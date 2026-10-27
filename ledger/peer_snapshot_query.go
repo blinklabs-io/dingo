@@ -99,6 +99,26 @@ func (ls *LedgerState) queryLedgerPeerSnapshot(
 	)
 }
 
+// LedgerPeerSnapshot returns the relays that active pools registered, with
+// their stake, as of the current tip: what GetLedgerPeerSnapshot reports for
+// every ledger peer. It lets a component of the same process learn peers from
+// the ledger without going through a local socket.
+func (ls *LedgerState) LedgerPeerSnapshot(
+	ctx context.Context,
+) (olocalstatequery.LedgerPeerSnapshotResult, error) {
+	txn, release := ls.readTxn(ctx, nil)
+	defer release()
+	tip, err := ls.db.GetTip(txn)
+	if err != nil {
+		return olocalstatequery.LedgerPeerSnapshotResult{}, fmt.Errorf(
+			"ledger peer snapshot: get tip: %w", err,
+		)
+	}
+	return ls.ledgerPeerSnapshotAtTip(
+		ctx, olocalstatequery.LedgerPeerKindAll, tip.Point, txn,
+	)
+}
+
 // peerSnapshotNetworkMagic returns the network magic the version 23 snapshot
 // carries, taken from the Shelley genesis as GetGenesisConfig does.
 func (ls *LedgerState) peerSnapshotNetworkMagic() (uint32, error) {

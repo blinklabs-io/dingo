@@ -8470,9 +8470,11 @@ which a live restore unregisters) and are all prefixed `dingo_dmq_`:
 `messages_received_total`, `messages_expired_total`, `messages_sent_total`
 (messages queued for a notification consumer, or bodies sent to a peer),
 `validation_failures_total{reason}`, `mempool_messages`, `mempool_bytes`,
-`connections` (local clients) and `peers` (open node-to-node connections).
-Every `reason` series exists from startup, so a `rate()` alert sees a reason
-before its first rejection.
+`connections` (local clients), `peers` (open node-to-node connections) and
+`peer_dials_total{result}` (the peer manager's connection attempts, `success`
+or `failure`). Every `reason` and `result` series exists from startup, so a
+`rate()` alert sees one before its first event. When the stack has a topic, each
+metric carries it as a `topic` label.
 
 `dmq.topologyFile` names a dmq-node topology file, which uses cardano-node's
 P2P topology syntax and is separate from the Cardano topology. `dmq.LoadTopology`
@@ -8612,7 +8614,12 @@ container, dmq-node using the devnet as its Cardano node. The tests, built only
 with the `dingo_dmq_interop` tag, cover Dingo dialing dmq-node, dmq-node serving
 a message signed by the devnet pool's real KES key to Dingo, which checks the
 signatures itself, and dmq-node dialing in and pulling a message from Dingo,
-shown by a second Dingo stack then fetching it from dmq-node. dmq-node accepts a
+shown by a second Dingo stack then fetching it from dmq-node, and Dingo's peer
+manager dialing dmq-node from a topology. In node mode a native Dingo binary with
+`dmq.enabled` also runs beside dmq-node: it dials dmq-node from its topology,
+accepts dmq-node's connection, authenticates what dmq-node accepted against its
+own ledger for a consumer on its local socket, and has a message it accepted on
+that socket accepted by dmq-node. dmq-node accepts a
 pool's messages only once the pool's set stake snapshot is nonzero, which is
 after the devnet's second epoch change, so a run takes about twenty minutes.
 The last two tests need gouroboros v0.214.0 or later, whose authenticator
@@ -8620,11 +8627,76 @@ verifies the KES signature over the payload's raw CBOR, as dmq-node does;
 earlier releases verified a byte-string wrapped copy and so rejected what
 dmq-node signs.
 
-Not yet provided: the listener on `dmq.n2nPort`, the peer manager that dials the
-topology peers within `dmq.minPeers` and `dmq.maxPeers`, and ledger peer
-discovery, so nothing outside tests calls `AttachPeer`. `dmq.n2nPort`,
-`dmq.listenAddress`, `dmq.listenIpv6Address`, `dmq.minPeers` and `dmq.maxPeers`
-are validated configuration keys that nothing reads yet.
+### DMQ Peer Network
+
+`StackConfig.Peers`, a `dmq.PeerConfig`, makes a stack accept and dial
+node-to-node peers; without it the stack serves local clients only and a caller
+hands connections to `AttachPeer`. The node builds it in `dmqPeerConfig` from
+the `dmq` settings, and only when `dmq.n2nPort` and `dmq.maxPeers` are both
+above zero, so a node that sets neither serves local clients only. It is
+independent of Cardano peer governance: `peergov` and the Cardano topology are
+never read or changed. It does not use the Cardano `connmanager` either, which
+builds gouroboros connections that cannot open a DMQ node-to-node connection; a
+peer here is a `PeerConn` over the muxer.
+
+The listener binds `dmq.listenAddress` and `dmq.listenIpv6Address` on
+`dmq.n2nPort`. An IPv4 literal binds TCP over IPv4 only and an IPv6 literal
+over IPv6 only, so the two share the port. A host without IPv6 skips the IPv6
+address with a warning, because the default is `::`; any other failure to bind
+stops startup. Each accepted connection goes to `AttachPeer` as a listener.
+`dmq.maxPeers` bounds every peer connection, inbound and outbound, in
+`registerPeer` before the handshake, which refuses the next with
+`ErrTooManyPeers`; one source, an IPv4 address or an IPv6 /64, holds at most
+four inbound connections, so one host cannot take every slot.
+
+The peer manager is one goroutine that reviews the connections on every change
+and at least every 15 seconds. It keeps each local root at its valency, a
+target that may exceed the peers listed. It then fills the stack up to
+`dmq.minPeers`, counting inbound peers, from the public roots and then the
+ledger peers, each in random order, and never beyond `dmq.maxPeers`; at most
+four dials are in flight. A peer whose address is one of the stack's own listen
+addresses is not dialed (only an IP literal can match). A peer that fails waits
+five seconds, doubling to fifteen minutes, give or take a fifth, and a
+connection that ends within a minute counts as a failure, so a peer that
+accepts and drops is not redialed in a tight loop. Attempts are counted in
+`dingo_dmq_peer_dials_total{result}`, and `dingo_dmq_peers` is the open count.
+A pair of nodes that dial each other hold two connections.
+
+Ledger peer discovery feeds the same manager. `ledger.LedgerState.
+LedgerPeerSnapshot` returns what `GetLedgerPeerSnapshot` reports for every
+ledger peer, and `dmqStakeAuthority.LedgerPeerSnapshot` reads it through the
+same detach handling as the other lookups, so a live restore or truncate
+reports the chain state unavailable and the manager asks again. `dmq.
+LedgerRelayDomains` takes the snapshot and returns the domains of the pools'
+SRV relays, in snapshot order without repeats. IP and domain relays are left
+out: they carry the pool's Cardano port, not the port a DMQ node listens on.
+`dmq.ResolveLedgerPeers` then prepends the topic's SRV prefix
+(`dmq.TopicSRVPrefix`; `_dmq._mithril._cardano._tcp` for Mithril, from the
+Cardano SRV registry) to each domain and looks up its SRV records through an
+injected `SRVResolver`, which `*net.Resolver` satisfies. At most eight lookups
+run at once and each has its own timeout. Records order by priority, then
+weight, and a record whose target is `.` or whose port is zero is skipped. A
+domain whose lookup fails is skipped and logged, because a pool that registered
+an SRV relay need not run a DMQ node; the call fails only when its context
+ends. No stake-based selection is applied. The manager looks the ledger peers
+up only when the topology leaves it short of `dmq.minPeers`, at most every 30
+minutes, and again a minute after a failure.
+
+What the ledger offers is untrusted. A ledger peer whose host is a local name,
+or an IP literal that is loopback, private, link-local or otherwise not
+publicly routable, is dropped, and the rest are dialed through `netguard`,
+which resolves the name and refuses a connection if any answer is in such a
+range. Peers from the topology file are the operator's own and dial plainly, so
+they may be on a private network.
+
+A `Stack` is one topic: its own pool, local socket, peer port and network
+magic. `StackConfig.Topic` is attached to every metric the stack registers as a
+`topic` label, so the stacks of several topics share one registry without
+colliding, and the node runs the one for `dmq.topic`, which is `mithril` only.
+Two stacks in one process, each with its own port and socket, are tested.
+
+Not provided: stake-based peer selection, peer sharing (mini-protocol 13), and
+any node-to-node version but 2.
 
 ### DMQ Message Authentication
 
