@@ -80,6 +80,7 @@ var expectedCardanoNodeConfig = &CardanoNodeConfig{
 	ShelleyGenesisHash:                         "363498d1024f84bb39d3fa9593ce391483cb40d479b87233f868d6e57c3a400d",
 	CheckpointsFile:                            "checkpoints.json",
 	CheckpointsFileHash:                        "bb5056ff1ced9d68dd99720695789664f6bf6f0cb02a4010df09b813e225ac51",
+	ConsensusMode:                              "GenesisMode",
 	ExperimentalHardForksEnabled:               new(false),
 	TestShelleyHardForkAtEpoch:                 ptrUint64(0),
 	TestAllegraHardForkAtEpoch:                 ptrUint64(0),
@@ -776,4 +777,39 @@ func TestReadHashedGenesisReturnsTransformedBuffer(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Equal(t, transformed, returned)
+}
+
+func TestCardanoNodeConfigConsensusMode(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		network  string
+		wantMode string
+		praos    bool
+	}{
+		{network: "dijkstra", wantMode: "GenesisMode", praos: false},
+		{network: "musashi", wantMode: "PraosMode", praos: true},
+		{network: "preview", wantMode: "GenesisMode"},
+		{network: "preprod", wantMode: "GenesisMode"},
+		{network: "mainnet", wantMode: "GenesisMode"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.network, func(t *testing.T) {
+			t.Parallel()
+			cfg, err := NewCardanoNodeConfigFromFile(
+				filepath.Join(tt.network, "config.json"),
+			)
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantMode, cfg.ConsensusMode)
+			assert.Equal(t, tt.praos, cfg.PraosConsensusMode())
+		})
+	}
+
+	// Only an explicit PraosMode counts: a configuration that does not name a
+	// mode keeps the node's own Genesis bootstrap setting in charge.
+	var unset *CardanoNodeConfig
+	assert.False(t, unset.PraosConsensusMode())
+	assert.False(t, (&CardanoNodeConfig{}).PraosConsensusMode())
+	assert.False(t, (&CardanoNodeConfig{ConsensusMode: "GenesisMode"}).PraosConsensusMode())
+	assert.True(t, (&CardanoNodeConfig{ConsensusMode: "PraosMode"}).PraosConsensusMode())
 }

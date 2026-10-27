@@ -100,8 +100,7 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 		fixture := newV2Fixture(t, v2FixtureOptions{
 			immutableFileNumber: 0,
 			validImmutable:      true,
-			fallbackLedgerState: true,
-			missingAncillary:    true,
+			validLedgerState:    true,
 		})
 		_, anchorHash := validImmutableFiles(t, 1000)
 		wrongHash := bytes.Clone(anchorHash)
@@ -158,8 +157,7 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 		fixture := newV2Fixture(t, v2FixtureOptions{
 			immutableFileNumber: 0,
 			validImmutable:      true,
-			fallbackLedgerState: true,
-			missingAncillary:    true,
+			validLedgerState:    true,
 		})
 		_, anchorHash := validImmutableFiles(t, 1000)
 		dataDir := t.TempDir()
@@ -237,8 +235,7 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 		fixture := newV2Fixture(t, v2FixtureOptions{
 			immutableFileNumber: 0,
 			validImmutable:      true,
-			fallbackLedgerState: true,
-			missingAncillary:    true,
+			validLedgerState:    true,
 		})
 		_, anchorHash := validImmutableFiles(t, 1000)
 		localTailHash := bytes.Repeat([]byte{0xcc}, 32)
@@ -337,8 +334,7 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 		fixture := newV2Fixture(t, v2FixtureOptions{
 			immutableFileNumber: 0,
 			validImmutable:      true,
-			fallbackLedgerState: true,
-			missingAncillary:    true,
+			validLedgerState:    true,
 		})
 		_, snapshotHash := validImmutableFiles(t, 1000)
 		stableHash := bytes.Repeat([]byte{0xdd}, 32)
@@ -407,8 +403,7 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 		fixture := newV2Fixture(t, v2FixtureOptions{
 			immutableFileNumber: 0,
 			validImmutable:      true,
-			fallbackLedgerState: true,
-			missingAncillary:    true,
+			validLedgerState:    true,
 		})
 		_, anchorHash := validImmutableFiles(t, 1000)
 		dataDir := t.TempDir()
@@ -478,8 +473,7 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 		fixture := newV2Fixture(t, v2FixtureOptions{
 			immutableFileNumber: 0,
 			validImmutable:      true,
-			fallbackLedgerState: true,
-			missingAncillary:    true,
+			validLedgerState:    true,
 		})
 		files, _ := validImmutableFiles(t, 1000)
 		firstHash := bytes.Clone(files["immutable/00000.secondary"][16:48])
@@ -713,12 +707,11 @@ func testSyncRewardRepairBelowCertifiedTip(t *testing.T, withLocalTail bool) {
 	utxoMap := append([]byte{0xa1}, txInCBOR...)
 	utxoMap = append(utxoMap, txOutCBOR...)
 	fixture := newV2Fixture(t, v2FixtureOptions{
-		immutableFileNumber:        0,
-		validImmutable:             true,
-		fallbackLedgerState:        true,
-		fallbackLedgerStateSlot:    999,
-		fallbackLedgerStateUTxOMap: utxoMap,
-		missingAncillary:           true,
+		immutableFileNumber:     0,
+		validImmutable:          true,
+		validLedgerState:        true,
+		validLedgerStateSlot:    999,
+		validLedgerStateUTxOMap: utxoMap,
 	})
 
 	dataDir := t.TempDir()
@@ -1189,10 +1182,10 @@ func TestDecideCatchUp(t *testing.T) {
 		require.ErrorContains(t, err, "API-mode metadata replacement")
 	})
 
-	t.Run("v1 backend never engages", func(t *testing.T) {
+	t.Run("unsupported backend never engages", func(t *testing.T) {
 		setState(t, "", 2, true)
 		dec, err := decideCatchUp(
-			ctx, db, modeOf(t), BackendV1, "core", noAggregator, true, discard,
+			ctx, db, modeOf(t), "v0", "core", noAggregator, true, discard,
 		)
 		require.NoError(t, err)
 		require.False(t, dec.engage)

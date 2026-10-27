@@ -15,6 +15,7 @@
 package mempool
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -23,6 +24,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 )
@@ -161,4 +163,70 @@ func TestMempool_TransactionsBounded_DAGWalksOnlyPrefix(t *testing.T) {
 	require.Len(t, all, 6)
 	require.Equal(t, txs[0].Hash, all[0].Hash,
 		"a full read reaches the unresolvable hash and falls back")
+}
+
+// TestMempool_SizeBytes_TracksRetainedBytes admits real transactions through
+// each backend's Service and checks SizeBytes reports the retained figure
+// admission charges, which includes decoded outputs beyond the CBOR length.
+func TestMempool_SizeBytes_TracksRetainedBytes(t *testing.T) {
+	t.Parallel()
+	for _, implementation := range []Implementation{
+		ImplementationFIFO,
+		ImplementationDAG,
+	} {
+		t.Run(string(implementation), func(t *testing.T) {
+			t.Parallel()
+			cfg := MempoolConfig{
+				Validator:       newMockValidator(),
+				MempoolCapacity: 1 << 20,
+				PromRegistry:    prometheus.NewRegistry(),
+			}
+			var svc Service
+			var pool Pool
+			if implementation == ImplementationDAG {
+				dag, err := NewDAG(cfg)
+				require.NoError(t, err)
+				svc, pool = dag, dag
+			} else {
+				fifo, err := NewFIFO(cfg)
+				require.NoError(t, err)
+				svc, pool = fifo, fifo
+			}
+			t.Cleanup(func() { _ = pool.Stop(context.Background()) })
+			require.Zero(t, svc.SizeBytes())
+
+			txType := uint(conway.EraIdConway)
+			var want, cborBytes int64
+			var hashes []string
+			for seed := byte(1); seed <= 3; seed++ {
+				txBytes := withdrawalTxCbor(
+					t, seed, bytes.Repeat([]byte{seed}, 28), 1,
+				)
+				require.NoError(t, svc.AddTransaction(
+					context.Background(), txType, txBytes,
+				))
+				want += retainedSize(t, txBytes)
+				cborBytes += int64(len(txBytes))
+			}
+			for _, tx := range svc.Transactions() {
+				hashes = append(hashes, tx.Hash)
+			}
+			require.Len(t, hashes, 3)
+			require.Greater(t, want, cborBytes,
+				"fixture must retain decoded outputs beyond its CBOR")
+			require.Equal(t, want, svc.SizeBytes())
+
+			svc.RemoveTransaction(hashes[0])
+			remaining, _ := svc.TransactionsBounded(0, 0)
+			var wantAfter int64
+			for _, tx := range remaining {
+				wantAfter += retainedSize(t, tx.Cbor)
+			}
+			require.Len(t, remaining, 2)
+			require.Equal(t, wantAfter, svc.SizeBytes())
+
+			svc.RemoveTxsByHash(hashes[1:])
+			require.Zero(t, svc.SizeBytes())
+		})
+	}
 }

@@ -15,7 +15,6 @@
 package uplcconformance
 
 import (
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -136,7 +135,7 @@ type CaseResult struct {
 }
 
 type testCase struct {
-	// program is the path of the .uplc or .flat program relative to the corpus root.
+	// program is the path of the .uplc program relative to the corpus root.
 	program  string
 	id       string
 	group    string
@@ -145,7 +144,6 @@ type testCase struct {
 	protocol uint
 	costs    costModelKey
 	ndc      bool
-	flat     bool
 }
 
 type costModelKey struct {
@@ -384,7 +382,13 @@ func discoverMainCases(root string) ([]testCase, error) {
 }
 
 // discoverNDCCases reads the versioned UPLC corpus and cost models published
-// for node-diversity-conformance, preferring Flat bytes when provided.
+// for node-diversity-conformance.
+//
+// Each vector is evaluated from its textual program. The corpus also carries a
+// Flat encoding for most vectors, but the two can disagree and the expected
+// results follow the text: term/constr/constr-07 is the text
+// "(constr -5 ...)", a parse error, while its Flat file decodes to a valid
+// constr with tag 2^64-5, which the reference decoder accepts.
 func discoverNDCCases(
 	root string,
 	corpusFS *os.Root,
@@ -425,13 +429,6 @@ func discoverNDCCases(
 			}
 			caseName := path.Base(casePath)
 			id := slug(casePath+"_"+versionName(language), "_")
-			program := rel
-			flatProgram := strings.TrimSuffix(rel, ".uplc") + ".flat"
-			if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(flatProgram))); err == nil {
-				program = flatProgram
-			} else if !errors.Is(err, os.ErrNotExist) {
-				return fmt.Errorf("inspect Flat program %q: %w", flatProgram, err)
-			}
 			key := costModelKey{language: language, protocol: protocolVersion}
 			if _, ok := costModels[key]; !ok {
 				modelPath := fmt.Sprintf(
@@ -453,7 +450,7 @@ func discoverNDCCases(
 				costModels[key] = params
 			}
 			cases = append(cases, testCase{
-				program:  program,
+				program:  rel,
 				id:       id,
 				group:    group,
 				title:    strings.ReplaceAll(caseName, "-", " "),
@@ -461,7 +458,6 @@ func discoverNDCCases(
 				protocol: protocolVersion,
 				costs:    key,
 				ndc:      true,
-				flat:     program == flatProgram,
 			})
 			return nil
 		},
@@ -713,21 +709,13 @@ func runCase(
 	var consumed cek.ExBudget
 	var stage failureStage
 	var runErr error
-	if testCase.flat {
-		result, programVersion, consumed, stage, runErr = evaluateFlat(
-			string(contents),
-			testCase.language,
-			testCase.protocol,
-			evalCtx,
-		)
-	} else {
-		result, programVersion, consumed, stage, runErr = evaluate(
-			string(contents),
-			testCase.language,
-			testCase.protocol,
-			evalCtx,
-		)
-	}
+	result, programVersion, consumed, stage, runErr = evaluate(
+		string(contents),
+		testCase.language,
+		testCase.protocol,
+		evalCtx,
+		testCase.ndc,
+	)
 	var evalActual, evaluationObservation string
 	switch stage {
 	case parseFailure:
@@ -836,11 +824,15 @@ func compareBudgetExhaustion(stage failureStage, err error) bool {
 // and protocol version. A program rejected by the syntax parser fails at the
 // parse stage; one rejected by protocol-version validation, de Bruijn
 // conversion or the machine fails at the evaluation stage.
+// evaluate parses and runs a textual program. The scenario's expected results
+// treat the execution-time version gate as a decode error, which gateIsDecode
+// selects; the earlier corpus layout treats it as an evaluation failure.
 func evaluate(
 	text string,
 	language lang.LanguageVersion,
 	protocol uint,
 	evalCtx *cek.EvalContext,
+	gateIsDecode bool,
 ) (syn.Term[syn.DeBruijn], lang.LanguageVersion, cek.ExBudget, failureStage, error) {
 	if _, err := syn.Parse(text); err != nil {
 		return nil, lang.LanguageVersion{}, cek.ExBudget{}, parseFailure, err
@@ -854,38 +846,17 @@ func evaluate(
 		return nil, lang.LanguageVersion{}, cek.ExBudget{}, evaluationFailure, err
 	}
 	if err := syn.ValidateTermVersionForExecution(program.Version, programContext); err != nil {
-		return nil, program.Version, cek.ExBudget{}, evaluationFailure, err
+		stage := evaluationFailure
+		if gateIsDecode {
+			stage = parseFailure
+		}
+		return nil, program.Version, cek.ExBudget{}, stage, err
 	}
 	deBruijn, err := syn.NameToDeBruijn(program)
 	if err != nil {
 		return nil, program.Version, cek.ExBudget{}, evaluationFailure, err
 	}
 	result, consumed, stage, err := runTerm(deBruijn, language, evalCtx)
-	return result, program.Version, consumed, stage, err
-}
-
-func evaluateFlat(
-	flatHex string,
-	language lang.LanguageVersion,
-	protocol uint,
-	evalCtx *cek.EvalContext,
-) (syn.Term[syn.DeBruijn], lang.LanguageVersion, cek.ExBudget, failureStage, error) {
-	flat, err := hex.DecodeString(strings.TrimSpace(flatHex))
-	if err != nil {
-		return nil, lang.LanguageVersion{}, cek.ExBudget{}, parseFailure, err
-	}
-	programContext := syn.ProgramContext{
-		LedgerLanguage: language,
-		ProtocolMajor:  protocol,
-	}
-	program, err := syn.DecodeWithContext[syn.DeBruijn](flat, programContext)
-	if err != nil {
-		return nil, lang.LanguageVersion{}, cek.ExBudget{}, parseFailure, err
-	}
-	if err := syn.ValidateTermVersionForExecution(program.Version, programContext); err != nil {
-		return nil, program.Version, cek.ExBudget{}, parseFailure, err
-	}
-	result, consumed, stage, err := runTerm(program, language, evalCtx)
 	return result, program.Version, consumed, stage, err
 }
 

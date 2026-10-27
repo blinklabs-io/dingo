@@ -126,6 +126,14 @@ type namedStop struct {
 // manager stops last.
 func (n *Node) quiesceComponentStops() []namedStop {
 	var stops []namedStop
+	// First: a Mithril run holds network ingest, pauses chain ingest and
+	// applies blocks to the ledger about to be closed.
+	if n.mithrilCoordinator != nil {
+		stops = append(stops, namedStop{
+			name: "mithril catch-up",
+			stop: func() error { n.abortMithrilRun(); return nil },
+		})
+	}
 	// The DMQ stack keeps serving, so its stake lookups are detached from the
 	// ledger state about to be closed. Detaching waits for a lookup in flight,
 	// which reads storage without a context of its own.
@@ -170,7 +178,19 @@ func (n *Node) quiesceComponentStops() []namedStop {
 	if n.leiosVoteManager != nil {
 		stops = append(stops, namedStop{
 			name: "leios vote manager",
-			stop: n.leiosVoteManager.Stop,
+			stop: func() error {
+				// Clearing the pointer first stops new loads from seeing a
+				// manager tied to the old ledger: a certificate callback
+				// that loads after this sees nil and retries the block.
+				// A callback that already loaded the manager may still run
+				// ValidateDijkstraCertificate during or after Stop. That
+				// is safe: the old ledger and database stay open until
+				// LedgerState.Close drains block processing, and a stopped
+				// manager's committee waiter returns ErrVoteManagerStopped,
+				// which the ledger retries rather than rejecting.
+				n.leiosCertificateVerifier.Store(nil)
+				return n.leiosVoteManager.Stop()
+			},
 		})
 	}
 	if n.snapshotMgr != nil {
@@ -605,7 +625,7 @@ func (n *Node) closeStorageForLiveLifecycleOp(ctx context.Context) error {
 	// quiesceForLiveLifecycleOp) — they're simply dropped here so
 	// reinitializeStorage starts from a clean slate.
 	n.chainManager = nil
-	n.chainsyncState = nil
+	n.publishChainsyncState(nil)
 
 	// Every component reinitialized below (or, for Truncate, opened
 	// briefly to resolve the target) re-registers its Prometheus
@@ -664,6 +684,17 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 		)
 		dbNeedsRecovery = true
 	}
+	if !dbNeedsRecovery {
+		if err := n.enforceConsensusDatabaseIdentity(); err != nil {
+			return fmt.Errorf("consensus database compatibility: %w", err)
+		}
+	}
+	// A Mithril run this operation aborted skipped its index rebuild, and a
+	// restored snapshot may have been taken during one: either way the
+	// critical indexes rollback reads can be missing behind the marker.
+	if err := n.repairCriticalIndexesBeforeIngest(ctx); err != nil {
+		return err
+	}
 
 	cm, err := chain.NewManager(ctx, n.db, n.eventBus, n.config.promRegistry)
 	if err != nil {
@@ -717,6 +748,9 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 	if dbNeedsRecovery {
 		if err := n.ledgerState.RecoverCommitTimestampConflict(ctx); err != nil {
 			return fmt.Errorf("failed to recover database: %w", err)
+		}
+		if err := n.enforceConsensusDatabaseIdentity(); err != nil {
+			return fmt.Errorf("consensus database compatibility: %w", err)
 		}
 		if err := n.enforceRecoveredNodeSettings(ctx); err != nil {
 			return err
@@ -893,11 +927,11 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 	}
 	n.ledgerState.SetMempool(&ledgerMempoolAdapter{source: n.mempool})
 
-	n.chainsyncState = chainsync.NewStateWithConfig(
+	n.publishChainsyncState(chainsync.NewStateWithConfig(
 		n.eventBus,
 		n.ledgerState,
 		n.chainsyncConfig(),
-	)
+	))
 	n.chainsyncClientRemoveSubId = n.subscribeChainsyncClientRemoveRequests()
 
 	// Providers, not eagerly-computed values, matching Run. Resolving these
@@ -970,9 +1004,7 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 	// disabled. This matches Run's own long-lived subscription.
 	n.ouroboros().SubscribeChainsyncResync(n.ctx) //nolint:contextcheck
 
-	genesisSelectionMode := n.config.genesisBootstrap &&
-		!n.config.intersectTip &&
-		len(n.config.intersectPoints) == 0
+	genesisSelectionMode := n.config.genesisSelectionMode()
 	if n.config.topologyConfig != nil {
 		topologyConfig := n.config.topologyConfig
 		usePeerSnapshot := genesisSelectionMode &&
@@ -1912,6 +1944,10 @@ func (n *Node) restoreStorageConfig() lifecycle.RestoreStorageConfig {
 		Blob:          n.config.pluginSelections[plugin.CapabilityStorageBlob].Config,
 		Metadata:      n.config.pluginSelections[plugin.CapabilityStorageMetadata].Config,
 		ActiveDataDir: n.config.dataDir,
+		RecoveryMarkerDirs: []string{
+			n.config.dataDir,
+			n.config.dataDir + preRestoreBackupSuffix,
+		},
 		AlonzoLovelacePerUtxoWord: cardano.AlonzoLovelacePerUtxoWord(
 			n.config.cardanoNodeConfig, "", n.config.network,
 		),
@@ -2156,6 +2192,18 @@ func (n *Node) Truncate(
 			)
 		}
 		tmpDB := tmpRuntime.Database
+		// The truncate's rollback reads the critical indexes a Mithril run
+		// this operation aborted left dropped; without them it scans the
+		// utxo table once per rolled-back transaction.
+		if !n.config.storageMode.IsAPI() {
+			if err := repairPendingCriticalIndexes(
+				ctx, tmpDB, n.config.logger,
+			); err != nil {
+				return 0, fmt.Errorf(
+					"%w: %w", lifecycle.ErrTruncateNotStarted, err,
+				)
+			}
+		}
 
 		if pending, pendingErr := lifecycle.GetPendingTruncate(tmpDB); pendingErr != nil {
 			return 0, pendingErr

@@ -1036,7 +1036,7 @@ func TestCompareEpochAccountsSkipsWithheldAndAggregatesSharedAccounts(t *testing
 		time.Now(),
 	))
 
-	mismatches := compareEpochAccounts(
+	mismatches, _, _ := compareEpochAccounts(
 		context.Background(),
 		cache,
 		dingo,
@@ -1284,6 +1284,73 @@ func TestCheckFlagsStakeEpochPoolMissingFromKoios(t *testing.T) {
 		"a pool in epoch %d's stake basis but absent from Koios is a real "+
 			"divergence and must stay flagged", koiosEpoch,
 	)
+}
+
+// TestCheckUnpublishedKoiosPoolHistoryIsReferenceLag covers an epoch whose
+// Koios epoch_info exists but whose pool_history has not been published, so
+// the cached pool set is empty. The reference is absent, not zero pools: every
+// Dingo pool must not be filed as pool_only_dingo (a FAIL category), even
+// when the epoch closed longer ago than the grace window.
+func TestCheckUnpublishedKoiosPoolHistoryIsReferenceLag(t *testing.T) {
+	t.Parallel()
+
+	const network = "preview"
+	const koiosEpoch = uint64(10)
+	secondPool := testPoolKeyHash(t, 0x07)
+
+	dingoDir, cachePath := seedPoolPresenceFixture(
+		t, network, koiosEpoch, true, secondPool,
+	)
+
+	cache, err := openTestCache(cachePath, nil)
+	require.NoError(t, err)
+	fetchedAt := time.Now().Add(-time.Hour).UTC()
+	require.NoError(t, cache.CommitEpochData(
+		KoiosEpochInfo{
+			Network:      network,
+			Epoch:        koiosEpoch,
+			ActiveStake:  "5000000",
+			EpochEndTime: time.Now().Add(-50 * time.Hour).UTC(),
+			FetchedAt:    fetchedAt,
+		},
+		nil,
+		&KoiosTotals{
+			Network:   network,
+			Epoch:     koiosEpoch,
+			Treasury:  "1000",
+			Reserves:  "2000",
+			Fees:      "300",
+			FetchedAt: fetchedAt,
+		},
+	))
+	require.NoError(t, cache.Close())
+
+	result, err := Check(context.Background(), CheckConfig{
+		Network:    network,
+		DingoDB:    DingoDBConfig{Plugin: "sqlite", DataDir: dingoDir},
+		CachePath:  cachePath,
+		GraceHours: 24,
+	}, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+	require.Empty(t, result.FailEpochs)
+
+	cache, err = openTestCache(cachePath, nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+	mismatches, err := cache.GetMismatches(network, koiosEpoch, "")
+	require.NoError(t, err)
+
+	var lag bool
+	for _, m := range mismatches {
+		require.NotEqual(
+			t, CategoryPoolOnlyDingo, m.Category,
+			"empty Koios pool history must not fail every Dingo pool",
+		)
+		if m.Field == "pool_history" && m.Category == CategoryReferenceLag {
+			lag = true
+		}
+	}
+	require.True(t, lag, "unpublished pool history must be reference_lag")
 }
 
 // TestCheckDepartedPoolDoesNotErrorEpoch is the end-to-end counterpart of

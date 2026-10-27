@@ -60,7 +60,21 @@ var hotStatements = func() []string {
 		governanceVotePreviousQuery,
 		governanceVoteUpsertQuery,
 		governanceVoteHistoryInsertQuery,
+		governanceVoteCastExistsQuery,
 		poolByKeyHashQuery,
+		spendScriptHashQuery,
+		deleteRedeemerScriptsSQL,
+		upsertUtxoReferenceScriptQuery,
+		updateCertificateSpecializedIDSQL,
+		getAccountDrepDelegationSQL,
+		getAccountCertificateStateSQL,
+		upsertAccountSQL,
+		insertAccountWithdrawalWitnessSQL,
+		getActiveAccountRewardSQL,
+		getAccountRewardStateSQL,
+		withdrawalRewardDeltaExistsSQL,
+		updateAccountRewardSQL,
+		insertWithdrawalRewardDeltaSQL,
 		sqlitequery.GetAccountByCredentialQuery,
 		sqlitequery.GetActiveAccountByCredentialQuery,
 		sqlitequery.SetTipQuery,
@@ -379,6 +393,8 @@ func (s *Store) stmtForQueryer(
 		return s.stmtForQueryer(ctx, v.queryer, cached)
 	case countingQueryer:
 		return s.stmtForQueryer(ctx, v.queryer, cached)
+	case barrierQueryer:
+		return s.stmtForQueryer(ctx, v.queryer, cached)
 	default:
 		return cached
 	}
@@ -527,6 +543,9 @@ func (s *Store) queryRowCached(
 	query string,
 	args ...any,
 ) *sql.Row {
+	// A failed barrier is recorded on the overlay and fails the batch at
+	// FlushBatch; a *sql.Row cannot carry it.
+	_ = overlayReadBarrier(ctx, db, query)
 	if cached, release, ok := s.borrowCachedStmt(query); ok {
 		// Counted and timed here, not by countingQueryer: stmtForQueryer
 		// resolves straight to a *sql.Stmt, bypassing db (and any
@@ -567,6 +586,9 @@ func (s *Store) execCached(
 	query string,
 	args ...any,
 ) (sql.Result, error) {
+	if err := overlayReadBarrier(ctx, db, query); err != nil {
+		return nil, err
+	}
 	if cached, release, ok := s.borrowCachedStmt(query); ok {
 		op, name := classifySQLStatement(query)
 		if s.sqlOperations != nil {
@@ -650,6 +672,9 @@ func (s *Store) queryRowsCached(
 	query string,
 	args ...any,
 ) (*sql.Rows, error) {
+	if err := overlayReadBarrier(ctx, db, query); err != nil {
+		return nil, err
+	}
 	if cached, release, ok := s.borrowCachedStmt(query); ok {
 		op, name := classifySQLStatement(query)
 		if s.sqlOperations != nil {

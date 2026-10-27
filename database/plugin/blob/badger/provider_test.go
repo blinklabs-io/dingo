@@ -16,6 +16,7 @@ package badger
 
 import (
 	"context"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -58,6 +59,56 @@ func TestProviderDataDirPrecedence(t *testing.T) {
 			)
 			require.NoError(t, err)
 			require.Equal(t, want, store.dataDir)
+		})
+	}
+}
+
+func TestResolvedMemTableSize(t *testing.T) {
+	t.Parallel()
+
+	require.Zero(t, defaultConfig().MemTableSize)
+	require.EqualValues(t, 1<<30, DefaultCoreSyncMemTableSize)
+	tests := []struct {
+		name        string
+		configured  uint64
+		storageMode string
+		runMode     string
+		want        uint64
+	}{
+		{
+			name:        "core sync",
+			storageMode: "core",
+			runMode:     "sync",
+			want:        DefaultCoreSyncMemTableSize,
+		},
+		{
+			name:        "core serve",
+			storageMode: "core",
+			runMode:     "serve",
+			want:        DefaultMemTableSize,
+		},
+		{
+			name:        "api sync",
+			storageMode: "api",
+			runMode:     "sync",
+			want:        DefaultMemTableSize,
+		},
+		{
+			name:        "explicit core sync override",
+			configured:  DefaultMemTableSize,
+			storageMode: "core",
+			runMode:     "sync",
+			want:        DefaultMemTableSize,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := resolvedMemTableSize(tt.configured, blob.ProviderDependencies{
+				StorageMode: tt.storageMode,
+				RunMode:     tt.runMode,
+			})
+			require.Equal(t, tt.want, got)
 		})
 	}
 }
@@ -205,6 +256,18 @@ func TestProviderValueThresholdDefaults(t *testing.T) {
 			want:        DefaultValueThreshold,
 		},
 		{
+			name:        "core leios",
+			storageMode: "core",
+			runMode:     "leios",
+			want:        DefaultCoreLeiosValueThreshold,
+		},
+		{
+			name:        "api leios",
+			storageMode: "api",
+			runMode:     "leios",
+			want:        DefaultValueThreshold,
+		},
+		{
 			name:        "core load",
 			storageMode: "core",
 			runMode:     "load",
@@ -227,7 +290,10 @@ func TestProviderValueThresholdDefaults(t *testing.T) {
 					RunMode:     tt.runMode,
 				},
 			)
-			require.Equal(t, int64(tt.want), store.valueThreshold)
+			if store.valueThreshold != int64(tt.want) {
+				t.Fatalf("value threshold = %d, want %d",
+					store.valueThreshold, tt.want)
+			}
 		})
 	}
 }
@@ -269,6 +335,23 @@ func TestProviderExplicitZeroValueThresholdOverridesSyncDefault(t *testing.T) {
 		RunMode:     "sync",
 	})
 	require.Zero(t, store.valueThreshold)
+}
+
+func TestProviderExplicitValueThresholdOverridesLeiosDefault(t *testing.T) {
+	for _, threshold := range []uint64{0, 2048, DefaultValueThreshold} {
+		t.Run(strconv.FormatUint(threshold, 10), func(t *testing.T) {
+			store := resolveBadgerProvider(t, map[string]any{
+				"valueThreshold": threshold,
+			}, blob.ProviderDependencies{
+				StorageMode: "core",
+				RunMode:     "leios",
+			})
+			if store.valueThreshold != int64(threshold) {
+				t.Fatalf("explicit value threshold = %d, want %d",
+					store.valueThreshold, threshold)
+			}
+		})
+	}
 }
 
 func TestProviderStopDeadlineDuringValueLogGC(t *testing.T) {

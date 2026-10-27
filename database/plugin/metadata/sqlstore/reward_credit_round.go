@@ -831,7 +831,7 @@ func (s *Store) upsertSyncState(
 	db queryer,
 	key, value string,
 ) error {
-	_, err := db.ExecContext(ctx, s.dialect.Rebind(`
+	_, err := db.ExecContext(ctx, s.dialect.Rebind(`-- name: UpsertSyncState :exec
 INSERT INTO sync_state (sync_key, value) VALUES (?, ?)
 ON CONFLICT (sync_key) DO UPDATE SET value = excluded.value`), key, value)
 	return err

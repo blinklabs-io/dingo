@@ -59,7 +59,10 @@ func explainRun(cmd *cobra.Command, _ []string) error {
 	poolFilter, _ := cmd.Flags().GetString("pool")
 	live, _ := cmd.Flags().GetBool("live")
 	asJSON, _ := cmd.Flags().GetBool("json")
-	cachePath := resolveCachePath()
+	cachePath, err := resolveCachePath()
+	if err != nil {
+		return err
+	}
 
 	cache, err := koiosparity.OpenCache(cachePath, slog.Default())
 	if err != nil {
@@ -68,11 +71,15 @@ func explainRun(cmd *cobra.Command, _ []string) error {
 	defer cache.Close() //nolint:errcheck
 
 	if live {
+		dingoDB, err := resolveDingoDB(cmd)
+		if err != nil {
+			return err
+		}
 		checkResult, checkErr := koiosparity.Check(
 			cmd.Context(),
 			koiosparity.CheckConfig{
 				Network:         network,
-				DingoDB:         resolveDingoDB(cmd),
+				DingoDB:         dingoDB,
 				CachePath:       cachePath,
 				All:             true,
 				FromEpoch:       epoch,

@@ -30,6 +30,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -37,6 +38,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database/immutable"
+	"github.com/blinklabs-io/dingo/internal/httpuseragent"
 	"github.com/blinklabs-io/dingo/internal/netguard"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/protocol/blockfetch"
@@ -420,17 +422,148 @@ func redactRemoteImmutableURL(value string) string {
 		return "remote ImmutableDB URL"
 	}
 	u.User = nil
+	u.RawQuery = ""
+	u.ForceQuery = false
+	u.Fragment = ""
+	u.RawFragment = ""
 	return u.String()
 }
 
+// remoteImmutableCredentialToken matches whitespace and double-quote
+// delimited words. Transport causes quote URLs that net/http could not parse
+// (relative, scheme-relative, non-http, or containing apostrophes), so a word
+// is treated as URL text by the characters that carry credentials rather than
+// by its scheme.
+var remoteImmutableCredentialToken = regexp.MustCompile(`[^\s"]+`)
+
+const (
+	remoteImmutableRedactedURL    = "remote ImmutableDB URL"
+	remoteImmutableRedactedSecret = "[redacted]"
+	remoteImmutableMinSecretLen   = 3
+)
+
+// remoteImmutableRequestSecrets returns the credential values carried by the
+// request URL, so a cause that echoes them outside URL syntax is still
+// scrubbed.
+func remoteImmutableRequestSecrets(requestURL string) []string {
+	u, err := url.Parse(requestURL)
+	if err != nil {
+		return nil
+	}
+	var secrets []string
+	add := func(v string) {
+		if len(v) >= remoteImmutableMinSecretLen {
+			secrets = append(secrets, v)
+		}
+	}
+	if u.User != nil {
+		add(u.User.Username())
+		if pw, ok := u.User.Password(); ok {
+			add(pw)
+		}
+	}
+	add(u.RawQuery)
+	add(u.Fragment)
+	add(u.RawFragment)
+	for _, values := range u.Query() {
+		for _, v := range values {
+			add(v)
+		}
+	}
+	return secrets
+}
+
+func scrubRemoteImmutableText(text string, secrets []string) string {
+	for _, secret := range secrets {
+		text = strings.ReplaceAll(text, secret, remoteImmutableRedactedSecret)
+	}
+	// net/http quotes an unparseable Location with %q. A double quote or
+	// space inside that literal would split it into several words and leave
+	// the credential in a word without ?, # or @, so a quoted literal is
+	// judged and replaced whole.
+	var b strings.Builder
+	for {
+		i := strings.IndexByte(text, '"')
+		if i < 0 {
+			b.WriteString(scrubRemoteImmutableWords(text))
+			return b.String()
+		}
+		b.WriteString(scrubRemoteImmutableWords(text[:i]))
+		text = text[i:]
+		quoted, err := strconv.QuotedPrefix(text)
+		if err != nil {
+			b.WriteByte('"')
+			text = text[1:]
+			continue
+		}
+		if value, err := strconv.Unquote(quoted); err == nil &&
+			strings.ContainsAny(value, "?#@") {
+			b.WriteString(`"` + remoteImmutableRedactedURL + `"`)
+		} else {
+			b.WriteString(scrubRemoteImmutableWords(quoted))
+		}
+		text = text[len(quoted):]
+	}
+}
+
+func scrubRemoteImmutableWords(text string) string {
+	return remoteImmutableCredentialToken.ReplaceAllStringFunc(
+		text,
+		func(word string) string {
+			if !strings.ContainsAny(word, "?#@") {
+				return word
+			}
+			trimmed := strings.TrimRight(word, ":,.;)'")
+			return remoteImmutableRedactedURL + word[len(trimmed):]
+		},
+	)
+}
+
+// redactedRemoteImmutableError keeps the original error reachable through
+// Unwrap for errors.Is and errors.As while its message carries no URL
+// userinfo, query or fragment.
+type redactedRemoteImmutableError struct {
+	msg     string
+	err     error
+	secrets []string
+}
+
+func (e *redactedRemoteImmutableError) Error() string { return e.msg }
+
+func (e *redactedRemoteImmutableError) Unwrap() error { return e.err }
+
+// As stops errors.As from handing out the original *url.Error, whose URL and
+// message can carry credentials. Other targets traverse the original chain.
+func (e *redactedRemoteImmutableError) As(target any) bool {
+	urlErrTarget, ok := target.(**url.Error)
+	if !ok {
+		return false
+	}
+	var urlErr *url.Error
+	if !errors.As(e.err, &urlErr) {
+		return false
+	}
+	redacted := *urlErr
+	redacted.URL = redactRemoteImmutableURL(urlErr.URL)
+	redacted.Err = errors.New(
+		scrubRemoteImmutableText(fmt.Sprint(urlErr.Err), e.secrets),
+	)
+	*urlErrTarget = &redacted
+	return true
+}
+
 func remoteImmutableRequestError(action, requestURL string, err error) error {
+	secrets := remoteImmutableRequestSecrets(requestURL)
 	var urlErr *url.Error
 	if errors.As(err, &urlErr) && urlErr.Err != nil {
+		secrets = append(secrets, remoteImmutableRequestSecrets(urlErr.URL)...)
 		err = urlErr.Err
 	}
-	return fmt.Errorf(
-		"%s %s: %w", action, redactRemoteImmutableURL(requestURL), err,
+	msg := fmt.Sprintf(
+		"%s %s: %s", action, redactRemoteImmutableURL(requestURL),
+		scrubRemoteImmutableText(err.Error(), secrets),
 	)
+	return &redactedRemoteImmutableError{msg: msg, err: err, secrets: secrets}
 }
 
 func isLoopbackRemoteURL(u *url.URL) bool {
@@ -708,7 +841,7 @@ func copyBlocksRemote(
 			return blocksCopied, tip.Slot, err
 		}
 		copied, _, err := copyBlocksDirect(
-			ctx, logger, readyDir, c, replayBatches, true,
+			ctx, logger, readyDir, c, replayBatches,
 		)
 		blocksCopied += copied
 		if err != nil {
@@ -759,6 +892,7 @@ func fetchRemoteImmutableTipWithClient(
 			redactRemoteImmutableURL(rootURL+"/tip.json"),
 		)
 	}
+	httpuseragent.Set(req)
 	resp, err := client.Do(req)
 	if err != nil {
 		return tip, remoteImmutableRequestError(
@@ -852,6 +986,7 @@ func remoteImmutableFilePublishedWithClient(
 			redactRemoteImmutableURL(fileURL),
 		)
 	}
+	httpuseragent.Set(req)
 	req.Header.Set("Range", "bytes=0-0")
 	resp, err := client.Do(req)
 	if err != nil {
@@ -989,6 +1124,7 @@ func fetchRemoteFileOnceWithClient(
 			redactRemoteImmutableURL(fileURL),
 		)
 	}
+	httpuseragent.Set(req)
 	if offset > 0 {
 		req.Header.Set("Range", "bytes="+strconv.FormatInt(offset, 10)+"-")
 	}

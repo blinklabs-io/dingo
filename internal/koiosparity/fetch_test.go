@@ -472,7 +472,7 @@ func TestFetchBackfillsAccountsForPreExistingCache(t *testing.T) {
 	require.True(t, cov.Complete)
 	require.Equal(t, 1, cov.RequestedCount)
 
-	rows, err := cache2.GetAccountRewardsForEpoch(network, epoch)
+	rows, err := getAccountRewardsForEpoch(cache2.db, network, epoch)
 	require.NoError(t, err)
 	require.Len(t, rows, 1)
 	require.Equal(t, koiosAddr, rows[0].StakeAddress)

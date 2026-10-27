@@ -410,7 +410,14 @@ var (
 	feeProdForgedRevalidation = feeProdPath{
 		name: "forged block revalidation",
 		run: func(t *testing.T, c feeProdCase) error {
-			return c.ledger(t).validateForgedTxs(context.Background(), c.block)
+			ls := c.ledger(t)
+			// Forged validation judges a block only at its parent. A block
+			// numbered past zero names a zero-hash parent rather than
+			// origin, so the ledger stands on that parent.
+			if len(LeiosValidationParentHash(c.block.Header())) > 0 {
+				setForgedStateTestTip(ls, c.block.Header().PrevHash())
+			}
+			return ls.validateForgedTxs(context.Background(), c.block)
 		},
 	}
 	feeProdReplay = feeProdPath{

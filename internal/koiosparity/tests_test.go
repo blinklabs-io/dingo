@@ -2715,7 +2715,7 @@ func TestKoiosTxInfoItem_ConsumedProduced(t *testing.T) {
 	})
 }
 
-// TestComparePoolEpochMemberRewardsBeforeApplication is the
+// TestCompareMemberRewardsBeforeApplication is the
 // regression, built from the divergence a Preview replay reported at epoch 96.
 //
 // Dingo computed 4006269 in member rewards for the pool and Koios reported
@@ -2726,7 +2726,7 @@ func TestKoiosTxInfoItem_ConsumedProduced(t *testing.T) {
 //
 // Recomputed after the boundary the two agree exactly, so the difference has to
 // be classified by whether the rewards have been applied, not by its size.
-func TestComparePoolEpochMemberRewardsBeforeApplication(t *testing.T) {
+func TestCompareMemberRewardsBeforeApplication(t *testing.T) {
 	const (
 		koiosPaid     = "4004412"
 		dingoComputed = "4006269"
@@ -2760,10 +2760,8 @@ func TestComparePoolEpochMemberRewardsBeforeApplication(t *testing.T) {
 	t.Run("before application it is a timing statement", func(t *testing.T) {
 		d := base()
 		d.RewardsPending = true
-		m := find(t, ComparePoolEpoch(
-			"preview", 96, koios, d, now, 0, time.Time{}, false,
-			false,
-		))
+		m := find(t, memberRewardsFor(
+			"preview", 96, koios, d, now, 0, time.Time{}))
 		assert.Equal(t, CategoryReferenceLag, m.Category,
 			"a pending forfeiture must not be reported as a divergence")
 	})
@@ -2771,10 +2769,8 @@ func TestComparePoolEpochMemberRewardsBeforeApplication(t *testing.T) {
 	t.Run("after application it is a real divergence", func(t *testing.T) {
 		d := base()
 		d.RewardsPending = false
-		m := find(t, ComparePoolEpoch(
-			"preview", 96, koios, d, now, 0, time.Time{}, false,
-			false,
-		))
+		m := find(t, memberRewardsFor(
+			"preview", 96, koios, d, now, 0, time.Time{}))
 		assert.Equal(t, CategoryValueMismatch, m.Category,
 			"once applied, a difference is a genuine mismatch")
 	})
@@ -2783,17 +2779,15 @@ func TestComparePoolEpochMemberRewardsBeforeApplication(t *testing.T) {
 		d := base()
 		d.RewardsPending = false
 		d.SpendableMemberRewardTotal = koiosPaid
-		for _, m := range ComparePoolEpoch(
-			"preview", 96, koios, d, now, 0, time.Time{}, false,
-			false,
-		) {
+		for _, m := range memberRewardsFor(
+			"preview", 96, koios, d, now, 0, time.Time{}) {
 			assert.NotEqual(t, "member_rewards", m.Field,
 				"the spendable sum equals Koios, so nothing to report")
 		}
 	})
 }
 
-// TestComparePoolEpochMissingRewardsBeforeApplication is the
+// TestCompareMemberRewardsMissingRowBeforeApplication is the
 // regression.
 //
 // A reward_pool_output row for a stake epoch is not written until well after
@@ -2803,7 +2797,7 @@ func TestComparePoolEpochMemberRewardsBeforeApplication(t *testing.T) {
 // from-genesis replay -- where every epoch closed years ago -- it can never
 // fire, and the absence was reported as dingo_db_missing against a node that
 // was simply not there yet.
-func TestComparePoolEpochMissingRewardsBeforeApplication(t *testing.T) {
+func TestCompareMemberRewardsMissingRowBeforeApplication(t *testing.T) {
 	koios := &KoiosPoolEpoch{
 		PoolBech32:    "pool1l5u4zh84na80xr56d342d32rsdw62qycwaw97hy9wwsc6axdwla",
 		MemberRewards: "4004412",
@@ -2830,10 +2824,8 @@ func TestComparePoolEpochMissingRewardsBeforeApplication(t *testing.T) {
 	t.Run(
 		"not computed yet is a lag even long after the epoch closed",
 		func(t *testing.T) {
-			m := find(t, ComparePoolEpoch(
-				"preview", 44, koios, missing(true), now, 24, longClosed, false,
-				false,
-			))
+			m := find(t, memberRewardsFor(
+				"preview", 44, koios, missing(true), now, 24, longClosed))
 			assert.Equal(
 				t,
 				CategoryReferenceLag,
@@ -2844,20 +2836,16 @@ func TestComparePoolEpochMissingRewardsBeforeApplication(t *testing.T) {
 	)
 
 	t.Run("past the boundary a missing row is a real gap", func(t *testing.T) {
-		m := find(t, ComparePoolEpoch(
-			"preview", 44, koios, missing(false), now, 24, longClosed, false,
-			false,
-		))
+		m := find(t, memberRewardsFor(
+			"preview", 44, koios, missing(false), now, 24, longClosed))
 		assert.Equal(t, CategoryDBMissing, m.Category,
 			"once Dingo has had its chance, absence is a genuine gap")
 	})
 
 	t.Run("the wall-clock window still works at the tip", func(t *testing.T) {
-		m := find(t, ComparePoolEpoch(
+		m := find(t, memberRewardsFor(
 			"preview", 44, koios, missing(false), now, 24,
-			now.Add(-1*time.Hour), false,
-			false,
-		))
+			now.Add(-1*time.Hour)))
 		assert.Equal(t, CategoryReferenceLag, m.Category,
 			"a recently closed epoch keeps the existing grace behaviour")
 	})
@@ -3260,7 +3248,7 @@ func TestZeroSlotWithTipHashIsNotPending(t *testing.T) {
 	})
 }
 
-func TestComparePoolEpochUsesRewardsPending(t *testing.T) {
+func TestCompareMemberRewardsUsesRewardsPending(t *testing.T) {
 	t.Parallel()
 
 	memberRewardMismatch := func(mismatches []CheckMismatch) CheckMismatch {
@@ -3281,10 +3269,8 @@ func TestComparePoolEpochUsesRewardsPending(t *testing.T) {
 	}
 
 	dingo.RewardsPending = true
-	mismatches := ComparePoolEpoch(
-		"preview", 96, koios, dingo, time.Now(), 0, time.Time{}, false,
-		false,
-	)
+	mismatches := memberRewardsFor(
+		"preview", 96, koios, dingo, time.Now(), 0, time.Time{})
 	require.Equal(
 		t,
 		CategoryReferenceLag,
@@ -3292,10 +3278,8 @@ func TestComparePoolEpochUsesRewardsPending(t *testing.T) {
 	)
 
 	dingo.RewardsPending = false
-	mismatches = ComparePoolEpoch(
-		"preview", 96, koios, dingo, time.Now(), 0, time.Time{}, false,
-		false,
-	)
+	mismatches = memberRewardsFor(
+		"preview", 96, koios, dingo, time.Now(), 0, time.Time{})
 	require.Equal(
 		t,
 		CategoryValueMismatch,

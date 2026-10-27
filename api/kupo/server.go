@@ -34,7 +34,7 @@ import (
 const (
 	responseWriteTimeout      = 30 * time.Second
 	matchStreamTimeout        = 5 * time.Minute
-	maxConcurrentMatchStreams = 2
+	maxConcurrentMatchStreams = 3
 	maxMatchStreamsPerClient  = 1
 )
 
@@ -123,6 +123,17 @@ func matchClient(r *http.Request) string {
 	return r.RemoteAddr
 }
 
+// corsExposeHeaders lists every response header this API sets that is not
+// CORS-safelisted. A browser hides any other header from scripts, so a client
+// on an allowed origin could not read the checkpoint, ETag or block hash the
+// Kupo contract returns.
+var corsExposeHeaders = []string{
+	"ETag",
+	"Retry-After",
+	"X-Block-Header-Hash",
+	"X-Most-Recent-Checkpoint",
+}
+
 func (s *Server) handler() http.Handler {
 	mux := http.NewServeMux()
 	for _, prefix := range []string{"", "/v1"} {
@@ -134,6 +145,7 @@ func (s *Server) handler() http.Handler {
 	limited := http.MaxBytesHandler(s.boundWrites(mux), maxRequestBodyBytes)
 	return httpcors.Handler(limited, httpcors.Config{
 		AllowedOrigins: s.config.CORSAllowedOrigins,
+		ExposeHeaders:  corsExposeHeaders,
 	})
 }
 
@@ -174,7 +186,10 @@ func (w *progressResponseWriter) Write(p []byte) (int, error) {
 	return w.ResponseWriter.Write(p)
 }
 
-func registerRoutes(mux *http.ServeMux, prefix string, s *Server) {
+func registerRoutes(mux interface {
+	HandleFunc(string, func(http.ResponseWriter, *http.Request))
+}, prefix string, s *Server,
+) {
 	mux.HandleFunc("GET "+prefix+"/matches", s.handleMatches)
 	mux.HandleFunc("GET "+prefix+"/matches/{pattern}", s.handleMatches)
 	mux.HandleFunc(

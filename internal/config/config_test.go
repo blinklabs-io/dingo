@@ -75,7 +75,12 @@ func resetGlobalConfig() {
 		ForgeEBMaxBytes:                  forgeEBCapDefault(DefaultForgeEBMaxBytes),
 		ForgeEBSelectionReserve:          DefaultForgeEBSelectionReserve,
 		Mithril: MithrilConfig{
-			Enabled:            true,
+			WindowChunks:       DefaultMithrilWindowChunks,
+			BatchChunks:        DefaultMithrilBatchChunks,
+			DownloadWorkers:    DefaultMithrilDownloadWorkers,
+			MinGapChunks:       DefaultMithrilMinGapChunks,
+			CheckInterval:      DefaultMithrilCheckInterval,
+			RetryBackoff:       DefaultMithrilRetryBackoff,
 			CleanupAfterLoad:   true,
 			VerifyCertificates: true,
 		},
@@ -88,6 +93,9 @@ func resetGlobalConfig() {
 		// ValidateForgedBlock's production default is an unconditional
 		// literal with no separate fill-in step to test around.
 		ValidateForgedBlock: true,
+		// Mirrors newDefaultConfig: the apply-ahead work is on by default.
+		LedgerPrefetchAheadEnabled: true,
+		LedgerValidateAheadEnabled: true,
 	}
 	globalTopologyConfig = &topology.TopologyConfig{}
 }
@@ -293,11 +301,19 @@ mithril:
 		ForgeAppliedTipStalenessSlots:    DefaultForgeAppliedTipStalenessSlots,
 		ForgeEndorserBlockStalenessSlots: DefaultForgeEndorserBlockStalenessSlots,
 		ValidateForgedBlock:              true,
+		LedgerPrefetchAheadEnabled:       true,
+		LedgerValidateAheadEnabled:       true,
 		ForgeEBMaxTxRefs:                 forgeEBCapDefault(777),
 		ForgeEBMaxBytes:                  forgeEBCapDefault(888888),
 		ForgeEBSelectionReserve:          750 * time.Millisecond,
 		Mithril: MithrilConfig{
 			Enabled:                false,
+			WindowChunks:           DefaultMithrilWindowChunks,
+			BatchChunks:            DefaultMithrilBatchChunks,
+			DownloadWorkers:        DefaultMithrilDownloadWorkers,
+			MinGapChunks:           DefaultMithrilMinGapChunks,
+			CheckInterval:          DefaultMithrilCheckInterval,
+			RetryBackoff:           DefaultMithrilRetryBackoff,
 			AggregatorURL:          "https://mithril.example.net",
 			DownloadDir:            "/tmp/mithril",
 			DownloadIdleTimeout:    "5m",
@@ -325,6 +341,12 @@ mithril:
 func TestDefaultMempoolProviderIsFIFO(t *testing.T) {
 	if got := defaultPluginsConfig().Mempool.Provider; got != "fifo" {
 		t.Fatalf("default mempool provider = %q, want fifo", got)
+	}
+}
+
+func TestDefaultConsensusProviderIsPraos(t *testing.T) {
+	if got := defaultPluginsConfig().Consensus.Provider; got != "praos" {
+		t.Fatalf("default consensus provider = %q, want praos", got)
 	}
 }
 
@@ -412,11 +434,18 @@ func TestLoad_WithoutConfigFile_UsesDefaults(t *testing.T) {
 		ForgeAppliedTipStalenessSlots:    DefaultForgeAppliedTipStalenessSlots,
 		ForgeEndorserBlockStalenessSlots: DefaultForgeEndorserBlockStalenessSlots,
 		ValidateForgedBlock:              true,
+		LedgerPrefetchAheadEnabled:       true,
+		LedgerValidateAheadEnabled:       true,
 		ForgeEBMaxTxRefs:                 forgeEBCapDefault(DefaultForgeEBMaxTxRefs),
 		ForgeEBMaxBytes:                  forgeEBCapDefault(DefaultForgeEBMaxBytes),
 		ForgeEBSelectionReserve:          DefaultForgeEBSelectionReserve,
 		Mithril: MithrilConfig{
-			Enabled:            true,
+			WindowChunks:       DefaultMithrilWindowChunks,
+			BatchChunks:        DefaultMithrilBatchChunks,
+			DownloadWorkers:    DefaultMithrilDownloadWorkers,
+			MinGapChunks:       DefaultMithrilMinGapChunks,
+			CheckInterval:      DefaultMithrilCheckInterval,
+			RetryBackoff:       DefaultMithrilRetryBackoff,
 			CleanupAfterLoad:   true,
 			VerifyCertificates: true,
 		},
@@ -1869,6 +1898,16 @@ func TestLoad_MempoolCapacityMode(t *testing.T) {
 			name:     "explicit value wins under leios",
 			yaml:     "runMode: \"leios\"\nplugins:\n  mempool:\n    provider: default\n    config:\n      capacity: 5242880\n      evictionWatermark: 0.90\n      rejectionWatermark: 0.95\n",
 			expected: 5242880,
+		},
+		{
+			name:     "musashi default raises to 25 MiB",
+			yaml:     "runMode: \"serve\"\nnetwork: \"musashi\"\n",
+			expected: DefaultMempoolCapacityLeios,
+		},
+		{
+			name:     "explicit praos-sized value wins on musashi",
+			yaml:     "network: \"musashi\"\nplugins:\n  mempool:\n    provider: default\n    config:\n      capacity: 1048576\n      evictionWatermark: 0.90\n      rejectionWatermark: 0.95\n",
+			expected: DefaultMempoolCapacityPraos,
 		},
 		{
 			name:     "explicit value wins under serve",

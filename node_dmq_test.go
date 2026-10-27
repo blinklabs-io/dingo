@@ -15,16 +15,22 @@
 package dingo
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/consensus/praos"
+	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/dmq"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/plugin"
@@ -118,12 +124,74 @@ func TestConfigPopulateDMQNetworkMagic(t *testing.T) {
 	}
 }
 
+// A node that cannot answer a lookup has no grounds to call a message
+// invalid, so every failure must carry the sentinel admission reports as other.
 func TestDMQStakeAuthorityWithoutLedger(t *testing.T) {
 	t.Parallel()
-	_, err := (&dmqStakeAuthority{}).PoolActiveStake(
-		ocommon.PoolKeyHash{},
-	)
-	require.ErrorContains(t, err, "ledger state unavailable")
+	auth := &dmqStakeAuthority{}
+	_, err := auth.PoolActiveStake(ocommon.PoolKeyHash{})
+	require.ErrorIs(t, err, dmq.ErrChainStateUnavailable)
+	require.ErrorIs(t, err, errDMQLedgerDetached)
+	_, err = auth.CurrentSlot()
+	require.ErrorIs(t, err, dmq.ErrChainStateUnavailable)
+	_, err = auth.CurrentKESPeriod()
+	require.ErrorIs(t, err, dmq.ErrChainStateUnavailable)
+	_, _, err = auth.PoolOpCertIssueNumber(ocommon.PoolKeyHash{})
+	require.ErrorIs(t, err, dmq.ErrChainStateUnavailable)
+}
+
+func dmqPoolStakeAt(
+	auth *dmqStakeAuthority,
+	slot uint64,
+	pool ocommon.PoolKeyHash,
+) (uint64, error) {
+	auth.mu.RLock()
+	defer auth.mu.RUnlock()
+	return auth.poolStakeAtLocked(slot, pool)
+}
+
+// The authority answers from the snapshot that elects leaders at the slot: a
+// pool in it carries its stake, a pool absent from it carries none, and a
+// distribution the ledger has not captured is unavailable rather than empty.
+func TestDMQStakeAuthorityReadsElectingStake(t *testing.T) {
+	t.Parallel()
+	n, points := newLiveLifecycleTestNode(t, 2)
+	auth := &n.dmqStake
+	auth.setLedgerState(n.ledgerState)
+	slot := points[0].Slot
+
+	unknown := ocommon.PoolKeyHash{0xbb}
+	_, err := dmqPoolStakeAt(auth, slot, unknown)
+	require.ErrorIs(t, err, dmq.ErrChainStateUnavailable)
+	require.ErrorIs(t, err, ledger.ErrLeaderStakeSnapshotUnavailable)
+
+	epoch, err := n.ledgerState.SlotToEpoch(slot)
+	require.NoError(t, err)
+	staked := ocommon.PoolKeyHash{0xaa}
+	for _, row := range []struct {
+		epoch uint64
+		pool  ocommon.PoolKeyHash
+		stake uint64
+	}{
+		{praos.StakeSnapshotEpoch(epoch.EpochId), staked, 700},
+		// The next epoch's distribution elects nobody yet.
+		{praos.StakeSnapshotEpoch(epoch.EpochId) + 1, unknown, 900},
+	} {
+		require.NoError(t, n.ledgerState.Database().Metadata().
+			SavePoolStakeSnapshot(&models.PoolStakeSnapshot{
+				Epoch:        row.epoch,
+				SnapshotType: models.PoolStakeSnapshotTypeMark,
+				PoolKeyHash:  row.pool[:],
+				TotalStake:   types.Uint64(row.stake),
+			}, nil))
+	}
+
+	stake, err := dmqPoolStakeAt(auth, slot, staked)
+	require.NoError(t, err)
+	require.Equal(t, uint64(700), stake)
+	stake, err = dmqPoolStakeAt(auth, slot, unknown)
+	require.NoError(t, err)
+	require.Zero(t, stake)
 }
 
 // A live truncate closes and replaces the ledger state while DMQ submissions
@@ -142,10 +210,22 @@ func TestDMQStakeAuthorityAcrossLiveTruncate(t *testing.T) {
 	// Only the detached state may fail a lookup: any other error means a
 	// lookup reached storage that was closed or not yet reopened.
 	var lookupErr error
+	// A fixed chain slot, so lookups reach storage rather than stopping at a
+	// wall clock the test chain's era history does not cover.
+	slot := points[0].Slot
+	lookup := func() error {
+		_, err := dmqPoolStakeAt(auth, slot, ocommon.PoolKeyHash{})
+		// The test chain holds no stake snapshot, which is an answer read
+		// from storage.
+		if errors.Is(err, ledger.ErrLeaderStakeSnapshotUnavailable) {
+			return nil
+		}
+		return err
+	}
 	wg.Go(func() {
 		for {
-			_, err := auth.PoolActiveStake(ocommon.PoolKeyHash{})
-			if err != nil && err.Error() != "ledger state unavailable" {
+			err := lookup()
+			if err != nil && !errors.Is(err, errDMQLedgerDetached) {
 				lookupErr = err
 				return
 			}
@@ -172,8 +252,7 @@ func TestDMQStakeAuthorityAcrossLiveTruncate(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, lookupErr)
 	require.Positive(t, during, "no stake lookup ran during the truncate")
-	_, err = auth.PoolActiveStake(ocommon.PoolKeyHash{})
-	require.NoError(t, err)
+	require.NoError(t, lookup())
 }
 
 // Quiesce must not wait without bound on a stake lookup stalled inside the
@@ -232,10 +311,183 @@ func TestNodeRunServesDMQSubmission(t *testing.T) {
 	require.Equal(
 		t,
 		ocommon.OtherReason{
-			Message: "confirmed era history does not cover wall clock",
+			Message: "dmq: chain state unavailable: " +
+				"confirmed era history does not cover wall clock",
 		},
 		reason,
 	)
+}
+
+// syncLogBuffer is a log sink that node goroutines may write while the test
+// reads it.
+type syncLogBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncLogBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncLogBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// A topology file that cannot be loaded stops startup before the DMQ stack
+// opens its socket and before any API provider starts.
+func TestNodeRunRejectsBadDMQTopology(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		path func(t *testing.T, dir string) string
+	}{
+		{
+			name: "malformed",
+			path: func(t *testing.T, dir string) string {
+				path := filepath.Join(dir, "dmq-topology.json")
+				require.NoError(t, os.WriteFile(path, []byte("{"), 0o600))
+				return path
+			},
+		},
+		{
+			name: "missing",
+			path: func(_ *testing.T, dir string) string {
+				return filepath.Join(dir, "absent.json")
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			n := newAPIPluginRuntimeNode(t)
+			dir := t.TempDir()
+			socket := filepath.Join(dir, "dmq.sock")
+			dmqCfg := internalconfig.DefaultDMQConfig()
+			dmqCfg.Enabled = true
+			dmqCfg.NetworkMagic = 42
+			dmqCfg.SocketPath = socket
+			dmqCfg.TopologyFile = tt.path(t, dir)
+			n.config.cfg.DMQ = dmqCfg
+			probe := &apiLifecycleProbe{}
+			registerAPIProbe(
+				t, n.pluginHost, plugin.CapabilityAPIBlockfrost, "probe", probe,
+			)
+			selectAPIProbe(n, plugin.CapabilityAPIBlockfrost, "probe", 13000)
+
+			err := n.Run(context.Background())
+			require.ErrorContains(t, err, "loading dmq topology")
+			require.NoFileExists(t, socket)
+			require.Zero(t, probe.starts.Load())
+		})
+	}
+}
+
+// A topology file that loads lets startup continue, and the log reports how
+// many distinct peers it names. A file that names none is accepted with a
+// warning, because ledger peer discovery can supply peers without one.
+func TestNodeRunLoadsDMQTopology(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		content  string
+		wantPeer string
+		wantWarn bool
+	}{
+		{
+			name: "peers",
+			content: `{
+				"localRoots": [{
+					"accessPoints": [
+						{"address": "10.0.0.1", "port": 3141},
+						{"address": "10.0.0.2", "port": 3141}
+					],
+					"valency": 2
+				}],
+				"publicRoots": [{
+					"accessPoints": [{"address": "10.0.0.1", "port": 3141}],
+					"valency": 1
+				}]
+			}`,
+			wantPeer: "peers=2",
+		},
+		{
+			// The topology the Mithril documentation publishes: a valency of
+			// 2 over one access point, and a null peerSnapshotFile.
+			name: "mithril documented topology",
+			content: `{
+				"bootstrapPeers": [],
+				"localRoots": [{
+					"accessPoints": [
+						{"address": "dmq.example.com", "port": 6161, "valency": 1}
+					],
+					"advertise": true,
+					"trustable": false,
+					"valency": 2
+				}],
+				"peerSnapshotFile": null,
+				"publicRoots": [{"accessPoints": [], "advertise": false}]
+			}`,
+			wantPeer: "peers=1",
+		},
+		{
+			name:     "no peers",
+			content:  `{}`,
+			wantPeer: "peers=0",
+			wantWarn: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			runNodeWithDMQTopology(t, tt.content, tt.wantPeer, tt.wantWarn)
+		})
+	}
+}
+
+func runNodeWithDMQTopology(
+	t *testing.T,
+	content, wantPeer string,
+	wantWarn bool,
+) {
+	t.Helper()
+	n := newAPIPluginRuntimeNode(t)
+	dir := t.TempDir()
+	topologyFile := filepath.Join(dir, "dmq-topology.json")
+	require.NoError(t, os.WriteFile(topologyFile, []byte(content), 0o600))
+	dmqCfg := internalconfig.DefaultDMQConfig()
+	dmqCfg.Enabled = true
+	dmqCfg.NetworkMagic = 42
+	// A Unix socket path is limited to about 100 bytes, which a subtest's
+	// t.TempDir path can exceed, so the socket gets a short directory.
+	socketDir, err := os.MkdirTemp("", "dmq")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(socketDir) })
+	dmqCfg.SocketPath = filepath.Join(socketDir, "dmq.sock")
+	dmqCfg.TopologyFile = topologyFile
+	n.config.cfg.DMQ = dmqCfg
+	logs := &syncLogBuffer{}
+	n.config.logger = slog.New(slog.NewTextHandler(logs, nil))
+
+	errProbe := errors.New("probe done")
+	probe := &apiLifecycleProbe{onStart: func() error { return errProbe }}
+	registerAPIProbe(
+		t, n.pluginHost, plugin.CapabilityAPIBlockfrost, "probe", probe,
+	)
+	selectAPIProbe(n, plugin.CapabilityAPIBlockfrost, "probe", 13000)
+
+	require.ErrorIs(t, n.Run(context.Background()), errProbe)
+	require.Equal(t, int32(1), probe.starts.Load())
+	require.Contains(t, logs.String(), "loaded dmq topology")
+	require.Contains(t, logs.String(), wantPeer)
+	if wantWarn {
+		require.Contains(t, logs.String(), "dmq topology names no peers")
+	} else {
+		require.NotContains(t, logs.String(), "dmq topology names no peers")
+	}
 }
 
 // submitDMQ submits an unsigned message over a DMQ local socket and returns
@@ -282,7 +534,7 @@ func submitDMQ(
 	require.NoError(t, conn.LocalMessageSubmission().Client.SubmitMessage(
 		&ocommon.DmqMessage{
 			Payload: ocommon.DmqMessagePayload{
-				MessageBody: []byte("node"),
+				MessageBody: bytes.Repeat([]byte("node"), 100),
 				KESPeriod:   1,
 				ExpiresAt:   expiry,
 			},

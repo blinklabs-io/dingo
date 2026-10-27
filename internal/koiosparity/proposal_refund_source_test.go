@@ -223,7 +223,7 @@ func compareRefundEpoch(
 	require.NoError(t, cache.CommitAccountRewardsForEpoch(
 		"preview", 677, koios, 1, true, time.Now(),
 	))
-	return compareEpochAccounts(
+	ms, _, _ := compareEpochAccounts(
 		context.Background(),
 		cache,
 		source,
@@ -236,6 +236,7 @@ func compareRefundEpoch(
 		false,
 		slog.New(slog.DiscardHandler),
 	)
+	return ms
 }
 
 func koiosRefundRows(
@@ -480,7 +481,7 @@ func TestCompareEpochAccountsLogsRefundCredentialSource(t *testing.T) {
 		"preview", 677, nil, 1, true, time.Now(),
 	))
 	var logs strings.Builder
-	ms := compareEpochAccounts(
+	ms, _, _ := compareEpochAccounts(
 		context.Background(),
 		cache,
 		badCredentialRefundSource{inner},
@@ -600,7 +601,7 @@ func TestCompareEpochAccountsRefundPendingIsIndependent(t *testing.T) {
 					koiosRefundRows(t, registered, "500000000000"),
 					1, true, time.Now(),
 				))
-				ms := compareEpochAccounts(
+				ms, _, _ := compareEpochAccounts(
 					context.Background(), cache, src, "preview", 677, 676,
 					time.Now(), 0, time.Time{}, true,
 					slog.New(slog.DiscardHandler),

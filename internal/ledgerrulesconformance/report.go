@@ -52,8 +52,7 @@ type Report struct {
 	Scenario       string            `json:"scenario"`
 	GeneratedAt    string            `json:"generated_at"`
 	Implementation map[string]string `json:"implementation"`
-	Corpus         string            `json:"corpus"`
-	Totals         Totals            `json:"totals"`
+	Totals         Totals            `json:"-"`
 	Scenarios      []CaseOutcome     `json:"scenarios"`
 }
 
@@ -267,7 +266,6 @@ func GenerateReport(
 		Scenario:       "ledger-rules",
 		GeneratedAt:    generatedAt.UTC().Format(time.RFC3339),
 		Implementation: map[string]string{"name": "dingo"},
-		Corpus:         "pragma-org/node-diversity-conformance/ledger-rules-v2",
 		Scenarios:      make([]CaseOutcome, 0, len(files)),
 	}
 	failures := make([]Failure, 0)
@@ -469,6 +467,19 @@ func runFixture(
 		provider,
 		pp,
 	)
+	if predicate := unregisteredDelegationPredicate(tx, provider, validationErr); validationErr != nil &&
+		predicate != "" {
+		outcome := CaseOutcome{ID: id, Result: predicate}
+		if predicate == expected.Predicate {
+			return outcome, nil, nil
+		}
+		_, failure, err := mismatch(
+			id,
+			expected,
+			"rejected: "+validationErr.Error(),
+		)
+		return outcome, failure, err
+	}
 	if expected.Predicate == "" {
 		if validationErr == nil {
 			return CaseOutcome{ID: id, Result: "pass"}, nil, nil
@@ -482,6 +493,65 @@ func runFixture(
 		return CaseOutcome{ID: id, Result: expected.Predicate}, nil, nil
 	}
 	return mismatch(id, expected, "rejected: "+validationErr.Error())
+}
+
+// The ledger uses one error type for pool and vote delegation by an
+// unregistered credential. NDC distinguishes them by certificate type.
+func unregisteredDelegationPredicate(
+	tx common.Transaction,
+	state common.LedgerState,
+	err error,
+) string {
+	delegationErr, ok := errors.AsType[conway.DelegateUnregisteredStakeCredentialError](
+		err,
+	)
+	if !ok {
+		return ""
+	}
+	registered := state.IsStakeCredentialRegistered(delegationErr.Credential)
+	for _, certificate := range tx.Certificates() {
+		var credential *common.Credential
+		var registration *bool
+		var predicate string
+		switch cert := certificate.(type) {
+		case *common.StakeRegistrationCertificate:
+			credential, registration = &cert.StakeCredential, new(true)
+		case *common.RegistrationCertificate:
+			credential, registration = &cert.StakeCredential, new(true)
+		case *common.StakeRegistrationDelegationCertificate:
+			credential, registration = &cert.StakeCredential, new(true)
+		case *common.VoteRegistrationDelegationCertificate:
+			credential, registration = &cert.StakeCredential, new(true)
+		case *common.StakeVoteRegistrationDelegationCertificate:
+			credential, registration = &cert.StakeCredential, new(true)
+		case *common.StakeDeregistrationCertificate:
+			credential, registration = &cert.StakeCredential, new(false)
+		case *common.DeregistrationCertificate:
+			credential, registration = &cert.StakeCredential, new(false)
+		case *common.StakeDelegationCertificate:
+			credential = cert.StakeCredential
+			predicate = "StakeCredentialInvalidPoolDelegation"
+		case *common.VoteDelegationCertificate:
+			credential = &cert.StakeCredential
+			predicate = "StakeCredentialInvalidVoteDelegation"
+		case *common.StakeVoteDelegationCertificate:
+			credential = &cert.StakeCredential
+			predicate = "StakeCredentialInvalidVoteDelegation"
+		default:
+			continue
+		}
+		if credential == nil ||
+			credential.CredType != delegationErr.Credential.CredType ||
+			credential.Credential != delegationErr.Credential.Credential {
+			continue
+		}
+		if registration != nil {
+			registered = *registration
+		} else if !registered {
+			return predicate
+		}
+	}
+	return ""
 }
 
 func transactionFailsToDecode(transactionCBOR []byte) bool {
@@ -529,7 +599,9 @@ func observedLedgerResult(observed string) (string, bool) {
 	case strings.HasPrefix(observed, "transaction decoding failure:"):
 		return "DecodingFailure", true
 	case strings.HasPrefix(observed, "rejected: "):
-		return ledgerPredicateFromError(strings.TrimPrefix(observed, "rejected: "))
+		return ledgerPredicateFromError(
+			strings.TrimPrefix(observed, "rejected: "),
+		)
 	default:
 		return "", false
 	}
@@ -550,9 +622,13 @@ func ledgerPredicateFromError(errText string) (string, bool) {
 		if separator := strings.IndexByte(reportResult, ':'); separator >= 0 {
 			reportResult = reportResult[:separator]
 		}
+		if listed, ok := ndcPredicateAliases[reportResult]; ok {
+			reportResult = listed
+		}
 		for _, pattern := range ledgerPredicateErrorPatterns[predicate] {
 			pattern = strings.ToLower(pattern)
-			if len(pattern) > bestPatternLength && strings.Contains(text, pattern) {
+			if len(pattern) > bestPatternLength &&
+				strings.Contains(text, pattern) {
 				result = reportResult
 				bestPatternLength = len(pattern)
 			}
@@ -594,12 +670,31 @@ func predicateMatches(err error, expected expectedDoc) bool {
 	if !ok {
 		patterns = []string{predicate}
 	}
+	for alias, listed := range ndcPredicateAliases {
+		if listed == predicate {
+			patterns = append(
+				slices.Clone(patterns),
+				ledgerPredicateErrorPatterns[alias]...)
+		}
+	}
 	for _, pattern := range patterns {
 		if strings.Contains(text, strings.ToLower(pattern)) {
 			return true
 		}
 	}
 	return false
+}
+
+// ndcPredicateAliases names the listed predicate that reports a Dingo rule
+// which the scenario's closed predicate list lacks. The scenario asks each
+// implementation to map its own failures onto that list. Only the report is
+// affected: the validator still raises the distinct rule.
+//
+// UnelectedCommitteeVoters, raised for a committee hot credential whose cold
+// credential holds no seat, is reported as VotersDoNotExist, the listed
+// predicate for a vote cast by a voter that cannot vote.
+var ndcPredicateAliases = map[string]string{
+	"UnelectedCommitteeVoters": "VotersDoNotExist",
 }
 
 var ledgerPredicateErrorPatterns = map[string][]string{
@@ -636,6 +731,7 @@ var ledgerPredicateErrorPatterns = map[string][]string{
 	},
 	"DisallowedVoters":               {"voting restriction"},
 	"DRepAlreadyRegistered":          {"drep already registered"},
+	"DRepNotRegistered":              {"drep is not registered"},
 	"ExtraneousScriptWitnessesUTXOW": {"extraneous script witness"},
 	"FeeTooSmallUTxO": {
 		"less than the calculated minimum fee",
@@ -706,6 +802,7 @@ var ledgerPredicateErrorPatterns = map[string][]string{
 	"StakeKeyHasNonZeroAccountBalance": {
 		"stake credential has nonzero reward balance",
 	},
+	"StakeKeyNotRegistered": {"stake credential is not registered"},
 	"StakeKeyRegistered": {
 		"stake credential already registered",
 	},

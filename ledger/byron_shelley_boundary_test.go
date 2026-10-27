@@ -320,23 +320,35 @@ func newByronShelleyBoundaryLedger(
 		strings.NewReader(shelleyGenesisJSON),
 	))
 
+	return newByronShelleyBoundaryLedgerFrom(
+		t,
+		cfg,
+		loadBoundaryBlock(t, "mainnet-byron-last-4492799.cbor", 1),
+		loadBoundaryBlock(t, "mainnet-shelley-first-4492800.cbor", 2),
+		207,
+		4_471_200,
+		21_600,
+	)
+}
+
+// newByronShelleyBoundaryLedgerFrom builds a ledger whose tip is lastByron, in
+// the Byron epoch byronEpoch, with firstShelley stored after it on the primary
+// chain and not yet applied.
+func newByronShelleyBoundaryLedgerFrom(
+	t *testing.T,
+	cfg *cardano.CardanoNodeConfig,
+	lastByron, firstShelley gledger.Block,
+	byronEpoch, byronEpochStart uint64,
+	byronEpochLength uint,
+) (*LedgerState, gledger.Block, gledger.Block) {
+	t.Helper()
+
 	db := newTestDB(t)
 	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	require.NoError(t, cm.SetLedger(testSecurityParamLedger{
 		securityParam: 2,
 	}))
-
-	lastByron := loadBoundaryBlock(
-		t,
-		"mainnet-byron-last-4492799.cbor",
-		1,
-	)
-	firstShelley := loadBoundaryBlock(
-		t,
-		"mainnet-shelley-first-4492800.cbor",
-		2,
-	)
 	rawBlocks := []chain.RawBlock{{
 		Slot:        lastByron.SlotNumber(),
 		Hash:        lastByron.Hash().Bytes(),
@@ -357,11 +369,6 @@ func newByronShelleyBoundaryLedger(
 		cm.PrimaryChain().AddRawBlocks(context.Background(), rawBlocks),
 	)
 
-	const (
-		byronEpoch       = uint64(207)
-		byronEpochStart  = uint64(4_471_200)
-		byronEpochLength = uint(21_600)
-	)
 	require.NoError(t, db.SetEpoch(
 		byronEpochStart,
 		byronEpoch,
@@ -796,4 +803,97 @@ func TestRollbackChainAndStateClearsShelleyPParamsInsideByronPrefix(
 	assert.Nil(t, ls.currentPParams)
 	assert.Nil(t, ls.prevEraPParams)
 	assert.Equal(t, hardfork.NewTransitionUnknown(), ls.transitionInfo)
+}
+
+func loadPreprodNodeConfig(t *testing.T) *cardano.CardanoNodeConfig {
+	t.Helper()
+	cfg, err := cardano.NewCardanoNodeConfigFromEmbedFS(
+		cardano.EmbeddedConfigFS,
+		"preprod/config.json",
+	)
+	require.NoError(t, err)
+	return cfg
+}
+
+// TestByronShelleyBoundaryPreprodHeaderMajorDoesNotSkipShelley pins the era
+// preprod's fork boundary opens. The first Shelley block there advertises
+// header major 3, Allegra's, but Shelley ends by a version trigger that only
+// Shelley's own enacted parameters can meet: preprod runs epoch 4 at major 2
+// and enacts major 3 at epoch 5. Reading the header as the era moved epoch 4
+// into Allegra.
+func TestByronShelleyBoundaryPreprodHeaderMajorDoesNotSkipShelley(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	firstShelley := loadBoundaryBlock(t, "preprod-shelley-first-86400.cbor", 2)
+	headerMajor, known := HeaderProtocolMajor(firstShelley.Header())
+	require.True(t, known)
+	require.Equal(t, eras.AllegraEraDesc.MinMajorVersion, headerMajor,
+		"the premise: preprod's first Shelley header names Allegra's major")
+
+	t.Run("version trigger", func(t *testing.T) {
+		t.Parallel()
+		ls := &LedgerState{
+			config: LedgerStateConfig{
+				CardanoNodeConfig: loadPreprodNodeConfig(t),
+			},
+		}
+		target, allowTwo := ls.boundaryEraForBlock(
+			eras.ByronEraDesc.Id,
+			eras.ShelleyEraDesc.Id,
+			headerMajor,
+			known,
+			4,
+		)
+		assert.Equal(t, eras.ShelleyEraDesc.Id, target)
+		assert.False(t, allowTwo)
+	})
+
+	t.Run("scheduled epoch", func(t *testing.T) {
+		t.Parallel()
+		cfg := loadPreprodNodeConfig(t)
+		shelleyEpoch, allegraEpoch := uint64(4), uint64(4)
+		cfg.TestShelleyHardForkAtEpoch = &shelleyEpoch
+		cfg.TestAllegraHardForkAtEpoch = &allegraEpoch
+		ls := &LedgerState{config: LedgerStateConfig{CardanoNodeConfig: cfg}}
+		target, allowTwo := ls.boundaryEraForBlock(
+			eras.ByronEraDesc.Id,
+			eras.ShelleyEraDesc.Id,
+			headerMajor,
+			known,
+			4,
+		)
+		assert.Equal(t, eras.AllegraEraDesc.Id, target,
+			"an Allegra scheduled for the fork epoch still opens it")
+		assert.True(t, allowTwo)
+	})
+
+	t.Run("rollover", func(t *testing.T) {
+		t.Parallel()
+		ls, _, block := newByronShelleyBoundaryLedgerFrom(
+			t,
+			loadPreprodNodeConfig(t),
+			loadBoundaryBlock(t, "preprod-byron-last-84242.cbor", 1),
+			firstShelley,
+			3,
+			64_800,
+			21_600,
+		)
+		results := make(chan readChainResult, 1)
+		results <- readChainResult{blocks: []gledger.Block{block}}
+		close(results)
+		require.NoError(t, ls.ledgerProcessBlocksFromSource(
+			context.Background(),
+			results,
+		))
+		require.Equal(t, block.SlotNumber(), ls.currentTip.Point.Slot)
+		assert.Equal(t, uint64(4), ls.currentEpoch.EpochId)
+		assert.Equal(t, eras.ShelleyEraDesc.Id, ls.currentEpoch.EraId)
+		assert.Equal(t, eras.ShelleyEraDesc.Id, ls.currentEra.Id)
+		pparams, ok := ls.currentPParams.(*shelley.ShelleyProtocolParameters)
+		require.True(t, ok, "epoch 4 runs on Shelley pparams, got %T",
+			ls.currentPParams)
+		assert.Equal(t, uint(2), pparams.ProtocolMajor)
+	})
 }

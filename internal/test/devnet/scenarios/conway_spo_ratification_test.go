@@ -652,6 +652,17 @@ func (q *governanceLSQ) fundedWallet(
 	keys []*governanceSigningKey,
 	minimum uint64,
 ) (*governanceSigningKey, governanceUTxO, error) {
+	// The ledger answers for applied blocks only. A transaction still in the
+	// node's mempool (a txpump submission that was accepted before txpump was
+	// stopped, or one this test submitted earlier) has already claimed its
+	// inputs, and a transaction spending one is rejected. Read the mempool
+	// before the ledger: a pending transaction forged between the two reads
+	// is then gone from the mempool snapshot but already applied in the
+	// ledger snapshot, so its inputs are never offered as unspent.
+	pending, err := q.pendingInputs()
+	if err != nil {
+		return nil, governanceUTxO{}, err
+	}
 	if err := q.Refresh(); err != nil {
 		return nil, governanceUTxO{}, err
 	}
@@ -672,8 +683,40 @@ func (q *governanceLSQ) fundedWallet(
 	if err != nil {
 		return nil, governanceUTxO{}, err
 	}
-	ids := make([]olsq.UtxoId, 0, len(result.Results))
-	for id := range result.Results {
+	key, utxo, ok := selectGovernanceUTxO(
+		result.Results, keyByAddress, minimum, pending,
+	)
+	if !ok {
+		return nil, governanceUTxO{}, fmt.Errorf(
+			"no genesis wallet UTxO covers %d lovelace outside the mempool",
+			minimum+1_000_000,
+		)
+	}
+	return key, utxo, nil
+}
+
+// governanceInput identifies a transaction output by transaction and index.
+type governanceInput struct {
+	hash [32]byte
+	idx  int
+}
+
+// selectGovernanceUTxO returns the lowest-hash wallet UTxO that covers minimum
+// plus the fee reserve and is not an input of a pending transaction.
+func selectGovernanceUTxO(
+	results map[olsq.UtxoId]babbage.BabbageTransactionOutput,
+	keyByAddress map[string]*governanceSigningKey,
+	minimum uint64,
+	pending map[governanceInput]struct{},
+) (*governanceSigningKey, governanceUTxO, bool) {
+	ids := make([]olsq.UtxoId, 0, len(results))
+	for id := range results {
+		if _, spent := pending[governanceInput{
+			hash: id.Hash,
+			idx:  id.Idx,
+		}]; spent {
+			continue
+		}
 		ids = append(ids, id)
 	}
 	sort.Slice(ids, func(i, j int) bool {
@@ -683,24 +726,77 @@ func (q *governanceLSQ) fundedWallet(
 		return ids[i].Idx < ids[j].Idx
 	})
 	for _, id := range ids {
-		output := result.Results[id]
+		output := results[id]
 		addressBytes, err := output.Address().Bytes()
 		if err != nil {
-			return nil, governanceUTxO{}, fmt.Errorf(
-				"encode UTxO address: %w",
-				err,
-			)
+			continue
 		}
 		key := keyByAddress[string(addressBytes)]
 		if key == nil || output.OutputAmount.Amount < minimum+1_000_000 {
 			continue
 		}
-		return key, governanceUTxO{ID: id, Output: output}, nil
+		return key, governanceUTxO{ID: id, Output: output}, true
 	}
-	return nil, governanceUTxO{}, fmt.Errorf(
-		"no genesis wallet UTxO covers %d lovelace",
-		minimum+1_000_000,
+	return nil, governanceUTxO{}, false
+}
+
+// pendingInputs returns the inputs consumed by the transactions in the node's
+// mempool, read through LocalTxMonitor.
+func (q *governanceLSQ) pendingInputs() (map[governanceInput]struct{}, error) {
+	conn, err := ouroboros.New(
+		ouroboros.WithNetworkMagic(q.magic),
+		ouroboros.WithNodeToNode(false),
 	)
+	if err != nil {
+		return nil, fmt.Errorf("ouroboros.New: %w", err)
+	}
+	defer conn.Close() //nolint:errcheck
+	if err := conn.DialTimeout("tcp", q.addr, 10*time.Second); err != nil {
+		return nil, fmt.Errorf("dial %s: %w", q.addr, err)
+	}
+	protocol := conn.LocalTxMonitor()
+	if protocol == nil || protocol.Client == nil {
+		return nil, fmt.Errorf("LocalTxMonitor unavailable at %s", q.addr)
+	}
+	if err := protocol.Client.Acquire(); err != nil {
+		return nil, fmt.Errorf("acquire mempool snapshot: %w", err)
+	}
+	defer protocol.Client.Release() //nolint:errcheck
+	var txs [][]byte
+	for {
+		txBytes, err := protocol.Client.NextTx()
+		if err != nil {
+			return nil, fmt.Errorf("read mempool transaction: %w", err)
+		}
+		if len(txBytes) == 0 {
+			break
+		}
+		txs = append(txs, txBytes)
+	}
+	return governanceTransactionInputs(txs)
+}
+
+// governanceTransactionInputs decodes Conway transactions and returns their
+// inputs.
+func governanceTransactionInputs(
+	txs [][]byte,
+) (map[governanceInput]struct{}, error) {
+	inputs := make(map[governanceInput]struct{})
+	for _, txBytes := range txs {
+		tx, err := gledger.NewTransactionFromCbor(
+			uint(gledger.EraIdConway), txBytes,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("decode mempool transaction: %w", err)
+		}
+		for _, input := range tx.Consumed() {
+			inputs[governanceInput{
+				hash: [32]byte(input.Id()),
+				idx:  int(input.Index()),
+			}] = struct{}{}
+		}
+	}
+	return inputs, nil
 }
 
 type governanceUTxO struct {

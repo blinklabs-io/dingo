@@ -16,10 +16,7 @@ package mithril
 
 import (
 	"context"
-	"crypto/ed25519"
-	"crypto/rand"
 	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -53,130 +50,6 @@ func standardTestMetadata() CertificateMetadata {
 		InitiatedAt: "2026-02-10T00:06:46.282994610Z",
 		SealedAt:    "2026-02-10T00:07:45.906010670Z",
 	}
-}
-
-func TestListSnapshots(t *testing.T) {
-	t.Parallel()
-
-	expected := []SnapshotListItem{
-		{
-			SnapshotBase: SnapshotBase{
-				Digest:  "abc123def456",
-				Network: "preprod",
-				Beacon: Beacon{
-					Epoch:               270,
-					ImmutableFileNumber: 5320,
-				},
-				CertificateHash: "cert123",
-				Size:            3267621057,
-				AncillarySize:   666693003,
-				CreatedAt:       "2026-02-10T00:24:56.094721055Z",
-				Locations: []string{
-					"https://example.com/snapshot.tar.zst",
-				},
-				AncillaryLocations: []string{
-					"https://example.com/ancillary.tar.zst",
-				},
-				CompressionAlgorithm: "zstandard",
-				CardanoNodeVersion:   "10.5.3",
-			},
-		},
-	}
-
-	server := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
-		// Use t.Errorf (not require) because httptest handlers
-		// run in a separate goroutine; require calls t.FailNow
-		// which panics from non-test goroutines.
-		if r.URL.Path != "/artifact/snapshots" {
-			t.Errorf(
-				"expected path /artifact/snapshots, got %s",
-				r.URL.Path,
-			)
-		}
-		if r.Header.Get("Accept") != "application/json" {
-			t.Errorf(
-				"expected Accept application/json, got %s",
-				r.Header.Get("Accept"),
-			)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(expected); err != nil {
-			http.Error(
-				w, err.Error(),
-				http.StatusInternalServerError,
-			)
-		}
-	})
-
-	client := NewClient(server.URL, WithAllowInsecureHTTP())
-	snapshots, err := client.ListSnapshots(context.Background())
-	require.NoError(t, err)
-	require.Len(t, snapshots, 1)
-	require.Equal(t, expected[0].Digest, snapshots[0].Digest)
-	require.Equal(t, expected[0].Network, snapshots[0].Network)
-	require.Equal(t, expected[0].Beacon.Epoch, snapshots[0].Beacon.Epoch)
-	require.Equal(
-		t,
-		expected[0].Beacon.ImmutableFileNumber,
-		snapshots[0].Beacon.ImmutableFileNumber,
-	)
-	require.Equal(t, expected[0].Size, snapshots[0].Size)
-	require.Equal(t, expected[0].Locations, snapshots[0].Locations)
-	require.Equal(
-		t,
-		expected[0].CompressionAlgorithm,
-		snapshots[0].CompressionAlgorithm,
-	)
-}
-
-func TestGetSnapshot(t *testing.T) {
-	t.Parallel()
-
-	expected := SnapshotListItem{
-		SnapshotBase: SnapshotBase{
-			Digest:  "abc123def456",
-			Network: "preprod",
-			Beacon: Beacon{
-				Epoch:               270,
-				ImmutableFileNumber: 5320,
-			},
-			CertificateHash: "cert123",
-			Size:            3267621057,
-			CreatedAt:       "2026-02-10T00:24:56.094721055Z",
-			Locations: []string{
-				"https://example.com/snapshot.tar.zst",
-			},
-			CompressionAlgorithm: "zstandard",
-			CardanoNodeVersion:   "10.5.3",
-		},
-	}
-
-	server := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/artifact/snapshot/abc123def456" {
-			t.Errorf(
-				"expected path /artifact/snapshot/abc123def456, got %s",
-				r.URL.Path,
-			)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(expected); err != nil {
-			http.Error(
-				w, err.Error(),
-				http.StatusInternalServerError,
-			)
-		}
-	})
-
-	client := NewClient(server.URL, WithAllowInsecureHTTP())
-	snapshot, err := client.GetSnapshot(
-		context.Background(),
-		"abc123def456",
-	)
-	require.NoError(t, err)
-	require.NotNil(t, snapshot)
-	require.Equal(t, expected.Digest, snapshot.Digest)
-	require.Equal(t, expected.Network, snapshot.Network)
-	require.Equal(t, expected.Size, snapshot.Size)
 }
 
 func TestGetCertificate(t *testing.T) {
@@ -283,69 +156,6 @@ func TestGetCertificateGenesis(t *testing.T) {
 	require.NotNil(t, cert)
 	require.True(t, cert.IsGenesis())
 	require.True(t, cert.IsChainingToItself())
-}
-
-func TestGetLatestSnapshot(t *testing.T) {
-	t.Parallel()
-
-	snapshots := []SnapshotListItem{
-		{
-			SnapshotBase: SnapshotBase{
-				Digest:  "latest_digest",
-				Network: "preprod",
-				Beacon: Beacon{
-					Epoch:               270,
-					ImmutableFileNumber: 5320,
-				},
-				Size:      3267621057,
-				Locations: []string{"https://example.com/latest.tar.zst"},
-			},
-		},
-		{
-			SnapshotBase: SnapshotBase{
-				Digest:  "older_digest",
-				Network: "preprod",
-				Beacon: Beacon{
-					Epoch:               269,
-					ImmutableFileNumber: 5319,
-				},
-				Size:      3267176247,
-				Locations: []string{"https://example.com/older.tar.zst"},
-			},
-		},
-	}
-
-	server := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(snapshots); err != nil {
-			http.Error(
-				w, err.Error(),
-				http.StatusInternalServerError,
-			)
-		}
-	})
-
-	client := NewClient(server.URL, WithAllowInsecureHTTP())
-	latest, err := client.GetLatestSnapshot(context.Background())
-	require.NoError(t, err)
-	require.NotNil(t, latest)
-	require.Equal(t, "latest_digest", latest.Digest)
-}
-
-func TestGetLatestSnapshotEmpty(t *testing.T) {
-	t.Parallel()
-
-	server := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		if _, err := w.Write([]byte("[]")); err != nil {
-			t.Errorf("writing response: %v", err)
-		}
-	})
-
-	client := NewClient(server.URL, WithAllowInsecureHTTP())
-	_, err := client.GetLatestSnapshot(context.Background())
-	require.ErrorIs(t, err, ErrNoSnapshotsAvailable)
-	require.Contains(t, err.Error(), "no snapshots available")
 }
 
 func TestListMithrilStakeDistributions(t *testing.T) {
@@ -479,11 +289,11 @@ func TestClientErrorHandling(t *testing.T) {
 
 	client := NewClient(server.URL, WithAllowInsecureHTTP())
 
-	_, err := client.ListSnapshots(context.Background())
+	_, err := client.ListCardanoDatabaseSnapshots(context.Background())
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "404")
 
-	_, err = client.GetSnapshot(
+	_, err = client.GetCardanoDatabaseSnapshot(
 		context.Background(),
 		"nonexistent",
 	)
@@ -512,7 +322,7 @@ func TestClientContextCancellation(t *testing.T) {
 	cancel() // Cancel immediately
 
 	client := NewClient(server.URL, WithAllowInsecureHTTP())
-	_, err := client.ListSnapshots(ctx)
+	_, err := client.ListCardanoDatabaseSnapshots(ctx)
 	require.Error(t, err)
 }
 
@@ -1028,7 +838,7 @@ func TestClientRedactsMalformedRedirectLocation(t *testing.T) {
 		WithAllowInsecureHTTP(),
 	)
 
-	_, err := client.ListSnapshots(context.Background())
+	_, err := client.ListCardanoDatabaseSnapshots(context.Background())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unparsable location")
 	for _, secret := range []string{
@@ -1071,7 +881,7 @@ func TestClientRejectsRedirectWithUserinfo(t *testing.T) {
 		WithAllowInsecureHTTP(),
 	)
 
-	_, err := client.ListSnapshots(context.Background())
+	_, err := client.ListCardanoDatabaseSnapshots(context.Background())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "must not include userinfo")
 	assert.NotContains(t, err.Error(), "operator")
@@ -1114,7 +924,7 @@ func TestClientRejectsPlainHTTPAggregatorByDefault(t *testing.T) {
 	})
 
 	client := NewClient(server.URL)
-	_, err := client.ListSnapshots(context.Background())
+	_, err := client.ListCardanoDatabaseSnapshots(context.Background())
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "must use https")
 	require.False(
@@ -1136,7 +946,7 @@ func TestClientAllowsPlainHTTPAggregatorWithEscapeHatch(t *testing.T) {
 	})
 
 	client := NewClient(server.URL, WithAllowInsecureHTTP())
-	_, err := client.ListSnapshots(context.Background())
+	_, err := client.ListCardanoDatabaseSnapshots(context.Background())
 	require.NoError(t, err)
 }
 
@@ -1159,7 +969,7 @@ func TestClientRejectsPrivateAggregatorByDefault(t *testing.T) {
 		})}),
 	)
 
-	_, err := client.ListSnapshots(context.Background())
+	_, err := client.ListCardanoDatabaseSnapshots(context.Background())
 	require.ErrorContains(t, err, "not allowed")
 	require.False(t, called, "a rejected aggregator must not be requested")
 }
@@ -1183,7 +993,7 @@ func TestClientRejectsUnrestrictedCustomTransport(t *testing.T) {
 		})}),
 	)
 
-	_, err := client.ListSnapshots(context.Background())
+	_, err := client.ListCardanoDatabaseSnapshots(context.Background())
 	require.ErrorContains(
 		t,
 		err,
@@ -1228,7 +1038,6 @@ func TestVerifyCertChainGenesis(t *testing.T) {
 		context.Background(),
 		client,
 		cert.Hash,
-		"",
 	)
 	require.NoError(t, err)
 }
@@ -1322,7 +1131,6 @@ func TestVerifyCertChainThreeDeep(t *testing.T) {
 		context.Background(),
 		client,
 		leaf.Hash,
-		"",
 	)
 	require.NoError(t, err)
 }
@@ -1381,7 +1189,6 @@ func TestVerifyCertChainMissingCert(t *testing.T) {
 		context.Background(),
 		client,
 		leaf.Hash,
-		"",
 	)
 	require.Error(t, err)
 	require.Contains(
@@ -1426,163 +1233,9 @@ func TestVerifyCertChainEmptyPreviousHash(t *testing.T) {
 		context.Background(),
 		client,
 		cert.Hash,
-		"",
 	)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "empty previous_hash")
-}
-
-func TestVerifyCertChainDigestMismatch(t *testing.T) {
-	t.Parallel()
-
-	g1Hex := testBLSG1Hex(t)
-	g2Hex := testBLSG2Hex(t)
-	certs := map[string]Certificate{
-		"leaf": {
-			Epoch:                    1,
-			AggregateVerificationKey: g2Hex,
-			MultiSignature:           g1Hex,
-			Metadata:                 standardTestMetadata(),
-			ProtocolMessage: ProtocolMessage{
-				MessageParts: map[string]string{
-					"snapshot_digest": "wrong_digest",
-					"current_epoch":   "1",
-				},
-			},
-		},
-		"root": {
-			Epoch:                    1,
-			GenesisSignature:         "genesis_sig",
-			AggregateVerificationKey: g2Hex,
-			Metadata:                 standardTestMetadata(),
-			ProtocolMessage: ProtocolMessage{
-				MessageParts: map[string]string{"current_epoch": "1"},
-			},
-		},
-	}
-	root := certs["root"]
-	finalizeTestCertificate(t, &root)
-	root.PreviousHash = root.Hash
-	finalizeTestCertificate(t, &root)
-	certs["root"] = root
-	leaf := certs["leaf"]
-	leaf.PreviousHash = root.Hash
-	finalizeTestCertificate(t, &leaf)
-	certs["leaf"] = leaf
-
-	server := httptest.NewServer(
-		http.HandlerFunc(
-			func(w http.ResponseWriter, r *http.Request) {
-				hash := r.URL.Path[len("/certificate/"):]
-				var cert Certificate
-				ok := false
-				for _, candidate := range certs {
-					if candidate.Hash == hash {
-						cert = candidate
-						ok = true
-						break
-					}
-				}
-				if !ok {
-					http.NotFound(w, r)
-					return
-				}
-				w.Header().
-					Set("Content-Type", "application/json")
-				if err := json.NewEncoder(w).Encode(cert); err != nil {
-					http.Error(w, err.Error(), http.StatusInternalServerError)
-					return
-				}
-			},
-		),
-	)
-	t.Cleanup(server.Close)
-
-	client := NewClient(server.URL, WithAllowInsecureHTTP())
-	err := VerifyCertificateChain(
-		context.Background(),
-		client,
-		leaf.Hash,
-		"expected_digest",
-	)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "snapshot_digest mismatch")
-}
-
-func TestVerifyCertChainDigestMatch(t *testing.T) {
-	t.Parallel()
-
-	g1Hex := testBLSG1Hex(t)
-	g2Hex := testBLSG2Hex(t)
-	certs := map[string]Certificate{
-		"leaf": {
-			Epoch:                    1,
-			AggregateVerificationKey: g2Hex,
-			MultiSignature:           g1Hex,
-			Metadata:                 standardTestMetadata(),
-			ProtocolMessage: ProtocolMessage{
-				MessageParts: map[string]string{
-					"snapshot_digest": "matching_digest",
-					"current_epoch":   "1",
-				},
-			},
-		},
-		"root": {
-			Epoch:                    1,
-			GenesisSignature:         "genesis_sig",
-			AggregateVerificationKey: g2Hex,
-			Metadata:                 standardTestMetadata(),
-			ProtocolMessage: ProtocolMessage{
-				MessageParts: map[string]string{"current_epoch": "1"},
-			},
-		},
-	}
-	root := certs["root"]
-	finalizeTestCertificate(t, &root)
-	root.PreviousHash = root.Hash
-	finalizeTestCertificate(t, &root)
-	certs["root"] = root
-	leaf := certs["leaf"]
-	leaf.PreviousHash = root.Hash
-	finalizeTestCertificate(t, &leaf)
-	certs["leaf"] = leaf
-
-	server := httptest.NewServer(
-		http.HandlerFunc(
-			func(w http.ResponseWriter, r *http.Request) {
-				hash := r.URL.Path[len("/certificate/"):]
-				var cert Certificate
-				ok := false
-				for _, candidate := range certs {
-					if candidate.Hash == hash {
-						cert = candidate
-						ok = true
-						break
-					}
-				}
-				if !ok {
-					http.NotFound(w, r)
-					return
-				}
-				w.Header().
-					Set("Content-Type", "application/json")
-				if err := json.NewEncoder(w).Encode(cert); err != nil {
-					http.Error(w, err.Error(), http.StatusInternalServerError)
-					return
-				}
-			},
-		),
-	)
-	t.Cleanup(server.Close)
-
-	client := NewClient(server.URL, WithAllowInsecureHTTP())
-	err := VerifyCertificateChain(
-		context.Background(),
-		client,
-		leaf.Hash,
-		"matching_digest",
-	)
-	require.NoError(t, err)
 }
 
 // TestVerifyCertChainRejectsStaleHashCrossReferences verifies that
@@ -1655,7 +1308,6 @@ func TestVerifyCertChainRejectsStaleHashCrossReferences(t *testing.T) {
 		context.Background(),
 		client,
 		certA.Hash,
-		"",
 	)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "fetching certificate")
@@ -1668,7 +1320,6 @@ func TestVerifyCertChainNilClient(t *testing.T) {
 		context.Background(),
 		nil,
 		"some_hash",
-		"",
 	)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "client is nil")
@@ -1682,254 +1333,7 @@ func TestVerifyCertChainEmptyHash(t *testing.T) {
 		context.Background(),
 		client,
 		"",
-		"",
 	)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "empty")
-}
-
-func TestBootstrapWithCertVerification(t *testing.T) {
-	t.Parallel()
-
-	archiveData := createChunkArchive(t)
-	genesisPubKey, genesisPrivKey, err := ed25519.GenerateKey(rand.Reader)
-	require.NoError(t, err)
-	genesisKeyText := fmt.Sprintf(
-		`{"type":"GenesisVerificationKey_ed25519","description":"Mithril Genesis Verification Key","cborHex":"5820%s"}`,
-		hex.EncodeToString(genesisPubKey),
-	)
-
-	snapshots := []SnapshotListItem{
-		{
-			SnapshotBase: SnapshotBase{
-				Digest:  "f123456789abcdef0f123456789abcdef0f123456789abcdef0f123456789abc",
-				Network: "preprod",
-				Beacon: Beacon{
-					Epoch:               270,
-					ImmutableFileNumber: 5320,
-				},
-				CertificateHash:      "placeholder",
-				Size:                 int64(len(archiveData)),
-				CreatedAt:            "2026-02-10T00:24:56.094721055Z",
-				Locations:            []string{},
-				CompressionAlgorithm: "zstandard",
-			},
-		},
-	}
-
-	certs := map[string]Certificate{
-		"cert_leaf": {
-			Epoch:                    270,
-			AggregateVerificationKey: "",
-			MultiSignature:           "",
-			SignedEntityType: SignedEntityType{
-				raw: json.RawMessage(
-					`{"CardanoImmutableFilesFull":{"epoch":270,"immutable_file_number":5320}}`,
-				),
-			},
-			Metadata: CertificateMetadata{
-				Network:     "preprod",
-				Version:     "0.1.0",
-				Parameters:  ProtocolParameters{K: 1, M: 1, PhiF: 1.0},
-				InitiatedAt: "2026-02-10T00:06:46.282994610Z",
-				SealedAt:    "2026-02-10T00:07:45.906010670Z",
-				Signers:     nil,
-			},
-			ProtocolMessage: ProtocolMessage{
-				MessageParts: map[string]string{
-					"snapshot_digest": "f123456789abcdef0f123456789abcdef0f123456789abcdef0f123456789abc",
-					"current_epoch":   "270",
-				},
-			},
-		},
-		"cert_genesis": {
-			Epoch:            269,
-			GenesisSignature: "",
-			Metadata: CertificateMetadata{
-				Network:     "preprod",
-				Version:     "0.1.0",
-				Parameters:  ProtocolParameters{K: 1, M: 1, PhiF: 1.0},
-				InitiatedAt: "2026-02-09T00:06:46.282994610Z",
-				SealedAt:    "2026-02-09T00:07:45.906010670Z",
-			},
-			ProtocolMessage: ProtocolMessage{
-				MessageParts: map[string]string{
-					"current_epoch":                   "269",
-					"next_aggregate_verification_key": "",
-					"next_protocol_parameters": ProtocolParameters{
-						K:    1,
-						M:    1,
-						PhiF: 1.0,
-					}.ComputeHash(),
-				},
-			},
-		},
-	}
-	leafCert := certs["cert_leaf"]
-	leafCert.SignedMessage = leafCert.ProtocolMessage.ComputeHash()
-	leafCert.AggregateVerificationKey, leafCert.MultiSignature = testCreateEncodedSTMProof(
-		t,
-		[]byte(leafCert.SignedMessage),
-	)
-	certs["cert_leaf"] = leafCert
-
-	genesisCert := certs["cert_genesis"]
-	genesisCert.ProtocolMessage.MessageParts["next_aggregate_verification_key"] = leafCert.AggregateVerificationKey
-	genesisCert.SignedMessage = genesisCert.ProtocolMessage.ComputeHash()
-	genesisSignature := ed25519.Sign(
-		genesisPrivKey,
-		[]byte(genesisCert.SignedMessage),
-	)
-	genesisCert.GenesisSignature = hex.EncodeToString(genesisSignature)
-	hash, err := genesisCert.ComputeHash()
-	require.NoError(t, err)
-	genesisCert.Hash = hash
-	genesisCert.PreviousHash = genesisCert.Hash
-	hash, err = genesisCert.ComputeHash()
-	require.NoError(t, err)
-	genesisCert.Hash = hash
-	certs["cert_genesis"] = genesisCert
-
-	leafCert = certs["cert_leaf"]
-	leafCert.PreviousHash = genesisCert.Hash
-	hash, err = leafCert.ComputeHash()
-	require.NoError(t, err)
-	leafCert.Hash = hash
-	certs["cert_leaf"] = leafCert
-	snapshots[0].CertificateHash = leafCert.Hash
-
-	mux := http.NewServeMux()
-
-	mux.HandleFunc(
-		"/artifact/snapshots",
-		func(w http.ResponseWriter, r *http.Request) {
-			w.Header().
-				Set("Content-Type", "application/json")
-			if err := json.NewEncoder(w).Encode(snapshots); err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-		},
-	)
-
-	mux.HandleFunc(
-		"/certificate/",
-		func(w http.ResponseWriter, r *http.Request) {
-			hash := r.URL.Path[len("/certificate/"):]
-			var cert Certificate
-			ok := false
-			for _, candidate := range certs {
-				if candidate.Hash == hash {
-					cert = candidate
-					ok = true
-					break
-				}
-			}
-			if !ok {
-				http.NotFound(w, r)
-				return
-			}
-			w.Header().
-				Set("Content-Type", "application/json")
-			if err := json.NewEncoder(w).Encode(cert); err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-		},
-	)
-
-	mux.HandleFunc(
-		"/artifact/mithril-stake-distributions",
-		func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(
-				[]MithrilStakeDistributionListItem{
-					{
-						Hash:            "msd123",
-						CertificateHash: leafCert.Hash,
-						Epoch:           270,
-					},
-				},
-			)
-		},
-	)
-
-	mux.HandleFunc(
-		"/artifact/mithril-stake-distribution/msd123",
-		func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(
-				MithrilStakeDistribution{
-					Hash:            "msd123",
-					CertificateHash: leafCert.Hash,
-					Epoch:           270,
-					Signers:         nil,
-				},
-			)
-		},
-	)
-
-	mux.HandleFunc(
-		"/artifact/cardano-stake-distributions",
-		func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(
-				[]CardanoStakeDistributionListItem{
-					{
-						Hash:            "csd123",
-						CertificateHash: leafCert.Hash,
-						Epoch:           270,
-					},
-				},
-			)
-		},
-	)
-
-	mux.HandleFunc(
-		"/artifact/cardano-stake-distribution/csd123",
-		func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(
-				CardanoStakeDistribution{
-					Hash:            "csd123",
-					CertificateHash: leafCert.Hash,
-					Epoch:           270,
-					Pools:           nil,
-				},
-			)
-		},
-	)
-
-	mux.HandleFunc(
-		"/download/snapshot.tar.zst",
-		func(w http.ResponseWriter, r *http.Request) {
-			w.Header().
-				Set("Content-Type", "application/octet-stream")
-			_, _ = w.Write(archiveData)
-		},
-	)
-
-	server := httptest.NewServer(mux)
-	t.Cleanup(server.Close)
-
-	snapshots[0].Locations = []string{
-		server.URL + "/download/snapshot.tar.zst",
-	}
-
-	downloadDir := t.TempDir()
-
-	_, err = Bootstrap(
-		context.Background(),
-		BootstrapConfig{
-			Network:                "preprod",
-			Backend:                BackendV1,
-			AggregatorURL:          server.URL,
-			AllowInsecureHTTP:      true,
-			DownloadDir:            downloadDir,
-			GenesisVerificationKey: genesisKeyText,
-			VerifyCertificateChain: true,
-		},
-	)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "signed ancillary state")
 }

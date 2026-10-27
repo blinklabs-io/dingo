@@ -48,6 +48,7 @@ type TestHarness struct {
 	t                *testing.T
 	endpoints        []NodeEndpoint
 	networkMagic     uint32
+	observers        *ChainObservers
 	tipConnectionsMu sync.Mutex
 	tipConnections   map[string]*chainTipConnection
 }
@@ -106,6 +107,7 @@ func (h *TestHarness) startFailureCapture() {
 	observers := StartObservers(
 		obsCtx, h.endpoints, h.networkMagic, h.t.Logf,
 	)
+	h.observers = observers
 	h.t.Cleanup(func() {
 		// Stop before reading, so no observer goroutine is still
 		// logging once this cleanup returns.
@@ -281,13 +283,27 @@ func chainTipFromConnection(
 	}, nil
 }
 
-// GetChainTip retrieves the specified node's current tip via ChainSync. Dingo
-// queries reuse one connection per endpoint so polling cannot look like an
-// inbound reconnect flood. Reference nodes use a fresh connection because
-// their tip view is bound to the ChainSync connection.
+// GetChainTip uses persistent observers when failure capture started. Otherwise,
+// Dingo queries reuse one connection per endpoint and reference nodes use a
+// fresh connection because their tip view is bound to the ChainSync connection.
 func (h *TestHarness) GetChainTip(
 	endpoint NodeEndpoint,
 ) (ChainTip, error) {
+	if h.observers != nil {
+		chain := h.observers.Chain(endpoint.Name)
+		if chain == nil {
+			return ChainTip{}, fmt.Errorf(
+				"no observer configured for %s", endpoint.Name,
+			)
+		}
+		snapshot := chain.Snapshot()
+		if !snapshot.Connected {
+			return ChainTip{}, fmt.Errorf(
+				"observer for %s is not connected", endpoint.Name,
+			)
+		}
+		return snapshot.ServerTip, nil
+	}
 	if !endpoint.IsDingo {
 		conn, err := h.dialTipConnection(endpoint)
 		if err != nil {

@@ -17,7 +17,6 @@ package ouroboros
 import (
 	"testing"
 
-	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	oleiosfetch "github.com/blinklabs-io/gouroboros/protocol/leiosfetch"
@@ -214,10 +213,12 @@ func TestLeiosForgedEBLogCommitsOnlyAfterDelivery(t *testing.T) {
 	entry, _ := log.next(connKey)
 	require.NotNil(t, entry)
 	require.Equal(t, first, *entry.point)
-	// Merely selecting a response must not advance the cursor.
+	// Merely selecting a response must not advance the cursor, and a request
+	// arriving before that send is reported must not offer it again.
+	require.Equal(t, 0, log.cursors[connKey])
 	entry, _ = log.next(connKey)
-	require.NotNil(t, entry)
-	require.Equal(t, first, *entry.point)
+	require.Nil(t, entry)
+	require.Equal(t, 0, log.cursors[connKey])
 
 	log.complete(connKey, nil, true)
 	entry, _ = log.next(connKey)
@@ -345,8 +346,8 @@ func TestLeiosForgedEBLogReconnectClearsConsecutiveRetries(t *testing.T) {
 // TestServeForgedEndorserBlockTxs verifies that a locally-forged endorser
 // block's transaction bodies are stored alongside its manifest so the
 // leios-fetch server can serve them, in manifest order, honoring the requested
-// bitmap. Each served transaction is the on-the-wire byte-string wrap of the
-// forged body, so it decodes back to the original body on the requesting side.
+// bitmap. Each served transaction is the forged block_transaction itself; the
+// protocol layer adds the tag-24 wrapping on the wire.
 func TestServeForgedEndorserBlockTxs(t *testing.T) {
 	t.Parallel()
 
@@ -389,19 +390,11 @@ func TestServeForgedEndorserBlockTxs(t *testing.T) {
 	require.True(t, ok)
 	require.Len(t, msg.TxsRaw, len(bodies))
 	for i, raw := range msg.TxsRaw {
-		var inner []byte
-		_, derr := cbor.Decode(raw, &inner)
-		require.NoErrorf(
-			t,
-			derr,
-			"served tx %d should be a CBOR byte string",
-			i,
-		)
 		require.Equalf(
 			t,
 			bodies[i],
-			inner,
-			"served tx %d should round-trip to the forged body",
+			[]byte(raw),
+			"served tx %d should be the forged body",
 			i,
 		)
 	}
@@ -416,8 +409,5 @@ func TestServeForgedEndorserBlockTxs(t *testing.T) {
 	msg2, ok := resp2.(*oleiosfetch.MsgBlockTxs)
 	require.True(t, ok)
 	require.Len(t, msg2.TxsRaw, 1)
-	var inner1 []byte
-	_, err = cbor.Decode(msg2.TxsRaw[0], &inner1)
-	require.NoError(t, err)
-	require.Equal(t, bodies[1], inner1)
+	require.Equal(t, bodies[1], []byte(msg2.TxsRaw[0]))
 }

@@ -23,6 +23,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/internal/safedecode"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -96,11 +97,20 @@ func newLeiosCertApplyFixtureWithTransactions(
 		stakeKey:    pathStakeKey(stakeKey),
 		ebAvailable: true,
 	}
-	f.ebTx = path.txs[0]
 	f.ebTxs = make([]cbor.RawMessage, 0, len(path.txs))
 	for _, tx := range path.txs {
-		f.ebTxs = append(f.ebTxs, bytes.Clone(tx.Cbor()))
+		// Endorser transactions travel as block_transactions: the fixture's
+		// [body, witnesses, auxiliary_data] gains the trailing is_valid flag.
+		var parts []cbor.RawMessage
+		_, err := cbor.Decode(tx.Cbor(), &parts)
+		require.NoError(t, err)
+		raw, err := cbor.Encode(append(parts, cbor.RawMessage{0xf5}))
+		require.NoError(t, err)
+		f.ebTxs = append(f.ebTxs, raw)
 	}
+	var err error
+	f.ebTx, err = safedecode.DijkstraBlockTransaction(f.ebTxs[0])
+	require.NoError(t, err)
 	f.ebHash = lcommon.NewBlake2b256(leiosTestHash(0xEB))
 	f.ls.config.EndorserBlockProvider = func(
 		hash []byte,
@@ -302,7 +312,7 @@ func (f *leiosCertApplyFixture) removeEndorserWitnesses() {
 	envelope[1] = emptyWitnesses
 	raw, err := cbor.Encode(envelope)
 	require.NoError(f.t, err)
-	tx, err := gledger.NewTransactionFromCbor(gledger.TxTypeDijkstra, raw)
+	tx, err := safedecode.DijkstraBlockTransaction(raw)
 	require.NoError(f.t, err)
 	f.ebTx = tx
 	f.ebTxs = []cbor.RawMessage{raw}
@@ -340,7 +350,7 @@ func (f *leiosCertApplyFixture) corruptEndorserWitness() {
 	require.NoError(f.t, err)
 	raw, err := cbor.Encode(envelope)
 	require.NoError(f.t, err)
-	tx, err := gledger.NewTransactionFromCbor(gledger.TxTypeDijkstra, raw)
+	tx, err := safedecode.DijkstraBlockTransaction(raw)
 	require.NoError(f.t, err)
 	f.ebTx = tx
 	f.ebTxs = []cbor.RawMessage{raw}
@@ -538,6 +548,7 @@ func TestLeiosAnnouncementValidationMarksInvalidWitnessDeterministic(
 	err := f.ls.ValidateLeiosEndorserBlockTransactions(
 		t.Context(),
 		announcer.Header(),
+		LeiosValidationParentHash(announcer.Header()),
 		[][]byte{f.ebTx.Cbor()},
 	)
 	require.ErrorIs(t, err, ErrInvalidLeiosEndorserBlockTransactions)
@@ -571,6 +582,7 @@ func TestLeiosAnnouncementValidationKeepsProtocolParamFaultRetryable(
 			err := f.ls.ValidateLeiosEndorserBlockTransactions(
 				t.Context(),
 				announcer.Header(),
+				LeiosValidationParentHash(announcer.Header()),
 				[][]byte{f.ebTx.Cbor()},
 			)
 			require.ErrorIs(t, err, eras.ErrIncompatibleProtocolParams)
@@ -609,6 +621,7 @@ func TestLeiosAnnouncementValidationPropagatesCancellation(t *testing.T) {
 	err := f.ls.ValidateLeiosEndorserBlockTransactions(
 		ctx,
 		announcer.Header(),
+		LeiosValidationParentHash(announcer.Header()),
 		[][]byte{f.ebTx.Cbor()},
 	)
 	require.ErrorIs(t, err, context.Canceled)

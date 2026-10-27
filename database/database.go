@@ -134,6 +134,17 @@ type Database struct {
 	// the sync.RWMutex it replaces, so no constructor change is needed.
 	commitBarrier cancellableBarrier
 
+	// commitPhase covers only the commit step of a Txn that holds the shared
+	// side of commitBarrier: the commit timestamp update and both store
+	// commits. NewReadSnapshotContext takes its exclusive side instead of
+	// commitBarrier's, because a consistent pair of read views needs only that
+	// no commit lands between opening them. Uncommitted writes are invisible to
+	// both views, so waiting for every open read-write Txn to finish -- a
+	// block-apply chunk, an epoch-boundary job -- delayed snapshot opens by
+	// that transaction's whole duration without making them any more
+	// consistent.
+	commitPhase cancellableBarrier
+
 	// readSnapshotAdmission bounds coordinated snapshots for their full
 	// lifetime. Without this gate, snapshots can hold every read connection
 	// either while queued on the barrier or while streaming a client-paced
@@ -152,6 +163,11 @@ type Database struct {
 	// barrier, preserving their existing concurrency and avoiding nested-write
 	// deadlocks.
 	destructiveTransitionBarrier cancellableBarrier
+
+	// utxoAsOfReads are the paged as-of UTxO reads in progress, which a
+	// UTxO rollback below their slot marks disturbed (see noteUtxoRollback).
+	utxoAsOfReadsMu sync.Mutex
+	utxoAsOfReads   map[*utxoAsOfRead]struct{}
 }
 
 func (d *Database) acquireReadSnapshotAdmission(
@@ -194,11 +210,12 @@ func (d *Database) releaseReadSnapshotAdmission() {
 // backup calls: each backup is independently consistent as of whenever it
 // runs, but a commit landing between the two would write its timestamp to
 // one store's backup and not the other's, so the restored copy fails
-// checkCommitTimestamp's cross-check. NewReadSnapshotContext similarly
-// brackets opening its two read views. The destructive-transition shared hold
-// also prevents either snapshot type from opening in the gap between a
-// blob-only primary-chain truncation and its later ledger metadata rollback.
-// Together the two barriers keep both stores at one logical boundary.
+// checkCommitTimestamp's cross-check. NewReadSnapshotContext brackets opening
+// its two read views with the narrower pauseCommitPhaseContext. The
+// destructive-transition shared hold also prevents either snapshot type from
+// opening in the gap between a blob-only primary-chain truncation and its
+// later ledger metadata rollback. Together the two barriers keep both stores
+// at one logical boundary.
 func (d *Database) PauseCommits() (resume func()) {
 	d.destructiveTransitionBarrier.RLock()
 	token := d.commitBarrier.Lock()
@@ -235,6 +252,37 @@ func (d *Database) PauseCommitsContext(
 	}
 	return func() {
 		d.commitBarrier.Unlock(token)
+		d.destructiveTransitionBarrier.RUnlock()
+	}, nil
+}
+
+// holdCommitPhase takes the commit phase's shared side for one Txn.Commit.
+// The wait is bounded by a snapshot opening its two views, and a commit that
+// has begun is not abandoned, so it takes no context.
+//
+//nolint:contextcheck // Txn.Commit has no context, and must not be cancelled midway.
+func (d *Database) holdCommitPhase() {
+	d.commitPhase.RLock()
+}
+
+// pauseCommitPhaseContext waits for any multi-transaction destructive
+// transition and any commit in progress, then blocks new commits (not new
+// read-write Txns) until the returned resume func is called. Read snapshots
+// use it; database/lifecycle.Snapshot needs PauseCommits, whose backups
+// contend for the write connection an open read-write Txn holds.
+func (d *Database) pauseCommitPhaseContext(
+	ctx context.Context,
+) (resume func(), err error) {
+	if err := d.destructiveTransitionBarrier.RLockContext(ctx); err != nil {
+		return nil, err
+	}
+	token, err := d.commitPhase.LockContext(ctx)
+	if err != nil {
+		d.destructiveTransitionBarrier.RUnlock()
+		return nil, err
+	}
+	return func() {
+		d.commitPhase.Unlock(token)
 		d.destructiveTransitionBarrier.RUnlock()
 	}, nil
 }
@@ -466,8 +514,8 @@ func (d *Database) init(ctx context.Context) error {
 			return fmt.Errorf("rebuild typed address transaction history: %w", err)
 		}
 	}
-	if err := d.backfillLiveAssetUtxoAddresses(ctx); err != nil {
-		return fmt.Errorf("backfill live asset UTxO addresses: %w", err)
+	if err := d.backfillUtxoAddresses(ctx); err != nil {
+		return fmt.Errorf("backfill UTxO addresses: %w", err)
 	}
 	return nil
 }

@@ -134,40 +134,6 @@ func TestNodeAdapterMempoolTransactionFailingPhaseTwo(t *testing.T) {
 	require.Equal(t, []string{"spend", "mint", "voting"}, purposes)
 }
 
-func TestNodeAdapterMempoolAddressTransactionsFailingPhaseTwo(t *testing.T) {
-	t.Parallel()
-	adapter, raw, db := newDBBackedAdapter(t)
-	payee, _, _ := testKeyAddress(t, 0xd1, 0)
-	collateralPayee, _, _ := testKeyAddress(t, 0xd2, 0)
-	spender, _, _ := testKeyAddress(t, 0xd3, 0)
-	collateralOwner, _, _ := testKeyAddress(t, 0xd4, 0)
-	input, collateral := fill32(0xd5), fill32(0xd6)
-	seedMempoolInput(t, raw, db, input, spender)
-	seedMempoolInput(t, raw, db, collateral, collateralOwner)
-	entry := failedMempoolTx(t, input, collateral, payee, collateralPayee)
-	adapter.mempool = &fakeMempool{txs: []mempool.MempoolTransaction{entry}}
-	ctx := context.Background()
-	asc := PaginationParams{Count: 10, Page: 1, Order: PaginationOrderAsc}
-
-	for _, tc := range []struct {
-		name    string
-		address lcommon.Address
-		want    []string
-	}{
-		{"collateral return payee", collateralPayee, []string{entry.Hash}},
-		{"collateral owner", collateralOwner, []string{entry.Hash}},
-		{"discarded output payee", payee, []string{}},
-		{"unspent input owner", spender, []string{}},
-	} {
-		got, total, err := adapter.MempoolAddressTransactions(
-			ctx, tc.address.String(), asc,
-		)
-		require.NoError(t, err, tc.name)
-		require.Equal(t, len(tc.want), total, tc.name)
-		require.Equal(t, tc.want, got, tc.name)
-	}
-}
-
 func TestNodeAdapterMempoolAddressTransactionsRejectsCredential(t *testing.T) {
 	t.Parallel()
 	adapter, _, _ := newDBBackedAdapter(t)

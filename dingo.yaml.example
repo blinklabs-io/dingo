@@ -1,6 +1,9 @@
 # Example config file for dingo
 # No settings are required. Uncomment a setting only to override its in-code
 # default.
+# DINGO_HTTP_USER_AGENT overrides the default user-agent sent on outbound HTTP
+# requests; a value that is not a valid header is ignored. Off-chain metadata
+# and token registry userAgent settings take precedence over this shared value.
 #
 # Keep a local copy that holds credentials (token registry headers, API keys)
 # outside the repository, or name it dingo.yaml, which git ignores. Key files
@@ -35,12 +38,23 @@
 
 # Compiled-in plugin selection and provider configuration.
 # plugins:
+  # consensus:
+    # Praos is the default when this section is omitted. Tachys is available
+    # for networks that start in Babbage or Conway with activeSlotsCoeff 1/1;
+    # Genesis/Mithril bootstrap, Leios, and Dijkstra are rejected.
+    # CLI: --consensus
+    # Env: DINGO_PLUGINS_CONSENSUS_PROVIDER
+    # provider: "praos" # or "tachys"
+    # config: {}
   # storage:
     # blob:
       # provider: "badger"
       # config:
         # Optional Badger data directory. When unset, databasePath applies.
         # dataDir: ".dingo"
+        # Optional memtable size override in bytes. Core sync defaults to
+        # 1073741824 (1 GiB); other modes default to 134217728 (128 MiB).
+        # memTableSize: 1073741824
     # metadata:
       # provider: "sqlite"
       # config:
@@ -80,9 +94,10 @@
       # the CBOR of the decoded outputs the pool keeps for it. Left commented
       # out so the run-mode default
       # applies: 1048576 (1 MiB) for standard modes, 26214400 (25 MiB) for the
-      # leios run mode. An explicit value here overrides both defaults, so a
-      # leios node would silently run with the smaller capacity — uncomment
-      # only to pin a specific size for every run mode.
+      # leios run mode and for the Musashi network (by name or magic). An
+      # explicit value here overrides both defaults, so a leios or Musashi
+      # node would silently run with the smaller capacity — uncomment only to
+      # pin a specific size for every run mode.
       # capacity: 1048576
       # FIFO begins oldest-first eviction here. DAG never evicts and applies
       # TxSubmission backpressure as it approaches rejectionWatermark.
@@ -361,6 +376,22 @@
 # CLI: --bark-archive-max-concurrent-fetches
 # barkArchiveMaxConcurrentFetches: 0
 
+# Sustained ArchiveService block lookups per second across all callers. A
+# reference that names no block still costs a storage lookup, so a FetchBlock
+# whose references do not fit the remaining budget is refused whole with
+# RESOURCE_EXHAUSTED. 0 selects the default of 200.
+# Can be overridden with DINGO_BARK_ARCHIVE_LOOKUPS_PER_SECOND
+# CLI: --bark-archive-lookups-per-second
+# barkArchiveLookupsPerSecond: 0
+
+# Sustained ArchiveService block lookups per second for one caller, keyed by
+# IPv4 address or IPv6 /64. Callers behind one proxy share an allowance, and
+# a Dingo node reading expired history through barkBaseUrl is one caller. 0
+# selects the default of 50.
+# Can be overridden with DINGO_BARK_ARCHIVE_CALLER_LOOKUPS_PER_SECOND
+# CLI: --bark-archive-caller-lookups-per-second
+# barkArchiveCallerLookupsPerSecond: 0
+
 # SHA-256 fingerprints of client certificate DER bytes authorized to invoke
 # destructive DatabaseService RPCs (CreateSnapshot, DeleteSnapshot,
 # VerifySnapshot, Restore, Truncate, CancelOperation). Hex is matched
@@ -520,8 +551,18 @@
   # CLI: --koios-parity-cache-path
   # cachePath: ""
   # Can be overridden with DINGO_KOIOS_PARITY_API_KEY
-  # CLI: --koios-parity-api-key
+  # Literal API keys cannot be supplied by CLI because process arguments are
+  # visible to other local accounts. Use the file option for CLI configuration.
   # apiKey: ""
+  # File holding the API key, read at startup with trailing line endings
+  # removed. Must be a regular file that other users cannot access. On Unix,
+  # the file and its non-sticky path entries must be owned by this user or root;
+  # owner and group file access is allowed. On Windows only the owner,
+  # Administrators and SYSTEM may have access. At most 64 KiB and not blank. Set
+  # apiKey or apiKeyFile, not both.
+  # Can be overridden with DINGO_KOIOS_PARITY_API_KEY_FILE
+  # CLI: --koios-parity-api-key-file
+  # apiKeyFile: ""
   # Koios v1 API root override, for a self-hosted or mirrored instance.
   # Empty selects the public host for the network above. A custom host is not
   # subject to the public tier's burst cap, since that ceiling describes
@@ -682,6 +723,10 @@
 # registration. A pool without a usable on-chain key is keyless and cannot emit
 # a vote or contribute verified stake to a certificate. Static voter-key
 # overrides are intentionally unsupported in reference-compatible mode.
+# A rotated key becomes usable only when the stake snapshot containing the new
+# pool registration becomes the committee snapshot. Keep the old signing key
+# configured until that boundary, then replace this file and restart dingo;
+# signing-key files are loaded only during block-producer startup.
 #
 # Can be overridden with DINGO_LEIOS_VOTE_SIGNING_KEY_FILE.
 # leiosVoteSigningKeyFile: "/keys/leios-vote.skey"
@@ -739,7 +784,7 @@
 # blockPipelineValidateEnabled: false
 
 # Prefetch the next block's input UTxOs on a separate goroutine from a
-# read-only transaction while the current block applies (default: false).
+# read-only transaction while the current block applies (default: true).
 # Not consensus-affecting. Inputs spent by earlier blocks of the same
 # block-apply chunk are never served from the prefetch, and any input it
 # misses is read as without the flag.
@@ -747,7 +792,17 @@
 # Can be overridden with the DINGO_LEDGER_PREFETCH_AHEAD_ENABLED
 # environment variable
 # CLI: --ledger-prefetch-ahead-enabled
-# ledgerPrefetchAheadEnabled: false
+# ledgerPrefetchAheadEnabled: true
+
+# Verify the witness signatures of every validated block of a block-apply
+# chunk on worker goroutines while earlier blocks of the chunk validate and
+# write (default: true). Not consensus-affecting: each result is bound to
+# its transaction, and every other rule still runs in order.
+#
+# Can be overridden with the DINGO_LEDGER_VALIDATE_AHEAD_ENABLED
+# environment variable
+# CLI: --ledger-validate-ahead-enabled
+# ledgerValidateAheadEnabled: true
 
 # In core storage mode, write the accumulated deltas of blocks that are not
 # validated with multi-row batched inserts instead of one statement group per
@@ -863,7 +918,9 @@
 
 # Genesis bootstrap configuration
 # Used only for from-origin sync. Default behavior keeps this enabled and
-# exits Genesis mode automatically near the best known peer tip.
+# exits Genesis mode automatically near the best known peer tip. A Cardano node
+# configuration with ConsensusMode set to PraosMode (for example Musashi) turns
+# Genesis mode off whatever this section says, as for the reference node.
 # genesisBootstrap:
   # Enable/disable Genesis bootstrap mode (default: true).
   # enabled: true
@@ -893,11 +950,18 @@
 
 # DMQ (CIP-0137 Decentralized Message Queue) runs alongside the Cardano stack
 # in the same process, on its own Unix socket and network magic. It serves
-# local message submission and notification only.
+# local message submission and notification. The peer settings (n2nPort,
+# listenAddress, listenIpv6Address, topologyFile, minPeers, maxPeers) are
+# validated but not yet used: no peer listener or dialer exists yet.
 # CLI: --dmq-enabled, --dmq-topic, --dmq-network-magic, --dmq-socket-path,
-#   --dmq-message-ttl, --dmq-max-mempool-size
+#   --dmq-message-ttl, --dmq-max-mempool-size, --dmq-n2n-port,
+#   --dmq-listen-address, --dmq-listen-ipv6-address, --dmq-topology-file,
+#   --dmq-min-peers, --dmq-max-peers
 # Env: DINGO_DMQ_ENABLED, DINGO_DMQ_TOPIC, DINGO_DMQ_NETWORK_MAGIC,
-#   DINGO_DMQ_SOCKET_PATH, DINGO_DMQ_MESSAGE_TTL, DINGO_DMQ_MAX_MEMPOOL_SIZE
+#   DINGO_DMQ_SOCKET_PATH, DINGO_DMQ_MESSAGE_TTL, DINGO_DMQ_MAX_MEMPOOL_SIZE,
+#   DINGO_DMQ_N2N_PORT, DINGO_DMQ_LISTEN_ADDRESS,
+#   DINGO_DMQ_LISTEN_IPV6_ADDRESS, DINGO_DMQ_TOPOLOGY_FILE,
+#   DINGO_DMQ_MIN_PEERS, DINGO_DMQ_MAX_PEERS
 # dmq:
   # Start the DMQ stack. Default: false.
   # enabled: false
@@ -913,6 +977,20 @@
   # messageTtl: 1800
   # Message pool size limit in megabytes. Default: 128.
   # maxMempoolSize: 128
+  # TCP port DMQ peers connect to, separate from the Cardano relay port.
+  # 0 serves local clients only. Default: 0.
+  # n2nPort: 4001
+  # Peer listener addresses. Empty disables that address family.
+  # Defaults: "0.0.0.0" and "::".
+  # listenAddress: "0.0.0.0"
+  # listenIpv6Address: "::"
+  # dmq-node topology file naming the DMQ peers to dial. Separate from the
+  # Cardano topology. It must exist when set. Default: unset.
+  # topologyFile: "/etc/dingo/dmq-topology.json"
+  # DMQ peers to keep connected, and the most to hold. minPeers must not
+  # exceed maxPeers; 0 and 0 allows no peers. Defaults: 3 and 10.
+  # minPeers: 3
+  # maxPeers: 10
 
 # Midnight indexer configuration
 # Indexing requires BOTH enabled: true AND API storage mode; either alone is
@@ -1009,8 +1087,34 @@
 # Use 'dingo mithril sync' or 'dingo sync --mithril' to bootstrap from a snapshot
 # CLI: --mithril-enabled, --mithril-verify-certs
 # mithril:
-  # Enable Mithril integration (default: true)
-  # enabled: true
+  # Make `dingo serve` sync from Mithril while it is behind the aggregator's
+  # certified immutable tip, falling back to Ouroboros on any failure.
+  # Requires core storage mode. With historyExpiry.enabled false the node
+  # replays certified blocks; with it true it restores a snapshot and
+  # backfills. `dingo mithril sync` works regardless of this setting.
+  # Default: false
+  # enabled: false
+  # Immutable chunks held on disk at once during node-managed sync (default: 64).
+  # They wait undecoded; decoded blocks in memory are bounded by batchChunks.
+  # CLI: --mithril-window-chunks  Env: DINGO_MITHRIL_WINDOW_CHUNKS
+  # windowChunks: 64
+  # Chunks applied per ledger batch; at least 1 and at most windowChunks
+  # (default: 8)
+  # CLI: --mithril-batch-chunks  Env: DINGO_MITHRIL_BATCH_CHUNKS
+  # batchChunks: 8
+  # Concurrent chunk downloads (default: 16)
+  # CLI: --mithril-download-workers  Env: DINGO_MITHRIL_DOWNLOAD_WORKERS
+  # downloadWorkers: 16
+  # Smallest certified gap, in chunks, that starts a node-managed sync
+  # (default: 4)
+  # CLI: --mithril-min-gap-chunks  Env: DINGO_MITHRIL_MIN_GAP_CHUNKS
+  # minGapChunks: 4
+  # How often a live node re-checks the aggregator (default: 10m)
+  # CLI: --mithril-check-interval  Env: DINGO_MITHRIL_CHECK_INTERVAL
+  # checkInterval: 10m
+  # Wait after a Mithril failure before retrying (default: 30m)
+  # CLI: --mithril-retry-backoff  Env: DINGO_MITHRIL_RETRY_BACKOFF
+  # retryBackoff: 30m
   # Override aggregator URL (auto-detected from network if empty)
   # Supported networks: mainnet, preprod, preview
   # aggregatorUrl: ""
@@ -1021,12 +1125,11 @@
   # allowInsecureHttp: false
   # Mithril artifact backend: "v2" (default) restores from incremental
   # per-immutable-file archives verified against the certified merkle
-  # root; "v1" uses the legacy full snapshot tarballs (being phased
-  # out upstream)
+  # root. "v1" is no longer supported and is rejected.
   # CLI: --mithril-backend
   # backend: "v2"
-  # Optional exact artifact identity for a fresh bootstrap: a v1 snapshot
-  # digest or v2 Cardano database artifact hash. It is rejected for catch-up
+  # Optional exact artifact identity for a fresh bootstrap: a Cardano
+  # database artifact hash. It is rejected for catch-up
   # runs and cannot override an interrupted import's durable pin.
   # CLI: --mithril-pinned-digest  Env: DINGO_MITHRIL_PINNED_DIGEST
   # pinnedDigest: ""

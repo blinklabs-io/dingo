@@ -15,8 +15,10 @@
 package leader
 
 import (
+	"fmt"
 	"testing"
 
+	nodeconsensus "github.com/blinklabs-io/dingo/consensus"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -68,6 +70,10 @@ func TestSyncStateScheduleStoreRoundTrip(t *testing.T) {
 	schedule := NewSchedule(42, poolId, 1000, 10000, electionTestNonce)
 	schedule.AddLeaderSlot(420)
 	schedule.AddLeaderSlot(424)
+	schedule.EpochStartSlot = 420
+	schedule.EpochSlotCount = 10
+	schedule.EraID = 6
+	schedule.DistributionCommitment = []byte("full-distribution")
 
 	err := store.SaveSchedule(schedule)
 	require.NoError(t, err)
@@ -76,11 +82,16 @@ func TestSyncStateScheduleStoreRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, loaded)
 	assert.Equal(t, ScheduleFormatVersion, loaded.FormatVersion)
+	assert.Equal(t, nodeconsensus.PraosIdentity, loaded.ConsensusIdentity)
 	assert.Equal(t, schedule.Epoch, loaded.Epoch)
 	assert.Equal(t, schedule.PoolId, loaded.PoolId)
 	assert.Equal(t, schedule.PoolStake, loaded.PoolStake)
 	assert.Equal(t, schedule.TotalStake, loaded.TotalStake)
 	assert.Equal(t, schedule.EpochNonce, loaded.EpochNonce)
+	assert.Equal(t, schedule.EpochStartSlot, loaded.EpochStartSlot)
+	assert.Equal(t, schedule.EpochSlotCount, loaded.EpochSlotCount)
+	assert.Equal(t, schedule.EraID, loaded.EraID)
+	assert.Equal(t, schedule.DistributionCommitment, loaded.DistributionCommitment)
 	assert.Equal(
 		t,
 		schedule.LeaderSlotsSnapshot(),
@@ -112,6 +123,33 @@ func TestSyncStateScheduleStoreLoadsZeroFormatVersionFromOldRecord(
 	require.NotNil(t, loaded)
 	assert.Equal(t, 0, loaded.FormatVersion,
 		"missing format_version must decode to 0 so validation rejects it")
+	assert.Empty(t, loaded.ConsensusIdentity,
+		"an identity the record never carried must not default to Praos")
+}
+
+func TestSyncStateScheduleStoreKeepsMissingIdentityOnCurrentFormat(
+	t *testing.T,
+) {
+	poolId := lcommon.PoolKeyHash{}
+	copy(poolId[:], []byte("testpool1234567890123"))
+
+	backingStore := newMockSyncStateStore()
+	backingStore.values[syncStateScheduleKey(42, poolId)] =
+		fmt.Sprintf(
+			`{"format_version":%d,"epoch":42,"pool_id":"%s",`+
+				`"pool_stake":1,"total_stake":1,"epoch_nonce":"",`+
+				`"leader_slots":[1]}`,
+			ScheduleFormatVersion,
+			hexEncode(poolId[:]),
+		)
+
+	loaded, err := NewSyncStateScheduleStore(backingStore).
+		LoadSchedule(42, poolId)
+	require.NoError(t, err)
+	require.NotNil(t, loaded)
+	assert.Equal(t, ScheduleFormatVersion, loaded.FormatVersion)
+	assert.Empty(t, loaded.ConsensusIdentity,
+		"the election must see no identity so it recomputes the schedule")
 }
 
 // TestSyncStateScheduleStoreSortsUnsortedRecord verifies that a persisted

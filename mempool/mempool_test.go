@@ -4840,3 +4840,33 @@ func TestMutationWindowClonesOnlyTheBoundedWindow(t *testing.T) {
 	window[0].seq = 9999
 	assert.Equal(t, uint64(1), journal[0].seq)
 }
+
+// A caller cancelled while queued behind the mutation gate must not validate or
+// admit its transaction once the gate frees.
+func TestAddTransactionCancelledWhileQueuedSkipsValidation(t *testing.T) {
+	t.Parallel()
+	validator := &countingValidator{}
+	m := newTestMempoolWithValidator(t, validator)
+	defer m.Stop(context.Background())
+
+	m.mutationMutex.Lock()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- m.AddTransaction(
+			ctx, uint(conway.EraIdConway), getTestTxBytes(t),
+		)
+	}()
+	// The call cannot finish while the gate is held, so the cancellation is
+	// in place before the gate is acquired.
+	cancel()
+	m.mutationMutex.Unlock()
+
+	err := dingotestutil.RequireReceive(
+		t, done, 5*time.Second, "AddTransaction return",
+	)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Zero(t, validator.calls.Load(),
+		"a cancelled caller must not reach validation")
+	require.Empty(t, m.Transactions())
+}

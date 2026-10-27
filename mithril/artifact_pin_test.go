@@ -29,7 +29,7 @@ import (
 )
 
 // fixtureLedgerStateSlot is the tip slot of the ledger state a
-// validImmutable+fallbackLedgerState fixture carries, and therefore the slot
+// validImmutable+validLedgerState fixture carries, and therefore the slot
 // half of the ledger-state import key.
 const fixtureLedgerStateSlot uint64 = 1000
 
@@ -184,9 +184,8 @@ func syncConfigForFixture(
 // assertions below fail in that case.
 func TestSyncResumesPinnedArtifactAfterAggregatorAdvance(t *testing.T) {
 	fixture := newV2Fixture(t, v2FixtureOptions{
-		missingAncillary:    true,
-		validImmutable:      true,
-		fallbackLedgerState: true,
+		validImmutable:   true,
+		validLedgerState: true,
 	})
 	pinned := fixture.artifact
 	newer := fixture.publishNewerArtifact(t)
@@ -232,9 +231,8 @@ func TestSyncResumesPinnedArtifactAfterAggregatorAdvance(t *testing.T) {
 // no in-progress marker takes the newest published artifact.
 func TestSyncFreshBootstrapSelectsLatestArtifact(t *testing.T) {
 	fixture := newV2Fixture(t, v2FixtureOptions{
-		missingAncillary:    true,
-		validImmutable:      true,
-		fallbackLedgerState: true,
+		validImmutable:   true,
+		validLedgerState: true,
 	})
 	newer := fixture.publishNewerArtifact(t)
 
@@ -258,9 +256,8 @@ func TestSyncFreshBootstrapSelectsExplicitArtifact(t *testing.T) {
 	t.Parallel()
 
 	fixture := newV2Fixture(t, v2FixtureOptions{
-		missingAncillary:    true,
-		validImmutable:      true,
-		fallbackLedgerState: true,
+		validImmutable:   true,
+		validLedgerState: true,
 	})
 	pinned := fixture.artifact
 	fixture.publishNewerArtifact(t)
@@ -287,30 +284,6 @@ func TestSyncRejectsExplicitPinForAlreadyCurrentDatabase(t *testing.T) {
 	_, err := Sync(context.Background(), cfg)
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "complete database")
-}
-
-func TestSyncRejectsExplicitPinForCompleteV1Database(t *testing.T) {
-	t.Parallel()
-
-	dataDir := t.TempDir()
-	seedCompleteDB(t, dataDir, "core", 5, true)
-
-	cfg := SyncConfig{
-		Network:           "preview",
-		DataDir:           dataDir,
-		StorageMode:       "core",
-		Backend:           BackendV1,
-		AggregatorURL:     "http://127.0.0.1:1",
-		AllowInsecureHTTP: true,
-		PinnedDigest:      "snapshot-digest",
-		StoragePlugins:    testStoragePlugins(),
-		DatabaseWorkers:   1,
-		Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
-	}
-	_, err := Sync(context.Background(), cfg)
-	require.Error(t, err)
-	assert.ErrorContains(t, err, "complete database")
-	assert.NotContains(t, err.Error(), "catch-up runs")
 }
 
 func TestSyncRejectsExplicitPinForInterruptedCatchUp(t *testing.T) {
@@ -352,9 +325,8 @@ func TestSyncRejectsExplicitPinForInterruptedCatchUp(t *testing.T) {
 // cannot be identified, so no artifact may be imported over them.
 func TestSyncRefusesResumeWithoutArtifactPin(t *testing.T) {
 	fixture := newV2Fixture(t, v2FixtureOptions{
-		missingAncillary:    true,
-		validImmutable:      true,
-		fallbackLedgerState: true,
+		validImmutable:   true,
+		validLedgerState: true,
 	})
 	dataDir := t.TempDir()
 	seedInterruptedImport(t, dataDir, "", 0)
@@ -370,9 +342,8 @@ func TestSyncRefusesResumeWithoutArtifactPin(t *testing.T) {
 // silent switch to whatever is published now.
 func TestSyncRefusesResumeWhenPinnedArtifactIsGone(t *testing.T) {
 	fixture := newV2Fixture(t, v2FixtureOptions{
-		missingAncillary:    true,
-		validImmutable:      true,
-		fallbackLedgerState: true,
+		validImmutable:   true,
+		validLedgerState: true,
 	})
 	gone := "0000000000000000000000000000000000000000000000000000000000000001"
 	dataDir := t.TempDir()
@@ -392,9 +363,8 @@ func TestSyncRefusesResumeWhenPinnedArtifactIsGone(t *testing.T) {
 // run recorded.
 func TestSyncRefusesResumeWhenCertifiedTipMoved(t *testing.T) {
 	fixture := newV2Fixture(t, v2FixtureOptions{
-		missingAncillary:    true,
-		validImmutable:      true,
-		fallbackLedgerState: true,
+		validImmutable:   true,
+		validLedgerState: true,
 	})
 	dataDir := t.TempDir()
 	seedInterruptedImport(
@@ -416,4 +386,15 @@ func TestSyncRefusesResumeWhenCertifiedTipMoved(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "certified ImmutableDB tip")
 	assert.ErrorContains(t, err, "no longer matches the pinned artifact")
+}
+
+func TestValidateForRunRejectsV1Pin(t *testing.T) {
+	t.Parallel()
+
+	err := pinnedArtifact{Backend: "v1", Digest: "old-digest"}.
+		validateForRun("v2", "preview")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "v1 backend, which is no longer supported")
+	assert.Contains(t, err.Error(), "remove the database directory")
+	assert.NotContains(t, err.Error(), "re-run with the original backend")
 }

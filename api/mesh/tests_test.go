@@ -485,7 +485,7 @@ func TestRequestBodyLimit(t *testing.T) {
 	rec := postRaw(t, h, "/network/status", oversized)
 
 	requireMeshError(
-		t, rec, ErrInvalidRequest, http.StatusBadRequest,
+		t, rec, ErrInvalidRequest, http.StatusInternalServerError,
 	)
 }
 
@@ -710,7 +710,7 @@ func requireInvalidRequest(
 ) {
 	t.Helper()
 	require.Equal(
-		t, http.StatusBadRequest, resp.StatusCode,
+		t, http.StatusInternalServerError, resp.StatusCode,
 		"unexpected status, body: %s", body,
 	)
 	var got Error
@@ -889,13 +889,22 @@ func (f *fakeDatabase) GetTransactionsByBlockHash(ctx context.Context,
 
 // fakeLedgerState is a MeshLedgerState with per-test behavior.
 type fakeLedgerState struct {
-	pparams     lcommon.ProtocolParameters
-	slotToTime  func(slot uint64) (time.Time, error)
-	utxos       func(addrs []lcommon.Address) ([]models.Utxo, error)
+	pparams       lcommon.ProtocolParameters
+	slotToTime    func(slot uint64) (time.Time, error)
+	utxos         func(addrs []lcommon.Address) ([]models.Utxo, error)
+	utxosComplete func(
+		ctx context.Context,
+		addrs []lcommon.Address,
+	) ([]models.Utxo, error)
 	utxosAtSlot func(
 		addr lcommon.Address,
 		slot uint64,
 	) ([]models.Utxo, error)
+	balanceAtSlot func(
+		ctx context.Context,
+		addr lcommon.Address,
+		slot uint64,
+	) (models.AddressBalance, error)
 }
 
 func (f *fakeLedgerState) GetCurrentPParams() lcommon.ProtocolParameters {
@@ -928,6 +937,16 @@ func (f *fakeLedgerState) UtxosByAddress(
 	return f.utxos(addrs)
 }
 
+func (f *fakeLedgerState) UtxosByAddressComplete(
+	ctx context.Context,
+	addrs []lcommon.Address,
+) ([]models.Utxo, error) {
+	if f.utxosComplete != nil {
+		return f.utxosComplete(ctx, addrs)
+	}
+	return f.UtxosByAddress(addrs)
+}
+
 func (f *fakeLedgerState) UtxosByAddressAtSlot(
 	addr lcommon.Address,
 	slot uint64,
@@ -936,6 +955,44 @@ func (f *fakeLedgerState) UtxosByAddressAtSlot(
 		return nil, nil
 	}
 	return f.utxosAtSlot(addr, slot)
+}
+
+func (f *fakeLedgerState) UtxoBalanceByAddressAtSlot(
+	ctx context.Context,
+	addr lcommon.Address,
+	slot uint64,
+) (models.AddressBalance, error) {
+	if f.balanceAtSlot != nil {
+		return f.balanceAtSlot(ctx, addr, slot)
+	}
+	if err := ctx.Err(); err != nil {
+		return models.AddressBalance{}, err
+	}
+	utxos, err := f.UtxosByAddressAtSlot(addr, slot)
+	if err != nil {
+		return models.AddressBalance{}, err
+	}
+	var balance models.AddressBalance
+	assetIndexes := make(map[string]int)
+	for i := range utxos {
+		balance.UtxoCount++
+		balance.Lovelace += uint64(utxos[i].Amount)
+		for j := range utxos[i].Assets {
+			asset := &utxos[i].Assets[j]
+			key := string(asset.PolicyId) + string(asset.Name)
+			idx, ok := assetIndexes[key]
+			if !ok {
+				idx = len(balance.Assets)
+				assetIndexes[key] = idx
+				balance.Assets = append(balance.Assets, models.AssetBalance{
+					PolicyId: asset.PolicyId,
+					Name:     asset.Name,
+				})
+			}
+			balance.Assets[idx].Amount += uint64(asset.Amount)
+		}
+	}
+	return balance, nil
 }
 
 // submittedTx records one accepted MeshMempool.AddTransaction call.
@@ -951,6 +1008,13 @@ type fakeMempool struct {
 	txs       []mempool.MempoolTransaction
 	addErr    error
 	submitted []submittedTx
+	// listCalls records the maxItems of each TransactionHashes call.
+	listCalls []int
+	// listEntered and listRelease, when set before the server handles a
+	// request, park the next TransactionHashes call only until the test
+	// releases it; later calls run unparked.
+	listEntered chan struct{}
+	listRelease chan struct{}
 }
 
 func (f *fakeMempool) AddTransaction(
@@ -983,12 +1047,27 @@ func (f *fakeMempool) GetTransaction(
 	return mempool.MempoolTransaction{}, false
 }
 
-func (f *fakeMempool) Transactions() []mempool.MempoolTransaction {
+func (f *fakeMempool) TransactionHashes(maxItems int) ([]string, int) {
+	f.mu.Lock()
+	listEntered, listRelease := f.listEntered, f.listRelease
+	f.listEntered, f.listRelease = nil, nil
+	f.listCalls = append(f.listCalls, maxItems)
+	f.mu.Unlock()
+	if listEntered != nil {
+		listEntered <- struct{}{}
+		<-listRelease
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return append(
-		[]mempool.MempoolTransaction(nil), f.txs...,
-	)
+	n := len(f.txs)
+	if maxItems > 0 && maxItems < n {
+		n = maxItems
+	}
+	hashes := make([]string, n)
+	for i := range hashes {
+		hashes[i] = f.txs[i].Hash
+	}
+	return hashes, len(f.txs)
 }
 
 func (f *fakeMempool) submissions() []submittedTx {
@@ -1260,9 +1339,15 @@ func testSignedTx(
 	witnesses []lcommon.VkeyWitness,
 ) []byte {
 	t.Helper()
+	// The vkey witness field is a non-empty set, so an unsigned transaction
+	// omits it rather than encoding null or an empty array.
+	witnessSet := map[int]any{}
+	if len(witnesses) > 0 {
+		witnessSet[0] = witnesses
+	}
 	signed := []any{
 		cbor.RawMessage(bodyCbor),
-		map[int]any{0: witnesses},
+		witnessSet,
 		true,
 		nil,
 	}

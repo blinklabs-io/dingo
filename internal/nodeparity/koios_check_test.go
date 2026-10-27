@@ -25,12 +25,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/blinklabs-io/dingo/internal/koiosparity"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
@@ -214,10 +216,6 @@ func TestCheckStakeDistribution_CacheHitSkipsLiveKoiosCall(t *testing.T) {
 	t.Cleanup(func() { _ = listener.Close() })
 	lsq.serve(t, listener, magic)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	client := dialWiringClient(t, ctx, listener.Addr().String(), magic)
-
 	koiosURL, reqCount := countingKoiosServer(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	})
@@ -243,6 +241,12 @@ func TestCheckStakeDistribution_CacheHitSkipsLiveKoiosCall(t *testing.T) {
 		ActiveStake: "1000000",
 		FetchedAt:   time.Now().UTC(),
 	}))
+
+	// The deadline starts after cache setup, so it bounds only the dial and
+	// the query: slow SQLite setup cannot expire it before the query runs.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	client := dialWiringClient(t, ctx, listener.Addr().String(), magic)
 
 	mismatches, err := CheckStakeDistribution(ctx, client, koios, cache, "preview", epoch)
 	require.NoError(t, err)
@@ -1115,6 +1119,11 @@ type wiringFakeLSQServer struct {
 	// killNextPoolDistr models).
 	killAllPoolDistr atomic.Bool
 	activeConn       atomic.Pointer[ouroboros.Connection]
+	// cancelOnQuery, when set before serve, is called as the first query
+	// arrives, and that query's connection is then closed unanswered. The
+	// cancel happens before the close, so the client sees its query fail
+	// with the caller's context already ended.
+	cancelOnQuery context.CancelFunc
 }
 
 // killNextPoolDistr arms killConnOnNextPoolDistr -- see that field's doc
@@ -1188,6 +1197,15 @@ func (s *wiringFakeLSQServer) config() localstatequery.Config {
 				_ localstatequery.CallbackContext,
 				q localstatequery.QueryWrapper,
 			) (any, error) {
+				if s.cancelOnQuery != nil {
+					s.cancelOnQuery()
+					if conn := s.activeConn.Load(); conn != nil {
+						_ = conn.Close()
+					}
+					return nil, errors.New(
+						"wiringFakeLSQServer: context ended mid-query",
+					)
+				}
 				eraID, eraErr, pp, poolDistr := s.snapshot()
 				block, ok := q.Query.(*localstatequery.BlockQuery)
 				if !ok {
@@ -1763,4 +1781,502 @@ func TestCheckStakeDistributionStillComparesASettledEpoch(t *testing.T) {
 	require.Empty(t, mismatches,
 		"a settled epoch that agrees must still compare clean, not be "+
 			"skipped as unpublished")
+}
+
+// stakeRetryFixture is a Dingo serving one pool distribution and a Koios
+// whose /pool_history answer is chosen per pool and per attempt, for the
+// retry-round tests of checkStakeDistribution.
+type stakeRetryFixture struct {
+	client *localstatequery.Client
+	koios  *koiosparity.KoiosClient
+	pools  []string // bech32, in the order the pool IDs were built
+	mu     sync.Mutex
+	calls  map[string]int
+	// latest answers the undated /pool_history probe for a pool; nil
+	// answers 404. probes counts those requests.
+	latest func(pool int) string
+	probes int
+}
+
+// newStakeRetryFixture serves one pool per entry of stakes, all with the
+// same Dingo stake, and answers /pool_history for pool i with respond(i,
+// attempt), attempt counting from 1. /epoch_info reports the sum Dingo
+// reports, so the epoch-total comparison stays silent.
+func newStakeRetryFixture(
+	t *testing.T,
+	ctx context.Context,
+	epoch uint64,
+	dingoStake uint64,
+	poolCount int,
+	respond func(w http.ResponseWriter, pool, attempt int),
+) *stakeRetryFixture {
+	t.Helper()
+	const magic = 764824073
+	f := &stakeRetryFixture{calls: map[string]int{}}
+	byBech32 := map[string]int{}
+	distr := map[ledger.PoolId]localstatequery.PoolDistr2IndividualStake{}
+	for i := range poolCount {
+		var poolID ledger.PoolId
+		poolID[0] = 0x70
+		poolID[1] = byte(i + 1)
+		f.pools = append(f.pools, poolID.String())
+		byBech32[poolID.String()] = i
+		distr[poolID] = localstatequery.PoolDistr2IndividualStake{
+			StakeFraction:  &cbor.Rat{Rat: big.NewRat(1, int64(poolCount))},
+			TotalPoolStake: dingoStake,
+		}
+	}
+	total := dingoStake * uint64(poolCount)
+
+	lsq := newWiringFakeLSQServer()
+	lsq.setPoolDistr(&localstatequery.PoolDistr2Result{
+		Pools:            distr,
+		TotalActiveStake: total,
+	})
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	lsq.serve(t, listener, magic)
+	f.client = dialWiringClient(t, ctx, listener.Addr().String(), magic)
+
+	srv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/pool_history":
+				pool := r.URL.Query().Get("_pool_bech32")
+				f.mu.Lock()
+				if r.URL.Query().Get("_epoch_no") == "" {
+					f.probes++
+					latest := f.latest
+					f.mu.Unlock()
+					if latest == nil {
+						w.WriteHeader(http.StatusNotFound)
+						return
+					}
+					_, _ = w.Write([]byte(latest(byBech32[pool])))
+					return
+				}
+				f.calls[pool]++
+				attempt := f.calls[pool]
+				f.mu.Unlock()
+				respond(w, byBech32[pool], attempt)
+			case "/epoch_info":
+				_, _ = fmt.Fprintf(
+					w, `[{"epoch_no":%d,"active_stake":"%d"}]`, epoch, total,
+				)
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		},
+	))
+	t.Cleanup(srv.Close)
+	f.koios, err = NewKoiosClient("preview", "", srv.URL, true, true)
+	require.NoError(t, err)
+	return f
+}
+
+func (f *stakeRetryFixture) callsFor(pool int) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls[f.pools[pool]]
+}
+
+// writePoolHistory answers with a pool_history row carrying stake. A body
+// that does not decode is used for a failed attempt instead of a 5xx or a
+// stalled connection: the shared client retries those with real backoff
+// inside the request, while a decode failure reaches checkStakeDistribution
+// at once, which is the layer these tests exercise.
+func writePoolHistory(w http.ResponseWriter, epoch uint64, stake uint64) {
+	_, _ = fmt.Fprintf(
+		w, `[{"epoch_no":%d,"active_stake":"%d"}]`, epoch, stake,
+	)
+}
+
+func writeUndecodable(w http.ResponseWriter) {
+	_, _ = w.Write([]byte("upstream stalled"))
+}
+
+// recordingWait returns at once and records each wait it was asked for.
+type recordingWait struct {
+	mu    sync.Mutex
+	waits []time.Duration
+}
+
+func (r *recordingWait) wait(_ context.Context, d time.Duration) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.waits = append(r.waits, d)
+	return nil
+}
+
+// TestCheckStakeDistributionRetriesATransientPoolFailure pins the live
+// preprod failure: one pool's /pool_history stalled past the shared
+// client's retries, and that single error cancelled every other pool's fetch
+// and reported the whole epoch's stake check as not run. The failing pool
+// must be fetched again in a later round while the others complete
+// undisturbed, and the epoch must then report a clean match.
+func TestCheckStakeDistributionRetriesATransientPoolFailure(t *testing.T) {
+	t.Parallel()
+	const epoch = uint64(303)
+	const stake = uint64(1_000_000)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	f := newStakeRetryFixture(t, ctx, epoch, stake, 3,
+		func(w http.ResponseWriter, pool, attempt int) {
+			if pool == 0 && attempt == 1 {
+				writeUndecodable(w)
+				return
+			}
+			writePoolHistory(w, epoch, stake)
+		},
+	)
+	waits := &recordingWait{}
+	schedule := []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}
+
+	mismatches, err := checkStakeDistribution(
+		ctx, f.client, f.koios, nil, "preview", epoch, schedule, waits.wait,
+	)
+	require.NoError(t, err)
+	require.Empty(t, mismatches,
+		"a pool fetched on a retry round must leave the epoch a clean match")
+	assert.Equal(t, 2, f.callsFor(0), "the failed pool is fetched once more")
+	assert.Equal(t, 1, f.callsFor(1), "the other pools are not cancelled")
+	assert.Equal(t, 1, f.callsFor(2), "the other pools are not cancelled")
+	assert.Equal(t, schedule[:1], waits.waits,
+		"rounds stop as soon as every pool is fetched")
+}
+
+// TestCheckStakeDistributionReportsPoolsThatNeverFetch pins the result for
+// pools Koios never answers: the epoch is incomplete, naming them, and is
+// never a match -- while a real divergence on a pool that did fetch is still
+// reported as one. A permanent rejection is not fetched again.
+func TestCheckStakeDistributionReportsPoolsThatNeverFetch(t *testing.T) {
+	t.Parallel()
+	const epoch = uint64(304)
+	const stake = uint64(1_000_000)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	f := newStakeRetryFixture(t, ctx, epoch, stake, 4,
+		func(w http.ResponseWriter, pool, _ int) {
+			switch pool {
+			case 0:
+				writeUndecodable(w)
+			case 1:
+				writePoolHistory(w, epoch, stake-400_000)
+			case 2:
+				w.WriteHeader(http.StatusUnauthorized)
+			default:
+				writePoolHistory(w, epoch, stake)
+			}
+		},
+	)
+	waits := &recordingWait{}
+	schedule := []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}
+
+	mismatches, err := checkStakeDistribution(
+		ctx, f.client, f.koios, nil, "preview", epoch, schedule, waits.wait,
+	)
+	require.NoError(t, err,
+		"an error return would discard the divergence found on pool 1")
+
+	var real, faults []StakeMismatch
+	for _, m := range mismatches {
+		if m.KoiosFault {
+			faults = append(faults, m)
+		} else {
+			real = append(real, m)
+		}
+	}
+	require.Len(t, real, 1, "the fetched pool's divergence is still reported")
+	assert.Equal(t, f.pools[1], real[0].PoolIDBech32)
+	assert.Equal(t, int64(400_000), real[0].DiffLovelace)
+
+	require.Len(t, faults, 1, "unfetched pools leave the epoch incomplete")
+	fault := faults[0]
+	assert.Empty(t, fault.PoolIDBech32)
+	assert.Equal(t, 2*stake, fault.DingoStake)
+	assert.True(t, strings.HasPrefix(
+		fault.Reason, ReasonKoiosPoolHistoryUnavailable+": 2 of 4 pools",
+	), fault.Reason)
+	assert.Contains(t, fault.Reason, f.pools[0])
+	assert.Contains(t, fault.Reason, f.pools[2])
+	assert.NotContains(t, fault.Reason, f.pools[3])
+
+	assert.Equal(t, 1+len(schedule), f.callsFor(0),
+		"a transient failure is fetched again every round")
+	assert.Equal(t, 1, f.callsFor(2),
+		"a permanent rejection is not fetched again")
+	assert.Equal(t, schedule, waits.waits)
+}
+
+// TestCheckStakeDistributionStopsWaitingWhenCancelled proves a session end
+// during the wait between rounds ends the check at once with the
+// cancellation, rather than after the wait or as an incomplete verdict.
+func TestCheckStakeDistributionStopsWaitingWhenCancelled(t *testing.T) {
+	t.Parallel()
+	const epoch = uint64(308)
+	const stake = uint64(1_000_000)
+	dialCtx, dialCancel := context.WithTimeout(
+		context.Background(), 30*time.Second,
+	)
+	defer dialCancel()
+
+	f := newStakeRetryFixture(t, dialCtx, epoch, stake, 2,
+		func(w http.ResponseWriter, pool, _ int) {
+			if pool == 0 {
+				writeUndecodable(w)
+				return
+			}
+			writePoolHistory(w, epoch, stake)
+		},
+	)
+	ctx, cancel := context.WithCancel(dialCtx)
+	defer cancel()
+	cancelThenWait := func(ctx context.Context, d time.Duration) error {
+		cancel()
+		return waitStakeRetry(ctx, d)
+	}
+
+	type result struct {
+		mismatches []StakeMismatch
+		err        error
+	}
+	done := make(chan result, 1)
+	go func() {
+		m, err := checkStakeDistribution(
+			ctx, f.client, f.koios, nil, "preview", epoch,
+			[]time.Duration{time.Hour}, cancelThenWait,
+		)
+		done <- result{m, err}
+	}()
+	got := testutil.RequireReceive(
+		t, done, 5*time.Second, "checkStakeDistribution after cancellation",
+	)
+	require.ErrorIs(t, got.err, context.Canceled)
+	assert.Nil(t, got.mismatches)
+	assert.Equal(t, 1, f.callsFor(0), "no round runs after cancellation")
+}
+
+func (f *stakeRetryFixture) setLatest(latest func(pool int) string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.latest = latest
+}
+
+func (f *stakeRetryFixture) probeCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.probes
+}
+
+// TestCheckStakeDistributionReportsUnpublishedPoolHistoryAsIncomplete pins
+// the live preprod case at epoch 320: /epoch_info already answered for epoch
+// 319 while /pool_history had no row for any pool, and each pool was reported
+// as a divergence. When no pool has a row and Koios's newest row for them is
+// older, the epoch is one incomplete fault; anything else stays a mismatch.
+func TestCheckStakeDistributionReportsUnpublishedPoolHistoryAsIncomplete(
+	t *testing.T,
+) {
+	t.Parallel()
+	const epoch = uint64(319)
+	const stake = uint64(1_000_000)
+	latestRow := func(e uint64) func(int) string {
+		return func(int) string { return fmt.Sprintf(`[{"epoch_no":%d}]`, e) }
+	}
+	noRows := func(int) string { return "[]" }
+	tests := []struct {
+		name        string
+		pools       int
+		latest      func(int) string
+		unpublished bool
+	}{
+		{"every pool behind the epoch", 3, latestRow(epoch - 1), true},
+		{"single pool behind the epoch", 1, latestRow(epoch - 1), true},
+		{"pool unknown to koios at any epoch", 3, noRows, false},
+		{"koios has rows past the epoch", 3, latestRow(epoch + 1), false},
+		{"publication probe fails", 3, nil, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := context.WithTimeout(
+				context.Background(), 30*time.Second,
+			)
+			defer cancel()
+			f := newStakeRetryFixture(t, ctx, epoch, stake, tc.pools,
+				func(w http.ResponseWriter, _, _ int) {
+					_, _ = w.Write([]byte("[]"))
+				},
+			)
+			f.setLatest(tc.latest)
+
+			mismatches, err := checkStakeDistribution(
+				ctx, f.client, f.koios, nil, "preview", epoch,
+				nil, (&recordingWait{}).wait,
+			)
+			require.NoError(t, err)
+			assert.Equal(t, 1, f.probeCount(),
+				"one probe decides the epoch, not one per pool")
+			if !tc.unpublished {
+				require.Len(t, mismatches, tc.pools)
+				for _, m := range mismatches {
+					assert.False(t, m.KoiosFault)
+					assert.Equal(t, ReasonNoKoiosPoolHistoryRow, m.Reason)
+				}
+				return
+			}
+			require.Len(t, mismatches, 1,
+				"an unpublished epoch is one fault, not one per pool")
+			m := mismatches[0]
+			assert.True(t, m.KoiosFault, "reference lag must not page")
+			assert.Empty(t, m.PoolIDBech32)
+			assert.Equal(t, uint64(tc.pools)*stake, m.DingoStake)
+			assert.True(t, strings.HasPrefix(
+				m.Reason, ReasonKoiosPoolHistoryNotPublished+": ",
+			), m.Reason)
+		})
+	}
+}
+
+// TestCheckStakeDistributionStillReportsOnePoolMissingARow is the other side
+// of the publication rule: rows for the other pools prove Koios published the
+// epoch, so the one pool without a row is a real mismatch and no probe runs.
+func TestCheckStakeDistributionStillReportsOnePoolMissingARow(t *testing.T) {
+	t.Parallel()
+	const epoch = uint64(319)
+	const stake = uint64(1_000_000)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	f := newStakeRetryFixture(t, ctx, epoch, stake, 3,
+		func(w http.ResponseWriter, pool, _ int) {
+			if pool == 0 {
+				_, _ = w.Write([]byte("[]"))
+				return
+			}
+			writePoolHistory(w, epoch, stake)
+		},
+	)
+	f.setLatest(func(int) string {
+		return fmt.Sprintf(`[{"epoch_no":%d}]`, epoch-1)
+	})
+
+	mismatches, err := checkStakeDistribution(
+		ctx, f.client, f.koios, nil, "preview", epoch,
+		nil, (&recordingWait{}).wait,
+	)
+	require.NoError(t, err)
+	require.Len(t, mismatches, 1)
+	assert.Equal(t, f.pools[0], mismatches[0].PoolIDBech32)
+	assert.Equal(t, ReasonNoKoiosPoolHistoryRow, mismatches[0].Reason)
+	assert.False(t, mismatches[0].KoiosFault)
+	assert.Equal(t, 0, f.probeCount())
+}
+
+// TestCheckQueriesReportExpiredContext proves a dingo query that fails because
+// the caller's context ended reports that context error. Dial closes the
+// connection when the context ends, so without the wrap the query error reads
+// only "protocol is shutting down" and hides the deadline.
+func TestCheckQueriesReportExpiredContext(t *testing.T) {
+	t.Parallel()
+
+	const magic = 764824073
+
+	checks := map[string]func(
+		context.Context, *localstatequery.Client, *koiosparity.Cache,
+	) error{
+		"stake distribution": func(
+			ctx context.Context, c *localstatequery.Client,
+			cache *koiosparity.Cache,
+		) error {
+			_, err := CheckStakeDistribution(ctx, c, nil, cache, "preview", 500)
+			return err
+		},
+		"protocol params": func(
+			ctx context.Context, c *localstatequery.Client,
+			cache *koiosparity.Cache,
+		) error {
+			_, err := CheckProtocolParams(ctx, c, nil, cache, "preview", 500)
+			return err
+		},
+	}
+	for name, check := range checks {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			lsq := newWiringFakeLSQServer()
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = listener.Close() })
+			lsq.serve(t, listener, magic)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			client := dialWiringClient(t, ctx, listener.Addr().String(), magic)
+			cache := openTestCache(t)
+			cancel()
+
+			err = check(ctx, client, cache)
+			require.Error(t, err)
+			require.ErrorIs(
+				t, err, context.Canceled,
+				"an expired caller context must not be "+
+					"reported only as a closed protocol",
+			)
+		})
+	}
+}
+
+// TestCheckQueriesReportContextEndedMidQuery proves the context error is
+// reported when the caller's context ends while a dingo query is in flight,
+// past the pre-query ctx.Err() check. The server cancels the context and
+// then closes the connection, so the query fails only after the context
+// ended.
+func TestCheckQueriesReportContextEndedMidQuery(t *testing.T) {
+	t.Parallel()
+
+	const magic = 764824073
+
+	checks := map[string]func(
+		context.Context, *localstatequery.Client, *koiosparity.Cache,
+	) error{
+		"stake distribution": func(
+			ctx context.Context, c *localstatequery.Client,
+			cache *koiosparity.Cache,
+		) error {
+			_, err := CheckStakeDistribution(ctx, c, nil, cache, "preview", 500)
+			return err
+		},
+		"protocol params": func(
+			ctx context.Context, c *localstatequery.Client,
+			cache *koiosparity.Cache,
+		) error {
+			_, err := CheckProtocolParams(ctx, c, nil, cache, "preview", 500)
+			return err
+		},
+	}
+	for name, check := range checks {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			cache := openTestCache(t)
+
+			lsq := newWiringFakeLSQServer()
+			lsq.cancelOnQuery = cancel
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = listener.Close() })
+			lsq.serve(t, listener, magic)
+			client := dialWiringClient(t, ctx, listener.Addr().String(), magic)
+
+			err = check(ctx, client, cache)
+			require.Error(t, err)
+			require.ErrorIs(
+				t, err, context.Canceled,
+				"a context that ends mid-query must not be "+
+					"reported only as a closed protocol",
+			)
+		})
+	}
 }

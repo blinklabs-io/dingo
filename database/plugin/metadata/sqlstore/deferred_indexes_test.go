@@ -204,3 +204,167 @@ func TestBuildDeferredIndexesContextCommitsEachSQLiteIndex(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, missing)
 }
+
+// TestDropLazyDeferredIndexesKeepsCriticalIndexes drops only the lazy
+// manifest entries, behind the same recovery marker a full drop records, and
+// BuildDeferredIndexes ends that cycle.
+func TestDropLazyDeferredIndexesKeepsCriticalIndexes(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	require.NoError(t, store.DropLazyDeferredIndexesContext(t.Context()))
+
+	pending, err := store.HasDeferredIndexesPending()
+	require.NoError(t, err)
+	require.True(t, pending, "a lazy drop must record the recovery marker")
+	critical, err := store.MissingCriticalDeferredIndexes()
+	require.NoError(t, err)
+	require.Empty(t, critical, "a lazy drop removed a critical index")
+	var lazy []string
+	for _, index := range deferred.LazyManifest() {
+		lazy = append(lazy, index.Name)
+	}
+	require.NotEmpty(t, lazy)
+	missing, err := store.MissingDeferredIndexes()
+	require.NoError(t, err)
+	require.ElementsMatch(t, lazy, missing)
+
+	require.NoError(t, store.BuildDeferredIndexesContext(t.Context()))
+	pending, err = store.HasDeferredIndexesPending()
+	require.NoError(t, err)
+	require.False(t, pending)
+	missing, err = store.MissingDeferredIndexes()
+	require.NoError(t, err)
+	require.Empty(t, missing)
+}
+
+// TestCatchUpIndexDropAndRebuild drops the lazy and catch-up droppable
+// entries behind the recovery marker. The catch-up rebuild restores the
+// droppable ones and keeps the marker, which only the full rebuild clears.
+func TestCatchUpIndexDropAndRebuild(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	var lazy, droppable []string
+	for _, index := range deferred.LazyManifest() {
+		lazy = append(lazy, index.Name)
+	}
+	for _, index := range deferred.CatchUpDroppableManifest() {
+		droppable = append(droppable, index.Name)
+	}
+	require.NotEmpty(t, droppable)
+	require.NoError(t, store.DropCatchUpIndexesContext(t.Context()))
+
+	pending, err := store.HasDeferredIndexesPending()
+	require.NoError(t, err)
+	require.True(t, pending, "a catch-up drop must record the recovery marker")
+	missing, err := store.MissingDeferredIndexes()
+	require.NoError(t, err)
+	require.ElementsMatch(t, append(append([]string(nil), lazy...),
+		droppable...), missing)
+	critical, err := store.MissingCriticalDeferredIndexes()
+	require.NoError(t, err)
+	require.ElementsMatch(t, droppable, critical)
+
+	require.NoError(t, store.BuildCatchUpIndexesContext(t.Context()))
+	missing, err = store.MissingDeferredIndexes()
+	require.NoError(t, err)
+	require.ElementsMatch(t, lazy, missing,
+		"the catch-up rebuild must restore exactly the droppable entries")
+	pending, err = store.HasDeferredIndexesPending()
+	require.NoError(t, err)
+	require.True(t, pending, "the lazy entries are still missing")
+
+	require.NoError(t, store.BuildDeferredIndexesContext(t.Context()))
+	pending, err = store.HasDeferredIndexesPending()
+	require.NoError(t, err)
+	require.False(t, pending)
+}
+
+// TestSetCatchUpPragmasLeavesDurabilityAlone checks the catch-up tuning
+// changes only memory settings on the write connection and that
+// RestoreNormalPragmas puts them back.
+func TestSetCatchUpPragmasLeavesDurabilityAlone(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	store.writeDB.SetMaxOpenConns(1)
+	pragma := func(name string) int64 {
+		t.Helper()
+		var value int64
+		require.NoError(t, store.writeDB.QueryRowContext(
+			t.Context(), "PRAGMA "+name,
+		).Scan(&value))
+		return value
+	}
+	synchronous := pragma("synchronous")
+	journal := func() string {
+		t.Helper()
+		var mode string
+		require.NoError(t, store.writeDB.QueryRowContext(
+			t.Context(), "PRAGMA journal_mode",
+		).Scan(&mode))
+		return mode
+	}
+	journalMode := journal()
+
+	require.NoError(t, store.SetCatchUpPragmas())
+	require.Equal(t, int64(-200000), pragma("cache_size"))
+	require.Equal(t, int64(2), pragma("temp_store"), "temp_store = MEMORY")
+	require.Equal(t, synchronous, pragma("synchronous"),
+		"catch-up tuning must not relax durability")
+	require.Equal(t, journalMode, journal())
+	require.False(t, store.bulkMode, "catch-up tuning is not bulk mode")
+
+	require.NoError(t, store.RestoreNormalPragmas())
+	require.Equal(t, int64(-50000), pragma("cache_size"))
+	require.Equal(t, int64(0), pragma("temp_store"), "temp_store = DEFAULT")
+}
+
+// A bulk-load cycle drops the spender indexes and the rebuild recreates them.
+// The rebuild must restore the partial definition the schema migration
+// installed, not a full-table index over the mostly-NULL columns.
+func TestDeferredRebuildKeepsUtxoSpenderIndexesPartial(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	require.NoError(t, store.DropDeferredIndexes())
+	require.NoError(t, store.BuildDeferredIndexes())
+
+	for _, column := range []string{
+		"spent_at_tx_id",
+		"collateral_by_tx_id",
+		"referenced_by_tx_id",
+	} {
+		var definition string
+		require.NoError(t, store.readDB.QueryRow(
+			"SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?",
+			"idx_utxo_"+column,
+		).Scan(&definition))
+		require.Contains(t, definition, "WHERE "+column+" IS NOT NULL",
+			"rebuilt idx_utxo_%s must stay partial: %s", column, definition)
+	}
+}
+
+// MySQL has no partial indexes and needs a full index on each foreign-key
+// column, so a deferred index predicate applies only to SQLite and Postgres.
+func TestDeferredIndexSQLPartialPredicateByDialect(t *testing.T) {
+	t.Parallel()
+	index := deferred.Index{
+		Name:    "idx_utxo_spent_at_tx_id",
+		Table:   "utxo",
+		Columns: []string{"spent_at_tx_id"},
+		Where:   "spent_at_tx_id IS NOT NULL",
+	}
+	require.Equal(
+		t,
+		`CREATE INDEX IF NOT EXISTS "idx_utxo_spent_at_tx_id" ON "utxo" ("spent_at_tx_id") WHERE spent_at_tx_id IS NOT NULL`,
+		deferredIndexCreateSQL(SQLiteDialect(), index),
+	)
+	require.Equal(
+		t,
+		`CREATE INDEX IF NOT EXISTS "idx_utxo_spent_at_tx_id" ON "utxo" ("spent_at_tx_id") WHERE spent_at_tx_id IS NOT NULL`,
+		deferredIndexCreateSQL(PostgresDialect(), index),
+	)
+	require.Equal(
+		t,
+		"CREATE INDEX `idx_utxo_spent_at_tx_id` ON `utxo` (`spent_at_tx_id`(255))",
+		deferredIndexCreateSQL(MySQLDialect(), index),
+	)
+}

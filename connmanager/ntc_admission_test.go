@@ -141,6 +141,98 @@ func requireNtCAdmissionCount(
 	}, 2*time.Second, time.Millisecond, "unexpected NtC admission count")
 }
 
+func requireTrustedNtCAdmissionCount(
+	t *testing.T,
+	manager *ConnectionManager,
+	count int,
+) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		manager.ntcAdmissionMutex.Lock()
+		defer manager.ntcAdmissionMutex.Unlock()
+		return manager.trustedLocalNtCCount == count
+	}, 2*time.Second, time.Millisecond, "unexpected trusted NtC admission count")
+}
+
+func TestTrustedLocalNtCIdleAfterHandshakeReleasesAdmissionSlot(t *testing.T) {
+	t.Parallel()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	manager := startNtCAdmissionManager(t, ConnectionManagerConfig{
+		MaxTrustedLocalNtCConns:        1,
+		trustedNtCPostHandshakeTimeout: 50 * time.Millisecond,
+		Listeners: []ListenerConfig{{
+			Listener:     listener,
+			UseNtC:       true,
+			TrustedLocal: true,
+			ConnectionOpts: []ouroboros.ConnectionOptionFunc{
+				ouroboros.WithNetworkMagic(1),
+				ouroboros.WithMuxerSegmentReadTimeout(0),
+			},
+		}},
+	})
+
+	connectNtCAdmissionClient(t, listener)
+	requireTrustedNtCAdmissionCount(t, manager, 1)
+	requireTrustedNtCAdmissionCount(t, manager, 0)
+
+	connectNtCAdmissionClient(t, listener)
+	requireTrustedNtCAdmissionCount(t, manager, 1)
+}
+
+func TestTrustedLocalNtCIdleAfterProtocolActivityReleasesAdmissionSlot(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	manager := startNtCAdmissionManager(t, ConnectionManagerConfig{
+		MaxTrustedLocalNtCConns:        1,
+		trustedNtCPostHandshakeTimeout: 50 * time.Millisecond,
+		Listeners: []ListenerConfig{{
+			Listener:     listener,
+			UseNtC:       true,
+			TrustedLocal: true,
+			ConnectionOpts: []ouroboros.ConnectionOptionFunc{
+				ouroboros.WithNetworkMagic(1),
+				ouroboros.WithMuxerSegmentReadTimeout(0),
+			},
+		}},
+	})
+
+	client := connectNtCAdmissionClient(t, listener)
+	requireTrustedNtCAdmissionCount(t, manager, 1)
+	require.NoError(t, client.LocalTxSubmission().Client.Stop())
+	requireTrustedNtCAdmissionCount(t, manager, 0)
+
+	connectNtCAdmissionClient(t, listener)
+	requireTrustedNtCAdmissionCount(t, manager, 1)
+}
+
+func TestTrustedNtCLateActivityDoesNotRecreateClosedEntry(t *testing.T) {
+	t.Parallel()
+
+	manager := NewConnectionManager(ConnectionManagerConfig{})
+	conn := newUnstartedConnection(t)
+	connID := conn.Id()
+	endPreRegisterActivity := manager.BeginTrustedNtCOneWayActivity(connID, 7)
+	endPreRegisterActivity()
+	require.Contains(t, manager.trustedNtCActivities, connID)
+	manager.trustedNtCActivityOwners[connID] = conn
+
+	manager.unregisterTrustedNtCActivity(connID, conn)
+	endActivity := manager.BeginTrustedNtCActivity(connID, 7)
+	endActivity()
+
+	require.NotContains(t, manager.trustedNtCActivities, connID)
+	manager.forgetClosedTrustedNtCActivity(connID, conn)
+	require.NotContains(t, manager.trustedNtCClosedActivities, connID)
+}
+
 func requireNtCAdmissionRejected(t *testing.T, listener net.Listener) {
 	t.Helper()
 	conn := dialNtCAdmissionClient(t, listener)

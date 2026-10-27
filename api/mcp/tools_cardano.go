@@ -93,6 +93,8 @@ type UtxosByAssetParams struct {
 	Offset    int    `json:"offset,omitempty"     jsonschema:"Pagination offset (default 0)"`
 }
 
+var errAssetInfoIncomplete = errors.New("asset info row cap exceeded")
+
 // AssetInfoParams defines the input schema for get_asset_info.
 type AssetInfoParams struct {
 	PolicyID  string `json:"policy_id"            jsonschema:"Hex-encoded 28-byte (56 hex characters) minting policy ID"`
@@ -125,6 +127,9 @@ func formatHash(val any) string {
 type utxoAddressLookup func(context.Context, *models.UtxoWithOrderingQuery, int) (models.UtxoAddressPage, error)
 
 // RegisterCardanoTools registers domain-specific Cardano and db-sync aligned tools.
+// Each call creates its own concurrency budget for get_asset_info, separate
+// from the one RegisterSQLiteTools creates; NewMCPServer shares one budget
+// across both tool sets.
 func RegisterCardanoTools(
 	server *mcp.Server,
 	db *sql.DB,
@@ -134,11 +139,29 @@ func RegisterCardanoTools(
 	queryTimeout time.Duration,
 	addressLookups ...utxoAddressLookup,
 ) {
+	registerCardanoTools(
+		server, db, ls, mp, network, queryTimeout,
+		newReadLimits(), addressLookups...,
+	)
+}
+
+func registerCardanoTools(
+	server *mcp.Server,
+	db *sql.DB,
+	ls *ledger.LedgerState,
+	mp mempool.Service,
+	network string,
+	queryTimeout time.Duration,
+	limits *readLimits,
+	addressLookups ...utxoAddressLookup,
+) {
 	if queryTimeout <= 0 {
 		queryTimeout = defaultQueryTimeout
 	}
 
-	registerExtendedCardanoTools(server, db, ls, mp, network, queryTimeout)
+	registerExtendedCardanoTools(
+		server, db, ls, mp, network, queryTimeout, limits,
+	)
 	var evaluator txEvaluator
 	if ls != nil {
 		evaluator = ls
@@ -1286,7 +1309,7 @@ func RegisterCardanoTools(
 	// Tool: get_asset_info
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "get_asset_info",
-		Description: "Detailed asset discovery and metadata inspection: queries off-chain Token Registry cache, on-chain circulating supply, mint/burn events, and CIP-25 NFT metadata (label 721).",
+		Description: "Detailed asset discovery and metadata inspection: queries off-chain Token Registry cache, on-chain circulating supply, mint/burn events, and CIP-25 NFT metadata (label 721). Returns an incomplete-result error instead of totals when more than 50,000 live asset rows match.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, input AssetInfoParams) (*mcp.CallToolResult, any, error) {
 		if db == nil {
 			return &mcp.CallToolResult{
@@ -1331,6 +1354,11 @@ func RegisterCardanoTools(
 		}
 		subject := policyHex + hexName
 
+		if err := limits.admit(); err != nil {
+			return nil, nil, err
+		}
+		defer limits.release()
+
 		qCtx, cancel := context.WithTimeout(ctx, queryTimeout)
 		defer cancel()
 
@@ -1355,17 +1383,18 @@ func RegisterCardanoTools(
 			circQuery = `SELECT a.amount, u.id
 						 FROM asset a
 						 JOIN utxo u ON a.utxo_id = u.id
-						 WHERE a.policy_id = ? AND a.name = ? AND u.deleted_slot = 0`
+						 WHERE a.policy_id = ? AND a.name = ? AND u.deleted_slot = 0 LIMIT ?`
 			circArgs = []any{
 				policyBytes,
 				rawName,
+				limits.maxAssetRows + 1,
 			}
 		} else {
 			circQuery = `SELECT a.amount, u.id
 						 FROM asset a
 						 JOIN utxo u ON a.utxo_id = u.id
-						 WHERE a.policy_id = ? AND u.deleted_slot = 0`
-			circArgs = []any{policyBytes}
+						 WHERE a.policy_id = ? AND u.deleted_slot = 0 LIMIT ?`
+			circArgs = []any{policyBytes, limits.maxAssetRows + 1}
 		}
 		if err := func() error {
 			rows, err := db.QueryContext(qCtx, circQuery, circArgs...)
@@ -1374,7 +1403,14 @@ func RegisterCardanoTools(
 			}
 			defer rows.Close()
 			holders := make(map[int64]struct{})
+			scanned := 0
 			for rows.Next() {
+				// The query reads one row past the cap so an over-cap
+				// policy is detected rather than silently truncated.
+				scanned++
+				if scanned > limits.maxAssetRows {
+					return errAssetInfoIncomplete
+				}
 				var amount string
 				var id int64
 				if err := rows.Scan(&amount, &id); err != nil {
@@ -1390,6 +1426,22 @@ func RegisterCardanoTools(
 			holderCount = len(holders)
 			return rows.Err()
 		}(); err != nil {
+			if errors.Is(err, errAssetInfoIncomplete) {
+				text := fmt.Sprintf(
+					"Error: result incomplete: more than %d live asset rows match; "+
+						"supply and holder count were not computed.",
+					limits.maxAssetRows,
+				)
+				if len(rawName) == 0 {
+					text += " Specify asset_name to narrow the query."
+				}
+				return &mcp.CallToolResult{
+					IsError: true,
+					Content: []mcp.Content{
+						&mcp.TextContent{Text: text},
+					},
+				}, nil, nil
+			}
 			return nil, nil, fmt.Errorf("read circulating supply: %w", err)
 		}
 
@@ -2205,6 +2257,18 @@ func decodeEvaluateTransactionWith(
 	})
 }
 
+// invalidTransactionError marks a transaction payload that failed to decode,
+// so the handler can report it as a bad request rather than a failed
+// evaluation.
+type invalidTransactionError struct{ err error }
+
+func (e invalidTransactionError) Error() string { return e.err.Error() }
+
+func (e invalidTransactionError) Unwrap() error { return e.err }
+
+// errLedgerStateUnavailable reports that evaluate_tx has no ledger state.
+var errLedgerStateUnavailable = errors.New("ledger state is not initialized")
+
 func registerEvaluateTxTool(
 	server *mcp.Server,
 	evaluator txEvaluator,
@@ -2223,6 +2287,15 @@ func registerEvaluateTxTool(
 					&mcp.TextContent{
 						Text: "Error: Transaction payload is empty. Please provide hex-encoded or base64-encoded transaction CBOR.",
 					},
+				},
+			}, nil, nil
+		}
+
+		if err := checkEncodedPayloadSize("Transaction payload", trimmed); err != nil {
+			return &mcp.CallToolResult{
+				IsError: true,
+				Content: []mcp.Content{
+					&mcp.TextContent{Text: "Error: " + err.Error()},
 				},
 			}, nil, nil
 		}
@@ -2251,22 +2324,49 @@ func registerEvaluateTxTool(
 			}, nil, nil
 		}
 
-		tx, err := decodeEvaluateTransaction(txBytes)
-		if err != nil {
+		if err := checkDecodedPayloadSize("Transaction payload", len(txBytes)); err != nil {
+			return &mcp.CallToolResult{
+				IsError: true,
+				Content: []mcp.Content{
+					&mcp.TextContent{Text: "Error: " + err.Error()},
+				},
+			}, nil, nil
+		}
+
+		// The payload is parsed inside the evaluation slot and under the
+		// deadline, so concurrent callers cannot spend parsing CPU and memory
+		// outside either limit.
+		evalCtx, cancel := context.WithTimeout(ctx, queryTimeout)
+		defer cancel()
+		result, err := runBoundedEvaluation(
+			evalCtx,
+			evaluationGate,
+			func(ctx context.Context) (evaluationResult, error) {
+				tx, err := decodeEvaluateTransaction(txBytes)
+				if err != nil {
+					return evaluationResult{}, invalidTransactionError{err}
+				}
+				if evaluator == nil {
+					return evaluationResult{}, errLedgerStateUnavailable
+				}
+				fee, total, redeemers, err := evaluator.EvaluateTxContext(ctx, tx)
+				return evaluationResult{fee, total, redeemers}, err
+			},
+		)
+		if invalid, ok := errors.AsType[invalidTransactionError](err); ok {
 			return &mcp.CallToolResult{
 				IsError: true,
 				Content: []mcp.Content{
 					&mcp.TextContent{
 						Text: fmt.Sprintf(
 							"Error: Invalid transaction CBOR: %v",
-							err,
+							invalid.err,
 						),
 					},
 				},
 			}, nil, nil
 		}
-
-		if evaluator == nil {
+		if errors.Is(err, errLedgerStateUnavailable) {
 			return &mcp.CallToolResult{
 				IsError: true,
 				Content: []mcp.Content{
@@ -2276,17 +2376,6 @@ func registerEvaluateTxTool(
 				},
 			}, nil, nil
 		}
-
-		evalCtx, cancel := context.WithTimeout(ctx, queryTimeout)
-		defer cancel()
-		result, err := runBoundedEvaluation(
-			evalCtx,
-			evaluationGate,
-			func(ctx context.Context) (evaluationResult, error) {
-				fee, total, redeemers, err := evaluator.EvaluateTxContext(ctx, tx)
-				return evaluationResult{fee, total, redeemers}, err
-			},
-		)
 		fee, totalExUnits, redeemerExUnits := result.fee, result.total, result.redeemers
 		if err != nil {
 			return &mcp.CallToolResult{
@@ -2358,43 +2447,13 @@ func runBoundedEvaluation(
 	gate chan struct{},
 	evaluate func(context.Context) (evaluationResult, error),
 ) (evaluationResult, error) {
-	if err := ctx.Err(); err != nil {
-		return evaluationResult{}, err
-	}
-	select {
-	case gate <- struct{}{}:
-	default:
-		return evaluationResult{}, errors.New(
+	return runAdmitted(
+		ctx,
+		gate,
+		errors.New(
 			"transaction evaluator busy; retry after the current evaluation completes",
-		)
-	}
-	type response struct {
-		result evaluationResult
-		err    error
-	}
-	done := make(chan response, 1)
-	go func() {
-		var res response
-		defer func() {
-			<-gate
-			if recovered := recover(); recovered != nil {
-				res.err = fmt.Errorf(
-					"transaction evaluation panicked: %v",
-					recovered,
-				)
-			}
-			done <- res
-		}()
-		if err := ctx.Err(); err != nil {
-			res.err = err
-			return
-		}
-		res.result, res.err = evaluate(ctx)
-	}()
-	select {
-	case <-ctx.Done():
-		return evaluationResult{}, ctx.Err()
-	case res := <-done:
-		return res.result, res.err
-	}
+		),
+		"transaction evaluation",
+		evaluate,
+	)
 }

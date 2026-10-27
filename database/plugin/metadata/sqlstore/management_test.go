@@ -15,6 +15,7 @@
 package sqlstore
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -601,6 +602,55 @@ func TestGetPoolByVrfKeyHashActivatesAndReleasesAtEpochBoundary(
 	)
 	require.NoError(t, err)
 	require.Nil(t, got, "a first registration is current, not future state")
+}
+
+func TestGetPoolByLeiosKeyTracksActiveAndFutureRotation(t *testing.T) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+
+	pool := bytes.Repeat([]byte{0x61}, 28)
+	keyA := bytes.Repeat([]byte{0xa1}, 96)
+	keyB := bytes.Repeat([]byte{0xb1}, 96)
+	proof := bytes.Repeat([]byte{0xc1}, 48)
+	importKey := func(slot uint64, key []byte) {
+		t.Helper()
+		require.NoError(t, store.ImportPool(
+			&models.Pool{
+				PoolKeyHash:             pool,
+				VrfKeyHash:              bytes.Repeat([]byte{0x71}, 32),
+				LeiosKeyPublic:          key,
+				LeiosKeyPossessionProof: proof,
+			},
+			&models.PoolRegistration{
+				PoolKeyHash:             pool,
+				VrfKeyHash:              bytes.Repeat([]byte{0x71}, 32),
+				LeiosKeyPublic:          key,
+				LeiosKeyPossessionProof: proof,
+				AddedSlot:               slot,
+			},
+			nil,
+		))
+	}
+
+	importKey(10, keyA)
+	importKey(50, keyB)
+
+	active, err := store.GetPoolByLeiosKey(keyA, 30, nil)
+	require.NoError(t, err)
+	require.NotNil(t, active)
+	require.Equal(t, pool, active.PoolKeyHash)
+	future, err := store.GetFuturePoolByLeiosKey(keyB, 30, nil)
+	require.NoError(t, err)
+	require.NotNil(t, future)
+	require.Equal(t, pool, future.PoolKeyHash)
+
+	active, err = store.GetPoolByLeiosKey(keyB, 60, nil)
+	require.NoError(t, err)
+	require.NotNil(t, active)
+	require.Equal(t, pool, active.PoolKeyHash)
+	released, err := store.GetPoolByLeiosKey(keyA, 60, nil)
+	require.NoError(t, err)
+	require.Nil(t, released)
 }
 
 // TestGetPoolByVrfKeyHashClaimsSupersededSameEpochFutureKey is the

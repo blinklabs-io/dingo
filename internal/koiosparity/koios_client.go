@@ -31,6 +31,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blinklabs-io/dingo/internal/httpuseragent"
 	"github.com/blinklabs-io/dingo/internal/netguard"
 )
 
@@ -365,6 +366,12 @@ type KoiosTotalsResp struct {
 // remain unwrapped/transient). Callers use errors.Is(err, ErrKoiosPermanent)
 // to decide whether to keep scheduling further work or abort immediately.
 var ErrKoiosPermanent = errors.New("koios: permanent error")
+
+// ErrTxInfoMissing marks a GetTxInfos failure caused only by Koios returning
+// no result for a requested hash. Koios indexes a block after a node serves
+// it, so near the chain tip a later request can succeed where this one did
+// not.
+var ErrTxInfoMissing = errors.New("koios /tx_info: no result for requested tx hash")
 
 // KoiosClient queries the Koios v1 REST API.
 type KoiosClient struct {
@@ -737,9 +744,9 @@ func validateKoiosHost(host string, allowPrivateAddresses bool) error {
 	return nil
 }
 
-// redactURLError strips the URL from a *url.Error so a parse failure cannot
-// carry credentials into a log. url.Parse wraps the offending string in the
-// error it returns, which is exactly the value being kept out of logs.
+// redactURLError strips the URL from a *url.Error so parsing and transport
+// failures cannot carry credentials into a log. The operation and underlying
+// cause remain available for diagnosis.
 func redactURLError(err error) error {
 	if urlErr, ok := errors.AsType[*url.Error](err); ok {
 		return fmt.Errorf("%s: %w", urlErr.Op, urlErr.Err)
@@ -928,8 +935,9 @@ func (k *KoiosClient) get(
 	url := k.baseURL + path
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
+		return nil, fmt.Errorf("build request: %w", redactURLError(err))
 	}
+	httpuseragent.Set(req)
 	if k.apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+k.apiKey)
 	}
@@ -970,7 +978,7 @@ func (k *KoiosClient) get(
 		if doErr != nil {
 			if err := retryOrFail(otherAttempt,
 				koiosRetryBackoff5xx*time.Duration(otherAttempt+1),
-				"koios GET %s: %w", path, doErr,
+				"koios GET %s: %w", path, redactURLError(doErr),
 			); err != nil {
 				return nil, err
 			}
@@ -1169,9 +1177,10 @@ func (k *KoiosClient) post(
 			return nil, fmt.Errorf(
 				"koios POST %s: build request: %w",
 				path,
-				err,
+				redactURLError(err),
 			)
 		}
+		httpuseragent.Set(req)
 		if k.apiKey != "" {
 			req.Header.Set("Authorization", "Bearer "+k.apiKey)
 		}
@@ -1182,7 +1191,7 @@ func (k *KoiosClient) post(
 		if doErr != nil {
 			if err := retryOrFail(otherAttempt,
 				koiosRetryBackoff5xx*time.Duration(otherAttempt+1),
-				"koios POST %s: %w", path, doErr,
+				"koios POST %s: %w", path, redactURLError(doErr),
 			); err != nil {
 				return nil, err
 			}
@@ -1556,6 +1565,40 @@ func (k *KoiosClient) GetPoolEpochHistory(
 		)
 	}
 	return &items[0], nil
+}
+
+// GetPoolLatestHistoryEpoch returns the newest epoch Koios has a
+// /pool_history row for, for one pool. ok is false when Koios has no row
+// for the pool at any epoch.
+func (k *KoiosClient) GetPoolLatestHistoryEpoch(
+	ctx context.Context,
+	poolBech32 string,
+) (epoch uint64, ok bool, err error) {
+	path := fmt.Sprintf(
+		"/pool_history?_pool_bech32=%s&select=epoch_no&order=epoch_no.desc&limit=1",
+		poolBech32,
+	)
+	resp, err := k.get(ctx, path, -1, -1)
+	if err != nil {
+		return 0, false, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return 0, false, fmt.Errorf(
+			"koios /pool_history: status %d body: %s",
+			resp.StatusCode,
+			resp.Body,
+		)
+	}
+	var items []struct {
+		EpochNo uint64 `json:"epoch_no"`
+	}
+	if err := json.Unmarshal(resp.Body, &items); err != nil {
+		return 0, false, fmt.Errorf("koios /pool_history decode: %w", err)
+	}
+	if len(items) == 0 {
+		return 0, false, nil
+	}
+	return items[0].EpochNo, true, nil
 }
 
 // GetAllAccountAddresses returns the bech32 stake address of every account
@@ -2253,7 +2296,8 @@ func CanonicalKoiosUTxOEntry(out KoiosTxInfoOutput) string {
 // applying only the hashes that did come back would silently and
 // permanently lose that transaction's spends/creates from the running
 // reconstruction. Requires exactly one result per requested hash --
-// erroring, not silently dropping, on any that are missing or duplicated --
+// erroring, not silently dropping, on any that are missing (ErrTxInfoMissing)
+// or duplicated --
 // and returns them in request order (not Koios's response order) so a
 // caller applying dependent transactions (a UTxO created by one hash and
 // spent by a later one in the same request) does so in the same order the
@@ -2287,9 +2331,19 @@ func (k *KoiosClient) GetTxInfos(
 				resp.Body,
 			)
 		}
+		// Script and datum values can nest past encoding/json's limit; see
+		// elideDeepJSON.
+		body, err := elideDeepJSON(resp.Body, koiosMaxDecodeDepth)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"koios /tx_info decode: %w: %s",
+				err,
+				koiosBodyExcerpt(resp.Body),
+			)
+		}
 		var items []KoiosTxInfoItem
-		if err := json.Unmarshal(resp.Body, &items); err != nil {
-			return nil, describeTxInfoDecodeFailure(resp.Body, err)
+		if err := json.Unmarshal(body, &items); err != nil {
+			return nil, describeTxInfoDecodeFailure(body, err)
 		}
 		for _, item := range items {
 			if _, dup := byHash[item.TxHash]; dup {
@@ -2306,10 +2360,7 @@ func (k *KoiosClient) GetTxInfos(
 	for i, hash := range txHashes {
 		item, ok := byHash[hash]
 		if !ok {
-			return nil, fmt.Errorf(
-				"koios /tx_info: no result for requested tx hash %s",
-				hash,
-			)
+			return nil, fmt.Errorf("%w %s", ErrTxInfoMissing, hash)
 		}
 		all[i] = item
 	}

@@ -30,6 +30,10 @@ const (
 
 type Config struct {
 	AllowedOrigins []string
+	// ExposeHeaders names response headers, beyond the gRPC status headers
+	// every caller exposes, that browser scripts on an allowed origin may
+	// read.
+	ExposeHeaders []string
 }
 
 // Handler wraps next with CORS response headers. An empty AllowedOrigins
@@ -38,6 +42,10 @@ func Handler(next http.Handler, cfg Config) http.Handler {
 	allowedOrigins := normalizeOrigins(cfg.AllowedOrigins)
 	if len(allowedOrigins) == 0 {
 		return next
+	}
+	exposed := exposeHeaders
+	if len(cfg.ExposeHeaders) > 0 {
+		exposed += ", " + strings.Join(cfg.ExposeHeaders, ", ")
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
@@ -57,7 +65,7 @@ func Handler(next http.Handler, cfg Config) http.Handler {
 			); requestedHeaders != "" {
 				h.Set("Access-Control-Allow-Headers", requestedHeaders)
 			}
-			h.Set("Access-Control-Expose-Headers", exposeHeaders)
+			h.Set("Access-Control-Expose-Headers", exposed)
 		}
 		if r.Method == http.MethodOptions &&
 			origin != "" &&

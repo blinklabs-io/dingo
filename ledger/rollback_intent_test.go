@@ -17,16 +17,19 @@ package ledger
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -459,4 +462,141 @@ func TestEnsureRollbackIntentRetainsSupersededPayload(t *testing.T) {
 		gotSlots,
 		"a deeper rollback must retain the superseded record's payload",
 	)
+}
+
+func rollbackIntentRecord(blocks string) string {
+	return `{"format_version":1,"slot":1,"hash":"01","blocks":` + blocks + `}`
+}
+
+// A restored database can hold any string under the sync-state key. Recovery
+// must refuse a record that exceeds the limits the writer enforces before it
+// allocates one struct per element, or a few megabytes of "{}" would expand
+// into gigabytes of decoded blocks.
+func TestDecodeRollbackIntentRefusesRecordsBeyondWriterLimits(t *testing.T) {
+	t.Parallel()
+
+	emptyBlocks := func(n int) string {
+		return "[" + strings.Repeat("{},", n-1) + "{}]"
+	}
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{
+			name: "encoded size",
+			raw:  strings.Repeat(" ", maxRollbackIntentEncodedBytes+1),
+			want: "encoded size",
+		},
+		{
+			name: "block count",
+			raw:  rollbackIntentRecord(emptyBlocks(maxRollbackIntentBlocks + 1)),
+			want: "more than",
+		},
+		{
+			name: "trailing data",
+			raw:  rollbackIntentRecord("[]") + " {}",
+			want: "unexpected data",
+		},
+		{
+			name: "unknown field",
+			raw:  `{"format_version":1,"slot":1,"hash":"01","extra":"x"}`,
+			want: "unknown field",
+		},
+		{
+			name: "blocks not an array",
+			raw:  rollbackIntentRecord(`{}`),
+			want: "blocks is not an array",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := decodeRollbackIntent(tc.raw)
+			require.ErrorIs(t, err, errInvalidRollbackIntent)
+			require.ErrorContains(t, err, tc.want)
+		})
+	}
+}
+
+func TestDecodeRollbackIntentRefusesBlockBytesBeyondLimit(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("allocates the full durable payload limit")
+	}
+
+	data, err := json.Marshal(durableRollbackIntent{
+		Version: durableRollbackIntentVersion,
+		Slot:    new(uint64),
+		Hash:    new(string),
+		Blocks: []durableRollbackBlock{{
+			Cbor: make([]byte, maxRollbackIntentPayloadBytes+1),
+		}},
+	})
+	require.NoError(t, err)
+	require.LessOrEqual(
+		t,
+		len(data),
+		maxRollbackIntentEncodedBytes,
+		"the byte limit must be reachable under the encoded size limit",
+	)
+
+	_, err = decodeRollbackIntent(string(data))
+	require.ErrorIs(t, err, errInvalidRollbackIntent)
+	require.ErrorContains(t, err, "block bytes exceed")
+}
+
+func TestRollbackIntentAcceptsWriterMaximumBlockCount(t *testing.T) {
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	blocks := make([]models.Block, maxRollbackIntentBlocks)
+	for i := range blocks {
+		blocks[i] = models.Block{
+			Hash: []byte{byte(i), byte(i >> 8)},
+			Cbor: []byte{0x80},
+			Slot: uint64(i + 2),
+		}
+	}
+	point := ocommon.Point{Slot: 1, Hash: []byte{1}}
+	require.NoError(t, persistRollbackIntent(db, point, blocks))
+
+	gotPoint, gotBlocks, pending, err := loadRollbackIntent(db)
+	require.NoError(t, err)
+	require.True(t, pending)
+	require.Equal(t, point, gotPoint)
+	require.Len(t, gotBlocks, maxRollbackIntentBlocks)
+}
+
+func TestLoadRollbackIntentRefusesOversizedStoredRecord(t *testing.T) {
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	require.NoError(t, db.SetSyncState(
+		durableRollbackIntentSyncKey,
+		rollbackIntentRecord("["+strings.Repeat("{},", maxRollbackIntentBlocks)+"{}]"),
+		nil,
+	))
+
+	_, _, pending, err := loadRollbackIntent(db)
+	require.ErrorIs(t, err, errInvalidRollbackIntent)
+	require.False(t, pending)
+}
+
+// The stored value is sized inside the database, so an oversized record is
+// refused without being read into memory at all.
+func TestLoadRollbackIntentRefusesStoredRecordAboveEncodedLimit(t *testing.T) {
+	if testing.Short() {
+		t.Skip("stores a value above the durable encoded limit")
+	}
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	require.NoError(t, db.SetSyncState(
+		durableRollbackIntentSyncKey,
+		strings.Repeat(" ", maxRollbackIntentEncodedBytes+1),
+		nil,
+	))
+
+	_, _, pending, err := loadRollbackIntent(db)
+	require.ErrorIs(t, err, errInvalidRollbackIntent)
+	require.ErrorIs(t, err, metadata.ErrSyncStateTooLarge)
+	require.False(t, pending)
 }

@@ -23,6 +23,7 @@ import (
 	"net"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
@@ -169,6 +170,10 @@ type TrackedClient struct {
 	blockfetchThroughputSamples uint64
 	// Patience is the client's Genesis Limit on Patience bucket.
 	Patience PatienceState
+	// ingestHeld marks a client that existed while network ingest was
+	// held. Its cursor ran ahead of the chain with its headers dropped, so
+	// it stays held until the connection closes.
+	ingestHeld bool
 }
 
 // Config holds configuration for the chainsync State.
@@ -262,6 +267,11 @@ type State struct {
 	// roundRobinIndex is the rotation cursor for the round-robin header-sync
 	// strategy. Guarded by clientConnIdMutex.
 	roundRobinIndex uint64
+	// ingestHeld marks every client tracked while network ingest is held.
+	// Guarded by clientConnIdMutex. ingestHeldClients counts the marked
+	// clients so the unheld hot path reads one atomic and takes no lock.
+	ingestHeld        bool
+	ingestHeldClients atomic.Int64
 
 	// Header deduplication: maps slot -> list of distinct
 	// block hashes seen at that slot
@@ -627,6 +637,9 @@ func (s *State) removeClientConnId(
 	wasPrimary := s.activeClientConnId != nil &&
 		*s.activeClientConnId == connId
 	wasEligible := exists && tc != nil && !tc.ObservabilityOnly
+	if exists && tc != nil && tc.ingestHeld {
+		s.ingestHeldClients.Add(-1)
+	}
 	delete(s.trackedClients, connId)
 	peer, connectionID := blockfetchLatencyMetricLabels(connId)
 	s.blockfetchLatencyGauge.DeleteLabelValues(peer, connectionID)
@@ -679,7 +692,14 @@ func (s *State) addTrackedClientLocked(
 	observabilityOnly bool,
 	startedAsOutbound bool,
 ) *ClientAddedEvent {
+	if old := s.trackedClients[connId]; old != nil && old.ingestHeld {
+		s.ingestHeldClients.Add(-1)
+	}
+	if s.ingestHeld {
+		s.ingestHeldClients.Add(1)
+	}
 	s.trackedClients[connId] = &TrackedClient{
+		ingestHeld:        s.ingestHeld,
 		ConnId:            connId,
 		Status:            ClientStatusSyncing,
 		ObservabilityOnly: observabilityOnly,
@@ -906,6 +926,9 @@ func (s *State) SetClientObservabilityOnly(
 		if !exists {
 			return false
 		}
+		if !observabilityOnly && tc.Status == ClientStatusFailed {
+			return false
+		}
 		if tc.ObservabilityOnly == observabilityOnly {
 			return true
 		}
@@ -1049,6 +1072,83 @@ func (s *State) AdmitClientTip(
 	return true
 }
 
+// RecordHeldClientTip records the tip a tracked client reported while network
+// ingest is held. It moves neither the admitted cursor nor the delivery
+// watermark, since the header itself was dropped, but it refreshes the stall
+// clock: the peer is delivering. It reports whether the client is tracked.
+func (s *State) RecordHeldClientTip(
+	connId ouroboros.ConnectionId,
+	tip ochainsync.Tip,
+) bool {
+	s.clientConnIdMutex.Lock()
+	defer s.clientConnIdMutex.Unlock()
+	tc, exists := s.trackedClients[connId]
+	if !exists {
+		return false
+	}
+	tip.Point.Hash = cloneBytes(tip.Point.Hash)
+	tc.Tip = tip
+	tc.LastActivity = s.now()
+	if tc.Status == ClientStatusStalled {
+		tc.Status = ClientStatusSyncing
+	}
+	return true
+}
+
+// SetNetworkIngestHeld records that network ingest is now held or released.
+// Holding marks every tracked client, and every client tracked until the
+// release; a release stops marking new clients but leaves the marks, which
+// last until each client is removed.
+func (s *State) SetNetworkIngestHeld(held bool) {
+	s.clientConnIdMutex.Lock()
+	defer s.clientConnIdMutex.Unlock()
+	s.ingestHeld = held
+	if !held {
+		return
+	}
+	for _, tc := range s.trackedClients {
+		if !tc.ingestHeld {
+			tc.ingestHeld = true
+			s.ingestHeldClients.Add(1)
+		}
+	}
+}
+
+// ConnectionIngestHeld reports whether connId is a tracked client marked by
+// SetNetworkIngestHeld.
+func (s *State) ConnectionIngestHeld(connId ouroboros.ConnectionId) bool {
+	if s.ingestHeldClients.Load() == 0 {
+		return false
+	}
+	s.clientConnIdMutex.RLock()
+	defer s.clientConnIdMutex.RUnlock()
+	tc, exists := s.trackedClients[connId]
+	return exists && tc != nil && tc.ingestHeld
+}
+
+// PeerTipSlot returns the highest tip slot any tracked, ingress-eligible
+// client has reported, and false when none has reported a tip. An
+// observability-only client is excluded, so a random inbound peer cannot
+// inflate it.
+func (s *State) PeerTipSlot() (uint64, bool) {
+	s.clientConnIdMutex.RLock()
+	defer s.clientConnIdMutex.RUnlock()
+	var (
+		best  uint64
+		found bool
+	)
+	for _, tc := range s.trackedClients {
+		if tc.ObservabilityOnly || len(tc.Tip.Point.Hash) == 0 {
+			continue
+		}
+		if !found || tc.Tip.Point.Slot > best {
+			best = tc.Tip.Point.Slot
+			found = true
+		}
+	}
+	return best, found
+}
+
 // RecordClientDelivery counts a header delivered by a tracked client without
 // moving its admitted cursor or tip. A delivery refreshes the
 // stall clock only when it advances the client's delivery watermark, so replay
@@ -1063,15 +1163,51 @@ func (s *State) RecordClientDelivery(
 	if !exists {
 		return false
 	}
+	s.recordClientDeliveryLocked(tc, point)
+	return true
+}
+
+func (s *State) recordClientDeliveryLocked(
+	tc *TrackedClient,
+	point ocommon.Point,
+) {
 	tc.HeadersRecv++
 	if tc.deliverySeen && point.Slot <= tc.deliveryWatermark.Slot {
-		return true
+		return
 	}
 	setDeliveryWatermark(tc, point)
 	tc.LastActivity = s.now()
 	if tc.Status == ClientStatusStalled {
 		tc.Status = ClientStatusSyncing
 	}
+}
+
+// AdmitDeferredClientTip admits a header whose admission was deferred and
+// that the node has since applied, as the client's cursor and tip. When
+// recordDelivery is set it first accounts for the delivery as
+// RecordClientDelivery does; callers clear it when RecordClientDelivery
+// already counted the header. It changes nothing when the client's cursor is
+// already at or past point's slot, so a stale deferral cannot move back a
+// cursor that a later header advanced. It reports whether the cursor moved.
+func (s *State) AdmitDeferredClientTip(
+	connId ouroboros.ConnectionId,
+	point ocommon.Point,
+	tip ochainsync.Tip,
+	recordDelivery bool,
+) bool {
+	s.clientConnIdMutex.Lock()
+	defer s.clientConnIdMutex.Unlock()
+	tc, exists := s.trackedClients[connId]
+	if !exists || tc.Cursor.Slot >= point.Slot {
+		return false
+	}
+	if recordDelivery {
+		s.recordClientDeliveryLocked(tc, point)
+	}
+	point.Hash = cloneBytes(point.Hash)
+	tip.Point.Hash = cloneBytes(tip.Point.Hash)
+	tc.Cursor = point
+	tc.Tip = tip
 	return true
 }
 
@@ -1102,7 +1238,9 @@ func (s *State) UpdateClientRollback(
 	setDeliveryWatermark(tc, point)
 	if !noOp {
 		tc.LastActivity = s.now()
-		tc.Status = ClientStatusSyncing
+		if tc.Status != ClientStatusFailed {
+			tc.Status = ClientStatusSyncing
+		}
 	}
 	s.resumePatienceAfterRollbackLocked(tc, point, tip, active)
 	return true
@@ -1155,17 +1293,20 @@ func (s *State) RewindTrackedClientsTo(
 			Slot: point.Slot,
 			Hash: cloneBytes(point.Hash),
 		}
-		tc.Status = ClientStatusSyncing
+		if tc.Status != ClientStatusFailed {
+			tc.Status = ClientStatusSyncing
+		}
 		tc.LastActivity = s.now()
 		ret = append(ret, connId)
 	}
 	return ret
 }
 
-// RecordObservedHeader stores the raw per-connection header ancestry before
-// cross-peer dedup can suppress delivery into the ledger queue. This lets
-// fork resolution reconstruct the selected peer's candidate fragment even
-// when earlier headers were first seen from another peer.
+// RecordObservedHeader stores raw per-connection header ancestry before
+// cross-peer dedup can suppress delivery into the ledger queue. A zero
+// verification generation marks a deferred or withheld header; ledger fork
+// resolution can use it only as candidate-path input and must validate the
+// complete linked path before caching a verdict.
 func (s *State) RecordObservedHeader(h ObservedHeader) {
 	if h.BlockHeader == nil || len(h.Point.Hash) == 0 {
 		return
@@ -1269,7 +1410,8 @@ func (s *State) ClearObservedHeaderHistory(
 }
 
 // ClearObservedHeaderHistoryFrom removes a rejected header and every header
-// observed after it while retaining the independently verified prefix. When
+// observed after it while retaining the earlier candidate prefix. Entries
+// with no current verdict remain untrusted and are revalidated when used. When
 // the rejected hash is not retained, removal starts at the first retained
 // header at or beyond the point's slot; if none exists, the history is kept.
 func (s *State) ClearObservedHeaderHistoryFrom(
@@ -1431,6 +1573,20 @@ func sameTrackedNetAddr(a, b net.Addr) bool {
 	return a.String() == b.String()
 }
 
+// MarkClientFailed excludes a tracked client until its connection is removed.
+func (s *State) MarkClientFailed(connId ouroboros.ConnectionId) bool {
+	s.clientConnIdMutex.Lock()
+	tc, exists := s.trackedClients[connId]
+	if exists {
+		tc.Status = ClientStatusFailed
+	}
+	s.clientConnIdMutex.Unlock()
+	if !exists {
+		return false
+	}
+	return s.SetClientObservabilityOnly(connId, true)
+}
+
 // MarkClientSynced marks a tracked client as synced (at chain
 // tip).
 func (s *State) MarkClientSynced(
@@ -1439,7 +1595,8 @@ func (s *State) MarkClientSynced(
 	s.clientConnIdMutex.Lock()
 	tc, exists := s.trackedClients[connId]
 	var changed bool
-	if exists && tc.Status != ClientStatusSynced {
+	if exists && tc.Status != ClientStatusSynced &&
+		tc.Status != ClientStatusFailed {
 		tc.Status = ClientStatusSynced
 		tc.LastActivity = s.now()
 		changed = true

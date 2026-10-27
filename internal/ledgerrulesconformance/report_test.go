@@ -20,6 +20,10 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 )
 
 func TestOutsideForecastMatchesExpectedMessage(t *testing.T) {
@@ -40,14 +44,21 @@ func TestOutsideForecastMatchesExpectedMessage(t *testing.T) {
 	}
 }
 
-func TestUnelectedCommitteeVoterIsNotUnknownVoter(t *testing.T) {
+func TestUnelectedCommitteeVoterIsReportedAsVotersDoNotExist(t *testing.T) {
 	t.Parallel()
-	err := errors.New("conway utxo validation rule 60: committee voter is not elected")
-	if predicateMatches(err, expectedDoc{Predicate: "VotersDoNotExist"}) {
-		t.Fatal("an unelected committee voter matched VotersDoNotExist")
+	err := errors.New(
+		"conway utxo validation rule 60: committee voter is not elected",
+	)
+	for _, predicate := range []string{"VotersDoNotExist", "UnelectedCommitteeVoters"} {
+		if !predicateMatches(err, expectedDoc{Predicate: predicate}) {
+			t.Fatalf("an unelected committee voter did not match %s", predicate)
+		}
 	}
-	if !predicateMatches(err, expectedDoc{Predicate: "UnelectedCommitteeVoters"}) {
-		t.Fatal("an unelected committee voter did not match UnelectedCommitteeVoters")
+	if predicateMatches(
+		errors.New("vote cast by unknown voter"),
+		expectedDoc{Predicate: "UnelectedCommitteeVoters"},
+	) {
+		t.Fatal("an unknown voter matched UnelectedCommitteeVoters")
 	}
 }
 
@@ -90,6 +101,18 @@ func TestObservedLedgerResult(t *testing.T) {
 		ok       bool
 	}{
 		{"accepted", "transaction accepted", "pass", true},
+		{
+			"unregistered DRep",
+			"rejected: " + (conway.DRepNotRegisteredError{}).Error(),
+			"DRepNotRegistered",
+			true,
+		},
+		{
+			"unregistered stake key",
+			"rejected: " + (conway.StakeCredentialNotRegisteredError{}).Error(),
+			"StakeKeyNotRegistered",
+			true,
+		},
 		{"decoded", "transaction decoded successfully", "pass", true},
 		{
 			"decoding failure",
@@ -106,7 +129,7 @@ func TestObservedLedgerResult(t *testing.T) {
 		{
 			"unelected committee voter",
 			"rejected: conway utxo validation rule 60: committee voter is not elected",
-			"UnelectedCommitteeVoters",
+			"VotersDoNotExist",
 			true,
 		},
 		{"unmapped rejection", "rejected: something novel", "", false},
@@ -120,6 +143,118 @@ func TestObservedLedgerResult(t *testing.T) {
 					"observedLedgerResult(%q) = %q, %v; want %q, %v",
 					tc.observed, got, ok, tc.want, tc.ok,
 				)
+			}
+		})
+	}
+}
+
+func TestUnregisteredDelegationPredicate(t *testing.T) {
+	t.Parallel()
+	credential := common.Credential{CredType: common.CredentialTypeAddrKeyHash}
+	other := credential
+	other.Credential[0] = 1
+	script := credential
+	script.CredType = common.CredentialTypeScriptHash
+	pool := &common.StakeDelegationCertificate{StakeCredential: &credential}
+	vote := &common.VoteDelegationCertificate{StakeCredential: credential}
+	combined := &common.StakeVoteDelegationCertificate{
+		StakeCredential: credential,
+	}
+	delegationErr := conway.DelegateUnregisteredStakeCredentialError{
+		Credential: credential,
+	}
+	for _, tc := range []struct {
+		name         string
+		certificates []common.Certificate
+		err          error
+		want         string
+	}{
+		{"pool", []common.Certificate{pool}, delegationErr, "StakeCredentialInvalidPoolDelegation"},
+		{"vote", []common.Certificate{vote}, delegationErr, "StakeCredentialInvalidVoteDelegation"},
+		{"stake and vote", []common.Certificate{combined}, delegationErr, "StakeCredentialInvalidVoteDelegation"},
+		{"pool before vote", []common.Certificate{pool, vote}, delegationErr, "StakeCredentialInvalidPoolDelegation"},
+		{"vote before pool", []common.Certificate{vote, pool}, delegationErr, "StakeCredentialInvalidVoteDelegation"},
+		{
+			"different hash before vote",
+			[]common.Certificate{&common.StakeDelegationCertificate{StakeCredential: &other}, vote},
+			delegationErr,
+			"StakeCredentialInvalidVoteDelegation",
+		},
+		{
+			"different credential type before vote",
+			[]common.Certificate{&common.StakeDelegationCertificate{StakeCredential: &script}, vote},
+			delegationErr,
+			"StakeCredentialInvalidVoteDelegation",
+		},
+		{"unrelated error", []common.Certificate{vote}, conway.DRepNotRegisteredError{}, ""},
+		{"accepted", []common.Certificate{vote}, nil, ""},
+		{"no matching certificate", []common.Certificate{}, delegationErr, ""},
+		{"joined error", []common.Certificate{vote}, errors.Join(errors.New("another rule"), delegationErr), "StakeCredentialInvalidVoteDelegation"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tx := &conway.ConwayTransaction{}
+			for _, cert := range tc.certificates {
+				tx.Body.TxCertificates = append(
+					tx.Body.TxCertificates,
+					common.CertificateWrapper{Certificate: cert},
+				)
+			}
+			state := mockledger.NewLedgerStateBuilder().Build()
+			if got := unregisteredDelegationPredicate(tx, state, tc.err); got != tc.want {
+				t.Fatalf("delegation predicate = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestUnregisteredDelegationPredicateTracksRegistration(t *testing.T) {
+	t.Parallel()
+	credential := common.Credential{CredType: common.CredentialTypeAddrKeyHash}
+	pool := &common.StakeDelegationCertificate{StakeCredential: &credential}
+	vote := &common.VoteDelegationCertificate{StakeCredential: credential}
+	registration := &common.RegistrationCertificate{StakeCredential: credential}
+	deregistration := &common.DeregistrationCertificate{
+		StakeCredential: credential,
+	}
+	for _, tc := range []struct {
+		name         string
+		certificates []common.Certificate
+		want         string
+	}{
+		{
+			"pool then deregister then vote",
+			[]common.Certificate{pool, deregistration, vote},
+			"StakeCredentialInvalidVoteDelegation",
+		},
+		{
+			"vote then deregister then pool",
+			[]common.Certificate{vote, deregistration, pool},
+			"StakeCredentialInvalidPoolDelegation",
+		},
+		{
+			"re-register then delegate then deregister then vote",
+			[]common.Certificate{deregistration, registration, pool, deregistration, vote},
+			"StakeCredentialInvalidVoteDelegation",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tx := &conway.ConwayTransaction{}
+			for _, cert := range tc.certificates {
+				tx.Body.TxCertificates = append(
+					tx.Body.TxCertificates,
+					common.CertificateWrapper{Certificate: cert},
+				)
+			}
+			state := mockledger.NewLedgerStateBuilder().
+				WithStakeCredentialRegistered(credential.Credential, true).
+				Build()
+			err := conway.DelegateUnregisteredStakeCredentialError{
+				Credential: credential,
+			}
+			if got := unregisteredDelegationPredicate(tx, state, err); got != tc.want {
+				t.Fatalf("delegation predicate = %q, want %q", got, tc.want)
 			}
 		})
 	}
@@ -148,7 +283,10 @@ func TestReportJSONFields(t *testing.T) {
 	t.Parallel()
 	data, err := json.Marshal(Report{
 		SchemaVersion:  schemaVersion,
+		Scenario:       "ledger-rules",
+		GeneratedAt:    "2026-10-24T00:00:00Z",
 		Implementation: map[string]string{"name": "dingo"},
+		Totals:         Totals{Total: 1, Passed: 1},
 		Scenarios:      []CaseOutcome{{ID: "00001", Result: "pass"}},
 	})
 	if err != nil {
@@ -157,6 +295,21 @@ func TestReportJSONFields(t *testing.T) {
 	var got map[string]any
 	if err := json.Unmarshal(data, &got); err != nil {
 		t.Fatal(err)
+	}
+	keys := []string{
+		"version",
+		"scenario",
+		"generated_at",
+		"implementation",
+		"scenarios",
+	}
+	if len(got) != len(keys) {
+		t.Fatalf("report fields = %s, want %v", data, keys)
+	}
+	for _, key := range keys {
+		if _, ok := got[key]; !ok {
+			t.Errorf("report is missing %q", key)
+		}
 	}
 	if got["version"] != schemaVersion {
 		t.Fatalf("version = %v", got["version"])

@@ -1,0 +1,18 @@
+# Generated automatically by org-governance-bot. Do not edit manually.
+name: "release-fanout"
+
+on:
+  workflow_run:
+    types:
+      - completed
+    workflows:
+      - publish
+
+permissions:
+  contents: read
+
+jobs:
+  orchestrate:
+    uses: blinklabs-io/actions/.github/workflows/reuseable-release-dispatch.yml@e0caeb743570431ebc4e26aeea54cdf8ab6a0a33
+    secrets:
+      token: ${{ secrets.ORG_PROJECT_PAT }}

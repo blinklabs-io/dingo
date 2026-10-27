@@ -15,6 +15,8 @@
 package ledger
 
 import (
+	"bytes"
+	"encoding/hex"
 	"io"
 	"log/slog"
 	"math/big"
@@ -778,33 +780,52 @@ func poolDistr2CborQuery() *olocalstatequery.BlockQuery {
 	}
 }
 
+// poolDistr2ExpectedBody is the literal CBOR a cardano-node produces for a
+// PoolDistr holding one pool (28 bytes of 0x11) that holds all 3,000,000
+// lovelace of active stake with a 32-byte VRF hash of 0xAA, below protocol
+// version 12 (no BLS field). Layout from cardano-ledger
+// State/PoolDistr.hs (Rec PoolDistr: array(2) [map, total]) and
+// Api/State/Query.hs (QueryResultIndividualPoolStake: array(3) [rational,
+// pool stake, VRF hash]; array(4) with a BLS field only from version 12).
+func poolDistr2ExpectedBody() []byte {
+	var b []byte
+	b = append(b, 0x82)       // array(2): PoolDistr
+	b = append(b, 0xa1)       // map(1)
+	b = append(b, 0x58, 0x1c) // bytes(28): pool key hash
+	b = append(b, bytes.Repeat([]byte{0x11}, 28)...)
+	b = append(b, 0x83)                         // array(3): individual stake
+	b = append(b, 0xd8, 0x1e)                   // tag 30: rational
+	b = append(b, 0x82, 0x01, 0x01)             // [1, 1]
+	b = append(b, 0x1a, 0x00, 0x2d, 0xc6, 0xc0) // 3000000
+	b = append(b, 0x58, 0x20)                   // bytes(32): VRF hash
+	b = append(b, bytes.Repeat([]byte{0xAA}, 32)...)
+	b = append(b, 0x1a, 0x00, 0x2d, 0xc6, 0xc0) // total active stake
+	return b
+}
+
+func seedPoolDistr2SinglePool(t *testing.T) *LedgerState {
+	t.Helper()
+	db := newTestDB(t)
+	seedPoolDistr2Fixture(
+		t,
+		db,
+		bytes.Repeat([]byte{0x11}, 28),
+		bytes.Repeat([]byte{0xAA}, 32),
+		3_000_000,
+		0,
+	)
+	return newPoolDistr2Ledger(t, db)
+}
+
 // TestQueryShelleyPoolDistr2_ViaGetCBOR covers GetPoolDistr2 wrapped in the
-// GetCBOR combinator (queryShelleyCbor), a path distinct from the direct
-// query the rest of this file exercises.
-//
-// queryShelleyPoolDistr2's fix -- returning the result's two fields
-// destructured into a []any instead of the whole PoolDistr2Result struct --
-// changed the shape queryShelleyCbor sees from its wrapped inner query: one
-// element (the struct) before the fix, two (the fields) after. Before
-// queryShelleyCbor was updated to match, that regressed a case that used to
-// work by accident: the CBOR round trip below is what would have caught it.
+// GetCBOR combinator (queryShelleyCbor). The tag-24 content must be exactly
+// the PoolDistr a node encodes, [pool map, total active stake], with no
+// extra array around it. The expected bytes are literal, derived from the
+// Haskell layout, not from a gOuroboros decode.
 func TestQueryShelleyPoolDistr2_ViaGetCBOR(t *testing.T) {
 	t.Parallel()
 
-	db := newTestDB(t)
-
-	vrfA := make([]byte, 32)
-	for i := range vrfA {
-		vrfA[i] = 0xAA
-	}
-	poolA := make([]byte, 28)
-	for i := range poolA {
-		poolA[i] = 0x11
-	}
-	const snapshotEpoch = 0
-	pkhA := seedPoolDistr2Fixture(t, db, poolA, vrfA, 3_000_000, snapshotEpoch)
-
-	ls := newPoolDistr2Ledger(t, db)
+	ls := seedPoolDistr2SinglePool(t)
 
 	result, err := ls.Query(t.Context(), poolDistr2CborQuery(), QueryPoint{})
 	require.NoError(t, err, "GetCBOR-wrapped GetPoolDistr2 must not error")
@@ -823,17 +844,54 @@ func TestQueryShelleyPoolDistr2_ViaGetCBOR(t *testing.T) {
 		"tag content must be raw CBOR bytes, got %T",
 		tag.Content,
 	)
+	assert.Equal(t, hex.EncodeToString(poolDistr2ExpectedBody()),
+		hex.EncodeToString(content))
+}
 
-	// The tag-24 content must decode via the same real client-side type a
-	// direct (non-GetCBOR) GetPoolDistr2 reply does: proof that GetCBOR
-	// carries the identical value, just CBOR-in-CBOR encoded.
-	var wrapped olocalstatequery.StakeDistribution2Result
-	_, err = cbor.Decode(content, &wrapped)
-	require.NoError(t, err, "tag-24 content must decode as a StakeDistribution2Result")
-	distr := wrapped.Distribution
+// TestQueryShelleyPoolDistr2_DirectReplyBytes pins the direct (non-GetCBOR)
+// reply: the single-element era result wrapper around the PoolDistr.
+func TestQueryShelleyPoolDistr2_DirectReplyBytes(t *testing.T) {
+	t.Parallel()
 
-	entryA, ok := distr.Pools[lcommon.PoolId(pkhA)]
-	require.True(t, ok, "pool missing from the GetCBOR-wrapped distribution")
-	assert.Equal(t, uint64(3_000_000), entryA.TotalPoolStake)
-	assert.Equal(t, uint64(3_000_000), distr.TotalActiveStake)
+	ls := seedPoolDistr2SinglePool(t)
+	query := &olocalstatequery.BlockQuery{
+		Query: &olocalstatequery.ShelleyQuery{
+			Query: &olocalstatequery.ShelleyPoolDistr2Query{
+				Type: olocalstatequery.QueryTypeShelleyPoolDistr2,
+			},
+		},
+	}
+	result, err := ls.Query(t.Context(), query, QueryPoint{})
+	require.NoError(t, err)
+	encoded, err := cbor.Encode(&result)
+	require.NoError(t, err)
+	want := append([]byte{0x81}, poolDistr2ExpectedBody()...)
+	assert.Equal(t, hex.EncodeToString(want), hex.EncodeToString(encoded))
+}
+
+// TestQueryShelleyStakeDistribution2_ViaGetCBORBytes pins GetStakeDistribution2
+// under GetCBOR to the node's PoolDistr encoding (Rec PoolDistr), identical in
+// layout to the GetPoolDistr2 reply.
+func TestQueryShelleyStakeDistribution2_ViaGetCBORBytes(t *testing.T) {
+	t.Parallel()
+
+	ls := seedPoolDistr2SinglePool(t)
+	query := &olocalstatequery.BlockQuery{
+		Query: &olocalstatequery.ShelleyQuery{
+			Query: &olocalstatequery.ShelleyCborQuery{
+				Query: &olocalstatequery.ShelleyStakeDistribution2Query{},
+			},
+		},
+	}
+	result, err := ls.Query(t.Context(), query, QueryPoint{})
+	require.NoError(t, err)
+	arr, ok := result.([]any)
+	require.True(t, ok)
+	require.Len(t, arr, 1)
+	tag, ok := arr[0].(cbor.Tag)
+	require.True(t, ok, "expected a tag-24 CBOR.Tag, got %T", arr[0])
+	content, ok := tag.Content.([]byte)
+	require.True(t, ok)
+	assert.Equal(t, hex.EncodeToString(poolDistr2ExpectedBody()),
+		hex.EncodeToString(content))
 }

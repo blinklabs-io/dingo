@@ -419,6 +419,10 @@ func seedByronUtxoWithAmount(
 	return seedByronUtxoAt(t, db, txIdSeed, 0, addr, amount)
 }
 
+// byronMaxLovelace is the largest amount a Byron transaction output can
+// carry; larger amounts no longer decode.
+const byronMaxLovelace = 45_000_000_000_000_000
+
 // seedByronUtxoAt stores a Byron UTxO at the given output index.
 func seedByronUtxoAt(
 	t *testing.T,
@@ -551,7 +555,7 @@ func TestApplyIntraEraHardForkRule_Pv3_CreditsOnlyAvvmValue(t *testing.T) {
 	require.NoError(t, err)
 	avvmTxID := seedByronUtxoWithAmount(t, db, 0xAA, redeemAddr, 1)
 	pubkeyTxID := seedByronUtxoWithAmount(
-		t, db, 0xBB, pubkeyAddr, math.MaxUint64,
+		t, db, 0xBB, pubkeyAddr, byronMaxLovelace,
 	)
 	require.NoError(t, db.Metadata().SetNetworkState(0, 0, 100, nil))
 
@@ -602,14 +606,15 @@ func TestApplyIntraEraHardForkRule_Pv3_RejectsOverflow(t *testing.T) {
 			lcommon.ByronAddressAttributes{},
 		)
 		require.NoError(t, err)
-		first := seedByronUtxoWithAmount(
-			t,
-			db,
-			0xAA,
-			redeemAddr,
-			math.MaxUint64,
-		)
-		second := seedByronUtxoWithAmount(t, db, 0xBB, redeemAddr, 1)
+		// A Byron output cannot exceed byronMaxLovelace, so the AVVM total
+		// only overflows uint64 across many outputs.
+		const outputs = math.MaxUint64/byronMaxLovelace + 2
+		var txIDs [][]byte
+		for i := range uint32(outputs) {
+			txIDs = append(txIDs, seedByronUtxoAt(
+				t, db, 0xAA, i, redeemAddr, byronMaxLovelace,
+			))
+		}
 		require.NoError(
 			t,
 			db.Metadata().SetNetworkState(7_000, 5_000, 100, nil),
@@ -618,8 +623,10 @@ func TestApplyIntraEraHardForkRule_Pv3_RejectsOverflow(t *testing.T) {
 		ls := newTestLSForHardForkRule(t, db)
 		err = ls.applyIntraEraHardForkRule(context.Background(), nil, 3, 200, 1)
 		require.ErrorContains(t, err, "AVVM lovelace total overflows uint64")
-		for _, txID := range [][]byte{first, second} {
-			_, lookupErr := db.UtxoByRef(context.Background(), txID, 0, nil)
+		for i, txID := range txIDs {
+			_, lookupErr := db.UtxoByRef(
+				context.Background(), txID, uint32(i), nil,
+			)
 			require.NoError(t, lookupErr)
 		}
 		state, stateErr := db.Metadata().GetNetworkState(nil)

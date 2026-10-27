@@ -20,7 +20,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"math"
 	"sync"
 	"time"
 
@@ -104,15 +103,14 @@ func (ls *LedgerState) rejectLeiosCertifyingBlock(
 
 const certifiedEndorserBlockRetryDelay = time.Second
 
-// decodeEndorserTxEnvelope unwraps one endorser-block transaction entry and
-// splits it into its transaction CBOR and its top-level array elements.
+// decodeEndorserTxEnvelope splits one endorser-block transaction entry into
+// its CBOR and its top-level array elements.
 //
-// leios-fetch carries each endorser transaction CBOR-in-CBOR: the tx_list entry
-// is a CBOR byte string wrapping the transaction's own CBOR
-// (LeiosTx = encodeBytes(txCbor)). A non-byte-string entry — major type != 2 —
-// is already the bare transaction. elems[0] is the transaction body, which is
-// both the transaction-offset payload and, hashed, the transaction id.
-// Both decodes read bytes a peer delivered over leios-fetch, so they go
+// leios-fetch delivers each entry already unwrapped from its tag-24 byte
+// string, so the entry is the Dijkstra block_transaction itself,
+// [body, witnesses, auxiliary_data / null, is_valid]. elems[0] is the
+// transaction body, which is both the transaction-offset payload and, hashed,
+// the transaction id. The decode reads bytes a peer delivered, so it goes
 // through safedecode.Cbor: a decoder panic becomes the error this function
 // already returns instead of unwinding into whatever goroutine is applying
 // the endorser block. The function decodes into locals and returns them, so
@@ -121,23 +119,13 @@ func decodeEndorserTxEnvelope(
 	raw cbor.RawMessage,
 ) (txCbor []byte, elems []cbor.RawMessage, err error) {
 	txCbor = []byte(raw)
-	if len(txCbor) > 0 && txCbor[0]>>5 == 2 {
-		inner, _, err := safedecode.Cbor[[]byte](txCbor)
-		if err != nil {
-			return nil, nil, fmt.Errorf(
-				"unwrap CBOR-in-CBOR entry: %w",
-				err,
-			)
-		}
-		txCbor = inner
-	}
 	elems, _, err = safedecode.Cbor[[]cbor.RawMessage](txCbor)
 	if err != nil {
 		return nil, nil, fmt.Errorf("decode envelope: %w", err)
 	}
-	if len(elems) < 2 {
+	if len(elems) != 4 {
 		return nil, nil, fmt.Errorf(
-			"envelope has %d elements, want >= 2",
+			"envelope has %d elements, want 4",
 			len(elems),
 		)
 	}
@@ -243,15 +231,15 @@ func (ls *LedgerState) applyEndorserBlockInContext(
 			)}
 		}
 		// An endorser block referenced by a Dijkstra ranking block is
-		// Dijkstra-era, so decode its transactions as Dijkstra directly.
-		// DetermineTransactionType is heuristic and cannot reliably identify a
-		// bare standalone transaction without block/era context (it returns
-		// "unknown transaction type" for these), so it must not be used here.
+		// Dijkstra-era, and its transactions are block_transactions whose
+		// is_valid flag decides whether outputs or collateral apply, so they
+		// decode through the block-transaction form rather than as standalone
+		// transactions, which cannot carry is_valid=false.
 		// Peer-supplied transaction bytes, decoded before any storage is
 		// mutated, so the guard cannot convert a crash into a partially
 		// applied endorser block: every return below this loop's decode
 		// failure leaves the ledger untouched.
-		tx, err := safedecode.Transaction(ledger.TxTypeDijkstra, txCbor)
+		tx, err := safedecode.DijkstraBlockTransaction(txCbor)
 		if err != nil {
 			return 0, 0, &leiosEndorserBlockValidationError{err: fmt.Errorf(
 				"decode endorser tx %d: %w",
@@ -391,11 +379,16 @@ func (ls *LedgerState) validateAndApplyEndorserBlockTransactions(
 				epochStartSlot:    snapshot.currentEpochStartSlot,
 			}).pinCommitteeState(snapshot.currentEpoch, pp).
 				pinSyntheticV2CostModel(synthetic)
+			validateStart := time.Now()
 			err = validationEra.ValidateTxFunc(
 				tx,
 				referenceSlot,
 				lv,
 				pp,
+			)
+			ls.metrics.observeBlockStage(
+				blockStageValidate,
+				time.Since(validateStart),
 			)
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return 0, 0, ctxErr
@@ -436,7 +429,9 @@ func (ls *LedgerState) validateAndApplyEndorserBlockTransactions(
 			applyEvents = append(applyEvents, events...)
 		}
 		delta.addTransaction(tx, idx)
+		applyStart := time.Now()
 		err = delta.applyWithoutRecordingDonations(ctx, ls, txn)
+		ls.metrics.observeBlockStage(blockStageApply, time.Since(applyStart))
 		if err == nil {
 			donation, err = addUint64(donation, delta.donation)
 		}
@@ -597,7 +592,7 @@ func buildEndorserBlockBlob(
 	}
 	writeRange := func(b []byte) (uint32, uint32, error) {
 		off := buf.Len()
-		if off > math.MaxUint32 || len(b) > math.MaxUint32 {
+		if !fitsUint32(off) || !fitsUint32(len(b)) {
 			return 0, 0, errors.New(
 				"endorser block blob offset out of uint32 range",
 			)
@@ -610,7 +605,7 @@ func buildEndorserBlockBlob(
 		levels := TransactionLevelsForApply(tx)
 		for levelIdx, level := range levels {
 			// The last level is always the enclosing transaction, and its
-			// Cbor() is the whole [body, witnesses, isValid, aux] envelope
+			// Cbor() is the whole block_transaction envelope
 			// whether or not it carries sub-transactions. Store its body
 			// element, as BlockIndexer.TxOffsets does under the same hash.
 			// Only sub-transaction levels expose their own body bytes.

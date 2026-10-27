@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"math"
 	"net"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -577,6 +578,52 @@ func TestPeerTipAdmissionCandidatesStayOutOfSelectionUntilAdmitted(t *testing.T)
 	assert.Nil(t, cs.pendingPeerTipFrontiers[applicant])
 }
 
+func TestForecastHorizonWitnessRecoversVerifiedCandidate(t *testing.T) {
+	t.Parallel()
+
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:           true,
+		SecurityParam:         20,
+		MinCorroboratingPeers: 1,
+	})
+	candidate := corrConn(21)
+	witness := corrConn(22)
+	for _, connId := range []ouroboros.ConnectionId{candidate, witness} {
+		feedFrontier(cs, connId,
+			genesisTip(100, "h100", 100),
+			genesisTip(105, "h105", 101),
+		)
+	}
+	update := PeerTipUpdateEvent{
+		ConnectionId:                       candidate,
+		AdmissionID:                        1,
+		Tip:                                genesisTip(110, "h110", 102),
+		ObservedTip:                        genesisTip(110, "h110", 102),
+		ObservedPrevHash:                   []byte("h105"),
+		HeaderCryptoVerificationGeneration: 1,
+	}
+	require.True(t, cs.PreparePeerTipAdmission(update))
+	require.False(t, cs.ShouldApplyIngress(candidate),
+		"a verified candidate must wait for a witness at its current point")
+
+	horizonUpdate := PeerTipUpdateEvent{
+		ConnectionId:     witness,
+		AdmissionID:      2,
+		Tip:              genesisTip(110, "h110", 102),
+		ObservedTip:      genesisTip(110, "h110", 102),
+		ObservedPrevHash: []byte("h105"),
+	}
+	recoveries := cs.PrepareForecastHorizonWitness(horizonUpdate)
+	require.Equal(t, []ouroboros.ConnectionId{candidate}, recoveries)
+	require.True(t, cs.ShouldApplyIngress(candidate))
+	require.Equal(t, uint64(105), cs.GetAllPeerTips()[witness].ObservedTip.Point.Slot,
+		"an unverified horizon header must stay outside normal peer state")
+
+	cs.RemoveForecastHorizonWitness(horizonUpdate)
+	require.False(t, cs.ShouldApplyIngress(candidate),
+		"the temporary witness must stop corroborating when its wait ends")
+}
+
 func TestStaleHeaderVerificationGenerationCannotCorroborate(t *testing.T) {
 	t.Parallel()
 
@@ -668,6 +715,115 @@ func TestPinnedPeerTipAdmissionDoesNotRepinDuringEvaluation(t *testing.T) {
 	assert.Zero(t, pinCalls.Load(),
 		"a ledger-pinned admission must not acquire the generation lock again")
 	assert.Contains(t, cs.GetAllPeerTips(), connId)
+}
+
+// generationRWMutexPin models the ledger's generation pin: a read lock on a
+// sync.RWMutex, which admits no new reader once a writer is waiting.
+type generationRWMutexPin struct {
+	mu          sync.RWMutex
+	queueOnPin  atomic.Bool
+	writerDone  chan struct{}
+	writerStart sync.Once
+}
+
+func newGenerationRWMutexPin() *generationRWMutexPin {
+	return &generationRWMutexPin{writerDone: make(chan struct{})}
+}
+
+func (p *generationRWMutexPin) pin(uint64) (func(), bool) {
+	p.mu.RLock()
+	var once sync.Once
+	release := func() { once.Do(p.mu.RUnlock) }
+	if p.queueOnPin.CompareAndSwap(true, false) {
+		p.queueWriter()
+	}
+	return release, true
+}
+
+// queueWriter starts a snapshot publisher and returns once it is waiting for
+// the held read lock.
+func (p *generationRWMutexPin) queueWriter() {
+	p.writerStart.Do(func() {
+		go func() {
+			p.mu.Lock()
+			close(p.writerDone)
+			p.mu.Unlock()
+		}()
+		for p.mu.TryRLock() {
+			p.mu.RUnlock()
+			runtime.Gosched()
+		}
+	})
+}
+
+func (p *generationRWMutexPin) config() ChainSelectorConfig {
+	return ChainSelectorConfig{
+		HeaderCryptoVerificationGenerationCurrent: func(uint64) bool {
+			return true
+		},
+		CurrentHeaderCryptoVerificationGeneration: func() uint64 { return 1 },
+		PinHeaderCryptoVerificationGeneration:     p.pin,
+	}
+}
+
+// A commit that holds the generation pin must not take it again while
+// evaluating: a publisher queued between the two read locks blocks the second
+// one, and the publisher waits for the first, so neither ever proceeds.
+func TestPinnedPeerTipCommitDoesNotRepinBehindQueuedPublisher(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		admissionID uint64
+		callerPin   bool
+	}{
+		{name: "caller pin, unstaged candidate", admissionID: 1, callerPin: true},
+		{name: "caller pin, legacy update", admissionID: 0, callerPin: true},
+		{name: "selector pin, unstaged candidate", admissionID: 1},
+	}
+	for i, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			gen := newGenerationRWMutexPin()
+			cs := NewChainSelector(gen.config())
+			update := PeerTipUpdateEvent{
+				ConnectionId:                       corrConn(60 + i),
+				AdmissionID:                        tc.admissionID,
+				Tip:                                genesisTip(100, "h100", 100),
+				ObservedTip:                        genesisTip(100, "h100", 100),
+				HeaderCryptoVerificationGeneration: 1,
+			}
+			committed := make(chan bool, 1)
+			if tc.callerPin {
+				release, current := gen.pin(1)
+				require.True(t, current)
+				gen.queueWriter()
+				go func() {
+					defer release()
+					committed <- cs.CommitPeerTipAdmissionPinned(update)
+				}()
+			} else {
+				gen.queueOnPin.Store(true)
+				go func() {
+					committed <- cs.CommitPeerTipAdmission(update)
+				}()
+			}
+			assert.True(t, testutil.RequireReceive(
+				t,
+				committed,
+				testutil.AsyncWait,
+				"pinned commit deadlocked re-pinning behind a queued publisher",
+			))
+			testutil.RequireReceive(
+				t,
+				gen.writerDone,
+				testutil.AsyncWait,
+				"publisher did not proceed after the commit released its pin",
+			)
+			assert.Contains(t, cs.GetAllPeerTips(), update.ConnectionId)
+		})
+	}
 }
 
 func TestImmediatePeerTipAdmissionAcquiresGenerationPin(t *testing.T) {

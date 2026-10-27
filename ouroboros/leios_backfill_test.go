@@ -26,7 +26,6 @@ import (
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	ouroboros "github.com/blinklabs-io/gouroboros"
-	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/protocol"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/blinklabs-io/gouroboros/protocol/leiosfetch"
@@ -470,7 +469,7 @@ func TestFetchLeiosEbTxsBatchedUntilPastDeadline(t *testing.T) {
 	o := &Ouroboros{}
 	o.config.LeiosTxFetchTailBudget = time.Minute // would otherwise keep retrying
 	point := ocommon.Point{Slot: 100, Hash: []byte{0x01, 0x02}}
-	requester := &cappingBlockTxsRequester{maxPerResp: 50}
+	requester := &cappingBlockTxsRequester{}
 
 	txs, err := o.fetchLeiosEbTxsBatchedUntil(
 		context.Background(),
@@ -502,8 +501,8 @@ func TestLeiosFetchResponseTimeoutFitsBackfillAttempt(t *testing.T) {
 	)
 }
 
-// dribbleBlockTxsRequester simulates a slow-but-alive relay that always serves a
-// little (one transaction per request) but takes real time per round, so the
+// dribbleBlockTxsRequester simulates a slow-but-alive relay that answers every
+// request in full but takes real time per round, so the
 // leios-fetch protocol per-message timeout never fires yet the fetch never
 // promptly completes. The per-round latency exercises the wall-clock per-attempt
 // deadline (it is relay-latency simulation, not goroutine synchronization).
@@ -522,23 +521,13 @@ func (r *dribbleBlockTxsRequester) BlockTxsRequest(
 	requested := leiosBitmapTxIndices(bitmaps)
 	slices.Sort(requested)
 	if len(requested) == 0 {
-		return leiosfetch.NewMsgBlockTxs(
-			point,
-			map[uint16]uint64{},
-			nil,
-		), nil
+		return leiosfetch.NewMsgBlockTxs(nil), nil
 	}
-	idx := requested[0]
-	served := map[uint16]uint64{uint16(idx / 64): 1 << uint(63-(idx%64))}
-	enc, err := cbor.Encode(idx)
+	txs, err := buildBitmapResponseTxs(bitmaps)
 	if err != nil {
 		return nil, err
 	}
-	return leiosfetch.NewMsgBlockTxs(
-		point,
-		served,
-		[]cbor.RawMessage{cbor.RawMessage(enc)},
-	), nil
+	return leiosfetch.NewMsgBlockTxs(txs), nil
 }
 
 // TestFetchLeiosEbTxsBatchedUntilAbandonsSlowRelay verifies that a relay which
@@ -552,7 +541,8 @@ func TestFetchLeiosEbTxsBatchedUntilAbandonsSlowRelay(t *testing.T) {
 	o := &Ouroboros{}
 	o.config.LeiosTxFetchTailBudget = time.Minute
 	point := ocommon.Point{Slot: 100, Hash: []byte{0x0a}}
-	const txCount = 100
+	// Each round serves one request batch, so the block spans many rounds.
+	const txCount = 16 * leiosTxFetchWindowsPerRequest * leiosTxFetchWindowSize
 	requester := &dribbleBlockTxsRequester{perRound: 20 * time.Millisecond}
 
 	txs, err := o.fetchLeiosEbTxsBatchedUntil(
@@ -586,7 +576,7 @@ func TestFetchLeiosEbTxsBatchedNoDeadlineStillCompletes(t *testing.T) {
 	point := ocommon.Point{Slot: 100, Hash: []byte{0x0b}}
 	txs, err := o.fetchLeiosEbTxsBatchedUntil(
 		context.Background(),
-		&cappingBlockTxsRequester{maxPerResp: 50},
+		&cappingBlockTxsRequester{},
 		point,
 		200,
 		nil,

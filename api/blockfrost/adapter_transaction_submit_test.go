@@ -562,3 +562,25 @@ func TestTransactionEvaluateRejectsTrailingBytes(t *testing.T) {
 
 	require.ErrorIs(t, err, ErrInvalidTransaction)
 }
+
+// TestTransactionSubmitInputResolutionFailureIsNotARejection covers the
+// mempool's input-address lookup, which reads storage before ledger
+// validation: its failure leaves the transaction unjudged.
+func TestTransactionSubmitInputResolutionFailureIsNotARejection(t *testing.T) {
+	t.Parallel()
+	submitErr := fmt.Errorf(
+		"resolve confirmed input addresses: %w: %w",
+		mempool.ErrInputResolution,
+		errors.New("database is locked"),
+	)
+	adapter := &NodeAdapter{submitter: &stubSubmitter{err: submitErr}}
+
+	hash, err := adapter.TransactionSubmit(
+		context.Background(), submitTestTxCbor(t),
+	)
+	require.Error(t, err)
+	assert.Empty(t, hash)
+	assert.ErrorIs(t, err, ErrLedgerUnavailable)
+	assert.NotErrorIs(t, err, ErrTransactionRejected)
+	assert.ErrorIs(t, err, mempool.ErrInputResolution)
+}

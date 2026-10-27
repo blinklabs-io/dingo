@@ -16,6 +16,7 @@ package blockfrost
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"io"
 	"log/slog"
@@ -115,7 +116,7 @@ func TestPersistedMetadataEndpointsDeterministicAcrossKeyOrders(t *testing.T) {
 		for i, mt := range txs {
 			hash := bytes.Repeat([]byte{mt.hashByte}, 32)
 
-			jsonLabels, err := adapter.TransactionMetadata(hash)
+			jsonLabels, err := adapter.TransactionMetadata(context.Background(), hash)
 			require.NoError(t, err, "pass %d tx %d", pass, i)
 			require.Len(t, jsonLabels, 2)
 			require.Equal(t, "1", jsonLabels[0].Label)
@@ -129,7 +130,7 @@ func TestPersistedMetadataEndpointsDeterministicAcrossKeyOrders(t *testing.T) {
 				i,
 			)
 
-			cborLabels, err := adapter.TransactionMetadataCBOR(hash)
+			cborLabels, err := adapter.TransactionMetadataCBOR(context.Background(), hash)
 			require.NoError(t, err)
 			require.Len(t, cborLabels, 2)
 			require.Equal(t, "6161", cborLabels[0].CBORMetadata)
@@ -142,11 +143,16 @@ func TestPersistedMetadataEndpointsDeterministicAcrossKeyOrders(t *testing.T) {
 			Order: PaginationOrderAsc,
 		}
 		for _, label := range []uint64{1, 721} {
-			jsonRows, total, err := adapter.MetadataTransactions(label, params)
+			jsonRows, total, err := adapter.MetadataTransactions(
+				context.Background(),
+				label,
+				params,
+			)
 			require.NoError(t, err)
 			require.Equal(t, len(txs), total, "label %d", label)
 			require.Len(t, jsonRows, len(txs))
 			cborRows, cborTotal, err := adapter.MetadataTransactionsCBOR(
+				context.Background(),
 				label,
 				params,
 			)
@@ -173,11 +179,16 @@ func TestPersistedMetadataEndpointsDeterministicAcrossKeyOrders(t *testing.T) {
 				Page:  page,
 				Order: PaginationOrderAsc,
 			}
-			rows, _, err := adapter.MetadataTransactions(721, pageParams)
+			rows, _, err := adapter.MetadataTransactions(
+				context.Background(),
+				721,
+				pageParams,
+			)
 			require.NoError(t, err)
 			require.Len(t, rows, 1)
 			seenJSON = append(seenJSON, rows[0].TxHash)
 			cborRows, _, err := adapter.MetadataTransactionsCBOR(
+				context.Background(),
 				721,
 				pageParams,
 			)

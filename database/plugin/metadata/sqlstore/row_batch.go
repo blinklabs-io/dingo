@@ -27,6 +27,9 @@ import (
 // than by table. suffix is appended after the VALUES list, for an ON CONFLICT
 // clause.
 type rowShape struct {
+	// name is the fixed query name flush stamps on the statement, so the
+	// metrics label is bounded by the shapes declared here.
+	name    string
 	table   string
 	columns []string
 	suffix  string
@@ -34,10 +37,12 @@ type rowShape struct {
 
 var (
 	vkeyWitnessShape = rowShape{
+		name:    "InsertKeyWitnessVkeyBatch",
 		table:   "key_witness",
 		columns: []string{"vkey", "signature", "transaction_id", "type"},
 	}
 	bootstrapWitnessShape = rowShape{
+		name:  "InsertKeyWitnessBootstrapBatch",
 		table: "key_witness",
 		columns: []string{
 			"signature", "public_key", "chain_code", "attributes",
@@ -45,14 +50,17 @@ var (
 		},
 	}
 	witnessScriptShape = rowShape{
+		name:    "InsertWitnessScriptBatch",
 		table:   "witness_scripts",
 		columns: []string{"script_hash", "transaction_id", "type"},
 	}
 	plutusDataShape = rowShape{
+		name:    "InsertPlutusDataBatch",
 		table:   "plutus_data",
 		columns: []string{"data", "transaction_id"},
 	}
 	redeemerShape = rowShape{
+		name:  "InsertRedeemerBatch",
 		table: "redeemer",
 		columns: []string{
 			"data", "transaction_id", "ex_units_memory", "ex_units_cpu",
@@ -60,6 +68,7 @@ var (
 		},
 	}
 	redeemerScriptShape = rowShape{
+		name:  "InsertRedeemerScriptBatch",
 		table: "redeemer_script",
 		columns: []string{
 			"transaction_id", "tag", `"index"`, "script_hash", "slot",
@@ -67,6 +76,7 @@ var (
 		},
 	}
 	addressTransactionShape = rowShape{
+		name:  "InsertAddressTransactionBatch",
 		table: "address_transaction",
 		columns: []string{
 			"payment_key", "payment_script", "staking_key", "credential_tag",
@@ -74,6 +84,7 @@ var (
 		},
 	}
 	metadataLabelShape = rowShape{
+		name:  "UpsertTransactionMetadataLabelBatch",
 		table: "transaction_metadata_label",
 		columns: []string{
 			"transaction_id", "label", "slot", "cbor_value", "json_value",
@@ -86,21 +97,25 @@ var (
 	// datum rows are content-addressed and shared between transactions, so
 	// they carry no transaction_id and are never replaced.
 	datumShape = rowShape{
+		name:    "InsertDatumBatch",
 		table:   "datum",
 		columns: []string{"hash", "raw_datum", "added_slot"},
 		suffix:  "ON CONFLICT (hash) DO NOTHING",
 	}
 	assetShape = rowShape{
+		name:    "InsertAssetBatch",
 		table:   "asset",
 		columns: []string{"name", "policy_id", "fingerprint", "utxo_id", "amount"},
 		suffix:  "ON CONFLICT (name, policy_id, utxo_id) DO NOTHING",
 	}
-	assetUtxoAddressShape = rowShape{
+	utxoAddressShape = rowShape{
+		name:    "UpsertUtxoAddressBatch",
 		table:   "utxo_address",
 		columns: []string{"utxo_id", "address"},
 		suffix:  "ON CONFLICT (utxo_id) DO UPDATE SET address = excluded.address",
 	}
 	assetMintBurnShape = rowShape{
+		name:  "InsertAssetMintBurnBatch",
 		table: "asset_mint_burn",
 		columns: []string{
 			"tx_hash", "policy_id", "name", "fingerprint", "slot",
@@ -222,7 +237,8 @@ func (b *rowBatch) flush(
 			for _, row := range entry.rows[start:end] {
 				args = append(args, row...)
 			}
-			query := "INSERT INTO " + entry.shape.table + " (" +
+			query := "-- name: " + entry.shape.name + " :exec\n" +
+				"INSERT INTO " + entry.shape.table + " (" +
 				strings.Join(entry.shape.columns, ", ") + ") VALUES " +
 				strings.TrimSuffix(
 					strings.Repeat(placeholder+", ", end-start), ", ",

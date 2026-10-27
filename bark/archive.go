@@ -262,6 +262,19 @@ func (a *archiveServiceHandler) FetchBlock(
 		)
 	}
 
+	// Every reference costs a storage lookup, whether or not the block
+	// exists, so the batch is charged up front and refused whole when the
+	// caller's allowance or the global budget cannot cover it.
+	if !a.bark.archiveBudget.allow(
+		archiveCallerKey(req.Peer().Addr),
+		len(refs),
+	) {
+		return nil, connect.NewError(
+			connect.CodeResourceExhausted,
+			errors.New("archive lookup budget exhausted, retry later"),
+		)
+	}
+
 	db, release, err := a.bark.Acquire()
 	if err != nil {
 		return nil, connect.NewError(connect.CodeUnavailable, err)

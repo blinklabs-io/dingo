@@ -32,6 +32,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/ratewindow"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	oleiosvotes "github.com/blinklabs-io/gouroboros/protocol/leiosvotes"
 	bls12381 "github.com/consensys/gnark-crypto/ecc/bls12-381"
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -100,6 +101,11 @@ var (
 		"peer vote verification budget exhausted",
 	)
 	errVoteEquivocation = errors.New("vote equivocation")
+	// errVoteWindowClosed marks a vote whose slot is behind the voting
+	// window. Honest relays forward such votes without an age check, so
+	// the drop is not counted toward the per-connection invalid-vote
+	// limit.
+	errVoteWindowClosed = errors.New("vote window closed")
 )
 
 // Reasons recorded by dingo_metrics_leios_votes_not_emitted_total. They
@@ -1687,7 +1693,8 @@ func (m *VoteManager) slotWindowCheck(slot uint64) error {
 	cur := m.slotProvider.CurrentOrTipSlot()
 	if slot < cur && cur-slot >= m.voteWindowSlots {
 		return fmt.Errorf(
-			"vote slot %d is %d or more slots behind current slot %d (vote window closed)",
+			"%w: vote slot %d is %d or more slots behind current slot %d",
+			errVoteWindowClosed,
 			slot,
 			m.voteWindowSlots,
 			cur,
@@ -1779,7 +1786,8 @@ func (m *VoteManager) rejectIncomingVote(
 	if errors.Is(err, errVoteVerificationProcessBudget) ||
 		errors.Is(err, errVoteVerificationPeerTrackingBudget) ||
 		errors.Is(err, errVoteVerificationPeerBudget) ||
-		errors.Is(err, errVoteEquivocation) {
+		errors.Is(err, errVoteEquivocation) ||
+		errors.Is(err, errVoteWindowClosed) {
 		return nil
 	}
 	now := m.now()
@@ -2530,6 +2538,11 @@ func (m *VoteManager) filterVotesLocked(keep func(*storedVote) bool) {
 	m.voteLog = kept
 }
 
+// ErrVoteRequestCount is returned by NextVotes when the requested count
+// is zero or exceeds the leios-votes protocol maximum, before any
+// allocation or wait.
+var ErrVoteRequestCount = errors.New("invalid leios vote request count")
+
 // NextVotes blocks until count votes not originating from connKey are
 // available and returns exactly count votes, tracking a per-connection
 // cursor so each vote is served at most once per connection. It returns
@@ -2539,8 +2552,13 @@ func (m *VoteManager) NextVotes(
 	connKey string,
 	count uint64,
 ) ([]lcommon.LeiosVote, error) {
-	if count == 0 {
-		return nil, errors.New("leios vote request for zero votes")
+	if count == 0 || count > oleiosvotes.MaxRequestNextCount {
+		return nil, fmt.Errorf(
+			"%w: %d (must be 1..%d)",
+			ErrVoteRequestCount,
+			count,
+			oleiosvotes.MaxRequestNextCount,
+		)
 	}
 	collected := make([]lcommon.LeiosVote, 0, count)
 	// Track the cursor locally and persist it only on successful

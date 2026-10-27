@@ -127,6 +127,43 @@ func (n *Node) chainsyncApplyEligible(
 	return n.chainSelector.ShouldApplyIngress(connId)
 }
 
+func (n *Node) chainsyncPrepareForecastWitness(
+	update chainselection.PeerTipUpdateEvent,
+) []ouroboros.ConnectionId {
+	if n.chainSelector == nil {
+		return nil
+	}
+	return n.chainSelector.PrepareForecastHorizonWitness(update)
+}
+
+func (n *Node) chainsyncRemoveForecastWitness(
+	update chainselection.PeerTipUpdateEvent,
+) {
+	if n.chainSelector != nil {
+		n.chainSelector.RemoveForecastHorizonWitness(update)
+	}
+}
+
+// chainsyncAwaitCorroboration holds a header denied only for lack of Genesis
+// corroboration. With no chain selector wired there is no such denial.
+func (n *Node) chainsyncAwaitCorroboration(
+	ctx context.Context,
+	connId ouroboros.ConnectionId,
+) (bool, error) {
+	if n.chainSelector == nil {
+		return false, nil
+	}
+	return n.chainSelector.AwaitIngressCorroboration(ctx, connId)
+}
+
+// chainsyncIntersectAtLedgerTip reports whether new chainsync sessions must
+// intersect at the applied ledger tip. It holds while Genesis corroboration is
+// active, which needs every peer's frontier to begin at that tip.
+func (n *Node) chainsyncIntersectAtLedgerTip() bool {
+	return n.chainSelector != nil &&
+		n.chainSelector.GenesisCorroborationActive()
+}
+
 // chainsyncAwaitEagerness pauses a peer's header stream while its next header
 // is past the Limit on Eagerness. With no chain selector wired it never waits.
 func (n *Node) chainsyncAwaitEagerness(

@@ -901,7 +901,7 @@ func TestVanRossem(t *testing.T) {
 			t, cardanoBlocks, 0,
 			"no cardano-issued blocks observed on relay across %d "+
 				"headers — cardano-producer is not contributing to the "+
-				"canonical chain. Check that cardano-node:11.0.1 "+
+				"canonical chain. Check that cardano-node:11.1.3-2 "+
 				"actually started and is forging at PV10.",
 			len(headers),
 		)

@@ -30,6 +30,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/deferred"
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/plugin"
 	"github.com/stretchr/testify/require"
 )
 
@@ -689,7 +690,10 @@ func TestBuildDingoConfigWiresForgeEBSelectionReserve(t *testing.T) {
 	)
 
 	if got := built.ForgeEBSelectionReserve(); got != 750*time.Millisecond {
-		t.Fatalf("expected forgeEbSelectionReserve 750ms to flow through, got %s", got)
+		t.Fatalf(
+			"expected forgeEbSelectionReserve 750ms to flow through, got %s",
+			got,
+		)
 	}
 }
 
@@ -749,6 +753,29 @@ func TestBuildDingoConfigCarriesTokenRegistry(t *testing.T) {
 	require.True(t, got.AllowPrivateAddresses)
 }
 
+func TestBuildDingoConfigCarriesConsensusProvider(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{
+		Plugins: config.PluginsConfig{
+			Consensus: plugin.Selection{Provider: "custom-consensus"},
+		},
+	}
+	built := buildDingoConfig(
+		cfg,
+		nil,
+		nil,
+		nil,
+		false,
+		dingo.StorageModeCore,
+		time.Minute,
+		time.Minute,
+		0,
+	)
+
+	require.Equal(t, "custom-consensus", built.ConsensusPlugin())
+}
+
 // TestBuildDingoConfigTokenRegistryDefaultsOff pins the deliberate default
 // through the same production path.
 func TestBuildDingoConfigTokenRegistryDefaultsOff(t *testing.T) {
@@ -791,4 +818,34 @@ func TestBuildDingoConfigWiresPlannerStatsRefresh(t *testing.T) {
 		)
 		require.Equal(t, enabled, built.PlannerStatsRefreshEnabled())
 	}
+}
+
+// TestRepairDeferredIndexesRestoresCatchUpIndexes covers serve's core-mode
+// startup after a process died inside a held Mithril catch-up: the catch-up
+// droppable and lazy entries are missing behind the marker, and the repair
+// that runs before the node starts rebuilds both and clears it.
+func TestRepairDeferredIndexesRestoresCatchUpIndexes(t *testing.T) {
+	db := newFileTestDB(t)
+	manager, ok := db.Metadata().(metadata.CatchUpIndexManager)
+	require.True(t, ok)
+	require.NoError(t, manager.DropCatchUpIndexesContext(t.Context()))
+	raw, err := dbtest.RawSQLiteMetadata(t, db)
+	require.NoError(t, err)
+	droppable := deferred.CatchUpDroppableManifest()
+	require.NotEmpty(t, droppable)
+	for _, index := range droppable {
+		require.False(t, dbtest.MetadataIndexExists(t, raw, index.Name))
+	}
+
+	require.NoError(t, RepairDeferredIndexes(
+		t.Context(),
+		db,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	))
+
+	for _, index := range deferred.Manifest {
+		require.True(t, dbtest.MetadataIndexExists(t, raw, index.Name),
+			index.Name)
+	}
+	requireNoPendingMarker(t, raw)
 }

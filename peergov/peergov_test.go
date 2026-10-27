@@ -6817,6 +6817,7 @@ func TestPeerGovernor_ShouldExitBootstrap_SlotThreshold(t *testing.T) {
 		LedgerPeerProvider: mockProvider,
 		UseLedgerAfterSlot: 5000, // Threshold
 	})
+	bootstrapProgress := pg.bootstrapExitProgress()
 
 	// Add a bootstrap peer
 	pg.mu.Lock()
@@ -6832,7 +6833,7 @@ func TestPeerGovernor_ShouldExitBootstrap_SlotThreshold(t *testing.T) {
 		Connection: &PeerConnection{IsClient: true},
 	})
 
-	shouldExit, reason := pg.shouldExitBootstrap()
+	shouldExit, reason := pg.shouldExitBootstrapLocked(bootstrapProgress)
 	pg.mu.Unlock()
 
 	assert.True(t, shouldExit, "should exit bootstrap when slot > threshold")
@@ -6851,6 +6852,7 @@ func TestPeerGovernor_ShouldExitBootstrap_SlotThreshold_NoSuccessor(
 		LedgerPeerProvider: mockProvider,
 		UseLedgerAfterSlot: 5000, // Threshold
 	})
+	bootstrapProgress := pg.bootstrapExitProgress()
 
 	pg.mu.Lock()
 	pg.peers = append(pg.peers, &Peer{
@@ -6860,7 +6862,7 @@ func TestPeerGovernor_ShouldExitBootstrap_SlotThreshold_NoSuccessor(
 		Connection: &PeerConnection{IsClient: true},
 	})
 
-	shouldExit, _ := pg.shouldExitBootstrap()
+	shouldExit, _ := pg.shouldExitBootstrapLocked(bootstrapProgress)
 	pg.mu.Unlock()
 
 	assert.False(
@@ -6882,6 +6884,7 @@ func TestPeerGovernor_ShouldExitBootstrap_SlotThreshold_NotReached(
 		LedgerPeerProvider: mockProvider,
 		UseLedgerAfterSlot: 5000, // Threshold
 	})
+	bootstrapProgress := pg.bootstrapExitProgress()
 
 	// Add a bootstrap peer
 	pg.mu.Lock()
@@ -6891,7 +6894,7 @@ func TestPeerGovernor_ShouldExitBootstrap_SlotThreshold_NotReached(
 		State:   PeerStateWarm,
 	})
 
-	shouldExit, _ := pg.shouldExitBootstrap()
+	shouldExit, _ := pg.shouldExitBootstrapLocked(bootstrapProgress)
 	pg.mu.Unlock()
 
 	assert.False(
@@ -6906,6 +6909,7 @@ func TestPeerGovernor_ShouldExitBootstrap_LedgerPeerCount(t *testing.T) {
 		Logger:                slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		MinLedgerPeersForExit: 3,
 	})
+	bootstrapProgress := pg.bootstrapExitProgress()
 
 	// Add a bootstrap peer
 	pg.mu.Lock()
@@ -6925,7 +6929,7 @@ func TestPeerGovernor_ShouldExitBootstrap_LedgerPeerCount(t *testing.T) {
 		})
 	}
 
-	shouldExit, reason := pg.shouldExitBootstrap()
+	shouldExit, reason := pg.shouldExitBootstrapLocked(bootstrapProgress)
 	pg.mu.Unlock()
 
 	assert.True(
@@ -6943,6 +6947,7 @@ func TestPeerGovernor_ShouldExitBootstrap_LedgerPeerCount_ColdNotCounted(
 		Logger:                slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		MinLedgerPeersForExit: 3,
 	})
+	bootstrapProgress := pg.bootstrapExitProgress()
 
 	// Add a bootstrap peer
 	pg.mu.Lock()
@@ -6961,7 +6966,7 @@ func TestPeerGovernor_ShouldExitBootstrap_LedgerPeerCount_ColdNotCounted(
 		})
 	}
 
-	shouldExit, _ := pg.shouldExitBootstrap()
+	shouldExit, _ := pg.shouldExitBootstrapLocked(bootstrapProgress)
 	pg.mu.Unlock()
 
 	assert.False(
@@ -6978,6 +6983,7 @@ func TestPeerGovernor_ShouldExitBootstrap_LedgerPeerCount_ResponderOnlyWarmNotCo
 		Logger:                slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		MinLedgerPeersForExit: 3,
 	})
+	bootstrapProgress := pg.bootstrapExitProgress()
 
 	pg.mu.Lock()
 	pg.peers = append(pg.peers, &Peer{
@@ -6995,7 +7001,7 @@ func TestPeerGovernor_ShouldExitBootstrap_LedgerPeerCount_ResponderOnlyWarmNotCo
 		})
 	}
 
-	shouldExit, _ := pg.shouldExitBootstrap()
+	shouldExit, _ := pg.shouldExitBootstrapLocked(bootstrapProgress)
 	pg.mu.Unlock()
 
 	assert.False(
@@ -7012,6 +7018,7 @@ func TestPeerGovernor_ShouldExitBootstrap_LedgerPeerCount_ResponderOnlyHotNotCou
 		Logger:                slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		MinLedgerPeersForExit: 3,
 	})
+	bootstrapProgress := pg.bootstrapExitProgress()
 
 	pg.mu.Lock()
 	pg.peers = append(pg.peers, &Peer{
@@ -7029,7 +7036,7 @@ func TestPeerGovernor_ShouldExitBootstrap_LedgerPeerCount_ResponderOnlyHotNotCou
 		})
 	}
 
-	shouldExit, _ := pg.shouldExitBootstrap()
+	shouldExit, _ := pg.shouldExitBootstrapLocked(bootstrapProgress)
 	pg.mu.Unlock()
 
 	assert.False(
@@ -7049,6 +7056,7 @@ func TestPeerGovernor_ShouldExitBootstrap_SyncProgress(t *testing.T) {
 		SyncProgressProvider: mockSync,
 		SyncProgressForExit:  0.95, // 95% threshold
 	})
+	bootstrapProgress := pg.bootstrapExitProgress()
 
 	// Add a bootstrap peer
 	pg.mu.Lock()
@@ -7064,7 +7072,7 @@ func TestPeerGovernor_ShouldExitBootstrap_SyncProgress(t *testing.T) {
 		Connection: &PeerConnection{IsClient: true},
 	})
 
-	shouldExit, reason := pg.shouldExitBootstrap()
+	shouldExit, reason := pg.shouldExitBootstrapLocked(bootstrapProgress)
 	pg.mu.Unlock()
 
 	assert.True(
@@ -7087,6 +7095,7 @@ func TestPeerGovernor_ShouldExitBootstrap_SyncProgress_NoSuccessor(
 		SyncProgressProvider: mockSync,
 		SyncProgressForExit:  0.95,
 	})
+	bootstrapProgress := pg.bootstrapExitProgress()
 
 	pg.mu.Lock()
 	pg.peers = append(pg.peers, &Peer{
@@ -7096,7 +7105,7 @@ func TestPeerGovernor_ShouldExitBootstrap_SyncProgress_NoSuccessor(
 		Connection: &PeerConnection{IsClient: true},
 	})
 
-	shouldExit, _ := pg.shouldExitBootstrap()
+	shouldExit, _ := pg.shouldExitBootstrapLocked(bootstrapProgress)
 	pg.mu.Unlock()
 
 	assert.False(
@@ -7118,6 +7127,7 @@ func TestPeerGovernor_ShouldExitBootstrap_SyncProgress_NotReached(
 		SyncProgressProvider: mockSync,
 		SyncProgressForExit:  0.95, // 95% threshold
 	})
+	bootstrapProgress := pg.bootstrapExitProgress()
 
 	// Add a bootstrap peer
 	pg.mu.Lock()
@@ -7127,7 +7137,7 @@ func TestPeerGovernor_ShouldExitBootstrap_SyncProgress_NotReached(
 		State:   PeerStateWarm,
 	})
 
-	shouldExit, _ := pg.shouldExitBootstrap()
+	shouldExit, _ := pg.shouldExitBootstrapLocked(bootstrapProgress)
 	pg.mu.Unlock()
 
 	assert.False(
@@ -7147,6 +7157,7 @@ func TestPeerGovernor_ShouldExitBootstrap_NoBootstrapPeers(t *testing.T) {
 		SyncProgressProvider: mockSync,
 		SyncProgressForExit:  0.95,
 	})
+	bootstrapProgress := pg.bootstrapExitProgress()
 
 	// No bootstrap peers, only gossip peers
 	pg.mu.Lock()
@@ -7156,7 +7167,7 @@ func TestPeerGovernor_ShouldExitBootstrap_NoBootstrapPeers(t *testing.T) {
 		State:   PeerStateWarm,
 	})
 
-	shouldExit, _ := pg.shouldExitBootstrap()
+	shouldExit, _ := pg.shouldExitBootstrapLocked(bootstrapProgress)
 	pg.mu.Unlock()
 
 	assert.False(
@@ -7176,6 +7187,7 @@ func TestPeerGovernor_ShouldExitBootstrap_AlreadyExited(t *testing.T) {
 		SyncProgressProvider: mockSync,
 		SyncProgressForExit:  0.95,
 	})
+	bootstrapProgress := pg.bootstrapExitProgress()
 
 	// Add bootstrap peer and mark as already exited
 	pg.mu.Lock()
@@ -7186,7 +7198,7 @@ func TestPeerGovernor_ShouldExitBootstrap_AlreadyExited(t *testing.T) {
 	})
 	pg.bootstrapExited = true
 
-	shouldExit, _ := pg.shouldExitBootstrap()
+	shouldExit, _ := pg.shouldExitBootstrapLocked(bootstrapProgress)
 	pg.mu.Unlock()
 
 	assert.False(t, shouldExit, "should not exit bootstrap when already exited")
@@ -8022,16 +8034,15 @@ func TestResolveInboundIdentity(t *testing.T) {
 			wantIdx:     0,
 		},
 		{
-			name: "operator pattern — topology peer, ephemeral source port",
+			name: "topology peer on same host with different port is untrusted",
 			seeds: []seed{
 				{
 					addr: "44.0.0.1:3001", normalized: "44.0.0.1:3001",
 					source: PeerSourceTopologyLocalRoot, groupID: "local-root-0",
 				},
 			},
-			inboundAddr:     "44.0.0.1:51432",
-			wantIdx:         0,
-			wantTopologyGID: "local-root-0",
+			inboundAddr: "44.0.0.1:51432",
+			wantIdx:     -1,
 		},
 		{
 			name: "ambiguous host — two topology peers on same host → no match",
@@ -8096,12 +8107,11 @@ func TestResolveInboundIdentity(t *testing.T) {
 			wantIdx:     -1,
 		},
 		{
-			name: "topology peer with DNS-unresolved normalized address — no host match",
+			name: "topology peer with DNS-unresolved normalized address has no match",
 			seeds: []seed{
 				// DNS failed during topology load, NormalizedAddress is
 				// still a hostname. The inbound arrives as an IP; we
-				// deliberately do not re-do DNS during admission, so
-				// no rule-2 match.
+				// deliberately do not re-do DNS during admission.
 				{
 					addr:       "relay.example.com:3001",
 					normalized: "relay.example.com:3001",
@@ -8113,21 +8123,20 @@ func TestResolveInboundIdentity(t *testing.T) {
 			wantIdx:     -1,
 		},
 		{
-			name: "IPv6 topology host match",
+			name: "IPv6 topology host with different port is untrusted",
 			seeds: []seed{
 				{
 					addr: "[2001:db8::1]:3001", normalized: "[2001:db8::1]:3001",
 					source: PeerSourceTopologyLocalRoot, groupID: "local-root-0",
 				},
 			},
-			inboundAddr:     "[2001:db8::1]:51432",
-			wantIdx:         0,
-			wantTopologyGID: "local-root-0",
+			inboundAddr: "[2001:db8::1]:51432",
+			wantIdx:     -1,
 		},
 		{
-			name: "exact match takes priority over topology host",
+			name: "exact inbound match does not inherit topology identity",
 			seeds: []seed{
-				// Topology peer that could also match via rule 2.
+				// A topology peer shares the host.
 				{
 					addr: "44.0.0.1:3001", normalized: "44.0.0.1:3001",
 					source: PeerSourceTopologyLocalRoot, groupID: "local-root-0",
@@ -8142,11 +8151,11 @@ func TestResolveInboundIdentity(t *testing.T) {
 			wantIdx:     1, // exact match wins; topology index is 0
 		},
 		{
-			// Regression: rule 1 against a topology peer must still
+			// An exact match against a topology peer must still
 			// classify as a topology match. Otherwise an operator-
 			// configured peer that connects from its listener port
 			// would be indistinguishable from a random inbound.
-			name: "rule-1 exact match against topology peer yields GroupID",
+			name: "exact match against topology peer yields GroupID",
 			seeds: []seed{
 				{
 					addr: "44.0.0.1:3001", normalized: "44.0.0.1:3001",
@@ -8158,9 +8167,9 @@ func TestResolveInboundIdentity(t *testing.T) {
 			wantTopologyGID: "local-root-0",
 		},
 		{
-			// Rule 1 against a non-topology peer must not fabricate a
+			// An exact match against a non-topology peer must not fabricate a
 			// topology classification.
-			name: "rule-1 exact match against gossip peer yields no GroupID",
+			name: "exact match against gossip peer yields no GroupID",
 			seeds: []seed{
 				{
 					addr: "44.0.0.1:3001", normalized: "44.0.0.1:3001",
@@ -8219,7 +8228,7 @@ func TestResolveInboundIdentity_CanonicalKeyParity(t *testing.T) {
 	}
 }
 
-func TestHandleInboundConnection_TopologyHostMatch(t *testing.T) {
+func TestHandleInboundConnection_TopologyHostRemainsUntrusted(t *testing.T) {
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:     newMockEventBus(),
@@ -8250,23 +8259,13 @@ func TestHandleInboundConnection_TopologyHostMatch(t *testing.T) {
 		},
 	})
 	peers := pg.GetPeers()
-	require.Len(
-		t,
-		peers,
-		1,
-		"inbound must attach to topology peer, not spawn new",
-	)
-	peer := peers[0]
-	assert.Equal(
-		t,
-		"44.0.0.1:3001",
-		peer.Address,
-		"topology address must be preserved — do not rewrite with ephemeral port",
-	)
-	assert.Equal(t, PeerSource(PeerSourceTopologyLocalRoot), peer.Source,
-		"source must remain topology; inbound does not downgrade identity")
-	assert.Equal(t, "local-root-0", peer.InboundTopologyMatch,
-		"matched topology GroupID must be recorded")
+	require.Len(t, peers, 2, "untrusted inbound must keep a separate identity")
+	assert.Equal(t, PeerSource(PeerSourceTopologyLocalRoot), peers[0].Source)
+	assert.Empty(t, peers[0].InboundTopologyMatch)
+	peer := peers[1]
+	assert.Equal(t, "44.0.0.1:51432", peer.Address)
+	assert.Equal(t, PeerSource(PeerSourceInboundConn), peer.Source)
+	assert.Empty(t, peer.InboundTopologyMatch)
 	assert.False(t, peer.InboundConnectedAt.IsZero())
 	assert.True(t, peer.InboundDuplex,
 		"event-carried IsDuplex must be recorded when no connmanager is wired")
@@ -8299,7 +8298,7 @@ func TestHandleInboundConnection_ResetsOutboundBackoff(t *testing.T) {
 	pg.mu.Unlock()
 
 	localAddr, _ := net.ResolveTCPAddr("tcp", "44.0.0.9:3001")
-	remoteAddr, _ := net.ResolveTCPAddr("tcp", "44.0.0.1:51432")
+	remoteAddr, _ := net.ResolveTCPAddr("tcp", "44.0.0.1:3001")
 	pg.handleInboundConnectionEvent(event.Event{
 		Type: connmanager.InboundConnectionEventType,
 		Data: connmanager.InboundConnectionEvent{
@@ -8430,26 +8429,23 @@ func TestHandleInboundConnection_TopologyMatchPersistsOnReArrival(
 	)
 	localAddr, _ := net.ResolveTCPAddr("tcp", "44.0.0.9:3001")
 
-	// First arrival via ephemeral port — rule 2 records the match.
-	ephemeralAddr, _ := net.ResolveTCPAddr("tcp", "44.0.0.1:51432")
+	// The configured transport identity records the topology match.
+	configuredAddr, _ := net.ResolveTCPAddr("tcp", "44.0.0.1:3001")
 	pg.handleInboundConnectionEvent(event.Event{
 		Type: connmanager.InboundConnectionEventType,
 		Data: connmanager.InboundConnectionEvent{
 			ConnectionId: ouroboros.ConnectionId{
-				LocalAddr: localAddr, RemoteAddr: ephemeralAddr,
+				LocalAddr: localAddr, RemoteAddr: configuredAddr,
 			},
-			LocalAddr: localAddr, RemoteAddr: ephemeralAddr,
+			LocalAddr: localAddr, RemoteAddr: configuredAddr,
 			NormalizedRemoteAddr: connmanager.NormalizePeerAddr(
-				ephemeralAddr.String(),
+				configuredAddr.String(),
 			),
 		},
 	})
 	require.Equal(t, "local-root-0", pg.GetPeers()[0].InboundTopologyMatch)
 
-	// Second arrival at the configured port — rule 1 now classifies
-	// this as a topology match too (the matched peer is topology-
-	// sourced). The recorded match must remain the same GroupID.
-	configuredAddr, _ := net.ResolveTCPAddr("tcp", "44.0.0.1:3001")
+	// A repeated exact arrival must retain the topology match.
 	pg.handleInboundConnectionEvent(event.Event{
 		Type: connmanager.InboundConnectionEventType,
 		Data: connmanager.InboundConnectionEvent{
@@ -8465,11 +8461,11 @@ func TestHandleInboundConnection_TopologyMatchPersistsOnReArrival(
 	peers := pg.GetPeers()
 	require.Len(t, peers, 1)
 	assert.Equal(t, "local-root-0", peers[0].InboundTopologyMatch,
-		"rule-1 re-arrival must not clobber the existing topology match")
+		"exact re-arrival must not clobber the existing topology match")
 }
 
 // TestHandleInboundConnection_TopologyMatchNotClearedByUnrelatedReArrival
-// exercises the write guard in the caller: a non-topology rule-1
+// exercises the write guard in the caller: a non-topology exact
 // re-arrival (e.g. a pre-existing inbound entry the event later
 // attaches to) must not clear a previously-recorded topology match.
 // Synthetic: we directly mutate the peer list to simulate the state

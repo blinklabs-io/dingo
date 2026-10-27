@@ -242,7 +242,7 @@ func TestGenerateReportDerivesScenarioIdentity(t *testing.T) {
 	}
 }
 
-func TestGenerateReportReadsNDCFlatCorpus(t *testing.T) {
+func TestGenerateReportReadsNDCCorpusFromTextualPrograms(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	writeFile(
@@ -252,42 +252,45 @@ func TestGenerateReportReadsNDCFlatCorpus(t *testing.T) {
 	)
 	writeFile(
 		t,
-		filepath.Join(root, "cost-models", "protocol-version-11", "v1.json"),
+		filepath.Join(root, "cost-models", "protocol-version-11", "v3.json"),
 		"[1,2,3]",
 	)
+	earlyDir := filepath.Join(
+		root, "protocol-version-10", "v1", "term", "textual", "simple",
+	)
+	writeFile(t, filepath.Join(earlyDir, "simple.uplc"), "(program 1.0.0 (con integer")
+	writeFile(t, filepath.Join(earlyDir, "simple.uplc.expected"), "parse/decode error")
+	// UPLC 1.1.0 is not available to Plutus V1 before protocol 11. The
+	// execution-time version gate is a decode error, not an evaluation failure.
+	gatedDir := filepath.Join(
+		root, "protocol-version-10", "v1", "program", "version", "one-one-zero",
+	)
+	writeFile(t, filepath.Join(gatedDir, "one-one-zero.uplc"), "(program 1.1.0 (con integer 1))")
+	writeFile(t, filepath.Join(gatedDir, "one-one-zero.uplc.expected"), "parse/decode error")
 
-	for _, protocol := range []string{"10", "11"} {
-		badVectorDir := filepath.Join(
-			root,
-			"protocol-version-"+protocol,
-			"v1",
-			"term",
-			"parse",
-			"bad-flat",
-		)
-		writeFile(t, filepath.Join(badVectorDir, "bad-flat.uplc"), "(program 1.0.0 (error))")
-		writeFile(t, filepath.Join(badVectorDir, "bad-flat.flat"), "not-hex")
-		writeFile(t, filepath.Join(badVectorDir, "bad-flat.uplc.expected"), "parse/decode error")
-		writeFile(t, filepath.Join(badVectorDir, "bad-flat.budget"), "parse/decode error")
-	}
-	textualVectorDir := filepath.Join(
+	// The text is a parse error, while the Flat file beside it decodes to a
+	// valid constr with tag 2^64-5. The expected result follows the text, so
+	// evaluating the Flat file would report an evaluation failure instead.
+	vectorDir := filepath.Join(
 		root,
-		"protocol-version-10",
-		"v1",
+		"protocol-version-11",
+		"v3",
 		"term",
-		"textual",
-		"simple",
+		"constr",
+		"negative-tag",
 	)
 	writeFile(
 		t,
-		filepath.Join(textualVectorDir, "simple.uplc"),
-		"(program 1.0.0 (con integer",
+		filepath.Join(vectorDir, "negative-tag.uplc"),
+		"(program 1.1.0 (constr -5 (con integer 1) (error)))",
 	)
 	writeFile(
 		t,
-		filepath.Join(textualVectorDir, "simple.uplc.expected"),
-		"parse/decode error",
+		filepath.Join(vectorDir, "negative-tag.flat"),
+		"0101008fbffffffffffffffff01a400561",
 	)
+	writeFile(t, filepath.Join(vectorDir, "negative-tag.uplc.expected"), "parse/decode error")
+	writeFile(t, filepath.Join(vectorDir, "negative-tag.budget"), "parse/decode error")
 
 	report, err := GenerateReport(root, testTime)
 	if err != nil {
@@ -296,19 +299,16 @@ func TestGenerateReportReadsNDCFlatCorpus(t *testing.T) {
 	if len(report.Scenarios) != 3 {
 		t.Fatalf("scenario count = %d, want 3", len(report.Scenarios))
 	}
-	for i, protocol := range []string{"10.0", "11.0"} {
-		scenario := report.Scenarios[i]
-		if scenario.ID != "term_parse_bad_flat_v1" ||
-			scenario.Title != "bad flat" || scenario.Group != "term/parse" ||
-			scenario.PlutusVersion != "V1" || scenario.ProtocolVersion != protocol ||
-			scenario.Evaluation.Actual != "parse/decode error" || !scenario.Passed {
-			t.Fatalf("NDC Flat scenario = %+v", scenario)
-		}
+	gated := scenarioByID(t, report, "program_version_one_one_zero_v1")
+	if gated.Evaluation.Actual != "parse/decode error" || !gated.Passed {
+		t.Fatalf("version-gated scenario = %+v", gated)
 	}
-	textualScenario := scenarioByID(t, report, "term_textual_simple_v1")
-	if textualScenario.Evaluation.Actual != "parse/decode error" ||
-		!textualScenario.Passed {
-		t.Fatalf("NDC textual scenario = %+v", textualScenario)
+	scenario := scenarioByID(t, report, "term_constr_negative_tag_v3")
+	if scenario.ID != "term_constr_negative_tag_v3" ||
+		scenario.Title != "negative tag" || scenario.Group != "term/constr" ||
+		scenario.PlutusVersion != "V3" || scenario.ProtocolVersion != "11.0" ||
+		scenario.Evaluation.Actual != "parse/decode error" || !scenario.Passed {
+		t.Fatalf("NDC scenario = %+v", scenario)
 	}
 }
 

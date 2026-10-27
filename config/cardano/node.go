@@ -67,6 +67,12 @@ type CardanoNodeConfig struct {
 	// the maximum share of the last k blocks one genesis key may sign.
 	PBftSignatureThreshold *CardanoNodeDouble `yaml:"PBftSignatureThreshold"`
 
+	// ConsensusMode is the cardano-node chain selection mode, "PraosMode" or
+	// "GenesisMode". It is read only to tell a network that follows its peers
+	// by Praos rules from one that selects by Ouroboros Genesis density; see
+	// PraosConsensusMode.
+	ConsensusMode string `yaml:"ConsensusMode"`
+
 	// Hard fork epoch configuration. Pointer types distinguish
 	// "not set" (nil) from "set to 0" (*0), which is critical
 	// because setting these to 0 instructs the node to perform
@@ -588,6 +594,16 @@ func (c *CardanoNodeConfig) P2PTargets() (
 		c.TargetNumberOfKnownPeers,
 		c.TargetNumberOfEstablishedPeers,
 		c.TargetNumberOfActivePeers
+}
+
+// PraosConsensusMode reports whether the configuration names PraosMode. The
+// reference node then selects the longest valid chain and runs none of the
+// Genesis density, corroboration or patience logic, which is how a network
+// served by a single bootstrap host is meant to be followed. Only an explicit
+// PraosMode counts: a configuration that does not name a mode leaves the
+// decision to the node's own Genesis bootstrap setting.
+func (c *CardanoNodeConfig) PraosConsensusMode() bool {
+	return c != nil && c.ConsensusMode == "PraosMode"
 }
 
 // HardForkEpoch returns the epoch at which the named era's hard fork is

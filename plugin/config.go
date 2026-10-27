@@ -20,6 +20,7 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/blinklabs-io/dingo/internal/secretfile"
 	"gopkg.in/yaml.v3"
 )
 
@@ -39,6 +40,11 @@ func EnvironmentPrefix(capability Capability) string {
 // ApplyEnvironment overlays generic plugin environment entries on a YAML
 // selection. CLI provider selectors are intentionally applied by composition
 // after this function, giving selector CLI > environment > YAML precedence.
+//
+// A CONFIG_<FIELD>_FILE entry sets <FIELD> to the contents of the named file
+// (see secretfile.Read), so a secret such as a password need not appear in
+// the environment. The contents are a plain string, never parsed as YAML.
+// Setting both forms of one field is an error.
 func ApplyEnvironment(
 	capability Capability,
 	selection *Selection,
@@ -51,6 +57,7 @@ func ApplyEnvironment(
 		return errorsNewNilSelection(capability)
 	}
 	prefix := EnvironmentPrefix(capability)
+	setBy := make(map[string]string)
 	for _, entry := range environ {
 		name, value, ok := strings.Cut(entry, "=")
 		if !ok || !strings.HasPrefix(name, prefix) {
@@ -68,9 +75,7 @@ func ApplyEnvironment(
 					name,
 				)
 			}
-			if selection.Config == nil {
-				selection.Config = make(map[string]any)
-			}
+			fieldPath, fileBacked := strings.CutSuffix(fieldPath, "_FILE")
 			components := strings.Split(fieldPath, "_")
 			if slices.Contains(components, "") {
 				// Repeated or leading/trailing underscores (e.g.
@@ -82,11 +87,35 @@ func ApplyEnvironment(
 					name,
 				)
 			}
+			field := environmentFieldName(components)
+			if previous, ok := setBy[field]; ok {
+				return fmt.Errorf(
+					"%s and %s both set plugin config field %q; set only one",
+					previous,
+					name,
+					field,
+				)
+			}
+			setBy[field] = name
 			var scalar any
-			if err := yaml.Unmarshal([]byte(value), &scalar); err != nil {
+			// An empty path is treated like an empty literal, which
+			// clears the field, so presence means the same in both forms.
+			if fileBacked && value != "" {
+				contents, err := secretfile.Read(value)
+				if err != nil {
+					return fmt.Errorf("read %s: %w", name, err)
+				}
+				scalar = contents
+			} else if err := yaml.Unmarshal(
+				[]byte(value),
+				&scalar,
+			); err != nil {
 				return fmt.Errorf("parse %s: %w", name, err)
 			}
-			setEnvironmentPath(selection.Config, components, scalar)
+			if selection.Config == nil {
+				selection.Config = make(map[string]any)
+			}
+			selection.Config[field] = scalar
 		default:
 			return fmt.Errorf("unknown plugin environment path %s", name)
 		}
@@ -98,7 +127,7 @@ func errorsNewNilSelection(capability Capability) error {
 	return fmt.Errorf("nil plugin selection for capability %s", capability)
 }
 
-func setEnvironmentPath(dst map[string]any, words []string, value any) {
+func environmentFieldName(words []string) string {
 	// Environment paths flatten camelCase YAML names to underscore-separated
 	// words. Provider configs are currently flat, so the full suffix maps to a
 	// single lowerCamel field (DATA_DIR -> dataDir). Nested provider fields can
@@ -116,5 +145,5 @@ func setEnvironmentPath(dst map[string]any, words []string, value any) {
 		}
 		field.WriteString(string(runes))
 	}
-	dst[field.String()] = value
+	return field.String()
 }

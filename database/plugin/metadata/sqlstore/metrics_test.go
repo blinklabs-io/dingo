@@ -85,9 +85,8 @@ func TestClassifySQLStatementName(t *testing.T) {
 		},
 		{
 			name: "hand-written query with no sqlc annotation is unknown",
-			// Mirrors sumCredentialUtxoStakeQuery (live_stake.go), a
-			// hand-written hot query cached by prepared_stmt.go that has
-			// never carried a "-- name:" comment.
+			// A hand-written statement that has not been given a
+			// "-- name:" comment.
 			query:    "\nSELECT SUM(amount) FROM utxo WHERE credential_tag = ?",
 			wantOp:   "select",
 			wantName: "unknown",
@@ -526,10 +525,9 @@ func TestSQLQueryDurationHistogramMultiRowMeasuresDispatchNotIteration(
 // inside a write transaction wrapped in countingQueryer, exercising the
 // same stmtForQueryer unwrap the counter regression test covers) and the
 // plain instrumentedQueryer path (an uncached INSERT). It also checks the
-// "query" label: sumCredentialUtxoStakeQuery carries no sqlc "-- name:"
-// annotation (it predates the sqlc-generated query set -- see its
-// definition in live_stake.go), so its observations must land under
-// query="unknown", not under some guessed name.
+// "query" label: sumCredentialUtxoStakeQuery is hand-written but carries a
+// "-- name: SumCredentialUtxoStake" comment, so its observations land under
+// that name, while the unnamed INSERT lands under query="unknown".
 func TestSQLQueryDurationHistogramObservesCachedAndUncachedQueries(
 	t *testing.T,
 ) {
@@ -538,7 +536,7 @@ func TestSQLQueryDurationHistogramObservesCachedAndUncachedQueries(
 	store := newMigratedSQLiteStoreWithRegistry(t, reg)
 	ref := models.NewStakeCredentialRef(0, credentialKeyForIndex(0))
 
-	before := histogramSampleCount(t, reg, "select", "unknown")
+	before := histogramSampleCount(t, reg, "select", "SumCredentialUtxoStake")
 	err := store.withWriteTransaction(
 		nil,
 		func(db queryer, ctx context.Context) error {
@@ -550,7 +548,7 @@ func TestSQLQueryDurationHistogramObservesCachedAndUncachedQueries(
 	require.Equal(
 		t,
 		before+1,
-		histogramSampleCount(t, reg, "select", "unknown"),
+		histogramSampleCount(t, reg, "select", "SumCredentialUtxoStake"),
 		"expected the cached-statement call to be observed exactly once",
 	)
 

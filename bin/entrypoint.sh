@@ -23,13 +23,13 @@
 #   - Debug mode with verbose logging
 #
 # Environment variables:
-#   CARDANO_NETWORK       - Named network: mainnet, preprod, preview, devnet (default: preview)
+#   CARDANO_NETWORK       - Named network: mainnet, preprod, preview, dijkstra, devnet (default: preview)
 #   CARDANO_CONFIG        - Path to cardano node config.json (auto-set from network)
 #   CARDANO_DATABASE_PATH - Database storage location (default: /data/db)
 #   DINGO_SOCKET_PATH     - Unix socket path for NtC (default: /ipc/dingo.socket)
 #   DINGO_DEBUG           - Set to any value to enable debug logging and set -x
 #                           (tracing stops before the dingo command line is built)
-#   DINGO_LOG_FILE        - Optional file receiving dingo stdout/stderr
+#   DINGO_LOG_FILE        - Optional new file receiving dingo stdout/stderr
 #   RESTORE_SNAPSHOT      - Set to any value to bootstrap from Mithril snapshot on first run
 
 set -euo pipefail
@@ -119,21 +119,24 @@ is_secret_flag() {
 }
 
 # redact_url_query masks credential parameters while retaining endpoint and
-# non-secret query values that are useful in startup diagnostics.
+# non-secret query values that are useful in startup diagnostics. A URL
+# fragment is replaced whole, since it can carry a credential and is never
+# sent to the server, so diagnostics gain nothing from it.
 redact_url_query() {
-  local value="$1" head tail query fragment="" rendered pair separator name
+  local value="$1" head query fragment="" rendered pair separator name
+  if [[ "${value}" == *#* ]] &&
+    [[ "${value}" == *\?* || "${value}" =~ ^[A-Za-z][A-Za-z0-9+.-]*:// ]]; then
+    # Split at the first "#" before the query, so a "?" inside the fragment
+    # is not mistaken for the start of the query.
+    fragment="#<redacted>"
+    value="${value%%#*}"
+  fi
   if [[ "${value}" != *\?* ]]; then
-    printf '%s' "${value}"
+    printf '%s' "${value}${fragment}"
     return
   fi
   head="${value%%\?*}"
-  tail="${value#*\?}"
-  if [[ "${tail}" == *#* ]]; then
-    query="${tail%%#*}"
-    fragment="#${tail#*#}"
-  else
-    query="${tail}"
-  fi
+  query="${value#*\?}"
   rendered="${head}?"
   while true; do
     if [[ "${query}" =~ ^([^\&\;]*)([\&\;])(.*)$ ]]; then
@@ -267,7 +270,7 @@ forward_signal() {
 }
 
 run_managed_dingo() {
-  local output_file="$1"
+  local log_file="$1"
   shift
 
   # A shutdown request received before a child exists must not start new work.
@@ -275,8 +278,10 @@ run_managed_dingo() {
     exit "${PENDING_SIGNAL_EXIT_CODE}"
   fi
 
-  if [[ -n "${output_file}" ]]; then
-    dingo "$@" >>"${output_file}" 2>&1 &
+  # DINGO_LOG_FILE persists structured output for test harnesses; stdout
+  # stays the default for normal deployments.
+  if [[ -n "${log_file}" ]]; then
+    perl -e "${DINGO_LOG_OPENER}" -- "${log_file}" dingo "$@" &
   else
     dingo "$@" &
   fi
@@ -297,6 +302,66 @@ run_managed_dingo() {
   return "${child_exit_code}"
 }
 
+# Bash redirections cannot open with O_EXCL|O_NOFOLLOW or relative to a
+# directory descriptor, so any check before them leaves a window in which a
+# FIFO or a symlinked parent can appear. This perl-base helper walks the
+# parents with O_NOFOLLOW descriptors, creates the log with one exclusive
+# no-follow open, sets the mode on the descriptor (a default ACL would
+# otherwise override the umask), and execs dingo with stdout and stderr on it.
+# Running it as the managed child keeps the descriptor out of the entrypoint.
+# shellcheck disable=SC2016
+DINGO_LOG_OPENER='
+use strict;
+use warnings;
+use Errno qw(EEXIST ENOENT);
+use Fcntl qw(O_CREAT O_DIRECTORY O_EXCL O_NOFOLLOW O_RDONLY O_WRONLY);
+
+my $path = shift @ARGV;
+sub fail {
+  print STDERR "[entrypoint] ERROR: DINGO_LOG_FILE $_[0]\n";
+  exit 1;
+}
+my @parts = split m{/}, $path, -1;
+my $name = pop @parts;
+if ($name eq q() || $name eq q(.) || $name eq q(..)) {
+  fail("must name a new file: $path");
+}
+sysopen(my $cwd, q(.), O_RDONLY | O_DIRECTORY)
+  or fail("cannot open the working directory: $!");
+if ($path =~ m{^/}) {
+  sysopen(my $root, q(/), O_RDONLY | O_DIRECTORY)
+    or fail("cannot open /: $!");
+  chdir($root) or fail("cannot enter /: $!");
+}
+my $walked = $path =~ m{^/} ? q() : q(.);
+for my $part (@parts) {
+  next if $part eq q() || $part eq q(.);
+  $walked .= "/$part";
+  my $dir;
+  my $opened = sysopen($dir, $part, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+  if (!$opened && $! == ENOENT) {
+    mkdir($part) or $! == EEXIST
+      or fail("parent cannot be created: $walked: $!");
+    $opened = sysopen($dir, $part, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+  }
+  if (!$opened) {
+    fail("must not traverse a symlink: $walked") if -l $part;
+    fail("parent is not a directory: $walked: $!");
+  }
+  chdir($dir) or fail("cannot enter $walked: $!");
+}
+sysopen(my $log, $name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0644)
+  or fail("must name a new file: $path");
+chmod(0644, $log) or fail("cannot set mode on $path: $!");
+chdir($cwd) or fail("cannot restore the working directory: $!");
+open(STDOUT, q(>&), $log) or fail("cannot redirect stdout: $!");
+open(STDERR, q(>&), $log) or fail("cannot redirect stderr: $!");
+exec { $ARGV[0] } @ARGV or do {
+  print STDERR "[entrypoint] ERROR: cannot run $ARGV[0]: $!\n";
+  exit 127;
+};
+'
+
 # --------------------------------------------------------------------------- #
 # Configuration validation
 # --------------------------------------------------------------------------- #
@@ -307,6 +372,7 @@ config_path_for_network() {
     mainnet) echo "/opt/cardano/config/mainnet/config.json" ;;
     preprod) echo "/opt/cardano/config/preprod/config.json" ;;
     preview) echo "/opt/cardano/config/preview/config.json" ;;
+    dijkstra) echo "/opt/cardano/config/dijkstra/config.json" ;;
     devnet)  echo "" ;; # devnet uses embedded config, no external file needed
     *)       echo "" ;;
   esac
@@ -341,7 +407,7 @@ validate_config_network_match() {
   expected_config="$(config_path_for_network "${network}")"
   if [[ -n "${expected_config}" ]] && [[ "${config}" != "${expected_config}" ]]; then
     # Only warn if the config path references a different known network
-    for known_net in mainnet preprod preview; do
+    for known_net in mainnet preprod preview dijkstra; do
       if [[ "${known_net}" != "${network}" ]] && [[ "${config}" == *"/${known_net}/"* ]]; then
         warn "CARDANO_CONFIG '${config}' appears to be for '${known_net}' but CARDANO_NETWORK is '${network}'"
         warn "This mismatch may cause unexpected behavior"
@@ -476,14 +542,6 @@ else
 fi
 
 log "Starting dingo $(redact_args "${DINGO_ARGS[@]}")"
-
-# Persist structured output for test harnesses when requested, while keeping
-# stdout as the default for normal deployments.
-if [[ -n "${DINGO_LOG_FILE:-}" ]]; then
-  mkdir -p "$(dirname "${DINGO_LOG_FILE}")"
-  touch "${DINGO_LOG_FILE}"
-  chmod 0644 "${DINGO_LOG_FILE}"
-fi
 
 # Start dingo and preserve its exit status, including after a forwarded signal.
 if run_managed_dingo "${DINGO_LOG_FILE:-}" "${DINGO_ARGS[@]}"; then

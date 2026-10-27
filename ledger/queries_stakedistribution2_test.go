@@ -92,8 +92,8 @@ func TestQueryShelleyStakeDistribution2_ReportsTheLeaderElectionDistribution(
 }
 
 // TestQueryShelleyStakeDistribution2_ViaGetCBOR covers the query wrapped in
-// the GetCBOR combinator, whose tag-24 content must decode as the same
-// StakeDistribution2Result a direct reply does.
+// the GetCBOR combinator, whose tag-24 content is the bare PoolDistr
+// ([pool map, total]) a node wraps, with no era result wrapper around it.
 func TestQueryShelleyStakeDistribution2_ViaGetCBOR(t *testing.T) {
 	t.Parallel()
 
@@ -118,11 +118,11 @@ func TestQueryShelleyStakeDistribution2_ViaGetCBOR(t *testing.T) {
 	content, ok := tag.Content.([]byte)
 	require.True(t, ok, "tag content must be raw CBOR bytes")
 
-	var decoded olocalstatequery.StakeDistribution2Result
+	var decoded olocalstatequery.PoolDistribution
 	_, err = cbor.Decode(content, &decoded)
-	require.NoError(t, err, "tag-24 content must decode as a StakeDistribution2Result")
-	entry, ok := decoded.Distribution.Pools[lcommon.PoolId(poolA)]
+	require.NoError(t, err, "tag-24 content must decode as a PoolDistribution")
+	entry, ok := decoded.Pools[lcommon.PoolId(poolA)]
 	require.True(t, ok, "pool missing from the GetCBOR-wrapped distribution")
 	assert.Equal(t, uint64(3_000_000), entry.TotalPoolStake)
-	assert.Equal(t, uint64(4_000_000), decoded.Distribution.TotalActiveStake)
+	assert.Equal(t, uint64(4_000_000), decoded.TotalActiveStake)
 }

@@ -17,7 +17,9 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/internal/koiosparity"
@@ -276,4 +278,317 @@ func TestSubcommandsRejectNegativeGraceHours(t *testing.T) {
 			require.ErrorContains(t, err, "--grace-hours must not be negative")
 		})
 	}
+}
+
+func TestKoiosAPIKeySources(t *testing.T) {
+	// Not t.Parallel: t.Setenv changes the process environment.
+	dir := t.TempDir()
+	require.NoError(t, os.Chmod(dir, 0o700))
+	flagFile := filepath.Join(dir, "flag")
+	require.NoError(t, os.WriteFile(flagFile, []byte("flag-file\n"), 0o600))
+	envFile := filepath.Join(dir, "env")
+	require.NoError(t, os.WriteFile(envFile, []byte("env-file\n"), 0o600))
+	for _, tc := range []struct {
+		name    string
+		flags   map[string]string
+		env     map[string]string
+		want    string
+		wantErr string
+	}{
+		{name: "unset"},
+		{
+			name:  "flag file",
+			flags: map[string]string{"api-key-file": flagFile},
+			want:  "flag-file",
+		},
+		{
+			name: "env file",
+			env:  map[string]string{"KOIOS_API_KEY_FILE": envFile},
+			want: "env-file",
+		},
+		{
+			name:  "flag file beats env literal",
+			flags: map[string]string{"api-key-file": flagFile},
+			env:   map[string]string{"KOIOS_API_KEY": "env"},
+			want:  "flag-file",
+		},
+		{
+			name:  "flag literal beats env file",
+			flags: map[string]string{"api-key": "flag"},
+			env:   map[string]string{"KOIOS_API_KEY_FILE": envFile},
+			want:  "flag",
+		},
+		{
+			name:  "empty flag file beats env literal",
+			flags: map[string]string{"api-key-file": ""},
+			env:   map[string]string{"KOIOS_API_KEY": "env"},
+			want:  "",
+		},
+		{
+			name: "empty flag literal and file",
+			flags: map[string]string{
+				"api-key":      "",
+				"api-key-file": flagFile,
+			},
+			wantErr: "--api-key-file",
+		},
+		{
+			name: "empty env literal and file",
+			env: map[string]string{
+				"KOIOS_API_KEY":      "",
+				"KOIOS_API_KEY_FILE": envFile,
+			},
+			wantErr: "KOIOS_API_KEY_FILE",
+		},
+		{
+			name: "both flags",
+			flags: map[string]string{
+				"api-key":      "flag",
+				"api-key-file": flagFile,
+			},
+			wantErr: "--api-key-file",
+		},
+		{
+			name: "both env",
+			env: map[string]string{
+				"KOIOS_API_KEY":      "env",
+				"KOIOS_API_KEY_FILE": envFile,
+			},
+			wantErr: "KOIOS_API_KEY_FILE",
+		},
+		{
+			name: "missing file",
+			flags: map[string]string{
+				"api-key-file": filepath.Join(dir, "missing"),
+			},
+			wantErr: "--api-key-file",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, name := range []string{
+				"KOIOS_API_KEY",
+				"KOIOS_API_KEY_FILE",
+			} {
+				t.Setenv(name, "")
+				require.NoError(t, os.Unsetenv(name))
+			}
+			for name, value := range tc.env {
+				t.Setenv(name, value)
+			}
+			cmd := &cobra.Command{}
+			addAPIKeyFlags(cmd)
+			for name, value := range tc.flags {
+				require.NoError(t, cmd.Flags().Set(name, value))
+			}
+			got, err := koiosAPIKey(cmd)
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tc.want, got)
+		})
+	}
+}
+
+func TestResolveDingoDBMetadataDSNFile(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	require.NoError(t, os.Chmod(dir, 0o700))
+	dsnFile := filepath.Join(dir, "dsn")
+	require.NoError(t, os.WriteFile(
+		dsnFile,
+		[]byte("postgres://u:pw@db.example.com/dingo\n"),
+		0o600,
+	))
+	for _, tc := range []struct {
+		name    string
+		flags   map[string]string
+		want    string
+		wantErr string
+	}{
+		{
+			name: "literal",
+			flags: map[string]string{
+				"metadata-plugin": "postgres",
+				"metadata-dsn":    "postgres://literal",
+			},
+			want: "postgres://literal",
+		},
+		{
+			name: "file",
+			flags: map[string]string{
+				"metadata-plugin":   "postgres",
+				"metadata-dsn-file": dsnFile,
+			},
+			want: "postgres://u:pw@db.example.com/dingo",
+		},
+		{
+			name: "both",
+			flags: map[string]string{
+				"metadata-dsn":      "postgres://literal",
+				"metadata-dsn-file": dsnFile,
+			},
+			wantErr: "--metadata-dsn-file",
+		},
+		{
+			name: "empty literal and file",
+			flags: map[string]string{
+				"metadata-dsn":      "",
+				"metadata-dsn-file": dsnFile,
+			},
+			wantErr: "--metadata-dsn-file",
+		},
+		{
+			name: "missing file",
+			flags: map[string]string{
+				"metadata-dsn-file": filepath.Join(t.TempDir(), "missing"),
+			},
+			wantErr: "--metadata-dsn-file",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cmd := &cobra.Command{}
+			addDingoDBFlags(cmd)
+			for name, value := range tc.flags {
+				require.NoError(t, cmd.Flags().Set(name, value))
+			}
+			got, err := resolveDingoDB(cmd)
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tc.want, got.DSN)
+		})
+	}
+}
+
+// resetDingoConfigCache clears loadedDingoConfig's memoized result before and
+// after a test, so the test loads Dingo's configuration from its own
+// environment and later tests do not inherit it.
+func resetDingoConfigCache(t *testing.T) {
+	t.Helper()
+	reset := func() {
+		dingoConfigOnce = sync.Once{}
+		dingoConfigCached = nil
+		errDingoConfig = nil
+	}
+	reset()
+	t.Cleanup(reset)
+}
+
+func TestDingoConfigLoadErrorFailsClosed(t *testing.T) {
+	// Not t.Parallel: t.Setenv, and loadedDingoConfig memoizes into
+	// package-level state.
+	resetDingoConfigCache(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_PLUGINS_STORAGE_METADATA_PROVIDER", "postgres")
+	t.Setenv(
+		"DINGO_PLUGINS_STORAGE_METADATA_CONFIG_PASSWORD_FILE",
+		filepath.Join(t.TempDir(), "missing"),
+	)
+	const variable = "DINGO_PLUGINS_STORAGE_METADATA_CONFIG_PASSWORD_FILE"
+
+	cmd := &cobra.Command{}
+	addDingoDBFlags(cmd)
+	_, err := resolveDingoDB(cmd)
+	require.ErrorContains(t, err, variable)
+	_, err = resolveCachePath()
+	require.ErrorContains(t, err, variable)
+
+	// Explicit paths never consult Dingo's configuration.
+	prevData, prevCache := globalFlags.dingoData, globalFlags.cachePath
+	t.Cleanup(func() {
+		globalFlags.dingoData, globalFlags.cachePath = prevData, prevCache
+	})
+	globalFlags.cachePath = filepath.Join(t.TempDir(), "cache.db")
+	got, err := resolveCachePath()
+	require.NoError(t, err)
+	require.Equal(t, globalFlags.cachePath, got)
+	globalFlags.dingoData = t.TempDir()
+	dataDir, err := resolveDingoDataDir()
+	require.NoError(t, err)
+	require.Equal(t, globalFlags.dingoData, dataDir)
+}
+
+func TestResolveDingoDBExplicitEmptyDSNOverridesConfig(t *testing.T) {
+	// Not t.Parallel: t.Setenv, and loadedDingoConfig memoizes into
+	// package-level state.
+	resetDingoConfigCache(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_PLUGINS_STORAGE_METADATA_PROVIDER", "postgres")
+	t.Setenv(
+		"DINGO_PLUGINS_STORAGE_METADATA_CONFIG_DSN",
+		"postgres://config.example.com/dingo",
+	)
+	for _, tc := range []struct {
+		name  string
+		flags map[string]string
+		want  string
+	}{
+		{name: "no flag", want: "postgres://config.example.com/dingo"},
+		{name: "empty literal", flags: map[string]string{"metadata-dsn": ""}},
+		{
+			name:  "empty file",
+			flags: map[string]string{"metadata-dsn-file": ""},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := &cobra.Command{}
+			addDingoDBFlags(cmd)
+			for name, value := range tc.flags {
+				require.NoError(t, cmd.Flags().Set(name, value))
+			}
+			got, err := resolveDingoDB(cmd)
+			require.NoError(t, err)
+			require.Equal(t, "postgres", got.Plugin)
+			require.Equal(t, tc.want, got.DSN)
+		})
+	}
+}
+
+func TestResolveDingoDBExplicitFlagsSkipBrokenConfig(t *testing.T) {
+	// Not t.Parallel: t.Setenv, and loadedDingoConfig and globalFlags are
+	// package-level state.
+	resetDingoConfigCache(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(
+		"DINGO_PLUGINS_STORAGE_METADATA_CONFIG_PASSWORD_FILE",
+		filepath.Join(t.TempDir(), "missing"),
+	)
+	prevData := globalFlags.dingoData
+	t.Cleanup(func() { globalFlags.dingoData = prevData })
+	globalFlags.dingoData = ""
+
+	resolve := func(flags map[string]string) (string, error) {
+		cmd := &cobra.Command{}
+		addDingoDBFlags(cmd)
+		for name, value := range flags {
+			require.NoError(t, cmd.Flags().Set(name, value))
+		}
+		got, err := resolveDingoDB(cmd)
+		return got.DSN, err
+	}
+
+	// A DSN-based plugin never reads the data directory.
+	dsn, err := resolve(map[string]string{
+		"metadata-plugin": "postgres",
+		"metadata-dsn":    "postgres://flag.example.com/dingo",
+	})
+	require.NoError(t, err)
+	require.Equal(t, "postgres://flag.example.com/dingo", dsn)
+
+	// sqlite opens a file in the data directory, which comes from the
+	// configuration unless --dingo-data names it.
+	_, err = resolve(map[string]string{"metadata-plugin": "sqlite"})
+	require.ErrorContains(
+		t,
+		err,
+		"DINGO_PLUGINS_STORAGE_METADATA_CONFIG_PASSWORD_FILE",
+	)
+	globalFlags.dingoData = t.TempDir()
+	_, err = resolve(map[string]string{"metadata-plugin": "sqlite"})
+	require.NoError(t, err)
 }

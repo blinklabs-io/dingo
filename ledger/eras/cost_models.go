@@ -14,7 +14,11 @@
 
 package eras
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/blinklabs-io/dingo/config/cardano"
+)
 
 // requiredCostModel returns the cost model for a Plutus language version, or
 // an error when the protocol parameters don't carry one at all. A plain map
@@ -68,4 +72,20 @@ func cloneCostModels(values map[uint][]int64) map[uint][]int64 {
 		ret[language] = append([]int64(nil), model...)
 	}
 	return ret
+}
+
+// applyAlonzoExtraConfigCostModels re-applies the Alonzo genesis extraConfig
+// cost models over models. The ledger injects them after every era
+// translation, so an era that derives cost models from its own genesis (the
+// Conway PlutusV3 model) must call this after that derivation or the
+// translated model would win over the injected one. Without extraConfig the
+// models are returned unchanged.
+func applyAlonzoExtraConfigCostModels(
+	nodeConfig *cardano.CardanoNodeConfig,
+	models map[uint][]int64,
+) (map[uint][]int64, error) {
+	if nodeConfig == nil {
+		return models, nil
+	}
+	return nodeConfig.AlonzoGenesis().ApplyExtraConfigCostModels(models)
 }

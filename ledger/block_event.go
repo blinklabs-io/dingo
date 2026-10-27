@@ -32,6 +32,9 @@ func (ls *LedgerState) handleEventChainUpdate(evt event.Event) {
 	switch data := evt.Data.(type) {
 	case chain.ChainBlockEvent:
 		ls.publishBlockEvent(BlockActionApply, data.Block)
+		// Every primary-chain addition arrives here, fetched or forged, so
+		// a battle settles even when only this node's blocks follow it.
+		ls.resolveSlotBattles()
 	case chain.ChainRollbackEvent:
 		for _, blk := range data.RolledBackBlocks {
 			ls.publishBlockEvent(BlockActionUndo, blk)

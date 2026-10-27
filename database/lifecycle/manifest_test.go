@@ -201,7 +201,7 @@ func TestManifestRejectsNewerFormatVersion(t *testing.T) {
 	require.NoError(t, err)
 	patched := strings.Replace(
 		string(data),
-		`"formatVersion": 1`,
+		`"formatVersion": 2`,
 		`"formatVersion": 999`,
 		1,
 	)

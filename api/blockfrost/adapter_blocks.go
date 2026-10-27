@@ -100,10 +100,10 @@ func (a *NodeAdapter) neighborBlocks(
 	return ret, total, nil
 }
 
-func (a *NodeAdapter) blockInfos(blocks []models.Block) ([]BlockInfo, error) {
+func (a *NodeAdapter) blockInfos(ctx context.Context, blocks []models.Block) ([]BlockInfo, error) {
 	ret := make([]BlockInfo, 0, len(blocks))
 	for _, block := range blocks {
-		info, err := a.blockInfoFromBlock(block)
+		info, err := a.blockInfoFromBlock(ctx, block)
 		if err != nil {
 			return nil, err
 		}
@@ -122,8 +122,7 @@ func (a *NodeAdapter) BlockNext(
 	if err != nil {
 		return nil, 0, err
 	}
-	//nolint:contextcheck // block aggregates are read through the ledger state, which takes no context
-	infos, err := a.blockInfos(blocks)
+	infos, err := a.blockInfos(ctx, blocks)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -140,8 +139,7 @@ func (a *NodeAdapter) BlockPrevious(
 	if err != nil {
 		return nil, 0, err
 	}
-	//nolint:contextcheck // block aggregates are read through the ledger state, which takes no context
-	infos, err := a.blockInfos(blocks)
+	infos, err := a.blockInfos(ctx, blocks)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -175,8 +173,7 @@ func (a *NodeAdapter) BlockBySlot(
 	if err != nil {
 		return BlockInfo{}, err
 	}
-	//nolint:contextcheck // block aggregates are read through the ledger state, which takes no context
-	return a.blockInfoFromBlock(block)
+	return a.blockInfoFromBlock(ctx, block)
 }
 
 func (a *NodeAdapter) blockAtEpochSlot(
@@ -219,27 +216,18 @@ func (a *NodeAdapter) BlockByEpochSlot(
 	if err != nil {
 		return BlockInfo{}, err
 	}
-	//nolint:contextcheck // block aggregates are read through the ledger state, which takes no context
-	return a.blockInfoFromBlock(block)
+	return a.blockInfoFromBlock(ctx, block)
 }
 
-func (a *NodeAdapter) decodedBlockByID(
+func (a *NodeAdapter) blockByID(
 	ctx context.Context,
 	id string,
-) (models.Block, lcommon.Block, error) {
+) (models.Block, error) {
 	block, err := a.resolveBlock(ctx, id)
 	if err != nil {
-		return models.Block{}, nil, err
+		return models.Block{}, err
 	}
-	decoded, err := block.Decode()
-	if err != nil {
-		return models.Block{}, nil, fmt.Errorf(
-			"decode block %x: %w",
-			block.Hash,
-			err,
-		)
-	}
-	return block, decoded, nil
+	return block, nil
 }
 
 // BlockTransactionHashes returns the transaction hashes of a block in block
@@ -248,11 +236,14 @@ func (a *NodeAdapter) BlockTransactionHashes(
 	ctx context.Context,
 	id string,
 ) ([]string, error) {
-	_, decoded, err := a.decodedBlockByID(ctx, id)
+	block, err := a.blockByID(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	txs := decoded.Transactions()
+	txs, err := a.ledgerState.BlockTransactions(ctx, block)
+	if err != nil {
+		return nil, fmt.Errorf("get transactions for block %x: %w", block.Hash, err)
+	}
 	ret := make([]string, 0, len(txs))
 	for _, tx := range txs {
 		ret = append(ret, tx.Hash().String())
@@ -261,9 +252,8 @@ func (a *NodeAdapter) BlockTransactionHashes(
 }
 
 func transactionCBORInfos(
-	block lcommon.Block,
+	txs []lcommon.Transaction,
 ) []BlockTransactionCBORInfo {
-	txs := block.Transactions()
 	ret := make([]BlockTransactionCBORInfo, 0, len(txs))
 	for _, tx := range txs {
 		ret = append(ret, BlockTransactionCBORInfo{
@@ -280,11 +270,15 @@ func (a *NodeAdapter) BlockTransactionCBOR(
 	ctx context.Context,
 	id string,
 ) ([]BlockTransactionCBORInfo, error) {
-	_, decoded, err := a.decodedBlockByID(ctx, id)
+	block, err := a.blockByID(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	return transactionCBORInfos(decoded), nil
+	txs, err := a.ledgerState.BlockTransactions(ctx, block)
+	if err != nil {
+		return nil, fmt.Errorf("get transactions for block %x: %w", block.Hash, err)
+	}
+	return transactionCBORInfos(txs), nil
 }
 
 // LatestBlockTransactionCBOR returns the transactions of the chain tip block
@@ -293,14 +287,18 @@ func (a *NodeAdapter) LatestBlockTransactionCBOR(
 	ctx context.Context,
 ) ([]BlockTransactionCBORInfo, error) {
 	tip := a.ledgerState.Tip()
-	_, decoded, err := a.decodedBlockByID(
+	block, err := a.blockByID(
 		ctx,
 		hex.EncodeToString(tip.Point.Hash),
 	)
 	if err != nil {
 		return nil, err
 	}
-	return transactionCBORInfos(decoded), nil
+	txs, err := a.ledgerState.BlockTransactions(ctx, block)
+	if err != nil {
+		return nil, fmt.Errorf("get transactions for block %x: %w", block.Hash, err)
+	}
+	return transactionCBORInfos(txs), nil
 }
 
 // BlockAddresses returns every address a block's transactions pay to or spend
@@ -313,9 +311,13 @@ func (a *NodeAdapter) BlockAddresses(
 	ctx context.Context,
 	id string,
 ) ([]BlockAddressInfo, error) {
-	block, decoded, err := a.decodedBlockByID(ctx, id)
+	block, err := a.blockByID(ctx, id)
 	if err != nil {
 		return nil, err
+	}
+	txs, err := a.ledgerState.BlockTransactions(ctx, block)
+	if err != nil {
+		return nil, fmt.Errorf("get transactions for block %x: %w", block.Hash, err)
 	}
 	indexed, err := a.ledgerState.Database().
 		GetTransactionsByBlockHash(ctx, block.Hash, nil)
@@ -330,8 +332,29 @@ func (a *NodeAdapter) BlockAddresses(
 	for _, tx := range indexed {
 		byHash[hex.EncodeToString(tx.Hash)] = tx
 	}
+	// The ledger applies a transaction repeated by a later endorser block
+	// once, so its row stays under the earlier certifying block.
+	var missing [][]byte
+	for _, tx := range txs {
+		if _, ok := byHash[tx.Hash().String()]; !ok {
+			missing = append(missing, tx.Hash().Bytes())
+		}
+	}
+	if len(missing) > 0 {
+		applied, err := a.ledgerState.Database().
+			GetTransactionsByHashes(ctx, missing, nil)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"get transactions for block %x: %w",
+				block.Hash,
+				err,
+			)
+		}
+		for _, tx := range applied {
+			byHash[hex.EncodeToString(tx.Hash)] = tx
+		}
+	}
 
-	txs := decoded.Transactions()
 	outputAddresses := make([][]string, 0, len(txs))
 	spent := make([][]models.Utxo, 0, len(txs))
 	for _, tx := range txs {

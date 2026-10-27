@@ -32,6 +32,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/safedecode"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger/eras"
@@ -140,9 +141,10 @@ func leiosApplyTestSignedSpendingTx(
 		cbor.RawMessage(bodyCbor),
 		pathSignedWitnesses(pathSigner(), lcommon.Blake2b256Hash(bodyCbor)),
 		nil,
+		true,
 	})
 	require.NoError(t, err)
-	tx, err := gledger.NewTransactionFromCbor(gledger.TxTypeDijkstra, txCbor)
+	tx, err := safedecode.DijkstraBlockTransaction(txCbor)
 	require.NoError(t, err)
 	return cbor.RawMessage(txCbor), tx
 }
@@ -156,9 +158,10 @@ func leiosApplyTestTxFromBody(
 		cbor.RawMessage(bodyCbor),
 		map[uint]any{},
 		nil,
+		true,
 	})
 	require.NoError(t, err)
-	tx, err := gledger.NewTransactionFromCbor(gledger.TxTypeDijkstra, txCbor)
+	tx, err := safedecode.DijkstraBlockTransaction(txCbor)
 	require.NoError(t, err)
 	return cbor.RawMessage(txCbor), tx
 }
@@ -177,10 +180,16 @@ func TestBuildEndorserBlockBlobIndexesDijkstraBatchLevels(t *testing.T) {
 		},
 		TxIsValid: true,
 	}
-	txCbor, err := tx.MarshalCBOR()
+	standalone, err := tx.MarshalCBOR()
 	require.NoError(t, err)
-	tx, err = dijkstra.NewDijkstraTransactionFromCbor(txCbor)
+	var parts []cbor.RawMessage
+	_, err = cbor.Decode(standalone, &parts)
 	require.NoError(t, err)
+	txCbor, err := cbor.Encode(append(parts, cbor.RawMessage{0xf5}))
+	require.NoError(t, err)
+	decoded, err := safedecode.DijkstraBlockTransaction(txCbor)
+	require.NoError(t, err)
+	tx = decoded.(*dijkstra.DijkstraTransaction)
 	_, elems, err := decodeEndorserTxEnvelope(txCbor)
 	require.NoError(t, err)
 	levels := TransactionLevelsForApply(tx)
@@ -457,6 +466,7 @@ func TestLeiosAnnouncementValidationAcceptsPriorClosureConsume(t *testing.T) {
 	require.NoError(t, ls.ValidateLeiosEndorserBlockTransactions(
 		t.Context(),
 		header,
+		LeiosValidationParentHash(header),
 		[][]byte{rawSecond},
 	))
 }
@@ -640,12 +650,10 @@ func leiosApplyTestTx(
 		cbor.RawMessage(bodyCbor),
 		map[uint]any{},
 		nil,
+		true,
 	})
 	require.NoError(t, err)
-	tx, err := gledger.NewTransactionFromCbor(
-		gledger.TxTypeDijkstra,
-		txCbor,
-	)
+	tx, err := safedecode.DijkstraBlockTransaction(txCbor)
 	require.NoError(t, err)
 	return cbor.RawMessage(txCbor), bodyCbor, tx
 }
@@ -921,9 +929,10 @@ func leiosApplyTestTxWithOutput(
 		cbor.RawMessage(bodyCbor),
 		map[uint]any{},
 		nil,
+		true,
 	})
 	require.NoError(t, err)
-	tx, err := gledger.NewTransactionFromCbor(gledger.TxTypeDijkstra, txCbor)
+	tx, err := safedecode.DijkstraBlockTransaction(txCbor)
 	require.NoError(t, err)
 	return cbor.RawMessage(txCbor), tx
 }

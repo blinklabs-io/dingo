@@ -32,13 +32,18 @@ type syncStateStore interface {
 }
 
 type syncStateScheduleRecord struct {
-	FormatVersion int      `json:"format_version"`
-	Epoch         uint64   `json:"epoch"`
-	PoolID        string   `json:"pool_id"`
-	PoolStake     uint64   `json:"pool_stake"`
-	TotalStake    uint64   `json:"total_stake"`
-	EpochNonce    string   `json:"epoch_nonce"`
-	LeaderSlots   []uint64 `json:"leader_slots"`
+	FormatVersion          int      `json:"format_version"`
+	ConsensusIdentity      string   `json:"consensus_identity,omitempty"`
+	Epoch                  uint64   `json:"epoch"`
+	PoolID                 string   `json:"pool_id"`
+	PoolStake              uint64   `json:"pool_stake"`
+	TotalStake             uint64   `json:"total_stake"`
+	EpochNonce             string   `json:"epoch_nonce"`
+	EpochStartSlot         uint64   `json:"epoch_start_slot"`
+	EpochSlotCount         uint64   `json:"epoch_slot_count"`
+	EraID                  uint     `json:"era_id"`
+	DistributionCommitment string   `json:"distribution_commitment,omitempty"`
+	LeaderSlots            []uint64 `json:"leader_slots"`
 }
 
 // syncStateScheduleStore persists schedules in metadata sync state.
@@ -103,10 +108,29 @@ func (s *syncStateScheduleStore) LoadSchedule(
 		record.TotalStake,
 		epochNonce,
 	)
+	// Assigned even when empty: NewSchedule's Praos default must not stand in
+	// for an identity the record never carried, or a current-format record
+	// without one would be reused as if Praos had computed it.
+	schedule.ConsensusIdentity = record.ConsensusIdentity
 	// Carry the persisted format version through so validatePersistedSchedule
 	// can reject schedules written by builds with an incompatible compute
 	// path (missing field decodes to 0 ≠ ScheduleFormatVersion).
 	schedule.FormatVersion = record.FormatVersion
+	schedule.EpochStartSlot = record.EpochStartSlot
+	schedule.EpochSlotCount = record.EpochSlotCount
+	schedule.EraID = record.EraID
+	if record.DistributionCommitment != "" {
+		schedule.DistributionCommitment, err = hex.DecodeString(
+			record.DistributionCommitment,
+		)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"decode distribution commitment for %q: %w",
+				key,
+				err,
+			)
+		}
+	}
 	for _, slot := range record.LeaderSlots {
 		schedule.AddLeaderSlot(slot)
 	}
@@ -124,13 +148,20 @@ func (s *syncStateScheduleStore) SaveSchedule(schedule *Schedule) error {
 		return nil
 	}
 	record := syncStateScheduleRecord{
-		FormatVersion: schedule.FormatVersion,
-		Epoch:         schedule.Epoch,
-		PoolID:        hex.EncodeToString(schedule.PoolId[:]),
-		PoolStake:     schedule.PoolStake,
-		TotalStake:    schedule.TotalStake,
-		EpochNonce:    hex.EncodeToString(schedule.EpochNonce),
-		LeaderSlots:   schedule.LeaderSlotsSnapshot(),
+		FormatVersion:     schedule.FormatVersion,
+		ConsensusIdentity: schedule.ConsensusIdentity,
+		Epoch:             schedule.Epoch,
+		PoolID:            hex.EncodeToString(schedule.PoolId[:]),
+		PoolStake:         schedule.PoolStake,
+		TotalStake:        schedule.TotalStake,
+		EpochNonce:        hex.EncodeToString(schedule.EpochNonce),
+		EpochStartSlot:    schedule.EpochStartSlot,
+		EpochSlotCount:    schedule.EpochSlotCount,
+		EraID:             schedule.EraID,
+		DistributionCommitment: hex.EncodeToString(
+			schedule.DistributionCommitment,
+		),
+		LeaderSlots: schedule.LeaderSlotsSnapshot(),
 	}
 	payload, err := json.Marshal(record)
 	if err != nil {

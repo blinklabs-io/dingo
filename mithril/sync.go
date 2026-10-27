@@ -560,7 +560,7 @@ type SyncConfig struct {
 	DownloadIdleTimeout    string                     // optional; passed to BootstrapConfig
 	DownloadMaxIdleRetries int                        // must be >= 0
 	DownloadMaxBytes       int64                      // per compressed object; zero uses DefaultMaxDownloadBytes
-	PinnedDigest           string                     // optional exact artifact identity for a fresh bootstrap (v1 snapshot digest; v2 database hash)
+	PinnedDigest           string                     // optional exact artifact identity for a fresh bootstrap (database hash)
 	VerifyCertChain        bool
 	CleanupAfterLoad       bool
 	// RepairLegacyRewardState forces a same-chain Mithril reconciliation for
@@ -575,6 +575,7 @@ type SyncConfig struct {
 	Tracing                 bool             // OpenTelemetry tracing enabled; forwarded to the metadata pool
 	Logger                  *slog.Logger     // optional; defaults to slog.Default()
 	OnProgress              SyncProgressFunc // optional
+	Metrics                 *PipelineMetrics // optional; records the immutable chunk downloads
 }
 
 // StoragePlugins contains canonical storage provider selections used during
@@ -892,8 +893,8 @@ func Sync(
 	// Pipelined copy consumer. Bootstrap invokes onChunkContiguous for each
 	// immutable file number in contiguous order as it finishes downloading; we
 	// copy that contiguous prefix into the blob store while later chunks are
-	// still downloading. The sequencer drives this from a single in-order
-	// consumer goroutine, so the closure needs no locking.
+	// still downloading. The bootstrap's chunk feed consumer calls it from a
+	// single goroutine, in order, so the closure needs no locking.
 	copyCm, err := chain.NewManager(ctx, db, nil)
 	if err != nil {
 		return SyncResult{}, fmt.Errorf("loading chain manager: %w", err)
@@ -912,8 +913,8 @@ func Sync(
 			return nil
 		}
 		// Opened per call, and only usable from inside this callback: it is
-		// bound to the handle downloadImmutables holds open, which is closed
-		// when the download returns, and the sequencer drains before it does.
+		// bound to the handle downloadImmutables's chunk feed holds open, which
+		// is closed when the download returns, after the last call.
 		// Nothing after Bootstrap may read it — the post-bootstrap copy opens
 		// its own.
 		//
@@ -1032,6 +1033,7 @@ func Sync(
 			DownloadIdleTimeout:    downloadIdleTimeout,
 			DownloadMaxIdleRetries: cfg.DownloadMaxIdleRetries,
 			DownloadMaxBytes:       cfg.DownloadMaxBytes,
+			Metrics:                cfg.Metrics,
 			OnProgress: func() func(DownloadProgress) {
 				const progressLogInterval = 10 * time.Second
 				const progressLogPercentStep = 5.0
@@ -1123,6 +1125,9 @@ func Sync(
 			"certified ImmutableDB has no chain tip",
 		)
 	}
+	slotLimit := func() (uint64, error) {
+		return ancillarySlotLimit(nodeCfg, certifiedTip.Slot)
+	}
 
 	var preparedRepairImport *preparedLedgerStateImport
 	var preservedLocalTail map[string]struct{}
@@ -1183,7 +1188,7 @@ func Sync(
 		}
 		if cfg.RepairLegacyRewardState {
 			preparedRepairImport, err = prepareLedgerStateImport(
-				logger, bootstrapResult, certifiedTip.Slot,
+				logger, bootstrapResult, certifiedTip.Slot, slotLimit,
 			)
 			if err != nil {
 				return SyncResult{}, fmt.Errorf(
@@ -1226,10 +1231,11 @@ func Sync(
 		}
 	}
 
-	// Backstop the in-progress marker for paths that did not pipeline a copy
-	// (for example the v1 backend, which has no per-chunk hook). Idempotent
-	// when the pipelined copy already set it. Set after a successful bootstrap
-	// and before any post-bootstrap write or deferred-index drop.
+	// Backstop the in-progress marker for paths that did not pipeline a copy:
+	// catch-up runs and runs with certificate-chain verification enabled, both
+	// of which clear the chunk hook above. Idempotent when the pipelined copy
+	// already set it. Set after a successful bootstrap and before any
+	// post-bootstrap write or deferred-index drop.
 	if err := markSyncInProgress(
 		db, cfg.StorageMode, cfg.RepairLegacyRewardState,
 	); err != nil {
@@ -1702,10 +1708,15 @@ func Sync(
 			"immutable_tip_slot", immutableTip.Slot,
 			"ledger_state_slot", ledgerStateSlot,
 		)
+		maxGapBlocks, limitErr := ancillaryBlockLimit(nodeCfg)
+		if limitErr != nil {
+			return SyncResult{}, limitErr
+		}
 		gapBlocks, fetchErr := fetchGapBlocks(
 			ctx, logger, network,
 			ocommon.NewPoint(immutableTip.Slot, immutableTip.Hash),
 			ocommon.NewPoint(ledgerStateSlot, ledgerStateHash),
+			maxGapBlocks,
 		)
 		if fetchErr != nil {
 			return SyncResult{}, fmt.Errorf(
@@ -1832,53 +1843,12 @@ func Sync(
 		cfg.emit(SyncProgress{Phase: PhaseBackfill, Active: false})
 	}
 
-	// Rebuild critical deferred indexes BEFORE clearing sync_status so a
-	// crash here leaves sync_status set (serve refuses to start)
-	// and metadata_indexes_pending set (next mithril sync rebuilds
-	// before re-running anything else).
-	cfg.emit(SyncProgress{Phase: PhaseIndexRebuild, Active: true})
-	indexRebuildStart := time.Now()
-	if err := deferredIndexes.BuildCritical(); err != nil {
-		cfg.emit(SyncProgress{Phase: PhaseIndexRebuild, Active: false})
-		return SyncResult{}, err
-	}
-	indexRebuildElapsed := time.Since(indexRebuildStart)
-	cfg.emit(
-		SyncProgress{
-			Phase:       PhaseIndexRebuild,
-			Active:      true,
-			Description: indexRebuildElapsed.String(),
-		},
-	)
-	cfg.emit(SyncProgress{Phase: PhaseIndexRebuild, Active: false})
-	logger.Info(
-		"critical deferred metadata indexes rebuilt; lazy indexes deferred to maintenance",
-		"component",
-		"mithril",
-		"duration",
-		indexRebuildElapsed,
-	)
-
-	if err := cleanupBulkLoadPragmas(); err != nil {
-		return SyncResult{}, fmt.Errorf(
-			"restoring normal metadata settings: %w", err,
-		)
-	}
-
-	if err := node.FinalizeMithrilBackfillPlannerStats(
-		ctx,
-		db,
-		logger,
+	indexRebuildElapsed, err := finishMithrilImport(
+		ctx, db, logger, cfg.emit, deferredIndexes, cleanupBulkLoadPragmas,
+		loadResult, ledgerStateSlot, ledgerStateHash,
 		mode == syncModeBootstrap,
-	); err != nil {
-		return SyncResult{}, err
-	}
-
-	if err := updateMithrilReadyState(
-		ctx,
-		db, logger, loadResult, ledgerStateSlot, ledgerStateHash,
-		"", true,
-	); err != nil {
+	)
+	if err != nil {
 		return SyncResult{}, err
 	}
 	syncComplete = true
@@ -1923,6 +1893,75 @@ func Sync(
 		Snapshot:   bootstrapResult.Snapshot,
 		LedgerSlot: ledgerStateSlot,
 	}, nil
+}
+
+// finishMithrilImport makes an imported database servable: it rebuilds the
+// critical deferred indexes, restores normal metadata settings and planner
+// statistics, and only then clears the transient sync state and records the
+// stable ledger anchor. The rebuild runs before the clear so a crash during it
+// leaves sync_status set (serve refuses to start, or the node resumes its own
+// restore) and metadata_indexes_pending set (the next run rebuilds first).
+// freshBootstrap selects the running-total planner finalization, which is safe
+// only after a complete fresh ledger-state import. It returns how long the
+// index rebuild took.
+func finishMithrilImport(
+	ctx context.Context,
+	db *database.Database,
+	logger *slog.Logger,
+	emit func(SyncProgress),
+	deferredIndexes *node.DeferredIndexRebuilder,
+	cleanupBulkLoadPragmas func() error,
+	loadResult *node.LoadBlobsResult,
+	ledgerStateSlot uint64,
+	ledgerStateHash []byte,
+	freshBootstrap bool,
+) (time.Duration, error) {
+	emit(SyncProgress{Phase: PhaseIndexRebuild, Active: true})
+	indexRebuildStart := time.Now()
+	if err := deferredIndexes.BuildCritical(); err != nil {
+		emit(SyncProgress{Phase: PhaseIndexRebuild, Active: false})
+		return 0, err
+	}
+	indexRebuildElapsed := time.Since(indexRebuildStart)
+	emit(
+		SyncProgress{
+			Phase:       PhaseIndexRebuild,
+			Active:      true,
+			Description: indexRebuildElapsed.String(),
+		},
+	)
+	emit(SyncProgress{Phase: PhaseIndexRebuild, Active: false})
+	logger.Info(
+		"critical deferred metadata indexes rebuilt; lazy indexes deferred to maintenance",
+		"component",
+		"mithril",
+		"duration",
+		indexRebuildElapsed,
+	)
+
+	if err := cleanupBulkLoadPragmas(); err != nil {
+		return 0, fmt.Errorf(
+			"restoring normal metadata settings: %w", err,
+		)
+	}
+
+	if err := node.FinalizeMithrilBackfillPlannerStats(
+		ctx,
+		db,
+		logger,
+		freshBootstrap,
+	); err != nil {
+		return 0, err
+	}
+
+	if err := updateMithrilReadyState(
+		ctx,
+		db, logger, loadResult, ledgerStateSlot, ledgerStateHash,
+		"", true,
+	); err != nil {
+		return 0, err
+	}
+	return indexRebuildElapsed, nil
 }
 
 // NeedsSync reports whether the database at cfg.DataDir requires a (re)sync —

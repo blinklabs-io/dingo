@@ -46,7 +46,7 @@ func rowBatchingKey(tag byte) []byte {
 	return bytes.Repeat([]byte{tag}, 28)
 }
 
-func rowBatchingBaseAddress(t *testing.T, payment, stake byte) []byte {
+func rowBatchingBaseAddress(t testing.TB, payment, stake byte) []byte {
 	t.Helper()
 	addr, err := lcommon.NewAddressFromParts(
 		lcommon.AddressTypeKeyKey,
@@ -78,7 +78,7 @@ type rowBatchingTx struct {
 }
 
 func newRowBatchingTx(
-	t *testing.T,
+	t testing.TB,
 	body map[uint]any,
 ) rowBatchingTx {
 	t.Helper()
@@ -89,7 +89,7 @@ func newRowBatchingTx(
 // auxiliary data, which in API mode produce the queued detail rows. Nothing
 // is validated, so the witnesses need not verify.
 func newRowBatchingTxWith(
-	t *testing.T,
+	t testing.TB,
 	body map[uint]any,
 	witnesses map[uint]any,
 	aux any,
@@ -110,13 +110,28 @@ func newRowBatchingTxWith(
 }
 
 func rowBatchingBlock(
-	t *testing.T,
+	t testing.TB,
 	slot, number uint64,
 	prev lcommon.Blake2b256,
 	txs ...rowBatchingTx,
 ) gledger.Block {
 	t.Helper()
+	return rowBatchingBlockWithInvalid(t, slot, number, prev, nil, txs...)
+}
+
+// rowBatchingBlockWithInvalid is rowBatchingBlock with the transactions at
+// the invalid indexes marked phase-2 invalid, so they consume their
+// collateral and produce only their collateral return.
+func rowBatchingBlockWithInvalid(
+	t testing.TB,
+	slot, number uint64,
+	prev lcommon.Blake2b256,
+	invalid []uint,
+	txs ...rowBatchingTx,
+) gledger.Block {
+	t.Helper()
 	block := &conway.ConwayBlock{
+		InvalidTransactions: invalid,
 		BlockHeader: &conway.ConwayBlockHeader{
 			BabbageBlockHeader: babbage.BabbageBlockHeader{
 				Body: babbage.BabbageBlockHeaderBody{
@@ -320,6 +335,7 @@ func rowBatchingScenario(t *testing.T) (
 }
 
 type rowBatchingRun struct {
+	ls         *LedgerState
 	db         *database.Database
 	batchedTxs int
 }
@@ -332,6 +348,7 @@ func runRowBatchingScenario(
 	storageMode string,
 	batching bool,
 	batchSize int,
+	configure ...func(*LedgerState),
 ) *rowBatchingRun {
 	t.Helper()
 	db, err := dbtest.NewDatabase(t, &database.Config{
@@ -357,7 +374,10 @@ func runRowBatchingScenario(
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, ls.Close()) })
-	run := &rowBatchingRun{db: db}
+	run := &rowBatchingRun{db: db, ls: ls}
+	for _, fn := range configure {
+		fn(ls)
+	}
 	var txs atomic.Int64
 	ls.afterBatchedTransactionWrite = func() { txs.Add(1) }
 	nonce := bytes.Repeat([]byte{0x42}, 32)

@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"math/rand/v2"
 	"regexp"
 	"slices"
@@ -939,9 +940,12 @@ func (s *Store) dbFromTxn(
 	if sqlTransaction.finished || sqlTransaction.tx == nil {
 		return nil, nil, types.ErrNilTxn
 	}
-	return s.instrumentedQueryer(
-		sqlTransaction.tx,
-	), sqlTransaction.ctx, nil
+	db := s.instrumentedQueryer(sqlTransaction.tx)
+	if acc := sqlTransaction.overlayAccumulator; acc != nil &&
+		acc.overlay != nil {
+		db = barrierQueryer{queryer: db, store: s, accumulator: acc}
+	}
+	return db, sqlTransaction.ctx, nil
 }
 
 func (s *Store) readDBFromTxn(
@@ -1166,6 +1170,9 @@ type sqlTxn struct {
 	batchBefore     map[*transactionBatchAccumulator]transactionBatchCheckpoint
 	batchSavepoints map[string]map[*transactionBatchAccumulator]transactionBatchCheckpoint
 	savepointOrder  []string
+	// overlayAccumulator holds the accumulator whose batch UTxO overlay is
+	// active on this transaction; dbFromTxn then hands out a barrierQueryer.
+	overlayAccumulator *transactionBatchAccumulator
 }
 
 func (t *sqlTxn) Commit() error {
@@ -1191,6 +1198,7 @@ func (t *sqlTxn) Commit() error {
 	}
 	t.batchBefore = nil
 	t.batchSavepoints = nil
+	t.overlayAccumulator = nil
 	return err
 }
 
@@ -1208,6 +1216,7 @@ func (t *sqlTxn) Rollback() error {
 	t.restoreBatches(t.batchBefore)
 	t.batchBefore = nil
 	t.batchSavepoints = nil
+	t.overlayAccumulator = nil
 	if t.tx == nil {
 		return nil
 	}
@@ -1332,6 +1341,27 @@ func (s *Store) SetBulkLoadPragmas() error {
 	return nil
 }
 
+// SetCatchUpPragmas applies the backend's crash-safe catch-up tuning to the
+// write connection. Unlike SetBulkLoadPragmas it leaves durability alone and
+// does not enter bulk mode, so checkpoints and planner maintenance carry on.
+// RestoreNormalPragmas undoes it. Backends without a SQLite write pool are
+// left untouched.
+func (s *Store) SetCatchUpPragmas() error {
+	s.scheduledWorkMu.Lock()
+	defer s.scheduledWorkMu.Unlock()
+	s.startMu.Lock()
+	defer s.startMu.Unlock()
+	if s.closed.Load() {
+		return errors.New("sqlstore: store is closed")
+	}
+	if s.dialect.Name() != "sqlite" {
+		return nil
+	}
+	s.bulkMu.Lock()
+	defer s.bulkMu.Unlock()
+	return s.dialect.SetCatchUpMode(context.Background(), s.writeDB)
+}
+
 // RestoreNormalPragmas restores safe backend defaults.
 func (s *Store) RestoreNormalPragmas() error {
 	s.scheduledWorkMu.Lock()
@@ -1397,6 +1427,23 @@ func (t *sqlTxn) bindBatch(accumulator *transactionBatchAccumulator) error {
 		checkpoint[accumulator] = accumulator.checkpoint()
 	}
 	return nil
+}
+
+func (t *sqlTxn) setOverlayAccumulator(
+	accumulator *transactionBatchAccumulator,
+) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.overlayAccumulator = accumulator
+}
+
+func (t *sqlTxn) boundBatches() []*transactionBatchAccumulator {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if len(t.batchBefore) == 0 {
+		return nil
+	}
+	return slices.Collect(maps.Keys(t.batchBefore))
 }
 
 func (t *sqlTxn) restoreBatches(

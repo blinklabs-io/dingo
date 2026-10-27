@@ -15,7 +15,6 @@
 package uplcconformance
 
 import (
-	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,7 +26,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/blinklabs-io/plutigo/cek"
@@ -304,79 +302,16 @@ func discoverTurboCases(root string) ([]turboCase, error) {
 	return cases, nil
 }
 
-// variantACostModel holds Plutus's default parameters for semantics variant A
-// (cekMachineCostsA.json and builtinCostModelA.json), keyed by ledger cost
-// model parameter name. Variant A applies to PlutusV1 and PlutusV2 before
-// protocol version 9, and its parameters differ from the later defaults in
-// both the machine step costs and the CPU costs of many builtins.
-//
-//go:embed variant_a_cost_model.json
-var variantACostModel []byte
-
-type variantAKey struct {
-	version       lang.LanguageVersion
-	protocolMajor uint
-}
-
-var (
-	variantAMu       sync.Mutex
-	variantAContexts = map[variantAKey]*cek.EvalContext{}
-)
-
-// turboEvalContext returns the evaluation context whose default costs match
-// the semantics variant in force for the language and protocol version.
-func turboEvalContext(
-	version lang.LanguageVersion,
-	protocolMajor uint,
-) (*cek.EvalContext, error) {
-	protoVersion := cek.ProtoVersion{Major: protocolMajor}
-	if cek.GetSemantics(version, protoVersion) != cek.SemanticsVariantA {
-		return cek.NewDefaultEvalContext(version, protoVersion), nil
-	}
-	key := variantAKey{version, protocolMajor}
-	variantAMu.Lock()
-	defer variantAMu.Unlock()
-	if evalCtx, ok := variantAContexts[key]; ok {
-		return evalCtx, nil
-	}
-	evalCtx, err := newVariantAEvalContext(version, protocolMajor)
-	if err != nil {
-		return nil, err
-	}
-	variantAContexts[key] = evalCtx
-	return evalCtx, nil
-}
-
-func newVariantAEvalContext(
-	version lang.LanguageVersion,
-	protocolMajor uint,
-) (*cek.EvalContext, error) {
-	var values map[string]int64
-	if err := json.Unmarshal(variantACostModel, &values); err != nil {
-		return nil, fmt.Errorf("decode variant A cost model: %w", err)
-	}
-	names := lang.GetParamNamesForVersion(version)
-	params := make([]int64, 0, len(names))
-	for _, name := range names {
-		value, ok := values[name]
-		if !ok {
-			return nil, fmt.Errorf("variant A cost model lacks parameter %s", name)
-		}
-		params = append(params, value)
-	}
-	return cek.NewEvalContext(version, cek.ProtoVersion{Major: protocolMajor}, params)
-}
-
 func measureTurboCase(
 	tc turboCase,
 	programBytes []byte,
 	samples int,
 ) ([]turboSample, error) {
-	evalCtx, err := turboEvalContext(tc.version, uint(tc.protocolMajor))
-	if err != nil {
-		return nil, err
-	}
-	machine := cek.NewMachine[syn.DeBruijn](tc.version, 200, evalCtx)
+	machine := cek.NewMachine[syn.DeBruijn](
+		tc.version,
+		200,
+		cek.NewDefaultEvalContext(tc.version, cek.ProtoVersion{Major: uint(tc.protocolMajor)}),
+	)
 	measurements := make([]turboSample, 0, samples)
 	for range samples {
 		decodeStart := time.Now()

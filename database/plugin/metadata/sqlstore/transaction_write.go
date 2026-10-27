@@ -27,6 +27,7 @@ import (
 	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/deferred"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/labelcodec"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -71,6 +72,9 @@ type transactionBatchAccumulator struct {
 	stakeDeltaOrder []string
 	opCertSequences map[poolOpCertSequenceKey]queuedPoolOpCertSequence
 	opCertOrder     []poolOpCertSequenceKey
+	// overlay stages UTxO writes in memory when EnableBatchUtxoOverlay
+	// attached one; nil on the per-row path.
+	overlay *utxoOverlay
 }
 
 type poolOpCertSequenceKey struct {
@@ -97,6 +101,8 @@ type transactionBatchCheckpoint struct {
 	stakeDeltaOrder []string
 	opCertSequences map[poolOpCertSequenceKey]queuedPoolOpCertSequence
 	opCertOrder     []poolOpCertSequenceKey
+	overlay         *utxoOverlay
+	overlayVersion  uint64
 }
 
 func (a *transactionBatchAccumulator) addStakeDeltas(
@@ -138,6 +144,10 @@ func (a *transactionBatchAccumulator) checkpoint() transactionBatchCheckpoint {
 		rows:            a.rows.clone(),
 		stakeDeltaOrder: append([]string(nil), a.stakeDeltaOrder...),
 		opCertOrder:     append([]poolOpCertSequenceKey(nil), a.opCertOrder...),
+		overlay:         a.overlay,
+	}
+	if a.overlay != nil {
+		checkpoint.overlayVersion = a.overlay.mutations
 	}
 	if len(a.stakeDeltas) > 0 {
 		checkpoint.stakeDeltas = make(
@@ -169,15 +179,20 @@ func (a *transactionBatchAccumulator) restore(
 	if len(checkpoint.opCertSequences) > 0 {
 		a.opCertSequences = maps.Clone(checkpoint.opCertSequences)
 	}
+	a.overlay = checkpoint.overlay
+	if a.overlay != nil && a.overlay.mutations != checkpoint.overlayVersion &&
+		a.overlay.err == nil {
+		a.overlay.err = errOverlaySavepoint
+	}
 }
 
 // getUtxoSpendStateQuery reads back a consumed input that the spend UPDATE
 // did not mark, to tell an already-spent input from a missing one.
-const getUtxoSpendStateQuery = `
+const getUtxoSpendStateQuery = `-- name: GetUtxoSpendState :one
 SELECT deleted_slot, spent_at_tx_id
 FROM utxo WHERE tx_id = ? AND output_idx = ?`
 
-const transactionInsertSQL = `
+const transactionInsertSQL = `-- name: InsertTransaction :one
 INSERT INTO "transaction" (
     hash, block_hash, metadata, slot, type, fee, collateral_fee, ttl,
     block_index, valid
@@ -191,7 +206,7 @@ RETURNING id`
 
 // The batched path needs to distinguish a fresh ID from a replay so it can
 // skip child-table cleanup only when those rows cannot already exist.
-const transactionBatchInsertSQL = `
+const transactionBatchInsertSQL = `-- name: InsertTransactionIfAbsent :one
 INSERT INTO "transaction" (
     hash, block_hash, metadata, slot, type, fee, collateral_fee, ttl,
     block_index, valid
@@ -199,21 +214,21 @@ INSERT INTO "transaction" (
 ON CONFLICT (hash) DO NOTHING
 RETURNING id`
 
-const transactionBatchConflictUpdateSQL = `
+const transactionBatchConflictUpdateSQL = `-- name: UpdateTransactionOnConflict :exec
 UPDATE "transaction"
 SET block_hash = ?, block_index = ?, slot = ?, collateral_fee = ?
 WHERE hash = ?`
 
-const transactionBatchConflictIDSQL = `
+const transactionBatchConflictIDSQL = `-- name: GetTransactionIDOnConflict :one
 SELECT id FROM "transaction" WHERE hash = ?`
 
-const consumeUtxoSQL = `
+const consumeUtxoSQL = `-- name: ConsumeUtxo :execrows
 UPDATE utxo
 SET deleted_slot = ?, spent_at_tx_id = ?
 WHERE tx_id = ? AND output_idx = ?
   AND deleted_slot = 0 AND spent_at_tx_id IS NULL`
 
-const consumeUtxoSQLiteReturningSQL = `
+const consumeUtxoSQLiteReturningSQL = `-- name: ConsumeUtxoReturningStake :one
 UPDATE utxo
 SET deleted_slot = ?, spent_at_tx_id = ?
 WHERE tx_id = ? AND output_idx = ?
@@ -223,7 +238,8 @@ RETURNING tx_id, output_idx, credential_tag, staking_key, amount`
 func insertUtxoBatchQuery(rowCount int) string {
 	row := "(" + strings.TrimSuffix(strings.Repeat("?,", 15), ",") + ")"
 	values := strings.TrimSuffix(strings.Repeat(row+",", rowCount), ",")
-	return `INSERT INTO utxo (
+	return `-- name: InsertUtxoBatch :many
+INSERT INTO utxo (
     transaction_id, collateral_return_for_tx_id, tx_id, payment_key,
     staking_key, credential_tag, datum_hash, spent_at_tx_id,
     referenced_by_tx_id, collateral_by_tx_id, added_slot, deleted_slot,
@@ -233,7 +249,7 @@ ON CONFLICT (tx_id, output_idx) DO NOTHING
 RETURNING id, tx_id, output_idx`
 }
 
-const repairConflictedUtxoQuery = `
+const repairConflictedUtxoQuery = `-- name: RepairConflictedUtxo :one
 UPDATE utxo
 SET transaction_id = COALESCE(transaction_id, ?),
     collateral_return_for_tx_id = COALESCE(collateral_return_for_tx_id, ?)
@@ -264,10 +280,13 @@ func consumeUtxosBatchQuery(rowCount int, returnStake bool) string {
 		" UNION ALL ",
 	)
 	returning := "tx_id, output_idx"
+	name := "ConsumeUtxosBatch"
 	if returnStake {
 		returning += ", credential_tag, staking_key, amount"
+		name = "ConsumeUtxosBatchReturningStake"
 	}
-	return `UPDATE utxo
+	return `-- name: ` + name + ` :many
+UPDATE utxo
 SET deleted_slot = ?, spent_at_tx_id = ?
 WHERE id IN (` + arms + `)
 RETURNING ` + returning
@@ -546,6 +565,7 @@ func (a *transactionBatchAccumulator) Reset() {
 	a.stakeDeltaOrder = nil
 	a.opCertSequences = nil
 	a.opCertOrder = nil
+	a.overlay = nil
 }
 
 func (s *Store) NewBatchAccumulator() types.MetadataBatchAccumulator {
@@ -563,37 +583,36 @@ func (s *Store) FlushBatch(
 			accumulator,
 		)
 	}
-	if transaction, ok := txn.(*sqlTxn); ok {
+	transaction, _ := txn.(*sqlTxn)
+	if transaction != nil {
 		if err := transaction.bindBatch(batched); err != nil {
 			return err
 		}
 	}
 	if !batched.rows.empty() || len(batched.stakeDeltaOrder) > 0 ||
-		len(batched.opCertOrder) > 0 {
+		len(batched.opCertOrder) > 0 || batched.overlay != nil {
 		if err := s.withWriteTransaction(
 			txn,
 			func(db queryer, ctx context.Context) error {
 				if err := s.flushPoolOpCertSequences(ctx, db, batched); err != nil {
 					return err
 				}
+				if batched.overlay != nil {
+					return s.flushOverlay(ctx, db, batched)
+				}
 				if err := batched.rows.flush(
 					ctx, db, s.dialect.ParameterLimit(),
 				); err != nil {
 					return err
 				}
-				for _, key := range batched.stakeDeltaOrder {
-					pending := batched.stakeDeltas[key]
-					if err := s.refreshRewardLiveStakeAggregateDelta(
-						ctx, db, pending.ref, pending.slot, pending.delta,
-					); err != nil {
-						return err
-					}
-				}
-				return nil
+				return s.flushQueuedStakeDeltas(ctx, db, batched)
 			},
 		); err != nil {
 			return err
 		}
+	}
+	if transaction != nil && batched.overlay != nil {
+		transaction.setOverlayAccumulator(nil)
 	}
 	accumulator.Reset()
 	return nil
@@ -618,24 +637,21 @@ func (s *Store) FlushBatchStakeDeltas(
 			return err
 		}
 	}
+	if batched.overlay != nil {
+		// A block ends: the overlay keeps its deltas as one segment and
+		// writes them at FlushBatch or a read barrier.
+		batched.overlay.closeStakeSegment(batched)
+		return nil
+	}
 	if err := s.withWriteTransaction(
 		txn,
 		func(db queryer, ctx context.Context) error {
-			for _, key := range batched.stakeDeltaOrder {
-				pending := batched.stakeDeltas[key]
-				if err := s.refreshRewardLiveStakeAggregateDelta(
-					ctx, db, pending.ref, pending.slot, pending.delta,
-				); err != nil {
-					return err
-				}
-			}
-			return nil
+			return s.flushQueuedStakeDeltas(ctx, db, batched)
 		},
 	); err != nil {
 		return err
 	}
-	batched.stakeDeltas = nil
-	batched.stakeDeltaOrder = nil
+	batched.clearQueuedStakeDeltas()
 	return nil
 }
 
@@ -832,6 +848,10 @@ func (s *Store) setTransactionWithAccumulator(
 			return err
 		}
 	}
+	var overlay *utxoOverlay
+	if batchedAccumulator != nil {
+		overlay = batchedAccumulator.overlay
+	}
 	// Detail rows are staged here and reach the accumulator only once the
 	// write succeeds, so a failed write cannot leave rows queued for a
 	// transaction that was rolled back, nor drop the rows an earlier
@@ -847,15 +867,37 @@ func (s *Store) setTransactionWithAccumulator(
 	err := s.withWriteTransaction(
 		txn,
 		func(db queryer, ctx context.Context) error {
-			collateralFee, err := collateralFeeForTransaction(
-				ctx,
-				db,
-				transaction,
+			var (
+				collateralFee uint64
+				err           error
 			)
+			if overlay != nil {
+				collateralFee, err = overlay.collateralFee(
+					ctx, db, transaction,
+				)
+			} else {
+				collateralFee, err = collateralFeeForTransaction(
+					ctx, db, transaction,
+				)
+			}
 			if err != nil {
 				return err
 			}
-			if batched, ok := accumulator.(*transactionBatchAccumulator); ok {
+			if overlay != nil {
+				transactionID, err = overlay.stageTransaction(
+					hash,
+					point.Hash,
+					metadataValue,
+					point.Slot,
+					transaction.Type(),
+					decimalUint64(transactionFee(transaction)),
+					decimalUint64(types.Uint64(collateralFee)),
+					decimalUint64(types.Uint64(transaction.TTL())),
+					index,
+					transaction.IsValid(),
+				)
+				transactionIsNew = true
+			} else if batched := batchedAccumulator; batched != nil {
 				var id uint
 				id, transactionIsNew, err = batched.insertTransaction(ctx, db,
 					hash,
@@ -918,6 +960,8 @@ func (s *Store) setTransactionWithAccumulator(
 					hash,
 					skipWithdrawalWitness,
 					historicalBackfill,
+					txn,
+					batchedAccumulator,
 				); err != nil {
 					return err
 				}
@@ -962,6 +1006,29 @@ func (s *Store) setTransactionWithAccumulator(
 					model.TransactionID = &id
 				}
 				producedModels = append(producedModels, model)
+			}
+			if overlay != nil {
+				var produced, consumed, skipped []stakeCredentialDelta
+				produced, consumed, skipped, err = s.setTransactionOverlayUtxos(
+					ctx, db, overlay, transaction, point,
+					producedModels, uniqueConsumedInputs(transaction),
+				)
+				if err != nil {
+					return err
+				}
+				if historicalBackfill {
+					batchedStakeDeltas = mergeStakeCredentialDeltas(
+						consumed, produced,
+					)
+					return nil
+				}
+				batchedStakeDeltas = mergeStakeCredentialDeltas(
+					refsToStakeCredentialDeltas(certificateRefs),
+					consumed,
+					skipped,
+					produced,
+				)
+				return nil
 			}
 			producedModelPtrs := make([]*models.Utxo, len(producedModels))
 			for i := range producedModels {
@@ -1023,44 +1090,20 @@ func (s *Store) setTransactionWithAccumulator(
 			// are still refreshed at zero delta so the set of credentials this
 			// write touches is unchanged from the full-scan path.
 			var spentRefs []models.UtxoId
-			if s.dialect.Name() != "sqlite" && !historicalBackfill {
+			if s.dialect.Name() != "sqlite" {
 				spentRefs = make([]models.UtxoId, 0, len(transaction.Consumed()))
 			}
 			var skippedRefs []models.UtxoId
-			var consumedStakeDeltas []stakeCredentialDelta
-			if !historicalBackfill {
-				consumedStakeDeltas = make(
-					[]stakeCredentialDelta, 0, len(transaction.Consumed()),
-				)
-			}
-			seenConsumed := make(
-				map[string]struct{},
-				len(transaction.Consumed()),
+			consumedStakeDeltas := make(
+				[]stakeCredentialDelta, 0, len(transaction.Consumed()),
 			)
-			uniqueConsumed := make(
-				[]models.UtxoId,
-				0,
-				len(transaction.Consumed()),
-			)
-			for _, input := range transaction.Consumed() {
-				refKey := utxoIdentityKey(input.Id().Bytes(), input.Index())
-				if _, ok := seenConsumed[refKey]; ok {
-					continue
-				}
-				seenConsumed[refKey] = struct{}{}
-				uniqueConsumed = append(uniqueConsumed, models.UtxoId{
-					Hash: input.Id().Bytes(),
-					Idx:  input.Index(),
-				})
-			}
+			uniqueConsumed := uniqueConsumedInputs(transaction)
 			for start := 0; start < len(uniqueConsumed); start += utxoSpendBatchSize {
 				end := min(start+utxoSpendBatchSize, len(uniqueConsumed))
 				batch := uniqueConsumed[start:end]
 				updated := make(map[string]struct{}, len(batch))
 				if s.dialect.Name() == "sqlite" && len(batch) > 1 {
-					query := consumeUtxosBatchQuery(
-						len(batch), !historicalBackfill,
-					)
+					query := consumeUtxosBatchQuery(len(batch), true)
 					args := make([]any, 0, 2+len(batch)*2)
 					args = append(args, point.Slot, hash)
 					for _, ref := range batch {
@@ -1070,15 +1113,13 @@ func (s *Store) setTransactionWithAccumulator(
 					if err != nil {
 						return err
 					}
-					updatedRows, deltas, scanErr := scanConsumedUtxoRows(
-						rows, !historicalBackfill,
-					)
+					updatedRows, deltas, scanErr := scanConsumedUtxoRows(rows, true)
 					if scanErr != nil {
 						return scanErr
 					}
 					updated = updatedRows
 					consumedStakeDeltas = append(consumedStakeDeltas, deltas...)
-				} else if s.dialect.Name() == "sqlite" && !historicalBackfill {
+				} else if s.dialect.Name() == "sqlite" {
 					rows, err := s.queryRowsCached(
 						ctx, db, consumeUtxoSQLiteReturningSQL,
 						point.Slot, hash, batch[0].Hash, batch[0].Idx,
@@ -1162,7 +1203,30 @@ func (s *Store) setTransactionWithAccumulator(
 				}
 			}
 			if historicalBackfill {
-				return nil
+				if s.dialect.Name() != "sqlite" {
+					consumedStakeDeltas, err = s.queryUtxoStakeConsumedDeltas(
+						ctx,
+						db,
+						spentRefs,
+					)
+					if err != nil {
+						return err
+					}
+				}
+				// Historical replay defers account-derived fields to the final
+				// rebuild, but it still changes the live UTxO set. Keep its
+				// running stake totals aligned with the outputs it inserts and
+				// inputs it spends.
+				batchedStakeDeltas = mergeStakeCredentialDeltas(
+					consumedStakeDeltas,
+					producedStakeDeltas,
+				)
+				if batchedAccumulator != nil {
+					return nil
+				}
+				return s.refreshRewardLiveStakeDeltas(
+					ctx, db, batchedStakeDeltas, point.Slot,
+				)
 			}
 			if s.dialect.Name() != "sqlite" {
 				consumedStakeDeltas, err = s.queryUtxoStakeConsumedDeltas(
@@ -1267,7 +1331,7 @@ func (s *Store) SetGapBlockTransaction(
 			if err != nil {
 				return err
 			}
-			transactionID, err := queryReturnedID(ctx, db, `
+			transactionID, err := queryReturnedID(ctx, db, `-- name: UpsertTransactionWithoutMetadata :one
 INSERT INTO "transaction" (
     hash, block_hash, metadata, slot, type, fee, collateral_fee, ttl,
     block_index, valid
@@ -1371,7 +1435,7 @@ func (s *Store) RecomputeGapCollateralFee(
 			if err != nil {
 				return err
 			}
-			_, err = db.ExecContext(ctx, `
+			_, err = db.ExecContext(ctx, `-- name: UpdateTransactionCollateralFee :exec
 UPDATE "transaction" SET collateral_fee = ? WHERE hash = ?`,
 				decimalUint64(types.Uint64(fee)),
 				transaction.Hash().Bytes(),
@@ -1390,7 +1454,7 @@ func (s *Store) SetGenesisTransaction(
 	return s.withWriteTransaction(
 		txn,
 		func(db queryer, ctx context.Context) error {
-			id, err := queryReturnedID(ctx, db, `
+			id, err := queryReturnedID(ctx, db, `-- name: UpsertGenesisTransaction :one
 INSERT INTO "transaction" (
     hash, block_hash, slot, type, fee, collateral_fee, ttl,
     block_index, valid
@@ -1469,11 +1533,13 @@ SELECT hash FROM "transaction" WHERE slot > ?`,
 				for i, hash := range hashes[start:end] {
 					args[i] = hash
 				}
-				stakeRows, err := db.QueryContext(ctx, `
-SELECT DISTINCT credential_tag, staking_key FROM utxo
-WHERE spent_at_tx_id IN (`+bindPlaceholders(len(args))+`)`,
-					args...,
+				stakeQuery, err := s.rollbackSpentStakeRefsQuery(
+					ctx, db, len(args),
 				)
+				if err != nil {
+					return err
+				}
+				stakeRows, err := db.QueryContext(ctx, stakeQuery, args...)
 				if err != nil {
 					return err
 				}
@@ -1545,7 +1611,11 @@ DELETE FROM asset_mint_burn WHERE slot > ?`,
 			); err != nil {
 				return err
 			}
-			return s.refreshRewardLiveStakeRefs(ctx, db, refs, slot)
+			// The stake lookup returns one row per spent UTxO; refresh each
+			// credential once.
+			return s.refreshRewardLiveStakeRefs(
+				ctx, db, mergeStakeCredentialRefs(refs), slot,
+			)
 		},
 	)
 }
@@ -1561,7 +1631,7 @@ DELETE FROM asset_mint_burn WHERE slot > ?`,
 // uncached fallback instead. SQLite and PostgreSQL both support RETURNING
 // natively, so this participates in the hot-statement cache normally on
 // those dialects.
-const insertUtxoQuery = `
+const insertUtxoQuery = `-- name: InsertUtxo :one
 INSERT INTO utxo (
     transaction_id, collateral_return_for_tx_id, tx_id, payment_key,
     staking_key, credential_tag, datum_hash, spent_at_tx_id,
@@ -1582,8 +1652,7 @@ RETURNING id`
 // this one QueryRowContext call, almost entirely modernc.org/sqlite
 // re-parsing and re-planning the identical statement text on every UTxO
 // output insert.
-const insertUtxoQueryIgnoreConflict = `
--- name: CreateUtxoIfAbsent :one
+const insertUtxoQueryIgnoreConflict = `-- name: InsertUtxoIfAbsent :one
 INSERT INTO utxo (
     transaction_id, collateral_return_for_tx_id, tx_id, payment_key,
     staking_key, credential_tag, datum_hash, spent_at_tx_id,
@@ -1597,7 +1666,7 @@ RETURNING id`
 // snapshot importer and insertUtxoModel. It is a fixed query shape on every
 // imported asset, so keep one prepared statement for the Store lifetime just
 // like the surrounding UTxO importer statements.
-const importAssetQuery = `
+const importAssetQuery = `-- name: InsertAssetIfAbsent :exec
 INSERT INTO asset (
     name, policy_id, fingerprint, utxo_id, amount
 ) VALUES (?, ?, ?, ?, ?)
@@ -1606,7 +1675,7 @@ ON CONFLICT (name, policy_id, utxo_id) DO NOTHING
 
 // getAssetIDQuery resolves the caller-visible asset row ID after an
 // insert that may have been skipped by its conflict clause.
-const getAssetIDQuery = `
+const getAssetIDQuery = `-- name: GetAssetIDByOutput :one
 SELECT id FROM asset
 WHERE utxo_id = ? AND policy_id = ? AND name = ?
 ORDER BY id DESC LIMIT 1`
@@ -1679,7 +1748,7 @@ func (s *Store) insertUtxoModelCheckedWithRows(
 	).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) && ignoreConflict {
 		inserted = false
-		err = db.QueryRowContext(ctx, `
+		err = db.QueryRowContext(ctx, `-- name: GetUtxoIDByOutput :one
 SELECT id FROM utxo WHERE tx_id = ? AND output_idx = ?`,
 			params.TxID,
 			params.OutputIdx,
@@ -1693,7 +1762,7 @@ SELECT id FROM utxo WHERE tx_id = ? AND output_idx = ?`,
 			// pointer address's credential is not stored on the row at all
 			// (see pointer_stake.go); every other address form carries its
 			// credential in the address, so an imported row already has it.
-			_, err = db.ExecContext(ctx, `
+			_, err = db.ExecContext(ctx, `-- name: RepairConflictedUtxoByID :exec
 UPDATE utxo
 SET transaction_id = COALESCE(transaction_id, ?),
     collateral_return_for_tx_id = COALESCE(collateral_return_for_tx_id, ?)
@@ -1734,7 +1803,7 @@ func (s *Store) persistUtxoRelations(
 	id uint,
 ) error {
 	utxo.ID = id
-	if err := persistUtxoAddress(ctx, db, int64(id), utxo); err != nil {
+	if err := s.persistUtxoAddress(ctx, db, int64(id), utxo); err != nil {
 		return err
 	}
 	if err := persistUtxoPointer(ctx, db, int64(id), utxo.Pointer); err != nil {
@@ -1782,12 +1851,12 @@ func (s *Store) persistUtxoRelationsWithDeferredAssets(
 	rows *rowBatch,
 ) error {
 	utxo.ID = id
-	address, err := assetUtxoAddress(utxo)
-	if err != nil {
-		return err
-	}
-	if len(address) > 0 {
-		rows.add(assetUtxoAddressShape, int64(id), address)
+	if s.storageMode == types.StorageModeAPI {
+		address, err := utxoAddress(utxo)
+		if err != nil {
+			return err
+		}
+		rows.add(utxoAddressShape, int64(id), address)
 	}
 	if err := persistUtxoPointer(ctx, db, int64(id), utxo.Pointer); err != nil {
 		return err
@@ -1816,10 +1885,56 @@ func (s *Store) persistUtxoRelationsWithDeferredAssets(
 	return nil
 }
 
+// uniqueConsumedInputs returns transaction's consumed inputs, first
+// occurrence of each, in order.
+func uniqueConsumedInputs(transaction lcommon.Transaction) []models.UtxoId {
+	consumed := transaction.Consumed()
+	seen := make(map[string]struct{}, len(consumed))
+	ret := make([]models.UtxoId, 0, len(consumed))
+	for _, input := range consumed {
+		refKey := utxoIdentityKey(input.Id().Bytes(), input.Index())
+		if _, ok := seen[refKey]; ok {
+			continue
+		}
+		seen[refKey] = struct{}{}
+		ret = append(ret, models.UtxoId{
+			Hash: input.Id().Bytes(),
+			Idx:  input.Index(),
+		})
+	}
+	return ret
+}
+
 func collateralFeeForTransaction(
 	ctx context.Context,
 	db queryer,
 	transaction lcommon.Transaction,
+) (uint64, error) {
+	return collateralFeeWithLookup(transaction, func(
+		input lcommon.TransactionInput,
+	) (string, bool, error) {
+		var amount string
+		err := db.QueryRowContext(ctx, `-- name: GetUtxoAmountByOutput :one
+SELECT amount FROM utxo WHERE tx_id = ? AND output_idx = ?`,
+			input.Id().Bytes(),
+			input.Index(),
+		).Scan(&amount)
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", false, nil
+		}
+		if err != nil {
+			return "", false, err
+		}
+		return amount, true, nil
+	})
+}
+
+// collateralFeeWithLookup computes a phase-2-invalid transaction's collateral
+// fee, reading each collateral input's amount through lookup, which reports
+// false for an input it cannot find.
+func collateralFeeWithLookup(
+	transaction lcommon.Transaction,
+	lookup func(lcommon.TransactionInput) (string, bool, error),
 ) (uint64, error) {
 	if transaction.IsValid() {
 		return 0, nil
@@ -1839,17 +1954,12 @@ func collateralFeeForTransaction(
 			continue
 		}
 		seen[key] = struct{}{}
-		var amount string
-		err := db.QueryRowContext(ctx, `
-SELECT amount FROM utxo WHERE tx_id = ? AND output_idx = ?`,
-			input.Id().Bytes(),
-			input.Index(),
-		).Scan(&amount)
-		if errors.Is(err, sql.ErrNoRows) {
-			continue
-		}
+		amount, found, err := lookup(input)
 		if err != nil {
 			return 0, err
+		}
+		if !found {
+			continue
 		}
 		value, err := parseUint64("collateral input", amount)
 		if err != nil {
@@ -1887,6 +1997,8 @@ func (s *Store) applyTransactionWithdrawals(
 	txHash []byte,
 	skipWithdrawalWitness bool,
 	historicalBackfill bool,
+	txn types.Txn,
+	batchedAccumulator *transactionBatchAccumulator,
 ) error {
 	for address, amount := range transaction.Withdrawals() {
 		if address == nil || amount == nil {
@@ -1912,11 +2024,7 @@ func (s *Store) applyTransactionWithdrawals(
 			// SkipWithdrawalWitnessWrite), so gate-off callers elide the
 			// insert rather than growing an unbounded, never-pruned table
 			// nothing reads.
-			if _, err := db.ExecContext(ctx, `
-INSERT INTO account_withdrawal_witness (
-    staking_key, credential_tag, tx_hash, added_slot
-) VALUES (?, ?, ?, ?)
-ON CONFLICT (tx_hash, credential_tag, staking_key) DO NOTHING`,
+			if _, err := s.execCached(ctx, db, insertAccountWithdrawalWitnessSQL,
 				stakeKey.Bytes(),
 				tag,
 				txHash,
@@ -1927,9 +2035,7 @@ ON CONFLICT (tx_hash, credential_tag, staking_key) DO NOTHING`,
 		}
 		var accountID uint
 		var reward sql.NullString
-		err := db.QueryRowContext(ctx, `
-SELECT id, reward FROM account
-WHERE credential_tag = ? AND staking_key = ? AND active = TRUE`,
+		err := s.queryRowCached(ctx, db, getActiveAccountRewardSQL,
 			tag,
 			stakeKey.Bytes(),
 		).Scan(&accountID, &reward)
@@ -1944,9 +2050,7 @@ WHERE credential_tag = ? AND staking_key = ? AND active = TRUE`,
 			// must be present; silently journaling a withdrawal with no account
 			// would hide a broken certificate replay or skipped block.
 			var fallbackActive sql.NullBool
-			err = db.QueryRowContext(ctx, `
-SELECT id, reward, active FROM account
-WHERE credential_tag = ? AND staking_key = ?`,
+			err = s.queryRowCached(ctx, db, getAccountRewardStateSQL,
 				tag,
 				stakeKey.Bytes(),
 			).Scan(&accountID, &reward, &fallbackActive)
@@ -1959,12 +2063,7 @@ WHERE credential_tag = ? AND staking_key = ?`,
 			return err
 		}
 		var exists bool
-		if err := db.QueryRowContext(ctx, `
-SELECT EXISTS (
-    SELECT 1 FROM account_reward_delta
-    WHERE withdrawal = TRUE AND tx_hash = ?
-      AND credential_tag = ? AND staking_key = ?
-)`,
+		if err := s.queryRowCached(ctx, db, withdrawalRewardDeltaExistsSQL,
 			txHash,
 			tag,
 			stakeKey.Bytes(),
@@ -1998,22 +2097,14 @@ SELECT EXISTS (
 		// current stake-registration account.
 		if !historicalBackfill && accountFound {
 			rewardAfter := previous - amount.Uint64()
-			if _, err := db.ExecContext(ctx, `
-UPDATE account SET reward = ? WHERE id = ?`,
+			if _, err := s.execCached(ctx, db, updateAccountRewardSQL,
 				strconv.FormatUint(rewardAfter, 10),
 				accountID,
 			); err != nil {
 				return err
 			}
 		}
-		if _, err := db.ExecContext(ctx, `
-INSERT INTO account_reward_delta (
-    staking_key, credential_tag, tx_hash, amount, previous_reward,
-    added_slot, withdrawal
-) VALUES (?, ?, ?, ?, ?, ?, TRUE)
-ON CONFLICT (
-    withdrawal, tx_hash, credential_tag, staking_key, added_slot
-) DO NOTHING`,
+		if _, err := s.execCached(ctx, db, insertWithdrawalRewardDeltaSQL,
 			stakeKey.Bytes(),
 			tag,
 			txHash,
@@ -2024,10 +2115,15 @@ ON CONFLICT (
 			return err
 		}
 		if !historicalBackfill {
-			if err := s.refreshRewardLiveStakeAggregate(
-				ctx, db,
-				models.NewStakeCredentialRef(tag, stakeKey.Bytes()),
-				slot,
+			ref := models.NewStakeCredentialRef(tag, stakeKey.Bytes())
+			pending, err := pendingUtxoStakeDelta(
+				ctx, db, txn, batchedAccumulator, ref,
+			)
+			if err != nil {
+				return err
+			}
+			if err := s.refreshRewardLiveStakeAggregateNetOfPending(
+				ctx, db, ref, slot, pending,
 			); err != nil {
 				return err
 			}
@@ -2041,6 +2137,87 @@ func recordTransactionLedgerContext(ctx context.Context, db queryer, transaction
 	if err != nil {
 		return err
 	}
-	_, err = db.ExecContext(ctx, `INSERT INTO leios_transaction_context (transaction_id, slot) VALUES (?, ?) ON CONFLICT (transaction_id) DO UPDATE SET slot = excluded.slot`, transactionID, value)
+	_, err = db.ExecContext(ctx, `-- name: UpsertLeiosTransactionContext :exec
+INSERT INTO leios_transaction_context (transaction_id, slot) VALUES (?, ?) ON CONFLICT (transaction_id) DO UPDATE SET slot = excluded.slot`, transactionID, value)
 	return err
 }
+
+// rollbackSpentStakeRefsIndex is the spender index the rollback stake lookup
+// reads. It is a deferred index, so it can be absent while a bulk-load
+// rebuild is pending.
+var rollbackSpentStakeRefsIndex = deferred.Index{
+	Name:  "idx_utxo_spent_at_tx_id",
+	Table: "utxo",
+}
+
+// rollbackSpentStakeRefsQuery returns the statement that collects the stake
+// credentials of the UTxOs spent by n rolled-back transactions.
+//
+// On SQLite the statement names idx_utxo_spent_at_tx_id whenever that index
+// exists. Its statistics are unreliable: utxo statistics taken over an
+// imported, never-spent UTxO set record spent_at_tx_id as one value covering
+// every row, and the table never grows enough afterwards for the incremental
+// refresh to re-analyze it. With those statistics a single-hash lookup was
+// planned as a pass over every utxo row, holding the ledger write lock for
+// tens of seconds on a mainnet-sized table. Without the index any plan scans,
+// so the hint is dropped rather than failing the rollback.
+//
+// There is no DISTINCT: it lets SQLite satisfy the query by walking
+// idx_utxo_staking_deleted_amount in credential order, and the caller
+// deduplicates in Go across all chunks anyway.
+func (s *Store) rollbackSpentStakeRefsQuery(
+	ctx context.Context,
+	db queryer,
+	n int,
+) (string, error) {
+	from := "FROM utxo"
+	if s.dialect.Name() == "sqlite" {
+		exists, err := s.deferredIndexExists(
+			ctx, db, rollbackSpentStakeRefsIndex,
+		)
+		if err != nil {
+			return "", fmt.Errorf(
+				"check %s: %w", rollbackSpentStakeRefsIndex.Name, err,
+			)
+		}
+		if exists {
+			from += " INDEXED BY " + rollbackSpentStakeRefsIndex.Name
+		}
+	}
+	return "-- name: GetRollbackSpentStakeRefs\n" +
+		"SELECT credential_tag, staking_key " + from + "\n" +
+		"WHERE spent_at_tx_id IN (" + bindPlaceholders(n) + ")", nil
+}
+
+const insertAccountWithdrawalWitnessSQL = `-- name: InsertAccountWithdrawalWitness :exec
+INSERT INTO account_withdrawal_witness (
+    staking_key, credential_tag, tx_hash, added_slot
+) VALUES (?, ?, ?, ?)
+ON CONFLICT (tx_hash, credential_tag, staking_key) DO NOTHING`
+
+const getActiveAccountRewardSQL = `-- name: GetActiveAccountReward :one
+SELECT id, reward FROM account
+WHERE credential_tag = ? AND staking_key = ? AND active = TRUE`
+
+const getAccountRewardStateSQL = `-- name: GetAccountRewardState :one
+SELECT id, reward, active FROM account
+WHERE credential_tag = ? AND staking_key = ?`
+
+const withdrawalRewardDeltaExistsSQL = `-- name: WithdrawalRewardDeltaExists :one
+SELECT EXISTS (
+    SELECT 1 FROM account_reward_delta
+    WHERE withdrawal = TRUE AND tx_hash = ?
+      AND credential_tag = ? AND staking_key = ?
+)`
+
+const updateAccountRewardSQL = `-- name: UpdateAccountReward :exec
+UPDATE account SET reward = ? WHERE id = ?`
+
+const insertWithdrawalRewardDeltaSQL = `-- name: InsertWithdrawalRewardDelta :exec
+INSERT INTO account_reward_delta (
+    staking_key, credential_tag, tx_hash, amount, previous_reward,
+    added_slot, withdrawal
+) VALUES (?, ?, ?, ?, ?, ?, TRUE)
+ON CONFLICT (
+    withdrawal, tx_hash, credential_tag, staking_key, added_slot
+) DO NOTHING`

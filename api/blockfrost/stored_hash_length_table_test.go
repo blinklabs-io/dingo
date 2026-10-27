@@ -325,7 +325,7 @@ func TestBlockfrostRejectsMalformedStoredHashes(t *testing.T) {
 			store: &malformedHashStore{},
 			seed:  createAccount(short),
 			call: func(t *testing.T, a *NodeAdapter) error {
-				_, err := a.Account(stakeAddress(t))
+				_, err := a.Account(context.Background(), stakeAddress(t))
 				return err
 			},
 			want: "delegated pool key hash",

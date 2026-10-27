@@ -15,10 +15,15 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -668,4 +673,94 @@ func TestRequireMatchingKoiosSource(t *testing.T) {
 			requireMatchingKoiosSource(cache, newClient(t, ""), network),
 		)
 	})
+}
+
+func TestFromGenesisKoiosAPIKeySources(t *testing.T) {
+	// Not t.Parallel: fromGenesisCommand binds its flags to the
+	// package-level koiosFlags.
+	dir := t.TempDir()
+	require.NoError(t, os.Chmod(dir, 0o700))
+	keyFile := filepath.Join(dir, "key")
+	require.NoError(t, os.WriteFile(keyFile, []byte("from-file\n"), 0o600))
+	for _, tc := range []struct {
+		name    string
+		flags   map[string]string
+		want    string
+		wantErr string
+	}{
+		{name: "unset"},
+		{
+			name:  "literal",
+			flags: map[string]string{"koios-api-key": "lit"},
+			want:  "lit",
+		},
+		{
+			name:  "file",
+			flags: map[string]string{"koios-api-key-file": keyFile},
+			want:  "from-file",
+		},
+		{
+			name: "both",
+			flags: map[string]string{
+				"koios-api-key":      "lit",
+				"koios-api-key-file": keyFile,
+			},
+			wantErr: "--koios-api-key-file",
+		},
+		{
+			name: "missing file",
+			flags: map[string]string{
+				"koios-api-key-file": filepath.Join(t.TempDir(), "missing"),
+			},
+			wantErr: "--koios-api-key-file",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := fromGenesisCommand()
+			for name, value := range tc.flags {
+				require.NoError(t, cmd.Flags().Set(name, value))
+			}
+			got, err := koiosAPIKey(cmd)
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tc.want, got)
+		})
+	}
+}
+
+func TestFromGenesisKoiosClientUsesKeyFile(t *testing.T) {
+	// Not t.Parallel: fromGenesisCommand binds its flags to the
+	// package-level koiosFlags.
+	var authorization atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			authorization.Store(r.Header.Get("Authorization"))
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[{"epoch_no":7}]`))
+		},
+	))
+	t.Cleanup(srv.Close)
+	dir := t.TempDir()
+	require.NoError(t, os.Chmod(dir, 0o700))
+	keyFile := filepath.Join(dir, "key")
+	require.NoError(t, os.WriteFile(keyFile, []byte("from-file\n"), 0o600))
+
+	cmd := fromGenesisCommand()
+	for name, value := range map[string]string{
+		"koios-api-key-file":            keyFile,
+		"koios-base-url":                srv.URL,
+		"koios-allow-insecure-http":     "true",
+		"koios-allow-private-addresses": "true",
+	} {
+		require.NoError(t, cmd.Flags().Set(name, value))
+	}
+	client, err := newFromGenesisKoiosClient(cmd, "preview")
+	require.NoError(t, err)
+	epoch, err := client.GetTipEpoch(context.Background())
+	require.NoError(t, err)
+	require.EqualValues(t, 7, epoch)
+	require.Equal(t, "Bearer from-file", authorization.Load())
 }

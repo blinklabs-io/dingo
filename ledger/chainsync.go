@@ -42,7 +42,6 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/tracing"
 	"github.com/blinklabs-io/dingo/ledger/eras"
-	"github.com/blinklabs-io/dingo/ledger/forging"
 	"github.com/blinklabs-io/dingo/ledger/governance"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -401,46 +400,21 @@ func (ls *LedgerState) handleEventChainsync(evt event.Event) {
 		ls.discardBufferedPeerHeaders(e.ConnectionId, &pending)
 		queuePeerTipAdmission(&pending, e, false)
 		ls.removePeerHeaderHistory(connIdKey(e.ConnectionId))
+		ls.forgetChainsyncSession(connIdKey(e.ConnectionId))
+		return
+	}
+	// Also drops an event published before the hold was taken.
+	if ls.connectionIngestHeld(e.ConnectionId) {
+		queuePeerTipAdmission(&pending, e, false)
 		return
 	}
 	if e.Rollback {
-		if err := ls.handleEventChainsyncRollback(e, &pending); err != nil {
-			if errors.Is(err, ErrRollbackLoopDetected) {
-				// The rollback was skipped to break a pathological
-				// loop. Trigger a chainsync re-sync so the peer
-				// can negotiate a fresh intersection rather than
-				// continuing to send the same rollback point.
-				ls.resetChainsyncResyncState(&pending)
-				ls.setChainsyncState(SyncingChainsyncState)
-				// Queued rather than published here: this runs with
-				// ls.chainsyncMutex held, and this event's subscriber
-				// takes that same mutex via RecoverAfterLocalRollback.
-				pending.add(
-					ls.config.EventBus,
-					event.ChainsyncResyncEventType,
-					event.NewEvent(
-						event.ChainsyncResyncEventType,
-						event.ChainsyncResyncEvent{
-							ConnectionId: e.ConnectionId,
-							Reason:       event.ChainsyncResyncReasonRollbackLoop,
-						},
-					),
-				)
-				return
-			}
-			ls.config.Logger.Error(
-				"failed to handle rollback",
-				"component", "ledger",
-				"error", err,
-				"slot", e.Point.Slot,
-				"hash", hex.EncodeToString(e.Point.Hash),
-			)
-			if ls.config.FatalErrorFunc != nil {
-				ls.config.FatalErrorFunc(err)
-			}
+		if ls.deferOpeningChainsyncRollback(e) {
 			return
 		}
+		ls.processChainsyncRollback(e, &pending)
 	} else if e.BlockHeader != nil {
+		ls.resolveOpeningChainsyncRollback(e, &pending)
 		if err := ls.handleEventChainsyncBlockHeaderWithPending(e, &pending); err != nil {
 			// Header queue full is expected during bulk sync when
 			// pipelined headers arrive faster than blockfetch can
@@ -1328,6 +1302,10 @@ func (ls *LedgerState) verifyDeferredBlockHeaderState(
 	if err := ls.verifyBlockHeaderCryptoWithEpochAdvance(
 		ctx, block, true, false,
 	); err != nil {
+		if errors.Is(err, context.Canceled) ||
+			errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
 		// Typed so the pipeline can rewind past this block instead of
 		// restarting onto it forever: the block is already persisted, so
 		// this failure is deterministic rather than transient. The block is
@@ -1370,6 +1348,10 @@ func (ls *LedgerState) handleEventBlockfetch(evt event.Event) {
 	e, ok := evt.Data.(BlockfetchEvent)
 	if !ok {
 		ls.logUnexpectedChainsyncEventData("BlockfetchEvent", evt)
+		return
+	}
+	// The hold discarded the batch these events belong to.
+	if ls.NetworkIngestHeld() {
 		return
 	}
 	if e.BatchDone {
@@ -1480,6 +1462,12 @@ func (ls *LedgerState) handleChainSwitchEvent(evt event.Event) {
 	var requestFreshCursor bool
 	ls.chainsyncMutex.Lock()
 	defer ls.chainsyncMutex.Unlock()
+	// A switch would hand the header pipeline to the new peer. While held
+	// there is no pipeline, and the release closes every peer. Checked under
+	// chainsyncMutex, which the hold's discard takes after setting the flag.
+	if ls.NetworkIngestHeld() {
+		return
+	}
 	ls.chainsyncBlockfetchMutex.Lock()
 	if ls.config.GetActiveConnectionFunc != nil {
 		if !ls.isConnectionLive(effectiveConnId) {
@@ -1637,6 +1625,7 @@ func (ls *LedgerState) handleConnectionClosedEvent(evt event.Event) {
 	}
 	ls.removePeerHeaderHistory(connIdKey(e.ConnectionId))
 	ls.resetHeaderMismatches(connIdKey(e.ConnectionId))
+	ls.forgetChainsyncSession(connIdKey(e.ConnectionId))
 	// Cancel in-flight blockfetch if the dead connection owns it.
 	// Without this, chainsyncBlockfetchReadyChan stays non-nil and
 	// new headers from reconnected peers are queued behind a batch
@@ -1882,6 +1871,9 @@ func (ls *LedgerState) AwaitChainsyncHeaderCapacity(
 			return nil
 		}
 		resumeAt := max(pauseAt-BlockfetchBatchSize, 0)
+		if hook := ls.chainsyncCapacityWaitHook; hook != nil {
+			hook()
+		}
 		if err := ls.chain.WaitForHeaderCountBelowOrSignal(ctx, resumeAt+1, changed); err != nil {
 			return err
 		}
@@ -2514,6 +2506,7 @@ func (ls *LedgerState) evictOldestPeerHeaderRecord(historyKey string) bool {
 }
 
 func (ls *LedgerState) removePeerHeaderHistory(historyKey string) {
+	ls.removePeerForkNoncePrefix(historyKey)
 	history := ls.peerHeaderHistory[historyKey]
 	if history == nil {
 		return
@@ -2651,6 +2644,9 @@ func (ls *LedgerState) genesisSelectionState() (bool, uint64) {
 
 func (ls *LedgerState) peerHeaderHistoryLimit() int {
 	limit := maxPeerHeaderHistoryPerConn
+	if ls.chain != nil {
+		limit = max(limit, ls.allowedQueuedHeaders())
+	}
 	active, window := ls.genesisSelectionState()
 	if !active || window <= uint64(limit) {
 		return limit
@@ -3577,6 +3573,9 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 	e ChainsyncEvent,
 	pending *pendingPublishes,
 ) error {
+	connKey := connIdKey(e.ConnectionId)
+	ls.removePeerForkNoncePrefix(connKey)
+
 	// Filter events from non-active connections when chain selection is enabled
 	if activeConnId, configured := ls.detectConnectionSwitch(pending); configured {
 		if activeConnId == nil {
@@ -3639,7 +3638,6 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 	// Rollback loop detection: track recent rollbacks and skip if
 	// the same peer repeats the same rollback point too frequently
 	// within the detection window.
-	connKey := connIdKey(e.ConnectionId)
 	slotCount := ls.recordRollback(connKey, e.Point, time.Now())
 	if slotCount >= rollbackLoopThreshold {
 		// Exempt rollbacks to slots where we forged a block — fork
@@ -4041,8 +4039,11 @@ func (ls *LedgerState) resetChainsyncResyncState(
 ) {
 	ls.clearRollbackHistory()
 	ls.clearHeaderMismatches()
-	ls.setSelectedBlockfetchConnId(ouroboros.ConnectionId{})
 	ls.chainsyncBlockfetchMutex.Lock()
+	// The selection is guarded by chainsyncBlockfetchMutex like every other
+	// field cleared here: startQueuedBlockfetchOnLocked compares it across
+	// the request it sends outside the lock.
+	ls.setSelectedBlockfetchConnId(ouroboros.ConnectionId{})
 	// clearQueuedHeaders mutates headerPipelineConnId, which every other
 	// mutator guards with chainsyncBlockfetchMutex -- moved inside this
 	// lock (rather than called before it, as this used to) to close that
@@ -4123,33 +4124,15 @@ func (ls *LedgerState) compareIncomingHeaderToLocalTip(
 	localTip ochainsync.Tip,
 ) praos.ChainComparisonResult {
 	observedTip := observedHeaderTip(e)
-	if observedTip.BlockNumber == 0 && e.Tip.BlockNumber > 0 {
-		observedTip = e.Tip
-	}
 
 	incomingView, _ := praos.GetPraosTiebreakerView(e.BlockHeader)
-	result := praos.ComparePraosTips(
+	localView := ls.localTipPraosView(ls.lifecycleContext(), localTip)
+	return ls.compareConsensusTips(
 		observedTip,
 		localTip,
 		incomingView,
-		ls.localTipPraosView(ls.lifecycleContext(), localTip),
+		localView,
 	)
-	if result != praos.ChainEqual {
-		return result
-	}
-
-	// If the peer has advertised a further tip than the header just delivered,
-	// use that only when block number alone decides the comparison. We do not
-	// have the advertised tip's Praos select view until its header arrives.
-	if e.Tip.BlockNumber > observedTip.BlockNumber {
-		switch {
-		case e.Tip.BlockNumber > localTip.BlockNumber:
-			return praos.ChainABetter
-		case e.Tip.BlockNumber < localTip.BlockNumber:
-			return praos.ChainBBetter
-		}
-	}
-	return result
 }
 
 func (ls *LedgerState) earlierHeaderCanBeatLocalTip(
@@ -4157,14 +4140,8 @@ func (ls *LedgerState) earlierHeaderCanBeatLocalTip(
 	localTip ochainsync.Tip,
 ) bool {
 	observedTip := observedHeaderTip(e)
-	if observedTip.BlockNumber > localTip.BlockNumber {
-		return true
-	}
-	if observedTip.BlockNumber < localTip.BlockNumber {
-		return false
-	}
 	incomingView, _ := praos.GetPraosTiebreakerView(e.BlockHeader)
-	return praos.ComparePraosTips(
+	return ls.compareConsensusTips(
 		observedTip,
 		localTip,
 		incomingView,
@@ -4487,8 +4464,8 @@ func (ls *LedgerState) recoverPeerHeaderHistoryFromPointLocked(
 		}
 		ls.chainsyncBlockfetchMutex.Lock()
 		ls.headerPipelineConnId = connId
-		ls.chainsyncBlockfetchMutex.Unlock()
 		ls.setSelectedBlockfetchConnId(connId)
+		ls.chainsyncBlockfetchMutex.Unlock()
 		return ls.chain.HeaderCount(), nil
 	}
 	return 0, nil
@@ -4646,8 +4623,11 @@ func (ls *LedgerState) RecoverAfterLocalRollback(
 	// successful replay reassigns this field before its blockfetch attempt, so
 	// nothing downstream currently reads a stale value -- but that makes the
 	// invariant depend on every future writer reassigning first, which is not a
-	// property worth relying on.
+	// property worth relying on. The loop above has released
+	// chainsyncBlockfetchMutex, which guards the selection.
+	ls.chainsyncBlockfetchMutex.Lock()
 	ls.setSelectedBlockfetchConnId(ouroboros.ConnectionId{})
+	ls.chainsyncBlockfetchMutex.Unlock()
 	return LocalRollbackRecoveryResult{}
 }
 
@@ -4710,6 +4690,25 @@ func queuePeerTipAdmission(
 	})
 }
 
+// clearChainsyncHeaderAuthorization queues a header whose producer
+// authorization cannot be confirmed now, as pre-authorization ledger admission
+// did: block-fetch verifies its body before application, and an unauthorized
+// header that does not fit the queue still cannot clear it or roll back
+// canonical state. Withholding it instead deadlocks sync whenever only applying
+// queued blocks can make its authorization verifiable, as at the Byron->Shelley
+// boundary.
+//
+// The update is cleared in place, never replaced by a copy: the ingress
+// owner's PeerTipAdmission callback commits the update it shares with this
+// event, and a copy would leave it committing the stale generation as if the
+// ledger still held that generation's pin.
+func clearChainsyncHeaderAuthorization(e *ChainsyncEvent) {
+	e.HeaderCryptoVerificationGeneration = 0
+	if e.PeerTipUpdate != nil {
+		e.PeerTipUpdate.HeaderCryptoVerificationGeneration = 0
+	}
+}
+
 func queuePeerHeaderHistoryInvalidation(
 	pending *pendingPublishes,
 	e ChainsyncEvent,
@@ -4767,32 +4766,40 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 	if headerCryptoVerificationGeneration != 0 &&
 		!headerCryptoVerified && !headerTrusted && !headerValidationRequired {
 		ls.config.Logger.Debug(
-			"withholding chainsync header after its producer authorization became stale",
+			"queueing chainsync header without producer authorization after it became stale",
 			"component", "ledger",
 			"slot", e.Point.Slot,
 			"hash", hex.EncodeToString(e.Point.Hash),
 		)
-		return nil
+		headerCryptoVerificationGeneration = 0
+		producerAuthorizationGeneration = 0
+		clearChainsyncHeaderAuthorization(&e)
 	}
 	if headerValidationRequired && !headerCryptoVerified {
 		var err error
 		headerCryptoVerificationGeneration, err = ls.
 			ValidateChainSelectionHeaderCryptoWithGeneration(e.BlockHeader)
-		if err != nil {
-			if IsHeaderVerificationDeferred(err) {
-				ls.config.Logger.Debug(
-					"withholding chainsync header until producer authorization can be verified",
-					"component",
-					"ledger",
-					"slot",
-					e.Point.Slot,
-					"hash",
-					hex.EncodeToString(e.Point.Hash),
-					"error",
-					err,
-				)
-				return nil
-			} else {
+		switch {
+		case err == nil:
+			headerCryptoVerified = true
+			e.HeaderCryptoVerificationGeneration = headerCryptoVerificationGeneration
+			if e.PeerTipUpdate != nil {
+				e.PeerTipUpdate.HeaderCryptoVerificationGeneration = headerCryptoVerificationGeneration
+			}
+			producerAuthorizationGeneration = headerCryptoVerificationGeneration
+		case IsHeaderVerificationDeferred(err):
+			ls.config.Logger.Debug(
+				"queueing chainsync header until producer authorization can be verified",
+				"component", "ledger",
+				"slot", e.Point.Slot,
+				"hash", hex.EncodeToString(e.Point.Hash),
+				"error", err,
+			)
+			headerCryptoVerificationGeneration = 0
+			producerAuthorizationGeneration = 0
+			clearChainsyncHeaderAuthorization(&e)
+		default:
+			{
 				if ls.config.EventBus != nil {
 					ls.config.Logger.Warn(
 						"recycling connection after header verification failure",
@@ -4819,12 +4826,6 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 				)
 			}
 		}
-		headerCryptoVerified = true
-		e.HeaderCryptoVerificationGeneration = headerCryptoVerificationGeneration
-		if e.PeerTipUpdate != nil {
-			e.PeerTipUpdate.HeaderCryptoVerificationGeneration = headerCryptoVerificationGeneration
-		}
-		producerAuthorizationGeneration = headerCryptoVerificationGeneration
 	}
 	var releaseVerificationGeneration func()
 	verificationGenerationReleased := false
@@ -5284,12 +5285,22 @@ func (ls *LedgerState) startQueuedBlockfetchWithFallbackLocked(
 }
 
 // ErrChainsyncHeaderDisconnected is returned by AwaitChainsyncHeaderAdmission
-// for a header past the forecast horizon whose predecessor is neither the
-// chain tip, the header tip, nor any header or block the local chain holds.
-// Applying blocks the node already has cannot bring such a header into range,
-// so the connection must re-intersect from the local chain instead of waiting.
+// for a header past the forecast horizon whose predecessor remains neither the
+// chain tip, the header tip, nor any header or block the local chain holds
+// after queued and in-flight local work has had a chance to advance the chain.
+// The connection must then re-intersect from the local chain instead of
+// waiting.
 var ErrChainsyncHeaderDisconnected = errors.New(
 	"chainsync header does not connect to the local chain",
+)
+
+// ErrChainsyncHeaderNeedsResync is returned when a forecast-held header
+// connects to the local chain but no queued or in-flight blockfetch, and no
+// stored block the ledger has yet to apply, can publish state that advances
+// the forecast horizon. Re-intersection makes the peer replay from the local
+// chain; this is not a peer fault.
+var ErrChainsyncHeaderNeedsResync = errors.New(
+	"chainsync header forecast has no local block work to advance it",
 )
 
 // AwaitChainsyncHeaderAdmission enforces the Ouroboros ChainSync future-header
@@ -5305,13 +5316,16 @@ var ErrChainsyncHeaderDisconnected = errors.New(
 // validated, so it waits until the applied ledger advances far enough to
 // forecast its slot before the onset check runs, as the reference ChainSync
 // client does for OutsideForecastRange; until then it must not influence chain
-// selection or reach blockfetch. Such a header whose predecessor does not
-// connect to the local chain is not held: it returns an error wrapping
-// ErrChainsyncHeaderDisconnected, because no publication can release it.
-// Other conversion failures fail closed. A zero
-// timestamp is retained for compatibility with synthetic/internal events that
-// never crossed the network ingress path. As with other Go APIs that accept a
-// context, ctx must not be nil.
+// selection or reach blockfetch. A header whose predecessor does not connect
+// to the local chain waits while queued or in-flight local work may connect it;
+// otherwise it returns an error wrapping ErrChainsyncHeaderDisconnected. A
+// connected header also returns
+// ErrChainsyncHeaderNeedsResync when no queued or in-flight blockfetch, and no
+// stored block the ledger has yet to apply, can publish state to advance the
+// forecast. Other conversion failures fail
+// closed. A zero timestamp is retained for compatibility with
+// synthetic/internal events that never crossed the network ingress path. As
+// with other Go APIs that accept a context, ctx must not be nil.
 func (ls *LedgerState) AwaitChainsyncHeaderAdmission(
 	ctx context.Context,
 	e ChainsyncEvent,
@@ -5376,11 +5390,12 @@ func (ls *LedgerState) AwaitChainsyncHeaderAdmission(
 }
 
 // flushQueuedHeadersForHorizonWait starts blockfetch for headers already
-// queued while admission holds the next header past the forecast horizon.
+// queued while admission holds the next header past the forecast horizon, and
+// reports whether a queued or in-flight fetch can publish a newer snapshot.
 // Far from the peer tip the header handler waits for a full batch before
 // fetching, but the held header is the one that would complete it, and only
 // applying the queued blocks moves the horizon that releases it. It is a no-op
-// when a fetch is already running or nothing is queued.
+// when no fetch is running and nothing is queued.
 //
 // The fetch origin is the header pipeline owner, which delivered the queued
 // headers, rather than waitingConnId: peer selection treats the origin as a
@@ -5390,28 +5405,31 @@ func (ls *LedgerState) AwaitChainsyncHeaderAdmission(
 // already have been processed and must not be undone here.
 func (ls *LedgerState) flushQueuedHeadersForHorizonWait(
 	waitingConnId ouroboros.ConnectionId,
-) {
-	if ls.chain == nil || ls.chain.HeaderCount() == 0 {
-		return
-	}
+) bool {
 	var pending pendingPublishes
 	defer pending.flush()
-	pending.drainChain(ls.chain)
 	ls.chainsyncMutex.Lock()
 	defer ls.chainsyncMutex.Unlock()
 	ls.chainsyncBlockfetchMutex.Lock()
 	defer ls.chainsyncBlockfetchMutex.Unlock()
 	if ls.chainsyncBlockfetchReadyChan != nil ||
-		ls.blockfetchContinuationPending ||
-		ls.chain.HeaderCount() == 0 {
-		return
+		ls.activeBlockfetchRequestDone != nil ||
+		ls.blockfetchContinuationPending {
+		return true
+	}
+	if ls.chain == nil {
+		return false
+	}
+	pending.drainChain(ls.chain)
+	if ls.chain.HeaderCount() == 0 {
+		return false
 	}
 	connId := ls.headerPipelineConnId
 	if connIdKey(connId) == "" {
 		connId = waitingConnId
 	}
 	if !ls.isConnectionLive(connId) {
-		return
+		return false
 	}
 	ls.setSelectedBlockfetchConnId(connId)
 	initialConnId := ls.selectInitialBlockfetchConn(connId)
@@ -5422,23 +5440,77 @@ func (ls *LedgerState) flushQueuedHeadersForHorizonWait(
 		"header_count", ls.chain.HeaderCount(),
 	)
 	ls.startQueuedBlockfetchWithFallbackLocked(initialConnId, connId, &pending)
+	return ls.chainsyncBlockfetchReadyChan != nil ||
+		ls.activeBlockfetchRequestDone != nil ||
+		ls.blockfetchContinuationPending
+}
+
+// chainAheadOfAppliedTip reports whether the primary chain holds blocks the
+// ledger has not applied yet. Applying them publishes the snapshots that move
+// the forecast horizon, so they are local work even when no header is queued
+// and no blockfetch is running, as while a block waits on data fetched by
+// another protocol. Re-intersecting instead closes the connections that work
+// may need, without advancing the horizon.
+//
+// A chain tip in the applied tip's slot under another hash is such a block. A
+// chain tip in an earlier slot is a rollback the ledger has yet to follow, and
+// nothing at or below the applied slot can move the horizon past where it is.
+func (ls *LedgerState) chainAheadOfAppliedTip() bool {
+	if ls.chain == nil {
+		return false
+	}
+	tip := ls.loadTipSnapshot()
+	if tip == nil {
+		return false
+	}
+	chainTip := ls.chain.Tip().Point
+	applied := tip.currentTip.Point
+	if chainTip.Slot != applied.Slot {
+		return chainTip.Slot > applied.Slot
+	}
+	return !pointMatches(chainTip, applied)
 }
 
 // awaitForecastHorizon blocks until the published ledger state can forecast
 // e's slot, or ctx ends. The horizon only moves when a snapshot is published,
-// so it waits for publication rather than polling.
+// so it waits for publication, or for blockfetch capacity to change, rather
+// than polling.
 func (ls *LedgerState) awaitForecastHorizon(
 	ctx context.Context,
 	e ChainsyncEvent,
 ) error {
 	logged := false
+	witnessPublished := false
 	for {
 		published := ls.snapshotPublishedChan()
+		// Captured before the fetch state is read so a request that ends
+		// without publishing a snapshot, such as a zero-block batch, still
+		// wakes this loop.
+		ls.chainsyncBlockfetchMutex.Lock()
+		if ls.chainsyncCapacityChanged == nil {
+			ls.chainsyncCapacityChanged = make(chan struct{})
+		}
+		capacityChanged := ls.chainsyncCapacityChanged
+		ls.chainsyncBlockfetchMutex.Unlock()
 		if !ls.headerBeyondForecastHorizon(ctx, e) {
 			return nil
 		}
 		if ls.chainsyncHeaderDisconnected(ctx, e) {
-			return ErrChainsyncHeaderDisconnected
+			if !ls.flushQueuedHeadersForHorizonWait(e.ConnectionId) &&
+				!ls.chainAheadOfAppliedTip() {
+				return ErrChainsyncHeaderDisconnected
+			}
+			select {
+			case <-published:
+			case <-capacityChanged:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+			continue
+		}
+		if !witnessPublished && e.ForecastHorizonWait != nil {
+			e.ForecastHorizonWait()
+			witnessPublished = true
 		}
 		if !logged && ls.config.Logger != nil {
 			ls.config.Logger.Debug(
@@ -5448,9 +5520,24 @@ func (ls *LedgerState) awaitForecastHorizon(
 			)
 			logged = true
 		}
-		ls.flushQueuedHeadersForHorizonWait(e.ConnectionId)
+		if !ls.flushQueuedHeadersForHorizonWait(e.ConnectionId) &&
+			!ls.chainAheadOfAppliedTip() {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if !ls.headerBeyondForecastHorizon(ctx, e) {
+				return nil
+			}
+			select {
+			case <-published:
+				continue
+			default:
+			}
+			return ErrChainsyncHeaderNeedsResync
+		}
 		select {
 		case <-published:
+		case <-capacityChanged:
 		case <-ctx.Done():
 			return ctx.Err()
 		}
@@ -5794,6 +5881,30 @@ func (ls *LedgerState) CurrentHeaderCryptoVerificationGeneration() uint64 {
 		return 0
 	}
 	return consensus.generation
+}
+
+// currentHeaderVerificationContext returns the current generation and the
+// generation at which its consensus context began, or zeros while the
+// consensus and tip snapshots are not jointly stable.
+func (ls *LedgerState) currentHeaderVerificationContext() (uint64, uint64) {
+	if ls.txValidationTransitions.Load() != 0 {
+		return 0, 0
+	}
+	consensus := ls.loadConsensusSnapshot()
+	tip := ls.loadTipSnapshot()
+	if consensus == nil || tip == nil || consensus.generation != tip.generation ||
+		ls.txValidationTransitions.Load() != 0 {
+		return 0, 0
+	}
+	return consensus.generation, consensus.contextGeneration
+}
+
+// headerVerdictInContext reports whether a verdict stamped with generation
+// was made within the consensus context that began at contextGeneration and
+// is current at generation current.
+func headerVerdictInContext(stamp, contextGeneration, current uint64) bool {
+	return stamp != 0 && contextGeneration != 0 &&
+		stamp >= contextGeneration && stamp <= current
 }
 
 // PinHeaderCryptoVerificationGeneration keeps a current producer-
@@ -6426,6 +6537,10 @@ func (ls *LedgerState) handleEventBlockfetchBlockDeferredInternal(
 			queuedVerificationGeneration = ls.chain.QueuedHeaderCryptoVerificationGeneration(e.Point)
 		}
 		headerVerifyStart := time.Now()
+		verifyCtx, cancelVerify := context.WithTimeout(
+			ls.lifecycleContext(),
+			blockfetchBusyTimeout,
+		)
 		verificationGeneration, verifyErr := ls.
 			withStableBlockfetchHeaderVerification(
 				blockfetchMutexHeld,
@@ -6433,16 +6548,22 @@ func (ls *LedgerState) handleEventBlockfetchBlockDeferredInternal(
 					if !ls.headerCryptoVerificationGenerationCurrent(
 						queuedVerificationGeneration,
 					) {
-						return ls.verifyBlockHeaderCryptoBeforeApply(e.Block)
+						return ls.verifyBlockHeaderCryptoWithEpochAdvance(
+							verifyCtx,
+							e.Block,
+							true,
+							true,
+						)
 					}
 					return ls.verifyBlockHeaderStateWithEpochAdvance(
-						ls.lifecycleContext(),
+						verifyCtx,
 						e.Block,
 						true,
 						true,
 					)
 				},
 			)
+		cancelVerify()
 		if blockfetchMutexHeld {
 			if !ls.blockfetchEventCurrent(e) ||
 				!ls.blockfetchBatchStillCurrent() {
@@ -6453,6 +6574,17 @@ func (ls *LedgerState) handleEventBlockfetchBlockDeferredInternal(
 			blockStageHeaderVerify,
 			time.Since(headerVerifyStart),
 		)
+		if errors.Is(verifyErr, context.Canceled) &&
+			ls.lifecycleContext().Err() != nil {
+			return nil //nolint:nilerr // Ledger shutdown cancels in-flight admission.
+		}
+		if errors.Is(verifyErr, context.DeadlineExceeded) {
+			verifyErr = fmt.Errorf(
+				"%w: header verification exceeded %s",
+				errHeaderVerificationDeferred,
+				blockfetchBusyTimeout,
+			)
+		}
 		if verifyErr == nil && ls.config.BlockPipelineValidateEnabled {
 			ls.markAdmissionVerified(e.Point, verificationGeneration)
 		}
@@ -7610,7 +7742,7 @@ func (ls *LedgerState) flushPendingBlockfetchBlocksDeferred(
 			// fork transactions.
 			validationEnabled, _ := ls.validationStateSnapshot()
 			ls.auditContinuationBlock(pendingEvent, validationEnabled)
-			ls.checkSlotBattle(pendingEvent, nil)
+			ls.checkSlotBattle(pendingEvent)
 			// The block extended the chain, so the range it belongs to
 			// is fetchable after all and any failure record for it is
 			// stale. Noting it here rather than on arrival is what keeps
@@ -7680,7 +7812,7 @@ func (ls *LedgerState) flushPendingBlockfetchBlocksDeferred(
 				pubs,
 			)
 		}
-		ls.checkSlotBattle(pendingEvent, addBlockErr)
+		ls.checkSlotBattle(pendingEvent)
 	}
 	ls.chain.NotifyIterators()
 	return nil
@@ -8434,13 +8566,13 @@ func buildGenesisBlockCbor(
 			outputLen := len(outputCbor)
 
 			// Validate sizes fit in uint32 (fail fast instead of silent truncation)
-			if offset > math.MaxUint32 {
+			if !fitsUint32(offset) {
 				return nil, fmt.Errorf(
 					"genesis CBOR offset %d exceeds uint32 max",
 					offset,
 				)
 			}
-			if outputLen > math.MaxUint32 {
+			if !fitsUint32(outputLen) {
 				return nil, fmt.Errorf(
 					"genesis output CBOR length %d exceeds uint32 max",
 					outputLen,
@@ -8502,7 +8634,7 @@ func writeCborMajorType(buf *bytes.Buffer, majorType, n int) {
 		buf.WriteByte(header | 25)
 		buf.WriteByte(byte(n >> 8))
 		buf.WriteByte(byte(n))
-	case n < 4294967296:
+	case int64(n) < 4294967296:
 		buf.WriteByte(header | 26)
 		buf.WriteByte(byte(n >> 24))
 		buf.WriteByte(byte(n >> 16))
@@ -9977,20 +10109,18 @@ func (ls *LedgerState) cleanupBlockNoncesBefore(
 
 // checkSlotBattle checks whether an incoming block from a peer
 // occupies a slot for which the local node has already forged a
-// block. If so, it emits a SlotBattleEvent and logs a warning.
+// block. If so, it counts and logs the battle and registers it so the winner
+// is reported once the slot is settled.
 //
-// The addBlockErr parameter is the error (if any) returned by
-// chain.AddBlock for the incoming block. A nil error means the
-// remote block was accepted onto the chain (remote won); a
-// non-nil error means it was rejected (local won).
+// The winner cannot be read when the rival arrives. chain.AddBlock only
+// accepts a block that extends the tip, so an accepted rival means the forged
+// block is off the chain at that moment, and a refused one leaves ours at the
+// tip; either can still reverse when chain selection switches branches (see
+// AdoptLocalForgedSibling). resolveSlotBattles reports the winner from the
+// chain once the tip is a security parameter of blocks past the arrival.
 //
-// The caller must hold ls.Lock() (write lock). This method must not
-// acquire ls.RLock(), because sync.RWMutex is not reentrant and
-// attempting a read lock while holding the write lock deadlocks.
-func (ls *LedgerState) checkSlotBattle(
-	e BlockfetchEvent,
-	addBlockErr error,
-) {
+// It takes no ledger lock, so it is safe whichever one the caller holds.
+func (ls *LedgerState) checkSlotBattle(e BlockfetchEvent) {
 	checker := ls.loadForgedBlockChecker()
 	if checker == nil {
 		return
@@ -10009,17 +10139,12 @@ func (ls *LedgerState) checkSlotBattle(
 		return
 	}
 
-	// Determine winner: if the remote block was rejected (addBlockErr
-	// != nil), our local block remains on chain, so we won.
-	localWon := addBlockErr != nil
-
 	ls.config.Logger.Warn(
 		"slot battle detected",
 		"component", "ledger",
 		"slot", incomingSlot,
 		"local_block_hash", hex.EncodeToString(localHash),
 		"remote_block_hash", hex.EncodeToString(remoteHash),
-		"local_won", localWon,
 	)
 
 	// Increment slot battle metric
@@ -10027,20 +10152,12 @@ func (ls *LedgerState) checkSlotBattle(
 		recorder.RecordSlotBattle()
 	}
 
-	if ls.config.EventBus != nil {
-		ls.config.EventBus.PublishAsync(
-			forging.SlotBattleEventType,
-			event.NewEvent(
-				forging.SlotBattleEventType,
-				forging.SlotBattleEvent{
-					Slot:            incomingSlot,
-					LocalBlockHash:  localHash,
-					RemoteBlockHash: remoteHash,
-					Won:             localWon,
-				},
-			),
-		)
-	}
+	ls.slotBattles.add(slotBattle{
+		slot:       incomingSlot,
+		localHash:  localHash,
+		remoteHash: remoteHash,
+		settleAt:   ls.chain.Tip().BlockNumber + ls.slotBattleSettleDepth(),
+	})
 }
 
 // selectInitialBlockfetchConn picks the connection to fetch the queued range

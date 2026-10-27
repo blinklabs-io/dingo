@@ -35,15 +35,15 @@ type BlockfrostNode interface {
 
 	// LatestBlock returns information about the latest
 	// block on the chain.
-	LatestBlock() (BlockInfo, error)
+	LatestBlock(ctx context.Context) (BlockInfo, error)
 
 	// BlockByHashOrNumber returns information about a block
 	// identified by a 64-character hex hash or decimal height.
-	BlockByHashOrNumber(id string) (BlockInfo, error)
+	BlockByHashOrNumber(ctx context.Context, id string) (BlockInfo, error)
 
 	// LatestBlockTxHashes returns the transaction hashes
 	// for the latest block.
-	LatestBlockTxHashes() ([]string, error)
+	LatestBlockTxHashes(ctx context.Context) ([]string, error)
 
 	// CurrentEpoch returns information about the current
 	// epoch.
@@ -131,8 +131,9 @@ type BlockfrostNode interface {
 	PoolsList(ctx context.Context, params PaginationParams) ([]string, int, error)
 
 	// Address returns summary information for an address,
-	// including balances aggregated across its live UTxOs.
-	Address(address string) (AddressInfo, error)
+	// including balances aggregated across its live UTxOs. The read stops
+	// when ctx is cancelled.
+	Address(ctx context.Context, address string) (AddressInfo, error)
 
 	// PoolsRetiring returns the paginated list of pools with a
 	// pending retirement announcement, along with the total number
@@ -291,7 +292,8 @@ type BlockfrostNode interface {
 	// AddressUTXOs returns the paginated current UTxOs for
 	// an address along with the total number of matching
 	// results before pagination.
-	AddressUTXOs(ctx context.Context,
+	AddressUTXOs(
+		ctx context.Context,
 		address string,
 		params PaginationParams,
 	) ([]AddressUTXOInfo, int, error)
@@ -309,6 +311,7 @@ type BlockfrostNode interface {
 	// MetadataTransactions returns the paginated transactions
 	// containing the requested metadata label, with JSON values.
 	MetadataTransactions(
+		ctx context.Context,
 		label uint64,
 		params PaginationParams,
 	) ([]MetadataTransactionJSONInfo, int, error)
@@ -316,12 +319,13 @@ type BlockfrostNode interface {
 	// MetadataTransactionsCBOR returns the paginated transactions
 	// containing the requested metadata label, with CBOR values.
 	MetadataTransactionsCBOR(
+		ctx context.Context,
 		label uint64,
 		params PaginationParams,
 	) ([]MetadataTransactionCBORInfo, int, error)
 
 	// Transaction returns summary details for a transaction hash.
-	Transaction(hash []byte) (TransactionInfo, error)
+	Transaction(ctx context.Context, hash []byte) (TransactionInfo, error)
 
 	// TransactionSubmit submits raw signed transaction CBOR to the mempool.
 	TransactionSubmit(ctx context.Context, txCbor []byte) (string, error)
@@ -331,42 +335,44 @@ type BlockfrostNode interface {
 	TransactionEvaluate(context.Context, []byte) (TransactionEvaluationResponse, error)
 
 	// TransactionCBOR returns raw signed transaction CBOR bytes.
-	TransactionCBOR(hash []byte) ([]byte, error)
+	TransactionCBOR(ctx context.Context, hash []byte) ([]byte, error)
 
 	// TransactionMetadata returns transaction metadata labels as JSON values.
-	TransactionMetadata(hash []byte) ([]TransactionMetadataInfo, error)
+	TransactionMetadata(ctx context.Context, hash []byte) ([]TransactionMetadataInfo, error)
 
 	// TransactionMetadataCBOR returns transaction metadata labels as CBOR values.
-	TransactionMetadataCBOR(hash []byte) ([]TransactionMetadataCBORInfo, error)
+	TransactionMetadataCBOR(ctx context.Context, hash []byte) ([]TransactionMetadataCBORInfo, error)
 
 	// TransactionUTXOs returns transaction inputs and outputs.
-	TransactionUTXOs(hash []byte) (TransactionUTXOsInfo, error)
+	TransactionUTXOs(ctx context.Context, hash []byte) (TransactionUTXOsInfo, error)
 
 	// TransactionDelegations returns delegation certificates in a transaction.
-	TransactionDelegations(hash []byte) ([]TransactionDelegationInfo, error)
+	TransactionDelegations(ctx context.Context, hash []byte) ([]TransactionDelegationInfo, error)
 
 	// TransactionStakeAddresses returns stake address certificates in a transaction.
 	TransactionStakeAddresses(
+		ctx context.Context,
 		hash []byte,
 	) ([]TransactionStakeAddressInfo, error)
 
 	// TransactionWithdrawals returns reward withdrawals in a transaction.
-	TransactionWithdrawals(hash []byte) ([]TransactionWithdrawalInfo, error)
+	TransactionWithdrawals(ctx context.Context, hash []byte) ([]TransactionWithdrawalInfo, error)
 
 	// TransactionMIRs returns MIR certificates in a transaction.
-	TransactionMIRs(hash []byte) ([]TransactionMIRInfo, error)
+	TransactionMIRs(ctx context.Context, hash []byte) ([]TransactionMIRInfo, error)
 
 	// TransactionPoolUpdates returns pool registration certificates in a transaction.
-	TransactionPoolUpdates(hash []byte) ([]TransactionPoolUpdateInfo, error)
+	TransactionPoolUpdates(ctx context.Context, hash []byte) ([]TransactionPoolUpdateInfo, error)
 
 	// TransactionPoolRetires returns pool retirement certificates in a transaction.
-	TransactionPoolRetires(hash []byte) ([]TransactionPoolRetireInfo, error)
+	TransactionPoolRetires(ctx context.Context, hash []byte) ([]TransactionPoolRetireInfo, error)
 
 	// TransactionRedeemers returns Plutus redeemers in a transaction.
-	TransactionRedeemers(hash []byte) ([]TransactionRedeemerInfo, error)
+	TransactionRedeemers(ctx context.Context, hash []byte) ([]TransactionRedeemerInfo, error)
 
 	// TransactionRequiredSigners returns required signing key hashes in a transaction.
 	TransactionRequiredSigners(
+		ctx context.Context,
 		hash []byte,
 	) ([]TransactionRequiredSignerInfo, error)
 
@@ -396,7 +402,7 @@ type BlockfrostNode interface {
 
 	// Account returns stake-account information for the
 	// requested stake address.
-	Account(string) (AccountInfo, error)
+	Account(context.Context, string) (AccountInfo, error)
 
 	// AccountAssociatedAddresses returns payment addresses
 	// associated with the requested stake address.

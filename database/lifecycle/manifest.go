@@ -23,6 +23,7 @@ package lifecycle
 import (
 	"context"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -30,6 +31,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -44,7 +46,10 @@ import (
 // tooling can reject a manifest it doesn't understand instead of silently
 // misreading it. Adding the Gates field did not bump this -- see Gates'
 // doc comment for why that is acceptable today.
-const ManifestFormatVersion = 1
+//
+// Version 2 added the signed snapshot ID. A version 1 manifest carries no ID,
+// so a keyed verification rejects it; see ErrManifestLegacyFormat.
+const ManifestFormatVersion = 2
 
 // ManifestFileName is the name of the manifest file inside a snapshot
 // directory.
@@ -66,6 +71,8 @@ type ManifestOption func(*manifestConfig)
 type manifestConfig struct {
 	maxBytes int64
 	key      []byte
+	// id is the snapshot ID a manifest must carry when verified under a key.
+	id string
 	// maxPause is consumed only by Snapshot and SnapshotToCloud.
 	maxPause time.Duration
 	// pauseNow, pauseContext, and pauseDeadline are per-call test seams
@@ -104,6 +111,81 @@ func snapshotCatalogReconcile(
 // authenticates them. An empty key is the same as passing no option.
 func WithManifestKey(key []byte) ManifestOption {
 	return func(cfg *manifestConfig) { cfg.key = key }
+}
+
+// WithManifestID sets the snapshot ID (local directory name or cloud object
+// prefix segment) that a keyed verification requires the manifest to carry.
+// ReadManifest defaults it to the base name of the directory it reads, so
+// this is needed only where the manifest is read from a location whose name
+// is not the snapshot ID, such as a temporary download directory or a cached
+// catalog row. An empty id is the same as passing no option.
+func WithManifestID(id string) ManifestOption {
+	return func(cfg *manifestConfig) {
+		if id != "" {
+			cfg.id = id
+		}
+	}
+}
+
+func manifestID(opts []ManifestOption) string {
+	cfg := manifestConfig{}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&cfg)
+		}
+	}
+	return cfg.id
+}
+
+// snapshotIDForDir returns the snapshot ID a snapshot directory is addressed
+// by: its base name, without resolving symlinks, so a link to another
+// snapshot is addressed by the link's name.
+func snapshotIDForDir(dir string) string {
+	if abs, err := filepath.Abs(dir); err == nil {
+		dir = abs
+	}
+	return filepath.Base(dir)
+}
+
+// cloudSnapshotIDFromURI returns the snapshot ID a cloud snapshot URI
+// addresses: the last segment of the canonical path ParseCloudDestination
+// hands the destination factory, which JoinCloudURI makes the snapshot ID.
+// Deriving it from the raw path instead would let "prefix/newer/." read the
+// objects under prefix/newer while naming no ID. It returns "" when the URI
+// is invalid or names no path segment.
+func cloudSnapshotIDFromURI(uri string) string {
+	u, err := parseCloudDestinationURL(uri)
+	if err != nil {
+		return ""
+	}
+	id := path.Base(u.Path)
+	if id == "." || id == "/" {
+		return ""
+	}
+	return id
+}
+
+// withCloudManifestID returns opts plus the snapshot ID uri addresses as the
+// ID a keyed verification requires. Under a key it refuses a URI naming no
+// snapshot ID: snapshots are always written one segment below a destination,
+// and accepting any signed manifest at the bucket root would let a writer to
+// the bucket substitute one there.
+func withCloudManifestID(
+	uri string,
+	opts []ManifestOption,
+) ([]ManifestOption, error) {
+	id := cloudSnapshotIDFromURI(uri)
+	if id == "" && len(manifestKey(opts)) > 0 {
+		return nil, fmt.Errorf(
+			"%w: %w: cloud URI %q names no snapshot ID",
+			ErrManifestUnauthenticated, ErrManifestIDMismatch,
+			CloudDestinationDisplay(uri),
+		)
+	}
+	return append(
+		append([]ManifestOption(nil), opts...),
+		WithManifestID(id),
+	), nil
 }
 
 func manifestKey(opts []ManifestOption) []byte {
@@ -191,6 +273,23 @@ var ErrManifestUnauthenticated = errors.New(
 	"manifest is not authenticated by the configured trust key",
 )
 
+// ErrManifestLegacyFormat marks a manifest written before snapshot IDs were
+// signed (format version 1). It carries no ID the trust key authenticates, so
+// it cannot be bound to the directory or object prefix it was found under;
+// the snapshot must be re-created. It is returned only by keyed verification,
+// and always joined with ErrManifestUnauthenticated.
+var ErrManifestLegacyFormat = errors.New(
+	"snapshot predates signed snapshot IDs and must be re-created",
+)
+
+// ErrManifestIDMismatch marks an authenticated manifest whose signed snapshot
+// ID differs from the directory name or object prefix it was found under,
+// which is how a complete older snapshot copied under a newer ID presents.
+// It is always joined with ErrManifestUnauthenticated.
+var ErrManifestIDMismatch = errors.New(
+	"manifest snapshot ID does not match the requested snapshot ID",
+)
+
 // Trigger values recorded in Manifest.Trigger.
 const (
 	TriggerEpochBoundary = "epoch-boundary"
@@ -203,9 +302,16 @@ const (
 // data. It is written as JSON (not CBOR) since it is operator/tooling
 // facing metadata, not chain data.
 type Manifest struct {
-	FormatVersion int       `json:"formatVersion"`
-	CreatedAt     time.Time `json:"createdAt"`
-	Trigger       string    `json:"trigger"`
+	FormatVersion int `json:"formatVersion"`
+
+	// ID is the snapshot ID, the base name of the snapshot directory or cloud
+	// prefix the snapshot was written to. It is covered by Authentication, so
+	// a keyed verification can bind the manifest to the ID it is requested by.
+	// Empty in a format version 1 manifest.
+	ID string `json:"id,omitempty"`
+
+	CreatedAt time.Time `json:"createdAt"`
+	Trigger   string    `json:"trigger"`
 
 	// Name/Description are operator-supplied labels, set after the fact
 	// via LabelSnapshot (Snapshot itself has no caller-facing label
@@ -323,10 +429,20 @@ func (m Manifest) authentication(key []byte) (string, error) {
 // Authenticate verifies m against the trust key in opts. It returns nil when
 // no key is configured, since there is then nothing to verify against, and
 // ErrManifestUnauthenticated when m's tag is absent or does not match.
+// Under a key it also rejects a format version 1 manifest
+// (ErrManifestLegacyFormat) and, when WithManifestID names the requested
+// snapshot, a manifest whose signed ID differs (ErrManifestIDMismatch).
 func (m Manifest) Authenticate(opts ...ManifestOption) error {
 	key := manifestKey(opts)
 	if len(key) == 0 {
 		return nil
+	}
+	if m.FormatVersion < 2 {
+		return fmt.Errorf(
+			"%w: %w (format version %d)",
+			ErrManifestUnauthenticated, ErrManifestLegacyFormat,
+			m.FormatVersion,
+		)
 	}
 	want, err := m.authentication(key)
 	if err != nil {
@@ -335,7 +451,24 @@ func (m Manifest) Authenticate(opts ...ManifestOption) error {
 	if !hmac.Equal([]byte(want), []byte(m.Authentication)) {
 		return ErrManifestUnauthenticated
 	}
+	if id := manifestID(opts); id != "" && m.ID != id {
+		return fmt.Errorf(
+			"%w: %w: manifest signed for %q, requested %q",
+			ErrManifestUnauthenticated, ErrManifestIDMismatch, m.ID, id,
+		)
+	}
 	return nil
+}
+
+// authenticateEntry verifies a catalog or listing entry against the trust key,
+// requiring the manifest to carry the entry's own ID.
+func authenticateEntry(entry SnapshotEntry, opts []ManifestOption) error {
+	return entry.Manifest.Authenticate(
+		append(
+			append([]ManifestOption(nil), opts...),
+			WithManifestID(entry.ID),
+		)...,
+	)
 }
 
 // CheckPluginMatch returns an error if the manifest was produced by a
@@ -487,33 +620,9 @@ func writeManifest(
 	m Manifest,
 	opts ...ManifestOption,
 ) error {
-	limit, err := manifestByteLimit(opts)
+	m, data, err := prepareManifest(dir, m, opts...)
 	if err != nil {
 		return err
-	}
-	m.FormatVersion = ManifestFormatVersion
-	m.Authentication = ""
-	if key := manifestKey(opts); len(key) > 0 {
-		tag, err := m.authentication(key)
-		if err != nil {
-			return err
-		}
-		m.Authentication = tag
-	}
-	sum, err := m.checksum()
-	if err != nil {
-		return err
-	}
-	m.Checksum = sum
-	data, err := json.MarshalIndent(m, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal manifest: %w", err)
-	}
-	if int64(len(data)) > limit {
-		return fmt.Errorf(
-			"manifest size %d exceeds maximum %d bytes: %w",
-			len(data), limit, ErrManifestTooLarge,
-		)
 	}
 	path := filepath.Join(dir, ManifestFileName)
 
@@ -523,37 +632,135 @@ func writeManifest(
 	}
 	tmpPath := tmp.Name()
 	renamed := false
-	// Best-effort: if anything below fails before the rename, don't leave
-	// the temp file behind for a future WriteManifest/directory listing
-	// to trip over. No-op once renamed, since tmpPath no longer exists.
 	defer func() {
 		if !renamed {
 			_ = os.Remove(tmpPath)
 		}
 	}()
 
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("write temp manifest %q: %w", tmpPath, err)
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("sync temp manifest %q: %w", tmpPath, err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close temp manifest %q: %w", tmpPath, err)
+	if err := writeAndSyncManifest(tmp, data, tmpPath); err != nil {
+		return err
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
 		return fmt.Errorf("rename temp manifest to %q: %w", path, err)
 	}
 	renamed = true
 
-	// A file's own fsync does not guarantee its directory entry is
-	// persisted; sync dir itself so the rename above is durable too, not
-	// just atomic.
 	if err := fsyncdir.Sync(dir); err != nil {
 		return err
 	}
+	return publishManifestToCatalog(ctx, dir, m, opts...)
+}
+
+func prepareManifest(
+	dir string,
+	m Manifest,
+	opts ...ManifestOption,
+) (Manifest, []byte, error) {
+	limit, err := manifestByteLimit(opts)
+	if err != nil {
+		return Manifest{}, nil, err
+	}
+	m.FormatVersion = ManifestFormatVersion
+	m.ID = snapshotIDForDir(dir)
+	m.Authentication = ""
+	if key := manifestKey(opts); len(key) > 0 {
+		tag, err := m.authentication(key)
+		if err != nil {
+			return Manifest{}, nil, err
+		}
+		m.Authentication = tag
+	}
+	sum, err := m.checksum()
+	if err != nil {
+		return Manifest{}, nil, err
+	}
+	m.Checksum = sum
+	data, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return Manifest{}, nil, fmt.Errorf("marshal manifest: %w", err)
+	}
+	if int64(len(data)) > limit {
+		return Manifest{}, nil, fmt.Errorf(
+			"manifest size %d exceeds maximum %d bytes: %w",
+			len(data), limit, ErrManifestTooLarge,
+		)
+	}
+	return m, data, nil
+}
+
+func writeManifestAtRoot(
+	ctx context.Context,
+	root *os.Root,
+	dir string,
+	m Manifest,
+	opts ...ManifestOption,
+) (Manifest, error) {
+	m, data, err := prepareManifest(dir, m, opts...)
+	if err != nil {
+		return Manifest{}, err
+	}
+	var random [16]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return Manifest{}, fmt.Errorf("choose temp manifest name: %w", err)
+	}
+	tmpName := ManifestFileName + ".tmp-" + hex.EncodeToString(random[:])
+	tmp, err := root.OpenFile(tmpName, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return Manifest{}, fmt.Errorf("create temp manifest: %w", err)
+	}
+	renamed := false
+	defer func() {
+		if !renamed {
+			_ = root.Remove(tmpName)
+		}
+	}()
+	if err := writeAndSyncManifest(tmp, data, tmpName); err != nil {
+		return Manifest{}, err
+	}
+	if err := root.Rename(tmpName, ManifestFileName); err != nil {
+		return Manifest{}, fmt.Errorf("publish manifest: %w", err)
+	}
+	renamed = true
+	rootDir, err := root.Open(".")
+	if err != nil {
+		return Manifest{}, fmt.Errorf("open snapshot directory for sync: %w", err)
+	}
+	syncErr := rootDir.Sync()
+	closeErr := rootDir.Close()
+	if err := errors.Join(syncErr, closeErr); err != nil {
+		return Manifest{}, fmt.Errorf("sync snapshot directory: %w", err)
+	}
+	if err := snapshotRootMatchesPath(root, dir); err != nil {
+		return Manifest{}, err
+	}
+	if err := publishManifestToCatalog(ctx, dir, m, opts...); err != nil {
+		return Manifest{}, err
+	}
+	return m, nil
+}
+
+func writeAndSyncManifest(file *os.File, data []byte, name string) error {
+	if _, err := file.Write(data); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("write temp manifest %q: %w", name, err)
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("sync temp manifest %q: %w", name, err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close temp manifest %q: %w", name, err)
+	}
+	return nil
+}
+
+func publishManifestToCatalog(
+	ctx context.Context,
+	dir string,
+	m Manifest,
+	opts ...ManifestOption,
+) error {
 	if err := updateSnapshotCatalogIfPresent(
 		ctx,
 		filepath.Dir(dir),
@@ -582,7 +789,12 @@ func ReadManifest(dir string, opts ...ManifestOption) (Manifest, error) {
 	if err != nil {
 		return Manifest{}, fmt.Errorf("read manifest %q: %w", path, err)
 	}
-	m, err := ParseManifest(data, opts...)
+	// Explicit options come last so a caller-supplied ID wins the default.
+	idOpts := append(
+		[]ManifestOption{WithManifestID(snapshotIDForDir(dir))},
+		opts...,
+	)
+	m, err := ParseManifest(data, idOpts...)
 	if err != nil {
 		return Manifest{}, fmt.Errorf("%s: %w", path, err)
 	}

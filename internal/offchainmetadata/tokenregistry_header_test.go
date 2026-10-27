@@ -245,3 +245,34 @@ func TestTokenRegistryRedirectGuardRunsAfterCustomCallback(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []string{""}, seen())
 }
+
+func TestTokenRegistryRedirectDropsReferer(t *testing.T) {
+	t.Parallel()
+	client := &http.Client{
+		CheckRedirect: func(req *http.Request, _ []*http.Request) error {
+			req.Header.Set(
+				"Referer", "https://registry.example/archive?token="+redactHeader,
+			)
+			return nil
+		},
+	}
+	sync, err := NewTokenRegistrySync(TokenRegistryConfig{
+		Store:              newFakeTokenRegistryStore(),
+		SourceURL:          "https://registry.example/archive",
+		ManifestURL:        "https://registry.example/manifest",
+		TrustedManifestKey: testTokenRegistryManifestKey(),
+		HTTPClient:         client,
+	})
+	require.NoError(t, err)
+
+	req, err := http.NewRequest(http.MethodGet, "https://mirror.example/archive", nil)
+	require.NoError(t, err)
+	via, err := http.NewRequest(
+		http.MethodGet,
+		"https://registry.example/archive?token="+redactHeader,
+		nil,
+	)
+	require.NoError(t, err)
+	require.NoError(t, sync.client.CheckRedirect(req, []*http.Request{via}))
+	require.Empty(t, req.Header.Get("Referer"))
+}

@@ -280,7 +280,7 @@ func (a *NodeAdapter) DatumCBOR(
 // redeemerSource resolves the redeemers of one transaction with their
 // execution cost and datum.
 type redeemerSource interface {
-	TransactionRedeemers(hash []byte) ([]TransactionRedeemerInfo, error)
+	TransactionRedeemers(ctx context.Context, hash []byte) ([]TransactionRedeemerInfo, error)
 }
 
 // buildScriptRedeemerInfos resolves each redeemer reference against its
@@ -288,6 +288,7 @@ type redeemerSource interface {
 // A reference whose redeemer the transaction does not carry is an error: the
 // index and the transaction disagree, which a silent skip would hide.
 func buildScriptRedeemerInfos(
+	ctx context.Context,
 	refs []models.ScriptRedeemerRef,
 	source redeemerSource,
 ) ([]ScriptRedeemerInfo, error) {
@@ -298,7 +299,7 @@ func buildScriptRedeemerInfos(
 		redeemers, ok := byTx[txKey]
 		if !ok {
 			var err error
-			redeemers, err = source.TransactionRedeemers(ref.TxHash)
+			redeemers, err = source.TransactionRedeemers(ctx, ref.TxHash)
 			if err != nil {
 				return nil, fmt.Errorf(
 					"get redeemers of transaction %s: %w",
@@ -384,7 +385,7 @@ func (a *NodeAdapter) ScriptRedeemers(
 	// snapshot's connection across them lets concurrent requests exhaust the
 	// read pool waiting on each other.
 	txn.Release()
-	infos, err := buildScriptRedeemerInfos(refs, a)
+	infos, err := buildScriptRedeemerInfos(ctx, refs, a)
 	if err != nil {
 		return nil, 0, err
 	}

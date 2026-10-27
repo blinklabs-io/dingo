@@ -131,10 +131,11 @@ func TestWithheldConnectionCallSites(t *testing.T) {
 			source: PeerSourceP2PLedger,
 			state:  PeerStateWarm,
 			usable: func(pg *PeerGovernor, _ ouroboros.ConnectionId) bool {
+				progress := pg.bootstrapExitProgress()
 				pg.mu.Lock()
 				defer pg.mu.Unlock()
 				addColdBootstrapPeer(pg)
-				exit, _ := pg.shouldExitBootstrap()
+				exit, _ := pg.shouldExitBootstrapLocked(progress)
 				return exit
 			},
 		},

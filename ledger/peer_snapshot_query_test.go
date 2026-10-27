@@ -15,11 +15,15 @@
 package ledger
 
 import (
+	"bytes"
 	"context"
+	"encoding/hex"
 	"net"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
@@ -110,7 +114,9 @@ func TestQueryLedgerPeerSnapshotEmptyAtOrigin(t *testing.T) {
 
 	result, err := ls.queryLedgerPeerSnapshot(
 		context.Background(),
-		olocalstatequery.LedgerPeerKindAll,
+		&olocalstatequery.ShelleyGetLedgerPeerSnapshotQuery{
+			PeerKind: olocalstatequery.LedgerPeerKindAll,
+		},
 		nil,
 	)
 	require.NoError(t, err)
@@ -133,7 +139,9 @@ func TestQueryLedgerPeerSnapshotRealSlotZero(t *testing.T) {
 
 	result, err := ls.queryLedgerPeerSnapshot(
 		context.Background(),
-		olocalstatequery.LedgerPeerKindAll,
+		&olocalstatequery.ShelleyGetLedgerPeerSnapshotQuery{
+			PeerKind: olocalstatequery.LedgerPeerKindAll,
+		},
 		nil,
 	)
 	require.NoError(t, err)
@@ -434,4 +442,189 @@ func TestAssembleLedgerPeerSnapshotResultEncodes(t *testing.T) {
 		olocalstatequery.RelayKindIPv4,
 		decoded.Pools[0].Detail.Relays[0].Kind,
 	)
+}
+
+// --- version 23 request form ------------------------------------------------
+
+// peerSnapshotV23Ledger builds a ledger over an empty database whose Shelley
+// genesis carries the preview network magic (2).
+func peerSnapshotV23Ledger(t *testing.T) *LedgerState {
+	t.Helper()
+	cfg, err := cardano.LoadCardanoNodeConfigWithFallback(
+		"preview/config.json",
+		"preview",
+		cardano.EmbeddedConfigFS,
+	)
+	require.NoError(t, err)
+	require.EqualValues(t, 2, cfg.ShelleyGenesis().NetworkMagic)
+	return &LedgerState{
+		db:     newTestDB(t),
+		config: LedgerStateConfig{CardanoNodeConfig: cfg},
+	}
+}
+
+func peerSnapshotV23Query(kind olocalstatequery.LedgerPeerKind) *olocalstatequery.BlockQuery {
+	return &olocalstatequery.BlockQuery{
+		Query: &olocalstatequery.ShelleyQuery{
+			Query: &olocalstatequery.ShelleyGetLedgerPeerSnapshotQuery{
+				Type:         olocalstatequery.QueryTypeShelleyGetLedgerPeerSnapshot,
+				PeerKind:     kind,
+				WithPeerKind: true,
+			},
+		},
+	}
+}
+
+// encodePeerSnapshotReply encodes the handler's reply the way the server does,
+// and returns the snapshot bytes: the server wraps a bare snapshot in the
+// single-element era result wrapper (0x81), which is stripped here.
+func encodePeerSnapshotReply(t *testing.T, result any) string {
+	t.Helper()
+	snap, ok := result.(olocalstatequery.LedgerPeerSnapshotResult)
+	require.True(t, ok, "expected LedgerPeerSnapshotResult, got %T", result)
+	encoded, err := cbor.Encode(snap)
+	require.NoError(t, err)
+	return hex.EncodeToString(encoded)
+}
+
+// TestQueryLedgerPeerSnapshotV23EmptyBytes pins the version 23 replies to the
+// layout ouroboros-network's encodeLedgerPeerSnapshot writes:
+//
+//	big (kind 1): [2, [point, magic, [_ ...]]]
+//	all (kind 0): [3, [point, magic, [_ ...]]]
+//	point: [0] at genesis, [1, slot, hash(32)] otherwise
+func TestQueryLedgerPeerSnapshotV23EmptyBytes(t *testing.T) {
+	t.Parallel()
+
+	tipHash := bytes.Repeat([]byte{0xEF}, 32)
+	hashHex := hex.EncodeToString(tipHash)
+	tests := []struct {
+		name    string
+		kind    olocalstatequery.LedgerPeerKind
+		tip     bool
+		wantHex string
+	}{
+		{"big at genesis", olocalstatequery.LedgerPeerKindBig, false,
+			"820283" + "8100" + "02" + "9fff"},
+		{"all at genesis", olocalstatequery.LedgerPeerKindAll, false,
+			"820383" + "8100" + "02" + "9fff"},
+		{"big at block", olocalstatequery.LedgerPeerKindBig, true,
+			"820283" + "8301191092" + "5820" + hashHex + "02" + "9fff"},
+		{"all at block", olocalstatequery.LedgerPeerKindAll, true,
+			"820383" + "8301191092" + "5820" + hashHex + "02" + "9fff"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ls := peerSnapshotV23Ledger(t)
+			if tc.tip {
+				require.NoError(t, ls.db.SetTip(
+					ochainsync.Tip{Point: ocommon.NewPoint(4242, tipHash)},
+					nil,
+				))
+			}
+			result, err := ls.Query(
+				t.Context(),
+				peerSnapshotV23Query(tc.kind),
+				QueryPoint{},
+			)
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantHex, encodePeerSnapshotReply(t, result))
+		})
+	}
+}
+
+// TestLedgerPeerSnapshotV23PoolBytes pins the per-pool entries of the version
+// 2 and 3 replies: [acc stake, pool stake, relays] for big peers and
+// [pool stake, relays] for all peers, with stakes as untagged [num, den] and
+// relays as an indefinite list. The one pool holds all stake and advertises
+// the IPv4 relay 1.2.3.4:3001.
+func TestLedgerPeerSnapshotV23PoolBytes(t *testing.T) {
+	t.Parallel()
+
+	tipHash := bytes.Repeat([]byte{0xEF}, 32)
+	const (
+		stake = "820101"                 // [1, 1]
+		relay = "8301190bb99f01020304ff" // [1, 3001, [_ 1,2,3,4]]
+	)
+	pointHex := "8301191092" + "5820" + hex.EncodeToString(tipHash)
+	bigEntry := "83" + stake + stake + "9f" + relay + "ff"
+	allEntry := "82" + stake + "9f" + relay + "ff"
+
+	tests := []struct {
+		name    string
+		kind    olocalstatequery.LedgerPeerKind
+		wantHex string
+	}{
+		{"big", olocalstatequery.LedgerPeerKindBig,
+			"820283" + pointHex + "02" + "9f" + bigEntry + "ff"},
+		{"all", olocalstatequery.LedgerPeerKindAll,
+			"820383" + pointHex + "02" + "9f" + allEntry + "ff"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			snapshot := assembleLedgerPeerSnapshot(
+				atSlot(4242),
+				map[string]uint64{string(poolKeyHash28(0x11)): 5_000_000},
+				[]models.Pool{
+					poolWithRelays(poolKeyHash28(0x11), ipv4Relay("1.2.3.4", 3001)),
+				},
+				tc.kind,
+			)
+			result, err := forLedgerPeerSnapshotV23(
+				snapshot,
+				tc.kind,
+				ocommon.NewPoint(4242, tipHash),
+				2,
+			)
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantHex, encodePeerSnapshotReply(t, result))
+		})
+	}
+}
+
+// TestLedgerPeerSnapshotV23RejectsMalformedTipHash proves a non-genesis tip
+// without a 32-byte hash is an error rather than a snapshot the client cannot
+// decode.
+func TestLedgerPeerSnapshotV23RejectsMalformedTipHash(t *testing.T) {
+	t.Parallel()
+
+	_, err := forLedgerPeerSnapshotV23(
+		emptyLedgerPeerSnapshot(atSlot(7)),
+		olocalstatequery.LedgerPeerKindBig,
+		ocommon.NewPoint(7, []byte("short")),
+		2,
+	)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "tip hash")
+}
+
+// TestQueryLedgerPeerSnapshotV23RequiresNetworkMagic proves the version 23
+// form fails without a Shelley genesis to take the magic from, while the legacy
+// form (which carries no magic) does not need one.
+func TestQueryLedgerPeerSnapshotV23RequiresNetworkMagic(t *testing.T) {
+	t.Parallel()
+
+	ls := &LedgerState{db: newTestDB(t)}
+	_, err := ls.Query(
+		t.Context(),
+		peerSnapshotV23Query(olocalstatequery.LedgerPeerKindBig),
+		QueryPoint{},
+	)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "network magic")
+
+	legacy := &olocalstatequery.BlockQuery{
+		Query: &olocalstatequery.ShelleyQuery{
+			Query: &olocalstatequery.ShelleyGetLedgerPeerSnapshotQuery{
+				Type:     olocalstatequery.QueryTypeShelleyGetLedgerPeerSnapshot,
+				PeerKind: olocalstatequery.LedgerPeerKindBig,
+			},
+		},
+	}
+	result, err := ls.Query(t.Context(), legacy, QueryPoint{})
+	require.NoError(t, err)
+	// Legacy form: version 1 layout, [1, [[0], [_ ]]] at genesis.
+	assert.Equal(t, "82018281009fff", encodePeerSnapshotReply(t, result))
 }

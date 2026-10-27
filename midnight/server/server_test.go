@@ -371,7 +371,7 @@ func TestReflectionDisabledByDefault(t *testing.T) {
 	// valid outcome rather than a failure. Requiring NoError made the test
 	// fail whenever the rejection won, which the race detector's slower
 	// scheduling makes markedly more likely -- observed on the
-	// go-test (Linux, race) job while the same commit passed unraced.
+	// CI's race job while the same commit passed unraced.
 	if err := stream.Send(&reflectionpb.ServerReflectionRequest{
 		MessageRequest: &reflectionpb.ServerReflectionRequest_ListServices{
 			ListServices: "*",

@@ -167,7 +167,7 @@ type DingoPoolEpochData struct {
 	// MemberRewardPresent distinguishes "no reward_pool_output row yet at the
 	// stake epoch (K-1)" — reward calculation not finished for this
 	// pool/epoch — from "row exists with a genuinely empty/zero
-	// MemberRewardTotal". See ComparePoolEpoch: neither absence may be
+	// MemberRewardTotal". See CompareMemberRewards: neither absence may be
 	// silently treated as a comparison pass.
 	MemberRewardPresent bool
 	// MemberRewardTotal is reward_pool_output.member_reward_total (lovelace
@@ -195,16 +195,18 @@ type DingoPoolEpochData struct {
 	// SpendableMemberRewardTotal is the sum of reward_account_output.amount
 	// over the stake epoch's member rows the ledger actually credits —
 	// spendable and not guarded by CIP-0163 expiry, the same pair
-	// applyStakeRewards tests before crediting — which is the quantity Koios
-	// pool_history.member_rewards reports.
+	// applyStakeRewards tests before crediting. It is compared with the sum of
+	// Koios's per-account member reward rows for the pool (CompareMemberRewards),
+	// not with pool_history.member_rewards, which is a cached total that can
+	// include rewards the ledger forfeited.
 	//
 	// reward_pool_output.member_reward_total is deliberately not that
 	// quantity: Result.addReward (ledger/rewards/rewards.go) accumulates it
 	// from every member reward the calculation produced, spendable or not, so
 	// the two differ by exactly the pool's unspendable member rewards — a
 	// reward computed for a credential the ledger correctly never credits.
-	// Comparing it against Koios reported a value_mismatch for any pool
-	// holding one, against a ledger that was right.
+	// Comparing it against the credited rewards reported a value_mismatch for
+	// any pool holding one, against a ledger that was right.
 	//
 	// Subtracting reward_pool_output.unspendable from member_reward_total
 	// would not be equivalent: that column accumulates unspendable leader
@@ -963,9 +965,9 @@ func (d *DingoDB) GetPoolEpochDataMap(
 }
 
 // addSpendableMemberRewards fills SpendableMemberRewardTotal/Present from the
-// stake epoch's reward_account_output rows — the sum Koios
-// pool_history.member_rewards reports, which reward_pool_output's own
-// member_reward_total is not (see DingoPoolEpochData).
+// stake epoch's reward_account_output rows — the amount the ledger credits to
+// a pool's members, which reward_pool_output's own member_reward_total is not
+// (see DingoPoolEpochData). It is the Dingo side of CompareMemberRewards.
 //
 // The predicate matches what the ledger actually credits: applyStakeRewards
 // (ledger/reward_calculation.go) skips a reward that is not spendable and one

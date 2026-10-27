@@ -14,7 +14,10 @@
 
 package models
 
-import "math/big"
+import (
+	"errors"
+	"math/big"
+)
 
 // EpochStakeRow is one credential's stake in the distribution a pool held at
 // an epoch, as recorded by the epoch-boundary reward snapshot.
@@ -83,6 +86,24 @@ type AssetQuantity struct {
 	PolicyID []byte
 	Name     []byte
 }
+
+// AccountAggregateLimits bounds the work of one account aggregate read. A
+// zero field leaves that dimension unbounded.
+type AccountAggregateLimits struct {
+	// MaxUtxos is the most UTxO rows, spent or live, one lovelace sum may
+	// read.
+	MaxUtxos int
+	// MaxAssetRows is the most asset holdings the read may visit.
+	MaxAssetRows int
+	// MaxAssets is the most distinct assets the read may accumulate.
+	MaxAssets int
+}
+
+// ErrAccountAggregateLimit reports an account aggregate read stopped by its
+// AccountAggregateLimits before the whole aggregate was read.
+var ErrAccountAggregateLimit = errors.New(
+	"account aggregate read exceeds its limit",
+)
 
 // AccountAddressTotals are the lifetime totals across every address that
 // carries a stake credential.

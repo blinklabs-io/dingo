@@ -9,6 +9,7 @@ memory allocations; `make bench-leios-db` prints latency percentiles only.
 ```sh
 make bench
 make bench-leios-db
+make bench-leios-db-cached
 make bench-mempool
 make bench-mempool-normal
 make bench-mempool-degenerate
@@ -24,7 +25,7 @@ go test -run='^$' -bench='^BenchmarkName$' -benchmem -count=5 ./ledger
 
 `make bench-leios-db` measures the latency of Dingo's LeiosDB storage steps,
 mirroring the
-[upstream LeiosDB latency benchmark](https://github.com/IntersectMBO/ouroboros-consensus/pull/2422).
+[upstream LeiosDB latency benchmark](https://github.com/IntersectMBO/ouroboros-consensus/pull/2424).
 It tracks 100 measured EBs, one at a time, over a database of 1000 EBs of 2857
 transactions of 350 bytes each. Each EB is fetched from 20 upstream peers,
 read once for voting, read by 100 downstream peers, and read once more for
@@ -33,6 +34,26 @@ step. `-burst` adds background bursts of 10 EBs every 5 seconds that are
 fetched, voted on, and served alongside the measured EBs, and `-h` lists the
 flags that change the workload. Set `GOMAXPROCS` and `TMPDIR` to compare
 against the reference's `-N` setting and storage device.
+
+`make bench-leios-db-cached` (or `-cached-reads` on the command) shares the first
+persisted manifest and transaction-closure read for each EB across its readers. Transaction requests
+copy only their selected transactions out of the shared closure, using the
+same packed response-copy routine as the Leios-fetch responder, and vote and
+apply reads copy the full closure. The first load and concurrent waiters remain
+timed. Measured EB caches are released after apply; background caches live with
+their in-flight work. This models good read-through-cache conditions without
+using the generated input as the read result. It does not exercise the network
+protocol's cache admission, TTL, eviction or wire encoding. Report it separately
+from the default cache-bypassing database workload, including with `-burst`.
+Both Make targets forward `LEIOS_DB_BENCH_ARGS`, for example
+`make bench-leios-db-cached LEIOS_DB_BENCH_ARGS=-burst`.
+
+Use `-cpuprofile=<file>` for a diagnostic run to profile the workload after
+database prepopulation. Keep profile runs separate from comparison timings.
+Use `-heapprofile=<file>` to sample runtime memory through prepopulation and
+the workload and write a final heap profile without forcing a collection.
+Its runtime memory counters exclude Badger's mmap-backed files and other
+non-Go allocations; compare them with process RSS in a diagnostic run.
 
 Dingo persists Leios EBs in its Badger blob store, whereas the reference uses
 SQLite, so the steps map as follows:
@@ -79,6 +100,7 @@ measurements, not as current performance guarantees.
 - [Ledger and database results](benchmarks/benchmark_results.md)
 - [Targeted comparison](benchmarks/benchmark_results_targeted.md)
 - [Block producer sizing](benchmarks/benchmark_results_bp_pi.md)
+- [Mithril Core sync](benchmarks/benchmark_results_mithril_core.md)
 - [Mithril API backfill](benchmarks/benchmark_results_api_backfill.md)
 
 `./generate_benchmarks.sh --write` updates the ledger and database report.

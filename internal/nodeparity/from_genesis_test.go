@@ -16,23 +16,31 @@ package nodeparity
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"maps"
+	"math"
 	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/blinklabs-io/dingo/internal/koiosparity"
 	"github.com/blinklabs-io/dingo/internal/test/fixtures"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/mary"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/blinklabs-io/gouroboros/protocol"
 	"github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -299,6 +307,276 @@ func TestRunFromGenesis_EpochNoFailureDoesNotSkipEpoch(t *testing.T) {
 	}
 }
 
+// TestRunFromGenesis_DoesNotAcquireChainOrigin proves a from-genesis run does
+// not depend on acquiring the chain origin. Every session opens with a
+// RollBackward to origin, and Dingo refuses to acquire that point, so asking
+// it which epoch the origin is in failed the session before any block was
+// checked and the reconnect loop repeated that failure indefinitely.
+func TestRunFromGenesis_DoesNotAcquireChainOrigin(t *testing.T) {
+	const magic = 42
+	const blockCount = 3
+
+	server := newGenesisFakeServer(t, blockCount)
+	server.refuseOriginAcquire = true
+	server.initialRollbackToOrigin = true
+	server.epochBySlot = map[uint64]int{
+		server.chain.Points[0].Slot: 0,
+		server.chain.Points[1].Slot: 1,
+		server.chain.Points[2].Slot: 2,
+	}
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	server.serve(t, listener, magic)
+
+	koiosSrv := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(koiosSrv.Close)
+	koios, err := NewKoiosClient("preview", "", koiosSrv.URL, true, true)
+	require.NoError(t, err)
+
+	logs := newLogCollector()
+	results := make(chan EpochResult, 8)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- RunFromGenesis(
+			ctx, listener.Addr().String(), "preview", magic, koios, nil,
+			func(r EpochResult) { results <- r },
+			logs.logf, nil,
+		)
+	}()
+
+	require.False(
+		t,
+		logs.waitFor("point too old", 2*time.Second),
+		"the session ended asking Dingo to acquire the chain origin; logs: %v",
+		logs.all(),
+	)
+
+	server.allowStep(t)
+	server.allowStep(t)
+	server.allowStep(t)
+
+	select {
+	case r := <-results:
+		assert.Equal(t, uint64(1), r.Epoch)
+	case <-time.After(20 * time.Second):
+		t.Fatalf(
+			"no epoch was reported; the run never got past the origin; logs: %v",
+			logs.all(),
+		)
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		assert.True(t, err == nil || errors.Is(err, context.Canceled))
+	case <-time.After(10 * time.Second):
+		t.Fatal("RunFromGenesis did not exit after ctx cancellation")
+	}
+}
+
+// TestRunFromGenesis_StartsValidatingAtFirstAnswerablePoint covers a chain
+// whose earliest points Dingo cannot answer for, as preprod's Byron epochs
+// are: it has no protocol parameters or stake there and Koios holds none
+// either. Those blocks are skipped, and validation starts at the first point
+// Dingo answers for rather than the run failing on its first block.
+func TestRunFromGenesis_StartsValidatingAtFirstAnswerablePoint(t *testing.T) {
+	const magic = 42
+	const blockCount = 5
+
+	server := newGenesisFakeServer(t, blockCount)
+	server.initialRollbackToOrigin = true
+	server.epochBySlot = map[uint64]int{
+		server.chain.Points[0].Slot: 0,
+		server.chain.Points[1].Slot: 1,
+		server.chain.Points[2].Slot: 2,
+		server.chain.Points[3].Slot: 3,
+		server.chain.Points[4].Slot: 4,
+	}
+	firstAnswerable := server.chain.Points[3].Slot
+	server.refuseAcquireFn = func(p pcommon.Point) bool {
+		return p.Slot < firstAnswerable
+	}
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	server.serve(t, listener, magic)
+
+	koiosSrv := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(koiosSrv.Close)
+	koios, err := NewKoiosClient("preview", "", koiosSrv.URL, true, true)
+	require.NoError(t, err)
+
+	logs := newLogCollector()
+	results := make(chan EpochResult, 8)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- RunFromGenesis(
+			ctx, listener.Addr().String(), "preview", magic, koios, nil,
+			func(r EpochResult) { results <- r },
+			logs.logf, nil,
+		)
+	}()
+
+	for range blockCount {
+		server.allowStep(t)
+	}
+
+	recv := func() EpochResult {
+		t.Helper()
+		select {
+		case r := <-results:
+			return r
+		case <-time.After(20 * time.Second):
+			t.Fatalf("timed out waiting for an epoch result; logs: %v", logs.all())
+			return EpochResult{}
+		}
+	}
+	assert.Equal(t, uint64(3), recv().Epoch,
+		"validation must start at the first point Dingo answers for")
+	assert.Equal(t, uint64(4), recv().Epoch)
+	assert.True(t, logs.waitFor("validation starts at slot", 5*time.Second),
+		"the skipped epochs must be reported; logs: %v", logs.all())
+	assert.False(t, logs.waitFor("chainsync session ended", 500*time.Millisecond),
+		"skipping must not end the session; logs: %v", logs.all())
+
+	cancel()
+	select {
+	case err := <-done:
+		assert.True(t, err == nil || errors.Is(err, context.Canceled))
+	case <-time.After(10 * time.Second):
+		t.Fatal("RunFromGenesis did not exit after ctx cancellation")
+	}
+}
+
+// TestRunFromGenesis_RefusalAfterValidationStartsStillFails proves skipping
+// is limited to the start of the run. Once Dingo has answered for a point, a
+// later refusal is a real fault -- a retention floor overtaking the walk, for
+// instance -- and must end the session, not be skipped silently.
+func TestRunFromGenesis_RefusalAfterValidationStartsStillFails(t *testing.T) {
+	const magic = 42
+	const blockCount = 3
+
+	server := newGenesisFakeServer(t, blockCount)
+	server.epochBySlot = map[uint64]int{
+		server.chain.Points[0].Slot: 1,
+		server.chain.Points[1].Slot: 2,
+		server.chain.Points[2].Slot: 3,
+	}
+	refused := server.chain.Points[2].Slot
+	server.refuseAcquireFn = func(p pcommon.Point) bool {
+		return p.Slot == refused
+	}
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	server.serve(t, listener, magic)
+
+	koiosSrv := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(koiosSrv.Close)
+	koios, err := NewKoiosClient("preview", "", koiosSrv.URL, true, true)
+	require.NoError(t, err)
+
+	logs := newLogCollector()
+	results := make(chan EpochResult, 8)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- RunFromGenesis(
+			ctx, listener.Addr().String(), "preview", magic, koios, nil,
+			func(r EpochResult) { results <- r },
+			logs.logf, nil,
+		)
+	}()
+
+	for range blockCount {
+		server.allowStep(t)
+	}
+	select {
+	case r := <-results:
+		assert.Equal(t, uint64(2), r.Epoch)
+	case <-time.After(20 * time.Second):
+		t.Fatalf("no epoch was reported; logs: %v", logs.all())
+	}
+	require.True(
+		t,
+		logs.waitFor("chainsync session ended", 20*time.Second),
+		"a refusal after validation started was skipped; logs: %v",
+		logs.all(),
+	)
+
+	cancel()
+	select {
+	case err := <-done:
+		assert.True(t, err == nil || errors.Is(err, context.Canceled))
+	case <-time.After(10 * time.Second):
+		t.Fatal("RunFromGenesis did not exit after ctx cancellation")
+	}
+}
+
+// TestRunFromGenesis_RefusalPastEraHistoryAfterValidationStartsFails covers
+// a run whose epochs the era history resolved until a slot past its bounded
+// end, where the refetch fails and the per-point fallback is refused as too
+// old. Validation had already started, so the refusal must end the session
+// rather than consume the block unchecked and shift its epoch's checks to a
+// later block.
+func TestRunFromGenesis_RefusalPastEraHistoryAfterValidationStartsFails(
+	t *testing.T,
+) {
+	t.Parallel()
+	const blockCount = 6
+	// Slots 100..200 step 20. The cached history covers slots 100-140 as
+	// epoch 2; 160 and 180 are epoch 3 and 200 epoch 4, answered per point.
+	server := newGenesisFakeServer(t, blockCount)
+	server.ungated = true
+	server.eraHistory = []eraSpan{
+		{startSlot: 0, startEpoch: 0, endSlot: 150, epochSize: 50},
+	}
+	server.eraHistoryAnswers = 1
+	refused := server.chain.Points[3].Slot
+	server.epochBySlot = map[uint64]int{
+		refused:                     3,
+		server.chain.Points[4].Slot: 3,
+		server.chain.Points[5].Slot: 4,
+	}
+	var refusals atomic.Int32
+	server.refuseAcquireFn = func(p pcommon.Point) bool {
+		return p.Slot == refused && refusals.Add(1) == 1
+	}
+	run := startGenesisRun(t, server)
+
+	// The first block's epoch is the baseline's, so 3 is the first reported.
+	assert.Equal(t, uint64(3), run.recv(t).Epoch)
+	assert.Equal(t, uint64(4), run.recv(t).Epoch)
+
+	assert.Greater(t, refusals.Load(), int32(1),
+		"the refused point must be acquired again after the session ends")
+	server.mu.Lock()
+	sessions := server.sessions
+	server.mu.Unlock()
+	assert.GreaterOrEqual(t, sessions, 2)
+	assert.True(
+		t,
+		run.logs.waitFor("chainsync session ended", time.Second),
+		"logs: %v", run.logs.all(),
+	)
+	for _, line := range run.logs.all() {
+		assert.NotContains(t, line, "validation starts at slot",
+			"the refusal was skipped as if validation had not started")
+	}
+}
+
 // TestIsRetryableDingoConnErr pins the exact classification
 // runProtocolParamsAndStake's retry decision depends on: a connection-death
 // shaped error (protocol.ErrProtocolShuttingDown, bare or wrapped, or a raw
@@ -530,7 +808,7 @@ func TestResolveStartPoint(t *testing.T) {
 
 // TestUTxOVerdict pins the fix for a Koios outage during tx_info
 // reconstruction being reported as a false "utxo set match" instead of
-// "not run": utxoTaintedThisEpoch was closure state inside RunFromGenesis's
+// "not run": the taint flag was closure state inside RunFromGenesis's
 // 500+ line function literal, with nothing asserting on it directly.
 // utxoVerdict is that decision, lifted out so it is directly testable:
 // reverting its tainted case in place (returning utxoVerdictCompare
@@ -539,28 +817,29 @@ func TestUTxOVerdict(t *testing.T) {
 	someRefs := UTxOSet{"deadbeef#0": "addr|100|||"}
 
 	t.Run("tainted always wins, even with refs available", func(t *testing.T) {
-		mode, err := utxoVerdict(true, someRefs)
+		mode, err := utxoVerdict(taintCauseTxInfo, someRefs)
 		assert.Equal(t, utxoVerdictTainted, mode)
 		assert.ErrorIs(t, err, errUTxOTainted)
+		assert.ErrorContains(t, err, taintCauseTxInfo)
 	})
 
 	t.Run("refs available and not tainted: compare", func(t *testing.T) {
-		mode, err := utxoVerdict(false, someRefs)
+		mode, err := utxoVerdict("", someRefs)
 		assert.Equal(t, utxoVerdictCompare, mode)
 		assert.NoError(t, err)
 	})
 
 	t.Run("no refs, not tainted: no baseline", func(t *testing.T) {
-		mode, err := utxoVerdict(false, nil)
+		mode, err := utxoVerdict("", nil)
 		assert.Equal(t, utxoVerdictNoBaseline, mode)
 		assert.NoError(t, err)
 	})
 }
 
 // TestApplyTxInfoResults pins flushPendingTxInfos's actual failure
-// decision -- the one that sets utxoTaintedThisEpoch -- not just
+// decision -- the one that sets utxoTaintCause -- not just
 // utxoVerdict, which only reads that flag: TestUTxOVerdict alone doesn't
-// prove a tx_info fetch failure is what makes utxoTaintedThisEpoch true in
+// prove a tx_info fetch failure is what makes utxoTaintCause non-empty in
 // the first place. Reverting applyTxInfoResults to always return false (as
 // if every chunk always succeeded) would make the "one chunk fails" subtest
 // below fail.
@@ -729,6 +1008,18 @@ type genesisFakeServer struct {
 	// never fails, leaving every other test's behavior unchanged.
 	failUtxoWholeCount int
 	utxoWholeCalls     int
+	// failUtxoWholeSkip lets that many GetUTxOWhole calls succeed before
+	// the failUtxoWholeCount failures begin, so a failure can land on a
+	// comparison rather than the genesis capture.
+	failUtxoWholeSkip int
+
+	// failAcquiresAfterStake arms, at the next ShelleyPoolDistr2Query, that
+	// many failures of the specific-point Acquires that follow it: the UTxO
+	// comparison's Acquire, which runs right after the stake check. The
+	// Acquire callback returns a generic error, which tears the connection
+	// down as Dingo's did when its snapshot open hit its deadline.
+	failAcquiresAfterStake int
+	acquireFailuresArmed   int
 
 	// failEpochNoAtSlot, when non-nil, makes ShelleyEpochNoQuery fail once
 	// for each slot in it whose count is still above zero, decrementing as
@@ -738,6 +1029,164 @@ type genesisFakeServer struct {
 	// which is the whole point: see
 	// TestRunFromGenesis_EpochNoFailureDoesNotHangSession.
 	failEpochNoAtSlot map[uint64]int
+
+	// refuseOriginAcquire makes an Acquire of the chain origin (slot 0, no
+	// hash) fail with ErrAcquireFailurePointTooOld, as Dingo does: its query
+	// model reads slot 0 as "live", so it refuses an origin point rather than
+	// answer the live state for it.
+	refuseOriginAcquire bool
+
+	// initialRollbackToOrigin makes a session that intersected at the origin
+	// open with a RollBackward to the origin, as Dingo's ChainSync server
+	// does, instead of to the first block. Off by default so the other tests'
+	// epoch bookkeeping, which counts the first block as that rollback's
+	// point, is unchanged.
+	initialRollbackToOrigin bool
+
+	// refuseAcquireFn, when set, makes an Acquire of any point it returns
+	// true for fail with ErrAcquireFailurePointTooOld, as Dingo does for a
+	// point it cannot answer for.
+	refuseAcquireFn func(pcommon.Point) bool
+
+	// tooOldAfterFirstAcquire makes the Acquires of a slot after its first
+	// one fail with ErrAcquireFailurePointTooOld, that many times, as Dingo
+	// does when it cannot open a read snapshot within its own wait. The
+	// first Acquire is the epoch lookup, so the refusals land on the epoch
+	// checks that follow it.
+	tooOldAfterFirstAcquire map[uint64]int
+
+	// utxoWhole, when non-nil, is the answer to ShelleyUtxoWholeQuery in
+	// place of the empty set.
+	utxoWhole map[localstatequery.UtxoId]ledger.BabbageTransactionOutput
+
+	// eraHistory, when non-nil, is the answer to HardForkEraHistoryQuery.
+	// Left nil, that query fails like any other unexpected one, so
+	// RunFromGenesis resolves every epoch through its per-point fallback.
+	eraHistory []eraSpan
+	// eraHistoryAnswers, when nonzero, answers only that many
+	// HardForkEraHistoryQuery calls; later ones fail, as when Dingo cannot
+	// serve a refetch.
+	eraHistoryAnswers  int
+	eraHistoryAnswered int
+
+	// acquiredSlots records the slot of every specific-point Acquire
+	// attempt, refused or not; volatileTipAcquires and epochNoQueries count
+	// tip Acquires and ShelleyEpochNoQuery calls.
+	acquiredSlots       []uint64
+	volatileTipAcquires int
+	epochNoQueries      int
+
+	// ungated makes requestNext answer every RollForward at once instead of
+	// waiting for allowStep.
+	ungated bool
+	// conns holds every accepted connection by its client address, and
+	// chainSyncAddr the client address of the latest chainsync session.
+	conns         map[string]net.Conn
+	chainSyncAddr string
+	// closeChainSyncAtSlot, when set, makes the ShelleyEpochNoQuery for a
+	// point Acquired at this slot close the chainsync session's connection
+	// from the server side, once, before answering.
+	//
+	// The query runs inside the client's roll-forward callback. gouroboros'
+	// chainsync client sends RequestNext in batches of PipelineLimit and
+	// sends no more until it has handled every reply, so during the callback
+	// for the last reply of a batch it has nothing outstanding and is idle.
+	// gouroboros reads a peer close in that state as graceful: it closes
+	// ErrorChan without sending an error. A Dingo killed while node-parity
+	// is busy in a callback leaves exactly that. Closing at any other block
+	// leaves requests outstanding, and the close arrives as an error.
+	closeChainSyncAtSlot *uint64
+	// hangEpochNoAtSlot, when set, makes the ShelleyEpochNoQuery for a point
+	// Acquired at this slot go unanswered, once, until hangRelease is
+	// closed. It runs after closeChainSyncAtSlot, so the two together close
+	// the session while its callback waits on the query.
+	hangEpochNoAtSlot *uint64
+	hangRelease       chan struct{}
+	// stallUtxoWholeAtSlot and stallPoolDistrAtSlot, when set, make the
+	// first ShelleyUtxoWholeQuery or ShelleyPoolDistr2Query for a point
+	// Acquired at that slot close the chainsync session's connection and
+	// then go unanswered until hangRelease is closed: Dingo dropping the
+	// session while an epoch check waits on its answer.
+	stallUtxoWholeAtSlot *uint64
+	stallPoolDistrAtSlot *uint64
+}
+
+// takeQueryStall implements stallUtxoWholeAtSlot and stallPoolDistrAtSlot
+// for the one at names, returning the channel to wait on, or nil when this
+// query is answered.
+func (s *genesisFakeServer) takeQueryStall(at **uint64) <-chan struct{} {
+	s.mu.Lock()
+	if *at == nil || **at != s.lastAcquiredSlot {
+		s.mu.Unlock()
+		return nil
+	}
+	*at = nil
+	conn := s.conns[s.chainSyncAddr]
+	release := s.hangRelease
+	s.mu.Unlock()
+	if conn != nil {
+		_ = conn.Close()
+	}
+	return release
+}
+
+// takeEpochNoHang implements hangEpochNoAtSlot, returning the channel to
+// wait on, or nil when this query is answered.
+func (s *genesisFakeServer) takeEpochNoHang() <-chan struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.hangEpochNoAtSlot == nil ||
+		*s.hangEpochNoAtSlot != s.lastAcquiredSlot {
+		return nil
+	}
+	s.hangEpochNoAtSlot = nil
+	return s.hangRelease
+}
+
+// closeChainSyncIfArmed implements closeChainSyncAtSlot.
+func (s *genesisFakeServer) closeChainSyncIfArmed() {
+	s.mu.Lock()
+	if s.closeChainSyncAtSlot == nil ||
+		*s.closeChainSyncAtSlot != s.lastAcquiredSlot {
+		s.mu.Unlock()
+		return
+	}
+	s.closeChainSyncAtSlot = nil
+	conn := s.conns[s.chainSyncAddr]
+	s.mu.Unlock()
+	if conn != nil {
+		_ = conn.Close()
+	}
+}
+
+// queryCounts snapshots this fake's Acquire and GetEpochNo bookkeeping.
+func (s *genesisFakeServer) queryCounts() (
+	acquiredSlots []uint64, volatileTipAcquires, epochNoQueries int,
+) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]uint64(nil), s.acquiredSlots...),
+		s.volatileTipAcquires, s.epochNoQueries
+}
+
+// eraHistoryAnswer encodes spans the way Dingo answers
+// HardForkEraHistoryQuery.
+func eraHistoryAnswer(spans []eraSpan) any {
+	ret := make(cbor.IndefLengthList, 0, len(spans))
+	for _, sp := range spans {
+		var end any
+		if !sp.unbounded {
+			endEpoch := sp.startEpoch +
+				(sp.endSlot-sp.startSlot)/sp.epochSize
+			end = []any{big.NewInt(0), sp.endSlot, endEpoch}
+		}
+		ret = append(ret, []any{
+			[]any{big.NewInt(0), sp.startSlot, sp.startEpoch},
+			end,
+			[]any{sp.epochSize, uint(1000), []any{0, 0, []any{0}}, 0},
+		})
+	}
+	return ret
 }
 
 // failEpochNoOnce arranges for the next ShelleyEpochNoQuery Acquired at slot
@@ -760,6 +1209,21 @@ func (s *genesisFakeServer) takeEpochNoFailure() bool {
 		return false
 	}
 	s.failEpochNoAtSlot[s.lastAcquiredSlot]--
+	return true
+}
+
+// takeTooOldAfterFirst reports whether this Acquire of slot is one of the
+// refusals tooOldAfterFirstAcquire armed. acquiredSlots already holds it.
+func (s *genesisFakeServer) takeTooOldAfterFirst(slot uint64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.tooOldAfterFirstAcquire[slot] <= 0 {
+		return false
+	}
+	if slices.Index(s.acquiredSlots, slot) == len(s.acquiredSlots)-1 {
+		return false
+	}
+	s.tooOldAfterFirstAcquire[slot]--
 	return true
 }
 
@@ -844,13 +1308,16 @@ func (s *genesisFakeServer) allowStep(t *testing.T) {
 // findIntersect resumes at an offered chain point or origin. Empty tip
 // probes have no possible intersection and do not start a sync session.
 func (s *genesisFakeServer) findIntersect(
-	_ chainsync.CallbackContext, points []pcommon.Point,
+	ctx chainsync.CallbackContext, points []pcommon.Point,
 ) (pcommon.Point, chainsync.Tip, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if len(points) == 0 {
 		return pcommon.Point{}, s.chain.Tip(),
 			chainsync.ErrIntersectNotFound
+	}
+	if ctx.ConnectionId.RemoteAddr != nil {
+		s.chainSyncAddr = ctx.ConnectionId.RemoteAddr.String()
 	}
 	// FindIntersect starts a session, and a real server opens every session
 	// with a RollBackward (NeedsInitialRollback), not just the first one.
@@ -888,6 +1355,11 @@ func (s *genesisFakeServer) requestNext(ctx chainsync.CallbackContext) error {
 	if !s.rolledBack {
 		s.rolledBack = true
 		defer s.mu.Unlock()
+		if s.initialRollbackToOrigin && s.cursor == 0 {
+			return ctx.Server.RollBackward(
+				csmock.OriginPoint(), s.chain.Tip(),
+			)
+		}
 		return ctx.Server.RollBackward(
 			s.chain.Points[max(s.cursor-1, 0)], s.chain.Tip(),
 		)
@@ -904,13 +1376,16 @@ func (s *genesisFakeServer) requestNext(ctx chainsync.CallbackContext) error {
 	}
 	step := s.step
 	gone := s.sessionGone
+	ungated := s.ungated
 	s.mu.Unlock()
-	select {
-	case <-step:
-	case <-gone:
-		// A newer session has started; stop feeding this one rather than
-		// consuming a step meant for its successor.
-		return errors.New("chainsync session superseded")
+	if !ungated {
+		select {
+		case <-step:
+		case <-gone:
+			// A newer session has started; stop feeding this one rather
+			// than consuming a step meant for its successor.
+			return errors.New("chainsync session superseded")
+		}
 	}
 
 	s.mu.Lock()
@@ -947,8 +1422,34 @@ func (s *genesisFakeServer) lsqConfig() localstatequery.Config {
 				target localstatequery.AcquireTarget,
 				_ bool,
 			) error {
+				if _, ok := target.(localstatequery.AcquireVolatileTip); ok {
+					s.mu.Lock()
+					s.volatileTipAcquires++
+					s.mu.Unlock()
+				}
 				if sp, ok := target.(localstatequery.AcquireSpecificPoint); ok {
 					s.mu.Lock()
+					s.acquiredSlots = append(s.acquiredSlots, sp.Point.Slot)
+					s.mu.Unlock()
+					if s.refuseOriginAcquire &&
+						sp.Point.Slot == 0 && len(sp.Point.Hash) == 0 {
+						return localstatequery.ErrAcquireFailurePointTooOld
+					}
+					if s.refuseAcquireFn != nil && s.refuseAcquireFn(sp.Point) {
+						return localstatequery.ErrAcquireFailurePointTooOld
+					}
+					if s.takeTooOldAfterFirst(sp.Point.Slot) {
+						return localstatequery.ErrAcquireFailurePointTooOld
+					}
+					s.mu.Lock()
+					if s.acquireFailuresArmed > 0 {
+						s.acquireFailuresArmed--
+						s.mu.Unlock()
+						return errors.New(
+							"simulated open ledger snapshot: " +
+								"context deadline exceeded",
+						)
+					}
 					s.lastAcquiredSlot = sp.Point.Slot
 					s.mu.Unlock()
 				}
@@ -969,6 +1470,21 @@ func (s *genesisFakeServer) lsqConfig() localstatequery.Config {
 					switch inner.Query.(type) {
 					case *localstatequery.HardForkCurrentEraQuery:
 						return int(ledger.EraIdConway), nil
+					case *localstatequery.HardForkEraHistoryQuery:
+						s.mu.Lock()
+						spans := s.eraHistory
+						if s.eraHistoryAnswers > 0 &&
+							s.eraHistoryAnswered >= s.eraHistoryAnswers {
+							spans = nil
+						}
+						s.eraHistoryAnswered++
+						s.mu.Unlock()
+						if spans == nil {
+							return nil, errors.New(
+								"era history not configured",
+							)
+						}
+						return eraHistoryAnswer(spans), nil
 					default:
 						return nil, fmt.Errorf("unexpected hardfork query %T", inner.Query)
 					}
@@ -977,15 +1493,36 @@ func (s *genesisFakeServer) lsqConfig() localstatequery.Config {
 					case *localstatequery.ShelleyCurrentProtocolParamsQuery:
 						return []any{pp}, nil
 					case *localstatequery.ShelleyPoolDistr2Query:
+						if release := s.takeQueryStall(
+							&s.stallPoolDistrAtSlot,
+						); release != nil {
+							<-release
+							return nil, errors.New(
+								"simulated unanswered stake distribution query",
+							)
+						}
+						s.mu.Lock()
+						s.acquireFailuresArmed = s.failAcquiresAfterStake
+						s.failAcquiresAfterStake = 0
+						s.mu.Unlock()
 						return localstatequery.StakeDistribution2Result{
 							Distribution: localstatequery.PoolDistr2Result{
 								Pools: map[ledger.PoolId]localstatequery.PoolDistr2IndividualStake{},
 							},
 						}, nil
 					case *localstatequery.ShelleyUtxoWholeQuery:
+						if release := s.takeQueryStall(
+							&s.stallUtxoWholeAtSlot,
+						); release != nil {
+							<-release
+							return nil, errors.New(
+								"simulated unanswered UTxO query",
+							)
+						}
 						s.mu.Lock()
 						s.utxoWholeCalls++
-						fail := s.utxoWholeCalls <= s.failUtxoWholeCount
+						fail := s.utxoWholeCalls > s.failUtxoWholeSkip &&
+							s.utxoWholeCalls <= s.failUtxoWholeSkip+s.failUtxoWholeCount
 						s.mu.Unlock()
 						if fail {
 							return nil, errors.New(
@@ -993,10 +1530,24 @@ func (s *genesisFakeServer) lsqConfig() localstatequery.Config {
 									"can't assign requested address",
 							)
 						}
-						return localstatequery.UTxOsResult{
-							Results: map[localstatequery.UtxoId]ledger.BabbageTransactionOutput{},
-						}, nil
+						s.mu.Lock()
+						whole := s.utxoWhole
+						s.mu.Unlock()
+						if whole == nil {
+							whole = map[localstatequery.UtxoId]ledger.BabbageTransactionOutput{}
+						}
+						return localstatequery.UTxOsResult{Results: whole}, nil
 					case *localstatequery.ShelleyEpochNoQuery:
+						s.mu.Lock()
+						s.epochNoQueries++
+						s.mu.Unlock()
+						s.closeChainSyncIfArmed()
+						if release := s.takeEpochNoHang(); release != nil {
+							<-release
+							return nil, errors.New(
+								"simulated unanswered epoch-number query",
+							)
+						}
 						if s.takeEpochNoFailure() {
 							return nil, errors.New(
 								"simulated epoch-number query failure",
@@ -1030,6 +1581,12 @@ func (s *genesisFakeServer) serve(t *testing.T, listener net.Listener, magic uin
 			if err != nil {
 				return
 			}
+			s.mu.Lock()
+			if s.conns == nil {
+				s.conns = make(map[string]net.Conn)
+			}
+			s.conns[conn.RemoteAddr().String()] = conn
+			s.mu.Unlock()
 			go func() {
 				oconn, err := ouroboros.New(
 					ouroboros.WithConnection(conn),
@@ -1055,7 +1612,7 @@ func (s *genesisFakeServer) serve(t *testing.T, listener net.Listener, magic uin
 
 // TestRunFromGenesis_UTxOTaintLifecycle drives RunFromGenesis through a
 // genuine RollBackward and three epoch boundaries, proving
-// utxoTaintedThisEpoch's real lifecycle inside RunFromGenesis's own
+// utxoTaintCause's real lifecycle inside RunFromGenesis's own
 // closures -- not just utxoVerdict/applyTxInfoResults in isolation (see
 // this file's own doc comment).
 //
@@ -1065,16 +1622,19 @@ func (s *genesisFakeServer) serve(t *testing.T, listener net.Listener, magic uin
 // epoch that rollback already established and never itself starts a new
 // epoch boundary -- it only captures the genesis UTxO baseline. Block 1 is
 // this test's first real reported epoch (clean). The deliberate rollback
-// then fires once block 1 has been delivered (rollbackAfterCursor),
-// re-baselining utxoRefs from Dingo's own (fake) current answer -- which
+// to block 0 then fires once block 1 has been delivered
+// (rollbackAfterCursor), re-baselining utxoRefs from Dingo's own (fake) current answer -- which
 // the fix must taint, or block 2's report would trivially compare the
 // re-baselined set against itself and falsely read "clean". Block 3's
 // report must NOT still be tainted, proving the post-report reset ran too,
 // not just that the rollback's own assignment did.
 //
-// Reverting the rollback callback's utxoTaintedThisEpoch = true assignment
-// in from_genesis.go, or its post-report utxoTaintedThisEpoch = false
-// reset, in place leaves TestUTxOVerdict and TestApplyTxInfoResults green:
+// The rollback targets block 0, not block 1: a rollback to the block last
+// processed invalidates nothing and must not re-baseline (see
+// TestRunFromGenesis_ResumeKeepsUTxOComparison).
+//
+// Reverting the rollback callback's taint call in from_genesis.go, or its
+// post-report utxoTaintCause = "" reset, in place leaves TestUTxOVerdict and TestApplyTxInfoResults green:
 // neither drives RunFromGenesis's real callbacks at all.
 func TestRunFromGenesis_UTxOTaintLifecycle(t *testing.T) {
 	const magic = 42
@@ -1082,7 +1642,7 @@ func TestRunFromGenesis_UTxOTaintLifecycle(t *testing.T) {
 
 	server := newGenesisFakeServer(t, blockCount)
 	server.rollbackAfterCursor = 1
-	rollbackTo := server.chain.Points[1]
+	rollbackTo := server.chain.Points[0]
 	server.rollbackTo = &rollbackTo
 	server.epochBySlot = map[uint64]int{
 		server.chain.Points[0].Slot: 1,
@@ -1154,6 +1714,9 @@ func TestRunFromGenesis_UTxOTaintLifecycle(t *testing.T) {
 	assert.True(t, report2.UTxOAttempted)
 	require.Error(t, report2.UTxOErr)
 	assert.ErrorIs(t, report2.UTxOErr, errUTxOTainted)
+	assert.ErrorContains(
+		t, report2.UTxOErr, taintCauseRollback(rollbackTo.Slot),
+	)
 
 	server.allowStep(t)
 
@@ -1174,11 +1737,11 @@ func TestRunFromGenesis_UTxOTaintLifecycle(t *testing.T) {
 
 // TestRunFromGenesis_TxInfoChunkFailureTaintsEpoch drives RunFromGenesis
 // through a genuine Koios tx_info fetch failure -- no rollback at all --
-// proving flushPendingTxInfos's own "if failed { utxoTaintedThisEpoch =
-// true ... }" branch (from_genesis.go) actually taints the epoch it
-// belongs to. TestRunFromGenesis_UTxOTaintLifecycle above only exercises
-// the rollback callback's separate utxoTaintedThisEpoch = true assignment;
-// its own chain (newGenesisFakeServer's empty-body blocks) never gives
+// proving flushPendingTxInfos's own "if failed { taint(...) }" branch
+// (from_genesis.go) actually taints the epoch it belongs to, and that the
+// verdict names the tx_info failure as the cause.
+// TestRunFromGenesis_UTxOTaintLifecycle above only exercises the rollback
+// callback's separate taint call; its own chain (newGenesisFakeServer's empty-body blocks) never gives
 // flushPendingTxInfos a single transaction hash to fetch, so that taint
 // source's own wiring goes completely unexercised there. Reverting this
 // assignment to a discarded no-op (`_ = true`) in place leaves
@@ -1256,6 +1819,11 @@ func TestRunFromGenesis_TxInfoChunkFailureTaintsEpoch(t *testing.T) {
 	assert.True(t, report.UTxOAttempted)
 	require.Error(t, report.UTxOErr)
 	assert.ErrorIs(t, report.UTxOErr, errUTxOTainted)
+	assert.Equal(
+		t,
+		taintCauseTxInfo+": "+errUTxOTainted.Error(),
+		report.UTxOErr.Error(),
+	)
 
 	cancel()
 	select {
@@ -1358,6 +1926,7 @@ func TestRunFromGenesis_UTxOBaselineRetryRecovers(t *testing.T) {
 	assert.True(t, report1.UTxOAttempted)
 	require.Error(t, report1.UTxOErr)
 	assert.ErrorIs(t, report1.UTxOErr, errUTxOTainted)
+	assert.ErrorContains(t, report1.UTxOErr, taintCauseBaseline)
 
 	// Block 2: utxoRefs is now non-nil and untainted -- a real comparison
 	// (call #3) must run and come back clean, proving checking actually
@@ -1380,4 +1949,1061 @@ func TestRunFromGenesis_UTxOBaselineRetryRecovers(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("RunFromGenesis did not exit after ctx cancellation")
 	}
+}
+
+// TestRunFromGenesis_UTxOComparisonRetriesConnectionFailure proves the UTxO
+// comparison survives its Dingo connection dying, as the protocol-parameter
+// and stake checks already do. Live, Dingo's Acquire missed its deadline at
+// an epoch boundary, the client gave up in Acquiring, and the epoch was
+// reported as "utxo check did not run" with "acquire: protocol is shutting
+// down".
+//
+// Epochs 1-4 on blocks 0-3. Block 0 captures the baseline (GetUTxOWhole call
+// 1). At block 1 the comparison's GetUTxOWhole (call 2) kills its
+// connection; the retry (call 3) must report a clean comparison. At block 2
+// the comparison's Acquire kills its connection, as in the live failure; the
+// retry must again report clean. Block 3 checks that neither retry tainted
+// or re-baselined the reconstruction: one more clean comparison, and exactly
+// one GetUTxOWhole per comparison plus the retried one.
+func TestRunFromGenesis_UTxOComparisonRetriesConnectionFailure(t *testing.T) {
+	t.Parallel()
+	const magic = 42
+	const blockCount = 5
+
+	server := newGenesisFakeServer(t, blockCount)
+	server.failUtxoWholeSkip = 1
+	server.failUtxoWholeCount = 1
+	server.epochBySlot = map[uint64]int{
+		server.chain.Points[0].Slot: 1,
+		server.chain.Points[1].Slot: 2,
+		server.chain.Points[2].Slot: 3,
+		server.chain.Points[3].Slot: 4,
+	}
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	server.serve(t, listener, magic)
+
+	koiosSrv := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(koiosSrv.Close)
+	koios, err := NewKoiosClient("preview", "", koiosSrv.URL, true, true)
+	require.NoError(t, err)
+
+	results := make(chan EpochResult, 8)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- RunFromGenesis(
+			ctx, listener.Addr().String(), "preview", magic, koios, nil,
+			func(r EpochResult) { results <- r },
+			nil, nil,
+		)
+	}()
+
+	recv := func() EpochResult {
+		t.Helper()
+		select {
+		case r := <-results:
+			return r
+		case <-time.After(10 * time.Second):
+			t.Fatal("timed out waiting for an epoch result")
+			return EpochResult{}
+		}
+	}
+	utxoWholeCalls := func() int {
+		server.mu.Lock()
+		defer server.mu.Unlock()
+		return server.utxoWholeCalls
+	}
+
+	server.allowStep(t)
+
+	server.allowStep(t)
+	report1 := recv()
+	assert.Equal(t, uint64(2), report1.Epoch)
+	assert.True(t, report1.UTxOAttempted)
+	assert.NoError(t, report1.UTxOErr, "a dropped GetUTxOWhole must be retried")
+	assert.Equal(t, 3, utxoWholeCalls())
+
+	server.mu.Lock()
+	server.failAcquiresAfterStake = 1
+	server.mu.Unlock()
+	server.allowStep(t)
+	report2 := recv()
+	assert.Equal(t, uint64(3), report2.Epoch)
+	assert.True(t, report2.UTxOAttempted)
+	assert.NoError(t, report2.UTxOErr, "a dropped Acquire must be retried")
+	assert.Equal(t, 4, utxoWholeCalls())
+	server.mu.Lock()
+	assert.Zero(t, server.acquireFailuresArmed, "the armed Acquire failure must have fired")
+	server.mu.Unlock()
+
+	server.allowStep(t)
+	report3 := recv()
+	assert.Equal(t, uint64(4), report3.Epoch)
+	assert.True(t, report3.UTxOAttempted)
+	assert.NoError(t, report3.UTxOErr)
+	assert.Equal(t, 5, utxoWholeCalls())
+
+	cancel()
+	select {
+	case err := <-done:
+		assert.True(t, err == nil || errors.Is(err, context.Canceled))
+	case <-time.After(10 * time.Second):
+		t.Fatal("RunFromGenesis did not exit after ctx cancellation")
+	}
+}
+
+// TestRunFromGenesis_ResumeKeepsUTxOComparison drives a chainsync session
+// that dies mid-epoch and resumes. The resumed session opens with a
+// RollBackward to the block last processed, which invalidates nothing: the
+// reconstruction is still exact there. That epoch must still get a real
+// UTxO comparison, with no extra GetUTxOWhole, and every block's transaction
+// must reach /tx_info exactly once.
+//
+// Four blocks with one transaction each, in epochs 1, 2, 2, 3. Block 2's
+// epoch lookup fails after its transaction was buffered, ending the session
+// with lastPoint at block 2. Treating the reconnect's rollback as a real one
+// re-baselines from Dingo, drops block 2's buffered hash, and reports epoch
+// 3 as not run.
+func TestRunFromGenesis_ResumeKeepsUTxOComparison(t *testing.T) {
+	t.Parallel()
+	const magic = 42
+	const blockCount = 4
+
+	server := newGenesisFakeServerWithTransactions(t, blockCount)
+	server.epochBySlot = map[uint64]int{
+		server.chain.Points[0].Slot: 1,
+		server.chain.Points[1].Slot: 2,
+		server.chain.Points[2].Slot: 2,
+		server.chain.Points[3].Slot: 3,
+	}
+	server.failEpochNoOnce(server.chain.Points[2].Slot)
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	server.serve(t, listener, magic)
+
+	// /tx_info answers every requested hash with a transaction that neither
+	// spends nor creates anything, so the reconstruction stays equal to the
+	// fake's empty UTxO set, and records how often each hash was asked for.
+	// Everything else 404s, as in the sibling tests.
+	var (
+		txInfoMu       sync.Mutex
+		txInfoRequests = map[string]int{}
+	)
+	koiosSrv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			if !strings.HasSuffix(r.URL.Path, "/tx_info") {
+				http.NotFound(w, r)
+				return
+			}
+			var body struct {
+				TxHashes []string `json:"_tx_hashes"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			items := make([]koiosparity.KoiosTxInfoItem, 0, len(body.TxHashes))
+			txInfoMu.Lock()
+			for _, h := range body.TxHashes {
+				txInfoRequests[h]++
+				items = append(items, koiosparity.KoiosTxInfoItem{TxHash: h})
+			}
+			txInfoMu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(items)
+		},
+	))
+	t.Cleanup(koiosSrv.Close)
+	koios, err := NewKoiosClient("preview", "", koiosSrv.URL, true, true)
+	require.NoError(t, err)
+
+	logs := newLogCollector()
+	results := make(chan EpochResult, 8)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- RunFromGenesis(
+			ctx, listener.Addr().String(), "preview", magic, koios, nil,
+			func(r EpochResult) { results <- r },
+			logs.logf, nil,
+		)
+	}()
+
+	recv := func() EpochResult {
+		t.Helper()
+		select {
+		case r := <-results:
+			return r
+		case <-time.After(20 * time.Second):
+			t.Fatal("timed out waiting for an epoch result")
+			return EpochResult{}
+		}
+	}
+
+	// Block 0: baseline (GetUTxOWhole #1). Block 1: epoch 2 boundary, a real
+	// comparison (#2).
+	server.allowStep(t)
+	server.allowStep(t)
+	report2 := recv()
+	require.Equal(t, uint64(2), report2.Epoch)
+	require.True(t, report2.UTxOAttempted)
+	require.NoError(t, report2.UTxOErr)
+
+	// Block 2: its transaction is buffered, then its epoch lookup fails.
+	server.allowStep(t)
+	require.True(
+		t,
+		logs.waitFor("chainsync session ended, resuming from slot", 20*time.Second),
+		"the failed session never reached the reconnect loop; logs: %v",
+		logs.all(),
+	)
+	server.waitForSessions(t, 2)
+
+	// Block 3: epoch 3 boundary, a real comparison (#3) covering block 2's
+	// transaction, which must have survived the reconnect.
+	server.allowStep(t)
+	report3 := recv()
+	assert.Equal(t, uint64(3), report3.Epoch)
+	assert.True(t, report3.UTxOAttempted)
+	assert.NoError(
+		t, report3.UTxOErr,
+		"the reconnect's rollback to the block last processed voided "+
+			"this epoch's UTxO comparison",
+	)
+	assert.Empty(t, report3.UTxOMissing)
+	assert.Empty(t, report3.UTxOExtra)
+	assert.Empty(t, report3.UTxODiffers)
+
+	server.mu.Lock()
+	utxoWholeCalls := server.utxoWholeCalls
+	server.mu.Unlock()
+	// A re-baseline skips the tainted epoch's comparison, so the count
+	// alone would not show it; the re-baseline's own log line does.
+	assert.Equal(
+		t, 3, utxoWholeCalls,
+		"want one baseline and two comparisons, no re-baseline",
+	)
+	for _, line := range logs.all() {
+		assert.NotContains(t, line, "re-baselined")
+	}
+
+	txInfoMu.Lock()
+	gotRequests := maps.Clone(txInfoRequests)
+	txInfoMu.Unlock()
+	wantRequests := map[string]int{}
+	// Block 0's transaction is inside the baseline, so it is never fetched.
+	for _, block := range server.chain.Blocks[1:] {
+		for _, tx := range block.Transactions() {
+			wantRequests[tx.Hash().String()] = 1
+		}
+	}
+	assert.Equal(t, wantRequests, gotRequests)
+
+	cancel()
+	select {
+	case err := <-done:
+		assert.True(t, err == nil || errors.Is(err, context.Canceled))
+	case <-time.After(10 * time.Second):
+		t.Fatal("RunFromGenesis did not exit after ctx cancellation")
+	}
+}
+
+// TestRunFromGenesis_ReconnectsAfterDingoClosesConnection proves a chainsync
+// connection Dingo closes while ctx is live ends only the session, not the
+// run. See closeChainSyncAtSlot for how the fake reaches the close that
+// gouroboros reports by closing ErrorChan rather than sending an error;
+// RunFromGenesis read that as a clean stop and returned nil, so a Dingo
+// restart ended the whole run.
+func TestRunFromGenesis_ReconnectsAfterDingoClosesConnection(t *testing.T) {
+	t.Parallel()
+	const magic = 42
+	// Client.Sync sends one RequestNext, answered by the initial
+	// RollBackward; handling that sends the first batch, answered by blocks
+	// 0 to closeBlock. A later block starts epoch 3.
+	const closeBlock = chainsync.DefaultPipelineLimit - 1
+	const blockCount = closeBlock + 10
+
+	server := newGenesisFakeServer(t, blockCount)
+	server.ungated = true
+	server.epochBySlot = make(map[uint64]int, blockCount)
+	for i, p := range server.chain.Points {
+		switch {
+		case i == 0:
+			server.epochBySlot[p.Slot] = 1
+		case i < blockCount-5:
+			server.epochBySlot[p.Slot] = 2
+		default:
+			server.epochBySlot[p.Slot] = 3
+		}
+	}
+	closeAt := server.chain.Points[closeBlock].Slot
+	server.closeChainSyncAtSlot = &closeAt
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	server.serve(t, listener, magic)
+
+	koiosSrv := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(koiosSrv.Close)
+	koios, err := NewKoiosClient("preview", "", koiosSrv.URL, true, true)
+	require.NoError(t, err)
+
+	logs := newLogCollector()
+	results := make(chan EpochResult, 8)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- RunFromGenesis(
+			ctx, listener.Addr().String(), "preview", magic, koios, nil,
+			func(r EpochResult) { results <- r },
+			logs.logf, nil,
+		)
+	}()
+
+	recv := func() EpochResult {
+		t.Helper()
+		select {
+		case r := <-results:
+			return r
+		case err := <-done:
+			t.Fatalf(
+				"RunFromGenesis returned %v before ctx was cancelled; logs: %v",
+				err, logs.all(),
+			)
+		case <-time.After(30 * time.Second):
+			t.Fatalf("timed out waiting for an epoch result; logs: %v", logs.all())
+		}
+		return EpochResult{}
+	}
+
+	// Block 1 starts epoch 2. closeBlock's epoch lookup then closes the
+	// connection, so epoch 3 can only be reached by a second session.
+	require.Equal(t, uint64(2), recv().Epoch)
+	require.Equal(t, uint64(3), recv().Epoch)
+
+	server.mu.Lock()
+	sessions := server.sessions
+	server.mu.Unlock()
+	assert.GreaterOrEqual(t, sessions, 2)
+	assert.True(
+		t,
+		logs.waitFor("chainsync session ended, resuming from slot", time.Second),
+		"logs: %v", logs.all(),
+	)
+
+	select {
+	case err := <-done:
+		t.Fatalf("RunFromGenesis returned %v before ctx was cancelled", err)
+	default:
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		assert.True(t, err == nil || errors.Is(err, context.Canceled))
+	case <-time.After(10 * time.Second):
+		t.Fatal("RunFromGenesis did not exit after ctx cancellation")
+	}
+}
+
+// newEpochLookupStallServer serves a chain whose epoch 3 starts after
+// closeBlock and whose epoch-number query at closeBlock goes unanswered, so
+// epoch 3 is reachable only if the run gives up on that query and reconnects.
+func newEpochLookupStallServer(
+	t *testing.T, magic uint32,
+) (server *genesisFakeServer, addr string, closeAt uint64) {
+	t.Helper()
+	const closeBlock = chainsync.DefaultPipelineLimit - 1
+	const blockCount = closeBlock + 10
+
+	server = newGenesisFakeServer(t, blockCount)
+	server.ungated = true
+	server.epochBySlot = make(map[uint64]int, blockCount)
+	for i, p := range server.chain.Points {
+		switch {
+		case i == 0:
+			server.epochBySlot[p.Slot] = 1
+		case i < blockCount-5:
+			server.epochBySlot[p.Slot] = 2
+		default:
+			server.epochBySlot[p.Slot] = 3
+		}
+	}
+	closeAt = server.chain.Points[closeBlock].Slot
+	server.hangEpochNoAtSlot = &closeAt
+	server.hangRelease = make(chan struct{})
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	server.serve(t, listener, magic)
+	t.Cleanup(func() { close(server.hangRelease) })
+	return server, listener.Addr().String(), closeAt
+}
+
+// runUntilEpoch3 runs RunFromGenesis against addr until it reports epochs 2
+// and 3, then cancels it and returns its log.
+func runUntilEpoch3(t *testing.T, addr string, magic uint32) []string {
+	t.Helper()
+	koiosSrv := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(koiosSrv.Close)
+	koios, err := NewKoiosClient("preview", "", koiosSrv.URL, true, true)
+	require.NoError(t, err)
+
+	logs := newLogCollector()
+	results := make(chan EpochResult, 8)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- RunFromGenesis(
+			ctx, addr, "preview", magic, koios, nil,
+			func(r EpochResult) { results <- r },
+			logs.logf, nil,
+		)
+	}()
+
+	for _, want := range []uint64{2, 3} {
+		select {
+		case r := <-results:
+			require.Equal(t, want, r.Epoch)
+		case err := <-done:
+			t.Fatalf(
+				"RunFromGenesis returned %v before ctx was cancelled; logs: %v",
+				err, logs.all(),
+			)
+		case <-time.After(30 * time.Second):
+			t.Fatalf(
+				"timed out waiting for epoch %d; logs: %v", want, logs.all(),
+			)
+		}
+	}
+	cancel()
+	err = testutil.RequireReceive(
+		t, done, 10*time.Second, "RunFromGenesis exit after ctx cancellation",
+	)
+	assert.True(t, err == nil || errors.Is(err, context.Canceled))
+	return logs.all()
+}
+
+// TestRunFromGenesis_ReconnectsWhenSessionEndsDuringEpochLookup covers Dingo
+// closing the chainsync connection while the roll-forward callback waits on
+// an epoch-number query Dingo never answers. The reconnect loop waits for
+// that callback before starting the next session, and the query's
+// connection has no query timeout, so the run stayed up with no reconnect
+// and no further epoch. Ending the session must close the lookup's
+// connection.
+func TestRunFromGenesis_ReconnectsWhenSessionEndsDuringEpochLookup(t *testing.T) {
+	t.Parallel()
+	const magic = 42
+	server, addr, closeAt := newEpochLookupStallServer(t, magic)
+	server.closeChainSyncAtSlot = &closeAt
+
+	logs := runUntilEpoch3(t, addr, magic)
+
+	server.mu.Lock()
+	sessions := server.sessions
+	server.mu.Unlock()
+	assert.GreaterOrEqual(t, sessions, 2)
+	assert.True(
+		t,
+		slices.ContainsFunc(logs, func(line string) bool {
+			return strings.Contains(line, "chainsync session ended") &&
+				strings.Contains(line, errDingoClosedConnection.Error())
+		}),
+		"logs: %v", logs,
+	)
+}
+
+// TestRunFromGenesis_ReconnectsWhenEpochLookupStalls covers an epoch-number
+// query Dingo never answers while the chainsync connection stays open. The
+// session is idle with nothing outstanding, so the connection never reports
+// an error: without a bound on the lookup the run made no progress and never
+// reconnected.
+//
+// Not t.Parallel: it shortens the package-level epochLookupTimeout.
+func TestRunFromGenesis_ReconnectsWhenEpochLookupStalls(t *testing.T) {
+	prevTimeout := epochLookupTimeout
+	epochLookupTimeout = 2 * time.Second
+	t.Cleanup(func() { epochLookupTimeout = prevTimeout })
+
+	const magic = 42
+	server, addr, _ := newEpochLookupStallServer(t, magic)
+
+	logs := runUntilEpoch3(t, addr, magic)
+
+	server.mu.Lock()
+	sessions := server.sessions
+	server.mu.Unlock()
+	assert.GreaterOrEqual(t, sessions, 2)
+	assert.True(
+		t,
+		slices.ContainsFunc(logs, func(line string) bool {
+			return strings.Contains(line, "chainsync session ended") &&
+				strings.Contains(line, errEpochLookupTimedOut.Error())
+		}),
+		"logs: %v", logs,
+	)
+}
+
+// runWithStalledEpochCheck runs RunFromGenesis against a chain with epochs
+// 1, 2, 2, 3, 3, 3 on blocks 0-5, after stall arms one of the fake's query
+// stalls at block 1, the first block of epoch 2. It returns every result
+// reported, the number of chainsync sessions served, and the run's log.
+func runWithStalledEpochCheck(
+	t *testing.T, stall func(*genesisFakeServer, *uint64),
+) (results []EpochResult, sessions int, logs []string) {
+	t.Helper()
+	const magic = 42
+	const blockCount = 6
+
+	server := newGenesisFakeServer(t, blockCount)
+	server.ungated = true
+	server.epochBySlot = make(map[uint64]int, blockCount)
+	for i, p := range server.chain.Points {
+		switch {
+		case i == 0:
+			server.epochBySlot[p.Slot] = 1
+		case i < 3:
+			server.epochBySlot[p.Slot] = 2
+		default:
+			server.epochBySlot[p.Slot] = 3
+		}
+	}
+	stallAt := server.chain.Points[1].Slot
+	server.hangRelease = make(chan struct{})
+	stall(server, &stallAt)
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	server.serve(t, listener, magic)
+	t.Cleanup(func() { close(server.hangRelease) })
+
+	koiosSrv := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(koiosSrv.Close)
+	koios, err := NewKoiosClient("preview", "", koiosSrv.URL, true, true)
+	require.NoError(t, err)
+
+	logc := newLogCollector()
+	reported := make(chan EpochResult, 8)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- RunFromGenesis(
+			ctx, listener.Addr().String(), "preview", magic, koios, nil,
+			func(r EpochResult) { reported <- r },
+			logc.logf, nil,
+		)
+	}()
+
+	for _, want := range []uint64{2, 3} {
+		select {
+		case r := <-reported:
+			require.Equal(t, want, r.Epoch, "logs: %v", logc.all())
+			results = append(results, r)
+		case err := <-done:
+			t.Fatalf(
+				"RunFromGenesis returned %v before ctx was cancelled; logs: %v",
+				err, logc.all(),
+			)
+		case <-time.After(30 * time.Second):
+			t.Fatalf(
+				"timed out waiting for epoch %d; logs: %v", want, logc.all(),
+			)
+		}
+	}
+	// Every block has been delivered by now, so no further boundary can
+	// produce a result: anything else would be a second report of one.
+	testutil.RequireNoReceive(
+		t, reported, 200*time.Millisecond, "a duplicate epoch report",
+	)
+	cancel()
+	err = testutil.RequireReceive(
+		t, done, 10*time.Second, "RunFromGenesis exit after ctx cancellation",
+	)
+	assert.True(t, err == nil || errors.Is(err, context.Canceled))
+
+	server.mu.Lock()
+	sessions = server.sessions
+	assert.Nil(t, server.stallUtxoWholeAtSlot, "the UTxO stall must have fired")
+	assert.Nil(t, server.stallPoolDistrAtSlot, "the stake stall must have fired")
+	server.mu.Unlock()
+	return results, sessions, logc.all()
+}
+
+// assertEpochChecksInterruptedAndRerun asserts that the session ending
+// during epoch 2's checks reported neither a cancellation nor a dropped
+// connection for any of them, and that the checks ran again: epoch 2 is
+// reported once, with the same outcome as the uninterrupted epoch 3.
+func assertEpochChecksInterruptedAndRerun(
+	t *testing.T, results []EpochResult, sessions int, logs []string,
+) {
+	t.Helper()
+	require.Len(t, results, 2)
+	epoch2, epoch3 := results[0], results[1]
+	assert.GreaterOrEqual(t, sessions, 2)
+	assert.True(
+		t,
+		slices.ContainsFunc(logs, func(line string) bool {
+			return strings.Contains(line, errEpochChecksInterrupted.Error()+
+				": epoch 2 at slot ")
+		}),
+		"logs: %v", logs,
+	)
+	for _, err := range []error{
+		epoch2.ProtocolParamsErr, epoch2.StakeErr, epoch2.UTxOErr,
+	} {
+		assert.NotErrorIs(t, err, context.Canceled)
+		assert.False(t, isRetryableDingoConnErr(err), "error: %v", err)
+	}
+	assert.True(t, epoch2.UTxOAttempted)
+	assert.NoError(t, epoch2.UTxOErr, "the UTxO comparison must match")
+	assert.Empty(t, epoch2.UTxOMissing)
+	assert.Empty(t, epoch2.UTxOExtra)
+	assert.Empty(t, epoch2.UTxODiffers)
+	assert.Equal(t, epoch3.ProtocolParamsErr == nil, epoch2.ProtocolParamsErr == nil)
+	assert.Equal(t, epoch3.StakeErr == nil, epoch2.StakeErr == nil)
+	assert.Equal(t, epoch3.UTxOAttempted, epoch2.UTxOAttempted)
+	assert.NoError(t, epoch3.UTxOErr)
+}
+
+// TestRunFromGenesis_ReconnectsWhenSessionEndsDuringUTxOComparison covers
+// Dingo closing the chainsync connection while the roll-forward callback
+// waits on an epoch's whole-UTxO query Dingo never answers. The comparison
+// ran under the run's context, which a session ending does not cancel, so
+// the reconnect loop's wait for the callback never ended. The epoch must not
+// be reported from the cut-off comparison, and must not be lost: the next
+// session checks it again.
+func TestRunFromGenesis_ReconnectsWhenSessionEndsDuringUTxOComparison(
+	t *testing.T,
+) {
+	t.Parallel()
+	results, sessions, logs := runWithStalledEpochCheck(
+		t, func(s *genesisFakeServer, slot *uint64) {
+			s.stallUtxoWholeAtSlot = slot
+		},
+	)
+	assertEpochChecksInterruptedAndRerun(t, results, sessions, logs)
+}
+
+// TestRunFromGenesis_ReconnectsWhenSessionEndsDuringStakeCheck is the same
+// for the stake distribution query, which shares the protocol-parameters
+// check's connection.
+func TestRunFromGenesis_ReconnectsWhenSessionEndsDuringStakeCheck(
+	t *testing.T,
+) {
+	t.Parallel()
+	results, sessions, logs := runWithStalledEpochCheck(
+		t, func(s *genesisFakeServer, slot *uint64) {
+			s.stallPoolDistrAtSlot = slot
+		},
+	)
+	assertEpochChecksInterruptedAndRerun(t, results, sessions, logs)
+}
+
+// TestRunFromGenesis_EpochChecksRetryTooOldRefusal covers Dingo refusing an
+// epoch check's Acquire as too old for the block it just delivered. Live,
+// Dingo answers that when commit contention at an epoch boundary keeps it
+// from opening a read snapshot within its wait, and every check of the epoch
+// was reported as not run.
+//
+// Epochs 1-4 on blocks 0-3. At block 1 the checks' Acquires are refused three
+// times and must then run. At block 2 they are refused for good, which must
+// end as not run with a reason naming the exhausted retries, and the run must
+// go on to check block 3.
+func TestRunFromGenesis_EpochChecksRetryTooOldRefusal(t *testing.T) {
+	t.Parallel()
+	const magic = 42
+	const blockCount = 4
+
+	server := newGenesisFakeServer(t, blockCount)
+	server.epochBySlot = map[uint64]int{
+		server.chain.Points[0].Slot: 1,
+		server.chain.Points[1].Slot: 2,
+		server.chain.Points[2].Slot: 3,
+		server.chain.Points[3].Slot: 4,
+	}
+	transient := server.chain.Points[1].Slot
+	permanent := server.chain.Points[2].Slot
+	server.tooOldAfterFirstAcquire = map[uint64]int{
+		transient: 3,
+		permanent: math.MaxInt,
+	}
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	server.serve(t, listener, magic)
+
+	koiosSrv := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(koiosSrv.Close)
+	koios, err := NewKoiosClient("preview", "", koiosSrv.URL, true, true)
+	require.NoError(t, err)
+
+	results := make(chan EpochResult, 8)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- RunFromGenesis(
+			ctx, listener.Addr().String(), "preview", magic, koios, nil,
+			func(r EpochResult) { results <- r },
+			nil, nil,
+		)
+	}()
+
+	recv := func() EpochResult {
+		t.Helper()
+		select {
+		case r := <-results:
+			return r
+		case <-time.After(20 * time.Second):
+			t.Fatal("timed out waiting for an epoch result")
+			return EpochResult{}
+		}
+	}
+	tooOld := localstatequery.ErrAcquireFailurePointTooOld
+
+	server.allowStep(t)
+
+	server.allowStep(t)
+	report := recv()
+	assert.Equal(t, uint64(2), report.Epoch)
+	assert.NotErrorIs(t, report.ProtocolParamsErr, tooOld)
+	assert.NotErrorIs(t, report.StakeErr, tooOld)
+	assert.True(t, report.UTxOAttempted)
+	assert.NoError(t, report.UTxOErr)
+	server.mu.Lock()
+	assert.Zero(t, server.tooOldAfterFirstAcquire[transient],
+		"the armed refusals must all have fired")
+	server.mu.Unlock()
+
+	server.allowStep(t)
+	report = recv()
+	assert.Equal(t, uint64(3), report.Epoch)
+	for name, err := range map[string]error{
+		"protocol params": report.ProtocolParamsErr,
+		"stake":           report.StakeErr,
+		"utxo":            report.UTxOErr,
+	} {
+		require.ErrorIs(t, err, tooOld, name)
+		assert.ErrorContains(t, err,
+			fmt.Sprintf("after %d attempts", acquireRetries), name)
+	}
+
+	server.allowStep(t)
+	report = recv()
+	assert.Equal(t, uint64(4), report.Epoch)
+	assert.True(t, report.UTxOAttempted)
+	assert.NoError(t, report.UTxOErr)
+
+	cancel()
+	select {
+	case err := <-done:
+		assert.True(t, err == nil || errors.Is(err, context.Canceled))
+	case <-time.After(10 * time.Second):
+		t.Fatal("RunFromGenesis did not exit after ctx cancellation")
+	}
+}
+
+// TestDial_ReceivesUTxOWholeLargerThanIngressBudget covers a whole-UTxO-set
+// reply larger than the muxer's connection-wide ingress budget. Live, the
+// reply at preprod epoch 157 overran the 64MiB default and the muxer closed
+// the connection with ErrIngressOverflow. The budget is shrunk to a fraction
+// of one segment here, so the reply exceeds it many times over and any
+// segment queued behind another overruns it.
+func TestDial_ReceivesUTxOWholeLargerThanIngressBudget(t *testing.T) {
+	t.Parallel()
+	const magic = 42
+	const utxoCount = 3000
+	const ingressBudget = 1024
+
+	server := newGenesisFakeServer(t, 1)
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		make([]byte, lcommon.AddressHashSize),
+		nil,
+	)
+	require.NoError(t, err)
+	server.utxoWhole = make(
+		map[localstatequery.UtxoId]ledger.BabbageTransactionOutput, utxoCount,
+	)
+	for i := range utxoCount {
+		var hash ledger.Blake2b256
+		hash[0], hash[1] = byte(i>>8), byte(i)
+		server.utxoWhole[localstatequery.UtxoId{Hash: hash, Idx: i}] =
+			ledger.BabbageTransactionOutput{
+				OutputAddress: addr,
+				OutputAmount:  mary.MaryTransactionOutputValue{Amount: uint64(i) + 1},
+			}
+	}
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	server.serve(t, listener, magic)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	conn, lsq, err := acquireWithRetry(
+		ctx, listener.Addr().String(), magic, server.chain.Points[0], true,
+	)
+	require.NoError(t, err)
+	defer conn.Close() //nolint:errcheck
+	conn.Muxer().SetIngressBudget(ingressBudget)
+
+	utxos, err := lsq.Client.GetUTxOWhole()
+	require.NoError(t, err)
+	assert.Len(t, utxos.Results, utxoCount)
+}
+
+// txInfoChunkFake answers each chunk, by its first hash, with respond(attempt)
+// and counts the attempts.
+type txInfoChunkFake struct {
+	mu       sync.Mutex
+	attempts map[string]int
+	respond  func(chunk []string, attempt int) error
+}
+
+func (f *txInfoChunkFake) fetch(
+	_ context.Context, chunk []string,
+) ([]koiosparity.KoiosTxInfoItem, error) {
+	f.mu.Lock()
+	f.attempts[chunk[0]]++
+	attempt := f.attempts[chunk[0]]
+	f.mu.Unlock()
+	if err := f.respond(chunk, attempt); err != nil {
+		return nil, err
+	}
+	items := make([]koiosparity.KoiosTxInfoItem, 0, len(chunk))
+	for _, h := range chunk {
+		items = append(items, koiosparity.KoiosTxInfoItem{TxHash: h})
+	}
+	return items, nil
+}
+
+func (f *txInfoChunkFake) attemptsFor(hash string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.attempts[hash]
+}
+
+func errTxNotIndexed(hash string) error {
+	return fmt.Errorf("%w %s", koiosparity.ErrTxInfoMissing, hash)
+}
+
+// TestFetchTxInfoChunksRetriesATxKoiosHasNotIndexed pins the live preprod
+// failure at the tip: Koios had no /tx_info result yet for a hash Dingo had
+// just served, and the flush re-baselined the reconstruction. A chunk that
+// fails only that way is fetched again after a wait and then applies.
+func TestFetchTxInfoChunksRetriesATxKoiosHasNotIndexed(t *testing.T) {
+	t.Parallel()
+	chunks := [][]string{{"aa", "ab"}, {"ba", "bb"}}
+	f := &txInfoChunkFake{
+		attempts: map[string]int{},
+		respond: func(chunk []string, attempt int) error {
+			if chunk[0] == "ba" && attempt == 1 {
+				return errTxNotIndexed("bb")
+			}
+			return nil
+		},
+	}
+	waits := &recordingWait{}
+	schedule := []time.Duration{time.Second, 2 * time.Second}
+
+	results, errs, err := fetchTxInfoChunks(
+		context.Background(), chunks, f.fetch, schedule, waits.wait,
+		func(string, ...any) {},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, []error{nil, nil}, errs)
+	assert.Equal(t, schedule[:1], waits.waits)
+	assert.Equal(t, 1, f.attemptsFor("aa"), "a fetched chunk is not refetched")
+	assert.Equal(t, 2, f.attemptsFor("ba"))
+
+	refs := UTxOSet{}
+	assert.False(t,
+		applyTxInfoResults(refs, chunks, results, errs, t.Logf),
+		"a tx Koios indexed within the waits must not taint the epoch",
+	)
+}
+
+// TestFetchTxInfoChunksGivesUpAfterTheLastWait proves the waits are bounded:
+// a hash still missing after the last one fails its chunk, which taints the
+// epoch as before, and a failure of any other kind is not fetched again.
+func TestFetchTxInfoChunksGivesUpAfterTheLastWait(t *testing.T) {
+	t.Parallel()
+	chunks := [][]string{{"aa"}, {"ba"}, {"ca"}}
+	f := &txInfoChunkFake{
+		attempts: map[string]int{},
+		respond: func(chunk []string, _ int) error {
+			switch chunk[0] {
+			case "aa":
+				return errTxNotIndexed("aa")
+			case "ba":
+				return errors.New("koios /tx_info: status 500")
+			}
+			return nil
+		},
+	}
+	waits := &recordingWait{}
+	schedule := []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}
+
+	results, errs, err := fetchTxInfoChunks(
+		context.Background(), chunks, f.fetch, schedule, waits.wait,
+		func(string, ...any) {},
+	)
+	require.NoError(t, err)
+	assert.ErrorIs(t, errs[0], koiosparity.ErrTxInfoMissing)
+	assert.Error(t, errs[1])
+	assert.NoError(t, errs[2])
+	assert.Equal(t, schedule, waits.waits)
+	assert.Equal(t, 1+len(schedule), f.attemptsFor("aa"))
+	assert.Equal(t, 1, f.attemptsFor("ba"))
+	assert.Equal(t, 1, f.attemptsFor("ca"))
+
+	assert.True(t,
+		applyTxInfoResults(UTxOSet{}, chunks, results, errs, t.Logf),
+		"a hash still missing after the last wait must taint the epoch",
+	)
+}
+
+// TestFetchTxInfoChunksStopsWaitingWhenCancelled proves a session end during
+// a wait returns the cancellation at once, with no further fetch.
+func TestFetchTxInfoChunksStopsWaitingWhenCancelled(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f := &txInfoChunkFake{
+		attempts: map[string]int{},
+		respond: func(chunk []string, _ int) error {
+			return errTxNotIndexed(chunk[0])
+		},
+	}
+	cancelThenWait := func(ctx context.Context, d time.Duration) error {
+		cancel()
+		return waitStakeRetry(ctx, d)
+	}
+
+	type result struct {
+		results [][]koiosparity.KoiosTxInfoItem
+		errs    []error
+		err     error
+	}
+	done := make(chan result, 1)
+	go func() {
+		r, e, err := fetchTxInfoChunks(
+			ctx, [][]string{{"aa"}}, f.fetch, []time.Duration{time.Hour},
+			cancelThenWait, func(string, ...any) {},
+		)
+		done <- result{r, e, err}
+	}()
+	got := testutil.RequireReceive(
+		t, done, 5*time.Second, "fetchTxInfoChunks after cancellation",
+	)
+	require.ErrorIs(t, got.err, context.Canceled)
+	assert.Nil(t, got.results)
+	assert.Nil(t, got.errs)
+	assert.Equal(t, 1, f.attemptsFor("aa"), "no fetch runs after cancellation")
+}
+
+// TestRunFromGenesis_TxInfoIndexLagDoesNotTaintEpoch drives the whole flush:
+// /tx_info first answers without the boundary block's transaction, as Koios
+// does before it has indexed the block, then with it. The epoch's UTxO
+// comparison must run rather than be tainted by a re-baseline.
+//
+// Not t.Parallel: it shortens the package-level txInfoIndexWaits.
+func TestRunFromGenesis_TxInfoIndexLagDoesNotTaintEpoch(t *testing.T) {
+	prevWaits := txInfoIndexWaits
+	txInfoIndexWaits = []time.Duration{time.Millisecond}
+	t.Cleanup(func() { txInfoIndexWaits = prevWaits })
+
+	const magic = 42
+	server := newGenesisFakeServerWithTransactions(t, 2)
+	server.epochBySlot = map[uint64]int{
+		server.chain.Points[0].Slot: 1,
+		server.chain.Points[1].Slot: 2,
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	server.serve(t, listener, magic)
+
+	var txInfoCalls atomic.Int32
+	koiosSrv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			if !strings.HasSuffix(r.URL.Path, "/tx_info") {
+				http.NotFound(w, r)
+				return
+			}
+			var body struct {
+				TxHashes []string `json:"_tx_hashes"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			items := []koiosparity.KoiosTxInfoItem{}
+			if txInfoCalls.Add(1) > 1 {
+				for _, h := range body.TxHashes {
+					items = append(
+						items, koiosparity.KoiosTxInfoItem{TxHash: h},
+					)
+				}
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(items)
+		},
+	))
+	t.Cleanup(koiosSrv.Close)
+	koios, err := NewKoiosClient("preview", "", koiosSrv.URL, true, true)
+	require.NoError(t, err)
+
+	logs := newLogCollector()
+	results := make(chan EpochResult, 8)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- RunFromGenesis(
+			ctx, listener.Addr().String(), "preview", magic, koios, nil,
+			func(r EpochResult) { results <- r },
+			logs.logf, nil,
+		)
+	}()
+
+	server.allowStep(t)
+	server.allowStep(t)
+	report := testutil.RequireReceive(
+		t, results, 10*time.Second, "epoch 2 result",
+	)
+	assert.True(t, report.UTxOAttempted)
+	assert.NoError(t, report.UTxOErr,
+		"a tx Koios indexed after one wait must not taint the epoch")
+	assert.Equal(t, int32(2), txInfoCalls.Load())
+	for _, line := range logs.all() {
+		assert.NotContains(t, line, "re-baselined")
+	}
+
+	cancel()
+	err = testutil.RequireReceive(
+		t, done, 10*time.Second, "RunFromGenesis exit after cancellation",
+	)
+	assert.True(t, err == nil || errors.Is(err, context.Canceled))
 }

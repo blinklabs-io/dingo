@@ -15,14 +15,17 @@
 package ouroboros
 
 import (
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/mempool"
 	gouroboros "github.com/blinklabs-io/gouroboros"
@@ -656,4 +659,229 @@ func TestLocalTxSubmissionProtocol_AcceptThenReject(t *testing.T) {
 		gledger.EraIdConway, fixtures[1].body,
 	))
 	require.Len(t, o.mempool.Transactions(), 2)
+}
+
+// blockingLocalTxMempool stands in for a mempool whose admission is parked
+// behind the mutation gate. It records the context each call received and
+// returns only when released, as the real gate cannot be left early.
+type blockingLocalTxMempool struct {
+	mempool.Service
+	entered chan context.Context
+	release chan struct{}
+	// holdThroughCancel keeps the call parked after its context ends, like a
+	// call waiting on the gate.
+	holdThroughCancel bool
+}
+
+func newBlockingLocalTxMempool() *blockingLocalTxMempool {
+	return &blockingLocalTxMempool{
+		entered: make(chan context.Context, 64),
+		release: make(chan struct{}),
+	}
+}
+
+func (m *blockingLocalTxMempool) AddTransaction(
+	ctx context.Context,
+	_ uint,
+	_ []byte,
+) error {
+	m.entered <- ctx
+	if m.holdThroughCancel {
+		<-m.release
+		return nil
+	}
+	select {
+	case <-m.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func localTxSubmissionTestConnId(port int) connection.ConnectionId {
+	return connection.ConnectionId{
+		LocalAddr:  &net.TCPAddr{},
+		RemoteAddr: &net.TCPAddr{Port: port},
+	}
+}
+
+// The validation context must end when the connection is torn down.
+func TestLocalTxSubmissionServerSubmitTx_CancelsOnConnectionClose(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	o := newOuroboros(OuroborosConfig{})
+	pool := newBlockingLocalTxMempool()
+	o.mempool = pool
+	connDone := make(chan struct{})
+	o.localTxSubmissionConnDoneFunc = func(
+		connection.ConnectionId,
+	) <-chan struct{} {
+		return connDone
+	}
+	cb := localTxSubmissionTestCtx()
+	result := make(chan error, 1)
+	go func() {
+		result <- o.localtxsubmissionServerSubmitTx(
+			cb, localTxSubmissionTestMsg([]byte{0x80}),
+		)
+	}()
+	valCtx := testutil.RequireReceive(
+		t, pool.entered, 5*time.Second, "validation start",
+	)
+	require.NoError(t, valCtx.Err())
+
+	close(connDone)
+
+	select {
+	case <-valCtx.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("validation context not cancelled by connection close")
+	}
+	err := testutil.RequireReceive(
+		t, result, 5*time.Second, "callback return",
+	)
+	require.EqualError(t, err, "local transaction submission unavailable")
+	var reason cborRejectReason
+	require.NotErrorAs(t, err, &reason,
+		"a cancelled validation is not a ledger rejection")
+}
+
+// Closing connections must not free validation slots while their callbacks are
+// still running: reconnecting cannot multiply concurrent validations.
+func TestLocalTxSubmissionServerSubmitTx_BudgetSurvivesDisconnect(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	o := newOuroboros(OuroborosConfig{})
+	pool := newBlockingLocalTxMempool()
+	pool.holdThroughCancel = true
+	o.mempool = pool
+	closed := make(chan struct{})
+	close(closed)
+	o.localTxSubmissionConnDoneFunc = func(
+		connection.ConnectionId,
+	) <-chan struct{} {
+		// Every connection is already closed; the blocking mempool still
+		// holds its call.
+		return closed
+	}
+	results := make(chan error, localTxSubmissionMaxInFlight)
+	for i := range localTxSubmissionMaxInFlight {
+		go func() {
+			results <- o.localtxsubmissionServerSubmitTx(
+				olocaltxsubmission.CallbackContext{
+					ConnectionId: localTxSubmissionTestConnId(i),
+				},
+				localTxSubmissionTestMsg([]byte{0x80}),
+			)
+		}()
+	}
+	for range localTxSubmissionMaxInFlight {
+		testutil.RequireReceive(
+			t, pool.entered, 5*time.Second, "validation start",
+		)
+	}
+
+	// Run beyond the budget on its own goroutine: if the budget leaks, this
+	// call parks in the mempool and the test must fail rather than hang.
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(pool.release) }) }
+	defer release()
+	extra := make(chan error, 1)
+	go func() {
+		extra <- o.localtxsubmissionServerSubmitTx(
+			olocaltxsubmission.CallbackContext{
+				ConnectionId: localTxSubmissionTestConnId(1000),
+			},
+			localTxSubmissionTestMsg([]byte{0x80}),
+		)
+	}()
+	var err error
+	select {
+	case err = <-extra:
+	case <-pool.entered:
+		t.Fatal("a call beyond the budget reached the mempool")
+	case <-time.After(5 * time.Second):
+		t.Fatal("call beyond the budget neither rejected nor admitted")
+	}
+	require.EqualError(t, err, "local transaction submission unavailable")
+	var reason cborRejectReason
+	require.NotErrorAs(t, err, &reason,
+		"an exhausted budget is a node condition, not a ledger rejection")
+	release()
+	for range localTxSubmissionMaxInFlight {
+		testutil.RequireReceive(
+			t, results, 5*time.Second, "callback return",
+		)
+	}
+	require.NoError(t, o.localtxsubmissionServerSubmitTx(
+		localTxSubmissionTestCtx(),
+		localTxSubmissionTestMsg([]byte{0x80}),
+	), "slots must be released once callbacks return")
+}
+
+// The listener starts an NtC connection's protocols before registering it with
+// the connection manager, so a submission can arrive while the manager knows
+// nothing of the connection. Closing the bearer must still cancel validation.
+func TestLocalTxSubmissionProtocol_UnregisteredConnCloseCancels(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	cm := connmanager.NewConnectionManager(
+		connmanager.ConnectionManagerConfig{},
+	)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		require.NoError(t, cm.Stop(ctx))
+	})
+	o := newOuroboros(OuroborosConfig{ConnManager: cm})
+	pool := newBlockingLocalTxMempool()
+	o.mempool = pool
+	t.Cleanup(func() { close(pool.release) })
+	conn := newNtCTestClientConn(
+		t,
+		gouroboros.WithLocalTxSubmissionConfig(
+			olocaltxsubmission.NewConfig(
+				o.localtxsubmissionServerConnOpts()...,
+			),
+		),
+	)
+	client := conn.LocalTxSubmission().Client
+	require.NotNil(t, client)
+	go func() {
+		_ = client.SubmitTx(gledger.EraIdConway, []byte{0x80})
+	}()
+	valCtx := testutil.RequireReceive(
+		t, pool.entered, 5*time.Second, "validation start",
+	)
+	require.NoError(t, valCtx.Err())
+
+	require.NoError(t, conn.Close())
+
+	select {
+	case <-valCtx.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("validation context not cancelled when the bearer closed")
+	}
+}
+
+// TestLocalTxSubmissionInputResolutionFailureStaysGeneric: the mempool's
+// input-address lookup failing is a node fault, not a ledger rejection.
+func TestLocalTxSubmissionInputResolutionFailureStaysGeneric(t *testing.T) {
+	t.Parallel()
+	err := fmt.Errorf(
+		"resolve confirmed input addresses: %w: %w",
+		mempool.ErrInputResolution,
+		errors.New("database is locked"),
+	)
+	require.True(t, isLocalTxSubmissionInfrastructureError(err))
+	rejectErr := localTxSubmissionRejectReason(gledger.EraIdConway, err)
+	require.EqualError(t, rejectErr, "local transaction submission unavailable")
+	var reason cborRejectReason
+	require.NotErrorAs(t, rejectErr, &reason)
 }

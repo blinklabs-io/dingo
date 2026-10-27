@@ -15,6 +15,7 @@
 package ouroboros
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"encoding/hex"
@@ -29,10 +30,10 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/safedecode"
+	"github.com/blinklabs-io/dingo/internal/txresponse"
 	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
-	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/protocol"
@@ -409,12 +410,12 @@ func cloneRawMessages(in []cbor.RawMessage) []cbor.RawMessage {
 // validateLeiosEndorserBlockTxs binds fetched transaction wire values to the
 // manifest before the complete set is cached or applied. Each Leios manifest
 // reference is content-addressed over the FULL serialized transaction: the
-// TransactionHash is Blake2b256 of the complete transaction CBOR (NOT the
+// TransactionHash is Blake2b256 of the complete block_transaction CBOR (NOT the
 // Cardano tx-id / body hash) and TransactionSize is that CBOR's length. Both
 // the fetch-side validator here and the forge-side reference builder
 // (buildLeiosEB) use this same full-transaction contract, matching Haskell
-// reference nodes. leios-fetch carries each transaction either directly or in
-// a CBOR byte-string wrapper.
+// reference nodes. The bytes are the Dijkstra block_transaction, including its
+// is_valid flag.
 func validateLeiosEndorserBlockTxs(
 	manifestRaw []byte,
 	txsRaw []cbor.RawMessage,
@@ -486,7 +487,7 @@ func validateLeiosEndorserBlockTxStructure(
 	if err != nil {
 		return fmt.Errorf("decode endorser tx %d envelope: %w", index, err)
 	}
-	if _, err := safedecode.Transaction(gledger.TxTypeDijkstra, txCbor); err != nil {
+	if _, err := safedecode.DijkstraBlockTransaction(txCbor); err != nil {
 		return fmt.Errorf("decode endorser tx %d: %w", index, err)
 	}
 	return nil
@@ -503,18 +504,13 @@ func validateLeiosEndorserBlockTxStructures(
 	return nil
 }
 
+// leiosEndorserBlockTxCbor checks that raw is exactly one Dijkstra
+// block_transaction, [body, witnesses, auxiliary_data / null, is_valid], and
+// returns it. leios-fetch hands over the transaction already unwrapped from
+// its tag-24 byte string, so any other envelope is rejected rather than
+// guessed at: the manifest hash and size cover these exact bytes.
 func leiosEndorserBlockTxCbor(raw cbor.RawMessage) ([]byte, error) {
 	txCbor := []byte(raw)
-	if len(txCbor) > 0 && txCbor[0]>>5 == 2 {
-		inner, bytesRead, err := safedecode.Cbor[[]byte](txCbor)
-		if err != nil {
-			return nil, fmt.Errorf("unwrap byte-string transaction: %w", err)
-		}
-		if bytesRead != len(txCbor) {
-			return nil, errors.New("endorser transaction has trailing wrapper bytes")
-		}
-		txCbor = inner
-	}
 	txElems, bytesRead, err := safedecode.Cbor[[]cbor.RawMessage](txCbor)
 	if err != nil {
 		return nil, fmt.Errorf("decode transaction envelope: %w", err)
@@ -522,8 +518,15 @@ func leiosEndorserBlockTxCbor(raw cbor.RawMessage) ([]byte, error) {
 	if bytesRead != len(txCbor) {
 		return nil, errors.New("endorser transaction has trailing envelope bytes")
 	}
-	if len(txElems) == 0 {
-		return nil, errors.New("endorser transaction has no body")
+	if len(txElems) != 4 {
+		return nil, fmt.Errorf(
+			"endorser transaction has %d elements, expected 4",
+			len(txElems),
+		)
+	}
+	if len(txElems[3]) != 1 ||
+		(txElems[3][0] != 0xf4 && txElems[3][0] != 0xf5) {
+		return nil, errors.New("endorser transaction has no is_valid flag")
 	}
 	return txCbor, nil
 }
@@ -659,7 +662,12 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 	// distinct key instead of colliding with (or needing to evict) this one.
 	// Every remaining branch below is about the same
 	// occurrence's own transaction/verification state, not a slot conflict.
-	if existing := o.leiosEndorserBlocks[cacheKeys[0]]; existing != nil {
+	existing := o.leiosEndorserBlocks[cacheKeys[0]]
+	// Whether the closure was already complete and slot-verified before this
+	// store, so the arrival is recorded once, at the transition.
+	wasClosureReady := existing != nil && existing.completeTxCache() &&
+		existing.slotVerified
+	if existing != nil {
 		// Never regress a cached transaction set. The relay offers each
 		// endorser block on every connection, so a manifest-only store
 		// (txsRaw nil) routinely arrives after another connection has already
@@ -759,6 +767,11 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 	if data.slotVerified {
 		o.publishLeiosEndorserBlock(point, blockRaw, data)
 	}
+	// A block this node forged itself did not arrive from anywhere.
+	if origin != leiosStoreAuthoritative && !wasClosureReady &&
+		data.completeTxCache() && data.slotVerified {
+		o.recordLeiosEbArrival(point, data.txCount)
+	}
 	return nil
 }
 
@@ -800,7 +813,10 @@ func (o *Ouroboros) enqueueLeiosRelayOffers(
 		return
 	}
 	updated := *current
-	manifestOffer := !updated.relayManifestOffered
+	// An intent-only entry has no manifest to size the offer with. Receivers
+	// reject a zero-size offer by closing the connection, so defer until the
+	// manifest is stored (which re-enters here) and only then mark it offered.
+	manifestOffer := !updated.relayManifestOffered && updated.hasManifest()
 	if manifestOffer {
 		updated.relayManifestOffered = true
 	}
@@ -943,10 +959,10 @@ func (o *Ouroboros) scheduleLeiosEndorserBlockValidation(
 		o.leiosValidationMu.Unlock()
 		return
 	}
-	parentHash := ledger.LeiosValidationParentHash(header)
+	basis := ledger.LeiosEndorserBlockBasisHash(header)
 	pending := *current
 	pending.semanticValidationStatus = leiosEBValidationPending
-	pending.semanticValidationParent = slices.Clone(parentHash)
+	pending.semanticValidationParent = slices.Clone(basis)
 	pending.semanticValidationDone = make(chan struct{})
 	for _, cacheKey := range current.cacheKeys {
 		if o.leiosEndorserBlocks[cacheKey] == current {
@@ -962,14 +978,17 @@ func (o *Ouroboros) scheduleLeiosEndorserBlockValidation(
 
 // ValidateLeiosEndorserBlockForHeader waits through the configured diffusion
 // window for the exact endorser block announced by header, then validates it
-// synchronously while header's parent is still the applied ledger tip. Callers
-// use this at the selected block's apply boundary, or before adopting a locally
-// forged block, so validation cannot race the ranking block past the parent
-// state it names. Endorser-block bodies arrive independently on asynchronous
-// Leios fetch workers.
+// synchronously while basis is still the applied ledger tip. The ledger's
+// apply boundary passes ledger.LeiosEndorserBlockBasisHash, once the
+// announcing block is the tip and before the block that may certify it
+// applies. A forger checking its own announcement before adoption passes
+// ledger.LeiosValidationParentHash (see
+// ledger.LedgerState.ValidateLeiosEndorserBlockTransactions). Endorser-block
+// bodies arrive independently on asynchronous Leios fetch workers.
 func (o *Ouroboros) ValidateLeiosEndorserBlockForHeader(
 	ctx context.Context,
 	header lcommon.BlockHeader,
+	basis []byte,
 ) error {
 	if header == nil {
 		return errors.New("nil Leios announcing header")
@@ -989,7 +1008,7 @@ func (o *Ouroboros) ValidateLeiosEndorserBlockForHeader(
 	}
 	if o.ledgerState != nil && !slices.Equal(
 		o.ledgerState.Tip().Point.Hash,
-		ledger.LeiosValidationParentHash(header),
+		basis,
 	) {
 		return ledger.ErrLeiosValidationParentUnavailable
 	}
@@ -1051,7 +1070,7 @@ func (o *Ouroboros) ValidateLeiosEndorserBlockForHeader(
 	if err := validateLeiosEndorserBlockBinding(header, data); err != nil {
 		return err
 	}
-	validationParent := ledger.LeiosValidationParentHash(header)
+	validationParent := basis
 	var pending leiosEndorserBlockData
 	for {
 		o.leiosMu.Lock()
@@ -1121,6 +1140,7 @@ func (o *Ouroboros) ValidateLeiosEndorserBlockForHeader(
 		err = o.leiosAnnouncementLedger.ValidateLeiosEndorserBlockTransactions(
 			ctx,
 			header,
+			validationParent,
 			txCbors,
 		)
 	}
@@ -1263,6 +1283,7 @@ func (o *Ouroboros) validateLeiosEndorserBlock(
 		err = o.leiosAnnouncementLedger.ValidateLeiosEndorserBlockTransactions(
 			o.leiosValidationCtx,
 			header,
+			data.semanticValidationParent,
 			txCbors,
 		)
 	}
@@ -1552,6 +1573,8 @@ func (o *Ouroboros) bindLeiosEndorserBlockSlot(
 	now := time.Now()
 	o.pruneLeiosEndorserBlockCacheLocked(now)
 	data := o.leiosEndorserBlocks[key]
+	wasClosureReady := data != nil && data.completeTxCache() &&
+		data.slotVerified
 	contentChanged := false
 	if data == nil || !data.completeTxCache() {
 		// The manifest is content-addressed, so a complete cached occurrence
@@ -1641,6 +1664,13 @@ func (o *Ouroboros) bindLeiosEndorserBlockSlot(
 			verified.blockRaw,
 			&verified,
 		)
+		// Recorded here, not above: the caller may hold
+		// leiosAnnouncementsMu until it runs this closure, and recording
+		// resolves the slot through the ledger.
+		if !wasClosureReady && verified.completeTxCache() &&
+			verified.slotVerified {
+			o.recordLeiosEbArrival(verified.point, verified.txCount)
+		}
 	}
 }
 
@@ -2159,9 +2189,9 @@ func leiosTxsFromBitmap(
 		if mask&(1<<uint(63-(idx%64))) == 0 {
 			continue
 		}
-		ret = append(ret, slices.Clone(tx))
+		ret = append(ret, tx)
 	}
-	return ret
+	return txresponse.Clone(ret)
 }
 
 func leiosAvailableTxsFromBitmap(
@@ -2236,6 +2266,22 @@ func (o *Ouroboros) EndorserBlockTxsByHash(
 	return cloneRawMessages(data.txsRaw), true
 }
 
+// EndorserBlockDataByHash returns the verified manifest and complete
+// transaction bodies for one cached endorser-block occurrence. It satisfies
+// ledger.EndorserBlockDataProviderFunc for read paths that race persistence.
+func (o *Ouroboros) EndorserBlockDataByHash(
+	ebHash []byte,
+	ebSlot uint64,
+) ([]byte, []cbor.RawMessage, bool) {
+	data, ok := o.lookupLeiosEndorserBlock(ebSlot, ebHash)
+	if !ok || !data.completeTxCache() || !data.slotVerified ||
+		data.semanticValidationStatus == leiosEBValidationPending ||
+		data.semanticValidationStatus == leiosEBValidationInvalid {
+		return nil, nil, false
+	}
+	return bytes.Clone(data.blockRaw), cloneRawMessages(data.txsRaw), true
+}
+
 // EndorserBlockValidation reports the cached semantic verdict for an endorser
 // block occurrence.
 func (o *Ouroboros) EndorserBlockValidation(
@@ -2258,28 +2304,27 @@ func (o *Ouroboros) EndorserBlockValidation(
 	}
 }
 
-// EndorserBlockTxHashesByHash returns the manifest-order transaction hashes of
-// a complete cached endorser block at ebSlot. The forge loop uses this to
-// build the prototype-2026w29 post-certificate mempool view: transactions in
-// the EB being certified are excluded from the new EB announced by the same
-// ranking block. See EndorserBlockTxsByHash for why ebSlot is required.
-func (o *Ouroboros) EndorserBlockTxHashesByHash(
+// EndorserBlockClosureTxsByHash returns the manifest-order transactions of a
+// complete, slot-verified cached endorser block at ebSlot, as the
+// block_transaction CBOR the endorser block serves. The forge loop uses this
+// to rebase endorser-block selection onto the certified closure a ranking
+// block applies, as the prototype's post-certificate mempool view does:
+// transactions in the EB being certified, and transactions spending the
+// inputs they consume, are kept out of the new EB announced by the same
+// ranking block. The manifest references hash the block_transaction bytes,
+// not the transaction id the mempool keys by, so the forge loop derives the
+// ids from these bodies. Unlike EndorserBlockTxsByHash, it does not wait for
+// this node's own semantic verdict: the closure is certified, and the forge
+// loop only reads it. See EndorserBlockTxsByHash for why ebSlot is required.
+func (o *Ouroboros) EndorserBlockClosureTxsByHash(
 	ebHash []byte,
 	ebSlot uint64,
-) ([]string, bool) {
+) ([]cbor.RawMessage, bool) {
 	data, ok := o.lookupLeiosEndorserBlock(ebSlot, ebHash)
 	if !ok || !data.completeTxCache() || !data.slotVerified {
 		return nil, false
 	}
-	block, err := decodeLeiosEndorserBlock(data.blockRaw)
-	if err != nil {
-		return nil, false
-	}
-	hashes := make([]string, len(block.TransactionReferences))
-	for i, ref := range block.TransactionReferences {
-		hashes[i] = hex.EncodeToString(ref.TransactionHash.Bytes())
-	}
-	return hashes, true
+	return cloneRawMessages(data.txsRaw), true
 }
 
 // leiosAnnouncementFromBlockCbor returns the endorser block announced by the
@@ -2498,11 +2543,9 @@ func (o *Ouroboros) awaitMergedLeiosRankingBlock(
 //
 // It returns an error (and the caller serves the raw block) when the block is
 // not a fillable CertRB shape: the top level must have two elements, the body
-// three, and the existing transactions segment must be empty. Three-field
-// transactions are normalized with is_valid=true. Four-field transactions in
-// mempool order ([body, witnesses, is_valid, auxiliary_data]) are converted to
-// Dijkstra block order ([body, witnesses, auxiliary_data, is_valid]); inputs
-// already in block order are preserved.
+// three, and the existing transactions segment must be empty. Endorser
+// transactions are already in block_transaction form, is_valid included, and
+// are inlined unchanged, so a transaction marked invalid stays invalid.
 func spliceEndorserTxsIntoDijkstraBlock(
 	rankingBlockCbor []byte,
 	ebTxsRaw []cbor.RawMessage,
@@ -2540,7 +2583,9 @@ func spliceEndorserTxsIntoDijkstraBlock(
 	newTxs := make([]cbor.RawMessage, len(ebTxsRaw))
 	var err error
 	for i, tx := range ebTxsRaw {
-		newTxs[i], err = dijkstraBlockTransactionCbor(tx)
+		var txCbor []byte
+		txCbor, err = leiosEndorserBlockTxCbor(tx)
+		newTxs[i] = txCbor
 		if err != nil {
 			return nil, fmt.Errorf("convert endorser transaction %d: %w", i, err)
 		}
@@ -2572,58 +2617,6 @@ func spliceEndorserTxsIntoDijkstraBlock(
 		return nil, fmt.Errorf("encode merged block: %w", err)
 	}
 	return merged, nil
-}
-
-func dijkstraBlockTransactionCbor(
-	txCbor cbor.RawMessage,
-) (cbor.RawMessage, error) {
-	var components []cbor.RawMessage
-	if _, err := cbor.Decode(txCbor, &components); err != nil {
-		return nil, fmt.Errorf("decode transaction components: %w", err)
-	}
-	switch len(components) {
-	case 3:
-		validity, err := cbor.Encode(true)
-		if err != nil {
-			return nil, fmt.Errorf("encode transaction validity: %w", err)
-		}
-		components = append(components, validity)
-	case 4:
-		var valid bool
-		if len(components[3]) == 1 &&
-			(components[3][0] == 0xf4 || components[3][0] == 0xf5) {
-			if _, err := cbor.Decode(components[3], &valid); err != nil {
-				return nil, fmt.Errorf("decode transaction validity: %w", err)
-			}
-			if !valid {
-				return nil, errors.New("dijkstra transaction is marked invalid")
-			}
-			return txCbor, nil
-		}
-		if len(components[2]) != 1 ||
-			(components[2][0] != 0xf4 && components[2][0] != 0xf5) {
-			return nil, errors.New("dijkstra transaction has no validity boolean")
-		}
-		if _, err := cbor.Decode(components[2], &valid); err != nil {
-			return nil, fmt.Errorf("decode transaction validity: %w", err)
-		}
-		if !valid {
-			return nil, errors.New("dijkstra transaction is marked invalid")
-		}
-		// Standalone Dijkstra transactions put is_valid before auxiliary data;
-		// block transactions put it last.
-		components[2], components[3] = components[3], components[2]
-	default:
-		return nil, fmt.Errorf(
-			"dijkstra transaction has %d components, expected 3 or 4",
-			len(components),
-		)
-	}
-	encoded, err := cbor.Encode(components)
-	if err != nil {
-		return nil, fmt.Errorf("encode block transaction: %w", err)
-	}
-	return encoded, nil
 }
 
 // mergedLeiosRankingBlockCbor returns the node-to-client representation of a

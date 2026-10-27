@@ -185,7 +185,8 @@ func utxoReferencePredicate(inputCount int, alias string) string {
 }
 
 func utxoReferenceInsertBatchSQL(associationTable string, inputCount int) string {
-	return `INSERT INTO ` + associationTable + ` (utxo_id, transaction_hash)
+	return `-- name: InsertUtxoReferenceBatch :execrows
+INSERT INTO ` + associationTable + ` (utxo_id, transaction_hash)
 SELECT u.id, ? FROM utxo AS u
 WHERE (` + utxoReferencePredicate(inputCount, "u.") + `)
   AND NOT EXISTS (
@@ -195,7 +196,8 @@ WHERE (` + utxoReferencePredicate(inputCount, "u.") + `)
 }
 
 func utxoReferenceUpdateBatchSQL(column string, inputCount int) string {
-	return "UPDATE utxo SET " + column + " = ? WHERE (" +
+	return "-- name: UpdateUtxoReferenceBatch :execrows\n" +
+		"UPDATE utxo SET " + column + " = ? WHERE (" +
 		utxoReferencePredicate(inputCount, "") + ")"
 }
 
@@ -273,7 +275,7 @@ type addressIndexKey struct {
 }
 
 const (
-	deleteAddressTransactionSQL    = "DELETE FROM address_transaction WHERE transaction_id = ?"
+	deleteAddressTransactionSQL    = "-- name: DeleteAddressTransactionByTransaction :exec\nDELETE FROM address_transaction WHERE transaction_id = ?"
 	maxCachedAddressInputQuerySize = 32
 )
 
@@ -284,6 +286,7 @@ const addressTransactionInputQueryParamsPerRef = 2
 // Separate lookups keep SQLite on tx_id_output_idx for every input.
 func addressTransactionInputQuery(size int) string {
 	var query strings.Builder
+	query.WriteString("-- name: GetAddressTransactionInputs :many")
 	for i := range size {
 		if i > 0 {
 			query.WriteString(" UNION ALL ")
@@ -445,7 +448,8 @@ func TransactionWitnessTables() []string {
 // actually runs. Replay deletes can still scan while their index is deferred;
 // normal import assigns a new transaction ID and skips these deletes.
 func TransactionWitnessCleanupSQL(table string) string {
-	return "DELETE FROM " + table + " WHERE transaction_id = ?"
+	return "-- name: DeleteTransactionWitnessByTransaction :exec\n" +
+		"DELETE FROM " + table + " WHERE transaction_id = ?"
 }
 
 func (s *Store) storeTransactionWitnesses(
@@ -648,7 +652,7 @@ func storeScriptContent[T lcommon.Script](
 	scriptType uint8,
 	slot uint64,
 ) error {
-	if _, err := db.ExecContext(ctx, `
+	if _, err := db.ExecContext(ctx, `-- name: InsertScriptIfAbsent :exec
 INSERT INTO script (hash, content, created_slot, type)
 VALUES (?, ?, ?, ?)
 ON CONFLICT (hash) DO NOTHING`,

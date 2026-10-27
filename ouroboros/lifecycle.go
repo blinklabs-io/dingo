@@ -160,6 +160,7 @@ func (o *Ouroboros) close() error {
 	// handlers. A timer that fired concurrently with Close must not keep
 	// shutdown waiting on an ordered-lane enqueue.
 	o.stopFutureHeaderResyncs()
+	o.stopHeldTipRefresher()
 	o.subscriptionsMu.Lock()
 	subs := o.subscriptions
 	o.subscriptions = nil

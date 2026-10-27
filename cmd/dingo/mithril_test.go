@@ -131,3 +131,33 @@ func testStoragePlugins() config.PluginsConfig {
 		},
 	}
 }
+
+// TestServeAllowsInactivityGateAfterStream: a database that Mithril stream
+// catch-up populated replayed every block through the ledger, which renews
+// CIP-0163 expirations as it goes, so serving it with the gate on is allowed.
+// The keys mirror mithril's stream-only immutable-import marker
+// (setStreamImportMarker in import_marker.go).
+func TestServeAllowsInactivityGateAfterStream(t *testing.T) {
+	t.Parallel()
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	dir := t.TempDir()
+	cfg := &config.Config{
+		DelegatorInactivityEnabled: true,
+		DatabasePath:               dir,
+		Plugins:                    testStoragePlugins(),
+	}
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: dir,
+		Logger:  logger,
+	})
+	require.NoError(t, err)
+	require.NoError(
+		t,
+		db.SetSyncState("mithril_immutable_stream_only", "1", nil),
+	)
+	require.NoError(t, db.SetSyncState("mithril_immutable_max", "26887", nil))
+	require.NoError(t, dbtest.CloseDatabase(db))
+
+	require.NoError(t, checkMithrilInactivityCompat(cfg, logger))
+}

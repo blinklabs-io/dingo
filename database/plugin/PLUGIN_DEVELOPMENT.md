@@ -6,7 +6,15 @@ configuration is decoded before construction, and the host owns `Start`/`Stop`.
 
 Storage contracts remain in `database/plugin/blob` and
 `database/plugin/metadata`; the generic `plugin` package does not import either
-domain. The same platform also hosts mempool and API providers.
+domain. The same platform also hosts consensus, mempool, and API providers.
+
+Consensus providers implement `consensus.Provider`. One resolved instance must
+make header authorization, leader scheduling, and chain comparison decisions
+for the whole node. Keep ledger state and producer credentials in their owning
+components: use `consensus.HeaderVerifier` for ledger-owned Praos checks and
+the scheduler factory supplied by composition. A provider must return stable,
+versioned network, database, and schedule identities. Register it explicitly in
+`internal/plugins/register.go`; do not register from `init`.
 
 ## Provider shape
 
@@ -67,6 +75,9 @@ map so an untagged binary returns the actionable build-tag error.
 
 ```yaml
 plugins:
+  consensus:
+    provider: praos
+    config: {}
   storage:
     blob:
       provider: example
@@ -74,13 +85,37 @@ plugins:
         bucket: blocks
 ```
 
-The selector flag is `--blob example`. Generic environment paths flatten the
+Selector flags include `--consensus praos` and `--blob example`. Generic environment paths flatten the
 capability and config field names, for example:
 
 ```text
 DINGO_PLUGINS_STORAGE_BLOB_PROVIDER=example
 DINGO_PLUGINS_STORAGE_BLOB_CONFIG_BUCKET=blocks
 ```
+
+A `_FILE` suffix sets the field to the contents of a file instead, so a secret
+such as a password need not appear in the environment. The contents are used
+as a plain string, never parsed as YAML, with trailing line endings removed.
+The file must be a regular file of at most 64 KiB whose contents are not
+blank. On Unix the file and non-sticky path entries must be owned by the Dingo
+user or root, directories must deny group and other writes unless they use the
+sticky bit, and other users must have no file access (owner and group access is
+allowed). Anything else fails configuration loading:
+
+```text
+DINGO_PLUGINS_STORAGE_METADATA_CONFIG_PASSWORD_FILE=/run/secrets/db-password
+```
+
+Orchestrators do not create such files by default. A Docker Swarm secret is
+mounted with mode `0444`, so set the secret's `mode` to `0400` with a `uid`, or
+to `0440` with a `gid`, matching the user Dingo runs as. A Kubernetes secret
+volume defaults to `0644`, so set `defaultMode: 0400`, or `0440` with the pod's
+`fsGroup`. On Windows the rule is stricter: the file's ACL may grant access only
+to its owner, Administrators, SYSTEM, CREATOR OWNER and OWNER RIGHTS, so a grant
+to any other user or group fails, including the group access Unix allows.
+
+Setting both forms of one field is an error. Because the suffix is reserved, a
+provider field whose name ends in `File` cannot be set from the environment.
 
 Precedence is selector CLI flag, generic plugin environment, YAML, then
 provider defaults. There are no provider-specific flags, mutable global option

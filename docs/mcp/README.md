@@ -639,7 +639,7 @@ The Dingo MCP server provides 21 specialized tools:
 | `get_governance_state` | Conway CIP-1694 governance state (constitution, committee quorum, members, DReps) | `drep_credential` (optional Bech32 `drep1...` or 56-hex) |
 | `get_pool_performance` | Historical SPO reward performance, blocks, delegated stake and pledge (lovelace), and apparent performance | `pool_id` (Bech32 `pool1...` or 56-hex, required), `epoch` (optional int), `limit` (default 10, max 50) |
 | `get_protocol_parameters` | Active ledger protocol parameters (fees, min UTxO, max ExUnits, Plutus prices, governance deposits) | *none* |
-| `get_mempool_info` | Live mempool metrics (pending tx count, byte volume, saturation percentage) or tx status | `tx_hash` (optional 64-character hex) |
+| `get_mempool_info` | Live mempool metrics (pending tx count, byte volume, saturation percentage) or tx status | `tx_hash` (optional 64-character hex), `limit` (optional, default 10, at most 50) |
 | `decode_address` | Cryptographically parse Bech32 or raw hex address into network ID and payment/stake credentials | `address` (string, required) |
 | `get_governance_proposal` | Query CIP-1694 governance proposals with CC, DRep, and SPO voting breakdown tallies | `tx_hash` (optional), `action_index` (optional), `status` (optional: `active`, `ratified`, `enacted`, `expired`, `all`), `limit` |
 | `calculate_min_utxo` | Compute CIP-55 minimum required Lovelace for output shapes with multi-assets and datums | `output_cbor_hex`, `address`, `coins_per_utxo_byte` |
@@ -687,10 +687,10 @@ without relying on average asset sizes.
 Inspects Dingo's live in-memory transaction buffer (mempool) awaiting inclusion in upcoming forged blocks:
 - **Global Mempool Health (when called with `{}`)**:
   - `pending_tx_count`: Total number of validated transactions currently queued in memory.
-  - `mempool_bytes`: Aggregated memory volume consumed by buffered transactions.
+  - `mempool_bytes`: Bytes retained by buffered transactions (CBOR plus decoded outputs), the figure capacity and admission are measured against.
   - `max_mempool_bytes`: Configured maximum memory pool capacity (default 1 MiB in standard modes, 25 MiB in Leios).
   - `saturation_pct`: Real-time percentage saturation of the node's mempool buffer.
-  - `transactions`: Summary listing of pending transaction hashes, fees, and sizes in bytes.
+  - `transactions`: The first `limit` pending transactions (default 10, at most 50) in queue order, with hash, size in bytes, type, and age.
 - **Single Transaction Inspection (when called with `{"tx_hash": "..."}`)**:
   - Verifies whether an emitted transaction has been admitted into the local mempool, its queued slot, fee, and byte size.
 
@@ -719,7 +719,7 @@ Mirrors Kupo-style indexing by finding all unspent UTxOs containing assets under
 #### `get_asset_info`
 Consolidates on-chain and off-chain asset intelligence into a unified profile:
 - **Cardano Token Registry**: Pulls off-chain name, ticker, description, website URL, and decimals from the synchronized token registry.
-- **On-Chain Circulation**: Aggregates total live unspent quantity and the count of holding UTxOs. This count is not a unique wallet or address count.
+- **On-Chain Circulation**: Aggregates total live unspent quantity and the count of holding UTxOs. This count is not a unique wallet or address count. When more than 50,000 live asset rows match, the tool returns an incomplete-result error instead of partial totals.
 - **Mint / Burn History**: Shows initial mint transaction hash, slot, and total minted/burned quantity.
 - **CIP-25 NFT Metadata**: Returns sanitized, JSON-quoted text from transaction label 721 when available; the result is marked as untrusted data.
 

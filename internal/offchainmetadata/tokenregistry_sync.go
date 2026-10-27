@@ -38,6 +38,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/httpuseragent"
 	"golang.org/x/crypto/blake2b"
 	"golang.org/x/net/http/httpguts"
 )
@@ -109,11 +110,8 @@ const (
 	// roughly 8,000 mappings in the mainnet registry.
 	tokenRegistryBatchSize = 500
 
-	// nolint:gosec // G101 matches on "Token" in the name; this is a
-	// user agent for the CIP-26 token registry, not a credential.
-	defaultTokenRegistryUserAgent = "dingo-token-registry/1" //nolint:gosec
-	tokenRegistryMappingsDir      = "mappings"
-	tokenRegistryMappingExt       = ".json"
+	tokenRegistryMappingsDir = "mappings"
+	tokenRegistryMappingExt  = ".json"
 )
 
 // TokenRegistryStore is the persistence surface the registry sync needs.
@@ -275,6 +273,10 @@ func NewTokenRegistrySync(
 				return err
 			}
 		}
+		// net/http derives Referer from the previous request before invoking
+		// CheckRedirect. Registry URLs may contain credentials in their query,
+		// so no redirect may forward that URL as a header.
+		req.Header.Del("Referer")
 		return validateTokenRegistryHTTPSURL(
 			req.URL.String(),
 			cfg.AllowPrivateAddresses,
@@ -308,7 +310,7 @@ func NewTokenRegistrySync(
 	}
 	userAgent := cfg.UserAgent
 	if userAgent == "" {
-		userAgent = defaultTokenRegistryUserAgent
+		userAgent = httpuseragent.Default()
 	}
 	maxBytes := cfg.MaxBytes
 	if maxBytes <= 0 {
@@ -731,38 +733,60 @@ func (s *TokenRegistrySync) stageAuthenticatedSnapshot(
 	ctx context.Context,
 	body io.Reader,
 	manifest tokenRegistryManifest,
-) (*tokenRegistryStage, error) {
-	hasher, err := blake2b.New256(nil)
-	if err != nil {
-		return nil, fmt.Errorf("initialize token registry snapshot digest: %w", err)
+) (stage *tokenRegistryStage, retErr error) {
+	if manifest.ArchiveBytes < 0 {
+		return nil, fmt.Errorf(
+			"token registry snapshot manifest has negative size %d",
+			manifest.ArchiveBytes,
+		)
 	}
-	compressed := &countingReader{reader: io.TeeReader(body, hasher)}
-	stage, err := s.stageSnapshot(ctx, compressed)
-	if err != nil {
-		return nil, err
-	}
-	remaining := s.maxBytes - compressed.read
-	if remaining < 0 {
-		_ = stage.close(s.removeStageFile)
+	if manifest.ArchiveBytes > s.maxBytes {
 		return nil, fmt.Errorf(
 			"token registry snapshot exceeds %d bytes",
 			s.maxBytes,
 		)
 	}
-	_, drainErr := io.Copy(io.Discard, limitReaderPast(compressed, remaining))
-	if drainErr != nil {
-		_ = stage.close(s.removeStageFile)
-		return nil, fmt.Errorf("read token registry snapshot: %w", drainErr)
+	hasher, err := blake2b.New256(nil)
+	if err != nil {
+		return nil, fmt.Errorf("initialize token registry snapshot digest: %w", err)
+	}
+	// Authenticate the bounded bytes before gzip or tar readers inspect them.
+	archiveFile, err := os.CreateTemp("", "dingo-token-registry-archive-*")
+	if err != nil {
+		return nil, fmt.Errorf("create token registry archive staging file: %w", err)
+	}
+	archivePath := archiveFile.Name()
+	defer func() {
+		cleanupErr := errors.Join(archiveFile.Close(), os.Remove(archivePath))
+		if cleanupErr == nil {
+			return
+		}
+		retErr = errors.Join(
+			retErr,
+			fmt.Errorf("clean token registry archive staging file: %w", cleanupErr),
+		)
+		if stage != nil {
+			stageCleanupErr := stage.close(s.removeStageFile)
+			stage = nil
+			retErr = errors.Join(retErr, stageCleanupErr)
+		}
+	}()
+	compressed := &countingReader{
+		reader: limitReaderPast(
+			io.TeeReader(&contextReader{ctx: ctx, reader: body}, hasher),
+			s.maxBytes,
+		),
+	}
+	if _, err := io.Copy(archiveFile, compressed); err != nil {
+		return nil, fmt.Errorf("read token registry snapshot: %w", err)
 	}
 	if compressed.read > s.maxBytes {
-		_ = stage.close(s.removeStageFile)
 		return nil, fmt.Errorf(
 			"token registry snapshot exceeds %d bytes",
 			s.maxBytes,
 		)
 	}
 	if compressed.read != manifest.ArchiveBytes {
-		_ = stage.close(s.removeStageFile)
 		return nil, fmt.Errorf(
 			"token registry snapshot is %d bytes, manifest declares %d",
 			compressed.read,
@@ -771,8 +795,14 @@ func (s *TokenRegistrySync) stageAuthenticatedSnapshot(
 	}
 	actualDigest := hex.EncodeToString(hasher.Sum(nil))
 	if actualDigest != manifest.ArchiveDigest {
-		_ = stage.close(s.removeStageFile)
 		return nil, errors.New("token registry snapshot digest does not match manifest")
+	}
+	if _, err := archiveFile.Seek(0, io.SeekStart); err != nil {
+		return nil, fmt.Errorf("rewind token registry archive staging file: %w", err)
+	}
+	stage, err = s.stageSnapshot(ctx, archiveFile)
+	if err != nil {
+		return nil, err
 	}
 	return stage, nil
 }
@@ -1546,6 +1576,22 @@ func isTokenRegistryMapping(header *tar.Header) bool {
 type countingReader struct {
 	reader io.Reader
 	read   int64
+}
+
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r *contextReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	n, err := r.reader.Read(p)
+	if contextErr := r.ctx.Err(); contextErr != nil {
+		return n, contextErr
+	}
+	return n, err
 }
 
 func (c *countingReader) Read(p []byte) (int, error) {

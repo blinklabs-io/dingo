@@ -78,6 +78,9 @@ const (
 	// DefaultMaxConcurrentBulkRequests caps how many bulk read handlers run
 	// at once; further requests are refused with ResourceExhausted.
 	DefaultMaxConcurrentBulkRequests = 32
+	DefaultMaxConcurrentEvalRequests = 4
+	DefaultMaxEvalRequestsPerClient  = 2
+	defaultListenHost                = "127.0.0.1"
 	// DefaultBulkResponseWriteTimeout bounds delivery of a bulk unary
 	// response without imposing a deadline on streaming RPCs.
 	DefaultBulkResponseWriteTimeout = 30 * time.Second
@@ -95,8 +98,12 @@ type Utxorpc struct {
 	listener *apilistener.Listener
 	config   UtxorpcConfig
 	// bulkSlots is a counting semaphore sized by MaxConcurrentBulkRequests.
-	bulkSlots chan struct{}
-	streams   *streamLimiter
+	bulkSlots    chan struct{}
+	streams      *streamLimiter
+	replays      *replayLimiter
+	evalRequests *streamLimiter
+	// watchHistory is the process-wide budget for WatchTx undo histories.
+	watchHistory *watchTxHistoryBudget
 }
 
 type UtxorpcConfig struct {
@@ -126,8 +133,8 @@ type UtxorpcConfig struct {
 	// request (0 = use default).
 	MaxTxRefs int
 	// MaxStreams caps concurrent FollowTip, WatchTx, WatchMempool and WaitForTx streams
-	// across all clients; MaxStreamsPerClient caps them per remote host
-	// (0 = use default).
+	// across all clients; MaxStreamsPerClient caps them per client, an IPv4
+	// address or IPv6 /64 (0 = use default).
 	MaxStreams          int
 	MaxStreamsPerClient int
 	// MaxPredicateNodes caps the total nodes of a watch predicate
@@ -136,6 +143,32 @@ type UtxorpcConfig struct {
 	// MaxReplayBlocks caps how far behind the tip a WatchTx intersect may
 	// start, in blocks (0 = use default).
 	MaxReplayBlocks int
+	// MaxWatchHistoryBytes caps the bytes one WatchTx stream retains for
+	// rollback; older blocks are evicted and rebuilt from persisted blocks if
+	// a rollback needs them (0 = use default).
+	MaxWatchHistoryBytes int64
+	// MaxWatchHistoryBytesTotal caps the bytes all WatchTx streams retain
+	// for rollback together (0 = use default).
+	MaxWatchHistoryBytesTotal int64
+	// MaxConcurrentReplays caps FollowTip streams that are serving blocks
+	// behind the tip at once, across all clients; a further replay is refused
+	// with ResourceExhausted (0 = use default).
+	MaxConcurrentReplays int
+	// MaxReplaysPerClient caps the FollowTip streams one client may have
+	// serving blocks behind the tip at once, so one client cannot hold every
+	// MaxConcurrentReplays slot (0 = use default).
+	MaxReplaysPerClient int
+	// ReplayBlocksPerSecond paces the historical blocks FollowTip serves to
+	// one client across all its streams; replay slows down, it does not stop
+	// (0 = use default).
+	ReplayBlocksPerSecond int
+	// MaxReplayBlocksPerClient caps the historical blocks FollowTip serves to
+	// one client per ReplayBudgetWindow; a replay that spends it ends with
+	// ResourceExhausted (0 = use default).
+	MaxReplayBlocksPerClient int64
+	// ReplayBudgetWindow is the period MaxReplayBlocksPerClient covers
+	// (0 = use default).
+	ReplayBudgetWindow time.Duration
 	// MaxPoolFilter caps ReadState's pool_keyhashes filter length.
 	MaxPoolFilter int
 	// MaxMempoolItems caps ReadMempool's result size (0 = use default).
@@ -146,6 +179,10 @@ type UtxorpcConfig struct {
 	// MaxConcurrentBulkRequests caps concurrently running bulk read handlers
 	// (0 = use default).
 	MaxConcurrentBulkRequests int
+	// MaxConcurrentEvalRequests caps EvalTx handlers before transaction
+	// decoding; MaxEvalRequestsPerClient applies the same bound per client.
+	MaxConcurrentEvalRequests int
+	MaxEvalRequestsPerClient  int
 	// BulkResponseWriteTimeout bounds delivery of a bulk unary response
 	// (0 = use default).
 	BulkResponseWriteTimeout time.Duration
@@ -168,7 +205,7 @@ func NewUtxorpc(cfg UtxorpcConfig) *Utxorpc {
 	}
 	cfg.Logger = cfg.Logger.With("component", "utxorpc")
 	if cfg.Host == "" {
-		cfg.Host = "0.0.0.0"
+		cfg.Host = defaultListenHost
 	}
 	if cfg.Port == 0 {
 		cfg.Port = 9090
@@ -207,6 +244,27 @@ func NewUtxorpc(cfg UtxorpcConfig) *Utxorpc {
 	if cfg.MaxReplayBlocks <= 0 {
 		cfg.MaxReplayBlocks = DefaultMaxReplayBlocks
 	}
+	if cfg.MaxWatchHistoryBytes <= 0 {
+		cfg.MaxWatchHistoryBytes = DefaultMaxWatchHistoryBytes
+	}
+	if cfg.MaxWatchHistoryBytesTotal <= 0 {
+		cfg.MaxWatchHistoryBytesTotal = DefaultMaxWatchHistoryBytesTotal
+	}
+	if cfg.MaxConcurrentReplays <= 0 {
+		cfg.MaxConcurrentReplays = DefaultMaxConcurrentReplays
+	}
+	if cfg.MaxReplaysPerClient <= 0 {
+		cfg.MaxReplaysPerClient = DefaultMaxReplaysPerClient
+	}
+	if cfg.ReplayBlocksPerSecond <= 0 {
+		cfg.ReplayBlocksPerSecond = DefaultReplayBlocksPerSecond
+	}
+	if cfg.MaxReplayBlocksPerClient <= 0 {
+		cfg.MaxReplayBlocksPerClient = DefaultMaxReplayBlocksPerClient
+	}
+	if cfg.ReplayBudgetWindow <= 0 {
+		cfg.ReplayBudgetWindow = DefaultReplayBudgetWindow
+	}
 	if cfg.MaxPoolFilter <= 0 {
 		cfg.MaxPoolFilter = DefaultMaxPoolFilter
 	}
@@ -218,6 +276,12 @@ func NewUtxorpc(cfg UtxorpcConfig) *Utxorpc {
 	}
 	if cfg.MaxConcurrentBulkRequests <= 0 {
 		cfg.MaxConcurrentBulkRequests = DefaultMaxConcurrentBulkRequests
+	}
+	if cfg.MaxConcurrentEvalRequests <= 0 {
+		cfg.MaxConcurrentEvalRequests = DefaultMaxConcurrentEvalRequests
+	}
+	if cfg.MaxEvalRequestsPerClient <= 0 {
+		cfg.MaxEvalRequestsPerClient = DefaultMaxEvalRequestsPerClient
 	}
 	if cfg.BulkResponseWriteTimeout <= 0 {
 		cfg.BulkResponseWriteTimeout = DefaultBulkResponseWriteTimeout
@@ -232,6 +296,21 @@ func NewUtxorpc(cfg UtxorpcConfig) *Utxorpc {
 		config:    cfg,
 		bulkSlots: make(chan struct{}, cfg.MaxConcurrentBulkRequests),
 		streams:   newStreamLimiter(cfg.MaxStreams, cfg.MaxStreamsPerClient),
+		evalRequests: newRequestLimiter(
+			cfg.MaxConcurrentEvalRequests,
+			cfg.MaxEvalRequestsPerClient,
+			"EvalTx request",
+		),
+		watchHistory: newWatchTxHistoryBudget(
+			cfg.MaxWatchHistoryBytesTotal,
+		),
+		replays: newReplayLimiter(
+			cfg.MaxConcurrentReplays,
+			cfg.MaxReplaysPerClient,
+			cfg.ReplayBlocksPerSecond,
+			cfg.MaxReplayBlocksPerClient,
+			cfg.ReplayBudgetWindow,
+		),
 		listener: apilistener.New(
 			"utxorpc gRPC", cfg.Logger,
 		),

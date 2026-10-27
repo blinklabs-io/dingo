@@ -25,6 +25,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/ledger/governance"
+	"github.com/blinklabs-io/dingo/utxoref"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
@@ -225,11 +226,12 @@ func (d *LedgerDelta) applyWithDonationRecording(
 	storageIndexOffset := d.expandedIndexOffset
 	for i, tr := range d.Transactions {
 		var proposalsValidated bool
-		if tr.Index < 0 || tr.Index > math.MaxUint32 {
+		if !fitsUint32(tr.Index) {
 			return fmt.Errorf("transaction index out of range: %d", tr.Index)
 		}
 		levels := TransactionLevelsForApply(tr.Tx)
 		childCount := uint64(len(levels)) - 1
+		// #nosec G115 -- the transaction index is checked against uint32 above.
 		storageBaseIndex := uint64(tr.Index) + storageIndexOffset
 		storageParentIndex := storageBaseIndex + childCount
 		if storageParentIndex > math.MaxUint32 {
@@ -299,7 +301,7 @@ func (d *LedgerDelta) applyWithDonationRecording(
 			}
 			opts := database.BatchedTxIngestOpts{
 				SkipConsumedInputRecovery:      d.skipConsumedInputRecovery,
-				TrustedImmutableReplay:         ls.config.TrustedReplay,
+				TrustedImmutableReplay:         ls.trustedReplayActive(),
 				LedgerContextSlot:              d.closureContextSlot,
 				StrictAppliedInputConservation: d.strictConsumedInputs,
 				SkipWithdrawalWitnessWrite:     !ls.config.DelegatorInactivityEnabled,
@@ -322,6 +324,9 @@ func (d *LedgerDelta) applyWithDonationRecording(
 				)
 				if setErr == nil && ls.afterBatchedTransactionWrite != nil {
 					ls.afterBatchedTransactionWrite()
+				}
+				if setErr == nil && ls.afterBatchedTransactionStored != nil {
+					setErr = ls.afterBatchedTransactionStored(txn, level)
 				}
 			} else {
 				setErr = ls.db.SetTransactionWithOpts(
@@ -718,10 +723,30 @@ func (b *LedgerDeltaBatch) apply(
 	ls *LedgerState,
 	txn *database.Txn,
 ) error {
-	// API mode batches without the flag. Other storage modes batch only when
-	// ApplyRowBatchingEnabled is set; the stored state is the same either way.
+	if ls.externalIngest.trusted.Load() {
+		// ApplyTrustedBatch's beforeCommit deletes outputs spent within
+		// the batch only if a delta batch applied without the overlay.
+		usedOverlay := false
+		defer func() { ls.externalIngest.recordApply(usedOverlay) }()
+		return b.applyBatched(ctx, ls, txn, &usedOverlay)
+	}
+	return b.applyBatched(ctx, ls, txn, nil)
+}
+
+// applyBatched is apply; usedOverlay, when not nil, is set when the batch
+// applied through a batch UTxO overlay.
+func (b *LedgerDeltaBatch) applyBatched(
+	ctx context.Context,
+	ls *LedgerState,
+	txn *database.Txn,
+	usedOverlay *bool,
+) (err error) {
+	// API mode and ApplyTrustedBatch batch without the flag. Other storage
+	// modes batch only when ApplyRowBatchingEnabled is set; the stored state
+	// is the same either way.
 	if ls.db.StorageMode() != types.StorageModeAPI &&
-		!ls.config.ApplyRowBatchingEnabled {
+		!ls.config.ApplyRowBatchingEnabled &&
+		!ls.externalIngest.trusted.Load() {
 		return b.applyUnbatched(ctx, ls, txn)
 	}
 	// The accumulator path does not implement Leios closure context or its
@@ -740,6 +765,17 @@ func (b *LedgerDeltaBatch) apply(
 		return b.applyUnbatched(ctx, ls, txn)
 	}
 	defer acc.Reset()
+	// Every statement of the overlay's lifetime returns through here, so a
+	// conflict a read barrier recorded but could not return reaches
+	// ApplyTrustedBatch's per-row fallback. Runs before acc.Reset.
+	defer func() { err = database.WithBatchUtxoOverlayError(acc, err) }()
+	overlay, err := b.enableTrustedUtxoOverlay(ls, txn, acc)
+	if err != nil {
+		return err
+	}
+	if usedOverlay != nil {
+		*usedOverlay = overlay
+	}
 	for _, delta := range b.deltas {
 		if delta == nil {
 			continue // Skip nil deltas (shouldn't happen in normal operation)
@@ -748,6 +784,8 @@ func (b *LedgerDeltaBatch) apply(
 		if err != nil {
 			return err
 		}
+		// With the overlay this only ends the block's stake segment; the
+		// overlay writes it at FlushBatch or at a read barrier.
 		if err := ls.db.FlushBatchStakeDeltas(acc, txn); err != nil {
 			return fmt.Errorf("flush ledger delta stake metadata: %w", err)
 		}
@@ -756,6 +794,69 @@ func (b *LedgerDeltaBatch) apply(
 		return fmt.Errorf("flush ledger delta metadata batch: %w", err)
 	}
 	return nil
+}
+
+// enableTrustedUtxoOverlay attaches a batch UTxO overlay to acc when b is
+// applied by ApplyTrustedBatch and every delta is a plain ranking-block
+// delta. It reads the batch's pre-batch inputs once, in bulk; the store
+// declines outside SQLite core storage mode. Dijkstra blocks stay on the
+// per-row path because endorser closures consume inputs their ranking
+// transactions do not name, and so do later eras until they are known not
+// to.
+func (b *LedgerDeltaBatch) enableTrustedUtxoOverlay(
+	ls *LedgerState,
+	txn *database.Txn,
+	acc database.BatchAccumulator,
+) (bool, error) {
+	e := &ls.externalIngest
+	if !e.trusted.Load() || e.overlayOff.Load() || ls.trustedBatchOverlayOff {
+		return false, nil
+	}
+	produced := make(map[utxoref.Key]struct{})
+	var inputs []models.UtxoId
+	for _, delta := range b.deltas {
+		if delta == nil {
+			continue
+		}
+		if delta.BlockEraId >= dijkstra.EraIdDijkstra {
+			return false, nil
+		}
+		for _, tr := range delta.Transactions {
+			levels := TransactionLevelsForApply(tr.Tx)
+			if len(levels) != 1 {
+				return false, nil
+			}
+			for _, input := range levels[0].Consumed() {
+				if _, ok := produced[utxoref.ForInput(input)]; ok {
+					continue
+				}
+				inputs = append(inputs, models.UtxoId{
+					Hash: input.Id().Bytes(),
+					Idx:  input.Index(),
+				})
+			}
+			for _, utxo := range levels[0].Produced() {
+				produced[utxoref.ForUtxo(utxo)] = struct{}{}
+			}
+		}
+	}
+	if len(inputs) == 0 && len(produced) == 0 {
+		return false, nil
+	}
+	var deleteOnSpend []models.UtxoId
+	if spends := e.spends.Load(); spends != nil {
+		deleteOnSpend = spends.committedAmong(inputs)
+	}
+	enabled, err := ls.db.EnableBatchUtxoOverlay(
+		acc, txn, inputs, deleteOnSpend,
+	)
+	if err != nil {
+		return false, fmt.Errorf("enable batch UTxO overlay: %w", err)
+	}
+	if enabled && ls.afterTrustedBatchOverlay != nil {
+		ls.afterTrustedBatchOverlay()
+	}
+	return enabled, nil
 }
 
 func (b *LedgerDeltaBatch) applyUnbatched(

@@ -261,11 +261,7 @@ func TestFetchEndorserBlockByPointRecyclesDeadConnectionAndFailsOver(
 				ProtocolId: leiosfetch.ProtocolId,
 				IsResponse: true,
 				Messages: []protocol.Message{
-					leiosfetch.NewMsgBlockTxs(
-						point,
-						bitmap,
-						[]cbor.RawMessage{tx},
-					),
+					leiosfetch.NewMsgBlockTxs([]cbor.RawMessage{tx}),
 				},
 			},
 			// The second endorser block: this peer cannot serve it, and the
@@ -558,7 +554,7 @@ func TestFetchEndorserBlockByPointReportsNoPeerAfterDisconnect(t *testing.T) {
 func TestFetchEndorserBlockByPointPrefersExactOfferSource(t *testing.T) {
 	t.Parallel()
 
-	tx, manifestRaw, point, bitmap := leiosCertifiedRecoveryFixture(
+	tx, manifestRaw, point, _ := leiosCertifiedRecoveryFixture(
 		t,
 		0x55,
 		376041,
@@ -577,11 +573,7 @@ func TestFetchEndorserBlockByPointPrefersExactOfferSource(t *testing.T) {
 				ProtocolId: leiosfetch.ProtocolId,
 				IsResponse: true,
 				Messages: []protocol.Message{
-					leiosfetch.NewMsgBlockTxs(
-						point,
-						bitmap,
-						[]cbor.RawMessage{wrongTx},
-					),
+					leiosfetch.NewMsgBlockTxs([]cbor.RawMessage{wrongTx}),
 				},
 			},
 		),
@@ -598,11 +590,7 @@ func TestFetchEndorserBlockByPointPrefersExactOfferSource(t *testing.T) {
 				ProtocolId: leiosfetch.ProtocolId,
 				IsResponse: true,
 				Messages: []protocol.Message{
-					leiosfetch.NewMsgBlockTxs(
-						point,
-						bitmap,
-						[]cbor.RawMessage{tx},
-					),
+					leiosfetch.NewMsgBlockTxs([]cbor.RawMessage{tx}),
 				},
 			},
 		),
@@ -1098,7 +1086,7 @@ func TestFetchEndorserBlockByPointRotatesPastPeerThatNeverAnswers(
 ) {
 	t.Parallel()
 
-	tx, manifestRaw, point, bitmap := leiosCertifiedRecoveryFixture(
+	tx, manifestRaw, point, _ := leiosCertifiedRecoveryFixture(
 		t,
 		0x58,
 		376044,
@@ -1125,11 +1113,7 @@ func TestFetchEndorserBlockByPointRotatesPastPeerThatNeverAnswers(
 				ProtocolId: leiosfetch.ProtocolId,
 				IsResponse: true,
 				Messages: []protocol.Message{
-					leiosfetch.NewMsgBlockTxs(
-						point,
-						bitmap,
-						[]cbor.RawMessage{tx},
-					),
+					leiosfetch.NewMsgBlockTxs([]cbor.RawMessage{tx}),
 				},
 			},
 		),

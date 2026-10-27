@@ -64,6 +64,12 @@ type Manager struct {
 	// Tests replace it to fire the trigger without waiting on a clock.
 	newTick func() (<-chan time.Time, func())
 
+	// deferMu guards deferrals, the outstanding Defer calls, and skipped,
+	// whether a trigger arrived while any was outstanding.
+	deferMu   sync.Mutex
+	deferrals int
+	skipped   bool
+
 	mu             sync.Mutex
 	cancel         context.CancelFunc
 	subscriptionID event.EventSubscriberId
@@ -165,6 +171,56 @@ func (m *Manager) Stop() error {
 	return nil
 }
 
+// Defer holds back the epoch and periodic runs until resume is called, for a
+// write burst such as a Mithril stream catch-up: a run holds SQLite's only
+// write connection, and on a database growing that fast nearly every table
+// passes the re-analysis threshold at every epoch, so the runs cost more the
+// further the burst gets and their statistics are stale again within the
+// next epoch. Every trigger that arrives while deferred collapses into one
+// run queued when the last resume is called; none is queued if nothing
+// arrived. A run already in flight when Defer is called finishes. Nested
+// calls are counted, and calling one resume more than once has no further
+// effect. Defer on a nil Manager returns a no-op.
+func (m *Manager) Defer() (resume func()) {
+	if m == nil {
+		return func() {}
+	}
+	m.deferMu.Lock()
+	m.deferrals++
+	m.deferMu.Unlock()
+	return sync.OnceFunc(func() {
+		m.deferMu.Lock()
+		m.deferrals--
+		queue := m.deferrals == 0 && m.skipped
+		if queue {
+			m.skipped = false
+		}
+		m.deferMu.Unlock()
+		if queue {
+			m.signal()
+		}
+	})
+}
+
+// deferred reports whether runs are deferred, recording the skipped trigger
+// when they are.
+func (m *Manager) deferred() bool {
+	m.deferMu.Lock()
+	defer m.deferMu.Unlock()
+	if m.deferrals == 0 {
+		return false
+	}
+	m.skipped = true
+	return true
+}
+
+func (m *Manager) signal() {
+	select {
+	case m.pending <- struct{}{}:
+	default:
+	}
+}
+
 func (m *Manager) handleEpochTransition(evt event.Event) {
 	epochEvent, ok := evt.Data.(event.EpochTransitionEvent)
 	if !ok {
@@ -182,10 +238,7 @@ func (m *Manager) handleEpochTransition(evt event.Event) {
 		epochEvent.ProtocolVersion >= shelleyProtocolMajor {
 		return
 	}
-	select {
-	case m.pending <- struct{}{}:
-	default:
-	}
+	m.signal()
 }
 
 func (m *Manager) worker(ctx context.Context, tick <-chan time.Time) {
@@ -194,9 +247,13 @@ func (m *Manager) worker(ctx context.Context, tick <-chan time.Time) {
 		case <-ctx.Done():
 			return
 		case <-tick:
-			_, _ = m.run(ctx, types.PlannerStatsTriggerPeriodic)
+			if !m.deferred() {
+				_, _ = m.run(ctx, types.PlannerStatsTriggerPeriodic)
+			}
 		case <-m.pending:
-			_, _ = m.run(ctx, types.PlannerStatsTriggerEpoch)
+			if !m.deferred() {
+				_, _ = m.run(ctx, types.PlannerStatsTriggerEpoch)
+			}
 		}
 	}
 }

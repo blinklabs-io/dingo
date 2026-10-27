@@ -32,6 +32,8 @@ const (
 	recentBlockDelayMetricName    = "dingo_blockfetch_recent_delay_seconds"
 	recentBlockNumberMetricName   = "dingo_blockfetch_recent_block_number"
 	recentFetchDurationMetricName = "dingo_blockfetch_recent_fetch_duration_seconds"
+	recentBlockKindMetricName     = "dingo_blockfetch_recent_block_kind"
+	recentBlockSlotMetricName     = "dingo_blockfetch_recent_block_slot"
 )
 
 var (
@@ -49,17 +51,34 @@ var (
 	)
 	recentFetchDurationDesc = prometheus.NewDesc(
 		recentFetchDurationMetricName,
-		"request-dispatch-to-response duration in seconds for the block held in each slot of "+recentBlockDelayMetricName+"; unlike that metric (wall clock minus slot time), this excludes any delay before the request was dispatched -- e.g. local rollback/chain-selection work that runs before a fork's replacement block is even requested -- so a high "+recentBlockDelayMetricName+" alongside a low value here means the fetch itself was fast and the delay was upstream of it, not in the network transfer",
+		"request-dispatch-to-response duration in seconds for the block held in each slot of "+recentBlockDelayMetricName+"; measured from dispatch of the blockfetch request (one request can span a range of blocks, so for the k-th block of a multi-block range it also includes the transfer of the earlier blocks; at tip a range is almost always one block); unlike that metric (wall clock minus slot time), this excludes any delay before the request was dispatched -- e.g. local rollback/chain-selection work that runs before a fork's replacement block is even requested -- so a high "+recentBlockDelayMetricName+" alongside a low value here means the fetch itself was fast and the delay was upstream of it, not in the network transfer",
 		[]string{"idx"},
 		nil,
 	)
 )
 
+var recentBlockKindDesc = prometheus.NewDesc(
+	recentBlockKindMetricName,
+	"Leios kind bitmask of the ranking block held in each slot of the ring behind "+recentBlockDelayMetricName+": 1 = the block announces an endorser block, 2 = the block carries an endorser block certificate, 0 = plain ranking block (every pre-Leios block)",
+	[]string{"idx"},
+	nil,
+)
+
+var recentBlockSlotDesc = prometheus.NewDesc(
+	recentBlockSlotMetricName,
+	"slot number of the ranking block held in each slot of the ring behind "+recentBlockDelayMetricName,
+	[]string{"idx"},
+	nil,
+)
+
 type recentBlockDelay struct {
 	blockNumber  uint64
+	blockSlot    uint64
+	hasSlot      bool
 	hash         lcommon.Blake2b256
 	delay        float64
 	fetchSeconds float64
+	kind         uint8
 	set          bool
 }
 
@@ -69,8 +88,8 @@ type recentBlockDelay struct {
 // compatible cardano_node_metrics_blockfetchclient_blockdelay_s gauge.
 //
 // Slot position is blockNumber % recentBlockDelaySlots and the block number
-// is exported as a value, so the collector always exposes at most 3N series
-// with no label churn. It is a custom collector rather than three GaugeVecs so
+// is exported as a value, so the collector always exposes at most 4N series
+// with no label churn. It is a custom collector rather than four GaugeVecs so
 // each scrape reads a slot's block number, delay, and fetch duration together
 // under one lock; a scrape can never pair one block's number with another
 // block's delay or fetch duration. Slots that have never been written are not
@@ -103,12 +122,29 @@ func newRecentBlockDelays() *recentBlockDelays {
 // measure a genuine fetch duration (e.g. no matching in-flight request) pass
 // the same value as delay, matching the pre-existing fallback in
 // blockfetchClientBlock.
+//
+// opts carry the optional per-block fields, stored and exported under the
+// same lock as the delay so a scrape never pairs one block's slot or kind
+// with another block's delay. See withBlockSlot and withBlockKind. Omitting
+// withBlockKind records 0, a plain ranking block; omitting withBlockSlot
+// exports no slot for the entry.
 func (r *recentBlockDelays) record(
 	blockNumber uint64,
 	hash lcommon.Blake2b256,
 	delay float64,
 	fetchSeconds float64,
+	opts ...recentBlockOption,
 ) {
+	entry := recentBlockDelay{
+		blockNumber:  blockNumber,
+		hash:         hash,
+		delay:        delay,
+		fetchSeconds: fetchSeconds,
+		set:          true,
+	}
+	for _, opt := range opts {
+		opt(&entry)
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	s := &r.slots[blockNumber%recentBlockDelaySlots]
@@ -118,19 +154,32 @@ func (r *recentBlockDelays) record(
 	if s.set && s.blockNumber == blockNumber && s.hash == hash {
 		return
 	}
-	*s = recentBlockDelay{
-		blockNumber:  blockNumber,
-		hash:         hash,
-		delay:        delay,
-		fetchSeconds: fetchSeconds,
-		set:          true,
+	*s = entry
+}
+
+// recentBlockOption sets an optional field of a recorded ring entry.
+type recentBlockOption func(*recentBlockDelay)
+
+// withBlockSlot records the ranking block's slot number.
+func withBlockSlot(slot uint64) recentBlockOption {
+	return func(e *recentBlockDelay) {
+		e.blockSlot = slot
+		e.hasSlot = true
 	}
+}
+
+// withBlockKind records the Leios ranking-block kind bitmask
+// (leiosheader.KindAnnouncesEB | leiosheader.KindCertifiesEB).
+func withBlockKind(kind uint8) recentBlockOption {
+	return func(e *recentBlockDelay) { e.kind = kind }
 }
 
 func (r *recentBlockDelays) Describe(ch chan<- *prometheus.Desc) {
 	ch <- recentBlockDelayDesc
 	ch <- recentBlockNumberDesc
 	ch <- recentFetchDurationDesc
+	ch <- recentBlockKindDesc
+	ch <- recentBlockSlotDesc
 }
 
 func (r *recentBlockDelays) Collect(ch chan<- prometheus.Metric) {
@@ -160,5 +209,19 @@ func (r *recentBlockDelays) Collect(ch chan<- prometheus.Metric) {
 			s.fetchSeconds,
 			idx,
 		)
+		ch <- prometheus.MustNewConstMetric(
+			recentBlockKindDesc,
+			prometheus.GaugeValue,
+			float64(s.kind),
+			idx,
+		)
+		if s.hasSlot {
+			ch <- prometheus.MustNewConstMetric(
+				recentBlockSlotDesc,
+				prometheus.GaugeValue,
+				float64(s.blockSlot),
+				idx,
+			)
+		}
 	}
 }

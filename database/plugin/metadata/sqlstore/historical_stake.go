@@ -977,7 +977,7 @@ func (s *Store) historicalStakeCTE(
 		query += resolution
 		args = append(args, resolutionArgs...)
 	}
-	expiryJoin := ""
+	delegationSource := "active_delegation"
 	expiryPredicate := ""
 	if expiryEpoch > 0 {
 		if inactivityPeriod == 0 {
@@ -997,12 +997,15 @@ func (s *Store) historicalStakeCTE(
 		}
 		query += expiration
 		args = append(args, expirationArgs...)
-		expiryJoin = `
-LEFT JOIN historical_expiration expiry
-  ON expiry.credential_tag = active_delegation.credential_tag
- AND expiry.staking_key = active_delegation.staking_key`
-		expiryPredicate = `(expiry.expiration_epoch = 0
- OR expiry.expiration_epoch >= ? OR expiry.expiration_epoch IS NULL) AND `
+		// historical_expiration carries every active_delegation row with its
+		// expiration, so it stands in for active_delegation rather than being
+		// joined back to it: SQLite expands each reference to a CTE into its
+		// own copy of the CTE chain beneath it, and each copy of
+		// active_delegation costs over a hundred cursors.
+		delegationSource = "historical_expiration active_delegation"
+		expiryPredicate = `(active_delegation.expiration_epoch = 0
+ OR active_delegation.expiration_epoch >= ?
+ OR active_delegation.expiration_epoch IS NULL) AND `
 	}
 	query += `,
 active_delegator_stake AS (
@@ -1010,13 +1013,12 @@ active_delegator_stake AS (
         active_delegation.credential_tag,
         active_delegation.staking_key,
         utxo.amount AS utxo_amount
- FROM active_delegation
+ FROM ` + delegationSource + `
  LEFT JOIN utxo
    ON utxo.credential_tag = active_delegation.credential_tag
   AND utxo.staking_key = active_delegation.staking_key
   AND COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = COALESCE(utxo.transaction_id, utxo.collateral_return_for_tx_id)), utxo.added_slot) <= ?
   AND (utxo.deleted_slot = 0 OR COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN "transaction" spent_tx ON spent_tx.id = lc.transaction_id WHERE spent_tx.hash = utxo.spent_at_tx_id), utxo.deleted_slot) > ?)
-` + expiryJoin + `
  WHERE ` + expiryPredicate + predicate
 	args = append(args, slot, slot)
 	if expiryEpoch > 0 {
@@ -1034,7 +1036,7 @@ active_delegator_stake AS (
         active_delegation.credential_tag,
         active_delegation.staking_key,
         utxo.amount AS utxo_amount
- FROM active_delegation
+ FROM ` + delegationSource + `
  JOIN pointer_resolution
    ON pointer_resolution.credential_tag = active_delegation.credential_tag
   AND pointer_resolution.staking_key = active_delegation.staking_key
@@ -1042,7 +1044,6 @@ active_delegator_stake AS (
    ON utxo.id = pointer_resolution.utxo_id
   AND COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = COALESCE(utxo.transaction_id, utxo.collateral_return_for_tx_id)), utxo.added_slot) <= ?
   AND (utxo.deleted_slot = 0 OR COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN "transaction" spent_tx ON spent_tx.id = lc.transaction_id WHERE spent_tx.hash = utxo.spent_at_tx_id), utxo.deleted_slot) > ?)
-` + expiryJoin + `
  WHERE ` + expiryPredicate + predicate
 		args = append(args, slot, slot)
 		if expiryEpoch > 0 {
@@ -1259,6 +1260,13 @@ WITH delegation_events AS (` + strings.Join(delegationParts, " UNION ALL ") + `
 // all, before or after slot -- it falls back to the mutable
 // account.expiration_epoch; a missing account row produces 0.
 //
+// The historical_expiration CTE it emits holds one row per active_delegation
+// row, with that row's pool_key_hash, so a caller selects from it in place of
+// active_delegation. It references active_delegation exactly once: SQLite
+// expands every reference to a CTE into its own copy of the CTEs beneath it,
+// and a statement whose copies open more cursors than SQLITE_LIMIT_EXPR_DEPTH
+// fails to prepare.
+//
 // When the query's expiryEpoch is at or after the recorded CIP-0163
 // activation epoch (activation != nil && *activation <= expiryEpoch), a
 // credential recorded in the one-time activation membership
@@ -1305,38 +1313,41 @@ LIMIT 1`).Scan(&value)
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return "", nil, err
 	}
-	parts := []string{}
+	// Each witness source is read through its (credential_tag, staking_key)
+	// index, correlated on the outer active_delegation row, rather than
+	// joined to active_delegation, which would copy that CTE once per source.
+	parts := make([]string, 0, len(accountWitnessTables)+2)
 	for _, table := range accountWitnessTables {
 		parts = append(parts, `
-SELECT witness.credential_tag, witness.staking_key,
-       COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs c ON c.transaction_id = lc.transaction_id WHERE c.id = witness.certificate_id), witness.added_slot) AS added_slot
-FROM `+table+` witness
-JOIN active_delegation active
-  ON active.credential_tag = witness.credential_tag
- AND active.staking_key = witness.staking_key`)
+  SELECT COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs c ON c.transaction_id = lc.transaction_id WHERE c.id = witness.certificate_id), witness.added_slot) AS added_slot
+  FROM `+table+` witness
+  WHERE witness.credential_tag = active.credential_tag
+    AND witness.staking_key = active.staking_key`)
 	}
+	// A reward delta that is not a withdrawal yields a NULL slot, which no
+	// MAX counts, rather than being filtered out: a withdrawal = TRUE
+	// predicate lets SQLite choose the (withdrawal, ...) index and scan every
+	// withdrawal row once per credential.
 	parts = append(parts, `
-SELECT witness.credential_tag, witness.staking_key,
-       COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN "transaction" tx ON tx.id = lc.transaction_id WHERE tx.hash = witness.tx_hash), witness.added_slot) AS added_slot
-FROM account_withdrawal_witness witness
-JOIN active_delegation active
-  ON active.credential_tag = witness.credential_tag
- AND active.staking_key = witness.staking_key`, `
-SELECT witness.credential_tag, witness.staking_key,
-       COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN "transaction" tx ON tx.id = lc.transaction_id WHERE tx.hash = witness.tx_hash), witness.added_slot) AS added_slot
-FROM account_reward_delta witness
-JOIN active_delegation active
-  ON active.credential_tag = witness.credential_tag
- AND active.staking_key = witness.staking_key
-WHERE witness.withdrawal = TRUE`)
+  SELECT COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN "transaction" tx ON tx.id = lc.transaction_id WHERE tx.hash = witness.tx_hash), witness.added_slot) AS added_slot
+  FROM account_withdrawal_witness witness
+  WHERE witness.credential_tag = active.credential_tag
+    AND witness.staking_key = active.staking_key`, `
+  SELECT CASE WHEN witness.withdrawal = TRUE
+         THEN COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN "transaction" tx ON tx.id = lc.transaction_id WHERE tx.hash = witness.tx_hash), witness.added_slot)
+         END AS added_slot
+  FROM account_reward_delta witness
+  WHERE witness.credential_tag = active.credential_tag
+    AND witness.staking_key = active.staking_key`)
+	witnessEvents := strings.Join(parts, " UNION ALL ")
 	args := make([]any, 1, 5)
 	args[0] = slot
 	activationCTE := ""
 	activationJoin := ""
 	expiration := `CASE
  WHEN account.id IS NULL THEN 0
- WHEN witness_epoch.epoch_id IS NOT NULL
-   THEN witness_epoch.epoch_id + ?
+ WHEN summary.witness_epoch IS NOT NULL
+   THEN summary.witness_epoch + ?
  WHEN summary.latest_added_slot IS NOT NULL
    THEN COALESCE(created_epoch.epoch_id, 0) + ?
  ELSE COALESCE(account.expiration_epoch, 0) END`
@@ -1353,47 +1364,46 @@ WHERE witness.withdrawal = TRUE`)
 		activationJoin = `
 CROSS JOIN inactivity_activation
 LEFT JOIN account_inactivity_activation activation_account
-  ON activation_account.credential_tag = active.credential_tag
- AND activation_account.staking_key = active.staking_key`
+  ON activation_account.credential_tag = summary.credential_tag
+ AND activation_account.staking_key = summary.staking_key`
 		expiration = `CASE
  WHEN account.id IS NULL THEN 0
  WHEN activation_account.staking_key IS NOT NULL
-  AND (witness_epoch.epoch_id IS NULL
-    OR witness_epoch.epoch_id < inactivity_activation.epoch_id)
+  AND (summary.witness_epoch IS NULL
+    OR summary.witness_epoch < inactivity_activation.epoch_id)
    THEN inactivity_activation.epoch_id + ?
- WHEN witness_epoch.epoch_id IS NOT NULL
-   THEN witness_epoch.epoch_id + ?
+ WHEN summary.witness_epoch IS NOT NULL
+   THEN summary.witness_epoch + ?
  WHEN summary.latest_added_slot IS NOT NULL
    THEN COALESCE(created_epoch.epoch_id, 0) + ?
  ELSE COALESCE(account.expiration_epoch, 0) END`
 	}
+	// DISTINCT changes no rows, because active_delegation holds one row per
+	// credential, but it stops the planner from flattening historical_witness
+	// into historical_expiration. Flattened, each reference to witness_epoch
+	// in the CASE above would carry, and evaluate, its own copy of the
+	// witness lookups.
 	return `,
-account_witness_events AS (` + strings.Join(parts, " UNION ALL ") + `
-), witness_summary AS (
- SELECT credential_tag, staking_key,
-        MAX(CASE WHEN added_slot <= ? THEN added_slot END) historical_added_slot,
-        MAX(added_slot) latest_added_slot
- FROM account_witness_events GROUP BY credential_tag, staking_key
-), historical_witness_epoch AS (
- SELECT summary.credential_tag, summary.staking_key,
-        MAX(epoch.epoch_id) epoch_id
- FROM witness_summary summary
- JOIN epoch ON summary.historical_added_slot >= epoch.start_slot
-  AND summary.historical_added_slot < epoch.start_slot + epoch.length_in_slots
- GROUP BY summary.credential_tag, summary.staking_key
+historical_witness AS (
+ SELECT DISTINCT active.pool_key_hash, active.credential_tag, active.staking_key,
+        (SELECT MAX(epoch.epoch_id)
+         FROM (SELECT MAX(witness.added_slot) added_slot FROM (` + witnessEvents + `
+              ) witness WHERE witness.added_slot <= ?) historical
+         JOIN epoch
+           ON historical.added_slot >= epoch.start_slot
+          AND historical.added_slot < epoch.start_slot + epoch.length_in_slots
+        ) witness_epoch,
+        (SELECT MAX(witness.added_slot) FROM (` + witnessEvents + `
+        ) witness) latest_added_slot
+ FROM active_delegation active
 )` + activationCTE + `,
 historical_expiration AS (
- SELECT active.credential_tag, active.staking_key, ` + expiration + ` expiration_epoch
- FROM active_delegation active
+ SELECT summary.pool_key_hash, summary.credential_tag, summary.staking_key,
+        ` + expiration + ` expiration_epoch
+ FROM historical_witness summary
  LEFT JOIN account
-  ON account.credential_tag = active.credential_tag
- AND account.staking_key = active.staking_key
- LEFT JOIN historical_witness_epoch witness_epoch
-  ON witness_epoch.credential_tag = active.credential_tag
- AND witness_epoch.staking_key = active.staking_key
- LEFT JOIN witness_summary summary
-  ON summary.credential_tag = active.credential_tag
- AND summary.staking_key = active.staking_key
+  ON account.credential_tag = summary.credential_tag
+ AND account.staking_key = summary.staking_key
  LEFT JOIN epoch created_epoch
   ON account.created_slot > 0 AND account.created_slot >= created_epoch.start_slot
  AND account.created_slot < created_epoch.start_slot + created_epoch.length_in_slots

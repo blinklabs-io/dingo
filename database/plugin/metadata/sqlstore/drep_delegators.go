@@ -35,7 +35,7 @@ func addDrepDelegator(
 	if err != nil {
 		return err
 	}
-	_, err = db.ExecContext(ctx, `
+	_, err = db.ExecContext(ctx, `-- name: InsertDrepDelegatorIfActive :exec
 INSERT INTO drep_delegator (
     drep_credential_tag, drep_credential, stake_credential_tag,
     stake_credential, added_slot
@@ -79,7 +79,7 @@ func removeDrepDelegator(
 	if err != nil {
 		return err
 	}
-	_, err = db.ExecContext(ctx, `
+	_, err = db.ExecContext(ctx, `-- name: RemoveDrepDelegator :exec
 UPDATE drep_delegator SET removed_slot = ?
 WHERE drep_credential_tag = ? AND drep_credential = ?
   AND stake_credential_tag = ? AND stake_credential = ?
@@ -104,7 +104,8 @@ func removeAllDrepDelegators(
 	if err != nil {
 		return err
 	}
-	insert := `INSERT INTO account_drep_clear (credential_tag, staking_key, added_slot)
+	insert := `-- name: InsertAccountDrepClearForDrep :exec
+INSERT INTO account_drep_clear (credential_tag, staking_key, added_slot)
 SELECT account.credential_tag, account.staking_key, ? FROM account
 WHERE EXISTS (
     SELECT 1 FROM drep_delegator
@@ -123,7 +124,7 @@ WHERE EXISTS (
 	); err != nil {
 		return fmt.Errorf("record DRep delegator account clears: %w", err)
 	}
-	if _, err := db.ExecContext(ctx, `
+	if _, err := db.ExecContext(ctx, `-- name: ClearAccountDrepDelegationsForDrep :exec
 UPDATE account SET drep = NULL, drep_type = 0, added_slot = ?
 WHERE EXISTS (
     SELECT 1 FROM drep_delegator
@@ -134,7 +135,7 @@ WHERE EXISTS (
 )`, removedSlot, drepTag, drepCredential); err != nil {
 		return fmt.Errorf("clear DRep delegator accounts: %w", err)
 	}
-	if _, err := db.ExecContext(ctx, `
+	if _, err := db.ExecContext(ctx, `-- name: RemoveAllDrepDelegatorsForDrep :exec
 UPDATE drep_delegator SET removed_slot = ?
 WHERE drep_credential_tag = ? AND drep_credential = ?
   AND removed_slot IS NULL`, removedSlot, drepTag, drepCredential); err != nil {

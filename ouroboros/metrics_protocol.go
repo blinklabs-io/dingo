@@ -15,8 +15,10 @@
 package ouroboros
 
 import (
+	"errors"
 	"time"
 
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
@@ -116,7 +118,8 @@ func (o *Ouroboros) recordProtocolMessage(
 		return
 	}
 	outcome := "success"
-	if err != nil {
+	// A held chainsync message stops the sync loop by design.
+	if err != nil && !errors.Is(err, ochainsync.ErrStopSyncProcess) {
 		outcome = "error"
 	}
 	o.protocolMetrics.messagesReceived.

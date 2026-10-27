@@ -449,27 +449,27 @@ func TestGenesisConfigResultExtraConfigBytes(t *testing.T) {
 		"83", // ShelleyExtraConfig
 		// initial funds
 		"8202a2",
-		"581d605d11c3d8a44b5aeb60831099a6d122a408ea33ca1faa1102bd4a80cc",
+		"581d60f405259e3b805556a2d27f88e3c2a0b4f345fe3db26f0ea5c13bc25b",
 		"1b006a94d74f430000",
-		"5839002ac6275715d4fcc740134a578e619876752821c786cb4701c5756ee7dda643b05c248cbff2d80fd45dff2b4cb260cd03ea6fa299da3955ef",
+		"5839001c82bd289a68eadfcb0e6cb181aa84ea8eff7ab9155a2c4193f3906c229c1ef7ee70091be326d0ffc140d054a028864bd4a860aafd3a1b25",
 		"1a35a4e900",
 		// stake pools
 		"8202a1",
-		"581cfd32267bc1c702ad9b530d4e9f9939ce93bbb99f55f31fbe4989ea88",
+		"581c6f1b079433f84acb8e4cc5faebae582d2e3fd7eeb13ee7111be91c9b",
 		"89",
-		"581cfd32267bc1c702ad9b530d4e9f9939ce93bbb99f55f31fbe4989ea88",
-		"5820f8eb3533e40984adc744cb326fd410c200dab831f915224c8515a06cedaabdc5",
+		"581c6f1b079433f84acb8e4cc5faebae582d2e3fd7eeb13ee7111be91c9b",
+		"5820df8f61e2b7e0793ccbc58463a1849fe89470a2c52a406345c4da4bac5585407a",
 		"00",
 		"00",
 		"d81e820001",
-		"581de0c002c1f5bccc09b7d2865b8ba5bc6fb280b2f5f0e63cb11da79f413e",
+		"581de03fee4e5565080db996687d2f57c4b44e8ffe0870c4cbb2251fe26e15",
 		"80", // owners: the Shelley encoding has no set tag
 		"80",
 		"f6",
 		// stake credentials
 		"8202a1",
-		"581cdda643b05c248cbff2d80fd45dff2b4cb260cd03ea6fa299da3955ef",
-		"581cfd32267bc1c702ad9b530d4e9f9939ce93bbb99f55f31fbe4989ea88",
+		"581c229c1ef7ee70091be326d0ffc140d054a028864bd4a860aafd3a1b25",
+		"581c6f1b079433f84acb8e4cc5faebae582d2e3fd7eeb13ee7111be91c9b",
 	)
 	require.Equal(
 		t,

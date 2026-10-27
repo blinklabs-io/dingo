@@ -875,7 +875,7 @@ func generateValidatedConwayForkChain(
 				Output: vrfOutput,
 				Proof:  vrfProof,
 			},
-			BlockBodySize: 0,
+			BlockBodySize: testutil.ConwayEmptyBodySize(t),
 			BlockBodyHash: bodyHash,
 			OpCert: babbage.BabbageOpCert{
 				HotVkey:        keys.kesPk,
@@ -2250,6 +2250,11 @@ func addBlocksSerially(
 	epochLength uint64,
 ) {
 	t.Helper()
+	// With no upstream connection and reachedTip unlatched, the ledger loop
+	// holds each lone new block for about two seconds waiting for more, out
+	// of the five second wait below. A live truncate or restore builds a new
+	// ledger with the flag clear, so latch the current one.
+	n.ledgerState.MarkReachedTipForTesting()
 	subID, epochEvents := n.eventBus.SubscribeWithBuffer(
 		event.EpochTransitionEventType,
 		len(blocks),

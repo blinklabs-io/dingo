@@ -104,10 +104,9 @@ golines: ## Enforce 80-character line limit
 	golines -w --ignore-generated --chain-split-dots --max-len=80 --reformat-tags .
 
 # golangci-lint covers one module per run. The loop reaches every nested
-# module. CI runs the same scopes in the `lint` jobs of
-# .github/workflows/go-test.yml and .github/workflows/publish.yml;
-# internal/docsparity's
-# TestLintCoversEveryGoModule fails until every go.mod has a step in both.
+# module. CI runs the same scopes in the `check` job of
+# .github/workflows/go-test.yml; internal/docsparity's
+# TestLintCoversEveryGoModule fails until every go.mod has a step there.
 lint: import-boundaries ## Run import-boundaries, golangci-lint, nilaway, and modernize
 	@for dir in $(GO_MODULE_DIRS); do \
 		echo "golangci-lint run ./... ($$dir)"; \
@@ -173,9 +172,8 @@ $(PROTOC):
 	fi
 	unzip -q -o $(PROTOC_ZIP) -d $(PROTOC_DIR)
 
-# -timeout matches the race-enabled CI jobs (go-test.yml's go-test (Linux,
-# race) and publish.yml's release gate) so a local run and CI cannot disagree
-# about which slow package is a hang. ./ledger alone runs 9-13 minutes here.
+# CI's gate (race) job in go-test.yml runs the same suite with a 60m
+# per-package -timeout. ./ledger alone runs 9-13 minutes here.
 test: mod-tidy ## Run mod-tidy, then all tests with race detection
 	go test $(GO_TAG_FLAGS) -v -race -timeout 30m ./...
 
@@ -189,8 +187,13 @@ bench-storage-scale: ## Run the scale-parameterised storage benchmarks (DINGO_BE
 	DINGO_BENCH_SCALE=$${DINGO_BENCH_SCALE:-1m} DINGO_BENCH_BLOCKS=$${DINGO_BENCH_BLOCKS:-100k} go test $(GO_TAG_FLAGS) -run=^$$ -bench='^BenchmarkStorageScale(Utxo|BlobBlocks)' -benchtime=100x -benchmem -timeout=0 ./internal/integration
 	DINGO_BENCH_SCALE=$${DINGO_BENCH_SCALE:-1m} DINGO_BENCH_BLOCKS=$${DINGO_BENCH_BLOCKS:-100k} go test $(GO_TAG_FLAGS) -run=^$$ -bench='^BenchmarkStorageScaleSnapshotPause' -benchtime=1x -benchmem -timeout=0 ./internal/integration
 
+.PHONY: bench-leios-db-cached
+
 bench-leios-db: ## Run the LeiosDB latency benchmark against the default storage providers
-	go run $(GO_TAG_FLAGS) ./cmd/leios-db-bench
+	go run $(GO_TAG_FLAGS) ./cmd/leios-db-bench $(LEIOS_DB_BENCH_ARGS)
+
+bench-leios-db-cached: ## Run the LeiosDB latency benchmark with shared cached reads
+	go run $(GO_TAG_FLAGS) ./cmd/leios-db-bench -cached-reads $(LEIOS_DB_BENCH_ARGS)
 
 bench-ci: mod-tidy ## Run mod-tidy, then the curated CI benchmark suite (count=10) plus a GOMAXPROCS lock-contention sweep
 	go test $(GO_TAG_FLAGS) -run=^$$ -bench='^Benchmark(BlockProcessingThroughput|BlockProcessingThroughputPredecoded|BlockBatchProcessingThroughput|RawBlockBatchProcessingThroughput|VerifyBlockHeader|TransactionValidation|ChainSyncFromGenesis|RealBlockProcessing|EraTransitionPerformanceRealData|TestLoad|BlockfetchNearTipThroughput|BlockfetchNearTipThroughputPredecoded|BlockfetchNearTipFlushOnlyPredecoded|BlockfetchNearTipQueuedHeaderPredecoded|BlockfetchVerifiedHeaderDispatch|BlockfetchClientBlockMetrics|UpdateConnectionMetrics|HasInboundPeerAddress|Reconcile|PublishSubscribers|BlockMemoryUsage|HotCacheGet|HotCachePut|HotCacheGetMiss|BlockLRUCacheGet|BlockLRUCachePut|TieredCacheHotHit|CachedBlockExtract|CborOffsetEncode|CborOffsetDecode|StorageModeIngest|StorageModeIngestSteadyState|UtxoLookupByAddressRealData|UtxoLookupByRefRealData|TransactionHistoryQueriesRealData|AccountLookupByStakeKeyRealData|PoolLookupByKeyHashRealData|DRepLookupByKeyHashRealData|DatumLookupByHashRealData|ProtocolParametersLookupByEpochRealData|BlockNonceLookupRealData|StakeRegistrationLookupsRealData|PoolRegistrationLookupsRealData)$$' -benchmem -count=10 -timeout=90m ./...

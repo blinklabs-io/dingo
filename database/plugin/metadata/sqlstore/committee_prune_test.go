@@ -636,8 +636,10 @@ INSERT INTO auth_committee_hot (
 func TestCommitteeHotAuthorizationDeleteRebindsForSQLProviders(t *testing.T) {
 	t.Parallel()
 	for dialect, want := range map[string]string{
-		"postgres": "DELETE FROM auth_committee_hot WHERE id = $1",
-		"mysql":    "DELETE FROM auth_committee_hot WHERE id = ?",
+		"postgres": "-- name: DeleteCommitteeHotAuthorizationByID :exec\n" +
+			"DELETE FROM auth_committee_hot WHERE id = $1",
+		"mysql": "-- name: DeleteCommitteeHotAuthorizationByID :exec\n" +
+			"DELETE FROM auth_committee_hot WHERE id = ?",
 	} {
 		t.Run(dialect, func(t *testing.T) {
 			t.Parallel()

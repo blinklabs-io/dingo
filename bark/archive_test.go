@@ -750,3 +750,65 @@ func TestArchiveFetchBlockRejectsMalformedReference(t *testing.T) {
 		})
 	}
 }
+
+// TestArchiveFetchBlockBoundsRepeatedMissingReferenceLookups drives the
+// anonymous amplification path: a hash+slot reference is taken at face value,
+// so every reference naming no block still costs one cloud lookup. Repeating
+// full batches must run out of lookup budget instead of reaching the blob
+// store without bound.
+func TestArchiveFetchBlockBoundsRepeatedMissingReferenceLookups(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	const (
+		requests = 40
+		perBatch = DefaultMaxFetchBlockRefs
+	)
+	var lookups atomic.Int64
+	handler, _ := newArchiveTestHandlerWithOptions(
+		t,
+		1,
+		archiveTestOptions{
+			onGetBlockURL: func() { lookups.Add(1) },
+		},
+	)
+	batch := make([]*archive.BlockRef, 0, perBatch)
+	for i := range perBatch {
+		batch = append(batch, &archive.BlockRef{
+			Hash: new(hex.EncodeToString(
+				bytes.Repeat([]byte{byte(i + 1)}, blockHashLength),
+			)),
+			Slot: new(uint64(1000 + i)),
+		})
+	}
+
+	var refused int
+	for range requests {
+		resp, err := handler.FetchBlock(
+			t.Context(),
+			connect.NewRequest(&archive.FetchBlockRequest{Blocks: batch}),
+		)
+		if err != nil {
+			require.Equal(
+				t,
+				connect.CodeResourceExhausted,
+				connect.CodeOf(err),
+			)
+			refused++
+			continue
+		}
+		require.Len(t, resp.Msg.GetNotFound(), perBatch)
+	}
+
+	require.Positive(
+		t,
+		refused,
+		"%d requests of %d missing references each all reached the blob "+
+			"store (%d lookups)",
+		requests,
+		perBatch,
+		lookups.Load(),
+	)
+	require.Less(t, lookups.Load(), int64(requests*perBatch))
+}

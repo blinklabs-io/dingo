@@ -18,20 +18,22 @@ import "time"
 
 // Default cache and value sizes for BadgerDB, in bytes.
 const (
-	DefaultBlockCacheSize         = 268435456
-	DefaultIndexCacheSize         = 0
-	DefaultValueLogFileSize       = 1073741824
-	DefaultMemTableSize           = 134217728
-	DefaultValueThreshold         = 1048576
-	DefaultCoreSyncValueThreshold = 1024
-	DefaultCoreBlockCacheSize     = 0
-	DefaultCoreIndexCacheSize     = 0
-	DefaultCoreCompressionEnabled = false
-	DefaultAPIBlockCacheSize      = DefaultBlockCacheSize
-	DefaultAPIIndexCacheSize      = DefaultIndexCacheSize
-	DefaultAPICompressionEnabled  = true
-	DefaultCompressionLevel       = 1
-	DefaultGCDiscardRatio         = 0.5
+	DefaultBlockCacheSize          = 268435456
+	DefaultIndexCacheSize          = 0
+	DefaultValueLogFileSize        = 1073741824
+	DefaultMemTableSize            = 134217728
+	DefaultCoreSyncMemTableSize    = 1024 * 1024 * 1024
+	DefaultValueThreshold          = 1048576
+	DefaultCoreSyncValueThreshold  = 1024
+	DefaultCoreLeiosValueThreshold = 1024
+	DefaultCoreBlockCacheSize      = 0
+	DefaultCoreIndexCacheSize      = 0
+	DefaultCoreCompressionEnabled  = false
+	DefaultAPIBlockCacheSize       = DefaultBlockCacheSize
+	DefaultAPIIndexCacheSize       = DefaultIndexCacheSize
+	DefaultAPICompressionEnabled   = true
+	DefaultCompressionLevel        = 1
+	DefaultGCDiscardRatio          = 0.5
 )
 
 // DefaultGCInterval is how often the background value-log GC runs.

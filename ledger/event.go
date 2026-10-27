@@ -40,7 +40,7 @@ const (
 	ConnectionClosedEventType           event.EventType = "ledger.conn_closed"
 	ConnectionRecycleRequestedEventType event.EventType = "ledger.connection_recycle_requested"
 	LedgerErrorEventType                event.EventType = "ledger.error"
-	PoolStateRestoredEventType          event.EventType = "ledger.pool_restored"
+	PoolStateRestoredEventType          event.EventType = event.PoolStateRestoredEventType
 	TransactionEventType                event.EventType = "ledger.tx"
 )
 
@@ -96,8 +96,11 @@ type ChainsyncEvent struct {
 	// a roll-forward header. It lets ledger admission judge the peer's clock at
 	// arrival even if event delivery or header processing is delayed.
 	ArrivalTime time.Time
-	Point       ocommon.Point  // Chain point for roll forward/backward
-	Tip         ochainsync.Tip // Upstream chain tip
+	// ForecastHorizonWait is called once after admission establishes that this
+	// connected header must wait for ledger progress.
+	ForecastHorizonWait func()
+	Point               ocommon.Point  // Chain point for roll forward/backward
+	Tip                 ochainsync.Tip // Upstream chain tip
 	// SyncTarget is the event-paired, policy-approved target eligible for
 	// publication only after this header is admitted.
 	SyncTarget        ochainsync.Tip

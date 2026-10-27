@@ -93,14 +93,22 @@ type stateMetrics struct {
 	// epochRolloverDuration is the whole processEpochRollover transaction
 	// body, and epochRolloverPhaseDuration each of its named phases; see
 	// timeRolloverPhase.
-	epochRolloverDuration      prometheus.Histogram
+	epochRolloverDuration prometheus.Histogram
+	// blockAdoptionDelay and recentAdoptions record wall clock minus slot
+	// time at the moment an at-tip block becomes the ledger tip; see
+	// observeBlockAdoption.
+	blockAdoptionDelay         prometheus.Histogram
+	recentAdoptions            *recentAdoptions
 	epochRolloverPhaseDuration *prometheus.HistogramVec
 	// Pre-materialized observers for the stage label values, so the hot
 	// path does not resolve a label on every block or transaction.
-	blockStageHeaderVerify  prometheus.Observer
-	blockStageValidate      prometheus.Observer
-	blockStageApply         prometheus.Observer
-	blockStageEpochRollover prometheus.Observer
+	blockStageHeaderVerify         prometheus.Observer
+	blockStageValidate             prometheus.Observer
+	blockStageApply                prometheus.Observer
+	blockStageEpochRollover        prometheus.Observer
+	blockStagePrepare              prometheus.Observer
+	blockStageCommit               prometheus.Observer
+	blockStageDeferredHeaderVerify prometheus.Observer
 	// Per-stage maximum wall-clock duration ever observed since process
 	// start, each holding math.Float64bits of a seconds value and advanced
 	// by updateMaxDuration's compare-and-swap loop at the same
@@ -125,10 +133,13 @@ type stateMetrics struct {
 	// Collector, real complexity for a question -- "did we ever see
 	// something this bad" -- that a simple non-resetting maximum already
 	// answers.
-	blockStageHeaderVerifyMax  atomic.Uint64
-	blockStageValidateMax      atomic.Uint64
-	blockStageApplyMax         atomic.Uint64
-	blockStageEpochRolloverMax atomic.Uint64
+	blockStageHeaderVerifyMax         atomic.Uint64
+	blockStageValidateMax             atomic.Uint64
+	blockStageApplyMax                atomic.Uint64
+	blockStageEpochRolloverMax        atomic.Uint64
+	blockStagePrepareMax              atomic.Uint64
+	blockStageCommitMax               atomic.Uint64
+	blockStageDeferredHeaderVerifyMax atomic.Uint64
 	// Wall-clock time from the start of applying one committed
 	// DB-transaction chunk of blocks (ledger/state.go's batch loop, which
 	// commits at most batchSize=50 blocks per transaction) to the moment
@@ -301,6 +312,11 @@ type stateMetrics struct {
 	// value on a Mithril-bootstrapped node explains a stake shortfall; a
 	// rising value on any node is a live divergence from the network.
 	skippedStakeRewardRounds prometheus.Counter
+	// Incremented each time a trusted batch's UTxO overlay hit a write
+	// conflict and the batch was applied again on the per-row path. Each
+	// increment is a batch that ran at the slower per-row speed; a rising
+	// value means the store holds rows the overlay does not expect.
+	trustedBatchOverlayFallbacks prometheus.Counter
 	// Incremented each time GetStakeDistribution or GetPoolDistr2 omits a
 	// pool that holds stake at the queried snapshot but has no resolvable
 	// registration/VRF key hash on record. This is a deliberate fallback
@@ -424,6 +440,11 @@ const (
 	blockStageValidate      = "validate"
 	blockStageApply         = "apply"
 	blockStageEpochRollover = "epoch_rollover"
+	blockStagePrepare       = "prepare"
+	blockStageCommit        = "commit"
+	// blockStageDeferredHeaderVerify is distinct from header_verify, which
+	// is observed on blockfetch arrival outside the block-apply window.
+	blockStageDeferredHeaderVerify = "deferred_header_verify"
 )
 
 // observeBlockStage records one sample of wall-clock time spent in the named
@@ -451,6 +472,15 @@ func (m *stateMetrics) observeBlockStage(stage string, d time.Duration) {
 	case blockStageEpochRollover:
 		obs = m.blockStageEpochRollover
 		record = &m.blockStageEpochRolloverMax
+	case blockStagePrepare:
+		obs = m.blockStagePrepare
+		record = &m.blockStagePrepareMax
+	case blockStageCommit:
+		obs = m.blockStageCommit
+		record = &m.blockStageCommitMax
+	case blockStageDeferredHeaderVerify:
+		obs = m.blockStageDeferredHeaderVerify
+		record = &m.blockStageDeferredHeaderVerifyMax
 	}
 	if obs == nil {
 		// Unknown stage, or metrics were never initialised: neither field
@@ -556,10 +586,13 @@ func (m *stateMetrics) registerBlockStageMaxDuration(
 	factory promauto.Factory,
 ) {
 	for stage, record := range map[string]*atomic.Uint64{
-		blockStageHeaderVerify:  &m.blockStageHeaderVerifyMax,
-		blockStageValidate:      &m.blockStageValidateMax,
-		blockStageApply:         &m.blockStageApplyMax,
-		blockStageEpochRollover: &m.blockStageEpochRolloverMax,
+		blockStageHeaderVerify:         &m.blockStageHeaderVerifyMax,
+		blockStageValidate:             &m.blockStageValidateMax,
+		blockStageApply:                &m.blockStageApplyMax,
+		blockStageEpochRollover:        &m.blockStageEpochRolloverMax,
+		blockStagePrepare:              &m.blockStagePrepareMax,
+		blockStageCommit:               &m.blockStageCommitMax,
+		blockStageDeferredHeaderVerify: &m.blockStageDeferredHeaderVerifyMax,
 	} {
 		factory.NewGaugeFunc(
 			prometheus.GaugeOpts{
@@ -744,6 +777,13 @@ func (m *stateMetrics) incLeaderThresholdRejections() {
 		return
 	}
 	m.leaderThresholdRejections.Inc()
+}
+
+func (m *stateMetrics) incTrustedBatchOverlayFallbacks() {
+	if m == nil || m.trustedBatchOverlayFallbacks == nil {
+		return
+	}
+	m.trustedBatchOverlayFallbacks.Inc()
 }
 
 func (m *stateMetrics) incSkippedStakeRewardRounds() {
@@ -986,6 +1026,21 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 			Help: "ledger apply-path waits for a referenced Leios endorser block that ran the full diffusion window without it arriving",
 		},
 	)
+	m.blockAdoptionDelay = promautoFactory.NewHistogram(
+		prometheus.HistogramOpts{
+			Name: "dingo_ledger_block_adoption_delay_seconds",
+			Help: "wall clock minus slot time when an at-tip block became the ledger tip, i.e. after validation and commit; catch-up and trusted replay are not recorded",
+			// 100ms to 120s: a healthy relay adopts within seconds of slot
+			// time, a stalled one has been seen at 44s.
+			Buckets: []float64{
+				0.1, 0.25, 0.5, 1, 2, 3, 5, 7.5, 10, 15, 20, 30, 45, 60, 90, 120,
+			},
+		},
+	)
+	m.recentAdoptions = newRecentAdoptions()
+	if promRegistry != nil {
+		promRegistry.MustRegister(m.recentAdoptions)
+	}
 	m.epochRolloverDuration = promautoFactory.NewHistogram(
 		prometheus.HistogramOpts{
 			Name: "dingo_ledger_epoch_rollover_duration_seconds",
@@ -1006,7 +1061,7 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 	m.blockStageDuration = promautoFactory.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name: "dingo_ledger_block_stage_duration_seconds",
-			Help: "wall-clock time spent in each ledger-owned stage of per-block processing, by stage: header_verify (VRF/KES/signature checks on blockfetch arrival), validate (one transaction's era ledger-rule validation, including Plutus evaluation), apply (writing a flushed delta batch's UTXO and transaction rows to the metadata store), epoch_rollover (the epoch-boundary transaction, including reward application and the governance tally, during which no block is applied)",
+			Help: "wall-clock time spent in each ledger-owned stage of per-block processing, by stage: header_verify (VRF/KES/signature checks on blockfetch arrival), validate (era ledger-rule validation: one sample per transaction, including Plutus evaluation, and one per validated block for resolving its inputs and its block-level reference-script check), apply (writing UTXO and transaction rows to the metadata store: one sample per flushed delta batch, including its replay-row flush, and, on a validating block, one per validated transaction's immediate write), epoch_rollover (the epoch-boundary transaction, including reward application and the governance tally, during which no block is applied), prepare (per chunk that commits at least one block: everything from the start of the chunk to the database transaction, including the Leios endorser-block wait, the block-apply snapshot and replay header preparation), commit (per chunk that commits at least one block: the database transaction outside its body, covering the tip and candidate checks, the worker-pool wait, begin and commit), deferred_header_verify (per applied block: the check whether admission deferred its header verification and, if it did, that VRF/KES/signature verification); prepare, validate, apply, commit and deferred_header_verify all fall inside the window of dingo_ledger_block_apply_batch_latency_seconds, and the remainder of that window is the rest of the transaction body (per-block bookkeeping, the nonce and tip writes) plus the post-commit tip update",
 			// 100us to ~419s. Most observations are sub-100ms (a single
 			// cheap signature check, one transaction's validation, one
 			// delta-batch flush), which is why resolution stays fine down
@@ -1029,6 +1084,15 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 	)
 	m.blockStageEpochRollover = m.blockStageDuration.WithLabelValues(
 		blockStageEpochRollover,
+	)
+	m.blockStagePrepare = m.blockStageDuration.WithLabelValues(
+		blockStagePrepare,
+	)
+	m.blockStageCommit = m.blockStageDuration.WithLabelValues(
+		blockStageCommit,
+	)
+	m.blockStageDeferredHeaderVerify = m.blockStageDuration.WithLabelValues(
+		blockStageDeferredHeaderVerify,
 	)
 	m.registerBlockStageMaxDuration(promautoFactory)
 	m.blockApplyBatchLatency = promautoFactory.NewHistogram(
@@ -1194,6 +1258,12 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 		prometheus.CounterOpts{
 			Name: "dingo_ledger_skipped_stake_reward_rounds_total",
 			Help: "epoch-boundary reward rounds skipped for want of their inputs; each one leaves reward balances and the leadership stake distribution permanently short by that epoch's rewards, which makes the node reject canonical blocks near the leader-eligibility threshold",
+		},
+	)
+	m.trustedBatchOverlayFallbacks = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_ledger_trusted_batch_overlay_fallbacks_total",
+			Help: "trusted batches whose batch UTxO overlay hit a write conflict and were applied again on the per-row path",
 		},
 	)
 	m.poolStakeDistributionOmittedPools = promautoFactory.NewCounter(

@@ -89,6 +89,90 @@ func newTestKoiosClient(baseURL string) *KoiosClient {
 	}
 }
 
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func TestKoiosTransportErrorsRedactURLUserinfo(t *testing.T) {
+	const (
+		secretUsername = "SENTINEL-URL-USERNAME"
+		secretPassword = "SENTINEL-URL-PASSWORD"
+		safeCause      = "connection refused by test transport"
+	)
+
+	for _, tc := range []struct {
+		name string
+		do   func(*KoiosClient) error
+		want string
+	}{
+		{
+			name: "GET",
+			do: func(k *KoiosClient) error {
+				_, err := k.get(context.Background(), "/tip", -1, -1)
+				return err
+			},
+			want: "koios GET /tip",
+		},
+		{
+			name: "POST",
+			do: func(k *KoiosClient) error {
+				_, err := k.post(
+					context.Background(),
+					"/account_reward_history",
+					map[string]any{"_epoch_no": 1},
+				)
+				return err
+			},
+			want: "koios POST /account_reward_history",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			k := newTestKoiosClient(
+				"https://" + secretUsername + ":" + secretPassword +
+					"@koios.example/api/v1",
+			)
+			k.http.Transport = roundTripFunc(
+				func(*http.Request) (*http.Response, error) {
+					return nil, errors.New(safeCause)
+				},
+			)
+
+			err := tc.do(k)
+			require.Error(t, err)
+			assert.NotContains(t, err.Error(), secretUsername)
+			assert.NotContains(t, err.Error(), secretPassword)
+			assert.Contains(t, err.Error(), tc.want)
+			assert.Contains(t, err.Error(), safeCause)
+		})
+	}
+}
+
+func TestKoiosRequestBuildErrorsRedactURLUserinfo(t *testing.T) {
+	const (
+		secretUsername = "SENTINEL-BUILD-USERNAME"
+		secretPassword = "SENTINEL-BUILD-PASSWORD"
+	)
+
+	k := newTestKoiosClient(
+		"https://" + secretUsername + ":" + secretPassword +
+			"@koios.example/api/v1",
+	)
+	_, err := k.GetPoolEpochHistory(
+		context.Background(),
+		"pool1\nbad",
+		1,
+	)
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), secretUsername)
+	assert.NotContains(t, err.Error(), secretPassword)
+	assert.Contains(t, err.Error(), "build request")
+	assert.Contains(t, err.Error(), "invalid control character in URL")
+}
+
 func TestKoiosRestrictedDialerRejectsPrivateDNSAnswer(t *testing.T) {
 	t.Parallel()
 
@@ -764,7 +848,8 @@ func TestGetTxInfosErrorsOnIncompleteResponse(t *testing.T) {
 
 	k := newTestKoiosClient(srv.URL)
 	_, err := k.GetTxInfos(context.Background(), []string{"aaa", "bbb"})
-	require.Error(t, err)
+	require.ErrorIs(t, err, ErrTxInfoMissing,
+		"the caller fetches a missing hash again, so it must be identifiable")
 	require.ErrorContains(t, err, "bbb")
 }
 
@@ -789,6 +874,7 @@ func TestGetTxInfosErrorsOnDuplicateResult(t *testing.T) {
 	_, err := k.GetTxInfos(context.Background(), []string{"aaa"})
 	require.Error(t, err)
 	require.ErrorContains(t, err, "duplicate")
+	require.NotErrorIs(t, err, ErrTxInfoMissing)
 }
 
 // TestNewKoiosTransportResponseHeaderTimeout proves newKoiosTransport's

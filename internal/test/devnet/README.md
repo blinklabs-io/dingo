@@ -97,11 +97,12 @@ live in the [`cardano-txpump`](https://github.com/blinklabs-io/cardano-txpump)
 repository.
 
 The dedicated `--leios` runner uses the all-Dingo topology with
-`testnet-dingo-leios.yaml`: Dijkstra is active from genesis, test-only Leios
-keys are registered on the three pools, and a producer-to-peer scenario
-checks EB notification, relay fetch, ranking-header reference, and ledger
-application. It selects that feature scenario only; it does not change the
-canonical Conway specs or the `--accelerated` timeline.
+`testnet-dingo-leios.yaml`: the chain produces Conway blocks in epoch 0, then
+crosses into Dijkstra at epoch 1. Test-only Leios keys are registered on the
+three pools, and a producer-to-peer scenario checks the era transition, EB
+notification, relay fetch, ranking-header reference, and ledger application.
+It selects that feature scenario only; it does not change the canonical Conway
+specs or the `--accelerated` timeline.
 
 The Leios spec uses 300-slot, 150-second epochs with `f: 0.05` and `k: 3`.
 Its 240-slot nonce stability window contains 12 expected blocks, which keeps
@@ -163,7 +164,7 @@ someone quietly speeds them up.
 - Docker with the Compose plugin (`docker compose version` must work).
 - Go 1.26+ on the host (matching `go.mod`) to run the integration tests.
 - Outbound network access on first run to pull
-  `ghcr.io/blinklabs-io/cardano-node:11.0.1` (conformance mode only) and to
+  `ghcr.io/blinklabs-io/cardano-node:11.1.3-2` (conformance mode only) and to
   clone `cardano-foundation/testnet-generation-tool` inside the configurator
   image.
 - Local build of Dingo via the repo root `Dockerfile` — Compose builds it
@@ -241,7 +242,8 @@ docker compose -f docker-compose.yml build dingo-producer
 `up`) when you want fresh code in the running containers.
 
 The configurator image (`Dockerfile.configurator`) is built from this
-directory and pinned to upstream `testnet-generation-tool@v0.1.0`; it rarely
+directory and pinned to upstream `testnet-generation-tool@v0.2.0`, which
+generates configuration for cardano-node's current tracing system; it rarely
 needs rebuilding once cached.
 
 ## Where to run from
@@ -484,18 +486,19 @@ budget could not be met.
 ## Dijkstra/Leios producer-to-peer scenario
 
 `--leios` selects `testnet-dingo-leios.yaml`, runs the all-Dingo profile,
-registers a valid test-only Leios key in each generated pool registration,
-starts each Dingo node in explicit `leios` run mode and Dijkstra start era,
-and activates Dijkstra at epoch 0. Its transaction pump submits signed Dijkstra
-payments so the endorser block contains ledger-valid transactions. The pump
-keeps their outputs unavailable for 1000 slots so it cannot spend them before
-the scenario queries the relay ledger; this wallet delay is not confirmation
-evidence. The test
-observes an endorser-block offer over LeiosNotify, fetches its manifest and
-every referenced body from the non-forging relay over LeiosFetch, matches the
-ranking header's announcement to that EB, and queries the relay's ledger for
-an output from the fetched transactions. This exercises the producer,
-network, and ledger path through Dingo's interfaces and protocol outputs.
+registers a valid test-only Leios key in each generated pool registration, and
+starts each Dingo node in explicit `leios` run mode. The generated chain
+produces Conway blocks in epoch 0 and schedules the Dijkstra hard fork at epoch
+1. Its transaction pump submits signed Dijkstra payments after the transition
+so the endorser block contains ledger-valid transactions. The pump keeps their
+outputs unavailable for 1000 slots so it cannot spend them before the scenario
+queries the relay ledger; this wallet delay is not confirmation evidence. The
+test observes Conway and Dijkstra headers on every node, then follows an
+endorser-block offer over LeiosNotify, fetches its manifest and every
+referenced body from the non-forging relay over LeiosFetch, matches the ranking
+header's announcement to that EB, and queries the relay's ledger for an output
+from the fetched transactions. This exercises the transition and producer,
+network, and ledger paths through Dingo's interfaces and protocol outputs.
 
 Run the complete scenario with:
 
@@ -737,7 +740,7 @@ dingo mode — no `cardano-node` reference exists for this feature:
 | Test | What it verifies |
 |------|-------------------|
 | `TestCIP50PledgeLeverageRewardEffect` | With `poolPledge: 0`, compares a leverage-off baseline (member rewards greater than zero by epoch 4) against a leveraged pass (member rewards exactly zero for every delegated stake credential). Skipped unless `DEVNET_CIP50_TEST=1` is set; requires two separately launched networks to run both passes (see above). |
-| `TestLeiosEndorserBlockProducerToPeer` | On the dedicated Dijkstra network, follows a producer EB offer through LeiosNotify, relay LeiosFetch, a Dijkstra ranking-header reference, and presence of a fetched transaction output in the relay ledger. Runs only via `run-tests.sh --leios`. |
+| `TestLeiosEndorserBlockProducerToPeer` | On the dedicated network, observes Conway headers before the scheduled epoch-1 Dijkstra hard fork and Dijkstra headers afterward on every node, then follows a producer EB offer through LeiosNotify, relay LeiosFetch, a Dijkstra ranking-header reference, and presence of a fetched transaction output in the relay ledger. Runs only via `run-tests.sh --leios`. |
 
 ## Port and address overrides
 
@@ -788,13 +791,13 @@ harness and the compose port mappings always agree.
 | File                         | Purpose |
 |------------------------------|---------|
 | `docker-compose.yml`         | Service, volume, and network definitions for the `dingo`, `conformance`, and `koios-parity` profiles |
-| `Dockerfile.configurator`    | Builds the genesis/key generator image (cardano-foundation/testnet-generation-tool v0.1.0) |
+| `Dockerfile.configurator`    | Builds the genesis/key generator image (cardano-foundation/testnet-generation-tool v0.2.0) |
 | `configurator.sh`            | Runs inside the configurator: drives `genesis-cli.py`, builds ring topology (mode-aware pool count via `DINGO_POOL_IDS`), sets `systemStart`, relaxes key permissions for non-root node containers and chowns each Dingo pool's keys to `DINGO_UID`/`DINGO_GID` (passed in by compose, defaulting to the `1000:1000` pinned in the repo root `Dockerfile`) |
 | `testnet-dingo.yaml`         | Canonical network spec for dingo mode: 3 pools, `poolPledge: 0` |
 | `testnet.yaml`               | Canonical network spec for conformance mode: 2 pools |
 | `testnet-dingo-accelerated.yaml` | Accelerated dingo-mode spec: 60s epochs, `k: 10`, 0.5s slots |
 | `testnet-accelerated.yaml`   | Accelerated conformance-mode spec: same timing, 2 pools |
-| `testnet-dingo-leios.yaml`   | Dijkstra/Leios all-Dingo integration spec: Dijkstra at genesis, 300-slot epochs, 0.5s slots |
+| `testnet-dingo-leios.yaml`   | Dijkstra/Leios all-Dingo integration spec: Conway in epoch 0, Dijkstra from epoch 1, 300-slot epochs, 0.5s slots |
 | `topology/dingo-1.json`, `dingo-2.json`, `dingo-3.json`, `dingo-relay.json` | Static peer lists for dingo mode |
 | `topology/dingo-producer.json`, `cardano-producer.json`, `relay.json` | Static peer lists for conformance mode |
 | `.env`                       | Sets the default `COMPOSE_PROFILES=dingo` |

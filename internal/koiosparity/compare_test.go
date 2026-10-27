@@ -475,7 +475,7 @@ func TestComparePoolEpochStakeNotPresent(t *testing.T) {
 	require.Equal(t, StatusError, DetermineStatus(ms))
 }
 
-func TestComparePoolEpochMemberRewards(t *testing.T) {
+func TestCompareMemberRewardsSpendableSum(t *testing.T) {
 	t.Parallel()
 
 	now := time.Now()
@@ -501,36 +501,30 @@ func TestComparePoolEpochMemberRewards(t *testing.T) {
 	}
 	require.Empty(
 		t,
-		ComparePoolEpoch(
+		memberRewardsFor(
 			"preview",
 			5,
 			koios,
 			dingo,
 			now,
 			0,
-			time.Time{},
-			false,
-			false,
-		),
+			time.Time{}),
 	)
 
 	// Reward calculation not yet finished for this pool/epoch: Dingo has no
 	// reward_pool_output row. This must NEVER read as a comparison pass —
-	// see TestComparePoolEpochMemberRewardsNotPresent for the recent
+	// see TestCompareMemberRewardsRowNotPresent for the recent
 	// (reference_lag) vs historical (dingo_db_missing) split this guards.
 	dingo.MemberRewardPresent = false
 	dingo.MemberRewardTotal = ""
-	ms := ComparePoolEpoch(
+	ms := memberRewardsFor(
 		"preview",
 		5,
 		koios,
 		dingo,
 		now,
 		0,
-		time.Time{},
-		false,
-		false,
-	)
+		time.Time{})
 	require.Len(
 		t,
 		ms,
@@ -543,29 +537,26 @@ func TestComparePoolEpochMemberRewards(t *testing.T) {
 	dingo.MemberRewardPresent = true
 
 	dingo.MemberRewardTotal = "1"
-	ms = ComparePoolEpoch(
+	ms = memberRewardsFor(
 		"preview",
 		5,
 		koios,
 		dingo,
 		now,
 		0,
-		time.Time{},
-		false,
-		false,
-	)
+		time.Time{})
 	require.Len(t, ms, 1)
 	require.Equal(t, "member_rewards", ms[0].Field)
 	require.Equal(t, CategoryValueMismatch, ms[0].Category)
 }
 
-// TestComparePoolEpochMemberRewardsNotPresent proves a missing
+// TestCompareMemberRewardsRowNotPresent proves a missing
 // reward_pool_output row can never yield PASS regardless of how recently the
 // epoch closed — only the mismatch category differs (reference_lag for a
 // recent epoch that may simply not be computed yet vs dingo_db_missing for a
 // long-settled one). This condition must not be conflated with "nothing to
 // compare".
-func TestComparePoolEpochMemberRewardsNotPresent(t *testing.T) {
+func TestCompareMemberRewardsRowNotPresent(t *testing.T) {
 	t.Parallel()
 
 	now := time.Now()
@@ -587,17 +578,14 @@ func TestComparePoolEpochMemberRewardsNotPresent(t *testing.T) {
 
 	// Historical: outside the grace window (or no grace configured) — a
 	// genuine gap in Dingo's own computation.
-	ms := ComparePoolEpoch(
+	ms := memberRewardsFor(
 		"preview",
 		5,
 		koios,
 		dingo,
 		now,
 		0,
-		time.Time{},
-		false,
-		false,
-	)
+		time.Time{})
 	require.Len(t, ms, 1)
 	require.Equal(t, "member_rewards", ms[0].Field)
 	require.Equal(t, CategoryDBMissing, ms[0].Category)
@@ -606,17 +594,14 @@ func TestComparePoolEpochMemberRewardsNotPresent(t *testing.T) {
 	// Recent: epoch closed within the grace window — may simply not be
 	// computed yet, but still not a pass.
 	recentClose := now.Add(-time.Hour)
-	ms = ComparePoolEpoch(
+	ms = memberRewardsFor(
 		"preview",
 		5,
 		koios,
 		dingo,
 		now,
 		24,
-		recentClose,
-		false,
-		false,
-	)
+		recentClose)
 	require.Len(t, ms, 1)
 	require.Equal(t, "member_rewards", ms[0].Field)
 	require.Equal(t, CategoryReferenceLag, ms[0].Category)
@@ -1572,13 +1557,13 @@ func TestComparePoolEpochZeroStakeRequiresStakeEpochRow(t *testing.T) {
 	require.Equal(t, StatusError, DetermineStatus(ms))
 }
 
-// TestComparePoolEpochMemberRewardsExcludesUnspendable pins the quantity
+// TestCompareMemberRewardsExcludesUnspendable pins the quantity
 // member_rewards is compared on. Koios reports the rewards members actually
 // received; reward_pool_output.member_reward_total sums every member reward the
 // calculation produced, spendable or not. A pool with an unspendable member
 // reward — one computed for a credential the ledger correctly never credits —
 // used to fail against a node that was right.
-func TestComparePoolEpochMemberRewardsExcludesUnspendable(t *testing.T) {
+func TestCompareMemberRewardsExcludesUnspendable(t *testing.T) {
 	t.Parallel()
 
 	now := time.Now()
@@ -1607,25 +1592,21 @@ func TestComparePoolEpochMemberRewardsExcludesUnspendable(t *testing.T) {
 		SpendableMemberRewardPresent: true,
 		SpendableMemberRewardTotal:   "327005332",
 	}
-	require.Empty(t, ComparePoolEpoch(
-		"preview", 5, koios, dingo, now, 0, time.Time{}, false,
-		false,
-	), "an unspendable member reward is not a divergence")
+	require.Empty(t, memberRewardsFor(
+		"preview", 5, koios, dingo, now, 0, time.Time{}), "an unspendable member reward is not a divergence")
 
 	// A real disagreement in the spendable sum still fails, and reports the
 	// spendable figure rather than the pool total.
 	dingo.SpendableMemberRewardTotal = "327005333"
-	ms := ComparePoolEpoch(
-		"preview", 5, koios, dingo, now, 0, time.Time{}, false,
-		false,
-	)
+	ms := memberRewardsFor(
+		"preview", 5, koios, dingo, now, 0, time.Time{})
 	require.Len(t, ms, 1)
 	require.Equal(t, "member_rewards", ms[0].Field)
 	require.Equal(t, CategoryValueMismatch, ms[0].Category)
 	require.Equal(t, "327005333", ms[0].DingoValue)
 }
 
-// TestComparePoolEpochMemberRewardsWithoutAccountOutputs covers a node whose
+// TestCompareMemberRewardsWithoutAccountOutputs covers a node whose
 // reward_account_output rows for the epoch are gone — cleanupOldSnapshots
 // retains them without bound only in api storage mode.
 //
@@ -1634,7 +1615,7 @@ func TestComparePoolEpochMemberRewardsExcludesUnspendable(t *testing.T) {
 // its spendable member total by construction. When something was withheld the
 // two provably differ, so the field is reported as a missing row rather than
 // compared on a basis that would fail a correct ledger.
-func TestComparePoolEpochMemberRewardsWithoutAccountOutputs(t *testing.T) {
+func TestCompareMemberRewardsWithoutAccountOutputs(t *testing.T) {
 	t.Parallel()
 
 	now := time.Now()
@@ -1660,19 +1641,15 @@ func TestComparePoolEpochMemberRewardsWithoutAccountOutputs(t *testing.T) {
 		SpendableMemberRewardPresent: false,
 		PoolUnspendable:              0,
 	}
-	require.Empty(t, ComparePoolEpoch(
-		"preview", 5, koios, dingo, now, 0, time.Time{}, false,
-		false,
-	), "with nothing withheld the pool total is the spendable total")
+	require.Empty(t, memberRewardsFor(
+		"preview", 5, koios, dingo, now, 0, time.Time{}), "with nothing withheld the pool total is the spendable total")
 
 	// The same missing rows, but the pool withheld something, so the pool
 	// total is known to overstate what members received.
 	dingo.PoolUnspendable = 71328
 	dingo.MemberRewardTotal = "327076660"
-	ms := ComparePoolEpoch(
-		"preview", 5, koios, dingo, now, 0, time.Time{}, false,
-		false,
-	)
+	ms := memberRewardsFor(
+		"preview", 5, koios, dingo, now, 0, time.Time{})
 	require.Len(t, ms, 1,
 		"an unformable comparison must not read as a pass")
 	require.Equal(t, "member_rewards", ms[0].Field)

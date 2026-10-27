@@ -17,11 +17,14 @@ package ledger
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
@@ -466,6 +469,9 @@ func TestObserveBlockStageRecordsUnderEachLabel(t *testing.T) {
 	m.observeBlockStage(blockStageApply, 30*time.Millisecond)
 	m.observeBlockStage(blockStageValidate, 5*time.Millisecond)
 	m.observeBlockStage(blockStageEpochRollover, 40*time.Second)
+	m.observeBlockStage(blockStagePrepare, 2*time.Millisecond)
+	m.observeBlockStage(blockStageCommit, 3*time.Millisecond)
+	m.observeBlockStage(blockStageDeferredHeaderVerify, time.Millisecond)
 
 	count, _ := blockStageSampleCount(t, &m, blockStageHeaderVerify)
 	assert.Equal(t, uint64(1), count)
@@ -476,20 +482,26 @@ func TestObserveBlockStageRecordsUnderEachLabel(t *testing.T) {
 	assert.Equal(t, uint64(1), count)
 	count, _ = blockStageSampleCount(t, &m, blockStageEpochRollover)
 	assert.Equal(t, uint64(1), count)
+	count, _ = blockStageSampleCount(t, &m, blockStagePrepare)
+	assert.Equal(t, uint64(1), count)
+	count, _ = blockStageSampleCount(t, &m, blockStageCommit)
+	assert.Equal(t, uint64(1), count)
+	count, _ = blockStageSampleCount(t, &m, blockStageDeferredHeaderVerify)
+	assert.Equal(t, uint64(1), count)
 
-	// Four distinct label series, no more.
+	// Seven distinct label series, no more.
 	assert.Equal(
 		t,
-		4,
+		7,
 		testutil.CollectAndCount(m.blockStageDuration),
 	)
 }
 
 // TestObserveBlockStageIgnoresUnknownStage confirms an unrecognized stage
 // label is silently dropped rather than panicking or creating a stray label
-// series. init pre-materializes the four known stage series, so this
+// series. init pre-materializes the seven known stage series, so this
 // checks their sample counts stay zero rather than the series count, which
-// is already 4 regardless of any observation.
+// is already 7 regardless of any observation.
 func TestObserveBlockStageIgnoresUnknownStage(t *testing.T) {
 	t.Parallel()
 
@@ -500,15 +512,18 @@ func TestObserveBlockStageIgnoresUnknownStage(t *testing.T) {
 
 	assert.Equal(
 		t,
-		4,
+		7,
 		testutil.CollectAndCount(m.blockStageDuration),
-		"init pre-materializes exactly the four known stage series",
+		"init pre-materializes exactly the seven known stage series",
 	)
 	for _, stage := range []string{
 		blockStageHeaderVerify,
 		blockStageValidate,
 		blockStageApply,
 		blockStageEpochRollover,
+		blockStagePrepare,
+		blockStageCommit,
+		blockStageDeferredHeaderVerify,
 	} {
 		count, _ := blockStageSampleCount(t, &m, stage)
 		assert.Zerof(
@@ -613,6 +628,9 @@ func TestBlockStageMaxDurationExportsRunningMaximum(t *testing.T) {
 		blockStageValidate,
 		blockStageApply,
 		blockStageEpochRollover,
+		blockStagePrepare,
+		blockStageCommit,
+		blockStageDeferredHeaderVerify,
 	} {
 		assert.Equal(
 			t,
@@ -646,6 +664,9 @@ func TestBlockStageMaxDurationExportsRunningMaximum(t *testing.T) {
 		blockStageHeaderVerify,
 		blockStageValidate,
 		blockStageEpochRollover,
+		blockStagePrepare,
+		blockStageCommit,
+		blockStageDeferredHeaderVerify,
 	} {
 		assert.Equal(
 			t,
@@ -960,4 +981,139 @@ func TestLedgerProcessBlocksFromSourceObservesBlockApplyBatchLatency(
 		sizeSum,
 		"the committed chunk contained exactly one block",
 	)
+}
+
+// TestBlockApplyStagesAttributeBatchTime drives real block batches through
+// the production apply loop on the batched (row-batching) and unbatched
+// sync paths and requires that the stages cover the batch's wall-clock time:
+// apply is observed, the pre-transaction work and the transaction commit are
+// attributed to their own stages, and the in-window stages never sum to more
+// than dingo_ledger_block_apply_batch_latency_seconds.
+func TestBlockApplyStagesAttributeBatchTime(t *testing.T) {
+	t.Parallel()
+
+	blocks, _ := rowBatchingScenario(t)
+	for _, batching := range []bool{false, true} {
+		t.Run(fmt.Sprintf("rowBatching=%v", batching), func(t *testing.T) {
+			t.Parallel()
+			// Injected latency after the commit, so the commit stage has a
+			// known lower bound that does not depend on machine speed.
+			const commitDelay = 20 * time.Millisecond
+			run := runRowBatchingScenario(
+				t, blocks, types.StorageModeCore, batching, len(blocks),
+				func(ls *LedgerState) {
+					ls.afterLedgerWriteCommit = func() {
+						deadline := time.Now().Add(commitDelay)
+						for time.Now().Before(deadline) {
+							runtime.Gosched()
+						}
+					}
+				},
+			)
+			m := &run.ls.metrics
+
+			batchCount, batchSum := blockApplyBatchLatencySample(t, m)
+			require.Equal(t, uint64(1), batchCount)
+
+			var stageSum float64
+			for _, stage := range []string{
+				blockStagePrepare,
+				blockStageApply,
+				blockStageCommit,
+			} {
+				count, sum := blockStageSampleCount(t, m, stage)
+				assert.Equal(
+					t, uint64(1), count,
+					"stage %q must be observed once for the one batch",
+					stage,
+				)
+				stageSum += sum
+			}
+			// The scenario's blocks are unvalidated, so validate is zero
+			// and the three stages above are the whole in-window sum.
+			validateCount, _ := blockStageSampleCount(t, m, blockStageValidate)
+			require.Zero(t, validateCount)
+			_, commitSum := blockStageSampleCount(t, m, blockStageCommit)
+			assert.GreaterOrEqual(
+				t, commitSum, commitDelay.Seconds(),
+				"commit stage must include the post-commit window",
+			)
+			assert.LessOrEqual(
+				t, stageSum, batchSum,
+				"stages inside the batch window must not exceed its latency",
+			)
+		})
+	}
+}
+
+// TestBlockApplyStageIncludesReplayRowFlush pins the replay-row flush inside
+// the batch's apply sample. On the row-batching path the delta batch only
+// accumulates rows and the flush is where they are written, so an apply
+// sample that stopped before it would read near zero.
+func TestBlockApplyStageIncludesReplayRowFlush(t *testing.T) {
+	t.Parallel()
+
+	blocks, _ := rowBatchingScenario(t)
+	// Injected latency inside the flush, so the apply stage has a known
+	// lower bound that does not depend on machine speed.
+	const flushDelay = 20 * time.Millisecond
+	var flushes atomic.Int64
+	run := runRowBatchingScenario(
+		t, blocks, types.StorageModeCore, true, len(blocks),
+		func(ls *LedgerState) {
+			ls.beforeReplayRowFlush = func() {
+				flushes.Add(1)
+				deadline := time.Now().Add(flushDelay)
+				for time.Now().Before(deadline) {
+					runtime.Gosched()
+				}
+			}
+		},
+	)
+	require.Equal(
+		t, int64(1), flushes.Load(),
+		"the scenario must flush replay rows once",
+	)
+	count, sum := blockStageSampleCount(t, &run.ls.metrics, blockStageApply)
+	require.Equal(t, uint64(1), count)
+	assert.GreaterOrEqual(
+		t, sum, flushDelay.Seconds(),
+		"the apply sample must include the replay-row flush",
+	)
+}
+
+// TestBlockApplyStagesObservedOnlyWithBatchLatency pins prepare and commit to
+// the chunks dingo_ledger_block_apply_batch_latency_seconds observes. Crossing
+// an epoch boundary first commits a chunk that applies no block, which records
+// no batch latency; a prepare or commit sample from it would have no window to
+// fall inside.
+func TestBlockApplyStagesObservedOnlyWithBatchLatency(t *testing.T) {
+	t.Parallel()
+
+	ls, _, firstShelley := newByronShelleyBoundaryLedger(t)
+	results := make(chan readChainResult, 1)
+	results <- readChainResult{blocks: []gledger.Block{firstShelley}}
+	close(results)
+	require.NoError(t, ls.ledgerProcessBlocksFromSource(
+		context.Background(),
+		results,
+	))
+	rolloverCount, _ := blockStageSampleCount(
+		t, &ls.metrics, blockStageEpochRollover,
+	)
+	require.Equal(
+		t, uint64(1), rolloverCount,
+		"the scenario must cross an epoch boundary",
+	)
+
+	batchCount, _ := blockApplyBatchLatencySample(t, &ls.metrics)
+	require.Equal(t, uint64(1), batchCount)
+	for _, stage := range []string{blockStagePrepare, blockStageCommit} {
+		count, _ := blockStageSampleCount(t, &ls.metrics, stage)
+		assert.Equal(
+			t, batchCount, count,
+			"stage %q must be observed once per batch latency sample",
+			stage,
+		)
+	}
 }

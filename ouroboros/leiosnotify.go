@@ -56,6 +56,7 @@ type LeiosAnnouncementLedger interface {
 	ValidateLeiosEndorserBlockTransactions(
 		context.Context,
 		gledger.BlockHeader,
+		[]byte,
 		[][]byte,
 	) error
 }
@@ -88,10 +89,13 @@ const (
 )
 
 type leiosAnnouncement struct {
-	raw    []byte
-	ebHash lcommon.Blake2b256
-	ebSize uint64
-	slot   uint64
+	// raw preserves the original wire envelope for relaying.
+	raw []byte
+	// headerRaw is the bare Dijkstra CBOR used by internal header consumers.
+	headerRaw []byte
+	ebHash    lcommon.Blake2b256
+	ebSize    uint64
+	slot      uint64
 	// electionKey lets pruning rebuild the bounded per-election index.
 	electionKey string
 }
@@ -176,13 +180,13 @@ func (o *Ouroboros) reserveLeiosAnnouncementValidation(
 	key string,
 	ebHash lcommon.Blake2b256,
 	ebSize uint64,
-	raw []byte,
+	headerRaw []byte,
 ) (bool, func(), error) {
 	o.leiosAnnouncementsMu.Lock()
 	if previous, exists := o.leiosAnnouncements[key]; exists {
 		o.leiosAnnouncementsMu.Unlock()
 		if previous.ebHash == ebHash && previous.ebSize == ebSize &&
-			bytes.Equal(previous.raw, raw) {
+			bytes.Equal(previous.headerRaw, headerRaw) {
 			return true, nil, nil
 		}
 		return false, nil, errors.New(
@@ -380,7 +384,11 @@ func (l *leiosForgedEBLog) nextWhileConnected(
 	if reserved, ok := l.reservations[connKey]; ok {
 		if item, found := l.itemAtOrAfterLocked(reserved.index); found &&
 			item.index == reserved.index {
-			return &item.entry, l.wakeCh
+			// The peer sends its next RequestNext as soon as it has read a
+			// response, which can be before the server reports that send.
+			// Wait for complete to commit or release the reservation, or
+			// this request would offer the same entry again.
+			return nil, l.wakeCh
 		}
 		delete(l.reservations, connKey)
 	}
@@ -425,6 +433,7 @@ func (l *leiosForgedEBLog) complete(
 		return
 	}
 	delete(l.reservations, connKey)
+	defer l.wakeLocked()
 	if delivered {
 		if l.cursors[connKey] == reserved.index {
 			l.cursors[connKey] = reserved.index + 1
@@ -447,6 +456,14 @@ func (l *leiosForgedEBLog) complete(
 		l.retryCursors[connKey] = reserved.index
 	}
 	l.pruneLocked()
+}
+
+// wakeLocked releases every request parked on the current wake channel so it
+// re-checks the log. Callers must hold l.mu.
+func (l *leiosForgedEBLog) wakeLocked() {
+	wake := l.wakeCh
+	l.wakeCh = make(chan struct{})
+	close(wake)
 }
 
 // skipExcludedLocked advances connKey across consecutive entries that it
@@ -680,18 +697,14 @@ func (o *Ouroboros) BroadcastEndorserBlock(
 	txBodies [][]byte,
 ) error {
 	point := ocommon.Point{Slot: slot, Hash: hash}
-	// Match the on-the-wire form fetched EB transactions are stored in: each
-	// transaction is a CBOR byte string wrapping its CBOR (LeiosTx =
-	// encodeBytes(txCbor)), so served forged-EB bodies decode identically.
+	// Forged bodies are already block_transactions, the form fetched EB
+	// transactions are cached in once leios-fetch has removed its tag-24
+	// wrapper.
 	var txsRaw []cbor.RawMessage
 	if len(txBodies) > 0 {
 		txsRaw = make([]cbor.RawMessage, 0, len(txBodies))
-		for i, body := range txBodies {
-			wrapped, err := cbor.Encode(body)
-			if err != nil {
-				return fmt.Errorf("encode forged EB tx %d: %w", i, err)
-			}
-			txsRaw = append(txsRaw, cbor.RawMessage(wrapped))
+		for _, body := range txBodies {
+			txsRaw = append(txsRaw, cbor.RawMessage(slices.Clone(body)))
 		}
 	}
 	// Locally forged: dingo chose this slot itself, so the binding is
@@ -2089,24 +2102,14 @@ func (o *Ouroboros) fetchLeiosEbTxsBatchedUntilWithValidator(
 				"unexpected leios-fetch BlockTxs response type %T", resp,
 			)
 		}
-		if err := validateLeiosTxBitmap(txCount, respTxs.Bitmaps); err != nil {
-			// A relay-declared bitmap referencing an index beyond this
-			// endorser block's txCount is rejected before it is expanded: a
-			// small txCount must not license decoding a disproportionately
-			// large index list.
-			return leiosCollectTxs(result), fmt.Errorf(
-				"leios-fetch response bitmap: %w",
-				err,
-			)
-		}
-		served := leiosBitmapTxIndices(respTxs.Bitmaps)
+		// The reply carries no bitmap: its transactions answer the requested
+		// bitmap in ascending index order.
+		served := leiosBitmapTxIndices(needed)
 		if len(served) != len(respTxs.TxsRaw) {
-			// The SDK wire contract requires one transaction per served bit;
-			// do not infer positions from an obsolete bitmap-free response.
 			return leiosCollectTxs(result), fmt.Errorf(
-				"leios-fetch response bitmap selects %d transactions, got %d",
-				len(served),
+				"leios-fetch response has %d transactions, requested %d",
 				len(respTxs.TxsRaw),
+				len(served),
 			)
 		}
 		progress := 0
@@ -2299,6 +2302,13 @@ func (o *Ouroboros) acceptLeiosAnnouncementInternal(
 		}
 		return fmt.Errorf("decode ranking-block header: %w", err)
 	}
+	// Only relay uses the original wire bytes. Duplicate detection and
+	// semantic validation use the bare Dijkstra header preserved by
+	// DecodeStoreCbor, so era-wrapped and bare encodings of one header agree.
+	headerRaw := header.Cbor()
+	if len(headerRaw) == 0 {
+		return errors.New("decoded ranking-block header has no preserved CBOR")
+	}
 	ebHash, ebSize, ok := header.LeiosAnnouncement()
 	if !ok {
 		return errors.New(
@@ -2310,7 +2320,7 @@ func (o *Ouroboros) acceptLeiosAnnouncementInternal(
 		announcementKey,
 		ebHash,
 		ebSize,
-		raw,
+		headerRaw,
 	)
 	if err != nil {
 		return err
@@ -2409,6 +2419,7 @@ func (o *Ouroboros) acceptLeiosAnnouncementInternal(
 		// relay bound prevents an old message from propagating indefinitely.
 		return o.recordLeiosAnnouncement(
 			raw,
+			headerRaw,
 			ebHash,
 			ebSize,
 			header,
@@ -2416,7 +2427,15 @@ func (o *Ouroboros) acceptLeiosAnnouncementInternal(
 			false,
 		)
 	}
-	return o.recordLeiosAnnouncement(raw, ebHash, ebSize, header, source, true)
+	return o.recordLeiosAnnouncement(
+		raw,
+		headerRaw,
+		ebHash,
+		ebSize,
+		header,
+		source,
+		true,
+	)
 }
 
 func (o *Ouroboros) deferLeiosAnnouncement(
@@ -2524,6 +2543,16 @@ func (o *Ouroboros) subscribeLeiosAnnouncementRetries() {
 	}
 	o.subscribeTracked(chain.ChainUpdateEventType, retry)
 	o.subscribeTracked(event.EpochTransitionEventType, retry)
+	// An endorser block validates once its announcing block is the applied
+	// ledger tip, which the chain update above can precede. The ledger
+	// publishes this event with PublishBlocking, so the handler only
+	// schedules work.
+	o.subscribeTracked(ledger.BlockEventType, func(evt event.Event) {
+		if blockEvt, ok := evt.Data.(ledger.BlockEvent); ok &&
+			blockEvt.Action == ledger.BlockActionApply {
+			o.retryLeiosEndorserBlockValidations()
+		}
+	})
 }
 
 // pruneLeiosAnnouncements bounds announcement deduplication state to the
@@ -2579,6 +2608,7 @@ func (o *Ouroboros) pruneLeiosAnnouncements() {
 // peer-supplied slot.
 func (o *Ouroboros) recordLeiosAnnouncement(
 	raw []byte,
+	headerRaw []byte,
 	ebHash lcommon.Blake2b256,
 	ebSize uint64,
 	header *gdijkstra.DijkstraBlockHeader,
@@ -2606,6 +2636,7 @@ func (o *Ouroboros) recordLeiosAnnouncement(
 	if err == nil {
 		err = o.recordLeiosAnnouncementLocked(
 			raw,
+			headerRaw,
 			ebHash,
 			ebSize,
 			header,
@@ -2623,7 +2654,7 @@ func (o *Ouroboros) recordLeiosAnnouncement(
 		publish = o.bindLeiosEndorserBlockSlot(
 			ebHash.Bytes(),
 			header.SlotNumber(),
-			raw,
+			headerRaw,
 		)
 	}
 	o.leiosAnnouncementsMu.Unlock()
@@ -2637,6 +2668,7 @@ func (o *Ouroboros) recordLeiosAnnouncement(
 // The caller must hold leiosAnnouncementsMu.
 func (o *Ouroboros) recordLeiosAnnouncementLocked(
 	raw []byte,
+	headerRaw []byte,
 	ebHash lcommon.Blake2b256,
 	ebSize uint64,
 	header *gdijkstra.DijkstraBlockHeader,
@@ -2674,7 +2706,7 @@ func (o *Ouroboros) recordLeiosAnnouncementLocked(
 	slot := header.SlotNumber()
 	if previous, exists := o.leiosAnnouncements[key]; exists {
 		if previous.ebHash != ebHash || previous.ebSize != ebSize ||
-			string(previous.raw) != string(raw) {
+			string(previous.headerRaw) != string(headerRaw) {
 			return errors.New(
 				"announcement is inconsistent with a previously observed ranking block",
 			)
@@ -2698,6 +2730,7 @@ func (o *Ouroboros) recordLeiosAnnouncementLocked(
 	electionAnnouncements[key] = struct{}{}
 	o.leiosAnnouncements[key] = leiosAnnouncement{
 		raw:         append([]byte(nil), raw...),
+		headerRaw:   append([]byte(nil), headerRaw...),
 		ebHash:      ebHash,
 		ebSize:      ebSize,
 		slot:        slot,
@@ -2759,8 +2792,9 @@ func (o *Ouroboros) leiosAnnouncementBindsSlotLocked(
 	return true
 }
 
-// leiosAnnouncementHeaderLocked returns the exact announcement header that
-// binds one endorser-block occurrence. The caller holds leiosAnnouncementsMu.
+// leiosAnnouncementHeaderLocked returns the bare preserved Dijkstra header
+// that binds one endorser-block occurrence. The caller holds
+// leiosAnnouncementsMu.
 func (o *Ouroboros) leiosAnnouncementHeaderLocked(
 	ebHash []byte,
 	slot uint64,
@@ -2768,7 +2802,7 @@ func (o *Ouroboros) leiosAnnouncementHeaderLocked(
 	for _, announcement := range o.leiosAnnouncements {
 		if announcement.slot == slot &&
 			slices.Equal(announcement.ebHash.Bytes(), ebHash) {
-			return slices.Clone(announcement.raw)
+			return slices.Clone(announcement.headerRaw)
 		}
 	}
 	return nil

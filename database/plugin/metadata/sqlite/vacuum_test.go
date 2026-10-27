@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -107,7 +108,10 @@ func TestSQLiteVacuumRunsThroughWritePool(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- vacuum(context.Background()) }()
 
-	require.Never(
+	// writeLockHeld opens a transaction, so no check may still be running
+	// once the wait ends: one that is would hold the lock against the VACUUM
+	// below and roll back after the test's context is gone.
+	testutil.RequireNever(
 		t,
 		writeLockHeld,
 		time.Second,

@@ -137,7 +137,7 @@ var AcceptedChainsyncStrategies = []string{
 // empty string (which selects the default v2), matching cmd/dingo's
 // resolveMithrilBackend. Kept in sync by the same parity test in
 // cmd/dingo as AcceptedChainsyncStrategies.
-var AcceptedMithrilBackends = []string{"", "v1", "v2"}
+var AcceptedMithrilBackends = []string{"", "v2"}
 
 // FullPotRewardsStandardNetwork reports whether network/networkMagic identifies
 // a predefined non-devnet network where CIP-0163 full-pot rewards must not be
@@ -166,17 +166,9 @@ func FullPotRewardsStandardNetwork(
 // experimental Musashi network (the IOG Leios prototype) with a *different*
 // predefined network, returning the name of the network it collides with.
 //
-// This matters because Musashi is identified by either half of its identity —
-// the name "musashi" or network magic 164 — and that identity switches on
-// consensus/ledger trust bypasses (SkipLeaderStakeThresholdCheck,
-// SkipDijkstraTxValidation). Either half alone is enough to enable them, so a
-// half-matching configuration is dangerous in both directions:
-//
-//   - network "preview" with magic 164 runs the prototype's non-validating
-//     rules on a node the operator configured as preview; and
-//   - network "musashi" with magic 2 is worse still, because the handshake
-//     uses the magic: the node actually joins preview while trusting the
-//     prototype's rules.
+// The network name selects built-in configuration while network magic selects
+// peers during the handshake. A half-matching configuration therefore mixes
+// two network identities.
 //
 // A custom name or an unregistered magic is not a conflict — those are private
 // prototype deployments (e.g. a Musashi mirror). Devnet is excluded for the
@@ -206,13 +198,14 @@ func MusashiNetworkIdentityConflict(
 }
 
 // MusashiPrototypeNetwork reports whether network/networkMagic unambiguously
-// identifies the Musashi prototype network, and is therefore permitted to run
-// with the prototype's consensus/ledger trust bypasses.
+// identifies the Musashi prototype network: the name "musashi" or the magic
+// 164, with no conflicting standard network (see
+// MusashiNetworkIdentityConflict). It gates prototype-only protocol behavior
+// that a client of a standard network could not decode.
 //
-// A conflicting identity (see MusashiNetworkIdentityConflict) is deliberately
-// *not* the prototype network. Startup validation rejects those configurations
-// outright, but returning false here keeps the bypasses off even for an
-// embedder that builds a Config directly and never calls Validate.
+// A conflicting identity is deliberately not the prototype network. Startup
+// validation rejects those configurations outright, but returning false here
+// keeps the behavior off for an embedder that never calls Validate.
 func MusashiPrototypeNetwork(network string, networkMagic uint32) bool {
 	if _, conflict := MusashiNetworkIdentityConflict(
 		network,
@@ -389,6 +382,21 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		(effectiveMode == RunModeDev || c.RunMode.IsDevMode() ||
 			c.StorageMode == storageModeAPI)
 	midnightServer := apiListeners && c.Midnight.ServerEnabled
+	dmqN2N := serving && c.DMQ.Enabled
+	// The peer listener binds one port on each configured address family,
+	// so each address contends with the other listeners. With neither set a
+	// single wildcard row still range-checks the port.
+	var dmqN2NHosts []string
+	for _, host := range []string{
+		c.DMQ.ListenAddress, c.DMQ.ListenIPv6Address,
+	} {
+		if host != "" {
+			dmqN2NHosts = append(dmqN2NHosts, host)
+		}
+	}
+	if len(dmqN2NHosts) == 0 {
+		dmqN2NHosts = []string{""}
+	}
 	utxorpcPort := APIPluginPort(c.Plugins.API.Utxorpc)
 	blockfrostPort := APIPluginPort(c.Plugins.API.Blockfrost)
 	kupoPort := APIPluginPort(c.Plugins.API.Kupo)
@@ -414,13 +422,21 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	// at runtime: bindAddr for public listeners, privateBindAddr for the
 	// private listener, debugBindAddr for pprof, metricsBindAddr for
 	// Prometheus, midnight.host for Midnight, and BarkHost for bark.
-	ports := []struct {
+	type portSpec struct {
 		setting  string
 		host     string
 		port     uint
 		active   bool
 		required bool
-	}{
+	}
+	dmqPorts := make([]portSpec, 0, len(dmqN2NHosts))
+	for _, host := range dmqN2NHosts {
+		dmqPorts = append(
+			dmqPorts,
+			portSpec{"dmq.n2nPort", host, c.DMQ.N2NPort, dmqN2N, false},
+		)
+	}
+	ports := slices.Concat([]portSpec{
 		{"port (relay/NtN)", c.BindAddr, c.RelayPort, serving, serving},
 		{"privatePort", c.PrivateBindAddr, c.PrivatePort, serving, serving},
 		{
@@ -475,7 +491,7 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 			midnightServer,
 			midnightServer,
 		},
-	}
+	}, dmqPorts)
 	// Two active listeners contending for a port only fails at bind
 	// time; catch it here. Zero ports are disabled or OS-assigned, so
 	// they don't clash, and a port is only a conflict when the bind
@@ -486,18 +502,25 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		host    string
 	}
 	seenPorts := make(map[uint][]boundListener, len(ports))
+	validated := make(map[string]bool, len(ports))
 	for _, p := range ports {
 		if !p.active {
 			continue
 		}
-		if err := validatePort(p.setting, p.port, p.required, minBindable); err != nil {
-			errs = append(errs, err)
+		// A setting listed once per bind address is range-checked once.
+		if !validated[p.setting] {
+			validated[p.setting] = true
+			if err := validatePort(p.setting, p.port, p.required, minBindable); err != nil {
+				errs = append(errs, err)
+			}
 		}
 		if p.port == 0 {
 			continue
 		}
 		for _, other := range seenPorts[p.port] {
-			if !bindAddrsOverlap(other.host, p.host) {
+			// One setting's own addresses (0.0.0.0 and ::) are one listener.
+			if other.setting == p.setting ||
+				!bindAddrsOverlap(other.host, p.host) {
 				continue
 			}
 			errs = append(errs, fmt.Errorf(
@@ -550,6 +573,18 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		errs = append(errs, fmt.Errorf(
 			"invalid barkArchiveMaxConcurrentFetches %d: must not be negative",
 			c.BarkArchiveMaxConcurrentFetches,
+		))
+	}
+	if c.BarkArchiveLookupsPerSecond < 0 {
+		errs = append(errs, fmt.Errorf(
+			"invalid barkArchiveLookupsPerSecond %d: must not be negative",
+			c.BarkArchiveLookupsPerSecond,
+		))
+	}
+	if c.BarkArchiveCallerLookupsPerSecond < 0 {
+		errs = append(errs, fmt.Errorf(
+			"invalid barkArchiveCallerLookupsPerSecond %d: must not be negative",
+			c.BarkArchiveCallerLookupsPerSecond,
 		))
 	}
 
@@ -813,11 +848,9 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		}
 	}
 
-	// The Musashi prototype network's identity switches on consensus/ledger
-	// trust bypasses, so it must never be half-claimed by a configuration
-	// that also names or addresses a standard network. Rejected outright
-	// rather than defused silently: the operator asked for two mutually
-	// exclusive networks and only one of them can be what they meant.
+	// The network name selects built-in configuration while network magic
+	// selects peers during the handshake. Reject a configuration that identifies
+	// both Musashi and another predefined network.
 	if network, ok := MusashiNetworkIdentityConflict(
 		c.Network,
 		c.NetworkMagic,
@@ -825,9 +858,7 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		errs = append(errs, fmt.Errorf(
 			"network identity conflict: network %q with networkMagic %d "+
 				"identifies both the %q network and the Musashi prototype "+
-				"network (name %q, magic %d); the Musashi prototype disables "+
-				"consensus and ledger validation and must not be reachable "+
-				"from a standard network configuration",
+				"network (name %q, magic %d)",
 			c.Network,
 			c.NetworkMagic,
 			network,
@@ -920,9 +951,14 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	// AcceptedMithrilBackends, kept in sync with cmd/dingo's
 	// resolveMithrilBackend by a parity test in cmd/dingo (empty
 	// selects v2).
-	if !slices.Contains(AcceptedMithrilBackends, c.Mithril.Backend) {
+	if c.Mithril.Backend == "v1" {
+		errs = append(errs, errors.New(
+			"mithril.backend \"v1\" is no longer supported; "+
+				"remove the setting or use \"v2\"",
+		))
+	} else if !slices.Contains(AcceptedMithrilBackends, c.Mithril.Backend) {
 		errs = append(errs, fmt.Errorf(
-			"invalid mithril.backend %q: must be \"v1\" or \"v2\"",
+			"invalid mithril.backend %q: must be empty or \"v2\"",
 			c.Mithril.Backend,
 		))
 	}
@@ -990,6 +1026,47 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 			}
 		}
 	}
+	// Node-managed Mithril sync runs only inside a serving node, so the
+	// one-shot `dingo mithril sync` and `dingo sync --mithril` paths are
+	// not gated by these settings.
+	if c.Mithril.Enabled && effectiveMode.RequiresListeners() {
+		if c.StorageMode == storageModeAPI {
+			errs = append(errs, errors.New(
+				"mithril.enabled requires core storage mode",
+			))
+		}
+		if c.Mithril.BatchChunks < 1 {
+			errs = append(errs, fmt.Errorf(
+				"invalid mithril.batchChunks %d: must be at least 1",
+				c.Mithril.BatchChunks,
+			))
+		}
+		if c.Mithril.WindowChunks < c.Mithril.BatchChunks {
+			errs = append(errs, fmt.Errorf(
+				"invalid mithril.windowChunks %d: must be at least "+
+					"mithril.batchChunks (%d)",
+				c.Mithril.WindowChunks, c.Mithril.BatchChunks,
+			))
+		}
+		if c.Mithril.DownloadWorkers < 1 {
+			errs = append(errs, fmt.Errorf(
+				"invalid mithril.downloadWorkers %d: must be at least 1",
+				c.Mithril.DownloadWorkers,
+			))
+		}
+		if c.Mithril.CheckInterval <= 0 {
+			errs = append(errs, fmt.Errorf(
+				"invalid mithril.checkInterval %s: must be positive",
+				c.Mithril.CheckInterval,
+			))
+		}
+		if c.Mithril.RetryBackoff <= 0 {
+			errs = append(errs, fmt.Errorf(
+				"invalid mithril.retryBackoff %s: must be positive",
+				c.Mithril.RetryBackoff,
+			))
+		}
+	}
 	if c.Mithril.DownloadMaxBytes < 0 {
 		errs = append(errs, fmt.Errorf(
 			"invalid mithril.downloadMaxBytes %d: must not be negative",
@@ -1053,10 +1130,11 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 				"dmq.socketPath must differ from socketPath",
 			))
 		}
+		errs = append(errs, validateDMQPeers(c.DMQ)...)
 		// Both are scaled into int64 quantities: seconds to a Duration and
 		// megabytes to bytes.
 		const maxMessageTTL = uint64(math.MaxInt64) / uint64(time.Second)
-		const maxMempoolSize = math.MaxInt64 >> 20
+		const maxMempoolSize = uint64(math.MaxInt64 >> 20)
 		switch {
 		case c.DMQ.MessageTTL == 0:
 			errs = append(errs, errors.New(
@@ -1295,8 +1373,19 @@ func isWildcardAddr(addr string) bool {
 // container's non-root user doesn't own (see the Docker image's pinned
 // UID:GID note in dingo.yaml.example).
 func checkDirWritable(dir string) (err error) {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("create directory: %w", err)
+	}
+	dirFile, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("open directory for permission check: %w", err)
+	}
+	if err := restrictSnapshotDirectory(dirFile); err != nil {
+		_ = dirFile.Close()
+		return fmt.Errorf("restrict directory permissions: %w", err)
+	}
+	if err := dirFile.Close(); err != nil {
+		return fmt.Errorf("close directory after permission check: %w", err)
 	}
 	probe, err := os.CreateTemp(dir, ".dingo-writable-check-*")
 	if err != nil {
@@ -1350,4 +1439,70 @@ func sameSocketPath(a, b string) bool {
 		return filepath.Clean(a) == filepath.Clean(b)
 	}
 	return absA == absB
+}
+
+// validateDMQTopologyFile checks that a configured DMQ topology file is a
+// regular file, so a typo fails at startup instead of when the peer dialer
+// first reads it.
+func validateDMQTopologyFile(path string) error {
+	if path == "" {
+		return nil
+	}
+	if err := validatePathNoTraversal("dmq.topologyFile", path); err != nil {
+		return err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("invalid dmq.topologyFile %q: %w", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf(
+			"invalid dmq.topologyFile %q: not a regular file", path,
+		)
+	}
+	return nil
+}
+
+// validateDMQPeers checks the DMQ peer listener and peer-count settings. The
+// listener fields are only meaningful when N2NPort is set, so they are left
+// unchecked for a local-only stack; the peer counts and topology file bound
+// outbound peers too, so they are always checked.
+func validateDMQPeers(c DMQConfig) []error {
+	var errs []error
+	if c.MinPeers > c.MaxPeers {
+		errs = append(errs, errors.New(
+			"dmq.minPeers must not exceed dmq.maxPeers",
+		))
+	}
+	if err := validateDMQTopologyFile(c.TopologyFile); err != nil {
+		errs = append(errs, err)
+	}
+	if c.N2NPort == 0 {
+		return errs
+	}
+	if c.ListenAddress == "" && c.ListenIPv6Address == "" {
+		errs = append(errs, errors.New(
+			"dmq.listenAddress or dmq.listenIpv6Address must be set "+
+				"when dmq.n2nPort is set",
+		))
+	}
+	if c.ListenAddress != "" {
+		if addr, err := netip.ParseAddr(c.ListenAddress); err != nil ||
+			!addr.Is4() {
+			errs = append(errs, fmt.Errorf(
+				"dmq.listenAddress %q must be an IPv4 address",
+				c.ListenAddress,
+			))
+		}
+	}
+	if c.ListenIPv6Address != "" {
+		if addr, err := netip.ParseAddr(c.ListenIPv6Address); err != nil ||
+			!addr.Is6() || addr.Is4In6() {
+			errs = append(errs, fmt.Errorf(
+				"dmq.listenIpv6Address %q must be an IPv6 address",
+				c.ListenIPv6Address,
+			))
+		}
+	}
+	return errs
 }

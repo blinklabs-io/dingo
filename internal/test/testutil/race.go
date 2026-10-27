@@ -19,9 +19,10 @@ import "testing"
 // SkipUnderRace skips t when the binary is built with -race. Use it only for a
 // test whose cost is single-goroutine computation or SQLite query planning,
 // where the detector has nothing to observe and multiplies the runtime several
-// times over. The same test must still run un-instrumented in go-test (Linux)
-// and go-test (Linux, quick), and reason must say what that test covers, so a
-// reader can tell the skip is not hiding a concurrency check.
+// times over. The same test must still run un-instrumented in CI's check job
+// (and, for a service-backed package, gate (services)), and reason must say
+// what that test covers, so a reader can tell the skip is not hiding a
+// concurrency check.
 func SkipUnderRace(t testing.TB, reason string) {
 	t.Helper()
 	if raceEnabled {

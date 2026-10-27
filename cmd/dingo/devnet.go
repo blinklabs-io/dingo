@@ -16,6 +16,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -59,6 +60,7 @@ type localDevnetConfig struct {
 	RunMode                       string `yaml:"runMode"`
 	Network                       string `yaml:"network"`
 	NetworkMagic                  uint32 `yaml:"networkMagic"`
+	BindAddr                      string `yaml:"bindAddr"`
 	DatabasePath                  string `yaml:"databasePath"`
 	CardanoConfig                 string `yaml:"cardanoConfig"`
 	BlockProducer                 bool   `yaml:"blockProducer"`
@@ -211,6 +213,11 @@ func devnetRunDirectory(dataDir string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolving devnet data directory: %w", err)
 	}
+	// A symlinked --data-dir is resolved once here; the resolved directory is
+	// then opened and pinned, and any symlink swapped in later is rejected.
+	if resolved, err := filepath.EvalSymlinks(runDir); err == nil {
+		runDir = resolved
+	}
 	return runDir, nil
 }
 
@@ -219,79 +226,142 @@ func prepareLockedDevnetState(
 	persistent, reset bool,
 	startTime time.Time,
 ) (func() error, error) {
-	if persistent {
-		if _, err := checkDevnetStateDirectory(runDir, reset); err != nil {
-			return nil, err
-		}
+	if err := os.MkdirAll(runDir, 0o700); err != nil {
+		return nil, fmt.Errorf("creating devnet data directory: %w", err)
 	}
-	releaseStateLock, err := acquireDevnetStateLock(runDir)
+	root, err := openDevnetStateRoot(runDir)
 	if err != nil {
 		return nil, err
 	}
-	if err := prepareDevnetState(runDir, persistent, reset, startTime); err != nil {
+	if persistent {
+		if _, err := checkDevnetStateDirectory(root, runDir, reset); err != nil {
+			_ = root.Close()
+			return nil, err
+		}
+	}
+	releaseStateLock, err := acquireDevnetStateLock(root, runDir)
+	if err != nil {
+		_ = root.Close()
+		return nil, err
+	}
+	if err := prepareDevnetState(
+		root,
+		runDir,
+		persistent,
+		reset,
+		startTime,
+	); err != nil {
 		if releaseErr := releaseStateLock(); releaseErr != nil {
 			err = errors.Join(err, fmt.Errorf("releasing devnet state lock: %w", releaseErr))
 		}
+		err = errors.Join(err, root.Close())
 		return nil, err
 	}
-	return releaseStateLock, nil
+	return func() error {
+		return errors.Join(releaseStateLock(), root.Close())
+	}, nil
+}
+
+func openDevnetStateRoot(runDir string) (*os.Root, error) {
+	expected, err := os.Lstat(runDir)
+	if err != nil {
+		return nil, fmt.Errorf("checking devnet data directory: %w", err)
+	}
+	if expected.Mode()&os.ModeSymlink != 0 || !expected.IsDir() {
+		return nil, fmt.Errorf("devnet data path %q is not a directory", runDir)
+	}
+	root, err := os.OpenRoot(runDir)
+	if err != nil {
+		return nil, fmt.Errorf("opening devnet data directory: %w", err)
+	}
+	opened, err := root.Stat(".")
+	if err != nil {
+		_ = root.Close()
+		return nil, fmt.Errorf("checking opened devnet data directory: %w", err)
+	}
+	if !opened.IsDir() || !os.SameFile(expected, opened) {
+		_ = root.Close()
+		return nil, fmt.Errorf(
+			"devnet data directory %q changed while it was opened",
+			runDir,
+		)
+	}
+	if err := devnetkeys.RestrictLocalTestDirectory(root); err != nil {
+		_ = root.Close()
+		return nil, fmt.Errorf("restricting devnet data directory: %w", err)
+	}
+	return root, nil
 }
 
 func prepareDevnetState(
+	root *os.Root,
 	runDir string,
 	persistent, reset bool,
 	startTime time.Time,
 ) error {
 	if !persistent {
-		if err := os.MkdirAll(runDir, 0o700); err != nil {
-			return fmt.Errorf("creating temporary devnet directory: %w", err)
-		}
-		return initializeDevnetState(runDir, startTime)
+		return initializeDevnetState(root, runDir, startTime)
 	}
-	if err := os.MkdirAll(runDir, 0o700); err != nil {
-		return fmt.Errorf("creating devnet data directory: %w", err)
-	}
-	hasMarker, err := checkDevnetStateDirectory(runDir, reset)
+	hasMarker, err := checkDevnetStateDirectory(root, runDir, reset)
 	if err != nil {
 		return err
 	}
 	if !hasMarker {
-		if err := createDevnetStateMarker(filepath.Join(runDir, devnetStateMarker)); err != nil {
+		if err := createDevnetStateMarker(root); err != nil {
 			return err
 		}
 		if !reset {
-			return initializeDevnetState(runDir, startTime)
+			return initializeDevnetState(root, runDir, startTime)
 		}
 	}
 	if reset {
-		for _, path := range []string{
-			filepath.Join(runDir, "data"),
-			filepath.Join(runDir, "cardano"),
-			filepath.Join(runDir, "dingo.yaml"),
+		for _, name := range []string{
+			"data",
+			"cardano",
+			"dingo.yaml",
 		} {
-			if err := os.RemoveAll(path); err != nil {
-				return fmt.Errorf("resetting devnet state at %q: %w", path, err)
+			if err := root.RemoveAll(name); err != nil {
+				return fmt.Errorf(
+					"resetting devnet state at %q: %w",
+					filepath.Join(runDir, name),
+					err,
+				)
 			}
 		}
-		return initializeDevnetState(runDir, startTime)
+		return initializeDevnetState(root, runDir, startTime)
 	}
-	if err := devnetkeys.InstallLocalTestFaucet(
-		filepath.Join(runDir, "cardano", "keys"),
+	if err := devnetkeys.InstallLocalTestFaucetInRoot(
+		root,
+		filepath.Join("cardano", "keys"),
 	); err != nil {
 		return fmt.Errorf("refreshing local DevNet faucet: %w", err)
 	}
 	return writeLocalDevnetConfig(
-		filepath.Join(runDir, "dingo.yaml"),
+		root,
+		"dingo.yaml",
 		filepath.Join(runDir, "cardano"),
 		filepath.Join(runDir, "data"),
 	)
 }
 
-func checkDevnetStateDirectory(runDir string, reset bool) (bool, error) {
-	markerPath := filepath.Join(runDir, devnetStateMarker)
-	marker, err := os.ReadFile(markerPath)
+func checkDevnetStateDirectory(
+	root *os.Root,
+	runDir string,
+	reset bool,
+) (bool, error) {
+	markerInfo, err := root.Lstat(devnetStateMarker)
 	switch {
 	case err == nil:
+		if !markerInfo.Mode().IsRegular() {
+			return true, fmt.Errorf(
+				"%q is not a recognized dingo devnet state directory",
+				runDir,
+			)
+		}
+		marker, err := root.ReadFile(devnetStateMarker)
+		if err != nil {
+			return true, fmt.Errorf("reading devnet state marker: %w", err)
+		}
 		if string(marker) != devnetStateVersion {
 			return true, fmt.Errorf(
 				"%q is not a recognized dingo devnet state directory",
@@ -301,7 +371,7 @@ func checkDevnetStateDirectory(runDir string, reset bool) (bool, error) {
 		if reset {
 			return true, nil
 		}
-		if err := validateDevnetState(runDir); err != nil {
+		if err := validateDevnetState(root); err != nil {
 			return true, fmt.Errorf(
 				"devnet state at %q is incomplete; use --reset to recreate it: %w",
 				runDir,
@@ -310,7 +380,7 @@ func checkDevnetStateDirectory(runDir string, reset bool) (bool, error) {
 		}
 		return true, nil
 	case errors.Is(err, fs.ErrNotExist):
-		entries, readErr := os.ReadDir(runDir)
+		entries, readErr := fs.ReadDir(root.FS(), ".")
 		if readErr != nil {
 			return false, fmt.Errorf("reading devnet data directory: %w", readErr)
 		}
@@ -329,8 +399,12 @@ func checkDevnetStateDirectory(runDir string, reset bool) (bool, error) {
 	}
 }
 
-func createDevnetStateMarker(path string) error {
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+func createDevnetStateMarker(root *os.Root) error {
+	file, err := root.OpenFile(
+		devnetStateMarker,
+		os.O_WRONLY|os.O_CREATE|os.O_EXCL,
+		0o600,
+	)
 	if err != nil {
 		return fmt.Errorf("creating Dingo devnet state marker: %w", err)
 	}
@@ -344,55 +418,62 @@ func createDevnetStateMarker(path string) error {
 	return nil
 }
 
-func validateDevnetState(runDir string) error {
-	for _, path := range []struct {
+func validateDevnetState(root *os.Root) error {
+	for _, entry := range []struct {
 		name  string
 		isDir bool
 	}{
-		{name: filepath.Join(runDir, "data"), isDir: true},
-		{name: filepath.Join(runDir, "cardano"), isDir: true},
-		{name: filepath.Join(runDir, "cardano", "config.json")},
-		{name: filepath.Join(runDir, "cardano", "keys", "vrf.skey")},
-		{name: filepath.Join(runDir, "cardano", "keys", "kes.skey")},
-		{name: filepath.Join(runDir, "cardano", "keys", "opcert.cert")},
-		{name: filepath.Join(runDir, "dingo.yaml")},
+		{name: "data", isDir: true},
+		{name: "cardano", isDir: true},
+		{name: filepath.Join("cardano", "config.json")},
+		{name: filepath.Join("cardano", "keys", "vrf.skey")},
+		{name: filepath.Join("cardano", "keys", "kes.skey")},
+		{name: filepath.Join("cardano", "keys", "opcert.cert")},
+		{name: "dingo.yaml"},
 	} {
-		info, err := os.Stat(path.name)
+		info, err := root.Lstat(entry.name)
 		if err != nil {
-			return fmt.Errorf("checking %q: %w", path.name, err)
+			return fmt.Errorf("checking %q: %w", entry.name, err)
 		}
-		if path.isDir && !info.IsDir() {
-			return fmt.Errorf("%q is not a directory", path.name)
+		if entry.isDir && !info.IsDir() {
+			return fmt.Errorf("%q is not a directory", entry.name)
 		}
-		if !path.isDir && !info.Mode().IsRegular() {
-			return fmt.Errorf("%q is not a regular file", path.name)
+		if !entry.isDir && !info.Mode().IsRegular() {
+			return fmt.Errorf("%q is not a regular file", entry.name)
 		}
 	}
 	return nil
 }
 
-func initializeDevnetState(runDir string, startTime time.Time) error {
-	configDir := filepath.Join(runDir, "cardano")
-	if err := materializeDevnetConfig(configDir, startTime); err != nil {
+func initializeDevnetState(
+	root *os.Root,
+	runDir string,
+	startTime time.Time,
+) error {
+	if err := materializeDevnetConfig(root, "cardano", startTime); err != nil {
 		return err
 	}
-	dataDir := filepath.Join(runDir, "data")
-	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+	if err := root.MkdirAll("data", 0o700); err != nil {
 		return fmt.Errorf("creating devnet database directory: %w", err)
 	}
-	configPath := filepath.Join(runDir, "dingo.yaml")
-	if err := writeLocalDevnetConfig(configPath, configDir, dataDir); err != nil {
-		return err
-	}
-	return nil
+	return writeLocalDevnetConfig(
+		root,
+		"dingo.yaml",
+		filepath.Join(runDir, "cardano"),
+		filepath.Join(runDir, "data"),
+	)
 }
 
-func materializeDevnetConfig(destination string, startTime time.Time) error {
+func materializeDevnetConfig(
+	root *os.Root,
+	destination string,
+	startTime time.Time,
+) error {
 	devnetFS, err := fs.Sub(cardano.EmbeddedConfigFS, "devnet")
 	if err != nil {
 		return fmt.Errorf("opening embedded devnet config: %w", err)
 	}
-	if err := os.MkdirAll(destination, 0o700); err != nil {
+	if err := root.MkdirAll(destination, 0o700); err != nil {
 		return fmt.Errorf("creating devnet config directory: %w", err)
 	}
 	if err := fs.WalkDir(devnetFS, ".", func(
@@ -408,7 +489,7 @@ func materializeDevnetConfig(destination string, startTime time.Time) error {
 		}
 		path := filepath.Join(destination, filepath.FromSlash(name))
 		if entry.IsDir() {
-			return os.MkdirAll(path, 0o700)
+			return root.MkdirAll(path, 0o700)
 		}
 		data, err := fs.ReadFile(devnetFS, name)
 		if err != nil {
@@ -427,14 +508,15 @@ func materializeDevnetConfig(destination string, startTime time.Time) error {
 		if err != nil {
 			return fmt.Errorf("updating devnet %s: %w", name, err)
 		}
-		if err := os.WriteFile(path, data, 0o600); err != nil {
+		if err := writeDevnetFile(root, path, data, 0o600); err != nil {
 			return fmt.Errorf("writing devnet file %q: %w", name, err)
 		}
 		return nil
 	}); err != nil {
 		return fmt.Errorf("materializing embedded devnet config: %w", err)
 	}
-	if err := devnetkeys.InstallLocalTestKeys(
+	if err := devnetkeys.InstallLocalTestKeysInRoot(
+		root,
 		filepath.Join(destination, "keys"),
 	); err != nil {
 		return fmt.Errorf("materializing local DevNet keys: %w", err)
@@ -462,11 +544,15 @@ func replaceJSONField(data []byte, field string, value any) ([]byte, error) {
 	return append(encoded, '\n'), nil
 }
 
-func writeLocalDevnetConfig(path, configDir, dataDir string) error {
+func writeLocalDevnetConfig(
+	root *os.Root,
+	path, configDir, dataDir string,
+) error {
 	config := localDevnetConfig{
 		RunMode:                       "dev",
 		Network:                       "devnet",
 		NetworkMagic:                  42,
+		BindAddr:                      "127.0.0.1",
 		DatabasePath:                  dataDir,
 		CardanoConfig:                 filepath.Join(configDir, "config.json"),
 		BlockProducer:                 true,
@@ -478,10 +564,44 @@ func writeLocalDevnetConfig(path, configDir, dataDir string) error {
 	if err != nil {
 		return fmt.Errorf("encoding devnet node config: %w", err)
 	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
+	if err := writeDevnetFile(root, path, data, 0o600); err != nil {
 		return fmt.Errorf("writing devnet node config: %w", err)
 	}
 	return nil
+}
+
+func writeDevnetFile(
+	root *os.Root,
+	path string,
+	data []byte,
+	perm os.FileMode,
+) error {
+	tmpPath := filepath.Join(
+		filepath.Dir(path),
+		"."+filepath.Base(path)+"-"+rand.Text(),
+	)
+	file, err := root.OpenFile(
+		tmpPath,
+		os.O_WRONLY|os.O_CREATE|os.O_EXCL,
+		perm,
+	)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if file != nil {
+			_ = file.Close()
+		}
+		_ = root.Remove(tmpPath)
+	}()
+	if _, err := file.Write(data); err != nil {
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	file = nil
+	return root.Rename(tmpPath, path)
 }
 
 func devnetEnvironment() []string {

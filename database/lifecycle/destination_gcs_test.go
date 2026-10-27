@@ -254,6 +254,7 @@ func TestGCSUploadExcludesAndRemovesCloudMirrorMarker(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, client.Close()) })
 	dir := t.TempDir()
+	writeTestUploadSnapshot(t, dir)
 	require.NoError(t, os.WriteFile(
 		filepath.Join(dir, cloudMirrorMarkerName), []byte("legacy secret"), 0o600,
 	))
@@ -261,15 +262,15 @@ func TestGCSUploadExcludesAndRemovesCloudMirrorMarker(t *testing.T) {
 		client: client, bucket: client.Bucket("bucket"), prefix: "prefix/snapshot",
 	}
 	require.NoError(t, d.UploadDir(t.Context(), dir))
-	require.Len(t, methods, 1)
-	require.Contains(t, methods[0], "DELETE ")
-	require.Contains(t, methods[0], ".cloud-mirrored")
+	require.Len(t, methods, 4)
+	require.Contains(t, methods[3], "DELETE ")
+	require.Contains(t, methods[3], ".cloud-mirrored")
 	require.NoError(t, os.Remove(filepath.Join(dir, cloudMirrorMarkerName)))
 	methods = nil
 	require.NoError(t, d.UploadDir(t.Context(), dir))
-	require.Len(t, methods, 1)
-	require.Contains(t, methods[0], "DELETE ")
-	require.Contains(t, methods[0], ".cloud-mirrored")
+	require.Len(t, methods, 4)
+	require.Contains(t, methods[3], "DELETE ")
+	require.Contains(t, methods[3], ".cloud-mirrored")
 }
 
 func TestGCSDownloadSkipsCloudMirrorMarker(t *testing.T) {

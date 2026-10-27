@@ -216,6 +216,15 @@ func (s *s3ArtifactStore) Put(
 	return nil
 }
 
+// The server's multi-range guard keys on this marker, so dropping it from a
+// remote store must not compile.
+var (
+	_ remoteObjectStore = (*s3ArtifactStore)(nil)
+	_ remoteObjectStore = (*gcsArtifactStore)(nil)
+)
+
+func (s *s3ArtifactStore) streamsRemoteObjects() bool { return true }
+
 func (s *s3ArtifactStore) Open(
 	ctx context.Context,
 	key string,
@@ -375,6 +384,8 @@ func (s *gcsArtifactStore) Put(
 	}
 	return nil
 }
+
+func (s *gcsArtifactStore) streamsRemoteObjects() bool { return true }
 
 func (s *gcsArtifactStore) Open(
 	ctx context.Context,

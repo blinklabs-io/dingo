@@ -61,6 +61,47 @@ func TestHarnessGetChainTip(t *testing.T) {
 	}
 }
 
+func TestHarnessGetChainTipReusesPersistentObserver(t *testing.T) {
+	endpoint := NodeEndpoint{
+		Name:    "dingo-producer",
+		Address: "127.0.0.1:0",
+	}
+	group := NewChainGroup(endpoint.Name)
+	chain := group.Chain(endpoint.Name)
+	want := ChainTip{
+		SlotNumber:  42,
+		BlockNumber: 17,
+		Hash:        []byte{0xaa, 0xbb},
+	}
+	chain.ObserveServerTip(want)
+	chain.Connected()
+	h := &TestHarness{
+		t:         t,
+		endpoints: []NodeEndpoint{endpoint},
+		observers: &ChainObservers{group: group},
+	}
+
+	got, err := h.GetChainTip(endpoint)
+	require.NoError(t, err)
+	require.Equal(t, want, got)
+	require.Equal(t, 1, chain.Snapshot().Connects)
+
+	want = ChainTip{
+		SlotNumber:  45,
+		BlockNumber: 19,
+		Hash:        []byte{0xcc, 0xdd},
+	}
+	chain.Disconnected(nil)
+	chain.ObserveServerTip(want)
+	chain.Connected()
+	for range 3 {
+		got, err = h.GetChainTip(endpoint)
+		require.NoError(t, err)
+		require.Equal(t, want, got)
+	}
+	require.Equal(t, 2, chain.Snapshot().Connects)
+}
+
 func TestHarnessWaitForSlot(t *testing.T) {
 	// Set path relative to this package (internal/test/devnet/)
 	t.Setenv("DEVNET_TESTNET_YAML", "./testnet.yaml")

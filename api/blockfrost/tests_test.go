@@ -1613,7 +1613,7 @@ func TestProtocolParamsForSlot_ByronEraSentinel(t *testing.T) {
 
 	adapter, _, _ := newDBBackedAdapter(t)
 
-	pparams, err := adapter.protocolParamsForSlot(0)
+	pparams, err := adapter.protocolParamsForSlot(context.Background(), 0)
 
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrProtocolParamsUnavailable)
@@ -1830,7 +1830,7 @@ VALUES (?, ?, ?, ?)`,
 	)
 	require.NoError(t, err)
 
-	pparams, err := adapter.protocolParamsForSlot(50)
+	pparams, err := adapter.protocolParamsForSlot(context.Background(), 50)
 
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrProtocolParamsUnavailable)

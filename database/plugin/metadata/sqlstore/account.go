@@ -16,17 +16,20 @@
 package sqlstore
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
 	"math/big"
+	"slices"
 	"strconv"
 	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	sqlitequery "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/internal/query/sqlite"
 	"github.com/blinklabs-io/dingo/database/types"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
 const sqliteAccountColumns = "staking_key, credential_tag, pool, drep, id, " +
@@ -144,6 +147,10 @@ func requireAccountBaselineTransaction(db queryer) error {
 			db = wrapped.queryer
 			continue
 		}
+		if wrapped, ok := db.(barrierQueryer); ok {
+			db = wrapped.queryer
+			continue
+		}
 		wrapped, ok := db.(dialectQueryer)
 		if !ok {
 			return errors.New(
@@ -185,7 +192,7 @@ func writeAccountImportBaseline(
 	if account.ImportDeposit != nil {
 		deposit = decimalUint64(*account.ImportDeposit)
 	}
-	if _, err := db.ExecContext(ctx, `
+	if _, err := db.ExecContext(ctx, `-- name: UpsertAccountImportBaseline :exec
 INSERT INTO account_import_baseline (
     credential_tag, staking_key, pool, drep, drep_type, active, added_slot,
     deposit_amount
@@ -232,7 +239,7 @@ func (s *Store) GetAccountImportRegistrationByCredential(
 		addedSlot int64
 		raw       sql.NullString
 	)
-	err = db.QueryRowContext(ctx, `
+	err = db.QueryRowContext(ctx, `-- name: GetAccountImportBaselineState :one
 SELECT active, added_slot, deposit_amount
 FROM account_import_baseline
 WHERE credential_tag = ? AND staking_key = ?`,
@@ -274,7 +281,7 @@ func readAccountImportBaseline(
 		drepType  sql.NullInt64
 		addedSlot int64
 	)
-	err := db.QueryRowContext(ctx, `
+	err := db.QueryRowContext(ctx, `-- name: GetAccountImportBaseline :one
 SELECT pool, drep, drep_type, active, added_slot
 FROM account_import_baseline
 WHERE credential_tag = ? AND staking_key = ?`,
@@ -317,7 +324,7 @@ func deleteAccountImportBaseline(
 	if err := requireAccountBaselineTransaction(db); err != nil {
 		return err
 	}
-	if _, err := db.ExecContext(ctx, `
+	if _, err := db.ExecContext(ctx, `-- name: DeleteAccountImportBaseline :exec
 DELETE FROM account_import_baseline
 WHERE credential_tag = ? AND staking_key = ?`,
 		credentialTag,
@@ -678,6 +685,146 @@ SELECT credential_tag, staking_key FROM account WHERE active = TRUE`)
 	return ret, rows.Err()
 }
 
+// activeDelegatorChunkSize bounds the pool key hashes bound to one statement
+// of the active-delegator queries and of GetPoolDepositsHeld, which serve the
+// same stake pool state reply for the same pool set.
+const activeDelegatorChunkSize = 200
+
+// GetActiveDelegatorCountsByPool counts the active accounts delegated to each
+// requested pool. A pool with no delegator is absent from the result. The
+// count is an aggregate over the (active, pool, credential_tag, staking_key)
+// index, so its cost follows the delegators of the requested pools, not the
+// account table.
+func (s *Store) GetActiveDelegatorCountsByPool(
+	poolKeyHashes []lcommon.PoolKeyHash,
+	txn types.Txn,
+) (map[string]uint64, error) {
+	ret := make(map[string]uint64, len(poolKeyHashes))
+	if len(poolKeyHashes) == 0 {
+		return ret, nil
+	}
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, fmt.Errorf("GetActiveDelegatorCountsByPool: resolve db: %w", err)
+	}
+	for start := 0; start < len(poolKeyHashes); start += activeDelegatorChunkSize {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		end := min(start+activeDelegatorChunkSize, len(poolKeyHashes))
+		args := make([]any, 0, end-start)
+		for _, poolKeyHash := range poolKeyHashes[start:end] {
+			args = append(args, poolKeyHash.Bytes())
+		}
+		rows, err := db.QueryContext(ctx, `
+SELECT pool, COUNT(*) FROM account
+WHERE active = TRUE AND pool IN (`+bindPlaceholders(len(args))+`)
+GROUP BY pool`,
+			args...,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("GetActiveDelegatorCountsByPool: %w", err)
+		}
+		for rows.Next() {
+			var pool []byte
+			var count int64
+			if err := rows.Scan(&pool, &count); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			if count < 0 {
+				rows.Close()
+				return nil, fmt.Errorf(
+					"GetActiveDelegatorCountsByPool: negative count %d",
+					count,
+				)
+			}
+			ret[string(pool)] = uint64(count)
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+	}
+	return ret, nil
+}
+
+// GetActiveDelegatorCredentialsByPool returns the stake credentials of the
+// active accounts delegated to each requested pool, keyed by pool key hash. A
+// pool with no delegator is absent. Each list is in the ledger's credential
+// order: script credentials before key credentials, then by hash ascending.
+func (s *Store) GetActiveDelegatorCredentialsByPool(
+	poolKeyHashes []lcommon.PoolKeyHash,
+	txn types.Txn,
+) (map[string][]models.StakeCredentialRef, error) {
+	ret := make(map[string][]models.StakeCredentialRef, len(poolKeyHashes))
+	if len(poolKeyHashes) == 0 {
+		return ret, nil
+	}
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"GetActiveDelegatorCredentialsByPool: resolve db: %w",
+			err,
+		)
+	}
+	for start := 0; start < len(poolKeyHashes); start += activeDelegatorChunkSize {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		end := min(start+activeDelegatorChunkSize, len(poolKeyHashes))
+		args := make([]any, 0, end-start)
+		for _, poolKeyHash := range poolKeyHashes[start:end] {
+			args = append(args, poolKeyHash.Bytes())
+		}
+		rows, err := db.QueryContext(ctx, `
+SELECT pool, credential_tag, staking_key FROM account
+WHERE active = TRUE AND pool IN (`+bindPlaceholders(len(args))+`)`,
+			args...,
+		)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"GetActiveDelegatorCredentialsByPool: %w",
+				err,
+			)
+		}
+		for rows.Next() {
+			var pool, key []byte
+			var tag int64
+			if err := rows.Scan(&pool, &tag, &key); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			ret[string(pool)] = append(
+				ret[string(pool)],
+				models.NewStakeCredentialRef(uint8(tag), key), // #nosec G115 -- 0 or 1
+			)
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+	}
+	for _, refs := range ret {
+		slices.SortFunc(refs, func(a, b models.StakeCredentialRef) int {
+			if a.Tag != b.Tag {
+				// The ledger's Credential orders ScriptHashObj (tag 1)
+				// before KeyHashObj (tag 0).
+				if a.Tag > b.Tag {
+					return -1
+				}
+				return 1
+			}
+			return bytes.Compare(a.Key, b.Key)
+		})
+	}
+	return ret, nil
+}
+
 // ClearDelegationsToRetiredPool removes every account delegation pointing at a
 // pool reaped at an epoch boundary, the delegation half of the Shelley POOLREAP
 // transition (domain-restrict the delegation map by the retired pools, Shelley
@@ -892,16 +1039,15 @@ func (s *Store) GetAccountSumsByCredential(
 	if err != nil {
 		return ret, fmt.Errorf("resolve read DB for account sums: %w", err)
 	}
-	sum := func(query string, args ...any) (uint64, error) {
-		return sumUint64Rows(ctx, db, s.dialect.Rebind(query), args...)
-	}
 	// MIR amounts are delta_coin, so the two pot totals are summed as signed
 	// values. A withdrawal is coin and stays unsigned.
 	sumSigned := func(query string, args ...any) (*big.Int, error) {
-		return sumSignedRows(ctx, db, s.dialect.Rebind(query), args...)
+		return s.sumWide(ctx, db, query, args...)
 	}
-	ret.WithdrawalsSum, err = sum(`
-SELECT amount
+	// The totals are exact database-side aggregates, so no row stream
+	// crosses to the caller and a cancelled ctx stops the statement.
+	ret.WithdrawalsSum, err = s.sumWideUint64(ctx, db, `
+SELECT `+s.wideSumExpr("amount")+`
 FROM account_reward_delta
 WHERE withdrawal = TRUE AND credential_tag = ? AND staking_key = ?`,
 		credentialTag,
@@ -914,7 +1060,7 @@ WHERE withdrawal = TRUE AND credential_tag = ? AND staking_key = ?`,
 		)
 	}
 	ret.ReservesSum, err = sumSigned(`
-SELECT reward.amount
+SELECT `+s.wideSumExpr("reward.amount")+`
 FROM move_instantaneous_rewards_reward reward
 JOIN move_instantaneous_rewards mir ON mir.id = reward.mir_id
 WHERE mir.pot = 0 AND reward.credential_tag = ?
@@ -929,7 +1075,7 @@ WHERE mir.pot = 0 AND reward.credential_tag = ?
 		)
 	}
 	ret.TreasurySum, err = sumSigned(`
-SELECT reward.amount
+SELECT `+s.wideSumExpr("reward.amount")+`
 FROM move_instantaneous_rewards_reward reward
 JOIN move_instantaneous_rewards mir ON mir.id = reward.mir_id
 WHERE mir.pot = 1 AND reward.credential_tag = ?
@@ -1584,11 +1730,13 @@ UPDATE account SET reward = ? WHERE id = ?`,
 			if affected == 0 {
 				return models.ErrAccountNotFound
 			}
-			return s.refreshRewardLiveStakeAggregate(
-				ctx,
-				db,
-				models.NewStakeCredentialRef(credentialTag, stakeKey),
-				slot,
+			ref := models.NewStakeCredentialRef(credentialTag, stakeKey)
+			pending, err := pendingUtxoStakeDelta(ctx, db, txn, nil, ref)
+			if err != nil {
+				return err
+			}
+			return s.refreshRewardLiveStakeAggregateNetOfPending(
+				ctx, db, ref, slot, pending,
 			)
 		},
 	)
@@ -1631,7 +1779,7 @@ func (s *Store) AddAccountRewardsByCredential(
 			for start := 0; start < len(credits); start += batchSize {
 				end := min(start+batchSize, len(credits))
 				if err := s.addAccountRewardCreditBatch(
-					ctx, db, credits[start:end],
+					ctx, db, credits[start:end], txn,
 				); err != nil {
 					return err
 				}
@@ -1648,6 +1796,7 @@ func (s *Store) addAccountRewardCreditBatch(
 	ctx context.Context,
 	db queryer,
 	credits []models.AccountRewardCredit,
+	txn types.Txn,
 ) error {
 	type pendingCredit struct {
 		key    rewardCreditJournalKey
@@ -1856,8 +2005,12 @@ ON CONFLICT (
 		); err != nil {
 			return fmt.Errorf("credit account reward: %w", err)
 		}
-		if err := s.refreshRewardLiveStakeAggregate(
-			ctx, db, entry.ref, entry.slot,
+		pendingStake, err := pendingUtxoStakeDelta(ctx, db, txn, nil, entry.ref)
+		if err != nil {
+			return err
+		}
+		if err := s.refreshRewardLiveStakeAggregateNetOfPending(
+			ctx, db, entry.ref, entry.slot, pendingStake,
 		); err != nil {
 			return err
 		}

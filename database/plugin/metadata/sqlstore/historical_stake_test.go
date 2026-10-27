@@ -214,7 +214,18 @@ func TestTransactionLedgerContextCanBeReplayed(t *testing.T) {
 
 func TestHistoricalExpirationUsesClosureExecutionSlot(t *testing.T) {
 	t.Parallel()
-	store := newDepositHeldStore(t)
+	testHistoricalExpirationUsesClosureExecutionSlot(t, newDepositHeldStore(t))
+}
+
+// testHistoricalExpirationUsesClosureExecutionSlot runs the expiration
+// reconstruction on store's backend, so the correlated witness lookups are
+// exercised on every dialect that shares the SQL.
+func testHistoricalExpirationUsesClosureExecutionSlot(
+	t *testing.T,
+	store *Store,
+) {
+	t.Helper()
+	db := store.instrumentedQueryer(store.writeDB)
 	depositHeldEpochs(t, store, 3)
 	pool := depositHeldPoolKey(0xd4)
 	credential := stakeCredential(0xd5)
@@ -229,18 +240,21 @@ func TestHistoricalExpirationUsesClosureExecutionSlot(t *testing.T) {
 			CertType:        uint(lcommon.CertificateTypeStakeDelegation),
 			StakeCredential: &credential, PoolKeyHash: pool,
 		}, 0)
-	_, err := store.writeDB.Exec(`INSERT INTO leios_transaction_context
+	_, err := db.ExecContext(t.Context(), `INSERT INTO leios_transaction_context
 		(transaction_id, slot) SELECT id, 1999 FROM "transaction"
 		WHERE slot = 2000`)
 	require.NoError(t, err)
 	query, args := activeDelegationSQL(1_999, 1_999)
 	expiration, expirationArgs, err := historicalExpirationSQL(
-		t.Context(), store.writeDB, 1_999, 2, 1)
+		t.Context(), db, 1_999, 2, 1)
 	require.NoError(t, err)
 	query += expiration + ` SELECT expiration_epoch FROM historical_expiration`
 	args = append(args, expirationArgs...)
 	var expiry uint64
-	require.NoError(t, store.writeDB.QueryRow(query, args...).Scan(&expiry))
+	require.NoError(
+		t,
+		db.QueryRowContext(t.Context(), query, args...).Scan(&expiry),
+	)
 	require.Equal(t, uint64(2), expiry,
 		"the epoch-1 closure refreshes activity before epoch 2")
 }

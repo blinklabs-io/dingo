@@ -24,6 +24,7 @@ import (
 	"github.com/blinklabs-io/dingo/api/mcp"
 	"github.com/blinklabs-io/dingo/api/mesh"
 	"github.com/blinklabs-io/dingo/api/utxorpc"
+	"github.com/blinklabs-io/dingo/consensus"
 	"github.com/blinklabs-io/dingo/database/plugin/blob/badger"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/mempool"
@@ -38,6 +39,9 @@ func NewHost() (*plugin.Host, error) {
 	}
 	if err := sqlite.RegisterProvider(host); err != nil {
 		return nil, fmt.Errorf("register sqlite provider: %w", err)
+	}
+	if err := consensus.RegisterProvider(host); err != nil {
+		return nil, fmt.Errorf("register consensus provider: %w", err)
 	}
 	if err := mempool.RegisterProvider(host); err != nil {
 		return nil, fmt.Errorf("register default mempool provider: %w", err)

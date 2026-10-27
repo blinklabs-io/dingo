@@ -89,18 +89,20 @@ func (a *NodeAdapter) Tip() (Point, error) {
 const matchPageSize = 512
 
 type nodeMatchIterator struct {
-	ctx       context.Context
-	adapter   *NodeAdapter
-	txn       *database.Txn
-	tip       Point
-	pattern   parsedPattern
-	query     MatchQuery
-	storage   *models.UtxoHistoryQuery
-	page      []models.UtxoWithHistory
-	pageIndex int
-	exhausted bool
-	closed    bool
-	spenders  map[string]*spendingTransactionDetails
+	ctx     context.Context
+	adapter *NodeAdapter
+	txn     *database.Txn
+	tip     Point
+	pattern parsedPattern
+	query   MatchQuery
+	storage *models.UtxoHistoryQuery
+	// matches is the hydrated current page; its snapshot is already
+	// released.
+	matches    []Match
+	matchIndex int
+	exhausted  bool
+	closed     bool
+	spenders   map[string]*spendingTransactionDetails
 }
 
 type spendingTransactionDetails struct {
@@ -120,12 +122,23 @@ func (a *NodeAdapter) Matches(
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrInvalidRequest, err)
 	}
+	var outputIndex *uint32
+	outputIndexOutsideStorage := false
+	if query.OutputIndex != nil {
+		requested := *query.OutputIndex
+		if requested <= math.MaxUint32 {
+			idx := uint32(requested)
+			outputIndex = &idx
+		} else {
+			outputIndexOutsideStorage = true
+		}
+	}
 	storageQuery := &models.UtxoHistoryQuery{
 		MatchAllAddresses: matchAll,
 		AddressPatterns:   addressPatterns,
 		Descending:        !query.OldestFirst,
 		TransactionID:     append([]byte(nil), query.TransactionID...),
-		OutputIndex:       query.OutputIndex,
+		OutputIndex:       outputIndex,
 	}
 	switch query.Status {
 	case MatchStatusAny:
@@ -144,7 +157,7 @@ func (a *NodeAdapter) Matches(
 			storageQuery.AssetName = query.AssetName
 		}
 	}
-	empty := applyPatternFilters(storageQuery, pattern)
+	empty := outputIndexOutsideStorage || applyPatternFilters(storageQuery, pattern)
 	db := a.ledgerState.Database()
 	txn, dbTip, err := database.NewReadSnapshotContext(ctx, db)
 	if err != nil {
@@ -192,60 +205,68 @@ func (i *nodeMatchIterator) Next() (Match, bool, error) {
 		if err := i.ctx.Err(); err != nil {
 			return Match{}, false, err
 		}
-		if i.pageIndex >= len(i.page) {
-			if i.exhausted {
-				i.releaseSnapshot()
-				return Match{}, false, nil
-			}
-			if i.storage.After != nil {
-				i.releaseSnapshot()
-				txn, _, err := database.NewReadSnapshotContext(
-					i.ctx,
-					i.adapter.ledgerState.Database(),
-				)
-				if err != nil {
-					return Match{}, false, fmt.Errorf(
-						"open Kupo query page snapshot: %w",
-						err,
-					)
-				}
-				i.txn = txn
-			}
-			i.storage.Limit = matchPageSize
-			page, err := i.adapter.ledgerState.Database().UtxosWithHistory(
-				i.storage,
-				i.txn,
-			)
-			if err != nil {
-				return Match{}, false, fmt.Errorf(
-					"query historical UTxOs: %w",
-					err,
-				)
-			}
-			i.page = page
-			i.pageIndex = 0
-			i.exhausted = len(page) < matchPageSize
-			// Bound spender hydration to the current result page. A consuming
-			// transaction commonly spends several returned outputs, while a
-			// full-history query may encounter an unbounded number of spenders.
-			i.spenders = make(map[string]*spendingTransactionDetails)
-			if len(page) == 0 {
-				return Match{}, false, nil
-			}
-			last := page[len(page)-1]
-			i.storage.After = &models.UtxoOrderingCursor{
-				Slot:       last.TxSlot,
-				BlockIndex: last.TxBlockIndex,
-				OutputIdx:  last.OutputIdx,
-				TxId:       append([]byte(nil), last.TxId...),
-			}
+		if i.matchIndex < len(i.matches) {
+			match := i.matches[i.matchIndex]
+			i.matches[i.matchIndex] = Match{}
+			i.matchIndex++
+			return match, true, nil
 		}
+		if i.exhausted {
+			i.releaseSnapshot()
+			return Match{}, false, nil
+		}
+		if err := i.loadPage(); err != nil {
+			return Match{}, false, err
+		}
+	}
+}
 
-		utxo := i.page[i.pageIndex]
-		i.pageIndex++
+// loadPage reads and fully hydrates the next storage page, then releases its
+// read snapshot before any of it is handed to the client. A stream is paced
+// by its client's reads, so holding the snapshot across them would let one
+// slow reader pin a read-pool connection and a snapshot admission slot for
+// the whole response. Each page is therefore its own consistent view; the
+// first page shares the snapshot that produced the response's tip headers.
+func (i *nodeMatchIterator) loadPage() error {
+	if i.txn == nil {
+		txn, _, err := database.NewReadSnapshotContext(
+			i.ctx,
+			i.adapter.ledgerState.Database(),
+		)
+		if err != nil {
+			return fmt.Errorf("open Kupo query page snapshot: %w", err)
+		}
+		i.txn = txn
+	}
+	defer i.releaseSnapshot()
+	i.storage.Limit = matchPageSize
+	page, err := i.adapter.ledgerState.Database().UtxosWithHistory(
+		i.storage,
+		i.txn,
+	)
+	if err != nil {
+		return fmt.Errorf("query historical UTxOs: %w", err)
+	}
+	i.exhausted = len(page) < matchPageSize
+	if len(page) > 0 {
+		last := page[len(page)-1]
+		i.storage.After = &models.UtxoOrderingCursor{
+			Slot:       last.TxSlot,
+			BlockIndex: last.TxBlockIndex,
+			OutputIdx:  last.OutputIdx,
+			TxId:       append([]byte(nil), last.TxId...),
+		}
+	}
+	// Bound spender hydration to the current result page. A consuming
+	// transaction commonly spends several returned outputs, while a
+	// full-history query may encounter an unbounded number of spenders.
+	i.spenders = make(map[string]*spendingTransactionDetails)
+	defer func() { i.spenders = nil }()
+	matches := make([]Match, 0, len(page))
+	for _, utxo := range page {
 		output, err := utxo.Decode()
 		if err != nil {
-			return Match{}, false, fmt.Errorf(
+			return fmt.Errorf(
 				"decode output %x#%d: %w",
 				utxo.TxId,
 				utxo.OutputIdx,
@@ -266,18 +287,21 @@ func (i *nodeMatchIterator) Next() (Match, bool, error) {
 			i.txn,
 		)
 		if err != nil {
-			return Match{}, false, err
+			return err
 		}
 		if match.SpentAt != nil {
 			inputIndex, redeemer, err := i.spentFields(utxo)
 			if err != nil {
-				return Match{}, false, err
+				return err
 			}
 			match.SpentAt.InputIndex = inputIndex
 			match.SpentAt.Redeemer = redeemer
 		}
-		return match, true, nil
+		matches = append(matches, match)
 	}
+	i.matches = matches
+	i.matchIndex = 0
+	return nil
 }
 
 func (i *nodeMatchIterator) spentFields(
@@ -553,7 +577,7 @@ func scriptFromLedger(script lcommon.Script) *Script {
 	case lcommon.PlutusV3Script:
 		language = "plutus:v3"
 	case lcommon.PlutusV4Script:
-		language = "plutus:v4"
+		return nil
 	}
 	return &Script{
 		Language: language,
@@ -604,6 +628,9 @@ func (a *NodeAdapter) Script(
 	if err != nil {
 		return nil, Point{}, err
 	}
+	if language == "" {
+		return nil, snapshotTip, nil
+	}
 	return &Script{
 		Language: language,
 		Script:   hex.EncodeToString(script.Content),
@@ -621,7 +648,7 @@ func scriptLanguage(scriptType uint8) (string, error) {
 	case lcommon.ScriptRefTypePlutusV3:
 		return "plutus:v3", nil
 	case lcommon.ScriptRefTypePlutusV4:
-		return "plutus:v4", nil
+		return "", nil
 	default:
 		return "", fmt.Errorf("unsupported Kupo script type %d", scriptType)
 	}

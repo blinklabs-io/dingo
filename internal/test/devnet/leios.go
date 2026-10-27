@@ -22,8 +22,8 @@ import (
 	"net"
 	"time"
 
+	"github.com/blinklabs-io/dingo/internal/safedecode"
 	ouroboros "github.com/blinklabs-io/gouroboros"
-	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/protocol"
@@ -229,14 +229,9 @@ func FetchLeiosEndorserBlock(
 	}
 	bodies := make([][]byte, len(txsMessage.TxsRaw))
 	for i, raw := range txsMessage.TxsRaw {
-		var body []byte
-		bytesRead, err := cbor.Decode(raw, &body)
-		if err != nil {
-			return nil, fmt.Errorf("decode EB transaction body %d: %w", i, err)
-		}
-		if bytesRead != len(raw) {
-			return nil, fmt.Errorf("EB transaction body %d has trailing bytes", i)
-		}
+		// The protocol layer has already removed the tag-24 wrapper, so each
+		// entry is the block_transaction the manifest hash covers.
+		body := []byte(raw)
 		reference := manifest.TransactionReferences[i]
 		if len(body) != int(reference.TransactionSize) {
 			return nil, fmt.Errorf(
@@ -317,10 +312,7 @@ func LeiosTransactionOutputsApplied(
 
 	var inputs []gledger.TransactionInput
 	for i, body := range bodies {
-		tx, err := gledger.NewTransactionFromCbor(
-			uint(gledger.TxTypeDijkstra),
-			body,
-		)
+		tx, err := safedecode.DijkstraBlockTransaction(body)
 		if err != nil {
 			return false, fmt.Errorf("decode fetched Dijkstra transaction %d: %w", i, err)
 		}

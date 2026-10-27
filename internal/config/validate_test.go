@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -51,10 +52,7 @@ func validTestConfig() *Config {
 		Chainsync:            DefaultChainsyncConfig(),
 		HistoryExpiry:        DefaultHistoryExpiryConfig(),
 		Midnight:             DefaultMidnightConfig(),
-		Mithril: MithrilConfig{
-			Enabled: true,
-			Backend: "v2",
-		},
+		Mithril:              newDefaultConfig().Mithril,
 	}
 	cfg.Plugins.Mempool.Config["capacity"] = int64(DefaultMempoolCapacityPraos)
 	return cfg
@@ -876,7 +874,7 @@ func TestValidate(t *testing.T) {
 		{
 			name:    "invalid mithril backend",
 			modify:  func(c *Config) { c.Mithril.Backend = "v3" },
-			wantErr: "invalid mithril.backend",
+			wantErr: `must be empty or "v2"`,
 		},
 		{
 			name:   "empty mithril backend",
@@ -1468,6 +1466,27 @@ func TestValidateDatabaseLifecycleSnapshotMaxCommitPause(t *testing.T) {
 // non-root user doesn't own (see dingo.yaml.example's snapshotDir entry).
 func TestValidateDatabaseLifecycleSnapshotDirWritability(t *testing.T) {
 	t.Run(
+		"existing snapshot directory is restricted to the current user",
+		func(t *testing.T) {
+			if runtime.GOOS == "windows" {
+				t.Skip("Windows does not expose Unix permission bits")
+			}
+			dir := filepath.Join(t.TempDir(), "snapshots")
+			require.NoError(t, os.Mkdir(dir, 0o755))
+			require.NoError(t, os.Chmod(dir, 0o755))
+
+			cfg := validTestConfig()
+			cfg.DatabaseLifecycle.SnapshotEnabled = true
+			cfg.DatabaseLifecycle.SnapshotDir = dir
+			require.NoError(t, cfg.validate(cfg.RunMode, minUnprivilegedPort))
+
+			info, err := os.Stat(dir)
+			require.NoError(t, err)
+			require.Equal(t, os.FileMode(0o700), info.Mode().Perm())
+		},
+	)
+
+	t.Run(
 		"writable directory passes and is created if missing",
 		func(t *testing.T) {
 			dir := filepath.Join(t.TempDir(), "nested", "snapshots")
@@ -1920,8 +1939,16 @@ func TestValidateMinPoolMargin(t *testing.T) {
 	}
 }
 
+func TestDefaultDMQConfigIsLocalOnly(t *testing.T) {
+	t.Parallel()
+	assert.Zero(t, DefaultDMQConfig().N2NPort)
+}
+
 func TestValidateDMQ(t *testing.T) {
 	t.Parallel()
+	topologyDir := t.TempDir()
+	topologyFile := filepath.Join(topologyDir, "dmq-topology.json")
+	require.NoError(t, os.WriteFile(topologyFile, []byte("{}"), 0o600))
 	tests := []struct {
 		name    string
 		mutate  func(*Config)
@@ -1932,7 +1959,14 @@ func TestValidateDMQ(t *testing.T) {
 			mutate: func(c *Config) { c.DMQ.SocketPath = c.SocketPath },
 		},
 		{
-			name:   "enabled defaults",
+			name: "enabled defaults",
+			mutate: func(c *Config) {
+				c.DMQ.Enabled = true
+				c.DMQ.N2NPort = 0
+			},
+		},
+		{
+			name:   "enabled with a peer listener",
 			mutate: func(c *Config) { c.DMQ.Enabled = true },
 		},
 		{
@@ -1975,6 +2009,166 @@ func TestValidateDMQ(t *testing.T) {
 			},
 			wantErr: "dmq.maxMempoolSize must be positive",
 		},
+		{
+			name: "zero max peers with the default min peers",
+			mutate: func(c *Config) {
+				c.DMQ.Enabled = true
+				c.DMQ.MaxPeers = 0
+			},
+			wantErr: "dmq.minPeers must not exceed dmq.maxPeers",
+		},
+		{
+			name: "no peers allowed",
+			mutate: func(c *Config) {
+				c.DMQ.Enabled = true
+				c.DMQ.MinPeers = 0
+				c.DMQ.MaxPeers = 0
+			},
+		},
+		{
+			name: "peer counts checked without a peer listener",
+			mutate: func(c *Config) {
+				c.DMQ.Enabled = true
+				c.DMQ.N2NPort = 0
+				c.DMQ.MinPeers = 11
+			},
+			wantErr: "dmq.minPeers must not exceed dmq.maxPeers",
+		},
+		{
+			name: "topology file",
+			mutate: func(c *Config) {
+				c.DMQ.Enabled = true
+				c.DMQ.TopologyFile = topologyFile
+			},
+		},
+		{
+			name: "missing topology file",
+			mutate: func(c *Config) {
+				c.DMQ.Enabled = true
+				c.DMQ.TopologyFile = filepath.Join(topologyDir, "absent.json")
+			},
+			wantErr: "invalid dmq.topologyFile",
+		},
+		{
+			name: "topology file is a directory",
+			mutate: func(c *Config) {
+				c.DMQ.Enabled = true
+				c.DMQ.TopologyFile = topologyDir
+			},
+			wantErr: "not a regular file",
+		},
+		{
+			name: "topology file with a parent directory component",
+			mutate: func(c *Config) {
+				c.DMQ.Enabled = true
+				c.DMQ.TopologyFile = topologyDir + "/../dmq-topology.json"
+			},
+			wantErr: "path must not contain",
+		},
+		{
+			name: "topology file ignored when disabled",
+			mutate: func(c *Config) {
+				c.DMQ.TopologyFile = filepath.Join(topologyDir, "absent.json")
+			},
+		},
+		{
+			name: "min peers above max peers",
+			mutate: func(c *Config) {
+				c.DMQ.Enabled = true
+				c.DMQ.MinPeers = 11
+			},
+			wantErr: "dmq.minPeers must not exceed dmq.maxPeers",
+		},
+		{
+			name: "n2n port above range",
+			mutate: func(c *Config) {
+				c.DMQ.Enabled = true
+				c.DMQ.N2NPort = 70000
+			},
+			wantErr: "invalid dmq.n2nPort",
+		},
+		{
+			name: "n2n port shared with the relay port",
+			mutate: func(c *Config) {
+				c.DMQ.Enabled = true
+				c.DMQ.N2NPort = c.RelayPort
+			},
+			wantErr: "is assigned to both port (relay/NtN) and dmq.n2nPort",
+		},
+		{
+			name: "ipv6 listener overlaps another listener on the same port",
+			mutate: func(c *Config) {
+				c.DMQ.Enabled = true
+				c.BindAddr = "::1"
+				c.DMQ.ListenAddress = "127.0.0.1"
+				c.DMQ.ListenIPv6Address = "::1"
+				c.DMQ.N2NPort = c.RelayPort
+			},
+			wantErr: "is assigned to both port (relay/NtN) and dmq.n2nPort",
+		},
+		{
+			name: "n2n port zero skips listener checks",
+			mutate: func(c *Config) {
+				c.DMQ.Enabled = true
+				c.DMQ.N2NPort = 0
+				c.DMQ.ListenAddress = "not-an-address"
+			},
+		},
+		{
+			name: "no listen address with an n2n port",
+			mutate: func(c *Config) {
+				c.DMQ.Enabled = true
+				c.DMQ.ListenAddress = ""
+				c.DMQ.ListenIPv6Address = ""
+			},
+			wantErr: "dmq.listenAddress or dmq.listenIpv6Address must be set",
+		},
+		{
+			name: "ipv6 only listener",
+			mutate: func(c *Config) {
+				c.DMQ.Enabled = true
+				c.DMQ.ListenAddress = ""
+			},
+		},
+		{
+			name: "ipv6 literal in the ipv4 address",
+			mutate: func(c *Config) {
+				c.DMQ.Enabled = true
+				c.DMQ.ListenAddress = "::1"
+			},
+			wantErr: "dmq.listenAddress \"::1\" must be an IPv4 address",
+		},
+		{
+			name: "hostname in the ipv4 address",
+			mutate: func(c *Config) {
+				c.DMQ.Enabled = true
+				c.DMQ.ListenAddress = "localhost"
+			},
+			wantErr: "must be an IPv4 address",
+		},
+		{
+			name: "ipv4 literal in the ipv6 address",
+			mutate: func(c *Config) {
+				c.DMQ.Enabled = true
+				c.DMQ.ListenIPv6Address = "127.0.0.1"
+			},
+			wantErr: "must be an IPv6 address",
+		},
+		{
+			name: "ipv4-mapped literal in the ipv6 address",
+			mutate: func(c *Config) {
+				c.DMQ.Enabled = true
+				c.DMQ.ListenIPv6Address = "::ffff:127.0.0.1"
+			},
+			wantErr: "must be an IPv6 address",
+		},
+		{
+			name: "disabled ignores peer settings",
+			mutate: func(c *Config) {
+				c.DMQ.MaxPeers = 0
+				c.DMQ.N2NPort = c.RelayPort
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1982,6 +2176,7 @@ func TestValidateDMQ(t *testing.T) {
 			cfg := validTestConfig()
 			cfg.SocketPath = "dingo.socket"
 			cfg.DMQ = DefaultDMQConfig()
+			cfg.DMQ.N2NPort = 4001
 			tt.mutate(cfg)
 			err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
 			if tt.wantErr == "" {
@@ -1994,43 +2189,78 @@ func TestValidateDMQ(t *testing.T) {
 	}
 }
 
+func TestValidateDMQN2NPortRangeReportedOnce(t *testing.T) {
+	t.Parallel()
+	cfg := validTestConfig()
+	cfg.SocketPath = "dingo.socket"
+	cfg.DMQ = DefaultDMQConfig()
+	cfg.DMQ.Enabled = true
+	cfg.DMQ.N2NPort = 70000
+	err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
+	require.Error(t, err)
+	assert.Equal(t, 1, strings.Count(err.Error(), "invalid dmq.n2nPort"))
+	assert.NotContains(t, err.Error(), "assigned to both dmq.n2nPort")
+}
+
 func TestPipeline_DMQYAMLAndFlags(t *testing.T) {
 	// The environment overrides YAML, so a DINGO_DMQ_* variable set where the
 	// test runs would replace the values it asserts.
 	for _, name := range []string{
 		"DINGO_DMQ_ENABLED", "DINGO_DMQ_TOPIC", "DINGO_DMQ_NETWORK_MAGIC",
 		"DINGO_DMQ_SOCKET_PATH", "DINGO_DMQ_MESSAGE_TTL",
-		"DINGO_DMQ_MAX_MEMPOOL_SIZE",
+		"DINGO_DMQ_MAX_MEMPOOL_SIZE", "DINGO_DMQ_N2N_PORT",
+		"DINGO_DMQ_LISTEN_ADDRESS", "DINGO_DMQ_LISTEN_IPV6_ADDRESS",
+		"DINGO_DMQ_TOPOLOGY_FILE", "DINGO_DMQ_MIN_PEERS",
+		"DINGO_DMQ_MAX_PEERS",
 	} {
 		t.Setenv(name, "")
 		require.NoError(t, os.Unsetenv(name))
 	}
+	topologyFile := filepath.ToSlash(
+		filepath.Join(t.TempDir(), "dmq-topology.json"),
+	)
+	require.NoError(t, os.WriteFile(topologyFile, []byte("{}"), 0o600))
 	cfg, err := loadConfigThroughPipeline(
 		t,
-		"dmq:\n  enabled: true\n  topic: mithril\n  messageTtl: 300\n",
+		"dmq:\n  enabled: true\n  topic: mithril\n  messageTtl: 300\n"+
+			"  n2nPort: 4100\n  listenIpv6Address: \"::1\"\n"+
+			"  topologyFile: \""+topologyFile+"\"\n  minPeers: 2\n",
 		[]string{
 			"--dmq-socket-path=/run/dmq.sock",
 			"--dmq-network-magic=7",
 			"--dmq-max-mempool-size=4",
 			"--dmq-message-ttl=600",
+			"--dmq-listen-address=127.0.0.1",
+			"--dmq-max-peers=6",
 		},
 	)
 	require.NoError(t, err)
 	assert.Equal(t, DMQConfig{
-		Enabled:         true,
-		Topic:           "mithril",
-		NetworkMagic:    7,
-		networkMagicSet: true,
-		SocketPath:      "/run/dmq.sock",
-		MessageTTL:      600,
-		MaxMempoolSize:  4,
+		Enabled:           true,
+		Topic:             "mithril",
+		NetworkMagic:      7,
+		networkMagicSet:   true,
+		SocketPath:        "/run/dmq.sock",
+		MessageTTL:        600,
+		MaxMempoolSize:    4,
+		N2NPort:           4100,
+		ListenAddress:     "127.0.0.1",
+		ListenIPv6Address: "::1",
+		TopologyFile:      topologyFile,
+		MinPeers:          2,
+		MaxPeers:          6,
 	}, cfg.DMQ)
 }
 
 func TestValidateDMQBounds(t *testing.T) {
 	t.Parallel()
+	// The scaled limits below exceed a 32-bit uint, so those cases have no
+	// representable input there and are skipped.
+	maxTTL := uint64(math.MaxInt64 / int64(time.Second))
+	maxMempool := uint64(math.MaxInt64 >> 20)
 	tests := []struct {
 		name    string
+		wide    bool
 		mutate  func(*Config)
 		wantErr string
 	}{
@@ -2056,27 +2286,31 @@ func TestValidateDMQBounds(t *testing.T) {
 		},
 		{
 			name: "largest message ttl",
+			wide: true,
 			mutate: func(c *Config) {
-				c.DMQ.MessageTTL = uint(math.MaxInt64 / int64(time.Second))
+				c.DMQ.MessageTTL = uint(maxTTL)
 			},
 		},
 		{
 			name: "message ttl overflowing a duration",
+			wide: true,
 			mutate: func(c *Config) {
-				c.DMQ.MessageTTL = uint(math.MaxInt64/int64(time.Second)) + 1
+				c.DMQ.MessageTTL = uint(maxTTL + 1)
 			},
 			wantErr: "dmq.messageTtl must be at most",
 		},
 		{
 			name: "largest mempool size",
+			wide: true,
 			mutate: func(c *Config) {
-				c.DMQ.MaxMempoolSize = uint(math.MaxInt64 >> 20)
+				c.DMQ.MaxMempoolSize = uint(maxMempool)
 			},
 		},
 		{
 			name: "mempool size overflowing a byte count",
+			wide: true,
 			mutate: func(c *Config) {
-				c.DMQ.MaxMempoolSize = uint(math.MaxInt64>>20) + 1
+				c.DMQ.MaxMempoolSize = uint(maxMempool + 1)
 			},
 			wantErr: "dmq.maxMempoolSize must be at most",
 		},
@@ -2084,6 +2318,9 @@ func TestValidateDMQBounds(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
+			if tt.wide && strconv.IntSize < 64 {
+				t.Skip("uint is too narrow for this limit on this target")
+			}
 			cfg := validTestConfig()
 			cfg.SocketPath = "dingo.socket"
 			cfg.DMQ = DefaultDMQConfig()
@@ -2153,4 +2390,27 @@ func TestValidateDMQRejectsUnknownTopic(t *testing.T) {
 	cfg.DMQ.Enabled = true
 	cfg.DMQ.Topic = "typo"
 	require.ErrorContains(t, cfg.validate(cfg.RunMode, minUnprivilegedPort), "dmq.topic must be mithril")
+}
+
+func TestValidateRejectsNegativeBarkArchiveLookupRates(t *testing.T) {
+	t.Parallel()
+
+	cfg := validTestConfig()
+	cfg.BarkArchiveLookupsPerSecond = -1
+	require.ErrorContains(
+		t,
+		cfg.validate(RunModeServe, minUnprivilegedPort),
+		"invalid barkArchiveLookupsPerSecond -1",
+	)
+
+	cfg = validTestConfig()
+	cfg.BarkArchiveCallerLookupsPerSecond = -1
+	require.ErrorContains(
+		t,
+		cfg.validate(RunModeServe, minUnprivilegedPort),
+		"invalid barkArchiveCallerLookupsPerSecond -1",
+	)
+
+	cfg = validTestConfig()
+	require.NoError(t, cfg.validate(RunModeServe, minUnprivilegedPort))
 }

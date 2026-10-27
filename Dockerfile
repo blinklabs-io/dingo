@@ -1,9 +1,4 @@
-# This image bundles Go 1.26.7; go.mod's toolchain is pinned to 1.26.9.
-# GOTOOLCHAIN is `auto` in this image, so the build fetches the patched toolchain
-# instead of using the bundled compiler. Update this tag when blinklabs-io/
-# docker-go publishes a matching image; never lower the module toolchain to
-# match an older image.
-FROM ghcr.io/blinklabs-io/go:1.26.7-1@sha256:33d5a9fc16157790277b088625c1030a9c80afc2dc86542e0fb6ec0bdfeceba5 AS build
+FROM ghcr.io/blinklabs-io/go:1.27.3-1@sha256:3e5e8c2d5b52421d1d54d49a607463deca214b27fb1b0378b1aa883d1e6cfe1e AS build
 
 ARG VERSION
 ARG COMMIT_HASH
@@ -34,12 +29,12 @@ RUN `go env GOPATH`/bin/antithesis-go-instrumentor /code /antithesis
 WORKDIR /antithesis/customer
 RUN make CGO_ENABLED=1 build
 
-FROM ghcr.io/blinklabs-io/cardano-cli:11.2.3.1-1@sha256:bc943590a8f0685a34a63697df18527b5e35d06dc0ce5fb931d7bc78ed5c4866 AS cardano-cli
-FROM ghcr.io/blinklabs-io/cardano-configs:20260915-1@sha256:d13289f8c094b8ec9e0f0c64888254c94183239400f9564fb933e323ee2fa5f7 AS cardano-configs
-FROM ghcr.io/blinklabs-io/nview:0.15.2@sha256:2c00f8542bc17073e4f8f75c403ba01226fb0949de4bb8db8f5170b29f85676d AS nview
-FROM ghcr.io/blinklabs-io/txtop:0.16.0@sha256:7386a04aefdeef17e84f1f80790374c8da74142fadb6b558f093496bb1a427b1 AS txtop
+FROM ghcr.io/blinklabs-io/cardano-cli:11.4.0.0-2@sha256:a406a55bb9bbf730879c97e2bc8bfe66fbc531afea86115850a7102bb2d46c88 AS cardano-cli
+FROM ghcr.io/blinklabs-io/cardano-configs:20261024-1@sha256:99ac3a14c3c5969c95b3f791c89d851f68ef7c89a926a06d8fb03f2fa348075b AS cardano-configs
+FROM ghcr.io/blinklabs-io/nview:0.17.0@sha256:9b3c78702d3074cae7fe410e8594d98dbac7414ffb5512b00877558964a956b8 AS nview
+FROM ghcr.io/blinklabs-io/txtop:0.17.0@sha256:ac64eec8467f579d01a7cf070e9d006b7b509e31cd1d701b5882933f3b8f7b42 AS txtop
 
-FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587 AS dingo
+FROM debian:bookworm-slim@sha256:7ff6ba31527b9e336162fa061746c366c4b2032f4d2cff2078bea43f78efe3f8 AS dingo
 # pg_dump/pg_restore version compatibility is asymmetric and narrower than
 # it first appears, confirmed by actually running both directions against
 # real Postgres 16/17 servers while building this image:
@@ -64,8 +59,8 @@ FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595
 # (and re-verify pg_restore against every currently-supported server
 # version, not just the newest) if that becomes a real requirement.
 RUN sed -i \
-    -e 's|http://deb.debian.org/debian-security|http://snapshot.debian.org/archive/debian-security/20261005T000000Z|g' \
-    -e 's|http://deb.debian.org/debian|http://snapshot.debian.org/archive/debian/20261005T000000Z|g' \
+    -e 's|http://deb.debian.org/debian-security|http://snapshot.debian.org/archive/debian-security/20261020T000000Z|g' \
+    -e 's|http://deb.debian.org/debian|http://snapshot.debian.org/archive/debian/20261020T000000Z|g' \
     /etc/apt/sources.list.d/debian.sources && \
   apt-get -o Acquire::Check-Valid-Until=false update -y && \
   apt-get install -y --no-install-recommends \

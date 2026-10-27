@@ -1222,3 +1222,76 @@ func TestBlockPointAtOrBeforeSlotBoundedHonorsTheBound(t *testing.T) {
 	require.Equal(t, blocks[1].Slot, point.Slot)
 	require.Equal(t, blocks[1].Hash, point.Hash)
 }
+
+// bodyReadCountingStore counts every block-body read, local or not.
+type bodyReadCountingStore struct {
+	blob.BlobStore
+	bodyReads int
+}
+
+func (s *bodyReadCountingStore) GetBlock(
+	txn types.Txn,
+	slot uint64,
+	hash []byte,
+) ([]byte, types.BlockMetadata, error) {
+	s.bodyReads++
+	return s.BlobStore.GetBlock(txn, slot, hash)
+}
+
+func (s *bodyReadCountingStore) GetBlockLocal(
+	txn types.Txn,
+	slot uint64,
+	hash []byte,
+) ([]byte, types.BlockMetadata, error) {
+	s.bodyReads++
+	return s.BlobStore.GetBlock(txn, slot, hash)
+}
+
+func TestBlockIDByPointMetadataReadsNoBlockBody(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	block := testIndexedBlock(42, 7, 0x42)
+	require.NoError(t, db.BlockCreate(block, nil))
+	syntheticHash := bytes.Repeat([]byte{0x43}, 32)
+	require.NoError(t, db.SetGenesisCbor(43, syntheticHash, []byte{0x80}, nil))
+
+	store := &bodyReadCountingStore{BlobStore: db.Blob()}
+	db.SetBlobStore(store)
+	point := ocommon.NewPoint(block.Slot, block.Hash)
+	lookup := func(p ocommon.Point) (uint64, error) {
+		var id uint64
+		txn := db.BlobTxn(false)
+		err := txn.Do(func(txn *Txn) error {
+			var err error
+			id, err = BlockIDByPointMetadataTxn(txn, p)
+			return err
+		})
+		return id, err
+	}
+
+	blockID, err := lookup(point)
+	require.NoError(t, err)
+	require.Equal(t, block.ID, blockID)
+
+	_, err = lookup(
+		ocommon.NewPoint(block.Slot, bytes.Repeat([]byte{0xff}, 32)),
+	)
+	require.ErrorIs(t, err, models.ErrBlockNotFound)
+
+	// A synthetic entry shares the key layout but is not a chain block.
+	_, err = lookup(ocommon.NewPoint(43, syntheticHash))
+	require.ErrorIs(t, err, models.ErrBlockNotFound)
+
+	// Local history expiry keeps the metadata, so the point stays held.
+	txn := db.BlobTxn(true)
+	require.NoError(t, txn.Do(func(txn *Txn) error {
+		return db.Blob().TombstoneBlock(
+			txn.Blob(), block.Slot, block.Hash,
+		)
+	}))
+	blockID, err = lookup(point)
+	require.NoError(t, err)
+	require.Equal(t, block.ID, blockID)
+	require.Zero(t, store.bodyReads)
+}

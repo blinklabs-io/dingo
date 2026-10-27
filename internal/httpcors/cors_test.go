@@ -107,3 +107,41 @@ func TestHandlerEmptyConfigDisablesCORS(t *testing.T) {
 		t.Fatalf("unexpected allow origin: %q", got)
 	}
 }
+
+func TestHandlerExposesCallerHeadersAfterTheGRPCDefaults(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		extra  []string
+		expect string
+	}{
+		{"default", nil, exposeHeaders},
+		{
+			"caller",
+			[]string{"X-Next", "ETag"},
+			exposeHeaders + ", X-Next, ETag",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			handler := Handler(
+				http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					w.WriteHeader(http.StatusOK)
+				}),
+				Config{
+					AllowedOrigins: []string{"https://mywallet.io"},
+					ExposeHeaders:  tc.extra,
+				},
+			)
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			req.Header.Set("Origin", "https://mywallet.io")
+			rec := httptest.NewRecorder()
+
+			handler.ServeHTTP(rec, req)
+
+			if got := rec.Header().Get(
+				"Access-Control-Expose-Headers",
+			); got != tc.expect {
+				t.Fatalf("unexpected expose headers: %q", got)
+			}
+		})
+	}
+}

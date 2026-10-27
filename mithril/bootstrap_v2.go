@@ -34,14 +34,13 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/semaphore"
 )
 
 // immutableDownloadWorkers is the number of concurrent immutable
-// archive downloads during a v2 bootstrap. Paired with a shared
-// keep-alive client (see downloadImmutables) so each worker holds a
-// warm pooled connection; the connection pool in
+// archive downloads during a v2 bootstrap, and a chunk feed's default.
+// Paired with a shared keep-alive client (see ChunkFeed.start) so each
+// worker holds a warm pooled connection; the connection pool in
 // newPooledDownloadTransport is sized to this value.
 const immutableDownloadWorkers = 64
 
@@ -83,9 +82,10 @@ func immutableDownloadBudget(cfg BootstrapConfig) (*semaphore.Weighted, int64) {
 	return semaphore.NewWeighted(max(immutableInflightBytes, weight)), weight
 }
 
-// immutableArchiveLimits admits only an immutable archive's certified trio and
-// hashes each file as it is written. Ledger state comes from the separately
-// signed ancillary archive.
+// immutableArchiveLimits admits only an immutable archive's own certified
+// trio under immutable/, and hashes each file as it is written. Any other
+// member, including a ledger/ tree, is refused: the ledger state is imported
+// from the ancillary archive only.
 func immutableArchiveLimits(
 	num uint64,
 	digests map[string]string,
@@ -163,21 +163,14 @@ const ancillaryManifestFilename = "ancillary_manifest.json"
 // immutableFileExtensions are the three files of an immutable trio.
 var immutableFileExtensions = []string{"chunk", "primary", "secondary"}
 
-// bootstrapV2 restores a node database from Mithril CardanoDatabase
-// (v2) artifacts: per-immutable-file archives verified against the
-// certified merkle root, plus an ancillary archive carrying the
-// ledger state verified via the signed ancillary manifest. It
-// produces the same BootstrapResult shape as the v1 flow so that
-// downstream loading is backend-agnostic.
-func bootstrapV2(
+// selectArtifactV2 fetches the selected artifact -- the pinned one for a
+// resumed sync, otherwise the latest -- and checks its self-hash, identity and
+// network. It does not authenticate the artifact against a certificate.
+func selectArtifactV2(
 	ctx context.Context,
 	cfg BootstrapConfig,
-	aggregatorURL string,
-) (*BootstrapResult, error) {
-	client := newMithrilClient(aggregatorURL, cfg.AllowInsecureHTTP)
-
-	// Step 1: Fetch the selected artifact -- the pinned one for a resumed sync,
-	// otherwise the latest -- and verify its self-hash.
+	client *Client,
+) (*CardanoDatabaseSnapshot, error) {
 	var artifact *CardanoDatabaseSnapshot
 	var err error
 	if cfg.PinnedDigest != "" {
@@ -240,7 +233,7 @@ func bootstrapV2(
 		)
 	}
 	locationPolicy, err := newArtifactLocationPolicy(
-		aggregatorURL, cfg.AllowInsecureHTTP,
+		client.aggregatorURL, cfg.AllowInsecureHTTP,
 	)
 	if err != nil {
 		return nil, err
@@ -248,17 +241,101 @@ func bootstrapV2(
 	if err := locationPolicy.apply(artifact); err != nil {
 		return nil, err
 	}
+	return artifact, nil
+}
+
+// newArtifactDownloadClient returns a keep-alive client for artifact
+// downloads, pooling connections for workers concurrent fetches. Its redirects
+// are held to the artifact location policy for aggregatorURL, and when budget
+// is set every request and body byte it carries is charged to budget.
+func newArtifactDownloadClient(
+	aggregatorURL string,
+	allowInsecureHTTP bool,
+	workers int,
+	budget *artifactDownloadBudget,
+) (*http.Client, *restrictedHTTPTransport, error) {
+	policy, err := newArtifactLocationPolicy(aggregatorURL, allowInsecureHTTP)
+	if err != nil {
+		return nil, nil, err
+	}
+	transport := newPooledDownloadTransport(workers, allowInsecureHTTP)
+	transport.downloadBudget = budget
+	return &http.Client{
+		Transport:     transport,
+		CheckRedirect: policy.checkRedirect,
+	}, transport, nil
+}
+
+// withOneShotDownloadClient returns bcfg with the client, download budget and
+// extraction budget for the downloads of a run that fetches its immutable
+// files through chunk feeds: the digest list and, with ancillary set, the
+// ancillary archive. The returned func releases the client's idle connections.
+func withOneShotDownloadClient(
+	bcfg BootstrapConfig,
+	aggregatorURL string,
+	downloadDir string,
+	ancillary bool,
+) (BootstrapConfig, func(), error) {
+	objects := uint64(1)
+	var ancillaryBytes int64
+	if ancillary {
+		objects++
+		ancillaryBytes = bcfg.objectMaxBytes(ancillaryMaxBytes)
+	}
+	budget, err := newArtifactDownloadBudget(
+		objects, 0, bcfg.objectMaxBytes(digestListMaxBytes), ancillaryBytes,
+	)
+	if err != nil {
+		return bcfg, nil, err
+	}
+	extraction, err := newBootstrapExtractionBudget(downloadDir)
+	if err != nil {
+		return bcfg, nil, err
+	}
+	httpClient, transport, err := newArtifactDownloadClient(
+		aggregatorURL, bcfg.AllowInsecureHTTP, 1, budget,
+	)
+	if err != nil {
+		return bcfg, nil, err
+	}
+	bcfg.httpClient = httpClient
+	bcfg.downloadBudget = budget
+	bcfg.extractionBudget = extraction
+	bcfg.decoderBudget = newDecoderMemoryBudget()
+	return bcfg, transport.CloseIdleConnections, nil
+}
+
+// bootstrapV2 restores a node database from Mithril CardanoDatabase
+// (v2) artifacts: per-immutable-file archives verified against the
+// certified merkle root, plus an ancillary archive carrying the
+// ledger state verified via the signed ancillary manifest. Its
+// result carries the verified immutable and ancillary handles.
+func bootstrapV2(
+	ctx context.Context,
+	cfg BootstrapConfig,
+	aggregatorURL string,
+) (*BootstrapResult, error) {
+	client := newMithrilClient(aggregatorURL, cfg.AllowInsecureHTTP)
+
+	// Step 1: Fetch the selected artifact, verify its self-hash and hold its
+	// locations to the artifact location policy.
+	artifact, err := selectArtifactV2(ctx, cfg, client)
+	if err != nil {
+		return nil, err
+	}
+	// The v2 flow imports ledger state only from the ancillary artifact. Refuse
+	// an incomplete artifact before downloading its immutable files.
+	if len(artifact.Ancillary.Locations) == 0 {
+		return nil, errors.New(
+			"mithril bootstrap requires ancillary locations",
+		)
+	}
 	// A certificate authenticates the immutable database content, while the
 	// ledger state and the final in-progress immutable trio are authenticated
 	// by the separately signed ancillary manifest. Do not start downloading
 	// immutable data when the second half of that trust boundary cannot be
 	// checked.
 	if cfg.VerifyCertificateChain {
-		if len(artifact.Ancillary.Locations) == 0 {
-			return nil, errors.New(
-				"verified Mithril bootstrap requires ancillary locations",
-			)
-		}
 		if cfg.AncillaryVerificationKey == "" {
 			return nil, errors.New(
 				"verified Mithril bootstrap requires an ancillary verification key",
@@ -344,16 +421,17 @@ func bootstrapV2(
 	if err != nil {
 		return nil, err
 	}
-	downloadTransport := newPooledDownloadTransport(
-		immutableDownloadWorkers,
+	var downloadTransport *restrictedHTTPTransport
+	cfg.httpClient, downloadTransport, err = newArtifactDownloadClient(
+		aggregatorURL,
 		cfg.AllowInsecureHTTP,
+		immutableDownloadWorkers,
+		cfg.downloadBudget,
 	)
-	downloadTransport.downloadBudget = cfg.downloadBudget
-	defer downloadTransport.CloseIdleConnections()
-	cfg.httpClient = &http.Client{
-		Transport:     downloadTransport,
-		CheckRedirect: locationPolicy.checkRedirect,
+	if err != nil {
+		return nil, err
 	}
+	defer downloadTransport.CloseIdleConnections()
 	client.httpClient = aggregatorHTTPClient(cfg.httpClient)
 	downloadCtx, cancelDownloads := context.WithTimeout(
 		ctx, artifactDownloadTotalTimeout,
@@ -386,8 +464,9 @@ func bootstrapV2(
 	if err != nil {
 		return nil, err
 	}
+	cfg.decoderBudget = newDecoderMemoryBudget()
 
-	// Unlike v1, the ancillary download and the immutable archive
+	// The ancillary download and the immutable archive
 	// pool report progress concurrently. Downstream OnProgress
 	// callbacks are not required to be thread-safe, so serialize
 	// emissions here.
@@ -535,7 +614,7 @@ func bootstrapV2(
 
 	// Step 4: Download, extract, and verify the immutable archives
 	if err := downloadImmutables(
-		ctx, cfg, artifact, digests, downloadDir, extractDir,
+		ctx, cfg, client, artifact, digests, downloadDir, extractDir,
 	); err != nil {
 		return nil, fmt.Errorf(
 			"downloading immutable archives: %w",
@@ -578,23 +657,14 @@ func bootstrapV2(
 	// for the error-return path; calling Wait twice is safe).
 	ancWg.Wait()
 	if ancillaryErr != nil {
-		if cfg.VerifyCertificateChain {
-			return nil, fmt.Errorf(
-				"verified Mithril ancillary data unavailable: %w",
-				ancillaryErr,
-			)
-		}
-		cfg.Logger.Warn(
-			"failed to download ancillary data; continuing without ledger state",
-			"component",
-			"mithril",
-			"error",
+		return nil, fmt.Errorf(
+			"mithril ancillary data unavailable: %w",
 			ancillaryErr,
 		)
 	}
-	if cfg.VerifyCertificateChain && ancillaryTree == nil {
+	if ancillaryTree == nil {
 		return nil, errors.New(
-			"verified Mithril bootstrap produced no ancillary data",
+			"mithril bootstrap produced no ancillary data",
 		)
 	}
 
@@ -622,8 +692,9 @@ func bootstrapV2(
 				CardanoNodeVersion: artifact.CardanoNodeVersion,
 			},
 		},
-		ImmutableDir:  immutableTree.Path(),
-		ImmutableRoot: immutableTree.Root(),
+		ImmutableDir:        immutableTree.Path(),
+		ImmutableRoot:       immutableTree.Root(),
+		CertificateVerified: cfg.VerifyCertificateChain,
 		// The digest list the certificate's merkle root covers, carried on so
 		// the load can re-check each file from the descriptor it reads through
 		// rather than trusting a check that ran before the file was closed.
@@ -665,6 +736,26 @@ func verifyArtifactCertificateV2(
 			artifact.Hash,
 		)
 	}
+	cache := cfg.CertificateCache
+	if leaf := cache.acceptedLeaf(
+		cfg.GenesisVerificationKey, artifact.CertificateHash,
+	); leaf != nil {
+		cfg.Logger.Debug(
+			"certificate chain already verified",
+			"component", "mithril",
+			"phase", "certificate_verification",
+			"artifact", "cardano_database",
+			"certificate_hash", artifact.CertificateHash,
+		)
+		kind, err := leaf.SignedEntityType.Kind()
+		if err != nil {
+			return fmt.Errorf(
+				"certificate %s has invalid signed entity type: %w",
+				leaf.Hash, err,
+			)
+		}
+		return checkLeafBindsArtifact(leaf, kind, artifact)
+	}
 	cfg.Logger.Info(
 		"verifying certificate chain",
 		"component", "mithril",
@@ -672,12 +763,19 @@ func verifyArtifactCertificateV2(
 		"artifact", "cardano_database",
 		"certificate_hash", artifact.CertificateHash,
 	)
-	verificationResult, err := VerifyCertificateChainWithMode(
+	var anchors *certificateAnchors
+	if cache != nil {
+		anchors = &certificateAnchors{
+			cache: cache, genesisKey: cfg.GenesisVerificationKey,
+		}
+	}
+	verificationResult, err := verifyCertificateChainAnchored(
 		ctx,
 		client,
 		artifact.CertificateHash,
-		"", // v2 leaf binding uses cardano_database_merkle_root below
 		VerificationModeSTM,
+		newCertificateChainBudget(),
+		anchors,
 	)
 	if err != nil {
 		return fmt.Errorf(
@@ -717,14 +815,30 @@ func verifyArtifactCertificateV2(
 			err,
 		)
 	}
-	if verificationResult.SignedEntityKind !=
-		signedEntityTypeCardanoDatabase {
+	if err := checkLeafBindsArtifact(
+		verificationResult.LeafCertificate,
+		verificationResult.SignedEntityKind,
+		artifact,
+	); err != nil {
+		return err
+	}
+	cache.accept(cfg.GenesisVerificationKey, verificationResult)
+	return nil
+}
+
+// checkLeafBindsArtifact checks that a verified leaf certificate certifies
+// artifact: its signed entity kind, merkle root, network and beacon.
+func checkLeafBindsArtifact(
+	leaf *Certificate,
+	kind string,
+	artifact *CardanoDatabaseSnapshot,
+) error {
+	if kind != signedEntityTypeCardanoDatabase {
 		return fmt.Errorf(
 			"unexpected signed entity kind for Cardano database bootstrap: %s",
-			verificationResult.SignedEntityKind,
+			kind,
 		)
 	}
-	leaf := verificationResult.LeafCertificate
 	certifiedRoot := leaf.ProtocolMessage.
 		MessageParts["cardano_database_merkle_root"]
 	if certifiedRoot == "" {
@@ -943,6 +1057,7 @@ func downloadDigestsArchive(
 			"artifact", "immutable_digest_list",
 		),
 		WithReplaceDestination(),
+		withDecoderBudget(cfg.decoderBudget),
 		withArchiveLimits(withBootstrapExtractionBudget(
 			digestListLimits(), cfg.extractionBudget,
 		)),
@@ -981,54 +1096,37 @@ func downloadDigestsArchive(
 }
 
 // downloadImmutables downloads, extracts, and digest-verifies the
-// immutable archives 0..=beacon.ImmutableFileNumber into extractDir
-// using a bounded worker pool. Trios whose files already exist with
-// matching digests are skipped, providing resume support. Archives
-// are deleted after successful extraction to bound disk usage.
+// immutable archives StartImmutable..=beacon.ImmutableFileNumber into
+// extractDir. It is a consumer of the same verified ChunkFeed that in-node
+// stream catch-up reads, opened with an unbounded window over a stable
+// directory that outlives the feed: the caller loads the extracted tree once
+// the download returns, and a rerun resumes by reusing every trio already in
+// place that matches the certified digest list. Archives are deleted after
+// extraction to bound disk usage.
+//
+// When cfg.OnChunkContiguous is set it runs for each file in ascending order
+// as the feed delivers it, so the caller can copy the contiguous prefix while
+// later files are still downloading.
 func downloadImmutables(
 	ctx context.Context,
 	cfg BootstrapConfig,
+	client *Client,
 	artifact *CardanoDatabaseSnapshot,
 	digests map[string]string,
 	downloadDir string,
 	extractDir string,
 ) error {
-	immutableDir, immutableRoot, err := openImmutableRoot(extractDir)
-	if err != nil {
-		return err
-	}
-	defer immutableRoot.Close()
-
 	// archiveDir is not created here. A create-then-close-then-hand-off-
 	// the-bare-path step would itself be a TOCTOU window: a symlink
 	// swapped in for it between this function returning and the first
 	// download would be followed by whatever opens it next. Instead,
-	// DownloadSnapshot (called below, once per archive) creates and
-	// verifies its own DestDir through a handle on its parent every time
-	// it runs, closing that window at the point it actually matters.
+	// DownloadSnapshot (called once per archive) creates and verifies its
+	// own DestDir through a handle on its parent every time it runs,
+	// closing that window at the point it actually matters.
 	archiveDir := filepath.Join(
 		downloadDir,
 		filepath.Base("immutable-archives-"+truncateDigest(artifact.Hash)),
 	)
-
-	locations := make(
-		[]*CardanoDatabaseLocation,
-		0,
-		len(artifact.Immutables.Locations),
-	)
-	for i := range artifact.Immutables.Locations {
-		if artifact.Immutables.Locations[i].URITemplate != "" {
-			locations = append(
-				locations,
-				&artifact.Immutables.Locations[i],
-			)
-		}
-	}
-	if len(locations) == 0 {
-		return errors.New(
-			"no usable immutable archive locations (URI template missing)",
-		)
-	}
 
 	totalArchives := artifact.Beacon.ImmutableFileNumber + 1
 	// startArchive is the lowest immutable number this run downloads. A catch-up
@@ -1068,230 +1166,194 @@ func downloadImmutables(
 		"immutable_archives",
 		artifact.Hash,
 	)
-	// Per-archive extraction is too chatty for the main log at
-	// mainnet scale (tens of thousands of archives); aggregate
-	// progress is reported by onArchiveDone instead.
-	quietLogger := slog.New(slog.DiscardHandler)
 
-	cfg.immutableDigests = digests
-	// Each in-flight download is charged at its size limit, since the real
-	// size is not known until it has arrived.
-	inflight, inflightWeight := immutableDownloadBudget(cfg)
-
-	// Optional download<->processing pipeline: chunks are fetched in
-	// parallel (out of order) but seq invokes OnChunkContiguous in strict
-	// 0,1,2,... order as each prefix completes, so the caller can copy
-	// blocks while later chunks still download. nil hook => no sequencer,
-	// legacy "download everything, then process" behaviour.
-	// errgroup only cancels its context when a download worker (a g.Go) returns
-	// an error. The pipelined copy runs in the sequencer's own goroutine, so a
-	// copy failure would otherwise let the remaining archives finish
-	// downloading before the error surfaced. Cancel the download context
-	// explicitly when the sequencer's processing fails so downloads stop at
-	// once.
-	dlCtx := ctx
-	var seq *inOrderSequencer
-	// copyErr captures a pipelined-copy failure as the root cause. It is
-	// written in the sequencer's single consumer goroutine and read only after
-	// seq.Wait() returns, so the mutex inside the sequencer orders the access.
-	var copyErr error
-	if cfg.OnChunkContiguous != nil {
-		var cancelDownloads context.CancelCauseFunc
-		dlCtx, cancelDownloads = context.WithCancelCause(ctx)
-		defer cancelDownloads(nil)
-		seqProcess := func(num uint64) error {
-			if err := cfg.OnChunkContiguous(ContiguousChunk{
-				Dir:     immutableDir,
-				Root:    immutableRoot,
-				Digests: digests,
-				Start:   startArchive,
-				Num:     num,
-			}); err != nil {
-				copyErr = err
-				cancelDownloads(err)
-				return err
-			}
+	feed, err := newVerifiedChunkFeed(ctx, ChunkFeedConfig{
+		Bootstrap:      cfg,
+		StartImmutable: startArchive,
+		keep: &feedKeep{
+			extractDir: extractDir,
+			archiveDir: archiveDir,
+			onFetched:  onArchiveDone,
+		},
+	}, cfg, client, artifact, digests)
+	if err != nil {
+		return err
+	}
+	// The kept tree is the result, so Close has nothing to remove; it only
+	// stops the workers and releases the directory handle.
+	defer func() { _ = feed.Close() }()
+	for {
+		chunk, err := feed.Next(ctx)
+		if errors.Is(err, io.EOF) {
 			return nil
 		}
-		// A full sync starts the contiguous processing window at 0; a catch-up
-		// starts it at the immutable-import marker so already-present archives
-		// are neither downloaded nor re-processed.
-		if startArchive == 0 {
-			seq = newInOrderSequencer(totalArchives, seqProcess)
-		} else {
-			seq = newInOrderSequencerFrom(
-				startArchive, totalArchives, seqProcess,
-			)
+		if err != nil {
+			return err
 		}
-	}
-
-	g, gctx := errgroup.WithContext(dlCtx)
-	g.SetLimit(immutableDownloadWorkers)
-	for num := range totalArchives {
-		if num < startArchive {
-			// Already present in the blob store from a prior sync; the catch-up
-			// forward-copy fills only what is missing above this point.
+		if cfg.OnChunkContiguous == nil {
 			continue
 		}
-		g.Go(func() error {
-			if err := gctx.Err(); err != nil {
-				return err
-			}
-			archiveErr := &ImmutableArchiveError{
-				ArtifactHash:        artifact.Hash,
-				Epoch:               artifact.Beacon.Epoch,
-				ImmutableFileNumber: num,
-				Locations:           len(locations),
-			}
-			cachedBytes, cacheErr := checkImmutableTrio(
-				immutableRoot, num, digests,
+		// A copy failure is the root cause; returning it closes the feed,
+		// which cancels the downloads still running.
+		if err := cfg.OnChunkContiguous(ContiguousChunk{
+			Dir:     feed.immDir,
+			Root:    feed.immRoot,
+			Digests: digests,
+			Start:   startArchive,
+			Num:     chunk.Num,
+		}); err != nil {
+			return err
+		}
+	}
+}
+
+// reuseCachedImmutableTrio reports whether the trio for num is already in
+// root and matches the certified digests, so a rerun need not fetch it again.
+// A trio that does not match is removed so it cannot be reported against bytes
+// no location served; any other failure to check it is returned as archiveErr,
+// since another location cannot fix it.
+func reuseCachedImmutableTrio(
+	logger *slog.Logger,
+	root *os.Root,
+	num uint64,
+	digests map[string]string,
+	archiveErr *ImmutableArchiveError,
+) (int64, bool, error) {
+	cachedBytes, cacheErr := checkImmutableTrio(root, num, digests)
+	switch {
+	case cacheErr == nil:
+		return cachedBytes, true, nil
+	case errors.Is(cacheErr, fs.ErrNotExist):
+		// Nothing extracted for this number yet: the ordinary first pass,
+		// not a rejected cache. No attempt is recorded.
+		return 0, false, nil
+	}
+	archiveErr.Attempts = append(
+		archiveErr.Attempts,
+		ImmutableArchiveAttempt{
+			Source: immutableSourceCache,
+			Err:    cacheErr,
+		},
+	)
+	if !errors.As(cacheErr, new(*DigestMismatchError)) {
+		// The certified digest list carries no entry for this file, or the
+		// cached files cannot be read. Neither is something another location
+		// can fix, and neither says the cached bytes are wrong, so the trio is
+		// left in place.
+		return 0, false, archiveErr
+	}
+	// A trio left by an earlier run that does not match the digest list this
+	// run verified. It is removed before the first download rather than left
+	// for extraction to overwrite, so a later failure cannot be reported
+	// against bytes no location served, and a partially overwritten trio
+	// cannot survive into the next attempt.
+	removeImmutableTrio(root, num)
+	logger.Warn(
+		"cached immutable trio does not match the certified "+
+			"digest list, removing and refetching",
+		"component", "mithril",
+		"immutable_file_number", num,
+		"source", immutableSourceCache,
+		"error", cacheErr,
+	)
+	return 0, false, nil
+}
+
+// fetchVerifiedImmutableTrio tries each location in turn until one yields a
+// trio whose files match the certified digest list, recording every rejected
+// attempt on archiveErr. It returns archiveErr when no location does, and the
+// trio is removed after each rejected attempt so a failed or partially
+// overwritten download never survives into the next one.
+func fetchVerifiedImmutableTrio(
+	ctx context.Context,
+	cfg BootstrapConfig,
+	quietLogger *slog.Logger,
+	locations []*CardanoDatabaseLocation,
+	num uint64,
+	archiveDir string,
+	extractDir string,
+	immutableRoot *os.Root,
+	digests map[string]string,
+	archiveErr *ImmutableArchiveError,
+) (int64, error) {
+	var bytes int64
+	fetched := false
+	for i, location := range locations {
+		source := redactLocationURI(location.ImmutableArchiveURI(num))
+		attempt := ImmutableArchiveAttempt{
+			Source:   source,
+			Location: i + 1,
+		}
+		if err := fetchImmutableArchive(
+			ctx, cfg, quietLogger, location, num,
+			archiveDir, extractDir,
+		); err != nil {
+			attempt.Err = err
+			archiveErr.Attempts = append(archiveErr.Attempts, attempt)
+			// fetchImmutableArchive has already removed its own
+			// archive file, through the root it downloaded
+			// through, on every exit -- no bare-path cleanup of
+			// archiveDir needed here.
+			removeImmutableTrio(immutableRoot, num)
+			cfg.Logger.Warn(
+				"immutable archive location failed, trying next",
+				"component", "mithril",
+				"immutable_file_number", num,
+				"location", i+1,
+				"total", len(locations),
+				"location_uri", source,
+				"error", err,
 			)
-			switch {
-			case cacheErr == nil:
-				onArchiveDone(cachedBytes)
-				if seq != nil {
-					seq.Complete(num)
-				}
-				return nil
-			case errors.Is(cacheErr, fs.ErrNotExist):
-				// Nothing extracted for this number yet: the ordinary first
-				// pass, not a rejected cache. No attempt is recorded.
-			default:
-				archiveErr.Attempts = append(
-					archiveErr.Attempts,
-					ImmutableArchiveAttempt{
-						Source: immutableSourceCache,
-						Err:    cacheErr,
-					},
-				)
-				if !errors.As(cacheErr, new(*DigestMismatchError)) {
-					// The certified digest list carries no entry for this
-					// file, or the cached files cannot be read. Neither is
-					// something another location can fix, and neither says the
-					// cached bytes are wrong, so the trio is left in place.
-					return archiveErr
-				}
-				// A trio left by an earlier run that does not match the
-				// digest list this run verified. It is removed before the
-				// first download rather than left for extraction to
-				// overwrite, so a later failure cannot be reported against
-				// bytes no location served, and a partially overwritten trio
-				// cannot survive into the next attempt.
-				removeImmutableTrio(immutableRoot, num)
-				cfg.Logger.Warn(
-					"cached immutable trio does not match the certified "+
-						"digest list, removing and refetching",
-					"component", "mithril",
-					"immutable_file_number", num,
-					"source", immutableSourceCache,
-					"error", cacheErr,
-				)
-			}
-			if err := inflight.Acquire(gctx, inflightWeight); err != nil {
-				return err
-			}
-			defer inflight.Release(inflightWeight)
-			var bytes int64
-			fetched := false
-			for i, location := range locations {
-				source := redactLocationURI(location.ImmutableArchiveURI(num))
-				attempt := ImmutableArchiveAttempt{
-					Source:   source,
-					Location: i + 1,
-				}
-				if err := fetchImmutableArchive(
-					gctx, cfg, quietLogger, location, num,
-					archiveDir, extractDir,
-				); err != nil {
-					attempt.Err = err
-					archiveErr.Attempts = append(archiveErr.Attempts, attempt)
-					// fetchImmutableArchive has already removed its own
-					// archive file, through the root it downloaded
-					// through, on every exit -- no bare-path cleanup of
-					// archiveDir needed here.
-					removeImmutableTrio(immutableRoot, num)
-					cfg.Logger.Warn(
-						"immutable archive location failed, trying next",
-						"component", "mithril",
-						"immutable_file_number", num,
-						"location", i+1,
-						"total", len(locations),
-						"location_uri", source,
-						"error", err,
-					)
-					continue
-				}
-				var checkErr error
-				bytes, checkErr = checkImmutableTrio(
-					immutableRoot, num, digests,
-				)
-				if checkErr != nil {
-					attempt.Err = checkErr
-					archiveErr.Attempts = append(archiveErr.Attempts, attempt)
-					removeImmutableTrio(immutableRoot, num)
-					logAttrs := []any{
-						"component", "mithril",
-						"immutable_file_number", num,
-						"location", i + 1,
-						"total", len(locations),
-						"location_uri", source,
-						"error", checkErr,
-					}
-					if mismatch := attempt.Mismatch(); mismatch != nil {
-						logAttrs = append(
-							logAttrs,
-							"immutable_file", mismatch.FileName,
-							"expected_digest", mismatch.Expected,
-							"observed_digest", mismatch.Observed,
-						)
-					}
-					cfg.Logger.Warn(
-						"immutable archive verification failed, trying next",
-						logAttrs...,
-					)
-					continue
-				}
-				fetched = true
-				break
-			}
-			if !fetched {
-				if len(archiveErr.Attempts) == 0 {
-					archiveErr.Attempts = append(
-						archiveErr.Attempts,
-						ImmutableArchiveAttempt{
-							Source: "none",
-							Err: errors.New(
-								"no usable immutable archive locations",
-							),
-						},
-					)
-				}
-				return archiveErr
-			}
-			onArchiveDone(bytes)
-			if seq != nil {
-				seq.Complete(num)
-			}
-			return nil
-		})
-	}
-	err = g.Wait()
-	if seq != nil {
-		// A download failure (or the copy-triggered cancel above) means the
-		// contiguous prefix can never advance, so unblock the consumer's Wait.
-		if err != nil {
-			seq.Cancel(err)
+			continue
 		}
-		// Block until the consumer drains; its error is redundant here (copyErr
-		// holds a processing failure and err holds a download failure).
-		_ = seq.Wait()
-		// A pipelined-copy failure is the root cause; surface it instead of the
-		// context cancellation it triggered in the download workers.
-		if copyErr != nil {
-			return copyErr
+		var checkErr error
+		bytes, checkErr = checkImmutableTrio(
+			immutableRoot, num, digests,
+		)
+		if checkErr != nil {
+			attempt.Err = checkErr
+			archiveErr.Attempts = append(archiveErr.Attempts, attempt)
+			removeImmutableTrio(immutableRoot, num)
+			logAttrs := []any{
+				"component", "mithril",
+				"immutable_file_number", num,
+				"location", i + 1,
+				"total", len(locations),
+				"location_uri", source,
+				"error", checkErr,
+			}
+			if mismatch := attempt.Mismatch(); mismatch != nil {
+				logAttrs = append(
+					logAttrs,
+					"immutable_file", mismatch.FileName,
+					"expected_digest", mismatch.Expected,
+					"observed_digest", mismatch.Observed,
+				)
+			}
+			cfg.Logger.Warn(
+				"immutable archive verification failed, trying next",
+				logAttrs...,
+			)
+			continue
 		}
+		fetched = true
+		break
 	}
-	return err
+	if !fetched {
+		if len(archiveErr.Attempts) == 0 {
+			archiveErr.Attempts = append(
+				archiveErr.Attempts,
+				ImmutableArchiveAttempt{
+					Source: "none",
+					Err: errors.New(
+						"no usable immutable archive locations",
+					),
+				},
+			)
+		}
+		return 0, archiveErr
+	}
+	return bytes, nil
 }
 
 // newImmutableProgressWithContext aggregates the concurrent immutable
@@ -1452,7 +1514,10 @@ func fetchImmutableArchive(
 	// Merge: every immutable archive extracts into one shared directory,
 	// concurrently, so this destination accumulates across calls and must
 	// not be staged-and-swapped.
-	extractOpts := []ExtractOption{WithMergeIntoDestination()}
+	extractOpts := []ExtractOption{
+		WithMergeIntoDestination(),
+		withDecoderBudget(cfg.decoderBudget),
+	}
 	if cfg.immutableDigests != nil {
 		extractOpts = append(
 			extractOpts,
@@ -1574,9 +1639,20 @@ func openImmutableRoot(extractDir string) (string, *os.Root, error) {
 // Resolved through the immutable directory's handle so a failed download can
 // only ever unlink files in the directory it was writing into.
 func removeImmutableTrio(root *os.Root, num uint64) {
+	_ = removeImmutableTrioErr(root, num)
+}
+
+// removeImmutableTrioErr is removeImmutableTrio for a caller that must know
+// the files are gone. Files that are already absent are not an error.
+func removeImmutableTrioErr(root *os.Root, num uint64) error {
+	var errs []error
 	for _, ext := range immutableFileExtensions {
-		_ = root.Remove(fmt.Sprintf("%05d.%s", num, ext))
+		if err := root.Remove(fmt.Sprintf("%05d.%s", num, ext)); err != nil &&
+			!errors.Is(err, fs.ErrNotExist) {
+			errs = append(errs, err)
+		}
 	}
+	return errors.Join(errs...)
 }
 
 // sha256FileInRoot returns the hex SHA-256 digest and size of a file directly
@@ -1711,8 +1787,7 @@ func downloadAncillaryV2(
 		// there for Cleanup to remove.
 		//
 		// Asked of the downloader rather than assembled here, so the two
-		// cannot name different files — see downloadAncillary for what that
-		// costs when the aggregator picks the network name.
+		// cannot name different files.
 		dest := downloadDestinationPath(DownloadConfig{
 			DestDir:  downloadDir,
 			Filename: ancillaryFilename,
@@ -1737,6 +1812,7 @@ func downloadAncillaryV2(
 	if cfg.VerifyCertificateChain {
 		manifest, manifestData, preflightErr := readVerifiedAncillaryManifest(
 			ctx, archiveFile, cfg.AncillaryVerificationKey,
+			cfg.decoderBudget,
 		)
 		if preflightErr != nil {
 			return nil, nil, ancillaryPath, fmt.Errorf(
@@ -1765,6 +1841,7 @@ func downloadAncillaryV2(
 			"artifact", "ancillary_ledger_state",
 		),
 		WithReplaceDestination(),
+		withDecoderBudget(cfg.decoderBudget),
 		withArchiveLimits(limits),
 	); extractErr != nil {
 		return nil, nil, ancillaryPath, fmt.Errorf(

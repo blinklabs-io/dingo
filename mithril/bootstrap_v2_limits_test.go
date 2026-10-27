@@ -21,6 +21,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"io/fs"
 	"log/slog"
 	"maps"
 	"math"
@@ -357,71 +358,45 @@ func TestBootstrapV2RefusesImmutableArchiveWithForeignMember(t *testing.T) {
 	require.ErrorContains(t, err, ErrExtractUnexpectedMember.Error())
 }
 
-// TestDownloadAncillaryV1AdmitsOnlyConsumedMembers covers the v1 ancillary
-// archive, which the aggregator builds with the same layout as the v2 one.
-func TestDownloadAncillaryV1AdmitsOnlyConsumedMembers(t *testing.T) {
+// TestBootstrapV2RefusesImmutableArchiveWithLedgerMember pins that an immutable
+// archive admits only its own trio: a ledger/ entry is a hard extraction error
+// and nothing outside immutable/ reaches the extraction directory.
+func TestBootstrapV2RefusesImmutableArchiveWithLedgerMember(t *testing.T) {
 	t.Parallel()
 
-	for _, tc := range []struct {
-		name    string
-		files   map[string][]byte
-		wantErr error
-	}{
-		{
-			name: "ledger state and next trio",
-			files: map[string][]byte{
-				"ledger/100/state":          []byte("state"),
-				"ledger/100/tables/values":  []byte("values"),
-				"immutable/00003.chunk":     []byte("c"),
-				"immutable/00003.primary":   []byte("p"),
-				"immutable/00003.secondary": []byte("s"),
-			},
-		},
-		{
-			name: "unrelated top-level file",
-			files: map[string][]byte{
-				"ledger/100/state": []byte("state"),
-				"unrelated.bin":    []byte("x"),
-			},
-			wantErr: ErrExtractUnexpectedMember,
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			archive := buildTarZst(t, tc.files)
-			srv := httptest.NewServer(http.HandlerFunc(
-				func(w http.ResponseWriter, r *http.Request) {
-					_, _ = w.Write(archive)
-				},
-			))
-			t.Cleanup(srv.Close)
-			tree, _, err := downloadAncillary(
-				t.Context(),
-				BootstrapConfig{
-					AllowInsecureHTTP: true,
-					Logger: slog.New(
-						slog.NewTextHandler(io.Discard, nil),
-					),
-				},
-				&SnapshotListItem{
-					SnapshotBase: SnapshotBase{
-						Digest:             "abc123",
-						Network:            "preprod",
-						AncillaryLocations: []string{srv.URL},
-					},
-				},
-				t.TempDir(),
-			)
-			if tree != nil {
-				tree.Close()
-			}
-			if tc.wantErr != nil {
-				require.ErrorIs(t, err, tc.wantErr)
-				return
-			}
-			require.NoError(t, err)
-		})
+	fixture := newV2Fixture(t, v2FixtureOptions{immutableFileNumber: 0})
+	files := map[string][]byte{
+		"ledger/100/state": []byte("planted"),
 	}
+	for name, content := range fixture.immutableContent {
+		files["immutable/"+name] = content
+	}
+	fixture.immutableArchives[0] = buildTarZst(t, files)
+
+	downloadDir := t.TempDir()
+	cfg := fixture.bootstrapConfig(downloadDir)
+	cfg.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	result, err := Bootstrap(context.Background(), cfg)
+	if err == nil {
+		result.CloseHandles()
+	}
+	require.ErrorIs(t, err, ErrExtractUnexpectedMember)
+
+	var ledgerDirs []string
+	require.NoError(t, filepath.WalkDir(
+		downloadDir,
+		func(path string, d fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if d.IsDir() && d.Name() == "ledger" &&
+				strings.Contains(path, "immutable-") {
+				ledgerDirs = append(ledgerDirs, path)
+			}
+			return nil
+		},
+	))
+	require.Empty(t, ledgerDirs, "no ledger tree may be extracted")
 }
 
 func TestExpansionReaderLargeCompressedCount(t *testing.T) {
@@ -455,16 +430,14 @@ func TestImmutableDownloadBudgetAbovePoolLimit(t *testing.T) {
 	budget.Release(weight)
 }
 
-func TestImmutableArchiveLimitsAdmitOnlyCertifiedTrio(t *testing.T) {
+func TestImmutableArchiveLimitsRefuseLedgerTree(t *testing.T) {
 	t.Parallel()
 	limits := immutableArchiveLimits(0, map[string]string{
-		"00000.chunk":     strings.Repeat("0", 64),
-		"00000.primary":   strings.Repeat("1", 64),
-		"00000.secondary": strings.Repeat("2", 64),
+		"00000.chunk": "d",
 	})
 	require.True(t, limits.allow("immutable"))
 	require.True(t, limits.allow("immutable/00000.chunk"))
+	require.False(t, limits.allow("immutable/00001.chunk"))
+	require.False(t, limits.allow("ledger"))
 	require.False(t, limits.allow("ledger/100/state"))
-	require.GreaterOrEqual(t, limits.maxMemberBytes, int64(maxExtractFileSize))
-	require.GreaterOrEqual(t, limits.maxTotalBytes, int64(maxTotalExtractSize))
 }

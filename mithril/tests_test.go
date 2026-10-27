@@ -135,11 +135,10 @@ func requireTip(t *testing.T, imm *immutable.ImmutableDb) ocommon.Point {
 func TestBootstrapImmutableSurvivesHandoffSwap(t *testing.T) {
 	t.Parallel()
 
-	// The two lookups that produce a BootstrapResult's ImmutableDir: v1 walks
-	// the extracted layouts, v2 knows the archives land in `immutable`.
+	// The lookup that produces a BootstrapResult's ImmutableDir: the archives
+	// land in `immutable`.
 	lookups := map[string]func(extractDir string) *vettedDir{
-		"v1 findImmutableDir": findImmutableDir,
-		"v2 chunkDirUnder": func(extractDir string) *vettedDir {
+		"chunkDirUnder": func(extractDir string) *vettedDir {
 			return chunkDirUnder(extractDir, "immutable")
 		},
 	}
@@ -155,9 +154,19 @@ func TestBootstrapImmutableSurvivesHandoffSwap(t *testing.T) {
 			found := lookup(extractDir)
 			require.NotNil(t, found)
 			t.Cleanup(found.Close)
+			digests := map[string]string{}
+			for _, ext := range []string{".chunk", ".primary", ".secondary"} {
+				data, err := os.ReadFile(filepath.Join(
+					extractDir, "immutable", "00000"+ext,
+				))
+				require.NoError(t, err)
+				sum := sha256.Sum256(data)
+				digests["00000"+ext] = hex.EncodeToString(sum[:])
+			}
 			result := &BootstrapResult{
-				ImmutableDir:  found.Path(),
-				ImmutableRoot: found.Root(),
+				ImmutableDir:     found.Path(),
+				ImmutableRoot:    found.Root(),
+				ImmutableDigests: digests,
 			}
 
 			ours := requireTip(t, mustOpenBootstrapped(t, result))
@@ -265,6 +274,29 @@ func TestImportLedgerStateRefusesUnvettedResult(t *testing.T) {
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 		nil,
 		&BootstrapResult{
+			AncillaryDir:        t.TempDir(),
+			ExtractDir:          t.TempDir(),
+			CertificateVerified: true,
+		},
+		false,
+		^uint64(0),
+		nil,
+	)
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "no verified directory handle")
+}
+
+// TestImportLedgerStateUnverifiedRunReportsNoAncillaryState pins that a run
+// that never asked for verification is not told a verified handle is missing.
+func TestImportLedgerStateUnverifiedRunReportsNoAncillaryState(t *testing.T) {
+	t.Parallel()
+
+	_, _, _, err := importLedgerState(
+		t.Context(),
+		nil,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		nil,
+		&BootstrapResult{
 			AncillaryDir: t.TempDir(),
 			ExtractDir:   t.TempDir(),
 		},
@@ -273,7 +305,8 @@ func TestImportLedgerStateRefusesUnvettedResult(t *testing.T) {
 		nil,
 	)
 	require.Error(t, err)
-	assert.ErrorContains(t, err, "no verified directory handle")
+	assert.ErrorContains(t, err, "produced no ancillary ledger state")
+	assert.NotContains(t, err.Error(), "verified")
 }
 
 // TestImportLedgerStateRefusesSymlinkedState covers the ancillary tree's file
@@ -348,8 +381,8 @@ func TestImportLedgerStateRefusesSymlinkedState(t *testing.T) {
 // attacker who cannot forge a signed ancillary state can make the real one
 // unopenable and have the unsigned extraction directory imported instead.
 //
-// A tree with genuinely no ledger state still falls through — that is the
-// v1 layout, where the state lives in the main archive's db/ledger.
+// A tree with genuinely no ledger state is refused too: there is no source to
+// move on to.
 func TestImportLedgerStateRefusesUnsafeAncillaryTree(t *testing.T) {
 	t.Parallel()
 
@@ -400,9 +433,8 @@ func TestImportLedgerStateRefusesUnsafeAncillaryTree(t *testing.T) {
 				"source selection to whoever planted it")
 	})
 
-	t.Run("stateless ancillary tree falls through", func(t *testing.T) {
+	t.Run("stateless ancillary tree is refused", func(t *testing.T) {
 		anc := t.TempDir()
-		extractDir, extractRoot := newExtract(t)
 		ancRoot, err := openVerifiedDir(anc)
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = ancRoot.Close() })
@@ -412,16 +444,11 @@ func TestImportLedgerStateRefusesUnsafeAncillaryTree(t *testing.T) {
 			&BootstrapResult{
 				AncillaryDir:  anc,
 				AncillaryRoot: ancRoot,
-				ExtractDir:    extractDir,
-				ExtractRoot:   extractRoot,
 			},
 			false, ^uint64(0), nil,
 		)
-		// Reaches the parser on the extraction directory's state, which is
-		// what makes the refusal above about planted content rather than
-		// about the fallback being unreachable.
 		require.Error(t, err)
-		assert.ErrorContains(t, err, "parsing ledger state")
+		assert.ErrorContains(t, err, "no ledger state at or before")
 	})
 }
 
@@ -433,9 +460,8 @@ func TestImportLedgerStateRefusesUnsafeAncillaryTree(t *testing.T) {
 // import read the second, whoever emptied it would have chosen the source. So
 // nothing is looked at after a verified tree, even when it yields no state.
 //
-// Unverified is the opposite case and must still fall through: that is how the
-// v1 layout works, its ledger state living in the main archive, and it also
-// covers an ancillary tree holding only states newer than the certified tip.
+// There is no extraction-directory fallback for an unverified tree either: the
+// ledger state is read from the ancillary tree only.
 func TestImportLedgerStateWillNotLookPastAVerifiedTree(t *testing.T) {
 	t.Parallel()
 
@@ -492,11 +518,12 @@ func TestImportLedgerStateWillNotLookPastAVerifiedTree(t *testing.T) {
 				"unsigned one")
 	})
 
-	t.Run("unverified tree falls through", func(t *testing.T) {
-		// Reaches the parser on the extraction directory's state, so the
-		// refusal above is about the signature and not about the fallback
-		// being unreachable.
-		assert.ErrorContains(t, run(t, false), "parsing ledger state")
+	t.Run("unverified tree has no fallback", func(t *testing.T) {
+		// The extraction directory's state is never read, so the error is the
+		// plain absence rather than a parse of the unsigned state.
+		err := run(t, false)
+		assert.ErrorContains(t, err, "no ledger state at or before")
+		assert.NotContains(t, err.Error(), "parsing ledger state")
 	})
 }
 
@@ -540,6 +567,7 @@ func TestSelectLedgerStateSnapshotAcceptsVerifiedAncillaryStateNewerThanCertifie
 				},
 			},
 			maxTrustedSlot,
+			unboundedSlotLimit,
 		)
 	require.NoError(t, err)
 	require.NotNil(t, snapshot)
@@ -587,6 +615,7 @@ func TestSelectLedgerStateSnapshotStillRefusesAGenuinelyEmptyVerifiedTree(
 			AncillaryDigests:  map[string]string{"ledger/100/state": "00"},
 		},
 		100,
+		unboundedSlotLimit,
 	)
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "refusing to import one from elsewhere")
@@ -598,8 +627,7 @@ func TestSelectLedgerStateSnapshotStillRefusesAGenuinelyEmptyVerifiedTree(
 // importLedgerState itself, so the search-stage fix is proven where the real
 // caller enters it. It only needs to reach the parser (proving the search
 // selected the newer state instead of refusing) — parsing minimal non-ledger
-// bytes is expected to fail on its own terms, exactly as the existing
-// "unverified tree falls through" subtest above already relies on.
+// bytes is expected to fail on its own terms.
 func TestImportLedgerStateAcceptsAVerifiedAncillaryStateNewerThanCertifiedTip(
 	t *testing.T,
 ) {
@@ -620,7 +648,7 @@ func TestImportLedgerStateAcceptsAVerifiedAncillaryStateNewerThanCertifiedTip(
 	sum := sha256.Sum256(stateBytes)
 
 	_, _, _, err = importLedgerState(
-		t.Context(), nil, discard, nil,
+		t.Context(), nil, discard, shelleyNodeConfig(t, 2160),
 		&BootstrapResult{
 			AncillaryDir:      anc,
 			AncillaryRoot:     ancRoot,
@@ -633,197 +661,6 @@ func TestImportLedgerStateAcceptsAVerifiedAncillaryStateNewerThanCertifiedTip(
 	)
 	assert.ErrorContains(t, err, "parsing ledger state")
 	assert.NotErrorIs(t, err, ledgerstate.ErrNoUsableLedgerState)
-}
-
-// TestDownloadAncillaryReportsArchiveWhenTreeUnusable pins that a downloaded
-// ancillary archive is still reported for cleanup when the tree it extracted to
-// turns out to hold no ledger state.
-//
-// The tree and the archive fail together but are cleaned up separately: the
-// caller records the archive path from the same return that carries the error,
-// and losing it would leave the download behind in an operator-supplied
-// directory, where no temp-dir removal sweeps it up.
-func TestDownloadAncillaryReportsArchiveWhenTreeUnusable(t *testing.T) {
-	t.Parallel()
-
-	// An ancillary archive whose payload has no ledger state at all.
-	archive := writeTestArchive(t, map[string]string{
-		"immutable/00000.chunk": "not ledger state",
-	})
-	downloadDir := t.TempDir()
-	served := filepath.Join(downloadDir, "served.tar.zst")
-	data, err := os.ReadFile(archive)
-	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(served, data, 0o640))
-
-	srv := httptest.NewServer(http.HandlerFunc(
-		func(w http.ResponseWriter, r *http.Request) {
-			http.ServeFile(w, r, served)
-		},
-	))
-	defer srv.Close()
-
-	tree, archPath, err := downloadAncillary(
-		t.Context(),
-		BootstrapConfig{
-			AllowInsecureHTTP: true,
-			Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
-		},
-		&SnapshotListItem{
-			SnapshotBase: SnapshotBase{
-				Digest:             "abc123",
-				Network:            "preprod",
-				AncillaryLocations: []string{srv.URL},
-			},
-		},
-		downloadDir,
-	)
-	require.Error(t, err)
-	assert.Nil(t, tree, "an unusable tree must not be returned")
-	assert.NotEmpty(t, archPath,
-		"the downloaded archive must still be reported so it gets cleaned up")
-}
-
-// TestDownloadAncillaryReportsArchiveOnFailure pins that every error after the
-// download has begun still names the archive, so Cleanup can remove it.
-//
-// DownloadSnapshot resumes, which means a failed attempt deliberately leaves a
-// partial file at the destination. Combined with an error that clears the path,
-// that file is unreachable to cleanup — invisible when the download directory
-// is a temp dir that gets removed wholesale, and a leak when the operator
-// supplied one.
-func TestDownloadAncillaryReportsArchiveOnFailure(t *testing.T) {
-	t.Parallel()
-
-	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
-	snapshot := func(locations ...string) *SnapshotListItem {
-		return &SnapshotListItem{
-			SnapshotBase: SnapshotBase{
-				Digest:             "abc123",
-				Network:            "preprod",
-				AncillaryLocations: locations,
-			},
-		}
-	}
-
-	t.Run("every download location fails", func(t *testing.T) {
-		// Truncated mid-body rather than refused outright: a refusal writes
-		// nothing, and the point of this case is the partial file a resumable
-		// download leaves behind.
-		srv := httptest.NewServer(http.HandlerFunc(
-			func(w http.ResponseWriter, r *http.Request) {
-				w.Header().Set("Content-Length", "4096")
-				w.WriteHeader(http.StatusOK)
-				_, _ = w.Write(make([]byte, 512))
-				if f, ok := w.(http.Flusher); ok {
-					f.Flush()
-				}
-				panic(http.ErrAbortHandler)
-			},
-		))
-		defer srv.Close()
-
-		downloadDir := t.TempDir()
-		tree, archPath, err := downloadAncillary(
-			t.Context(),
-			BootstrapConfig{
-				AllowInsecureHTTP:           true,
-				Logger:                      discard,
-				DownloadMaxTransientRetries: -1,
-				DownloadMaxIdleRetries:      1,
-			},
-			snapshot(srv.URL),
-			downloadDir,
-		)
-		require.Error(t, err)
-		assert.Nil(t, tree)
-		require.NotEmpty(t, archPath)
-		// The assertion that matters: the reported path is the partial file
-		// that is actually on disk, not merely some non-empty string.
-		fi, statErr := os.Stat(archPath)
-		require.NoError(t, statErr,
-			"a partial download is left on disk and must stay reachable "+
-				"to cleanup")
-		assert.NotZero(t, fi.Size(), "the partial file should hold bytes")
-	})
-
-	t.Run("extraction fails after a complete download", func(t *testing.T) {
-		srv := httptest.NewServer(http.HandlerFunc(
-			func(w http.ResponseWriter, r *http.Request) {
-				// Downloads fine, is not a valid archive.
-				_, _ = w.Write([]byte("not an archive"))
-			},
-		))
-		defer srv.Close()
-
-		downloadDir := t.TempDir()
-		tree, archPath, err := downloadAncillary(
-			t.Context(),
-			BootstrapConfig{
-				Logger:            discard,
-				AllowInsecureHTTP: true,
-			},
-			snapshot(srv.URL),
-			downloadDir,
-		)
-		require.Error(t, err)
-		assert.Nil(t, tree)
-		require.NotEmpty(t, archPath,
-			"the downloaded archive must stay reachable to cleanup")
-		_, statErr := os.Stat(archPath)
-		assert.NoError(t, statErr,
-			"the reported path must be the archive that is actually there")
-	})
-}
-
-// TestDownloadAncillaryKeepsTheReportedArchiveInsideDownloadDir covers the
-// archive path reported on failure being reduced the same way the downloader
-// reduces it.
-//
-// The filename carries the network name, which the aggregator supplies, and
-// DownloadSnapshot writes to its last element. A path assembled from the raw
-// name would name a different file for a network like "../../etc" — one outside
-// the download directory, and Cleanup calls os.RemoveAll on whatever it is
-// given. So the reported path has to stay inside, whatever the aggregator says.
-func TestDownloadAncillaryKeepsTheReportedArchiveInsideDownloadDir(
-	t *testing.T,
-) {
-	t.Parallel()
-
-	srv := httptest.NewServer(http.HandlerFunc(
-		func(w http.ResponseWriter, r *http.Request) {
-			http.Error(w, "nope", http.StatusInternalServerError)
-		},
-	))
-	defer srv.Close()
-
-	downloadDir := t.TempDir()
-	_, archPath, err := downloadAncillary(
-		t.Context(),
-		BootstrapConfig{
-			AllowInsecureHTTP: true,
-			Logger: slog.New(
-				slog.NewTextHandler(io.Discard, nil),
-			),
-			DownloadMaxTransientRetries: -1,
-		},
-		&SnapshotListItem{
-			SnapshotBase: SnapshotBase{
-				Digest:             "abc123",
-				Network:            filepath.Join("..", "..", "etc"),
-				AncillaryLocations: []string{srv.URL},
-			},
-		},
-		downloadDir,
-	)
-	require.Error(t, err)
-	require.NotEmpty(t, archPath)
-
-	rel, relErr := filepath.Rel(downloadDir, archPath)
-	require.NoError(t, relErr)
-	assert.False(t, strings.HasPrefix(rel, ".."),
-		"a network name with a separator must not move the reported "+
-			"archive out of the download directory: got %s", archPath)
 }
 
 // TestDownloadAncillaryV2ReportsArchiveWhenManifestUnverified pins the v2
@@ -924,25 +761,6 @@ func TestDownloadAncillaryRemovesAnUnusableExtraction(t *testing.T) {
 	for name, download := range map[string]func(
 		t *testing.T, downloadDir string,
 	) (*vettedDir, string, error){
-		"v1": func(t *testing.T, downloadDir string) (
-			*vettedDir, string, error,
-		) {
-			return downloadAncillary(
-				t.Context(),
-				BootstrapConfig{
-					Logger:            discard,
-					AllowInsecureHTTP: true,
-				},
-				&SnapshotListItem{
-					SnapshotBase: SnapshotBase{
-						Digest:             digest,
-						Network:            "preprod",
-						AncillaryLocations: []string{serve(t)},
-					},
-				},
-				downloadDir,
-			)
-		},
 		"v2": func(t *testing.T, downloadDir string) (
 			*vettedDir, string, error,
 		) {
@@ -1355,16 +1173,11 @@ func TestSignedTableDigestRefusesAnUncoveredTable(t *testing.T) {
 	assert.Empty(t, unsigned.UTxOTableDigest)
 }
 
-// TestOpenBootstrappedImmutableRefusesAnEmptyDigestMap keeps the choice
-// between a verified and an unverified open a statement about the backend
-// rather than about how many entries a map happens to hold.
-//
-// v1 carries no digests at all, and that is the only case that may read
-// unverified. A map that is present but empty is not that case — it is a v2
-// result that lost its digests — and selecting on emptiness would read it
-// unverified, which is the one outcome nothing should be able to reach by
-// removing something.
-func TestOpenBootstrappedImmutableRefusesAnEmptyDigestMap(t *testing.T) {
+// TestOpenBootstrappedImmutableRefusesMissingDigests keeps the open fail-closed:
+// a result with no digest map, or an empty one, is refused rather than read
+// unverified, which is the one outcome nothing should reach by removing
+// something.
+func TestOpenBootstrappedImmutableRefusesMissingDigests(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -1373,12 +1186,12 @@ func TestOpenBootstrappedImmutableRefusesAnEmptyDigestMap(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = root.Close() })
 
-	// Control: no map at all is v1, which reads.
 	_, err = openBootstrappedImmutable(&BootstrapResult{
 		ImmutableDir:  dir,
 		ImmutableRoot: root,
 	})
-	require.NoError(t, err, "v1 carries no digests and must still open")
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "no certified file digests")
 
 	_, err = openBootstrappedImmutable(&BootstrapResult{
 		ImmutableDir:     dir,
@@ -1413,7 +1226,7 @@ func TestIntegrationVerifyCertificateChainPreview(t *testing.T) {
 	client := NewClient(netCfg.AggregatorURL)
 
 	// List snapshots and pick the latest one.
-	snapshots, err := client.ListSnapshots(ctx)
+	snapshots, err := client.ListCardanoDatabaseSnapshots(ctx)
 	require.NoError(t, err)
 	if len(snapshots) == 0 {
 		t.Skip("Mithril preview aggregator has no snapshots")
@@ -1422,15 +1235,14 @@ func TestIntegrationVerifyCertificateChainPreview(t *testing.T) {
 	latest := snapshots[0]
 	t.Logf(
 		"verifying certificate chain for snapshot %s (epoch %d)",
-		latest.Digest, latest.Beacon.Epoch,
+		latest.Hash, latest.Beacon.Epoch,
 	)
 
-	// Structural verification — chain linkage + digest binding.
+	// Structural verification — chain linkage.
 	result, err := VerifyCertificateChainWithMode(
 		ctx,
 		client,
 		latest.CertificateHash,
-		latest.Digest,
 		VerificationModeStructural,
 	)
 	require.NoError(t, err, "structural verification failed")
@@ -1446,7 +1258,6 @@ func TestIntegrationVerifyCertificateChainPreview(t *testing.T) {
 		ctx,
 		client,
 		latest.CertificateHash,
-		latest.Digest,
 		VerificationModeSTM,
 	)
 	require.NoError(t, err, "STM verification failed")
@@ -1501,16 +1312,17 @@ func TestLiveMithrilSTMVerification(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	snapshot, err := client.GetLatestSnapshot(ctx)
+	snapshots, err := client.ListCardanoDatabaseSnapshots(ctx)
 	require.NoError(t, err)
+	require.NotEmpty(t, snapshots)
+	snapshot := snapshots[0]
 	require.NotEmpty(t, snapshot.CertificateHash)
-	require.NotEmpty(t, snapshot.Digest)
+	require.NotEmpty(t, snapshot.Hash)
 
 	verification, err := VerifyCertificateChainWithMode(
 		ctx,
 		client,
 		snapshot.CertificateHash,
-		snapshot.Digest,
 		VerificationModeSTM,
 	)
 	require.NoError(t, err)

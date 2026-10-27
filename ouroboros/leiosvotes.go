@@ -106,6 +106,13 @@ func (o *Ouroboros) leiosvotesServerRequestNext(
 		)
 		return nil, errLeiosVotesUnavailable
 	}
+	if count == 0 || count > oleiosvotes.MaxRequestNextCount {
+		return nil, fmt.Errorf(
+			"leios votes request count %d outside 1..%d",
+			count,
+			oleiosvotes.MaxRequestNextCount,
+		)
+	}
 	// The protocol requires exactly count votes per request, so the
 	// vote manager blocks until enough votes are available. Observe the
 	// stop request because this callback runs on a protocol loop that must

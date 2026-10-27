@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 
+	nodeconsensus "github.com/blinklabs-io/dingo/consensus"
 	"github.com/blinklabs-io/dingo/consensus/praos"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -58,6 +59,37 @@ func praosPrefersCandidateSibling(
 		candidateView,
 		incumbentView,
 	) == praos.ChainABetter
+}
+
+func consensusPrefersCandidateSibling(
+	provider nodeconsensus.Provider,
+	candidateTip, incumbentTip ochainsync.Tip,
+	candidateView, incumbentView praos.PraosTiebreakerView,
+) bool {
+	if provider == nil {
+		return praosPrefersCandidateSibling(
+			candidateTip,
+			incumbentTip,
+			candidateView,
+			incumbentView,
+		)
+	}
+	return provider.CompareTips(
+		candidateTip,
+		incumbentTip,
+		candidateView,
+		incumbentView,
+	) == praos.ChainABetter
+}
+
+func (ls *LedgerState) compareConsensusTips(
+	tipA, tipB ochainsync.Tip,
+	viewA, viewB praos.PraosTiebreakerView,
+) praos.ChainComparisonResult {
+	if ls.config.Consensus == nil {
+		return praos.ComparePraosTips(tipA, tipB, viewA, viewB)
+	}
+	return ls.config.Consensus.CompareTips(tipA, tipB, viewA, viewB)
 }
 
 // AdoptLocalForgedSibling offers a locally forged block that competes with the
@@ -143,7 +175,8 @@ func (ls *LedgerState) AdoptLocalForgedSibling(ctx context.Context,
 	}
 	candidateView, _ := praos.GetPraosTiebreakerView(block.Header())
 	incumbentView := ls.localTipPraosView(ctx, incumbentTip)
-	if !praosPrefersCandidateSibling(
+	if !consensusPrefersCandidateSibling(
+		ls.config.Consensus,
 		candidateTip,
 		incumbentTip,
 		candidateView,

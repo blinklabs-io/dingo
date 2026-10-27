@@ -145,7 +145,7 @@ WHERE added_slot <= ?
 ORDER BY cold_credential_tag, cold_credential
 LIMIT ?`
 
-const committeeHotAuthSupersededIDsQuery = `
+const committeeHotAuthSupersededIDsQuery = `-- name: GetSupersededCommitteeHotAuthorizationIDs :many
 SELECT id
 FROM auth_committee_hot
 WHERE cold_credential_tag = ?
@@ -154,7 +154,7 @@ WHERE cold_credential_tag = ?
 ORDER BY added_slot DESC, certificate_id DESC
 LIMIT ? OFFSET 1`
 
-const committeeHotAuthorizationDeleteIDQuery = "DELETE FROM auth_committee_hot WHERE id = ?"
+const committeeHotAuthorizationDeleteIDQuery = "-- name: DeleteCommitteeHotAuthorizationByID :exec\nDELETE FROM auth_committee_hot WHERE id = ?"
 
 type committeeAuthIdentity struct {
 	tag        uint8

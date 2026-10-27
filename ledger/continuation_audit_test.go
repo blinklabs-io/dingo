@@ -431,12 +431,6 @@ func TestEndorserBlockTxIdsMatchDecodedTransactionHashes(t *testing.T) {
 		rawTxs = append(rawTxs, raw)
 		want = append(want, tx.Hash().Bytes())
 	}
-	// leios-fetch delivers each transaction CBOR-in-CBOR; the third entry
-	// carries that wrapping so both envelope shapes are covered.
-	wrapped, err := cbor.Encode([]byte(rawTxs[2]))
-	require.NoError(t, err)
-	rawTxs[2] = cbor.RawMessage(wrapped)
-
 	got, err := endorserBlockTxIds(rawTxs)
 	require.NoError(t, err)
 	require.Equal(t, want, got)

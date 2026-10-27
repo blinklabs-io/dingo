@@ -44,10 +44,44 @@ var _ databaseconnect.DatabaseServiceHandler = &databaseServiceHandler{}
 // leaves page_size unset (0), matching the proto's documented "0 means
 // server default".
 const (
-	defaultCatalogPageSize = 50
-	defaultHistoryPageSize = 50
-	maxCatalogPageSize     = lifecycle.SnapshotCatalogPageLimit
+	defaultCatalogPageSize   = 50
+	defaultHistoryPageSize   = 50
+	maxCatalogPageSize       = lifecycle.SnapshotCatalogPageLimit
+	maxProgressStreams       = 32
+	maxClientProgressStreams = 4
+	initialCatalogRetry      = 30 * time.Second
+	maxCatalogRetry          = 5 * time.Minute
 )
+
+type catalogReconciliationRetry struct {
+	destination string
+	nextAttempt time.Time
+	delay       time.Duration
+}
+
+func (r *catalogReconciliationRetry) allow(destination string, now time.Time) bool {
+	return r.destination != destination || !now.Before(r.nextAttempt)
+}
+
+func (r *catalogReconciliationRetry) failed(destination string, now time.Time) {
+	if r.destination != destination {
+		r.delay = 0
+	}
+	if r.delay == 0 {
+		r.delay = initialCatalogRetry
+	} else {
+		r.delay *= 2
+		if r.delay > maxCatalogRetry {
+			r.delay = maxCatalogRetry
+		}
+	}
+	r.destination = destination
+	r.nextAttempt = now.Add(r.delay)
+}
+
+func (r *catalogReconciliationRetry) succeeded() {
+	*r = catalogReconciliationRetry{}
+}
 
 // streamProgressPollInterval is how often StreamOperationProgress polls
 // the operation's in-memory state. There is no push-based notification
@@ -55,7 +89,10 @@ const (
 // open stream, so this is a plain poll loop — operations are expected to
 // run for seconds to hours, not sub-second, so this interval is far
 // finer-grained than actually needed for a useful progress stream.
-const streamProgressPollInterval = 250 * time.Millisecond
+const (
+	streamProgressPollInterval = 250 * time.Millisecond
+	streamProgressMaxLifetime  = 15 * time.Minute
+)
 
 // databaseServiceHandler implements bark's full DatabaseService: async
 // CreateSnapshot/Restore/Truncate/VerifySnapshot (each with a pollable
@@ -102,15 +139,23 @@ type databaseServiceHandler struct {
 	databaseconnect.UnimplementedDatabaseServiceHandler
 	bark *Bark
 
-	mu         sync.Mutex
-	operations map[string]*operation
-	busy       bool
-	diagnostic chan struct{}
-	catalogErr error
+	mu sync.Mutex
+	// Serializes cloud scans and protects their retry state without holding the
+	// lifecycle catalog gate during provider I/O.
+	catalogReconciliationGate     chan struct{}
+	catalogReconciliationGateOnce sync.Once
+	operations                    map[string]*operation
+	busy                          bool
+	diagnostic                    chan struct{}
+	activeProgressStreams         int
+	progressStreamsByFingerprint  map[string]int
+	progressStreamLifetime        time.Duration
+	catalogErr                    error
 	// catalogCloudDestination is set only after this handler reconciles the
 	// configured provider into the catalog. An empty value restricts available
 	// pages to the local index even if an older cloud source remains on disk.
 	catalogCloudDestination string
+	catalogRetry            catalogReconciliationRetry
 }
 
 func newDatabaseServiceHandler(
@@ -118,12 +163,84 @@ func newDatabaseServiceHandler(
 	b *Bark,
 ) *databaseServiceHandler {
 	h := &databaseServiceHandler{
-		bark:       b,
-		operations: make(map[string]*operation),
-		diagnostic: make(chan struct{}, 1),
+		bark:                   b,
+		operations:             make(map[string]*operation),
+		diagnostic:             make(chan struct{}, 1),
+		progressStreamLifetime: streamProgressMaxLifetime,
 	}
 	h.initializeSnapshotCatalog(ctx)
 	return h
+}
+
+func (h *databaseServiceHandler) admitProgressStream(
+	ctx context.Context,
+) (func(), error) {
+	id := peerIdentityFromContext(ctx)
+	if !id.Verified || id.Fingerprint == "" {
+		return nil, connect.NewError(
+			connect.CodeUnauthenticated,
+			errAnonymousDatabaseCall,
+		)
+	}
+	h.mu.Lock()
+	global := h.activeProgressStreams
+	client := h.progressStreamsByFingerprint[id.Fingerprint]
+	var admissionErr error
+	switch {
+	case global >= maxProgressStreams:
+		admissionErr = errors.New("too many active operation progress streams")
+	case client >= maxClientProgressStreams:
+		admissionErr = errors.New(
+			"too many active operation progress streams for client",
+		)
+	default:
+		if h.progressStreamsByFingerprint == nil {
+			h.progressStreamsByFingerprint = make(map[string]int)
+		}
+		h.activeProgressStreams++
+		h.progressStreamsByFingerprint[id.Fingerprint]++
+		global++
+		client++
+	}
+	h.mu.Unlock()
+	if admissionErr != nil {
+		h.bark.config.Logger.Warn(
+			"rejected bark operation progress stream",
+			"component", "bark",
+			"client_cert_fingerprint", id.Fingerprint,
+			"active_streams", global,
+			"client_active_streams", client,
+		)
+		return nil, connect.NewError(
+			connect.CodeResourceExhausted,
+			admissionErr,
+		)
+	}
+	h.bark.config.Logger.Debug(
+		"admitted bark operation progress stream",
+		"component", "bark",
+		"client_cert_fingerprint", id.Fingerprint,
+		"active_streams", global,
+		"client_active_streams", client,
+	)
+	return func() {
+		h.mu.Lock()
+		h.activeProgressStreams--
+		h.progressStreamsByFingerprint[id.Fingerprint]--
+		if h.progressStreamsByFingerprint[id.Fingerprint] == 0 {
+			delete(h.progressStreamsByFingerprint, id.Fingerprint)
+		}
+		global := h.activeProgressStreams
+		client := h.progressStreamsByFingerprint[id.Fingerprint]
+		h.mu.Unlock()
+		h.bark.config.Logger.Debug(
+			"released bark operation progress stream",
+			"component", "bark",
+			"client_cert_fingerprint", id.Fingerprint,
+			"active_streams", global,
+			"client_active_streams", client,
+		)
+	}, nil
 }
 
 func (h *databaseServiceHandler) initializeSnapshotCatalog(ctx context.Context) {
@@ -161,25 +278,92 @@ func (h *databaseServiceHandler) initializeSnapshotCatalog(ctx context.Context) 
 func (h *databaseServiceHandler) reconcileCloudSnapshotCatalog(
 	ctx context.Context,
 ) error {
+	if err := h.lockCatalogReconciliation(ctx); err != nil {
+		return err
+	}
+	defer h.unlockCatalogReconciliation()
+	return h.reconcileCloudSnapshotCatalogLocked(ctx)
+}
+
+func (h *databaseServiceHandler) reconcileCloudSnapshotCatalogIfNeeded(
+	ctx context.Context,
+) (string, error) {
+	if err := h.lockCatalogReconciliation(ctx); err != nil {
+		return "", err
+	}
+	defer h.unlockCatalogReconciliation()
+
+	destination := h.bark.config.SnapshotCloudDestination
+	if h.catalogCloudDestination != destination &&
+		h.catalogRetry.allow(destination, time.Now()) {
+		if err := h.reconcileCloudSnapshotCatalogLocked(ctx); err != nil {
+			return h.catalogCloudDestination, err
+		}
+	}
+	return h.catalogCloudDestination, nil
+}
+
+func (h *databaseServiceHandler) lockCatalogReconciliation(
+	ctx context.Context,
+) error {
+	h.catalogReconciliationGateOnce.Do(func() {
+		h.catalogReconciliationGate = make(chan struct{}, 1)
+	})
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case h.catalogReconciliationGate <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (h *databaseServiceHandler) unlockCatalogReconciliation() {
+	<-h.catalogReconciliationGate
+}
+
+func (h *databaseServiceHandler) reconcileCloudSnapshotCatalogLocked(
+	ctx context.Context,
+) error {
 	b := h.bark
-	if b.config.SnapshotCloudDestination == "" {
+	destination := b.config.SnapshotCloudDestination
+	retryFailure := func(err error) error {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		h.catalogRetry.failed(destination, time.Now())
+		return err
+	}
+	if destination == "" {
 		_, err := lifecycle.ReconcileCloudSnapshotCatalogContext(
 			ctx, b.config.SnapshotDir, b.config.DestinationRegistry, "",
 		)
+		if err != nil {
+			return retryFailure(err)
+		}
+		h.catalogCloudDestination = ""
+		h.catalogRetry.succeeded()
 		return err
 	}
 	manifestOpts, err := h.cloudManifestOptions()
 	if err != nil {
-		return err
+		return retryFailure(err)
 	}
 	current, err := lifecycle.ReconcileCloudSnapshotCatalogContext(
 		ctx, b.config.SnapshotDir, b.config.DestinationRegistry,
-		b.config.SnapshotCloudDestination, manifestOpts...,
+		destination, manifestOpts...,
 	)
-	if current {
-		h.catalogCloudDestination = b.config.SnapshotCloudDestination
+	if !current && err == nil {
+		err = lifecycle.ErrSnapshotCatalogIncomplete
 	}
-	return err
+	if err != nil {
+		return retryFailure(err)
+	}
+	h.catalogCloudDestination = destination
+	h.catalogRetry.succeeded()
+	return nil
 }
 
 func (h *databaseServiceHandler) beginDiagnostic() (func(), error) {
@@ -821,13 +1005,12 @@ func (h *databaseServiceHandler) mergedSnapshotCatalogPage(
 			fmt.Errorf("initialize snapshot catalog: %w", h.catalogErr),
 		)
 	}
-	if h.catalogCloudDestination != h.bark.config.SnapshotCloudDestination {
-		if err := h.reconcileCloudSnapshotCatalog(ctx); err != nil {
-			h.bark.config.Logger.Warn(
-				"cloud snapshot catalog reconciliation failed",
-				"component", "bark", "error", err,
-			)
-		}
+	destination, err := h.reconcileCloudSnapshotCatalogIfNeeded(ctx)
+	if err != nil {
+		h.bark.config.Logger.Warn(
+			"cloud snapshot catalog reconciliation failed",
+			"component", "bark", "error", err,
+		)
 	}
 	cursor, err := decodeSnapshotPageToken(pageToken)
 	if err != nil {
@@ -840,7 +1023,7 @@ func (h *databaseServiceHandler) mergedSnapshotCatalogPage(
 
 	items, nextCursor, err := lifecycle.ListAvailableSnapshotPageContext(
 		ctx, h.bark.config.SnapshotDir,
-		h.catalogCloudDestination, size, cursor,
+		destination, size, cursor,
 	)
 	if err != nil {
 		if ctxErr := connectContextError(err); ctxErr != nil {
@@ -963,8 +1146,13 @@ func (h *databaseServiceHandler) cloudSnapshotExists(
 // resolveSnapshotSource resolves snapshotID to wherever it can actually be
 // read from for Restore/VerifySnapshot: its local directory if a valid
 // manifest exists there, otherwise the configured cloud destination if a
-// copy exists there. This is what lets a snapshot ListAvailableSnapshots
-// surfaced as cloud-only (its local copy deleted or pruned) actually be
+// copy exists there. The local manifest is read with the configured trust
+// key. Under a key, a local manifest that fails authentication, its
+// checksum, or its size bound is not chosen: a writer to the snapshot
+// directory can cause any of the three, so the failure is logged and the
+// cloud mirror of the same ID is used only if it authenticates on its own,
+// and an error naming both outcomes is returned otherwise. This is what
+// lets a snapshot ListAvailableSnapshots surfaced as cloud-only (its local copy deleted or pruned) actually be
 // restored/verified through bark, not just the offline CLI. Returns
 // CodeNotFound if the snapshot exists in neither place.
 func (h *databaseServiceHandler) resolveSnapshotSource(
@@ -975,9 +1163,31 @@ func (h *databaseServiceHandler) resolveSnapshotSource(
 	if err != nil {
 		return "", err
 	}
-	_, localErr := lifecycle.ReadManifest(localDir)
+	manifestOpts, err := h.cloudManifestOptions()
+	if err != nil {
+		return "", err
+	}
+	_, localErr := lifecycle.ReadManifest(localDir, manifestOpts...)
 	if localErr == nil {
 		return localDir, nil
+	}
+	keyed := len(manifestOpts) > 0
+	switch {
+	case errors.Is(localErr, lifecycle.ErrManifestUnauthenticated):
+		return h.resolveCloudAfterLocalIntegrityFailure(
+			ctx, snapshotID, localErr,
+			connect.CodeDataLoss, "authentication",
+		)
+	case keyed && errors.Is(localErr, lifecycle.ErrManifestCorrupted):
+		return h.resolveCloudAfterLocalIntegrityFailure(
+			ctx, snapshotID, localErr,
+			connect.CodeDataLoss, "checksum validation",
+		)
+	case keyed && errors.Is(localErr, lifecycle.ErrManifestTooLarge):
+		return h.resolveCloudAfterLocalIntegrityFailure(
+			ctx, snapshotID, localErr,
+			connect.CodeResourceExhausted, "size check",
+		)
 	}
 	if errors.Is(localErr, lifecycle.ErrManifestTooLarge) {
 		return "", connect.NewError(
@@ -1003,6 +1213,14 @@ func (h *databaseServiceHandler) resolveSnapshotSource(
 			),
 		)
 	}
+	// A local manifest that exists but cannot be read or parsed still hands
+	// the request to another source, which must not happen silently.
+	if !errors.Is(localErr, os.ErrNotExist) {
+		h.bark.config.Logger.Warn(
+			"local snapshot manifest is unreadable, checking the cloud destination",
+			"component", "bark", "snapshot_id", snapshotID, "error", localErr,
+		)
+	}
 	cloudURI, exists, cloudErr := h.cloudSnapshotExists(ctx, snapshotID)
 	if cloudErr != nil {
 		code := connect.CodeUnavailable
@@ -1026,6 +1244,45 @@ func (h *databaseServiceHandler) resolveSnapshotSource(
 		fmt.Errorf(
 			"snapshot %q not found locally or in the configured cloud destination",
 			snapshotID,
+		),
+	)
+}
+
+// resolveCloudAfterLocalIntegrityFailure handles a local manifest that is
+// present but failed verification under the trust key; check names the
+// verification that failed. The failure is logged, and the cloud mirror of the same ID is
+// returned only when its manifest authenticates independently; otherwise
+// the error carries code and names both the local and the cloud outcome.
+// The failed local copy is never returned as the source.
+func (h *databaseServiceHandler) resolveCloudAfterLocalIntegrityFailure(
+	ctx context.Context,
+	snapshotID string,
+	localErr error,
+	code connect.Code,
+	check string,
+) (string, error) {
+	logger := h.bark.config.Logger
+	logger.Error(
+		"local snapshot failed manifest "+check,
+		"component", "bark", "snapshot_id", snapshotID, "error", localErr,
+	)
+	cloudURI, exists, cloudErr := h.cloudSnapshotExists(ctx, snapshotID)
+	if cloudErr == nil && exists {
+		logger.Warn(
+			"using cloud mirror of snapshot whose local copy failed verification",
+			"component", "bark", "snapshot_id", snapshotID,
+		)
+		return cloudURI, nil
+	}
+	cloudOutcome := errors.New("no copy in the configured cloud destination")
+	if cloudErr != nil {
+		cloudOutcome = fmt.Errorf("cloud copy failed authentication or could not be read: %w", cloudErr)
+	}
+	return "", connect.NewError(
+		code,
+		fmt.Errorf(
+			"snapshot %q local copy failed %s: %w; cloud mirror unusable: %w",
+			snapshotID, check, localErr, cloudOutcome,
 		),
 	)
 }
@@ -1431,11 +1688,12 @@ func (h *databaseServiceHandler) GetTruncateStatus(
 // StreamOperationProgress polls the operation's in-memory progress every
 // streamProgressPollInterval and sends it to the client, returning once
 // the operation reaches a terminal state or the stream's context is
-// cancelled (e.g. the client disconnects). There is no push-based
-// notification from an operation's background goroutine, so this is a
-// plain poll loop rather than a true event stream — adequate given
-// operations run for seconds to hours, far coarser than the poll
-// interval.
+// cancelled (e.g. the client disconnects), or its renewal lifetime expires.
+// Admission is claimed before either timer is allocated and released on every
+// exit path. There is no push-based notification from an operation's
+// background goroutine, so this is a plain poll loop rather than a true event
+// stream — adequate given operations run for seconds to hours, far coarser
+// than the poll interval.
 func (h *databaseServiceHandler) StreamOperationProgress(
 	ctx context.Context,
 	req *connect.Request[databasev1alpha1.StreamOperationProgressRequest],
@@ -1445,6 +1703,40 @@ func (h *databaseServiceHandler) StreamOperationProgress(
 	if err != nil {
 		return err
 	}
+	setWriteDeadline, ok := responseWriteDeadlineSetterFromContext(ctx)
+	if !ok {
+		return connect.NewError(
+			connect.CodeInternal,
+			errors.New("operation progress stream write deadline is unavailable"),
+		)
+	}
+	release, err := h.admitProgressStream(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
+	lifetime := h.progressStreamLifetime
+	if lifetime <= 0 {
+		lifetime = streamProgressMaxLifetime
+	}
+	deadline := time.Now().Add(lifetime)
+	if err := setWriteDeadline(deadline); err != nil {
+		return connect.NewError(
+			connect.CodeInternal,
+			fmt.Errorf("set operation progress stream write deadline: %w", err),
+		)
+	}
+	defer func() {
+		if err := setWriteDeadline(time.Time{}); err != nil {
+			h.bark.config.Logger.Warn(
+				"failed to clear bark operation progress stream write deadline",
+				"component", "bark",
+				"error", err,
+			)
+		}
+	}()
+	lifetimeTimer := time.NewTimer(time.Until(deadline))
+	defer lifetimeTimer.Stop()
 	ticker := time.NewTicker(streamProgressPollInterval)
 	defer ticker.Stop()
 	for {
@@ -1463,6 +1755,11 @@ func (h *databaseServiceHandler) StreamOperationProgress(
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-lifetimeTimer.C:
+			return connect.NewError(
+				connect.CodeDeadlineExceeded,
+				errors.New("operation progress stream lifetime exceeded"),
+			)
 		case <-ticker.C:
 		}
 	}

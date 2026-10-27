@@ -20,8 +20,11 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"errors"
+	"io"
+	"log/slog"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
@@ -31,9 +34,32 @@ import (
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type cancelAfterContext struct {
+	checks      int
+	cancelAfter int
+	done        chan struct{}
+	canceled    bool
+}
+
+func (c *cancelAfterContext) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (c *cancelAfterContext) Done() <-chan struct{}       { return c.done }
+func (c *cancelAfterContext) Value(any) any               { return nil }
+func (c *cancelAfterContext) Err() error {
+	c.checks++
+	if c.checks >= c.cancelAfter {
+		if !c.canceled {
+			close(c.done)
+			c.canceled = true
+		}
+		return context.Canceled
+	}
+	return nil
+}
 
 func exactAddressTestPointer(
 	t *testing.T,
@@ -50,6 +76,18 @@ func exactAddressTestPointer(
 	addr, err := lcommon.NewAddressFromBytes(raw)
 	require.NoError(t, err)
 	return addr
+}
+
+func openTestDBWithStorageMode(t *testing.T, mode string) *Database {
+	t.Helper()
+	db, err := newTestDatabase(t, &Config{
+		DataDir:     t.TempDir(),
+		StorageMode: mode,
+		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	return db
 }
 
 func seedExactAddressUtxo(
@@ -91,7 +129,7 @@ INSERT INTO utxo (
 		require.NoError(t, err)
 		_, err = metadataTxn.Exec(`
 INSERT INTO asset (name, policy_id, utxo_id, amount)
-VALUES ('asset', 'policy', ?, '1')`, utxoID)
+VALUES (?, ?, ?, '1')`, []byte("asset"), []byte("policy"), utxoID)
 		require.NoError(t, err)
 		if outputCbor != nil {
 			require.NoError(t, db.Blob().SetUtxo(
@@ -103,9 +141,8 @@ VALUES ('asset', 'policy', ?, '1')`, utxoID)
 	require.NoError(t, blobTxn.Commit())
 }
 
-func TestBackfillLiveAssetUtxoAddressesBatchesAndResumes(t *testing.T) {
-	db := openTestDB(t)
-	db.config.StorageMode = types.StorageModeAPI
+func TestBackfillUtxoAddressesBatchesAndResumes(t *testing.T) {
+	db := openTestDBWithStorageMode(t, types.StorageModeAPI)
 	raw := rawSQLiteMetadataFixture(t, db)
 	addr, err := lcommon.NewAddressFromParts(
 		lcommon.AddressTypeKeyNone,
@@ -120,8 +157,9 @@ func TestBackfillLiveAssetUtxoAddressesBatchesAndResumes(t *testing.T) {
 	})
 	require.NoError(t, err)
 	seedLegacyAssetUtxosWithoutAddress(t, db, raw, 129, outputCbor)
+	require.NoError(t, db.SetSyncState(utxoAddressBackfillSyncKey, "", nil))
 
-	nextID, processed, err := db.backfillLiveAssetUtxoAddressBatch(
+	nextID, processed, err := db.backfillUtxoAddressBatch(
 		context.Background(), 0, 128,
 	)
 	require.NoError(t, err)
@@ -130,7 +168,7 @@ func TestBackfillLiveAssetUtxoAddressesBatchesAndResumes(t *testing.T) {
 	var count int
 	require.NoError(t, raw.QueryRow(`SELECT COUNT(*) FROM utxo_address`).Scan(&count))
 	require.Equal(t, 128, count)
-	pending, err := db.utxoStore().GetLiveAssetUtxosMissingAddress(
+	pending, err := db.utxoStore().GetUtxosMissingAddress(
 		nextID,
 		128,
 		nil,
@@ -138,7 +176,7 @@ func TestBackfillLiveAssetUtxoAddressesBatchesAndResumes(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, pending, 1)
 
-	require.NoError(t, db.backfillLiveAssetUtxoAddresses(context.Background()))
+	require.NoError(t, db.backfillUtxoAddresses(context.Background()))
 	require.NoError(t, raw.QueryRow(`SELECT COUNT(*) FROM utxo_address`).Scan(&count))
 	require.Equal(t, 129, count)
 	var distinct int
@@ -151,12 +189,12 @@ func TestBackfillLiveAssetUtxoAddressesBatchesAndResumes(t *testing.T) {
 	cancel()
 	require.ErrorIs(
 		t,
-		db.backfillLiveAssetUtxoAddresses(canceled),
+		db.backfillUtxoAddresses(canceled),
 		context.Canceled,
 	)
 }
 
-func TestBackfillLiveAssetUtxoAddressesFailsClosed(t *testing.T) {
+func TestBackfillUtxoAddressesFailsClosed(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		outputCbor []byte
@@ -165,12 +203,12 @@ func TestBackfillLiveAssetUtxoAddressesFailsClosed(t *testing.T) {
 		{name: "invalid CBOR", outputCbor: []byte{0xff}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			db := openTestDB(t)
-			db.config.StorageMode = types.StorageModeAPI
+			db := openTestDBWithStorageMode(t, types.StorageModeAPI)
 			raw := rawSQLiteMetadataFixture(t, db)
 			seedLegacyAssetUtxosWithoutAddress(t, db, raw, 1, tc.outputCbor)
+			require.NoError(t, db.SetSyncState(utxoAddressBackfillSyncKey, "", nil))
 
-			err := db.backfillLiveAssetUtxoAddresses(context.Background())
+			err := db.backfillUtxoAddresses(context.Background())
 			require.Error(t, err)
 			var count int
 			require.NoError(t, raw.QueryRow(
@@ -181,12 +219,121 @@ func TestBackfillLiveAssetUtxoAddressesFailsClosed(t *testing.T) {
 	}
 }
 
-func TestBackfillLiveAssetUtxoAddressesSkipsCoreMode(t *testing.T) {
+func TestRollbackRestoresLegacyAssetAddressAtomically(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		validCbor    bool
+		metadataOnly bool
+	}{
+		{name: "restores address", validCbor: true},
+		{name: "metadata-only transaction", validCbor: true, metadataOnly: true},
+		{name: "invalid CBOR keeps UTxO spent"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := openTestDBWithStorageMode(t, types.StorageModeAPI)
+			raw := rawSQLiteMetadataFixture(t, db)
+			addr, err := lcommon.NewAddressFromParts(
+				lcommon.AddressTypeKeyNone,
+				lcommon.AddressNetworkTestnet,
+				bytes.Repeat([]byte{0x52}, lcommon.AddressHashSize),
+				nil,
+			)
+			require.NoError(t, err)
+			outputCbor := []byte{0xff}
+			if tc.validCbor {
+				outputCbor, err = cbor.Encode(&shelley.ShelleyTransactionOutput{
+					OutputAddress: addr,
+					OutputAmount:  1,
+				})
+				require.NoError(t, err)
+			}
+			seedLegacyAssetUtxosWithoutAddress(t, db, raw, 1, outputCbor)
+			spenderHash := bytes.Repeat([]byte{0x73}, 32)
+			_, err = raw.Exec(`
+INSERT INTO "transaction" (hash, slot, block_index) VALUES (?, 20, 0)`,
+				spenderHash,
+			)
+			require.NoError(t, err)
+			_, err = raw.Exec(`
+UPDATE utxo SET deleted_slot = 20, spent_at_tx_id = ?`, spenderHash)
+			require.NoError(t, err)
+
+			if tc.metadataOnly {
+				db.cborCache = nil
+				txn := NewMetadataOnlyTxn(t.Context(), db, true)
+				t.Cleanup(txn.Release)
+				err = db.TransactionsDeleteRolledback(t.Context(), 10, txn)
+				if err == nil {
+					err = txn.Commit()
+				}
+			} else {
+				err = db.RollbackMetadataAfterSlot(
+					t.Context(),
+					ocommon.NewPoint(10, []byte("rollback")),
+					0,
+					nil,
+				)
+			}
+			if !tc.validCbor {
+				require.Error(t, err)
+				var deletedSlot uint64
+				var addressRows int
+				var transactionRows int
+				require.NoError(t, raw.QueryRow(
+					`SELECT deleted_slot FROM utxo`,
+				).Scan(&deletedSlot))
+				assert.Equal(t, uint64(20), deletedSlot)
+				require.NoError(t, raw.QueryRow(
+					`SELECT COUNT(*) FROM utxo_address`,
+				).Scan(&addressRows))
+				assert.Zero(t, addressRows)
+				require.NoError(t, raw.QueryRow(
+					`SELECT COUNT(*) FROM "transaction" WHERE hash = ?`,
+					spenderHash,
+				).Scan(&transactionRows))
+				assert.Equal(t, 1, transactionRows)
+				return
+			}
+			require.NoError(t, err)
+			var deletedSlot uint64
+			var addressRows int
+			require.NoError(t, raw.QueryRow(
+				`SELECT deleted_slot FROM utxo`,
+			).Scan(&deletedSlot))
+			require.Zero(t, deletedSlot)
+			require.NoError(t, raw.QueryRow(
+				`SELECT COUNT(*) FROM utxo_address`,
+			).Scan(&addressRows))
+			require.Equal(t, 1, addressRows)
+			var transactionRows int
+			require.NoError(t, raw.QueryRow(
+				`SELECT COUNT(*) FROM "transaction" WHERE hash = ?`,
+				spenderHash,
+			).Scan(&transactionRows))
+			require.Zero(t, transactionRows)
+			holders, total, err := db.AssetHolders(
+				t.Context(),
+				models.AssetHolderQuery{
+					PolicyID:  []byte("policy"),
+					AssetName: []byte("asset"),
+					Limit:     100,
+				},
+				nil,
+			)
+			require.NoError(t, err)
+			require.Equal(t, 1, total)
+			require.Len(t, holders, 1)
+			assert.Equal(t, addr.String(), string(holders[0].Address))
+		})
+	}
+}
+
+func TestBackfillUtxoAddressesSkipsCoreMode(t *testing.T) {
 	db := openTestDB(t)
 	raw := rawSQLiteMetadataFixture(t, db)
 	seedLegacyAssetUtxosWithoutAddress(t, db, raw, 1, []byte{0xff})
 
-	require.NoError(t, db.backfillLiveAssetUtxoAddresses(context.Background()))
+	require.NoError(t, db.backfillUtxoAddresses(context.Background()))
 	var count int
 	require.NoError(t, raw.QueryRow(
 		"SELECT COUNT(*) FROM utxo_address",
@@ -194,16 +341,15 @@ func TestBackfillLiveAssetUtxoAddressesSkipsCoreMode(t *testing.T) {
 	require.Zero(t, count)
 }
 
-func TestBackfillLiveAssetUtxoAddressesSkipsCompletedMarker(t *testing.T) {
-	db := openTestDB(t)
-	db.config.StorageMode = types.StorageModeAPI
+func TestBackfillUtxoAddressesSkipsCompletedMarker(t *testing.T) {
+	db := openTestDBWithStorageMode(t, types.StorageModeAPI)
 	raw := rawSQLiteMetadataFixture(t, db)
 	seedLegacyAssetUtxosWithoutAddress(t, db, raw, 1, []byte{0xff})
 	require.NoError(t, db.SetSyncState(
-		assetUtxoAddressBackfillSyncKey, "true", nil,
+		utxoAddressBackfillSyncKey, "true", nil,
 	))
 
-	require.NoError(t, db.backfillLiveAssetUtxoAddresses(context.Background()))
+	require.NoError(t, db.backfillUtxoAddresses(context.Background()))
 	var count int
 	require.NoError(t, raw.QueryRow(
 		"SELECT COUNT(*) FROM utxo_address",
@@ -211,8 +357,8 @@ func TestBackfillLiveAssetUtxoAddressesSkipsCompletedMarker(t *testing.T) {
 	require.Zero(t, count)
 }
 
-func TestCreateAssetUtxoRequiresAddressIdentity(t *testing.T) {
-	db := openTestDB(t)
+func TestAPIModeAssetUtxoRequiresAddressIdentity(t *testing.T) {
+	db := openTestDBWithStorageMode(t, types.StorageModeAPI)
 	raw := rawSQLiteMetadataFixture(t, db)
 	utxo := &models.Utxo{
 		TxId: bytes.Repeat([]byte{0x61}, 32),
@@ -241,6 +387,32 @@ func TestCreateAssetUtxoRequiresAddressIdentity(t *testing.T) {
 	)
 	require.NoError(t, raw.QueryRow(
 		`SELECT COUNT(*) FROM utxo WHERE tx_id = ?`, imported.TxId,
+	).Scan(&count))
+	require.Zero(t, count)
+}
+
+func TestCoreModeAssetUtxoSkipsAddressIdentity(t *testing.T) {
+	db := openTestDB(t)
+	raw := rawSQLiteMetadataFixture(t, db)
+	newUtxo := func(txID byte) models.Utxo {
+		return models.Utxo{
+			TxId: bytes.Repeat([]byte{txID}, 32),
+			Assets: []models.Asset{{
+				Name: []byte("asset"), PolicyId: []byte("policy"), Amount: 1,
+			}},
+		}
+	}
+
+	created := newUtxo(0x63)
+	require.NoError(t, db.CreateUtxo(context.Background(), nil, &created))
+	imported := newUtxo(0x64)
+	require.NoError(t, db.utxoStore().ImportUtxos([]models.Utxo{imported}, nil))
+
+	var count int
+	require.NoError(t, raw.QueryRow(`SELECT COUNT(*) FROM utxo`).Scan(&count))
+	require.Equal(t, 2, count)
+	require.NoError(t, raw.QueryRow(
+		`SELECT COUNT(*) FROM utxo_address`,
 	).Scan(&count))
 	require.Zero(t, count)
 }
@@ -325,6 +497,189 @@ INSERT INTO address_transaction (
 		)
 	}))
 	return row
+}
+
+func TestUtxoRefsByIndexedAddressPageUsesExactIdentityAndOrdering(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDBWithStorageMode(t, types.StorageModeAPI)
+	raw := rawSQLiteMetadataFixture(t, db)
+	payment := bytes.Repeat([]byte{0x4a}, lcommon.AddressHashSize)
+	enterprise, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		payment,
+		nil,
+	)
+	require.NoError(t, err)
+	pointer := exactAddressTestPointer(t, payment, 0x01)
+	first := seedExactAddressUtxo(t, db, raw, enterprise, 10, 0x4b)
+	seedExactAddressUtxo(t, db, raw, pointer, 11, 0x4c)
+	last := seedExactAddressUtxo(t, db, raw, enterprise, 12, 0x4d)
+	require.NoError(t, db.SetSyncState(utxoAddressBackfillSyncKey, "", nil))
+	require.NoError(t, db.backfillUtxoAddresses(context.Background()))
+
+	refs, total, indexed, err := db.UtxoRefsByIndexedAddressPage(
+		t.Context(), enterprise, false, 1, 1, nil,
+	)
+	require.NoError(t, err)
+	require.True(t, indexed)
+	assert.Equal(t, 2, total)
+	require.Len(t, refs, 1)
+	assert.Equal(t, last.TxId, refs[0].Hash)
+
+	refs, total, indexed, err = db.UtxoRefsByIndexedAddressPage(
+		t.Context(), enterprise, true, 0, 1, nil,
+	)
+	require.NoError(t, err)
+	require.True(t, indexed)
+	assert.Equal(t, 2, total)
+	require.Len(t, refs, 1)
+	assert.Equal(t, last.TxId, refs[0].Hash)
+
+	refs, total, indexed, err = db.UtxoRefsByIndexedAddressPage(
+		t.Context(), enterprise, false, 10, 1, nil,
+	)
+	require.NoError(t, err)
+	require.True(t, indexed)
+	assert.Equal(t, 2, total)
+	assert.Empty(t, refs)
+	assert.NotEqual(t, first.TxId, last.TxId)
+}
+
+func TestHistoricalAddressBalanceUsesExactIdentityAndSlot(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDBWithStorageMode(t, types.StorageModeAPI)
+	raw := rawSQLiteMetadataFixture(t, db)
+	payment := bytes.Repeat([]byte{0x42}, lcommon.AddressHashSize)
+	enterprise, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		payment,
+		nil,
+	)
+	require.NoError(t, err)
+	base, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyKey,
+		lcommon.AddressNetworkTestnet,
+		payment,
+		bytes.Repeat([]byte{0x43}, lcommon.AddressHashSize),
+	)
+	require.NoError(t, err)
+	seedExactAddressUtxo(t, db, raw, enterprise, 10, 0x44)
+	second := seedExactAddressUtxo(t, db, raw, enterprise, 11, 0x45)
+	seedExactAddressUtxo(t, db, raw, base, 9, 0x46)
+	_, err = raw.Exec(`UPDATE utxo SET deleted_slot = 12 WHERE tx_id = ?`, second.TxId)
+	require.NoError(t, err)
+	require.NoError(t, db.SetSyncState(utxoAddressBackfillSyncKey, "", nil))
+	require.NoError(t, db.backfillUtxoAddresses(context.Background()))
+
+	beforeSpend, err := db.UtxoBalanceByAddressAtSlot(
+		context.Background(), enterprise, 11, nil,
+	)
+	require.NoError(t, err)
+	require.EqualValues(t, 2, beforeSpend.UtxoCount)
+	require.EqualValues(t, 21_000_000, beforeSpend.Lovelace)
+	afterSpend, err := db.UtxoBalanceByAddressAtSlot(
+		context.Background(), enterprise, 12, nil,
+	)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, afterSpend.UtxoCount)
+	require.EqualValues(t, 10_000_000, afterSpend.Lovelace)
+}
+
+func TestHistoricalAddressBalanceAggregatesLargeResultSet(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDBWithStorageMode(t, types.StorageModeAPI)
+	raw := rawSQLiteMetadataFixture(t, db)
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		bytes.Repeat([]byte{0x47}, lcommon.AddressHashSize),
+		nil,
+	)
+	require.NoError(t, err)
+	txn, err := raw.Begin()
+	require.NoError(t, err)
+	for i := 1; i <= 1001; i++ {
+		txID := make([]byte, 32)
+		binary.BigEndian.PutUint64(txID[24:], uint64(i))
+		result, err := txn.Exec(`
+INSERT INTO utxo (tx_id, added_slot, deleted_slot, amount, output_idx, payment_script)
+VALUES (?, 1, 0, '1', 0, FALSE)`, txID)
+		require.NoError(t, err)
+		utxoID, err := result.LastInsertId()
+		require.NoError(t, err)
+		_, err = txn.Exec(
+			`INSERT INTO utxo_address (utxo_id, address) VALUES (?, ?)`,
+			utxoID, []byte(addr.String()),
+		)
+		require.NoError(t, err)
+		if i == 1 {
+			_, err = txn.Exec(
+				`INSERT INTO asset (name, policy_id, utxo_id, amount) VALUES (?, ?, ?, '5')`,
+				[]byte{0x01}, bytes.Repeat([]byte{0x48}, 28), utxoID,
+			)
+			require.NoError(t, err)
+		}
+	}
+	require.NoError(t, txn.Commit())
+	require.NoError(t, db.SetSyncState(utxoAddressBackfillSyncKey, "true", nil))
+
+	limited, err := db.utxoStore().GetUtxoBalanceByAddressAtSlot(
+		[]byte(addr.String()), 1, 1000, nil,
+	)
+	require.ErrorIs(t, err, models.ErrTooManyUtxoResults)
+	require.EqualValues(t, 1001, limited.UtxoCount)
+
+	got, err := db.UtxoBalanceByAddressAtSlot(
+		context.Background(), addr, 1, nil,
+	)
+	require.NoError(t, err)
+	require.EqualValues(t, 1001, got.UtxoCount)
+	require.EqualValues(t, 1001, got.Lovelace)
+	require.Equal(t, []models.AssetBalance{{
+		PolicyId: bytes.Repeat([]byte{0x48}, 28),
+		Name:     []byte{0x01},
+		Amount:   5,
+	}}, got.Assets)
+}
+
+func TestHistoricalAddressBalanceEnforcesAssetRowLimit(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDBWithStorageMode(t, types.StorageModeAPI)
+	raw := rawSQLiteMetadataFixture(t, db)
+	address := []byte("addr_test1_asset_budget")
+	result, err := raw.Exec(`
+INSERT INTO utxo (tx_id, added_slot, deleted_slot, amount, output_idx, payment_script)
+VALUES (?, 1, 0, '1', 0, FALSE)`, bytes.Repeat([]byte{0x49}, 32))
+	require.NoError(t, err)
+	utxoID, err := result.LastInsertId()
+	require.NoError(t, err)
+	_, err = raw.Exec(
+		`INSERT INTO utxo_address (utxo_id, address) VALUES (?, ?)`,
+		utxoID,
+		address,
+	)
+	require.NoError(t, err)
+	for assetName := range 3 {
+		_, err = raw.Exec(`
+INSERT INTO asset (name, policy_id, utxo_id, amount)
+VALUES (?, ?, ?, '1')`,
+			[]byte{byte(assetName)},
+			bytes.Repeat([]byte{0x4a}, 28),
+			utxoID,
+		)
+		require.NoError(t, err)
+	}
+
+	_, err = db.utxoStore().GetUtxoBalanceByAddressAtSlot(
+		address, 1, 2, nil,
+	)
+	require.ErrorIs(t, err, models.ErrTooManyUtxoResults)
 }
 
 func TestUtxoAddressQueriesPreserveExactIdentityAndPagination(t *testing.T) {
@@ -503,10 +858,6 @@ func TestUtxoAddressQueriesPreserveExactIdentityAndPagination(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Empty(t, andMismatch)
-
-	atSlot, err := db.UtxosByAddressAtSlot(context.Background(), enterprise, 6, nil)
-	require.NoError(t, err)
-	require.Len(t, atSlot, 3)
 
 	enterpriseTxs, err := db.GetTransactionsByAddressWithOrder(
 		context.Background(),
@@ -922,27 +1273,72 @@ func TestUtxosByAddressWithOrderingRejectsOffsetOnExactAddress(t *testing.T) {
 	require.ErrorIs(t, err, models.ErrOffsetRequiresCoarseMatch)
 }
 
-// TestUtxosByAddressWithOrderingRejectsDescendingKeyset proves Descending
-// cannot be combined with keyset (After) pagination: the After predicate's
-// comparison operators assume ascending order, so silently accepting both
-// would return rows in the wrong direction from the cursor instead of
-// failing loudly.
-func TestUtxosByAddressWithOrderingRejectsDescendingKeyset(t *testing.T) {
+func TestUtxosByAddressWithOrderingKeysetDirections(t *testing.T) {
 	t.Parallel()
 
 	db := openTestDB(t)
-
-	_, err := db.UtxosByAddressWithOrdering(
-		context.Background(),
-		&models.UtxoWithOrderingQuery{
-			MatchAllAddresses: true,
-			Descending:        true,
-			After:             &models.UtxoOrderingCursor{Slot: 1},
-			Limit:             10,
-		},
+	raw := rawSQLiteMetadataFixture(t, db)
+	payment := bytes.Repeat([]byte{0x23}, lcommon.AddressHashSize)
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		payment,
 		nil,
 	)
-	require.ErrorIs(t, err, models.ErrDescendingKeysetUnsupported)
+	require.NoError(t, err)
+	encoded, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
+		OutputAddress: addr,
+		OutputAmount:  1_000_000,
+	})
+	require.NoError(t, err)
+	require.NoError(t, db.BlobTxn(true).Do(func(txn *Txn) error {
+		for i := 1; i <= 6; i++ {
+			txHash := make([]byte, 32)
+			txHash[31] = byte(i)
+			seedExactAddressImportedUtxo(t, raw, addr, 1, 0, txHash)
+			if err := db.Blob().SetUtxo(txn.Blob(), txHash, 0, encoded); err != nil {
+				return err
+			}
+		}
+		return nil
+	}))
+	pattern, err := models.ExactUtxoAddressPattern(addr)
+	require.NoError(t, err)
+
+	for _, test := range []struct {
+		name       string
+		descending bool
+		want       []byte
+	}{
+		{name: "ascending", want: []byte{1, 2, 3, 4, 5, 6}},
+		{name: "descending", descending: true, want: []byte{6, 5, 4, 3, 2, 1}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			query := &models.UtxoWithOrderingQuery{
+				AddressPatterns: []models.UtxoAddressPattern{pattern},
+				Descending:      test.descending,
+				Limit:           3,
+			}
+			first, err := db.UtxosByAddressWithOrdering(t.Context(), query, nil)
+			require.NoError(t, err)
+			require.Len(t, first, 3)
+			last := first[len(first)-1]
+			query.After = &models.UtxoOrderingCursor{
+				Slot:       last.TxSlot,
+				BlockIndex: last.TxBlockIndex,
+				OutputIdx:  last.OutputIdx,
+				TxId:       last.TxId,
+			}
+			second, err := db.UtxosByAddressWithOrdering(t.Context(), query, nil)
+			require.NoError(t, err)
+			require.Len(t, second, 3)
+			got := make([]byte, 0, 6)
+			for _, item := range append(first, second...) {
+				got = append(got, item.TxId[31])
+			}
+			assert.Equal(t, test.want, got)
+		})
+	}
 }
 
 // TestUtxosByAddressWithOrderingRejectsOffsetKeyset proves Offset cannot be
@@ -1040,12 +1436,12 @@ func TestCountAndFetchShareSnapshotWithinOneTxn(t *testing.T) {
 	require.Len(t, rows, 5)
 }
 
-// TestMatchingUtxoRefsByAddressWithOrderingExcludesPointerSiblings proves
-// MatchingUtxoRefsByAddressWithOrdering applies the same CBOR-based exact
+// TestMatchingUtxoRefsByAddressWithOrderingBoundedExcludesPointerSiblings proves
+// the bounded reference scan applies the same CBOR-based exact
 // match as UtxosByAddressWithOrdering: it returns exactly the enterprise
 // address's own UTxOs, in ascending order, excluding pointer-address
 // siblings that share its payment credential.
-func TestMatchingUtxoRefsByAddressWithOrderingExcludesPointerSiblings(
+func TestMatchingUtxoRefsByAddressWithOrderingBoundedExcludesPointerSiblings(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -1082,26 +1478,31 @@ func TestMatchingUtxoRefsByAddressWithOrderingExcludesPointerSiblings(
 
 	pattern, err := models.ExactUtxoAddressPattern(enterprise)
 	require.NoError(t, err)
-	refs, err := db.MatchingUtxoRefsByAddressWithOrdering(
+	txn := db.Transaction(context.Background(), false)
+	defer txn.Release()
+	refs, exhausted, err := db.MatchingUtxoRefsByAddressWithOrderingBounded(
 		context.Background(),
 		&models.UtxoWithOrderingQuery{
 			AddressPatterns: []models.UtxoAddressPattern{pattern},
+			Limit:           4,
 		},
-		nil,
+		txn,
+		10,
+		DefaultPublicUtxoCborBudget,
 	)
 	require.NoError(t, err)
+	assert.True(t, exhausted)
 	require.Len(t, refs, 3)
 	assert.Equal(t, seeded[1].TxId, refs[0].Hash)
 	assert.Equal(t, seeded[2].TxId, refs[1].Hash)
 	assert.Equal(t, seeded[3].TxId, refs[2].Hash)
 }
 
-// TestMatchingUtxoRefsByAddressWithOrderingCrossesBatchBoundary seeds more
-// exact-address UTxOs than the internal scan's per-batch size (1024) and
+// TestMatchingUtxoRefsByAddressWithOrderingBoundedCrossesBatchBoundary seeds
+// more exact-address UTxOs than the internal scan's per-batch size (128) and
 // proves the keyset-cursor continuation across batches neither drops nor
-// duplicates a match -- the risk a batched scan carries that a single
-// unbounded fetch does not.
-func TestMatchingUtxoRefsByAddressWithOrderingCrossesBatchBoundary(
+// duplicates a match.
+func TestMatchingUtxoRefsByAddressWithOrderingBoundedCrossesBatchBoundary(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -1131,14 +1532,20 @@ func TestMatchingUtxoRefsByAddressWithOrderingCrossesBatchBoundary(
 
 	pattern, err := models.ExactUtxoAddressPattern(addr)
 	require.NoError(t, err)
-	refs, err := db.MatchingUtxoRefsByAddressWithOrdering(
+	txn := db.Transaction(context.Background(), false)
+	defer txn.Release()
+	refs, exhausted, err := db.MatchingUtxoRefsByAddressWithOrderingBounded(
 		context.Background(),
 		&models.UtxoWithOrderingQuery{
 			AddressPatterns: []models.UtxoAddressPattern{pattern},
+			Limit:           total + 1,
 		},
-		nil,
+		txn,
+		total+1,
+		DefaultPublicUtxoCborBudget,
 	)
 	require.NoError(t, err)
+	assert.True(t, exhausted)
 	require.Len(t, refs, total)
 	gotHashes := make([][]byte, len(refs))
 	for i := range refs {
@@ -1184,14 +1591,14 @@ INSERT INTO utxo (
 	require.NoError(t, err)
 }
 
-// TestMatchingUtxoRefsByAddressWithOrderingSnapshotTieBreak seeds more
+// TestMatchingUtxoRefsByAddressWithOrderingBoundedSnapshotTieBreak seeds more
 // snapshot-imported exact-address UTxOs sharing one slot, block index, and
-// output index than the internal scan's per-batch size (1024), so the
+// output index than the internal scan's per-batch size (128), so the
 // keyset cursor can only resume correctly past the batch boundary by
 // carrying the last row's tx_id. Without it, the next batch's predicate
 // re-matches (duplicating) or excludes (dropping) every tied row instead of
 // resuming after the one already returned.
-func TestMatchingUtxoRefsByAddressWithOrderingSnapshotTieBreak(t *testing.T) {
+func TestMatchingUtxoRefsByAddressWithOrderingBoundedSnapshotTieBreak(t *testing.T) {
 	t.Parallel()
 
 	db := openTestDB(t)
@@ -1231,14 +1638,20 @@ func TestMatchingUtxoRefsByAddressWithOrderingSnapshotTieBreak(t *testing.T) {
 
 	pattern, err := models.ExactUtxoAddressPattern(addr)
 	require.NoError(t, err)
-	refs, err := db.MatchingUtxoRefsByAddressWithOrdering(
+	txn := db.Transaction(context.Background(), false)
+	defer txn.Release()
+	refs, exhausted, err := db.MatchingUtxoRefsByAddressWithOrderingBounded(
 		context.Background(),
 		&models.UtxoWithOrderingQuery{
 			AddressPatterns: []models.UtxoAddressPattern{pattern},
+			Limit:           total + 1,
 		},
-		nil,
+		txn,
+		total+1,
+		DefaultPublicUtxoCborBudget,
 	)
 	require.NoError(t, err)
+	assert.True(t, exhausted)
 	require.Len(
 		t, refs, total,
 		"tied snapshot-imported rows must not be dropped or duplicated "+
@@ -1257,14 +1670,84 @@ func TestMatchingUtxoRefsByAddressWithOrderingSnapshotTieBreak(t *testing.T) {
 	assert.Equal(t, wantHashes, got)
 }
 
-// TestMatchingUtxoRefsByAddressWithOrderingExceedsOldCandidateScanLimit
-// seeds more exact-address UTxOs than the page-fill scan's
-// exactAddressCandidateScanLimit (10,000). AddressUTXOs relies on this scan
-// for an exact-address total, which -- unlike a page fetch -- cannot stop
-// once a page is full; applying that same cap here previously turned a
-// valid, merely large, address listing into a hard error instead of
-// completing it.
-func TestMatchingUtxoRefsByAddressWithOrderingExceedsOldCandidateScanLimit(
+func TestMatchingUtxoRefsByAddressWithOrderingBoundedBudgets(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	raw := rawSQLiteMetadataFixture(t, db)
+	payment := bytes.Repeat([]byte{0x9b}, lcommon.AddressHashSize)
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		payment,
+		nil,
+	)
+	require.NoError(t, err)
+	encoded, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
+		OutputAddress: addr,
+		OutputAmount:  1_000_000,
+	})
+	require.NoError(t, err)
+	const total = 300
+	require.NoError(t, db.BlobTxn(true).Do(func(txn *Txn) error {
+		for i := range total {
+			txHash := make([]byte, 32)
+			binary.BigEndian.PutUint32(txHash[28:], uint32(i)+1)
+			seedExactAddressImportedUtxo(t, raw, addr, uint64(i)+1, 0, txHash)
+			if err := db.Blob().SetUtxo(txn.Blob(), txHash, 0, encoded); err != nil {
+				return err
+			}
+		}
+		return nil
+	}))
+	pattern, err := models.ExactUtxoAddressPattern(addr)
+	require.NoError(t, err)
+	query := &models.UtxoWithOrderingQuery{
+		AddressPatterns: []models.UtxoAddressPattern{pattern},
+		Limit:           total + 1,
+	}
+
+	t.Run("candidate count", func(t *testing.T) {
+		txn := NewTxnContext(t.Context(), db, false)
+		defer txn.Release()
+		refs, exhausted, err := db.MatchingUtxoRefsByAddressWithOrderingBounded(
+			t.Context(), query, txn, 2, len(encoded)*total,
+		)
+		require.NoError(t, err)
+		assert.False(t, exhausted)
+		assert.Len(t, refs, 2)
+	})
+
+	t.Run("CBOR bytes", func(t *testing.T) {
+		txn := NewTxnContext(t.Context(), db, false)
+		defer txn.Release()
+		_, _, err := db.MatchingUtxoRefsByAddressWithOrderingBounded(
+			t.Context(), query, txn, total, len(encoded),
+		)
+		require.ErrorIs(t, err, models.ErrUtxoQueryBudgetExceeded)
+	})
+
+	t.Run("cancellation after first batch", func(t *testing.T) {
+		txn := NewTxnContext(t.Context(), db, false)
+		defer txn.Release()
+		// One outer check, two per row in the first batch, then the next
+		// outer check and first row check.
+		ctx := &cancelAfterContext{
+			cancelAfter: 1 + matchingUtxoRefBatchSize*2 + 2,
+			done:        make(chan struct{}),
+		}
+		_, _, err := db.MatchingUtxoRefsByAddressWithOrderingBounded(
+			ctx, query, txn, total, len(encoded)*total,
+		)
+		require.ErrorIs(t, err, context.Canceled)
+		assert.Greater(t, ctx.checks, matchingUtxoRefBatchSize*2)
+	})
+}
+
+// TestMatchingUtxoRefsByAddressWithOrderingBoundedStopsAtCandidateBudget
+// proves an exact-address scan stops after its configured candidate budget
+// rather than traversing an unbounded address history.
+func TestMatchingUtxoRefsByAddressWithOrderingBoundedStopsAtCandidateBudget(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -1331,15 +1814,21 @@ INSERT INTO utxo (
 
 	pattern, err := models.ExactUtxoAddressPattern(addr)
 	require.NoError(t, err)
-	refs, err := db.MatchingUtxoRefsByAddressWithOrdering(
+	txn := db.Transaction(context.Background(), false)
+	defer txn.Release()
+	refs, exhausted, err := db.MatchingUtxoRefsByAddressWithOrderingBounded(
 		context.Background(),
 		&models.UtxoWithOrderingQuery{
 			AddressPatterns: []models.UtxoAddressPattern{pattern},
+			Limit:           total,
 		},
-		nil,
+		txn,
+		ExactAddressCandidateScanLimit,
+		DefaultPublicUtxoCborBudget,
 	)
 	require.NoError(t, err)
-	assert.Len(t, refs, total)
+	assert.False(t, exhausted)
+	assert.Len(t, refs, ExactAddressCandidateScanLimit)
 }
 
 // TestUtxosByAddressWithOrderingSnapshotTieBreak seeds enough
@@ -1491,6 +1980,52 @@ func TestUtxosByAddressLoadsAssets(t *testing.T) {
 	assert.Equal(t, assetName, got[0].Assets[0].Name)
 	assert.Equal(t, policyID, got[0].Assets[0].PolicyId)
 	assert.Equal(t, types.Uint64(5), got[0].Assets[0].Amount)
+}
+
+func TestUtxosByAddressCompleteExceedsBoundedLimit(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	payment := bytes.Repeat([]byte{0x56}, lcommon.AddressHashSize)
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		payment,
+		nil,
+	)
+	require.NoError(t, err)
+	encoded, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
+		OutputAddress: addr,
+		OutputAmount:  1_000_000,
+	})
+	require.NoError(t, err)
+
+	const total = 3
+	for i := range total {
+		txHash := bytes.Repeat([]byte{byte(i + 1)}, 32)
+		require.NoError(t, db.CreateUtxo(t.Context(), nil, &models.Utxo{
+			TxId:       txHash,
+			OutputIdx:  0,
+			PaymentKey: addr.PaymentKeyHash().Bytes(),
+			Address:    []byte(addr.String()),
+			AddedSlot:  uint64(i + 1),
+			Amount:     types.Uint64(1_000_000),
+			Cbor:       encoded,
+		}))
+		require.NoError(t, db.BlobTxn(true).Do(func(txn *Txn) error {
+			return db.Blob().SetUtxo(txn.Blob(), txHash, 0, encoded)
+		}))
+	}
+
+	_, err = db.UtxosByAddress(
+		t.Context(), []lcommon.Address{addr}, total-1, nil,
+	)
+	require.ErrorIs(t, err, models.ErrTooManyUtxoResults)
+	got, err := db.UtxosByAddressComplete(
+		t.Context(), []lcommon.Address{addr}, nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, got, total)
 }
 
 // seedManyUtxoAddressesAndAssertRoundTrip builds numAddrs addresses via
@@ -2410,7 +2945,7 @@ func TestRollbackTransactionDeletionRestoresLegacyAssetAddress(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			db := openTestDB(t)
+			db := openTestDBWithStorageMode(t, types.StorageModeAPI)
 			raw := rawSQLiteMetadataFixture(t, db)
 			outputCbor, wantAddress := tc.outputCbor(t)
 			seedLegacyAssetUtxosWithoutAddress(t, db, raw, 1, outputCbor)
@@ -2458,4 +2993,82 @@ UPDATE utxo SET deleted_slot = 10, spent_at_tx_id = ?`, consumerHash)
 			require.Zero(t, deletedSlot)
 		})
 	}
+}
+
+// TestUtxosDeleteSpentInBatchFloor pins that removing a batch's spent rows
+// raises the consumed-UTxO prune floor to the batch's slot and never lowers
+// it, and that the delete refuses to run outside the caller's transaction.
+func TestUtxosDeleteSpentInBatchFloor(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	ids := []models.UtxoId{{Hash: bytes.Repeat([]byte{0x01}, 32), Idx: 0}}
+	require.ErrorIs(t,
+		db.UtxosDeleteSpentInBatch(ids, 10, nil), types.ErrNilTxn)
+	require.NoError(t, db.UtxosDeleteSpentInBatch(nil, 10, nil),
+		"an empty batch needs no transaction")
+
+	apply := func(slot uint64) {
+		txn := db.Transaction(context.Background(), true)
+		require.NoError(t, txn.Do(func(txn *Txn) error {
+			return db.UtxosDeleteSpentInBatch(ids, slot, txn)
+		}))
+	}
+	floor := func() uint64 {
+		value, err := db.ConsumedUtxoPruneFloor(nil)
+		require.NoError(t, err)
+		return value
+	}
+	apply(50)
+	require.Equal(t, uint64(50), floor())
+	apply(20)
+	require.Equal(t, uint64(50), floor(), "the floor must not move down")
+}
+
+// TestFilterUtxosByAddressPatternsExactSetMatchesLinear pins the keyed
+// exact-address lookup to the pattern contract, including a mixed filter
+// that must still use the linear matcher.
+func TestFilterUtxosByAddressPatternsExactSetMatchesLinear(t *testing.T) {
+	t.Parallel()
+	mk := func(b byte) lcommon.Address {
+		a, err := lcommon.NewAddressFromParts(
+			lcommon.AddressTypeKeyNone,
+			lcommon.AddressNetworkTestnet,
+			bytes.Repeat([]byte{b}, lcommon.AddressHashSize),
+			nil,
+		)
+		require.NoError(t, err)
+		return a
+	}
+	addrs := []lcommon.Address{mk(1), mk(2), mk(3)}
+	utxos := make([]models.Utxo, len(addrs))
+	for i, a := range addrs {
+		out, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
+			OutputAddress: a,
+			OutputAmount:  1,
+		})
+		require.NoError(t, err)
+		utxos[i] = models.Utxo{TxId: bytes.Repeat([]byte{byte(i)}, 32), Cbor: out}
+	}
+	exact := func(a lcommon.Address) models.UtxoAddressPattern {
+		p, err := models.ExactUtxoAddressPattern(a)
+		require.NoError(t, err)
+		return p
+	}
+	got, err := filterUtxosByAddressPatterns(
+		t.Context(), utxos,
+		[]models.UtxoAddressPattern{exact(addrs[0]), exact(addrs[2])},
+	)
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+	require.Equal(t, utxos[0].TxId, got[0].TxId)
+	require.Equal(t, utxos[2].TxId, got[1].TxId)
+
+	mixed := exact(addrs[1])
+	mixed.PaymentPart = addrs[2].PaymentKeyHash().Bytes()
+	got, err = filterUtxosByAddressPatterns(
+		t.Context(), utxos, []models.UtxoAddressPattern{mixed},
+	)
+	require.NoError(t, err)
+	require.Empty(t, got)
 }

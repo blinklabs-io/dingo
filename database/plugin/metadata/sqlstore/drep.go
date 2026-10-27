@@ -54,7 +54,7 @@ func recordDrepExpiry(
 	if err != nil {
 		return err
 	}
-	if _, err := db.ExecContext(ctx, `
+	if _, err := db.ExecContext(ctx, `-- name: UpsertDrepExpiryHistory :exec
 INSERT INTO drep_expiry_history (
     credential_tag, credential, added_slot, last_activity_epoch, expiry_epoch
 ) VALUES (?, ?, ?, ?, ?)
@@ -1162,7 +1162,7 @@ func (s *Store) RecordDRepActivityEpoch(
 	if err != nil {
 		return err
 	}
-	if _, err := db.ExecContext(ctx, s.dialect.Rebind(`
+	if _, err := db.ExecContext(ctx, s.dialect.Rebind(`-- name: UpdateDrepLastActivityEpoch :exec
 UPDATE drep SET last_activity_epoch = ?
 WHERE credential_tag = ? AND credential = ?`),
 		activity,

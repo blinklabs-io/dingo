@@ -1709,7 +1709,8 @@ var manifestOnlyFixture = lifecycle.Manifest{
 // at all.
 func TestPeekManifestUsesLightweightCloudFetchWithoutDownloading(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
+	dir := filepath.Join(t.TempDir(), "prefix")
+	require.NoError(t, os.Mkdir(dir, 0o700))
 	fixture := manifestOnlyFixture
 	require.NoError(t, lifecycle.WriteManifest(
 		dir, fixture, lifecycle.WithManifestKey(testTrustKey),

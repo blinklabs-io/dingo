@@ -133,7 +133,7 @@ variant runs the identical harness against a real PostgreSQL database,
 using the same `dingo_extra_plugins` build tag as
 `database/plugin/metadata/postgres` (the actual Postgres metadata store
 plugin) and the same `POSTGRES_HOST/PORT/USER/PASSWORD/DATABASE/SSLMODE`
-environment variables that plugin's tests and CI's `go-test-linux` job
+environment variables that plugin's tests and CI's `gate (services)` job
 already use.
 
 Bring up a local Postgres and run it:
@@ -147,15 +147,15 @@ POSTGRES_PASSWORD=postgres POSTGRES_DATABASE=dingo_test \
 ```
 
 Without a `POSTGRES_PASSWORD` or `POSTGRES_DSN` set, both Postgres tests
-skip (they never fail a plain `go test ./...`). CI's `go-test-linux` job
-already runs a `postgres:16` service with those exact env vars, so the
-Postgres variant runs automatically as part of the existing tagged
-`go test -tags dingo_extra_plugins ./...` step. Note that
-`.github/workflows/go-test.yml`'s `go-test-linux-race` job deliberately runs
+skip (they never fail a plain `go test ./...`). CI's `gate (services)` job
+already runs a `postgres:16` service with those exact env vars and tests this
+package, so the Postgres variant runs automatically in the merge queue. Note
+that `.github/workflows/go-test.yml`'s `gate (race)` job deliberately runs
 without those services, and it skips the corpus replays outright
 (`testutil.SkipUnderRace`): they are single-goroutine and cost most of the
 package's time under the detector. The SQLite, Postgres and MySQL vectors are
-all covered uninstrumented by `go-test-linux`, and SQLite by `go-test-linux-quick`.
+all covered uninstrumented by `gate (services)`, and SQLite by the pull
+request's `check` job.
 
 **Schema isolation.** `database/plugin/metadata/postgres`'s own tests
 connect to the same `dingo_test` database. Since `go test ./...` runs
@@ -225,7 +225,7 @@ SQLite run the gate already performed instead of rebuilding a baseline.
 Same idea as the PostgreSQL backend above, using the same `dingo_extra_plugins`
 build tag as `database/plugin/metadata/mysql` and the same
 `MYSQL_HOST/PORT` environment variables that plugin's tests and CI's
-`go-test-linux` job already use.
+`gate (services)` job already use.
 
 Bring up a local MySQL and run it:
 
@@ -237,11 +237,10 @@ MYSQL_HOST=localhost MYSQL_PORT=3306 MYSQL_ROOT_PASSWORD=mysql \
 ```
 
 Without a `MYSQL_ROOT_PASSWORD` or `MYSQL_DSN` set, both MySQL tests skip.
-CI's `go-test-linux` job already runs a `mysql:8` service and sets
-`MYSQL_ROOT_PASSWORD`, so the MySQL variant runs automatically as part of
-the existing tagged `go test -tags dingo_extra_plugins ./...` step. As with
-Postgres above, `go-test-linux-race` runs without these services, so the
-MySQL variant is covered uninstrumented rather than under `-race`.
+CI's `gate (services)` job already runs a `mysql:8` service and sets
+`MYSQL_ROOT_PASSWORD`, so the MySQL variant runs automatically in the merge
+queue. As with Postgres above, `gate (race)` runs without these services, so
+the MySQL variant is covered uninstrumented rather than under `-race`.
 
 **Database isolation.** MySQL has no schema/database distinction the way
 Postgres does — a MySQL "schema" *is* a database. `database/plugin/metadata/mysql`'s

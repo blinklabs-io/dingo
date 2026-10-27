@@ -1073,13 +1073,16 @@ func getZeroRewardSummary(
 	return summary, rows.Err()
 }
 
-// GetAccountRewardsForEpoch retrieves all cached Koios account-reward rows
-// for (network, epoch).
-func (c *Cache) GetAccountRewardsForEpoch(
+// getAccountRewardsForEpoch retrieves all cached Koios account-reward rows
+// for (network, epoch). Comparisons read them only through
+// GetAccountReference, together with the coverage record that vouches for
+// them.
+func getAccountRewardsForEpoch(
+	db sqlQueryer,
 	network string,
 	epoch uint64,
 ) ([]KoiosAccountRewards, error) {
-	rows, err := c.db.Query(
+	rows, err := db.Query(
 		`SELECT network, epoch, stake_address, reward_type, earned, spendable_epoch, pool_id_bech32, fetched_at
 		FROM koios_account_rewards WHERE network = ? AND epoch = ? ORDER BY id`,
 		network,
@@ -1110,9 +1113,17 @@ func (c *Cache) GetAccountCoverage(
 	network string,
 	epoch uint64,
 ) (*KoiosAccountCoverage, error) {
+	return getAccountCoverage(c.db, network, epoch)
+}
+
+func getAccountCoverage(
+	db sqlQueryer,
+	network string,
+	epoch uint64,
+) (*KoiosAccountCoverage, error) {
 	var cov KoiosAccountCoverage
 	var zeroRewardSample string
-	err := c.db.QueryRow(`SELECT network, epoch, requested_count, fetched_count, complete, fetched_at,
+	err := db.QueryRow(`SELECT network, epoch, requested_count, fetched_count, complete, fetched_at,
 		zero_reward_count, zero_reward_sample, zero_reward_summary_ready
 		FROM koios_account_coverage WHERE network = ? AND epoch = ?`, network, epoch).
 		Scan(&cov.Network, &cov.Epoch, &cov.RequestedCount, &cov.FetchedCount, &cov.Complete, &cov.FetchedAt,
@@ -1126,6 +1137,55 @@ func (c *Cache) GetAccountCoverage(
 		}
 	}
 	return &cov, nil
+}
+
+// accountRowsReadError reports that GetAccountReference read a complete
+// coverage record but failed to read the account-reward rows it covers.
+type accountRowsReadError struct {
+	Err error
+}
+
+func (e *accountRowsReadError) Error() string {
+	return "read koios_account_rewards: " + e.Err.Error()
+}
+
+func (e *accountRowsReadError) Unwrap() error {
+	return e.Err
+}
+
+// GetAccountReference reads the coverage record for (network, epoch) and,
+// only when that record is complete, the Koios account-reward rows it covers,
+// in one read transaction. Every comparison of an epoch's account scope must
+// take its reference from one such read: separate reads can straddle
+// CommitAccountRewardsForEpoch or MarkAccountCoverageIncomplete, pairing a
+// complete coverage record with another fetch's rows, or letting one
+// comparison run while another sees incomplete coverage and forms no verdict.
+//
+// A missing coverage record returns sql.ErrNoRows unwrapped, as
+// GetAccountCoverage does; an incomplete one returns the record and nil rows.
+// A failure reading the rows is returned as *accountRowsReadError.
+func (c *Cache) GetAccountReference(
+	network string,
+	epoch uint64,
+) (*KoiosAccountCoverage, []KoiosAccountRewards, error) {
+	tx, err := c.db.Begin()
+	if err != nil {
+		return nil, nil, err
+	}
+	// Read-only: nothing to commit, and rolling back releases the snapshot.
+	defer tx.Rollback() //nolint:errcheck
+	coverage, err := getAccountCoverage(tx, network, epoch)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !coverage.Complete {
+		return coverage, nil, nil
+	}
+	rows, err := getAccountRewardsForEpoch(tx, network, epoch)
+	if err != nil {
+		return nil, nil, &accountRowsReadError{Err: err}
+	}
+	return coverage, rows, nil
 }
 
 // MarkAccountCoverageIncomplete downgrades an existing koios_account_coverage
@@ -1810,6 +1870,32 @@ func (c *Cache) GetEpochsNeedingRetry(network string, accounts bool) ([]uint64, 
 		epochs = append(epochs, epoch)
 	}
 	return epochs, rows.Err()
+}
+
+// EpochAwaitingPoolHistory reports whether the cache holds a post-staking
+// epoch with no pool rows whose last check recorded the pool_history
+// reference_lag mismatch. GetUncachedEpochs treats such an epoch as complete
+// because its epoch_info row exists, so the caller must refetch it explicitly
+// for Koios's later pool_history to be compared.
+func (c *Cache) EpochAwaitingPoolHistory(
+	network string,
+	epoch uint64,
+) (bool, error) {
+	var n int
+	err := c.db.QueryRow(
+		`SELECT COUNT(*) FROM koios_epoch_info i
+		 WHERE i.network = ? AND i.epoch = ? AND i.pre_staking = 0
+		   AND NOT EXISTS (SELECT 1 FROM koios_pool_epoch p
+		                   WHERE p.network = i.network AND p.epoch = i.epoch)
+		   AND EXISTS (SELECT 1 FROM check_mismatches m
+		               WHERE m.network = i.network AND m.epoch = i.epoch
+		                 AND m.field = ? AND m.category = ?)`,
+		network, epoch, poolHistoryMismatchField, CategoryReferenceLag,
+	).Scan(&n)
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 
 // GetUncachedEpochs returns epoch numbers in [from, through] (inclusive) that

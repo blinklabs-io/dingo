@@ -125,11 +125,13 @@ services:
       # These controlled fixtures start without shared chain history; the
       # corroboration rule is exercised directly by chain-selection tests.
       DINGO_GENESIS_BOOTSTRAP_CORROBORATION_PEERS: "0"
+      DINGO_GENESIS_BOOTSTRAP_ENABLED: "${DEVNET_GENESIS_BOOTSTRAP_ENABLED:-true}"
       DINGO_PLEDGE_LEVERAGE_ENABLED: "${DEVNET_DINGO_PLEDGE_LEVERAGE_ENABLED:-false}"
       DINGO_PLEDGE_LEVERAGE: "${DEVNET_DINGO_PLEDGE_LEVERAGE:-100}"
       DINGO_MIN_POOL_MARGIN: "${DEVNET_DINGO_MIN_POOL_MARGIN:-0}"
       DINGO_LEIOS_VOTE_SIGNING_KEY_FILE: "${DEVNET_LEIOS_VOTE_SIGNING_KEY_FILE:-}"
       DINGO_PLUGINS_MEMPOOL_PROVIDER: "${DEVNET_MEMPOOL_PROVIDER:-fifo}"
+      DINGO_PLUGINS_CONSENSUS_PROVIDER: "${DEVNET_CONSENSUS_PROVIDER:-praos}"
       DINGO_BLOCK_PIPELINE_ENABLED: "${DEVNET_BLOCK_PIPELINE_ENABLED:-false}"
       DINGO_BLOCK_PIPELINE_VALIDATE_ENABLED: "${DEVNET_BLOCK_PIPELINE_VALIDATE_ENABLED:-false}"
       # Expose node-to-client over TCP (private port 3002) so the host test
@@ -345,7 +347,7 @@ services:
       start_period: 10s
 
   cardano-producer:
-    image: ghcr.io/blinklabs-io/cardano-node:11.0.1@sha256:d5ede07a890e9b6a0a5182cdba9dbaf73756336762235e0934a11690beedae02
+    image: ghcr.io/blinklabs-io/cardano-node:11.1.3-2@sha256:dc2b885811294fc497bcd50224bdf1e51d693f6113c749a3b21be1428af79ef8
     profiles: ["conformance"]
     depends_on:
       configurator:
@@ -445,7 +447,7 @@ services:
         ipv4_address: ${DEVNET_NET_BASE:-172.20.0}.20
 
   cardano-relay:
-    image: ghcr.io/blinklabs-io/cardano-node:11.0.1@sha256:d5ede07a890e9b6a0a5182cdba9dbaf73756336762235e0934a11690beedae02
+    image: ghcr.io/blinklabs-io/cardano-node:11.1.3-2@sha256:dc2b885811294fc497bcd50224bdf1e51d693f6113c749a3b21be1428af79ef8
     profiles: ["conformance"]
     depends_on:
       configurator:

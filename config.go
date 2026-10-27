@@ -200,6 +200,11 @@ type Config struct {
 	// This is the single source of truth for all configuration fields.
 	cfg *internalconfig.Config
 
+	// mempoolCapacitySet records an explicit capacity (WithMempoolCapacity, a
+	// WithPluginSelection mempool config carrying one, or a loaded internal
+	// config), so the Leios default never replaces it.
+	mempoolCapacitySet bool
+
 	// Runtime-only fields that are not loaded from YAML/env:
 	promRegistry      prometheus.Registerer
 	topologyConfig    *topology.TopologyConfig
@@ -244,11 +249,14 @@ type Config struct {
 	barkHost                                                                            string
 	barkClientCAFilePath                                                                string
 	barkArchiveMaxConcurrentFetches                                                     int
+	barkArchiveLookupsPerSecond                                                         int
+	barkArchiveCallerLookupsPerSecond                                                   int
 	barkOperatorCertificateFingerprints                                                 []string
 	barkLifecycleEnabled                                                                bool
 	barkLifecycleOperatorCertificateFingerprints                                        []string
 	databaseLifecycle                                                                   internalconfig.DatabaseLifecycleConfig
 	historyExpiry                                                                       HistoryExpiryConfig
+	mithrilCatchUp                                                                      MithrilCatchUpFactory
 	koiosParity                                                                         KoiosParityConfig
 	corsAllowedOrigins                                                                  []string
 	networkMagic                                                                        uint32
@@ -287,6 +295,7 @@ type Config struct {
 	blockPipelineEnabled                                                                bool
 	blockPipelineValidateEnabled                                                        bool
 	ledgerPrefetchAheadEnabled                                                          bool
+	ledgerValidateAheadEnabled                                                          bool
 	ledgerApplyRowBatchingEnabled                                                       bool
 	blockfetchLowWatermarkEnabled                                                       bool
 	minPoolMargin                                                                       uint
@@ -397,22 +406,34 @@ func (n *Node) registerRTSMetrics(r *promutil.Registration) {
 		return
 	}
 	n.rtsMetrics = &rtsMetrics{
-		gcLiveBytes: promutil.Register(r, prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "cardano_node_metrics_RTS_gcLiveBytes_int",
-			Help: "live heap bytes currently in use (Go runtime.MemStats.HeapAlloc)",
-		})),
-		gcHeapBytes: promutil.Register(r, prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "cardano_node_metrics_RTS_gcHeapBytes_int",
-			Help: "heap memory bytes obtained from the OS (Go runtime.MemStats.HeapSys)",
-		})),
-		gcMajorNum: promutil.Register(r, prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "cardano_node_metrics_RTS_gcMajorNum_int",
-			Help: "count of forced GCs (Go runtime.MemStats.NumForcedGC)",
-		})),
-		gcMinorNum: promutil.Register(r, prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "cardano_node_metrics_RTS_gcMinorNum_int",
-			Help: "count of automatic GCs (Go runtime.MemStats.NumGC - NumForcedGC)",
-		})),
+		gcLiveBytes: promutil.Register(
+			r,
+			prometheus.NewGauge(prometheus.GaugeOpts{
+				Name: "cardano_node_metrics_RTS_gcLiveBytes_int",
+				Help: "live heap bytes currently in use (Go runtime.MemStats.HeapAlloc)",
+			}),
+		),
+		gcHeapBytes: promutil.Register(
+			r,
+			prometheus.NewGauge(prometheus.GaugeOpts{
+				Name: "cardano_node_metrics_RTS_gcHeapBytes_int",
+				Help: "heap memory bytes obtained from the OS (Go runtime.MemStats.HeapSys)",
+			}),
+		),
+		gcMajorNum: promutil.Register(
+			r,
+			prometheus.NewGauge(prometheus.GaugeOpts{
+				Name: "cardano_node_metrics_RTS_gcMajorNum_int",
+				Help: "count of forced GCs (Go runtime.MemStats.NumForcedGC)",
+			}),
+		),
+		gcMinorNum: promutil.Register(
+			r,
+			prometheus.NewGauge(prometheus.GaugeOpts{
+				Name: "cardano_node_metrics_RTS_gcMinorNum_int",
+				Help: "count of automatic GCs (Go runtime.MemStats.NumGC - NumForcedGC)",
+			}),
+		),
 	}
 }
 
@@ -481,23 +502,18 @@ func (c *Config) isMusashiNetwork() bool {
 		c.cfg.NetworkMagic == ouroboros.NetworkCardanoMusashi.NetworkMagic
 }
 
-// prototypeTrustBypassesEnabled reports whether this node may run with the
-// Musashi prototype's consensus/ledger trust bypasses —
-// LedgerStateConfig.SkipLeaderStakeThresholdCheck and
-// SkipDijkstraTxValidation. Those two make the node accept blocks and Dijkstra
-// transactions a validating ledger would reject, so they are prototype-only
-// behaviour and must never be reachable from a preview, preprod, or mainnet
-// configuration.
+// musashiPrototypeIdentity reports whether the configuration unambiguously
+// identifies the Musashi prototype network. It gates prototype-only protocol
+// behavior: the GetStakePoolState query and the Praos2 chain-dependent state.
 //
 // This is deliberately stricter than isMusashiNetwork, which treats either
-// half of the identity (name or magic) as Musashi and is used for era and
-// mini-protocol selection where a half-match is merely wrong, not unsafe. Here
-// a half-match that also names or addresses a standard network yields false.
-// configValidate rejects such a configuration outright, so in the normal
-// startup path this can only be reached with an unambiguous identity; the
-// extra check keeps the bypasses off for an embedder that builds a Config
-// directly and never validates it.
-func (c *Config) prototypeTrustBypassesEnabled() bool {
+// half of the identity (name or magic) as Musashi. Here a half-match that
+// also names or addresses a standard network yields false, so a mainnet,
+// preprod, preview or sancho node never answers in a layout its clients
+// cannot decode. configValidate rejects such a configuration outright; the
+// extra check covers an embedder that builds a Config directly and never
+// validates it.
+func (c *Config) musashiPrototypeIdentity() bool {
 	if c.cfg == nil {
 		return false
 	}
@@ -571,14 +587,9 @@ func (n *Node) configValidate() error {
 			n.config.cfg.PledgeLeverage,
 		)
 	}
-	// The Musashi prototype network disables consensus and ledger validation
-	// (see Config.prototypeTrustBypassesEnabled). Its identity is matched on
-	// either the network name or the network magic, so refuse any configuration
-	// that pairs one half of it with a different standard network — otherwise a
-	// node an operator configured as preview/preprod/mainnet would silently run
-	// with those bypasses, or (with `--network musashi --network-magic 2`)
-	// actually join preview while trusting the prototype's rules, since the
-	// handshake uses the magic. There is deliberately no opt-in override.
+	// The network name selects the built-in configuration while network magic
+	// selects peers during the handshake. Refuse a configuration that identifies
+	// both Musashi and a different predefined network.
 	if network, ok := internalconfig.MusashiNetworkIdentityConflict(
 		n.config.cfg.Network,
 		n.config.cfg.NetworkMagic,
@@ -586,9 +597,7 @@ func (n *Node) configValidate() error {
 		return fmt.Errorf(
 			"network identity conflict: network %q with networkMagic %d "+
 				"identifies both the %q network and the Musashi prototype "+
-				"network (name %q, magic %d); the Musashi prototype disables "+
-				"consensus and ledger validation and must not be reachable "+
-				"from a standard network configuration",
+				"network (name %q, magic %d)",
 			n.config.cfg.Network,
 			n.config.cfg.NetworkMagic,
 			network,
@@ -686,7 +695,8 @@ func (n *Node) configValidate() error {
 		}
 		if byronGenesis := n.config.CardanoNodeConfig().ByronGenesis(); byronGenesis != nil {
 			byronProtocolMagic := byronGenesis.ProtocolConsts.ProtocolMagic
-			if byronProtocolMagic < 0 || byronProtocolMagic > math.MaxUint32 {
+			if byronProtocolMagic < 0 ||
+				int64(byronProtocolMagic) > math.MaxUint32 {
 				return fmt.Errorf(
 					"byron genesis protocol magic %d is out of uint32 range",
 					byronProtocolMagic,
@@ -742,7 +752,15 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 			// SQLite planner statistics stay current unless an operator
 			// opts out; see internalconfig.Config.PlannerStatsRefreshEnabled.
 			PlannerStatsRefreshEnabled: true,
+			// Mirrors internalconfig's default: block apply overlaps input
+			// reads and signature checks with earlier blocks of its chunk.
+			LedgerPrefetchAheadEnabled: true,
+			LedgerValidateAheadEnabled: true,
 			Plugins: internalconfig.PluginsConfig{
+				Consensus: hostplugin.Selection{
+					Provider: "praos",
+					Config:   map[string]any{},
+				},
 				Storage: internalconfig.StoragePluginsConfig{
 					Blob: hostplugin.Selection{
 						Provider: "badger",
@@ -822,6 +840,8 @@ func (c *Config) syncCompatFields() {
 	c.barkHost = c.cfg.BarkHost
 	c.barkClientCAFilePath = c.cfg.BarkClientCAFilePath
 	c.barkArchiveMaxConcurrentFetches = c.cfg.BarkArchiveMaxConcurrentFetches
+	c.barkArchiveLookupsPerSecond = c.cfg.BarkArchiveLookupsPerSecond
+	c.barkArchiveCallerLookupsPerSecond = c.cfg.BarkArchiveCallerLookupsPerSecond
 	c.barkOperatorCertificateFingerprints = slices.Clone(
 		c.cfg.BarkOperatorCertificateFingerprints,
 	)
@@ -839,7 +859,11 @@ func (c *Config) syncCompatFields() {
 	), c.cfg.StartEra, StorageMode(
 		c.cfg.StorageMode,
 	)
-	if c.runMode == string(internalconfig.RunModeLeios) &&
+	// Leios run mode and the Musashi testnet (which enables Leios networking
+	// without changing the run mode) both default to the larger mempool.
+	if !c.mempoolCapacitySet &&
+		(c.runMode == string(internalconfig.RunModeLeios) ||
+			c.isMusashiNetwork()) &&
 		pluginInt64(
 			c.cfg.Plugins.Mempool.Config["capacity"],
 		) == internalconfig.DefaultMempoolCapacityPraos {
@@ -944,6 +968,7 @@ func (c *Config) syncCompatFields() {
 	c.blockPipelineEnabled = c.cfg.BlockPipelineEnabled
 	c.blockPipelineValidateEnabled = c.cfg.BlockPipelineValidateEnabled
 	c.ledgerPrefetchAheadEnabled = c.cfg.LedgerPrefetchAheadEnabled
+	c.ledgerValidateAheadEnabled = c.cfg.LedgerValidateAheadEnabled
 	c.ledgerApplyRowBatchingEnabled = c.cfg.LedgerApplyRowBatchingEnabled
 	c.blockfetchLowWatermarkEnabled = c.cfg.BlockfetchLowWatermarkEnabled
 	c.minPoolMargin, c.pledgeLeverageEnabled, c.pledgeLeverage = c.cfg.MinPoolMargin, c.cfg.PledgeLeverageEnabled, c.cfg.PledgeLeverage
@@ -954,7 +979,8 @@ func (c *Config) syncCompatFields() {
 	c.cacheBlockLRUEntries, c.cacheHotUtxoEntries, c.cacheHotTxEntries, c.cacheHotTxMaxBytes = c.cfg.Cache.BlockLRUEntries, c.cfg.Cache.HotUtxoEntries, c.cfg.Cache.HotTxEntries, c.cfg.Cache.HotTxMaxBytes
 	c.pluginSelections = map[hostplugin.Capability]hostplugin.Selection{
 		hostplugin.CapabilityStorageBlob: c.cfg.Plugins.Storage.Blob, hostplugin.CapabilityStorageMetadata: c.cfg.Plugins.Storage.Metadata,
-		hostplugin.CapabilityMempool: c.cfg.Plugins.Mempool, hostplugin.CapabilityAPIBlockfrost: c.cfg.Plugins.API.Blockfrost,
+		hostplugin.CapabilityConsensus: c.cfg.Plugins.Consensus,
+		hostplugin.CapabilityMempool:   c.cfg.Plugins.Mempool, hostplugin.CapabilityAPIBlockfrost: c.cfg.Plugins.API.Blockfrost,
 		hostplugin.CapabilityAPIKupo: c.cfg.Plugins.API.Kupo,
 		hostplugin.CapabilityAPIMesh: c.cfg.Plugins.API.Mesh, hostplugin.CapabilityAPIUtxorpc: c.cfg.Plugins.API.Utxorpc,
 		hostplugin.CapabilityAPIMcp: c.cfg.Plugins.API.Mcp,
@@ -970,6 +996,9 @@ func WithPluginSelection(
 			*c = NewConfig()
 		}
 		if capability == hostplugin.CapabilityMempool {
+			// The selection replaces the whole mempool config, so its
+			// capacity is explicit exactly when the caller supplied one.
+			_, c.mempoolCapacitySet = selection.Config["capacity"]
 			if selection.Config == nil &&
 				(selection.Provider == "default" || selection.Provider == "fifo" || selection.Provider == "dag") {
 				selection.Config = map[string]any{
@@ -985,6 +1014,8 @@ func WithPluginSelection(
 			c.cfg.Plugins.Storage.Blob = selection
 		case hostplugin.CapabilityStorageMetadata:
 			c.cfg.Plugins.Storage.Metadata = selection
+		case hostplugin.CapabilityConsensus:
+			c.cfg.Plugins.Consensus = selection
 		case hostplugin.CapabilityMempool:
 			c.cfg.Plugins.Mempool = selection
 		case hostplugin.CapabilityAPIBlockfrost:
@@ -1125,6 +1156,9 @@ func NewConfigFromInternal(
 		tracingEndpoint:       cfg.TracingEndpoint,
 		tracingServiceName:    cfg.TracingServiceName,
 		tracingSampleRatio:    cfg.TracingSampleRatio,
+		// The loaded config already resolved the capacity default from its
+		// run mode and network.
+		mempoolCapacitySet: true,
 	}
 	c.syncCompatFields()
 	return c, nil
@@ -1321,6 +1355,7 @@ func WithShutdownTimeout(timeout time.Duration) ConfigOptionFunc {
 func WithMempoolCapacity(capacity int64) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.Plugins.Mempool.Config["capacity"] = capacity
+		c.mempoolCapacitySet = true
 	}
 }
 
@@ -1820,11 +1855,21 @@ func WithBlockPipelineValidateEnabled(enabled bool) ConfigOptionFunc {
 
 // WithLedgerPrefetchAheadEnabled prefetches the next block's input UTxOs from a
 // read-only transaction while the current block applies, for blocks under
-// normal validation only. Not consensus-affecting; off by default. See
+// normal validation only. Not consensus-affecting; on by default. See
 // LedgerStateConfig.LedgerPrefetchAheadEnabled.
 func WithLedgerPrefetchAheadEnabled(enabled bool) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.LedgerPrefetchAheadEnabled = enabled
+	}
+}
+
+// WithLedgerValidateAheadEnabled verifies the witness signatures of the
+// validated blocks of a block-apply chunk on worker goroutines while earlier
+// blocks of the chunk validate and write. Not consensus-affecting; on by
+// default. See LedgerStateConfig.LedgerValidateAheadEnabled.
+func WithLedgerValidateAheadEnabled(enabled bool) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.LedgerValidateAheadEnabled = enabled
 	}
 }
 
@@ -1920,6 +1965,26 @@ func WithBarkArchiveMaxConcurrentFetches(limit int) ConfigOptionFunc {
 	}
 }
 
+// WithBarkArchiveLookupsPerSecond sets the sustained rate of Bark
+// ArchiveService block lookups across all callers. Zero selects Bark's
+// default.
+func WithBarkArchiveLookupsPerSecond(rate int) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.BarkArchiveLookupsPerSecond = rate
+		c.barkArchiveLookupsPerSecond = rate
+	}
+}
+
+// WithBarkArchiveCallerLookupsPerSecond sets the sustained rate of Bark
+// ArchiveService block lookups for one caller address. Zero selects Bark's
+// default.
+func WithBarkArchiveCallerLookupsPerSecond(rate int) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.BarkArchiveCallerLookupsPerSecond = rate
+		c.barkArchiveCallerLookupsPerSecond = rate
+	}
+}
+
 // WithBarkOperatorCertificateFingerprints sets the SHA-256 client certificate
 // fingerprints authorized to invoke destructive DatabaseService RPCs.
 func WithBarkOperatorCertificateFingerprints(
@@ -1946,8 +2011,30 @@ func WithBarkLifecycleOperatorCertificateFingerprints(
 	fingerprints []string,
 ) ConfigOptionFunc {
 	return func(c *Config) {
-		c.cfg.BarkLifecycleOperatorCertificateFingerprints = slices.Clone(fingerprints)
-		c.barkLifecycleOperatorCertificateFingerprints = slices.Clone(fingerprints)
+		c.cfg.BarkLifecycleOperatorCertificateFingerprints = slices.Clone(
+			fingerprints,
+		)
+		c.barkLifecycleOperatorCertificateFingerprints = slices.Clone(
+			fingerprints,
+		)
+	}
+}
+
+// WithMithrilConfig sets the Mithril configuration, including the
+// node-managed catch-up settings under mithril.enabled.
+func WithMithrilConfig(cfg internalconfig.MithrilConfig) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.Mithril = cfg
+	}
+}
+
+// WithMithrilCatchUp supplies the Mithril half of node-managed Mithril
+// catch-up. Run calls factory once; a nil MithrilCatchUp from it leaves the
+// node syncing from Ouroboros alone. Without this option the node never
+// contacts an aggregator, whatever mithril.enabled says.
+func WithMithrilCatchUp(factory MithrilCatchUpFactory) ConfigOptionFunc {
+	return func(c *Config) {
+		c.mithrilCatchUp = factory
 	}
 }
 
@@ -2221,6 +2308,11 @@ func (c *Config) MetadataPlugin() string {
 	return c.cfg.Plugins.Storage.Metadata.Provider
 }
 
+// ConsensusPlugin returns the configured consensus plugin name.
+func (c *Config) ConsensusPlugin() string {
+	return c.cfg.Plugins.Consensus.Provider
+}
+
 // BindAddr returns the IP address for relay and public API listeners.
 func (c *Config) BindAddr() string {
 	return c.cfg.BindAddr
@@ -2295,6 +2387,18 @@ func (c *Config) BarkOperatorCertificateFingerprints() []string {
 
 // BarkLifecycleEnabled reports whether Bark's remote node lifecycle service
 // is explicitly enabled.
+// BarkArchiveLookupsPerSecond returns the configured global ArchiveService
+// lookup rate; zero means Bark's default.
+func (c *Config) BarkArchiveLookupsPerSecond() int {
+	return c.barkArchiveLookupsPerSecond
+}
+
+// BarkArchiveCallerLookupsPerSecond returns the configured per-caller
+// ArchiveService lookup rate; zero means Bark's default.
+func (c *Config) BarkArchiveCallerLookupsPerSecond() int {
+	return c.barkArchiveCallerLookupsPerSecond
+}
+
 func (c *Config) BarkLifecycleEnabled() bool {
 	return c.cfg.BarkLifecycleEnabled
 }
@@ -2383,7 +2487,7 @@ func pluginInt64(value any) int64 {
 	case int:
 		return int64(v)
 	case uint:
-		if v > math.MaxInt64 {
+		if uint64(v) > math.MaxInt64 {
 			return math.MaxInt64
 		}
 		return int64(v)
@@ -2761,6 +2865,12 @@ func (c *Config) LedgerPrefetchAheadEnabled() bool {
 	return c.cfg.LedgerPrefetchAheadEnabled
 }
 
+// LedgerValidateAheadEnabled returns whether state-independent validation
+// work runs ahead of the serial apply loop.
+func (c *Config) LedgerValidateAheadEnabled() bool {
+	return c.cfg.LedgerValidateAheadEnabled
+}
+
 // LedgerApplyRowBatchingEnabled returns whether blocks that are not validated
 // are applied through the batched metadata write path.
 func (c *Config) LedgerApplyRowBatchingEnabled() bool {
@@ -2802,6 +2912,16 @@ func (c *Config) Logger() *slog.Logger {
 // CardanoNodeConfig returns the loaded Cardano node configuration.
 func (c *Config) CardanoNodeConfig() *cardano.CardanoNodeConfig {
 	return c.cardanoNodeConfig
+}
+
+// genesisSelectionMode reports whether the chain selector starts in Genesis
+// mode: Genesis bootstrap is enabled, the sync starts from origin, and the
+// Cardano node configuration does not name PraosMode.
+func (c *Config) genesisSelectionMode() bool {
+	return c.genesisBootstrap &&
+		!c.intersectTip &&
+		len(c.intersectPoints) == 0 &&
+		!c.cardanoNodeConfig.PraosConsensusMode()
 }
 
 // TopologyConfig returns the loaded topology configuration.

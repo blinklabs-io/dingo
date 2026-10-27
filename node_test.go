@@ -3539,7 +3539,9 @@ func TestLedgerStateConfigForwardsBlockPipelineFlags(t *testing.T) {
 func TestLedgerStateConfigForwardsLedgerPrefetchAheadFlag(t *testing.T) {
 	t.Parallel()
 
-	off := (&Node{config: NewConfig()}).ledgerStateConfig()
+	off := (&Node{
+		config: NewConfig(WithLedgerPrefetchAheadEnabled(false)),
+	}).ledgerStateConfig()
 	assert.False(t, off.LedgerPrefetchAheadEnabled)
 	on := (&Node{
 		config: NewConfig(WithLedgerPrefetchAheadEnabled(true)),
@@ -3587,6 +3589,22 @@ func TestLedgerStateConfigCallbacksTolerateMissingOuroboros(t *testing.T) {
 			txs, ok = cfg.EndorserBlockProvider([]byte("eb-hash"), 660070)
 		})
 		assert.False(t, ok, "an endorser block must not be reported present")
+		assert.Empty(t, txs)
+	})
+
+	t.Run("endorser block data provider reports unavailable", func(t *testing.T) {
+		t.Parallel()
+		cfg := newConfig(t)
+		var (
+			manifest []byte
+			txs      []cbor.RawMessage
+			ok       bool
+		)
+		require.NotPanics(t, func() {
+			manifest, txs, ok = cfg.EndorserBlockDataProvider([]byte("eb-hash"), 660070)
+		})
+		assert.False(t, ok, "an endorser block must not be reported present")
+		assert.Empty(t, manifest)
 		assert.Empty(t, txs)
 	})
 
@@ -3644,31 +3662,29 @@ func TestLedgerStateConfigCallbacksDelegateOnceOuroborosExists(t *testing.T) {
 	assert.NotErrorIs(t, err, errOuroborosNotStarted)
 }
 
-func TestLedgerStateConfigUsesMusashiCertificateTrust(t *testing.T) {
+func TestLedgerStateConfigValidatesMusashiBlocks(t *testing.T) {
 	t.Parallel()
 
-	t.Run("Musashi prototype trusts certificate without vote manager", func(t *testing.T) {
-		n := &Node{config: Config{cfg: &internalconfig.Config{
-			Network:      ouroboros.NetworkCardanoMusashi.Name,
-			NetworkMagic: ouroboros.NetworkCardanoMusashi.NetworkMagic,
-		}}}
-		validate := n.ledgerStateConfig().ValidateLeiosCertificate
-		require.NotNil(t, validate)
-		require.NoError(t, validate(0, nil, nil, nil))
-	})
-
-	t.Run("standard network still requires certificate verifier", func(t *testing.T) {
-		n := &Node{config: Config{cfg: &internalconfig.Config{
-			Network:      ouroboros.NetworkCardanoPreview.Name,
-			NetworkMagic: ouroboros.NetworkCardanoPreview.NetworkMagic,
-		}}}
-		validate := n.ledgerStateConfig().ValidateLeiosCertificate
-		require.NotNil(t, validate)
-		err := validate(0, nil, nil, nil)
-		require.ErrorContains(t, err, "vote manager is unavailable")
-		require.NotErrorIs(t, err, ledger.ErrLeiosInvalidCertificate,
-			"an unavailable verifier is not a verdict on the certificate")
-	})
+	for _, network := range []ouroboros.Network{
+		ouroboros.NetworkCardanoMusashi,
+		ouroboros.NetworkCardanoPreview,
+	} {
+		t.Run(network.Name, func(t *testing.T) {
+			n := &Node{config: Config{cfg: &internalconfig.Config{
+				Network:      network.Name,
+				NetworkMagic: network.NetworkMagic,
+			}}}
+			cfg := n.ledgerStateConfig()
+			assert.False(t, cfg.SkipLeaderStakeThresholdCheck)
+			assert.False(t, cfg.SkipDijkstraTxValidation)
+			validate := cfg.ValidateLeiosCertificate
+			require.NotNil(t, validate)
+			err := validate(0, nil, nil, nil)
+			require.ErrorContains(t, err, "vote manager is unavailable")
+			require.NotErrorIs(t, err, ledger.ErrLeiosInvalidCertificate,
+				"an unavailable verifier is not a verdict on the certificate")
+		})
+	}
 }
 
 type certificateLeiosStakeProvider struct{}
@@ -3696,13 +3712,15 @@ func TestLedgerStateConfigMapsCertificateVerdicts(t *testing.T) {
 			KeyProvider:    startupLeiosKeyProvider{},
 		})
 		require.NoError(t, err)
-		return &Node{
+		n := &Node{
 			config: Config{cfg: &internalconfig.Config{
 				Network:      ouroboros.NetworkCardanoPreview.Name,
 				NetworkMagic: ouroboros.NetworkCardanoPreview.NetworkMagic,
 			}},
 			leiosVoteManager: voteManager,
 		}
+		n.leiosCertificateVerifier.Store(voteManager)
+		return n
 	}
 	signers := []byte{0x80}
 	aggregate := make([]byte, lcommon.LeiosBlsSignatureSize)
@@ -4968,4 +4986,31 @@ func TestRunKeepsStorageOpenWhenLeiosPersistenceDrainIsUnconfirmed(
 	)
 	require.NoError(t, n.ouroboros().Close())
 	require.NoError(t, n.db.Close())
+}
+
+func TestLedgerStateConfigForwardsLedgerValidateAheadFlag(t *testing.T) {
+	t.Parallel()
+
+	off := (&Node{
+		config: NewConfig(WithLedgerValidateAheadEnabled(false)),
+	}).ledgerStateConfig()
+	assert.False(t, off.LedgerValidateAheadEnabled)
+	on := (&Node{
+		config: NewConfig(WithLedgerValidateAheadEnabled(true)),
+	}).ledgerStateConfig()
+	assert.True(t, on.LedgerValidateAheadEnabled)
+}
+
+func TestNewConfigEnablesLedgerApplyAheadByDefault(t *testing.T) {
+	t.Parallel()
+
+	cfg := (&Node{config: NewConfig()}).ledgerStateConfig()
+	assert.True(t, cfg.LedgerPrefetchAheadEnabled)
+	assert.True(t, cfg.LedgerValidateAheadEnabled)
+	off := (&Node{config: NewConfig(
+		WithLedgerPrefetchAheadEnabled(false),
+		WithLedgerValidateAheadEnabled(false),
+	)}).ledgerStateConfig()
+	assert.False(t, off.LedgerPrefetchAheadEnabled)
+	assert.False(t, off.LedgerValidateAheadEnabled)
 }

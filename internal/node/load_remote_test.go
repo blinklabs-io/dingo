@@ -20,6 +20,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -472,7 +473,6 @@ func localBlockCount(t *testing.T, dir string) int {
 		dir,
 		cm.PrimaryChain(),
 		batches,
-		false,
 	)
 	close(batches)
 	require.NoError(t, err)
@@ -997,4 +997,169 @@ func TestLoadWithDBRemoteRootRequiresADatabasePath(t *testing.T) {
 		newTestDB(t),
 	)
 	require.ErrorContains(t, err, "requires databasePath")
+}
+
+func TestRedactRemoteImmutableURLDropsQueryAndFragment(t *testing.T) {
+	t.Parallel()
+	got := redactRemoteImmutableURL(
+		"https://archive-user:archive-secret@example.invalid/tip.json" +
+			"?token=query-secret&x=1#frag-secret",
+	)
+	require.Equal(t, "https://example.invalid/tip.json", got)
+	got = redactRemoteImmutableURL("https://example.invalid/tip.json?#frag")
+	require.Equal(t, "https://example.invalid/tip.json", got)
+}
+
+func TestRemoteImmutableRequestErrorRedactsQueryCredentials(t *testing.T) {
+	t.Parallel()
+	const rawURL = "https://example.invalid/00000.chunk?token=query-secret"
+	for name, cause := range map[string]error{
+		"url error": &url.Error{
+			Op: "Get", URL: rawURL, Err: errors.New("connection refused"),
+		},
+		"nested url in cause": &url.Error{
+			Op: "Get", URL: rawURL,
+			Err: fmt.Errorf(
+				"redirect to %q failed: connection refused",
+				"https://other.invalid/x?token=query-secret#frag-secret",
+			),
+		},
+		"bare cause": fmt.Errorf("dial %s: connection refused", rawURL),
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			err := remoteImmutableRequestError("fetching", rawURL, cause)
+			require.NotContains(t, err.Error(), "query-secret")
+			require.NotContains(t, err.Error(), "frag-secret")
+			require.ErrorContains(t, err, "connection refused")
+		})
+	}
+}
+
+func TestFetchRemoteFileOnceRedactsQueryCredentials(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			// A redirect target that cannot be parsed makes the client
+			// quote the Location value in its error.
+			w.Header().Set("Location", "http://[::1/x?token=query-secret")
+			w.WriteHeader(http.StatusFound)
+		},
+	))
+	t.Cleanup(server.Close)
+	partPath := filepath.Join(t.TempDir(), "00000.chunk.part")
+	client, budget := newRemoteImmutableTestClientAndBudget(
+		t, server.URL, filepath.Dir(partPath), remoteImmutableLimits{
+			imported: 17, cache: 17, concurrent: 1,
+		},
+	)
+	err := fetchRemoteFileOnceWithClient(
+		context.Background(), client, budget,
+		server.URL+"/00000.chunk?token=query-secret", partPath, 16,
+	)
+	require.Error(t, err)
+	require.NotContains(t, err.Error(), "query-secret")
+}
+
+func TestFetchRemoteFileOnceRedactsUnparseableRedirectLocations(t *testing.T) {
+	t.Parallel()
+	for name, location := range map[string]string{
+		"relative bad escape": "/x%zz?token=query-secret",
+		"non-http scheme":     "ftp://[::1/x?token=query-secret",
+		"scheme relative":     "//[::1/x?token=query-secret",
+		"apostrophe":          "http://[::1/x?token=ab'query-secret",
+		"fragment only":       "/x%zz#frag-secret",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			server := httptest.NewServer(http.HandlerFunc(
+				func(w http.ResponseWriter, _ *http.Request) {
+					w.Header().Set("Location", location)
+					w.WriteHeader(http.StatusFound)
+				},
+			))
+			t.Cleanup(server.Close)
+			partPath := filepath.Join(t.TempDir(), "00000.chunk.part")
+			client, budget := newRemoteImmutableTestClientAndBudget(
+				t, server.URL, filepath.Dir(partPath),
+				remoteImmutableLimits{imported: 17, cache: 17, concurrent: 1},
+			)
+			err := fetchRemoteFileOnceWithClient(
+				context.Background(), client, budget,
+				server.URL+"/00000.chunk?token=query-secret", partPath, 16,
+			)
+			require.Error(t, err)
+			require.NotContains(t, err.Error(), "query-secret")
+			require.NotContains(t, err.Error(), "frag-secret")
+		})
+	}
+}
+
+func TestRemoteImmutableRequestErrorScrubsRequestSecrets(t *testing.T) {
+	t.Parallel()
+	const rawURL = "https://archive-user:archive-secret@example.invalid/f" +
+		"?token=query-secret#frag-secret"
+	err := remoteImmutableRequestError(
+		"fetching", rawURL,
+		errors.New("bad token query-secret for archive-secret"),
+	)
+	for _, s := range []string{
+		"query-secret", "frag-secret", "archive-secret", "archive-user",
+	} {
+		require.NotContains(t, err.Error(), s)
+	}
+}
+
+func TestRemoteImmutableRequestErrorAsHidesRawURL(t *testing.T) {
+	t.Parallel()
+	const rawURL = "https://example.invalid/f?token=query-secret"
+	err := remoteImmutableRequestError(
+		"fetching", rawURL,
+		&url.Error{Op: "Get", URL: rawURL, Err: errors.New("boom")},
+	)
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		require.NotContains(t, urlErr.Error(), "query-secret")
+	}
+	bare := remoteImmutableRequestError(
+		"fetching", rawURL, &url.Error{Op: "Get", URL: rawURL},
+	)
+	urlErr = nil
+	if errors.As(bare, &urlErr) {
+		require.NotContains(t, urlErr.Error(), "query-secret")
+	}
+}
+
+func TestFetchRemoteFileOnceRedactsQuotedRedirectQuery(t *testing.T) {
+	t.Parallel()
+	// The Location credential differs from the request URL, so only the
+	// quoted-literal scrub can remove it. A double quote or space inside the
+	// query must not split the credential out of the redacted text.
+	for name, location := range map[string]string{
+		"plain":        "/x%zz?sig=location-secret",
+		"double quote": `/x%zz?sig="location-secret`,
+		"space":        "/x%zz?sig=ab location-secret",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			server := httptest.NewServer(http.HandlerFunc(
+				func(w http.ResponseWriter, _ *http.Request) {
+					w.Header().Set("Location", location)
+					w.WriteHeader(http.StatusFound)
+				},
+			))
+			t.Cleanup(server.Close)
+			partPath := filepath.Join(t.TempDir(), "00000.chunk.part")
+			client, budget := newRemoteImmutableTestClientAndBudget(
+				t, server.URL, filepath.Dir(partPath),
+				remoteImmutableLimits{imported: 17, cache: 17, concurrent: 1},
+			)
+			err := fetchRemoteFileOnceWithClient(
+				context.Background(), client, budget,
+				server.URL+"/00000.chunk", partPath, 16,
+			)
+			require.Error(t, err)
+			require.NotContains(t, err.Error(), "location-secret")
+		})
+	}
 }

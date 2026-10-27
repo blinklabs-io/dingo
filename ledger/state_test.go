@@ -4243,6 +4243,26 @@ func TestIntersectPointsIncludesPersistedMithrilBoundaryWhenRecentPointsEmpty(
 	assert.Equal(t, boundaryHash, points[0].Hash)
 }
 
+// Sessions that must start at the applied ledger tip still offer the Mithril
+// trust boundary; after a Mithril bootstrap it can be the only point.
+func TestLedgerTipIntersectPointsIncludesMithrilTrustBoundary(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	boundaryHash := bytes.Repeat([]byte{0x24}, 32)
+	ls := &LedgerState{
+		db:                db,
+		mithrilLedgerSlot: 42,
+		mithrilLedgerHash: boundaryHash,
+	}
+
+	points, err := ls.LedgerTipIntersectPoints(context.Background(), 4)
+	require.NoError(t, err)
+	require.Len(t, points, 1)
+	assert.Equal(t, uint64(42), points[0].Slot)
+	assert.Equal(t, boundaryHash, points[0].Hash)
+}
+
 func TestIntersectPointsUsesPrimaryChainWhenPrimaryChainIsAhead(t *testing.T) {
 	t.Parallel()
 
@@ -7368,11 +7388,16 @@ func seedSpentUtxoForCleanup(
 	addedSlot, deletedSlot uint64,
 ) {
 	t.Helper()
+	address := []byte(nil)
+	if db.StorageMode() == types.StorageModeAPI {
+		address = []byte("test-address")
+	}
 	mdTxn := db.MetadataTxn(context.Background(), true)
 	require.NoError(t, mdTxn.Do(func(txn *database.Txn) error {
 		return db.CreateUtxo(context.Background(), txn, &models.Utxo{
 			TxId:        txId,
 			OutputIdx:   outputIdx,
+			Address:     address,
 			AddedSlot:   addedSlot,
 			DeletedSlot: deletedSlot,
 			Amount:      types.Uint64(1),
@@ -10923,7 +10948,9 @@ func TestLedgerReadChainIteratorCoalescesGapsDuringBulkReplay(t *testing.T) {
 	// Not t.Parallel: swaps the package-level
 	// gatherCoalesceRetryInterval/gatherCoalesceMaxAttempts seam via
 	// shrinkGatherCoalesceRetryInterval.
-	shrinkGatherCoalesceRetryInterval(t, time.Millisecond, 5)
+	// The script below has seven gaps in one pass, and the budget is spent
+	// per pass, so it must cover all of them.
+	shrinkGatherCoalesceRetryInterval(t, time.Millisecond, 10)
 
 	block1, point1 := buildDecodableTestBlock(t, 10, 1)
 	block2, point2 := buildDecodableTestBlock(t, 20, 2)
@@ -10971,6 +10998,165 @@ func TestLedgerReadChainIteratorCoalescesGapsDuringBulkReplay(t *testing.T) {
 		5,
 		"gaps during bulk replay should be coalesced into one batch instead "+
 			"of flushing on the very first empty non-blocking check",
+	)
+	close(result.done)
+}
+
+// TestLedgerReadChainIteratorBoundsCoalesceWaitPerPass pins the coalescing
+// budget to the whole gather pass rather than to each gap. Blockfetch exposes
+// blocks to the chain in small groups, so a catch-up pass meets one gap per
+// group. A per-gap budget either flushes every group as its own commit, which
+// multiplies SQLite's write volume, or, raised far enough to bridge the
+// groups, lets one pass hold blockPipelineGatherMutex for batchSize times the
+// budget. Spending one budget per pass bounds that hold to the budget itself.
+//
+// Each gap here is shorter than the budget, so a per-gap budget gathers all
+// four blocks. Spent per pass, the budget runs out in the second gap and the
+// pass flushes the two blocks it has.
+func TestLedgerReadChainIteratorBoundsCoalesceWaitPerPass(t *testing.T) {
+	// Not t.Parallel: swaps the package-level
+	// gatherCoalesceRetryInterval/gatherCoalesceMaxAttempts seam via
+	// shrinkGatherCoalesceRetryInterval.
+	shrinkGatherCoalesceRetryInterval(t, time.Millisecond, 4)
+
+	block1, point1 := buildDecodableTestBlock(t, 10, 1)
+	block2, point2 := buildDecodableTestBlock(t, 20, 2)
+	block3, point3 := buildDecodableTestBlock(t, 30, 3)
+	block4, point4 := buildDecodableTestBlock(t, 40, 4)
+
+	script := []*chain.ChainIteratorResult{
+		{Point: point1, Block: block1},
+		nil, nil, nil,
+		{Point: point2, Block: block2},
+		nil, nil, nil,
+		{Point: point3, Block: block3},
+		nil, nil, nil,
+		{Point: point4, Block: block4},
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	iter := &scriptedGapLedgerReadIterator{ctx: ctx, script: script}
+
+	ls := &LedgerState{config: LedgerStateConfig{Logger: testLogger()}}
+	ls.advanceUpstreamTipSlot(farUpstreamTipSlot)
+
+	resultCh := make(chan readChainResult, 1)
+	go ls.ledgerReadChainIterator(ctx, iter, resultCh)
+
+	result := testutil.RequireReceive(
+		t, resultCh, testutil.AsyncWait,
+		"reader never delivered a batch",
+	)
+	require.NoError(t, result.err)
+	require.False(t, result.rollback)
+	require.Len(
+		t,
+		result.blocks,
+		2,
+		"the coalescing budget must be spent once per gather pass; a "+
+			"budget that resets at every gap lets one pass wait once per "+
+			"block it gathers",
+	)
+	close(result.done)
+}
+
+// TestLedgerReadChainIteratorFlushesWhenChainStopsGrowing pins the per-gap
+// cap that sits inside the per-pass budget. A pass that has gathered blocks
+// the chain will not follow up for a while -- a few blocks added with nothing
+// behind them, or an upstream that went quiet -- must apply them once one gap
+// outlasts gatherCoalesceMaxGapAttempts, not hold them for the whole pass
+// budget.
+func TestLedgerReadChainIteratorFlushesWhenChainStopsGrowing(t *testing.T) {
+	// Not t.Parallel: swaps the package-level gatherCoalesce* seams.
+	shrinkGatherCoalesceRetryInterval(t, time.Millisecond, 100)
+	prevGap := gatherCoalesceMaxGapAttempts
+	gatherCoalesceMaxGapAttempts = 3
+	t.Cleanup(func() { gatherCoalesceMaxGapAttempts = prevGap })
+
+	block1, point1 := buildDecodableTestBlock(t, 10, 1)
+	block2, point2 := buildDecodableTestBlock(t, 20, 2)
+	block3, point3 := buildDecodableTestBlock(t, 30, 3)
+
+	// The first gap fits the gap cap; the second, four probes long, does not.
+	script := []*chain.ChainIteratorResult{
+		{Point: point1, Block: block1},
+		nil, nil,
+		{Point: point2, Block: block2},
+		nil, nil, nil, nil,
+		{Point: point3, Block: block3},
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	iter := &scriptedGapLedgerReadIterator{ctx: ctx, script: script}
+
+	ls := &LedgerState{config: LedgerStateConfig{Logger: testLogger()}}
+	ls.advanceUpstreamTipSlot(farUpstreamTipSlot)
+
+	resultCh := make(chan readChainResult, 1)
+	go ls.ledgerReadChainIterator(ctx, iter, resultCh)
+
+	result := testutil.RequireReceive(
+		t, resultCh, testutil.AsyncWait,
+		"reader never delivered a batch",
+	)
+	require.NoError(t, result.err)
+	require.False(t, result.rollback)
+	require.Len(
+		t,
+		result.blocks,
+		2,
+		"a gap longer than gatherCoalesceMaxGapAttempts must flush the "+
+			"pass even while its per-pass budget remains",
+	)
+	close(result.done)
+}
+
+// TestLedgerReadChainIteratorGapCapResetsPerBlock is the other side of the
+// gap cap: it measures one gap, so short gaps between blockfetch groups never
+// add up to it. Each gap here fits the cap while their sum does not, and the
+// pass must still gather every block.
+func TestLedgerReadChainIteratorGapCapResetsPerBlock(t *testing.T) {
+	// Not t.Parallel: swaps the package-level gatherCoalesce* seams.
+	shrinkGatherCoalesceRetryInterval(t, time.Millisecond, 100)
+	prevGap := gatherCoalesceMaxGapAttempts
+	gatherCoalesceMaxGapAttempts = 3
+	t.Cleanup(func() { gatherCoalesceMaxGapAttempts = prevGap })
+
+	block1, point1 := buildDecodableTestBlock(t, 10, 1)
+	block2, point2 := buildDecodableTestBlock(t, 20, 2)
+	block3, point3 := buildDecodableTestBlock(t, 30, 3)
+
+	script := []*chain.ChainIteratorResult{
+		{Point: point1, Block: block1},
+		nil, nil,
+		{Point: point2, Block: block2},
+		nil, nil,
+		{Point: point3, Block: block3},
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	iter := &scriptedGapLedgerReadIterator{ctx: ctx, script: script}
+
+	ls := &LedgerState{config: LedgerStateConfig{Logger: testLogger()}}
+	ls.advanceUpstreamTipSlot(farUpstreamTipSlot)
+
+	resultCh := make(chan readChainResult, 1)
+	go ls.ledgerReadChainIterator(ctx, iter, resultCh)
+
+	result := testutil.RequireReceive(
+		t, resultCh, testutil.AsyncWait,
+		"reader never delivered a batch",
+	)
+	require.NoError(t, result.err)
+	require.False(t, result.rollback)
+	require.Len(
+		t,
+		result.blocks,
+		3,
+		"the gap cap must restart at every gathered block",
 	)
 	close(result.done)
 }
@@ -11559,7 +11745,7 @@ func (c *countingGapLedgerReadIterator) counts() (int, int) {
 	return c.probes, c.inSpan
 }
 
-// TestLedgerReadChainIteratorBoundsChainProbesPerCoalesceGap pins the
+// TestLedgerReadChainIteratorBoundsChainProbesPerCoalescePass pins the
 // multiplier in the coalescing bound ARCHITECTURE.md states. The sleeping is
 // bounded by the gatherCoalesce* settings, but each retry also re-probes the
 // iterator while blockPipelineGatherMutex is still held, and that probe
@@ -11573,7 +11759,7 @@ func (c *countingGapLedgerReadIterator) counts() (int, int) {
 // plus one per retry the budget allows. Dropping the
 // coalesceAttempts < gatherCoalesceMaxAttempts term in place makes the
 // reader probe forever and never deliver the batch.
-func TestLedgerReadChainIteratorBoundsChainProbesPerCoalesceGap(
+func TestLedgerReadChainIteratorBoundsChainProbesPerCoalescePass(
 	t *testing.T,
 ) {
 	// Not t.Parallel: swaps the package-level
@@ -11618,7 +11804,7 @@ func TestLedgerReadChainIteratorBoundsChainProbesPerCoalesceGap(
 		t, attempts+1, probes,
 		"a gap that never resolves must cost one chain probe to find the "+
 			"tip plus one per allowed retry; ARCHITECTURE.md's worst case "+
-			"multiplies batchSize by gatherCoalesceMaxAttempts on that basis",
+			"counts gatherCoalesceMaxAttempts probes per pass on that basis",
 	)
 	require.Equal(
 		t, probes, inSpan,
@@ -14330,7 +14516,7 @@ func (b leiosApplyBatchTestBlock) PrevHash() lcommon.Blake2b256 {
 	return b.header.PrevHash()
 }
 
-func TestLeiosAnnouncementBatchEndWaitsOnlyForSelectedBlock(t *testing.T) {
+func TestLeiosAnnouncementBatchEndEndsWithSelectedBlock(t *testing.T) {
 	plain := func(slot uint64) lcommon.Block {
 		return leiosApplyBatchTestBlock{header: mockHeader{slot: slot}}
 	}
@@ -14352,14 +14538,16 @@ func TestLeiosAnnouncementBatchEndWaitsOnlyForSelectedBlock(t *testing.T) {
 		plain(5),
 	}
 	live := func(uint64) bool { return true }
-	require.Equal(t, 2, leiosAnnouncementBatchEnd(blocks, 0, len(blocks), live))
+	// Each chunk ends with its first announcing block, so that block is the
+	// ledger tip when the next chunk validates its endorser block.
+	require.Equal(t, 3, leiosAnnouncementBatchEnd(blocks, 0, len(blocks), live))
 	require.Equal(t, 4, leiosAnnouncementBatchEnd(blocks, 3, len(blocks), live))
 	require.Equal(t, len(blocks), leiosAnnouncementBatchEnd(blocks, 4, len(blocks), live))
 
 	// A chunk can begin in historical replay and cross the stability cutoff.
-	// The first live announcing block must begin the next one-block chunk.
+	// The first live announcing block ends it.
 	crossing := []lcommon.Block{plain(8), plain(9), announcing(10), plain(11)}
-	require.Equal(t, 2, leiosAnnouncementBatchEnd(
+	require.Equal(t, 3, leiosAnnouncementBatchEnd(
 		crossing,
 		0,
 		len(crossing),
@@ -14383,6 +14571,7 @@ func TestLeiosTransitionBlockReconcilesLiveRegionAfterWait(t *testing.T) {
 		ebHash,
 	)
 	block := leiosApplyBatchTestBlock{header: header}
+	next := leiosApplyBatchTestBlock{header: mockHeader{slot: 101}}
 	validated := 0
 	epoch := models.Epoch{StartSlot: 0, SlotLength: 1, LengthInSlots: 1_000}
 	ls := &LedgerState{
@@ -14400,15 +14589,82 @@ func TestLeiosTransitionBlockReconcilesLiveRegionAfterWait(t *testing.T) {
 			},
 		},
 	}
-	snapshot, err := ls.prepareBlockApplySnapshot(
+	// The chunk that ends with the announcing block only records it.
+	_, err := ls.prepareBlockApplySnapshot(
 		t.Context(),
 		[]lcommon.Block{block},
 		epoch,
 		false,
 	)
 	require.NoError(t, err)
+	require.Zero(t, validated)
+
+	// Once it is the tip, the next chunk validates its endorser block.
+	ls.currentTip = ochainsync.Tip{
+		Point:       ocommon.NewPoint(100, header.Hash().Bytes()),
+		BlockNumber: 10,
+	}
+	snapshot, err := ls.prepareBlockApplySnapshot(
+		t.Context(),
+		[]lcommon.Block{next},
+		epoch,
+		false,
+	)
+	require.NoError(t, err)
 	require.Equal(t, SyncingChainsyncState, snapshot.chainsyncState)
 	require.Equal(t, 1, validated)
+}
+
+// A chunk that ends with a historical announcing block records nothing, so
+// the next chunk, live or not, does not hold for that block's closure.
+func TestLeiosHistoricalAnnouncerIsNotValidatedNextChunk(t *testing.T) {
+	header := announcingHeader(
+		100,
+		"historical-header",
+		lcommon.NewBlake2b256([]byte("parent")),
+		10,
+		lcommon.NewBlake2b256([]byte("historical-endorser")),
+	)
+	validated := 0
+	epoch := models.Epoch{StartSlot: 0, SlotLength: 1, LengthInSlots: 1_000}
+	ls := &LedgerState{
+		chainsyncState: SyncingChainsyncState,
+		currentEpoch:   epoch,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			ValidateLeiosAnnouncement: func(
+				context.Context,
+				lcommon.BlockHeader,
+			) error {
+				validated++
+				return nil
+			},
+		},
+	}
+	ls.externalIngest.trusted.Store(true)
+	_, err := ls.prepareBlockApplySnapshot(
+		t.Context(),
+		[]lcommon.Block{leiosApplyBatchTestBlock{header: header}},
+		epoch,
+		false,
+	)
+	require.NoError(t, err)
+
+	ls.externalIngest.trusted.Store(false)
+	ls.currentTip = ochainsync.Tip{
+		Point:       ocommon.NewPoint(100, header.Hash().Bytes()),
+		BlockNumber: 10,
+	}
+	_, err = ls.prepareBlockApplySnapshot(
+		t.Context(),
+		[]lcommon.Block{
+			leiosApplyBatchTestBlock{header: mockHeader{slot: 101}},
+		},
+		epoch,
+		true,
+	)
+	require.NoError(t, err)
+	require.Zero(t, validated)
 }
 
 func TestLeiosApplySnapshotIsReadAfterAnnouncementWait(t *testing.T) {
@@ -14419,7 +14675,6 @@ func TestLeiosApplySnapshotIsReadAfterAnnouncementWait(t *testing.T) {
 		10,
 		lcommon.NewBlake2b256([]byte("endorser")),
 	)
-	block := leiosApplyBatchTestBlock{header: header}
 	newTip := ochainsync.Tip{
 		Point:       ocommon.NewPoint(99, []byte("reloaded-parent")),
 		BlockNumber: 9,
@@ -14427,9 +14682,10 @@ func TestLeiosApplySnapshotIsReadAfterAnnouncementWait(t *testing.T) {
 	var ls *LedgerState
 	ls = &LedgerState{
 		currentTip: ochainsync.Tip{
-			Point:       ocommon.NewPoint(98, []byte("old-parent")),
-			BlockNumber: 8,
+			Point:       ocommon.NewPoint(100, header.Hash().Bytes()),
+			BlockNumber: 10,
 		},
+		leiosApplyAnnouncer: header,
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 			ValidateLeiosAnnouncement: func(
@@ -14447,7 +14703,9 @@ func TestLeiosApplySnapshotIsReadAfterAnnouncementWait(t *testing.T) {
 	}
 	snapshot, err := ls.prepareBlockApplySnapshot(
 		t.Context(),
-		[]lcommon.Block{block},
+		[]lcommon.Block{
+			leiosApplyBatchTestBlock{header: mockHeader{slot: 101}},
+		},
 		models.Epoch{StartSlot: 0, SlotLength: 1, LengthInSlots: 1_000},
 		true,
 	)

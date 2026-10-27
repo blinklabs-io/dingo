@@ -15,7 +15,9 @@
 package chainselection
 
 import (
+	"context"
 	"net"
+	"time"
 
 	"github.com/blinklabs-io/dingo/event"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -161,7 +163,7 @@ func (cs *ChainSelector) corroboratingPeersIncludingCandidatesLocked(
 		if connId == candidate {
 			continue
 		}
-		peerTip := cs.latestPeerTipCandidateLocked(connId)
+		peerTip := cs.latestCorroborationWitnessLocked(connId)
 		if peerTip == nil {
 			peerTip = committedTip
 		}
@@ -188,7 +190,7 @@ func (cs *ChainSelector) corroboratingPeersIncludingCandidatesLocked(
 		if _, exists := seen[connId]; exists {
 			continue
 		}
-		peerTip := cs.latestPeerTipCandidateLocked(connId)
+		peerTip := cs.latestCorroborationWitnessLocked(connId)
 		if !cs.peerCanCorroborateLocked(connId, peerTip) {
 			continue
 		}
@@ -206,6 +208,15 @@ func (cs *ChainSelector) corroboratingPeersIncludingCandidatesLocked(
 		witnesses[identity] = struct{}{}
 	}
 	return len(witnesses)
+}
+
+func (cs *ChainSelector) latestCorroborationWitnessLocked(
+	connId ouroboros.ConnectionId,
+) *PeerChainTip {
+	if witness, ok := cs.forecastHorizonWitnesses[connId]; ok {
+		return witness.peerTip
+	}
+	return cs.latestPeerTipCandidateLocked(connId)
 }
 
 // frontierTrustedLocked reports whether a peer's delivered frontier may be used
@@ -260,9 +271,30 @@ func (cs *ChainSelector) isPeerCorroboratedLocked(
 func (cs *ChainSelector) ShouldApplyIngress(
 	connId ouroboros.ConnectionId,
 ) bool {
+	return cs.ingressDecision(connId) == ingressApply
+}
+
+type ingressVerdict int
+
+const (
+	ingressApply ingressVerdict = iota
+	// ingressAwaitCorroboration: the peer is denied only because no
+	// independent witness has delivered its latest header yet.
+	ingressAwaitCorroboration
+	ingressDeny
+)
+
+func (cs *ChainSelector) ingressDecision(
+	connId ouroboros.ConnectionId,
+) ingressVerdict {
 	releaseGeneration, generationCurrent := cs.pinCurrentHeaderCryptoGeneration()
 	if !generationCurrent {
-		return false
+		if cs.GenesisCorroborationActive() {
+			// The ledger is publishing a new snapshot; the verdict is only
+			// unavailable for the moment.
+			return ingressAwaitCorroboration
+		}
+		return ingressDeny
 	}
 	defer releaseGeneration()
 	cs.mutex.RLock()
@@ -280,18 +312,85 @@ func (cs *ChainSelector) ShouldApplyIngress(
 		// that observation, there is no tip against which to apply the stale
 		// bound, so accepting the header would bypass the rule.
 		if peerTip == nil || cs.advertisedTipStaleLocked(peerTip) {
-			return false
+			return ingressDeny
 		}
 	}
 	if !cs.genesisCorroborationActiveLocked() {
-		return true
+		return ingressApply
 	}
 
 	if peerTip == nil {
-		return false
+		return ingressDeny
 	}
-	return cs.corroboratingPeersIncludingCandidatesLocked(connId, peerTip) >=
-		cs.config.MinCorroboratingPeers
+	if cs.corroboratingPeersIncludingCandidatesLocked(connId, peerTip) >=
+		cs.config.MinCorroboratingPeers {
+		return ingressApply
+	}
+	return ingressAwaitCorroboration
+}
+
+// AwaitIngressCorroboration holds a header from connId that ShouldApplyIngress
+// denies only because the peer is not yet corroborated, and reports whether
+// the header may then be applied. It returns false at once when the denial has
+// another cause (Genesis corroboration is off, the advertised tip is stale, or
+// the peer is untracked), and returns the context's error if it is cancelled
+// while waiting.
+//
+// The caller's chainsync callback blocks here while witnesses can advance.
+// The caller bounds that wait; on expiry it withholds the header but keeps the
+// session and staged candidate frontier so another peer can deliver the same
+// point. Re-intersecting immediately from the applied tip discards that
+// frontier and repeats the hold. Staged observations remain bounded, so a peer
+// that runs beyond the admission window cannot corroborate its entire prefix.
+func (cs *ChainSelector) AwaitIngressCorroboration(
+	ctx context.Context,
+	connId ouroboros.ConnectionId,
+) (bool, error) {
+	var ticker *time.Ticker
+	for {
+		wake := cs.ingressWakeChan()
+		switch cs.ingressDecision(connId) {
+		case ingressApply:
+			return true, nil
+		case ingressDeny:
+			return false, nil
+		case ingressAwaitCorroboration:
+		}
+		if ticker == nil {
+			// The verdict also moves with ledger snapshot publication, which
+			// does not signal the wake channel.
+			ticker = time.NewTicker(eagernessPollInterval)
+			defer ticker.Stop()
+		}
+		select {
+		case <-ctx.Done():
+			return false, ctx.Err()
+		case <-wake:
+		case <-ticker.C:
+		}
+	}
+}
+
+// ingressWakeChan returns a channel closed by the next change to staged or
+// committed peer frontiers.
+func (cs *ChainSelector) ingressWakeChan() <-chan struct{} {
+	cs.ingressWakeMu.Lock()
+	defer cs.ingressWakeMu.Unlock()
+	if cs.ingressWake == nil {
+		cs.ingressWake = make(chan struct{})
+	}
+	return cs.ingressWake
+}
+
+// signalIngressChange wakes every AwaitIngressCorroboration call to re-read
+// its verdict. It takes only its own mutex, so callers may hold cs.mutex.
+func (cs *ChainSelector) signalIngressChange() {
+	cs.ingressWakeMu.Lock()
+	defer cs.ingressWakeMu.Unlock()
+	if cs.ingressWake != nil {
+		close(cs.ingressWake)
+		cs.ingressWake = nil
+	}
 }
 
 // rawDensityLeaderLocked returns the connection with the highest observed

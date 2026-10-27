@@ -545,11 +545,11 @@ func (a *NodeAdapter) loadSlotBlock(
 		}
 		return nil, fmt.Errorf("get block at slot %d: %w", slot, err)
 	}
-	decoded, err := stored.Decode()
+	txs, err := a.ledgerState.BlockTransactions(ctx, stored)
 	if err != nil {
-		return nil, fmt.Errorf("decode block at slot %d: %w", slot, err)
+		return nil, fmt.Errorf("get transactions for block at slot %d: %w", slot, err)
 	}
-	return &slotBlock{number: stored.Number, txs: decoded.Transactions()}, nil
+	return &slotBlock{number: stored.Number, txs: txs}, nil
 }
 
 func lcommonVoterType(voterType uint8, credentialTag uint8) (uint8, bool) {

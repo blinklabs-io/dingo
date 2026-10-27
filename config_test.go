@@ -29,6 +29,9 @@ import (
 	"github.com/blinklabs-io/dingo/internal/promutil"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/plugin"
+	hostplugin "github.com/blinklabs-io/dingo/plugin"
+	ouroboros "github.com/blinklabs-io/gouroboros"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
@@ -239,6 +242,7 @@ func TestConfigPopulateNetworkMagicSyncsCompatField(t *testing.T) {
 	}{
 		{"devnet", 42},
 		{"preview", 2},
+		{"dijkstra", 6},
 	}
 	for _, tc := range cases {
 		t.Run(tc.network, func(t *testing.T) {
@@ -369,6 +373,90 @@ func TestNewConfigMempoolCapacityDefaultsFromRunMode(t *testing.T) {
 	}
 }
 
+func TestNewConfigMempoolCapacityDefaultsOnMusashi(t *testing.T) {
+	t.Parallel()
+
+	leios := int64(internalconfig.DefaultMempoolCapacityLeios)
+	praos := int64(internalconfig.DefaultMempoolCapacityPraos)
+	tests := []struct {
+		name     string
+		opts     []ConfigOptionFunc
+		expected int64
+	}{
+		{
+			name: "musashi by name gets leios default",
+			opts: []ConfigOptionFunc{
+				WithNetwork(ouroboros.NetworkCardanoMusashi.Name),
+			},
+			expected: leios,
+		},
+		{
+			name: "musashi by magic gets leios default",
+			opts: []ConfigOptionFunc{
+				WithNetworkMagic(ouroboros.NetworkCardanoMusashi.NetworkMagic),
+			},
+			expected: leios,
+		},
+		{
+			name: "musashi explicit capacity wins",
+			opts: []ConfigOptionFunc{
+				WithNetwork(ouroboros.NetworkCardanoMusashi.Name),
+				WithMempoolCapacity(5242880),
+			},
+			expected: 5242880,
+		},
+		{
+			name: "musashi explicit praos-sized capacity is kept",
+			opts: []ConfigOptionFunc{
+				WithNetwork(ouroboros.NetworkCardanoMusashi.Name),
+				WithMempoolCapacity(praos),
+			},
+			expected: praos,
+		},
+		{
+			name: "musashi plugin selection capacity is kept",
+			opts: []ConfigOptionFunc{
+				WithNetwork(ouroboros.NetworkCardanoMusashi.Name),
+				WithPluginSelection(
+					hostplugin.CapabilityMempool,
+					hostplugin.Selection{
+						Provider: "fifo",
+						Config:   map[string]any{"capacity": praos},
+					},
+				),
+			},
+			expected: praos,
+		},
+		{
+			name: "musashi plugin selection without capacity takes leios default",
+			opts: []ConfigOptionFunc{
+				WithNetwork(ouroboros.NetworkCardanoMusashi.Name),
+				WithMempoolCapacity(praos),
+				WithPluginSelection(
+					hostplugin.CapabilityMempool,
+					hostplugin.Selection{Provider: "fifo"},
+				),
+			},
+			expected: int64(internalconfig.DefaultMempoolCapacityLeios),
+		},
+		{
+			name: "non-musashi network keeps praos default",
+			opts: []ConfigOptionFunc{
+				WithNetwork("preprod"),
+			},
+			expected: praos,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := NewConfig(tt.opts...)
+			selection := cfg.pluginSelections[plugin.CapabilityMempool]
+			assert.Equal(t, tt.expected, selection.Config["capacity"])
+		})
+	}
+}
+
 func TestNewConfigPublicBindAddressDefaultsToWildcard(t *testing.T) {
 	cfg := NewConfig(
 		WithRunMode(string(internalconfig.RunModeDev)),
@@ -415,6 +503,13 @@ func TestNewConfigDefaultsBuiltInMempoolCapacity(t *testing.T) {
 			)
 		})
 	}
+}
+
+func TestNewConfigDefaultsToPraosConsensus(t *testing.T) {
+	t.Parallel()
+
+	cfg := NewConfig()
+	assert.Equal(t, "praos", cfg.ConsensusPlugin())
 }
 
 func TestNewConfigDoesNotDefaultCustomMempoolConfig(t *testing.T) {
@@ -1130,14 +1225,16 @@ func TestTokenRegistryConfigReachesRuntimeFromYAML(t *testing.T) {
 	cfg, err := NewConfigFromInternal(
 		&internalconfig.Config{
 			TokenRegistry: internalconfig.TokenRegistryConfig{
-				Enabled:               true,
-				SourceURL:             "https://mirror.example.test/reg.tar.gz",
-				ManifestURL:           "https://mirror.example.test/manifest.json",
-				TrustedManifestKey:    strings.Repeat("ab", 32),
-				Interval:              2 * time.Hour,
-				RequestTimeout:        9 * time.Minute,
-				UserAgent:             "custom-agent/9",
-				HeaderSecrets:         map[string]string{"Authorization": "Bearer x"},
+				Enabled:            true,
+				SourceURL:          "https://mirror.example.test/reg.tar.gz",
+				ManifestURL:        "https://mirror.example.test/manifest.json",
+				TrustedManifestKey: strings.Repeat("ab", 32),
+				Interval:           2 * time.Hour,
+				RequestTimeout:     9 * time.Minute,
+				UserAgent:          "custom-agent/9",
+				HeaderSecrets: map[string]string{
+					"Authorization": "Bearer x",
+				},
 				MaxBytes:              123,
 				MaxDecompressedBytes:  456,
 				MaxEntryBytes:         45,
@@ -1164,7 +1261,11 @@ func TestTokenRegistryConfigReachesRuntimeFromYAML(t *testing.T) {
 		"https://mirror.example.test/manifest.json",
 		cfg.tokenRegistry.ManifestURL,
 	)
-	require.Equal(t, strings.Repeat("ab", 32), cfg.tokenRegistry.TrustedManifestKey)
+	require.Equal(
+		t,
+		strings.Repeat("ab", 32),
+		cfg.tokenRegistry.TrustedManifestKey,
+	)
 	require.Equal(t, 2*time.Hour, cfg.tokenRegistry.Interval)
 	require.Equal(t, 9*time.Minute, cfg.tokenRegistry.RequestTimeout)
 	require.Equal(t, "custom-agent/9", cfg.tokenRegistry.UserAgent)
@@ -1230,7 +1331,11 @@ func TestWithTokenRegistryConfigPreservesHTTPClient(t *testing.T) {
 		"https://mirror.example.test/manifest.json",
 		cfg.TokenRegistry().ManifestURL,
 	)
-	require.Equal(t, strings.Repeat("cd", 32), cfg.TokenRegistry().TrustedManifestKey)
+	require.Equal(
+		t,
+		strings.Repeat("cd", 32),
+		cfg.TokenRegistry().TrustedManifestKey,
+	)
 	require.True(t, cfg.TokenRegistry().AllowRollback)
 }
 
@@ -1243,4 +1348,46 @@ func TestNewConfigPlannerStatsRefreshDefaultsOnAndCanBeDisabled(t *testing.T) {
 	// A hand-built Config has no internal config and must not start the
 	// refresh.
 	assert.False(t, (&Config{}).PlannerStatsRefreshEnabled())
+}
+
+// TestGenesisSelectionModeHonorsConsensusMode pins the rule that the node
+// configuration's ConsensusMode decides whether Genesis chain selection runs,
+// as it does for the reference node: PraosMode never selects by Genesis
+// density or demands corroboration, whatever genesisBootstrap says.
+func TestGenesisSelectionModeHonorsConsensusMode(t *testing.T) {
+	t.Parallel()
+
+	praos := &cardano.CardanoNodeConfig{ConsensusMode: "PraosMode"}
+	genesis := &cardano.CardanoNodeConfig{ConsensusMode: "GenesisMode"}
+	tests := []struct {
+		name          string
+		bootstrap     bool
+		nodeConfig    *cardano.CardanoNodeConfig
+		intersectTip  bool
+		intersectPnts []ocommon.Point
+		want          bool
+	}{
+		{name: "genesis mode config", bootstrap: true, nodeConfig: genesis, want: true},
+		{name: "mode not named", bootstrap: true, nodeConfig: &cardano.CardanoNodeConfig{}, want: true},
+		{name: "no node config", bootstrap: true, want: true},
+		{name: "praos mode config", bootstrap: true, nodeConfig: praos, want: false},
+		{name: "bootstrap disabled", bootstrap: false, nodeConfig: genesis, want: false},
+		{name: "intersect tip", bootstrap: true, nodeConfig: genesis, intersectTip: true, want: false},
+		{
+			name: "intersect points", bootstrap: true, nodeConfig: genesis,
+			intersectPnts: []ocommon.Point{{Slot: 1}}, want: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := &Config{
+				genesisBootstrap:  tt.bootstrap,
+				cardanoNodeConfig: tt.nodeConfig,
+				intersectTip:      tt.intersectTip,
+				intersectPoints:   tt.intersectPnts,
+			}
+			assert.Equal(t, tt.want, cfg.genesisSelectionMode())
+		})
+	}
 }

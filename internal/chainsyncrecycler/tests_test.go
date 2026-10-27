@@ -114,6 +114,13 @@ type fakeLedger struct {
 	reconcileErr        error
 	reconcileReasons    []string
 	reconcileConns      []ouroboros.ConnectionId
+	held                bool
+}
+
+func (f *fakeLedger) NetworkIngestHeld() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.held
 }
 
 func (f *fakeLedger) Tip() ochainsync.Tip {

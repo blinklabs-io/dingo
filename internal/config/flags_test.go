@@ -122,8 +122,10 @@ func TestRegisterFlags_CoversAllExportedConfigFields(t *testing.T) {
 	specFields := map[string]string{}
 	yamlOnlyFields := map[string]struct{}{
 		"MetricsAuthToken":                     {},
+		"KoiosParity.APIKey":                   {},
 		"Plugins.Storage.Blob.Config":          {},
 		"Plugins.Storage.Metadata.Config":      {},
+		"Plugins.Consensus.Config":             {},
 		"Plugins.Mempool.Config":               {},
 		"Plugins.API.Blockfrost.Config":        {},
 		"Plugins.API.Kupo.Config":              {},
@@ -178,6 +180,40 @@ func TestRegisterFlags_CoversAllExportedConfigFields(t *testing.T) {
 			)
 		}
 	}
+}
+
+func TestRegisterFlagsDoesNotExposeKoiosAPIKeyThroughArgv(t *testing.T) {
+	t.Parallel()
+
+	cmd := &cobra.Command{Use: "dingo"}
+	RegisterFlags(cmd)
+
+	require.Nil(t, cmd.PersistentFlags().Lookup("koios-parity-api-key"))
+	err := cmd.ParseFlags([]string{
+		"--koios-parity-api-key=process-list-visible-secret",
+	})
+	require.ErrorContains(t, err, "unknown flag: --koios-parity-api-key")
+}
+
+func TestConsensusProviderSourcePrecedence(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_PLUGINS_CONSENSUS_PROVIDER", "environment")
+	configFile := filepath.Join(t.TempDir(), "dingo.yaml")
+	require.NoError(t, os.WriteFile(
+		configFile,
+		[]byte("plugins:\n  consensus:\n    provider: yaml\n"),
+		0o600,
+	))
+	cfg, err := LoadConfig(configFile)
+	require.NoError(t, err)
+	require.Equal(t, "environment", cfg.Plugins.Consensus.Provider)
+
+	cmd := &cobra.Command{Use: "dingo"}
+	RegisterFlags(cmd)
+	require.NoError(t, cmd.ParseFlags([]string{"--consensus=cli"}))
+	require.NoError(t, ApplyFlags(cmd, cfg))
+	require.Equal(t, "cli", cfg.Plugins.Consensus.Provider)
 }
 
 func TestPledgeLeverageEnvBinding(t *testing.T) {
@@ -1700,4 +1736,94 @@ func TestBarkBlockDownloadAllowPrivateAddressesBindings(t *testing.T) {
 		require.NoError(t, ApplyFlags(cmd, cfg))
 		require.True(t, cfg.BarkBlockDownloadAllowPrivateAddresses)
 	})
+}
+
+// TestBarkArchiveLookupRatesEnvFlagsAndYAML pins that both ArchiveService
+// lookup budgets are reachable from YAML, the environment and the CLI.
+func TestBarkArchiveLookupRatesEnvFlagsAndYAML(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	configFile := filepath.Join(t.TempDir(), "dingo.yaml")
+	require.NoError(t, os.WriteFile(configFile, []byte(
+		"barkArchiveLookupsPerSecond: 301\n"+
+			"barkArchiveCallerLookupsPerSecond: 302\n",
+	), 0o600))
+	cfg, err := LoadConfig(configFile)
+	require.NoError(t, err)
+	require.Equal(t, 301, cfg.BarkArchiveLookupsPerSecond)
+	require.Equal(t, 302, cfg.BarkArchiveCallerLookupsPerSecond)
+
+	resetGlobalConfig()
+	t.Setenv("DINGO_BARK_ARCHIVE_LOOKUPS_PER_SECOND", "1001")
+	t.Setenv("DINGO_BARK_ARCHIVE_CALLER_LOOKUPS_PER_SECOND", "1002")
+	cfg, err = LoadConfig(configFile)
+	require.NoError(t, err)
+	require.Equal(t, 1001, cfg.BarkArchiveLookupsPerSecond)
+	require.Equal(t, 1002, cfg.BarkArchiveCallerLookupsPerSecond)
+
+	cmd := &cobra.Command{Use: "dingo"}
+	RegisterFlags(cmd)
+	require.NoError(t, cmd.ParseFlags([]string{
+		"--bark-archive-lookups-per-second=2001",
+		"--bark-archive-caller-lookups-per-second=2002",
+	}))
+	require.NoError(t, ApplyFlags(cmd, cfg))
+	require.Equal(t, 2001, cfg.BarkArchiveLookupsPerSecond)
+	require.Equal(t, 2002, cfg.BarkArchiveCallerLookupsPerSecond)
+}
+
+func TestLedgerValidateAheadEnabledEnvBinding(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_LEDGER_VALIDATE_AHEAD_ENABLED", "true")
+
+	tmpDir := t.TempDir()
+	configFile := filepath.Join(tmpDir, "dingo.yaml")
+	if err := os.WriteFile(configFile, []byte(""), 0o600); err != nil {
+		t.Fatalf("failed to write temp config file: %v", err)
+	}
+
+	cfg, err := LoadConfig(configFile)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+	if !cfg.LedgerValidateAheadEnabled {
+		t.Fatal("expected env var to enable ahead signature verification")
+	}
+}
+
+func TestLedgerApplyAheadDefaultsOn(t *testing.T) {
+	require.True(t, newDefaultConfig().LedgerPrefetchAheadEnabled)
+	require.True(t, newDefaultConfig().LedgerValidateAheadEnabled)
+
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+
+	cfg, err := LoadConfig("")
+	require.NoError(t, err)
+	require.True(t, cfg.LedgerPrefetchAheadEnabled)
+	require.True(t, cfg.LedgerValidateAheadEnabled)
+
+	cmd := &cobra.Command{Use: "dingo"}
+	RegisterFlags(cmd)
+	for _, name := range []string{
+		"ledger-prefetch-ahead-enabled",
+		"ledger-validate-ahead-enabled",
+	} {
+		got, err := cmd.PersistentFlags().GetBool(name)
+		require.NoError(t, err)
+		require.True(t, got, "--%s must default to true", name)
+	}
+}
+
+func TestLedgerApplyAheadCanBeDisabledByEnv(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_LEDGER_PREFETCH_AHEAD_ENABLED", "false")
+	t.Setenv("DINGO_LEDGER_VALIDATE_AHEAD_ENABLED", "false")
+
+	cfg, err := LoadConfig("")
+	require.NoError(t, err)
+	require.False(t, cfg.LedgerPrefetchAheadEnabled)
+	require.False(t, cfg.LedgerValidateAheadEnabled)
 }

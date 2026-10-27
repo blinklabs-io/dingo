@@ -846,3 +846,57 @@ func TestNewFromRootVerifiedBoundHoldsPastFiveDigits(t *testing.T) {
 		t.Error("chunk 100000 must be outside a bound of 99999")
 	}
 }
+
+func TestBlocksInChunkReadsOnlyThatChunk(t *testing.T) {
+	imm, err := immutable.New(testDataDir)
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	last, ok, err := imm.LastSlotInChunk(2)
+	if err != nil || !ok {
+		t.Fatalf("chunk 2 last slot: ok=%v err=%v", ok, err)
+	}
+	iter, err := imm.BlocksInChunk(2)
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	defer iter.Close()
+	var count int
+	var lastSeen uint64
+	for {
+		block, err := iter.Next()
+		if err != nil {
+			t.Fatalf("unexpected error: %s", err)
+		}
+		if block == nil {
+			break
+		}
+		count++
+		lastSeen = block.Slot
+	}
+	if count == 0 {
+		t.Fatalf("expected blocks from chunk 2")
+	}
+	if lastSeen != last {
+		t.Fatalf(
+			"iterator crossed the chunk boundary: last slot %d, chunk ends at %d",
+			lastSeen,
+			last,
+		)
+	}
+}
+
+func TestBlocksInChunkMissingChunkErrors(t *testing.T) {
+	imm, err := immutable.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	iter, err := imm.BlocksInChunk(7)
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	defer iter.Close()
+	if _, err := iter.Next(); err == nil {
+		t.Fatalf("expected an error for a chunk that is not present")
+	}
+}

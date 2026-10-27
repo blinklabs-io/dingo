@@ -143,6 +143,10 @@ type mithrilSyncMetrics struct {
 	backfillIntervalCounts *prometheus.GaugeVec
 
 	indexRebuildDuration prometheus.Gauge
+
+	// pipeline records the immutable chunk downloads, under the same names
+	// node-managed Mithril uses.
+	pipeline *mithril.PipelineMetrics
 }
 
 func newMithrilSyncMetrics(reg prometheus.Registerer) *mithrilSyncMetrics {
@@ -287,6 +291,13 @@ func newMithrilSyncMetrics(reg prometheus.Registerer) *mithrilSyncMetrics {
 		}),
 	}
 	m.startedAt.SetToCurrentTime()
+	// The registry is this command's own and fresh, so registration cannot
+	// collide; promauto above panics on the same condition.
+	pipeline, err := mithril.NewPipelineMetrics(reg)
+	if err != nil {
+		panic(err)
+	}
+	m.pipeline = pipeline
 	return m
 }
 

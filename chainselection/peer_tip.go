@@ -230,7 +230,7 @@ func (p *PeerChainTip) ApplyRollback(
 	p.VRFOutput = nil
 	p.PraosView = PraosTiebreakerView{}
 	p.LastUpdated = p.now()
-	if point.Slot == 0 {
+	if point.Slot == 0 && len(point.Hash) == 0 {
 		p.observedSlots = nil
 		p.observedPoints = nil
 		p.observedPointBaseBlock = 0
@@ -373,7 +373,9 @@ func (p *PeerChainTip) recordObservedPoint(
 		maxPoints = 1
 	}
 	slot := point.Slot
-	if slot == 0 {
+	// The origin carries no hash. A block at slot 0 does, and is a delivered
+	// point like any other.
+	if slot == 0 && len(point.Hash) == 0 {
 		p.observedSlots = nil
 		p.observedPoints = nil
 		p.observedPointBaseBlock = 0
@@ -535,8 +537,8 @@ func (p *PeerChainTip) confirmsRecentChainWithin(
 	candidate := p.observedPoints
 	if window > 0 {
 		hi := candidate[len(candidate)-1].Slot
-		var cutoff uint64 = 1
-		if hi > window {
+		var cutoff uint64
+		if hi >= window {
 			cutoff = hi - window + 1
 		}
 		candidate = candidate[sort.Search(len(candidate), func(i int) bool {

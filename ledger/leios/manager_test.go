@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"math"
 	"math/big"
 	"slices"
 	"strings"
@@ -36,6 +37,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	oleiosvotes "github.com/blinklabs-io/gouroboros/protocol/leiosvotes"
 	bls12381 "github.com/consensys/gnark-crypto/ecc/bls12-381"
 	"github.com/prometheus/client_golang/prometheus"
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
@@ -3226,6 +3228,40 @@ func TestVoteManagerRemoveConnectionResetsCursor(t *testing.T) {
 	)
 	require.NoError(t, result.err)
 	require.Len(t, result.votes, 1)
+}
+
+func TestVoteManagerNextVotesRejectsOversizedCount(t *testing.T) {
+	t.Parallel()
+
+	fixture := newManagerFixture(t)
+	// A closed done channel makes an unbounded request return an abort
+	// error instead of blocking, so only the count check can produce
+	// ErrVoteRequestCount.
+	done := make(chan struct{})
+	close(done)
+	for _, count := range []uint64{
+		oleiosvotes.MaxRequestNextCount + 1,
+		math.MaxUint64,
+	} {
+		votes, err := fixture.mgr.NextVotes(done, "conn-b", count)
+		require.ErrorIs(t, err, ErrVoteRequestCount, "count %d", count)
+		assert.Nil(t, votes)
+	}
+}
+
+func TestVoteManagerNextVotesAcceptsMaxCount(t *testing.T) {
+	t.Parallel()
+
+	fixture := newManagerFixture(t)
+	done := make(chan struct{})
+	close(done)
+	_, err := fixture.mgr.NextVotes(
+		done,
+		"conn-b",
+		oleiosvotes.MaxRequestNextCount,
+	)
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, ErrVoteRequestCount)
 }
 
 func TestVoteManagerNextVotesAccumulatesAcrossInserts(t *testing.T) {
@@ -6873,4 +6909,148 @@ func TestVoteManagerRollbackRejectsInFlightResolvedPrototypeVote(t *testing.T) {
 	defer fixture.mgr.mu.Unlock()
 	assert.Empty(t, fixture.mgr.tallies)
 	assert.Empty(t, fixture.mgr.voteRecords)
+}
+
+func TestVoteManagerLateVotesAreNotPeerMisbehavior(t *testing.T) {
+	t.Parallel()
+
+	const voteWindow = 10
+	fixture := newManagerFixture(
+		t,
+		func(f *managerFixture, cfg *VoteManagerConfig) {
+			cfg.PromRegistry = prometheus.NewRegistry()
+			cfg.SlotProvider = &fakeSlotProvider{slot: 1000}
+			cfg.VoteWindowSlots = voteWindow
+		},
+	)
+	ebHash := lcommon.NewBlake2b256([]byte("late-eb"))
+	rejected := fixture.mgr.metrics.votesRejectedTotal.WithLabelValues(
+		voteNotEmittedSlotWindow,
+	)
+	before := promtestutil.ToFloat64(rejected)
+
+	// Late votes relayed honestly are dropped, never counted as strikes.
+	lateCount := 3 * voteInvalidPeerLimit
+	for i := range lateCount {
+		slot := uint64(1000 - voteWindow - i)
+		require.NoError(
+			t,
+			fixture.mgr.HandleVote(
+				"relay",
+				fixture.makeVote(t, uint64(i%4), slot, ebHash),
+			),
+			"late vote %d must not be peer misbehavior",
+			i,
+		)
+		assert.Empty(t, fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{
+			{SlotNo: slot, VoterId: uint64(i % 4)},
+		}), "late vote %d must not be stored", i)
+	}
+	assert.EqualValues(
+		t,
+		lateCount,
+		promtestutil.ToFloat64(rejected)-before,
+		"slot_window rejection metric must still count late votes",
+	)
+
+	// Late votes must not consume the budget for genuinely invalid ones
+	// from the same connection: the limit still trips at exactly the limit.
+	invalid := lcommon.LeiosVote{}
+	for range voteInvalidPeerLimit - 1 {
+		require.NoError(t, fixture.mgr.HandleVote("relay", invalid))
+	}
+	require.ErrorIs(
+		t,
+		fixture.mgr.HandleVote("relay", invalid),
+		ErrPeerMisbehavior,
+	)
+
+	// Votes too far in the future are not exempt.
+	for i := range voteInvalidPeerLimit - 1 {
+		require.NoError(t, fixture.mgr.HandleVote(
+			"skewed",
+			fixture.makeVote(
+				t,
+				uint64(i%4),
+				1000+slotWindowFutureTolerance+1+uint64(i),
+				ebHash,
+			),
+		))
+	}
+	require.ErrorIs(
+		t,
+		fixture.mgr.HandleVote(
+			"skewed",
+			fixture.makeVote(t, 0, 1000+slotWindowFutureTolerance+100, ebHash),
+		),
+		ErrPeerMisbehavior,
+	)
+}
+
+func TestVoteManagerLatePrototypeVotesAreNotPeerMisbehavior(t *testing.T) {
+	t.Parallel()
+
+	const voteWindow = 10
+	fixture := newManagerFixture(
+		t,
+		func(f *managerFixture, cfg *VoteManagerConfig) {
+			cfg.PromRegistry = prometheus.NewRegistry()
+			cfg.SlotProvider = &fakeSlotProvider{slot: 1000}
+			cfg.VoteWindowSlots = voteWindow
+		},
+	)
+	rejected := fixture.mgr.metrics.votesRejectedTotal.WithLabelValues(
+		voteNotEmittedSlotWindow,
+	)
+	before := promtestutil.ToFloat64(rejected)
+
+	// Votes for an announcement already behind the window, delivered
+	// directly and after waiting in the pending queue.
+	lateSlot := uint64(1000 - voteWindow)
+	ebHash := lcommon.NewBlake2b256([]byte("late-prototype-eb"))
+	rbHash := lcommon.NewBlake2b256([]byte("late-prototype-rb"))
+	queuedRbHash := lcommon.NewBlake2b256([]byte("late-queued-rb"))
+	const queuedCount = 4
+	for voterId := range uint64(queuedCount) {
+		require.NoError(t, fixture.mgr.HandlePrototypeVote(
+			"relay",
+			fixture.makePrototypeVote(t, voterId, queuedRbHash),
+		))
+	}
+	lateCount := 2 * voteInvalidPeerLimit
+	fixture.mgr.ObserveAnnouncement(lateSlot, queuedRbHash, ebHash)
+	fixture.mgr.ObserveAnnouncement(lateSlot, rbHash, ebHash)
+	for i := range lateCount {
+		require.NoError(
+			t,
+			fixture.mgr.HandlePrototypeVote(
+				"relay",
+				fixture.makePrototypeVote(t, uint64(i%4), rbHash),
+			),
+			"late prototype vote %d must not be peer misbehavior",
+			i,
+		)
+	}
+	assert.EqualValues(
+		t,
+		queuedCount+lateCount,
+		promtestutil.ToFloat64(rejected)-before,
+		"slot_window rejection metric must count every late vote",
+	)
+	for voterId := range uint64(4) {
+		assert.Empty(t, fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{
+			{SlotNo: lateSlot, VoterId: voterId},
+		}))
+	}
+
+	// The connection's invalid-vote budget is untouched by the late votes.
+	invalid := lcommon.LeiosVote{}
+	for range voteInvalidPeerLimit - 1 {
+		require.NoError(t, fixture.mgr.HandleVote("relay", invalid))
+	}
+	require.ErrorIs(
+		t,
+		fixture.mgr.HandleVote("relay", invalid),
+		ErrPeerMisbehavior,
+	)
 }

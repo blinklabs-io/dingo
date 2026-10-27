@@ -75,6 +75,12 @@ type Check struct {
 	// Liveness marks a check whose failure fails /healthz as well as
 	// /readyz. Every other check gates /readyz alone.
 	Liveness bool
+	// Startup marks a readiness check that names a startup phase holding
+	// the node back before its tip gap is known. It runs ahead of the tip
+	// gap, so its reason is reported instead of the generic one for a node
+	// still starting; every other readiness check runs only once the node
+	// is within the tolerance.
+	Startup bool
 	// Reason is the stable public reason code returned when Fn fails.
 	Reason string
 	// Fn returns nil when the condition holds, and otherwise an error whose
@@ -150,6 +156,18 @@ func evaluate(
 			return evaluation{status: status, diagnostic: err}
 		}
 	}
+	for _, check := range checks {
+		if check.Liveness || !check.Startup {
+			continue
+		}
+		if err := check.evaluate(); err != nil {
+			status.Reason = check.Reason
+			if status.Reason == "" {
+				status.Reason = reasonCheckFailed
+			}
+			return evaluation{status: status, diagnostic: err}
+		}
+	}
 	if tipGap == nil {
 		status.Reason = reasonTipGapUnavailable
 		return evaluation{status: status}
@@ -165,7 +183,7 @@ func evaluate(
 		return evaluation{status: status}
 	}
 	for _, check := range checks {
-		if check.Liveness {
+		if check.Liveness || check.Startup {
 			continue
 		}
 		if err := check.evaluate(); err != nil {

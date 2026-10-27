@@ -202,6 +202,24 @@ func TestLeiosVotesServerRequestNextDelegates(t *testing.T) {
 	assert.Equal(t, []uint64{2}, handler.nextRequests)
 }
 
+func TestLeiosVotesServerRequestNextRejectsOversizedCount(t *testing.T) {
+	t.Parallel()
+
+	o := newOuroboros(OuroborosConfig{EnableLeios: false})
+	handler := &fakeLeiosVoteHandler{}
+	o.leiosVotes = handler
+
+	votes, err := o.leiosvotesServerRequestNext(
+		oleiosvotes.CallbackContext{},
+		oleiosvotes.MaxRequestNextCount+1,
+	)
+	require.Error(t, err)
+	assert.Nil(t, votes)
+	handler.mu.Lock()
+	defer handler.mu.Unlock()
+	assert.Empty(t, handler.nextRequests)
+}
+
 func TestLeiosVotesServerRequestNextCanceledByProtocolStop(t *testing.T) {
 	t.Parallel()
 

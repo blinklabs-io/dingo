@@ -44,6 +44,10 @@ const (
 	ChainsyncResyncReasonBlockfetchTimeoutRetryFailed      = "blockfetch timeout retry failed on all available connections"
 	ChainsyncResyncReasonBlockfetchRangeUnavailable        = "blockfetch could not obtain the queued header range"
 	ChainsyncResyncReasonHeaderValidationRecovery          = "deferred header validation recovery"
+	// ChainsyncResyncReasonForecastCorroborationRecovery replays a verified
+	// staged header after a peer waiting at the forecast horizon supplies the
+	// independent Genesis witness it lacked. It is not a peer-fault signal.
+	ChainsyncResyncReasonForecastCorroborationRecovery = "forecast corroboration recovery"
 	// ChainsyncResyncReasonDeferredHeaderValidationFailure names the peer that
 	// supplied a block whose deferred header validation failed with a verdict
 	// the peer is responsible for. Unlike HeaderValidationRecovery, which
@@ -64,6 +68,16 @@ const (
 	// restarts from fresh intersect points. It is not a peer-fault signal and
 	// does not impose a peer cooldown.
 	ChainsyncResyncReasonDisconnectedHeaderAdmission = "disconnected header admission"
+	// ChainsyncResyncReasonGenesisCorroborationHoldExpired re-intersects a
+	// connection whose header was held for Genesis corroboration longer than
+	// the hold allows. The header was withheld, so the fresh intersection
+	// delivers it again. It is not a peer-fault signal.
+	ChainsyncResyncReasonGenesisCorroborationHoldExpired = "genesis corroboration hold expired"
+	// ChainsyncResyncReasonForecastHorizonNoWork re-intersects a connected
+	// ChainSync peer when no local queued or in-flight blockfetch can advance
+	// the forecast horizon. It is not a peer-fault signal and does not impose
+	// a peer cooldown.
+	ChainsyncResyncReasonForecastHorizonNoWork = "forecast horizon has no local block work"
 	// ChainsyncResyncReasonBehindLocalTip re-intersects an ingress-eligible
 	// ChainSync connection whose delivered header trails the local tip by more
 	// than the security parameter while the peer's advertised tip does not,
@@ -72,6 +86,20 @@ const (
 	// from fresh intersect points. It is not a peer-fault signal and does not
 	// impose a peer cooldown.
 	ChainsyncResyncReasonBehindLocalTip = "behind local tip"
+	// ChainsyncResyncReasonPromotedObserverAhead re-intersects a connection
+	// promoted from observability-only to ingress-eligible whose delivered
+	// header is more than one block above the local tip. Its candidate
+	// frontier would start above the ledger and could neither be corroborated
+	// nor corroborate the header after the tip, so the connection restarts
+	// from the local tip. It is not a peer-fault signal and does not impose a
+	// peer cooldown.
+	ChainsyncResyncReasonPromotedObserverAhead = "promoted observer ahead of local tip"
+	// ChainsyncResyncReasonNetworkIngestReleased re-intersects every tracked
+	// ChainSync client from the current chain tip when a network ingest hold
+	// is released: while held, each client's cursor ran ahead of the chain
+	// with its headers dropped. It carries no ConnectionId, is not a
+	// peer-fault signal and does not impose a peer cooldown.
+	ChainsyncResyncReasonNetworkIngestReleased = "network ingest released"
 )
 
 // ChainsyncResyncEvent carries the connection ID that should

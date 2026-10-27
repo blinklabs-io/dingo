@@ -25,6 +25,7 @@ import (
 	"slices"
 	"sync"
 
+	nodeconsensus "github.com/blinklabs-io/dingo/consensus"
 	"github.com/blinklabs-io/gouroboros/consensus"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/vrf"
@@ -42,7 +43,7 @@ import (
 // the epoch nonce and both sigma inputs but not the active slot coefficient,
 // so the version bump is the only thing that retires a schedule computed with
 // a different f.
-const ScheduleFormatVersion = 5
+const ScheduleFormatVersion = 7
 
 // EpochSlotRange identifies the absolute slot range covered by an epoch.
 // StartSlot is inclusive and SlotCount is the number of slots to evaluate.
@@ -54,13 +55,20 @@ type EpochSlotRange struct {
 // Schedule represents the leader schedule for a stake pool in an epoch.
 // It contains the slots where the pool is eligible to produce blocks.
 type Schedule struct {
-	FormatVersion int                 // Snapshot of ScheduleFormatVersion at compute time
-	Epoch         uint64              // Epoch this schedule is for
-	PoolId        lcommon.PoolKeyHash // Pool key hash
-	PoolStake     uint64              // Pool's stake from active snapshot
-	TotalStake    uint64              // Total active stake from active snapshot
-	EpochNonce    []byte              // Epoch nonce for VRF
-	LeaderSlots   []uint64            // Slots where pool is leader, ascending-sorted
+	FormatVersion     int                 // Snapshot of ScheduleFormatVersion at compute time
+	ConsensusIdentity string              // Consensus algorithm and semantic version
+	Epoch             uint64              // Epoch this schedule is for
+	PoolId            lcommon.PoolKeyHash // Pool key hash
+	PoolStake         uint64              // Pool's stake from active snapshot
+	TotalStake        uint64              // Total active stake from active snapshot
+	EpochNonce        []byte              // Epoch nonce for VRF
+	EpochStartSlot    uint64              // First absolute slot in the epoch
+	EpochSlotCount    uint64              // Number of slots in the epoch
+	EraID             uint                // Ledger era governing the schedule
+	// DistributionCommitment binds public-schedule algorithms to the whole
+	// election distribution. It is empty for Praos schedules.
+	DistributionCommitment []byte
+	LeaderSlots            []uint64 // Slots where pool is leader, ascending-sorted
 
 	mu sync.RWMutex
 }
@@ -83,13 +91,14 @@ func NewSchedule(
 	epochNonce []byte,
 ) *Schedule {
 	return &Schedule{
-		FormatVersion: ScheduleFormatVersion,
-		Epoch:         epoch,
-		PoolId:        poolId,
-		PoolStake:     poolStake,
-		TotalStake:    totalStake,
-		EpochNonce:    epochNonce,
-		LeaderSlots:   make([]uint64, 0),
+		FormatVersion:     ScheduleFormatVersion,
+		ConsensusIdentity: nodeconsensus.PraosIdentity,
+		Epoch:             epoch,
+		PoolId:            poolId,
+		PoolStake:         poolStake,
+		TotalStake:        totalStake,
+		EpochNonce:        epochNonce,
+		LeaderSlots:       make([]uint64, 0),
 	}
 }
 

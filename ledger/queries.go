@@ -1236,8 +1236,8 @@ func (ls *LedgerState) queryShelley(ctx context.Context, query *olocalstatequery
 //
 // Point-pinning coverage audit (every case below, classified):
 //
-// Honors at today: ShelleyStakeDistributionQuery, ShelleyStakeDistribution2Query
-// and ShelleyPoolDistr2Query (the last two via PoolStakeDistribution, resolving at to its epoch and reading
+// Honors at today: ShelleyStakeDistributionQuery, ShelleyStakeDistribution2Query,
+// ShelleyPoolDistrQuery and ShelleyPoolDistr2Query (the last three via PoolStakeDistribution, resolving at to its epoch and reading
 // that epoch's persisted mark snapshot; StakeDistribution's circulating-
 // supply denominator additionally resolves historically via
 // GetNetworkStateAsOfSlot), ShelleyCurrentProtocolParamsQuery
@@ -1300,14 +1300,17 @@ func (ls *LedgerState) queryShelley(ctx context.Context, query *olocalstatequery
 // ShelleyGetLedgerPeerSnapshotQuery (peer/networking bootstrap data, not
 // ledger state at all).
 //
-// Not point-aware, real gap: ShelleyStakePoolParamsQuery reads live pool
-// registration rows, which carry no per-point history.
+// Not point-aware, real gap: ShelleyStakePoolParamsQuery and
+// ShelleyStakePoolStateQuery read live pool registration and delegation rows,
+// which carry no per-point history.
 //
 // Not answered, so the call fails with "unsupported query type":
-// ShelleyPoolStateQuery, ShelleyPoolDistrQuery and
-// ShelleyNonMyopicMemberRewardsQuery, whose request filters the pinned
-// gouroboros version cannot decode (the request is rejected before it reaches
-// this switch); ShelleyRewardInfoPoolsQuery, ShelleyRewardProvenanceQuery,
+// ShelleyPoolStateQuery and
+// ShelleyNonMyopicMemberRewardsQuery, which decode but have no handler here;
+// ShelleyStakePoolStateQuery on every network but the Leios prototype's
+// (LedgerStateConfig.StakePoolStateQuery), because released nodes do not
+// support it;
+// ShelleyRewardInfoPoolsQuery, ShelleyRewardProvenanceQuery,
 // ShelleyDebugEpochStateQuery and ShelleyDebugNewEpochStateQuery, which need
 // reward-calculation and full epoch state that is not tracked.
 //
@@ -1341,7 +1344,7 @@ func (ls *LedgerState) queryShelleyLeaf(ctx context.Context, query any,
 	case *olocalstatequery.ShelleyStakeDelegDepositsQuery:
 		return ls.queryShelleyStakeDelegDeposits(ctx, q.Creds.Items(), at, txn)
 	case *olocalstatequery.ShelleyGetLedgerPeerSnapshotQuery:
-		return ls.queryLedgerPeerSnapshot(ctx, q.PeerKind, txn)
+		return ls.queryLedgerPeerSnapshot(ctx, q, txn)
 	case *olocalstatequery.ShelleyStakePoolsQuery:
 		return ls.queryShelleyStakePools(ctx, at, txn)
 	case *olocalstatequery.ShelleyDRepStateQuery:
@@ -1363,6 +1366,8 @@ func (ls *LedgerState) queryShelleyLeaf(ctx context.Context, query any,
 		return ls.queryShelleyDebugChainDepState(ctx, at, txn)
 	case *olocalstatequery.ShelleyPoolDistr2Query:
 		return ls.queryShelleyPoolDistr2(ctx, q, at, txn)
+	case *olocalstatequery.ShelleyPoolDistrQuery:
+		return ls.queryShelleyPoolDistr(ctx, q, at, txn)
 	case *olocalstatequery.ShelleyStakeDistributionQuery:
 		return ls.queryShelleyStakeDistribution(ctx, at, txn)
 	case *olocalstatequery.ShelleyStakeDistribution2Query:
@@ -1375,6 +1380,14 @@ func (ls *LedgerState) queryShelleyLeaf(ctx context.Context, query any,
 		return ls.queryShelleyProposedProtocolParamsUpdates(ctx, q, at, txn)
 	case *olocalstatequery.ShelleyStakePoolParamsQuery:
 		return ls.queryShelleyStakePoolParams(ctx, q.PoolIds.Items())
+	case *olocalstatequery.ShelleyStakePoolStateQuery:
+		// Released nodes do not support GetStakePoolState, so only the Leios
+		// prototype answers it; elsewhere it is unsupported like any other
+		// query dingo does not implement.
+		if !ls.config.StakePoolStateQuery {
+			return nil, fmt.Errorf("unsupported query type: %T", q)
+		}
+		return ls.queryShelleyStakePoolState(ctx, q, txn)
 	// TODO: implement the remaining Shelley ledger queries below.
 	/*
 		case *olocalstatequery.ShelleyNonMyopicMemberRewardsQuery:
@@ -1383,7 +1396,6 @@ func (ls *LedgerState) queryShelleyLeaf(ctx context.Context, query any,
 		case *olocalstatequery.ShelleyRewardProvenanceQuery:
 		case *olocalstatequery.ShelleyRewardInfoPoolsQuery:
 		case *olocalstatequery.ShelleyPoolStateQuery:
-		case *olocalstatequery.ShelleyPoolDistrQuery:
 	*/
 	default:
 		return nil, fmt.Errorf("unsupported query type: %T", q)
@@ -1438,35 +1450,17 @@ func (ls *LedgerState) queryShelleyCbor(ctx context.Context, q *olocalstatequery
 			Content: bounded.bareResult(),
 		}}, nil
 	}
-	// Two different, shape-indistinguishable conventions collide at
-	// exactly one element. Most handlers return []any{value} where value
-	// IS the complete result the client decodes directly (e.g.
-	// GetStakeSnapshots' []any{result}, where the direct reply's own
-	// client-side type is a one-element slice of the result struct) --
-	// GetCBOR's tag-24 content there must be cbor.Encode(value) (unwrapping
-	// the outer slice), which strips exactly the slice-of-one wrapping
-	// that direct reply needed but GetCBOR does not. This is pinned
-	// against real cardano-node wire bytes by
-	// TestQueryStakeSnapshotSpecificPool, which fails if this case is
-	// changed to keep the outer slice.
-	//
-	// queryShelleyPoolDistr2 and queryShelleyStakeDistribution instead
-	// destructure their result struct's own fields directly into values
-	// (so that struct's StructAsArray encoding doesn't nest inside an
-	// extra wrapping array on their direct, non-GetCBOR reply, whose
-	// client-side type decodes the bare struct with no slice-of-one
-	// wrapping, unlike GetStakeSnapshots). For those, GetCBOR's content
-	// must be cbor.Encode(values) (the whole slice, reconstructing that
-	// struct's array-of-fields encoding exactly) regardless of field
-	// count -- proven for the 2-field case (queryShelleyPoolDistr2) by
-	// TestQueryShelleyPoolDistr2_ViaGetCBOR and for the 1-field case
-	// (queryShelleyStakeDistribution) by
-	// TestQueryShelleyStakeDistribution_ViaGetCBOR, which fails if this
-	// case is unwrapped like the general one above instead.
-	//
-	// Slice length alone cannot tell the two conventions apart when there
-	// is exactly one field/value, so the destructured-fields query types
-	// are named explicitly here rather than guessed from shape.
+	// A handler's []any{value} is the one-element era result wrapper of the
+	// direct reply; GetCBOR's tag-24 content is the bare result inside it,
+	// so a single value is unwrapped. GetStakeSnapshots is pinned to
+	// cardano-node wire bytes by TestQueryStakeSnapshotSpecificPool, and
+	// GetPoolDistr2/GetStakeDistribution2 to the ledger PoolDistr layout,
+	// [pool map, total active stake], by TestQueryShelleyPoolDistr2_ViaGetCBOR
+	// and TestQueryShelleyStakeDistribution2_ViaGetCBORBytes. The legacy
+	// GetStakeDistribution and GetPoolDistr both answer with the consensus
+	// PoolDistr newtype, whose CBOR is the bare pool map, pinned by
+	// TestQueryShelleyStakeDistribution_ViaGetCBOR and
+	// TestQueryShelleyPoolDistr_ViaGetCBOR.
 	values, ok := inner.([]any)
 	if !ok || len(values) == 0 {
 		return nil, fmt.Errorf(
@@ -1475,15 +1469,8 @@ func (ls *LedgerState) queryShelleyCbor(ctx context.Context, q *olocalstatequery
 		)
 	}
 	var content any = values
-	switch q.Query.(type) {
-	case *olocalstatequery.ShelleyPoolDistr2Query,
-		*olocalstatequery.ShelleyStakeDistributionQuery,
-		*olocalstatequery.ShelleyStakeDistribution2Query:
-		// content stays the whole slice; see comment above.
-	default:
-		if len(values) == 1 {
-			content = values[0]
-		}
+	if len(values) == 1 {
+		content = values[0]
 	}
 	encoded, err := cbor.Encode(content)
 	if err != nil {
@@ -1996,6 +1983,24 @@ func (ls *LedgerState) queryShelleyGenesisConfig(ctx context.Context, protocolVe
 	result, err := genesisConfigResult(shelleyGenesis)
 	if err != nil {
 		return nil, err
+	}
+	// Node-to-client versions 21 to 23 are the 15-field record with the
+	// current 17-field protocol parameters and no extra config. Released
+	// clients decode exactly that there (cardano-cli up to 11.0 and from
+	// 11.2.3.0, Ogmios, cardano-wallet, db-sync, the Leios rc-2026w42 CLI):
+	// ouroboros-consensus 4.0.0.0 to 4.2.0.1 sent a sixteenth field at these
+	// versions, which upstream fixed as a regression in 4.2.1.0 (#2251,
+	// #2258). The layout is set explicitly; Auto with no extra config would
+	// select the legacy 18-field protocol parameters.
+	//
+	// From version 24 the record keeps its sixteenth field. Neither
+	// gouroboros nor Dingo can negotiate version 24 yet, so that branch is
+	// dormant. Upstream's version 24 (ShelleyNodeToClientVersion16) writes the
+	// field as an empty StrictMaybe (0x80), because compactGenesis sets
+	// sgExtraConfig to SNothing; revisit this branch when version 24 exists.
+	if protocolVersion < 24+protocol.ProtocolVersionNtCOffset {
+		result.Layout = olocalstatequery.GenesisConfigLayoutNoExtraConfig
+		result.ExtraConfig = nil
 	}
 	return []any{result}, nil
 }
@@ -2608,8 +2613,11 @@ func (ls *LedgerState) queryShelleyUtxoByAddress(
 	if len(addrs) == 0 {
 		return []any{ret}, nil
 	}
+	addrs, err := dedupeAddresses(addrs)
+	if err != nil {
+		return nil, err
+	}
 	var utxos []models.Utxo
-	var err error
 	if at.pinned() {
 		var release func()
 		txn, release = ls.readTxn(ctx, txn)
@@ -2651,6 +2659,26 @@ func (ls *LedgerState) queryShelleyUtxoByAddress(
 		ret[utxoId] = txOut
 	}
 	return []any{ret}, nil
+}
+
+// dedupeAddresses drops repeated addresses, keyed by serialized bytes, so a
+// repeated entry cannot multiply SQL branches or postfilter comparisons. The
+// reply is a map keyed by UTxO id, so it is unchanged.
+func dedupeAddresses(addrs []ledger.Address) ([]ledger.Address, error) {
+	seen := make(map[string]struct{}, len(addrs))
+	ret := make([]ledger.Address, 0, len(addrs))
+	for _, addr := range addrs {
+		b, err := addr.Bytes()
+		if err != nil {
+			return nil, fmt.Errorf("encode exact address: %w", err)
+		}
+		if _, dup := seen[string(b)]; dup {
+			continue
+		}
+		seen[string(b)] = struct{}{}
+		ret = append(ret, addr)
+	}
+	return ret, nil
 }
 
 // queryShelleyFilteredDelegationAndRewardAccounts answers

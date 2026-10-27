@@ -15,6 +15,7 @@
 package blockfrost
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -30,9 +31,9 @@ type latestBlockPaginationNode struct {
 	calls int
 }
 
-func (n *latestBlockPaginationNode) LatestBlockTxHashes() ([]string, error) {
+func (n *latestBlockPaginationNode) LatestBlockTxHashes(ctx context.Context) ([]string, error) {
 	n.calls++
-	return n.mockNode.LatestBlockTxHashes()
+	return n.mockNode.LatestBlockTxHashes(ctx)
 }
 
 func TestLatestBlockTransactionsPagesInBlockOrder(t *testing.T) {

@@ -106,7 +106,7 @@ func TestVerifyCertificateChainLengthCap(t *testing.T) {
 		budget := newCertificateChainBudget()
 		budget.maxCertificates = maxCertificates
 		_, err := verifyCertificateChain(
-			context.Background(), client, leaf, "",
+			context.Background(), client, leaf,
 			VerificationModeStructural, budget,
 		)
 		return err
@@ -126,7 +126,7 @@ func TestVerifyCertificateChainCumulativeByteBudget(t *testing.T) {
 		budget := newCertificateChainBudget()
 		budget.maxBytes = maxBytes
 		_, err := verifyCertificateChain(
-			context.Background(), client, leaf, "",
+			context.Background(), client, leaf,
 			VerificationModeStructural, budget,
 		)
 		return err
@@ -150,13 +150,13 @@ func TestVerifyCertificateChainSignerCountCap(t *testing.T) {
 
 	client, leaf, _ := budgetChain(t, 1, stmMaxSigners)
 	_, err := VerifyCertificateChainWithMode(
-		context.Background(), client, leaf, "", VerificationModeStructural,
+		context.Background(), client, leaf, VerificationModeStructural,
 	)
 	require.NoError(t, err, "signers exactly at the cap are accepted")
 
 	client, leaf, _ = budgetChain(t, 1, stmMaxSigners+1)
 	_, err = VerifyCertificateChainWithMode(
-		context.Background(), client, leaf, "", VerificationModeStructural,
+		context.Background(), client, leaf, VerificationModeStructural,
 	)
 	require.ErrorIs(t, err, errCertificateChainBudget)
 	require.Contains(t, err.Error(), "signers")
@@ -170,7 +170,7 @@ func TestVerifyCertificateChainCumulativeSignerCountCap(t *testing.T) {
 		budget := newCertificateChainBudget()
 		budget.maxSigners = maxSigners
 		_, err := verifyCertificateChain(
-			context.Background(), client, leaf, "",
+			context.Background(), client, leaf,
 			VerificationModeStructural, budget,
 		)
 		return err
@@ -431,7 +431,7 @@ func TestVerifyCertificateChainChargesSTMWorkToChainBudget(t *testing.T) {
 		budget := newCertificateChainBudget()
 		budget.work = spent
 		_, err := verifyCertificateChain(
-			context.Background(), client, cert.Hash, "",
+			context.Background(), client, cert.Hash,
 			VerificationModeSTM, budget,
 		)
 		return err

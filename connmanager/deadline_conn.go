@@ -15,8 +15,10 @@
 package connmanager
 
 import (
+	"encoding/binary"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -26,6 +28,11 @@ const socketIdleTimeout = 2 * time.Minute
 // connection. It is intentionally shorter than the socket idle timeout: the
 // listener must not wait for a peer that never completes the handshake.
 const handshakeTimeout = 10 * time.Second
+
+// trustedNtCIdleTimeout bounds idle time and stalled mux segment transfers on
+// trusted local NtC connections. Active protocol callbacks clear this deadline
+// so supported long-running requests remain unbounded.
+const trustedNtCIdleTimeout = 2 * time.Minute
 
 // deadlineConn bounds how long a single socket write may block. Nothing below
 // the Ouroboros muxer sets a write deadline, so a peer that stops reading can
@@ -64,6 +71,10 @@ type handshakeDeadlineConn struct {
 	net.Conn
 	mu       sync.Mutex
 	deadline time.Time
+
+	readParser  muxSegmentParser
+	writeParser muxSegmentParser
+	activity    atomic.Pointer[trustedNtCActivity]
 }
 
 func withHandshakeDeadline(conn net.Conn) *handshakeDeadlineConn {
@@ -88,7 +99,105 @@ func (c *handshakeDeadlineConn) SetReadDeadline(deadline time.Time) error {
 	return c.Conn.SetReadDeadline(deadline)
 }
 
+func (c *handshakeDeadlineConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	if n == 0 {
+		return n, err
+	}
+	for range c.readParser.consume(p[:n]) {
+		if activity := c.activity.Load(); activity != nil {
+			activity.readProgress()
+		}
+	}
+	return n, err
+}
+
+func (c *handshakeDeadlineConn) Write(p []byte) (int, error) {
+	n, err := c.Conn.Write(p)
+	if n == 0 {
+		return n, err
+	}
+	for _, protocolID := range c.writeParser.consume(p[:n]) {
+		if activity := c.activity.Load(); activity != nil {
+			activity.responseProgress(protocolID)
+		}
+	}
+	return n, err
+}
+
+func (c *handshakeDeadlineConn) setReadDeadlineCap(deadline time.Time) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.deadline = deadline
+	return c.Conn.SetReadDeadline(deadline)
+}
+
+func (c *handshakeDeadlineConn) attachActivity(
+	activity *trustedNtCActivity,
+) map[uint16]uint64 {
+	c.readParser.mu.Lock()
+	c.writeParser.mu.Lock()
+	defer c.writeParser.mu.Unlock()
+	defer c.readParser.mu.Unlock()
+	preAttachWrites := c.writeParser.completedByProtocol
+	c.writeParser.completedByProtocol = nil
+	c.activity.Store(activity)
+	return preAttachWrites
+}
+
 func (c *handshakeDeadlineConn) Unwrap() net.Conn { return c.Conn }
+
+const muxSegmentHeaderSize = 8
+
+type muxSegmentParser struct {
+	mu                  sync.Mutex
+	header              [muxSegmentHeaderSize]byte
+	headerBytes         int
+	payloadRemaining    int
+	protocolID          uint16
+	completedByProtocol map[uint16]uint64
+}
+
+func (p *muxSegmentParser) consume(data []byte) []uint16 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var completed []uint16
+	for len(data) > 0 {
+		if p.headerBytes < muxSegmentHeaderSize {
+			n := copy(p.header[p.headerBytes:], data)
+			p.headerBytes += n
+			data = data[n:]
+			if p.headerBytes < muxSegmentHeaderSize {
+				break
+			}
+			p.protocolID = binary.BigEndian.Uint16(p.header[4:6]) & 0x7fff
+			p.payloadRemaining = int(binary.BigEndian.Uint16(p.header[6:8]))
+			if p.payloadRemaining == 0 {
+				p.reset()
+				continue
+			}
+		}
+		n := min(len(data), p.payloadRemaining)
+		p.payloadRemaining -= n
+		data = data[n:]
+		if p.payloadRemaining == 0 {
+			protocolID := p.protocolID
+			completed = append(completed, protocolID)
+			if p.completedByProtocol == nil {
+				p.completedByProtocol = make(map[uint16]uint64)
+			}
+			p.completedByProtocol[protocolID]++
+			p.reset()
+		}
+	}
+	return completed
+}
+
+func (p *muxSegmentParser) reset() {
+	p.headerBytes = 0
+	p.payloadRemaining = 0
+	p.protocolID = 0
+}
 
 // unwrapConn walks any chain of Unwrap-able wrappers down to the base
 // connection.
@@ -106,11 +215,12 @@ func unwrapConn(conn net.Conn) net.Conn {
 	}
 }
 
-// withSocketDeadlines adds a write-idle deadline to TCP bearers. Unix bearers
-// are left untouched: NtC clients are local, and the concrete *net.UnixConn is
-// still needed for peer credentials.
+// withSocketDeadlines adds a write-idle deadline to TCP bearers and to Unix
+// bearers after their unique remote-address wrapper is applied.
 func withSocketDeadlines(conn net.Conn) net.Conn {
-	if _, ok := conn.(*net.TCPConn); !ok {
+	switch conn.(type) {
+	case *net.TCPConn, *UnixConn:
+	default:
 		return conn
 	}
 	return &deadlineConn{Conn: conn, timeout: socketIdleTimeout}

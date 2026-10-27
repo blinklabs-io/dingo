@@ -15,17 +15,20 @@
 package mithril
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -346,10 +349,9 @@ func TestServerSignatureAdmissionIsIndependentFromArtifactDownloads(
 ) {
 	t.Parallel()
 
-	const requestLimit = publicRequestLimit
 	aggregator := newAggregatorFixture(t, lotteryParams).aggregator
 	store := &blockingListStore{
-		entered:  make(chan struct{}, requestLimit),
+		entered:  make(chan struct{}, 1),
 		release:  make(chan struct{}),
 		blockAll: true,
 	}
@@ -365,23 +367,19 @@ func TestServerSignatureAdmissionIsIndependentFromArtifactDownloads(
 		Aggregator:    aggregator,
 		PublicBaseURL: "http://127.0.0.1",
 	})
-	done := make(chan struct{}, requestLimit)
-	for range requestLimit {
-		go func() {
-			handler.ServeHTTP(
-				httptest.NewRecorder(),
-				httptest.NewRequest(
-					http.MethodGet, "/artifact/cardano-database", nil,
-				),
-			)
-			done <- struct{}{}
-		}()
-	}
-	for range requestLimit {
-		testutil.RequireReceive(
-			t, store.entered, testutil.AsyncWait, "admitted artifact request",
+	done := make(chan struct{}, 1)
+	go func() {
+		handler.ServeHTTP(
+			httptest.NewRecorder(),
+			httptest.NewRequest(
+				http.MethodGet, "/artifact/cardano-database", nil,
+			),
 		)
-	}
+		done <- struct{}{}
+	}()
+	testutil.RequireReceive(
+		t, store.entered, testutil.AsyncWait, "admitted artifact request",
+	)
 
 	rec := &deadlineResponseWriter{header: make(http.Header)}
 	handler.ServeHTTP(
@@ -390,16 +388,14 @@ func TestServerSignatureAdmissionIsIndependentFromArtifactDownloads(
 			http.MethodPost, "/register-signatures", strings.NewReader(`{}`),
 		),
 	)
-	assert.Equal(t, http.StatusConflict, rec.status)
+	assert.Equal(t, http.StatusBadRequest, rec.status)
 	assert.Empty(t, rec.Header().Get("Retry-After"))
 	assert.NotEmpty(t, rec.readDeadlines)
 
 	close(store.release)
-	for range requestLimit {
-		testutil.RequireReceive(
-			t, done, testutil.AsyncWait, "admitted artifact response",
-		)
-	}
+	testutil.RequireReceive(
+		t, done, testutil.AsyncWait, "admitted artifact response",
+	)
 }
 
 func TestServerRejectsArtifactWorkBeyondAdmissionLimit(t *testing.T) {
@@ -460,21 +456,67 @@ func TestServerRejectsArtifactWorkBeyondAdmissionLimit(t *testing.T) {
 	)
 }
 
+func newSignatureAdmissionTestServer(
+	readLimit int,
+	readsPerClient int,
+	verificationLimit int,
+) *snapshotServer {
+	return &snapshotServer{
+		cfg: ServerConfig{
+			Logger: slog.New(slog.DiscardHandler),
+		},
+		signatureReads:       make(chan struct{}, readLimit),
+		signatureReadClients: newClientAdmission(readsPerClient),
+		signatureRequests:    make(chan struct{}, verificationLimit),
+		requestReadTimeout:   time.Minute,
+		responseWriteTimeout: time.Minute,
+	}
+}
+
+func createdSignatureHandler(
+	handled *atomic.Int32,
+) signatureRequestHandler {
+	return func(
+		w http.ResponseWriter,
+		_ *http.Request,
+		_ registerSignatureRequest,
+	) {
+		if handled != nil {
+			handled.Add(1)
+		}
+		w.WriteHeader(http.StatusCreated)
+	}
+}
+
+func serveSignatureRequest(
+	handler http.Handler,
+	remoteAddr string,
+	body io.ReadCloser,
+) <-chan int {
+	done := make(chan int, 1)
+	go func() {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/register-signatures", nil)
+		req.RemoteAddr = remoteAddr
+		req.Body = body
+		handler.ServeHTTP(rec, req)
+		done <- rec.Code
+	}()
+	return done
+}
+
 func TestServerBoundsSignatureAdmissionIndependently(t *testing.T) {
 	t.Parallel()
 
 	entered := make(chan struct{}, 1)
 	release := make(chan struct{})
-	s := &snapshotServer{
-		cfg: ServerConfig{
-			Logger: slog.New(slog.DiscardHandler),
-		},
-		signatureRequests:    make(chan struct{}, 1),
-		requestReadTimeout:   time.Minute,
-		responseWriteTimeout: time.Minute,
-	}
+	s := newSignatureAdmissionTestServer(2, 2, 1)
 	handler := s.withSignatureRequest(
-		func(w http.ResponseWriter, _ *http.Request) {
+		func(
+			w http.ResponseWriter,
+			_ *http.Request,
+			_ registerSignatureRequest,
+		) {
 			entered <- struct{}{}
 			<-release
 			w.WriteHeader(http.StatusCreated)
@@ -485,7 +527,11 @@ func TestServerBoundsSignatureAdmissionIndependently(t *testing.T) {
 		defer close(firstDone)
 		handler.ServeHTTP(
 			httptest.NewRecorder(),
-			httptest.NewRequest(http.MethodPost, "/register-signatures", nil),
+			httptest.NewRequest(
+				http.MethodPost,
+				"/register-signatures",
+				strings.NewReader(`{"party_id":"first"}`),
+			),
 		)
 	}()
 	testutil.RequireReceive(
@@ -495,7 +541,11 @@ func TestServerBoundsSignatureAdmissionIndependently(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(
 		rec,
-		httptest.NewRequest(http.MethodPost, "/register-signatures", nil),
+		httptest.NewRequest(
+			http.MethodPost,
+			"/register-signatures",
+			strings.NewReader(`{"party_id":"second"}`),
+		),
 	)
 	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
 	assert.Equal(t, "1", rec.Header().Get("Retry-After"))
@@ -504,6 +554,332 @@ func TestServerBoundsSignatureAdmissionIndependently(t *testing.T) {
 	testutil.RequireReceive(
 		t, firstDone, testutil.AsyncWait, "released signature request",
 	)
+}
+
+type incompleteSignatureBody struct {
+	started     chan struct{}
+	release     chan struct{}
+	startedOnce sync.Once
+}
+
+func (b *incompleteSignatureBody) Read([]byte) (int, error) {
+	b.startedOnce.Do(func() { close(b.started) })
+	<-b.release
+	return 0, io.ErrUnexpectedEOF
+}
+
+func (*incompleteSignatureBody) Close() error { return nil }
+
+type slowTrailingSignatureBody struct {
+	prefix      *strings.Reader
+	trailing    chan struct{}
+	release     chan struct{}
+	startedOnce sync.Once
+}
+
+func (b *slowTrailingSignatureBody) Read(data []byte) (int, error) {
+	if b.prefix.Len() > 0 {
+		return b.prefix.Read(data)
+	}
+	b.startedOnce.Do(func() { close(b.trailing) })
+	<-b.release
+	return 0, io.ErrUnexpectedEOF
+}
+
+func (*slowTrailingSignatureBody) Close() error { return nil }
+
+func TestServerIncompleteSignatureBodyDoesNotHoldVerificationAdmission(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	decodeStarted := make(chan struct{})
+	releaseBody := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseBody) }) }
+	defer release()
+
+	s := newSignatureAdmissionTestServer(2, 2, 1)
+	handler := s.withSignatureRequest(createdSignatureHandler(nil))
+	firstDone := serveSignatureRequest(
+		handler,
+		"192.0.2.1:1001",
+		&incompleteSignatureBody{
+			started: decodeStarted,
+			release: releaseBody,
+		},
+	)
+	testutil.RequireReceive(
+		t, decodeStarted, testutil.AsyncWait, "incomplete body read",
+	)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(
+		rec,
+		httptest.NewRequest(
+			http.MethodPost,
+			"/register-signatures",
+			strings.NewReader(`{"party_id":"complete"}`),
+		),
+	)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf(
+			"complete signature body returned %d while incomplete body was decoding",
+			rec.Code,
+		)
+	}
+	assert.Empty(t, rec.Header().Get("Retry-After"))
+
+	release()
+	assert.Equal(
+		t,
+		http.StatusBadRequest,
+		testutil.RequireReceive(
+			t, firstDone, testutil.AsyncWait, "incomplete request response",
+		),
+	)
+}
+
+func TestServerKeepsSignatureReadAdmissionUntilBodyEOF(t *testing.T) {
+	t.Parallel()
+
+	trailingRead := make(chan struct{})
+	releaseBody := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseBody) }) }
+	defer release()
+
+	s := newSignatureAdmissionTestServer(1, 2, 1)
+	var handled atomic.Int32
+	handler := s.withSignatureRequest(createdSignatureHandler(&handled))
+	firstDone := serveSignatureRequest(
+		handler,
+		"192.0.2.1:1001",
+		&slowTrailingSignatureBody{
+			prefix:   strings.NewReader(`{"party_id":"slow"}`),
+			trailing: trailingRead,
+			release:  releaseBody,
+		},
+	)
+	testutil.RequireReceive(
+		t, trailingRead, testutil.AsyncWait, "trailing signature body read",
+	)
+
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/register-signatures",
+		strings.NewReader(`{"party_id":"complete"}`),
+	)
+	req.RemoteAddr = "198.51.100.1:1002"
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	assert.Zero(t, handled.Load())
+
+	release()
+	assert.Equal(
+		t,
+		http.StatusBadRequest,
+		testutil.RequireReceive(
+			t, firstDone, testutil.AsyncWait, "slow trailing body response",
+		),
+	)
+}
+
+func TestServerRejectsOversizedTrailingSignatureBody(t *testing.T) {
+	t.Parallel()
+
+	s := newSignatureAdmissionTestServer(1, 1, 1)
+	var handled atomic.Int32
+	handler := s.withSignatureRequest(createdSignatureHandler(&handled))
+
+	body := `{"party_id":"complete"}` +
+		strings.Repeat(" ", maxAggregatorRequestBytes)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(
+		rec,
+		httptest.NewRequest(
+			http.MethodPost,
+			"/register-signatures",
+			strings.NewReader(body),
+		),
+	)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Zero(t, handled.Load())
+}
+
+type observedSignatureBody struct {
+	reader io.Reader
+	reads  atomic.Int32
+}
+
+func (b *observedSignatureBody) Read(data []byte) (int, error) {
+	b.reads.Add(1)
+	return b.reader.Read(data)
+}
+
+func (*observedSignatureBody) Close() error { return nil }
+
+func TestServerBoundsConcurrentSignatureBodyReads(t *testing.T) {
+	t.Parallel()
+
+	decodeStarted := make(chan struct{})
+	releaseBody := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseBody) }) }
+	defer release()
+
+	s := newSignatureAdmissionTestServer(1, 2, 1)
+	handler := s.withSignatureRequest(createdSignatureHandler(nil))
+	firstDone := serveSignatureRequest(
+		handler,
+		"192.0.2.1:1001",
+		&incompleteSignatureBody{
+			started: decodeStarted,
+			release: releaseBody,
+		},
+	)
+	testutil.RequireReceive(
+		t, decodeStarted, testutil.AsyncWait, "first signature body read",
+	)
+
+	body := &observedSignatureBody{
+		reader: strings.NewReader(`{"party_id":"complete"}`),
+	}
+	req := httptest.NewRequest(http.MethodPost, "/register-signatures", nil)
+	req.RemoteAddr = "198.51.100.1:1002"
+	req.Body = body
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	assert.Equal(t, "1", rec.Header().Get("Retry-After"))
+	assert.Zero(t, body.reads.Load())
+
+	release()
+	assert.Equal(
+		t,
+		http.StatusBadRequest,
+		testutil.RequireReceive(
+			t, firstDone, testutil.AsyncWait, "incomplete request response",
+		),
+	)
+}
+
+func TestServerSignatureReadAdmissionPreservesOtherClientCapacity(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	decodeStarted := make(chan struct{})
+	releaseBody := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseBody) }) }
+	defer release()
+
+	s := newSignatureAdmissionTestServer(2, 1, 1)
+	handler := s.withSignatureRequest(createdSignatureHandler(nil))
+	firstDone := serveSignatureRequest(
+		handler,
+		"192.0.2.1:1001",
+		&incompleteSignatureBody{
+			started: decodeStarted,
+			release: releaseBody,
+		},
+	)
+	testutil.RequireReceive(
+		t, decodeStarted, testutil.AsyncWait, "first client signature body read",
+	)
+
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/register-signatures",
+		strings.NewReader(`{"party_id":"same-client"}`),
+	)
+	req.RemoteAddr = "192.0.2.1:1002"
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusTooManyRequests, rec.Code)
+	assert.Equal(t, "1", rec.Header().Get("Retry-After"))
+
+	req = httptest.NewRequest(
+		http.MethodPost,
+		"/register-signatures",
+		strings.NewReader(`{"party_id":"other-client"}`),
+	)
+	req.RemoteAddr = "198.51.100.1:1003"
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusCreated, rec.Code)
+
+	release()
+	assert.Equal(
+		t,
+		http.StatusBadRequest,
+		testutil.RequireReceive(
+			t, firstDone, testutil.AsyncWait, "incomplete request response",
+		),
+	)
+}
+
+func requireSlowSignatureConnectionClosed(
+	t *testing.T,
+	handler http.Handler,
+	chunk string,
+	wantStatus int,
+) {
+	t.Helper()
+	srv := httptest.NewServer(handler)
+	t.Cleanup(srv.Close)
+
+	conn, err := net.Dial("tcp", srv.Listener.Addr().String())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+	require.NoError(t, conn.SetDeadline(time.Now().Add(5*time.Second)))
+	_, err = fmt.Fprintf(
+		conn,
+		"POST /register-signatures HTTP/1.1\r\n"+
+			"Host: %s\r\n"+
+			"Transfer-Encoding: chunked\r\n\r\n"+
+			"1\r\n%s\r\n",
+		srv.Listener.Addr().String(),
+		chunk,
+	)
+	require.NoError(t, err)
+
+	resp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{
+		Method: http.MethodPost,
+	})
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, wantStatus, resp.StatusCode)
+	assert.True(t, resp.Close)
+	_, err = io.ReadAll(resp.Body)
+	require.NoError(t, err)
+}
+
+func TestServerRejectedSignatureBodyClosesSlowConnection(t *testing.T) {
+	t.Parallel()
+
+	s := newSignatureAdmissionTestServer(1, 1, 1)
+	s.signatureReads <- struct{}{}
+	var handled atomic.Int32
+	handler := s.withSignatureRequest(createdSignatureHandler(&handled))
+	requireSlowSignatureConnectionClosed(
+		t, handler, "{", http.StatusServiceUnavailable,
+	)
+	assert.Zero(t, handled.Load())
+}
+
+func TestServerMalformedSignatureBodyClosesSlowConnection(t *testing.T) {
+	t.Parallel()
+
+	s := newSignatureAdmissionTestServer(1, 1, 1)
+	var handled atomic.Int32
+	handler := s.withSignatureRequest(createdSignatureHandler(&handled))
+	requireSlowSignatureConnectionClosed(
+		t, handler, "]", http.StatusBadRequest,
+	)
+	assert.Zero(t, handled.Load())
 }
 
 type deadlineResponseWriter struct {
@@ -580,7 +956,7 @@ func TestServerArmsSignatureBodyDeadlineBeforeDecode(t *testing.T) {
 	// the handler starts decoding an untrusted signature request body.
 	handler.ServeHTTP(w, req)
 	assert.NotEmpty(t, w.readDeadlines)
-	assert.Equal(t, http.StatusConflict, w.status)
+	assert.Equal(t, http.StatusBadRequest, w.status)
 }
 
 func TestServerArmsWriteDeadlineOnlyWhenWriting(t *testing.T) {
@@ -750,14 +1126,14 @@ func TestServerSnapshotSyncsEndToEnd(t *testing.T) {
 	assert.Equal(t, uint64(1000), result.LedgerSlot)
 }
 
-// A v2 bootstrap downloads immutableDownloadWorkers archives and the
-// ancillary archive at once; none of those requests may be shed.
-func TestServerAdmitsOneBootstrapAtFullConcurrency(t *testing.T) {
+// Concurrent listing requests share one catalog scan and all receive its
+// result after it completes.
+func TestServerCoalescesConcurrentCatalogRequests(t *testing.T) {
 	t.Parallel()
 
 	const requests = immutableDownloadWorkers + 1
 	store := &blockingListStore{
-		entered:  make(chan struct{}, requests),
+		entered:  make(chan struct{}, 1),
 		release:  make(chan struct{}),
 		blockAll: true,
 	}
@@ -785,15 +1161,9 @@ func TestServerAdmitsOneBootstrapAtFullConcurrency(t *testing.T) {
 			codes <- rec.Code
 		}()
 	}
-	for range requests {
-		select {
-		case <-store.entered:
-		case code := <-codes:
-			t.Fatalf("request answered %d while the others were held", code)
-		case <-time.After(testutil.AsyncWait):
-			t.Fatal("timed out waiting for admitted requests")
-		}
-	}
+	testutil.RequireReceive(
+		t, store.entered, testutil.AsyncWait, "single catalog scan",
+	)
 	close(store.release)
 	for range requests {
 		code := testutil.RequireReceive(
@@ -801,4 +1171,119 @@ func TestServerAdmitsOneBootstrapAtFullConcurrency(t *testing.T) {
 		)
 		assert.Equal(t, http.StatusOK, code)
 	}
+	assert.Equal(t, int32(1), store.calls.Load())
+}
+
+// rangeCountingStore reports itself as remote and counts the backend range
+// requests an objectReader-style reader would issue: one each time a read
+// starts after the position moved.
+type rangeCountingStore struct {
+	ArtifactStore
+	opens atomic.Int64
+}
+
+func (s *rangeCountingStore) streamsRemoteObjects() bool { return true }
+
+func (s *rangeCountingStore) Open(
+	ctx context.Context,
+	key string,
+) (io.ReadSeekCloser, error) {
+	inner, err := s.ArtifactStore.Open(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	return &rangeCountingReader{ReadSeekCloser: inner, store: s}, nil
+}
+
+type rangeCountingReader struct {
+	io.ReadSeekCloser
+	store   *rangeCountingStore
+	started bool
+}
+
+func (r *rangeCountingReader) Read(p []byte) (int, error) {
+	if !r.started {
+		r.started = true
+		r.store.opens.Add(1)
+	}
+	return r.ReadSeekCloser.Read(p)
+}
+
+func (r *rangeCountingReader) Seek(off int64, whence int) (int64, error) {
+	cur, err := r.ReadSeekCloser.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return 0, err
+	}
+	next, err := r.ReadSeekCloser.Seek(off, whence)
+	if err == nil && next != cur {
+		r.started = false
+	}
+	return next, err
+}
+
+func TestServerLimitsMultipartRangesOnRemoteStores(t *testing.T) {
+	t.Parallel()
+
+	f := newServerFixture(t, ServerConfig{})
+	counting := &rangeCountingStore{ArtifactStore: f.store}
+	srv := newMithrilTestServer(t, ServerConfig{
+		Store: counting, Logger: slog.New(slog.DiscardHandler),
+	})
+	name := "/download/" + f.artifact.Hash + "/00001.tar.zst"
+	full, err := os.ReadFile( //nolint:gosec // test temp dir
+		filepath.Join(f.dir, f.artifact.Hash, "00001.tar.zst"),
+	)
+	require.NoError(t, err)
+	require.Greater(t, len(full), 20)
+
+	// A single range, including padded and empty list elements, is served.
+	for _, h := range []string{"bytes=10-19", "bytes= 10-19 ,", "bytes=,10-19"} {
+		before := counting.opens.Load()
+		resp := get(t, srv.URL+name, "Range", h)
+		require.Equal(t, http.StatusPartialContent, resp.StatusCode, h)
+		assert.Equal(t, "application/zstd", resp.Header.Get("Content-Type"), h)
+		assert.Equal(t, full[10:20], getBody(t, resp), h)
+		assert.Equal(t, int64(1), counting.opens.Load()-before, h)
+	}
+
+	// More than one range is answered as the whole object from one backend
+	// read, never as a multipart body.
+	for _, h := range []string{
+		"bytes=0-0,2-2",
+		"bytes=0-0, 2-2",
+		"bytes=0-9,5-14,10-19",
+		"bytes=0-0" + strings.Repeat(",0-0", 50),
+	} {
+		before := counting.opens.Load()
+		resp := get(t, srv.URL+name, "Range", h)
+		require.Equal(t, http.StatusOK, resp.StatusCode, h)
+		assert.Empty(t, resp.Header.Get("Content-Range"), h)
+		assert.NotContains(t, resp.Header.Get("Content-Type"), "multipart", h)
+		assert.Equal(t, full, getBody(t, resp), h)
+		assert.Equal(t, int64(1), counting.opens.Load()-before, h)
+	}
+
+	// The metadata of a stored certificate is limited the same way.
+	certHash := strings.Repeat("c", 64)
+	body := `{"hash":"` + certHash + `"}`
+	require.NoError(t, counting.Put(
+		t.Context(), "certificates/"+certHash+".json", strings.NewReader(body),
+	))
+	resp := get(t, srv.URL+"/certificate/"+certHash, "Range", "bytes=0-0,2-2")
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, "application/json", resp.Header.Get("Content-Type"))
+	assert.Equal(t, body, string(getBody(t, resp)))
+}
+
+func TestServerKeepsMultipartRangesOnLocalStores(t *testing.T) {
+	t.Parallel()
+
+	f := newServerFixture(t, ServerConfig{})
+	resp := get(
+		t, f.srv.URL+"/download/"+f.artifact.Hash+"/00001.tar.zst",
+		"Range", "bytes=0-0,2-2",
+	)
+	require.Equal(t, http.StatusPartialContent, resp.StatusCode)
+	assert.Contains(t, resp.Header.Get("Content-Type"), "multipart/byteranges")
+	_ = getBody(t, resp)
 }

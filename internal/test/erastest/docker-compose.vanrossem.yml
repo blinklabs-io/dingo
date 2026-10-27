@@ -33,7 +33,7 @@
 #     spending keys. Read-only mount; the driver never mutates the
 #     keys.
 #
-# The base docker-compose.yml already uses cardano-node:11.0.1 for both
+# The base docker-compose.yml already uses cardano-node:11.1.3-2 for both
 # producer and relay (and Dockerfile.configurator's FROM matches), so no
 # image overrides are needed here — every service inherits the
 # vanRossem-aware binary from the base file.

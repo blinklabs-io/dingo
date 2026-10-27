@@ -737,6 +737,38 @@ func (p *PeerGovernor) shouldDropNeverConnectedPeerAfterDialFailureLocked(
 	return p.countEligibleUpstreamsLocked() > 0
 }
 
+// closeRejectedInbound closes the registered connection of an inbound peer
+// the governor refuses to track. A refused peer has no record for pruning to
+// retire, so the connection would otherwise hold its inbound slots
+// indefinitely. Call without p.mu held.
+func (p *PeerGovernor) closeRejectedInbound(
+	connManager *connmanager.ConnectionManager,
+	connId ouroboros.ConnectionId,
+	address string,
+	reason string,
+) {
+	if connManager == nil {
+		return
+	}
+	conn := connManager.GetConnectionById(connId)
+	if conn == nil {
+		return
+	}
+	p.config.Logger.Info(
+		"closing rejected inbound peer",
+		"address", address,
+		"connection_id", connId.String(),
+		"reason", reason,
+	)
+	closeConnAndLog(
+		p.config.Logger,
+		conn,
+		"error closing rejected inbound peer connection",
+		"address", address,
+		"connection_id", connId.String(),
+	)
+}
+
 func (p *PeerGovernor) handleInboundConnectionEvent(evt event.Event) {
 	e, ok := evt.Data.(connmanager.InboundConnectionEvent)
 	if !ok {
@@ -795,22 +827,7 @@ func (p *PeerGovernor) handleInboundConnectionEvent(evt event.Event) {
 		connManager := p.config.ConnManager
 		connId := e.ConnectionId
 		p.mu.Unlock()
-		if connManager != nil {
-			if conn := connManager.GetConnectionById(connId); conn != nil {
-				p.config.Logger.Info(
-					"closing denied inbound peer",
-					"address", address,
-					"connection_id", connId.String(),
-				)
-				closeConnAndLog(
-					p.config.Logger,
-					conn,
-					"error closing denied inbound peer connection",
-					"address", address,
-					"connection_id", connId.String(),
-				)
-			}
-		}
+		p.closeRejectedInbound(connManager, connId, address, "denied")
 		return
 	}
 	var tmpPeer *Peer
@@ -824,7 +841,10 @@ func (p *PeerGovernor) handleInboundConnectionEvent(evt event.Event) {
 				"cap", p.maxPeerListSize(),
 				"current", len(p.peers),
 			)
+			connManager := p.config.ConnManager
+			connId := e.ConnectionId
 			p.mu.Unlock()
+			p.closeRejectedInbound(connManager, connId, address, "peer list at capacity")
 			return
 		}
 		tmpPeer = &Peer{
@@ -852,9 +872,9 @@ func (p *PeerGovernor) handleInboundConnectionEvent(evt event.Event) {
 			tmpPeer.Address = address
 			tmpPeer.NormalizedAddress = normalized
 		}
-		// Record the topology identity once on first rule-2 match and
-		// keep it across subsequent reconnects. Rule-1 matches yield
-		// topologyGroupID == "" and must not clear a prior match.
+		// Record an exact topology identity once and keep it across
+		// subsequent reconnects. A non-topology exact match must not
+		// clear a prior match.
 		if topologyGroupID != "" && tmpPeer.InboundTopologyMatch == "" {
 			tmpPeer.InboundTopologyMatch = topologyGroupID
 		}
@@ -1137,11 +1157,9 @@ func (p *PeerGovernor) DenyPeer(address string, duration time.Duration) {
 	); idx != -1 && p.peers[idx] != nil {
 		p.addPeerDenyKeysLocked(p.peers[idx], expiry, normalized, hostnameNormalized)
 	} else {
-		// A deferred verdict can arrive after a topology peer reconnects
-		// inbound from a new source port. Reuse the same unambiguous host
-		// identity as inbound admission so the stale transport address still
-		// denies that configured peer without broadening the denial to the
-		// whole host.
+		// A deferred verdict may still match an existing exact transport
+		// identity. Never widen a stale transport address to another peer on
+		// the same host.
 		idx, _ := p.resolveInboundIdentity(address, hostnameNormalized)
 		if idx != -1 && p.peers[idx] != nil &&
 			p.isTopologyPeer(p.peers[idx].Source) {
@@ -1355,6 +1373,9 @@ func (p *PeerGovernor) isPeerDeniedLocked(peer *Peer) bool {
 	}
 	if p.isDeniedLocked(peer.NormalizedAddress) ||
 		p.isDeniedLocked(p.normalizeAddress(peer.Address)) {
+		return true
+	}
+	if relayAddress := p.ledgerKnownAddrs[p.normalizeAddress(peer.Address)]; relayAddress != "" && p.isDeniedLocked(relayAddress) {
 		return true
 	}
 	if peer.Connection != nil && peer.Connection.Id.RemoteAddr != nil {

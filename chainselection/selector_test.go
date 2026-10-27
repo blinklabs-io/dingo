@@ -6086,6 +6086,83 @@ func TestStagedLoneFarFrontierIsCommittedAfterKConnectedHeaders(t *testing.T) {
 	}
 }
 
+func TestStagedFarFrontierCatchUpWithReferenceAheadOfLocalTip(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name            string
+		referenceOffset uint64
+		accepted        bool
+	}{
+		{name: "below catch-up ceiling", referenceOffset: 3, accepted: true},
+		{name: "at catch-up ceiling", referenceOffset: 4, accepted: true},
+		{name: "above catch-up ceiling", referenceOffset: 5},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			c := loneFarChain{localBlock: 1_000, k: 2}
+			cs := NewChainSelector(ChainSelectorConfig{
+				SecurityParam:             c.k,
+				DisableEventSubscriptions: true,
+			})
+			cs.SetLocalTip(c.tip(c.localBlock))
+			referenceConn := newTestConnectionId(1)
+			require.True(t, cs.UpdatePeerTip(
+				referenceConn,
+				c.tip(c.localBlock+tc.referenceOffset),
+				nil,
+			))
+
+			conn := newTestConnectionId(2)
+			first := c.first()
+			updates := make([]PeerTipUpdateEvent, 0, c.k+1)
+			for i := uint64(0); i <= c.k; i++ {
+				block := first + i
+				update := PeerTipUpdateEvent{
+					ConnectionId:     conn,
+					AdmissionID:      i + 1,
+					Tip:              c.tip(4_687_076),
+					ObservedTip:      c.tip(block),
+					ObservedPrevHash: c.prevHash(block),
+				}
+				updates = append(updates, update)
+				disposition := cs.PreparePeerTipAdmissionDisposition(update)
+				if !tc.accepted {
+					require.Equal(t, PeerTipUpdateRejected, disposition)
+					continue
+				}
+				if i < c.k {
+					require.Equal(t, PeerTipUpdatePending, disposition)
+				} else {
+					require.Equal(t, PeerTipUpdateAccepted, disposition)
+				}
+			}
+
+			if !tc.accepted {
+				assert.NotContains(t, cs.pendingFarTipClaims, conn)
+				assert.Nil(t, cs.GetPeerTip(conn))
+				return
+			}
+
+			claim, ok := cs.pendingFarTipClaims[conn]
+			require.True(t, ok)
+			assert.True(t, claim.lone)
+			assert.Equal(t, c.k+1, claim.run)
+			for _, update := range updates {
+				require.True(t, cs.CommitPeerTipAdmission(update))
+			}
+			peerTip := cs.GetPeerTip(conn)
+			require.NotNil(t, peerTip)
+			assert.Equal(
+				t,
+				updates[len(updates)-1].ObservedTip.Point,
+				peerTip.SelectionTip().Point,
+			)
+		})
+	}
+}
+
 func TestFarTipDispositionRejectsJumpAfterPendingClaim(t *testing.T) {
 	t.Parallel()
 
@@ -7155,4 +7232,129 @@ func TestRollbackRegisteredPeerBehindLocalTipEvaluation(t *testing.T) {
 		require.True(t, ok)
 		assert.Equal(t, peer, none.PreviousConnectionId)
 	})
+}
+
+func newHostConnectionId(host, port int) ouroboros.ConnectionId {
+	localAddr, _ := net.ResolveTCPAddr("tcp", "127.0.0.1:3001")
+	remoteAddr, _ := net.ResolveTCPAddr(
+		"tcp",
+		fmt.Sprintf("127.0.1.%d:%d", host, port),
+	)
+	return ouroboros.ConnectionId{
+		LocalAddr:  localAddr,
+		RemoteAddr: remoteAddr,
+	}
+}
+
+// A lagging peer that delivers the first headers of a from-genesis sync must
+// not cap every honest peer through the bootstrap advertised bound: once a
+// second remote host advertises a tip within K of a refused one, the honest
+// tip is accepted and selection can follow it.
+func TestBootstrapAdvertisedBoundStaleReferenceDoesNotWedge(t *testing.T) {
+	t.Parallel()
+	const (
+		securityParam = 2160
+		staleBlock    = 4805012
+		networkBlock  = 5311431
+	)
+	blockTip := func(block uint64, hash string) ochainsync.Tip {
+		return ochainsync.Tip{
+			Point: ocommon.Point{
+				Slot: block * 20,
+				Hash: fmt.Appendf(nil, "%s-%d", hash, block),
+			},
+			BlockNumber: block,
+		}
+	}
+	var reasons []PeerTipRejection
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam:             securityParam,
+		DisableEventSubscriptions: true,
+		OnPeerTipRejected: func(r PeerTipRejection) {
+			reasons = append(reasons, r)
+		},
+	})
+	stale := newHostConnectionId(1, 6000)
+	require.True(t, cs.updatePeerTipObserved(
+		stale, blockTip(staleBlock, "stale"), blockTip(10, "chain"), nil,
+	))
+
+	honest := blockTip(networkBlock, "honest")
+	first := newHostConnectionId(2, 6000)
+	assert.False(t, cs.updatePeerTipObserved(
+		first, honest, blockTip(1, "chain"), nil,
+	), "a lone claim beyond the stale reference is refused")
+	assert.Equal(t, []PeerTipRejection{PeerTipRejectedAdvertisedTip}, reasons)
+
+	second := newHostConnectionId(3, 6000)
+	require.True(t, cs.updatePeerTipObserved(
+		second, blockTip(networkBlock+2, "honest"), blockTip(1, "chain"), nil,
+	), "a second host agreeing with the refused claim is accepted")
+
+	reconnected := newHostConnectionId(2, 6001)
+	require.True(t, cs.updatePeerTipObserved(
+		reconnected, honest, blockTip(1, "chain"), nil,
+	), "the refused host is accepted once an honest reference exists")
+	require.True(t, cs.updatePeerTipObserved(
+		newHostConnectionId(4, 6000), honest, blockTip(1, "chain"), nil,
+	))
+	assert.Len(t, reasons, 1)
+
+	require.True(t, cs.updatePeerTipObserved(
+		second, honest, blockTip(50, "chain"), nil,
+	))
+	cs.EvaluateAndSwitch()
+	best := cs.GetBestPeer()
+	require.NotNil(t, best)
+	assert.Equal(t, second, *best)
+}
+
+// The bootstrap advertised bound still refuses a far claim no other remote
+// host supports, including the same host reconnecting to vouch for itself.
+func TestBootstrapAdvertisedBoundRejectsLoneFarClaim(t *testing.T) {
+	t.Parallel()
+	const (
+		securityParam = 2160
+		networkBlock  = 5311431
+		inflated      = 9_000_000
+	)
+	blockTip := func(block uint64, hash string) ochainsync.Tip {
+		return ochainsync.Tip{
+			Point: ocommon.Point{
+				Slot: block * 20,
+				Hash: fmt.Appendf(nil, "%s-%d", hash, block),
+			},
+			BlockNumber: block,
+		}
+	}
+	var reasons []PeerTipRejection
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam:             securityParam,
+		DisableEventSubscriptions: true,
+		OnPeerTipRejected: func(r PeerTipRejection) {
+			reasons = append(reasons, r)
+		},
+	})
+	for host := 1; host <= 3; host++ {
+		require.True(t, cs.updatePeerTipObserved(
+			newHostConnectionId(host, 6000),
+			blockTip(networkBlock, "honest"),
+			blockTip(1, "chain"),
+			nil,
+		))
+	}
+	for port := 6000; port < 6003; port++ {
+		assert.False(t, cs.updatePeerTipObserved(
+			newHostConnectionId(9, port),
+			blockTip(inflated, "inflated"),
+			blockTip(1, "chain"),
+			nil,
+		))
+	}
+	assert.Equal(t, []PeerTipRejection{
+		PeerTipRejectedAdvertisedTip,
+		PeerTipRejectedAdvertisedTip,
+		PeerTipRejectedAdvertisedTip,
+	}, reasons)
+	assert.Equal(t, 3, cs.PeerCount())
 }

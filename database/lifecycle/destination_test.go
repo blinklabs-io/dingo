@@ -669,7 +669,8 @@ func TestListCloudSnapshotsInvalidDestReturnsError(t *testing.T) {
 
 func TestCloudManifestHelpersAuthenticateDestinationResults(t *testing.T) {
 	t.Parallel()
-	manifestDir := t.TempDir()
+	manifestDir := filepath.Join(t.TempDir(), "trusted")
+	require.NoError(t, os.Mkdir(manifestDir, 0o700))
 	require.NoError(t, lifecycle.WriteManifest(
 		manifestDir,
 		lifecycle.Manifest{Network: "preview"},

@@ -21,6 +21,7 @@ import (
 	"io"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/blinklabs-io/dingo/connmanager"
@@ -72,6 +73,11 @@ const (
 	reasonOther           = "other"
 )
 
+// ErrChainStateUnavailable marks a lookup the authenticator's chain-state
+// callbacks could not answer. Admission reports such a failure as other, not
+// invalid: the message may be valid, and invalid is a protocol violation.
+var ErrChainStateUnavailable = errors.New("dmq: chain state unavailable")
+
 // StackConfig configures a Stack.
 type StackConfig struct {
 	// Now supplies the clock shared by admission, feeding, and pool expiry.
@@ -91,7 +97,8 @@ type StackConfig struct {
 	// means unlimited.
 	MaxMempoolBytes int64
 	// Authenticator verifies every submitted message before it is admitted.
-	// Required.
+	// Required. Its chain-state callbacks wrap ErrChainStateUnavailable when
+	// they cannot answer, so the failure is not reported as invalid.
 	Authenticator *ocommon.MessageAuthenticator
 	// CurrentKESPeriod returns the KES period for the confirmed wall-clock
 	// slot. When set, a message is rejected if it claims a future period or
@@ -101,6 +108,12 @@ type StackConfig struct {
 	// MaxKESEvolutions is the number of KES periods an operational
 	// certificate is valid for. Zero uses the Cardano mainnet value.
 	MaxKESEvolutions uint64
+	// MessageBodyMin and MessageBodyMax bound the size of a message body
+	// accepted from a local client or a peer. Zero uses CIP-0137's limits,
+	// DefaultMessageBodyMin and DefaultMessageBodyMax, which dmq-node
+	// enforces when it decodes a message.
+	MessageBodyMin int
+	MessageBodyMax int
 }
 
 // Stack is one DMQ topic instance: its own message pool, connection manager
@@ -116,6 +129,15 @@ type Stack struct {
 	failures *prometheus.CounterVec
 	sent     prometheus.Counter
 	conns    prometheus.Gauge
+	peersCnt prometheus.Gauge
+
+	// peers are the open node-to-node connections. Once peersClosed is set
+	// no more are admitted, so Stop cannot miss one that is still starting.
+	peerMu      sync.Mutex
+	peers       map[*PeerConn]struct{}
+	peersClosed bool
+	peerSeq     atomic.Uint64
+	peerTune    peerTuning
 
 	// ctx scopes the feeder goroutines; Stop cancels it and waits on wg.
 	ctx    context.Context
@@ -150,6 +172,12 @@ func NewStack(cfg StackConfig) (*Stack, error) {
 	if cfg.MaxKESEvolutions == 0 {
 		cfg.MaxKESEvolutions = ocommon.DefaultMaxKESEvolutions
 	}
+	if cfg.MessageBodyMin == 0 {
+		cfg.MessageBodyMin = DefaultMessageBodyMin
+	}
+	if cfg.MessageBodyMax == 0 {
+		cfg.MessageBodyMax = DefaultMessageBodyMax
+	}
 	factory := promauto.With(cfg.PromRegistry)
 	s := &Stack{
 		cfg:    cfg,
@@ -169,12 +197,19 @@ func NewStack(cfg StackConfig) (*Stack, error) {
 		}, []string{"reason"}),
 		sent: factory.NewCounter(prometheus.CounterOpts{
 			Name: "dingo_dmq_messages_sent_total",
-			Help: "DMQ messages queued for local notification consumers",
+			Help: "DMQ messages queued for local notification consumers " +
+				"or sent to peers",
 		}),
 		conns: factory.NewGauge(prometheus.GaugeOpts{
 			Name: "dingo_dmq_connections",
 			Help: "open local DMQ connections",
 		}),
+		peersCnt: factory.NewGauge(prometheus.GaugeOpts{
+			Name: "dingo_dmq_peers",
+			Help: "open node-to-node DMQ peer connections",
+		}),
+		peers:     make(map[*PeerConn]struct{}),
+		peerTune:  defaultPeerTuning(),
 		feeders:   make(map[ouroboros.ConnectionId]context.CancelFunc),
 		feedTimer: newFeedTimer,
 	}
@@ -254,7 +289,9 @@ func subscribeInbound(
 // return the first call's result.
 func (s *Stack) Stop(ctx context.Context) error {
 	s.stopOnce.Do(func() {
-		s.stopErr = s.connMgr.Stop(ctx)
+		// Peers admit into the pool, so they close before it does.
+		s.stopErr = s.closePeers(ctx)
+		s.stopErr = errors.Join(s.stopErr, s.connMgr.Stop(ctx))
 		s.stopErr = errors.Join(s.stopErr, s.shutdownLocal(ctx))
 		if poolErr := s.pool.Stop(ctx); poolErr != nil {
 			s.stopErr = errors.Join(s.stopErr, poolErr)
@@ -284,9 +321,10 @@ func (s *Stack) shutdownLocal(ctx context.Context) error {
 }
 
 // submissionConfig serves protocol 14. Validation happens in submit, not in
-// the gouroboros server, so that every refusal is counted and an expired
-// message gets the expired reason rather than a generic invalid one; the
-// server's own checks are therefore disabled.
+// the gouroboros server, so that an expired message gets the expired reason
+// rather than a generic invalid one; the server's own checks are therefore
+// disabled. The server still answers a resubmitted message ID from its replay
+// cache without calling submit, so its refusals are counted separately.
 func (s *Stack) submissionConfig() localmessagesubmission.Config {
 	return localmessagesubmission.NewConfig(
 		localmessagesubmission.WithAuthenticator(
@@ -301,6 +339,16 @@ func (s *Stack) submissionConfig() localmessagesubmission.Config {
 				msg *ocommon.DmqMessage,
 			) ocommon.RejectReason {
 				return s.submit(msg)
+			},
+		),
+		localmessagesubmission.WithSubmitRefusedFunc(
+			func(
+				_ localmessagesubmission.CallbackContext,
+				_ *ocommon.DmqMessage,
+				reason ocommon.RejectReason,
+			) {
+				s.failures.WithLabelValues(reasonLabel(reason)).Inc()
+				s.logger.Debug("dmq message refused", "reason", reason)
 			},
 		),
 	)
@@ -318,16 +366,40 @@ func (s *Stack) submit(msg *ocommon.DmqMessage) ocommon.RejectReason {
 }
 
 func (s *Stack) admit(msg *ocommon.DmqMessage) ocommon.RejectReason {
+	if reason := s.precheck(msg, s.cfg.CurrentKESPeriod); reason != nil {
+		return reason
+	}
+	if err := s.cfg.Authenticator.VerifyMessage(msg); err != nil {
+		return authReason(err)
+	}
+	return s.addToPool(msg)
+}
+
+// precheck runs every admission check that comes before authentication.
+// kesPeriod resolves the current KES period; nil skips the KES checks.
+func (s *Stack) precheck(
+	msg *ocommon.DmqMessage,
+	kesPeriod func() (uint64, error),
+) ocommon.RejectReason {
+	// A message that breaks CIP-0137's sizes is one dmq-node refuses to
+	// decode, so it is neither kept nor passed on.
+	if err := checkMessageShape(
+		msg, s.cfg.MessageBodyMin, s.cfg.MessageBodyMax,
+	); err != nil {
+		return ocommon.InvalidReason{Message: err.Error()}
+	}
 	if !msg.IsValidAt(s.cfg.Now()) {
 		return ocommon.ExpiredReason{}
 	}
-	if s.cfg.CurrentKESPeriod != nil {
-		current, err := s.cfg.CurrentKESPeriod()
+	if kesPeriod != nil {
+		current, err := kesPeriod()
 		if err != nil {
 			return ocommon.OtherReason{Message: err.Error()}
 		}
 		if msg.Payload.KESPeriod > current {
-			return ocommon.InvalidReason{Message: "message claims a future KES period"}
+			return ocommon.InvalidReason{
+				Message: "message claims a future KES period",
+			}
 		}
 		// The authenticator checks the window against the period the message
 		// claims, which an expired certificate's key can still sign for.
@@ -342,9 +414,20 @@ func (s *Stack) admit(msg *ocommon.DmqMessage) ocommon.RejectReason {
 	if err := s.ttl.ValidateMessageTTLAt(msg, s.cfg.Now()); err != nil {
 		return ocommon.InvalidReason{Message: err.Error()}
 	}
-	if err := s.cfg.Authenticator.VerifyMessage(msg); err != nil {
-		return ocommon.InvalidReason{Message: err.Error()}
+	return nil
+}
+
+// authReason classifies an authentication failure. A node that cannot read
+// the chain state has no grounds to call the message invalid.
+func authReason(err error) ocommon.RejectReason {
+	if errors.Is(err, ErrChainStateUnavailable) {
+		return ocommon.OtherReason{Message: err.Error()}
 	}
+	return ocommon.InvalidReason{Message: err.Error()}
+}
+
+// addToPool admits an authenticated message.
+func (s *Stack) addToPool(msg *ocommon.DmqMessage) ocommon.RejectReason {
 	added, err := s.pool.Add(*msg)
 	switch {
 	case errors.Is(err, ErrExpired):

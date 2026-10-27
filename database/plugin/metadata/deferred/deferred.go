@@ -72,6 +72,10 @@ type Index struct {
 	Table string
 	// Columns is the ordered SQL column list.
 	Columns []string
+	// Where, when set, makes the index partial: a predicate over plain
+	// column names that the rebuild appends as the index's WHERE clause.
+	// MySQL has no partial indexes and builds the full index instead.
+	Where string
 	// Notes documents why this index is safe to defer. Surfaces
 	// in the manifest test failure message when the
 	// classification is questioned.
@@ -99,6 +103,23 @@ type Index struct {
 	// depends on, other witness/redeemer secondary indexes, and any
 	// column that is only SELECTed or SET but never filtered.
 	Critical bool
+	// CatchUpDroppable marks critical indexes that a node-managed Mithril
+	// stream catch-up may drop while it holds the ledger, on top of the
+	// lazy entries. Every query that reads one serves only rollback, the
+	// API or LocalStateQuery, and none of those writes or rolls back while
+	// the run holds network and chain ingest; LSQ and API reads still run,
+	// and are slower until the rebuild. The run rebuilds them before it
+	// releases the hold, because the rollback and chain selection Ouroboros
+	// resumes need them at once.
+	//
+	// Criteria for CatchUpDroppable=true, on top of Critical=true:
+	//   - No statement of the trusted batch apply path, the post-batch
+	//     consumed-UTxO prune or an epoch rollover reads it, as a WHERE
+	//     predicate, a join or the child side of a foreign key whose
+	//     parent rows those paths delete or rekey.
+	//   - It is on utxo, transaction or asset, the tables whose index
+	//     maintenance dominates a trusted batch commit.
+	CatchUpDroppable bool
 }
 
 // CriticalManifest returns the subset of Manifest entries that are
@@ -108,6 +129,33 @@ func CriticalManifest() []Index {
 	var out []Index
 	for _, idx := range Manifest {
 		if idx.Critical {
+			out = append(out, idx)
+		}
+	}
+	return out
+}
+
+// LazyManifest returns the Manifest entries that are not Critical. Nothing
+// that applies blocks, serves the API, or rolls back reads them, so they are
+// the only entries safe to drop on a database that keeps serving while it
+// catches up, as a node-managed Mithril stream catch-up does.
+func LazyManifest() []Index {
+	var out []Index
+	for _, idx := range Manifest {
+		if !idx.Critical {
+			out = append(out, idx)
+		}
+	}
+	return out
+}
+
+// CatchUpDroppableManifest returns the Manifest entries marked
+// CatchUpDroppable. A held stream catch-up drops them with the lazy entries
+// and rebuilds them before Ouroboros resumes.
+func CatchUpDroppableManifest() []Index {
+	var out []Index
+	for _, idx := range Manifest {
+		if idx.CatchUpDroppable {
 			out = append(out, idx)
 		}
 	}
@@ -141,31 +189,40 @@ var Manifest = []Index{
 		Name: "idx_utxo_payment_key", Table: "utxo",
 		Columns: []string{"payment_key"},
 		Notes:   "API address lookup", Critical: true,
+		CatchUpDroppable: true,
 	},
 	{
 		Name: "idx_utxo_staking_key", Table: "utxo",
 		Columns: []string{"staking_key"},
 		Notes:   "API stake lookup", Critical: true,
+		CatchUpDroppable: true,
 	},
 	{
 		Name: "idx_utxo_spent_at_tx_id", Table: "utxo",
 		Columns: []string{"spent_at_tx_id"},
+		Where:   "spent_at_tx_id IS NOT NULL",
 		Notes:   "Consumer transaction lookup and rollback repair", Critical: true,
+		CatchUpDroppable: true,
 	},
 	{
 		Name: "idx_utxo_referenced_by_tx_id", Table: "utxo",
 		Columns: []string{"referenced_by_tx_id"},
+		Where:   "referenced_by_tx_id IS NOT NULL",
 		Notes:   "Reference-input lookup and rollback repair", Critical: true,
+		CatchUpDroppable: true,
 	},
 	{
 		Name: "idx_utxo_collateral_by_tx_id", Table: "utxo",
 		Columns: []string{"collateral_by_tx_id"},
+		Where:   "collateral_by_tx_id IS NOT NULL",
 		Notes:   "Collateral lookup and rollback repair", Critical: true,
+		CatchUpDroppable: true,
 	},
 	{
 		Name: "idx_utxo_added_slot", Table: "utxo",
 		Columns: []string{"added_slot"},
 		Notes:   "Rollback range scan", Critical: true,
+		CatchUpDroppable: true,
 	},
 	// idx_utxo_transaction_id is critical because the rollback sweep's
 	// DELETE FROM "transaction" WHERE slot > ? cascades through
@@ -180,7 +237,8 @@ var Manifest = []Index{
 		Columns: []string{"transaction_id"},
 		Notes: "Rollback DELETE cascade into utxo " +
 			"(fk_transaction_outputs)",
-		Critical: true,
+		Critical:         true,
+		CatchUpDroppable: true,
 	},
 	{
 		Name: "idx_utxo_deleted_staking_amount", Table: "utxo",
@@ -211,6 +269,7 @@ var Manifest = []Index{
 		Name: "idx_transaction_block_hash", Table: "transaction",
 		Columns: []string{"block_hash"},
 		Notes:   "Block transaction grouping", Critical: true,
+		CatchUpDroppable: true,
 	},
 	{
 		Name: "idx_transaction_slot", Table: "transaction",
@@ -221,6 +280,7 @@ var Manifest = []Index{
 		Name: "idx_asset_policy_id", Table: "asset",
 		Columns: []string{"policy_id"},
 		Notes:   "Policy lookup", Critical: true,
+		CatchUpDroppable: true,
 	},
 	{
 		Name: "idx_pool_opcert_sequence_slot", Table: "pool_opcert_sequence",
