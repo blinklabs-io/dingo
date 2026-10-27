@@ -452,3 +452,57 @@ func TestArchiveFetchBlockHeightChargeCoversStaleTailRestarts(t *testing.T) {
 		)
 	}
 }
+
+// TestArchiveFetchBlockStaleTailRefusedBeforeRetrying covers a caller that can
+// pay for the first bound round but not for a retry below a stale tail entry.
+// The retry has to be refused before it probes, so the store does no more
+// than the one round that was paid for.
+func TestArchiveFetchBlockStaleTailRefusedBeforeRetrying(t *testing.T) {
+	t.Parallel()
+
+	const blockCount = 1500
+	counts := &blobOpCounts{}
+	handler, blocks := newArchiveTestHandlerWithOptions(
+		t, blockCount, archiveTestOptions{counts: counts},
+	)
+	// A burst of 100 covers the up-front charge (1 + 66) but leaves fewer
+	// than the 66 a retry costs.
+	budget := newArchiveBudget(100, 100)
+	frozen := time.Now()
+	budget.now = func() time.Time { return frozen }
+	handler.bark.archiveBudget = budget
+
+	db, release, err := handler.bark.Acquire()
+	require.NoError(t, err)
+	txn := db.BlobTxn(true)
+	for i := range 3 {
+		block := blocks[blockCount-1-i]
+		require.NoError(t, db.Blob().Delete(
+			txn.Blob(),
+			types.BlockBlobMetadataKey(
+				types.BlockBlobKey(block.Slot, block.Hash),
+			),
+		))
+	}
+	require.NoError(t, txn.Commit())
+	release()
+
+	counts.reset()
+	_, err = handler.FetchBlock(
+		t.Context(),
+		connect.NewRequest(&archive.FetchBlockRequest{
+			Blocks: []*archive.BlockRef{heightRef(1)},
+		}),
+	)
+	require.Error(t, err)
+	require.Equal(t, connect.CodeResourceExhausted, connect.CodeOf(err))
+	work := counts.forwardIndexScans.Load() +
+		counts.metadataReads.Load() +
+		counts.blockReads.Load()
+	require.Less(
+		t,
+		work,
+		int64(2*archiveBoundResolveLookups),
+		"refused retry still ran its probes",
+	)
+}

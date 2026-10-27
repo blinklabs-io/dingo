@@ -319,7 +319,28 @@ func (a *archiveServiceHandler) FetchBlock(
 	// at all.
 	var bound database.BlockNumberBound
 	if hasHeightRefs {
-		bound, err = database.ResolveBlockNumberBound(ctx, db)
+		// Each stale-tail retry is a further full round of probes, so it is
+		// reserved before it runs and the search stops when it cannot be
+		// paid for.
+		bound, err = database.ResolveBlockNumberBoundBudgeted(
+			ctx,
+			db,
+			func() bool {
+				return a.bark.archiveBudget.allow(
+					caller,
+					archiveBoundResolveLookups,
+				)
+			},
+		)
+		if errors.Is(err, database.ErrBlockNumberBoundBudget) {
+			return nil, connect.NewError(
+				connect.CodeResourceExhausted,
+				errors.New(
+					"archive lookup budget exhausted resolving the "+
+						"highest block, retry later",
+				),
+			)
+		}
 		if err != nil {
 			return nil, fmt.Errorf(
 				"failed resolving highest indexed block: %w",
@@ -336,11 +357,8 @@ func (a *archiveServiceHandler) FetchBlock(
 				heightRefs++
 			}
 		}
-		// A stale entry at the top of the index makes the bound search again
-		// below it, another full round of probes each time. The restarts are
-		// only known now, so charge them with the searches.
-		extra := heightRefs*archiveHeightSearchLookups(bound) +
-			bound.StaleTailRestarts*archiveBoundResolveLookups
+		// Stale-tail restarts were already reserved one by one above.
+		extra := heightRefs * archiveHeightSearchLookups(bound)
 		if !a.bark.archiveBudget.allow(caller, extra) {
 			return nil, connect.NewError(
 				connect.CodeResourceExhausted,

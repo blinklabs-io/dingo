@@ -849,11 +849,29 @@ func ResolveBlockNumberBound(
 	ctx context.Context,
 	db *Database,
 ) (BlockNumberBound, error) {
+	return ResolveBlockNumberBoundBudgeted(ctx, db, nil)
+}
+
+// ErrBlockNumberBoundBudget is returned when the reserve callback given to
+// ResolveBlockNumberBoundBudgeted refuses another stale-tail retry.
+var ErrBlockNumberBoundBudget = errors.New(
+	"block number bound search budget exhausted",
+)
+
+// ResolveBlockNumberBoundBudgeted is ResolveBlockNumberBound for callers that
+// meter storage work. reserve is called before each stale-tail retry (not
+// the first round) and the search stops with ErrBlockNumberBoundBudget,
+// before probing, when it returns false. A nil reserve never refuses.
+func ResolveBlockNumberBoundBudgeted(
+	ctx context.Context,
+	db *Database,
+	reserve func() bool,
+) (BlockNumberBound, error) {
 	var ret BlockNumberBound
 	txn := db.Transaction(ctx, false)
 	err := txn.Do(func(txn *Txn) error {
 		var err error
-		ret, err = ResolveBlockNumberBoundTxn(txn)
+		ret, err = resolveBlockNumberBoundTxn(txn, reserve)
 		return err
 	})
 	return ret, err
@@ -872,6 +890,13 @@ func ResolveBlockNumberBound(
 // probes for each candidate. Metadata is checked only at the highest candidate;
 // a stale tail candidate restarts the search below that ID.
 func ResolveBlockNumberBoundTxn(txn *Txn) (BlockNumberBound, error) {
+	return resolveBlockNumberBoundTxn(txn, nil)
+}
+
+func resolveBlockNumberBoundTxn(
+	txn *Txn,
+	reserve func() bool,
+) (BlockNumberBound, error) {
 	if txn == nil {
 		return BlockNumberBound{}, types.ErrNilTxn
 	}
@@ -921,6 +946,11 @@ func ResolveBlockNumberBoundTxn(txn *Txn) (BlockNumberBound, error) {
 		}
 		if highest.id == 0 {
 			return unresolved(), nil
+		}
+		// Pay for the next round before running it, so a refused
+		// reservation stops the search instead of being noticed after.
+		if reserve != nil && !reserve() {
+			return BlockNumberBound{}, ErrBlockNumberBoundBudget
 		}
 		upper = highest.id - 1
 		restarts++
