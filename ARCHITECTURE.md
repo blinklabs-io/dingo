@@ -10024,10 +10024,23 @@ exceed the configured maximum.
 Resumed prefixes count against the limit; responses without Content-Length
 are bounded while streaming. An extra byte is read only as an overflow
 probe and is never written. Size-limit errors are terminal for the downloader.
-An oversized existing file or a file that overflows while streaming is removed;
-ordinary header rejection can retain an existing in-budget partial file for a
-different mirror, while a malformed-range restart truncates the prefix before
-checking the replacement response.
+Every transfer writes to an exclusively created staging file through the
+verified destination-directory handle, then atomically replaces the cache entry.
+A resume copies only a regular, singly linked partial file owned by the node,
+re-checked on the opened file with its size unchanged, into that staging file
+and requests the range after the bytes actually copied; other regular
+files are replaced only after a complete download, and a non-regular entry such
+as a symlink is refused. An owned partial already over the size limit is removed
+before any request. Before the first attempt, staging files a crashed process
+left beside the entry are removed when they are owned by the node, singly
+linked, and unwritten for twice the idle timeout; with idle detection disabled
+none is removed, since no age then proves a transfer abandoned. A malformed-range restart truncates the private staging file
+before checking the replacement response. Transfer failures publish an owned
+partial atomically for the next retry. Size-limit, free-space-reserve, and
+filesystem-space failures discard the staging file and the owned partial, as
+does a 416 whose total disagrees with the partial, so disk pressure does not
+persist and later attempts do not resume into the same failure. Header-only
+size rejection keeps an in-budget partial for a different mirror.
 
 The v2 bootstrap admits at most four unique locations per artifact component.
 Aggregator locations must retain the configured aggregator origin; cloud
@@ -10093,8 +10106,9 @@ verification still binds the resulting directory handle to the importer.
 
 All v2 extractions share a one-million-entry and 1 TiB expanded-byte ceiling,
 further reduced to the filesystem's available space minus the larger of 1 GiB
-or ten percent. Free space is checked after each 64 MiB of aggregate output so
-concurrent downloads and other writers cannot silently consume the reserve.
+or ten percent. Compressed download writes preserve the same free-space margin.
+Both paths check free space after each 64 MiB of aggregate output so concurrent
+downloads and other writers cannot silently consume the reserve.
 The immutable pool separately charges each compressed in-flight download at
 its size limit against a 32 GiB budget. Raising the limit lowers concurrency;
 an override above 32 GiB allows only one download, with capacity equal to that
