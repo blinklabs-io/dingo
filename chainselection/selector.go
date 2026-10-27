@@ -1139,6 +1139,7 @@ func (cs *ChainSelector) PreparePeerTipAdmissionDisposition(
 			link,
 			cs.pendingFarTipClaims,
 			true,
+			true,
 		)
 		claim, hasClaim := cs.pendingFarTipClaims[update.ConnectionId]
 		evidence := hasClaim &&
@@ -1423,6 +1424,7 @@ func (cs *ChainSelector) rebuildPendingAdmissionStateLocked() {
 			},
 			claims,
 			true,
+			false,
 		)
 		claim, hasClaim := claims[update.ConnectionId]
 		evidence := hasClaim && claim.slot == update.ObservedTip.Point.Slot &&
@@ -1722,6 +1724,7 @@ func (cs *ChainSelector) commitPeerTipAdmission(
 				link,
 				cs.farTipClaims,
 				false,
+				false,
 			)
 			if candidate.plausible {
 				plausible = true
@@ -1961,7 +1964,7 @@ func (cs *ChainSelector) checkPeerTipPlausibleLocked(
 		cs.farTipClaims = make(map[ouroboros.ConnectionId]farTipClaim)
 	}
 	return cs.checkPeerTipPlausibleWithClaimsLocked(
-		connId, tip, observedTip, link, cs.farTipClaims, true,
+		connId, tip, observedTip, link, cs.farTipClaims, true, true,
 	)
 }
 
@@ -1972,9 +1975,10 @@ func (cs *ChainSelector) checkPeerTipPlausibleWithClaimsLocked(
 	link deliveredLink,
 	claims map[ouroboros.ConnectionId]farTipClaim,
 	includePending bool,
+	announce bool,
 ) bool {
 	plausible, _ := cs.checkPeerTipPlausibleWithClaimsTrackedLocked(
-		connId, tip, observedTip, link, claims, includePending,
+		connId, tip, observedTip, link, claims, includePending, announce,
 	)
 	return plausible
 }
@@ -1986,6 +1990,7 @@ func (cs *ChainSelector) checkPeerTipPlausibleWithClaimsTrackedLocked(
 	link deliveredLink,
 	claims map[ouroboros.ConnectionId]farTipClaim,
 	includePending bool,
+	announce bool,
 ) (bool, bool) {
 	claimsChanged := false
 	// Reject implausible delivered frontiers that jump too far ahead of a
@@ -2210,6 +2215,12 @@ func (cs *ChainSelector) checkPeerTipPlausibleWithClaimsTrackedLocked(
 		// Case 3: len(peerTips)==0 && peer not known → bootstrap
 		if observedReject ||
 			(advertisedReject && cs.localTip.BlockNumber == 0) {
+			// Admission replays and commit re-checks re-evaluate headers
+			// this call already refused when they arrived; reporting them
+			// again would log and count each refusal once per replay.
+			if !announce {
+				return false, claimsChanged
+			}
 			cs.config.Logger.Warn(
 				"rejecting implausible peer tip",
 				"connection_id", connId.String(),
