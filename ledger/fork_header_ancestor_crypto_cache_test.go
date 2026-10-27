@@ -57,7 +57,7 @@ func TestPeerForkAncestorCryptoCacheChecksGrowingPrefixOnce(t *testing.T) {
 	calls := 0
 	for length := 2; length <= len(headers); length++ {
 		path := headers[:length]
-		ls.storePeerForkPathPrefix(connIdKey(conn), models.Block{}, path, 7)
+		ls.storePeerForkPathPrefix(connIdKey(conn), models.Block{}, path, 7, 7)
 		for index := 0; index < len(path)-1; index++ {
 			require.NoError(
 				t,
@@ -91,7 +91,7 @@ func TestPeerForkAncestorCryptoCacheDoesNotReuseWrongBasisOrFailure(
 	last := mockHeader{hash: lcommon.Blake2b256{2}, slot: 2, blockNumber: 2}
 	path := []gledger.BlockHeader{first, last}
 	nonce := bytes.Repeat([]byte{0x42}, 32)
-	ls.storePeerForkPathPrefix(connIdKey(conn), models.Block{}, path, 7)
+	ls.storePeerForkPathPrefix(connIdKey(conn), models.Block{}, path, 7, 7)
 	calls := 0
 	verify := func() error { calls++; return nil }
 	require.NoError(
@@ -132,7 +132,7 @@ func TestPeerForkAncestorCryptoCacheDoesNotReuseWrongBasisOrFailure(
 		ls.verifyPeerForkAncestorCrypto(conn, path, 0, 2, nonce, 7, verify),
 	)
 	require.Equal(t, 4, calls)
-	ls.storePeerForkPathPrefix(connIdKey(conn), models.Block{}, path, 8)
+	ls.storePeerForkPathPrefix(connIdKey(conn), models.Block{}, path, 8, 8)
 	require.NoError(
 		t,
 		ls.verifyPeerForkAncestorCrypto(conn, path, 0, 2, nonce, 8, verify),
@@ -141,7 +141,7 @@ func TestPeerForkAncestorCryptoCacheDoesNotReuseWrongBasisOrFailure(
 	forkFirst := first
 	forkFirst.hash = lcommon.Blake2b256{3}
 	fork := []gledger.BlockHeader{forkFirst, last}
-	ls.storePeerForkPathPrefix(connIdKey(conn), models.Block{}, fork, 8)
+	ls.storePeerForkPathPrefix(connIdKey(conn), models.Block{}, fork, 8, 8)
 	require.NoError(
 		t,
 		ls.verifyPeerForkAncestorCrypto(conn, fork, 0, 2, nonce, 8, verify),
@@ -163,7 +163,7 @@ func TestPeerForkAncestorCryptoCacheDoesNotReuseWrongBasisOrFailure(
 	)
 
 	other := testConnectionId(11001, 12001)
-	ls.storePeerForkPathPrefix(connIdKey(other), models.Block{}, fork, 8)
+	ls.storePeerForkPathPrefix(connIdKey(other), models.Block{}, fork, 8, 8)
 	require.NoError(
 		t,
 		ls.verifyPeerForkAncestorCrypto(other, fork, 0, 2, nonce, 8, verify),
@@ -301,7 +301,14 @@ func TestPeerForkAncestorCryptoCacheStillChecksStateAfterCryptoSuccess(
 		}, anchorPoint.Hash, true
 	}
 
+	contextGeneration := ls.loadConsensusSnapshot().contextGeneration
 	for range 2 {
+		ls.publishSnapshotsLocked()
+		require.Greater(
+			t,
+			ls.loadConsensusSnapshot().generation,
+			contextGeneration,
+		)
 		err = ls.ValidatePeerChainSelectionHeaderCrypto(
 			ouroboros.ConnectionId{},
 			target.block.Header(),
@@ -311,6 +318,12 @@ func TestPeerForkAncestorCryptoCacheStillChecksStateAfterCryptoSuccess(
 			t,
 			IsHeaderVerificationDeferred(err),
 			"successful cached cryptography must not authorize unavailable pool state",
+		)
+		require.Equal(
+			t,
+			contextGeneration,
+			ls.forkHeaderPathCache[connIdKey(ouroboros.ConnectionId{})].ancestorCrypto.contextGeneration,
+			"production verification must cache under the stable context",
 		)
 	}
 
@@ -336,4 +349,67 @@ func TestPeerForkAncestorCryptoCacheStillChecksStateAfterCryptoSuccess(
 	require.False(t, IsHeaderVerificationDeferred(err))
 	require.ErrorContains(t, err, "VRF")
 
+}
+
+func TestPeerForkAncestorCryptoCacheSurvivesTipOnlyPublication(t *testing.T) {
+	t.Parallel()
+	f := newForkPathFreshnessFixture(t, 0)
+	conn := testConnectionId(11002, 12002)
+	path := []gledger.BlockHeader{
+		mockHeader{hash: lcommon.Blake2b256{1}, slot: 1, blockNumber: 1},
+		mockHeader{hash: lcommon.Blake2b256{2}, slot: 2, blockNumber: 2},
+	}
+	generation, contextGeneration := f.ls.currentHeaderVerificationContext()
+	nonce := bytes.Repeat([]byte{0x42}, 32)
+	calls := 0
+	verify := func() error { calls++; return nil }
+	f.ls.storePeerForkPathPrefix(
+		connIdKey(conn),
+		models.Block{},
+		path,
+		generation,
+		contextGeneration,
+	)
+	require.NoError(
+		t,
+		f.ls.verifyPeerForkAncestorCrypto(
+			conn,
+			path,
+			0,
+			1,
+			nonce,
+			contextGeneration,
+			verify,
+		),
+	)
+	require.Equal(t, 1, calls)
+	f.ls.publishSnapshotsLocked()
+	nextGeneration, nextContext := f.ls.currentHeaderVerificationContext()
+	require.Greater(t, nextGeneration, generation)
+	require.Equal(t, contextGeneration, nextContext)
+	f.ls.storePeerForkPathPrefix(
+		connIdKey(conn),
+		models.Block{},
+		path,
+		nextGeneration,
+		nextContext,
+	)
+	require.NoError(
+		t,
+		f.ls.verifyPeerForkAncestorCrypto(
+			conn,
+			path,
+			0,
+			1,
+			nonce,
+			nextContext,
+			verify,
+		),
+	)
+	require.Equal(
+		t,
+		1,
+		calls,
+		"tip-only publication must preserve successful stateless crypto",
+	)
 }

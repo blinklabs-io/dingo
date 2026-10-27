@@ -1720,15 +1720,18 @@ func (o *Ouroboros) clearObserverHeaderGapAtRollback(
 	session chainsync.ClientSessionToken,
 	point ocommon.Point,
 ) {
-	if o.chainsyncState == nil || !o.chainsyncState.ClientObserverHeaderGap(connId) {
+	if o.chainsyncState == nil ||
+		!o.chainsyncState.ClientObserverHeaderGap(connId) {
 		return
 	}
 	safe := point.Slot == 0 && len(point.Hash) == 0
 	if !safe && o.ledgerState != nil {
 		applied := o.ledgerState.Tip().Point
-		safe = point.Slot == applied.Slot && bytes.Equal(point.Hash, applied.Hash)
+		safe = point.Slot == applied.Slot &&
+			bytes.Equal(point.Hash, applied.Hash)
 	}
-	if !safe || !o.chainsyncState.ClearClientObserverHeaderGap(connId, session) {
+	if !safe ||
+		!o.chainsyncState.ClearClientObserverHeaderGap(connId, session) {
 		return
 	}
 	o.futureHeaderResyncMu.Lock()
@@ -2136,6 +2139,13 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		// so they need the same producer authentication as ingress candidates.
 		if !verificationAttempted && !deliveryVerified &&
 			o.config.ChainsyncRecordDeliveredPeerTip != nil {
+			if o.chainsyncState != nil {
+				client := o.chainsyncState.GetTrackedClient(ctx.ConnectionId)
+				if client != nil && client.Status == chainsync.ClientStatusFailed {
+					patienceResume = false
+					return nil
+				}
+			}
 			verificationGeneration, verifyErr := o.chainSelectionVerifyHeaderCrypto(
 				ctx.ConnectionId,
 				v,
@@ -2143,6 +2153,26 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			if verifyErr == nil {
 				chainsyncEvent.HeaderCryptoVerificationGeneration = verificationGeneration
 				deliveryVerified = true
+			}
+			if verifyErr != nil &&
+				!ledger.IsHeaderVerificationDeferred(verifyErr) &&
+				!ledger.IsHeaderVerificationWithheld(verifyErr) &&
+				!errors.Is(verifyErr, ledger.ErrHeaderBeyondForecastHorizon) {
+				patienceResume = false
+				o.eventBus.Publish(
+					ledger.ConnectionRecycleRequestedEventType,
+					event.NewEvent(
+						ledger.ConnectionRecycleRequestedEventType,
+						ledger.ConnectionRecycleRequestedEvent{
+							ConnectionId: ctx.ConnectionId,
+							Reason:       "header_verification_failure",
+						},
+					),
+				)
+				if o.chainsyncState != nil {
+					o.chainsyncState.MarkClientFailed(ctx.ConnectionId)
+				}
+				return nil
 			}
 			if o.chainsyncState != nil && (verifyErr == nil ||
 				ledger.IsHeaderVerificationDeferred(verifyErr) ||
@@ -2583,9 +2613,12 @@ func (o *Ouroboros) admitChainsyncHeader(
 		e.ForecastHorizonWait = func() {
 			praosView, _ := praos.GetPraosTiebreakerView(e.BlockHeader)
 			update := chainselection.PeerTipUpdateEvent{
-				ConnectionId:     e.ConnectionId,
-				Tip:              e.Tip,
-				ObservedTip:      ochainsync.Tip{Point: e.Point, BlockNumber: e.BlockHeader.BlockNumber()},
+				ConnectionId: e.ConnectionId,
+				Tip:          e.Tip,
+				ObservedTip: ochainsync.Tip{
+					Point:       e.Point,
+					BlockNumber: e.BlockHeader.BlockNumber(),
+				},
 				VRFOutput:        praos.GetVRFOutput(e.BlockHeader),
 				PraosView:        praosView,
 				AdmissionID:      o.chainsyncAdmissionSequence.Add(1),
@@ -2605,7 +2638,8 @@ func (o *Ouroboros) admitChainsyncHeader(
 	admissionCtx, cancel := chainsyncAdmissionContext(ctx)
 	defer cancel()
 	accepted, err := o.chainsyncHeaderAdmission(admissionCtx, e)
-	if forecastWitness != nil && o.config.ChainsyncRemoveForecastWitness != nil {
+	if forecastWitness != nil &&
+		o.config.ChainsyncRemoveForecastWitness != nil {
 		o.config.ChainsyncRemoveForecastWitness(*forecastWitness)
 	}
 	if errors.Is(err, ledger.ErrChainsyncHeaderNeedsResync) {
@@ -2819,7 +2853,9 @@ func (o *Ouroboros) reconcileChainsyncIngressAdmission(
 			if !o.chainsyncState.SetClientObservabilityOnly(connId, false) {
 				return false
 			}
-			observabilityOnly, exists = o.chainsyncState.ClientObservabilityOnly(connId)
+			observabilityOnly, exists = o.chainsyncState.ClientObservabilityOnly(
+				connId,
+			)
 			if !exists || observabilityOnly {
 				return false
 			}
@@ -3046,7 +3082,11 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 			// connection down anyway. Closing lets peer governance
 			// reconnect with a fresh bearer and updated intersect points.
 			for _, connId := range connIds {
-				o.denyDivergentChainsyncPeer(connId, e.Reason) //nolint:contextcheck // address normalization bounds its own DNS lookup
+				//nolint:contextcheck // address normalization bounds its own DNS lookup
+				o.denyDivergentChainsyncPeer(
+					connId,
+					e.Reason,
+				)
 				if o.chainsyncState != nil {
 					o.chainsyncState.ClearObservedHeaderHistory(connId)
 				}

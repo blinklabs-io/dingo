@@ -30,11 +30,11 @@ import (
 )
 
 type peerForkAncestorCryptoPrefix struct {
-	generation uint64
-	epoch      uint64
-	nonce      []byte
-	lastIndex  int
-	valid      bool
+	contextGeneration uint64
+	epoch             uint64
+	nonce             []byte
+	lastIndex         int
+	valid             bool
 }
 
 type peerForkPathPrefix struct {
@@ -227,7 +227,7 @@ func (ls *LedgerState) verifyPeerForkTargetEpochAncestors(
 		}
 		block := headerOnlyBlock{header: header, peerRelative: true}
 		if err := ls.verifyPeerForkAncestorCrypto(connID, headers, index,
-			epoch.EpochId, epochNonce, snapshot.generation, func() error {
+			epoch.EpochId, epochNonce, snapshot.contextGeneration, func() error {
 				return ls.verifyBlockHeaderStatelessCryptoWithEpochNonce(
 					block,
 					epoch,
@@ -287,7 +287,11 @@ func (ls *LedgerState) peerChainSelectionEpochNonceAcrossEpochs(
 	labNonce := cloneNonce(sourceEpoch.LastEpochBlockNonce)
 	var initialEvolvingNonce, initialCandidateNonce []byte
 	if originAncestor {
-		_, initialEvolvingNonce, initialCandidateNonce, _, err = ls.computeEpochNonceForSlot(context.Background(), 0, models.Epoch{})
+		_, initialEvolvingNonce, initialCandidateNonce, _, err = ls.computeEpochNonceForSlot(
+			context.Background(),
+			0,
+			models.Epoch{},
+		)
 	} else {
 		initialEvolvingNonce, err = ls.db.GetBlockNonce(ancestor, nil)
 		initialCandidateNonce = cloneNonce(initialEvolvingNonce)
@@ -775,7 +779,10 @@ func (ls *LedgerState) peerHeaderForkPathContext(
 		if err != nil {
 			return ocommon.Point{}, nil, false, err
 		}
-		cachedAncestor = ocommon.NewPoint(cached.ancestor.Slot, cached.ancestor.Hash)
+		cachedAncestor = ocommon.NewPoint(
+			cached.ancestor.Slot,
+			cached.ancestor.Hash,
+		)
 	}
 	if validCached && len(cached.headers) > 0 {
 		lastHeader := cached.headers[len(cached.headers)-1]
@@ -852,6 +859,7 @@ func (ls *LedgerState) peerHeaderForkPathContext(
 				cached.ancestor,
 				path,
 				verificationGeneration,
+				contextGeneration,
 			)
 			return cachedAncestor, path, true, nil
 		}
@@ -888,6 +896,7 @@ func (ls *LedgerState) peerHeaderForkPathContext(
 				models.Block{},
 				pathReversed,
 				verificationGeneration,
+				contextGeneration,
 			)
 			return origin, pathReversed, true, nil
 		}
@@ -911,6 +920,7 @@ func (ls *LedgerState) peerHeaderForkPathContext(
 					block,
 					pathReversed,
 					verificationGeneration,
+					contextGeneration,
 				)
 				return point, pathReversed, true, nil
 			}
@@ -985,7 +995,7 @@ func (ls *LedgerState) storePeerForkPathPrefix(
 	key string,
 	ancestor models.Block,
 	headers []gledger.BlockHeader,
-	generation uint64,
+	generation, contextGeneration uint64,
 ) {
 	ls.forkHeaderNonceCacheMutex.Lock()
 	defer ls.forkHeaderNonceCacheMutex.Unlock()
@@ -994,10 +1004,15 @@ func (ls *LedgerState) storePeerForkPathPrefix(
 	}
 	var ancestorCrypto peerForkAncestorCryptoPrefix
 	if cached, ok := ls.forkHeaderPathCache[key]; ok &&
-		cached.generation == generation && cached.ancestor.Slot == ancestor.Slot &&
+		headerVerdictInContext(
+			cached.generation,
+			contextGeneration,
+			generation,
+		) &&
+		cached.ancestor.Slot == ancestor.Slot &&
 		bytes.Equal(cached.ancestor.Hash, ancestor.Hash) &&
 		cached.ancestorCrypto.valid &&
-		cached.ancestorCrypto.generation == generation &&
+		cached.ancestorCrypto.contextGeneration == contextGeneration &&
 		cached.ancestorCrypto.lastIndex < len(cached.headers) &&
 		cached.ancestorCrypto.lastIndex < len(headers) {
 		matches := true
@@ -1116,7 +1131,7 @@ func (ls *LedgerState) verifyPeerForkAncestorCrypto(
 	index int,
 	epoch uint64,
 	nonce []byte,
-	generation uint64,
+	contextGeneration uint64,
 	verify func() error,
 ) error {
 	key := connIdKey(connID)
@@ -1124,8 +1139,9 @@ func (ls *LedgerState) verifyPeerForkAncestorCrypto(
 	ls.forkHeaderNonceCacheMutex.Lock()
 	entry, exists := ls.forkHeaderPathCache[key]
 	prefix := entry.ancestorCrypto
-	cached := exists && generation != 0 && entry.generation == generation &&
-		prefix.valid && prefix.generation == generation && prefix.epoch == epoch &&
+	cached := exists && contextGeneration != 0 &&
+		entry.generation >= contextGeneration && prefix.valid &&
+		prefix.contextGeneration == contextGeneration && prefix.epoch == epoch &&
 		bytes.Equal(prefix.nonce, nonce) && index <= prefix.lastIndex &&
 		index < len(
 			entry.headers,
@@ -1140,22 +1156,23 @@ func (ls *LedgerState) verifyPeerForkAncestorCrypto(
 	ls.forkHeaderNonceCacheMutex.Lock()
 	defer ls.forkHeaderNonceCacheMutex.Unlock()
 	entry, exists = ls.forkHeaderPathCache[key]
-	if !exists || generation == 0 || entry.generation != generation ||
+	if !exists || contextGeneration == 0 ||
+		entry.generation < contextGeneration ||
 		index >= len(entry.headers) ||
 		!bytes.Equal(entry.headers[index].Hash().Bytes(), hash) {
 		return nil
 	}
 	prefix = entry.ancestorCrypto
-	if !prefix.valid || prefix.generation != generation ||
+	if !prefix.valid || prefix.contextGeneration != contextGeneration ||
 		prefix.epoch != epoch ||
 		!bytes.Equal(prefix.nonce, nonce) ||
 		index > prefix.lastIndex {
 		entry.ancestorCrypto = peerForkAncestorCryptoPrefix{
-			generation: generation,
-			epoch:      epoch,
-			nonce:      cloneNonce(nonce),
-			lastIndex:  index,
-			valid:      true,
+			contextGeneration: contextGeneration,
+			epoch:             epoch,
+			nonce:             cloneNonce(nonce),
+			lastIndex:         index,
+			valid:             true,
 		}
 		ls.forkHeaderPathCache[key] = entry
 	}
@@ -1207,7 +1224,7 @@ func (ls *LedgerState) trimPeerForkPathAtAppliedTip(
 		}
 		// Nonce folding reloads this anchor's stored nonce. The old path's
 		// operational-certificate and crypto prefixes use a different anchor.
-		ls.storePeerForkPathPrefix(key, block, trimmed.headers, generation)
+		ls.storePeerForkPathPrefix(key, block, trimmed.headers, generation, 0)
 		return trimmed, nil
 	}
 	return cached, nil

@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/chainselection"
+	dchainsync "github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -110,10 +111,14 @@ func TestChainsyncObserverDeliveryAuthenticatesLinkedRawAncestry(t *testing.T) {
 			}
 			f.rollForward(t, child)
 
-			require.Equal(t, tc.wantChild, childAuthenticated,
-				"a linked observer child must authenticate using its raw parent")
+			require.Equal(
+				t,
+				tc.wantChild,
+				childAuthenticated,
+				"a linked observer child must authenticate using its raw parent",
+			)
 			wantCalls := 2
-			if tc.skipFirst {
+			if tc.skipFirst || tc.name == "invalid" {
 				wantCalls = 1
 			}
 			require.Equal(t, wantCalls, calls)
@@ -126,7 +131,11 @@ func TestChainsyncObserverDeliveryAuthenticatesLinkedRawAncestry(t *testing.T) {
 			for len(delivered) > 0 {
 				update := <-delivered
 				require.Zero(t, update.AdmissionID)
-				if string(update.ObservedTip.Point.Hash) == string(child.Hash().Bytes()) {
+				if string(
+					update.ObservedTip.Point.Hash,
+				) == string(
+					child.Hash().Bytes(),
+				) {
 					childDelivered = true
 					require.EqualValues(t, 42,
 						update.HeaderCryptoVerificationGeneration)
@@ -208,4 +217,73 @@ func TestChainsyncObserverRawAncestryRejectsReplacedSession(t *testing.T) {
 	_, _, ok := f.state.LookupObservedHeader(f.conn, header.Hash().Bytes())
 	require.False(t, ok,
 		"an old observer callback must not populate a replacement session")
+}
+
+func TestChainsyncObserverVerificationFailureRecyclesOnlyDefiniteErrors(
+	t *testing.T,
+) {
+	t.Parallel()
+	deferred := newTestLedgerState(
+		t,
+	).ValidateChainSelectionHeaderCrypto(nonByronTestHeader{newTestBlockHeader(200, 1, 0xaa).(*testBlockHeader)})
+	require.True(t, ledger.IsHeaderVerificationDeferred(deferred))
+	for _, tc := range []struct {
+		name   string
+		err    error
+		failed bool
+	}{
+		{"valid", nil, false},
+		{"invalid crypto", errors.New("invalid VRF proof"), true},
+		{"deferred", deferred, false},
+		{"withheld", ledger.ErrHeaderVerificationWithheld, false},
+		{"forecast horizon", ledger.ErrHeaderBeyondForecastHorizon, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newPatienceRollForwardFixture(t, false)
+			_, recycleCh := f.o.eventBus.Subscribe(
+				ledger.ConnectionRecycleRequestedEventType,
+			)
+			delivered := 0
+			f.o.config.ChainsyncRecordDeliveredPeerTip = func(chainselection.PeerTipUpdateEvent) { delivered++ }
+			f.o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
+			calls := 0
+			f.o.chainSelectionVerifyHeaderCrypto = func(ouroboros.ConnectionId, gledger.BlockHeader) (uint64, error) { calls++; return 42, tc.err }
+			f.rollForward(t, newTestBlockHeader(100, 1, 0xaa))
+			client := f.state.GetTrackedClient(f.conn)
+			require.NotNil(t, client)
+			require.Equal(
+				t,
+				tc.failed,
+				client.Status == dchainsync.ClientStatusFailed,
+			)
+			if tc.failed {
+				evt := testutil.RequireReceive(
+					t,
+					recycleCh,
+					time.Second,
+					"definite observer failure must request recycling",
+				)
+				data, ok := evt.Data.(ledger.ConnectionRecycleRequestedEvent)
+				require.True(t, ok)
+				require.Equal(t, f.conn, data.ConnectionId)
+				require.Equal(t, "header_verification_failure", data.Reason)
+				require.True(t, client.ObservabilityOnly)
+			} else {
+				testutil.RequireNoReceive(t, recycleCh, 20*time.Millisecond, "retryable observer verification must not penalize the peer")
+			}
+			f.rollForward(t, newTestBlockHeader(101, 2, 0xbb))
+			if tc.failed {
+				require.Equal(
+					t,
+					1,
+					calls,
+					"a failed observer must not re-enter verification",
+				)
+				require.Zero(t, delivered)
+			} else {
+				require.Equal(t, 2, calls)
+			}
+		})
+	}
 }

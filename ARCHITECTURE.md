@@ -6342,9 +6342,10 @@ it. Dingo implements this as a **corroboration gate**
 `genesisBootstrap.corroborationPeers` (`MinCorroboratingPeers`):
 
 A retained peer fork path also records the longest ancestor prefix whose
-stateless cryptography passed for one exact ledger snapshot generation, epoch,
-and candidate nonce. Extending the same hash-linked path preserves that marker;
-a generation change, nonce change, or different prefix prevents reuse. The
+stateless cryptography passed for one consensus context generation, epoch,
+and candidate nonce. Extending the same hash-linked path or publishing a tip
+within that context preserves the marker; a context change, nonce change,
+different anchor, or different prefix prevents reuse. The
 marker adds constant storage per retained connection and is discarded with its
 existing fork-path cache. It skips only repeated VRF, KES, and operational
 certificate signature verification. Peer-scoped ancestry lookup, recorded
@@ -6493,7 +6494,10 @@ Ordinary Praos sessions continue to use primary-chain intersection points.
   populate a replacement bearer with the same connection ID. The existing
   history limit, rollback invalidation, and disconnect cleanup apply, and a
   promoted observer still traverses normal future-header admission and crypto
-  validation. Genuinely invalid deliveries are not retained.
+  validation. Genuinely invalid deliveries are not retained: a definite
+  verification failure marks the observer failed and requests connection
+  recycling. Further callbacks from that failed connection skip verification.
+  Deferred, withheld, and out-of-forecast results do not penalize the peer.
   Rollbacks keep both histories aligned:
   `OuroborosConfig.ChainsyncRecordDeliveredPeerRollback` runs before the
   ingress-admission check, so an ineligible observer's existing
@@ -16208,7 +16212,9 @@ ChainSync admission callback runs under the ledger's pin, so
 `ChainSelector.CommitPeerTipAdmissionPinned`, and a selector commit that took
 its own admission pin, pass that pin to every peer-tip update, peer removal,
 and chain-selection evaluation they trigger instead of re-pinning the current
-generation.
+generation. The selector releases its current-generation pin together with
+its in-memory ingress decision, before checking applied-chain membership in the
+database, so a slow storage read cannot block snapshot publication.
 
 ## Configuration
 
