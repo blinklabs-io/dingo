@@ -9619,7 +9619,11 @@ set):
   signatures back; the KES secret key never enters the node process.
   `PoolCredentials.LoadFromAgentSign` installs VRF/opcert material as usual
   but leaves the local KES secret key unset, storing a `RemoteKESSigner`
-  instead.
+  instead. Every signing request uses a newly authenticated connection that is
+  closed after its response. Dingo never sends a request on a connection that
+  may have gone stale between leader slots, and never retries a request that
+  may already have reached the agent. Serve-key subscriptions continue to
+  reuse their connection so later key pushes arrive on the same stream.
 
 **The non-negotiable invariant**: whichever source supplies the key, KES
 signing goes through the same `credentialGeneration.kesSign`, and that method

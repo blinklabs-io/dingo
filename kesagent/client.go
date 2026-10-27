@@ -110,8 +110,9 @@ type Config struct {
 }
 
 // Client is a bursa KES agent service-socket client. It is safe for
-// concurrent use: every method holds the client's own mutex around the
-// shared connection.
+// concurrent use: every method holds the client's own mutex around connection
+// state. Serve-key mode reuses its subscription connection; sign mode opens a
+// fresh authenticated connection for each request.
 type Client struct {
 	cfg    Config
 	logger *slog.Logger
@@ -325,7 +326,12 @@ func (c *Client) connectLocked(ctx context.Context) error {
 	// serve-key subscriber legitimately blocks on afterward, so it must be
 	// bounded explicitly rather than left to block on a stalled or hostile
 	// agent.
-	if err := conn.SetDeadline(time.Now().Add(c.cfg.HelloTimeout)); err != nil {
+	helloDeadline := time.Now().Add(c.cfg.HelloTimeout)
+	if ctxDeadline, ok := ctx.Deadline(); ok &&
+		ctxDeadline.Before(helloDeadline) {
+		helloDeadline = ctxDeadline
+	}
+	if err := conn.SetDeadline(helloDeadline); err != nil {
 		_ = conn.Close()
 		c.recordDialFailureLocked()
 		return fmt.Errorf("kesagent: set hello deadline: %w", err)
@@ -711,7 +717,10 @@ func (c *Client) invalidateCurrentConn() {
 // internally) and returns the agent's signature only after validating the
 // response's type, its echoed period, and the signature itself against
 // Config.KESVKey (P1: "sign response accepted without validating its type or
-// KES period" -- a cryptographic verification subsumes both).
+// KES period" -- a cryptographic verification subsumes both). Each call uses
+// one freshly authenticated connection and closes it after the response, so an
+// idle connection cannot become stale between leader slots and a request is
+// never retried after it may have reached the agent.
 func (c *Client) Sign(period uint64, message []byte) ([]byte, error) {
 	if len(message) > MaxSignFrameLen/2 {
 		return nil, fmt.Errorf(
@@ -727,40 +736,39 @@ func (c *Client) Sign(period uint64, message []byte) ([]byte, error) {
 			c.cfg.Mode,
 		)
 	}
+	// Sign connections are request-scoped. Discard any connection retained by
+	// an older caller before authenticating the peer for this request.
+	_ = c.closeLocked()
 
 	ctx, cancel := context.WithTimeout(context.Background(), c.cfg.SignTimeout)
 	defer cancel()
+	start := time.Now()
 	if err := c.connectLocked(ctx); err != nil {
 		return nil, err
 	}
-	if err := c.conn.SetDeadline(time.Now().Add(c.cfg.SignTimeout)); err != nil {
-		_ = c.closeLocked()
+	defer func() { _ = c.closeLocked() }()
+	signDeadline := time.Now().Add(c.cfg.SignTimeout)
+	if ctxDeadline, ok := ctx.Deadline(); ok {
+		signDeadline = ctxDeadline
+	}
+	if err := c.conn.SetDeadline(signDeadline); err != nil {
 		c.recordDialFailureLocked()
 		return nil, fmt.Errorf("kesagent: set sign deadline: %w", err)
 	}
-	defer func() {
-		if c.conn != nil {
-			_ = c.conn.SetDeadline(time.Time{})
-		}
-	}()
 
-	start := time.Now()
 	req := SignRequest{Type: "sign_request", Period: period, Message: message}
 	if err := writeFrame(c.conn, MaxSignFrameLen, req); err != nil {
-		_ = c.closeLocked()
 		c.recordDialFailureLocked()
 		c.cfg.Metrics.incSignFailure()
 		return nil, fmt.Errorf("kesagent: send sign request: %w", err)
 	}
 	var resp SignResponse
 	if err := readFrame(c.conn, MaxSignFrameLen, &resp); err != nil {
-		_ = c.closeLocked()
 		c.recordDialFailureLocked()
 		c.cfg.Metrics.incSignFailure()
 		return nil, fmt.Errorf("kesagent: read sign response: %w", err)
 	}
 	if resp.Type != "sign_response" {
-		_ = c.closeLocked()
 		c.recordDialFailureLocked()
 		c.cfg.Metrics.incSignFailure()
 		return nil, fmt.Errorf(
@@ -769,7 +777,6 @@ func (c *Client) Sign(period uint64, message []byte) ([]byte, error) {
 		)
 	}
 	if resp.Period != period {
-		_ = c.closeLocked()
 		c.recordDialFailureLocked()
 		c.cfg.Metrics.incSignFailure()
 		return nil, fmt.Errorf(
@@ -779,6 +786,7 @@ func (c *Client) Sign(period uint64, message []byte) ([]byte, error) {
 		)
 	}
 	if resp.Error != "" {
+		c.recordDialFailureLocked()
 		c.cfg.Metrics.incSignFailure()
 		return nil, fmt.Errorf(
 			"kesagent: agent refused to sign: %s",
@@ -786,7 +794,6 @@ func (c *Client) Sign(period uint64, message []byte) ([]byte, error) {
 		)
 	}
 	if len(resp.Signature) != kes.CardanoKesSignatureSize {
-		_ = c.closeLocked()
 		c.recordDialFailureLocked()
 		c.cfg.Metrics.incSignFailure()
 		return nil, fmt.Errorf(
@@ -796,7 +803,6 @@ func (c *Client) Sign(period uint64, message []byte) ([]byte, error) {
 		)
 	}
 	if period < c.cfg.OpCertStartPeriod {
-		_ = c.closeLocked()
 		c.recordDialFailureLocked()
 		c.cfg.Metrics.incSignFailure()
 		return nil, fmt.Errorf(
@@ -812,7 +818,6 @@ func (c *Client) Sign(period uint64, message []byte) ([]byte, error) {
 		message,
 		resp.Signature,
 	) {
-		_ = c.closeLocked()
 		c.recordDialFailureLocked()
 		c.cfg.Metrics.incSignFailure()
 		return nil, errors.New(
