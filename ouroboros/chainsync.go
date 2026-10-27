@@ -1629,10 +1629,6 @@ func (o *Ouroboros) chainsyncClientRollBackward(
 	// The peer's protocol cursor moves whether or not the rollback is tracked
 	// below, so a withheld header can no longer stand in for it.
 	o.invalidateDeferredHeaderResolution(ctx.ConnectionId)
-	if o.recordHeldChainsyncTip(ctx.ConnectionId, tip) {
-		return ochainsync.ErrStopSyncProcess
-	}
-	o.clearObserverHeaderGapAtRollback(ctx.ConnectionId, clientSession, point)
 	// The delivered history outlives admission, so an observer that is not
 	// ingress-eligible must still lose the frontier the rollback abandoned
 	// before promotion can let it corroborate a candidate.
@@ -1645,6 +1641,10 @@ func (o *Ouroboros) chainsyncClientRollBackward(
 			},
 		)
 	}
+	if o.recordHeldChainsyncTip(ctx.ConnectionId, tip) {
+		return ochainsync.ErrStopSyncProcess
+	}
+	o.clearObserverHeaderGapAtRollback(ctx.ConnectionId, clientSession, point)
 	if !o.reconcileChainsyncIngressAdmission(
 		ctx.ConnectionId,
 		o.shouldPublishChainsyncToLedger(ctx.ConnectionId),

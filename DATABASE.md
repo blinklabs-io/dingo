@@ -3965,18 +3965,23 @@ Validated block application (`ledger.LedgerState.prefetchBlockUtxos`)
 also calls it once per block for the spend, collateral and reference inputs no
 transaction in that block produces; a failed batch falls back to per-input
 `GetUtxo` reads. Refs with no matching live UTxO are simply absent from the result;
-callers must not treat a partial result as an error. It groups the requested
-references by distinct transaction hash, queries every output for batches of
-up to 400 hashes, then filters to the requested output indexes and live rows in
-Go. This keeps SQLite on the leading column of `tx_id_output_idx`; combining a
-large OR-chain of exact pairs with `deleted_slot = 0` can otherwise make the
-planner scan a deleted-slot index instead.
+callers must not treat a partial result as an error. It de-duplicates the
+requested references and resolves exactly those (tx hash, output index) pairs
+in batches of up to 200, then keeps the live rows in Go. Each pair is its own
+equality lookup, so SQLite stays on `tx_id_output_idx` for every reference and
+reads neither the other outputs of the same transactions nor their assets;
+combining a large OR-chain of exact pairs with `deleted_slot = 0` can otherwise
+make the planner scan a deleted-slot index instead.
 
 ```sql
-SELECT u.*, a.*
+SELECT u.*
 FROM utxo u
-LEFT JOIN asset a ON a.utxo_id = u.id
-WHERE u.tx_id IN (decode($1, 'hex'), decode($2, 'hex'));
+WHERE u.id IN (
+  SELECT id FROM utxo WHERE tx_id = decode($1, 'hex') AND output_idx = $2
+  UNION ALL
+  SELECT id FROM utxo WHERE tx_id = decode($3, 'hex') AND output_idx = $4
+);
+-- then the assets of the returned rows only
 ```
 
 ### `UtxoRefsAsOfAfterID`
@@ -4012,18 +4017,20 @@ node, and both only correct rows to what the slot's state already was.
 `GetUtxosByRefs`'s point-pinned sibling, used
 by the point-pinned `GetUTxOByTxIn` n2c query
 (`ledger.LedgerState.queryShelleyUtxoByTxIn`) when the LocalStateQuery
-session has an acquired point. It uses the same transaction-hash lookup shape
-as `GetUtxosByRefs`, then filters in Go to requested output indexes and to the
-as-of-slot bounds: a row matches when it was created at-or-before the pinned
+session has an acquired point. It uses the same exact-reference lookup as
+`GetUtxosByRefs`, then filters in Go to the as-of-slot bounds: a row matches when it was created at-or-before the pinned
 slot and is either still live or was spent strictly after it —
 `added_slot`/`deleted_slot` already carry exactly that per-row history, so this
 is a real historical reconstruction rather than an approximation:
 
 ```sql
-SELECT u.*, a.*
+SELECT u.*
 FROM utxo u
-LEFT JOIN asset a ON a.utxo_id = u.id
-WHERE u.tx_id IN (decode($1, 'hex'), decode($2, 'hex'));
+WHERE u.id IN (
+  SELECT id FROM utxo WHERE tx_id = decode($1, 'hex') AND output_idx = $2
+  UNION ALL
+  SELECT id FROM utxo WHERE tx_id = decode($3, 'hex') AND output_idx = $4
+);
 ```
 
 A ref this query does not return is ambiguous once the pinned slot is old

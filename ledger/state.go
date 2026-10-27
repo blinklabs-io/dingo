@@ -15021,6 +15021,17 @@ func (ls *LedgerState) UtxosByRefs(
 	return ls.db.UtxosByRefs(context.Background(), refs, nil)
 }
 
+// UtxosByRefsBounded is UtxosByRefs for query.ReadUtxos: it observes ctx and
+// stops loading CBOR once maxBytes is exceeded, returning
+// database.ErrUtxoBytesExceeded.
+func (ls *LedgerState) UtxosByRefsBounded(
+	ctx context.Context,
+	refs []models.UtxoId,
+	maxBytes int64,
+) ([]models.Utxo, error) {
+	return ls.db.UtxosByRefsBounded(ctx, refs, maxBytes, nil)
+}
+
 // UtxosByAddress returns all UTxOs that belong to any of the specified addresses
 func (ls *LedgerState) UtxosByAddress(
 	addrs []ledger.Address,

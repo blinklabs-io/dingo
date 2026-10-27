@@ -51,6 +51,10 @@ const (
 	// logURLOrPath redacts HTTP(S) URL credentials while preserving an
 	// ordinary filesystem path byte for byte.
 	logURLOrPath
+	// logHostOnly renders an HTTP(S) URL as scheme, host, and port only.
+	// The path is dropped as well as the credentials, because a mirror can
+	// carry a capability token in it. Any other shape is redacted.
+	logHostOnly
 	// logProviderConfig recursively renders a plugin provider's
 	// free-form configuration map, classifying each key by name.
 	logProviderConfig
@@ -86,9 +90,14 @@ var logURIConfigFields = []string{
 	"Mithril.Server.PublicBaseURL",
 	"Mithril.Server.RedirectBaseURL",
 	"OffchainMetadata.IPFSGatewayURL",
+	"TracingEndpoint",
+}
+
+// logHostOnlyConfigFields are Config field paths holding an operator-chosen
+// mirror URL whose path may itself be a credential.
+var logHostOnlyConfigFields = []string{
 	"TokenRegistry.ManifestURL",
 	"TokenRegistry.SourceURL",
-	"TracingEndpoint",
 }
 
 var logURLOrPathConfigFields = []string{
@@ -362,6 +371,7 @@ var configLogClasses = sync.OnceValue(func() map[string]logClass {
 		logSecret:         logSecretConfigFields,
 		logURI:            logURIConfigFields,
 		logURLOrPath:      logURLOrPathConfigFields,
+		logHostOnly:       logHostOnlyConfigFields,
 		logProviderConfig: logProviderConfigFields,
 	} {
 		for _, path := range paths {
@@ -524,6 +534,8 @@ func classedValue(v reflect.Value, class logClass) slog.Value {
 		return mappedValue(v, redactURICredentials, redactedValue)
 	case logURLOrPath:
 		return mappedValue(v, redactURLCredentialsOrPath, redactedValue)
+	case logHostOnly:
+		return mappedValue(v, redactURLToHost, redactedValue)
 	case logPlain:
 		return mappedValue(
 			v,
@@ -722,6 +734,22 @@ func redactURICredentials(s string) string {
 		return s
 	}
 	return redactURIUserinfo(redactCredentialParams(s))
+}
+
+// redactURLToHost reduces an HTTP(S) URL to scheme, host, and port. A value
+// that is not an absolute HTTP(S) URL has no safe parsed form, so it is
+// replaced rather than echoed.
+func redactURLToHost(s string) string {
+	if s == "" {
+		return s
+	}
+	u, err := url.Parse(strings.TrimSpace(s))
+	if err != nil || u.Opaque != "" || u.Host == "" ||
+		(!strings.EqualFold(u.Scheme, "https") &&
+			!strings.EqualFold(u.Scheme, "http")) {
+		return redactedPlaceholder
+	}
+	return u.Scheme + "://" + u.Host
 }
 
 func redactURLCredentialsOrPath(s string) string {

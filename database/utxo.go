@@ -759,6 +759,48 @@ func (d *Database) UtxosByRefs(
 	return utxos, nil
 }
 
+// ErrUtxoBytesExceeded is returned by UtxosByRefsBounded when the CBOR of the
+// matching UTxOs adds up to more than the byte limit it was given.
+var ErrUtxoBytesExceeded = errors.New("utxo cbor exceeds byte limit")
+
+// UtxosByRefsBounded is UtxosByRefs with a cap on the CBOR it will load. The
+// CBOR size of an output is only known once it has been read, so it is counted
+// as each output is loaded and the call stops with ErrUtxoBytesExceeded as
+// soon as the running total passes maxBytes, holding at most maxBytes plus the
+// output that crossed it. The first output always fits, so a limit smaller
+// than one output still makes progress. ctx is checked before each output is
+// loaded. A maxBytes of zero or less means no limit.
+func (d *Database) UtxosByRefsBounded(
+	ctx context.Context,
+	refs []models.UtxoId,
+	maxBytes int64,
+	txn *Txn,
+) ([]models.Utxo, error) {
+	if txn == nil {
+		txn = d.Transaction(ctx, false)
+		defer txn.Release()
+	}
+	utxos, err := d.utxoStore().GetUtxosByRefs(refs, txn.Metadata())
+	if err != nil {
+		return nil, err
+	}
+	var used int64
+	for i := range utxos {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if err := loadCbor(&utxos[i], txn); err != nil {
+			return nil, err
+		}
+		size := int64(len(utxos[i].Cbor))
+		if maxBytes > 0 && i > 0 && used+size > maxBytes {
+			return nil, ErrUtxoBytesExceeded
+		}
+		used += size
+	}
+	return utxos, nil
+}
+
 // UtxosByRefsAsOf returns the UTxOs matching refs as they stood at atSlot:
 // a ref is included when it was created at-or-before atSlot and is either
 // still live or was spent strictly after atSlot. As with UtxosByRefs, a

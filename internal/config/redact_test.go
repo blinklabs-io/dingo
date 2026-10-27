@@ -104,6 +104,7 @@ func TestConfigLogClassesAreUnambiguous(t *testing.T) {
 		logSecretConfigFields,
 		logURIConfigFields,
 		logURLOrPathConfigFields,
+		logHostOnlyConfigFields,
 		logProviderConfigFields,
 	} {
 		for _, path := range paths {
@@ -127,6 +128,8 @@ var sentinelSecrets = []string{
 	"SENTINEL-MITHRIL-KEY",
 	"SENTINEL-S3-SECRET-KEY",
 	"SENTINEL-TOKEN-REGISTRY-PASSWORD",
+	"SENTINEL-TOKEN-REGISTRY-PATH",
+	"SENTINEL-MANIFEST-PATH",
 	"SENTINEL-TOKEN-REGISTRY-HEADER",
 	"SENTINEL-IPFS-PASSWORD",
 	"SENTINEL-PG-PASSWORD",
@@ -175,8 +178,10 @@ func sentinelSecretConfig() *Config {
 		},
 		TokenRegistry: TokenRegistryConfig{
 			SourceURL: "https://reg:SENTINEL-TOKEN-REGISTRY-PASSWORD" +
-				"@registry.example/registry.tar.gz" +
+				"@registry.example/SENTINEL-TOKEN-REGISTRY-PATH/registry.tar.gz" +
 				"?apiKey='prefix'SENTINEL-TOKEN-REGISTRY-PASSWORD",
+			ManifestURL: "https://registry.example/SENTINEL-MANIFEST-PATH" +
+				"/manifest.json",
 			HeaderSecrets: map[string]string{
 				"Authorization": "Bearer SENTINEL-TOKEN-REGISTRY-HEADER",
 			},
@@ -316,6 +321,47 @@ func TestConfigLogValueRedactsSentinelSecrets(t *testing.T) {
 			if !strings.Contains(rendered, redactedPlaceholder) {
 				t.Errorf("rendered log has no redaction marker:\n%s",
 					rendered)
+			}
+		})
+	}
+}
+
+// TestRedactURLToHost pins the host-only rendering of a mirror URL: the path
+// is dropped with the credentials, and a value with no safe parsed form is
+// replaced rather than echoed.
+func TestRedactURLToHost(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"empty", "", ""},
+		{"plain", "https://registry.example/reg.tar.gz", "https://registry.example"},
+		{"no path", "https://registry.example", "https://registry.example"},
+		{"port", "https://registry.example:8443/a/b", "https://registry.example:8443"},
+		{"http", "http://registry.example/a", "http://registry.example"},
+		{"uppercase scheme", "HTTPS://registry.example/a", "https://registry.example"},
+		{"capability path", "https://registry.example/SENTINEL-PATH/x", "https://registry.example"},
+		{"userinfo query fragment", "https://u:p@registry.example/SENTINEL-PATH?k=SENTINEL-Q#SENTINEL-F", "https://registry.example"},
+		{"surrounding space", "  https://registry.example/SENTINEL-PATH ", "https://registry.example"},
+		{"malformed escape", "https://registry.example/%zz", redactedPlaceholder},
+		{"opaque", "https:registry.example/SENTINEL-PATH", redactedPlaceholder},
+		{"no host", "https:///SENTINEL-PATH", redactedPlaceholder},
+		{"not http", "ftp://registry.example/SENTINEL-PATH", redactedPlaceholder},
+		{"relative", "/SENTINEL-PATH/registry.tar.gz", redactedPlaceholder},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := redactURLToHost(tc.in)
+			if got != tc.want {
+				t.Errorf("redactURLToHost(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+			if strings.Contains(got, "SENTINEL") {
+				t.Errorf("redactURLToHost(%q) leaks: %q", tc.in, got)
 			}
 		})
 	}
@@ -834,6 +880,7 @@ func TestConfigFieldClassesAgreeWithClassifier(t *testing.T) {
 		logPlainConfigFields,
 		logURIConfigFields,
 		logURLOrPathConfigFields,
+		logHostOnlyConfigFields,
 		logProviderConfigFields,
 	) {
 		leaf := path

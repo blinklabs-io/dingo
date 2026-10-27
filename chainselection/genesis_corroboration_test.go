@@ -1885,7 +1885,7 @@ func TestShouldApplyIngressWaitsOutTransientZeroGeneration(t *testing.T) {
 func TestStaleSweepDropsDeliveredHistoryOfClosedConnections(t *testing.T) {
 	t.Parallel()
 
-	const maxPeers = 3
+	const maxPeers = 200
 	dead := make(map[ouroboros.ConnectionId]bool)
 	var deadMu sync.Mutex
 	var cs *ChainSelector
@@ -1930,7 +1930,7 @@ func TestStaleSweepDropsDeliveredHistoryOfClosedConnections(t *testing.T) {
 	require.Equal(t, maxPeers, leaked,
 		"the removal interleaving must leave closed-connection entries")
 
-	live := corrConn(50)
+	live := corrConn(maxPeers + 1)
 	cs.RecordDeliveredPeerTip(update(live))
 	cs.mutex.RLock()
 	require.NotContains(t, cs.deliveredPeerTips, live,
