@@ -407,13 +407,15 @@ func (m *peerManager) backoffLocked(failures int) time.Duration {
 }
 
 // refreshLedgerLocked starts a lookup of the ledger peers when the last is
-// stale or none succeeded yet. The caller holds m.mu.
+// stale or none succeeded yet. A lookup that succeeded and found no usable
+// peer counts as done, so an empty answer is not asked for again on every
+// review. The caller holds m.mu.
 func (m *peerManager) refreshLedgerLocked(ctx context.Context, now time.Time) {
 	l := &m.ledger
 	if l.refreshing || now.Before(l.nextTry) {
 		return
 	}
-	if len(l.peers) > 0 && now.Sub(l.fetched) < m.cfg.LedgerRefresh {
+	if !l.fetched.IsZero() && now.Sub(l.fetched) < m.cfg.LedgerRefresh {
 		return
 	}
 	l.refreshing = true
@@ -431,12 +433,13 @@ func (m *peerManager) refreshLedgerLocked(ctx context.Context, now time.Time) {
 			return
 		}
 		l.peers = publicPeers(peers)
+		usable := len(l.peers)
 		l.fetched = done
 		l.nextTry = time.Time{}
 		m.mu.Unlock()
 		m.logger.Info(
 			"dmq ledger peers refreshed",
-			"offered", len(peers), "usable", len(l.peers),
+			"offered", len(peers), "usable", usable,
 		)
 		m.kick()
 	})

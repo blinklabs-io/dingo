@@ -8622,10 +8622,12 @@ own ledger for a consumer on its local socket, and has a message it accepted on
 that socket accepted by dmq-node. dmq-node accepts a
 pool's messages only once the pool's set stake snapshot is nonzero, which is
 after the devnet's second epoch change, so a run takes about twenty minutes.
-The last two tests need gouroboros v0.214.0 or later, whose authenticator
-verifies the KES signature over the payload's raw CBOR, as dmq-node does;
-earlier releases verified a byte-string wrapped copy and so rejected what
-dmq-node signs.
+`TestInteropDmqNodeServesAMessageToDingo`,
+`TestInteropDmqNodePullsAMessageFromDingo` and
+`TestInteropNodeExchangesMessagesWithDmqNode` need gouroboros v0.214.0 or
+later, whose authenticator verifies the KES signature over the payload's raw
+CBOR, as dmq-node does; earlier releases verified a byte-string wrapped copy
+and so rejected what dmq-node signs.
 
 ### DMQ Peer Network
 
@@ -8662,12 +8664,12 @@ accepts and drops is not redialed in a tight loop. Attempts are counted in
 `dingo_dmq_peer_dials_total{result}`, and `dingo_dmq_peers` is the open count.
 A pair of nodes that dial each other hold two connections.
 
-Ledger peer discovery feeds the same manager. `ledger.LedgerState.
-LedgerPeerSnapshot` returns what `GetLedgerPeerSnapshot` reports for every
-ledger peer, and `dmqStakeAuthority.LedgerPeerSnapshot` reads it through the
+Ledger peer discovery feeds the same manager.
+`ledger.LedgerState.LedgerPeerSnapshot` returns what `GetLedgerPeerSnapshot`
+reports for every ledger peer, and `dmqStakeAuthority.LedgerPeerSnapshot` reads it through the
 same detach handling as the other lookups, so a live restore or truncate
-reports the chain state unavailable and the manager asks again. `dmq.
-LedgerRelayDomains` takes the snapshot and returns the domains of the pools'
+reports the chain state unavailable and the manager asks again.
+`dmq.LedgerRelayDomains` takes the snapshot and returns the domains of the pools'
 SRV relays, in snapshot order without repeats. IP and domain relays are left
 out: they carry the pool's Cardano port, not the port a DMQ node listens on.
 `dmq.ResolveLedgerPeers` then prepends the topic's SRV prefix

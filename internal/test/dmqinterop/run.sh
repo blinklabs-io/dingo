@@ -61,6 +61,7 @@ esac
 
 node_pid=""
 node_dir=""
+devnet_pid=""
 
 cleanup() {
   status=$?
@@ -75,11 +76,13 @@ cleanup() {
     fi
   fi
   if [ -z "${DMQ_INTEROP_KEEP:-}" ]; then
+    if [ -n "$devnet_pid" ]; then kill -TERM "$devnet_pid" 2>/dev/null || true; fi
     if [ -n "$node_pid" ]; then kill -TERM "$node_pid" 2>/dev/null || true; fi
     docker rm -f "$name" >/dev/null 2>&1 || true
     if [ -n "$node_dir" ]; then
       for _ in $(seq 1 60); do
-        kill -0 "$node_pid" 2>/dev/null || break
+        kill -0 "$node_pid" 2>/dev/null || kill -0 "$devnet_pid" 2>/dev/null \
+          || break
         sleep 1
       done
       rm -rf "$node_dir"
@@ -204,7 +207,7 @@ start_node() {
   # exec makes the subshell the node, so $! is the node's own process ID.
   (cd "$node_dir" && exec "$work/bin/dingo-host" devnet \
     --data-dir "$node_dir/state" > "$node_dir/devnet.log" 2>&1) &
-  echo $! > "$node_dir/devnet.pid"
+  devnet_pid=$!
   for _ in $(seq 1 60); do
     if [ -S "$node_dir/dingo.socket" ]; then break; fi
     sleep 1
@@ -213,7 +216,6 @@ start_node() {
     || { echo "the devnet node did not start" >&2; exit 1; }
   # A job the shell runs in the background may ignore SIGINT, so it is
   # stopped with SIGTERM; the command waits for its node, then exits.
-  devnet_pid="$(cat "$node_dir/devnet.pid")"
   kill -TERM "$devnet_pid"
   for _ in $(seq 1 120); do
     if ! kill -0 "$devnet_pid" 2>/dev/null; then break; fi
@@ -223,6 +225,7 @@ start_node() {
     echo "the devnet node did not stop" >&2
     exit 1
   fi
+  devnet_pid=""
   cat > "$work/cfg/dmq-topology-node.json" <<JSON
 {
   "localRoots": [

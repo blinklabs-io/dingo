@@ -76,7 +76,10 @@ always built from this tree.
 
 ## gouroboros version
 
-The second and third tests need a gouroboros whose `MessageAuthenticator`
+`TestInteropDmqNodeServesAMessageToDingo`,
+`TestInteropDmqNodePullsAMessageFromDingo` and
+`TestInteropNodeExchangesMessagesWithDmqNode` need a gouroboros whose
+`MessageAuthenticator`
 verifies a message's KES signature over the payload's raw CBOR, which is what
 dmq-node signs and verifies. gouroboros v0.214.0 does; earlier releases verify a
 copy wrapped in a CBOR byte string, so Dingo would reject every message

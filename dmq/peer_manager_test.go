@@ -282,6 +282,27 @@ func TestPeerManagerDoesNotDialItself(t *testing.T) {
 	assert.Equal(t, 1, m.PeerCount())
 }
 
+// A lookup that succeeds with no usable peer is cached like any other, so an
+// empty answer is not asked for again on every review.
+func TestPeerManagerDoesNotRepeatAnEmptyLedgerLookup(t *testing.T) {
+	t.Parallel()
+	var lookups atomic.Int32
+	m, _, _ := managed(t, PeerConfig{
+		MinPeers: 1,
+		LedgerPeers: func(context.Context) ([]Peer, error) {
+			lookups.Add(1)
+			return nil, nil
+		},
+	})
+	waitFor(t, "the lookup runs", func() bool { return lookups.Load() > 0 })
+	for range 20 {
+		settle(t, m)
+	}
+	// Absence check: a second lookup would start within a few reviews.
+	assert.Never(t, func() bool { return lookups.Load() > 1 },
+		300*time.Millisecond, 10*time.Millisecond)
+}
+
 func TestPeerManagerDialsLedgerPeersOnlyThroughTheGuard(t *testing.T) {
 	t.Parallel()
 	remote, _ := newListeningStack(t, PeerConfig{})
@@ -585,8 +606,11 @@ func TestPeerManagerSettlesAmongManyPeersAndReplacesLostOnes(t *testing.T) {
 		}
 	}
 	require.Equal(t, 3, lost)
+	// The count can still read the limit before the manager has noticed the
+	// loss, so wait for the replacement dials as well.
 	waitFor(t, "the lost peers are replaced", func() bool {
-		return m.PeerCount() == limit &&
+		plain, _ := log.totals()
+		return plain > limit && m.PeerCount() == limit &&
 			connectedCount(m.peerNet.manager) == limit
 	})
 	for range 5 {
