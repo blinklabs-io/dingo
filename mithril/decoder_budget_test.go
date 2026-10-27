@@ -16,8 +16,8 @@ package mithril
 
 import (
 	"bytes"
-	"errors"
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
