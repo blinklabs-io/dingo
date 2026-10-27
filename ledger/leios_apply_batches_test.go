@@ -24,7 +24,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/types"
-	"github.com/blinklabs-io/dingo/internal/safedecode"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -66,16 +65,7 @@ func leiosApplyDenseTx(
 		2: 200_000 + uint64(idx), //nolint:gosec
 	})
 	require.NoError(t, err)
-	txCbor, err := cbor.Encode([]any{
-		cbor.RawMessage(bodyCbor),
-		map[uint]any{},
-		nil,
-		true,
-	})
-	require.NoError(t, err)
-	tx, err := safedecode.DijkstraBlockTransaction(txCbor)
-	require.NoError(t, err)
-	return cbor.RawMessage(txCbor), tx
+	return leiosApplyTestTxFromBody(t, bodyCbor)
 }
 
 // newLeiosApplyDenseLedger opens a ledger over a Badger store whose memtable
@@ -260,6 +250,33 @@ func TestApplyEndorserBlockDenseOffsetsReadableByLaterBlock(t *testing.T) {
 	spender, _ := leiosApplyTestUtxoState(t, raw, spent.Hash().Bytes(), 3)
 	require.NotEmpty(t, spender, "the later block must spend the dense output")
 	requireLeiosDenseOutputsResolve(t, db, txs)
+}
+
+// A transaction later in the same dense endorser block can spend an output
+// of an earlier one. Its offsets are written only after every transaction of
+// the block is applied, so the spend must not read them, and the shared
+// transaction still commits.
+func TestApplyEndorserBlockDenseOffsetsSpentWithinBlock(t *testing.T) {
+	t.Parallel()
+
+	ls, db, count := newLeiosApplyDenseLedger(t)
+	raw, err := dbtest.RawSQLiteMetadata(t, db)
+	require.NoError(t, err)
+	raws, txs := leiosApplyDenseBlock(t, count)
+	spent := txs[0]
+	spendRaw, spendTx := leiosApplyTestSpendingTx(
+		t, 0x5b, spent.Hash().Bytes(), 3,
+	)
+	raws = append(raws, spendRaw)
+
+	require.NoError(t, applyLeiosDenseBlock(
+		ls, db, leiosApplyTestRankingPoint(0x5c), 715,
+		leiosApplyTestEbHash(0x5d), raws,
+	))
+	requireLeiosApplyTestTxCount(t, raw, int64(count+1))
+	spender, _ := leiosApplyTestUtxoState(t, raw, spent.Hash().Bytes(), 3)
+	require.Equal(t, spendTx.Hash().Bytes(), spender)
+	requireLeiosDenseOutputsResolve(t, db, append(txs, spendTx))
 }
 
 // A failure between offset batches leaves the committed batches unreferenced:
