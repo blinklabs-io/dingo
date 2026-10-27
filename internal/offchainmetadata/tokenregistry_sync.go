@@ -473,9 +473,9 @@ func (s *TokenRegistrySync) SourceURL() string {
 }
 
 // registryLogURL renders a registry source for a log field with every
-// component that can carry a credential removed: userinfo, query, and
-// fragment. Scheme, host, port, and path are kept, which is what makes a
-// log line diagnosable.
+// component that can carry a credential removed: userinfo, path, query, and
+// fragment. Only scheme, host, and port are kept. The path is dropped because
+// a mirror can embed a capability token in it.
 //
 // A URL that does not parse has no safe parsed form, and neither does an
 // opaque one, whose single opaque section is not separable into host and
@@ -490,6 +490,8 @@ func registryLogURL(raw string) string {
 		return "[invalid URL]"
 	}
 	u.User = nil
+	u.Path = ""
+	u.RawPath = ""
 	u.RawQuery = ""
 	u.ForceQuery = false
 	u.Fragment = ""
