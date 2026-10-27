@@ -647,6 +647,7 @@ func (n *Node) newOuroborosConfig(
 		ChainsyncHasBestPeer:                 n.chainsyncHasBestPeer,
 		ChainsyncApplyEligible:               n.chainsyncApplyEligible,
 		ChainsyncAwaitEagerness:              n.chainsyncAwaitEagerness,
+		ChainsyncAwaitCatchUpBand:            n.chainsyncAwaitCatchUpBand,
 		ChainsyncAwaitCorroboration:          n.chainsyncAwaitCorroboration,
 		ChainsyncIntersectAtLedgerTip:        n.chainsyncIntersectAtLedgerTip,
 		ChainsyncObservePeerTip:              n.chainsyncObservePeerTip,

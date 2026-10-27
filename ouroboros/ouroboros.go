@@ -57,6 +57,26 @@ import (
 // to keep defaults consistent.
 const defaultMaxChainsyncClients = chainsync.DefaultMaxClients
 
+// defaultCatchUpBandWaitTimeout bounds a catch-up band wait. A parked
+// roll-forward callback stops its protocol's receive loop. The protocol state
+// timers that can run meanwhile are the chainsync Idle timeout (3673s), the
+// CanAwait timeout (ChainsyncBlockTimeout, at least 269s), the MustReply
+// timeout (135-269s), and dingo's own stall timeout (2m by default, measured
+// from the last delivered header). The bound stays under all of them.
+const defaultCatchUpBandWaitTimeout = 60 * time.Second
+
+// catchUpBandWaitTimeoutFor bounds a catch-up band wait by half of stall, the
+// operator's chainsync stall timeout as the node passes it in
+// OuroborosConfig.ChainsyncBlockTimeout before it is raised to the protocol
+// minimum, so a parked connection is never recycled as stalled. A zero stall
+// selects the default.
+func catchUpBandWaitTimeoutFor(stall time.Duration) time.Duration {
+	if stall <= 0 {
+		return defaultCatchUpBandWaitTimeout
+	}
+	return min(defaultCatchUpBandWaitTimeout, stall/2)
+}
+
 // defaultCorroborationHoldTimeout bounds a Genesis corroboration hold. A held
 // roll-forward callback stops its protocol's receive loop, and gouroboros
 // fails a pipelined client that consumes no reply within its CanAwait timeout
@@ -269,6 +289,9 @@ type Ouroboros struct {
 	// corroborationHoldTimeout bounds how long a roll-forward callback holds
 	// a header for Genesis corroboration.
 	corroborationHoldTimeout time.Duration
+	// catchUpBandWaitTimeout bounds how long a roll-forward callback waits
+	// in ChainsyncAwaitCatchUpBand.
+	catchUpBandWaitTimeout time.Duration
 	// chainsyncArrivalNow is an instance-local clock seam for deterministic
 	// arrival-order tests. Production instances use time.Now.
 	chainsyncArrivalNow      func() time.Time
@@ -567,6 +590,19 @@ type OuroborosConfig struct {
 		blockNumber uint64,
 		appliedTip func() ochainsync.Tip,
 	) error
+	// ChainsyncAwaitCatchUpBand blocks while connId's next header, whose
+	// frontier is observedTip, overshoots the peer-relative plausibility bound
+	// only because the local tip lags the headers the node is delivered. The
+	// roll-forward callback blocks on it before the header is admitted,
+	// verified, or observed, so the connection stops requesting headers and no
+	// header is dropped or recorded early. It returns an error if ctx is
+	// cancelled first, and the roll-forward bounds the wait. When nil, no wait
+	// applies.
+	ChainsyncAwaitCatchUpBand func(
+		ctx context.Context,
+		connId ouroboros.ConnectionId,
+		observedTip ochainsync.Tip,
+	) error
 	// ChainsyncAwaitCorroboration holds a roll-forward that ChainsyncApplyEligible
 	// denied, while the denial is only a lack of Genesis corroboration, and
 	// reports whether the header may then be applied. The peer's cursor stays
@@ -777,6 +813,7 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		cfg.Logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	}
 	cfg.Logger = cfg.Logger.With("component", "ouroboros")
+	catchUpBandWait := catchUpBandWaitTimeoutFor(cfg.ChainsyncBlockTimeout)
 	cfg.ChainsyncBlockTimeout = effectiveChainsyncBlockTimeout(
 		cfg.ChainsyncBlockTimeout,
 	)
@@ -826,6 +863,7 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		),
 		chainsyncScheduleAt:      defaultChainsyncScheduleAt,
 		corroborationHoldTimeout: defaultCorroborationHoldTimeout,
+		catchUpBandWaitTimeout:   catchUpBandWait,
 		chainsyncArrivalNow:      time.Now,
 		futureHeaderResyncs: make(
 			map[ouroboros.ConnectionId]*scheduledChainsyncResync,
