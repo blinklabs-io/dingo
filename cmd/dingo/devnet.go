@@ -282,10 +282,6 @@ func prepareLockedDevnetState(
 	}, nil
 }
 
-func openDevnetStateRoot(runDir string) (*os.Root, error) {
-	return openDevnetStateRootMatching(runDir, nil)
-}
-
 func devnetStatePathComponents(runDir string) (string, string, []string, error) {
 	absRunDir, err := filepath.Abs(runDir)
 	if err != nil {

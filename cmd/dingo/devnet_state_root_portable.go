@@ -25,7 +25,7 @@ import (
 )
 
 func openOrCreateDevnetStateRootPortable(runDir string) (*os.Root, error) {
-	_, volumeRoot, names, err := devnetStatePathComponents(runDir)
+	absRunDir, volumeRoot, names, err := devnetStatePathComponents(runDir)
 	if err != nil {
 		return nil, err
 	}
@@ -90,5 +90,10 @@ func openOrCreateDevnetStateRootPortable(runDir string) (*os.Root, error) {
 		root = child
 		current = filepath.Join(current, name)
 	}
-	return root, nil
+	anchored, err := root.Stat(".")
+	_ = root.Close()
+	if err != nil {
+		return nil, fmt.Errorf("checking devnet data directory: %w", err)
+	}
+	return openDevnetStateRootMatching(absRunDir, anchored)
 }
