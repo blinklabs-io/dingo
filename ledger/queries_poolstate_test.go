@@ -22,6 +22,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -432,4 +433,57 @@ func TestQueryPoolState_PinnedPointIgnoresLaterRegistrations(t *testing.T) {
 	live := decode(QueryPoint{})
 	require.Contains(t, live.FState, id)
 	require.Equal(t, map[gledger.Blake2b224]uint64{id: 300}, live.Deposits)
+}
+
+// TestQueryViewPoolStateUsesFrozenEpoch proves a held view answers
+// GetPoolState for the epoch and tip it froze, not for the live epoch a
+// boundary has since advanced to: in the frozen epoch one pool is retiring and
+// another has a re-registration pending, and in the live epoch the retirement
+// is over and nothing is pending.
+func TestQueryViewPoolStateUsesFrozenEpoch(t *testing.T) {
+	t.Parallel()
+
+	ls, db := newDiskTestLedger(t)
+	ls.config.CardanoNodeConfig = newTestEraHistoryCfg(t)
+	retiring := repeatedBytes(28, 0x11)
+	pending := repeatedBytes(28, 0x12)
+
+	// Epoch 3 starts at slot 300 and the frozen tip is slot 350.
+	seedStakePoolParamsPool(t, ls, retiring, 0)
+	seedStakePoolParamsPool(t, ls, pending, 0)
+	seedStakePoolParamsRegistration(t, ls, pending, 0, 320, 2_000_000)
+	seedEpochs(t, ls, map[uint64]uint64{300: 3, 600: 6})
+	seedStakePoolRetirement(t, ls, retiring, 5, 330)
+	view := freezeEpochThenCrossBoundary(
+		t, ls, db, eras.ConwayEraDesc, eras.ConwayEraDesc,
+	)
+	ls.currentEpoch = models.Epoch{
+		EpochId: 6, StartSlot: 600, LengthInSlots: 100,
+	}
+	ls.currentTip = ochainsync.Tip{
+		Point: ocommon.NewPoint(650, repeatedBytes(32, 0x0B)),
+	}
+	ls.publishSnapshotsLocked()
+	query := poolStateQuery([][]byte{retiring, pending})
+	decode := func(got any) olocalstatequery.PoolStateResult {
+		t.Helper()
+		wire, err := cbor.Encode(got)
+		require.NoError(t, err)
+		var wrapped []olocalstatequery.PoolStateResult
+		_, err = cbor.Decode(wire, &wrapped)
+		require.NoError(t, err)
+		require.Len(t, wrapped, 1)
+		return wrapped[0]
+	}
+	retiringID := gledger.NewBlake2b224(retiring)
+	pendingID := gledger.NewBlake2b224(pending)
+
+	got, err := view.Query(t.Context(), query, 0)
+	require.NoError(t, err)
+	frozen := decode(got)
+	require.Contains(t, frozen.PState, retiringID)
+	require.Equal(t, map[gledger.Blake2b224]uint64{retiringID: 5}, frozen.Retiring)
+	require.Contains(t, frozen.FState, pendingID)
+	require.Equal(t, uint64(1_000_000), frozen.PState[pendingID].Pledge)
+	require.Equal(t, uint64(2_000_000), frozen.FState[pendingID].Pledge)
 }
