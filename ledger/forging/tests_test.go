@@ -4468,7 +4468,8 @@ func TestForgeRefusesTheRetryOnEveryStaleTipReason(t *testing.T) {
 				c.chainTipBlockNumber = 100
 				c.upstreamTarget = 9
 				c.upstreamLive = true
-				c.upstreamBlockNumber = 105
+				// K-1 ahead at entry, so only the move opens the gap.
+				c.upstreamBlockNumber = 104
 			},
 			move: func(c *retryTestSlotClock) {
 				c.chainTipSlot = 8
@@ -4512,6 +4513,34 @@ func TestForgeRefusesTheRetryOnEveryStaleTipReason(t *testing.T) {
 			})
 		})
 	}
+}
+
+// TestForgeRefusesAtEntryWhenPeerIsExactlyKBlocksAhead pins the inclusive
+// peer height bound: a corroborated upstream exactly K blocks ahead of the
+// applied tip refuses before the builder runs.
+func TestForgeRefusesAtEntryWhenPeerIsExactlyKBlocksAhead(t *testing.T) {
+	applied := bytes.Repeat([]byte{0xAA}, 32)
+	block := newForgerTestBlock(10, 2)
+	clock := applyBacklogClock(10, 9, applied, time.Now().Add(2*time.Second))
+	clock.chainTipBlockNumber = 100
+	clock.upstreamTarget = 9
+	clock.upstreamLive = true
+	// retryTestSlotClock reports K = 5.
+	clock.upstreamBlockNumber = 105
+	builder := &tipMovingBuilder{
+		block: block,
+		cbor:  block.cbor,
+		clock: clock,
+	}
+	broadcaster := &forgerTestBroadcaster{}
+	forger := newRetryForger(t, clock, builder, broadcaster)
+
+	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+	require.Equal(t, 0, builder.calls)
+	require.Equal(t, 0, broadcaster.calls)
+	requireStaleTipSkips(t, forger, map[string]float64{
+		forgeStaleTipReasonPeerHeightGap: 1,
+	})
 }
 
 // TestTipGateRefusalsAreSkipsNotFailures pins the caller's contract: every
