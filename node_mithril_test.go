@@ -53,6 +53,9 @@ type fakeMithrilLedger struct {
 	// onPause runs when chain ingest is paused, standing in for the wait
 	// for the ledger loop.
 	onPause func()
+	// drain, when set, stands in for DrainTrustedPrune, which is then
+	// recorded as an event.
+	drain func(ctx context.Context) error
 }
 
 func (f *fakeMithrilLedger) Tip() ochainsync.Tip {
@@ -95,6 +98,19 @@ func (f *fakeMithrilLedger) PauseChainIngest() func() {
 		f.pauses--
 		f.events = append(f.events, "resume")
 	})
+}
+
+func (f *fakeMithrilLedger) DrainTrustedPrune(ctx context.Context) error {
+	f.mu.Lock()
+	drain := f.drain
+	if drain != nil {
+		f.events = append(f.events, "drain")
+	}
+	f.mu.Unlock()
+	if drain == nil {
+		return nil
+	}
+	return drain(ctx)
 }
 
 func (f *fakeMithrilLedger) ApplyTrustedBatch(
@@ -714,4 +730,113 @@ func TestCoordinatorMithrilRate(t *testing.T) {
 			assert.InDelta(t, tc.wantBPS, h.c.mithrilBPS, 0.001)
 		})
 	}
+}
+
+// A held run drains the consumed-UTxO cleanup its trusted batches still owe
+// before it resumes chain ingest, so Ouroboros starts without that backlog.
+func TestCoordinatorDrainsTrustedPruneBeforeResume(t *testing.T) {
+	t.Parallel()
+	l := &fakeMithrilLedger{
+		tip:  tipAt(0, 10),
+		next: []ochainsync.Tip{tipAt(10, 1010)},
+	}
+	drained := make(chan error, 1)
+	l.drain = func(ctx context.Context) error {
+		drained <- ctx.Err()
+		return nil
+	}
+	h := newCoordinatorHarness(t, l, 10, func(
+		ctx context.Context, applier TrustedBatchApplier,
+	) error {
+		_, err := applier.ApplyTrustedBatch(ctx, applier.Tip(), nil)
+		return err
+	})
+	h.c.cycle(t.Context())
+	err := testutil.RequireReceive(t, drained, time.Second,
+		"the release did not drain the trusted cleanup")
+	require.NoError(t, err, "the drain ran on a cancelled context")
+	_, _, events := l.state()
+	assert.Equal(t,
+		[]string{"hold", "pause", "apply", "drain", "resume", "release"},
+		events,
+	)
+}
+
+// A live Restore or Truncate that aborts a run while its release drains the
+// trusted cleanup stops the drain, so abortRun, and the lifecycle quiesce
+// waiting on it, does not wait the drain out on a database about to be
+// replaced.
+func TestCoordinatorAbortStopsTrustedPruneDrain(t *testing.T) {
+	t.Parallel()
+	l := &fakeMithrilLedger{
+		tip:  tipAt(0, 10),
+		next: []ochainsync.Tip{tipAt(10, 1010)},
+	}
+	started := make(chan struct{})
+	cause := make(chan error, 1)
+	l.drain = func(ctx context.Context) error {
+		close(started)
+		<-ctx.Done()
+		cause <- context.Cause(ctx)
+		return ctx.Err()
+	}
+	h := newCoordinatorHarness(t, l, 10, func(
+		ctx context.Context, applier TrustedBatchApplier,
+	) error {
+		_, err := applier.ApplyTrustedBatch(ctx, applier.Tip(), nil)
+		return err
+	})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h.c.cycle(t.Context())
+	}()
+	testutil.RequireReceive(t, started, 5*time.Second,
+		"the release never drained the trusted cleanup")
+	aborted := make(chan struct{})
+	go func() {
+		defer close(aborted)
+		h.c.lifecycle.Lock()
+		defer h.c.lifecycle.Unlock()
+		h.c.abortRun()
+	}()
+	testutil.RequireReceive(t, aborted, 5*time.Second,
+		"abortRun waited out the trusted cleanup drain")
+	require.ErrorIs(t,
+		testutil.RequireReceive(t, cause, time.Second, "the drain did not end"),
+		errMithrilLifecycleAbort,
+	)
+	testutil.RequireReceive(t, done, 5*time.Second, "the run did not end")
+	holds, pauses, _ := l.state()
+	require.Zero(t, holds)
+	require.Zero(t, pauses)
+}
+
+// A run a live Restore or Truncate aborted before its release does not drain
+// the trusted cleanup at all: the operation replaces or rewrites the database
+// it would prune.
+func TestCoordinatorAbortSkipsTrustedPruneDrain(t *testing.T) {
+	t.Parallel()
+	l := &fakeMithrilLedger{tip: tipAt(0, 10)}
+	l.drain = func(context.Context) error { return nil }
+	running := make(chan struct{})
+	h := newCoordinatorHarness(t, l, 10, func(
+		ctx context.Context, _ TrustedBatchApplier,
+	) error {
+		close(running)
+		<-ctx.Done()
+		return ctx.Err()
+	})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h.c.cycle(t.Context())
+	}()
+	testutil.RequireReceive(t, running, 5*time.Second, "catch-up did not start")
+	h.lifecycle.Lock()
+	h.c.abortRun()
+	h.lifecycle.Unlock()
+	testutil.RequireReceive(t, done, 5*time.Second, "cycle did not return")
+	_, _, events := l.state()
+	assert.Equal(t, []string{"hold", "pause", "resume", "release"}, events)
 }

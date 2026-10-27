@@ -385,3 +385,42 @@ func testBackendIdentityMetric(t *testing.T, implementation Implementation) {
 	}
 	t.Fatal("dingo_metrics_mempool_info was not registered")
 }
+
+func TestBackendCapacityGauge(t *testing.T) {
+	t.Parallel()
+
+	for _, implementation := range []Implementation{
+		ImplementationFIFO,
+		ImplementationDAG,
+	} {
+		t.Run(string(implementation), func(t *testing.T) {
+			t.Parallel()
+			registry := prometheus.NewRegistry()
+			const capacity = int64(26214400)
+			pool, err := New(implementation, MempoolConfig{
+				Validator:       newMockValidator(),
+				MempoolCapacity: capacity,
+				PromRegistry:    registry,
+			})
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = pool.Stop(context.Background()) })
+
+			families, err := registry.Gather()
+			require.NoError(t, err)
+			for _, family := range families {
+				if family.GetName() != "dingo_mempool_capacity_bytes" {
+					continue
+				}
+				require.Len(t, family.Metric, 1)
+				assert.Empty(t, family.Metric[0].Label)
+				assert.Equal(
+					t,
+					float64(capacity),
+					family.Metric[0].Gauge.GetValue(),
+				)
+				return
+			}
+			t.Fatal("dingo_mempool_capacity_bytes was not registered")
+		})
+	}
+}

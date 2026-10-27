@@ -73,6 +73,12 @@ const (
 	// the hold allows. The header was withheld, so the fresh intersection
 	// delivers it again. It is not a peer-fault signal.
 	ChainsyncResyncReasonGenesisCorroborationHoldExpired = "genesis corroboration hold expired"
+	// ChainsyncResyncReasonIngressPromotion re-intersects a ChainSync observer
+	// when it becomes ingress-eligible, so its headers pass through normal
+	// verification before contributing to Genesis corroboration. The request
+	// is a fallback: a promoting header that continues the local chain
+	// cancels it.
+	ChainsyncResyncReasonIngressPromotion = "ingress promotion"
 	// ChainsyncResyncReasonForecastHorizonNoWork re-intersects a connected
 	// ChainSync peer when no local queued or in-flight blockfetch can advance
 	// the forecast horizon. It is not a peer-fault signal and does not impose
@@ -86,6 +92,14 @@ const (
 	// from fresh intersect points. It is not a peer-fault signal and does not
 	// impose a peer cooldown.
 	ChainsyncResyncReasonBehindLocalTip = "behind local tip"
+	// ChainsyncResyncReasonPromotedObserverAhead re-intersects a connection
+	// promoted from observability-only to ingress-eligible whose delivered
+	// header is more than one block above the local tip. Its candidate
+	// frontier would start above the ledger and could neither be corroborated
+	// nor corroborate the header after the tip, so the connection restarts
+	// from the local tip. It is not a peer-fault signal and does not impose a
+	// peer cooldown.
+	ChainsyncResyncReasonPromotedObserverAhead = "promoted observer ahead of local tip"
 	// ChainsyncResyncReasonNetworkIngestReleased re-intersects every tracked
 	// ChainSync client from the current chain tip when a network ingest hold
 	// is released: while held, each client's cursor ran ahead of the chain

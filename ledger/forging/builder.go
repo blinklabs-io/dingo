@@ -138,6 +138,63 @@ var errTxValidationSnapshotChanged = errors.New(
 	"transaction validation snapshot changed",
 )
 
+// ParentPinnedTxValidationSessionProvider opens a validation session only
+// when the ledger tip is parentHash, the block the caller builds on. A session
+// whose tip is anything else returns an error wrapping
+// ErrTxValidationParentMismatch without calling fn. LedgerState implements it.
+//
+// Endorser-block selection uses it: an announced endorser block must be a
+// valid extension of the state its ranking block leaves, and the forger builds
+// on the primary chain tip while the tip gates let the ledger trail that tip
+// by a short apply backlog. Validating against the trailing state would miss
+// the effects of the unapplied blocks, including certified closures they
+// apply, and could select transactions those blocks already applied.
+type ParentPinnedTxValidationSessionProvider interface {
+	WithTxValidationSessionAtParent(
+		ctx context.Context,
+		parentHash []byte,
+		fn func(
+			validate TxValidationFunc,
+			stillCurrent func() bool,
+			commitIfCurrent func(func() error) (bool, error),
+		) error,
+	) error
+}
+
+// ErrTxValidationParentMismatch reports a parent-pinned validation session
+// whose ledger tip is not the requested parent.
+var ErrTxValidationParentMismatch = errors.New(
+	"transaction validation ledger tip is not the block parent",
+)
+
+// withLeiosSelectionSession runs fn in a validation session pinned to
+// parentHash when the validator supports pinning and parentHash is known, and
+// in an ordinary session otherwise.
+func withLeiosSelectionSession(ctx context.Context,
+	validator TxValidator,
+	parentHash []byte,
+	fn func(TxValidationFunc, func() bool) error,
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if len(parentHash) > 0 {
+		if provider, ok := validator.(ParentPinnedTxValidationSessionProvider); ok {
+			return provider.WithTxValidationSessionAtParent(ctx,
+				parentHash,
+				func(
+					validate TxValidationFunc,
+					stillCurrent func() bool,
+					_ func(func() error) (bool, error),
+				) error {
+					return fn(validate, stillCurrent)
+				},
+			)
+		}
+	}
+	return withTxValidationSession(ctx, validator, fn)
+}
+
 // blockSelectionConstraints carries per-attempt limits from the forge loop
 // into block construction. The zero value is the unconstrained build the
 // exported BuildBlock entrypoints have always performed.

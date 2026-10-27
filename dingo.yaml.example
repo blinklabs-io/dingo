@@ -39,10 +39,12 @@
 # Compiled-in plugin selection and provider configuration.
 # plugins:
   # consensus:
-    # Praos is the default when this section is omitted.
+    # Praos is the default when this section is omitted. Tachys is available
+    # for networks that start in Babbage or Conway with activeSlotsCoeff 1/1;
+    # Genesis/Mithril bootstrap, Leios, and Dijkstra are rejected.
     # CLI: --consensus
     # Env: DINGO_PLUGINS_CONSENSUS_PROVIDER
-    # provider: "praos"
+    # provider: "praos" # or "tachys"
     # config: {}
   # storage:
     # blob:
@@ -92,9 +94,10 @@
       # the CBOR of the decoded outputs the pool keeps for it. Left commented
       # out so the run-mode default
       # applies: 1048576 (1 MiB) for standard modes, 26214400 (25 MiB) for the
-      # leios run mode. An explicit value here overrides both defaults, so a
-      # leios node would silently run with the smaller capacity — uncomment
-      # only to pin a specific size for every run mode.
+      # leios run mode and for the Musashi network (by name or magic). An
+      # explicit value here overrides both defaults, so a leios or Musashi
+      # node would silently run with the smaller capacity — uncomment only to
+      # pin a specific size for every run mode.
       # capacity: 1048576
       # FIFO begins oldest-first eviction here. DAG never evicts and applies
       # TxSubmission backpressure as it approaches rejectionWatermark.
@@ -548,12 +551,14 @@
   # CLI: --koios-parity-cache-path
   # cachePath: ""
   # Can be overridden with DINGO_KOIOS_PARITY_API_KEY
-  # CLI: --koios-parity-api-key
+  # Literal API keys cannot be supplied by CLI because process arguments are
+  # visible to other local accounts. Use the file option for CLI configuration.
   # apiKey: ""
   # File holding the API key, read at startup with trailing line endings
-  # removed. Must be a regular file that other users cannot access (on Unix
-  # owner and group access is allowed; on Windows only the owner,
-  # Administrators and SYSTEM), at most 64 KiB, and not blank. Set
+  # removed. Must be a regular file that other users cannot access. On Unix,
+  # the file and its non-sticky path entries must be owned by this user or root;
+  # owner and group file access is allowed. On Windows only the owner,
+  # Administrators and SYSTEM may have access. At most 64 KiB and not blank. Set
   # apiKey or apiKeyFile, not both.
   # Can be overridden with DINGO_KOIOS_PARITY_API_KEY_FILE
   # CLI: --koios-parity-api-key-file

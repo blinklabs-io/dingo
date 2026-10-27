@@ -2127,10 +2127,12 @@ func TestImportUtxosDeferredRewardLiveStakeRefreshRebuildsCorrectly(
 
 func TestImportUtxosDeferredSQLiteBatchesLiveRows(t *testing.T) {
 	t.Parallel()
-	store := newMigratedSQLiteStore(t)
+	// API mode, where every UTxO write carries its utxo_address row.
+	store := newAPIModeSQLiteStore(t, nil)
 
 	existing := *utxoForInsertCacheTest(90, 0, 5_000_000)
 	existing.AddedSlot = 100
+	existing.Address = []byte("existing-address")
 	require.NoError(t, store.ImportUtxos([]models.Utxo{existing}, nil))
 	markUtxoSpentDirect(t, store, existing.TxId, 0, importConflictHash32(0xaa), 150)
 
@@ -2139,8 +2141,8 @@ func TestImportUtxosDeferredSQLiteBatchesLiveRows(t *testing.T) {
 	utxos[0] = existing
 	for i := 1; i < len(utxos); i++ {
 		utxos[i] = *utxoForInsertCacheTest(byte(100+i), 0, 1_000_000)
+		utxos[i].Address = fmt.Appendf(nil, "test-address-%d", i)
 	}
-	utxos[1].Address = []byte("test-address")
 	utxos[1].Assets = []models.Asset{{
 		Name:        []byte("token"),
 		PolicyId:    bytes.Repeat([]byte{0xab}, 28),
@@ -2166,7 +2168,40 @@ func TestImportUtxosDeferredSQLiteBatchesLiveRows(t *testing.T) {
 		"SELECT COUNT(*) FROM utxo_address",
 	).Scan(&addressCount))
 	require.Equal(t, 1, assetCount)
-	require.Equal(t, 1, addressCount)
+	require.Equal(t, outputCount, addressCount)
+}
+
+// TestImportUtxosDeferredSQLiteSkipsAddressInCoreMode proves the batched
+// import omits the API-only utxo_address relation in core mode, even for an
+// asset-bearing output.
+func TestImportUtxosDeferredSQLiteSkipsAddressInCoreMode(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	require.Equal(t, types.StorageModeCore, store.storageMode)
+
+	utxo := *utxoForInsertCacheTest(0x91, 0, 1_000_000)
+	utxo.Address = []byte("test-address")
+	utxo.Assets = []models.Asset{{
+		Name:        []byte("token"),
+		PolicyId:    bytes.Repeat([]byte{0xab}, 28),
+		Fingerprint: []byte("asset1"),
+		Amount:      types.Uint64(9),
+	}}
+	require.NoError(t, store.ImportUtxosDeferredRewardLiveStakeRefresh(
+		[]models.Utxo{utxo},
+		nil,
+	))
+
+	var assetCount, addressCount int
+	require.NoError(t, store.writeDB.QueryRow(
+		"SELECT COUNT(*) FROM asset",
+	).Scan(&assetCount))
+	require.NoError(t, store.writeDB.QueryRow(
+		"SELECT COUNT(*) FROM utxo_address",
+	).Scan(&addressCount))
+	require.Equal(t, 1, assetCount)
+	require.Zero(t, addressCount,
+		"core mode must not persist API-only UTxO addresses")
 }
 
 // TestImportUtxosDeferredSQLiteDoesNotMutateInput proves the batched path
@@ -2441,4 +2476,90 @@ func TestGetUtxosByAddressAsOfCountsSlotArgsInChunkBudget(t *testing.T) {
 
 	_, err := store.GetUtxosByAddressAsOf(patterns, 1_000, 10, nil)
 	require.NoError(t, err)
+}
+
+// TestUtxosByExactRefsLoadsOnlyRequestedOutputs covers a reference to one
+// output of a transaction that has several. Only that output may be read:
+// resolving by tx_id alone loaded every sibling output and its assets before
+// the caller filtered them away.
+func TestUtxosByExactRefsLoadsOnlyRequestedOutputs(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	txID := bytes.Repeat([]byte{0xAB}, 32)
+	otherTx := bytes.Repeat([]byte{0xCD}, 32)
+	insert := func(tx []byte, idx int) {
+		_, err := store.writeDB.Exec(
+			"INSERT INTO utxo (tx_id, output_idx, added_slot, deleted_slot, "+
+				"amount) VALUES (?, ?, ?, ?, ?)",
+			tx, idx, 1, 0, "1",
+		)
+		require.NoError(t, err)
+	}
+	for idx := range 5 {
+		insert(txID, idx)
+	}
+	insert(otherTx, 0)
+	insert(otherTx, 1)
+
+	// A cross pair of (tx, idx) combinations: both tx_ids and both indexes
+	// also appear in unrequested rows.
+	refs := []models.UtxoId{
+		{Hash: txID, Idx: 3},
+		{Hash: otherTx, Idx: 1},
+		{Hash: txID, Idx: 3},  // repeated
+		{Hash: txID, Idx: 99}, // no such output
+	}
+	got, err := store.utxosByExactRefs(nil, refs)
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+	found := map[string]bool{}
+	for _, u := range got {
+		found[utxoRefKeyForTest(u.TxId, u.OutputIdx)] = true
+	}
+	require.True(t, found[utxoRefKeyForTest(txID, 3)])
+	require.True(t, found[utxoRefKeyForTest(otherTx, 1)])
+}
+
+func utxoRefKeyForTest(hash []byte, idx uint32) string {
+	return fmt.Sprintf("%x#%d", hash, idx)
+}
+
+// TestUtxosByExactRefsSpansQueryBatches covers more references than fit in a
+// single statement. Every reference must still resolve, across batches.
+func TestUtxosByExactRefsSpansQueryBatches(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	seedStakeRefLookupUtxos(t, store, 1_000, 16)
+	n := utxoRefsMaxPerQuery*2 + 37
+	refs := make([]models.UtxoId, n)
+	for i := range refs {
+		refs[i] = utxoIDAt(i)
+	}
+	got, err := store.utxosByExactRefs(nil, refs)
+	require.NoError(t, err)
+	require.Len(t, got, n)
+}
+
+// TestUtxoRefsExactQueryUsesCompositeIndex pins the plan: each reference is
+// its own tx_id_output_idx lookup, with no fallback to a deleted_slot index.
+func TestUtxoRefsExactQueryUsesCompositeIndex(t *testing.T) {
+	skipPlanTestUnderRace(t)
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	seedStakeRefLookupUtxos(t, store, 50_000, 256)
+
+	args := make([]any, 0, utxoRefsMaxPerQuery*2)
+	for i := range utxoRefsMaxPerQuery {
+		ref := utxoIDAt(i * 7)
+		args = append(args, ref.Hash, ref.Idx)
+	}
+	plan := queryPlan(
+		t,
+		store.writeDB,
+		"SELECT id FROM utxo WHERE "+utxoRefsExactQuery(utxoRefsMaxPerQuery),
+		args...,
+	)
+	require.Contains(t, plan, "tx_id_output_idx")
+	require.NotContains(t, plan, "idx_utxo_deleted_payment_script")
+	require.NotContains(t, plan, "idx_utxo_deleted_staking_amount")
 }

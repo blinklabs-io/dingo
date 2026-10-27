@@ -127,6 +127,10 @@ type StreamConfig struct {
 	// for this long without committing a batch. Zero or negative selects
 	// DefaultStreamNoProgressTimeout.
 	NoProgressTimeout time.Duration
+	// chunkTaken, when set, is called with each chunk's number once the feed
+	// has returned it decoded, on the goroutine that decoded it. Tests use it
+	// to see when decoding happens.
+	chunkTaken func(num uint64)
 }
 
 // StreamResult reports where a stream catch-up stopped.
@@ -855,8 +859,14 @@ func (l *tipLocator) verifyAhead(ctx context.Context) error {
 
 func (r *streamRun) run(ctx context.Context) error {
 	window := r.cfg.Feed.WindowChunks
+	// Up to one batch of chunks decodes while the batch before it applies.
+	ahead := startDecodeAhead(
+		ctx, r.feed, r.cfg.BatchChunks, r.cfg.MaxBatchBlocks,
+		r.cfg.chunkTaken,
+	)
+	defer ahead.stop()
 	for {
-		chunk, err := r.feed.Next(ctx)
+		chunk, err := ahead.next()
 		if errors.Is(err, io.EOF) {
 			return r.flush(ctx)
 		}

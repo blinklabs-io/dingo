@@ -463,10 +463,13 @@ func blockApplyCandidatePoint(
 	)
 }
 
-// leiosAnnouncementBatchEnd keeps an announcing ranking block at the front of
-// a one-block apply chunk. The validator can then inspect it while its exact
-// parent is still the published ledger tip, without delaying ChainSync for
-// headers that may never be selected or fetched.
+// leiosAnnouncementBatchEnd ends an apply chunk with the first live
+// announcing ranking block. Once the chunk commits, that block is the
+// published ledger tip, the state its endorser block validates against (see
+// LeiosEndorserBlockBasisHash), and the next chunk's preparation validates
+// the endorser block before any later block, including the one that may
+// certify it, is applied. Headers that are never selected or fetched delay
+// nothing.
 func leiosAnnouncementBatchEnd(
 	blocks []ledger.Block,
 	start, end int,
@@ -483,30 +486,55 @@ func leiosAnnouncementBatchEnd(
 		if _, _, announced := announcer.LeiosAnnouncement(); !announced {
 			continue
 		}
-		if offset == 0 {
-			return start + 1
-		}
-		return start + offset
+		return start + offset + 1
 	}
 	return end
 }
 
-func (ls *LedgerState) validateLeiosAnnouncementBeforeApply(
-	ctx context.Context,
-	block ledger.Block,
-	inLiveValidationRegion bool,
-) error {
-	if !inLiveValidationRegion || ls.config.ValidateLeiosAnnouncement == nil {
+// leiosBatchAnnouncer returns the header of the last block of an apply chunk
+// when that block announces an endorser block, which is where
+// leiosAnnouncementBatchEnd places a live announcing block.
+func leiosBatchAnnouncer(blocks []ledger.Block) ledger.BlockHeader {
+	if len(blocks) == 0 {
 		return nil
 	}
-	announcer, ok := block.Header().(leiosEndorserBlockReferencer)
+	header := blocks[len(blocks)-1].Header()
+	announcer, ok := header.(leiosEndorserBlockReferencer)
 	if !ok {
 		return nil
 	}
 	if _, _, announced := announcer.LeiosAnnouncement(); !announced {
 		return nil
 	}
-	return ls.config.ValidateLeiosAnnouncement(ctx, block.Header())
+	return header
+}
+
+// validateLeiosAnnouncementBeforeApply validates the endorser block
+// announced by the block that ended the previous apply chunk, while that
+// block is still the published ledger tip and before the next chunk applies.
+// A tip that moved elsewhere, by rollback or recovery, leaves nothing to
+// validate.
+func (ls *LedgerState) validateLeiosAnnouncementBeforeApply(
+	ctx context.Context,
+	inLiveValidationRegion bool,
+) error {
+	if !inLiveValidationRegion || ls.config.ValidateLeiosAnnouncement == nil {
+		return nil
+	}
+	header := ls.leiosApplyAnnouncer
+	if header == nil {
+		return nil
+	}
+	ls.RLock()
+	atTip := bytes.Equal(
+		ls.currentTip.Point.Hash,
+		LeiosEndorserBlockBasisHash(header),
+	)
+	ls.RUnlock()
+	if !atTip {
+		return nil
+	}
+	return ls.config.ValidateLeiosAnnouncement(ctx, header)
 }
 
 func (ls *LedgerState) waitForLeiosBeforeApply(
@@ -521,13 +549,12 @@ func (ls *LedgerState) waitForLeiosBeforeApply(
 	}
 	if err := ls.validateLeiosAnnouncementBeforeApply(
 		ctx,
-		precheck[0],
 		validateAnnouncement,
 	); err != nil {
 		ls.config.Logger.Debug(
 			"Leios announcement not validated before block apply",
 			"component", "ledger",
-			"slot", precheck[0].SlotNumber(),
+			"slot", ls.leiosApplyAnnouncer.SlotNumber(),
 			"error", err,
 		)
 	}
@@ -574,18 +601,29 @@ func (ls *LedgerState) prepareBlockApplySnapshot(
 			) {
 			if err := ls.validateLeiosAnnouncementBeforeApply(
 				ctx,
-				precheck[0],
 				true,
 			); err != nil {
 				ls.config.Logger.Debug(
 					"Leios announcement not validated before block apply",
 					"component", "ledger",
-					"slot", precheck[0].SlotNumber(),
+					"slot", ls.leiosApplyAnnouncer.SlotNumber(),
 					"error", err,
 				)
 			}
 			snapshot = ls.captureBlockApplyStateSnapshot()
 		}
+	}
+	// Only a live announcing block is validated at the next chunk; a
+	// historical one would only hold that chunk for its closure.
+	ls.leiosApplyAnnouncer = leiosBatchAnnouncer(
+		blocksBeforeEpochEnd(blocks, selectionEpoch),
+	)
+	if ls.leiosApplyAnnouncer != nil &&
+		!ls.blockApplySnapshotInLiveValidationRegion(
+			snapshot,
+			ls.leiosApplyAnnouncer.SlotNumber(),
+		) {
+		ls.leiosApplyAnnouncer = nil
 	}
 	return snapshot, nil
 }
@@ -885,6 +923,9 @@ type GenesisSelectionStateFunc func() (active bool, window uint64)
 
 type LedgerStateConfig struct {
 	Consensus nodeconsensus.Provider
+	// ConsensusStateRestoredFunc synchronously invalidates provider-owned
+	// production state after rollback publishes its replacement snapshot.
+	ConsensusStateRestoredFunc func()
 	// MaxConcurrentEvaluations bounds transaction evaluations running at
 	// once across every API front end. Zero leaves one logical processor for
 	// consensus work when possible.
@@ -941,7 +982,7 @@ type LedgerStateConfig struct {
 	// the chain and leaving the UTxO set incomplete. Nil disables backfill.
 	EndorserBlockFetcher EndorserBlockFetcherFunc
 	// ValidateLeiosAnnouncement validates a cached endorser block while the
-	// announcing header's parent is still the applied ledger tip. Header
+	// announcing block is the applied ledger tip. Header
 	// admission remains independent: an unavailable or invalid endorser block
 	// receives no vote but does not invalidate its ranking block.
 	ValidateLeiosAnnouncement func(context.Context, ledger.BlockHeader) error
@@ -1366,6 +1407,15 @@ type LedgerState struct {
 	metrics       stateMetrics
 	consensus     atomic.Pointer[consensusSnapshot]
 	tip           atomic.Pointer[tipSnapshot]
+	// tachysMu serializes construction of the full public leader selector.
+	// The cache is bounded to the same three-epoch window as pool snapshots
+	// and keyed by the published consensus context so rollback or state
+	// replacement cannot reuse a selector built from abandoned state.
+	tachysMu            sync.Mutex
+	tachysDistributions []tachysDistributionCacheEntry
+	// Test hook called after a Tachys distribution read releases its
+	// transaction and before the consensus context is rechecked.
+	tachysDistributionLoadedHook func()
 	// snapshotPublished is closed and replaced after every snapshot
 	// publication, so a reader waiting for the ledger to advance can block
 	// until the published state changes instead of polling it.
@@ -1933,6 +1983,11 @@ type LedgerState struct {
 	// untickedClosure holds unpublished Apply events until its certifying RB
 	// commits. Guarded by the LedgerState lock.
 	untickedClosure *pendingLeiosClosure
+	// leiosApplyAnnouncer is the announcing header that ended the last
+	// prepared apply chunk, kept so the next chunk validates its endorser
+	// block while it is the ledger tip. Owned by the block-processing
+	// goroutine, the only caller of prepareBlockApplySnapshot.
+	leiosApplyAnnouncer ledger.BlockHeader
 
 	// publishCtx is cancelled at the top of Close so a ledger.tx publish
 	// parked on a full ordered lane cannot outlive shutdown. Only the
@@ -1957,6 +2012,11 @@ type LedgerState struct {
 	// they write through the batched metadata path, so a test can tell that
 	// path from the per-row one, which stores the same state.
 	afterBatchedTransactionWrite func()
+	// afterBatchedTransactionStored is a test-only hook, nil in production.
+	// It runs where afterBatchedTransactionWrite does, inside the block-apply
+	// transaction, so a test can read the store mid-batch; its error fails
+	// the transaction write.
+	afterBatchedTransactionStored func(*database.Txn, lcommon.Transaction) error
 	// beforeReplayRowFlush is a test-only observation hook, nil in
 	// production. It runs immediately before a chunk's replay-row flush, so a
 	// test can place a known delay inside that flush's apply sample.
@@ -2189,9 +2249,16 @@ type LedgerState struct {
 	// cleanupWG, so a lifecycle test can hold a run in flight and assert
 	// that Close drains it.
 	cleanupConsumedUtxosRunHook func()
-	// trustedPruneRows, when positive, replaces cleanupConsumedUtxoBatchSize
-	// as the per-delete row limit of the trusted-batch cleanup. Test only.
+	// trustedPruneRows, when positive, replaces trustedBatchPruneRows as the
+	// per-delete row limit of the trusted-batch cleanup. Test only.
 	trustedPruneRows int
+	// trustedPruneEvery, when positive, replaces trustedBatchPruneEvery as
+	// the number of trusted batches between trusted-batch cleanups. Test
+	// only.
+	trustedPruneEvery int
+	// trustedPruneBudget, when positive, replaces trustedBatchPruneBudget.
+	// Test only.
+	trustedPruneBudget time.Duration
 	// startupRewardPrecomputeHook is test-only observability for the startup
 	// catch-up boundary; it runs after the real queue call.
 	startupRewardPrecomputeHook func()
@@ -3483,9 +3550,14 @@ func (ls *LedgerState) LatestOpCertSequence(
 	)
 }
 
-// Datum looks up a datum by hash & adding this for implementing query.ReadData
-func (ls *LedgerState) Datum(hash []byte) (*models.Datum, error) {
-	return ls.db.GetDatum(context.Background(), hash, nil)
+// Datums looks up datums by hash in one read transaction for
+// query.ReadData. The result is aligned with hashes; an entry is nil when
+// that datum is not stored.
+func (ls *LedgerState) Datums(
+	ctx context.Context,
+	hashes [][]byte,
+) ([]*models.Datum, error) {
+	return ls.db.GetDatums(ctx, hashes)
 }
 
 // CloseDBWorkerPoolShutdownTimeout, CloseProcessBlocksDrainTimeout, and
@@ -4620,23 +4692,57 @@ func (ls *LedgerState) pruneConsumedUtxosUpTo(
 	return pruned, floor, nil
 }
 
-// trustedBatchPruneBudget bounds how long the consumed-UTxO cleanup after one
-// ApplyTrustedBatch call may run. The cleanup drains every prunable row it
-// can, in cleanupConsumedUtxoBatchSize deletes, so it keeps up with however
-// many outputs a dense batch spends; what the budget leaves behind drains
-// after the next batch. A stream catch-up's no-progress timeout is five
-// minutes per committed batch, and a batch commit itself takes seconds, so
-// thirty seconds keeps the cleanup well inside it.
+// trustedBatchPruneEvery is how many trusted batches commit between runs of
+// the trusted-batch consumed-UTxO cleanup, and trustedBatchPruneRows how many
+// rows each of its deletes removes. A spent row costs less to delete the more
+// rows its transaction deletes with it, so draining the rows sixteen batches
+// spent in one or two large transactions costs less than draining each
+// batch's in a small one.
+const (
+	trustedBatchPruneEvery = 16
+	trustedBatchPruneRows  = 20_000
+)
+
+// trustedBatchPruneBudget bounds how long one run of the trusted-batch
+// consumed-UTxO cleanup may take. The cleanup drains every prunable row it
+// can, in trustedBatchPruneRows deletes, so it keeps up with however many
+// outputs the batches since the last run spent; what the budget leaves behind
+// drains after the next batch, or in DrainTrustedPrune, which has no budget.
+// A stream catch-up's no-progress timeout is five minutes per committed
+// batch, and a batch commit itself takes seconds, so thirty seconds keeps the
+// cleanup well inside it.
 const trustedBatchPruneBudget = 30 * time.Second
+
+// trustedPruneOutcome is how a run of the trusted-batch consumed-UTxO
+// cleanup ended.
+type trustedPruneOutcome int
+
+const (
+	// trustedPruneDrained: nothing prunable is left up to the target.
+	trustedPruneDrained trustedPruneOutcome = iota
+	// trustedPruneSkipped: another cleanup run held the write connection.
+	trustedPruneSkipped
+	// trustedPruneUnfinished: the time budget ran out with rows left.
+	trustedPruneUnfinished
+	// trustedPruneStopped: the cleanup failed, its context ended or the
+	// ledger is closing.
+	trustedPruneStopped
+)
+
+// errTrustedPruneClosing stops a trusted-batch cleanup once Close has begun.
+var errTrustedPruneClosing = errors.New(
+	"consumed UTxO cleanup: ledger is closing",
+)
 
 // trustedPruneBacklogProbeLimit caps the rows read to report the backlog a
 // budget-limited cleanup leaves behind; a larger backlog is logged as capped.
 const trustedPruneBacklogProbeLimit = 10_000
 
 // pruneConsumedUtxosAfterTrustedBatch runs the routine consumed-UTxO cleanup
-// after a trusted batch commits, without the catch-up deferral
-// cleanupConsumedUtxos applies, and up to the committed tip rather than the
-// stability window behind it. A trusted batch lies at or below a certified
+// after trusted batches commit, without the catch-up deferral
+// cleanupConsumedUtxos applies, and up to target, the tip a trusted batch
+// committed, rather than the stability window behind it; a ledger tip below
+// target since a rollback caps it. A trusted batch lies at or below a certified
 // immutable tip, which no rollback can reach, and the batch's own
 // UtxosDeleteSpentInBatch already raises the prune floor to its last slot.
 // While trusted batches arrive the node is far behind the network tip, so the
@@ -4645,30 +4751,39 @@ const trustedPruneBacklogProbeLimit = 10_000
 // index on utxo with them. The floor is capped by acquired LocalStateQuery
 // points and persisted before anything is deleted, exactly as in a routine
 // sweep, so pins and rollbacks below it are refused.
+//
+// It reports whether it drained every prunable row up to target, the rows it
+// deleted, and the error that stopped it when it failed, was cancelled or
+// found the ledger closing.
 func (ls *LedgerState) pruneConsumedUtxosAfterTrustedBatch(
 	ctx context.Context,
-) {
+	target uint64,
+) (trustedPruneOutcome, int, error) {
 	if ls.db.StorageMode() == types.StorageModeAPI {
-		return
+		return trustedPruneDrained, 0, nil
 	}
 	if !ls.beginCleanupConsumedUtxosRun() {
-		return
+		return trustedPruneStopped, 0, errTrustedPruneClosing
 	}
 	defer ls.cleanupWG.Done()
-	// A periodic or epoch run in flight holds the write connection; the next
-	// batch prunes instead.
+	// A periodic or epoch run in flight holds the write connection; the
+	// caller tries again.
 	if !ls.cleanupConsumedUtxosRunning.CompareAndSwap(false, true) {
-		return
+		return trustedPruneSkipped, 0, nil
 	}
 	defer ls.cleanupConsumedUtxosRunning.Store(false)
 	ls.RLock()
-	tipSlot := ls.currentTip.Point.Slot
+	tipSlot := min(ls.currentTip.Point.Slot, target)
 	eraId := ls.currentEra.Id
 	ls.RUnlock()
 	stabilityWindow := ls.calculateStabilityWindowForEra(eraId)
-	rows := cleanupConsumedUtxoBatchSize
+	rows := trustedBatchPruneRows
 	if ls.trustedPruneRows > 0 {
 		rows = ls.trustedPruneRows
+	}
+	budget := trustedBatchPruneBudget
+	if ls.trustedPruneBudget > 0 {
+		budget = ls.trustedPruneBudget
 	}
 	start := time.Now()
 	var (
@@ -4681,7 +4796,7 @@ func (ls *LedgerState) pruneConsumedUtxosAfterTrustedBatch(
 			ctx, tipSlot, stabilityWindow, rows,
 		)
 		if err != nil {
-			return
+			return trustedPruneStopped, total, err
 		}
 		total += pruned
 		floor = prunedTo
@@ -4689,12 +4804,12 @@ func (ls *LedgerState) pruneConsumedUtxosAfterTrustedBatch(
 			drained = true
 			break
 		}
-		if time.Since(start) >= trustedBatchPruneBudget {
+		if time.Since(start) >= budget {
 			break
 		}
 	}
-	if ctx.Err() != nil {
-		return
+	if err := ctx.Err(); err != nil {
+		return trustedPruneStopped, total, err
 	}
 	backlog := 0
 	if !drained {
@@ -4715,6 +4830,10 @@ func (ls *LedgerState) pruneConsumedUtxosAfterTrustedBatch(
 		"prunable_backlog_capped", backlog >= trustedPruneBacklogProbeLimit,
 		"duration", time.Since(start),
 	)
+	if !drained {
+		return trustedPruneUnfinished, total, nil
+	}
+	return trustedPruneDrained, total, nil
 }
 
 // withDestructiveDatabaseTransition keeps coordinated API and lifecycle
@@ -5234,16 +5353,6 @@ func (ls *LedgerState) rollbackWithBlocksAndIntent(
 		snapshot.committed = true
 	}
 	ls.rewardPrecomputeMu.Unlock()
-	// Notify subscribers that pool state has been restored (e.g., for cache invalidation)
-	if publishResync && ls.config.EventBus != nil {
-		ls.config.EventBus.PublishAsync(
-			PoolStateRestoredEventType,
-			event.NewEvent(
-				PoolStateRestoredEventType,
-				PoolStateRestoredEvent{Slot: point.Slot},
-			),
-		)
-	}
 	// Reload epoch cache into locals to discard stale nonces from
 	// rolled-back epochs. The deleted epoch entries will be recreated
 	// with correct nonces when the chain replays past those epoch
@@ -5514,6 +5623,22 @@ func (ls *LedgerState) rollbackWithBlocksAndIntent(
 			ls.config.FatalErrorFunc(healErr)
 		}
 		return &rollbackCommittedError{err: healErr}
+	}
+	// Production schedule recomputation must observe the replacement snapshot,
+	// including a block nonce healed after a deep rollback.
+	if ls.config.ConsensusStateRestoredFunc != nil {
+		ls.config.ConsensusStateRestoredFunc()
+	}
+	// Other ledger consumers may process the restoration asynchronously once
+	// consensus production state has been invalidated.
+	if publishResync && ls.config.EventBus != nil {
+		ls.config.EventBus.PublishAsync(
+			PoolStateRestoredEventType,
+			event.NewEvent(
+				PoolStateRestoredEventType,
+				PoolStateRestoredEvent{Slot: point.Slot},
+			),
+		)
 	}
 	if publishResync && !sameTip {
 		ls.publishLocalLedgerRollback(point)
@@ -9178,6 +9303,9 @@ func (ls *LedgerState) processBlocksFromSource(
 				len(nextBatch[i:end]),
 			)
 			var blocksProcessed int
+			// Blocks this chunk applies through ledgerProcessBlock, kept
+			// for the post-commit adoption-delay observation.
+			var chunkAdopted []adoptedBlock
 			runningNonce := snapshotNonce
 			trackByronPBFT := batchContainsByronBlocks(nextBatch[i:end])
 			var runningByronPBFTState byronPBFTState
@@ -9620,6 +9748,11 @@ func (ls *LedgerState) processBlocksFromSource(
 							BlockNumber: next.BlockNumber(),
 						}
 						blocksProcessed++
+						chunkAdopted = append(chunkAdopted, adoptedBlock{
+							number: next.BlockNumber(),
+							slot:   next.SlotNumber(),
+							hash:   tmpPoint.Hash,
+						})
 						// Per-block composition metrics: era,
 						// transaction count, script/redeemer presence, UTxO
 						// churn, certificate count. Recorded here, not for
@@ -9868,6 +10001,9 @@ func (ls *LedgerState) processBlocksFromSource(
 				checker = ls.config.ForgedBlockChecker
 				ls.publishSnapshotsLocked()
 				ls.Unlock()
+				if !trustedReplay {
+					ls.observeBlockAdoptions(chunkAdopted)
+				}
 				ls.maybeQueueStakeRewardPrecomputeRetry(pendingTip.Point.Slot)
 				// Restore normal DB options outside the lock after validation is enabled
 				if wantEnableValidation && bulkLoadActive &&
@@ -13458,6 +13594,20 @@ func (ls *LedgerState) IntersectPoints(
 			), nil
 		}
 	}
+	return ls.LedgerTipIntersectPoints(ctx, count)
+}
+
+// LedgerTipIntersectPoints returns chainsync FindIntersect candidates ordered
+// from newest to oldest, starting at the applied ledger tip rather than at any
+// primary-chain header ahead of it. Like IntersectPoints, it includes the
+// Mithril trust boundary.
+func (ls *LedgerState) LedgerTipIntersectPoints(
+	ctx context.Context,
+	count int,
+) ([]ocommon.Point, error) {
+	if count <= 0 {
+		return nil, nil
+	}
 	points, err := ls.RecentChainPoints(ctx, count)
 	if err != nil {
 		return nil, err
@@ -14317,11 +14467,7 @@ func (ls *LedgerState) IsByronEra() bool {
 	return ls.loadConsensusSnapshot().currentEra.Id == eras.ByronEraDesc.Id
 }
 
-// ConsensusModeForEpoch returns the Praos consensus variant that
-// governs leader eligibility for the given epoch. Shelley/Allegra/
-// Mary/Alonzo run TPraos; Babbage/Conway run CPraos. Anything else
-// (including Byron and unknown eras) defaults to CPraos, matching
-// how block production paths fall back today.
+// EraIDForEpoch returns the ledger era governing an epoch.
 //
 // Resolution order, mirroring how the leader-election caller can be
 // computing the schedule for the current epoch or pre-computing the
@@ -14346,9 +14492,9 @@ func (ls *LedgerState) IsByronEra() bool {
 // both the VRF leader-value derivation and the threshold, so callers must
 // decline to answer instead of producing a mode nothing established.
 // Steps 1, 2 and 4 read state the node already holds and never error.
-func (ls *LedgerState) ConsensusModeForEpoch(
+func (ls *LedgerState) EraIDForEpoch(
 	epoch uint64,
-) (consensus.ConsensusMode, error) {
+) (uint, error) {
 	snapshot := ls.loadConsensusSnapshot()
 	cache := snapshot.epochCache
 	currentEra := snapshot.currentEra
@@ -14357,12 +14503,12 @@ func (ls *LedgerState) ConsensusModeForEpoch(
 
 	for _, e := range cache {
 		if e.EpochId == epoch {
-			return consensusModeForEraID(e.EraId), nil
+			return e.EraId, nil
 		}
 	}
 
 	if epoch <= currentEpoch.EpochId {
-		return consensusModeForEraID(currentEra.Id), nil
+		return currentEra.Id, nil
 	}
 
 	// HardForkInitiation path: if a confirmed transition pins the next
@@ -14375,14 +14521,14 @@ func (ls *LedgerState) ConsensusModeForEpoch(
 		epoch >= transitionInfo.KnownEpoch {
 		nextID := currentEra.Id + 1
 		if _, ok := ls.eraById(nextID); ok {
-			return consensusModeForEraID(nextID), nil
+			return nextID, nil
 		}
 	}
 
 	shape, err := ls.eraShapeWithError()
 	if err != nil {
 		return 0, fmt.Errorf(
-			"consensus mode for epoch %d is unresolvable: %w",
+			"era for epoch %d is unresolvable: %w",
 			epoch,
 			err,
 		)
@@ -14395,7 +14541,7 @@ func (ls *LedgerState) ConsensusModeForEpoch(
 			// rule out a scheduled fork at or before the target epoch, so
 			// the forecast is unresolvable rather than "no fork".
 			return 0, fmt.Errorf(
-				"consensus mode for epoch %d is unresolvable: "+
+				"era for epoch %d is unresolvable: "+
 					"era %d is unavailable in the hard-fork shape",
 				epoch,
 				eraID,
@@ -14410,13 +14556,25 @@ func (ls *LedgerState) ConsensusModeForEpoch(
 		nextID := eraID + 1
 		if _, ok := ls.eraById(nextID); !ok {
 			return 0, fmt.Errorf(
-				"consensus mode for epoch %d is unresolvable: "+
+				"era for epoch %d is unresolvable: "+
 					"successor era %d is unavailable",
 				epoch,
 				nextID,
 			)
 		}
 		eraID = nextID
+	}
+	return eraID, nil
+}
+
+// ConsensusModeForEpoch returns the Praos consensus variant that governs
+// leader eligibility for the given epoch.
+func (ls *LedgerState) ConsensusModeForEpoch(
+	epoch uint64,
+) (consensus.ConsensusMode, error) {
+	eraID, err := ls.EraIDForEpoch(epoch)
+	if err != nil {
+		return 0, err
 	}
 	return consensusModeForEraID(eraID), nil
 }
@@ -14857,6 +15015,17 @@ func (ls *LedgerState) UtxosByRefs(
 	return ls.db.UtxosByRefs(context.Background(), refs, nil)
 }
 
+// UtxosByRefsBounded is UtxosByRefs for query.ReadUtxos: it observes ctx and
+// stops loading CBOR once maxBytes is exceeded, returning
+// database.ErrUtxoBytesExceeded.
+func (ls *LedgerState) UtxosByRefsBounded(
+	ctx context.Context,
+	refs []models.UtxoId,
+	maxBytes int64,
+) ([]models.Utxo, error) {
+	return ls.db.UtxosByRefsBounded(ctx, refs, maxBytes, nil)
+}
+
 // UtxosByAddress returns all UTxOs that belong to any of the specified addresses
 func (ls *LedgerState) UtxosByAddress(
 	addrs []ledger.Address,
@@ -14900,13 +15069,16 @@ func (ls *LedgerState) UtxosByAddressBoundedPage(
 	)
 }
 
-// UtxosByAddressAtSlot returns all UTxOs belonging to the
-// specified address that existed at the given slot.
-func (ls *LedgerState) UtxosByAddressAtSlot(
+// UtxoBalanceByAddressAtSlot aggregates a historical address balance without
+// materializing its UTxO set.
+func (ls *LedgerState) UtxoBalanceByAddressAtSlot(
+	ctx context.Context,
 	addr lcommon.Address,
 	slot uint64,
-) ([]models.Utxo, error) {
-	return ls.db.UtxosByAddressAtSlot(context.Background(), addr, slot, nil)
+) (models.AddressBalance, error) {
+	txn := database.NewTxnContext(ctx, ls.db, false)
+	defer txn.Release()
+	return ls.db.UtxoBalanceByAddressAtSlot(ctx, addr, slot, txn)
 }
 
 // UtxoByRefIncludingSpent returns a UTxO by reference, including
@@ -15229,6 +15401,19 @@ func LeiosValidationParentHash(header ledger.BlockHeader) []byte {
 	return parentHash.Bytes()
 }
 
+// LeiosEndorserBlockBasisHash returns the ledger-point hash an announced
+// endorser block validates against: the announcing ranking block itself.
+// CIP-164 makes the endorser block's transactions a valid extension of the
+// ledger state that block leaves, which includes the transactions of any
+// endorser block it certifies and its own body transactions, so they can
+// spend outputs neither the block's parent state nor its own transactions
+// alone contain. The block that certifies the endorser block is the next
+// one, whose parent is the announcing block, so this is also the state those
+// transactions are applied on.
+func LeiosEndorserBlockBasisHash(header ledger.BlockHeader) []byte {
+	return header.Hash().Bytes()
+}
+
 func (ls *LedgerState) txValidationSnapshot() txValidationSnapshot {
 	consensusState, tipState := ls.loadStateSnapshots()
 	tipSlot := tipState.currentTip.Point.Slot
@@ -15272,6 +15457,7 @@ func (ls *LedgerState) txValidationSnapshot() txValidationSnapshot {
 // the root package, which is where *LedgerState is wired in as its validator.
 var (
 	_ forging.TxValidationSessionProvider               = (*LedgerState)(nil)
+	_ forging.ParentPinnedTxValidationSessionProvider   = (*LedgerState)(nil)
 	_ lcommon.GenesisDelegationState                    = (*LedgerState)(nil)
 	_ lcommon.ClassicProtocolParameterUpdateWindowState = (*LedgerState)(nil)
 )
@@ -15358,6 +15544,48 @@ func (ls *LedgerState) WithResolvingTxValidationSession(ctx context.Context,
 	) error {
 		return fn(validate, stillCurrent, commitIfCurrent, resolve)
 	})
+}
+
+// WithTxValidationSessionAtParent is WithTxValidationSession pinned to a
+// ledger tip of parentHash: when the published tip is anything else, fn is not
+// called and the error wraps forging.ErrTxValidationParentMismatch. The block
+// forger selects an announced endorser block's transactions through it, so
+// they are validated against the state of the ranking block's parent rather
+// than a trailing ledger that has not yet applied it.
+func (ls *LedgerState) WithTxValidationSessionAtParent(ctx context.Context,
+	parentHash []byte,
+	fn func(
+		validate func(
+			tx ledger.Transaction,
+			consumedUtxos map[utxoref.Key]struct{},
+			createdUtxos map[utxoref.Key]lcommon.Utxo,
+			accounts *utxoref.StateOverlay,
+		) error,
+		stillCurrent func() bool,
+		commitIfCurrent func(func() error) (bool, error),
+	) error,
+) error {
+	if parentHash == nil {
+		// A nil expected parent disables the check below; the origin
+		// parent is the empty hash.
+		parentHash = []byte{}
+	}
+	err := ls.withTxValidationSession(ctx, parentHash, nil, false, false, func(
+		validate func(ledger.Transaction, map[utxoref.Key]struct{}, map[utxoref.Key]lcommon.Utxo, *utxoref.StateOverlay) error,
+		stillCurrent func() bool,
+		commitIfCurrent func(func() error) (bool, error),
+		_ txValidationApplyFunc,
+	) error {
+		return fn(validate, stillCurrent, commitIfCurrent)
+	})
+	if errors.Is(err, ErrLeiosValidationParentSuperseded) {
+		return fmt.Errorf(
+			"%w: %w",
+			forging.ErrTxValidationParentMismatch,
+			err,
+		)
+	}
+	return err
 }
 
 func (ls *LedgerState) withTxValidationSession(ctx context.Context,
@@ -15575,12 +15803,18 @@ var errRollbackLedgerValidationSession = errors.New(
 )
 
 // ValidateLeiosEndorserBlockTransactions validates an announced endorser
-// block against the exact ledger snapshot named by the ranking block's
-// parent. It uses one repeatable-read transaction and applies transaction
-// effects in manifest order so later transactions can spend earlier outputs.
+// block against the exact ledger snapshot named by basis, which must be the
+// applied ledger tip. Peers and voters pass LeiosEndorserBlockBasisHash; a
+// forger checking its own announcement before the ranking block is adopted
+// passes LeiosValidationParentHash, which is equivalent only because a
+// locally built announcing block carries no transactions of its own and
+// excludes the transactions of the endorser block it certifies. It uses one
+// repeatable-read transaction and applies transaction effects in manifest
+// order so later transactions can spend earlier outputs.
 func (ls *LedgerState) ValidateLeiosEndorserBlockTransactions(
 	ctx context.Context,
 	header ledger.BlockHeader,
+	basis []byte,
 	txs [][]byte,
 ) error {
 	if header == nil {
@@ -15613,13 +15847,12 @@ func (ls *LedgerState) ValidateLeiosEndorserBlockTransactions(
 		ctx = context.Background() //nolint:contextcheck // literal-nil fallback
 	}
 	slot := header.SlotNumber()
-	parentHash := LeiosValidationParentHash(header)
-	parentIsCurrentTip := func() bool {
+	basisIsCurrentTip := func() bool {
 		_, currentTip := ls.loadStateSnapshots()
-		return bytes.Equal(currentTip.currentTip.Point.Hash, parentHash)
+		return bytes.Equal(currentTip.currentTip.Point.Hash, basis)
 	}
 	return ls.withTxValidationSession(ctx,
-		parentHash,
+		basis,
 		&slot,
 		true,
 		true,
@@ -15641,7 +15874,7 @@ func (ls *LedgerState) ValidateLeiosEndorserBlockTransactions(
 					return err
 				}
 				if !stillCurrent() {
-					if !parentIsCurrentTip() {
+					if !basisIsCurrentTip() {
 						return ErrLeiosValidationParentSuperseded
 					}
 					return ErrLeiosValidationParentUnavailable
@@ -15710,7 +15943,7 @@ func (ls *LedgerState) ValidateLeiosEndorserBlockTransactions(
 				return err
 			}
 			if !stillCurrent() {
-				if !parentIsCurrentTip() {
+				if !basisIsCurrentTip() {
 					return ErrLeiosValidationParentSuperseded
 				}
 				return ErrLeiosValidationParentUnavailable

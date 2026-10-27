@@ -678,7 +678,9 @@ func TestRequireMatchingKoiosSource(t *testing.T) {
 func TestFromGenesisKoiosAPIKeySources(t *testing.T) {
 	// Not t.Parallel: fromGenesisCommand binds its flags to the
 	// package-level koiosFlags.
-	keyFile := filepath.Join(t.TempDir(), "key")
+	dir := t.TempDir()
+	require.NoError(t, os.Chmod(dir, 0o700))
+	keyFile := filepath.Join(dir, "key")
 	require.NoError(t, os.WriteFile(keyFile, []byte("from-file\n"), 0o600))
 	for _, tc := range []struct {
 		name    string
@@ -741,7 +743,9 @@ func TestFromGenesisKoiosClientUsesKeyFile(t *testing.T) {
 		},
 	))
 	t.Cleanup(srv.Close)
-	keyFile := filepath.Join(t.TempDir(), "key")
+	dir := t.TempDir()
+	require.NoError(t, os.Chmod(dir, 0o700))
+	keyFile := filepath.Join(dir, "key")
 	require.NoError(t, os.WriteFile(keyFile, []byte("from-file\n"), 0o600))
 
 	cmd := fromGenesisCommand()

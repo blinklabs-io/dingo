@@ -18,7 +18,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
 	"sync"
 	"time"
 
@@ -40,11 +39,12 @@ const (
 // Three independent limits apply: a cap on streams that are replaying at once,
 // process-wide and per client (refused, never queued), a per-client block rate
 // that slows replay down without ending it, and a per-client block count per
-// window that ends a replay once spent. A client is the remote host, so
-// clients behind one proxy share a budget, as with streamLimiter. The
-// per-client slot cap is what stops one host from holding every process-wide
-// slot: the stream cap admits many streams per client, and a stream holds its
-// slot while it waits on pacing or on a client that stopped reading.
+// window that ends a replay once spent. A client is the remote IPv4 address
+// or IPv6 /64 prefix (see clientKey), so clients behind one proxy share a
+// budget, as with streamLimiter. The per-client slot cap is what stops one
+// client from holding every process-wide slot: the stream cap admits many
+// streams per client, and a stream holds its slot while it waits on pacing or
+// on a client that stopped reading.
 type replayLimiter struct {
 	maxSlots          int
 	maxSlotsPerClient int
@@ -105,17 +105,10 @@ func sleepContext(ctx context.Context, d time.Duration) error {
 	}
 }
 
-func replayClientKey(peerAddr string) string {
-	if host, _, err := net.SplitHostPort(peerAddr); err == nil {
-		return host
-	}
-	return peerAddr
-}
-
 // acquireSlot reserves one of the concurrent replay slots for the client at
 // peerAddr without waiting.
 func (l *replayLimiter) acquireSlot(peerAddr string) (func(), error) {
-	key := replayClientKey(peerAddr)
+	key := clientKey(peerAddr)
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.active >= l.maxSlots {
@@ -152,7 +145,7 @@ func (l *replayLimiter) acquireSlot(peerAddr string) (func(), error) {
 // ResourceExhausted once the client has spent its window budget, and
 // otherwise waits as long as the client's block rate requires.
 func (l *replayLimiter) charge(ctx context.Context, peerAddr string) error {
-	key := replayClientKey(peerAddr)
+	key := clientKey(peerAddr)
 	l.mu.Lock()
 	now := l.now()
 	l.sweepLocked(now)

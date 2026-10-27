@@ -133,8 +133,8 @@ type UtxorpcConfig struct {
 	// request (0 = use default).
 	MaxTxRefs int
 	// MaxStreams caps concurrent FollowTip, WatchTx, WatchMempool and WaitForTx streams
-	// across all clients; MaxStreamsPerClient caps them per remote host
-	// (0 = use default).
+	// across all clients; MaxStreamsPerClient caps them per client, an IPv4
+	// address or IPv6 /64 (0 = use default).
 	MaxStreams          int
 	MaxStreamsPerClient int
 	// MaxPredicateNodes caps the total nodes of a watch predicate
@@ -180,7 +180,7 @@ type UtxorpcConfig struct {
 	// (0 = use default).
 	MaxConcurrentBulkRequests int
 	// MaxConcurrentEvalRequests caps EvalTx handlers before transaction
-	// decoding; MaxEvalRequestsPerClient applies the same bound per remote host.
+	// decoding; MaxEvalRequestsPerClient applies the same bound per client.
 	MaxConcurrentEvalRequests int
 	MaxEvalRequestsPerClient  int
 	// BulkResponseWriteTimeout bounds delivery of a bulk unary response

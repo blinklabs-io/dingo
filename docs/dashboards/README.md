@@ -11,7 +11,7 @@ Monitoring dashboards for [Dingo](https://github.com/blinklabs-io/dingo), the Go
 | **Peer Health** | `peer-health.json` | Hot/warm/cold peers, connection types, peer state timeseries, promotions/demotions, network I/O |
 | **Mempool** | `mempool.json` | Pending TXs, mempool size, TX lifecycle, CBOR cache, event bus |
 | **Resource Usage** | `resources.json` | CPU, memory, GC heatmap, disk I/O, IOPS, PSI pressure, Badger, file descriptors |
-| **Leios** | `leios.json` | Voting committee, own votes not cast by reason, votes received and rejected, endorser block pipeline and stages, diffusion waits, endorser block forging |
+| **Leios** | `leios.json` | Voting committee, block lanes (each RB's header arrival, time before the request, fetch and adoption beside each EB's arrival), endorser block lifecycle against the CIP-164 header, vote and diffusion periods, own votes not cast by reason, votes received and rejected, endorser block pipeline and stages, diffusion waits, endorser block forging, RB/EB timing, chainsync deferred headers and resyncs, ledger stage time, RB and EB detail tables |
 
 ## Prerequisites
 
@@ -176,6 +176,12 @@ Some metrics only emit when their feature is active. Panels display "No data" un
 | `database_blob_*` | Badger blob store is active |
 | `dingo_metrics_leios_*` other than `dingo_metrics_leios_eb_wait_*` | Leios is active: the network is Musashi, `runMode` is `leios`, or the node starts in the Dijkstra era. The `eb_wait` series exist on every node and stay at zero without Leios |
 | `dingo_metrics_leios_forge_eb_*`, `dingo_forge_eb_*` | The node runs as a block producer. They exist at zero on every block producer, with or without Leios, and are absent on relays |
+| `dingo_blockfetch_recent_block_slot`, `dingo_blockfetch_recent_block_kind`, `dingo_blockfetch_block_delay_seconds` | Blockfetch has delivered a block. `block_kind` is 0 for a block that neither announces nor certifies an endorser block, so it stays 0 without Leios. The Leios block lanes and endorser block lifecycle panels need `block_slot`; on a build without it they show "No per-block data" |
+| `dingo_leios_recent_eb_*`, `dingo_leios_eb_arrival_delay_seconds` | Leios is active and an endorser block arrived at the tip; backfilled endorser blocks more than 5 minutes after their slot are not recorded |
+| `dingo_chainsync_recent_header_*`, `dingo_chainsync_header_arrival_delay_seconds` | The node is at tip and a verified chainsync header arrived; the header-arrival ticks and the L_hdr counts on the Leios panels need them |
+| `dingo_ledger_recent_adoption_*`, `dingo_ledger_block_adoption_delay_seconds` | The ledger adopted a block outside trusted replay |
+| `dingo_chainsync_deferred_headers_total`, `dingo_chainsync_deferred_header_connections`, `dingo_chainsync_resyncs_total` | Always registered; the counters stay at zero until a header is parked or a resync is handled |
+| `dingo_mempool_capacity_bytes` | The mempool is initialized |
 
 ## File listing
 

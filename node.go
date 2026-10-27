@@ -71,6 +71,7 @@ import (
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/muxer"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	okeepalive "github.com/blinklabs-io/gouroboros/protocol/keepalive"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 	"github.com/prometheus/client_golang/prometheus"
@@ -148,10 +149,13 @@ type Node struct {
 	// dialing/closing it (closing the prior one before replacing it, so a
 	// live-lifecycle rebuild via reinitializeBlockProducer cannot leak a
 	// connection); node_shutdown.go closes it during graceful shutdown.
-	kesAgentClient               *kesagent.Client
-	kesAgentCancel               context.CancelFunc
-	kesAgentMetrics              *kesagent.Metrics
-	leaderElection               nodeconsensus.LeaderScheduler
+	kesAgentClient  *kesagent.Client
+	kesAgentCancel  context.CancelFunc
+	kesAgentMetrics *kesagent.Metrics
+	leaderElection  nodeconsensus.LeaderScheduler
+	// leaderSchedulerRef mirrors leaderElection for readers outside the
+	// node lifecycle goroutine, such as the ledger rollback callback.
+	leaderSchedulerRef           atomic.Pointer[leaderSchedulerRef]
 	rtsMetrics                   *rtsMetrics
 	shutdownFuncs                []func(context.Context) error
 	deferredIndexMaintenanceDone chan struct{}
@@ -614,6 +618,7 @@ func (n *Node) newOuroborosConfig(
 		ChainsyncState:                 n.chainsyncState,
 		PeerGov:                        n.peerGov,
 		NetworkMagic:                   n.config.networkMagic,
+		NodeToNodeNetworkMagic:         n.consensusNetworkMagic(),
 		PeerSharing:                    n.config.peerSharing,
 		IntersectTip:                   n.config.intersectTip,
 		IntersectPoints:                n.config.intersectPoints,
@@ -636,20 +641,23 @@ func (n *Node) newOuroborosConfig(
 		// connection, so the fetch is gated on the txs offer, not the block
 		// offer. Best-effort: a fetch failure never tears down the shared
 		// connection.
-		EnableLeiosTxFetch:              enableLeiosNetworking,
-		LeiosTxFetchTailBudget:          leiosTxFetchTailBudget,
-		ChainsyncIngressEligible:        n.isChainsyncIngressEligible,
-		ChainsyncHasBestPeer:            n.chainsyncHasBestPeer,
-		ChainsyncApplyEligible:          n.chainsyncApplyEligible,
-		ChainsyncAwaitEagerness:         n.chainsyncAwaitEagerness,
-		ChainsyncAwaitCorroboration:     n.chainsyncAwaitCorroboration,
-		ChainsyncObservePeerTip:         n.chainsyncObservePeerTip,
-		ChainsyncPrepareForecastWitness: n.chainsyncPrepareForecastWitness,
-		ChainsyncRemoveForecastWitness:  n.chainsyncRemoveForecastWitness,
-		ChainsyncResolvePeerTip:         n.chainsyncResolvePeerTip,
-		ChainsyncObserveAwaitReply:      n.chainsyncObserveAwaitReply,
-		ChainsyncSyncTarget:             n.chainsyncSyncTarget,
-		ChainsyncObservePeerRollback:    n.chainsyncObservePeerRollback,
+		EnableLeiosTxFetch:                   enableLeiosNetworking,
+		LeiosTxFetchTailBudget:               leiosTxFetchTailBudget,
+		ChainsyncIngressEligible:             n.isChainsyncIngressEligible,
+		ChainsyncHasBestPeer:                 n.chainsyncHasBestPeer,
+		ChainsyncApplyEligible:               n.chainsyncApplyEligible,
+		ChainsyncAwaitEagerness:              n.chainsyncAwaitEagerness,
+		ChainsyncAwaitCorroboration:          n.chainsyncAwaitCorroboration,
+		ChainsyncIntersectAtLedgerTip:        n.chainsyncIntersectAtLedgerTip,
+		ChainsyncObservePeerTip:              n.chainsyncObservePeerTip,
+		ChainsyncRecordDeliveredPeerTip:      n.chainsyncRecordDeliveredPeerTip,
+		ChainsyncRecordDeliveredPeerRollback: n.chainsyncRecordDeliveredPeerRollback,
+		ChainsyncPrepareForecastWitness:      n.chainsyncPrepareForecastWitness,
+		ChainsyncRemoveForecastWitness:       n.chainsyncRemoveForecastWitness,
+		ChainsyncResolvePeerTip:              n.chainsyncResolvePeerTip,
+		ChainsyncObserveAwaitReply:           n.chainsyncObserveAwaitReply,
+		ChainsyncSyncTarget:                  n.chainsyncSyncTarget,
+		ChainsyncObservePeerRollback:         n.chainsyncObservePeerRollback,
 		// On the Musashi prototype network every mini-protocol shares one muxer
 		// to a single relay; block/EB traffic can delay the relay's keep-alive
 		// pong past the tight 10s gouroboros default, making dingo drop the
@@ -685,6 +693,12 @@ var (
 // through the same validator's session, again by interface assertion; losing
 // the method would leave those inputs out of the index with no error.
 var _ mempool.ResolvingTxValidationSessionProvider = (*ledger.LedgerState)(nil)
+
+// The mempool evicts a Leios certifying ranking block's certified closure as
+// confirmed (and restores it on rollback) through the same validator, again
+// by interface assertion; losing the method would leave applied closure
+// transactions in the pool until revalidation happened to catch them.
+var _ mempool.CertifiedClosureProvider = (*ledger.LedgerState)(nil)
 
 //nolint:contextcheck // Run is the lifecycle boundary and derives n.ctx from the caller context.
 func (n *Node) Run(ctx context.Context) (runErr error) {
@@ -790,6 +804,9 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		return fmt.Errorf("failed to resolve consensus plugin: %w", err)
 	}
 	n.consensusProvider = provider
+	if err := validateConsensusConfiguration(&n.config, provider); err != nil {
+		return fmt.Errorf("invalid consensus configuration: %w", err)
+	}
 
 	// Reconcile a live Restore's directory swap (node_lifecycle.go's
 	// swapInRestoredDataDir) that was interrupted by a crash, process
@@ -2209,6 +2226,16 @@ func (n *Node) buildChainSelectorConfig(
 				return ochainsync.Tip{}, false
 			}
 			return ls.Tip(), true
+		},
+		PointOnLocalChain: func(point ocommon.Point) bool {
+			ls := n.wallClockLedger.Load()
+			if ls == nil {
+				return false
+			}
+			return ls.VerifyPointOnChain(
+				context.Background(),
+				ledger.QueryPoint{Slot: point.Slot, Hash: point.Hash},
+			) == nil
 		},
 	}
 	// The running node publishes its started ledger before constructing the

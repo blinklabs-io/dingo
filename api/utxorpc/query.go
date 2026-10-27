@@ -450,8 +450,18 @@ func (s *queryServiceServer) ReadUtxos(
 	for i, txo := range keys {
 		refs[i] = models.UtxoId{Hash: txo.GetHash(), Idx: txo.GetIndex()}
 	}
-	utxos, err := s.utxorpc.config.LedgerState.UtxosByRefs(refs)
+	utxos, err := s.utxorpc.config.LedgerState.UtxosByRefsBounded(
+		ctx,
+		refs,
+		budget.limit,
+	)
 	if err != nil {
+		if errors.Is(err, database.ErrUtxoBytesExceeded) {
+			return nil, budget.exceeded()
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, readStateContextError(ctxErr)
+		}
 		return nil, err
 	}
 	utxoByRef := make(map[string]*models.Utxo, len(utxos))
@@ -725,16 +735,42 @@ func (s *queryServiceServer) ReadData(
 	budget := byteBudget{limit: s.utxorpc.config.MaxResponseBytes}
 	resp := &query.ReadDataResponse{}
 
+	// Look each distinct hash up once, in first-seen order, in a single
+	// read transaction that observes cancellation.
+	seen := make(map[string]struct{}, len(keys))
+	unique := make([][]byte, 0, len(keys))
 	for _, key := range keys {
-		datum, err := s.utxorpc.config.LedgerState.Datum(key)
+		if _, dup := seen[string(key)]; dup {
+			continue
+		}
+		seen[string(key)] = struct{}{}
+		unique = append(unique, key)
+	}
+	datums := []*models.Datum{}
+	if len(unique) > 0 {
+		found, err := s.utxorpc.config.LedgerState.Datums(ctx, unique)
 		if err != nil {
-			if errors.Is(err, database.ErrDatumNotFound) {
-				return nil, connect.NewError(
-					connect.CodeNotFound,
-					fmt.Errorf("datum not found: %x", key),
-				)
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, readStateContextError(ctxErr)
 			}
-			return nil, fmt.Errorf("get datum %x: %w", key, err)
+			return nil, fmt.Errorf("get datums: %w", err)
+		}
+		if len(found) != len(unique) {
+			return nil, fmt.Errorf(
+				"get datums: got %d results for %d hashes",
+				len(found),
+				len(unique),
+			)
+		}
+		datums = found
+	}
+	for i, key := range unique {
+		datum := datums[i]
+		if datum == nil {
+			return nil, connect.NewError(
+				connect.CodeNotFound,
+				fmt.Errorf("datum not found: %x", key),
+			)
 		}
 		if !budget.fits(len(datum.RawDatum)) {
 			return nil, budget.exceeded()

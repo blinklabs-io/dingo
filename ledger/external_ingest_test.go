@@ -19,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -87,6 +88,7 @@ func newExternalIngestHarnessWith(
 	dataDir string,
 	storageMode string,
 	securityParam int,
+	opts ...func(*LedgerStateConfig),
 ) *externalIngestHarness {
 	t.Helper()
 	db, err := dbtest.NewDatabase(t, &database.Config{
@@ -101,7 +103,7 @@ func newExternalIngestHarnessWith(
 	if securityParam != 0 {
 		cfg.ShelleyGenesis().SecurityParam = securityParam
 	}
-	ls, err := NewLedgerState(LedgerStateConfig{
+	lsCfg := LedgerStateConfig{
 		Database:              db,
 		ChainManager:          cm,
 		CardanoNodeConfig:     cfg,
@@ -109,7 +111,11 @@ func newExternalIngestHarnessWith(
 		PromRegistry:          prometheus.NewRegistry(),
 		ManualBlockProcessing: manual,
 		TrustedReplay:         manual,
-	})
+	}
+	for _, opt := range opts {
+		opt(&lsCfg)
+	}
+	ls, err := NewLedgerState(lsCfg)
 	require.NoError(t, err)
 	h := &externalIngestHarness{ls: ls, db: db, cm: cm}
 	t.Cleanup(func() { h.shutdown(t) })
@@ -237,7 +243,15 @@ func (h *externalIngestHarness) applyPaused(
 	t.Helper()
 	resume := h.ls.PauseChainIngest()
 	defer resume()
-	return h.ls.ApplyTrustedBatch(t.Context(), expected, blocks)
+	tip, err := h.ls.ApplyTrustedBatch(t.Context(), expected, blocks)
+	// The Mithril coordinator drains the owed cleanup before it resumes, so
+	// each call leaves the store a whole catch-up leaves. A test holding the
+	// cleanup flag stands for a run in flight, which the drain would wait
+	// for.
+	if !h.ls.cleanupConsumedUtxosRunning.Load() {
+		require.NoError(t, h.ls.DrainTrustedPrune(t.Context()))
+	}
+	return tip, err
 }
 
 func utxoRowCount(t *testing.T, db *database.Database) int {
@@ -1150,4 +1164,296 @@ func TestApplyTrustedBatchPruneKeepsUpWithDenseBatch(t *testing.T) {
 	require.NoError(t, err)
 	require.Zero(t, backlog)
 	require.Len(t, liveUtxoKeys(t, h.db), 1)
+}
+
+// TestApplyTrustedBatchPruneCadence applies the spend scenario of
+// TestApplyTrustedBatchPrunesSpentRows inside one outer pause, as the Mithril
+// stream does. The trusted cleanup must skip batches until the cadence is
+// reached, keep the live UTxO set identical to an every-batch cleanup while
+// spent rows wait, and prune everything up to the tip when it runs.
+func TestApplyTrustedBatchPruneCadence(t *testing.T) {
+	t.Parallel()
+
+	blocks, _ := externalIngestBlocks(t, 2)
+	batches := [][]gledger.Block{
+		blocks[:3], blocks[3:4], blocks[4:5], blocks[5:],
+	}
+	reference := newExternalIngestHarness(t, false)
+	referenceLive := make([][]string, len(batches))
+	tip := ocommon.Point{}
+	for i, batch := range batches {
+		var err error
+		tip, err = reference.applyPaused(t, tip, batch)
+		require.NoError(t, err)
+		referenceLive[i] = liveUtxoKeys(t, reference.db)
+	}
+
+	h := newExternalIngestHarness(t, false)
+	// The first batch of a process always prunes, so the cadence counts
+	// from the second: it prunes again after the fourth.
+	h.ls.trustedPruneEvery = 3
+	resume := h.ls.PauseChainIngest()
+	defer resume()
+	tip = ocommon.Point{}
+	spent := make([]int, len(batches))
+	for i, batch := range batches {
+		var err error
+		tip, err = h.ls.ApplyTrustedBatch(t.Context(), tip, batch)
+		require.NoError(t, err)
+		spent[i] = spentUtxoRowCount(t, h.db)
+		require.Equal(t, referenceLive[i], liveUtxoKeys(t, h.db),
+			"spent rows awaiting the cleanup changed the live UTxO set "+
+				"after batch %d", i)
+	}
+	require.Zero(t, spent[0])
+	require.Positive(t, spent[1],
+		"the cleanup ran before the cadence was reached")
+	require.Greater(t, spent[2], spent[1],
+		"the cleanup ran before the cadence was reached")
+	require.Zero(t, spent[3],
+		"spent rows at or below the trusted tip were kept at the cadence")
+	floor, err := h.ls.readConsumedUtxoPruneFloor(nil)
+	require.NoError(t, err)
+	require.Equal(t, tip.Slot, floor,
+		"the prune floor must be persisted at the batch tip")
+}
+
+// owedTrustedPrune applies two batches inside one pause with a cadence the
+// second does not reach, so the second batch's spent row is owed to the
+// cleanup. It returns the harness, still paused, and the trusted tip.
+func owedTrustedPrune(
+	t *testing.T,
+	opts ...func(*LedgerStateConfig),
+) (*externalIngestHarness, ocommon.Point) {
+	t.Helper()
+	blocks, _ := externalIngestBlocks(t, 2)
+	h := newExternalIngestHarnessWith(
+		t, false, t.TempDir(), types.StorageModeCore, 0, opts...,
+	)
+	h.ls.trustedPruneEvery = 100
+	resume := h.ls.PauseChainIngest()
+	t.Cleanup(resume)
+	tip, err := h.ls.ApplyTrustedBatch(t.Context(), ocommon.Point{}, blocks[:3])
+	require.NoError(t, err)
+	tip, err = h.ls.ApplyTrustedBatch(t.Context(), tip, blocks[3:5])
+	require.NoError(t, err)
+	require.Positive(t, spentUtxoRowCount(t, h.db),
+		"the second batch must leave spent rows for the cleanup")
+	return h, tip
+}
+
+// TestDrainTrustedPrune drains what the cadence left owed: every spent row up
+// to the trusted tip goes, the floor is persisted at it, and the live UTxO
+// set is unchanged. The drain reports its start and its end, with the rows
+// it deleted, at Info. Draining again with nothing owed is a silent no-op.
+func TestDrainTrustedPrune(t *testing.T) {
+	t.Parallel()
+
+	var logs syncSafeBuffer
+	h, tip := owedTrustedPrune(t, func(cfg *LedgerStateConfig) {
+		cfg.Logger = slog.New(slog.NewTextHandler(&logs, nil))
+	})
+	spent := spentUtxoRowCount(t, h.db)
+	live := liveUtxoKeys(t, h.db)
+	require.NoError(t, h.ls.DrainTrustedPrune(t.Context()))
+	require.Zero(t, spentUtxoRowCount(t, h.db),
+		"the drain left spent rows at or below the trusted tip")
+	floor, err := h.ls.readConsumedUtxoPruneFloor(nil)
+	require.NoError(t, err)
+	require.Equal(t, tip.Slot, floor)
+	require.Equal(t, live, liveUtxoKeys(t, h.db))
+	out := logs.String()
+	require.Equal(t, 1, strings.Count(
+		out,
+		"level=INFO msg=\"draining consumed UTxO cleanup owed by "+
+			"trusted batches\"",
+	))
+	require.Contains(t, out, fmt.Sprintf(
+		"level=INFO msg=\"finished consumed UTxO cleanup owed by trusted "+
+			"batches\" component=ledger pruned=%d", spent))
+	require.NoError(t, h.ls.DrainTrustedPrune(t.Context()))
+	require.Equal(t, out, logs.String(),
+		"a drain with nothing owed must not log")
+}
+
+// TestDrainTrustedPruneWaitsOutAnotherRun holds the cleanup, as an in-flight
+// periodic sweep does, when the drain starts. The drain must wait for it and
+// then prune, rather than give up and leave the backlog to live mode.
+func TestDrainTrustedPruneWaitsOutAnotherRun(t *testing.T) {
+	t.Parallel()
+
+	h, _ := owedTrustedPrune(t)
+	h.ls.cleanupConsumedUtxosRunning.Store(true)
+	done := make(chan error, 1)
+	go func() { done <- h.ls.DrainTrustedPrune(t.Context()) }()
+	testutil.RequireNoReceive(t, done, 300*time.Millisecond,
+		"the drain gave up while another cleanup run held the connection")
+	h.ls.cleanupConsumedUtxosRunning.Store(false)
+	require.NoError(t, testutil.RequireReceive(t, done, 5*time.Second,
+		"the drain did not finish once the other run ended"))
+	require.Zero(t, spentUtxoRowCount(t, h.db),
+		"the drain left spent rows at or below the trusted tip")
+}
+
+// TestDrainTrustedPruneOutlastsBudget owes the cleanup forty spent rows and
+// gives it deletes of one row and a budget one delete exhausts. The drain
+// must keep going past the budget until nothing is owed.
+func TestDrainTrustedPruneOutlastsBudget(t *testing.T) {
+	t.Parallel()
+
+	const outputs = 40
+	seed := bytes.Repeat([]byte{0x7b}, 32)
+	addr := rowBatchingBaseAddress(t, 0x44, 0x22)
+	produced := make([]any, outputs)
+	for i := range produced {
+		produced[i] = map[uint]any{0: addr, 1: uint64(1_000_000)}
+	}
+	fanOut := newRowBatchingTx(t, map[uint]any{
+		0: []any{[]any{seed, uint64(0)}},
+		1: produced,
+		2: uint64(100_000),
+	})
+	spent := make([]any, outputs)
+	for i := range spent {
+		spent[i] = []any{fanOut.hash, uint64(i)}
+	}
+	fanIn := newRowBatchingTx(t, map[uint]any{
+		0: spent,
+		1: []any{map[uint]any{0: addr, 1: uint64(1_000_000)}},
+		2: uint64(100_000),
+	})
+	b1 := rowBatchingBlock(t, 10, 1, lcommon.Blake2b256{}, fanOut)
+	b2 := rowBatchingBlock(t, 20, 2, b1.Hash(), fanIn)
+
+	h := newExternalIngestHarness(t, false)
+	h.ls.trustedPruneEvery = 100
+	resume := h.ls.PauseChainIngest()
+	defer resume()
+	tip, err := h.ls.ApplyTrustedBatch(
+		t.Context(), ocommon.Point{}, []gledger.Block{b1},
+	)
+	require.NoError(t, err)
+	_, err = h.ls.ApplyTrustedBatch(t.Context(), tip, []gledger.Block{b2})
+	require.NoError(t, err)
+	require.Equal(t, outputs, spentUtxoRowCount(t, h.db))
+	h.ls.trustedPruneRows = 1
+	h.ls.trustedPruneBudget = time.Nanosecond
+	require.NoError(t, h.ls.DrainTrustedPrune(t.Context()))
+	require.Zero(t, spentUtxoRowCount(t, h.db),
+		"the drain stopped at the cleanup's time budget")
+}
+
+// TestDrainTrustedPruneStopsWithContext drains on an ended context, as a
+// lifecycle abort or a node shutdown leaves it. The drain must return the
+// context's error at once and delete nothing.
+func TestDrainTrustedPruneStopsWithContext(t *testing.T) {
+	t.Parallel()
+
+	h, _ := owedTrustedPrune(t)
+	spent := spentUtxoRowCount(t, h.db)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	require.ErrorIs(t, h.ls.DrainTrustedPrune(ctx), context.Canceled)
+	require.Equal(t, spent, spentUtxoRowCount(t, h.db))
+}
+
+// TestApplyTrustedBatchPrunesBacklogAfterRestart leaves spent rows awaiting
+// the cleanup when the process stops, then restarts over the same store. The
+// restarted process's first trusted batch must prune the backlog the earlier
+// process left, rather than wait for a cadence it never counted.
+func TestApplyTrustedBatchPrunesBacklogAfterRestart(t *testing.T) {
+	t.Parallel()
+
+	blocks, _ := externalIngestBlocks(t, 2)
+	dir := t.TempDir()
+	h := newExternalIngestHarnessAt(t, false, dir)
+	h.ls.trustedPruneEvery = 100
+	tip, err := h.applyPaused(t, ocommon.Point{}, blocks[:3])
+	require.NoError(t, err)
+	// Held, as by an in-flight periodic sweep, the cleanup skips the second
+	// batch, as a process stopped before its cleanup would.
+	h.ls.cleanupConsumedUtxosRunning.Store(true)
+	tip, err = h.applyPaused(t, tip, blocks[3:5])
+	require.NoError(t, err)
+	h.ls.cleanupConsumedUtxosRunning.Store(false)
+	require.Positive(t, spentUtxoRowCount(t, h.db))
+	h.shutdown(t)
+
+	h = newExternalIngestHarnessAt(t, false, dir)
+	h.ls.trustedPruneEvery = 100
+	require.Positive(t, spentUtxoRowCount(t, h.db))
+	resume := h.ls.PauseChainIngest()
+	defer resume()
+	_, err = h.ls.ApplyTrustedBatch(t.Context(), tip, blocks[5:])
+	require.NoError(t, err)
+	require.Zero(t, spentUtxoRowCount(t, h.db),
+		"the first batch after a restart left the earlier backlog")
+}
+
+// TestApplyTrustedBatchPruneRetriedAfterSkip holds the cleanup, as an
+// in-flight periodic sweep does, on the batch that reaches the cadence. The
+// next batch must run it rather than count a new cadence from the skip.
+func TestApplyTrustedBatchPruneRetriedAfterSkip(t *testing.T) {
+	t.Parallel()
+
+	blocks, _ := externalIngestBlocks(t, 2)
+	h := newExternalIngestHarness(t, false)
+	h.ls.trustedPruneEvery = 2
+	resume := h.ls.PauseChainIngest()
+	defer resume()
+	tip, err := h.ls.ApplyTrustedBatch(t.Context(), ocommon.Point{}, blocks[:3])
+	require.NoError(t, err)
+	tip, err = h.ls.ApplyTrustedBatch(t.Context(), tip, blocks[3:4])
+	require.NoError(t, err)
+	h.ls.cleanupConsumedUtxosRunning.Store(true)
+	tip, err = h.ls.ApplyTrustedBatch(t.Context(), tip, blocks[4:5])
+	require.NoError(t, err)
+	h.ls.cleanupConsumedUtxosRunning.Store(false)
+	require.Positive(t, spentUtxoRowCount(t, h.db),
+		"the held cleanup must leave the spent rows")
+	_, err = h.ls.ApplyTrustedBatch(t.Context(), tip, blocks[5:])
+	require.NoError(t, err)
+	require.Zero(t, spentUtxoRowCount(t, h.db),
+		"a skipped cleanup was not retried on the next batch")
+}
+
+// TestApplyTrustedBatchPruneStopsAtTrustedTip leaves a trusted cleanup owed
+// past the pause, lets the live loop apply blocks above the trusted tip, and
+// then drains it. The owed cleanup must stop at the tip the
+// trusted batch committed: rows the live blocks spent lie inside the rollback
+// window, so neither they nor the prune floor may move.
+func TestApplyTrustedBatchPruneStopsAtTrustedTip(t *testing.T) {
+	t.Parallel()
+
+	blocks, _ := externalIngestBlocks(t, 2)
+	h := newExternalIngestHarness(t, false)
+	h.ls.trustedPruneEvery = 100
+	tip, err := h.applyPaused(t, ocommon.Point{}, blocks[:3])
+	require.NoError(t, err)
+	// Held, the cleanup skips the batch, so the batch's spent row is still
+	// owed when the live loop takes over.
+	h.ls.cleanupConsumedUtxosRunning.Store(true)
+	trusted, err := h.applyPaused(t, tip, blocks[3:4])
+	require.NoError(t, err)
+	h.ls.cleanupConsumedUtxosRunning.Store(false)
+	owed := spentUtxoRowCount(t, h.db)
+	require.Positive(t, owed)
+
+	h.startLiveLoop(t)
+	require.NoError(t, h.cm.PrimaryChain().AddBlocks(t.Context(), blocks[4:]))
+	last := blockPoint(blocks[len(blocks)-1])
+	require.Eventually(t, func() bool {
+		return pointMatches(h.ls.Tip().Point, last)
+	}, 5*time.Second, 10*time.Millisecond)
+	require.Greater(t, spentUtxoRowCount(t, h.db), owed,
+		"the live blocks must spend a committed output")
+	liveSpent := spentUtxoRowCount(t, h.db) - owed
+
+	require.NoError(t, h.ls.DrainTrustedPrune(t.Context()))
+	require.Equal(t, liveSpent, spentUtxoRowCount(t, h.db),
+		"the owed cleanup pruned rows spent above the trusted tip")
+	floor, err := h.ls.readConsumedUtxoPruneFloor(nil)
+	require.NoError(t, err)
+	require.Equal(t, trusted.Slot, floor,
+		"the owed cleanup raised the prune floor above the trusted tip")
 }

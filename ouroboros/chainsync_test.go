@@ -150,6 +150,73 @@ func TestChainsyncClientRollForwardCarriesHeaderCryptoVerdict(t *testing.T) {
 	require.EqualValues(t, 42, data.HeaderCryptoVerificationGeneration)
 }
 
+func TestChainsyncClientRollForwardRecordsObserverDelivery(t *testing.T) {
+	t.Parallel()
+	f := newPatienceRollForwardFixture(t, false)
+	delivered := make(chan chainselection.PeerTipUpdateEvent, 1)
+	observeCalled := false
+	f.o.config.ChainsyncRecordDeliveredPeerTip = func(
+		update chainselection.PeerTipUpdateEvent,
+	) {
+		delivered <- update
+	}
+	f.o.config.ChainsyncObservePeerTip = func(
+		chainselection.PeerTipUpdateEvent,
+	) chainselection.PeerTipUpdateDisposition {
+		observeCalled = true
+		return chainselection.PeerTipUpdateAccepted
+	}
+	f.o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
+	f.o.chainSelectionVerifyHeaderCrypto = func(
+		ouroboros.ConnectionId,
+		gledger.BlockHeader,
+	) (uint64, error) {
+		return 42, nil
+	}
+	header := newTestBlockHeader(100, 1, 0xaa)
+
+	f.rollForward(t, header)
+
+	update := testutil.RequireReceive(t, delivered, time.Second,
+		"observer header should be recorded for corroboration")
+	require.Equal(t, f.conn, update.ConnectionId)
+	require.Equal(t, header.Hash().Bytes(), update.ObservedTip.Point.Hash)
+	require.Equal(t, uint64(42), update.HeaderCryptoVerificationGeneration)
+	require.Zero(t, update.AdmissionID,
+		"observer history must not create an admission candidate")
+	require.False(t, observeCalled,
+		"an ineligible observer must not enter selector admission")
+}
+
+func TestChainsyncClientRollForwardRejectsUnverifiedObserverDelivery(
+	t *testing.T,
+) {
+	t.Parallel()
+	f := newPatienceRollForwardFixture(t, false)
+	f.o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
+	f.o.chainSelectionVerifyHeaderCrypto = func(
+		ouroboros.ConnectionId,
+		gledger.BlockHeader,
+	) (uint64, error) {
+		return 0, errors.New("bad vrf")
+	}
+	delivered := make(chan chainselection.PeerTipUpdateEvent, 1)
+	f.o.config.ChainsyncRecordDeliveredPeerTip = func(
+		update chainselection.PeerTipUpdateEvent,
+	) {
+		delivered <- update
+	}
+
+	f.rollForward(t, newTestBlockHeader(100, 1, 0xaa))
+
+	testutil.RequireNoReceive(
+		t,
+		delivered,
+		200*time.Millisecond,
+		"an unauthenticated observer header must not become corroboration evidence",
+	)
+}
+
 func TestChainsyncPeerTipAdmissionUsesRevalidatedGeneration(t *testing.T) {
 	t.Parallel()
 
@@ -8413,4 +8480,28 @@ func TestChainsyncClientRollForwardWithholdsWallClockStalePeer(t *testing.T) {
 		t, ledgerCh, 200*time.Millisecond,
 		"no further header should be published",
 	)
+}
+
+func TestChainsyncRollBackwardTrimsIneligibleObserverDeliveredHistory(
+	t *testing.T,
+) {
+	t.Parallel()
+	f := newPatienceRollForwardFixture(t, false)
+	rolled := make(chan chainselection.PeerRollbackEvent, 1)
+	f.o.config.ChainsyncRecordDeliveredPeerRollback = func(
+		e chainselection.PeerRollbackEvent,
+	) {
+		rolled <- e
+	}
+	point := ocommon.NewPoint(50, []byte("rb"))
+	tip := ochainsync.Tip{Point: point, BlockNumber: 5}
+
+	require.NoError(t, f.o.chainsyncClientRollBackward(
+		ochainsync.CallbackContext{ConnectionId: f.conn}, point, tip,
+	))
+
+	e := testutil.RequireReceive(t, rolled, time.Second,
+		"an ineligible observer's rollback must reach the delivered history")
+	require.Equal(t, f.conn, e.ConnectionId)
+	require.Equal(t, point, e.Point)
 }

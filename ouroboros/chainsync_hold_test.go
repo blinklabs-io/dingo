@@ -196,6 +196,34 @@ func TestHoldNetworkIngestDropsHeaders(t *testing.T) {
 	)
 }
 
+func TestHoldNetworkIngestRollBackwardTrimsObserverHistory(t *testing.T) {
+	t.Parallel()
+	f := newHoldFixture(t)
+	f.o.config.ChainsyncIngressEligible = func(ouroboros.ConnectionId) bool {
+		return false
+	}
+	rolled := make(chan chainselection.PeerRollbackEvent, 1)
+	f.o.config.ChainsyncRecordDeliveredPeerRollback = func(
+		e chainselection.PeerRollbackEvent,
+	) {
+		rolled <- e
+	}
+
+	point := ocommon.NewPoint(50, []byte("rb"))
+	tip := ochainsync.Tip{Point: point, BlockNumber: 5}
+	release := f.o.ledgerState.HoldNetworkIngest()
+	defer release()
+
+	require.ErrorIs(t, f.o.chainsyncClientRollBackward(
+		ochainsync.CallbackContext{ConnectionId: f.conn}, point, tip,
+	), ochainsync.ErrStopSyncProcess)
+
+	e := testutil.RequireReceive(t, rolled, time.Second,
+		"a held rollback must trim observer delivered history")
+	require.Equal(t, f.conn, e.ConnectionId)
+	require.Equal(t, point, e.Point)
+}
+
 // Inbound blockfetch keeps serving committed history while ingest is held.
 func TestHoldServesPeers(t *testing.T) {
 	t.Parallel()

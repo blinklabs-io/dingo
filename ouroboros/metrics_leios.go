@@ -33,6 +33,11 @@ type leiosMetrics struct {
 	// closure, labelled resolved (closure arrived), timeout (the wait window
 	// elapsed), or cancelled (the serving connection ended first).
 	certRbWaitSeconds *prometheus.HistogramVec
+	// ebArrivalDelay and recentEbArrivals record wall clock minus slot time
+	// when an endorser block's manifest and all transactions became available
+	// locally; see recordLeiosEbArrival.
+	ebArrivalDelay   prometheus.Histogram
+	recentEbArrivals *recentEbArrivals
 }
 
 func (o *Ouroboros) initLeiosMetrics() {
@@ -64,7 +69,17 @@ func (o *Ouroboros) initLeiosMetrics() {
 			},
 			[]string{"outcome"},
 		),
+		ebArrivalDelay: factory.NewHistogram(prometheus.HistogramOpts{
+			Name: "dingo_leios_eb_arrival_delay_seconds",
+			Help: "wall clock minus slot time when an at-tip endorser block's manifest and all transactions became available locally; arrivals more than 5 minutes after the slot (backfill) are not recorded",
+			Buckets: []float64{
+				0.1, 0.25, 0.5, 1, 2, 3, 5, 7.5, 10, 15, 20, 30, 45, 60, 90,
+				120, 300,
+			},
+		}),
+		recentEbArrivals: newRecentEbArrivals(),
 	}
+	o.registerer.MustRegister(o.leiosMetrics.recentEbArrivals)
 }
 
 // recordLeiosCertRbOutcome increments the CertRB outcome counter for the given

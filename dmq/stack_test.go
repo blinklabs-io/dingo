@@ -15,6 +15,7 @@
 package dmq
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
@@ -60,6 +61,10 @@ func newTestStack(
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	reg := prometheus.NewRegistry()
 	cfg.PromRegistry = reg
+	// The fixtures use short bodies; the size limits have tests of their own.
+	if cfg.MessageBodyMin == 0 {
+		cfg.MessageBodyMin = 1
+	}
 	cfg.SocketPath = filepath.Join(dir, "dmq.sock")
 	cfg.NetworkMagic = testDMQMagic
 	if cfg.Authenticator == nil {
@@ -230,11 +235,27 @@ func metricValue(
 	return 0
 }
 
+// unavailableStake answers like a node whose ledger cannot read the electing
+// stake distribution.
+type unavailableStake struct{}
+
+func (unavailableStake) PoolActiveStake(ocommon.PoolKeyHash) (uint64, error) {
+	return 0, fmt.Errorf("%w: snapshot not captured", ErrChainStateUnavailable)
+}
+
 func newNoStakeAuthenticator(t *testing.T) *ocommon.MessageAuthenticator {
+	t.Helper()
+	return newStakeAuthenticator(t, noStake{})
+}
+
+func newStakeAuthenticator(
+	t *testing.T,
+	stake ocommon.StakeAuthority,
+) *ocommon.MessageAuthenticator {
 	t.Helper()
 	auth, err := ocommon.NewMessageAuthenticator(
 		ocommon.MessageAuthenticatorConfig{
-			StakeAuthority: noStake{},
+			StakeAuthority: stake,
 			CurrentSlot: func() (uint64, error) {
 				return 0, nil
 			},
@@ -317,6 +338,15 @@ func TestStackSubmissionRejectReasons(t *testing.T) {
 			msg:   newTestMessage([]byte("anon"), soon),
 			want:  ocommon.InvalidReason{},
 			label: reasonInvalid,
+		},
+		{
+			name: "stake distribution unavailable",
+			cfg: StackConfig{
+				Authenticator: newStakeAuthenticator(t, unavailableStake{}),
+			},
+			msg:   newTestMessage([]byte("unknown"), soon),
+			want:  ocommon.OtherReason{},
+			label: reasonOther,
 		},
 		{
 			name:  "expiry beyond message ttl",
@@ -627,7 +657,14 @@ func TestStackServesConnectionsAfterInboundStall(t *testing.T) {
 	s, _ := newTestStack(t, StackConfig{})
 	// Hold the feeder registry so the inbound handler stalls on the first
 	// real connection.
-	require.NoError(t, s.bus.UnsubscribeAndWaitContext(t.Context(), connmanager.InboundConnectionEventType, s.inboundSub))
+	require.NoError(
+		t,
+		s.bus.UnsubscribeAndWaitContext(
+			t.Context(),
+			connmanager.InboundConnectionEventType,
+			s.inboundSub,
+		),
+	)
 	entered := make(chan struct{})
 	var enteredOnce sync.Once
 	s.inboundSub = subscribeInbound(s.bus, func(evt event.Event) {
@@ -846,7 +883,10 @@ func TestStackBacksOffFullNotificationQueue(t *testing.T) {
 	t.Parallel()
 	refusals := &refusalCounter{}
 	s, _ := newTestStack(t, StackConfig{Logger: slog.New(refusals)})
-	timers := make(chan *manualFeedTimer, 2*localmessagenotification.NewConfig().MaxQueueSize)
+	timers := make(
+		chan *manualFeedTimer,
+		2*localmessagenotification.NewConfig().MaxQueueSize,
+	)
 	s.feedTimer = func(wait time.Duration) feedTimer {
 		timer := &manualFeedTimer{
 			wait:    wait,
@@ -914,7 +954,45 @@ func TestStackAdmissionUsesPoolClock(t *testing.T) {
 	t.Parallel()
 	now := time.Now().Add(-time.Minute)
 	s, _ := newTestStack(t, StackConfig{Now: func() time.Time { return now }})
-	msg := newTestMessage([]byte("clock"), uint32(now.Add(30*time.Second).Unix()))
+	msg := newTestMessage(
+		[]byte("clock"),
+		uint32(now.Add(30*time.Second).Unix()),
+	)
 	require.False(t, msg.IsValid())
 	require.Nil(t, s.admit(&msg))
+}
+
+// A message that breaks CIP-0137's sizes is one dmq-node refuses to decode, so
+// a local client's is refused too, with the default limits.
+func TestStackRefusesMessagesOutsideTheSizeLimits(t *testing.T) {
+	t.Parallel()
+	s, reg := newTestStack(t, StackConfig{
+		MessageBodyMin: DefaultMessageBodyMin,
+		MessageBodyMax: DefaultMessageBodyMax,
+	})
+	submit := submitter(t, s)
+	exp := soonExpiry()
+	body := func(n int) []byte { return bytes.Repeat([]byte{'x'}, n) }
+
+	for _, n := range []int{0, 1, 89, 2001, 5000} {
+		reason := submit(newTestMessage(body(n), exp))
+		invalid, ok := reason.(ocommon.InvalidReason)
+		require.True(t, ok, "body of %d bytes: %v", n, reason)
+		require.Contains(t, invalid.Message, "body is")
+	}
+	require.Zero(t, s.Mempool().Len())
+	for _, n := range []int{90, 1000, 2000} {
+		require.Nil(t, submit(newTestMessage(body(n), exp)), "%d bytes", n)
+	}
+	require.Equal(t, 3, s.Mempool().Len())
+	require.Equal(
+		t,
+		5.0,
+		metricValue(t, reg, "dingo_dmq_validation_failures_total", "invalid"),
+	)
+
+	// A signature or key of the wrong length is refused as well.
+	short := newTestMessage(body(400), exp)
+	short.KESSignature = make([]byte, 447)
+	require.IsType(t, ocommon.InvalidReason{}, submit(short))
 }

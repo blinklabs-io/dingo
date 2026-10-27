@@ -325,6 +325,9 @@ func (d *LedgerDelta) applyWithDonationRecording(
 				if setErr == nil && ls.afterBatchedTransactionWrite != nil {
 					ls.afterBatchedTransactionWrite()
 				}
+				if setErr == nil && ls.afterBatchedTransactionStored != nil {
+					setErr = ls.afterBatchedTransactionStored(txn, level)
+				}
 			} else {
 				setErr = ls.db.SetTransactionWithOpts(
 					ctx,
@@ -737,7 +740,7 @@ func (b *LedgerDeltaBatch) applyBatched(
 	ls *LedgerState,
 	txn *database.Txn,
 	usedOverlay *bool,
-) error {
+) (err error) {
 	// API mode and ApplyTrustedBatch batch without the flag. Other storage
 	// modes batch only when ApplyRowBatchingEnabled is set; the stored state
 	// is the same either way.
@@ -762,6 +765,10 @@ func (b *LedgerDeltaBatch) applyBatched(
 		return b.applyUnbatched(ctx, ls, txn)
 	}
 	defer acc.Reset()
+	// Every statement of the overlay's lifetime returns through here, so a
+	// conflict a read barrier recorded but could not return reaches
+	// ApplyTrustedBatch's per-row fallback. Runs before acc.Reset.
+	defer func() { err = database.WithBatchUtxoOverlayError(acc, err) }()
 	overlay, err := b.enableTrustedUtxoOverlay(ls, txn, acc)
 	if err != nil {
 		return err

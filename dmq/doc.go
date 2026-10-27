@@ -39,9 +39,8 @@
 // A peer new to the pool starts at the beginning of the retained log; each
 // call advances that peer's cursor past the message it returns. This mirrors
 // CIP-0137's per-peer outstanding-message-ids queue for the node-to-node
-// message-submission mini-protocol (protocol 18), without implementing the
-// protocol's blocking/non-blocking request state machine itself -- that is
-// phase 3's job.
+// message-submission mini-protocol (protocol 11). The pool does not run that
+// protocol's blocking/non-blocking request state machine; PeerConn does.
 //
 // # Size limits and backpressure
 //
@@ -64,6 +63,19 @@
 // invalid (with the validation error), alreadyReceived for a duplicate ID, or
 // other (with the error) when the current KES period cannot be resolved or the
 // pool is full.
+//
+// # Node-to-node exchange
+//
+// Stack.AttachPeer runs CIP-0137's node-to-node message submission, version 2
+// as dmq-node encodes it, over a connection the caller supplies. Both sides can
+// serve and pull: the serving side announces pooled message IDs and sizes from a
+// per-peer cursor and returns bodies on request, and the pulling side, which is
+// the connection's initiator, fetches the IDs it lacks and admits them through
+// the same checks a local submission gets, including the size limits CIP-0137
+// fixes. Each reply is authenticated as one batch at one current slot, and
+// none of it is admitted if any message in it is invalid. The connection also
+// runs keep-alive on dmq-node's mini-protocol number 12.
+// internal/test/dmqinterop runs it against a real dmq-node.
 //
 // Local message notification gives each connection its own cursor over the
 // pool, so every consumer receives each unexpired message once. A feeder

@@ -1881,3 +1881,108 @@ func TestShouldApplyIngressWaitsOutTransientZeroGeneration(t *testing.T) {
 	assert.True(t, cs.ShouldApplyIngress(corrConn(40)),
 		"a generation that is zero only during a transition must not reject the header")
 }
+
+func TestStaleSweepDropsDeliveredHistoryOfClosedConnections(t *testing.T) {
+	t.Parallel()
+
+	const maxPeers = 200
+	dead := make(map[ouroboros.ConnectionId]bool)
+	var deadMu sync.Mutex
+	var cs *ChainSelector
+	raced := make(map[ouroboros.ConnectionId]bool)
+	cs = NewChainSelector(ChainSelectorConfig{
+		GenesisMode:           true,
+		SecurityParam:         20,
+		MinCorroboratingPeers: 1,
+		MaxTrackedPeers:       maxPeers,
+		ConnectionLive: func(connId ouroboros.ConnectionId) bool {
+			deadMu.Lock()
+			defer deadMu.Unlock()
+			if dead[connId] {
+				return false
+			}
+			if raced[connId] {
+				// First probe: report live, then let the close and the
+				// peer removal run before the caller takes the lock.
+				raced[connId] = false
+				dead[connId] = true
+				deadMu.Unlock()
+				cs.RemovePeer(connId)
+				deadMu.Lock()
+			}
+			return true
+		},
+	})
+	point := genesisTip(100, "h100", 100)
+	update := func(c ouroboros.ConnectionId) PeerTipUpdateEvent {
+		return PeerTipUpdateEvent{
+			ConnectionId: c, AdmissionID: 1, Tip: point, ObservedTip: point,
+		}
+	}
+	for i := range maxPeers {
+		c := corrConn(i + 1)
+		raced[c] = true
+		cs.RecordDeliveredPeerTip(update(c))
+	}
+	cs.mutex.RLock()
+	leaked := len(cs.deliveredPeerTips)
+	cs.mutex.RUnlock()
+	require.Equal(t, maxPeers, leaked,
+		"the removal interleaving must leave closed-connection entries")
+
+	live := corrConn(maxPeers + 1)
+	cs.RecordDeliveredPeerTip(update(live))
+	cs.mutex.RLock()
+	require.NotContains(t, cs.deliveredPeerTips, live,
+		"precondition: the cap is exhausted by leaked entries")
+	cs.mutex.RUnlock()
+
+	cs.cleanupStalePeers()
+	cs.mutex.RLock()
+	require.Empty(t, cs.deliveredPeerTips)
+	cs.mutex.RUnlock()
+
+	cs.RecordDeliveredPeerTip(update(live))
+	cs.mutex.RLock()
+	defer cs.mutex.RUnlock()
+	assert.Contains(t, cs.deliveredPeerTips, live,
+		"a live connection must be recorded once the sweep freed the slots")
+}
+
+func TestRecordDeliveredPeerRollbackTrimsWithoutRegistering(t *testing.T) {
+	t.Parallel()
+
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:           true,
+		SecurityParam:         20,
+		MinCorroboratingPeers: 1,
+	})
+	conn := corrConn(1)
+	high := genesisTip(100, "h100", 100)
+	cs.RecordDeliveredPeerTip(PeerTipUpdateEvent{
+		ConnectionId: conn, AdmissionID: 1, Tip: high, ObservedTip: high,
+	})
+	cs.mutex.RLock()
+	require.Contains(t, cs.deliveredPeerTips, conn)
+	require.EqualValues(t, 100,
+		cs.deliveredPeerTips[conn].ObservedTip.Point.Slot)
+	cs.mutex.RUnlock()
+
+	low := genesisTip(40, "h40", 40)
+	cs.RecordDeliveredPeerRollback(PeerRollbackEvent{
+		ConnectionId: conn, Point: low.Point, Tip: high,
+	})
+	other := corrConn(2)
+	cs.RecordDeliveredPeerRollback(PeerRollbackEvent{
+		ConnectionId: other, Point: low.Point, Tip: high,
+	})
+
+	cs.mutex.RLock()
+	defer cs.mutex.RUnlock()
+	assert.LessOrEqual(t,
+		cs.deliveredPeerTips[conn].ObservedTip.Point.Slot, uint64(40),
+		"the abandoned frontier must be trimmed")
+	assert.NotContains(t, cs.deliveredPeerTips, other)
+	assert.NotContains(t, cs.peerTips, other,
+		"a delivered-history rollback must not register a peer")
+}

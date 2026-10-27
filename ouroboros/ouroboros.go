@@ -148,6 +148,11 @@ type Ouroboros struct {
 	subscriptions     []subscription
 	blockfetchMetrics *blockfetchMetrics
 	protocolMetrics   *protocolMetrics
+	chainsyncMetrics  *chainsyncMetrics
+
+	// headerArrivalMetrics records chainsync header arrival against slot time.
+	headerArrivalMetrics *headerArrivalMetrics
+
 	// Shared cache of decoded blocks/headers keyed by content hash, so
 	// multiple connections delivering byte-identical data (the common case
 	// when several peers relay the same block) decode once instead of once
@@ -454,6 +459,13 @@ type chainsyncPeerStats struct {
 	headerCount         int64
 }
 
+func (o *Ouroboros) nodeToNodeNetworkMagic() uint32 {
+	if o.config.NodeToNodeNetworkMagic != 0 {
+		return o.config.NodeToNodeNetworkMagic
+	}
+	return o.config.NetworkMagic
+}
+
 // OuroborosConfig carries both the settings NewOuroboros applies at
 // construction and the node dependencies Wire installs afterwards. The two
 // groups are read at different points in the lifecycle and are not
@@ -467,10 +479,14 @@ type OuroborosConfig struct {
 	EventBus        *event.EventBus
 	ConnManager     *connmanager.ConnectionManager
 	IntersectPoints []ocommon.Point
-	NetworkMagic    uint32
-	PeerSharing     bool
-	IntersectTip    bool
-	PromRegistry    prometheus.Registerer
+	// NetworkMagic is the Cardano network identity used by node-to-client
+	// connections. NodeToNodeNetworkMagic may separate a consensus network
+	// while preserving the standard local-client contract.
+	NetworkMagic           uint32
+	NodeToNodeNetworkMagic uint32
+	PeerSharing            bool
+	IntersectTip           bool
+	PromRegistry           prometheus.Registerer
 	// ChainsyncBlockTimeout bounds how long NtN chain-sync can wait for a
 	// block reply after a peer enters a server-agency state. Values below
 	// the protocol maximum are raised to the protocol maximum.
@@ -516,6 +532,15 @@ type OuroborosConfig struct {
 	// Candidates may inform Genesis corroboration and eagerness but must not
 	// affect selection until the ledger admits the accompanying header.
 	ChainsyncObservePeerTip func(chainselection.PeerTipUpdateEvent) chainselection.PeerTipUpdateDisposition
+	// ChainsyncRecordDeliveredPeerTip records processed roll-forward headers for
+	// bounded corroboration history, including observer connections that are
+	// not eligible for chain-selection admission.
+	ChainsyncRecordDeliveredPeerTip func(chainselection.PeerTipUpdateEvent)
+	// ChainsyncRecordDeliveredPeerRollback trims a peer's bounded delivered
+	// history after a rollback, including observer connections that are not
+	// eligible for chain-selection admission and so never reach
+	// ChainsyncObservePeerRollback. It must not register or select the peer.
+	ChainsyncRecordDeliveredPeerRollback func(chainselection.PeerRollbackEvent)
 	// ChainsyncPrepareForecastWitness temporarily records a connected header
 	// that is waiting for the ledger forecast horizon. It may corroborate
 	// verified staged candidates but cannot enter selection or admission. The
@@ -554,6 +579,12 @@ type OuroborosConfig struct {
 		ctx context.Context,
 		connId ouroboros.ConnectionId,
 	) (bool, error)
+	// ChainsyncIntersectAtLedgerTip reports whether new chainsync sessions
+	// must intersect at the applied ledger tip rather than at the primary
+	// chain's header-ahead points. Genesis corroboration needs each peer's
+	// candidate frontier to begin at the ledger tip, or held peers that start
+	// above it never overlap. When nil, the primary chain's points are used.
+	ChainsyncIntersectAtLedgerTip func() bool
 	// ChainsyncObserveAwaitReply records the peer's explicit protocol-idle
 	// frontier. It runs after gouroboros fences preceding pipelined updates.
 	ChainsyncObserveAwaitReply func(ouroboros.ConnectionId, ocommon.Point)
@@ -663,6 +694,9 @@ type blockfetchMetrics struct {
 	// per-block chart sees every block; blockDelay above keeps only the most
 	// recent one, which a scrape interval longer than the block gap misses.
 	recentDelays *recentBlockDelays
+	// Histogram of the same at-tip delays by Leios ranking-block kind, so
+	// the share of blocks under 1s/3s/5s can be computed from le buckets.
+	blockDelayByKind *prometheus.HistogramVec
 	// Ring of the distinct blocks observed competing for each of the same
 	// heights tracked by recentDelays, so a dashboard can tell a fork-battle
 	// delay from a genuinely slow fetch. See RecordForkBattleParticipants.
@@ -868,8 +902,10 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 	}
 	if cfg.PromRegistry != nil {
 		o.initBlockfetchMetrics()
+		o.initHeaderArrivalMetrics()
 		o.initProtocolMetrics()
 		o.initLeiosMetrics()
+		o.initChainsyncMetrics()
 		o.initDecodeCacheMetrics()
 	}
 	o.subscribeLeiosAnnouncementRetries()
@@ -895,6 +931,8 @@ func (o *Ouroboros) initBlockfetchMetrics() {
 	)
 	o.blockfetchMetrics.recentDelays = newRecentBlockDelays()
 	o.registerer.MustRegister(o.blockfetchMetrics.recentDelays)
+	o.blockfetchMetrics.blockDelayByKind = newBlockDelayByKindHistogram()
+	o.registerer.MustRegister(o.blockfetchMetrics.blockDelayByKind)
 	o.blockfetchMetrics.recentForks = newRecentForkBattles()
 	o.registerer.MustRegister(o.blockfetchMetrics.recentForks)
 	o.blockfetchMetrics.lateBlocks = promautoFactory.NewCounter(
@@ -1123,7 +1161,7 @@ func (o *Ouroboros) ConfigureListeners(
 					okeepalive.NewConfig(o.keepaliveConnOpts()...),
 				),
 				ouroboros.WithPeerSharing(o.config.PeerSharing),
-				ouroboros.WithNetworkMagic(o.config.NetworkMagic),
+				ouroboros.WithNetworkMagic(o.nodeToNodeNetworkMagic()),
 				ouroboros.WithPeerSharingConfig(
 					o.peerSharingConfig(),
 				),
@@ -1184,7 +1222,7 @@ func (o *Ouroboros) OutboundConnOpts(
 	ctx context.Context,
 ) []ouroboros.ConnectionOptionFunc {
 	opts := []ouroboros.ConnectionOptionFunc{
-		ouroboros.WithNetworkMagic(o.config.NetworkMagic),
+		ouroboros.WithNetworkMagic(o.nodeToNodeNetworkMagic()),
 		ouroboros.WithNodeToNode(true),
 		ouroboros.WithKeepAlive(true),
 		ouroboros.WithKeepAliveConfig(
