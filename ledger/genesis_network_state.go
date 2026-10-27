@@ -89,9 +89,15 @@ func genesisReserveBalance(
 // boundary to the maximum lovelace supply minus the live UTxO balance being
 // translated, as cardano-ledger's Shelley/API/ByronTranslation.hs does.
 // Value that left circulation during Byron, such as fees, is therefore
-// reserves rather than missing from every pot. It must run before the first
-// Shelley epoch's ADA pots are captured, since the first Shelley reward round
-// reads them.
+// reserves rather than missing from every pot. It runs before any Shelley
+// boundary rule, as the hard-fork combinator translates the ledger before the
+// first Shelley TICK, and before the first Shelley epoch's ADA pots are
+// captured, since the first Shelley reward round reads them.
+//
+// An empty live set is never a translated UTxO: the Byron genesis funds can
+// only move, not vanish, so zero means the UTxO table was not populated.
+// Writing max supply as reserves there would misstate every later pot, so
+// the genesis baseline is kept instead.
 func (ls *LedgerState) applyByronTranslationReserves(
 	txn *database.Txn,
 	newEpoch uint64,
@@ -105,6 +111,16 @@ func (ls *LedgerState) applyByronTranslationReserves(
 	live, err := meta.GetLiveUtxoLovelace(txn.Metadata())
 	if err != nil {
 		return fmt.Errorf("sum live UTxO balance: %w", err)
+	}
+	if live == 0 {
+		ls.config.Logger.Warn(
+			"no live UTxO at the Byron-to-Shelley boundary, "+
+				"keeping genesis reserves",
+			"epoch", newEpoch,
+			"boundary_slot", boundarySlot,
+			"component", "ledger",
+		)
+		return nil
 	}
 	if live > shelleyGenesis.MaxLovelaceSupply {
 		return fmt.Errorf(

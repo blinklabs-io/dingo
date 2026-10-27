@@ -905,36 +905,107 @@ func TestByronShelleyBoundaryPreprodHeaderMajorDoesNotSkipShelley(
 // to the maximum supply minus that set (Shelley/API/ByronTranslation.hs).
 // The genesis reserves written at slot 0 therefore overstate nothing and
 // understate the reserves by exactly the Byron-era loss.
+//
+// Mainnet and preprod both open Shelley this way: preprod's prefix is four
+// Byron epochs and its first Shelley header names Allegra's major, so the
+// fixture also pins that neither shape bypasses the translation.
 func TestByronShelleyBoundaryReservesExcludeLiveUtxoBalance(t *testing.T) {
 	t.Parallel()
 
 	const (
-		maxSupply       = uint64(45_000_000_000_000_000)
-		genesisUtxo     = uint64(1_000_000_000)
-		liveUtxo        = uint64(900_000_000)
-		spentUtxo       = uint64(50_000_000)
-		expectedReserve = maxSupply - liveUtxo
+		genesisUtxo = uint64(1_000_000_000)
+		liveUtxo    = uint64(900_000_000)
+		spentUtxo   = uint64(50_000_000)
+	)
+
+	for _, tc := range []struct {
+		name   string
+		ledger func(t *testing.T) (*LedgerState, gledger.Block, gledger.Block)
+	}{
+		{name: "mainnet", ledger: newByronShelleyBoundaryLedger},
+		{name: "preprod", ledger: newPreprodByronShelleyBoundaryLedger},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			ls, _, firstShelley := tc.ledger(t)
+			maxSupply := ls.config.CardanoNodeConfig.ShelleyGenesis().
+				MaxLovelaceSupply
+			require.NotZero(t, maxSupply)
+			expectedReserve := maxSupply - liveUtxo
+			seedByronBoundaryUtxos(
+				t, ls, maxSupply-genesisUtxo, liveUtxo, spentUtxo,
+			)
+
+			crossByronShelleyBoundary(t, ls, firstShelley)
+
+			requireBoundaryReserves(t, ls, expectedReserve)
+		})
+	}
+}
+
+// An empty live UTxO set is not a translated Byron ledger: genesis funds can
+// move but not vanish, so zero means the UTxO table was never populated.
+// Translating it would set reserves to the whole maximum supply and misstate
+// every later pot, so the boundary keeps the genesis baseline instead.
+func TestByronShelleyBoundaryReservesKeepGenesisWithoutLiveUtxo(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	const (
+		maxSupply   = uint64(45_000_000_000_000_000)
+		genesisUtxo = uint64(1_000_000_000)
 	)
 
 	ls, _, firstShelley := newByronShelleyBoundaryLedger(t)
-	meta := ls.db.Metadata()
-	require.NoError(t, meta.SetNetworkState(
-		0, maxSupply-genesisUtxo, 0, nil,
+	seedByronBoundaryUtxos(t, ls, maxSupply-genesisUtxo, 0, 0)
+
+	crossByronShelleyBoundary(t, ls, firstShelley)
+
+	requireBoundaryReserves(t, ls, maxSupply-genesisUtxo)
+}
+
+// seedByronBoundaryUtxos writes the slot-0 network state and, for each
+// nonzero amount, one live and one spent UTxO.
+func seedByronBoundaryUtxos(
+	t *testing.T,
+	ls *LedgerState,
+	genesisReserves, liveUtxo, spentUtxo uint64,
+) {
+	t.Helper()
+	require.NoError(t, ls.db.Metadata().SetNetworkState(
+		0, genesisReserves, 0, nil,
 	))
 	txn := ls.db.Transaction(context.Background(), true)
-	require.NoError(t, ls.db.CreateUtxo(context.Background(), txn, &models.Utxo{
-		TxId:      bytes.Repeat([]byte{0x01}, 32),
-		AddedSlot: 0,
-		Amount:    types.Uint64(liveUtxo),
-	}))
-	require.NoError(t, ls.db.CreateUtxo(context.Background(), txn, &models.Utxo{
-		TxId:        bytes.Repeat([]byte{0x02}, 32),
-		AddedSlot:   0,
-		DeletedSlot: 100,
-		Amount:      types.Uint64(spentUtxo),
-	}))
+	if liveUtxo > 0 {
+		require.NoError(t, ls.db.CreateUtxo(
+			context.Background(), txn, &models.Utxo{
+				TxId:      bytes.Repeat([]byte{0x01}, 32),
+				AddedSlot: 0,
+				Amount:    types.Uint64(liveUtxo),
+			},
+		))
+	}
+	if spentUtxo > 0 {
+		require.NoError(t, ls.db.CreateUtxo(
+			context.Background(), txn, &models.Utxo{
+				TxId:        bytes.Repeat([]byte{0x02}, 32),
+				AddedSlot:   0,
+				DeletedSlot: 100,
+				Amount:      types.Uint64(spentUtxo),
+			},
+		))
+	}
 	require.NoError(t, txn.Commit())
+}
 
+func crossByronShelleyBoundary(
+	t *testing.T,
+	ls *LedgerState,
+	firstShelley gledger.Block,
+) {
+	t.Helper()
 	results := make(chan readChainResult, 1)
 	results <- readChainResult{blocks: []gledger.Block{firstShelley}}
 	close(results)
@@ -943,7 +1014,18 @@ func TestByronShelleyBoundaryReservesExcludeLiveUtxoBalance(t *testing.T) {
 		results,
 	))
 	require.Equal(t, eras.ShelleyEraDesc.Id, ls.currentEra.Id)
+}
 
+// requireBoundaryReserves checks the reserves the boundary left in the
+// network state and in the first Shelley epoch's ADA pots, which the first
+// Shelley reward round reads.
+func requireBoundaryReserves(
+	t *testing.T,
+	ls *LedgerState,
+	expectedReserve uint64,
+) {
+	t.Helper()
+	meta := ls.db.Metadata()
 	state, err := meta.GetNetworkState(nil)
 	require.NoError(t, err)
 	require.NotNil(t, state)
@@ -955,6 +1037,21 @@ func TestByronShelleyBoundaryReservesExcludeLiveUtxoBalance(t *testing.T) {
 	require.NotNil(t, pots)
 	require.Equal(
 		t, expectedReserve, uint64(pots.Reserves),
-		"the first Shelley epoch's pots must carry the corrected reserves",
+		"the first Shelley epoch's pots must carry the boundary reserves",
+	)
+}
+
+func newPreprodByronShelleyBoundaryLedger(
+	t *testing.T,
+) (*LedgerState, gledger.Block, gledger.Block) {
+	t.Helper()
+	return newByronShelleyBoundaryLedgerFrom(
+		t,
+		loadPreprodNodeConfig(t),
+		loadBoundaryBlock(t, "preprod-byron-last-84242.cbor", 1),
+		loadBoundaryBlock(t, "preprod-shelley-first-86400.cbor", 2),
+		3,
+		64_800,
+		21_600,
 	)
 }
