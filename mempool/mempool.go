@@ -291,6 +291,9 @@ type Mempool struct {
 	dag               *transactionDAG
 	headroomChanged   chan struct{}
 	submissionSlots   chan struct{}
+	// apiSubmissionSlots keeps one shared validation slot available to direct
+	// network submission when Mesh or UTxO RPC saturates API admission.
+	apiSubmissionSlots chan struct{}
 
 	// rebuildMutex permits one double-buffer rebuild at a time. mutationSeq and
 	// mutationJournal are protected by mutationMutex and let that rebuild catch
@@ -635,10 +638,10 @@ var ErrNilValidator = errors.New("mempool: validator is nil")
 // ErrMempoolStopped is returned when admission is attempted after shutdown.
 var ErrMempoolStopped = errors.New("mempool: stopped")
 
-// ErrSubmissionBusy reports that every transaction-submission validation
-// slot is in use. AdmitSubmission returns it instead of waiting, so an API
-// request does not hold a handler goroutine while it waits for a metadata
-// read transaction.
+// ErrSubmissionBusy reports that API submission cannot reserve its bounded
+// share of transaction-validation capacity. AdmitSubmission returns it instead
+// of waiting, so an API request does not hold a handler goroutine while it
+// waits for a metadata read transaction.
 var ErrSubmissionBusy = errors.New("transaction submission capacity exhausted")
 
 type submissionAdmissionKey struct{}
@@ -759,6 +762,10 @@ func newMempool(
 		submissionSlots: make(
 			chan struct{},
 			submissionCapacity,
+		),
+		apiSubmissionSlots: make(
+			chan struct{},
+			max(submissionCapacity-1, 0),
 		),
 	}
 	if implementation == ImplementationDAG {
@@ -2113,10 +2120,10 @@ func (m *Mempool) AddTransaction(
 	return nil
 }
 
-// AdmitSubmission reserves a validation slot without waiting and marks the
-// returned context so AddTransaction can reuse the reservation. API handlers
-// call this before decoding request data so a busy node can answer the client
-// at once; it returns ErrSubmissionBusy when every slot is held.
+// AdmitSubmission reserves API and shared validation capacity without waiting
+// and marks the returned context so AddTransaction can reuse the reservation.
+// API handlers call this before decoding request data so a busy node can answer
+// the client at once; it returns ErrSubmissionBusy when either limit is held.
 func (m *Mempool) AdmitSubmission(
 	ctx context.Context,
 ) (context.Context, func(), error) {
@@ -2124,13 +2131,19 @@ func (m *Mempool) AdmitSubmission(
 		return ctx, nil, err
 	}
 	select {
+	case m.apiSubmissionSlots <- struct{}{}:
+	default:
+		return ctx, nil, ErrSubmissionBusy
+	}
+	select {
 	case m.submissionSlots <- struct{}{}:
 		return context.WithValue(
 			ctx,
 			submissionAdmissionKey{},
 			submissionAdmission{mempool: m},
-		), m.submissionSlotRelease(), nil
+		), m.apiSubmissionSlotRelease(), nil
 	default:
+		<-m.apiSubmissionSlots
 		return ctx, nil, ErrSubmissionBusy
 	}
 }
@@ -2158,6 +2171,16 @@ func (m *Mempool) submissionSlotRelease() func() {
 	var once sync.Once
 	return func() {
 		once.Do(func() { <-m.submissionSlots })
+	}
+}
+
+func (m *Mempool) apiSubmissionSlotRelease() func() {
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			<-m.submissionSlots
+			<-m.apiSubmissionSlots
+		})
 	}
 }
 

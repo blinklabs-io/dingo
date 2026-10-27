@@ -5927,9 +5927,17 @@ previous frontier: its next update is accepted within `securityParam` of its
 claim even when the corroborating frontier sits up to `securityParam` below
 it, and the entry is cleared once the connection is accepted.
 The stale-reference recovery also applies when the tracked reference is ahead
-of the local tip but still within the same `localTip + 2*securityParam`
-catch-up ceiling; a snapshot-backed local tip can lag its delivered peer
-references without making those references current enough to rule out catch-up.
+of the local tip by more than `securityParam`, including beyond the
+`localTip + 2*securityParam` catch-up ceiling; a snapshot-backed or
+from-genesis local tip can lag its delivered peer references without making
+those references current enough to rule out catch-up. Up to that ceiling a
+frontier past the reference plus `securityParam` is accepted with the same
+corroboration or connected-chain evidence. Beyond it nothing anchors the
+frontier near the local chain and one peer can fabricate any number of
+self-linked headers, so only a connection in another identity group
+(`ChainSelectorConfig.PeerIdentity`, or the remote host when unset)
+corroborates it, and a connected header chain from one connection is not
+accepted (`corroborateIndependentFarTipClaimLocked`).
 Staging a peer tip reads the local tip from `ChainSelectorConfig.AppliedTip`
 (the live applied ledger tip) rather than from the last `SetLocalTip`, which
 the node calls only at startup and on the stall recycler's tick. A node
@@ -6423,7 +6431,28 @@ it. Dingo implements this as a **corroboration gate**
   state in the roll-forward handler), so the apply decision reflects the header
   currently being admitted rather than a tip update that has not been processed
   yet — an async observation could otherwise let a header slip through in the
-  window before it revoked corroboration. A staged candidate cannot become a
+  window before it revoked corroboration. For processed roll-forward headers,
+  a separate bounded delivered history is updated before candidate admission,
+  including for observer connections. Headers enter that history only after
+  producer authentication when the ledger requires it. A record counts only
+  while its connection is live, eligible, and non-stale; it does not make a
+  candidate selectable or apply-eligible. Rollbacks keep both histories aligned:
+  `OuroborosConfig.ChainsyncRecordDeliveredPeerRollback` runs before the
+  ingest-hold and ingress-admission checks, so an ineligible observer's
+  existing delivered-history record is trimmed without registering the peer.
+  For an ingress-eligible peer while Genesis selection is active,
+  `OuroborosConfig.ChainsyncObservePeerRollback` synchronously trims the selector
+  frontier before apply eligibility is evaluated and returns true to suppress
+  the asynchronous rollback event; outside Genesis selection it returns false
+  and the event is published. A header still held for corroboration
+  is released without it when its point is already on the local chain:
+  `ChainSelectorConfig.AppliedTip` supplies the current applied tip (falling
+  back to the staged local tip) and `PointOnLocalChain` confirms the point
+  against that chain, so a block another source already applied cannot stall
+  behind a corroboration threshold. Delivered-history entries whose connection
+  has closed and that have no admission-frontier record are dropped by the
+  stale-peer sweep, so a record that raced a peer's removal cannot hold a
+  tracked-peer slot. A staged candidate cannot become a
   selectable peer frontier until the ledger accepts a header at its point, but
   it does count as corroboration evidence before admission: the gate checks the
   applicant's own staged frontier and counts every other connection's staged
@@ -6450,14 +6479,9 @@ it. Dingo implements this as a **corroboration gate**
   client activity without moving the cursor, so the stall checker does not
   recycle a peer that is following the chain. This staged
   admission path applies when Genesis corroboration is disabled too, so a
-  rejected or discarded header cannot advance the selector frontier. The
-  roll-**backward** path does the same via `OuroborosConfig.ChainsyncObserveRollback`
-  (wired to apply the rollback into chain selection, skipping the async
-  `PeerRollbackEvent`): a rollback trims the peer's observed frontier and can
-  change its corroboration status, so the rollback apply decision must reflect
-  the post-rollback state rather than pre-trim corroboration. With the gate
-  disabled, rollback keeps its existing async observation path; roll-forward
-  still stages and resolves tips around ledger admission.
+  rejected or discarded header cannot advance the selector frontier. With the
+  gate disabled, rollback keeps its existing asynchronous observation path;
+  roll-forward still stages and resolves tips around ledger admission.
 - The gate **denies application but does not disconnect** the fast source. Genesis
   wants the fast source kept connected so it can serve blocks as soon as
   corroboration arrives; demoting or dropping it would defeat the accelerator.
@@ -11104,7 +11128,10 @@ separate local policy that accepts only loopback resolutions. Loading stops afte
 chunk that reaches the `tip.json`
 slot, whose hash must then match the loaded block, or at the first chunk the
 root does not publish; a chunk whose `.chunk` exists without its indexes is an
-error. The downloader lives in `internal/node` rather than reusing the
+error. Chunks are uniform in slots, so the chunk numbered by the `tip.json`
+slot must hold the tip: nothing past it is fetched, and copying that chunk
+without reaching the tip fails the load instead of following empty chunks the
+root keeps serving. The downloader lives in `internal/node` rather than reusing the
 `mithril` one because `mithril` imports `internal/node`.
 
 Trust: remote chunk files carry no signature or digest, so authenticated
@@ -12620,19 +12647,22 @@ node-to-node and node-to-client submissions), and endorser-block transaction
 decoding. Mesh
 `details.error` is omitted for internal errors; the cause goes to the log.
 
-Mempool transaction admission has at most four process-wide validation
-slots and is reduced to the metadata store's coordinated read snapshot limit
-when it exposes one. This leaves operational read capacity for chain and query
-work even when SQLite's pool is configured below its default of five
-connections. Mesh and UTxO RPC reserve a slot through `AdmitSubmission` after
-reading the request body and before decoding the transaction; it fails fast
-with `ErrSubmissionBusy`, which Mesh reports as retriable unavailable and UTxO
-RPC as `ResourceExhausted`. Node-to-node and node-to-client submission and
-rolled-back transaction restoration reserve inside `AddTransaction`, which
-waits for a slot until its context ends or the mempool stops, so contention
-delays those transactions instead of dropping them. Node-to-node and
-node-to-client validation inherit connection cancellation, so a disconnected
-peer cannot retain a slot, a wait, or a ledger snapshot.
+Mempool transaction admission has at most four process-wide validation slots
+and is reduced to the metadata store's coordinated read snapshot limit when it
+exposes one. This leaves operational read capacity for chain and query work
+even when SQLite's pool is configured below its default of five connections.
+Mesh and UTxO RPC reserve through `AdmitSubmission` after reading the request
+body and before decoding the transaction. API reservations may hold at most
+one fewer than the process-wide limit, leaving one validation slot for direct
+network submission; when the process-wide limit is one, API submission is
+unavailable. Admission fails fast with `ErrSubmissionBusy`, which Mesh reports
+as retriable unavailable and UTxO RPC as `ResourceExhausted`. Node-to-node and
+node-to-client submission and rolled-back transaction restoration reserve
+inside `AddTransaction`, which waits for a slot until its context ends or the
+mempool stops, so contention delays those transactions instead of dropping
+them. Node-to-node and node-to-client validation inherit connection
+cancellation, so a disconnected peer cannot retain a slot, a wait, or a ledger
+snapshot.
 
 ### Blockfrost unsupported operations
 
@@ -18851,6 +18881,14 @@ header pipeline owner. The node sets it from the
 `blockfetchLowWatermarkEnabled` config key, the
 `DINGO_BLOCKFETCH_LOW_WATERMARK_ENABLED` environment variable, or the
 `--blockfetch-low-watermark-enabled` flag.
+
+Only the owner's own headers grow the queue, so an owner whose next header is
+withheld (an uncorroborated Genesis source) leaves it below the gate while every
+other connection's headers are buffered as non-fitting. When a connection's
+buffer is full and no request or continuation is pending,
+`startStalledHeaderQueueBlockfetch` fetches the queued headers from the owner
+below the gate instead of closing the connection with nothing in flight; the
+batch's completion clears the owner and replays the buffered headers.
 
 `decodeReadChainBatch` enforces the header check only when the serial path
 has enough state to make the same decision: validation is enabled, the slot is
