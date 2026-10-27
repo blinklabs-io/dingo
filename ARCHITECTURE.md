@@ -3068,7 +3068,8 @@ querying per asset, the sync reveals nothing about which assets its users hold,
 unlike a remote metadata server lookup.
 
 The sync streams a gzipped tarball of the registry repository, parses each
-`mappings/*.json` document with `ParseTokenRegistryEntry`, and upserts entries
+`mappings/*.json` (mainnet) or `registry/*.json` (testnet) document with
+`ParseTokenRegistryEntry`, and upserts entries
 into `token_registry_entry` in batches of at most 500. The compressed response,
 aggregate decompressed tar stream, archive-header count, accepted mapping count,
 single mapping, and retained batch payload each have independent limits. All
@@ -3079,27 +3080,26 @@ Operators may lower the four aggregate limits with
 `maxAcceptedEntries`, and `maxBatchBytes`; zero selects the defaults and
 negative values fail configuration validation.
 Parsed entries are written to a bounded, process-local temporary staging file;
-no more than one mapping is retained during ingestion. A mapping that fails to
+no more than one mapping is retained during ingestion. Well-formed documents
+whose subjects cannot identify Cardano assets are ignored; the testnet registry
+contains such entries. A mapping that fails to
 parse is skipped and counted while the rest of the archive is inspected. A
 nonzero skipped count rejects the staged result for application, so API readers
 continue to see the previous complete snapshot. Exhausting any aggregate limit
 rejects the artifact and removes the staging file.
 
-Every archive is named by a signed manifest. The operator pins the manifest
-publisher's Ed25519 public key; the signature binds a monotonic sequence, the
-HTTPS archive URL, its exact compressed size, and its BLAKE2b-256 digest.
-Manifest and archive requests require HTTPS at the initial URL and through
-every redirect, even when private mirror addresses are allowed. Archive bytes
-are copied to a bounded temporary file and checked against the signed size and
-digest before gzip or tar parsing; only an authenticated archive reaches the
-parser.
+The public registries publish GitHub repository archives, not signed snapshot
+manifests. By default the sync downloads the network-selected archive over
+HTTPS and conditionally revalidates its ETag. HTTPS is required at the initial
+URL and every redirect, including private mirrors. Archive size, expansion,
+parsing, staging, and transactional application limits apply to this path.
 
-The last applied manifest sequence and digest are stored with the snapshot
-rows in one metadata transaction. A lower sequence is rejected unless the
-operator explicitly enables rollback, and a different digest at the same
-sequence is always rejected. An interrupted, partially parsed, incorrectly
-signed, or digest-mismatched snapshot cannot advance that authenticated state.
-An unchanged authenticated manifest costs only the small manifest request.
+An operator-managed mirror can optionally supply both `tokenRegistry.manifestUrl`
+and `trustedManifestKey`. This Dingo-specific extension verifies an Ed25519
+signature binding the archive URL, compressed size, digest, and sequence before
+parsing. Its sequence and digest advance with the snapshot in one transaction;
+rollback requires explicit configuration. Neither setting is needed for the
+Cardano Foundation or IOG registry.
 
 Upserting alone cannot retire anything, so each snapshot is also reconciled
 against the table. Every row a snapshot carries is stamped with that snapshot's
@@ -3115,14 +3115,15 @@ an archive carrying no `mappings/*.json` files at all (what an upstream layout
 change or a mirror serving the wrong repository looks like, as opposed to a
 genuinely empty registry, which does carry mapping files), and a snapshot in
 which any mapping was skipped as malformed or oversized. Both log a warning
-and leave every row and its authenticated state unchanged.
+and leave every row and its sync state unchanged.
 
 The recorded `sync_state` describes the snapshot **the table currently holds**,
 not a per-source cache — there is one `token_registry_entry` table, so there is
-one set of state, and all of it moves together on a successful apply. Five
-keys record the manifest entity tag, a fingerprint of the source URL, manifest
-URL, trusted key, and logo mode, the high-water snapshot stamp, the manifest
-sequence, and the archive digest.
+one set of state, and all of it moves together on a successful apply. Three
+keys record the archive entity tag, source identity, and snapshot stamp.
+Optional signed mirrors also record sequence and digest; their validator is
+the manifest entity tag. The source identity is a fingerprint of the source
+URL, manifest URL, trusted key, and logo mode.
 
 The fingerprint is what makes the tag safe to replay. A validator only
 describes the table while the table still holds what that source served under
