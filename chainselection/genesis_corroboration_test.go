@@ -1885,7 +1885,7 @@ func TestShouldApplyIngressWaitsOutTransientZeroGeneration(t *testing.T) {
 func TestStaleSweepDropsDeliveredHistoryOfClosedConnections(t *testing.T) {
 	t.Parallel()
 
-	const maxPeers = 3
+	const maxPeers = 200
 	dead := make(map[ouroboros.ConnectionId]bool)
 	var deadMu sync.Mutex
 	var cs *ChainSelector
