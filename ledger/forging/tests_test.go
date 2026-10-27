@@ -2307,6 +2307,13 @@ func (c *forgerMovingTipSlotClock) PrimaryChainTipRelation(
 		primary.Slot == point.Slot && bytes.Equal(primary.Hash, point.Hash), nil
 }
 
+func (c *forgerMovingTipSlotClock) PrimaryChainTipRelationAndHeader(
+	point ocommon.Point,
+) (ochainsync.Tip, ochainsync.Tip, uint64, bool, error) {
+	tip, depth, ancestor, err := c.PrimaryChainTipRelation(point)
+	return tip, tip, depth, ancestor, err
+}
+
 func (c *forgerMovingTipSlotClock) ChainTipHash() []byte {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -3458,6 +3465,13 @@ func (c *retryTestSlotClock) PrimaryChainTipRelation(
 		depth, ancestor, nil
 }
 
+func (c *retryTestSlotClock) PrimaryChainTipRelationAndHeader(
+	point ocommon.Point,
+) (ochainsync.Tip, ochainsync.Tip, uint64, bool, error) {
+	tip, depth, ancestor, err := c.PrimaryChainTipRelation(point)
+	return tip, tip, depth, ancestor, err
+}
+
 func (c *retryTestSlotClock) UpstreamSyncTip() (ochainsync.Tip, bool) {
 	return ochainsync.Tip{
 		Point:       ocommon.Point{Slot: c.upstreamTarget},
@@ -4255,6 +4269,7 @@ func requireStaleTipSkips(
 	for _, reason := range []string{
 		forgeStaleTipReasonPrimaryNotAncestor,
 		forgeStaleTipReasonBlockGap,
+		forgeStaleTipReasonHeaderFrontier,
 		forgeStaleTipReasonPeerHeightGap,
 		forgeStaleTipReasonHashDiverged,
 		forgeStaleTipReasonPrimaryTipBehind,
@@ -5625,6 +5640,13 @@ func (c *ebTestSlotClock) PrimaryChainTipRelation(
 		Point:       primary,
 		BlockNumber: primary.Slot,
 	}, depth, ancestor, nil
+}
+
+func (c *ebTestSlotClock) PrimaryChainTipRelationAndHeader(
+	point ocommon.Point,
+) (ochainsync.Tip, ochainsync.Tip, uint64, bool, error) {
+	tip, depth, ancestor, err := c.PrimaryChainTipRelation(point)
+	return tip, tip, depth, ancestor, err
 }
 
 func (*ebTestSlotClock) UpstreamSyncTip() (ochainsync.Tip, bool) {

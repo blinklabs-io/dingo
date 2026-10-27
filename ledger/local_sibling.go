@@ -38,6 +38,10 @@ var ErrNotChainTipSibling = errors.New(
 	"block does not compete with the current chain tip",
 )
 
+func sameChainTip(a, b ochainsync.Tip) bool {
+	return a.BlockNumber == b.BlockNumber && pointMatches(a.Point, b.Point)
+}
+
 // praosPrefersCandidateSibling reports whether an equal-length candidate beats
 // the incumbent tip under the standard Praos rule: higher block number, then
 // the reference implementation's opcert-issue-number and VRF tiebreakers when
@@ -151,6 +155,28 @@ func (ls *LedgerState) AdoptLocalForgedSibling(ctx context.Context,
 	}
 	if err := validateLocalSibling(block, parent, incumbentTip); err != nil {
 		return false, err
+	}
+	// Header admission also takes chainsyncMutex, so this coherent chain
+	// snapshot remains authoritative through the rollback and replacement
+	// below. A verified descendant of the incumbent is stronger evidence than
+	// the locally forged sibling and must not be erased by replacing its parent.
+	selectedTip, headerTip, _, _, err := ls.chain.TipRelationAndHeader(
+		incumbentTip.Point,
+	)
+	if err != nil {
+		return false, fmt.Errorf("read sibling adoption frontier: %w", err)
+	}
+	if !sameChainTip(selectedTip, incumbentTip) {
+		return false, fmt.Errorf(
+			"%w: selected chain tip changed before sibling adoption",
+			ErrNotChainTipSibling,
+		)
+	}
+	if !sameChainTip(headerTip, selectedTip) {
+		return false, fmt.Errorf(
+			"%w: verified header frontier advanced beyond the incumbent",
+			ErrNotChainTipSibling,
+		)
 	}
 	// Only compete for a tip the ledger has actually applied. While the
 	// pipeline is still replaying, the primary chain runs ahead of committed

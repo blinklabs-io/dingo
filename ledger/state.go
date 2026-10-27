@@ -13995,6 +13995,22 @@ func (ls *LedgerState) PrimaryChainTipRelation(
 	return chain.TipRelation(point)
 }
 
+// PrimaryChainTipRelationAndHeader returns the primary tip, crypto-verified
+// queued-header frontier, and applied-point relation from one chain snapshot.
+func (ls *LedgerState) PrimaryChainTipRelationAndHeader(
+	point ocommon.Point,
+) (ochainsync.Tip, ochainsync.Tip, uint64, bool, error) {
+	ls.RLock()
+	chain := ls.chain
+	ls.RUnlock()
+	if chain == nil {
+		return ochainsync.Tip{}, ochainsync.Tip{}, 0, false, errors.New(
+			"primary chain is nil",
+		)
+	}
+	return chain.TipRelationAndHeader(point)
+}
+
 // PrimaryChainTipSlot returns the slot number of the primary chain tip. This
 // can be ahead of ChainTipSlot() while the ledger pipeline is still replaying
 // blocks into committed metadata state.
