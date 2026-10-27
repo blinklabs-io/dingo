@@ -663,6 +663,7 @@ func TestGetUtxoEvents_EndBlockHashResolverStopsAtRequestDeadline(
 	t.Parallel()
 	store := setupTestStore(t)
 
+	entered := make(chan struct{})
 	resolverErr := make(chan error, 1)
 	addr := startTestServerConfig(t, server.Config{
 		Metadata: store,
@@ -670,6 +671,7 @@ func TestGetUtxoEvents_EndBlockHashResolverStopsAtRequestDeadline(
 			ctx context.Context,
 			_ []byte,
 		) (uint64, bool, error) {
+			close(entered)
 			<-ctx.Done()
 			resolverErr <- ctx.Err()
 			return 0, false, ctx.Err()
@@ -677,15 +679,21 @@ func TestGetUtxoEvents_EndBlockHashResolverStopsAtRequestDeadline(
 	})
 	client := midnight.NewMidnightStateClient(dial(t, addr))
 
-	ctx, cancel := context.WithTimeout(
-		context.Background(), 200*time.Millisecond,
-	)
+	// The deadline covers connecting and the event reads before the
+	// resolver runs, so it is long enough for those and the test confirms
+	// the resolver was entered before the deadline could be what ended it.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	_, err := client.GetUtxoEvents(ctx, &midnight.UtxoEventsRequest{
 		TxCapacity:   10,
 		EndBlockHash: hashForByte(1),
 	})
+	testutil.RequireReceive(
+		t, entered, time.Second, "resolver was not called before the deadline",
+	)
 	require.Equal(t, codes.DeadlineExceeded, status.Code(err))
+	// The server may observe the client's expiry as either DeadlineExceeded
+	// or Canceled (a stream reset), so only require that it ended.
 	require.Error(
 		t,
 		testutil.RequireReceive(
