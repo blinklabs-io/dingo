@@ -1415,11 +1415,17 @@ func (s *TokenRegistrySync) stageSnapshot(
 		if err != nil {
 			// The testnet registry also carries non-asset subjects. They cannot
 			// be looked up by the asset API and do not invalidate asset rows.
-			var doc tokenRegistryMapping
-			if json.Unmarshal(raw, &doc) == nil && doc.Subject != "" {
-				if _, subjectErr := normalizeTokenRegistrySubject(doc.Subject); subjectErr != nil {
-					stage.mappings--
-					continue
+			if path.Base(path.Dir(path.Clean(header.Name))) == "registry" {
+				var doc tokenRegistryMapping
+				if json.Unmarshal(raw, &doc) == nil && doc.Subject != "" {
+					if _, subjectErr := normalizeTokenRegistrySubject(doc.Subject); subjectErr != nil {
+						stage.mappings--
+						s.logger.Debug(
+							"token registry non-asset document skipped",
+							"name", header.Name,
+						)
+						continue
+					}
 				}
 			}
 			stage.skipped++
