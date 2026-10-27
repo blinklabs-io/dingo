@@ -174,6 +174,9 @@ type ChainSelectorConfig struct {
 	// the last SetLocalTip value. It must not block or take locks shared with
 	// the selector.
 	AppliedTip func() (ochainsync.Tip, bool)
+	// PointOnLocalChain confirms a point against the current applied chain.
+	// The Genesis ingress gate calls it without holding the selector mutex.
+	PointOnLocalChain func(ocommon.Point) bool
 	// HeaderCryptoVerificationGenerationCurrent reports whether a nonzero
 	// producer-authorization generation still matches the live ledger state.
 	// It is optional for callers that do not stage cryptographically verified
@@ -256,7 +259,10 @@ type ChainSelector struct {
 	maxTrackedPeers int
 	mode            SelectionMode
 	peerTips        map[ouroboros.ConnectionId]*PeerChainTip
-	pendingPeerTips map[ouroboros.ConnectionId][]peerTipAdmissionCandidate
+	// deliveredPeerTips survives admission-frontier rebuilds so delivered,
+	// verified headers remain available as corroboration evidence.
+	deliveredPeerTips map[ouroboros.ConnectionId]*PeerChainTip
+	pendingPeerTips   map[ouroboros.ConnectionId][]peerTipAdmissionCandidate
 	// One rolling snapshot per peer; candidate events retain only the bounded
 	// admission updates needed to promote or rebuild that snapshot.
 	pendingPeerTipFrontiers map[ouroboros.ConnectionId]*PeerChainTip
@@ -560,6 +566,7 @@ func NewChainSelector(cfg ChainSelectorConfig) *ChainSelector {
 		maxTrackedPeers:          maxPeers,
 		mode:                     SelectionModePraos,
 		peerTips:                 make(map[ouroboros.ConnectionId]*PeerChainTip),
+		deliveredPeerTips:        make(map[ouroboros.ConnectionId]*PeerChainTip),
 		pendingPeerTips:          make(map[ouroboros.ConnectionId][]peerTipAdmissionCandidate),
 		pendingPeerTipFrontiers:  make(map[ouroboros.ConnectionId]*PeerChainTip),
 		forecastHorizonWitnesses: make(map[ouroboros.ConnectionId]forecastHorizonWitness),
@@ -800,6 +807,7 @@ func (cs *ChainSelector) advanceSelectionModeWithBestKnownBlockLocked(
 		peerTip.observedPoints = nil
 		peerTip.observedPointBaseBlock = 0
 	}
+	clear(cs.deliveredPeerTips)
 	cs.lastCorroborationFailedConn = nil
 	cs.config.Logger.Info(
 		"exiting Genesis selection mode",
@@ -2770,6 +2778,7 @@ func (cs *ChainSelector) evictLeastRecentPeerLocked() *ouroboros.ConnectionId {
 
 func (cs *ChainSelector) deletePeerLocked(connId ouroboros.ConnectionId) {
 	delete(cs.peerTips, connId)
+	delete(cs.deliveredPeerTips, connId)
 	delete(cs.pendingPeerTips, connId)
 	delete(cs.pendingPeerTipFrontiers, connId)
 	delete(cs.forecastHorizonWitnesses, connId)
@@ -4423,6 +4432,9 @@ func (cs *ChainSelector) HandlePeerRollbackEvent(evt event.Event) {
 		defer cs.mutex.Unlock()
 		delete(cs.pendingPeerTips, e.ConnectionId)
 		delete(cs.pendingPeerTipFrontiers, e.ConnectionId)
+		if deliveredTip := cs.deliveredPeerTips[e.ConnectionId]; deliveredTip != nil {
+			deliveredTip.ApplyRollback(e.Point, e.Tip)
+		}
 		cs.rebuildPendingAdmissionStateLocked()
 		// Re-check under the lock: a concurrent roll forward (or another
 		// rollback) may have created the entry while liveness was evaluated.
@@ -4469,6 +4481,9 @@ func (cs *ChainSelector) applyRollbackToTrackedPeer(e PeerRollbackEvent) bool {
 	delete(cs.pendingPeerTips, e.ConnectionId)
 	delete(cs.pendingPeerTipFrontiers, e.ConnectionId)
 	peerTip.ApplyRollback(e.Point, e.Tip)
+	if deliveredTip := cs.deliveredPeerTips[e.ConnectionId]; deliveredTip != nil {
+		deliveredTip.ApplyRollback(e.Point, e.Tip)
+	}
 	cs.rebuildPendingAdmissionStateLocked()
 	cs.computeEagernessLimitLocked(nil, cs.localTip)
 	return true
@@ -4675,7 +4690,46 @@ func safeLog(logger *slog.Logger, msg string, args ...any) {
 	logger.Error(msg, args...)
 }
 
+// sweepDeadDeliveredPeerTips removes delivered-history entries that have no
+// admission-frontier record and whose connection is no longer live. Such an
+// entry can only be created by RecordDeliveredPeerTip racing the peer's
+// removal, and the peerTips-driven stale sweep never reaches it, so without
+// this it would hold a maxTrackedPeers slot until Genesis exit. ConnectionLive
+// reaches into the composition layer and must not run under cs.mutex, so
+// candidates are collected under the lock, probed outside it, and re-checked
+// after relocking: an entry that gained a peerTips record in between is kept.
+func (cs *ChainSelector) sweepDeadDeliveredPeerTips() {
+	if cs.config.ConnectionLive == nil {
+		return
+	}
+	cs.mutex.RLock()
+	var candidates []ouroboros.ConnectionId
+	for connId := range cs.deliveredPeerTips {
+		if _, tracked := cs.peerTips[connId]; !tracked {
+			candidates = append(candidates, connId)
+		}
+	}
+	cs.mutex.RUnlock()
+	var dead []ouroboros.ConnectionId
+	for _, connId := range candidates {
+		if !cs.config.ConnectionLive(connId) {
+			dead = append(dead, connId)
+		}
+	}
+	if len(dead) == 0 {
+		return
+	}
+	cs.mutex.Lock()
+	defer cs.mutex.Unlock()
+	for _, connId := range dead {
+		if _, tracked := cs.peerTips[connId]; !tracked {
+			delete(cs.deliveredPeerTips, connId)
+		}
+	}
+}
+
 func (cs *ChainSelector) cleanupStalePeers() {
+	cs.sweepDeadDeliveredPeerTips()
 	var switchEvent *event.Event
 
 	func() {
