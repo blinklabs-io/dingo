@@ -721,7 +721,7 @@ func (c *Client) invalidateCurrentConn() {
 // one freshly authenticated connection and closes it after the response, so an
 // idle connection cannot become stale between leader slots and a request is
 // never retried after it may have reached the agent.
-func (c *Client) Sign(period uint64, message []byte) ([]byte, error) {
+func (c *Client) Sign(period uint64, message []byte) (_ []byte, err error) {
 	if len(message) > MaxSignFrameLen/2 {
 		return nil, fmt.Errorf(
 			"kesagent: sign message is %d bytes, too large for a sign request",
@@ -736,6 +736,13 @@ func (c *Client) Sign(period uint64, message []byte) ([]byte, error) {
 			c.cfg.Mode,
 		)
 	}
+	// Every failure from here on is a failed sign request, including a refused
+	// or failed connect: each request authenticates its own connection.
+	defer func() {
+		if err != nil {
+			c.cfg.Metrics.incSignFailure()
+		}
+	}()
 	// Sign connections are request-scoped. Discard any connection retained by
 	// an older caller before authenticating the peer for this request.
 	_ = c.closeLocked()
@@ -759,18 +766,15 @@ func (c *Client) Sign(period uint64, message []byte) ([]byte, error) {
 	req := SignRequest{Type: "sign_request", Period: period, Message: message}
 	if err := writeFrame(c.conn, MaxSignFrameLen, req); err != nil {
 		c.recordDialFailureLocked()
-		c.cfg.Metrics.incSignFailure()
 		return nil, fmt.Errorf("kesagent: send sign request: %w", err)
 	}
 	var resp SignResponse
 	if err := readFrame(c.conn, MaxSignFrameLen, &resp); err != nil {
 		c.recordDialFailureLocked()
-		c.cfg.Metrics.incSignFailure()
 		return nil, fmt.Errorf("kesagent: read sign response: %w", err)
 	}
 	if resp.Type != "sign_response" {
 		c.recordDialFailureLocked()
-		c.cfg.Metrics.incSignFailure()
 		return nil, fmt.Errorf(
 			"kesagent: expected sign_response frame, got type %q",
 			resp.Type,
@@ -778,7 +782,6 @@ func (c *Client) Sign(period uint64, message []byte) ([]byte, error) {
 	}
 	if resp.Period != period {
 		c.recordDialFailureLocked()
-		c.cfg.Metrics.incSignFailure()
 		return nil, fmt.Errorf(
 			"kesagent: sign response period %d does not match requested period %d",
 			resp.Period,
@@ -787,7 +790,6 @@ func (c *Client) Sign(period uint64, message []byte) ([]byte, error) {
 	}
 	if resp.Error != "" {
 		c.recordDialFailureLocked()
-		c.cfg.Metrics.incSignFailure()
 		return nil, fmt.Errorf(
 			"kesagent: agent refused to sign: %s",
 			resp.Error,
@@ -795,7 +797,6 @@ func (c *Client) Sign(period uint64, message []byte) ([]byte, error) {
 	}
 	if len(resp.Signature) != kes.CardanoKesSignatureSize {
 		c.recordDialFailureLocked()
-		c.cfg.Metrics.incSignFailure()
 		return nil, fmt.Errorf(
 			"kesagent: sign response signature is %d bytes, want %d",
 			len(resp.Signature),
@@ -804,7 +805,6 @@ func (c *Client) Sign(period uint64, message []byte) ([]byte, error) {
 	}
 	if period < c.cfg.OpCertStartPeriod {
 		c.recordDialFailureLocked()
-		c.cfg.Metrics.incSignFailure()
 		return nil, fmt.Errorf(
 			"kesagent: sign period %d precedes configured opcert start period %d",
 			period,
@@ -819,7 +819,6 @@ func (c *Client) Sign(period uint64, message []byte) ([]byte, error) {
 		resp.Signature,
 	) {
 		c.recordDialFailureLocked()
-		c.cfg.Metrics.incSignFailure()
 		return nil, errors.New(
 			"kesagent: sign response failed KES signature verification",
 		)
