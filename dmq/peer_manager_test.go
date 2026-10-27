@@ -359,23 +359,35 @@ func TestPeerManagerRedialsAPeerThatDrops(t *testing.T) {
 	m, log, reg := managed(t, PeerConfig{Topology: &Topology{
 		LocalRoots: []RootGroup{group(1, root)},
 	}})
-	waitFor(t, "connected", func() bool { return m.PeerCount() == 1 })
-
-	var first *PeerConn
-	m.peerMu.Lock()
-	for p := range m.peers {
-		first = p
-	}
-	m.peerMu.Unlock()
-	require.NotNil(t, first)
+	waitFor(t, "connected", func() bool {
+		return managedConn(m, root) != nil
+	})
+	first := managedConn(m, root)
 	first.Close()
 
 	waitFor(t, "redialed", func() bool {
-		return metricValue(
-			t, reg, "dingo_dmq_peer_dials_total", "success",
-		) >= 2 && m.PeerCount() == 1
+		c := managedConn(m, root)
+		return c != nil && c != first
 	})
+	assert.GreaterOrEqual(t, metricValue(
+		t, reg, "dingo_dmq_peer_dials_total", "success",
+	), float64(2))
+	assert.Equal(t, 1, m.PeerCount())
 	assert.GreaterOrEqual(t, log.plainCount(root.Address()), 2)
+}
+
+// managedConn is the connection the manager holds to p, or nil. The stack
+// counts a peer from before its handshake, so PeerCount can include a dial
+// still in progress; closing that one fails the dial instead of dropping an
+// established connection.
+func managedConn(s *Stack, p Peer) *PeerConn {
+	m := s.peerNet.manager
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if e := m.entries[p.key()]; e != nil {
+		return e.conn
+	}
+	return nil
 }
 
 // Stop cancels a dial that is still waiting, and waits for it.
