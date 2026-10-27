@@ -579,16 +579,10 @@ var flagSpecs = []flagSpec{
 		"Koios reference cache.db path (default: {data-dir}/.koios/cache.db)",
 	),
 	stringFlag(
-		"KoiosParity.APIKey",
-		"koios-parity-api-key",
-		"",
-		"Koios Bearer token for rate-limited access",
-	),
-	stringFlag(
 		"KoiosParity.APIKeyFile",
 		"koios-parity-api-key-file",
 		"",
-		"file holding the Koios Bearer token (alternative to --koios-parity-api-key)",
+		"file holding the Koios Bearer token",
 	),
 	stringFlag(
 		"KoiosParity.BaseURL",

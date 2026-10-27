@@ -647,6 +647,7 @@ func (n *Node) newOuroborosConfig(
 		ChainsyncApplyEligible:          n.chainsyncApplyEligible,
 		ChainsyncAwaitEagerness:         n.chainsyncAwaitEagerness,
 		ChainsyncAwaitCorroboration:     n.chainsyncAwaitCorroboration,
+		ChainsyncIntersectAtLedgerTip:   n.chainsyncIntersectAtLedgerTip,
 		ChainsyncObservePeerTip:         n.chainsyncObservePeerTip,
 		ChainsyncPrepareForecastWitness: n.chainsyncPrepareForecastWitness,
 		ChainsyncRemoveForecastWitness:  n.chainsyncRemoveForecastWitness,
@@ -689,6 +690,12 @@ var (
 // through the same validator's session, again by interface assertion; losing
 // the method would leave those inputs out of the index with no error.
 var _ mempool.ResolvingTxValidationSessionProvider = (*ledger.LedgerState)(nil)
+
+// The mempool evicts a Leios certifying ranking block's certified closure as
+// confirmed (and restores it on rollback) through the same validator, again
+// by interface assertion; losing the method would leave applied closure
+// transactions in the pool until revalidation happened to catch them.
+var _ mempool.CertifiedClosureProvider = (*ledger.LedgerState)(nil)
 
 //nolint:contextcheck // Run is the lifecycle boundary and derives n.ctx from the caller context.
 func (n *Node) Run(ctx context.Context) (runErr error) {

@@ -315,11 +315,11 @@ func TestSetTransactionIndexesRedeemerScripts(t *testing.T) {
 	keyHash := bytes.Repeat([]byte{0x78}, 28)
 	lockedTx := bytes.Repeat([]byte{0x51}, 32)
 	insertUtxoInTxn(t, store, &models.Utxo{
-		TxId: lockedTx, OutputIdx: 0, PaymentKey: scriptHash.Bytes(),
+		Address: []byte("addr"), TxId: lockedTx, OutputIdx: 0, PaymentKey: scriptHash.Bytes(),
 		PaymentScript: true, AddedSlot: 1, Amount: 5,
 	}, true)
 	insertUtxoInTxn(t, store, &models.Utxo{
-		TxId: lockedTx, OutputIdx: 1, PaymentKey: keyHash,
+		Address: []byte("addr"), TxId: lockedTx, OutputIdx: 1, PaymentKey: keyHash,
 		AddedSlot: 1, Amount: 5,
 	}, true)
 	lockedInput, err := mockledger.NewTransactionInputBuilder().
@@ -395,11 +395,11 @@ func TestSetTransactionIndexesRedeemerScriptsUsesSortedInputs(t *testing.T) {
 	scriptHash := lcommon.NewBlake2b224(bytes.Repeat([]byte{0x7a}, 28))
 	lockedTx := bytes.Repeat([]byte{0x53}, 32)
 	insertUtxoInTxn(t, store, &models.Utxo{
-		TxId: lockedTx, OutputIdx: 0, PaymentKey: scriptHash.Bytes(),
+		Address: []byte("addr"), TxId: lockedTx, OutputIdx: 0, PaymentKey: scriptHash.Bytes(),
 		PaymentScript: true, AddedSlot: 1, Amount: 5,
 	}, true)
 	insertUtxoInTxn(t, store, &models.Utxo{
-		TxId: lockedTx, OutputIdx: 1,
+		Address: []byte("addr"), TxId: lockedTx, OutputIdx: 1,
 		PaymentKey: bytes.Repeat([]byte{0x7b}, 28), AddedSlot: 1, Amount: 5,
 	}, true)
 	lockedInput, err := mockledger.NewTransactionInputBuilder().
@@ -512,6 +512,7 @@ func TestReferenceScriptIndexedOnImportAndCreate(t *testing.T) {
 	hash := lcommon.NewBlake2b224(bytes.Repeat([]byte{0x7c}, 28))
 	newUtxo := func(seed byte) models.Utxo {
 		return models.Utxo{
+			Address:             []byte("addr"),
 			TxId:                bytes.Repeat([]byte{seed}, 32),
 			OutputIdx:           0,
 			PaymentKey:          bytes.Repeat([]byte{0x7d}, 28),

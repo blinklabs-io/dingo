@@ -73,7 +73,9 @@ func resolveKoiosAPIKey(
 
 func writeSecret(t *testing.T, value string) string {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "secret")
+	dir := t.TempDir()
+	require.NoError(t, os.Chmod(dir, 0o700))
+	path := filepath.Join(dir, "secret")
 	require.NoError(t, os.WriteFile(path, []byte(value+"\n"), 0o600))
 	return path
 }
@@ -159,32 +161,10 @@ func TestKoiosParityAPIKeyFilePrecedence(t *testing.T) {
 			wantErr: "koiosParity.apiKeyFile",
 		},
 		{
-			name: "empty flag literal and file",
-			args: []string{
-				"--koios-parity-api-key=",
-				"--koios-parity-api-key-file=" + flagFile,
-			},
-			wantErr: "--koios-parity-api-key-file",
-		},
-		{
-			name: "flag literal replaces env file",
-			env:  map[string]string{koiosAPIKeyFileEnv: envFile},
-			args: []string{"--koios-parity-api-key=flag"},
-			want: "flag",
-		},
-		{
 			name: "flag file replaces env literal",
 			env:  map[string]string{koiosAPIKeyEnv: "env"},
 			args: []string{"--koios-parity-api-key-file=" + flagFile},
 			want: "flag-file",
-		},
-		{
-			name: "flag literal and file",
-			args: []string{
-				"--koios-parity-api-key=flag",
-				"--koios-parity-api-key-file=" + flagFile,
-			},
-			wantErr: "--koios-parity-api-key-file",
 		},
 		{
 			name: "missing file",

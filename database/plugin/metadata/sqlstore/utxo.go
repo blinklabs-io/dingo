@@ -16,6 +16,7 @@
 package sqlstore
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/binary"
@@ -71,7 +72,7 @@ func (s *Store) CreateUtxo(txn types.Txn, utxo *models.Utxo) error {
 				return err
 			}
 			utxo.ID = uint(id)
-			if err := persistUtxoAddress(ctx, db, id, utxo); err != nil {
+			if err := s.persistUtxoAddress(ctx, db, id, utxo); err != nil {
 				return err
 			}
 			// A pointer address carries its stake reference as a
@@ -298,7 +299,7 @@ SELECT COUNT(*) FROM utxo WHERE tx_id = ? AND output_idx = ?`,
 	)
 }
 
-func (s *Store) GetSpentAssetUtxosMissingAddressAfterSlot(
+func (s *Store) GetSpentUtxosMissingAddressAfterSlot(
 	slot uint64,
 	afterID uint,
 	limit int,
@@ -319,7 +320,6 @@ func (s *Store) GetSpentAssetUtxosMissingAddressAfterSlot(
 		`SELECT `+qualifiedSQLiteUtxoColumns+` FROM utxo
 WHERE utxo.deleted_slot > ?
   AND utxo.id > ?
-  AND EXISTS (SELECT 1 FROM asset WHERE asset.utxo_id = utxo.id)
   AND NOT EXISTS (SELECT 1 FROM utxo_address WHERE utxo_address.utxo_id = utxo.id)
 ORDER BY utxo.id LIMIT ?`,
 	), slotValue, afterID, limit)
@@ -618,6 +618,145 @@ ORDER BY asset.policy_id, asset.name`),
 	return ret, rows.Err()
 }
 
+func (s *Store) GetUtxoBalanceByAddressAtSlot(
+	address []byte,
+	slot uint64,
+	maxResults int,
+	txn types.Txn,
+) (models.AddressBalance, error) {
+	if len(address) == 0 {
+		return models.AddressBalance{}, errors.New("UTxO address must not be empty")
+	}
+	if maxResults <= 0 || maxResults == math.MaxInt {
+		return models.AddressBalance{}, errors.New("UTxO balance result limit must be positive")
+	}
+	return s.getUtxoBalanceByPredicate(
+		"utxo_address.address = ? AND utxo.added_slot <= ? AND "+
+			"(utxo.deleted_slot = 0 OR utxo.deleted_slot > ?)",
+		[]any{address, slot, slot}, maxResults, txn,
+	)
+}
+
+func (s *Store) getUtxoBalanceByPredicate(
+	predicate string,
+	args []any,
+	maxResults int,
+	txn types.Txn,
+) (models.AddressBalance, error) {
+	var ret models.AddressBalance
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return ret, fmt.Errorf("resolve DB for UTxO balance: %w", err)
+	}
+	query := `
+SELECT utxo.amount
+FROM utxo
+JOIN utxo_address ON utxo_address.utxo_id = utxo.id
+WHERE ` + predicate
+	queryArgs := args
+	if maxResults > 0 {
+		query += " LIMIT ?"
+		queryArgs = append(append([]any(nil), args...), maxResults+1)
+	}
+	rows, err := db.QueryContext(ctx, s.dialect.Rebind(query), queryArgs...)
+	if err != nil {
+		return ret, fmt.Errorf("query UTxO balance: %w", err)
+	}
+	queryErr := func() (queryErr error) {
+		defer func() {
+			if closeErr := rows.Close(); queryErr == nil {
+				queryErr = closeErr
+			}
+		}()
+		for rows.Next() {
+			ret.UtxoCount++
+			var raw sql.NullString
+			if err := rows.Scan(&raw); err != nil {
+				return err
+			}
+			if raw.Valid && raw.String != "" {
+				amount, err := parseUint64("utxo amount", raw.String)
+				if err != nil {
+					return err
+				}
+				if ^uint64(0)-ret.Lovelace < amount {
+					return errors.New("utxo balance overflow")
+				}
+				ret.Lovelace += amount
+			}
+		}
+		return rows.Err()
+	}()
+	if queryErr != nil {
+		return ret, queryErr
+	}
+	if maxResults > 0 && ret.UtxoCount > int64(maxResults) {
+		return ret, models.ErrTooManyUtxoResults
+	}
+	if ret.UtxoCount == 0 {
+		return ret, nil
+	}
+	query = `
+SELECT asset.policy_id, asset.name, asset.amount
+FROM utxo
+JOIN utxo_address ON utxo_address.utxo_id = utxo.id
+JOIN asset ON asset.utxo_id = utxo.id
+WHERE ` + predicate
+	queryArgs = args
+	if maxResults > 0 {
+		query += " LIMIT ?"
+		queryArgs = append(append([]any(nil), args...), maxResults+1)
+	}
+	rows, err = db.QueryContext(ctx, s.dialect.Rebind(query), queryArgs...)
+	if err != nil {
+		return ret, fmt.Errorf("query UTxO asset balances: %w", err)
+	}
+	defer rows.Close()
+	type assetKey struct{ policy, name string }
+	assetIndexes := make(map[assetKey]int)
+	assetRows := 0
+	for rows.Next() {
+		assetRows++
+		if maxResults > 0 && assetRows > maxResults {
+			return ret, models.ErrTooManyUtxoResults
+		}
+		var asset models.AssetBalance
+		var raw sql.NullString
+		if err := rows.Scan(&asset.PolicyId, &asset.Name, &raw); err != nil {
+			return ret, err
+		}
+		if !raw.Valid || raw.String == "" {
+			continue
+		}
+		amount, err := parseUint64("asset amount", raw.String)
+		if err != nil {
+			return ret, err
+		}
+		key := assetKey{policy: string(asset.PolicyId), name: string(asset.Name)}
+		idx, ok := assetIndexes[key]
+		if !ok {
+			asset.Amount = amount
+			assetIndexes[key] = len(ret.Assets)
+			ret.Assets = append(ret.Assets, asset)
+			continue
+		}
+		if ^uint64(0)-ret.Assets[idx].Amount < amount {
+			return ret, errors.New("asset balance overflow")
+		}
+		ret.Assets[idx].Amount += amount
+	}
+	if err := rows.Err(); err != nil {
+		return ret, err
+	}
+	slices.SortFunc(ret.Assets, func(a, b models.AssetBalance) int {
+		if result := bytes.Compare(a.PolicyId, b.PolicyId); result != 0 {
+			return result
+		}
+		return bytes.Compare(a.Name, b.Name)
+	})
+	return ret, nil
+}
+
 func (s *Store) importUtxos(
 	utxos []models.Utxo,
 	txn types.Txn,
@@ -696,7 +835,7 @@ func (s *Store) importUtxos(
 				); err != nil {
 					return err
 				}
-				if err := persistUtxoAddress(ctx, db, id, &item); err != nil {
+				if err := s.persistUtxoAddress(ctx, db, id, &item); err != nil {
 					return err
 				}
 				// #nosec G115 -- row ids are positive
@@ -2099,25 +2238,36 @@ func utxoOrderingClauses(
 		predicate = "+utxo.deleted_slot = 0"
 	}
 	args := []any{}
-	switch {
-	case query.MatchAllAddresses:
-	case len(query.AddressPatterns) == 0:
-		predicate += " AND 1 = 0"
-	default:
-		branches := []string{}
-		for _, pattern := range query.AddressPatterns {
-			if err := models.AppendUtxoAddressPatternOrBranch(
-				&branches,
-				&args,
-				pattern,
-			); err != nil {
-				return "", "", nil, err
-			}
+	if len(query.IndexedExactAddress) > 0 {
+		if query.MatchAllAddresses || len(query.AddressPatterns) != 0 {
+			return "", "", nil, errors.New(
+				"indexed exact address cannot be combined with address patterns",
+			)
 		}
-		if len(branches) == 0 {
+		from += " JOIN utxo_address ON utxo_address.utxo_id = utxo.id"
+		predicate += " AND utxo_address.address = ?"
+		args = append(args, query.IndexedExactAddress)
+	} else {
+		switch {
+		case query.MatchAllAddresses:
+		case len(query.AddressPatterns) == 0:
 			predicate += " AND 1 = 0"
-		} else {
-			predicate += " AND (" + strings.Join(branches, " OR ") + ")"
+		default:
+			branches := []string{}
+			for _, pattern := range query.AddressPatterns {
+				if err := models.AppendUtxoAddressPatternOrBranch(
+					&branches,
+					&args,
+					pattern,
+				); err != nil {
+					return "", "", nil, err
+				}
+			}
+			if len(branches) == 0 {
+				predicate += " AND 1 = 0"
+			} else {
+				predicate += " AND (" + strings.Join(branches, " OR ") + ")"
+			}
 		}
 	}
 	if query.FilterByAsset {
@@ -2201,12 +2351,6 @@ func (s *Store) GetUtxosByAddressWithOrdering(
 			models.ErrNilUtxoWithOrderingQuery,
 		)
 	}
-	if query.After != nil && query.Descending {
-		return nil, fmt.Errorf(
-			"GetUtxosByAddressWithOrdering: %w",
-			models.ErrDescendingKeysetUnsupported,
-		)
-	}
 	if query.After != nil && query.Offset > 0 {
 		return nil, fmt.Errorf(
 			"GetUtxosByAddressWithOrdering: %w",
@@ -2245,14 +2389,18 @@ func (s *Store) GetUtxosByAddressWithOrdering(
 	slotExpr := utxoOrderingSlotExpr
 	blockIndexExpr := utxoOrderingBlockIndexExpr
 	if query.After != nil {
+		comparison := ">"
+		if query.Descending {
+			comparison = "<"
+		}
 		predicate += `
  AND (
-     ` + slotExpr + ` > ?
-     OR (` + slotExpr + ` = ? AND ` + blockIndexExpr + ` > ?)
+     ` + slotExpr + ` ` + comparison + ` ?
+     OR (` + slotExpr + ` = ? AND ` + blockIndexExpr + ` ` + comparison + ` ?)
      OR (` + slotExpr + ` = ? AND ` + blockIndexExpr + ` = ?
-         AND utxo.output_idx > ?)
+         AND utxo.output_idx ` + comparison + ` ?)
      OR (` + slotExpr + ` = ? AND ` + blockIndexExpr + ` = ?
-         AND utxo.output_idx = ? AND utxo.tx_id > ?)
+         AND utxo.output_idx = ? AND utxo.tx_id ` + comparison + ` ?)
  )`
 		args = append(
 			args,
@@ -2556,41 +2704,6 @@ func (s *Store) CountUtxosByAddressWithOrdering(
 	return count, nil
 }
 
-func (s *Store) GetUtxosByAddressAtSlot(
-	pattern models.UtxoAddressPattern,
-	slot uint64,
-	txn types.Txn,
-) ([]models.Utxo, error) {
-	var predicates []string
-	var args []any
-	if err := models.AppendUtxoAddressPatternOrBranch(
-		&predicates,
-		&args,
-		pattern,
-	); err != nil {
-		return nil, err
-	}
-	if len(predicates) == 0 {
-		return nil, models.ErrEmptyUtxoAddressPattern
-	}
-	sqlSlot, err := checkedInt64(slot)
-	if err != nil {
-		return nil, err
-	}
-	args = append(
-		[]any{sqlSlot, sqlSlot},
-		args...,
-	)
-	return s.queryUtxosWithAssets(
-		txn,
-		"utxo.added_slot <= ? AND "+
-			"(utxo.deleted_slot = 0 OR utxo.deleted_slot > ?) AND "+
-			predicates[0],
-		args,
-		"",
-	)
-}
-
 func (s *Store) GetControlledAmountByCredential(
 	credentialTag uint8,
 	stakingKey []byte,
@@ -2731,7 +2844,7 @@ func persistUtxoAddress(
 	utxoID int64,
 	utxo *models.Utxo,
 ) error {
-	address, err := assetUtxoAddress(utxo)
+	address, err := utxoAddress(utxo)
 	if err != nil {
 		return err
 	}
@@ -2751,10 +2864,19 @@ func persistUtxoAddress(
 	return nil
 }
 
-func assetUtxoAddress(utxo *models.Utxo) ([]byte, error) {
-	if len(utxo.Assets) == 0 {
-		return nil, nil
+func (s *Store) persistUtxoAddress(
+	ctx context.Context,
+	db queryer,
+	utxoID int64,
+	utxo *models.Utxo,
+) error {
+	if s.storageMode != types.StorageModeAPI {
+		return nil
 	}
+	return persistUtxoAddress(ctx, db, utxoID, utxo)
+}
+
+func utxoAddress(utxo *models.Utxo) ([]byte, error) {
 	address := utxo.Address
 	if len(address) == 0 && len(utxo.Cbor) > 0 {
 		output, err := utxo.Decode()
@@ -2764,14 +2886,12 @@ func assetUtxoAddress(utxo *models.Utxo) ([]byte, error) {
 		address = []byte(output.Address().String())
 	}
 	if len(address) == 0 {
-		return nil, errors.New(
-			"persist asset UTxO address: address is unavailable",
-		)
+		return nil, errors.New("persist UTxO address: address is unavailable")
 	}
 	return address, nil
 }
 
-func (s *Store) GetLiveAssetUtxosMissingAddress(
+func (s *Store) GetUtxosMissingAddress(
 	afterID uint,
 	limit int,
 	txn types.Txn,
@@ -2785,9 +2905,7 @@ func (s *Store) GetLiveAssetUtxosMissingAddress(
 	}
 	rows, err := db.QueryContext(ctx, s.dialect.Rebind(
 		`SELECT `+qualifiedSQLiteUtxoColumns+` FROM utxo
-WHERE utxo.deleted_slot = 0
-	AND utxo.id > ?
-  AND EXISTS (SELECT 1 FROM asset WHERE asset.utxo_id = utxo.id)
+WHERE utxo.id > ?
   AND NOT EXISTS (SELECT 1 FROM utxo_address WHERE utxo_address.utxo_id = utxo.id)
 ORDER BY utxo.id LIMIT ?`,
 	), afterID, limit)
@@ -3147,11 +3265,12 @@ func (s *Store) loadUtxoAssetsPointers(
 		}
 		byID[utxo.ID] = append(byID[utxo.ID], utxo)
 	}
-	for start := 0; start < len(ids); start += s.dialect.ParameterLimit() {
-		end := min(start+s.dialect.ParameterLimit(), len(ids))
-		args := make([]any, end-start)
-		for i, id := range ids[start:end] {
-			args[i] = id
+	chunkSize := s.dialect.ParameterLimit()
+	for start := 0; start < len(ids); start += chunkSize {
+		end := min(start+chunkSize, len(ids))
+		args := make([]any, 0, end-start)
+		for _, id := range ids[start:end] {
+			args = append(args, id)
 		}
 		rows, err := db.QueryContext(ctx, s.dialect.Rebind(
 			"-- name: GetAssetsByUtxoIDs :many\n"+

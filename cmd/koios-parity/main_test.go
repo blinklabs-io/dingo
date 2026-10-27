@@ -283,6 +283,7 @@ func TestSubcommandsRejectNegativeGraceHours(t *testing.T) {
 func TestKoiosAPIKeySources(t *testing.T) {
 	// Not t.Parallel: t.Setenv changes the process environment.
 	dir := t.TempDir()
+	require.NoError(t, os.Chmod(dir, 0o700))
 	flagFile := filepath.Join(dir, "flag")
 	require.NoError(t, os.WriteFile(flagFile, []byte("flag-file\n"), 0o600))
 	envFile := filepath.Join(dir, "env")
@@ -392,7 +393,9 @@ func TestKoiosAPIKeySources(t *testing.T) {
 
 func TestResolveDingoDBMetadataDSNFile(t *testing.T) {
 	t.Parallel()
-	dsnFile := filepath.Join(t.TempDir(), "dsn")
+	dir := t.TempDir()
+	require.NoError(t, os.Chmod(dir, 0o700))
+	dsnFile := filepath.Join(dir, "dsn")
 	require.NoError(t, os.WriteFile(
 		dsnFile,
 		[]byte("postgres://u:pw@db.example.com/dingo\n"),

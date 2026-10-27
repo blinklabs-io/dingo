@@ -33,9 +33,10 @@ const MaxBytes = 64 << 10
 
 // Read returns the contents of the file at path with trailing line endings
 // removed. The file must be a regular file whose contents are not entirely
-// whitespace and that users other than its owner and group cannot access; on
-// Windows the ACL check is stricter and allows only the owner and
-// administrators. Errors never include the file's contents.
+// whitespace. On Unix the file and its path must be controlled by the current
+// user or root, no non-sticky directory may grant group or other write access,
+// and other users may not access the file. On Windows the ACL check allows
+// only the owner and administrators. Errors never include the file's contents.
 func Read(path string) (string, error) {
 	if path == "" {
 		return "", errors.New("value file path is empty")
@@ -45,7 +46,7 @@ func Read(path string) (string, error) {
 		return "", fmt.Errorf("open value file: %w", err)
 	}
 	defer f.Close()
-	if err := checkPermissions(f); err != nil {
+	if err := checkPermissions(path, f); err != nil {
 		return "", err
 	}
 	buf, err := io.ReadAll(io.LimitReader(f, MaxBytes+1))

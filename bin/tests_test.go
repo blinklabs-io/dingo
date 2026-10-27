@@ -296,7 +296,7 @@ func TestRedactArgsEdgeCases(t *testing.T) {
 					"?api_key=query-secret&service=dingo#fragment",
 			},
 			"--tracing-endpoint=https://collector.example/v1/traces" +
-				"?api_key=<redacted>&service=dingo#fragment",
+				"?api_key=<redacted>&service=dingo#<redacted>",
 		},
 		{
 			"encoded url query credential name",
@@ -323,9 +323,34 @@ func TestRedactArgsEdgeCases(t *testing.T) {
 			"https://host?email=user@example.com",
 		},
 		{
-			"url fragment with at sign untouched",
+			"url fragment without query redacted",
+			[]string{"https://host/path#access_token=fragment-secret"},
+			"https://host/path#<redacted>",
+		},
+		{
+			"url fragment with at sign redacted",
 			[]string{"https://host#user@example.com"},
-			"https://host#user@example.com",
+			"https://host#<redacted>",
+		},
+		{
+			"url fragment containing a query redacted",
+			[]string{"https://host/path#frag?token=fragment-secret"},
+			"https://host/path#<redacted>",
+		},
+		{
+			"url fragment after secret query value",
+			[]string{"--endpoint=https://host?token=a&x=b#fragment-secret"},
+			"--endpoint=https://host?token=<redacted>&x=b#<redacted>",
+		},
+		{
+			"empty url fragment redacted",
+			[]string{"https://host/path?x=y#"},
+			"https://host/path?x=y#<redacted>",
+		},
+		{
+			"fragment in a non url value untouched",
+			[]string{"--label=build#42"},
+			"--label=build#42",
 		},
 		{
 			"url userinfo before query redacted",
@@ -371,6 +396,7 @@ func TestEntrypointRedactsSecretArguments(t *testing.T) {
 		secretD = "header-secret-ddd"
 		secretE = "query-secret-eee"
 		secretF = "pending-secret-fff"
+		secretG = "fragment-secret-ggg"
 	)
 	for _, debug := range []string{"", "1"} {
 		t.Run("debug="+debug, func(t *testing.T) {
@@ -391,7 +417,7 @@ func TestEntrypointRedactsSecretArguments(t *testing.T) {
 				"--header", "Authorization: Bearer " + secretD,
 				"--api-key", "--bearer", secretF,
 				"--tracing-endpoint=https://collector.example/v1/traces?api_key=" +
-					secretE + "&service=dingo",
+					secretE + "&service=dingo#" + secretG,
 				"--token-registry-enabled",
 				"--network", "devnet",
 			}
@@ -408,6 +434,7 @@ func TestEntrypointRedactsSecretArguments(t *testing.T) {
 			require.NotContains(t, logs, secretD)
 			require.NotContains(t, logs, secretE)
 			require.NotContains(t, logs, secretF)
+			require.NotContains(t, logs, secretG)
 			require.Contains(
 				t,
 				logs,
@@ -416,7 +443,7 @@ func TestEntrypointRedactsSecretArguments(t *testing.T) {
 					"--header Authorization: Bearer <redacted> "+
 					"--api-key --bearer <redacted> "+
 					"--tracing-endpoint=https://collector.example/v1/traces"+
-					"?api_key=<redacted>&service=dingo "+
+					"?api_key=<redacted>&service=dingo#<redacted> "+
 					"--token-registry-enabled --network devnet",
 			)
 		})

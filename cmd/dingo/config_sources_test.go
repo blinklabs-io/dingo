@@ -40,6 +40,7 @@ func TestMergeConfigSourcesReadsSecretFiles(t *testing.T) {
 		require.NoError(t, os.Unsetenv(name))
 	}
 	dir := t.TempDir()
+	require.NoError(t, os.Chmod(dir, 0o700))
 	keyFile := filepath.Join(dir, "koios-key")
 	require.NoError(t, os.WriteFile(keyFile, []byte("from-file\n"), 0o600))
 	configFile := filepath.Join(dir, "dingo.yaml")

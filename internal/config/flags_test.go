@@ -122,6 +122,7 @@ func TestRegisterFlags_CoversAllExportedConfigFields(t *testing.T) {
 	specFields := map[string]string{}
 	yamlOnlyFields := map[string]struct{}{
 		"MetricsAuthToken":                     {},
+		"KoiosParity.APIKey":                   {},
 		"Plugins.Storage.Blob.Config":          {},
 		"Plugins.Storage.Metadata.Config":      {},
 		"Plugins.Consensus.Config":             {},
@@ -179,6 +180,19 @@ func TestRegisterFlags_CoversAllExportedConfigFields(t *testing.T) {
 			)
 		}
 	}
+}
+
+func TestRegisterFlagsDoesNotExposeKoiosAPIKeyThroughArgv(t *testing.T) {
+	t.Parallel()
+
+	cmd := &cobra.Command{Use: "dingo"}
+	RegisterFlags(cmd)
+
+	require.Nil(t, cmd.PersistentFlags().Lookup("koios-parity-api-key"))
+	err := cmd.ParseFlags([]string{
+		"--koios-parity-api-key=process-list-visible-secret",
+	})
+	require.ErrorContains(t, err, "unknown flag: --koios-parity-api-key")
 }
 
 func TestConsensusProviderSourcePrecedence(t *testing.T) {
