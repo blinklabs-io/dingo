@@ -536,6 +536,11 @@ type OuroborosConfig struct {
 	// bounded corroboration history, including observer connections that are
 	// not eligible for chain-selection admission.
 	ChainsyncRecordDeliveredPeerTip func(chainselection.PeerTipUpdateEvent)
+	// ChainsyncRecordDeliveredPeerRollback trims a peer's bounded delivered
+	// history after a rollback, including observer connections that are not
+	// eligible for chain-selection admission and so never reach
+	// ChainsyncObservePeerRollback. It must not register or select the peer.
+	ChainsyncRecordDeliveredPeerRollback func(chainselection.PeerRollbackEvent)
 	// ChainsyncPrepareForecastWitness temporarily records a connected header
 	// that is waiting for the ledger forecast horizon. It may corroborate
 	// verified staged candidates but cannot enter selection or admission. The

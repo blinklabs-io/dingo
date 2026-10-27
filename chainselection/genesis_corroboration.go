@@ -93,6 +93,20 @@ func (cs *ChainSelector) RecordDeliveredPeerTip(update PeerTipUpdateEvent) {
 	cs.signalIngressChange()
 }
 
+// RecordDeliveredPeerRollback trims the delivered history of a peer after a
+// rollback. It touches only an existing delivered record: it never registers
+// the connection, so it is safe for peers that are not admitted to selection.
+func (cs *ChainSelector) RecordDeliveredPeerRollback(e PeerRollbackEvent) {
+	cs.mutex.Lock()
+	defer cs.mutex.Unlock()
+	deliveredTip := cs.deliveredPeerTips[e.ConnectionId]
+	if deliveredTip == nil {
+		return
+	}
+	deliveredTip.ApplyRollback(e.Point, e.Tip)
+	cs.signalIngressChange()
+}
+
 // peerLiveEligibleNonStaleLocked reports whether a peer passes the shared
 // live/eligible/non-stale prerequisite used by both Genesis corroboration
 // witness eligibility and normal selection eligibility. It is the single

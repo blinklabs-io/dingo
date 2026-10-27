@@ -4690,7 +4690,46 @@ func safeLog(logger *slog.Logger, msg string, args ...any) {
 	logger.Error(msg, args...)
 }
 
+// sweepDeadDeliveredPeerTips removes delivered-history entries that have no
+// admission-frontier record and whose connection is no longer live. Such an
+// entry can only be created by RecordDeliveredPeerTip racing the peer's
+// removal, and the peerTips-driven stale sweep never reaches it, so without
+// this it would hold a maxTrackedPeers slot until Genesis exit. ConnectionLive
+// reaches into the composition layer and must not run under cs.mutex, so
+// candidates are collected under the lock, probed outside it, and re-checked
+// after relocking: an entry that gained a peerTips record in between is kept.
+func (cs *ChainSelector) sweepDeadDeliveredPeerTips() {
+	if cs.config.ConnectionLive == nil {
+		return
+	}
+	cs.mutex.RLock()
+	var candidates []ouroboros.ConnectionId
+	for connId := range cs.deliveredPeerTips {
+		if _, tracked := cs.peerTips[connId]; !tracked {
+			candidates = append(candidates, connId)
+		}
+	}
+	cs.mutex.RUnlock()
+	var dead []ouroboros.ConnectionId
+	for _, connId := range candidates {
+		if !cs.config.ConnectionLive(connId) {
+			dead = append(dead, connId)
+		}
+	}
+	if len(dead) == 0 {
+		return
+	}
+	cs.mutex.Lock()
+	defer cs.mutex.Unlock()
+	for _, connId := range dead {
+		if _, tracked := cs.peerTips[connId]; !tracked {
+			delete(cs.deliveredPeerTips, connId)
+		}
+	}
+}
+
 func (cs *ChainSelector) cleanupStalePeers() {
+	cs.sweepDeadDeliveredPeerTips()
 	var switchEvent *event.Event
 
 	func() {
