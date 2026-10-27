@@ -27,6 +27,11 @@ import (
 	"sync"
 )
 
+const (
+	cloudDestinationIdentityPrefix = "v1:sha256:"
+	cloudDestinationIdentityBytes  = len(cloudDestinationIdentityPrefix) + sha256.Size*2
+)
+
 // ErrCloudSnapshotNotFound is what a CloudManifestFetcher implementation
 // wraps around its underlying "object doesn't exist" error (e.g. S3's
 // NoSuchKey/NotFound, GCS's storage.ErrObjectNotExist) — the one case
@@ -171,7 +176,7 @@ func cloudDestinationIdentity(raw string) (string, error) {
 		return "", err
 	}
 	digest := sha256.Sum256([]byte(uri.String()))
-	return fmt.Sprintf("v1:sha256:%x", digest), nil
+	return fmt.Sprintf("%s%x", cloudDestinationIdentityPrefix, digest), nil
 }
 
 // CloudDestinationDisplay returns a credential-free form of a cloud URI for

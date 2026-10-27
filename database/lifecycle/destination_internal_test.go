@@ -177,11 +177,15 @@ func TestOpenSnapshotUploadFilesUsesDeclaredFilesInPublicationOrder(t *testing.T
 		filepath.Join(dir, "unrelated"), []byte("secret"), 0o600,
 	))
 
-	files, _, err := openSnapshotUploadFiles(
+	files, _, root, err := openSnapshotUploadFiles(
 		t.Context(), dir, MaxManifestBytes,
 	)
 	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, closeSnapshotUploadFiles(files)) })
+	t.Cleanup(func() {
+		require.NoError(t, errors.Join(
+			closeSnapshotUploadFiles(files), root.Close(),
+		))
+	})
 
 	names := make([]string, 0, len(files))
 	for _, file := range files {
@@ -204,7 +208,7 @@ func TestOpenSnapshotUploadFilesRejectsSymlink(t *testing.T) {
 	require.NoError(t, os.Remove(filepath.Join(dir, BlobBackupFileName)))
 	require.NoError(t, os.Symlink(outside, filepath.Join(dir, BlobBackupFileName)))
 
-	files, _, err := openSnapshotUploadFiles(
+	files, _, _, err := openSnapshotUploadFiles(
 		t.Context(), dir, MaxManifestBytes,
 	)
 	require.ErrorContains(t, err, "open snapshot upload file")
@@ -216,11 +220,15 @@ func TestOpenSnapshotUploadFilesKeepsOpenedFileAfterPathSwap(t *testing.T) {
 
 	dir := t.TempDir()
 	writeTestUploadSnapshot(t, dir)
-	files, _, err := openSnapshotUploadFiles(
+	files, _, root, err := openSnapshotUploadFiles(
 		t.Context(), dir, MaxManifestBytes,
 	)
 	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, closeSnapshotUploadFiles(files)) })
+	t.Cleanup(func() {
+		require.NoError(t, errors.Join(
+			closeSnapshotUploadFiles(files), root.Close(),
+		))
+	})
 
 	outside := filepath.Join(t.TempDir(), "outside")
 	require.NoError(t, os.WriteFile(outside, []byte("secret"), 0o600))

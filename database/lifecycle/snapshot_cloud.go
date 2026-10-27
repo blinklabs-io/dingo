@@ -16,13 +16,17 @@ package lifecycle
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/keystore"
 )
 
 // cloudMirrorMarkerName is a small marker file written inside a local
@@ -30,7 +34,11 @@ import (
 // succeed. It contains only the destination identity digest. Its presence is
 // what distinguishes a complete mirror from a local copy that still needs an
 // upload or catalog repair.
-const cloudMirrorMarkerName = ".cloud-mirrored"
+const (
+	cloudMirrorMarkerName = ".cloud-mirrored"
+	// MirrorToCloud adds one newline to the fixed-size destination identity.
+	maxCloudMirrorMarkerBytes = cloudDestinationIdentityBytes + 1
+)
 
 // CloudMirrorMarkerPath returns the marker file path for the local
 // snapshot directory dir, per cloudMirrorMarkerName's doc comment.
@@ -43,8 +51,11 @@ func CloudMirrorMarkerPath(dir string) string {
 // actually completed successfully, as opposed to dir merely existing
 // locally.
 func IsCloudMirrored(dir string) bool {
-	_, err := os.Stat(CloudMirrorMarkerPath(dir))
-	return err == nil
+	marker, err := openCloudMirrorMarker(dir)
+	if err != nil {
+		return false
+	}
+	return marker.Close() == nil
 }
 
 // IsCloudMirroredTo reports whether dir's cloud mirror marker records the
@@ -60,7 +71,7 @@ func IsCloudMirroredTo(dir string, cloudDest string) bool {
 	if cloudDest == "" {
 		return false
 	}
-	recorded, err := os.ReadFile(CloudMirrorMarkerPath(dir))
+	recorded, err := readCloudMirrorMarker(dir)
 	if err != nil {
 		return false
 	}
@@ -68,6 +79,126 @@ func IsCloudMirroredTo(dir string, cloudDest string) bool {
 		JoinCloudURI(cloudDest, filepath.Base(dir)),
 	)
 	return err == nil && strings.TrimSpace(string(recorded)) == want
+}
+
+func openCloudMirrorMarker(dir string) (*os.File, error) {
+	return keystore.OpenRegularFileNoFollow(CloudMirrorMarkerPath(dir))
+}
+
+func readCloudMirrorMarker(dir string) ([]byte, error) {
+	marker, err := openCloudMirrorMarker(dir)
+	if err != nil {
+		return nil, err
+	}
+	recorded, readErr := io.ReadAll(io.LimitReader(
+		marker,
+		maxCloudMirrorMarkerBytes+1,
+	))
+	if err := errors.Join(readErr, marker.Close()); err != nil {
+		return nil, err
+	}
+	if len(recorded) > maxCloudMirrorMarkerBytes {
+		return nil, fmt.Errorf(
+			"cloud mirror marker exceeds maximum size of %d bytes",
+			maxCloudMirrorMarkerBytes,
+		)
+	}
+	return recorded, nil
+}
+
+func writeCloudMirrorMarker(
+	root *os.Root,
+	dir string,
+	markerValue string,
+) (retErr error) {
+	data := []byte(markerValue + "\n")
+	if len(data) != maxCloudMirrorMarkerBytes {
+		return fmt.Errorf(
+			"cloud mirror marker has invalid size %d, want %d bytes",
+			len(data), maxCloudMirrorMarkerBytes,
+		)
+	}
+
+	if root == nil {
+		return fmt.Errorf("%w: %q", ErrSnapshotDirectoryReplaced, dir)
+	}
+	if err := snapshotRootMatchesPath(root, dir); err != nil {
+		return err
+	}
+
+	var random [16]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return fmt.Errorf("choose temp cloud mirror marker name: %w", err)
+	}
+	tmpName := cloudMirrorMarkerName + ".tmp-" +
+		hex.EncodeToString(random[:])
+	tmp, err := root.OpenFile(
+		tmpName,
+		os.O_WRONLY|os.O_CREATE|os.O_EXCL,
+		0o600,
+	)
+	if err != nil {
+		return fmt.Errorf("create temp cloud mirror marker: %w", err)
+	}
+	renamed := false
+	defer func() {
+		if renamed {
+			return
+		}
+		if err := root.Remove(tmpName); err != nil && !errors.Is(err, os.ErrNotExist) {
+			retErr = errors.Join(
+				retErr,
+				fmt.Errorf("remove temp cloud mirror marker: %w", err),
+			)
+		}
+	}()
+	if err := writeAndSyncCloudMirrorMarker(tmp, data, tmpName); err != nil {
+		return err
+	}
+	if err := root.Rename(tmpName, cloudMirrorMarkerName); err != nil {
+		return fmt.Errorf("publish cloud mirror marker: %w", err)
+	}
+	renamed = true
+
+	rootDir, err := root.Open(".")
+	if err != nil {
+		return fmt.Errorf("open snapshot directory for sync: %w", err)
+	}
+	syncErr := rootDir.Sync()
+	closeErr := rootDir.Close()
+	if err := errors.Join(syncErr, closeErr); err != nil {
+		return fmt.Errorf("sync snapshot directory: %w", err)
+	}
+	return snapshotRootMatchesPath(root, dir)
+}
+
+func writeAndSyncCloudMirrorMarker(
+	file *os.File,
+	data []byte,
+	name string,
+) (retErr error) {
+	defer func() {
+		if err := file.Close(); err != nil {
+			retErr = errors.Join(
+				retErr,
+				fmt.Errorf("close temp cloud mirror marker %q: %w", name, err),
+			)
+		}
+	}()
+	written, err := file.Write(data)
+	if err != nil {
+		return fmt.Errorf("write temp cloud mirror marker %q: %w", name, err)
+	}
+	if written != len(data) {
+		return fmt.Errorf(
+			"write temp cloud mirror marker %q: %w",
+			name, io.ErrShortWrite,
+		)
+	}
+	if err := file.Sync(); err != nil {
+		return fmt.Errorf("sync temp cloud mirror marker %q: %w", name, err)
+	}
+	return nil
 }
 
 // MirrorToCloud uploads dir's contents to cloudDest (a base URI like
@@ -120,7 +251,7 @@ func mirrorToCloud(
 	dir string,
 	cloudDest string,
 	opts []ManifestOption,
-) error {
+) (retErr error) {
 	if cloudDest == "" {
 		return nil
 	}
@@ -140,17 +271,17 @@ func mirrorToCloud(
 		)
 	}
 	defer closeCloudDestination(dest)
-	var manifest Manifest
+	var upload snapshotUploadResult
 	if uploader, ok := dest.(interface {
 		uploadAuthenticatedSnapshot(
 			context.Context,
 			string,
 			...ManifestOption,
-		) (Manifest, error)
+		) (snapshotUploadResult, error)
 	}); ok {
-		manifest, err = uploader.uploadAuthenticatedSnapshot(ctx, dir, opts...)
+		upload, err = uploader.uploadAuthenticatedSnapshot(ctx, dir, opts...)
 	} else {
-		manifest, err = uploadStagedSnapshot(ctx, dest, dir, opts...)
+		upload, err = uploadStagedSnapshot(ctx, dest, dir, opts...)
 	}
 	if err != nil {
 		return fmt.Errorf(
@@ -159,10 +290,18 @@ func mirrorToCloud(
 			sanitizeCloudError(snapshotCloudURI, err),
 		)
 	}
+	defer func() {
+		if err := upload.close(); err != nil {
+			retErr = errors.Join(
+				retErr,
+				fmt.Errorf("close snapshot upload source: %w", err),
+			)
+		}
+	}()
 	if err := updateCloudSnapshotCatalogIfPresent(
 		context.WithoutCancel(ctx),
 		filepath.Dir(dir),
-		SnapshotEntry{ID: filepath.Base(dir), Manifest: manifest},
+		SnapshotEntry{ID: filepath.Base(dir), Manifest: upload.manifest},
 		cloudDest,
 		opts...,
 	); err != nil {
@@ -176,8 +315,8 @@ func mirrorToCloud(
 			)
 		}
 	}
-	if err := os.WriteFile(
-		CloudMirrorMarkerPath(dir), []byte(markerValue+"\n"), 0o600,
+	if err := writeCloudMirrorMarker(
+		upload.root, dir, markerValue,
 	); err != nil {
 		return fmt.Errorf(
 			"upload to %q succeeded, but recording the cloud-mirrored marker failed: %w",

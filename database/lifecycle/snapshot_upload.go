@@ -31,31 +31,53 @@ type snapshotUploadFile struct {
 	file *os.File
 }
 
+type snapshotUploadResult struct {
+	manifest Manifest
+	root     *os.Root
+}
+
+func (r *snapshotUploadResult) close() error {
+	if r.root == nil {
+		return nil
+	}
+	err := r.root.Close()
+	r.root = nil
+	return err
+}
+
 // openSnapshotUploadFiles opens exactly the files declared by a snapshot,
 // with the manifest last so it remains the remote completion marker. The root
-// and each file are held by handle while names are checked, so replacing the
-// directory or an entry cannot redirect a later upload.
+// and each file remain held by handle, so replacing the directory or an entry
+// cannot redirect a later upload. The caller owns the returned files and root.
 func openSnapshotUploadFiles(
 	ctx context.Context,
 	dir string,
 	maxManifestBytes int64,
 	opts ...ManifestOption,
-) (_ []snapshotUploadFile, _ Manifest, retErr error) {
+) (_ []snapshotUploadFile, _ Manifest, _ *os.Root, retErr error) {
 	root, err := os.OpenRoot(dir)
 	if err != nil {
-		return nil, Manifest{}, fmt.Errorf("open snapshot directory %q: %w", dir, err)
+		return nil, Manifest{}, nil, fmt.Errorf(
+			"open snapshot directory %q: %w", dir, err,
+		)
 	}
 	var files []snapshotUploadFile
 	defer func() {
-		retErr = errors.Join(retErr, root.Close())
 		if retErr != nil {
-			retErr = errors.Join(retErr, closeSnapshotUploadFiles(files))
+			retErr = errors.Join(
+				retErr,
+				closeSnapshotUploadFiles(files),
+				root.Close(),
+			)
 		}
 	}()
+	if err := snapshotRootMatchesPath(root, dir); err != nil {
+		return nil, Manifest{}, nil, err
+	}
 
 	manifestFile, err := openSnapshotUploadFile(root, ManifestFileName)
 	if err != nil {
-		return nil, Manifest{}, err
+		return nil, Manifest{}, nil, err
 	}
 	files = []snapshotUploadFile{{name: ManifestFileName, file: manifestFile}}
 
@@ -64,7 +86,9 @@ func openSnapshotUploadFiles(
 		[]ManifestOption{WithManifestMaxBytes(maxManifestBytes)},
 	)
 	if err != nil {
-		return nil, Manifest{}, fmt.Errorf("read snapshot manifest for upload: %w", err)
+		return nil, Manifest{}, nil, fmt.Errorf(
+			"read snapshot manifest for upload: %w", err,
+		)
 	}
 	idOpts := append(
 		[]ManifestOption{WithManifestID(snapshotIDForDir(dir))},
@@ -73,21 +97,25 @@ func openSnapshotUploadFiles(
 	idOpts = append(idOpts, WithManifestMaxBytes(maxManifestBytes))
 	manifest, err := ParseManifest(data, idOpts...)
 	if err != nil {
-		return nil, Manifest{}, fmt.Errorf("parse snapshot manifest for upload: %w", err)
+		return nil, Manifest{}, nil, fmt.Errorf(
+			"parse snapshot manifest for upload: %w", err,
+		)
 	}
 	if _, err := manifestFile.Seek(0, io.SeekStart); err != nil {
-		return nil, Manifest{}, fmt.Errorf("rewind snapshot manifest for upload: %w", err)
+		return nil, Manifest{}, nil, fmt.Errorf(
+			"rewind snapshot manifest for upload: %w", err,
+		)
 	}
 
 	ordered := make([]snapshotUploadFile, 0, len(manifest.payloadFiles())+1)
 	for _, payload := range manifest.payloadFiles() {
 		file, err := openSnapshotUploadFile(root, payload.name)
 		if err != nil {
-			return nil, Manifest{}, err
+			return nil, Manifest{}, nil, err
 		}
 		files = append(files, snapshotUploadFile{name: payload.name, file: file})
 		if payload.sha256 == "" {
-			return nil, Manifest{}, fmt.Errorf(
+			return nil, Manifest{}, nil, fmt.Errorf(
 				"%w: manifest declares no digest for %s",
 				ErrSnapshotPayloadMismatch,
 				payload.name,
@@ -95,12 +123,12 @@ func openSnapshotUploadFiles(
 		}
 		digest, size, err := hashSnapshotUploadFile(ctx, file)
 		if err != nil {
-			return nil, Manifest{}, fmt.Errorf(
+			return nil, Manifest{}, nil, fmt.Errorf(
 				"hash snapshot upload file %q: %w", payload.name, err,
 			)
 		}
 		if size != payload.size {
-			return nil, Manifest{}, fmt.Errorf(
+			return nil, Manifest{}, nil, fmt.Errorf(
 				"%w: %s is %d bytes, manifest declares %d",
 				ErrSnapshotPayloadMismatch,
 				payload.name,
@@ -109,7 +137,7 @@ func openSnapshotUploadFiles(
 			)
 		}
 		if !strings.EqualFold(digest, payload.sha256) {
-			return nil, Manifest{}, fmt.Errorf(
+			return nil, Manifest{}, nil, fmt.Errorf(
 				"%w: %s digest %s, manifest declares %s",
 				ErrSnapshotPayloadMismatch,
 				payload.name,
@@ -118,14 +146,14 @@ func openSnapshotUploadFiles(
 			)
 		}
 		if _, err := file.Seek(0, io.SeekStart); err != nil {
-			return nil, Manifest{}, fmt.Errorf(
+			return nil, Manifest{}, nil, fmt.Errorf(
 				"rewind snapshot upload file %q: %w", payload.name, err,
 			)
 		}
 		ordered = append(ordered, snapshotUploadFile{name: payload.name, file: file})
 	}
 	ordered = append(ordered, files[0])
-	return ordered, manifest, nil
+	return ordered, manifest, root, nil
 }
 
 func hashSnapshotUploadFile(
@@ -171,6 +199,20 @@ func closeSnapshotUploadFiles(files []snapshotUploadFile) error {
 	return err
 }
 
+func finishSnapshotUpload(
+	files []snapshotUploadFile,
+	root *os.Root,
+	result *snapshotUploadResult,
+	retErr *error,
+) {
+	*retErr = errors.Join(*retErr, closeSnapshotUploadFiles(files))
+	if *retErr == nil {
+		return
+	}
+	*retErr = errors.Join(*retErr, root.Close())
+	*result = snapshotUploadResult{}
+}
+
 // uploadStagedSnapshot serves a destination that implements only UploadDir,
 // which reads pathnames rather than the verified handles. It copies the
 // declared files from those handles into a private directory beside dir,
@@ -182,21 +224,19 @@ func uploadStagedSnapshot(
 	dest CloudDestination,
 	dir string,
 	opts ...ManifestOption,
-) (_ Manifest, retErr error) {
+) (result snapshotUploadResult, retErr error) {
 	limit, err := manifestByteLimit(opts)
 	if err != nil {
-		return Manifest{}, err
+		return snapshotUploadResult{}, err
 	}
-	files, _, err := openSnapshotUploadFiles(ctx, dir, limit, opts...)
+	files, _, root, err := openSnapshotUploadFiles(ctx, dir, limit, opts...)
 	if err != nil {
-		return Manifest{}, err
+		return snapshotUploadResult{}, err
 	}
-	defer func() {
-		retErr = errors.Join(retErr, closeSnapshotUploadFiles(files))
-	}()
+	defer finishSnapshotUpload(files, root, &result, &retErr)
 	tempDir, err := os.MkdirTemp(filepath.Dir(dir), ".dingo-cloud-upload-*")
 	if err != nil {
-		return Manifest{}, fmt.Errorf(
+		return snapshotUploadResult{}, fmt.Errorf(
 			"create staging directory for snapshot upload: %w", err,
 		)
 	}
@@ -205,7 +245,7 @@ func uploadStagedSnapshot(
 	}()
 	stagedDir := filepath.Join(tempDir, snapshotIDForDir(dir))
 	if err := os.Mkdir(stagedDir, 0o700); err != nil {
-		return Manifest{}, fmt.Errorf(
+		return snapshotUploadResult{}, fmt.Errorf(
 			"create staged snapshot directory: %w", err,
 		)
 	}
@@ -213,20 +253,23 @@ func uploadStagedSnapshot(
 		if err := copySnapshotUploadFile(
 			ctx, filepath.Join(stagedDir, file.name), file.file,
 		); err != nil {
-			return Manifest{}, err
+			return snapshotUploadResult{}, err
 		}
 	}
 	manifest, err := ReadManifest(stagedDir, opts...)
 	if err != nil {
-		return Manifest{}, err
+		return snapshotUploadResult{}, err
 	}
 	if err := manifest.verifyPayloads(ctx, stagedDir, true); err != nil {
-		return Manifest{}, err
+		return snapshotUploadResult{}, err
 	}
 	if err := dest.UploadDir(ctx, stagedDir); err != nil {
-		return Manifest{}, err
+		return snapshotUploadResult{}, err
 	}
-	return manifest, nil
+	return snapshotUploadResult{
+		manifest: manifest,
+		root:     root,
+	}, nil
 }
 
 func copySnapshotUploadFile(
