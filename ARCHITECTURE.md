@@ -3702,10 +3702,11 @@ ledger before the first Shelley TICK; a two-era boundary's pv3 AVVM return then
 adds the reclaimed value to the translated reserves rather than being
 overwritten. The first Shelley epoch's ADA pots, captured at the end of the
 rollover, therefore carry the translated reserves, which the first Shelley
-reward round reads. An empty live UTxO set is left at the genesis baseline
-with a warning: Byron genesis funds can move but not vanish, so zero means the
-UTxO table was not populated, and translating it would set reserves to the
-whole maximum supply. The translation is one write inside the rollover
+reward round reads. An empty live UTxO set fails the rollover: genesis sync
+refuses a configuration with no genesis UTxO and those funds can move but not
+vanish, so zero means the UTxO table was not populated, and neither the whole
+maximum supply nor the genesis baseline is the translated reserves. The
+translation is one write inside the rollover
 transaction, keyed on the ended epoch being Byron and the incoming era not, so
 a restart after the boundary does not repeat it and a rollback past the
 boundary removes it with the other boundary rows. A database synced through

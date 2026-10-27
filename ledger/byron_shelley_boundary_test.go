@@ -278,6 +278,17 @@ func newByronShelleyBoundaryLedger(
 	t *testing.T,
 ) (*LedgerState, gledger.Block, gledger.Block) {
 	t.Helper()
+	ls, lastByron, firstShelley := newUnseededByronShelleyBoundaryLedger(t)
+	seedBoundaryFixtureLiveUtxo(t, ls)
+	return ls, lastByron, firstShelley
+}
+
+// newUnseededByronShelleyBoundaryLedger is newByronShelleyBoundaryLedger
+// without the live UTxO, for tests that control the translated balance.
+func newUnseededByronShelleyBoundaryLedger(
+	t *testing.T,
+) (*LedgerState, gledger.Block, gledger.Block) {
+	t.Helper()
 
 	const byronGenesisJSON = `{
 		"protocolConsts": {"k": 2160, "protocolMagic": 764824073},
@@ -322,7 +333,7 @@ func newByronShelleyBoundaryLedger(
 		strings.NewReader(shelleyGenesisJSON),
 	))
 
-	return newByronShelleyBoundaryLedgerFrom(
+	return newUnseededByronShelleyBoundaryLedgerFrom(
 		t,
 		cfg,
 		loadBoundaryBlock(t, "mainnet-byron-last-4492799.cbor", 1),
@@ -337,6 +348,40 @@ func newByronShelleyBoundaryLedger(
 // the Byron epoch byronEpoch, with firstShelley stored after it on the primary
 // chain and not yet applied.
 func newByronShelleyBoundaryLedgerFrom(
+	t *testing.T,
+	cfg *cardano.CardanoNodeConfig,
+	lastByron, firstShelley gledger.Block,
+	byronEpoch, byronEpochStart uint64,
+	byronEpochLength uint,
+) (*LedgerState, gledger.Block, gledger.Block) {
+	t.Helper()
+	ls, lastByron, firstShelley := newUnseededByronShelleyBoundaryLedgerFrom(
+		t, cfg, lastByron, firstShelley,
+		byronEpoch, byronEpochStart, byronEpochLength,
+	)
+	seedBoundaryFixtureLiveUtxo(t, ls)
+	return ls, lastByron, firstShelley
+}
+
+// seedBoundaryFixtureLiveUtxo writes the one live UTxO a boundary fixture
+// carries. A ledger at the end of Byron holds the translated genesis funds,
+// and the boundary rejects an empty live UTxO set as an unpopulated table.
+func seedBoundaryFixtureLiveUtxo(t *testing.T, ls *LedgerState) {
+	t.Helper()
+	txn := ls.db.Transaction(context.Background(), true)
+	require.NoError(t, ls.db.CreateUtxo(
+		context.Background(), txn, &models.Utxo{
+			TxId:      bytes.Repeat([]byte{0x03}, 32),
+			AddedSlot: 0,
+			Amount:    types.Uint64(1_000_000_000),
+		},
+	))
+	require.NoError(t, txn.Commit())
+}
+
+// newUnseededByronShelleyBoundaryLedgerFrom is newByronShelleyBoundaryLedgerFrom
+// without the live UTxO, for tests that control the translated balance.
+func newUnseededByronShelleyBoundaryLedgerFrom(
 	t *testing.T,
 	cfg *cardano.CardanoNodeConfig,
 	lastByron, firstShelley gledger.Block,
@@ -922,8 +967,8 @@ func TestByronShelleyBoundaryReservesExcludeLiveUtxoBalance(t *testing.T) {
 		name   string
 		ledger func(t *testing.T) (*LedgerState, gledger.Block, gledger.Block)
 	}{
-		{name: "mainnet", ledger: newByronShelleyBoundaryLedger},
-		{name: "preprod", ledger: newPreprodByronShelleyBoundaryLedger},
+		{name: "mainnet", ledger: newUnseededByronShelleyBoundaryLedger},
+		{name: "preprod", ledger: newUnseededPreprodByronShelleyBoundaryLedger},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -945,12 +990,10 @@ func TestByronShelleyBoundaryReservesExcludeLiveUtxoBalance(t *testing.T) {
 }
 
 // An empty live UTxO set is not a translated Byron ledger: genesis funds can
-// move but not vanish, so zero means the UTxO table was never populated.
-// Translating it would set reserves to the whole maximum supply and misstate
-// every later pot, so the boundary keeps the genesis baseline instead.
-func TestByronShelleyBoundaryReservesKeepGenesisWithoutLiveUtxo(
-	t *testing.T,
-) {
+// move but not vanish, so zero means the UTxO table was never populated. The
+// boundary must fail rather than commit the first Shelley epoch, and the ADA
+// pots its first reward round reads, from reserves the translation never set.
+func TestByronShelleyBoundaryRejectsEmptyLiveUtxo(t *testing.T) {
 	t.Parallel()
 
 	const (
@@ -958,12 +1001,19 @@ func TestByronShelleyBoundaryReservesKeepGenesisWithoutLiveUtxo(
 		genesisUtxo = uint64(1_000_000_000)
 	)
 
-	ls, _, firstShelley := newByronShelleyBoundaryLedger(t)
+	ls, _, firstShelley := newUnseededByronShelleyBoundaryLedger(t)
 	seedByronBoundaryUtxos(t, ls, maxSupply-genesisUtxo, 0, 0)
 
-	crossByronShelleyBoundary(t, ls, firstShelley)
+	results := make(chan readChainResult, 1)
+	results <- readChainResult{blocks: []gledger.Block{firstShelley}}
+	close(results)
+	err := ls.ledgerProcessBlocksFromSource(context.Background(), results)
+	require.ErrorContains(t, err, "no live UTxO at the Byron-to-Shelley boundary")
+	require.Equal(t, eras.ByronEraDesc.Id, ls.currentEra.Id)
 
-	requireBoundaryReserves(t, ls, maxSupply-genesisUtxo)
+	pots, err := ls.db.Metadata().GetRewardAdaPots(208, nil)
+	require.NoError(t, err)
+	require.Nil(t, pots, "the failed boundary must not commit Shelley pots")
 }
 
 // seedByronBoundaryUtxos writes the slot-0 network state and, for each
@@ -1041,11 +1091,11 @@ func requireBoundaryReserves(
 	)
 }
 
-func newPreprodByronShelleyBoundaryLedger(
+func newUnseededPreprodByronShelleyBoundaryLedger(
 	t *testing.T,
 ) (*LedgerState, gledger.Block, gledger.Block) {
 	t.Helper()
-	return newByronShelleyBoundaryLedgerFrom(
+	return newUnseededByronShelleyBoundaryLedgerFrom(
 		t,
 		loadPreprodNodeConfig(t),
 		loadBoundaryBlock(t, "preprod-byron-last-84242.cbor", 1),

@@ -94,10 +94,11 @@ func genesisReserveBalance(
 // first Shelley TICK, and before the first Shelley epoch's ADA pots are
 // captured, since the first Shelley reward round reads them.
 //
-// An empty live set is never a translated UTxO: the Byron genesis funds can
-// only move, not vanish, so zero means the UTxO table was not populated.
-// Writing max supply as reserves there would misstate every later pot, so
-// the genesis baseline is kept instead.
+// An empty live set is never a translated UTxO: genesis sync refuses a
+// configuration with no genesis UTxO, and those funds can only move, not
+// vanish, so zero means the UTxO table was not populated. Neither max supply
+// nor the genesis baseline is the translated reserves then, so the boundary
+// fails rather than commit the first Shelley epoch from an unverified supply.
 func (ls *LedgerState) applyByronTranslationReserves(
 	txn *database.Txn,
 	newEpoch uint64,
@@ -113,14 +114,12 @@ func (ls *LedgerState) applyByronTranslationReserves(
 		return fmt.Errorf("sum live UTxO balance: %w", err)
 	}
 	if live == 0 {
-		ls.config.Logger.Warn(
-			"no live UTxO at the Byron-to-Shelley boundary, "+
-				"keeping genesis reserves",
-			"epoch", newEpoch,
-			"boundary_slot", boundarySlot,
-			"component", "ledger",
+		return fmt.Errorf(
+			"no live UTxO at the Byron-to-Shelley boundary "+
+				"(epoch %d, slot %d): UTxO set is not populated",
+			newEpoch,
+			boundarySlot,
 		)
-		return nil
 	}
 	if live > shelleyGenesis.MaxLovelaceSupply {
 		return fmt.Errorf(
