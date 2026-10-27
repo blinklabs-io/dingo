@@ -54,7 +54,7 @@ func (p *PeerConn) answerMessageIDs(blocking bool, limit int) {
 		ids := p.nextMessageIDs(limit)
 		if len(ids) > 0 || !blocking {
 			if err := p.server.ReplyIDs(ids); err != nil {
-				p.fail(fmt.Errorf("dmq peer: reply message IDs: %w", err))
+				p.failSend("reply message IDs", err)
 			}
 			return
 		}
@@ -62,7 +62,7 @@ func (p *PeerConn) answerMessageIDs(blocking bool, limit int) {
 		case <-added:
 		case <-deadline:
 			if err := p.server.ReplyNoIDs(); err != nil {
-				p.fail(fmt.Errorf("dmq peer: reply no message IDs: %w", err))
+				p.failSend("reply no message IDs", err)
 			}
 			return
 		case <-p.ctx.Done():
@@ -118,7 +118,7 @@ func (p *PeerConn) onRequestSigs(ids [][]byte) {
 			msgs = append(msgs, msg)
 		}
 		if err := p.server.ReplySigs(msgs); err != nil {
-			p.fail(fmt.Errorf("dmq peer: reply messages: %w", err))
+			p.failSend("reply messages", err)
 			return
 		}
 		p.stack.sent.Add(float64(len(msgs)))
@@ -218,7 +218,7 @@ func (p *PeerConn) pull() {
 			if err := p.puller.RequestIDs(
 				blocking, ackCount, wantCount,
 			); err != nil {
-				p.fail(fmt.Errorf("dmq peer: request message IDs: %w", err))
+				p.failSend("request message IDs", err)
 				return
 			}
 			ids, ok := p.awaitMessageIDs()
@@ -249,7 +249,7 @@ func (p *PeerConn) pull() {
 			ids = append(ids, window[i].id)
 		}
 		if err := p.puller.RequestSigs(ids); err != nil {
-			p.fail(fmt.Errorf("dmq peer: request messages: %w", err))
+			p.failSend("request messages", err)
 			return
 		}
 		msgs, ok := p.awaitMessages()

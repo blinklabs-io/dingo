@@ -300,6 +300,19 @@ func (p *PeerConn) fail(err error) {
 	})
 }
 
+// failSend ends the connection after a send failed. A protocol that is
+// shutting down refuses sends, but the refusal is a symptom: what stopped the
+// protocol, such as the muxer losing the connection or a protocol error,
+// reaches fail through the muxer's or the protocols' error channel. A refusal
+// recorded first would hide it, and would report a remote reset as a failure.
+// A protocol the peer ended leaves the connection up for the other direction.
+func (p *PeerConn) failSend(what string, err error) {
+	if errors.Is(err, protocol.ErrProtocolShuttingDown) {
+		return
+	}
+	p.fail(fmt.Errorf("dmq peer: %s: %w", what, err))
+}
+
 // endedCleanly reports whether err is how a connection normally ends: the
 // remote hanging up, or this side having closed it. A remote that closes with
 // unread data queued makes the kernel reset the connection, so the muxer sees
