@@ -739,6 +739,12 @@ var ledgerPredicateErrorPatterns = map[string][]string{
 	"IncorrectDepositDELEG": {
 		"incorrect deposit for certificate type",
 	},
+	// The ledger reports one deposit error for every registration
+	// certificate. NDC names the DRep registration (certificate type 16)
+	// separately, and the longer pattern wins over the generic one above.
+	"IncorrectDepositDRep": {
+		"incorrect deposit for certificate type 16:",
+	},
 	"IncorrectTotalCollateralField": {
 		"incorrect total collateral field",
 	},
