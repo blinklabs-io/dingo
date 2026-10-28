@@ -32,9 +32,10 @@ import (
 // when the reference is inside (localTip, localTip+K], where neither stale nor
 // catch-up relaxation applies, and the frontier is past reference+K. A
 // connection that is already held (entered) stays held after the reference
-// passes the local tip, until the frontier is within the bound that then
-// applies, max(reference+K, localTip+2K); otherwise the first header released
-// would meet the far-claim path that cannot corroborate a lone header.
+// leaves the band, until the frontier is within localTip+2K; otherwise the
+// first header released would stay pending, since admission holds anything
+// past localTip+2K whatever the peer evidence. No reference or corroborated
+// claim releases a connection past that ceiling.
 //
 // A frontier no chain could have reached from the local tip is never held, so
 // it still meets the plausibility rejection at once.
@@ -73,6 +74,11 @@ func (cs *ChainSelector) catchUpBandHoldLocked(
 			local, safeAddUint64(cs.securityParam, cs.securityParam),
 		))
 	}
+	// Admission keeps anything past localTip+2K pending whatever the peer
+	// evidence, so releasing such a header would only stage it unadmitted.
+	ceiling = min(ceiling, safeAddUint64(
+		local, safeAddUint64(cs.securityParam, cs.securityParam),
+	))
 	return observedTip.BlockNumber > ceiling &&
 		cs.blockWithinSlotDistanceFromLocked(localTip, observedTip)
 }

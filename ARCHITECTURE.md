@@ -6016,14 +6016,15 @@ admitted, verified, observed, or published,
 so it requests no further headers, until the header is admissible. It re-reads
 the live applied tip, the reference and the tracked peers every 100ms and takes
 the selector lock only for each check, never while parked. A connection is held
-only from inside the band; once held it stays held after the reference passes
-the local tip until the header is within `max(reference + securityParam,
-localTip + 2 * securityParam)`, because releasing it into the far-claim path
-would withhold the header from the connection's observed ancestry and defer
-every later header's verification. The wait records no frontier, claim or
-witness, so a waiting connection can neither be selected nor corroborate
-another, and a header no chain could have reached from the local tip is not
-held and is still rejected. It ends on connection close or node shutdown (the
+only from inside the band; once held it stays held after the reference leaves
+the band until the header is within `localTip + 2 * securityParam`, the applied
+catch-up ceiling, because admission keeps a header past it pending whatever the
+peer evidence, which would withhold the header from the connection's observed
+ancestry and defer every later header's verification. The wait records no
+frontier, claim or witness, so a waiting connection can neither be selected
+nor corroborate another, and a header no chain could have reached from the
+local tip is not held and is still rejected. It ends on connection close or
+node shutdown (the
 admission context), and after 60 seconds, or half the operator's chainsync
 stall timeout if that is lower (`catchUpBandWaitTimeoutFor`), below the 135 to
 269 second MustReply, 269 second minimum CanAwait and 3673 second Idle
