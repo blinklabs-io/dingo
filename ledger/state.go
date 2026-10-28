@@ -15249,66 +15249,6 @@ func (ls *LedgerState) CountTransactionsByMetadataLabel(
 	return count, nil
 }
 
-// CountTransactionsInSlotRange returns the number of transactions whose slot
-// falls within the inclusive range [startSlot, endSlot].
-// Used by the Blockfrost adapter CurrentEpoch() path so epoch responses can
-// return real tx counts without decoding every block in the epoch on demand.
-func (ls *LedgerState) CountTransactionsInSlotRange(
-	startSlot, endSlot uint64,
-) (int, error) {
-	if endSlot < startSlot {
-		return 0, nil
-	}
-	store, ok := ls.db.Metadata().(metadata.SlotRangeStore)
-	if !ok {
-		return 0, errors.New(
-			"metadata store does not support slot-range statistics",
-		)
-	}
-	count, err := store.CountTransactionsInSlotRange(
-		startSlot,
-		endSlot,
-		nil,
-	)
-	if err != nil {
-		return 0, fmt.Errorf(
-			"count transactions in slot range %d-%d: %w",
-			startSlot,
-			endSlot,
-			err,
-		)
-	}
-	return count, nil
-}
-
-// CountBlocksInSlotRange returns the number of canonical blocks in the
-// inclusive slot range [startSlot, endSlot], along with the first and last
-// block slots found. It uses canonical metadata rows instead of raw blob keys
-// so orphaned fork blocks do not leak into Blockfrost epoch responses.
-func (ls *LedgerState) CountBlocksInSlotRange(
-	startSlot, endSlot uint64,
-) (int, uint64, uint64, error) {
-	if endSlot < startSlot {
-		return 0, 0, 0, nil
-	}
-	store, ok := ls.db.Metadata().(metadata.SlotRangeStore)
-	if !ok {
-		return 0, 0, 0, errors.New(
-			"metadata store does not support slot-range statistics",
-		)
-	}
-	stats, err := store.GetBlockSlotRangeStats(startSlot, endSlot, nil)
-	if err != nil {
-		return 0, 0, 0, fmt.Errorf(
-			"count blocks in slot range %d-%d: %w",
-			startSlot,
-			endSlot,
-			err,
-		)
-	}
-	return stats.Count, stats.FirstSlot, stats.LastSlot, nil
-}
-
 // resolveValidationEra determines the appropriate era descriptor for
 // validating a transaction. It returns the current era if the transaction
 // matches, the previous era if compatible (era-1), or an error if the

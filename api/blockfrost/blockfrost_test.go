@@ -1226,9 +1226,9 @@ func (m *mockNode) LatestBlockTxHashes(_ context.Context) (
 	return m.txHashes, m.txHashesErr
 }
 
-func (m *mockNode) CurrentEpoch() (
-	EpochInfo, error,
-) {
+func (m *mockNode) CurrentEpoch(
+	_ context.Context,
+) (EpochInfo, error) {
 	return m.epoch, m.epochErr
 }
 
@@ -1244,9 +1244,9 @@ func (m *mockNode) EpochProtocolParams(
 	return m.epochParams, m.epochParamsErr
 }
 
-func (m *mockNode) Network() (
-	NetworkInfo, error,
-) {
+func (m *mockNode) Network(
+	_ context.Context,
+) (NetworkInfo, error) {
 	return m.network, m.networkErr
 }
 
