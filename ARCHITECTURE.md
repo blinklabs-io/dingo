@@ -6035,6 +6035,32 @@ The connected-header check uses the delivered parent hash, block number, slot,
 and Byron boundary marker; a lone accepted frontier must continue that chain
 or the peer is removed. A lone frontier is not independent evidence for a new
 peer, and the check counts connections rather than operators.
+A reference inside `(localTip, localTip + securityParam]` gets no catch-up
+relaxation, so a header past `reference + securityParam` is rejected, which
+closes the connection, though an honest peer is only ahead of a ledger that
+lags the headers it was delivered. The roll-forward callback therefore applies
+backpressure instead, as the reference node's ChainSync client waits for the
+local selection to advance rather than disconnecting: before the header is
+admitted, verified, observed, or published,
+`ChainSelector.AwaitCatchUpBand` (wired as
+`OuroborosConfig.ChainsyncAwaitCatchUpBand`) parks that connection's callback,
+so it requests no further headers, until the header is admissible. It re-reads
+the live applied tip, the reference and the tracked peers every 100ms and takes
+the selector lock only for each check, never while parked. A connection is held
+only from inside the band; once held it stays held after the reference passes
+the local tip until the header is within `max(reference + securityParam,
+localTip + 2 * securityParam)`, because releasing it into the far-claim path
+would withhold the header from the connection's observed ancestry and defer
+every later header's verification. The wait records no frontier, claim or
+witness, so a waiting connection can neither be selected nor corroborate
+another, and a header no chain could have reached from the local tip is not
+held and is still rejected. It ends on connection close or node shutdown (the
+admission context), and after 60 seconds, or half the operator's chainsync
+stall timeout if that is lower (`catchUpBandWaitTimeoutFor`), below the 135 to
+269 second MustReply, 269 second minimum CanAwait and 3673 second Idle
+chainsync timers and the 2 minute default stall timeout. At that bound the
+header meets the ordinary plausibility verdict unchanged, so a wedged ledger
+or a stale reference costs the peer one bounded pause and nothing else.
 
 Chainsync observations carry an admission ID and remain staged until the
 ledger admits the matching header. Far-tip claims and corroboration gathered

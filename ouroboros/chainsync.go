@@ -2164,6 +2164,19 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			!o.chainsyncState.ClientObserverHeaderGap(ctx.ConnectionId) {
 			o.cancelPendingIngressPromotionResync(ctx.ConnectionId)
 		}
+		// A header past the peer-relative bound only because the ledger lags
+		// is not a peer fault, and rejecting it closes the connection while
+		// holding it would drop it from the connection's observed ancestry.
+		// Wait on this connection's callback, before anything is recorded or
+		// published, so the header is then processed in full.
+		if ingressEligible && o.config.ChainsyncAwaitCatchUpBand != nil {
+			if err := o.awaitCatchUpBand(ctx, v, point); err != nil {
+				return err
+			}
+			if o.recordHeldChainsyncTip(ctx.ConnectionId, tip) {
+				return ochainsync.ErrStopSyncProcess
+			}
+		}
 		// Enforce the future-header boundary on this peer's protocol callback,
 		// before any observed-tip, cursor, dedup, or ledger mutation. A
 		// permitted wait therefore blocks only this peer and never the shared
@@ -2760,6 +2773,43 @@ func (o *Ouroboros) recordHeldChainsyncTip(
 		o.ensureHeldTipRefresher()
 	}
 	return true
+}
+
+// awaitCatchUpBand parks the callback while the header overshoots the
+// catch-up band. A wait that reaches its bound is not an error: the header
+// then meets the ordinary plausibility verdict, so the bound only limits how
+// long this connection stays quiet. Cancellation (connection close, protocol
+// stop) is returned and the header never reaches the ledger queue.
+func (o *Ouroboros) awaitCatchUpBand(
+	ctx ochainsync.CallbackContext,
+	header gledger.BlockHeader,
+	point ocommon.Point,
+) error {
+	admissionCtx, cancelAdmission := chainsyncAdmissionContext(ctx)
+	defer cancelAdmission()
+	waitCtx, cancelWait := context.WithTimeout(
+		admissionCtx,
+		o.catchUpBandWaitTimeout,
+	)
+	defer cancelWait()
+	err := o.config.ChainsyncAwaitCatchUpBand(
+		waitCtx,
+		ctx.ConnectionId,
+		ochainsync.Tip{Point: point, BlockNumber: header.BlockNumber()},
+	)
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, context.DeadlineExceeded) && admissionCtx.Err() == nil {
+		o.config.Logger.Debug(
+			"chainsync: catch-up band wait expired",
+			"component", "ouroboros",
+			"slot", point.Slot,
+			"connection_id", ctx.ConnectionId.String(),
+		)
+		return nil
+	}
+	return fmt.Errorf("chainsync: await catch-up band: %w", err)
 }
 
 // admitChainsyncHeader runs the future-header admission for one delivered
