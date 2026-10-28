@@ -13266,7 +13266,17 @@ func (ls *LedgerState) latestLedgerPrimaryChainAncestor(
 }
 
 func (ls *LedgerState) GetBlock(point ocommon.Point) (models.Block, error) {
-	ret, err := ls.chain.BlockByPoint(context.Background(), point, nil)
+	return ls.GetBlockContext(context.Background(), point)
+}
+
+// GetBlockContext is GetBlock with a caller-supplied context that cancels the
+// metadata lookup. The blob read that follows takes no context, so a read
+// already in flight finishes before the call returns.
+func (ls *LedgerState) GetBlockContext(
+	ctx context.Context,
+	point ocommon.Point,
+) (models.Block, error) {
+	ret, err := ls.chain.BlockByPoint(ctx, point, nil)
 	if err != nil {
 		return models.Block{}, err
 	}
