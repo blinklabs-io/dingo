@@ -421,3 +421,30 @@ func TestChainSelectorGenesisRollbackTrimsObservedHistory(t *testing.T) {
 	assert.Equal(t, []uint64{1, 6, 20}, peerTip.observedSlots)
 	assert.Equal(t, uint64(3), peerTip.observedDensity(cs.GenesisWindowSlots()))
 }
+
+func TestGenesisCandidateHeaderLimit(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		window uint64
+		k      uint64
+		want   int
+	}{
+		{"mainnet", 129600, 2160, 8640},
+		{"window below bound", 30, 2160, 30},
+		{"window at bound", 8640, 2160, 8640},
+		{"unknown k", 129600, 0, 129600},
+		{"huge k", 129600, math.MaxUint64, 129600},
+		{"huge window unknown k", math.MaxUint64, 0, math.MaxInt},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(
+				t,
+				tc.want,
+				GenesisCandidateHeaderLimit(tc.window, tc.k),
+			)
+		})
+	}
+}

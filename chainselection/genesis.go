@@ -80,6 +80,27 @@ func GenesisWindowSlotsForParams(
 	return window.Uint64()
 }
 
+// GenesisCandidateHeaderLimit converts the Genesis window, measured in slots,
+// into a header count for retaining or walking a peer's candidate ancestry. A
+// candidate fragment holds at most k headers plus the headers inside the
+// forecast range, and the forecast range spans one window, which carries 3k
+// headers in expectation, so 4k headers keep a fetched candidate
+// reconstructable from its intersection. The window bounds the result from above because a window
+// cannot hold more headers than slots. Without a known k (zero) the window is
+// returned unchanged. The result saturates at math.MaxInt.
+func GenesisCandidateHeaderLimit(windowSlots, securityParam uint64) int {
+	limit := windowSlots
+	if securityParam > 0 && securityParam <= math.MaxUint64/4 {
+		limit = min(limit, 4*securityParam)
+	}
+	if limit > uint64(math.MaxInt) {
+		return math.MaxInt
+	}
+	// The MaxInt check above makes this conversion safe on both 32- and
+	// 64-bit platforms.
+	return int(limit) //nolint:gosec // G115: limit is bounded by MaxInt
+}
+
 // DensityFromIntersection counts candidate blocks in the Genesis window that
 // starts immediately after the common intersection and ends at
 // intersectionSlot+window, inclusive. The intersection block itself belongs
