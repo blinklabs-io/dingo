@@ -2605,7 +2605,9 @@ func poolStakeSumUint64(raw any, pool []byte) (uint64, error) {
 	}
 	if total.Sign() < 0 || !total.IsUint64() {
 		if pool == nil {
-			return 0, fmt.Errorf("active pool stake total %s outside uint64", total)
+			return 0, fmt.Errorf(
+				"active pool stake total %s outside uint64", total,
+			)
 		}
 		return 0, fmt.Errorf("pool stake overflow for %x", pool)
 	}

@@ -202,7 +202,10 @@ func TestHandlePoolAggregateCancelledRequestWritesNothing(t *testing.T) {
 			)
 			cancel()
 			w := testutil.RequireReceive(
-				t, done, 5*time.Second, "handler returns once the client cancels",
+				t,
+				done,
+				5*time.Second,
+				"handler returns once the client cancels",
 			)
 			require.Equal(t, 0, w.Body.Len())
 		})

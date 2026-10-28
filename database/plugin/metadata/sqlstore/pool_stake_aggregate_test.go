@@ -153,7 +153,13 @@ func TestGetActivePoolStakeTotalDoesNotStreamDelegators(t *testing.T) {
 }
 
 // seedPoolUtxo gives key a live UTxO of amount.
-func seedPoolUtxo(t *testing.T, store *Store, key []byte, id byte, amount uint64) {
+func seedPoolUtxo(
+	t *testing.T,
+	store *Store,
+	key []byte,
+	id byte,
+	amount uint64,
+) {
 	t.Helper()
 	require.NoError(t, store.CreateUtxo(nil, &models.Utxo{
 		TxId:       bytes.Repeat([]byte{id}, 32),
@@ -189,7 +195,9 @@ func testPoolStakeAggregateContract(t *testing.T, store *Store) {
 	missingKey := seedPoolDelegator(t, store, poolMissing, 0, "")
 	seedPoolUtxo(t, store, missingKey, 0x71, 700)
 	_, err := store.writeDB.Exec(
-		store.dialect.Rebind("DELETE FROM reward_live_stake WHERE staking_key = ?"),
+		store.dialect.Rebind(
+			"DELETE FROM reward_live_stake WHERE staking_key = ?",
+		),
 		missingKey,
 	)
 	require.NoError(t, err)
@@ -244,6 +252,29 @@ func testPoolStakeAggregateContract(t *testing.T, store *Store) {
 	seedActivePool(t, store, poolOver)
 	_, err = store.GetActivePoolStakeTotal(nil)
 	require.Error(t, err)
+}
+
+// TestGetActivePoolStakeTotalRejectsTotalPastUint64 proves a complete live
+// aggregate whose pools each fit in uint64 but whose sum does not is an error
+// rather than a wrapped total.
+func TestGetActivePoolStakeTotalRejectsTotalPastUint64(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	poolFull := bytes.Repeat([]byte{0xc1}, 28)
+	poolOne := bytes.Repeat([]byte{0xc2}, 28)
+	seedActivePool(t, store, poolFull)
+	seedActivePool(t, store, poolOne)
+	seedPoolTip(t, store)
+	seedPoolDelegator(t, store, poolFull, 0, "18446744073709551615")
+	seedPoolDelegator(t, store, poolOne, 0, "1")
+
+	stakes, _, err := store.GetStakeByPools([][]byte{poolFull, poolOne}, nil)
+	require.NoError(t, err)
+	require.Equal(t, uint64(18446744073709551615), stakes[string(poolFull)])
+	require.Equal(t, uint64(1), stakes[string(poolOne)])
+
+	_, err = store.GetActivePoolStakeTotal(nil)
+	require.ErrorContains(t, err, "outside uint64")
 }
 
 func TestSQLitePoolStakeAggregateContract(t *testing.T) {

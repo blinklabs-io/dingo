@@ -1771,8 +1771,9 @@ func (a *NodeAdapter) drepAnchorMetadata(
 
 // liveStake returns the delegated stake across every active pool for the
 // network-wide live-stake total, summed by the database. txn scopes the read
-// to the caller's transaction (nil for no transaction, matching every other call in this
-// file that takes a *types.Txn-shaped parameter): passing the caller's txn
+// to the caller's transaction (nil for no transaction, matching every other
+// call in this file that takes a *types.Txn-shaped parameter): passing the
+// caller's txn
 // keeps this read in the same snapshot as the caller's other reads, rather
 // than potentially straddling a block boundary against them.
 func (a *NodeAdapter) liveStake(txn dbtypes.Txn) (uint64, error) {
