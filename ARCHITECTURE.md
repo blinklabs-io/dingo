@@ -12838,7 +12838,10 @@ undos, keeping its stream and query results consistent.
 `WaitForTx` rejects references that are not exactly 32 bytes before logging,
 allocating pending state, subscribing, or looking up transactions. Empty
 reference lists remain a no-op. Duplicate references are deduplicated in
-first-request order for committed-state lookup.
+first-request order for committed-state lookup, which reads every reference
+through one `LedgerState.ExistingTransactionHashes` call: one metadata read
+transaction per stream, bound to the stream's deadline, rather than one per
+reference. References found there are confirmed in first-request order.
 
 `WaitForTx` reports `STAGE_CONFIRMED` from current active-chain transaction
 metadata or a forward `ledger.tx` `TransactionEvent`. Persisted metadata is

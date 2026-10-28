@@ -14956,6 +14956,15 @@ func (ls *LedgerState) TransactionByHash(ctx context.Context,
 	return ls.db.GetTransactionByHash(ctx, hash, nil)
 }
 
+// ExistingTransactionHashes returns the subset of hashes that have a
+// transaction record, in no particular order, from one read transaction.
+func (ls *LedgerState) ExistingTransactionHashes(
+	ctx context.Context,
+	hashes [][]byte,
+) ([][]byte, error) {
+	return ls.db.GetExistingTransactionHashes(ctx, hashes)
+}
+
 // BlockByHash returns a block by its hash.
 func (ls *LedgerState) BlockByHash(
 	ctx context.Context,
