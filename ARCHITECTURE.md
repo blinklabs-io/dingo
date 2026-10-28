@@ -11202,7 +11202,11 @@ exactly as before: no coordinator starts and no aggregator is contacted.
   `finishMithrilImport` (critical index rebuild, planner statistics, the
   completion clear and the `mithril_ledger_slot`/`mithril_ledger_hash` trust
   boundary), then `mithril_immutable_max`, which makes `WasBootstrapped`
-  true. Probed files wait for the load on disk, in a probe directory named
+  true. The ledger import rebuilds reward live stake in ordered credential
+  ranges. Each range and its import cursor share one metadata transaction, so
+  an interrupted restore resumes after the last committed range while source
+  account, UTxO, and delegation state remains unchanged until completion.
+  Probed files wait for the load on disk, in a probe directory named
   like a feed's so a crash's leftovers are swept, at most
   `min(mithril.windowChunks, 16)` at a time: the highest is evicted first
   and re-downloaded by the load's windowed feed. When the cutoff lies below
