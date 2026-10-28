@@ -25,6 +25,9 @@ import (
 	"connectrpc.com/connect"
 	archive "github.com/blinklabs-io/bark/proto/v1alpha1/archive"
 	archiveconnect "github.com/blinklabs-io/bark/proto/v1alpha1/archive/archivev1alpha1connect"
+	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/stretchr/testify/require"
 )
 
@@ -224,4 +227,390 @@ func TestArchiveCallerKey(t *testing.T) {
 			}
 		})
 	}
+}
+
+func heightRef(height uint64) *archive.BlockRef {
+	return &archive.BlockRef{Height: new(height)}
+}
+
+// TestArchiveFetchBlockChargesHeightReferencesTheirSearchCost covers the
+// budget a height reference is charged. A hash or slot reference costs one
+// lookup; a height reference first needs the highest indexed block resolved
+// (archiveBoundResolveLookups) and then a binary search of the index
+// (archiveHeightSearchLookups), so it must be charged for that work and not
+// for one lookup.
+func TestArchiveFetchBlockChargesHeightReferencesTheirSearchCost(t *testing.T) {
+	t.Parallel()
+
+	const blockCount = 16
+	handler, _ := newArchiveTestHandlerWithOptions(
+		t, blockCount, archiveTestOptions{},
+	)
+	budget := newArchiveBudget(1000, 1000)
+	frozen := time.Now()
+	budget.now = func() time.Time { return frozen }
+	handler.bark.archiveBudget = budget
+
+	tokens := func() float64 {
+		// A direct call has no peer address, so the caller key is "".
+		return budget.callers[archiveCallerKey("")].TokensAt(frozen)
+	}
+
+	// A highest block of 16 searches the index in 5 halvings, each a seek and
+	// a metadata read, plus the read of the matching block.
+	bound := database.BlockNumberBound{HighestID: blockCount}
+	perHeight := archiveHeightSearchLookups(bound)
+	require.Equal(t, 11, perHeight)
+
+	resp := fetchBlocks(t, handler, heightRef(3))
+	require.Len(t, resp.GetBlocks(), 1)
+	require.Equal(
+		t,
+		float64(archiveBurst(1000)-(1+archiveBoundResolveLookups+perHeight)),
+		tokens(),
+		"one height reference pays its lookup, the bound and its search",
+	)
+
+	// The bound is paid once per batch, each search once per reference.
+	before := tokens()
+	resp = fetchBlocks(t, handler, heightRef(3), heightRef(4), heightRef(5))
+	require.Len(t, resp.GetBlocks(), 3)
+	require.Equal(
+		t,
+		before-float64(3+archiveBoundResolveLookups+3*perHeight),
+		tokens(),
+	)
+
+	// A hash+slot reference is still one lookup and pays nothing extra.
+	before = tokens()
+	_ = fetchBlocks(t, handler, missingBatch(2)...)
+	require.Equal(t, before-2, tokens())
+}
+
+// TestArchiveFetchBlockRefusesHeightBatchBeforeSearching covers a batch the
+// caller can afford to resolve the bound for but not to search. It must be
+// refused after the bound is resolved and before any block is searched or
+// read, so the refused request does none of the work it was refused for.
+func TestArchiveFetchBlockRefusesHeightBatchBeforeSearching(t *testing.T) {
+	t.Parallel()
+
+	const blockCount = 16
+	counts := &blobOpCounts{}
+	handler, _ := newArchiveTestHandlerWithOptions(
+		t, blockCount, archiveTestOptions{counts: counts},
+	)
+	// Caller burst is 100: enough for a handful of references and the bound
+	// (1 + 65 per batch for the first reference), not for 16 searches.
+	handler.bark.archiveBudget = newArchiveBudget(1000, 1)
+	fetch := newBudgetedArchiveClient(t, handler)
+
+	refs := make([]*archive.BlockRef, blockCount)
+	for i := range refs {
+		refs[i] = heightRef(uint64(i + 1))
+	}
+	counts.reset()
+	err := fetch("192.0.2.1", refs)
+	require.Error(t, err)
+	require.Equal(t, connect.CodeResourceExhausted, connect.CodeOf(err))
+	require.Zero(t, counts.blockReads.Load(), "no block was read")
+	// Resolving the bound reads the highest block's metadata once; a search
+	// would read far more.
+	require.LessOrEqual(
+		t,
+		counts.metadataReads.Load(),
+		int64(1),
+		"no block was searched",
+	)
+}
+
+// TestArchiveFetchBlockHeightRefusalKeepsHashSlotService covers a caller
+// whose allowance cannot pay for a height search: the same caller is still
+// served a hash+slot reference, which costs one lookup.
+func TestArchiveFetchBlockHeightRefusalKeepsHashSlotService(t *testing.T) {
+	t.Parallel()
+
+	handler, blocks := newArchiveTestHandlerWithOptions(
+		t, 16, archiveTestOptions{},
+	)
+	handler.bark.archiveBudget = newArchiveBudget(1000, 1)
+	fetch := newBudgetedArchiveClient(t, handler)
+
+	refs := make([]*archive.BlockRef, 16)
+	for i := range refs {
+		refs[i] = heightRef(uint64(i + 1))
+	}
+	require.Error(t, fetch("192.0.2.1", refs))
+
+	hash := hex.EncodeToString(blocks[0].Hash)
+	require.NoError(t, fetch("192.0.2.1", []*archive.BlockRef{{
+		Hash: new(hash),
+		Slot: new(blocks[0].Slot),
+	}}))
+}
+
+// TestArchiveFetchBlockHeightChargeCoversMeasuredStorageWork compares what a
+// height reference is charged with the storage operations the blob store
+// actually sees for it, on a chain deep enough for the search to run its full
+// depth: every index listing, metadata read and block read. The charge must
+// never be less than the work, whichever height is asked for, including
+// heights above the chain that fail after the bound is resolved.
+func TestArchiveFetchBlockHeightChargeCoversMeasuredStorageWork(t *testing.T) {
+	t.Parallel()
+
+	const blockCount = 1500
+	counts := &blobOpCounts{}
+	handler, _ := newArchiveTestHandlerWithOptions(
+		t, blockCount, archiveTestOptions{counts: counts},
+	)
+	handler.bark.archiveBudget = newArchiveBudget(10_000_000, 10_000_000)
+
+	bound := database.BlockNumberBound{HighestID: blockCount}
+	charge := int64(
+		1 + archiveBoundResolveLookups + archiveHeightSearchLookups(bound),
+	)
+	for _, height := range []uint64{1, 2, 3, 5, 100, 733, 1499, 1500, 1501, 9999} {
+		counts.reset()
+		_, err := handler.FetchBlock(
+			t.Context(),
+			connect.NewRequest(&archive.FetchBlockRequest{
+				Blocks: []*archive.BlockRef{heightRef(height)},
+			}),
+		)
+		require.NoError(t, err)
+		work := counts.forwardIndexScans.Load() +
+			counts.metadataReads.Load() +
+			counts.blockReads.Load()
+		require.LessOrEqual(
+			t,
+			work,
+			charge,
+			"height %d did more storage work than it was charged for",
+			height,
+		)
+	}
+}
+
+// TestArchiveFetchBlockHeightChargeCoversStaleTailRestarts covers an index
+// whose newest entries are stale: their block metadata is gone, so resolving
+// the bound searches again below each one. That is extra storage work the
+// up-front charge cannot know about; it has to be charged once the bound
+// reports it, and the total must still cover what the store did.
+func TestArchiveFetchBlockHeightChargeCoversStaleTailRestarts(t *testing.T) {
+	t.Parallel()
+
+	const blockCount = 1500
+	for _, stale := range []int{1, 3, 10} {
+		counts := &blobOpCounts{}
+		handler, blocks := newArchiveTestHandlerWithOptions(
+			t, blockCount, archiveTestOptions{counts: counts},
+		)
+		budget := newArchiveBudget(10_000_000, 10_000_000)
+		frozen := time.Now()
+		budget.now = func() time.Time { return frozen }
+		handler.bark.archiveBudget = budget
+
+		db, release, err := handler.bark.Acquire()
+		require.NoError(t, err)
+		txn := db.BlobTxn(true)
+		for i := range stale {
+			block := blocks[blockCount-1-i]
+			require.NoError(t, db.Blob().Delete(
+				txn.Blob(),
+				types.BlockBlobMetadataKey(
+					types.BlockBlobKey(block.Slot, block.Hash),
+				),
+			))
+		}
+		require.NoError(t, txn.Commit())
+		release()
+
+		counts.reset()
+		_, err = handler.FetchBlock(
+			t.Context(),
+			connect.NewRequest(&archive.FetchBlockRequest{
+				Blocks: []*archive.BlockRef{heightRef(1)},
+			}),
+		)
+		require.NoError(t, err)
+		work := counts.forwardIndexScans.Load() +
+			counts.metadataReads.Load() +
+			counts.blockReads.Load()
+		charged := float64(archiveBurst(10_000_000)) -
+			budget.callers[archiveCallerKey("")].TokensAt(frozen)
+		require.GreaterOrEqual(
+			t,
+			charged,
+			float64(work),
+			"%d stale entries: charged %v for %d storage operations",
+			stale, charged, work,
+		)
+		require.GreaterOrEqual(
+			t,
+			charged,
+			float64(1+archiveBoundResolveLookups*(1+stale)),
+			"%d stale entries must each be charged a bound round",
+			stale,
+		)
+	}
+}
+
+// TestArchiveFetchBlockStaleTailRefusedBeforeRetrying covers a caller that can
+// pay for the first bound round but not for a retry below a stale tail entry.
+// The retry has to be refused before it probes, so the store does no more
+// than the one round that was paid for.
+func TestArchiveFetchBlockStaleTailRefusedBeforeRetrying(t *testing.T) {
+	t.Parallel()
+
+	const blockCount = 1500
+	counts := &blobOpCounts{}
+	handler, blocks := newArchiveTestHandlerWithOptions(
+		t, blockCount, archiveTestOptions{counts: counts},
+	)
+	// A burst of 100 covers the up-front charge (1 + 66) but leaves fewer
+	// than the 66 a retry costs.
+	budget := newArchiveBudget(100, 100)
+	frozen := time.Now()
+	budget.now = func() time.Time { return frozen }
+	handler.bark.archiveBudget = budget
+
+	db, release, err := handler.bark.Acquire()
+	require.NoError(t, err)
+	txn := db.BlobTxn(true)
+	for i := range 3 {
+		block := blocks[blockCount-1-i]
+		require.NoError(t, db.Blob().Delete(
+			txn.Blob(),
+			types.BlockBlobMetadataKey(
+				types.BlockBlobKey(block.Slot, block.Hash),
+			),
+		))
+	}
+	require.NoError(t, txn.Commit())
+	release()
+
+	counts.reset()
+	_, err = handler.FetchBlock(
+		t.Context(),
+		connect.NewRequest(&archive.FetchBlockRequest{
+			Blocks: []*archive.BlockRef{heightRef(1)},
+		}),
+	)
+	require.Error(t, err)
+	require.Equal(t, connect.CodeResourceExhausted, connect.CodeOf(err))
+	work := counts.forwardIndexScans.Load() +
+		counts.metadataReads.Load() +
+		counts.blockReads.Load()
+	require.Less(
+		t,
+		work,
+		int64(2*archiveBoundResolveLookups),
+		"refused retry still ran its probes",
+	)
+}
+
+// deleteBlockMetadata removes the metadata of blocks[from:to], leaving their
+// index entries behind as stale ones.
+func deleteBlockMetadata(
+	t *testing.T,
+	handler *archiveServiceHandler,
+	blocks []models.Block,
+	from, to int,
+) {
+	t.Helper()
+	db, release, err := handler.bark.Acquire()
+	require.NoError(t, err)
+	defer release()
+	txn := db.BlobTxn(true)
+	for _, block := range blocks[from:to] {
+		require.NoError(t, db.Blob().Delete(
+			txn.Blob(),
+			types.BlockBlobMetadataKey(
+				types.BlockBlobKey(block.Slot, block.Hash),
+			),
+		))
+	}
+	require.NoError(t, txn.Commit())
+}
+
+// TestArchiveFetchBlockHeightChargeCoversStaleInteriorEntries covers an index
+// whose newest entry is live but which has stale entries below it. Every
+// probe of the height search skips them, one metadata read each, and the
+// bound reports no restart, so the flat per-probe charge alone undercounts.
+// The skipped entries have to be charged as they are read.
+func TestArchiveFetchBlockHeightChargeCoversStaleInteriorEntries(t *testing.T) {
+	t.Parallel()
+
+	const blockCount = 1500
+	for _, stale := range []int{5, 50, 300} {
+		counts := &blobOpCounts{}
+		handler, blocks := newArchiveTestHandlerWithOptions(
+			t, blockCount, archiveTestOptions{counts: counts},
+		)
+		budget := newArchiveBudget(10_000_000, 10_000_000)
+		frozen := time.Now()
+		budget.now = func() time.Time { return frozen }
+		handler.bark.archiveBudget = budget
+		// Block IDs start at 1, so the first probe (ID 750) seeks forward
+		// from blocks[749]; start the run there so it walks the whole run.
+		mid := blockCount/2 - 1
+		deleteBlockMetadata(t, handler, blocks, mid, mid+stale)
+
+		counts.reset()
+		_, err := handler.FetchBlock(
+			t.Context(),
+			connect.NewRequest(&archive.FetchBlockRequest{
+				Blocks: []*archive.BlockRef{heightRef(1)},
+			}),
+		)
+		require.NoError(t, err)
+		work := counts.forwardIndexScans.Load() +
+			counts.metadataReads.Load() +
+			counts.blockReads.Load()
+		charged := float64(archiveBurst(10_000_000)) -
+			budget.callers[archiveCallerKey("")].TokensAt(frozen)
+		require.GreaterOrEqual(
+			t,
+			charged,
+			float64(work),
+			"%d stale interior entries: charged %v for %d operations",
+			stale, charged, work,
+		)
+	}
+}
+
+// TestArchiveFetchBlockStaleInteriorRefusedWhileSearching covers a caller
+// that can pay for the bound and the flat search charge but not for the stale
+// entries one probe has to skip. The search has to stop at the refusal, not
+// read them all first.
+func TestArchiveFetchBlockStaleInteriorRefusedWhileSearching(t *testing.T) {
+	t.Parallel()
+
+	const blockCount = 1500
+	counts := &blobOpCounts{}
+	handler, blocks := newArchiveTestHandlerWithOptions(
+		t, blockCount, archiveTestOptions{counts: counts},
+	)
+	// Burst 200: the up-front 67 and the 23 for one height reference leave
+	// about 110, far fewer than the 700 stale entries below.
+	budget := newArchiveBudget(100, 100)
+	frozen := time.Now()
+	budget.now = func() time.Time { return frozen }
+	handler.bark.archiveBudget = budget
+	deleteBlockMetadata(t, handler, blocks, blockCount/2-1, blockCount-1)
+
+	counts.reset()
+	_, err := handler.FetchBlock(
+		t.Context(),
+		connect.NewRequest(&archive.FetchBlockRequest{
+			Blocks: []*archive.BlockRef{heightRef(1)},
+		}),
+	)
+	require.Error(t, err)
+	require.Equal(t, connect.CodeResourceExhausted, connect.CodeOf(err))
+	require.Less(
+		t,
+		counts.metadataReads.Load(),
+		int64(200),
+		"refused search still read the stale entries",
+	)
 }
