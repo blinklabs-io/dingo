@@ -6432,6 +6432,14 @@ certificate counter checks still run through their existing paths. A successful
 cryptographic result does not stamp a raw header as fully verified: unavailable
 or invalid state continues to defer or reject it.
 
+A retained path that already holds more headers than the per-connection history
+limit also records the latest header deferred past it and that header's
+distance beyond the path's last header. A delivered header extending the path or
+that deferred tail is deferred without walking its ancestry while the primary
+chain tip lies below every ancestor such a walk would read, because the walk
+could reach no held block. Once the chain tip reaches that range the full walk
+runs again. Replacing the retained path clears the record.
+
 While Genesis corroboration is active, a new ChainSync session intersects at
 the applied ledger tip through `LedgerState.LedgerTipIntersectPoints`, retaining
 older persisted intersection points when available. Starting at primary-chain

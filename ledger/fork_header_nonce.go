@@ -45,8 +45,10 @@ type peerForkPathPrefix struct {
 	opCertLastHash []byte
 	opCertCounters map[lcommon.PoolKeyHash]opCertCounterSnapshot
 	// overflowTail is the hash of the latest header deferred because its
-	// path exceeds the history limit. Replacing the entry clears it.
-	overflowTail []byte
+	// path exceeds the history limit, and overflowDepth is how many headers
+	// it lies past the last cached header. Replacing the entry clears both.
+	overflowTail  []byte
+	overflowDepth uint64
 }
 
 type peerForkNoncePrefix struct {
@@ -809,15 +811,37 @@ func (ls *LedgerState) peerHeaderForkPathContext(
 				return cachedAncestor, slices.Clone(cached.headers), true, nil
 			}
 		}
-		// The ancestry walk accepts at most limit+1 headers. A header that
-		// extends a cached path past that bound, or the latest header already
-		// deferred for that reason, would exhaust the walk after reading every
-		// ancestor, so defer it without repeating the walk.
-		if len(cached.headers) > ls.peerHeaderHistoryLimit() &&
-			(bytes.Equal(lastHeader.Hash().Bytes(), header.PrevHash().Bytes()) ||
-				bytes.Equal(cached.overflowTail, header.PrevHash().Bytes())) {
-			ls.markPeerForkPathOverflow(key, lastHeader.Hash().Bytes(), header)
-			return ocommon.Point{}, nil, false, errHeaderVerificationDeferred
+		// The ancestry walk reads the limit+1 ancestors closest to the header
+		// and succeeds only if the primary chain holds one of them. A header
+		// extending a saturated cached path, or the latest header deferred for
+		// that reason, has ancestors whose block numbers follow from the last
+		// cached header. While the chain tip is below all of them the walk
+		// would read every ancestor and defer, so defer without the walk.
+		if limit := ls.peerHeaderHistoryLimit(); len(cached.headers) > limit {
+			prevHash := header.PrevHash().Bytes()
+			parentDepth, extends := uint64(0), false
+			switch {
+			case bytes.Equal(lastHeader.Hash().Bytes(), prevHash):
+				extends = true
+			case len(cached.overflowTail) > 0 &&
+				bytes.Equal(cached.overflowTail, prevHash):
+				parentDepth, extends = cached.overflowDepth, true
+			}
+			// The lowest ancestor the walk reads is at parentNumber-limit.
+			parentNumber := lastHeader.BlockNumber() + parentDepth
+			//nolint:gosec // G115: the history limit is never negative
+			walkSpan := uint64(limit)
+			if extends && ls.chain.Tip().BlockNumber+walkSpan < parentNumber {
+				ls.markPeerForkPathOverflow(
+					key,
+					lastHeader.Hash().Bytes(),
+					cached.overflowTail,
+					parentDepth,
+					header,
+				)
+				return ocommon.Point{}, nil, false,
+					errHeaderVerificationDeferred
+			}
 		}
 		if len(cached.headers) < ls.peerHeaderHistoryLimit() &&
 			bytes.Equal(
@@ -991,21 +1015,29 @@ func (ls *LedgerState) peerHeaderForkPathContext(
 }
 
 // markPeerForkPathOverflow records header as the deferred tail of the cached
-// path ending at lastHash. A cache entry replaced since the caller read it is
-// left alone.
+// path ending at lastHash, one past a parent parentDepth headers beyond it.
+// An entry whose last header or deferred tail changed since the caller read
+// them is left alone.
 func (ls *LedgerState) markPeerForkPathOverflow(
 	key string,
 	lastHash []byte,
+	tail []byte,
+	parentDepth uint64,
 	header gledger.BlockHeader,
 ) {
 	ls.forkHeaderNonceCacheMutex.Lock()
 	defer ls.forkHeaderNonceCacheMutex.Unlock()
 	entry, ok := ls.forkHeaderPathCache[key]
 	if !ok || len(entry.headers) == 0 ||
-		!bytes.Equal(entry.headers[len(entry.headers)-1].Hash().Bytes(), lastHash) {
+		!bytes.Equal(
+			entry.headers[len(entry.headers)-1].Hash().Bytes(),
+			lastHash,
+		) ||
+		!bytes.Equal(entry.overflowTail, tail) {
 		return
 	}
 	entry.overflowTail = append([]byte(nil), header.Hash().Bytes()...)
+	entry.overflowDepth = parentDepth + 1
 	ls.forkHeaderPathCache[key] = entry
 }
 
