@@ -198,3 +198,48 @@ func TestNodeAdapterChainSummariesStopOnCancelledContext(t *testing.T) {
 	_, err = fx.adapter.Network(live)
 	require.NoError(t, err)
 }
+
+// Malformed input is answered with 400 even while the chain summary pool is
+// full, so a bad request never waits on or reports capacity.
+func TestHandleChainSummaryValidatesBeforeAdmission(t *testing.T) {
+	t.Parallel()
+	node := newBlockingChainNode()
+	b := newTestBlockfrost(node)
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(node.release) }) }
+	defer release()
+
+	var wg sync.WaitGroup
+	for range 2 {
+		wg.Go(func() {
+			b.handler().ServeHTTP(
+				httptest.NewRecorder(),
+				addressSummaryRequest(
+					context.Background(), chainSummaryRoutes[0],
+				),
+			)
+		})
+	}
+	for range 2 {
+		testutil.RequireReceive(
+			t, node.entered, 5*time.Second, "request admitted",
+		)
+	}
+	for _, path := range []string{
+		"/api/v0/epochs/x",
+		"/api/v0/epochs/x/next",
+		"/api/v0/epochs/5/next?count=0",
+		"/api/v0/epochs/5/next?page=x",
+		"/api/v0/epochs/x/previous",
+		"/api/v0/epochs/5/previous?count=101",
+		"/api/v0/epochs/5/previous?page=0",
+	} {
+		w := httptest.NewRecorder()
+		b.handler().ServeHTTP(
+			w, addressSummaryRequest(context.Background(), path),
+		)
+		require.Equal(t, http.StatusBadRequest, w.Code, path)
+	}
+	release()
+	wg.Wait()
+}
