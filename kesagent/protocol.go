@@ -54,9 +54,9 @@
 //
 // # sign mode
 //
-// After the Hello the client sends SignRequest frames and the agent replies
-// with one SignResponse per request, over the same persistent connection; the
-// KES key never leaves the agent.
+// After the Hello the client sends a SignRequest and the agent replies with one
+// SignResponse. A client may authenticate a fresh connection for each request;
+// the KES key never leaves the agent.
 package kesagent
 
 import (
