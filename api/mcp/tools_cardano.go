@@ -60,7 +60,7 @@ type TransactionParams struct {
 type UTxOsParams struct {
 	AddressOrCredential string `json:"address_or_credential" jsonschema:"Bech32 Cardano address or hex payment credential"`
 	Limit               int    `json:"limit,omitempty"       jsonschema:"Maximum UTxOs to return (default 20, max 100)"`
-	Offset              int    `json:"offset,omitempty"      jsonschema:"Offset for raw-credential searches only; full addresses use cursor"`
+	Offset              int    `json:"offset,omitempty"      jsonschema:"Offset for raw-credential searches only, max 10000; full addresses use cursor"`
 	Cursor              string `json:"cursor,omitempty"      jsonschema:"Continuation cursor from a full-address query"`
 }
 
@@ -90,7 +90,7 @@ type UtxosByAssetParams struct {
 	PolicyID  string `json:"policy_id"            jsonschema:"Hex-encoded 28-byte (56 hex characters) minting policy ID"`
 	AssetName string `json:"asset_name,omitempty" jsonschema:"Asset name as hex or literal UTF-8; hex takes precedence, max 32 bytes, omitted means any name"`
 	Limit     int    `json:"limit,omitempty"      jsonschema:"Maximum UTxOs to return (default 50, max 200)"`
-	Offset    int    `json:"offset,omitempty"     jsonschema:"Pagination offset (default 0)"`
+	Offset    int    `json:"offset,omitempty"     jsonschema:"Pagination offset (default 0, max 10000)"`
 }
 
 var errAssetInfoIncomplete = errors.New("asset info row cap exceeded")

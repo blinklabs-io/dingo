@@ -17,6 +17,7 @@ package mcp
 import (
 	"context"
 	"database/sql"
+	"maps"
 	"strconv"
 	"testing"
 	"time"
@@ -82,7 +83,9 @@ func newUTxOAdmissionSession(
 
 func utxoAdmissionCalls() map[string]map[string]any {
 	return map[string]map[string]any{
-		"get_utxos":          {"address_or_credential": utxoAdmissionCredential},
+		"get_utxos": {
+			"address_or_credential": utxoAdmissionCredential,
+		},
 		"get_utxos_by_asset": {"policy_id": utxoAdmissionPolicy},
 	}
 }
@@ -94,13 +97,8 @@ func callUTxOAdmission(
 	extra map[string]any,
 ) string {
 	t.Helper()
-	args := map[string]any{}
-	for k, v := range utxoAdmissionCalls()[tool] {
-		args[k] = v
-	}
-	for k, v := range extra {
-		args[k] = v
-	}
+	args := maps.Clone(utxoAdmissionCalls()[tool])
+	maps.Copy(args, extra)
 	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
 		Name: tool, Arguments: args,
 	})
@@ -153,9 +151,7 @@ func TestUTxOToolsAcceptOffsetAtBoundAndReleaseSlot(t *testing.T) {
 				Name: tool,
 				Arguments: func() map[string]any {
 					args := map[string]any{"offset": maxToolOffset}
-					for k, v := range utxoAdmissionCalls()[tool] {
-						args[k] = v
-					}
+					maps.Copy(args, utxoAdmissionCalls()[tool])
 					return args
 				}(),
 			})

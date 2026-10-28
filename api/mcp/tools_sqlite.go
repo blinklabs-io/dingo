@@ -38,7 +38,7 @@ const (
 type SQLiteQueryParams struct {
 	Query  string `json:"query"            jsonschema:"The SQL SELECT query to execute against Dingo's SQLite database"`
 	Limit  int    `json:"limit,omitempty"  jsonschema:"Maximum rows to return (default 50, capped by configured maxRows and 200)"`
-	Offset int    `json:"offset,omitempty" jsonschema:"Number of rows to skip for pagination (default 0)"`
+	Offset int    `json:"offset,omitempty" jsonschema:"Number of rows to skip for pagination (default 0, max 10000)"`
 }
 
 // SQLiteExplainParams defines the input schema for sqlite_explain.

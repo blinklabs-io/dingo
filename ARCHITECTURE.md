@@ -12018,8 +12018,10 @@ decoded cell data. The original settings are restored before the connection
 returns to an injected pool.
 `get_asset_info` takes one of the same slots and scans at most 50,000 live
 asset rows. A policy or asset with more matching rows returns an explicit
-incomplete error, never a partial supply or holder count. `NewMCPServer` shares
-one slot budget across both tool sets; the exported `RegisterSQLiteTools` and
+incomplete error, never a partial supply or holder count. `get_utxos_by_asset`
+and raw-credential `get_utxos` searches also take a slot and reject offsets
+above 10,000; full-address `get_utxos` pages read through the metadata store
+without one. `NewMCPServer` shares one slot budget across both tool sets; the exported `RegisterSQLiteTools` and
 `RegisterCardanoTools` each create their own.
 `get_mempool_info` without `tx_hash` lists at most `limit` pending transactions
 (default 10, at most 50) in the pool's own order, read through
