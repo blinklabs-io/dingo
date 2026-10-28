@@ -80,7 +80,8 @@ func catchUpBandWaitTimeoutFor(stall time.Duration) time.Duration {
 // defaultCorroborationHoldTimeout bounds a Genesis corroboration hold. A held
 // roll-forward callback stops its protocol's receive loop, and gouroboros
 // fails a pipelined client that consumes no reply within its CanAwait timeout
-// (10s), so the bound stays well under it.
+// (ChainsyncBlockTimeout, at least 269s) or MustReply timeout (135-269s), so
+// the bound stays well under them.
 const defaultCorroborationHoldTimeout = 5 * time.Second
 
 // Mempool is the protocol-facing subset of the backend-neutral mempool. Keeping
