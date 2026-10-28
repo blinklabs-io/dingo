@@ -6524,7 +6524,14 @@ Ordinary Praos sessions continue to use primary-chain intersection points.
   history is separate from admitted candidate frontiers. A connection promoted
   to ingress-eligible whose header is more than one block above the applied tip
   is re-synced with `ChainsyncResyncReasonPromotedObserverAhead` instead of
-  recording a frontier that starts above the ledger. While corroboration is
+  recording a frontier that starts above the ledger. A lagging node's
+  observers all stream above its applied tip, so only one such re-sync is
+  requested per `chainsyncPromotedAheadRecycleCooldown` across all
+  connections. Until it elapses, another observer that would be promoted above
+  the tip stays an observer: it is not promoted, holds no ingress slot and
+  records nothing, and its next promotion is evaluated afresh. Re-syncing each
+  would close a connection per freed slot, hand the slot to the next
+  observer, and close that one in turn. While corroboration is
   active (`OuroborosConfig.ChainsyncIntersectAtLedgerTip`) new sessions
   intersect at `LedgerState.LedgerTipIntersectPoints`, the applied ledger tip
   plus the Mithril trust boundary, rather than the primary chain's
@@ -6695,7 +6702,17 @@ Ordinary Praos sessions continue to use primary-chain intersection points.
   is withheld from selection, density, corroboration and the ledger. ChainSync
   records that the peer needs recovery and re-intersects it after the applied
   ledger advances, or at once (once per connection and applied tip) when
-  nothing is queued, since then no block can be applied to trigger it. If the
+  nothing is queued, since then no block can be applied to trigger it. A peer
+  whose reported tip is below the applied tip gets neither: its chain is
+  shorter than one already applied and cannot be selected, so its deferred
+  header is withheld without parking a recovery, and a parked recovery whose
+  peer the applied tip has passed is dropped rather than retried. Either
+  re-intersection is also limited to one per remote address per
+  `chainsyncDeferredRecoveryRepeatCooldown`: a peer that reconnects into the
+  same deferral delivers the same headers again, and while the ledger lags
+  every applied block would recycle it without being able to change the
+  verdict. Its withheld header stays parked and the first applied block after
+  the window retries it. If the
   ledger advances during ancestry verification, recording the deferred marker
   detects that tip change and schedules recovery immediately. Closing the
   connection clears its marker, and a failed retry does not restore the marker
