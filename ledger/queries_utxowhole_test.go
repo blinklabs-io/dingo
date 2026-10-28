@@ -17,7 +17,9 @@ package ledger
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -160,6 +162,41 @@ func TestQueryShelleyUtxoWhole_ReturnsLiveUtxos(t *testing.T) {
 	require.True(t, ok, "utxo B missing from the whole UTxO set")
 	require.Equal(t, addrB.String(), outB.Address().String())
 	require.Equal(t, uint64(2_000_000), outB.Amount().Uint64())
+}
+
+func TestQueryShelleyUtxoWhole_ADAOnlyUsesCardanoNodeEncoding(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		bytes.Repeat([]byte{0xAA}, lcommon.AddressHashSize),
+		nil,
+	)
+	require.NoError(t, err)
+	txID := seedBabbageUtxo(t, db, 0xA1, 0, addr, 1_000_000)
+
+	ls := newPoolDistr2Ledger(t, db)
+	result, err := ls.Query(t.Context(), utxoWholeQuery(), QueryPoint{})
+	require.NoError(t, err)
+	bounded, ok := result.(*utxoWholeResult)
+	require.True(t, ok)
+
+	var wire []map[olocalstatequery.UtxoId]cbor.RawMessage
+	_, err = cbor.Decode(bounded.encoded, &wire)
+	require.NoError(t, err)
+	require.Len(t, wire, 1)
+	encoded, ok := wire[0][olocalstatequery.UtxoId{
+		Hash: ledger.NewBlake2b256(txID),
+		Idx:  0,
+	}]
+	require.True(t, ok)
+	require.Equal(
+		t,
+		"82581d60"+strings.Repeat("aa", lcommon.AddressHashSize)+"1a000f4240",
+		hex.EncodeToString(encoded),
+	)
 }
 
 // TestQueryShelleyUtxoWhole_EmptyLedger covers a chain with no UTxOs at

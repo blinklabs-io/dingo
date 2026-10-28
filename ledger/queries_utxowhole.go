@@ -539,5 +539,5 @@ func decodeUtxoWholeCbor(
 			err,
 		)
 	}
-	return txOut, nil
+	return localStateQueryTransactionOutput(txOut), nil
 }
