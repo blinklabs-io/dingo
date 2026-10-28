@@ -25,6 +25,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -1854,21 +1855,21 @@ func TestPeerGovernor_DenyPeer_MatchesActiveConnectionRemoteAddress(
 }
 
 func TestPeerGovernor_IsDenied_Expiry(t *testing.T) {
-	pg := NewPeerGovernor(PeerGovernorConfig{
-		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		DenyDuration: 1 * time.Millisecond, // Very short for testing
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		pg := NewPeerGovernor(PeerGovernorConfig{
+			Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			DenyDuration: time.Millisecond,
+		})
+		pg.DenyPeer("44.0.0.1:3001", time.Millisecond)
+		require.True(t, pg.IsDenied("44.0.0.1:3001"))
+
+		// The bubble clock advances only when all goroutines are blocked.
+		timer := time.NewTimer(2 * time.Millisecond)
+		defer timer.Stop()
+		<-timer.C
+		require.False(t, pg.IsDenied("44.0.0.1:3001"))
 	})
-
-	// Deny a peer with very short duration
-	pg.DenyPeer("44.0.0.1:3001", 1*time.Millisecond)
-
-	// Should be denied initially
-	assert.True(t, pg.IsDenied("44.0.0.1:3001"))
-
-	// Wait for expiry using polling instead of fixed sleep
-	require.Eventually(t, func() bool {
-		return !pg.IsDenied("44.0.0.1:3001")
-	}, 1*time.Second, 1*time.Millisecond, "deny entry should expire")
 }
 
 func TestPeerGovernor_AddPeer_Denied(t *testing.T) {
