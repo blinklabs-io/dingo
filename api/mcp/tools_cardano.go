@@ -560,6 +560,13 @@ func registerCardanoTools(
 				"cursor pagination requires a full address",
 			)
 		}
+		if offset > maxToolOffset {
+			return nil, nil, errOffsetTooLarge
+		}
+		if err := limits.admit(); err != nil {
+			return nil, nil, err
+		}
+		defer limits.release()
 
 		var cols []string
 		colsErr := func() error {
@@ -1159,6 +1166,13 @@ func registerCardanoTools(
 			limit = 200
 		}
 		offset := max(input.Offset, 0)
+		if offset > maxToolOffset {
+			return nil, nil, errOffsetTooLarge
+		}
+		if err := limits.admit(); err != nil {
+			return nil, nil, err
+		}
+		defer limits.release()
 
 		qCtx, cancel := context.WithTimeout(ctx, queryTimeout)
 		defer cancel()

@@ -1,0 +1,172 @@
+// Copyright 2026 Blink Labs Software
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package mcp
+
+import (
+	"context"
+	"database/sql"
+	"strconv"
+	"testing"
+	"time"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+const (
+	utxoAdmissionCredential = "5e68f6d9c3203ea691221f59a3988477cfaeda716e2b7bf60b216ae0"
+	utxoAdmissionPolicy     = "a0000000000000000000000000000000000000000000000000000001"
+)
+
+// newUTxOAdmissionSession serves get_utxos and get_utxos_by_asset over an
+// in-memory database. With closed set, the database is closed after setup,
+// so any query that reaches it fails with "database is closed" rather than
+// with an admission error.
+func newUTxOAdmissionSession(
+	t *testing.T,
+	limits *readLimits,
+	closed bool,
+) *mcp.ClientSession {
+	t.Helper()
+	db, err := sql.Open("sqlite", ":memory:")
+	require.NoError(t, err)
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = db.Close() })
+	_, err = db.Exec(`
+		CREATE TABLE utxo (
+			id INTEGER PRIMARY KEY AUTOINCREMENT, tx_id BLOB,
+			output_idx INTEGER, payment_key BLOB, staking_key BLOB,
+			amount TEXT, added_slot INTEGER,
+			deleted_slot INTEGER NOT NULL DEFAULT 0, datum_hash BLOB);
+		CREATE TABLE asset (
+			id INTEGER PRIMARY KEY AUTOINCREMENT, utxo_id INTEGER NOT NULL,
+			policy_id BLOB NOT NULL, name BLOB NOT NULL,
+			fingerprint BLOB NOT NULL, amount TEXT NOT NULL);
+	`)
+	require.NoError(t, err)
+	if closed {
+		require.NoError(t, db.Close())
+	}
+
+	server := mcp.NewServer(
+		&mcp.Implementation{Name: "test-server", Version: "1.0"}, nil,
+	)
+	registerCardanoTools(
+		server, db, nil, nil, "preview", 5*time.Second, limits,
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	t.Cleanup(cancel)
+	ct, st := mcp.NewInMemoryTransports()
+	_, err = server.Connect(ctx, st, nil)
+	require.NoError(t, err)
+	cs, err := mcp.NewClient(
+		&mcp.Implementation{Name: "client", Version: "1.0"}, nil,
+	).Connect(ctx, ct, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cs.Close() })
+	return cs
+}
+
+func utxoAdmissionCalls() map[string]map[string]any {
+	return map[string]map[string]any{
+		"get_utxos":          {"address_or_credential": utxoAdmissionCredential},
+		"get_utxos_by_asset": {"policy_id": utxoAdmissionPolicy},
+	}
+}
+
+func callUTxOAdmission(
+	t *testing.T,
+	cs *mcp.ClientSession,
+	tool string,
+	extra map[string]any,
+) string {
+	t.Helper()
+	args := map[string]any{}
+	for k, v := range utxoAdmissionCalls()[tool] {
+		args[k] = v
+	}
+	for k, v := range extra {
+		args[k] = v
+	}
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: tool, Arguments: args,
+	})
+	require.NoError(t, err)
+	require.True(t, res.IsError)
+	return res.Content[0].(*mcp.TextContent).Text
+}
+
+func TestUTxOToolsRefusedWhenReadSlotsBusy(t *testing.T) {
+	t.Parallel()
+	for tool := range utxoAdmissionCalls() {
+		t.Run(tool, func(t *testing.T) {
+			t.Parallel()
+			limits := newReadLimits()
+			cs := newUTxOAdmissionSession(t, limits, true)
+			for limits.acquire() {
+			}
+			text := callUTxOAdmission(t, cs, tool, nil)
+			assert.Contains(t, text, errReadsBusy.Error())
+			assert.NotContains(t, text, "database is closed")
+		})
+	}
+}
+
+func TestUTxOToolsRejectOffsetAboveBound(t *testing.T) {
+	t.Parallel()
+	for tool := range utxoAdmissionCalls() {
+		t.Run(tool, func(t *testing.T) {
+			t.Parallel()
+			limits := newReadLimits()
+			cs := newUTxOAdmissionSession(t, limits, true)
+			text := callUTxOAdmission(
+				t, cs, tool, map[string]any{"offset": maxToolOffset + 1},
+			)
+			assert.Contains(t, text, errOffsetTooLarge.Error())
+			assert.Contains(t, text, strconv.Itoa(maxToolOffset))
+			assert.NotContains(t, text, "database is closed")
+		})
+	}
+}
+
+func TestUTxOToolsAcceptOffsetAtBoundAndReleaseSlot(t *testing.T) {
+	t.Parallel()
+	for tool := range utxoAdmissionCalls() {
+		t.Run(tool, func(t *testing.T) {
+			t.Parallel()
+			limits := newReadLimits()
+			cs := newUTxOAdmissionSession(t, limits, false)
+			res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
+				Name: tool,
+				Arguments: func() map[string]any {
+					args := map[string]any{"offset": maxToolOffset}
+					for k, v := range utxoAdmissionCalls()[tool] {
+						args[k] = v
+					}
+					return args
+				}(),
+			})
+			require.NoError(t, err)
+			assert.False(t, res.IsError)
+			held := 0
+			for limits.acquire() {
+				held++
+			}
+			assert.Equal(t, maxConcurrentSQLiteQueries, held,
+				"the call must give its slot back")
+		})
+	}
+}

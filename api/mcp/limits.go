@@ -17,6 +17,7 @@ package mcp
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"log/slog"
 	"math"
@@ -35,6 +36,10 @@ const (
 	// scans. A call that would exceed it fails instead of returning a
 	// partial supply or holder count.
 	maxAssetInfoRows = 50_000
+	// maxToolOffset bounds the OFFSET a paginated SQLite tool accepts: SQLite
+	// walks and discards every skipped row, so the cost of a page grows
+	// with its offset.
+	maxToolOffset = 10_000
 	// maxSQLiteWALBytes is the metadata WAL size above which new database
 	// reads are refused. It is twice the 64 MiB journal_size_limit the
 	// metadata store sets, so a WAL this large has been neither reset nor
@@ -47,7 +52,8 @@ const (
 )
 
 var (
-	errReadsBusy = errors.New("too many concurrent SQLite queries")
+	errReadsBusy      = errors.New("too many concurrent SQLite queries")
+	errOffsetTooLarge = fmt.Errorf("offset must not exceed %d", maxToolOffset)
 	// errWALPressure is returned while the metadata WAL exceeds
 	// maxSQLiteWALBytes or its size cannot be read. Refusing new reads lets
 	// the in-flight ones finish within their query timeout, which gives the
