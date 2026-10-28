@@ -49,6 +49,15 @@ const (
 	// dead-fork peer. Peers still behind retry on their next header.
 	chainsyncBehindTipRecycleCooldown = 30 * time.Second
 
+	// chainsyncPromotedAheadRecycleCooldown spaces the re-syncs of promoted
+	// observers above the local tip across all connections. A lagging node's
+	// observers all stream above its applied tip, so re-syncing every one a
+	// freed ingress slot promotes closes a connection per promotion and
+	// hands the slot to the next observer, which is closed in turn. One
+	// re-sync leaves the slot free for the reconnecting peer to take from its
+	// fresh intersection; the other observers stay observers meanwhile.
+	chainsyncPromotedAheadRecycleCooldown = 10 * time.Second
+
 	chainsyncIntersectPointCount = 100
 
 	// chainsyncMaxFindIntersectPoints bounds how many points a peer may
@@ -1828,6 +1837,31 @@ func (o *Ouroboros) releaseBehindTipRecycle(now time.Time) {
 	}
 }
 
+// claimPromotedAheadRecycle reports whether a promoted-observer re-sync may be
+// requested at now, and records it when so. It admits one per
+// chainsyncPromotedAheadRecycleCooldown across all connections.
+func (o *Ouroboros) claimPromotedAheadRecycle(now time.Time) bool {
+	o.promotedAheadRecycleMu.Lock()
+	defer o.promotedAheadRecycleMu.Unlock()
+	if !o.promotedAheadRecycleAt.IsZero() &&
+		now.Sub(o.promotedAheadRecycleAt) <
+			chainsyncPromotedAheadRecycleCooldown {
+		return false
+	}
+	o.promotedAheadRecycleAt = now
+	return true
+}
+
+// releasePromotedAheadRecycle returns the window taken by
+// claimPromotedAheadRecycle at now when no re-sync was scheduled for it.
+func (o *Ouroboros) releasePromotedAheadRecycle(now time.Time) {
+	o.promotedAheadRecycleMu.Lock()
+	defer o.promotedAheadRecycleMu.Unlock()
+	if o.promotedAheadRecycleAt.Equal(now) {
+		o.promotedAheadRecycleAt = time.Time{}
+	}
+}
+
 func (o *Ouroboros) chainsyncClientRollForwardAt(
 	ctx ochainsync.CallbackContext,
 	blockType uint,
@@ -1906,10 +1940,36 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				ctx.ConnectionId,
 			)
 		}
+		desiredEligible := o.shouldPublishChainsyncToLedger(ctx.ConnectionId)
+		// A promoted observer above the local tip is re-synced below, at most
+		// one per window. While another one holds the window, promoting this
+		// observer would only be undone, so it stays an observer; promoting
+		// and demoting it on every header would publish an event pair each.
+		var promotedAheadClaim time.Time
+		defer func() {
+			// A claim no re-sync consumed, because a wait below failed or
+			// the connection stopped first, must not hold the window.
+			if !promotedAheadClaim.IsZero() {
+				o.releasePromotedAheadRecycle(promotedAheadClaim)
+			}
+		}()
+		if desiredEligible && wasObserver &&
+			o.promotedObserverAboveLocalTip(v.BlockNumber()) {
+			if now := time.Now(); o.claimPromotedAheadRecycle(now) {
+				promotedAheadClaim = now
+			} else {
+				desiredEligible = false
+			}
+		}
 		ingressEligible := o.reconcileChainsyncIngressAdmission(
 			ctx.ConnectionId,
-			o.shouldPublishChainsyncToLedger(ctx.ConnectionId),
+			desiredEligible,
 		)
+		if !promotedAheadClaim.IsZero() && !ingressEligible {
+			// Promotion failed, so no re-sync is due.
+			o.releasePromotedAheadRecycle(promotedAheadClaim)
+			promotedAheadClaim = time.Time{}
+		}
 		observerDelivery := !ingressEligible
 		patienceResume = ingressEligible
 		if ingressEligible && o.chainsyncHeaderBackpressure != nil {
@@ -1986,15 +2046,17 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		// Starting above the applied suffix would leave a gap that cannot
 		// corroborate or deliver the next block, so replay from a safe local
 		// intersection before admitting this promoted cursor.
-		if ingressEligible && wasObserver &&
-			o.promotedObserverAboveLocalTip(v.BlockNumber()) {
+		if !promotedAheadClaim.IsZero() {
+			claimedAt := promotedAheadClaim
+			promotedAheadClaim = time.Time{}
 			if o.scheduleHeaderResync(
 				ctx.ConnectionId,
-				time.Now(),
+				claimedAt,
 				event.ChainsyncResyncReasonPromotedObserverAhead,
 			) {
 				return nil
 			}
+			o.releasePromotedAheadRecycle(claimedAt)
 		}
 		// A promoting header that continues the local chain needs no fresh
 		// intersection: the observer contributes from the tip.

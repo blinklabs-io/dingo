@@ -6519,7 +6519,14 @@ Ordinary Praos sessions continue to use primary-chain intersection points.
   history is separate from admitted candidate frontiers. A connection promoted
   to ingress-eligible whose header is more than one block above the applied tip
   is re-synced with `ChainsyncResyncReasonPromotedObserverAhead` instead of
-  recording a frontier that starts above the ledger. While corroboration is
+  recording a frontier that starts above the ledger. A lagging node's
+  observers all stream above its applied tip, so only one such re-sync is
+  requested per `chainsyncPromotedAheadRecycleCooldown` across all
+  connections. Until it elapses, another observer that would be promoted above
+  the tip stays an observer: it is not promoted, holds no ingress slot and
+  records nothing, and its next promotion is evaluated afresh. Re-syncing each
+  would close a connection per freed slot, hand the slot to the next
+  observer, and close that one in turn. While corroboration is
   active (`OuroborosConfig.ChainsyncIntersectAtLedgerTip`) new sessions
   intersect at `LedgerState.LedgerTipIntersectPoints`, the applied ledger tip
   plus the Mithril trust boundary, rather than the primary chain's

@@ -251,6 +251,10 @@ type Ouroboros struct {
 	// requested on any connection; see claimBehindTipRecycle.
 	behindTipRecycleMu sync.Mutex
 	behindTipRecycleAt time.Time
+	// promotedAheadRecycleAt is when a promoted observer above the local tip
+	// was last re-synced on any connection; see claimPromotedAheadRecycle.
+	promotedAheadRecycleMu sync.Mutex
+	promotedAheadRecycleAt time.Time
 	// heldTips refreshes held clients' tips. See chainsync_hold.go.
 	heldTips heldTipRefresher
 	// chainSelectionShouldVerifyHeaderCrypto and chainSelectionVerifyHeaderCrypto
