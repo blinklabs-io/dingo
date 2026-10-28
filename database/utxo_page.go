@@ -20,6 +20,7 @@ import (
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 )
 
 // UtxosByAddressPage scans at most maxCandidates outputs in ascending ledger
@@ -60,27 +61,114 @@ func (d *Database) UtxosByAddressBoundedPage(
 	return d.utxosByAddressPage(ctx, q, maxCandidates, maxBytes)
 }
 
+// ScanUtxosByAddress visits every UTxO matching q's exact address patterns
+// in ascending ledger order, one page at a time, and returns the tip stored
+// in the same read transaction. q.Limit is the page size and q.After must be
+// nil; maxCandidates and maxBytes bound each page as in
+// UtxosByAddressBoundedPage, so memory is bounded by one page however many
+// outputs match. Every page and the tip come from one snapshot, so a block
+// applied mid-scan neither duplicates nor drops an output, and the tip names
+// the state the outputs belong to. The transaction stays open until the scan
+// returns, including while visit runs. Native assets are not loaded. A
+// non-nil error from visit ends the scan and is returned.
+func (d *Database) ScanUtxosByAddress(
+	ctx context.Context,
+	q *models.UtxoWithOrderingQuery,
+	maxCandidates int,
+	maxBytes int64,
+	visit func([]models.UtxoWithOrdering) error,
+) (ochainsync.Tip, error) {
+	if q == nil {
+		return ochainsync.Tip{}, models.ErrNilUtxoWithOrderingQuery
+	}
+	if q.MatchAllAddresses ||
+		!models.RequiresExactAddressFilter(q.AddressPatterns) {
+		return ochainsync.Tip{}, errors.New(
+			"address scan requires exact address patterns",
+		)
+	}
+	if q.After != nil || maxBytes <= 0 {
+		return ochainsync.Tip{}, errors.New(
+			"address scan requires no cursor and a positive byte limit",
+		)
+	}
+	if err := ctx.Err(); err != nil {
+		return ochainsync.Tip{}, err
+	}
+	txn := NewTxnContext(ctx, d, false)
+	defer txn.Release()
+	// The first read fixes the snapshot on engines that take it lazily.
+	tip, err := d.GetTip(txn)
+	if err != nil {
+		return ochainsync.Tip{}, err
+	}
+	pageQuery := *q
+	for {
+		page, err := d.utxosByAddressPageTxn(
+			ctx, txn, &pageQuery, maxCandidates, maxBytes,
+		)
+		if err != nil {
+			return ochainsync.Tip{}, err
+		}
+		if len(page.Utxos) > 0 {
+			if err := visit(page.Utxos); err != nil {
+				return ochainsync.Tip{}, err
+			}
+		}
+		if page.Next == nil {
+			return tip, nil
+		}
+		pageQuery.After = page.Next
+	}
+}
+
 func (d *Database) utxosByAddressPage(
 	ctx context.Context,
 	q *models.UtxoWithOrderingQuery,
 	maxCandidates int,
 	maxBytes int64,
 ) (models.UtxoAddressPage, error) {
-	page := models.UtxoAddressPage{}
+	if err := validateAddressPageQuery(q, maxCandidates); err != nil {
+		return models.UtxoAddressPage{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		return models.UtxoAddressPage{Next: q.After}, err
+	}
+	txn := NewTxnContext(ctx, d, false)
+	defer txn.Release()
+	return d.utxosByAddressPageTxn(ctx, txn, q, maxCandidates, maxBytes)
+}
+
+func validateAddressPageQuery(
+	q *models.UtxoWithOrderingQuery,
+	maxCandidates int,
+) error {
 	if q == nil {
-		return page, models.ErrNilUtxoWithOrderingQuery
+		return models.ErrNilUtxoWithOrderingQuery
 	}
 	if q.Limit <= 0 || maxCandidates <= 0 || q.Offset != 0 || q.Descending {
-		return page, errors.New(
+		return errors.New(
 			"address page requires positive limits and ascending cursor pagination",
 		)
+	}
+	return nil
+}
+
+func (d *Database) utxosByAddressPageTxn(
+	ctx context.Context,
+	txn *Txn,
+	q *models.UtxoWithOrderingQuery,
+	maxCandidates int,
+	maxBytes int64,
+) (models.UtxoAddressPage, error) {
+	page := models.UtxoAddressPage{}
+	if err := validateAddressPageQuery(q, maxCandidates); err != nil {
+		return page, err
 	}
 	page.Next = q.After
 	if err := ctx.Err(); err != nil {
 		return page, err
 	}
-	txn := NewTxnContext(ctx, d, false)
-	defer txn.Release()
 	scan := *q
 	scan.SkipAssets = true
 	var retainedBytes int64
