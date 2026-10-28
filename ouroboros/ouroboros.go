@@ -281,8 +281,13 @@ type Ouroboros struct {
 	futureHeaderResyncCtx    context.Context
 	futureHeaderResyncCancel context.CancelFunc
 	futureHeaderResyncClosed bool
-	deferredHeaderRecoveryMu sync.Mutex
-	deferredHeaderRecovery   map[ouroboros.ConnectionId]deferredHeaderRecoveryState
+	// deferredRecoveryRecycleAt is when a deferred-header recovery last
+	// re-intersected a connection to each remote address; see
+	// claimDeferredRecoveryRecycle.
+	deferredRecoveryRecycleMu sync.Mutex
+	deferredRecoveryRecycleAt map[string]time.Time
+	deferredHeaderRecoveryMu  sync.Mutex
+	deferredHeaderRecovery    map[ouroboros.ConnectionId]deferredHeaderRecoveryState
 	// chainsyncLocalChainTips returns the hashes of the local block tip and
 	// header-queue tip. Tests override it without a LedgerState.
 	chainsyncLocalChainTips func() (tipHash, headerTipHash []byte)

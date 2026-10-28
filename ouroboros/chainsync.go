@@ -58,6 +58,14 @@ const (
 	// fresh intersection; the other observers stay observers meanwhile.
 	chainsyncPromotedAheadRecycleCooldown = 10 * time.Second
 
+	// chainsyncDeferredRecoveryRepeatCooldown spaces the deferred-header
+	// recoveries of one remote address. A peer whose headers stay deferred
+	// after a fresh intersection delivers them again on every reconnect, and
+	// while the ledger lags each applied block would recycle it again without
+	// being able to change the verdict. The withheld header stays parked and
+	// the next applied block after the cooldown retries it.
+	chainsyncDeferredRecoveryRepeatCooldown = 30 * time.Second
+
 	chainsyncIntersectPointCount = 100
 
 	// chainsyncMaxFindIntersectPoints bounds how many points a peer may
@@ -386,10 +394,12 @@ func (o *Ouroboros) markDeferredHeaderRecovery(
 		return
 	}
 	retryNow := false
+	retryAt := time.Now()
 	if idle {
 		o.deferredHeaderRecoveryMu.Lock()
 		retried, seen := o.deferredHeaderIdleRetry[connId]
-		if !seen || !bytes.Equal(retried, baseline.Point.Hash) {
+		if (!seen || !bytes.Equal(retried, baseline.Point.Hash)) &&
+			o.claimDeferredRecoveryRecycle(connId, retryAt) {
 			if o.deferredHeaderIdleRetry == nil {
 				o.deferredHeaderIdleRetry = make(
 					map[ouroboros.ConnectionId][]byte,
@@ -400,12 +410,13 @@ func (o *Ouroboros) markDeferredHeaderRecovery(
 		}
 		o.deferredHeaderRecoveryMu.Unlock()
 	}
-	if retryNow {
-		o.scheduleHeaderResync(
+	if retryNow &&
+		!o.scheduleHeaderResync(
 			connId,
-			time.Now(),
+			retryAt,
 			event.ChainsyncResyncReasonHeaderValidationRecovery,
-		)
+		) {
+		o.releaseDeferredRecoveryRecycle(connId, retryAt)
 	}
 }
 
@@ -565,12 +576,16 @@ func (o *Ouroboros) retryDeferredHeadersAfterLedgerAdvance(evt event.Event) {
 	}
 
 	for _, candidate := range pending {
-		if o.scheduleHeaderResync(
-			candidate.conn,
-			time.Now(),
-			event.ChainsyncResyncReasonHeaderValidationRecovery,
-		) {
-			continue
+		now := time.Now()
+		if o.claimDeferredRecoveryRecycle(candidate.conn, now) {
+			if o.scheduleHeaderResync(
+				candidate.conn,
+				now,
+				event.ChainsyncResyncReasonHeaderValidationRecovery,
+			) {
+				continue
+			}
+			o.releaseDeferredRecoveryRecycle(candidate.conn, now)
 		}
 		if o.futureHeaderResyncPending(candidate.conn) {
 			continue
@@ -584,6 +599,54 @@ func (o *Ouroboros) retryDeferredHeadersAfterLedgerAdvance(evt event.Event) {
 			}
 		}
 		o.deferredHeaderRecoveryMu.Unlock()
+	}
+}
+
+// claimDeferredRecoveryRecycle reports whether a deferred-header recovery
+// may re-intersect a connection at now, and records it when so. It admits one
+// per chainsyncDeferredRecoveryRepeatCooldown for each remote address, so a
+// peer that reconnects into the same deferral is not recycled again at once.
+// A connection with no remote address is never limited.
+func (o *Ouroboros) claimDeferredRecoveryRecycle(
+	connId ouroboros.ConnectionId,
+	now time.Time,
+) bool {
+	if connId.RemoteAddr == nil {
+		return true
+	}
+	key := connId.RemoteAddr.String()
+	o.deferredRecoveryRecycleMu.Lock()
+	defer o.deferredRecoveryRecycleMu.Unlock()
+	if at, ok := o.deferredRecoveryRecycleAt[key]; ok &&
+		now.Sub(at) < chainsyncDeferredRecoveryRepeatCooldown {
+		return false
+	}
+	if o.deferredRecoveryRecycleAt == nil {
+		o.deferredRecoveryRecycleAt = make(map[string]time.Time)
+	}
+	for addr, at := range o.deferredRecoveryRecycleAt {
+		if now.Sub(at) >= chainsyncDeferredRecoveryRepeatCooldown {
+			delete(o.deferredRecoveryRecycleAt, addr)
+		}
+	}
+	o.deferredRecoveryRecycleAt[key] = now
+	return true
+}
+
+// releaseDeferredRecoveryRecycle returns the window taken by
+// claimDeferredRecoveryRecycle at now when no re-sync was scheduled for it.
+func (o *Ouroboros) releaseDeferredRecoveryRecycle(
+	connId ouroboros.ConnectionId,
+	now time.Time,
+) {
+	if connId.RemoteAddr == nil {
+		return
+	}
+	key := connId.RemoteAddr.String()
+	o.deferredRecoveryRecycleMu.Lock()
+	defer o.deferredRecoveryRecycleMu.Unlock()
+	if at, ok := o.deferredRecoveryRecycleAt[key]; ok && at.Equal(now) {
+		delete(o.deferredRecoveryRecycleAt, key)
 	}
 }
 
