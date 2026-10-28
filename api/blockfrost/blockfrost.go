@@ -57,8 +57,8 @@ type Blockfrost struct {
 	drepAdmission      *requestAdmission
 	// addressSummaryAdmission is shared by every route that scans a whole
 	// address or account history: the base and extended summaries, the
-	// account summary, the address and account totals, and the account asset
-	// balances.
+	// account summary, the address and account totals, the account asset
+	// balances, and the account associated-address pages.
 	addressSummaryAdmission *requestAdmission
 	mempoolAddressAdmission *requestAdmission
 	// listener owns the start/stop protocol, including releasing the
