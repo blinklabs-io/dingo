@@ -50,6 +50,11 @@ func (b *Blockfrost) handleEpoch(
 	if !ok {
 		return
 	}
+	release, ok := b.admitChainSummary(w, r)
+	if !ok {
+		return
+	}
+	defer release()
 	info, err := b.node.Epoch(r.Context(), epoch)
 	if err != nil {
 		b.writeHistoryError(w, err, "failed to retrieve epoch")
@@ -67,6 +72,11 @@ func (b *Blockfrost) handleEpochNext(
 	if !ok {
 		return
 	}
+	release, ok := b.admitChainSummary(w, r)
+	if !ok {
+		return
+	}
+	defer release()
 	servePage(
 		b,
 		w,
@@ -88,6 +98,11 @@ func (b *Blockfrost) handleEpochPrevious(
 	if !ok {
 		return
 	}
+	release, ok := b.admitChainSummary(w, r)
+	if !ok {
+		return
+	}
+	defer release()
 	servePage(
 		b,
 		w,

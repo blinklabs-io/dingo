@@ -427,7 +427,7 @@ func TestNodeAdapterEpochAggregates(t *testing.T) {
 	_, err = fx.adapter.Epoch(ctx, 3)
 	assert.ErrorIs(t, err, ErrEpochNotFound)
 
-	current, err := fx.adapter.CurrentEpoch()
+	current, err := fx.adapter.CurrentEpoch(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(2), current.Epoch)
 	assert.Equal(t, "7", current.Fees)

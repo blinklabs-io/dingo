@@ -12444,7 +12444,11 @@ Dingo's internal state and Blockfrost response types and supports
 Blockfrost-style pagination headers. `GET /accounts/{stake_address}` passes
 the request context to the adapter and its database reads, and takes a slot
 in the address summary admission pool because it aggregates every live UTxO
-of the credential. Pool and account list routes reject
+of the credential. `GET /network`, `GET /epochs/latest`, `GET /epochs/{number}`
+and its `next` and `previous` lists aggregate over the chain or whole epochs, so
+they pass the request context to the adapter's database reads and share a
+chain summary admission pool, separate from the address summary pool, that
+answers 429 when full. Pool and account list routes reject
 out-of-range count and page values before calling the adapter, using the
 shared strict pagination parser (count 1–100, page 1–21474836). The epoch
 next, previous and stakes lists, whose Blockfrost schema defines only count and
