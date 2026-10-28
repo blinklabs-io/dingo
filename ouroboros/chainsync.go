@@ -351,6 +351,21 @@ func (o *Ouroboros) markDeferredHeaderRecovery(
 		}
 		idle = len(tipHash) > 0 && bytes.Equal(tipHash, headerTipHash)
 	}
+	// A peer whose tip is below the applied tip serves a chain that cannot be
+	// selected, so verifying its headers later cannot change anything, and a
+	// re-intersection only replays them on a new connection that this bound
+	// does not cover. Withhold the header and park nothing.
+	if o.peerTipBelowLocalTip(tip) {
+		o.clearDeferredHeaderRecovery(connId)
+		o.config.Logger.Debug(
+			"chainsync: withholding deferred header from peer behind the local tip",
+			"component", "ouroboros",
+			"slot", point.Slot,
+			"peer_tip_block_number", tip.BlockNumber,
+			"connection_id", connId.String(),
+		)
+		return
+	}
 	// Reaching here means the header is parked, not resolved as an applied
 	// deferral above.
 	o.recordDeferredHeaderParked()
@@ -576,6 +591,14 @@ func (o *Ouroboros) retryDeferredHeadersAfterLedgerAdvance(evt event.Event) {
 	}
 
 	for _, candidate := range pending {
+		// The applied tip has moved past this peer's tip since it was
+		// parked; see markDeferredHeaderRecovery.
+		if o.peerTipBelowLocalTip(candidate.state.tip) {
+			o.deferredHeaderRecoveryMu.Lock()
+			delete(o.deferredHeaderIdleRetry, candidate.conn)
+			o.deferredHeaderRecoveryMu.Unlock()
+			continue
+		}
 		now := time.Now()
 		if o.claimDeferredRecoveryRecycle(candidate.conn, now) {
 			if o.scheduleHeaderResync(
@@ -1859,6 +1882,18 @@ func (o *Ouroboros) headerAtOrBelowLocalTip(header gledger.BlockHeader) bool {
 		return header.BlockNumber() < tipBlock
 	}
 	return header.BlockNumber() <= tipBlock
+}
+
+// peerTipBelowLocalTip reports whether a peer's reported tip is below the
+// applied local tip, so its chain is shorter than one already applied and can
+// never be selected. A tip equal to the local tip may still win the tiebreak.
+// Without a ledger the answer is false.
+func (o *Ouroboros) peerTipBelowLocalTip(tip ochainsync.Tip) bool {
+	if o.chainsyncLocalTipBlock == nil {
+		return false
+	}
+	tipBlock, _ := o.chainsyncLocalTipBlock()
+	return tip.BlockNumber < tipBlock
 }
 
 // promotedObserverAboveLocalTip reports whether a header delivered to a

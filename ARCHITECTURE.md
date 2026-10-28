@@ -6697,7 +6697,11 @@ Ordinary Praos sessions continue to use primary-chain intersection points.
   is withheld from selection, density, corroboration and the ledger. ChainSync
   records that the peer needs recovery and re-intersects it after the applied
   ledger advances, or at once (once per connection and applied tip) when
-  nothing is queued, since then no block can be applied to trigger it. Either
+  nothing is queued, since then no block can be applied to trigger it. A peer
+  whose reported tip is below the applied tip gets neither: its chain is
+  shorter than one already applied and cannot be selected, so its deferred
+  header is withheld without parking a recovery, and a parked recovery whose
+  peer the applied tip has passed is dropped rather than retried. Either
   re-intersection is also limited to one per remote address per
   `chainsyncDeferredRecoveryRepeatCooldown`: a peer that reconnects into the
   same deferral delivers the same headers again, and while the ledger lags
