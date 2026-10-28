@@ -884,6 +884,7 @@ func buildDingoConfig(
 			cfg.BarkLifecycleOperatorCertificateFingerprints,
 		),
 		dingo.WithMithrilConfig(cfg.Mithril),
+		dingo.WithDMQConfig(cfg.DMQ),
 		dingo.WithHistoryExpiry(dingo.HistoryExpiryConfig{
 			Enabled:   cfg.HistoryExpiry.Enabled,
 			Frequency: cfg.HistoryExpiry.Frequency,

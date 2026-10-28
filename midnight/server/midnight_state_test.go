@@ -28,6 +28,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/midnight"
 	"github.com/blinklabs-io/dingo/midnight/server"
 	"github.com/stretchr/testify/require"
@@ -570,7 +571,7 @@ func TestGetUtxoEvents_EndBlockHashStopsAtBlockWithNoEvents(t *testing.T) {
 	}
 	addr := startTestServerConfig(t, server.Config{
 		Metadata: store,
-		BlockNumberByHash: func(hash []byte) (uint64, bool, error) {
+		BlockNumberByHash: func(_ context.Context, hash []byte) (uint64, bool, error) {
 			n, ok := blockNumbers[string(hash)]
 			return n, ok, nil
 		},
@@ -594,6 +595,111 @@ func TestGetUtxoEvents_EndBlockHashStopsAtBlockWithNoEvents(t *testing.T) {
 		t,
 		uint64(1),
 		resp.GetEvents()[0].GetAssetCreate().GetBlockNumber(),
+	)
+}
+
+// TestGetUtxoEvents_EndBlockHashResolverStopsWhenRequestCanceled verifies
+// the end_block_hash resolver runs under the RPC's context, so a canceled
+// request releases the resolver instead of holding its admission slot until
+// the lookup returns on its own.
+func TestGetUtxoEvents_EndBlockHashResolverStopsWhenRequestCanceled(
+	t *testing.T,
+) {
+	t.Parallel()
+	store := setupTestStore(t)
+
+	entered := make(chan struct{})
+	resolverErr := make(chan error, 1)
+	addr := startTestServerConfig(t, server.Config{
+		Metadata: store,
+		BlockNumberByHash: func(
+			ctx context.Context,
+			_ []byte,
+		) (uint64, bool, error) {
+			close(entered)
+			<-ctx.Done()
+			resolverErr <- ctx.Err()
+			return 0, false, ctx.Err()
+		},
+	})
+	client := midnight.NewMidnightStateClient(dial(t, addr))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	callErr := make(chan error, 1)
+	go func() {
+		_, err := client.GetUtxoEvents(ctx, &midnight.UtxoEventsRequest{
+			TxCapacity:   10,
+			EndBlockHash: hashForByte(1),
+		})
+		callErr <- err
+	}()
+
+	testutil.RequireReceive(
+		t, entered, 5*time.Second, "resolver was not called",
+	)
+	cancel()
+
+	require.ErrorIs(
+		t,
+		testutil.RequireReceive(
+			t, resolverErr, 5*time.Second,
+			"resolver context was not canceled with the request",
+		),
+		context.Canceled,
+	)
+	err := testutil.RequireReceive(
+		t, callErr, 5*time.Second, "RPC did not return after cancellation",
+	)
+	require.Equal(t, codes.Canceled, status.Code(err))
+}
+
+// TestGetUtxoEvents_EndBlockHashResolverStopsAtRequestDeadline verifies a
+// request that times out while the resolver is running returns
+// DeadlineExceeded and releases the resolver, rather than waiting for it.
+func TestGetUtxoEvents_EndBlockHashResolverStopsAtRequestDeadline(
+	t *testing.T,
+) {
+	t.Parallel()
+	store := setupTestStore(t)
+
+	entered := make(chan struct{})
+	resolverErr := make(chan error, 1)
+	addr := startTestServerConfig(t, server.Config{
+		Metadata: store,
+		BlockNumberByHash: func(
+			ctx context.Context,
+			_ []byte,
+		) (uint64, bool, error) {
+			close(entered)
+			<-ctx.Done()
+			resolverErr <- ctx.Err()
+			return 0, false, ctx.Err()
+		},
+	})
+	client := midnight.NewMidnightStateClient(dial(t, addr))
+
+	// The deadline covers connecting and the event reads before the
+	// resolver runs, so it is long enough for those and the test confirms
+	// the resolver was entered before the deadline could be what ended it.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_, err := client.GetUtxoEvents(ctx, &midnight.UtxoEventsRequest{
+		TxCapacity:   10,
+		EndBlockHash: hashForByte(1),
+	})
+	testutil.RequireReceive(
+		t, entered, time.Second, "resolver was not called before the deadline",
+	)
+	require.Equal(t, codes.DeadlineExceeded, status.Code(err))
+	// The server may observe the client's expiry as either DeadlineExceeded
+	// or Canceled (a stream reset), so only require that it ended.
+	require.Error(
+		t,
+		testutil.RequireReceive(
+			t, resolverErr, 5*time.Second,
+			"resolver context was not done at the request deadline",
+		),
 	)
 }
 

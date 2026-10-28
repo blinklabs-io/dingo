@@ -21,6 +21,8 @@ import (
 
 	"github.com/blinklabs-io/dingo/event"
 	ouroboros "github.com/blinklabs-io/gouroboros"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
 // Genesis corroboration implements the Ouroboros Genesis trust property that a
@@ -54,6 +56,55 @@ func (cs *ChainSelector) GenesisCorroborationActive() bool {
 	cs.mutex.RLock()
 	defer cs.mutex.RUnlock()
 	return cs.genesisCorroborationActiveLocked()
+}
+
+// RecordDeliveredPeerTip keeps a bounded corroboration history separate from
+// the admission frontier, whose contents can be discarded after rejection or
+// rebuilt from a later intersection.
+func (cs *ChainSelector) RecordDeliveredPeerTip(update PeerTipUpdateEvent) {
+	if update.ObservedTip.Point.Slot == 0 &&
+		len(update.ObservedTip.Point.Hash) == 0 {
+		return
+	}
+	if !cs.peerTipAdmissionGenerationCurrent(update) {
+		return
+	}
+	if cs.config.ConnectionLive != nil &&
+		!cs.config.ConnectionLive(update.ConnectionId) {
+		return
+	}
+	cs.mutex.Lock()
+	defer cs.mutex.Unlock()
+	if !cs.genesisCorroborationActiveLocked() {
+		return
+	}
+	peerTip := cs.deliveredPeerTips[update.ConnectionId]
+	if peerTip == nil {
+		if len(cs.deliveredPeerTips) >= cs.maxTrackedPeers {
+			return
+		}
+		peerTip = &PeerChainTip{
+			ConnectionId: update.ConnectionId,
+			nowFn:        cs.nowFn,
+		}
+		cs.deliveredPeerTips[update.ConnectionId] = peerTip
+	}
+	cs.applyPeerTipAdmissionUpdateLocked(peerTip, update)
+	cs.signalIngressChange()
+}
+
+// RecordDeliveredPeerRollback trims the delivered history of a peer after a
+// rollback. It touches only an existing delivered record: it never registers
+// the connection, so it is safe for peers that are not admitted to selection.
+func (cs *ChainSelector) RecordDeliveredPeerRollback(e PeerRollbackEvent) {
+	cs.mutex.Lock()
+	defer cs.mutex.Unlock()
+	deliveredTip := cs.deliveredPeerTips[e.ConnectionId]
+	if deliveredTip == nil {
+		return
+	}
+	deliveredTip.ApplyRollback(e.Point, e.Tip)
+	cs.signalIngressChange()
 }
 
 // peerLiveEligibleNonStaleLocked reports whether a peer passes the shared
@@ -157,55 +208,46 @@ func (cs *ChainSelector) corroboratingPeersIncludingCandidatesLocked(
 		return 0
 	}
 	witnesses := make(map[string]struct{})
-	seen := make(map[ouroboros.ConnectionId]struct{}, len(cs.peerTips))
+	seen := make(map[ouroboros.ConnectionId]struct{},
+		len(cs.peerTips)+len(cs.pendingPeerTips)+len(cs.deliveredPeerTips))
+	countWitness := func(connId ouroboros.ConnectionId, peerTip *PeerChainTip) {
+		if connId == candidate ||
+			!cs.peerCanCorroborateLocked(connId, peerTip) {
+			return
+		}
+		if !candidateTip.confirmsRecentChainWithin(
+			peerTip,
+			cs.genesisWindowSlotsLocked(),
+		) || !cs.witnessSupportsSuffixLocked(candidateTip, peerTip) {
+			return
+		}
+		identity, ok := cs.corroboratorIdentity(connId)
+		if !ok || identity == candidateIdentity {
+			return
+		}
+		witnesses[identity] = struct{}{}
+	}
 	for connId, committedTip := range cs.peerTips {
 		seen[connId] = struct{}{}
-		if connId == candidate {
-			continue
-		}
 		peerTip := cs.latestCorroborationWitnessLocked(connId)
 		if peerTip == nil {
 			peerTip = committedTip
 		}
-		if !cs.peerCanCorroborateLocked(connId, peerTip) {
-			continue
-		}
-		if !candidateTip.confirmsRecentChainWithin(
-			peerTip,
-			cs.genesisWindowSlotsLocked(),
-		) ||
-			!cs.witnessSupportsSuffixLocked(candidateTip, peerTip) {
-			continue
-		}
-		identity, ok := cs.corroboratorIdentity(connId)
-		if !ok || identity == candidateIdentity {
-			continue
-		}
-		witnesses[identity] = struct{}{}
+		countWitness(connId, peerTip)
 	}
 	for connId := range cs.pendingPeerTips {
-		if connId == candidate {
-			continue
-		}
 		if _, exists := seen[connId]; exists {
 			continue
 		}
+		seen[connId] = struct{}{}
 		peerTip := cs.latestCorroborationWitnessLocked(connId)
-		if !cs.peerCanCorroborateLocked(connId, peerTip) {
+		countWitness(connId, peerTip)
+	}
+	for connId, peerTip := range cs.deliveredPeerTips {
+		if _, exists := seen[connId]; exists {
 			continue
 		}
-		if !candidateTip.confirmsRecentChainWithin(
-			peerTip,
-			cs.genesisWindowSlotsLocked(),
-		) ||
-			!cs.witnessSupportsSuffixLocked(candidateTip, peerTip) {
-			continue
-		}
-		identity, ok := cs.corroboratorIdentity(connId)
-		if !ok || identity == candidateIdentity {
-			continue
-		}
-		witnesses[identity] = struct{}{}
+		countWitness(connId, peerTip)
 	}
 	return len(witnesses)
 }
@@ -215,6 +257,9 @@ func (cs *ChainSelector) latestCorroborationWitnessLocked(
 ) *PeerChainTip {
 	if witness, ok := cs.forecastHorizonWitnesses[connId]; ok {
 		return witness.peerTip
+	}
+	if witness := cs.deliveredPeerTips[connId]; witness != nil {
+		return witness
 	}
 	return cs.latestPeerTipCandidateLocked(connId)
 }
@@ -296,37 +341,70 @@ func (cs *ChainSelector) ingressDecision(
 		}
 		return ingressDeny
 	}
-	defer releaseGeneration()
-	cs.mutex.RLock()
-	defer cs.mutex.RUnlock()
-	peerTip := cs.latestPeerTipCandidateLocked(connId)
-	if peerTip == nil {
-		peerTip = cs.peerTips[connId]
-	}
-	// A peer whose advertised tip is older than the wall clock by more than a
-	// Genesis window serves an abandoned chain. Its headers must not enter the
-	// ledger's shared header queue, where they would outlive its selection and
-	// make honest peers' headers look like a persistent fork.
-	if _, active := cs.staleTipRuleWallSlotLocked(); active {
-		// Tip observation is ordered before this gate. If admission rejected
-		// that observation, there is no tip against which to apply the stale
-		// bound, so accepting the header would bypass the rule.
-		if peerTip == nil || cs.advertisedTipStaleLocked(peerTip) {
+	var observedPoint ocommon.Point
+	var observedBlock uint64
+	var localTip ochainsync.Tip
+	verdict := func() ingressVerdict {
+		defer releaseGeneration()
+		cs.mutex.RLock()
+		defer cs.mutex.RUnlock()
+		peerTip := cs.latestPeerTipCandidateLocked(connId)
+		if peerTip == nil {
+			peerTip = cs.peerTips[connId]
+		}
+		// A peer whose advertised tip is older than the wall clock by more than a
+		// Genesis window serves an abandoned chain. Its headers must not enter the
+		// ledger's shared header queue, where they would outlive its selection and
+		// make honest peers' headers look like a persistent fork.
+		if _, active := cs.staleTipRuleWallSlotLocked(); active {
+			// Tip observation is ordered before this gate. If admission rejected
+			// that observation, there is no tip against which to apply the stale
+			// bound, so accepting the header would bypass the rule.
+			if peerTip == nil || cs.advertisedTipStaleLocked(peerTip) {
+				return ingressDeny
+			}
+		}
+		if !cs.genesisCorroborationActiveLocked() {
+			return ingressApply
+		}
+		if peerTip == nil {
 			return ingressDeny
 		}
+		if cs.corroboratingPeersIncludingCandidatesLocked(connId, peerTip) >=
+			cs.config.MinCorroboratingPeers {
+			return ingressApply
+		}
+		observedPoint = clonePoint(peerTip.ObservedTip.Point)
+		observedBlock = peerTip.ObservedTip.BlockNumber
+		localTip = cs.localTip
+		return ingressAwaitCorroboration
+	}()
+	if verdict != ingressAwaitCorroboration {
+		return verdict
 	}
-	if !cs.genesisCorroborationActiveLocked() {
-		return ingressApply
-	}
-
-	if peerTip == nil {
-		return ingressDeny
-	}
-	if cs.corroboratingPeersIncludingCandidatesLocked(connId, peerTip) >=
-		cs.config.MinCorroboratingPeers {
+	if cs.pointOnAppliedChain(observedPoint, observedBlock, localTip) {
 		return ingressApply
 	}
 	return ingressAwaitCorroboration
+}
+
+func (cs *ChainSelector) pointOnAppliedChain(
+	point ocommon.Point,
+	blockNumber uint64,
+	localTip ochainsync.Tip,
+) bool {
+	if cs.config.PointOnLocalChain == nil || len(point.Hash) == 0 {
+		return false
+	}
+	if cs.config.AppliedTip != nil {
+		if currentTip, ok := cs.config.AppliedTip(); ok {
+			localTip = currentTip
+		}
+	}
+	if blockNumber > localTip.BlockNumber || point.Slot > localTip.Point.Slot {
+		return false
+	}
+	return cs.config.PointOnLocalChain(point)
 }
 
 // AwaitIngressCorroboration holds a header from connId that ShouldApplyIngress

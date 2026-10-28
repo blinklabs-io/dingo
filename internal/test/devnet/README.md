@@ -732,6 +732,7 @@ Reference-conformance scenario
 |------|-------------------|
 | `TestCardanoProducerChainAdvances` | `cardano-producer`'s tip advances (sanity check on the reference node) |
 | `TestLedgerStateConsensus` | dingo-producer's and cardano-producer's ledger state (protocol parameters, stake distribution, whole UTxO set) match at a point acquired on both nodes in epochs 1 and 2; fails with a diagnostic naming every divergence found |
+| `TestPoolQueriesMatchReference` | dingo-producer's and cardano-producer's answers to `GetRewardProvenance` and `GetPoolState` match at a point acquired on both nodes; the reward account and relays of the genesis pools are not compared |
 
 Dingo-only feature scenario
 (`//go:build linux && devnet && !devnet_conformance`) runs only in the default

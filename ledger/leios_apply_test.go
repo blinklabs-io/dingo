@@ -112,6 +112,7 @@ func leiosApplyTestSeedKeyUtxo(
 			PaymentKey: pathSignerHash(),
 			AddedSlot:  1,
 			Amount:     types.Uint64(amount),
+			Cbor:       outputCbor,
 		}); err != nil {
 			return err
 		}
@@ -2586,4 +2587,55 @@ func TestRollbackAheadOfParentRemovesUntickedClosure(t *testing.T) {
 	stored, err := ls.db.GetTransactionByHash(t.Context(), tx.Hash().Bytes(), nil)
 	require.NoError(t, err)
 	require.Nil(t, stored, "rollback before the certifier must remove pending closure effects")
+}
+
+func TestApplyEndorserBlockPreverifiesSignaturesAndRollsBackInvalidClosure(t *testing.T) {
+	t.Parallel()
+	for _, corrupt := range []bool{false, true} {
+		name := "valid"
+		if corrupt {
+			name = "invalid"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			ls, db, rawDB := newLeiosApplyTestLedger(t)
+			input := leiosApplyTestSeedKeyUtxo(t, db, 0x81, 5_000_000)
+			firstRaw, first := leiosApplyTestSignedSpendingTx(t, 1, input, 0, 5_000_000)
+			secondRaw, _ := leiosApplyTestSignedSpendingTx(t, 2, first.Hash().Bytes(), 0, 4_799_999)
+			if corrupt {
+				_, elems, err := decodeEndorserTxEnvelope(secondRaw)
+				require.NoError(t, err)
+				secondRaw, err = cbor.Encode([]any{
+					elems[0], pathSignedWitnesses(pathSigner(), lcommon.Blake2b256Hash([]byte("wrong body"))), nil, true,
+				})
+				require.NoError(t, err)
+			}
+			calls := 0
+			validate := func(tx lcommon.Transaction, slot uint64, state lcommon.LedgerState, pp lcommon.ProtocolParameters) error {
+				lv, ok := state.(*LedgerView)
+				require.True(t, ok)
+				require.NotNil(t, lv.PreverifiedSignatures(), "closure validation must consume its own preverification result")
+				calls++
+				return lcommon.VerifyTransactionWithSignatures(tx, slot, state, pp,
+					[]lcommon.UtxoValidationRuleFunc{lcommon.UtxoValidateSignatures}, lv.PreverifiedSignatures())
+			}
+			ls.currentEra.ValidateTxFunc = validate
+			ls.activeEras[0].ValidateTxFunc = validate
+			ls.publishSnapshotsLocked()
+			applied, err := leiosApplyTestApplyEndorserBlock(t, ls, db,
+				leiosApplyTestRankingPoint(0x41), 1, 1_000, leiosApplyTestEbHash(0x42), firstRaw, secondRaw)
+			require.Equal(t, 2, calls)
+			if corrupt {
+				require.Error(t, err)
+				requireLeiosApplyTestTxCount(t, rawDB, 0)
+				spender, deleted := leiosApplyTestUtxoState(t, rawDB, input, 0)
+				require.Empty(t, spender)
+				require.Zero(t, deleted)
+			} else {
+				require.NoError(t, err)
+				require.Equal(t, 2, applied)
+				requireLeiosApplyTestTxCount(t, rawDB, 2)
+			}
+		})
+	}
 }

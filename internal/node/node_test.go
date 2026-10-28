@@ -957,6 +957,47 @@ func TestBuildDingoConfigWiresMidnightServerPolicy(t *testing.T) {
 	}
 }
 
+// TestBuildDingoConfigWiresDMQConfig proves the dmq settings reach the node's
+// configuration. Without them a configuration file, environment variable or
+// command-line flag that enables DMQ is read and validated, then dropped.
+func TestBuildDingoConfigWiresDMQConfig(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{
+		DMQ: config.DMQConfig{
+			Enabled:           true,
+			Topic:             "mithril",
+			NetworkMagic:      2147483650,
+			SocketPath:        "/run/dingo/dmq.socket",
+			MessageTTL:        900,
+			MaxMempoolSize:    64,
+			N2NPort:           4001,
+			ListenAddress:     "127.0.0.1",
+			ListenIPv6Address: "::1",
+			TopologyFile:      "/etc/dingo/dmq-topology.json",
+			MinPeers:          2,
+			MaxPeers:          7,
+		},
+	}
+	logger := slog.New(slog.NewTextHandler(new(bytes.Buffer), nil))
+
+	built := buildDingoConfig(
+		cfg,
+		logger,
+		nil,
+		nil,
+		false,
+		dingo.StorageModeAPI,
+		30*time.Second,
+		chainsync.DefaultStallTimeout,
+		chainsync.HeaderSyncStrategyPrimary,
+	)
+
+	if got := built.DMQ(); got != cfg.DMQ {
+		t.Fatalf("expected DMQ config to flow through, got %+v", got)
+	}
+}
+
 // TestRootPeerTargetComposition verifies Cardano fallback values and Dingo's
 // higher-precedence root-peer setting reach the top-level Dingo configuration.
 func TestRootPeerTargetComposition(t *testing.T) {

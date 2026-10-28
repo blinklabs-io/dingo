@@ -234,47 +234,102 @@ func (c *Chain) TipRelationContext(
 	ctx context.Context,
 	point ocommon.Point,
 ) (tip ochainsync.Tip, depth uint64, ancestor bool, err error) {
+	tip, _, depth, ancestor, err = c.tipRelationAndHeaderContext(ctx, point, false)
+	return tip, depth, ancestor, err
+}
+
+// TipRelationAndHeader returns the current tip, the crypto-verified queued
+// header frontier, and point's relation to the current tip from one chain
+// snapshot.
+func (c *Chain) TipRelationAndHeader(
+	point ocommon.Point,
+) (
+	tip ochainsync.Tip,
+	headerTip ochainsync.Tip,
+	depth uint64,
+	ancestor bool,
+	err error,
+) {
+	return c.TipRelationAndHeaderContext(context.Background(), point)
+}
+
+// TipRelationAndHeaderContext is TipRelationAndHeader using ctx for chain
+// reconciliation and block lookups.
+func (c *Chain) TipRelationAndHeaderContext(
+	ctx context.Context,
+	point ocommon.Point,
+) (
+	tip ochainsync.Tip,
+	headerTip ochainsync.Tip,
+	depth uint64,
+	ancestor bool,
+	err error,
+) {
+	return c.tipRelationAndHeaderContext(ctx, point, true)
+}
+
+func (c *Chain) tipRelationAndHeaderContext(
+	ctx context.Context,
+	point ocommon.Point,
+	includeHeader bool,
+) (
+	tip ochainsync.Tip,
+	headerTip ochainsync.Tip,
+	depth uint64,
+	ancestor bool,
+	err error,
+) {
 	if c == nil {
-		return ochainsync.Tip{}, 0, false, errors.New("chain is nil")
+		return ochainsync.Tip{}, ochainsync.Tip{}, 0, false, errors.New("chain is nil")
 	}
 	if err := ctx.Err(); err != nil {
-		return ochainsync.Tip{}, 0, false, err
+		return ochainsync.Tip{}, ochainsync.Tip{}, 0, false, err
 	}
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	if err := c.reconcile(ctx); err != nil {
-		return ochainsync.Tip{}, 0, false, err
+		return ochainsync.Tip{}, ochainsync.Tip{}, 0, false, err
 	}
 	unlockBlockIndexReadLocks := c.lockBlockIndexReadLocks()
 	defer unlockBlockIndexReadLocks()
 	tip = c.currentTip
+	headerTip = tip
+	if includeHeader {
+		var ok bool
+		headerTip, ok = c.verifiedHeaderTip()
+		if !ok {
+			return tip, ochainsync.Tip{}, 0, false, errors.New(
+				"verified header queue does not extend primary chain tip",
+			)
+		}
+	}
 	if point.Slot == 0 && len(point.Hash) == 0 {
 		if c.tipBlockIndex >= initialBlockIndex {
-			return tip, c.tipBlockIndex, true, nil
+			return tip, headerTip, c.tipBlockIndex, true, nil
 		}
-		return tip, 0, true, nil
+		return tip, headerTip, 0, true, nil
 	}
 	block, err := c.manager.blockByPoint(ctx, point, nil)
 	if err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
-			return tip, 0, false, nil
+			return tip, headerTip, 0, false, nil
 		}
-		return tip, 0, false, err
+		return tip, headerTip, 0, false, err
 	}
 	if block.ID < initialBlockIndex || block.ID > c.tipBlockIndex {
-		return tip, 0, false, nil
+		return tip, headerTip, 0, false, nil
 	}
 	activeBlock, err := c.blockByIndexLocked(ctx, block.ID)
 	if err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
-			return tip, 0, false, nil
+			return tip, headerTip, 0, false, nil
 		}
-		return tip, 0, false, err
+		return tip, headerTip, 0, false, err
 	}
 	if activeBlock.Slot != point.Slot || !bytes.Equal(activeBlock.Hash, point.Hash) {
-		return tip, 0, false, nil
+		return tip, headerTip, 0, false, nil
 	}
-	return tip, c.tipBlockIndex - block.ID, true, nil
+	return tip, headerTip, c.tipBlockIndex - block.ID, true, nil
 }
 
 // WithTip runs fn while holding the chain mutex. It is intended for operations
@@ -288,6 +343,23 @@ func (c *Chain) WithTip(fn func(ochainsync.Tip) error) error {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	return fn(c.currentTip)
+}
+
+// WithTipAndHeader runs fn with a coherent primary-chain and crypto-verified
+// queued-header frontier while holding the chain mutex.
+func (c *Chain) WithTipAndHeader(
+	fn func(ochainsync.Tip, ochainsync.Tip) error,
+) error {
+	if c == nil {
+		return errors.New("chain is nil")
+	}
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	headerTip, ok := c.verifiedHeaderTip()
+	if !ok {
+		return errors.New("verified header queue does not extend primary chain tip")
+	}
+	return fn(c.currentTip, headerTip)
 }
 
 func (c *Chain) HeaderTip() ochainsync.Tip {
@@ -471,6 +543,29 @@ func (c *Chain) headerTip() ochainsync.Tip {
 		Point:       lastHeader.point,
 		BlockNumber: lastHeader.blockNumber,
 	}
+}
+
+// verifiedHeaderTip returns the longest crypto-verified prefix of the queued
+// header chain. The explicit prev-hash walk keeps forging fail closed if the
+// queue ever stops extending the selected block chain despite admission's
+// continuity checks. c.mutex must be held by the caller.
+func (c *Chain) verifiedHeaderTip() (ochainsync.Tip, bool) {
+	tip := c.currentTip
+	for i := range c.headers {
+		header := &c.headers[i]
+		if !header.cryptoVerified {
+			break
+		}
+		if len(tip.Point.Hash) > 0 &&
+			!bytes.Equal(header.prevHash, tip.Point.Hash) {
+			return ochainsync.Tip{}, false
+		}
+		tip = ochainsync.Tip{
+			Point:       header.point,
+			BlockNumber: header.blockNumber,
+		}
+	}
+	return tip, true
 }
 
 // IsFirstOnHeaderChain reports whether a header with the given hash is the
@@ -808,6 +903,14 @@ func (c *Chain) AddBlock(
 // peer headers. A successful local block invalidates those pending headers;
 // the actual chain-tip and block-number checks remain mandatory.
 func (c *Chain) AddLocalBlock(ctx context.Context, block ledger.Block) error {
+	return c.addLocalBlock(ctx, block, nil)
+}
+
+func (c *Chain) addLocalBlock(
+	ctx context.Context,
+	block ledger.Block,
+	admit func() bool,
+) error {
 	evt, err := c.addBlockInternal(
 		ctx,
 		block,
@@ -815,7 +918,7 @@ func (c *Chain) AddLocalBlock(ctx context.Context, block ledger.Block) error {
 		nil,
 		false,
 		false,
-		nil,
+		admit,
 	)
 	if err != nil {
 		return err
@@ -830,6 +933,26 @@ func (c *Chain) AddLocalBlock(ctx context.Context, block ledger.Block) error {
 		c.eventBus.Publish(ChainUpdateEventType, evt)
 	}
 	return nil
+}
+
+// AddLocalBlockIfHeaderCurrent adds a locally forged block only while the
+// crypto-verified header frontier still equals the selected block tip. The
+// check and block admission run under the same chain lock, so a peer header
+// cannot arrive between them and then be discarded by the local block.
+func (c *Chain) AddLocalBlockIfHeaderCurrent(
+	ctx context.Context,
+	block ledger.Block,
+) error {
+	return c.addLocalBlock(
+		ctx, block,
+		func() bool {
+			headerTip, ok := c.verifiedHeaderTip()
+			return ok &&
+				headerTip.BlockNumber == c.currentTip.BlockNumber &&
+				headerTip.Point.Slot == c.currentTip.Point.Slot &&
+				bytes.Equal(headerTip.Point.Hash, c.currentTip.Point.Hash)
+		},
+	)
 }
 
 // AddLocalBlockDeferred adds a locally forged block exactly like AddLocalBlock
@@ -3005,10 +3128,23 @@ func (c *Chain) BlockBeforeSlot(
 
 // HoldsPoint reports whether point is currently part of this chain. A block
 // that remains resolvable only through the manager's retained-block cache
-// after a rollback, or that lives on a fork, is not held.
+// after a rollback, or that lives on a fork, is not held. Pruning block content
+// does not retract persistent membership while its metadata and active index
+// still identify the exact point.
+//
+//nolint:contextcheck // A nil caller has no context to inherit.
 func (c *Chain) HoldsPoint(ctx context.Context, point ocommon.Point) bool {
 	if c == nil || c.manager == nil {
 		return false
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if ctx.Err() != nil {
+		return false
+	}
+	if c.persistent {
+		return c.holdsPersistentPoint(ctx, point)
 	}
 	blk, err := c.BlockByPoint(ctx, point, nil)
 	if err != nil {
@@ -3017,6 +3153,43 @@ func (c *Chain) HoldsPoint(ctx context.Context, point ocommon.Point) bool {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
 	return c.holdsBlockAtIndex(ctx, blk.ID, point.Hash)
+}
+
+// holdsPersistentPoint needs only the retained metadata and active index.
+// Read both from one blob snapshot without fetching CBOR or opening SQL. The
+// generation check rejects a result if rollback or another block mutation
+// raced these unlocked reads; no membership verdict survives the call.
+func (c *Chain) holdsPersistentPoint(
+	ctx context.Context,
+	point ocommon.Point,
+) bool {
+	if len(point.Hash) != lcommon.Blake2b256Size {
+		return false
+	}
+	c.mutex.RLock()
+	generation := c.mutationGeneration
+	c.mutex.RUnlock()
+	c.manager.mutex.RLock()
+	db := c.manager.db
+	c.manager.mutex.RUnlock()
+	if db == nil {
+		return false
+	}
+	txn := db.BlobTxn(false)
+	defer txn.Rollback() //nolint:errcheck
+	index, err := database.BlockIDByPointMetadataTxn(txn, point)
+	if err != nil || ctx.Err() != nil {
+		return false
+	}
+	indexed, err := db.BlockPointByIndex(index, txn)
+	if err != nil || indexed.Slot != point.Slot ||
+		!bytes.Equal(indexed.Hash, point.Hash) || ctx.Err() != nil {
+		return false
+	}
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	return generation == c.mutationGeneration &&
+		index >= initialBlockIndex && index <= c.tipBlockIndex
 }
 
 // holdsBlockAtIndex reports whether this chain currently has the block with

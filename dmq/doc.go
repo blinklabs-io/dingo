@@ -56,6 +56,14 @@
 // its own, and a Unix socket speaking the DMQ node-to-client handshake under
 // the topic's network magic. Each connection carries both local mini-protocols.
 //
+// # Peers
+//
+// A Stack built with StackConfig.Peers also accepts and dials node-to-node
+// peers: it listens on PeerConfig.ListenAddrs, and a manager dials the peers
+// of PeerConfig.Topology and of the ledger, within MinPeers and MaxPeers, with
+// backoff for a peer that fails. Ledger peers are untrusted and are dialed only
+// through netguard. See PeerConfig.
+//
 // Local message submission validates a message in order -- already expired,
 // the current KES period when one is configured, expiry beyond the configured
 // message TTL, CIP-0137 authentication -- and then admits it to the pool. It

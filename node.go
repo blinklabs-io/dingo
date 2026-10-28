@@ -71,6 +71,7 @@ import (
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/muxer"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	okeepalive "github.com/blinklabs-io/gouroboros/protocol/keepalive"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 	"github.com/prometheus/client_golang/prometheus"
@@ -640,21 +641,23 @@ func (n *Node) newOuroborosConfig(
 		// connection, so the fetch is gated on the txs offer, not the block
 		// offer. Best-effort: a fetch failure never tears down the shared
 		// connection.
-		EnableLeiosTxFetch:              enableLeiosNetworking,
-		LeiosTxFetchTailBudget:          leiosTxFetchTailBudget,
-		ChainsyncIngressEligible:        n.isChainsyncIngressEligible,
-		ChainsyncHasBestPeer:            n.chainsyncHasBestPeer,
-		ChainsyncApplyEligible:          n.chainsyncApplyEligible,
-		ChainsyncAwaitEagerness:         n.chainsyncAwaitEagerness,
-		ChainsyncAwaitCorroboration:     n.chainsyncAwaitCorroboration,
-		ChainsyncIntersectAtLedgerTip:   n.chainsyncIntersectAtLedgerTip,
-		ChainsyncObservePeerTip:         n.chainsyncObservePeerTip,
-		ChainsyncPrepareForecastWitness: n.chainsyncPrepareForecastWitness,
-		ChainsyncRemoveForecastWitness:  n.chainsyncRemoveForecastWitness,
-		ChainsyncResolvePeerTip:         n.chainsyncResolvePeerTip,
-		ChainsyncObserveAwaitReply:      n.chainsyncObserveAwaitReply,
-		ChainsyncSyncTarget:             n.chainsyncSyncTarget,
-		ChainsyncObservePeerRollback:    n.chainsyncObservePeerRollback,
+		EnableLeiosTxFetch:                   enableLeiosNetworking,
+		LeiosTxFetchTailBudget:               leiosTxFetchTailBudget,
+		ChainsyncIngressEligible:             n.isChainsyncIngressEligible,
+		ChainsyncHasBestPeer:                 n.chainsyncHasBestPeer,
+		ChainsyncApplyEligible:               n.chainsyncApplyEligible,
+		ChainsyncAwaitEagerness:              n.chainsyncAwaitEagerness,
+		ChainsyncAwaitCorroboration:          n.chainsyncAwaitCorroboration,
+		ChainsyncIntersectAtLedgerTip:        n.chainsyncIntersectAtLedgerTip,
+		ChainsyncObservePeerTip:              n.chainsyncObservePeerTip,
+		ChainsyncRecordDeliveredPeerTip:      n.chainsyncRecordDeliveredPeerTip,
+		ChainsyncRecordDeliveredPeerRollback: n.chainsyncRecordDeliveredPeerRollback,
+		ChainsyncPrepareForecastWitness:      n.chainsyncPrepareForecastWitness,
+		ChainsyncRemoveForecastWitness:       n.chainsyncRemoveForecastWitness,
+		ChainsyncResolvePeerTip:              n.chainsyncResolvePeerTip,
+		ChainsyncObserveAwaitReply:           n.chainsyncObserveAwaitReply,
+		ChainsyncSyncTarget:                  n.chainsyncSyncTarget,
+		ChainsyncObservePeerRollback:         n.chainsyncObservePeerRollback,
 		// On the Musashi prototype network every mini-protocol shares one muxer
 		// to a single relay; block/EB traffic can delay the relay's keep-alive
 		// pong past the tight 10s gouroboros default, making dingo drop the
@@ -1600,7 +1603,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	if midnightServerActive(n.config.storageMode, n.config.midnight) {
 		var err error
 		n.midnightServer, err = midnightserver.New(
-			n.midnightServerConfig(ctx),
+			n.midnightServerConfig(),
 		)
 		if err != nil {
 			return fmt.Errorf("failed to create midnight gRPC server: %w", err)
@@ -2192,7 +2195,7 @@ func (n *Node) buildChainSelectorConfig(
 				n.connManager.GetConnectionById(connId) != nil
 		},
 		PeerIdentity: func(connId ouroboros.ConnectionId) string {
-			return n.peerDiversityGroupByConnId(connId)
+			return n.peerCorroborationIdentityByConnId(connId)
 		},
 		BlockfetchLatency: func(connId ouroboros.ConnectionId) (time.Duration, bool) {
 			if n.chainsyncState == nil {
@@ -2223,6 +2226,16 @@ func (n *Node) buildChainSelectorConfig(
 				return ochainsync.Tip{}, false
 			}
 			return ls.Tip(), true
+		},
+		PointOnLocalChain: func(point ocommon.Point) bool {
+			ls := n.wallClockLedger.Load()
+			if ls == nil {
+				return false
+			}
+			return ls.VerifyPointOnChain(
+				context.Background(),
+				ledger.QueryPoint{Slot: point.Slot, Hash: point.Hash},
+			) == nil
 		},
 	}
 	// The running node publishes its started ledger before constructing the
@@ -2271,7 +2284,7 @@ func (n *Node) setPeerGovernor(peerGov *peergov.PeerGovernor) {
 	n.peerGovMu.Unlock()
 }
 
-func (n *Node) peerDiversityGroupByConnId(
+func (n *Node) peerCorroborationIdentityByConnId(
 	connId ouroboros.ConnectionId,
 ) string {
 	n.peerGovMu.RLock()
@@ -2279,7 +2292,7 @@ func (n *Node) peerDiversityGroupByConnId(
 	if n.peerGov == nil {
 		return ""
 	}
-	return n.peerGov.DiversityGroupByConnId(connId)
+	return n.peerGov.CorroborationIdentityByConnId(connId)
 }
 
 func (n *Node) isConfiguredRootConnection(

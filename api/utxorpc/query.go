@@ -450,8 +450,18 @@ func (s *queryServiceServer) ReadUtxos(
 	for i, txo := range keys {
 		refs[i] = models.UtxoId{Hash: txo.GetHash(), Idx: txo.GetIndex()}
 	}
-	utxos, err := s.utxorpc.config.LedgerState.UtxosByRefs(refs)
+	utxos, err := s.utxorpc.config.LedgerState.UtxosByRefsBounded(
+		ctx,
+		refs,
+		budget.limit,
+	)
 	if err != nil {
+		if errors.Is(err, database.ErrUtxoBytesExceeded) {
+			return nil, budget.exceeded()
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, readStateContextError(ctxErr)
+		}
 		return nil, err
 	}
 	utxoByRef := make(map[string]*models.Utxo, len(utxos))

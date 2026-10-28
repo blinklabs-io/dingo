@@ -85,6 +85,9 @@ type Config struct {
 	// and dingo_dmq_messages_expired_total counters and the
 	// dingo_dmq_mempool_messages and dingo_dmq_mempool_bytes gauges.
 	PromRegistry prometheus.Registerer
+	// ConstLabels are attached to those collectors, so that the pools of two
+	// topics can share one registry.
+	ConstLabels prometheus.Labels
 	// Now, when non-nil, replaces time.Now for expiry checks. Tests use
 	// this for deterministic TTL behavior.
 	Now func() time.Time
@@ -170,20 +173,24 @@ func NewMessageMempool(cfg Config) *MessageMempool {
 	// counters can be incremented unconditionally.
 	factory := promauto.With(cfg.PromRegistry)
 	p.receivedTotal = factory.NewCounter(prometheus.CounterOpts{
-		Name: "dingo_dmq_messages_received_total",
-		Help: "DMQ messages admitted to the message pool",
+		Name:        "dingo_dmq_messages_received_total",
+		ConstLabels: cfg.ConstLabels,
+		Help:        "DMQ messages admitted to the message pool",
 	})
 	p.expiredTotal = factory.NewCounter(prometheus.CounterOpts{
-		Name: "dingo_dmq_messages_expired_total",
-		Help: "DMQ messages removed from the message pool after expiring",
+		Name:        "dingo_dmq_messages_expired_total",
+		ConstLabels: cfg.ConstLabels,
+		Help:        "DMQ messages removed from the message pool after expiring",
 	})
 	factory.NewGaugeFunc(prometheus.GaugeOpts{
-		Name: "dingo_dmq_mempool_messages",
-		Help: "DMQ messages currently held in the message pool",
+		Name:        "dingo_dmq_mempool_messages",
+		ConstLabels: cfg.ConstLabels,
+		Help:        "DMQ messages currently held in the message pool",
 	}, func() float64 { return float64(p.Len()) })
 	factory.NewGaugeFunc(prometheus.GaugeOpts{
-		Name: "dingo_dmq_mempool_bytes",
-		Help: "CBOR-encoded bytes currently held in the DMQ message pool",
+		Name:        "dingo_dmq_mempool_bytes",
+		ConstLabels: cfg.ConstLabels,
+		Help:        "CBOR-encoded bytes currently held in the DMQ message pool",
 	}, func() float64 { return float64(p.SizeBytes()) })
 	return p
 }

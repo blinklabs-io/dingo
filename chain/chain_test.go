@@ -2243,6 +2243,12 @@ func TestTipRelationUsesTheActivePrimaryChain(t *testing.T) {
 	); !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected canceled context error, got %v", err)
 	}
+	if _, _, _, _, err := primary.TipRelationAndHeaderContext(
+		ctx,
+		blockPoint(testBlocks[1]),
+	); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected canceled context error with header, got %v", err)
+	}
 
 	fork, err := cm.NewChain(context.Background(), blockPoint(testBlocks[1]))
 	if err != nil {

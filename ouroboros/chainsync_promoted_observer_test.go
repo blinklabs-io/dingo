@@ -290,8 +290,8 @@ func TestBuildDefaultChainsyncIntersectPointsAtLedgerTipForCorroboration(
 	bus := event.NewEventBus(nil, logger)
 	defer bus.Close()
 
-	o, _, connId := newOutboundStartTestOuroboros(t, logger, bus)
 	ls, _ := newTestLedgerStateWithChain(t, 5)
+	o, _, connId := newOutboundStartTestOuroboros(t, logger, bus)
 	o.ledgerState = ls
 	ledgerTip := ocommon.NewPoint(2, bytes.Repeat([]byte{2}, 32))
 	ls.SetTipForTesting(ochainsync.Tip{Point: ledgerTip, BlockNumber: 2})

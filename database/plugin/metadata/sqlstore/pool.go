@@ -1743,7 +1743,18 @@ WHERE NOT EXISTS (
 	)
 }
 
-const retiringPoolsCTE = `
+// retiringPoolsCTE ranks every pool's registration and retirement
+// certificates, newest first. The AtSlot form keeps only certificates added
+// at or before a slot, so the ranking reads as that slot saw it.
+var retiringPoolsCTE = retiringPoolsCTEWhere("", "")
+
+var retiringPoolsCTEAtSlot = retiringPoolsCTEWhere(
+	"WHERE pr.added_slot <= ?",
+	"WHERE pt.added_slot <= ?",
+)
+
+func retiringPoolsCTEWhere(regWhere, retWhere string) string {
+	return `
 WITH latest_reg AS (
     SELECT pr.pool_key_hash, pr.added_slot,
            CASE WHEN pr.certificate_id = 0 THEN 1 ELSE 0 END synth,
@@ -1760,6 +1771,7 @@ WITH latest_reg AS (
     FROM pool_registration pr
     LEFT JOIN certs c ON c.id = pr.certificate_id
     LEFT JOIN "transaction" t ON t.id = c.transaction_id
+    ` + regWhere + `
 ),
 latest_ret AS (
     SELECT pt.pool_key_hash, pt.epoch, pt.added_slot,
@@ -1776,8 +1788,10 @@ latest_ret AS (
     FROM pool_retirement pt
     LEFT JOIN certs c ON c.id = pt.certificate_id
     LEFT JOIN "transaction" t ON t.id = c.transaction_id
+    ` + retWhere + `
 )
 `
+}
 
 func retiringPoolsFrom(epochOp string) string {
 	return `
@@ -1832,6 +1846,30 @@ func (s *Store) GetRetiringPools(
 	)
 	if err != nil {
 		return nil, fmt.Errorf("get retiring pools: %w", err)
+	}
+	return scanRetiringPools(rows, 0)
+}
+
+// GetRetiringPoolsAtSlot is GetRetiringPools as the chain stood at slot:
+// only certificates added at or before it count, so a retirement announced
+// later is not reported and a registration made later does not cancel one.
+func (s *Store) GetRetiringPoolsAtSlot(
+	currentEpoch uint64,
+	slot uint64,
+	txn types.Txn,
+) ([]models.PoolRetiringRow, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(
+		ctx,
+		s.dialect.Rebind(retiringPoolsCTEAtSlot+"SELECT r.pool_key_hash, r.epoch"+
+			retiringPoolsFrom(">")+retiringPoolsOrder),
+		slot, slot, currentEpoch,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get retiring pools at slot: %w", err)
 	}
 	return scanRetiringPools(rows, 0)
 }
@@ -4291,6 +4329,26 @@ func (s *Store) GetPoolDepositsHeld(
 	poolKeyHashes []lcommon.PoolKeyHash,
 	txn types.Txn,
 ) (map[string]uint64, error) {
+	return s.poolDepositsHeld(poolKeyHashes, nil, txn)
+}
+
+// GetPoolDepositsHeldAtSlot is GetPoolDepositsHeld over the registrations
+// added at or before slot, so each deposit is the one the pool held then.
+func (s *Store) GetPoolDepositsHeldAtSlot(
+	poolKeyHashes []lcommon.PoolKeyHash,
+	slot uint64,
+	txn types.Txn,
+) (map[string]uint64, error) {
+	return s.poolDepositsHeld(poolKeyHashes, &slot, txn)
+}
+
+// poolDepositsHeld reads each pool's latest registration's retained deposit,
+// restricted to registrations added at or before *slot when slot is set.
+func (s *Store) poolDepositsHeld(
+	poolKeyHashes []lcommon.PoolKeyHash,
+	slot *uint64,
+	txn types.Txn,
+) (map[string]uint64, error) {
 	ret := make(map[string]uint64, len(poolKeyHashes))
 	if len(poolKeyHashes) == 0 {
 		return ret, nil
@@ -4299,14 +4357,22 @@ func (s *Store) GetPoolDepositsHeld(
 	if err != nil {
 		return nil, err
 	}
+	slotWhere := ""
+	if slot != nil {
+		slotWhere = " AND pr.added_slot <= ?"
+	}
 	for start := 0; start < len(poolKeyHashes); start += activeDelegatorChunkSize {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 		end := min(start+activeDelegatorChunkSize, len(poolKeyHashes))
-		args := make([]any, 0, end-start)
+		args := make([]any, 0, end-start+1)
 		for _, poolKeyHash := range poolKeyHashes[start:end] {
 			args = append(args, poolKeyHash.Bytes())
+		}
+		placeholders := bindPlaceholders(len(args))
+		if slot != nil {
+			args = append(args, *slot)
 		}
 		rows, err := db.QueryContext(ctx, `
 SELECT pool_key_hash, held FROM (
@@ -4322,7 +4388,7 @@ SELECT pool_key_hash, held FROM (
     FROM pool_registration pr
     LEFT JOIN certs c ON c.id = pr.certificate_id
     LEFT JOIN "transaction" t ON t.id = c.transaction_id
-    WHERE pr.pool_key_hash IN (`+bindPlaceholders(len(args))+`)
+    WHERE pr.pool_key_hash IN (`+placeholders+`)`+slotWhere+`
 ) latest WHERE rn = 1`,
 			args...,
 		)
