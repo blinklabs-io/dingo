@@ -5443,6 +5443,28 @@ func (ls *LedgerState) AwaitChainsyncHeaderAdmission(
 	return true, nil
 }
 
+// AwaitObserverHeaderHorizon blocks until the published ledger state can
+// forecast e's slot, or ctx ends. It serves observer connections, whose
+// headers are never fetched: unlike AwaitChainsyncHeaderAdmission it starts no
+// blockfetch and requests no re-intersection, because the ingress connections
+// advance the horizon and an observer only has to stop reading ahead of it.
+func (ls *LedgerState) AwaitObserverHeaderHorizon(
+	ctx context.Context,
+	e ChainsyncEvent,
+) error {
+	for {
+		published := ls.snapshotPublishedChan()
+		if !ls.headerBeyondForecastHorizon(ctx, e) {
+			return nil
+		}
+		select {
+		case <-published:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
 // flushQueuedHeadersForHorizonWait starts blockfetch for headers already
 // queued while admission holds the next header past the forecast horizon, and
 // reports whether a queued or in-flight fetch can publish a newer snapshot.

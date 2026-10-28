@@ -1999,3 +1999,68 @@ func TestFarFromTipBlockfetchLowWatermarkAfterHorizonRelease(t *testing.T) {
 		})
 	}
 }
+
+// An observer header past the forecast horizon waits for a publication that
+// brings its slot into range, and neither fetches nor requests a resync.
+func TestAwaitObserverHeaderHorizonHoldsUntilForecastable(t *testing.T) {
+	t.Parallel()
+
+	systemStart := time.Date(2026, time.August, 22, 12, 0, 0, 0, time.UTC)
+	arrival := systemStart.Add(100 * time.Second)
+	ls, _ := newFutureHeaderTestLedger(t, systemStart, arrival)
+	covered := &atomic.Bool{}
+	ls.slotClock.provider = gatedHorizonSlotTimeProvider{
+		SlotTimeProvider: ls.slotClock.provider,
+		slot:             90,
+		covered:          covered,
+	}
+	var witnessCalls atomic.Int32
+	e := futureHeaderEvent(90, arrival)
+	e.ForecastHorizonWait = func() { witnessCalls.Add(1) }
+
+	results := make(chan error, 1)
+	go func() { results <- ls.AwaitObserverHeaderHorizon(t.Context(), e) }()
+	testutil.RequireNoReceive(
+		t, results, 100*time.Millisecond,
+		"an observer header past the forecast horizon must wait",
+	)
+	ls.notifySnapshotPublished()
+	testutil.RequireNoReceive(
+		t, results, 100*time.Millisecond,
+		"a publication that leaves the slot past the horizon must keep waiting",
+	)
+	covered.Store(true)
+	ls.notifySnapshotPublished()
+	require.NoError(t, testutil.RequireReceive(
+		t, results, testutil.AsyncWait,
+		"observer wait did not resume once the slot was forecastable",
+	))
+	require.Zero(t, witnessCalls.Load(),
+		"an observer must not publish a forecast witness")
+}
+
+func TestAwaitObserverHeaderHorizonHonorsCancellation(t *testing.T) {
+	t.Parallel()
+
+	systemStart := time.Date(2026, time.August, 22, 12, 0, 0, 0, time.UTC)
+	arrival := systemStart.Add(100 * time.Second)
+	ls, _ := newFutureHeaderTestLedger(t, systemStart, arrival)
+	ls.slotClock.provider = gatedHorizonSlotTimeProvider{
+		SlotTimeProvider: ls.slotClock.provider,
+		slot:             90,
+		covered:          &atomic.Bool{},
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	results := make(chan error, 1)
+	go func() {
+		results <- ls.AwaitObserverHeaderHorizon(
+			ctx, futureHeaderEvent(90, arrival),
+		)
+	}()
+	testutil.RequireNoReceive(t, results, 50*time.Millisecond, "must wait")
+	cancel()
+	err := testutil.RequireReceive(
+		t, results, testutil.AsyncWait, "cancellation must end the wait",
+	)
+	require.ErrorIs(t, err, context.Canceled)
+}

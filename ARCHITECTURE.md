@@ -6572,7 +6572,12 @@ Ordinary Praos sessions continue to use primary-chain intersection points.
   the tip stays an observer: it is not promoted, holds no ingress slot and
   records nothing, and its next promotion is evaluated afresh. Re-syncing each
   would close a connection per freed slot, hand the slot to the next
-  observer, and close that one in turn. While corroboration is
+  observer, and close that one in turn. An observer header past the ledger's
+  forecast horizon parks its callback (`LedgerState.AwaitObserverHeaderHorizon`)
+  before authentication or retention, bounded by `catchUpBandWaitTimeout`, so
+  an observer does not read ahead of what the ledger can forecast; the wait
+  fetches nothing and requests no re-sync, and a header it releases is handled
+  as any observer header. While corroboration is
   active (`OuroborosConfig.ChainsyncIntersectAtLedgerTip`) new sessions
   intersect at `LedgerState.LedgerTipIntersectPoints`, the applied ledger tip
   plus the Mithril trust boundary, rather than the primary chain's
