@@ -6004,6 +6004,33 @@ A peer whose advertised tip is wall-clock stale is never a new peer's
 reference. It serves an abandoned chain and is never selectable; from
 genesis, where the advertised bound applies, its short advertisement would
 otherwise reject every honest peer that advertises the real tip.
+A reference inside `(localTip, localTip + securityParam]` gets no catch-up
+relaxation, so a header past `reference + securityParam` is rejected, which
+closes the connection, though an honest peer is only ahead of a ledger that
+lags the headers it was delivered. The roll-forward callback therefore applies
+backpressure instead, as the reference node's ChainSync client waits for the
+local selection to advance rather than disconnecting: before the header is
+admitted, verified, observed, or published,
+`ChainSelector.AwaitCatchUpBand` (wired as
+`OuroborosConfig.ChainsyncAwaitCatchUpBand`) parks that connection's callback,
+so it requests no further headers, until the header is admissible. It re-reads
+the live applied tip, the reference and the tracked peers every 100ms and takes
+the selector lock only for each check, never while parked. A connection is held
+only from inside the band; once held it stays held after the reference passes
+the local tip until the header is within `max(reference + securityParam,
+localTip + 2 * securityParam)`, because releasing it into the far-claim path
+would withhold the header from the connection's observed ancestry and defer
+every later header's verification. The wait records no frontier, claim or
+witness, so a waiting connection can neither be selected nor corroborate
+another, and a header no chain could have reached from the local tip is not
+held and is still rejected. It ends on connection close or node shutdown (the
+admission context), and after 60 seconds, or half the operator's chainsync
+stall timeout if that is lower (`catchUpBandWaitTimeoutFor`), below the 135 to
+269 second MustReply, 269 second minimum CanAwait and 3673 second Idle
+chainsync timers and the 2 minute default stall timeout. At that bound the
+header meets the ordinary plausibility verdict unchanged, so a wedged ledger
+or a stale reference costs the peer one bounded pause and nothing else.
+
 Chainsync observations carry an admission ID and remain staged until the
 ledger admits the matching header. Far-tip claims and corroboration gathered
 while admission is pending stay in a bounded provisional view. Only commit
@@ -6492,7 +6519,14 @@ Ordinary Praos sessions continue to use primary-chain intersection points.
   history is separate from admitted candidate frontiers. A connection promoted
   to ingress-eligible whose header is more than one block above the applied tip
   is re-synced with `ChainsyncResyncReasonPromotedObserverAhead` instead of
-  recording a frontier that starts above the ledger. While corroboration is
+  recording a frontier that starts above the ledger. A lagging node's
+  observers all stream above its applied tip, so only one such re-sync is
+  requested per `chainsyncPromotedAheadRecycleCooldown` across all
+  connections. Until it elapses, another observer that would be promoted above
+  the tip stays an observer: it is not promoted, holds no ingress slot and
+  records nothing, and its next promotion is evaluated afresh. Re-syncing each
+  would close a connection per freed slot, hand the slot to the next
+  observer, and close that one in turn. While corroboration is
   active (`OuroborosConfig.ChainsyncIntersectAtLedgerTip`) new sessions
   intersect at `LedgerState.LedgerTipIntersectPoints`, the applied ledger tip
   plus the Mithril trust boundary, rather than the primary chain's
@@ -6663,7 +6697,17 @@ Ordinary Praos sessions continue to use primary-chain intersection points.
   is withheld from selection, density, corroboration and the ledger. ChainSync
   records that the peer needs recovery and re-intersects it after the applied
   ledger advances, or at once (once per connection and applied tip) when
-  nothing is queued, since then no block can be applied to trigger it. If the
+  nothing is queued, since then no block can be applied to trigger it. A peer
+  whose reported tip is below the applied tip gets neither: its chain is
+  shorter than one already applied and cannot be selected, so its deferred
+  header is withheld without parking a recovery, and a parked recovery whose
+  peer the applied tip has passed is dropped rather than retried. Either
+  re-intersection is also limited to one per remote address per
+  `chainsyncDeferredRecoveryRepeatCooldown`: a peer that reconnects into the
+  same deferral delivers the same headers again, and while the ledger lags
+  every applied block would recycle it without being able to change the
+  verdict. Its withheld header stays parked and the first applied block after
+  the window retries it. If the
   ledger advances during ancestry verification, recording the deferred marker
   detects that tip change and schedules recovery immediately. Closing the
   connection clears its marker, and a failed retry does not restore the marker
@@ -12617,12 +12661,23 @@ queued.
 TLS is configured through `plugins.api.mesh.config.tls`; see "API security"
 above.
 
-`/account/coins` reads the exact address's complete UTxO set and returns every
-coin in one response. The request and response expose no pagination, cursor,
-limit, offset or truncation state because a Mesh client treats omitted coins as
-absent. At most 8 complete reads run at once; a request that finds no free slot
-is refused before starting its ledger query with `ErrUnavailable` rather than
-queued. Every successful request still returns the complete result.
+`/account/coins` returns every coin of the exact address in one response. The
+request and response expose no pagination, cursor, limit, offset or truncation
+state because a Mesh client treats omitted coins as absent, and no account is
+refused for its size. At most 8 reads run at once; a request that finds no free
+slot is refused before starting its ledger query with `ErrUnavailable` rather
+than queued. The handler reads through `LedgerState.ScanUtxosByAddress`, which
+holds one database read transaction for the whole request and visits the
+matching outputs in ascending ledger order in pages of at most 500 matches,
+5,000 scanned candidates and 1 MiB of output CBOR. Each page's coins, native
+assets decoded from the output CBOR, are encoded and flushed before the next
+page is read, so server memory is bounded by one page. The `block_identifier`
+is the tip stored in the same snapshot and is written after the coins. Each
+flushed page extends the connection write deadline by 30 seconds, so a large
+account completes while a client that stops reading is cut off. A failure
+before the first page is a Mesh error; once coins are on the wire the handler
+aborts the connection without closing the JSON document, so a client never
+reads a partial list as complete.
 `/account/balance` is unchanged.
 
 Implements the Mesh (formerly Rosetta) API specification for wallet integration and chain analysis. Provides endpoints for network status, account balances, block queries, transaction construction, and mempool access.
@@ -12690,7 +12745,7 @@ Two contracts follow from that boundary:
   `block not found` rather than falling back to another point. An identifier
   carrying neither hash nor index is treated as absent, since clients commonly
   send the field unconditionally. `/account/coins` has no block identifier in
-  the Rosetta schema and always reports the tip.
+  the Rosetta schema and always reports the tip of the snapshot it read.
 
 ### UTxO RPC (`api/utxorpc/`)
 
@@ -12714,7 +12769,7 @@ and before Connect serializes it. A stalled reader therefore cannot retain a
 bulk concurrency slot indefinitely. Streaming RPCs do not run the unary
 interceptor and retain their unbounded write lifetime.
 
-A gRPC server implementing the UTxO RPC specification with query, submit, sync, and watch services. The same listener exposes both the `utxorpc.v1alpha` and `utxorpc.v1beta` service namespaces. Every method other than v1beta's additional `QueryService.ReadState` is wire-compatible across the two, so the beta routes rewrite the service path onto the alpha handlers; `ReadState` is served by `betaQueryServiceServer` (`api/utxorpc/readstate.go`) instead. It answers the one Cardano state query v1beta defines, `GetStakePoolDistribution`, from `ledger.LedgerState.PoolStakeDistribution` — the same read that backs the node-to-client `GetPoolDistr2` query. The `ledger_tip` it reports is the tip that read took inside its own transaction, carried back on the result, rather than one sampled while building the reply: the two can straddle an epoch boundary, and a later tip would name an epoch whose stake snapshot is not the one the reply carries. Its `height` comes from that same carried tip's block number rather than from a separate lookup of the tip's stored block, as it does for every tip this listener reports (`ReadTip` already did; `ReadParams`, `ReadUtxos`, `SearchUtxos`, `ReadData`, `ReadTx`, and `ReadState` were brought in line): the height is already known at the point the slot and hash are, and `height` is a plain proto3 `uint64` with no encoding for "unknown", so a zero — whether from a failed lookup or from never populating the field — asserts that the tip is the origin block rather than admitting the height could not be read. Chain points that name something other than a tip, such as the `block_ref` on a returned transaction, still come from that block's own stored model. `LedgerState` is an optional dependency that `Utxorpc.Start` admits as an untyped nil, so the handler checks it per request and reports `Unavailable` rather than panicking. The `pool_keyhashes` filter is capped by `MaxPoolFilter` (default 1000), like the `ReadUtxos` and `ReadData` key lists, since it sizes the snapshot and registration reads it drives; asking for every pool is an empty filter and one bulk read. An empty `pool_keyhashes` means every pool, per the proto; a filter entry that is not 28 bytes is rejected as `InvalidArgument` rather than padded or truncated into a different pool. Because the protobuf `RationalNumber` is an int32 over a uint32, a stake fraction whose exact ratio does not fit — the normal case on a real network, where the denominator is total active stake in lovelace — is rescaled onto a fixed denominator of 1e9 rather than failing. `newServeMux` is the single wiring site for the routing table, and one service-name list (`servedServiceNames`) feeds the `grpc_health_v1` checker and both reflection wire versions, so `grpc.reflection.v1` and `grpc.reflection.v1alpha` clients discover the same services — v1alpha is an older reflection protocol, not an older API surface. Unary handlers whose cost scales with the result (`ReadUtxos`, `SearchUtxos`, `ReadData`, `ReadState`, `FetchBlock`, `DumpHistory`, `ReadMempool`) share a non-blocking concurrency budget (`MaxConcurrentBulkRequests`, default 32): a request that finds every slot held is refused with `ResourceExhausted` rather than queued behind retained responses. A request takes its slot only after its parameters validate, so a rejected request never contends with valid ones, and keeps it until Connect has finished writing the response or `BulkResponseWriteTimeout` has cut the write off (`holdBulkSlotsUntilWritten` wraps the query, submit and sync routes), because a response is serialized and written after the handler returns and a slow reader would otherwise pin it with its slot already free. All but `DumpHistory`, which has its own `MaxHistoryBytes` cap described below, have a response byte budget (`MaxResponseBytes`, default 16 MiB). Item-oriented responses keep the first item so cursor-based operations can make progress; `ReadState` has no cursor and rejects an oversized response. `SearchUtxos` passes the request context, candidate-row cap, and response-byte cap into its database page scan, so cancellation and limits stop CBOR hydration before a full page is retained; a bounded page returns a resumption token. `ReadState` applies the same bulk admission and server/write deadlines, and rejects a pool response that exceeds the byte cap with `ResourceExhausted`, as `ReadUtxos`, `ReadData` and `FetchBlock` do, since none of them has a cursor. `ReadData` looks each distinct datum hash up once, in first-seen order, so repeated hashes in a request yield one value, and resolves them through `LedgerState.Datums` / `Database.GetDatums`: one metadata read transaction per request, bound to the request context and checked before each lookup, so a cancelled caller stops the batch instead of opening a transaction per hash. `ReadUtxos` resolves exactly the requested (tx hash, output index) references and loads their CBOR through `LedgerState.UtxosByRefsBounded` / `Database.UtxosByRefsBounded`, which counts bytes as each output is read and stops with `ErrUtxoBytesExceeded` (mapped to `ResourceExhausted`) once the running total passes `MaxResponseBytes`, so a request holds at most the limit plus one output rather than every requested output before the budget check; it also observes the request context. `ReadMempool` has no cursor in the pinned spec, so it returns a prefix of the mempool snapshot in the mempool's own order, capped at `MaxMempoolItems` (default 1000) transactions and the byte budget, and the response does not say whether it was truncated. `Mempool.TransactionsBounded` walks and copies only that prefix, transaction headers and CBOR alike, so the read costs in proportion to the result and not the pool. Request logs carry fixed-size metadata (counts and presence flags) and are written after request validation, never the caller's keys, predicates, tokens or field masks. TLS is configured through `plugins.api.utxorpc.config.tls`; the legacy process-level `tlsCertFilePath`/`tlsKeyFilePath` fields remain a supported, UTxO RPC-only default for that TLS policy.
+A gRPC server implementing the UTxO RPC specification with query, submit, sync, and watch services. The same listener exposes both the `utxorpc.v1alpha` and `utxorpc.v1beta` service namespaces. Every method other than v1beta's additional `QueryService.ReadState` is wire-compatible across the two, so the beta routes rewrite the service path onto the alpha handlers; `ReadState` is served by `betaQueryServiceServer` (`api/utxorpc/readstate.go`) instead. It answers the one Cardano state query v1beta defines, `GetStakePoolDistribution`, from `ledger.LedgerState.PoolStakeDistribution` — the same read that backs the node-to-client `GetPoolDistr2` query. The `ledger_tip` it reports is the tip that read took inside its own transaction, carried back on the result, rather than one sampled while building the reply: the two can straddle an epoch boundary, and a later tip would name an epoch whose stake snapshot is not the one the reply carries. Its `height` comes from that same carried tip's block number rather than from a separate lookup of the tip's stored block, as it does for every tip this listener reports (`ReadTip` already did; `ReadParams`, `ReadUtxos`, `SearchUtxos`, `ReadData`, `ReadTx`, and `ReadState` were brought in line): the height is already known at the point the slot and hash are, and `height` is a plain proto3 `uint64` with no encoding for "unknown", so a zero — whether from a failed lookup or from never populating the field — asserts that the tip is the origin block rather than admitting the height could not be read. Chain points that name something other than a tip, such as the `block_ref` on a returned transaction, still come from that block's own stored model. `LedgerState` is an optional dependency that `Utxorpc.Start` admits as an untyped nil, so the handler checks it per request and reports `Unavailable` rather than panicking. The `pool_keyhashes` filter is capped by `MaxPoolFilter` (default 1000), like the `ReadUtxos` and `ReadData` key lists, since it sizes the snapshot and registration reads it drives; asking for every pool is an empty filter and one bulk read. An empty `pool_keyhashes` means every pool, per the proto; a filter entry that is not 28 bytes is rejected as `InvalidArgument` rather than padded or truncated into a different pool. Because the protobuf `RationalNumber` is an int32 over a uint32, a stake fraction whose exact ratio does not fit — the normal case on a real network, where the denominator is total active stake in lovelace — is rescaled onto a fixed denominator of 1e9 rather than failing. `newServeMux` is the single wiring site for the routing table, and one service-name list (`servedServiceNames`) feeds the `grpc_health_v1` checker and both reflection wire versions, so `grpc.reflection.v1` and `grpc.reflection.v1alpha` clients discover the same services — v1alpha is an older reflection protocol, not an older API surface. Unary handlers whose cost scales with the result or that decode stored blocks (`ReadUtxos`, `SearchUtxos`, `ReadData`, `ReadTx`, `ReadState`, `FetchBlock`, `DumpHistory`, `ReadMempool`) share a non-blocking concurrency budget (`MaxConcurrentBulkRequests`, default 32): a request that finds every slot held is refused with `ResourceExhausted` rather than queued behind retained responses. A request takes its slot only after its parameters validate, so a rejected request never contends with valid ones, and keeps it until Connect has finished writing the response or `BulkResponseWriteTimeout` has cut the write off (`holdBulkSlotsUntilWritten` wraps the query, submit and sync routes), because a response is serialized and written after the handler returns and a slow reader would otherwise pin it with its slot already free. All but `DumpHistory`, which has its own `MaxHistoryBytes` cap described below, have a response byte budget (`MaxResponseBytes`, default 16 MiB). Item-oriented responses keep the first item so cursor-based operations can make progress; `ReadState` has no cursor and rejects an oversized response. `SearchUtxos` passes the request context, candidate-row cap, and response-byte cap into its database page scan, so cancellation and limits stop CBOR hydration before a full page is retained; a bounded page returns a resumption token. `ReadState` applies the same bulk admission and server/write deadlines, and rejects a pool response that exceeds the byte cap with `ResourceExhausted`, as `ReadUtxos`, `ReadData` and `FetchBlock` do, since none of them has a cursor. `ReadData` looks each distinct datum hash up once, in first-seen order, so repeated hashes in a request yield one value, and resolves them through `LedgerState.Datums` / `Database.GetDatums`: one metadata read transaction per request, bound to the request context and checked before each lookup, so a cancelled caller stops the batch instead of opening a transaction per hash. `ReadUtxos` resolves exactly the requested (tx hash, output index) references and loads their CBOR through `LedgerState.UtxosByRefsBounded` / `Database.UtxosByRefsBounded`, which counts bytes as each output is read and stops with `ErrUtxoBytesExceeded` (mapped to `ResourceExhausted`) once the running total passes `MaxResponseBytes`, so a request holds at most the limit plus one output rather than every requested output before the budget check; it also observes the request context. `ReadMempool` has no cursor in the pinned spec, so it returns a prefix of the mempool snapshot in the mempool's own order, capped at `MaxMempoolItems` (default 1000) transactions and the byte budget, and the response does not say whether it was truncated. `Mempool.TransactionsBounded` walks and copies only that prefix, transaction headers and CBOR alike, so the read costs in proportion to the result and not the pool. Request logs carry fixed-size metadata (counts and presence flags) and are written after request validation, never the caller's keys, predicates, tokens or field masks. TLS is configured through `plugins.api.utxorpc.config.tls`; the legacy process-level `tlsCertFilePath`/`tlsKeyFilePath` fields remain a supported, UTxO RPC-only default for that TLS policy.
 
 For `ReadState`, the response byte budget also determines a pool-count ceiling
 passed into the ledger snapshot read. The unfiltered read applies that ceiling
@@ -12722,7 +12777,9 @@ as an ordered SQL limit before materializing the distribution; final protobuf
 sizing still rejects responses whose variable fields cross the byte budget.
 
 `ReadTx` rejects hashes that are not exactly 32 bytes before database access and
-uses a constant-size not-found error. Its transaction lookup uses the ledger
+uses a constant-size not-found error. A valid hash then takes a bulk slot before
+any lookup, because answering it loads and decodes the whole containing block
+for a caller-chosen hash. Its transaction lookup uses the ledger
 transaction view, so a Dijkstra certifying ranking block returns its certified
 endorser-block transaction body rather than searching only the empty ranking
 block body. `WatchTx` uses the same view for forward applies and rollback

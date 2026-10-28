@@ -48,10 +48,16 @@ type MeshLedgerState interface {
 	GetCurrentPParamsForReporting() lcommon.ProtocolParameters
 	SlotToTime(slot uint64) (time.Time, error)
 	UtxosByAddress(addrs []lcommon.Address) ([]models.Utxo, error)
-	UtxosByAddressComplete(
+	// ScanUtxosByAddress visits every UTxO matching q's exact address
+	// patterns in bounded pages from one snapshot and returns the tip stored
+	// in that snapshot, as ledger.LedgerState.ScanUtxosByAddress does.
+	ScanUtxosByAddress(
 		ctx context.Context,
-		addrs []lcommon.Address,
-	) ([]models.Utxo, error)
+		q *models.UtxoWithOrderingQuery,
+		maxCandidates int,
+		maxBytes int64,
+		visit func([]models.UtxoWithOrdering) error,
+	) (ochainsync.Tip, error)
 	// UtxoBalanceByAddressAtSlot aggregates balances for outputs held at a
 	// historical point without materializing the matching UTxOs.
 	UtxoBalanceByAddressAtSlot(

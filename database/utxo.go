@@ -20,7 +20,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"math"
 	"slices"
 	"sync/atomic"
 	"time"
@@ -927,17 +926,6 @@ func (d *Database) UtxosByAddress(
 		return nil, err
 	}
 	return filterUtxosByAddressPatterns(ctx, utxos, patterns)
-}
-
-// UtxosByAddressComplete returns every live UTxO belonging to any requested
-// address. It applies no row limit; callers must provide their own admission
-// control when exposing this query to untrusted clients.
-func (d *Database) UtxosByAddressComplete(
-	ctx context.Context,
-	addrs []ledger.Address,
-	txn *Txn,
-) ([]models.Utxo, error) {
-	return d.UtxosByAddress(ctx, addrs, math.MaxInt, txn)
 }
 
 // UtxosByAddressAsOf is UtxosByAddress as the outputs stood at atSlot (see

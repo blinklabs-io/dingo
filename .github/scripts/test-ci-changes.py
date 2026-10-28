@@ -16,6 +16,11 @@ class CIChangesTest(unittest.TestCase):
         cases = [
             ("readme", {"README.md": "new"}, "pull_request", False),
             ("nested docs", {"docs/guide/setup.md": "new"}, "pull_request", False),
+            ("dashboard", {"docs/dashboards/mempool.json": "new"}, "pull_request", False),
+            ("docs diagram", {"docs/mcp/architecture.svg": "new"}, "pull_request", False),
+            ("queue docs", {"docs/dashboards/mempool.json": "new"}, "merge_group", False),
+            ("queue go", {"node.go": "new"}, "merge_group", True),
+            ("queue mixed", {"docs/dashboards/mempool.json": "new", "node.go": "new"}, "merge_group", True),
             ("go", {"node.go": "new"}, "pull_request", True),
             ("package docs", {"doc.go": "new"}, "pull_request", True),
             ("mixed", {"README.md": "new", "node.go": "new"}, "pull_request", True),

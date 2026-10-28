@@ -201,6 +201,20 @@ func (n *Node) chainsyncAwaitEagerness(
 	)
 }
 
+// chainsyncAwaitCatchUpBand pauses a connection whose next header overshoots the
+// catch-up band because the ledger lags. With no chain selector wired it never
+// waits.
+func (n *Node) chainsyncAwaitCatchUpBand(
+	ctx context.Context,
+	connId ouroboros.ConnectionId,
+	observedTip ochainsync.Tip,
+) error {
+	if n.chainSelector == nil {
+		return nil
+	}
+	return n.chainSelector.AwaitCatchUpBand(ctx, connId, observedTip)
+}
+
 // chainsyncHasBestPeer reports whether chain selection has a best peer.
 func (n *Node) chainsyncHasBestPeer() bool {
 	return n.chainSelector != nil && n.chainSelector.GetBestPeer() != nil

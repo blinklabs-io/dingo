@@ -823,6 +823,11 @@ func (s *queryServiceServer) ReadTx(
 		"Got a ReadTx request",
 		"hash_bytes", len(hash),
 	)
+	release, err := s.utxorpc.acquireBulk(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 
 	// Resolve the transaction metadata to find it's containing block.
 	txRecord, err := s.utxorpc.config.LedgerState.TransactionByHash(ctx, hash)
