@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -241,4 +242,147 @@ func TestAwaitCatchUpBandRecordsNothingAndLeavesVerdictUnchanged(t *testing.T) {
 		cs.PreparePeerTipAdmissionDisposition(bandUpdate(block)),
 		"a lone far frontier is still not adopted once the wait ends")
 	require.Nil(t, cs.GetPeerTip(conn))
+}
+
+// Every frontier the admission path rejects outright, rather than holding as a
+// pending far claim, is one the wait parks, both for a new connection bounded
+// by another peer's frontier and for a known connection bounded by its own. A
+// rejection the wait does not cover closes the connection as before.
+func TestCatchUpBandHoldCoversEveryRejection(t *testing.T) {
+	t.Parallel()
+
+	conn := newTestConnectionId(2)
+	knownPeer := func(t *testing.T, frontier uint64) *ChainSelector {
+		t.Helper()
+		cs := NewChainSelector(ChainSelectorConfig{
+			SecurityParam:             bandK,
+			DisableEventSubscriptions: true,
+		})
+		cs.SetLocalTip(bandChain().tip(bandLocal))
+		require.True(t, cs.UpdatePeerTip(conn, bandChain().tip(frontier), nil))
+		return cs
+	}
+	setups := map[string]func(*testing.T, uint64) *ChainSelector{
+		"new connection": func(t *testing.T, reference uint64) *ChainSelector {
+			return newBandSelector(t, reference, nil)
+		},
+		"known connection": knownPeer,
+	}
+	for name, setup := range setups {
+		for reference := uint64(bandLocal - 2); reference <= bandLocal+3*bandK; reference++ {
+			for observed := reference + 1; observed <= bandLocal+4*bandK; observed++ {
+				t.Run(fmt.Sprintf("%s/ref=%d/observed=%d", name, reference, observed), func(t *testing.T) {
+					t.Parallel()
+
+					update := bandUpdate(observed)
+					update.ConnectionId = conn
+					rejected := setup(t, reference).
+						PreparePeerTipAdmissionDisposition(update) ==
+						PeerTipUpdateRejected
+					cs := setup(t, reference)
+					cs.mutex.RLock()
+					defer cs.mutex.RUnlock()
+					held := cs.catchUpBandHoldLocked(
+						conn,
+						bandChain().tip(observed),
+						bandChain().tip(bandLocal),
+						false,
+					)
+					if rejected {
+						require.True(t, held,
+							"a rejected frontier must be parked, not disconnected")
+					}
+				})
+			}
+		}
+	}
+}
+
+// bandReferencePeer returns the connection newBandSelector registered as the
+// reference.
+func bandReferencePeer(t *testing.T, cs *ChainSelector) ouroboros.ConnectionId {
+	t.Helper()
+	peers := cs.GetAllPeerTips()
+	require.Len(t, peers, 1)
+	for connId := range peers {
+		return connId
+	}
+	return ouroboros.ConnectionId{}
+}
+
+// A parked connection is released, not stranded, when the peer it is bounded
+// against goes away.
+func TestAwaitCatchUpBandReleasesWhenReferencePeerLeaves(t *testing.T) {
+	t.Parallel()
+
+	cs := newBandSelector(t, bandLocal+2, nil)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	done := awaitBand(cs, ctx, newTestConnectionId(2), bandLocal+2*bandK+4)
+	testutil.RequireNoReceive(t, done, 250*time.Millisecond,
+		"the connection must be parked before its reference leaves")
+	cs.RemovePeer(bandReferencePeer(t, cs))
+	require.NoError(t, testutil.RequireReceive(t, done, 5*time.Second,
+		"the wait must re-derive the reference and release"))
+}
+
+// A rollback on the reference connection while another connection is parked
+// moves the reference below the local tip. The parked connection stays parked
+// until its header is admissible from the new reference, and is then accepted.
+func TestAwaitCatchUpBandHeldAcrossReferenceRollback(t *testing.T) {
+	t.Parallel()
+
+	var applied atomic.Uint64
+	applied.Store(bandLocal)
+	cs := newBandSelector(t, bandLocal+2, &applied)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	const block = bandLocal + 2*bandK + 4
+	done := awaitBand(cs, ctx, newTestConnectionId(2), block)
+	testutil.RequireNoReceive(t, done, 250*time.Millisecond,
+		"the connection must be parked before the rollback")
+
+	rollback := bandChain().tip(bandLocal - 2)
+	cs.HandlePeerRollbackEvent(event.Event{Data: PeerRollbackEvent{
+		ConnectionId: bandReferencePeer(t, cs),
+		Point:        rollback.Point,
+		Tip:          rollback,
+	}})
+	testutil.RequireNoReceive(t, done, 350*time.Millisecond,
+		"a header past localTip+2K must stay parked after the rollback")
+
+	applied.Store(block - 2*bandK)
+	require.NoError(t, testutil.RequireReceive(t, done, 10*time.Second,
+		"the wait must end once the header is admissible"))
+	require.Equal(t, PeerTipUpdateAccepted,
+		cs.PreparePeerTipAdmissionDisposition(bandUpdate(block)),
+		"the released header must meet the ordinary bound")
+}
+
+// A local rollback while a connection is parked moves its reference past the
+// band. The connection stays parked until the header is within the catch-up
+// bound that then applies, and is then accepted.
+func TestAwaitCatchUpBandHeldAcrossLocalRollback(t *testing.T) {
+	t.Parallel()
+
+	var applied atomic.Uint64
+	applied.Store(bandLocal)
+	cs := newBandSelector(t, bandLocal+2, &applied)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	const block = bandLocal + 2*bandK + 4
+	done := awaitBand(cs, ctx, newTestConnectionId(2), block)
+	testutil.RequireNoReceive(t, done, 250*time.Millisecond,
+		"the connection must be parked before the local rollback")
+
+	applied.Store(bandLocal - bandK - 1)
+	testutil.RequireNoReceive(t, done, 350*time.Millisecond,
+		"a header past the catch-up bound must stay parked after a local rollback")
+
+	applied.Store(block - 2*bandK)
+	require.NoError(t, testutil.RequireReceive(t, done, 10*time.Second,
+		"the wait must end once the header is admissible"))
+	require.Equal(t, PeerTipUpdateAccepted,
+		cs.PreparePeerTipAdmissionDisposition(bandUpdate(block)),
+		"the released header must meet the ordinary bound")
 }
