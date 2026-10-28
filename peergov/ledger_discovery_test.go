@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"net"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -359,9 +360,16 @@ func TestLoadPeerSnapshotSeedsLedgerPeers(t *testing.T) {
 		require.NotNil(t, peer)
 		assert.Equal(t, PeerSource(PeerSourceP2PLedger), peer.Source)
 		assert.Equal(t, PeerStateCold, peer.State)
+		assert.NotEmpty(t, peer.CorroborationIdentity)
 		_, known := pg.ledgerKnownAddrs[peer.NormalizedAddress]
 		assert.True(t, known)
 	}
+	assert.Equal(
+		t,
+		pg.peers[0].CorroborationIdentity,
+		pg.peers[1].CorroborationIdentity,
+		"relays in one snapshot pool share one control identity",
+	)
 }
 
 func TestLoadPeerSnapshotConvertsRelayShapes(t *testing.T) {
@@ -381,6 +389,7 @@ func TestLoadPeerSnapshotConvertsRelayShapes(t *testing.T) {
 	relays := PoolRelaysFromPeerSnapshot(snapshot)
 
 	require.Len(t, relays, 4)
+	require.NotEmpty(t, relays[0].ControlIdentity)
 	assert.Equal(t, "relay.example.com", relays[0].Hostname)
 	assert.Equal(t, uint(3002), relays[0].Port)
 	assert.False(t, relays[0].IsMultiHost)
@@ -394,6 +403,80 @@ func TestLoadPeerSnapshotConvertsRelayShapes(t *testing.T) {
 	require.NotNil(t, relays[3].IPv6)
 	assert.Equal(t, "2001:db8::1", relays[3].IPv6.String())
 	assert.Equal(t, uint(3004), relays[3].Port)
+	for _, relay := range relays[1:] {
+		assert.Equal(t, relays[0].ControlIdentity, relay.ControlIdentity)
+	}
+}
+
+func TestPoolRelaysFromPeerSnapshotSeparatesPoolControl(t *testing.T) {
+	snapshot := &topology.PeerSnapshotConfig{
+		Point: topology.PeerSnapshotPoint{BlockPointHash: strings.Repeat("a", 64)},
+		BigLedgerPools: []topology.PeerSnapshotLedgerPool{
+			{Relays: []topology.TopologyConfigP2PAccessPoint{{
+				Address: "44.0.0.1", Port: 3001,
+			}}},
+			{Relays: []topology.TopologyConfigP2PAccessPoint{{
+				Address: "45.0.0.1", Port: 3001,
+			}}},
+		},
+	}
+
+	relays := PoolRelaysFromPeerSnapshot(snapshot)
+	require.Len(t, relays, 2)
+	require.NotEmpty(t, relays[0].ControlIdentity)
+	require.NotEmpty(t, relays[1].ControlIdentity)
+	assert.NotEqual(t, relays[0].ControlIdentity, relays[1].ControlIdentity)
+}
+
+func TestLedgerRelayControlIdentityFailsClosedOnAmbiguousEndpoint(t *testing.T) {
+	pg := discardGovernor()
+	ip := net.ParseIP("44.0.0.1")
+	identities := pg.ledgerRelayCorroborationIdentities([]PoolRelay{
+		{IPv4: &ip, Port: 3001, PoolKeyHash: bytes.Repeat([]byte{0x11}, 28)},
+		{IPv4: &ip, Port: 3001, PoolKeyHash: bytes.Repeat([]byte{0x22}, 28)},
+	})
+
+	assert.Empty(t, identities["44.0.0.1:3001"])
+}
+
+func TestLedgerReconciliationRefreshesControlIdentity(t *testing.T) {
+	pg := discardGovernor()
+	relayAddress := "44.0.0.1:3001"
+	pg.peers = []*Peer{{
+		Address:               relayAddress,
+		NormalizedAddress:     relayAddress,
+		Source:                PeerSourceP2PLedger,
+		CorroborationIdentity: "pool:stale",
+	}}
+	pg.ledgerKnownAddrs[relayAddress] = relayAddress
+	ip := net.ParseIP("44.0.0.1")
+	relay := PoolRelay{
+		IPv4:        &ip,
+		Port:        3001,
+		PoolKeyHash: bytes.Repeat([]byte{0x33}, 28),
+	}
+
+	pg.reconcileLedgerKnownAddrs(relay.Addresses())
+	pg.reconcileLedgerCorroborationIdentities(
+		pg.ledgerRelayCorroborationIdentities([]PoolRelay{relay}),
+	)
+	require.Equal(
+		t,
+		poolCorroborationIdentity(relay.PoolKeyHash),
+		pg.peers[0].CorroborationIdentity,
+	)
+
+	otherIP := net.ParseIP("45.0.0.1")
+	other := PoolRelay{
+		IPv4:        &otherIP,
+		Port:        3001,
+		PoolKeyHash: bytes.Repeat([]byte{0x44}, 28),
+	}
+	pg.reconcileLedgerKnownAddrs(other.Addresses())
+	pg.reconcileLedgerCorroborationIdentities(
+		pg.ledgerRelayCorroborationIdentities([]PoolRelay{other}),
+	)
+	assert.Empty(t, pg.peers[0].CorroborationIdentity)
 }
 
 func TestDiscoverLedgerPeers_BoundedByTarget(t *testing.T) {

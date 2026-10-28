@@ -932,7 +932,9 @@ func TestPeerGovernor_TouchPeerByConnId(t *testing.T) {
 	assert.True(t, peers[0].LastActivity.After(oldActivity))
 }
 
-func TestPeerGovernor_CorroborationIdentityByConnId(t *testing.T) {
+func TestPeerGovernor_CorroborationIdentityFailsClosedWithoutEvidence(
+	t *testing.T,
+) {
 	t.Parallel()
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -955,17 +957,74 @@ func TestPeerGovernor_CorroborationIdentityByConnId(t *testing.T) {
 	pg.peers[1].Connection = &PeerConnection{Id: second, IsClient: true}
 	pg.mu.Unlock()
 
-	assert.Equal(t, "ipv4:44.0.0.0/24", pg.CorroborationIdentityByConnId(first))
-	assert.Equal(
-		t,
-		pg.CorroborationIdentityByConnId(first),
-		pg.CorroborationIdentityByConnId(second),
-		"addresses in one /24 are one diversity group",
-	)
+	assert.Empty(t, pg.CorroborationIdentityByConnId(first))
+	assert.Empty(t, pg.CorroborationIdentityByConnId(second))
 	assert.Empty(t, pg.CorroborationIdentityByConnId(connFor("45.0.0.1:3001")))
 }
 
-func TestPeerGovernor_CorroborationIdentityIgnoresGroup(t *testing.T) {
+func TestPeerGovernor_CorroborationIdentityUsesPoolControlKey(t *testing.T) {
+	t.Parallel()
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		LedgerPeerTarget: 2,
+	})
+	ipv4 := net.ParseIP("44.0.0.1")
+	ipv6 := net.ParseIP("2001:4860::1")
+	poolKeyHash := bytes.Repeat([]byte{0x5a}, 28)
+	require.Equal(t, 2, pg.addLedgerRelaysContext(t.Context(), []PoolRelay{{
+		IPv4:        &ipv4,
+		IPv6:        &ipv6,
+		Port:        3001,
+		PoolKeyHash: poolKeyHash,
+	}}, 0))
+
+	localAddr, err := net.ResolveTCPAddr("tcp", "127.0.0.1:6000")
+	require.NoError(t, err)
+	connections := make([]ouroboros.ConnectionId, 0, 2)
+	pg.mu.Lock()
+	require.Len(t, pg.peers, 2)
+	for _, peer := range pg.peers {
+		remoteAddr, resolveErr := net.ResolveTCPAddr("tcp", peer.Address)
+		require.NoError(t, resolveErr)
+		connID := ouroboros.ConnectionId{
+			LocalAddr:  localAddr,
+			RemoteAddr: remoteAddr,
+		}
+		peer.Connection = &PeerConnection{Id: connID, IsClient: true}
+		connections = append(connections, connID)
+	}
+	pg.mu.Unlock()
+
+	firstIdentity := pg.CorroborationIdentityByConnId(connections[0])
+	require.NotEmpty(t, firstIdentity, "a ledger control key establishes identity")
+	assert.Equal(
+		t,
+		firstIdentity,
+		pg.CorroborationIdentityByConnId(connections[1]),
+		"IPv4 and IPv6 relays registered by one control key count once",
+	)
+
+	require.NoError(t, pg.AddPeer("45.0.0.1:3001", PeerSourceP2PGossip))
+	gossipRemote, err := net.ResolveTCPAddr("tcp", "45.0.0.1:3001")
+	require.NoError(t, err)
+	gossipConn := ouroboros.ConnectionId{
+		LocalAddr:  localAddr,
+		RemoteAddr: gossipRemote,
+	}
+	pg.mu.Lock()
+	pg.peers[len(pg.peers)-1].Connection = &PeerConnection{
+		Id:       gossipConn,
+		IsClient: true,
+	}
+	pg.mu.Unlock()
+	assert.Empty(
+		t,
+		pg.CorroborationIdentityByConnId(gossipConn),
+		"peer sharing does not prove independent control",
+	)
+}
+
+func TestPeerGovernor_TopologyGroupDoesNotEstablishControl(t *testing.T) {
 	t.Parallel()
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -1005,26 +1064,17 @@ func TestPeerGovernor_CorroborationIdentityIgnoresGroup(t *testing.T) {
 	}
 	pg.mu.Unlock()
 
-	assert.Equal(
-		t,
-		"ipv4:44.0.0.0/24",
-		pg.CorroborationIdentityByConnId(conns["44.0.0.1:3001"]),
-	)
-	assert.Equal(
-		t,
-		pg.CorroborationIdentityByConnId(conns["44.0.0.1:3001"]),
-		pg.CorroborationIdentityByConnId(conns["44.0.0.9:3001"]),
-		"addresses in one /24 stay one identity inside a group",
-	)
-	assert.NotEqual(
-		t,
-		pg.CorroborationIdentityByConnId(conns["44.0.0.1:3001"]),
-		pg.CorroborationIdentityByConnId(conns["45.0.0.1:3001"]),
-		"a valency group must not merge independent hosts into one identity",
-	)
+	for address, connID := range conns {
+		assert.Emptyf(
+			t,
+			pg.CorroborationIdentityByConnId(connID),
+			"topology group for %s does not prove common or independent control",
+			address,
+		)
+	}
 }
 
-func TestPeerGovernor_CorroborationIdentityUsesConnectedAddress(t *testing.T) {
+func TestPeerGovernor_ConnectedAddressDoesNotEstablishControl(t *testing.T) {
 	t.Parallel()
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -1044,11 +1094,10 @@ func TestPeerGovernor_CorroborationIdentityUsesConnectedAddress(t *testing.T) {
 	pg.peers[0].Connection = &PeerConnection{Id: conn, IsClient: true}
 	pg.mu.Unlock()
 
-	assert.Equal(
+	assert.Empty(
 		t,
-		"ipv4:45.0.0.0/24",
 		pg.CorroborationIdentityByConnId(conn),
-		"identity follows the address the connection uses",
+		"a connected address alone does not prove independent control",
 	)
 }
 
