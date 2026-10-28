@@ -354,9 +354,11 @@ func (o *Ouroboros) markDeferredHeaderRecovery(
 	// A peer whose tip is below the applied tip serves a chain that cannot be
 	// selected, so verifying its headers later cannot change anything, and a
 	// re-intersection only replays them on a new connection that this bound
-	// does not cover. Withhold the header and park nothing.
+	// does not cover. Withhold the header and park nothing. A recovery already
+	// parked is left alone: a late rejection of an older header carries that
+	// header's tip, and the next applied block drops the recovery if the peer
+	// has really fallen behind.
 	if o.peerTipBelowLocalTip(tip) {
-		o.clearDeferredHeaderRecovery(connId)
 		o.config.Logger.Debug(
 			"chainsync: withholding deferred header from peer behind the local tip",
 			"component", "ouroboros",

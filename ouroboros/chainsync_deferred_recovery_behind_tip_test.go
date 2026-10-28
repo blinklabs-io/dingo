@@ -21,6 +21,7 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
@@ -125,4 +126,44 @@ func TestDeferredHeaderRecoveryDropsParkedPeerBehindLocalTip(t *testing.T) {
 		"a parked peer now below the local tip must not be re-intersected",
 	)
 	require.NotContains(t, f.o.deferredHeaderRecovery, f.conn)
+}
+
+// A late ledger rejection of an older header carries the tip from when that
+// header arrived, which can be below the local tip by now. It must not drop
+// the recovery parked for the peer's newer withheld header.
+func TestDeferredHeaderRecoveryKeepsParkedRecoveryOnStaleRejection(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	f := newDeferredHeaderRecoveryFixture(t, "127.0.0.1:6082")
+	f.o.chainsyncLocalTipBlock = func() (uint64, uint64) {
+		return 2, 2160
+	}
+	f.deferHeader(t, 0xef, 0x01, 200, 2)
+	older := ocommon.NewPoint(190, []byte("older"))
+	f.o.markDeferredHeaderRecovery(
+		f.conn,
+		f.o.ledgerState.Tip(),
+		older,
+		ochainsync.Tip{Point: older, BlockNumber: 1},
+		true,
+	)
+	require.Contains(
+		t,
+		f.o.deferredHeaderRecovery,
+		f.conn,
+		"a stale rejection must not drop the newer parked recovery",
+	)
+
+	f.applyElsewhere(ocommon.NewPoint(300, []byte("applied-1")))
+	resync := testutil.RequireReceive(
+		t,
+		f.resyncCh,
+		testutil.AsyncWait,
+		"the parked recovery must still re-intersect the peer",
+	)
+	data, ok := resync.Data.(event.ChainsyncResyncEvent)
+	require.True(t, ok)
+	require.Equal(t, f.conn, data.ConnectionId)
 }
