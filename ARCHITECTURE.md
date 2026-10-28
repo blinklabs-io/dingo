@@ -4467,6 +4467,13 @@ fetch guard with an atomic compare-and-swap before starting a worker. Concurrent
 callbacks sharing that guard cannot exceed its admission bound; worker
 completion releases the slot. The guard also serializes protocol requests.
 
+Transaction fetches bound each requested bitmap by both its window count and
+the encoded reply byte limit. Verified manifest sizes determine the selected
+prefix, including conservative tag-24, byte-string and message framing costs.
+The next request resumes at the first missing transaction, even within a
+partially requested bitmap window. A transaction that cannot fit alone fails
+explicitly; the client never raises the protocol ingress limit to admit it.
+
 Configured LeiosFetch vote serving accepts at most 1,000 requested IDs per
 request, including duplicate and unknown IDs. Larger requests fail before
 dispatch to the vote manager, bounding lookup and response-cloning work under

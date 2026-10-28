@@ -1989,9 +1989,10 @@ func (o *Ouroboros) fetchLeiosEbTxsBatchedUntil(
 	deadline time.Time,
 ) ([]cbor.RawMessage, error) {
 	var validate func(int, cbor.RawMessage) error
+	var references []lcommon.LeiosTransactionReference
 	if len(manifestRaw) > 0 {
 		var err error
-		validate, err = leiosEndorserBlockTxValidator(manifestRaw, txCount)
+		validate, references, err = leiosEndorserBlockTxValidator(manifestRaw, txCount)
 		if err != nil {
 			return nil, err
 		}
@@ -2002,6 +2003,7 @@ func (o *Ouroboros) fetchLeiosEbTxsBatchedUntil(
 		point,
 		txCount,
 		deadline,
+		references,
 		validate,
 	)
 }
@@ -2012,6 +2014,7 @@ func (o *Ouroboros) fetchLeiosEbTxsBatchedUntilWithValidator(
 	point ocommon.Point,
 	txCount int,
 	deadline time.Time,
+	references []lcommon.LeiosTransactionReference,
 	validate func(int, cbor.RawMessage) error,
 ) ([]cbor.RawMessage, error) {
 	if ctx == nil {
@@ -2063,6 +2066,13 @@ func (o *Ouroboros) fetchLeiosEbTxsBatchedUntilWithValidator(
 			txCount,
 			leiosTxFetchWindowsPerRequest,
 		)
+		if len(references) > 0 {
+			var err error
+			needed, err = leiosBoundFetchReply(needed, references)
+			if err != nil {
+				return leiosCollectTxs(result), err
+			}
+		}
 		if len(needed) == 0 {
 			break // every transaction fetched
 		}
@@ -2175,6 +2185,35 @@ func leiosNeededBitmap(
 		}
 	}
 	return bitmap
+}
+
+// Manifest sizes cover the block_transaction bytes, but the reply wraps each
+// transaction in tag 24 and a byte string. Reserve the largest CBOR headers
+// so the selected prefix fits the protocol ingress limit even at size boundaries.
+func leiosBoundFetchReply(
+	needed map[uint16]uint64,
+	references []lcommon.LeiosTransactionReference,
+) (map[uint16]uint64, error) {
+	const envelopeBytes = 16
+	const transactionWrapperBytes = 11
+	remaining := uint64(leiosfetch.MaxBlockTxsMessageBytes - envelopeBytes)
+	selected := make(map[uint16]uint64)
+	for _, index := range leiosBitmapTxIndices(needed) {
+		if index >= len(references) {
+			return nil, fmt.Errorf("leios-fetch transaction index %d exceeds manifest", index)
+		}
+		cost := uint64(references[index].TransactionSize) + transactionWrapperBytes
+		if cost > remaining {
+			if len(selected) == 0 {
+				return nil, fmt.Errorf("leios-fetch transaction %d cannot fit the reply byte limit", index)
+			}
+			break
+		}
+		remaining -= cost
+		window := uint16(index / leiosTxFetchWindowSize) // #nosec G115 -- index came from a uint16 bitmap window
+		selected[window] |= uint64(1) << uint(63-index%leiosTxFetchWindowSize)
+	}
+	return selected, nil
 }
 
 // leiosWindowNeededMask returns the bitmap of transaction indices in 64-tx
