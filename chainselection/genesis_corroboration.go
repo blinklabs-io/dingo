@@ -142,13 +142,11 @@ func (cs *ChainSelector) peerCanCorroborateLocked(
 // corroboratorIdentity returns the independence group used to de-duplicate
 // corroboration witnesses, and whether the connection could be placed in one.
 // With a PeerIdentity hook configured the group is the one it reports, which
-// the node backs with peer governance's diversity group, so one operator's
-// several addresses count once. A connection the hook cannot place has no
-// identity: keying it by remote host instead would put it in a different
-// namespace from its siblings, so an untracked connection and its tracked
-// siblings would count as independent of each other. Without a hook,
-// witnesses are grouped by remote host. Either is a lower bound on
-// independence, not a guarantee.
+// the node backs with ledger or snapshot control metadata, so several relay
+// addresses under one control key count once. A connection the hook cannot
+// place has no identity: address or topology diversity alone does not prove
+// independent control. Without a hook, witnesses are grouped by remote host.
+// Either is a lower bound on independence, not a guarantee.
 func (cs *ChainSelector) corroboratorIdentity(
 	connId ouroboros.ConnectionId,
 ) (string, bool) {

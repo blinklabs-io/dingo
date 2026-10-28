@@ -198,9 +198,9 @@ type ChainSelectorConfig struct {
 	// corroboration (density-only Genesis selection, the historical default).
 	MinCorroboratingPeers int
 	ConnectionLive        func(ouroboros.ConnectionId) bool
-	// PeerIdentity maps a connection to the independence group used to
-	// de-duplicate corroborating witnesses (peer governance's diversity
-	// group). A connection for which it returns "" has no identity and
+	// PeerIdentity maps a connection to a control identity used to
+	// de-duplicate corroborating witnesses. A connection for which it returns
+	// "" has no trustworthy independence evidence and
 	// fails closed in corroboration: it is not corroborated as a candidate
 	// and does not count as a witness. A nil hook groups by remote host.
 	PeerIdentity       func(ouroboros.ConnectionId) string

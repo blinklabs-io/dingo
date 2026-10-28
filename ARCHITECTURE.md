@@ -6459,29 +6459,23 @@ Ordinary Praos sessions continue to use primary-chain intersection points.
   number is unknown (zero), so it cannot vouch for the candidate's height.
 - Witnesses are counted by distinct **peer identity**, and a witness with the
   candidate's own identity is excluded, so several connections from one operator
-  cannot self-corroborate a private fork. The identity is peer governance's
-  address group (`PeerGovernor.CorroborationIdentityByConnId`, wired through
-  `ChainSelectorConfig.PeerIdentity`): the /24 (IPv4) or /64 (IPv6) prefix
-  of the address the connection uses, else the host name. A hostname peer's
-  recorded address is the first one DNS returned when it was added, which a
-  later dial need not use, so it is only a fallback. It is never the topology
-  group ID. A local-root group is
-  a valency target that can hold several operators' relays; counting it as
-  one identity left roots in a single group unable to corroborate each other,
-  so a node restarted in Genesis selection with only such roots eligible never
-  left it. The address group also gives a relay one identity whether it is a
-  root or a ledger peer. Hot-promotion diversity still uses the topology group
-  ID. A connection the hook
-  cannot place, such as an inbound connection peer governance rejected and is
-  closing at its peer-list cap, has no identity and fails closed: as a candidate
-  it has no corroborators, and as a witness it does not count. Keying it by
-  remote host instead would put it in a different namespace from its tracked
-  siblings, so one operator could corroborate itself. Without a hook the
-  selector groups by remote host. This is a lower bound on independence, not a
-  guarantee: genuine independence (distinct operators, ASNs, and chain views)
-  depends on the operator's validated topology. Raising `corroborationPeers`
-  raises the *count* required, not the independence of the peers supplied —
-  that remains an operator responsibility.
+  cannot self-corroborate a private fork. Peer governance supplies the identity
+  through `PeerGovernor.CorroborationIdentityByConnId`, wired to
+  `ChainSelectorConfig.PeerIdentity`. Live ledger peers use the pool control key
+  that registered the relay. Snapshot peers use the snapshot's existing pool
+  grouping, so its IPv4, IPv6, and hostname relays share one identity before the
+  live ledger is available. A topology peer that is also matched to a ledger
+  relay retains that ledger control identity, including when an inbound duplex
+  connection reuses the peer entry. Topology valency groups, peer-sharing
+  addresses, unmatched inbound connections, and network prefixes do not prove
+  independent control and therefore supply no corroboration identity. A relay
+  endpoint registered under conflicting control keys is also untrusted. These
+  connections fail closed: as candidates they have no corroborators, and as
+  witnesses they do not count. Without a hook the selector groups by remote
+  host. Pool control is a lower bound on operator independence; multiple pool
+  keys can still share an operator. Raising `corroborationPeers` raises the
+  count required, while the trusted ledger or snapshot source establishes the
+  available control groups.
 - **Candidate exclusion uses a trusted frontier, whatever the threshold.** In
   Genesis mode the "behind the best known tip" filter
   (`bestKnownBlockNumber`) takes its frontier only from a live, eligible,
