@@ -69,8 +69,9 @@ type ledgerCache struct {
 }
 
 // peerManager keeps a Stack's outbound connections: its local roots up to
-// their valency, then as many public-root and ledger peers as bring the peer
-// count to MinPeers, never beyond MaxPeers. It is independent of Cardano peer
+// their valency, then as many public-root and ledger peers as bring the
+// outbound count to MinPeers, never beyond MaxPeers in all. Inbound
+// connections do not count toward MinPeers. It is independent of Cardano peer
 // governance.
 type peerManager struct {
 	s      *Stack
@@ -270,7 +271,8 @@ func (m *peerManager) plan(
 		}
 	}
 
-	need := m.cfg.MinPeers - m.s.PeerCount() - m.inflight - len(picked)
+	need := m.cfg.MinPeers - m.s.outboundPeerCount() - m.inflight -
+		len(picked)
 	need = min(need, room-len(picked))
 	if need <= 0 {
 		return picked, dueAt, false

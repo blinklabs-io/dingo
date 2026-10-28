@@ -87,6 +87,19 @@ func dialStack(t *testing.T, from, to *Stack) *PeerConn {
 	return peer
 }
 
+// tryInbound connects a fresh stack to a listening one and returns the error
+// the dialer sees, which is non-nil when the listener refuses it.
+func tryInbound(t *testing.T, to *Stack) error {
+	t.Helper()
+	from, _ := newTestStack(t, StackConfig{})
+	conn, err := net.DialTimeout(
+		"tcp", listenPeer(t, to).Address(), peerWait,
+	)
+	require.NoError(t, err)
+	_, err = from.AttachPeer(t.Context(), conn, true)
+	return err
+}
+
 func TestPeerNetworkAcceptsPeersAndExchangesMessages(t *testing.T) {
 	t.Parallel()
 	listener, _ := newListeningStack(t, PeerConfig{})
@@ -102,6 +115,32 @@ func TestPeerNetworkAcceptsPeersAndExchangesMessages(t *testing.T) {
 	waitFor(t, "messages cross in both directions", func() bool {
 		return listener.pool.Len() == 4 && dialer.pool.Len() == 4
 	})
+}
+
+// The inbound limit leaves MinPeers connections' room for the peers the stack
+// dials, whatever opens connections to it.
+func TestPeerNetworkLimitsInboundApartFromOutbound(t *testing.T) {
+	t.Parallel()
+	listener, _ := newListeningStack(t, PeerConfig{
+		MinPeers: 2, MaxPeers: 4, MaxInboundPerSource: 20,
+	})
+	require.NoError(t, tryInbound(t, listener))
+	require.NoError(t, tryInbound(t, listener))
+	require.Error(t, tryInbound(t, listener), "inbound is full at two")
+
+	// A peer the stack dials is not held back by the full inbound share.
+	remote, _ := newListeningStack(t, PeerConfig{})
+	dialStack(t, listener, remote)
+	assert.Equal(t, 3, listener.PeerCount())
+	assert.Equal(t, 1, listener.outboundPeerCount())
+}
+
+// With no room kept for inbound connections the stack accepts none.
+func TestPeerNetworkAcceptsNoInboundWhenMinimumEqualsMaximum(t *testing.T) {
+	t.Parallel()
+	listener, _ := newListeningStack(t, PeerConfig{MinPeers: 2, MaxPeers: 2})
+	require.Error(t, tryInbound(t, listener))
+	assert.Zero(t, listener.PeerCount())
 }
 
 func TestPeerNetworkRefusesPeersBeyondMaxPeers(t *testing.T) {
@@ -234,6 +273,23 @@ func TestPeerConfigValidation(t *testing.T) {
 			PeerConfig{MaxPeers: 1, MinPeers: 2},
 			"exceeds",
 		},
+		{"negative inbound limit", PeerConfig{
+			MaxPeers: 1, MaxInbound: -1,
+		}, "MaxInbound must not be negative"},
+		{"inbound limit above the reserve", PeerConfig{
+			MaxPeers: 3, MinPeers: 2, MaxInbound: 2,
+		}, "MaxInbound exceeds"},
+		{"inbound limit above the room for local roots", PeerConfig{
+			MaxPeers: 5, MinPeers: 1, MaxInbound: 3,
+			Topology: &Topology{LocalRoots: []RootGroup{{
+				Valency: 3,
+				Peers: []Peer{
+					{Host: "a.example", Port: 1},
+					{Host: "b.example", Port: 1},
+					{Host: "c.example", Port: 1},
+				},
+			}}},
+		}, "MaxInbound exceeds"},
 		{"negative per-source limit", PeerConfig{
 			MaxPeers: 1, MaxInboundPerSource: -1,
 		}, "MaxInboundPerSource"},
