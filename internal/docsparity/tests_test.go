@@ -3070,10 +3070,10 @@ func TestPipelineTiers(t *testing.T) {
 				name,
 			)
 		}
-		if needs := jobNeeds(t, prPipeline, id, fields); len(needs) != 1 ||
-			needs[0] != "check" {
+		if needs := jobNeeds(t, prPipeline, id, fields); len(needs) != 2 ||
+			needs[0] != "check" || needs[1] != "changes" {
 			t.Errorf(
-				"%s: tier-2 job %s needs %v, want [check]",
+				"%s: tier-2 job %s needs %v, want [check changes]",
 				prPipeline,
 				id,
 				needs,
@@ -3083,6 +3083,7 @@ func TestPipelineTiers(t *testing.T) {
 		for _, want := range []string{
 			"!cancelled()",
 			"github.event_name == 'merge_group'",
+			"needs.changes.outputs.run-ci != 'false'",
 			"vars.CI_MERGE_QUEUE != 'true'",
 			"needs.check.result == 'success'",
 			"needs.check.outputs.run-ci == 'true'",
@@ -3103,6 +3104,19 @@ func TestPipelineTiers(t *testing.T) {
 				publishPipeline,
 				name,
 			)
+		}
+	}
+}
+
+func TestVerifyTestedAcceptsSkippedGatesOnlyBesideChanges(t *testing.T) {
+	root := repoRoot(t)
+	script := readRepoFile(t, root, publishPipeline)
+	for _, want := range []string{
+		"conclusion_of changes",
+		`[ "$conclusion" = skipped ] && [ "$changes" = success ]`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("%s verify-tested lacks %q", publishPipeline, want)
 		}
 	}
 }

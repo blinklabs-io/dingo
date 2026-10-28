@@ -97,12 +97,23 @@ jobs:
         run: |
           set -euo pipefail
           failed=0
-          for gate in 'gate (race)' 'gate (services)' 'gate (macOS)' 'gate (build)'; do
-            conclusion="$(gh api -X GET \
+          conclusion_of() {
+            gh api -X GET \
               "repos/${GITHUB_REPOSITORY}/commits/${COMMIT_SHA}/check-runs" \
-              -f check_name="$gate" -f filter=latest \
-              --jq '[.check_runs[] | select(.app.slug == "github-actions") | .conclusion] | first // "missing"')"
+              -f check_name="$1" -f filter=latest \
+              --jq '[.check_runs[] | select(.app.slug == "github-actions") | .conclusion] | first // "missing"'
+          }
+          # The merge queue skips every gate for a documentation-only group
+          # and records that its changes job succeeded. A skipped gate on a
+          # commit that never went through the queue has no such record.
+          changes="$(conclusion_of changes)"
+          echo "changes: ${changes}"
+          for gate in 'gate (race)' 'gate (services)' 'gate (macOS)' 'gate (build)'; do
+            conclusion="$(conclusion_of "$gate")"
             echo "${gate}: ${conclusion}"
+            if [ "$conclusion" = skipped ] && [ "$changes" = success ]; then
+              continue
+            fi
             if [ "$conclusion" != success ]; then
               failed=1
             fi
