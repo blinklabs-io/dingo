@@ -160,15 +160,14 @@ func TestValidateTokenRegistryAggregateBounds(t *testing.T) {
 func TestValidateTokenRegistryTrustConfiguration(t *testing.T) {
 	t.Parallel()
 
-	t.Run("enabled requires manifest and key", func(t *testing.T) {
+	t.Run("enabled supports upstream without manifest", func(t *testing.T) {
 		t.Parallel()
 		cfg := validTestConfig()
 		cfg.TokenRegistry.Enabled = true
 
 		err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
 
-		require.ErrorContains(t, err, "tokenRegistry.manifestUrl")
-		require.ErrorContains(t, err, "tokenRegistry.trustedManifestKey")
+		require.NoError(t, err)
 	})
 
 	t.Run("key has Ed25519 width", func(t *testing.T) {

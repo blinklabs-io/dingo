@@ -532,6 +532,15 @@ type OuroborosConfig struct {
 	// Candidates may inform Genesis corroboration and eagerness but must not
 	// affect selection until the ledger admits the accompanying header.
 	ChainsyncObservePeerTip func(chainselection.PeerTipUpdateEvent) chainselection.PeerTipUpdateDisposition
+	// ChainsyncRecordDeliveredPeerTip records processed roll-forward headers for
+	// bounded corroboration history, including observer connections that are
+	// not eligible for chain-selection admission.
+	ChainsyncRecordDeliveredPeerTip func(chainselection.PeerTipUpdateEvent)
+	// ChainsyncRecordDeliveredPeerRollback trims a peer's bounded delivered
+	// history after a rollback, including observer connections that are not
+	// eligible for chain-selection admission and so never reach
+	// ChainsyncObservePeerRollback. It must not register or select the peer.
+	ChainsyncRecordDeliveredPeerRollback func(chainselection.PeerRollbackEvent)
 	// ChainsyncPrepareForecastWitness temporarily records a connected header
 	// that is waiting for the ledger forecast horizon. It may corroborate
 	// verified staged candidates but cannot enter selection or admission. The
@@ -570,6 +579,12 @@ type OuroborosConfig struct {
 		ctx context.Context,
 		connId ouroboros.ConnectionId,
 	) (bool, error)
+	// ChainsyncIntersectAtLedgerTip reports whether new chainsync sessions
+	// must intersect at the applied ledger tip rather than at the primary
+	// chain's header-ahead points. Genesis corroboration needs each peer's
+	// candidate frontier to begin at the ledger tip, or held peers that start
+	// above it never overlap. When nil, the primary chain's points are used.
+	ChainsyncIntersectAtLedgerTip func() bool
 	// ChainsyncObserveAwaitReply records the peer's explicit protocol-idle
 	// frontier. It runs after gouroboros fences preceding pipelined updates.
 	ChainsyncObserveAwaitReply func(ouroboros.ConnectionId, ocommon.Point)
@@ -1289,10 +1304,9 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 		o.recordKeepaliveTimeout()
 	}
 
-	// Record connection stability observation for peer scoring
-	// Connection closure indicates reduced stability
-	if o.peerGov != nil {
-		// Treat connection closure as negative stability signal (0.0)
+	localRestart := e.Error == nil &&
+		event.IsLocalChainsyncResyncReason(e.LocalCloseReason)
+	if o.peerGov != nil && !localRestart {
 		o.peerGov.UpdatePeerConnectionStability(connId, 0.0)
 	}
 

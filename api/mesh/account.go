@@ -18,12 +18,14 @@ import (
 	"cmp"
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
 	"slices"
 	"strconv"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	dledger "github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger"
 )
 
@@ -59,35 +61,52 @@ func (s *Server) handleAccountBalance(
 		return
 	}
 
-	var (
-		utxos []models.Utxo
-		err   error
-	)
+	var balances []*Amount
 	if point.historical {
-		utxos, err = s.config.LedgerState.
-			UtxosByAddressAtSlot(addr, point.slot)
+		historical, err := s.config.LedgerState.
+			UtxoBalanceByAddressAtSlot(r.Context(), addr, point.slot)
+		if err != nil {
+			s.writeAccountBalanceError(w, req, point, err)
+			return
+		}
+		balances = aggregateAddressBalance(historical)
 	} else {
-		utxos, err = s.config.LedgerState.UtxosByAddress(
+		utxos, err := s.config.LedgerState.UtxosByAddress(
 			[]ledger.Address{addr},
 		)
-	}
-	if err != nil {
-		s.logger.Error(
-			"failed to query UTxOs for account",
-			"address",
-			req.AccountIdentifier.Address,
-			"slot", point.slot,
-			"historical", point.historical,
-			"error", err,
-		)
-		writeError(w, ErrInternal)
-		return
+		if err != nil {
+			s.writeAccountBalanceError(w, req, point, err)
+			return
+		}
+		balances = aggregateBalances(utxos)
 	}
 
 	writeJSON(w, http.StatusOK, &AccountBalanceResponse{
 		BlockIdentifier: point.blockID,
-		Balances:        aggregateBalances(utxos),
+		Balances:        balances,
 	})
+}
+
+func (s *Server) writeAccountBalanceError(
+	w http.ResponseWriter,
+	req AccountBalanceRequest,
+	point balancePoint,
+	err error,
+) {
+	s.logger.Error(
+		"failed to query account balance",
+		"address", req.AccountIdentifier.Address,
+		"slot", point.slot,
+		"historical", point.historical,
+		"error", err,
+	)
+	if errors.Is(err, models.ErrUtxoQueryBudgetExceeded) ||
+		errors.Is(err, models.ErrTooManyUtxoResults) ||
+		errors.Is(err, dledger.ErrHistoricalStateUnavailable) {
+		writeError(w, wrapErr(ErrInvalidRequest, err))
+	} else {
+		writeError(w, wrapErr(ErrInternal, err))
+	}
 }
 
 // handleAccountCoins handles POST /account/coins.
@@ -266,6 +285,22 @@ func aggregateBalances(utxos []models.Utxo) []*Amount {
 			Currency: nativeAssetCurrency(
 				key.policyHex,
 				key.nameHex,
+			),
+		})
+	}
+	return balances
+}
+
+func aggregateAddressBalance(balance models.AddressBalance) []*Amount {
+	balances := make([]*Amount, 1, len(balance.Assets)+1)
+	balances[0] = convertAmount(balance.Lovelace)
+	for i := range balance.Assets {
+		asset := &balance.Assets[i]
+		balances = append(balances, &Amount{
+			Value: strconv.FormatUint(asset.Amount, 10),
+			Currency: nativeAssetCurrency(
+				hex.EncodeToString(asset.PolicyId),
+				hex.EncodeToString(asset.Name),
 			),
 		})
 	}

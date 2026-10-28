@@ -308,7 +308,8 @@ func TestBuildChainSelectorConfigWiresPeerIdentity(t *testing.T) {
 			),
 		)
 		require.Eventually(t, func() bool {
-			return peerGov.DiversityGroupByConnId(conn) == expectedGroup &&
+			identity := peerGov.CorroborationIdentityByConnId(conn)
+			return identity == expectedGroup &&
 				cfg.PeerIdentity(conn) == expectedGroup
 		}, time.Second, time.Millisecond)
 		require.NoError(t, peerGov.Stop(context.Background()))

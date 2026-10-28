@@ -15,12 +15,16 @@
 package ouroboros
 
 import (
+	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	dchainsync "github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	ouroboros "github.com/blinklabs-io/gouroboros"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -97,4 +101,48 @@ func TestRegisterTrackedChainsyncClientRootTakesSlotFromDiscoveredPeers(
 	require.True(t, tracked)
 	assert.False(t, observer, "the root must hold an eligible slot")
 	assert.Equal(t, capacityTestSlots, o.chainsyncState.ClientConnCount())
+}
+
+func TestIngressPromotionAfterSkippedHeaderRequestsFreshIntersection(t *testing.T) {
+	t.Parallel()
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+	_, resyncCh := bus.Subscribe(event.ChainsyncResyncEventType)
+	o := newOuroboros(OuroborosConfig{EventBus: bus})
+	o.futureHeaderResyncCtx = context.Background()
+	o.chainsyncState = dchainsync.NewStateWithConfig(
+		bus,
+		nil,
+		dchainsync.Config{
+			MaxClients:   1,
+			StallTimeout: dchainsync.DefaultStallTimeout,
+		},
+	)
+	connId := newTestConnId("127.0.0.1:6000", "10.0.0.9:3001")
+	require.True(t, o.chainsyncState.TryAddObservedClientConnId(connId))
+	var scheduled func()
+	o.chainsyncScheduleAt = func(_ time.Time, fn func()) func() {
+		scheduled = fn
+		return func() {}
+	}
+
+	// Only a header actually skipped while observing requires replay.
+	o.config.ChainsyncIngressEligible = func(ouroboros.ConnectionId) bool { return false }
+	require.NoError(t, o.chainsyncClientRollForward(
+		ochainsync.CallbackContext{ConnectionId: connId},
+		0, newTestBlockHeader(100, 1, 0xaa), ochainsync.Tip{},
+	))
+
+	require.True(t, o.reconcileChainsyncIngressAdmission(connId, true))
+	require.NotNil(t, scheduled)
+	scheduled()
+	resyncEvent := testutil.RequireReceive(
+		t,
+		resyncCh,
+		time.Second,
+		"promoted observer must request a fresh intersection",
+	)
+	data := resyncEvent.Data.(event.ChainsyncResyncEvent)
+	assert.Equal(t, connId, data.ConnectionId)
+	assert.Equal(t, event.ChainsyncResyncReasonIngressPromotion, data.Reason)
 }

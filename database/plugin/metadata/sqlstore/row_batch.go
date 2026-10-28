@@ -108,7 +108,7 @@ var (
 		columns: []string{"name", "policy_id", "fingerprint", "utxo_id", "amount"},
 		suffix:  "ON CONFLICT (name, policy_id, utxo_id) DO NOTHING",
 	}
-	assetUtxoAddressShape = rowShape{
+	utxoAddressShape = rowShape{
 		name:    "UpsertUtxoAddressBatch",
 		table:   "utxo_address",
 		columns: []string{"utxo_id", "address"},
@@ -264,4 +264,25 @@ func (b *rowBatch) clone() rowBatch {
 		ret.entries[i].rows = slices.Clone(ret.entries[i].rows)
 	}
 	return ret
+}
+
+// flushExceptClosureAPIRows keeps only API lookup/history rows queued. Assets,
+// datums and script-related rows remain visible before the next tx validates.
+func (b *rowBatch) flushExceptClosureAPIRows(ctx context.Context, db queryer, parameterLimit int) error {
+	var immediate, deferred rowBatch
+	for _, entry := range b.entries {
+		target := &immediate
+		switch entry.shape.table {
+		case "key_witness", "address_transaction", "transaction_metadata_label":
+			target = &deferred
+		}
+		for _, row := range entry.rows {
+			target.add(entry.shape, row...)
+		}
+	}
+	if err := immediate.flush(ctx, db, parameterLimit); err != nil {
+		return err
+	}
+	*b = deferred
+	return nil
 }

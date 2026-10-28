@@ -313,78 +313,19 @@ func (s *Store) applyRewardLiveStakeAggregate(
 	slot uint64,
 	utxoStake uint64,
 ) error {
-	return s.applyRewardLiveStakeAggregateWithID(
-		ctx, db, ref, slot, utxoStake, 0, false,
-	)
-}
-
-const rewardLiveStakeUpdateQuery = `-- name: BatchOverlayUpdateRewardLiveStake :exec
-UPDATE reward_live_stake SET
-    pool_key_hash = ?, utxo_stake = ?, reward_stake = ?, total_stake = ?,
-    registered = ?, pool_delegation_slot = ?, pool_delegation_block_index = 0,
-    pool_delegation_cert_index = 0, updated_slot = ?, calculation_version = ?
-WHERE credential_tag = ? AND staking_key = ?`
-
-// rewardLiveStakeInsertWithIDQuery is rewardLiveStakeUpsertQuery for a row
-// the batch UTxO overlay inserts under an id it reserved; the caller deletes
-// any earlier row of the credential first.
-const rewardLiveStakeInsertWithIDQuery = `
--- name: BatchOverlayInsertRewardLiveStake :exec
-INSERT INTO reward_live_stake (
-    id, credential_tag, staking_key, pool_key_hash, utxo_stake, reward_stake,
-    total_stake, registered, pool_delegation_slot,
-    pool_delegation_block_index, pool_delegation_cert_index, updated_slot,
-    calculation_version
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)`
-
-// applyRewardLiveStakeAggregateWithID is applyRewardLiveStakeAggregate that,
-// when id is not zero, inserts the row under that id, and when update is
-// set, updates the existing row, instead of upserting it. SQLite advances an
-// AUTOINCREMENT sequence on every upsert, including one that resolves to an
-// update. An update leaves it alone and an explicit-id insert raises it no
-// further than that id, so the batch UTxO overlay can set the sequence
-// itself.
-func (s *Store) applyRewardLiveStakeAggregateWithID(
-	ctx context.Context,
-	db queryer,
-	ref models.StakeCredentialRef,
-	slot uint64,
-	utxoStake uint64,
-	id int64,
-	update bool,
-) error {
-	var reward sql.NullString
-	var pool []byte
-	var active sql.NullBool
-	var addedSlot sql.NullInt64
-	accountErr := s.queryRowCached(
+	var account liveStakeAccount
+	err := s.queryRowCached(
 		ctx, db, rewardLiveStakeAccountQuery, ref.Tag, ref.Key,
-	).Scan(&reward, &pool, &active, &addedSlot)
-	if accountErr != nil && !errors.Is(accountErr, sql.ErrNoRows) {
-		return fmt.Errorf("query reward live stake account: %w", accountErr)
+	).Scan(&account.reward, &account.pool, &account.active, &account.addedSlot)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("query reward live stake account: %w", err)
 	}
-	rewardStake := uint64(0)
-	registered := false
-	if accountErr == nil {
-		registered = active.Bool
-		if reward.Valid {
-			value, err := parseUint64("reward live stake reward", reward.String)
-			if err != nil {
-				return err
-			}
-			rewardStake = value
-		}
+	account.exists = err == nil
+	row, keep, err := rewardLiveStakeRowValues(ref, account, slot, utxoStake)
+	if err != nil {
+		return err
 	}
-	utxoValue := utxoStake
-	if utxoValue > ^uint64(0)-rewardStake {
-		return fmt.Errorf(
-			"reward live stake overflow for credential %d:%x",
-			ref.Tag,
-			ref.Key,
-		)
-	}
-	total := utxoValue + rewardStake
-	if errors.Is(accountErr, sql.ErrNoRows) && total == 0 {
+	if !keep {
 		_, err := db.ExecContext(ctx, `-- name: DeleteRewardLiveStake :exec
 DELETE FROM reward_live_stake
 WHERE credential_tag = ? AND staking_key = ?`,
@@ -393,73 +334,90 @@ WHERE credential_tag = ? AND staking_key = ?`,
 		)
 		return err
 	}
-	if !registered {
-		pool = nil
-	}
-	delegationSlot := int64(0)
-	if registered && len(pool) > 0 {
-		delegationSlot = addedSlot.Int64
-	}
-	slotValue, err := checkedInt64(slot)
-	if err != nil {
-		return err
-	}
-	if update {
-		_, err = db.ExecContext(
-			ctx, rewardLiveStakeUpdateQuery,
-			pool,
-			decimalUint64(types.Uint64(utxoValue)),
-			decimalUint64(types.Uint64(rewardStake)),
-			decimalUint64(types.Uint64(total)),
-			registered,
-			delegationSlot,
-			slotValue,
-			models.RewardStakeCalculationVersion,
-			ref.Tag,
-			ref.Key,
-		)
-		if err != nil {
-			return fmt.Errorf("update reward live stake: %w", err)
-		}
-		return nil
-	}
-	if id != 0 {
-		_, err = db.ExecContext(
-			ctx, rewardLiveStakeInsertWithIDQuery,
-			id,
-			ref.Tag,
-			ref.Key,
-			pool,
-			decimalUint64(types.Uint64(utxoValue)),
-			decimalUint64(types.Uint64(rewardStake)),
-			decimalUint64(types.Uint64(total)),
-			registered,
-			delegationSlot,
-			slotValue,
-			models.RewardStakeCalculationVersion,
-		)
-		if err != nil {
-			return overlayWriteError("insert reward live stake", err)
-		}
-		return nil
-	}
 	_, err = s.execCached(
 		ctx, db, rewardLiveStakeUpsertQuery,
 		ref.Tag,
 		ref.Key,
-		pool,
-		decimalUint64(types.Uint64(utxoValue)),
-		decimalUint64(types.Uint64(rewardStake)),
-		decimalUint64(types.Uint64(total)),
-		registered,
-		delegationSlot,
-		slotValue,
+		row.pool,
+		decimalUint64(types.Uint64(row.utxo)),
+		decimalUint64(types.Uint64(row.reward)),
+		decimalUint64(types.Uint64(row.total)),
+		row.registered,
+		row.delegationSlot,
+		row.slot,
 		models.RewardStakeCalculationVersion,
 	)
 	if err != nil {
 		return fmt.Errorf("upsert reward live stake: %w", err)
 	}
 	return nil
+}
+
+// liveStakeAccount is the account state a reward_live_stake row is derived
+// from; exists is false when the credential has no account row.
+type liveStakeAccount struct {
+	exists    bool
+	reward    sql.NullString
+	pool      []byte
+	active    sql.NullBool
+	addedSlot sql.NullInt64
+}
+
+// liveStakeRowContent is the content of one credential's reward_live_stake
+// row, without its key and id.
+type liveStakeRowContent struct {
+	pool           []byte
+	utxo           uint64
+	reward         uint64
+	total          uint64
+	registered     bool
+	delegationSlot int64
+	slot           int64
+}
+
+// rewardLiveStakeRowValues derives ref's reward_live_stake row from its
+// account and UTxO total. keep is false when the credential must have no
+// row: it has no account and nothing staked.
+func rewardLiveStakeRowValues(
+	ref models.StakeCredentialRef,
+	account liveStakeAccount,
+	slot uint64,
+	utxoStake uint64,
+) (row liveStakeRowContent, keep bool, err error) {
+	if account.exists {
+		row.registered = account.active.Bool
+		if account.reward.Valid {
+			row.reward, err = parseUint64(
+				"reward live stake reward", account.reward.String,
+			)
+			if err != nil {
+				return row, false, err
+			}
+		}
+	}
+	if utxoStake > ^uint64(0)-row.reward {
+		return row, false, fmt.Errorf(
+			"reward live stake overflow for credential %d:%x",
+			ref.Tag,
+			ref.Key,
+		)
+	}
+	row.utxo = utxoStake
+	row.total = utxoStake + row.reward
+	if !account.exists && row.total == 0 {
+		return row, false, nil
+	}
+	if row.registered {
+		row.pool = account.pool
+		if len(row.pool) > 0 {
+			row.delegationSlot = account.addedSlot.Int64
+		}
+	}
+	row.slot, err = checkedInt64(slot)
+	if err != nil {
+		return row, false, err
+	}
+	return row, true, nil
 }
 
 // sumCredentialUtxoStake totals a stake credential's live UTxO amounts with

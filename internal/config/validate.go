@@ -733,10 +733,10 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 			c.TokenRegistry.MaxEntryBytes,
 		))
 	}
-	if c.TokenRegistry.Enabled &&
+	if strings.TrimSpace(c.TokenRegistry.TrustedManifestKey) != "" &&
 		strings.TrimSpace(c.TokenRegistry.ManifestURL) == "" {
 		errs = append(errs, errors.New(
-			"tokenRegistry.manifestUrl is required when token registry sync is enabled",
+			"tokenRegistry.manifestUrl is required with trustedManifestKey",
 		))
 	}
 	if raw := strings.TrimSpace(c.TokenRegistry.ManifestURL); raw != "" {
@@ -760,9 +760,9 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	trustedManifestKey := strings.TrimSpace(
 		c.TokenRegistry.TrustedManifestKey,
 	)
-	if c.TokenRegistry.Enabled && trustedManifestKey == "" {
+	if strings.TrimSpace(c.TokenRegistry.ManifestURL) != "" && trustedManifestKey == "" {
 		errs = append(errs, errors.New(
-			"tokenRegistry.trustedManifestKey is required when token registry sync is enabled",
+			"tokenRegistry.trustedManifestKey is required with manifestUrl",
 		))
 	}
 	if trustedManifestKey != "" {

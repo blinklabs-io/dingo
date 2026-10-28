@@ -37,6 +37,7 @@ const (
 	redactPassword = "SENTINEL-USERINFO-PASSWORD"
 	redactQuery    = "SENTINEL-QUERY-TOKEN"
 	redactFragment = "SENTINEL-FRAGMENT-TOKEN"
+	redactPath     = "SENTINEL-PATH-TOKEN"
 	redactRedirect = "SENTINEL-REDIRECT-TOKEN"
 	redactHeader   = "SENTINEL-HEADER-TOKEN"
 )
@@ -49,15 +50,16 @@ var redactSecrets = []string{
 	redactPassword,
 	redactQuery,
 	redactFragment,
+	redactPath,
 	redactRedirect,
 	redactHeader,
 }
 
-// withCredentials appends a credential-bearing query and fragment to a base
-// URL. Userinfo is added separately, because the SSRF guard rejects it before
+// withCredentials appends a credential-bearing path, query and fragment to a
+// base URL. Userinfo is added separately, because the SSRF guard rejects it before
 // a request is ever built.
 func withCredentials(base string) string {
-	return base + "/?apikey=" + redactQuery + "#" + redactFragment
+	return base + "/" + redactPath + "/?apikey=" + redactQuery + "#" + redactFragment
 }
 
 // captureSync builds a sync whose logger writes to the returned buffer at
@@ -103,7 +105,7 @@ func deadServerURL(t *testing.T) string {
 }
 
 // TestRegistryLogURLRedactsCredentialComponents pins the log rendering of a
-// source URL directly: userinfo, query, and fragment are dropped, and an
+// source URL directly: userinfo, path, query, and fragment are dropped, and an
 // input with no safe parsed form never falls back to echoing itself.
 func TestRegistryLogURLRedactsCredentialComponents(t *testing.T) {
 	tests := []struct {
@@ -114,35 +116,50 @@ func TestRegistryLogURLRedactsCredentialComponents(t *testing.T) {
 		{
 			name: "plain",
 			raw:  "https://registry.example/reg.tar.gz",
-			want: "https://registry.example/reg.tar.gz",
+			want: "https://registry.example",
+		},
+		{
+			name: "no path",
+			raw:  "https://registry.example",
+			want: "https://registry.example",
+		},
+		{
+			name: "path",
+			raw:  "https://registry.example/" + redactPath + "/reg.tar.gz",
+			want: "https://registry.example",
+		},
+		{
+			name: "encoded path",
+			raw:  "https://registry.example/%41" + redactPath + "%2Freg.tar.gz",
+			want: "https://registry.example",
 		},
 		{
 			name: "userinfo",
 			raw: "https://" + redactUser + ":" + redactPassword +
 				"@registry.example/reg.tar.gz",
-			want: "https://registry.example/reg.tar.gz",
+			want: "https://registry.example",
 		},
 		{
 			name: "query",
 			raw:  "https://registry.example/reg.tar.gz?apikey=" + redactQuery,
-			want: "https://registry.example/reg.tar.gz",
+			want: "https://registry.example",
 		},
 		{
 			name: "empty forced query",
 			raw:  "https://registry.example/reg.tar.gz?",
-			want: "https://registry.example/reg.tar.gz",
+			want: "https://registry.example",
 		},
 		{
 			name: "fragment",
 			raw:  "https://registry.example/reg.tar.gz#" + redactFragment,
-			want: "https://registry.example/reg.tar.gz",
+			want: "https://registry.example",
 		},
 		{
 			name: "every component",
 			raw: "https://" + redactUser + ":" + redactPassword +
 				"@registry.example:8443/reg.tar.gz?apikey=" + redactQuery +
 				"#" + redactFragment,
-			want: "https://registry.example:8443/reg.tar.gz",
+			want: "https://registry.example:8443",
 		},
 		{
 			name: "malformed escape",
@@ -228,7 +245,7 @@ func TestTokenRegistrySyncRedactsCredentialsFromLogs(t *testing.T) {
 		sync.runOnce(t.Context())
 
 		requireRedacted(t, buf.String(), "token registry sync complete")
-		require.Contains(t, buf.String(), "url="+server.URL+"/")
+		require.Contains(t, buf.String(), "url="+server.URL+" ")
 	})
 
 	t.Run("unchanged", func(t *testing.T) {

@@ -451,14 +451,15 @@
   # Can be overridden with DINGO_TOKEN_REGISTRY_SOURCE_URL
   # CLI: --token-registry-source-url
   # sourceUrl: ""
-  # Signed manifest URL. Required when enabled. The manifest authenticates
+  # Optional signed manifest URL for operator-managed mirrors. The public
+  # registries do not publish these manifests. A configured manifest binds
   # the snapshot URL, exact compressed size, BLAKE2b-256 digest, and monotonic
   # sequence. HTTPS is required for the manifest, snapshot, and every redirect.
   # Can be overridden with DINGO_TOKEN_REGISTRY_MANIFEST_URL
   # CLI: --token-registry-manifest-url
   # manifestUrl: ""
-  # Hex-encoded Ed25519 public key trusted to sign manifests. Required when
-  # enabled. Key rotation is an explicit configuration change.
+  # Hex-encoded Ed25519 public key. Required only with manifestUrl.
+  # Key rotation is an explicit configuration change.
   # Can be overridden with DINGO_TOKEN_REGISTRY_TRUSTED_MANIFEST_KEY
   # CLI: --token-registry-trusted-manifest-key
   # trustedManifestKey: ""
@@ -551,12 +552,14 @@
   # CLI: --koios-parity-cache-path
   # cachePath: ""
   # Can be overridden with DINGO_KOIOS_PARITY_API_KEY
-  # CLI: --koios-parity-api-key
+  # Literal API keys cannot be supplied by CLI because process arguments are
+  # visible to other local accounts. Use the file option for CLI configuration.
   # apiKey: ""
   # File holding the API key, read at startup with trailing line endings
-  # removed. Must be a regular file that other users cannot access (on Unix
-  # owner and group access is allowed; on Windows only the owner,
-  # Administrators and SYSTEM), at most 64 KiB, and not blank. Set
+  # removed. Must be a regular file that other users cannot access. On Unix,
+  # the file and its non-sticky path entries must be owned by this user or root;
+  # owner and group file access is allowed. On Windows only the owner,
+  # Administrators and SYSTEM may have access. At most 64 KiB and not blank. Set
   # apiKey or apiKeyFile, not both.
   # Can be overridden with DINGO_KOIOS_PARITY_API_KEY_FILE
   # CLI: --koios-parity-api-key-file
@@ -948,9 +951,10 @@
 
 # DMQ (CIP-0137 Decentralized Message Queue) runs alongside the Cardano stack
 # in the same process, on its own Unix socket and network magic. It serves
-# local message submission and notification. The peer settings (n2nPort,
-# listenAddress, listenIpv6Address, topologyFile, minPeers, maxPeers) are
-# validated but not yet used: no peer listener or dialer exists yet.
+# local message submission and notification. With n2nPort and maxPeers above
+# zero it also accepts DMQ peers on n2nPort and dials the peers named by
+# topologyFile, then ledger peers found through the topic's SRV records, to
+# keep minPeers connections. DMQ peers are independent of Cardano peers.
 # CLI: --dmq-enabled, --dmq-topic, --dmq-network-magic, --dmq-socket-path,
 #   --dmq-message-ttl, --dmq-max-mempool-size, --dmq-n2n-port,
 #   --dmq-listen-address, --dmq-listen-ipv6-address, --dmq-topology-file,
@@ -976,7 +980,7 @@
   # Message pool size limit in megabytes. Default: 128.
   # maxMempoolSize: 128
   # TCP port DMQ peers connect to, separate from the Cardano relay port.
-  # 0 serves local clients only. Default: 0.
+  # 0 serves local clients only: no peer is accepted or dialed. Default: 0.
   # n2nPort: 4001
   # Peer listener addresses. Empty disables that address family.
   # Defaults: "0.0.0.0" and "::".
@@ -985,8 +989,9 @@
   # dmq-node topology file naming the DMQ peers to dial. Separate from the
   # Cardano topology. It must exist when set. Default: unset.
   # topologyFile: "/etc/dingo/dmq-topology.json"
-  # DMQ peers to keep connected, and the most to hold. minPeers must not
-  # exceed maxPeers; 0 and 0 allows no peers. Defaults: 3 and 10.
+  # DMQ peers to keep connected, and the most to hold. Both count inbound
+  # peers. minPeers must not exceed maxPeers; 0 and 0 allows no peers.
+  # Defaults: 3 and 10.
   # minPeers: 3
   # maxPeers: 10
 

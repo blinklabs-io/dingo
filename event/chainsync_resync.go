@@ -73,6 +73,10 @@ const (
 	// the hold allows. The header was withheld, so the fresh intersection
 	// delivers it again. It is not a peer-fault signal.
 	ChainsyncResyncReasonGenesisCorroborationHoldExpired = "genesis corroboration hold expired"
+	// ChainsyncResyncReasonIngressPromotion re-intersects an ingress-eligible
+	// client that skipped headers while observing, so normal admission can
+	// replay its complete chain from a safe local intersection.
+	ChainsyncResyncReasonIngressPromotion = "ingress promotion"
 	// ChainsyncResyncReasonForecastHorizonNoWork re-intersects a connected
 	// ChainSync peer when no local queued or in-flight blockfetch can advance
 	// the forecast horizon. It is not a peer-fault signal and does not impose
@@ -86,6 +90,14 @@ const (
 	// from fresh intersect points. It is not a peer-fault signal and does not
 	// impose a peer cooldown.
 	ChainsyncResyncReasonBehindLocalTip = "behind local tip"
+	// ChainsyncResyncReasonPromotedObserverAhead re-intersects a connection
+	// promoted from observability-only to ingress-eligible whose delivered
+	// header is more than one block above the local tip. Its candidate
+	// frontier would start above the ledger and could neither be corroborated
+	// nor corroborate the header after the tip, so the connection restarts
+	// from the local tip. It is not a peer-fault signal and does not impose a
+	// peer cooldown.
+	ChainsyncResyncReasonPromotedObserverAhead = "promoted observer ahead of local tip"
 	// ChainsyncResyncReasonNetworkIngestReleased re-intersects every tracked
 	// ChainSync client from the current chain tip when a network ingest hold
 	// is released: while held, each client's cursor ran ahead of the chain
@@ -100,4 +112,27 @@ type ChainsyncResyncEvent struct {
 	ConnectionId ouroboros.ConnectionId
 	Reason       string
 	Point        ocommon.Point
+}
+
+// IsLocalChainsyncResyncReason reports whether reason describes local cursor
+// recovery rather than evidence of peer failure. Consumers must also require
+// a clean transport close; a reason never overrides an actual protocol error.
+// Unknown reasons remain subject to ordinary peer failure handling.
+func IsLocalChainsyncResyncReason(reason string) bool {
+	switch reason {
+	case ChainsyncResyncReasonIngressPromotion,
+		ChainsyncResyncReasonPromotedObserverAhead,
+		ChainsyncResyncReasonHeaderValidationRecovery,
+		ChainsyncResyncReasonForecastCorroborationRecovery,
+		ChainsyncResyncReasonFutureHeaderAdmissionRecovery,
+		ChainsyncResyncReasonDisconnectedHeaderAdmission,
+		ChainsyncResyncReasonGenesisCorroborationHoldExpired,
+		ChainsyncResyncReasonForecastHorizonNoWork,
+		ChainsyncResyncReasonBehindLocalTip,
+		ChainsyncResyncReasonNetworkIngestReleased,
+		ChainsyncResyncReasonLocalLedgerRollback:
+		return true
+	default:
+		return false
+	}
 }

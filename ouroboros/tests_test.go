@@ -1652,13 +1652,13 @@ func TestStoreLeiosEndorserBlockAuthoritativeAndAnnouncedOccurrencesCoexist(
 	require.True(t, announcedData.slotVerified)
 }
 
-// TestEndorserBlockTxHashesByHashWithholdsUnverifiedSlot is the second review
-// round's comment 2 companion to
+// TestEndorserBlockClosureTxsByHashWithholdsUnverifiedSlot is the second
+// review round's comment 2 companion to
 // TestEndorserBlockTxsByHashWithholdsUnverifiedSlotFromLedger:
-// EndorserBlockTxHashesByHash feeds the forge loop's post-certificate mempool
-// exclusion list, so a complete-but-unbound entry must read as unavailable
+// EndorserBlockClosureTxsByHash feeds the forge loop's post-certificate
+// mempool rebase, so a complete-but-unbound entry must read as unavailable
 // there too, not just from the tx-body provider.
-func TestEndorserBlockTxHashesByHashWithholdsUnverifiedSlot(t *testing.T) {
+func TestEndorserBlockClosureTxsByHashWithholdsUnverifiedSlot(t *testing.T) {
 	t.Parallel()
 
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 22, 1)
@@ -1675,7 +1675,7 @@ func TestEndorserBlockTxHashesByHashWithholdsUnverifiedSlot(t *testing.T) {
 	data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
 	require.True(t, ok)
 	require.True(t, data.completeTxCache())
-	_, ok = o.EndorserBlockTxHashesByHash(point.Hash, point.Slot)
+	_, ok = o.EndorserBlockClosureTxsByHash(point.Hash, point.Slot)
 	require.False(
 		t,
 		ok,
@@ -1689,9 +1689,9 @@ func TestEndorserBlockTxHashesByHashWithholdsUnverifiedSlot(t *testing.T) {
 		testEbHash(point),
 		len(blockRaw),
 	)
-	hashes, ok := o.EndorserBlockTxHashesByHash(point.Hash, point.Slot)
+	txs, ok := o.EndorserBlockClosureTxsByHash(point.Hash, point.Slot)
 	require.True(t, ok)
-	require.Len(t, hashes, 1)
+	require.Equal(t, txsRaw, txs)
 }
 
 // TestLeiosClosureCompleteLockedWithholdsUnverifiedEntry is the closure-wait

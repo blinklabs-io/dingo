@@ -106,12 +106,17 @@ func seedUtxoMetadata(
 	t.Helper()
 	mdTxn := db.MetadataTxn(context.Background(), true)
 	require.NoError(t, mdTxn.Do(func(txn *Txn) error {
+		address := []byte(nil)
+		if db.StorageMode() == types.StorageModeAPI {
+			address = []byte("test-address")
+		}
 		return db.Metadata().CreateUtxo(txn.Metadata(), &models.Utxo{
 			TxId:        txId,
 			OutputIdx:   outputIdx,
 			AddedSlot:   addedSlot,
 			DeletedSlot: deletedSlot,
 			Amount:      types.Uint64(1),
+			Address:     address,
 		})
 	}))
 }

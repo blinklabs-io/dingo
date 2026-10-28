@@ -2017,6 +2017,7 @@ func (ls *LedgerState) handoffPipelineOnSwitchLocked(
 				"header_count", headerCount,
 				"minimum_header_count", minBatchHeaders,
 			)
+			ls.armQueuedBlockfetchFlush()
 			// No batch is in flight to own the queue, so the selected peer
 			// must; otherwise any peer's non-fitting header is processed
 			// and clears it instead of being buffered.
@@ -2345,6 +2346,7 @@ func (ls *LedgerState) bufferHeaderEvent(
 // callers would touch the most deadlock-sensitive code in the ledger for no
 // behavioural gain at the sites that already register it.
 func (ls *LedgerState) clearQueuedHeaders() {
+	ls.stopQueuedBlockfetchFlush()
 	ls.chain.ClearHeaders()
 	// The blockfetch range-failure record is deliberately NOT cleared here.
 	// Fork resolution, connection switches and header mismatches clear the
@@ -3217,6 +3219,8 @@ func (ls *LedgerState) shouldBufferHeaderEvent(
 	if !shouldBuffer {
 		return false
 	}
+	ls.startStalledHeaderQueueBlockfetch(e, ownerConnId, pending)
+
 	ls.bufferHeaderEvent(e, pending)
 	ls.config.Logger.Debug(
 		"buffering header from non-owner connection",
@@ -3226,6 +3230,54 @@ func (ls *LedgerState) shouldBufferHeaderEvent(
 		"slot", e.Point.Slot,
 	)
 	return true
+}
+
+// startStalledHeaderQueueBlockfetch fetches the queued headers when e is the
+// header that would overflow its connection's buffer while the queue owner
+// has nothing in flight.
+//
+// Far from the peer tip, blockfetch normally waits for the queue to reach
+// farFromTipHeaderGate, and only the owner's own headers grow the queue. An
+// owner whose next header is withheld (an uncorroborated Genesis source) never
+// adds another, while every other connection delivers headers that do not
+// extend the queue and is closed at the buffer limit. Nothing then leaves the
+// state: the queue stays below the gate and no batch is requested. A full
+// buffer is the signal that the queue has stopped growing, so the headers
+// already queued are fetched even though the gate is not reached; the batch's
+// completion clears the owner and replays buffered headers.
+func (ls *LedgerState) startStalledHeaderQueueBlockfetch(
+	e ChainsyncEvent,
+	ownerConnId ouroboros.ConnectionId,
+	pending *pendingPublishes,
+) {
+	ls.bufferedHeaderMutex.Lock()
+	full := len(ls.bufferedHeaderEvents[connIdKey(e.ConnectionId)]) >=
+		maxBufferedHeadersPerConn
+	ls.bufferedHeaderMutex.Unlock()
+	if !full || ls.chain == nil {
+		return
+	}
+	ls.chainsyncBlockfetchMutex.Lock()
+	defer ls.chainsyncBlockfetchMutex.Unlock()
+	if ls.chainsyncBlockfetchReadyChan != nil ||
+		ls.blockfetchContinuationPending ||
+		ls.chain.HeaderCount() == 0 {
+		return
+	}
+	ls.config.Logger.Info(
+		"starting blockfetch for stalled header queue",
+		"component", "ledger",
+		"owner_connection_id", ownerConnId.String(),
+		"event_connection_id", e.ConnectionId.String(),
+		"header_count", ls.chain.HeaderCount(),
+	)
+	ls.setSelectedBlockfetchConnId(ownerConnId)
+	initialConnId := ls.selectInitialBlockfetchConn(ownerConnId)
+	ls.startQueuedBlockfetchWithFallbackLocked(
+		initialConnId,
+		ownerConnId,
+		pending,
+	)
 }
 
 func (ls *LedgerState) headerFitsCurrentPipeline(e ChainsyncEvent) bool {
@@ -5167,6 +5219,7 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 			"header_count", headersReady,
 			"minimum_header_count", minBatchHeaders,
 		)
+		ls.armQueuedBlockfetchFlush()
 		return nil
 	}
 	slotThreshold := ls.calculateStabilityWindow()
@@ -5181,6 +5234,7 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 			"threshold", slotThreshold,
 			"header_count", headersReady,
 		)
+		ls.armQueuedBlockfetchFlush()
 		return nil
 	}
 	// We use the blockfetch lock to ensure we aren't starting a batch at the same
@@ -7253,6 +7307,7 @@ func (ls *LedgerState) startQueuedBlockfetchLockedWithWaitSignal(
 	// The lock is temporarily released around each external request and is
 	// reacquired before any state is inspected or changed. Callers still own
 	// the lock when this function returns.
+	ls.stopQueuedBlockfetchFlush()
 	if err := ls.waitForBlockfetchRequestLockedWithSignal(connId, waitStarted); err != nil {
 		return err
 	}

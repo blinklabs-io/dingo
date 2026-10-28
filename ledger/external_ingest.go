@@ -21,6 +21,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -79,6 +80,13 @@ type externalIngestState struct {
 	pauses  int
 	// applyMu serializes ApplyTrustedBatch callers.
 	applyMu sync.Mutex
+	// unpruned counts the batches that moved the tip since the trusted
+	// consumed-UTxO cleanup last drained, pruneSlot is the tip slot the
+	// last of them committed, and prunedOnce records that the cleanup has
+	// drained in this process. All three are guarded by applyMu.
+	unpruned   int
+	pruneSlot  uint64
+	prunedOnce bool
 	// gen advances whenever an external ingest moves the ledger tip. The
 	// loop compares it against the value it loaded before its reader took
 	// a tip, to discard a read positioned at a tip that no longer exists.
@@ -177,6 +185,115 @@ func (ls *LedgerState) PauseChainIngest() (resume func()) {
 	return sync.OnceFunc(ls.resumeChainIngest)
 }
 
+// trustedPruneRetryDelay is how long DrainTrustedPrune waits before trying
+// again when another consumed-UTxO cleanup run holds the write connection.
+// Such a run deletes at most cleanupConsumedUtxoBatchSize rows.
+const trustedPruneRetryDelay = 100 * time.Millisecond
+
+// DrainTrustedPrune runs the consumed-UTxO cleanup that trusted batches still
+// owe, up to the tip the last of them committed, until nothing prunable is
+// left there or ctx ends. Unlike the cleanup a batch runs, it has no time
+// budget, and it waits out another cleanup run rather than skipping, so a
+// catch-up that calls it before resuming chain ingest leaves the backlog a
+// cleanup after every batch would leave. It returns ctx's error when ctx
+// ends first and the cleanup's error when it fails; the rows it did not
+// reach stay marked spent for the periodic cleanup.
+//
+// The node does not leave catch-up until the drain returns, so when cleanup
+// is owed it logs its start and its end, with the rows it deleted, at Info.
+func (ls *LedgerState) DrainTrustedPrune(ctx context.Context) error {
+	e := &ls.externalIngest
+	e.applyMu.Lock()
+	defer e.applyMu.Unlock()
+	if e.unpruned == 0 {
+		return nil
+	}
+	start := time.Now()
+	ls.config.Logger.Info(
+		"draining consumed UTxO cleanup owed by trusted batches",
+		"component", "ledger",
+		"batches", e.unpruned,
+	)
+	pruned, err := ls.drainTrustedPrune(ctx)
+	ls.config.Logger.Info(
+		"finished consumed UTxO cleanup owed by trusted batches",
+		"component", "ledger",
+		"pruned", pruned,
+		"duration", time.Since(start),
+		"complete", err == nil,
+	)
+	return err
+}
+
+// drainTrustedPrune is DrainTrustedPrune's loop. It returns the rows it
+// deleted. The caller holds applyMu.
+func (ls *LedgerState) drainTrustedPrune(ctx context.Context) (int, error) {
+	e := &ls.externalIngest
+	total := 0
+	for e.unpruned > 0 {
+		outcome, pruned, err := ls.pruneTrustedBacklog(ctx)
+		total += pruned
+		switch outcome {
+		case trustedPruneDrained:
+			return total, nil
+		case trustedPruneUnfinished:
+			continue
+		case trustedPruneSkipped:
+			timer := time.NewTimer(trustedPruneRetryDelay)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return total, ctx.Err()
+			case <-timer.C:
+			}
+		case trustedPruneStopped:
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return total, ctxErr
+			}
+			return total, err
+		}
+	}
+	return total, nil
+}
+
+// pruneTrustedBacklog runs the trusted-batch cleanup up to the tip the last
+// trusted batch committed and, once it has drained every prunable row,
+// resets the count of batches owing one. A cleanup that skipped, failed or
+// ran out of budget leaves the count, so the next batch tries again, as it
+// did when every batch ran the cleanup. The caller holds applyMu.
+//
+// The cleanup must not reach past that tip even when the ledger tip has
+// moved on: a debt left by a skipped cleanup outlives the pause, and once the
+// live loop has applied blocks the tip is no longer below the certified
+// immutable tip, so pruning to it would raise the floor over a rollback
+// window.
+func (ls *LedgerState) pruneTrustedBacklog(
+	ctx context.Context,
+) (trustedPruneOutcome, int, error) {
+	e := &ls.externalIngest
+	outcome, pruned, err := ls.pruneConsumedUtxosAfterTrustedBatch(
+		ctx, e.pruneSlot,
+	)
+	if outcome == trustedPruneDrained {
+		e.unpruned = 0
+		e.prunedOnce = true
+	}
+	return outcome, pruned, err
+}
+
+// trustedPruneDue reports whether the batch that just committed should run
+// the trusted-batch cleanup. The first batch of a process always does, so a
+// backlog a stopped process left is pruned without waiting for a cadence it
+// never counted. The caller holds applyMu.
+func (ls *LedgerState) trustedPruneDue() bool {
+	e := &ls.externalIngest
+	every := trustedBatchPruneEvery
+	if ls.trustedPruneEvery > 0 {
+		every = ls.trustedPruneEvery
+	}
+	return !e.prunedOnce || e.unpruned >= every
+}
+
 func (ls *LedgerState) resumeChainIngest() {
 	e := &ls.externalIngest
 	e.pauseMu.Lock()
@@ -215,9 +332,11 @@ func (ls *LedgerState) resumeChainIngest() {
 // commits instead of failing on every attempt. Nothing is skipped: a single
 // block Badger still refuses fails the call.
 //
-// After a batch commits, spent UTxO rows up to its tip are hard-deleted with
-// the routine consumed-UTxO cleanup (see pruneConsumedUtxosAfterTrustedBatch).
-// API storage mode keeps them.
+// After the first batch of a process, and then once every
+// trustedBatchPruneEvery committed batches, spent UTxO rows up to the tip are
+// hard-deleted with the routine consumed-UTxO cleanup (see
+// pruneConsumedUtxosAfterTrustedBatch); DrainTrustedPrune runs the cleanup
+// the batches since still owe. API storage mode keeps them.
 //
 // A failure after the blocks are stored leaves the ledger tip where it was.
 // Calling again with the same expected point and blocks reuses the stored
@@ -279,8 +398,14 @@ func (ls *LedgerState) ApplyTrustedBatch(
 		}
 	}()
 	tip, err := ls.applyTrustedSplitting(ctx, expected, blocks)
-	if err == nil {
-		ls.pruneConsumedUtxosAfterTrustedBatch(ctx)
+	if after := ls.ledgerTipPoint(); !pointMatches(after, before) {
+		e.unpruned++
+		e.pruneSlot = after.Slot
+	}
+	if err == nil && ls.trustedPruneDue() {
+		// A cleanup that does not drain is retried after the next batch,
+		// or by DrainTrustedPrune; the batch itself has committed.
+		_, _, _ = ls.pruneTrustedBacklog(ctx)
 	}
 	return tip, err
 }

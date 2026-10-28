@@ -888,6 +888,15 @@ type UtxoStore interface {
 		models.AddressBalanceLimits,
 		types.Txn,
 	) (models.AddressBalance, error)
+	// GetUtxoBalanceByAddressAtSlot aggregates an exact address balance from
+	// retained UTxOs that existed at the requested slot. It returns
+	// models.ErrTooManyUtxoResults when more than maxResults UTxOs match.
+	GetUtxoBalanceByAddressAtSlot(
+		[]byte,
+		uint64,
+		int,
+		types.Txn,
+	) (models.AddressBalance, error)
 
 	// GetUtxosByAddressWithOrdering runs q against live UTxOs with ordering
 	// metadata. Snapshot-imported UTxOs without a producing transaction use
@@ -912,21 +921,14 @@ type UtxoStore interface {
 	) ([]models.UtxoWithHistory, error)
 
 	// CountUtxosByAddressWithOrdering returns the number of live UTxOs
-	// matching q's coarse SQL predicate, without materializing rows. It
-	// errors if q's address patterns require CBOR-based exact-address
-	// filtering (see models.RequiresExactAddressFilter), since the coarse
-	// predicate alone would over-count. See models.UtxoWithOrderingQuery.
+	// matching q's SQL predicate, without materializing rows. It errors if
+	// q's address patterns require CBOR-based exact-address filtering (see
+	// models.RequiresExactAddressFilter), since that coarse predicate alone
+	// would over-count. IndexedExactAddress is counted exactly in SQL.
 	CountUtxosByAddressWithOrdering(
 		*models.UtxoWithOrderingQuery,
 		types.Txn,
 	) (int, error)
-
-	// GetUtxosByAddressAtSlot retrieves all UTxOs for a given address at a specific slot.
-	GetUtxosByAddressAtSlot(
-		models.UtxoAddressPattern,
-		uint64,
-		types.Txn,
-	) ([]models.Utxo, error)
 
 	// GetUtxosByAssets retrieves all UTxOs that contain the specified assets.
 	// Pass nil for assetName to match all assets under the policy, or empty []byte{} to match assets with empty names.
@@ -939,7 +941,7 @@ type UtxoStore interface {
 		models.AssetHolderQuery,
 		types.Txn,
 	) ([]models.AssetHolder, int, error)
-	GetLiveAssetUtxosMissingAddress(
+	GetUtxosMissingAddress(
 		uint,
 		int,
 		types.Txn,
@@ -964,7 +966,7 @@ type UtxoStore interface {
 
 	// SetUtxosNotDeletedAfterSlot marks all UTxOs created after the given slot as not deleted.
 	SetUtxosNotDeletedAfterSlot(uint64, types.Txn) error
-	GetSpentAssetUtxosMissingAddressAfterSlot(
+	GetSpentUtxosMissingAddressAfterSlot(
 		uint64,
 		uint,
 		int,
@@ -1046,6 +1048,23 @@ type UtxoStore interface {
 		txn types.Txn,
 		refs []types.UtxoKey,
 		atSlot uint64,
+	) error
+}
+
+// LeiosClosureAccumulator identifies an accumulator that defers only API detail
+// rows while keeping UTxO, stake, certificates and closure context immediate.
+type LeiosClosureAccumulator interface {
+	types.MetadataBatchAccumulator
+	LeiosClosureRowsOnly() bool
+}
+
+// LeiosClosureBatcher is an optional performance capability. Providers without
+// it keep the ordinary closure setter and exactly the same ledger effects.
+type LeiosClosureBatcher interface {
+	NewLeiosClosureBatchAccumulator() types.MetadataBatchAccumulator
+	SetTransactionLeiosClosureBatched(
+		lcommon.Transaction, ocommon.Point, uint32, map[int]uint64, bool,
+		*uint64, types.MetadataBatchAccumulator, types.Txn, uint64,
 	) error
 }
 
@@ -2043,6 +2062,14 @@ type MetadataStore interface {
 		currentEpoch uint64,
 		txn types.Txn,
 	) ([]models.PoolRetiringRow, error)
+	// GetRetiringPoolsAtSlot is GetRetiringPools as the chain stood at the
+	// slot: certificates added after it neither announce a retirement nor
+	// cancel one.
+	GetRetiringPoolsAtSlot(
+		currentEpoch uint64,
+		slot uint64,
+		txn types.Txn,
+	) ([]models.PoolRetiringRow, error)
 	GetRetiringPoolsPage(
 		currentEpoch uint64,
 		limit, offset int,
@@ -2197,6 +2224,14 @@ type MetadataStore interface {
 	// (both columns NULL), are absent from the map.
 	GetPoolDepositsHeld(
 		[]lcommon.PoolKeyHash,
+		types.Txn,
+	) (map[string]uint64, error)
+
+	// GetPoolDepositsHeldAtSlot is GetPoolDepositsHeld over the
+	// registrations added at or before the slot.
+	GetPoolDepositsHeldAtSlot(
+		[]lcommon.PoolKeyHash,
+		uint64, // slot
 		types.Txn,
 	) (map[string]uint64, error)
 

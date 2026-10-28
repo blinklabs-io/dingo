@@ -357,6 +357,7 @@ func TestApplyEnvironmentRejectsEmptyPathComponent(t *testing.T) {
 
 func TestApplyEnvironmentReadsFileBackedConfig(t *testing.T) {
 	dir := t.TempDir()
+	require.NoError(t, os.Chmod(dir, 0o700))
 	tokenPath := filepath.Join(dir, "token")
 	require.NoError(
 		t,

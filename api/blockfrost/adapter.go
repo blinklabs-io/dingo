@@ -3436,7 +3436,8 @@ func (a *NodeAdapter) addressSummary(
 	}, nil
 }
 
-func (a *NodeAdapter) AddressUTXOs(ctx context.Context,
+func (a *NodeAdapter) AddressUTXOs(
+	ctx context.Context,
 	address string,
 	params PaginationParams,
 ) ([]AddressUTXOInfo, int, error) {
@@ -3477,49 +3478,76 @@ func (a *NodeAdapter) addressUTXOs(ctx context.Context,
 	if err != nil {
 		return nil, 0, err
 	}
-	// Shared between the reference scan and the page fetch below so the
-	// total and the returned page describe the same snapshot: two
-	// separate (nil-txn) calls could otherwise straddle a concurrent
-	// commit and return a page inconsistent with the reported total.
-	txn := a.ledgerState.Database().Transaction(ctx, false)
+	db := a.ledgerState.Database()
+	txn := db.Transaction(ctx, false)
 	defer txn.Release()
-
-	// Exact-address matching requires decoding output CBOR (see
-	// models.RequiresExactAddressFilter), so getting an accurate total
-	// requires visiting every coarse candidate either way. Fetch only
-	// references (no assets, no full rows) for that pass, and materialize
-	// full UTxO data via UtxosByRefs for just the requested page, instead
-	// of loading the address's entire UTxO history in full.
-	query := &models.UtxoWithOrderingQuery{
-		AddressPatterns: []models.UtxoAddressPattern{pattern},
+	offset, ok := paginationOffset(params)
+	if !ok || offset > math.MaxInt-params.Count-1 {
+		return nil, 0, models.ErrUtxoQueryBudgetExceeded
 	}
-	if filter != nil {
-		query.FilterByAsset = true
-		query.AssetPolicyID = filter.policyID
-		query.AssetName = filter.assetName
-	}
-	refs, err := a.ledgerState.Database().
-		MatchingUtxoRefsByAddressWithOrdering(ctx, query, txn)
-	if err != nil {
-		return nil, 0, fmt.Errorf(
-			"get address UTxOs for %q: %w",
-			address,
-			err,
+	requestedEnd := offset + params.Count
+	matchLimit := requestedEnd + 1
+	var (
+		pageRefs []models.UtxoId
+		total    int
+		indexed  bool
+	)
+	// The address index carries no asset predicate, so an asset-filtered
+	// listing always takes the bounded candidate scan.
+	if filter == nil {
+		pageRefs, total, indexed, err = db.UtxoRefsByIndexedAddressPage(
+			ctx,
+			addr,
+			params.Order == PaginationOrderDesc,
+			offset,
+			params.Count,
+			txn,
 		)
+		if err != nil {
+			return nil, 0, fmt.Errorf(
+				"get address UTxOs for %q: %w",
+				address,
+				err,
+			)
+		}
 	}
-	total := len(refs)
-	start, end := paginationRange(total, params)
-	var pageRefs []models.UtxoId
-	if params.Order == PaginationOrderDesc {
-		// Page N in descending order is ascending index range
-		// [total-end, total-start), reversed.
-		pageRefs = append(
-			[]models.UtxoId(nil),
-			refs[total-end:total-start]...,
+	if !indexed {
+		query := &models.UtxoWithOrderingQuery{
+			AddressPatterns: []models.UtxoAddressPattern{pattern},
+			Limit:           matchLimit,
+			Descending:      params.Order == PaginationOrderDesc,
+		}
+		if filter != nil {
+			// The asset predicate has no index, so scan to the candidate
+			// budget to keep the exact total the listing reported before.
+			query.Limit = max(matchLimit, database.ExactAddressCandidateScanLimit+1)
+			query.FilterByAsset = true
+			query.AssetPolicyID = filter.policyID
+			query.AssetName = filter.assetName
+		}
+		refs, exhausted, scanErr := db.MatchingUtxoRefsByAddressWithOrderingBounded(
+			ctx,
+			query,
+			txn,
+			database.ExactAddressCandidateScanLimit,
+			database.DefaultPublicUtxoCborBudget,
 		)
-		slices.Reverse(pageRefs)
-	} else {
-		pageRefs = refs[start:end]
+		if scanErr != nil {
+			return nil, 0, fmt.Errorf(
+				"get address UTxOs for %q: %w",
+				address,
+				scanErr,
+			)
+		}
+		pageRefs, total, err = addressUtxoPageRefs(
+			refs,
+			exhausted,
+			offset,
+			requestedEnd,
+		)
+		if err != nil {
+			return nil, 0, err
+		}
 	}
 
 	paged, err := a.orderedUtxosByRefs(ctx, pageRefs, txn)
@@ -3580,6 +3608,24 @@ func (a *NodeAdapter) addressUTXOs(ctx context.Context,
 		})
 	}
 	return ret, total, nil
+}
+
+func addressUtxoPageRefs(
+	refs []models.UtxoId,
+	exhausted bool,
+	offset int,
+	requestedEnd int,
+) ([]models.UtxoId, int, error) {
+	total := -1
+	if !exhausted && len(refs) < requestedEnd {
+		return nil, 0, models.ErrUtxoQueryBudgetExceeded
+	}
+	if exhausted {
+		total = len(refs)
+	}
+	start := min(offset, len(refs))
+	end := min(requestedEnd, len(refs))
+	return refs[start:end], total, nil
 }
 
 // orderedUtxosByRefs fetches full UTxO rows (including assets) for refs in
@@ -3806,19 +3852,20 @@ func (a *NodeAdapter) transactionPositionInfos(
 	return ret, nil
 }
 
-// MetadataTransactions returns paginated transaction metadata values for the
-// requested label in JSON form.
-func (a *NodeAdapter) MetadataTransactions(
+// metadataLabelPage returns one page of transactions carrying the label and
+// the label's total. Count and page share one read transaction so they agree,
+// and the page query is skipped when the offset is at or past the total, since
+// it can only return no rows.
+func (a *NodeAdapter) metadataLabelPage(
+	ctx context.Context,
 	label uint64,
 	params PaginationParams,
-) ([]MetadataTransactionJSONInfo, int, error) {
+) ([]models.Transaction, int, error) {
 	db := a.ledgerState.Database()
+	txn := db.Transaction(ctx, false)
+	defer txn.Release()
 
-	total, err := db.CountTransactionsByMetadataLabel(
-		context.Background(),
-		label,
-		nil,
-	)
+	total, err := db.CountTransactionsByMetadataLabel(ctx, label, txn)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
 			"count transactions by metadata label %d: %w",
@@ -3826,14 +3873,18 @@ func (a *NodeAdapter) MetadataTransactions(
 			err,
 		)
 	}
+	offset, ok := paginationOffset(params)
+	if !ok || offset >= total {
+		return nil, total, nil
+	}
 
 	txs, err := db.GetTransactionsByMetadataLabel(
-		context.Background(),
+		ctx,
 		label,
 		params.Count,
-		(params.Page-1)*params.Count,
+		offset,
 		params.Order == PaginationOrderDesc,
-		nil,
+		txn,
 	)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
@@ -3841,6 +3892,20 @@ func (a *NodeAdapter) MetadataTransactions(
 			label,
 			err,
 		)
+	}
+	return txs, total, nil
+}
+
+// MetadataTransactions returns paginated transaction metadata values for the
+// requested label in JSON form.
+func (a *NodeAdapter) MetadataTransactions(
+	ctx context.Context,
+	label uint64,
+	params PaginationParams,
+) ([]MetadataTransactionJSONInfo, int, error) {
+	txs, total, err := a.metadataLabelPage(ctx, label, params)
+	if err != nil {
+		return nil, 0, err
 	}
 
 	ret := make([]MetadataTransactionJSONInfo, 0, len(txs))
@@ -3868,38 +3933,13 @@ func (a *NodeAdapter) MetadataTransactions(
 // MetadataTransactionsCBOR returns paginated transaction metadata values for
 // the requested label in CBOR-hex form.
 func (a *NodeAdapter) MetadataTransactionsCBOR(
+	ctx context.Context,
 	label uint64,
 	params PaginationParams,
 ) ([]MetadataTransactionCBORInfo, int, error) {
-	db := a.ledgerState.Database()
-
-	total, err := db.CountTransactionsByMetadataLabel(
-		context.Background(),
-		label,
-		nil,
-	)
+	txs, total, err := a.metadataLabelPage(ctx, label, params)
 	if err != nil {
-		return nil, 0, fmt.Errorf(
-			"count transactions by metadata label %d: %w",
-			label,
-			err,
-		)
-	}
-
-	txs, err := db.GetTransactionsByMetadataLabel(
-		context.Background(),
-		label,
-		params.Count,
-		(params.Page-1)*params.Count,
-		params.Order == PaginationOrderDesc,
-		nil,
-	)
-	if err != nil {
-		return nil, 0, fmt.Errorf(
-			"get transactions by metadata label %d: %w",
-			label,
-			err,
-		)
+		return nil, 0, err
 	}
 
 	ret := make([]MetadataTransactionCBORInfo, 0, len(txs))
@@ -5689,22 +5729,4 @@ func bigIntString(v *big.Int) string {
 		return "0"
 	}
 	return v.String()
-}
-
-func paginationRange(
-	total int,
-	params PaginationParams,
-) (int, int) {
-	if total <= 0 || params.Count <= 0 || params.Page <= 0 {
-		return total, total
-	}
-	if params.Page-1 > (math.MaxInt / params.Count) {
-		return total, total
-	}
-	start := (params.Page - 1) * params.Count
-	if start >= total {
-		return total, total
-	}
-	end := min(start+params.Count, total)
-	return start, end
 }

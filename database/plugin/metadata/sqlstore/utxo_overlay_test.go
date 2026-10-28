@@ -267,6 +267,26 @@ func TestBatchUtxoOverlayMatchesPerRowPath(t *testing.T) {
 	require.Contains(t, states[1], "name=utxo|seq=")
 }
 
+// Core storage mode does not index UTxO addresses, so the overlay, which
+// only runs in that mode, writes no utxo_address row even for outputs that
+// carry assets.
+func TestBatchUtxoOverlayWritesNoAddressInCoreMode(t *testing.T) {
+	t.Parallel()
+	chain := buildOverlayChain(t, 4)
+	store := newForeignKeySQLiteStore(t)
+	seedOverlayChain(t, store, chain)
+	applyOverlayChain(t, store, chain, true)
+	var assets, addresses int
+	require.NoError(t, store.writeDB.QueryRowContext(
+		context.Background(), `SELECT COUNT(*) FROM asset`,
+	).Scan(&assets))
+	require.NoError(t, store.writeDB.QueryRowContext(
+		context.Background(), `SELECT COUNT(*) FROM utxo_address`,
+	).Scan(&addresses))
+	require.Positive(t, assets)
+	require.Zero(t, addresses)
+}
+
 // An input the caller did not name for the prefetch is read on first use
 // and resolves the same way.
 func TestBatchUtxoOverlayResolvesUnprefetchedInputs(t *testing.T) {
@@ -318,8 +338,7 @@ func overlayBatchOps(
 
 // TestBatchUtxoOverlayStatementCount requires the overlay's SQL statements
 // per batch not to grow with the batch: a batch four times as long issues
-// the same number of every statement kind except one transaction row insert
-// per transaction, which the overlay leaves per row.
+// the same number of every statement kind, transaction rows included.
 func TestBatchUtxoOverlayStatementCount(t *testing.T) {
 	t.Parallel()
 	const small, large = 8, 32
@@ -329,16 +348,142 @@ func TestBatchUtxoOverlayStatementCount(t *testing.T) {
 	t.Logf("overlay n=%d: %v", small, smallOps)
 	t.Logf("overlay n=%d: %v", large, largeOps)
 	t.Logf("per-row n=%d: %v", large, perRowOps)
-	for _, op := range []string{"update", "delete", "select", "other"} {
+	for _, op := range []string{
+		"insert", "update", "delete", "select", "other",
+	} {
 		require.Equal(t, smallOps[op], largeOps[op],
 			"%s statements grew with the batch", op)
 	}
-	require.Equal(
-		t,
-		float64(large-small),
-		largeOps["insert"]-smallOps["insert"],
-		"inserts grew by more than one transaction row per transaction",
-	)
+}
+
+// buildOverlayStakeChain is an overlayChain over n credentials, each holding
+// one pre-batch output. Batch transaction i spends credential i's output and,
+// for even i, pays a smaller output back to it, so its live-stake row is
+// updated in place; for odd i it pays a credential the batch introduces, so
+// credential i is drained to zero and, having no account, loses its row.
+func buildOverlayStakeChain(t testing.TB, n int) overlayChain {
+	t.Helper()
+	address := func(stake string) lcommon.Address {
+		addr, err := lcommon.NewAddressFromParts(
+			lcommon.AddressTypeKeyKey, lcommon.AddressNetworkTestnet,
+			lcommon.NewBlake2b224([]byte("overlay-stake-payment")).Bytes(),
+			lcommon.NewBlake2b224([]byte(stake)).Bytes(),
+		)
+		require.NoError(t, err)
+		return addr
+	}
+	output := func(stake string, lovelace uint64) lcommon.TransactionOutput {
+		out, err := mockledger.NewTransactionOutputBuilder().
+			WithAddress(address(stake).String()).WithLovelace(lovelace).Build()
+		require.NoError(t, err)
+		return out
+	}
+	var chain overlayChain
+	for i := range n {
+		own := fmt.Sprintf("overlay-stake-%d", i)
+		pre := mockledger.NewTransactionBuilder()
+		pre.WithId(overlayTxID(0x04, i))
+		pre.WithOutputs(output(own, 3_000_000))
+		pre.WithValid(true)
+		chain.prebatch = append(chain.prebatch, pre)
+		chain.inputs = append(chain.inputs, models.UtxoId{
+			Hash: overlayTxID(0x04, i), Idx: 0,
+		})
+		payee := own
+		if i%2 == 1 {
+			payee = "overlay-stake-fresh"
+		}
+		tx := mockledger.NewTransactionBuilder()
+		tx.WithId(overlayTxID(0x05, i))
+		tx.WithInputs(overlayTxInput(t, overlayTxID(0x04, i), 0))
+		tx.WithOutputs(output(payee, 2_000_000))
+		tx.WithValid(true)
+		chain.batch = append(chain.batch, tx)
+	}
+	return chain
+}
+
+// overlayStakeState dumps every reward_live_stake column, ids included, and
+// every id sequence.
+func overlayStakeState(t testing.TB, store *Store) string {
+	t.Helper()
+	var out strings.Builder
+	for _, query := range []string{
+		`SELECT * FROM reward_live_stake`,
+		`SELECT * FROM sqlite_sequence`,
+	} {
+		rows, err := store.writeDB.QueryContext(context.Background(), query)
+		require.NoError(t, err)
+		cols, err := rows.Columns()
+		require.NoError(t, err)
+		var lines []string
+		for rows.Next() {
+			values := make([]any, len(cols))
+			ptrs := make([]any, len(cols))
+			for i := range values {
+				ptrs[i] = &values[i]
+			}
+			require.NoError(t, rows.Scan(ptrs...))
+			parts := make([]string, len(cols))
+			for i, col := range cols {
+				if b, ok := values[i].([]byte); ok {
+					parts[i] = col + "=" + hex.EncodeToString(b)
+				} else {
+					parts[i] = fmt.Sprintf("%s=%v", col, values[i])
+				}
+			}
+			lines = append(lines, strings.Join(parts, "|"))
+		}
+		require.NoError(t, rows.Err())
+		require.NoError(t, rows.Close())
+		sort.Strings(lines)
+		fmt.Fprintf(&out, "## %s\n%s\n", query, strings.Join(lines, "\n"))
+	}
+	return out.String()
+}
+
+func overlayStakeBatchOps(
+	t *testing.T,
+	n int,
+	overlay bool,
+) (map[string]float64, string) {
+	t.Helper()
+	reg := prometheus.NewRegistry()
+	store := newMigratedSQLiteStoreWithRegistry(t, reg)
+	chain := buildOverlayStakeChain(t, n)
+	seedOverlayChain(t, store, chain)
+	before := overlayOps(t, reg)
+	applyOverlayChain(t, store, chain, overlay)
+	after := overlayOps(t, reg)
+	for op := range after {
+		after[op] -= before[op]
+	}
+	return after, overlayStakeState(t, store)
+}
+
+// TestBatchUtxoOverlayStakeStatementCount requires the live-stake write of a
+// batch not to issue statements per credential: a batch touching four times
+// as many credentials, updating half of their rows and removing the other
+// half, issues the same number of every statement kind, and leaves the
+// per-row path's rows, ids and sequences.
+func TestBatchUtxoOverlayStakeStatementCount(t *testing.T) {
+	t.Parallel()
+	const small, large = 8, 32
+	smallOps, _ := overlayStakeBatchOps(t, small, true)
+	largeOps, overlayState := overlayStakeBatchOps(t, large, true)
+	perRowOps, perRowState := overlayStakeBatchOps(t, large, false)
+	t.Logf("overlay n=%d: %v", small, smallOps)
+	t.Logf("overlay n=%d: %v", large, largeOps)
+	t.Logf("per-row n=%d: %v", large, perRowOps)
+	require.Equal(t, perRowState, overlayState,
+		"the overlay's live-stake rows diverged from the per-row path")
+	require.Contains(t, overlayState, "name=reward_live_stake|seq=")
+	for _, op := range []string{
+		"insert", "update", "delete", "select", "other",
+	} {
+		require.Equal(t, smallOps[op], largeOps[op],
+			"%s statements grew with the credentials touched", op)
+	}
 }
 
 // TestBatchUtxoOverlayReadBarrier reads, inside the batch, rows the overlay
@@ -385,6 +530,127 @@ func TestBatchUtxoOverlayReadBarrier(t *testing.T) {
 		"live stake read inside the batch is stale")
 	require.NoError(t, store.FlushBatch(acc, txn))
 	require.NoError(t, txn.Commit())
+}
+
+// Transaction rows are written in bulk, but a statement that reads them or
+// writes a row referencing them must find them: a lookup by hash sees the
+// staged row's id, and a certificate row naming that id passes its foreign
+// key check, which SQLite runs at the statement.
+func TestBatchUtxoOverlayTransactionBarrier(t *testing.T) {
+	t.Parallel()
+	chain := buildOverlayChain(t, 2)
+	reference := newForeignKeySQLiteStore(t)
+	seedOverlayChain(t, reference, chain)
+	applyOverlayChain(t, reference, chain, false)
+	var wantID int64
+	require.NoError(t, reference.writeDB.QueryRowContext(
+		context.Background(),
+		`SELECT id FROM "transaction" WHERE hash = ?`,
+		chain.batch[0].Hash().Bytes(),
+	).Scan(&wantID))
+
+	store := newForeignKeySQLiteStore(t)
+	seedOverlayChain(t, store, chain)
+	txn := store.Transaction(context.Background())
+	defer func() { _ = txn.Rollback() }()
+	acc := store.NewBatchAccumulator()
+	enabled, err := store.EnableBatchUtxoOverlay(acc, txn, chain.inputs, nil)
+	require.NoError(t, err)
+	require.True(t, enabled)
+	tx := chain.batch[0]
+	require.NoError(t, store.SetTransactionBatched(
+		tx, ocommon.Point{Slot: 1_000, Hash: tx.Hash().Bytes()},
+		0, nil, true, acc, txn, 0,
+	))
+	db, ctx, err := store.dbFromTxn(txn)
+	require.NoError(t, err)
+	var id int64
+	require.NoError(t, db.QueryRowContext(ctx,
+		`SELECT id FROM "transaction" WHERE hash = ?`, tx.Hash().Bytes(),
+	).Scan(&id), "a reader missed a transaction row the batch staged")
+	require.Equal(t, wantID, id, "the staged row took another id")
+
+	tx = chain.batch[1]
+	require.NoError(t, store.SetTransactionBatched(
+		tx, ocommon.Point{Slot: 1_001, Hash: tx.Hash().Bytes()},
+		0, nil, true, acc, txn, 0,
+	))
+	_, err = db.ExecContext(ctx,
+		`INSERT INTO certs (transaction_id, cert_index, cert_type, slot)
+		 VALUES (?, 0, 0, 1001)`, wantID+1,
+	)
+	require.NoError(t, err,
+		"a row referencing a staged transaction failed its foreign key")
+	require.NoError(t, store.FlushBatch(acc, txn))
+	require.NoError(t, txn.Commit())
+}
+
+// A batch transaction whose hash already has a row makes the explicit-id
+// transaction insert fail UNIQUE, which is an overlay conflict: the per-row
+// path's ON CONFLICT branch reuses the existing row.
+func TestBatchUtxoOverlayReportsTransactionConflict(t *testing.T) {
+	t.Parallel()
+	chain := buildOverlayChain(t, 2)
+	store := newMigratedSQLiteStore(t)
+	seedOverlayChain(t, store, chain)
+	_, err := store.writeDB.ExecContext(context.Background(),
+		`INSERT INTO "transaction" (hash, slot, valid) VALUES (?, 5, 1)`,
+		chain.batch[1].Hash().Bytes())
+	require.NoError(t, err)
+	txn := store.Transaction(context.Background())
+	defer func() { _ = txn.Rollback() }()
+	acc := store.NewBatchAccumulator()
+	enabled, err := store.EnableBatchUtxoOverlay(acc, txn, chain.inputs, nil)
+	require.NoError(t, err)
+	require.True(t, enabled)
+	for i, tx := range chain.batch {
+		require.NoError(t, store.SetTransactionBatched(
+			tx, ocommon.Point{Slot: 1_000 + uint64(i), Hash: tx.Hash().Bytes()},
+			0, nil, true, acc, txn, 0,
+		))
+	}
+	require.ErrorIs(t,
+		store.FlushBatch(acc, txn), types.ErrBatchUtxoOverlayConflict,
+	)
+}
+
+// "transaction".id is AUTOINCREMENT, so after a rollback deleted the
+// highest rows the per-row insert continues from sqlite_sequence, not from
+// MAX(id). The staged rows must take the same ids and leave the same
+// sequence.
+func TestBatchUtxoOverlayTransactionIDsAfterRollback(t *testing.T) {
+	t.Parallel()
+	state := func(overlay bool) string {
+		store := newForeignKeySQLiteStore(t)
+		chain := buildOverlayChain(t, 4)
+		seedOverlayChain(t, store, chain)
+		_, err := store.writeDB.ExecContext(context.Background(),
+			`INSERT INTO "transaction" (hash, slot, valid) VALUES (X'AA', 900, 1)`)
+		require.NoError(t, err)
+		require.NoError(t, store.DeleteTransactionsAfterSlot(899, nil))
+		applyOverlayChain(t, store, chain, overlay)
+		var out strings.Builder
+		for _, query := range []string{
+			`SELECT id, hex(hash) FROM "transaction" ORDER BY id`,
+			`SELECT name, seq FROM sqlite_sequence WHERE name = 'transaction'`,
+		} {
+			rows, err := store.writeDB.QueryContext(
+				context.Background(), query,
+			)
+			require.NoError(t, err)
+			for rows.Next() {
+				var a, b any
+				require.NoError(t, rows.Scan(&a, &b))
+				fmt.Fprintf(&out, "%v=%v\n", a, b)
+			}
+			require.NoError(t, rows.Err())
+			require.NoError(t, rows.Close())
+		}
+		return out.String()
+	}
+	perRow := state(false)
+	require.Equal(t, perRow, state(true),
+		"the staged transaction rows took other ids than the per-row path")
 }
 
 // The overlay keeps no undo log. Rolling back to a savepoint across
@@ -509,9 +775,11 @@ func TestReadsOverlayTables(t *testing.T) {
 
 // TestBatchUtxoOverlayStatementPlans pins the plans of the overlay's bulk
 // statements against a skewed utxo table: the prefetch probes
-// tx_id_output_idx once per key, and the spend mark and the delete find rows
-// by primary key. No plan may use a deleted_slot index or scan utxo, with no
-// statistics, with statistics, and with the catch-up indexes dropped.
+// tx_id_output_idx once per key, the spend mark and the delete find rows by
+// primary key, and the live-stake prefetches probe the unique credential
+// indexes of reward_live_stake and account. No plan may use a deleted_slot
+// index or scan utxo, with no statistics, with statistics, and with the
+// catch-up indexes dropped.
 func TestBatchUtxoOverlayStatementPlans(t *testing.T) {
 	skipPlanTestUnderRace(t)
 	// Not t.Parallel: the stages rewrite this store's statistics and
@@ -526,10 +794,12 @@ func TestBatchUtxoOverlayStatementPlans(t *testing.T) {
 	prefetchArgs := make([]any, 0, 2*keys)
 	markArgs := make([]any, 0, 3*keys)
 	deleteArgs := make([]any, 0, keys)
+	stakeArgs := make([]any, 0, 2*keys)
 	for i := range keys {
 		prefetchArgs = append(prefetchArgs, skewedUtxoTxID(i*7), i%4)
 		markArgs = append(markArgs, int64(i+1), int64(9), make([]byte, 32))
 		deleteArgs = append(deleteArgs, int64(i+1))
+		stakeArgs = append(stakeArgs, 0, skewedUtxoTxID(i)[:28])
 	}
 	deleteQuery := `DELETE FROM utxo WHERE id IN (?, ?, ?, ?, ?)`
 
@@ -560,8 +830,23 @@ func TestBatchUtxoOverlayStatementPlans(t *testing.T) {
 		del := connQueryPlan(t, conn, deleteQuery, deleteArgs...)
 		require.Contains(t, del, "USING INTEGER PRIMARY KEY (rowid=?)",
 			stage.name+": "+del)
+		stakeRows := connQueryPlan(
+			t, conn, overlayStakeRowsQuery(keys), stakeArgs...,
+		)
+		require.Contains(t, stakeRows,
+			"SEARCH r USING INDEX idx_reward_live_stake_cred "+
+				"(credential_tag=? AND staking_key=?)",
+			stage.name+": "+stakeRows)
+		stakeAccounts := connQueryPlan(
+			t, conn, overlayStakeAccountsQuery(keys), stakeArgs...,
+		)
+		require.Contains(t, stakeAccounts,
+			"SEARCH a USING INDEX idx_account_credential "+
+				"(credential_tag=? AND staking_key=?)",
+			stage.name+": "+stakeAccounts)
 		for name, plan := range map[string]string{
 			"prefetch": prefetch, "mark": mark, "delete": del,
+			"stake_rows": stakeRows, "stake_accounts": stakeAccounts,
 		} {
 			t.Logf("%s/%s:\n%s", stage.name, name, plan)
 			require.NotContains(t, plan, "deleted",
@@ -614,9 +899,12 @@ func TestOverlayWriteErrorClassifiesOwnTables(t *testing.T) {
 		"UNIQUE constraint failed: utxo.id (1555)":                     true,
 		"UNIQUE constraint failed: asset.id (1555)":                    true,
 		"UNIQUE constraint failed: reward_live_stake.id (1555)":        true,
+		"UNIQUE constraint failed: transaction.hash (2067)":            true,
+		"UNIQUE constraint failed: transaction.id (1555)":              true,
+		"FOREIGN KEY constraint failed (787)":                          true,
 		"UNIQUE constraint failed: redeemer_script.transaction_id":     false,
 		"UNIQUE constraint failed: utxo_address.utxo_id":               false,
-		"database is locked": false,
+		"database is locked":                                           false,
 	} {
 		err := overlayWriteError("write", errors.New(msg))
 		require.Equal(t, want,

@@ -27,6 +27,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	dledger "github.com/blinklabs-io/dingo/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -239,7 +240,6 @@ func TestAccountBalanceHistoricalByIndex(t *testing.T) {
 	req := balanceRequest(addr)
 	req.BlockIdentifier = byIndex(120)
 	rec := postJSON(t, h, "/account/balance", req)
-
 	resp := decodeResponse[AccountBalanceResponse](t, rec)
 	require.Equal(
 		t,
@@ -248,6 +248,37 @@ func TestAccountBalanceHistoricalByIndex(t *testing.T) {
 	)
 	require.Len(t, resp.Balances, 1)
 	require.Equal(t, "7000000", resp.Balances[0].Value)
+}
+
+func TestAccountBalanceHistoricalAggregatesLargeAddress(t *testing.T) {
+	t.Parallel()
+
+	deps := newTestDeps()
+	addr := testAddress(t, lcommon.AddressTypeKeyNone, testKeyHash(0x38), nil)
+	deps.database.blockByIndex = func(uint64) (models.Block, error) {
+		return models.Block{Hash: testHash(0x39), Number: 120, Slot: 1200}, nil
+	}
+	deps.ledger.utxosAtSlot = func(lcommon.Address, uint64) ([]models.Utxo, error) {
+		t.Fatal("historical balance must not materialize UTxOs")
+		return nil, nil
+	}
+	deps.ledger.balanceAtSlot = func(
+		ctx context.Context,
+		got lcommon.Address,
+		slot uint64,
+	) (models.AddressBalance, error) {
+		require.NoError(t, ctx.Err())
+		require.Equal(t, addr, got.String())
+		require.Equal(t, uint64(1200), slot)
+		return models.AddressBalance{Lovelace: 1_001_000_000, UtxoCount: 1001}, nil
+	}
+	h := newTestHandler(t, deps)
+	req := balanceRequest(addr)
+	req.BlockIdentifier = byIndex(120)
+	rec := postJSON(t, h, "/account/balance", req)
+
+	resp := decodeResponse[AccountBalanceResponse](t, rec)
+	require.Equal(t, "1001000000", resp.Balances[0].Value)
 }
 
 // TestAccountBalanceHistoricalByHash covers pinning by block hash,
@@ -415,6 +446,44 @@ func TestAccountBalanceHistoricalLedgerError(t *testing.T) {
 		t, rec, ErrInternal, http.StatusInternalServerError,
 	)
 	require.Nil(t, got.Details)
+}
+
+func TestAccountBalanceHistoricalBudgetErrorIsInvalidRequest(t *testing.T) {
+	t.Parallel()
+
+	for _, queryErr := range []error{
+		models.ErrUtxoQueryBudgetExceeded,
+		models.ErrTooManyUtxoResults,
+		dledger.ErrHistoricalStateUnavailable,
+	} {
+		t.Run(queryErr.Error(), func(t *testing.T) {
+			deps := newTestDeps()
+			addr := testAddress(
+				t, lcommon.AddressTypeKeyNone, testKeyHash(0x3c), nil,
+			)
+			deps.database.blockByIndex = func(
+				uint64,
+			) (models.Block, error) {
+				return models.Block{
+					Hash: testHash(0x3d), Number: 4, Slot: 40,
+				}, nil
+			}
+			deps.ledger.utxosAtSlot = func(
+				lcommon.Address, uint64,
+			) ([]models.Utxo, error) {
+				return nil, queryErr
+			}
+			h := newTestHandler(t, deps)
+
+			req := balanceRequest(addr)
+			req.BlockIdentifier = byIndex(4)
+			rec := postJSON(t, h, "/account/balance", req)
+
+			requireMeshError(
+				t, rec, ErrInvalidRequest, http.StatusInternalServerError,
+			)
+		})
+	}
 }
 
 func TestAccountBalanceInvalidAccount(t *testing.T) {

@@ -44,7 +44,7 @@ type UtxorpcLedgerState interface {
 		hash []byte,
 	) (models.Block, error)
 	CardanoNodeConfig() *cardano.CardanoNodeConfig
-	Datum(hash []byte) (*models.Datum, error)
+	Datums(ctx context.Context, hashes [][]byte) ([]*models.Datum, error)
 	EvaluateTxContext(
 		ctx context.Context,
 		tx lcommon.Transaction,
@@ -89,7 +89,11 @@ type UtxorpcLedgerState interface {
 	Tip() ochainsync.Tip
 	TransactionByHash(ctx context.Context, hash []byte) (*models.Transaction, error)
 	UtxoByRef(txId []byte, outputIdx uint32) (*models.Utxo, error)
-	UtxosByRefs(refs []models.UtxoId) ([]models.Utxo, error)
+	UtxosByRefsBounded(
+		ctx context.Context,
+		refs []models.UtxoId,
+		maxBytes int64,
+	) ([]models.Utxo, error)
 	UtxosByAddressBoundedPage(
 		ctx context.Context,
 		q *models.UtxoWithOrderingQuery,

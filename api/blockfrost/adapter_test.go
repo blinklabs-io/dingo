@@ -197,16 +197,15 @@ func TestNodeAdapterAccountUTXOsEmpty(t *testing.T) {
 }
 
 // TestNodeAdapterAddressUTXOsLargeResultSetPagination seeds one address with
-// a large number of live UTxOs and proves ascending and descending
-// pagination both return the correct window. It exercises the windowed
-// reverse in NodeAdapter.AddressUTXOs (adapter.go): descending pagination
-// used to swap-reverse the address's entire UTxO history before slicing out
-// a page; reversing only the requested window must produce the identical
-// ordering for a large result set (see dingo/3520).
+// more UTxOs than the public aggregation limit and proves ascending and
+// descending pagination both return bounded windows in the requested order.
 func TestNodeAdapterAddressUTXOsLargeResultSetPagination(t *testing.T) {
 	t.Parallel()
 
-	adapter, raw, db := newDBBackedAdapter(t)
+	adapter, raw, db := newDBBackedAdapterWithStorageMode(
+		t,
+		types.StorageModeAPI,
+	)
 
 	payment := bytes.Repeat([]byte{0x99}, lcommon.AddressHashSize)
 	addr, err := lcommon.NewAddressFromParts(
@@ -217,7 +216,7 @@ func TestNodeAdapterAddressUTXOsLargeResultSetPagination(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	const total = 250
+	const total = database.ExactAddressCandidateScanLimit + 1
 	for i := range total {
 		txHash := make([]byte, 32)
 		binary.BigEndian.PutUint32(txHash[28:], uint32(i)+1)
@@ -231,6 +230,7 @@ func TestNodeAdapterAddressUTXOsLargeResultSetPagination(t *testing.T) {
 				TxId:       txHash,
 				OutputIdx:  0,
 				PaymentKey: payment,
+				Address:    []byte(addr.String()),
 				AddedSlot:  slot,
 				Amount:     types.Uint64(amount),
 			}},
@@ -239,40 +239,492 @@ func TestNodeAdapterAddressUTXOsLargeResultSetPagination(t *testing.T) {
 	}
 
 	t.Run("ascending page stops at the requested window", func(t *testing.T) {
-		items, total, err := adapter.AddressUTXOs(context.Background(),
+		items, gotTotal, err := adapter.AddressUTXOs(
+			context.Background(),
 			addr.String(),
 			PaginationParams{Count: 10, Page: 3, Order: PaginationOrderAsc},
 		)
 		require.NoError(t, err)
-		assert.Equal(t, 250, total)
+		assert.Equal(t, total, gotTotal)
 		require.Len(t, items, 10)
 		assert.Equal(t, "21000000", items[0].Amount[0].Quantity)
 		assert.Equal(t, "30000000", items[len(items)-1].Amount[0].Quantity)
 	})
 
 	t.Run("descending page matches a full-history reverse", func(t *testing.T) {
-		items, total, err := adapter.AddressUTXOs(context.Background(),
+		items, gotTotal, err := adapter.AddressUTXOs(
+			context.Background(),
 			addr.String(),
 			PaginationParams{Count: 10, Page: 5, Order: PaginationOrderDesc},
 		)
 		require.NoError(t, err)
-		assert.Equal(t, 250, total)
+		assert.Equal(t, total, gotTotal)
 		require.Len(t, items, 10)
 		// Descending page 5 (count 10) is the 41st-newest through the
-		// 50th-newest UTxO: amounts 210000000 down to 201000000.
-		assert.Equal(t, "210000000", items[0].Amount[0].Quantity)
-		assert.Equal(t, "201000000", items[len(items)-1].Amount[0].Quantity)
+		// 50th-newest UTxO.
+		assert.Equal(t, "9961000000", items[0].Amount[0].Quantity)
+		assert.Equal(t, "9952000000", items[len(items)-1].Amount[0].Quantity)
 	})
 
 	t.Run("descending page past the end is empty", func(t *testing.T) {
-		items, total, err := adapter.AddressUTXOs(context.Background(),
+		items, gotTotal, err := adapter.AddressUTXOs(
+			context.Background(),
 			addr.String(),
-			PaginationParams{Count: 10, Page: 26, Order: PaginationOrderDesc},
+			PaginationParams{Count: 10, Page: 1002, Order: PaginationOrderDesc},
 		)
 		require.NoError(t, err)
-		assert.Equal(t, 250, total)
+		assert.Equal(t, total, gotTotal)
 		assert.Empty(t, items)
 	})
+
+	t.Run("ascending page beyond candidate scan limit", func(t *testing.T) {
+		items, gotTotal, err := adapter.AddressUTXOs(
+			context.Background(),
+			addr.String(),
+			PaginationParams{
+				Count: 1,
+				Page:  database.ExactAddressCandidateScanLimit + 1,
+				Order: PaginationOrderAsc,
+			},
+		)
+		require.NoError(t, err)
+		assert.Equal(t, total, gotTotal)
+		require.Len(t, items, 1)
+		assert.Equal(t, "10001000000", items[0].Amount[0].Quantity)
+	})
+}
+
+func TestNodeAdapterAddressUTXOsDescendingPageStopsAtRequestedWindow(t *testing.T) {
+	t.Parallel()
+
+	adapter, raw, db := newDBBackedAdapter(t)
+
+	payment := bytes.Repeat([]byte{0x97}, lcommon.AddressHashSize)
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		payment,
+		nil,
+	)
+	require.NoError(t, err)
+
+	const total = database.DefaultPublicUtxoResultLimit + 2
+	for i := range total {
+		txHash := make([]byte, 32)
+		binary.BigEndian.PutUint32(txHash[28:], uint32(i)+1)
+		amount := (uint64(i) + 1) * 1_000_000
+		insertAdapterTransaction(t, raw, &models.Transaction{
+			Hash:       txHash,
+			Slot:       uint64(i) + 1,
+			BlockIndex: 0,
+			Outputs: []models.Utxo{{
+				TxId:       txHash,
+				OutputIdx:  0,
+				PaymentKey: payment,
+				AddedSlot:  uint64(i) + 1,
+				Amount:     types.Uint64(amount),
+			}},
+		})
+		if i == 0 || i == total-3 {
+			// A first-page descending read must not inspect the oldest row or
+			// the third-newest row, beyond the requested result window.
+			require.NoError(t, db.BlobTxn(true).Do(func(txn *database.Txn) error {
+				return db.Blob().SetUtxo(txn.Blob(), txHash, 0, []byte{0xff})
+			}))
+			continue
+		}
+		storePointerOutputCbor(t, db, txHash, 0, addr, amount)
+	}
+
+	items, resultTotal, err := adapter.AddressUTXOs(
+		t.Context(),
+		addr.String(),
+		PaginationParams{Count: 1, Page: 1, Order: PaginationOrderDesc},
+	)
+	require.NoError(t, err)
+	require.Len(t, items, 1)
+	assert.Equal(t, -1, resultTotal)
+	assert.Equal(t, "1002000000", items[0].Amount[0].Quantity)
+}
+
+func TestNodeAdapterAddressUTXOsStopsAfterRequestedWindow(t *testing.T) {
+	t.Parallel()
+
+	adapter, raw, db := newDBBackedAdapter(t)
+	payment := bytes.Repeat([]byte{0x98}, lcommon.AddressHashSize)
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		payment,
+		nil,
+	)
+	require.NoError(t, err)
+
+	for i := range 12 {
+		txHash := make([]byte, 32)
+		binary.BigEndian.PutUint32(txHash[28:], uint32(i)+1)
+		insertAdapterTransaction(t, raw, &models.Transaction{
+			Hash:       txHash,
+			Slot:       uint64(i) + 1,
+			BlockIndex: 0,
+			Outputs: []models.Utxo{{
+				TxId:       txHash,
+				OutputIdx:  0,
+				PaymentKey: payment,
+				AddedSlot:  uint64(i) + 1,
+				Amount:     types.Uint64(1_000_000),
+			}},
+		})
+		if i < 11 {
+			storePointerOutputCbor(t, db, txHash, 0, addr, 1_000_000)
+		} else {
+			require.NoError(t, db.BlobTxn(true).Do(func(txn *database.Txn) error {
+				return db.Blob().SetUtxo(txn.Blob(), txHash, 0, []byte{0xff})
+			}))
+		}
+	}
+
+	items, total, err := adapter.AddressUTXOs(
+		context.Background(),
+		addr.String(),
+		PaginationParams{Count: 10, Page: 1, Order: PaginationOrderAsc},
+	)
+	require.NoError(t, err)
+	require.Len(t, items, 10)
+	assert.Equal(t, -1, total)
+}
+
+func TestAddressUtxoPageRefsRejectsSparseCandidateExhaustion(t *testing.T) {
+	t.Parallel()
+
+	refs := []models.UtxoId{{Hash: fill32(0x01), Idx: 0}}
+	_, _, err := addressUtxoPageRefs(
+		refs,
+		false,
+		0,
+		2,
+	)
+	require.ErrorIs(t, err, models.ErrUtxoQueryBudgetExceeded)
+}
+func TestNodeAdapterAssetAddressesHonorsCancellation(t *testing.T) {
+	t.Parallel()
+
+	adapter, _, _ := newDBBackedAdapter(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, _, err := adapter.AssetAddresses(
+		ctx,
+		hex.EncodeToString(bytes.Repeat([]byte{0x44}, lcommon.AddressHashSize)),
+		[]byte("TOKEN"),
+		PaginationParams{Count: 10, Page: 1, Order: PaginationOrderAsc},
+	)
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestNodeAdapterAssetAddressesHydratesCompleteAssets(t *testing.T) {
+	t.Parallel()
+
+	adapter, store, db := newDBBackedAdapter(t)
+	payment := bytes.Repeat([]byte{0x35}, lcommon.AddressHashSize)
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		payment,
+		nil,
+	)
+	require.NoError(t, err)
+	policyID := bytes.Repeat([]byte{0x45}, lcommon.AddressHashSize)
+	assetName := []byte("TOKEN")
+	otherPolicyID := bytes.Repeat([]byte{0x46}, lcommon.AddressHashSize)
+	txHash := fill32(0x55)
+	insertAdapterTransaction(t, store, &models.Transaction{
+		Hash: txHash,
+		Slot: 1,
+		Outputs: []models.Utxo{{
+			TxId:       txHash,
+			OutputIdx:  0,
+			PaymentKey: payment,
+			Address:    []byte(addr.String()),
+			AddedSlot:  1,
+			Amount:     types.Uint64(1_000_000),
+			Assets: []models.Asset{{
+				PolicyId: policyID,
+				Name:     assetName,
+				Amount:   types.Uint64(9),
+			}, {
+				PolicyId: otherPolicyID,
+				Name:     []byte("OTHER"),
+				Amount:   types.Uint64(99),
+			}},
+		}},
+	})
+	storePointerOutputCbor(t, db, txHash, 0, addr, 1_000_000)
+	filtered, err := db.UtxosByAddressWithOrdering(
+		context.Background(),
+		&models.UtxoWithOrderingQuery{
+			MatchAllAddresses: true,
+			Limit:             10,
+			FilterByAsset:     true,
+			AssetPolicyID:     policyID,
+			AssetName:         assetName,
+		},
+		nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, filtered, 1)
+	require.Len(t, filtered[0].Assets, 2)
+
+	holders, total, err := adapter.AssetAddresses(
+		context.Background(),
+		hex.EncodeToString(policyID),
+		assetName,
+		PaginationParams{Count: 10, Page: 1, Order: PaginationOrderAsc},
+	)
+	require.NoError(t, err)
+	require.Len(t, holders, 1)
+	assert.Equal(t, 1, total)
+	assert.Equal(t, addr.String(), holders[0].Address)
+	assert.Equal(t, "9", holders[0].Quantity)
+}
+
+func TestNodeAdapterAssetAddressesStreamsWidelyHeldAsset(t *testing.T) {
+	t.Parallel()
+
+	adapter, store, db := newDBBackedAdapter(t)
+	payment := bytes.Repeat([]byte{0x36}, lcommon.AddressHashSize)
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		payment,
+		nil,
+	)
+	require.NoError(t, err)
+	policyID := bytes.Repeat([]byte{0x47}, lcommon.AddressHashSize)
+	assetName := []byte("POPULAR")
+	txHash := fill32(0x56)
+	outputs := make([]models.Utxo, database.DefaultPublicUtxoResultLimit+1)
+	for i := range outputs {
+		outputs[i] = models.Utxo{
+			TxId:       txHash,
+			OutputIdx:  uint32(i), //nolint:gosec // bounded test fixture
+			PaymentKey: payment,
+			Address:    []byte(addr.String()),
+			AddedSlot:  1,
+			Amount:     types.Uint64(1_000_000),
+			Assets: []models.Asset{{
+				PolicyId: policyID,
+				Name:     assetName,
+				Amount:   types.Uint64(1),
+			}},
+		}
+	}
+	insertAdapterTransaction(t, store, &models.Transaction{
+		Hash:    txHash,
+		Slot:    1,
+		Outputs: outputs,
+	})
+	for i := range outputs {
+		storePointerOutputCbor(
+			t,
+			db,
+			txHash,
+			uint32(i), //nolint:gosec // bounded test fixture
+			addr,
+			1_000_000,
+		)
+	}
+
+	holders, total, err := adapter.AssetAddresses(
+		context.Background(),
+		hex.EncodeToString(policyID),
+		assetName,
+		PaginationParams{Count: 1, Page: 1, Order: PaginationOrderAsc},
+	)
+	require.NoError(t, err)
+	require.Len(t, holders, 1)
+	assert.Equal(t, 1, total)
+	assert.Equal(t, addr.String(), holders[0].Address)
+	assert.Equal(
+		t,
+		strconv.Itoa(database.DefaultPublicUtxoResultLimit+1),
+		holders[0].Quantity,
+	)
+}
+
+func seedAssetHolderRows(
+	t *testing.T,
+	raw *sql.DB,
+	policyID []byte,
+	assetName []byte,
+	addresses []string,
+	amounts []string,
+) {
+	t.Helper()
+	require.Len(t, amounts, len(addresses))
+	txn, err := raw.Begin()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = txn.Rollback() })
+	utxoStmt, err := txn.Prepare(`
+INSERT INTO utxo (tx_id, added_slot, deleted_slot, amount, output_idx, payment_script)
+VALUES (?, 1, 0, '1', 0, FALSE)`)
+	require.NoError(t, err)
+	defer utxoStmt.Close()
+	addressStmt, err := txn.Prepare(`
+INSERT INTO utxo_address (utxo_id, address) VALUES (?, ?)`)
+	require.NoError(t, err)
+	defer addressStmt.Close()
+	assetStmt, err := txn.Prepare(`
+INSERT INTO asset (name, policy_id, utxo_id, amount) VALUES (?, ?, ?, ?)`)
+	require.NoError(t, err)
+	defer assetStmt.Close()
+	for i := range addresses {
+		txID := make([]byte, 32)
+		binary.BigEndian.PutUint64(txID[24:], uint64(i+1))
+		result, err := utxoStmt.Exec(txID)
+		require.NoError(t, err)
+		utxoID, err := result.LastInsertId()
+		require.NoError(t, err)
+		_, err = addressStmt.Exec(utxoID, []byte(addresses[i]))
+		require.NoError(t, err)
+		_, err = assetStmt.Exec(assetName, policyID, utxoID, amounts[i])
+		require.NoError(t, err)
+	}
+	require.NoError(t, txn.Commit())
+}
+
+func TestNodeAdapterAssetAddressesPagesHighCardinalityInMetadata(t *testing.T) {
+	t.Parallel()
+
+	adapter, raw, _ := newDBBackedAdapter(t)
+	policyID := bytes.Repeat([]byte{0x48}, lcommon.AddressHashSize)
+	assetName := []byte("MANY")
+	addresses := make([]string, database.ExactAddressCandidateScanLimit+1)
+	amounts := make([]string, len(addresses))
+	for i := range addresses {
+		payment := make([]byte, lcommon.AddressHashSize)
+		binary.BigEndian.PutUint64(payment[20:], uint64(i+1))
+		addr, err := lcommon.NewAddressFromParts(
+			lcommon.AddressTypeKeyNone,
+			lcommon.AddressNetworkTestnet,
+			payment,
+			nil,
+		)
+		require.NoError(t, err)
+		addresses[i] = addr.String()
+		amounts[i] = "1"
+	}
+	seedAssetHolderRows(t, raw, policyID, assetName, addresses, amounts)
+	slices.Sort(addresses)
+
+	holders, total, err := adapter.AssetAddresses(
+		context.Background(),
+		hex.EncodeToString(policyID),
+		assetName,
+		PaginationParams{Count: 2, Page: 1, Order: PaginationOrderAsc},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, len(addresses), total)
+	require.Len(t, holders, 2)
+	assert.Equal(t, addresses[0], holders[0].Address)
+	assert.Equal(t, addresses[1], holders[1].Address)
+}
+
+func TestNodeAdapterAssetAddressesPreservesExactAddressTieOrder(t *testing.T) {
+	t.Parallel()
+
+	adapter, raw, _ := newDBBackedAdapter(t)
+	payment := bytes.Repeat([]byte{0x39}, lcommon.AddressHashSize)
+	pointerA := testPointerAddress(t, payment, 0x01)
+	pointerB := testPointerAddress(t, payment, 0x02)
+	bootstrapA, err := lcommon.NewByronAddressFromParts(
+		lcommon.ByronAddressTypePubkey,
+		bytes.Repeat([]byte{0x3a}, lcommon.AddressHashSize),
+		lcommon.ByronAddressAttributes{},
+	)
+	require.NoError(t, err)
+	bootstrapB, err := lcommon.NewByronAddressFromParts(
+		lcommon.ByronAddressTypePubkey,
+		bytes.Repeat([]byte{0x3b}, lcommon.AddressHashSize),
+		lcommon.ByronAddressAttributes{},
+	)
+	require.NoError(t, err)
+	addresses := []string{
+		pointerA.String(), pointerB.String(), bootstrapA.String(), bootstrapB.String(),
+	}
+	want := slices.Clone(addresses)
+	slices.Sort(want)
+	policyID := bytes.Repeat([]byte{0x49}, lcommon.AddressHashSize)
+	assetName := []byte("TIES")
+	seedAssetHolderRows(
+		t,
+		raw,
+		policyID,
+		assetName,
+		addresses,
+		[]string{"1", "1", "1", "1"},
+	)
+
+	holders, total, err := adapter.AssetAddresses(
+		context.Background(),
+		hex.EncodeToString(policyID),
+		assetName,
+		PaginationParams{Count: 4, Page: 1, Order: PaginationOrderAsc},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 4, total)
+	for i := range want {
+		assert.Equal(t, want[i], holders[i].Address)
+	}
+}
+
+func TestNodeAdapterAssetAddressesOrdersExactUint64Quantities(t *testing.T) {
+	t.Parallel()
+
+	adapter, raw, _ := newDBBackedAdapter(t)
+	policyID := bytes.Repeat([]byte{0x4a}, lcommon.AddressHashSize)
+	assetName := []byte("LARGE")
+	seedAssetHolderRows(
+		t,
+		raw,
+		policyID,
+		assetName,
+		[]string{"addr_b", "addr_a"},
+		[]string{"9223372036854775809", "9223372036854775808"},
+	)
+	holders, total, err := adapter.AssetAddresses(
+		context.Background(),
+		hex.EncodeToString(policyID),
+		assetName,
+		PaginationParams{Count: 2, Page: 1, Order: PaginationOrderAsc},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 2, total)
+	require.Len(t, holders, 2)
+	assert.Equal(t, "9223372036854775808", holders[0].Quantity)
+	assert.Equal(t, "9223372036854775809", holders[1].Quantity)
+}
+
+func TestNodeAdapterAssetAddressesRejectsQuantityOverflow(t *testing.T) {
+	t.Parallel()
+
+	adapter, raw, _ := newDBBackedAdapter(t)
+	policyID := bytes.Repeat([]byte{0x4b}, lcommon.AddressHashSize)
+	assetName := []byte("OVERFLOW")
+	seedAssetHolderRows(
+		t,
+		raw,
+		policyID,
+		assetName,
+		[]string{"addr_same", "addr_same"},
+		[]string{"18446744073709551615", "1"},
+	)
+	_, _, err := adapter.AssetAddresses(
+		context.Background(),
+		hex.EncodeToString(policyID),
+		assetName,
+		PaginationParams{Count: 1, Page: 1, Order: PaginationOrderAsc},
+	)
+	require.ErrorContains(t, err, "quantity overflow")
 }
 
 // TestNodeAdapterAddressUTXOsAssetsSurviveRefFetch proves native assets
@@ -315,7 +767,8 @@ func TestNodeAdapterAddressUTXOsAssetsSurviveRefFetch(t *testing.T) {
 	})
 	storePointerOutputCbor(t, db, txHash, 0, addr, 1_000_000)
 
-	items, total, err := adapter.AddressUTXOs(context.Background(),
+	items, total, err := adapter.AddressUTXOs(
+		context.Background(),
 		addr.String(),
 		PaginationParams{Count: 10, Page: 1, Order: PaginationOrderAsc},
 	)
@@ -332,40 +785,6 @@ func TestNodeAdapterAddressUTXOsAssetsSurviveRefFetch(t *testing.T) {
 	assert.Equal(t, "9", items[0].Amount[1].Quantity)
 }
 
-func seedAssetHolderRows(
-	t *testing.T,
-	raw *sql.DB,
-	policyID []byte,
-	assetName []byte,
-	addresses []string,
-) {
-	t.Helper()
-	txn, err := raw.Begin()
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = txn.Rollback() })
-	for i := range addresses {
-		txID := make([]byte, 32)
-		binary.BigEndian.PutUint64(txID[24:], uint64(i+1))
-		result, err := txn.Exec(`
-INSERT INTO utxo (tx_id, added_slot, deleted_slot, amount, output_idx, payment_script)
-VALUES (?, 1, 0, '1', 0, FALSE)`, txID)
-		require.NoError(t, err)
-		utxoID, err := result.LastInsertId()
-		require.NoError(t, err)
-		_, err = txn.Exec(
-			`INSERT INTO utxo_address (utxo_id, address) VALUES (?, ?)`,
-			utxoID, []byte(addresses[i]),
-		)
-		require.NoError(t, err)
-		_, err = txn.Exec(`
-INSERT INTO asset (name, policy_id, utxo_id, amount) VALUES (?, ?, ?, '7')`,
-			assetName, policyID, utxoID,
-		)
-		require.NoError(t, err)
-	}
-	require.NoError(t, txn.Commit())
-}
-
 func TestNodeAdapterAssetAddressesPagesInMetadata(t *testing.T) {
 	t.Parallel()
 	adapter, raw, _ := newDBBackedAdapter(t)
@@ -378,7 +797,11 @@ func TestNodeAdapterAssetAddressesPagesInMetadata(t *testing.T) {
 		addr := testPointerAddress(t, payment, byte(i%128))
 		addresses[i] = addr.String()
 	}
-	seedAssetHolderRows(t, raw, policyID, assetName, addresses)
+	amounts := make([]string, len(addresses))
+	for i := range amounts {
+		amounts[i] = "7"
+	}
+	seedAssetHolderRows(t, raw, policyID, assetName, addresses, amounts)
 	slices.Sort(addresses)
 
 	holders, total, err := adapter.AssetAddresses(
@@ -400,9 +823,22 @@ func newDBBackedAdapter(
 	t *testing.T,
 	nodeConfig ...*cardano.CardanoNodeConfig,
 ) (*NodeAdapter, *sql.DB, *database.Database) {
+	return newDBBackedAdapterWithStorageMode(
+		t,
+		types.StorageModeCore,
+		nodeConfig...,
+	)
+}
+
+func newDBBackedAdapterWithStorageMode(
+	t *testing.T,
+	storageMode string,
+	nodeConfig ...*cardano.CardanoNodeConfig,
+) (*NodeAdapter, *sql.DB, *database.Database) {
 	t.Helper()
 	db, err := dbtest.NewDatabase(t, &database.Config{
-		DataDir: t.TempDir(),
+		DataDir:     t.TempDir(),
+		StorageMode: storageMode,
 	})
 	require.NoError(t, err)
 
@@ -456,6 +892,14 @@ INSERT INTO utxo (
 	require.NoError(t, err)
 	utxoID, err := result.LastInsertId()
 	require.NoError(t, err)
+	if len(utxo.Address) > 0 {
+		_, err = raw.Exec(`
+INSERT INTO utxo_address (utxo_id, address) VALUES (?, ?)`,
+			utxoID,
+			utxo.Address,
+		)
+		require.NoError(t, err)
+	}
 	for i := range utxo.Assets {
 		asset := &utxo.Assets[i]
 		_, err = raw.Exec(`
@@ -711,7 +1155,8 @@ func TestNodeAdapterEnterpriseAddressExcludesPointerUtxos(t *testing.T) {
 	require.Len(t, info.Amount, 1)
 	assert.Equal(t, "1000000", info.Amount[0].Quantity)
 
-	utxos, total, err := adapter.AddressUTXOs(context.Background(),
+	utxos, total, err := adapter.AddressUTXOs(
+		context.Background(),
 		enterprise.String(),
 		PaginationParams{Count: 100, Page: 1, Order: PaginationOrderAsc},
 	)
@@ -1278,4 +1723,17 @@ func TestBlockfrostAdaptersHonorCancelledContext(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 	_, _, err = adapter.AddressTransactions(ctx, stakeAddr, TransactionRangeParams{})
 	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestNodeAdapterAddressUTXOsFarPastEnd(t *testing.T) {
+	t.Parallel()
+	adapter, _, _ := newDBBackedAdapter(t)
+	addr, err := lcommon.NewAddressFromParts(lcommon.AddressTypeKeyNone, lcommon.AddressNetworkTestnet, bytes.Repeat([]byte{0x95}, lcommon.AddressHashSize), nil)
+	require.NoError(t, err)
+	for _, params := range []PaginationParams{{Page: 11, Count: 100, Order: PaginationOrderAsc}, {Page: 1001, Count: 1, Order: PaginationOrderAsc}} {
+		rows, total, err := adapter.AddressUTXOs(t.Context(), addr.String(), params)
+		require.NoError(t, err)
+		require.Empty(t, rows)
+		require.Zero(t, total)
+	}
 }

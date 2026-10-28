@@ -66,3 +66,30 @@ func (d *Database) GetDatum(
 	}
 	return ret, nil
 }
+
+// GetDatums retrieves the datums for hashes inside one read transaction. The
+// result is aligned with hashes; an entry is nil when that datum is not
+// stored. ctx is checked before each lookup and also bounds the transaction's
+// statements, so a cancelled caller stops the batch.
+func (d *Database) GetDatums(
+	ctx context.Context,
+	hashes [][]byte,
+) ([]*models.Datum, error) {
+	txn := d.TransactionContext(ctx, false)
+	defer txn.Release()
+	out := make([]*models.Datum, len(hashes))
+	for i, hash := range hashes {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		datum, err := d.GetDatum(ctx, hash, txn)
+		if err != nil {
+			if errors.Is(err, ErrDatumNotFound) {
+				continue
+			}
+			return nil, err
+		}
+		out[i] = datum
+	}
+	return out, nil
+}

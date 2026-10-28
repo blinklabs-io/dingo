@@ -33,6 +33,9 @@ import (
 // only through dialect-translated statements, so it runs on every dialect.
 func populateRewardLiveStakeBatchFixture(t testing.TB, store *Store) int {
 	t.Helper()
+	address := []byte(
+		"addr_test1qz2fxv2umyhttkxyxp8x0dlpdt3k6cwng5pxj3jhsydzer3jcu5d8ps7zex2k2xt3uqxgjqnnj83ws8lhrn648jjxtwq2ytjqp",
+	)
 	keys := make([]models.StakeCredentialRef, 0)
 	for tag := range uint8(2) {
 		for index := range 12 {
@@ -65,7 +68,7 @@ func populateRewardLiveStakeBatchFixture(t testing.TB, store *Store) int {
 				txID := make([]byte, 32)
 				txID[0], txID[1], txID[2] = ref.Tag, byte(index), byte(output)
 				utxos = append(utxos, models.Utxo{
-					TxId: txID, OutputIdx: uint32(output),
+					TxId: txID, OutputIdx: uint32(output), Address: address,
 					StakingKey: ref.Key, CredentialTag: ref.Tag,
 					AddedSlot: uint64(100 + index),
 					Amount:    types.Uint64(uint64(1000*index + output)),
@@ -136,7 +139,7 @@ func testRewardLiveStakeBatchBoundaries(t *testing.T, store *Store) {
 
 func TestRebuildRewardLiveStakeBatchBoundaries(t *testing.T) {
 	t.Parallel()
-	testRewardLiveStakeBatchBoundaries(t, newMigratedSQLiteStore(t))
+	testRewardLiveStakeBatchBoundaries(t, newAPIModeSQLiteStore(t, nil))
 }
 
 func TestRebuildRewardLiveStakeBatchSkipsLegacyNullAccountKey(t *testing.T) {

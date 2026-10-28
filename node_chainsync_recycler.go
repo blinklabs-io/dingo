@@ -55,6 +55,24 @@ func (n *Node) chainsyncObservePeerTip(
 	return disposition
 }
 
+func (n *Node) chainsyncRecordDeliveredPeerTip(
+	e chainselection.PeerTipUpdateEvent,
+) {
+	if n.chainSelector == nil {
+		return
+	}
+	n.chainSelector.RecordDeliveredPeerTip(e)
+}
+
+func (n *Node) chainsyncRecordDeliveredPeerRollback(
+	e chainselection.PeerRollbackEvent,
+) {
+	if n.chainSelector == nil {
+		return
+	}
+	n.chainSelector.RecordDeliveredPeerRollback(e)
+}
+
 // chainsyncResolvePeerTip removes rejected candidates immediately and promotes
 // admitted candidates before the event-bus notification is dispatched.
 func (n *Node) chainsyncResolvePeerTip(
@@ -154,6 +172,14 @@ func (n *Node) chainsyncAwaitCorroboration(
 		return false, nil
 	}
 	return n.chainSelector.AwaitIngressCorroboration(ctx, connId)
+}
+
+// chainsyncIntersectAtLedgerTip reports whether new chainsync sessions must
+// intersect at the applied ledger tip. It holds while Genesis corroboration is
+// active, which needs every peer's frontier to begin at that tip.
+func (n *Node) chainsyncIntersectAtLedgerTip() bool {
+	return n.chainSelector != nil &&
+		n.chainSelector.GenesisCorroborationActive()
 }
 
 // chainsyncAwaitEagerness pauses a peer's header stream while its next header

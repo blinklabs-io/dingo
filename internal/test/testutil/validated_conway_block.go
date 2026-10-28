@@ -53,6 +53,21 @@ type ValidatedConwayBlock struct {
 // duplicating it, which would let the two drift apart.
 func ConwayEmptyBodyHash(t testing.TB) lcommon.Blake2b256 {
 	t.Helper()
+	hash, _ := conwayEmptyBody(t)
+	return hash
+}
+
+// ConwayEmptyBodySize returns the serialized size of the body components
+// ConwayEmptyBodyHash commits to. A header's declared body size must equal
+// it, or header validation rejects the block.
+func ConwayEmptyBodySize(t testing.TB) uint64 {
+	t.Helper()
+	_, size := conwayEmptyBody(t)
+	return size
+}
+
+func conwayEmptyBody(t testing.TB) (lcommon.Blake2b256, uint64) {
+	t.Helper()
 	block := &conway.ConwayBlock{
 		BlockHeader: &conway.ConwayBlockHeader{},
 	}
@@ -63,11 +78,13 @@ func ConwayEmptyBodyHash(t testing.TB) lcommon.Blake2b256 {
 	require.NoError(t, err)
 	require.Len(t, comps, 5)
 	var concat []byte
+	var size uint64
 	for i := 1; i < 5; i++ {
 		h := lcommon.Blake2b256Hash(comps[i])
 		concat = append(concat, h.Bytes()...)
+		size += uint64(len(comps[i]))
 	}
-	return lcommon.Blake2b256Hash(concat)
+	return lcommon.Blake2b256Hash(concat), size
 }
 
 // BuildValidatedConwayBlockBytes generates real VRF, KES, and cold keys,
@@ -233,7 +250,7 @@ func buildValidatedConwayBlockBytes(
 
 	bodyHash := ConwayEmptyBodyHash(t)
 	var bodyComps []cbor.RawMessage
-	var bodySize uint64
+	bodySize := ConwayEmptyBodySize(t)
 	if withTransaction {
 		bodyComps, bodyHash, bodySize = minimalTransactionBody(t)
 	}

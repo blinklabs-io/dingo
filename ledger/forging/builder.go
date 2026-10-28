@@ -76,6 +76,12 @@ type ChainTipSigningProvider interface {
 	WithTip(func(ochainsync.Tip) error) error
 }
 
+// ChainTipHeaderSigningProvider binds signing to one coherent selected-block
+// and crypto-verified queued-header snapshot.
+type ChainTipHeaderSigningProvider interface {
+	WithTipAndHeader(func(ochainsync.Tip, ochainsync.Tip) error) error
+}
+
 // ChainTipRelationProvider evaluates ancestry against one primary-chain
 // snapshot. Production forging uses it to bind the parent to the ledger tip.
 type ChainTipRelationProvider interface {
@@ -137,6 +143,63 @@ type TxValidationSessionProvider interface {
 var errTxValidationSnapshotChanged = errors.New(
 	"transaction validation snapshot changed",
 )
+
+// ParentPinnedTxValidationSessionProvider opens a validation session only
+// when the ledger tip is parentHash, the block the caller builds on. A session
+// whose tip is anything else returns an error wrapping
+// ErrTxValidationParentMismatch without calling fn. LedgerState implements it.
+//
+// Endorser-block selection uses it: an announced endorser block must be a
+// valid extension of the state its ranking block leaves, and the forger builds
+// on the primary chain tip while the tip gates let the ledger trail that tip
+// by a short apply backlog. Validating against the trailing state would miss
+// the effects of the unapplied blocks, including certified closures they
+// apply, and could select transactions those blocks already applied.
+type ParentPinnedTxValidationSessionProvider interface {
+	WithTxValidationSessionAtParent(
+		ctx context.Context,
+		parentHash []byte,
+		fn func(
+			validate TxValidationFunc,
+			stillCurrent func() bool,
+			commitIfCurrent func(func() error) (bool, error),
+		) error,
+	) error
+}
+
+// ErrTxValidationParentMismatch reports a parent-pinned validation session
+// whose ledger tip is not the requested parent.
+var ErrTxValidationParentMismatch = errors.New(
+	"transaction validation ledger tip is not the block parent",
+)
+
+// withLeiosSelectionSession runs fn in a validation session pinned to
+// parentHash when the validator supports pinning and parentHash is known, and
+// in an ordinary session otherwise.
+func withLeiosSelectionSession(ctx context.Context,
+	validator TxValidator,
+	parentHash []byte,
+	fn func(TxValidationFunc, func() bool) error,
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if len(parentHash) > 0 {
+		if provider, ok := validator.(ParentPinnedTxValidationSessionProvider); ok {
+			return provider.WithTxValidationSessionAtParent(ctx,
+				parentHash,
+				func(
+					validate TxValidationFunc,
+					stillCurrent func() bool,
+					_ func(func() error) (bool, error),
+				) error {
+					return fn(validate, stillCurrent)
+				},
+			)
+		}
+	}
+	return withTxValidationSession(ctx, validator, fn)
+}
 
 // blockSelectionConstraints carries per-attempt limits from the forge loop
 // into block construction. The zero value is the unconstrained build the
@@ -1326,7 +1389,19 @@ func (b *DefaultBlockBuilder) buildBlock(ctx context.Context,
 		}
 		return nil
 	}
-	if provider, ok := b.chainTip.(ChainTipSigningProvider); ok {
+	if provider, ok := b.chainTip.(ChainTipHeaderSigningProvider); ok {
+		err = provider.WithTipAndHeader(
+			func(reTip, headerTip ochainsync.Tip) error {
+				if !tipsEqual(headerTip, reTip) {
+					return fmt.Errorf(
+						"%w: admitted header frontier moved ahead of parent before signing",
+						errParentChangedDuringBuild,
+					)
+				}
+				return encodeAndSign(reTip)
+			},
+		)
+	} else if provider, ok := b.chainTip.(ChainTipSigningProvider); ok {
 		err = provider.WithTip(encodeAndSign)
 	} else {
 		err = encodeAndSign(b.chainTip.Tip())
