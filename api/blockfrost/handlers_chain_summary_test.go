@@ -243,3 +243,42 @@ func TestHandleChainSummaryValidatesBeforeAdmission(t *testing.T) {
 	release()
 	wg.Wait()
 }
+
+// The pool's global cap rejects a client that has no request in flight once
+// other clients hold every slot.
+func TestHandleChainSummaryGlobalCap(t *testing.T) {
+	t.Parallel()
+	node := newBlockingChainNode()
+	b := newTestBlockfrost(node)
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(node.release) }) }
+	defer release()
+
+	var wg sync.WaitGroup
+	for _, client := range []string{"192.0.2.7:4000", "192.0.2.8:4000"} {
+		for _, path := range chainSummaryRoutes[:defaultMaxChainSummariesPerClient] {
+			req := addressSummaryRequest(context.Background(), path)
+			req.RemoteAddr = client
+			wg.Go(func() {
+				b.handler().ServeHTTP(httptest.NewRecorder(), req)
+			})
+		}
+	}
+	for range defaultMaxChainSummaries {
+		testutil.RequireReceive(
+			t, node.entered, 5*time.Second, "request admitted",
+		)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	third := addressSummaryRequest(ctx, chainSummaryRoutes[2])
+	third.RemoteAddr = "192.0.2.9:4000"
+	w := httptest.NewRecorder()
+	b.handler().ServeHTTP(w, third)
+	require.Equal(t, http.StatusTooManyRequests, w.Code)
+	require.Equal(t, "1", w.Header().Get("Retry-After"))
+
+	release()
+	wg.Wait()
+}
