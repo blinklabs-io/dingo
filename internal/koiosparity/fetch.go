@@ -210,6 +210,11 @@ func Fetch(
 	cfg FetchConfig,
 	logger *slog.Logger,
 ) (*FetchResult, error) {
+	// NewKoiosClient accepts mainnet for node-parity; Fetch also builds
+	// stake addresses for the account comparison, which is testnet-only.
+	if err := validateKoiosNetwork(cfg.Network); err != nil {
+		return nil, err
+	}
 	if cfg.Concurrency <= 0 {
 		cfg.Concurrency = 5
 	}
