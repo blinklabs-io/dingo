@@ -5775,7 +5775,11 @@ against a real Preview cardano-node: 36 real pools reported by cardano-node
 were completely absent from dingo's reply for no reason other than that
 snapshot lag. `GetUTxOWhole` enumerates live references, resolves their stored
 CBOR through a fixed worker pool, and decodes them into the node-to-client
-reply shape. A successful response always contains the complete UTxO set at
+reply shape. The UTxO query leaves serialize Babbage-era ADA-only outputs
+without a datum or reference script as the backwards-compatible two-element
+array that cardano-ledger emits from its compact UTxO state. They do not reuse
+the post-Alonzo map bytes retained from the producing transaction for those
+outputs. A successful response always contains the complete UTxO set at
 the acquired point. Pagination, offsets, item limits, byte limits, time limits,
 truncation, and partial success are forbidden for this protocol result. If the
 complete set cannot be produced, the query fails without returning a successful
