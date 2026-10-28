@@ -1304,10 +1304,9 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 		o.recordKeepaliveTimeout()
 	}
 
-	// Record connection stability observation for peer scoring
-	// Connection closure indicates reduced stability
-	if o.peerGov != nil {
-		// Treat connection closure as negative stability signal (0.0)
+	localRestart := e.Error == nil &&
+		event.IsLocalChainsyncResyncReason(e.LocalCloseReason)
+	if o.peerGov != nil && !localRestart {
 		o.peerGov.UpdatePeerConnectionStability(connId, 0.0)
 	}
 

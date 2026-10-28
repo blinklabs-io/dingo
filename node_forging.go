@@ -1259,7 +1259,7 @@ func (b *blockBroadcaster) AddBlock(ctx context.Context,
 	if b.chain == nil {
 		return errors.New("chain unavailable")
 	}
-	if err := b.chain.AddLocalBlock(ctx, block); err != nil {
+	if err := b.chain.AddLocalBlockIfHeaderCurrent(ctx, block); err != nil {
 		return fmt.Errorf("chain rejected proposed block: %w", err)
 	}
 
@@ -1554,10 +1554,8 @@ var _ forging.ChainTipHashProvider = (*slotClockAdapter)(nil)
 
 // PrimaryChainTip returns the primary chain's BLOCK tip -- chain.Tip(), the
 // newest block added to the chain, which runs ahead of the ledger-applied tip
-// while the pipeline replays. It is NOT the header frontier: that is
-// chain.HeaderTip(), and nothing in the forge gate reads it. The primary chain
-// returns its tip under one lock, so the returned slot and hash are always
-// from the same tip.
+// while the pipeline replays. The forge safety provider below reads it together
+// with the verified queued-header frontier under one chain lock.
 func (a *slotClockAdapter) PrimaryChainTip() ocommon.Point {
 	return a.ledgerState.PrimaryChainTip().Point
 }
@@ -1566,6 +1564,12 @@ func (a *slotClockAdapter) PrimaryChainTipRelation(
 	point ocommon.Point,
 ) (ochainsync.Tip, uint64, bool, error) {
 	return a.ledgerState.PrimaryChainTipRelation(point)
+}
+
+func (a *slotClockAdapter) PrimaryChainTipRelationAndHeader(
+	point ocommon.Point,
+) (ochainsync.Tip, ochainsync.Tip, uint64, bool, error) {
+	return a.ledgerState.PrimaryChainTipRelationAndHeader(point)
 }
 
 func (a *slotClockAdapter) NextSlotTime() (time.Time, error) {

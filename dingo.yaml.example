@@ -451,14 +451,15 @@
   # Can be overridden with DINGO_TOKEN_REGISTRY_SOURCE_URL
   # CLI: --token-registry-source-url
   # sourceUrl: ""
-  # Signed manifest URL. Required when enabled. The manifest authenticates
+  # Optional signed manifest URL for operator-managed mirrors. The public
+  # registries do not publish these manifests. A configured manifest binds
   # the snapshot URL, exact compressed size, BLAKE2b-256 digest, and monotonic
   # sequence. HTTPS is required for the manifest, snapshot, and every redirect.
   # Can be overridden with DINGO_TOKEN_REGISTRY_MANIFEST_URL
   # CLI: --token-registry-manifest-url
   # manifestUrl: ""
-  # Hex-encoded Ed25519 public key trusted to sign manifests. Required when
-  # enabled. Key rotation is an explicit configuration change.
+  # Hex-encoded Ed25519 public key. Required only with manifestUrl.
+  # Key rotation is an explicit configuration change.
   # Can be overridden with DINGO_TOKEN_REGISTRY_TRUSTED_MANIFEST_KEY
   # CLI: --token-registry-trusted-manifest-key
   # trustedManifestKey: ""

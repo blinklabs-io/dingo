@@ -1088,7 +1088,7 @@ func (n *Node) reinitializeAPIServers() error {
 	if midnightServerActive(n.config.storageMode, n.config.midnight) {
 		var err error
 		n.midnightServer, err = midnightserver.New(
-			n.midnightServerConfig(n.ctx),
+			n.midnightServerConfig(),
 		)
 		if err != nil {
 			return fmt.Errorf(

@@ -951,8 +951,9 @@ func TestForgeProceedsWhenEitherTipHashIsEmpty(t *testing.T) {
 // exists before the first skip, so a dashboard is not looking at an absent
 // series.
 //
-// Eight series cover primary-chain ancestry, local and peer block-height gaps,
-// existing tip disagreements, the pre-leader-check rival, and staleness.
+// Nine series cover primary-chain ancestry, local and peer block-height gaps,
+// the admitted header frontier, existing tip disagreements, the
+// pre-leader-check rival, and staleness.
 func TestForgeStaleTipSkipReasonsArePreMaterialized(t *testing.T) {
 	var logs bytes.Buffer
 	hash := bytes.Repeat([]byte{0xAA}, 32)
@@ -964,7 +965,7 @@ func TestForgeStaleTipSkipReasonsArePreMaterialized(t *testing.T) {
 	)
 	require.Equal(
 		t,
-		8,
+		9,
 		testutil.CollectAndCount(forger.metrics.forgeStaleTipSkip),
 	)
 }
@@ -2388,6 +2389,13 @@ func (c forgerTestSlotClock) PrimaryChainTipRelation(
 		Point:       primary,
 		BlockNumber: c.primaryTipBlockNumber,
 	}, depth, ancestor, nil
+}
+
+func (c forgerTestSlotClock) PrimaryChainTipRelationAndHeader(
+	point ocommon.Point,
+) (ochainsync.Tip, ochainsync.Tip, uint64, bool, error) {
+	tip, depth, ancestor, err := c.PrimaryChainTipRelation(point)
+	return tip, tip, depth, ancestor, err
 }
 
 // NextSlotTime reports a boundary that is still ahead, which is what a

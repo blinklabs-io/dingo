@@ -33,6 +33,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/protocol/handshake"
+	"github.com/stretchr/testify/require"
 )
 
 func TestIsExpectedConnectionCloseError(t *testing.T) {
@@ -1392,4 +1393,124 @@ func TestPeerGovernor_TestPeer_StaleProbeCompletionDoesNotCorruptReplacementPeer
 			"stale probe's failure incorrectly denied the replacement peer's address",
 		)
 	}
+}
+
+func TestLocalChainsyncRestartPreservesFailureHistory(t *testing.T) {
+	t.Parallel()
+	for _, reason := range []string{
+		event.ChainsyncResyncReasonIngressPromotion,
+		event.ChainsyncResyncReasonPromotedObserverAhead,
+		event.ChainsyncResyncReasonHeaderValidationRecovery,
+	} {
+		t.Run(reason, func(t *testing.T) {
+			pg := NewPeerGovernor(PeerGovernorConfig{
+				Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			})
+			connID := outboundTestConnId()
+			peer := &Peer{
+				Address:                 "192.168.12.101:3003",
+				Source:                  PeerSourceP2PGossip,
+				Reconnecting:            true,
+				ReconnectCount:          5,
+				OutboundShortLivedCount: 7,
+			}
+			pg.peers = []*Peer{
+				peer,
+				{Address: "10.0.0.1:3001", State: PeerStateHot},
+				{Address: "10.0.0.2:3001", State: PeerStateHot},
+				{Address: "10.0.0.3:3001", State: PeerStateHot},
+			}
+			for range 10 {
+				peer.Connection = &PeerConnection{Id: connID}
+				peer.State = PeerStateHot
+				peer.ConnectedAt = time.Now().Add(-time.Second)
+				peer.ReconnectDelay = 128 * time.Second
+				pg.handleConnectionClosedEvent(event.NewEvent(
+					connmanager.ConnectionClosedEventType,
+					connmanager.ConnectionClosedEvent{
+						ConnectionId: connID, LocalCloseReason: reason,
+					},
+				))
+				require.Equal(t, initialReconnectDelay, peer.ReconnectDelay)
+				require.Equal(t, uint32(7), peer.OutboundShortLivedCount)
+				require.Equal(t, 5, peer.ReconnectCount)
+				require.Zero(t, peer.LastChainsyncStall)
+			}
+			// A genuine short-lived clean remote close still escalates.
+			peer.Connection = &PeerConnection{Id: connID}
+			peer.ConnectedAt = time.Now().Add(-time.Second)
+			peer.ReconnectDelay = 0
+			pg.handleConnectionClosedEvent(event.NewEvent(
+				connmanager.ConnectionClosedEventType,
+				connmanager.ConnectionClosedEvent{ConnectionId: connID},
+			))
+			require.Equal(t, uint32(8), peer.OutboundShortLivedCount)
+			require.Equal(t, 128*time.Second, peer.ReconnectDelay)
+		})
+	}
+}
+
+func TestLocalChainsyncRestartDoesNotMaskPeerFailure(t *testing.T) {
+	t.Parallel()
+	for _, e := range []connmanager.ConnectionClosedEvent{
+		{LocalCloseReason: "unknown reason"},
+		{LocalCloseReason: event.ChainsyncResyncReasonRollbackExceedsK},
+		{LocalCloseReason: event.
+			ChainsyncResyncReasonDeferredHeaderValidationFailure},
+		{
+			LocalCloseReason: event.ChainsyncResyncReasonIngressPromotion,
+			Error:            io.EOF,
+		},
+		{
+			LocalCloseReason: event.
+				ChainsyncResyncReasonHeaderValidationRecovery,
+			Error: errChainsyncStall,
+		},
+	} {
+		require.False(t, isLocalChainsyncRestart(e))
+		pg := NewPeerGovernor(PeerGovernorConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		})
+		e.ConnectionId = outboundTestConnId()
+		peer := &Peer{
+			Address:                 "192.168.12.101:3003",
+			Source:                  PeerSourceP2PGossip,
+			Connection:              &PeerConnection{Id: e.ConnectionId},
+			ConnectedAt:             time.Now().Add(-time.Second),
+			Reconnecting:            true,
+			OutboundShortLivedCount: 2,
+		}
+		pg.peers = []*Peer{peer}
+		pg.handleConnectionClosedEvent(event.NewEvent(
+			connmanager.ConnectionClosedEventType, e,
+		))
+		require.Equal(t, uint32(3), peer.OutboundShortLivedCount)
+		require.Equal(t, 4*time.Second, peer.ReconnectDelay)
+	}
+}
+
+func TestLocalChainsyncRestartDoesNotAddInboundChurn(t *testing.T) {
+	t.Parallel()
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+	id := outboundTestConnId()
+	peer := &Peer{
+		Address:                "192.168.12.101:3003",
+		Source:                 PeerSourceInboundConn,
+		Connection:             &PeerConnection{Id: id},
+		InboundConnectedAt:     time.Now().Add(-time.Second),
+		InboundShortLivedCount: 2,
+	}
+	pg.peers = []*Peer{peer}
+	pg.handleConnectionClosedEvent(event.NewEvent(
+		connmanager.ConnectionClosedEventType,
+		connmanager.ConnectionClosedEvent{
+			ConnectionId:     id,
+			LocalCloseReason: event.ChainsyncResyncReasonIngressPromotion,
+		},
+	))
+	require.Equal(t, uint32(2), peer.InboundShortLivedCount)
+	require.Zero(t, peer.InboundConnectedAt)
+	require.Nil(t, peer.Connection)
 }

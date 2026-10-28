@@ -16,6 +16,8 @@ package chain_test
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"sync/atomic"
 	"testing"
 
@@ -24,6 +26,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
@@ -256,4 +259,133 @@ func TestPersistentFromPointRejectsReplacementAfterIndexCheck(t *testing.T) {
 	}
 	require.Nil(t, store.afterIndexGet.Load(), "replacement hook did not run")
 	require.ErrorIs(t, err, models.ErrBlockNotFound)
+}
+
+func TestChainHoldsPointReadsOnlyMetadata(t *testing.T) {
+	t.Parallel()
+	db, store := newLocalProbeDB(t, nil)
+	cm, err := chain.NewManager(t.Context(), db, nil)
+	require.NoError(t, err)
+	mustSetLedger(t, cm, 100)
+	c := cm.PrimaryChain()
+	for _, block := range testBlocks {
+		require.NoError(t, c.AddBlock(t.Context(), block, nil))
+	}
+	store.getBlockCalls.Store(0)
+	point := blockPoint(testBlocks[len(testBlocks)-1])
+	for range 100 {
+		require.True(t, c.HoldsPoint(t.Context(), point))
+	}
+	require.Zero(t, store.getBlockCalls.Load(),
+		"membership must not fetch full block content")
+	require.False(t, c.HoldsPoint(t.Context(), ocommon.NewPoint(
+		point.Slot+1, point.Hash,
+	)))
+	require.False(t, c.HoldsPoint(t.Context(), ocommon.NewPoint(
+		point.Slot, bytes.Repeat([]byte{0xff}, 32),
+	)))
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	require.False(t, c.HoldsPoint(ctx, point))
+
+	// Expired body content does not retract canonical block membership.
+	txn := db.BlobTxn(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		return db.Blob().TombstoneBlock(txn.Blob(), point.Slot, point.Hash)
+	}))
+	require.True(t, c.HoldsPoint(t.Context(), point))
+}
+
+func TestChainHoldsPointRejectsConcurrentRollback(t *testing.T) {
+	t.Parallel()
+	db, store := newLocalProbeDB(t, nil)
+	cm, err := chain.NewManager(t.Context(), db, nil)
+	require.NoError(t, err)
+	mustSetLedger(t, cm, 100)
+	c := cm.PrimaryChain()
+	for _, block := range testBlocks {
+		require.NoError(t, c.AddBlock(t.Context(), block, nil))
+	}
+	point := blockPoint(testBlocks[len(testBlocks)-1])
+	survivor := blockPoint(testBlocks[len(testBlocks)-2])
+	var rolledBack atomic.Bool
+	hook := func() {
+		require.NoError(t, c.Rollback(t.Context(), survivor))
+		rolledBack.Store(true)
+	}
+	// Every test block has a dense ID starting at1. The hook fires after
+	// the old snapshot's index read but before HoldsPoint publishes it.
+	store.indexKey = dbtypes.BlockBlobIndexKey(uint64(len(testBlocks)))
+	db.SetBlobStore(store)
+	store.afterIndexGet.Store(&hook)
+	require.False(t, c.HoldsPoint(t.Context(), point))
+	require.True(t, rolledBack.Load(), "force the rollback/read interleaving")
+	require.True(t, c.HoldsPoint(t.Context(), survivor))
+	require.False(t, c.HoldsPoint(t.Context(), point))
+}
+
+func TestChainHoldsPointRejectsUncommittedCallerAdd(t *testing.T) {
+	t.Parallel()
+	for _, outcome := range []string{"commit", "rollback"} {
+		t.Run(outcome, func(t *testing.T) {
+			db := newTestDB(t)
+			cm, err := chain.NewManager(t.Context(), db, nil)
+			require.NoError(t, err)
+			mustSetLedger(t, cm, 100)
+			c := cm.PrimaryChain()
+			require.NoError(t, c.AddBlock(t.Context(), testBlocks[0], nil))
+			prefix := blockPoint(testBlocks[0])
+			point := blockPoint(testBlocks[1])
+			txn := db.BlockBlobTxn()
+			defer txn.Rollback() //nolint:errcheck
+			require.NoError(t, c.AddBlock(t.Context(), testBlocks[1], txn))
+			require.Equal(t, point, c.Tip().Point,
+				"memory has advanced while the caller transaction is open")
+			require.False(t, c.HoldsPoint(t.Context(), point),
+				"uncommitted metadata/index cannot establish membership")
+			require.True(t, c.HoldsPoint(t.Context(), prefix))
+			if outcome == "commit" {
+				require.NoError(t, txn.Commit())
+				require.True(t, c.HoldsPoint(t.Context(), point))
+			} else {
+				require.NoError(t, txn.Rollback())
+				require.Equal(t, prefix, c.Tip().Point)
+				require.False(t, c.HoldsPoint(t.Context(), point))
+			}
+		})
+	}
+}
+
+func TestChainHoldsPointRejectsUncommittedFailedBatch(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	cm, err := chain.NewManager(t.Context(), db, nil)
+	require.NoError(t, err)
+	mustSetLedger(t, cm, 100)
+	c := cm.PrimaryChain()
+	require.NoError(t, c.AddBlock(t.Context(), testBlocks[0], nil))
+	prefix := blockPoint(testBlocks[0])
+	point := blockPoint(testBlocks[1])
+	commitErr := errors.New("injected membership batch failure")
+	armed := &atomic.Bool{}
+	var observed atomic.Bool
+	db.SetBlobStore(commitFailingBlobStore{
+		BlobStore: db.Blob(),
+		err:       commitErr,
+		armed:     armed,
+		beforeFail: func() {
+			require.Equal(t, point, c.Tip().Point)
+			require.False(t, c.HoldsPoint(t.Context(), point),
+				"advanced memory cannot replace committed index evidence")
+			require.True(t, c.HoldsPoint(t.Context(), prefix))
+			observed.Store(true)
+		},
+	})
+	armed.Store(true)
+	err = c.AddBlocks(t.Context(), []ledger.Block{testBlocks[1]})
+	require.ErrorIs(t, err, commitErr)
+	require.True(t, observed.Load(), "force the pre-restore commit window")
+	require.Equal(t, prefix, c.Tip().Point)
+	require.False(t, c.HoldsPoint(t.Context(), point))
+	require.True(t, c.HoldsPoint(t.Context(), prefix))
 }

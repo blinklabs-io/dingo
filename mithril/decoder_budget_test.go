@@ -16,8 +16,8 @@ package mithril
 
 import (
 	"bytes"
-	"errors"
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -330,20 +330,27 @@ func TestChunkFeedDecoderBudget(t *testing.T) {
 		defer release()
 		cfg.Bootstrap.decoderBudget = b
 
+		// The feed's workers keep writing beneath the t.TempDir above until
+		// Close returns, so the result is sent only after Close, and this
+		// cleanup, registered after t.TempDir and so run before it, holds
+		// the directory until the goroutine has finished on a failing run.
+		stopped := make(chan struct{})
+		t.Cleanup(func() { <-stopped })
 		done := make(chan error, 1)
 		go func() {
-			feed, err := NewChunkFeed(t.Context(), cfg)
-			if err != nil {
-				done <- err
-				return
-			}
-			defer feed.Close()
-			if feed.cfg.decoderBudget != b {
-				done <- errors.New("feed replaced the budget it was given")
-				return
-			}
-			_, err = feed.Next(t.Context())
-			done <- err
+			defer close(stopped)
+			done <- func() (err error) {
+				feed, err := NewChunkFeed(t.Context(), cfg)
+				if err != nil {
+					return err
+				}
+				defer func() { err = errors.Join(err, feed.Close()) }()
+				if feed.cfg.decoderBudget != b {
+					return errors.New("feed replaced the budget it was given")
+				}
+				_, err = feed.Next(t.Context())
+				return err
+			}()
 		}()
 		testutil.RequireNoReceive(
 			t, done, decoderGateWait, "feed decoded outside its budget",
