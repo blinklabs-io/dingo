@@ -482,7 +482,7 @@
             "type": "prometheus",
             "uid": "default"
           },
-          "expr": "(process_resident_memory_bytes{instance=~\"$instance\"} - go_memstats_sys_bytes{instance=~\"$instance\"})",
+          "expr": "(process_resident_memory_bytes{instance=~\"$instance\"} - (go_memstats_sys_bytes{instance=~\"$instance\"} - go_memstats_heap_released_bytes{instance=~\"$instance\"}))",
           "instant": true,
           "legendFormat": "",
           "range": false,

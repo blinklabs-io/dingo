@@ -66,6 +66,20 @@ const (
 	// changing the contents of a successful response.
 	defaultMaxConcurrentBulkReads = 8
 
+	// An /account/coins response streams the account's UTxOs from storage in
+	// pages of at most defaultAccountCoinsPageSize matches, scanning at most
+	// defaultAccountCoinsPageCandidates outputs and retaining at most
+	// defaultAccountCoinsPageBytes of output CBOR per page. Server memory is
+	// bounded by one page however many coins the account holds.
+	defaultAccountCoinsPageSize       = 500
+	defaultAccountCoinsPageCandidates = 5000
+	defaultAccountCoinsPageBytes      = 1 << 20
+
+	// accountCoinsPageWriteTimeout is the write deadline each streamed
+	// /account/coins page gets. Progress extends it, so a large account
+	// completes while a client that stops reading is cut off.
+	accountCoinsPageWriteTimeout = 30 * time.Second
+
 	// listenerReadTimeout bounds the whole request read at the
 	// connection, covering the requests whose body no handler reads --
 	// such as an unknown route -- which the per-request deadline above
@@ -104,6 +118,12 @@ type ServerConfig struct {
 	// maxConcurrentBulkReads is unexported so the concurrency bound remains a
 	// server invariant rather than part of the Mesh wire contract.
 	maxConcurrentBulkReads int
+	// accountCoinsPageSize, accountCoinsPageCandidates and
+	// accountCoinsPageBytes bound one streamed /account/coins page. They are
+	// unexported for the same reason as maxConcurrentBulkReads.
+	accountCoinsPageSize       int
+	accountCoinsPageCandidates int
+	accountCoinsPageBytes      int64
 	// maxMempoolListing and maxConcurrentMempoolListings are unexported and
 	// defaulted the same way.
 	maxMempoolListing            int
@@ -187,6 +207,15 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	}
 	if cfg.maxConcurrentMempoolListings <= 0 {
 		cfg.maxConcurrentMempoolListings = defaultMaxConcurrentMempoolListings
+	}
+	if cfg.accountCoinsPageSize <= 0 {
+		cfg.accountCoinsPageSize = defaultAccountCoinsPageSize
+	}
+	if cfg.accountCoinsPageCandidates <= 0 {
+		cfg.accountCoinsPageCandidates = defaultAccountCoinsPageCandidates
+	}
+	if cfg.accountCoinsPageBytes <= 0 {
+		cfg.accountCoinsPageBytes = defaultAccountCoinsPageBytes
 	}
 	if cfg.maxConcurrentBulkReads <= 0 {
 		cfg.maxConcurrentBulkReads = defaultMaxConcurrentBulkReads

@@ -136,8 +136,8 @@ func TestFetchBlock_CancelDuringLookupMapsToCanceled(t *testing.T) {
 
 // TestFetchBlock_DeadlineDuringLookupMapsToDeadlineExceeded covers a request
 // that times out while the block read is running. The deadline is a second so
-// the handler reaches the read first, and the test waits for that signal
-// before trusting the result.
+// the handler reaches the read first; the handler is synchronous, so the test
+// fails if the read never started instead of waiting on it.
 func TestFetchBlock_DeadlineDuringLookupMapsToDeadlineExceeded(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -154,7 +154,11 @@ func TestFetchBlock_DeadlineDuringLookupMapsToDeadlineExceeded(t *testing.T) {
 		},
 	}
 	u, err := fetchBlockWith(ctx, stub)
-	<-entered
+	select {
+	case <-entered:
+	default:
+		t.Fatalf("FetchBlock returned before entering lookup: %v", err)
+	}
 	require.Equal(t, connect.CodeDeadlineExceeded, connect.CodeOf(err))
 	requireBulkSlotFree(t, u)
 }

@@ -2008,6 +2008,10 @@ type LedgerState struct {
 	// production; tests use it to hold the exact post-commit/pre-publication
 	// window without relying on scheduler timing.
 	beforeTransactionApplyPublish func()
+	// afterEndorserOffsetBatch is a test-only crash seam. Nil in production;
+	// it runs after each committed batch of endorser-block offsets, and an
+	// error from it stops the write there.
+	afterEndorserOffsetBatch func() error
 	// afterBlockApplyCommit is a test-only sequencing hook. Nil in
 	// production; it holds the durable-commit-before-snapshot-publication
 	// window in the normal block-apply path.
@@ -15076,13 +15080,17 @@ func (ls *LedgerState) UtxosByAddress(
 	return ret, nil
 }
 
-// UtxosByAddressComplete returns every UTxO for the requested addresses and
-// stops the read when ctx is canceled.
-func (ls *LedgerState) UtxosByAddressComplete(
+// ScanUtxosByAddress visits every UTxO matching q's exact address patterns
+// one bounded page at a time from a single database snapshot and returns the
+// tip stored in that snapshot. See database.Database.ScanUtxosByAddress.
+func (ls *LedgerState) ScanUtxosByAddress(
 	ctx context.Context,
-	addrs []ledger.Address,
-) ([]models.Utxo, error) {
-	return ls.db.UtxosByAddressComplete(ctx, addrs, nil)
+	q *models.UtxoWithOrderingQuery,
+	maxCandidates int,
+	maxBytes int64,
+	visit func([]models.UtxoWithOrdering) error,
+) (ochainsync.Tip, error) {
+	return ls.db.ScanUtxosByAddress(ctx, q, maxCandidates, maxBytes, visit)
 }
 
 // UtxosByAddressBoundedPage returns an ordered, resumable UTxO page while

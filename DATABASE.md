@@ -842,7 +842,7 @@ Use the Go APIs when code runs inside Dingo:
 
 - `database.Database` in `database/database.go` owns both stores and exposes `Blob()`, `PinBlob()`, `SetBlobStore()`, `Metadata()`, `Transaction()`, `BlobTxn()`, `MetadataTxn()`, `StorageMode()`, and `Close()`. `Blob()`, `PinBlob()`, and `SetBlobStore()` are the only readers and writer of the installed blob store; see "Storage provider ownership" for the pin/drain rules that make replacement safe.
 - `database.CborCache()` returns the `TieredCborCache`. Its cold-path entry points `ResolveUtxoCbor(txId, outputIdx, txn ...*Txn)` and `ResolveTxCbor(txn *Txn, txHash)` take the database transaction, not a bare `types.Txn` handle: an optional transaction makes uncommitted writes visible, and the cold read has to run against the store that transaction was opened on rather than whichever store is installed when the resolve happens. A resolve through a read-write transaction populates the shared hot UTxO cache only when a fresh read snapshot holds the identical stored value, so a UTxO row staged by the open transaction (and therefore subject to rollback) never reaches the shared cache while rows committed before the transaction began are still cached. `Database.ResolveUtxoCborWithRecovery(txId, outputIdx, txn)` wraps `ResolveUtxoCbor` for a caller that only has a bare ref (not a `*models.Utxo` already loaded via `GetUtxo`) and must not silently treat a recoverable missing blob as absent: on `types.ErrBlobKeyNotFound` it falls back to the same producing-block reconstruction `loadCbor` performs for `UtxoByRef`/`IterateLiveUtxos`, returning `ErrUtxoCborUnavailable` only once that recovery itself confirms the CBOR cannot be rebuilt. `ledger.queryShelleyUtxoWhole` (answering `GetUTxOWhole`) uses this rather than the bare cache call for exactly that reason.
-- `database.UtxosByAddressBoundedPage` uses ascending keyset batches to cap candidate rows and retained output CBOR while preserving a resumption cursor. It skips native-asset hydration because callers decode the original output CBOR, and it checks cancellation between SQL, blob, and decode steps. `UtxosByAddressPage` shares the same scan without a byte cap for internal callers that impose their own output bound.
+- `database.UtxosByAddressBoundedPage` uses ascending keyset batches to cap candidate rows and retained output CBOR while preserving a resumption cursor. It skips native-asset hydration because callers decode the original output CBOR, and it checks cancellation between SQL, blob, and decode steps. `UtxosByAddressPage` shares the same scan without a byte cap for internal callers that impose their own output bound. `database.ScanUtxosByAddress` runs the same bounded pages to exhaustion inside one read transaction, calling a visitor per page and returning the tip read in that transaction, so every page and the tip share one snapshot (SQLite WAL read snapshot, REPEATABLE READ on PostgreSQL and MySQL, a Badger read transaction for blob CBOR) and a block applied mid-scan neither duplicates nor drops an output. The transaction stays open while the visitor runs; on SQLite a long scan delays WAL checkpointing until it ends.
 - `database.IterateLiveUtxoRefs` and `IterateUtxoRefsAsOf` bind each SQL scan to the call context even when the caller supplies a longer-lived transaction. This preserves the transaction snapshot while allowing a per-query deadline to interrupt enumeration.
 - `database.Txn` in `database/txn.go` coordinates sibling metadata/blob transactions. Write commits update commit timestamps in both stores, commit the blob transaction first, then commit metadata. `Txn.BlobStore()` returns the blob store the transaction was opened on — the store its `Blob()` handle belongs to, and the one every blob call inside the transaction must use.
 - `metadata.MetadataStore` in `database/plugin/metadata/store.go` is the
@@ -3524,6 +3524,34 @@ When a later offset read in that transaction misses the LRU, `ResolveUtxoCbor`
 reads the marked block through a fresh blob read transaction instead of the
 stale snapshot, which also keeps the block key out of the shared transaction's
 conflict-detection read set. The mark is dropped when the transaction finishes.
+
+The endorser transactions' own `t` and `u` offset entries are bounded the same
+way. A dense endorser block stages one `t` entry per transaction body and one
+`u` entry per produced output, which can exceed one Badger write transaction,
+and the shared transaction would fail with `ErrTxnTooBig` partway through the
+block. `applyEndorserBlock` therefore applies the transactions' metadata with
+`BatchedTxIngestOpts.OffsetsPersisted`, which leaves the blob writes out, and
+afterwards calls `Database.PersistTransactionOffsets`. That commits the entries
+for the applied transactions in blob-only transactions of their own, each sized
+from the store's `blob.TxnBudget` and committed before it fills; a store with no
+budget receives them in the shared transaction. The order is: the endorser blob
+commits, then the offset batches, then the metadata with the shared
+transaction's commit. Offsets therefore never name a blob that is not
+committed. A crash or error between batches, or a rejected or rolled-back
+block, leaves committed `t`/`u` entries whose transactions have no metadata
+rows. Metadata is the source of truth, so those entries are unreachable, and a
+re-apply finds no existing transaction rows, applies every transaction again,
+and rewrites the same values. A rollback of the ranking block deletes the
+entries through its metadata rows, subject to the same per-transaction staging
+limit as any rollback (`ErrBlobDeleteIncomplete`), so a rolled-back dense
+endorser block can strand some entries until a re-apply overwrites them. The
+shared transaction's snapshot predates these commits, so
+`PersistTransactionOffsets` marks each written key on the `Txn`, and reads of a
+marked `t`/`u` key (`ResolveUtxoCbor`, `ResolveTxCbor`, and the producer lookup
+and recovery paths) use a fresh read snapshot instead of the shared handle.
+Reading a key that was committed after the shared transaction began through
+that handle would also add it to the transaction's conflict read set and fail
+its commit.
 
 Transaction effects are stored under the certifying ranking block's
 point, so rolling back that ranking block removes the effects. A blob left
