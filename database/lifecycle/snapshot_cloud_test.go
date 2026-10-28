@@ -298,3 +298,117 @@ func TestMirrorToCloudUploadDirReceivesVerifiedBytes(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, siblings, 1, "staging directory must be removed")
 }
+
+func writeMirrorFixtureSnapshot(t *testing.T, dir string) {
+	t.Helper()
+	blob := []byte("blob")
+	metadata := []byte("metadata")
+	require.NoError(t, os.MkdirAll(dir, 0o700))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, lifecycle.BlobBackupFileName), blob, 0o600,
+	))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, lifecycle.MetadataBackupFileName), metadata, 0o600,
+	))
+	require.NoError(t, lifecycle.WriteManifest(dir, lifecycle.Manifest{
+		BlobBytes:      int64(len(blob)),
+		MetadataBytes:  int64(len(metadata)),
+		BlobSHA256:     sha256Hex(blob),
+		MetadataSHA256: sha256Hex(metadata),
+	}, lifecycle.WithManifestKey(testTrustKey)))
+}
+
+func TestIsCloudMirroredToRejectsSymlinkMarker(t *testing.T) {
+	t.Parallel()
+
+	setFakeCloudBackingDir(t, t.TempDir())
+	const cloudDest = "faketest://bucket/prefix"
+	dir := filepath.Join(t.TempDir(), "epoch-marker-link")
+	writeMirrorFixtureSnapshot(t, dir)
+	require.NoError(t, lifecycle.MirrorToCloud(
+		t.Context(), testDestinationRegistry, dir, cloudDest,
+		lifecycle.WithManifestKey(testTrustKey),
+	))
+	require.True(t, lifecycle.IsCloudMirroredTo(dir, cloudDest))
+
+	marker := lifecycle.CloudMirrorMarkerPath(dir)
+	digest, err := os.ReadFile(marker)
+	require.NoError(t, err)
+	target := filepath.Join(t.TempDir(), "valid-digest")
+	require.NoError(t, os.WriteFile(target, digest, 0o600))
+	require.NoError(t, os.Remove(marker))
+	require.NoError(t, os.Symlink(target, marker))
+
+	require.False(t, lifecycle.IsCloudMirroredTo(dir, cloudDest))
+	require.False(t, lifecycle.IsCloudMirrored(dir))
+}
+
+// dirSwappingDestination replaces the snapshot directory with a new one
+// while the upload is in flight.
+type dirSwappingDestination struct {
+	sourceDir string
+}
+
+func (d *dirSwappingDestination) UploadDir(context.Context, string) error {
+	if err := os.Rename(d.sourceDir, d.sourceDir+".moved"); err != nil {
+		return err
+	}
+	return os.Mkdir(d.sourceDir, 0o700)
+}
+
+func (*dirSwappingDestination) DownloadFiles(
+	context.Context,
+	string,
+	[]lifecycle.DownloadFile,
+) error {
+	return errors.New("not implemented")
+}
+
+func TestMirrorToCloudRefusesReplacedSnapshotDirectory(t *testing.T) {
+	t.Parallel()
+
+	dir := filepath.Join(t.TempDir(), "epoch-replaced")
+	writeMirrorFixtureSnapshot(t, dir)
+	registry := lifecycle.NewDestinationRegistry()
+	registry.Register(
+		"swapdirtest",
+		func(*url.URL) (lifecycle.CloudDestination, error) {
+			return &dirSwappingDestination{sourceDir: dir}, nil
+		},
+	)
+
+	err := lifecycle.MirrorToCloud(
+		t.Context(), registry, dir, "swapdirtest://bucket/prefix",
+		lifecycle.WithManifestKey(testTrustKey),
+	)
+	require.ErrorIs(t, err, lifecycle.ErrSnapshotDirectoryReplaced)
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	require.Empty(t, entries, "no marker may land in the replacement directory")
+}
+
+func TestMirrorToCloudDoesNotFollowPreplacedMarkerSymlink(t *testing.T) {
+	t.Parallel()
+
+	setFakeCloudBackingDir(t, t.TempDir())
+	const cloudDest = "faketest://bucket/prefix"
+	dir := filepath.Join(t.TempDir(), "epoch-marker-preplaced")
+	writeMirrorFixtureSnapshot(t, dir)
+	target := filepath.Join(t.TempDir(), "victim")
+	require.NoError(t, os.WriteFile(target, []byte("untouched"), 0o600))
+	marker := lifecycle.CloudMirrorMarkerPath(dir)
+	require.NoError(t, os.Symlink(target, marker))
+
+	require.NoError(t, lifecycle.MirrorToCloud(
+		t.Context(), testDestinationRegistry, dir, cloudDest,
+		lifecycle.WithManifestKey(testTrustKey),
+	))
+
+	got, err := os.ReadFile(target)
+	require.NoError(t, err)
+	require.Equal(t, "untouched", string(got))
+	info, err := os.Lstat(marker)
+	require.NoError(t, err)
+	require.True(t, info.Mode().IsRegular(), "marker replaced the symlink")
+	require.True(t, lifecycle.IsCloudMirroredTo(dir, cloudDest))
+}

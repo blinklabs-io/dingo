@@ -428,3 +428,20 @@ func TestHashFileContextRejectsCancellation(t *testing.T) {
 	_, _, err := hashFileContext(ctx, path)
 	require.ErrorIs(t, err, context.Canceled)
 }
+
+func TestOpenSnapshotUploadFilesRejectsSymlinkedDirectory(t *testing.T) {
+	t.Parallel()
+
+	real := filepath.Join(t.TempDir(), "epoch-real")
+	require.NoError(t, os.Mkdir(real, 0o700))
+	writeTestUploadSnapshot(t, real)
+	link := filepath.Join(t.TempDir(), "epoch-real")
+	require.NoError(t, os.Symlink(real, link))
+
+	files, _, root, err := openSnapshotUploadFiles(
+		t.Context(), link, MaxManifestBytes,
+	)
+	require.ErrorIs(t, err, ErrSnapshotDirectoryReplaced)
+	require.Empty(t, files)
+	require.Nil(t, root)
+}
