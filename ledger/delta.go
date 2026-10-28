@@ -83,6 +83,10 @@ type LedgerDelta struct {
 	// reference ledger's applyLeiosClosure; false for all ranking-block deltas so
 	// their behavior is unchanged.
 	skipConsumedInputRecovery bool
+	// offsetsPersisted marks a delta whose transactions' blob offsets the
+	// caller has already written (see BatchedTxIngestOpts.OffsetsPersisted).
+	// Set only for Leios endorser-block closure application.
+	offsetsPersisted bool
 	// strictConsumedInputs refuses to recover an absent consumed-input producer
 	// from the blob store and treats it as a hard error instead.
 	// Set only when the block is applied in the steady-state, at-tip, validated
@@ -110,6 +114,7 @@ func NewLedgerDelta(
 	delta.donation = 0
 	delta.expandedIndexOffset = 0
 	delta.skipConsumedInputRecovery = false
+	delta.offsetsPersisted = false
 	delta.strictConsumedInputs = false
 	delta.validated = false
 	delta.closureContextSlot = nil
@@ -134,6 +139,7 @@ func (d *LedgerDelta) Release() {
 	d.donation = 0
 	d.expandedIndexOffset = 0
 	d.skipConsumedInputRecovery = false
+	d.offsetsPersisted = false
 	d.strictConsumedInputs = false
 	d.validated = false
 	d.closureContextSlot = nil
@@ -301,6 +307,7 @@ func (d *LedgerDelta) applyWithDonationRecording(
 			}
 			opts := database.BatchedTxIngestOpts{
 				SkipConsumedInputRecovery:      d.skipConsumedInputRecovery,
+				OffsetsPersisted:               d.offsetsPersisted,
 				TrustedImmutableReplay:         ls.trustedReplayActive(),
 				LedgerContextSlot:              d.closureContextSlot,
 				StrictAppliedInputConservation: d.strictConsumedInputs,

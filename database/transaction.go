@@ -313,8 +313,10 @@ func (d *Database) SetTransactionWithOpts(
 	}
 	// Store offset reference
 	offsetData := EncodeTxOffset(&txOffset)
-	if err := blob.SetTx(blobTxn, txHashBytes, offsetData); err != nil {
-		return fmt.Errorf("set tx offset: %w", err)
+	if !opts.OffsetsPersisted {
+		if err := blob.SetTx(blobTxn, txHashBytes, offsetData); err != nil {
+			return fmt.Errorf("set tx offset: %w", err)
+		}
 	}
 
 	// Store all produced UTxOs - tx.Produced() returns correct indices for both
@@ -375,6 +377,9 @@ func (d *Database) SetTransactionWithOpts(
 			)
 		}
 		// Store offset reference
+		if opts.OffsetsPersisted {
+			continue
+		}
 		offsetData := EncodeUtxoOffset(&offset)
 		if err := blob.SetUtxo(blobTxn, txId, outputIdx, offsetData); err != nil {
 			return fmt.Errorf(
@@ -968,8 +973,13 @@ func (d *Database) recoverConsumedUtxo(
 	if blobTxn == nil {
 		return nil, types.ErrNilTxn
 	}
+	offsetTxn, releaseRead := txn.utxoBlobHandle(
+		ledgerInputIDBytes(input),
+		input.Index(),
+	)
+	defer releaseRead()
 	utxoData, err := blob.GetUtxo(
-		blobTxn,
+		offsetTxn,
 		ledgerInputIDBytes(input),
 		input.Index(),
 	)
