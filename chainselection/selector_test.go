@@ -7761,3 +7761,46 @@ func TestPendingHeaderFirstRefusedOnReplayIsReported(t *testing.T) {
 		t, int64(1), rejections.Load(), "commit does not count again",
 	)
 }
+
+// TestUnstagedPeerTipRefusalIsReportedEachTime delivers the same implausible
+// tip twice through the direct update path, which stages nothing. Each
+// delivery is a separate refusal and is reported, and no rejection record is
+// left behind for a candidate that was never staged.
+func TestUnstagedPeerTipRefusalIsReportedEachTime(t *testing.T) {
+	t.Parallel()
+
+	const rejectedMsg = "rejecting implausible peer tip"
+	c := loneFarChain{k: 8}
+	logs := &lockedLogBuffer{}
+	var rejections atomic.Int64
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam:             c.k,
+		DisableEventSubscriptions: true,
+		Logger: slog.New(slog.NewTextHandler(
+			logs, &slog.HandlerOptions{Level: slog.LevelWarn},
+		)),
+		OnPeerTipRejected: func(PeerTipRejection) {
+			rejections.Add(1)
+		},
+	})
+	require.True(t, cs.UpdatePeerTip(newTestConnectionId(1), c.tip(10), nil))
+
+	far := newTestConnectionId(2)
+	for i := range 2 {
+		require.False(
+			t, cs.UpdatePeerTip(far, c.tip(23), nil), "delivery %d", i,
+		)
+		assert.Equal(
+			t, i+1, logs.count(rejectedMsg), "delivery %d is logged", i,
+		)
+		assert.Equal(
+			t, int64(i+1), rejections.Load(), "delivery %d is counted", i,
+		)
+	}
+	cs.mutex.RLock()
+	defer cs.mutex.RUnlock()
+	assert.Empty(
+		t, cs.reportedPeerTipRejections,
+		"an unstaged refusal leaves no rejection record",
+	)
+}

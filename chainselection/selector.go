@@ -302,8 +302,10 @@ type ChainSelector struct {
 	// reportedPeerTipRejections holds the candidates whose refusal was
 	// already warned about, counted and passed to OnPeerTipRejected, so a
 	// replay or re-check does not report it again. Only staged candidates
-	// are kept (see prunePeerTipRejectionReportsLocked), which bounds it by
-	// the pending admission limits. Guarded by mutex.
+	// are kept: the direct update paths drop a refusal they did not stage
+	// (forgetUnstagedPeerTipRejectionLocked) and every change to the staged
+	// set prunes the rest (prunePeerTipRejectionReportsLocked), which bounds
+	// it by the pending admission limits. Guarded by mutex.
 	reportedPeerTipRejections map[peerTipRejectionKey]struct{}
 	mutex                     sync.RWMutex
 	ctx                       context.Context
@@ -2025,7 +2027,9 @@ func (cs *ChainSelector) admissionPeerCountLocked() int {
 // may be recorded, applying the shared plausibility bound used by every path
 // that records a peer frontier (roll forward and the roll-backward
 // registration of a peer that has no entry yet). It logs and returns false
-// when the observation is rejected. Callers must hold cs.mutex.
+// when the observation is rejected. These paths stage nothing, so each
+// refusal is reported unless it matches a staged candidate already reported.
+// Callers must hold cs.mutex.
 func (cs *ChainSelector) checkPeerTipPlausibleLocked(
 	connId ouroboros.ConnectionId,
 	tip ochainsync.Tip,
@@ -2035,9 +2039,37 @@ func (cs *ChainSelector) checkPeerTipPlausibleLocked(
 	if cs.farTipClaims == nil {
 		cs.farTipClaims = make(map[ouroboros.ConnectionId]farTipClaim)
 	}
-	return cs.checkPeerTipPlausibleWithClaimsLocked(
+	plausible := cs.checkPeerTipPlausibleWithClaimsLocked(
 		connId, tip, observedTip, link, cs.farTipClaims, true,
 	)
+	if !plausible {
+		cs.forgetUnstagedPeerTipRejectionLocked(connId, tip, observedTip)
+	}
+	return plausible
+}
+
+// forgetUnstagedPeerTipRejectionLocked drops the rejection record for a
+// refusal that matches no staged candidate of connId. Must be called with
+// cs.mutex held.
+func (cs *ChainSelector) forgetUnstagedPeerTipRejectionLocked(
+	connId ouroboros.ConnectionId,
+	tip ochainsync.Tip,
+	observedTip ochainsync.Tip,
+) {
+	key := newPeerTipRejectionKey(connId, tip, observedTip)
+	if _, ok := cs.reportedPeerTipRejections[key]; !ok {
+		return
+	}
+	for _, candidate := range cs.pendingPeerTips[connId] {
+		if newPeerTipRejectionKey(
+			candidate.update.ConnectionId,
+			candidate.update.Tip,
+			candidate.update.ObservedTip,
+		) == key {
+			return
+		}
+	}
+	delete(cs.reportedPeerTipRejections, key)
 }
 
 func (cs *ChainSelector) checkPeerTipPlausibleWithClaimsLocked(
