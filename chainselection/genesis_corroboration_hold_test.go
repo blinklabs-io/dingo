@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -339,6 +340,46 @@ func TestPeerTipAdmissionBoundsCatchUpByAppliedTip(t *testing.T) {
 		run(t, 150),
 		"a frontier within 2k of the applied tip was bounded by a stale local tip",
 	)
+}
+
+func TestPeerClaimsCannotAdvanceAppliedCatchUpCeiling(t *testing.T) {
+	t.Parallel()
+	const (
+		k          = uint64(2)
+		appliedTip = uint64(100)
+	)
+	var applied atomic.Uint64
+	applied.Store(appliedTip)
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam: k,
+		AppliedTip: func() (ochainsync.Tip, bool) {
+			block := applied.Load()
+			return genesisTip(block*20, fmt.Sprintf("h%d", block), block), true
+		},
+	})
+	cs.SetLocalTip(genesisTip(appliedTip*20, "local", appliedTip))
+
+	// Establish the highest admissible frontier at the applied-tip ceiling.
+	reference := genesisTip(104*20, "h104", 104)
+	require.True(t, cs.UpdatePeerTip(corrConn(1), reference, nil))
+
+	prepare := func(conn int, admissionID, block uint64) PeerTipUpdateDisposition {
+		tip := genesisTip(block*20, fmt.Sprintf("h%d", block), block)
+		return cs.PreparePeerTipAdmissionDisposition(PeerTipUpdateEvent{
+			ConnectionId: corrConn(conn),
+			AdmissionID:  admissionID,
+			Tip:          tip,
+			ObservedTip:  tip,
+		})
+	}
+
+	require.NotEqual(t, PeerTipUpdateAccepted, prepare(2, 1, 108))
+	require.NotEqual(t, PeerTipUpdateAccepted, prepare(3, 1, 107),
+		"matching peer claims advanced the applied catch-up ceiling")
+
+	// Verified ledger progress moves the same frontier inside the ceiling.
+	applied.Store(104)
+	require.Equal(t, PeerTipUpdateAccepted, prepare(3, 1, 107))
 }
 
 // A chain's first block can sit at slot 0, as Preview's does. It carries a

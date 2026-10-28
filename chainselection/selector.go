@@ -276,6 +276,10 @@ type ChainSelector struct {
 	evaluationTrigger        chan struct{}
 	bestPeerConn             *ouroboros.ConnectionId
 	localTip                 ochainsync.Tip
+	// localTipKnown records that localTip came from applied ledger state or
+	// an explicitly trusted checkpoint. Its zero value is a valid origin, so
+	// the tip's block number cannot encode this provenance.
+	localTipKnown bool
 	// farTipClaims records, per connection, the most recent delivered
 	// frontier that exceeded the catch-up plausibility ceiling. Entries are
 	// provisional: they never enter peerTips and so never influence chain
@@ -1098,7 +1102,9 @@ func (cs *ChainSelector) PreparePeerTipAdmissionDisposition(
 	func() {
 		cs.mutex.Lock()
 		defer cs.mutex.Unlock()
-		cs.refreshAppliedLocalTipLocked()
+		if cs.refreshAppliedLocalTipLocked() && len(cs.pendingPeerTips) > 0 {
+			cs.rebuildPendingAdmissionStateLocked()
+		}
 		if cs.truncateStalePendingPeerTipsLocked() {
 			cs.rebuildPendingAdmissionStateLocked()
 		}
@@ -1132,6 +1138,11 @@ func (cs *ChainSelector) PreparePeerTipAdmissionDisposition(
 			prevHash: update.ObservedPrevHash,
 			boundary: update.ObservedBoundary,
 		}
+		// Remote agreement cannot extend the catch-up ceiling because the
+		// relevant header cryptography can be beyond the ledger forecast.
+		// Keep the candidate pending until applied ledger progress or a
+		// trusted checkpoint moves the bound over it.
+		beyondCatchUpCeiling := cs.peerTipBeyondCatchUpCeilingLocked(update)
 		plausible, claimsChanged := cs.checkPeerTipPlausibleWithClaimsTrackedLocked(
 			update.ConnectionId,
 			update.Tip,
@@ -1140,10 +1151,13 @@ func (cs *ChainSelector) PreparePeerTipAdmissionDisposition(
 			cs.pendingFarTipClaims,
 			true,
 		)
+		if beyondCatchUpCeiling {
+			plausible = false
+		}
 		claim, hasClaim := cs.pendingFarTipClaims[update.ConnectionId]
-		evidence := hasClaim &&
-			claim.slot == update.ObservedTip.Point.Slot &&
-			bytes.Equal(claim.hash, update.ObservedTip.Point.Hash)
+		evidence := beyondCatchUpCeiling ||
+			(hasClaim && claim.slot == update.ObservedTip.Point.Slot &&
+				bytes.Equal(claim.hash, update.ObservedTip.Point.Hash))
 		if !plausible && !evidence {
 			cs.rebuildPendingAdmissionStateLocked()
 			return
@@ -1424,9 +1438,14 @@ func (cs *ChainSelector) rebuildPendingAdmissionStateLocked() {
 			claims,
 			true,
 		)
+		beyondCatchUpCeiling := cs.peerTipBeyondCatchUpCeilingLocked(update)
+		if beyondCatchUpCeiling {
+			plausible = false
+		}
 		claim, hasClaim := claims[update.ConnectionId]
-		evidence := hasClaim && claim.slot == update.ObservedTip.Point.Slot &&
-			bytes.Equal(claim.hash, update.ObservedTip.Point.Hash)
+		evidence := beyondCatchUpCeiling ||
+			(hasClaim && claim.slot == update.ObservedTip.Point.Slot &&
+				bytes.Equal(claim.hash, update.ObservedTip.Point.Hash))
 		candidate.plausible = plausible
 		candidate.farTipClaim = cloneCandidateFarTipClaim(
 			update,
@@ -2947,7 +2966,8 @@ func (cs *ChainSelector) SetLocalTip(tip ochainsync.Tip) {
 		}
 		cs.localTipProgressBlock = tip.BlockNumber
 		cs.localTip = tip
-		if len(cs.pendingFarTipClaims) > 0 {
+		cs.localTipKnown = true
+		if len(cs.pendingFarTipClaims) > 0 || len(cs.pendingPeerTips) > 0 {
 			cs.rebuildPendingAdmissionStateLocked()
 		}
 		shouldEvaluate = cs.advanceSelectionModeLocked()
@@ -2958,16 +2978,35 @@ func (cs *ChainSelector) SetLocalTip(tip ochainsync.Tip) {
 }
 
 // refreshAppliedLocalTipLocked replaces the local tip with the live applied
-// tip when an AppliedTip source is configured. It leaves the progress clock
-// that SetLocalTip maintains to SetLocalTip. Must be called with cs.mutex held
-// for writing.
-func (cs *ChainSelector) refreshAppliedLocalTipLocked() {
+// tip when an AppliedTip source is configured and reports whether its block
+// number changed. It leaves the progress clock that SetLocalTip maintains to
+// SetLocalTip. Must be called with cs.mutex held for writing.
+func (cs *ChainSelector) refreshAppliedLocalTipLocked() bool {
 	if cs.config.AppliedTip == nil {
-		return
+		return false
 	}
 	if tip, ok := cs.config.AppliedTip(); ok {
+		changed := !cs.localTipKnown || tip.BlockNumber != cs.localTip.BlockNumber
 		cs.localTip = tip
+		cs.localTipKnown = true
+		return changed
 	}
+	return false
+}
+
+// peerTipBeyondCatchUpCeilingLocked reports whether staged header admission
+// must wait for applied ledger progress. Remote claims do not move this bound.
+// Must be called with cs.mutex held.
+func (cs *ChainSelector) peerTipBeyondCatchUpCeilingLocked(
+	update PeerTipUpdateEvent,
+) bool {
+	if cs.securityParam == 0 || !cs.localTipKnown {
+		return false
+	}
+	return update.ObservedTip.BlockNumber > safeAddUint64(
+		cs.localTip.BlockNumber,
+		safeAddUint64(cs.securityParam, cs.securityParam),
+	)
 }
 
 // now returns the current time via the injectable clock. Must be called with

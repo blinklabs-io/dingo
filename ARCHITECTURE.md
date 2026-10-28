@@ -5989,53 +5989,21 @@ is recorded as having delivered nothing: the advertised tip is never
 substituted for a missing observed frontier, and the peer is bounded and
 compared as block 0 until it delivers a header.
 
-A delivered frontier beyond the catch-up allowance is not rejected outright.
-A rejected frontier is never recorded, so without a second path a node whose
-honest peers deliver more than `2*securityParam` blocks ahead of a
-slow-to-apply local tip could never accept them. Such a frontier is too far
-ahead of local ledger state for its VRF/KES check to run
-(`ledger.ValidateChainSelectionHeaderCrypto` defers), so no single claim is
-trusted: `checkPeerTipPlausibleLocked` records it per connection
-(`ChainSelector.farTipClaims`, bounded to `maxTrackedPeers` and pruned with the
-peer in `deletePeerLocked`; a frontier that does not fit is still compared
-against the recorded ones) and accepts it once another connection has
-recorded a frontier within `securityParam` of it
-(`corroborateFarTipClaimLocked`). The earlier claim is then marked
-corroborated and becomes that connection's own reference, like a known peer's
-previous frontier: its next update is accepted within `securityParam` of its
-claim even when the corroborating frontier sits up to `securityParam` below
-it, and the entry is cleared once the connection is accepted.
-The stale-reference recovery also applies when the tracked reference is ahead
-of the local tip by more than `securityParam`, including beyond the
-`localTip + 2*securityParam` catch-up ceiling; a snapshot-backed or
-from-genesis local tip can lag its delivered peer references without making
-those references current enough to rule out catch-up. Up to that ceiling a
-frontier past the reference plus `securityParam` is accepted with the same
-corroboration or connected-chain evidence. Beyond it nothing anchors the
-frontier near the local chain and one peer can fabricate any number of
-self-linked headers, so only a connection in another identity group
-(`ChainSelectorConfig.PeerIdentity`, or the remote host when unset)
-corroborates it, and a connected header chain from one connection is not
-accepted (`corroborateIndependentFarTipClaimLocked`).
-Staging a peer tip reads the local tip from `ChainSelectorConfig.AppliedTip`
-(the live applied ledger tip) rather than from the last `SetLocalTip`, which
-the node calls only at startup and on the stall recycler's tick. A node
-replaying blocks it already stored, as after a Mithril import, applies
-hundreds of blocks in that interval, and a ceiling measured from the tip it
-started at rejects headers the ledger has already passed.
+A staged delivered frontier beyond `localTip + 2*securityParam` remains a
+bounded pending candidate and cannot enter ledger ingress. The ceiling is
+anchored to applied ledger state or an explicit trusted checkpoint, including
+the origin. Peer agreement and a run of self-linked delivered headers do not
+move it: relevant VRF/KES checks can be unavailable beyond the ledger forecast
+horizon, so those observations are not verified chain evidence. Staging reads
+the current applied tip from `ChainSelectorConfig.AppliedTip` and rebuilds the
+pending candidates against it. Applied ledger progress therefore releases an
+honest frontier as soon as it falls within the moving allowance, including
+while replaying blocks after a snapshot import, without trusting remote claims
+to expand the bound.
 A peer whose advertised tip is wall-clock stale is never a new peer's
 reference. It serves an abandoned chain and is never selectable; from
 genesis, where the advertised bound applies, its short advertisement would
 otherwise reject every honest peer that advertises the real tip.
-A delivered frontier beyond the catch-up allowance is not rejected outright.
-`checkPeerTipPlausibleLocked` holds bounded far-tip evidence per connection. A
-far frontier is supported by another distinct connection within
-`securityParam`, or by more than `securityParam` consecutive connected headers.
-The connected-header check uses the delivered parent hash, block number, slot,
-and Byron boundary marker; a lone accepted frontier must continue that chain
-or the peer is removed. A lone frontier is not independent evidence for a new
-peer, and the check counts connections rather than operators.
-
 Chainsync observations carry an admission ID and remain staged until the
 ledger admits the matching header. Far-tip claims and corroboration gathered
 while admission is pending stay in a bounded provisional view. Only commit
