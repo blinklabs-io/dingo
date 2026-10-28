@@ -76,6 +76,12 @@ type ChainTipSigningProvider interface {
 	WithTip(func(ochainsync.Tip) error) error
 }
 
+// ChainTipHeaderSigningProvider binds signing to one coherent selected-block
+// and crypto-verified queued-header snapshot.
+type ChainTipHeaderSigningProvider interface {
+	WithTipAndHeader(func(ochainsync.Tip, ochainsync.Tip) error) error
+}
+
 // ChainTipRelationProvider evaluates ancestry against one primary-chain
 // snapshot. Production forging uses it to bind the parent to the ledger tip.
 type ChainTipRelationProvider interface {
@@ -1383,7 +1389,19 @@ func (b *DefaultBlockBuilder) buildBlock(ctx context.Context,
 		}
 		return nil
 	}
-	if provider, ok := b.chainTip.(ChainTipSigningProvider); ok {
+	if provider, ok := b.chainTip.(ChainTipHeaderSigningProvider); ok {
+		err = provider.WithTipAndHeader(
+			func(reTip, headerTip ochainsync.Tip) error {
+				if !tipsEqual(headerTip, reTip) {
+					return fmt.Errorf(
+						"%w: admitted header frontier moved ahead of parent before signing",
+						errParentChangedDuringBuild,
+					)
+				}
+				return encodeAndSign(reTip)
+			},
+		)
+	} else if provider, ok := b.chainTip.(ChainTipSigningProvider); ok {
 		err = provider.WithTip(encodeAndSign)
 	} else {
 		err = encodeAndSign(b.chainTip.Tip())

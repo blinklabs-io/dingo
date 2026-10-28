@@ -20,8 +20,11 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"math"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -32,6 +35,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/dmq"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/plugin"
 
@@ -39,6 +43,7 @@ import (
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/blinklabs-io/gouroboros/protocol/localmessagesubmission"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 )
 
@@ -555,4 +560,301 @@ func submitDMQ(
 		require.FailNow(t, "no verdict from the dmq socket")
 		return nil
 	}
+}
+
+func TestDMQStakeAuthorityLedgerPeerSnapshot(t *testing.T) {
+	t.Parallel()
+	auth := &dmqStakeAuthority{}
+	_, err := auth.LedgerPeerSnapshot(t.Context())
+	require.ErrorIs(t, err, dmq.ErrChainStateUnavailable)
+	require.ErrorIs(t, err, errDMQLedgerDetached)
+
+	n, points := newLiveLifecycleTestNode(t, 2)
+	auth.setLedgerState(n.ledgerState)
+	snapshot, err := auth.LedgerPeerSnapshot(t.Context())
+	require.NoError(t, err)
+	require.True(t, snapshot.Slot.HasSlot)
+	require.LessOrEqual(t, snapshot.Slot.Slot, points[len(points)-1].Slot)
+
+	auth.setLedgerState(nil)
+	_, err = auth.LedgerPeerSnapshot(t.Context())
+	require.ErrorIs(t, err, dmq.ErrChainStateUnavailable)
+}
+
+func TestDMQPeerConfig(t *testing.T) {
+	t.Parallel()
+	topo := &dmq.Topology{}
+	base := internalconfig.DefaultDMQConfig()
+	base.Enabled = true
+	base.N2NPort = 4001
+	base.MinPeers, base.MaxPeers = 3, 10
+
+	t.Run("both address families", func(t *testing.T) {
+		t.Parallel()
+		n := newAPIPluginRuntimeNode(t)
+		got := n.dmqPeerConfig(base, topo)
+		require.NotNil(t, got)
+		require.Equal(t, []dmq.ListenAddr{
+			{Address: "0.0.0.0:4001"},
+			{Address: "[::]:4001", SkipIfUnsupported: true},
+		}, got.ListenAddrs)
+		require.Equal(t, 3, got.MinPeers)
+		require.Equal(t, 10, got.MaxPeers)
+		require.Same(t, topo, got.Topology)
+		require.NotNil(t, got.LedgerPeers, "mithril has an SRV prefix")
+	})
+	t.Run("one address family", func(t *testing.T) {
+		t.Parallel()
+		n := newAPIPluginRuntimeNode(t)
+		cfg := base
+		cfg.ListenIPv6Address = ""
+		got := n.dmqPeerConfig(cfg, nil)
+		require.Equal(
+			t,
+			[]dmq.ListenAddr{{Address: "0.0.0.0:4001"}},
+			got.ListenAddrs,
+		)
+		require.Nil(t, got.Topology)
+	})
+	t.Run("no SRV prefix means no ledger peers", func(t *testing.T) {
+		t.Parallel()
+		n := newAPIPluginRuntimeNode(t)
+		cfg := base
+		cfg.Topic = "other"
+		require.Nil(t, n.dmqPeerConfig(cfg, nil).LedgerPeers)
+	})
+	t.Run("no peer port serves local clients only", func(t *testing.T) {
+		t.Parallel()
+		n := newAPIPluginRuntimeNode(t)
+		cfg := base
+		cfg.N2NPort = 0
+		require.Nil(t, n.dmqPeerConfig(cfg, topo))
+	})
+	t.Run("a topology without a peer port is reported", func(t *testing.T) {
+		t.Parallel()
+		n := newAPIPluginRuntimeNode(t)
+		logs := &syncLogBuffer{}
+		n.config.logger = slog.New(slog.NewTextHandler(logs, nil))
+		cfg := base
+		cfg.N2NPort = 0
+		cfg.TopologyFile = "/etc/dingo/dmq-topology.json"
+		require.Nil(t, n.dmqPeerConfig(cfg, topo))
+		require.Contains(t, logs.String(), "dmq.n2nPort is 0")
+	})
+	t.Run("the defaults warn of nothing", func(t *testing.T) {
+		t.Parallel()
+		n := newAPIPluginRuntimeNode(t)
+		logs := &syncLogBuffer{}
+		n.config.logger = slog.New(slog.NewTextHandler(logs, nil))
+		cfg := internalconfig.DefaultDMQConfig()
+		cfg.Enabled = true
+		require.Nil(t, n.dmqPeerConfig(cfg, nil))
+		require.NotContains(t, logs.String(), "level=WARN")
+	})
+	t.Run("a peer port with no room for peers is reported", func(t *testing.T) {
+		t.Parallel()
+		n := newAPIPluginRuntimeNode(t)
+		logs := &syncLogBuffer{}
+		n.config.logger = slog.New(slog.NewTextHandler(logs, nil))
+		cfg := base
+		cfg.MinPeers, cfg.MaxPeers = 0, 0
+		require.Nil(t, n.dmqPeerConfig(cfg, topo))
+		require.Contains(t, logs.String(), "dmq.maxPeers is 0")
+	})
+	t.Run("room for no peers serves local clients only", func(t *testing.T) {
+		t.Parallel()
+		n := newAPIPluginRuntimeNode(t)
+		cfg := base
+		cfg.MinPeers, cfg.MaxPeers = 0, 0
+		require.Nil(t, n.dmqPeerConfig(cfg, topo))
+	})
+	t.Run("settings too large for an int are clamped", func(t *testing.T) {
+		t.Parallel()
+		n := newAPIPluginRuntimeNode(t)
+		cfg := base
+		cfg.MinPeers, cfg.MaxPeers = 1, ^uint(0)
+		require.Equal(t, math.MaxInt32, n.dmqPeerConfig(cfg, nil).MaxPeers)
+	})
+}
+
+// dmqPeerMessage is a message of the shape CIP-0137 fixes, which a peer
+// that does not authenticate admits.
+func dmqPeerMessage(t *testing.T, body string) ocommon.DmqMessage {
+	t.Helper()
+	// #nosec G115 -- test fixture timestamp
+	expiry := uint32(time.Now().Add(10 * time.Minute).Unix())
+	msg := ocommon.DmqMessage{
+		Payload: ocommon.DmqMessagePayload{
+			MessageBody: bytes.Repeat([]byte(body), 100),
+			KESPeriod:   1,
+			ExpiresAt:   expiry,
+		},
+		KESSignature: make([]byte, 448),
+		OperationalCertificate: ocommon.OperationalCertificate{
+			KESVerificationKey: make([]byte, 32),
+			ColdSignature:      make([]byte, 64),
+		},
+		ColdVerificationKey: make([]byte, 32),
+	}
+	require.NoError(t, msg.SetComputedMessageID())
+	return msg
+}
+
+// newDMQPeerStack is a stack of the node's DMQ network that authenticates
+// nothing, standing in for another DMQ node.
+func newDMQPeerStack(
+	t *testing.T,
+	magic uint32,
+	peers *dmq.PeerConfig,
+) *dmq.Stack {
+	t.Helper()
+	socketDir, err := os.MkdirTemp("", "dmq")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(socketDir) })
+	s, err := dmq.NewStack(dmq.StackConfig{
+		PromRegistry:   prometheus.NewRegistry(),
+		NetworkMagic:   magic,
+		SocketPath:     filepath.Join(socketDir, "dmq.sock"),
+		Authenticator:  ocommon.NewNoOpAuthenticator(nil),
+		MessageBodyMin: 1,
+		Peers:          peers,
+	})
+	require.NoError(t, err)
+	require.NoError(t, s.Start(t.Context()))
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		require.NoError(t, s.Stop(ctx))
+	})
+	return s
+}
+
+// A node with DMQ enabled dials the peers its topology names, accepts the
+// ones that dial it, and passes messages to them, all in the one process that
+// also runs the Cardano stack.
+func TestNodeRunConnectsDMQPeers(t *testing.T) {
+	t.Parallel()
+	const magic = 42
+	remote := newDMQPeerStack(t, magic, &dmq.PeerConfig{
+		MaxPeers:    5,
+		ListenAddrs: []dmq.ListenAddr{{Address: "127.0.0.1:0"}},
+	})
+	remoteAddr := remote.PeerListenAddrs()[0].(*net.TCPAddr)
+	visitor := newDMQPeerStack(t, magic, nil)
+
+	// The node's own peer port is found by binding and releasing one.
+	probePort, err := net.Listen("tcp4", "127.0.0.1:0")
+	require.NoError(t, err)
+	nodePort := probePort.Addr().(*net.TCPAddr).Port
+	require.NoError(t, probePort.Close())
+
+	n := newAPIPluginRuntimeNode(t)
+	topologyFile := filepath.Join(t.TempDir(), "dmq-topology.json")
+	require.NoError(t, os.WriteFile(topologyFile, []byte(`{
+		"localRoots": [{
+			"accessPoints": [{"address": "127.0.0.1", "port": `+
+		strconv.Itoa(remoteAddr.Port)+`}],
+			"valency": 1
+		}]
+	}`), 0o600))
+	socketDir, err := os.MkdirTemp("", "dmq")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(socketDir) })
+	dmqCfg := internalconfig.DefaultDMQConfig()
+	dmqCfg.Enabled = true
+	dmqCfg.NetworkMagic = magic
+	dmqCfg.SocketPath = filepath.Join(socketDir, "dmq.sock")
+	dmqCfg.N2NPort = uint(nodePort) // #nosec G115 -- a TCP port
+	dmqCfg.ListenAddress = "127.0.0.1"
+	dmqCfg.ListenIPv6Address = ""
+	dmqCfg.MinPeers, dmqCfg.MaxPeers = 1, 5
+	dmqCfg.TopologyFile = topologyFile
+	n.config.cfg.DMQ = dmqCfg
+
+	errProbe := errors.New("probe done")
+	probe := &apiLifecycleProbe{onStart: func() error {
+		stack := n.dmqStack
+		testutil.WaitForCondition(t, func() bool {
+			return stack.PeerCount() == 1 && remote.PeerCount() == 1
+		}, 10*time.Second, "the node dials its topology peer")
+
+		// A message in the node's pool reaches the peer it dialed.
+		sent := dmqPeerMessage(t, "from-node")
+		added, err := stack.Mempool().Add(sent)
+		require.NoError(t, err)
+		require.True(t, added)
+		testutil.WaitForCondition(t, func() bool {
+			return remote.Mempool().Has(sent.ID())
+		}, 10*time.Second, "the message reaches the dialed peer")
+
+		// A peer that dials the node's port is accepted as well.
+		conn, err := net.DialTimeout(
+			"tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(nodePort)),
+			10*time.Second,
+		)
+		require.NoError(t, err)
+		_, err = visitor.AttachPeer(context.Background(), conn, true)
+		require.NoError(t, err)
+		testutil.WaitForCondition(t, func() bool {
+			return stack.PeerCount() == 2
+		}, 10*time.Second, "the node accepts an inbound peer")
+		testutil.WaitForCondition(t, func() bool {
+			return visitor.Mempool().Has(sent.ID())
+		}, 10*time.Second, "the message reaches the inbound peer too")
+		return errProbe
+	}}
+	registerAPIProbe(
+		t, n.pluginHost, plugin.CapabilityAPIBlockfrost, "probe", probe,
+	)
+	selectAPIProbe(n, plugin.CapabilityAPIBlockfrost, "probe", 13000)
+
+	require.ErrorIs(t, n.Run(context.Background()), errProbe)
+	require.Equal(t, int32(1), probe.starts.Load())
+}
+
+// Ledger peer lookups keep running while a live truncate replaces the ledger
+// state: a lookup may only find the state detached, never one being closed.
+func TestDMQStakeAuthorityLedgerPeerSnapshotAcrossLiveTruncate(t *testing.T) {
+	t.Parallel()
+	const numBlocks = 6
+	n, points := newLiveLifecycleTestNode(t, numBlocks)
+	auth := &n.dmqStake
+	auth.setLedgerState(n.ledgerState)
+	stop := make(chan struct{})
+	started := make(chan struct{})
+	var lookups atomic.Int64
+	var wg sync.WaitGroup
+	var lookupErr error
+	wg.Go(func() {
+		for {
+			_, err := auth.LedgerPeerSnapshot(context.Background())
+			if err != nil && !errors.Is(err, errDMQLedgerDetached) {
+				lookupErr = err
+				return
+			}
+			if lookups.Add(1) == 1 {
+				close(started)
+			}
+			select {
+			case <-stop:
+				return
+			default:
+			}
+		}
+	})
+	<-started
+	targetSlot := points[numBlocks/2].Slot
+	before := lookups.Load()
+	_, err := n.Truncate(
+		context.Background(),
+		dblifecycle.TruncateTarget{Slot: &targetSlot},
+	)
+	during := lookups.Load() - before
+	close(stop)
+	wg.Wait()
+	require.NoError(t, err)
+	require.NoError(t, lookupErr)
+	require.Positive(t, during, "no snapshot lookup ran during the truncate")
+	_, err = auth.LedgerPeerSnapshot(context.Background())
+	require.NoError(t, err)
 }

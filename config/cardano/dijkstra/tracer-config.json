@@ -2,11 +2,11 @@
   "ekgRequestFreq": null,
   "ekgRequestFull": null,
   "hasEKG": {
-    "epHost": "127.0.0.1",
+    "epHost": "0.0.0.0",
     "epPort": 12788
   },
   "hasPrometheus": {
-    "epHost": "127.0.0.1",
+    "epHost": "0.0.0.0",
     "epPort": 12808
   },
   "loRequestNum": null,

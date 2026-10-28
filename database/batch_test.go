@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
@@ -562,4 +563,13 @@ func TestBatchedIngestionRejectsPrototypeClosureContext(t *testing.T) {
 	err := db.SetTransactionBatchedWithOpts(t.Context(), nil, ocommon.Point{}, 0, 0,
 		nil, nil, nil, nil, nil, BatchedTxIngestOpts{LedgerContextSlot: &slot})
 	require.ErrorContains(t, err, "prototype closure context requires unbatched ingestion")
+}
+
+type legacyClosureMetadata struct{ metadata.MetadataStore }
+
+func TestLeiosClosureBatchAccumulatorFallsBackForOlderProviders(t *testing.T) {
+	t.Parallel()
+	db := openTestDB(t)
+	db.metadata = legacyClosureMetadata{MetadataStore: db.metadata}
+	require.Nil(t, db.NewLeiosClosureBatchAccumulator())
 }

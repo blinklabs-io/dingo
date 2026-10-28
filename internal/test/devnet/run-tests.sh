@@ -369,10 +369,13 @@ fi
 log "txpump is running"
 
 # --------------------------------------------------------------------------- #
-# Copy genesis stake keys to the host (dingo mode only)
+# Copy genesis stake keys to the host
 # --------------------------------------------------------------------------- #
 
-if [[ "${MODE}" == "dingo" ]]; then
+# Both modes copy the keys: dingo mode uses the stake and pool keys, and
+# conformance mode uses the genesis payment keys to sign the Plutus script
+# transactions it submits to both implementations.
+if true; then
   log "Copying genesis stake keys from the utxo-keys volume..."
   UTXO_KEYS_VOLUME="${COMPOSE_PROJECT_NAME}_utxo-keys"
   if ! docker volume inspect "${UTXO_KEYS_VOLUME}" &>/dev/null; then
@@ -421,6 +424,13 @@ if [[ "${MODE}" == "dingo" ]]; then
     log "DEVNET_GOVERNANCE_KEYS_DIR=${DEVNET_GOVERNANCE_KEYS_DIR}"
   else
     unset DEVNET_GOVERNANCE_KEYS_DIR
+  fi
+  if [[ "${MODE}" == "conformance" ]] &&
+    compgen -G "${STAKE_KEYS_HOST_DIR}/genesis.*.skey" >/dev/null; then
+    export DEVNET_GENESIS_KEYS_DIR="${STAKE_KEYS_HOST_DIR}"
+    log "DEVNET_GENESIS_KEYS_DIR=${DEVNET_GENESIS_KEYS_DIR}"
+  else
+    unset DEVNET_GENESIS_KEYS_DIR
   fi
 fi
 

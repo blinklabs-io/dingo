@@ -647,6 +647,7 @@ func (n *Node) newOuroborosConfig(
 		ChainsyncHasBestPeer:                 n.chainsyncHasBestPeer,
 		ChainsyncApplyEligible:               n.chainsyncApplyEligible,
 		ChainsyncAwaitEagerness:              n.chainsyncAwaitEagerness,
+		ChainsyncAwaitCatchUpBand:            n.chainsyncAwaitCatchUpBand,
 		ChainsyncAwaitCorroboration:          n.chainsyncAwaitCorroboration,
 		ChainsyncIntersectAtLedgerTip:        n.chainsyncIntersectAtLedgerTip,
 		ChainsyncObservePeerTip:              n.chainsyncObservePeerTip,
@@ -1603,7 +1604,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	if midnightServerActive(n.config.storageMode, n.config.midnight) {
 		var err error
 		n.midnightServer, err = midnightserver.New(
-			n.midnightServerConfig(ctx),
+			n.midnightServerConfig(),
 		)
 		if err != nil {
 			return fmt.Errorf("failed to create midnight gRPC server: %w", err)
@@ -2195,7 +2196,7 @@ func (n *Node) buildChainSelectorConfig(
 				n.connManager.GetConnectionById(connId) != nil
 		},
 		PeerIdentity: func(connId ouroboros.ConnectionId) string {
-			return n.peerDiversityGroupByConnId(connId)
+			return n.peerCorroborationIdentityByConnId(connId)
 		},
 		BlockfetchLatency: func(connId ouroboros.ConnectionId) (time.Duration, bool) {
 			if n.chainsyncState == nil {
@@ -2284,7 +2285,7 @@ func (n *Node) setPeerGovernor(peerGov *peergov.PeerGovernor) {
 	n.peerGovMu.Unlock()
 }
 
-func (n *Node) peerDiversityGroupByConnId(
+func (n *Node) peerCorroborationIdentityByConnId(
 	connId ouroboros.ConnectionId,
 ) string {
 	n.peerGovMu.RLock()
@@ -2292,7 +2293,7 @@ func (n *Node) peerDiversityGroupByConnId(
 	if n.peerGov == nil {
 		return ""
 	}
-	return n.peerGov.DiversityGroupByConnId(connId)
+	return n.peerGov.CorroborationIdentityByConnId(connId)
 }
 
 func (n *Node) isConfiguredRootConnection(

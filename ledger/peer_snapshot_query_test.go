@@ -628,3 +628,30 @@ func TestQueryLedgerPeerSnapshotV23RequiresNetworkMagic(t *testing.T) {
 	// Legacy form: version 1 layout, [1, [[0], [_ ]]] at genesis.
 	assert.Equal(t, "82018281009fff", encodePeerSnapshotReply(t, result))
 }
+
+// TestLedgerPeerSnapshotExportedMatchesTheQuery proves the exported accessor
+// reports what the LocalStateQuery handler does for every ledger peer.
+func TestLedgerPeerSnapshotExportedMatchesTheQuery(t *testing.T) {
+	t.Parallel()
+
+	ls := &LedgerState{db: newTestDB(t)}
+	require.NoError(t, ls.db.SetTip(
+		ochainsync.Tip{Point: ocommon.NewPoint(4242, []byte("tip"))},
+		nil,
+	))
+
+	got, err := ls.LedgerPeerSnapshot(t.Context())
+	require.NoError(t, err)
+
+	want, err := ls.queryLedgerPeerSnapshot(
+		t.Context(),
+		&olocalstatequery.ShelleyGetLedgerPeerSnapshotQuery{
+			PeerKind: olocalstatequery.LedgerPeerKindAll,
+		},
+		nil,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, want, any(got))
+	assert.True(t, got.Slot.HasSlot)
+	assert.Equal(t, uint64(4242), got.Slot.Slot)
+}

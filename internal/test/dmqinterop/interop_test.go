@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -115,6 +116,13 @@ func newAuthenticator(t *testing.T) *ocommon.MessageAuthenticator {
 
 func newStack(t *testing.T) *dmq.Stack {
 	t.Helper()
+	return newStackWithPeers(t, nil)
+}
+
+// newStackWithPeers is a stack whose listener and peer manager run as the
+// node's do, when peers is set.
+func newStackWithPeers(t *testing.T, peers *dmq.PeerConfig) *dmq.Stack {
+	t.Helper()
 	dir, err := os.MkdirTemp("", "dmq")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
@@ -126,6 +134,7 @@ func newStack(t *testing.T) *dmq.Stack {
 		NetworkMagic:  dmqNetworkMagic,
 		SocketPath:    filepath.Join(dir, "dmq.sock"),
 		Authenticator: newAuthenticator(t),
+		Peers:         peers,
 	})
 	require.NoError(t, err)
 	require.NoError(t, stack.Start(t.Context()))
@@ -341,27 +350,13 @@ func TestInteropDmqNodePullsAMessageFromDingo(t *testing.T) {
 	primeNode(t, env)
 	msg := signedMessage(t, env, "dingo-to-node")
 
-	serving := newStack(t)
+	serving := newStackWithPeers(t, &dmq.PeerConfig{
+		MaxPeers:    5,
+		ListenAddrs: []dmq.ListenAddr{{Address: env.listenAddr}},
+	})
 	added, err := serving.Mempool().Add(msg)
 	require.NoError(t, err)
 	require.True(t, added)
-
-	listener, err := net.Listen("tcp", env.listenAddr)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = listener.Close() })
-	go func() {
-		for {
-			conn, err := listener.Accept()
-			if err != nil {
-				return
-			}
-			if _, err := serving.AttachPeer(
-				context.Background(), conn, false,
-			); err != nil {
-				t.Logf("attach: %v", err)
-			}
-		}
-	}()
 
 	fetching := newStack(t)
 	dialNode(t, env, fetching)
@@ -370,4 +365,29 @@ func TestInteropDmqNodePullsAMessageFromDingo(t *testing.T) {
 	got, ok := fetching.Mempool().Get(msg.ID())
 	require.True(t, ok)
 	require.Equal(t, msg.Payload.MessageBody, got.Payload.MessageBody)
+}
+
+// Dingo's peer manager dials dmq-node from a topology, as the node does, and
+// the connection holds.
+func TestInteropPeerManagerDialsDmqNode(t *testing.T) {
+	env := loadEnvironment(t)
+	host, portText, err := net.SplitHostPort(env.nodeAddr)
+	require.NoError(t, err)
+	port, err := strconv.ParseUint(portText, 10, 16)
+	require.NoError(t, err)
+
+	stack := newStackWithPeers(t, &dmq.PeerConfig{
+		MinPeers: 1,
+		MaxPeers: 5,
+		Topology: &dmq.Topology{LocalRoots: []dmq.RootGroup{{
+			Peers:   []dmq.Peer{{Host: host, Port: uint(port)}},
+			Valency: 1,
+		}}},
+	})
+	waitFor(t, 30*time.Second, "the manager connects to dmq-node", func() bool {
+		return stack.PeerCount() == 1
+	})
+	require.Never(t, func() bool { return stack.PeerCount() != 1 },
+		20*time.Second, 500*time.Millisecond,
+		"the connection to dmq-node holds")
 }

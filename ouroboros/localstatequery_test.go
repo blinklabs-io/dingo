@@ -1624,3 +1624,41 @@ func TestLocalStateQueryDeferredOpenWaitBelowClientTimeout(t *testing.T) {
 	require.Positive(t, clientTimeout)
 	require.Less(t, localStateQueryDeferredOpenWait, clientTimeout)
 }
+
+// TestLocalstatequeryProtocol_UnansweredQueryEndsConnection pins what a
+// client sees for a query Dingo does not answer: the protocol has no failure
+// reply to a query, so the call fails and the connection ends, and the server
+// callback's error is ledger.ErrQueryNotAnswered, naming the query. Another
+// connection to the same node is unaffected.
+func TestLocalstatequeryProtocol_UnansweredQueryEndsConnection(t *testing.T) {
+	t.Parallel()
+
+	o, _, _ := newSnapshotTestOuroboros(t, OuroborosConfig{})
+	ctx := olocalstatequery.CallbackContext{ConnectionId: ouroboros.ConnectionId{}}
+	acquireSnapshotTestSession(t, o, ctx)
+	_, err := o.localstatequeryServerQuery(
+		ctx,
+		olocalstatequery.QueryWrapper{Query: &olocalstatequery.BlockQuery{
+			Query: &olocalstatequery.ShelleyQuery{
+				Query: &olocalstatequery.ShelleyRewardInfoPoolsQuery{},
+			},
+		}},
+	)
+	require.ErrorIs(t, err, ledger.ErrQueryNotAnswered)
+	require.ErrorContains(t, err, "GetRewardInfoPools")
+
+	client := newLocalStateQueryTestClient(t, o)
+	require.NoError(t, client.AcquireVolatileTip())
+	_, err = client.GetCurrentEra()
+	require.NoError(t, err, "the era lookup GetRewardInfoPools starts with")
+	_, err = client.GetRewardInfoPools()
+	require.Error(t, err)
+	_, err = client.GetChainPoint()
+	require.Error(t, err, "the connection ended with the failed query")
+
+	other := newLocalStateQueryTestClient(t, o)
+	require.NoError(t, other.AcquireVolatileTip())
+	_, err = other.GetChainPoint()
+	require.NoError(t, err)
+	require.NoError(t, other.Release())
+}

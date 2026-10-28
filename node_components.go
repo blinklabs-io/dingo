@@ -151,11 +151,11 @@ func (n *Node) newDatabaseLifecycleManager() *dblifecycle.Manager {
 	)
 }
 
-func (n *Node) midnightServerConfig(ctx context.Context) midnightserver.Config {
+func (n *Node) midnightServerConfig() midnightserver.Config {
 	return midnightserver.Config{
 		Logger:   n.config.logger,
 		Metadata: n.db.Metadata(),
-		BlockNumberByHash: func(hash []byte) (uint64, bool, error) {
+		BlockNumberByHash: func(ctx context.Context, hash []byte) (uint64, bool, error) {
 			block, err := database.BlockByHash(ctx, n.db, hash)
 			if err != nil {
 				if errors.Is(err, models.ErrBlockNotFound) {

@@ -32,6 +32,11 @@ name: ci
 # main. A change now peaks at two concurrent jobs on its pull request and four
 # in the merge queue.
 #
+# A merge-queue group whose diff is documentation only (ci-changes.sh) skips
+# every tier-2 gate, as a documentation-only pull request skips its tier-1
+# steps. The changes job records the classification, and publish.yml accepts a
+# skipped gate only beside a successful changes job.
+#
 # Every tier-2 job is required for the merge queue and reports as skipped on a
 # pull request; every tier-1 job reports as skipped in the merge queue. GitHub
 # counts a skipped required check as passing, so one set of required checks
@@ -201,6 +206,40 @@ jobs:
         if: always()
         run: python3 .github/scripts/runner-probe.py end
 
+  # Tier 2 selection. The merge queue skips `check`, so this job classifies the
+  # queue group's diff with the same trusted script. The gates run unless it
+  # reports run-ci=false, so a failed or missing classification runs them.
+  changes:
+    name: changes
+    if: github.event_name == 'merge_group'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run-ci: ${{ steps.detect.outputs.run-ci }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: checkout-trusted-ci
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
+        with:
+          ref: ${{ github.event.merge_group.base_sha }}
+          persist-credentials: false
+          path: .trusted-ci
+      - id: detect
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.merge_group.base_sha }}
+          HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+        run: |
+          if [[ -f .trusted-ci/.github/scripts/ci-changes.sh ]]; then
+            bash .trusted-ci/.github/scripts/ci-changes.sh
+          else
+            echo "run-ci=true" >> "$GITHUB_OUTPUT"
+          fi
+          rm -rf .trusted-ci
+
   # Tier 1, beside check. Deliberately not a dependency of anything: a new
   # advisory landing upstream must not block every merge in the repository
   # while it is triaged. It still fails the run. A release tag does gate on it,
@@ -263,10 +302,10 @@ jobs:
   # of the dependencies, and held three runners at once.
   race:
     name: gate (race)
-    needs: [check]
+    needs: [check, changes]
     if: >-
       !cancelled()
-      && (github.event_name == 'merge_group'
+      && ((github.event_name == 'merge_group' && needs.changes.outputs.run-ci != 'false')
       || ((github.event_name == 'workflow_dispatch' || vars.CI_MERGE_QUEUE != 'true')
       && needs.check.result == 'success'
       && needs.check.outputs.run-ci == 'true'))
@@ -312,10 +351,10 @@ jobs:
   # variable. Everything else in the tree already ran in check and gate (race).
   services:
     name: gate (services)
-    needs: [check]
+    needs: [check, changes]
     if: >-
       !cancelled()
-      && (github.event_name == 'merge_group'
+      && ((github.event_name == 'merge_group' && needs.changes.outputs.run-ci != 'false')
       || ((github.event_name == 'workflow_dispatch' || vars.CI_MERGE_QUEUE != 'true')
       && needs.check.result == 'success'
       && needs.check.outputs.run-ci == 'true'))
@@ -519,10 +558,10 @@ jobs:
   # instead of on a second macOS runner.
   macos:
     name: gate (macOS)
-    needs: [check]
+    needs: [check, changes]
     if: >-
       !cancelled()
-      && (github.event_name == 'merge_group'
+      && ((github.event_name == 'merge_group' && needs.changes.outputs.run-ci != 'false')
       || ((github.event_name == 'workflow_dispatch' || vars.CI_MERGE_QUEUE != 'true')
       && needs.check.result == 'success'
       && needs.check.outputs.run-ci == 'true'))
@@ -564,10 +603,10 @@ jobs:
   # and FreeBSD ones.
   build:
     name: gate (build)
-    needs: [check]
+    needs: [check, changes]
     if: >-
       !cancelled()
-      && (github.event_name == 'merge_group'
+      && ((github.event_name == 'merge_group' && needs.changes.outputs.run-ci != 'false')
       || ((github.event_name == 'workflow_dispatch' || vars.CI_MERGE_QUEUE != 'true')
       && needs.check.result == 'success'
       && needs.check.outputs.run-ci == 'true'))

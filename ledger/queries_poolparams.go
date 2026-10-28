@@ -23,6 +23,7 @@ import (
 	"net"
 	"slices"
 
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
@@ -211,10 +212,16 @@ func stakePoolParamsFromRegistration(
 // that are not registered are omitted, and an empty request yields an empty
 // map.
 //
-// Live-only: pool registrations carry no per-point history to read back.
+// A pinned at answers for that block: its epoch, the registrations added at
+// or before it, and the protocol version of its epoch. A point no epoch
+// record covers fails with ErrHistoricalStateUnavailable. An unpinned query
+// through a held query view answers for the tip and epoch the view froze, and
+// one without a view answers from the live epoch and tip.
 func (ls *LedgerState) queryShelleyStakePoolParams(
 	ctx context.Context,
 	poolIds []ledger.PoolId,
+	at QueryPoint,
+	txn *database.Txn,
 ) (any, error) {
 	if err := checkLocalStateQueryItemLimit(
 		"GetStakePoolParams",
@@ -226,14 +233,38 @@ func (ls *LedgerState) queryShelleyStakePoolParams(
 	if len(poolIds) == 0 {
 		return []any{result}, nil
 	}
-	txn := ls.db.Transaction(ctx, false)
-	defer txn.Release()
-	networkID := uint8(ls.NewView(txn).NetworkId()) // #nosec G115 -- 0 or 1
-	consensus, tip := ls.loadStateSnapshots()
+	consensus, live := ls.loadStateSnapshots()
 	epoch := consensus.currentEpoch
-	tipSlot := tip.currentTip.Point.Slot
+	tipSlot := live.currentTip.Point.Slot
+	var epochRow *models.Epoch
+	if at.pinned() || txn != nil {
+		// A pinned point, or a held view's snapshot, answers for its own
+		// tip and the epoch containing it rather than the live ones.
+		var release func()
+		txn, release = ls.readTxn(ctx, txn)
+		defer release()
+		tip, row, err := ls.epochAtPoint(at, txn)
+		if err != nil {
+			return nil, err
+		}
+		if row != nil {
+			epoch = *row
+		} else if at.pinned() {
+			return nil, errEpochNotResolved(at)
+		}
+		epochRow = row
+		tipSlot = tip.Point.Slot
+	} else {
+		txn = ls.db.Transaction(ctx, false)
+		defer txn.Release()
+	}
+	pparams, err := ls.snapshotProtocolParameters(consensus, epochRow, txn)
+	if err != nil {
+		return nil, err
+	}
+	networkID := uint8(ls.NewView(txn).NetworkId()) // #nosec G115 -- 0 or 1
 	includeBlsKey := false
-	if pv, err := GetProtocolVersion(consensus.currentPParams); err == nil {
+	if pv, err := GetProtocolVersion(pparams); err == nil {
 		includeBlsKey = pv.Major >= blsKeyMinProtocolMajor
 	}
 	keyHashes := make([]lcommon.PoolKeyHash, 0, len(poolIds))

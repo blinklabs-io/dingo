@@ -504,6 +504,10 @@ func bootstrapV2(
 	if err != nil {
 		return nil, err
 	}
+	cfg.downloadSpaceBudget, err = newDownloadSpaceBudget(downloadDir)
+	if err != nil {
+		return nil, err
+	}
 	cfg.decoderBudget = newDecoderMemoryBudget()
 
 	// The ancillary download and the immutable archive
@@ -1071,9 +1075,10 @@ func downloadDigestsArchive(
 	downloadDir string,
 ) (_ []CardanoDatabaseDigestEntry, retErr error) {
 	downloadCfg := DownloadConfig{
-		MaxBytes: cfg.objectMaxBytes(digestListMaxBytes),
-		URL:      uri,
-		DestDir:  downloadDir,
+		MaxBytes:    cfg.objectMaxBytes(digestListMaxBytes),
+		spaceBudget: cfg.downloadSpaceBudget,
+		URL:         uri,
+		DestDir:     downloadDir,
 		Filename: filepath.Base(fmt.Sprintf(
 			"digests-%s.tar.zst",
 			truncateDigest(artifact.Hash),
@@ -1578,6 +1583,7 @@ func fetchImmutableArchive(
 	_, root, dlErr := downloadSnapshot(
 		ctx, DownloadConfig{
 			MaxBytes:            cfg.objectMaxBytes(immutableArchiveMaxBytes),
+			spaceBudget:         cfg.downloadSpaceBudget,
 			URL:                 location.ImmutableArchiveURI(num),
 			DestDir:             archiveDir,
 			Filename:            archiveFilename,
@@ -1850,11 +1856,12 @@ func downloadAncillaryV2(
 			continue
 		}
 		downloadCfg := DownloadConfig{
-			MaxBytes: cfg.objectMaxBytes(ancillaryMaxBytes),
-			URL:      loc.URI,
-			DestDir:  downloadDir,
-			Filename: ancillaryFilename,
-			Logger:   cfg.Logger,
+			MaxBytes:    cfg.objectMaxBytes(ancillaryMaxBytes),
+			spaceBudget: cfg.downloadSpaceBudget,
+			URL:         loc.URI,
+			DestDir:     downloadDir,
+			Filename:    ancillaryFilename,
+			Logger:      cfg.Logger,
 			OnProgress: withProgressContext(
 				cfg.OnProgress,
 				"ancillary_ledger_state",

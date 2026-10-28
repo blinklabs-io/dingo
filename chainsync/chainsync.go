@@ -155,6 +155,9 @@ type TrackedClient struct {
 	HeadersRecv       uint64
 	deliveryWatermark ocommon.Point
 	deliverySeen      bool
+	// observerHeaderGap survives role changes until a safe intersection or
+	// replacement session can replay headers skipped by this observer.
+	observerHeaderGap bool
 	// TODO: BytesRecv needs to be wired to the underlying
 	// connection's byte counter. Currently unused.
 	BytesRecv uint64
@@ -857,6 +860,60 @@ func (s *State) TryAddClientConnIdWithDirection(
 	return s.tryAddClientConnIdWithDirection(connId, maxClients, startedAsOutbound)
 }
 
+// ClientSessionToken identifies one tracked registration without exposing its
+// mutable state. A callback from a replaced bearer cannot mark the new session.
+type ClientSessionToken struct {
+	client *TrackedClient
+}
+
+// ClientSession returns a token for the current tracked registration.
+func (s *State) ClientSession(connId ouroboros.ConnectionId) ClientSessionToken {
+	s.clientConnIdMutex.RLock()
+	defer s.clientConnIdMutex.RUnlock()
+	return ClientSessionToken{client: s.trackedClients[connId]}
+}
+
+// RecordClientObserverHeaderGap records an actual observer drop in session,
+// even if an eligibility event promoted it after the callback's admission
+// decision. It reports whether that session is already admitted.
+func (s *State) RecordClientObserverHeaderGap(
+	connId ouroboros.ConnectionId,
+	session ClientSessionToken,
+) bool {
+	s.clientConnIdMutex.Lock()
+	defer s.clientConnIdMutex.Unlock()
+	tc := s.trackedClients[connId]
+	if tc == nil || tc != session.client {
+		return false
+	}
+	tc.observerHeaderGap = true
+	return !tc.ObservabilityOnly
+}
+
+// ClientObserverHeaderGap reports whether this session skipped observer headers.
+func (s *State) ClientObserverHeaderGap(connId ouroboros.ConnectionId) bool {
+	s.clientConnIdMutex.RLock()
+	defer s.clientConnIdMutex.RUnlock()
+	tc := s.trackedClients[connId]
+	return tc != nil && tc.observerHeaderGap
+}
+
+// ClearClientObserverHeaderGap clears session's gap after its protocol cursor
+// returns to a known applied intersection. Role changes alone cannot clear it.
+func (s *State) ClearClientObserverHeaderGap(
+	connId ouroboros.ConnectionId,
+	session ClientSessionToken,
+) bool {
+	s.clientConnIdMutex.Lock()
+	defer s.clientConnIdMutex.Unlock()
+	tc := s.trackedClients[connId]
+	if tc == nil || tc != session.client || !tc.observerHeaderGap {
+		return false
+	}
+	tc.observerHeaderGap = false
+	return true
+}
+
 // ClientObservabilityOnly reports whether a tracked client is currently
 // observability-only. The second return value reports whether the client exists.
 func (s *State) ClientObservabilityOnly(
@@ -1304,10 +1361,27 @@ func (s *State) RewindTrackedClientsTo(
 
 // RecordObservedHeader stores raw per-connection header ancestry before
 // cross-peer dedup can suppress delivery into the ledger queue. A zero
-// verification generation marks a deferred or withheld header; ledger fork
-// resolution can use it only as candidate-path input and must validate the
-// complete linked path before caching a verdict.
+// verification generation marks raw ancestry, including observer deliveries;
+// ledger fork resolution can use it only as candidate-path input and must
+// validate the complete linked path before caching a verdict.
 func (s *State) RecordObservedHeader(h ObservedHeader) {
+	s.recordObservedHeader(h, nil)
+}
+
+// RecordObservedHeaderForSession stores ancestry only while session still owns
+// the tracked connection. Delayed validation cannot populate a replacement
+// bearer that reuses the same connection ID.
+func (s *State) RecordObservedHeaderForSession(
+	session ClientSessionToken,
+	h ObservedHeader,
+) {
+	s.recordObservedHeader(h, &session)
+}
+
+func (s *State) recordObservedHeader(
+	h ObservedHeader,
+	session *ClientSessionToken,
+) {
 	if h.BlockHeader == nil || len(h.Point.Hash) == 0 {
 		return
 	}
@@ -1324,7 +1398,8 @@ func (s *State) RecordObservedHeader(h ObservedHeader) {
 	// removes again, leaking one per disconnect.
 	s.clientConnIdMutex.RLock()
 	defer s.clientConnIdMutex.RUnlock()
-	if _, tracked := s.trackedClients[h.ConnectionId]; !tracked {
+	client := s.trackedClients[h.ConnectionId]
+	if client == nil || (session != nil && client != session.client) {
 		return
 	}
 

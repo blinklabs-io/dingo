@@ -2019,88 +2019,12 @@ func (cs *ChainSelector) checkPeerTipPlausibleWithClaimsTrackedLocked(
 		observedBlock := observedTip.BlockNumber
 		observedReject := false
 		advertisedReject := false
-		hasReference := false
-		var referenceBlock uint64
-		var advertisedReferenceBlock uint64
 		var maxPlausibleBlock uint64
 		var maxPlausibleAdvertisedBlock uint64
-		prevTip := cs.peerTips[connId]
-		if includePending {
-			if pendingTip := cs.latestPeerTipCandidateLocked(connId); pendingTip != nil {
-				prevTip = pendingTip
-			}
-		}
-		if prevTip != nil && !prevTip.awaitingFirstHeader {
-			// Case 1: known peer — compare against the peer's own
-			// previous delivered frontier.
-			hasReference = true
-			referenceBlock = prevTip.SelectionTip().BlockNumber
-			advertisedReferenceBlock = prevTip.Tip.BlockNumber
-		} else if len(cs.peerTips) > 0 ||
-			(includePending && len(cs.pendingPeerTips) > 0) {
-			// Case 2: new peer — check against the best observed and
-			// advertised frontiers separately. Lone far frontiers do not count
-			// as independent references for a new peer.
-			// Nor does a peer whose advertised tip is wall-clock stale: it
-			// serves an abandoned chain and is never selectable, so before a
-			// block is applied its short advertisement would bound every
-			// honest peer advertising the real tip.
-			excludedLone := false
-			for peerConn, committedTip := range cs.peerTips {
-				pt := committedTip
-				if includePending {
-					if pendingTip := cs.latestPeerTipCandidateLocked(peerConn); pendingTip != nil {
-						pt = pendingTip
-					}
-				}
-				if pt == nil || pt.awaitingFirstHeader ||
-					cs.advertisedTipStaleLocked(pt) {
-					continue
-				}
-				if claim, ok := claims[peerConn]; ok && claim.lone {
-					excludedLone = true
-					continue
-				}
-				hasReference = true
-				blockNumber := pt.SelectionTip().BlockNumber
-				if blockNumber > referenceBlock {
-					referenceBlock = blockNumber
-				}
-				if pt.Tip.BlockNumber > advertisedReferenceBlock {
-					advertisedReferenceBlock = pt.Tip.BlockNumber
-				}
-			}
-			if includePending {
-				for peerConn := range cs.pendingPeerTips {
-					if _, exists := cs.peerTips[peerConn]; exists {
-						continue
-					}
-					pt := cs.latestPeerTipCandidateLocked(peerConn)
-					if pt == nil || pt.awaitingFirstHeader ||
-						cs.advertisedTipStaleLocked(pt) {
-						continue
-					}
-					if claim, ok := claims[peerConn]; ok && claim.lone {
-						excludedLone = true
-						continue
-					}
-					hasReference = true
-					if blockNumber := pt.SelectionTip().BlockNumber; blockNumber > referenceBlock {
-						referenceBlock = blockNumber
-					}
-					if pt.Tip.BlockNumber > advertisedReferenceBlock {
-						advertisedReferenceBlock = pt.Tip.BlockNumber
-					}
-				}
-			}
-			// If every delivered frontier is lone-only, keep the local tip as
-			// the trusted reference. Treating the new peer as a bootstrap peer
-			// here would admit its first unrelated far header without a run.
-			if !hasReference && excludedLone && cs.localTip.BlockNumber > 0 {
-				hasReference = true
-				referenceBlock = cs.localTip.BlockNumber
-			}
-		}
+		ref := cs.peerTipReferenceLocked(connId, claims, includePending)
+		hasReference := ref.has
+		referenceBlock := ref.block
+		advertisedReferenceBlock := ref.advertisedBlock
 		if hasReference {
 			maxPlausibleBlock = safeAddUint64(
 				referenceBlock,
@@ -2267,6 +2191,114 @@ func connectionRemoteHost(connId ouroboros.ConnectionId) string {
 		return host
 	}
 	return addr
+}
+
+// peerTipReference is the trusted reference frontier a connection's delivered
+// header is bounded against.
+type peerTipReference struct {
+	// has reports whether any reference exists. Without one the first peer
+	// bootstraps the chain.
+	has bool
+	// block is the reference's delivered frontier block number.
+	block uint64
+	// advertisedBlock is the reference's advertised tip block number.
+	advertisedBlock uint64
+}
+
+// peerTipReferenceLocked derives the reference connId's next delivered
+// frontier is bounded against: its own previous frontier for a known peer,
+// else the best frontier among the other peers. It reads selector state and
+// changes none. Must be called with cs.mutex held.
+func (cs *ChainSelector) peerTipReferenceLocked(
+	connId ouroboros.ConnectionId,
+	claims map[ouroboros.ConnectionId]farTipClaim,
+	includePending bool,
+) peerTipReference {
+	hasReference := false
+	var referenceBlock uint64
+	var advertisedReferenceBlock uint64
+	prevTip := cs.peerTips[connId]
+	if includePending {
+		if pendingTip := cs.latestPeerTipCandidateLocked(connId); pendingTip != nil {
+			prevTip = pendingTip
+		}
+	}
+	if prevTip != nil && !prevTip.awaitingFirstHeader {
+		// Case 1: known peer — compare against the peer's own
+		// previous delivered frontier.
+		hasReference = true
+		referenceBlock = prevTip.SelectionTip().BlockNumber
+		advertisedReferenceBlock = prevTip.Tip.BlockNumber
+	} else if len(cs.peerTips) > 0 ||
+		(includePending && len(cs.pendingPeerTips) > 0) {
+		// Case 2: new peer — check against the best observed and
+		// advertised frontiers separately. Lone far frontiers do not count
+		// as independent references for a new peer.
+		// Nor does a peer whose advertised tip is wall-clock stale: it
+		// serves an abandoned chain and is never selectable, so before a
+		// block is applied its short advertisement would bound every
+		// honest peer advertising the real tip.
+		excludedLone := false
+		for peerConn, committedTip := range cs.peerTips {
+			pt := committedTip
+			if includePending {
+				if pendingTip := cs.latestPeerTipCandidateLocked(peerConn); pendingTip != nil {
+					pt = pendingTip
+				}
+			}
+			if pt == nil || pt.awaitingFirstHeader ||
+				cs.advertisedTipStaleLocked(pt) {
+				continue
+			}
+			if claim, ok := claims[peerConn]; ok && claim.lone {
+				excludedLone = true
+				continue
+			}
+			hasReference = true
+			blockNumber := pt.SelectionTip().BlockNumber
+			if blockNumber > referenceBlock {
+				referenceBlock = blockNumber
+			}
+			if pt.Tip.BlockNumber > advertisedReferenceBlock {
+				advertisedReferenceBlock = pt.Tip.BlockNumber
+			}
+		}
+		if includePending {
+			for peerConn := range cs.pendingPeerTips {
+				if _, exists := cs.peerTips[peerConn]; exists {
+					continue
+				}
+				pt := cs.latestPeerTipCandidateLocked(peerConn)
+				if pt == nil || pt.awaitingFirstHeader ||
+					cs.advertisedTipStaleLocked(pt) {
+					continue
+				}
+				if claim, ok := claims[peerConn]; ok && claim.lone {
+					excludedLone = true
+					continue
+				}
+				hasReference = true
+				if blockNumber := pt.SelectionTip().BlockNumber; blockNumber > referenceBlock {
+					referenceBlock = blockNumber
+				}
+				if pt.Tip.BlockNumber > advertisedReferenceBlock {
+					advertisedReferenceBlock = pt.Tip.BlockNumber
+				}
+			}
+		}
+		// If every delivered frontier is lone-only, keep the local tip as
+		// the trusted reference. Treating the new peer as a bootstrap peer
+		// here would admit its first unrelated far header without a run.
+		if !hasReference && excludedLone && cs.localTip.BlockNumber > 0 {
+			hasReference = true
+			referenceBlock = cs.localTip.BlockNumber
+		}
+	}
+	return peerTipReference{
+		has:             hasReference,
+		block:           referenceBlock,
+		advertisedBlock: advertisedReferenceBlock,
+	}
 }
 
 // advertisedClaimCorroboratedLocked reports whether an advertised tip that
@@ -2525,10 +2557,19 @@ func farTipClaimEqual(a, b farTipClaim) bool {
 func (cs *ChainSelector) blockWithinSlotDistanceLocked(
 	observedTip ochainsync.Tip,
 ) bool {
-	localSlot := cs.localTip.Point.Slot
+	return cs.blockWithinSlotDistanceFromLocked(cs.localTip, observedTip)
+}
+
+// blockWithinSlotDistanceFromLocked is blockWithinSlotDistanceLocked measured
+// from localTip.
+func (cs *ChainSelector) blockWithinSlotDistanceFromLocked(
+	localTip ochainsync.Tip,
+	observedTip ochainsync.Tip,
+) bool {
+	localSlot := localTip.Point.Slot
 	slot := max(observedTip.Point.Slot, localSlot)
 	maxBlock := safeAddUint64(
-		cs.localTip.BlockNumber,
+		localTip.BlockNumber,
 		safeAddUint64(cs.securityParam, slot-localSlot),
 	)
 	return observedTip.BlockNumber <= maxBlock

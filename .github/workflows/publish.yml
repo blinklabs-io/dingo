@@ -97,12 +97,23 @@ jobs:
         run: |
           set -euo pipefail
           failed=0
-          for gate in 'gate (race)' 'gate (services)' 'gate (macOS)' 'gate (build)'; do
-            conclusion="$(gh api -X GET \
+          conclusion_of() {
+            gh api -X GET \
               "repos/${GITHUB_REPOSITORY}/commits/${COMMIT_SHA}/check-runs" \
-              -f check_name="$gate" -f filter=latest \
-              --jq '[.check_runs[] | select(.app.slug == "github-actions") | .conclusion] | first // "missing"')"
+              -f check_name="$1" -f filter=latest \
+              --jq '[.check_runs[] | select(.app.slug == "github-actions") | .conclusion] | first // "missing"'
+          }
+          # The merge queue skips every gate for a documentation-only group
+          # and records that its changes job succeeded. A skipped gate on a
+          # commit that never went through the queue has no such record.
+          changes="$(conclusion_of changes)"
+          echo "changes: ${changes}"
+          for gate in 'gate (race)' 'gate (services)' 'gate (macOS)' 'gate (build)'; do
+            conclusion="$(conclusion_of "$gate")"
             echo "${gate}: ${conclusion}"
+            if [ "$conclusion" = skipped ] && [ "$changes" = success ]; then
+              continue
+            fi
             if [ "$conclusion" != success ]; then
               failed=1
             fi
@@ -215,7 +226,7 @@ jobs:
     timeout-minutes: 90
     env:
       CBOR_DATASET_REVISION: '6cd8c928665bbafe90e02066ebb4620e38f051de'
-      NDC_LEDGER_REVISION: '9d14fd8cc05562055c3dc2288661bb6e2b7e7ad7'
+      NDC_LEDGER_REVISION: 'e02a9e1c7dc15cc6d618c7ffdbd41167a38de2a4'
       UPLC_CORPUS_SHA256: '8bd4ad4f9f4c8c6b8ffa1f06ed1db0b43043afbba77ef6a14bcfb5a52345ed3f'
       TURBO_CORPUS_SHA256: '821af55e3323c826b5598c964d634b46dd468014834d0e97ebdc5edb0a158576'
     permissions:

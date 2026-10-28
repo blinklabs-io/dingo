@@ -889,13 +889,24 @@ func (f *fakeDatabase) GetTransactionsByBlockHash(ctx context.Context,
 
 // fakeLedgerState is a MeshLedgerState with per-test behavior.
 type fakeLedgerState struct {
-	pparams       lcommon.ProtocolParameters
-	slotToTime    func(slot uint64) (time.Time, error)
-	utxos         func(addrs []lcommon.Address) ([]models.Utxo, error)
+	pparams    lcommon.ProtocolParameters
+	slotToTime func(slot uint64) (time.Time, error)
+	utxos      func(addrs []lcommon.Address) ([]models.Utxo, error)
+	// utxosComplete supplies the account's whole UTxO set; the default
+	// ScanUtxosByAddress pages it by the query limit. scan replaces that
+	// paging entirely, and scanTip is the snapshot tip the default returns.
 	utxosComplete func(
 		ctx context.Context,
 		addrs []lcommon.Address,
 	) ([]models.Utxo, error)
+	scan func(
+		ctx context.Context,
+		q *models.UtxoWithOrderingQuery,
+		maxCandidates int,
+		maxBytes int64,
+		visit func([]models.UtxoWithOrdering) error,
+	) (ochainsync.Tip, error)
+	scanTip     ochainsync.Tip
 	utxosAtSlot func(
 		addr lcommon.Address,
 		slot uint64,
@@ -937,14 +948,42 @@ func (f *fakeLedgerState) UtxosByAddress(
 	return f.utxos(addrs)
 }
 
-func (f *fakeLedgerState) UtxosByAddressComplete(
+func (f *fakeLedgerState) ScanUtxosByAddress(
 	ctx context.Context,
-	addrs []lcommon.Address,
-) ([]models.Utxo, error) {
-	if f.utxosComplete != nil {
-		return f.utxosComplete(ctx, addrs)
+	q *models.UtxoWithOrderingQuery,
+	maxCandidates int,
+	maxBytes int64,
+	visit func([]models.UtxoWithOrdering) error,
+) (ochainsync.Tip, error) {
+	if f.scan != nil {
+		return f.scan(ctx, q, maxCandidates, maxBytes, visit)
 	}
-	return f.UtxosByAddress(addrs)
+	var (
+		utxos []models.Utxo
+		err   error
+	)
+	if f.utxosComplete != nil {
+		utxos, err = f.utxosComplete(ctx, nil)
+	} else {
+		utxos, err = f.UtxosByAddress(nil)
+	}
+	if err != nil {
+		return ochainsync.Tip{}, err
+	}
+	for start := 0; start < len(utxos); start += q.Limit {
+		if err := ctx.Err(); err != nil {
+			return ochainsync.Tip{}, err
+		}
+		end := min(start+q.Limit, len(utxos))
+		page := make([]models.UtxoWithOrdering, 0, end-start)
+		for i := start; i < end; i++ {
+			page = append(page, models.UtxoWithOrdering{Utxo: utxos[i]})
+		}
+		if err := visit(page); err != nil {
+			return ochainsync.Tip{}, err
+		}
+	}
+	return f.scanTip, nil
 }
 
 func (f *fakeLedgerState) UtxosByAddressAtSlot(
