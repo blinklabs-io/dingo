@@ -177,6 +177,7 @@ var transactionStoreMethods = []string{
 	"SumTransactionFeesInSlotRange",
 	"GetTransactionsByBlockHash",
 	"GetTransactionsByHashes",
+	"GetExistingTransactionHashes",
 	"GetTransactionHashesAfterSlot",
 	"CountTransactionsByPaymentCred",
 	"CountTransactionsByMetadataLabel",
