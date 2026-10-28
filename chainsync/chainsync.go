@@ -194,8 +194,9 @@ type Config struct {
 	SeenHeadersRetention uint64
 	// ObservedHeaderLimitFunc returns the per-connection ancestry limit used
 	// by fork resolution. A non-positive result uses the bounded default.
-	// Genesis composition raises this to the active density window so a fully
-	// fetched candidate remains reconstructable from its intersection.
+	// Genesis composition raises this to the candidate-fragment bound (k plus
+	// the forecast range, in headers) so a fully fetched candidate remains
+	// reconstructable from its intersection.
 	ObservedHeaderLimitFunc func() int
 	// PromRegistry, when non-nil, is used to register chainsync metrics
 	// such as the current header deduplication cache size.

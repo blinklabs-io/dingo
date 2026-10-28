@@ -2848,14 +2848,45 @@ func (n *Node) chainsyncConfig() chainsync.Config {
 		if !active {
 			return 0
 		}
-		if window > uint64(math.MaxInt) {
-			return math.MaxInt
-		}
-		// The MaxInt check above makes this conversion safe on both 32- and
-		// 64-bit platforms.
-		return int(window) //nolint:gosec // G115: window is bounded by MaxInt
+		return genesisObservedHeaderLimit(
+			window,
+			n.shelleySecurityParam(),
+		)
 	}
 	return chainsyncCfg
+}
+
+// shelleySecurityParam returns the Shelley genesis security parameter, or zero
+// when it is unknown.
+func (n *Node) shelleySecurityParam() uint64 {
+	if n.config.cardanoNodeConfig == nil {
+		return 0
+	}
+	sg := n.config.cardanoNodeConfig.ShelleyGenesis()
+	if sg == nil || sg.SecurityParam <= 0 {
+		return 0
+	}
+	return uint64(sg.SecurityParam) //nolint:gosec // checked positive above
+}
+
+// genesisObservedHeaderLimit converts the Genesis window, measured in slots,
+// into a per-connection observed-header count. A candidate fragment holds at
+// most k headers plus the headers inside the forecast range, and the forecast
+// range spans one window that carries at most 3k headers, so 4k headers keep a
+// fetched candidate reconstructable from its intersection. The window bounds
+// the result from above because a window cannot hold more headers than slots.
+// Without a known k the window is returned unchanged.
+func genesisObservedHeaderLimit(window, securityParam uint64) int {
+	limit := window
+	if securityParam > 0 && securityParam <= math.MaxUint64/4 {
+		limit = min(limit, 4*securityParam)
+	}
+	if limit > uint64(math.MaxInt) {
+		return math.MaxInt
+	}
+	// The MaxInt check above makes this conversion safe on both 32- and
+	// 64-bit platforms.
+	return int(limit) //nolint:gosec // G115: limit is bounded by MaxInt
 }
 
 // wireDeferredRewardStakeInputs lets the authoritative boundary capture leave

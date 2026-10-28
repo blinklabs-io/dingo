@@ -28,6 +28,7 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"math"
 	"net"
 	"os"
 	"path/filepath"
@@ -318,6 +319,36 @@ func TestChainsyncConfigCarriesLimitOnPatience(t *testing.T) {
 		chainselection.ChainSelectorConfig{},
 	)
 	assert.False(t, cfg.PatienceActiveFunc(), "Praos selection")
+}
+
+// The observed-header history counts headers, but the Genesis window is
+// measured in slots. The per-connection limit must stay at the reference
+// candidate-fragment bound (k headers plus the forecast range, which holds at
+// most 3k headers) rather than following the slot count.
+func TestChainsyncConfigObservedHeaderLimitBoundedByCandidateFragment(
+	t *testing.T,
+) {
+	t.Parallel()
+	cardanoCfg := newNodeTestCardanoNodeCfg(t)
+	k := uint64(cardanoCfg.ShelleyGenesis().SecurityParam) //nolint:gosec
+	require.NotZero(t, k)
+	window := chainselection.GenesisWindowSlotsForParams(
+		k,
+		cardanoCfg.ShelleyGenesis().ActiveSlotsCoeff.Rat,
+	)
+	require.Greater(t, window, 4*k, "window in slots must exceed 4k headers")
+
+	n := &Node{config: NewConfig(WithCardanoNodeConfig(cardanoCfg))}
+	n.chainSelector = chainselection.NewChainSelector(
+		chainselection.ChainSelectorConfig{
+			GenesisMode:        true,
+			GenesisWindowSlots: window,
+		},
+	)
+	cfg := n.chainsyncConfig()
+	require.NotNil(t, cfg.ObservedHeaderLimitFunc)
+	assert.Equal(t, int(4*k), cfg.ObservedHeaderLimitFunc(), //nolint:gosec
+		"per-connection observed headers must not follow the slot window")
 }
 
 func TestChainsyncConfigLimitOnPatienceDefaults(t *testing.T) {
@@ -5013,4 +5044,27 @@ func TestNewConfigEnablesLedgerApplyAheadByDefault(t *testing.T) {
 	)}).ledgerStateConfig()
 	assert.False(t, off.LedgerPrefetchAheadEnabled)
 	assert.False(t, off.LedgerValidateAheadEnabled)
+}
+
+func TestGenesisObservedHeaderLimit(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		window uint64
+		k      uint64
+		want   int
+	}{
+		{"mainnet", 129600, 2160, 8640},
+		{"window below bound", 30, 2160, 30},
+		{"window at bound", 8640, 2160, 8640},
+		{"unknown k", 129600, 0, 129600},
+		{"huge k", 129600, math.MaxUint64, 129600},
+		{"huge window unknown k", math.MaxUint64, 0, math.MaxInt},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, genesisObservedHeaderLimit(tc.window, tc.k))
+		})
+	}
 }
