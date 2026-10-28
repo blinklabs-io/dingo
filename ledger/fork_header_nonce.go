@@ -44,6 +44,9 @@ type peerForkPathPrefix struct {
 	generation     uint64
 	opCertLastHash []byte
 	opCertCounters map[lcommon.PoolKeyHash]opCertCounterSnapshot
+	// overflowTail is the hash of the latest header deferred because its
+	// path exceeds the history limit. Replacing the entry clears it.
+	overflowTail []byte
 }
 
 type peerForkNoncePrefix struct {
@@ -806,6 +809,16 @@ func (ls *LedgerState) peerHeaderForkPathContext(
 				return cachedAncestor, slices.Clone(cached.headers), true, nil
 			}
 		}
+		// The ancestry walk accepts at most limit+1 headers. A header that
+		// extends a cached path past that bound, or the latest header already
+		// deferred for that reason, would exhaust the walk after reading every
+		// ancestor, so defer it without repeating the walk.
+		if len(cached.headers) > ls.peerHeaderHistoryLimit() &&
+			(bytes.Equal(lastHeader.Hash().Bytes(), header.PrevHash().Bytes()) ||
+				bytes.Equal(cached.overflowTail, header.PrevHash().Bytes())) {
+			ls.markPeerForkPathOverflow(key, lastHeader.Hash().Bytes(), header)
+			return ocommon.Point{}, nil, false, errHeaderVerificationDeferred
+		}
 		if len(cached.headers) < ls.peerHeaderHistoryLimit() &&
 			bytes.Equal(
 				lastHeader.Hash().Bytes(),
@@ -975,6 +988,25 @@ func (ls *LedgerState) peerHeaderForkPathContext(
 		pathReversed = append(pathReversed, event.BlockHeader)
 		prevHash = append(prevHash[:0], nextPrevHash...)
 	}
+}
+
+// markPeerForkPathOverflow records header as the deferred tail of the cached
+// path ending at lastHash. A cache entry replaced since the caller read it is
+// left alone.
+func (ls *LedgerState) markPeerForkPathOverflow(
+	key string,
+	lastHash []byte,
+	header gledger.BlockHeader,
+) {
+	ls.forkHeaderNonceCacheMutex.Lock()
+	defer ls.forkHeaderNonceCacheMutex.Unlock()
+	entry, ok := ls.forkHeaderPathCache[key]
+	if !ok || len(entry.headers) == 0 ||
+		!bytes.Equal(entry.headers[len(entry.headers)-1].Hash().Bytes(), lastHash) {
+		return
+	}
+	entry.overflowTail = append([]byte(nil), header.Hash().Bytes()...)
+	ls.forkHeaderPathCache[key] = entry
 }
 
 func (ls *LedgerState) peerForkAncestorOnChain(
