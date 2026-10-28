@@ -207,7 +207,8 @@ provider's resolved file location, exposed through the optional
 therefore also controls MCP's read target. Other backends and in-memory SQLite
 return no file location. MCP owns the extra connection pool and closes it when
 the API stops; it never borrows or closes the provider's pools. At most four
-SQL-tool calls execute concurrently; excess calls fail immediately.
+calls to the SQL tools, `get_asset_info`, `get_utxos_by_asset`, and
+raw-credential `get_utxos` execute concurrently; excess calls fail immediately.
 While the metadata `-wal` file exceeds 128 MiB, twice the `journal_size_limit`,
 every MCP tool call and resource read is refused: at that size the WAL has been
 neither reset nor truncated since it grew past the limit, and an open reader
@@ -224,8 +225,9 @@ SQLite limits: 64 KiB per value or encoded row, 64 KiB SQL, and 32 result
 columns. `sqlite_query` also rejects a response after 1 MiB of decoded cell data.
 Settings are restored before returning injected connections to their pool. The
 SQL byte limit is also checked before tokenization. Schema inspection binds table names through SQLite
-table-valued PRAGMAs, including reserved identifiers such as `transaction`. Query offsets are capped
-at 10,000. UTxO and asset queries use `deleted_slot = 0`; native-asset supply is
+table-valued PRAGMAs, including reserved identifiers such as `transaction`. Query, asset, and
+raw-credential UTxO offsets are capped at 10,000; a full page whose next offset
+would exceed the cap says the result is truncated. UTxO and asset queries use `deleted_slot = 0`; native-asset supply is
 summed from decimal quantities with arbitrary precision. Asset pages order by
 UTxO ID and asset ID so policy-only queries have a stable order even when one
 UTxO holds multiple matching assets. Asset-name filters match one decoded byte

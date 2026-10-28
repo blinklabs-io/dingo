@@ -79,8 +79,9 @@ The server exposes 21 specialized tools categorized into SQLite introspection (3
 | `sqlite_explain` | Analyze query execution plans via `EXPLAIN QUERY PLAN` | `query` (string) |
 | `sqlite_table_schema` | Inspect table DDL, column types, nullability, and indices | `table_name` (string) |
 
-The three SQL tools and `get_asset_info` share four execution slots and fail
-immediately when all slots are occupied. While the metadata SQLite `-wal` file
+The three SQL tools, `get_asset_info`, `get_utxos_by_asset`, and raw-credential
+`get_utxos` searches share four execution slots and fail immediately when all
+slots are occupied. While the metadata SQLite `-wal` file
 exceeds 128 MiB, every tool call and resource read fails until the WAL is back
 under that size, so MCP reads cannot hold the snapshot that blocks the periodic
 TRUNCATE checkpoint. SQLite rejects values over 64 KiB and result sets over 32
@@ -224,7 +225,7 @@ transaction and compare full address bytes from output CBOR. Pages return at
 most 100 matches and examine at most 2,000 candidates. A cursor follows the last
 completed candidate, including empty pages with more candidates. Separate pages
 read live state independently. Credential searches are intentionally wider and
-use offset pagination.
+use offset pagination, with offsets capped at 10,000.
 Stake accounts and DReps bind binary hashes together with their credential tag.
 Epoch queries use persisted epoch slot boundaries and epoch-summary nonces.
 Historical protocol-parameter requests return an explicit unsupported error.
