@@ -15066,22 +15066,17 @@ func (ls *LedgerState) UtxosByAddress(
 	return ret, nil
 }
 
-// UtxosByAddressComplete returns every UTxO for the requested addresses and
-// stops the read when ctx is canceled. maxResults bounds the UTxO rows and
-// maxCoins the UTxO rows plus their native assets (one coin per UTxO and one
-// per asset); both must be positive. A set larger than either fails with
-// models.ErrTooManyUtxoResults before output CBOR is loaded, rather than
-// being truncated or fully materialized.
-func (ls *LedgerState) UtxosByAddressComplete(
+// ScanUtxosByAddress visits every UTxO matching q's exact address patterns
+// one bounded page at a time from a single database snapshot and returns the
+// tip stored in that snapshot. See database.Database.ScanUtxosByAddress.
+func (ls *LedgerState) ScanUtxosByAddress(
 	ctx context.Context,
-	addrs []ledger.Address,
-	maxResults int,
-	maxCoins int,
-) ([]models.Utxo, error) {
-	if maxResults <= 0 || maxCoins <= 0 {
-		return nil, errors.New("maxResults and maxCoins must be positive")
-	}
-	return ls.db.UtxosByAddressBounded(ctx, addrs, maxResults, maxCoins, nil)
+	q *models.UtxoWithOrderingQuery,
+	maxCandidates int,
+	maxBytes int64,
+	visit func([]models.UtxoWithOrdering) error,
+) (ochainsync.Tip, error) {
+	return ls.db.ScanUtxosByAddress(ctx, q, maxCandidates, maxBytes, visit)
 }
 
 // UtxosByAddressBoundedPage returns an ordered, resumable UTxO page while

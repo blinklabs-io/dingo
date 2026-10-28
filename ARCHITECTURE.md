@@ -12641,19 +12641,23 @@ queued.
 TLS is configured through `plugins.api.mesh.config.tls`; see "API security"
 above.
 
-`/account/coins` reads the exact address's complete UTxO set and returns every
-coin in one response. The request and response expose no pagination, cursor,
-limit, offset or truncation state because a Mesh client treats omitted coins as
-absent. At most 8 complete reads run at once; a request that finds no free slot
-is refused before starting its ledger query with `ErrUnavailable` rather than
-queued. Every successful request still returns the complete result. The read
-is bounded at the database: an address with more than 10,000 live UTxOs, or
-whose native-asset expansion exceeds 50,000 coins, is refused with the
-non-retriable `ErrAccountTooLarge` (code 12) instead of being truncated.
-Storage enforces both bounds in the metadata read, counting the coin budget
-as UTxO rows plus asset rows, so a refused account loads no output CBOR and
-at most one asset row past the budget. An accepted account loads output CBOR
-for each of its at most 10,000 UTxOs.
+`/account/coins` returns every coin of the exact address in one response. The
+request and response expose no pagination, cursor, limit, offset or truncation
+state because a Mesh client treats omitted coins as absent, and no account is
+refused for its size. At most 8 reads run at once; a request that finds no free
+slot is refused before starting its ledger query with `ErrUnavailable` rather
+than queued. The handler reads through `LedgerState.ScanUtxosByAddress`, which
+holds one database read transaction for the whole request and visits the
+matching outputs in ascending ledger order in pages of at most 500 matches,
+5,000 scanned candidates and 1 MiB of output CBOR. Each page's coins, native
+assets decoded from the output CBOR, are encoded and flushed before the next
+page is read, so server memory is bounded by one page. The `block_identifier`
+is the tip stored in the same snapshot and is written after the coins. Each
+flushed page extends the connection write deadline by 30 seconds, so a large
+account completes while a client that stops reading is cut off. A failure
+before the first page is a Mesh error; once coins are on the wire the handler
+aborts the connection without closing the JSON document, so a client never
+reads a partial list as complete.
 `/account/balance` is unchanged.
 
 Implements the Mesh (formerly Rosetta) API specification for wallet integration and chain analysis. Provides endpoints for network status, account balances, block queries, transaction construction, and mempool access.
@@ -12721,7 +12725,7 @@ Two contracts follow from that boundary:
   `block not found` rather than falling back to another point. An identifier
   carrying neither hash nor index is treated as absent, since clients commonly
   send the field unconditionally. `/account/coins` has no block identifier in
-  the Rosetta schema and always reports the tip.
+  the Rosetta schema and always reports the tip of the snapshot it read.
 
 ### UTxO RPC (`api/utxorpc/`)
 

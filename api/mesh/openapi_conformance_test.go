@@ -22,7 +22,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/test/openapiconformance"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/require"
@@ -155,19 +154,6 @@ func assertMeshErrorResponses(
 	busyMux := http.NewServeMux()
 	busy.registerRoutes(busyMux)
 
-	oversizedDeps := newTestDeps()
-	oversizedDeps.ledger.utxos = func(
-		[]lcommon.Address,
-	) ([]models.Utxo, error) {
-		return []models.Utxo{
-			testUtxo(testHash(1), 0, 1_000_000, testKeyHash(0x36), nil),
-			testUtxo(testHash(2), 0, 1_000_000, testKeyHash(0x36), nil),
-		}, nil
-	}
-	oversized := newTestHandler(t, oversizedDeps, func(c *ServerConfig) {
-		c.maxAccountCoinUtxos = 1
-	})
-
 	cases := []struct {
 		name      string
 		handler   http.Handler
@@ -202,13 +188,6 @@ func assertMeshErrorResponses(
 			operation: operation(http.MethodPost, "/account/coins"),
 			body:      mustJSON(t, coinsRequest(addr)),
 			want:      ErrUnavailable,
-		},
-		{
-			name:      "oversized account coins",
-			handler:   oversized,
-			operation: operation(http.MethodPost, "/account/coins"),
-			body:      mustJSON(t, coinsRequest(addr)),
-			want:      ErrAccountTooLarge,
 		},
 	}
 	for _, tc := range cases {

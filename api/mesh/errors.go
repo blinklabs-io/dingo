@@ -97,13 +97,6 @@ var (
 			"unavailable. Please retry.",
 		Retriable: true,
 	}
-	ErrAccountTooLarge = &Error{
-		Code:    12,
-		Message: "account has too many coins",
-		Description: "The account holds more coins than a " +
-			"single complete response may contain.",
-		Retriable: false,
-	}
 )
 
 // AllErrors returns all defined error types for the
@@ -121,7 +114,6 @@ func AllErrors() []*Error {
 		ErrInvalidTransaction,
 		ErrSubmitFailed,
 		ErrUnavailable,
-		ErrAccountTooLarge,
 	}
 }
 

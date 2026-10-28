@@ -24,10 +24,12 @@ import (
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
 
-func TestUtxosByAddressCompleteEnforcesMaxResults(t *testing.T) {
+func TestScanUtxosByAddressVisitsEveryOutput(t *testing.T) {
 	t.Parallel()
 
 	db := newTestDB(t)
@@ -54,36 +56,36 @@ func TestUtxosByAddressCompleteEnforcesMaxResults(t *testing.T) {
 			AddedSlot:  uint64(i + 1),
 			Amount:     types.Uint64(1_000_000),
 			Cbor:       encoded,
-			Assets: []models.Asset{{
-				PolicyId: bytes.Repeat([]byte{0x01}, 28),
-				Name:     []byte{byte(i)},
-				Amount:   1,
-			}},
 		}))
 		require.NoError(t, db.BlobTxn(true).Do(func(txn *database.Txn) error {
 			return db.Blob().SetUtxo(txn.Blob(), txHash, 0, encoded)
 		}))
 	}
-	ls := &LedgerState{db: db}
-	addrs := []lcommon.Address{addr}
-
-	// One coin per UTxO plus one per asset.
-	const coins = 2 * total
-	got, err := ls.UtxosByAddressComplete(t.Context(), addrs, total, coins)
-	require.NoError(t, err)
-	require.Len(t, got, total)
-	for i := range got {
-		require.Len(t, got[i].Assets, 1)
+	tip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(30, bytes.Repeat([]byte{0x03}, 32)),
+		BlockNumber: 3,
 	}
+	require.NoError(t, db.SetTip(tip, nil))
+	pattern, err := models.ExactUtxoAddressPattern(addr)
+	require.NoError(t, err)
+	ls := &LedgerState{db: db}
 
-	_, err = ls.UtxosByAddressComplete(t.Context(), addrs, total-1, coins)
-	require.ErrorIs(t, err, models.ErrTooManyUtxoResults)
-
-	_, err = ls.UtxosByAddressComplete(t.Context(), addrs, total, coins-1)
-	require.ErrorIs(t, err, models.ErrTooManyUtxoResults)
-
-	_, err = ls.UtxosByAddressComplete(t.Context(), addrs, 0, coins)
-	require.Error(t, err)
-	_, err = ls.UtxosByAddressComplete(t.Context(), addrs, total, 0)
-	require.Error(t, err)
+	seen := 0
+	gotTip, err := ls.ScanUtxosByAddress(
+		t.Context(),
+		&models.UtxoWithOrderingQuery{
+			AddressPatterns: []models.UtxoAddressPattern{pattern},
+			Limit:           2,
+		},
+		10,
+		1<<20,
+		func(page []models.UtxoWithOrdering) error {
+			require.LessOrEqual(t, len(page), 2)
+			seen += len(page)
+			return nil
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, total, seen)
+	require.Equal(t, tip, gotTip)
 }

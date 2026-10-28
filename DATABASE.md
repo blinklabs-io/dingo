@@ -842,7 +842,7 @@ Use the Go APIs when code runs inside Dingo:
 
 - `database.Database` in `database/database.go` owns both stores and exposes `Blob()`, `PinBlob()`, `SetBlobStore()`, `Metadata()`, `Transaction()`, `BlobTxn()`, `MetadataTxn()`, `StorageMode()`, and `Close()`. `Blob()`, `PinBlob()`, and `SetBlobStore()` are the only readers and writer of the installed blob store; see "Storage provider ownership" for the pin/drain rules that make replacement safe.
 - `database.CborCache()` returns the `TieredCborCache`. Its cold-path entry points `ResolveUtxoCbor(txId, outputIdx, txn ...*Txn)` and `ResolveTxCbor(txn *Txn, txHash)` take the database transaction, not a bare `types.Txn` handle: an optional transaction makes uncommitted writes visible, and the cold read has to run against the store that transaction was opened on rather than whichever store is installed when the resolve happens. A resolve through a read-write transaction populates the shared hot UTxO cache only when a fresh read snapshot holds the identical stored value, so a UTxO row staged by the open transaction (and therefore subject to rollback) never reaches the shared cache while rows committed before the transaction began are still cached. `Database.ResolveUtxoCborWithRecovery(txId, outputIdx, txn)` wraps `ResolveUtxoCbor` for a caller that only has a bare ref (not a `*models.Utxo` already loaded via `GetUtxo`) and must not silently treat a recoverable missing blob as absent: on `types.ErrBlobKeyNotFound` it falls back to the same producing-block reconstruction `loadCbor` performs for `UtxoByRef`/`IterateLiveUtxos`, returning `ErrUtxoCborUnavailable` only once that recovery itself confirms the CBOR cannot be rebuilt. `ledger.queryShelleyUtxoWhole` (answering `GetUTxOWhole`) uses this rather than the bare cache call for exactly that reason.
-- `database.UtxosByAddressBoundedPage` uses ascending keyset batches to cap candidate rows and retained output CBOR while preserving a resumption cursor. It skips native-asset hydration because callers decode the original output CBOR, and it checks cancellation between SQL, blob, and decode steps. `UtxosByAddressPage` shares the same scan without a byte cap for internal callers that impose their own output bound.
+- `database.UtxosByAddressBoundedPage` uses ascending keyset batches to cap candidate rows and retained output CBOR while preserving a resumption cursor. It skips native-asset hydration because callers decode the original output CBOR, and it checks cancellation between SQL, blob, and decode steps. `UtxosByAddressPage` shares the same scan without a byte cap for internal callers that impose their own output bound. `database.ScanUtxosByAddress` runs the same bounded pages to exhaustion inside one read transaction, calling a visitor per page and returning the tip read in that transaction, so every page and the tip share one snapshot (SQLite WAL read snapshot, REPEATABLE READ on PostgreSQL and MySQL, a Badger read transaction for blob CBOR) and a block applied mid-scan neither duplicates nor drops an output. The transaction stays open while the visitor runs; on SQLite a long scan delays WAL checkpointing until it ends.
 - `database.IterateLiveUtxoRefs` and `IterateUtxoRefsAsOf` bind each SQL scan to the call context even when the caller supplies a longer-lived transaction. This preserves the transaction snapshot while allowing a per-query deadline to interrupt enumeration.
 - `database.Txn` in `database/txn.go` coordinates sibling metadata/blob transactions. Write commits update commit timestamps in both stores, commit the blob transaction first, then commit metadata. `Txn.BlobStore()` returns the blob store the transaction was opened on — the store its `Blob()` handle belongs to, and the one every blob call inside the transaction must use.
 - `metadata.MetadataStore` in `database/plugin/metadata/store.go` is the
@@ -4352,21 +4352,6 @@ their own use `database.MaxUtxosByAddressResults`. This is unrelated to
 `GetUtxosByAddressWithOrdering`'s own `Limit`/`Offset` pagination, which
 remains the mechanism for a caller that wants a bounded page rather than an
 error on overflow.
-
-`GetUtxosByAddressBounded` (and `Database.UtxosByAddressBounded`) add a
-second required, positive `maxEntries` bound on the candidate rows plus
-their native-asset rows: one entry per UTxO and one per asset, the shape of
-a Mesh coin list. The row bound alone does not bound the result, since every
-candidate can carry as many assets as the maximum value size allows. Once
-the candidate rows are collected, more rows than `maxEntries` are refused
-before any asset loads; otherwise the remaining budget is `maxEntries` minus
-the row count. Asset rows are loaded in parameter-limit chunks of UTxO ids;
-each chunk's query carries `LIMIT` of the remaining budget plus one (the ids
-are deduplicated, so no asset row repeats across chunks), and the first row
-past the budget returns `models.ErrTooManyUtxoResults`. Every refusal happens
-in the metadata read, so `Database.UtxosByAddressBounded` loads no output
-CBOR for a refused set; an accepted set loads CBOR for each of its at most
-`maxResults` rows. Mesh `/account/coins` uses this read.
 
 The `LIMIT` clause's own bind parameter is reserved when `GetUtxosByAddress`
 decides whether a chunk's accumulated WHERE-clause arguments have reached
