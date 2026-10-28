@@ -8856,14 +8856,19 @@ address with a warning, because the default is `::`; any other failure to bind
 stops startup. Each accepted connection goes to `AttachPeer` as a listener.
 `dmq.maxPeers` bounds every peer connection, inbound and outbound, in
 `registerPeer` before the handshake, which refuses the next with
-`ErrTooManyPeers`; one source, an IPv4 address or an IPv6 /64, holds at most
-four inbound connections, so one host cannot take every slot.
+`ErrTooManyPeers`. Inbound connections also stop at `dmq.maxPeers` less
+the room kept for dialed peers, so connections anyone may open cannot take it.
+That room is `dmq.minPeers`, or the total valency of the topology's local roots
+when that is larger; when nothing is left no inbound connection is accepted.
+One source, an IPv4 address or an IPv6 /64,
+holds at most four inbound connections, so one host cannot take every inbound
+slot.
 
 The peer manager is one goroutine that reviews the connections on every change
 and at least every 15 seconds. It keeps each local root at its valency, a
 target that may exceed the peers listed. It then fills the stack up to
-`dmq.minPeers`, counting inbound peers, from the public roots and then the
-ledger peers, each in random order, and never beyond `dmq.maxPeers`; at most
+`dmq.minPeers` dialed connections, not counting inbound peers, from the public
+roots and then the ledger peers, each in random order, and never beyond `dmq.maxPeers`; at most
 four dials are in flight. A peer whose address is one of the stack's own listen
 addresses is not dialed (only an IP literal can match). A peer that fails waits
 five seconds, doubling to fifteen minutes, give or take a fifth, and a

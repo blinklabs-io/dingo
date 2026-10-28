@@ -679,10 +679,12 @@ type DMQConfig struct {
 	// TopologyFile is a dmq-node topology file naming the DMQ peers to dial.
 	// It is separate from the Cardano topology.
 	TopologyFile string `yaml:"topologyFile" envconfig:"DINGO_DMQ_TOPOLOGY_FILE"`
-	// MinPeers is the number of DMQ peers to keep connections to. It must
-	// not exceed MaxPeers.
+	// MinPeers is the number of DMQ peers to keep dialed. Inbound connections
+	// do not count toward it. It must not exceed MaxPeers.
 	MinPeers uint `yaml:"minPeers"     envconfig:"DINGO_DMQ_MIN_PEERS"`
-	// MaxPeers is the most DMQ peers to hold connections to. Zero allows
+	// MaxPeers is the most DMQ peer connections to hold, inbound and dialed.
+	// Inbound ones stop at MaxPeers less the room kept for dialed peers:
+	// MinPeers, or the topology's local-root valency if larger. Zero allows
 	// none, which needs MinPeers of zero too.
 	MaxPeers uint `yaml:"maxPeers"     envconfig:"DINGO_DMQ_MAX_PEERS"`
 }
