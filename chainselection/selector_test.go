@@ -7582,3 +7582,225 @@ func TestFarFrontierCorroborationAtReferenceBoundaries(t *testing.T) {
 		}
 	}
 }
+
+// lockedLogBuffer is a goroutine-safe slog sink for counting log records.
+type lockedLogBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedLogBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedLogBuffer) count(substr string) int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return bytes.Count(b.buf.Bytes(), []byte(substr))
+}
+
+// TestPendingFarFrontierRejectionIsReportedOncePerHeader drives a connected
+// far chain through admission one header at a time. Every header is refused
+// until the run completes, and each admission replays the earlier pending
+// headers; a replay must not log or count the same refusal again.
+func TestPendingFarFrontierRejectionIsReportedOncePerHeader(t *testing.T) {
+	t.Parallel()
+
+	const rejectedMsg = "rejecting implausible peer tip"
+	for _, commit := range []bool{false, true} {
+		name := "prepare only"
+		if commit {
+			name = "prepare then commit"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			c := loneFarChain{localBlock: 1_000, k: 8}
+			logs := &lockedLogBuffer{}
+			var rejections atomic.Int64
+			cs := NewChainSelector(ChainSelectorConfig{
+				SecurityParam:             c.k,
+				DisableEventSubscriptions: true,
+				Logger: slog.New(slog.NewTextHandler(
+					logs, &slog.HandlerOptions{Level: slog.LevelWarn},
+				)),
+				OnPeerTipRejected: func(PeerTipRejection) {
+					rejections.Add(1)
+				},
+			})
+			cs.SetLocalTip(c.tip(c.localBlock))
+			require.True(t, cs.UpdatePeerTip(
+				newTestConnectionId(1), c.tip(c.localBlock+10), nil,
+			))
+			require.Zero(t, logs.count(rejectedMsg))
+			require.Zero(t, rejections.Load())
+
+			conn := newTestConnectionId(2)
+			first := c.first()
+			updates := make([]PeerTipUpdateEvent, 0, c.k)
+			for i := range c.k {
+				block := first + i
+				update := PeerTipUpdateEvent{
+					ConnectionId:     conn,
+					AdmissionID:      i + 1,
+					Tip:              c.tip(4_687_076),
+					ObservedTip:      c.tip(block),
+					ObservedPrevHash: c.prevHash(block),
+				}
+				updates = append(updates, update)
+				require.Equal(
+					t,
+					PeerTipUpdatePending,
+					cs.PreparePeerTipAdmissionDisposition(update),
+				)
+			}
+			if commit {
+				for _, update := range updates {
+					require.True(t, cs.CommitPeerTipAdmission(update))
+				}
+			}
+
+			assert.Equal(
+				t, int(c.k), logs.count(rejectedMsg),
+				"each rejected header is logged once, not once per replay",
+			)
+			assert.Equal(
+				t, int64(c.k), rejections.Load(),
+				"OnPeerTipRejected is called once per rejected header",
+			)
+		})
+	}
+}
+
+// TestPendingHeaderFirstRefusedOnReplayIsReported stages a header that is
+// plausible against a far reference peer, then removes that peer so the
+// replay refuses the header for the first time. The refusal is reported once
+// there, and later replays do not report it again.
+func TestPendingHeaderFirstRefusedOnReplayIsReported(t *testing.T) {
+	t.Parallel()
+
+	const rejectedMsg = "rejecting implausible peer tip"
+	c := loneFarChain{localBlock: 1_000, k: 8}
+	logs := &lockedLogBuffer{}
+	var rejections atomic.Int64
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam:             c.k,
+		DisableEventSubscriptions: true,
+		Logger: slog.New(slog.NewTextHandler(
+			logs, &slog.HandlerOptions{Level: slog.LevelWarn},
+		)),
+		OnPeerTipRejected: func(PeerTipRejection) {
+			rejections.Add(1)
+		},
+	})
+	cs.SetLocalTip(c.tip(c.localBlock))
+	near := newTestConnectionId(1)
+	far := newTestConnectionId(2)
+	other := newTestConnectionId(3)
+	bystander := newTestConnectionId(4)
+	for i, ref := range []struct {
+		conn  ouroboros.ConnectionId
+		block uint64
+	}{{far, 1_018}, {near, 1_009}, {bystander, 1_005}} {
+		refUpdate := PeerTipUpdateEvent{
+			ConnectionId:     ref.conn,
+			AdmissionID:      1,
+			Tip:              c.tip(ref.block),
+			ObservedTip:      c.tip(ref.block),
+			ObservedPrevHash: c.prevHash(ref.block),
+		}
+		require.Equal(
+			t, PeerTipUpdateAccepted,
+			cs.PreparePeerTipAdmissionDisposition(refUpdate), "ref %d", i,
+		)
+		require.True(t, cs.CommitPeerTipAdmission(refUpdate))
+	}
+
+	update := PeerTipUpdateEvent{
+		ConnectionId:     other,
+		AdmissionID:      1,
+		Tip:              c.tip(1_023),
+		ObservedTip:      c.tip(1_023),
+		ObservedPrevHash: c.prevHash(1_023),
+	}
+	require.Equal(
+		t,
+		PeerTipUpdateAccepted,
+		cs.PreparePeerTipAdmissionDisposition(update),
+		"the header is plausible against the far reference peer",
+	)
+	require.Zero(t, logs.count(rejectedMsg))
+	require.Zero(t, rejections.Load())
+
+	cs.RemovePeer(far)
+	assert.Equal(
+		t, 1, logs.count(rejectedMsg),
+		"the refusal first reached on replay is logged once",
+	)
+	assert.Equal(
+		t, int64(1), rejections.Load(),
+		"the refusal first reached on replay reaches OnPeerTipRejected once",
+	)
+
+	// Further replays and the commit re-check must stay silent.
+	cs.RemovePeer(bystander)
+	require.Equal(
+		t,
+		PeerTipUpdatePending,
+		cs.PreparePeerTipAdmissionDisposition(update),
+	)
+	assert.Equal(t, 1, logs.count(rejectedMsg), "replays do not log again")
+	assert.Equal(
+		t, int64(1), rejections.Load(), "replays do not count again",
+	)
+	cs.CommitPeerTipAdmission(update)
+	assert.Equal(t, 1, logs.count(rejectedMsg), "commit does not log again")
+	assert.Equal(
+		t, int64(1), rejections.Load(), "commit does not count again",
+	)
+}
+
+// TestUnstagedPeerTipRefusalIsReportedEachTime delivers the same implausible
+// tip twice through the direct update path, which stages nothing. Each
+// delivery is a separate refusal and is reported, and no rejection record is
+// left behind for a candidate that was never staged.
+func TestUnstagedPeerTipRefusalIsReportedEachTime(t *testing.T) {
+	t.Parallel()
+
+	const rejectedMsg = "rejecting implausible peer tip"
+	c := loneFarChain{k: 8}
+	logs := &lockedLogBuffer{}
+	var rejections atomic.Int64
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam:             c.k,
+		DisableEventSubscriptions: true,
+		Logger: slog.New(slog.NewTextHandler(
+			logs, &slog.HandlerOptions{Level: slog.LevelWarn},
+		)),
+		OnPeerTipRejected: func(PeerTipRejection) {
+			rejections.Add(1)
+		},
+	})
+	require.True(t, cs.UpdatePeerTip(newTestConnectionId(1), c.tip(10), nil))
+
+	far := newTestConnectionId(2)
+	for i := range 2 {
+		require.False(
+			t, cs.UpdatePeerTip(far, c.tip(23), nil), "delivery %d", i,
+		)
+		assert.Equal(
+			t, i+1, logs.count(rejectedMsg), "delivery %d is logged", i,
+		)
+		assert.Equal(
+			t, int64(i+1), rejections.Load(), "delivery %d is counted", i,
+		)
+	}
+	cs.mutex.RLock()
+	defer cs.mutex.RUnlock()
+	assert.Empty(
+		t, cs.reportedPeerTipRejections,
+		"an unstaged refusal leaves no rejection record",
+	)
+}
