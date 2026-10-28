@@ -226,7 +226,8 @@ columns. `sqlite_query` also rejects a response after 1 MiB of decoded cell data
 Settings are restored before returning injected connections to their pool. The
 SQL byte limit is also checked before tokenization. Schema inspection binds table names through SQLite
 table-valued PRAGMAs, including reserved identifiers such as `transaction`. Query, asset, and
-raw-credential UTxO offsets are capped at 10,000. UTxO and asset queries use `deleted_slot = 0`; native-asset supply is
+raw-credential UTxO offsets are capped at 10,000; a full page whose next offset
+would exceed the cap says the result is truncated. UTxO and asset queries use `deleted_slot = 0`; native-asset supply is
 summed from decimal quantities with arbitrary precision. Asset pages order by
 UTxO ID and asset ID so policy-only queries have a stable order even when one
 UTxO holds multiple matching assets. Asset-name filters match one decoded byte

@@ -166,6 +166,7 @@ func registerSQLiteTools(
 			valuePtrs[i] = &rowValues[i]
 		}
 
+		requestedOffset := offset
 		count := 0
 		decodedBytes := 0
 		for rows.Next() {
@@ -222,6 +223,11 @@ func registerSQLiteTools(
 			duration.Round(time.Millisecond),
 			formatUntrustedInline(q),
 		)
+		if note := offsetLimitNote(
+			requestedOffset, effectiveLimit, count,
+		); note != "" {
+			summary += "\n" + note
+		}
 
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{

@@ -721,10 +721,11 @@ func registerCardanoTools(
 
 		table := FormatMarkdownTable(queryCols, utxoRows)
 		header := fmt.Sprintf(
-			"### UTxOs for `%s`\n\n*(Showing %d results, offset %d)*\n\n",
+			"### UTxOs for `%s`\n\n*(Showing %d results, offset %d)*\n\n%s",
 			addr,
 			len(utxoRows),
 			offset,
+			offsetLimitNote(offset, limit, len(utxoRows)),
 		)
 
 		return &mcp.CallToolResult{
@@ -1307,10 +1308,11 @@ func registerCardanoTools(
 		}
 
 		md := fmt.Sprintf(
-			"### Live UTxOs for Policy `%s`\n\n*(Found %d UTxOs, offset %d)*\n\n%s",
+			"### Live UTxOs for Policy `%s`\n\n*(Found %d UTxOs, offset %d)*\n\n%s%s",
 			policyHex,
 			len(resRows),
 			offset,
+			offsetLimitNote(offset, limit, len(resRows)),
 			FormatMarkdownTable(cols, resRows),
 		)
 		return &mcp.CallToolResult{

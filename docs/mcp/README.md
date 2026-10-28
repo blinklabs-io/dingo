@@ -352,7 +352,11 @@ metadata backend or an in-memory SQLite store, file-based SQL tools are
 unavailable. Full-address UTxO lookup uses the active database's exact CBOR
 address matcher in ascending ledger order. Full addresses use `cursor` pagination
 and reject nonzero `offset`; raw payment credentials retain offset pagination,
-capped at 10,000, and intentionally search across address forms. Stake addresses and CIP-129 DRep
+capped at 10,000, and intentionally search across address forms. When a full
+page from a raw-credential `get_utxos`, `get_utxos_by_asset`, or `sqlite_query`
+call ends where the next offset would exceed 10,000, the response states that
+the offset limit was reached and later rows are not retrievable through that
+tool. Stake addresses and CIP-129 DRep
 identifiers preserve key/script types; raw hashes mean key credentials. An
 all-zero stake credential remains a valid lookup.
 

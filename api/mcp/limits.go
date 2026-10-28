@@ -186,3 +186,19 @@ func (l *readLimits) acquire() bool {
 }
 
 func (l *readLimits) release() { <-l.slots }
+
+// offsetLimitNote returns a notice for a full page whose next offset would
+// exceed maxToolOffset, or "" otherwise. Without it, a caller paging until a
+// short page cannot tell a complete result from one cut off by the bound.
+func offsetLimitNote(offset, limit, returned int) string {
+	if returned < limit || offset+limit <= maxToolOffset {
+		return ""
+	}
+	return fmt.Sprintf(
+		"**Offset limit reached**: the next page would start past "+
+			"offset %d, which this tool rejects. Matching rows beyond "+
+			"this page are not retrievable here; treat the result as "+
+			"truncated.\n\n",
+		maxToolOffset,
+	)
+}

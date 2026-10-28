@@ -17,6 +17,7 @@ package mcp
 import (
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"maps"
 	"strconv"
 	"testing"
@@ -32,14 +33,16 @@ const (
 	utxoAdmissionPolicy     = "a0000000000000000000000000000000000000000000000000000001"
 )
 
-// newUTxOAdmissionSession serves get_utxos and get_utxos_by_asset over an
-// in-memory database. With closed set, the database is closed after setup,
-// so any query that reaches it fails with "database is closed" rather than
-// with an admission error.
+// newUTxOAdmissionSession serves get_utxos, get_utxos_by_asset and
+// sqlite_query over an in-memory database holding rows live UTxOs, each paid
+// to utxoAdmissionCredential and carrying one utxoAdmissionPolicy asset. With
+// closed set, the database is closed after setup, so any query that reaches
+// it fails with "database is closed" rather than with an admission error.
 func newUTxOAdmissionSession(
 	t *testing.T,
 	limits *readLimits,
 	closed bool,
+	rows int,
 ) *mcp.ClientSession {
 	t.Helper()
 	db, err := sql.Open("sqlite", ":memory:")
@@ -58,6 +61,22 @@ func newUTxOAdmissionSession(
 			fingerprint BLOB NOT NULL, amount TEXT NOT NULL);
 	`)
 	require.NoError(t, err)
+	if rows > 0 {
+		_, err = db.Exec(`
+			WITH RECURSIVE n(i) AS (
+				SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?)
+			INSERT INTO utxo (tx_id, output_idx, payment_key, amount, added_slot)
+			SELECT randomblob(32), 0, ?, '1000000', i FROM n`,
+			rows, mustDecodeHex(t, utxoAdmissionCredential),
+		)
+		require.NoError(t, err)
+		_, err = db.Exec(`
+			INSERT INTO asset (utxo_id, policy_id, name, fingerprint, amount)
+			SELECT id, ?, X'', 'asset1', '1' FROM utxo`,
+			mustDecodeHex(t, utxoAdmissionPolicy),
+		)
+		require.NoError(t, err)
+	}
 	if closed {
 		require.NoError(t, db.Close())
 	}
@@ -68,6 +87,7 @@ func newUTxOAdmissionSession(
 	registerCardanoTools(
 		server, db, nil, nil, "preview", 5*time.Second, limits,
 	)
+	registerSQLiteTools(server, db, 5*time.Second, 200, limits)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	t.Cleanup(cancel)
 	ct, st := mcp.NewInMemoryTransports()
@@ -113,7 +133,7 @@ func TestUTxOToolsRefusedWhenReadSlotsBusy(t *testing.T) {
 		t.Run(tool, func(t *testing.T) {
 			t.Parallel()
 			limits := newReadLimits()
-			cs := newUTxOAdmissionSession(t, limits, true)
+			cs := newUTxOAdmissionSession(t, limits, true, 0)
 			for limits.acquire() {
 			}
 			text := callUTxOAdmission(t, cs, tool, nil)
@@ -129,7 +149,7 @@ func TestUTxOToolsRejectOffsetAboveBound(t *testing.T) {
 		t.Run(tool, func(t *testing.T) {
 			t.Parallel()
 			limits := newReadLimits()
-			cs := newUTxOAdmissionSession(t, limits, true)
+			cs := newUTxOAdmissionSession(t, limits, true, 0)
 			text := callUTxOAdmission(
 				t, cs, tool, map[string]any{"offset": maxToolOffset + 1},
 			)
@@ -146,7 +166,7 @@ func TestUTxOToolsAcceptOffsetAtBoundAndReleaseSlot(t *testing.T) {
 		t.Run(tool, func(t *testing.T) {
 			t.Parallel()
 			limits := newReadLimits()
-			cs := newUTxOAdmissionSession(t, limits, false)
+			cs := newUTxOAdmissionSession(t, limits, false, 0)
 			res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
 				Name: tool,
 				Arguments: func() map[string]any {
@@ -164,5 +184,60 @@ func TestUTxOToolsAcceptOffsetAtBoundAndReleaseSlot(t *testing.T) {
 			assert.Equal(t, maxConcurrentSQLiteQueries, held,
 				"the call must give its slot back")
 		})
+	}
+}
+
+func mustDecodeHex(t *testing.T, s string) []byte {
+	t.Helper()
+	b, err := hex.DecodeString(s)
+	require.NoError(t, err)
+	return b
+}
+
+// TestOffsetToolsReportOffsetLimit pins the notice a full page carries when
+// the next offset would be rejected, so a caller paging until a short page
+// can tell a result cut off by maxToolOffset from a complete one.
+func TestOffsetToolsReportOffsetLimit(t *testing.T) {
+	t.Parallel()
+	cs := newUTxOAdmissionSession(
+		t, newReadLimits(), false, maxToolOffset+1,
+	)
+	calls := utxoAdmissionCalls()
+	calls["sqlite_query"] = map[string]any{
+		"query": "SELECT id FROM utxo ORDER BY id",
+	}
+	for tool, base := range calls {
+		for _, tc := range []struct {
+			offset int
+			limit  int
+			want   bool
+		}{
+			// The next offset, maxToolOffset, is still accepted.
+			{offset: maxToolOffset - 1, limit: 1, want: false},
+			// The next offset, maxToolOffset+1, is rejected.
+			{offset: maxToolOffset, limit: 1, want: true},
+			// A short page is the last one, so nothing was cut off.
+			{offset: maxToolOffset, limit: 2, want: false},
+		} {
+			name := tool + "/" + strconv.Itoa(tc.offset) + "/" +
+				strconv.Itoa(tc.limit)
+			t.Run(name, func(t *testing.T) {
+				args := maps.Clone(base)
+				args["offset"] = tc.offset
+				args["limit"] = tc.limit
+				res, err := cs.CallTool(
+					context.Background(),
+					&mcp.CallToolParams{Name: tool, Arguments: args},
+				)
+				require.NoError(t, err)
+				text := res.Content[0].(*mcp.TextContent).Text
+				require.False(t, res.IsError, text)
+				if tc.want {
+					assert.Contains(t, text, "Offset limit reached")
+				} else {
+					assert.NotContains(t, text, "Offset limit reached")
+				}
+			})
+		}
 	}
 }
