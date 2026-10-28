@@ -25,6 +25,7 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/blinklabs-io/gouroboros/connection"
@@ -187,6 +188,9 @@ func (s *Stack) registerPeer(conn net.Conn, dialed bool) (*PeerConn, error) {
 	if s.peersClosed {
 		return nil, errors.New("dmq: stack is stopped")
 	}
+	if s.maxPeers > 0 && len(s.peers) >= s.maxPeers {
+		return nil, ErrTooManyPeers
+	}
 	// gouroboros formats both addresses when it logs the connection.
 	if conn.LocalAddr() == nil || conn.RemoteAddr() == nil {
 		return nil, errors.New("dmq: connection has no network address")
@@ -223,6 +227,10 @@ func (s *Stack) forgetPeer(p *PeerConn) {
 	if _, ok := s.peers[p]; ok {
 		delete(s.peers, p)
 		s.peersCnt.Dec()
+		// A lost peer may leave the stack below its minimum.
+		if s.peerNet != nil && s.peerNet.manager != nil {
+			s.peerNet.manager.kick()
+		}
 	}
 }
 
@@ -292,11 +300,29 @@ func (p *PeerConn) fail(err error) {
 	})
 }
 
+// failSend ends the connection after a send failed. A protocol that is
+// shutting down refuses sends, but the refusal is a symptom: what stopped the
+// protocol, such as the muxer losing the connection or a protocol error,
+// reaches fail through the muxer's or the protocols' error channel. A refusal
+// recorded first would hide it, and would report a remote reset as a failure.
+// A protocol the peer ended leaves the connection up for the other direction.
+func (p *PeerConn) failSend(what string, err error) {
+	if errors.Is(err, protocol.ErrProtocolShuttingDown) {
+		return
+	}
+	p.fail(fmt.Errorf("dmq peer: %s: %w", what, err))
+}
+
 // endedCleanly reports whether err is how a connection normally ends: the
-// remote hanging up, or this side having closed it.
+// remote hanging up, or this side having closed it. A remote that closes with
+// unread data queued makes the kernel reset the connection, so the muxer sees
+// ECONNRESET (or EPIPE on a write) where an orderly close would give EOF.
 func endedCleanly(err error) bool {
 	var closed *muxer.ConnectionClosedError
-	return errors.As(err, &closed) || errors.Is(err, net.ErrClosed)
+	return errors.As(err, &closed) ||
+		errors.Is(err, net.ErrClosed) ||
+		errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, syscall.EPIPE)
 }
 
 func (p *PeerConn) teardown() {

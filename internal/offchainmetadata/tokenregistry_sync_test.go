@@ -1849,8 +1849,8 @@ func TestTokenRegistrySyncDoesNotPruneEmptySnapshot(t *testing.T) {
 
 	// Same repository, but nothing the sync recognizes as a mapping.
 	server.setBody(tarballOf(t, map[string]string{
-		"README.md":           "the layout changed",
-		"registry/moved.json": mappingJSON(syncSubjectDjed, "Djed", "", ""),
+		"README.md":            "the layout changed",
+		"elsewhere/moved.json": mappingJSON(syncSubjectDjed, "Djed", "", ""),
 	}), `"etag-empty"`)
 
 	written, err := sync.SyncOnce(t.Context())
@@ -2670,4 +2670,60 @@ func TestTokenRegistrySyncCommitFailureDoesNotAdvanceSnapshot(t *testing.T) {
 	require.Equal(t, stampBefore, store.state(tokenRegistryStampKey))
 	require.Equal(t, etagBefore, store.state(TokenRegistrySyncStateKey))
 	require.Equal(t, identityBefore, store.state(tokenRegistrySnapshotIDKey))
+}
+
+func TestTokenRegistrySyncUpstreamArchiveWithoutManifest(t *testing.T) {
+	t.Parallel()
+	body := tarballOf(t, map[string]string{
+		"registry/aaaa.json": `{"subject":"aaaa","name":{"value":"not an asset"}}`, "registry/" + syncSubjectNut + ".json": mappingJSON(syncSubjectNut, "nutcoin", "NUT", "")})
+	var requests atomic.Int32
+	var corrupt atomic.Bool
+	var nonAssetsOnly atomic.Bool
+	nonAssetArchive := tarballOf(t, map[string]string{"registry/aaaa.json": `{"subject":"aaaa","name":{"value":"not an asset"}}`})
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/archive.tar.gz", r.URL.Path)
+		requests.Add(1)
+		if nonAssetsOnly.Load() {
+			_, _ = w.Write(nonAssetArchive)
+			return
+		}
+		if corrupt.Load() {
+			_, _ = w.Write(body[:len(body)/2])
+			return
+		}
+		if r.Header.Get("If-None-Match") == `"upstream"` {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		w.Header().Set("ETag", `"upstream"`)
+		_, _ = w.Write(body)
+	}))
+	t.Cleanup(server.Close)
+	store := newFakeTokenRegistryStore()
+	syncer, err := NewTokenRegistrySync(TokenRegistryConfig{Store: store, SourceURL: server.URL + "/archive.tar.gz", HTTPClient: server.Client(), AllowPrivateAddresses: true})
+	require.NoError(t, err)
+	written, err := syncer.SyncOnce(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, 1, written)
+	require.Equal(t, "nutcoin", store.snapshot()[syncSubjectNut].Name)
+	// A fresh worker must reuse the persisted archive validator.
+	syncer, err = NewTokenRegistrySync(TokenRegistryConfig{Store: store, SourceURL: server.URL + "/archive.tar.gz", HTTPClient: server.Client(), AllowPrivateAddresses: true})
+	require.NoError(t, err)
+	written, err = syncer.SyncOnce(t.Context())
+	require.NoError(t, err)
+	require.Zero(t, written)
+	require.EqualValues(t, 2, requests.Load())
+	require.Len(t, store.snapshot(), 1)
+	corrupt.Store(true)
+	written, err = syncer.SyncOnce(t.Context())
+	require.Error(t, err)
+	require.Zero(t, written)
+	require.Equal(t, "nutcoin", store.snapshot()[syncSubjectNut].Name)
+	require.Equal(t, `"upstream"`, store.state(TokenRegistrySyncStateKey))
+	nonAssetsOnly.Store(true)
+	written, err = syncer.SyncOnce(t.Context())
+	require.NoError(t, err)
+	require.Zero(t, written)
+	require.Equal(t, "nutcoin", store.snapshot()[syncSubjectNut].Name)
+	require.Equal(t, `"upstream"`, store.state(TokenRegistrySyncStateKey))
 }

@@ -73,6 +73,12 @@ const (
 	reasonOther           = "other"
 )
 
+// Result labels for dingo_dmq_peer_dials_total.
+const (
+	dialSuccess = "success"
+	dialFailure = "failure"
+)
+
 // ErrChainStateUnavailable marks a lookup the authenticator's chain-state
 // callbacks could not answer. Admission reports such a failure as other, not
 // invalid: the message may be valid, and invalid is a protocol violation.
@@ -114,6 +120,13 @@ type StackConfig struct {
 	// enforces when it decodes a message.
 	MessageBodyMin int
 	MessageBodyMax int
+	// Topic names the stack's topic. When set, every metric the stack
+	// registers carries it as a topic label, so the stacks of several topics
+	// can share one registry.
+	Topic string
+	// Peers, when set, makes the stack accept and dial node-to-node peers.
+	// Nil serves local clients only.
+	Peers *PeerConfig
 }
 
 // Stack is one DMQ topic instance: its own message pool, connection manager
@@ -130,12 +143,16 @@ type Stack struct {
 	sent     prometheus.Counter
 	conns    prometheus.Gauge
 	peersCnt prometheus.Gauge
+	dials    *prometheus.CounterVec
 
 	// peers are the open node-to-node connections. Once peersClosed is set
 	// no more are admitted, so Stop cannot miss one that is still starting.
+	// peerNet is the listeners and manager, set once started.
 	peerMu      sync.Mutex
 	peers       map[*PeerConn]struct{}
 	peersClosed bool
+	peerNet     *peerNetwork
+	maxPeers    int
 	peerSeq     atomic.Uint64
 	peerTune    peerTuning
 
@@ -169,6 +186,21 @@ func NewStack(cfg StackConfig) (*Stack, error) {
 		logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	}
 	logger = logger.With("component", "dmq")
+	var maxPeers int
+	if cfg.Peers != nil {
+		peers := *cfg.Peers
+		if err := peers.validate(); err != nil {
+			return nil, err
+		}
+		peers.applyDefaults()
+		cfg.Peers = &peers
+		maxPeers = peers.MaxPeers
+	}
+	var labels prometheus.Labels
+	if cfg.Topic != "" {
+		labels = prometheus.Labels{"topic": cfg.Topic}
+		logger = logger.With("topic", cfg.Topic)
+	}
 	if cfg.MaxKESEvolutions == 0 {
 		cfg.MaxKESEvolutions = ocommon.DefaultMaxKESEvolutions
 	}
@@ -186,28 +218,40 @@ func NewStack(cfg StackConfig) (*Stack, error) {
 			Now:          cfg.Now,
 			Capacity:     cfg.MaxMempoolBytes,
 			PromRegistry: cfg.PromRegistry,
+			ConstLabels:  labels,
 		}),
 		// The bus carries only this stack's connection events, so the
 		// Cardano stack's handlers never see a DMQ connection.
 		bus: event.NewEventBus(nil, logger),
 		ttl: ocommon.NewTTLValidator(cfg.MessageTTL, logger),
 		failures: factory.NewCounterVec(prometheus.CounterOpts{
-			Name: "dingo_dmq_validation_failures_total",
-			Help: "DMQ messages refused, by CIP-0137 reject reason",
+			Name:        "dingo_dmq_validation_failures_total",
+			Help:        "DMQ messages refused, by CIP-0137 reject reason",
+			ConstLabels: labels,
 		}, []string{"reason"}),
 		sent: factory.NewCounter(prometheus.CounterOpts{
 			Name: "dingo_dmq_messages_sent_total",
 			Help: "DMQ messages queued for local notification consumers " +
 				"or sent to peers",
+			ConstLabels: labels,
 		}),
 		conns: factory.NewGauge(prometheus.GaugeOpts{
-			Name: "dingo_dmq_connections",
-			Help: "open local DMQ connections",
+			Name:        "dingo_dmq_connections",
+			Help:        "open local DMQ connections",
+			ConstLabels: labels,
 		}),
 		peersCnt: factory.NewGauge(prometheus.GaugeOpts{
-			Name: "dingo_dmq_peers",
-			Help: "open node-to-node DMQ peer connections",
+			Name:        "dingo_dmq_peers",
+			Help:        "open node-to-node DMQ peer connections",
+			ConstLabels: labels,
 		}),
+		dials: factory.NewCounterVec(prometheus.CounterOpts{
+			Name: "dingo_dmq_peer_dials_total",
+			Help: "DMQ peer connection attempts made by the peer manager, " +
+				"by result",
+			ConstLabels: labels,
+		}, []string{"result"}),
+		maxPeers:  maxPeers,
 		peers:     make(map[*PeerConn]struct{}),
 		peerTune:  defaultPeerTuning(),
 		feeders:   make(map[ouroboros.ConnectionId]context.CancelFunc),
@@ -217,6 +261,9 @@ func NewStack(cfg StackConfig) (*Stack, error) {
 		reasonInvalid, reasonAlreadyReceived, reasonExpired, reasonOther,
 	} {
 		s.failures.WithLabelValues(reason)
+	}
+	for _, result := range []string{dialSuccess, dialFailure} {
+		s.dials.WithLabelValues(result)
 	}
 	s.ctx, s.cancel = context.WithCancel(context.Background())
 	s.connMgr = connmanager.NewConnectionManager(
@@ -267,6 +314,14 @@ func (s *Stack) Start(ctx context.Context) error {
 			s.pool.Stop(ctx),
 		)
 	}
+	if err := s.startPeerNetwork(ctx); err != nil {
+		return errors.Join(
+			err,
+			s.connMgr.Stop(ctx),
+			s.shutdownLocal(ctx),
+			s.pool.Stop(ctx),
+		)
+	}
 	return nil
 }
 
@@ -289,8 +344,10 @@ func subscribeInbound(
 // return the first call's result.
 func (s *Stack) Stop(ctx context.Context) error {
 	s.stopOnce.Do(func() {
-		// Peers admit into the pool, so they close before it does.
-		s.stopErr = s.closePeers(ctx)
+		// Nothing may add a peer while the open ones close, and peers admit
+		// into the pool, so they close before it does.
+		s.stopErr = s.stopPeerNetwork(ctx)
+		s.stopErr = errors.Join(s.stopErr, s.closePeers(ctx))
 		s.stopErr = errors.Join(s.stopErr, s.connMgr.Stop(ctx))
 		s.stopErr = errors.Join(s.stopErr, s.shutdownLocal(ctx))
 		if poolErr := s.pool.Stop(ctx); poolErr != nil {
@@ -366,6 +423,21 @@ func (s *Stack) submit(msg *ocommon.DmqMessage) ocommon.RejectReason {
 }
 
 func (s *Stack) admit(msg *ocommon.DmqMessage) ocommon.RejectReason {
+	if reason := s.precheck(msg, s.cfg.CurrentKESPeriod); reason != nil {
+		return reason
+	}
+	if err := s.cfg.Authenticator.VerifyMessage(msg); err != nil {
+		return authReason(err)
+	}
+	return s.addToPool(msg)
+}
+
+// precheck runs every admission check that comes before authentication.
+// kesPeriod resolves the current KES period; nil skips the KES checks.
+func (s *Stack) precheck(
+	msg *ocommon.DmqMessage,
+	kesPeriod func() (uint64, error),
+) ocommon.RejectReason {
 	// A message that breaks CIP-0137's sizes is one dmq-node refuses to
 	// decode, so it is neither kept nor passed on.
 	if err := checkMessageShape(
@@ -376,8 +448,8 @@ func (s *Stack) admit(msg *ocommon.DmqMessage) ocommon.RejectReason {
 	if !msg.IsValidAt(s.cfg.Now()) {
 		return ocommon.ExpiredReason{}
 	}
-	if s.cfg.CurrentKESPeriod != nil {
-		current, err := s.cfg.CurrentKESPeriod()
+	if kesPeriod != nil {
+		current, err := kesPeriod()
 		if err != nil {
 			return ocommon.OtherReason{Message: err.Error()}
 		}
@@ -399,12 +471,20 @@ func (s *Stack) admit(msg *ocommon.DmqMessage) ocommon.RejectReason {
 	if err := s.ttl.ValidateMessageTTLAt(msg, s.cfg.Now()); err != nil {
 		return ocommon.InvalidReason{Message: err.Error()}
 	}
-	if err := s.cfg.Authenticator.VerifyMessage(msg); err != nil {
-		if errors.Is(err, ErrChainStateUnavailable) {
-			return ocommon.OtherReason{Message: err.Error()}
-		}
-		return ocommon.InvalidReason{Message: err.Error()}
+	return nil
+}
+
+// authReason classifies an authentication failure. A node that cannot read
+// the chain state has no grounds to call the message invalid.
+func authReason(err error) ocommon.RejectReason {
+	if errors.Is(err, ErrChainStateUnavailable) {
+		return ocommon.OtherReason{Message: err.Error()}
 	}
+	return ocommon.InvalidReason{Message: err.Error()}
+}
+
+// addToPool admits an authenticated message.
+func (s *Stack) addToPool(msg *ocommon.DmqMessage) ocommon.RejectReason {
 	added, err := s.pool.Add(*msg)
 	switch {
 	case errors.Is(err, ErrExpired):

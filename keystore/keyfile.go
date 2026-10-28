@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/kes"
@@ -46,6 +47,14 @@ type loadedKey struct {
 	OpCertKesPeriod   uint64
 	OpCertSignature   []byte
 	OpCertColdVKey    []byte
+}
+
+// wipeKeyBytes keeps the overwrite alive through the end of the function.
+//
+//go:noinline
+func wipeKeyBytes(data []byte) {
+	clear(data)
+	runtime.KeepAlive(data)
 }
 
 // Cardano key envelopes are small JSON objects containing fixed-size key
@@ -192,6 +201,7 @@ func loadOpCertFromFile(path string) (*loadedKey, error) {
 
 // parseKeyEnvelope parses a cardano-cli format key file.
 func parseKeyEnvelope(fileBytes []byte) (*loadedKey, error) {
+	defer wipeKeyBytes(fileBytes)
 	var env keyFileEnvelope
 	if err := json.Unmarshal(fileBytes, &env); err != nil {
 		return nil, fmt.Errorf("could not parse key file envelope: %w", err)
@@ -201,6 +211,7 @@ func parseKeyEnvelope(fileBytes []byte) (*loadedKey, error) {
 	if err != nil {
 		return nil, fmt.Errorf("could not decode key from hex: %w", err)
 	}
+	defer wipeKeyBytes(cborData)
 
 	lk := &loadedKey{
 		Type:        env.Type,

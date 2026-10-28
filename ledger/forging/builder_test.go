@@ -1744,6 +1744,13 @@ func (c *advancingSlotClock) PrimaryChainTipRelation(
 	return ochainsync.Tip{Point: primary}, depth, ancestor, nil
 }
 
+func (c *advancingSlotClock) PrimaryChainTipRelationAndHeader(
+	point ocommon.Point,
+) (ochainsync.Tip, ochainsync.Tip, uint64, bool, error) {
+	tip, depth, ancestor, err := c.PrimaryChainTipRelation(point)
+	return tip, tip, depth, ancestor, err
+}
+
 func (*advancingSlotClock) UpstreamSyncTip() (ochainsync.Tip, bool) {
 	return ochainsync.Tip{}, false
 }
@@ -4767,6 +4774,7 @@ func TestLeiosSelectionHonorsCancellationAfterLastCandidate(t *testing.T) {
 				leiosCandidateTxs(t, count),
 				validator,
 				leiosSelectionLimits{},
+				leiosSelectionBasis{},
 			)
 			require.ErrorIs(t, err, context.Canceled)
 			require.Equal(t, 1, validator.validateCalls)

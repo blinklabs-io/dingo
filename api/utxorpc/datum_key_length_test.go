@@ -20,7 +20,6 @@ import (
 	"testing"
 
 	connect "connectrpc.com/connect"
-	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/stretchr/testify/require"
 	query "github.com/utxorpc/go-codegen/utxorpc/v1alpha/query"
@@ -31,9 +30,12 @@ type datumLookupStub struct {
 	lookups int
 }
 
-func (s *datumLookupStub) Datum([]byte) (*models.Datum, error) {
-	s.lookups++
-	return nil, database.ErrDatumNotFound
+func (s *datumLookupStub) Datums(
+	_ context.Context,
+	hashes [][]byte,
+) ([]*models.Datum, error) {
+	s.lookups += len(hashes)
+	return make([]*models.Datum, len(hashes)), nil
 }
 
 // TestReadDataRejectsWrongLengthKey covers a datum key that is not a

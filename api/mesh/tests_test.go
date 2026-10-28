@@ -905,6 +905,11 @@ type fakeLedgerState struct {
 		addr lcommon.Address,
 		slot uint64,
 	) ([]models.Utxo, error)
+	balanceAtSlot func(
+		ctx context.Context,
+		addr lcommon.Address,
+		slot uint64,
+	) (models.AddressBalance, error)
 }
 
 func (f *fakeLedgerState) GetCurrentPParams() lcommon.ProtocolParameters {
@@ -978,6 +983,44 @@ func (f *fakeLedgerState) UtxosByAddressAtSlot(
 		return nil, nil
 	}
 	return f.utxosAtSlot(addr, slot)
+}
+
+func (f *fakeLedgerState) UtxoBalanceByAddressAtSlot(
+	ctx context.Context,
+	addr lcommon.Address,
+	slot uint64,
+) (models.AddressBalance, error) {
+	if f.balanceAtSlot != nil {
+		return f.balanceAtSlot(ctx, addr, slot)
+	}
+	if err := ctx.Err(); err != nil {
+		return models.AddressBalance{}, err
+	}
+	utxos, err := f.UtxosByAddressAtSlot(addr, slot)
+	if err != nil {
+		return models.AddressBalance{}, err
+	}
+	var balance models.AddressBalance
+	assetIndexes := make(map[string]int)
+	for i := range utxos {
+		balance.UtxoCount++
+		balance.Lovelace += uint64(utxos[i].Amount)
+		for j := range utxos[i].Assets {
+			asset := &utxos[i].Assets[j]
+			key := string(asset.PolicyId) + string(asset.Name)
+			idx, ok := assetIndexes[key]
+			if !ok {
+				idx = len(balance.Assets)
+				assetIndexes[key] = idx
+				balance.Assets = append(balance.Assets, models.AssetBalance{
+					PolicyId: asset.PolicyId,
+					Name:     asset.Name,
+				})
+			}
+			balance.Assets[idx].Amount += uint64(asset.Amount)
+		}
+	}
+	return balance, nil
 }
 
 // submittedTx records one accepted MeshMempool.AddTransaction call.
@@ -1324,9 +1367,15 @@ func testSignedTx(
 	witnesses []lcommon.VkeyWitness,
 ) []byte {
 	t.Helper()
+	// The vkey witness field is a non-empty set, so an unsigned transaction
+	// omits it rather than encoding null or an empty array.
+	witnessSet := map[int]any{}
+	if len(witnesses) > 0 {
+		witnessSet[0] = witnesses
+	}
 	signed := []any{
 		cbor.RawMessage(bodyCbor),
-		map[int]any{0: witnesses},
+		witnessSet,
 		true,
 		nil,
 	}

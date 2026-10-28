@@ -56,6 +56,14 @@
 // its own, and a Unix socket speaking the DMQ node-to-client handshake under
 // the topic's network magic. Each connection carries both local mini-protocols.
 //
+// # Peers
+//
+// A Stack built with StackConfig.Peers also accepts and dials node-to-node
+// peers: it listens on PeerConfig.ListenAddrs, and a manager dials the peers
+// of PeerConfig.Topology and of the ledger, within MinPeers and MaxPeers, with
+// backoff for a peer that fails. Ledger peers are untrusted and are dialed only
+// through netguard. See PeerConfig.
+//
 // Local message submission validates a message in order -- already expired,
 // the current KES period when one is configured, expiry beyond the configured
 // message TTL, CIP-0137 authentication -- and then admits it to the pool. It
@@ -72,8 +80,10 @@
 // per-peer cursor and returns bodies on request, and the pulling side, which is
 // the connection's initiator, fetches the IDs it lacks and admits them through
 // the same checks a local submission gets, including the size limits CIP-0137
-// fixes. The connection also runs keep-alive on dmq-node's mini-protocol number
-// 12. internal/test/dmqinterop runs it against a real dmq-node.
+// fixes. Each reply is authenticated as one batch at one current slot, and
+// none of it is admitted if any message in it is invalid. The connection also
+// runs keep-alive on dmq-node's mini-protocol number 12.
+// internal/test/dmqinterop runs it against a real dmq-node.
 //
 // Local message notification gives each connection its own cursor over the
 // pool, so every consumer receives each unexpired message once. A feeder

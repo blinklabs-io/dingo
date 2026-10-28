@@ -931,7 +931,7 @@ func TestPeerGovernor_TouchPeerByConnId(t *testing.T) {
 	assert.True(t, peers[0].LastActivity.After(oldActivity))
 }
 
-func TestPeerGovernor_DiversityGroupByConnId(t *testing.T) {
+func TestPeerGovernor_CorroborationIdentityByConnId(t *testing.T) {
 	t.Parallel()
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -954,14 +954,101 @@ func TestPeerGovernor_DiversityGroupByConnId(t *testing.T) {
 	pg.peers[1].Connection = &PeerConnection{Id: second, IsClient: true}
 	pg.mu.Unlock()
 
-	assert.Equal(t, "ipv4:44.0.0.0/24", pg.DiversityGroupByConnId(first))
+	assert.Equal(t, "ipv4:44.0.0.0/24", pg.CorroborationIdentityByConnId(first))
 	assert.Equal(
 		t,
-		pg.DiversityGroupByConnId(first),
-		pg.DiversityGroupByConnId(second),
+		pg.CorroborationIdentityByConnId(first),
+		pg.CorroborationIdentityByConnId(second),
 		"addresses in one /24 are one diversity group",
 	)
-	assert.Empty(t, pg.DiversityGroupByConnId(connFor("45.0.0.1:3001")))
+	assert.Empty(t, pg.CorroborationIdentityByConnId(connFor("45.0.0.1:3001")))
+}
+
+func TestPeerGovernor_CorroborationIdentityIgnoresGroup(t *testing.T) {
+	t.Parallel()
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+	// One valency group holding relays of different operators, as a
+	// topology may list its own node beside public relays.
+	pg.LoadTopologyConfig(&topology.TopologyConfig{
+		LocalRoots: []topology.TopologyConfigP2PLocalRoot{
+			{
+				AccessPoints: []topology.TopologyConfigP2PAccessPoint{
+					{Address: "44.0.0.1", Port: 3001},
+					{Address: "44.0.0.9", Port: 3001},
+					{Address: "45.0.0.1", Port: 3001},
+				},
+				Trustable: true,
+				Valency:   3,
+			},
+		},
+	})
+
+	connFor := func(remote string) ouroboros.ConnectionId {
+		localAddr, _ := net.ResolveTCPAddr("tcp", "127.0.0.1:6000")
+		remoteAddr, _ := net.ResolveTCPAddr("tcp", remote)
+		return ouroboros.ConnectionId{
+			LocalAddr:  localAddr,
+			RemoteAddr: remoteAddr,
+		}
+	}
+	conns := make(map[string]ouroboros.ConnectionId)
+	pg.mu.Lock()
+	require.Len(t, pg.peers, 3)
+	for _, peer := range pg.peers {
+		require.NotEmpty(t, peer.GroupID, "topology peers carry a group")
+		conn := connFor(peer.Address)
+		peer.Connection = &PeerConnection{Id: conn, IsClient: true}
+		conns[peer.Address] = conn
+	}
+	pg.mu.Unlock()
+
+	assert.Equal(
+		t,
+		"ipv4:44.0.0.0/24",
+		pg.CorroborationIdentityByConnId(conns["44.0.0.1:3001"]),
+	)
+	assert.Equal(
+		t,
+		pg.CorroborationIdentityByConnId(conns["44.0.0.1:3001"]),
+		pg.CorroborationIdentityByConnId(conns["44.0.0.9:3001"]),
+		"addresses in one /24 stay one identity inside a group",
+	)
+	assert.NotEqual(
+		t,
+		pg.CorroborationIdentityByConnId(conns["44.0.0.1:3001"]),
+		pg.CorroborationIdentityByConnId(conns["45.0.0.1:3001"]),
+		"a valency group must not merge independent hosts into one identity",
+	)
+}
+
+func TestPeerGovernor_CorroborationIdentityUsesConnectedAddress(t *testing.T) {
+	t.Parallel()
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+	// A hostname root is normalized to the first address DNS returned when
+	// the topology loaded; the live connection can use another one.
+	pg.AddPeer("44.0.0.1:3001", PeerSourceTopologyLocalRoot)
+	localAddr, _ := net.ResolveTCPAddr("tcp", "127.0.0.1:6000")
+	remoteAddr, _ := net.ResolveTCPAddr("tcp", "45.0.0.1:3001")
+	conn := ouroboros.ConnectionId{
+		LocalAddr:  localAddr,
+		RemoteAddr: remoteAddr,
+	}
+	pg.mu.Lock()
+	require.Len(t, pg.peers, 1)
+	require.Equal(t, "44.0.0.1:3001", pg.peers[0].NormalizedAddress)
+	pg.peers[0].Connection = &PeerConnection{Id: conn, IsClient: true}
+	pg.mu.Unlock()
+
+	assert.Equal(
+		t,
+		"ipv4:45.0.0.0/24",
+		pg.CorroborationIdentityByConnId(conn),
+		"identity follows the address the connection uses",
+	)
 }
 
 func TestPeerGovernorAppendChainSelectionEventsLocked(t *testing.T) {
@@ -6817,6 +6904,7 @@ func TestPeerGovernor_ShouldExitBootstrap_SlotThreshold(t *testing.T) {
 		LedgerPeerProvider: mockProvider,
 		UseLedgerAfterSlot: 5000, // Threshold
 	})
+	bootstrapProgress := pg.bootstrapExitProgress()
 
 	// Add a bootstrap peer
 	pg.mu.Lock()
@@ -6832,7 +6920,7 @@ func TestPeerGovernor_ShouldExitBootstrap_SlotThreshold(t *testing.T) {
 		Connection: &PeerConnection{IsClient: true},
 	})
 
-	shouldExit, reason := pg.shouldExitBootstrap()
+	shouldExit, reason := pg.shouldExitBootstrapLocked(bootstrapProgress)
 	pg.mu.Unlock()
 
 	assert.True(t, shouldExit, "should exit bootstrap when slot > threshold")
@@ -6851,6 +6939,7 @@ func TestPeerGovernor_ShouldExitBootstrap_SlotThreshold_NoSuccessor(
 		LedgerPeerProvider: mockProvider,
 		UseLedgerAfterSlot: 5000, // Threshold
 	})
+	bootstrapProgress := pg.bootstrapExitProgress()
 
 	pg.mu.Lock()
 	pg.peers = append(pg.peers, &Peer{
@@ -6860,7 +6949,7 @@ func TestPeerGovernor_ShouldExitBootstrap_SlotThreshold_NoSuccessor(
 		Connection: &PeerConnection{IsClient: true},
 	})
 
-	shouldExit, _ := pg.shouldExitBootstrap()
+	shouldExit, _ := pg.shouldExitBootstrapLocked(bootstrapProgress)
 	pg.mu.Unlock()
 
 	assert.False(
@@ -6882,6 +6971,7 @@ func TestPeerGovernor_ShouldExitBootstrap_SlotThreshold_NotReached(
 		LedgerPeerProvider: mockProvider,
 		UseLedgerAfterSlot: 5000, // Threshold
 	})
+	bootstrapProgress := pg.bootstrapExitProgress()
 
 	// Add a bootstrap peer
 	pg.mu.Lock()
@@ -6891,7 +6981,7 @@ func TestPeerGovernor_ShouldExitBootstrap_SlotThreshold_NotReached(
 		State:   PeerStateWarm,
 	})
 
-	shouldExit, _ := pg.shouldExitBootstrap()
+	shouldExit, _ := pg.shouldExitBootstrapLocked(bootstrapProgress)
 	pg.mu.Unlock()
 
 	assert.False(
@@ -6906,6 +6996,7 @@ func TestPeerGovernor_ShouldExitBootstrap_LedgerPeerCount(t *testing.T) {
 		Logger:                slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		MinLedgerPeersForExit: 3,
 	})
+	bootstrapProgress := pg.bootstrapExitProgress()
 
 	// Add a bootstrap peer
 	pg.mu.Lock()
@@ -6925,7 +7016,7 @@ func TestPeerGovernor_ShouldExitBootstrap_LedgerPeerCount(t *testing.T) {
 		})
 	}
 
-	shouldExit, reason := pg.shouldExitBootstrap()
+	shouldExit, reason := pg.shouldExitBootstrapLocked(bootstrapProgress)
 	pg.mu.Unlock()
 
 	assert.True(
@@ -6943,6 +7034,7 @@ func TestPeerGovernor_ShouldExitBootstrap_LedgerPeerCount_ColdNotCounted(
 		Logger:                slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		MinLedgerPeersForExit: 3,
 	})
+	bootstrapProgress := pg.bootstrapExitProgress()
 
 	// Add a bootstrap peer
 	pg.mu.Lock()
@@ -6961,7 +7053,7 @@ func TestPeerGovernor_ShouldExitBootstrap_LedgerPeerCount_ColdNotCounted(
 		})
 	}
 
-	shouldExit, _ := pg.shouldExitBootstrap()
+	shouldExit, _ := pg.shouldExitBootstrapLocked(bootstrapProgress)
 	pg.mu.Unlock()
 
 	assert.False(
@@ -6978,6 +7070,7 @@ func TestPeerGovernor_ShouldExitBootstrap_LedgerPeerCount_ResponderOnlyWarmNotCo
 		Logger:                slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		MinLedgerPeersForExit: 3,
 	})
+	bootstrapProgress := pg.bootstrapExitProgress()
 
 	pg.mu.Lock()
 	pg.peers = append(pg.peers, &Peer{
@@ -6995,7 +7088,7 @@ func TestPeerGovernor_ShouldExitBootstrap_LedgerPeerCount_ResponderOnlyWarmNotCo
 		})
 	}
 
-	shouldExit, _ := pg.shouldExitBootstrap()
+	shouldExit, _ := pg.shouldExitBootstrapLocked(bootstrapProgress)
 	pg.mu.Unlock()
 
 	assert.False(
@@ -7012,6 +7105,7 @@ func TestPeerGovernor_ShouldExitBootstrap_LedgerPeerCount_ResponderOnlyHotNotCou
 		Logger:                slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		MinLedgerPeersForExit: 3,
 	})
+	bootstrapProgress := pg.bootstrapExitProgress()
 
 	pg.mu.Lock()
 	pg.peers = append(pg.peers, &Peer{
@@ -7029,7 +7123,7 @@ func TestPeerGovernor_ShouldExitBootstrap_LedgerPeerCount_ResponderOnlyHotNotCou
 		})
 	}
 
-	shouldExit, _ := pg.shouldExitBootstrap()
+	shouldExit, _ := pg.shouldExitBootstrapLocked(bootstrapProgress)
 	pg.mu.Unlock()
 
 	assert.False(
@@ -7049,6 +7143,7 @@ func TestPeerGovernor_ShouldExitBootstrap_SyncProgress(t *testing.T) {
 		SyncProgressProvider: mockSync,
 		SyncProgressForExit:  0.95, // 95% threshold
 	})
+	bootstrapProgress := pg.bootstrapExitProgress()
 
 	// Add a bootstrap peer
 	pg.mu.Lock()
@@ -7064,7 +7159,7 @@ func TestPeerGovernor_ShouldExitBootstrap_SyncProgress(t *testing.T) {
 		Connection: &PeerConnection{IsClient: true},
 	})
 
-	shouldExit, reason := pg.shouldExitBootstrap()
+	shouldExit, reason := pg.shouldExitBootstrapLocked(bootstrapProgress)
 	pg.mu.Unlock()
 
 	assert.True(
@@ -7087,6 +7182,7 @@ func TestPeerGovernor_ShouldExitBootstrap_SyncProgress_NoSuccessor(
 		SyncProgressProvider: mockSync,
 		SyncProgressForExit:  0.95,
 	})
+	bootstrapProgress := pg.bootstrapExitProgress()
 
 	pg.mu.Lock()
 	pg.peers = append(pg.peers, &Peer{
@@ -7096,7 +7192,7 @@ func TestPeerGovernor_ShouldExitBootstrap_SyncProgress_NoSuccessor(
 		Connection: &PeerConnection{IsClient: true},
 	})
 
-	shouldExit, _ := pg.shouldExitBootstrap()
+	shouldExit, _ := pg.shouldExitBootstrapLocked(bootstrapProgress)
 	pg.mu.Unlock()
 
 	assert.False(
@@ -7118,6 +7214,7 @@ func TestPeerGovernor_ShouldExitBootstrap_SyncProgress_NotReached(
 		SyncProgressProvider: mockSync,
 		SyncProgressForExit:  0.95, // 95% threshold
 	})
+	bootstrapProgress := pg.bootstrapExitProgress()
 
 	// Add a bootstrap peer
 	pg.mu.Lock()
@@ -7127,7 +7224,7 @@ func TestPeerGovernor_ShouldExitBootstrap_SyncProgress_NotReached(
 		State:   PeerStateWarm,
 	})
 
-	shouldExit, _ := pg.shouldExitBootstrap()
+	shouldExit, _ := pg.shouldExitBootstrapLocked(bootstrapProgress)
 	pg.mu.Unlock()
 
 	assert.False(
@@ -7147,6 +7244,7 @@ func TestPeerGovernor_ShouldExitBootstrap_NoBootstrapPeers(t *testing.T) {
 		SyncProgressProvider: mockSync,
 		SyncProgressForExit:  0.95,
 	})
+	bootstrapProgress := pg.bootstrapExitProgress()
 
 	// No bootstrap peers, only gossip peers
 	pg.mu.Lock()
@@ -7156,7 +7254,7 @@ func TestPeerGovernor_ShouldExitBootstrap_NoBootstrapPeers(t *testing.T) {
 		State:   PeerStateWarm,
 	})
 
-	shouldExit, _ := pg.shouldExitBootstrap()
+	shouldExit, _ := pg.shouldExitBootstrapLocked(bootstrapProgress)
 	pg.mu.Unlock()
 
 	assert.False(
@@ -7176,6 +7274,7 @@ func TestPeerGovernor_ShouldExitBootstrap_AlreadyExited(t *testing.T) {
 		SyncProgressProvider: mockSync,
 		SyncProgressForExit:  0.95,
 	})
+	bootstrapProgress := pg.bootstrapExitProgress()
 
 	// Add bootstrap peer and mark as already exited
 	pg.mu.Lock()
@@ -7186,7 +7285,7 @@ func TestPeerGovernor_ShouldExitBootstrap_AlreadyExited(t *testing.T) {
 	})
 	pg.bootstrapExited = true
 
-	shouldExit, _ := pg.shouldExitBootstrap()
+	shouldExit, _ := pg.shouldExitBootstrapLocked(bootstrapProgress)
 	pg.mu.Unlock()
 
 	assert.False(t, shouldExit, "should not exit bootstrap when already exited")

@@ -38,6 +38,17 @@ func (d *Database) NewBatchAccumulator() BatchAccumulator {
 	return d.transactionStore().NewBatchAccumulator()
 }
 
+// NewLeiosClosureBatchAccumulator creates an API-detail accumulator when the
+// metadata provider supports ordered closure application; nil selects the
+// existing immediate path.
+func (d *Database) NewLeiosClosureBatchAccumulator() BatchAccumulator {
+	store, ok := d.transactionStore().(metadata.LeiosClosureBatcher)
+	if !ok {
+		return nil
+	}
+	return store.NewLeiosClosureBatchAccumulator()
+}
+
 // FlushBatch writes accumulated metadata rows for the active metadata plugin.
 func (d *Database) FlushBatch(
 	acc BatchAccumulator,
@@ -80,6 +91,25 @@ func (d *Database) EnableBatchUtxoOverlay(
 	return overlay.EnableBatchUtxoOverlay(
 		acc, metadataTxn, inputs, deleteOnSpend,
 	)
+}
+
+// WithBatchUtxoOverlayError joins err with the error acc's batch UTxO overlay
+// recorded. A read barrier inside QueryRowContext cannot return its error, so
+// the statement and those after it run against tables the barrier failed to
+// write, and the failure a caller then reports does not name the overlay. A
+// caller that answers an overlay conflict with a per-row retry passes the
+// errors of everything it ran under the overlay through this. err is
+// returned unchanged when it is nil or acc records nothing.
+func WithBatchUtxoOverlayError(acc BatchAccumulator, err error) error {
+	recorder, ok := acc.(interface{ BatchUtxoOverlayError() error })
+	if err == nil || !ok {
+		return err
+	}
+	overlayErr := recorder.BatchUtxoOverlayError()
+	if overlayErr == nil || errors.Is(err, overlayErr) {
+		return err
+	}
+	return errors.Join(overlayErr, err)
 }
 
 // BatchedTxIngestOpts toggles optional behaviors of SetTransactionBatched.
@@ -251,8 +281,13 @@ func (d *Database) SetTransactionBatchedWithOpts(
 	txn *Txn,
 	opts BatchedTxIngestOpts,
 ) (retErr error) {
-	if opts.LedgerContextSlot != nil {
+	closureAcc, markedClosure := acc.(metadata.LeiosClosureAccumulator)
+	closureBatch := markedClosure && closureAcc.LeiosClosureRowsOnly()
+	if opts.LedgerContextSlot != nil && !closureBatch {
 		return errors.New("prototype closure context requires unbatched ingestion")
+	}
+	if closureBatch && !opts.SkipConsumedInputRecovery {
+		return errors.New("closure accumulator requires closure input semantics")
 	}
 	if acc == nil {
 		return errors.New("batch accumulator must not be nil")
@@ -383,7 +418,16 @@ func (d *Database) SetTransactionBatchedWithOpts(
 		setter.SetBackfillStats(opts.Stats)
 	}
 	var metadataErr error
-	if store, ok := d.transactionStore().(transactionStoreHistoricalBackfill); ok {
+	if closureBatch {
+		store, ok := d.transactionStore().(metadata.LeiosClosureBatcher)
+		if !ok {
+			return errors.New("metadata provider does not support closure batching")
+		}
+		metadataErr = store.SetTransactionLeiosClosureBatched(
+			tx, point, idx, certDeposits, opts.SkipWithdrawalWitnessWrite,
+			opts.LedgerContextSlot, acc, metadataTxn, opts.ProtocolMajor,
+		)
+	} else if store, ok := d.transactionStore().(transactionStoreHistoricalBackfill); ok {
 		metadataErr = store.SetTransactionBatchedHistorical(
 			tx, point, idx, certDeposits,
 			opts.SkipWithdrawalWitnessWrite,

@@ -24,11 +24,12 @@ import (
 )
 
 // checkPermissions rejects a value file that users other than its owner and
-// group can access. A signing key must be owner-only, but a value file is
-// commonly delivered by an orchestrator that grants its group read access, such
-// as a Kubernetes secret volume with mode 0440 and an fsGroup; the group is the
-// boundary that delivery chose, while other access reaches every local user.
-func checkPermissions(f *os.File) error {
+// group can access, then applies the platform's path ownership checks. A
+// signing key must be owner-only, but a value file is commonly delivered by an
+// orchestrator that grants its group read access, such as a Kubernetes secret
+// volume with mode 0440 and an fsGroup; the group is the boundary that delivery
+// chose, while other access reaches every local user.
+func checkPermissions(path string, f *os.File) error {
 	fi, err := f.Stat()
 	if err != nil {
 		return fmt.Errorf("stat value file %s: %w", f.Name(), err)
@@ -41,5 +42,5 @@ func checkPermissions(f *os.File) error {
 			keystore.ErrInsecureFileMode,
 		)
 	}
-	return nil
+	return checkTrustedPath(path, fi)
 }

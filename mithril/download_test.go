@@ -1932,3 +1932,287 @@ func TestValidRelPath(t *testing.T) {
 		})
 	}
 }
+
+// TestDownloadSnapshotRangeNotSatisfiableMismatchDiscardsPartial pins that a
+// 416 whose total disagrees with the partial removes the partial. Keeping it
+// would make every later attempt, mirror, and restart resume the same prefix
+// and fail on the same 416.
+func TestDownloadSnapshotRangeNotSatisfiableMismatchDiscardsPartial(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "archive")
+	require.NoError(t, os.WriteFile(dest, []byte("ab"), 0o600))
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusRequestedRangeNotSatisfiable,
+			Body:       io.NopCloser(bytes.NewReader(nil)),
+			Header:     http.Header{"Content-Range": {"bytes */3"}},
+		}, nil
+	})}
+	path, err := DownloadSnapshot(context.Background(), DownloadConfig{
+		URL: "https://example.test/archive", AllowInsecureHTTP: true,
+		DestDir: dir, Filename: "archive", HTTPClient: client,
+		MaxTransientRetries: -1,
+	})
+	require.ErrorContains(t, err, "existing file size mismatch")
+	require.Empty(t, path)
+	require.NoFileExists(t, dest)
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	require.Empty(t, entries, "staging files must not be left behind")
+}
+
+// TestDownloadSnapshotFreeSpaceFailureDiscardsPartials pins that a download
+// stopped by the free-space reserve leaves neither its staging file nor the
+// owned partial it resumed from, so disk pressure does not persist.
+func TestDownloadSnapshotFreeSpaceFailureDiscardsPartials(t *testing.T) {
+	t.Parallel()
+	for _, prefix := range []string{"", "a"} {
+		t.Run(fmt.Sprintf("prefix=%q", prefix), func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			if prefix != "" {
+				require.NoError(t, os.WriteFile(filepath.Join(dir, "archive"), []byte(prefix), 0o600))
+			}
+			client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode:    http.StatusOK,
+					Body:          io.NopCloser(bytes.NewReader([]byte("abc"))),
+					ContentLength: -1,
+					Header:        make(http.Header),
+				}, nil
+			})}
+			_, err := DownloadSnapshot(context.Background(), DownloadConfig{
+				URL: "https://example.test/archive", AllowInsecureHTTP: true,
+				DestDir: dir, Filename: "archive", HTTPClient: client,
+				MaxTransientRetries: -1,
+				spaceBudget: &downloadSpaceBudget{
+					freeSpaceReserve: math.MaxUint64 / 2,
+					filesystemPath:   dir,
+				},
+			})
+			require.ErrorIs(t, err, errDownloadFreeSpace)
+			entries, err := os.ReadDir(dir)
+			require.NoError(t, err)
+			require.Empty(t, entries)
+		})
+	}
+}
+
+// rangeServingClient serves body, honoring an open-ended Range request with a
+// 206, and records every Range header it receives.
+func rangeServingClient(body []byte, ranges *[]string) *http.Client {
+	return &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		rng := req.Header.Get("Range")
+		*ranges = append(*ranges, rng)
+		var start int
+		if _, err := fmt.Sscanf(rng, "bytes=%d-", &start); err == nil &&
+			start > 0 && start < len(body) {
+			return &http.Response{
+				StatusCode:    http.StatusPartialContent,
+				Body:          io.NopCloser(bytes.NewReader(body[start:])),
+				ContentLength: int64(len(body) - start),
+				Header: http.Header{"Content-Range": {fmt.Sprintf(
+					"bytes %d-%d/%d", start, len(body)-1, len(body),
+				)}},
+			}, nil
+		}
+		return &http.Response{
+			StatusCode:    http.StatusOK,
+			Body:          io.NopCloser(bytes.NewReader(body)),
+			ContentLength: int64(len(body)),
+			Header:        make(http.Header),
+		}, nil
+	})}
+}
+
+// TestDownloadSnapshotDoesNotResumeFromHardLink pins that a destination with
+// more than one link is never used as a resume prefix: a hard link would let
+// another file's contents become the head of the published artifact. The
+// download restarts from zero, and publishing replaces only the link.
+func TestDownloadSnapshotDoesNotResumeFromHardLink(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	other := filepath.Join(dir, "other")
+	require.NoError(t, os.WriteFile(other, []byte("xy"), 0o600))
+	if err := os.Link(other, filepath.Join(dir, "archive")); err != nil {
+		t.Skipf("hard links unavailable: %v", err)
+	}
+	var ranges []string
+	path, err := DownloadSnapshot(context.Background(), DownloadConfig{
+		URL: "https://example.test/archive", AllowInsecureHTTP: true,
+		DestDir: dir, Filename: "archive",
+		HTTPClient:          rangeServingClient([]byte("abc"), &ranges),
+		MaxTransientRetries: -1,
+	})
+	require.NoError(t, err)
+	require.Equal(t, []string{""}, ranges, "a hard-linked partial must not be resumed")
+	got, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, "abc", string(got))
+	got, err = os.ReadFile(other)
+	require.NoError(t, err)
+	require.Equal(t, "xy", string(got), "the other link must be left untouched")
+}
+
+// enospcWriter fails the failOn-th write (1-based) counted across every
+// writer sharing writes, with the error os.File returns on a full filesystem.
+type enospcWriter struct {
+	w      io.Writer
+	writes *int
+	failOn int
+}
+
+func (e *enospcWriter) Write(p []byte) (int, error) {
+	*e.writes++
+	if *e.writes == e.failOn {
+		return 0, &os.PathError{Op: "write", Path: "staging", Err: syscall.ENOSPC}
+	}
+	return e.w.Write(p)
+}
+
+// TestDownloadSnapshotENOSPCDiscardsPartials pins that a filesystem ENOSPC,
+// while copying the resume prefix or while writing the response body, leaves
+// neither the staging file nor the owned partial behind.
+func TestDownloadSnapshotENOSPCDiscardsPartials(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		failOn int
+		ranges []string
+	}{
+		{name: "copying resume prefix", failOn: 1},
+		{name: "writing response body", failOn: 2, ranges: []string{"bytes=1-"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			require.NoError(t, os.WriteFile(filepath.Join(dir, "archive"), []byte("a"), 0o600))
+			var ranges []string
+			writes := 0
+			_, err := DownloadSnapshot(context.Background(), DownloadConfig{
+				URL: "https://example.test/archive", AllowInsecureHTTP: true,
+				DestDir: dir, Filename: "archive",
+				HTTPClient:          rangeServingClient([]byte("abc"), &ranges),
+				MaxTransientRetries: -1,
+				wrapStagingFile: func(w io.Writer) io.Writer {
+					return &enospcWriter{w: w, writes: &writes, failOn: tc.failOn}
+				},
+			})
+			require.ErrorIs(t, err, syscall.ENOSPC)
+			require.Equal(t, tc.failOn, writes)
+			require.Equal(t, tc.ranges, ranges)
+			entries, err := os.ReadDir(dir)
+			require.NoError(t, err)
+			require.Empty(t, entries)
+		})
+	}
+}
+
+// TestDownloadSnapshotRechecksOpenedPartial pins that the resume policy is
+// applied to the file actually opened, not only to what Lstat saw: a hard
+// link or a size change landing between the two must not let the partial be
+// resumed, because the opened file is no longer the singly linked prefix the
+// inspection approved.
+func TestDownloadSnapshotRechecksOpenedPartial(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		change func(t *testing.T, dir string)
+	}{
+		{name: "hard link added", change: func(t *testing.T, dir string) {
+			if err := os.Link(
+				filepath.Join(dir, "archive"), filepath.Join(dir, "other"),
+			); err != nil {
+				t.Skipf("hard links unavailable: %v", err)
+			}
+		}},
+		{name: "partial grew", change: func(t *testing.T, dir string) {
+			f, err := os.OpenFile(
+				filepath.Join(dir, "archive"), os.O_APPEND|os.O_WRONLY, 0,
+			)
+			require.NoError(t, err)
+			_, err = f.Write([]byte("z"))
+			require.NoError(t, err)
+			require.NoError(t, f.Close())
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			require.NoError(t, os.WriteFile(filepath.Join(dir, "archive"), []byte("x"), 0o600))
+			var ranges []string
+			path, err := DownloadSnapshot(context.Background(), DownloadConfig{
+				URL: "https://example.test/archive", AllowInsecureHTTP: true,
+				DestDir: dir, Filename: "archive",
+				HTTPClient:          rangeServingClient([]byte("abc"), &ranges),
+				MaxTransientRetries: -1,
+				afterPartialInspect: func() { tc.change(t, dir) },
+			})
+			require.NoError(t, err)
+			require.Equal(t, []string{""}, ranges, "the changed partial must not be resumed")
+			got, err := os.ReadFile(path)
+			require.NoError(t, err)
+			require.Equal(t, "abc", string(got))
+		})
+	}
+}
+
+// TestDownloadSnapshotRemovesStaleStagingFiles pins that staging files left
+// by a crashed process are swept before the download starts, while a recent
+// one (which may belong to a live transfer) and unrelated entries stay.
+func TestDownloadSnapshotRemovesStaleStagingFiles(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("staging ownership cannot be established on windows")
+	}
+	dir := t.TempDir()
+	old := time.Now().Add(-time.Hour)
+	for name, aged := range map[string]bool{
+		"archive.partial-old":   true,
+		"archive.partial-fresh": false,
+		"other.partial-old":     true,
+	} {
+		p := filepath.Join(dir, name)
+		require.NoError(t, os.WriteFile(p, []byte("x"), 0o600))
+		if aged {
+			require.NoError(t, os.Chtimes(p, old, old))
+		}
+	}
+	var ranges []string
+	_, err := DownloadSnapshot(context.Background(), DownloadConfig{
+		URL: "https://example.test/archive", AllowInsecureHTTP: true,
+		DestDir: dir, Filename: "archive",
+		HTTPClient:          rangeServingClient([]byte("abc"), &ranges),
+		MaxTransientRetries: -1,
+	})
+	require.NoError(t, err)
+	require.NoFileExists(t, filepath.Join(dir, "archive.partial-old"))
+	require.FileExists(t, filepath.Join(dir, "archive.partial-fresh"))
+	require.FileExists(t, filepath.Join(dir, "other.partial-old"))
+}
+
+// TestDownloadSnapshotKeepsStagingWhenIdleDetectionDisabled pins that no
+// staging file is swept when idle detection is disabled: a live transfer may
+// then go unwritten indefinitely, so no age proves a file abandoned.
+func TestDownloadSnapshotKeepsStagingWhenIdleDetectionDisabled(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("staging ownership cannot be established on windows")
+	}
+	dir := t.TempDir()
+	p := filepath.Join(dir, "archive.partial-stalled")
+	require.NoError(t, os.WriteFile(p, []byte("x"), 0o600))
+	old := time.Now().Add(-24 * time.Hour)
+	require.NoError(t, os.Chtimes(p, old, old))
+	var ranges []string
+	_, err := DownloadSnapshot(context.Background(), DownloadConfig{
+		URL: "https://example.test/archive", AllowInsecureHTTP: true,
+		DestDir: dir, Filename: "archive",
+		HTTPClient:          rangeServingClient([]byte("abc"), &ranges),
+		IdleTimeout:         -1,
+		MaxTransientRetries: -1,
+	})
+	require.NoError(t, err)
+	require.FileExists(t, p)
+}

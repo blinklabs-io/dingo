@@ -97,8 +97,10 @@ A `_FILE` suffix sets the field to the contents of a file instead, so a secret
 such as a password need not appear in the environment. The contents are used
 as a plain string, never parsed as YAML, with trailing line endings removed.
 The file must be a regular file of at most 64 KiB whose contents are not
-blank, and on Unix other users must have no access to it (owner and group
-access is allowed); anything else fails configuration loading:
+blank. On Unix the file and non-sticky path entries must be owned by the Dingo
+user or root, directories must deny group and other writes unless they use the
+sticky bit, and other users must have no file access (owner and group access is
+allowed). Anything else fails configuration loading:
 
 ```text
 DINGO_PLUGINS_STORAGE_METADATA_CONFIG_PASSWORD_FILE=/run/secrets/db-password

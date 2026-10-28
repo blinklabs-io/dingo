@@ -36,7 +36,7 @@ func preverifyTestTransaction(t *testing.T, fee uint64) lcommon.Transaction {
 }
 
 func preverifyTestTransactionWithWitness(
-	t *testing.T,
+	t testing.TB,
 	fee uint64,
 	seedByte byte,
 ) *conway.ConwayTransaction {
@@ -120,4 +120,26 @@ func TestPreverifyTransactionSignaturesEmptyInput(t *testing.T) {
 	require.Nil(t, preverifyTransactionSignatures(nil))
 	ctx := context.Background()
 	require.Equal(t, ctx, withPreverifiedSignatures(ctx, nil))
+}
+
+func BenchmarkEndorserBlockSignaturePreverification(b *testing.B) {
+	const txCount = 1035
+	txs := make([]lcommon.Transaction, txCount)
+	for i := range txs {
+		txs[i] = preverifyTestTransactionWithWitness(b, uint64(i+1), byte(i))
+	}
+	b.Run("serial", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			for _, tx := range txs {
+				_ = lcommon.PreverifySignatures(tx)
+			}
+		}
+	})
+	b.Run("bounded_workers", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			_ = preverifyTransactionSignatures(txs)
+		}
+	})
 }

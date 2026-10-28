@@ -28,27 +28,66 @@ func (p *PeerGovernor) PreferPeerSnapshot() {
 	p.publishPendingEvents(events)
 }
 
-// shouldExitBootstrap checks if conditions are met to exit bootstrap mode.
+type bootstrapExitProgress struct {
+	currentSlot  uint64
+	syncProgress float64
+}
+
+// bootstrapExitProgress reads node state. It must be called without p.mu
+// held: the providers may take chainsync locks, and the chainsync root
+// admission callback takes p.mu while holding the chainsync client lock.
+func (p *PeerGovernor) bootstrapExitProgress() bootstrapExitProgress {
+	var progress bootstrapExitProgress
+	if p.config.UseLedgerAfterSlot > 0 && p.config.LedgerPeerProvider != nil {
+		progress.currentSlot = p.config.LedgerPeerProvider.CurrentSlot()
+	}
+	if p.config.SyncProgressForExit > 0 &&
+		p.config.SyncProgressProvider != nil {
+		progress.syncProgress = p.config.SyncProgressProvider.SyncProgress()
+	}
+	return progress
+}
+
+// bootstrapExitProgressWantedLocked reports whether a bootstrap exit is still
+// possible and a progress provider is configured, so the caller knows whether
+// reading progress is worthwhile. Must be called with p.mu held.
+func (p *PeerGovernor) bootstrapExitProgressWantedLocked() bool {
+	if p.bootstrapExited || !p.hasBootstrapPeersLocked() {
+		return false
+	}
+	return (p.config.UseLedgerAfterSlot > 0 &&
+		p.config.LedgerPeerProvider != nil) ||
+		(p.config.SyncProgressForExit > 0 &&
+			p.config.SyncProgressProvider != nil)
+}
+
+// hasBootstrapPeersLocked reports whether any topology bootstrap peer is
+// tracked. Must be called with p.mu held.
+func (p *PeerGovernor) hasBootstrapPeersLocked() bool {
+	for _, peer := range p.peers {
+		if peer != nil && peer.Source == PeerSourceTopologyBootstrapPeer {
+			return true
+		}
+	}
+	return false
+}
+
+// shouldExitBootstrapLocked checks if conditions are met to exit bootstrap mode.
 // Returns true if any of these conditions are met:
 // 1. Ledger peer count >= MinLedgerPeersForExit
 // 2. Current slot > UseLedgerAfterSlot and a non-bootstrap successor exists
 // 3. Sync progress >= SyncProgressForExit and a non-bootstrap successor exists
 // Must be called with p.mu held.
-func (p *PeerGovernor) shouldExitBootstrap() (bool, string) {
+func (p *PeerGovernor) shouldExitBootstrapLocked(
+	progress bootstrapExitProgress,
+) (bool, string) {
 	// Already exited
 	if p.bootstrapExited {
 		return false, ""
 	}
 
 	// Check if we have any bootstrap peers to exit
-	hasBootstrapPeers := false
-	for _, peer := range p.peers {
-		if peer != nil && peer.Source == PeerSourceTopologyBootstrapPeer {
-			hasBootstrapPeers = true
-			break
-		}
-	}
-	if !hasBootstrapPeers {
+	if !p.hasBootstrapPeersLocked() {
 		return false, ""
 	}
 
@@ -78,10 +117,9 @@ func (p *PeerGovernor) shouldExitBootstrap() (bool, string) {
 	// bootstrap source until some non-bootstrap client-capable peer can
 	// carry ChainSync/BlockFetch forward.
 	if p.config.UseLedgerAfterSlot > 0 && p.config.LedgerPeerProvider != nil {
-		currentSlot := p.config.LedgerPeerProvider.CurrentSlot()
 		// Safe conversion: UseLedgerAfterSlot is already checked to be > 0
 		useLedgerAfterSlot := uint64(p.config.UseLedgerAfterSlot) // #nosec G115
-		if currentSlot > useLedgerAfterSlot {
+		if progress.currentSlot > useLedgerAfterSlot {
 			if successorCount > 0 {
 				return true, "slot threshold reached"
 			}
@@ -99,19 +137,18 @@ func (p *PeerGovernor) shouldExitBootstrap() (bool, string) {
 	// available so bootstrap exit cannot strand chain sync.
 	if p.config.SyncProgressForExit > 0 &&
 		p.config.SyncProgressProvider != nil {
-		syncProgress := p.config.SyncProgressProvider.SyncProgress()
-		if syncProgress >= p.config.SyncProgressForExit {
+		if progress.syncProgress >= p.config.SyncProgressForExit {
 			if successorCount > 0 {
 				return true, fmt.Sprintf(
 					"sync progress (%.2f%%) >= threshold (%.2f%%)",
-					syncProgress*100,
+					progress.syncProgress*100,
 					p.config.SyncProgressForExit*100,
 				)
 			}
 			p.config.Logger.Debug(
 				"bootstrap exit delayed: no non-bootstrap successor peers",
 				"reason", "sync progress threshold reached",
-				"sync_progress", syncProgress,
+				"sync_progress", progress.syncProgress,
 				"sync_progress_threshold", p.config.SyncProgressForExit,
 				"successor_count", successorCount,
 			)

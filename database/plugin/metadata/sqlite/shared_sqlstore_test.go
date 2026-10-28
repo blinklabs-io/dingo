@@ -5099,12 +5099,6 @@ func TestSharedSQLStoreUtxoReadParity(t *testing.T) {
 		nil,
 	)
 	require.NoError(t, err)
-	_, err = store.GetUtxosByAddressAtSlot(
-		pattern,
-		15,
-		nil,
-	)
-	require.NoError(t, err)
 	gotControlled, err := store.GetControlledAmountByCredential(
 		1,
 		stakingKey,
@@ -5170,4 +5164,70 @@ func TestGetUtxosByAddressEmptyPatterns(t *testing.T) {
 	got, err := store.GetUtxosByAddress(nil, 100, nil)
 	require.NoError(t, err)
 	require.Nil(t, got)
+}
+
+// TestSharedSQLStorePoolRetirementAndDepositAtSlot reads a pool's pending
+// retirement and held deposit as of a slot: a retirement announced later is
+// not reported, and a later registration neither cancels an earlier
+// retirement nor replaces the deposit held until it is added.
+func TestSharedSQLStorePoolRetirementAndDepositAtSlot(t *testing.T) {
+	t.Parallel()
+	store, _ := newSharedSQLStore(t)
+
+	poolBytes := bytes.Repeat([]byte{0xA1}, 28)
+	poolKeyHash := lcommon.PoolKeyHash(lcommon.NewBlake2b224(poolBytes))
+	vrf := bytes.Repeat([]byte{0xA2}, 32)
+	register := func(slot, deposit uint64) {
+		t.Helper()
+		require.NoError(t, store.ImportPool(
+			&models.Pool{PoolKeyHash: poolBytes, VrfKeyHash: vrf},
+			&models.PoolRegistration{
+				PoolKeyHash:   poolBytes,
+				VrfKeyHash:    vrf,
+				AddedSlot:     slot,
+				DepositAmount: types.Uint64(deposit),
+			},
+			nil,
+		))
+	}
+	register(10, 100)
+	require.NoError(t, store.RetirePools(nil, [][]byte{poolBytes}, 5, 30))
+	register(40, 200)
+
+	retiring := func(slot uint64) []models.PoolRetiringRow {
+		t.Helper()
+		rows, err := store.GetRetiringPoolsAtSlot(2, slot, nil)
+		require.NoError(t, err)
+		return rows
+	}
+	require.Empty(t, retiring(20), "retirement announced at slot 30")
+	require.Equal(
+		t,
+		[]models.PoolRetiringRow{{PoolKeyHash: poolBytes, Epoch: 5}},
+		retiring(35),
+	)
+	require.Empty(t, retiring(40), "the registration at slot 40 cancels it")
+	live, err := store.GetRetiringPools(2, nil)
+	require.NoError(t, err)
+	require.Empty(t, live)
+
+	deposit := func(slot uint64) map[string]uint64 {
+		t.Helper()
+		held, err := store.GetPoolDepositsHeldAtSlot(
+			[]lcommon.PoolKeyHash{poolKeyHash},
+			slot,
+			nil,
+		)
+		require.NoError(t, err)
+		return held
+	}
+	require.Empty(t, deposit(5), "not registered yet")
+	require.Equal(t, map[string]uint64{string(poolBytes): 100}, deposit(35))
+	require.Equal(t, map[string]uint64{string(poolBytes): 200}, deposit(45))
+	latest, err := store.GetPoolDepositsHeld(
+		[]lcommon.PoolKeyHash{poolKeyHash},
+		nil,
+	)
+	require.NoError(t, err)
+	require.Equal(t, map[string]uint64{string(poolBytes): 200}, latest)
 }

@@ -579,16 +579,10 @@ var flagSpecs = []flagSpec{
 		"Koios reference cache.db path (default: {data-dir}/.koios/cache.db)",
 	),
 	stringFlag(
-		"KoiosParity.APIKey",
-		"koios-parity-api-key",
-		"",
-		"Koios Bearer token for rate-limited access",
-	),
-	stringFlag(
 		"KoiosParity.APIKeyFile",
 		"koios-parity-api-key-file",
 		"",
-		"file holding the Koios Bearer token (alternative to --koios-parity-api-key)",
+		"file holding the Koios Bearer token",
 	),
 	stringFlag(
 		"KoiosParity.BaseURL",
@@ -938,7 +932,7 @@ var flagSpecs = []flagSpec{
 	uint64Flag(
 		"ForgeUpstreamStalenessSlots",
 		"forge-upstream-staleness-slots",
-		"max slots the newest block this node holds may trail the corroborated upstream target before skipping block forging",
+		"max slots the newest locally authenticated frontier may trail the policy-approved upstream target before skipping block forging",
 	),
 	uint64Flag(
 		"ForgeAppliedTipStalenessSlots",

@@ -1119,17 +1119,29 @@ func (p *PeerGovernor) TouchPeerByConnId(connId ouroboros.ConnectionId) {
 	}
 }
 
-// DiversityGroupByConnId returns the diversity group of the peer holding
-// connId, or "" when no tracked peer holds it.
-func (p *PeerGovernor) DiversityGroupByConnId(
+// CorroborationIdentityByConnId returns the independence group of the peer
+// holding connId for Genesis corroboration, or "" when no tracked peer holds
+// it. It is the address group (/24, /64 or hostname) of the address the
+// connection uses, never the topology GroupID: a valency group is a
+// connection target and can list several operators' relays, so treating it
+// as one identity would stop roots in one group from corroborating each
+// other, and would give a relay listed as a root a different identity from
+// the same relay found through the ledger. The peer's normalized address is
+// only a fallback, because for a hostname it is the first address DNS
+// returned when the peer was added, which a later dial need not use.
+func (p *PeerGovernor) CorroborationIdentityByConnId(
 	connId ouroboros.ConnectionId,
 ) string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if peerIdx := p.peerIndexByConnId(connId); peerIdx != -1 {
-		return p.peerDiversityGroup(p.peers[peerIdx])
+	peerIdx := p.peerIndexByConnId(connId)
+	if peerIdx == -1 {
+		return ""
 	}
-	return ""
+	if connId.RemoteAddr != nil {
+		return addressGroup(connId.RemoteAddr.String())
+	}
+	return peerAddressGroup(p.peers[peerIdx])
 }
 
 func (p *PeerGovernor) IsChainSelectionEligible(

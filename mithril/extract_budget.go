@@ -29,6 +29,8 @@ const (
 	freeSpaceCheckInterval     = 64 << 20
 )
 
+var errDownloadFreeSpace = errors.New("mithril download free-space reserve reached")
+
 type bootstrapExtractionBudget struct {
 	mu             sync.Mutex
 	maxBytes       int64
@@ -44,37 +46,123 @@ type bootstrapExtractionBudget struct {
 	filesystemPath   string
 }
 
-func newBootstrapExtractionBudget(
-	downloadDir string,
-) (*bootstrapExtractionBudget, error) {
-	filesystemPath := filepath.Clean(downloadDir)
+type downloadSpaceBudget struct {
+	mu               sync.Mutex
+	bytesUntilCheck  int64
+	freeSpaceReserve uint64
+	filesystemPath   string
+}
+
+func freeSpacePolicy(path, purpose string) (string, uint64, uint64, error) {
+	filesystemPath := filepath.Clean(path)
 	for {
 		info, err := os.Stat(filesystemPath)
 		if err == nil {
 			if !info.IsDir() {
-				return nil, fmt.Errorf(
-					"checking Mithril extraction path: %s is not a directory",
+				return "", 0, 0, fmt.Errorf(
+					"checking Mithril %s path: %s is not a directory",
+					purpose,
 					filesystemPath,
 				)
 			}
 			break
 		}
 		if !errors.Is(err, os.ErrNotExist) {
-			return nil, fmt.Errorf("checking Mithril extraction path: %w", err)
+			return "", 0, 0, fmt.Errorf("checking Mithril %s path: %w", purpose, err)
 		}
 		parent := filepath.Dir(filesystemPath)
 		if parent == filesystemPath {
-			return nil, fmt.Errorf("checking Mithril extraction path: %w", err)
+			return "", 0, 0, fmt.Errorf("checking Mithril %s path: %w", purpose, err)
 		}
 		filesystemPath = parent
 	}
 	available, err := availableDiskBytes(filesystemPath)
 	if err != nil {
-		return nil, fmt.Errorf("checking Mithril extraction free space: %w", err)
+		return "", 0, 0, fmt.Errorf(
+			"checking Mithril %s free space: %w", purpose, err,
+		)
 	}
 	reserve := max(uint64(minimumFreeSpaceReserve), available/10)
 	if available <= reserve {
-		return nil, errors.New("insufficient free space for Mithril extraction")
+		return "", 0, 0, fmt.Errorf(
+			"insufficient free space for Mithril %s", purpose,
+		)
+	}
+	return filesystemPath, available, reserve, nil
+}
+
+func newDownloadSpaceBudget(path string) (*downloadSpaceBudget, error) {
+	filesystemPath, available, reserve, err := freeSpacePolicy(path, "download")
+	if err != nil {
+		return nil, err
+	}
+	if available-reserve < freeSpaceCheckInterval {
+		return nil, errors.New("insufficient free space for Mithril download")
+	}
+	return &downloadSpaceBudget{
+		freeSpaceReserve: reserve,
+		filesystemPath:   filesystemPath,
+	}, nil
+}
+
+func (b *downloadSpaceBudget) reserveWrite(size int) error {
+	if b == nil || size == 0 {
+		return nil
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if size < 0 {
+		return errors.New("invalid Mithril download write size")
+	}
+	if int64(size) <= b.bytesUntilCheck {
+		b.bytesUntilCheck -= int64(size)
+		return nil
+	}
+	available, err := availableDiskBytes(b.filesystemPath)
+	if err != nil {
+		return fmt.Errorf("checking Mithril download free space: %w", err)
+	}
+	needed := b.freeSpaceReserve + freeSpaceCheckInterval
+	if needed < b.freeSpaceReserve || available < needed {
+		return errDownloadFreeSpace
+	}
+	b.bytesUntilCheck = max(freeSpaceCheckInterval-int64(size), 0)
+	return nil
+}
+
+func (b *downloadSpaceBudget) invalidate() {
+	if b == nil {
+		return
+	}
+	b.mu.Lock()
+	b.bytesUntilCheck = 0
+	b.mu.Unlock()
+}
+
+type downloadSpaceWriter struct {
+	writer io.Writer
+	budget *downloadSpaceBudget
+}
+
+func (w *downloadSpaceWriter) Write(p []byte) (int, error) {
+	if err := w.budget.reserveWrite(len(p)); err != nil {
+		return 0, err
+	}
+	n, err := w.writer.Write(p)
+	if err != nil || n != len(p) {
+		w.budget.invalidate()
+	}
+	return n, err
+}
+
+func newBootstrapExtractionBudget(
+	downloadDir string,
+) (*bootstrapExtractionBudget, error) {
+	filesystemPath, available, reserve, err := freeSpacePolicy(
+		downloadDir, "extraction",
+	)
+	if err != nil {
+		return nil, err
 	}
 	usable := available - reserve
 	maxBytes := int64(min(usable, uint64(maxTotalExtractSize))) // #nosec G115 -- capped at 1 TiB
@@ -101,16 +189,17 @@ func (b *bootstrapExtractionBudget) reserveStreamBytes(size int64) error {
 	return nil
 }
 
-func (b *bootstrapExtractionBudget) reserveEntry() error {
-	if b == nil {
+func (b *bootstrapExtractionBudget) reserveEntries(count int) error {
+	if b == nil || count == 0 {
 		return nil
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.entries >= b.maxEntries {
+	if count < 0 || count > b.maxEntries ||
+		b.entries > b.maxEntries-count {
 		return fmt.Errorf("%w: bootstrap entry limit reached", ErrExtractLimitExceeded)
 	}
-	b.entries++
+	b.entries += count
 	return nil
 }
 

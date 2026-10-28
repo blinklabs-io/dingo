@@ -27,7 +27,7 @@ import (
 // other user or group is rejected, including the group access Unix allows.
 // The shared check's own message still says "key file"; the wrapper names the
 // value file so the error points at the setting that was read.
-func checkPermissions(f *os.File) error {
+func checkPermissions(_ string, f *os.File) error {
 	if err := keystore.CheckOpenFilePermissions(f); err != nil {
 		return fmt.Errorf("value file %s: %w", f.Name(), err)
 	}

@@ -54,13 +54,13 @@ type MeshLedgerState interface {
 		maxResults int,
 		maxCoins int,
 	) ([]models.Utxo, error)
-	// UtxosByAddressAtSlot returns the UTxOs the address held at the
-	// given slot -- those added at or before it and not spent until
-	// after it. It backs historical /account/balance queries.
-	UtxosByAddressAtSlot(
+	// UtxoBalanceByAddressAtSlot aggregates balances for outputs held at a
+	// historical point without materializing the matching UTxOs.
+	UtxoBalanceByAddressAtSlot(
+		ctx context.Context,
 		addr lcommon.Address,
 		slot uint64,
-	) ([]models.Utxo, error)
+	) (models.AddressBalance, error)
 }
 
 // MeshSyncProgress is an optional ledger capability for network/status.

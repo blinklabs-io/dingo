@@ -114,6 +114,9 @@ type BootstrapConfig struct {
 	// extractionBudget bounds expanded bytes and entries across all archives in
 	// one v2 bootstrap and preserves free space on their destination filesystem.
 	extractionBudget *bootstrapExtractionBudget
+	// downloadSpaceBudget preserves the same filesystem reserve while compressed
+	// artifacts are being written, including concurrent immutable downloads.
+	downloadSpaceBudget *downloadSpaceBudget
 	// decoderBudget bounds the zstd history memory of the archive decoders
 	// running at once in one v2 bootstrap. Nil reserves nothing.
 	decoderBudget *decoderMemoryBudget

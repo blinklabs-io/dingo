@@ -1065,7 +1065,7 @@ func TestEqualSlotAlternativeCarriesNoLeiosData(t *testing.T) {
 				AnnouncingRbHash: rbHash,
 			},
 		},
-		txHashesOK: true,
+		closureTxsOK: true,
 	}
 	builder := &forgerTestBuilder{
 		block: newForgerTestBlock(10, altTestRivalBlockNumber),
@@ -2307,6 +2307,13 @@ func (c *forgerMovingTipSlotClock) PrimaryChainTipRelation(
 		primary.Slot == point.Slot && bytes.Equal(primary.Hash, point.Hash), nil
 }
 
+func (c *forgerMovingTipSlotClock) PrimaryChainTipRelationAndHeader(
+	point ocommon.Point,
+) (ochainsync.Tip, ochainsync.Tip, uint64, bool, error) {
+	tip, depth, ancestor, err := c.PrimaryChainTipRelation(point)
+	return tip, tip, depth, ancestor, err
+}
+
 func (c *forgerMovingTipSlotClock) ChainTipHash() []byte {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -2956,8 +2963,8 @@ func TestForgeKeepsLeiosDataWhenParentIsUnchanged(t *testing.T) {
 				Certificate:       leiosTestCertificate(eb, 9),
 			},
 		},
-		txHashes:   []string{},
-		txHashesOK: true,
+		closureTxs:   [][]byte{},
+		closureTxsOK: true,
 	}
 	block := newForgerTestBlock(10, 2)
 	builder := &parentSwapBuilder{
@@ -3187,7 +3194,7 @@ func TestForgeReResolvesLeiosDataWhenParentChangesBeforeTheFirstBuild(
 		},
 		// The certified closure resolves, so endorser-block production is
 		// reached rather than skipped -- that is the window this test needs.
-		txHashesOK: true,
+		closureTxsOK: true,
 	}
 	block := newForgerTestBlock(10, 2)
 	// Succeeds on the first attempt: there is no retry in this scenario,
@@ -3456,6 +3463,13 @@ func (c *retryTestSlotClock) PrimaryChainTipRelation(
 	}
 	return ochainsync.Tip{Point: primary, BlockNumber: primary.Slot},
 		depth, ancestor, nil
+}
+
+func (c *retryTestSlotClock) PrimaryChainTipRelationAndHeader(
+	point ocommon.Point,
+) (ochainsync.Tip, ochainsync.Tip, uint64, bool, error) {
+	tip, depth, ancestor, err := c.PrimaryChainTipRelation(point)
+	return tip, tip, depth, ancestor, err
 }
 
 func (c *retryTestSlotClock) UpstreamSyncTip() (ochainsync.Tip, bool) {
@@ -4255,6 +4269,7 @@ func requireStaleTipSkips(
 	for _, reason := range []string{
 		forgeStaleTipReasonPrimaryNotAncestor,
 		forgeStaleTipReasonBlockGap,
+		forgeStaleTipReasonHeaderFrontier,
 		forgeStaleTipReasonPeerHeightGap,
 		forgeStaleTipReasonHashDiverged,
 		forgeStaleTipReasonPrimaryTipBehind,
@@ -4453,7 +4468,8 @@ func TestForgeRefusesTheRetryOnEveryStaleTipReason(t *testing.T) {
 				c.chainTipBlockNumber = 100
 				c.upstreamTarget = 9
 				c.upstreamLive = true
-				c.upstreamBlockNumber = 105
+				// K-1 ahead at entry, so only the move opens the gap.
+				c.upstreamBlockNumber = 104
 			},
 			move: func(c *retryTestSlotClock) {
 				c.chainTipSlot = 8
@@ -4497,6 +4513,34 @@ func TestForgeRefusesTheRetryOnEveryStaleTipReason(t *testing.T) {
 			})
 		})
 	}
+}
+
+// TestForgeRefusesAtEntryWhenPeerIsExactlyKBlocksAhead pins the inclusive
+// peer height bound: a corroborated upstream exactly K blocks ahead of the
+// applied tip refuses before the builder runs.
+func TestForgeRefusesAtEntryWhenPeerIsExactlyKBlocksAhead(t *testing.T) {
+	applied := bytes.Repeat([]byte{0xAA}, 32)
+	block := newForgerTestBlock(10, 2)
+	clock := applyBacklogClock(10, 9, applied, time.Now().Add(2*time.Second))
+	clock.chainTipBlockNumber = 100
+	clock.upstreamTarget = 9
+	clock.upstreamLive = true
+	// retryTestSlotClock reports K = 5.
+	clock.upstreamBlockNumber = 105
+	builder := &tipMovingBuilder{
+		block: block,
+		cbor:  block.cbor,
+		clock: clock,
+	}
+	broadcaster := &forgerTestBroadcaster{}
+	forger := newRetryForger(t, clock, builder, broadcaster)
+
+	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+	require.Equal(t, 0, builder.calls)
+	require.Equal(t, 0, broadcaster.calls)
+	requireStaleTipSkips(t, forger, map[string]float64{
+		forgeStaleTipReasonPeerHeightGap: 1,
+	})
 }
 
 // TestTipGateRefusalsAreSkipsNotFailures pins the caller's contract: every
@@ -4922,6 +4966,7 @@ func TestSelectValidLeiosTransactionsPreservesDependentChain(t *testing.T) {
 			reject: map[string]struct{}{},
 		},
 		leiosSelectionLimits{},
+		leiosSelectionBasis{},
 	)
 	require.NoError(t, err)
 	require.Equal(t, txs, selected)
@@ -4958,6 +5003,7 @@ func TestSelectValidLeiosTransactionsRejectsInvalidChain(t *testing.T) {
 			},
 		},
 		leiosSelectionLimits{},
+		leiosSelectionBasis{},
 	)
 	require.NoError(t, err)
 	require.Empty(t, selected, "a rejected parent must not expose its output")
@@ -4986,6 +5032,7 @@ func TestSelectValidLeiosTransactionsRejectsUnrepresentableParent(
 		},
 		&leiosOverlayValidator{base: map[utxoref.Key]struct{}{baseKey: {}}},
 		leiosSelectionLimits{},
+		leiosSelectionBasis{},
 	)
 	require.NoError(t, err)
 	require.Empty(t, selected)
@@ -5500,6 +5547,7 @@ func TestLeiosEBSelectionStopsAtTheDeadline(t *testing.T) {
 			now:      func() time.Time { return fakeNow },
 			deadline: start.Add(selectionTime),
 		},
+		leiosSelectionBasis{},
 	)
 	require.NoError(t, err)
 	require.True(t, truncated)
@@ -5521,6 +5569,7 @@ func TestLeiosEBSelectionCompletesWithinBudget(t *testing.T) {
 			now:      time.Now,
 			deadline: time.Now().Add(time.Hour),
 		},
+		leiosSelectionBasis{},
 	)
 	require.NoError(t, err)
 	require.False(t, truncated)
@@ -5536,6 +5585,7 @@ func TestLeiosEBSelectionAbortsWhenSnapshotChanges(t *testing.T) {
 		leiosCandidateTxs(t, 10),
 		validator,
 		leiosSelectionLimits{now: time.Now},
+		leiosSelectionBasis{},
 	)
 	require.ErrorIs(t, err, errTxValidationSnapshotChanged)
 	require.Equal(
@@ -5554,6 +5604,7 @@ func TestLeiosEBSelectionWithoutDeadlineIsUnbounded(t *testing.T) {
 		leiosCandidateTxs(t, 8),
 		validator,
 		leiosSelectionLimits{},
+		leiosSelectionBasis{},
 	)
 	require.NoError(t, err)
 	require.False(t, truncated)
@@ -5618,6 +5669,13 @@ func (c *ebTestSlotClock) PrimaryChainTipRelation(
 		Point:       primary,
 		BlockNumber: primary.Slot,
 	}, depth, ancestor, nil
+}
+
+func (c *ebTestSlotClock) PrimaryChainTipRelationAndHeader(
+	point ocommon.Point,
+) (ochainsync.Tip, ochainsync.Tip, uint64, bool, error) {
+	tip, depth, ancestor, err := c.PrimaryChainTipRelation(point)
+	return tip, tip, depth, ancestor, err
 }
 
 func (*ebTestSlotClock) UpstreamSyncTip() (ochainsync.Tip, bool) {
