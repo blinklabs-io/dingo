@@ -5981,7 +5981,10 @@ func (c loneFarChain) first() uint64 {
 func (c loneFarChain) newSelector(t *testing.T) *ChainSelector {
 	t.Helper()
 	cs := NewChainSelector(ChainSelectorConfig{SecurityParam: c.k})
-	cs.SetLocalTip(c.tip(c.localBlock))
+	// These legacy plausibility tests use a synthetic reference without an
+	// applied-tip source. Tests for the applied catch-up ceiling explicitly
+	// establish the trusted local tip with SetLocalTip.
+	cs.localTip = c.tip(c.localBlock)
 	// A lagging peer makes every reference stale, so the ahead peer takes the
 	// catch-up branch.
 	require.True(t, cs.UpdatePeerTip(
@@ -6015,36 +6018,80 @@ func newLoneFarChain() loneFarChain {
 	return loneFarChain{localBlock: 175516, k: 432}
 }
 
-// TestLoneFarFrontierAcceptsConnectedChain covers a far-behind node whose only
-// ahead peer serves the real chain: more than K connected headers are accepted,
-// fewer are not.
-func TestLoneFarFrontierAcceptsConnectedChain(t *testing.T) {
+// TestLoneFarFrontierWaitsForAppliedCatchUpCeiling covers a far-behind node
+// whose only ahead peer serves a connected chain. Remote continuity can retain
+// the claim, but only applied progress can make the frontier selectable.
+func TestLoneFarFrontierWaitsForAppliedCatchUpCeiling(t *testing.T) {
 	t.Parallel()
 
 	c := newLoneFarChain()
 	cs := c.newSelector(t)
+	cs.SetLocalTip(c.tip(c.localBlock))
 	conn := newTestConnectionId(2)
 	first := c.first()
-	for i := range c.k {
+	for i := uint64(0); i <= c.k; i++ {
 		require.False(
 			t,
 			c.deliver(cs, conn, first+i, c.prevHash(first+i)),
-			"header %d of the run must not be accepted yet", i+1,
+			"remote continuity must not advance the applied catch-up ceiling",
 		)
 	}
+	require.Nil(t, cs.GetPeerTip(conn))
+
+	next := first + c.k + 1
+	cs.SetLocalTip(c.tip(next - 2*c.k))
 	require.True(
 		t,
-		c.deliver(cs, conn, first+c.k, c.prevHash(first+c.k)),
-		"the connected header after K+1 consecutive headers must be accepted",
+		c.deliver(cs, conn, next, c.prevHash(next)),
+		"applied progress must release the connected frontier",
 	)
 	require.NotNil(t, cs.GetPeerTip(conn))
-	// The peer keeps making progress: the next connected headers stay accepted.
-	for i := c.k + 1; i < c.k+20; i++ {
-		require.True(
-			t,
-			c.deliver(cs, conn, first+i, c.prevHash(first+i)),
-			"header %d after acceptance must stay accepted", i,
-		)
+}
+
+func TestUnstagedPeerTipAdmissionWaitsForAppliedCatchUpCeiling(t *testing.T) {
+	t.Parallel()
+
+	for _, admissionID := range []uint64{0, 1} {
+		t.Run(fmt.Sprintf("admission_id=%d", admissionID), func(t *testing.T) {
+			t.Parallel()
+
+			c := loneFarChain{localBlock: 1_000, k: 2}
+			cs := c.newSelector(t)
+			cs.SetLocalTip(c.tip(c.localBlock))
+			conn := newTestConnectionId(2)
+			first := c.first()
+			for i := uint64(0); i <= c.k; i++ {
+				block := first + i
+				id := admissionID
+				if id != 0 {
+					id += i
+				}
+				update := PeerTipUpdateEvent{
+					ConnectionId:     conn,
+					AdmissionID:      id,
+					Tip:              c.tip(100_000),
+					ObservedTip:      c.tip(block),
+					ObservedPrevHash: c.prevHash(block),
+				}
+				require.False(t, cs.CommitPeerTipAdmission(update))
+			}
+			require.Nil(t, cs.GetPeerTip(conn))
+
+			next := first + c.k + 1
+			cs.SetLocalTip(c.tip(next - 2*c.k))
+			id := admissionID
+			if id != 0 {
+				id += c.k + 1
+			}
+			require.True(t, cs.CommitPeerTipAdmission(PeerTipUpdateEvent{
+				ConnectionId:     conn,
+				AdmissionID:      id,
+				Tip:              c.tip(100_000),
+				ObservedTip:      c.tip(next),
+				ObservedPrevHash: c.prevHash(next),
+			}))
+			require.NotNil(t, cs.GetPeerTip(conn))
+		})
 	}
 }
 
@@ -6055,6 +6102,7 @@ func TestStagedLoneFarFrontierIsCommittedAfterKConnectedHeaders(t *testing.T) {
 		t.Run(fmt.Sprintf("k=%d", securityParam), func(t *testing.T) {
 			c := loneFarChain{localBlock: 175516, k: securityParam}
 			cs := c.newSelector(t)
+			cs.SetLocalTip(c.tip(c.localBlock))
 			conn := newTestConnectionId(2)
 			first := c.first()
 			var last PeerTipUpdateEvent

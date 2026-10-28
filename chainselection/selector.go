@@ -892,7 +892,7 @@ func (cs *ChainSelector) updatePeerTipObservedLinked(
 	link deliveredLink,
 ) bool {
 	return cs.updatePeerTipObservedLinkedDisposition(
-		connId, tip, observedTip, vrfOutput, praosView, link, false,
+		connId, tip, observedTip, vrfOutput, praosView, link, false, false,
 	) == PeerTipUpdateAccepted
 }
 
@@ -909,6 +909,7 @@ func (cs *ChainSelector) updatePeerTipObservedLinkedDisposition(
 	praosView PraosTiebreakerView,
 	link deliveredLink,
 	generationPinned bool,
+	enforceCatchUpCeiling bool,
 ) PeerTipUpdateDisposition {
 	if cs.config.ConnectionLive != nil &&
 		!cs.config.ConnectionLive(connId) {
@@ -937,6 +938,10 @@ func (cs *ChainSelector) updatePeerTipObservedLinkedDisposition(
 			disposition = PeerTipUpdateRejected
 			return
 		}
+		beyondCatchUpCeiling := enforceCatchUpCeiling &&
+			cs.peerTipBeyondCatchUpCeilingLocked(
+				PeerTipUpdateEvent{ObservedTip: observedTip},
+			)
 		if !cs.checkPeerTipPlausibleLocked(
 			connId, tip, observedTip, link,
 		) {
@@ -948,6 +953,10 @@ func (cs *ChainSelector) updatePeerTipObservedLinkedDisposition(
 				claim.boundary == link.boundary {
 				disposition = PeerTipUpdatePending
 			}
+			return
+		}
+		if beyondCatchUpCeiling {
+			disposition = PeerTipUpdatePending
 			return
 		}
 
@@ -1627,6 +1636,7 @@ func (cs *ChainSelector) commitPeerTipAdmissionResolved(
 				boundary: update.ObservedBoundary,
 			},
 			generationPinned,
+			true,
 		) == PeerTipUpdateAccepted
 		if !accepted {
 			return false
@@ -1843,6 +1853,7 @@ func (cs *ChainSelector) commitPeerTipAdmission(
 				boundary: update.ObservedBoundary,
 			},
 			generationPinned,
+			true,
 		) == PeerTipUpdateAccepted
 		if accepted {
 			cs.mutex.Lock()
@@ -4446,7 +4457,7 @@ func (cs *ChainSelector) HandlePeerTipUpdateEvent(evt event.Event) {
 		return
 	}
 	if e.AdmissionID == 0 {
-		cs.updatePeerTipObservedLinked(
+		cs.updatePeerTipObservedLinkedDisposition(
 			e.ConnectionId,
 			e.Tip,
 			e.ObservedTip,
@@ -4456,6 +4467,8 @@ func (cs *ChainSelector) HandlePeerTipUpdateEvent(evt event.Event) {
 				prevHash: e.ObservedPrevHash,
 				boundary: e.ObservedBoundary,
 			},
+			false,
+			true,
 		)
 		return
 	}
@@ -4492,6 +4505,7 @@ func (cs *ChainSelector) ObservePeerTipUpdate(
 			boundary: e.ObservedBoundary,
 		},
 		false,
+		true,
 	)
 }
 
