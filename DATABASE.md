@@ -4735,13 +4735,26 @@ AND a.active = true
 
 ### `GetStakeByPools`
 
-Current live stake by pool reads the maintained `reward_live_stake.utxo_stake`
-value once per active credential, preserving exact decimal `uint64` arithmetic
-without materializing every live UTxO. If a requested active credential lacks a
-current aggregate row, the store falls back to the canonical account/UTxO scan
-until `RebuildRewardLiveStake` completes; this preserves correctness while
-making steady-state ledger-peer and pool-detail requests proportional to
-credentials.
+Current live stake by pool is one `GROUP BY account.pool` aggregate over
+`account LEFT JOIN reward_live_stake`, returning one row per requested pool:
+the delegator count, the count of credentials with a non-empty
+`utxo_stake`, and the exact stake sum. The sum uses the engine-side wide
+aggregate described under the account totals (`NUMERIC`, `DECIMAL(65, 0)`, or
+`dingo_bigint_sum`), so the work in Go follows the requested pools rather than
+their delegators, and a total outside `uint64` is an error rather than a
+wrapped value. If any requested active credential lacks a current aggregate
+row (the two counts differ), the store falls back to the canonical
+account/UTxO scan until `RebuildRewardLiveStake` completes; this preserves
+correctness.
+
+### `GetActivePoolStakeTotal`
+
+The network-wide live stake of every active pool, as one aggregate row: the
+same statement as `GetStakeByPools` without the `GROUP BY`, restricted to the
+active pool set `GetActivePoolKeyHashes` resolves (the tip slot and the
+registration/retirement CTE). Completeness and the fallback are the same as for
+`GetStakeByPools`, evaluated across the whole active set. It runs on the
+caller's transaction, so its context cancels the statement.
 
 ### `GetStakeByPoolsAtSlot`
 
