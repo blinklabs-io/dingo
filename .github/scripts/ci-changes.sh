@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Default to full CI whenever the diff is unavailable or ambiguous.
 run_ci=true
-if [[ ${EVENT_NAME:-} == pull_request && -n ${BASE_SHA:-} && -n ${HEAD_SHA:-} ]]; then
+if [[ ( ${EVENT_NAME:-} == pull_request || ${EVENT_NAME:-} == merge_group ) && -n ${BASE_SHA:-} && -n ${HEAD_SHA:-} ]]; then
     changed_files=$(mktemp)
     trap 'rm -f "$changed_files"' EXIT
     # Disable rename detection so moving code into a documentation path still
@@ -13,7 +13,7 @@ if [[ ${EVENT_NAME:-} == pull_request && -n ${BASE_SHA:-} && -n ${HEAD_SHA:-} ]]
             run_ci=false
             while IFS= read -r -d '' path; do
                 case "$path" in
-                    docs/*.md) ;;
+                    docs/*) ;;
                     *.md)
                         if [[ "$path" == */* ]]; then
                             run_ci=true
