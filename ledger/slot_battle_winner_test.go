@@ -150,6 +150,7 @@ func (h *slotBattleHarness) requireWon(t *testing.T, want bool) {
 	battle, ok := evt.Data.(forging.SlotBattleEvent)
 	require.True(t, ok)
 	assert.Equal(t, siblingSlot, battle.Slot)
+	assert.Equal(t, siblingSlot, battle.RemoteSlot)
 	assert.Equal(t, h.forged.Hash().Bytes(), battle.LocalBlockHash)
 	assert.Equal(t, h.f.rival.Hash().Bytes(), battle.RemoteBlockHash)
 	assert.Equal(t, want, battle.Won)

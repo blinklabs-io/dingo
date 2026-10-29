@@ -17320,6 +17320,57 @@ func TestCheckComparedTipSlotBattleRestrictedWindow(t *testing.T) {
 	}
 }
 
+func TestRestrictedWindowSlotBattleEventCarriesBothSlots(t *testing.T) {
+	t.Parallel()
+
+	f := newSiblingFixture(t)
+	localTip := f.ls.chain.Tip()
+	remoteSlot := localTip.Point.Slot + 4
+	remoteHash := bytes.Repeat([]byte{0x22}, 32)
+	bus := newTestEventBus(t, nil)
+	defer bus.Stop()
+	f.ls.config.EventBus = bus
+	f.ls.SetForgedBlockChecker(&mockForgedBlockChecker{
+		forgedSlots: map[uint64][]byte{
+			localTip.Point.Slot: localTip.Point.Hash,
+		},
+	})
+	_, evtCh := bus.Subscribe(forging.SlotBattleEventType)
+
+	f.ls.checkComparedTipSlotBattle(
+		ochainsync.Tip{
+			Point:       ocommon.NewPoint(remoteSlot, remoteHash),
+			BlockNumber: localTip.BlockNumber,
+		},
+		localTip,
+		praos.ChainABetter,
+		praos.PraosTiebreakerView{
+			TiebreakerConfig: praos.PraosTiebreakerConfigConway(),
+		},
+		praos.PraosTiebreakerView{},
+	)
+
+	require.Len(t, f.ls.slotBattles.pending, 1)
+	f.ls.slotBattles.mu.Lock()
+	f.ls.slotBattles.pending[0].settleAt = localTip.BlockNumber
+	f.ls.slotBattles.mu.Unlock()
+	f.ls.resolveSlotBattles()
+
+	evt := testutil.RequireReceive(
+		t,
+		evtCh,
+		testutil.AsyncWait,
+		"timeout waiting for restricted-window SlotBattleEvent",
+	)
+	battle, ok := evt.Data.(forging.SlotBattleEvent)
+	require.True(t, ok)
+	assert.Equal(t, localTip.Point.Slot, battle.Slot)
+	assert.Equal(t, remoteSlot, battle.RemoteSlot)
+	assert.Equal(t, localTip.Point.Hash, battle.LocalBlockHash)
+	assert.Equal(t, remoteHash, battle.RemoteBlockHash)
+	assert.True(t, battle.Won)
+}
+
 func TestCheckSlotBattle_DetectsConflict(t *testing.T) {
 	t.Parallel()
 

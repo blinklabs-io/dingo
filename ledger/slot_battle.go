@@ -128,6 +128,7 @@ func (ls *LedgerState) resolveSlotBattles() {
 					forging.SlotBattleEventType,
 					forging.SlotBattleEvent{
 						Slot:            battle.slot,
+						RemoteSlot:      battle.remoteSlot,
 						LocalBlockHash:  battle.localHash,
 						RemoteBlockHash: battle.remoteHash,
 						Won:             localWon,

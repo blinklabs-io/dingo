@@ -9443,7 +9443,7 @@ or rejected by `AddBlock` reads as `outcome=forged, adopted=false` rather than
 as a success. Reconstructing those intervals from block timestamps after the
 fact is the only reason a lost slot previously took a field trace to diagnose.
 
-The forger tracks slot battles (competing blocks at the same slot) and skips forging when the node is not sufficiently synced, controlled by `forgeSyncToleranceSlots` and `forgeStaleGapThresholdSlots`.
+The forger tracks same-slot contenders, and ledger chain selection tracks equal-height battles involving a locally forged tip across the active restricted Praos tiebreak window. Forging is skipped when the node is not sufficiently synced, controlled by `forgeSyncToleranceSlots` and `forgeStaleGapThresholdSlots`.
 
 The forger additionally refuses to forge when its applied, selected-block, and
 admitted-header frontiers are unsafe. The builder takes the forged block's

@@ -882,10 +882,9 @@ type NetworkIngestHoldTracker interface {
 // arrive after teardown.
 type ConnectionLiveFunc func(ouroboros.ConnectionId) bool
 
-// ForgedBlockChecker is an interface for checking whether the local
-// node recently forged a block for a given slot. This is used by
-// chainsync to detect slot battles when an incoming block from a
-// peer occupies the same slot as a locally forged block.
+// ForgedBlockChecker is an interface for checking whether the local node
+// recently forged a block for a given slot. Chainsync uses it to attribute the
+// local side of same-slot and restricted-window Praos battles.
 type ForgedBlockChecker interface {
 	// WasForgedByUs returns the block hash and true if the local node
 	// forged a block for the given slot, or nil and false otherwise.
