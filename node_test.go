@@ -327,22 +327,22 @@ func TestChainsyncConfigCorroborationCapableFailsClosed(t *testing.T) {
 	t.Parallel()
 	n := &Node{config: NewConfig(WithGenesisCorroborationPeers(1))}
 	cfg := n.chainsyncConfig()
-	require.NotNil(t, cfg.CanCorroborate)
+	require.NotNil(t, cfg.CorroborationIdentity)
 	connId := ouroboros.ConnectionId{
 		LocalAddr:  &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 3001},
 		RemoteAddr: &net.TCPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 3001},
 	}
-	assert.False(t, cfg.CanCorroborate(connId), "no chain selector yet")
+	assert.Empty(t, cfg.CorroborationIdentity(connId), "no chain selector yet")
 
 	n.chainSelector = chainselection.NewChainSelector(
 		chainselection.ChainSelectorConfig{GenesisMode: true},
 	)
-	assert.False(t, cfg.CanCorroborate(connId), "peer has no identity")
+	assert.Empty(t, cfg.CorroborationIdentity(connId), "peer has no identity")
 
 	n.chainSelector = chainselection.NewChainSelector(
 		chainselection.ChainSelectorConfig{},
 	)
-	assert.False(t, cfg.CanCorroborate(connId), "Praos selection")
+	assert.Empty(t, cfg.CorroborationIdentity(connId), "Praos selection")
 }
 
 func TestChainsyncConfigLimitOnPatienceDefaults(t *testing.T) {

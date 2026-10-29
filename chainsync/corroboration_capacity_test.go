@@ -15,6 +15,7 @@
 package chainsync_test
 
 import (
+	"fmt"
 	"net"
 	"sync/atomic"
 	"testing"
@@ -40,9 +41,17 @@ func newCorroborationState(
 			port := connId.RemoteAddr.(*net.TCPAddr).Port
 			return port >= 100 && port < 200
 		},
-		CanCorroborate: func(connId ouroboros.ConnectionId) bool {
-			return active.Load() &&
-				connId.RemoteAddr.(*net.TCPAddr).Port >= 200
+		CorroborationIdentity: func(connId ouroboros.ConnectionId) string {
+			port := connId.RemoteAddr.(*net.TCPAddr).Port
+			if !active.Load() || port < 200 {
+				return ""
+			}
+			// Ports 200-299 are distinct identities; 300 and above map to
+			// identity "pool-<port/100>" so several ports share one pool.
+			if port < 300 {
+				return fmt.Sprintf("peer-%d", port)
+			}
+			return fmt.Sprintf("pool-%d", port/100)
 		},
 	})
 }
@@ -162,4 +171,90 @@ func TestCorroborationCapablePeerKeepsIdentifiedPeersAndRoots(t *testing.T) {
 	for _, connId := range held {
 		assert.False(t, observabilityOnly(t, state, connId))
 	}
+}
+
+// Several connections of one pool identity must not take every slot: a second
+// connection of an identity already holding an ingress slot cannot displace an
+// identity-less peer, so the remaining slots stay available to other
+// candidates.
+func TestCorroborationSameIdentityCannotFillAllSlots(t *testing.T) {
+	t.Parallel()
+	var active atomic.Bool
+	active.Store(true)
+	state := newCorroborationState(t, &active)
+	peers := fillWithDiscoveredPeers(t, state)
+
+	require.True(t, state.TryAddClientConnIdWithDirection(
+		newTestConnId(300), rootTestSlots, true,
+	))
+	for _, port := range []uint{301, 302, 303} {
+		state.TryAddClientConnIdWithDirection(
+			newTestConnId(port), rootTestSlots, true,
+		)
+	}
+
+	assert.Equal(
+		t,
+		1,
+		countObservers(t, state, peers),
+		"only the first connection of an identity may displace a peer",
+	)
+	assert.Equal(t, rootTestSlots, state.ClientConnCount())
+}
+
+// A distinct identity can still take a slot from a duplicate connection of an
+// identity that another ingress client already represents, so duplicates never
+// crowd out a distinct witness.
+func TestCorroborationDistinctIdentityDisplacesDuplicateIdentity(t *testing.T) {
+	t.Parallel()
+	var active atomic.Bool
+	active.Store(true)
+	state := newCorroborationState(t, &active)
+	var dups []ouroboros.ConnectionId
+	for _, port := range []uint{300, 301, 302} {
+		connId := newTestConnId(port)
+		require.True(t, state.TryAddClientConnIdWithDirection(
+			connId, rootTestSlots, true,
+		))
+		dups = append(dups, connId)
+	}
+	distinct := newTestConnId(200)
+
+	require.True(t, state.TryAddClientConnIdWithDirection(
+		distinct, rootTestSlots, true,
+	))
+
+	assert.False(t, observabilityOnly(t, state, distinct))
+	assert.Equal(t, 1, countObservers(t, state, dups))
+}
+
+// A duplicate-identity connection that was displaced cannot take the slot back
+// while another connection of its identity holds one, so displacement does not
+// cycle.
+func TestCorroborationDisplacedDuplicateDoesNotCycle(t *testing.T) {
+	t.Parallel()
+	var active atomic.Bool
+	active.Store(true)
+	state := newCorroborationState(t, &active)
+	var dups []ouroboros.ConnectionId
+	for _, port := range []uint{300, 301, 302} {
+		connId := newTestConnId(port)
+		require.True(t, state.TryAddClientConnIdWithDirection(
+			connId, rootTestSlots, true,
+		))
+		dups = append(dups, connId)
+	}
+	require.True(t, state.TryAddClientConnIdWithDirection(
+		newTestConnId(200), rootTestSlots, true,
+	))
+	var displaced ouroboros.ConnectionId
+	for _, connId := range dups {
+		if observabilityOnly(t, state, connId) {
+			displaced = connId
+		}
+	}
+	require.NotZero(t, displaced.RemoteAddr)
+
+	assert.False(t, state.SetClientObservabilityOnly(displaced, false))
+	assert.True(t, observabilityOnly(t, state, displaced))
 }

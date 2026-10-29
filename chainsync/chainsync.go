@@ -214,14 +214,14 @@ type Config struct {
 	// displace a non-root client when every slot is taken, and a freed slot
 	// goes to a connected root first. When nil no connection is a root.
 	IsRoot func(ouroboros.ConnectionId) bool
-	// CanCorroborate reports whether a connection can currently serve as a
-	// Genesis corroboration witness: corroboration is in effect and the peer
-	// has a corroboration identity. Such a peer can displace a client that
-	// cannot corroborate when every eligible slot is taken, because slots held
-	// by identity-less peers cannot make progress while corroboration is in
-	// effect. It must not take locks that are held while calling into State.
+	// CorroborationIdentity returns the Genesis corroboration identity of a
+	// connection, or "" when corroboration is not in effect or the peer has
+	// none. A peer with an identity can displace a client that has none, or a
+	// client whose identity another ingress client already represents, when
+	// every eligible slot is taken, provided no other ingress client carries its
+	// identity. It must not take locks that are held while calling into State.
 	// When nil no connection is preferred on this basis.
-	CanCorroborate func(ouroboros.ConnectionId) bool
+	CorroborationIdentity func(ouroboros.ConnectionId) string
 }
 
 // DefaultConfig returns the default chainsync configuration.
@@ -1045,28 +1045,49 @@ func (s *State) SetClientObservabilityOnly(
 }
 
 // preemptForRootLocked frees one eligible slot for connId when it is a
-// configured root or, while corroboration is in effect, a corroboration-capable
-// peer: the longest-idle client that is neither a root, nor corroboration
-// capable, nor the active one becomes observability-only and stays connected.
-// It reports false when connId has no such claim or no client can be
-// displaced. Because only a client that is neither can be displaced and
-// neither claim is held by it, displacement cannot cycle.
+// configured root or, while corroboration is in effect, a corroboration
+// witness candidate. A candidate is a peer with a corroboration identity that
+// no other ingress client already carries: Genesis selection counts an
+// identity once, so a second connection of the same identity adds no witness.
+// The longest-idle client that is neither a root nor the active one becomes
+// observability-only and stays connected, provided it has no identity or
+// shares its identity with another ingress client. Every client displaced that
+// way either lacks an identity or is a duplicate, and a duplicate cannot
+// reclaim a slot while its identity is represented, so displacement cannot
+// cycle. Identity-less victims are taken before duplicates. It reports false
+// when connId has no claim or no client can be displaced.
 // Caller must hold clientConnIdMutex.
 func (s *State) preemptForRootLocked(
 	connId ouroboros.ConnectionId,
 ) (*ClientRemovedEvent, bool) {
-	if !s.isRoot(connId) && !s.canCorroborate(connId) {
-		return nil, false
+	ingressIdentities := s.ingressIdentityCountsLocked()
+	if !s.isRoot(connId) {
+		identity := s.corroborationIdentity(connId)
+		if identity == "" || ingressIdentities[identity] > 0 {
+			return nil, false
+		}
 	}
 	var victim *TrackedClient
+	victimDuplicate := false
 	for id, tc := range s.trackedClients {
 		if tc.ObservabilityOnly ||
 			(s.activeClientConnId != nil && *s.activeClientConnId == id) ||
-			s.isRoot(id) || s.canCorroborate(id) {
+			s.isRoot(id) {
 			continue
 		}
-		if victim == nil || tc.LastActivity.Before(victim.LastActivity) {
+		duplicate := false
+		if identity := s.corroborationIdentity(id); identity != "" {
+			if ingressIdentities[identity] < 2 {
+				continue
+			}
+			duplicate = true
+		}
+		if victim == nil ||
+			(victimDuplicate && !duplicate) ||
+			(victimDuplicate == duplicate &&
+				tc.LastActivity.Before(victim.LastActivity)) {
 			victim = tc
+			victimDuplicate = duplicate
 		}
 	}
 	if victim == nil {
@@ -1082,12 +1103,31 @@ func (s *State) preemptForRootLocked(
 	}, true
 }
 
+// ingressIdentityCountsLocked counts the corroboration identities carried by
+// clients that currently hold an ingress slot. Caller must hold
+// clientConnIdMutex.
+func (s *State) ingressIdentityCountsLocked() map[string]int {
+	counts := make(map[string]int)
+	for id, tc := range s.trackedClients {
+		if tc.ObservabilityOnly {
+			continue
+		}
+		if identity := s.corroborationIdentity(id); identity != "" {
+			counts[identity]++
+		}
+	}
+	return counts
+}
+
 func (s *State) isRoot(connId ouroboros.ConnectionId) bool {
 	return s.config.IsRoot != nil && s.config.IsRoot(connId)
 }
 
-func (s *State) canCorroborate(connId ouroboros.ConnectionId) bool {
-	return s.config.CanCorroborate != nil && s.config.CanCorroborate(connId)
+func (s *State) corroborationIdentity(connId ouroboros.ConnectionId) string {
+	if s.config.CorroborationIdentity == nil {
+		return ""
+	}
+	return s.config.CorroborationIdentity(connId)
 }
 
 func (s *State) publishClientRemoved(removed *ClientRemovedEvent) {
