@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"bytes"
 	"encoding/hex"
 	"sync"
 
@@ -32,6 +33,7 @@ const maxPendingSlotBattles = 64
 type slotBattle struct {
 	slot       uint64
 	localHash  []byte
+	remoteSlot uint64
 	remoteHash []byte
 	// settleAt is the tip block number from which the outcome is final: a
 	// security parameter of blocks past the tip seen at detection.
@@ -45,13 +47,20 @@ type slotBattleBook struct {
 	pending []slotBattle
 }
 
-func (b *slotBattleBook) add(battle slotBattle) {
+func (b *slotBattleBook) add(battle slotBattle) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	for _, pending := range b.pending {
+		if bytes.Equal(pending.localHash, battle.localHash) &&
+			bytes.Equal(pending.remoteHash, battle.remoteHash) {
+			return false
+		}
+	}
 	if len(b.pending) >= maxPendingSlotBattles {
 		b.pending = b.pending[1:]
 	}
 	b.pending = append(b.pending, battle)
+	return true
 }
 
 // settled removes and returns the battles final at tipBlockNumber.
@@ -107,6 +116,7 @@ func (ls *LedgerState) resolveSlotBattles() {
 			"slot battle settled",
 			"component", "ledger",
 			"slot", battle.slot,
+			"remote_slot", battle.remoteSlot,
 			"local_block_hash", hex.EncodeToString(battle.localHash),
 			"remote_block_hash", hex.EncodeToString(battle.remoteHash),
 			"local_won", localWon,

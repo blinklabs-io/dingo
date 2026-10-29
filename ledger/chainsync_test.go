@@ -17184,6 +17184,142 @@ type mockForgedBlockChecker struct {
 	forgedSlots map[uint64][]byte
 }
 
+func (ls *LedgerState) compareIncomingHeaderToLocalTip(
+	e ChainsyncEvent,
+	localTip ochainsync.Tip,
+) praos.ChainComparisonResult {
+	result, _, _ := ls.incomingHeaderTipComparison(e, localTip)
+	return result
+}
+
+func TestCheckComparedTipSlotBattleRestrictedWindow(t *testing.T) {
+	t.Parallel()
+
+	const (
+		localSlot        = uint64(100)
+		localBlockNumber = uint64(20)
+	)
+	localHash := bytes.Repeat([]byte{0x11}, 32)
+	remoteHash := bytes.Repeat([]byte{0x22}, 32)
+	restricted := praos.PraosTiebreakerView{
+		TiebreakerConfig: praos.PraosTiebreakerConfigConway(),
+	}
+	unrestricted := praos.PraosTiebreakerView{
+		TiebreakerConfig: praos.PraosTiebreakerConfigBeforeConway(),
+	}
+
+	tests := []struct {
+		name         string
+		remoteSlot   uint64
+		remoteBlock  uint64
+		comparison   praos.ChainComparisonResult
+		incomingView praos.PraosTiebreakerView
+		trackedHash  []byte
+		wantBattles  int64
+	}{
+		{
+			name:         "remote wins below boundary",
+			remoteSlot:   localSlot + 4,
+			remoteBlock:  localBlockNumber,
+			comparison:   praos.ChainABetter,
+			incomingView: restricted,
+			trackedHash:  localHash,
+			wantBattles:  1,
+		},
+		{
+			name:         "local wins at boundary",
+			remoteSlot:   localSlot + 5,
+			remoteBlock:  localBlockNumber,
+			comparison:   praos.ChainBBetter,
+			incomingView: restricted,
+			trackedHash:  localHash,
+			wantBattles:  1,
+		},
+		{
+			name:         "above boundary",
+			remoteSlot:   localSlot + 6,
+			remoteBlock:  localBlockNumber,
+			comparison:   praos.ChainABetter,
+			incomingView: restricted,
+			trackedHash:  localHash,
+		},
+		{
+			name:         "unresolved comparison",
+			remoteSlot:   localSlot + 4,
+			remoteBlock:  localBlockNumber,
+			comparison:   praos.ChainEqual,
+			incomingView: restricted,
+			trackedHash:  localHash,
+		},
+		{
+			name:         "different block height",
+			remoteSlot:   localSlot + 4,
+			remoteBlock:  localBlockNumber + 1,
+			comparison:   praos.ChainABetter,
+			incomingView: restricted,
+			trackedHash:  localHash,
+		},
+		{
+			name:         "tracked block is not local tip",
+			remoteSlot:   localSlot + 4,
+			remoteBlock:  localBlockNumber,
+			comparison:   praos.ChainABetter,
+			incomingView: restricted,
+			trackedHash:  bytes.Repeat([]byte{0x33}, 32),
+		},
+		{
+			name:         "unrestricted era stays on body detection",
+			remoteSlot:   localSlot + 4,
+			remoteBlock:  localBlockNumber,
+			comparison:   praos.ChainABetter,
+			incomingView: unrestricted,
+			trackedHash:  localHash,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSiblingFixture(t)
+			recorder := &countingSlotBattleRecorder{}
+			f.ls.SetSlotBattleRecorder(recorder)
+			f.ls.SetForgedBlockChecker(&mockForgedBlockChecker{
+				forgedSlots: map[uint64][]byte{localSlot: tc.trackedHash},
+			})
+			f.ls.checkComparedTipSlotBattle(
+				ochainsync.Tip{
+					Point:       ocommon.NewPoint(tc.remoteSlot, remoteHash),
+					BlockNumber: tc.remoteBlock,
+				},
+				ochainsync.Tip{
+					Point:       ocommon.NewPoint(localSlot, localHash),
+					BlockNumber: localBlockNumber,
+				},
+				tc.comparison,
+				tc.incomingView,
+				praos.PraosTiebreakerView{},
+			)
+
+			if got := recorder.n.Load(); got != tc.wantBattles {
+				t.Fatalf(
+					"restricted tip battle count = %d, want %d",
+					got,
+					tc.wantBattles,
+				)
+			}
+			if tc.wantBattles == 0 {
+				assert.Empty(t, f.ls.slotBattles.pending)
+				return
+			}
+			require.Len(t, f.ls.slotBattles.pending, 1)
+			battle := f.ls.slotBattles.pending[0]
+			assert.Equal(t, localSlot, battle.slot)
+			assert.Equal(t, tc.remoteSlot, battle.remoteSlot)
+			assert.Equal(t, localHash, battle.localHash)
+			assert.Equal(t, remoteHash, battle.remoteHash)
+		})
+	}
+}
+
 func TestCheckSlotBattle_DetectsConflict(t *testing.T) {
 	t.Parallel()
 

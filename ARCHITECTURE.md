@@ -1540,7 +1540,8 @@ sequenceDiagram
     end
 
     Note over SC,EB: Slot Battle Detection
-    LS->>LS: blockfetch delivers a peer block at a forged slot, counted and held pending
+    LS->>LS: compare an equal-height peer tip with the actual forged local tip inside the active Praos tiebreak window
+    LS->>LS: count the distinct battle and hold it pending
     LS->>PC: on each chain.update, fetched or forged, once the tip is a security parameter of blocks past it: is the forged block on the chain?
     LS->>EB: publish SlotBattleEvent(Won)
 ```
