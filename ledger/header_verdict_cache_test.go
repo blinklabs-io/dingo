@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	"github.com/stretchr/testify/require"
 )
 
@@ -88,6 +89,49 @@ func TestStatelessHeaderCryptoVerdictKeyedByNonceAndHeader(t *testing.T) {
 
 	require.NoError(t, verify(tb.block, tb.epochNonce))
 	require.Equal(t, int64(5), runs.Load(), "original verdict must survive")
+}
+
+func TestStatelessHeaderCryptoVerdictNotSharedWithoutHeaderCbor(t *testing.T) {
+	t.Parallel()
+
+	// Verification reads the header body CBOR and the decoded signature, while
+	// the header hash covers the stored header CBOR. A header without stored
+	// CBOR hashes the empty input, so every such header would share one key.
+	good := createTestBlock(t, [32]byte{65}, 0, tamperNone)
+	bad := createTestBlock(t, [32]byte{65}, 0, tamperVRFProof)
+	ls, _ := newEligibilityTestLedger(t, good.epochNonce)
+	epoch := models.Epoch{EpochId: 5}
+	withoutHeaderCbor := func(b *realBabbageBlock) headerOnlyBlock {
+		return headerOnlyBlock{
+			header: &babbage.BabbageBlockHeader{
+				Body:      b.header.Body,
+				Signature: b.header.Signature,
+			},
+			peerRelative: true,
+		}
+	}
+	goodBlock := withoutHeaderCbor(good.block)
+	badBlock := withoutHeaderCbor(bad.block)
+	require.Empty(t, goodBlock.Header().Cbor())
+	require.Equal(t, goodBlock.Header().Hash(), badBlock.Header().Hash())
+
+	require.NoError(
+		t,
+		ls.verifyBlockHeaderStatelessCryptoWithEpochNonce(
+			goodBlock,
+			epoch,
+			good.epochNonce,
+		),
+	)
+	require.Error(
+		t,
+		ls.verifyBlockHeaderStatelessCryptoWithEpochNonce(
+			badBlock,
+			epoch,
+			good.epochNonce,
+		),
+		"a header without stored CBOR must not be answered from the cache",
+	)
 }
 
 func TestStatelessHeaderVerdictCacheBoundedAndConcurrent(t *testing.T) {

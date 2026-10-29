@@ -394,7 +394,14 @@ func (ls *LedgerState) verifyBlockHeaderStatelessCryptoWithEpochNonce(
 			len(epochNonce),
 		)
 	}
-	hash := block.Header().Hash().Bytes()
+	// The verdict is keyed by the header hash, which covers the stored header
+	// CBOR, but verification reads the body CBOR and decoded signature. Only a
+	// header carrying its CBOR ties the two together; without it the hash is
+	// of the empty input and would be shared by unrelated headers.
+	var hash []byte
+	if len(block.Header().Cbor()) > 0 {
+		hash = block.Header().Hash().Bytes()
+	}
 	if ls.statelessHeaderVerdicts.contains(hash, epochNonce) {
 		return nil
 	}
