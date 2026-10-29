@@ -6922,7 +6922,7 @@ func TestPinnedForkRollbackResyncsWithoutGenerationLockDeadlock(t *testing.T) {
 	releaseForkDecision()
 	// The writer must progress before the real SQL rollback sweep; its cost
 	// under parallel fixtures is independent of the generation lock cycle.
-	testutil.RequireReceive(t, writerDone, time.Second,
+	testutil.RequireReceive(t, writerDone, testutil.AsyncWait,
 		"rollback must release the pinned generation for the waiting writer")
 	testutil.RequireReceive(t, truncateEntered, 30*time.Second,
 		"fork handling should reach the real rollback sweep")
