@@ -34,9 +34,20 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestPeerForkAncestorStateCheckedOncePerContext(t *testing.T) {
-	t.Parallel()
+type peerForkAncestorStateFixture struct {
+	ls     *LedgerState
+	checks map[uint64]int
+	verify func(snapshot *consensusSnapshot, count int) error
+}
 
+// newPeerForkAncestorStateFixture builds three chained headers in one epoch.
+// registered reports whether the producer of header i is seeded with a pool
+// registration and stake, so an unregistered ancestor fails its state check.
+func newPeerForkAncestorStateFixture(
+	t *testing.T,
+	registered func(int) bool,
+) peerForkAncestorStateFixture {
+	t.Helper()
 	cfg := newHighFreqShelleyGenesisCfg(t)
 	epochNonce := bytes.Repeat([]byte{0x21}, lcommon.Blake2b256Size)
 	anchor := createTestBlockWithNonceAtSlots(
@@ -102,9 +113,11 @@ func TestPeerForkAncestorStateCheckedOncePerContext(t *testing.T) {
 			t, [32]byte{byte(91 + i)}, epochNonce,
 			uint64(2_200+100*i), uint64(2_201+100*i), prev, &n, tamperNone,
 		)
-		seedBlockPoolRegistration(t, db, b.block)
-		pool := b.block.IssuerVkey().Hash()
-		seedPoolStakeSnapshot(t, db, 5, pool[:], 1_000_000_000)
+		if registered(i) {
+			seedBlockPoolRegistration(t, db, b.block)
+			pool := b.block.IssuerVkey().Hash()
+			seedPoolStakeSnapshot(t, db, 5, pool[:], 1_000_000_000)
+		}
 		blocks = append(blocks, b.block)
 		prev = b.block.Hash().Bytes()
 	}
@@ -142,7 +155,14 @@ func TestPeerForkAncestorStateCheckedOncePerContext(t *testing.T) {
 			conn, headers, epoch, epochNonce, snapshot,
 		)
 	}
+	return peerForkAncestorStateFixture{ls: ls, checks: checks, verify: verify}
+}
 
+func TestPeerForkAncestorStateCheckedOncePerContext(t *testing.T) {
+	t.Parallel()
+
+	f := newPeerForkAncestorStateFixture(t, func(int) bool { return true })
+	ls, checks, verify := f.ls, f.checks, f.verify
 	snapshot := ls.loadConsensusSnapshot()
 	require.NoError(t, verify(snapshot, 2))
 	require.Equal(t, map[uint64]int{2_200: 1}, checks)
@@ -173,4 +193,18 @@ func TestPeerForkAncestorStateCheckedOncePerContext(t *testing.T) {
 		checks,
 		"a context change must re-run the state verification",
 	)
+}
+
+func TestPeerForkAncestorStateFailureNotMemoized(t *testing.T) {
+	t.Parallel()
+
+	f := newPeerForkAncestorStateFixture(t, func(i int) bool { return i != 0 })
+	snapshot := f.ls.loadConsensusSnapshot()
+	require.Error(t, f.verify(snapshot, 2))
+	require.Error(
+		t,
+		f.verify(snapshot, 3),
+		"an ancestor that failed its state check must fail again for a later header",
+	)
+	require.Equal(t, map[uint64]int{2_200: 2}, f.checks)
 }
