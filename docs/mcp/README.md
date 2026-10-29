@@ -351,8 +351,12 @@ resolved file. Provider `dataDir` overrides are honored. With a different
 metadata backend or an in-memory SQLite store, file-based SQL tools are
 unavailable. Full-address UTxO lookup uses the active database's exact CBOR
 address matcher in ascending ledger order. Full addresses use `cursor` pagination
-and reject nonzero `offset`; raw payment credentials retain offset pagination
-and intentionally search across address forms. Stake addresses and CIP-129 DRep
+and reject nonzero `offset`; raw payment credentials retain offset pagination,
+capped at 10,000, and intentionally search across address forms. When a full
+page from a raw-credential `get_utxos`, `get_utxos_by_asset`, or `sqlite_query`
+call ends where the next offset would exceed 10,000, the response states that
+the offset limit was reached and later rows are not retrievable through that
+tool. Stake addresses and CIP-129 DRep
 identifiers preserve key/script types; raw hashes mean key credentials. An
 all-zero stake credential remains a valid lookup.
 
@@ -629,12 +633,12 @@ The Dingo MCP server provides 21 specialized tools:
 | `get_cardano_tip` | Live Cardano slot, height, block hash, and sync state | *none* |
 | `get_block` | Look up block details by slot number or block hash | `hash_or_slot` (string, required) |
 | `get_transaction` | Fetch transaction details by 64-character hex hash | `tx_hash` (string, required) |
-| `get_utxos` | Query unspent outputs for a Bech32 address or payment credential | `address_or_credential` (string, required), `limit`, `cursor` (full addresses; nonzero `offset` rejected), `offset` (payment credentials) |
+| `get_utxos` | Query unspent outputs for a Bech32 address or payment credential | `address_or_credential` (string, required), `limit`, `cursor` (full addresses; nonzero `offset` rejected), `offset` (payment credentials, at most 10,000) |
 | `get_account` | Query the stored stake-account row, including indexed delegation, reward, and DRep fields | `stake_address_or_credential` (string, required), `credential_type` (`key` or `script`, required for hex credentials) |
 | `get_epoch_summary` | Summary stats and boundary nonces for an epoch | `epoch` (int, optional) |
 | `resolve_datum_or_script` | Look up and decode Plutus CIP-32 datum or script metadata from hash | `hash` (string, required - 56 or 64 hex chars) |
 | `evaluate_tx` | Simulate Plutus execution units (CPU steps, memory) & fee before submission | `cbor` (string, required - hex or base64) |
-| `get_utxos_by_asset` | Kupo-style pattern matching querying unspent UTxOs holding a specific policy or asset | `policy_id` (56-hex, required), `asset_name` (optional ASCII or hex), `limit`, `offset` |
+| `get_utxos_by_asset` | Kupo-style pattern matching querying unspent UTxOs holding a specific policy or asset | `policy_id` (56-hex, required), `asset_name` (optional ASCII or hex), `limit`, `offset` (at most 10,000) |
 | `get_asset_info` | Detailed Cardano native asset metadata, Token Registry info, on-chain supply, count of holding UTxOs, and CIP-25 NFT metadata | `policy_id` (56-hex, required), `asset_name` (optional ASCII or hex) |
 | `get_governance_state` | Conway CIP-1694 governance state (constitution, committee quorum, members, DReps) | `drep_credential` (optional Bech32 `drep1...` or 56-hex) |
 | `get_pool_performance` | Historical SPO reward performance, blocks, delegated stake and pledge (lovelace), and apparent performance | `pool_id` (Bech32 `pool1...` or 56-hex, required), `epoch` (optional int), `limit` (default 10, max 50) |

@@ -2667,6 +2667,7 @@ func (ls *LedgerState) queryShelleyUtxoByAddress(
 		if err != nil {
 			return nil, err
 		}
+		txOut = localStateQueryTransactionOutput(txOut)
 		txId, err := lcommon.NewBlake2b256Checked(utxo.TxId)
 		if err != nil {
 			return nil, fmt.Errorf("utxo by address tx id: %w", err)
@@ -3261,6 +3262,7 @@ func (ls *LedgerState) queryShelleyUtxoByTxIn(ctx context.Context, txIns []ledge
 		if err != nil {
 			return nil, err
 		}
+		txOut = localStateQueryTransactionOutput(txOut)
 		txId, err := lcommon.NewBlake2b256Checked(utxo.TxId)
 		if err != nil {
 			return nil, fmt.Errorf("utxo by tx in tx id: %w", err)

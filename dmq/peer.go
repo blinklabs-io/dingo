@@ -191,6 +191,13 @@ func (s *Stack) registerPeer(conn net.Conn, dialed bool) (*PeerConn, error) {
 	if s.maxPeers > 0 && len(s.peers) >= s.maxPeers {
 		return nil, ErrTooManyPeers
 	}
+	// The inbound share is bounded apart from the total so that connections
+	// anyone may open cannot take the room kept for the peers this side
+	// dials.
+	if !dialed && s.limitInbound &&
+		len(s.peers)-s.outboundLocked() >= s.maxInbound {
+		return nil, ErrTooManyPeers
+	}
 	// gouroboros formats both addresses when it logs the connection.
 	if conn.LocalAddr() == nil || conn.RemoteAddr() == nil {
 		return nil, errors.New("dmq: connection has no network address")

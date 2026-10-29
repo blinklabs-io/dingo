@@ -1137,6 +1137,14 @@ type TransactionStore interface {
 		types.Txn,
 	) ([]models.Transaction, error)
 
+	// GetExistingTransactionHashes returns the subset of hashes that have a
+	// transaction record, without loading the records or their
+	// associations. The result is in no particular order.
+	GetExistingTransactionHashes(
+		[][]byte, // hashes
+		types.Txn,
+	) ([][]byte, error)
+
 	// GetTransactionsByBlockHash retrieves all transactions
 	// for a given block hash, ordered by block_index.
 	GetTransactionsByBlockHash(

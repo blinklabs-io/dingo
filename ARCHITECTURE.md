@@ -4495,6 +4495,13 @@ fetch guard with an atomic compare-and-swap before starting a worker. Concurrent
 callbacks sharing that guard cannot exceed its admission bound; worker
 completion releases the slot. The guard also serializes protocol requests.
 
+Transaction fetches bound each requested bitmap by both its window count and
+the encoded reply byte limit. Verified manifest sizes determine the selected
+prefix, including conservative tag-24, byte-string and message framing costs.
+The next request resumes at the first missing transaction, even within a
+partially requested bitmap window. A transaction that cannot fit alone fails
+explicitly; the client never raises the protocol ingress limit to admit it.
+
 Configured LeiosFetch vote serving accepts at most 1,000 requested IDs per
 request, including duplicate and unknown IDs. Larger requests fail before
 dispatch to the vote manager, bounding lookup and response-cloning work under
@@ -5803,7 +5810,11 @@ against a real Preview cardano-node: 36 real pools reported by cardano-node
 were completely absent from dingo's reply for no reason other than that
 snapshot lag. `GetUTxOWhole` enumerates live references, resolves their stored
 CBOR through a fixed worker pool, and decodes them into the node-to-client
-reply shape. A successful response always contains the complete UTxO set at
+reply shape. The UTxO query leaves serialize Babbage-era ADA-only outputs
+without a datum or reference script as the backwards-compatible two-element
+array that cardano-ledger emits from its compact UTxO state. They do not reuse
+the post-Alonzo map bytes retained from the producing transaction for those
+outputs. A successful response always contains the complete UTxO set at
 the acquired point. Pagination, offsets, item limits, byte limits, time limits,
 truncation, and partial success are forbidden for this protocol result. If the
 complete set cannot be produced, the query fails without returning a successful
@@ -8896,14 +8907,19 @@ address with a warning, because the default is `::`; any other failure to bind
 stops startup. Each accepted connection goes to `AttachPeer` as a listener.
 `dmq.maxPeers` bounds every peer connection, inbound and outbound, in
 `registerPeer` before the handshake, which refuses the next with
-`ErrTooManyPeers`; one source, an IPv4 address or an IPv6 /64, holds at most
-four inbound connections, so one host cannot take every slot.
+`ErrTooManyPeers`. Inbound connections also stop at `dmq.maxPeers` less
+the room kept for dialed peers, so connections anyone may open cannot take it.
+That room is `dmq.minPeers`, or the total valency of the topology's local roots
+when that is larger; when nothing is left no inbound connection is accepted.
+One source, an IPv4 address or an IPv6 /64,
+holds at most four inbound connections, so one host cannot take every inbound
+slot.
 
 The peer manager is one goroutine that reviews the connections on every change
 and at least every 15 seconds. It keeps each local root at its valency, a
 target that may exceed the peers listed. It then fills the stack up to
-`dmq.minPeers`, counting inbound peers, from the public roots and then the
-ledger peers, each in random order, and never beyond `dmq.maxPeers`; at most
+`dmq.minPeers` dialed connections, not counting inbound peers, from the public
+roots and then the ledger peers, each in random order, and never beyond `dmq.maxPeers`; at most
 four dials are in flight. A peer whose address is one of the stack's own listen
 addresses is not dialed (only an IP literal can match). A peer that fails waits
 five seconds, doubling to fifteen minutes, give or take a fifth, and a
@@ -12101,8 +12117,10 @@ decoded cell data. The original settings are restored before the connection
 returns to an injected pool.
 `get_asset_info` takes one of the same slots and scans at most 50,000 live
 asset rows. A policy or asset with more matching rows returns an explicit
-incomplete error, never a partial supply or holder count. `NewMCPServer` shares
-one slot budget across both tool sets; the exported `RegisterSQLiteTools` and
+incomplete error, never a partial supply or holder count. `get_utxos_by_asset`
+and raw-credential `get_utxos` searches also take a slot and reject offsets
+above 10,000; full-address `get_utxos` pages read through the metadata store
+without one. `NewMCPServer` shares one slot budget across both tool sets; the exported `RegisterSQLiteTools` and
 `RegisterCardanoTools` each create their own.
 `get_mempool_info` without `tx_hash` lists at most `limit` pending transactions
 (default 10, at most 50) in the pool's own order, read through
@@ -12484,7 +12502,11 @@ Dingo's internal state and Blockfrost response types and supports
 Blockfrost-style pagination headers. `GET /accounts/{stake_address}` passes
 the request context to the adapter and its database reads, and takes a slot
 in the address summary admission pool because it aggregates every live UTxO
-of the credential. Pool and account list routes reject
+of the credential. `GET /network`, `GET /epochs/latest`, `GET /epochs/{number}`
+and its `next` and `previous` lists aggregate over the chain or whole epochs, so
+they pass the request context to the adapter's database reads and share a
+chain summary admission pool, separate from the address summary pool, that
+answers 429 when full. Pool and account list routes reject
 out-of-range count and page values before calling the adapter, using the
 shared strict pagination parser (count 1–100, page 1–21474836). The epoch
 next, previous and stakes lists, whose Blockfrost schema defines only count and
@@ -12859,7 +12881,10 @@ undos, keeping its stream and query results consistent.
 `WaitForTx` rejects references that are not exactly 32 bytes before logging,
 allocating pending state, subscribing, or looking up transactions. Empty
 reference lists remain a no-op. Duplicate references are deduplicated in
-first-request order for committed-state lookup.
+first-request order for committed-state lookup, which reads every reference
+through one `LedgerState.ExistingTransactionHashes` call: one metadata read
+transaction per stream, bound to the stream's deadline, rather than one per
+reference. References found there are confirmed in first-request order.
 
 `WaitForTx` reports `STAGE_CONFIRMED` from current active-chain transaction
 metadata or a forward `ledger.tx` `TransactionEvent`. Persisted metadata is

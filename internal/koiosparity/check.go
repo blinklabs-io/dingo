@@ -306,8 +306,11 @@ const defaultPreStakingThroughEpoch = 1
 // staking era at epoch 0. Preprod runs Byron for epochs 0-3 and enters
 // Shelley at epoch 4, so the mark/set/go derivation first yields a valid
 // snapshot at epoch 6 and Koios reports a null active_stake for epochs 0-5.
+// Mainnet runs Byron for epochs 0-207 and enters Shelley at epoch 208, so
+// the same derivation first yields a valid snapshot at epoch 210.
 var preStakingThroughEpochByNetwork = map[string]uint64{
 	"preprod": 5,
+	"mainnet": 209,
 }
 
 // preStakingThroughEpoch returns the last Koios reporting epoch of network

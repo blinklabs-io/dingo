@@ -935,18 +935,48 @@ func TestNewKoiosClientCustomHostDropsBurstCap(t *testing.T) {
 }
 
 // TestNewKoiosClientRejectsUnsupportedNetworkWithOverride pins that supplying a
-// host does not bypass network validation: StakeAddressFromCredential hardcodes
-// the testnet address network ID, so an unvalidated "mainnet" would silently
-// generate wrong-network stake addresses.
+// host does not bypass network validation.
 func TestNewKoiosClientRejectsUnsupportedNetworkWithOverride(t *testing.T) {
 	_, err := NewKoiosClient(
-		"mainnet",
+		"sanchonet",
 		"",
 		"https://host.example/api/v1",
 		false,
 		false,
 	)
 	require.Error(t, err)
+}
+
+// TestAccountComparisonRejectsMainnet pins that mainnet, which NewKoiosClient
+// accepts for node-parity, still cannot reach the reward/account comparison:
+// StakeAddressFromCredential hardcodes the testnet address network ID, so
+// mainnet would silently generate wrong-network stake addresses. Each entry
+// point must refuse before touching its cache.
+func TestAccountComparisonRejectsMainnet(t *testing.T) {
+	t.Parallel()
+
+	_, err := NewKoiosClient("mainnet", "", "", false, false)
+	require.NoError(t, err)
+
+	cachePath := filepath.Join(t.TempDir(), "cache.db")
+	_, err = Fetch(
+		context.Background(),
+		FetchConfig{Network: "mainnet", CachePath: cachePath},
+		slog.New(slog.DiscardHandler),
+	)
+	require.ErrorContains(t, err, "unsupported network \"mainnet\"")
+	_, err = Check(
+		context.Background(),
+		CheckConfig{Network: "mainnet", CachePath: cachePath},
+		slog.New(slog.DiscardHandler),
+	)
+	require.ErrorContains(t, err, "unsupported network \"mainnet\"")
+	_, err = CheckEpoch(
+		context.Background(), nil, nil, "mainnet", 300, 0, true, nil,
+	)
+	require.ErrorContains(t, err, "unsupported network \"mainnet\"")
+	_, statErr := os.Stat(cachePath)
+	require.ErrorIs(t, statErr, os.ErrNotExist)
 }
 
 // TestNewKoiosClientRejectsPlainHTTPByDefault covers the transport guard. get

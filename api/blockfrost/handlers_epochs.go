@@ -50,6 +50,11 @@ func (b *Blockfrost) handleEpoch(
 	if !ok {
 		return
 	}
+	release, ok := b.admitChainSummary(w, r)
+	if !ok {
+		return
+	}
+	defer release()
 	info, err := b.node.Epoch(r.Context(), epoch)
 	if err != nil {
 		b.writeHistoryError(w, err, "failed to retrieve epoch")
@@ -67,10 +72,21 @@ func (b *Blockfrost) handleEpochNext(
 	if !ok {
 		return
 	}
-	servePage(
+	req := withoutOrder(r)
+	params, ok := parsePaginationOrWriteError(w, req)
+	if !ok {
+		return
+	}
+	release, ok := b.admitChainSummary(w, r)
+	if !ok {
+		return
+	}
+	defer release()
+	serveParsedPage(
 		b,
 		w,
-		withoutOrder(r),
+		req,
+		params,
 		func(ctx context.Context, params PaginationParams) ([]EpochInfo, int, error) {
 			return b.node.EpochsAfter(ctx, epoch, params)
 		},
@@ -88,10 +104,21 @@ func (b *Blockfrost) handleEpochPrevious(
 	if !ok {
 		return
 	}
-	servePage(
+	req := withoutOrder(r)
+	params, ok := parsePaginationOrWriteError(w, req)
+	if !ok {
+		return
+	}
+	release, ok := b.admitChainSummary(w, r)
+	if !ok {
+		return
+	}
+	defer release()
+	serveParsedPage(
 		b,
 		w,
-		withoutOrder(r),
+		req,
+		params,
 		func(ctx context.Context, params PaginationParams) ([]EpochInfo, int, error) {
 			return b.node.EpochsBefore(ctx, epoch, params)
 		},

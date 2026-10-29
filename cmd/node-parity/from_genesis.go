@@ -37,6 +37,7 @@ var koiosFlags struct {
 	allowInsecureHTTP     bool
 	allowPrivateAddresses bool
 	verbose               bool
+	skipUTxO              bool
 	// cachePath, when set, points this run's CheckProtocolParams,
 	// CheckStakeDistribution and /tx_info lookups at a koiosparity.Cache
 	// (koios_check.go's doc comments on those functions) instead of calling
@@ -234,7 +235,9 @@ func (c *fromGenesisCounters) recordEpoch(
 		}
 	}
 
-	if !r.UTxOAttempted {
+	if r.UTxOSkipped {
+		logger.Debug("utxo check skipped by --skip-utxo", "epoch", r.Epoch)
+	} else if !r.UTxOAttempted {
 		c.utxoIncomplete++
 		c.recordIncomplete("utxo")
 		logger.Debug("utxo check skipped (no genesis baseline)", "epoch", r.Epoch)
@@ -306,13 +309,10 @@ ahead of a freshly-started Dingo fast enough that there is never a matching
 historical block left to compare against by the time Dingo reaches it. Koios
 has no such problem -- it retains full per-epoch history indefinitely.
 
-Restricted to --network preview or preprod: Koios only ever serves these two
-networks, and this command's UTxO-set check walks every transaction one at a
-time from genesis, which is only tractable at their scale. For mainnet-scale
-validation of an already-synced node, use 'check'/'watch' against a real
-reference cardano-node instead -- both nodes bootstrapped near their live tip
-(e.g. via a Mithril snapshot) avoids the from-genesis race this command
-exists to work around in the first place.
+Supports --network preview, preprod and mainnet. The UTxO-set check walks
+every transaction one at a time from genesis, over a hundred million on
+mainnet; pass --skip-utxo there to compare protocol parameters and stake
+only.
 
 Runs until interrupted (Ctrl-C). A chain-sync session that ends for any other
 reason is reconnected and resumed from the last block seen, so a dropped
@@ -354,6 +354,10 @@ of re-deriving them from scratch.`,
 	cmd.Flags().BoolVar(
 		&koiosFlags.verbose, "verbose", false,
 		"log each individual UTxO ref that differs (address/amount/assets/datum/scriptref), not just per-epoch counts",
+	)
+	cmd.Flags().BoolVar(
+		&koiosFlags.skipUTxO, "skip-utxo", false,
+		"skip the UTxO-set comparison: no baseline is captured and no /tx_info is fetched; protocol parameters and stake are still compared",
 	)
 	cmd.Flags().StringVar(
 		&koiosFlags.cachePath, "koios-cache-path", "",
@@ -508,7 +512,7 @@ func fromGenesisRun(cmd *cobra.Command, _ []string) error {
 
 	err = nodeparity.RunFromGenesis(
 		cmd.Context(), globalFlags.dingoAddr, network, magic, koios, cache, report, logf,
-		resumeFrom,
+		resumeFrom, koiosFlags.skipUTxO,
 	)
 
 	logger.Info("run summary",
