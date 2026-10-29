@@ -5743,6 +5743,10 @@ behind `MsgAwaitReply` until `LedgerState.AwaitAppliedSlot` sees the ledger
 reach the block, as cardano-node serves local clients only blocks it has
 already validated. A local client can therefore Acquire every point ChainSync
 delivers to it. Node-to-node peers are still served ahead of the ledger.
+When the applied tip reaches the held block's slot with a different hash, the
+server waits for the iterator's rollback instead, unless the held block is the
+tip's parent: a Byron epoch-boundary block shares its slot with the block after
+it, and the ledger can apply both before the waiter wakes.
 
 A specific acquired point is also pinned against pruning
 (`ledger/acquired_point_pins.go`). Acquire calls `LedgerState.PinAcquiredPoint`

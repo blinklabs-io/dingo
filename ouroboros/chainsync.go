@@ -1498,7 +1498,8 @@ func (o *Ouroboros) chainsyncServerAwaitNext(
 				}
 				appliedTip := o.ledgerState.Tip().Point
 				if appliedTip.Slot == next.Point.Slot &&
-					!bytes.Equal(appliedTip.Hash, next.Point.Hash) {
+					!bytes.Equal(appliedTip.Hash, next.Point.Hash) &&
+					!o.chainsyncServerAppliedParent(appliedTip, next.Point) {
 					// A different block reached the same slot. Wait for the
 					// iterator's rollback event and serve that instead.
 					continue
@@ -1510,6 +1511,26 @@ func (o *Ouroboros) chainsyncServerAwaitNext(
 		}
 	}
 	o.chainsyncServerServeAwaited(ctx, conn, next, nextErr)
+}
+
+// chainsyncServerAppliedParent reports whether next is the parent of the
+// applied tip. A Byron epoch-boundary block shares its slot with the block
+// after it, so the ledger can apply both before the waiter wakes and leave a
+// tip at next's slot with a different hash. That is not a fork: no rollback
+// will follow, and treating it as one parks the client indefinitely.
+func (o *Ouroboros) chainsyncServerAppliedParent(
+	appliedTip ocommon.Point,
+	next ocommon.Point,
+) bool {
+	tipBlock, err := o.ledgerState.Chain().BlockByPoint(
+		context.Background(),
+		appliedTip,
+		nil,
+	)
+	if err != nil {
+		return false
+	}
+	return bytes.Equal(tipBlock.PrevHash, next.Hash)
 }
 
 // closeAbandonedChainsyncServerConn drops the transport when the connection is
