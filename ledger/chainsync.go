@@ -5457,10 +5457,22 @@ func (ls *LedgerState) AwaitObserverHeaderHorizon(
 	e ChainsyncEvent,
 ) error {
 	var anchor heldForkAnchor
+	parked := false
+	defer func() {
+		if parked {
+			ls.metrics.observerHorizonParkEnd()
+		}
+	}()
 	for {
 		published := ls.snapshotPublishedChan()
 		if !ls.headerBeyondForecastHorizonFrom(ctx, e, &anchor) {
 			return nil
+		}
+		if !parked {
+			parked = true
+			ls.metrics.observerHorizonParkStart(
+				ls.observerHorizonOvershoot(e, &anchor),
+			)
 		}
 		select {
 		case <-published:
@@ -5767,6 +5779,35 @@ func (ls *LedgerState) holdsPointSettled(
 		}
 	}
 	return false, false
+}
+
+// observerHorizonOvershoot returns how many slots e's header lies past the
+// end of the forecast it is held on, when that end is known.
+func (ls *LedgerState) observerHorizonOvershoot(
+	e ChainsyncEvent,
+	anchor *heldForkAnchor,
+) (uint64, bool) {
+	forecastSlot := anchor.slot
+	if !anchor.forked {
+		tip := ls.loadTipSnapshot()
+		if tip == nil {
+			return 0, false
+		}
+		forecastSlot = tip.currentTip.Point.Slot
+	}
+	summary, err := ls.forecastSummaryFrom(forecastSlot)
+	if err != nil {
+		return 0, false
+	}
+	era := summary.CurrentEra()
+	if era == nil || era.End == nil {
+		return 0, false
+	}
+	slot := e.BlockHeader.SlotNumber()
+	if slot < era.End.Slot {
+		return 0, true
+	}
+	return slot - era.End.Slot, true
 }
 
 // chainsyncHeaderDisconnected reports whether e's predecessor is neither the

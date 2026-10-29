@@ -1124,8 +1124,13 @@ these series carries a connection or peer label.
   the two gauges read; the ledger installs
   `ChainManager.SetHeaderQueueFullObserver`, and `Chain.addBlockHeader` calls
   it under the chain lock, so the observer only increments the counter.
-- `dingo_ledger_fork_anchor_membership_retries_total` counts fork-anchor
-  membership reads repeated because a block mutation overlapped them.
+- `dingo_ledger_observer_horizon_parked_callbacks` is the number of observer
+  chainsync callbacks currently parked in `AwaitObserverHeaderHorizon`.
+  `dingo_ledger_observer_horizon_overshoot_slots` observes, once per parked
+  header, how many slots it lies past the end of the forecast it is held on,
+  and `dingo_ledger_fork_anchor_membership_retries_total` counts fork-anchor
+  membership reads repeated because a block mutation overlapped them. None
+  carries a connection or peer label.
 - `dingo_ledger_last_block_added_timestamp_seconds` is one atomic store per
   block the blockfetch drain adds to the chain, and
   `dingo_blockfetch_last_request_timestamp_seconds` is the same for the last
