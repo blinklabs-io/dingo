@@ -1733,8 +1733,9 @@ func WithForgeSyncToleranceSlots(slots uint64) ConfigOptionFunc {
 	}
 }
 
-// WithForgeUpstreamStalenessSlots sets how far the newest block this node holds
-// may trail the corroborated upstream sync target before forging is skipped.
+// WithForgeUpstreamStalenessSlots sets how far the newest locally authenticated
+// frontier may trail the policy-approved upstream sync target before forging
+// is skipped.
 // 0 (the default) DISABLES the bound -- it is not "fall back to a built-in
 // default", and nothing fills it in: see
 // internal/config.DefaultForgeUpstreamStalenessSlots, which is itself 0.
@@ -2798,8 +2799,9 @@ func (c *Config) ForgeSyncToleranceSlots() uint64 {
 	return c.cfg.ForgeSyncToleranceSlots
 }
 
-// ForgeUpstreamStalenessSlots returns how far the newest block this node holds
-// may trail the corroborated upstream sync target before forging is skipped.
+// ForgeUpstreamStalenessSlots returns how far the newest locally authenticated
+// frontier may trail the policy-approved upstream sync target before forging
+// is skipped.
 func (c *Config) ForgeUpstreamStalenessSlots() uint64 {
 	return c.cfg.ForgeUpstreamStalenessSlots
 }

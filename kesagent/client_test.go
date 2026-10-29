@@ -25,6 +25,8 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/gouroboros/kes"
+	"github.com/prometheus/client_golang/prometheus"
+	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -965,4 +967,46 @@ func TestClientCheckReadyDetectsUnavailableAgentWithoutSigning(t *testing.T) {
 	require.Error(t, client.CheckReady())
 	require.NoError(t, client.Close())
 	require.ErrorIs(t, client.CheckReady(), ErrClosed)
+}
+
+// TestClient_SignConnectFailureCountsAsSignFailure pins the sign failure
+// metric to every failed Sign call. Sign authenticates a fresh connection per
+// request, so an unreachable or misbehaving agent fails inside connect rather
+// than on the request frame, and those failures must still be counted.
+func TestClient_SignConnectFailureCountsAsSignFailure(t *testing.T) {
+	t.Parallel()
+
+	_, vkey, _ := testKESMaterial(t)
+	ln, sockPath := listenUnix(t)
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			// Close before the Hello frame so the client's connect fails.
+			_ = conn.Close()
+		}
+	}()
+
+	metrics := NewMetrics(prometheus.NewRegistry())
+	c, err := NewClient(Config{
+		SocketPath: sockPath,
+		Mode:       ModeSign,
+		KESVKey:    vkey,
+		Metrics:    metrics,
+	})
+	require.NoError(t, err)
+	defer c.Close()
+
+	_, err = c.Sign(0, []byte("header-bytes"))
+	require.ErrorContains(t, err, "read hello")
+	require.InDelta(t, 1, promtestutil.ToFloat64(metrics.signFailures), 0)
+
+	// The failed connect armed the reconnect backoff, so the next call is
+	// refused before dialing; that refusal is a failed sign request too.
+	_, err = c.Sign(0, []byte("header-bytes"))
+	require.ErrorContains(t, err, "backoff active")
+	require.InDelta(t, 2, promtestutil.ToFloat64(metrics.signFailures), 0)
+	require.InDelta(t, 0, promtestutil.ToFloat64(metrics.signSuccesses), 0)
 }

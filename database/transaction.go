@@ -313,8 +313,10 @@ func (d *Database) SetTransactionWithOpts(
 	}
 	// Store offset reference
 	offsetData := EncodeTxOffset(&txOffset)
-	if err := blob.SetTx(blobTxn, txHashBytes, offsetData); err != nil {
-		return fmt.Errorf("set tx offset: %w", err)
+	if !opts.OffsetsPersisted {
+		if err := blob.SetTx(blobTxn, txHashBytes, offsetData); err != nil {
+			return fmt.Errorf("set tx offset: %w", err)
+		}
 	}
 
 	// Store all produced UTxOs - tx.Produced() returns correct indices for both
@@ -375,6 +377,9 @@ func (d *Database) SetTransactionWithOpts(
 			)
 		}
 		// Store offset reference
+		if opts.OffsetsPersisted {
+			continue
+		}
 		offsetData := EncodeUtxoOffset(&offset)
 		if err := blob.SetUtxo(blobTxn, txId, outputIdx, offsetData); err != nil {
 			return fmt.Errorf(
@@ -968,8 +973,13 @@ func (d *Database) recoverConsumedUtxo(
 	if blobTxn == nil {
 		return nil, types.ErrNilTxn
 	}
+	offsetTxn, releaseRead := txn.utxoBlobHandle(
+		ledgerInputIDBytes(input),
+		input.Index(),
+	)
+	defer releaseRead()
 	utxoData, err := blob.GetUtxo(
-		blobTxn,
+		offsetTxn,
 		ledgerInputIDBytes(input),
 		input.Index(),
 	)
@@ -1398,6 +1408,28 @@ func (d *Database) GetTransactionsByHashes(
 		return nil, fmt.Errorf("get txs by hashes: %w", err)
 	}
 	return txs, nil
+}
+
+// GetExistingTransactionHashes returns the subset of hashes that have a
+// transaction record, read in one metadata transaction that observes ctx.
+// The result is in no particular order.
+func (d *Database) GetExistingTransactionHashes(
+	ctx context.Context,
+	hashes [][]byte,
+) ([][]byte, error) {
+	if len(hashes) == 0 {
+		return nil, nil
+	}
+	txn := d.TransactionContext(ctx, false)
+	defer txn.Release()
+	found, err := d.transactionStore().GetExistingTransactionHashes(
+		hashes,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get existing tx hashes: %w", err)
+	}
+	return found, nil
 }
 
 // GetTransactionsByBlockHash returns all transactions for a given

@@ -71,6 +71,8 @@ type connectionInfo struct {
 	// receiving from the one-shot error channel themselves.
 	done     chan struct{}
 	closeErr error
+	// Protected by connectionsMutex and scoped to this connection owner.
+	localCloseReason string
 }
 
 type ConnectionManager struct {
@@ -1028,8 +1030,11 @@ func (c *ConnectionManager) addConnectionImplWithAdmission(
 		} else {
 			err = <-conn.ErrorChan()
 		}
+		c.connectionsMutex.Lock()
 		info.closeErr = err
+		localCloseReason := info.localCloseReason
 		close(info.done)
+		c.connectionsMutex.Unlock()
 		if info.ntcBufferTracker != nil {
 			info.ntcBufferTracker.close(c)
 		}
@@ -1055,8 +1060,9 @@ func (c *ConnectionManager) addConnectionImplWithAdmission(
 				event.NewEvent(
 					ConnectionClosedEventType,
 					ConnectionClosedEvent{
-						ConnectionId: connId,
-						Error:        err,
+						ConnectionId:     connId,
+						Error:            err,
+						LocalCloseReason: localCloseReason,
 					},
 				),
 			)
@@ -1224,6 +1230,36 @@ func (c *ConnectionManager) GetConnectionWithDone(
 		return info.conn, info.done
 	}
 	return nil, nil
+}
+
+// CloseConnectionWithReason closes conn only while it is still the tracked
+// owner. The reason is recorded before teardown and cannot leak to a new
+// connection that reuses the same ID. Callers must classify local intent;
+// an actual transport error remains separately available on the close event.
+func (c *ConnectionManager) CloseConnectionWithReason(
+	conn *ouroboros.Connection,
+	reason string,
+) error {
+	if conn == nil {
+		return nil
+	}
+	c.connectionsMutex.Lock()
+	info := c.connections[conn.Id()]
+	if info == nil || info.conn != conn {
+		c.connectionsMutex.Unlock()
+		return nil
+	}
+	select {
+	case <-info.done:
+		c.connectionsMutex.Unlock()
+		return nil
+	default:
+	}
+	if info.localCloseReason == "" {
+		info.localCloseReason = reason
+	}
+	c.connectionsMutex.Unlock()
+	return conn.Close()
 }
 
 // GetConnectionWithDoneAndError returns the connection, its teardown signal,

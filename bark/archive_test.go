@@ -503,6 +503,9 @@ func TestArchiveFetchBlockResolvesHeightBoundOncePerBatch(t *testing.T) {
 	handler, blocks := newArchiveTestHandlerWithOptions(t, blockCount,
 		archiveTestOptions{counts: counts},
 	)
+	// This test is about the blob cost of a batch, not its budget, which a
+	// 16-reference height batch would otherwise exhaust.
+	handler.bark.archiveBudget = newArchiveBudget(100_000, 100_000)
 
 	heightRefs := make([]*archive.BlockRef, 0, len(blocks))
 	pointRefs := make([]*archive.BlockRef, 0, len(blocks))

@@ -114,11 +114,13 @@ type Config struct {
 	// this narrower interface structurally.
 	Metadata eventStore
 	// BlockNumberByHash resolves a Cardano block hash to its block number.
+	// It receives the RPC's context and must stop when it is done, so a
+	// canceled or timed-out request does not hold its admission slot.
 	// It backs GetUtxoEvents' end_block_hash boundary so that boundary is
 	// honored even when the target block has no Midnight events of its
 	// own (found=false for an unknown hash, not an error). Nil causes
 	// GetUtxoEvents to fail requests that set end_block_hash.
-	BlockNumberByHash func(hash []byte) (blockNumber uint64, found bool, err error)
+	BlockNumberByHash func(ctx context.Context, hash []byte) (blockNumber uint64, found bool, err error)
 	// Host and Port are the gRPC listen address. Defaults to 127.0.0.1:50051.
 	Host string
 	Port uint
@@ -371,7 +373,7 @@ func (s *Server) gracefulStop(timeout time.Duration) {
 type service struct {
 	midnight.UnimplementedMidnightStateServer
 	metadata          eventStore
-	blockNumberByHash func(hash []byte) (blockNumber uint64, found bool, err error)
+	blockNumberByHash func(ctx context.Context, hash []byte) (blockNumber uint64, found bool, err error)
 	db                MidnightDatabase
 	slotTimer         SlotTimer
 	// logger receives the diagnostic detail behind every codes.Internal

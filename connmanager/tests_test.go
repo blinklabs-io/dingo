@@ -860,3 +860,52 @@ func TestHasInboundPeerAddressDisabledWithoutPortReuse(t *testing.T) {
 
 	assert.False(t, cm.HasInboundPeerAddress("1.2.3.4:3001"))
 }
+
+func TestLocalCloseReasonIsBoundToConnectionOwner(t *testing.T) {
+	t.Parallel()
+	bus := event.NewEventBus(nil, nil)
+	defer bus.Close()
+	_, closeEvents := bus.Subscribe(ConnectionClosedEventType)
+	cm := NewConnectionManager(ConnectionManagerConfig{EventBus: bus})
+	old := newUnstartedConnection(t)
+	live := newUnstartedConnection(t)
+	require.True(t, cm.AddConnection(old, false, "1.2.3.4:3001"))
+	require.NoError(t, cm.CloseConnectionWithReason(old, "first reason"))
+	require.True(t, cm.AddConnection(live, false, "1.2.3.4:3001"))
+	// A stale owner's close must not mark its replacement.
+	require.NoError(t, cm.CloseConnectionWithReason(old, "stale reason"))
+	old.ErrorChan() <- nil
+	live.ErrorChan() <- nil
+	select {
+	case evt := <-closeEvents:
+		closed, ok := evt.Data.(ConnectionClosedEvent)
+		require.True(t, ok)
+		require.Empty(t, closed.LocalCloseReason)
+	case <-time.After(time.Second):
+		t.Fatal("missing replacement close event")
+	}
+	waitForConnectionManagerWatchers(t, cm)
+}
+
+func TestLocalCloseReasonPublishedWithTransportError(t *testing.T) {
+	t.Parallel()
+	bus := event.NewEventBus(nil, nil)
+	defer bus.Close()
+	_, closeEvents := bus.Subscribe(ConnectionClosedEventType)
+	cm := NewConnectionManager(ConnectionManagerConfig{EventBus: bus})
+	conn := newUnstartedConnection(t)
+	require.True(t, cm.AddConnection(conn, false, "1.2.3.4:3001"))
+	require.NoError(t, cm.CloseConnectionWithReason(conn, "local recovery"))
+	failure := errors.New("protocol failure")
+	conn.ErrorChan() <- failure
+	select {
+	case evt := <-closeEvents:
+		closed, ok := evt.Data.(ConnectionClosedEvent)
+		require.True(t, ok)
+		require.Equal(t, "local recovery", closed.LocalCloseReason)
+		require.ErrorIs(t, closed.Error, failure)
+	case <-time.After(time.Second):
+		t.Fatal("missing local close event")
+	}
+	waitForConnectionManagerWatchers(t, cm)
+}

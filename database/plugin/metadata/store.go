@@ -850,6 +850,10 @@ type UtxoStore interface {
 	// amounts controlled by the given stake credential.
 	GetControlledAmountByCredential(uint8, []byte, types.Txn) (uint64, error)
 
+	// GetLiveUtxoLovelace returns the total lovelace of every live
+	// (unspent) UTxO.
+	GetLiveUtxoLovelace(types.Txn) (uint64, error)
+
 	// GetUtxoPaymentScriptByCredential returns, for the given bounded set
 	// of payment-key hashes previously observed under a stake credential,
 	// whether each payment credential is a script hash (true) or a key
@@ -1051,6 +1055,23 @@ type UtxoStore interface {
 	) error
 }
 
+// LeiosClosureAccumulator identifies an accumulator that defers only API detail
+// rows while keeping UTxO, stake, certificates and closure context immediate.
+type LeiosClosureAccumulator interface {
+	types.MetadataBatchAccumulator
+	LeiosClosureRowsOnly() bool
+}
+
+// LeiosClosureBatcher is an optional performance capability. Providers without
+// it keep the ordinary closure setter and exactly the same ledger effects.
+type LeiosClosureBatcher interface {
+	NewLeiosClosureBatchAccumulator() types.MetadataBatchAccumulator
+	SetTransactionLeiosClosureBatched(
+		lcommon.Transaction, ocommon.Point, uint32, map[int]uint64, bool,
+		*uint64, types.MetadataBatchAccumulator, types.Txn, uint64,
+	) error
+}
+
 // TransactionStore owns chain transactions: the transaction table, the
 // per-transaction metadata it carries, and the address and metadata-label
 // indexes derived from it.
@@ -1115,6 +1136,14 @@ type TransactionStore interface {
 		[][]byte, // hashes
 		types.Txn,
 	) ([]models.Transaction, error)
+
+	// GetExistingTransactionHashes returns the subset of hashes that have a
+	// transaction record, without loading the records or their
+	// associations. The result is in no particular order.
+	GetExistingTransactionHashes(
+		[][]byte, // hashes
+		types.Txn,
+	) ([][]byte, error)
 
 	// GetTransactionsByBlockHash retrieves all transactions
 	// for a given block hash, ordered by block_index.
@@ -2045,6 +2074,14 @@ type MetadataStore interface {
 		currentEpoch uint64,
 		txn types.Txn,
 	) ([]models.PoolRetiringRow, error)
+	// GetRetiringPoolsAtSlot is GetRetiringPools as the chain stood at the
+	// slot: certificates added after it neither announce a retirement nor
+	// cancel one.
+	GetRetiringPoolsAtSlot(
+		currentEpoch uint64,
+		slot uint64,
+		txn types.Txn,
+	) ([]models.PoolRetiringRow, error)
 	GetRetiringPoolsPage(
 		currentEpoch uint64,
 		limit, offset int,
@@ -2199,6 +2236,14 @@ type MetadataStore interface {
 	// (both columns NULL), are absent from the map.
 	GetPoolDepositsHeld(
 		[]lcommon.PoolKeyHash,
+		types.Txn,
+	) (map[string]uint64, error)
+
+	// GetPoolDepositsHeldAtSlot is GetPoolDepositsHeld over the
+	// registrations added at or before the slot.
+	GetPoolDepositsHeldAtSlot(
+		[]lcommon.PoolKeyHash,
+		uint64, // slot
 		types.Txn,
 	) (map[string]uint64, error)
 

@@ -191,6 +191,13 @@ func (s *Stack) registerPeer(conn net.Conn, dialed bool) (*PeerConn, error) {
 	if s.maxPeers > 0 && len(s.peers) >= s.maxPeers {
 		return nil, ErrTooManyPeers
 	}
+	// The inbound share is bounded apart from the total so that connections
+	// anyone may open cannot take the room kept for the peers this side
+	// dials.
+	if !dialed && s.limitInbound &&
+		len(s.peers)-s.outboundLocked() >= s.maxInbound {
+		return nil, ErrTooManyPeers
+	}
 	// gouroboros formats both addresses when it logs the connection.
 	if conn.LocalAddr() == nil || conn.RemoteAddr() == nil {
 		return nil, errors.New("dmq: connection has no network address")
@@ -298,6 +305,19 @@ func (p *PeerConn) fail(err error) {
 		close(p.doneChan)
 		go p.teardown()
 	})
+}
+
+// failSend ends the connection after a send failed. A protocol that is
+// shutting down refuses sends, but the refusal is a symptom: what stopped the
+// protocol, such as the muxer losing the connection or a protocol error,
+// reaches fail through the muxer's or the protocols' error channel. A refusal
+// recorded first would hide it, and would report a remote reset as a failure.
+// A protocol the peer ended leaves the connection up for the other direction.
+func (p *PeerConn) failSend(what string, err error) {
+	if errors.Is(err, protocol.ErrProtocolShuttingDown) {
+		return
+	}
+	p.fail(fmt.Errorf("dmq peer: %s: %w", what, err))
 }
 
 // endedCleanly reports whether err is how a connection normally ends: the

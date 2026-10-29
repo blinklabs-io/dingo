@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/bits"
 	"slices"
 
 	"connectrpc.com/connect"
@@ -35,6 +36,26 @@ import (
 // blockHashLength is the byte length of a Cardano block hash, which the
 // hex-encoded BlockRef.hash field has to decode to.
 const blockHashLength = 32
+
+// archiveBoundResolveLookups is the budget charged for resolving the highest
+// indexed block, which a batch with any height reference needs once. The
+// resolution is one seek for the first indexed entry and then bisects the
+// 64-bit block-ID space for the last, at most 64 further seeks, followed by
+// one read of that block's metadata
+// (database.ResolveBlockNumberBoundTxn). Each seek is a bounded listing on the
+// s3 and gcs blob plugins and the metadata read is an object GET, so each is
+// a storage lookup like any other the budget counts.
+const archiveBoundResolveLookups = 1 + 64 + 1
+
+// archiveHeightSearchLookups is the budget a single height reference costs on
+// top of the lookup every reference is charged. It binary-searches the block
+// IDs up to the highest indexed one. Each halving seeks the index and reads
+// the metadata of the entry it lands on, to learn its height, so a probe
+// costs two lookups; the matching block is then read once
+// (database.BlockByNumberBounded).
+func archiveHeightSearchLookups(bound database.BlockNumberBound) int {
+	return 2*bits.Len64(bound.HighestID) + 1
+}
 
 var _ archiveconnect.ArchiveServiceHandler = &archiveServiceHandler{}
 
@@ -172,6 +193,7 @@ func resolveBlockPoint(
 	db *database.Database,
 	ref blockRefRequest,
 	bound database.BlockNumberBound,
+	reserve func() bool,
 ) (common.Point, bool, error) {
 	switch {
 	case ref.hasHash && ref.hasSlot:
@@ -191,7 +213,9 @@ func resolveBlockPoint(
 		}
 		return common.NewPoint(block.Slot, block.Hash), true, nil
 	default:
-		block, err := database.BlockByNumberBounded(ctx, db, ref.height, bound)
+		block, err := database.BlockByNumberBoundedBudgeted(
+			ctx, db, ref.height, bound, reserve,
+		)
 		if err != nil {
 			return common.Point{}, false, err
 		}
@@ -264,11 +288,17 @@ func (a *archiveServiceHandler) FetchBlock(
 
 	// Every reference costs a storage lookup, whether or not the block
 	// exists, so the batch is charged up front and refused whole when the
-	// caller's allowance or the global budget cannot cover it.
-	if !a.bark.archiveBudget.allow(
-		archiveCallerKey(req.Peer().Addr),
-		len(refs),
-	) {
+	// caller's allowance or the global budget cannot cover it. A batch with
+	// a height reference also pays for resolving the highest indexed block,
+	// which it cannot avoid; what each height search itself costs depends on
+	// that block and is charged once it is known, below.
+	caller := archiveCallerKey(req.Peer().Addr)
+	hasHeightRefs := slices.ContainsFunc(refs, blockRefRequest.resolvesByHeight)
+	upfront := len(refs)
+	if hasHeightRefs {
+		upfront += archiveBoundResolveLookups
+	}
+	if !a.bark.archiveBudget.allow(caller, upfront) {
 		return nil, connect.NewError(
 			connect.CodeResourceExhausted,
 			errors.New("archive lookup budget exhausted, retry later"),
@@ -291,18 +321,75 @@ func (a *archiveServiceHandler) FetchBlock(
 	// can cost, and a batch of hash+slot references still touches no index
 	// at all.
 	var bound database.BlockNumberBound
-	if slices.ContainsFunc(refs, blockRefRequest.resolvesByHeight) {
-		bound, err = database.ResolveBlockNumberBound(ctx, db)
+	if hasHeightRefs {
+		// Each stale-tail retry is a further full round of probes, so it is
+		// reserved before it runs and the search stops when it cannot be
+		// paid for.
+		bound, err = database.ResolveBlockNumberBoundBudgeted(
+			ctx,
+			db,
+			func() bool {
+				return a.bark.archiveBudget.allow(
+					caller,
+					archiveBoundResolveLookups,
+				)
+			},
+		)
+		if errors.Is(err, database.ErrBlockIndexBudget) {
+			return nil, connect.NewError(
+				connect.CodeResourceExhausted,
+				errors.New(
+					"archive lookup budget exhausted resolving the "+
+						"highest block, retry later",
+				),
+			)
+		}
 		if err != nil {
 			return nil, fmt.Errorf(
 				"failed resolving highest indexed block: %w",
 				err,
 			)
 		}
+		// Each height reference binary-searches the index below that bound,
+		// and a lookup by height is far more storage work than the one
+		// lookup a hash or slot reference costs. Charge it now that the
+		// search depth is known, before any search runs.
+		heightRefs := 0
+		for _, ref := range refs {
+			if ref.resolvesByHeight() {
+				heightRefs++
+			}
+		}
+		// Stale-tail restarts were already reserved one by one above.
+		extra := heightRefs * archiveHeightSearchLookups(bound)
+		if !a.bark.archiveBudget.allow(caller, extra) {
+			return nil, connect.NewError(
+				connect.CodeResourceExhausted,
+				errors.New(
+					"archive lookup budget exhausted by height references, "+
+						"retry later or request fewer",
+				),
+			)
+		}
 	}
 
 	for _, ref := range refs {
-		point, confirmed, err := resolveBlockPoint(ctx, db, ref, bound)
+		// A probe skips stale index entries, a metadata read each that the
+		// flat per-probe charge cannot know about; each one is reserved
+		// before the search moves on to the next.
+		point, confirmed, err := resolveBlockPoint(
+			ctx, db, ref, bound,
+			func() bool { return a.bark.archiveBudget.allow(caller, 1) },
+		)
+		if errors.Is(err, database.ErrBlockIndexBudget) {
+			return nil, connect.NewError(
+				connect.CodeResourceExhausted,
+				errors.New(
+					"archive lookup budget exhausted by stale index "+
+						"entries, retry later",
+				),
+			)
+		}
 		if err != nil {
 			if isBlockMissing(err) {
 				resp.NotFound = append(resp.NotFound, ref.requested())

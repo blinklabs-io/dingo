@@ -507,7 +507,13 @@ func TestAddLedgerPeerContextRejectsCancellationDuringResolution(t *testing.T) {
 
 	added := make(chan bool, 1)
 	go func() {
-		added <- pg.addLedgerPeerContext(ctx, "relay.example.com:3001", 0, false)
+		added <- pg.addLedgerPeerContext(
+			ctx,
+			"relay.example.com:3001",
+			0,
+			false,
+			"",
+		)
 	}()
 
 	select {
@@ -930,13 +936,20 @@ func TestLedgerRediscoveryUpdatesRetainedPeerStake(t *testing.T) {
 			"44.0.9.9:3001",
 			123,
 			true,
+			"",
 		),
 	)
 	require.Equal(t, uint64(123), pg.peers[0].StakeLovelace)
 	require.True(t, pg.peers[0].StakeKnown)
 	require.False(
 		t,
-		pg.addLedgerPeerContext(context.Background(), "44.0.9.9:3001", 0, true),
+		pg.addLedgerPeerContext(
+			context.Background(),
+			"44.0.9.9:3001",
+			0,
+			true,
+			"",
+		),
 	)
 	require.Zero(t, pg.peers[0].StakeLovelace)
 	require.True(t, pg.peers[0].StakeKnown)

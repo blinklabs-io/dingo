@@ -38,6 +38,17 @@ func (d *Database) NewBatchAccumulator() BatchAccumulator {
 	return d.transactionStore().NewBatchAccumulator()
 }
 
+// NewLeiosClosureBatchAccumulator creates an API-detail accumulator when the
+// metadata provider supports ordered closure application; nil selects the
+// existing immediate path.
+func (d *Database) NewLeiosClosureBatchAccumulator() BatchAccumulator {
+	store, ok := d.transactionStore().(metadata.LeiosClosureBatcher)
+	if !ok {
+		return nil
+	}
+	return store.NewLeiosClosureBatchAccumulator()
+}
+
 // FlushBatch writes accumulated metadata rows for the active metadata plugin.
 func (d *Database) FlushBatch(
 	acc BatchAccumulator,
@@ -124,6 +135,15 @@ type BatchedTxIngestOpts struct {
 	// TX offset writes, metadata writes, and consumed-input handling are
 	// unaffected.
 	SkipProducedUtxoOffsetWrites bool
+
+	// OffsetsPersisted elides both the transaction offset and the
+	// produced-UTxO offset blob writes. Use when the caller has written
+	// this transaction's offsets itself, in bounded blob transactions of
+	// its own (Database.PersistTransactionOffsets), because staging them in
+	// the enclosing transaction could exceed the blob store's
+	// per-transaction budget. Offsets must still be present in the
+	// BlockIngestionResult.
+	OffsetsPersisted bool
 
 	// SkipConsumedInputRecovery elides the per-input GetUtxoIncludingSpent
 	// recovery checks in ensureTransactionConsumedUtxos. Use when replaying
@@ -270,8 +290,13 @@ func (d *Database) SetTransactionBatchedWithOpts(
 	txn *Txn,
 	opts BatchedTxIngestOpts,
 ) (retErr error) {
-	if opts.LedgerContextSlot != nil {
+	closureAcc, markedClosure := acc.(metadata.LeiosClosureAccumulator)
+	closureBatch := markedClosure && closureAcc.LeiosClosureRowsOnly()
+	if opts.LedgerContextSlot != nil && !closureBatch {
 		return errors.New("prototype closure context requires unbatched ingestion")
+	}
+	if closureBatch && !opts.SkipConsumedInputRecovery {
+		return errors.New("closure accumulator requires closure input semantics")
 	}
 	if acc == nil {
 		return errors.New("batch accumulator must not be nil")
@@ -332,12 +357,14 @@ func (d *Database) SetTransactionBatchedWithOpts(
 
 	blobStart := time.Now()
 	offsetData := EncodeTxOffset(&txOffset)
-	if err := blob.SetTx(blobTxn, txHashBytes, offsetData); err != nil {
-		return fmt.Errorf("set tx offset: %w", err)
-	}
-	if opts.Stats != nil {
-		// Count tx offset writes separately from produced UTxO offset writes.
-		opts.Stats.BlobTxOffsetWrites++
+	if !opts.OffsetsPersisted {
+		if err := blob.SetTx(blobTxn, txHashBytes, offsetData); err != nil {
+			return fmt.Errorf("set tx offset: %w", err)
+		}
+		if opts.Stats != nil {
+			// Count tx offset writes separately from produced UTxO offset writes.
+			opts.Stats.BlobTxOffsetWrites++
+		}
 	}
 
 	for _, utxo := range produced {
@@ -356,7 +383,7 @@ func (d *Database) SetTransactionBatchedWithOpts(
 				point.Slot,
 			)
 		}
-		if opts.SkipProducedUtxoOffsetWrites {
+		if opts.SkipProducedUtxoOffsetWrites || opts.OffsetsPersisted {
 			// Offset is required to be computed (validated above) so a
 			// regression in the indexer is still caught, but the blob
 			// write itself is elided: the immutable-copy phase already
@@ -402,7 +429,16 @@ func (d *Database) SetTransactionBatchedWithOpts(
 		setter.SetBackfillStats(opts.Stats)
 	}
 	var metadataErr error
-	if store, ok := d.transactionStore().(transactionStoreHistoricalBackfill); ok {
+	if closureBatch {
+		store, ok := d.transactionStore().(metadata.LeiosClosureBatcher)
+		if !ok {
+			return errors.New("metadata provider does not support closure batching")
+		}
+		metadataErr = store.SetTransactionLeiosClosureBatched(
+			tx, point, idx, certDeposits, opts.SkipWithdrawalWitnessWrite,
+			opts.LedgerContextSlot, acc, metadataTxn, opts.ProtocolMajor,
+		)
+	} else if store, ok := d.transactionStore().(transactionStoreHistoricalBackfill); ok {
 		metadataErr = store.SetTransactionBatchedHistorical(
 			tx, point, idx, certDeposits,
 			opts.SkipWithdrawalWitnessWrite,

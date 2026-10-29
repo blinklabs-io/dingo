@@ -547,7 +547,13 @@ func TestAccountCoins(t *testing.T) {
 	)
 	txID := testHash(0x0a)
 	policy := testKeyHash(0xcc)
+	// The block identifier names the snapshot the coins were read from,
+	// not the chain tip.
 	deps.chain.tip = ochainsync.Tip{
+		Point:       ocommon.NewPoint(10, testHash(0x0c)),
+		BlockNumber: 4,
+	}
+	deps.ledger.scanTip = ochainsync.Tip{
 		Point:       ocommon.NewPoint(9, testHash(0x0b)),
 		BlockNumber: 3,
 	}

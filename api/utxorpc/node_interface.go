@@ -49,7 +49,16 @@ type UtxorpcLedgerState interface {
 		ctx context.Context,
 		tx lcommon.Transaction,
 	) (uint64, lcommon.ExUnits, map[lcommon.RedeemerKey]lcommon.ExUnits, error)
+	ExistingTransactionHashes(
+		ctx context.Context,
+		hashes [][]byte,
+	) ([][]byte, error)
 	GetBlock(point ocommon.Point) (models.Block, error)
+	// GetBlockContext is GetBlock under the caller's context.
+	GetBlockContext(
+		ctx context.Context,
+		point ocommon.Point,
+	) (models.Block, error)
 	GetChainFromPointContext(
 		ctx context.Context,
 		point ocommon.Point,

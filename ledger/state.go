@@ -1181,9 +1181,10 @@ type LedgerStateConfig struct {
 	// on worker goroutines while earlier blocks of the chunk validate and
 	// write. Each result is bound to its transaction body and witness set, and
 	// every rule still runs against the write transaction, so verdicts and
-	// stored state are identical either way. Byron blocks, Dijkstra chunks
-	// and TrustedReplay (which preverifies the whole chunk itself) are not
-	// covered. Not consensus-affecting. The zero value is off; node
+	// stored state are identical either way. Dijkstra ranking bodies use this
+	// path independently of certified-closure signature verification. Byron
+	// blocks and TrustedReplay (which preverifies the whole chunk itself) are
+	// not covered. Not consensus-affecting. The zero value is off; node
 	// configuration turns it on by default.
 	LedgerValidateAheadEnabled bool
 	// BlockfetchLowWatermarkEnabled starts blockfetch once one blockfetch
@@ -1456,6 +1457,11 @@ type LedgerState struct {
 	// database connection.
 	txValidationCommitMutex sync.RWMutex
 	txValidationTransitions atomic.Int64
+	queuedBlockfetchFlushMu sync.Mutex
+	queuedBlockfetchFlush   *queuedBlockfetchFlush
+	// queuedBlockfetchSchedule substitutes only timer delivery in tests.
+	queuedBlockfetchSchedule func(time.Duration, func()) func()
+
 	// The fields below are writer-owned working state. Lock-free readers use
 	// consensus and tip snapshots; writers update these fields under Lock and
 	// publish a fresh immutable snapshot before unlocking.
@@ -2002,6 +2008,10 @@ type LedgerState struct {
 	// production; tests use it to hold the exact post-commit/pre-publication
 	// window without relying on scheduler timing.
 	beforeTransactionApplyPublish func()
+	// afterEndorserOffsetBatch is a test-only crash seam. Nil in production;
+	// it runs after each committed batch of endorser-block offsets, and an
+	// error from it stops the write there.
+	afterEndorserOffsetBatch func() error
 	// afterBlockApplyCommit is a test-only sequencing hook. Nil in
 	// production; it holds the durable-commit-before-snapshot-publication
 	// window in the normal block-apply path.
@@ -3619,6 +3629,7 @@ func (ls *LedgerState) Close() (retErr error) {
 	}
 	ls.closed.Store(true)
 	ls.closeMu.Unlock()
+	ls.stopQueuedBlockfetchFlush()
 	defer func() {
 		ls.closeMu.Lock()
 		ls.closeErr = retErr
@@ -9475,13 +9486,12 @@ func (ls *LedgerState) processBlocksFromSource(
 					// filtered from the blocks alone.
 					var aheadSignatures *signaturePreverifyAhead
 					prefetchAhead := ls.config.LedgerPrefetchAheadEnabled &&
-						end-i > 1
+						end-i > 1 && !dijkstraEraGate(snapshotEra)
 					// Trusted replay preverifies the whole chunk's signatures
 					// before the transaction instead.
 					signaturesAhead := ls.config.LedgerValidateAheadEnabled &&
 						!trustedReplay
-					if (prefetchAhead || signaturesAhead) &&
-						!dijkstraEraGate(snapshotEra) {
+					if prefetchAhead || signaturesAhead {
 						chunk := nextBatch[i:end]
 						validated := chunkValidatedBlocks(
 							chunk,
@@ -13260,7 +13270,17 @@ func (ls *LedgerState) latestLedgerPrimaryChainAncestor(
 }
 
 func (ls *LedgerState) GetBlock(point ocommon.Point) (models.Block, error) {
-	ret, err := ls.chain.BlockByPoint(context.Background(), point, nil)
+	return ls.GetBlockContext(context.Background(), point)
+}
+
+// GetBlockContext is GetBlock with a caller-supplied context that cancels the
+// metadata lookup. The blob read that follows takes no context, so a read
+// already in flight finishes before the call returns.
+func (ls *LedgerState) GetBlockContext(
+	ctx context.Context,
+	point ocommon.Point,
+) (models.Block, error) {
+	ret, err := ls.chain.BlockByPoint(ctx, point, nil)
 	if err != nil {
 		return models.Block{}, err
 	}
@@ -13993,6 +14013,22 @@ func (ls *LedgerState) PrimaryChainTipRelation(
 		return ochainsync.Tip{}, 0, false, errors.New("primary chain is nil")
 	}
 	return chain.TipRelation(point)
+}
+
+// PrimaryChainTipRelationAndHeader returns the primary tip, crypto-verified
+// queued-header frontier, and applied-point relation from one chain snapshot.
+func (ls *LedgerState) PrimaryChainTipRelationAndHeader(
+	point ocommon.Point,
+) (ochainsync.Tip, ochainsync.Tip, uint64, bool, error) {
+	ls.RLock()
+	chain := ls.chain
+	ls.RUnlock()
+	if chain == nil {
+		return ochainsync.Tip{}, ochainsync.Tip{}, 0, false, errors.New(
+			"primary chain is nil",
+		)
+	}
+	return chain.TipRelationAndHeader(point)
 }
 
 // PrimaryChainTipSlot returns the slot number of the primary chain tip. This
@@ -14920,6 +14956,15 @@ func (ls *LedgerState) TransactionByHash(ctx context.Context,
 	return ls.db.GetTransactionByHash(ctx, hash, nil)
 }
 
+// ExistingTransactionHashes returns the subset of hashes that have a
+// transaction record, in no particular order, from one read transaction.
+func (ls *LedgerState) ExistingTransactionHashes(
+	ctx context.Context,
+	hashes [][]byte,
+) ([][]byte, error) {
+	return ls.db.GetExistingTransactionHashes(ctx, hashes)
+}
+
 // BlockByHash returns a block by its hash.
 func (ls *LedgerState) BlockByHash(
 	ctx context.Context,
@@ -15044,13 +15089,17 @@ func (ls *LedgerState) UtxosByAddress(
 	return ret, nil
 }
 
-// UtxosByAddressComplete returns every UTxO for the requested addresses and
-// stops the read when ctx is canceled.
-func (ls *LedgerState) UtxosByAddressComplete(
+// ScanUtxosByAddress visits every UTxO matching q's exact address patterns
+// one bounded page at a time from a single database snapshot and returns the
+// tip stored in that snapshot. See database.Database.ScanUtxosByAddress.
+func (ls *LedgerState) ScanUtxosByAddress(
 	ctx context.Context,
-	addrs []ledger.Address,
-) ([]models.Utxo, error) {
-	return ls.db.UtxosByAddressComplete(ctx, addrs, nil)
+	q *models.UtxoWithOrderingQuery,
+	maxCandidates int,
+	maxBytes int64,
+	visit func([]models.UtxoWithOrdering) error,
+) (ochainsync.Tip, error) {
+	return ls.db.ScanUtxosByAddress(ctx, q, maxCandidates, maxBytes, visit)
 }
 
 // UtxosByAddressBoundedPage returns an ordered, resumable UTxO page while
@@ -15207,66 +15256,6 @@ func (ls *LedgerState) CountTransactionsByMetadataLabel(
 		)
 	}
 	return count, nil
-}
-
-// CountTransactionsInSlotRange returns the number of transactions whose slot
-// falls within the inclusive range [startSlot, endSlot].
-// Used by the Blockfrost adapter CurrentEpoch() path so epoch responses can
-// return real tx counts without decoding every block in the epoch on demand.
-func (ls *LedgerState) CountTransactionsInSlotRange(
-	startSlot, endSlot uint64,
-) (int, error) {
-	if endSlot < startSlot {
-		return 0, nil
-	}
-	store, ok := ls.db.Metadata().(metadata.SlotRangeStore)
-	if !ok {
-		return 0, errors.New(
-			"metadata store does not support slot-range statistics",
-		)
-	}
-	count, err := store.CountTransactionsInSlotRange(
-		startSlot,
-		endSlot,
-		nil,
-	)
-	if err != nil {
-		return 0, fmt.Errorf(
-			"count transactions in slot range %d-%d: %w",
-			startSlot,
-			endSlot,
-			err,
-		)
-	}
-	return count, nil
-}
-
-// CountBlocksInSlotRange returns the number of canonical blocks in the
-// inclusive slot range [startSlot, endSlot], along with the first and last
-// block slots found. It uses canonical metadata rows instead of raw blob keys
-// so orphaned fork blocks do not leak into Blockfrost epoch responses.
-func (ls *LedgerState) CountBlocksInSlotRange(
-	startSlot, endSlot uint64,
-) (int, uint64, uint64, error) {
-	if endSlot < startSlot {
-		return 0, 0, 0, nil
-	}
-	store, ok := ls.db.Metadata().(metadata.SlotRangeStore)
-	if !ok {
-		return 0, 0, 0, errors.New(
-			"metadata store does not support slot-range statistics",
-		)
-	}
-	stats, err := store.GetBlockSlotRangeStats(startSlot, endSlot, nil)
-	if err != nil {
-		return 0, 0, 0, fmt.Errorf(
-			"count blocks in slot range %d-%d: %w",
-			startSlot,
-			endSlot,
-			err,
-		)
-	}
-	return stats.Count, stats.FirstSlot, stats.LastSlot, nil
 }
 
 // resolveValidationEra determines the appropriate era descriptor for

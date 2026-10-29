@@ -3070,10 +3070,10 @@ func TestPipelineTiers(t *testing.T) {
 				name,
 			)
 		}
-		if needs := jobNeeds(t, prPipeline, id, fields); len(needs) != 1 ||
-			needs[0] != "check" {
+		if needs := jobNeeds(t, prPipeline, id, fields); len(needs) != 2 ||
+			needs[0] != "check" || needs[1] != "changes" {
 			t.Errorf(
-				"%s: tier-2 job %s needs %v, want [check]",
+				"%s: tier-2 job %s needs %v, want [check changes]",
 				prPipeline,
 				id,
 				needs,
@@ -3083,6 +3083,7 @@ func TestPipelineTiers(t *testing.T) {
 		for _, want := range []string{
 			"!cancelled()",
 			"github.event_name == 'merge_group'",
+			"needs.changes.outputs.run-ci != 'false'",
 			"vars.CI_MERGE_QUEUE != 'true'",
 			"needs.check.result == 'success'",
 			"needs.check.outputs.run-ci == 'true'",
@@ -3107,10 +3108,23 @@ func TestPipelineTiers(t *testing.T) {
 	}
 }
 
+func TestVerifyTestedAcceptsSkippedGatesOnlyBesideChanges(t *testing.T) {
+	root := repoRoot(t)
+	script := readRepoFile(t, root, publishPipeline)
+	for _, want := range []string{
+		"conclusion_of changes",
+		`[ "$conclusion" = skipped ] && [ "$changes" = success ]`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("%s verify-tested lacks %q", publishPipeline, want)
+		}
+	}
+}
+
 func TestConformanceReportsRunOnlyForLinuxRelease(t *testing.T) {
 	root := repoRoot(t)
 	const datasetRevision = "6cd8c928665bbafe90e02066ebb4620e38f051de"
-	const ndcLedgerRevision = "9d14fd8cc05562055c3dc2288661bb6e2b7e7ad7"
+	const ndcLedgerRevision = "e02a9e1c7dc15cc6d618c7ffdbd41167a38de2a4"
 	const uplcCorpusSHA256 = "8bd4ad4f9f4c8c6b8ffa1f06ed1db0b43043afbba77ef6a14bcfb5a52345ed3f"
 	const turboCorpusSHA256 = "821af55e3323c826b5598c964d634b46dd468014834d0e97ebdc5edb0a158576"
 

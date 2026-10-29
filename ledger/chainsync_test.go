@@ -5431,6 +5431,8 @@ func TestProcessEpochRollover_OrderingInvariant(t *testing.T) {
 	// pot movements are visible to the deposit refunds). dingo ran POOLREAP
 	// before MIR until the epoch-boundary snapshot semantics were corrected.
 	wantOrder := []string{
+		"applyByronTranslationReserves",       // Byron-to-Shelley translation
+		"applyStakeRewards",                   // delayed reward update
 		"applyMIRCerts",                       // (1) Shelley-era INSTANT rule, pre-SNAP
 		"ComputeAndApplyPParamUpdates",        // (2) Shelley-style pparam updates
 		"applyPoolRetirements",                // (3) embedded POOLREAP deposit refunds

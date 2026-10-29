@@ -230,6 +230,54 @@ FROM "transaction" WHERE hash IN (`+bindPlaceholders(len(chunk))+`)`,
 	return ret, nil
 }
 
+func (s *Store) GetExistingTransactionHashes(
+	hashes [][]byte,
+	txn types.Txn,
+) ([][]byte, error) {
+	ret := [][]byte{}
+	if len(hashes) == 0 {
+		return ret, nil
+	}
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	for start := 0; start < len(hashes); start += s.dialect.ParameterLimit() {
+		end := min(start+s.dialect.ParameterLimit(), len(hashes))
+		chunk := hashes[start:end]
+		args := make([]any, len(chunk))
+		for i := range chunk {
+			args[i] = chunk[i]
+		}
+		rows, err := db.QueryContext(
+			ctx,
+			s.dialect.Rebind(
+				`SELECT hash FROM "transaction" WHERE hash IN (`+
+					bindPlaceholders(len(chunk))+`)`,
+			),
+			args...,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("get existing tx hashes: %w", err)
+		}
+		for rows.Next() {
+			var hash []byte
+			if err := rows.Scan(&hash); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			ret = append(ret, hash)
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+	}
+	return ret, nil
+}
+
 func (s *Store) GetTransactionHashesAfterSlot(
 	slot uint64,
 	txn types.Txn,

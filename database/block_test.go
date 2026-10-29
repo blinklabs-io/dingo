@@ -17,15 +17,19 @@ package database
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/common"
@@ -1294,4 +1298,218 @@ func TestBlockIDByPointMetadataReadsNoBlockBody(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, block.ID, blockID)
 	require.Zero(t, store.bodyReads)
+}
+
+// TestResolveBlockNumberBoundCountsStaleTailRestarts covers an index whose
+// newest entries have lost their block metadata. The bound still resolves to
+// the highest live block, and reports one restart per stale entry so a caller
+// metering storage work can charge for them.
+func TestResolveBlockNumberBoundCountsStaleTailRestarts(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	blocks := make([]models.Block, 0, 5)
+	for i := uint64(1); i <= 5; i++ {
+		block := testIndexedBlock(i*10, i, byte(i))
+		require.NoError(t, db.BlockCreate(block, nil))
+		blocks = append(blocks, block)
+	}
+
+	bound, err := ResolveBlockNumberBound(context.Background(), db)
+	require.NoError(t, err)
+	require.True(t, bound.Resolved)
+	require.Zero(t, bound.StaleTailRestarts, "a live tail needs no restart")
+
+	txn := db.BlobTxn(true)
+	for _, block := range blocks[3:] {
+		require.NoError(t, db.Blob().Delete(
+			txn.Blob(),
+			types.BlockBlobMetadataKey(
+				types.BlockBlobKey(block.Slot, block.Hash),
+			),
+		))
+	}
+	require.NoError(t, txn.Commit())
+
+	bound, err = ResolveBlockNumberBound(context.Background(), db)
+	require.NoError(t, err)
+	require.True(t, bound.Resolved)
+	require.Equal(t, blocks[2].Number, bound.HighestNumber)
+	require.Equal(t, 2, bound.StaleTailRestarts)
+}
+
+type blockHashMetadataGate struct {
+	metadata.MetadataStore
+	armed     atomic.Bool
+	requested chan struct{}
+	release   chan struct{}
+}
+
+func (s *blockHashMetadataGate) ReadTransaction(ctx context.Context) types.Txn {
+	if s.armed.Load() {
+		select {
+		case s.requested <- struct{}{}:
+		default:
+		}
+		select {
+		case <-s.release:
+		case <-ctx.Done():
+		}
+	}
+	return s.MetadataStore.ReadTransaction(ctx)
+}
+
+func TestBlockByHashDoesNotAcquireMetadataRead(t *testing.T) {
+	t.Parallel()
+	for _, kind := range []string{"known", "missing"} {
+		t.Run(kind, func(t *testing.T) {
+			base := newTestDB(t)
+			gate := &blockHashMetadataGate{
+				MetadataStore: base.Metadata(),
+				requested:     make(chan struct{}, 1),
+				release:       make(chan struct{}),
+			}
+			db, err := New(t.Context(), base.Config(), Stores{
+				Blob: base.Blob(), Metadata: gate,
+			})
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, db.Close()) })
+			block := testIndexedBlock(42, 7, 0x42)
+			require.NoError(t, db.BlockCreate(block, nil))
+			hash := block.Hash
+			if kind == "missing" {
+				hash = bytes.Repeat([]byte{0xff}, 32)
+			}
+			gate.armed.Store(true)
+			release := sync.OnceFunc(func() { close(gate.release) })
+			defer release()
+			type result struct {
+				block models.Block
+				err   error
+			}
+			results := make(chan result, 1)
+			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+			defer cancel()
+			go func() {
+				got, err := BlockByHash(ctx, db, hash)
+				results <- result{block: got, err: err}
+			}()
+			select {
+			case got := <-results:
+				if kind == "known" {
+					require.NoError(t, got.err)
+					require.Equal(t, block, got.block)
+				} else {
+					require.ErrorIs(t, got.err, models.ErrBlockNotFound)
+				}
+			case <-gate.requested:
+				release()
+				<-results
+				t.Fatal("block-only lookup acquired a metadata transaction")
+			case <-ctx.Done():
+				release()
+				<-results
+				t.Fatal("block-only lookup waited behind metadata read pool")
+			}
+		})
+	}
+}
+
+type blockHashReadTxn struct {
+	types.Txn
+	rollbackErr error
+}
+
+func (t *blockHashReadTxn) Rollback() error {
+	return errors.Join(t.Txn.Rollback(), t.rollbackErr)
+}
+
+type blockHashReadStore struct {
+	blob.BlobStore
+	readErr     error
+	rollbackErr error
+	panicRead   bool
+	afterRead   func()
+}
+
+func (s blockHashReadStore) NewTransaction(rw bool) types.Txn {
+	return &blockHashReadTxn{
+		Txn: s.BlobStore.NewTransaction(rw), rollbackErr: s.rollbackErr,
+	}
+}
+
+func (s blockHashReadStore) Get(txn types.Txn, key []byte) ([]byte, error) {
+	if s.panicRead {
+		panic("injected block hash read panic")
+	}
+	if s.readErr != nil {
+		return nil, s.readErr
+	}
+	return s.BlobStore.Get(txn.(*blockHashReadTxn).Txn, key)
+}
+
+func (s blockHashReadStore) GetBlock(
+	txn types.Txn,
+	slot uint64,
+	hash []byte,
+) ([]byte, types.BlockMetadata, error) {
+	raw, meta, err := s.BlobStore.GetBlock(
+		txn.(*blockHashReadTxn).Txn, slot, hash,
+	)
+	if s.afterRead != nil {
+		s.afterRead()
+	}
+	return raw, meta, err
+}
+
+func TestBlockByHashBlobOnlyPreservesErrorsAndRelease(t *testing.T) {
+	t.Parallel()
+	for _, kind := range []string{
+		"success", "read error", "rollback error", "panic", "cancel after read",
+	} {
+		t.Run(kind, func(t *testing.T) {
+			db := newTestDB(t)
+			block := testIndexedBlock(42, 7, 0x42)
+			require.NoError(t, db.BlockCreate(block, nil))
+			base := db.Blob()
+			failure := errors.New("injected block-only failure")
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			store := blockHashReadStore{BlobStore: base}
+			switch kind {
+			case "read error":
+				store.readErr = failure
+			case "rollback error":
+				store.rollbackErr = failure
+			case "panic":
+				store.panicRead = true
+			case "cancel after read":
+				store.afterRead = cancel
+			}
+			db.SetBlobStore(store)
+			got, err := BlockByHash(ctx, db, block.Hash)
+			switch kind {
+			case "success":
+				require.NoError(t, err)
+				require.Equal(t, block, got)
+			case "read error", "rollback error":
+				require.ErrorIs(t, err, failure)
+			case "panic":
+				require.ErrorIs(t, err, ErrTxnPanic)
+			case "cancel after read":
+				require.ErrorIs(t, err, context.Canceled)
+			}
+			_, drain := db.SetBlobStore(base)
+			drained := make(chan struct{})
+			go func() { drain(); close(drained) }()
+			select {
+			case <-drained:
+			case <-time.After(time.Second):
+				t.Fatal("BlockByHash leaked the blob-store lifetime pin")
+			}
+			got, err = BlockByHash(nil, db, block.Hash)
+			require.NoError(t, err)
+			require.Equal(t, block, got,
+				"nil context retains default semantics")
+		})
+	}
 }

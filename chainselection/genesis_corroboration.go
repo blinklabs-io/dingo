@@ -142,13 +142,11 @@ func (cs *ChainSelector) peerCanCorroborateLocked(
 // corroboratorIdentity returns the independence group used to de-duplicate
 // corroboration witnesses, and whether the connection could be placed in one.
 // With a PeerIdentity hook configured the group is the one it reports, which
-// the node backs with peer governance's diversity group, so one operator's
-// several addresses count once. A connection the hook cannot place has no
-// identity: keying it by remote host instead would put it in a different
-// namespace from its siblings, so an untracked connection and its tracked
-// siblings would count as independent of each other. Without a hook,
-// witnesses are grouped by remote host. Either is a lower bound on
-// independence, not a guarantee.
+// the node backs with ledger or snapshot control metadata, so several relay
+// addresses under one control key count once. A connection the hook cannot
+// place has no identity: address or topology diversity alone does not prove
+// independent control. Without a hook, witnesses are grouped by remote host.
+// Either is a lower bound on independence, not a guarantee.
 func (cs *ChainSelector) corroboratorIdentity(
 	connId ouroboros.ConnectionId,
 ) (string, bool) {
@@ -211,7 +209,8 @@ func (cs *ChainSelector) corroboratingPeersIncludingCandidatesLocked(
 	seen := make(map[ouroboros.ConnectionId]struct{},
 		len(cs.peerTips)+len(cs.pendingPeerTips)+len(cs.deliveredPeerTips))
 	countWitness := func(connId ouroboros.ConnectionId, peerTip *PeerChainTip) {
-		if connId == candidate || !cs.peerCanCorroborateLocked(connId, peerTip) {
+		if connId == candidate ||
+			!cs.peerCanCorroborateLocked(connId, peerTip) {
 			return
 		}
 		if !candidateTip.confirmsRecentChainWithin(
@@ -340,11 +339,11 @@ func (cs *ChainSelector) ingressDecision(
 		}
 		return ingressDeny
 	}
-	defer releaseGeneration()
 	var observedPoint ocommon.Point
 	var observedBlock uint64
 	var localTip ochainsync.Tip
 	verdict := func() ingressVerdict {
+		defer releaseGeneration()
 		cs.mutex.RLock()
 		defer cs.mutex.RUnlock()
 		peerTip := cs.latestPeerTipCandidateLocked(connId)

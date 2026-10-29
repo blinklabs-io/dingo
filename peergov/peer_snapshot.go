@@ -16,6 +16,7 @@ package peergov
 
 import (
 	"context"
+	"fmt"
 	"net"
 
 	"github.com/blinklabs-io/dingo/topology"
@@ -52,14 +53,36 @@ func PoolRelaysFromPeerSnapshot(
 	if snapshot == nil {
 		return nil
 	}
-	accessPoints := snapshot.RelayAccessPoints()
-	relays := make([]PoolRelay, 0, len(accessPoints))
-	for _, accessPoint := range accessPoints {
-		if relay, ok := poolRelayFromSnapshotAccessPoint(accessPoint); ok {
-			relays = append(relays, relay)
+	pools := append(
+		append(
+			[]topology.PeerSnapshotLedgerPool(nil),
+			snapshot.BigLedgerPools...,
+		),
+		snapshot.AllLedgerPools...,
+	)
+	relays := make([]PoolRelay, 0, snapshotRelayCount(pools))
+	for poolIdx, pool := range pools {
+		controlIdentity := fmt.Sprintf(
+			"snapshot:%s:%d",
+			snapshot.Point.BlockPointHash,
+			poolIdx,
+		)
+		for _, accessPoint := range pool.Relays {
+			if relay, ok := poolRelayFromSnapshotAccessPoint(accessPoint); ok {
+				relay.ControlIdentity = controlIdentity
+				relays = append(relays, relay)
+			}
 		}
 	}
 	return relays
+}
+
+func snapshotRelayCount(pools []topology.PeerSnapshotLedgerPool) int {
+	count := 0
+	for _, pool := range pools {
+		count += len(pool.Relays)
+	}
+	return count
 }
 
 func poolRelayFromSnapshotAccessPoint(
@@ -100,6 +123,7 @@ func (p *PeerGovernor) addLedgerRelaysContext(
 	// continue past it until the deficit is filled.
 	added := 0
 	ordered := weightedSample(relays, len(relays))
+	corroborationIdentities := p.ledgerRelayCorroborationIdentities(relays)
 	addresses := make([][]string, len(ordered))
 	origins := make([][]string, len(ordered))
 	maxAddresses := 0
@@ -130,7 +154,13 @@ func (p *PeerGovernor) addLedgerRelaysContext(
 			origin := origins[i][round]
 			host, _, err := net.SplitHostPort(addr)
 			if err == nil && net.ParseIP(host) != nil && addr == origin {
-				if p.addLedgerPeerContext(ctx, addr, relay.Stake, relay.StakeKnown) {
+				if p.addLedgerPeerContext(
+					ctx,
+					addr,
+					relay.Stake,
+					relay.StakeKnown,
+					corroborationIdentities[p.normalizeAddress(origin)],
+				) {
 					added++
 				}
 				continue
@@ -165,6 +195,7 @@ func (p *PeerGovernor) addLedgerRelaysContext(
 				origin,
 				relay.Stake,
 				relay.StakeKnown,
+				corroborationIdentities[p.normalizeAddress(origin)],
 			) {
 				added++
 			}

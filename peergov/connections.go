@@ -948,6 +948,11 @@ func (p *PeerGovernor) handleInboundConnectionEvent(evt event.Event) {
 	p.publishPendingEvents(selectionEvents)
 }
 
+func isLocalChainsyncRestart(e connmanager.ConnectionClosedEvent) bool {
+	return e.Error == nil &&
+		event.IsLocalChainsyncResyncReason(e.LocalCloseReason)
+}
+
 func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
 	e, ok := evt.Data.(connmanager.ConnectionClosedEvent)
 	if !ok {
@@ -1003,7 +1008,8 @@ func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
 				) >= p.config.InboundCooldown {
 				peer.InboundShortLivedCount = 0
 			}
-			if !peer.InboundConnectedAt.IsZero() &&
+			if !isLocalChainsyncRestart(e) &&
+				!peer.InboundConnectedAt.IsZero() &&
 				connDur < minStableConnectionDuration {
 				// A close with no error is not proof that this node asked
 				// for it: the connection layer reports a remote close as
@@ -1011,7 +1017,8 @@ func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
 				// peer that handshakes and disconnects looks.
 				peer.InboundShortLivedCount++
 				p.rememberInboundHostChurnLocked(peer, connClosedAt)
-			} else if !peer.InboundConnectedAt.IsZero() {
+			} else if !isLocalChainsyncRestart(e) &&
+				!peer.InboundConnectedAt.IsZero() {
 				peer.InboundShortLivedCount = 0
 			}
 			peer.LastInboundDisconnect = connClosedAt
@@ -1056,7 +1063,12 @@ func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
 				}
 				// A stall ends a long session without the peer having been
 				// useful, so it backs the peer off like a short one.
-				if !stalled && !peer.ConnectedAt.IsZero() &&
+				if isLocalChainsyncRestart(e) {
+					// Local cursor recovery is not evidence of instability.
+					// Keep retry pacing and existing failure history, so a
+					// later genuine failure resumes its previous backoff rung.
+					peer.ReconnectDelay = initialReconnectDelay
+				} else if !stalled && !peer.ConnectedAt.IsZero() &&
 					connDur >= minStableConnectionDuration {
 					// Connection was stable, reset backoff
 					peer.ReconnectCount = 0

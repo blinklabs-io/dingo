@@ -7492,6 +7492,9 @@ func TestSubscribeChainsyncResyncClosesConnectionForFreshSyncReasons(
 			ctx := t.Context()
 			o.SubscribeChainsyncResync(ctx)
 
+			_, closeEvents := bus.Subscribe(
+				connmanager.ConnectionClosedEventType,
+			)
 			connId := oConn.Id()
 			bus.Publish(
 				event.ChainsyncResyncEventType,
@@ -7527,6 +7530,13 @@ func TestSubscribeChainsyncResyncClosesConnectionForFreshSyncReasons(
 				2*time.Second,
 				20*time.Millisecond,
 			)
+			select {
+			case closeEvent := <-closeEvents:
+				closed := closeEvent.Data.(connmanager.ConnectionClosedEvent)
+				require.Equal(t, reason, closed.LocalCloseReason)
+			case <-time.After(time.Second):
+				t.Fatal("missing owner close notification")
+			}
 			require.NotContains(
 				t,
 				logBuf.String(),
@@ -8480,6 +8490,106 @@ func TestChainsyncClientRollForwardWithholdsWallClockStalePeer(t *testing.T) {
 		t, ledgerCh, 200*time.Millisecond,
 		"no further header should be published",
 	)
+}
+
+func TestHandleConnClosedEventPreservesLocalRestartStability(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		reason   string
+		closeErr error
+		local    bool
+	}{
+		{
+			name:   "ingress promotion",
+			reason: event.ChainsyncResyncReasonIngressPromotion,
+			local:  true,
+		},
+		{
+			name:   "deferred recovery",
+			reason: event.ChainsyncResyncReasonHeaderValidationRecovery,
+			local:  true,
+		},
+		{
+			name:   "peer fault",
+			reason: event.ChainsyncResyncReasonRollbackExceedsK,
+		},
+		{name: "unknown reason", reason: "unknown reason"},
+		{name: "remote clean close"},
+		{
+			name:     "local reason cannot mask transport error",
+			reason:   event.ChainsyncResyncReasonIngressPromotion,
+			closeErr: io.EOF,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+			bus := event.NewEventBus(nil, logger)
+			defer bus.Close()
+			conn := newChainsyncResyncTestConnection(t, "127.0.0.2:3001")
+			defer conn.Close()
+			manager := connmanager.NewConnectionManager(
+				connmanager.ConnectionManagerConfig{Logger: logger},
+			)
+			require.True(t, manager.AddConnection(
+				conn, true, conn.Id().RemoteAddr.String(),
+			))
+			pg := peergov.NewPeerGovernor(peergov.PeerGovernorConfig{
+				Logger:          logger,
+				EventBus:        bus,
+				ConnManager:     manager,
+				DisableOutbound: true,
+			})
+			require.NoError(t, pg.Start(t.Context()))
+			defer func() {
+				ctx, cancel := context.WithTimeout(
+					context.Background(), 3*time.Second,
+				)
+				defer cancel()
+				require.NoError(t, pg.Stop(ctx))
+			}()
+			id := conn.Id()
+			require.NoError(t, bus.PublishBlocking(
+				connmanager.InboundConnectionEventType,
+				event.NewEvent(connmanager.InboundConnectionEventType,
+					connmanager.InboundConnectionEvent{
+						ConnectionId: id,
+						LocalAddr:    id.LocalAddr,
+						RemoteAddr:   id.RemoteAddr,
+					},
+				),
+			))
+			require.Eventually(t, func() bool {
+				peers := pg.GetPeers()
+				return len(peers) == 1 && peers[0].Connection != nil
+			}, time.Second, time.Millisecond)
+			if tc.local {
+				pg.UpdatePeerConnectionStability(id, 0.8)
+			}
+			before := pg.GetPeers()[0]
+			o := newOuroboros(OuroborosConfig{Logger: logger})
+			defer func() { require.NoError(t, o.Close()) }()
+			o.peerGov = pg
+			o.HandleConnClosedEvent(event.NewEvent(
+				connmanager.ConnectionClosedEventType,
+				connmanager.ConnectionClosedEvent{
+					ConnectionId:     id,
+					LocalCloseReason: tc.reason,
+					Error:            tc.closeErr,
+				},
+			))
+			after := pg.GetPeers()[0]
+			if tc.local {
+				require.Equal(t, before.ConnectionStability,
+					after.ConnectionStability)
+				require.Equal(t,
+					before.PerformanceScore, after.PerformanceScore)
+			} else {
+				require.True(t, after.ConnectionStabilityInit)
+				require.Zero(t, after.ConnectionStability)
+			}
+		})
+	}
 }
 
 func TestChainsyncRollBackwardTrimsIneligibleObserverDeliveredHistory(

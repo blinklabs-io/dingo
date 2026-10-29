@@ -296,6 +296,23 @@ func (ls *LedgerState) applyEndorserBlockInContext(
 		}
 	}
 	txn.MarkBlockCborCommittedSeparately(ebSlot, ebHash)
+	// The offsets of a dense endorser block exceed one blob transaction, so
+	// they commit in bounded blob transactions of their own, after the blob
+	// they point at. See DATABASE.md, "Leios endorser-block storage".
+	var levels []lcommon.Transaction
+	for _, idx := range keepIndexes {
+		levels = append(levels, TransactionLevelsForApply(txs[idx])...)
+	}
+	if err := ls.db.PersistTransactionOffsets(
+		txn,
+		levels,
+		offsets,
+		ls.afterEndorserOffsetBatch,
+	); err != nil {
+		return 0, 0, &leiosEndorserBlockStorageError{
+			err: fmt.Errorf("store endorser block offsets: %w", err),
+		}
+	}
 	return applied, donation, nil
 }
 
@@ -322,7 +339,15 @@ func (ls *LedgerState) validateAndApplyEndorserBlockTransactions(
 	txs []lcommon.Transaction,
 	indexes []int,
 ) (int, uint64, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, 0, err
+	}
 	snapshot := ls.txValidationSnapshot()
+	acc := ls.db.NewLeiosClosureBatchAccumulator()
+	if acc != nil {
+		defer acc.Reset()
+	}
+	var signatures preverifiedSignatureSet
 	created := make(map[utxoref.Key]lcommon.Utxo, len(indexes)*2)
 	consumed := make(map[utxoref.Key]struct{}, len(indexes)*2)
 	applyEvents := make([]TransactionEvent, 0, len(indexes))
@@ -357,6 +382,17 @@ func (ls *LedgerState) validateAndApplyEndorserBlockTransactions(
 			return 0, 0, err
 		}
 		if validationEra.ValidateTxFunc != nil {
+			validateStart := time.Now()
+			if signatures == nil {
+				selected := make([]lcommon.Transaction, len(indexes))
+				for i, idx := range indexes {
+					selected[i] = txs[idx]
+				}
+				signatures = preverifyTransactionSignatures(selected)
+				if err := ctx.Err(); err != nil {
+					return 0, 0, err
+				}
+			}
 			pp := snapshot.currentPParams
 			isCurrentEraPParams := true
 			if validationEra.Id != snapshot.currentEra.Id &&
@@ -370,16 +406,16 @@ func (ls *LedgerState) validateAndApplyEndorserBlockTransactions(
 				snapshot.syntheticV2CostModelInEffect,
 			)
 			lv := (&LedgerView{
-				ctx:               ctx,
-				txn:               txn,
-				ls:                ls,
-				intraBlockUtxos:   created,
-				consumedUtxos:     consumed,
-				horizonAnchorSlot: referenceSlot,
-				epochStartSlot:    snapshot.currentEpochStartSlot,
+				ctx:                   ctx,
+				txn:                   txn,
+				ls:                    ls,
+				intraBlockUtxos:       created,
+				consumedUtxos:         consumed,
+				horizonAnchorSlot:     referenceSlot,
+				epochStartSlot:        snapshot.currentEpochStartSlot,
+				preverifiedSignatures: signatures[tx.LeiosHash()],
 			}).pinCommitteeState(snapshot.currentEpoch, pp).
 				pinSyntheticV2CostModel(synthetic)
-			validateStart := time.Now()
 			err = validationEra.ValidateTxFunc(
 				tx,
 				referenceSlot,
@@ -425,12 +461,17 @@ func (ls *LedgerState) validateAndApplyEndorserBlockTransactions(
 		delta.expandedIndexOffset = expandedIndexOffset
 		delta.closureContextSlot = contextSlot
 		delta.skipConsumedInputRecovery = true
+		delta.offsetsPersisted = true
 		delta.stageApplyEvents = func(events []TransactionEvent) {
 			applyEvents = append(applyEvents, events...)
 		}
 		delta.addTransaction(tx, idx)
 		applyStart := time.Now()
-		err = delta.applyWithoutRecordingDonations(ctx, ls, txn)
+		if acc != nil {
+			err = delta.applyWithoutRecordingDonationsWithAccumulator(ctx, ls, txn, acc)
+		} else {
+			err = delta.applyWithoutRecordingDonations(ctx, ls, txn)
+		}
 		ls.metrics.observeBlockStage(blockStageApply, time.Since(applyStart))
 		if err == nil {
 			donation, err = addUint64(donation, delta.donation)
@@ -451,6 +492,14 @@ func (ls *LedgerState) validateAndApplyEndorserBlockTransactions(
 		}
 		for _, input := range tx.Consumed() {
 			consumed[utxoref.ForInput(input)] = struct{}{}
+		}
+	}
+	if acc != nil {
+		flushStart := time.Now()
+		err := ls.db.FlushBatch(acc, txn)
+		ls.metrics.observeBlockStage(blockStageApply, time.Since(flushStart))
+		if err != nil {
+			return 0, 0, &leiosEndorserBlockStorageError{err: fmt.Errorf("flush endorser API details: %w", err)}
 		}
 	}
 	if len(applyEvents) > 0 {

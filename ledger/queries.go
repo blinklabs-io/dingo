@@ -1292,28 +1292,35 @@ func (ls *LedgerState) queryShelley(ctx context.Context, query *olocalstatequery
 // the three epochs of block nonce rows kept, the nonce fold recomputes from
 // the stored blocks.
 //
-// Also honors at: ShelleyLedgerTipQuery (answers at itself when pinned), and
+// Also honors at: ShelleyLedgerTipQuery (answers at itself when pinned),
 // ShelleyProposedProtocolParamsUpdatesQuery (resolves at's era like
-// HardForkCurrentEraQuery: an empty map from Conway on, refused earlier).
+// HardForkCurrentEraQuery: an empty map from Conway on, refused earlier),
+// ShelleyStakePoolParamsQuery (queryShelleyStakePoolParams) and
+// ShelleyPoolStateQuery (queryShelleyPoolState): the pool registrations added
+// at or before at.Slot in the epoch containing it, plus, for pool state, the
+// retirements and deposits as of that slot. Pool registration and retirement
+// rows are removed only by rollback, so neither needs a retention floor; a
+// point no epoch record covers is refused with ErrHistoricalStateUnavailable.
 //
 // Intentionally live-only, not a gap: ShelleyGenesisConfigQuery
 // (genesis is an immutable chain-wide constant with no historical variant),
 // ShelleyGetLedgerPeerSnapshotQuery (peer/networking bootstrap data, not
-// ledger state at all).
+// ledger state at all), ShelleyRewardProvenanceQuery (a constant: the
+// reference answers the ledger's default provenance whatever the state).
 //
-// Not point-aware, real gap: ShelleyStakePoolParamsQuery and
-// ShelleyStakePoolStateQuery read live pool registration and delegation rows,
-// which carry no per-point history.
+// Not point-aware, real gap: ShelleyStakePoolStateQuery reads live pool
+// registration and delegation rows, and delegations carry no per-point
+// history to read back.
 //
-// Not answered, so the call fails with "unsupported query type":
-// ShelleyPoolStateQuery and
-// ShelleyNonMyopicMemberRewardsQuery, which decode but have no handler here;
-// ShelleyStakePoolStateQuery on every network but the Leios prototype's
-// (LedgerStateConfig.StakePoolStateQuery), because released nodes do not
-// support it;
-// ShelleyRewardInfoPoolsQuery, ShelleyRewardProvenanceQuery,
-// ShelleyDebugEpochStateQuery and ShelleyDebugNewEpochStateQuery, which need
-// reward-calculation and full epoch state that is not tracked.
+// Not answered, so the call fails with ErrQueryNotAnswered:
+// ShelleyNonMyopicMemberRewardsQuery and ShelleyRewardInfoPoolsQuery, which
+// rank pools by a performance estimate derived from a per-pool likelihood
+// history and the last boundary's reward pot, neither of which is tracked;
+// ShelleyDebugEpochStateQuery and ShelleyDebugNewEpochStateQuery, which return
+// the whole epoch state in the ledger's encoding. Also not answered, with an
+// unsupported-query error: ShelleyStakePoolStateQuery on every network but
+// the Leios prototype's (LedgerStateConfig.StakePoolStateQuery), because
+// released nodes do not support it.
 //
 // Not applicable: ShelleyCborQuery (a combinator, not a leaf query --
 // forwards at to whatever it wraps).
@@ -1380,7 +1387,12 @@ func (ls *LedgerState) queryShelleyLeaf(ctx context.Context, query any,
 	case *olocalstatequery.ShelleyProposedProtocolParamsUpdatesQuery:
 		return ls.queryShelleyProposedProtocolParamsUpdates(ctx, q, at, txn)
 	case *olocalstatequery.ShelleyStakePoolParamsQuery:
-		return ls.queryShelleyStakePoolParams(ctx, q.PoolIds.Items())
+		return ls.queryShelleyStakePoolParams(
+			ctx,
+			q.PoolIds.Items(),
+			at,
+			txn,
+		)
 	case *olocalstatequery.ShelleyStakePoolStateQuery:
 		// Released nodes do not support GetStakePoolState, so only the Leios
 		// prototype answers it; elsewhere it is unsupported like any other
@@ -1389,15 +1401,22 @@ func (ls *LedgerState) queryShelleyLeaf(ctx context.Context, query any,
 			return nil, fmt.Errorf("unsupported query type: %T", q)
 		}
 		return ls.queryShelleyStakePoolState(ctx, q, txn)
-	// TODO: implement the remaining Shelley ledger queries below.
-	/*
-		case *olocalstatequery.ShelleyNonMyopicMemberRewardsQuery:
-		case *olocalstatequery.ShelleyDebugEpochStateQuery:
-		case *olocalstatequery.ShelleyDebugNewEpochStateQuery:
-		case *olocalstatequery.ShelleyRewardProvenanceQuery:
-		case *olocalstatequery.ShelleyRewardInfoPoolsQuery:
-		case *olocalstatequery.ShelleyPoolStateQuery:
-	*/
+	case *olocalstatequery.ShelleyRewardProvenanceQuery:
+		return ls.queryShelleyRewardProvenance()
+	case *olocalstatequery.ShelleyPoolStateQuery:
+		return ls.queryShelleyPoolState(ctx, q, at, txn)
+	case *olocalstatequery.ShelleyNonMyopicMemberRewardsQuery:
+		return nil, queryNotAnswered(
+			"GetNonMyopicMemberRewards", missingPoolPerformance,
+		)
+	case *olocalstatequery.ShelleyRewardInfoPoolsQuery:
+		return nil, queryNotAnswered(
+			"GetRewardInfoPools", missingPoolPerformance,
+		)
+	case *olocalstatequery.ShelleyDebugEpochStateQuery:
+		return nil, queryNotAnswered("DebugEpochState", missingEpochState)
+	case *olocalstatequery.ShelleyDebugNewEpochStateQuery:
+		return nil, queryNotAnswered("DebugNewEpochState", missingEpochState)
 	default:
 		return nil, fmt.Errorf("unsupported query type: %T", q)
 	}
@@ -2649,6 +2668,7 @@ func (ls *LedgerState) queryShelleyUtxoByAddress(
 		if err != nil {
 			return nil, err
 		}
+		txOut = localStateQueryTransactionOutput(txOut)
 		txId, err := lcommon.NewBlake2b256Checked(utxo.TxId)
 		if err != nil {
 			return nil, fmt.Errorf("utxo by address tx id: %w", err)
@@ -3243,6 +3263,7 @@ func (ls *LedgerState) queryShelleyUtxoByTxIn(ctx context.Context, txIns []ledge
 		if err != nil {
 			return nil, err
 		}
+		txOut = localStateQueryTransactionOutput(txOut)
 		txId, err := lcommon.NewBlake2b256Checked(utxo.TxId)
 		if err != nil {
 			return nil, fmt.Errorf("utxo by tx in tx id: %w", err)

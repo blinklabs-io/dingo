@@ -114,10 +114,10 @@ const (
 	// crossing it means the tip is genuinely stuck, not merely quiet.
 	DefaultHealthReadyGapSlots = 1000
 	// DefaultForgeUpstreamStalenessSlots is 0, which disables the upstream
-	// staleness bound. It is opt-in because the newest block this node holds
-	// is a BLOCK while the upstream target is published at HEADER admission,
-	// so the two legitimately differ by the inter-block gap and a small
-	// always-on bound refuses leader slots during ordinary operation.
+	// staleness bound. The always-on forge gate covers the locally admitted,
+	// crypto-verified header frontier. This optional bound can also compare a
+	// policy-approved peer-advertised head within the bounded Genesis window,
+	// which is not authenticated evidence for an always-on consensus gate.
 	DefaultForgeUpstreamStalenessSlots = 0
 	// DefaultForgeAppliedTipStalenessSlots is 0, which disables the optional
 	// wall-clock age bound. The bound is ignored when no corroborated upstream
@@ -486,10 +486,10 @@ type TokenRegistryConfig struct {
 	// Foundation registry for mainnet, the IOG testnet registry otherwise.
 	SourceURL string `yaml:"sourceUrl"             envconfig:"DINGO_TOKEN_REGISTRY_SOURCE_URL"`
 	// ManifestURL identifies the signed manifest that authenticates each
-	// snapshot. It is required when the sync is enabled.
+	// snapshot for an operator-managed mirror. Empty uses the public registry.
 	ManifestURL string `yaml:"manifestUrl"           envconfig:"DINGO_TOKEN_REGISTRY_MANIFEST_URL"`
 	// TrustedManifestKey is the hex-encoded Ed25519 public key used to verify
-	// signed manifests. It is required when the sync is enabled.
+	// an optional mirror manifest. Required only with ManifestURL.
 	TrustedManifestKey string `yaml:"trustedManifestKey"    envconfig:"DINGO_TOKEN_REGISTRY_TRUSTED_MANIFEST_KEY"`
 	// Interval controls how often the registry is re-checked. Each check
 	// is a conditional request, so an unchanged registry costs no download.
@@ -679,10 +679,12 @@ type DMQConfig struct {
 	// TopologyFile is a dmq-node topology file naming the DMQ peers to dial.
 	// It is separate from the Cardano topology.
 	TopologyFile string `yaml:"topologyFile" envconfig:"DINGO_DMQ_TOPOLOGY_FILE"`
-	// MinPeers is the number of DMQ peers to keep connections to. It must
-	// not exceed MaxPeers.
+	// MinPeers is the number of DMQ peers to keep dialed. Inbound connections
+	// do not count toward it. It must not exceed MaxPeers.
 	MinPeers uint `yaml:"minPeers"     envconfig:"DINGO_DMQ_MIN_PEERS"`
-	// MaxPeers is the most DMQ peers to hold connections to. Zero allows
+	// MaxPeers is the most DMQ peer connections to hold, inbound and dialed.
+	// Inbound ones stop at MaxPeers less the room kept for dialed peers:
+	// MinPeers, or the topology's local-root valency if larger. Zero allows
 	// none, which needs MinPeers of zero too.
 	MaxPeers uint `yaml:"maxPeers"     envconfig:"DINGO_DMQ_MAX_PEERS"`
 }

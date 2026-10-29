@@ -132,6 +132,26 @@ func TestObservedLedgerResult(t *testing.T) {
 			"VotersDoNotExist",
 			true,
 		},
+		{
+			"stake registration deposit",
+			"rejected: " + conway.CertificateDepositIncorrectError{
+				CertificateType: common.CertificateTypeStakeRegistration,
+				Supplied:        1,
+				Expected:        2,
+			}.Error(),
+			"IncorrectDepositDELEG",
+			true,
+		},
+		{
+			"DRep registration deposit",
+			"rejected: " + conway.CertificateDepositIncorrectError{
+				CertificateType: common.CertificateTypeRegistrationDrep,
+				Supplied:        110,
+				Expected:        500000000,
+			}.Error(),
+			"IncorrectDepositDRep",
+			true,
+		},
 		{"unmapped rejection", "rejected: something novel", "", false},
 		{"unknown observation", "weird", "", false},
 	} {

@@ -2017,6 +2017,7 @@ func (ls *LedgerState) handoffPipelineOnSwitchLocked(
 				"header_count", headerCount,
 				"minimum_header_count", minBatchHeaders,
 			)
+			ls.armQueuedBlockfetchFlush()
 			// No batch is in flight to own the queue, so the selected peer
 			// must; otherwise any peer's non-fitting header is processed
 			// and clears it instead of being buffered.
@@ -2345,6 +2346,7 @@ func (ls *LedgerState) bufferHeaderEvent(
 // callers would touch the most deadlock-sensitive code in the ledger for no
 // behavioural gain at the sites that already register it.
 func (ls *LedgerState) clearQueuedHeaders() {
+	ls.stopQueuedBlockfetchFlush()
 	ls.chain.ClearHeaders()
 	// The blockfetch range-failure record is deliberately NOT cleared here.
 	// Fork resolution, connection switches and header mismatches clear the
@@ -5217,6 +5219,7 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 			"header_count", headersReady,
 			"minimum_header_count", minBatchHeaders,
 		)
+		ls.armQueuedBlockfetchFlush()
 		return nil
 	}
 	slotThreshold := ls.calculateStabilityWindow()
@@ -5231,6 +5234,7 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 			"threshold", slotThreshold,
 			"header_count", headersReady,
 		)
+		ls.armQueuedBlockfetchFlush()
 		return nil
 	}
 	// We use the blockfetch lock to ensure we aren't starting a batch at the same
@@ -7303,6 +7307,7 @@ func (ls *LedgerState) startQueuedBlockfetchLockedWithWaitSignal(
 	// The lock is temporarily released around each external request and is
 	// reacquired before any state is inspected or changed. Callers still own
 	// the lock when this function returns.
+	ls.stopQueuedBlockfetchFlush()
 	if err := ls.waitForBlockfetchRequestLockedWithSignal(connId, waitStarted); err != nil {
 		return err
 	}
@@ -9295,6 +9300,12 @@ func (ls *LedgerState) processEpochRolloverWithClassicPParamsContext(
 	// TestProcessEpochRollover_SnapStakeReadOrdering in
 	// chainsync_test.go, is (Dijkstra moves step 3 after step 10):
 	//
+	//   0. applyByronTranslationReserves — Byron-to-Shelley boundary only:
+	//      reset reserves from the translated UTxO. The hard-fork combinator
+	//      translates the Byron ledger before the first Shelley TICK, so this
+	//      precedes every Shelley rule, and a later rule that moves reserves
+	//      at the same boundary (a two-era boundary's pv3 AVVM return) builds
+	//      on the translated value instead of being overwritten by it.
 	//   1. applyStakeRewards             — apply the delayed reward update
 	//      (rewards from the snapshot three epochs back): credit spendable
 	//      rewards and move undistributed→reserves, unspendable→treasury
@@ -9336,6 +9347,22 @@ func (ls *LedgerState) processEpochRolloverWithClassicPParamsContext(
 	// Steps 7 and 8 must observe the post-enactment major version. Step 9 must
 	// observe the persisted pparams (not just the in-memory ones) because its
 	// body issues SQL within `txn` that may join against `pparams` rows.
+	if currentEpoch.EraId == eras.ByronEraDesc.Id &&
+		currentEra.Id != eras.ByronEraDesc.Id {
+		if err := ls.timeRolloverPhase(
+			currentEpoch.EpochId+1, "byron_translation", func() error {
+				return ls.applyByronTranslationReserves(
+					txn,
+					currentEpoch.EpochId+1,
+					epochStartSlot,
+				)
+			},
+		); err != nil {
+			return nil, fmt.Errorf(
+				"apply Byron-to-Shelley reserves: %w", err,
+			)
+		}
+	}
 	if err := ls.timeRolloverPhase(
 		currentEpoch.EpochId+1, "ratify_consume", func() error {
 			return ls.consumePendingRatification(ctx, txn)
@@ -9778,8 +9805,9 @@ func (ls *LedgerState) processEpochRolloverWithClassicPParamsContext(
 	}
 
 	// Capture the new epoch's ADA pots (reserves/treasury/fees) after every
-	// boundary treasury/reserves mutation above (stake rewards, POOLREAP,
-	// governance withdrawals, donations, and any AVVM-removal reserves top-up).
+	// boundary treasury/reserves mutation above (Byron translation, stake
+	// rewards, POOLREAP, governance withdrawals, donations, and any
+	// AVVM-removal reserves top-up).
 	// This row seeds the delayed reward calculation for a later epoch, so it
 	// must observe the fully settled pots for the ended epoch.
 	if err := ls.timeRolloverPhase(

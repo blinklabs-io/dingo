@@ -111,7 +111,9 @@ func managed(
 	cfg.BackoffBase = 10 * time.Millisecond
 	cfg.BackoffMax = 50 * time.Millisecond
 	cfg.ledgerRetry = 10 * time.Millisecond
-	cfg.dialPlain = log.plainDial
+	if cfg.dialPlain == nil {
+		cfg.dialPlain = log.plainDial
+	}
 	cfg.dialGuarded = log.guardedDial
 	cfg.ListenAddrs = append(
 		[]ListenAddr{{Address: loopbackAny}}, cfg.ListenAddrs...,
@@ -180,9 +182,9 @@ func TestPeerManagerFillsToTheMinimumFromPublicRoots(t *testing.T) {
 	assert.Zero(t, guarded)
 }
 
-// A connection a peer opened to us is a peer like any other, so it is not
-// replaced by one we dial.
-func TestPeerManagerCountsInboundPeersTowardTheMinimum(t *testing.T) {
+// A connection a peer opened to us is not one the manager chose, so it does
+// not stand in for the minimum of peers it dials itself.
+func TestPeerManagerDoesNotCountInboundPeersTowardTheMinimum(t *testing.T) {
 	t.Parallel()
 	remote, _ := newListeningStack(t, PeerConfig{})
 	release := make(chan struct{})
@@ -208,10 +210,60 @@ func TestPeerManagerCountsInboundPeersTowardTheMinimum(t *testing.T) {
 	waitFor(t, "the inbound peer", func() bool { return m.PeerCount() == 1 })
 
 	close(release)
+	waitFor(t, "the ledger peer is dialed", func() bool {
+		return m.outboundPeerCount() == 1
+	})
 	settle(t, m)
 	_, guarded := log.totals()
-	assert.Zero(t, guarded, "nothing is dialed once an inbound peer fills it")
-	assert.Equal(t, 1, m.PeerCount())
+	assert.Equal(t, 1, guarded, "the inbound peer does not fill the minimum")
+	assert.Equal(t, 2, m.PeerCount())
+}
+
+// Inbound connections stop at their own limit, so a flood of them cannot take
+// the room the manager needs for the peers it dials.
+func TestPeerManagerKeepsRoomForOutboundPeersAgainstAnInboundFlood(
+	t *testing.T,
+) {
+	t.Parallel()
+	var roots []Peer
+	for range 2 {
+		r, _ := newListeningStack(t, PeerConfig{})
+		roots = append(roots, listenPeer(t, r))
+	}
+	gate := make(chan struct{})
+	m, _, _ := managed(t, PeerConfig{
+		MinPeers: 2, MaxPeers: 5, MaxInboundPerSource: 20,
+		Topology: &Topology{PublicRoots: []RootGroup{group(0, roots...)}},
+		dialPlain: func(ctx context.Context, address string) (net.Conn, error) {
+			select {
+			case <-gate:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+			var d net.Dialer
+			return d.DialContext(ctx, "tcp", address)
+		},
+	})
+
+	// With the dials held back the inbound connections arrive first.
+	held := 0
+	for range 8 {
+		if tryInbound(t, m) == nil {
+			held++
+		}
+	}
+	assert.Equal(t, 3, held, "inbound stops at MaxPeers less MinPeers")
+	require.Equal(t, 3, m.PeerCount())
+	require.Zero(t, m.outboundPeerCount())
+
+	close(gate)
+	waitFor(t, "the minimum is dialed", func() bool {
+		return m.outboundPeerCount() == 2
+	})
+	settle(t, m)
+	assert.Equal(t, 5, m.PeerCount())
+	assert.Equal(t, 2, m.outboundPeerCount())
+	assert.Error(t, tryInbound(t, m), "the stack is full")
 }
 
 func TestPeerManagerFallsBackFromAPeerThatFails(t *testing.T) {
@@ -359,23 +411,35 @@ func TestPeerManagerRedialsAPeerThatDrops(t *testing.T) {
 	m, log, reg := managed(t, PeerConfig{Topology: &Topology{
 		LocalRoots: []RootGroup{group(1, root)},
 	}})
-	waitFor(t, "connected", func() bool { return m.PeerCount() == 1 })
-
-	var first *PeerConn
-	m.peerMu.Lock()
-	for p := range m.peers {
-		first = p
-	}
-	m.peerMu.Unlock()
-	require.NotNil(t, first)
+	waitFor(t, "connected", func() bool {
+		return managedConn(m, root) != nil
+	})
+	first := managedConn(m, root)
 	first.Close()
 
 	waitFor(t, "redialed", func() bool {
-		return metricValue(
-			t, reg, "dingo_dmq_peer_dials_total", "success",
-		) >= 2 && m.PeerCount() == 1
+		c := managedConn(m, root)
+		return c != nil && c != first
 	})
+	assert.GreaterOrEqual(t, metricValue(
+		t, reg, "dingo_dmq_peer_dials_total", "success",
+	), float64(2))
+	assert.Equal(t, 1, m.PeerCount())
 	assert.GreaterOrEqual(t, log.plainCount(root.Address()), 2)
+}
+
+// managedConn is the connection the manager holds to p, or nil. The stack
+// counts a peer from before its handshake, so PeerCount can include a dial
+// still in progress; closing that one fails the dial instead of dropping an
+// established connection.
+func managedConn(s *Stack, p Peer) *PeerConn {
+	m := s.peerNet.manager
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if e := m.entries[p.key()]; e != nil {
+		return e.conn
+	}
+	return nil
 }
 
 // Stop cancels a dial that is still waiting, and waits for it.
@@ -619,6 +683,48 @@ func TestPeerManagerSettlesAmongManyPeersAndReplacesLostOnes(t *testing.T) {
 	assert.Equal(t, limit, m.PeerCount())
 	plain, _ := log.totals()
 	assert.Greater(t, plain, limit, "replacements were dialed")
+}
+
+// Local roots can be more than MinPeers, and they are dialed whatever opens
+// connections to the stack, so the room kept for them is their valency.
+func TestPeerManagerKeepsRoomForLocalRootsAgainstAnInboundFlood(
+	t *testing.T,
+) {
+	t.Parallel()
+	var roots []Peer
+	for range 4 {
+		r, _ := newListeningStack(t, PeerConfig{})
+		roots = append(roots, listenPeer(t, r))
+	}
+	gate := make(chan struct{})
+	m, _, _ := managed(t, PeerConfig{
+		MinPeers: 1, MaxPeers: 6, MaxInboundPerSource: 20,
+		Topology: &Topology{LocalRoots: []RootGroup{group(4, roots...)}},
+		dialPlain: func(ctx context.Context, address string) (net.Conn, error) {
+			select {
+			case <-gate:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+			var d net.Dialer
+			return d.DialContext(ctx, "tcp", address)
+		},
+	})
+
+	held := 0
+	for range 8 {
+		if tryInbound(t, m) == nil {
+			held++
+		}
+	}
+	assert.Equal(t, 2, held, "inbound stops at MaxPeers less the local roots")
+
+	close(gate)
+	waitFor(t, "every local root is dialed", func() bool {
+		return m.outboundPeerCount() == 4
+	})
+	settle(t, m)
+	assert.Equal(t, 6, m.PeerCount())
 }
 
 // Stopping a stack with live peers, a dial in progress and a ledger lookup

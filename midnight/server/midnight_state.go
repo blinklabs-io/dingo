@@ -452,7 +452,7 @@ func (s *service) GetUtxoEvents(
 		// Resolved independently of the fetched event rows: a block with no
 		// Midnight events of its own would never be found by scanning
 		// items, silently letting the response run past the boundary.
-		boundary, found, err := s.blockNumberByHash(endHash)
+		boundary, found, err := s.blockNumberByHash(ctx, endHash)
 		if err != nil {
 			return nil, s.internalError("resolve end_block_hash", err)
 		}

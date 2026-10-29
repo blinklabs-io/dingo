@@ -932,7 +932,7 @@ var flagSpecs = []flagSpec{
 	uint64Flag(
 		"ForgeUpstreamStalenessSlots",
 		"forge-upstream-staleness-slots",
-		"max slots the newest block this node holds may trail the corroborated upstream target before skipping block forging",
+		"max slots the newest locally authenticated frontier may trail the policy-approved upstream target before skipping block forging",
 	),
 	uint64Flag(
 		"ForgeAppliedTipStalenessSlots",
