@@ -6103,10 +6103,10 @@ func TestLoneFarFrontierRunContinuesAcrossReconnectsByIdentity(t *testing.T) {
 	cs := c.newGenesisSelector(t, peerIdentity, time.Minute)
 	first := c.first()
 	firstConn := newTestConnectionId(2)
-	for i := uint64(0); i < 4; i++ {
+	for i := range 4 {
 		require.Equal(
 			t, PeerTipUpdatePending,
-			c.prepareGenesis(cs, firstConn, i+1, first+i),
+			c.prepareGenesis(cs, firstConn, uint64(i+1), first+uint64(i)),
 		)
 	}
 	cs.RemovePeer(firstConn)
@@ -6144,10 +6144,10 @@ func TestLoneFarFrontierRunDoesNotCrossPeerIdentities(t *testing.T) {
 	cs := c.newGenesisSelector(t, peerIdentity, time.Minute)
 	first := c.first()
 	firstConn := newTestConnectionId(2)
-	for i := uint64(0); i < 4; i++ {
+	for i := range 4 {
 		require.Equal(
 			t, PeerTipUpdatePending,
-			c.prepareGenesis(cs, firstConn, i+1, first+i),
+			c.prepareGenesis(cs, firstConn, uint64(i+1), first+uint64(i)),
 		)
 	}
 	cs.RemovePeer(firstConn)
@@ -6181,10 +6181,10 @@ func TestLoneFarFrontierRunRestartsAfterBrokenReconnect(t *testing.T) {
 	cs := c.newGenesisSelector(t, peerIdentity, time.Minute)
 	first := c.first()
 	firstConn := newTestConnectionId(2)
-	for i := uint64(0); i < 4; i++ {
+	for i := range 4 {
 		require.Equal(
 			t, PeerTipUpdatePending,
-			c.prepareGenesis(cs, firstConn, i+1, first+i),
+			c.prepareGenesis(cs, firstConn, uint64(i+1), first+uint64(i)),
 		)
 	}
 	cs.RemovePeer(firstConn)
@@ -6226,10 +6226,10 @@ func TestLoneFarFrontierRunExpiresAfterDisconnect(t *testing.T) {
 	cs.mutex.Unlock()
 	first := c.first()
 	firstConn := newTestConnectionId(2)
-	for i := uint64(0); i < 4; i++ {
+	for i := range 4 {
 		require.Equal(
 			t, PeerTipUpdatePending,
-			c.prepareGenesis(cs, firstConn, i+1, first+i),
+			c.prepareGenesis(cs, firstConn, uint64(i+1), first+uint64(i)),
 		)
 	}
 	cs.RemovePeer(firstConn)
@@ -6267,10 +6267,10 @@ func TestRepeatedFarFrontierHeaderDoesNotExtendReconnectWindow(t *testing.T) {
 	cs.mutex.Unlock()
 	first := c.first()
 	firstConn := newTestConnectionId(2)
-	for i := uint64(0); i < 4; i++ {
+	for i := range 4 {
 		require.Equal(
 			t, PeerTipUpdatePending,
-			c.prepareGenesis(cs, firstConn, i+1, first+i),
+			c.prepareGenesis(cs, firstConn, uint64(i+1), first+uint64(i)),
 		)
 	}
 	now = now.Add(time.Second)
