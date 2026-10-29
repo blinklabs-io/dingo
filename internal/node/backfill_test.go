@@ -801,10 +801,12 @@ func TestBackfillBatchLimitReached(t *testing.T) {
 		{
 			name: "row limit",
 			rows: DefaultBackfillBatchRows,
+			want: true,
 		},
 		{
 			name:  "byte limit",
 			bytes: DefaultBackfillBatchBytes,
+			want:  true,
 		},
 	}
 	for _, test := range tests {
