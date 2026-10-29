@@ -103,7 +103,7 @@ at a time.`,
 
 	rootCmd.PersistentFlags().StringVar(
 		&globalFlags.network, "network", "",
-		"cardano network: preview or preprod",
+		"cardano network: preview, preprod or mainnet",
 	)
 	rootCmd.PersistentFlags().StringVar(
 		&globalFlags.dingoAddr, "dingo-addr", "",
@@ -136,17 +136,17 @@ at a time.`,
 	}
 }
 
-// requireNetwork validates --network the same way cmd/koios-parity does:
-// this tool is scoped to preview/preprod only.
+// requireNetwork validates --network against the networks this tool
+// supports.
 func requireNetwork() (string, error) {
 	switch globalFlags.network {
-	case "preview", "preprod":
+	case "preview", "preprod", "mainnet":
 		return globalFlags.network, nil
 	case "":
-		return "", errors.New("--network is required (preview or preprod)")
+		return "", errors.New("--network is required (preview, preprod or mainnet)")
 	default:
 		return "", fmt.Errorf(
-			"--network must be 'preview' or 'preprod', got %q",
+			"--network must be 'preview', 'preprod' or 'mainnet', got %q",
 			globalFlags.network,
 		)
 	}

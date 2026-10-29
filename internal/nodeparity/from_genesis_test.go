@@ -174,7 +174,7 @@ func TestRunFromGenesis_EpochNoFailureDoesNotHangSession(t *testing.T) {
 		done <- RunFromGenesis(
 			ctx, listener.Addr().String(), "preview", magic, koios, nil,
 			func(r EpochResult) { results <- r },
-			logs.logf, nil,
+			logs.logf, nil, false,
 		)
 	}()
 
@@ -250,7 +250,7 @@ func TestRunFromGenesis_EpochNoFailureDoesNotSkipEpoch(t *testing.T) {
 		done <- RunFromGenesis(
 			ctx, listener.Addr().String(), "preview", magic, koios, nil,
 			func(r EpochResult) { results <- r },
-			logs.logf, nil,
+			logs.logf, nil, false,
 		)
 	}()
 
@@ -345,7 +345,7 @@ func TestRunFromGenesis_DoesNotAcquireChainOrigin(t *testing.T) {
 		done <- RunFromGenesis(
 			ctx, listener.Addr().String(), "preview", magic, koios, nil,
 			func(r EpochResult) { results <- r },
-			logs.logf, nil,
+			logs.logf, nil, false,
 		)
 	}()
 
@@ -422,7 +422,7 @@ func TestRunFromGenesis_StartsValidatingAtFirstAnswerablePoint(t *testing.T) {
 		done <- RunFromGenesis(
 			ctx, listener.Addr().String(), "preview", magic, koios, nil,
 			func(r EpochResult) { results <- r },
-			logs.logf, nil,
+			logs.logf, nil, false,
 		)
 	}()
 
@@ -496,7 +496,7 @@ func TestRunFromGenesis_RefusalAfterValidationStartsStillFails(t *testing.T) {
 		done <- RunFromGenesis(
 			ctx, listener.Addr().String(), "preview", magic, koios, nil,
 			func(r EpochResult) { results <- r },
-			logs.logf, nil,
+			logs.logf, nil, false,
 		)
 	}()
 
@@ -1674,7 +1674,7 @@ func TestRunFromGenesis_UTxOTaintLifecycle(t *testing.T) {
 		done <- RunFromGenesis(
 			ctx, listener.Addr().String(), "preview", magic, koios, nil,
 			func(r EpochResult) { results <- r },
-			nil, nil,
+			nil, nil, false,
 		)
 	}()
 
@@ -1793,7 +1793,7 @@ func TestRunFromGenesis_TxInfoChunkFailureTaintsEpoch(t *testing.T) {
 		done <- RunFromGenesis(
 			ctx, listener.Addr().String(), "preview", magic, koios, nil,
 			func(r EpochResult) { results <- r },
-			nil, nil,
+			nil, nil, false,
 		)
 	}()
 
@@ -1896,7 +1896,7 @@ func TestRunFromGenesis_UTxOBaselineRetryRecovers(t *testing.T) {
 		done <- RunFromGenesis(
 			ctx, listener.Addr().String(), "preview", magic, koios, nil,
 			func(r EpochResult) { results <- r },
-			nil, nil,
+			nil, nil, false,
 		)
 	}()
 
@@ -1999,7 +1999,7 @@ func TestRunFromGenesis_UTxOComparisonRetriesConnectionFailure(t *testing.T) {
 		done <- RunFromGenesis(
 			ctx, listener.Addr().String(), "preview", magic, koios, nil,
 			func(r EpochResult) { results <- r },
-			nil, nil,
+			nil, nil, false,
 		)
 	}()
 
@@ -2134,7 +2134,7 @@ func TestRunFromGenesis_ResumeKeepsUTxOComparison(t *testing.T) {
 		done <- RunFromGenesis(
 			ctx, listener.Addr().String(), "preview", magic, koios, nil,
 			func(r EpochResult) { results <- r },
-			logs.logf, nil,
+			logs.logf, nil, false,
 		)
 	}()
 
@@ -2217,6 +2217,89 @@ func TestRunFromGenesis_ResumeKeepsUTxOComparison(t *testing.T) {
 	}
 }
 
+// TestRunFromGenesis_SkipUTxOCapturesNoBaselineAndFetchesNoTxInfo proves
+// skipUTxO turns the UTxO half off completely: on mainnet it would otherwise
+// fetch /tx_info for every transaction from genesis. No GetUTxOWhole is
+// issued, no /tx_info is requested, and each epoch reports UTxOSkipped rather
+// than a missing baseline.
+func TestRunFromGenesis_SkipUTxOCapturesNoBaselineAndFetchesNoTxInfo(t *testing.T) {
+	t.Parallel()
+	const magic = 42
+	const blockCount = 3
+
+	server := newGenesisFakeServerWithTransactions(t, blockCount)
+	server.epochBySlot = map[uint64]int{
+		server.chain.Points[0].Slot: 1,
+		server.chain.Points[1].Slot: 2,
+		server.chain.Points[2].Slot: 3,
+	}
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	server.serve(t, listener, magic)
+
+	var txInfoRequests atomic.Int64
+	koiosSrv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasSuffix(r.URL.Path, "/tx_info") {
+				txInfoRequests.Add(1)
+			}
+			http.NotFound(w, r)
+		},
+	))
+	t.Cleanup(koiosSrv.Close)
+	koios, err := NewKoiosClient("preview", "", koiosSrv.URL, true, true)
+	require.NoError(t, err)
+
+	logs := newLogCollector()
+	results := make(chan EpochResult, 8)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- RunFromGenesis(
+			ctx, listener.Addr().String(), "preview", magic, koios, nil,
+			func(r EpochResult) { results <- r },
+			logs.logf, nil, true,
+		)
+	}()
+
+	for _, want := range []uint64{2, 3} {
+		server.allowStep(t)
+		if want == 2 {
+			server.allowStep(t)
+		}
+		select {
+		case r := <-results:
+			assert.Equal(t, want, r.Epoch)
+			assert.True(t, r.UTxOSkipped)
+			assert.False(t, r.UTxOAttempted)
+			assert.NoError(t, r.UTxOErr)
+		case <-time.After(20 * time.Second):
+			t.Fatalf("timed out waiting for epoch %d", want)
+		}
+	}
+
+	server.mu.Lock()
+	utxoWholeCalls := server.utxoWholeCalls
+	server.mu.Unlock()
+	assert.Zero(t, utxoWholeCalls, "no baseline or comparison may query the UTxO set")
+	assert.Zero(t, txInfoRequests.Load(), "no /tx_info may be fetched")
+	for _, line := range logs.all() {
+		assert.NotContains(t, line, "baseline")
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		assert.True(t, err == nil || errors.Is(err, context.Canceled))
+	case <-time.After(10 * time.Second):
+		t.Fatal("RunFromGenesis did not exit after ctx cancellation")
+	}
+}
+
 // TestRunFromGenesis_ReconnectsAfterDingoClosesConnection proves a chainsync
 // connection Dingo closes while ctx is live ends only the session, not the
 // run. See closeChainSyncAtSlot for how the fake reaches the close that
@@ -2268,7 +2351,7 @@ func TestRunFromGenesis_ReconnectsAfterDingoClosesConnection(t *testing.T) {
 		done <- RunFromGenesis(
 			ctx, listener.Addr().String(), "preview", magic, koios, nil,
 			func(r EpochResult) { results <- r },
-			logs.logf, nil,
+			logs.logf, nil, false,
 		)
 	}()
 
@@ -2371,7 +2454,7 @@ func runUntilEpoch3(t *testing.T, addr string, magic uint32) []string {
 		done <- RunFromGenesis(
 			ctx, addr, "preview", magic, koios, nil,
 			func(r EpochResult) { results <- r },
-			logs.logf, nil,
+			logs.logf, nil, false,
 		)
 	}()
 
@@ -2506,7 +2589,7 @@ func runWithStalledEpochCheck(
 		done <- RunFromGenesis(
 			ctx, listener.Addr().String(), "preview", magic, koios, nil,
 			func(r EpochResult) { reported <- r },
-			logc.logf, nil,
+			logc.logf, nil, false,
 		)
 	}()
 
@@ -2663,7 +2746,7 @@ func TestRunFromGenesis_EpochChecksRetryTooOldRefusal(t *testing.T) {
 		done <- RunFromGenesis(
 			ctx, listener.Addr().String(), "preview", magic, koios, nil,
 			func(r EpochResult) { results <- r },
-			nil, nil,
+			nil, nil, false,
 		)
 	}()
 
@@ -2984,7 +3067,7 @@ func TestRunFromGenesis_TxInfoIndexLagDoesNotTaintEpoch(t *testing.T) {
 		done <- RunFromGenesis(
 			ctx, listener.Addr().String(), "preview", magic, koios, nil,
 			func(r EpochResult) { results <- r },
-			logs.logf, nil,
+			logs.logf, nil, false,
 		)
 	}()
 

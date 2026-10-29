@@ -34,11 +34,10 @@ func withGlobalFlags(t *testing.T, network, dingoAddr, cardanoAddr string) {
 	t.Cleanup(func() { globalFlags = saved })
 }
 
-// TestRequireNetwork covers --network's validation: "preview" and
-// "preprod" are the only two accepted values (this tool is scoped to
-// testnets), an unset value is an error rather than silently defaulting to
-// anything, and any other value (e.g. "mainnet") is rejected rather than
-// passed through to network-magic resolution.
+// TestRequireNetwork covers --network's validation: "preview", "preprod" and
+// "mainnet" are the only accepted values, an unset value is an error rather
+// than silently defaulting to anything, and any other value is rejected
+// rather than passed through to network-magic resolution.
 func TestRequireNetwork(t *testing.T) {
 	t.Run("preview is valid", func(t *testing.T) {
 		withGlobalFlags(t, "preview", "", "")
@@ -57,10 +56,16 @@ func TestRequireNetwork(t *testing.T) {
 		_, err := requireNetwork()
 		require.Error(t, err)
 	})
-	t.Run("mainnet is rejected", func(t *testing.T) {
+	t.Run("mainnet is valid", func(t *testing.T) {
 		withGlobalFlags(t, "mainnet", "", "")
+		got, err := requireNetwork()
+		require.NoError(t, err)
+		assert.Equal(t, "mainnet", got)
+	})
+	t.Run("other networks are rejected", func(t *testing.T) {
+		withGlobalFlags(t, "sanchonet", "", "")
 		_, err := requireNetwork()
-		require.Error(t, err, "this tool is scoped to preview/preprod only")
+		require.Error(t, err)
 	})
 }
 
