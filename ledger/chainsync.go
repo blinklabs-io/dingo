@@ -4721,7 +4721,7 @@ func (ls *LedgerState) invalidateChainsyncHeaderAdmission(
 	ls.resetChainsyncResyncState(&pending)
 	ls.requestChainsyncResync(
 		e.ConnectionId,
-		"header authorization changed before selector admission",
+		event.ChainsyncResyncReasonHeaderAuthorizationChanged,
 		&pending,
 	)
 	queuePeerHeaderHistoryInvalidation(&pending, e)

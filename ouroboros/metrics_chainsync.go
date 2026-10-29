@@ -92,6 +92,7 @@ var chainsyncResyncReasons = map[string]struct{}{
 	event.ChainsyncResyncReasonFutureHeaderAdmissionRecovery:     {},
 	event.ChainsyncResyncReasonGenesisCorroborationHoldExpired:   {},
 	event.ChainsyncResyncReasonHeaderQueueFullRestartFailed:      {},
+	event.ChainsyncResyncReasonHeaderAuthorizationChanged:        {},
 	event.ChainsyncResyncReasonHeaderValidationRecovery:          {},
 	event.ChainsyncResyncReasonLiveTxValidationRecovery:          {},
 	event.ChainsyncResyncReasonLocalLedgerRollback:               {},

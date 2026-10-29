@@ -8511,6 +8511,16 @@ func TestHandleConnClosedEventPreservesLocalRestartStability(t *testing.T) {
 			local:  true,
 		},
 		{
+			name:   "authorization snapshot changed",
+			reason: event.ChainsyncResyncReasonHeaderAuthorizationChanged,
+			local:  true,
+		},
+		{
+			name:     "authorization restart cannot mask transport error",
+			reason:   event.ChainsyncResyncReasonHeaderAuthorizationChanged,
+			closeErr: io.EOF,
+		},
+		{
 			name:   "peer fault",
 			reason: event.ChainsyncResyncReasonRollbackExceedsK,
 		},

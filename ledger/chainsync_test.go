@@ -6914,6 +6914,10 @@ func TestPinnedForkExtensionAvoidsLedgerGenerationLockCycle(t *testing.T) {
 
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
+	bus := newTestEventBus(t, nil)
+	t.Cleanup(bus.Stop)
+	ls.config.EventBus = bus
+	resyncCh := subscribeChainsyncResync(t, bus)
 	requestDone := make(chan struct{})
 	oldBatchReady := make(chan struct{})
 	ls.activeBlockfetchConnId = fixture.connId
@@ -7037,6 +7041,14 @@ func TestPinnedForkExtensionAvoidsLedgerGenerationLockCycle(t *testing.T) {
 		"fork extension did not resume after the prior request completed"))
 	assert.False(t, testutil.RequireReceive(t, admission, time.Second,
 		"snapshot publication before the deferred callback must reject selector admission"))
+	resync := testutil.RequireReceive(t, resyncCh, time.Second,
+		"changed authorization must re-intersect before replay")
+	require.Equal(t, fixture.connId, resync.ConnectionId)
+	require.Equal(
+		t, event.ChainsyncResyncReasonHeaderAuthorizationChanged, resync.Reason,
+	)
+	require.True(t, event.IsLocalChainsyncResyncReason(resync.Reason),
+		"local snapshot publication must not penalize a healthy peer")
 	assert.Zero(t, ls.chain.HeaderCount(),
 		"the stale queued header must be removed with selector admission")
 	assert.Equal(t, upstreamTipBefore, ls.syncUpstreamTipSlot.Load(),
