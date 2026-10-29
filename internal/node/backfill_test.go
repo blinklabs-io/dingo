@@ -788,8 +788,27 @@ func TestBackfillFlushesFullRowBatchWithinBlock(t *testing.T) {
 			Signature: []byte{byte(i >> 8), byte(i), 0x02},
 		})
 	}
+	input, err := mockledger.NewTransactionInputBuilder().
+		WithTxId(bytes.Repeat([]byte{0xC3}, 32)).
+		WithIndex(0).
+		Build()
+	require.NoError(t, err)
+	address, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyKey,
+		lcommon.AddressNetworkTestnet,
+		bytes.Repeat([]byte{0xD4}, lcommon.AddressHashSize),
+		bytes.Repeat([]byte{0xE5}, lcommon.AddressHashSize),
+	)
+	require.NoError(t, err)
+	output, err := mockledger.NewTransactionOutputBuilder().
+		WithAddress(address.String()).
+		WithLovelace(1_000_000).
+		Build()
+	require.NoError(t, err)
 	txBuilder := mockledger.NewTransactionBuilder()
 	txBuilder.WithId(bytes.Repeat([]byte{0xA1}, 32))
+	txBuilder.WithInputs(input)
+	txBuilder.WithOutputs(output)
 	txBuilder.WithValid(true)
 	txBuilder.WithWitnesses(
 		mockledger.NewMockTransactionWitnessSet().WithVkeyWitnesses(witnesses...),
@@ -805,6 +824,19 @@ func TestBackfillFlushesFullRowBatchWithinBlock(t *testing.T) {
 	copy(blockHash[:], point.Hash)
 	var txHash [32]byte
 	copy(txHash[:], tx.Hash().Bytes())
+	utxoOffsets := make(map[database.UtxoRef]database.CborOffset)
+	for _, produced := range tx.Produced() {
+		var producedTxHash [32]byte
+		copy(producedTxHash[:], produced.Id.Id().Bytes())
+		utxoOffsets[database.UtxoRef{
+			TxId:      producedTxHash,
+			OutputIdx: produced.Id.Index(),
+		}] = database.CborOffset{
+			BlockSlot:  point.Slot,
+			BlockHash:  blockHash,
+			ByteLength: 1,
+		}
+	}
 	offsets := &database.BlockIngestionResult{
 		TxOffsets: map[[32]byte]database.CborOffset{
 			txHash: {
@@ -813,6 +845,7 @@ func TestBackfillFlushesFullRowBatchWithinBlock(t *testing.T) {
 				ByteLength: 1,
 			},
 		},
+		UtxoOffsets: utxoOffsets,
 	}
 
 	require.NoError(t, backfill.processBlockTxsBatched(
