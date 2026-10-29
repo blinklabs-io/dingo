@@ -6959,8 +6959,11 @@ Dingo's only sync-state signal (there is no Genesis State Machine equivalent):
   delivered a header, and before the candidates have ever shared a retained
   point, the limit is `k` past the local tip. Otherwise it is `k` past the
   highest point common to every fragment. When the bounded fragments later stop
-  overlapping, the limit stays `k` past the last common point; it does not fall
-  back to the local tip, which advances with the chain the limit bounds. The
+  overlapping, the limit stays `k` past the last common point, but never below
+  `k` past the immutable tip (the applied tip less `k`), so a point the local
+  chain has moved more than `k` past cannot freeze it. A fragment whose head is
+  below the immutable tip is left out of the candidate set: switching to it
+  needs a rollback past `k`, and the reference disconnects such a peer. The
   recorded point is cleared when no candidate remains or Genesis mode ends. A
   single candidate is its own intersection, so the cap never holds back a lone
   peer.
@@ -6991,7 +6994,13 @@ and before it is handed to the ledger, the ChainSync roll-forward callback calls
 blocks that peer's callback, which pauses only its header stream: nothing is
 dropped and the peer's cursor does not move, so the header is delivered once
 the limit admits it. The wait re-evaluates every 100ms because the applied
-ledger tip has no change notification. It returns when the ChainSync client is
+ledger tip has no change notification. The roll-forward callback bounds it
+(half the stall timeout, at most 60s, the same bound as the catch-up band
+wait) so a parked callback never outlives the protocol's reply timers. On
+expiry the header is not queued, no error is returned, and the connection
+re-intersects from the local chain (`ChainsyncResyncReasonEagernessWaitExpired`,
+not a peer fault), which redelivers the header and keeps the peer's observed
+history from advancing past the limit. It returns when the ChainSync client is
 asked to stop or the connection begins shutting down: the callback runs on the
 protocol's receive loop, whose completion the protocol's done signal waits
 for, so the wait observes the stop request and the connection's shutdown

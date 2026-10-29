@@ -420,6 +420,8 @@ func TestAwaitEagernessLimitAllowsUntrackedSenderWhenInactive(t *testing.T) {
 // Once the candidates have shared a point, a later loss of that point from a
 // window must not hand the limit to the applied ledger tip: that tip follows
 // the selected peer's blocks, so the cap would move with the chain it bounds.
+// The applied tip only matters through the immutable tip it implies, which is
+// still at the shared point here.
 func TestAwaitEagernessLimitIgnoresAppliedTipOnceAnchored(t *testing.T) {
 	t.Parallel()
 	var applied atomic.Uint64
@@ -441,7 +443,7 @@ func TestAwaitEagernessLimitIgnoresAppliedTipOnceAnchored(t *testing.T) {
 	require.False(t, cs.EagernessLimit().Intersected)
 	require.Equal(t, uint64(10+loeTestK), cs.EagernessLimit().BlockNumber)
 
-	applied.Store(40 - loeTestK)
+	applied.Store(10 + loeTestK)
 	assert.False(t, cs.withinEagernessLimit(a, 40, appliedTip))
 	assert.Equal(t, uint64(10+loeTestK), cs.EagernessLimit().BlockNumber)
 }
@@ -642,4 +644,55 @@ func TestCandidateFragmentContainsPoint(t *testing.T) {
 	assert.False(t, f.containsPoint(loeTip("c", 0).Point))
 	assert.False(t, f.containsPoint(ocommon.Point{Slot: 450, Hash: []byte("c4")}))
 	assert.False(t, CandidateFragment{}.containsPoint(loeTip("c", 1).Point))
+}
+
+// Candidates shared a point once, then one peer's fragment stayed behind while
+// the local chain advanced past it. A fragment that ends below the immutable
+// tip cannot take part in a selection, so it must not keep the limit at the
+// stale shared point.
+func TestLimitOnEagernessFragmentBelowImmutableTipReleasesStaleAnchor(
+	t *testing.T,
+) {
+	t.Parallel()
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:   true,
+		SecurityParam: loeTestK,
+	})
+	a := newTestConnectionId(1)
+	b := newTestConnectionId(2)
+	feedLoEChain(cs, a, "c", 1, 10)
+	feedLoEChain(cs, b, "c", 1, 10)
+	require.Equal(t, uint64(10+loeTestK), cs.EagernessLimit().BlockNumber)
+	feedLoEChain(cs, a, "a", 11, 40)
+	feedLoEChain(cs, b, "b", 11, 12)
+	cs.SetLocalTip(loeTip("c", 10))
+	appliedTip := func() ochainsync.Tip { return loeTip("a", 38) }
+
+	assert.True(t, cs.withinEagernessLimit(a, 40+loeTestK, appliedTip),
+		"the limit stayed at the anchor the local chain had left behind")
+	assert.False(t, cs.withinEagernessLimit(a, 40+loeTestK+1, appliedTip))
+}
+
+// A fragment that is still within k of the local tip but shares no point with
+// the others keeps the limit from falling below the immutable tip.
+func TestLimitOnEagernessFallbackNeverFallsBelowImmutableTip(t *testing.T) {
+	t.Parallel()
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:   true,
+		SecurityParam: loeTestK,
+	})
+	a := newTestConnectionId(1)
+	b := newTestConnectionId(2)
+	feedLoEChain(cs, a, "c", 1, 10)
+	feedLoEChain(cs, b, "c", 1, 10)
+	require.Equal(t, uint64(10+loeTestK), cs.EagernessLimit().BlockNumber)
+	feedLoEChain(cs, a, "a", 11, 40)
+	feedLoEChain(cs, b, "b", 11, 36)
+	cs.SetLocalTip(loeTip("c", 10))
+	appliedTip := func() ochainsync.Tip { return loeTip("a", 38) }
+
+	assert.True(t, cs.withinEagernessLimit(a, 38, appliedTip),
+		"the limit fell below the applied immutable tip plus k")
+	assert.False(t, cs.withinEagernessLimit(a, 39, appliedTip),
+		"a fragment sharing no point with the others must still hold the cap")
 }

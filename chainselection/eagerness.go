@@ -113,12 +113,14 @@ func (cs *ChainSelector) EagernessLimit() EagernessLimit {
 // With a single candidate the intersection is that candidate's own head, so
 // the cap never holds back a lone peer. Retained fragments are bounded, so
 // candidates can stop sharing a retained point; the limit then stays k past
-// the last common point recorded. The local tip is not used once a common
-// point is known: it advances as the selected peer's blocks are applied, so a
-// limit measured from it would move with the chain it bounds. Only before the
-// candidates have ever overlapped is the limit k past the local tip. The
-// recorded point is the one piece of state this method writes, under its own
-// mutex, so it is safe under the read lock.
+// the last common point recorded, but never below k past the immutable tip
+// (localTip less k), as the reference's limit fragment never falls below the
+// immutable tip. A fragment whose head is below the immutable tip cannot be
+// switched to without a rollback past k, and the reference disconnects such a
+// peer, so it is left out of the candidate set. Before the candidates have
+// ever overlapped the limit is k past the local tip. The recorded point is the
+// one piece of state this method writes, under its own mutex, so it is safe
+// under the read lock.
 //
 // localTip is the applied tip the no-overlap-yet limit is measured from.
 // include names a peer that counts as a candidate even when it is stale or
@@ -139,6 +141,11 @@ func (cs *ChainSelector) computeEagernessLimitLocked(
 			cs.securityParam,
 		),
 	}
+	// The immutable tip is k blocks behind the applied tip. A fragment whose
+	// head is below it cannot be switched to, since that would roll back more
+	// than k blocks, so it does not bound the selection.
+	immutableBlock := localTip.BlockNumber -
+		min(localTip.BlockNumber, cs.securityParam)
 	var fragments []CandidateFragment
 	// forced is set when include admits a peer the selection view excludes.
 	// Such a view is the requester's alone, so it does not record the anchor:
@@ -165,9 +172,15 @@ func (cs *ChainSelector) computeEagernessLimitLocked(
 			points:    peerTip.observedPoints,
 			baseBlock: peerTip.observedPointBaseBlock,
 		}
-		if fragment.Len() > 0 {
-			fragments = append(fragments, fragment)
+		if fragment.Len() == 0 {
+			continue
 		}
+		// #nosec G115 -- the retained fragment length is bounded.
+		head := fragment.baseBlock + uint64(fragment.Len()-1)
+		if head < immutableBlock && !forced {
+			continue
+		}
+		fragments = append(fragments, fragment)
 	}
 	if len(fragments) == 0 {
 		if include == nil {
@@ -176,10 +189,18 @@ func (cs *ChainSelector) computeEagernessLimitLocked(
 		return limit
 	}
 	// Without a common retained point the limit holds at the last one the
-	// candidates shared.
+	// candidates shared, but never below the immutable tip: the shared point
+	// is stale once the local chain has moved more than k past it.
 	fallback := func() EagernessLimit {
 		anchor := cs.eagernessAnchorValue()
 		if anchor == nil {
+			return limit
+		}
+		if anchor.blockNumber < immutableBlock {
+			limit.BlockNumber = safeAddUint64(
+				immutableBlock,
+				cs.securityParam,
+			)
 			return limit
 		}
 		limit.Point = clonePoint(anchor.point)

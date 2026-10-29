@@ -57,7 +57,8 @@ import (
 // to keep defaults consistent.
 const defaultMaxChainsyncClients = chainsync.DefaultMaxClients
 
-// defaultCatchUpBandWaitTimeout bounds a catch-up band wait. A parked
+// defaultCatchUpBandWaitTimeout bounds a catch-up band wait and a Limit on
+// Eagerness wait. A parked
 // roll-forward callback stops its protocol's receive loop. The protocol state
 // timers that can run meanwhile are the chainsync Idle timeout (3673s), the
 // CanAwait timeout (ChainsyncBlockTimeout, at least 269s), the MustReply
@@ -297,6 +298,9 @@ type Ouroboros struct {
 	// catchUpBandWaitTimeout bounds how long a roll-forward callback waits
 	// in ChainsyncAwaitCatchUpBand.
 	catchUpBandWaitTimeout time.Duration
+	// eagernessWaitTimeout bounds how long a roll-forward callback waits in
+	// ChainsyncAwaitEagerness.
+	eagernessWaitTimeout time.Duration
 	// chainsyncArrivalNow is an instance-local clock seam for deterministic
 	// arrival-order tests. Production instances use time.Now.
 	chainsyncArrivalNow      func() time.Time
@@ -874,6 +878,7 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		chainsyncScheduleAt:      defaultChainsyncScheduleAt,
 		corroborationHoldTimeout: defaultCorroborationHoldTimeout,
 		catchUpBandWaitTimeout:   catchUpBandWait,
+		eagernessWaitTimeout:     catchUpBandWait,
 		chainsyncArrivalNow:      time.Now,
 		futureHeaderResyncs: make(
 			map[ouroboros.ConnectionId]*scheduledChainsyncResync,

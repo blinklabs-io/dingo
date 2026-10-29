@@ -84,6 +84,7 @@ var chainsyncResyncReasons = map[string]struct{}{
 	event.ChainsyncResyncReasonDeferredHeaderValidationFailure:   {},
 	event.ChainsyncResyncReasonDeterministicTxValidationRecovery: {},
 	event.ChainsyncResyncReasonDisconnectedHeaderAdmission:       {},
+	event.ChainsyncResyncReasonEagernessWaitExpired:              {},
 	event.ChainsyncResyncReasonForecastCorroborationRecovery:     {},
 	event.ChainsyncResyncReasonForecastHorizonNoWork:             {},
 	event.ChainsyncResyncReasonForkExtensionRestartFailed:        {},
