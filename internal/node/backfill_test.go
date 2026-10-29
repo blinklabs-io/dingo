@@ -773,7 +773,13 @@ func TestBackfillFlushesFullRowBatchWithinBlock(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
-	db := newTestDB(t)
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir:     "",
+		StorageMode: types.StorageModeAPI,
+		Logger:      slog.Default(),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
 	backfill := NewBackfill(db, nil, slog.Default())
 	backfill.SetDelegatorInactivityEnabled(false)
 	acc := db.NewBatchAccumulator()
