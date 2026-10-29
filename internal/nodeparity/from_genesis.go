@@ -480,6 +480,10 @@ type EpochResult struct {
 	StakeErr        error
 	StakeMismatches []StakeMismatch
 
+	// UTxOSkipped is true when the run was started with the UTxO check
+	// disabled: the check was not wanted, so it is neither verified nor
+	// incomplete, and UTxOAttempted is false.
+	UTxOSkipped bool
 	// UTxOAttempted is false whenever the genesis baseline was never
 	// captured (see captureGenesisBaseline) -- the fields below are
 	// meaningless in that case.
@@ -771,6 +775,9 @@ func resolveStartPoint(resumeFrom *Tip) (pcommon.Point, error) {
 // three for what gets cached and why it is safe for dingo's own embedded
 // koios-parity observer to be writing the same cache.db concurrently.
 //
+// skipUTxO disables the UTxO-set comparison: no baseline is captured and no
+// /tx_info is fetched, and each EpochResult carries UTxOSkipped.
+//
 // The reconstruction itself stays a stateful, order-dependent walk: what is
 // cached is only each transaction's own immutable /tx_info answer, keyed by
 // transaction hash rather than by epoch, so a re-run from genesis replays the
@@ -785,10 +792,11 @@ func RunFromGenesis(
 	report FromGenesisReporter,
 	logf func(format string, args ...any),
 	resumeFrom *Tip,
+	skipUTxO bool,
 ) error {
 	if !KoiosNetworks[network] {
 		return fmt.Errorf(
-			"koios-backed comparison only supports preview or preprod, got %q",
+			"koios-backed comparison only supports preview, preprod or mainnet, got %q",
 			network,
 		)
 	}
@@ -1185,7 +1193,7 @@ func RunFromGenesis(
 						// see lastPoint's doc comment above.
 						lastPoint = point
 
-						if !utxoAttempted {
+						if !utxoAttempted && !skipUTxO {
 							utxoAttempted = true
 							refs, err := captureGenesisBaseline(
 								sessionCtx, dingoAddr, magic, point,
@@ -1363,7 +1371,7 @@ func RunFromGenesis(
 						// this so the very first, still-in-progress capture
 						// attempt above (same block, same point) is not
 						// immediately redialed a second time here.
-						if utxoAttempted && utxoRefs == nil {
+						if !skipUTxO && utxoAttempted && utxoRefs == nil {
 							refs, err := captureGenesisBaseline(
 								sessionCtx, dingoAddr, magic, point,
 							)
@@ -1398,9 +1406,12 @@ func RunFromGenesis(
 								)
 							}
 						}
-						switch mode, verdictErr := utxoVerdict(
-							utxoTaintCause, utxoRefs,
-						); mode {
+						mode, verdictErr := utxoVerdict(utxoTaintCause, utxoRefs)
+						if skipUTxO {
+							result.UTxOSkipped = true
+							mode = utxoVerdictNoBaseline
+						}
+						switch mode {
 						case utxoVerdictTainted:
 							result.UTxOAttempted = true
 							result.UTxOErr = verdictErr

@@ -466,6 +466,16 @@ func TestFromGenesisCounters_RecordEpoch(t *testing.T) {
 		assert.Equal(t, 0, c.ppVerified)
 	})
 
+	t.Run("UTxOSkipped counts as neither incomplete nor verified", func(t *testing.T) {
+		var c fromGenesisCounters
+		c.recordEpoch(nodeparity.EpochResult{Epoch: 1, UTxOSkipped: true}, logger)
+		assert.Equal(t, fromGenesisCounters{
+			epochsChecked: 1,
+			ppVerified:    1, stakeVerified: 1,
+		}, c)
+		assert.NoError(t, c.result())
+	})
+
 	t.Run("UTxOErr counts as incomplete, not verified", func(t *testing.T) {
 		var c fromGenesisCounters
 		c.recordEpoch(nodeparity.EpochResult{
