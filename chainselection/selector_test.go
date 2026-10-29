@@ -290,6 +290,45 @@ func TestRejectPeerTipAdmissionPrunesMatchingPeerCandidates(t *testing.T) {
 			"only the prefix before the rejected point survives")
 	})
 
+	t.Run("rejected identity loses reconnect continuity", func(t *testing.T) {
+		t.Parallel()
+		reconnectConn := newTestConnectionId(30)
+		cs := NewChainSelector(ChainSelectorConfig{
+			SecurityParam:             2,
+			GenesisMode:               true,
+			MinCorroboratingPeers:     1,
+			DisableEventSubscriptions: true,
+			PeerIdentity: func(connId ouroboros.ConnectionId) string {
+				switch connId {
+				case firstConn, secondConn, reconnectConn:
+					return "rejected-pool"
+				default:
+					return "other-pool"
+				}
+			},
+		})
+		cs.SetLocalTip(localTip)
+		first := staged(firstConn, 1, 101, "bad-header")
+		duplicate := staged(secondConn, 1, 101, "bad-header")
+		require.True(t, cs.PreparePeerTipAdmission(first))
+		require.True(t, cs.PreparePeerTipAdmission(duplicate))
+		cs.farTipRunsByIdentity["rejected-pool"] = farTipRunContinuity{
+			connection: reconnectConn,
+			hash:       []byte("earlier-header"),
+			run:        2,
+		}
+		cs.farTipRunsByIdentity["other-pool"] = farTipRunContinuity{
+			connection: thirdConn,
+			hash:       []byte("other-header"),
+			run:        2,
+		}
+
+		cs.RejectPeerTipAdmission(first)
+
+		assert.NotContains(t, cs.farTipRunsByIdentity, "rejected-pool")
+		assert.Contains(t, cs.farTipRunsByIdentity, "other-pool")
+	})
+
 	t.Run("an admitted point keeps its copies", func(t *testing.T) {
 		t.Parallel()
 		cs := newSelector()

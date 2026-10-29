@@ -1621,6 +1621,7 @@ func (cs *ChainSelector) pruneMatchingPendingPeerTipsLocked(
 			if candidatePoint.Slot == point.Slot &&
 				bytes.Equal(candidatePoint.Hash, point.Hash) {
 				cs.truncatePendingPeerTipsLocked(connId, i)
+				cs.clearFarTipRunContinuityForConnLocked(connId)
 				pruned = true
 				break
 			}
@@ -2910,6 +2911,9 @@ func (cs *ChainSelector) clearFarTipRunContinuityForConnLocked(
 ) {
 	if cs.farTipRunsByIdentity == nil {
 		return
+	}
+	if identity, ok := cs.corroboratorIdentity(connId); ok {
+		delete(cs.farTipRunsByIdentity, identity)
 	}
 	for identity, continuity := range cs.farTipRunsByIdentity {
 		if continuity.connection == connId {
