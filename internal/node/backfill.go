@@ -43,7 +43,7 @@ const BackfillPhase = "metadata"
 
 // DefaultBackfillBatchSize controls how many processed blocks are accumulated
 // before deferred metadata rows are flushed.
-const DefaultBackfillBatchSize = 100
+const DefaultBackfillBatchSize = 200
 
 // DefaultBackfillBatchRows caps the accumulated metadata row count before a
 // flush so dense eras do not hold oversized batches in memory.

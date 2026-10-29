@@ -764,9 +764,9 @@ func TestBackfillBatchSizeDefaultAndOverride(t *testing.T) {
 	db := newTestDB(t)
 	bf := NewBackfill(db, nil, slog.Default())
 
-	require.Equal(t, DefaultBackfillBatchSize, bf.batchSize)
-	require.NoError(t, bf.SetBatchSize(200))
 	require.Equal(t, 200, bf.batchSize)
+	require.NoError(t, bf.SetBatchSize(300))
+	require.Equal(t, 300, bf.batchSize)
 }
 
 func TestBackfillSetBatchSizeRejectsInvalid(t *testing.T) {

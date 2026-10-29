@@ -1622,7 +1622,7 @@ func newDefaultConfig() *Config {
 		// Defaults for database worker pool and API backfill tuning
 		DatabaseWorkers:   5,
 		DatabaseQueueSize: 50,
-		BackfillBatchSize: 100,
+		BackfillBatchSize: 200,
 		// CIP-50 default L (feature disabled by default via PledgeLeverageEnabled)
 		PledgeLeverage: 100,
 		// Cache configuration defaults
