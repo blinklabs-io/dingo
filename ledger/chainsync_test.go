@@ -3942,23 +3942,17 @@ func assertPeerHeaderHistoryByteAccounting(t *testing.T, ls *LedgerState) {
 // (findPeerForkPath) where the peer's own recent header history resolves
 // all the way back to the local committed tip.
 //
-// Genesis selection is reported active with a large window and k so
+// Genesis selection is reported active with a large window so
 // peerHeaderHistoryLimit accepts a path longer than the default 256-entry
 // cap -- required to build a path that exceeds MaxQueuedHeaders (the
 // default floor is 10,000), matching the shape of the live-sync freeze this
 // file regression-tests (a single reconciliation event with several
 // thousand fork-path headers, phase 3).
 func buildOverflowForkPath(
-	t testing.TB,
 	fixture *chainsyncRollbackFixture,
 	connId ouroboros.ConnectionId,
 	headerCount int,
 ) mockHeader {
-	t.Helper()
-	// The Genesis history limit is 4k headers, so k must make room for the
-	// whole path.
-	fixture.ls.config.CardanoNodeConfig =
-		newTestShelleyGenesisCfgWithSecurityParam(t, headerCount)
 	fixture.ls.config.GenesisSelectionStateFunc = func() (bool, uint64) {
 		return true, uint64(headerCount) * 10
 	}
@@ -3998,15 +3992,11 @@ func TestRecordPeerHeaderHistoryBoundsRetainedBytes(t *testing.T) {
 	t.Parallel()
 
 	fixture := newChainsyncRollbackFixture(t)
-	const headerCount = 5000
-	// The Genesis history limit is 4k headers; k must leave the byte budget
-	// as the only bound.
-	fixture.ls.config.CardanoNodeConfig =
-		newTestShelleyGenesisCfgWithSecurityParam(t, headerCount)
 	fixture.ls.config.GenesisSelectionStateFunc = func() (bool, uint64) {
 		return true, ^uint64(0)
 	}
 	connId := testChainsyncConnId(6201, 3001)
+	const headerCount = 5000
 	for i := range headerCount {
 		hash := testHashBytes(fmt.Sprintf("budget-header-%d", i))
 		prevHash := fixture.currentTip.Point.Hash
@@ -4261,7 +4251,7 @@ func TestTryResolveForkExtensionRestartsBlockfetchAfterQueueOverflow(
 	fixture := newChainsyncRollbackFixture(t)
 	maxHeaders := fixture.ls.chain.MaxQueuedHeaders()
 	connId := testChainsyncConnId(6201, 3001)
-	trigger := buildOverflowForkPath(t, fixture, connId, maxHeaders+5)
+	trigger := buildOverflowForkPath(fixture, connId, maxHeaders+5)
 
 	// Sanity-check: chain.AddBlockHeader must reject the trigger header as
 	// not fitting the (empty) header queue's tip, i.e. the not-fit gate the
@@ -4357,7 +4347,7 @@ func TestEnsureBlockfetchDrainingAfterForkQueueFailureRecoversWhenStartFails(
 	fixture := newChainsyncRollbackFixture(t)
 	maxHeaders := fixture.ls.chain.MaxQueuedHeaders()
 	connId := testChainsyncConnId(6203, 3001)
-	trigger := buildOverflowForkPath(t, fixture, connId, maxHeaders+5)
+	trigger := buildOverflowForkPath(fixture, connId, maxHeaders+5)
 
 	err := fixture.ls.chain.AddBlockHeader(context.Background(), trigger)
 	var notFitErr chain.BlockNotFitChainTipError
@@ -4485,7 +4475,7 @@ func TestTryResolveForkExtensionDoesNotThrashAlreadyRunningBlockfetch(
 	fixture := newChainsyncRollbackFixture(t)
 	maxHeaders := fixture.ls.chain.MaxQueuedHeaders()
 	connId := testChainsyncConnId(6202, 3001)
-	trigger := buildOverflowForkPath(t, fixture, connId, maxHeaders+5)
+	trigger := buildOverflowForkPath(fixture, connId, maxHeaders+5)
 
 	err := fixture.ls.chain.AddBlockHeader(context.Background(), trigger)
 	var notFitErr chain.BlockNotFitChainTipError

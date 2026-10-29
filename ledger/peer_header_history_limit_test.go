@@ -15,10 +15,12 @@
 package ledger
 
 import (
+	"encoding/hex"
 	"fmt"
 	"math/big"
 	"testing"
 
+	ouroboros "github.com/blinklabs-io/gouroboros"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
@@ -27,15 +29,15 @@ import (
 	"github.com/blinklabs-io/dingo/chainselection"
 )
 
-// The Genesis window is measured in slots, but the per-connection history
-// limit counts headers. While Genesis is active the limit must follow the
-// candidate-fragment bound of 4k headers, not the window's slot count.
-func TestPeerHeaderHistoryLimitGenesisWindowCountsHeaders(t *testing.T) {
+// The per-connection history limit counts headers. While Genesis is active it
+// must cover the k headers of the local fragment plus every header the
+// forecast range can hold, which at full density is one per window slot.
+func TestPeerHeaderHistoryLimitGenesisCoversForecastRange(t *testing.T) {
 	t.Parallel()
 
-	const k = 2160
+	const k = 600
 	window := chainselection.GenesisWindowSlotsForParams(k, big.NewRat(1, 20))
-	require.Greater(t, window, uint64(4*k))
+	require.Equal(t, uint64(36000), window)
 
 	testCases := []struct {
 		name   string
@@ -44,16 +46,10 @@ func TestPeerHeaderHistoryLimitGenesisWindowCountsHeaders(t *testing.T) {
 		want   func(floor int) int
 	}{
 		{
-			name:   "slot window above candidate bound",
+			name:   "window above 4k",
 			active: true,
 			window: window,
-			want:   func(floor int) int { return max(floor, 4*k) },
-		},
-		{
-			name:   "slot window below candidate bound",
-			active: true,
-			window: 5000,
-			want:   func(floor int) int { return max(floor, 5000) },
+			want:   func(floor int) int { return max(floor, int(window)+k) },
 		},
 		{
 			name:   "genesis inactive",
@@ -74,19 +70,19 @@ func TestPeerHeaderHistoryLimitGenesisWindowCountsHeaders(t *testing.T) {
 				maxPeerHeaderHistoryPerConn,
 				fixture.ls.allowedQueuedHeaders(),
 			)
-			require.Less(t, floor, 4*k)
 			assert.Equal(t, tc.want(floor), fixture.ls.peerHeaderHistoryLimit())
 		})
 	}
 }
 
-// Headers the local chain has already passed are evicted by count. Under
-// Genesis that count must stop at the candidate-fragment bound rather than
-// retaining one header per slot of the window.
-func TestPeerHeaderHistoryGenesisRetentionBoundedByHeaders(t *testing.T) {
+// A dense candidate can hold more than 4k headers inside the forecast range.
+// The fork-path walk must still reach a held ancestor that many linked
+// headers back.
+func TestFindPeerForkPathGenesisDenseCandidateBeyondFourK(t *testing.T) {
 	t.Parallel()
 
-	const k = 2160
+	const k = 600
+	const linked = 4*k + 50
 	fixture := newChainsyncRollbackFixture(t)
 	fixture.ls.config.CardanoNodeConfig = newTestShelleyGenesisCfgWithSecurityParam(t, k)
 	fixture.ls.config.GenesisSelectionStateFunc = func() (bool, uint64) {
@@ -95,26 +91,53 @@ func TestPeerHeaderHistoryGenesisRetentionBoundedByHeaders(t *testing.T) {
 			big.NewRat(1, 20),
 		)
 	}
+	require.Greater(t, linked, fixture.ls.allowedQueuedHeaders())
 
-	const headerCount = 4*k + 100
-	slot := fixture.ancestorTip.Point.Slot
+	stamped := fixture.ls.CurrentHeaderCryptoVerificationGeneration()
+	byHash := map[string]ChainsyncEvent{}
+	prevOf := map[string][]byte{}
 	prevHash := fixture.ancestorTip.Point.Hash
-	for i := range headerCount {
-		hash := testHashBytes(fmt.Sprintf("genesis-retention-%d", i))
-		fixture.ls.recordPeerHeaderHistory(ChainsyncEvent{
-			ConnectionId: fixture.connId,
-			Point:        ocommon.NewPoint(slot, hash),
+	slot := fixture.ancestorTip.Point.Slot
+	var tipEvent ChainsyncEvent
+	var tipPrev []byte
+	for i := range linked {
+		slot++
+		hash := testHashBytes(fmt.Sprintf("dense-header-%d", i))
+		ev := ChainsyncEvent{
+			ConnectionId:                       fixture.connId,
+			HeaderCryptoVerificationGeneration: stamped,
+			Point:                              ocommon.NewPoint(slot, hash),
 			BlockHeader: mockHeader{
 				hash:        lcommon.NewBlake2b256(hash),
 				prevHash:    lcommon.NewBlake2b256(prevHash),
-				blockNumber: uint64(i) + 1,
+				blockNumber: fixture.ancestorTip.BlockNumber + uint64(i) + 1,
 				slot:        slot,
 			},
-		})
+		}
+		if i == linked-1 {
+			tipEvent, tipPrev = ev, prevHash
+			break
+		}
+		byHash[hex.EncodeToString(hash)] = ev
+		prevOf[hex.EncodeToString(hash)] = prevHash
 		prevHash = hash
 	}
+	fixture.ls.config.PeerHeaderLookupFunc = func(
+		_ ouroboros.ConnectionId,
+		h []byte,
+	) (ChainsyncEvent, []byte, bool) {
+		k := hex.EncodeToString(h)
+		ev, ok := byHash[k]
+		return ev, prevOf[k], ok
+	}
 
-	history := fixture.ls.peerHeaderHistory[connIdKey(fixture.connId)]
-	require.NotNil(t, history)
-	assert.Equal(t, 4*k, len(history.order))
+	point, path, err := fixture.ls.findPeerForkPath(
+		tipEvent,
+		tipPrev,
+		fixture.currentTip.Point.Slot,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, point, "ancestor behind %d linked headers lost", linked)
+	assert.Equal(t, fixture.ancestorTip.Point.Slot, point.Slot)
+	assert.Len(t, path, linked)
 }
