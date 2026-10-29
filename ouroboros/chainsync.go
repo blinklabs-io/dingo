@@ -2228,7 +2228,10 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			verificationAttempted = true
 			// One wait budget covers both verifications below, so a header
 			// re-admitted past the forecast horizon cannot double it.
+			// The wait holds a goroutine watching the connection until
+			// released; the defer covers re-admission returning early.
 			var deferredWait deferredVerificationWait
+			defer deferredWait.close()
 			verificationGeneration, verifyErr := o.verifyHeaderAwaitingLedger(
 				ctx,
 				v,

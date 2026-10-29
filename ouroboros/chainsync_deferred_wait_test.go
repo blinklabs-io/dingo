@@ -26,7 +26,10 @@ import (
 	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/goleak"
 )
 
 // deferredVerificationErr returns a real deferred verification result by
@@ -268,4 +271,61 @@ func TestChainsyncClientRollForwardSharesDeferredWaitBudgetAcrossReadmission(
 
 	require.EqualValues(t, maxDeferredVerificationWaits+2, attempts.Load(),
 		"one wait before re-admission leaves the rest of the budget after it")
+}
+
+// A roll-forward that waited out a deferral and then returns from re-admission
+// releases its wait, so no goroutine watching the connection outlives the
+// callback. Not t.Parallel: goleak needs no concurrent tests starting
+// goroutines.
+func TestChainsyncClientRollForwardReleasesDeferredWaitOnReadmissionReturn(
+	t *testing.T,
+) {
+	f := newForecastHorizonFixture(t, "10.0.0.45:3001")
+	deferredErr := deferredVerificationErr(t)
+	settle := newSettleSignal()
+	f.o.config.ChainsyncHeaderVerificationSettled = settle.current
+	// The first admission precedes verification; the second, after the
+	// header falls past the horizon, refuses it and ends the callback.
+	var admissions atomic.Int32
+	f.o.chainsyncHeaderAdmission = func(
+		context.Context,
+		ledger.ChainsyncEvent,
+	) (bool, error) {
+		return admissions.Add(1) == 1, nil
+	}
+	var attempts atomic.Int32
+	f.o.chainSelectionVerifyHeaderCrypto = func(
+		ouroboros.ConnectionId,
+		gledger.BlockHeader,
+	) (uint64, error) {
+		if attempts.Add(1) == 1 {
+			settle.publish()
+			return 0, deferredErr
+		}
+		return 0, beyondForecastHorizonErr()
+	}
+	connDone := make(chan any)
+	t.Cleanup(func() { close(connDone) })
+	ignore := goleak.IgnoreCurrent()
+
+	header := newTestBlockHeader(400, 1, 0xb6)
+	require.NoError(t, f.o.chainsyncClientRollForward(
+		ochainsync.CallbackContext{
+			ConnectionId:       f.conn,
+			ConnectionDoneChan: connDone,
+		},
+		0,
+		header,
+		ochainsync.Tip{
+			Point: ocommon.NewPoint(
+				header.SlotNumber(),
+				header.Hash().Bytes(),
+			),
+			BlockNumber: header.BlockNumber(),
+		},
+	))
+
+	require.EqualValues(t, 2, attempts.Load())
+	require.EqualValues(t, 2, admissions.Load())
+	goleak.VerifyNone(t, ignore)
 }
