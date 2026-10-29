@@ -194,3 +194,71 @@ func BenchmarkStatelessHeaderCryptoVerdict(b *testing.B) {
 		}
 	})
 }
+
+func TestStatelessHeaderCryptoVerdictBoundToDecodedInputs(t *testing.T) {
+	t.Parallel()
+
+	// The KES and opcert verifiers read decoded fields, which the stored
+	// header CBOR, and so the header hash, does not bind.
+	flip := func(b []byte) []byte {
+		out := append([]byte(nil), b...)
+		out[0] ^= 1
+		return out
+	}
+	tests := []struct {
+		name   string
+		seed   byte
+		mutate func(*babbage.BabbageBlockHeader)
+	}{
+		{
+			name: "KES signature",
+			seed: 66,
+			mutate: func(h *babbage.BabbageBlockHeader) {
+				h.Signature = flip(h.Signature)
+			},
+		},
+		{
+			name: "opcert cold signature",
+			seed: 67,
+			mutate: func(h *babbage.BabbageBlockHeader) {
+				h.Body.OpCert.Signature = flip(h.Body.OpCert.Signature)
+			},
+		},
+		{
+			name: "issuer key",
+			seed: 68,
+			mutate: func(h *babbage.BabbageBlockHeader) {
+				h.Body.IssuerVkey[0] ^= 1
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tb := createTestBlock(t, [32]byte{tc.seed}, 0, tamperNone)
+			ls, _ := newEligibilityTestLedger(t, tb.epochNonce)
+			block := headerOnlyBlock{header: tb.block.header, peerRelative: true}
+			epoch := models.Epoch{EpochId: 5}
+			require.NoError(
+				t,
+				ls.verifyBlockHeaderStatelessCryptoWithEpochNonce(
+					block,
+					epoch,
+					tb.epochNonce,
+				),
+			)
+			cbor := tb.block.header.Cbor()
+			tc.mutate(tb.block.header)
+			require.Equal(t, cbor, tb.block.header.Cbor())
+			require.Error(
+				t,
+				ls.verifyBlockHeaderStatelessCryptoWithEpochNonce(
+					block,
+					epoch,
+					tb.epochNonce,
+				),
+				"a decoded-field change must not reuse the cached verdict",
+			)
+		})
+	}
+}

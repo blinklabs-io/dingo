@@ -394,15 +394,17 @@ func (ls *LedgerState) verifyBlockHeaderStatelessCryptoWithEpochNonce(
 			len(epochNonce),
 		)
 	}
-	// The verdict is keyed by the header hash, which covers the stored header
-	// CBOR, but verification reads the body CBOR and decoded signature. Only a
-	// header carrying its CBOR ties the two together; without it the hash is
-	// of the empty input and would be shared by unrelated headers.
-	var hash []byte
+	// Verification reads the body CBOR and decoded KES and opcert fields,
+	// which the stored header CBOR, and so the header hash, does not bind.
+	// Key the verdict by the replay identity, which covers all of them. A
+	// header without its stored CBOR is never cached.
+	var identity []byte
 	if len(block.Header().Cbor()) > 0 {
-		hash = block.Header().Hash().Bytes()
+		if id, err := replayHeaderIdentity(block); err == nil {
+			identity = id.Bytes()
+		}
 	}
-	if ls.statelessHeaderVerdicts.contains(hash, epochNonce) {
+	if ls.statelessHeaderVerdicts.contains(identity, epochNonce) {
 		return nil
 	}
 	if ls.statelessHeaderCryptoRunHook != nil {
@@ -434,7 +436,7 @@ func (ls *LedgerState) verifyBlockHeaderStatelessCryptoWithEpochNonce(
 			err,
 		)
 	}
-	ls.statelessHeaderVerdicts.add(hash, epochNonce)
+	ls.statelessHeaderVerdicts.add(identity, epochNonce)
 	return nil
 }
 

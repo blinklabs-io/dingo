@@ -24,13 +24,14 @@ import (
 // statelessHeaderVerdictCacheLimit bounds the number of remembered verdicts.
 const statelessHeaderVerdictCacheLimit = 32768
 
-// statelessHeaderVerdictKey is a header hash followed by the epoch nonce it
-// was verified against.
+// statelessHeaderVerdictKey is a header verification identity followed by the
+// epoch nonce it was verified against.
 type statelessHeaderVerdictKey [2 * lcommon.Blake2b256Size]byte
 
 // statelessHeaderVerdictCache remembers headers whose stateless crypto
 // (VRF, KES, opcert signature and KES period) succeeded. That verdict is a
-// function of the header bytes, which the header hash commits to, the epoch
+// function of the stored header CBOR and the decoded fields the verifiers
+// read, which the identity from replayHeaderIdentity commits to, the epoch
 // nonce, and Shelley genesis constants fixed for the lifetime of a
 // LedgerState, so it is valid for every peer connection. Only successes are
 // stored. The zero value is ready to use and safe for concurrent use.
@@ -41,24 +42,24 @@ type statelessHeaderVerdictCache struct {
 }
 
 func newStatelessHeaderVerdictKey(
-	hash []byte,
+	identity []byte,
 	nonce []byte,
 ) (statelessHeaderVerdictKey, bool) {
 	var key statelessHeaderVerdictKey
-	if len(hash) != lcommon.Blake2b256Size ||
+	if len(identity) != lcommon.Blake2b256Size ||
 		len(nonce) != lcommon.Blake2b256Size {
 		return key, false
 	}
-	copy(key[:lcommon.Blake2b256Size], hash)
+	copy(key[:lcommon.Blake2b256Size], identity)
 	copy(key[lcommon.Blake2b256Size:], nonce)
 	return key, true
 }
 
 func (c *statelessHeaderVerdictCache) contains(
-	hash []byte,
+	identity []byte,
 	nonce []byte,
 ) bool {
-	key, ok := newStatelessHeaderVerdictKey(hash, nonce)
+	key, ok := newStatelessHeaderVerdictKey(identity, nonce)
 	if !ok {
 		return false
 	}
@@ -71,8 +72,8 @@ func (c *statelessHeaderVerdictCache) contains(
 	return found
 }
 
-func (c *statelessHeaderVerdictCache) add(hash []byte, nonce []byte) {
-	key, ok := newStatelessHeaderVerdictKey(hash, nonce)
+func (c *statelessHeaderVerdictCache) add(identity []byte, nonce []byte) {
+	key, ok := newStatelessHeaderVerdictKey(identity, nonce)
 	if !ok {
 		return
 	}

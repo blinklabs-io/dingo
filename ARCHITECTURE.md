@@ -6465,10 +6465,11 @@ cryptographic result does not stamp a raw header as fully verified: unavailable
 or invalid state continues to defer or reject it.
 
 Successful stateless header cryptography is also remembered across peer
-connections in a bounded LRU keyed by header hash and epoch nonce
-(`ledger/header_verdict_cache.go`). The verdict depends only on the header
-bytes, the nonce, and Shelley genesis constants, so a header delivered by many
-peers is verified once. Failures are never stored, and Byron headers and
+connections in a bounded LRU keyed by epoch nonce and a header identity that
+hashes the stored header CBOR together with the decoded KES and opcert fields
+the verifiers read (`ledger/header_verdict_cache.go`). The verdict depends only
+on those inputs, the nonce, and Shelley genesis constants, so a header
+delivered by many peers is verified once. Failures are never stored, and Byron headers and
 headers without their stored CBOR are not cached.
 
 While Genesis corroboration is active, a new ChainSync session intersects at
