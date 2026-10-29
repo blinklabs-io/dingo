@@ -131,6 +131,18 @@ func (cs *ChainSelector) computeEagernessLimitLocked(
 	include *ouroboros.ConnectionId,
 	localTip ochainsync.Tip,
 ) EagernessLimit {
+	return cs.computeEagernessLimitFromPeersLocked(
+		include,
+		localTip,
+		cs.peerTipsIncludingCandidatesLocked(),
+	)
+}
+
+func (cs *ChainSelector) computeEagernessLimitFromPeersLocked(
+	include *ouroboros.ConnectionId,
+	localTip ochainsync.Tip,
+	peerTips iter.Seq2[ouroboros.ConnectionId, *PeerChainTip],
+) EagernessLimit {
 	if cs.mode != SelectionModeGenesis || cs.securityParam == 0 {
 		cs.setEagernessAnchor(nil)
 		return EagernessLimit{}
@@ -153,10 +165,11 @@ func (cs *ChainSelector) computeEagernessLimitLocked(
 	// the anchor is the last point the live candidates shared, and a forced
 	// lone fragment's head was never shared with any of them.
 	forced := false
-	for connId, peerTip := range cs.peerTipsIncludingCandidatesLocked() {
+	for connId, peerTip := range peerTips {
 		if peerTip.awaitingFirstHeader {
 			continue
 		}
+		peerForced := false
 		// A peer advertising a wall-clock-stale tip is never selectable, so
 		// there is no switch to it for the limit to protect; counting it would
 		// pin the limit at k past its fork point while it stays connected.
@@ -165,6 +178,7 @@ func (cs *ChainSelector) computeEagernessLimitLocked(
 			if include == nil || *include != connId {
 				continue
 			}
+			peerForced = true
 			forced = true
 		}
 		// A read-only view: callers hold the selector lock, so the retained
@@ -178,7 +192,7 @@ func (cs *ChainSelector) computeEagernessLimitLocked(
 		}
 		// #nosec G115 -- the retained fragment length is bounded.
 		head := fragment.baseBlock + uint64(fragment.Len()-1)
-		if head < immutableBlock && !forced {
+		if head < immutableBlock && !peerForced {
 			continue
 		}
 		fragments = append(fragments, fragment)

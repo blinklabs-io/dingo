@@ -17,6 +17,7 @@ package chainselection
 import (
 	"context"
 	"fmt"
+	"iter"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -718,4 +719,47 @@ func TestLimitOnEagernessIntersectionNeverFallsBelowImmutableTip(t *testing.T) {
 	assert.True(t, cs.withinEagernessLimit(a, 30, appliedTip),
 		"the limit fell below the applied immutable tip plus k")
 	assert.False(t, cs.withinEagernessLimit(a, 31, appliedTip))
+}
+
+func TestLimitOnEagernessForcedSenderDoesNotAdmitOldPeer(t *testing.T) {
+	t.Parallel()
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:   true,
+		SecurityParam: loeTestK,
+	})
+	sender := newTestConnectionId(1)
+	oldPeer := newTestConnectionId(2)
+	feedLoEChain(cs, sender, "sender", 1, 40)
+	feedLoEChain(cs, oldPeer, "old", 1, 12)
+	cs.SetLocalTip(loeTip("base", 10))
+	cs.SetConnectionEligible(sender, false)
+
+	peerTips := cs.peerTips
+	require.NotNil(t, peerTips[sender])
+	require.NotNil(t, peerTips[oldPeer])
+	orderedPeers := func(order []ouroboros.ConnectionId) iter.Seq2[ouroboros.ConnectionId, *PeerChainTip] {
+		return func(yield func(ouroboros.ConnectionId, *PeerChainTip) bool) {
+			for _, connId := range order {
+				if !yield(connId, peerTips[connId]) {
+					return
+				}
+			}
+		}
+	}
+	include := sender
+	// The sender's forced inclusion must not leak into the old peer's filter,
+	// regardless of the order in which the selector visits candidates.
+	for _, order := range [][]ouroboros.ConnectionId{
+		{sender, oldPeer},
+		{oldPeer, sender},
+	} {
+		limit := cs.computeEagernessLimitFromPeersLocked(
+			&include,
+			loeTip("sender", 38),
+			orderedPeers(order),
+		)
+		require.True(t, limit.Intersected)
+		assert.Equal(t, uint64(40+loeTestK), limit.BlockNumber)
+		assert.Equal(t, loeTip("sender", 40).Point, limit.Point)
+	}
 }
