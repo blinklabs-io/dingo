@@ -6491,9 +6491,15 @@ Ordinary Praos sessions continue to use primary-chain intersection points.
   grouping, so its IPv4, IPv6, and hostname relays share one identity before the
   live ledger is available. A topology peer that is also matched to a ledger
   relay retains that ledger control identity, including when an inbound duplex
-  connection reuses the peer entry. Topology valency groups, peer-sharing
-  addresses, unmatched inbound connections, and network prefixes do not prove
-  independent control and therefore supply no corroboration identity. A relay
+  connection reuses the peer entry. A peer learned through peer sharing takes
+  the control identity of the registered relay at its address, looked up in the
+  last non-empty ledger or snapshot relay set (`ledgerRelayIdentities`) when the
+  peer is added and on every ledger discovery round. The lookup compares
+  addresses without DNS, so a relay registered only under a hostname does not
+  vouch for a peer-sharing address that arrives as an IP. Topology valency
+  groups, peer-sharing addresses outside the relay set, unmatched inbound
+  connections, and network prefixes do not prove independent control and
+  therefore supply no corroboration identity. A relay
   endpoint registered under conflicting control keys is also untrusted. These
   connections fail closed: as candidates they have no corroborators, and as
   witnesses they do not count. Without a hook the selector groups by remote
