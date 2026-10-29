@@ -820,6 +820,45 @@ func TestBackfillBatchLimitReached(t *testing.T) {
 	}
 }
 
+func TestBackfillTransactionByteLimitReached(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		flushedBytes int64
+		pendingBytes int64
+		want         bool
+	}{
+		{
+			name:         "below limit",
+			flushedBytes: DefaultBackfillBatchBytes / 2,
+			pendingBytes: DefaultBackfillBatchBytes/2 - 1,
+		},
+		{
+			name:         "pending bytes reach limit",
+			flushedBytes: DefaultBackfillBatchBytes / 2,
+			pendingBytes: DefaultBackfillBatchBytes / 2,
+			want:         true,
+		},
+		{
+			name:         "flushed bytes already reached limit",
+			flushedBytes: DefaultBackfillBatchBytes,
+			want:         true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			acc := fixedBackfillBatchMetrics{bytes: test.pendingBytes}
+			assert.Equal(
+				t,
+				test.want,
+				backfillTransactionByteLimitReached(test.flushedBytes, acc),
+			)
+		})
+	}
+}
+
 func TestBackfillFlushesFullRowBatchWithinBlock(t *testing.T) {
 	t.Parallel()
 
@@ -834,6 +873,9 @@ func TestBackfillFlushesFullRowBatchWithinBlock(t *testing.T) {
 	backfill := NewBackfill(db, nil, slog.Default())
 	backfill.SetDelegatorInactivityEnabled(false)
 	acc := db.NewBatchAccumulator()
+	tracker, ok := acc.(interface{ EnableSizeTracking() })
+	require.True(t, ok)
+	tracker.EnableSizeTracking()
 	txn := db.Transaction(ctx, true)
 	defer txn.Release()
 	defer acc.Reset()
@@ -921,6 +963,7 @@ func TestBackfillFlushesFullRowBatchWithinBlock(t *testing.T) {
 	sizer, ok := acc.(backfillBatchSizer)
 	require.True(t, ok)
 	assert.Zero(t, sizer.Len())
+	assert.Greater(t, backfill.batchTxnEstimatedBytes, int64(0))
 
 	stored, err := db.GetTransactionByHash(ctx, tx.Hash().Bytes(), txn)
 	require.NoError(t, err)
