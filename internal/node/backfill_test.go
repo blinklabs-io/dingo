@@ -17,6 +17,7 @@ package node
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -977,6 +978,128 @@ func TestBackfillFlushesFullRowBatchWithinBlock(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, stored)
 	assert.Len(t, stored.KeyWitnesses, DefaultBackfillBatchRows)
+
+	require.NoError(t, txn.Rollback())
+	stored, err = db.GetTransactionByHash(ctx, tx.Hash().Bytes(), nil)
+	require.NoError(t, err)
+	assert.Nil(t, stored, "the row flush must remain inside the caller transaction")
+}
+
+func TestBackfillFlushesByteBatchWithinTransactionLevel(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir:     "",
+		StorageMode: types.StorageModeAPI,
+		Logger:      slog.Default(),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
+	backfill := NewBackfill(db, nil, slog.Default())
+	backfill.SetDelegatorInactivityEnabled(false)
+	acc := db.NewBatchAccumulator()
+	tracker, ok := acc.(interface{ EnableSizeTracking() })
+	require.True(t, ok)
+	tracker.EnableSizeTracking()
+	txn := db.Transaction(ctx, true)
+	defer txn.Release()
+	defer acc.Reset()
+
+	// One large datum makes the estimated byte threshold, rather than the row
+	// threshold, flush the real SQL accumulator.
+	payloadSize := uint32(DefaultBackfillBatchBytes + 1)
+	rawDatum := make([]byte, 5+payloadSize)
+	rawDatum[0] = 0x5a
+	binary.BigEndian.PutUint32(rawDatum[1:5], payloadSize)
+	var datum lcommon.Datum
+	datum.SetCbor(rawDatum)
+
+	input, err := mockledger.NewTransactionInputBuilder().
+		WithTxId(bytes.Repeat([]byte{0xC3}, 32)).
+		WithIndex(0).
+		Build()
+	require.NoError(t, err)
+	address, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyKey,
+		lcommon.AddressNetworkTestnet,
+		bytes.Repeat([]byte{0xD4}, lcommon.AddressHashSize),
+		bytes.Repeat([]byte{0xE5}, lcommon.AddressHashSize),
+	)
+	require.NoError(t, err)
+	output, err := mockledger.NewTransactionOutputBuilder().
+		WithAddress(address.String()).
+		WithLovelace(1_000_000).
+		Build()
+	require.NoError(t, err)
+	txBuilder := mockledger.NewTransactionBuilder()
+	txBuilder.WithId(bytes.Repeat([]byte{0xA1}, 32))
+	txBuilder.WithInputs(input)
+	txBuilder.WithOutputs(output)
+	txBuilder.WithValid(true)
+	txBuilder.WithWitnesses(
+		mockledger.NewMockTransactionWitnessSet().WithPlutusData(datum),
+	)
+	tx, err := txBuilder.Build()
+	require.NoError(t, err)
+
+	point := ocommon.Point{
+		Slot: 100,
+		Hash: bytes.Repeat([]byte{0xB2}, 32),
+	}
+	var blockHash [32]byte
+	copy(blockHash[:], point.Hash)
+	var txHash [32]byte
+	copy(txHash[:], tx.Hash().Bytes())
+	utxoOffsets := make(map[database.UtxoRef]database.CborOffset)
+	for _, produced := range tx.Produced() {
+		var producedTxHash [32]byte
+		copy(producedTxHash[:], produced.Id.Id().Bytes())
+		utxoOffsets[database.UtxoRef{
+			TxId:      producedTxHash,
+			OutputIdx: produced.Id.Index(),
+		}] = database.CborOffset{
+			BlockSlot:  point.Slot,
+			BlockHash:  blockHash,
+			ByteLength: 1,
+		}
+	}
+	offsets := &database.BlockIngestionResult{
+		TxOffsets: map[[32]byte]database.CborOffset{
+			txHash: {
+				BlockSlot:  point.Slot,
+				BlockHash:  blockHash,
+				ByteLength: 1,
+			},
+		},
+		UtxoOffsets: utxoOffsets,
+	}
+
+	require.NoError(t, backfill.processBlockTxsBatched(
+		ctx,
+		[]lcommon.Transaction{tx},
+		point,
+		0,
+		eras.ConwayEraDesc.Id,
+		nil,
+		offsets,
+		acc,
+		txn,
+		nil,
+		true,
+	))
+	sizer, ok := acc.(backfillBatchSizer)
+	require.True(t, ok)
+	assert.Zero(t, sizer.Len())
+	assert.GreaterOrEqual(
+		t,
+		backfill.batchTxnEstimatedBytes,
+		DefaultBackfillBatchBytes,
+	)
+
+	stored, err := db.GetTransactionByHash(ctx, tx.Hash().Bytes(), txn)
+	require.NoError(t, err)
+	require.NotNil(t, stored)
 
 	require.NoError(t, txn.Rollback())
 	stored, err = db.GetTransactionByHash(ctx, tx.Hash().Bytes(), nil)
