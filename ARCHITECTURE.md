@@ -3695,7 +3695,7 @@ Key models in `database/models/`:
 | `PoolStakeSnapshot` | Per-pool stake at epoch boundary |
 | `EpochSummary` | Network-wide aggregates per epoch |
 | `BackfillCheckpoint` | Mithril backfill progress tracking |
-| `NetworkState` | Network-wide treasury/reserves state; initialized from genesis circulation or imported Mithril account state, then updated at epoch boundaries by rewards, treasury withdrawals, donations, MIR, and unclaimed pool-retirement deposit refunds |
+| `NetworkState` | Network-wide treasury/reserves state; initialized from genesis circulation or imported Mithril account state, then updated at epoch boundaries by rewards, treasury withdrawals, donations, MIR, unclaimed pool-retirement deposit refunds, and, on a Byron-prefix network, the Byron-to-Shelley reserves reset |
 | `NetworkDonation` | Per-block treasury donations, applied to treasury at the epoch boundary |
 | `GovernanceAction` | Governance proposals |
 | `CommitteeMember` | Constitutional committee members |
@@ -3717,6 +3717,27 @@ unchanged at that boundary. Preview's genesis `d = 1` instead forces performance
 to 1 and requires the first treasury transfer; omitting the round is incorrect.
 This follows cardano-ledger's [TICK input to RUPD](https://github.com/IntersectMBO/cardano-ledger/blob/9975f3d3f36869822eee7225c8422aacafe57790/eras/shelley/impl/src/Cardano/Ledger/Shelley/Rules/Tick.hs)
 and [startStep performance calculation](https://github.com/IntersectMBO/cardano-ledger/blob/9975f3d3f36869822eee7225c8422aacafe57790/eras/shelley/impl/src/Cardano/Ledger/Shelley/LedgerState/PulsingReward.hs).
+On a Byron-prefix network the Byron-to-Shelley rollover also resets reserves to
+the maximum lovelace supply minus the live UTxO balance
+(`applyByronTranslationReserves`), as cardano-ledger's `ByronTranslation.hs`
+does, so value that left circulation during Byron (fees) is reserves rather
+than missing from every pot. It is the first phase of that rollover, before any
+Shelley boundary rule, because the hard-fork combinator translates the Byron
+ledger before the first Shelley TICK; a two-era boundary's pv3 AVVM return then
+adds the reclaimed value to the translated reserves rather than being
+overwritten. The first Shelley epoch's ADA pots, captured at the end of the
+rollover, therefore carry the translated reserves, which the first Shelley
+reward round reads. An empty live UTxO set fails the rollover: genesis sync
+refuses a configuration with no genesis UTxO and those funds can move but not
+vanish, so zero means the UTxO table was not populated, and neither the whole
+maximum supply nor the genesis baseline is the translated reserves. The
+translation is one write inside the rollover
+transaction, keyed on the ended epoch being Byron and the incoming era not, so
+a restart after the boundary does not repeat it and a rollback past the
+boundary removes it with the other boundary rows. A database synced through
+the boundary before this translation existed keeps its genesis-derived
+reserves and every pot derived from them; the first Shelley reward round
+compounds the gap, so only a resync from genesis corrects it.
 Networks with a Byron prefix have no Shelley reward round at either of those
 boundaries, and `applyStakeRewards`' Byron-ended-epoch guard suppresses both
 there; networks that declare Shelley at genesis, such as preview, run both.
@@ -5775,7 +5796,11 @@ against a real Preview cardano-node: 36 real pools reported by cardano-node
 were completely absent from dingo's reply for no reason other than that
 snapshot lag. `GetUTxOWhole` enumerates live references, resolves their stored
 CBOR through a fixed worker pool, and decodes them into the node-to-client
-reply shape. A successful response always contains the complete UTxO set at
+reply shape. The UTxO query leaves serialize Babbage-era ADA-only outputs
+without a datum or reference script as the backwards-compatible two-element
+array that cardano-ledger emits from its compact UTxO state. They do not reuse
+the post-Alonzo map bytes retained from the producing transaction for those
+outputs. A successful response always contains the complete UTxO set at
 the acquired point. Pagination, offsets, item limits, byte limits, time limits,
 truncation, and partial success are forbidden for this protocol result. If the
 complete set cannot be produced, the query fails without returning a successful
@@ -6459,29 +6484,23 @@ Ordinary Praos sessions continue to use primary-chain intersection points.
   number is unknown (zero), so it cannot vouch for the candidate's height.
 - Witnesses are counted by distinct **peer identity**, and a witness with the
   candidate's own identity is excluded, so several connections from one operator
-  cannot self-corroborate a private fork. The identity is peer governance's
-  address group (`PeerGovernor.CorroborationIdentityByConnId`, wired through
-  `ChainSelectorConfig.PeerIdentity`): the /24 (IPv4) or /64 (IPv6) prefix
-  of the address the connection uses, else the host name. A hostname peer's
-  recorded address is the first one DNS returned when it was added, which a
-  later dial need not use, so it is only a fallback. It is never the topology
-  group ID. A local-root group is
-  a valency target that can hold several operators' relays; counting it as
-  one identity left roots in a single group unable to corroborate each other,
-  so a node restarted in Genesis selection with only such roots eligible never
-  left it. The address group also gives a relay one identity whether it is a
-  root or a ledger peer. Hot-promotion diversity still uses the topology group
-  ID. A connection the hook
-  cannot place, such as an inbound connection peer governance rejected and is
-  closing at its peer-list cap, has no identity and fails closed: as a candidate
-  it has no corroborators, and as a witness it does not count. Keying it by
-  remote host instead would put it in a different namespace from its tracked
-  siblings, so one operator could corroborate itself. Without a hook the
-  selector groups by remote host. This is a lower bound on independence, not a
-  guarantee: genuine independence (distinct operators, ASNs, and chain views)
-  depends on the operator's validated topology. Raising `corroborationPeers`
-  raises the *count* required, not the independence of the peers supplied —
-  that remains an operator responsibility.
+  cannot self-corroborate a private fork. Peer governance supplies the identity
+  through `PeerGovernor.CorroborationIdentityByConnId`, wired to
+  `ChainSelectorConfig.PeerIdentity`. Live ledger peers use the pool control key
+  that registered the relay. Snapshot peers use the snapshot's existing pool
+  grouping, so its IPv4, IPv6, and hostname relays share one identity before the
+  live ledger is available. A topology peer that is also matched to a ledger
+  relay retains that ledger control identity, including when an inbound duplex
+  connection reuses the peer entry. Topology valency groups, peer-sharing
+  addresses, unmatched inbound connections, and network prefixes do not prove
+  independent control and therefore supply no corroboration identity. A relay
+  endpoint registered under conflicting control keys is also untrusted. These
+  connections fail closed: as candidates they have no corroborators, and as
+  witnesses they do not count. Without a hook the selector groups by remote
+  host. Pool control is a lower bound on operator independence; multiple pool
+  keys can still share an operator. Raising `corroborationPeers` raises the
+  count required, while the trusted ledger or snapshot source establishes the
+  available control groups.
 - **Candidate exclusion uses a trusted frontier, whatever the threshold.** In
   Genesis mode the "behind the best known tip" filter
   (`bestKnownBlockNumber`) takes its frontier only from a live, eligible,
@@ -7304,7 +7323,7 @@ The `chainsync.State` tracks multiple concurrent chainsync clients:
 - A rollback to the cursor a peer already sits at does not refresh its stall clock or clear a stalled status (`UpdateClientRollback`). The ledger recognizes a rollback to its own tip before tracking it; it keeps a bounded `maxRollbackHistory` event history and a separate per-connection/point count window so event eviction does not hide a repeated rollback.
 - When a `chainsync.resync` event identifies affected connections, the handler clears local history and generally closes those connections so peer governance can reconnect from fresh intersect points. `LocalLedgerRollback` first attempts ledger-side recovery and leaves connections open when recovery succeeds, no connections need recovery, or the chain is already past the rollback point. Only rollback/fork-resolution failures beyond K and Mithril trust-boundary failures add a peer cooldown; `PersistentFork` does not. Header-driven requests (`requestChainsyncResync`) are coalesced per connection for `chainsyncResyncCoalesceWindow`, and closing the connection clears that record so a reconnect can begin a new resync episode. While network ingest is held (see "Network ingest hold") the handler ignores every request except the release's `network ingest released`, which closes every tracked client.
 - Plateau detection: if the applied tip does not advance and the downloaded primary-chain tip does not change while peers are ahead, the recycler first asks ledger to reconcile any live primary-chain/ledger divergence (`ReconcileLivePrimaryChainLedgerDivergence`). Primary-chain movement, including rollback, resets the plateau clock even when ledger application is temporarily behind, avoiding a resync of an active catch-up stream. When the local repair succeeds, connection-level recovery is skipped so ledger replay can resume from the repaired tip. If no divergence is found, or the divergence's common ancestor sits more than the security parameter K behind the primary chain tip — a rewind that far is declined rather than forced through, per the bound below — the active chainsync connection is recycled — except when the primary (header) chain has already caught up to the peer and the gap is dominated by downloaded-but-not-yet-applied blocks (`isLedgerApplicationBacklog`, `internal/chainsyncrecycler/recycler.go`). That plateau is a ledger-application backlog, not a chainsync stall, so the healthy connection is left running and the condition is logged at INFO instead of recycling (recycling cannot advance the applied tip and only churns the connection). The "peers are ahead" comparison reads a peer's DELIVERED frontier. A peer that has delivered no header has that frontier pinned at the point its session intersected at, which immediately after a plateau resync is the stalled local tip itself, so comparing against it would disarm this watchdog exactly when it has just acted. While such a peer is still awaiting its first header (`PeerChainTip.AwaitingFirstHeader`, `chainselection/peer_tip.go`) the recycler therefore falls back to that peer's ADVERTISED tip, but only when the advertised tip is higher and only when the advertising peer IS the connection this plateau would recycle (`advertisesForOwnConnection`, compared by `ConnectionId` rather than by rendered address, so a replacement connection reusing a listen port does not inherit a stale peer's claim). An untrusted advertised tip can therefore only ever be spent on its own connection, and the substituted value also flows into `isLedgerApplicationBacklog` as the best-peer tip, so it sets the backlog-versus-stall classification too. "Awaiting its first header" means the `awaitingFirstHeader` flag chain selection sets only when it registers a peer from a rollback and clears on that peer's first delivered header, not a delivered block number of 0: a tracked peer that has delivered headers and then rolls back to a point outside its retained delivered-header history is also left with a block number of 0 (`ApplyRollback` keeps the point and cannot recover one), but it has delivered headers on this connection, so it is judged on its delivered frontier and its advertised tip is never substituted. That fallback is reachable only because chain selection tracks such a peer in the first place: a plateau resync closes the connection (`SubscribeChainsyncResync`, `ouroboros/chainsync.go`, closes it for every resync reason), the `ConnectionClosedEvent` subscription in `node.go` calls `ChainSelector.RemovePeer`, and the replacement's only chainsync traffic until the next block is its post-`FindIntersect` `MsgRollBackward` — registered as a peer by `registerPeerFromRollbackLocked` and made selectable with a delivered block number of 0 by the `awaitingFirstHeader` exemption in `isPeerSelectableLocked` (`chainselection/selector.go`). Without that registration `GetBestPeer()` is nil through the whole window and the plateau check returns before the fallback, so the two belong together
-- Plateau decisions are counted in `dingo_chainsync_plateau_decisions_total{outcome}`: `reconciled` (the local reconcile repaired the plateau), `backlog_not_recycled` (ledger-application backlog, stream left running), `resync` (a chainsync resync was requested) and `eagerness_held` (the selector holds the primary at the Limit on Eagerness, stream left running). The recycler reports each through `Config.OnPlateauDecision`, which the node wires in `buildChainsyncRecyclerConfig`. Peer tips refused as implausible are counted in `dingo_chainselection_peer_tip_rejections_total{reason}` (`observed_frontier` or `advertised_tip`, with the frontier reason taking precedence when both bounds refuse) through `ChainSelectorConfig.OnPeerTipRejected`, which runs under the selector lock and only increments a counter.
+- Plateau decisions are counted in `dingo_chainsync_plateau_decisions_total{outcome}`: `reconciled` (the local reconcile repaired the plateau), `backlog_not_recycled` (ledger-application backlog, stream left running), `resync` (a chainsync resync was requested) and `eagerness_held` (the selector holds the primary at the Limit on Eagerness, stream left running). The recycler reports each through `Config.OnPlateauDecision`, which the node wires in `buildChainsyncRecyclerConfig`. Peer tips refused as implausible are counted in `dingo_chainselection_peer_tip_rejections_total{reason}` (`observed_frontier` or `advertised_tip`, with the frontier reason taking precedence when both bounds refuse) through `ChainSelectorConfig.OnPeerTipRejected`, which runs under the selector lock and only increments a counter. A staged candidate is reported on its first refusal only, whether that happens on arrival, on an admission replay or on the commit re-check; a header refused without being staged is reported on each delivery.
 - The recycler itself is `internal/chainsyncrecycler.Recycler`, a `Start`/`Stop` background component that owns only the stall/plateau decision logic. It never reads node fields: the node passes a `ComponentProvider` (`nodeRecyclerComponents`, `node_chainsync_recycler.go`) that hands each tick the live `LedgerSource`, `ChainsyncState`, and `ChainSelector`, plus an `EventPublisher` for the recycle/resync/client-remove requests it decides on. Those are interfaces defined in the recycler package and satisfied structurally by `ledger.LedgerState`, `chainsync.State`, `chainselection.ChainSelector`, and the `EventBus`, so the dependency only goes one way and the whole component is exercised against fakes without constructing a node
 - Every tick `TryLock`s `n.liveLifecycleMu` (the mutex a live Restore/Truncate holds for its entire quiesce-through-reinitialize duration, since those calls actually nil/rebuild `n.ledgerState`/`n.chainsyncState`) (in the provider, for the whole callback) and skips entirely on contention, rather than just nil-checking those fields once up front: they are plain, unsynchronized fields a live restore/truncate reassigns, and the tick dereferences them many more times after any initial check, so holding the lock for the whole tick — not only the check — is what actually closes the race rather than merely narrowing its window. Snapshot deliberately does *not* hold `liveLifecycleMu` (it takes a separate `snapshotMu` instead, excluding a concurrent Restore/Truncate without contending with this tick) — see `snapshotMu`'s doc comment (`node.go`) — since Snapshot never touches either field and blocking this tick for its whole local-copy-plus-cloud-upload duration would contradict Snapshot's own documented "keeps syncing normally" behavior
 - Ledger callbacks that need the replaceable chainsync state use the same lock through `withLiveChainsyncState`. Both `Run()`'s initial publication and a Restore/Truncate's replacement hold that lock while constructing and assigning the state. Callbacks skip while the lock is held instead of blocking: the lifecycle operation can be waiting for the ledger goroutine to stop, so a blocking lock would deadlock quiesce.
@@ -8856,14 +8875,19 @@ address with a warning, because the default is `::`; any other failure to bind
 stops startup. Each accepted connection goes to `AttachPeer` as a listener.
 `dmq.maxPeers` bounds every peer connection, inbound and outbound, in
 `registerPeer` before the handshake, which refuses the next with
-`ErrTooManyPeers`; one source, an IPv4 address or an IPv6 /64, holds at most
-four inbound connections, so one host cannot take every slot.
+`ErrTooManyPeers`. Inbound connections also stop at `dmq.maxPeers` less
+the room kept for dialed peers, so connections anyone may open cannot take it.
+That room is `dmq.minPeers`, or the total valency of the topology's local roots
+when that is larger; when nothing is left no inbound connection is accepted.
+One source, an IPv4 address or an IPv6 /64,
+holds at most four inbound connections, so one host cannot take every inbound
+slot.
 
 The peer manager is one goroutine that reviews the connections on every change
 and at least every 15 seconds. It keeps each local root at its valency, a
 target that may exceed the peers listed. It then fills the stack up to
-`dmq.minPeers`, counting inbound peers, from the public roots and then the
-ledger peers, each in random order, and never beyond `dmq.maxPeers`; at most
+`dmq.minPeers` dialed connections, not counting inbound peers, from the public
+roots and then the ledger peers, each in random order, and never beyond `dmq.maxPeers`; at most
 four dials are in flight. A peer whose address is one of the stack's own listen
 addresses is not dialed (only an IP literal can match). A peer that fails waits
 five seconds, doubling to fifteen minutes, give or take a fifth, and a
@@ -12061,8 +12085,10 @@ decoded cell data. The original settings are restored before the connection
 returns to an injected pool.
 `get_asset_info` takes one of the same slots and scans at most 50,000 live
 asset rows. A policy or asset with more matching rows returns an explicit
-incomplete error, never a partial supply or holder count. `NewMCPServer` shares
-one slot budget across both tool sets; the exported `RegisterSQLiteTools` and
+incomplete error, never a partial supply or holder count. `get_utxos_by_asset`
+and raw-credential `get_utxos` searches also take a slot and reject offsets
+above 10,000; full-address `get_utxos` pages read through the metadata store
+without one. `NewMCPServer` shares one slot budget across both tool sets; the exported `RegisterSQLiteTools` and
 `RegisterCardanoTools` each create their own.
 `get_mempool_info` without `tx_hash` lists at most `limit` pending transactions
 (default 10, at most 50) in the pool's own order, read through
@@ -12446,7 +12472,11 @@ the request context to the adapter and its database reads, and takes a slot
 in the address summary admission pool because it aggregates every live UTxO
 of the credential. `GET /accounts/{stake_address}/addresses` takes a slot in the same pool
 after its pagination check, because both the page and the total aggregate the
-credential's whole transaction history. Pool and account list routes reject
+credential's whole transaction history. `GET /network`, `GET /epochs/latest`, `GET /epochs/{number}`
+and its `next` and `previous` lists aggregate over the chain or whole epochs, so
+they pass the request context to the adapter's database reads and share a
+chain summary admission pool, separate from the address summary pool, that
+answers 429 when full. Pool and account list routes reject
 out-of-range count and page values before calling the adapter, using the
 shared strict pagination parser (count 1–100, page 1–21474836). The epoch
 next, previous and stakes lists, whose Blockfrost schema defines only count and
@@ -12821,7 +12851,10 @@ undos, keeping its stream and query results consistent.
 `WaitForTx` rejects references that are not exactly 32 bytes before logging,
 allocating pending state, subscribing, or looking up transactions. Empty
 reference lists remain a no-op. Duplicate references are deduplicated in
-first-request order for committed-state lookup.
+first-request order for committed-state lookup, which reads every reference
+through one `LedgerState.ExistingTransactionHashes` call: one metadata read
+transaction per stream, bound to the stream's deadline, rather than one per
+reference. References found there are confirmed in first-request order.
 
 `WaitForTx` reports `STAGE_CONFIRMED` from current active-chain transaction
 metadata or a forward `ledger.tx` `TransactionEvent`. Persisted metadata is

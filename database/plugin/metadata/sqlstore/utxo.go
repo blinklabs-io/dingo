@@ -2725,6 +2725,17 @@ WHERE credential_tag = ? AND staking_key = ? AND deleted_slot = 0`,
 	)
 }
 
+func (s *Store) GetLiveUtxoLovelace(txn types.Txn) (uint64, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return 0, err
+	}
+	return s.sumWideUint64(ctx, db, `-- name: GetLiveUtxoLovelace :one
+SELECT `+s.wideSumExpr("amount")+`
+FROM utxo
+WHERE deleted_slot = 0`)
+}
+
 func (s *Store) GetUtxoPaymentScriptByCredential(
 	credentialTag uint8,
 	stakingKey []byte,

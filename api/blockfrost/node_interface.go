@@ -47,7 +47,7 @@ type BlockfrostNode interface {
 
 	// CurrentEpoch returns information about the current
 	// epoch.
-	CurrentEpoch() (EpochInfo, error)
+	CurrentEpoch(ctx context.Context) (EpochInfo, error)
 
 	// Epoch returns the requested epoch. It returns ErrEpochNotFound for an
 	// epoch the node has not reached.
@@ -111,7 +111,7 @@ type BlockfrostNode interface {
 	EpochProtocolParams(epoch uint64) (ProtocolParamsInfo, error)
 
 	// Network returns current network supply and stake information.
-	Network() (NetworkInfo, error)
+	Network(ctx context.Context) (NetworkInfo, error)
 
 	// NetworkEras returns hard-fork era summaries.
 	NetworkEras() ([]NetworkEraInfo, error)

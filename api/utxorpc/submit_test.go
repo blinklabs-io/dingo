@@ -170,10 +170,26 @@ type waitForTxLedgerStub struct {
 	transactionByHash func([]byte) (*models.Transaction, error)
 }
 
-func (s *waitForTxLedgerStub) TransactionByHash(ctx context.Context,
-	hash []byte,
-) (*models.Transaction, error) {
-	return s.transactionByHash(hash)
+// ExistingTransactionHashes observes ctx between hashes, as the database's
+// context-bound read transaction does between queries.
+func (s *waitForTxLedgerStub) ExistingTransactionHashes(
+	ctx context.Context,
+	hashes [][]byte,
+) ([][]byte, error) {
+	var found [][]byte
+	for _, hash := range hashes {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		record, err := s.transactionByHash(hash)
+		if err != nil {
+			return nil, err
+		}
+		if record != nil {
+			found = append(found, hash)
+		}
+	}
+	return found, nil
 }
 
 type blockingWaitForTxLedgerStub struct {
@@ -187,10 +203,10 @@ type waitForTxLookupStart struct {
 	hasDeadline bool
 }
 
-func (s *blockingWaitForTxLedgerStub) TransactionByHash(
+func (s *blockingWaitForTxLedgerStub) ExistingTransactionHashes(
 	ctx context.Context,
-	_ []byte,
-) (*models.Transaction, error) {
+	_ [][]byte,
+) ([][]byte, error) {
 	deadline, hasDeadline := ctx.Deadline()
 	s.lookupStarted <- waitForTxLookupStart{
 		deadline:    deadline,
@@ -343,7 +359,7 @@ func TestWaitForTxCommittedLookupError(t *testing.T) {
 		},
 	)
 	require.ErrorIs(t, err, lookupErr)
-	require.ErrorContains(t, err, "lookup committed transaction")
+	require.ErrorContains(t, err, "lookup committed transactions")
 	testutil.RequireReceive(
 		t,
 		eb.unsubscribeAndWaitCalled,
@@ -1879,4 +1895,71 @@ func TestEvalTxPropagatesCancellation(t *testing.T) {
 
 	require.ErrorIs(t, err, context.Canceled)
 	require.ErrorIs(t, stub.ctx.Err(), context.Canceled)
+}
+
+// waitForTxLookupCountingLedger answers committed-state lookups for a fixed
+// set of hashes and counts how often each kind of lookup is made.
+type waitForTxLookupCountingLedger struct {
+	UtxorpcLedgerState
+	committed     map[string]bool
+	batches       [][][]byte
+	singleLookups int
+}
+
+func (l *waitForTxLookupCountingLedger) TransactionByHash(
+	_ context.Context,
+	hash []byte,
+) (*models.Transaction, error) {
+	l.singleLookups++
+	if l.committed[string(hash)] {
+		return &models.Transaction{Hash: hash}, nil
+	}
+	return nil, nil
+}
+
+func (l *waitForTxLookupCountingLedger) ExistingTransactionHashes(
+	_ context.Context,
+	hashes [][]byte,
+) ([][]byte, error) {
+	l.batches = append(l.batches, hashes)
+	var found [][]byte
+	for _, hash := range hashes {
+		if l.committed[string(hash)] {
+			found = append(found, hash)
+		}
+	}
+	return found, nil
+}
+
+func TestWaitForTxLooksUpEveryReferenceInOneBatch(t *testing.T) {
+	t.Parallel()
+	refs := make([][]byte, 0, 50)
+	committed := make(map[string]bool, len(refs))
+	for i := range cap(refs) {
+		ref := bytes.Repeat([]byte{byte(i + 1)}, 32)
+		refs = append(refs, ref)
+		committed[string(ref)] = true
+	}
+	ledgerState := &waitForTxLookupCountingLedger{committed: committed}
+	server := &submitServiceServer{
+		utxorpc: NewUtxorpc(UtxorpcConfig{
+			EventBus:      newControlledWaitForTxEventBus(),
+			LedgerState:   ledgerState,
+			ServerTimeout: time.Second,
+		}),
+	}
+
+	var responses [][]byte
+	err := server.waitForTx(
+		context.Background(),
+		append(refs, refs[0]),
+		func(response *submit.WaitForTxResponse) error {
+			responses = append(responses, response.GetRef())
+			return nil
+		},
+	)
+	require.NoError(t, err)
+	require.Zero(t, ledgerState.singleLookups)
+	require.Equal(t, [][][]byte{refs}, ledgerState.batches)
+	require.Equal(t, refs, responses)
 }

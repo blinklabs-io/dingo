@@ -112,6 +112,20 @@ func servePage[Item, Response any](
 	if !ok {
 		return
 	}
+	serveParsedPage(b, w, r, params, fetch, convert, internalMessage)
+}
+
+// serveParsedPage is servePage for a caller that has already parsed the
+// pagination query, so it can validate input before taking an admission slot.
+func serveParsedPage[Item, Response any](
+	b *Blockfrost,
+	w http.ResponseWriter,
+	r *http.Request,
+	params PaginationParams,
+	fetch func(context.Context, PaginationParams) ([]Item, int, error),
+	convert func(Item) Response,
+	internalMessage string,
+) {
 	items, total, err := fetch(r.Context(), params)
 	if err != nil {
 		b.writeHistoryError(w, err, internalMessage)

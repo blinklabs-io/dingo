@@ -16,10 +16,27 @@ package peergov
 
 import (
 	"context"
+	"encoding/hex"
 	"net"
 	"strconv"
 	"strings"
 )
+
+const poolKeyHashLength = 28
+
+func poolCorroborationIdentity(poolKeyHash []byte) string {
+	if len(poolKeyHash) != poolKeyHashLength {
+		return ""
+	}
+	return "pool:" + hex.EncodeToString(poolKeyHash)
+}
+
+func relayCorroborationIdentity(relay PoolRelay) string {
+	if identity := poolCorroborationIdentity(relay.PoolKeyHash); identity != "" {
+		return identity
+	}
+	return relay.ControlIdentity
+}
 
 // SyncProgressProvider defines an interface for querying sync progress.
 // This allows the peer governor to check sync progress without directly
@@ -81,6 +98,9 @@ type PoolRelay struct {
 	// PoolKeyHash identifies the pool that registered this relay. Empty means
 	// the provider cannot associate the relay with a pool.
 	PoolKeyHash []byte
+	// ControlIdentity groups relays that a trusted discovery source attributes
+	// to one control domain when no pool key hash is available.
+	ControlIdentity string
 
 	// Stake is the total delegated stake, in lovelace, of the pool that owns
 	// this relay. Weighted sampling gives zero stake a floor weight.

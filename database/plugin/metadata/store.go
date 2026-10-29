@@ -850,6 +850,10 @@ type UtxoStore interface {
 	// amounts controlled by the given stake credential.
 	GetControlledAmountByCredential(uint8, []byte, types.Txn) (uint64, error)
 
+	// GetLiveUtxoLovelace returns the total lovelace of every live
+	// (unspent) UTxO.
+	GetLiveUtxoLovelace(types.Txn) (uint64, error)
+
 	// GetUtxoPaymentScriptByCredential returns, for the given bounded set
 	// of payment-key hashes previously observed under a stake credential,
 	// whether each payment credential is a script hash (true) or a key
@@ -1132,6 +1136,14 @@ type TransactionStore interface {
 		[][]byte, // hashes
 		types.Txn,
 	) ([]models.Transaction, error)
+
+	// GetExistingTransactionHashes returns the subset of hashes that have a
+	// transaction record, without loading the records or their
+	// associations. The result is in no particular order.
+	GetExistingTransactionHashes(
+		[][]byte, // hashes
+		types.Txn,
+	) ([][]byte, error)
 
 	// GetTransactionsByBlockHash retrieves all transactions
 	// for a given block hash, ordered by block_index.

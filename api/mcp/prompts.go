@@ -274,7 +274,7 @@ func RegisterPrompts(
 			"You are a Cardano on-chain financial analyst compiling an intelligence report for the native asset under policy '%s'%s.\n\n"+
 				"Follow this investigative playbook:\n"+
 				"1. Call 'get_asset_info' with policy_id='%s' and asset_name='%s' (hex) to retrieve metadata from the Cardano Token Registry (name, ticker, decimals, description, website) and CIP-25 NFT metadata from transaction label 721.\n"+
-				"2. Call 'get_utxos_by_asset' with policy_id='%s', asset_name='%s' (hex), and limit=200. If the result is full, continue with offset pagination until fewer than 200 rows are returned.\n"+
+				"2. Call 'get_utxos_by_asset' with policy_id='%s', asset_name='%s' (hex), and limit=200. If the result is full, continue with offset pagination until fewer than 200 rows are returned or a response reports that the offset limit was reached; in that case stop and report the UTxO list and distribution as truncated.\n"+
 				"3. Analyze the distribution of unspent outputs:\n"+
 				"   - Calculate the total live circulating supply across all active UTxOs.\n"+
 				"   - Report the returned holding UTxOs and their payment credentials. Do not call UTxO counts unique wallet counts, and do not claim complete concentration unless every page was retrieved.\n"+
