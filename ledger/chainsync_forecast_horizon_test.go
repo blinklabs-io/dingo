@@ -2206,3 +2206,94 @@ func TestAwaitObserverHeaderHorizonReresolvesAfterRollback(t *testing.T) {
 		"a rollback to the header's parent must release it",
 	))
 }
+
+// An observer whose ancestry the node cannot trace to the local chain has no
+// fork anchor: the walk ends at a parent that is neither recorded nor stored,
+// and the header is forecast from the ledger tip. The header's slot is within
+// that forecast, so the wait returns at once rather than holding the header
+// against an anchor it could not establish.
+func TestAwaitObserverHeaderHorizonReleasesUntracedAncestry(t *testing.T) {
+	t.Parallel()
+
+	ls, _, _, _, _ := newObserverForkTestLedger(t)
+	unknownParent := lcommon.Blake2b256Hash([]byte("never delivered"))
+	recorded := mockHeader{
+		hash:        lcommon.Blake2b256Hash([]byte("observer recorded")),
+		prevHash:    unknownParent,
+		blockNumber: 3,
+		slot:        310_000,
+	}
+	ls.config.PeerHeaderLookupFunc = func(
+		_ ouroboros.ConnectionId,
+		hash []byte,
+	) (ChainsyncEvent, []byte, bool) {
+		if !bytes.Equal(hash, recorded.Hash().Bytes()) {
+			return ChainsyncEvent{}, nil, false
+		}
+		return ChainsyncEvent{
+			BlockHeader: recorded,
+			Point: ocommon.NewPoint(
+				recorded.slot, recorded.Hash().Bytes(),
+			),
+		}, recorded.PrevHash().Bytes(), true
+	}
+	for _, tc := range []struct {
+		name     string
+		prevHash lcommon.Blake2b256
+	}{
+		{name: "parent unknown", prevHash: unknownParent},
+		{name: "recorded ancestor built on unknown parent", prevHash: recorded.Hash()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			header := mockHeader{
+				hash:        lcommon.Blake2b256Hash([]byte("observer " + tc.name)),
+				prevHash:    tc.prevHash,
+				blockNumber: 4,
+				slot:        320_000,
+			}
+			e := ChainsyncEvent{
+				BlockHeader: header,
+				Point:       ocommon.NewPoint(header.slot, header.Hash().Bytes()),
+			}
+			_, forked := ls.chainsyncForkAnchor(t.Context(), e)
+			require.False(t, forked,
+				"an ancestry that reaches no local block resolves no fork anchor")
+			results := make(chan error, 1)
+			go func() { results <- ls.AwaitObserverHeaderHorizon(t.Context(), e) }()
+			require.NoError(t, testutil.RequireReceive(
+				t, results, testutil.AsyncWait,
+				"a header forecastable from the ledger tip with no fork anchor must not wait",
+			))
+		})
+	}
+}
+
+// A stored parent resolves the anchor to that parent's own slot, so a header
+// one block above it is inside the anchor's forecast even when the parent lies
+// below the ledger tip.
+func TestAwaitObserverHeaderHorizonStoredParentAnchorsAtParent(t *testing.T) {
+	t.Parallel()
+
+	ls, _, blocks, _, _ := newObserverForkTestLedger(t)
+	header := mockHeader{
+		hash:        lcommon.Blake2b256Hash([]byte("observer near fork")),
+		prevHash:    blocks[0].Hash(),
+		blockNumber: 3,
+		slot:        320_000,
+	}
+	e := ChainsyncEvent{
+		BlockHeader: header,
+		Point:       ocommon.NewPoint(header.slot, header.Hash().Bytes()),
+	}
+	anchor, forked := ls.chainsyncForkAnchor(t.Context(), e)
+	require.True(t, forked, "a stored parent below the ledger tip is a fork anchor")
+	require.Equal(t, blocks[0].SlotNumber(), anchor,
+		"the anchor is the stored parent's own slot")
+	results := make(chan error, 1)
+	go func() { results <- ls.AwaitObserverHeaderHorizon(t.Context(), e) }()
+	require.NoError(t, testutil.RequireReceive(
+		t, results, testutil.AsyncWait,
+		"a header inside its parent's forecast must not wait",
+	))
+}
