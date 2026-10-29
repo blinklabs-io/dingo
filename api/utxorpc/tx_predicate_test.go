@@ -15,18 +15,34 @@
 package utxorpc
 
 import (
+	"errors"
 	"io"
 	"log/slog"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	cardano "github.com/utxorpc/go-codegen/utxorpc/v1alpha/cardano"
 	submit "github.com/utxorpc/go-codegen/utxorpc/v1alpha/submit"
 	watch "github.com/utxorpc/go-codegen/utxorpc/v1alpha/watch"
 )
+
+type predicateLookupLedgerStub struct {
+	UtxorpcLedgerState
+	lookups int
+}
+
+func (s *predicateLookupLedgerStub) UtxoByRef(
+	[]byte,
+	uint32,
+) (*models.Utxo, error) {
+	s.lookups++
+	return nil, errors.New("utxo unavailable")
+}
 
 // stubLeaf returns predMatch only when the pattern pointer equals pMatch.
 func stubLeaf(pMatch *cardano.TxPattern) txPatternLeaf {
@@ -342,4 +358,32 @@ func TestEvalTxPredicate_CycleBecomesUnevaluable(t *testing.T) {
 		predUnevaluable,
 		evalTxPredicateOutcome(nil, node, stubLeaf(nil)),
 	)
+}
+
+func TestMatchTxPredicateNode_CachesRepeatedInputLookups(t *testing.T) {
+	ledgerState := &predicateLookupLedgerStub{}
+	u := txPatternTestUtxorpc(t)
+	u.config.LedgerState = ledgerState
+	input := &txPatternTestInput{id: lcommon.Blake2b256{0x42}, idx: 3}
+	tx := &txPatternTestTx{consumed: []lcommon.TransactionInput{input}}
+	pattern := &cardano.TxPattern{
+		Consumes: &cardano.TxOutputPattern{},
+	}
+	predicate := &submit.TxPredicate{
+		AllOf: []*submit.TxPredicate{
+			matchSubmit(pattern),
+			matchSubmit(pattern),
+		},
+	}
+
+	require.False(
+		t,
+		u.matchTxPredicateNode(tx, txPredicateFromSubmit(predicate)),
+	)
+	if ledgerState.lookups != 1 {
+		t.Fatalf(
+			"repeated predicate leaves performed %d input lookups; want 1",
+			ledgerState.lookups,
+		)
+	}
 }

@@ -614,28 +614,29 @@ func (s *submitServiceServer) WatchMempool(
 // Set fields are combined with AND: consumes ∧ produces ∧ has_address ∧
 // mints_asset ∧ moves_asset ∧ has_certificate (each present sub-pattern must
 // match).
-func (u *Utxorpc) matchesTxPattern(
+func (u *Utxorpc) matchesTxPatternWithLookup(
 	tx gledger.Transaction,
 	pattern *cardano.TxPattern,
+	lookup spentOutputLookup,
 ) predOutcome {
 	if pattern == nil {
 		return predUnevaluable
 	}
 	var parts []predOutcome
 	if p := pattern.GetConsumes(); p != nil {
-		parts = append(parts, u.txPatternMatchConsumes(tx, p))
+		parts = append(parts, u.matchConsumesWithLookup(tx, p, lookup))
 	}
 	if p := pattern.GetProduces(); p != nil {
 		parts = append(parts, u.txPatternMatchProduces(tx, p))
 	}
 	if pattern.GetHasAddress() != nil {
-		parts = append(parts, u.txPatternMatchHasAddress(tx, pattern))
+		parts = append(parts, u.txPatternMatchHasAddress(tx, pattern, lookup))
 	}
 	if p := pattern.GetMintsAsset(); p != nil {
 		parts = append(parts, txPatternMatchMint(tx, p))
 	}
 	if p := pattern.GetMovesAsset(); p != nil {
-		parts = append(parts, u.txPatternMatchAsset(tx, p))
+		parts = append(parts, u.txPatternMatchAsset(tx, p, lookup))
 	}
 	if p := pattern.GetHasCertificate(); p != nil {
 		parts = append(parts, u.txPatternMatchHasCertificate(tx, p))
@@ -646,11 +647,31 @@ func (u *Utxorpc) matchesTxPattern(
 	return combineANDBranches(parts)
 }
 
-func (u *Utxorpc) txPatternMatchConsumes(
-	tx gledger.Transaction,
-	pat *cardano.TxOutputPattern,
-) predOutcome {
-	return u.matchConsumesWithLookup(tx, pat, u.lookupSpentOutput)
+type spentOutputLookup func(
+	gledger.TransactionInput,
+) (gledger.TransactionOutput, error)
+
+type spentOutputLookupResult struct {
+	output gledger.TransactionOutput
+	err    error
+}
+
+type spentOutputRef struct {
+	id    lcommon.Blake2b256
+	index uint32
+}
+
+func cacheSpentOutputLookup(lookup spentOutputLookup) spentOutputLookup {
+	cache := make(map[spentOutputRef]spentOutputLookupResult)
+	return func(input gledger.TransactionInput) (gledger.TransactionOutput, error) {
+		ref := spentOutputRef{id: input.Id(), index: input.Index()}
+		if result, ok := cache[ref]; ok {
+			return result.output, result.err
+		}
+		output, err := lookup(input)
+		cache[ref] = spentOutputLookupResult{output: output, err: err}
+		return output, err
+	}
 }
 
 func (u *Utxorpc) matchConsumesWithLookup(
@@ -844,6 +865,7 @@ func (u *Utxorpc) lookupSpentOutput(
 // resolved from ordinary, reference, and collateral inputs (same set as before).
 func (u *Utxorpc) collectOutputsForHasAddress(
 	tx gledger.Transaction,
+	lookup spentOutputLookup,
 ) ([]gledger.TransactionOutput, bool) {
 	var sawUnevaluable bool
 	utxos := make([]gledger.TransactionOutput, 0, len(tx.Outputs())+8)
@@ -863,7 +885,7 @@ func (u *Utxorpc) collectOutputsForHasAddress(
 	inputs = append(inputs, refInputs...)
 	inputs = append(inputs, collateral...)
 	for _, input := range inputs {
-		out, err := u.lookupSpentOutput(input)
+		out, err := lookup(input)
 		if err != nil {
 			u.config.Logger.Error(
 				"failed to look up input for predicate",
@@ -880,13 +902,14 @@ func (u *Utxorpc) collectOutputsForHasAddress(
 func (u *Utxorpc) txPatternMatchHasAddress(
 	tx gledger.Transaction,
 	pattern *cardano.TxPattern,
+	lookup spentOutputLookup,
 ) predOutcome {
 	addressPattern := pattern.GetHasAddress()
 	if addressPattern == nil {
 		return predUnevaluable
 	}
 
-	utxos, sawUnevaluable := u.collectOutputsForHasAddress(tx)
+	utxos, sawUnevaluable := u.collectOutputsForHasAddress(tx, lookup)
 
 	for _, utxo := range utxos {
 		st := u.addressPatternMatchesOutput(utxo, addressPattern)
@@ -938,11 +961,12 @@ func txPatternMatchMint(
 func (u *Utxorpc) txPatternMatchAsset(
 	tx gledger.Transaction,
 	assetPattern *cardano.AssetPattern,
+	lookup spentOutputLookup,
 ) predOutcome {
 	if assetPattern == nil {
 		return predUnevaluable
 	}
-	utxos, sawUnevaluable := u.collectOutputsForHasAddress(tx)
+	utxos, sawUnevaluable := u.collectOutputsForHasAddress(tx, lookup)
 	for _, utxo := range utxos {
 		if u.txOutputHasAssetPattern(utxo, assetPattern) {
 			return predMatch
