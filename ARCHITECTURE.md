@@ -6042,6 +6042,12 @@ self-linked headers, so only a connection in another identity group
 (`ChainSelectorConfig.PeerIdentity`, or the remote host when unset)
 corroborates it, and a connected header chain from one connection is not
 accepted (`corroborateIndependentFarTipClaimLocked`).
+In Genesis mode, a run of connected headers can continue across a short
+reconnect from the same identity. The selector retains only the last block,
+slot, hash, Byron boundary marker, and run count, bounded to
+`maxTrackedPeers` and expired after twice the stale-tip threshold. The next
+header must link to that exact point; the retained state carries no peer
+acceptance or corroboration status.
 Staging a peer tip reads the local tip from `ChainSelectorConfig.AppliedTip`
 (the live applied ledger tip) rather than from the last `SetLocalTip`, which
 the node calls only at startup and on the stall recycler's tick. A node

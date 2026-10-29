@@ -5986,6 +5986,50 @@ func (c loneFarChain) newSelector(t *testing.T) *ChainSelector {
 	return cs
 }
 
+func (c loneFarChain) newGenesisSelector(
+	t *testing.T,
+	peerIdentity func(ouroboros.ConnectionId) string,
+	staleTipThreshold time.Duration,
+) *ChainSelector {
+	t.Helper()
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:           true,
+		SecurityParam:         c.k,
+		MinCorroboratingPeers: 1,
+		PeerIdentity:          peerIdentity,
+		StaleTipThreshold:     staleTipThreshold,
+	})
+	cs.SetLocalTip(c.tip(c.localBlock))
+	require.True(t, cs.UpdatePeerTip(
+		newTestConnectionId(1), c.tip(c.localBlock-500), nil,
+	))
+	return cs
+}
+
+func (c loneFarChain) deliverGenesis(
+	cs *ChainSelector,
+	conn ouroboros.ConnectionId,
+	admissionID uint64,
+	block uint64,
+) bool {
+	observed := c.tip(block)
+	update := PeerTipUpdateEvent{
+		ConnectionId: conn,
+		AdmissionID:  admissionID,
+		Tip:          c.tip(4687076),
+		ObservedTip:  observed,
+		PraosView: PraosTiebreakerViewFromTip(
+			observed, nil, PraosTiebreakerConfigUnknown(),
+		),
+		ObservedPrevHash: c.prevHash(block),
+	}
+	if cs.PreparePeerTipAdmissionDisposition(update) == PeerTipUpdateRejected {
+		return false
+	}
+	cs.CommitPeerTipAdmission(update)
+	return cs.GetPeerTip(conn) != nil
+}
+
 // deliver feeds one header the way the roll-forward handler publishes it.
 func (c loneFarChain) deliver(
 	cs *ChainSelector,
@@ -6041,6 +6085,180 @@ func TestLoneFarFrontierAcceptsConnectedChain(t *testing.T) {
 			c.deliver(cs, conn, first+i, c.prevHash(first+i)),
 			"header %d after acceptance must stay accepted", i,
 		)
+	}
+}
+
+func TestLoneFarFrontierRunContinuesAcrossReconnectsByIdentity(t *testing.T) {
+	t.Parallel()
+
+	c := loneFarChain{localBlock: 1_000, k: 8}
+	identities := map[int]string{
+		10_002: "relay-a",
+		10_003: "relay-a",
+		10_004: "relay-a",
+	}
+	peerIdentity := func(conn ouroboros.ConnectionId) string {
+		remote, ok := conn.RemoteAddr.(*net.TCPAddr)
+		if !ok {
+			return ""
+		}
+		return identities[remote.Port]
+	}
+	cs := c.newGenesisSelector(t, peerIdentity, time.Minute)
+	first := c.first()
+	firstConn := newTestConnectionId(2)
+	for i := uint64(0); i < 4; i++ {
+		require.False(t, c.deliverGenesis(cs, firstConn, i+1, first+i))
+	}
+	cs.RemovePeer(firstConn)
+
+	secondConn := newTestConnectionId(3)
+	for i := uint64(4); i < 8; i++ {
+		require.False(t, c.deliverGenesis(cs, secondConn, i-3, first+i))
+	}
+	cs.RemovePeer(secondConn)
+
+	thirdConn := newTestConnectionId(4)
+	require.True(t, c.deliverGenesis(cs, thirdConn, 1, first+8),
+		"the ninth linked header from the same identity must continue the run")
+	require.NotNil(t, cs.GetPeerTip(thirdConn))
+}
+
+func TestLoneFarFrontierRunDoesNotCrossPeerIdentities(t *testing.T) {
+	t.Parallel()
+
+	c := loneFarChain{localBlock: 1_000, k: 8}
+	identities := map[int]string{
+		10_002: "relay-a",
+		10_003: "relay-b",
+	}
+	peerIdentity := func(conn ouroboros.ConnectionId) string {
+		remote, ok := conn.RemoteAddr.(*net.TCPAddr)
+		if !ok {
+			return ""
+		}
+		return identities[remote.Port]
+	}
+	cs := c.newGenesisSelector(t, peerIdentity, time.Minute)
+	first := c.first()
+	firstConn := newTestConnectionId(2)
+	for i := uint64(0); i < 4; i++ {
+		require.False(t, c.deliverGenesis(cs, firstConn, i+1, first+i))
+	}
+	cs.RemovePeer(firstConn)
+
+	secondConn := newTestConnectionId(3)
+	for i := uint64(4); i < 12; i++ {
+		require.False(t, c.deliverGenesis(cs, secondConn, i-3, first+i),
+			"a different identity must start its own connected-header run")
+	}
+	require.True(t, c.deliverGenesis(cs, secondConn, 9, first+12))
+}
+
+func TestLoneFarFrontierRunRestartsAfterBrokenReconnect(t *testing.T) {
+	t.Parallel()
+
+	c := loneFarChain{localBlock: 1_000, k: 8}
+	identities := map[int]string{
+		10_002: "relay-a",
+		10_003: "relay-a",
+	}
+	peerIdentity := func(conn ouroboros.ConnectionId) string {
+		remote, ok := conn.RemoteAddr.(*net.TCPAddr)
+		if !ok {
+			return ""
+		}
+		return identities[remote.Port]
+	}
+	cs := c.newGenesisSelector(t, peerIdentity, time.Minute)
+	first := c.first()
+	firstConn := newTestConnectionId(2)
+	for i := uint64(0); i < 4; i++ {
+		require.False(t, c.deliverGenesis(cs, firstConn, i+1, first+i))
+	}
+	cs.RemovePeer(firstConn)
+
+	secondConn := newTestConnectionId(3)
+	require.False(t, c.deliverGenesis(cs, secondConn, 1, first+5),
+		"a gap must restart the connected-header run")
+	for i := uint64(6); i < 13; i++ {
+		require.False(t, c.deliverGenesis(cs, secondConn, i-4, first+i),
+			"the run must remain below K+1 after the gap")
+	}
+	require.True(t, c.deliverGenesis(cs, secondConn, 9, first+13))
+}
+
+func TestLoneFarFrontierRunExpiresAfterDisconnect(t *testing.T) {
+	t.Parallel()
+
+	c := loneFarChain{localBlock: 1_000, k: 8}
+	identities := map[int]string{10_002: "relay-a", 10_003: "relay-a"}
+	peerIdentity := func(conn ouroboros.ConnectionId) string {
+		remote, ok := conn.RemoteAddr.(*net.TCPAddr)
+		if !ok {
+			return ""
+		}
+		return identities[remote.Port]
+	}
+	cs := c.newGenesisSelector(t, peerIdentity, time.Second)
+	now := time.Now()
+	cs.nowFn = func() time.Time { return now }
+	cs.mutex.Lock()
+	for _, peerTip := range cs.peerTips {
+		peerTip.nowFn = cs.nowFn
+		peerTip.LastUpdated = now
+	}
+	cs.mutex.Unlock()
+	first := c.first()
+	firstConn := newTestConnectionId(2)
+	for i := uint64(0); i < 4; i++ {
+		require.False(t, c.deliverGenesis(cs, firstConn, i+1, first+i))
+	}
+	cs.RemovePeer(firstConn)
+	now = now.Add(3 * time.Second)
+
+	secondConn := newTestConnectionId(3)
+	for i := uint64(4); i < 9; i++ {
+		require.False(t, c.deliverGenesis(cs, secondConn, i-3, first+i),
+			"an expired identity run must not authorize the frontier")
+	}
+}
+
+func TestRepeatedFarFrontierHeaderDoesNotExtendReconnectWindow(t *testing.T) {
+	t.Parallel()
+
+	c := loneFarChain{localBlock: 1_000, k: 8}
+	identities := map[int]string{10_002: "relay-a", 10_003: "relay-a"}
+	peerIdentity := func(conn ouroboros.ConnectionId) string {
+		remote, ok := conn.RemoteAddr.(*net.TCPAddr)
+		if !ok {
+			return ""
+		}
+		return identities[remote.Port]
+	}
+	cs := c.newGenesisSelector(t, peerIdentity, time.Second)
+	now := time.Unix(1_700_000_000, 0)
+	cs.nowFn = func() time.Time { return now }
+	cs.mutex.Lock()
+	for _, peerTip := range cs.peerTips {
+		peerTip.nowFn = cs.nowFn
+		peerTip.LastUpdated = now
+	}
+	cs.mutex.Unlock()
+	first := c.first()
+	firstConn := newTestConnectionId(2)
+	for i := uint64(0); i < 4; i++ {
+		require.False(t, c.deliverGenesis(cs, firstConn, i+1, first+i))
+	}
+	now = now.Add(time.Second)
+	require.False(t, c.deliverGenesis(cs, firstConn, 5, first+3))
+	cs.RemovePeer(firstConn)
+	now = now.Add(1100 * time.Millisecond)
+
+	secondConn := newTestConnectionId(3)
+	for i := uint64(4); i < 9; i++ {
+		require.False(t, c.deliverGenesis(cs, secondConn, i-3, first+i),
+			"repeating the old point must not extend the expired run")
 	}
 }
 
