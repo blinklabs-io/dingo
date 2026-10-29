@@ -1026,7 +1026,7 @@ func (cs *ChainSelector) updatePeerTipObservedLinkedDisposition(
 			}
 			return
 		}
-		cs.syncFarTipRunContinuityLocked(connId)
+		cs.syncFarTipRunContinuityLocked(connId, cs.farTipClaims)
 
 		trackHashes := cs.mode == SelectionModeGenesis
 		if peerTip, exists := cs.peerTips[connId]; exists {
@@ -1222,6 +1222,10 @@ func (cs *ChainSelector) PreparePeerTipAdmissionDisposition(
 			true,
 		)
 		claim, hasClaim := cs.pendingFarTipClaims[update.ConnectionId]
+		cs.syncFarTipRunContinuityLocked(
+			update.ConnectionId,
+			cs.pendingFarTipClaims,
+		)
 		evidence := hasClaim &&
 			claim.slot == update.ObservedTip.Point.Slot &&
 			bytes.Equal(claim.hash, update.ObservedTip.Point.Hash)
@@ -1819,7 +1823,10 @@ func (cs *ChainSelector) commitPeerTipAdmission(
 					cs.farTipClaims[update.ConnectionId] = claim
 				}
 			}
-			cs.syncFarTipRunContinuityLocked(update.ConnectionId)
+			cs.syncFarTipRunContinuityLocked(
+				update.ConnectionId,
+				cs.farTipClaims,
+			)
 			cs.committedPeerTips[update.ConnectionId] = update.AdmissionID
 			if i == len(pending)-1 {
 				delete(cs.pendingPeerTips, update.ConnectionId)
@@ -2904,6 +2911,7 @@ func (cs *ChainSelector) clearFarTipRunContinuityForConnLocked(
 
 func (cs *ChainSelector) syncFarTipRunContinuityLocked(
 	connId ouroboros.ConnectionId,
+	claims map[ouroboros.ConnectionId]farTipClaim,
 ) {
 	if !cs.genesisCorroborationActiveLocked() {
 		return
@@ -2912,7 +2920,7 @@ func (cs *ChainSelector) syncFarTipRunContinuityLocked(
 	if !hasIdentity {
 		return
 	}
-	claim, hasClaim := cs.farTipClaims[connId]
+	claim, hasClaim := claims[connId]
 	if !hasClaim || claim.run == 0 || len(claim.hash) == 0 {
 		if continuity, ok := cs.farTipRunsByIdentity[identity]; ok &&
 			continuity.connection == connId {

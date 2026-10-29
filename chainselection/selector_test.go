@@ -6006,12 +6006,12 @@ func (c loneFarChain) newGenesisSelector(
 	return cs
 }
 
-func (c loneFarChain) deliverGenesis(
+func (c loneFarChain) prepareGenesis(
 	cs *ChainSelector,
 	conn ouroboros.ConnectionId,
 	admissionID uint64,
 	block uint64,
-) bool {
+) PeerTipUpdateDisposition {
 	observed := c.tip(block)
 	update := PeerTipUpdateEvent{
 		ConnectionId: conn,
@@ -6023,11 +6023,7 @@ func (c loneFarChain) deliverGenesis(
 		),
 		ObservedPrevHash: c.prevHash(block),
 	}
-	if cs.PreparePeerTipAdmissionDisposition(update) == PeerTipUpdateRejected {
-		return false
-	}
-	cs.CommitPeerTipAdmission(update)
-	return cs.GetPeerTip(conn) != nil
+	return cs.PreparePeerTipAdmissionDisposition(update)
 }
 
 // deliver feeds one header the way the roll-forward handler publishes it.
@@ -6108,20 +6104,26 @@ func TestLoneFarFrontierRunContinuesAcrossReconnectsByIdentity(t *testing.T) {
 	first := c.first()
 	firstConn := newTestConnectionId(2)
 	for i := uint64(0); i < 4; i++ {
-		require.False(t, c.deliverGenesis(cs, firstConn, i+1, first+i))
+		require.Equal(
+			t, PeerTipUpdatePending,
+			c.prepareGenesis(cs, firstConn, i+1, first+i),
+		)
 	}
 	cs.RemovePeer(firstConn)
 
 	secondConn := newTestConnectionId(3)
 	for i := uint64(4); i < 8; i++ {
-		require.False(t, c.deliverGenesis(cs, secondConn, i-3, first+i))
+		require.Equal(
+			t, PeerTipUpdatePending,
+			c.prepareGenesis(cs, secondConn, i-3, first+i),
+		)
 	}
 	cs.RemovePeer(secondConn)
 
 	thirdConn := newTestConnectionId(4)
-	require.True(t, c.deliverGenesis(cs, thirdConn, 1, first+8),
+	require.Equal(t, PeerTipUpdateAccepted,
+		c.prepareGenesis(cs, thirdConn, 1, first+8),
 		"the ninth linked header from the same identity must continue the run")
-	require.NotNil(t, cs.GetPeerTip(thirdConn))
 }
 
 func TestLoneFarFrontierRunDoesNotCrossPeerIdentities(t *testing.T) {
@@ -6143,16 +6145,22 @@ func TestLoneFarFrontierRunDoesNotCrossPeerIdentities(t *testing.T) {
 	first := c.first()
 	firstConn := newTestConnectionId(2)
 	for i := uint64(0); i < 4; i++ {
-		require.False(t, c.deliverGenesis(cs, firstConn, i+1, first+i))
+		require.Equal(
+			t, PeerTipUpdatePending,
+			c.prepareGenesis(cs, firstConn, i+1, first+i),
+		)
 	}
 	cs.RemovePeer(firstConn)
 
 	secondConn := newTestConnectionId(3)
 	for i := uint64(4); i < 12; i++ {
-		require.False(t, c.deliverGenesis(cs, secondConn, i-3, first+i),
+		require.Equal(
+			t, PeerTipUpdatePending,
+			c.prepareGenesis(cs, secondConn, i-3, first+i),
 			"a different identity must start its own connected-header run")
 	}
-	require.True(t, c.deliverGenesis(cs, secondConn, 9, first+12))
+	require.Equal(t, PeerTipUpdateAccepted,
+		c.prepareGenesis(cs, secondConn, 9, first+12))
 }
 
 func TestLoneFarFrontierRunRestartsAfterBrokenReconnect(t *testing.T) {
@@ -6174,18 +6182,25 @@ func TestLoneFarFrontierRunRestartsAfterBrokenReconnect(t *testing.T) {
 	first := c.first()
 	firstConn := newTestConnectionId(2)
 	for i := uint64(0); i < 4; i++ {
-		require.False(t, c.deliverGenesis(cs, firstConn, i+1, first+i))
+		require.Equal(
+			t, PeerTipUpdatePending,
+			c.prepareGenesis(cs, firstConn, i+1, first+i),
+		)
 	}
 	cs.RemovePeer(firstConn)
 
 	secondConn := newTestConnectionId(3)
-	require.False(t, c.deliverGenesis(cs, secondConn, 1, first+5),
+	require.Equal(t, PeerTipUpdatePending,
+		c.prepareGenesis(cs, secondConn, 1, first+5),
 		"a gap must restart the connected-header run")
 	for i := uint64(6); i < 13; i++ {
-		require.False(t, c.deliverGenesis(cs, secondConn, i-4, first+i),
+		require.Equal(
+			t, PeerTipUpdatePending,
+			c.prepareGenesis(cs, secondConn, i-4, first+i),
 			"the run must remain below K+1 after the gap")
 	}
-	require.True(t, c.deliverGenesis(cs, secondConn, 9, first+13))
+	require.Equal(t, PeerTipUpdateAccepted,
+		c.prepareGenesis(cs, secondConn, 9, first+13))
 }
 
 func TestLoneFarFrontierRunExpiresAfterDisconnect(t *testing.T) {
@@ -6212,14 +6227,19 @@ func TestLoneFarFrontierRunExpiresAfterDisconnect(t *testing.T) {
 	first := c.first()
 	firstConn := newTestConnectionId(2)
 	for i := uint64(0); i < 4; i++ {
-		require.False(t, c.deliverGenesis(cs, firstConn, i+1, first+i))
+		require.Equal(
+			t, PeerTipUpdatePending,
+			c.prepareGenesis(cs, firstConn, i+1, first+i),
+		)
 	}
 	cs.RemovePeer(firstConn)
 	now = now.Add(3 * time.Second)
 
 	secondConn := newTestConnectionId(3)
 	for i := uint64(4); i < 9; i++ {
-		require.False(t, c.deliverGenesis(cs, secondConn, i-3, first+i),
+		require.Equal(
+			t, PeerTipUpdatePending,
+			c.prepareGenesis(cs, secondConn, i-3, first+i),
 			"an expired identity run must not authorize the frontier")
 	}
 }
@@ -6248,16 +6268,22 @@ func TestRepeatedFarFrontierHeaderDoesNotExtendReconnectWindow(t *testing.T) {
 	first := c.first()
 	firstConn := newTestConnectionId(2)
 	for i := uint64(0); i < 4; i++ {
-		require.False(t, c.deliverGenesis(cs, firstConn, i+1, first+i))
+		require.Equal(
+			t, PeerTipUpdatePending,
+			c.prepareGenesis(cs, firstConn, i+1, first+i),
+		)
 	}
 	now = now.Add(time.Second)
-	require.False(t, c.deliverGenesis(cs, firstConn, 5, first+3))
+	require.Equal(t, PeerTipUpdatePending,
+		c.prepareGenesis(cs, firstConn, 5, first+3))
 	cs.RemovePeer(firstConn)
 	now = now.Add(1100 * time.Millisecond)
 
 	secondConn := newTestConnectionId(3)
 	for i := uint64(4); i < 9; i++ {
-		require.False(t, c.deliverGenesis(cs, secondConn, i-3, first+i),
+		require.Equal(
+			t, PeerTipUpdatePending,
+			c.prepareGenesis(cs, secondConn, i-3, first+i),
 			"repeating the old point must not extend the expired run")
 	}
 }
