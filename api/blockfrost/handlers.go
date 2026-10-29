@@ -230,14 +230,45 @@ func (b *Blockfrost) handleLatestBlockTxs(
 	writeJSON(w, http.StatusOK, page)
 }
 
+// admitChainSummary reserves one chain summary slot for the request's client.
+// When the cap is reached it writes the 429 response and reports false.
+func (b *Blockfrost) admitChainSummary(
+	w http.ResponseWriter,
+	r *http.Request,
+) (func(), bool) {
+	release, ok := b.chainSummaryAdmission.acquire(
+		r.Context(),
+		requestClient(r),
+	)
+	if !ok {
+		w.Header().Set("Retry-After", "1")
+		writeError(
+			w,
+			http.StatusTooManyRequests,
+			"Too Many Requests",
+			"chain summary capacity reached, try again later",
+		)
+		return nil, false
+	}
+	return release, true
+}
+
 // handleLatestEpoch handles GET /api/v0/epochs/latest and
 // returns the current epoch info.
 func (b *Blockfrost) handleLatestEpoch(
 	w http.ResponseWriter,
-	_ *http.Request,
+	r *http.Request,
 ) {
-	info, err := b.node.CurrentEpoch()
+	release, ok := b.admitChainSummary(w, r)
+	if !ok {
+		return
+	}
+	defer release()
+	info, err := b.node.CurrentEpoch(r.Context())
 	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return
+		}
 		b.logger.Error(
 			"failed to get current epoch",
 			"error", err,
@@ -370,10 +401,18 @@ func (b *Blockfrost) handleEpochParams(
 // network supply and stake information.
 func (b *Blockfrost) handleNetwork(
 	w http.ResponseWriter,
-	_ *http.Request,
+	r *http.Request,
 ) {
-	info, err := b.node.Network()
+	release, ok := b.admitChainSummary(w, r)
+	if !ok {
+		return
+	}
+	defer release()
+	info, err := b.node.Network(r.Context())
 	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return
+		}
 		b.logger.Error(
 			"failed to get network info",
 			"error", err,

@@ -156,7 +156,7 @@ func startGenesisRun(t *testing.T, server *genesisFakeServer) *genesisRun {
 		run.done <- RunFromGenesis(
 			ctx, listener.Addr().String(), "preprod", magic, koios, nil,
 			func(r EpochResult) { run.results <- r },
-			run.logs.logf, nil,
+			run.logs.logf, nil, false,
 		)
 	}()
 	t.Cleanup(func() {

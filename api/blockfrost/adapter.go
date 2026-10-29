@@ -646,9 +646,9 @@ func (a *NodeAdapter) LatestBlockTxHashes(ctx context.Context) (
 
 // CurrentEpoch returns information about the current
 // epoch.
-func (a *NodeAdapter) CurrentEpoch() (
-	EpochInfo, error,
-) {
+func (a *NodeAdapter) CurrentEpoch(
+	ctx context.Context,
+) (EpochInfo, error) {
 	tip := a.ledgerState.Tip()
 	tipEpoch, err := a.ledgerState.SlotToEpoch(tip.Point.Slot)
 	if err != nil {
@@ -658,7 +658,7 @@ func (a *NodeAdapter) CurrentEpoch() (
 			err,
 		)
 	}
-	return a.epochInfoFor(context.Background(), tipEpoch, tip.Point.Slot)
+	return a.epochInfoFor(ctx, tipEpoch, tip.Point.Slot)
 }
 
 // CurrentProtocolParams returns the current protocol
@@ -799,7 +799,7 @@ func (a *NodeAdapter) EpochProtocolParams(
 }
 
 // Network returns current network supply and stake information.
-func (a *NodeAdapter) Network() (NetworkInfo, error) {
+func (a *NodeAdapter) Network(ctx context.Context) (NetworkInfo, error) {
 	nodeCfg := a.ledgerState.CardanoNodeConfig()
 	if nodeCfg == nil || nodeCfg.ShelleyGenesis() == nil {
 		return NetworkInfo{}, errors.New("shelley genesis not available")
@@ -807,7 +807,11 @@ func (a *NodeAdapter) Network() (NetworkInfo, error) {
 	genesis := nodeCfg.ShelleyGenesis()
 	maxSupply := genesis.MaxLovelaceSupply
 
-	state, err := a.ledgerState.Database().Metadata().GetNetworkState(nil)
+	db := a.ledgerState.Database()
+	txn := db.Transaction(ctx, false)
+	defer txn.Release()
+	meta := db.Metadata()
+	state, err := meta.GetNetworkState(txn.Metadata())
 	if err != nil {
 		return NetworkInfo{}, fmt.Errorf("get network state: %w", err)
 	}
@@ -819,8 +823,7 @@ func (a *NodeAdapter) Network() (NetworkInfo, error) {
 	}
 	// Script-locked supply: lovelace held in live UTxOs whose payment
 	// credential is a script. Subtracted from circulating supply below.
-	locked, err := a.ledgerState.Database().Metadata().
-		GetScriptLockedSupply(nil)
+	locked, err := meta.GetScriptLockedSupply(txn.Metadata())
 	if err != nil {
 		return NetworkInfo{}, fmt.Errorf(
 			"get script-locked supply: %w",
@@ -841,8 +844,11 @@ func (a *NodeAdapter) Network() (NetworkInfo, error) {
 	if currentEpoch >= 2 {
 		activeStakeEpoch = currentEpoch - 2
 	}
-	activeStake, err := a.ledgerState.Database().Metadata().
-		GetTotalActiveStake(activeStakeEpoch, "mark", nil)
+	activeStake, err := meta.GetTotalActiveStake(
+		activeStakeEpoch,
+		"mark",
+		txn.Metadata(),
+	)
 	if err != nil {
 		return NetworkInfo{}, fmt.Errorf(
 			"get active stake for epoch %d: %w",
@@ -851,7 +857,7 @@ func (a *NodeAdapter) Network() (NetworkInfo, error) {
 		)
 	}
 
-	liveStake, err := a.liveStake(nil)
+	liveStake, err := a.liveStake(txn.Metadata())
 	if err != nil {
 		return NetworkInfo{}, err
 	}

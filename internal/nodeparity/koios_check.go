@@ -28,13 +28,11 @@ package nodeparity
 // indefinitely, so it can answer for epoch 1 exactly as readily as epoch
 // 100 regardless of when Dingo asks.
 //
-// Restricted to preview/preprod, matching koios-parity's own restriction
-// (koios_client.go's validateKoiosNetwork) and this tool's own existing
-// --network validation: Koios only ever serves these two networks, and a
-// from-genesis UTxO-set reconstruction (CheckUTxO below) walks every
-// transaction one at a time, which is only tractable at these networks'
-// scale. It is not a substitute for the existing cardano-node-based Check
-// at mainnet scale -- see this package's doc comment for when to use which.
+// Supports preview, preprod and mainnet. On mainnet the from-genesis
+// UTxO-set reconstruction (CheckUTxO below) walks every transaction from
+// genesis one at a time, over a hundred million of them, so a mainnet run
+// normally passes --skip-utxo and compares protocol parameters and stake
+// only.
 //
 // This is intentionally narrower than DiffSnapshots/Diff (check.go,
 // diff.go), which assume a full-fidelity Snapshot from a real
@@ -121,14 +119,12 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-// KoiosNetworks are the only networks Koios's own client, and this
-// comparison, ever supports -- see this file's doc comment.
-var KoiosNetworks = map[string]bool{"preview": true, "preprod": true}
+// KoiosNetworks are the only networks this comparison supports -- see this
+// file's doc comment.
+var KoiosNetworks = map[string]bool{"preview": true, "preprod": true, "mainnet": true}
 
-// NewKoiosClient constructs a Koios client for network, validating it is
-// preview or preprod first so an unsupported network (in particular
-// "mainnet", where this comparison would not make sense at all -- see this
-// file's doc comment) fails immediately with a clear error rather than
+// NewKoiosClient constructs a Koios client for network, validating it first
+// so an unsupported network fails immediately with a clear error rather than
 // reaching koiosparity.NewKoiosClient's own, differently-worded rejection.
 func NewKoiosClient(
 	network, apiKey, baseURL string,
@@ -137,7 +133,7 @@ func NewKoiosClient(
 ) (*koiosparity.KoiosClient, error) {
 	if !KoiosNetworks[network] {
 		return nil, fmt.Errorf(
-			"koios-backed comparison only supports preview or preprod, got %q",
+			"koios-backed comparison only supports preview, preprod or mainnet, got %q",
 			network,
 		)
 	}

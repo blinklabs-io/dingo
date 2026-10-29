@@ -3256,7 +3256,7 @@ func TestRetainLeiosPartialTxsPublishesSanitizedHeldEntries(t *testing.T) {
 		[]cbor.RawMessage{tx2, nil},
 		nil,
 	)
-	validate, err := leiosEndorserBlockTxValidator(manifestRaw, 2)
+	validate, _, err := leiosEndorserBlockTxValidator(manifestRaw, 2)
 	require.NoError(t, err)
 	o.retainLeiosPartialTxs(
 		point.Slot,

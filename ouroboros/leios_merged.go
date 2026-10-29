@@ -534,19 +534,19 @@ func leiosEndorserBlockTxCbor(raw cbor.RawMessage) ([]byte, error) {
 func leiosEndorserBlockTxValidator(
 	manifestRaw []byte,
 	txCount int,
-) (func(int, cbor.RawMessage) error, error) {
+) (func(int, cbor.RawMessage) error, []lcommon.LeiosTransactionReference, error) {
 	block, err := decodeLeiosEndorserBlock(manifestRaw)
 	if err != nil {
-		return nil, fmt.Errorf("decode leios endorser block: %w", err)
+		return nil, nil, fmt.Errorf("decode leios endorser block: %w", err)
 	}
 	if err := block.Validate(); err != nil {
-		return nil, fmt.Errorf(
+		return nil, nil, fmt.Errorf(
 			"validate leios endorser block references: %w",
 			err,
 		)
 	}
 	if len(block.TransactionReferences) != txCount {
-		return nil, fmt.Errorf(
+		return nil, nil, fmt.Errorf(
 			"leios endorser block transaction count mismatch: got %d, want %d",
 			txCount,
 			len(block.TransactionReferences),
@@ -561,7 +561,7 @@ func leiosEndorserBlockTxValidator(
 			block.TransactionReferences[index],
 			raw,
 		)
-	}, nil
+	}, block.TransactionReferences, nil
 }
 
 func (o *Ouroboros) storeLeiosEndorserBlock(

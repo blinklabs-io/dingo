@@ -153,8 +153,11 @@ type Stack struct {
 	peersClosed bool
 	peerNet     *peerNetwork
 	maxPeers    int
-	peerSeq     atomic.Uint64
-	peerTune    peerTuning
+	// limitInbound is set when PeerConfig bounds the inbound connections.
+	limitInbound bool
+	maxInbound   int
+	peerSeq      atomic.Uint64
+	peerTune     peerTuning
 
 	// ctx scopes the feeder goroutines; Stop cancels it and waits on wg.
 	ctx    context.Context
@@ -186,7 +189,8 @@ func NewStack(cfg StackConfig) (*Stack, error) {
 		logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	}
 	logger = logger.With("component", "dmq")
-	var maxPeers int
+	var maxPeers, maxInbound int
+	limitInbound := false
 	if cfg.Peers != nil {
 		peers := *cfg.Peers
 		if err := peers.validate(); err != nil {
@@ -195,6 +199,8 @@ func NewStack(cfg StackConfig) (*Stack, error) {
 		peers.applyDefaults()
 		cfg.Peers = &peers
 		maxPeers = peers.MaxPeers
+		maxInbound = peers.MaxInbound
+		limitInbound = true
 	}
 	var labels prometheus.Labels
 	if cfg.Topic != "" {
@@ -251,11 +257,13 @@ func NewStack(cfg StackConfig) (*Stack, error) {
 				"by result",
 			ConstLabels: labels,
 		}, []string{"result"}),
-		maxPeers:  maxPeers,
-		peers:     make(map[*PeerConn]struct{}),
-		peerTune:  defaultPeerTuning(),
-		feeders:   make(map[ouroboros.ConnectionId]context.CancelFunc),
-		feedTimer: newFeedTimer,
+		maxPeers:     maxPeers,
+		maxInbound:   maxInbound,
+		limitInbound: limitInbound,
+		peers:        make(map[*PeerConn]struct{}),
+		peerTune:     defaultPeerTuning(),
+		feeders:      make(map[ouroboros.ConnectionId]context.CancelFunc),
+		feedTimer:    newFeedTimer,
 	}
 	for _, reason := range []string{
 		reasonInvalid, reasonAlreadyReceived, reasonExpired, reasonOther,
