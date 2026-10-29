@@ -199,6 +199,62 @@ func TestQueryShelleyUtxoWhole_ADAOnlyUsesCardanoNodeEncoding(t *testing.T) {
 	)
 }
 
+// TestQueryShelleyUtxoWhole_ByronOutputUsesShelleyEncoding: a Byron output is
+// stored with its address as an inline CBOR structure, and must be served with
+// that structure wrapped in a byte string, as a Shelley-era client decodes it.
+func TestQueryShelleyUtxoWhole_ByronOutputUsesShelleyEncoding(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	addr, err := lcommon.NewAddress(
+		"Ae2tdPwUPEZKQuZh2UndEoTKEakMYHGNjJVYmNZgJk2qqgHouxDsA5oT83n",
+	)
+	require.NoError(t, err)
+	addrBytes, err := addr.Bytes()
+	require.NoError(t, err)
+	byronOut, err := cbor.Encode(
+		[]any{cbor.RawMessage(addrBytes), uint64(2_000_000)},
+	)
+	require.NoError(t, err)
+	txID := bytes.Repeat([]byte{0xB1}, 32)
+	txn := db.Transaction(context.Background(), true)
+	require.NoError(t, db.CreateUtxo(context.Background(), txn, &models.Utxo{
+		TxId:      txID,
+		OutputIdx: 0,
+		AddedSlot: 100,
+	}))
+	require.NoError(t, db.Blob().SetUtxo(txn.Blob(), txID, 0, byronOut))
+	require.NoError(t, txn.Commit())
+	txn.Release()
+
+	ls := newPoolDistr2Ledger(t, db)
+	result, err := ls.Query(t.Context(), utxoWholeQuery(), QueryPoint{})
+	require.NoError(t, err)
+	bounded, ok := result.(*utxoWholeResult)
+	require.True(t, ok)
+
+	var wire []map[olocalstatequery.UtxoId]cbor.RawMessage
+	_, err = cbor.Decode(bounded.encoded, &wire)
+	require.NoError(t, err)
+	require.Len(t, wire, 1)
+	encoded, ok := wire[0][olocalstatequery.UtxoId{
+		Hash: ledger.NewBlake2b256(txID),
+		Idx:  0,
+	}]
+	require.True(t, ok)
+	addrField, err := cbor.Encode(addrBytes)
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		"82"+hex.EncodeToString(addrField)+"1a001e8480",
+		hex.EncodeToString(encoded),
+	)
+	out, err := ledger.NewTransactionOutputFromCbor(encoded)
+	require.NoError(t, err)
+	require.Equal(t, addr.String(), out.Address().String())
+	require.Equal(t, uint64(2_000_000), out.Amount().Uint64())
+}
+
 // TestQueryShelleyUtxoWhole_EmptyLedger covers a chain with no UTxOs at
 // all: the query must return an empty, non-nil map rather than failing.
 func TestQueryShelleyUtxoWhole_EmptyLedger(t *testing.T) {
