@@ -2400,3 +2400,69 @@ func TestAwaitObserverHeaderHorizonRacedHoldsPointIsNotAbsence(t *testing.T) {
 		t, reg, "dingo_ledger_fork_anchor_membership_retries_total",
 	), "the overlapped read is repeated once")
 }
+
+// When chain mutations overlap every attempt to read the fork anchor's
+// membership, the header's forecast is unknown. The observer wait releases
+// such a header, but admission and the header queue gate must keep it out
+// rather than take the unknown anchor for a forecastable one.
+func TestHeaderBeyondForecastHorizonUnsettledAnchorIsNotForecastable(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ls, primary, blocks, _, _ := newObserverForkTestLedgerAt(
+		t, 100_000, 210_000, 312_400,
+	)
+	extra, err := fixtures.GenerateConwayChain(
+		3, blocks[1].Hash(), 311_000, 1_000, holdsPointSettledAttempts,
+	)
+	require.NoError(t, err)
+	var added atomic.Int32
+	after := &atomic.Pointer[func()]{}
+	var hook func()
+	hook = func() {
+		n := added.Add(1)
+		require.NoError(t, primary.AddBlock(
+			context.Background(), extra[n-1], nil,
+		))
+		if int(n) < len(extra) {
+			after.Store(&hook)
+		}
+	}
+	after.Store(&hook)
+	ls.db.SetBlobStore(raceBlobStore{
+		BlobStore: ls.db.Blob(),
+		indexKey:  dbtypes.BlockBlobIndexKey(2),
+		after:     after,
+	})
+	peerParent := lcommon.Blake2b256Hash([]byte("peer ancestor"))
+	ls.config.PeerHeaderLookupFunc = func(
+		_ ouroboros.ConnectionId,
+		hash []byte,
+	) (ChainsyncEvent, []byte, bool) {
+		if !bytes.Equal(hash, peerParent.Bytes()) {
+			return ChainsyncEvent{}, nil, false
+		}
+		return ChainsyncEvent{
+			Point: ocommon.NewPoint(
+				blocks[1].SlotNumber(), blocks[1].Hash().Bytes(),
+			),
+		}, blocks[0].Hash().Bytes(), true
+	}
+	header := mockHeader{
+		hash:        lcommon.Blake2b256Hash([]byte("ingress racing anchor")),
+		prevHash:    peerParent,
+		blockNumber: 4,
+		slot:        320_000,
+	}
+	e := ChainsyncEvent{
+		BlockHeader: header,
+		Point:       ocommon.NewPoint(header.slot, header.Hash().Bytes()),
+	}
+	require.True(t, ls.headerBeyondForecastHorizon(t.Context(), e),
+		"a header whose fork anchor is unknown must not be admitted")
+	require.Equal(t, int32(holdsPointSettledAttempts), added.Load(),
+		"every membership read must have overlapped a chain mutation")
+	require.False(t, ls.headerBeyondForecastHorizon(t.Context(), e),
+		"a settled read anchors the header at its forecastable parent")
+}

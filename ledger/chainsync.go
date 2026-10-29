@@ -5465,7 +5465,12 @@ func (ls *LedgerState) AwaitObserverHeaderHorizon(
 	}()
 	for {
 		published := ls.snapshotPublishedChan()
-		if !ls.headerBeyondForecastHorizonFrom(ctx, e, &anchor) {
+		// An unsettled walk releases the header, as the wait's bound would:
+		// an observer only streams, and holding it on an unknown anchor
+		// could park it until that bound.
+		if beyond, _ := ls.headerBeyondForecastHorizonFrom(
+			ctx, e, &anchor,
+		); !beyond {
 			return nil
 		}
 		if !parked {
@@ -5641,12 +5646,17 @@ func (ls *LedgerState) awaitForecastHorizon(
 // horizon its chain can be forecast to. Like the reference ChainSync client,
 // the forecast is measured from the peer chain's intersection with the local
 // chain, so a fork that left the local chain before the ledger tip has a
-// shorter horizon than the tip's.
+// shorter horizon than the tip's. A header whose fork anchor could not be
+// settled is reported past the horizon: admission and the header queue must
+// not take a header they cannot show is forecastable.
 func (ls *LedgerState) headerBeyondForecastHorizon(
 	ctx context.Context,
 	e ChainsyncEvent,
 ) bool {
-	return ls.headerBeyondForecastHorizonFrom(ctx, e, &heldForkAnchor{})
+	beyond, settled := ls.headerBeyondForecastHorizonFrom(
+		ctx, e, &heldForkAnchor{},
+	)
+	return beyond || !settled
 }
 
 // heldForkAnchor is one held header's chainsyncForkAnchor result, kept across
@@ -5662,47 +5672,47 @@ type heldForkAnchor struct {
 	generation uint64
 }
 
-// headerBeyondForecastHorizonFrom is headerBeyondForecastHorizon reusing
-// anchor's resolution while it stands.
+// headerBeyondForecastHorizonFrom reports whether e's header lies past its
+// forecast horizon, reusing anchor's resolution while it stands. settled is
+// false when chain mutations overlapped the fork-anchor walk on every attempt;
+// beyond is then false and the caller decides what an unknown anchor means.
 func (ls *LedgerState) headerBeyondForecastHorizonFrom(
 	ctx context.Context,
 	e ChainsyncEvent,
 	anchor *heldForkAnchor,
-) bool {
+) (beyond bool, settled bool) {
 	if ls.slotClock == nil || e.BlockHeader == nil {
-		return false
+		return false, true
 	}
 	slot := e.BlockHeader.SlotNumber()
 	if _, err := ls.slotClock.SlotToTime(slot); err != nil {
-		return errors.Is(err, hardfork.ErrPastHorizon)
+		return errors.Is(err, hardfork.ErrPastHorizon), true
 	}
 	// Read before resolving, so a withdrawal that overlaps the walk is seen
 	// on the next wake.
 	generation := ls.chain.WithdrawalGeneration()
 	if !anchor.resolved || anchor.generation != generation ||
 		!anchor.belowLedgerTip(ls.loadTipSnapshot()) {
-		var settled bool
 		anchor.slot, anchor.forked, settled = ls.chainsyncForkAnchor(ctx, e)
 		// A walk that read a chain mutation in flight may have taken a held
 		// block for absent and stopped at an older ancestor, so its anchor is
-		// neither used nor kept: the header is not held on it, and the next
-		// call resolves again.
+		// neither used nor kept, and the next call resolves again.
 		if !settled {
 			anchor.resolved = false
-			return false
+			return false, false
 		}
 		anchor.resolved = true
 		anchor.generation = generation
 	}
 	if !anchor.forked {
-		return false
+		return false, true
 	}
 	summary, err := ls.forecastSummaryFrom(anchor.slot)
 	if err != nil {
-		return false
+		return false, true
 	}
 	_, err = summary.SlotToEpoch(slot)
-	return errors.Is(err, hardfork.ErrPastHorizon)
+	return errors.Is(err, hardfork.ErrPastHorizon), true
 }
 
 // belowLedgerTip reports whether a resolved fork anchor still lies below the
