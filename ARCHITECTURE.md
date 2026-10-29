@@ -13015,8 +13015,10 @@ recognized as the same operation.
 ### Koios Parity Tracker (`cmd/koios-parity/`, `internal/koiosparity/`)
 
 An operator tool that validates Dingo's closed-epoch reward inputs against Koios
-reference data on preview and preprod networks. Its original, still-supported
-form is a standalone binary built from `cmd/koios-parity/` that polls a
+reference data on preview, preprod and mainnet networks. On mainnet the
+account phase's `/account_list` crawl alone is several thousand requests,
+more than the public tier's daily allotment, so a mainnet run needs a Koios
+API key. Its original, still-supported form is a standalone binary built from `cmd/koios-parity/` that polls a
 separately synced copy of Dingo's metadata database. Dingo also has a
 second, in-process mode — an epoch-boundary observer the node itself can
 register from its own `Run()` composition — described in its own subsection
@@ -13171,7 +13173,7 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   | `/epoch_info` | derived-match | `active_stake` | Exact lovelace match to `epoch_summary.total_active_stake` at K-1. |
   | `/epoch_info` | derived-match | `end_time` | Establishes closure and the reference-lag window; not a Dingo value assertion. |
   | `/epoch_info` | unsupported | `era`, `out_sum`, `fees`, `tx_count`, `blk_count`, `start_time`, `first_block_time`, `last_block_time`, `total_rewards`, `avg_blk_reward` | Dingo has no matching persisted per-epoch aggregate. In particular, raw `fees`/`total_rewards` are not AdaPots balances. `era` is the exception: Dingo does persist it, in `epoch.era_id`, and it is compared once under `/epoch_params` rather than twice. |
-  | `/epoch_info` | unsupported | `pool_cnt`, `delegator_cnt` | Documented fields are not returned by Koios preview/preprod and are omitted from the response projection. |
+  | `/epoch_info` | unsupported | `pool_cnt`, `delegator_cnt` | Documented fields are not returned by Koios and are omitted from the response projection. |
   | `/totals` | exact-match | `epoch_no`, `treasury`, `reserves`, `fees` | Require the requested epoch and exact equality with K's `reward_ada_pots` boundary balances. |
   | `/totals` | intentionally-incomparable | `reward` | Koios reports a lagged cumulative accumulator; Dingo stores a per-epoch flow. |
   | `/totals` | unsupported | `circulation`, `supply`, `deposits_stake`, `deposits_drep`, `deposits_proposal`, `treasury_donation`, `treasury_withdrawal`, `reserves_withdrawal` | No matching persisted Dingo network aggregate. |
@@ -13642,12 +13644,14 @@ fabricated the model before the chain enacted a real one — see "Protocol
 parameter resolution" above). Results are stored in
 `check_mismatches` and summarised in `check_epoch_status`.
 
-Epochs 0-1 predate a valid Shelley "go" stake snapshot (mark→set→go takes 3
-epoch boundaries, so the go snapshot backing epoch E's active_stake needs
-E-2 >= 0) and Koios permanently returns `active_stake=null` there — `fetch`
-commits a `pre_staking` marker row instead of erroring, so `check` skips
-comparison for that epoch and it's never re-proposed by future `fetch` runs.
-A null `active_stake` on any other epoch is treated as a real, retryable
+Epochs up to the network's pre-staking cutoff (`preStakingThroughEpoch`:
+1 by default, 5 on preprod, and 209 on mainnet) predate a valid Shelley "go"
+stake snapshot (mark→set→go takes 3 epoch boundaries, so the go snapshot
+backing epoch E's active_stake needs E-2 to be a Shelley epoch) and Koios
+permanently returns `active_stake=null` there — `fetch` commits a
+`pre_staking` marker row instead of erroring, so `check` skips comparison for
+that epoch and it's never re-proposed by future `fetch` runs. A null
+`active_stake` on any epoch above the cutoff is treated as a real, retryable
 error (Koios backend lag or an upstream problem), not silently marked
 permanent. `fetch` cancels the rest of its in-flight batch as soon as any
 epoch hits this or the analogous `end_time=0` ("epoch not fully closed yet")
@@ -14149,9 +14153,9 @@ never the reverse.
   429 backoff are unchanged, so a host that *does* rate-limit still behaves
   correctly. `NewKoiosClient` runs `validateKoiosNetwork` before it applies the
   override, so an override cannot be used to reach a network the tool does not
-  support — that check is what keeps `StakeAddressFromCredential`, which
-  hardcodes the testnet address network ID, from being handed a network it
-  would silently generate wrong-network stake addresses for. The override
+  support — the same allow-list `StakeAddressFromCredential` keys its address
+  network ID on, so a supported network always encodes stake addresses with
+  that network's ID. The override
   itself is validated too: a custom host must be `https`, since `get` and
   `post` attach the API key as a Bearer token to every request and forged
   reference data can make a comparison report a false PASS. `AllowInsecureHTTP` is the local dev/test escape
@@ -14371,9 +14375,9 @@ never the reverse.
   behavior for any caller that does not configure grace hours.
 - **Pre-staking epochs are excluded from account fetching too.**
   `koiosStakeEpoch`/`preStakingThroughEpoch` (`check.go`) reject every epoch
-  up to the network's pre-staking boundary (1 by default, 5 on preprod, whose
-  Byron epochs 0-3 precede Shelley and for which Koios reports a null
-  `active_stake` for epochs 0-5), not just epoch == 0, so
+  up to the network's pre-staking boundary (1 by default, 5 on preprod, and
+  209 on mainnet; Koios reports a null `active_stake` through each network's
+  pre-staking cutoff), not just epoch == 0, so
   `FetchEpochAccountsWithAddrs` skips all pre-staking epochs entirely instead
   of running a real (and meaningless) Koios `/account_reward_history` sweep
   against a nonexistent stake epoch. No pre-staking epoch ever gets a
@@ -14510,11 +14514,13 @@ never the reverse.
   `KoiosClient` (they work entirely from the cache), so unlike `Fetch` they
   don't get `NewKoiosClient`'s network-allow-list check for free — both call
   `validateKoiosNetwork` (`koios_client.go`) explicitly. This matters
-  specifically for `StakeAddressFromCredential` (`dingo_db.go`), which
-  hardcodes the Cardano testnet address network ID since preview/preprod are
-  the only networks this tool ever validates against: an unvalidated
-  `network` value reaching `compareEpochAccounts` could otherwise silently
-  generate wrong-network-tagged stake addresses instead of erroring.
+  specifically for `StakeAddressFromCredential` (`dingo_db.go`), which takes
+  the network and encodes the mainnet address network ID for `mainnet` and the
+  testnet ID for `preview`/`preprod`, returning an error for any other value:
+  an unvalidated `network` value reaching `compareEpochAccounts` could
+  otherwise silently generate wrong-network-tagged stake addresses. Mainnet's
+  pre-staking range (`preStakingThroughEpochByNetwork`) runs through epoch 209,
+  since Shelley starts at epoch 208.
 
 #### Chunked, checkpointed account-reward fetch
 
