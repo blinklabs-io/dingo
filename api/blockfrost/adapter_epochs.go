@@ -160,7 +160,7 @@ func (a *NodeAdapter) epochInfoFor(
 		LastBlockTime:  lastBlockTime,
 		BlockCount:     blockCount,
 		TxCount:        txCount,
-		Output:         strconv.FormatUint(output, 10),
+		Output:         output.String(),
 		Fees:           strconv.FormatUint(fees, 10),
 		ActiveStake:    activeStake,
 	}, nil
