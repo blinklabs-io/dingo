@@ -394,6 +394,13 @@ func (ls *LedgerState) verifyBlockHeaderStatelessCryptoWithEpochNonce(
 			len(epochNonce),
 		)
 	}
+	hash := block.Header().Hash().Bytes()
+	if ls.statelessHeaderVerdicts.contains(hash, epochNonce) {
+		return nil
+	}
+	if ls.statelessHeaderCryptoRunHook != nil {
+		ls.statelessHeaderCryptoRunHook()
+	}
 	slotsPerKesPeriod := ls.SlotsPerKESPeriod()
 	if slotsPerKesPeriod == 0 {
 		return fmt.Errorf(
@@ -420,6 +427,7 @@ func (ls *LedgerState) verifyBlockHeaderStatelessCryptoWithEpochNonce(
 			err,
 		)
 	}
+	ls.statelessHeaderVerdicts.add(hash, epochNonce)
 	return nil
 }
 

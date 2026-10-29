@@ -6464,6 +6464,13 @@ certificate counter checks still run through their existing paths. A successful
 cryptographic result does not stamp a raw header as fully verified: unavailable
 or invalid state continues to defer or reject it.
 
+Successful stateless header cryptography is also remembered across peer
+connections in a bounded LRU keyed by header hash and epoch nonce
+(`ledger/header_verdict_cache.go`). The verdict depends only on the header
+bytes, the nonce, and Shelley genesis constants, so a header delivered by many
+peers is verified once. Failures are never stored, and Byron headers are not
+cached.
+
 While Genesis corroboration is active, a new ChainSync session intersects at
 the applied ledger tip through `LedgerState.LedgerTipIntersectPoints`, retaining
 older persisted intersection points when available. Starting at primary-chain
