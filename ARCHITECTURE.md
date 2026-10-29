@@ -11695,9 +11695,10 @@ before any hard-fork translation, as the live rollover does.
 
 API-mode backfill commits each SQL transaction after at most 100 blocks or
 when its estimated payload reaches 32 MiB. The estimate combines encoded block
-bytes and queued metadata-row bytes. It checks the commit threshold only after
-a complete block, so one heavy block can exceed it; queued rows are separately
-drained at 5,000 rows or 32 MiB while the transaction remains open.
+bytes and queued metadata-row bytes. The cumulative threshold also controls row
+flushes, while commits remain at complete-block boundaries; the transaction
+level or block that crosses the threshold can exceed it. Queued rows are drained
+at 5,000 rows or when they reach the remaining transaction byte budget.
 
 Historical block validation before the stable anchor is controlled
 independently. With `ValidateHistorical: true` (the default), ledger replay

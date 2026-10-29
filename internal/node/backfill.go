@@ -50,8 +50,9 @@ const DefaultBackfillBatchSize = 200
 const DefaultBackfillBatchRows = 5000
 
 // DefaultBackfillBatchBytes bounds the estimated backfill payload accumulated
-// by one SQL transaction. Queue flushes check after each transaction level,
-// and commits check after each block, so either unit may exceed the threshold.
+// by one SQL transaction. The limit is checked after each transaction level
+// and committed at block boundaries, so the level or block that crosses it may
+// exceed the threshold.
 const DefaultBackfillBatchBytes int64 = 32 * 1024 * 1024
 
 type backfillBatchSizer interface {
@@ -62,16 +63,15 @@ type backfillBatchByteSizer interface {
 	EstimatedSizeBytes() int64
 }
 
-func backfillBatchLimitReached(acc database.BatchAccumulator) bool {
+func backfillBatchLimitReached(
+	flushedBytes int64,
+	acc database.BatchAccumulator,
+) bool {
 	if sizer, ok := acc.(backfillBatchSizer); ok &&
 		sizer.Len() >= DefaultBackfillBatchRows {
 		return true
 	}
-	if sizer, ok := acc.(backfillBatchByteSizer); ok &&
-		sizer.EstimatedSizeBytes() >= DefaultBackfillBatchBytes {
-		return true
-	}
-	return false
+	return backfillTransactionByteLimitReached(flushedBytes, acc)
 }
 
 func backfillTransactionByteLimitReached(
@@ -1134,6 +1134,9 @@ func (b *Backfill) Run(ctx context.Context) error {
 			break
 		}
 		ensureBatchTxn()
+		// Include the current block while its metadata is accumulated so row
+		// flushes use only the remaining transaction byte budget.
+		b.batchTxnEstimatedBytes += int64(len(blk.Cbor))
 
 		epochId, eraId := b.slotToEpoch(blk.Slot)
 
@@ -1222,10 +1225,6 @@ func (b *Backfill) Run(ctx context.Context) error {
 				}
 			}
 		}
-
-		// Count source block bytes for direct SQL writes that are not held in
-		// the row accumulator.
-		b.batchTxnEstimatedBytes += int64(len(blk.Cbor))
 
 		// Common tail: update progress for every block.
 		processedTxs += blockTxCount
@@ -1462,7 +1461,7 @@ func (b *Backfill) processBlockTxsBatched(
 				)
 			}
 		}
-		if backfillBatchLimitReached(acc) {
+		if backfillBatchLimitReached(b.batchTxnEstimatedBytes, acc) {
 			flushStart := time.Now()
 			if sizer, ok := acc.(backfillBatchByteSizer); ok {
 				b.batchTxnEstimatedBytes += sizer.EstimatedSizeBytes()
