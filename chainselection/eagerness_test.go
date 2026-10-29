@@ -696,3 +696,26 @@ func TestLimitOnEagernessFallbackNeverFallsBelowImmutableTip(t *testing.T) {
 	assert.False(t, cs.withinEagernessLimit(a, 39, appliedTip),
 		"a fragment sharing no point with the others must still hold the cap")
 }
+
+// Candidates that still retain their fork point intersect there even when it
+// is below the immutable tip. The limit must not fall below the immutable tip
+// on that path either, or it would sit below the applied tip.
+func TestLimitOnEagernessIntersectionNeverFallsBelowImmutableTip(t *testing.T) {
+	t.Parallel()
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:   true,
+		SecurityParam: loeTestK,
+	})
+	a := newTestConnectionId(1)
+	b := newTestConnectionId(2)
+	feedLoEChain(cs, a, "c", 1, 20)
+	feedLoEChain(cs, b, "c", 1, 20)
+	feedLoEChain(cs, a, "a", 21, 30)
+	feedLoEChain(cs, b, "b", 21, 25)
+	cs.SetLocalTip(loeTip("c", 10))
+	appliedTip := func() ochainsync.Tip { return loeTip("a", 30) }
+
+	assert.True(t, cs.withinEagernessLimit(a, 30, appliedTip),
+		"the limit fell below the applied immutable tip plus k")
+	assert.False(t, cs.withinEagernessLimit(a, 31, appliedTip))
+}

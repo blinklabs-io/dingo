@@ -84,7 +84,8 @@ type EagernessLimit struct {
 	Point ocommon.Point
 	// BlockNumber is the highest block number selection may reach: k past the
 	// intersection or the last shared point, or k past the local tip when the
-	// candidates never shared a point.
+	// candidates never shared a point. It is never below k past the immutable
+	// tip (the local tip less k).
 	BlockNumber uint64
 }
 
@@ -113,9 +114,9 @@ func (cs *ChainSelector) EagernessLimit() EagernessLimit {
 // With a single candidate the intersection is that candidate's own head, so
 // the cap never holds back a lone peer. Retained fragments are bounded, so
 // candidates can stop sharing a retained point; the limit then stays k past
-// the last common point recorded, but never below k past the immutable tip
-// (localTip less k), as the reference's limit fragment never falls below the
-// immutable tip. A fragment whose head is below the immutable tip cannot be
+// the last common point recorded. Whichever point the limit is measured from,
+// it is never below k past the immutable tip (localTip less k), as the
+// reference's limit fragment never falls below the immutable tip. A fragment whose head is below the immutable tip cannot be
 // switched to without a rollback past k, and the reference disconnects such a
 // peer, so it is left out of the candidate set. Before the candidates have
 // ever overlapped the limit is k past the local tip. The recorded point is the
@@ -245,7 +246,10 @@ func (cs *ChainSelector) computeEagernessLimitLocked(
 	}
 	limit.Intersected = true
 	limit.Point = clonePoint(common.Point)
-	limit.BlockNumber = safeAddUint64(common.BlockNumber, cs.securityParam)
+	limit.BlockNumber = safeAddUint64(
+		max(common.BlockNumber, immutableBlock),
+		cs.securityParam,
+	)
 	return limit
 }
 

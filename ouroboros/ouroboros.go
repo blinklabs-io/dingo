@@ -58,9 +58,8 @@ import (
 const defaultMaxChainsyncClients = chainsync.DefaultMaxClients
 
 // defaultCatchUpBandWaitTimeout bounds a catch-up band wait and a Limit on
-// Eagerness wait. A parked
-// roll-forward callback stops its protocol's receive loop. The protocol state
-// timers that can run meanwhile are the chainsync Idle timeout (3673s), the
+// Eagerness wait. A parked roll-forward callback stops its protocol's receive
+// loop. The protocol state timers that can run meanwhile are the chainsync Idle timeout (3673s), the
 // CanAwait timeout (ChainsyncBlockTimeout, at least 269s), the MustReply
 // timeout (135-269s), and dingo's own stall timeout (2m by default, measured
 // from the last delivered header). The bound stays under all of them.

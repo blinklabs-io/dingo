@@ -6959,9 +6959,10 @@ Dingo's only sync-state signal (there is no Genesis State Machine equivalent):
   delivered a header, and before the candidates have ever shared a retained
   point, the limit is `k` past the local tip. Otherwise it is `k` past the
   highest point common to every fragment. When the bounded fragments later stop
-  overlapping, the limit stays `k` past the last common point, but never below
-  `k` past the immutable tip (the applied tip less `k`), so a point the local
-  chain has moved more than `k` past cannot freeze it. A fragment whose head is
+  overlapping, the limit stays `k` past the last common point. Whichever point
+  it is measured from, the limit is never below `k` past the immutable tip (the
+  applied tip less `k`), so a point the local chain has moved more than `k` past
+  cannot hold it below the applied tip. A fragment whose head is
   below the immutable tip is left out of the candidate set: switching to it
   needs a rollback past `k`, and the reference disconnects such a peer. The
   recorded point is cleared when no candidate remains or Genesis mode ends. A
