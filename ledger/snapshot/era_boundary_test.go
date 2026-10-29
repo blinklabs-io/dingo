@@ -122,6 +122,74 @@ func TestCaptureEpochBoundaryKeepsSnapPointStakeAcrossEraWithSameStakeRules(
 	}
 }
 
+// TestCaptureEpochBoundaryAgreesOnPointerStakeAcrossSameRuleEraChanges pins
+// that the kept SNAP-point stash and the historical reconstruction attribute
+// pointer-address stake identically at every pre-Conway era change. The
+// Shelley through Babbage translations carry ShelleyInstantStake across
+// unchanged (coerce in each era's Translation.hs), so the mark snapshot at
+// those boundaries counts pointer stake under both the outgoing and the
+// incoming era; only the outgoing epoch's row exists when the SNAP read runs,
+// exactly as in the rollover.
+func TestCaptureEpochBoundaryAgreesOnPointerStakeAcrossSameRuleEraChanges(
+	t *testing.T,
+) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		from, to uint
+	}{
+		{"shelley_to_allegra", eras.ShelleyEraDesc.Id, eras.AllegraEraDesc.Id},
+		{"allegra_to_mary", eras.AllegraEraDesc.Id, eras.MaryEraDesc.Id},
+		{"mary_to_alonzo", eras.MaryEraDesc.Id, eras.AlonzoEraDesc.Id},
+		{"alonzo_to_babbage", eras.AlonzoEraDesc.Id, eras.BabbageEraDesc.Id},
+	} {
+		for _, computeSnap := range []bool{true, false} {
+			name := tc.name + "/historical_fallback"
+			if computeSnap {
+				name = tc.name + "/snap_point_stash"
+			}
+			t.Run(name, func(t *testing.T) {
+				t.Parallel()
+				db := setupTestDB(t)
+				seedEpochRow(t, db, nil, 0, 0, 300, tc.from)
+				poolHash := bytes.Repeat([]byte{0xb7}, 28)
+				seedPointerStakeFixture(t, db, poolHash)
+
+				mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+				evt := event.EpochTransitionEvent{
+					PreviousEpoch:   0,
+					NewEpoch:        1,
+					BoundarySlot:    300,
+					EpochNonce:      []byte{0x0a, 0x0b},
+					ProtocolVersion: 2,
+					SnapshotSlot:    299,
+				}
+				txn := db.Transaction(context.Background(), true)
+				if computeSnap {
+					require.NoError(t, mgr.ComputeEpochBoundarySnapshot(
+						context.Background(), txn, evt,
+					))
+				}
+				seedEpochRow(t, db, txn, 300, 1, 300, tc.to)
+				require.NoError(t, mgr.CaptureEpochBoundarySnapshot(
+					context.Background(), txn, evt,
+				))
+				require.NoError(t, txn.Commit())
+
+				poolSnapshot, err := db.Metadata().GetPoolStakeSnapshot(
+					1, "mark", poolHash, nil,
+				)
+				require.NoError(t, err)
+				require.NotNil(t, poolSnapshot)
+				require.Equal(t, uint64(1_300), uint64(poolSnapshot.TotalStake),
+					"base-address 700 plus pointer-address 600: both eras "+
+						"count pointer stake, so both capture routes must "+
+						"attribute it")
+			})
+		}
+	}
+}
+
 // TestCaptureEpochBoundaryDiscardsSnapPointStakeWhenPointerStakeRuleChanges
 // is the negative case: the Babbage->Conway boundary stops counting
 // pointer-address stake, and the SNAP-point read was taken under the outgoing
