@@ -2604,7 +2604,7 @@ func (cs *ChainSelector) corroborateFarTipClaimWithLocked(
 	hasPrevious := connectionHasClaim
 	identity, hasIdentity := cs.corroboratorIdentity(connId)
 	if !hasPrevious && cs.genesisCorroborationActiveLocked() && hasIdentity {
-		prev, hasPrevious = cs.farTipRunForIdentityLocked(identity)
+		prev, hasPrevious = cs.farTipRunForIdentityLocked(identity, connId)
 	}
 	updated := farTipClaim{
 		block:        claimed,
@@ -2871,10 +2871,13 @@ type farTipRunContinuity struct {
 	boundary   bool
 	run        uint64
 	updatedAt  time.Time
+	base       farTipClaim
+	hasBase    bool
 }
 
 func (cs *ChainSelector) farTipRunForIdentityLocked(
 	identity string,
+	connId ouroboros.ConnectionId,
 ) (farTipClaim, bool) {
 	if identity == "" || cs.farTipRunsByIdentity == nil {
 		return farTipClaim{}, false
@@ -2882,6 +2885,12 @@ func (cs *ChainSelector) farTipRunForIdentityLocked(
 	continuity, ok := cs.farTipRunsByIdentity[identity]
 	if !ok {
 		return farTipClaim{}, false
+	}
+	if continuity.connection == connId {
+		if !continuity.hasBase {
+			return farTipClaim{}, false
+		}
+		return continuity.base, true
 	}
 	if cs.now().Sub(continuity.updatedAt) > cs.config.StaleTipThreshold*2 {
 		delete(cs.farTipRunsByIdentity, identity)
@@ -2931,6 +2940,23 @@ func (cs *ChainSelector) syncFarTipRunContinuityLocked(
 	if cs.farTipRunsByIdentity == nil {
 		cs.farTipRunsByIdentity = make(map[string]farTipRunContinuity)
 	}
+	var base farTipClaim
+	hasBase := false
+	if previous, exists := cs.farTipRunsByIdentity[identity]; exists {
+		if previous.connection == connId {
+			base = previous.base
+			hasBase = previous.hasBase
+		} else {
+			base = farTipClaim{
+				block:    previous.block,
+				slot:     previous.slot,
+				hash:     bytes.Clone(previous.hash),
+				boundary: previous.boundary,
+				run:      previous.run,
+			}
+			hasBase = true
+		}
+	}
 	if _, exists := cs.farTipRunsByIdentity[identity]; !exists &&
 		len(cs.farTipRunsByIdentity) >= cs.maxTrackedPeers {
 		oldestIdentity := ""
@@ -2959,6 +2985,8 @@ func (cs *ChainSelector) syncFarTipRunContinuityLocked(
 		boundary:   claim.boundary,
 		run:        claim.run,
 		updatedAt:  updatedAt,
+		base:       base,
+		hasBase:    hasBase,
 	}
 }
 
