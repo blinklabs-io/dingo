@@ -2911,10 +2911,10 @@ func (cs *ChainSelector) clearFarTipRunContinuityForConnLocked(
 	if cs.farTipRunsByIdentity == nil {
 		return
 	}
-	identity, hasIdentity := cs.corroboratorIdentity(connId)
-	if continuity, ok := cs.farTipRunsByIdentity[identity]; hasIdentity && ok &&
-		continuity.connection == connId {
-		delete(cs.farTipRunsByIdentity, identity)
+	for identity, continuity := range cs.farTipRunsByIdentity {
+		if continuity.connection == connId {
+			delete(cs.farTipRunsByIdentity, identity)
+		}
 	}
 }
 
@@ -2925,16 +2925,17 @@ func (cs *ChainSelector) syncFarTipRunContinuityLocked(
 	if !cs.genesisCorroborationActiveLocked() {
 		return
 	}
-	identity, hasIdentity := cs.corroboratorIdentity(connId)
-	if !hasIdentity {
-		return
-	}
 	claim, hasClaim := claims[connId]
 	if !hasClaim || claim.run == 0 || len(claim.hash) == 0 {
-		if continuity, ok := cs.farTipRunsByIdentity[identity]; ok &&
-			continuity.connection == connId {
-			delete(cs.farTipRunsByIdentity, identity)
+		for identity, continuity := range cs.farTipRunsByIdentity {
+			if continuity.connection == connId {
+				delete(cs.farTipRunsByIdentity, identity)
+			}
 		}
+		return
+	}
+	identity, hasIdentity := cs.corroboratorIdentity(connId)
+	if !hasIdentity {
 		return
 	}
 	if cs.farTipRunsByIdentity == nil {
