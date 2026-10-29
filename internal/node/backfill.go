@@ -49,8 +49,17 @@ const DefaultBackfillBatchSize = 100
 // threshold is checked after each transaction, so one transaction may exceed it.
 const DefaultBackfillBatchRows = 5000
 
+// DefaultBackfillBatchBytes bounds the estimated queued metadata payload
+// between flushes. The threshold is checked after each transaction, so one
+// transaction may exceed it.
+const DefaultBackfillBatchBytes int64 = 32 * 1024 * 1024
+
 type backfillBatchSizer interface {
 	Len() int
+}
+
+type backfillBatchByteSizer interface {
+	EstimatedSizeBytes() int64
 }
 
 // BackfillProgress is emitted with interval counters during metadata backfill.
@@ -934,6 +943,7 @@ func (b *Backfill) Run(ctx context.Context) error {
 			"tip_slot", tipSlot,
 			"batch_size", b.batchSize,
 			"batch_row_limit", DefaultBackfillBatchRows,
+			"batch_byte_limit", DefaultBackfillBatchBytes,
 		)
 		// Fresh start: reset epoch/era tracking to the
 		// first epoch so processEpochBoundary doesn't
@@ -956,6 +966,7 @@ func (b *Backfill) Run(ctx context.Context) error {
 				"restart_from_first_block", true,
 				"batch_size", b.batchSize,
 				"batch_row_limit", DefaultBackfillBatchRows,
+				"batch_byte_limit", DefaultBackfillBatchBytes,
 			)
 			b.initializeFromFirstEpoch()
 		} else {
@@ -966,6 +977,7 @@ func (b *Backfill) Run(ctx context.Context) error {
 				"tip_slot", tipSlot,
 				"batch_size", b.batchSize,
 				"batch_row_limit", DefaultBackfillBatchRows,
+				"batch_byte_limit", DefaultBackfillBatchBytes,
 			)
 			// Recover running nonce from the last processed
 			// block so nonce computation can continue.
@@ -990,6 +1002,9 @@ func (b *Backfill) Run(ctx context.Context) error {
 	// lazily after a block is read and released after each flush so
 	// checkpoint/final writes can use the base DB connection.
 	acc := b.db.NewBatchAccumulator()
+	if tracker, ok := acc.(interface{ EnableSizeTracking() }); ok {
+		tracker.EnableSizeTracking()
+	}
 	var batchTxn *database.Txn
 	defer func() {
 		if batchTxn != nil {
@@ -1186,11 +1201,15 @@ func (b *Backfill) Run(ctx context.Context) error {
 		if sizer, ok := acc.(backfillBatchSizer); ok {
 			batchRows = sizer.Len()
 		}
+		batchBytes := int64(0)
+		if sizer, ok := acc.(backfillBatchByteSizer); ok {
+			batchBytes = sizer.EstimatedSizeBytes()
+		}
 		// Flush once the current batch reaches the configured block window
-		// or the plugin reports enough accumulated rows to fill efficient
-		// bulk SQL batches.
+		// or the plugin reports enough accumulated rows or payload bytes.
 		if batchBlockCount >= b.batchSize ||
-			batchRows >= DefaultBackfillBatchRows {
+			batchRows >= DefaultBackfillBatchRows ||
+			batchBytes >= DefaultBackfillBatchBytes {
 			if err := flushBatch(); err != nil {
 				saveCommittedCheckpoint()
 				return fmt.Errorf(
@@ -1303,6 +1322,7 @@ func (b *Backfill) Run(ctx context.Context) error {
 		"elapsed", elapsed.Round(time.Second),
 		"batch_size", b.batchSize,
 		"batch_row_limit", DefaultBackfillBatchRows,
+		"batch_byte_limit", DefaultBackfillBatchBytes,
 		"skipped_utxo_offset_block_writes", b.skippedBlocks,
 		"skipped_utxo_offset_refs", b.skippedUtxoRefs,
 	)
@@ -1414,8 +1434,16 @@ func (b *Backfill) processBlockTxsBatched(
 				)
 			}
 		}
-		if sizer, ok := acc.(backfillBatchSizer); ok &&
-			sizer.Len() >= DefaultBackfillBatchRows {
+		batchRows := 0
+		if sizer, ok := acc.(backfillBatchSizer); ok {
+			batchRows = sizer.Len()
+		}
+		batchBytes := int64(0)
+		if sizer, ok := acc.(backfillBatchByteSizer); ok {
+			batchBytes = sizer.EstimatedSizeBytes()
+		}
+		if batchRows >= DefaultBackfillBatchRows ||
+			batchBytes >= DefaultBackfillBatchBytes {
 			flushStart := time.Now()
 			if err := b.db.FlushBatch(acc, txn); err != nil {
 				return fmt.Errorf(
