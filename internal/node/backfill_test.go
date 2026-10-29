@@ -769,6 +769,80 @@ func TestBackfillBatchSizeDefaultAndOverride(t *testing.T) {
 	require.Equal(t, 200, bf.batchSize)
 }
 
+func TestBackfillFlushesFullRowBatchWithinBlock(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	db := newTestDB(t)
+	backfill := NewBackfill(db, nil, slog.Default())
+	backfill.SetDelegatorInactivityEnabled(false)
+	acc := db.NewBatchAccumulator()
+	txn := db.Transaction(ctx, true)
+	defer txn.Release()
+	defer acc.Reset()
+
+	witnesses := make([]lcommon.VkeyWitness, 0, DefaultBackfillBatchRows)
+	for i := range DefaultBackfillBatchRows {
+		witnesses = append(witnesses, lcommon.VkeyWitness{
+			Vkey:      []byte{byte(i >> 8), byte(i), 0x01},
+			Signature: []byte{byte(i >> 8), byte(i), 0x02},
+		})
+	}
+	txBuilder := mockledger.NewTransactionBuilder()
+	txBuilder.WithId(bytes.Repeat([]byte{0xA1}, 32))
+	txBuilder.WithValid(true)
+	txBuilder.WithWitnesses(
+		mockledger.NewMockTransactionWitnessSet().WithVkeyWitnesses(witnesses...),
+	)
+	tx, err := txBuilder.Build()
+	require.NoError(t, err)
+
+	point := ocommon.Point{
+		Slot: 100,
+		Hash: bytes.Repeat([]byte{0xB2}, 32),
+	}
+	var blockHash [32]byte
+	copy(blockHash[:], point.Hash)
+	var txHash [32]byte
+	copy(txHash[:], tx.Hash().Bytes())
+	offsets := &database.BlockIngestionResult{
+		TxOffsets: map[[32]byte]database.CborOffset{
+			txHash: {
+				BlockSlot:  point.Slot,
+				BlockHash:  blockHash,
+				ByteLength: 1,
+			},
+		},
+	}
+
+	require.NoError(t, backfill.processBlockTxsBatched(
+		ctx,
+		[]lcommon.Transaction{tx},
+		point,
+		0,
+		eras.ConwayEraDesc.Id,
+		nil,
+		offsets,
+		acc,
+		txn,
+		nil,
+		true,
+	))
+	sizer, ok := acc.(backfillBatchSizer)
+	require.True(t, ok)
+	assert.Zero(t, sizer.Len())
+
+	stored, err := db.GetTransactionByHash(ctx, tx.Hash().Bytes(), txn)
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	assert.Len(t, stored.KeyWitnesses, DefaultBackfillBatchRows)
+
+	require.NoError(t, txn.Rollback())
+	stored, err = db.GetTransactionByHash(ctx, tx.Hash().Bytes(), nil)
+	require.NoError(t, err)
+	assert.Nil(t, stored, "the row flush must remain inside the caller transaction")
+}
+
 func TestBackfillSetBatchSizeRejectsInvalid(t *testing.T) {
 	t.Parallel()
 
