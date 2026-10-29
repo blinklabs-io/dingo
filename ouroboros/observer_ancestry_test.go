@@ -350,11 +350,32 @@ func TestChainsyncObserverHorizonWaitTimeoutIsNotAnError(t *testing.T) {
 	t.Parallel()
 	f := newPatienceRollForwardFixture(t, false)
 	f.o.catchUpBandWaitTimeout = 20 * time.Millisecond
+	var waits atomic.Int32
 	f.o.chainsyncObserverHorizonWait = func(
 		ctx context.Context, _ ledger.ChainsyncEvent,
 	) error {
+		waits.Add(1)
 		<-ctx.Done()
 		return ctx.Err()
 	}
-	f.rollForward(t, newTestBlockHeader(100, 1, 0xaa))
+	f.o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
+	var verifyCalls atomic.Int32
+	f.o.chainSelectionVerifyHeaderCrypto = func(
+		ouroboros.ConnectionId, gledger.BlockHeader,
+	) (uint64, error) {
+		verifyCalls.Add(1)
+		return 42, nil
+	}
+	f.o.config.ChainsyncRecordDeliveredPeerTip = func(
+		chainselection.PeerTipUpdateEvent,
+	) {
+	}
+	header := newTestBlockHeader(100, 1, 0xaa)
+	f.rollForward(t, header)
+	require.EqualValues(t, 1, waits.Load(), "the observer wait never ran")
+	require.EqualValues(t, 1, verifyCalls.Load(),
+		"a header whose wait timed out must still be authenticated")
+	_, _, stored := f.state.LookupObservedHeader(f.conn, header.Hash().Bytes())
+	require.True(t, stored,
+		"a header whose wait timed out must still be retained")
 }

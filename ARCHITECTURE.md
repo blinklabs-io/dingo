@@ -6590,7 +6590,14 @@ Ordinary Praos sessions continue to use primary-chain intersection points.
   overlapped (`Chain.HoldsPointSettled` reports it unsettled) is repeated up to
   three times, and a walk still unsettled neither holds the header nor caches an
   anchor: taking the overlap for an absent block would anchor the forecast at an
-  older ancestor. While corroboration is
+  older ancestor. A walk that ends at a parent that is neither recorded, queued,
+  nor held by the local chain (`resolveForkAnchor` reports it disconnected)
+  holds the header too, even inside the ledger tip's horizon, because the peer's
+  chain leaves the local chain at an unknown point; the walk repeats on every
+  wake and the header is released when the ancestry connects or the wait's bound
+  expires. A walk that runs out of `peerHeaderHistoryLimit` hops is not
+  disconnected: an observer reading ahead of the ledger has more unapplied
+  headers than the limit, and is forecast from the ledger tip. While corroboration is
   active (`OuroborosConfig.ChainsyncIntersectAtLedgerTip`) new sessions
   intersect at `LedgerState.LedgerTipIntersectPoints`, the applied ledger tip
   plus the Mithril trust boundary, rather than the primary chain's

@@ -5468,9 +5468,13 @@ func (ls *LedgerState) AwaitObserverHeaderHorizon(
 		// An unsettled walk releases the header, as the wait's bound would:
 		// an observer only streams, and holding it on an unknown anchor
 		// could park it until that bound.
+		//
+		// A header whose ancestry reaches no local block is held as well: its
+		// peer's chain leaves the local chain at an unknown point, so the
+		// ledger tip's horizon does not show it forecastable.
 		if beyond, _ := ls.headerBeyondForecastHorizonFrom(
 			ctx, e, &anchor,
-		); !beyond {
+		); !beyond && !anchor.disconnected {
 			return nil
 		}
 		if !parked {
@@ -5665,11 +5669,16 @@ func (ls *LedgerState) headerBeyondForecastHorizon(
 // peer's chain. Only a withdrawal from the local chain can move that
 // intersection, and only a ledger tip at or below it can turn it into the tip
 // anchor, so the result stands until one of the two is observed.
+//
+// A disconnected result is never kept: the ancestry it could not trace can be
+// completed by a block the local chain adds, which is not a withdrawal, so the
+// walk repeats on every wake until it connects.
 type heldForkAnchor struct {
-	resolved   bool
-	forked     bool
-	slot       uint64
-	generation uint64
+	resolved     bool
+	forked       bool
+	disconnected bool
+	slot         uint64
+	generation   uint64
 }
 
 // headerBeyondForecastHorizonFrom reports whether e's header lies past its
@@ -5691,9 +5700,10 @@ func (ls *LedgerState) headerBeyondForecastHorizonFrom(
 	// Read before resolving, so a withdrawal that overlaps the walk is seen
 	// on the next wake.
 	generation := ls.chain.WithdrawalGeneration()
-	if !anchor.resolved || anchor.generation != generation ||
+	if !anchor.resolved || anchor.disconnected ||
+		anchor.generation != generation ||
 		!anchor.belowLedgerTip(ls.loadTipSnapshot()) {
-		anchor.slot, anchor.forked, settled = ls.chainsyncForkAnchor(ctx, e)
+		anchor.slot, anchor.forked, anchor.disconnected, settled = ls.chainsyncForkAnchor(ctx, e)
 		// A walk that read a chain mutation in flight may have taken a held
 		// block for absent and stopped at an older ancestor, so its anchor is
 		// neither used nor kept, and the next call resolves again.
@@ -5728,23 +5738,25 @@ func (a *heldForkAnchor) belowLedgerTip(tip *tipSnapshot) bool {
 // leaves the local chain, when that is below the ledger tip. forked is false
 // when the peer's chain contains the ledger tip, which is then the forecast
 // anchor, and when the intersection cannot be resolved from recorded peer
-// headers. settled is false when a chain mutation overlapped a membership read
-// the walk depended on, in which case the other results mean nothing.
+// headers. disconnected is true when the walk ended at a parent that is
+// neither recorded, queued, nor held, as resolveForkAnchor defines it.
+// settled is false when a chain mutation overlapped a membership read the walk
+// depended on, in which case the other results mean nothing.
 func (ls *LedgerState) chainsyncForkAnchor(
 	ctx context.Context,
 	e ChainsyncEvent,
-) (slot uint64, forked bool, settled bool) {
+) (slot uint64, forked bool, disconnected bool, settled bool) {
 	if ls.chain == nil {
-		return 0, false, true
+		return 0, false, false, true
 	}
 	tip := ls.loadTipSnapshot()
 	if tip == nil {
-		return 0, false, true
+		return 0, false, false, true
 	}
 	prevHash := e.BlockHeader.PrevHash().Bytes()
 	if bytes.Equal(prevHash, ls.chain.HeaderTip().Point.Hash) ||
 		bytes.Equal(prevHash, ls.chain.Tip().Point.Hash) {
-		return 0, false, true
+		return 0, false, false, true
 	}
 	lookups := ls.forkAnchorLookups(ctx, e)
 	unsettled := false
@@ -5755,16 +5767,16 @@ func (ls *LedgerState) chainsyncForkAnchor(
 		}
 		return held
 	}
-	slot, forked = resolveForkAnchor(
+	slot, forked, disconnected = resolveForkAnchor(
 		prevHash,
 		tip.currentTip.Point.Slot,
 		ls.peerHeaderHistoryLimit(),
 		lookups,
 	)
 	if unsettled {
-		return 0, false, false
+		return 0, false, false, false
 	}
-	return slot, forked, true
+	return slot, forked, disconnected, true
 }
 
 // holdsPointSettledAttempts bounds how many times a membership read that a
@@ -5938,51 +5950,65 @@ type forkAnchorLookups struct {
 // ledger tip means the peer's chain contains the tip. A header built on origin
 // carries the zero hash as its parent, which no stored block has: that
 // intersection is slot 0.
+//
+// disconnected is true when the walk ended at a parent that is not recorded,
+// not queued, and not a block the local chain holds, so the peer's chain is
+// known to leave the local chain at a point that could not be found. A walk
+// that ran out of limit hops proves nothing either way: an observer reading
+// ahead of the ledger legitimately has more unapplied headers than the limit.
 func resolveForkAnchor(
 	prevHash []byte,
 	tipSlot uint64,
 	limit int,
 	lookups forkAnchorLookups,
-) (uint64, bool) {
+) (slot uint64, forked bool, disconnected bool) {
+	// absent classifies a parent that no peer record explains.
+	absent := func(hash []byte) (uint64, bool, bool) {
+		if lookups.queuedHeaderHash != nil && lookups.queuedHeaderHash(hash) {
+			return 0, false, false
+		}
+		point, found := lookups.blockByHash(hash)
+		if !found || !lookups.heldBlock(point) {
+			return 0, false, true
+		}
+		slot, forked := localForkAnchor(point.Slot, tipSlot)
+		return slot, forked, false
+	}
 	for range limit {
 		if isOriginHash(prevHash) {
-			return localForkAnchor(0, tipSlot)
+			slot, forked := localForkAnchor(0, tipSlot)
+			return slot, forked, false
 		}
 		point, parentHash, found := lookups.peerHeader(prevHash)
 		if !found {
-			point, found = lookups.blockByHash(prevHash)
-			if !found || !lookups.heldBlock(point) {
-				return 0, false
-			}
-			return localForkAnchor(point.Slot, tipSlot)
+			return absent(prevHash)
 		}
 		if lookups.queuedHeader(point) {
-			return 0, false
+			return 0, false, false
 		}
 		if lookups.heldBlock(point) {
-			return localForkAnchor(point.Slot, tipSlot)
+			slot, forked := localForkAnchor(point.Slot, tipSlot)
+			return slot, forked, false
 		}
 		prevHash = parentHash
 	}
 	// As in connectsToLocalChain, the parent reached by the last permitted
 	// hop is examined without traversing another peer header.
 	if isOriginHash(prevHash) {
-		return localForkAnchor(0, tipSlot)
+		slot, forked := localForkAnchor(0, tipSlot)
+		return slot, forked, false
 	}
 	if point, _, found := lookups.peerHeader(prevHash); found {
 		if lookups.queuedHeader(point) {
-			return 0, false
+			return 0, false, false
 		}
 		if lookups.heldBlock(point) {
-			return localForkAnchor(point.Slot, tipSlot)
+			slot, forked := localForkAnchor(point.Slot, tipSlot)
+			return slot, forked, false
 		}
-		return 0, false
+		return 0, false, false
 	}
-	point, found := lookups.blockByHash(prevHash)
-	if !found || !lookups.heldBlock(point) {
-		return 0, false
-	}
-	return localForkAnchor(point.Slot, tipSlot)
+	return absent(prevHash)
 }
 
 func isOriginHash(hash []byte) bool {
