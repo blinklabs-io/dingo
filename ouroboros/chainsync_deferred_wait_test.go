@@ -15,6 +15,7 @@
 package ouroboros
 
 import (
+	"context"
 	"errors"
 	"sync"
 	"sync/atomic"
@@ -185,4 +186,86 @@ func TestChainsyncClientRollForwardRejectsInvalidHeaderWithoutWaiting(
 		t, f.ledgerCh, 100*time.Millisecond,
 		"an invalid header must not reach the ledger",
 	)
+}
+
+// A deferred header that extends the local chain is forwarded unverified at
+// once, as before: its deferral may clear only by applying its own block, so
+// holding it for a settle signal would stall the node for the whole bound.
+func TestChainsyncClientRollForwardForwardsDeferredLocalExtensionWithoutWaiting(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	f := newForecastHorizonFixture(t, "10.0.0.43:3001")
+	deferredErr := deferredVerificationErr(t)
+	f.o.catchUpBandWaitTimeout = time.Minute
+	f.o.config.ChainsyncHeaderVerificationSettled = newSettleSignal().current
+	header := newTestBlockHeader(400, 1, 0xb4)
+	header.(*testBlockHeader).prevHash[0] = 0xb0
+	parent := header.PrevHash().Bytes()
+	f.o.chainsyncLocalChainTips = func() ([]byte, []byte) {
+		return parent, parent
+	}
+	var attempts atomic.Int32
+	f.o.chainSelectionVerifyHeaderCrypto = func(
+		ouroboros.ConnectionId,
+		gledger.BlockHeader,
+	) (uint64, error) {
+		attempts.Add(1)
+		return 0, deferredErr
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		f.rollForward(t, header)
+	}()
+	testutil.RequireReceive(
+		t, done, 5*time.Second,
+		"a deferred local extension must not wait for a settle signal",
+	)
+	require.EqualValues(t, 1, attempts.Load())
+	testutil.RequireReceive(
+		t, f.ledgerCh, testutil.AsyncWait,
+		"a deferred local extension must reach the ledger queue",
+	)
+}
+
+// The wait budget covers the whole roll-forward: a header re-admitted past
+// the forecast horizon continues the waits it already spent rather than
+// starting a second budget.
+func TestChainsyncClientRollForwardSharesDeferredWaitBudgetAcrossReadmission(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	f := newForecastHorizonFixture(t, "10.0.0.44:3001")
+	deferredErr := deferredVerificationErr(t)
+	settle := newSettleSignal()
+	f.o.config.ChainsyncHeaderVerificationSettled = settle.current
+	f.o.chainsyncHeaderAdmission = func(
+		context.Context,
+		ledger.ChainsyncEvent,
+	) (bool, error) {
+		return true, nil
+	}
+	var attempts atomic.Int32
+	f.o.chainSelectionVerifyHeaderCrypto = func(
+		ouroboros.ConnectionId,
+		gledger.BlockHeader,
+	) (uint64, error) {
+		n := attempts.Add(1)
+		// Every attempt lands a publication, so no wait blocks and only the
+		// wait count ends the retries.
+		settle.publish()
+		if n == 2 {
+			return 0, beyondForecastHorizonErr()
+		}
+		return 0, deferredErr
+	}
+
+	f.rollForward(t, newTestBlockHeader(400, 1, 0xb5))
+
+	require.EqualValues(t, maxDeferredVerificationWaits+2, attempts.Load(),
+		"one wait before re-admission leaves the rest of the budget after it")
 }

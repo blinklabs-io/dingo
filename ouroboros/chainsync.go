@@ -2226,10 +2226,14 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		var verificationTipBaseline ochainsync.Tip
 		if ingressEligible && shouldVerifyHeader {
 			verificationAttempted = true
+			// One wait budget covers both verifications below, so a header
+			// re-admitted past the forecast horizon cannot double it.
+			var deferredWait deferredVerificationWait
 			verificationGeneration, verifyErr := o.verifyHeaderAwaitingLedger(
 				ctx,
 				v,
 				&verificationTipBaseline,
+				&deferredWait,
 			)
 			if errors.Is(verifyErr, ledger.ErrHeaderBeyondForecastHorizon) &&
 				o.chainsyncHeaderAdmission != nil {
@@ -2246,8 +2250,10 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 					ctx,
 					v,
 					&verificationTipBaseline,
+					&deferredWait,
 				)
 			}
+			deferredWait.close()
 			if verifyErr == nil {
 				chainsyncEvent.HeaderCryptoVerificationGeneration = verificationGeneration
 				deliveryVerified = true
@@ -2772,30 +2778,33 @@ func (o *Ouroboros) recordHeldChainsyncTip(
 }
 
 // maxDeferredVerificationWaits bounds how many ledger settle signals one
-// header waits out before its deferral is parked for recovery.
+// roll-forward waits out before its deferral is parked for recovery.
 const maxDeferredVerificationWaits = 4
 
-// verifyHeaderAwaitingLedger verifies v for chain selection. A deferred
+// verifyHeaderAwaitingLedger verifies header for chain selection. A deferred
 // result means local state was not ready (a block-apply commit or snapshot
 // publication in progress, or the published epoch data not yet covering the
-// header's slot), which says nothing about the header. Rather than park the
-// connection for a later re-intersection, which closes it, the callback waits
-// for the ledger's next settle signal and verifies the same header again, as
-// the reference ChainSync client blocks until the ledger view can validate a
-// header. The wait is bounded by catchUpBandWaitTimeout, which stays under the
-// protocol state timers, by maxDeferredVerificationWaits, and by connection
-// close. A header beyond the forecast horizon has its own admission wait and
-// is returned immediately. When a bound is reached the last result is
-// returned unchanged. baseline receives the applied tip observed before the
-// last attempt.
+// header's slot), which says nothing about the header. A header that does not
+// extend the local chain would be parked for a re-intersection, which closes
+// the connection, so the callback instead waits for the ledger's next settle
+// signal and verifies the same header again, as the reference ChainSync
+// client blocks until the ledger view can validate a header. A header that
+// extends the local chain is returned at once: it is forwarded unverified and
+// the body path verifies it, and when its deferral clears only by applying
+// its own block no settle signal can arrive while it is held. wait bounds
+// every wait of one roll-forward to catchUpBandWaitTimeout, which stays under
+// the protocol state timers, and to maxDeferredVerificationWaits, and ends at
+// connection close. A header beyond the forecast horizon has its own
+// admission wait and is returned immediately. When a bound is reached the
+// last result is returned unchanged. baseline receives the applied tip
+// observed before the last attempt.
 func (o *Ouroboros) verifyHeaderAwaitingLedger(
 	ctx ochainsync.CallbackContext,
 	header gledger.BlockHeader,
 	baseline *ochainsync.Tip,
+	wait *deferredVerificationWait,
 ) (uint64, error) {
-	var wait deferredVerificationWait
-	defer wait.close()
-	for waits := 0; ; waits++ {
+	for {
 		// The channel is taken before the attempt so a publication that lands
 		// during it still wakes the wait.
 		var settled <-chan struct{}
@@ -2812,7 +2821,8 @@ func (o *Ouroboros) verifyHeaderAwaitingLedger(
 		if err == nil || settled == nil ||
 			!ledger.IsHeaderVerificationDeferred(err) ||
 			errors.Is(err, ledger.ErrHeaderBeyondForecastHorizon) ||
-			waits >= maxDeferredVerificationWaits {
+			wait.waits >= maxDeferredVerificationWaits ||
+			o.deferredHeaderExtendsLocalChain(ctx.ConnectionId, header) {
 			return generation, err
 		}
 		if !wait.await(ctx, o.catchUpBandWaitTimeout, settled) {
@@ -2822,10 +2832,12 @@ func (o *Ouroboros) verifyHeaderAwaitingLedger(
 }
 
 // deferredVerificationWait is the bounded context shared by every wait of one
-// header, created on the first wait so a header that verifies pays nothing.
+// roll-forward, created on the first wait so a header that verifies pays
+// nothing.
 type deferredVerificationWait struct {
 	ctx    context.Context
 	cancel func()
+	waits  int
 }
 
 func (w *deferredVerificationWait) close() {
@@ -2850,6 +2862,7 @@ func (w *deferredVerificationWait) await(
 			cancelAdmission()
 		}
 	}
+	w.waits++
 	select {
 	case <-settled:
 		return true
