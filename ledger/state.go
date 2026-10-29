@@ -2246,6 +2246,9 @@ type LedgerState struct {
 	forkHeaderNonceCacheMutex sync.Mutex
 	forkHeaderNonceCache      map[string]map[uint64]peerForkNoncePrefix
 	forkHeaderPathCache       map[string]peerForkPathPrefix
+	// onPeerForkAncestorStateCheck, when set by a test, observes each
+	// ledger-state verification of a peer fork ancestor.
+	onPeerForkAncestorStateCheck func(slot uint64)
 	// Test hook for fork ancestor lookups.
 	lookupBlockByHash func([]byte) (models.Block, error)
 	// Test hook called after Close releases the blockfetch continuation mutex

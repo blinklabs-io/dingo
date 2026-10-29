@@ -29,7 +29,10 @@ import (
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
-type peerForkAncestorCryptoPrefix struct {
+// peerForkAncestorPrefix records that every path index up to lastIndex passed
+// one kind of ancestor verification under the stated consensus context, epoch
+// and nonce.
+type peerForkAncestorPrefix struct {
 	contextGeneration uint64
 	epoch             uint64
 	nonce             []byte
@@ -38,7 +41,8 @@ type peerForkAncestorCryptoPrefix struct {
 }
 
 type peerForkPathPrefix struct {
-	ancestorCrypto peerForkAncestorCryptoPrefix
+	ancestorCrypto peerForkAncestorPrefix
+	ancestorState  peerForkAncestorPrefix
 	ancestor       models.Block
 	headers        []gledger.BlockHeader
 	generation     uint64
@@ -236,15 +240,23 @@ func (ls *LedgerState) verifyPeerForkTargetEpochAncestors(
 			}); err != nil {
 			return err
 		}
-		if err := chainSelectionHeaderStateError(
-			ls.verifySelectedBlockHeaderStateWithCache(
-				context.Background(),
-				block,
-				epoch.EpochId,
-				snapshot.epochCache,
-				epochNonce,
-			),
-		); err != nil {
+		if err := ls.verifyPeerForkAncestorMemo(
+			connID, headers, index, epoch.EpochId, epochNonce,
+			snapshot.contextGeneration, selectAncestorState,
+			func() error {
+				if ls.onPeerForkAncestorStateCheck != nil {
+					ls.onPeerForkAncestorStateCheck(header.SlotNumber())
+				}
+				return chainSelectionHeaderStateError(
+					ls.verifySelectedBlockHeaderStateWithCache(
+						context.Background(),
+						block,
+						epoch.EpochId,
+						snapshot.epochCache,
+						epochNonce,
+					),
+				)
+			}); err != nil {
 			return err
 		}
 	}
@@ -1002,7 +1014,7 @@ func (ls *LedgerState) storePeerForkPathPrefix(
 	if ls.forkHeaderPathCache == nil {
 		ls.forkHeaderPathCache = make(map[string]peerForkPathPrefix)
 	}
-	var ancestorCrypto peerForkAncestorCryptoPrefix
+	var ancestorCrypto, ancestorState peerForkAncestorPrefix
 	if cached, ok := ls.forkHeaderPathCache[key]; ok &&
 		headerVerdictInContext(
 			cached.generation,
@@ -1010,24 +1022,28 @@ func (ls *LedgerState) storePeerForkPathPrefix(
 			generation,
 		) &&
 		cached.ancestor.Slot == ancestor.Slot &&
-		bytes.Equal(cached.ancestor.Hash, ancestor.Hash) &&
-		cached.ancestorCrypto.valid &&
-		cached.ancestorCrypto.contextGeneration == contextGeneration &&
-		cached.ancestorCrypto.lastIndex < len(cached.headers) &&
-		cached.ancestorCrypto.lastIndex < len(headers) {
-		matches := true
-		for index := 0; index <= cached.ancestorCrypto.lastIndex; index++ {
-			if !bytes.Equal(
-				cached.headers[index].Hash().Bytes(),
-				headers[index].Hash().Bytes(),
-			) {
-				matches = false
-				break
+		bytes.Equal(cached.ancestor.Hash, ancestor.Hash) {
+		retain := func(
+			prefix peerForkAncestorPrefix,
+		) peerForkAncestorPrefix {
+			if !prefix.valid ||
+				prefix.contextGeneration != contextGeneration ||
+				prefix.lastIndex >= len(cached.headers) ||
+				prefix.lastIndex >= len(headers) {
+				return peerForkAncestorPrefix{}
 			}
+			for index := 0; index <= prefix.lastIndex; index++ {
+				if !bytes.Equal(
+					cached.headers[index].Hash().Bytes(),
+					headers[index].Hash().Bytes(),
+				) {
+					return peerForkAncestorPrefix{}
+				}
+			}
+			return prefix
 		}
-		if matches {
-			ancestorCrypto = cached.ancestorCrypto
-		}
+		ancestorCrypto = retain(cached.ancestorCrypto)
+		ancestorState = retain(cached.ancestorState)
 	}
 	var opCertLastHash []byte
 	var opCertCounters map[lcommon.PoolKeyHash]opCertCounterSnapshot
@@ -1062,6 +1078,7 @@ func (ls *LedgerState) storePeerForkPathPrefix(
 	}
 	ls.forkHeaderPathCache[key] = peerForkPathPrefix{
 		ancestorCrypto: ancestorCrypto,
+		ancestorState:  ancestorState,
 		ancestor:       ancestor,
 		headers:        slices.Clone(headers),
 		generation:     generation,
@@ -1122,8 +1139,16 @@ func (ls *LedgerState) foldHeaderEtaV(
 	)
 }
 
+func selectAncestorCrypto(p *peerForkPathPrefix) *peerForkAncestorPrefix {
+	return &p.ancestorCrypto
+}
+
+func selectAncestorState(p *peerForkPathPrefix) *peerForkAncestorPrefix {
+	return &p.ancestorState
+}
+
 // verifyPeerForkAncestorCrypto memoizes only stateless cryptography. The caller
-// still checks peer-scoped ancestry, lookup freshness and all stateful rules,
+// still checks peer-scoped ancestry, lookup freshness and the stateful rules,
 // traversing ancestors in order so the marker covers only successful crypto.
 func (ls *LedgerState) verifyPeerForkAncestorCrypto(
 	connID ouroboros.ConnectionId,
@@ -1134,11 +1159,31 @@ func (ls *LedgerState) verifyPeerForkAncestorCrypto(
 	contextGeneration uint64,
 	verify func() error,
 ) error {
+	return ls.verifyPeerForkAncestorMemo(
+		connID, headers, index, epoch, nonce, contextGeneration,
+		selectAncestorCrypto, verify,
+	)
+}
+
+// verifyPeerForkAncestorMemo runs verify unless the marker chosen by selector
+// already covers index. Only successful verdicts are recorded, in path order,
+// and a marker holds only for the consensus context, epoch and nonce it was
+// recorded under, so a rollback or context change re-verifies.
+func (ls *LedgerState) verifyPeerForkAncestorMemo(
+	connID ouroboros.ConnectionId,
+	headers []gledger.BlockHeader,
+	index int,
+	epoch uint64,
+	nonce []byte,
+	contextGeneration uint64,
+	selector func(*peerForkPathPrefix) *peerForkAncestorPrefix,
+	verify func() error,
+) error {
 	key := connIdKey(connID)
 	hash := headers[index].Hash().Bytes()
 	ls.forkHeaderNonceCacheMutex.Lock()
 	entry, exists := ls.forkHeaderPathCache[key]
-	prefix := entry.ancestorCrypto
+	prefix := *selector(&entry)
 	cached := exists && contextGeneration != 0 &&
 		entry.generation >= contextGeneration && prefix.valid &&
 		prefix.contextGeneration == contextGeneration && prefix.epoch == epoch &&
@@ -1162,12 +1207,12 @@ func (ls *LedgerState) verifyPeerForkAncestorCrypto(
 		!bytes.Equal(entry.headers[index].Hash().Bytes(), hash) {
 		return nil
 	}
-	prefix = entry.ancestorCrypto
+	prefix = *selector(&entry)
 	if !prefix.valid || prefix.contextGeneration != contextGeneration ||
 		prefix.epoch != epoch ||
 		!bytes.Equal(prefix.nonce, nonce) ||
 		index > prefix.lastIndex {
-		entry.ancestorCrypto = peerForkAncestorCryptoPrefix{
+		*selector(&entry) = peerForkAncestorPrefix{
 			contextGeneration: contextGeneration,
 			epoch:             epoch,
 			nonce:             cloneNonce(nonce),
