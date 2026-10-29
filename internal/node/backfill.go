@@ -45,8 +45,8 @@ const BackfillPhase = "metadata"
 // before deferred metadata rows are flushed.
 const DefaultBackfillBatchSize = 100
 
-// DefaultBackfillBatchRows caps the accumulated metadata row count before a
-// flush so dense eras do not hold oversized batches in memory.
+// DefaultBackfillBatchRows triggers a backfill flush after a block reaches this
+// many queued metadata rows. A single block may exceed the threshold.
 const DefaultBackfillBatchRows = 5000
 
 type backfillBatchSizer interface {

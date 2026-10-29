@@ -600,6 +600,15 @@ func (a *transactionBatchAccumulator) Reset() {
 	a.overlay = nil
 }
 
+// Len reports pending metadata rows for the API backfill batch bound.
+func (a *transactionBatchAccumulator) Len() int {
+	length := len(a.stakeDeltaOrder) + len(a.opCertOrder)
+	for i := range a.rows.entries {
+		length += len(a.rows.entries[i].rows)
+	}
+	return length
+}
+
 func (s *Store) NewBatchAccumulator() types.MetadataBatchAccumulator {
 	return &transactionBatchAccumulator{sqlOperations: s.sqlOperations}
 }

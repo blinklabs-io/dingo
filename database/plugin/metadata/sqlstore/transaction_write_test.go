@@ -932,6 +932,18 @@ func TestTransactionBatchAccumulatorResetClosesStatement(t *testing.T) {
 	require.Zero(t, count, "rollback must discard writes made through the accumulator")
 }
 
+func TestTransactionBatchAccumulatorLen(t *testing.T) {
+	t.Parallel()
+
+	acc := &transactionBatchAccumulator{}
+	require.Zero(t, acc.Len())
+	acc.rows.add(witnessScriptShape, []byte{0x01}, int64(1), 0)
+	acc.rows.add(plutusDataShape, []byte{0x02}, int64(1))
+	acc.stakeDeltaOrder = []string{"credential"}
+	acc.opCertOrder = []poolOpCertSequenceKey{{}}
+	require.Equal(t, 4, acc.Len())
+}
+
 // feelessTransaction stands in for a transaction body whose Fee is nil, which
 // is what TransactionBodyBase returns for any body that does not override it --
 // the synthetic transaction carrying imported certificates among them. Fee is
