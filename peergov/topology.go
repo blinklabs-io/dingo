@@ -34,6 +34,25 @@ func (p *PeerGovernor) LoadTopologyConfig(
 		return
 	}
 
+	// Own the overlay: callers may retain the canonical topology and reload it.
+	overlay := *topologyConfig
+	overlay.LocalRoots = append(
+		[]topology.TopologyConfigP2PLocalRoot(nil),
+		topologyConfig.LocalRoots...,
+	)
+	for _, group := range p.config.ControlGroups {
+		if group.Validate() != nil {
+			continue
+		}
+		overlay.LocalRoots = append(
+			overlay.LocalRoots,
+			topology.TopologyConfigP2PLocalRoot{
+				AccessPoints: group.AccessPoints, Valency: 1, WarmValency: 1,
+			},
+		)
+	}
+	topologyConfig = &overlay
+
 	// Resolve all addresses before acquiring the lock to avoid blocking DNS
 	// while holding the mutex
 	type resolvedPeer struct {

@@ -667,6 +667,11 @@ func (n *Node) configValidate() error {
 			n.config.cfg.NetworkMagic,
 		)
 	}
+	for _, group := range n.config.cfg.GenesisBootstrap.ControlGroups {
+		if err := group.Validate(); err != nil {
+			return fmt.Errorf("genesis control groups: %w", err)
+		}
+	}
 	if len(n.config.listeners) == 0 {
 		return errors.New("no listeners defined")
 	}
@@ -1049,6 +1054,15 @@ func clonePluginConfig(in map[string]any) map[string]any {
 		}
 	}
 	return out
+}
+
+// WithGenesisControlGroups replaces network relay control defaults. An empty
+// non-nil slice disables defaults; nil selects the network defaults.
+func WithGenesisControlGroups(groups []topology.PeerControlGroup) ConfigOptionFunc {
+	owned := topology.ClonePeerControlGroups(groups)
+	return func(c *Config) {
+		c.cfg.GenesisBootstrap.ControlGroups = topology.ClonePeerControlGroups(owned)
+	}
 }
 
 func WithGenesisCorroborationPeers(peers int) ConfigOptionFunc {
@@ -2720,7 +2734,9 @@ func (c *Config) LocalStateQueryViewMaxLifetimeDuration() time.Duration {
 
 // GenesisBootstrap returns the Genesis bootstrap configuration.
 func (c *Config) GenesisBootstrap() internalconfig.GenesisBootstrapConfig {
-	return c.cfg.GenesisBootstrap
+	cfg := c.cfg.GenesisBootstrap
+	cfg.ControlGroups = topology.ClonePeerControlGroups(cfg.ControlGroups)
+	return cfg
 }
 
 // HistoryExpiry returns the history expiry configuration.

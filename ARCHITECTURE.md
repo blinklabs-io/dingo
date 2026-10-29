@@ -6241,6 +6241,34 @@ stranding ChainSync when the bootstrap peer is still the only usable upstream.
 
 #### Ouroboros Genesis trust model
 
+Dingo-owned `genesisBootstrap.controlGroups` declares relay operator identities
+and their `accessPoints` independently of canonical cardano-node topology and
+stake snapshots. Each group asserts common control; different identities assert
+independent operators. When groups are configured, only their trusted endpoint
+origins can corroborate Genesis sources. Pool keys and snapshot pool indices do
+not add witnesses in this mode. All aliases of one configured identity count
+once. Conflicting declarations fail closed, and a retained peer can lose its
+identity but cannot be renamed to a different operator while its delivered
+frontier remains tracked.
+
+Canonical Dijkstra Genesis startup supplies IOG and Blink Labs relay groups by
+default. Defaults require matching network magic and every canonical genesis
+hash; private networks reusing a magic do not inherit them. Musashi receives the
+same operator defaults only when its configuration selects Genesis mode; its
+canonical Praos mode is unchanged. A nil `controlGroups` selects these defaults;
+an explicit empty list disables them and retains ledger/snapshot identity
+selection. Explicit groups replace defaults. The public
+`WithGenesisControlGroups` option owns its input, including endpoint slices.
+
+The node passes a frozen group set to each replacement peer governor on startup,
+restore and truncate. The governor overlays one local root per operator group
+without mutating the caller's topology or assigning ledger stake. Trusted relay
+discovery retains endpoint origins through DNS expansion. Discovery refreshes
+may revoke those associations but cannot silently turn an already identified
+peer into a different operator. Valency groups, trustable flags, remote IPs and
+peer sharing do not establish operator control.
+
+
 Genesis mode (`genesisBootstrap`, active only for from-origin sync with no
 `intersectTip`/`intersectPoints`, and never when the Cardano node configuration
 names `ConsensusMode: PraosMode`, which makes the node follow its peers by Praos
@@ -6486,8 +6514,9 @@ Ordinary Praos sessions continue to use primary-chain intersection points.
   candidate's own identity is excluded, so several connections from one operator
   cannot self-corroborate a private fork. Peer governance supplies the identity
   through `PeerGovernor.CorroborationIdentityByConnId`, wired to
-  `ChainSelectorConfig.PeerIdentity`. Live ledger peers use the pool control key
-  that registered the relay. Snapshot peers use the snapshot's existing pool
+  `ChainSelectorConfig.PeerIdentity`. Configured control groups, when present,
+  form the exclusive operator witness set described above. Otherwise live
+  ledger peers use the pool control key that registered the relay. Snapshot peers use the snapshot's existing pool
   grouping, so its IPv4, IPv6, and hostname relays share one identity before the
   live ledger is available. A topology peer that is also matched to a ledger
   relay retains that ledger control identity, including when an inbound duplex
@@ -8261,17 +8290,14 @@ route back to the bootstrap list. The `added == 0` fallback above does not help,
 because the addresses were added successfully — they only fail later, at the
 handshake.
 
-These snapshot-seeded ledger peers are the configured corroborators for the
-Genesis corroboration gate (see Chain Selection → Ouroboros Genesis trust
-model). In a GSA-style deployment the fast source is a trustable `localRoots`
-peer and the snapshot supplies the corroborating ledger peers; setting
-`genesisBootstrap.corroborationPeers` to the number of snapshot peers that must
-agree makes the node stall rather than follow the fast source until that many
-distinct-host corroborators confirm its recent blocks. Their *independence*
-(distinct operators, infrastructure, and chain views) is not something the
-selector can verify — it enforces only distinct remote hosts — so the operator
-is responsible for populating the snapshot with genuinely independent large
-ledger peers.
+Snapshot-seeded ledger peers provide historical corroborators for the Genesis
+corroboration gate (see Chain Selection → Ouroboros Genesis trust model).
+Configured operator groups override the snapshot's pool grouping for witness
+identity. Without them, trusted snapshot pool groups and later ledger control
+keys supply the available identities; remote hosts alone do not establish
+independence. The operator remains responsible for choosing independently
+controlled witnesses and a satisfiable `genesisBootstrap.corroborationPeers`
+threshold. The candidate's own operator never counts as its witness.
 
 Live ledger peer discovery is adapted at the node composition boundary:
 `ledger/` exposes stake pool relay data and current slot through neutral
