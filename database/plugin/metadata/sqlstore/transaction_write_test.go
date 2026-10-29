@@ -937,11 +937,17 @@ func TestTransactionBatchAccumulatorLen(t *testing.T) {
 
 	acc := &transactionBatchAccumulator{}
 	require.Zero(t, acc.Len())
+	acc.EnableSizeTracking()
 	acc.rows.add(witnessScriptShape, []byte{0x01}, int64(1), 0)
 	acc.rows.add(plutusDataShape, []byte{0x02}, int64(1))
 	acc.stakeDeltaOrder = []string{"credential"}
 	acc.opCertOrder = []poolOpCertSequenceKey{{}}
 	require.Equal(t, 4, acc.Len())
+	require.Equal(
+		t,
+		2*rowBatchRowOverheadBytes+5*rowBatchValueOverheadBytes+2,
+		acc.EstimatedSizeBytes(),
+	)
 }
 
 // feelessTransaction stands in for a transaction body whose Fee is nil, which

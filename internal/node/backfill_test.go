@@ -769,6 +769,55 @@ func TestBackfillBatchSizeDefaultAndOverride(t *testing.T) {
 	require.Equal(t, 200, bf.batchSize)
 }
 
+type fixedBackfillBatchMetrics struct {
+	rows  int
+	bytes int64
+}
+
+func (fixedBackfillBatchMetrics) Reset() {}
+
+func (m fixedBackfillBatchMetrics) Len() int {
+	return m.rows
+}
+
+func (m fixedBackfillBatchMetrics) EstimatedSizeBytes() int64 {
+	return m.bytes
+}
+
+func TestBackfillBatchLimitReached(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		rows  int
+		bytes int64
+		want  bool
+	}{
+		{
+			name:  "below both limits",
+			rows:  DefaultBackfillBatchRows - 1,
+			bytes: DefaultBackfillBatchBytes - 1,
+		},
+		{
+			name: "row limit",
+			rows: DefaultBackfillBatchRows,
+		},
+		{
+			name:  "byte limit",
+			bytes: DefaultBackfillBatchBytes,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			acc := fixedBackfillBatchMetrics{
+				rows: test.rows, bytes: test.bytes,
+			}
+			assert.Equal(t, test.want, backfillBatchLimitReached(acc))
+		})
+	}
+}
+
 func TestBackfillFlushesFullRowBatchWithinBlock(t *testing.T) {
 	t.Parallel()
 

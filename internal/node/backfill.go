@@ -62,6 +62,18 @@ type backfillBatchByteSizer interface {
 	EstimatedSizeBytes() int64
 }
 
+func backfillBatchLimitReached(acc database.BatchAccumulator) bool {
+	if sizer, ok := acc.(backfillBatchSizer); ok &&
+		sizer.Len() >= DefaultBackfillBatchRows {
+		return true
+	}
+	if sizer, ok := acc.(backfillBatchByteSizer); ok &&
+		sizer.EstimatedSizeBytes() >= DefaultBackfillBatchBytes {
+		return true
+	}
+	return false
+}
+
 // BackfillProgress is emitted with interval counters during metadata backfill.
 type BackfillProgress struct {
 	Slot            uint64
@@ -1197,19 +1209,10 @@ func (b *Backfill) Run(ctx context.Context) error {
 		processedBlocks++
 		batchBlockCount++
 
-		batchRows := 0
-		if sizer, ok := acc.(backfillBatchSizer); ok {
-			batchRows = sizer.Len()
-		}
-		batchBytes := int64(0)
-		if sizer, ok := acc.(backfillBatchByteSizer); ok {
-			batchBytes = sizer.EstimatedSizeBytes()
-		}
 		// Flush once the current batch reaches the configured block window
 		// or the plugin reports enough accumulated rows or payload bytes.
 		if batchBlockCount >= b.batchSize ||
-			batchRows >= DefaultBackfillBatchRows ||
-			batchBytes >= DefaultBackfillBatchBytes {
+			backfillBatchLimitReached(acc) {
 			if err := flushBatch(); err != nil {
 				saveCommittedCheckpoint()
 				return fmt.Errorf(
@@ -1434,16 +1437,7 @@ func (b *Backfill) processBlockTxsBatched(
 				)
 			}
 		}
-		batchRows := 0
-		if sizer, ok := acc.(backfillBatchSizer); ok {
-			batchRows = sizer.Len()
-		}
-		batchBytes := int64(0)
-		if sizer, ok := acc.(backfillBatchByteSizer); ok {
-			batchBytes = sizer.EstimatedSizeBytes()
-		}
-		if batchRows >= DefaultBackfillBatchRows ||
-			batchBytes >= DefaultBackfillBatchBytes {
+		if backfillBatchLimitReached(acc) {
 			flushStart := time.Now()
 			if err := b.db.FlushBatch(acc, txn); err != nil {
 				return fmt.Errorf(
