@@ -141,9 +141,7 @@ func TestStatelessHeaderVerdictCacheBoundedAndConcurrent(t *testing.T) {
 	nonce := make([]byte, 32)
 	var wg sync.WaitGroup
 	for worker := range 8 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for i := range statelessHeaderVerdictCacheLimit {
 				var hash [32]byte
 				hash[0] = byte(worker)
@@ -152,7 +150,7 @@ func TestStatelessHeaderVerdictCacheBoundedAndConcurrent(t *testing.T) {
 				cache.add(hash[:], nonce)
 				_ = cache.contains(hash[:], nonce)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	cache.mu.Lock()
