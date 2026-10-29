@@ -7349,10 +7349,14 @@ func (ls *LedgerState) ledgerReadChainIterator(
 					// clears, so the pair confines the wait to initial
 					// catch-up, where rollbacks are rare and no forging
 					// depends on them.
+					// Applying the drained network frontier can publish the state the
+					// next header needs. Offline import keeps its gap coalescing.
 					if len(rawBatch) > 0 && len(rawBatch) < cap(rawBatch) &&
 						coalesceAttempts < gatherCoalesceMaxAttempts &&
 						gapAttempts < gatherCoalesceMaxGapAttempts &&
 						!ls.reachedTip.Load() &&
+						(ls.config.GetActiveConnectionFunc == nil ||
+							ls.chain == nil || ls.chain.HeaderCount() > 0) &&
 						!nearKnownUpstreamTip(
 							rawBatch[len(rawBatch)-1].Slot,
 							upstreamTipSlot,

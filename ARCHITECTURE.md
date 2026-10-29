@@ -18882,6 +18882,20 @@ Once at or near the live upstream tip, the wait is skipped entirely: a
 solitary new block still commits immediately, matching the pre-existing
 latency behavior.
 
+For a node with `GetActiveConnectionFunc` wired, coalescing also requires an
+admitted header still queued on the primary chain. A drained network frontier
+flushes the gathered bodies immediately: applying them can publish the state
+needed to authenticate or corroborate the next header, so waiting for its body
+would delay the producer that could supply it. The queue is rechecked at each
+gap; a frontier drained during the pass releases the batch. This check reads
+only callback presence and the chain's header count under its existing chain
+lock; it never invokes the callback under the gather lock. Offline imports
+without that callback retain gap coalescing, and network replay with admitted
+headers still batches short body-delivery gaps.
+The header-count check can acquire that chain lock once more per retry,
+in addition to the iterator probe; it introduces no ledger or networking lock
+inside the gather span.
+
 `reachedTip` is part of that gate rather than `isNearTip` alone because
 `UpstreamTipSlot` returns 0 whenever no live upstream connection is selected,
 and the near-tip test folds an unknown upstream into "not near".
