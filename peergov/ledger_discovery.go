@@ -16,6 +16,7 @@ package peergov
 
 import (
 	"context"
+	"maps"
 	"time"
 )
 
@@ -381,17 +382,31 @@ func (p *PeerGovernor) reconcileLedgerCorroborationIdentities(
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.ledgerRelayIdentities = maps.Clone(identities)
 	for _, peer := range p.peers {
 		if peer == nil {
 			continue
 		}
 		candidate, known := p.ledgerKnownAddrs[p.normalizeAddress(peer.Address)]
 		if !known {
-			peer.CorroborationIdentity = ""
+			peer.CorroborationIdentity = p.gossipRelayIdentityLocked(peer)
 			continue
 		}
 		peer.CorroborationIdentity = identities[candidate]
 	}
+}
+
+// gossipRelayIdentityLocked returns the control identity of the registered
+// relay at a gossip-learned peer's address, or "" for any other peer. Only the
+// address is matched, without DNS, so a relay registered under a hostname
+// cannot vouch for a gossip peer that arrives as an IP. Address diversity
+// alone never grants an identity: the address must be in the ledger relay set.
+// Callers must hold p.mu.
+func (p *PeerGovernor) gossipRelayIdentityLocked(peer *Peer) string {
+	if peer.Source != PeerSourceP2PGossip {
+		return ""
+	}
+	return p.ledgerRelayIdentities[p.normalizeAddress(peer.Address)]
 }
 
 // reconcileLedgerKnownAddrs prunes ledgerKnownAddrs entries whose address is

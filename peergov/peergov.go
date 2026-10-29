@@ -192,6 +192,13 @@ type PeerGovernor struct {
 	// is what lets reconcileLedgerKnownAddrs compare against a fresh on-chain
 	// candidate list without re-resolving every peer.
 	ledgerKnownAddrs map[string]string
+	// ledgerRelayIdentities maps every relay endpoint in the last non-empty
+	// ledger relay set (normalizeAddress form, no DNS) to its pool control
+	// identity, "" when the endpoint is claimed by several pools. Unlike
+	// ledgerKnownAddrs it covers relays discovery never added, which is what
+	// lets a peer learned through peer sharing take the identity of a
+	// registered relay at the same address. Guarded by mu.
+	ledgerRelayIdentities map[string]string
 	// peerSnapshotRelays holds the relays of the last loaded peer snapshot.
 	// Below UseLedgerAfterSlot the ledger provider cannot answer, so urgent
 	// discovery refills from these instead. Guarded by mu.
@@ -498,6 +505,7 @@ func NewPeerGovernor(cfg PeerGovernorConfig) *PeerGovernor {
 		inboundHostChurn:        make(map[string]inboundHostChurnRecord),
 		networkMismatchDenyList: make(map[string]time.Time),
 		ledgerKnownAddrs:        make(map[string]string),
+		ledgerRelayIdentities:   make(map[string]string),
 		negativeDNS:             make(map[string]time.Time),
 	}
 	if cfg.PromRegistry != nil {

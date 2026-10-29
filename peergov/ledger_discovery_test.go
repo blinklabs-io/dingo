@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/topology"
+	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -1345,4 +1346,83 @@ func TestLoadPeerSnapshotDeniedHostnameSkipsResolution(t *testing.T) {
 	require.Zero(t, pg.LoadPeerSnapshot(context.Background(), snapshot))
 	require.Empty(t, pg.peers)
 	require.Zero(t, calls.Load())
+}
+
+func gossipIdentityConnId(ip string) ouroboros.ConnectionId {
+	return ouroboros.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 3001},
+		RemoteAddr: &net.TCPAddr{IP: net.ParseIP(ip), Port: 3001},
+	}
+}
+
+func attachGossipIdentityConn(
+	t *testing.T,
+	pg *PeerGovernor,
+	ip string,
+) ouroboros.ConnectionId {
+	t.Helper()
+	connId := gossipIdentityConnId(ip)
+	pg.mu.Lock()
+	defer pg.mu.Unlock()
+	for _, peer := range pg.peers {
+		if peer.Address == ip+":3001" {
+			peer.Connection = &PeerConnection{Id: connId, IsClient: true}
+			return connId
+		}
+	}
+	t.Fatalf("peer %s not found", ip)
+	return connId
+}
+
+// A peer learned through peer sharing is not in ledgerKnownAddrs, but its
+// address can still be a relay registered in the ledger. It must take that
+// pool's identity, while a gossip peer outside the relay set stays
+// identity-less.
+func TestGossipPeerTakesIdentityFromLedgerRelaySet(t *testing.T) {
+	t.Parallel()
+	pg := discardGovernor()
+	ip := net.ParseIP("44.0.0.1")
+	relay := PoolRelay{
+		IPv4:        &ip,
+		Port:        3001,
+		PoolKeyHash: bytes.Repeat([]byte{0x55}, 28),
+	}
+	want := poolCorroborationIdentity(relay.PoolKeyHash)
+
+	// Learned before the relay set is known: refreshed by reconciliation.
+	require.NoError(t, pg.AddPeer("44.0.0.1:3001", PeerSourceP2PGossip))
+	require.NoError(t, pg.AddPeer("44.0.0.2:3001", PeerSourceP2PGossip))
+	early := attachGossipIdentityConn(t, pg, "44.0.0.1")
+	outside := attachGossipIdentityConn(t, pg, "44.0.0.2")
+	assert.Empty(t, pg.CorroborationIdentityByConnId(early))
+
+	pg.reconcileLedgerKnownAddrs(relay.Addresses())
+	pg.reconcileLedgerCorroborationIdentities(
+		pg.ledgerRelayCorroborationIdentities([]PoolRelay{relay}),
+	)
+	assert.Equal(t, want, pg.CorroborationIdentityByConnId(early))
+	assert.Empty(t, pg.CorroborationIdentityByConnId(outside))
+
+	// Learned after the relay set is known: identity set on arrival.
+	pg.mu.Lock()
+	pg.peers = nil
+	pg.mu.Unlock()
+	require.NoError(t, pg.AddPeer("44.0.0.1:3001", PeerSourceP2PGossip))
+	require.NoError(t, pg.AddPeer("44.0.0.2:3001", PeerSourceP2PGossip))
+	late := attachGossipIdentityConn(t, pg, "44.0.0.1")
+	lateOutside := attachGossipIdentityConn(t, pg, "44.0.0.2")
+	assert.Equal(t, want, pg.CorroborationIdentityByConnId(late))
+	assert.Empty(t, pg.CorroborationIdentityByConnId(lateOutside))
+
+	// A relay the ledger delists no longer vouches for the address.
+	otherIP := net.ParseIP("45.0.0.1")
+	other := PoolRelay{
+		IPv4:        &otherIP,
+		Port:        3001,
+		PoolKeyHash: bytes.Repeat([]byte{0x66}, 28),
+	}
+	pg.reconcileLedgerCorroborationIdentities(
+		pg.ledgerRelayCorroborationIdentities([]PoolRelay{other}),
+	)
+	assert.Empty(t, pg.CorroborationIdentityByConnId(late))
 }

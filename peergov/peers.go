@@ -367,6 +367,7 @@ func (p *PeerGovernor) AddPeer(
 	// Gossip-discovered peers are sharable since they were already shared
 	if source == PeerSourceP2PGossip {
 		newPeer.Sharable = true
+		newPeer.CorroborationIdentity = p.gossipRelayIdentityLocked(newPeer)
 	}
 	p.peers = append(p.peers, newPeer)
 	p.updatePeerMetrics()
