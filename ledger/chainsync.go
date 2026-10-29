@@ -5669,7 +5669,16 @@ func (ls *LedgerState) headerBeyondForecastHorizonFrom(
 	generation := ls.chain.WithdrawalGeneration()
 	if !anchor.resolved || anchor.generation != generation ||
 		!anchor.belowLedgerTip(ls.loadTipSnapshot()) {
-		anchor.slot, anchor.forked = ls.chainsyncForkAnchor(ctx, e)
+		var settled bool
+		anchor.slot, anchor.forked, settled = ls.chainsyncForkAnchor(ctx, e)
+		// A walk that read a chain mutation in flight may have taken a held
+		// block for absent and stopped at an older ancestor, so its anchor is
+		// neither used nor kept: the header is not held on it, and the next
+		// call resolves again.
+		if !settled {
+			anchor.resolved = false
+			return false
+		}
 		anchor.resolved = true
 		anchor.generation = generation
 	}
@@ -5694,31 +5703,70 @@ func (a *heldForkAnchor) belowLedgerTip(tip *tipSnapshot) bool {
 }
 
 // chainsyncForkAnchor returns the slot at which the peer chain delivering e
-// leaves the local chain, when that is below the ledger tip. ok is false when
-// the peer's chain contains the ledger tip, which is then the forecast anchor,
-// and when the intersection cannot be resolved from recorded peer headers.
+// leaves the local chain, when that is below the ledger tip. forked is false
+// when the peer's chain contains the ledger tip, which is then the forecast
+// anchor, and when the intersection cannot be resolved from recorded peer
+// headers. settled is false when a chain mutation overlapped a membership read
+// the walk depended on, in which case the other results mean nothing.
 func (ls *LedgerState) chainsyncForkAnchor(
 	ctx context.Context,
 	e ChainsyncEvent,
-) (uint64, bool) {
+) (slot uint64, forked bool, settled bool) {
 	if ls.chain == nil {
-		return 0, false
+		return 0, false, true
 	}
 	tip := ls.loadTipSnapshot()
 	if tip == nil {
-		return 0, false
+		return 0, false, true
 	}
 	prevHash := e.BlockHeader.PrevHash().Bytes()
 	if bytes.Equal(prevHash, ls.chain.HeaderTip().Point.Hash) ||
 		bytes.Equal(prevHash, ls.chain.Tip().Point.Hash) {
-		return 0, false
+		return 0, false, true
 	}
-	return resolveForkAnchor(
+	lookups := ls.forkAnchorLookups(ctx, e)
+	unsettled := false
+	lookups.heldBlock = func(point ocommon.Point) bool {
+		held, ok := ls.holdsPointSettled(ctx, point)
+		if !ok {
+			unsettled = true
+		}
+		return held
+	}
+	slot, forked = resolveForkAnchor(
 		prevHash,
 		tip.currentTip.Point.Slot,
 		ls.peerHeaderHistoryLimit(),
-		ls.forkAnchorLookups(ctx, e),
+		lookups,
 	)
+	if unsettled {
+		return 0, false, false
+	}
+	return slot, forked, true
+}
+
+// holdsPointSettledAttempts bounds how many times a membership read that a
+// chain mutation overlapped is repeated before the point's membership is
+// reported unknown.
+const holdsPointSettledAttempts = 3
+
+// holdsPointSettled is Chain.HoldsPointSettled, repeating a read that a chain
+// mutation overlapped. Blocks are added continuously while the node syncs, so
+// the overlap is routine rather than exceptional.
+func (ls *LedgerState) holdsPointSettled(
+	ctx context.Context,
+	point ocommon.Point,
+) (held bool, settled bool) {
+	for attempt := range holdsPointSettledAttempts {
+		if attempt > 0 {
+			ls.metrics.incHoldsPointRetry()
+		}
+		held, settled = ls.chain.HoldsPointSettled(ctx, point)
+		if settled {
+			return held, true
+		}
+	}
+	return false, false
 }
 
 // chainsyncHeaderDisconnected reports whether e's predecessor is neither the

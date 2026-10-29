@@ -1124,6 +1124,8 @@ these series carries a connection or peer label.
   the two gauges read; the ledger installs
   `ChainManager.SetHeaderQueueFullObserver`, and `Chain.addBlockHeader` calls
   it under the chain lock, so the observer only increments the counter.
+- `dingo_ledger_fork_anchor_membership_retries_total` counts fork-anchor
+  membership reads repeated because a block mutation overlapped them.
 - `dingo_ledger_last_block_added_timestamp_seconds` is one atomic store per
   block the blockfetch drain adds to the chain, and
   `dingo_blockfetch_last_request_timestamp_seconds` is the same for the last
@@ -6577,7 +6579,13 @@ Ordinary Praos sessions continue to use primary-chain intersection points.
   before authentication or retention, bounded by `catchUpBandWaitTimeout`, so
   an observer does not read ahead of what the ledger can forecast; the wait
   fetches nothing and requests no re-sync, and a header it releases is handled
-  as any observer header. While corroboration is
+  as any observer header. The wait resolves the
+  header's fork anchor once and reuses it until a withdrawal from the local
+  chain or a ledger tip at the anchor. A membership read that a chain mutation
+  overlapped (`Chain.HoldsPointSettled` reports it unsettled) is repeated up to
+  three times, and a walk still unsettled neither holds the header nor caches an
+  anchor: taking the overlap for an absent block would anchor the forecast at an
+  older ancestor. While corroboration is
   active (`OuroborosConfig.ChainsyncIntersectAtLedgerTip`) new sessions
   intersect at `LedgerState.LedgerTipIntersectPoints`, the applied ledger tip
   plus the Mithril trust boundary, rather than the primary chain's

@@ -34,6 +34,7 @@ type stateMetrics struct {
 	blockfetchConnSelected        atomic.Bool
 	lastBlockAddedUnixNano        atomic.Int64
 	headerQueueFull               prometheus.Counter
+	holdsPointRetries             prometheus.Counter
 	blockfetchEventMu             sync.Mutex
 	blockfetchEventStarts         map[uint64]time.Time
 	blockfetchEventNextID         uint64
@@ -917,6 +918,10 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 	m.headerQueueFull = promautoFactory.NewCounter(prometheus.CounterOpts{
 		Name: "dingo_chain_header_queue_full_total",
 		Help: "headers rejected because the primary chain's header queue was at capacity",
+	})
+	m.holdsPointRetries = promautoFactory.NewCounter(prometheus.CounterOpts{
+		Name: "dingo_ledger_fork_anchor_membership_retries_total",
+		Help: "fork-anchor chain membership reads repeated because a block mutation overlapped them",
 	})
 	m.blockNum = promautoFactory.NewGauge(prometheus.GaugeOpts{
 		Name: "cardano_node_metrics_blockNum_int",

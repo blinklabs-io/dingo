@@ -65,6 +65,15 @@ func (m *stateMetrics) markBlockAdded() {
 	m.lastBlockAddedUnixNano.Store(time.Now().UnixNano())
 }
 
+// incHoldsPointRetry counts a fork-anchor membership read repeated because a
+// block mutation overlapped it.
+func (m *stateMetrics) incHoldsPointRetry() {
+	if m == nil || m.holdsPointRetries == nil {
+		return
+	}
+	m.holdsPointRetries.Inc()
+}
+
 // incHeaderQueueFull counts one header rejected because the primary chain's
 // header queue was full.
 func (m *stateMetrics) incHeaderQueueFull() {

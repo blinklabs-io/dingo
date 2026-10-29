@@ -29,6 +29,8 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/blob"
+	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
@@ -39,6 +41,7 @@ import (
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/blinklabs-io/ouroboros-mock/fixtures"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 )
 
@@ -2074,6 +2077,17 @@ func newObserverForkTestLedger(
 	t *testing.T,
 ) (*LedgerState, *chain.Chain, []lcommon.Block, ChainsyncEvent, *atomic.Int32) {
 	t.Helper()
+	return newObserverForkTestLedgerAt(t, 300_000, 1_000, 302_400)
+}
+
+// newObserverForkTestLedgerAt is newObserverForkTestLedger with the two stored
+// blocks at firstSlot and firstSlot+step, and the ledger tip at tipSlot.
+func newObserverForkTestLedgerAt(
+	t *testing.T,
+	firstSlot, step uint64,
+	tipSlot uint64,
+) (*LedgerState, *chain.Chain, []lcommon.Block, ChainsyncEvent, *atomic.Int32) {
+	t.Helper()
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	cm, err := chain.NewManager(context.Background(), db, nil)
@@ -2082,8 +2096,8 @@ func newObserverForkTestLedger(
 	blocks, err := fixtures.GenerateConwayChain(
 		1,
 		lcommon.Blake2b256{},
-		300_000,
-		1_000,
+		firstSlot,
+		step,
 		2,
 	)
 	require.NoError(t, err)
@@ -2104,7 +2118,7 @@ func newObserverForkTestLedger(
 		}},
 		currentEra: eras.ConwayEraDesc,
 		currentTip: ochainsync.Tip{
-			Point: ocommon.NewPoint(302_400, []byte("tip")),
+			Point: ocommon.NewPoint(tipSlot, []byte("tip")),
 		},
 		config: LedgerStateConfig{
 			CardanoNodeConfig: cfg,
@@ -2256,7 +2270,7 @@ func TestAwaitObserverHeaderHorizonReleasesUntracedAncestry(t *testing.T) {
 				BlockHeader: header,
 				Point:       ocommon.NewPoint(header.slot, header.Hash().Bytes()),
 			}
-			_, forked := ls.chainsyncForkAnchor(t.Context(), e)
+			_, forked, _ := ls.chainsyncForkAnchor(t.Context(), e)
 			require.False(t, forked,
 				"an ancestry that reaches no local block resolves no fork anchor")
 			results := make(chan error, 1)
@@ -2286,7 +2300,7 @@ func TestAwaitObserverHeaderHorizonStoredParentAnchorsAtParent(t *testing.T) {
 		BlockHeader: header,
 		Point:       ocommon.NewPoint(header.slot, header.Hash().Bytes()),
 	}
-	anchor, forked := ls.chainsyncForkAnchor(t.Context(), e)
+	anchor, forked, _ := ls.chainsyncForkAnchor(t.Context(), e)
 	require.True(t, forked, "a stored parent below the ledger tip is a fork anchor")
 	require.Equal(t, blocks[0].SlotNumber(), anchor,
 		"the anchor is the stored parent's own slot")
@@ -2296,4 +2310,93 @@ func TestAwaitObserverHeaderHorizonStoredParentAnchorsAtParent(t *testing.T) {
 		t, results, testutil.AsyncWait,
 		"a header inside its parent's forecast must not wait",
 	))
+}
+
+// raceBlobStore runs a hook once, right after the next read of indexKey
+// returns, so a test can mutate the chain inside the unlocked window of a
+// persistent HoldsPoint read.
+type raceBlobStore struct {
+	blob.BlobStore
+	indexKey []byte
+	after    *atomic.Pointer[func()]
+}
+
+func (s raceBlobStore) Get(txn dbtypes.Txn, key []byte) ([]byte, error) {
+	val, err := s.BlobStore.Get(txn, key)
+	if bytes.Equal(key, s.indexKey) {
+		if hook := s.after.Swap(nil); hook != nil {
+			(*hook)()
+		}
+	}
+	return val, err
+}
+
+// A chain mutation that overlaps the read deciding whether the local chain
+// holds the header's parent is not a verdict that the parent is absent. Taking
+// it as one walks the peer's ancestry back to an older block and anchors the
+// forecast there, which parks a header the true anchor can forecast.
+func TestAwaitObserverHeaderHorizonRacedHoldsPointIsNotAbsence(t *testing.T) {
+	t.Parallel()
+
+	ls, primary, blocks, _, _ := newObserverForkTestLedgerAt(
+		t, 100_000, 210_000, 312_400,
+	)
+	extra, err := fixtures.GenerateConwayChain(
+		3, blocks[1].Hash(), 311_000, 1_000, 1,
+	)
+	require.NoError(t, err)
+	var raced atomic.Bool
+	hook := func() {
+		require.NoError(t, primary.AddBlock(context.Background(), extra[0], nil))
+		raced.Store(true)
+	}
+	store := raceBlobStore{
+		BlobStore: ls.db.Blob(),
+		// Block IDs are dense from 1, so blocks[1] is entry 2.
+		indexKey: dbtypes.BlockBlobIndexKey(2),
+		after:    &atomic.Pointer[func()]{},
+	}
+	store.after.Store(&hook)
+	ls.db.SetBlobStore(store)
+	reg := prometheus.NewRegistry()
+	ls.metrics.init(reg)
+
+	// The peer's chain runs blocks[0] -> blocks[1] -> header. Anchored at
+	// blocks[1] (slot 310_000) the forecast covers slot 500_000; anchored at
+	// blocks[0] (slot 100_000) it ends at 432_000.
+	peerParent := lcommon.Blake2b256Hash([]byte("peer ancestor"))
+	ls.config.PeerHeaderLookupFunc = func(
+		_ ouroboros.ConnectionId,
+		hash []byte,
+	) (ChainsyncEvent, []byte, bool) {
+		if !bytes.Equal(hash, peerParent.Bytes()) {
+			return ChainsyncEvent{}, nil, false
+		}
+		return ChainsyncEvent{
+			Point: ocommon.NewPoint(
+				blocks[1].SlotNumber(), blocks[1].Hash().Bytes(),
+			),
+		}, blocks[0].Hash().Bytes(), true
+	}
+	header := mockHeader{
+		hash:        lcommon.Blake2b256Hash([]byte("observer racing anchor")),
+		prevHash:    peerParent,
+		blockNumber: 4,
+		slot:        500_000,
+	}
+	e := ChainsyncEvent{
+		BlockHeader: header,
+		Point:       ocommon.NewPoint(header.slot, header.Hash().Bytes()),
+	}
+	results := make(chan error, 1)
+	go func() { results <- ls.AwaitObserverHeaderHorizon(t.Context(), e) }()
+	require.NoError(t, testutil.RequireReceive(
+		t, results, testutil.AsyncWait,
+		"a header inside its parent's forecast must not wait on an anchor "+
+			"resolved from a raced membership read",
+	))
+	require.True(t, raced.Load(), "the chain mutation never overlapped the read")
+	require.Equal(t, float64(1), syncMetricValue(
+		t, reg, "dingo_ledger_fork_anchor_membership_retries_total",
+	), "the overlapped read is repeated once")
 }
