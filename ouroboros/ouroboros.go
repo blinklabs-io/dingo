@@ -312,6 +312,10 @@ type Ouroboros struct {
 	deferredRecoveryRecycleAt map[string]time.Time
 	deferredHeaderRecoveryMu  sync.Mutex
 	deferredHeaderRecovery    map[ouroboros.ConnectionId]deferredHeaderRecoveryState
+	// chainsyncServerPrevHashFunc replaces the primary-chain lookup of a
+	// block's previous hash in the node-to-client ChainSync waiter. Tests set
+	// it to inject a lookup failure.
+	chainsyncServerPrevHashFunc func(ocommon.Point) ([]byte, error)
 	// chainsyncLocalChainTips returns the hashes of the local block tip and
 	// header-queue tip. Tests override it without a LedgerState.
 	chainsyncLocalChainTips func() (tipHash, headerTipHash []byte)
