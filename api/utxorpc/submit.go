@@ -226,33 +226,26 @@ func (s *submitServiceServer) waitForTx(
 	// commits during the lookup is queued by the event callback. Both paths use
 	// queueConfirmation so the same reference is emitted only once. Preserve
 	// first-request order for references that are already committed.
+	// All references are looked up in one read transaction, so a stream
+	// costs one database transaction however many references it carries.
 	if !isNilInterface(s.utxorpc.config.LedgerState) {
-		for _, r := range uniqueRefs {
-			hash := hex.EncodeToString(r)
-			pendingMu.Lock()
-			_, stillPending := pending[hash]
-			pendingMu.Unlock()
-			if !stillPending {
-				continue
-			}
+		committed, err := s.utxorpc.config.LedgerState.ExistingTransactionHashes(
+			waitCtx,
+			uniqueRefs,
+		)
+		if err != nil {
 			if waitCtx.Err() != nil {
 				return waitForTxStopError(ctx, serverTimeout)
 			}
-			txRecord, err := s.utxorpc.config.LedgerState.TransactionByHash(
-				waitCtx,
-				r,
-			)
-			if err != nil {
-				if waitCtx.Err() != nil {
-					return waitForTxStopError(ctx, serverTimeout)
-				}
-				return fmt.Errorf(
-					"lookup committed transaction %x: %w",
-					r,
-					err,
-				)
-			}
-			if txRecord != nil {
+			return fmt.Errorf("lookup committed transactions: %w", err)
+		}
+		found := make(map[string]struct{}, len(committed))
+		for _, h := range committed {
+			found[hex.EncodeToString(h)] = struct{}{}
+		}
+		for _, r := range uniqueRefs {
+			hash := hex.EncodeToString(r)
+			if _, ok := found[hash]; ok {
 				queueConfirmation(hash)
 			}
 		}

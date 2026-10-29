@@ -17,6 +17,7 @@ package blockfrost
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"math"
 	"strconv"
@@ -64,9 +65,18 @@ func (a *NodeAdapter) epochInfoFor(
 			endSlot = epochLastSlot
 		}
 	}
-	blockCount, firstBlockSlot, lastBlockSlot, err := a.ledgerState.CountBlocksInSlotRange(
-		epoch.StartSlot,
-		endSlot,
+	db := a.ledgerState.Database()
+	txn := db.Transaction(ctx, false)
+	defer txn.Release()
+	meta := db.Metadata()
+	slotRanges, ok := meta.(metadata.SlotRangeStore)
+	if !ok {
+		return EpochInfo{}, errors.New(
+			"metadata store does not support slot-range statistics",
+		)
+	}
+	blockStats, err := slotRanges.GetBlockSlotRangeStats(
+		epoch.StartSlot, endSlot, txn.Metadata(),
 	)
 	if err != nil {
 		return EpochInfo{}, fmt.Errorf(
@@ -76,9 +86,9 @@ func (a *NodeAdapter) epochInfoFor(
 			err,
 		)
 	}
-	txCount, err := a.ledgerState.CountTransactionsInSlotRange(
-		epoch.StartSlot,
-		endSlot,
+	blockCount := blockStats.Count
+	txCount, err := slotRanges.CountTransactionsInSlotRange(
+		epoch.StartSlot, endSlot, txn.Metadata(),
 	)
 	if err != nil {
 		return EpochInfo{}, fmt.Errorf(
@@ -91,19 +101,19 @@ func (a *NodeAdapter) epochInfoFor(
 	firstBlockTime := int64(0)
 	lastBlockTime := int64(0)
 	if blockCount > 0 {
-		firstTime, err := a.ledgerState.SlotToTime(firstBlockSlot)
+		firstTime, err := a.ledgerState.SlotToTime(blockStats.FirstSlot)
 		if err != nil {
 			return EpochInfo{}, fmt.Errorf(
 				"get first epoch block time for slot %d: %w",
-				firstBlockSlot,
+				blockStats.FirstSlot,
 				err,
 			)
 		}
-		lastTime, err := a.ledgerState.SlotToTime(lastBlockSlot)
+		lastTime, err := a.ledgerState.SlotToTime(blockStats.LastSlot)
 		if err != nil {
 			return EpochInfo{}, fmt.Errorf(
 				"get last epoch block time for slot %d: %w",
-				lastBlockSlot,
+				blockStats.LastSlot,
 				err,
 			)
 		}
@@ -111,10 +121,6 @@ func (a *NodeAdapter) epochInfoFor(
 		lastBlockTime = lastTime.Unix()
 	}
 
-	db := a.ledgerState.Database()
-	txn := db.Transaction(ctx, false)
-	defer txn.Release()
-	meta := db.Metadata()
 	fees, err := meta.SumTransactionFeesInSlotRange(
 		epoch.StartSlot, endSlot, txn.Metadata(),
 	)

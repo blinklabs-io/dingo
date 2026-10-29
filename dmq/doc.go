@@ -61,7 +61,9 @@
 // A Stack built with StackConfig.Peers also accepts and dials node-to-node
 // peers: it listens on PeerConfig.ListenAddrs, and a manager dials the peers
 // of PeerConfig.Topology and of the ledger, within MinPeers and MaxPeers, with
-// backoff for a peer that fails. Ledger peers are untrusted and are dialed only
+// backoff for a peer that fails. Inbound connections do not count toward
+// MinPeers and stop short of the room kept for dialed peers (MinPeers, or the
+// local roots' valency if larger), so a flood of them cannot take it. Ledger peers are untrusted and are dialed only
 // through netguard. See PeerConfig.
 //
 // Local message submission validates a message in order -- already expired,
