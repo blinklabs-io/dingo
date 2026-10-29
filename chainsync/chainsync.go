@@ -214,6 +214,14 @@ type Config struct {
 	// displace a non-root client when every slot is taken, and a freed slot
 	// goes to a connected root first. When nil no connection is a root.
 	IsRoot func(ouroboros.ConnectionId) bool
+	// CanCorroborate reports whether a connection can currently serve as a
+	// Genesis corroboration witness: corroboration is in effect and the peer
+	// has a corroboration identity. Such a peer can displace a client that
+	// cannot corroborate when every eligible slot is taken, because slots held
+	// by identity-less peers cannot make progress while corroboration is in
+	// effect. It must not take locks that are held while calling into State.
+	// When nil no connection is preferred on this basis.
+	CanCorroborate func(ouroboros.ConnectionId) bool
 }
 
 // DefaultConfig returns the default chainsync configuration.
@@ -1037,21 +1045,24 @@ func (s *State) SetClientObservabilityOnly(
 }
 
 // preemptForRootLocked frees one eligible slot for connId when it is a
-// configured root: the longest-idle non-root client that is not the active
-// one becomes observability-only and stays connected. It reports false when
-// connId is not a root or every eligible client is a root or the active one.
+// configured root or, while corroboration is in effect, a corroboration-capable
+// peer: the longest-idle client that is neither a root, nor corroboration
+// capable, nor the active one becomes observability-only and stays connected.
+// It reports false when connId has no such claim or no client can be
+// displaced. Because only a client that is neither can be displaced and
+// neither claim is held by it, displacement cannot cycle.
 // Caller must hold clientConnIdMutex.
 func (s *State) preemptForRootLocked(
 	connId ouroboros.ConnectionId,
 ) (*ClientRemovedEvent, bool) {
-	if s.config.IsRoot == nil || !s.config.IsRoot(connId) {
+	if !s.isRoot(connId) && !s.canCorroborate(connId) {
 		return nil, false
 	}
 	var victim *TrackedClient
 	for id, tc := range s.trackedClients {
 		if tc.ObservabilityOnly ||
 			(s.activeClientConnId != nil && *s.activeClientConnId == id) ||
-			s.config.IsRoot(id) {
+			s.isRoot(id) || s.canCorroborate(id) {
 			continue
 		}
 		if victim == nil || tc.LastActivity.Before(victim.LastActivity) {
@@ -1069,6 +1080,14 @@ func (s *State) preemptForRootLocked(
 		ConnId:       victim.ConnId,
 		TotalClients: s.eligibleClientCountLocked(),
 	}, true
+}
+
+func (s *State) isRoot(connId ouroboros.ConnectionId) bool {
+	return s.config.IsRoot != nil && s.config.IsRoot(connId)
+}
+
+func (s *State) canCorroborate(connId ouroboros.ConnectionId) bool {
+	return s.config.CanCorroborate != nil && s.config.CanCorroborate(connId)
 }
 
 func (s *State) publishClientRemoved(removed *ClientRemovedEvent) {

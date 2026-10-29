@@ -2304,6 +2304,23 @@ func (n *Node) isConfiguredRootConnection(
 	return n.peerGov != nil && n.peerGov.IsConfiguredRootConnection(connId)
 }
 
+// isCorroborationCapableConnection reports whether connId can currently be a
+// Genesis corroboration witness: corroboration is in effect and the peer has a
+// corroboration identity. It is called with the chainsync client lock held, so
+// it reads the selector's lock-free Genesis state rather than taking the
+// selector mutex.
+func (n *Node) isCorroborationCapableConnection(
+	connId ouroboros.ConnectionId,
+) bool {
+	if n.config.genesisCorroborationPeers <= 0 || n.chainSelector == nil {
+		return false
+	}
+	if active, _ := n.chainSelector.GenesisSelectionState(); !active {
+		return false
+	}
+	return n.peerCorroborationIdentityByConnId(connId) != ""
+}
+
 func (n *Node) touchPeerByConnId(connId ouroboros.ConnectionId) {
 	n.peerGovMu.RLock()
 	defer n.peerGovMu.RUnlock()
@@ -2840,6 +2857,7 @@ func (n *Node) chainsyncConfig() chainsync.Config {
 		return active
 	}
 	chainsyncCfg.IsRoot = n.isConfiguredRootConnection
+	chainsyncCfg.CanCorroborate = n.isCorroborationCapableConnection
 	chainsyncCfg.ObservedHeaderLimitFunc = func() int {
 		if n.chainSelector == nil {
 			return 0
