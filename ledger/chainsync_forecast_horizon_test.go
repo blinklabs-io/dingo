@@ -2064,3 +2064,145 @@ func TestAwaitObserverHeaderHorizonHonorsCancellation(t *testing.T) {
 	)
 	require.ErrorIs(t, err, context.Canceled)
 }
+
+// newObserverForkTestLedger returns a ledger whose tip lies above blocks[0] of
+// its primary chain, and an observer header at slot 500_000 built on
+// blocks[0]: a fork whose intersection's forecast does not cover the header,
+// although the tip's does. Each walk of the peer's ancestry consults
+// PeerHeaderLookupFunc once per hop, counted in lookups.
+func newObserverForkTestLedger(
+	t *testing.T,
+) (*LedgerState, *chain.Chain, []lcommon.Block, ChainsyncEvent, *atomic.Int32) {
+	t.Helper()
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	cm, err := chain.NewManager(context.Background(), db, nil)
+	require.NoError(t, err)
+	primary := cm.PrimaryChain()
+	blocks, err := fixtures.GenerateConwayChain(
+		1,
+		lcommon.Blake2b256{},
+		300_000,
+		1_000,
+		2,
+	)
+	require.NoError(t, err)
+	for _, block := range blocks {
+		require.NoError(t, primary.AddBlock(context.Background(), block, nil))
+	}
+	lookups := &atomic.Int32{}
+	cfg := minimalShelleyGenesisCfg(t)
+	ls := &LedgerState{
+		db:    db,
+		chain: primary,
+		epochCache: []models.Epoch{{
+			EpochId:       0,
+			StartSlot:     0,
+			SlotLength:    1_000,
+			LengthInSlots: 432_000,
+			EraId:         eras.ConwayEraDesc.Id,
+		}},
+		currentEra: eras.ConwayEraDesc,
+		currentTip: ochainsync.Tip{
+			Point: ocommon.NewPoint(302_400, []byte("tip")),
+		},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+			PeerHeaderLookupFunc: func(
+				ouroboros.ConnectionId,
+				[]byte,
+			) (ChainsyncEvent, []byte, bool) {
+				lookups.Add(1)
+				return ChainsyncEvent{}, nil, false
+			},
+		},
+	}
+	systemStart := cfg.ShelleyGenesis().SystemStart
+	shape := hardfork.Shape{
+		SystemStart: systemStart,
+		Eras: []hardfork.ShapeEntry{{
+			EraID: eras.ConwayEraDesc.Id,
+			Params: hardfork.EraParams{
+				EpochSize:     432_000,
+				SlotLength:    time.Second,
+				SafeZoneSlots: 129_600,
+				GenesisWindow: 129_600,
+			},
+		}},
+	}
+	ls.cachedShape.Store(&shape)
+	ls.slotClock = NewSlotClock(
+		newSlotTimeConverterProvider(ls.timeConv()),
+		DefaultSlotClockConfig(),
+	)
+	ls.publishSnapshotsLocked()
+
+	const headerSlot = 500_000
+	header := mockHeader{
+		hash:        lcommon.Blake2b256Hash([]byte("observer fork")),
+		prevHash:    blocks[0].Hash(),
+		blockNumber: 3,
+		slot:        headerSlot,
+	}
+	e := ChainsyncEvent{
+		BlockHeader: header,
+		ArrivalTime: systemStart.Add(600_000 * time.Second),
+		Point:       ocommon.NewPoint(headerSlot, header.Hash().Bytes()),
+	}
+	return ls, primary, blocks, e, lookups
+}
+
+// A held observer header wakes on every publication. A publication that leaves
+// it past its fork's forecast horizon must not walk the peer's ancestry again.
+func TestAwaitObserverHeaderHorizonResolvesForkAnchorOnce(t *testing.T) {
+	t.Parallel()
+
+	ls, _, _, e, lookups := newObserverForkTestLedger(t)
+	results := make(chan error, 1)
+	go func() { results <- ls.AwaitObserverHeaderHorizon(t.Context(), e) }()
+	require.Eventually(t, func() bool { return lookups.Load() > 0 },
+		testutil.AsyncWait, time.Millisecond,
+		"the held header's fork anchor was never resolved")
+	testutil.RequireNoReceive(
+		t, results, 100*time.Millisecond,
+		"a fork header past its intersection's forecast must wait",
+	)
+	resolved := lookups.Load()
+	for range 3 {
+		ls.notifySnapshotPublished()
+		testutil.RequireNoReceive(
+			t, results, 50*time.Millisecond,
+			"a publication that leaves the slot past the horizon must keep waiting",
+		)
+	}
+	require.Equal(t, resolved, lookups.Load(),
+		"a wake that cannot release the header must not resolve its anchor again")
+}
+
+// A rollback can withdraw the block a held header's fork anchor rests on, so
+// the next wake resolves the anchor again. Here the rollback leaves the
+// header's parent as the chain tip, which releases it.
+func TestAwaitObserverHeaderHorizonReresolvesAfterRollback(t *testing.T) {
+	t.Parallel()
+
+	ls, primary, blocks, e, lookups := newObserverForkTestLedger(t)
+	results := make(chan error, 1)
+	go func() { results <- ls.AwaitObserverHeaderHorizon(t.Context(), e) }()
+	require.Eventually(t, func() bool { return lookups.Load() > 0 },
+		testutil.AsyncWait, time.Millisecond,
+		"the held header's fork anchor was never resolved")
+	testutil.RequireNoReceive(
+		t, results, 100*time.Millisecond,
+		"a fork header past its intersection's forecast must wait",
+	)
+	require.NoError(t, primary.RollbackUnbounded(
+		t.Context(),
+		ocommon.NewPoint(blocks[0].SlotNumber(), blocks[0].Hash().Bytes()),
+	))
+	ls.notifySnapshotPublished()
+	require.NoError(t, testutil.RequireReceive(
+		t, results, testutil.AsyncWait,
+		"a rollback to the header's parent must release it",
+	))
+}

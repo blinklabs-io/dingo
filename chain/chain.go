@@ -23,6 +23,7 @@ import (
 	"log/slog"
 	"slices"
 	"sync"
+	"sync/atomic"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -72,11 +73,19 @@ type Chain struct {
 	// c.mutex.
 	mutationGeneration       uint64
 	headerMutationGeneration uint64
-	lastCommonBlockIndex     uint64
-	id                       ChainId
-	mutex                    sync.RWMutex
-	waitingChanMutex         sync.Mutex
-	persistent               bool
+	// withdrawalGeneration advances after every operation that removes a
+	// block from the chain or discards queued headers without adding the
+	// block they announced: rollbacks, the restores that undo a failed add,
+	// and header-queue clears. Unlike mutationGeneration it is never
+	// restored, and it is bumped after the change, so a reader that loads it
+	// before consulting chain membership and finds it unchanged later knows
+	// nothing it saw held has been withdrawn since.
+	withdrawalGeneration atomic.Uint64
+	lastCommonBlockIndex uint64
+	id                   ChainId
+	mutex                sync.RWMutex
+	waitingChanMutex     sync.Mutex
+	persistent           bool
 
 	// pendingUpdates is the chain-level sequencer for deferred chain.update
 	// / chain.fork publication. The mutex-holding ledger paths (blockfetch
@@ -206,6 +215,18 @@ func (c *Chain) setHeadersLocked(headers []queuedHeader) {
 		close(c.headerChange)
 		c.headerChange = nil
 	}
+}
+
+// WithdrawalGeneration returns a counter that advances after every operation
+// that removes a block from the chain or discards queued headers without
+// adding their blocks. A caller that reads it before consulting HoldsPoint or
+// HoldsQueuedHeader may reuse a positive answer while it is unchanged; blocks
+// and headers added since are not reflected.
+func (c *Chain) WithdrawalGeneration() uint64 {
+	if c == nil {
+		return 0
+	}
+	return c.withdrawalGeneration.Load()
 }
 
 func (c *Chain) Tip() ochainsync.Tip {
@@ -1314,6 +1335,9 @@ func (c *Chain) addBlockLocked(
 	} else if !matchPendingHeader {
 		discardedHeaders = c.queuedHeaderHashes()
 		c.setHeadersLocked(c.headers[:0])
+		if len(discardedHeaders) > 0 {
+			defer c.withdrawalGeneration.Add(1)
+		}
 	}
 	// Update tip
 	c.currentTip = ochainsync.Tip{
@@ -2172,6 +2196,9 @@ func (c *Chain) rollbackWithMutationBarrierHeld(
 	point ocommon.Point,
 	unbounded bool,
 ) ([]event.Event, error) {
+	// Advanced even when the rollback is refused: a spurious advance only
+	// costs a reader one re-resolution.
+	defer c.withdrawalGeneration.Add(1)
 	// A queued-header rollback does not remove persistent blocks and therefore
 	// must not wait for unrelated caller transactions. Check that case before
 	// waiting; the full check is repeated below after the wait because headers
@@ -2516,6 +2543,9 @@ func (c *Chain) ClearHeaders() {
 	discarded := c.queuedHeaderHashes()
 	hadHeaders := len(discarded) > 0
 	c.setHeadersLocked(c.headers[:0])
+	if hadHeaders {
+		defer c.withdrawalGeneration.Add(1)
+	}
 	// Discarded headers never become blocks, so any announcement they
 	// carried is void, and no rollback is published for them because no
 	// block was ever added. Everything at or below the block tip survives;

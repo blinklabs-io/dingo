@@ -1421,6 +1421,9 @@ type LedgerState struct {
 	// publication, so a reader waiting for the ledger to advance can block
 	// until the published state changes instead of polling it.
 	snapshotPublished atomic.Pointer[chan struct{}]
+	// forkForecastSummaries caches fork-anchored forecast summaries for the
+	// current consensus snapshot. See forecastSummaryFrom.
+	forkForecastSummaries atomic.Pointer[forkForecastSummaries]
 	// txValidationSettled is closed and replaced after every snapshot
 	// publication and every finished validation transition: the two events
 	// that can turn a non-current validation session current again.

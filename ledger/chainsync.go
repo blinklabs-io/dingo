@@ -5448,13 +5448,18 @@ func (ls *LedgerState) AwaitChainsyncHeaderAdmission(
 // headers are never fetched: unlike AwaitChainsyncHeaderAdmission it starts no
 // blockfetch and requests no re-intersection, because the ingress connections
 // advance the horizon and an observer only has to stop reading ahead of it.
+//
+// Every held observer wakes on every publication, so a wake must not walk the
+// peer's ancestry again: the fork anchor is resolved once and reused until the
+// local chain withdraws a block or the ledger tip falls to it.
 func (ls *LedgerState) AwaitObserverHeaderHorizon(
 	ctx context.Context,
 	e ChainsyncEvent,
 ) error {
+	var anchor heldForkAnchor
 	for {
 		published := ls.snapshotPublishedChan()
-		if !ls.headerBeyondForecastHorizon(ctx, e) {
+		if !ls.headerBeyondForecastHorizonFrom(ctx, e, &anchor) {
 			return nil
 		}
 		select {
@@ -5629,6 +5634,29 @@ func (ls *LedgerState) headerBeyondForecastHorizon(
 	ctx context.Context,
 	e ChainsyncEvent,
 ) bool {
+	return ls.headerBeyondForecastHorizonFrom(ctx, e, &heldForkAnchor{})
+}
+
+// heldForkAnchor is one held header's chainsyncForkAnchor result, kept across
+// wakes. A fork anchor sits below the ledger tip on a block the local chain
+// holds and the peer's chain shares, with the local chain's next block off the
+// peer's chain. Only a withdrawal from the local chain can move that
+// intersection, and only a ledger tip at or below it can turn it into the tip
+// anchor, so the result stands until one of the two is observed.
+type heldForkAnchor struct {
+	resolved   bool
+	forked     bool
+	slot       uint64
+	generation uint64
+}
+
+// headerBeyondForecastHorizonFrom is headerBeyondForecastHorizon reusing
+// anchor's resolution while it stands.
+func (ls *LedgerState) headerBeyondForecastHorizonFrom(
+	ctx context.Context,
+	e ChainsyncEvent,
+	anchor *heldForkAnchor,
+) bool {
 	if ls.slotClock == nil || e.BlockHeader == nil {
 		return false
 	}
@@ -5636,16 +5664,33 @@ func (ls *LedgerState) headerBeyondForecastHorizon(
 	if _, err := ls.slotClock.SlotToTime(slot); err != nil {
 		return errors.Is(err, hardfork.ErrPastHorizon)
 	}
-	anchor, ok := ls.chainsyncForkAnchor(ctx, e)
-	if !ok {
+	// Read before resolving, so a withdrawal that overlaps the walk is seen
+	// on the next wake.
+	generation := ls.chain.WithdrawalGeneration()
+	if !anchor.resolved || anchor.generation != generation ||
+		!anchor.belowLedgerTip(ls.loadTipSnapshot()) {
+		anchor.slot, anchor.forked = ls.chainsyncForkAnchor(ctx, e)
+		anchor.resolved = true
+		anchor.generation = generation
+	}
+	if !anchor.forked {
 		return false
 	}
-	summary, err := ls.forecastSummaryFrom(anchor)
+	summary, err := ls.forecastSummaryFrom(anchor.slot)
 	if err != nil {
 		return false
 	}
 	_, err = summary.SlotToEpoch(slot)
 	return errors.Is(err, hardfork.ErrPastHorizon)
+}
+
+// belowLedgerTip reports whether a resolved fork anchor still lies below the
+// ledger tip, as chainsyncForkAnchor requires of one.
+func (a *heldForkAnchor) belowLedgerTip(tip *tipSnapshot) bool {
+	if !a.forked {
+		return true
+	}
+	return tip != nil && a.slot < tip.currentTip.Point.Slot
 }
 
 // chainsyncForkAnchor returns the slot at which the peer chain delivering e
