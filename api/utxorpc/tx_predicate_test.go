@@ -24,8 +24,10 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	cardano "github.com/utxorpc/go-codegen/utxorpc/v1alpha/cardano"
 	submit "github.com/utxorpc/go-codegen/utxorpc/v1alpha/submit"
 	watch "github.com/utxorpc/go-codegen/utxorpc/v1alpha/watch"
@@ -33,6 +35,8 @@ import (
 
 type predicateLookupLedgerStub struct {
 	UtxorpcLedgerState
+	utxo    *models.Utxo
+	err     error
 	lookups int
 }
 
@@ -41,7 +45,7 @@ func (s *predicateLookupLedgerStub) UtxoByRef(
 	uint32,
 ) (*models.Utxo, error) {
 	s.lookups++
-	return nil, errors.New("utxo unavailable")
+	return s.utxo, s.err
 }
 
 // stubLeaf returns predMatch only when the pattern pointer equals pMatch.
@@ -361,13 +365,18 @@ func TestEvalTxPredicate_CycleBecomesUnevaluable(t *testing.T) {
 }
 
 func TestMatchTxPredicateNode_CachesRepeatedInputLookups(t *testing.T) {
-	ledgerState := &predicateLookupLedgerStub{}
-	u := txPatternTestUtxorpc(t)
-	u.config.LedgerState = ledgerState
-	input := &txPatternTestInput{id: lcommon.Blake2b256{0x42}, idx: 3}
-	tx := &txPatternTestTx{consumed: []lcommon.TransactionInput{input}}
+	address := txPatternMustAddr(t, txPatternAddrA)
+	output, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
+		OutputAddress: address,
+		OutputAmount:  1_000_000,
+	})
+	require.NoError(t, err)
 	pattern := &cardano.TxPattern{
-		Consumes: &cardano.TxOutputPattern{},
+		Consumes: &cardano.TxOutputPattern{
+			Address: &cardano.AddressPattern{
+				ExactAddress: txPatternMustAddrBytes(t, txPatternAddrA),
+			},
+		},
 	}
 	predicate := &submit.TxPredicate{
 		AllOf: []*submit.TxPredicate{
@@ -375,15 +384,39 @@ func TestMatchTxPredicateNode_CachesRepeatedInputLookups(t *testing.T) {
 			matchSubmit(pattern),
 		},
 	}
+	tests := []struct {
+		name      string
+		ledger    *predicateLookupLedgerStub
+		wantMatch bool
+	}{
+		{
+			name:   "lookup_error",
+			ledger: &predicateLookupLedgerStub{err: errors.New("utxo unavailable")},
+		},
+		{
+			name:      "successful_lookup",
+			ledger:    &predicateLookupLedgerStub{utxo: &models.Utxo{Cbor: output}},
+			wantMatch: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			u := txPatternTestUtxorpc(t)
+			u.config.LedgerState = test.ledger
+			input := &txPatternTestInput{id: lcommon.Blake2b256{0x42}, idx: 3}
+			tx := &txPatternTestTx{consumed: []lcommon.TransactionInput{input}}
 
-	require.False(
-		t,
-		u.matchTxPredicateNode(tx, txPredicateFromSubmit(predicate)),
-	)
-	if ledgerState.lookups != 1 {
-		t.Fatalf(
-			"repeated predicate leaves performed %d input lookups; want 1",
-			ledgerState.lookups,
-		)
+			require.Equal(
+				t,
+				test.wantMatch,
+				u.matchTxPredicateNode(tx, txPredicateFromSubmit(predicate)),
+			)
+			if test.ledger.lookups != 1 {
+				t.Fatalf(
+					"repeated predicate leaves performed %d input lookups; want 1",
+					test.ledger.lookups,
+				)
+			}
+		})
 	}
 }
