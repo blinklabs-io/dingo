@@ -940,6 +940,15 @@
   # file. The default is 1. Set 0 explicitly only when every configured source
   # is trusted for fork choice (density-only Genesis selection).
   # corroborationPeers: 1
+  # Optional trusted relay operator metadata. All endpoints of an operator must
+  # use one identity. Configured groups form the exclusive Genesis witness set.
+  # Omit for canonical network defaults; [] disables those extra defaults.
+  # controlGroups:
+  #   - identity: operator-one
+  #     accessPoints:
+  #       - address: relay.example.org
+  #         port: 3001
+
   # Genesis Limit on Patience: while Genesis selection is active, disconnect a
   # ChainSync peer that delivers its advertised progress more slowly than
   # limitOnPatienceRate headers per second, beyond a limitOnPatienceCapacity

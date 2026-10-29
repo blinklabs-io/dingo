@@ -1121,7 +1121,8 @@ func (p *PeerGovernor) TouchPeerByConnId(connId ouroboros.ConnectionId) {
 
 // CorroborationIdentityByConnId returns a trusted control identity for the
 // peer holding connId. Address and topology diversity do not prove independent
-// control, so peers without ledger-backed control metadata fail closed.
+// control. Configured control groups form an exclusive witness set; otherwise
+// ledger-backed control metadata is required.
 func (p *PeerGovernor) CorroborationIdentityByConnId(
 	connId ouroboros.ConnectionId,
 ) string {
@@ -1130,6 +1131,9 @@ func (p *PeerGovernor) CorroborationIdentityByConnId(
 	peerIdx := p.peerIndexByConnId(connId)
 	if peerIdx == -1 {
 		return ""
+	}
+	if len(p.config.ControlGroups) > 0 {
+		return p.configuredCorroborationIdentityLocked(p.peers[peerIdx])
 	}
 	return p.peers[peerIdx].CorroborationIdentity
 }
