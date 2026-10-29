@@ -146,3 +146,34 @@ func TestLatestPoolOpCertSequenceZeroIsFound(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, found)
 }
+
+// A Mithril-restored ledger bounds After and InRange by its trust boundary,
+// so on a database without planner statistics the pool_slot range would visit
+// every row the pool minted since the boundary.
+func TestLatestPoolOpCertSequenceBoundedQueriesUseSequenceIndex(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	pool := lcommon.PoolKeyHash{5}
+	for slot := uint64(1); slot <= 50; slot++ {
+		require.NoError(t, store.UpdatePoolOpCertSequence(pool, slot, slot*10, nil))
+	}
+	for name, plan := range map[string]string{
+		"after": opCertQueryPlan(
+			t, store, latestPoolOpCertSequenceAfterSQL,
+			pool.Bytes(), int64(100),
+		),
+		"inRange": opCertQueryPlan(
+			t, store, latestPoolOpCertSequenceInRangeSQL,
+			pool.Bytes(), int64(100), int64(400),
+		),
+	} {
+		require.Contains(
+			t, plan, "idx_pool_opcert_sequence_pool_sequence",
+			"%s plan: %s", name, plan,
+		)
+		require.NotContains(
+			t, plan, "idx_pool_opcert_sequence_pool_slot",
+			"%s plan: %s", name, plan,
+		)
+	}
+}
