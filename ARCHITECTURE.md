@@ -5746,7 +5746,9 @@ delivers to it. Node-to-node peers are still served ahead of the ledger.
 When the applied tip reaches the held block's slot with a different hash, the
 server waits for the iterator's rollback instead, unless the held block is the
 tip's parent: a Byron epoch-boundary block shares its slot with the block after
-it, and the ledger can apply both before the waiter wakes.
+it, and the ledger can apply both before the waiter wakes. If the tip's block
+cannot be read, the server drops the transport so the client re-intersects:
+the applied-slot wait has already returned, so nothing else would wake it.
 
 A specific acquired point is also pinned against pruning
 (`ledger/acquired_point_pins.go`). Acquire calls `LedgerState.PinAcquiredPoint`

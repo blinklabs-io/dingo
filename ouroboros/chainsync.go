@@ -1498,11 +1498,28 @@ func (o *Ouroboros) chainsyncServerAwaitNext(
 				}
 				appliedTip := o.ledgerState.Tip().Point
 				if appliedTip.Slot == next.Point.Slot &&
-					!bytes.Equal(appliedTip.Hash, next.Point.Hash) &&
-					!o.chainsyncServerAppliedParent(appliedTip, next.Point) {
-					// A different block reached the same slot. Wait for the
-					// iterator's rollback event and serve that instead.
-					continue
+					!bytes.Equal(appliedTip.Hash, next.Point.Hash) {
+					isParent, err := o.chainsyncServerAppliedParent(
+						appliedTip,
+						next.Point,
+					)
+					if err != nil {
+						// applied has fired and will not fire again, so
+						// retrying here would park the peer until a rollback
+						// that a same-chain tip never produces.
+						cancel()
+						o.closeChainsyncServerConn(
+							conn,
+							ctx.ConnectionId.String(),
+							fmt.Errorf("resolve applied tip parent: %w", err),
+						)
+						return
+					}
+					if !isParent {
+						// A different block reached the same slot. Wait for
+						// the iterator's rollback event and serve that instead.
+						continue
+					}
 				}
 				cancel()
 				o.chainsyncServerServeAwaited(ctx, conn, next, nextErr)
@@ -1521,16 +1538,31 @@ func (o *Ouroboros) chainsyncServerAwaitNext(
 func (o *Ouroboros) chainsyncServerAppliedParent(
 	appliedTip ocommon.Point,
 	next ocommon.Point,
-) bool {
-	tipBlock, err := o.ledgerState.Chain().BlockByPoint(
+) (bool, error) {
+	prevHash, err := o.chainsyncServerPrevHash(appliedTip)
+	if err != nil {
+		return false, err
+	}
+	return bytes.Equal(prevHash, next.Hash), nil
+}
+
+// chainsyncServerPrevHash returns the previous hash of the block at point on
+// the primary chain.
+func (o *Ouroboros) chainsyncServerPrevHash(
+	point ocommon.Point,
+) ([]byte, error) {
+	if o.chainsyncServerPrevHashFunc != nil {
+		return o.chainsyncServerPrevHashFunc(point)
+	}
+	block, err := o.ledgerState.Chain().BlockByPoint(
 		context.Background(),
-		appliedTip,
+		point,
 		nil,
 	)
 	if err != nil {
-		return false
+		return nil, err
 	}
-	return bytes.Equal(tipBlock.PrevHash, next.Hash)
+	return block.PrevHash, nil
 }
 
 // closeAbandonedChainsyncServerConn drops the transport when the connection is
