@@ -1473,7 +1473,11 @@ func (s *State) recordObservedHeader(
 		s.evictOldestObservedHeaderLocked(chainHistory)
 	}
 	for s.observedHeaderBytes > maxObservedHeaderBytesTotal {
-		s.evictOldestObservedHeaderLocked(s.largestObservedHeaderChainLocked())
+		largest := s.largestObservedHeaderChainLocked()
+		if largest == nil {
+			break
+		}
+		s.evictOldestObservedHeaderLocked(largest)
 	}
 }
 
@@ -1494,10 +1498,15 @@ func (s *State) evictOldestObservedHeaderLocked(
 // largestObservedHeaderChainLocked returns the connection history retaining
 // the most bytes. Trimming the largest history first under total pressure
 // leaves every connection an equal share rather than letting one dense peer
-// evict the others' ancestry. Caller must hold observedHeadersMutex.
+// evict the others' ancestry. It returns nil when no history retains a
+// header, so a caller looping on the total budget cannot spin on an empty
+// map. Caller must hold observedHeadersMutex.
 func (s *State) largestObservedHeaderChainLocked() *observedHeaderChain {
 	var largest *observedHeaderChain
 	for _, chainHistory := range s.observedHeaders {
+		if len(chainHistory.order) == 0 {
+			continue
+		}
 		if largest == nil ||
 			chainHistory.retainedBytes > largest.retainedBytes {
 			largest = chainHistory
