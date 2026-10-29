@@ -2308,13 +2308,31 @@ func (b *Blockfrost) handleAccountAssociatedAddresses(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
-	handlePaginatedAccountRequest(
-		b, w, r, b.node.AccountAssociatedAddresses,
-		func(item AccountAssociatedAddressInfo) AccountAssociatedAddressResponse {
-			return AccountAssociatedAddressResponse(item)
-		},
-		"failed to retrieve account addresses",
+	params, ok := parsePaginationOrWriteError(w, r)
+	if !ok {
+		return
+	}
+	// The page and the total each aggregate the credential's whole
+	// address_transaction history, so the route shares the whole-history scan
+	// pool. Bad pagination is rejected above so it never holds a slot.
+	release, ok := b.admitAddressSummary(w, r)
+	if !ok {
+		return
+	}
+	defer release()
+	items, total, err := b.node.AccountAssociatedAddresses(
+		r.Context(), r.PathValue("stake_address"), params,
 	)
+	if err != nil {
+		b.writeAccountError(w, err, "failed to retrieve account addresses")
+		return
+	}
+	SetPaginationHeaders(w, total, params)
+	resp := make([]AccountAssociatedAddressResponse, len(items))
+	for i, item := range items {
+		resp[i] = AccountAssociatedAddressResponse(item)
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (b *Blockfrost) handleAccountDelegationHistory(
