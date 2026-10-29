@@ -73,6 +73,11 @@ const (
 	// the hold allows. The header was withheld, so the fresh intersection
 	// delivers it again. It is not a peer-fault signal.
 	ChainsyncResyncReasonGenesisCorroborationHoldExpired = "genesis corroboration hold expired"
+	// ChainsyncResyncReasonEagernessWaitExpired re-intersects a connection
+	// whose header stayed past the Limit on Eagerness for the whole bounded
+	// wait. The header was withheld, so the fresh intersection delivers it
+	// again. It is not a peer-fault signal.
+	ChainsyncResyncReasonEagernessWaitExpired = "eagerness wait expired"
 	// ChainsyncResyncReasonIngressPromotion re-intersects an ingress-eligible
 	// client that skipped headers while observing, so normal admission can
 	// replay its complete chain from a safe local intersection.
@@ -127,6 +132,7 @@ func IsLocalChainsyncResyncReason(reason string) bool {
 		ChainsyncResyncReasonFutureHeaderAdmissionRecovery,
 		ChainsyncResyncReasonDisconnectedHeaderAdmission,
 		ChainsyncResyncReasonGenesisCorroborationHoldExpired,
+		ChainsyncResyncReasonEagernessWaitExpired,
 		ChainsyncResyncReasonForecastHorizonNoWork,
 		ChainsyncResyncReasonBehindLocalTip,
 		ChainsyncResyncReasonNetworkIngestReleased,
