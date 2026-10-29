@@ -14,6 +14,8 @@
 
 package models
 
+import "github.com/blinklabs-io/gouroboros/ledger"
+
 type Epoch struct {
 	Nonce         []byte
 	EvolvingNonce []byte
@@ -43,4 +45,14 @@ type Epoch struct {
 	EraId         uint
 	SlotLength    uint
 	LengthInSlots uint
+}
+
+// PointerStakeCountedInEra reports whether stake held at a pointer address
+// counts toward its credential's delegated stake in the era with the given
+// id. Shelley through Babbage resolve the pointer at snapshot time
+// (resolveShelleyInstantStake); the Babbage->Conway translation drops
+// sisPtrStake (Conway/Translation.hs), so Conway and later count none, and
+// Byron has no stake at all.
+func PointerStakeCountedInEra(eraID uint) bool {
+	return eraID >= ledger.EraIdShelley && eraID <= ledger.EraIdBabbage
 }

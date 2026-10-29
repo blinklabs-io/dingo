@@ -4854,13 +4854,19 @@ Only the persist-time capture can resolve that era.
 row and the enactment that decides its era are written in the same transaction,
 so every era lookup it makes resolves the *outgoing* epoch's era whatever
 `boundarySlot` it passes. `CaptureEpochBoundarySnapshot` therefore discards a
-stashed SNAP-point distribution whenever the epoch at `BoundarySlot` runs at a
-different era than the epoch at `SnapshotSlot`, and reconstructs the boundary
+stashed SNAP-point distribution whenever the pointer-stake gate
+(`models.PointerStakeCountedInEra`) answers differently for the era at
+`BoundarySlot` than for the era at `SnapshotSlot`, and reconstructs the boundary
 with `calculateHistoricalBoundaryStakeDistributionInTxn` instead -- by then the
 incoming epoch's row exists, so the gate resolves the era the mark snapshot is
 actually produced under. Without that, the fast path would count pointer stake
 at the Babbage->Conway boundary while the fallback did not, and the two Mark
-capture routes would persist different stake for the same epoch.
+capture routes would persist different stake for the same epoch. An era change
+that leaves the gate unchanged (Shelley->Allegra through Alonzo->Babbage, and
+Conway onward) keeps the stashed read: the historical reconstruction scans
+every delegation and UTxO at the boundary inside the rollover transaction, and
+on mainnet it runs long enough to stall header verification at the last block
+of the outgoing era.
 
 `GetRewardStakeInputsForPools` takes the same `slot`, `expiryEpoch`, and
 `inactivityPeriod` arguments. With the gate off (`expiryEpoch == 0`) it reads the

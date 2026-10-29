@@ -23,7 +23,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
-	ledger "github.com/blinklabs-io/gouroboros/ledger"
 )
 
 // Pointer addresses (types 4 and 5) designate a stake credential by the
@@ -112,11 +111,10 @@ LIMIT 1`,
 	if err != nil {
 		return false, fmt.Errorf("resolve era for slot %d: %w", eraSlot, err)
 	}
-	if !eraID.Valid {
+	if !eraID.Valid || eraID.Int64 < 0 {
 		return false, nil
 	}
-	return eraID.Int64 >= ledger.EraIdShelley &&
-		eraID.Int64 <= ledger.EraIdBabbage, nil
+	return models.PointerStakeCountedInEra(uint(eraID.Int64)), nil
 }
 
 // persistUtxoPointer records the certificate position a pointer address names.
