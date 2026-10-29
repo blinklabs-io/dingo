@@ -641,3 +641,12 @@ func (n *Node) waitChainsyncStallRecycler() {
 	}
 	n.chainsyncStallRecycler.Stop()
 }
+
+// chainsyncHeaderVerificationSettled returns the ledger's settle channel, or
+// nil when no ledger is wired, so a deferred header is parked without a wait.
+func (n *Node) chainsyncHeaderVerificationSettled() <-chan struct{} {
+	if n.ledgerState == nil {
+		return nil
+	}
+	return n.ledgerState.HeaderVerificationSettledChan()
+}

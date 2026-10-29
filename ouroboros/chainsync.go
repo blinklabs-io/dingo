@@ -2226,12 +2226,10 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		var verificationTipBaseline ochainsync.Tip
 		if ingressEligible && shouldVerifyHeader {
 			verificationAttempted = true
-			if o.ledgerState != nil {
-				verificationTipBaseline = o.ledgerState.Tip()
-			}
-			verificationGeneration, verifyErr := o.chainSelectionVerifyHeaderCrypto(
-				ctx.ConnectionId,
+			verificationGeneration, verifyErr := o.verifyHeaderAwaitingLedger(
+				ctx,
 				v,
+				&verificationTipBaseline,
 			)
 			if errors.Is(verifyErr, ledger.ErrHeaderBeyondForecastHorizon) &&
 				o.chainsyncHeaderAdmission != nil {
@@ -2244,12 +2242,10 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				if o.recordHeldChainsyncTip(ctx.ConnectionId, tip) {
 					return ochainsync.ErrStopSyncProcess
 				}
-				if o.ledgerState != nil {
-					verificationTipBaseline = o.ledgerState.Tip()
-				}
-				verificationGeneration, verifyErr = o.chainSelectionVerifyHeaderCrypto(
-					ctx.ConnectionId,
+				verificationGeneration, verifyErr = o.verifyHeaderAwaitingLedger(
+					ctx,
 					v,
+					&verificationTipBaseline,
 				)
 			}
 			if verifyErr == nil {
@@ -2773,6 +2769,93 @@ func (o *Ouroboros) recordHeldChainsyncTip(
 		o.ensureHeldTipRefresher()
 	}
 	return true
+}
+
+// maxDeferredVerificationWaits bounds how many ledger settle signals one
+// header waits out before its deferral is parked for recovery.
+const maxDeferredVerificationWaits = 4
+
+// verifyHeaderAwaitingLedger verifies v for chain selection. A deferred
+// result means local state was not ready (a block-apply commit or snapshot
+// publication in progress, or the published epoch data not yet covering the
+// header's slot), which says nothing about the header. Rather than park the
+// connection for a later re-intersection, which closes it, the callback waits
+// for the ledger's next settle signal and verifies the same header again, as
+// the reference ChainSync client blocks until the ledger view can validate a
+// header. The wait is bounded by catchUpBandWaitTimeout, which stays under the
+// protocol state timers, by maxDeferredVerificationWaits, and by connection
+// close. A header beyond the forecast horizon has its own admission wait and
+// is returned immediately. When a bound is reached the last result is
+// returned unchanged. baseline receives the applied tip observed before the
+// last attempt.
+func (o *Ouroboros) verifyHeaderAwaitingLedger(
+	ctx ochainsync.CallbackContext,
+	header gledger.BlockHeader,
+	baseline *ochainsync.Tip,
+) (uint64, error) {
+	var wait deferredVerificationWait
+	defer wait.close()
+	for waits := 0; ; waits++ {
+		// The channel is taken before the attempt so a publication that lands
+		// during it still wakes the wait.
+		var settled <-chan struct{}
+		if o.config.ChainsyncHeaderVerificationSettled != nil {
+			settled = o.config.ChainsyncHeaderVerificationSettled()
+		}
+		if o.ledgerState != nil {
+			*baseline = o.ledgerState.Tip()
+		}
+		generation, err := o.chainSelectionVerifyHeaderCrypto(
+			ctx.ConnectionId,
+			header,
+		)
+		if err == nil || settled == nil ||
+			!ledger.IsHeaderVerificationDeferred(err) ||
+			errors.Is(err, ledger.ErrHeaderBeyondForecastHorizon) ||
+			waits >= maxDeferredVerificationWaits {
+			return generation, err
+		}
+		if !wait.await(ctx, o.catchUpBandWaitTimeout, settled) {
+			return generation, err
+		}
+	}
+}
+
+// deferredVerificationWait is the bounded context shared by every wait of one
+// header, created on the first wait so a header that verifies pays nothing.
+type deferredVerificationWait struct {
+	ctx    context.Context
+	cancel func()
+}
+
+func (w *deferredVerificationWait) close() {
+	if w.cancel != nil {
+		w.cancel()
+	}
+}
+
+// await blocks until settled closes and reports true, or reports false once
+// the shared bound or the connection ends.
+func (w *deferredVerificationWait) await(
+	cb ochainsync.CallbackContext,
+	bound time.Duration,
+	settled <-chan struct{},
+) bool {
+	if w.ctx == nil {
+		admissionCtx, cancelAdmission := chainsyncAdmissionContext(cb)
+		waitCtx, cancelWait := context.WithTimeout(admissionCtx, bound)
+		w.ctx = waitCtx
+		w.cancel = func() {
+			cancelWait()
+			cancelAdmission()
+		}
+	}
+	select {
+	case <-settled:
+		return true
+	case <-w.ctx.Done():
+		return false
+	}
 }
 
 // awaitCatchUpBand parks the callback while the header overshoots the

@@ -293,6 +293,26 @@ func TestSnapshotPublishedChanClosesOnPublish(t *testing.T) {
 	}
 }
 
+func TestHeaderVerificationSettledChanClosesOnPublish(t *testing.T) {
+	t.Parallel()
+
+	ls := &LedgerState{}
+	settled := ls.HeaderVerificationSettledChan()
+	select {
+	case <-settled:
+		t.Fatal("channel closed before any publication")
+	default:
+	}
+
+	ls.publishSnapshotsLocked()
+	testutil.RequireReceive(
+		t,
+		settled,
+		testutil.AsyncWait,
+		"publication did not close the settle channel obtained before it",
+	)
+}
+
 // The ledger header path must not queue a header past the forecast horizon
 // for blockfetch. It re-intersects the connection instead, so the header is
 // delivered again through admission once the ledger can validate it.

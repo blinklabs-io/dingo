@@ -2589,6 +2589,14 @@ func (ls *LedgerState) txValidationSettledChan() <-chan struct{} {
 	}
 }
 
+// HeaderVerificationSettledChan returns a channel closed by the next snapshot
+// publication or finished validation transition. Callers retrying a deferred
+// header verification obtain it before the attempt, so a publication during
+// the attempt still wakes them.
+func (ls *LedgerState) HeaderVerificationSettledChan() <-chan struct{} {
+	return ls.txValidationSettledChan()
+}
+
 // notifyTxValidationSettled wakes every txValidationSettledChan waiter. It
 // must run after the state change it reports is visible.
 func (ls *LedgerState) notifyTxValidationSettled() {

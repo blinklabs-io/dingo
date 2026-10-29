@@ -613,6 +613,12 @@ type OuroborosConfig struct {
 		connId ouroboros.ConnectionId,
 		observedTip ochainsync.Tip,
 	) error
+	// ChainsyncHeaderVerificationSettled returns a channel closed by the
+	// ledger's next snapshot publication or finished validation transition.
+	// A roll-forward whose header verification is deferred takes it before
+	// each attempt and waits on it, bounded, before verifying the header
+	// again. When nil, a deferred header is parked at once.
+	ChainsyncHeaderVerificationSettled func() <-chan struct{}
 	// ChainsyncAwaitCorroboration holds a roll-forward that ChainsyncApplyEligible
 	// denied, while the denial is only a lack of Genesis corroboration, and
 	// reports whether the header may then be applied. The peer's cursor stays
