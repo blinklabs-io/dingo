@@ -1389,3 +1389,46 @@ func TestLoadPeerSnapshotDoesNotDuplicateUnresolvedTopologyPeer(t *testing.T) {
 	require.True(t, counted,
 		"the retained peer still counts toward the ledger target")
 }
+
+// Not t.Parallel: replaces the package-level DNS resolver.
+//
+// Once bootstrap has exited, a bootstrap peer is no longer dialed, so a
+// snapshot relay it was admitted for needs peers of its own. A topology peer
+// of any other source is still dialed and stays the relay's only peer.
+func TestLoadPeerSnapshotUnresolvedPeerAfterBootstrapExit(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		source    PeerSource
+		wantPeers int
+	}{
+		{"bootstrap peer is dormant", PeerSourceTopologyBootstrapPeer, 3},
+		{"local root is still dialed", PeerSourceTopologyLocalRoot, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			countingResolver(t, nil, nxdomain("relay.example.com"))
+			pg := discardGovernor()
+			pg.config.LedgerPeerTarget = 4
+			require.NoError(t, pg.AddPeer("relay.example.com:3001", tc.source))
+			pg.mu.Lock()
+			pg.bootstrapExited = true
+			pg.mu.Unlock()
+
+			countingResolver(t, []net.IP{
+				net.ParseIP("44.0.0.1"),
+				net.ParseIP("44.0.0.2"),
+			}, nil)
+			pg.LoadPeerSnapshot(context.Background(),
+				&topology.PeerSnapshotConfig{
+					BigLedgerPools: []topology.PeerSnapshotLedgerPool{
+						{Relays: []topology.TopologyConfigP2PAccessPoint{
+							{Address: "relay.example.com", Port: 3001},
+						}},
+					},
+				})
+
+			pg.mu.Lock()
+			defer pg.mu.Unlock()
+			require.Len(t, pg.peers, tc.wantPeers)
+		})
+	}
+}
