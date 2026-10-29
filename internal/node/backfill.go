@@ -45,8 +45,8 @@ const BackfillPhase = "metadata"
 // before deferred metadata rows are flushed.
 const DefaultBackfillBatchSize = 100
 
-// DefaultBackfillBatchRows triggers a backfill flush after a block reaches this
-// many queued metadata rows. A single block may exceed the threshold.
+// DefaultBackfillBatchRows bounds queued metadata rows between flushes. The
+// threshold is checked after each transaction, so one transaction may exceed it.
 const DefaultBackfillBatchRows = 5000
 
 type backfillBatchSizer interface {
@@ -1324,7 +1324,7 @@ func (b *Backfill) computeBlockOffsets(
 }
 
 // processBlockTxsBatched stores transactions into an existing database
-// transaction and accumulates batchable metadata rows for a later flush.
+// transaction and flushes queued metadata rows as their batch fills.
 func (b *Backfill) processBlockTxsBatched(
 	ctx context.Context,
 	txs []lcommon.Transaction,
@@ -1412,6 +1412,21 @@ func (b *Backfill) processBlockTxsBatched(
 					levelIndex,
 					err,
 				)
+			}
+		}
+		if sizer, ok := acc.(backfillBatchSizer); ok &&
+			sizer.Len() >= DefaultBackfillBatchRows {
+			flushStart := time.Now()
+			if err := b.db.FlushBatch(acc, txn); err != nil {
+				return fmt.Errorf(
+					"flushing metadata rows at slot %d tx %d: %w",
+					point.Slot,
+					txIndex,
+					err,
+				)
+			}
+			if stats != nil {
+				stats.FlushBatch += time.Since(flushStart)
 			}
 		}
 	}
