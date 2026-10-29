@@ -22,6 +22,8 @@ import (
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
+	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -54,18 +56,30 @@ func seedStakeDistribution2Pools(
 	for i := range idA {
 		idA[i], idB[i] = 0x11, 0x22
 	}
-	const snapshotEpoch = 0
-	poolA = seedPoolDistr2Fixture(t, ls.db, idA, vrfA, 3_000_000, snapshotEpoch)
-	poolB = seedPoolDistr2Fixture(t, ls.db, idB, vrfB, 1_000_000, snapshotEpoch)
+	poolA = seedLiveStakeFixture(t, ls.db, idA, vrfA, 3_000_000, 1)
+	poolB = seedLiveStakeFixture(t, ls.db, idB, vrfB, 1_000_000, 1)
+	seedLiveTip(t, ls)
 	return poolA, poolB, vrfA, vrfB
 }
 
-// TestQueryShelleyStakeDistribution2_ReportsTheLeaderElectionDistribution
-// covers the query cardano-cli uses from node-to-client version 21, where
-// GetStakeDistribution2 replaces GetStakeDistribution. It is the same pool
-// distribution GetPoolDistr2 reports with no filter, and it must decode into
-// the client's own StakeDistribution2Result.
-func TestQueryShelleyStakeDistribution2_ReportsTheLeaderElectionDistribution(
+// seedLiveTip gives a ledger the epoch and tip the live stake reconstruction
+// resolves its slot and epoch from.
+func seedLiveTip(t *testing.T, ls *LedgerState) {
+	t.Helper()
+	seedEpochs(t, ls, map[uint64]uint64{0: 0})
+	tipHash := bytes.Repeat([]byte{0xEF}, 32)
+	seedBlockAtSlot(t, ls, 1, tipHash)
+	require.NoError(t, ls.db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(1, tipHash),
+	}, nil))
+}
+
+// TestQueryShelleyStakeDistribution2_ReportsTheLiveDistribution covers the
+// query cardano-cli uses from node-to-client version 21, where
+// GetStakeDistribution2 replaces GetStakeDistribution. It reports the live
+// pool distribution GetStakeDistribution reports, and it must decode into the
+// client's own StakeDistribution2Result.
+func TestQueryShelleyStakeDistribution2_ReportsTheLiveDistribution(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -73,6 +87,23 @@ func TestQueryShelleyStakeDistribution2_ReportsTheLeaderElectionDistribution(
 	db := newTestDB(t)
 	ls := newPoolDistr2Ledger(t, db)
 	poolA, poolB, vrfA, vrfB := seedStakeDistribution2Pools(t, ls)
+	// Circulation is pinned to the 4_000_000 the pools hold (nothing in
+	// reserves) so the fractions sum to one. Without genesis,
+	// totalCirculatingSupply falls back to the mark snapshot's total, which
+	// is unrelated to the live numerator.
+	cfg := &cardano.CardanoNodeConfig{
+		ShelleyGenesisHash: strings.Repeat("11", 32),
+	}
+	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(`{
+		"activeSlotsCoeff": 0.1,
+		"epochLength": 100,
+		"maxLovelaceSupply": 4000000,
+		"securityParam": 10,
+		"slotLength": 1,
+		"systemStart": "2022-10-25T00:00:00Z"
+	}`)))
+	require.NoError(t, db.Metadata().SetNetworkState(0, 0, 1, nil))
+	ls.config.CardanoNodeConfig = cfg
 
 	result, err := ls.Query(t.Context(), stakeDistribution2Query(), QueryPoint{})
 	require.NoError(t, err)
@@ -133,9 +164,10 @@ func TestQueryShelleyStakeDistribution2_ViaGetCBOR(t *testing.T) {
 	assert.Equal(t, uint64(4_000_000), decoded.TotalActiveStake)
 }
 
-// newHalfDelegatedLedger seeds two pools holding 1_000_000 each in the mark
-// snapshot of a network whose circulation (8_000_000 maximum supply minus
-// 4_000_000 reserves) is twice what the pools hold delegated between them.
+// newHalfDelegatedLedger seeds two pools holding 1_000_000 each, both live
+// and in the mark snapshot, on a network whose circulation (8_000_000 maximum
+// supply minus 4_000_000 reserves) is twice what the pools hold delegated
+// between them.
 func newHalfDelegatedLedger(
 	t *testing.T,
 	db *database.Database,
@@ -149,6 +181,12 @@ func newHalfDelegatedLedger(
 	pkhB := seedPoolDistr2Fixture(
 		t, db, repeatedBytes(28, 0xBB), repeatedBytes(32, 0x02),
 		1_000_000, snapshotEpoch,
+	)
+	seedLiveStakeFixture(
+		t, db, repeatedBytes(28, 0xAA), repeatedBytes(32, 0x01), 1_000_000, 1,
+	)
+	seedLiveStakeFixture(
+		t, db, repeatedBytes(28, 0xBB), repeatedBytes(32, 0x02), 1_000_000, 1,
 	)
 	cfg := &cardano.CardanoNodeConfig{
 		ShelleyGenesisHash: strings.Repeat("11", 32),
@@ -224,4 +262,128 @@ func TestQueryShelleyPoolDistr2_FractionStaysOverDelegatedStake(t *testing.T) {
 			entry.StakeFraction.Rat)
 	}
 	assert.Equal(t, uint64(2_000_000), distr.TotalActiveStake)
+}
+
+// newLiveVersusMarkLedger seeds a ledger whose live stake disagrees with its
+// mark snapshot. The mark snapshot holds pools A and B at 1_000_000 each.
+// Live state has A at 3_000_000, B at 1_000_000, C at 2_000_000 (registered
+// after the snapshot, so absent from it), and D registered with nothing
+// delegated. Circulation is 16_000_000 maximum supply minus 4_000_000
+// reserves.
+func newLiveVersusMarkLedger(
+	t *testing.T,
+	db *database.Database,
+) (ls *LedgerState, pkhA, pkhB, pkhC, pkhD lcommon.PoolKeyHash) {
+	t.Helper()
+	const snapshotEpoch = 0
+	idA, vrfA := repeatedBytes(28, 0xA1), repeatedBytes(32, 0x01)
+	idB, vrfB := repeatedBytes(28, 0xB2), repeatedBytes(32, 0x02)
+	idC, vrfC := repeatedBytes(28, 0xC3), repeatedBytes(32, 0x03)
+	idD, vrfD := repeatedBytes(28, 0xD4), repeatedBytes(32, 0x04)
+	pkhA = seedPoolDistr2Fixture(t, db, idA, vrfA, 1_000_000, snapshotEpoch)
+	pkhB = seedPoolDistr2Fixture(t, db, idB, vrfB, 1_000_000, snapshotEpoch)
+	seedLiveStakeFixture(t, db, idA, vrfA, 3_000_000, 1)
+	seedLiveStakeFixture(t, db, idB, vrfB, 1_000_000, 1)
+	pkhC = seedLiveStakeFixture(t, db, idC, vrfC, 2_000_000, 1)
+	pkhD = lcommon.PoolKeyHash(lcommon.NewBlake2b224(idD))
+	require.NoError(t, db.ImportPool(
+		t.Context(),
+		nil,
+		&models.Pool{PoolKeyHash: pkhD.Bytes(), VrfKeyHash: vrfD},
+		&models.PoolRegistration{
+			PoolKeyHash: pkhD.Bytes(),
+			VrfKeyHash:  vrfD,
+			AddedSlot:   1,
+			Pledge:      dbtypes.Uint64(1),
+			Cost:        dbtypes.Uint64(1),
+		},
+	))
+	cfg := &cardano.CardanoNodeConfig{
+		ShelleyGenesisHash: strings.Repeat("11", 32),
+	}
+	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(`{
+		"activeSlotsCoeff": 0.1,
+		"epochLength": 100,
+		"maxLovelaceSupply": 16000000,
+		"securityParam": 10,
+		"slotLength": 1,
+		"systemStart": "2022-10-25T00:00:00Z"
+	}`)))
+	require.NoError(t, db.Metadata().SetNetworkState(0, 4_000_000, 1, nil))
+	ls = newPoolDistr2Ledger(t, db)
+	ls.config.CardanoNodeConfig = cfg
+	seedEpochs(t, ls, map[uint64]uint64{0: 0})
+	tipHash := bytes.Repeat([]byte{0xEF}, 32)
+	seedBlockAtSlot(t, ls, 1, tipHash)
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(1, tipHash),
+	}, nil))
+	return ls, pkhA, pkhB, pkhC, pkhD
+}
+
+// TestQueryShelleyStakeDistribution2_ReadsLiveStakeNotMarkSnapshot pins the
+// numerator and the reply total to live stake. cardano-node answers
+// GetStakeDistribution2 with poolsByTotalStakeFraction, which reads
+// currentSnapshot (instant stake and current delegations), not an epoch
+// snapshot, so a pool's within-epoch stake change and a pool first delegated
+// after the mark snapshot both show up immediately.
+func TestQueryShelleyStakeDistribution2_ReadsLiveStakeNotMarkSnapshot(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	ls, pkhA, pkhB, pkhC, pkhD := newLiveVersusMarkLedger(t, db)
+
+	result, err := ls.Query(t.Context(), stakeDistribution2Query(), QueryPoint{})
+	require.NoError(t, err)
+	distr := decodePoolDistr2Result(t, result)
+
+	want := map[lcommon.PoolKeyHash]struct {
+		stake    uint64
+		fraction *big.Rat
+	}{
+		pkhA: {3_000_000, big.NewRat(3, 12)},
+		pkhB: {1_000_000, big.NewRat(1, 12)},
+		pkhC: {2_000_000, big.NewRat(2, 12)},
+	}
+	require.Len(t, distr.Pools, len(want))
+	for pkh, w := range want {
+		entry, ok := distr.Pools[lcommon.PoolId(pkh)]
+		require.True(t, ok, "pool %x missing", pkh.Bytes())
+		assert.Equal(t, w.stake, entry.TotalPoolStake)
+		require.NotNil(t, entry.StakeFraction)
+		assert.Zero(t, entry.StakeFraction.Cmp(w.fraction),
+			"pool %x: want %s, got %s", pkh.Bytes(), w.fraction,
+			entry.StakeFraction.Rat)
+	}
+	_, ok := distr.Pools[lcommon.PoolId(pkhD)]
+	assert.False(t, ok, "a pool with no delegated stake is not reported")
+	assert.Equal(t, uint64(6_000_000), distr.TotalActiveStake)
+}
+
+// TestQueryShelleyStakeDistribution_OmitsPoolWithNoDelegatedStake pins that
+// GetStakeDistribution, like GetStakeDistribution2, leaves out a registered
+// pool holding no delegated stake. calculatePoolDistr keeps only pools with
+// at least one delegator in the snapshot's active stake, and active stake
+// holds only non-zero balances.
+func TestQueryShelleyStakeDistribution_OmitsPoolWithNoDelegatedStake(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	ls, pkhA, pkhB, pkhC, pkhD := newLiveVersusMarkLedger(t, db)
+
+	result, err := ls.Query(t.Context(), stakeDistributionQuery(), QueryPoint{})
+	require.NoError(t, err)
+	dist := decodeStakeDistributionResult(t, result)
+
+	require.Len(t, dist.Results, 3)
+	for _, pkh := range []lcommon.PoolKeyHash{pkhA, pkhB, pkhC} {
+		_, ok := dist.Results[lcommon.PoolId(pkh)]
+		assert.True(t, ok, "pool %x missing", pkh.Bytes())
+	}
+	_, ok := dist.Results[lcommon.PoolId(pkhD)]
+	assert.False(t, ok, "a pool with no delegated stake is not reported")
 }

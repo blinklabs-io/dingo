@@ -16,7 +16,6 @@ package ledger
 
 import (
 	"context"
-	"math/big"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -131,13 +130,12 @@ func (ls *LedgerState) queryShelleyPoolDistr(
 }
 
 // queryShelleyStakeDistribution2 answers GetStakeDistribution2, which replaces
-// GetStakeDistribution from node-to-client protocol version 21. Pools, stakes
-// and VRF keys come from the same PoolStakeDistribution read as GetPoolDistr2,
-// so both agree about the snapshot.
-//
-// Unlike GetPoolDistr2, each StakeFraction is taken over total circulating
-// supply rather than over the sum of delegated stake, matching cardano-node's
-// poolsByTotalStakeFraction. The reply's total remains TotalActiveStake.
+// GetStakeDistribution from node-to-client protocol version 21. cardano-node
+// answers both from poolsByTotalStakeFraction, so this reads the same live
+// reconstruction as queryShelleyStakeDistribution -- not the mark snapshot
+// GetPoolDistr2 reads -- and takes each StakeFraction over total circulating
+// supply. Unlike GetStakeDistribution, the reply also carries each pool's
+// stake and the total delegated stake across the reported pools.
 //
 // Client.GetStakeDistribution2 decodes the reply into a StakeDistribution2Result,
 // a one-field struct around the distribution, so the result is a one-element
@@ -147,25 +145,20 @@ func (ls *LedgerState) queryShelleyStakeDistribution2(
 	at QueryPoint,
 	txn *database.Txn,
 ) (any, error) {
-	dist, err := ls.PoolStakeDistribution(ctx, nil, at, txn)
+	live, err := ls.liveStakeDistribution(ctx, at, txn)
 	if err != nil {
 		return nil, err
 	}
 	pools := make(
 		map[ledger.PoolId]olocalstatequery.IndividualPoolStake,
-		len(dist.Pools),
+		len(live.pools),
 	)
-	circulation := new(big.Int).SetUint64(dist.TotalCirculatingSupply)
-	for _, pool := range dist.Pools {
-		fraction := new(big.Rat).SetFrac(
-			new(big.Int).SetUint64(pool.Stake),
-			circulation,
-		)
-		pools[ledger.PoolId(pool.PoolKeyHash)] = olocalstatequery.IndividualPoolStake{
-			StakeFraction:  &cbor.Rat{Rat: fraction},
-			TotalPoolStake: pool.Stake,
-			VrfHash:        pool.VrfKeyHash,
+	for _, pool := range live.pools {
+		pools[ledger.PoolId(pool.poolKeyHash)] = olocalstatequery.IndividualPoolStake{
+			StakeFraction:  live.fraction(pool.stake),
+			TotalPoolStake: pool.stake,
+			VrfHash:        pool.vrfKeyHash,
 		}
 	}
-	return []any{[]any{pools, dist.TotalActiveStake}}, nil
+	return []any{[]any{pools, live.totalActiveStake}}, nil
 }

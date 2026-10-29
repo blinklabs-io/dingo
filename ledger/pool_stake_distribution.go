@@ -212,10 +212,9 @@ type PoolStakeDistribution struct {
 	TotalActiveStake uint64
 	// TotalCirculatingSupply is genesis MaxLovelaceSupply minus the live
 	// reserves pot, clamped the same way as TotalActiveStake. It is a
-	// different total from TotalActiveStake: GetStakeDistribution2 takes its
-	// per-pool fractions over it, while GetPoolDistr2 reports each
-	// PoolStakeShare.StakeFraction, which is over TotalActiveStake. See
-	// totalCirculatingSupply's doc comment for why the two differ.
+	// different total from TotalActiveStake -- see totalCirculatingSupply's
+	// doc comment for why GetStakeDistribution, and only GetStakeDistribution,
+	// needs this one instead.
 	TotalCirculatingSupply uint64
 	// Pools is ordered by PoolKeyHash. Callers that place this in a repeated
 	// protobuf field or any other ordered encoding depend on that: without it
