@@ -546,8 +546,15 @@ func (p *PeerGovernor) addResolvedLedgerPeerContext(
 		if peer == nil {
 			continue
 		}
+		// A peer retained under the relay's own name because resolution failed
+		// when it was admitted has that name as its NormalizedAddress. The
+		// candidate is then one of the addresses the name now expands to, so
+		// it is the same relay and must not be added beside the peer. A peer
+		// that did resolve holds an address instead, and keeps admitting the
+		// name's other addresses.
 		if peer.NormalizedAddress == normalized ||
 			peer.NormalizedAddress == hostnameNormalized ||
+			peer.NormalizedAddress == relayNormalized ||
 			p.normalizeAddress(peer.Address) == hostnameNormalized {
 			existingPeer = peer
 			break

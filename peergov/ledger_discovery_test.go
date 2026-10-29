@@ -1346,3 +1346,46 @@ func TestLoadPeerSnapshotDeniedHostnameSkipsResolution(t *testing.T) {
 	require.Empty(t, pg.peers)
 	require.Zero(t, calls.Load())
 }
+
+// Not t.Parallel: replaces the package-level DNS resolver.
+//
+// A topology relay whose name could not be resolved when it was admitted is
+// retained under that name. When the same relay later expands from the
+// snapshot into addresses, the retained peer is that relay and must not be
+// joined by one new peer per address.
+func TestLoadPeerSnapshotDoesNotDuplicateUnresolvedTopologyPeer(t *testing.T) {
+	countingResolver(t, nil, nxdomain("relay.example.com"))
+	pg := discardGovernor()
+	pg.config.LedgerPeerTarget = 4
+	// Mixed case: the retained name and the snapshot's must still match.
+	require.NoError(t, pg.AddPeer(
+		"Relay.Example.COM:3001", PeerSourceTopologyBootstrapPeer,
+	))
+	require.Len(t, pg.peers, 1)
+	require.Equal(t, "relay.example.com:3001", pg.peers[0].NormalizedAddress,
+		"the unresolved peer is retained under its name")
+
+	// The name resolves by the time the snapshot is loaded.
+	countingResolver(t, []net.IP{
+		net.ParseIP("44.0.0.1"),
+		net.ParseIP("44.0.0.2"),
+	}, nil)
+	snapshot := &topology.PeerSnapshotConfig{
+		BigLedgerPools: []topology.PeerSnapshotLedgerPool{
+			{Relays: []topology.TopologyConfigP2PAccessPoint{
+				{Address: "relay.example.com", Port: 3001},
+			}},
+		},
+	}
+	pg.LoadPeerSnapshot(context.Background(), snapshot)
+
+	pg.mu.Lock()
+	defer pg.mu.Unlock()
+	require.Len(t, pg.peers, 1,
+		"the relay must stay a single peer, not one per resolved address")
+	require.Equal(t, "Relay.Example.COM:3001", pg.peers[0].Address)
+	require.True(t, pg.peers[0].Source == PeerSourceTopologyBootstrapPeer)
+	_, counted := pg.ledgerKnownAddrs[pg.normalizeAddress(pg.peers[0].Address)]
+	require.True(t, counted,
+		"the retained peer still counts toward the ledger target")
+}
