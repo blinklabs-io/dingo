@@ -84,9 +84,11 @@ The three SQL tools, `get_asset_info`, `get_utxos_by_asset`, and raw-credential
 slots are occupied. While the metadata SQLite `-wal` file
 exceeds 128 MiB, every tool call and resource read fails until the WAL is back
 under that size, so MCP reads cannot hold the snapshot that blocks the periodic
-TRUNCATE checkpoint. SQLite rejects values over 64 KiB and result sets over 32
-columns before Go materializes them; `sqlite_query` stops after 1 MiB of decoded
-cell data.
+TRUNCATE checkpoint. Caller-supplied SQL (`sqlite_query`, `sqlite_explain`)
+also counts against a two-slot sub-budget inside those four slots, so it can
+never take the slots the built-in tools rely on. SQLite rejects values over
+64 KiB and result sets over 32 columns before Go materializes them;
+`sqlite_query` stops after 1 MiB of decoded cell data.
 
 ### 3.2 Cardano Domain Tools (`tools_cardano.go`, `tools_cardano_extended.go`)
 
