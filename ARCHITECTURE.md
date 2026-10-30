@@ -689,10 +689,13 @@ never cancelled by a switch.
 Batch accumulation has a one-second maximum wait for the exact admitted queue
 head. Further headers keep its first deadline, so slow authentication or a
 quiet stream cannot indefinitely strand a partial batch. Expiry fetches only
-headers already in the authorized queue and only through the current selected
-live peer; it does not admit a new header, advance LoE, or bypass validation.
-An empty or replaced queue, missing selection, active fetch, canceled context,
-or closed ledger makes the callback a no-op. Queue clearing, normal dispatch,
+headers already in the authorized queue, through the current selected peer or,
+when selection is empty after a selected-to-none transition, through the header
+pipeline owner; it does not admit a new header, advance LoE, or bypass
+validation. Because the deadline is one-shot, a no-op at expiry with no selected
+peer would leave a quiet queue below the batch threshold with nothing to fetch
+it. An empty or replaced queue, a fetch peer that is no longer live, an active
+fetch, a canceled context, or a closed ledger makes the callback a no-op. Queue clearing, normal dispatch,
 and Close cancel the deadline. The existing tracked continuation owns network
 work and shutdown draining; the timer does not own a separate network worker.
 
