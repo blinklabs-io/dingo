@@ -45,14 +45,13 @@ const BackfillPhase = "metadata"
 // backfill transaction.
 const DefaultBackfillBatchSize = 200
 
-// DefaultBackfillBatchRows bounds queued metadata rows between flushes. The
-// threshold is checked after each transaction level, so one level may exceed it.
+// DefaultBackfillBatchRows bounds queued metadata rows. Backfill also applies
+// the limit while a transaction level is staged.
 const DefaultBackfillBatchRows = 5000
 
-// DefaultBackfillBatchBytes bounds the estimated backfill payload accumulated
-// by one SQL transaction. The limit is checked after each transaction level
-// and committed at block boundaries, so the level or block that crosses it may
-// exceed the threshold.
+// DefaultBackfillBatchBytes bounds estimated payload accumulated by one SQL
+// transaction and the temporary row buffer. SQL transactions commit only at
+// block boundaries, so one block can exceed the transaction estimate.
 const DefaultBackfillBatchBytes int64 = 32 * 1024 * 1024
 
 type backfillBatchSizer interface {
@@ -61,6 +60,13 @@ type backfillBatchSizer interface {
 
 type backfillBatchByteSizer interface {
 	EstimatedSizeBytes() int64
+}
+
+type backfillBatchLimitSetter interface {
+	SetBackfillBatchLimitCallbacks(
+		func() (int64, int),
+		func(int64),
+	)
 }
 
 func backfillBatchLimitReached(
@@ -1034,6 +1040,16 @@ func (b *Backfill) Run(ctx context.Context) error {
 	acc := b.db.NewBatchAccumulator()
 	if tracker, ok := acc.(interface{ EnableSizeTracking() }); ok {
 		tracker.EnableSizeTracking()
+	}
+	if limiter, ok := acc.(backfillBatchLimitSetter); ok {
+		limiter.SetBackfillBatchLimitCallbacks(
+			func() (int64, int) {
+				return DefaultBackfillBatchBytes, DefaultBackfillBatchRows
+			},
+			func(bytes int64) {
+				b.batchTxnEstimatedBytes += bytes
+			},
+		)
 	}
 	var batchTxn *database.Txn
 	defer func() {

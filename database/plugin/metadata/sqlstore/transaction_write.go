@@ -55,9 +55,11 @@ func transactionFee(transaction lcommon.Transaction) types.Uint64 {
 // (and therefore to one caller transaction), because database/sql statements
 // prepared on a transaction must not escape it.
 type transactionBatchAccumulator struct {
-	leiosAPIRowsOnly  bool
-	transactionInsert *sql.Stmt
-	mysql             bool
+	leiosAPIRowsOnly     bool
+	transactionInsert    *sql.Stmt
+	mysql                bool
+	backfillBatchLimits  func() (int64, int)
+	backfillBatchFlushed func(int64)
 	// sqlOperations is the same counter instrumentedQueryer increments for
 	// every other query path (see metrics.go); nil when Config.PromRegistry
 	// was nil. insertTransaction executes transactionInsert directly against
@@ -622,6 +624,16 @@ func (a *transactionBatchAccumulator) EnableSizeTracking() {
 	a.rows.enableSizeTracking()
 }
 
+// SetBackfillBatchLimitCallbacks lets API backfill bound temporary detail
+// rows and account for rows flushed into its open SQL transaction.
+func (a *transactionBatchAccumulator) SetBackfillBatchLimitCallbacks(
+	remaining func() (int64, int),
+	flushed func(int64),
+) {
+	a.backfillBatchLimits = remaining
+	a.backfillBatchFlushed = flushed
+}
+
 func (s *Store) NewBatchAccumulator() types.MetadataBatchAccumulator {
 	return &transactionBatchAccumulator{sqlOperations: s.sqlOperations}
 }
@@ -949,6 +961,24 @@ func (s *Store) setTransactionWithAccumulator(
 	err := s.withWriteTransaction(
 		txn,
 		func(db queryer, ctx context.Context) error {
+			if historicalBackfill && txn != nil &&
+				batchedAccumulator != nil &&
+				batchedAccumulator.backfillBatchLimits != nil {
+				staged.enableSizeTracking()
+				maxBytes, maxRows :=
+					batchedAccumulator.backfillBatchLimits()
+				staged.setFlushLimit(
+					maxBytes,
+					maxRows,
+					func() error {
+						return staged.flush(
+							ctx, db, s.dialect.ParameterLimit(),
+						)
+					},
+					batchedAccumulator.backfillBatchFlushed,
+					batchedAccumulator.backfillBatchLimits,
+				)
+			}
 			var (
 				collateralFee uint64
 				err           error
@@ -1368,6 +1398,11 @@ func (s *Store) setTransactionWithAccumulator(
 			)
 		},
 	)
+	if err == nil && staged.flushErr != nil {
+		err = fmt.Errorf(
+			"flushing bounded metadata rows: %w", staged.flushErr,
+		)
+	}
 	if err != nil || batchedAccumulator == nil {
 		return err
 	}
