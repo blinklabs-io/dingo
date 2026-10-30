@@ -950,6 +950,90 @@ func TestTransactionBatchAccumulatorLen(t *testing.T) {
 	)
 }
 
+func TestRowBatchFlushesWithinBackfillLimits(t *testing.T) {
+	t.Parallel()
+
+	t.Run("row count", func(t *testing.T) {
+		t.Parallel()
+
+		var batch rowBatch
+		batch.enableSizeTracking()
+		var flushes []int
+		batch.setFlushLimit(
+			10_000,
+			2,
+			func() error {
+				flushes = append(flushes, batch.rowCount)
+				batch.clearRows()
+				return nil
+			},
+			nil,
+			func() (int64, int) { return 10_000, 2 },
+		)
+
+		batch.add(witnessScriptShape, []byte{0x01}, int64(1), 0)
+		batch.add(witnessScriptShape, []byte{0x02}, int64(1), 0)
+		batch.add(witnessScriptShape, []byte{0x03}, int64(1), 0)
+
+		require.Equal(t, []int{2}, flushes)
+		require.Equal(t, 1, batch.rowCount)
+	})
+
+	t.Run("estimated bytes", func(t *testing.T) {
+		t.Parallel()
+
+		var batch rowBatch
+		batch.enableSizeTracking()
+		var flushes []int64
+		batch.setFlushLimit(
+			200,
+			10,
+			func() error {
+				flushes = append(flushes, batch.EstimatedSizeBytes())
+				batch.clearRows()
+				return nil
+			},
+			func(size int64) { flushes[len(flushes)-1] = size },
+			func() (int64, int) { return 200, 10 },
+		)
+
+		batch.add(witnessScriptShape, []byte{0x01}, int64(1), 0)
+		batch.add(witnessScriptShape, []byte{0x02}, int64(1), 0)
+		batch.add(witnessScriptShape, []byte{0x03}, int64(1), 0)
+
+		require.Equal(t, []int64{145, 145}, flushes)
+		require.Equal(t, 1, batch.rowCount)
+	})
+
+	t.Run("single oversized row", func(t *testing.T) {
+		t.Parallel()
+
+		var batch rowBatch
+		batch.enableSizeTracking()
+		var flushedBytes int64
+		batch.setFlushLimit(
+			100,
+			10,
+			func() error {
+				batch.clearRows()
+				return nil
+			},
+			func(size int64) { flushedBytes += size },
+			func() (int64, int) { return 100, 10 },
+		)
+
+		batch.add(
+			witnessScriptShape,
+			make([]byte, 50),
+			int64(1),
+			0,
+		)
+
+		require.Greater(t, flushedBytes, int64(100))
+		require.Zero(t, batch.rowCount)
+	})
+}
+
 // feelessTransaction stands in for a transaction body whose Fee is nil, which
 // is what TransactionBodyBase returns for any body that does not override it --
 // the synthetic transaction carrying imported certificates among them. Fee is

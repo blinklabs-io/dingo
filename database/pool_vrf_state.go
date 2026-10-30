@@ -1,0 +1,55 @@
+// Copyright 2025 Blink Labs Software
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package database
+
+import (
+	"context"
+
+	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+)
+
+type poolVrfStateStore interface {
+	GetPoolVrfState(lcommon.PoolKeyHash, types.Txn) (*models.Pool, error)
+}
+
+// GetPoolVrfState reads the fields needed to resolve a pool's current VRF key.
+// Only PoolKeyHash, VrfKeyHash and the latest Registration's VrfKeyHash are
+// guaranteed. Inactive pools are included; a pool with no registrations stays
+// distinct from one whose latest registration has an empty VRF key hash.
+// Providers without the optional projection use GetPool with associations.
+func (d *Database) GetPoolVrfState(
+	ctx context.Context,
+	pkh lcommon.PoolKeyHash,
+	txn *Txn,
+) (*models.Pool, error) {
+	store, ok := d.metadata.(poolVrfStateStore)
+	if !ok {
+		return d.GetPool(ctx, pkh, true, txn)
+	}
+	if txn == nil {
+		txn = d.Transaction(ctx, false)
+		defer txn.Release()
+	}
+	pool, err := store.GetPoolVrfState(pkh, txn.Metadata())
+	if err != nil {
+		return nil, err
+	}
+	if pool == nil {
+		return nil, models.ErrPoolNotFound
+	}
+	return pool, nil
+}

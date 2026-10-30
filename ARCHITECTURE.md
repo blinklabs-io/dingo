@@ -7398,6 +7398,15 @@ active or while corroboration is incomplete.
 
 When full-block header verification needs an epoch nonce that is not cached yet, blockfetch first flushes already-received predecessor blocks from the pending batch into the primary chain, then `ensureEpochForSlot` may forecast the nonce only within the cache tail's era. A confirmed transition or configured epoch trigger stops that forecast at the hard-fork boundary and defers verification without penalizing the peer, except for a direct child of the applied tip: that header is verified against an immutable successor-era forecast (successor-era epoch parameters and nonce built without publishing them or mutating the shared epoch cache), and a predecessor-era header cannot use it. The full ledger rollover remains the only path that publishes successor-era parameters and rotates snapshots. Chainsync-header VRF/KES/opcert crypto verification runs only when the header's epoch nonce is already present in the in-memory epoch cache, so headers beyond that window are queued as unverified until blockfetch. The chain header queue records, per queued header, whether its stateless crypto was verified; blockfetch skips that duplicate stateless work when the fetched block's own queued header, matched by slot and hash, is marked verified. Fetched blocks wait in the pending batch before insertion, so that header is usually queued behind the head, and matching only the head would re-run the crypto for every later block in the batch. The skip is sound because the block hash is the hash of the header bytes, and chain insertion still requires the block to match the queue head. The stateful header checks (registered VRF key binding and Praos leader-stake eligibility) still run on the fetched full block. If those stateful facts are ahead of the ledger apply cursor — for example a pool registration or epoch mark snapshot is in predecessor/endorser data that blockfetch has seen but `ledgerProcessBlock` has not applied yet — blockfetch records that block point for deferred validation rather than recycling the peer. The marker is both in memory and durable as a `dh` blob key before the block is inserted, so a restart cannot replay the persisted block without the pending stateful check. It is a blob write rather than a `sync_state` row because the blockfetch handler writes it, and a `sync_state` write waits for the single SQLite write connection that a block-apply transaction holds for its whole length. `ledgerProcessBlock` consults that marker, and any legacy `sync_state` marker, even if normal replay validation is disabled, replays the deferred stateful check strictly after referenced Leios endorser-block metadata is processed and before the ranking block's own transactions are applied, then deletes the blob marker once the apply transaction commits, so a rolled-back apply leaves the check pending.
 
+Current-key VRF authorization reads `Database.GetPoolVrfState`, an optional
+metadata projection with a full-pool fallback for existing providers. The SQL
+stores fetch only the pool-row key and the latest registration's key in one
+query. The ledger's existing registration selection and malformed-hash checks
+remain authoritative; a pool without registrations is still unavailable even
+when its denormalized key is populated. Historical snapshot authorization keeps
+its cutoff, capture, and Mithril-specific reads. No stateful authorization
+verdict is cached or skipped when verifying retained peer ancestors.
+
 When candidate-chain header verification cannot resolve a peer fork's OpCert ancestry, Ouroboros retains the bounded per-connection headers with verification generation zero. Zero marks raw ancestry, not a successful crypto verdict. A deferred fork that does not extend the local chain stays out of peer cursors, deduplication, chain selection, and ledger ingress. A descendant may use those raw entries only as candidate-path input: the ledger must link the full path to a local anchor and revalidate every header against the current candidate state before caching a verdict. If the path cannot reach an anchor, verification remains deferred.
 
 #### Deferred Header Validation Bounds and Attribution
@@ -11702,6 +11711,14 @@ snapshot's DRep expiry, and a replayed governance proposal the snapshot does
 not hold is stored as already expired and dropped. Protocol parameters are
 resolved per epoch as replay reaches it, enacting the boundary's classic updates
 before any hard-fork translation, as the live rollover does.
+
+API-mode backfill commits a SQL transaction after the configured block window
+(200 blocks by default) or when its estimated payload reaches 32 MiB. The
+estimate combines encoded block bytes and queued metadata-row bytes. The
+cumulative threshold also controls row flushes. Rows are drained while they
+are staged when the temporary buffer reaches 5,000 rows or 32 MiB; one row may
+exceed the byte threshold. SQL commits remain at complete-block boundaries, so
+one block can make the transaction exceed the 32 MiB estimate.
 
 Historical block validation before the stable anchor is controlled
 independently. With `ValidateHistorical: true` (the default), ledger replay
@@ -18938,6 +18955,20 @@ the node has not reached tip since boot (`ls.reachedTip`), and the last gathered
 Once at or near the live upstream tip, the wait is skipped entirely: a
 solitary new block still commits immediately, matching the pre-existing
 latency behavior.
+
+For a node with `GetActiveConnectionFunc` wired, coalescing also requires an
+admitted header still queued on the primary chain. A drained network frontier
+flushes the gathered bodies immediately: applying them can publish the state
+needed to authenticate or corroborate the next header, so waiting for its body
+would delay the producer that could supply it. The queue is rechecked at each
+gap; a frontier drained during the pass releases the batch. This check reads
+only callback presence and the chain's header count under its existing chain
+lock; it never invokes the callback under the gather lock. Offline imports
+without that callback retain gap coalescing, and network replay with admitted
+headers still batches short body-delivery gaps.
+The header-count check can acquire that chain lock once more per retry,
+in addition to the iterator probe; it introduces no ledger or networking lock
+inside the gather span.
 
 `reachedTip` is part of that gate rather than `isNearTip` alone because
 `UpstreamTipSlot` returns 0 whenever no live upstream connection is selected,

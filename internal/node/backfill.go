@@ -41,17 +41,17 @@ import (
 // backfill checkpoint.
 const BackfillPhase = "metadata"
 
-// DefaultBackfillBatchSize controls how many processed blocks are accumulated
-// before deferred metadata rows are flushed.
+// DefaultBackfillBatchSize controls the maximum block window in one committed
+// backfill transaction.
 const DefaultBackfillBatchSize = 200
 
-// DefaultBackfillBatchRows bounds queued metadata rows between flushes. The
-// threshold is checked after each transaction, so one transaction may exceed it.
+// DefaultBackfillBatchRows bounds queued metadata rows. Backfill also applies
+// the limit while a transaction level is staged.
 const DefaultBackfillBatchRows = 5000
 
-// DefaultBackfillBatchBytes bounds the estimated queued metadata payload
-// between flushes. The threshold is checked after each transaction, so one
-// transaction may exceed it.
+// DefaultBackfillBatchBytes bounds estimated payload accumulated by one SQL
+// transaction and the temporary row buffer. SQL transactions commit only at
+// block boundaries, so one block can exceed the transaction estimate.
 const DefaultBackfillBatchBytes int64 = 32 * 1024 * 1024
 
 type backfillBatchSizer interface {
@@ -62,16 +62,37 @@ type backfillBatchByteSizer interface {
 	EstimatedSizeBytes() int64
 }
 
-func backfillBatchLimitReached(acc database.BatchAccumulator) bool {
+type backfillBatchLimitSetter interface {
+	SetBackfillBatchLimitCallbacks(
+		func() (int64, int),
+		func(int64),
+	)
+}
+
+func backfillBatchLimitReached(
+	flushedBytes int64,
+	acc database.BatchAccumulator,
+) bool {
 	if sizer, ok := acc.(backfillBatchSizer); ok &&
 		sizer.Len() >= DefaultBackfillBatchRows {
 		return true
 	}
-	if sizer, ok := acc.(backfillBatchByteSizer); ok &&
-		sizer.EstimatedSizeBytes() >= DefaultBackfillBatchBytes {
+	return backfillTransactionByteLimitReached(flushedBytes, acc)
+}
+
+func backfillTransactionByteLimitReached(
+	flushedBytes int64,
+	acc database.BatchAccumulator,
+) bool {
+	// A partial row flush clears the accumulator but not the SQL transaction.
+	if flushedBytes >= DefaultBackfillBatchBytes {
 		return true
 	}
-	return false
+	sizer, ok := acc.(backfillBatchByteSizer)
+	if !ok {
+		return false
+	}
+	return sizer.EstimatedSizeBytes() >= DefaultBackfillBatchBytes-flushedBytes
 }
 
 // BackfillProgress is emitted with interval counters during metadata backfill.
@@ -95,6 +116,9 @@ type Backfill struct {
 	epochs       []models.Epoch
 	pparamsCache map[uint64]lcommon.ProtocolParameters
 	batchSize    int
+	// batchTxnEstimatedBytes includes encoded blocks and rows already flushed
+	// from the accumulator into the still-open SQL transaction.
+	batchTxnEstimatedBytes int64
 	// freshDatabaseBootstrap records the sync caller's state classification.
 	// Mithril seeds a zero-slot checkpoint before import, so checkpoint
 	// presence alone cannot tell a fresh bootstrap from a resumed backfill.
@@ -1009,13 +1033,23 @@ func (b *Backfill) Run(ctx context.Context) error {
 	it := b.db.BlocksFromSlot(startSlot)
 	defer it.Close()
 
-	// Keep one batch accumulator across multiple blocks so metadata
-	// writes can be flushed in bulk. The DB transaction is opened
-	// lazily after a block is read and released after each flush so
-	// checkpoint/final writes can use the base DB connection.
+	// Keep one accumulator across multiple blocks. Queued rows can be drained
+	// while the SQL transaction remains open; commits happen at complete-block
+	// boundaries.
+	b.batchTxnEstimatedBytes = 0
 	acc := b.db.NewBatchAccumulator()
 	if tracker, ok := acc.(interface{ EnableSizeTracking() }); ok {
 		tracker.EnableSizeTracking()
+	}
+	if limiter, ok := acc.(backfillBatchLimitSetter); ok {
+		limiter.SetBackfillBatchLimitCallbacks(
+			func() (int64, int) {
+				return DefaultBackfillBatchBytes, DefaultBackfillBatchRows
+			},
+			func(bytes int64) {
+				b.batchTxnEstimatedBytes += bytes
+			},
+		)
 	}
 	var batchTxn *database.Txn
 	defer func() {
@@ -1049,6 +1083,7 @@ func (b *Backfill) Run(ctx context.Context) error {
 		}
 		acc.Reset()
 		batchBlockCount = 0
+		b.batchTxnEstimatedBytes = 0
 	}
 	// flushBatch writes deferred rows, commits the active transaction,
 	// and releases the current batch window.
@@ -1074,6 +1109,7 @@ func (b *Backfill) Run(ctx context.Context) error {
 		acc.Reset()
 		batchTxn = nil
 		batchBlockCount = 0
+		b.batchTxnEstimatedBytes = 0
 		return nil
 	}
 	// saveCommittedCheckpoint avoids advancing resume state past rows
@@ -1114,6 +1150,9 @@ func (b *Backfill) Run(ctx context.Context) error {
 			break
 		}
 		ensureBatchTxn()
+		// Include the current block while its metadata is accumulated so row
+		// flushes use only the remaining transaction byte budget.
+		b.batchTxnEstimatedBytes += int64(len(blk.Cbor))
 
 		epochId, eraId := b.slotToEpoch(blk.Slot)
 
@@ -1209,10 +1248,11 @@ func (b *Backfill) Run(ctx context.Context) error {
 		processedBlocks++
 		batchBlockCount++
 
-		// Flush once the current batch reaches the configured block window
-		// or the plugin reports enough accumulated rows or payload bytes.
+		// Commit after the configured block window or estimated payload limit.
 		if batchBlockCount >= b.batchSize ||
-			backfillBatchLimitReached(acc) {
+			backfillTransactionByteLimitReached(
+				b.batchTxnEstimatedBytes, acc,
+			) {
 			if err := flushBatch(); err != nil {
 				saveCommittedCheckpoint()
 				return fmt.Errorf(
@@ -1436,19 +1476,23 @@ func (b *Backfill) processBlockTxsBatched(
 					err,
 				)
 			}
-		}
-		if backfillBatchLimitReached(acc) {
-			flushStart := time.Now()
-			if err := b.db.FlushBatch(acc, txn); err != nil {
-				return fmt.Errorf(
-					"flushing metadata rows at slot %d tx %d: %w",
-					point.Slot,
-					txIndex,
-					err,
-				)
-			}
-			if stats != nil {
-				stats.FlushBatch += time.Since(flushStart)
+			if backfillBatchLimitReached(b.batchTxnEstimatedBytes, acc) {
+				flushStart := time.Now()
+				if sizer, ok := acc.(backfillBatchByteSizer); ok {
+					b.batchTxnEstimatedBytes += sizer.EstimatedSizeBytes()
+				}
+				if err := b.db.FlushBatch(acc, txn); err != nil {
+					return fmt.Errorf(
+						"flushing metadata rows at slot %d tx %d body %d: %w",
+						point.Slot,
+						txIndex,
+						levelIndex,
+						err,
+					)
+				}
+				if stats != nil {
+					stats.FlushBatch += time.Since(flushStart)
+				}
 			}
 		}
 	}

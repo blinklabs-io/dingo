@@ -5541,6 +5541,24 @@ slot. Such rows have no `certs`/`transaction` join, so without the
 tie-break to a registration, incorrectly keeping the pool active for stake
 snapshots and reward inputs.
 
+### Current pool VRF state
+
+`Database.GetPoolVrfState` uses an optional metadata capability to read only the
+pool key hash, denormalized VRF key hash, and the latest registration's VRF key
+hash. Providers without that capability retain `GetPool(..., true, ...)`.
+The SQL stores return those fields in one named query, without hydrating pool
+owners, relays, retirements, or unrelated registration fields. This projection
+uses the caller's transaction and includes inactive pools.
+
+The latest registration follows the same order as the full pool read: added
+slot, transaction block index, certificate index, registration index, and row
+ID, all descending. A missing registration remains distinct from a registration
+whose VRF field is NULL or empty. Both raw VRF fields are returned unchanged;
+the ledger still chooses the registration key first, falls back to the pool row
+only for an empty registration key, and rejects malformed nonempty hashes.
+Historical cutoff, capture, and effective-epoch queries are separate and retain
+their existing contracts. This is a read projection with no schema change.
+
 ### `GetPoolVrfKeyHashAtSlot` and `GetPoolEarliestVrfKeyHashAtSlot`
 
 Two lookups over the same rows, differing only in direction, used by header

@@ -2987,7 +2987,7 @@ func (ls *LedgerState) electingVrfKeyHashFromSnapshotWithTxn(
 			poolKeyHash[:],
 		)
 	}
-	pool, err := ls.db.GetPool(ctx, poolKeyHash, true, txn)
+	pool, err := ls.db.GetPoolVrfState(ctx, poolKeyHash, txn)
 	if err != nil {
 		return lcommon.Blake2b256{}, false, headerStateLookupErr(err)
 	}

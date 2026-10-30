@@ -33,10 +33,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestBackfillProcessBlockTxsBatchedUsesSharedGovernanceFixture ensures the
-// same child proposal IDs, parent root, and voting inputs used by ledger tests
-// are reconstructed by historical metadata backfill.
-func TestBackfillProcessBlockTxsBatchedUsesSharedGovernanceFixture(
+// TestBackfillProcessBlockTxsBatchedFlushesDijkstraGovernanceLevels ensures
+// repeated level flushes preserve the shared fixture's proposal and vote data.
+func TestBackfillProcessBlockTxsBatchedFlushesDijkstraGovernanceLevels(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -46,6 +45,7 @@ func TestBackfillProcessBlockTxsBatchedUsesSharedGovernanceFixture(
 		nil,
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 	)
+	backfill.batchTxnEstimatedBytes = DefaultBackfillBatchBytes
 
 	fixture, err := dijkstrabatchfixture.New()
 	require.NoError(t, err)
