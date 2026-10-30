@@ -17,7 +17,6 @@ package mcp
 import (
 	"context"
 	"database/sql"
-	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -35,7 +34,7 @@ const runawayQuery = "WITH RECURSIVE x(n) AS (VALUES(1) UNION ALL " +
 // the slots left over still admit a built-in read.
 func TestCallerSQLCannotTakeEveryReadSlot(t *testing.T) {
 	t.Parallel()
-	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "m.db"))
+	db, err := sql.Open("sqlite", ":memory:")
 	require.NoError(t, err)
 	db.SetMaxOpenConns(2 * maxConcurrentSQLiteQueries)
 	t.Cleanup(func() { _ = db.Close() })
