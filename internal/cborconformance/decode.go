@@ -174,6 +174,9 @@ func (s *cborValue) UnmarshalCBOR(data []byte) error {
 	s.Script = nil
 	switch s.Type {
 	case common.ScriptRefTypeNativeScript:
+		if err := validateConwayNativeScriptCBOR(items[1]); err != nil {
+			return fmt.Errorf("validate Conway native script shape: %w", err)
+		}
 		if _, err := cbor.Decode(items[1], &s.Native); err != nil {
 			return fmt.Errorf("decode native script: %w", err)
 		}
@@ -236,6 +239,15 @@ func reencode(rule string, raw []byte) ([]byte, error) {
 	case "auxiliary_data_map":
 		return reencodeConwayAuxiliaryData(raw, "map")
 	case "auxiliary_scripts":
+		var rawScripts []cbor.RawMessage
+		if _, err := cbor.DecodeExact(raw, &rawScripts); err != nil {
+			return nil, err
+		}
+		for index, script := range rawScripts {
+			if err := validateConwayNativeScriptCBOR(script); err != nil {
+				return nil, fmt.Errorf("auxiliary native script %d: %w", index, err)
+			}
+		}
 		return reencodeChecked[[]common.NativeScript](raw, func(scripts []common.NativeScript) error {
 			return common.ValidateNativeScriptConstructors(scripts, 5)
 		})
@@ -1339,6 +1351,15 @@ func validateConwayRedeemerNode(raw []byte) error {
 	if node.Children[0].Type != cbor.DiagTypeUint {
 		return errors.New("conway redeemer tag must be an unsigned integer")
 	}
+	return validateConwayExUnitsNode(&node.Children[3])
+}
+
+func validateConwayExUnitsNode(node *cbor.DiagnosticNode) error {
+	if node.Type != cbor.DiagTypeArray || len(node.Children) != 2 ||
+		node.Children[0].Type != cbor.DiagTypeUint ||
+		node.Children[1].Type != cbor.DiagTypeUint {
+		return errors.New("conway execution units must contain two unsigned integers")
+	}
 	return nil
 }
 
@@ -1350,19 +1371,33 @@ func validateConwayRedeemersCBOR(raw []byte) error {
 	switch node.Type {
 	case cbor.DiagTypeArray:
 		for index := range node.Children {
-			if node.Children[index].Type != cbor.DiagTypeArray ||
-				len(node.Children[index].Children) != 4 ||
-				node.Children[index].Children[0].Type != cbor.DiagTypeUint {
+			redeemer := &node.Children[index]
+			if redeemer.Type != cbor.DiagTypeArray ||
+				len(redeemer.Children) != 4 ||
+				redeemer.Children[0].Type != cbor.DiagTypeUint {
 				return fmt.Errorf("conway redeemer %d tag must be an unsigned integer", index)
+			}
+			if err := validateConwayExUnitsNode(&redeemer.Children[3]); err != nil {
+				return fmt.Errorf("conway redeemer %d: %w", index, err)
 			}
 		}
 	case cbor.DiagTypeMap:
+		if len(node.Children)%2 != 0 {
+			return errors.New("conway redeemer map must contain key-value pairs")
+		}
 		for index := 0; index < len(node.Children); index += 2 {
 			key := &node.Children[index]
 			if key.Type != cbor.DiagTypeArray || len(key.Children) != 2 ||
 				key.Children[0].Type != cbor.DiagTypeUint ||
 				key.Children[1].Type != cbor.DiagTypeUint {
 				return errors.New("conway redeemer map key must contain an unsigned tag and index")
+			}
+			value := &node.Children[index+1]
+			if value.Type != cbor.DiagTypeArray || len(value.Children) != 2 {
+				return errors.New("conway redeemer map value must contain data and execution units")
+			}
+			if err := validateConwayExUnitsNode(&value.Children[1]); err != nil {
+				return fmt.Errorf("conway redeemer map value: %w", err)
 			}
 		}
 	case cbor.DiagTypeUint,

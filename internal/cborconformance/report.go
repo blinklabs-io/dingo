@@ -88,6 +88,30 @@ type corpusWaiver struct {
 	Samples []string `json:"samples"`
 }
 
+type corpusCoverage struct {
+	Rules   []corpusCoverageRule `json:"rules"`
+	Samples int                  `json:"samples"`
+}
+
+type corpusCoverageRule struct {
+	Name        string                     `json:"name"`
+	Coverage    corpusCoverageCounts       `json:"coverage"`
+	Obligations []corpusCoverageObligation `json:"obligations"`
+}
+
+type corpusCoverageCounts struct {
+	Fulfilled   int `json:"fulfilled"`
+	Outstanding int `json:"outstanding"`
+	Untested    int `json:"untested"`
+	Waived      int `json:"waived"`
+}
+
+type corpusCoverageObligation struct {
+	Divergence json.RawMessage `json:"divergence"`
+	Verdict    string          `json:"verdict"`
+	Witness    string          `json:"witness"`
+}
+
 type expectation uint8
 
 const (
@@ -179,12 +203,14 @@ func generateReport(datasetDir, corpusRevision, expectedInventory string) (Repor
 
 	var files []sample
 	metadataPresent := false
+	coveragePresent := false
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			switch entry.Name() {
 			case "corpus.json":
 				metadataPresent = true
 			case "coverage.json":
+				coveragePresent = true
 			default:
 				return Report{}, fmt.Errorf(
 					"unexpected file in dataset root: %s",
@@ -227,6 +253,9 @@ func generateReport(datasetDir, corpusRevision, expectedInventory string) (Repor
 				maxCorpusSamples,
 			)
 		}
+	}
+	if err := validateCoverageMetadata(corpusRoot, coveragePresent, files); err != nil {
+		return Report{}, err
 	}
 	waivedSamples, err := loadSampleWaivers(corpusRoot, metadataPresent, files)
 	if err != nil {
@@ -370,6 +399,117 @@ func generateReport(datasetDir, corpusRevision, expectedInventory string) (Repor
 	}
 	report.Successful = len(report.Failures) == 0
 	return report, nil
+}
+
+func validateCoverageMetadata(root *os.Root, present bool, files []sample) error {
+	if !present {
+		return nil
+	}
+	data, err := readCorpusFile(root, "coverage.json")
+	if err != nil {
+		return fmt.Errorf("read corpus coverage metadata: %w", err)
+	}
+	var coverage corpusCoverage
+	if err := json.Unmarshal(data, &coverage); err != nil {
+		return fmt.Errorf("decode corpus coverage metadata: %w", err)
+	}
+	if len(coverage.Rules) == 0 {
+		return errors.New("corpus coverage metadata contains no rules")
+	}
+	if coverage.Samples != len(files) {
+		return fmt.Errorf(
+			"corpus coverage sample count is %d, discovered %d",
+			coverage.Samples,
+			len(files),
+		)
+	}
+
+	sampleRules := make(map[string]string, len(files))
+	discoveredRules := make(map[string]struct{})
+	for _, file := range files {
+		witness := strings.TrimSuffix(file.path, ".input.cbor")
+		witness = strings.TrimSuffix(witness, ".cbor")
+		sampleRules[witness] = file.rule
+		discoveredRules[file.rule] = struct{}{}
+	}
+	coveredRules := make(map[string]struct{}, len(coverage.Rules))
+	for _, rule := range coverage.Rules {
+		if _, ok := discoveredRules[rule.Name]; !ok {
+			return fmt.Errorf("corpus coverage references unknown rule %q", rule.Name)
+		}
+		if _, duplicate := coveredRules[rule.Name]; duplicate {
+			return fmt.Errorf("corpus coverage repeats rule %q", rule.Name)
+		}
+		coveredRules[rule.Name] = struct{}{}
+		var actual corpusCoverageCounts
+		for index, obligation := range rule.Obligations {
+			switch obligation.Verdict {
+			case "fulfilled":
+				actual.Fulfilled++
+				witnessRule, ok := sampleRules[obligation.Witness]
+				if !ok {
+					return fmt.Errorf(
+						"corpus coverage rule %q obligation %d references unknown witness %q",
+						rule.Name,
+						index,
+						obligation.Witness,
+					)
+				}
+				if witnessRule != rule.Name {
+					return fmt.Errorf(
+						"corpus coverage rule %q obligation %d witness belongs to %q",
+						rule.Name,
+						index,
+						witnessRule,
+					)
+				}
+			case "waived":
+				actual.Waived++
+				if len(obligation.Divergence) == 0 || string(obligation.Divergence) == "null" {
+					return fmt.Errorf(
+						"corpus coverage rule %q obligation %d is waived without a divergence",
+						rule.Name,
+						index,
+					)
+				}
+			case "outstanding":
+				actual.Outstanding++
+				return fmt.Errorf(
+					"corpus coverage rule %q obligation %d is outstanding",
+					rule.Name,
+					index,
+				)
+			case "untested":
+				actual.Untested++
+				return fmt.Errorf(
+					"corpus coverage rule %q obligation %d is untested",
+					rule.Name,
+					index,
+				)
+			default:
+				return fmt.Errorf(
+					"corpus coverage rule %q obligation %d has unknown verdict %q",
+					rule.Name,
+					index,
+					obligation.Verdict,
+				)
+			}
+		}
+		if actual != rule.Coverage {
+			return fmt.Errorf(
+				"corpus coverage counts for rule %q are %+v, obligations yield %+v",
+				rule.Name,
+				rule.Coverage,
+				actual,
+			)
+		}
+	}
+	for rule := range discoveredRules {
+		if _, ok := coveredRules[rule]; !ok {
+			return fmt.Errorf("corpus coverage omits rule %q", rule)
+		}
+	}
+	return nil
 }
 
 func corpusInventorySHA256(corpus fs.FS) (string, error) {

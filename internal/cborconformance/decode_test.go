@@ -62,8 +62,13 @@ func TestConwayCorpusShapeConstraints(t *testing.T) {
 		{name: "bignum over 64 bytes", rule: "big_int", raw: append([]byte{0xc2, 0x58, 0x41}, make([]byte, 65)...)},
 		{name: "execution memory not integer", rule: "ex_units", raw: []byte{0x82, 0xf6, 0x00}},
 		{name: "native script threshold not integer", rule: "native_script", raw: []byte{0x83, 0x03, 0xf6, 0x80}},
+		{name: "auxiliary native script threshold not integer", rule: "auxiliary_scripts", raw: []byte{0x81, 0x83, 0x03, 0xf6, 0x80}},
+		{name: "wrapped native script threshold not integer", rule: "script", raw: []byte{0x82, 0x00, 0x83, 0x03, 0xf6, 0x80}},
 		{name: "redeemer tag not integer", rule: "redeemer", raw: []byte{0x84, 0xf6, 0x00, 0x00, 0x82, 0x00, 0x00}},
+		{name: "redeemer execution memory not integer", rule: "redeemer", raw: []byte{0x84, 0x00, 0x00, 0x00, 0x82, 0xf6, 0x00}},
 		{name: "redeemer map key tag not integer", rule: "redeemers", raw: []byte{0xa1, 0x82, 0xf6, 0x00, 0x82, 0x00, 0x82, 0x00, 0x00}},
+		{name: "redeemer array execution memory not integer", rule: "redeemers", raw: []byte{0x81, 0x84, 0x00, 0x00, 0x00, 0x82, 0xf6, 0x00}},
+		{name: "redeemer map execution memory not integer", rule: "redeemers", raw: []byte{0xa1, 0x82, 0x00, 0x00, 0x82, 0x00, 0x82, 0xf6, 0x00}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
