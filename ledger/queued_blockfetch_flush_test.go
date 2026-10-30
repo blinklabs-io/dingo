@@ -168,10 +168,18 @@ func TestQueuedBlockfetchBatchHasBoundedAccumulation(t *testing.T) {
 					},
 				},
 			}
+			// Headers are admitted at base; the callbacks below fire with the
+			// clock at the maximum wait, past both the idle cutoff and the
+			// first deadline.
+			base := time.Unix(1_000_000, 0)
+			var clock atomic.Int64
+			ls.queuedBlockfetchNow = func() time.Time {
+				return base.Add(time.Duration(clock.Load()))
+			}
 			ls.queuedBlockfetchSchedule = func(
 				delay time.Duration, callback func(),
 			) func() {
-				require.Equal(t, queuedBlockfetchMaxWait, delay)
+				require.Equal(t, queuedBlockfetchIdleWait, delay)
 				timer := &queuedFlushTestTimer{callback: callback}
 				timers <- timer
 				return func() { timer.stopped.Store(true) }
@@ -232,6 +240,7 @@ func TestQueuedBlockfetchBatchHasBoundedAccumulation(t *testing.T) {
 			}
 			// Fire even a stopped callback to model a timer already racing
 			// cancellation. Pointer identity and live state must reject it.
+			clock.Store(int64(queuedBlockfetchMaxWait))
 			timer.callback()
 			ls.blockfetchContinuationWG.Wait()
 			if tc.want {

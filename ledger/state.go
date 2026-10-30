@@ -108,7 +108,9 @@ var snapshotGenerationCounter atomic.Uint64
 // two seconds. A gap that long means the chain has stopped growing for now --
 // a few blocks added with nothing behind them, or an upstream that went quiet
 // -- so the pass applies what it has rather than holding it for the rest of
-// the budget.
+// the budget. A chain with no queued header cannot grow without a new header
+// admission and fetch round trip, so the wait is skipped there too (see
+// queuedHeadersCanExtendGather).
 // Once the node is at or near the tip, this wait is skipped entirely: a
 // solitary new block at live tip must still commit promptly rather than wait
 // for a batch that will never fill. Vars, not consts, so tests can shrink the
@@ -1461,6 +1463,9 @@ type LedgerState struct {
 	queuedBlockfetchFlush   *queuedBlockfetchFlush
 	// queuedBlockfetchSchedule substitutes only timer delivery in tests.
 	queuedBlockfetchSchedule func(time.Duration, func()) func()
+	// queuedBlockfetchNow substitutes the clock the accumulation flush reads
+	// in tests.
+	queuedBlockfetchNow func() time.Time
 
 	// The fields below are writer-owned working state. Lock-free readers use
 	// consensus and tip snapshots; writers update these fields under Lock and
@@ -7150,6 +7155,18 @@ func (ls *LedgerState) ledgerReadChain(
 	}
 }
 
+// queuedHeadersCanExtendGather reports whether a block can still reach the
+// chain without a further header being admitted. Queued headers pop only when
+// their block is added, so an empty queue means every admitted header's block
+// is already on the chain and no blockfetch batch is in flight: the next block
+// is at least a header admission and a fetch round trip away, which no
+// coalescing gap is sized to bridge. It takes only the chain mutex the
+// iterator probe already takes, so it adds no lock to the gather span. A nil
+// chain reports true, keeping the coalescing wait when nothing is known.
+func (ls *LedgerState) queuedHeadersCanExtendGather() bool {
+	return ls.chain == nil || ls.chain.HeaderCount() > 0
+}
+
 func (ls *LedgerState) ledgerReadChainIterator(
 	ctx context.Context,
 	iter ledgerReadIterator,
@@ -7357,7 +7374,8 @@ func (ls *LedgerState) ledgerReadChainIterator(
 							rawBatch[len(rawBatch)-1].Slot,
 							upstreamTipSlot,
 							stabilityWindow,
-						) {
+						) &&
+						ls.queuedHeadersCanExtendGather() {
 						coalesceAttempts++
 						gapAttempts++
 						select {
