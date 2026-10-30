@@ -6832,9 +6832,29 @@ func TestPinnedForkRollbackResyncsWithoutGenerationLockDeadlock(t *testing.T) {
 	ls.config.EventBus = bus
 	resyncCh := subscribeChainsyncResync(t, bus)
 
+	truncateEntered := make(chan struct{})
+	allowTruncate := make(chan struct{})
+	var truncateOnce sync.Once
+	releaseTruncate := func() { truncateOnce.Do(func() { close(allowTruncate) }) }
+	ls.rollbackTruncateAfterSlotFunc = func(
+		point ocommon.Point,
+		trustSlot uint64,
+		txn *database.Txn,
+	) (ochainsync.Tip, []byte, error) {
+		close(truncateEntered)
+		<-allowTruncate
+		return ls.db.TruncateAfterSlot(
+			ls.lifecycleContext(),
+			point,
+			trustSlot,
+			txn,
+		)
+	}
+
 	decisionEntered := make(chan struct{})
 	releaseDecision := make(chan struct{})
-	var blockOnce sync.Once
+	var blockOnce, decisionOnce sync.Once
+	releaseForkDecision := func() { decisionOnce.Do(func() { close(releaseDecision) }) }
 	ls.config.GenesisSelectionStateFunc = func() (bool, uint64) {
 		blockOnce.Do(func() {
 			close(decisionEntered)
@@ -6861,7 +6881,15 @@ func TestPinnedForkRollbackResyncsWithoutGenerationLockDeadlock(t *testing.T) {
 	}
 	admission := make(chan bool, 1)
 	handled := make(chan error, 1)
+	handlerExited := make(chan struct{})
+	defer func() {
+		releaseForkDecision()
+		releaseTruncate()
+		testutil.RequireReceive(t, handlerExited, 30*time.Second,
+			"fork handler should finish before fixture cleanup")
+	}()
 	go func() {
+		defer close(handlerExited)
 		handled <- ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
 			ConnectionId: fixture.connId,
 			HeaderCryptoVerificationGeneration: ls.
@@ -6891,17 +6919,26 @@ func TestPinnedForkRollbackResyncsWithoutGenerationLockDeadlock(t *testing.T) {
 	}()
 	testutil.RequireNoReceive(t, writerDone, 100*time.Millisecond,
 		"a generation writer should wait for the fork decision")
-	close(releaseDecision)
-	require.NoError(t, testutil.RequireReceive(t, handled, time.Second,
-		"pinned fork handling must not deadlock on rollback"))
-	testutil.RequireReceive(t, writerDone, time.Second,
-		"the generation writer should resume after fork handling")
+	releaseForkDecision()
+	// The writer must progress before the real SQL rollback sweep; its cost
+	// under parallel fixtures is independent of the generation lock cycle.
+	testutil.RequireReceive(t, writerDone, testutil.AsyncWait,
+		"rollback must release the pinned generation for the waiting writer")
+	testutil.RequireReceive(t, truncateEntered, 30*time.Second,
+		"fork handling should reach the real rollback sweep")
+	releaseTruncate()
+	require.NoError(t, testutil.RequireReceive(t, handled, 30*time.Second,
+		"fork handling should finish the real rollback"))
 	assert.False(t, testutil.RequireReceive(t, admission, time.Second,
 		"a header must not be selector-admitted across a rollback generation"))
 	// The rollback publishes its own "local ledger rollback" resync first.
 	resync := testutil.RequireReceive(t, resyncCh, time.Second,
 		"the peer should re-intersect after the rollback")
-	assert.Equal(t, event.ChainsyncResyncReasonLocalLedgerRollback, resync.Reason)
+	assert.Equal(
+		t,
+		event.ChainsyncResyncReasonLocalLedgerRollback,
+		resync.Reason,
+	)
 	resync = testutil.RequireReceive(t, resyncCh, time.Second,
 		"the peer should re-intersect before replaying the winning fork")
 	assert.Equal(t, event.ChainsyncResyncReasonPersistentFork, resync.Reason)
