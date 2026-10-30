@@ -320,6 +320,31 @@ func TestChainsyncConfigCarriesLimitOnPatience(t *testing.T) {
 	assert.False(t, cfg.PatienceActiveFunc(), "Praos selection")
 }
 
+// TestChainsyncConfigCorroborationCapableFailsClosed pins that the chainsync
+// slot preference for corroboration-capable peers is wired and never applies
+// to a peer without a corroboration identity or outside Genesis corroboration.
+func TestChainsyncConfigCorroborationCapableFailsClosed(t *testing.T) {
+	t.Parallel()
+	n := &Node{config: NewConfig(WithGenesisCorroborationPeers(1))}
+	cfg := n.chainsyncConfig()
+	require.NotNil(t, cfg.CorroborationIdentity)
+	connId := ouroboros.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 3001},
+		RemoteAddr: &net.TCPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 3001},
+	}
+	assert.Empty(t, cfg.CorroborationIdentity(connId), "no chain selector yet")
+
+	n.chainSelector = chainselection.NewChainSelector(
+		chainselection.ChainSelectorConfig{GenesisMode: true},
+	)
+	assert.Empty(t, cfg.CorroborationIdentity(connId), "peer has no identity")
+
+	n.chainSelector = chainselection.NewChainSelector(
+		chainselection.ChainSelectorConfig{},
+	)
+	assert.Empty(t, cfg.CorroborationIdentity(connId), "Praos selection")
+}
+
 func TestChainsyncConfigLimitOnPatienceDefaults(t *testing.T) {
 	t.Parallel()
 	n := &Node{config: NewConfig()}

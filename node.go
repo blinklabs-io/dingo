@@ -2304,6 +2304,22 @@ func (n *Node) isConfiguredRootConnection(
 	return n.peerGov != nil && n.peerGov.IsConfiguredRootConnection(connId)
 }
 
+// corroborationIdentityForIngress returns connId's Genesis corroboration
+// identity while corroboration is in effect, and "" otherwise or when the peer
+// has none. It is called with the chainsync client lock held, so it reads the
+// selector's lock-free Genesis state rather than taking the selector mutex.
+func (n *Node) corroborationIdentityForIngress(
+	connId ouroboros.ConnectionId,
+) string {
+	if n.config.genesisCorroborationPeers <= 0 || n.chainSelector == nil {
+		return ""
+	}
+	if active, _ := n.chainSelector.GenesisSelectionState(); !active {
+		return ""
+	}
+	return n.peerCorroborationIdentityByConnId(connId)
+}
+
 func (n *Node) touchPeerByConnId(connId ouroboros.ConnectionId) {
 	n.peerGovMu.RLock()
 	defer n.peerGovMu.RUnlock()
@@ -2840,6 +2856,7 @@ func (n *Node) chainsyncConfig() chainsync.Config {
 		return active
 	}
 	chainsyncCfg.IsRoot = n.isConfiguredRootConnection
+	chainsyncCfg.CorroborationIdentity = n.corroborationIdentityForIngress
 	chainsyncCfg.ObservedHeaderLimitFunc = func() int {
 		if n.chainSelector == nil {
 			return 0
