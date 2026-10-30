@@ -2773,6 +2773,10 @@ func (ls *LedgerState) historicalPointOnPrimaryChain(
 	return ls.primaryChainContainsBlock(block, point)
 }
 
+var errPeerForkAuthorizationChanged = errors.New(
+	"retained peer header authorization generation changed",
+)
+
 func (ls *LedgerState) findPeerForkPath(
 	e ChainsyncEvent,
 	initialPrevHash []byte,
@@ -2849,6 +2853,11 @@ func (ls *LedgerState) findPeerForkPath(
 		if !ls.headerCryptoVerificationGenerationCurrent(
 			recordEvent.HeaderCryptoVerificationGeneration,
 		) {
+			// A nonzero stamp was issued locally. Its expiration requires
+			// replay, without attributing our snapshot change to the peer.
+			if recordEvent.HeaderCryptoVerificationGeneration != 0 {
+				return nil, nil, errPeerForkAuthorizationChanged
+			}
 			return nil, nil, nil
 		}
 		if _, seen := visited[hashKey]; seen {
@@ -4743,7 +4752,7 @@ func (ls *LedgerState) invalidateChainsyncHeaderAdmission(
 	ls.resetChainsyncResyncState(&pending)
 	ls.requestChainsyncResync(
 		e.ConnectionId,
-		"header authorization changed before selector admission",
+		event.ChainsyncResyncReasonHeaderAuthorizationChanged,
 		&pending,
 	)
 	queuePeerHeaderHistoryInvalidation(&pending, e)
@@ -6395,6 +6404,19 @@ func (ls *LedgerState) tryResolveForkPinned(
 		prevHashBytes,
 		localTip.Point.Slot,
 	)
+	if errors.Is(err, errPeerForkAuthorizationChanged) {
+		ls.config.Logger.Info(
+			"retained fork header authorization changed, triggering chainsync re-sync",
+			"component", "ledger",
+			"connection_id", e.ConnectionId.String(),
+		)
+		ls.requestChainsyncResync(
+			e.ConnectionId,
+			event.ChainsyncResyncReasonHeaderAuthorizationChanged,
+			pending,
+		)
+		return true, nil
+	}
 	if err != nil {
 		return false, fmt.Errorf(
 			"unexpected error looking up common ancestor for prev hash %s: %w",

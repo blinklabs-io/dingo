@@ -48,6 +48,10 @@ const (
 	// staged header after a peer waiting at the forecast horizon supplies the
 	// independent Genesis witness it lacked. It is not a peer-fault signal.
 	ChainsyncResyncReasonForecastCorroborationRecovery = "forecast corroboration recovery"
+	// ChainsyncResyncReasonHeaderAuthorizationChanged replays a header whose
+	// local verification snapshot changed before selector admission. The
+	// withheld header is not evidence of a peer or transport failure.
+	ChainsyncResyncReasonHeaderAuthorizationChanged = "header authorization changed before selector admission"
 	// ChainsyncResyncReasonDeferredHeaderValidationFailure names the peer that
 	// supplied a block whose deferred header validation failed with a verdict
 	// the peer is responsible for. Unlike HeaderValidationRecovery, which
@@ -128,6 +132,7 @@ func IsLocalChainsyncResyncReason(reason string) bool {
 	case ChainsyncResyncReasonIngressPromotion,
 		ChainsyncResyncReasonPromotedObserverAhead,
 		ChainsyncResyncReasonHeaderValidationRecovery,
+		ChainsyncResyncReasonHeaderAuthorizationChanged,
 		ChainsyncResyncReasonForecastCorroborationRecovery,
 		ChainsyncResyncReasonFutureHeaderAdmissionRecovery,
 		ChainsyncResyncReasonDisconnectedHeaderAdmission,
