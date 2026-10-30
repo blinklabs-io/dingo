@@ -16,6 +16,7 @@ package sqlstore
 
 import (
 	"errors"
+	"fmt"
 	"sort"
 	"testing"
 
@@ -203,4 +204,77 @@ SET pool_key_hash = NULL,
 		store.RebuildRewardLiveStakeFromRunningTotalsInBatches(500, runTxn),
 	)
 	require.Equal(t, expected, readRewardLiveStakeSnapshot(t, store))
+}
+
+func TestRebuildRewardLiveStakeResumesAfterCommittedRange(t *testing.T) {
+	t.Parallel()
+	expectedStore := newMigratedSQLiteStore(t)
+	resumedStore := newMigratedSQLiteStore(t)
+	populateRewardLiveStakeBatchFixture(t, expectedStore)
+	populateRewardLiveStakeBatchFixture(t, resumedStore)
+	require.NoError(t, expectedStore.RebuildRewardLiveStake(500, nil))
+	expected := readRewardLiveStakeSnapshot(t, expectedStore)
+
+	resumedStore.rewardLiveStakeBatchSize = 1
+	stopAfterFirstRange := errors.New("stop after first committed range")
+	interrupted := false
+	runTxn := func(
+		runBatch func(types.Txn) ([]byte, int64, int64, bool, error),
+	) error {
+		txn := resumedStore.Transaction(t.Context())
+		cursor, current, _, done, err := runBatch(txn)
+		if err != nil {
+			require.NoError(t, txn.Rollback())
+			return err
+		}
+		phase := models.RewardLiveStakeImportCheckpoint(cursor)
+		if done {
+			phase = models.ImportPhaseRewardLiveStake
+		}
+		err = resumedStore.SetImportCheckpoint(&models.ImportCheckpoint{
+			ImportKey: "snapshot:500",
+			Phase:     phase,
+		}, txn)
+		if err != nil {
+			require.NoError(t, txn.Rollback())
+			return err
+		}
+		if err := txn.Commit(); err != nil {
+			return err
+		}
+		if current == 1 && !interrupted {
+			interrupted = true
+			return stopAfterFirstRange
+		}
+		return nil
+	}
+
+	err := resumedStore.RebuildRewardLiveStakeInBatches(
+		t.Context(), 500, nil, false, runTxn,
+	)
+	require.ErrorIs(t, err, stopAfterFirstRange)
+	cp, err := resumedStore.GetImportCheckpoint("snapshot:500", nil)
+	require.NoError(t, err)
+	require.NotNil(t, cp)
+	cursor, inProgress, err := models.RewardLiveStakeImportCursor(cp.Phase)
+	require.NoError(t, err)
+	require.True(t, inProgress)
+	require.Len(t, cursor, 2)
+
+	_, err = resumedStore.writeDB.Exec(fmt.Sprintf(`
+CREATE TRIGGER reject_completed_reward_live_stake_rewrite
+BEFORE UPDATE ON reward_live_stake
+WHEN OLD.credential_tag = %d AND hex(OLD.staking_key) = '%X'
+BEGIN
+    SELECT RAISE(ABORT, 'completed range repeated');
+END`, cursor[0], cursor[1:]))
+	require.NoError(t, err)
+
+	require.NoError(t, resumedStore.RebuildRewardLiveStakeInBatches(
+		t.Context(), 500, cursor, true, runTxn,
+	))
+	require.Equal(t, expected, readRewardLiveStakeSnapshot(t, resumedStore))
+	cp, err = resumedStore.GetImportCheckpoint("snapshot:500", nil)
+	require.NoError(t, err)
+	require.Equal(t, models.ImportPhaseRewardLiveStake, cp.Phase)
 }
