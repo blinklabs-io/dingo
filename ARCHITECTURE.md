@@ -12527,7 +12527,8 @@ predates the oldest retained snapshot (an account with some retained rows lists
 those), when the block that cast a governance vote is not held, and when a pool
 history epoch has no ready epoch summary or lies at or below a Mithril anchor
 without imported block counts, and when an epoch or pool block list reaches a
-Mithril anchor or a range whose non-checkpoint `block_nonce` rows were pruned
+Mithril anchor before a completed backfill has written the rows below it, or a
+range whose non-checkpoint `block_nonce` rows were pruned
 (`database.BlockHistoryRetained`), and when a cold-credential committee vote
 list meets a vote whose hot key no retained authorization maps to a cold
 credential. A votes page releases its read transaction

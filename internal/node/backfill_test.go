@@ -23,6 +23,7 @@ import (
 	"log/slog"
 	"os"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -2392,4 +2393,64 @@ func TestBackfillProcessBlockTxsBatchedLeavesSnapshotBalanceForDirectDeposit(
 
 func closeTestDB(db *database.Database) error {
 	return dbtest.CloseDatabase(db)
+}
+
+// TestRun_WritesBlockNoncesBelowEndSlot covers the rows the Blockfrost epoch
+// block lists read: replay writes one block_nonce row per block, except at the
+// end slot, whose row the Mithril import seeded and live sync resumes from.
+func TestRun_WritesBlockNoncesBelowEndSlot(t *testing.T) {
+	t.Parallel()
+	nodeCfg := &cardano.CardanoNodeConfig{
+		ShelleyGenesisHash: strings.Repeat("ab", 32),
+	}
+	for _, tc := range []struct {
+		name       string
+		endSlot    uint64
+		endSlotSet bool
+		want       []uint64
+	}{
+		{"no end slot", 0, false, []uint64{0, 1, 2}},
+		{"end slot", 2, true, []uint64{0, 1}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			db := newTestDB(t)
+			require.NoError(t, db.SetEpoch(
+				0, 0, nil, nil, nil, nil,
+				eras.ConwayEraDesc.Id, 1000, 100, nil,
+			))
+			pparams := mockledger.NewMockConwayProtocolParams()
+			pparamsCbor, err := cbor.Encode(&pparams)
+			require.NoError(t, err)
+			require.NoError(t, db.SetPParams(
+				pparamsCbor, 0, 0, eras.ConwayEraDesc.Id, nil,
+			))
+			require.NoError(t, db.Metadata().SetBackfillCheckpoint(
+				&models.BackfillCheckpoint{
+					Phase:      BackfillPhase,
+					TotalSlots: 3,
+					StartedAt:  time.Now(),
+					UpdatedAt:  time.Now(),
+				},
+				nil,
+			))
+			addValidBackfillBlocks(t, db, 3)
+			bf := NewBackfill(
+				db, nodeCfg, slog.New(slog.NewTextHandler(io.Discard, nil)),
+			)
+			if tc.endSlotSet {
+				bf.SetEndSlot(tc.endSlot)
+			}
+			require.NoError(t, bf.Run(context.Background()))
+
+			rows, err := db.Metadata().GetBlockNoncesInSlotRange(0, 100, nil)
+			require.NoError(t, err)
+			var got []uint64
+			for _, row := range rows {
+				require.NotEmpty(t, row.Nonce)
+				got = append(got, row.Slot)
+			}
+			require.Equal(t, tc.want, got)
+		})
+	}
 }

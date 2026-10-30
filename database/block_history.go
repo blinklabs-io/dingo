@@ -26,7 +26,8 @@ import (
 // to be complete.
 //
 // Two things leave gaps. A bootstrap applies no block at or below its anchor,
-// so a range reaching the anchor is never covered. Nonce pruning deletes every
+// so a range reaching the anchor is covered only once the historical backfill
+// has completed and written the rows below it. Nonce pruning deletes every
 // non-checkpoint row below an epoch-start cutoff and keeps each epoch's
 // checkpoint rows, so the epoch holding the earliest non-checkpoint row is
 // where retained history begins, and any row below it belongs to a pruned
@@ -47,10 +48,17 @@ func BlockHistoryRetained(
 	}
 	var from uint64
 	if anchored {
-		if startSlot <= anchor {
-			return false, nil
+		if startSlot > anchor {
+			from = anchor + 1
+		} else {
+			covered, err := backfilledBelowAnchor(meta, metaTxn, anchor)
+			if err != nil {
+				return false, err
+			}
+			if !covered {
+				return false, nil
+			}
 		}
-		from = anchor + 1
 	}
 	upper := endSlot
 	first, found, err := meta.GetEarliestNonCheckpointBlockSlot(from, metaTxn)
@@ -80,4 +88,31 @@ func BlockHistoryRetained(
 		return false, err
 	}
 	return below == 0, nil
+}
+
+// backfillPhase mirrors node.BackfillPhase, the checkpoint phase of the
+// historical metadata backfill.
+const backfillPhase = "metadata"
+
+// backfilledBelowAnchor reports whether the historical backfill completed and
+// left block_nonce rows at or below the Mithril anchor. A backfill that ran
+// with nonce rows disabled completes without writing any, so the checkpoint
+// alone is not enough.
+func backfilledBelowAnchor(
+	meta metadata.MetadataStore,
+	metaTxn types.Txn,
+	anchor uint64,
+) (bool, error) {
+	cp, err := meta.GetBackfillCheckpoint(backfillPhase, metaTxn)
+	if err != nil {
+		return false, fmt.Errorf("get backfill checkpoint: %w", err)
+	}
+	if cp == nil || !cp.Completed {
+		return false, nil
+	}
+	first, found, err := meta.GetEarliestNonCheckpointBlockSlot(0, metaTxn)
+	if err != nil {
+		return false, err
+	}
+	return found && first <= anchor, nil
 }

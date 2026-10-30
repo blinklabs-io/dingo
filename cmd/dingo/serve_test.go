@@ -32,9 +32,12 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/deferred"
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	testfixtures "github.com/blinklabs-io/dingo/internal/test/fixtures"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/mithril"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
+	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	"github.com/stretchr/testify/require"
 	_ "modernc.org/sqlite"
 )
@@ -545,4 +548,64 @@ func TestServeAcceptsInterruptedSnapshotRestore(t *testing.T) {
 	require.ErrorContains(t, err, "node's own interrupted Mithril snapshot",
 		"stream mode resumed a snapshot restore")
 	require.NotContains(t, err.Error(), "dingo sync")
+}
+
+// TestResumeBackfillWritesBlockNonces covers the rows the Blockfrost epoch
+// block lists read: a resumed API-mode backfill must store a block_nonce row
+// for each block it replays.
+func TestResumeBackfillWritesBlockNonces(t *testing.T) {
+	t.Parallel()
+	cfg := &config.Config{
+		RunMode:           config.RunModeServe,
+		StorageMode:       "api",
+		Network:           "preview",
+		DatabasePath:      t.TempDir(),
+		Plugins:           testStoragePlugins(),
+		BackfillBatchSize: 100,
+		DatabaseWorkers:   1,
+	}
+	logger := slog.New(slog.DiscardHandler)
+	runtime, err := openConfiguredDatabase(t.Context(), cfg, logger, 1)
+	require.NoError(t, err)
+	db := runtime.Database
+	require.NoError(t, db.SetEpoch(
+		0, 0, nil, nil, nil, nil, eras.ConwayEraDesc.Id, 1000, 100, nil,
+	))
+	pparams := mockledger.NewMockConwayProtocolParams()
+	pparamsCbor, err := cbor.Encode(&pparams)
+	require.NoError(t, err)
+	require.NoError(t, db.SetPParams(
+		pparamsCbor, 0, 0, eras.ConwayEraDesc.Id, nil,
+	))
+	require.NoError(t, db.Metadata().SetBackfillCheckpoint(
+		&models.BackfillCheckpoint{
+			Phase:      "metadata",
+			TotalSlots: 3,
+			StartedAt:  time.Now().UTC(),
+			UpdatedAt:  time.Now().UTC(),
+		},
+		nil,
+	))
+	blocks, err := testfixtures.GenerateConwayChainAt(1, 0, 3)
+	require.NoError(t, err)
+	for _, block := range blocks {
+		require.NoError(t, db.BlockCreate(models.Block{
+			Slot:   block.SlotNumber(),
+			Hash:   block.Hash().Bytes(),
+			Number: block.BlockNumber(),
+			Cbor:   block.Cbor(),
+			Type:   uint(block.Type()),
+		}, nil))
+	}
+	require.NoError(t, runtime.Close(t.Context()))
+
+	require.NoError(t, resumeBackfill(t.Context(), cfg, logger))
+
+	runtime, err = openConfiguredDatabase(t.Context(), cfg, logger, 1)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = runtime.Close(context.Background()) })
+	rows, err := runtime.Database.Metadata().
+		GetBlockNoncesInSlotRange(0, 100, nil)
+	require.NoError(t, err)
+	require.Len(t, rows, 3)
 }

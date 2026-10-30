@@ -200,10 +200,10 @@ func (b *Backfill) SetBatchSize(size int) error {
 	return nil
 }
 
-// DisableNonceComputation skips historical block nonce reconstruction.
-// Mithril imports already seed the ledger-state tip nonce needed for
-// live sync; API metadata backfill does not need per-block historical
-// nonce rows.
+// DisableNonceComputation skips historical block nonce reconstruction. The
+// backfill otherwise writes one block_nonce row per replayed block, which the
+// Blockfrost epoch and pool block lists read, so only a caller that does not
+// serve those lists should disable it.
 func (b *Backfill) DisableNonceComputation() {
 	b.computeNonces = false
 }
@@ -1128,16 +1128,20 @@ func (b *Backfill) Run(ctx context.Context) error {
 				blk.Slot, blk.Hash,
 			)
 
-			// Compute and store block nonce
-			if nErr := b.computeBlockNonce(
-				parsedBlock, point, eraId,
-				isNewEpoch, batchTxn,
-			); nErr != nil {
-				saveCommittedCheckpoint()
-				return fmt.Errorf(
-					"block nonce at slot %d: %w",
-					blk.Slot, nErr,
-				)
+			// The block at the end slot is the Mithril anchor, whose
+			// block_nonce row the import seeded from the ledger state and
+			// live sync resumes from, so replay must not rewrite it.
+			if !endSlotSet || blk.Slot < endSlot {
+				if nErr := b.computeBlockNonce(
+					parsedBlock, point, eraId,
+					isNewEpoch, batchTxn,
+				); nErr != nil {
+					saveCommittedCheckpoint()
+					return fmt.Errorf(
+						"block nonce at slot %d: %w",
+						blk.Slot, nErr,
+					)
+				}
 			}
 
 			txs := parsedBlock.Transactions()
