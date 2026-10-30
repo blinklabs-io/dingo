@@ -15,6 +15,7 @@
 package blockfrost
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 	"time"
@@ -167,6 +168,7 @@ func TestAssetPopulatesRegistryMetadata(t *testing.T) {
 
 	var info AssetInfo
 	require.NoError(t, adapter.populateAssetRegistryMetadata(
+		nil,
 		&info,
 		policyID,
 		assetName,
@@ -189,10 +191,40 @@ func TestAssetLeavesRegistryMetadataNilWhenUnknown(t *testing.T) {
 
 	var info AssetInfo
 	require.NoError(t, adapter.populateAssetRegistryMetadata(
+		nil,
 		&info,
 		"00000002df633853f6a47465c9496721d2d5b1291b8398016c0e87ae",
 		[]byte("unknown"),
 	))
 
 	require.Nil(t, info.Metadata)
+}
+
+func TestAssetNestedReadsUseTheCallersTransaction(t *testing.T) {
+	t.Parallel()
+
+	adapter, _, db := newDBBackedAdapter(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	txn := db.Transaction(ctx, false)
+	defer txn.Release()
+	cancel()
+
+	var info AssetInfo
+	err := adapter.populateAssetRegistryMetadata(
+		txn.Metadata(),
+		&info,
+		"00000002df633853f6a47465c9496721d2d5b1291b8398016c0e87ae",
+		[]byte("unknown"),
+	)
+	require.ErrorIs(t, err, context.Canceled)
+
+	err = adapter.populateAssetOnchainMetadata(
+		context.Background(),
+		txn,
+		&info,
+		[]byte{0x01},
+		"00000002df633853f6a47465c9496721d2d5b1291b8398016c0e87ae",
+		[]byte("unknown"),
+	)
+	require.ErrorIs(t, err, context.Canceled)
 }

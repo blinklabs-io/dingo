@@ -1076,6 +1076,7 @@ func (a *NodeAdapter) Asset(
 		info.InitialMintTxHash = hex.EncodeToString(initialMintTxHash)
 		if err := a.populateAssetOnchainMetadata(
 			ctx,
+			txn,
 			&info,
 			initialMintTxHash,
 			policyID,
@@ -1087,6 +1088,7 @@ func (a *NodeAdapter) Asset(
 	// The CIP-26 off-chain registry is independent of the mint transaction,
 	// so this runs whether or not the asset has on-chain metadata.
 	if err := a.populateAssetRegistryMetadata(
+		txn.Metadata(),
 		&info,
 		policyID,
 		assetName,
@@ -1099,16 +1101,18 @@ func (a *NodeAdapter) Asset(
 // populateAssetOnchainMetadata resolves the CIP-25 on-chain metadata for an
 // asset from its initial mint transaction and fills the metadata fields on
 // info. A mint transaction without (matching) metadata is not an error; the
-// fields are simply left unset.
+// fields are simply left unset. A non-nil txn is reused so the read does not
+// wait for a second pooled connection while the caller holds one.
 func (a *NodeAdapter) populateAssetOnchainMetadata(
 	ctx context.Context,
+	txn *database.Txn,
 	info *AssetInfo,
 	initialMintTxHash []byte,
 	policyID string,
 	assetName []byte,
 ) error {
 	metadataCbor, err := a.ledgerState.Database().
-		GetTransactionMetadataByHash(ctx, initialMintTxHash, nil)
+		GetTransactionMetadataByHash(ctx, initialMintTxHash, txn)
 	if err != nil {
 		return fmt.Errorf(
 			"get initial mint tx %x metadata for asset %s%x: %w",
