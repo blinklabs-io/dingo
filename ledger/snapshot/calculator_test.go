@@ -1272,7 +1272,9 @@ func runHistoricalBoundaryStakeIncludesUntickedClosure(t *testing.T, collateralR
 	calc := NewCalculator(db)
 	txn := db.Transaction(t.Context(), false)
 	defer txn.Rollback() //nolint:errcheck
-	dist, err := calc.calculateHistoricalBoundaryStakeDistributionInTxn(context.Background(), txn, 999, 1000, 0, 0)
+	dist, err := calc.calculateHistoricalBoundaryStakeDistributionInTxn(
+		context.Background(), txn, 999, 1000, 0, 0, nil,
+	)
 	require.NoError(t, err)
 	var pool lcommon.PoolKeyHash
 	copy(pool[:], poolHash)
