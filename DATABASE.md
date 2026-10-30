@@ -261,7 +261,12 @@ Blockfrost historical and governance reads are served from existing tables
 through `HistoryStore` (`database/plugin/metadata/history_store.go`); migration
 v47 only adds the `reward_stake_input (credential_tag, staking_key, epoch)`
 index. Epoch totals sum `utxo` outputs and transaction fees over the epoch's
-slot range, counting a Leios closure transaction at its
+slot range. Output totals use exact database-side arbitrary-precision
+aggregation and return a non-nil `*big.Int` from
+`SumTransactionOutputsInSlotRange`; repeated transfers can exceed both signed
+and unsigned 64-bit totals without exceeding the supply in any one output.
+The Blockfrost response preserves the total as a decimal string. Totals count
+a Leios closure transaction at its
 `leios_transaction_context` slot, and epoch and pool block lists read
 `block_nonce` joined to `pool_opcert_sequence`. API storage mode keeps every
 non-checkpoint `block_nonce` row for those lists (one row per block); core mode

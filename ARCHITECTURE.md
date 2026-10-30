@@ -12579,6 +12579,12 @@ apart by whether the second segment names a part (`parameters`,
 `withdrawals`, `votes`, `metadata`), so both forms share one identifier parser
 and one error path.
 
+Epoch output flow is accumulated by the metadata store with arbitrary precision
+and passed to the adapter as a non-nil `*big.Int`. The adapter serializes its
+exact decimal value into the existing string field: repeatedly transferring
+the same lovelace can make an epoch total exceed the circulating supply and
+64-bit integer bounds. Fee and active-stake fields keep their existing types.
+
 Historical answers follow what the node retains. The endpoint answers `404`
 with "The requested history is not retained by this node"
 (`ErrHistoryNotRetained`) rather than an empty or partial answer that reads as
