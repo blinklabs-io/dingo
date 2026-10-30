@@ -592,3 +592,22 @@ func TestResolveDingoDBExplicitFlagsSkipBrokenConfig(t *testing.T) {
 	_, err = resolve(map[string]string{"metadata-plugin": "sqlite"})
 	require.NoError(t, err)
 }
+
+// Not t.Parallel: requireNetwork reads the process-global globalFlags and
+// the CARDANO_NETWORK/KOIOS_NETWORK environment.
+func TestRequireNetworkAcceptsMainnetAndRejectsUnknown(t *testing.T) {
+	t.Setenv("CARDANO_NETWORK", "")
+	t.Setenv("KOIOS_NETWORK", "")
+	saved := globalFlags.network
+	t.Cleanup(func() { globalFlags.network = saved })
+
+	for _, net := range []string{"preview", "preprod", "mainnet"} {
+		globalFlags.network = net
+		got, err := requireNetwork()
+		require.NoError(t, err, net)
+		require.Equal(t, net, got)
+	}
+	globalFlags.network = "sanchonet"
+	_, err := requireNetwork()
+	require.Error(t, err)
+}
