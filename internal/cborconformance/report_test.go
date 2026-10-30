@@ -273,6 +273,27 @@ func TestGenerateReportRejectsIncompleteCorpusInventory(t *testing.T) {
 	}
 }
 
+func TestGenerateReportAcceptsCoverageMetadata(t *testing.T) {
+	t.Parallel()
+	corpus := filepath.Join(t.TempDir(), "conway")
+	makeCompleteCorpus(t, corpus)
+	if err := os.WriteFile(
+		filepath.Join(corpus, "coverage.json"),
+		[]byte(`{"obligations":[]}`),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := generateReport(corpus, testCorpusRevision, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.Successful {
+		t.Fatalf("report has failures: %+v", report.Failures)
+	}
+}
+
 func TestGenerateReportAppliesExplicitSampleWaivers(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -307,6 +328,27 @@ func TestGenerateReportAppliesExplicitSampleWaivers(t *testing.T) {
 	if report.Totals.ZapMustBeRejectedExpected != wantZapCount ||
 		report.Totals.ZapMustBeRejectedActual != wantZapCount {
 		t.Fatalf("zap totals = %+v, want %d expected and actual", report.Totals, wantZapCount)
+	}
+}
+
+func TestGenerateReportAppliesVerifiedParentDivergences(t *testing.T) {
+	t.Parallel()
+	corpus := filepath.Join(t.TempDir(), "conway")
+	makeCompleteCorpus(t, corpus)
+	metadata := `{"divergences":[` +
+		`{"rule":"credential","kind":"verified-by-parent","reason":"checked by parent rule","samples":["credential/invalid/zap-1/complete"]},` +
+		`{"kind":"decoder-exception","reason":"reference decoder exception","samples":["credential/invalid/zap-1/complete"]}` +
+		`]}`
+	if err := os.WriteFile(filepath.Join(corpus, "corpus.json"), []byte(metadata), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := generateReport(corpus, testCorpusRevision, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.Successful || len(report.WaivedSamples) != 1 {
+		t.Fatalf("report = %+v, want one verified-by-parent waiver", report)
 	}
 }
 
@@ -356,10 +398,13 @@ func TestReencodeAcceptsIndefiniteCostModelMap(t *testing.T) {
 	}
 }
 
-func TestReencodeRejectsIndefiniteBoundedBytes(t *testing.T) {
+func TestReencodeAcceptsIndefiniteBoundedBytes(t *testing.T) {
 	t.Parallel()
+	if _, err := reencode("bounded_bytes", []byte{0x5f, 0x41, 'a', 0xff}); err != nil {
+		t.Fatalf("rejected an indefinite bounded byte string: %v", err)
+	}
 	if _, err := reencode("asset_name", []byte{0x5f, 0x41, 'a', 0xff}); err == nil {
-		t.Fatal("accepted an indefinite byte string for a bounded asset name")
+		t.Fatal("accepted an indefinite byte string for an asset name")
 	}
 }
 

@@ -225,7 +225,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
-      CBOR_DATASET_REVISION: '6cd8c928665bbafe90e02066ebb4620e38f051de'
+      CBOR_DATASET_REVISION: '95e9e7c296ca1b641c8d99af2ab7c286a90caebf'
       NDC_LEDGER_REVISION: 'e02a9e1c7dc15cc6d618c7ffdbd41167a38de2a4'
       UPLC_CORPUS_SHA256: '8bd4ad4f9f4c8c6b8ffa1f06ed1db0b43043afbba77ef6a14bcfb5a52345ed3f'
       TURBO_CORPUS_SHA256: '821af55e3323c826b5598c964d634b46dd468014834d0e97ebdc5edb0a158576'

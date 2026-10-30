@@ -27,8 +27,8 @@ const (
 	maxSampleBytes   = int64(16 << 20)
 
 	// Update this inventory together with the dataset revision in both conformance workflows.
-	primaryConwayCorpusRevision  = "6cd8c928665bbafe90e02066ebb4620e38f051de"
-	primaryConwayCorpusInventory = "9a7ce28ed79198ed30e09a9d13032728d00e0b70e501891965aa126c4ab7a93f"
+	primaryConwayCorpusRevision  = "95e9e7c296ca1b641c8d99af2ab7c286a90caebf"
+	primaryConwayCorpusInventory = "37337a6065d7137bd71eeb0e5da5e51fb364f2beb82546a8cd33b6452bfe1bb7"
 
 	decodeFailed        = "decoding failed"
 	decodeSucceeded     = "decoding succeeded but the sample must be rejected"
@@ -77,7 +77,8 @@ type Report struct {
 }
 
 type corpusMetadata struct {
-	Waivers []corpusWaiver `json:"waivers"`
+	Waivers     []corpusWaiver `json:"waivers"`
+	Divergences []corpusWaiver `json:"divergences"`
 }
 
 type corpusWaiver struct {
@@ -180,21 +181,27 @@ func generateReport(datasetDir, corpusRevision, expectedInventory string) (Repor
 	metadataPresent := false
 	for _, entry := range entries {
 		if !entry.IsDir() {
-			if entry.Name() == "corpus.json" {
+			switch entry.Name() {
+			case "corpus.json":
 				metadataPresent = true
-				info, err := corpusRoot.Lstat(entry.Name())
-				if err != nil {
-					return Report{}, fmt.Errorf("stat corpus metadata: %w", err)
-				}
-				if !info.Mode().IsRegular() {
-					return Report{}, errors.New("corpus.json is not a regular file")
-				}
-				continue
+			case "coverage.json":
+			default:
+				return Report{}, fmt.Errorf(
+					"unexpected file in dataset root: %s",
+					entry.Name(),
+				)
 			}
-			return Report{}, fmt.Errorf(
-				"unexpected file in dataset root: %s",
-				entry.Name(),
-			)
+			info, err := corpusRoot.Lstat(entry.Name())
+			if err != nil {
+				return Report{}, fmt.Errorf("stat corpus metadata: %w", err)
+			}
+			if !info.Mode().IsRegular() {
+				return Report{}, fmt.Errorf(
+					"%s is not a regular file",
+					entry.Name(),
+				)
+			}
+			continue
 		}
 		if _, ok := known[entry.Name()]; !ok {
 			return Report{}, fmt.Errorf(
@@ -434,8 +441,14 @@ func loadSampleWaivers(
 	for _, file := range files {
 		sampleRules[file.name] = file.rule
 	}
+	waivers := append([]corpusWaiver(nil), metadata.Waivers...)
+	for _, divergence := range metadata.Divergences {
+		if divergence.Kind == "verified-by-parent" {
+			waivers = append(waivers, divergence)
+		}
+	}
 	waived := make(map[string]WaivedSample)
-	for _, waiver := range metadata.Waivers {
+	for _, waiver := range waivers {
 		if len(waiver.Samples) == 0 {
 			continue
 		}
