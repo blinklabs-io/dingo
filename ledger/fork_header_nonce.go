@@ -94,8 +94,8 @@ func (ls *LedgerState) peerChainSelectionEpochNonce(
 	if consensus == nil || appliedTip == nil || consensus != snapshot ||
 		consensus.generation != appliedTip.generation {
 		return nil, models.Epoch{}, false, fmt.Errorf(
-			"%w: ledger verification context changed during ancestry lookup",
-			errHeaderVerificationDeferred,
+			"%w during ancestry lookup",
+			errHeaderVerificationContextChanged,
 		)
 	}
 	localTip := appliedTip.currentTip.Point
