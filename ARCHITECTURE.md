@@ -7413,8 +7413,10 @@ reason predicate in event identifies known local ChainSync cursor recovery;
 peer governance and Ouroboros each also require a clean transport close.
 This includes a header withheld after its local authorization snapshot changes
 before selector admission: the header is discarded and replayed from a fresh
-intersection, without treating snapshot publication as a peer failure. Its fixed
-resync reason has a separate metric label.
+intersection, without treating snapshot publication as a peer failure. A retained
+fork ancestor with an expired nonzero local authorization stamp uses the same
+recovery. Missing ancestors and unstamped headers retain ordinary failure
+handling. The fixed resync reason has a separate metric label.
 Those closes do not add session failures, inbound churn, or negative stability
 samples. The next reconnect uses the initial retry delay, replacing any
 pending instability delay, while retaining failure counters so a later genuine
