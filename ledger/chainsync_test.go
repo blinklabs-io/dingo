@@ -14132,7 +14132,7 @@ func TestHandleChainSwitchEventFallbackReplaysBufferedActiveHeaders(
 			BlockHeader: mockHeader{
 				hash:        bufferedHeaderHash,
 				prevHash:    lcommon.NewBlake2b256(nil),
-				blockNumber: 1,
+				blockNumber: 0,
 				slot:        1,
 			},
 			Point: ocommon.NewPoint(1, bufferedHeaderHash.Bytes()),

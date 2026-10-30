@@ -96,7 +96,7 @@ func TestQueuedBlockfetchBatchHasBoundedAccumulation(t *testing.T) {
 							Point:        ocommon.NewPoint(i, hash.Bytes()),
 							BlockHeader: mockHeader{
 								hash: hash, prevHash: prev,
-								blockNumber: i, slot: i,
+								blockNumber: i - 1, slot: i,
 							},
 							Tip: ochainsync.Tip{
 								Point:       ocommon.NewPoint(1280, []byte("tip")),
@@ -198,7 +198,7 @@ func TestQueuedBlockfetchBatchHasBoundedAccumulation(t *testing.T) {
 						Point:        point,
 						BlockHeader: mockHeader{
 							hash: hash, prevHash: prevHash,
-							blockNumber: i, slot: i,
+							blockNumber: i - 1, slot: i,
 						},
 						Tip: ochainsync.Tip{
 							Point:       ocommon.NewPoint(1280, []byte("tip")),

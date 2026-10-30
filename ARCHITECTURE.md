@@ -7361,6 +7361,8 @@ deadline, while the muxer continues to own read deadlines.
 
 ### Multi-Client Chainsync
 
+Network ChainSync admission distinguishes origin from an applied block numbered zero by the applied point hash. The first header remains eligible for corroboration waiting while the ledger is empty. The serving node wires an active-connection callback into its ledger configuration. With that wiring present, ledger admission requires block number zero before a network header establishes an empty chain; offline ledger construction and direct chain imports retain their arbitrary-anchor behavior. After a rollback empties a previously mutated chain, the chain itself enforces the same first-block bound.
+
 The `chainsync.State` tracks multiple concurrent chainsync clients:
 - Configurable max client count
 - Stall detection with configurable timeout

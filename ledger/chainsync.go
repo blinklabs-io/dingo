@@ -4954,15 +4954,17 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 		"header_count", headerCount,
 		"connection_id", e.ConnectionId.String(),
 	)
-	var err error
-	if headerCryptoVerified {
-		err = ls.chain.AddBlockHeaderWithCryptoVerificationGeneration(
-			ls.lifecycleContext(),
-			e.BlockHeader,
-			headerCryptoVerificationGeneration,
-		)
-	} else {
-		err = ls.chain.AddBlockHeader(ls.lifecycleContext(), e.BlockHeader)
+	err := ls.chainsyncHeaderOriginError(e.BlockHeader)
+	if err == nil {
+		if headerCryptoVerified {
+			err = ls.chain.AddBlockHeaderWithCryptoVerificationGeneration(
+				ls.lifecycleContext(),
+				e.BlockHeader,
+				headerCryptoVerificationGeneration,
+			)
+		} else {
+			err = ls.chain.AddBlockHeader(ls.lifecycleContext(), e.BlockHeader)
+		}
 	}
 	completeAdmitted := func() {
 		if releaseVerificationGeneration != nil {
@@ -6003,10 +6005,30 @@ func (ls *LedgerState) addChainsyncHeader(
 	return verified, err
 }
 
+func (ls *LedgerState) chainsyncHeaderOriginError(header gledger.BlockHeader) error {
+	// Fresh chains support arbitrary anchors for offline imports. Network
+	// serving is identified by the active-connection callback wired by the
+	// node. Inspect only its presence: calling it here would take networking
+	// locks under the header handler. Rollbacks to origin are also guarded
+	// atomically inside the chain.
+	if ls.config.GetActiveConnectionFunc != nil &&
+		header.BlockNumber() != 0 && len(ls.chain.HeaderTip().Point.Hash) == 0 {
+		return chain.NewBlockNotFitChainTipError(
+			header.Hash().String(),
+			header.PrevHash().String(),
+			"origin",
+		)
+	}
+	return nil
+}
+
 func (ls *LedgerState) addChainsyncHeaderPinned(
 	header gledger.BlockHeader,
 	verificationGeneration uint64,
 ) (bool, func(), error) {
+	if err := ls.chainsyncHeaderOriginError(header); err != nil {
+		return false, nil, err
+	}
 	ls.txValidationCommitMutex.RLock()
 	consensus := ls.loadConsensusSnapshot()
 	tip := ls.loadTipSnapshot()
