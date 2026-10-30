@@ -991,8 +991,10 @@ func (a *NodeAdapter) Genesis() (GenesisInfo, error) {
 }
 
 // Asset returns native asset information for a policy ID
-// and raw asset name bytes.
+// and raw asset name bytes. The quantity totals every live holding of the
+// asset, so the reads run in one transaction bound to ctx and stop with it.
 func (a *NodeAdapter) Asset(
+	ctx context.Context,
 	policyID string,
 	assetName []byte,
 ) (AssetInfo, error) {
@@ -1008,9 +1010,15 @@ func (a *NodeAdapter) Asset(
 	if err != nil {
 		return AssetInfo{}, fmt.Errorf("asset policy ID %q: %w", policyID, err)
 	}
-	asset, err := a.ledgerState.Database().
-		Metadata().
-		GetAssetByPolicyAndName(policyHash, assetName, nil)
+	db := a.ledgerState.Database()
+	txn := db.Transaction(ctx, false)
+	defer txn.Release()
+	meta := db.Metadata()
+	asset, err := meta.GetAssetByPolicyAndName(
+		policyHash,
+		assetName,
+		txn.Metadata(),
+	)
 	if err != nil {
 		return AssetInfo{}, fmt.Errorf(
 			"get asset by policy %s and name %x: %w",
@@ -1027,9 +1035,11 @@ func (a *NodeAdapter) Asset(
 			ErrAssetNotFound,
 		)
 	}
-	quantity, err := a.ledgerState.Database().
-		Metadata().
-		GetAssetQuantityByPolicyAndName(policyHash, assetName, nil)
+	quantity, err := meta.GetAssetQuantityByPolicyAndName(
+		policyHash,
+		assetName,
+		txn.Metadata(),
+	)
 	if err != nil {
 		return AssetInfo{}, fmt.Errorf(
 			"get asset quantity by policy %s and name %x: %w",
@@ -1039,9 +1049,11 @@ func (a *NodeAdapter) Asset(
 		)
 	}
 
-	initialMintTxHash, mintOrBurnCount, err := a.ledgerState.Database().
-		Metadata().
-		GetAssetMintBurnInfo(policyHash, assetName, nil)
+	initialMintTxHash, mintOrBurnCount, err := meta.GetAssetMintBurnInfo(
+		policyHash,
+		assetName,
+		txn.Metadata(),
+	)
 	if err != nil {
 		return AssetInfo{}, fmt.Errorf(
 			"get asset mint/burn info by policy %s and name %x: %w",
@@ -1063,7 +1075,7 @@ func (a *NodeAdapter) Asset(
 	if len(initialMintTxHash) > 0 {
 		info.InitialMintTxHash = hex.EncodeToString(initialMintTxHash)
 		if err := a.populateAssetOnchainMetadata(
-			context.Background(),
+			ctx,
 			&info,
 			initialMintTxHash,
 			policyID,

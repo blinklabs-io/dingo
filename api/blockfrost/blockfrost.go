@@ -44,6 +44,8 @@ const (
 	defaultMaxAddressSummariesPerClient         = 2
 	defaultMaxChainSummaries               uint = 4
 	defaultMaxChainSummariesPerClient           = 2
+	defaultMaxAssetDetails                 uint = 4
+	defaultMaxAssetDetailsPerClient             = 2
 	defaultMaxMempoolAddresses             uint = 4
 	defaultMaxMempoolAddressesPerClient         = 1
 )
@@ -67,7 +69,10 @@ type Blockfrost struct {
 	// latest epoch, a single epoch and the epochs before and after one. It is
 	// separate from addressSummaryAdmission so a burst of address scans cannot
 	// starve these routes, and the reverse.
-	chainSummaryAdmission   *requestAdmission
+	chainSummaryAdmission *requestAdmission
+	// assetDetailAdmission bounds concurrent asset lookups, each of which
+	// totals every live holding of the asset.
+	assetDetailAdmission    *requestAdmission
 	mempoolAddressAdmission *requestAdmission
 	// listener owns the start/stop protocol, including releasing the
 	// listening socket as part of what Stop waits for -- see
@@ -119,6 +124,10 @@ func New(
 		chainSummaryAdmission: newRequestAdmission(
 			defaultMaxChainSummaries,
 			defaultMaxChainSummariesPerClient,
+		),
+		assetDetailAdmission: newRequestAdmission(
+			defaultMaxAssetDetails,
+			defaultMaxAssetDetailsPerClient,
 		),
 		mempoolAddressAdmission: newRequestAdmission(
 			defaultMaxMempoolAddresses,

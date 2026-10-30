@@ -12519,7 +12519,7 @@ credential's whole transaction history. `GET /network`, `GET /epochs/latest`, `G
 and its `next` and `previous` lists aggregate over the chain or whole epochs, so
 they pass the request context to the adapter's database reads and share a
 chain summary admission pool, separate from the address summary pool, that
-answers 429 when full. Pool and account list routes reject
+answers 429 when full. `GET /assets/{asset}`, `GET /assets` and `GET /assets/policy/{policy_id}` total the live holdings of every asset they return, so they share one asset lookup admission pool (429 when full), run their database reads in one transaction under the request context and a 15-second deadline (a disconnected client stops the scan; an overrun answers 503 with `Retry-After`), and the metadata store sums the holdings in SQL, reading at most `models.MaxAssetQuantityHoldings` (1,000,000) of them: an asset held by more answers 400 as exceeding the service limit. Pool and account list routes reject
 out-of-range count and page values before calling the adapter, using the
 shared strict pagination parser (count 1–100, page 1–21474836). The epoch
 next, previous and stakes lists, whose Blockfrost schema defines only count and

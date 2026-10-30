@@ -1309,6 +1309,7 @@ func (m *mockNode) PoolDetail(ctx context.Context,
 }
 
 func (m *mockNode) Asset(
+	_ context.Context,
 	_ string,
 	_ []byte,
 ) (AssetInfo, error) {
