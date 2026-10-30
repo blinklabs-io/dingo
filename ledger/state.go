@@ -1405,9 +1405,14 @@ type LedgerState struct {
 	// evalAdmission bounds concurrent EvaluateTx calls globally and per remote
 	// source. Nil means unbounded.
 	evalAdmission *evaluationLimiter
-	metrics       stateMetrics
-	consensus     atomic.Pointer[consensusSnapshot]
-	tip           atomic.Pointer[tipSnapshot]
+	// utxoWholeAdmission permits one complete GetUTxOWhole materialization at
+	// a time. It is initialized lazily so test-only LedgerState values that do
+	// not use NewLedgerState receive the same admission bound.
+	utxoWholeAdmission     chan struct{}
+	utxoWholeAdmissionOnce sync.Once
+	metrics                stateMetrics
+	consensus              atomic.Pointer[consensusSnapshot]
+	tip                    atomic.Pointer[tipSnapshot]
 	// tachysMu serializes construction of the full public leader selector.
 	// The cache is bounded to the same three-epoch window as pool snapshots
 	// and keyed by the published consensus context so rollback or state

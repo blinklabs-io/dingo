@@ -15210,7 +15210,11 @@ prepared, then every complete response segment refreshes it. ChainSync keeps
 the request active across `AwaitReply` until the deferred reply finishes.
 This preserves the protocol's unbounded LocalStateQuery work and ChainSync
 waits, including one complete whole-UTxO result, while reclaiming the admission
-slot after a client becomes idle before or after protocol activity.
+slot after a client becomes idle before or after protocol activity. The ledger
+admits one `GetUTxOWhole` materialization at a time; later requests wait on
+their connection context without retaining an acquired database snapshot.
+Admission bounds the simultaneous worker pools and complete in-memory maps but
+does not limit, paginate, offset, truncate, or otherwise alter the response.
 
 It always starts with one full `Check` pinned at the live tip
 (`establishBaseline`) before validating anything incrementally -- the
