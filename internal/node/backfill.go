@@ -1460,22 +1460,23 @@ func (b *Backfill) processBlockTxsBatched(
 					err,
 				)
 			}
-		}
-		if backfillBatchLimitReached(b.batchTxnEstimatedBytes, acc) {
-			flushStart := time.Now()
-			if sizer, ok := acc.(backfillBatchByteSizer); ok {
-				b.batchTxnEstimatedBytes += sizer.EstimatedSizeBytes()
-			}
-			if err := b.db.FlushBatch(acc, txn); err != nil {
-				return fmt.Errorf(
-					"flushing metadata rows at slot %d tx %d: %w",
-					point.Slot,
-					txIndex,
-					err,
-				)
-			}
-			if stats != nil {
-				stats.FlushBatch += time.Since(flushStart)
+			if backfillBatchLimitReached(b.batchTxnEstimatedBytes, acc) {
+				flushStart := time.Now()
+				if sizer, ok := acc.(backfillBatchByteSizer); ok {
+					b.batchTxnEstimatedBytes += sizer.EstimatedSizeBytes()
+				}
+				if err := b.db.FlushBatch(acc, txn); err != nil {
+					return fmt.Errorf(
+						"flushing metadata rows at slot %d tx %d body %d: %w",
+						point.Slot,
+						txIndex,
+						levelIndex,
+						err,
+					)
+				}
+				if stats != nil {
+					stats.FlushBatch += time.Since(flushStart)
+				}
 			}
 		}
 	}
