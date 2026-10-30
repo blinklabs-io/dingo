@@ -5808,7 +5808,16 @@ this query. Routing both queries through the same mark-snapshot helper (as
 or first delegated after that snapshot was captured -- confirmed live
 against a real Preview cardano-node: 36 real pools reported by cardano-node
 were completely absent from dingo's reply for no reason other than that
-snapshot lag. `GetUTxOWhole` enumerates live references, resolves their stored
+snapshot lag. `GetStakeDistribution2` (`queryShelleyStakeDistribution2`)
+is answered by cardano-node from the same `poolsByTotalStakeFraction`, so it
+shares `GetStakeDistribution`'s live reconstruction (`liveStakeDistribution`)
+rather than `GetPoolDistr2`'s mark snapshot: pools, stakes and VRF keys are
+as of the queried slot, and each fraction is over total circulating supply
+where `GetPoolDistr2` divides by delegated stake. Its reply total is the
+delegated stake summed across the reconstructed pools, as
+`poolsByTotalStakeFraction` returns it. Both queries omit a pool with no
+delegated stake, as `calculatePoolDistr` does.
+`GetUTxOWhole` enumerates live references, resolves their stored
 CBOR through a fixed worker pool, and decodes them into the node-to-client
 reply shape. The UTxO query leaves serialize Babbage-era ADA-only outputs
 without a datum or reference script as the backwards-compatible two-element
