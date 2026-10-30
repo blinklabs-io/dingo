@@ -16519,6 +16519,18 @@ generation. The selector releases its current-generation pin together with
 its in-memory ingress decision, before checking applied-chain membership in the
 database, so a slow storage read cannot block snapshot publication.
 
+A deferred ChainSync admission callback can find that its original generation
+is no longer pinnable. With no ledger or ChainSync mutex held, it waits within
+the block-fetch busy budget for a local validation transition to settle, for
+at most four attempts. Ledger close and lifecycle cancellation interrupt the
+wait. A still-current original verdict retains its pin. An expired verdict is
+recoverable only when the exact event point and header hash
+have already been applied on the current chain: membership is read before a
+fresh pin, which rejects any intervening publication or transition. The shared
+selector update then receives that fresh generation. Unapplied or replaced
+points retain ordinary rejection and history invalidation. Recovering an
+applied header preserves queued descendants without refreshing their verdicts.
+
 ## Configuration
 
 Configuration priority (highest to lowest):
