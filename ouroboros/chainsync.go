@@ -2651,53 +2651,13 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				return fmt.Errorf("invalid peer tip disposition: %d", disposition)
 			}
 		}
-		// Apply-eligibility, evaluated after observation so it reflects this
-		// header. A peer can be ingress-eligible yet not apply-eligible (an
-		// uncorroborated Genesis fast source): its tips are observed but its
-		// blocks are withheld from the ledger.
-		applyEligible := selectionEligible &&
-			o.shouldApplyChainsyncToLedger(ctx.ConnectionId)
-		// A header withheld here is lost to the ledger: the peer's cursor moves
-		// past it. Hold only a selection-eligible header denied by Genesis
-		// corroboration; corroboration cannot override failed authentication.
-		// A header at or below the applied tip cannot reach the ledger, so
-		// waiting for witnesses only stalls the peer.
-		if selectionEligible && ingressEligible && !applyEligible &&
-			o.config.ChainsyncAwaitCorroboration != nil &&
-			!o.headerAtOrBelowLocalTip(v) {
-			admissionCtx, cancelAdmission := chainsyncAdmissionContext(ctx)
-			holdCtx, cancelHold := context.WithTimeout(
-				admissionCtx,
-				o.corroborationHoldTimeout,
-			)
-			eligible, err := o.config.ChainsyncAwaitCorroboration(
-				holdCtx,
-				ctx.ConnectionId,
-			)
-			holdExpired := errors.Is(err, context.DeadlineExceeded) &&
-				admissionCtx.Err() == nil
-			cancelHold()
-			cancelAdmission()
-			switch {
-			case holdExpired:
-				// Keep the chainsync cursor. Re-intersecting immediately from
-				// the applied tip discards this peer's candidate history and
-				// repeats the same hold; another peer needs that history to
-				// corroborate the withheld header when it catches up.
-			case err != nil:
-				return fmt.Errorf("wait for genesis corroboration: %w", err)
-			}
-			if o.recordHeldChainsyncTip(ctx.ConnectionId, tip) {
-				return ochainsync.ErrStopSyncProcess
-			}
-			applyEligible = eligible
-		}
 		// Limit on Eagerness: the tip was observed above, so the limit already
-		// accounts for this header. Wait before recording cross-peer dedup state:
-		// if the connection closes while held, another peer must still be able
-		// to deliver the same header to the ledger. Uncorroborated ingress also
-		// advances observed history, so it must not run past the shared overlap
-		// while its blocks remain withheld from application.
+		// accounts for this header. Wait before the apply gate, which admits a
+		// header the limit vouches for, and before recording cross-peer dedup
+		// state: if the connection closes while held, another peer must still
+		// be able to deliver the same header to the ledger. Ingress that is
+		// not corroborated in lockstep also advances observed history, so it
+		// must not run past the shared overlap.
 		if selectionEligible && ingressEligible && o.config.ChainsyncAwaitEagerness != nil {
 			var appliedTip func() ochainsync.Tip
 			if o.ledgerState != nil {
@@ -2749,6 +2709,51 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				tipAccepted = false
 				return ochainsync.ErrStopSyncProcess
 			}
+		}
+		// Apply-eligibility, evaluated after observation and after the Limit
+		// on Eagerness wait, so it reflects this header and sees it within
+		// the limit: a peer that is not corroborated in lockstep is still
+		// apply-eligible while its header is at most k past a prefix other
+		// identities retain, as the reference node's LoE admits candidates.
+		// A peer can be ingress-eligible yet not apply-eligible (a lone or
+		// Sybil Genesis fast source): its tips are observed but its blocks
+		// are withheld from the ledger.
+		applyEligible := selectionEligible &&
+			o.shouldApplyChainsyncToLedger(ctx.ConnectionId)
+		// A header withheld here is lost to the ledger: the peer's cursor moves
+		// past it. Hold only a selection-eligible header denied by Genesis
+		// corroboration; corroboration cannot override failed authentication.
+		// A header at or below the applied tip cannot reach the ledger, so
+		// waiting for witnesses only stalls the peer.
+		if selectionEligible && ingressEligible && !applyEligible &&
+			o.config.ChainsyncAwaitCorroboration != nil &&
+			!o.headerAtOrBelowLocalTip(v) {
+			admissionCtx, cancelAdmission := chainsyncAdmissionContext(ctx)
+			holdCtx, cancelHold := context.WithTimeout(
+				admissionCtx,
+				o.corroborationHoldTimeout,
+			)
+			eligible, err := o.config.ChainsyncAwaitCorroboration(
+				holdCtx,
+				ctx.ConnectionId,
+			)
+			holdExpired := errors.Is(err, context.DeadlineExceeded) &&
+				admissionCtx.Err() == nil
+			cancelHold()
+			cancelAdmission()
+			switch {
+			case holdExpired:
+				// Keep the chainsync cursor. Re-intersecting immediately from
+				// the applied tip discards this peer's candidate history and
+				// repeats the same hold; another peer needs that history to
+				// corroborate the withheld header when it catches up.
+			case err != nil:
+				return fmt.Errorf("wait for genesis corroboration: %w", err)
+			}
+			if o.recordHeldChainsyncTip(ctx.ConnectionId, tip) {
+				return ochainsync.ErrStopSyncProcess
+			}
+			applyEligible = eligible
 		}
 		patienceGrant = selectionEligible && ingressEligible
 		// Header arrival against slot time, for headers that passed (or

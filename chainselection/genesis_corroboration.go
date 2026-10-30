@@ -35,9 +35,10 @@ import (
 // chain selection so it stalls rather than steering the local chain.
 //
 // This gate supplies the independent-peer trust check. Authoritative
-// density-at-intersection is performed by ledger fork resolution; ChainSync
-// Jumping remains separate deferred work. See ARCHITECTURE.md ("Ouroboros
-// Genesis trust model").
+// density-at-intersection is performed by ledger fork resolution. ChainSync
+// Jumping records (jumping.go) add non-streaming peers as Limit on Eagerness
+// candidates and witnesses. See ARCHITECTURE.md ("Ouroboros Genesis trust
+// model").
 
 // genesisCorroborationActiveLocked reports whether the Genesis corroboration
 // gate is in effect (Genesis mode with a positive threshold). Genesis protocol
@@ -303,6 +304,24 @@ func (cs *ChainSelector) isPeerCorroboratedLocked(
 		cs.config.MinCorroboratingPeers
 }
 
+// selectionCorroboratedLocked reports whether a peer may drive Genesis chain
+// selection by either route the ingress gate accepts: an independent witness
+// has delivered its current point (isPeerCorroboratedLocked), or the Limit on
+// Eagerness vouches for its frontier (eagernessVouchesLocked). Two peers
+// serving one chain lead each other's delivered frontier by turns, and the
+// peer behind never holds the leader's current point; judged by the first
+// route alone the leader is unselectable at every crossing. Selection is
+// judged on the candidate's fragment truncated at the limit, so a frontier
+// past the limit does not make the peer unselectable: the apply gate and the
+// eagerness hold already stop every header at the limit.
+func (cs *ChainSelector) selectionCorroboratedLocked(
+	connId ouroboros.ConnectionId,
+	peerTip *PeerChainTip,
+) bool {
+	return cs.isPeerCorroboratedLocked(connId, peerTip) ||
+		cs.eagernessVouchesLocked(connId, peerTip, cs.localTip, false)
+}
+
 // ShouldApplyIngress reports whether headers/blocks from connId may be applied.
 // Genesis mode denies stale advertised tips and waits for a current ledger
 // generation. With a positive corroboration threshold it also withholds uncorroborated
@@ -328,6 +347,12 @@ const (
 func (cs *ChainSelector) ingressDecision(
 	connId ouroboros.ConnectionId,
 ) ingressVerdict {
+	// Read outside the lock: the applied tip is the ledger's to guard.
+	var applied ochainsync.Tip
+	haveApplied := false
+	if cs.config.AppliedTip != nil {
+		applied, haveApplied = cs.config.AppliedTip()
+	}
 	releaseGeneration, generationCurrent := cs.pinCurrentHeaderCryptoGeneration()
 	if !generationCurrent {
 		if genesis, _ := cs.GenesisSelectionState(); genesis {
@@ -370,6 +395,13 @@ func (cs *ChainSelector) ingressDecision(
 			cs.config.MinCorroboratingPeers {
 			return ingressApply
 		}
+		eagernessTip := cs.localTip
+		if haveApplied {
+			eagernessTip = applied
+		}
+		if cs.eagernessVouchesLocked(connId, peerTip, eagernessTip, true) {
+			return ingressApply
+		}
 		observedPoint = clonePoint(peerTip.ObservedTip.Point)
 		observedBlock = peerTip.ObservedTip.BlockNumber
 		localTip = cs.localTip
@@ -382,6 +414,65 @@ func (cs *ChainSelector) ingressDecision(
 		return ingressApply
 	}
 	return ingressAwaitCorroboration
+}
+
+// eagernessVouchesLocked reports whether the Limit on Eagerness vouches for
+// the candidate's staged frontier, the way the reference node's LoE does
+// (Ouroboros/Consensus/Genesis/Governor.hs sharedCandidatePrefix): the limit
+// is k past a point every candidate fragment retains, at least
+// MinCorroboratingPeers identities other than the candidate's retain that
+// point, and the frontier is at or below the limit. Selection cannot pass the
+// limit, so a header inside it extends the witnessed prefix by at most k
+// blocks, which is the rollback the security parameter already permits; a
+// witness need not have delivered the header itself. That is what lets a
+// ChainSync Jumping dynamo advance while its jumpers hold only the last jump
+// point. A lone candidate is its own intersection and has no witness, and a
+// limit measured from an anchor the fragments no longer share, or from the
+// local tip, vouches for nothing. withinLimit requires the frontier to be at
+// or below the limit, which the apply gate needs because the frontier is the
+// header about to be applied; selection only needs the prefix up to the limit
+// vouched for. Must be called with cs.mutex held; localTip is the applied tip
+// the caller read.
+func (cs *ChainSelector) eagernessVouchesLocked(
+	connId ouroboros.ConnectionId,
+	peerTip *PeerChainTip,
+	localTip ochainsync.Tip,
+	withinLimit bool,
+) bool {
+	if peerTip == nil || peerTip.awaitingFirstHeader ||
+		cs.config.MinCorroboratingPeers <= 0 {
+		return false
+	}
+	limit := cs.computeEagernessLimitLocked(&connId, localTip)
+	if !limit.Active || !limit.Intersected || len(limit.Point.Hash) == 0 {
+		return false
+	}
+	if withinLimit && peerTip.SelectionTip().BlockNumber > limit.BlockNumber {
+		return false
+	}
+	if !cs.eagernessFragmentLocked(connId, peerTip).containsPoint(limit.Point) {
+		return false
+	}
+	candidateIdentity, ok := cs.corroboratorIdentity(connId)
+	if !ok {
+		return false
+	}
+	witnesses := make(map[string]struct{})
+	for other, otherTip := range cs.peerTipsIncludingCandidatesLocked() {
+		if other == connId || otherTip.awaitingFirstHeader ||
+			!cs.peerLiveEligibleNonStaleLocked(other, otherTip) ||
+			cs.advertisedTipStaleLocked(otherTip) ||
+			!cs.eagernessFragmentLocked(other, otherTip).
+				containsPoint(limit.Point) {
+			continue
+		}
+		identity, ok := cs.corroboratorIdentity(other)
+		if !ok || identity == candidateIdentity {
+			continue
+		}
+		witnesses[identity] = struct{}{}
+	}
+	return len(witnesses) >= cs.config.MinCorroboratingPeers
 }
 
 func (cs *ChainSelector) pointOnAppliedChain(

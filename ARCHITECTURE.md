@@ -8572,6 +8572,36 @@ slot gauge reports the point the limit is measured from: the common point, or
 the last one the candidates shared once they stop overlapping, and 0 while the
 limit is measured from the local tip.
 
+#### ChainSync Jumping records
+
+`ChainSelectorConfig.ChainSyncJumping` (off by default) enables the selector
+half of ChainSync Jumping, the reference node's
+`Ouroboros/Consensus/MiniProtocol/ChainSync/Client/Jumping.hs`: one peer (the
+dynamo) streams headers, and other peers (jumpers) are asked at intervals
+whether they hold a point on the dynamo's fragment with `MsgFindIntersect`
+instead of streaming. `ChainSelector.RecordJumpAgreement` records an
+`IntersectFound` answer: the jumper's candidate fragment becomes the dynamo's
+committed fragment truncated at the agreed point, held under the jumper's own
+connection and therefore its own corroboration identity. The server proved
+that its chain holds the point, and header hashes chain, so it holds every
+point of the fragment below it. Such a record is a Limit on Eagerness
+candidate and witness and nothing else: it enters only the candidate and
+witness set of the limit (`peerTipsIncludingCandidatesLocked`), counts there
+although the connection holds no ingress slot, and is never selectable,
+compared by the density disconnector, or ranked. Witnesses are still counted
+by distinct identity with the candidate's own excluded, and the limit is still
+`k` past the common point, so a dynamo is apply-eligible up to `k` past the
+last point `MinCorroboratingPeers` other identities agreed to. A record is
+refused while the selector is outside Genesis mode, for a point the dynamo's
+committed fragment does not retain, and for a connection that has delivered
+headers itself. `ChainSelector.RecordJumpRejection` records an
+`IntersectNotFound` answer: the jumper becomes an objector and its record
+stays at the last point it agreed to, so the limit cannot pass `k` beyond
+that point until the objector's own stream supersedes the record; its fork is
+then bounded like any other candidate's. Records are removed with the
+connection. Nothing in the node issues jumps yet; the chainsync driver that
+elects the dynamo and sends the jumps is separate work.
+
 #### Anti-flap incumbent pin
 
 The active connection (the peer that drives the chainsync+blockfetch pipeline

@@ -198,6 +198,12 @@ type ChainSelectorConfig struct {
 	// corroboration (density-only Genesis selection, the historical default).
 	MinCorroboratingPeers int
 	ConnectionLive        func(ouroboros.ConnectionId) bool
+	// ChainSyncJumping enables ChainSync Jumping records
+	// (RecordJumpAgreement, RecordJumpRejection): a peer that answers a jump
+	// to the dynamo's point becomes a Limit on Eagerness candidate and
+	// witness without streaming headers. Off by default; while off both
+	// calls are refused.
+	ChainSyncJumping bool
 	// PeerIdentity maps a connection to a control identity used to
 	// de-duplicate corroborating witnesses. A connection for which it returns
 	// "" has no trustworthy independence evidence and
@@ -417,6 +423,10 @@ type ChainSelector struct {
 	// computed under the read lock.
 	eagernessAnchorMu sync.Mutex
 	eagernessAnchor   *eagernessAnchor
+
+	// jumpRecords holds the candidate fragments ChainSync Jumping assigns to
+	// peers that do not stream (see jumping.go). Guarded by mutex.
+	jumpRecords map[ouroboros.ConnectionId]*jumpRecord
 
 	// ingressWake is closed when staged or committed peer frontiers change,
 	// waking headers held by AwaitIngressCorroboration. It has its own mutex
@@ -671,6 +681,9 @@ func NewChainSelector(cfg ChainSelectorConfig) *ChainSelector {
 		),
 		forecastHorizonWitnesses: make(
 			map[ouroboros.ConnectionId]forecastHorizonWitness,
+		),
+		jumpRecords: make(
+			map[ouroboros.ConnectionId]*jumpRecord,
 		),
 		farTipClaims:              make(map[ouroboros.ConnectionId]farTipClaim),
 		pendingFarTipClaims:       make(map[ouroboros.ConnectionId]farTipClaim),
@@ -3226,6 +3239,7 @@ func (cs *ChainSelector) deletePeerLocked(connId ouroboros.ConnectionId) {
 	delete(cs.pendingPeerTips, connId)
 	delete(cs.pendingPeerTipFrontiers, connId)
 	delete(cs.forecastHorizonWitnesses, connId)
+	delete(cs.jumpRecords, connId)
 	delete(cs.committedPeerTips, connId)
 	delete(cs.eligible, connId)
 	delete(cs.priority, connId)
@@ -3759,8 +3773,9 @@ func (cs *ChainSelector) isPeerSelectableWithBestKnownBlockLocked(
 	}
 	// Genesis corroboration gate: a fast source must be corroborated by the
 	// configured minimum number of independent peers before it can steer
-	// selection. No-op outside Genesis mode / with corroboration disabled.
-	if !cs.isPeerCorroboratedLocked(connId, peerTip) {
+	// selection, or be within the Limit on Eagerness of a prefix they retain.
+	// No-op outside Genesis mode / with corroboration disabled.
+	if !cs.selectionCorroboratedLocked(connId, peerTip) {
 		if logSkip {
 			cs.config.Logger.Debug(
 				"skipping uncorroborated genesis fast source",

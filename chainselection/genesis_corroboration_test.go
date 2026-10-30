@@ -579,6 +579,23 @@ func TestPeerTipAdmissionCandidatesStayOutOfSelectionUntilAdmitted(t *testing.T)
 	assert.Nil(t, cs.pendingPeerTipFrontiers[applicant])
 }
 
+// witnessedAtCurrentPoint reports whether enough independent witnesses hold
+// connId's current point, the corroboration route that does not depend on the
+// Limit on Eagerness.
+func witnessedAtCurrentPoint(
+	cs *ChainSelector,
+	connId ouroboros.ConnectionId,
+) bool {
+	cs.mutex.RLock()
+	defer cs.mutex.RUnlock()
+	peerTip := cs.latestPeerTipCandidateLocked(connId)
+	if peerTip == nil {
+		peerTip = cs.peerTips[connId]
+	}
+	return cs.corroboratingPeersIncludingCandidatesLocked(connId, peerTip) >=
+		cs.config.MinCorroboratingPeers
+}
+
 func TestForecastHorizonWitnessRecoversVerifiedCandidate(t *testing.T) {
 	t.Parallel()
 
@@ -604,8 +621,10 @@ func TestForecastHorizonWitnessRecoversVerifiedCandidate(t *testing.T) {
 		HeaderCryptoVerificationGeneration: 1,
 	}
 	require.True(t, cs.PreparePeerTipAdmission(update))
-	require.False(t, cs.ShouldApplyIngress(candidate),
-		"a verified candidate must wait for a witness at its current point")
+	// The Limit on Eagerness admits the candidate's header one block past the
+	// shared prefix; the horizon witness concerns the witness route alone.
+	require.False(t, witnessedAtCurrentPoint(cs, candidate),
+		"no witness holds the candidate's current point yet")
 
 	horizonUpdate := PeerTipUpdateEvent{
 		ConnectionId:     witness,
@@ -616,12 +635,12 @@ func TestForecastHorizonWitnessRecoversVerifiedCandidate(t *testing.T) {
 	}
 	recoveries := cs.PrepareForecastHorizonWitness(horizonUpdate)
 	require.Equal(t, []ouroboros.ConnectionId{candidate}, recoveries)
-	require.True(t, cs.ShouldApplyIngress(candidate))
+	require.True(t, witnessedAtCurrentPoint(cs, candidate))
 	require.Equal(t, uint64(105), cs.GetAllPeerTips()[witness].ObservedTip.Point.Slot,
 		"an unverified horizon header must stay outside normal peer state")
 
 	cs.RemoveForecastHorizonWitness(horizonUpdate)
-	require.False(t, cs.ShouldApplyIngress(candidate),
+	require.False(t, witnessedAtCurrentPoint(cs, candidate),
 		"the temporary witness must stop corroborating when its wait ends")
 }
 

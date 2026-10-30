@@ -34,7 +34,8 @@ import (
 var ErrEagernessPeerUntracked = errors.New("eagerness peer untracked")
 
 // peerTipsIncludingCandidatesLocked lets admission gates see staged headers
-// without promoting them into the selectable peer set.
+// and ChainSync Jumping records without promoting them into the selectable
+// peer set.
 func (cs *ChainSelector) peerTipsIncludingCandidatesLocked() iter.Seq2[ouroboros.ConnectionId, *PeerChainTip] {
 	return func(yield func(ouroboros.ConnectionId, *PeerChainTip) bool) {
 		for connId, committed := range cs.peerTips {
@@ -52,6 +53,12 @@ func (cs *ChainSelector) peerTipsIncludingCandidatesLocked() iter.Seq2[ouroboros
 				continue
 			}
 			if _, exists := cs.peerTips[connId]; !exists && !yield(connId, peerTip) {
+				return
+			}
+		}
+		for connId := range cs.jumpRecords {
+			peerTip := cs.jumpCandidateLocked(connId)
+			if peerTip != nil && !yield(connId, peerTip) {
 				return
 			}
 		}
@@ -193,7 +200,7 @@ func (cs *ChainSelector) computeEagernessLimitFromPeersLocked(
 		// headers are not ingested, so its fragment can freeze.
 		if !cs.peerLiveEligibleNonStaleLocked(connId, peerTip) ||
 			cs.advertisedTipStaleLocked(peerTip) ||
-			!cs.eagernessCandidateAdmittedLocked(connId) {
+			!cs.loeCandidateConnectionLocked(connId) {
 			if include == nil || *include != connId {
 				continue
 			}
