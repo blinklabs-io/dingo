@@ -888,6 +888,20 @@ func TestExperimentalDijkstraEnabled(t *testing.T) {
 			expected: true,
 		},
 		{
+			name: "dijkstra network by name",
+			cfg: Config{cfg: &internalconfig.Config{
+				Network: ouroboros.NetworkCardanoDijkstra.Name,
+			}},
+			expected: true,
+		},
+		{
+			name: "dijkstra network by magic",
+			cfg: Config{cfg: &internalconfig.Config{
+				NetworkMagic: ouroboros.NetworkCardanoDijkstra.NetworkMagic,
+			}},
+			expected: true,
+		},
+		{
 			name: "non-musashi network stays disabled",
 			cfg: Config{cfg: &internalconfig.Config{
 				Network:      "preview",
@@ -961,6 +975,14 @@ func TestExperimentalLeiosNetworkingEnabled(t *testing.T) {
 				NetworkMagic: 164,
 			}},
 			expectNetworking:  true,
+			expectDijkstraEra: true,
+		},
+		{
+			name: "dijkstra network enables era only",
+			cfg: Config{cfg: &internalconfig.Config{
+				Network: ouroboros.NetworkCardanoDijkstra.Name,
+			}},
+			expectNetworking:  false,
 			expectDijkstraEra: true,
 		},
 	}
