@@ -242,7 +242,8 @@ services:
       start_period: 10s
 
   txpump-dingo:
-    image: ${TXPUMP_IMAGE:-ghcr.io/blinklabs-io/cardano-txpump:main@sha256:c3dadf8c6a6a1604487e32c2ee0503801369a989f0eaf82c73f0e7c5f7c5f9f3}
+    # The node requires era-tagged transaction IDs during mempool reconciliation.
+    image: ${TXPUMP_IMAGE:-ghcr.io/blinklabs-io/cardano-txpump:main@sha256:ede35f027be84e1d9b6e2e0958fcd33b90b05f8917567b5b29d4ff26619ccfb1}
     pull_policy: always
     profiles: ["dingo"]
     init: true
@@ -401,7 +402,7 @@ services:
       start_period: 10s
 
   txpump:
-    image: ${TXPUMP_IMAGE:-ghcr.io/blinklabs-io/cardano-txpump:main@sha256:c3dadf8c6a6a1604487e32c2ee0503801369a989f0eaf82c73f0e7c5f7c5f9f3}
+    image: ${TXPUMP_IMAGE:-ghcr.io/blinklabs-io/cardano-txpump:main@sha256:ede35f027be84e1d9b6e2e0958fcd33b90b05f8917567b5b29d4ff26619ccfb1}
     pull_policy: always
     profiles: ["conformance"]
     init: true
