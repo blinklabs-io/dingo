@@ -2580,13 +2580,41 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				appliedTip = o.ledgerState.Tip
 			}
 			admissionCtx, cancelAdmission := chainsyncAdmissionContext(ctx)
-			err := o.config.ChainsyncAwaitEagerness(
+			waitCtx, cancelWait := context.WithTimeout(
 				admissionCtx,
+				o.eagernessWaitTimeout,
+			)
+			err := o.config.ChainsyncAwaitEagerness(
+				waitCtx,
 				ctx.ConnectionId,
 				v.BlockNumber(),
 				appliedTip,
 			)
+			waitExpired := errors.Is(err, context.DeadlineExceeded) &&
+				admissionCtx.Err() == nil
+			cancelWait()
 			cancelAdmission()
+			if waitExpired {
+				// A callback parked past the protocol's reply timers would
+				// tear the connection down. The header is still past the
+				// limit, so it is not queued; re-intersecting from the local
+				// chain redelivers it and keeps this peer's observed history
+				// from advancing beyond the limit meanwhile.
+				tipAccepted = false
+				o.config.Logger.Debug(
+					"chainsync: eagerness wait expired",
+					"component", "ouroboros",
+					"slot", blockSlot,
+					"block_number", v.BlockNumber(),
+					"connection_id", ctx.ConnectionId.String(),
+				)
+				o.scheduleHeaderResync(
+					ctx.ConnectionId,
+					time.Now(),
+					event.ChainsyncResyncReasonEagernessWaitExpired,
+				)
+				return nil
+			}
 			if err != nil {
 				// The header never reaches the ledger queue.
 				tipAccepted = false
