@@ -6004,9 +6004,12 @@ func (ls *LedgerState) addChainsyncHeader(
 
 func (ls *LedgerState) chainsyncHeaderOriginError(header gledger.BlockHeader) error {
 	// Fresh chains support arbitrary anchors for offline imports. Network
-	// admission must establish block zero before any continuation; subsequent
-	// rollbacks to origin are also guarded atomically inside the chain.
-	if header.BlockNumber() != 0 && len(ls.chain.HeaderTip().Point.Hash) == 0 {
+	// serving is identified by the active-connection callback wired by the
+	// node. Inspect only its presence: calling it here would take networking
+	// locks under the header handler. Rollbacks to origin are also guarded
+	// atomically inside the chain.
+	if ls.config.GetActiveConnectionFunc != nil &&
+		header.BlockNumber() != 0 && len(ls.chain.HeaderTip().Point.Hash) == 0 {
 		return chain.NewBlockNotFitChainTipError(
 			header.Hash().String(),
 			header.PrevHash().String(),

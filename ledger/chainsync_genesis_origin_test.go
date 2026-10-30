@@ -88,6 +88,10 @@ func newGenesisChainsyncState(t *testing.T) *LedgerState {
 			Database:          db,
 			ChainManager:      cm,
 			CardanoNodeConfig: newTestShelleyGenesisCfg(t),
+			GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
+				conn := testChainsyncConnId(6601, 3001)
+				return &conn
+			},
 		},
 	)
 	require.NoError(t, err)
