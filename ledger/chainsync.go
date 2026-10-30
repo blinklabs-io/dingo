@@ -4171,12 +4171,15 @@ func (ls *LedgerState) localTipPraosView(ctx context.Context,
 	return view
 }
 
-func (ls *LedgerState) compareIncomingHeaderToLocalTip(
+func (ls *LedgerState) incomingHeaderTipComparison(
 	e ChainsyncEvent,
 	localTip ochainsync.Tip,
-) praos.ChainComparisonResult {
+) (
+	praos.ChainComparisonResult,
+	praos.PraosTiebreakerView,
+	praos.PraosTiebreakerView,
+) {
 	observedTip := observedHeaderTip(e)
-
 	incomingView, _ := praos.GetPraosTiebreakerView(e.BlockHeader)
 	localView := ls.localTipPraosView(ls.lifecycleContext(), localTip)
 	return ls.compareConsensusTips(
@@ -4184,7 +4187,7 @@ func (ls *LedgerState) compareIncomingHeaderToLocalTip(
 		localTip,
 		incomingView,
 		localView,
-	)
+	), incomingView, localView
 }
 
 func (ls *LedgerState) earlierHeaderCanBeatLocalTip(
@@ -6118,11 +6121,20 @@ func (ls *LedgerState) tryResolveForkPinned(
 ) (bool, error) {
 	incomingGenerationPinned := releaseIncomingGeneration != nil
 	localTip := ls.chain.Tip()
-	praosComparison := ls.compareIncomingHeaderToLocalTip(
+	praosComparison, incomingView, localView := ls.incomingHeaderTipComparison(
 		e,
 		localTip,
 	)
 	genesisActive, genesisWindow := ls.genesisSelectionState()
+	if !genesisActive {
+		ls.checkComparedTipSlotBattle(
+			observedHeaderTip(e),
+			localTip,
+			praosComparison,
+			incomingView,
+			localView,
+		)
+	}
 	// Once the selector has converged back to Praos, preserve the normal
 	// length-first decision and avoid the more expensive fork-path density
 	// walk for a candidate that cannot win.
@@ -6208,8 +6220,17 @@ func (ls *LedgerState) tryResolveForkPinned(
 		switch {
 		case peerDensity < localDensity:
 			return false, nil
-		case peerDensity == localDensity &&
-			praosComparison != praos.ChainABetter:
+		case peerDensity == localDensity:
+			ls.checkComparedTipSlotBattle(
+				observedHeaderTip(e),
+				localTip,
+				praosComparison,
+				incomingView,
+				localView,
+			)
+			if praosComparison == praos.ChainABetter {
+				break
+			}
 			// Equal density converges on the usual Praos length/VRF
 			// comparison, matching selector peer-ranking behavior.
 			return false, nil
@@ -10185,10 +10206,11 @@ func (ls *LedgerState) cleanupBlockNoncesBefore(
 	}
 }
 
-// checkSlotBattle checks whether an incoming block from a peer
-// occupies a slot for which the local node has already forged a
-// block. If so, it counts and logs the battle and registers it so the winner
-// is reported once the slot is settled.
+// checkSlotBattle preserves body-stage detection for an incoming peer block
+// that occupies a slot the local node forged. Header-stage chain selection
+// detects equal-height battles across the active restricted Praos window in
+// checkComparedTipSlotBattle. Both paths converge on recordSlotBattle so one
+// comparison delivered through both stages is counted once.
 //
 // The winner cannot be read when the rival arrives. chain.AddBlock only
 // accepts a block that extends the tip, so an accepted rival means the forged
@@ -10217,25 +10239,85 @@ func (ls *LedgerState) checkSlotBattle(e BlockfetchEvent) {
 		return
 	}
 
+	ls.recordSlotBattle(incomingSlot, localHash, incomingSlot, remoteHash)
+}
+
+func (ls *LedgerState) checkComparedTipSlotBattle(
+	incomingTip, localTip ochainsync.Tip,
+	comparison praos.ChainComparisonResult,
+	incomingView, localView praos.PraosTiebreakerView,
+) {
+	if comparison == praos.ChainEqual ||
+		incomingTip.BlockNumber != localTip.BlockNumber {
+		return
+	}
+
+	config := incomingView.TiebreakerConfig
+	if config.Flavor == praos.PraosTiebreakerUnknown {
+		config = localView.TiebreakerConfig
+	}
+	if config.Flavor != praos.PraosTiebreakerRestricted ||
+		slotDistance(incomingTip.Point.Slot, localTip.Point.Slot) >
+			config.MaxSlotDistance {
+		return
+	}
+
+	checker := ls.loadForgedBlockChecker()
+	if checker == nil {
+		return
+	}
+	localHash, forged := checker.WasForgedByUs(localTip.Point.Slot)
+	if !forged || !bytes.Equal(localHash, localTip.Point.Hash) ||
+		bytes.Equal(localHash, incomingTip.Point.Hash) {
+		return
+	}
+
+	ls.recordSlotBattle(
+		localTip.Point.Slot,
+		localHash,
+		incomingTip.Point.Slot,
+		incomingTip.Point.Hash,
+	)
+}
+
+func slotDistance(a, b uint64) uint64 {
+	if a >= b {
+		return a - b
+	}
+	return b - a
+}
+
+func (ls *LedgerState) recordSlotBattle(
+	localSlot uint64,
+	localHash []byte,
+	remoteSlot uint64,
+	remoteHash []byte,
+) {
+	if ls.chain == nil {
+		return
+	}
+	battle := slotBattle{
+		slot:       localSlot,
+		localHash:  bytes.Clone(localHash),
+		remoteSlot: remoteSlot,
+		remoteHash: bytes.Clone(remoteHash),
+		settleAt:   ls.chain.Tip().BlockNumber + ls.slotBattleSettleDepth(),
+	}
+	if !ls.slotBattles.add(battle) {
+		return
+	}
+
 	ls.config.Logger.Warn(
 		"slot battle detected",
 		"component", "ledger",
-		"slot", incomingSlot,
+		"slot", localSlot,
+		"remote_slot", remoteSlot,
 		"local_block_hash", hex.EncodeToString(localHash),
 		"remote_block_hash", hex.EncodeToString(remoteHash),
 	)
-
-	// Increment slot battle metric
 	if recorder := ls.loadSlotBattleRecorder(); recorder != nil {
 		recorder.RecordSlotBattle()
 	}
-
-	ls.slotBattles.add(slotBattle{
-		slot:       incomingSlot,
-		localHash:  localHash,
-		remoteHash: remoteHash,
-		settleAt:   ls.chain.Tip().BlockNumber + ls.slotBattleSettleDepth(),
-	})
 }
 
 // selectInitialBlockfetchConn picks the connection to fetch the queued range
