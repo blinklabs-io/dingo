@@ -6520,16 +6520,20 @@ it. Dingo implements this as a **corroboration gate**
 (`chainselection/genesis_corroboration.go`), controlled by
 `genesisBootstrap.corroborationPeers` (`MinCorroboratingPeers`):
 
-A retained peer fork path also records the longest ancestor prefix whose
-stateless cryptography passed for one consensus context generation, epoch,
-and candidate nonce. Extending the same hash-linked path or publishing a tip
-within that context preserves the marker; a context change, nonce change,
-different anchor, or different prefix prevents reuse. The
-marker adds constant storage per retained connection and is discarded with its
-existing fork-path cache. It skips only repeated VRF, KES, and operational
-certificate signature verification. Peer-scoped ancestry lookup, recorded
-verdict freshness, pool registration, leader eligibility, and operational
-certificate counter checks still run through their existing paths. A successful
+A retained peer fork path also records two ancestor prefixes for one consensus
+context generation, epoch, and candidate nonce: the longest prefix whose
+stateless cryptography passed, and the longest prefix whose ledger-state checks
+(header size limits, registered VRF key, and leader eligibility) passed.
+Extending the same hash-linked path or publishing a tip within that context
+preserves both markers; a context change, nonce change, different anchor, or
+different prefix prevents reuse. Each marker records only successes, in path
+order, so an ancestor that failed or deferred is checked again for every later
+header. The markers add constant storage per retained connection and are
+discarded with the existing fork-path cache. They skip only repeated VRF, KES,
+and operational certificate signature verification and repeated ancestor state
+checks within one context. Peer-scoped ancestry lookup, recorded verdict
+freshness, the candidate header's own state checks, and operational certificate
+counter checks still run through their existing paths. A successful
 cryptographic result does not stamp a raw header as fully verified: unavailable
 or invalid state continues to defer or reject it.
 
