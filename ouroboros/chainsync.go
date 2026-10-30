@@ -1880,6 +1880,12 @@ func (o *Ouroboros) headerAtOrBelowLocalTip(header gledger.BlockHeader) bool {
 		return false
 	}
 	tipBlock, _ := o.chainsyncLocalTipBlock()
+	// Origin and the first applied block both have block number zero. Only
+	// a nonempty applied point can make the first header historical.
+	if tipBlock == 0 && (o.ledgerState == nil ||
+		len(o.ledgerState.Tip().Point.Hash) == 0) {
+		return false
+	}
 	if _, boundary := header.(*byron.ByronEpochBoundaryBlockHeader); boundary {
 		return header.BlockNumber() < tipBlock
 	}
