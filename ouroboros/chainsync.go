@@ -1499,9 +1499,27 @@ func (o *Ouroboros) chainsyncServerAwaitNext(
 				appliedTip := o.ledgerState.Tip().Point
 				if appliedTip.Slot == next.Point.Slot &&
 					!bytes.Equal(appliedTip.Hash, next.Point.Hash) {
-					// A different block reached the same slot. Wait for the
-					// iterator's rollback event and serve that instead.
-					continue
+					isParent, err := o.chainsyncServerAppliedParent(
+						appliedTip,
+						next.Point,
+					)
+					if err != nil {
+						// applied has fired and will not fire again, so
+						// retrying here would park the peer until a rollback
+						// that a same-chain tip never produces.
+						cancel()
+						o.closeChainsyncServerConn(
+							conn,
+							ctx.ConnectionId.String(),
+							fmt.Errorf("resolve applied tip parent: %w", err),
+						)
+						return
+					}
+					if !isParent {
+						// A different block reached the same slot. Wait for
+						// the iterator's rollback event and serve that instead.
+						continue
+					}
 				}
 				cancel()
 				o.chainsyncServerServeAwaited(ctx, conn, next, nextErr)
@@ -1510,6 +1528,41 @@ func (o *Ouroboros) chainsyncServerAwaitNext(
 		}
 	}
 	o.chainsyncServerServeAwaited(ctx, conn, next, nextErr)
+}
+
+// chainsyncServerAppliedParent reports whether next is the parent of the
+// applied tip. A Byron epoch-boundary block shares its slot with the block
+// after it, so the ledger can apply both before the waiter wakes and leave a
+// tip at next's slot with a different hash. That is not a fork: no rollback
+// will follow, and treating it as one parks the client indefinitely.
+func (o *Ouroboros) chainsyncServerAppliedParent(
+	appliedTip ocommon.Point,
+	next ocommon.Point,
+) (bool, error) {
+	prevHash, err := o.chainsyncServerPrevHash(appliedTip)
+	if err != nil {
+		return false, err
+	}
+	return bytes.Equal(prevHash, next.Hash), nil
+}
+
+// chainsyncServerPrevHash returns the previous hash of the block at point on
+// the primary chain.
+func (o *Ouroboros) chainsyncServerPrevHash(
+	point ocommon.Point,
+) ([]byte, error) {
+	if o.chainsyncServerPrevHashFunc != nil {
+		return o.chainsyncServerPrevHashFunc(point)
+	}
+	block, err := o.ledgerState.Chain().BlockByPoint(
+		context.Background(),
+		point,
+		nil,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return block.PrevHash, nil
 }
 
 // closeAbandonedChainsyncServerConn drops the transport when the connection is

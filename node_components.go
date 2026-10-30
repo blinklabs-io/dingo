@@ -95,6 +95,7 @@ func (n *Node) newPeerGovernor() *peergov.PeerGovernor {
 	}
 
 	peerGovConfig := peergov.PeerGovernorConfig{
+		ControlGroups:   n.genesisControlGroups(),
 		Logger:          n.config.logger,
 		EventBus:        n.eventBus,
 		ConnManager:     n.connManager,

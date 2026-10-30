@@ -937,6 +937,13 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		))
 	}
 
+	for i, group := range c.GenesisBootstrap.ControlGroups {
+		if err := group.Validate(); err != nil {
+			errs = append(errs, fmt.Errorf(
+				"invalid genesisBootstrap.controlGroups[%d]: %w", i, err,
+			))
+		}
+	}
 	// Genesis corroboration is a security gate: a negative value must fail
 	// closed rather than silently disabling it (only 0 disables it).
 	if c.GenesisBootstrap.CorroborationPeers < 0 {

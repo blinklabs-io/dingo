@@ -600,6 +600,28 @@ func (a *transactionBatchAccumulator) Reset() {
 	a.overlay = nil
 }
 
+// Len reports pending metadata rows for the API backfill batch bound.
+func (a *transactionBatchAccumulator) Len() int {
+	length := len(a.stakeDeltaOrder) + len(a.opCertOrder)
+	for i := range a.rows.entries {
+		length += len(a.rows.entries[i].rows)
+	}
+	return length
+}
+
+// EstimatedSizeBytes reports queued SQL argument payload and per-value
+// overhead for the API backfill memory bound. It is an estimate, not RSS.
+func (a *transactionBatchAccumulator) EstimatedSizeBytes() int64 {
+	if !a.rows.trackSize {
+		return 0
+	}
+	return a.rows.EstimatedSizeBytes()
+}
+
+func (a *transactionBatchAccumulator) EnableSizeTracking() {
+	a.rows.enableSizeTracking()
+}
+
 func (s *Store) NewBatchAccumulator() types.MetadataBatchAccumulator {
 	return &transactionBatchAccumulator{sqlOperations: s.sqlOperations}
 }

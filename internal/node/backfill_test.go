@@ -764,9 +764,173 @@ func TestBackfillBatchSizeDefaultAndOverride(t *testing.T) {
 	db := newTestDB(t)
 	bf := NewBackfill(db, nil, slog.Default())
 
-	require.Equal(t, DefaultBackfillBatchSize, bf.batchSize)
-	require.NoError(t, bf.SetBatchSize(200))
 	require.Equal(t, 200, bf.batchSize)
+	require.NoError(t, bf.SetBatchSize(300))
+	require.Equal(t, 300, bf.batchSize)
+}
+
+type fixedBackfillBatchMetrics struct {
+	rows  int
+	bytes int64
+}
+
+func (fixedBackfillBatchMetrics) Reset() {}
+
+func (m fixedBackfillBatchMetrics) Len() int {
+	return m.rows
+}
+
+func (m fixedBackfillBatchMetrics) EstimatedSizeBytes() int64 {
+	return m.bytes
+}
+
+func TestBackfillBatchLimitReached(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		rows  int
+		bytes int64
+		want  bool
+	}{
+		{
+			name:  "below both limits",
+			rows:  DefaultBackfillBatchRows - 1,
+			bytes: DefaultBackfillBatchBytes - 1,
+		},
+		{
+			name: "row limit",
+			rows: DefaultBackfillBatchRows,
+			want: true,
+		},
+		{
+			name:  "byte limit",
+			bytes: DefaultBackfillBatchBytes,
+			want:  true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			acc := fixedBackfillBatchMetrics{
+				rows: test.rows, bytes: test.bytes,
+			}
+			assert.Equal(t, test.want, backfillBatchLimitReached(acc))
+		})
+	}
+}
+
+func TestBackfillFlushesFullRowBatchWithinBlock(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir:     "",
+		StorageMode: types.StorageModeAPI,
+		Logger:      slog.Default(),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
+	backfill := NewBackfill(db, nil, slog.Default())
+	backfill.SetDelegatorInactivityEnabled(false)
+	acc := db.NewBatchAccumulator()
+	txn := db.Transaction(ctx, true)
+	defer txn.Release()
+	defer acc.Reset()
+
+	witnesses := make([]lcommon.VkeyWitness, 0, DefaultBackfillBatchRows)
+	for i := range DefaultBackfillBatchRows {
+		witnesses = append(witnesses, lcommon.VkeyWitness{
+			Vkey:      []byte{byte(i >> 8), byte(i), 0x01},
+			Signature: []byte{byte(i >> 8), byte(i), 0x02},
+		})
+	}
+	input, err := mockledger.NewTransactionInputBuilder().
+		WithTxId(bytes.Repeat([]byte{0xC3}, 32)).
+		WithIndex(0).
+		Build()
+	require.NoError(t, err)
+	address, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyKey,
+		lcommon.AddressNetworkTestnet,
+		bytes.Repeat([]byte{0xD4}, lcommon.AddressHashSize),
+		bytes.Repeat([]byte{0xE5}, lcommon.AddressHashSize),
+	)
+	require.NoError(t, err)
+	output, err := mockledger.NewTransactionOutputBuilder().
+		WithAddress(address.String()).
+		WithLovelace(1_000_000).
+		Build()
+	require.NoError(t, err)
+	txBuilder := mockledger.NewTransactionBuilder()
+	txBuilder.WithId(bytes.Repeat([]byte{0xA1}, 32))
+	txBuilder.WithInputs(input)
+	txBuilder.WithOutputs(output)
+	txBuilder.WithValid(true)
+	txBuilder.WithWitnesses(
+		mockledger.NewMockTransactionWitnessSet().WithVkeyWitnesses(witnesses...),
+	)
+	tx, err := txBuilder.Build()
+	require.NoError(t, err)
+
+	point := ocommon.Point{
+		Slot: 100,
+		Hash: bytes.Repeat([]byte{0xB2}, 32),
+	}
+	var blockHash [32]byte
+	copy(blockHash[:], point.Hash)
+	var txHash [32]byte
+	copy(txHash[:], tx.Hash().Bytes())
+	utxoOffsets := make(map[database.UtxoRef]database.CborOffset)
+	for _, produced := range tx.Produced() {
+		var producedTxHash [32]byte
+		copy(producedTxHash[:], produced.Id.Id().Bytes())
+		utxoOffsets[database.UtxoRef{
+			TxId:      producedTxHash,
+			OutputIdx: produced.Id.Index(),
+		}] = database.CborOffset{
+			BlockSlot:  point.Slot,
+			BlockHash:  blockHash,
+			ByteLength: 1,
+		}
+	}
+	offsets := &database.BlockIngestionResult{
+		TxOffsets: map[[32]byte]database.CborOffset{
+			txHash: {
+				BlockSlot:  point.Slot,
+				BlockHash:  blockHash,
+				ByteLength: 1,
+			},
+		},
+		UtxoOffsets: utxoOffsets,
+	}
+
+	require.NoError(t, backfill.processBlockTxsBatched(
+		ctx,
+		[]lcommon.Transaction{tx},
+		point,
+		0,
+		eras.ConwayEraDesc.Id,
+		nil,
+		offsets,
+		acc,
+		txn,
+		nil,
+		true,
+	))
+	sizer, ok := acc.(backfillBatchSizer)
+	require.True(t, ok)
+	assert.Zero(t, sizer.Len())
+
+	stored, err := db.GetTransactionByHash(ctx, tx.Hash().Bytes(), txn)
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	assert.Len(t, stored.KeyWitnesses, DefaultBackfillBatchRows)
+
+	require.NoError(t, txn.Rollback())
+	stored, err = db.GetTransactionByHash(ctx, tx.Hash().Bytes(), nil)
+	require.NoError(t, err)
+	assert.Nil(t, stored, "the row flush must remain inside the caller transaction")
 }
 
 func TestBackfillSetBatchSizeRejectsInvalid(t *testing.T) {

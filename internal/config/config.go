@@ -321,6 +321,10 @@ type ChainsyncConfig struct {
 // GenesisBootstrapConfig holds configuration for Genesis-mode chain
 // selection and bootstrap-time peer promotion.
 type GenesisBootstrapConfig struct {
+	// ControlGroups overrides network relay control metadata. Nil selects network
+	// defaults; an explicit empty list disables those defaults.
+	ControlGroups []topology.PeerControlGroup `yaml:"controlGroups" ignored:"true"`
+
 	// Enabled controls whether Genesis bootstrap mode is used when the node
 	// starts from origin.
 	Enabled bool `yaml:"enabled"                     envconfig:"DINGO_GENESIS_BOOTSTRAP_ENABLED"`
@@ -1622,7 +1626,7 @@ func newDefaultConfig() *Config {
 		// Defaults for database worker pool and API backfill tuning
 		DatabaseWorkers:   5,
 		DatabaseQueueSize: 50,
-		BackfillBatchSize: 100,
+		BackfillBatchSize: 200,
 		// CIP-50 default L (feature disabled by default via PledgeLeverageEnabled)
 		PledgeLeverage: 100,
 		// Cache configuration defaults
@@ -1764,6 +1768,9 @@ func cloneConfig(cfg *Config) *Config {
 		return nil
 	}
 	clone := *cfg
+	clone.GenesisBootstrap.ControlGroups = topology.ClonePeerControlGroups(
+		cfg.GenesisBootstrap.ControlGroups,
+	)
 	clone.TokenRegistry.HeaderSecrets = maps.Clone(cfg.TokenRegistry.HeaderSecrets)
 	clone.BarkBlockDownloadHosts = append(
 		[]string(nil),
