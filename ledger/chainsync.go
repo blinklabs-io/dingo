@@ -2644,21 +2644,40 @@ func (ls *LedgerState) genesisSelectionState() (bool, uint64) {
 	return active && window > 0, window
 }
 
+// peerHeaderHistoryLimit bounds, in headers, both how many already-passed
+// headers each connection retains and how deep a fork-path walk follows that
+// history. While Genesis selection is active it rises to the candidate-fragment
+// bound derived from the Genesis window, which is measured in slots and must
+// be converted before it can bound a header count.
 func (ls *LedgerState) peerHeaderHistoryLimit() int {
 	limit := maxPeerHeaderHistoryPerConn
 	if ls.chain != nil {
 		limit = max(limit, ls.allowedQueuedHeaders())
 	}
 	active, window := ls.genesisSelectionState()
-	if !active || window <= uint64(limit) {
+	if !active {
 		return limit
 	}
-	if window > uint64(math.MaxInt) {
-		return math.MaxInt
+	return max(
+		limit,
+		chainselection.GenesisCandidateHeaderLimit(
+			window,
+			ls.shelleySecurityParam(),
+		),
+	)
+}
+
+// shelleySecurityParam returns the Shelley genesis security parameter the
+// Genesis window is derived from, or zero when it is unknown.
+func (ls *LedgerState) shelleySecurityParam() uint64 {
+	if ls.config.CardanoNodeConfig == nil {
+		return 0
 	}
-	// The MaxInt check above makes this conversion safe on both 32- and
-	// 64-bit platforms.
-	return int(window) //nolint:gosec // G115: window is bounded by MaxInt
+	sg := ls.config.CardanoNodeConfig.ShelleyGenesis()
+	if sg == nil || sg.SecurityParam <= 0 {
+		return 0
+	}
+	return uint64(sg.SecurityParam) //nolint:gosec // checked positive above
 }
 
 // headerAtOrImmediatelyBeforeTip recognizes only points already accepted into

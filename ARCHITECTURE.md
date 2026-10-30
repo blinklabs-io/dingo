@@ -6356,12 +6356,21 @@ where the node actually is. Greater density wins;
 equal density falls back to the normal Praos length/select-view comparison.
 Node composition injects an atomic Genesis-mode/window query from
 `ChainSelector` into ledger, so the same resolver automatically returns to
-Praos once the selector exits Genesis mode. Chainsync and ledger retain enough
-per-peer header ancestry for the active slot window while Genesis is active,
-then shrink back to their normal bounded history after exit. The ledger's
+Praos once the selector exits Genesis mode. While Genesis is active, chainsync
+and ledger raise their per-peer header ancestry entry bound to the candidate
+fragment bound, `chainselection.GenesisCandidateHeaderLimit`: k headers plus
+one header per window slot, because the window is measured in slots and a
+candidate denser than the active-slot coefficient holds more than 3k headers in
+it. They shrink back to their normal bounded history after exit. That entry
+bound is attacker-controlled in memory, so both histories are also held to
+byte budgets that apply whatever the entry bound is. Chainsync's observed-header
+history retains decoded headers; each record is charged its header CBOR plus
+2 KiB for the decoded form, and the history is held to 48 MiB per connection
+and 128 MiB across connections, evicting oldest first and trimming the largest
+history first under total pressure. The ledger's
 peer-local ancestry stores compact header CBOR and prev-hash metadata rather
-than retaining decoded header objects, and enforces the active window's
-entry bound and an 8 MiB per-connection byte budget. Headers still ahead of
+than retaining decoded header objects, and enforces the entry bound and an
+8 MiB per-connection byte budget. Headers still ahead of
 the local tip are kept past the entry bound, up to the header queue capacity
 (`chain.MaxQueuedHeaders`) and within the byte budgets, so that after a header
 queue clear the in-flight headers of an honest peer still reach the local tip.

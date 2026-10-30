@@ -194,8 +194,10 @@ type Config struct {
 	SeenHeadersRetention uint64
 	// ObservedHeaderLimitFunc returns the per-connection ancestry limit used
 	// by fork resolution. A non-positive result uses the bounded default.
-	// Genesis composition raises this to the active density window so a fully
-	// fetched candidate remains reconstructable from its intersection.
+	// Genesis composition raises this to the candidate-fragment bound (k plus
+	// the forecast range, in headers) so a fully fetched candidate remains
+	// reconstructable from its intersection. Retained history is also bounded
+	// in bytes per connection and in total, whatever this limit returns.
 	ObservedHeaderLimitFunc func() int
 	// PromRegistry, when non-nil, is used to register chainsync metrics
 	// such as the current header deduplication cache size.
@@ -314,6 +316,9 @@ type State struct {
 
 	observedHeaders      map[ouroboros.ConnectionId]*observedHeaderChain
 	observedHeadersMutex sync.RWMutex
+	// observedHeaderBytes is the charged size of every retained observed
+	// header across all connections. Guarded by observedHeadersMutex.
+	observedHeaderBytes int
 
 	sync.Mutex
 }
@@ -328,14 +333,35 @@ type headerRecord struct {
 type observedHeaderRecord struct {
 	header   ObservedHeader
 	prevHash []byte
+	bytes    int
 }
 
 type observedHeaderChain struct {
-	order  []string
-	byHash map[string]observedHeaderRecord
+	order         []string
+	byHash        map[string]observedHeaderRecord
+	retainedBytes int
 }
 
-const maxObservedHeadersPerConn = 256
+const (
+	maxObservedHeadersPerConn = 256
+
+	// The header count limit follows the Genesis candidate-fragment bound,
+	// which is one header per window slot and so is attacker-controlled in
+	// memory: a dense peer can fill it with ~130k decoded headers on mainnet.
+	// These byte budgets bound what that count may retain. Each record is
+	// charged its header CBOR plus observedHeaderRecordOverhead for the
+	// decoded form and record bookkeeping; a decoded Conway header holding its
+	// 859-byte CBOR occupies about 2.4 KB of heap. The per-connection and total
+	// budgets hold about twice the bytes of the ledger's 24 MiB unapplied
+	// per-connection and 64 MiB total peer header budgets, so this decoded
+	// history keeps roughly as many headers as the ledger's CBOR history and
+	// is not the tighter bound on a fork-path walk. Oldest headers are
+	// evicted first, so a candidate whose fragment outgrows the budget loses
+	// its oldest ancestry and recovers through a fresh intersection.
+	observedHeaderRecordOverhead  = 2048
+	maxObservedHeaderBytesPerConn = 48 << 20
+	maxObservedHeaderBytesTotal   = 128 << 20
+)
 
 // NewState creates a new chainsync State with the given
 // event bus and chain provider using default configuration.
@@ -1424,19 +1450,69 @@ func (s *State) recordObservedHeader(
 		}
 		return
 	}
+	recordBytes := observedHeaderRecordOverhead + len(h.BlockHeader.Cbor())
+	if recordBytes > maxObservedHeaderBytesPerConn {
+		if len(chainHistory.order) == 0 {
+			delete(s.observedHeaders, h.ConnectionId)
+		}
+		return
+	}
 	h.Point.Hash = cloneBytes(h.Point.Hash)
 	h.Tip.Point.Hash = cloneBytes(h.Tip.Point.Hash)
 	chainHistory.order = append(chainHistory.order, hashKey)
 	chainHistory.byHash[hashKey] = observedHeaderRecord{
 		header:   h,
 		prevHash: append([]byte(nil), prevHash...),
+		bytes:    recordBytes,
 	}
+	chainHistory.retainedBytes += recordBytes
+	s.observedHeaderBytes += recordBytes
 	limit := s.observedHeaderLimit()
-	for len(chainHistory.order) > limit {
-		evictKey := chainHistory.order[0]
-		chainHistory.order = chainHistory.order[1:]
+	for len(chainHistory.order) > limit ||
+		chainHistory.retainedBytes > maxObservedHeaderBytesPerConn {
+		s.evictOldestObservedHeaderLocked(chainHistory)
+	}
+	for s.observedHeaderBytes > maxObservedHeaderBytesTotal {
+		largest := s.largestObservedHeaderChainLocked()
+		if largest == nil {
+			break
+		}
+		s.evictOldestObservedHeaderLocked(largest)
+	}
+}
+
+// evictOldestObservedHeaderLocked drops the oldest retained header of
+// chainHistory. Caller must hold observedHeadersMutex for writing.
+func (s *State) evictOldestObservedHeaderLocked(
+	chainHistory *observedHeaderChain,
+) {
+	evictKey := chainHistory.order[0]
+	chainHistory.order = chainHistory.order[1:]
+	if record, ok := chainHistory.byHash[evictKey]; ok {
+		chainHistory.retainedBytes -= record.bytes
+		s.observedHeaderBytes -= record.bytes
 		delete(chainHistory.byHash, evictKey)
 	}
+}
+
+// largestObservedHeaderChainLocked returns the connection history retaining
+// the most bytes. Trimming the largest history first under total pressure
+// leaves every connection an equal share rather than letting one dense peer
+// evict the others' ancestry. It returns nil when no history retains a
+// header, so a caller looping on the total budget cannot spin on an empty
+// map. Caller must hold observedHeadersMutex.
+func (s *State) largestObservedHeaderChainLocked() *observedHeaderChain {
+	var largest *observedHeaderChain
+	for _, chainHistory := range s.observedHeaders {
+		if len(chainHistory.order) == 0 {
+			continue
+		}
+		if largest == nil ||
+			chainHistory.retainedBytes > largest.retainedBytes {
+			largest = chainHistory
+		}
+	}
+	return largest
 }
 
 func (s *State) observedHeaderLimit() int {
@@ -1475,6 +1551,9 @@ func (s *State) clearObservedHeaderHistory(
 ) {
 	s.observedHeadersMutex.Lock()
 	defer s.observedHeadersMutex.Unlock()
+	if chainHistory := s.observedHeaders[connId]; chainHistory != nil {
+		s.observedHeaderBytes -= chainHistory.retainedBytes
+	}
 	delete(s.observedHeaders, connId)
 }
 
@@ -1511,7 +1590,11 @@ func (s *State) ClearObservedHeaderHistoryFrom(
 		}
 	}
 	for _, hashKey := range chainHistory.order[index:] {
-		delete(chainHistory.byHash, hashKey)
+		if record, ok := chainHistory.byHash[hashKey]; ok {
+			chainHistory.retainedBytes -= record.bytes
+			s.observedHeaderBytes -= record.bytes
+			delete(chainHistory.byHash, hashKey)
+		}
 	}
 	if index == 0 {
 		delete(s.observedHeaders, connId)
