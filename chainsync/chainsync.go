@@ -1050,44 +1050,58 @@ func (s *State) SetClientObservabilityOnly(
 // no other ingress client already carries: Genesis selection counts an
 // identity once, so a second connection of the same identity adds no witness.
 // The longest-idle client that is neither a root nor the active one becomes
-// observability-only and stays connected, provided it has no identity or
-// shares its identity with another ingress client. Every client displaced that
-// way either lacks an identity or is a duplicate, and a duplicate cannot
-// reclaim a slot while its identity is represented, so displacement cannot
-// cycle. Identity-less victims are taken before duplicates. It reports false
-// when connId has no claim or no client can be displaced.
+// observability-only and stays connected. A candidate displaces only a client
+// that has no identity or shares its identity with another ingress client, so
+// every client it displaces lacks an identity or is a duplicate, and a
+// duplicate cannot reclaim a slot while its identity is represented, so
+// displacement cannot cycle. A root may also displace the only ingress client
+// of an identity, so root capacity does not depend on corroboration state.
+// Identity-less victims are taken before duplicates, and duplicates before
+// distinct identities. It reports false when connId has no claim or no client
+// can be displaced.
 // Caller must hold clientConnIdMutex.
 func (s *State) preemptForRootLocked(
 	connId ouroboros.ConnectionId,
 ) (*ClientRemovedEvent, bool) {
 	ingressIdentities := s.ingressIdentityCountsLocked()
-	if !s.isRoot(connId) {
+	root := s.isRoot(connId)
+	if !root {
 		identity := s.corroborationIdentity(connId)
 		if identity == "" || ingressIdentities[identity] > 0 {
 			return nil, false
 		}
 	}
+	// Victim rank: identity-less, then duplicate identity, then the sole
+	// ingress client of an identity, which only a root may displace.
+	const (
+		rankIdentityLess = iota
+		rankDuplicate
+		rankDistinct
+	)
 	var victim *TrackedClient
-	victimDuplicate := false
+	victimRank := 0
 	for id, tc := range s.trackedClients {
 		if tc.ObservabilityOnly ||
 			(s.activeClientConnId != nil && *s.activeClientConnId == id) ||
 			s.isRoot(id) {
 			continue
 		}
-		duplicate := false
+		rank := rankIdentityLess
 		if identity := s.corroborationIdentity(id); identity != "" {
+			rank = rankDuplicate
 			if ingressIdentities[identity] < 2 {
-				continue
+				if !root {
+					continue
+				}
+				rank = rankDistinct
 			}
-			duplicate = true
 		}
 		if victim == nil ||
-			(victimDuplicate && !duplicate) ||
-			(victimDuplicate == duplicate &&
+			rank < victimRank ||
+			(rank == victimRank &&
 				tc.LastActivity.Before(victim.LastActivity)) {
 			victim = tc
-			victimDuplicate = duplicate
+			victimRank = rank
 		}
 	}
 	if victim == nil {

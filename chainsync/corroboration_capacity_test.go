@@ -258,3 +258,62 @@ func TestCorroborationDisplacedDuplicateDoesNotCycle(t *testing.T) {
 	assert.False(t, state.SetClientObservabilityOnly(displaced, false))
 	assert.True(t, observabilityOnly(t, state, displaced))
 }
+
+// A configured root keeps its claim on a slot while corroboration is in
+// effect, even when every slot holds a distinct identity: the identity
+// restriction on victims applies only to non-root claimants.
+func TestCorroborationRootPreemptsDistinctIdentities(t *testing.T) {
+	t.Parallel()
+	var active atomic.Bool
+	active.Store(true)
+	state := newCorroborationState(t, &active)
+	var identified []ouroboros.ConnectionId
+	for _, port := range []uint{200, 201, 202} {
+		connId := newTestConnId(port)
+		require.True(t, state.TryAddClientConnIdWithDirection(
+			connId, rootTestSlots, true,
+		))
+		identified = append(identified, connId)
+	}
+	root := newTestConnId(100)
+
+	require.True(
+		t,
+		state.TryAddClientConnIdWithDirection(root, rootTestSlots, true),
+		"a configured root must be admitted when distinct identities fill every slot",
+	)
+
+	assert.False(t, observabilityOnly(t, state, root))
+	assert.Equal(t, rootTestSlots, state.ClientConnCount())
+	assert.Equal(t, 1, countObservers(t, state, identified))
+}
+
+// A configured root displaces an identity-less client before a distinct
+// identity, even a more recently active one, so admitting the root does not cost a witness when it need not.
+func TestCorroborationRootPrefersIdentityLessVictim(t *testing.T) {
+	t.Parallel()
+	var active atomic.Bool
+	active.Store(true)
+	state := newCorroborationState(t, &active)
+	var identified []ouroboros.ConnectionId
+	for _, port := range []uint{200, 201} {
+		connId := newTestConnId(port)
+		require.True(t, state.TryAddClientConnIdWithDirection(
+			connId, rootTestSlots, true,
+		))
+		identified = append(identified, connId)
+	}
+	// Added last, so it is the most recently active and longest idle alone
+	// would pick an identified peer.
+	identityLess := newTestConnId(1)
+	require.True(t, state.TryAddClientConnIdWithDirection(
+		identityLess, rootTestSlots, true,
+	))
+
+	require.True(t, state.TryAddClientConnIdWithDirection(
+		newTestConnId(100), rootTestSlots, true,
+	))
+
+	assert.True(t, observabilityOnly(t, state, identityLess))
+	assert.Zero(t, countObservers(t, state, identified))
+}
