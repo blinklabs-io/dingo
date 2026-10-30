@@ -1056,6 +1056,11 @@ func (b *Blockfrost) handleAddressTransactions(
 	if !ok {
 		return
 	}
+	release, ok := b.admitAddressSummary(w, r)
+	if !ok {
+		return
+	}
+	defer release()
 	address := r.PathValue("address")
 	txs, total, err := b.node.AddressTransactions(r.Context(), address, params)
 	if err != nil {
