@@ -11693,12 +11693,13 @@ not hold is stored as already expired and dropped. Protocol parameters are
 resolved per epoch as replay reaches it, enacting the boundary's classic updates
 before any hard-fork translation, as the live rollover does.
 
-API-mode backfill commits each SQL transaction after at most 100 blocks or
-when its estimated payload reaches 32 MiB. The estimate combines encoded block
-bytes and queued metadata-row bytes. The cumulative threshold also controls row
-flushes, while commits remain at complete-block boundaries; the transaction
-level or block that crosses the threshold can exceed it. Queued rows are drained
-at 5,000 rows or when they reach the remaining transaction byte budget.
+API-mode backfill commits a SQL transaction after the configured block window
+(200 blocks by default) or when its estimated payload reaches 32 MiB. The
+estimate combines encoded block bytes and queued metadata-row bytes. The
+cumulative threshold also controls row flushes, while commits remain at
+complete-block boundaries; the transaction level or block that crosses the
+threshold can exceed it. Queued rows are drained at 5,000 rows or when they
+reach the remaining transaction byte budget.
 
 Historical block validation before the stable anchor is controlled
 independently. With `ValidateHistorical: true` (the default), ledger replay
