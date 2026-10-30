@@ -965,8 +965,7 @@ func (s *Store) setTransactionWithAccumulator(
 				batchedAccumulator != nil &&
 				batchedAccumulator.backfillBatchLimits != nil {
 				staged.enableSizeTracking()
-				maxBytes, maxRows :=
-					batchedAccumulator.backfillBatchLimits()
+				maxBytes, maxRows := batchedAccumulator.backfillBatchLimits()
 				staged.setFlushLimit(
 					maxBytes,
 					maxRows,
