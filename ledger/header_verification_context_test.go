@@ -15,10 +15,13 @@
 package ledger
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/stretchr/testify/require"
 )
@@ -75,4 +78,29 @@ func TestPeerNonceLookupClassifiesChangedContext(t *testing.T) {
 	require.ErrorIs(t, err, errHeaderVerificationDeferred)
 	require.True(t, IsHeaderVerificationContextTransient(err),
 		"a context replaced before ancestry lookup must retry even a local extension")
+}
+
+func TestPeerForkPathClassifiesContextChangedDuringLookup(t *testing.T) {
+	t.Parallel()
+	f := newForkPathFreshnessFixture(t, 1)
+	var finish func()
+	f.ls.lookupBlockByHash = func(hash []byte) (models.Block, error) {
+		if finish == nil {
+			finish = f.ls.beginTxValidationTransition()
+			t.Cleanup(finish)
+		}
+		return database.BlockByHash(context.Background(), f.ls.db, hash)
+	}
+	_, _, found, err := f.ls.peerHeaderForkPath(ouroboros.ConnectionId{}, f.headers[0])
+	require.NotNil(t, finish, "the actual local-anchor lookup must run")
+	require.False(t, found)
+	require.ErrorIs(t, err, errHeaderVerificationDeferred)
+	require.True(t, IsHeaderVerificationContextTransient(err),
+		"a context change during local-anchor lookup must retry the header")
+
+	finish()
+	_, path, found, err := f.ls.peerHeaderForkPath(ouroboros.ConnectionId{}, f.headers[0])
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Len(t, path, 1)
 }

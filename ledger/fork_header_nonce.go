@@ -801,7 +801,7 @@ func (ls *LedgerState) peerHeaderForkPathContext(
 			if !tipOnCachedPath {
 				if contextChanged() {
 					return ocommon.Point{}, nil, false,
-						errHeaderVerificationDeferred
+						errHeaderVerificationContextChanged
 				}
 				return cachedAncestor, slices.Clone(cached.headers), true, nil
 			}
@@ -852,7 +852,7 @@ func (ls *LedgerState) peerHeaderForkPathContext(
 			path := append(slices.Clone(cached.headers), header)
 			if contextChanged() {
 				return ocommon.Point{}, nil, false,
-					errHeaderVerificationDeferred
+					errHeaderVerificationContextChanged
 			}
 			ls.storePeerForkPathPrefix(
 				key,
@@ -883,7 +883,7 @@ func (ls *LedgerState) peerHeaderForkPathContext(
 			slices.Reverse(pathReversed)
 			if contextChanged() {
 				return ocommon.Point{}, nil, false,
-					errHeaderVerificationDeferred
+					errHeaderVerificationContextChanged
 			}
 			if err := ls.validatePeerHeaderPath(
 				models.Block{},
@@ -907,7 +907,7 @@ func (ls *LedgerState) peerHeaderForkPathContext(
 				slices.Reverse(pathReversed)
 				if contextChanged() {
 					return ocommon.Point{}, nil, false,
-						errHeaderVerificationDeferred
+						errHeaderVerificationContextChanged
 				}
 				if err := ls.validatePeerHeaderPath(
 					block,
