@@ -12121,7 +12121,9 @@ times out cannot let parses accumulate. `NewMCPServer` shares the parse pool
 across tools through `readLimits`; the exported `RegisterCardanoTools` creates
 its own.
 
-SQLite tools share four fail-fast execution slots. Arbitrary queries borrow one
+SQLite tools share four fail-fast execution slots. `sqlite_query` and
+`sqlite_explain`, which run caller-supplied SQL, may hold at most two of them,
+so caller SQL alone cannot exhaust the pool. Arbitrary queries borrow one
 connection, enable `query_only`, and apply 64 KiB value, 64 KiB SQL, and
 32-column limits before execution. Query results are also capped at 1 MiB of
 decoded cell data. The original settings are restored before the connection
