@@ -2249,6 +2249,18 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				return ochainsync.ErrStopSyncProcess
 			}
 		}
+		// An observer is not held by the waits above, so without this it
+		// would read headers to the peer tip while the ledger cannot forecast
+		// them, authenticating and retaining each one. Park it at the horizon
+		// like an ingress connection; its delivered history is kept.
+		if !ingressEligible && o.chainsyncObserverHorizonWait != nil {
+			if err := o.awaitObserverHorizon(ctx, chainsyncEvent); err != nil {
+				return err
+			}
+			if o.recordHeldChainsyncTip(ctx.ConnectionId, tip) {
+				return ochainsync.ErrStopSyncProcess
+			}
+		}
 		// Verify header crypto (VRF/KES and, once local state has caught up,
 		// leader eligibility) before this header is allowed to influence
 		// Genesis chain-selection density or corroboration. Without this
@@ -2869,6 +2881,32 @@ func (o *Ouroboros) awaitCatchUpBand(
 		return nil
 	}
 	return fmt.Errorf("chainsync: await catch-up band: %w", err)
+}
+
+// awaitObserverHorizon parks an observer's callback while its header lies past
+// the ledger's forecast horizon. Like awaitCatchUpBand, a wait that reaches
+// its bound is not an error: the header then takes the ordinary observer path,
+// so the bound limits how long a promotion can go unnoticed. Cancellation is
+// returned.
+func (o *Ouroboros) awaitObserverHorizon(
+	ctx ochainsync.CallbackContext,
+	e ledger.ChainsyncEvent,
+) error {
+	admissionCtx, cancelAdmission := chainsyncAdmissionContext(ctx)
+	defer cancelAdmission()
+	waitCtx, cancelWait := context.WithTimeout(
+		admissionCtx,
+		o.catchUpBandWaitTimeout,
+	)
+	defer cancelWait()
+	err := o.chainsyncObserverHorizonWait(waitCtx, e)
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, context.DeadlineExceeded) && admissionCtx.Err() == nil {
+		return nil
+	}
+	return fmt.Errorf("chainsync: await observer forecast horizon: %w", err)
 }
 
 // admitChainsyncHeader runs the future-header admission for one delivered

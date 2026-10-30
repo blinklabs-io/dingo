@@ -1127,6 +1127,13 @@ these series carries a connection or peer label.
   the two gauges read; the ledger installs
   `ChainManager.SetHeaderQueueFullObserver`, and `Chain.addBlockHeader` calls
   it under the chain lock, so the observer only increments the counter.
+- `dingo_ledger_observer_horizon_parked_callbacks` is the number of observer
+  chainsync callbacks currently parked in `AwaitObserverHeaderHorizon`.
+  `dingo_ledger_observer_horizon_overshoot_slots` observes, once per parked
+  header, how many slots it lies past the end of the forecast it is held on,
+  and `dingo_ledger_fork_anchor_membership_retries_total` counts fork-anchor
+  membership reads repeated because a block mutation overlapped them. None
+  carries a connection or peer label.
 - `dingo_ledger_last_block_added_timestamp_seconds` is one atomic store per
   block the blockfetch drain adds to the chain, and
   `dingo_blockfetch_last_request_timestamp_seconds` is the same for the last
@@ -6645,7 +6652,25 @@ Ordinary Praos sessions continue to use primary-chain intersection points.
   the tip stays an observer: it is not promoted, holds no ingress slot and
   records nothing, and its next promotion is evaluated afresh. Re-syncing each
   would close a connection per freed slot, hand the slot to the next
-  observer, and close that one in turn. While corroboration is
+  observer, and close that one in turn. An observer header past the ledger's
+  forecast horizon parks its callback (`LedgerState.AwaitObserverHeaderHorizon`)
+  before authentication or retention, bounded by `catchUpBandWaitTimeout`, so
+  an observer does not read ahead of what the ledger can forecast; the wait
+  fetches nothing and requests no re-sync, and a header it releases is handled
+  as any observer header. The wait resolves the
+  header's fork anchor once and reuses it until a withdrawal from the local
+  chain or a ledger tip at the anchor. A membership read that a chain mutation
+  overlapped (`Chain.HoldsPointSettled` reports it unsettled) is repeated up to
+  three times, and a walk still unsettled neither holds the header nor caches an
+  anchor: taking the overlap for an absent block would anchor the forecast at an
+  older ancestor. A walk that ends at a parent that is neither recorded, queued,
+  nor held by the local chain (`resolveForkAnchor` reports it disconnected)
+  holds the header too, even inside the ledger tip's horizon, because the peer's
+  chain leaves the local chain at an unknown point; the walk repeats on every
+  wake and the header is released when the ancestry connects or the wait's bound
+  expires. A walk that runs out of `peerHeaderHistoryLimit` hops is not
+  disconnected: an observer reading ahead of the ledger has more unapplied
+  headers than the limit, and is forecast from the ledger tip. While corroboration is
   active (`OuroborosConfig.ChainsyncIntersectAtLedgerTip`) new sessions
   intersect at `LedgerState.LedgerTipIntersectPoints`, the applied ledger tip
   plus the Mithril trust boundary, rather than the primary chain's
@@ -19225,7 +19250,10 @@ local chain: a fork that left before the ledger tip gets that
 point's shorter horizon (`chainsyncForkAnchor`, `forecastSummaryFrom`). The
 intersection is resolved from the peer's recorded headers; a header extending
 the local header chain resolves on the first step, and an intersection that
-cannot be resolved falls back to the ledger tip. The wait is not charged to
+cannot be resolved falls back to the ledger tip. An intersection whose
+membership read a chain mutation overlapped on every attempt is not known, so
+admission and the header queue treat the header as past the horizon rather
+than forecast it from an ancestor the overlap made look absent. The wait is not charged to
 the peer's patience and is not a peer fault, and it ends when the peer's
 chainsync client is stopped or its connection begins shutdown (`StopChan`,
 `ConnectionDoneChan`); the client's `DoneChan` cannot end it, because that

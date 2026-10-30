@@ -17,6 +17,7 @@ package ledger
 import (
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
@@ -221,15 +222,53 @@ func (ls *LedgerState) buildHardForkSummary(
 	)
 }
 
-// forecastSummaryFrom builds a summary whose current-era horizon is measured
+// forkForecastSummaries holds the summaries forecastSummaryFrom built from one
+// consensus snapshot, keyed by forecast slot.
+type forkForecastSummaries struct {
+	consensus *consensusSnapshot
+	mu        sync.Mutex
+	bySlot    map[uint64]forkForecastSummary
+}
+
+type forkForecastSummary struct {
+	summary *hardfork.Summary
+	err     error
+}
+
+// forecastSummaryFrom returns a summary whose current-era horizon is measured
 // from forecastSlot itself, even below the published tip: the forecast a
 // peer's chain gets from its intersection with the local chain. It bypasses
-// the shared summary cache, which holds one entry keyed for the tip.
+// the tip summary cache, which holds one entry keyed for the tip, and keeps
+// its own per consensus snapshot and forecast slot: held headers re-check
+// their horizon on every publication, and sharing the summary leaves each
+// check a comparison of slots against era bounds. Callers must not modify the
+// returned summary.
 func (ls *LedgerState) forecastSummaryFrom(
 	forecastSlot uint64,
 ) (*hardfork.Summary, error) {
 	consensusState, _ := ls.loadStateSnapshots()
-	return ls.buildHardForkSummaryFrom(consensusState, forecastSlot)
+	cache := ls.forkForecastSummaries.Load()
+	if cache == nil || cache.consensus != consensusState {
+		fresh := &forkForecastSummaries{
+			consensus: consensusState,
+			bySlot:    make(map[uint64]forkForecastSummary),
+		}
+		if ls.forkForecastSummaries.CompareAndSwap(cache, fresh) {
+			cache = fresh
+		} else if cache = ls.forkForecastSummaries.Load(); cache == nil ||
+			cache.consensus != consensusState {
+			// Another reader installed a different snapshot's cache.
+			return ls.buildHardForkSummaryFrom(consensusState, forecastSlot)
+		}
+	}
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	if entry, ok := cache.bySlot[forecastSlot]; ok {
+		return entry.summary, entry.err
+	}
+	summary, err := ls.buildHardForkSummaryFrom(consensusState, forecastSlot)
+	cache.bySlot[forecastSlot] = forkForecastSummary{summary: summary, err: err}
+	return summary, err
 }
 
 // buildHardForkSummaryFrom is buildHardForkSummary with the current era's

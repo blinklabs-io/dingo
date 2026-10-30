@@ -65,6 +65,39 @@ func (m *stateMetrics) markBlockAdded() {
 	m.lastBlockAddedUnixNano.Store(time.Now().UnixNano())
 }
 
+// observerHorizonParkStart records an observer callback parking at the
+// forecast horizon. overshoot is how far past the forecast's end its header
+// lies, when that is known.
+func (m *stateMetrics) observerHorizonParkStart(
+	overshoot uint64,
+	known bool,
+) {
+	if m == nil {
+		return
+	}
+	m.observerHorizonParked.Add(1)
+	if known && m.observerHorizonOvershoot != nil {
+		m.observerHorizonOvershoot.Observe(float64(overshoot))
+	}
+}
+
+// observerHorizonParkEnd records a parked observer callback returning.
+func (m *stateMetrics) observerHorizonParkEnd() {
+	if m == nil {
+		return
+	}
+	m.observerHorizonParked.Add(-1)
+}
+
+// incHoldsPointRetry counts a fork-anchor membership read repeated because a
+// block mutation overlapped it.
+func (m *stateMetrics) incHoldsPointRetry() {
+	if m == nil || m.holdsPointRetries == nil {
+		return
+	}
+	m.holdsPointRetries.Inc()
+}
+
 // incHeaderQueueFull counts one header rejected because the primary chain's
 // header queue was full.
 func (m *stateMetrics) incHeaderQueueFull() {
@@ -135,6 +168,13 @@ func (ls *LedgerState) registerSyncGauges(registerer prometheus.Registerer) {
 			}
 			return float64(nanos) / float64(time.Second)
 		},
+	)
+	factory.NewGaugeFunc(
+		prometheus.GaugeOpts{
+			Name: "dingo_ledger_observer_horizon_parked_callbacks",
+			Help: "observer chainsync callbacks currently parked at the forecast horizon",
+		},
+		func() float64 { return float64(m.observerHorizonParked.Load()) },
 	)
 	factory.NewGaugeFunc(
 		prometheus.GaugeOpts{

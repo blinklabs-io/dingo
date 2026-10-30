@@ -261,7 +261,10 @@ type Ouroboros struct {
 	// the connection; one earliest-onset timer is retained per connection.
 	chainsyncHeaderBackpressure func(context.Context, int) error
 	chainsyncHeaderAdmission    chainsyncHeaderAdmissionFunc
-	chainsyncHeaderSlotTime     func(uint64) (time.Time, error)
+	// chainsyncObserverHorizonWait blocks an observer's header until the
+	// ledger can forecast its slot.
+	chainsyncObserverHorizonWait func(context.Context, ledger.ChainsyncEvent) error
+	chainsyncHeaderSlotTime      func(uint64) (time.Time, error)
 	// chainsyncLocalTipBlock returns the local tip's block number and the
 	// security parameter k. Tests override it without a LedgerState.
 	chainsyncLocalTipBlock func() (tipBlock, k uint64)
@@ -927,6 +930,7 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		o.blockfetchRangeBytes = o.ledgerState.BlockfetchRangeExpectedBytes
 		o.chainsyncHeaderBackpressure = o.ledgerState.AwaitChainsyncHeaderCapacity
 		o.chainsyncHeaderAdmission = o.ledgerState.AwaitChainsyncHeaderAdmission
+		o.chainsyncObserverHorizonWait = o.ledgerState.AwaitObserverHeaderHorizon
 		o.chainsyncHeaderSlotTime = o.ledgerState.SlotToTime
 		o.chainsyncLocalTipBlock = func() (uint64, uint64) {
 			k := max(o.ledgerState.SecurityParam(), 0)
