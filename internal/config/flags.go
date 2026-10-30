@@ -231,7 +231,7 @@ var flagSpecs = []flagSpec{
 	boolPtrFlag(
 		"PeerSharing",
 		"peer-sharing",
-		"enable peer sharing protocol (default: cardano-node config.json fallback for non-block-producers; false for block producers)",
+		"enable peer sharing protocol (default: cardano-node config.json fallback for non-block-producers, else true; false for block producers)",
 	),
 
 	// APIs

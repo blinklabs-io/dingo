@@ -7668,6 +7668,14 @@ requested count and is rechecked for valid, routable, non-reserved IP and port
 values before it reaches peer admission, so malformed or internal targets do
 not trigger DNS or outbound dialing.
 
+A node that is not a block producer advertises peer sharing in its handshake
+unless the Dingo or cardano-node configuration says otherwise, as in the
+reference node; a block producer does not unless explicitly enabled. Peer
+sharing is negotiated only when both sides advertise it. The governor requests
+peers only from hot peers, and never while topology bootstrap peers are in use:
+before bootstrap exit, or after bootstrap recovery re-enables them, peer
+sharing adds no candidates.
+
 Ledger-peer discovery is demand-driven so the pool never collapses in the
 first place. While the node has fewer chain-selection-eligible upstreams than
 its hot-peer target (`MinHotPeers`), replenishment is treated as urgent: a

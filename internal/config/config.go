@@ -1103,7 +1103,8 @@ type Config struct {
 	// to advertise known peers to other nodes on request. Pointer
 	// distinguishes "operator did not set this" (nil) from "explicitly
 	// false". On a block producer the resolved default is false unless
-	// this field is explicitly set to true.
+	// this field is explicitly set to true. Otherwise the default is the
+	// cardano-node config.json PeerSharing value, or true when that is unset.
 	PeerSharing *bool `yaml:"peerSharing" envconfig:"DINGO_PEER_SHARING"`
 
 	// Storage mode: "core" (default) or "api".
