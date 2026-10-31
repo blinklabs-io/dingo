@@ -501,7 +501,9 @@ func (it *BlobBlockIterator) fetchCanonicalBlock(
 		return entry, nil, types.BlockMetadata{}, false,
 			types.ErrBlobStoreUnavailable
 	}
-	ctx := nonNilContext(it.ctx)
+	// CanonicalBlocksFromIndex, the only constructor of a canonical
+	// iterator, already replaced a nil context, so it.ctx is non-nil here.
+	ctx := it.ctx
 	if err := ctx.Err(); err != nil {
 		return entry, nil, types.BlockMetadata{}, false, err
 	}
