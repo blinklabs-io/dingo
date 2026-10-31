@@ -373,3 +373,54 @@ func TestObserverGapPromotedByNonChildStillResyncs(t *testing.T) {
 	evt := testutil.RequireReceive(t, f.resyncCh, time.Second, "a gap off the applied chain must re-intersect")
 	require.Equal(t, event.ChainsyncResyncReasonIngressPromotion, evt.Data.(event.ChainsyncResyncEvent).Reason)
 }
+
+// The promotion fallback timer is armed before the header backpressure wait.
+// A child of the applied tip must cancel it before that wait, or a wait longer
+// than the fallback delay lets it close the connection first.
+func TestObserverGapAppliedTipChildSurvivesHeaderBackpressure(t *testing.T) {
+	t.Parallel()
+	ls := newTestLedgerState(t)
+	f := newPromotionGapFixture(t)
+	f.o.ledgerState = ls
+	var appliedHash gledger.Blake2b256
+	appliedHash[0] = 0xaa
+	ls.SetTipForTesting(ochainsync.Tip{Point: ocommon.NewPoint(50, appliedHash.Bytes()), BlockNumber: 2})
+	require.NoError(t, f.header(50, 2, 0xaa))
+	require.True(t, f.o.chainsyncState.ClientObserverHeaderGap(f.conn))
+	f.noTimer(t)
+	waiting, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	t.Cleanup(unblock)
+	f.o.chainsyncHeaderBackpressure = func(context.Context, int) error {
+		close(waiting)
+		<-release
+		return nil
+	}
+	f.o.chainsyncState.RemoveClientConnId(f.fillers[0])
+	child := &testBlockHeader{slotNumber: 60, blockNumber: 3, prevHash: appliedHash}
+	child.hash[0] = 0xbb
+	result := make(chan error, 1)
+	go func() {
+		result <- f.o.chainsyncClientRollForwardAt(
+			ochainsync.CallbackContext{ConnectionId: f.conn}, 0, child,
+			ochainsync.Tip{Point: ocommon.NewPoint(60, child.hash.Bytes()), BlockNumber: 3},
+			time.Now(),
+		)
+	}()
+	testutil.RequireReceive(t, waiting, time.Second, "the header must reach the backpressure wait")
+	timer := testutil.RequireReceive(t, f.timers, time.Second, "promotion arms the fallback resync")
+	// The fallback deadline passes while the header is still held.
+	timer.fire()
+	select {
+	case <-f.resyncCh:
+		t.Fatal("the fallback must not resync the connection during backpressure")
+	case <-time.After(50 * time.Millisecond):
+	}
+	require.NotNil(t, f.o.connManager.GetConnectionById(f.conn), "connection must stay open")
+	unblock()
+	require.NoError(t, testutil.RequireReceive(t, result, time.Second, "header callback must finish"))
+	evt := testutil.RequireReceive(t, f.ledgerCh, time.Second, "the new block's header must reach ledger ingress")
+	require.EqualValues(t, 60, evt.Data.(ledger.ChainsyncEvent).Point.Slot)
+	require.NotNil(t, f.o.connManager.GetConnectionById(f.conn))
+}

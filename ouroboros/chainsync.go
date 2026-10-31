@@ -2169,6 +2169,22 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		}
 		observerDelivery := !ingressEligible
 		patienceResume = ingressEligible
+		// A promoting header that continues the local chain needs no fresh
+		// intersection: the observer contributes from the tip. A header whose
+		// parent is the exact applied tip resolves an observer gap the same
+		// way a rollback to that tip does, so the connection is not closed
+		// under the header (e.g. a local block producer's new block).
+		// This runs before the header backpressure wait below, which can
+		// outlast the promotion fallback timer armed just above.
+		if ingressEligible && o.chainsyncState != nil {
+			extendsApplied := o.clearObserverHeaderGapAtAppliedExtension(
+				ctx.ConnectionId, clientSession, v, tip,
+			)
+			if (wasObserver || extendsApplied) &&
+				!o.chainsyncState.ClientObserverHeaderGap(ctx.ConnectionId) {
+				o.cancelPendingIngressPromotionResync(ctx.ConnectionId)
+			}
+		}
 		if ingressEligible && o.chainsyncHeaderBackpressure != nil {
 			admissionCtx, cancelAdmission := chainsyncAdmissionContext(ctx)
 			defer cancelAdmission()
@@ -2254,20 +2270,6 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				return nil
 			}
 			o.releasePromotedAheadRecycle(claimedAt)
-		}
-		// A promoting header that continues the local chain needs no fresh
-		// intersection: the observer contributes from the tip. A header whose
-		// parent is the exact applied tip resolves an observer gap the same
-		// way a rollback to that tip does, so the connection is not closed
-		// under the header (e.g. a local block producer's new block).
-		if ingressEligible && o.chainsyncState != nil {
-			extendsApplied := o.clearObserverHeaderGapAtAppliedExtension(
-				ctx.ConnectionId, clientSession, v, tip,
-			)
-			if (wasObserver || extendsApplied) &&
-				!o.chainsyncState.ClientObserverHeaderGap(ctx.ConnectionId) {
-				o.cancelPendingIngressPromotionResync(ctx.ConnectionId)
-			}
 		}
 		// A header past the peer-relative bound only because the ledger lags
 		// is not a peer fault, and rejecting it closes the connection while
