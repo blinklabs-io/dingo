@@ -15,6 +15,8 @@
 package chain
 
 import (
+	"time"
+
 	"github.com/blinklabs-io/dingo/database/models"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -24,9 +26,9 @@ const (
 	ChainUpdateEventType = "chain.update"
 	ChainForkEventType   = "chain.fork_detected"
 	// ChainHeaderEventType is the ordered header-lifecycle stream. It
-	// carries ChainHeaderAnnouncementEvent when a ranking-block header
-	// bearing a Leios endorser-block announcement enters the header queue,
-	// and ChainHeaderInvalidationEvent when queued headers leave it again.
+	// carries ChainHeaderObservedEvent or ChainHeaderAnnouncementEvent when
+	// an authenticated ranking-block header enters the chain, and
+	// ChainHeaderInvalidationEvent when queued headers leave it again.
 	// Both are enqueued on the chain-level sequencer under c.mutex, so a
 	// single subscriber observes them in true chain-mutation order.
 	ChainHeaderEventType = "chain.header"
@@ -60,6 +62,16 @@ type ChainForkEvent struct {
 	AlternateHead ocommon.Point
 	// CanonicalHead is the tip of the current canonical chain
 	CanonicalHead ocommon.Point
+}
+
+// ChainHeaderObservedEvent records an authenticated ranking-block header that
+// carries no Leios endorser-block announcement. Announcement-bearing headers
+// use ChainHeaderAnnouncementEvent instead, so each admitted header produces
+// exactly one ordered lifecycle event.
+type ChainHeaderObservedEvent struct {
+	Slot   uint64
+	RbHash lcommon.Blake2b256
+	Seq    uint64
 }
 
 // ChainHeaderAnnouncementEvent is published when a ranking block announcing a
@@ -97,6 +109,9 @@ type ChainHeaderAnnouncementEvent struct {
 	EbHash lcommon.Blake2b256
 	// Seq is this header admission's chain-mutation sequence number.
 	Seq uint64
+	// ArrivedAt is when the authenticated header entered the local chain.
+	// Leios voting compares this instant with the slot onset and L_hdr.
+	ArrivedAt time.Time
 }
 
 // ChainHeaderInvalidationEvent is published when queued headers leave the

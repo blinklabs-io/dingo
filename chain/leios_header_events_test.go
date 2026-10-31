@@ -97,9 +97,9 @@ func TestAddBlockHeaderQueuesLeiosAnnouncement(t *testing.T) {
 		slot:        577,
 	}
 	for _, tc := range []struct {
-		name        string
-		header      interface{ Hash() lcommon.Blake2b256 }
-		wantPublish bool
+		name             string
+		header           interface{ Hash() lcommon.Blake2b256 }
+		wantAnnouncement bool
 	}{
 		{
 			name: "announcing header",
@@ -109,7 +109,7 @@ func TestAddBlockHeaderQueuesLeiosAnnouncement(t *testing.T) {
 				ebSize:             4096,
 				announces:          true,
 			},
-			wantPublish: true,
+			wantAnnouncement: true,
 		},
 		{
 			name: "announcement-capable header announcing nothing",
@@ -141,24 +141,24 @@ func TestAddBlockHeaderQueuesLeiosAnnouncement(t *testing.T) {
 			}
 			c.PublishPendingChainUpdates()
 
-			if !tc.wantPublish {
-				testutil.RequireNoReceive(
-					t,
-					ch,
-					300*time.Millisecond,
-					"no header announcement expected",
-				)
+			evt := testutil.RequireReceive(
+				t, ch, 2*time.Second, "header lifecycle event",
+			)
+			if !tc.wantAnnouncement {
+				data, ok := evt.Data.(chain.ChainHeaderObservedEvent)
+				require.True(t, ok)
+				assert.Equal(t, uint64(577), data.Slot)
+				assert.Equal(t, base.hash, data.RbHash)
+				assert.NotZero(t, data.Seq)
 				return
 			}
-			evt := testutil.RequireReceive(
-				t, ch, 2*time.Second, "header announcement",
-			)
 			data, ok := evt.Data.(chain.ChainHeaderAnnouncementEvent)
 			require.True(t, ok)
 			assert.Equal(t, uint64(577), data.Slot)
 			assert.Equal(t, base.hash, data.RbHash)
 			assert.Equal(t, ebHash, data.EbHash)
 			assert.NotZero(t, data.Seq)
+			assert.False(t, data.ArrivedAt.IsZero())
 		})
 	}
 }

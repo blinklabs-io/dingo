@@ -24,6 +24,7 @@ import (
 	"slices"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -775,15 +776,37 @@ func (c *Chain) addBlockHeader(
 	// fetched, validated and applied (VoteManager.handleChainBlock), which is
 	// where all arming happened before the header stream existed.
 	if cryptoVerified {
+		seq := c.nextHeaderSeqLocked()
 		if evt, ok := leiosAnnouncementEvent(
 			header,
 			headerHash,
-			c.nextHeaderSeqLocked(),
+			seq,
 		); ok {
 			c.queueDeferredEventLocked(evt)
+		} else {
+			c.queueDeferredEventLocked(headerObservedEvent(
+				header,
+				headerHash,
+				seq,
+			))
 		}
 	}
 	return nil
+}
+
+func headerObservedEvent(
+	header ledger.BlockHeader,
+	headerHash lcommon.Blake2b256,
+	seq uint64,
+) event.Event {
+	return event.NewEvent(
+		ChainHeaderEventType,
+		ChainHeaderObservedEvent{
+			Slot:   header.SlotNumber(),
+			RbHash: lcommon.NewBlake2b256(headerHash.Bytes()),
+			Seq:    seq,
+		},
+	)
 }
 
 // leiosAnnouncementEvent builds the header-arrival event for a ranking-block
@@ -812,10 +835,11 @@ func leiosAnnouncementEvent(
 	return event.NewEvent(
 		ChainHeaderEventType,
 		ChainHeaderAnnouncementEvent{
-			Slot:   header.SlotNumber(),
-			RbHash: lcommon.NewBlake2b256(headerHash.Bytes()),
-			EbHash: ebHash,
-			Seq:    seq,
+			Slot:      header.SlotNumber(),
+			RbHash:    lcommon.NewBlake2b256(headerHash.Bytes()),
+			EbHash:    ebHash,
+			Seq:       seq,
+			ArrivedAt: time.Now(),
 		},
 	), true
 }
@@ -1373,12 +1397,21 @@ func (c *Chain) addBlockLocked(
 	// invalidation, means the id is always free before the consumer arms it.
 	// The apply-driven path stays as an idempotent backstop.
 	if !matchPendingHeader {
+		seq := c.nextHeaderSeqLocked()
+		header := block.Header()
+		headerHash := lcommon.NewBlake2b256(blockHashBytes)
 		if evt, ok := leiosAnnouncementEvent(
-			block.Header(),
-			lcommon.NewBlake2b256(blockHashBytes),
-			c.nextHeaderSeqLocked(),
+			header,
+			headerHash,
+			seq,
 		); ok {
 			c.queueDeferredTxnEventLocked(evt, txn)
+		} else {
+			c.queueDeferredTxnEventLocked(headerObservedEvent(
+				header,
+				headerHash,
+				seq,
+			), txn)
 		}
 	}
 	if notifyWaiters {
