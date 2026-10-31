@@ -391,7 +391,11 @@ func New(opts ...BlobStoreBadgerOptionFunc) (*BlobStoreBadger, error) {
 			db.gcDiscardRatio,
 		)
 	}
-
+	if db.dataDir != "" && db.compressionEnabled && db.blockCacheSize == 0 {
+		return nil, errors.New(
+			"badger block cache size must be greater than zero when compression is enabled",
+		)
+	}
 	if db.deferOpen {
 		return db, nil
 	}

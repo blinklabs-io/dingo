@@ -378,6 +378,10 @@ until recovery has run, which is what wrapping rather than retiring it
 achieves.
 
 The Badger provider threads the host's stop context through its close path.
+On-disk Badger configuration rejects compression with a zero-byte block cache
+before the store opens, because Badger requires a block cache for compressed
+tables. Core mode keeps both disabled by default; enabling compression also
+requires a positive `blockCacheSize`.
 Stopping periodic value-log GC prevents a successful rewrite from starting a
 second pass. Badger does not expose cancellation for a rewrite already in
 flight, so that rewrite drains through a one-time background close while the
