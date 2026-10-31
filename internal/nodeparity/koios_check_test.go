@@ -39,6 +39,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/allegra"
+	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
@@ -2315,4 +2316,37 @@ func TestReturnRedeemUTxOsRemovesOnlyRedeemAddresses(t *testing.T) {
 	if len(set) != 2 {
 		t.Fatalf("set has %d refs, want the 2 non-redeem refs: %v", len(set), set)
 	}
+}
+
+// TestReturnRedeemUTxOsMainnetGenesis runs the removal over every AVVM entry
+// in mainnet's Byron genesis, encoded the way a baseline read from Dingo is,
+// alongside real mainnet bootstrap, Daedalus and Shelley addresses. Every
+// unredeemed UTxO the Allegra hard fork removes on mainnet is one of these
+// genesis entries, so this covers the whole population it can act on.
+func TestReturnRedeemUTxOsMainnetGenesis(t *testing.T) {
+	genesis, err := byron.NewByronGenesisFromFile(
+		filepath.Join("..", "..", "config", "cardano", "mainnet", "byron-genesis.json"),
+	)
+	require.NoError(t, err)
+	utxos, err := genesis.GenesisUtxos()
+	require.NoError(t, err)
+	require.Len(t, utxos, len(genesis.AvvmDistr))
+
+	set := make(UTxOSet, len(utxos)+3)
+	for _, u := range utxos {
+		set[fmt.Sprintf("%s#%d", u.Id.Id().String(), u.Id.Index())] = canonicalUTxOEntry(u.Output)
+	}
+	kept := UTxOSet{
+		"kept0#0": "Ae2tdPwUPEYvouLpguoEDsSXzU4gHMu97s7iHJ6VgMeuj3SuFAB12hbAVAB|1000000",
+		"kept1#0": "DdzFFzCqrhsdnK3RRGGRXkLQ3K1rPySKAMuYqg62ECg3CGSz79Aq5LBQKKWsCGuS57LwuiumHxXpLzYPsmDFGfX7NzxzrBqKmJSfrdsq|2000000",
+		"kept2#0": "addr1q9t4zmhtx9exsl74825c2fj2hlx484x8nurhtae2478d4ycs4kvr6l0wrwsnqx9ad5km074nxgngdx6z5vhycsrsydvq2ddmtg|3000000",
+	}
+	for ref, entry := range kept {
+		set[ref] = entry
+	}
+
+	removed := ReturnRedeemUTxOs(set)
+
+	assert.Len(t, removed, len(genesis.AvvmDistr))
+	assert.Equal(t, kept, set)
 }
