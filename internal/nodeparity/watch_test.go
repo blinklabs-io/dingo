@@ -55,10 +55,14 @@ type testChainSyncServer struct {
 	chain      csmock.Chain
 	cursor     int
 	rolledBack bool
-	// accepted, if non-nil, receives each accepted connection so a test
-	// can force a specific session to drop (by closing it) rather than
-	// waiting for one to end on its own.
-	accepted chan *ouroboros.Connection
+	// conns holds every connection the server has completed a handshake
+	// on, by client address, and served names the one whose RequestNext
+	// was answered last. A test that must end a specific session closes
+	// that connection through servedConn: the first accepted connection is
+	// not necessarily the one the client keeps, because a session can fail
+	// after the server has accepted it.
+	conns  map[string]*ouroboros.Connection
+	served string
 	// release, if non-nil, gates every RequestNext reply: requestNext
 	// blocks on it before replying. Watcher.Events coalesces (holds at
 	// most one pending event), so a server free to answer every
@@ -68,6 +72,11 @@ type testChainSyncServer struct {
 	// event count sends on release once per expected event, keeping
 	// exactly one reply in flight at a time.
 	release chan struct{}
+	// failNextSync, when set, makes the next FindIntersect that offers a
+	// point answer IntersectNotFound instead of the origin intersection, so
+	// that client's Sync fails after the connection was accepted. It is
+	// cleared once used.
+	failNextSync bool
 	// stopped is closed when the test that created this server ends.
 	// requestNext selects on it alongside release so a session's final
 	// RequestNext call (issued after the test has stopped calling
@@ -105,6 +114,7 @@ func newTestChainSyncServer(
 	chain, err := csmock.BuildChain(1, common.Blake2b256{}, 0, 20, blockCount)
 	require.NoError(t, err)
 	s := &testChainSyncServer{
+		conns:   make(map[string]*ouroboros.Connection),
 		chain:   chain,
 		release: make(chan struct{}),
 		stopped: make(chan struct{}),
@@ -123,6 +133,12 @@ func (s *testChainSyncServer) findIntersect(
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if len(points) == 0 {
+		return pcommon.Point{}, chainsync.Tip{
+			Point: csmock.OriginPoint(),
+		}, chainsync.ErrIntersectNotFound
+	}
+	if s.failNextSync {
+		s.failNextSync = false
 		return pcommon.Point{}, chainsync.Tip{
 			Point: csmock.OriginPoint(),
 		}, chainsync.ErrIntersectNotFound
@@ -147,6 +163,7 @@ func (s *testChainSyncServer) requestNext(
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.served = ctx.ConnectionId.RemoteAddr.String()
 	if !s.rolledBack {
 		s.rolledBack = true
 		return ctx.Server.RollBackward(csmock.OriginPoint(), s.chain.Tip())
@@ -158,6 +175,18 @@ func (s *testChainSyncServer) requestNext(
 	tip := s.chain.Tips[s.cursor]
 	s.cursor++
 	return ctx.Server.RollForward(uint(block.Type()), block.Cbor(), tip)
+}
+
+// servedConn returns the connection that answered the most recent
+// RequestNext. It must be called after the reply has been received by the
+// client, which is what makes that connection the live session.
+func (s *testChainSyncServer) servedConn(t *testing.T) *ouroboros.Connection {
+	t.Helper()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	conn, ok := s.conns[s.served]
+	require.True(t, ok, "no connection has answered a RequestNext")
+	return conn
 }
 
 // serve accepts connections on listener until it closes, completing a real
@@ -187,9 +216,9 @@ func (s *testChainSyncServer) serve(listener net.Listener, magic uint32) {
 					return
 				}
 				defer oconn.Close() //nolint:errcheck
-				if s.accepted != nil {
-					s.accepted <- oconn
-				}
+				s.mu.Lock()
+				s.conns[conn.RemoteAddr().String()] = oconn
+				s.mu.Unlock()
 				<-oconn.ErrorChan()
 			}()
 		}
@@ -434,6 +463,27 @@ func TestWatchBlocks_ReconnectsQuicklyAfterEstablishedSessionDrops(
 ) {
 	t.Parallel()
 
+	requireReconnectsQuicklyAfterEstablishedDrop(t, false)
+}
+
+// TestWatchBlocks_ReconnectsQuicklyAfterEstablishedSessionDropsFollowingFailedSync
+// runs the same scenario with the first accepted session failing at Sync, so
+// the watcher's established session is a later connection than the first one
+// the server accepted.
+func TestWatchBlocks_ReconnectsQuicklyAfterEstablishedSessionDropsFollowingFailedSync(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	requireReconnectsQuicklyAfterEstablishedDrop(t, true)
+}
+
+func requireReconnectsQuicklyAfterEstablishedDrop(
+	t *testing.T,
+	failFirstSync bool,
+) {
+	t.Helper()
+
 	const magic = 42
 
 	// The gated listener drops every connection until it is opened, so each
@@ -441,7 +491,7 @@ func TestWatchBlocks_ReconnectsQuicklyAfterEstablishedSessionDrops(
 	listener := newTestGatedListener(t)
 	addr := listener.Addr().String()
 	server := newTestChainSyncServer(t, 5)
-	server.accepted = make(chan *ouroboros.Connection, 1)
+	server.failNextSync = failFirstSync
 	server.serve(listener, magic)
 
 	var mu sync.Mutex
@@ -478,22 +528,21 @@ func TestWatchBlocks_ReconnectsQuicklyAfterEstablishedSessionDrops(
 		"precondition: backoff must have grown past the minimum by now",
 	)
 
-	// Now let the server answer, and wait for the watcher to connect before
-	// releasing a reply. The watcher may be part way through a backoff of up
-	// to watcherMaxBackoff when the gate opens, which allowNext's own bound
-	// does not cover.
+	// Now let the server answer. The watcher may be part way through a
+	// backoff of up to watcherMaxBackoff when the gate opens, and a session
+	// it starts may fail before it is established, so the reply is released
+	// with a bound that covers those waits rather than allowNext's own.
 	listener.open()
-	var conn *ouroboros.Connection
 	select {
-	case conn = <-server.accepted:
-	case <-time.After(watcherMaxBackoff + dialTimeout):
-		t.Fatal("watcher never reconnected once the server accepted")
+	case server.release <- struct{}{}:
+	case <-time.After(2*watcherMaxBackoff + dialTimeout):
+		t.Fatal("no session ever requested a block once the server accepted")
 	}
-
-	requireNextEvent(
-		t, w, server, 10*time.Second,
+	requireEvent(
+		t, w, 10*time.Second,
 		"watcher must deliver an event once connected",
 	)
+	conn := server.servedConn(t)
 
 	// Force this specific session to end, and capture the log count so we
 	// can identify the *next* one below.
