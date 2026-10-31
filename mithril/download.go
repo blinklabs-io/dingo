@@ -1065,7 +1065,6 @@ func downloadSnapshotOnce(
 	var totalSize int64
 	restartDownload := func() error {
 		_ = resp.Body.Close()
-		discardPartial()
 		existingSize = 0
 		if err := resetDownloadFile(file); err != nil {
 			return fmt.Errorf("resetting download staging file: %w", err)

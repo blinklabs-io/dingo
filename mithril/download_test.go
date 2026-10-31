@@ -50,6 +50,15 @@ type trackingDownloadBody struct {
 	read   atomic.Int64
 }
 
+type closeFuncBody struct {
+	io.Reader
+	close func() error
+}
+
+func (b *closeFuncBody) Close() error {
+	return b.close()
+}
+
 func (b *trackingDownloadBody) Read(p []byte) (int, error) {
 	n, err := b.reader.Read(p)
 	b.read.Add(int64(n))
@@ -1967,13 +1976,14 @@ func TestDownloadSnapshotRangeNotSatisfiableMismatchDiscardsPartial(t *testing.T
 // cannot be trusted as complete and must be replaced by a fresh download.
 func TestDownloadSnapshotRangeNotSatisfiableWithoutSizeRestarts(t *testing.T) {
 	t.Parallel()
-	content := []byte("complete archive")
+	cached := []byte("cached archive")
+	content := []byte("fresh archive")
 	dir := t.TempDir()
 	dest := filepath.Join(dir, "archive")
-	require.NoError(t, os.WriteFile(dest, content, 0o600))
+	require.NoError(t, os.WriteFile(dest, cached, 0o600))
 
 	var ranges []string
-	cacheRemovedOnRestart := false
+	cachePreservedOnRestart := false
 	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		ranges = append(ranges, req.Header.Get("Range"))
 		if req.Header.Get("Range") != "" {
@@ -1983,8 +1993,8 @@ func TestDownloadSnapshotRangeNotSatisfiableWithoutSizeRestarts(t *testing.T) {
 				Header:     make(http.Header),
 			}, nil
 		}
-		_, err := os.Stat(dest)
-		cacheRemovedOnRestart = errors.Is(err, os.ErrNotExist)
+		got, err := os.ReadFile(dest)
+		cachePreservedOnRestart = err == nil && bytes.Equal(got, cached)
 		return &http.Response{
 			StatusCode:    http.StatusOK,
 			Body:          io.NopCloser(bytes.NewReader(content)),
@@ -1999,11 +2009,112 @@ func TestDownloadSnapshotRangeNotSatisfiableWithoutSizeRestarts(t *testing.T) {
 		MaxTransientRetries: -1,
 	})
 	require.NoError(t, err)
-	require.Equal(t, []string{"bytes=16-", ""}, ranges)
-	require.True(t, cacheRemovedOnRestart)
+	require.Equal(
+		t,
+		[]string{fmt.Sprintf("bytes=%d-", len(cached)), ""},
+		ranges,
+	)
+	require.True(t, cachePreservedOnRestart)
 	got, err := os.ReadFile(path)
 	require.NoError(t, err)
 	require.Equal(t, content, got)
+}
+
+// A failed restart must leave the named cache untouched. The first response
+// closes after another writer replaces that name, pinning that the downloader
+// never removes a path based on an earlier inode inspection.
+func TestDownloadSnapshotFailedRestartPreservesNamedCache(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "archive")
+	replacement := filepath.Join(dir, "replacement")
+	require.NoError(t, os.WriteFile(dest, []byte("cached archive"), 0o600))
+	require.NoError(t, os.WriteFile(replacement, []byte("replacement"), 0o600))
+
+	var replaceErr error
+	var once sync.Once
+	requests := 0
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		requests++
+		if requests == 1 {
+			return &http.Response{
+				StatusCode: http.StatusRequestedRangeNotSatisfiable,
+				Body: &closeFuncBody{
+					Reader: strings.NewReader("range rejected"),
+					close: func() error {
+						once.Do(func() {
+							replaceErr = os.Rename(replacement, dest)
+						})
+						return replaceErr
+					},
+				},
+				Header: make(http.Header),
+			}, nil
+		}
+		return &http.Response{
+			StatusCode: http.StatusInternalServerError,
+			Body:       io.NopCloser(strings.NewReader("retry failed")),
+			Header:     make(http.Header),
+		}, nil
+	})}
+
+	_, err := DownloadSnapshot(context.Background(), DownloadConfig{
+		URL: "https://example.test/archive", AllowInsecureHTTP: true,
+		DestDir: dir, Filename: "archive", HTTPClient: client,
+		MaxTransientRetries: -1,
+	})
+	require.ErrorContains(t, err, "restart download failed with status 500")
+	require.NoError(t, replaceErr)
+	got, err := os.ReadFile(dest)
+	require.NoError(t, err)
+	require.Equal(t, []byte("replacement"), got)
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	require.Equal(t, "archive", entries[0].Name())
+}
+
+func TestDownloadSnapshotCancelledRestartPreservesNamedCache(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "archive")
+	cached := []byte("cached archive")
+	require.NoError(t, os.WriteFile(dest, cached, 0o600))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	requests := 0
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requests++
+		if requests == 1 {
+			return &http.Response{
+				StatusCode: http.StatusRequestedRangeNotSatisfiable,
+				Body: &closeFuncBody{
+					Reader: strings.NewReader("range rejected"),
+					close: func() error {
+						cancel()
+						return nil
+					},
+				},
+				Header: make(http.Header),
+			}, nil
+		}
+		return nil, req.Context().Err()
+	})}
+
+	_, err := DownloadSnapshot(ctx, DownloadConfig{
+		URL: "https://example.test/archive", AllowInsecureHTTP: true,
+		DestDir: dir, Filename: "archive", HTTPClient: client,
+		MaxTransientRetries: -1,
+	})
+	require.ErrorIs(t, err, context.Canceled)
+	got, err := os.ReadFile(dest)
+	require.NoError(t, err)
+	require.Equal(t, cached, got)
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	require.Equal(t, "archive", entries[0].Name())
 }
 
 // TestDownloadSnapshotFreeSpaceFailureDiscardsPartials pins that a download
