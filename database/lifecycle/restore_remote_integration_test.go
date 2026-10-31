@@ -388,7 +388,7 @@ func populateRemoteIntegrationDatabase(
 
 func copyRemoteIntegrationSnapshot(t *testing.T, src string) string {
 	t.Helper()
-	dst := filepath.Join(t.TempDir(), "snapshot")
+	dst := snapshotTestDir(t, "snapshot")
 	require.NoError(t, os.MkdirAll(dst, 0o700))
 	for _, name := range []string{
 		lifecycle.ManifestFileName,
@@ -436,7 +436,7 @@ func TestLiveRemoteRestorePostgresS3PreservesOrSwitchesBothStores(
 	)
 	populateRemoteIntegrationDatabase(t, incoming.db, 0x99, "incoming")
 	incomingState := captureRemoteIntegrationState(t, incoming.db)
-	snapshotDir := filepath.Join(t.TempDir(), "incoming-snapshot")
+	snapshotDir := snapshotTestDir(t, "incoming-snapshot")
 	_, err := lifecycle.Snapshot(
 		t.Context(),
 		incoming.db,

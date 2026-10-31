@@ -43,7 +43,7 @@ func TestSnapshotToCloudLabelsBeforeMirroring(t *testing.T) {
 	db := newTestDB(t)
 	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
 
-	dir := filepath.Join(t.TempDir(), "snap-labeled")
+	dir := snapshotTestDir(t, "snap-labeled")
 	m, err := lifecycle.SnapshotToCloud(
 		context.Background(),
 		testDestinationRegistry,
@@ -103,7 +103,7 @@ func TestMirrorToCloudRejectsLegacySnapshot(t *testing.T) {
 	setFakeCloudBackingDir(t, backingDir)
 	db := newTestDB(t)
 	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
-	dir := filepath.Join(t.TempDir(), "epoch-legacy")
+	dir := snapshotTestDir(t, "epoch-legacy")
 	_, err := lifecycle.Snapshot(
 		context.Background(), db, dir,
 		lifecycle.TriggerEpochBoundary, "test", "badger", "sqlite",
@@ -255,7 +255,7 @@ func TestMirrorToCloudUploadDirReceivesVerifiedBytes(t *testing.T) {
 
 	db := newTestDB(t)
 	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
-	dir := filepath.Join(t.TempDir(), "epoch-swap")
+	dir := snapshotTestDir(t, "epoch-swap")
 	_, err := lifecycle.Snapshot(
 		context.Background(), db, dir,
 		lifecycle.TriggerEpochBoundary, "test", "badger", "sqlite",

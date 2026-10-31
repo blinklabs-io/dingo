@@ -165,7 +165,7 @@ func TestRestoreRejectsSnapshotCopiedUnderNewerID(t *testing.T) {
 	key := []byte("operator-trust-root-0123456789ab")
 	db := newTestDB(t)
 	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
-	root := t.TempDir()
+	root := snapshotTestParent(t)
 	older := filepath.Join(root, "older")
 	_, err := lifecycle.Snapshot(
 		context.Background(), db, older, lifecycle.TriggerManual, "test",
