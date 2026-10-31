@@ -954,6 +954,20 @@ survive cleanup rather than be replaced by an older value read by the import.
   attempts to remove objects written to the failed namespace. Cleanup failures
   are reported as `ErrRestoreRollbackPending`. The existing atomic
   directory rename activates the local store and its cloud namespace selector.
+
+  Local restore staging uses a unique sibling name and retains open handles on
+  both the staging directory and any accepted empty target. Failure cleanup
+  recursively removes entries through the retained staging handle; stale-work
+  cleanup opens and identity-checks each enumerated directory before doing the
+  same. Activation moves an existing empty target and the completed staging
+  tree through random quarantine names with no-replace renames and checks their
+  identities after each move. Failed rollback retains the last confirmed
+  quarantine name for stale-work recovery. A writer that replaces one of the
+  saved names can therefore make the restore fail, but cannot redirect
+  recursive cleanup into the replacement or publish the replacement as
+  validated data. Activation fails closed when the running operating system or
+  kernel cannot provide an atomic no-replace directory rename.
+
   PostgreSQL/MySQL metadata changes before that rename, so live restore also
   fsyncs a recovery record beside the staging directory before mutation.
   Startup uses that record and the live/backup directory state to compensate an

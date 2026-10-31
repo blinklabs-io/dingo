@@ -108,7 +108,7 @@ func Apply(cfg *config.Config) (err error) {
 	// registry as a side effect of merely starting it -- silently creating a
 	// database in a directory a caller like `dingo database restore` needs
 	// to still find empty (lifecycle.RestoreValidated's
-	// requireEmptyOrAbsent check would then reject it), and wastefully
+	// restore's empty-target check would then reject it), and wastefully
 	// double-migrating on a first `dingo serve` into a pre-created
 	// directory.
 	if entries, readErr := os.ReadDir(cfg.DatabasePath); readErr != nil {

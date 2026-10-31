@@ -16,6 +16,7 @@ package mithril
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -31,6 +32,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type testCloser func() error
+
+func (f testCloser) Close() error { return f() }
 
 func newFeedFixture(t *testing.T, last uint64, tamper *uint64) *v2Fixture {
 	t.Helper()
@@ -524,6 +529,128 @@ func TestChunkFeedOwnsTempDirWhenNoneGiven(t *testing.T) {
 	require.DirExists(t, feed.tempDir)
 	require.NoError(t, feed.Close())
 	assert.NoDirExists(t, feed.tempDir)
+}
+
+func TestChunkFeedRemoveFilesKeepsSubstitutedDirectory(t *testing.T) {
+	t.Parallel()
+	downloadDir := t.TempDir()
+	feedDir := filepath.Join(downloadDir, "feed")
+	require.NoError(t, os.Mkdir(feedDir, 0o700))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(feedDir, "ours"), []byte("ours"), 0o600,
+	))
+	owned, err := retainBootstrapDir(feedDir)
+	require.NoError(t, err)
+	feed := &ChunkFeed{feedDir: feedDir, feedOwned: owned}
+	moved := feed.feedDir + "-moved"
+	require.NoError(t, os.Rename(feed.feedDir, moved))
+	require.NoError(t, os.Mkdir(feed.feedDir, 0o700))
+	replacement := filepath.Join(feed.feedDir, "replacement")
+	require.NoError(t, os.WriteFile(replacement, []byte("keep"), 0o600))
+
+	err = feed.removeFiles()
+	require.ErrorIs(t, err, errBootstrapCleanupIdentity)
+	data, err := os.ReadFile(replacement)
+	require.NoError(t, err)
+	require.Equal(t, []byte("keep"), data)
+}
+
+func TestChunkFeedDirPatternMatchesCurrentAndLegacyNames(t *testing.T) {
+	t.Parallel()
+	require.True(t, chunkFeedDirPattern.MatchString(
+		"chunkfeed-0123456789abcdef-ABCDEFGHIJKLMNOPQRSTUVWXYZ234567",
+	))
+	require.True(t, chunkFeedDirPattern.MatchString(
+		"chunkfeed-0123456789abcdef-12345",
+	))
+	require.False(t, chunkFeedDirPattern.MatchString(
+		"chunkfeed-0123456789abcdef-abcdef",
+	))
+}
+
+func TestChunkFeedRemoveFilesKeepsNestedSubstitution(t *testing.T) {
+	t.Parallel()
+	parent := t.TempDir()
+	tempDir := filepath.Join(parent, "temp")
+	require.NoError(t, os.Mkdir(tempDir, 0o700))
+	tempOwned, err := retainBootstrapDir(tempDir)
+	require.NoError(t, err)
+	feedDir := filepath.Join(tempDir, "feed")
+	require.NoError(t, os.Mkdir(feedDir, 0o700))
+	feedOwned, err := retainBootstrapDir(feedDir)
+	require.NoError(t, err)
+	feed := &ChunkFeed{
+		tempDir: tempDir, tempOwned: tempOwned,
+		feedDir: feedDir, feedOwned: feedOwned,
+	}
+	require.NoError(t, os.Rename(feedDir, feedDir+"-moved"))
+	require.NoError(t, os.Mkdir(feedDir, 0o700))
+	replacement := filepath.Join(feedDir, "replacement")
+	require.NoError(t, os.WriteFile(replacement, []byte("keep"), 0o600))
+
+	err = feed.removeFiles()
+	require.ErrorIs(t, err, errBootstrapCleanupIdentity)
+	data, err := os.ReadFile(replacement)
+	require.NoError(t, err)
+	require.Equal(t, []byte("keep"), data)
+}
+
+func TestBootstrapDirCleanupReportsLifetimeLockCloseFailure(t *testing.T) {
+	t.Parallel()
+	parent := t.TempDir()
+	wantErr := errors.New("retain failed")
+	closed := false
+	_, owned, err := createBootstrapDirWithCreator(
+		parent,
+		"owned-*",
+		func(root *os.Root, _ string, name string) (bootstrapCreation, error) {
+			require.NoError(t, root.Mkdir(name, 0o700))
+			info, err := root.Lstat(name)
+			require.NoError(t, err)
+			return bootstrapCreation{
+				initialLock: testCloser(func() error {
+					closed = true
+					return wantErr
+				}),
+				info: info,
+			}, nil
+		},
+	)
+	require.NoError(t, err)
+	require.False(t, closed)
+	err = owned.cleanup()
+	require.ErrorIs(t, err, wantErr)
+	require.True(t, closed)
+	entries, err := os.ReadDir(parent)
+	require.NoError(t, err)
+	require.Empty(t, entries)
+}
+
+func TestCreateBootstrapDirKeepsRetainFailureSubstitution(t *testing.T) {
+	t.Parallel()
+	parent := t.TempDir()
+	var replacement string
+	_, _, err := createBootstrapDirWithCreator(
+		parent,
+		"owned-*",
+		func(root *os.Root, parentPath, name string) (bootstrapCreation, error) {
+			require.NoError(t, root.Mkdir(name, 0o700))
+			created, err := root.Lstat(name)
+			require.NoError(t, err)
+			path := filepath.Join(parentPath, name)
+			require.NoError(t, os.Rename(path, path+"-moved"))
+			require.NoError(t, os.Mkdir(path, 0o700))
+			replacement = filepath.Join(path, "replacement")
+			require.NoError(t, os.WriteFile(
+				replacement, []byte("keep"), 0o600,
+			))
+			return bootstrapCreation{info: created}, nil
+		},
+	)
+	require.ErrorIs(t, err, errBootstrapCleanupIdentity)
+	data, err := os.ReadFile(replacement)
+	require.NoError(t, err)
+	require.Equal(t, []byte("keep"), data)
 }
 
 func TestLatestCertifiedTarget(t *testing.T) {

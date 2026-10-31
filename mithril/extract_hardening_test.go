@@ -15,6 +15,7 @@
 package mithril
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -124,6 +125,43 @@ func TestExtractArchiveRefusesNonEmptyDestination(t *testing.T) {
 	data, readErr := os.ReadFile(preexisting)
 	require.NoError(t, readErr)
 	assert.Equal(t, "keep", string(data))
+}
+
+func TestExtractPublishSucceedsAfterHandleCloseError(t *testing.T) {
+	t.Parallel()
+	destDir := filepath.Join(t.TempDir(), "extracted")
+	wantErr := errors.New("close failed after publication")
+	cfg := newExtractConfig([]ExtractOption{
+		func(c *extractConfig) {
+			c.createStaging = func(
+				parent, pattern string,
+			) (string, *bootstrapDir, error) {
+				return createBootstrapDirWithCreator(
+					parent,
+					pattern,
+					func(root *os.Root, _ string, name string) (bootstrapCreation, error) {
+						if err := root.Mkdir(name, 0o700); err != nil {
+							return bootstrapCreation{}, err
+						}
+						info, err := root.Lstat(name)
+						return bootstrapCreation{info: info}, err
+					},
+				)
+			}
+		},
+		func(c *extractConfig) {
+			c.releasePublished = func(owned *bootstrapDir) error {
+				return errors.Join(releasePublishedBootstrapDir(owned), wantErr)
+			}
+		},
+	})
+	root, publish, cleanup, err := prepareExtractDestination(destDir, cfg)
+	require.NoError(t, err)
+	defer cleanup()
+	require.NoError(t, root.WriteFile("published", []byte("ok"), 0o600))
+
+	require.NoError(t, publish())
+	require.FileExists(t, filepath.Join(destDir, "published"))
 }
 
 // TestExtractArchiveReplaceSwapsDestination covers the explicit recovery
@@ -509,8 +547,9 @@ func TestExtractPublishRefusesConcurrentDestinationContent(t *testing.T) {
 // Renaming names its source, so it moves whatever occupies that name at the
 // instant it runs rather than the directory extraction wrote into. Go has no
 // rename keyed on a descriptor, so the substitution cannot be prevented
-// outright — but publishing an attacker's tree under the destination can be,
-// by confirming afterwards that what landed is the directory that was filled.
+// outright. Publication confirms afterward that the landed directory is the
+// one that was filled and reports interference without recursively deleting
+// the unverified object.
 func TestExtractPublishRefusesSubstitutedStaging(t *testing.T) {
 	t.Parallel()
 
@@ -539,10 +578,11 @@ func TestExtractPublishRefusesSubstitutedStaging(t *testing.T) {
 
 	require.ErrorIs(t, publish(), ErrExtractUnsafePath)
 
-	// The substituted tree must not remain published at the destination.
-	_, statErr := os.Stat(filepath.Join(destDir, "theirs"))
-	assert.True(t, os.IsNotExist(statErr),
-		"a substituted staging tree must not survive at the destination")
+	// The identity mismatch is detected after the atomic rename. The object at
+	// the destination is unverified, so cleanup must not recurse into it.
+	data, statErr := os.ReadFile(filepath.Join(destDir, "theirs"))
+	require.NoError(t, statErr)
+	assert.Equal(t, "substituted", string(data))
 }
 
 // TestExtractPublishRefusesSymlinkedStaging covers the same substitution done

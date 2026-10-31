@@ -1074,6 +1074,20 @@ func TestBootstrapV2(t *testing.T) {
 	assert.Positive(t, int(progressCalled.Load()))
 }
 
+func TestBootstrapV2CreatesMissingConfiguredDownloadDirectory(t *testing.T) {
+	t.Parallel()
+
+	fixture := newV2Fixture(t, v2FixtureOptions{immutableFileNumber: 0})
+	downloadDir := filepath.Join(t.TempDir(), ".mithril-cache")
+	result, err := Bootstrap(
+		context.Background(), fixture.bootstrapConfig(downloadDir),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { result.Cleanup(slog.New(slog.DiscardHandler)) })
+	require.DirExists(t, downloadDir)
+	require.NotNil(t, result)
+}
+
 func TestV2ArchiveByteLimits(t *testing.T) {
 	fixture := newV2Fixture(t, v2FixtureOptions{immutableFileNumber: 0})
 	for _, kind := range []string{"digests", "immutable", "ancillary"} {
@@ -2290,27 +2304,30 @@ func TestDownloadDigestsArchiveKeepsCacheOnCancellation(t *testing.T) {
 	assert.Equal(t, fixture.digestArchive, data)
 }
 
-// A bad ancillary archive that cannot be removed stays recorded, so the
-// result's Cleanup of an unverified bootstrap, which continues without
-// ancillary data, still owns it.
 func TestRemoveBadAncillaryArchiveKeepsPathWhenRemovalFails(t *testing.T) {
 	t.Parallel()
 
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	dir := t.TempDir()
+	newArchive := func(name string) *bootstrapFile {
+		t.Helper()
+		dir := t.TempDir()
+		path := filepath.Join(dir, name)
+		require.NoError(t, os.WriteFile(path, []byte("bad"), 0o600))
+		root, err := os.OpenRoot(dir)
+		require.NoError(t, err)
+		archive, err := retainBootstrapFile(path, root)
+		require.NoError(t, err)
+		return archive
+	}
 
-	file := filepath.Join(dir, "preprod-abc-ancillary.tar.zst")
-	require.NoError(t, os.WriteFile(file, []byte("bad"), 0o600))
-	assert.Empty(t, removeBadAncillaryArchive(logger, file))
-	assert.NoFileExists(t, file)
+	removed := newArchive("removed.tar.zst")
+	require.NoError(t, removed.cleanup())
+	assert.NoFileExists(t, removed.path)
 
-	assert.Empty(t, removeBadAncillaryArchive(logger, file),
-		"an archive already gone needs no cleanup")
+	absent := newArchive("absent.tar.zst")
+	testAbsentRetainedArchiveCleanup(t, absent)
 
-	// A non-empty directory makes os.Remove fail on every platform.
-	stuck := filepath.Join(dir, "stuck-ancillary.tar.zst")
-	require.NoError(t, os.MkdirAll(filepath.Join(stuck, "child"), 0o700))
-	assert.Equal(t, stuck, removeBadAncillaryArchive(logger, stuck))
+	substituted := newArchive("substituted.tar.zst")
+	testRetainedArchiveSubstitution(t, substituted)
 }
 
 // A failed ancillary download keeps its partial file at the destination path,
