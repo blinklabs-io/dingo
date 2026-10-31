@@ -168,6 +168,16 @@ var restoreWorkDirPrefixes = []string{
 	".dingo-verify-snapshot-",
 }
 
+// leasedRestoreWorkDirPrefixes name the work directories created through
+// createOwnedRestoreDir, which leases each one for its creator's lifetime.
+// The others are created elsewhere or hold an operator's original target, so
+// only the age cutoff can show they are abandoned.
+var leasedRestoreWorkDirPrefixes = []string{
+	".dingo-restore-payloads-",
+	".dingo-restore-staging-",
+	".dingo-cloud-snapshot-",
+}
+
 const (
 	restoreRecoveryFileName   = "recovery.json"
 	restoreRecoveryMarkerName = ".dingo-restore-operation"
@@ -277,9 +287,13 @@ func removeRestoreRecoveryMarkers(dirs []string, operationID string) error {
 	return errors.Join(errs...)
 }
 
-// CleanStaleRestoreWorkDirs removes restore work directories older than a
-// week from parentDir. Recent directories may belong to another active
-// restore and are left alone.
+// CleanStaleRestoreWorkDirs removes abandoned restore work directories from
+// parentDir. A directory a running restore still holds is never removed. On
+// Unix, a populated staging, payload, or cloud download directory that no
+// process holds is removed at once, because its restore exited without
+// cleaning up. Every other unheld directory, and on Windows every directory,
+// is removed only once it is older than a week, since a recent one may belong
+// to another active operation.
 func CleanStaleRestoreWorkDirs(parentDir string) error {
 	parent, err := os.OpenRoot(parentDir)
 	if err != nil {
@@ -330,10 +344,59 @@ func cleanStaleRestoreEntry(
 		_ = dir.closeRoot()
 		return fmt.Errorf("%w: %q changed after enumeration", errRestoreDirReplaced, path)
 	}
-	if dir.info.ModTime().After(cutoff) {
+	lease, acquired, err := leaseRestoreDir(dir.root, false)
+	switch {
+	case errors.Is(err, errRestoreLeaseUnsupported):
+		if dir.info.ModTime().After(cutoff) {
+			return dir.closeRoot()
+		}
+		return cleanupStaleRestoreDir(dir, path)
+	case err != nil:
+		_ = dir.closeRoot()
+		return fmt.Errorf("probe restore work directory %q: %w", path, err)
+	case !acquired:
+		// A running operation holds it, however old it looks.
 		return dir.closeRoot()
 	}
+	defer lease.Close() //nolint:errcheck // releasing a probe lock
+	if dir.info.ModTime().After(cutoff) {
+		reclaim, err := abandonedRestoreWorkDir(dir, name)
+		if err != nil || !reclaim {
+			return errors.Join(err, dir.closeRoot())
+		}
+	}
 	return cleanupStaleRestoreDir(dir, path)
+}
+
+// abandonedRestoreWorkDir reports whether a recent, unheld work directory
+// can be reclaimed before the age cutoff. Only names whose creator leases
+// them qualify, and only once populated: the creator takes its lease before
+// writing anything, so an empty one may be a new directory whose creator has
+// not leased it yet.
+func abandonedRestoreWorkDir(dir *restoreDir, name string) (bool, error) {
+	leased := false
+	for _, prefix := range leasedRestoreWorkDirPrefixes {
+		if strings.HasPrefix(name, prefix) {
+			leased = true
+			break
+		}
+	}
+	if !leased {
+		return false, nil
+	}
+	opened, err := dir.root.Open(".")
+	if err != nil {
+		return false, err
+	}
+	defer opened.Close() //nolint:errcheck // read-only directory listing
+	names, err := opened.Readdirnames(1)
+	if errors.Is(err, io.EOF) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return len(names) != 0, nil
 }
 
 func hasRestoreWorkDirPrefix(name string) bool {
@@ -427,9 +490,11 @@ func Restore(
 // termination does not install a signal-aware context, so an operator's
 // Ctrl+C takes this path, not graceful cancellation), is left with
 // targetDataDir exactly as it was before the call: absent, or the same
-// empty directory opened and confirmed. The half-restored
-// staging directory (if any) is an orphaned sibling that stale-work cleanup
-// removes through a retained directory handle after its grace period.
+// empty directory opened and confirmed. The half-restored staging and
+// payload directories are orphaned siblings. The next restore into the same
+// parent removes them through retained directory handles before it starts:
+// on Unix at once, since the killed process no longer holds them (see
+// CleanStaleRestoreWorkDirs), and on Windows after the age cutoff.
 //
 // Crash durability (power loss, not just an interrupted process that
 // leaves the OS itself running): atomic rename alone only guarantees

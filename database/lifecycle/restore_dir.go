@@ -26,7 +26,12 @@ import (
 	"github.com/blinklabs-io/dingo/internal/securefs"
 )
 
-var errRestoreDirReplaced = errors.New("restore directory was replaced")
+var (
+	errRestoreDirReplaced      = errors.New("restore directory was replaced")
+	errRestoreLeaseUnsupported = errors.New(
+		"restore directory lease unsupported",
+	)
+)
 
 // restoreDir keeps the directory restore created or accepted tied to the
 // object opened through parent. Its pathname remains useful for provider APIs,
@@ -52,6 +57,10 @@ type ownedRestoreDir struct {
 	dir        *restoreDir
 	parent     *os.Root
 	parentLock io.Closer
+	// lease marks the directory as held by a running operation, so
+	// stale-work cleanup in another process leaves it alone and reclaims it
+	// as soon as this process exits without cleaning up.
+	lease io.Closer
 }
 
 func createOwnedRestoreDir(parentPath, prefix string) (*ownedRestoreDir, error) {
@@ -69,9 +78,24 @@ func createOwnedRestoreDir(parentPath, prefix string) (*ownedRestoreDir, error) 
 		_ = parent.Close()
 		return nil, err
 	}
-	return retainCreatedRestoreDir(
+	owned, err := retainCreatedRestoreDir(
 		parent, parentLock, created, name, path,
 	)
+	if err != nil {
+		return nil, err
+	}
+	// Nothing is written into the directory before the lease is held, so
+	// stale-work cleanup that finds it empty and unheld leaves it alone.
+	// Waiting covers that cleanup's brief probe of the new directory.
+	lease, _, err := leaseRestoreDir(owned.dir.root, true)
+	if err != nil && !errors.Is(err, errRestoreLeaseUnsupported) {
+		return nil, errors.Join(
+			fmt.Errorf("lease restore directory %q: %w", path, err),
+			owned.cleanup(),
+		)
+	}
+	owned.lease = lease
+	return owned, nil
 }
 
 func retainCreatedRestoreDir(
@@ -159,8 +183,11 @@ func (d *ownedRestoreDir) cleanup() error {
 	if d == nil {
 		return nil
 	}
+	// The lease is released only after removal, so no other process can
+	// treat a partly removed directory as abandoned and race this one.
 	return errors.Join(
-		d.dir.cleanup(), closeIfSet(d.parentLock), d.parent.Close(),
+		d.dir.cleanup(), d.releaseLease(), closeIfSet(d.parentLock),
+		d.parent.Close(),
 	)
 }
 
@@ -169,8 +196,15 @@ func (d *ownedRestoreDir) close() error {
 		return nil
 	}
 	return errors.Join(
-		d.dir.closeRoot(), closeIfSet(d.parentLock), d.parent.Close(),
+		d.dir.closeRoot(), d.releaseLease(), closeIfSet(d.parentLock),
+		d.parent.Close(),
 	)
+}
+
+func (d *ownedRestoreDir) releaseLease() error {
+	lease := d.lease
+	d.lease = nil
+	return closeIfSet(lease)
 }
 
 func closeIfSet(closer io.Closer) error {
