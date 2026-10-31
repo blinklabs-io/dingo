@@ -4520,8 +4520,19 @@ FROM asset a
 JOIN utxo u ON u.id = a.utxo_id
 WHERE a.policy_id = decode($1, 'hex')
   AND a.name = decode($2, 'hex')
+  AND a.amount IS NOT NULL
   AND u.deleted_slot = 0;
 ```
+
+`GetAssetQuantityByPolicyAndName` runs this as one aggregate row, so the sum
+is computed by the database and no row per holding crosses the driver (SQLite
+uses `dingo_uint64_sum`, which refuses a total past 64 bits; other backends
+sum `DECIMAL(20, 0)` and the store rejects a total past 64 bits). The holdings
+are read through an inner `LIMIT models.MaxAssetQuantityHoldings + 1`
+(1,000,000); an asset held by more fails with `ErrUtxoQueryBudgetExceeded`
+instead of scanning without limit. The scan runs under the caller's
+transaction context and stops when that context ends. The Blockfrost asset
+routes add a request deadline and an admission pool.
 
 `GetAssetMintBurnInfo` (Blockfrost `/assets/{asset}` `initial_mint_tx_hash` and
 `mint_or_burn_count`) reads the mint/burn history rather than live holdings:

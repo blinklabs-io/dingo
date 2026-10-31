@@ -16,6 +16,7 @@ package sqlstore
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"testing"
 
@@ -105,4 +106,110 @@ func TestAssetAmountAndFingerprintReadCorrectlyWithoutIndexes(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Equal(t, wantAmount, quantity)
+}
+
+// insertAssetHolding stores a UTxO that holds amount of the asset. A
+// deletedSlot above zero makes it a spent holding.
+func insertAssetHolding(
+	t *testing.T,
+	store *Store,
+	seed byte,
+	policyID, assetName []byte,
+	amount uint64,
+	deletedSlot uint64,
+) {
+	t.Helper()
+	utxo := utxoForInsertCacheTest(seed, 0, 1_000_000)
+	utxo.Address = []byte("test-address")
+	utxo.DeletedSlot = deletedSlot
+	utxo.Assets = []models.Asset{{
+		Name:        assetName,
+		PolicyId:    policyID,
+		Fingerprint: []byte("fingerprint"),
+		Amount:      types.Uint64(amount),
+	}}
+	insertUtxoInTxn(t, store, utxo, true)
+}
+
+// TestGetAssetQuantityByPolicyAndNameSumsLiveHoldings covers the quantity
+// being totalled by the database: every live holding counts, a spent one and
+// another asset's do not, and an asset nobody holds totals zero.
+func TestGetAssetQuantityByPolicyAndNameSumsLiveHoldings(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	policyID := bytes.Repeat([]byte{0x51}, 28)
+	assetName := []byte("summed")
+	other := []byte("other")
+	policy := lcommon.NewBlake2b224(policyID)
+
+	zero, err := store.GetAssetQuantityByPolicyAndName(policy, assetName, nil)
+	require.NoError(t, err)
+	require.Zero(t, zero)
+
+	insertAssetHolding(t, store, 40, policyID, assetName, 10, 0)
+	insertAssetHolding(t, store, 41, policyID, assetName, 25, 0)
+	insertAssetHolding(t, store, 42, policyID, assetName, 7, 0)
+	insertAssetHolding(t, store, 43, policyID, assetName, 1000, 9)
+	insertAssetHolding(t, store, 44, policyID, other, 500, 0)
+
+	got, err := store.GetAssetQuantityByPolicyAndName(policy, assetName, nil)
+	require.NoError(t, err)
+	require.Equal(t, uint64(42), got)
+}
+
+// TestGetAssetQuantityByPolicyAndNameRejectsOverflow covers a total past 64
+// bits, which must fail rather than wrap.
+func TestGetAssetQuantityByPolicyAndNameRejectsOverflow(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	policyID := bytes.Repeat([]byte{0x52}, 28)
+	assetName := []byte("overflow")
+	insertAssetHolding(t, store, 50, policyID, assetName, 1<<63, 0)
+	insertAssetHolding(t, store, 51, policyID, assetName, 1<<63, 0)
+
+	_, err := store.GetAssetQuantityByPolicyAndName(
+		lcommon.NewBlake2b224(policyID), assetName, nil,
+	)
+	require.ErrorContains(t, err, "overflow")
+}
+
+// TestGetAssetQuantityByPolicyAndNameStopsWithItsContext covers the scan
+// running under the caller's transaction: once that context is done the query
+// fails instead of running to completion.
+func TestGetAssetQuantityByPolicyAndNameStopsWithItsContext(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	policyID := bytes.Repeat([]byte{0x53}, 28)
+	assetName := []byte("canceled")
+	insertAssetHolding(t, store, 60, policyID, assetName, 5, 0)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	txn := store.ReadTransaction(ctx)
+	defer txn.Rollback() //nolint:errcheck
+	cancel()
+	_, err := store.GetAssetQuantityByPolicyAndName(
+		lcommon.NewBlake2b224(policyID), assetName, txn,
+	)
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+// TestAssetQuantityStopsAtItsHoldingCap covers the scan bound: an asset held
+// by exactly the cap still totals, and one holding more fails with the query
+// budget error instead of reading the rest.
+func TestAssetQuantityStopsAtItsHoldingCap(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	policyID := bytes.Repeat([]byte{0x54}, 28)
+	assetName := []byte("capped")
+	policy := lcommon.NewBlake2b224(policyID)
+	for i := range 3 {
+		insertAssetHolding(t, store, byte(70+i), policyID, assetName, 4, 0)
+	}
+
+	got, err := store.assetQuantity(policy, assetName, 3, nil)
+	require.NoError(t, err)
+	require.Equal(t, uint64(12), got)
+
+	_, err = store.assetQuantity(policy, assetName, 2, nil)
+	require.ErrorIs(t, err, models.ErrUtxoQueryBudgetExceeded)
 }
