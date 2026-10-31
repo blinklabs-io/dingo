@@ -132,6 +132,7 @@ func cleanupInvalidRepairStoredGapBeforeImport(
 	}
 	resumeGapEnd := min(recent[0].Slot, stateTip.Slot)
 	storedGapBlocks, err := loadGapBlocksFromBlob(
+		ctx,
 		db,
 		certifiedTip.Slot+1,
 		resumeGapEnd,
@@ -1570,6 +1571,7 @@ func Sync(
 			"resume_gap_end_slot", resumeGapEnd,
 		)
 		storedGapBlocks, err := loadGapBlocksFromBlob(
+			ctx,
 			db,
 			immutableTipSlot+1,
 			resumeGapEnd,

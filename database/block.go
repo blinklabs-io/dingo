@@ -611,6 +611,128 @@ func BlockPointBySlotTxn(txn *Txn, slot uint64) (ocommon.Point, error) {
 	return ret, nil
 }
 
+// CanonicalBlockIdentityAtSlotTxn returns the unique block point and internal
+// index ID whose metadata and canonical index entry agree at slot. A resume
+// checkpoint stores one processed chain position, so multiple matching points
+// are ambiguous rather than a reason to choose one by index order.
+func CanonicalBlockIdentityAtSlotTxn(
+	ctx context.Context,
+	txn *Txn,
+	slot uint64,
+) (ocommon.Point, uint64, error) {
+	ctx = nonNilContext(ctx)
+	if err := ctx.Err(); err != nil {
+		return ocommon.Point{}, 0, err
+	}
+	if txn == nil || txn.Blob() == nil {
+		return ocommon.Point{}, 0, types.ErrNilTxn
+	}
+	store := txn.BlobStore()
+	if store == nil {
+		return ocommon.Point{}, 0, types.ErrBlobStoreUnavailable
+	}
+	prefix := slices.Concat(
+		[]byte(types.BlockBlobKeyPrefix),
+		types.BlockBlobKeyUint64ToBytes(slot),
+	)
+	it := store.NewIterator(txn.Blob(), types.BlobIteratorOptions{Prefix: prefix})
+	if it == nil {
+		return ocommon.Point{}, 0, errors.New("blob iterator is nil")
+	}
+	defer it.Close()
+	var (
+		ret     ocommon.Point
+		retID   uint64
+		matched bool
+	)
+	for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+		if err := ctx.Err(); err != nil {
+			return ocommon.Point{}, 0, err
+		}
+		item := it.Item()
+		if item == nil {
+			return ocommon.Point{}, 0, errors.New(
+				"canonical block identity iterator returned nil item",
+			)
+		}
+		key := item.Key()
+		if key == nil {
+			return ocommon.Point{}, 0, errors.New(
+				"canonical block identity iterator returned nil key",
+			)
+		}
+		if len(key) != types.BlockBlobKeySize {
+			if bytes.HasSuffix(key, []byte(types.BlockBlobMetadataKeySuffix)) {
+				continue
+			}
+			return ocommon.Point{}, 0, fmt.Errorf(
+				"invalid block key at checkpoint slot %d: %x",
+				slot, key,
+			)
+		}
+		point, err := BlockBlobKeyToPoint(key)
+		if err != nil {
+			return ocommon.Point{}, 0, err
+		}
+		rawMetadata, err := getBlobContext(
+			ctx,
+			store,
+			txn.Blob(),
+			types.BlockBlobMetadataKey(key),
+			int64(
+				types.BlockMetadataBinaryHeaderLen+
+					types.BlockMetadataPrevHashMaxLen,
+			),
+		)
+		if err != nil {
+			if errors.Is(err, types.ErrBlobKeyNotFound) {
+				continue
+			}
+			return ocommon.Point{}, 0, err
+		}
+		metadata, err := types.UnmarshalBlockMetadata(rawMetadata)
+		if err != nil {
+			return ocommon.Point{}, 0, fmt.Errorf(
+				"decoding metadata for checkpoint block key %x: %w",
+				key, err,
+			)
+		}
+		if metadata.ID == 0 {
+			continue
+		}
+		indexedKey, err := getBlobContext(
+			ctx,
+			store,
+			txn.Blob(),
+			types.BlockBlobIndexKey(metadata.ID),
+			int64(types.BlockBlobKeySize),
+		)
+		if err != nil {
+			if errors.Is(err, types.ErrBlobKeyNotFound) {
+				continue
+			}
+			return ocommon.Point{}, 0, err
+		}
+		if !bytes.Equal(indexedKey, key) {
+			continue
+		}
+		if matched {
+			return ocommon.Point{}, 0, fmt.Errorf(
+				"multiple canonical block identities at slot %d",
+				slot,
+			)
+		}
+		ret, retID, matched = point, metadata.ID, true
+	}
+	if err := it.Err(); err != nil {
+		return ocommon.Point{}, 0, err
+	}
+	if !matched {
+		return ocommon.Point{}, 0, models.ErrBlockNotFound
+	}
+	return ret, retID, nil
+}
+
 // BlockPointAtOrAfterSlotTxn returns the oldest canonical point whose slot is
 // at least slot, using only retained keys and metadata. It therefore remains
 // usable after local block CBOR expires.

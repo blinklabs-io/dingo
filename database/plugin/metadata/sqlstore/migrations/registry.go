@@ -90,6 +90,7 @@ const (
 	addressTransactionCredentialKindSchemaRelease       = "address-transaction-credential-kind"
 	opCertCounterEncodingSchemaRelease                  = "opcert-counter-unsigned-order"
 	utxoSpenderPartialIndexSchemaRelease                = "utxo-spender-partial-indexes"
+	backfillCheckpointIdentitySchemaRelease             = "backfill-checkpoint-identity"
 )
 
 const mithrilRewardRepairPendingKey = "mithril_reward_repair_pending"
@@ -252,6 +253,7 @@ var schemaVersions = []struct {
 	{Version: 48, Name: governanceVoteCastSchemaRelease, Dir: "v48"},
 	{Version: 49, Name: opCertCounterEncodingSchemaRelease, Dir: "v49"},
 	{Version: 50, Name: utxoSpenderPartialIndexSchemaRelease, Dir: "v50"},
+	{Version: 51, Name: backfillCheckpointIdentitySchemaRelease, Dir: "v51"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.

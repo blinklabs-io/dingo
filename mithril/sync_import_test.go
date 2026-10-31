@@ -378,14 +378,18 @@ func TestEnsureMithrilBackfillCheckpointPreservesIncomplete(t *testing.T) {
 	db := newMithrilTestDB(t)
 	startedAt := time.Now().Add(-time.Hour)
 	updatedAt := time.Now().Add(-time.Minute)
+	lastIndexID := uint64(42)
+	lastBlockHash := bytes.Repeat([]byte{0x42}, 32)
 	require.NoError(t, db.Metadata().SetBackfillCheckpoint(
 		&models.BackfillCheckpoint{
-			Phase:      node.BackfillPhase,
-			LastSlot:   1042527,
-			TotalSlots: 2000000,
-			StartedAt:  startedAt,
-			UpdatedAt:  updatedAt,
-			Completed:  false,
+			Phase:         node.BackfillPhase,
+			LastSlot:      1042527,
+			LastIndexID:   &lastIndexID,
+			LastBlockHash: lastBlockHash,
+			TotalSlots:    2000000,
+			StartedAt:     startedAt,
+			UpdatedAt:     updatedAt,
+			Completed:     false,
 		},
 		nil,
 	))
@@ -399,9 +403,38 @@ func TestEnsureMithrilBackfillCheckpointPreservesIncomplete(t *testing.T) {
 	require.NotNil(t, cp)
 	require.Equal(t, uint64(1042527), cp.LastSlot)
 	require.Equal(t, uint64(2000000), cp.TotalSlots)
+	require.NotNil(t, cp.LastIndexID)
+	require.Equal(t, lastIndexID, *cp.LastIndexID)
+	require.Equal(t, lastBlockHash, cp.LastBlockHash)
 	require.False(t, cp.Completed)
 	require.Equal(t, startedAt.UnixNano(), cp.StartedAt.UnixNano())
 	require.Equal(t, updatedAt.UnixNano(), cp.UpdatedAt.UnixNano())
+}
+
+func TestEnsureMithrilBackfillCheckpointResetsLegacyIncomplete(t *testing.T) {
+	t.Parallel()
+
+	db := newMithrilTestDB(t)
+	require.NoError(t, db.Metadata().SetBackfillCheckpoint(
+		&models.BackfillCheckpoint{
+			Phase:      node.BackfillPhase,
+			LastSlot:   1042527,
+			TotalSlots: 2000000,
+			StartedAt:  time.Now().Add(-time.Hour),
+			UpdatedAt:  time.Now().Add(-time.Minute),
+		},
+		nil,
+	))
+
+	require.NoError(t, ensureMithrilBackfillCheckpoint(db))
+	cp, err := db.Metadata().GetBackfillCheckpoint(node.BackfillPhase, nil)
+	require.NoError(t, err)
+	require.NotNil(t, cp)
+	require.Zero(t, cp.LastSlot)
+	require.Zero(t, cp.TotalSlots)
+	require.Nil(t, cp.LastIndexID)
+	require.Empty(t, cp.LastBlockHash)
+	require.False(t, cp.Completed)
 }
 
 func TestEnsureMithrilBackfillCheckpointReopensCompleted(t *testing.T) {
@@ -428,8 +461,10 @@ func TestEnsureMithrilBackfillCheckpointReopensCompleted(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.NotNil(t, cp)
-	require.Equal(t, uint64(5000), cp.LastSlot)
-	require.Equal(t, uint64(5000), cp.TotalSlots)
+	require.Zero(t, cp.LastSlot)
+	require.Zero(t, cp.TotalSlots)
+	require.Nil(t, cp.LastIndexID)
+	require.Empty(t, cp.LastBlockHash)
 	require.False(t, cp.Completed)
 	require.Equal(t, startedAt.UnixNano(), cp.StartedAt.UnixNano())
 	require.True(t, cp.UpdatedAt.After(startedAt))
@@ -439,14 +474,17 @@ func TestResetMithrilBackfillCheckpointReplaysFromFirstBlock(t *testing.T) {
 	t.Parallel()
 
 	db := newMithrilTestDB(t)
+	lastIndexID := uint64(42)
 	require.NoError(t, db.Metadata().SetBackfillCheckpoint(
 		&models.BackfillCheckpoint{
-			Phase:      node.BackfillPhase,
-			LastSlot:   1042527,
-			TotalSlots: 2000000,
-			StartedAt:  time.Now().Add(-time.Hour),
-			UpdatedAt:  time.Now().Add(-time.Minute),
-			Completed:  true,
+			Phase:         node.BackfillPhase,
+			LastSlot:      1042527,
+			LastIndexID:   &lastIndexID,
+			LastBlockHash: bytes.Repeat([]byte{0x42}, 32),
+			TotalSlots:    2000000,
+			StartedAt:     time.Now().Add(-time.Hour),
+			UpdatedAt:     time.Now().Add(-time.Minute),
+			Completed:     true,
 		},
 		nil,
 	))
@@ -457,6 +495,8 @@ func TestResetMithrilBackfillCheckpointReplaysFromFirstBlock(t *testing.T) {
 	require.NotNil(t, cp)
 	require.Zero(t, cp.LastSlot)
 	require.Zero(t, cp.TotalSlots)
+	require.Nil(t, cp.LastIndexID)
+	require.Empty(t, cp.LastBlockHash)
 	require.False(t, cp.Completed)
 }
 

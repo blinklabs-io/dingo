@@ -459,22 +459,22 @@ func TestReadBlobObjectWithLimit(t *testing.T) {
 func TestGcsTransactionStagesAndRollsBack(t *testing.T) {
 	txn := &gcsTxn{pending: make(map[string]gcsPendingChange)}
 	txn.stageSet([]byte("key"), []byte("value"))
-	value, deleted, staged := txn.stagedValue([]byte("key"))
-	if !staged || deleted || string(value) != "value" {
+	change, staged := txn.pending["key"]
+	if !staged || change.deleted || string(change.value) != "value" {
 		t.Fatalf(
 			"staged value = %q, deleted=%v, staged=%v",
-			value,
-			deleted,
+			change.value,
+			change.deleted,
 			staged,
 		)
 	}
 	txn.stageDelete([]byte("key"))
-	value, deleted, staged = txn.stagedValue([]byte("key"))
-	if !staged || !deleted || value != nil {
+	change, staged = txn.pending["key"]
+	if !staged || !change.deleted || change.value != nil {
 		t.Fatalf(
 			"staged delete = %q, deleted=%v, staged=%v",
-			value,
-			deleted,
+			change.value,
+			change.deleted,
 			staged,
 		)
 	}
@@ -581,24 +581,20 @@ func TestResolveKeyServesStagedEmptyValue(t *testing.T) {
 	txn := &gcsTxn{store: st, pending: make(map[string]gcsPendingChange)}
 	txn.stageSet([]byte("key"), []byte{})
 
-	value, deleted, staged := txn.stagedValue([]byte("key"))
-	if !staged || deleted {
+	change, staged := txn.pending["key"]
+	if !staged || change.deleted {
 		t.Fatalf(
 			"empty write should be staged and not deleted, got deleted=%v staged=%v",
-			deleted,
+			change.deleted,
 			staged,
 		)
 	}
-	if value == nil || len(value) != 0 {
-		t.Fatalf("staged empty value = %v, want an empty non-nil slice", value)
-	}
-
 	got, err := st.resolveKey(context.Background(), txn, []byte("key"))
 	if err != nil {
 		t.Fatalf("resolveKey on a staged empty value: %v", err)
 	}
-	if len(got) != 0 {
-		t.Fatalf("resolveKey = %q, want empty", got)
+	if got == nil || len(got) != 0 {
+		t.Fatalf("resolveKey = %v, want an empty non-nil slice", got)
 	}
 
 	// Iterators must still list it: it is a write, not a delete.
