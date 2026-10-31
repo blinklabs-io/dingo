@@ -6603,13 +6603,15 @@ Ordinary Praos sessions continue to use primary-chain intersection points.
   grouping, so its IPv4, IPv6, and hostname relays share one identity before the
   live ledger is available. A topology peer that is also matched to a ledger
   relay retains that ledger control identity, including when an inbound duplex
-  connection reuses the peer entry. Topology valency groups, peer-sharing
-  addresses, unmatched inbound connections, and network prefixes do not prove
-  independent control and therefore supply no corroboration identity. A relay
-  endpoint registered under conflicting control keys is also untrusted. These
-  connections fail closed: as candidates they have no corroborators, and as
-  witnesses they do not count. Without a hook the selector groups by remote
-  host. Pool control is a lower bound on operator independence; multiple pool
+  connection reuses the peer entry. A peer from the operator's own topology
+  (local root, public root or bootstrap peer) that no ledger or snapshot
+  describes, a peer learned through peer sharing, and a ledger or snapshot
+  relay whose endpoint is registered under conflicting control keys, is grouped by the address group of its connection
+  (/24, /64 or hostname), so a node syncing from genesis, which has few usable
+  ledger or snapshot identities, can still corroborate. Topology valency groups
+  are never an identity. Unmatched inbound connections stay unidentified. Those connections fail closed: as candidates they have no
+  corroborators, and as witnesses they do not count. Without a hook the
+  selector groups by remote host. Pool control is a lower bound on operator independence; multiple pool
   keys can still share an operator. Raising `corroborationPeers` raises the
   count required, while the trusted ledger or snapshot source establishes the
   available control groups.
@@ -8430,8 +8432,8 @@ Snapshot-seeded ledger peers provide historical corroborators for the Genesis
 corroboration gate (see Chain Selection → Ouroboros Genesis trust model).
 Configured operator groups override the snapshot's pool grouping for witness
 identity. Without them, trusted snapshot pool groups and later ledger control
-keys supply the available identities; remote hosts alone do not establish
-independence. The operator remains responsible for choosing independently
+keys supply the available identities, and topology peers that neither
+describes, peer-sharing peers, and relays with ambiguous control keys, are grouped by address. The operator remains responsible for choosing independently
 controlled witnesses and a satisfiable `genesisBootstrap.corroborationPeers`
 threshold. The candidate's own operator never counts as its witness.
 

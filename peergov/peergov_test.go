@@ -970,7 +970,7 @@ func TestPeerGovernor_TouchPeerByConnId(t *testing.T) {
 	assert.True(t, peers[0].LastActivity.After(oldActivity))
 }
 
-func TestPeerGovernor_CorroborationIdentityFailsClosedWithoutEvidence(
+func TestPeerGovernor_CorroborationIdentityFallsBackToAddressGroup(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -995,9 +995,18 @@ func TestPeerGovernor_CorroborationIdentityFailsClosedWithoutEvidence(
 	pg.peers[1].Connection = &PeerConnection{Id: second, IsClient: true}
 	pg.mu.Unlock()
 
-	assert.Empty(t, pg.CorroborationIdentityByConnId(first))
-	assert.Empty(t, pg.CorroborationIdentityByConnId(second))
-	assert.Empty(t, pg.CorroborationIdentityByConnId(connFor("45.0.0.1:3001")))
+	assert.Equal(t, "ipv4:44.0.0.0/24", pg.CorroborationIdentityByConnId(first))
+	assert.Equal(
+		t,
+		pg.CorroborationIdentityByConnId(first),
+		pg.CorroborationIdentityByConnId(second),
+		"relays in one /24 count once",
+	)
+	assert.Empty(
+		t,
+		pg.CorroborationIdentityByConnId(connFor("45.0.0.1:3001")),
+		"a connection no tracked peer holds has no identity",
+	)
 }
 
 func TestPeerGovernor_CorroborationIdentityUsesPoolControlKey(t *testing.T) {
@@ -1055,14 +1064,15 @@ func TestPeerGovernor_CorroborationIdentityUsesPoolControlKey(t *testing.T) {
 		IsClient: true,
 	}
 	pg.mu.Unlock()
-	assert.Empty(
+	assert.Equal(
 		t,
+		"ipv4:45.0.0.0/24",
 		pg.CorroborationIdentityByConnId(gossipConn),
-		"peer sharing does not prove independent control",
+		"a peer-sharing address has no pool identity and is grouped by address",
 	)
 }
 
-func TestPeerGovernor_TopologyGroupDoesNotEstablishControl(t *testing.T) {
+func TestPeerGovernor_TopologyGroupIsNotAnIdentity(t *testing.T) {
 	t.Parallel()
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -1102,17 +1112,23 @@ func TestPeerGovernor_TopologyGroupDoesNotEstablishControl(t *testing.T) {
 	}
 	pg.mu.Unlock()
 
+	want := map[string]string{
+		"44.0.0.1:3001": "ipv4:44.0.0.0/24",
+		"44.0.0.9:3001": "ipv4:44.0.0.0/24",
+		"45.0.0.1:3001": "ipv4:45.0.0.0/24",
+	}
 	for address, connID := range conns {
-		assert.Emptyf(
+		assert.Equalf(
 			t,
+			want[address],
 			pg.CorroborationIdentityByConnId(connID),
-			"topology group for %s does not prove common or independent control",
+			"%s is grouped by address, not by its topology group",
 			address,
 		)
 	}
 }
 
-func TestPeerGovernor_ConnectedAddressDoesNotEstablishControl(t *testing.T) {
+func TestPeerGovernor_ConnectedAddressGroupsUnidentifiedRoot(t *testing.T) {
 	t.Parallel()
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -1132,10 +1148,11 @@ func TestPeerGovernor_ConnectedAddressDoesNotEstablishControl(t *testing.T) {
 	pg.peers[0].Connection = &PeerConnection{Id: conn, IsClient: true}
 	pg.mu.Unlock()
 
-	assert.Empty(
+	assert.Equal(
 		t,
+		"ipv4:45.0.0.0/24",
 		pg.CorroborationIdentityByConnId(conn),
-		"a connected address alone does not prove independent control",
+		"an unidentified root is grouped by the address its connection uses",
 	)
 }
 
@@ -8921,5 +8938,74 @@ func TestAddressHost(t *testing.T) {
 		t.Run(tc.in, func(t *testing.T) {
 			assert.Equal(t, tc.want, addressHost(tc.in))
 		})
+	}
+}
+
+func TestPeerGovernor_CorroborationFallbackExcludesUntrustedSources(
+	t *testing.T,
+) {
+	t.Parallel()
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+	connFor := func(remote string) ouroboros.ConnectionId {
+		localAddr, _ := net.ResolveTCPAddr("tcp", "127.0.0.1:6000")
+		remoteAddr, _ := net.ResolveTCPAddr("tcp", remote)
+		return ouroboros.ConnectionId{
+			LocalAddr:  localAddr,
+			RemoteAddr: remoteAddr,
+		}
+	}
+	sources := map[string]PeerSource{
+		"44.0.0.1:3001": PeerSourceTopologyBootstrapPeer,
+		"44.0.0.2:3001": PeerSourceTopologyPublicRoot,
+		"45.0.0.1:3001": PeerSourceP2PGossip,
+		"46.0.0.1:3001": PeerSourceInboundConn,
+		"47.0.0.1:3001": PeerSourceUnknown,
+		"48.0.0.1:3001": PeerSourceP2PLedger,
+	}
+	for address, source := range sources {
+		require.NoError(t, pg.AddPeer(address, source))
+	}
+	pg.mu.Lock()
+	require.Len(t, pg.peers, len(sources))
+	for _, peer := range pg.peers {
+		peer.Connection = &PeerConnection{
+			Id:       connFor(peer.Address),
+			IsClient: true,
+		}
+	}
+	pg.mu.Unlock()
+	assert.Equal(
+		t,
+		"ipv4:44.0.0.0/24",
+		pg.CorroborationIdentityByConnId(connFor("44.0.0.1:3001")),
+	)
+	assert.Equal(
+		t,
+		"ipv4:48.0.0.0/24",
+		pg.CorroborationIdentityByConnId(connFor("48.0.0.1:3001")),
+		"a ledger relay with an ambiguous identity is grouped by address",
+	)
+	assert.Equal(
+		t,
+		"ipv4:44.0.0.0/24",
+		pg.CorroborationIdentityByConnId(connFor("44.0.0.2:3001")),
+	)
+	assert.Equal(
+		t,
+		"ipv4:45.0.0.0/24",
+		pg.CorroborationIdentityByConnId(connFor("45.0.0.1:3001")),
+		"a peer-sharing address is grouped by the address it connected on",
+	)
+	for _, address := range []string{
+		"46.0.0.1:3001", "47.0.0.1:3001",
+	} {
+		assert.Emptyf(
+			t,
+			pg.CorroborationIdentityByConnId(connFor(address)),
+			"%s has no outbound discovery source",
+			address,
+		)
 	}
 }
