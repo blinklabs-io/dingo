@@ -162,6 +162,7 @@ func seedPoolUtxo(
 ) {
 	t.Helper()
 	require.NoError(t, store.CreateUtxo(nil, &models.Utxo{
+		Address:    []byte("addr"),
 		TxId:       bytes.Repeat([]byte{id}, 32),
 		StakingKey: key, Amount: types.Uint64(amount), AddedSlot: 15,
 	}))
