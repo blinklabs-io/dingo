@@ -1471,6 +1471,51 @@ func TestRun_RejectsCanonicalBlockBeyondTip(t *testing.T) {
 	assert.Equal(t, uint64(3), checkpoint.TotalSlots)
 }
 
+func TestRun_RejectsDuplicateCanonicalTailAtTip(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	blocks, err := testfixtures.GenerateConwayChainAt(1, 1, 3)
+	require.NoError(t, err)
+	for i, block := range blocks {
+		require.NoError(t, db.BlockCreate(models.Block{
+			ID:     database.BlockInitialIndex + uint64(i),
+			Slot:   block.SlotNumber(),
+			Hash:   block.Hash().Bytes(),
+			Number: block.BlockNumber(),
+			Cbor:   block.Cbor(),
+			Type:   uint(block.Type()),
+		}, nil))
+	}
+
+	precedingKey := types.BlockBlobKey(
+		blocks[1].SlotNumber(), blocks[1].Hash().Bytes(),
+	)
+	txn := db.BlobTxn(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		return txn.BlobStore().Set(
+			txn.Blob(),
+			types.BlockBlobIndexKey(database.BlockInitialIndex+2),
+			precedingKey,
+		)
+	}))
+
+	bf := NewBackfill(db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	bf.SetBatchSize(1)
+	err = bf.Run(context.Background())
+	require.ErrorContains(t, err, "metadata index 2, expected 3")
+
+	checkpoint, checkpointErr := db.Metadata().GetBackfillCheckpoint(
+		BackfillPhase,
+		nil,
+	)
+	require.NoError(t, checkpointErr)
+	require.NotNil(t, checkpoint)
+	assert.False(t, checkpoint.Completed)
+	assert.Equal(t, uint64(2), checkpoint.LastSlot)
+	assert.Equal(t, uint64(2), checkpoint.TotalSlots)
+}
+
 func TestRun_EndSlotBetweenCanonicalBlocksCompletes(t *testing.T) {
 	t.Parallel()
 

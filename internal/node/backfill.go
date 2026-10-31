@@ -1298,7 +1298,7 @@ func (b *Backfill) Run(ctx context.Context) error {
 			tipSlot, startSlot, startTime, &lastLogTime,
 			&intervalStats, false,
 		)
-		if blk.Slot == tipSlot {
+		if tipBoundedByEndSlot && blk.Slot == tipSlot {
 			break
 		}
 	}
