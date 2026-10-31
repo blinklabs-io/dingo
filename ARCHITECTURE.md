@@ -6069,9 +6069,12 @@ bounded pending candidate and cannot enter ledger ingress. The ceiling is
 anchored to applied ledger state or an explicit trusted checkpoint, including
 the origin. Peer agreement and a run of self-linked delivered headers do not
 move it: relevant VRF/KES checks can be unavailable beyond the ledger forecast
-horizon, so those observations are not verified chain evidence. Staging reads
-the current applied tip from `ChainSelectorConfig.AppliedTip` and rebuilds the
-pending candidates against it. Applied ledger progress therefore releases an
+horizon, so those observations are not verified chain evidence. The ceiling
+only defers a frontier the peer-relative bound accepts; a frontier that bound
+refuses is rejected however far past the ceiling it is. Staging and the
+unstaged update path read the current applied tip from
+`ChainSelectorConfig.AppliedTip` and rebuild the pending candidates against
+it. Applied ledger progress therefore releases an
 honest frontier as soon as it falls within the moving allowance, including
 while replaying blocks after a snapshot import, without trusting remote claims
 to expand the bound.
@@ -6097,11 +6100,15 @@ admitted, verified, observed, or published,
 so it requests no further headers, until the header is admissible. It re-reads
 the live applied tip, the reference and the tracked peers every 100ms and takes
 the selector lock only for each check, never while parked. A connection is held
-only from inside the band; once held it stays held after the reference leaves
-the band until the header is within `localTip + 2 * securityParam`, the applied
-catch-up ceiling, because admission keeps a header past it pending whatever the
-peer evidence, which would withhold the header from the connection's observed
-ancestry and defer every later header's verification. The wait records no
+from inside the band, or from outside it when its header is within
+`reference + securityParam` but past `localTip + 2 * securityParam`, the applied
+catch-up ceiling. Once held it stays held after the reference leaves the band
+until the header is within the applied catch-up ceiling, because admission
+keeps a header past it pending whatever the peer evidence, which would
+withhold the header from the connection's observed ancestry and defer every
+later header's verification. The reference node's ChainSync client likewise
+waits when a header is beyond its ledger view forecast range, and other peers'
+claims do not extend that forecast. The wait records no
 frontier, claim or witness, so a waiting connection can neither be selected
 nor corroborate another, and a header no chain could have reached from the
 local tip is not held and is still rejected. It ends on connection close or

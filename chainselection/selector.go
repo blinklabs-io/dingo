@@ -1018,6 +1018,12 @@ func (cs *ChainSelector) updatePeerTipObservedLinkedDisposition(
 			disposition = PeerTipUpdateRejected
 			return
 		}
+		// The ceiling is measured from the live applied tip, as staging
+		// measures it; SetLocalTip alone lags a replaying ledger.
+		if enforceCatchUpCeiling && cs.refreshAppliedLocalTipLocked() &&
+			len(cs.pendingPeerTips) > 0 {
+			cs.rebuildPendingAdmissionStateLocked()
+		}
 		beyondCatchUpCeiling := enforceCatchUpCeiling &&
 			cs.peerTipBeyondCatchUpCeilingLocked(
 				PeerTipUpdateEvent{ObservedTip: observedTip},
@@ -1231,7 +1237,9 @@ func (cs *ChainSelector) PreparePeerTipAdmissionDisposition(
 		// Remote agreement cannot extend the catch-up ceiling because the
 		// relevant header cryptography can be beyond the ledger forecast.
 		// Keep the candidate pending until applied ledger progress or a
-		// trusted checkpoint moves the bound over it.
+		// trusted checkpoint moves the bound over it. The ceiling only defers
+		// a frontier the peer-relative bound accepts; one it refuses stays
+		// refused however far past the ceiling it is.
 		beyondCatchUpCeiling := cs.peerTipBeyondCatchUpCeilingLocked(update)
 		plausible, claimsChanged := cs.checkPeerTipPlausibleWithClaimsTrackedLocked(
 			update.ConnectionId,
@@ -1241,6 +1249,7 @@ func (cs *ChainSelector) PreparePeerTipAdmissionDisposition(
 			cs.pendingFarTipClaims,
 			true,
 		)
+		deferred := beyondCatchUpCeiling && plausible
 		if beyondCatchUpCeiling {
 			plausible = false
 		}
@@ -1249,7 +1258,7 @@ func (cs *ChainSelector) PreparePeerTipAdmissionDisposition(
 			update.ConnectionId,
 			cs.pendingFarTipClaims,
 		)
-		evidence := beyondCatchUpCeiling ||
+		evidence := deferred ||
 			(hasClaim && claim.slot == update.ObservedTip.Point.Slot &&
 				bytes.Equal(claim.hash, update.ObservedTip.Point.Hash))
 		if !plausible && !evidence {
@@ -1534,11 +1543,12 @@ func (cs *ChainSelector) rebuildPendingAdmissionStateLocked() {
 			true,
 		)
 		beyondCatchUpCeiling := cs.peerTipBeyondCatchUpCeilingLocked(update)
+		deferred := beyondCatchUpCeiling && plausible
 		if beyondCatchUpCeiling {
 			plausible = false
 		}
 		claim, hasClaim := claims[update.ConnectionId]
-		evidence := beyondCatchUpCeiling ||
+		evidence := deferred ||
 			(hasClaim && claim.slot == update.ObservedTip.Point.Slot &&
 				bytes.Equal(claim.hash, update.ObservedTip.Point.Hash))
 		candidate.plausible = plausible
