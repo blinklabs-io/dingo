@@ -502,3 +502,40 @@ func activateRestoreDirs(
 	}
 	return true, nil
 }
+
+// ValidateRestoreWorkParent reports an error unless dir is a real directory
+// whose absolute ancestor chain only the current user or root can modify. On
+// Unix, each ancestor must be owned by one of them and may be writable by
+// group or other only with the sticky bit set. Anyone else who could write
+// dir could rename a live data directory onto a work directory's name before
+// a removal or rename by that name runs.
+func ValidateRestoreWorkParent(dir string) error {
+	return validateRestoreWorkParent(dir)
+}
+
+// RemoveRestoreWorkDir removes the restore work directory at path, if one is
+// present. It validates the parent with ValidateRestoreWorkParent first, then
+// removes the directory's contents through a handle opened on it and removes
+// the emptied name only while it still identifies that directory. A symlink
+// or non-directory at path is refused, and a directory substituted at path
+// during removal is never traversed.
+func RemoveRestoreWorkDir(path string) error {
+	path = filepath.Clean(path)
+	if _, err := os.Lstat(path); errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err := validateRestoreWorkParent(filepath.Dir(path)); err != nil {
+		return err
+	}
+	owned, err := openOwnedRestoreDir(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("open restore work directory %q: %w", path, err)
+	}
+	if err := owned.cleanup(); err != nil {
+		return fmt.Errorf("remove restore work directory %q: %w", path, err)
+	}
+	return nil
+}
