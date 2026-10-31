@@ -761,9 +761,11 @@ again, up to four waits per roll-forward. All waits of one roll-forward share
 one `catchUpBandWaitTimeout` bound, which stays under the protocol state
 timers, and end when the connection closes. Only a header still deferred at
 the bound is parked by `markDeferredHeaderRecovery`; an invalid header is
-rejected without waiting. A header extending the local chain is not held: its
-deferral can clear only by applying its own block, so it is forwarded
-unverified at once.
+rejected without waiting. A snapshot publication or validation transition
+also waits and retries a local extension: otherwise an unstamped header can
+be withheld by corroboration while its peer cursor advances past it. Other
+deferrals on local extensions are forwarded unverified at once because
+missing epoch data may require applying that header's own block to settle.
 
 Header parking and resyncs are exported as metrics.
 `dingo_chainsync_deferred_headers_total` counts each header
