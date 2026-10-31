@@ -15,6 +15,7 @@
 package nodeparity
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -25,6 +26,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -2278,5 +2280,39 @@ func TestCheckQueriesReportContextEndedMidQuery(t *testing.T) {
 					"reported only as a closed protocol",
 			)
 		})
+	}
+}
+
+func TestReturnRedeemUTxOsRemovesOnlyRedeemAddresses(t *testing.T) {
+	redeem, err := lcommon.NewByronAddressRedeem(
+		bytes.Repeat([]byte{0x01}, 32), lcommon.ByronAddressAttributes{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pubkey, err := lcommon.NewByronAddressFromParts(
+		lcommon.ByronAddressTypePubkey,
+		bytes.Repeat([]byte{0x02}, lcommon.AddressHashSize),
+		lcommon.ByronAddressAttributes{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	set := UTxOSet{
+		"aa#0": redeem.String() + "|1000000",
+		"bb#1": pubkey.String() + "|2000000",
+		"cc#2": "addr1qshelley|3000000",
+	}
+
+	removed := ReturnRedeemUTxOs(set)
+
+	if !slices.Equal(removed, []string{"aa#0"}) {
+		t.Fatalf("removed %v, want [aa#0]", removed)
+	}
+	if _, ok := set["aa#0"]; ok {
+		t.Fatal("redeem UTxO is still in the set")
+	}
+	if len(set) != 2 {
+		t.Fatalf("set has %d refs, want the 2 non-redeem refs: %v", len(set), set)
 	}
 }

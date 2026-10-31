@@ -37,6 +37,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/internal/koiosparity"
 	ouroboros "github.com/blinklabs-io/gouroboros"
+	"github.com/blinklabs-io/gouroboros/ledger/allegra"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/protocol"
@@ -810,11 +811,18 @@ func RunFromGenesis(
 	}
 
 	var (
-		lastEpoch          uint64
-		haveLastEpoch      bool
-		utxoRefs           UTxOSet
-		utxoAttempted      bool
-		pendingTxHashes    []string
+		lastEpoch       uint64
+		haveLastEpoch   bool
+		utxoRefs        UTxOSet
+		utxoAttempted   bool
+		pendingTxHashes []string
+		// prevBlockEra is the era of the last block rolled forward, so the
+		// first block past the Allegra hard fork is recognised and the
+		// hard fork's redeem-UTxO removal applied exactly once on the way
+		// across. A baseline taken after the hard fork never sees the
+		// crossing and needs no removal: Dingo's own set already lacks them.
+		prevBlockEra       uint8
+		havePrevBlockEra   bool
 		txInfoFlushCount   int
 		txInfoFlushElapsed time.Duration
 		// lastPoint is the most recent chain point either callback below has
@@ -1174,7 +1182,7 @@ func RunFromGenesis(
 						_ uint,
 						blockData any,
 						_ chainsync.Tip,
-					) error {
+					) (retErr error) {
 						if err := enterCallback(); err != nil {
 							return err
 						}
@@ -1192,6 +1200,15 @@ func RunFromGenesis(
 						// Recorded before any of this block's own work runs --
 						// see lastPoint's doc comment above.
 						lastPoint = point
+						// Only a block whose callback succeeded counts: a
+						// failed one is delivered again by the resumed
+						// session, which must still see the crossing.
+						defer func() {
+							if retErr == nil {
+								prevBlockEra = block.Era().Id
+								havePrevBlockEra = true
+							}
+						}()
 
 						if !utxoAttempted && !skipUTxO {
 							utxoAttempted = true
@@ -1224,6 +1241,30 @@ func RunFromGenesis(
 								)
 							}
 						} else if utxoRefs != nil {
+							if havePrevBlockEra &&
+								prevBlockEra < allegra.EraIdAllegra &&
+								block.Era().Id >= allegra.EraIdAllegra {
+								// The pre-hard-fork transactions still
+								// buffered are applied first, so a redeem
+								// output one of them created is removed too.
+								if err := flushPendingTxInfos(
+									sessionCtx, point,
+								); err != nil {
+									return callbackErr(
+										"flush tx_info at slot %d: %w",
+										point.Slot, err,
+									)
+								}
+								if utxoRefs != nil {
+									removed := ReturnRedeemUTxOs(utxoRefs)
+									logf(
+										"nodeparity: applied the Allegra hard "+
+											"fork's redeem-address UTxO removal "+
+											"at slot %d: %d refs removed",
+										point.Slot, len(removed),
+									)
+								}
+							}
 							for _, tx := range block.Transactions() {
 								pendingTxHashes = append(
 									pendingTxHashes, tx.Hash().String(),

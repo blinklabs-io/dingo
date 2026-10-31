@@ -1278,6 +1278,31 @@ func UTxOChanges(set UTxOSet, txInfos []koiosparity.KoiosTxInfoItem) {
 	}
 }
 
+// ReturnRedeemUTxOs applies the Allegra hard fork's one-time removal of every
+// UTxO at a Byron redeem (AVVM) address, whose value returns to the reserves
+// (returnRedeemAddrsToReserves in cardano-ledger's Allegra/Translation.hs).
+// No transaction carries that removal, so UTxOChanges never sees it, and a
+// reconstruction that skips it reports every such UTxO as missing from Dingo
+// at each epoch after the hard fork. It returns the removed refs, sorted.
+func ReturnRedeemUTxOs(set UTxOSet) []string {
+	var removed []string
+	for ref, entry := range set {
+		addr, _, _ := strings.Cut(entry, "|")
+		if strings.HasPrefix(addr, "addr") || strings.HasPrefix(addr, "stake") {
+			continue
+		}
+		a, err := lcommon.NewAddress(addr)
+		if err != nil || a.Type() != lcommon.AddressTypeByron ||
+			a.ByronType() != lcommon.ByronAddressTypeRedeem {
+			continue
+		}
+		delete(set, ref)
+		removed = append(removed, ref)
+	}
+	sort.Strings(removed)
+	return removed
+}
+
 // UTxODiff reports every divergence between want (the Koios-derived
 // reconstruction) and got (Dingo's own live answer): refs present in want
 // but missing from got, refs present in got but missing from want, and
