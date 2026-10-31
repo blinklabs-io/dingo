@@ -71,13 +71,24 @@ type tpraosPrtclState struct {
 	CandidateNonce lcommon.Nonce
 }
 
-// tpraosChainDepState mirrors ouroboros-consensus' TPraosState record: the
-// last slot beside the nested PrtclState. The epoch, previous-epoch, lab and
-// last-epoch-block nonces are Praos-only and have no place here.
+type tpraosTicknState struct {
+	cbor.StructAsArray
+	EpochNonce         lcommon.Nonce
+	PreviousEpochNonce lcommon.Nonce
+}
+
+type tpraosLedgerState struct {
+	cbor.StructAsArray
+	PrtclState tpraosPrtclState
+	TicknState tpraosTicknState
+	LabNonce   lcommon.Nonce
+}
+
+// TPraos uses a StrictMaybe slot and nests the protocol and nonce states.
 type tpraosChainDepState struct {
 	cbor.StructAsArray
-	LastSlot   olocalstatequery.WithOriginSlot
-	PrtclState tpraosPrtclState
+	LastSlot    []uint64
+	LedgerState tpraosLedgerState
 }
 
 // praosChainDepState mirrors ouroboros-consensus' PraosState record. Field
@@ -290,25 +301,6 @@ func (ls *LedgerState) queryShelleyDebugChainDepState(
 		}
 	}
 
-	// The era at the tip decides the layout. Both records carry the last slot,
-	// the counters and these two nonces; the rest is Praos-only, so a TPraos
-	// reply is complete here and does not pay for reads it cannot report.
-	if chainDepStateUsesTPraos(eraId) {
-		return []any{
-			versionedChainDepState{
-				Version: chainDepStateVersionTPraos,
-				Inner: tpraosChainDepState{
-					LastSlot: lastSlot,
-					PrtclState: tpraosPrtclState{
-						OpCertCounters: counters,
-						EvolvingNonce:  evolvingNonce,
-						CandidateNonce: candidateNonce,
-					},
-				},
-			},
-		}, nil
-	}
-
 	state := praosChainDepState{
 		LastSlot:       lastSlot,
 		OpCertCounters: counters,
@@ -352,6 +344,31 @@ func (ls *LedgerState) queryShelleyDebugChainDepState(
 	state.LabNonce, err = ls.chainDepStateLabNonce(txn, tip, carriedLabNonce)
 	if err != nil {
 		return nil, err
+	}
+
+	if chainDepStateUsesTPraos(eraId) {
+		lastSlot := make([]uint64, 0, 1)
+		if state.LastSlot.HasSlot {
+			lastSlot = append(lastSlot, state.LastSlot.Slot)
+		}
+		return []any{versionedChainDepState{
+			Version: chainDepStateVersionTPraos,
+			Inner: tpraosChainDepState{
+				LastSlot: lastSlot,
+				LedgerState: tpraosLedgerState{
+					PrtclState: tpraosPrtclState{
+						OpCertCounters: counters,
+						EvolvingNonce:  evolvingNonce,
+						CandidateNonce: candidateNonce,
+					},
+					TicknState: tpraosTicknState{
+						EpochNonce:         state.EpochNonce,
+						PreviousEpochNonce: state.PreviousEpochNonce,
+					},
+					LabNonce: state.LabNonce,
+				},
+			},
+		}}, nil
 	}
 
 	if ls.chainDepStateUsesPraos2(eraId) {

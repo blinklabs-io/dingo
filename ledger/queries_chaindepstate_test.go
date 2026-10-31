@@ -197,8 +197,8 @@ func TestQueryShelleyDebugChainDepState_DecodesAsPraosState(t *testing.T) {
 // a TPraos era.
 //
 // The two protocols do not merely tag the reply differently, they serialise
-// different records: TPraos writes version 1 wrapping [lastSlot, [counters,
-// evolving, candidate]], where Praos writes version 0 wrapping a flat
+// different records: TPraos writes version 1 wrapping a StrictMaybe slot
+// and nested protocol, ticked nonce and lab states, where Praos writes a flat
 // eight-field array. Emitting the Praos form in a TPraos era hands the client
 // a payload whose nesting and arity do not match what the version promises.
 //
@@ -264,6 +264,11 @@ func TestQueryShelleyDebugChainDepState_TPraosEraUsesTPraosLayout(
 	)
 
 	require.NoError(t, db.Metadata().SetEpoch(
+		0, 0, bytes.Repeat([]byte{3}, 32), nil, nil, nil,
+		eras.ShelleyEraDesc.Id, 1, uint(epochLength), nil,
+	))
+
+	require.NoError(t, db.Metadata().SetEpoch(
 		epochStart,                  // slot
 		1,                           // epoch
 		bytes.Repeat([]byte{4}, 32), // nonce
@@ -305,13 +310,44 @@ func TestQueryShelleyDebugChainDepState_TPraosEraUsesTPraosLayout(
 	assert.Equal(t, olocalstatequery.ChainDepStateProtocolTPraos,
 		decoded.Protocol,
 		"a Shelley-era tip serialises the TPraos layout")
-	// The Praos-only fields have no place in the TPraos record, and the
-	// decoder leaves them nil precisely so a caller can tell.
-	assert.Nil(t, decoded.EpochNonce,
-		"TPraos carries no epoch nonce")
-	assert.Nil(t, decoded.PreviousEpochNonce)
-	assert.Nil(t, decoded.LabNonce)
+	require.NotNil(t, decoded.EpochNonce)
+	assert.Equal(
+		t,
+		lcommon.Nonce{
+			Type:  lcommon.NonceTypeNonce,
+			Value: [32]byte(bytes.Repeat([]byte{4}, 32)),
+		},
+		*decoded.EpochNonce,
+	)
+	require.NotNil(t, decoded.PreviousEpochNonce)
+	assert.Equal(
+		t,
+		lcommon.Nonce{
+			Type:  lcommon.NonceTypeNonce,
+			Value: [32]byte(bytes.Repeat([]byte{3}, 32)),
+		},
+		*decoded.PreviousEpochNonce,
+	)
+	require.NotNil(t, decoded.LabNonce)
+	assert.Equal(
+		t,
+		lcommon.Nonce{
+			Type:  lcommon.NonceTypeNonce,
+			Value: [32]byte(preCutoffHash),
+		},
+		*decoded.LabNonce,
+	)
 	assert.Nil(t, decoded.LastEpochBlockNonce)
+	var outer []cbor.RawMessage
+	_, err = cbor.Decode(encoded, &outer)
+	require.NoError(t, err)
+	var inner []cbor.RawMessage
+	_, err = cbor.Decode(outer[1], &inner)
+	require.NoError(t, err)
+	var slot []uint64
+	_, err = cbor.Decode(inner[0], &slot)
+	require.NoError(t, err)
+	assert.Equal(t, []uint64{tipSlot}, slot)
 
 	// The fields TPraos does carry still have to be right, and still have to
 	// be the tip's rather than the epoch's opening checkpoint.
