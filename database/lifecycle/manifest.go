@@ -722,13 +722,7 @@ func writeManifestAtRoot(
 		return Manifest{}, fmt.Errorf("publish manifest: %w", err)
 	}
 	renamed = true
-	rootDir, err := root.Open(".")
-	if err != nil {
-		return Manifest{}, fmt.Errorf("open snapshot directory for sync: %w", err)
-	}
-	syncErr := rootDir.Sync()
-	closeErr := rootDir.Close()
-	if err := errors.Join(syncErr, closeErr); err != nil {
+	if err := syncSnapshotRoot(root); err != nil {
 		return Manifest{}, fmt.Errorf("sync snapshot directory: %w", err)
 	}
 	if err := snapshotRootMatchesPath(root, dir); err != nil {

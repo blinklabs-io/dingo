@@ -761,9 +761,11 @@ again, up to four waits per roll-forward. All waits of one roll-forward share
 one `catchUpBandWaitTimeout` bound, which stays under the protocol state
 timers, and end when the connection closes. Only a header still deferred at
 the bound is parked by `markDeferredHeaderRecovery`; an invalid header is
-rejected without waiting. A header extending the local chain is not held: its
-deferral can clear only by applying its own block, so it is forwarded
-unverified at once.
+rejected without waiting. A snapshot publication or validation transition
+also waits and retries a local extension: otherwise an unstamped header can
+be withheld by corroboration while its peer cursor advances past it. Other
+deferrals on local extensions are forwarded unverified at once because
+missing epoch data may require applying that header's own block to settle.
 
 Header parking and resyncs are exported as metrics.
 `dingo_chainsync_deferred_headers_total` counts each header
@@ -10442,12 +10444,13 @@ extraction budget. Only the bootstrap carries the 24-hour deadline, since a
 stream catch-up of a long gap can outlast it.
 
 Without an `ExpectedSize`, which v2 artifacts cannot supply, a resume request
-for a file already at the server's size is answered 416 and the cached file
-is accepted as complete. A v2 bootstrap therefore removes a fully downloaded
-digests or ancillary archive once it fails extraction or verification, so the
-next run fetches it again instead of re-accepting the same bad bytes. A failed
-download keeps its partial file for resumption, and a cancelled run keeps its
-archive, since neither says anything about the bytes already on disk.
+for a file already at the server's size can be answered 416. The cached file is
+accepted only when the response supplies a matching total size. Otherwise the
+downloader keeps the named cache and performs a bounded full download through
+the same restricted client into a private staging file. It replaces the cache
+only after that transfer succeeds; archive extraction and digest checks still
+admit the downloaded bytes. A failed or cancelled replacement leaves the cache
+available for another attempt.
 The zstd decoder separately defaults to a 512 MiB window and 256 MiB decoder
 memory limit, configurable through `WithZstdLimits`. For a streaming decode
 the smaller of the two bounds the history buffer the decoder allocates from the
@@ -20448,6 +20451,15 @@ URI. Before an upload, `MirrorToCloud` requires the existing manifest to
 authenticate under the configured trust key and verifies both payloads against
 its signed sizes and digests. An unsigned local snapshot cannot acquire the
 cloud trust root through automatic retry; it must be recreated explicitly.
+Marker reads accept only a regular, non-symlink file and stop after the fixed
+digest-plus-newline size. The snapshot directory handle used to open the
+authenticated upload files remains live through the cloud upload, catalog
+reconciliation, and marker publication. The marker is written through that
+same handle, then the directory path is checked again before the handle closes.
+Publication writes and synchronizes a private temporary regular file,
+atomically replaces the marker, synchronizes the directory, and rejects a
+directory replacement. An existing symlink, device, or FIFO at the marker name
+is replaced as a directory entry and is never opened.
 S3 and GCS open the snapshot directory through one held `os.Root`, authenticate
 the manifest and verify both payloads through the same stable regular-file
 handles they upload, and upload the manifest last. They do not enumerate or
