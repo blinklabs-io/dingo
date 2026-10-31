@@ -2644,21 +2644,40 @@ func (ls *LedgerState) genesisSelectionState() (bool, uint64) {
 	return active && window > 0, window
 }
 
+// peerHeaderHistoryLimit bounds, in headers, both how many already-passed
+// headers each connection retains and how deep a fork-path walk follows that
+// history. While Genesis selection is active it rises to the candidate-fragment
+// bound derived from the Genesis window, which is measured in slots and must
+// be converted before it can bound a header count.
 func (ls *LedgerState) peerHeaderHistoryLimit() int {
 	limit := maxPeerHeaderHistoryPerConn
 	if ls.chain != nil {
 		limit = max(limit, ls.allowedQueuedHeaders())
 	}
 	active, window := ls.genesisSelectionState()
-	if !active || window <= uint64(limit) {
+	if !active {
 		return limit
 	}
-	if window > uint64(math.MaxInt) {
-		return math.MaxInt
+	return max(
+		limit,
+		chainselection.GenesisCandidateHeaderLimit(
+			window,
+			ls.shelleySecurityParam(),
+		),
+	)
+}
+
+// shelleySecurityParam returns the Shelley genesis security parameter the
+// Genesis window is derived from, or zero when it is unknown.
+func (ls *LedgerState) shelleySecurityParam() uint64 {
+	if ls.config.CardanoNodeConfig == nil {
+		return 0
 	}
-	// The MaxInt check above makes this conversion safe on both 32- and
-	// 64-bit platforms.
-	return int(window) //nolint:gosec // G115: window is bounded by MaxInt
+	sg := ls.config.CardanoNodeConfig.ShelleyGenesis()
+	if sg == nil || sg.SecurityParam <= 0 {
+		return 0
+	}
+	return uint64(sg.SecurityParam) //nolint:gosec // checked positive above
 }
 
 // headerAtOrImmediatelyBeforeTip recognizes only points already accepted into
@@ -2754,6 +2773,10 @@ func (ls *LedgerState) historicalPointOnPrimaryChain(
 	return ls.primaryChainContainsBlock(block, point)
 }
 
+var errPeerForkAuthorizationChanged = errors.New(
+	"retained peer header authorization generation changed",
+)
+
 func (ls *LedgerState) findPeerForkPath(
 	e ChainsyncEvent,
 	initialPrevHash []byte,
@@ -2830,6 +2853,11 @@ func (ls *LedgerState) findPeerForkPath(
 		if !ls.headerCryptoVerificationGenerationCurrent(
 			recordEvent.HeaderCryptoVerificationGeneration,
 		) {
+			// A nonzero stamp was issued locally. Its expiration requires
+			// replay, without attributing our snapshot change to the peer.
+			if recordEvent.HeaderCryptoVerificationGeneration != 0 {
+				return nil, nil, errPeerForkAuthorizationChanged
+			}
 			return nil, nil, nil
 		}
 		if _, seen := visited[hashKey]; seen {
@@ -4171,12 +4199,15 @@ func (ls *LedgerState) localTipPraosView(ctx context.Context,
 	return view
 }
 
-func (ls *LedgerState) compareIncomingHeaderToLocalTip(
+func (ls *LedgerState) incomingHeaderTipComparison(
 	e ChainsyncEvent,
 	localTip ochainsync.Tip,
-) praos.ChainComparisonResult {
+) (
+	praos.ChainComparisonResult,
+	praos.PraosTiebreakerView,
+	praos.PraosTiebreakerView,
+) {
 	observedTip := observedHeaderTip(e)
-
 	incomingView, _ := praos.GetPraosTiebreakerView(e.BlockHeader)
 	localView := ls.localTipPraosView(ls.lifecycleContext(), localTip)
 	return ls.compareConsensusTips(
@@ -4184,7 +4215,7 @@ func (ls *LedgerState) compareIncomingHeaderToLocalTip(
 		localTip,
 		incomingView,
 		localView,
-	)
+	), incomingView, localView
 }
 
 func (ls *LedgerState) earlierHeaderCanBeatLocalTip(
@@ -4721,7 +4752,7 @@ func (ls *LedgerState) invalidateChainsyncHeaderAdmission(
 	ls.resetChainsyncResyncState(&pending)
 	ls.requestChainsyncResync(
 		e.ConnectionId,
-		"header authorization changed before selector admission",
+		event.ChainsyncResyncReasonHeaderAuthorizationChanged,
 		&pending,
 	)
 	queuePeerHeaderHistoryInvalidation(&pending, e)
@@ -4951,15 +4982,17 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 		"header_count", headerCount,
 		"connection_id", e.ConnectionId.String(),
 	)
-	var err error
-	if headerCryptoVerified {
-		err = ls.chain.AddBlockHeaderWithCryptoVerificationGeneration(
-			ls.lifecycleContext(),
-			e.BlockHeader,
-			headerCryptoVerificationGeneration,
-		)
-	} else {
-		err = ls.chain.AddBlockHeader(ls.lifecycleContext(), e.BlockHeader)
+	err := ls.chainsyncHeaderOriginError(e.BlockHeader)
+	if err == nil {
+		if headerCryptoVerified {
+			err = ls.chain.AddBlockHeaderWithCryptoVerificationGeneration(
+				ls.lifecycleContext(),
+				e.BlockHeader,
+				headerCryptoVerificationGeneration,
+			)
+		} else {
+			err = ls.chain.AddBlockHeader(ls.lifecycleContext(), e.BlockHeader)
+		}
 	}
 	completeAdmitted := func() {
 		if releaseVerificationGeneration != nil {
@@ -5443,6 +5476,54 @@ func (ls *LedgerState) AwaitChainsyncHeaderAdmission(
 	return true, nil
 }
 
+// AwaitObserverHeaderHorizon blocks until the published ledger state can
+// forecast e's slot, or ctx ends. It serves observer connections, whose
+// headers are never fetched: unlike AwaitChainsyncHeaderAdmission it starts no
+// blockfetch and requests no re-intersection, because the ingress connections
+// advance the horizon and an observer only has to stop reading ahead of it.
+//
+// Every held observer wakes on every publication, so a wake must not walk the
+// peer's ancestry again: the fork anchor is resolved once and reused until the
+// local chain withdraws a block or the ledger tip falls to it.
+func (ls *LedgerState) AwaitObserverHeaderHorizon(
+	ctx context.Context,
+	e ChainsyncEvent,
+) error {
+	var anchor heldForkAnchor
+	parked := false
+	defer func() {
+		if parked {
+			ls.metrics.observerHorizonParkEnd()
+		}
+	}()
+	for {
+		published := ls.snapshotPublishedChan()
+		// An unsettled walk releases the header, as the wait's bound would:
+		// an observer only streams, and holding it on an unknown anchor
+		// could park it until that bound.
+		//
+		// A header whose ancestry reaches no local block is held as well: its
+		// peer's chain leaves the local chain at an unknown point, so the
+		// ledger tip's horizon does not show it forecastable.
+		if beyond, _ := ls.headerBeyondForecastHorizonFrom(
+			ctx, e, &anchor,
+		); !beyond && !anchor.disconnected {
+			return nil
+		}
+		if !parked {
+			parked = true
+			ls.metrics.observerHorizonParkStart(
+				ls.observerHorizonOvershoot(e, &anchor),
+			)
+		}
+		select {
+		case <-published:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
 // flushQueuedHeadersForHorizonWait starts blockfetch for headers already
 // queued while admission holds the next header past the forecast horizon, and
 // reports whether a queued or in-flight fetch can publish a newer snapshot.
@@ -5602,56 +5683,186 @@ func (ls *LedgerState) awaitForecastHorizon(
 // horizon its chain can be forecast to. Like the reference ChainSync client,
 // the forecast is measured from the peer chain's intersection with the local
 // chain, so a fork that left the local chain before the ledger tip has a
-// shorter horizon than the tip's.
+// shorter horizon than the tip's. A header whose fork anchor could not be
+// settled is reported past the horizon: admission and the header queue must
+// not take a header they cannot show is forecastable.
 func (ls *LedgerState) headerBeyondForecastHorizon(
 	ctx context.Context,
 	e ChainsyncEvent,
 ) bool {
+	beyond, settled := ls.headerBeyondForecastHorizonFrom(
+		ctx, e, &heldForkAnchor{},
+	)
+	return beyond || !settled
+}
+
+// heldForkAnchor is one held header's chainsyncForkAnchor result, kept across
+// wakes. A fork anchor sits below the ledger tip on a block the local chain
+// holds and the peer's chain shares, with the local chain's next block off the
+// peer's chain. Only a withdrawal from the local chain can move that
+// intersection, and only a ledger tip at or below it can turn it into the tip
+// anchor, so the result stands until one of the two is observed.
+//
+// A disconnected result is never kept: the ancestry it could not trace can be
+// completed by a block the local chain adds, which is not a withdrawal, so the
+// walk repeats on every wake until it connects.
+type heldForkAnchor struct {
+	resolved     bool
+	forked       bool
+	disconnected bool
+	slot         uint64
+	generation   uint64
+}
+
+// headerBeyondForecastHorizonFrom reports whether e's header lies past its
+// forecast horizon, reusing anchor's resolution while it stands. settled is
+// false when chain mutations overlapped the fork-anchor walk on every attempt;
+// beyond is then false and the caller decides what an unknown anchor means.
+func (ls *LedgerState) headerBeyondForecastHorizonFrom(
+	ctx context.Context,
+	e ChainsyncEvent,
+	anchor *heldForkAnchor,
+) (beyond bool, settled bool) {
 	if ls.slotClock == nil || e.BlockHeader == nil {
-		return false
+		return false, true
 	}
 	slot := e.BlockHeader.SlotNumber()
 	if _, err := ls.slotClock.SlotToTime(slot); err != nil {
-		return errors.Is(err, hardfork.ErrPastHorizon)
+		return errors.Is(err, hardfork.ErrPastHorizon), true
 	}
-	anchor, ok := ls.chainsyncForkAnchor(ctx, e)
-	if !ok {
-		return false
+	// Read before resolving, so a withdrawal that overlaps the walk is seen
+	// on the next wake.
+	generation := ls.chain.WithdrawalGeneration()
+	if !anchor.resolved || anchor.disconnected ||
+		anchor.generation != generation ||
+		!anchor.belowLedgerTip(ls.loadTipSnapshot()) {
+		anchor.slot, anchor.forked, anchor.disconnected, settled = ls.chainsyncForkAnchor(ctx, e)
+		// A walk that read a chain mutation in flight may have taken a held
+		// block for absent and stopped at an older ancestor, so its anchor is
+		// neither used nor kept, and the next call resolves again.
+		if !settled {
+			anchor.resolved = false
+			return false, false
+		}
+		anchor.resolved = true
+		anchor.generation = generation
 	}
-	summary, err := ls.forecastSummaryFrom(anchor)
+	if !anchor.forked {
+		return false, true
+	}
+	summary, err := ls.forecastSummaryFrom(anchor.slot)
 	if err != nil {
-		return false
+		return false, true
 	}
 	_, err = summary.SlotToEpoch(slot)
-	return errors.Is(err, hardfork.ErrPastHorizon)
+	return errors.Is(err, hardfork.ErrPastHorizon), true
+}
+
+// belowLedgerTip reports whether a resolved fork anchor still lies below the
+// ledger tip, as chainsyncForkAnchor requires of one.
+func (a *heldForkAnchor) belowLedgerTip(tip *tipSnapshot) bool {
+	if !a.forked {
+		return true
+	}
+	return tip != nil && a.slot < tip.currentTip.Point.Slot
 }
 
 // chainsyncForkAnchor returns the slot at which the peer chain delivering e
-// leaves the local chain, when that is below the ledger tip. ok is false when
-// the peer's chain contains the ledger tip, which is then the forecast anchor,
-// and when the intersection cannot be resolved from recorded peer headers.
+// leaves the local chain, when that is below the ledger tip. forked is false
+// when the peer's chain contains the ledger tip, which is then the forecast
+// anchor, and when the intersection cannot be resolved from recorded peer
+// headers. disconnected is true when the walk ended at a parent that is
+// neither recorded, queued, nor held, as resolveForkAnchor defines it.
+// settled is false when a chain mutation overlapped a membership read the walk
+// depended on, in which case the other results mean nothing.
 func (ls *LedgerState) chainsyncForkAnchor(
 	ctx context.Context,
 	e ChainsyncEvent,
-) (uint64, bool) {
+) (slot uint64, forked bool, disconnected bool, settled bool) {
 	if ls.chain == nil {
-		return 0, false
+		return 0, false, false, true
 	}
 	tip := ls.loadTipSnapshot()
 	if tip == nil {
-		return 0, false
+		return 0, false, false, true
 	}
 	prevHash := e.BlockHeader.PrevHash().Bytes()
 	if bytes.Equal(prevHash, ls.chain.HeaderTip().Point.Hash) ||
 		bytes.Equal(prevHash, ls.chain.Tip().Point.Hash) {
-		return 0, false
+		return 0, false, false, true
 	}
-	return resolveForkAnchor(
+	lookups := ls.forkAnchorLookups(ctx, e)
+	unsettled := false
+	lookups.heldBlock = func(point ocommon.Point) bool {
+		held, ok := ls.holdsPointSettled(ctx, point)
+		if !ok {
+			unsettled = true
+		}
+		return held
+	}
+	slot, forked, disconnected = resolveForkAnchor(
 		prevHash,
 		tip.currentTip.Point.Slot,
 		ls.peerHeaderHistoryLimit(),
-		ls.forkAnchorLookups(ctx, e),
+		lookups,
 	)
+	if unsettled {
+		return 0, false, false, false
+	}
+	return slot, forked, disconnected, true
+}
+
+// holdsPointSettledAttempts bounds how many times a membership read that a
+// chain mutation overlapped is repeated before the point's membership is
+// reported unknown.
+const holdsPointSettledAttempts = 3
+
+// holdsPointSettled is Chain.HoldsPointSettled, repeating a read that a chain
+// mutation overlapped. Blocks are added continuously while the node syncs, so
+// the overlap is routine rather than exceptional.
+func (ls *LedgerState) holdsPointSettled(
+	ctx context.Context,
+	point ocommon.Point,
+) (held bool, settled bool) {
+	for attempt := range holdsPointSettledAttempts {
+		if attempt > 0 {
+			ls.metrics.incHoldsPointRetry()
+		}
+		held, settled = ls.chain.HoldsPointSettled(ctx, point)
+		if settled {
+			return held, true
+		}
+	}
+	return false, false
+}
+
+// observerHorizonOvershoot returns how many slots e's header lies past the
+// end of the forecast it is held on, when that end is known.
+func (ls *LedgerState) observerHorizonOvershoot(
+	e ChainsyncEvent,
+	anchor *heldForkAnchor,
+) (uint64, bool) {
+	forecastSlot := anchor.slot
+	if !anchor.forked {
+		tip := ls.loadTipSnapshot()
+		if tip == nil {
+			return 0, false
+		}
+		forecastSlot = tip.currentTip.Point.Slot
+	}
+	summary, err := ls.forecastSummaryFrom(forecastSlot)
+	if err != nil {
+		return 0, false
+	}
+	era := summary.CurrentEra()
+	if era == nil || era.End == nil {
+		return 0, false
+	}
+	slot := e.BlockHeader.SlotNumber()
+	if slot < era.End.Slot {
+		return 0, true
+	}
+	return slot - era.End.Slot, true
 }
 
 // chainsyncHeaderDisconnected reports whether e's predecessor is neither the
@@ -5772,51 +5983,65 @@ type forkAnchorLookups struct {
 // ledger tip means the peer's chain contains the tip. A header built on origin
 // carries the zero hash as its parent, which no stored block has: that
 // intersection is slot 0.
+//
+// disconnected is true when the walk ended at a parent that is not recorded,
+// not queued, and not a block the local chain holds, so the peer's chain is
+// known to leave the local chain at a point that could not be found. A walk
+// that ran out of limit hops proves nothing either way: an observer reading
+// ahead of the ledger legitimately has more unapplied headers than the limit.
 func resolveForkAnchor(
 	prevHash []byte,
 	tipSlot uint64,
 	limit int,
 	lookups forkAnchorLookups,
-) (uint64, bool) {
+) (slot uint64, forked bool, disconnected bool) {
+	// absent classifies a parent that no peer record explains.
+	absent := func(hash []byte) (uint64, bool, bool) {
+		if lookups.queuedHeaderHash != nil && lookups.queuedHeaderHash(hash) {
+			return 0, false, false
+		}
+		point, found := lookups.blockByHash(hash)
+		if !found || !lookups.heldBlock(point) {
+			return 0, false, true
+		}
+		slot, forked := localForkAnchor(point.Slot, tipSlot)
+		return slot, forked, false
+	}
 	for range limit {
 		if isOriginHash(prevHash) {
-			return localForkAnchor(0, tipSlot)
+			slot, forked := localForkAnchor(0, tipSlot)
+			return slot, forked, false
 		}
 		point, parentHash, found := lookups.peerHeader(prevHash)
 		if !found {
-			point, found = lookups.blockByHash(prevHash)
-			if !found || !lookups.heldBlock(point) {
-				return 0, false
-			}
-			return localForkAnchor(point.Slot, tipSlot)
+			return absent(prevHash)
 		}
 		if lookups.queuedHeader(point) {
-			return 0, false
+			return 0, false, false
 		}
 		if lookups.heldBlock(point) {
-			return localForkAnchor(point.Slot, tipSlot)
+			slot, forked := localForkAnchor(point.Slot, tipSlot)
+			return slot, forked, false
 		}
 		prevHash = parentHash
 	}
 	// As in connectsToLocalChain, the parent reached by the last permitted
 	// hop is examined without traversing another peer header.
 	if isOriginHash(prevHash) {
-		return localForkAnchor(0, tipSlot)
+		slot, forked := localForkAnchor(0, tipSlot)
+		return slot, forked, false
 	}
 	if point, _, found := lookups.peerHeader(prevHash); found {
 		if lookups.queuedHeader(point) {
-			return 0, false
+			return 0, false, false
 		}
 		if lookups.heldBlock(point) {
-			return localForkAnchor(point.Slot, tipSlot)
+			slot, forked := localForkAnchor(point.Slot, tipSlot)
+			return slot, forked, false
 		}
-		return 0, false
+		return 0, false, false
 	}
-	point, found := lookups.blockByHash(prevHash)
-	if !found || !lookups.heldBlock(point) {
-		return 0, false
-	}
-	return localForkAnchor(point.Slot, tipSlot)
+	return absent(prevHash)
 }
 
 func isOriginHash(hash []byte) bool {
@@ -6000,10 +6225,30 @@ func (ls *LedgerState) addChainsyncHeader(
 	return verified, err
 }
 
+func (ls *LedgerState) chainsyncHeaderOriginError(header gledger.BlockHeader) error {
+	// Fresh chains support arbitrary anchors for offline imports. Network
+	// serving is identified by the active-connection callback wired by the
+	// node. Inspect only its presence: calling it here would take networking
+	// locks under the header handler. Rollbacks to origin are also guarded
+	// atomically inside the chain.
+	if ls.config.GetActiveConnectionFunc != nil &&
+		header.BlockNumber() != 0 && len(ls.chain.HeaderTip().Point.Hash) == 0 {
+		return chain.NewBlockNotFitChainTipError(
+			header.Hash().String(),
+			header.PrevHash().String(),
+			"origin",
+		)
+	}
+	return nil
+}
+
 func (ls *LedgerState) addChainsyncHeaderPinned(
 	header gledger.BlockHeader,
 	verificationGeneration uint64,
 ) (bool, func(), error) {
+	if err := ls.chainsyncHeaderOriginError(header); err != nil {
+		return false, nil, err
+	}
 	ls.txValidationCommitMutex.RLock()
 	consensus := ls.loadConsensusSnapshot()
 	tip := ls.loadTipSnapshot()
@@ -6118,11 +6363,20 @@ func (ls *LedgerState) tryResolveForkPinned(
 ) (bool, error) {
 	incomingGenerationPinned := releaseIncomingGeneration != nil
 	localTip := ls.chain.Tip()
-	praosComparison := ls.compareIncomingHeaderToLocalTip(
+	praosComparison, incomingView, localView := ls.incomingHeaderTipComparison(
 		e,
 		localTip,
 	)
 	genesisActive, genesisWindow := ls.genesisSelectionState()
+	if !genesisActive {
+		ls.checkComparedTipSlotBattle(
+			observedHeaderTip(e),
+			localTip,
+			praosComparison,
+			incomingView,
+			localView,
+		)
+	}
 	// Once the selector has converged back to Praos, preserve the normal
 	// length-first decision and avoid the more expensive fork-path density
 	// walk for a candidate that cannot win.
@@ -6150,6 +6404,19 @@ func (ls *LedgerState) tryResolveForkPinned(
 		prevHashBytes,
 		localTip.Point.Slot,
 	)
+	if errors.Is(err, errPeerForkAuthorizationChanged) {
+		ls.config.Logger.Info(
+			"retained fork header authorization changed, triggering chainsync re-sync",
+			"component", "ledger",
+			"connection_id", e.ConnectionId.String(),
+		)
+		ls.requestChainsyncResync(
+			e.ConnectionId,
+			event.ChainsyncResyncReasonHeaderAuthorizationChanged,
+			pending,
+		)
+		return true, nil
+	}
 	if err != nil {
 		return false, fmt.Errorf(
 			"unexpected error looking up common ancestor for prev hash %s: %w",
@@ -6208,8 +6475,17 @@ func (ls *LedgerState) tryResolveForkPinned(
 		switch {
 		case peerDensity < localDensity:
 			return false, nil
-		case peerDensity == localDensity &&
-			praosComparison != praos.ChainABetter:
+		case peerDensity == localDensity:
+			ls.checkComparedTipSlotBattle(
+				observedHeaderTip(e),
+				localTip,
+				praosComparison,
+				incomingView,
+				localView,
+			)
+			if praosComparison == praos.ChainABetter {
+				break
+			}
 			// Equal density converges on the usual Praos length/VRF
 			// comparison, matching selector peer-ranking behavior.
 			return false, nil
@@ -9300,6 +9576,12 @@ func (ls *LedgerState) processEpochRolloverWithClassicPParamsContext(
 	// TestProcessEpochRollover_SnapStakeReadOrdering in
 	// chainsync_test.go, is (Dijkstra moves step 3 after step 10):
 	//
+	//   0. applyByronTranslationReserves — Byron-to-Shelley boundary only:
+	//      reset reserves from the translated UTxO. The hard-fork combinator
+	//      translates the Byron ledger before the first Shelley TICK, so this
+	//      precedes every Shelley rule, and a later rule that moves reserves
+	//      at the same boundary (a two-era boundary's pv3 AVVM return) builds
+	//      on the translated value instead of being overwritten by it.
 	//   1. applyStakeRewards             — apply the delayed reward update
 	//      (rewards from the snapshot three epochs back): credit spendable
 	//      rewards and move undistributed→reserves, unspendable→treasury
@@ -9341,6 +9623,22 @@ func (ls *LedgerState) processEpochRolloverWithClassicPParamsContext(
 	// Steps 7 and 8 must observe the post-enactment major version. Step 9 must
 	// observe the persisted pparams (not just the in-memory ones) because its
 	// body issues SQL within `txn` that may join against `pparams` rows.
+	if currentEpoch.EraId == eras.ByronEraDesc.Id &&
+		currentEra.Id != eras.ByronEraDesc.Id {
+		if err := ls.timeRolloverPhase(
+			currentEpoch.EpochId+1, "byron_translation", func() error {
+				return ls.applyByronTranslationReserves(
+					txn,
+					currentEpoch.EpochId+1,
+					epochStartSlot,
+				)
+			},
+		); err != nil {
+			return nil, fmt.Errorf(
+				"apply Byron-to-Shelley reserves: %w", err,
+			)
+		}
+	}
 	if err := ls.timeRolloverPhase(
 		currentEpoch.EpochId+1, "ratify_consume", func() error {
 			return ls.consumePendingRatification(ctx, txn)
@@ -9783,8 +10081,9 @@ func (ls *LedgerState) processEpochRolloverWithClassicPParamsContext(
 	}
 
 	// Capture the new epoch's ADA pots (reserves/treasury/fees) after every
-	// boundary treasury/reserves mutation above (stake rewards, POOLREAP,
-	// governance withdrawals, donations, and any AVVM-removal reserves top-up).
+	// boundary treasury/reserves mutation above (Byron translation, stake
+	// rewards, POOLREAP, governance withdrawals, donations, and any
+	// AVVM-removal reserves top-up).
 	// This row seeds the delayed reward calculation for a later epoch, so it
 	// must observe the fully settled pots for the ended epoch.
 	if err := ls.timeRolloverPhase(
@@ -10162,10 +10461,11 @@ func (ls *LedgerState) cleanupBlockNoncesBefore(
 	}
 }
 
-// checkSlotBattle checks whether an incoming block from a peer
-// occupies a slot for which the local node has already forged a
-// block. If so, it counts and logs the battle and registers it so the winner
-// is reported once the slot is settled.
+// checkSlotBattle preserves body-stage detection for an incoming peer block
+// that occupies a slot the local node forged. Header-stage chain selection
+// detects equal-height battles across the active restricted Praos window in
+// checkComparedTipSlotBattle. Both paths converge on recordSlotBattle so one
+// comparison delivered through both stages is counted once.
 //
 // The winner cannot be read when the rival arrives. chain.AddBlock only
 // accepts a block that extends the tip, so an accepted rival means the forged
@@ -10194,25 +10494,85 @@ func (ls *LedgerState) checkSlotBattle(e BlockfetchEvent) {
 		return
 	}
 
+	ls.recordSlotBattle(incomingSlot, localHash, incomingSlot, remoteHash)
+}
+
+func (ls *LedgerState) checkComparedTipSlotBattle(
+	incomingTip, localTip ochainsync.Tip,
+	comparison praos.ChainComparisonResult,
+	incomingView, localView praos.PraosTiebreakerView,
+) {
+	if comparison == praos.ChainEqual ||
+		incomingTip.BlockNumber != localTip.BlockNumber {
+		return
+	}
+
+	config := incomingView.TiebreakerConfig
+	if config.Flavor == praos.PraosTiebreakerUnknown {
+		config = localView.TiebreakerConfig
+	}
+	if config.Flavor != praos.PraosTiebreakerRestricted ||
+		slotDistance(incomingTip.Point.Slot, localTip.Point.Slot) >
+			config.MaxSlotDistance {
+		return
+	}
+
+	checker := ls.loadForgedBlockChecker()
+	if checker == nil {
+		return
+	}
+	localHash, forged := checker.WasForgedByUs(localTip.Point.Slot)
+	if !forged || !bytes.Equal(localHash, localTip.Point.Hash) ||
+		bytes.Equal(localHash, incomingTip.Point.Hash) {
+		return
+	}
+
+	ls.recordSlotBattle(
+		localTip.Point.Slot,
+		localHash,
+		incomingTip.Point.Slot,
+		incomingTip.Point.Hash,
+	)
+}
+
+func slotDistance(a, b uint64) uint64 {
+	if a >= b {
+		return a - b
+	}
+	return b - a
+}
+
+func (ls *LedgerState) recordSlotBattle(
+	localSlot uint64,
+	localHash []byte,
+	remoteSlot uint64,
+	remoteHash []byte,
+) {
+	if ls.chain == nil {
+		return
+	}
+	battle := slotBattle{
+		slot:       localSlot,
+		localHash:  bytes.Clone(localHash),
+		remoteSlot: remoteSlot,
+		remoteHash: bytes.Clone(remoteHash),
+		settleAt:   ls.chain.Tip().BlockNumber + ls.slotBattleSettleDepth(),
+	}
+	if !ls.slotBattles.add(battle) {
+		return
+	}
+
 	ls.config.Logger.Warn(
 		"slot battle detected",
 		"component", "ledger",
-		"slot", incomingSlot,
+		"slot", localSlot,
+		"remote_slot", remoteSlot,
 		"local_block_hash", hex.EncodeToString(localHash),
 		"remote_block_hash", hex.EncodeToString(remoteHash),
 	)
-
-	// Increment slot battle metric
 	if recorder := ls.loadSlotBattleRecorder(); recorder != nil {
 		recorder.RecordSlotBattle()
 	}
-
-	ls.slotBattles.add(slotBattle{
-		slot:       incomingSlot,
-		localHash:  localHash,
-		remoteHash: remoteHash,
-		settleAt:   ls.chain.Tip().BlockNumber + ls.slotBattleSettleDepth(),
-	})
 }
 
 // selectInitialBlockfetchConn picks the connection to fetch the queued range

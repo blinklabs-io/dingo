@@ -230,14 +230,45 @@ func (b *Blockfrost) handleLatestBlockTxs(
 	writeJSON(w, http.StatusOK, page)
 }
 
+// admitChainSummary reserves one chain summary slot for the request's client.
+// When the cap is reached it writes the 429 response and reports false.
+func (b *Blockfrost) admitChainSummary(
+	w http.ResponseWriter,
+	r *http.Request,
+) (func(), bool) {
+	release, ok := b.chainSummaryAdmission.acquire(
+		r.Context(),
+		requestClient(r),
+	)
+	if !ok {
+		w.Header().Set("Retry-After", "1")
+		writeError(
+			w,
+			http.StatusTooManyRequests,
+			"Too Many Requests",
+			"chain summary capacity reached, try again later",
+		)
+		return nil, false
+	}
+	return release, true
+}
+
 // handleLatestEpoch handles GET /api/v0/epochs/latest and
 // returns the current epoch info.
 func (b *Blockfrost) handleLatestEpoch(
 	w http.ResponseWriter,
-	_ *http.Request,
+	r *http.Request,
 ) {
-	info, err := b.node.CurrentEpoch()
+	release, ok := b.admitChainSummary(w, r)
+	if !ok {
+		return
+	}
+	defer release()
+	info, err := b.node.CurrentEpoch(r.Context())
 	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return
+		}
 		b.logger.Error(
 			"failed to get current epoch",
 			"error", err,
@@ -370,10 +401,18 @@ func (b *Blockfrost) handleEpochParams(
 // network supply and stake information.
 func (b *Blockfrost) handleNetwork(
 	w http.ResponseWriter,
-	_ *http.Request,
+	r *http.Request,
 ) {
-	info, err := b.node.Network()
+	release, ok := b.admitChainSummary(w, r)
+	if !ok {
+		return
+	}
+	defer release()
+	info, err := b.node.Network(r.Context())
 	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return
+		}
 		b.logger.Error(
 			"failed to get network info",
 			"error", err,
@@ -1017,6 +1056,11 @@ func (b *Blockfrost) handleAddressTransactions(
 	if !ok {
 		return
 	}
+	release, ok := b.admitAddressSummary(w, r)
+	if !ok {
+		return
+	}
+	defer release()
 	address := r.PathValue("address")
 	txs, total, err := b.node.AddressTransactions(r.Context(), address, params)
 	if err != nil {
@@ -2269,13 +2313,31 @@ func (b *Blockfrost) handleAccountAssociatedAddresses(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
-	handlePaginatedAccountRequest(
-		b, w, r, b.node.AccountAssociatedAddresses,
-		func(item AccountAssociatedAddressInfo) AccountAssociatedAddressResponse {
-			return AccountAssociatedAddressResponse(item)
-		},
-		"failed to retrieve account addresses",
+	params, ok := parsePaginationOrWriteError(w, r)
+	if !ok {
+		return
+	}
+	// The page and the total each aggregate the credential's whole
+	// address_transaction history, so the route shares the whole-history scan
+	// pool. Bad pagination is rejected above so it never holds a slot.
+	release, ok := b.admitAddressSummary(w, r)
+	if !ok {
+		return
+	}
+	defer release()
+	items, total, err := b.node.AccountAssociatedAddresses(
+		r.Context(), r.PathValue("stake_address"), params,
 	)
+	if err != nil {
+		b.writeAccountError(w, err, "failed to retrieve account addresses")
+		return
+	}
+	SetPaginationHeaders(w, total, params)
+	resp := make([]AccountAssociatedAddressResponse, len(items))
+	for i, item := range items {
+		resp[i] = AccountAssociatedAddressResponse(item)
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (b *Blockfrost) handleAccountDelegationHistory(

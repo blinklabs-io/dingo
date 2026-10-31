@@ -34,24 +34,29 @@ type stateMetrics struct {
 	blockfetchConnSelected        atomic.Bool
 	lastBlockAddedUnixNano        atomic.Int64
 	headerQueueFull               prometheus.Counter
-	blockfetchEventMu             sync.Mutex
-	blockfetchEventStarts         map[uint64]time.Time
-	blockfetchEventNextID         uint64
-	blockNum                      prometheus.Gauge
-	density                       prometheus.Gauge
-	epochNum                      prometheus.Gauge
-	slotInEpoch                   prometheus.Gauge
-	slotNum                       prometheus.Gauge
-	forks                         prometheus.Gauge
-	slotClockFallbacks            prometheus.Counter
-	blocksForgedTotal             prometheus.Counter
-	blockForgingLatency           prometheus.Histogram
-	forgingEnabled                prometheus.Gauge
-	nodeStartTime                 prometheus.Gauge
-	tipGapSlots                   prometheus.Gauge
-	shelleyStartTime              prometheus.Gauge
-	epochLengthSlots              prometheus.Gauge
-	shadowGateDecisions           *prometheus.CounterVec
+	// Observer callbacks parked at the forecast horizon; see
+	// metrics_sync.go.
+	observerHorizonParked    atomic.Int64
+	observerHorizonOvershoot prometheus.Histogram
+	holdsPointRetries        prometheus.Counter
+	blockfetchEventMu        sync.Mutex
+	blockfetchEventStarts    map[uint64]time.Time
+	blockfetchEventNextID    uint64
+	blockNum                 prometheus.Gauge
+	density                  prometheus.Gauge
+	epochNum                 prometheus.Gauge
+	slotInEpoch              prometheus.Gauge
+	slotNum                  prometheus.Gauge
+	forks                    prometheus.Gauge
+	slotClockFallbacks       prometheus.Counter
+	blocksForgedTotal        prometheus.Counter
+	blockForgingLatency      prometheus.Histogram
+	forgingEnabled           prometheus.Gauge
+	nodeStartTime            prometheus.Gauge
+	tipGapSlots              prometheus.Gauge
+	shelleyStartTime         prometheus.Gauge
+	epochLengthSlots         prometheus.Gauge
+	shadowGateDecisions      *prometheus.CounterVec
 	// Wall-clock time the ledger apply path spent waiting for a referenced
 	// Leios endorser block, by outcome ("arrived", "timeout", "cancelled" or
 	// "unavailable"). It covers both waits the apply path can take: the
@@ -917,6 +922,18 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 	m.headerQueueFull = promautoFactory.NewCounter(prometheus.CounterOpts{
 		Name: "dingo_chain_header_queue_full_total",
 		Help: "headers rejected because the primary chain's header queue was at capacity",
+	})
+	m.observerHorizonOvershoot = promautoFactory.NewHistogram(prometheus.HistogramOpts{
+		Name: "dingo_ledger_observer_horizon_overshoot_slots",
+		Help: "slots an observer header lay past the end of the forecast it was held on, observed once when the header first parks",
+		Buckets: []float64{
+			0, 1_000, 5_000, 20_000, 50_000, 100_000, 250_000, 500_000,
+			1_000_000, 5_000_000,
+		},
+	})
+	m.holdsPointRetries = promautoFactory.NewCounter(prometheus.CounterOpts{
+		Name: "dingo_ledger_fork_anchor_membership_retries_total",
+		Help: "fork-anchor chain membership reads repeated because a block mutation overlapped them",
 	})
 	m.blockNum = promautoFactory.NewGauge(prometheus.GaugeOpts{
 		Name: "cardano_node_metrics_blockNum_int",

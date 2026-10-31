@@ -17,6 +17,7 @@ package mcp
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"log/slog"
 	"math"
@@ -31,10 +32,21 @@ const (
 	// maxConcurrentSQLiteQueries bounds the expensive database reads that
 	// may run at once on one server.
 	maxConcurrentSQLiteQueries = 4
+	// maxConcurrentCallerSQLQueries bounds the caller-supplied SQL
+	// (sqlite_query, sqlite_explain) running at once. A caller controls how
+	// long such a query holds its slot, up to the query timeout, so it also
+	// holds one of the maxConcurrentSQLiteQueries shared slots. Keeping this
+	// below that total leaves shared slots that caller SQL can never take, so
+	// the built-in tools keep a slot however many slow queries are submitted.
+	maxConcurrentCallerSQLQueries = 2
 	// maxAssetInfoRows bounds the live asset rows one get_asset_info call
 	// scans. A call that would exceed it fails instead of returning a
 	// partial supply or holder count.
 	maxAssetInfoRows = 50_000
+	// maxToolOffset bounds the OFFSET a paginated SQLite tool accepts: SQLite
+	// walks and discards every skipped row, so the cost of a page grows
+	// with its offset.
+	maxToolOffset = 10_000
 	// maxSQLiteWALBytes is the metadata WAL size above which new database
 	// reads are refused. It is twice the 64 MiB journal_size_limit the
 	// metadata store sets, so a WAL this large has been neither reset nor
@@ -47,7 +59,8 @@ const (
 )
 
 var (
-	errReadsBusy = errors.New("too many concurrent SQLite queries")
+	errReadsBusy      = errors.New("too many concurrent SQLite queries")
+	errOffsetTooLarge = fmt.Errorf("offset must not exceed %d", maxToolOffset)
 	// errWALPressure is returned while the metadata WAL exceeds
 	// maxSQLiteWALBytes or its size cannot be read. Refusing new reads lets
 	// the in-flight ones finish within their query timeout, which gives the
@@ -64,6 +77,9 @@ var (
 // share one value so the concurrency slots are a server-wide budget.
 type readLimits struct {
 	slots chan struct{}
+	// callerSlots is the sub-budget for caller-supplied SQL; see
+	// maxConcurrentCallerSQLQueries.
+	callerSlots chan struct{}
 	// parseSlots bounds the caller-supplied payloads parsed at once; see
 	// runAdmitted.
 	parseSlots   chan struct{}
@@ -77,6 +93,7 @@ type readLimits struct {
 func newReadLimits() *readLimits {
 	return &readLimits{
 		slots:        make(chan struct{}, maxConcurrentSQLiteQueries),
+		callerSlots:  make(chan struct{}, maxConcurrentCallerSQLQueries),
 		parseSlots:   make(chan struct{}, maxConcurrentPayloadParses),
 		maxAssetRows: maxAssetInfoRows,
 		maxWALBytes:  maxSQLiteWALBytes,
@@ -169,6 +186,31 @@ func (l *readLimits) admit() error {
 	return nil
 }
 
+// admitCallerSQL takes a caller-SQL slot and a shared query slot for a query
+// whose text the caller supplied, or refuses it under WAL pressure or when
+// either budget is full. A successful call must be paired with
+// releaseCallerSQL.
+func (l *readLimits) admitCallerSQL() error {
+	if err := l.walPressure(); err != nil {
+		return err
+	}
+	select {
+	case l.callerSlots <- struct{}{}:
+	default:
+		return errReadsBusy
+	}
+	if !l.acquire() {
+		<-l.callerSlots
+		return errReadsBusy
+	}
+	return nil
+}
+
+func (l *readLimits) releaseCallerSQL() {
+	l.release()
+	<-l.callerSlots
+}
+
 // acquire takes a query slot without blocking and reports whether it got one.
 func (l *readLimits) acquire() bool {
 	select {
@@ -180,3 +222,19 @@ func (l *readLimits) acquire() bool {
 }
 
 func (l *readLimits) release() { <-l.slots }
+
+// offsetLimitNote returns a notice for a full page whose next offset would
+// exceed maxToolOffset, or "" otherwise. Without it, a caller paging until a
+// short page cannot tell a complete result from one cut off by the bound.
+func offsetLimitNote(offset, limit, returned int) string {
+	if returned < limit || offset+limit <= maxToolOffset {
+		return ""
+	}
+	return fmt.Sprintf(
+		"**Offset limit reached**: the next page would start past "+
+			"offset %d, which this tool rejects. Matching rows beyond "+
+			"this page are not retrievable here; treat the result as "+
+			"truncated.\n\n",
+		maxToolOffset,
+	)
+}

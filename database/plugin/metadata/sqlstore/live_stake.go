@@ -540,6 +540,29 @@ func (s *Store) RebuildRewardLiveStakeFromRunningTotalsInBatches(
 	return s.rebuildRewardLiveStakeInBatches(slot, runTxn, nil)
 }
 
+// RebuildRewardLiveStakeInBatches rebuilds the authoritative aggregate in
+// independently committed credential ranges. The caller persists the returned
+// cursor in the same transaction as each range through runTxn. Account, UTxO,
+// and delegation rows must remain stable until the rebuild completes.
+func (s *Store) RebuildRewardLiveStakeInBatches(
+	ctx context.Context,
+	slot uint64,
+	cursor []byte,
+	initialized bool,
+	runTxn func(func(types.Txn) ([]byte, int64, int64, bool, error)) error,
+) error {
+	if runTxn == nil {
+		return errors.New("reward live stake batch transaction runner is nil")
+	}
+	return s.rebuildRewardLiveStakeResumable(
+		ctx,
+		slot,
+		cursor,
+		initialized,
+		runTxn,
+	)
+}
+
 // verifyRewardLiveStakeRunningTotals enforces the running-total path's
 // precondition: the ledger-state importer must have recorded a utxo_stake for
 // every credential that still holds a live UTxO, because that path never
@@ -693,14 +716,69 @@ func rewardLiveStakeKeySource(accountRange, utxoRange string) string {
 // countRewardLiveStakeKeys sizes the rebuild so its progress log can report
 // an ETA.
 func countRewardLiveStakeKeys(ctx context.Context, db queryer) (int64, error) {
+	return countRewardLiveStakeKeysInRange(ctx, db, stakeKeyRange{})
+}
+
+func countRewardLiveStakeKeysInRange(
+	ctx context.Context,
+	db queryer,
+	keys stakeKeyRange,
+) (int64, error) {
+	accountRange, accountArgs := keys.predicate("credential_tag", "staking_key")
+	utxoRange, utxoArgs := keys.predicate("credential_tag", "staking_key")
+	args := append(accountArgs, utxoArgs...)
 	var count int64
 	err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM (`+
-		rewardLiveStakeKeySource("1 = 1", "1 = 1")+`
-) stake_keys`).Scan(&count)
+		rewardLiveStakeKeySource(accountRange, utxoRange)+`
+) stake_keys`, args...).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("count reward live stake keys: %w", err)
 	}
 	return count, nil
+}
+
+func encodeRewardLiveStakeCursor(bound *stakeKeyBound) []byte {
+	if bound == nil {
+		return nil
+	}
+	cursor := make([]byte, len(bound.key)+1)
+	cursor[0] = bound.tag
+	copy(cursor[1:], bound.key)
+	return cursor
+}
+
+func decodeRewardLiveStakeCursor(cursor []byte) *stakeKeyBound {
+	if len(cursor) == 0 {
+		return nil
+	}
+	return &stakeKeyBound{
+		tag: cursor[0],
+		key: slices.Clone(cursor[1:]),
+	}
+}
+
+func rewardLiveStakeKeyExists(
+	ctx context.Context,
+	db queryer,
+	bound *stakeKeyBound,
+) (bool, error) {
+	if bound == nil {
+		return true, nil
+	}
+	var exists bool
+	err := db.QueryRowContext(ctx, `
+SELECT EXISTS (
+    SELECT 1 FROM account
+    WHERE credential_tag = ? AND staking_key = ?
+    UNION
+    SELECT 1 FROM utxo
+    WHERE `+liveUtxoStakeKeyFilter+`
+      AND credential_tag = ? AND staking_key = ?
+)`, bound.tag, bound.key, bound.tag, bound.key).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("verify reward live stake cursor: %w", err)
+	}
+	return exists, nil
 }
 
 // nextRewardLiveStakeBatchEnd returns the last stake key of the batch of
@@ -967,6 +1045,155 @@ func (s *Store) rebuildRewardLiveStake(
 			return nil
 		},
 	)
+}
+
+func (s *Store) rebuildRewardLiveStakeResumable(
+	ctx context.Context,
+	slot uint64,
+	cursor []byte,
+	initialized bool,
+	runTxn func(func(types.Txn) ([]byte, int64, int64, bool, error)) error,
+) error {
+	slotValue, err := checkedInt64(slot)
+	if err != nil {
+		return err
+	}
+	if err := s.ensureReady(); err != nil {
+		return err
+	}
+	lo := decodeRewardLiveStakeCursor(cursor)
+	if !initialized && lo != nil {
+		return errors.New("reward live stake cursor requires initialized rebuild")
+	}
+	readDB := s.instrumentedQueryer(s.readDB)
+	total, err := countRewardLiveStakeKeys(ctx, readDB)
+	if err != nil {
+		return err
+	}
+	var processed int64
+	if lo != nil {
+		exists, err := rewardLiveStakeKeyExists(ctx, readDB, lo)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			return fmt.Errorf(
+				"reward live stake cursor key %d:%x is absent",
+				lo.tag,
+				lo.key,
+			)
+		}
+		processed, err = countRewardLiveStakeKeysInRange(
+			ctx,
+			readDB,
+			stakeKeyRange{hi: lo},
+		)
+		if err != nil {
+			return err
+		}
+	}
+	if !initialized {
+		//nolint:contextcheck // runTxn binds txn to the caller context.
+		err := runTxn(func(txn types.Txn) ([]byte, int64, int64, bool, error) {
+			err := s.withWriteTransaction(
+				txn,
+				func(db queryer, ctx context.Context) error {
+					if _, err := db.ExecContext(
+						ctx,
+						"DELETE FROM reward_live_stake",
+					); err != nil {
+						return fmt.Errorf("clear reward live stake: %w", err)
+					}
+					return nil
+				},
+			)
+			return nil, 0, total, false, err
+		})
+		if err != nil {
+			return err
+		}
+	}
+
+	rebuildStart := time.Now()
+	s.logger.Info(
+		"reward live stake rebuild: started",
+		"stake_keys", total,
+		"stake_keys_done", processed,
+		"from_running_totals", false,
+	)
+	lastProgress := time.Now()
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		hi, err := nextRewardLiveStakeBatchEnd(
+			ctx,
+			readDB,
+			lo,
+			s.rewardLiveStakeBatch(),
+		)
+		if err != nil {
+			return err
+		}
+		var rows int
+		//nolint:contextcheck // runTxn binds txn to the caller context.
+		err = runTxn(func(txn types.Txn) ([]byte, int64, int64, bool, error) {
+			err := s.withWriteTransaction(
+				txn,
+				func(db queryer, ctx context.Context) error {
+					upserter := s.newRewardLiveStakeUpserter(db)
+					defer upserter.Close()
+					var err error
+					rows, err = s.rebuildRewardLiveStakeRange(
+						ctx,
+						db,
+						upserter,
+						stakeKeyRange{lo: lo, hi: hi},
+						false,
+						slotValue,
+					)
+					return err
+				},
+			)
+			if err != nil {
+				return nil, 0, total, false, err
+			}
+			return encodeRewardLiveStakeCursor(hi),
+				processed + int64(rows), total, hi == nil, nil
+		})
+		if err != nil {
+			return err
+		}
+		processed += int64(rows)
+		if hi == nil {
+			break
+		}
+		lo = hi
+		if time.Since(lastProgress) >= rewardLiveStakeProgressInterval {
+			lastProgress = time.Now()
+			elapsed := time.Since(rebuildStart)
+			remaining := time.Duration(0)
+			if processed > 0 && total > processed {
+				remaining = time.Duration(
+					float64(elapsed) *
+						float64(total-processed) / float64(processed),
+				)
+			}
+			s.logger.Info(
+				"reward live stake rebuild: progress",
+				"stake_keys_done", processed,
+				"stake_keys", total,
+				"elapsed", elapsed.Round(time.Second).String(),
+				"eta", remaining.Round(time.Second).String(),
+			)
+		}
+	}
+	s.logger.Info(
+		"reward live stake rebuild: complete",
+		"rows", processed,
+		"duration", time.Since(rebuildStart).String(),
+	)
+	return nil
 }
 
 func (s *Store) rebuildRewardLiveStakeInBatches(

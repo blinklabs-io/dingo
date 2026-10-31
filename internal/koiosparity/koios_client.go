@@ -202,12 +202,13 @@ const (
 var koiosBaseURLs = map[string]string{
 	"preview": "https://preview.koios.rest/api/v1",
 	"preprod": "https://preprod.koios.rest/api/v1",
+	"mainnet": "https://api.koios.rest/api/v1",
 }
 
 // KoiosEpochInfoResp is the Koios /epoch_info response shape, covering every
 // field in the documented schema (components/schemas/epoch_info in
 // https://api.koios.rest/koiosapi.yaml).
-// Note: pool_cnt and delegator_cnt are not returned by preview/preprod and are omitted.
+// Note: pool_cnt and delegator_cnt are not returned by Koios and are omitted.
 // active_stake, fees, and total_rewards are documented nullable on early
 // epochs (pre-staking, pre-rewards). out_sum and avg_blk_reward are not
 // documented nullable but are defensively typed as pointers because Koios has
@@ -390,24 +391,35 @@ type KoiosClient struct {
 	koios408MaxBackoff     time.Duration
 }
 
-// validateKoiosNetwork rejects any network this tool doesn't support
-// (currently "preview"/"preprod" only, via koiosBaseURLs). Called both by
-// NewKoiosClient (the live-fetch path) and by Check/CheckEpoch (the
-// cache-only path, which never constructs a KoiosClient and so would
-// otherwise let an unsupported network — e.g. "mainnet" — reach
-// compareEpochAccounts/StakeAddressFromCredential unvalidated;
-// StakeAddressFromCredential hardcodes the testnet address network ID since
-// preview/preprod are the only networks this tool ever validates against,
-// so an unvalidated "mainnet" would silently generate wrong-network stake
-// addresses instead of erroring).
-func validateKoiosNetwork(network string) error {
+// validateKoiosClientNetwork rejects any network with no public Koios root
+// in koiosBaseURLs. It gates only the client: what a caller may compare on a
+// network is decided separately, by validateKoiosNetwork.
+func validateKoiosClientNetwork(network string) error {
 	if _, ok := koiosBaseURLs[network]; !ok {
 		return fmt.Errorf(
-			"unsupported network %q; supported: preview, preprod",
+			"unsupported network %q; supported: preview, preprod, mainnet",
 			network,
 		)
 	}
 	return nil
+}
+
+// validateKoiosNetwork rejects any network the reward/account comparison
+// doesn't support. Called by Fetch (the live-fetch path) and by
+// Check/CheckEpoch (the cache-only path, which never constructs a KoiosClient
+// and so would otherwise let an unsupported network reach
+// compareEpochAccounts/StakeAddressFromCredential unvalidated, deriving stake
+// addresses with the wrong network ID instead of erroring). Every network
+// with a Koios root is comparable, so this defers to the client check.
+func validateKoiosNetwork(network string) error {
+	return validateKoiosClientNetwork(network)
+}
+
+// ValidateNetwork reports whether network is one koios-parity can validate
+// against. The node wiring and the CLI use it so the supported set has a single
+// definition.
+func ValidateNetwork(network string) error {
+	return validateKoiosNetwork(network)
 }
 
 // NewKoiosClient creates a client for the given network.
@@ -435,7 +447,7 @@ func NewKoiosClient(
 	network, apiKey, baseURL string,
 	allowInsecureHTTP, allowPrivateAddresses bool,
 ) (*KoiosClient, error) {
-	if err := validateKoiosNetwork(network); err != nil {
+	if err := validateKoiosClientNetwork(network); err != nil {
 		return nil, err
 	}
 	base := koiosBaseURLs[network]

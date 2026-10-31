@@ -108,7 +108,7 @@ func Check(
 ) (*CheckResult, error) {
 	// Check works entirely from the cache and never constructs a
 	// KoiosClient (unlike Fetch), so nothing else validates cfg.Network —
-	// without this, an unsupported network (e.g. "mainnet") would reach
+	// without this, an unsupported network (e.g. "sanchonet") would reach
 	// compareEpochAccounts/StakeAddressFromCredential unrejected. See
 	// validateKoiosNetwork's doc comment.
 	if err := validateKoiosNetwork(cfg.Network); err != nil {
@@ -306,8 +306,11 @@ const defaultPreStakingThroughEpoch = 1
 // staking era at epoch 0. Preprod runs Byron for epochs 0-3 and enters
 // Shelley at epoch 4, so the mark/set/go derivation first yields a valid
 // snapshot at epoch 6 and Koios reports a null active_stake for epochs 0-5.
+// Mainnet runs Byron for epochs 0-207 and enters Shelley at epoch 208, so
+// the same derivation first yields a valid snapshot at epoch 210.
 var preStakingThroughEpochByNetwork = map[string]uint64{
 	"preprod": 5,
+	"mainnet": 209,
 }
 
 // preStakingThroughEpoch returns the last Koios reporting epoch of network
@@ -1313,9 +1316,13 @@ func compareEpochAccounts(
 		}}, koiosRows, true
 	}
 
-	dingoRows, credentialErrs, poolErrs := creditedAccountRewards(dingoOutputs)
+	dingoRows, credentialErrs, poolErrs := creditedAccountRewards(
+		network,
+		dingoOutputs,
+	)
 	for _, refund := range refunds.Refunds {
 		addr, err := StakeAddressFromCredential(
+			network,
 			refund.StakingKey,
 			refund.CredentialTag,
 		)
@@ -1442,11 +1449,13 @@ func compareEpochAccounts(
 // one slice made a corrupt pool_key_hash read as a stake-address problem
 // during triage.
 func creditedAccountRewards(
+	network string,
 	outputs []*models.RewardAccountOutput,
 ) (rows []DingoAccountReward, credentialErrs, poolErrs []error) {
 	rows = make([]DingoAccountReward, 0, len(outputs))
 	for _, row := range outputs {
 		addr, err := StakeAddressFromCredential(
+			network,
 			row.StakingKey,
 			row.CredentialTag,
 		)
@@ -1594,8 +1603,8 @@ func accountLifecycleMismatches(
 	// underlying rows) — only previousOutputs has no other reporting path,
 	// since nothing else in this package ever decodes the previous stake
 	// epoch's addresses.
-	prevSet, prevDecodeErrs := dingoRewardAddressSet(previousOutputs)
-	currSet, currDecodeErrs := dingoRewardAddressSet(currentOutputs)
+	prevSet, prevDecodeErrs := dingoRewardAddressSet(network, previousOutputs)
+	currSet, currDecodeErrs := dingoRewardAddressSet(network, currentOutputs)
 	if prevDecodeErrs > 0 {
 		out = append(out, CheckMismatch{
 			Network: network,
@@ -1669,11 +1678,16 @@ func accountLifecycleMismatches(
 // mismatch when there's no other reporting path for this specific input
 // (see accountLifecycleMismatches's call site).
 func dingoRewardAddressSet(
+	network string,
 	outputs []*models.RewardAccountOutput,
 ) (set map[string]bool, decodeErrs int) {
 	set = make(map[string]bool, len(outputs))
 	for _, o := range outputs {
-		addr, err := StakeAddressFromCredential(o.StakingKey, o.CredentialTag)
+		addr, err := StakeAddressFromCredential(
+			network,
+			o.StakingKey,
+			o.CredentialTag,
+		)
 		if err != nil {
 			decodeErrs++
 			continue

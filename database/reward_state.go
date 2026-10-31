@@ -16,6 +16,7 @@ package database
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -53,6 +54,65 @@ func (d *Database) RebuildRewardLiveStake(
 		return fmt.Errorf("rebuild reward live stake at slot %d: %w", slot, err)
 	}
 	return nil
+}
+
+// RebuildRewardLiveStakeResumable rebuilds the authoritative live reward stake
+// aggregate in committed ranges. checkpoint runs in the same metadata
+// transaction as each range and must durably record cursor before returning.
+// Stable source metadata is required until done is true.
+func (d *Database) RebuildRewardLiveStakeResumable(
+	ctx context.Context,
+	slot uint64,
+	cursor []byte,
+	initialized bool,
+	checkpoint func(*Txn, []byte, int64, int64, bool) error,
+	onCommitted func([]byte, int64, int64, bool),
+) error {
+	if checkpoint == nil {
+		return errors.New("rebuild reward live stake: batch callback is nil")
+	}
+	rebuilder, ok := d.metadata.(interface {
+		RebuildRewardLiveStakeInBatches(
+			context.Context,
+			uint64,
+			[]byte,
+			bool,
+			func(func(types.Txn) ([]byte, int64, int64, bool, error)) error,
+		) error
+	})
+	if !ok {
+		return errors.New(
+			"rebuild reward live stake: metadata provider has no resumable rebuild",
+		)
+	}
+	return rebuilder.RebuildRewardLiveStakeInBatches(
+		ctx,
+		slot,
+		cursor,
+		initialized,
+		func(
+			runBatch func(types.Txn) ([]byte, int64, int64, bool, error),
+		) error {
+			var nextCursor []byte
+			var current, total int64
+			var done bool
+			err := d.withMetadataWriteTxn(ctx, nil, func(txn *Txn) error {
+				var err error
+				nextCursor, current, total, done, err = runBatch(txn.Metadata())
+				if err != nil {
+					return err
+				}
+				return checkpoint(txn, nextCursor, current, total, done)
+			})
+			if err != nil {
+				return err
+			}
+			if onCommitted != nil {
+				onCommitted(nextCursor, current, total, done)
+			}
+			return nil
+		},
+	)
 }
 
 // RebuildRewardLiveStakeFromRunningTotals finalizes the aggregate after a

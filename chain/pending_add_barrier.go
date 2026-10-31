@@ -363,6 +363,7 @@ func (c *Chain) finishCallerTxnAdd(txn *database.Txn) {
 		c.currentTip = add.tip
 		c.tipBlockIndex = add.tipIndex
 		c.mutationGeneration = add.generation
+		c.withdrawalGeneration.Add(1)
 		if c.headerMutationGeneration == add.headerGeneration+1 {
 			c.headerMutationGeneration = add.headerGeneration
 			c.headers = add.headers

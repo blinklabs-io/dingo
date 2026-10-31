@@ -66,12 +66,19 @@ type PeerConfig struct {
 	// addresses. Nil uses none. Its addresses are untrusted: one that is
 	// loopback, private or otherwise not publicly routable is never dialed.
 	LedgerPeers func(ctx context.Context) ([]Peer, error)
-	// MinPeers is how many peer connections the stack tries to hold, inbound
-	// ones included.
+	// MinPeers is how many outbound peer connections the stack tries to
+	// hold. Inbound connections are not counted: any source may open one, so
+	// they cannot stand in for the peers the stack chose to dial.
 	MinPeers int
 	// MaxPeers is the most peer connections it holds, inbound ones included.
 	// A connection that would exceed it is refused. Required.
 	MaxPeers int
+	// MaxInbound is the most inbound connections it holds. It may not exceed
+	// MaxPeers less the room kept for the peers the stack dials: MinPeers,
+	// or the valency of the topology's local roots when that is larger.
+	// Zero uses that difference, which accepts no inbound connection when
+	// nothing is left.
+	MaxInbound int
 	// MaxInboundPerSource is the most connections one source may hold. Zero
 	// uses four.
 	MaxInboundPerSource int
@@ -97,6 +104,21 @@ type PeerConfig struct {
 	listen      func(ctx context.Context, network, address string) (net.Listener, error)
 }
 
+// outboundReserve is how many connections are kept free of inbound ones for
+// the peers the stack dials: MinPeers, or the most its local roots can hold
+// when that is larger, never more than MaxPeers.
+func (c *PeerConfig) outboundReserve() int {
+	reserve := c.MinPeers
+	if c.Topology != nil {
+		roots := 0
+		for _, g := range c.Topology.LocalRoots {
+			roots += min(len(g.Peers), int(min(g.Valency, uint(c.MaxPeers))))
+		}
+		reserve = max(reserve, roots)
+	}
+	return min(reserve, c.MaxPeers)
+}
+
 func (c *PeerConfig) validate() error {
 	switch {
 	case c.MaxPeers <= 0:
@@ -105,6 +127,13 @@ func (c *PeerConfig) validate() error {
 		return errors.New("dmq: peer config MinPeers must not be negative")
 	case c.MinPeers > c.MaxPeers:
 		return errors.New("dmq: peer config MinPeers exceeds MaxPeers")
+	case c.MaxInbound < 0:
+		return errors.New("dmq: peer config MaxInbound must not be negative")
+	case c.MaxInbound > c.MaxPeers-c.outboundReserve():
+		return errors.New(
+			"dmq: peer config MaxInbound exceeds MaxPeers less the room " +
+				"kept for dialed peers",
+		)
 	case c.MaxInboundPerSource < 0:
 		return errors.New(
 			"dmq: peer config MaxInboundPerSource must not be negative",
@@ -121,6 +150,9 @@ func (c *PeerConfig) validate() error {
 }
 
 func (c *PeerConfig) applyDefaults() {
+	if c.MaxInbound == 0 {
+		c.MaxInbound = c.MaxPeers - c.outboundReserve()
+	}
 	if c.MaxInboundPerSource == 0 {
 		c.MaxInboundPerSource = defaultMaxInboundPerSource
 	}
@@ -162,6 +194,25 @@ func (s *Stack) PeerCount() int {
 	s.peerMu.Lock()
 	defer s.peerMu.Unlock()
 	return len(s.peers)
+}
+
+// outboundPeerCount returns the open peer connections this side dialed,
+// including ones still in their handshake.
+func (s *Stack) outboundPeerCount() int {
+	s.peerMu.Lock()
+	defer s.peerMu.Unlock()
+	return s.outboundLocked()
+}
+
+// outboundLocked counts the dialed peers. The caller holds s.peerMu.
+func (s *Stack) outboundLocked() int {
+	n := 0
+	for p := range s.peers {
+		if p.dialed {
+			n++
+		}
+	}
+	return n
 }
 
 // PeerListenAddrs returns the addresses the stack accepts peers on, which

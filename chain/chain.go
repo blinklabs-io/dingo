@@ -23,6 +23,7 @@ import (
 	"log/slog"
 	"slices"
 	"sync"
+	"sync/atomic"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -72,11 +73,19 @@ type Chain struct {
 	// c.mutex.
 	mutationGeneration       uint64
 	headerMutationGeneration uint64
-	lastCommonBlockIndex     uint64
-	id                       ChainId
-	mutex                    sync.RWMutex
-	waitingChanMutex         sync.Mutex
-	persistent               bool
+	// withdrawalGeneration advances after every operation that removes a
+	// block from the chain or discards queued headers without adding the
+	// block they announced: rollbacks, the restores that undo a failed add,
+	// and header-queue clears. Unlike mutationGeneration it is never
+	// restored, and it is bumped after the change, so a reader that loads it
+	// before consulting chain membership and finds it unchanged later knows
+	// nothing it saw held has been withdrawn since.
+	withdrawalGeneration atomic.Uint64
+	lastCommonBlockIndex uint64
+	id                   ChainId
+	mutex                sync.RWMutex
+	waitingChanMutex     sync.Mutex
+	persistent           bool
 
 	// pendingUpdates is the chain-level sequencer for deferred chain.update
 	// / chain.fork publication. The mutex-holding ledger paths (blockfetch
@@ -206,6 +215,18 @@ func (c *Chain) setHeadersLocked(headers []queuedHeader) {
 		close(c.headerChange)
 		c.headerChange = nil
 	}
+}
+
+// WithdrawalGeneration returns a counter that advances after every operation
+// that removes a block from the chain or discards queued headers without
+// adding their blocks. A caller that reads it before consulting HoldsPoint or
+// HoldsQueuedHeader may reuse a positive answer while it is unchanged; blocks
+// and headers added since are not reflected.
+func (c *Chain) WithdrawalGeneration() uint64 {
+	if c == nil {
+		return 0
+	}
+	return c.withdrawalGeneration.Load()
 }
 
 func (c *Chain) Tip() ochainsync.Tip {
@@ -1314,6 +1335,9 @@ func (c *Chain) addBlockLocked(
 	} else if !matchPendingHeader {
 		discardedHeaders = c.queuedHeaderHashes()
 		c.setHeadersLocked(c.headers[:0])
+		if len(discardedHeaders) > 0 {
+			defer c.withdrawalGeneration.Add(1)
+		}
 	}
 	// Update tip
 	c.currentTip = ochainsync.Tip{
@@ -2172,6 +2196,9 @@ func (c *Chain) rollbackWithMutationBarrierHeld(
 	point ocommon.Point,
 	unbounded bool,
 ) ([]event.Event, error) {
+	// Advanced even when the rollback is refused: a spurious advance only
+	// costs a reader one re-resolution.
+	defer c.withdrawalGeneration.Add(1)
 	// A queued-header rollback does not remove persistent blocks and therefore
 	// must not wait for unrelated caller transactions. Check that case before
 	// waiting; the full check is repeated below after the wait because headers
@@ -2516,6 +2543,9 @@ func (c *Chain) ClearHeaders() {
 	discarded := c.queuedHeaderHashes()
 	hadHeaders := len(discarded) > 0
 	c.setHeadersLocked(c.headers[:0])
+	if hadHeaders {
+		defer c.withdrawalGeneration.Add(1)
+	}
 	// Discarded headers never become blocks, so any announcement they
 	// carried is void, and no rollback is published for them because no
 	// block was ever added. Everything at or below the block tip survives;
@@ -3131,40 +3161,54 @@ func (c *Chain) BlockBeforeSlot(
 // after a rollback, or that lives on a fork, is not held. Pruning block content
 // does not retract persistent membership while its metadata and active index
 // still identify the exact point.
+func (c *Chain) HoldsPoint(ctx context.Context, point ocommon.Point) bool {
+	held, _ := c.HoldsPointSettled(ctx, point)
+	return held
+}
+
+// HoldsPointSettled is HoldsPoint that also reports whether the answer is
+// settled. A block mutation that overlaps the unlocked read of a persistent
+// chain leaves the membership unknown: held is then false and settled is
+// false, and the caller must not treat the point as absent. Every other false
+// answer is settled.
 //
 //nolint:contextcheck // A nil caller has no context to inherit.
-func (c *Chain) HoldsPoint(ctx context.Context, point ocommon.Point) bool {
+func (c *Chain) HoldsPointSettled(
+	ctx context.Context,
+	point ocommon.Point,
+) (held bool, settled bool) {
 	if c == nil || c.manager == nil {
-		return false
+		return false, true
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if ctx.Err() != nil {
-		return false
+		return false, true
 	}
 	if c.persistent {
 		return c.holdsPersistentPoint(ctx, point)
 	}
 	blk, err := c.BlockByPoint(ctx, point, nil)
 	if err != nil {
-		return false
+		return false, true
 	}
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
-	return c.holdsBlockAtIndex(ctx, blk.ID, point.Hash)
+	return c.holdsBlockAtIndex(ctx, blk.ID, point.Hash), true
 }
 
 // holdsPersistentPoint needs only the retained metadata and active index.
 // Read both from one blob snapshot without fetching CBOR or opening SQL. The
 // generation check rejects a result if rollback or another block mutation
-// raced these unlocked reads; no membership verdict survives the call.
+// raced these unlocked reads; no membership verdict survives the call, and
+// settled is false for it.
 func (c *Chain) holdsPersistentPoint(
 	ctx context.Context,
 	point ocommon.Point,
-) bool {
+) (held bool, settled bool) {
 	if len(point.Hash) != lcommon.Blake2b256Size {
-		return false
+		return false, true
 	}
 	c.mutex.RLock()
 	generation := c.mutationGeneration
@@ -3173,23 +3217,41 @@ func (c *Chain) holdsPersistentPoint(
 	db := c.manager.db
 	c.manager.mutex.RUnlock()
 	if db == nil {
-		return false
+		return false, true
 	}
 	txn := db.BlobTxn(false)
 	defer txn.Rollback() //nolint:errcheck
 	index, err := database.BlockIDByPointMetadataTxn(txn, point)
-	if err != nil || ctx.Err() != nil {
-		return false
+	if ctx.Err() != nil {
+		return false, true
+	}
+	if err != nil {
+		return false, !c.blockMutatedSince(generation)
 	}
 	indexed, err := db.BlockPointByIndex(index, txn)
+	if ctx.Err() != nil {
+		return false, true
+	}
 	if err != nil || indexed.Slot != point.Slot ||
-		!bytes.Equal(indexed.Hash, point.Hash) || ctx.Err() != nil {
-		return false
+		!bytes.Equal(indexed.Hash, point.Hash) {
+		// A rollback that replaces the entry mid-read looks the same as a
+		// point that was never here.
+		return false, !c.blockMutatedSince(generation)
 	}
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
-	return generation == c.mutationGeneration &&
-		index >= initialBlockIndex && index <= c.tipBlockIndex
+	if generation != c.mutationGeneration {
+		return false, false
+	}
+	return index >= initialBlockIndex && index <= c.tipBlockIndex, true
+}
+
+// blockMutatedSince reports whether the in-memory block state mutated after
+// generation was read.
+func (c *Chain) blockMutatedSince(generation uint64) bool {
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	return generation != c.mutationGeneration
 }
 
 // holdsBlockAtIndex reports whether this chain currently has the block with

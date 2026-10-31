@@ -81,8 +81,17 @@ func (s *syncServiceServer) FetchBlock(
 
 	budget := byteBudget{limit: s.utxorpc.config.MaxResponseBytes}
 	for _, point := range points {
-		block, err := s.utxorpc.config.LedgerState.GetBlock(point)
+		if err := ctx.Err(); err != nil {
+			return nil, readStateContextError(err)
+		}
+		block, err := s.utxorpc.config.LedgerState.GetBlockContext(
+			ctx,
+			point,
+		)
 		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, readStateContextError(ctxErr)
+			}
 			return nil, err
 		}
 		if !budget.fits(len(block.Cbor)) {

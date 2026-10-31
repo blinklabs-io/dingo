@@ -882,10 +882,9 @@ type NetworkIngestHoldTracker interface {
 // arrive after teardown.
 type ConnectionLiveFunc func(ouroboros.ConnectionId) bool
 
-// ForgedBlockChecker is an interface for checking whether the local
-// node recently forged a block for a given slot. This is used by
-// chainsync to detect slot battles when an incoming block from a
-// peer occupies the same slot as a locally forged block.
+// ForgedBlockChecker is an interface for checking whether the local node
+// recently forged a block for a given slot. Chainsync uses it to attribute the
+// local side of same-slot and restricted-window Praos battles.
 type ForgedBlockChecker interface {
 	// WasForgedByUs returns the block hash and true if the local node
 	// forged a block for the given slot, or nil and false otherwise.
@@ -1405,9 +1404,14 @@ type LedgerState struct {
 	// evalAdmission bounds concurrent EvaluateTx calls globally and per remote
 	// source. Nil means unbounded.
 	evalAdmission *evaluationLimiter
-	metrics       stateMetrics
-	consensus     atomic.Pointer[consensusSnapshot]
-	tip           atomic.Pointer[tipSnapshot]
+	// utxoWholeAdmission permits one complete GetUTxOWhole materialization at
+	// a time. It is initialized lazily so test-only LedgerState values that do
+	// not use NewLedgerState receive the same admission bound.
+	utxoWholeAdmission     chan struct{}
+	utxoWholeAdmissionOnce sync.Once
+	metrics                stateMetrics
+	consensus              atomic.Pointer[consensusSnapshot]
+	tip                    atomic.Pointer[tipSnapshot]
 	// tachysMu serializes construction of the full public leader selector.
 	// The cache is bounded to the same three-epoch window as pool snapshots
 	// and keyed by the published consensus context so rollback or state
@@ -1421,6 +1425,9 @@ type LedgerState struct {
 	// publication, so a reader waiting for the ledger to advance can block
 	// until the published state changes instead of polling it.
 	snapshotPublished atomic.Pointer[chan struct{}]
+	// forkForecastSummaries caches fork-anchored forecast summaries for the
+	// current consensus snapshot. See forecastSummaryFrom.
+	forkForecastSummaries atomic.Pointer[forkForecastSummaries]
 	// txValidationSettled is closed and replaced after every snapshot
 	// publication and every finished validation transition: the two events
 	// that can turn a non-current validation session current again.
@@ -2246,6 +2253,9 @@ type LedgerState struct {
 	forkHeaderNonceCacheMutex sync.Mutex
 	forkHeaderNonceCache      map[string]map[uint64]peerForkNoncePrefix
 	forkHeaderPathCache       map[string]peerForkPathPrefix
+	// onPeerForkAncestorStateCheck, when set by a test, observes each
+	// ledger-state verification of a peer fork ancestor.
+	onPeerForkAncestorStateCheck func(slot uint64)
 	// Test hook for fork ancestor lookups.
 	lookupBlockByHash func([]byte) (models.Block, error)
 	// Test hook called after Close releases the blockfetch continuation mutex
@@ -2587,6 +2597,14 @@ func (ls *LedgerState) txValidationSettledChan() <-chan struct{} {
 			return ch
 		}
 	}
+}
+
+// HeaderVerificationSettledChan returns a channel closed by the next snapshot
+// publication or finished validation transition. Callers retrying a deferred
+// header verification obtain it before the attempt, so a publication during
+// the attempt still wakes them.
+func (ls *LedgerState) HeaderVerificationSettledChan() <-chan struct{} {
+	return ls.txValidationSettledChan()
 }
 
 // notifyTxValidationSettled wakes every txValidationSettledChan waiter. It
@@ -7349,10 +7367,14 @@ func (ls *LedgerState) ledgerReadChainIterator(
 					// clears, so the pair confines the wait to initial
 					// catch-up, where rollbacks are rare and no forging
 					// depends on them.
+					// Applying the drained network frontier can publish the state the
+					// next header needs. Offline import keeps its gap coalescing.
 					if len(rawBatch) > 0 && len(rawBatch) < cap(rawBatch) &&
 						coalesceAttempts < gatherCoalesceMaxAttempts &&
 						gapAttempts < gatherCoalesceMaxGapAttempts &&
 						!ls.reachedTip.Load() &&
+						(ls.config.GetActiveConnectionFunc == nil ||
+							ls.chain == nil || ls.chain.HeaderCount() > 0) &&
 						!nearKnownUpstreamTip(
 							rawBatch[len(rawBatch)-1].Slot,
 							upstreamTipSlot,
@@ -13270,7 +13292,17 @@ func (ls *LedgerState) latestLedgerPrimaryChainAncestor(
 }
 
 func (ls *LedgerState) GetBlock(point ocommon.Point) (models.Block, error) {
-	ret, err := ls.chain.BlockByPoint(context.Background(), point, nil)
+	return ls.GetBlockContext(context.Background(), point)
+}
+
+// GetBlockContext is GetBlock with a caller-supplied context that cancels the
+// metadata lookup. The blob read that follows takes no context, so a read
+// already in flight finishes before the call returns.
+func (ls *LedgerState) GetBlockContext(
+	ctx context.Context,
+	point ocommon.Point,
+) (models.Block, error) {
+	ret, err := ls.chain.BlockByPoint(ctx, point, nil)
 	if err != nil {
 		return models.Block{}, err
 	}
@@ -14946,6 +14978,15 @@ func (ls *LedgerState) TransactionByHash(ctx context.Context,
 	return ls.db.GetTransactionByHash(ctx, hash, nil)
 }
 
+// ExistingTransactionHashes returns the subset of hashes that have a
+// transaction record, in no particular order, from one read transaction.
+func (ls *LedgerState) ExistingTransactionHashes(
+	ctx context.Context,
+	hashes [][]byte,
+) ([][]byte, error) {
+	return ls.db.GetExistingTransactionHashes(ctx, hashes)
+}
+
 // BlockByHash returns a block by its hash.
 func (ls *LedgerState) BlockByHash(
 	ctx context.Context,
@@ -15237,66 +15278,6 @@ func (ls *LedgerState) CountTransactionsByMetadataLabel(
 		)
 	}
 	return count, nil
-}
-
-// CountTransactionsInSlotRange returns the number of transactions whose slot
-// falls within the inclusive range [startSlot, endSlot].
-// Used by the Blockfrost adapter CurrentEpoch() path so epoch responses can
-// return real tx counts without decoding every block in the epoch on demand.
-func (ls *LedgerState) CountTransactionsInSlotRange(
-	startSlot, endSlot uint64,
-) (int, error) {
-	if endSlot < startSlot {
-		return 0, nil
-	}
-	store, ok := ls.db.Metadata().(metadata.SlotRangeStore)
-	if !ok {
-		return 0, errors.New(
-			"metadata store does not support slot-range statistics",
-		)
-	}
-	count, err := store.CountTransactionsInSlotRange(
-		startSlot,
-		endSlot,
-		nil,
-	)
-	if err != nil {
-		return 0, fmt.Errorf(
-			"count transactions in slot range %d-%d: %w",
-			startSlot,
-			endSlot,
-			err,
-		)
-	}
-	return count, nil
-}
-
-// CountBlocksInSlotRange returns the number of canonical blocks in the
-// inclusive slot range [startSlot, endSlot], along with the first and last
-// block slots found. It uses canonical metadata rows instead of raw blob keys
-// so orphaned fork blocks do not leak into Blockfrost epoch responses.
-func (ls *LedgerState) CountBlocksInSlotRange(
-	startSlot, endSlot uint64,
-) (int, uint64, uint64, error) {
-	if endSlot < startSlot {
-		return 0, 0, 0, nil
-	}
-	store, ok := ls.db.Metadata().(metadata.SlotRangeStore)
-	if !ok {
-		return 0, 0, 0, errors.New(
-			"metadata store does not support slot-range statistics",
-		)
-	}
-	stats, err := store.GetBlockSlotRangeStats(startSlot, endSlot, nil)
-	if err != nil {
-		return 0, 0, 0, fmt.Errorf(
-			"count blocks in slot range %d-%d: %w",
-			startSlot,
-			endSlot,
-			err,
-		)
-	}
-	return stats.Count, stats.FirstSlot, stats.LastSlot, nil
 }
 
 // resolveValidationEra determines the appropriate era descriptor for

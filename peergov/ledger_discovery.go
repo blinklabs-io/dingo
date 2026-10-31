@@ -180,6 +180,7 @@ func (p *PeerGovernor) discoverLedgerPeersContext(ctx context.Context) {
 	}
 
 	candidates := dedupeRelayCandidates(flattenRelayCandidates(relays))
+	corroborationIdentities := p.ledgerRelayCorroborationIdentities(relays)
 
 	// Reconcile ledgerKnownAddrs against this round's actual on-chain relay
 	// set before adding anything new: an address a pool no longer registers
@@ -190,6 +191,7 @@ func (p *PeerGovernor) discoverLedgerPeersContext(ctx context.Context) {
 	// list, which is a different and less frequent condition than the
 	// ledger delisting a relay while its peer stays connected.
 	p.reconcileLedgerKnownAddrs(candidates)
+	p.reconcileLedgerCorroborationIdentities(corroborationIdentities)
 
 	extraAdds := 0
 	if urgent && needed <= 0 {
@@ -343,6 +345,55 @@ func dedupeRelayCandidates(candidates []string) []string {
 	return unique
 }
 
+// ledgerRelayCorroborationIdentities maps each registered relay endpoint to
+// its pool control key. An endpoint claimed by different control keys is
+// ambiguous and deliberately has no corroboration identity.
+func (p *PeerGovernor) ledgerRelayCorroborationIdentities(
+	relays []PoolRelay,
+) map[string]string {
+	identities := make(map[string]string)
+	for _, relay := range relays {
+		identity := relayCorroborationIdentity(relay)
+		for _, address := range relay.Addresses() {
+			key := p.normalizeAddress(address)
+			current, exists := identities[key]
+			if !exists {
+				identities[key] = identity
+				continue
+			}
+			if current != identity {
+				identities[key] = ""
+			}
+		}
+	}
+	return identities
+}
+
+// reconcileLedgerCorroborationIdentities refreshes the control identity of
+// every retained peer associated with the current ledger relay set. Callers
+// intentionally skip this on an empty provider result, matching relay
+// association reconciliation's treatment of a transient empty response.
+func (p *PeerGovernor) reconcileLedgerCorroborationIdentities(
+	identities map[string]string,
+) {
+	if len(identities) == 0 {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, peer := range p.peers {
+		if peer == nil {
+			continue
+		}
+		candidate, known := p.ledgerKnownAddrs[p.normalizeAddress(peer.Address)]
+		if !known {
+			peer.CorroborationIdentity = ""
+			continue
+		}
+		peer.CorroborationIdentity = identities[candidate]
+	}
+}
+
 // reconcileLedgerKnownAddrs prunes ledgerKnownAddrs entries whose address is
 // not present in candidates, the current round's freshly fetched relay
 // addresses. This is what actually reconciles the map against current
@@ -394,7 +445,7 @@ func (p *PeerGovernor) reconcileLedgerKnownAddrs(candidates []string) {
 //
 //nolint:unused // Kept as a context-free test helper for existing peer tests.
 func (p *PeerGovernor) addLedgerPeer(address string) bool {
-	return p.addLedgerPeerContext(context.Background(), address, 0, false)
+	return p.addLedgerPeerContext(context.Background(), address, 0, false, "")
 }
 
 // addLedgerPeerContext adds a ledger peer for a relay whose pool has the given
@@ -405,6 +456,7 @@ func (p *PeerGovernor) addLedgerPeerContext(
 	address string,
 	stake uint64,
 	stakeKnown bool,
+	corroborationIdentity string,
 ) bool {
 	if err := ctx.Err(); err != nil {
 		return false
@@ -416,7 +468,12 @@ func (p *PeerGovernor) addLedgerPeerContext(
 	// entries for an unresolvable hostname are keyed on exactly the
 	// lock-free normalized form, which is what makes the dead-hostname case
 	// answerable here.
-	if p.ledgerPeerRejectedWithoutDNS(address, stake, stakeKnown) {
+	if p.ledgerPeerRejectedWithoutDNS(
+		address,
+		stake,
+		stakeKnown,
+		corroborationIdentity,
+	) {
 		return false
 	}
 	// Resolve address (with DNS lookup) before acquiring lock to avoid
@@ -426,7 +483,13 @@ func (p *PeerGovernor) addLedgerPeerContext(
 	// (unlike resolveAddress) filters to a locally-dialable address family.
 	normalized := p.resolveLedgerDiscoveryAddress(ctx, address)
 	return p.addResolvedLedgerPeerContext(
-		ctx, address, normalized, address, stake, stakeKnown,
+		ctx,
+		address,
+		normalized,
+		address,
+		stake,
+		stakeKnown,
+		corroborationIdentity,
 	)
 }
 
@@ -435,6 +498,7 @@ func (p *PeerGovernor) addResolvedLedgerPeerContext(
 	address, normalized, relayAddress string,
 	stake uint64,
 	stakeKnown bool,
+	corroborationIdentity string,
 ) bool {
 	// Rechecked after resolution, not just before it: a canceled DNS lookup
 	// falls back to the bare hostname, which isRoutableAddr accepts, so
@@ -482,8 +546,20 @@ func (p *PeerGovernor) addResolvedLedgerPeerContext(
 		if peer == nil {
 			continue
 		}
+		// A peer retained under the relay's own name because resolution failed
+		// when it was admitted has that name as its NormalizedAddress. The
+		// candidate is then one of the addresses the name now expands to, so
+		// it is the same relay and must not be added beside the peer. A peer
+		// that did resolve holds an address instead, and keeps admitting the
+		// name's other addresses. A bootstrap peer is not matched once
+		// bootstrap has exited: it is no longer dialed
+		// (spawnOutboundConnectionLocked), so the relay still needs a dialable
+		// peer of its own.
+		dormantBootstrap := p.isBootstrapPeer(peer) &&
+			!p.canPromoteBootstrapPeer()
 		if peer.NormalizedAddress == normalized ||
 			peer.NormalizedAddress == hostnameNormalized ||
+			(peer.NormalizedAddress == relayNormalized && !dormantBootstrap) ||
 			p.normalizeAddress(peer.Address) == hostnameNormalized {
 			existingPeer = peer
 			break
@@ -511,6 +587,9 @@ func (p *PeerGovernor) addResolvedLedgerPeerContext(
 			existingPeer.StakeLovelace = stake
 			existingPeer.StakeKnown = true
 		}
+		if corroborationIdentity != "" {
+			existingPeer.CorroborationIdentity = corroborationIdentity
+		}
 		p.mu.Unlock()
 		return false
 	}
@@ -537,15 +616,16 @@ func (p *PeerGovernor) addResolvedLedgerPeerContext(
 
 	// Add as new peer
 	newPeer := &Peer{
-		Address:           address,
-		NormalizedAddress: normalized,
-		Source:            PeerSourceP2PLedger,
-		State:             PeerStateCold,
-		Sharable:          true, // Ledger peers are public relays
-		EMAAlpha:          p.config.EMAAlpha,
-		FirstSeen:         time.Now(),
-		StakeLovelace:     stake,
-		StakeKnown:        stakeKnown || stake > 0,
+		Address:               address,
+		NormalizedAddress:     normalized,
+		Source:                PeerSourceP2PLedger,
+		State:                 PeerStateCold,
+		Sharable:              true, // Ledger peers are public relays
+		EMAAlpha:              p.config.EMAAlpha,
+		FirstSeen:             time.Now(),
+		StakeLovelace:         stake,
+		StakeKnown:            stakeKnown || stake > 0,
+		CorroborationIdentity: corroborationIdentity,
 	}
 	p.peers = append(p.peers, newPeer)
 	p.updatePeerMetrics()
@@ -589,6 +669,7 @@ func (p *PeerGovernor) ledgerPeerRejectedWithoutDNS(
 	address string,
 	stake uint64,
 	stakeKnown bool,
+	corroborationIdentity string,
 ) bool {
 	hostnameNormalized := p.normalizeAddress(address)
 	p.mu.Lock()
@@ -620,6 +701,9 @@ func (p *PeerGovernor) ledgerPeerRejectedWithoutDNS(
 		if stakeKnown || stake > 0 {
 			peer.StakeLovelace = stake
 			peer.StakeKnown = true
+		}
+		if corroborationIdentity != "" {
+			peer.CorroborationIdentity = corroborationIdentity
 		}
 		return true
 	}

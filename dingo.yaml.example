@@ -531,19 +531,19 @@
   # CLI: --token-registry-allow-rollback
   # allowRollback: false
 
-# Optional in-process Koios reward-parity observer (dingo #3098). When
+# Optional in-process Koios reward-parity observer. When
 # enabled, Dingo subscribes an observer to its own epoch.transition EventBus
 # event and validates each newly closed epoch's committed reward state
 # directly against Koios reference data as the node advances -- no separate
 # koios-parity CLI process or second synced copy of the database required.
-# This is a one-off validation aid for preview/preprod, not a permanent
+# This is a one-off validation aid, not a permanent
 # subsystem; leave disabled for normal node operation. See
 # internal/koiosparity and ARCHITECTURE.md's "Koios Parity Tracker" section.
 # koiosParity:
   # Can be overridden with DINGO_KOIOS_PARITY_ENABLED
   # CLI: --koios-parity-enabled
   # enabled: false
-  # Koios network to validate against: preview or preprod. Empty defaults to
+  # Koios network to validate against: preview, preprod or mainnet. Empty defaults to
   # this node's own `network` setting.
   # Can be overridden with DINGO_KOIOS_PARITY_NETWORK
   # CLI: --koios-parity-network
@@ -940,6 +940,15 @@
   # file. The default is 1. Set 0 explicitly only when every configured source
   # is trusted for fork choice (density-only Genesis selection).
   # corroborationPeers: 1
+  # Optional trusted relay operator metadata. All endpoints of an operator must
+  # use one identity. Configured groups form the exclusive Genesis witness set.
+  # Omit for canonical network defaults; [] disables those extra defaults.
+  # controlGroups:
+  #   - identity: operator-one
+  #     accessPoints:
+  #       - address: relay.example.org
+  #         port: 3001
+
   # Genesis Limit on Patience: while Genesis selection is active, disconnect a
   # ChainSync peer that delivers its advertised progress more slowly than
   # limitOnPatienceRate headers per second, beyond a limitOnPatienceCapacity
@@ -989,9 +998,13 @@
   # dmq-node topology file naming the DMQ peers to dial. Separate from the
   # Cardano topology. It must exist when set. Default: unset.
   # topologyFile: "/etc/dingo/dmq-topology.json"
-  # DMQ peers to keep connected, and the most to hold. Both count inbound
-  # peers. minPeers must not exceed maxPeers; 0 and 0 allows no peers.
-  # Defaults: 3 and 10.
+  # minPeers is how many DMQ peers to keep dialed; inbound connections do not
+  # count toward it. maxPeers is the most connections to hold, inbound and
+  # dialed. Inbound connections stop at maxPeers less the room kept for dialed
+  # peers, which is minPeers or the local roots' total valency if larger, so
+  # anyone may open connections without taking it; with nothing left no
+  # inbound connection is accepted. minPeers must not exceed maxPeers; 0 and 0 allows
+  # no peers. Defaults: 3 and 10.
   # minPeers: 3
   # maxPeers: 10
 

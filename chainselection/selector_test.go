@@ -290,6 +290,45 @@ func TestRejectPeerTipAdmissionPrunesMatchingPeerCandidates(t *testing.T) {
 			"only the prefix before the rejected point survives")
 	})
 
+	t.Run("rejected identity loses reconnect continuity", func(t *testing.T) {
+		t.Parallel()
+		reconnectConn := newTestConnectionId(30)
+		cs := NewChainSelector(ChainSelectorConfig{
+			SecurityParam:             2,
+			GenesisMode:               true,
+			MinCorroboratingPeers:     1,
+			DisableEventSubscriptions: true,
+			PeerIdentity: func(connId ouroboros.ConnectionId) string {
+				switch connId {
+				case firstConn, secondConn, reconnectConn:
+					return "rejected-pool"
+				default:
+					return "other-pool"
+				}
+			},
+		})
+		cs.SetLocalTip(localTip)
+		first := staged(firstConn, 1, 101, "bad-header")
+		duplicate := staged(secondConn, 1, 101, "bad-header")
+		require.True(t, cs.PreparePeerTipAdmission(first))
+		require.True(t, cs.PreparePeerTipAdmission(duplicate))
+		cs.farTipRunsByIdentity["rejected-pool"] = farTipRunContinuity{
+			connection: reconnectConn,
+			hash:       []byte("earlier-header"),
+			run:        2,
+		}
+		cs.farTipRunsByIdentity["other-pool"] = farTipRunContinuity{
+			connection: thirdConn,
+			hash:       []byte("other-header"),
+			run:        2,
+		}
+
+		cs.RejectPeerTipAdmission(first)
+
+		assert.NotContains(t, cs.farTipRunsByIdentity, "rejected-pool")
+		assert.Contains(t, cs.farTipRunsByIdentity, "other-pool")
+	})
+
 	t.Run("an admitted point keeps its copies", func(t *testing.T) {
 		t.Parallel()
 		cs := newSelector()
@@ -5993,6 +6032,46 @@ func (c loneFarChain) newSelector(t *testing.T) *ChainSelector {
 	return cs
 }
 
+func (c loneFarChain) newGenesisSelector(
+	t *testing.T,
+	peerIdentity func(ouroboros.ConnectionId) string,
+	staleTipThreshold time.Duration,
+) *ChainSelector {
+	t.Helper()
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:           true,
+		SecurityParam:         c.k,
+		MinCorroboratingPeers: 1,
+		PeerIdentity:          peerIdentity,
+		StaleTipThreshold:     staleTipThreshold,
+	})
+	cs.SetLocalTip(c.tip(c.localBlock))
+	require.True(t, cs.UpdatePeerTip(
+		newTestConnectionId(1), c.tip(c.localBlock-500), nil,
+	))
+	return cs
+}
+
+func (c loneFarChain) prepareGenesis(
+	cs *ChainSelector,
+	conn ouroboros.ConnectionId,
+	admissionID uint64,
+	block uint64,
+) PeerTipUpdateDisposition {
+	observed := c.tip(block)
+	update := PeerTipUpdateEvent{
+		ConnectionId: conn,
+		AdmissionID:  admissionID,
+		Tip:          c.tip(4687076),
+		ObservedTip:  observed,
+		PraosView: PraosTiebreakerViewFromTip(
+			observed, nil, PraosTiebreakerConfigUnknown(),
+		),
+		ObservedPrevHash: c.prevHash(block),
+	}
+	return cs.PreparePeerTipAdmissionDisposition(update)
+}
+
 // deliver feeds one header the way the roll-forward handler publishes it.
 func (c loneFarChain) deliver(
 	cs *ChainSelector,
@@ -6092,6 +6171,216 @@ func TestUnstagedPeerTipAdmissionWaitsForAppliedCatchUpCeiling(t *testing.T) {
 			}))
 			require.NotNil(t, cs.GetPeerTip(conn))
 		})
+	}
+}
+
+func TestLoneFarFrontierRunContinuesAcrossReconnectsByIdentity(t *testing.T) {
+	t.Parallel()
+
+	c := loneFarChain{localBlock: 1_000, k: 8}
+	identities := map[int]string{
+		10_002: "relay-a",
+		10_003: "relay-a",
+		10_004: "relay-a",
+	}
+	peerIdentity := func(conn ouroboros.ConnectionId) string {
+		remote, ok := conn.RemoteAddr.(*net.TCPAddr)
+		if !ok {
+			return ""
+		}
+		return identities[remote.Port]
+	}
+	cs := c.newGenesisSelector(t, peerIdentity, time.Minute)
+	first := c.first()
+	firstConn := newTestConnectionId(2)
+	for i := range 4 {
+		require.Equal(
+			t, PeerTipUpdatePending,
+			c.prepareGenesis(cs, firstConn, uint64(i+1), first+uint64(i)),
+		)
+	}
+	cs.RemovePeer(firstConn)
+
+	secondConn := newTestConnectionId(3)
+	for i := uint64(4); i < 8; i++ {
+		require.Equal(
+			t, PeerTipUpdatePending,
+			c.prepareGenesis(cs, secondConn, i-3, first+i),
+		)
+	}
+	cs.RemovePeer(secondConn)
+
+	thirdConn := newTestConnectionId(4)
+	require.Equal(t, PeerTipUpdatePending,
+		c.prepareGenesis(cs, thirdConn, 1, first+8),
+		"a connected run must not advance the applied catch-up ceiling")
+	assert.Equal(t, c.k+1, cs.pendingFarTipClaims[thirdConn].run,
+		"the ninth linked header from the same identity must continue the run")
+}
+
+func TestLoneFarFrontierRunDoesNotCrossPeerIdentities(t *testing.T) {
+	t.Parallel()
+
+	c := loneFarChain{localBlock: 1_000, k: 8}
+	identities := map[int]string{
+		10_002: "relay-a",
+		10_003: "relay-b",
+	}
+	peerIdentity := func(conn ouroboros.ConnectionId) string {
+		remote, ok := conn.RemoteAddr.(*net.TCPAddr)
+		if !ok {
+			return ""
+		}
+		return identities[remote.Port]
+	}
+	cs := c.newGenesisSelector(t, peerIdentity, time.Minute)
+	first := c.first()
+	firstConn := newTestConnectionId(2)
+	for i := range 4 {
+		require.Equal(
+			t, PeerTipUpdatePending,
+			c.prepareGenesis(cs, firstConn, uint64(i+1), first+uint64(i)),
+		)
+	}
+	cs.RemovePeer(firstConn)
+
+	secondConn := newTestConnectionId(3)
+	for i := uint64(4); i < 12; i++ {
+		require.Equal(
+			t, PeerTipUpdatePending,
+			c.prepareGenesis(cs, secondConn, i-3, first+i),
+			"a different identity must start its own connected-header run")
+	}
+	require.Equal(t, PeerTipUpdatePending,
+		c.prepareGenesis(cs, secondConn, 9, first+12))
+	assert.Equal(t, c.k+1, cs.pendingFarTipClaims[secondConn].run,
+		"a different identity must start its own connected-header run")
+}
+
+func TestLoneFarFrontierRunRestartsAfterBrokenReconnect(t *testing.T) {
+	t.Parallel()
+
+	c := loneFarChain{localBlock: 1_000, k: 8}
+	identities := map[int]string{
+		10_002: "relay-a",
+		10_003: "relay-a",
+	}
+	peerIdentity := func(conn ouroboros.ConnectionId) string {
+		remote, ok := conn.RemoteAddr.(*net.TCPAddr)
+		if !ok {
+			return ""
+		}
+		return identities[remote.Port]
+	}
+	cs := c.newGenesisSelector(t, peerIdentity, time.Minute)
+	first := c.first()
+	firstConn := newTestConnectionId(2)
+	for i := range 4 {
+		require.Equal(
+			t, PeerTipUpdatePending,
+			c.prepareGenesis(cs, firstConn, uint64(i+1), first+uint64(i)),
+		)
+	}
+	cs.RemovePeer(firstConn)
+
+	secondConn := newTestConnectionId(3)
+	require.Equal(t, PeerTipUpdatePending,
+		c.prepareGenesis(cs, secondConn, 1, first+5),
+		"a gap must restart the connected-header run")
+	for i := uint64(6); i < 13; i++ {
+		require.Equal(
+			t, PeerTipUpdatePending,
+			c.prepareGenesis(cs, secondConn, i-4, first+i),
+			"the run must remain below K+1 after the gap")
+	}
+	require.Equal(t, PeerTipUpdatePending,
+		c.prepareGenesis(cs, secondConn, 9, first+13))
+	assert.Equal(t, c.k+1, cs.pendingFarTipClaims[secondConn].run,
+		"a gap must restart the connected-header run")
+}
+
+func TestLoneFarFrontierRunExpiresAfterDisconnect(t *testing.T) {
+	t.Parallel()
+
+	c := loneFarChain{localBlock: 1_000, k: 8}
+	identities := map[int]string{10_002: "relay-a", 10_003: "relay-a"}
+	peerIdentity := func(conn ouroboros.ConnectionId) string {
+		remote, ok := conn.RemoteAddr.(*net.TCPAddr)
+		if !ok {
+			return ""
+		}
+		return identities[remote.Port]
+	}
+	cs := c.newGenesisSelector(t, peerIdentity, time.Second)
+	now := time.Now()
+	cs.nowFn = func() time.Time { return now }
+	cs.mutex.Lock()
+	for _, peerTip := range cs.peerTips {
+		peerTip.nowFn = cs.nowFn
+		peerTip.LastUpdated = now
+	}
+	cs.mutex.Unlock()
+	first := c.first()
+	firstConn := newTestConnectionId(2)
+	for i := range 4 {
+		require.Equal(
+			t, PeerTipUpdatePending,
+			c.prepareGenesis(cs, firstConn, uint64(i+1), first+uint64(i)),
+		)
+	}
+	cs.RemovePeer(firstConn)
+	now = now.Add(3 * time.Second)
+
+	secondConn := newTestConnectionId(3)
+	for i := uint64(4); i < 9; i++ {
+		require.Equal(
+			t, PeerTipUpdatePending,
+			c.prepareGenesis(cs, secondConn, i-3, first+i),
+			"an expired identity run must not authorize the frontier")
+	}
+}
+
+func TestRepeatedFarFrontierHeaderDoesNotExtendReconnectWindow(t *testing.T) {
+	t.Parallel()
+
+	c := loneFarChain{localBlock: 1_000, k: 8}
+	identities := map[int]string{10_002: "relay-a", 10_003: "relay-a"}
+	peerIdentity := func(conn ouroboros.ConnectionId) string {
+		remote, ok := conn.RemoteAddr.(*net.TCPAddr)
+		if !ok {
+			return ""
+		}
+		return identities[remote.Port]
+	}
+	cs := c.newGenesisSelector(t, peerIdentity, time.Second)
+	now := time.Unix(1_700_000_000, 0)
+	cs.nowFn = func() time.Time { return now }
+	cs.mutex.Lock()
+	for _, peerTip := range cs.peerTips {
+		peerTip.nowFn = cs.nowFn
+		peerTip.LastUpdated = now
+	}
+	cs.mutex.Unlock()
+	first := c.first()
+	firstConn := newTestConnectionId(2)
+	for i := range 4 {
+		require.Equal(
+			t, PeerTipUpdatePending,
+			c.prepareGenesis(cs, firstConn, uint64(i+1), first+uint64(i)),
+		)
+	}
+	now = now.Add(time.Second)
+	require.Equal(t, PeerTipUpdatePending,
+		c.prepareGenesis(cs, firstConn, 5, first+3))
+	cs.RemovePeer(firstConn)
+	now = now.Add(1100 * time.Millisecond)
+
+	secondConn := newTestConnectionId(3)
+	for i := uint64(4); i < 9; i++ {
+		require.Equal(
+			t, PeerTipUpdatePending,
+			c.prepareGenesis(cs, secondConn, i-3, first+i),
+			"repeating the old point must not extend the expired run")
 	}
 }
 
@@ -7607,4 +7896,226 @@ func TestFarFrontierCorroborationAtReferenceBoundaries(t *testing.T) {
 			})
 		}
 	}
+}
+
+// lockedLogBuffer is a goroutine-safe slog sink for counting log records.
+type lockedLogBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedLogBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedLogBuffer) count(substr string) int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return bytes.Count(b.buf.Bytes(), []byte(substr))
+}
+
+// TestPendingFarFrontierRejectionIsReportedOncePerHeader drives a connected
+// far chain through admission one header at a time. Every header is refused
+// until the run completes, and each admission replays the earlier pending
+// headers; a replay must not log or count the same refusal again.
+func TestPendingFarFrontierRejectionIsReportedOncePerHeader(t *testing.T) {
+	t.Parallel()
+
+	const rejectedMsg = "rejecting implausible peer tip"
+	for _, commit := range []bool{false, true} {
+		name := "prepare only"
+		if commit {
+			name = "prepare then commit"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			c := loneFarChain{localBlock: 1_000, k: 8}
+			logs := &lockedLogBuffer{}
+			var rejections atomic.Int64
+			cs := NewChainSelector(ChainSelectorConfig{
+				SecurityParam:             c.k,
+				DisableEventSubscriptions: true,
+				Logger: slog.New(slog.NewTextHandler(
+					logs, &slog.HandlerOptions{Level: slog.LevelWarn},
+				)),
+				OnPeerTipRejected: func(PeerTipRejection) {
+					rejections.Add(1)
+				},
+			})
+			cs.SetLocalTip(c.tip(c.localBlock))
+			require.True(t, cs.UpdatePeerTip(
+				newTestConnectionId(1), c.tip(c.localBlock+10), nil,
+			))
+			require.Zero(t, logs.count(rejectedMsg))
+			require.Zero(t, rejections.Load())
+
+			conn := newTestConnectionId(2)
+			first := c.first()
+			updates := make([]PeerTipUpdateEvent, 0, c.k)
+			for i := range c.k {
+				block := first + i
+				update := PeerTipUpdateEvent{
+					ConnectionId:     conn,
+					AdmissionID:      i + 1,
+					Tip:              c.tip(4_687_076),
+					ObservedTip:      c.tip(block),
+					ObservedPrevHash: c.prevHash(block),
+				}
+				updates = append(updates, update)
+				require.Equal(
+					t,
+					PeerTipUpdatePending,
+					cs.PreparePeerTipAdmissionDisposition(update),
+				)
+			}
+			if commit {
+				for _, update := range updates {
+					require.True(t, cs.CommitPeerTipAdmission(update))
+				}
+			}
+
+			assert.Equal(
+				t, int(c.k), logs.count(rejectedMsg),
+				"each rejected header is logged once, not once per replay",
+			)
+			assert.Equal(
+				t, int64(c.k), rejections.Load(),
+				"OnPeerTipRejected is called once per rejected header",
+			)
+		})
+	}
+}
+
+// TestPendingHeaderFirstRefusedOnReplayIsReported stages a header that is
+// plausible against a far reference peer, then removes that peer so the
+// replay refuses the header for the first time. The refusal is reported once
+// there, and later replays do not report it again.
+func TestPendingHeaderFirstRefusedOnReplayIsReported(t *testing.T) {
+	t.Parallel()
+
+	const rejectedMsg = "rejecting implausible peer tip"
+	c := loneFarChain{localBlock: 1_000, k: 8}
+	logs := &lockedLogBuffer{}
+	var rejections atomic.Int64
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam:             c.k,
+		DisableEventSubscriptions: true,
+		Logger: slog.New(slog.NewTextHandler(
+			logs, &slog.HandlerOptions{Level: slog.LevelWarn},
+		)),
+		OnPeerTipRejected: func(PeerTipRejection) {
+			rejections.Add(1)
+		},
+	})
+	cs.SetLocalTip(c.tip(c.localBlock))
+	near := newTestConnectionId(1)
+	far := newTestConnectionId(2)
+	other := newTestConnectionId(3)
+	bystander := newTestConnectionId(4)
+	for i, ref := range []struct {
+		conn  ouroboros.ConnectionId
+		block uint64
+	}{{far, 1_016}, {near, 1_004}, {bystander, 1_005}} {
+		refUpdate := PeerTipUpdateEvent{
+			ConnectionId:     ref.conn,
+			AdmissionID:      1,
+			Tip:              c.tip(ref.block),
+			ObservedTip:      c.tip(ref.block),
+			ObservedPrevHash: c.prevHash(ref.block),
+		}
+		require.Equal(
+			t, PeerTipUpdateAccepted,
+			cs.PreparePeerTipAdmissionDisposition(refUpdate), "ref %d", i,
+		)
+		require.True(t, cs.CommitPeerTipAdmission(refUpdate))
+	}
+
+	update := PeerTipUpdateEvent{
+		ConnectionId:     other,
+		AdmissionID:      1,
+		Tip:              c.tip(1_015),
+		ObservedTip:      c.tip(1_015),
+		ObservedPrevHash: c.prevHash(1_015),
+	}
+	require.Equal(
+		t,
+		PeerTipUpdateAccepted,
+		cs.PreparePeerTipAdmissionDisposition(update),
+		"the header is plausible against the far reference peer",
+	)
+	require.Zero(t, logs.count(rejectedMsg))
+	require.Zero(t, rejections.Load())
+
+	cs.RemovePeer(far)
+	assert.Equal(
+		t, 1, logs.count(rejectedMsg),
+		"the refusal first reached on replay is logged once",
+	)
+	assert.Equal(
+		t, int64(1), rejections.Load(),
+		"the refusal first reached on replay reaches OnPeerTipRejected once",
+	)
+
+	// Further replays and the commit re-check must stay silent.
+	cs.RemovePeer(bystander)
+	require.Equal(
+		t,
+		PeerTipUpdatePending,
+		cs.PreparePeerTipAdmissionDisposition(update),
+	)
+	assert.Equal(t, 1, logs.count(rejectedMsg), "replays do not log again")
+	assert.Equal(
+		t, int64(1), rejections.Load(), "replays do not count again",
+	)
+	cs.CommitPeerTipAdmission(update)
+	assert.Equal(t, 1, logs.count(rejectedMsg), "commit does not log again")
+	assert.Equal(
+		t, int64(1), rejections.Load(), "commit does not count again",
+	)
+}
+
+// TestUnstagedPeerTipRefusalIsReportedEachTime delivers the same implausible
+// tip twice through the direct update path, which stages nothing. Each
+// delivery is a separate refusal and is reported, and no rejection record is
+// left behind for a candidate that was never staged.
+func TestUnstagedPeerTipRefusalIsReportedEachTime(t *testing.T) {
+	t.Parallel()
+
+	const rejectedMsg = "rejecting implausible peer tip"
+	c := loneFarChain{k: 8}
+	logs := &lockedLogBuffer{}
+	var rejections atomic.Int64
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam:             c.k,
+		DisableEventSubscriptions: true,
+		Logger: slog.New(slog.NewTextHandler(
+			logs, &slog.HandlerOptions{Level: slog.LevelWarn},
+		)),
+		OnPeerTipRejected: func(PeerTipRejection) {
+			rejections.Add(1)
+		},
+	})
+	require.True(t, cs.UpdatePeerTip(newTestConnectionId(1), c.tip(10), nil))
+
+	far := newTestConnectionId(2)
+	for i := range 2 {
+		require.False(
+			t, cs.UpdatePeerTip(far, c.tip(23), nil), "delivery %d", i,
+		)
+		assert.Equal(
+			t, i+1, logs.count(rejectedMsg), "delivery %d is logged", i,
+		)
+		assert.Equal(
+			t, int64(i+1), rejections.Load(), "delivery %d is counted", i,
+		)
+	}
+	cs.mutex.RLock()
+	defer cs.mutex.RUnlock()
+	assert.Empty(
+		t, cs.reportedPeerTipRejections,
+		"an unstaged refusal leaves no rejection record",
+	)
 }

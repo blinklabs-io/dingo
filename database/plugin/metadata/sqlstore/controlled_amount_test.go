@@ -371,3 +371,26 @@ func TestSQLiteAccountAggregateContract(t *testing.T) {
 	t.Parallel()
 	testAccountAggregateContract(t, newMigratedSQLiteStore(t))
 }
+
+// TestGetLiveUtxoLovelaceExcludesSpent pins the live-only total across every
+// credential.
+func TestGetLiveUtxoLovelaceExcludesSpent(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	refA := models.NewStakeCredentialRef(0, credentialKeyForIndex(4))
+	refB := models.NewStakeCredentialRef(0, credentialKeyForIndex(5))
+	seedCredentialUtxos(
+		t, store, 0, refA,
+		[]uint64{1_000_000, 2_000_000, 9_000_000},
+		[]bool{false, false, true},
+	)
+	seedCredentialUtxos(
+		t, store, 10, refB,
+		[]uint64{4_000_000, 8_000_000},
+		[]bool{false, true},
+	)
+
+	got, err := store.GetLiveUtxoLovelace(nil)
+	require.NoError(t, err)
+	require.Equal(t, uint64(7_000_000), got, "spent UTxOs are excluded")
+}

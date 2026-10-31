@@ -186,10 +186,22 @@ func encodeUtxoWholeResult(
 func (ls *LedgerState) queryShelleyUtxoWhole(ctx context.Context, at QueryPoint,
 	txn *database.Txn,
 ) (any, error) {
+	// Detach an acquired view before waiting for admission. Queued whole-UTxO
+	// queries must not retain database snapshots or read connections while the
+	// admitted query completes.
+	var detachedPoint *QueryPoint
 	if detach := utxoWholeDetachFrom(ctx); detach != nil {
 		if point, ok := detach(); ok {
-			return ls.queryUtxoWholePaged(ctx, point)
+			detachedPoint = &point
 		}
+	}
+	releaseAdmission, err := ls.acquireUtxoWholeAdmission(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer releaseAdmission()
+	if detachedPoint != nil {
+		return ls.queryUtxoWholePaged(ctx, *detachedPoint)
 	}
 	if txn == nil {
 		txn = ls.db.Transaction(ctx, false)
@@ -241,6 +253,28 @@ func (ls *LedgerState) queryShelleyUtxoWhole(ctx context.Context, at QueryPoint,
 	}
 
 	return ls.resolveUtxoWhole(ctx, live)
+}
+
+// acquireUtxoWholeAdmission serializes complete GetUTxOWhole
+// materializations for one ledger state. Waiting follows the request context,
+// so a disconnected client does not leave queued work behind. Admission never
+// changes the reply: an admitted query still resolves and encodes every UTxO.
+func (ls *LedgerState) acquireUtxoWholeAdmission(
+	ctx context.Context,
+) (func(), error) {
+	ls.utxoWholeAdmissionOnce.Do(func() {
+		ls.utxoWholeAdmission = make(chan struct{}, 1)
+	})
+	select {
+	case ls.utxoWholeAdmission <- struct{}{}:
+		if err := ctx.Err(); err != nil {
+			<-ls.utxoWholeAdmission
+			return nil, err
+		}
+		return func() { <-ls.utxoWholeAdmission }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 // resolveUtxoWhole resolves and encodes the GetUTxOWhole reply for live. It
@@ -539,5 +573,5 @@ func decodeUtxoWholeCbor(
 			err,
 		)
 	}
-	return txOut, nil
+	return localStateQueryTransactionOutput(txOut), nil
 }

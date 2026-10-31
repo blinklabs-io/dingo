@@ -40,8 +40,8 @@ type TopologyConfig struct {
 }
 
 type TopologyConfigP2PAccessPoint struct {
-	Address string `json:"address"`
-	Port    uint   `json:"port"`
+	Address string `json:"address" yaml:"address"`
+	Port    uint   `json:"port" yaml:"port"`
 }
 
 type TopologyConfigP2PLocalRoot struct {

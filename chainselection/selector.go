@@ -198,9 +198,9 @@ type ChainSelectorConfig struct {
 	// corroboration (density-only Genesis selection, the historical default).
 	MinCorroboratingPeers int
 	ConnectionLive        func(ouroboros.ConnectionId) bool
-	// PeerIdentity maps a connection to the independence group used to
-	// de-duplicate corroborating witnesses (peer governance's diversity
-	// group). A connection for which it returns "" has no identity and
+	// PeerIdentity maps a connection to a control identity used to
+	// de-duplicate corroborating witnesses. A connection for which it returns
+	// "" has no trustworthy independence evidence and
 	// fails closed in corroboration: it is not corroborated as a candidate
 	// and does not count as a witness. A nil hook groups by remote host.
 	PeerIdentity       func(ouroboros.ConnectionId) string
@@ -294,6 +294,10 @@ type ChainSelector struct {
 	// Guarded by mutex.
 	farTipClaims        map[ouroboros.ConnectionId]farTipClaim
 	pendingFarTipClaims map[ouroboros.ConnectionId]farTipClaim
+	// farTipRunsByIdentity retains only the last connected-header frontier so
+	// an honest run can survive a short Genesis-mode reconnect. It carries no
+	// acceptance or corroboration state and is bounded and expired.
+	farTipRunsByIdentity map[string]farTipRunContinuity
 	// rejectedAdvertisedClaims holds the advertised tips of connections the
 	// bootstrap advertised bound refused, oldest first, so a later connection
 	// from another remote host advertising a tip within securityParam is
@@ -303,9 +307,17 @@ type ChainSelector struct {
 	// honest peer in turn. Bounded to maxTrackedPeers entries. Guarded by
 	// mutex.
 	rejectedAdvertisedClaims []rejectedAdvertisedClaim
-	mutex                    sync.RWMutex
-	ctx                      context.Context
-	cancel                   context.CancelFunc
+	// reportedPeerTipRejections holds the candidates whose refusal was
+	// already warned about, counted and passed to OnPeerTipRejected, so a
+	// replay or re-check does not report it again. Only staged candidates
+	// are kept: the direct update paths drop a refusal they did not stage
+	// (forgetUnstagedPeerTipRejectionLocked) and every change to the staged
+	// set prunes the rest (prunePeerTipRejectionReportsLocked), which bounds
+	// it by the pending admission limits. Guarded by mutex.
+	reportedPeerTipRejections map[peerTipRejectionKey]struct{}
+	mutex                     sync.RWMutex
+	ctx                       context.Context
+	cancel                    context.CancelFunc
 
 	// Anti-flap incumbent pin state (guarded by mutex).
 	//
@@ -414,6 +426,71 @@ type peerTipAdmissionCandidate struct {
 	update      PeerTipUpdateEvent
 	plausible   bool
 	farTipClaim *farTipClaim
+}
+
+// peerTipRejectionKey identifies a candidate for rejection reporting: the
+// connection, the observed header point and the claimed tip block.
+type peerTipRejectionKey struct {
+	connId       ouroboros.ConnectionId
+	observedSlot uint64
+	observedHash string
+	claimedBlock uint64
+}
+
+func newPeerTipRejectionKey(
+	connId ouroboros.ConnectionId,
+	tip ochainsync.Tip,
+	observedTip ochainsync.Tip,
+) peerTipRejectionKey {
+	return peerTipRejectionKey{
+		connId:       connId,
+		observedSlot: observedTip.Point.Slot,
+		observedHash: string(observedTip.Point.Hash),
+		claimedBlock: tip.BlockNumber,
+	}
+}
+
+// markPeerTipRejectionReportedLocked records the candidate and reports
+// whether this is its first refusal. Must be called with cs.mutex held.
+func (cs *ChainSelector) markPeerTipRejectionReportedLocked(
+	connId ouroboros.ConnectionId,
+	tip ochainsync.Tip,
+	observedTip ochainsync.Tip,
+) bool {
+	if cs.reportedPeerTipRejections == nil {
+		cs.reportedPeerTipRejections = make(map[peerTipRejectionKey]struct{})
+	}
+	key := newPeerTipRejectionKey(connId, tip, observedTip)
+	if _, seen := cs.reportedPeerTipRejections[key]; seen {
+		return false
+	}
+	cs.reportedPeerTipRejections[key] = struct{}{}
+	return true
+}
+
+// prunePeerTipRejectionReportsLocked drops reports for candidates that are no
+// longer staged: removed peers, committed or rejected candidates, and
+// candidates refused live without being staged. Must be called with cs.mutex
+// held.
+func (cs *ChainSelector) prunePeerTipRejectionReportsLocked() {
+	if len(cs.reportedPeerTipRejections) == 0 {
+		return
+	}
+	staged := make(map[peerTipRejectionKey]struct{})
+	for _, pending := range cs.pendingPeerTips {
+		for _, candidate := range pending {
+			staged[newPeerTipRejectionKey(
+				candidate.update.ConnectionId,
+				candidate.update.Tip,
+				candidate.update.ObservedTip,
+			)] = struct{}{}
+		}
+	}
+	for key := range cs.reportedPeerTipRejections {
+		if _, ok := staged[key]; !ok {
+			delete(cs.reportedPeerTipRejections, key)
+		}
+	}
 }
 
 type forecastHorizonWitness struct {
@@ -565,24 +642,26 @@ func NewChainSelector(cfg ChainSelectorConfig) *ChainSelector {
 		cfg.MinCorroboratingPeers = 1
 	}
 	cs := &ChainSelector{
-		config:                   cfg,
-		securityParam:            cfg.SecurityParam,
-		maxTrackedPeers:          maxPeers,
-		mode:                     SelectionModePraos,
-		peerTips:                 make(map[ouroboros.ConnectionId]*PeerChainTip),
-		deliveredPeerTips:        make(map[ouroboros.ConnectionId]*PeerChainTip),
-		pendingPeerTips:          make(map[ouroboros.ConnectionId][]peerTipAdmissionCandidate),
-		pendingPeerTipFrontiers:  make(map[ouroboros.ConnectionId]*PeerChainTip),
-		forecastHorizonWitnesses: make(map[ouroboros.ConnectionId]forecastHorizonWitness),
-		farTipClaims:             make(map[ouroboros.ConnectionId]farTipClaim),
-		pendingFarTipClaims:      make(map[ouroboros.ConnectionId]farTipClaim),
-		committedPeerTips:        make(map[ouroboros.ConnectionId]uint64),
-		eligible:                 make(map[ouroboros.ConnectionId]bool),
-		priority:                 make(map[ouroboros.ConnectionId]int),
-		evaluationTrigger:        make(chan struct{}, 1),
-		nowFn:                    time.Now,
-		switchBackCooldown:       cfg.SwitchBackCooldown,
-		recentlyLeft:             make(map[ouroboros.ConnectionId]time.Time),
+		config:                    cfg,
+		securityParam:             cfg.SecurityParam,
+		maxTrackedPeers:           maxPeers,
+		mode:                      SelectionModePraos,
+		peerTips:                  make(map[ouroboros.ConnectionId]*PeerChainTip),
+		deliveredPeerTips:         make(map[ouroboros.ConnectionId]*PeerChainTip),
+		pendingPeerTips:           make(map[ouroboros.ConnectionId][]peerTipAdmissionCandidate),
+		pendingPeerTipFrontiers:   make(map[ouroboros.ConnectionId]*PeerChainTip),
+		forecastHorizonWitnesses:  make(map[ouroboros.ConnectionId]forecastHorizonWitness),
+		farTipClaims:              make(map[ouroboros.ConnectionId]farTipClaim),
+		pendingFarTipClaims:       make(map[ouroboros.ConnectionId]farTipClaim),
+		farTipRunsByIdentity:      make(map[string]farTipRunContinuity),
+		reportedPeerTipRejections: make(map[peerTipRejectionKey]struct{}),
+		committedPeerTips:         make(map[ouroboros.ConnectionId]uint64),
+		eligible:                  make(map[ouroboros.ConnectionId]bool),
+		priority:                  make(map[ouroboros.ConnectionId]int),
+		evaluationTrigger:         make(chan struct{}, 1),
+		nowFn:                     time.Now,
+		switchBackCooldown:        cfg.SwitchBackCooldown,
+		recentlyLeft:              make(map[ouroboros.ConnectionId]time.Time),
 	}
 	if cfg.GenesisMode {
 		cs.mode = SelectionModeGenesis
@@ -934,6 +1013,7 @@ func (cs *ChainSelector) updatePeerTipObservedLinkedDisposition(
 		if cs.loneFrontierBrokenLocked(
 			connId, observedTip, link, cs.farTipClaims,
 		) {
+			cs.clearFarTipRunContinuityForConnLocked(connId)
 			revoke = true
 			disposition = PeerTipUpdateRejected
 			return
@@ -955,6 +1035,7 @@ func (cs *ChainSelector) updatePeerTipObservedLinkedDisposition(
 			}
 			return
 		}
+		cs.syncFarTipRunContinuityLocked(connId, cs.farTipClaims)
 		if beyondCatchUpCeiling {
 			disposition = PeerTipUpdatePending
 			return
@@ -1164,6 +1245,10 @@ func (cs *ChainSelector) PreparePeerTipAdmissionDisposition(
 			plausible = false
 		}
 		claim, hasClaim := cs.pendingFarTipClaims[update.ConnectionId]
+		cs.syncFarTipRunContinuityLocked(
+			update.ConnectionId,
+			cs.pendingFarTipClaims,
+		)
 		evidence := beyondCatchUpCeiling ||
 			(hasClaim && claim.slot == update.ObservedTip.Point.Slot &&
 				bytes.Equal(claim.hash, update.ObservedTip.Point.Hash))
@@ -1355,6 +1440,7 @@ func (cs *ChainSelector) truncateStalePendingPeerTipsLocked() bool {
 func (cs *ChainSelector) rebuildPeerTipAdmissionFrontierLocked(
 	connId ouroboros.ConnectionId,
 ) {
+	cs.prunePeerTipRejectionReportsLocked()
 	pending := cs.pendingPeerTips[connId]
 	if len(pending) == 0 {
 		delete(cs.pendingPeerTipFrontiers, connId)
@@ -1488,6 +1574,7 @@ func (cs *ChainSelector) rebuildPendingAdmissionStateLocked() {
 		cs.pendingPeerTipFrontiers[update.ConnectionId] = frontier
 	}
 	cs.pendingFarTipClaims = claims
+	cs.prunePeerTipRejectionReportsLocked()
 }
 
 // RejectPeerTipAdmission removes a candidate and later candidate headers from
@@ -1514,6 +1601,7 @@ func (cs *ChainSelector) RejectPeerTipAdmission(
 			pruned = true
 		}
 		if pruned {
+			cs.clearFarTipRunContinuityForConnLocked(update.ConnectionId)
 			cs.rebuildPendingAdmissionStateLocked()
 			cs.signalIngressChange()
 			shouldEvaluate = cs.genesisCorroborationActiveLocked()
@@ -1561,6 +1649,7 @@ func (cs *ChainSelector) pruneMatchingPendingPeerTipsLocked(
 			if candidatePoint.Slot == point.Slot &&
 				bytes.Equal(candidatePoint.Hash, point.Hash) {
 				cs.truncatePendingPeerTipsLocked(connId, i)
+				cs.clearFarTipRunContinuityForConnLocked(connId)
 				pruned = true
 				break
 			}
@@ -1739,6 +1828,7 @@ func (cs *ChainSelector) commitPeerTipAdmission(
 				link,
 				cs.farTipClaims,
 			) {
+				cs.clearFarTipRunContinuityForConnLocked(update.ConnectionId)
 				cs.deletePeerLocked(update.ConnectionId)
 				shouldEvaluate = true
 				accepted = true
@@ -1763,6 +1853,10 @@ func (cs *ChainSelector) commitPeerTipAdmission(
 					cs.farTipClaims[update.ConnectionId] = claim
 				}
 			}
+			cs.syncFarTipRunContinuityLocked(
+				update.ConnectionId,
+				cs.farTipClaims,
+			)
 			cs.committedPeerTips[update.ConnectionId] = update.AdmissionID
 			if i == len(pending)-1 {
 				delete(cs.pendingPeerTips, update.ConnectionId)
@@ -1772,6 +1866,7 @@ func (cs *ChainSelector) commitPeerTipAdmission(
 					pending[i+1:]...,
 				)
 			}
+			cs.prunePeerTipRejectionReportsLocked()
 			if len(cs.pendingFarTipClaims) > 0 {
 				cs.rebuildPendingAdmissionStateLocked()
 			} else if len(cs.pendingPeerTips[update.ConnectionId]) == 0 {
@@ -1980,7 +2075,9 @@ func (cs *ChainSelector) admissionPeerCountLocked() int {
 // may be recorded, applying the shared plausibility bound used by every path
 // that records a peer frontier (roll forward and the roll-backward
 // registration of a peer that has no entry yet). It logs and returns false
-// when the observation is rejected. Callers must hold cs.mutex.
+// when the observation is rejected. These paths stage nothing, so each
+// refusal is reported unless it matches a staged candidate already reported.
+// Callers must hold cs.mutex.
 func (cs *ChainSelector) checkPeerTipPlausibleLocked(
 	connId ouroboros.ConnectionId,
 	tip ochainsync.Tip,
@@ -1990,9 +2087,37 @@ func (cs *ChainSelector) checkPeerTipPlausibleLocked(
 	if cs.farTipClaims == nil {
 		cs.farTipClaims = make(map[ouroboros.ConnectionId]farTipClaim)
 	}
-	return cs.checkPeerTipPlausibleWithClaimsLocked(
+	plausible := cs.checkPeerTipPlausibleWithClaimsLocked(
 		connId, tip, observedTip, link, cs.farTipClaims, true,
 	)
+	if !plausible {
+		cs.forgetUnstagedPeerTipRejectionLocked(connId, tip, observedTip)
+	}
+	return plausible
+}
+
+// forgetUnstagedPeerTipRejectionLocked drops the rejection record for a
+// refusal that matches no staged candidate of connId. Must be called with
+// cs.mutex held.
+func (cs *ChainSelector) forgetUnstagedPeerTipRejectionLocked(
+	connId ouroboros.ConnectionId,
+	tip ochainsync.Tip,
+	observedTip ochainsync.Tip,
+) {
+	key := newPeerTipRejectionKey(connId, tip, observedTip)
+	if _, ok := cs.reportedPeerTipRejections[key]; !ok {
+		return
+	}
+	for _, candidate := range cs.pendingPeerTips[connId] {
+		if newPeerTipRejectionKey(
+			candidate.update.ConnectionId,
+			candidate.update.Tip,
+			candidate.update.ObservedTip,
+		) == key {
+			return
+		}
+	}
+	delete(cs.reportedPeerTipRejections, key)
 }
 
 func (cs *ChainSelector) checkPeerTipPlausibleWithClaimsLocked(
@@ -2164,6 +2289,14 @@ func (cs *ChainSelector) checkPeerTipPlausibleWithClaimsTrackedLocked(
 		// Case 3: len(peerTips)==0 && peer not known → bootstrap
 		if observedReject ||
 			(advertisedReject && cs.localTip.BlockNumber == 0) {
+			// Admission replays and commit re-checks re-evaluate candidates
+			// that may already have been refused; report each candidate's
+			// first refusal only, whether it happens live or on replay.
+			if !cs.markPeerTipRejectionReportedLocked(
+				connId, tip, observedTip,
+			) {
+				return false, claimsChanged
+			}
 			cs.config.Logger.Warn(
 				"rejecting implausible peer tip",
 				"connection_id", connId.String(),
@@ -2498,18 +2631,23 @@ func (cs *ChainSelector) corroborateFarTipClaimWithLocked(
 	// limit. A claim that does not fit is still compared against the recorded
 	// ones, so a full table cannot keep its own claims from being
 	// corroborated.
-	prev, exists := claims[connId]
+	prev, connectionHasClaim := claims[connId]
+	hasPrevious := connectionHasClaim
+	identity, hasIdentity := cs.corroboratorIdentity(connId)
+	if !hasPrevious && cs.genesisCorroborationActiveLocked() && hasIdentity {
+		prev, hasPrevious = cs.farTipRunForIdentityLocked(identity, connId)
+	}
 	updated := farTipClaim{
 		block:        claimed,
 		slot:         observedTip.Point.Slot,
 		hash:         bytes.Clone(observedTip.Point.Hash),
 		boundary:     link.boundary,
-		corroborated: prev.corroborated,
-		lone:         prev.lone,
+		corroborated: connectionHasClaim && prev.corroborated,
+		lone:         connectionHasClaim && prev.lone,
 		run:          1,
 	}
 	switch {
-	case !exists:
+	case !hasPrevious:
 	case len(observedTip.Point.Hash) > 0 &&
 		bytes.Equal(observedTip.Point.Hash, prev.hash):
 		// A repeat shows no progress and does not break the run.
@@ -2523,11 +2661,10 @@ func (cs *ChainSelector) corroborateFarTipClaimWithLocked(
 		case stepBroken:
 		}
 	}
-	if exists || len(claims) < cs.maxTrackedPeers {
-		changed = !exists || !farTipClaimEqual(prev, updated)
+	if connectionHasClaim || len(claims) < cs.maxTrackedPeers {
+		changed = !connectionHasClaim || !farTipClaimEqual(prev, updated)
 		claims[connId] = updated
 	}
-	identity, hasIdentity := cs.corroboratorIdentity(connId)
 	corroborated := false
 	for otherConn, other := range claims {
 		if otherConn == connId || other.lone {
@@ -2751,10 +2888,141 @@ type farTipClaim struct {
 	// lone marks a claim accepted on the connection's own header chain rather
 	// than by another connection's agreement.
 	lone bool
-	// run counts the connection's consecutive connected headers, starting at
-	// 1. A repeated header leaves it unchanged; anything else that does not
-	// continue the previous header restarts it at 1.
+	// run counts connected headers, starting at 1 or continuing a recent run
+	// from the same identity in Genesis mode. A repeated header leaves it
+	// unchanged; a broken link restarts it at 1.
 	run uint64
+}
+
+type farTipRunContinuity struct {
+	connection ouroboros.ConnectionId
+	block      uint64
+	slot       uint64
+	hash       []byte
+	boundary   bool
+	run        uint64
+	updatedAt  time.Time
+	base       farTipClaim
+	hasBase    bool
+}
+
+func (cs *ChainSelector) farTipRunForIdentityLocked(
+	identity string,
+	connId ouroboros.ConnectionId,
+) (farTipClaim, bool) {
+	if identity == "" || cs.farTipRunsByIdentity == nil {
+		return farTipClaim{}, false
+	}
+	continuity, ok := cs.farTipRunsByIdentity[identity]
+	if !ok {
+		return farTipClaim{}, false
+	}
+	if continuity.connection == connId {
+		if !continuity.hasBase {
+			return farTipClaim{}, false
+		}
+		return continuity.base, true
+	}
+	if cs.now().Sub(continuity.updatedAt) > cs.config.StaleTipThreshold*2 {
+		delete(cs.farTipRunsByIdentity, identity)
+		return farTipClaim{}, false
+	}
+	return farTipClaim{
+		block:    continuity.block,
+		slot:     continuity.slot,
+		hash:     bytes.Clone(continuity.hash),
+		boundary: continuity.boundary,
+		run:      continuity.run,
+	}, true
+}
+
+func (cs *ChainSelector) clearFarTipRunContinuityForConnLocked(
+	connId ouroboros.ConnectionId,
+) {
+	if cs.farTipRunsByIdentity == nil {
+		return
+	}
+	if identity, ok := cs.corroboratorIdentity(connId); ok {
+		delete(cs.farTipRunsByIdentity, identity)
+	}
+	for identity, continuity := range cs.farTipRunsByIdentity {
+		if continuity.connection == connId {
+			delete(cs.farTipRunsByIdentity, identity)
+		}
+	}
+}
+
+func (cs *ChainSelector) syncFarTipRunContinuityLocked(
+	connId ouroboros.ConnectionId,
+	claims map[ouroboros.ConnectionId]farTipClaim,
+) {
+	if !cs.genesisCorroborationActiveLocked() {
+		return
+	}
+	claim, hasClaim := claims[connId]
+	if !hasClaim || claim.run == 0 || len(claim.hash) == 0 {
+		for identity, continuity := range cs.farTipRunsByIdentity {
+			if continuity.connection == connId {
+				delete(cs.farTipRunsByIdentity, identity)
+			}
+		}
+		return
+	}
+	identity, hasIdentity := cs.corroboratorIdentity(connId)
+	if !hasIdentity {
+		return
+	}
+	if cs.farTipRunsByIdentity == nil {
+		cs.farTipRunsByIdentity = make(map[string]farTipRunContinuity)
+	}
+	var base farTipClaim
+	hasBase := false
+	if previous, exists := cs.farTipRunsByIdentity[identity]; exists {
+		if previous.connection == connId {
+			base = previous.base
+			hasBase = previous.hasBase
+		} else {
+			base = farTipClaim{
+				block:    previous.block,
+				slot:     previous.slot,
+				hash:     bytes.Clone(previous.hash),
+				boundary: previous.boundary,
+				run:      previous.run,
+			}
+			hasBase = true
+		}
+	}
+	if _, exists := cs.farTipRunsByIdentity[identity]; !exists &&
+		len(cs.farTipRunsByIdentity) >= cs.maxTrackedPeers {
+		oldestIdentity := ""
+		var oldest time.Time
+		for trackedIdentity, continuity := range cs.farTipRunsByIdentity {
+			if oldestIdentity == "" || continuity.updatedAt.Before(oldest) {
+				oldestIdentity = trackedIdentity
+				oldest = continuity.updatedAt
+			}
+		}
+		delete(cs.farTipRunsByIdentity, oldestIdentity)
+	}
+	updatedAt := cs.now()
+	// Re-reporting the same point must not keep an old run alive indefinitely.
+	if previous, exists := cs.farTipRunsByIdentity[identity]; exists &&
+		previous.block == claim.block && previous.slot == claim.slot &&
+		previous.boundary == claim.boundary &&
+		bytes.Equal(previous.hash, claim.hash) {
+		updatedAt = previous.updatedAt
+	}
+	cs.farTipRunsByIdentity[identity] = farTipRunContinuity{
+		connection: connId,
+		block:      claim.block,
+		slot:       claim.slot,
+		hash:       bytes.Clone(claim.hash),
+		boundary:   claim.boundary,
+		run:        claim.run,
+		updatedAt:  updatedAt,
+		base:       base,
+		hasBase:    hasBase,
+	}
 }
 
 // makeRoomForNewPeerLocked makes room in the tracked-peer table for a new
@@ -4625,6 +4893,7 @@ func (cs *ChainSelector) applyRollbackToTrackedPeer(e PeerRollbackEvent) bool {
 	}
 	delete(cs.pendingPeerTips, e.ConnectionId)
 	delete(cs.pendingPeerTipFrontiers, e.ConnectionId)
+	cs.prunePeerTipRejectionReportsLocked()
 	peerTip.ApplyRollback(e.Point, e.Tip)
 	if deliveredTip := cs.deliveredPeerTips[e.ConnectionId]; deliveredTip != nil {
 		deliveredTip.ApplyRollback(e.Point, e.Tip)

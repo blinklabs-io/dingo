@@ -1236,11 +1236,12 @@ func (ls *LedgerState) queryShelley(ctx context.Context, query *olocalstatequery
 //
 // Point-pinning coverage audit (every case below, classified):
 //
-// Honors at today: ShelleyStakeDistributionQuery, ShelleyStakeDistribution2Query,
-// ShelleyPoolDistrQuery and ShelleyPoolDistr2Query (the last three via PoolStakeDistribution, resolving at to its epoch and reading
-// that epoch's persisted mark snapshot; StakeDistribution's circulating-
-// supply denominator additionally resolves historically via
-// GetNetworkStateAsOfSlot), ShelleyCurrentProtocolParamsQuery
+// Honors at today: ShelleyStakeDistributionQuery and
+// ShelleyStakeDistribution2Query (via liveStakeDistribution, reconstructing
+// pool stake as of at.Slot, with a circulating-supply denominator resolved
+// historically via GetNetworkStateAsOfSlot), ShelleyPoolDistrQuery and
+// ShelleyPoolDistr2Query (via PoolStakeDistribution, resolving at to its
+// epoch and reading that epoch's persisted mark snapshot), ShelleyCurrentProtocolParamsQuery
 // (queryShelleyCurrentProtocolParams, answered from the live snapshot when
 // at's epoch matches the live tip's, otherwise from that epoch's persisted
 // pparams row when one was recorded -- see its doc comment),
@@ -2667,6 +2668,7 @@ func (ls *LedgerState) queryShelleyUtxoByAddress(
 		if err != nil {
 			return nil, err
 		}
+		txOut = localStateQueryTransactionOutput(txOut)
 		txId, err := lcommon.NewBlake2b256Checked(utxo.TxId)
 		if err != nil {
 			return nil, fmt.Errorf("utxo by address tx id: %w", err)
@@ -3261,6 +3263,7 @@ func (ls *LedgerState) queryShelleyUtxoByTxIn(ctx context.Context, txIns []ledge
 		if err != nil {
 			return nil, err
 		}
+		txOut = localStateQueryTransactionOutput(txOut)
 		txId, err := lcommon.NewBlake2b256Checked(utxo.TxId)
 		if err != nil {
 			return nil, fmt.Errorf("utxo by tx in tx id: %w", err)

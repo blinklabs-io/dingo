@@ -38,7 +38,7 @@ const (
 type SQLiteQueryParams struct {
 	Query  string `json:"query"            jsonschema:"The SQL SELECT query to execute against Dingo's SQLite database"`
 	Limit  int    `json:"limit,omitempty"  jsonschema:"Maximum rows to return (default 50, capped by configured maxRows and 200)"`
-	Offset int    `json:"offset,omitempty" jsonschema:"Number of rows to skip for pagination (default 0)"`
+	Offset int    `json:"offset,omitempty" jsonschema:"Number of rows to skip for pagination (default 0, max 10000)"`
 }
 
 // SQLiteExplainParams defines the input schema for sqlite_explain.
@@ -77,8 +77,6 @@ func registerSQLiteTools(
 	if maxRows <= 0 {
 		maxRows = 100
 	}
-	releaseQuery := limits.release
-
 	// Tool: sqlite_query
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "sqlite_query",
@@ -105,10 +103,10 @@ func registerSQLiteTools(
 				},
 			}, nil, nil
 		}
-		if err := limits.admit(); err != nil {
+		if err := limits.admitCallerSQL(); err != nil {
 			return nil, nil, err
 		}
-		defer releaseQuery()
+		defer limits.releaseCallerSQL()
 
 		effectiveLimit := input.Limit
 		if effectiveLimit <= 0 {
@@ -116,8 +114,8 @@ func registerSQLiteTools(
 		}
 		effectiveLimit = min(effectiveLimit, maxRows, 200)
 		offset := max(input.Offset, 0)
-		if offset > 10000 {
-			return nil, nil, errors.New("offset must not exceed 10000")
+		if offset > maxToolOffset {
+			return nil, nil, errOffsetTooLarge
 		}
 		q := strings.TrimRight(strings.TrimSpace(input.Query), ";")
 
@@ -166,6 +164,7 @@ func registerSQLiteTools(
 			valuePtrs[i] = &rowValues[i]
 		}
 
+		requestedOffset := offset
 		count := 0
 		decodedBytes := 0
 		for rows.Next() {
@@ -222,6 +221,11 @@ func registerSQLiteTools(
 			duration.Round(time.Millisecond),
 			formatUntrustedInline(q),
 		)
+		if note := offsetLimitNote(
+			requestedOffset, effectiveLimit, count,
+		); note != "" {
+			summary += "\n" + note
+		}
 
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{
@@ -257,10 +261,10 @@ func registerSQLiteTools(
 				},
 			}, nil, nil
 		}
-		if err := limits.admit(); err != nil {
+		if err := limits.admitCallerSQL(); err != nil {
 			return nil, nil, err
 		}
-		defer releaseQuery()
+		defer limits.releaseCallerSQL()
 
 		// #nosec G202 //nolint:gosec // cleanQ is validated by ValidateReadOnlyQuery
 		explainQuery := "EXPLAIN QUERY PLAN " + cleanQ
@@ -339,7 +343,7 @@ func registerSQLiteTools(
 		if err := limits.admit(); err != nil {
 			return nil, nil, err
 		}
-		defer releaseQuery()
+		defer limits.release()
 
 		tableName := strings.TrimSpace(input.TableName)
 		// Table name must be alphanumeric or underscore

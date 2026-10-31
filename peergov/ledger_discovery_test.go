@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"net"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -359,9 +360,16 @@ func TestLoadPeerSnapshotSeedsLedgerPeers(t *testing.T) {
 		require.NotNil(t, peer)
 		assert.Equal(t, PeerSource(PeerSourceP2PLedger), peer.Source)
 		assert.Equal(t, PeerStateCold, peer.State)
+		assert.NotEmpty(t, peer.CorroborationIdentity)
 		_, known := pg.ledgerKnownAddrs[peer.NormalizedAddress]
 		assert.True(t, known)
 	}
+	assert.Equal(
+		t,
+		pg.peers[0].CorroborationIdentity,
+		pg.peers[1].CorroborationIdentity,
+		"relays in one snapshot pool share one control identity",
+	)
 }
 
 func TestLoadPeerSnapshotConvertsRelayShapes(t *testing.T) {
@@ -381,6 +389,7 @@ func TestLoadPeerSnapshotConvertsRelayShapes(t *testing.T) {
 	relays := PoolRelaysFromPeerSnapshot(snapshot)
 
 	require.Len(t, relays, 4)
+	require.NotEmpty(t, relays[0].ControlIdentity)
 	assert.Equal(t, "relay.example.com", relays[0].Hostname)
 	assert.Equal(t, uint(3002), relays[0].Port)
 	assert.False(t, relays[0].IsMultiHost)
@@ -394,6 +403,80 @@ func TestLoadPeerSnapshotConvertsRelayShapes(t *testing.T) {
 	require.NotNil(t, relays[3].IPv6)
 	assert.Equal(t, "2001:db8::1", relays[3].IPv6.String())
 	assert.Equal(t, uint(3004), relays[3].Port)
+	for _, relay := range relays[1:] {
+		assert.Equal(t, relays[0].ControlIdentity, relay.ControlIdentity)
+	}
+}
+
+func TestPoolRelaysFromPeerSnapshotSeparatesPoolControl(t *testing.T) {
+	snapshot := &topology.PeerSnapshotConfig{
+		Point: topology.PeerSnapshotPoint{BlockPointHash: strings.Repeat("a", 64)},
+		BigLedgerPools: []topology.PeerSnapshotLedgerPool{
+			{Relays: []topology.TopologyConfigP2PAccessPoint{{
+				Address: "44.0.0.1", Port: 3001,
+			}}},
+			{Relays: []topology.TopologyConfigP2PAccessPoint{{
+				Address: "45.0.0.1", Port: 3001,
+			}}},
+		},
+	}
+
+	relays := PoolRelaysFromPeerSnapshot(snapshot)
+	require.Len(t, relays, 2)
+	require.NotEmpty(t, relays[0].ControlIdentity)
+	require.NotEmpty(t, relays[1].ControlIdentity)
+	assert.NotEqual(t, relays[0].ControlIdentity, relays[1].ControlIdentity)
+}
+
+func TestLedgerRelayControlIdentityFailsClosedOnAmbiguousEndpoint(t *testing.T) {
+	pg := discardGovernor()
+	ip := net.ParseIP("44.0.0.1")
+	identities := pg.ledgerRelayCorroborationIdentities([]PoolRelay{
+		{IPv4: &ip, Port: 3001, PoolKeyHash: bytes.Repeat([]byte{0x11}, 28)},
+		{IPv4: &ip, Port: 3001, PoolKeyHash: bytes.Repeat([]byte{0x22}, 28)},
+	})
+
+	assert.Empty(t, identities["44.0.0.1:3001"])
+}
+
+func TestLedgerReconciliationRefreshesControlIdentity(t *testing.T) {
+	pg := discardGovernor()
+	relayAddress := "44.0.0.1:3001"
+	pg.peers = []*Peer{{
+		Address:               relayAddress,
+		NormalizedAddress:     relayAddress,
+		Source:                PeerSourceP2PLedger,
+		CorroborationIdentity: "pool:stale",
+	}}
+	pg.ledgerKnownAddrs[relayAddress] = relayAddress
+	ip := net.ParseIP("44.0.0.1")
+	relay := PoolRelay{
+		IPv4:        &ip,
+		Port:        3001,
+		PoolKeyHash: bytes.Repeat([]byte{0x33}, 28),
+	}
+
+	pg.reconcileLedgerKnownAddrs(relay.Addresses())
+	pg.reconcileLedgerCorroborationIdentities(
+		pg.ledgerRelayCorroborationIdentities([]PoolRelay{relay}),
+	)
+	require.Equal(
+		t,
+		poolCorroborationIdentity(relay.PoolKeyHash),
+		pg.peers[0].CorroborationIdentity,
+	)
+
+	otherIP := net.ParseIP("45.0.0.1")
+	other := PoolRelay{
+		IPv4:        &otherIP,
+		Port:        3001,
+		PoolKeyHash: bytes.Repeat([]byte{0x44}, 28),
+	}
+	pg.reconcileLedgerKnownAddrs(other.Addresses())
+	pg.reconcileLedgerCorroborationIdentities(
+		pg.ledgerRelayCorroborationIdentities([]PoolRelay{other}),
+	)
+	assert.Empty(t, pg.peers[0].CorroborationIdentity)
 }
 
 func TestDiscoverLedgerPeers_BoundedByTarget(t *testing.T) {
@@ -1262,4 +1345,90 @@ func TestLoadPeerSnapshotDeniedHostnameSkipsResolution(t *testing.T) {
 	require.Zero(t, pg.LoadPeerSnapshot(context.Background(), snapshot))
 	require.Empty(t, pg.peers)
 	require.Zero(t, calls.Load())
+}
+
+// Not t.Parallel: replaces the package-level DNS resolver.
+//
+// A topology relay whose name could not be resolved when it was admitted is
+// retained under that name. When the same relay later expands from the
+// snapshot into addresses, the retained peer is that relay and must not be
+// joined by one new peer per address.
+func TestLoadPeerSnapshotDoesNotDuplicateUnresolvedTopologyPeer(t *testing.T) {
+	countingResolver(t, nil, nxdomain("relay.example.com"))
+	pg := discardGovernor()
+	pg.config.LedgerPeerTarget = 4
+	// Mixed case: the retained name and the snapshot's must still match.
+	require.NoError(t, pg.AddPeer(
+		"Relay.Example.COM:3001", PeerSourceTopologyBootstrapPeer,
+	))
+	require.Len(t, pg.peers, 1)
+	require.Equal(t, "relay.example.com:3001", pg.peers[0].NormalizedAddress,
+		"the unresolved peer is retained under its name")
+
+	// The name resolves by the time the snapshot is loaded.
+	countingResolver(t, []net.IP{
+		net.ParseIP("44.0.0.1"),
+		net.ParseIP("44.0.0.2"),
+	}, nil)
+	snapshot := &topology.PeerSnapshotConfig{
+		BigLedgerPools: []topology.PeerSnapshotLedgerPool{
+			{Relays: []topology.TopologyConfigP2PAccessPoint{
+				{Address: "relay.example.com", Port: 3001},
+			}},
+		},
+	}
+	pg.LoadPeerSnapshot(context.Background(), snapshot)
+
+	pg.mu.Lock()
+	defer pg.mu.Unlock()
+	require.Len(t, pg.peers, 1,
+		"the relay must stay a single peer, not one per resolved address")
+	require.Equal(t, "Relay.Example.COM:3001", pg.peers[0].Address)
+	require.True(t, pg.peers[0].Source == PeerSourceTopologyBootstrapPeer)
+	_, counted := pg.ledgerKnownAddrs[pg.normalizeAddress(pg.peers[0].Address)]
+	require.True(t, counted,
+		"the retained peer still counts toward the ledger target")
+}
+
+// Not t.Parallel: replaces the package-level DNS resolver.
+//
+// Once bootstrap has exited, a bootstrap peer is no longer dialed, so a
+// snapshot relay it was admitted for needs peers of its own. A topology peer
+// of any other source is still dialed and stays the relay's only peer.
+func TestLoadPeerSnapshotUnresolvedPeerAfterBootstrapExit(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		source    PeerSource
+		wantPeers int
+	}{
+		{"bootstrap peer is dormant", PeerSourceTopologyBootstrapPeer, 3},
+		{"local root is still dialed", PeerSourceTopologyLocalRoot, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			countingResolver(t, nil, nxdomain("relay.example.com"))
+			pg := discardGovernor()
+			pg.config.LedgerPeerTarget = 4
+			require.NoError(t, pg.AddPeer("relay.example.com:3001", tc.source))
+			pg.mu.Lock()
+			pg.bootstrapExited = true
+			pg.mu.Unlock()
+
+			countingResolver(t, []net.IP{
+				net.ParseIP("44.0.0.1"),
+				net.ParseIP("44.0.0.2"),
+			}, nil)
+			pg.LoadPeerSnapshot(context.Background(),
+				&topology.PeerSnapshotConfig{
+					BigLedgerPools: []topology.PeerSnapshotLedgerPool{
+						{Relays: []topology.TopologyConfigP2PAccessPoint{
+							{Address: "relay.example.com", Port: 3001},
+						}},
+					},
+				})
+
+			pg.mu.Lock()
+			defer pg.mu.Unlock()
+			require.Len(t, pg.peers, tc.wantPeers)
+		})
+	}
 }

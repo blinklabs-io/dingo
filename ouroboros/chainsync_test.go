@@ -5186,6 +5186,116 @@ func TestChainsyncServerLocalClientNotServedAheadOfLedger(t *testing.T) {
 	require.Equal(t, point3, rollbackPoint)
 }
 
+// parkOnByronBoundaryBlock serves block 1 to a local client, appends a Byron
+// epoch-boundary block and its same-slot successor, parks the client on the
+// boundary block, and then publishes the successor as the applied tip, as when
+// the ledger applies both before the waiter wakes.
+func parkOnByronBoundaryBlock(
+	t *testing.T,
+	f *chainsyncServerFixture,
+) (boundary, successor *testBlock) {
+	t.Helper()
+	block1, point1 := f.appendBlock(t, 1, 1, 0x01)
+	f.setTip(block1, point1)
+	f.drainInitialRollback(t, csmock.OriginPoint())
+	require.NoError(t, f.h.RequestNext())
+	require.True(t, f.observe(t).IsRollForward(), "applied block is served")
+
+	appendChild := func(
+		parent *testBlock,
+		slot, blockNumber uint64,
+		hashByte byte,
+	) (*testBlock, ocommon.Point) {
+		t.Helper()
+		header, ok := newTestBlockHeader(
+			slot,
+			blockNumber,
+			hashByte,
+		).(*testBlockHeader)
+		require.True(t, ok)
+		header.prevHash = parent.Hash()
+		block := &testBlock{
+			BlockHeader: header,
+			blockType:   1,
+			cbor:        []byte{0x81, hashByte},
+		}
+		require.NoError(
+			t,
+			f.o.ledgerState.Chain().AddBlock(context.Background(), block, nil),
+		)
+		return block, ocommon.NewPoint(
+			block.SlotNumber(),
+			block.Hash().Bytes(),
+		)
+	}
+
+	// A boundary block reuses its parent's block number; the next block
+	// shares its slot.
+	boundary, _ = appendChild(block1, 2, 1, 0x02)
+	require.NoError(t, f.h.RequestNext())
+	require.True(t, f.observe(t).IsAwaitReply(), "expected AwaitReply")
+	successor, successorPoint := appendChild(boundary, 2, 2, 0x03)
+	f.setTip(successor, successorPoint)
+	return boundary, successor
+}
+
+// TestChainsyncServerLocalClientServedByronBoundaryBlockAppliedWithSuccessor
+// covers a Byron epoch-boundary block, which shares its slot with the block
+// that follows it. When the ledger applies both before the parked waiter wakes,
+// the applied tip sits at the boundary block's slot with the successor's hash.
+// That is not a fork: the boundary block is on the applied chain and must be
+// served, not held for a rollback that never comes.
+func TestChainsyncServerLocalClientServedByronBoundaryBlockAppliedWithSuccessor(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	f := newChainsyncServerFixtureServing(
+		t,
+		csmock.ModeNtC,
+		OuroborosConfig{},
+		true,
+	)
+	boundary, successor := parkOnByronBoundaryBlock(t, f)
+
+	requireServed := func(want *testBlock) {
+		t.Helper()
+		_, blockCbor, _, ok := f.observe(t).RollForwardNtC()
+		require.True(t, ok, "expected RollForward")
+		require.Equal(t, want.cbor, blockCbor)
+	}
+	requireServed(boundary)
+	require.NoError(t, f.h.RequestNext())
+	requireServed(successor)
+}
+
+// TestChainsyncServerLocalClientUnparkedWhenAppliedTipLookupFails covers a
+// failed lookup of the applied tip's parent. The applied-slot notification has
+// already fired and no rollback follows a same-chain tip, so the waiter must
+// drop the transport rather than return to waiting.
+func TestChainsyncServerLocalClientUnparkedWhenAppliedTipLookupFails(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	f := newChainsyncServerFixtureServing(
+		t,
+		csmock.ModeNtC,
+		OuroborosConfig{},
+		true,
+		func(o *Ouroboros) {
+			o.chainsyncServerPrevHashFunc = func(ocommon.Point) ([]byte, error) {
+				return nil, errors.New("injected block lookup failure")
+			}
+		},
+	)
+	parkOnByronBoundaryBlock(t, f)
+	f.requireClientUnparked(
+		t,
+		"a failed applied-tip lookup must release the parked client",
+	)
+}
+
 // =============================================================================
 // RequestNext error paths
 //
@@ -8537,6 +8647,16 @@ func TestHandleConnClosedEventPreservesLocalRestartStability(t *testing.T) {
 			name:   "deferred recovery",
 			reason: event.ChainsyncResyncReasonHeaderValidationRecovery,
 			local:  true,
+		},
+		{
+			name:   "authorization snapshot changed",
+			reason: event.ChainsyncResyncReasonHeaderAuthorizationChanged,
+			local:  true,
+		},
+		{
+			name:     "authorization restart cannot mask transport error",
+			reason:   event.ChainsyncResyncReasonHeaderAuthorizationChanged,
+			closeErr: io.EOF,
 		},
 		{
 			name:   "peer fault",

@@ -845,6 +845,12 @@ type BlockNumberBound struct {
 	// over an empty ID space that quietly reports the same thing for a
 	// different reason. An empty chain resolves to the same zero value.
 	Resolved bool
+	// StaleTailRestarts counts how many times resolving the bound found
+	// its highest index entry stale (its block metadata missing or filed
+	// under another ID) and had to search again below it. Each restart is
+	// a full further round of index probes, so a caller metering storage
+	// work charges for them; it is zero for an index with a live tail.
+	StaleTailRestarts int
 }
 
 // ResolveBlockNumberBound reads the highest indexed block to bound a
@@ -854,11 +860,30 @@ func ResolveBlockNumberBound(
 	ctx context.Context,
 	db *Database,
 ) (BlockNumberBound, error) {
+	return ResolveBlockNumberBoundBudgeted(ctx, db, nil)
+}
+
+// ErrBlockIndexBudget is returned when a reserve callback given to
+// ResolveBlockNumberBoundBudgeted or BlockByNumberBoundedBudgeted refuses
+// further storage work.
+var ErrBlockIndexBudget = errors.New(
+	"block index search budget exhausted",
+)
+
+// ResolveBlockNumberBoundBudgeted is ResolveBlockNumberBound for callers that
+// meter storage work. reserve is called before each stale-tail retry (not
+// the first round) and the search stops with ErrBlockIndexBudget,
+// before probing, when it returns false. A nil reserve never refuses.
+func ResolveBlockNumberBoundBudgeted(
+	ctx context.Context,
+	db *Database,
+	reserve func() bool,
+) (BlockNumberBound, error) {
 	var ret BlockNumberBound
 	txn := db.Transaction(ctx, false)
 	err := txn.Do(func(txn *Txn) error {
 		var err error
-		ret, err = ResolveBlockNumberBoundTxn(txn)
+		ret, err = resolveBlockNumberBoundTxn(txn, reserve)
 		return err
 	})
 	return ret, err
@@ -877,22 +902,33 @@ func ResolveBlockNumberBound(
 // probes for each candidate. Metadata is checked only at the highest candidate;
 // a stale tail candidate restarts the search below that ID.
 func ResolveBlockNumberBoundTxn(txn *Txn) (BlockNumberBound, error) {
+	return resolveBlockNumberBoundTxn(txn, nil)
+}
+
+func resolveBlockNumberBoundTxn(
+	txn *Txn,
+	reserve func() bool,
+) (BlockNumberBound, error) {
 	if txn == nil {
 		return BlockNumberBound{}, types.ErrNilTxn
 	}
 	upper := uint64(math.MaxUint64)
+	restarts := 0
+	unresolved := func() BlockNumberBound {
+		return BlockNumberBound{StaleTailRestarts: restarts}
+	}
 	for {
 		// Search raw index keys first. Checking liveness while seeking from
 		// zero walks every stale entry left below the retained history.
 		highest, err := blockIndexSeekTxn(txn, 0, false)
 		if err != nil {
 			if errors.Is(err, models.ErrBlockNotFound) {
-				return BlockNumberBound{}, nil
+				return unresolved(), nil
 			}
 			return BlockNumberBound{}, err
 		}
 		if highest.id > upper {
-			return BlockNumberBound{}, nil
+			return unresolved(), nil
 		}
 		hi := upper
 		for highest.id < hi {
@@ -911,18 +947,25 @@ func ResolveBlockNumberBoundTxn(txn *Txn) (BlockNumberBound, error) {
 		metadata, err := blockMetadataByKey(txn, highest.blockKey)
 		if err == nil && metadata.ID == highest.id {
 			return BlockNumberBound{
-				HighestID:     highest.id,
-				HighestNumber: metadata.Height,
-				Resolved:      true,
+				HighestID:         highest.id,
+				HighestNumber:     metadata.Height,
+				Resolved:          true,
+				StaleTailRestarts: restarts,
 			}, nil
 		}
 		if err != nil && !errors.Is(err, models.ErrBlockNotFound) {
 			return BlockNumberBound{}, err
 		}
 		if highest.id == 0 {
-			return BlockNumberBound{}, nil
+			return unresolved(), nil
+		}
+		// Pay for the next round before running it, so a refused
+		// reservation stops the search instead of being noticed after.
+		if reserve != nil && !reserve() {
+			return BlockNumberBound{}, ErrBlockIndexBudget
 		}
 		upper = highest.id - 1
+		restarts++
 	}
 }
 
@@ -992,7 +1035,38 @@ func BlockByNumberBoundedTxn(
 	number uint64,
 	bound BlockNumberBound,
 ) (models.Block, error) {
-	blockKey, err := blockKeyByNumberBoundedTxn(txn, number, bound)
+	return blockByNumberBoundedTxn(txn, number, bound, nil)
+}
+
+// BlockByNumberBoundedBudgeted is BlockByNumberBounded for callers that meter
+// storage work. Every probe skips stale index entries, and each skipped entry
+// costs a metadata read, so reserve is called once per skipped entry before
+// the next one is examined. The search stops with ErrBlockIndexBudget when it
+// returns false. A nil reserve never refuses.
+func BlockByNumberBoundedBudgeted(
+	ctx context.Context,
+	db *Database,
+	number uint64,
+	bound BlockNumberBound,
+	reserve func() bool,
+) (models.Block, error) {
+	var ret models.Block
+	txn := db.Transaction(ctx, false)
+	err := txn.Do(func(txn *Txn) error {
+		var err error
+		ret, err = blockByNumberBoundedTxn(txn, number, bound, reserve)
+		return err
+	})
+	return ret, err
+}
+
+func blockByNumberBoundedTxn(
+	txn *Txn,
+	number uint64,
+	bound BlockNumberBound,
+	reserve func() bool,
+) (models.Block, error) {
+	blockKey, err := blockKeyByNumberBoundedTxn(txn, number, bound, reserve)
 	if err != nil {
 		return models.Block{}, err
 	}
@@ -1011,6 +1085,7 @@ func blockKeyByNumberBoundedTxn(
 	txn *Txn,
 	number uint64,
 	bound BlockNumberBound,
+	reserve func() bool,
 ) ([]byte, error) {
 	if txn == nil {
 		return nil, types.ErrNilTxn
@@ -1029,7 +1104,7 @@ func blockKeyByNumberBoundedTxn(
 		// forward to the next indexed block rather than fail, and a
 		// fallback that merely lowered hi would never find a target above
 		// the gap.
-		entry, err := blockIndexEntryAtOrAfterTxn(txn, mid)
+		entry, err := blockIndexSeekMeteredTxn(txn, mid, true, reserve)
 		if err != nil {
 			if errors.Is(err, models.ErrBlockNotFound) {
 				hi = mid - 1
@@ -1076,6 +1151,19 @@ func blockIndexEntryAtOrAfterTxn(
 }
 
 func blockIndexSeekTxn(txn *Txn, blockIndex uint64, validate bool) (blockIndexEntry, error) {
+	return blockIndexSeekMeteredTxn(txn, blockIndex, validate, nil)
+}
+
+// blockIndexSeekMeteredTxn is blockIndexSeekTxn that calls reserve before
+// examining each entry after a stale one it skipped, since every skip cost a
+// metadata read the caller has not paid for. A refusal returns
+// ErrBlockIndexBudget.
+func blockIndexSeekMeteredTxn(
+	txn *Txn,
+	blockIndex uint64,
+	validate bool,
+	reserve func() bool,
+) (blockIndexEntry, error) {
 	blobTxn := txn.Blob()
 	if blobTxn == nil {
 		return blockIndexEntry{}, types.ErrNilTxn
@@ -1118,12 +1206,18 @@ func blockIndexSeekTxn(txn *Txn, blockIndex uint64, validate bool) (blockIndexEn
 		metadata, err := blockMetadataByKey(txn, blockKey)
 		if err != nil {
 			if errors.Is(err, models.ErrBlockNotFound) {
+				if reserve != nil && !reserve() {
+					return blockIndexEntry{}, ErrBlockIndexBudget
+				}
 				it.Next()
 				continue
 			}
 			return blockIndexEntry{}, err
 		}
 		if !bytes.Equal(indexKey, types.BlockBlobIndexKey(metadata.ID)) {
+			if reserve != nil && !reserve() {
+				return blockIndexEntry{}, ErrBlockIndexBudget
+			}
 			it.Next()
 			continue
 		}

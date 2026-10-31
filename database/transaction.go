@@ -1410,6 +1410,28 @@ func (d *Database) GetTransactionsByHashes(
 	return txs, nil
 }
 
+// GetExistingTransactionHashes returns the subset of hashes that have a
+// transaction record, read in one metadata transaction that observes ctx.
+// The result is in no particular order.
+func (d *Database) GetExistingTransactionHashes(
+	ctx context.Context,
+	hashes [][]byte,
+) ([][]byte, error) {
+	if len(hashes) == 0 {
+		return nil, nil
+	}
+	txn := d.TransactionContext(ctx, false)
+	defer txn.Release()
+	found, err := d.transactionStore().GetExistingTransactionHashes(
+		hashes,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get existing tx hashes: %w", err)
+	}
+	return found, nil
+}
+
 // GetTransactionsByBlockHash returns all transactions for a given
 // block hash, ordered by their position within the block.
 func (d *Database) GetTransactionsByBlockHash(

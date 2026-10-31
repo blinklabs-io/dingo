@@ -30,7 +30,7 @@ import (
 const accountCheckpointRetentionEpochs = 4
 
 // KoiosEpochInfo holds Koios reference data for a closed epoch.
-// Note: pool_cnt and delegator_cnt are not returned by preview/preprod Koios and are omitted.
+// Note: pool_cnt and delegator_cnt are not returned by Koios and are omitted.
 type KoiosEpochInfo struct {
 	ID          uint
 	Network     string

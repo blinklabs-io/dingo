@@ -42,6 +42,8 @@ const (
 	defaultMaxDRepDetailsPerClient              = 1
 	defaultMaxAddressSummaries             uint = 4
 	defaultMaxAddressSummariesPerClient         = 2
+	defaultMaxChainSummaries               uint = 4
+	defaultMaxChainSummariesPerClient           = 2
 	defaultMaxMempoolAddresses             uint = 4
 	defaultMaxMempoolAddressesPerClient         = 1
 )
@@ -57,9 +59,16 @@ type Blockfrost struct {
 	drepAdmission      *requestAdmission
 	// addressSummaryAdmission is shared by every route that scans a whole
 	// address or account history: the base and extended summaries, the
-	// account summary, the address and account totals, and the account asset
-	// balances.
+	// address transaction pages, the account summary, the address and account
+	// totals, the account asset balances, and the account associated-address
+	// pages.
 	addressSummaryAdmission *requestAdmission
+	// chainSummaryAdmission is shared by the routes that aggregate over the
+	// whole chain or a whole epoch: the network supply and stake summary, the
+	// latest epoch, a single epoch and the epochs before and after one. It is
+	// separate from addressSummaryAdmission so a burst of address scans cannot
+	// starve these routes, and the reverse.
+	chainSummaryAdmission   *requestAdmission
 	mempoolAddressAdmission *requestAdmission
 	// listener owns the start/stop protocol, including releasing the
 	// listening socket as part of what Stop waits for -- see
@@ -107,6 +116,10 @@ func New(
 		addressSummaryAdmission: newRequestAdmission(
 			defaultMaxAddressSummaries,
 			defaultMaxAddressSummariesPerClient,
+		),
+		chainSummaryAdmission: newRequestAdmission(
+			defaultMaxChainSummaries,
+			defaultMaxChainSummariesPerClient,
 		),
 		mempoolAddressAdmission: newRequestAdmission(
 			defaultMaxMempoolAddresses,

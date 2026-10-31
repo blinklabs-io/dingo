@@ -903,9 +903,11 @@ func TestCheckAccountsEndToEndExactMatchAndMismatch(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, sqlDB.Close())
 
-	okAddr, err := StakeAddressFromCredential(okKey, 0)
+	okAddr, err := StakeAddressFromCredential(
+		"preview", okKey, 0)
 	require.NoError(t, err)
-	badAddr, err := StakeAddressFromCredential(badKey, 0)
+	badAddr, err := StakeAddressFromCredential(
+		"preview", badKey, 0)
 	require.NoError(t, err)
 
 	cachePath := filepath.Join(t.TempDir(), "cache.db")
@@ -1018,7 +1020,8 @@ func TestCompareEpochAccountsSkipsWithheldAndAggregatesSharedAccounts(t *testing
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
-	addr, err := StakeAddressFromCredential(stakingKey, 0)
+	addr, err := StakeAddressFromCredential(
+		"preview", stakingKey, 0)
 	require.NoError(t, err)
 	poolOneID, err := PoolKeyHashHexToBech32(hex.EncodeToString(poolOne))
 	require.NoError(t, err)
@@ -2080,7 +2083,8 @@ func TestCheckAccountRewardsPendingWiring(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, sqlDB.Close())
 
-		addr, err := StakeAddressFromCredential(stakingKey, 0)
+		addr, err := StakeAddressFromCredential(
+			"preview", stakingKey, 0)
 		require.NoError(t, err)
 
 		cachePath := filepath.Join(t.TempDir(), "cache.db")
@@ -2199,7 +2203,8 @@ func TestCheckUncreditedDingoRowStillFailsAgainstKoios(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, sqlDB.Close())
 
-	addr, err := StakeAddressFromCredential(stakingKey, 0)
+	addr, err := StakeAddressFromCredential(
+		"preview", stakingKey, 0)
 	require.NoError(t, err)
 
 	cachePath := filepath.Join(t.TempDir(), "cache.db")
@@ -2768,7 +2773,8 @@ func TestCheckEpochResultNamesOnlyThePhasesItRan(t *testing.T) {
 		Amount:      types.Uint64(2_000_000),
 		Spendable:   true,
 	}).Error)
-	badAddr, err := StakeAddressFromCredential(badKey, 0)
+	badAddr, err := StakeAddressFromCredential(
+		"preview", badKey, 0)
 	require.NoError(t, err)
 	seedDingoBabbageProtocolParams(t, sqlDB, koiosEpoch)
 
