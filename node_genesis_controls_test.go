@@ -136,6 +136,65 @@ func TestGenesisControlGroupsPublicNetworkDefaults(t *testing.T) {
 	}
 }
 
+func TestEffectiveGenesisCorroborationPeers(t *testing.T) {
+	t.Parallel()
+	newNode := func(t *testing.T, network string, peers int) *Node {
+		t.Helper()
+		cfg, err := cardano.NewCardanoNodeConfigFromEmbedFS(
+			cardano.EmbeddedConfigFS,
+			cardano.EmbeddedConfigPath(network),
+		)
+		require.NoError(t, err)
+		n := &Node{config: Config{
+			cardanoNodeConfig:         cfg,
+			genesisBootstrap:          true,
+			genesisCorroborationPeers: peers,
+		}}
+		n.config.networkMagic = cfg.ShelleyGenesis().NetworkMagic
+		return n
+	}
+	t.Run("single operator network is density only", func(t *testing.T) {
+		t.Parallel()
+		n := newNode(t, "prime-testnet", 1)
+		require.Zero(t, n.effectiveGenesisCorroborationPeers())
+		require.Empty(t, n.genesisControlGroups())
+	})
+	t.Run("multi operator networks keep the threshold", func(t *testing.T) {
+		t.Parallel()
+		for _, network := range []string{"mainnet", "preprod", "preview", "dijkstra"} {
+			require.Equal(
+				t,
+				1,
+				newNode(t, network, 1).effectiveGenesisCorroborationPeers(),
+				network,
+			)
+		}
+	})
+	t.Run("explicit control groups keep the threshold", func(t *testing.T) {
+		t.Parallel()
+		n := newNode(t, "prime-testnet", 1)
+		n.config.cfg = NewConfig().cfg
+		WithGenesisControlGroups([]topology.PeerControlGroup{})(&n.config)
+		require.Equal(t, 1, n.effectiveGenesisCorroborationPeers())
+	})
+	t.Run("private genesis keeps the threshold", func(t *testing.T) {
+		t.Parallel()
+		n := newNode(t, "prime-testnet", 1)
+		n.config.cardanoNodeConfig.ShelleyGenesisHash = "private genesis"
+		require.Equal(t, 1, n.effectiveGenesisCorroborationPeers())
+	})
+	t.Run("a reused magic keeps the threshold", func(t *testing.T) {
+		t.Parallel()
+		n := newNode(t, "prime-testnet", 1)
+		n.config.networkMagic++
+		require.Equal(t, 1, n.effectiveGenesisCorroborationPeers())
+	})
+	t.Run("configured zero stays zero", func(t *testing.T) {
+		t.Parallel()
+		require.Zero(t, newNode(t, "mainnet", 0).effectiveGenesisCorroborationPeers())
+	})
+}
+
 func TestGenesisControlGroupsExplicitOverrideIsOwned(t *testing.T) {
 	t.Parallel()
 	cfg := NewConfig()

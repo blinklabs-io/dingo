@@ -6321,9 +6321,10 @@ identities, so without these groups corroboration fails closed and chain
 selection never starts. Defaults require matching network magic and every
 canonical genesis hash; private networks reusing a magic do not inherit them.
 Musashi receives the same operator defaults only when its configuration selects
-Genesis mode; its canonical Praos mode is unchanged. A network with a single
-known operator, such as prime-testnet, has no default and needs configured
-groups naming a second independent operator. A nil `controlGroups` selects these defaults;
+Genesis mode; its canonical Praos mode is unchanged. Canonical prime-testnet has a
+single operator and so no independent witness; it selects by density alone
+unless control groups are configured, in which case `corroborationPeers`
+applies. A nil `controlGroups` selects these defaults;
 an explicit empty list disables them and retains ledger/snapshot identity
 selection. Explicit groups replace defaults. The public
 `WithGenesisControlGroups` option owns its input, including endpoint slices.

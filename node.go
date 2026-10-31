@@ -1334,7 +1334,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			"Genesis chain selection enabled",
 			"genesis_window_slots", genesisWindowSlots,
 			"security_param", chainSelectorSecurityParam,
-			"min_corroborating_peers", n.config.genesisCorroborationPeers,
+			"min_corroborating_peers", n.effectiveGenesisCorroborationPeers(),
 		)
 	}
 	// Wire chain-selector event subscriptions. Start the selected-to-none
@@ -2191,7 +2191,7 @@ func (n *Node) buildChainSelectorConfig(
 		SecurityParam:         securityParam,
 		GenesisMode:           genesisMode,
 		GenesisWindowSlots:    genesisWindowSlots,
-		MinCorroboratingPeers: n.config.genesisCorroborationPeers,
+		MinCorroboratingPeers: n.effectiveGenesisCorroborationPeers(),
 		ConnectionLive: func(connId ouroboros.ConnectionId) bool {
 			return n.connManager != nil &&
 				n.connManager.GetConnectionById(connId) != nil

@@ -26,6 +26,10 @@ type canonicalGenesisNetwork struct {
 	shelleyHash string
 	suffix      string
 	groups      []topology.PeerControlGroup
+	// singleOperator marks a network whose relays all belong to one operator.
+	// No independent witness exists there, so a corroboration threshold above
+	// zero could never be met.
+	singleOperator bool
 }
 
 func blinkRelayGroup(suffix string) topology.PeerControlGroup {
@@ -70,6 +74,12 @@ func canonicalGenesisNetworks() []canonicalGenesisNetwork {
 			},
 		},
 		{
+			magic:          3311,
+			shelleyHash:    "0b67b0cb16e973478888efb1c7f69fca8e80489369afed94624a588e94a94f2b",
+			suffix:         "prime-testnet",
+			singleOperator: true,
+		},
+		{
 			magic:       764824073,
 			shelleyHash: "1a3be38bcbb7911969283716ad7aa550250226b76a61fc51cc9a9a35d9276d81",
 			suffix:      "mainnet",
@@ -103,21 +113,13 @@ func canonicalGenesisNetworks() []canonicalGenesisNetwork {
 	}
 }
 
-// genesisControlGroups keeps Dingo's discovery policy separate from the
-// canonical cardano-node configuration. Pin defaults to the genesis identity
-// so private networks reusing a magic do not inherit public relay trust. A
-// node syncing from genesis has no ledger or peer snapshot identities and
-// dials only bootstrap peers, so without these defaults Genesis corroboration
-// fails closed and chain selection never starts.
-func (n *Node) genesisControlGroups() []topology.PeerControlGroup {
-	if n.config.cfg != nil {
-		if groups := n.config.cfg.GenesisBootstrap.ControlGroups; groups != nil {
-			return topology.ClonePeerControlGroups(groups)
-		}
-	}
+// canonicalGenesisNetwork returns the pinned public network this node runs in
+// Genesis mode. A private network reusing a magic, or any genesis hash that
+// differs from the embedded canonical configuration, does not match.
+func (n *Node) canonicalGenesisNetwork() (canonicalGenesisNetwork, bool) {
 	cfg := n.config.CardanoNodeConfig()
 	if cfg == nil || !n.config.genesisSelectionMode() {
-		return nil
+		return canonicalGenesisNetwork{}, false
 	}
 	for _, network := range canonicalGenesisNetworks() {
 		if n.config.networkMagic != network.magic ||
@@ -132,9 +134,43 @@ func (n *Node) genesisControlGroups() []topology.PeerControlGroup {
 			cfg.AlonzoGenesisHash != canonical.AlonzoGenesisHash ||
 			cfg.ConwayGenesisHash != canonical.ConwayGenesisHash ||
 			cfg.DijkstraGenesisHash != canonical.DijkstraGenesisHash {
-			return nil
+			return canonicalGenesisNetwork{}, false
 		}
-		return topology.ClonePeerControlGroups(network.groups)
+		return network, true
 	}
-	return nil
+	return canonicalGenesisNetwork{}, false
+}
+
+// genesisControlGroups keeps Dingo's discovery policy separate from the
+// canonical cardano-node configuration. Pin defaults to the genesis identity
+// so private networks reusing a magic do not inherit public relay trust. A
+// node syncing from genesis has no ledger or peer snapshot identities and
+// dials only bootstrap peers, so without these defaults Genesis corroboration
+// fails closed and chain selection never starts.
+func (n *Node) genesisControlGroups() []topology.PeerControlGroup {
+	if n.config.cfg != nil {
+		if groups := n.config.cfg.GenesisBootstrap.ControlGroups; groups != nil {
+			return topology.ClonePeerControlGroups(groups)
+		}
+	}
+	network, ok := n.canonicalGenesisNetwork()
+	if !ok {
+		return nil
+	}
+	return topology.ClonePeerControlGroups(network.groups)
+}
+
+// effectiveGenesisCorroborationPeers is the corroboration threshold the chain
+// selector uses. A canonical single-operator network has no independent
+// witnesses, so it selects by density alone unless the operator configured
+// control groups, in which case the configured threshold applies.
+func (n *Node) effectiveGenesisCorroborationPeers() int {
+	if n.config.cfg != nil &&
+		n.config.cfg.GenesisBootstrap.ControlGroups != nil {
+		return n.config.genesisCorroborationPeers
+	}
+	if network, ok := n.canonicalGenesisNetwork(); ok && network.singleOperator {
+		return 0
+	}
+	return n.config.genesisCorroborationPeers
 }
