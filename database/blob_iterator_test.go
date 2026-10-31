@@ -57,7 +57,9 @@ type canonicalReadCountingStore struct {
 	blob.BlobStore
 	valueReads   int
 	contextReads int
+	blockReads   int
 	readStarted  chan struct{}
+	readLimits   []int64
 }
 
 func (s *canonicalReadCountingStore) NewIterator(
@@ -82,6 +84,25 @@ func (s *canonicalReadCountingStore) GetContext(
 		return nil, ctx.Err()
 	}
 	return s.BlobStore.Get(txn, key)
+}
+
+func (s *canonicalReadCountingStore) GetContextLimited(
+	ctx context.Context,
+	txn types.Txn,
+	key []byte,
+	maxBytes int64,
+) ([]byte, error) {
+	s.readLimits = append(s.readLimits, maxBytes)
+	return s.GetContext(ctx, txn, key)
+}
+
+func (s *canonicalReadCountingStore) GetBlock(
+	txn types.Txn,
+	slot uint64,
+	hash []byte,
+) ([]byte, types.BlockMetadata, error) {
+	s.blockReads++
+	return s.BlobStore.GetBlock(txn, slot, hash)
 }
 
 // newTestDB creates an in-memory Database instance for testing.
@@ -172,7 +193,9 @@ func TestCanonicalBlobBlockIterator_SparseIndexesAndSlots(t *testing.T) {
 		require.NoError(t, db.BlockCreate(block, nil))
 	}
 
-	iter, err := db.CanonicalBlocksFromSlot(context.Background(), 20)
+	iter, err := db.CanonicalBlocksFromIndex(
+		context.Background(), blocks[1].ID, nil, nil,
+	)
 	require.NoError(t, err)
 	defer iter.Close()
 
@@ -206,7 +229,9 @@ func TestCanonicalBlobBlockIterator_PreservesHistoryExpiry(t *testing.T) {
 		)
 	}))
 
-	iter, err := db.CanonicalBlocksFromSlot(context.Background(), 0)
+	iter, err := db.CanonicalBlocksFromIndex(
+		context.Background(), BlockInitialIndex, nil, nil,
+	)
 	require.NoError(t, err)
 	defer iter.Close()
 
@@ -237,7 +262,9 @@ func TestCanonicalBlobBlockIteratorRejectsNonIncreasingSlots(t *testing.T) {
 		require.NoError(t, db.BlockCreate(block, nil))
 	}
 
-	iter, err := db.CanonicalBlocksFromSlot(t.Context(), 0)
+	iter, err := db.CanonicalBlocksFromIndex(
+		t.Context(), BlockInitialIndex, nil, nil,
+	)
 	require.NoError(t, err)
 	t.Cleanup(iter.Close)
 	for _, want := range []uint64{10, 30} {
@@ -253,6 +280,46 @@ func TestCanonicalBlobBlockIteratorRejectsNonIncreasingSlots(t *testing.T) {
 	)
 }
 
+func TestCanonicalBlobBlockIteratorAuditsBoundedTail(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	blocks := []models.Block{
+		{ID: 1, Slot: 1, Hash: randomHash(t), Cbor: []byte{0x81}, Type: 1},
+		{ID: 2, Slot: 10, Hash: randomHash(t), Cbor: []byte{0x82}, Type: 1},
+		{ID: 3, Slot: 3, Hash: randomHash(t), Cbor: []byte{0x83}, Type: 1},
+		{ID: 4, Slot: 20, Hash: randomHash(t), Cbor: []byte{0x84}, Type: 1},
+	}
+	for _, block := range blocks {
+		require.NoError(t, db.BlockCreate(block, nil))
+	}
+
+	base := db.Blob()
+	store := &canonicalReadCountingStore{BlobStore: base}
+	db.SetBlobStore(store)
+	t.Cleanup(func() { db.SetBlobStore(base) })
+	iter := &BlobBlockIterator{
+		db:         db,
+		ctx:        t.Context(),
+		endSlot:    5,
+		hasEndSlot: true,
+		canonical:  true,
+		startIndex: BlockInitialIndex,
+	}
+	t.Cleanup(iter.Close)
+
+	result, err := iter.NextRaw()
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, uint64(1), result.Slot)
+
+	result, err = iter.NextRaw()
+	require.Nil(t, result)
+	require.ErrorContains(t, err, "non-increasing slot 3 after slot 10")
+	require.Equal(t, 3, store.contextReads)
+	require.Equal(t, 1, store.blockReads)
+}
+
 func TestCanonicalBlobBlockIteratorReadsOneIndexValuePerBlock(t *testing.T) {
 	t.Parallel()
 
@@ -264,7 +331,9 @@ func TestCanonicalBlobBlockIteratorReadsOneIndexValuePerBlock(t *testing.T) {
 			t, db, uint64(i), hash, []byte{0x82, byte(i)},
 		)
 	}
-	iter, err := db.CanonicalBlocksFromSlot(t.Context(), 0)
+	iter, err := db.CanonicalBlocksFromIndex(
+		t.Context(), BlockInitialIndex, nil, nil,
+	)
 	require.NoError(t, err)
 	t.Cleanup(iter.Close)
 
@@ -278,6 +347,7 @@ func TestCanonicalBlobBlockIteratorReadsOneIndexValuePerBlock(t *testing.T) {
 	require.NotNil(t, result)
 	require.Zero(t, store.valueReads)
 	require.Equal(t, 1, store.contextReads)
+	require.Equal(t, []int64{types.BlockBlobKeySize}, store.readLimits)
 }
 
 func TestCanonicalBlobBlockIteratorCancelsIndexValueRead(t *testing.T) {
@@ -286,7 +356,9 @@ func TestCanonicalBlobBlockIteratorCancelsIndexValueRead(t *testing.T) {
 	db := newTestDB(t)
 	insertTestBlock(t, db, 1, randomHash(t), []byte{0x82, 0x01})
 	ctx, cancel := context.WithCancel(t.Context())
-	iter, err := db.CanonicalBlocksFromSlot(ctx, 0)
+	iter, err := db.CanonicalBlocksFromIndex(
+		ctx, BlockInitialIndex, nil, nil,
+	)
 	require.NoError(t, err)
 	t.Cleanup(iter.Close)
 
@@ -307,6 +379,42 @@ func TestCanonicalBlobBlockIteratorCancelsIndexValueRead(t *testing.T) {
 	cancel()
 	require.ErrorIs(t, <-errCh, context.Canceled)
 	require.Equal(t, 1, store.contextReads)
+	require.Equal(t, []int64{types.BlockBlobKeySize}, store.readLimits)
+}
+
+func TestCanonicalBlockIdentityCancelsMetadataRead(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	hash := randomHash(t)
+	insertTestBlock(t, db, 1, hash, []byte{0x82, 0x01})
+	ctx, cancel := context.WithCancel(t.Context())
+	base := db.Blob()
+	store := &canonicalReadCountingStore{
+		BlobStore:   base,
+		readStarted: make(chan struct{}),
+	}
+	db.SetBlobStore(store)
+	t.Cleanup(func() { db.SetBlobStore(base) })
+
+	errCh := make(chan error, 1)
+	go func() {
+		txn := db.BlobTxn(false)
+		errCh <- txn.Do(func(txn *Txn) error {
+			_, _, err := CanonicalBlockIdentityAtSlotTxn(ctx, txn, 1)
+			return err
+		})
+	}()
+	<-store.readStarted
+	cancel()
+	require.ErrorIs(t, <-errCh, context.Canceled)
+	require.Equal(t, 1, store.contextReads)
+	require.Equal(
+		t,
+		[]int64{types.BlockMetadataBinaryHeaderLen +
+			types.BlockMetadataPrevHashMaxLen},
+		store.readLimits,
+	)
 }
 
 // collectIterSlots drains a BlobBlockIterator via NextRaw and returns

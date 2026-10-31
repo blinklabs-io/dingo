@@ -149,7 +149,8 @@ func (p *Pruner) prune(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		default:
-			next, err := iter.NextRaw()
+			// BlocksInRange walks local slot keys and has no context API.
+			next, err := iter.NextRaw() //nolint:contextcheck
 			if err != nil {
 				if errors.Is(err, types.ErrHistoryExpired) {
 					cursor, _ = iter.Progress()

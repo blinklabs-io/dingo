@@ -100,6 +100,28 @@ func addValidBackfillBlocksFrom(
 	}
 }
 
+func bindBackfillCheckpointIdentity(
+	t *testing.T,
+	db *database.Database,
+	cp *models.BackfillCheckpoint,
+) {
+	t.Helper()
+	txn := db.BlobTxn(false)
+	var (
+		point ocommon.Point
+		index uint64
+	)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		var err error
+		point, index, err = database.CanonicalBlockIdentityAtSlotTxn(
+			context.Background(), txn, cp.LastSlot,
+		)
+		return err
+	}))
+	cp.LastIndexID = &index
+	cp.LastBlockHash = append([]byte(nil), point.Hash...)
+}
+
 func TestBackfillProcessBlockGovernanceRecordsDRepActivityFromCertificateOnly(
 	t *testing.T,
 ) {
@@ -1401,17 +1423,16 @@ func TestRun_ResumeRejectsBackwardCanonicalBlockMapping(t *testing.T) {
 	}
 
 	now := time.Now()
-	require.NoError(t, db.Metadata().SetBackfillCheckpoint(
-		&models.BackfillCheckpoint{
-			Phase:      BackfillPhase,
-			LastSlot:   1,
-			TotalSlots: 3,
-			StartedAt:  now,
-			UpdatedAt:  now,
-			Completed:  false,
-		},
-		nil,
-	))
+	cp := &models.BackfillCheckpoint{
+		Phase:      BackfillPhase,
+		LastSlot:   1,
+		TotalSlots: 3,
+		StartedAt:  now,
+		UpdatedAt:  now,
+		Completed:  false,
+	}
+	bindBackfillCheckpointIdentity(t, db, cp)
+	require.NoError(t, db.Metadata().SetBackfillCheckpoint(cp, nil))
 	backwardKey := types.BlockBlobKey(
 		blocks[1].SlotNumber(), blocks[1].Hash().Bytes(),
 	)
@@ -1424,7 +1445,7 @@ func TestRun_ResumeRejectsBackwardCanonicalBlockMapping(t *testing.T) {
 
 	bf := NewBackfill(db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	err = bf.Run(context.Background())
-	require.ErrorContains(t, err, "points backward to slot 1 before start slot 2")
+	require.ErrorContains(t, err, "non-increasing slot 1 after slot 1")
 
 	checkpoint, checkpointErr := db.Metadata().GetBackfillCheckpoint(
 		BackfillPhase,
@@ -1471,6 +1492,153 @@ func TestRun_RejectsCanonicalBlockBeyondTip(t *testing.T) {
 	assert.Equal(t, uint64(3), checkpoint.TotalSlots)
 }
 
+func TestRun_BoundedBackfillAuditsCanonicalTail(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	blocks, err := testfixtures.GenerateConwayChainAt(1, 1, 20)
+	require.NoError(t, err)
+	for idOffset, blockOffset := range []int{0, 9, 2, 19} {
+		block := blocks[blockOffset]
+		require.NoError(t, db.BlockCreate(models.Block{
+			ID:     database.BlockInitialIndex + uint64(idOffset),
+			Slot:   block.SlotNumber(),
+			Hash:   block.Hash().Bytes(),
+			Number: block.BlockNumber(),
+			Cbor:   block.Cbor(),
+			Type:   uint(block.Type()),
+		}, nil))
+	}
+
+	bf := NewBackfill(db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	bf.SetBatchSize(1)
+	bf.SetEndSlot(5)
+	err = bf.Run(context.Background())
+	require.ErrorContains(t, err, "non-increasing slot 3 after slot 10")
+
+	checkpoint, checkpointErr := db.Metadata().GetBackfillCheckpoint(
+		BackfillPhase, nil,
+	)
+	require.NoError(t, checkpointErr)
+	require.NotNil(t, checkpoint)
+	assert.False(t, checkpoint.Completed)
+	assert.Equal(t, uint64(1), checkpoint.LastSlot)
+	require.NotNil(t, checkpoint.LastIndexID)
+	assert.Equal(t, database.BlockInitialIndex, *checkpoint.LastIndexID)
+	assert.Equal(t, blocks[0].Hash().Bytes(), checkpoint.LastBlockHash)
+}
+
+func TestRun_LegacyCheckpointWithoutIdentityReplaysFromStart(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	addValidBackfillBlocks(t, db, 3)
+	now := time.Now()
+	require.NoError(t, db.Metadata().SetBackfillCheckpoint(
+		&models.BackfillCheckpoint{
+			Phase:      BackfillPhase,
+			LastSlot:   1,
+			TotalSlots: 2,
+			StartedAt:  now,
+			UpdatedAt:  now,
+		},
+		nil,
+	))
+
+	var progress []BackfillProgress
+	bf := NewBackfill(db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	bf.SetProgressFunc(func(p BackfillProgress) {
+		progress = append(progress, p)
+	})
+	require.NoError(t, bf.Run(context.Background()))
+	require.Len(t, progress, 1)
+	assert.Equal(t, uint64(3), progress[0].Stats.Blocks)
+
+	cp, err := db.Metadata().GetBackfillCheckpoint(BackfillPhase, nil)
+	require.NoError(t, err)
+	require.NotNil(t, cp)
+	require.True(t, cp.Completed)
+	require.NotNil(t, cp.LastIndexID)
+	assert.Equal(t, database.BlockInitialIndex+2, *cp.LastIndexID)
+	require.Len(t, cp.LastBlockHash, 32)
+}
+
+func TestRun_RejectsCheckpointIdentityMismatch(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	addValidBackfillBlocks(t, db, 2)
+	now := time.Now()
+	cp := &models.BackfillCheckpoint{
+		Phase:      BackfillPhase,
+		LastSlot:   1,
+		TotalSlots: 1,
+		StartedAt:  now,
+		UpdatedAt:  now,
+	}
+	bindBackfillCheckpointIdentity(t, db, cp)
+	cp.LastBlockHash = bytes.Repeat([]byte{0xff}, 32)
+	require.NoError(t, db.Metadata().SetBackfillCheckpoint(cp, nil))
+
+	bf := NewBackfill(db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	err := bf.Run(context.Background())
+	require.ErrorContains(t, err, "does not match canonical block")
+
+	stored, checkpointErr := db.Metadata().GetBackfillCheckpoint(
+		BackfillPhase, nil,
+	)
+	require.NoError(t, checkpointErr)
+	require.NotNil(t, stored)
+	require.False(t, stored.Completed)
+	require.Equal(t, uint64(1), stored.LastSlot)
+	require.Equal(t, bytes.Repeat([]byte{0xff}, 32), stored.LastBlockHash)
+}
+
+func TestRun_ResumeAuditsFirstCanonicalIndexAfterCheckpoint(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	blocks, err := testfixtures.GenerateConwayChainAt(1, 1, 20)
+	require.NoError(t, err)
+	for idOffset, blockOffset := range []int{0, 9, 2, 19} {
+		block := blocks[blockOffset]
+		require.NoError(t, db.BlockCreate(models.Block{
+			ID:     database.BlockInitialIndex + uint64(idOffset),
+			Slot:   block.SlotNumber(),
+			Hash:   block.Hash().Bytes(),
+			Number: block.BlockNumber(),
+			Cbor:   block.Cbor(),
+			Type:   uint(block.Type()),
+		}, nil))
+	}
+	now := time.Now()
+	cp := &models.BackfillCheckpoint{
+		Phase:      BackfillPhase,
+		LastSlot:   10,
+		TotalSlots: 20,
+		StartedAt:  now,
+		UpdatedAt:  now,
+	}
+	bindBackfillCheckpointIdentity(t, db, cp)
+	require.Equal(t, database.BlockInitialIndex+1, *cp.LastIndexID)
+	require.NoError(t, db.Metadata().SetBackfillCheckpoint(cp, nil))
+
+	bf := NewBackfill(db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	err = bf.Run(context.Background())
+	require.ErrorContains(t, err, "non-increasing slot 3 after slot 10")
+
+	checkpoint, checkpointErr := db.Metadata().GetBackfillCheckpoint(
+		BackfillPhase, nil,
+	)
+	require.NoError(t, checkpointErr)
+	require.NotNil(t, checkpoint)
+	assert.False(t, checkpoint.Completed)
+	assert.Equal(t, uint64(10), checkpoint.LastSlot)
+	require.NotNil(t, checkpoint.LastIndexID)
+	assert.Equal(t, database.BlockInitialIndex+1, *checkpoint.LastIndexID)
+	assert.Equal(t, blocks[9].Hash().Bytes(), checkpoint.LastBlockHash)
+}
+
 func TestRun_RejectsDuplicateCanonicalTailAtTip(t *testing.T) {
 	t.Parallel()
 
@@ -1503,7 +1671,7 @@ func TestRun_RejectsDuplicateCanonicalTailAtTip(t *testing.T) {
 	bf := NewBackfill(db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	bf.SetBatchSize(1)
 	err = bf.Run(context.Background())
-	require.ErrorContains(t, err, "metadata index 2, expected 3")
+	require.ErrorContains(t, err, "non-increasing slot 2 after slot 2")
 
 	checkpoint, checkpointErr := db.Metadata().GetBackfillCheckpoint(
 		BackfillPhase,
@@ -1593,15 +1761,16 @@ func TestRun_ConsumedInputRecoveryDependsOnFreshBootstrap(t *testing.T) {
 			}
 
 			now := time.Now()
-			require.NoError(t, db.Metadata().SetBackfillCheckpoint(
-				&models.BackfillCheckpoint{
-					Phase:     BackfillPhase,
-					LastSlot:  tc.lastSlot,
-					StartedAt: now,
-					UpdatedAt: now,
-				},
-				nil,
-			))
+			cp := &models.BackfillCheckpoint{
+				Phase:     BackfillPhase,
+				LastSlot:  tc.lastSlot,
+				StartedAt: now,
+				UpdatedAt: now,
+			}
+			if tc.lastSlot > 0 {
+				bindBackfillCheckpointIdentity(t, db, cp)
+			}
+			require.NoError(t, db.Metadata().SetBackfillCheckpoint(cp, nil))
 
 			var progress []BackfillProgress
 			bf := NewBackfill(
@@ -2716,6 +2885,7 @@ func TestRun_CancelledContext_WithBlocks(t *testing.T) {
 	)
 	assert.ErrorIs(t, err, context.Canceled)
 }
+
 func TestBackfillProcessBlockTxsBatchedStoresDijkstraSubtransaction(
 	t *testing.T,
 ) {

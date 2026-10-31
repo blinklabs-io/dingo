@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/types"
 )
@@ -102,56 +101,39 @@ func (d *Database) BlocksFromSlot(startSlot uint64) *BlobBlockIterator {
 	}
 }
 
-// CanonicalBlocksFromSlot returns an iterator over the primary-chain block
-// index starting at startSlot. Unlike the block-key iterator, an index entry
-// whose block body is absent is reported as an error instead of being skipped.
-func (d *Database) CanonicalBlocksFromSlot(
+// CanonicalBlocksFromIndex returns an iterator over the primary-chain block
+// index starting at startIndex. previousSlot seeds strict slot ordering for a
+// resumed traversal. When endSlot is set, entries above it are audited without
+// fetching their block bodies; iteration still continues through index EOF.
+func (d *Database) CanonicalBlocksFromIndex(
 	ctx context.Context,
-	startSlot uint64,
+	startIndex uint64,
+	previousSlot *uint64,
+	endSlot *uint64,
 ) (*BlobBlockIterator, error) {
-	startIndex := BlockInitialIndex
 	ctx = nonNilContext(ctx)
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	txn := d.BlobTxn(false)
-	err := txn.Do(func(txn *Txn) error {
-		bound, err := ResolveBlockNumberBoundTxn(txn)
-		if err != nil {
-			return err
-		}
-		if !bound.Resolved || startSlot == 0 {
-			return nil
-		}
-		point, err := BlockPointAtOrBeforeSlotBoundedTxn(
-			txn, startSlot, bound.HighestID,
-		)
-		if errors.Is(err, models.ErrBlockNotFound) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		id, err := BlockIDByPointLocalTxn(txn, point)
-		if err != nil {
-			return err
-		}
-		startIndex = id
-		if point.Slot < startSlot {
-			startIndex++
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	return &BlobBlockIterator{
+	ret := &BlobBlockIterator{
 		db:         d,
 		ctx:        ctx,
-		startSlot:  startSlot,
 		canonical:  true,
 		startIndex: startIndex,
-	}, nil
+	}
+	if previousSlot != nil {
+		if *previousSlot == ^uint64(0) {
+			return nil, errors.New("previous canonical slot overflows resume position")
+		}
+		ret.startSlot = *previousSlot + 1
+		ret.lastCanonicalSlot = *previousSlot
+		ret.hasCanonicalSlot = true
+	}
+	if endSlot != nil {
+		ret.endSlot = *endSlot
+		ret.hasEndSlot = true
+	}
+	return ret, nil
 }
 
 // BlocksInRange returns an iterator for a specific slot range [start, end].
@@ -169,6 +151,7 @@ func (d *Database) BlocksInRange(
 
 // BlobBlockResult holds the data returned by BlobBlockIterator.NextRaw.
 type BlobBlockResult struct {
+	Index     uint64
 	Slot      uint64
 	Hash      []byte
 	Cbor      []byte
@@ -221,10 +204,14 @@ func (it *BlobBlockIterator) NextRaw() (*BlobBlockResult, error) {
 			meta types.BlockMetadata
 		)
 		if it.canonical {
+			var yieldBlock bool
 			var err error
-			entry, cbor, meta, err = it.fetchCanonicalBlock(entry)
+			entry, cbor, meta, yieldBlock, err = it.fetchCanonicalBlock(entry)
 			if err != nil {
 				return nil, err
+			}
+			if !yieldBlock {
+				continue
 			}
 		} else {
 			var fetchErr error
@@ -253,19 +240,10 @@ func (it *BlobBlockIterator) NextRaw() (*BlobBlockResult, error) {
 				entry.slot, meta.ID, entry.index,
 			)
 		}
-		if it.canonical {
-			if it.hasCanonicalSlot && entry.slot <= it.lastCanonicalSlot {
-				return nil, fmt.Errorf(
-					"canonical block index %d points to non-increasing slot %d after slot %d",
-					entry.index, entry.slot, it.lastCanonicalSlot,
-				)
-			}
-			it.lastCanonicalSlot = entry.slot
-			it.hasCanonicalSlot = true
-		}
 		it.currentSlot = entry.slot
 
 		return &BlobBlockResult{
+			Index:     entry.index,
 			Slot:      entry.slot,
 			Hash:      entry.hash,
 			Cbor:      cbor,
@@ -375,10 +353,16 @@ func (it *BlobBlockIterator) fetchBatch() error {
 	for blobIter.Seek(seekKey); blobIter.ValidForPrefix(prefix); blobIter.Next() {
 		item := blobIter.Item()
 		if item == nil {
+			if it.canonical {
+				return errors.New("canonical block index iterator returned nil item")
+			}
 			continue
 		}
 		key := item.Key()
 		if key == nil {
+			if it.canonical {
+				return errors.New("canonical block index iterator returned nil key")
+			}
 			continue
 		}
 
@@ -465,64 +449,107 @@ type contextBlobGetter interface {
 	GetContext(context.Context, types.Txn, []byte) ([]byte, error)
 }
 
+type contextLimitedBlobGetter interface {
+	GetContextLimited(
+		context.Context,
+		types.Txn,
+		[]byte,
+		int64,
+	) ([]byte, error)
+}
+
+func getBlobContext(
+	ctx context.Context,
+	store blob.BlobStore,
+	txn types.Txn,
+	key []byte,
+	maxBytes int64,
+) ([]byte, error) {
+	ctx = nonNilContext(ctx)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	var (
+		value []byte
+		err   error
+	)
+	if getter, ok := store.(contextLimitedBlobGetter); ok {
+		value, err = getter.GetContextLimited(ctx, txn, key, maxBytes)
+	} else if getter, ok := store.(contextBlobGetter); ok {
+		value, err = getter.GetContext(ctx, txn, key)
+	} else {
+		value, err = store.Get(txn, key)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return value, nil
+}
+
 // fetchCanonicalBlock reads and validates one canonical index value when its
 // block is requested, then reads the body in the same transaction. Keeping
 // value reads out of fetchBatch prevents a remote store from issuing a full
 // batch of serial GETs before returning the first block.
 func (it *BlobBlockIterator) fetchCanonicalBlock(
 	entry blobBlockEntry,
-) (blobBlockEntry, []byte, types.BlockMetadata, error) {
+) (blobBlockEntry, []byte, types.BlockMetadata, bool, error) {
 	store := it.batchStore
 	if store == nil {
-		return entry, nil, types.BlockMetadata{}, types.ErrBlobStoreUnavailable
+		return entry, nil, types.BlockMetadata{}, false,
+			types.ErrBlobStoreUnavailable
 	}
 	ctx := nonNilContext(it.ctx)
 	if err := ctx.Err(); err != nil {
-		return entry, nil, types.BlockMetadata{}, err
+		return entry, nil, types.BlockMetadata{}, false, err
 	}
 
 	txn := store.NewTransaction(false)
 	defer txn.Rollback() //nolint:errcheck
 
-	var (
-		blockKey []byte
-		err      error
+	blockKey, err := getBlobContext(
+		ctx, store, txn, entry.key, int64(types.BlockBlobKeySize),
 	)
-	if getter, ok := store.(contextBlobGetter); ok {
-		blockKey, err = getter.GetContext(ctx, txn, entry.key)
-	} else {
-		blockKey, err = store.Get(txn, entry.key)
-	}
 	if err != nil {
-		return entry, nil, types.BlockMetadata{}, fmt.Errorf(
+		return entry, nil, types.BlockMetadata{}, false, fmt.Errorf(
 			"reading canonical block index %d: %w", entry.index, err,
 		)
 	}
-	if err := ctx.Err(); err != nil {
-		return entry, nil, types.BlockMetadata{}, err
+	if len(blockKey) != types.BlockBlobKeySize {
+		return entry, nil, types.BlockMetadata{}, false, fmt.Errorf(
+			"canonical block index %d has invalid value length %d",
+			entry.index, len(blockKey),
+		)
 	}
 	point, err := BlockBlobKeyToPoint(blockKey)
 	if err != nil {
-		return entry, nil, types.BlockMetadata{}, fmt.Errorf(
+		return entry, nil, types.BlockMetadata{}, false, fmt.Errorf(
 			"parsing canonical block index %d value: %w",
 			entry.index, err,
 		)
 	}
-	if point.Slot < it.startSlot {
-		return entry, nil, types.BlockMetadata{}, fmt.Errorf(
-			"canonical block index %d points backward to slot %d before start slot %d",
-			entry.index, point.Slot, it.startSlot,
-		)
-	}
 	entry.slot = point.Slot
 	entry.hash = point.Hash
+	if it.hasCanonicalSlot && entry.slot <= it.lastCanonicalSlot {
+		return entry, nil, types.BlockMetadata{}, false, fmt.Errorf(
+			"canonical block index %d points to non-increasing slot %d after slot %d",
+			entry.index, entry.slot, it.lastCanonicalSlot,
+		)
+	}
+	it.lastCanonicalSlot = entry.slot
+	it.hasCanonicalSlot = true
+	if it.hasEndSlot && entry.slot > it.endSlot {
+		return entry, nil, types.BlockMetadata{}, false, nil
+	}
 	cbor, meta, err := store.GetBlock(txn, entry.slot, entry.hash)
 	if err != nil {
-		return entry, nil, types.BlockMetadata{}, fmt.Errorf(
+		return entry, nil, types.BlockMetadata{}, false, fmt.Errorf(
 			"fetching block at slot %d: %w", entry.slot, err,
 		)
 	}
-	return entry, cbor, meta, nil
+	return entry, cbor, meta, true, nil
 }
 
 // fetchBlock retrieves the raw CBOR bytes and metadata for a block.

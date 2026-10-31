@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -56,12 +57,15 @@ type BlobStoreGCS struct {
 
 const maxBlobReadBytes int64 = 256 << 20
 
-func readBlobObject(r io.Reader) ([]byte, error) {
-	return readBlobObjectWithLimit(r, maxBlobReadBytes)
-}
-
 func readBlobObjectWithLimit(r io.Reader, maxBytes int64) ([]byte, error) {
-	data, err := io.ReadAll(io.LimitReader(r, maxBytes+1))
+	if maxBytes < 0 {
+		return nil, fmt.Errorf("invalid maximum blob size %d", maxBytes)
+	}
+	readLimit := maxBytes
+	if readLimit < math.MaxInt64 {
+		readLimit++
+	}
+	data, err := io.ReadAll(io.LimitReader(r, readLimit))
 	if err != nil {
 		return nil, err
 	}
@@ -260,24 +264,10 @@ func stagedDeleted(txn types.Txn, key string) bool {
 	return staged && change.deleted
 }
 
-// stagedValue reports this transaction's staged state for key. deleted is
-// reported separately from value because a staged zero-length write is a real
-// value, not a deletion: collapsing the two on a nil value would make Set of an
-// empty blob read back as missing until commit.
-func (t *gcsTxn) stagedValue(key []byte) (value []byte, deleted, staged bool) {
-	change, ok := t.pending[string(key)]
-	if !ok {
-		return nil, false, false
-	}
-	if change.deleted {
-		return nil, true, true
-	}
-	return append([]byte{}, change.value...), false, true
-}
-
-func (d *BlobStoreGCS) readObject(
+func (d *BlobStoreGCS) readObjectLimited(
 	ctx context.Context,
 	key []byte,
+	maxBytes int64,
 ) ([]byte, error) {
 	r, err := d.object(key).NewReader(ctx)
 	if err != nil {
@@ -287,7 +277,13 @@ func (d *BlobStoreGCS) readObject(
 		return nil, err
 	}
 	defer r.Close()
-	return readBlobObject(r)
+	if r.Attrs.Size > maxBytes {
+		return nil, fmt.Errorf(
+			"blob object exceeds maximum size of %d bytes",
+			maxBytes,
+		)
+	}
+	return readBlobObjectWithLimit(r, maxBytes)
 }
 
 // spoolPriorValue streams key's current object into the compensation log. The
@@ -382,13 +378,35 @@ func (d *BlobStoreGCS) resolveKey(
 	t *gcsTxn,
 	key []byte,
 ) ([]byte, error) {
-	if value, deleted, staged := t.stagedValue(key); staged {
-		if deleted {
+	return d.resolveKeyLimited(ctx, t, key, maxBlobReadBytes)
+}
+
+func (d *BlobStoreGCS) resolveKeyLimited(
+	ctx context.Context,
+	t *gcsTxn,
+	key []byte,
+	maxBytes int64,
+) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if change, staged := t.pending[string(key)]; staged {
+		if change.deleted {
 			return nil, types.ErrBlobKeyNotFound
+		}
+		if int64(len(change.value)) > maxBytes {
+			return nil, fmt.Errorf(
+				"blob object exceeds maximum size of %d bytes",
+				maxBytes,
+			)
+		}
+		value := append([]byte{}, change.value...)
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
 		return value, nil
 	}
-	value, err := d.readObject(ctx, key)
+	value, err := d.readObjectLimited(ctx, key, maxBytes)
 	if err != nil {
 		if errors.Is(err, types.ErrBlobKeyNotFound) {
 			return nil, types.ErrBlobKeyNotFound
@@ -401,6 +419,9 @@ func (d *BlobStoreGCS) resolveKey(
 		)
 		d.logger.Errorf("%v", wrappedErr)
 		return nil, wrappedErr
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	return value, nil
 }
@@ -417,13 +438,27 @@ func (d *BlobStoreGCS) GetContext(
 	txn types.Txn,
 	key []byte,
 ) ([]byte, error) {
+	return d.GetContextLimited(ctx, txn, key, maxBlobReadBytes)
+}
+
+// GetContextLimited retrieves at most maxBytes from GCS within a transaction.
+// The caller may cancel the remote request through ctx.
+func (d *BlobStoreGCS) GetContextLimited(
+	ctx context.Context,
+	txn types.Txn,
+	key []byte,
+	maxBytes int64,
+) ([]byte, error) {
 	if err := d.validateTxn(txn); err != nil {
 		return nil, err
+	}
+	if maxBytes < 0 {
+		return nil, fmt.Errorf("invalid maximum blob size %d", maxBytes)
 	}
 	t := txn.(*gcsTxn) // safe after validateTxn
 	ctx, cancel := d.opContextFrom(ctx)
 	defer cancel()
-	return d.resolveKey(ctx, t, key)
+	return d.resolveKeyLimited(ctx, t, key, maxBytes)
 }
 
 // Set stores a key-value pair in GCS within a transaction
@@ -448,8 +483,8 @@ func (d *BlobStoreGCS) Delete(txn types.Txn, key []byte) error {
 	if err := t.assertWritable(); err != nil {
 		return err
 	}
-	if _, deleted, staged := t.stagedValue(key); staged {
-		if deleted {
+	if change, staged := t.pending[string(key)]; staged {
+		if change.deleted {
 			return types.ErrBlobKeyNotFound
 		}
 		t.stageDelete(key)
@@ -1373,8 +1408,8 @@ func (d *BlobStoreGCS) GetBlockURL(
 	// A signed URL points at a bucket object, so it cannot represent a write
 	// this transaction has staged but not committed. Reject that explicitly
 	// rather than handing back a URL that would 404.
-	if _, deleted, staged := t.stagedValue(key); staged {
-		if deleted {
+	if change, staged := t.pending[string(key)]; staged {
+		if change.deleted {
 			return types.SignedURL{}, types.BlockMetadata{},
 				fmt.Errorf("gcs: block deleted in this transaction: %w",
 					types.ErrBlobKeyNotFound)

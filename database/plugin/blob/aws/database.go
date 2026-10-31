@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -64,12 +65,15 @@ type BlobStoreS3 struct {
 
 const maxBlobReadBytes int64 = 256 << 20
 
-func readBlobBody(r io.Reader) ([]byte, error) {
-	return readBlobBodyWithLimit(r, maxBlobReadBytes)
-}
-
 func readBlobBodyWithLimit(r io.Reader, maxBytes int64) ([]byte, error) {
-	data, err := io.ReadAll(io.LimitReader(r, maxBytes+1))
+	if maxBytes < 0 {
+		return nil, fmt.Errorf("invalid maximum blob size %d", maxBytes)
+	}
+	readLimit := maxBytes
+	if readLimit < math.MaxInt64 {
+		readLimit++
+	}
+	data, err := io.ReadAll(io.LimitReader(r, readLimit))
 	if err != nil {
 		return nil, err
 	}
@@ -254,21 +258,6 @@ func stagedDeleted(txn types.Txn, key string) bool {
 	return staged && change.deleted
 }
 
-// stagedValue reports this transaction's staged state for key. deleted is
-// reported separately from value because a staged zero-length write is a real
-// value, not a deletion: collapsing the two on a nil value would make Set of an
-// empty blob read back as missing until commit.
-func (t *s3Txn) stagedValue(key []byte) (value []byte, deleted, staged bool) {
-	change, ok := t.pending[string(key)]
-	if !ok {
-		return nil, false, false
-	}
-	if change.deleted {
-		return nil, true, true
-	}
-	return append([]byte{}, change.value...), false, true
-}
-
 func (d *BlobStoreS3) deleteObject(ctx context.Context, key string) error {
 	_, err := d.client.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket: aws.String(d.bucket),
@@ -289,17 +278,42 @@ func (d *BlobStoreS3) resolveKey(
 	t *s3Txn,
 	key []byte,
 ) ([]byte, error) {
-	if value, deleted, staged := t.stagedValue(key); staged {
-		if deleted {
+	return d.resolveKeyLimited(ctx, t, key, maxBlobReadBytes)
+}
+
+func (d *BlobStoreS3) resolveKeyLimited(
+	ctx context.Context,
+	t *s3Txn,
+	key []byte,
+	maxBytes int64,
+) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if change, staged := t.pending[string(key)]; staged {
+		if change.deleted {
 			return nil, types.ErrBlobKeyNotFound
+		}
+		if int64(len(change.value)) > maxBytes {
+			return nil, fmt.Errorf(
+				"blob object exceeds maximum size of %d bytes",
+				maxBytes,
+			)
+		}
+		value := append([]byte{}, change.value...)
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
 		return value, nil
 	}
-	data, err := d.getInternal(ctx, string(key))
+	data, err := d.getInternalLimited(ctx, string(key), maxBytes)
 	if err != nil {
 		if isS3NotFound(err) {
 			return nil, types.ErrBlobKeyNotFound
 		}
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	return data, nil
@@ -317,13 +331,27 @@ func (d *BlobStoreS3) GetContext(
 	txn types.Txn,
 	key []byte,
 ) ([]byte, error) {
+	return d.GetContextLimited(ctx, txn, key, maxBlobReadBytes)
+}
+
+// GetContextLimited retrieves at most maxBytes from S3 within a transaction.
+// The caller may cancel the remote request through ctx.
+func (d *BlobStoreS3) GetContextLimited(
+	ctx context.Context,
+	txn types.Txn,
+	key []byte,
+	maxBytes int64,
+) ([]byte, error) {
 	t, err := d.validateTxn(txn)
 	if err != nil {
 		return nil, err
 	}
+	if maxBytes < 0 {
+		return nil, fmt.Errorf("invalid maximum blob size %d", maxBytes)
+	}
 	ctx, cancel := d.opContextFrom(ctx)
 	defer cancel()
-	return d.resolveKey(ctx, t, key)
+	return d.resolveKeyLimited(ctx, t, key, maxBytes)
 }
 
 // Set stores a key-value pair in S3 within a transaction
@@ -348,8 +376,8 @@ func (d *BlobStoreS3) Delete(txn types.Txn, key []byte) error {
 	if err := t.assertWritable(); err != nil {
 		return err
 	}
-	if _, deleted, staged := t.stagedValue(key); staged {
-		if deleted {
+	if change, staged := t.pending[string(key)]; staged {
+		if change.deleted {
 			return types.ErrBlobKeyNotFound
 		}
 		t.stageDelete(key)
@@ -1321,10 +1349,10 @@ func (d *BlobStoreS3) objectExists(
 	return true, nil
 }
 
-// getInternal reads the value at key.
-func (d *BlobStoreS3) getInternal(
+func (d *BlobStoreS3) getInternalLimited(
 	ctx context.Context,
 	key string,
+	maxBytes int64,
 ) ([]byte, error) {
 	out, err := d.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: &d.bucket,
@@ -1337,8 +1365,14 @@ func (d *BlobStoreS3) getInternal(
 		return nil, err
 	}
 	defer out.Body.Close()
+	if out.ContentLength != nil && *out.ContentLength > maxBytes {
+		return nil, fmt.Errorf(
+			"blob object exceeds maximum size of %d bytes",
+			maxBytes,
+		)
+	}
 
-	data, err := readBlobBody(out.Body)
+	data, err := readBlobBodyWithLimit(out.Body, maxBytes)
 	if err != nil {
 		d.logger.Errorf("s3 read %q failed: %v", key, err)
 		return nil, err
@@ -1483,8 +1517,8 @@ func (d *BlobStoreS3) GetBlockURL(
 	// A signed URL points at a bucket object, so it cannot represent a write
 	// this transaction has staged but not committed. Reject that explicitly
 	// rather than handing back a URL that would 404.
-	if _, deleted, staged := t.stagedValue(key); staged {
-		if deleted {
+	if change, staged := t.pending[string(key)]; staged {
+		if change.deleted {
 			return types.SignedURL{}, types.BlockMetadata{},
 				fmt.Errorf("s3: block deleted in this transaction: %w",
 					types.ErrBlobKeyNotFound)

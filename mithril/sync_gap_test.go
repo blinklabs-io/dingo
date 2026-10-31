@@ -1212,14 +1212,14 @@ func TestDeleteBlobBlocksAboveSlot(t *testing.T) {
 
 	require.NoError(t, deleteBlobBlocksAboveSlotExcept(context.Background(), db, 150, nil))
 
-	remaining, err := loadGapBlocksFromBlob(db, 0, 1000)
+	remaining, err := loadGapBlocksFromBlob(t.Context(), db, 0, 1000)
 	require.NoError(t, err)
 	require.Len(t, remaining, 1)
 	assert.Equal(t, uint64(100), remaining[0].Slot)
 
 	// Idempotent re-run is a no-op.
 	require.NoError(t, deleteBlobBlocksAboveSlotExcept(context.Background(), db, 150, nil))
-	remaining, err = loadGapBlocksFromBlob(db, 0, 1000)
+	remaining, err = loadGapBlocksFromBlob(t.Context(), db, 0, 1000)
 	require.NoError(t, err)
 	require.Len(t, remaining, 1)
 	assert.Equal(t, uint64(100), remaining[0].Slot)
@@ -1262,7 +1262,7 @@ func TestDeleteBlobBlocksAboveSlotKeepsBoundaryTip(t *testing.T) {
 
 	require.NoError(t, deleteBlobBlocksAboveSlotExcept(context.Background(), db, 200, nil))
 
-	remaining, err := loadGapBlocksFromBlob(db, 0, 1000)
+	remaining, err := loadGapBlocksFromBlob(t.Context(), db, 0, 1000)
 	require.NoError(t, err)
 	require.Len(t, remaining, 2)
 	assert.Equal(t, uint64(100), remaining[0].Slot)
@@ -1394,6 +1394,7 @@ func TestLoadGapBlocksFromBlob(t *testing.T) {
 	require.NoError(t, db.BlockCreate(expected, nil))
 
 	loaded, err := loadGapBlocksFromBlob(
+		t.Context(),
 		db,
 		expected.Slot,
 		expected.Slot,

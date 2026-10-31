@@ -353,7 +353,8 @@ func deleteBlobBlocksAboveSlotExcept(
 	iter := db.BlocksInRange(slot+1, ^uint64(0))
 	var stale []ocommon.Point
 	for {
-		next, err := iter.NextRaw()
+		// BlocksInRange walks local slot keys and has no context API.
+		next, err := iter.NextRaw() //nolint:contextcheck
 		if err != nil {
 			iter.Close()
 			return fmt.Errorf(
@@ -441,10 +442,14 @@ func deleteBlobBlocksAboveSlotExcept(
 }
 
 func loadGapBlocksFromBlob(
+	ctx context.Context,
 	db *database.Database,
 	startSlot uint64,
 	endSlot uint64,
 ) ([]models.Block, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if startSlot > endSlot {
 		return []models.Block{}, nil
 	}
@@ -452,7 +457,8 @@ func loadGapBlocksFromBlob(
 	defer iter.Close()
 	ret := make([]models.Block, 0)
 	for {
-		next, err := iter.NextRaw()
+		// BlocksInRange walks local slot keys and has no context API.
+		next, err := iter.NextRaw() //nolint:contextcheck
 		if err != nil {
 			return nil, fmt.Errorf(
 				"iterate blob blocks in range [%d,%d]: %w",

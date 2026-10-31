@@ -47,6 +47,46 @@ import (
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/cardano"
 )
 
+func TestSharedSQLStoreBackfillCheckpointIdentityRoundTrip(t *testing.T) {
+	t.Parallel()
+	store, db := newSharedSQLStore(t)
+	lastIndexID := uint64(42)
+	lastBlockHash := bytes.Repeat([]byte{0xab}, 32)
+	checkpoint := &models.BackfillCheckpoint{
+		Phase:         "metadata",
+		LastSlot:      100,
+		LastIndexID:   &lastIndexID,
+		LastBlockHash: lastBlockHash,
+		TotalSlots:    200,
+		StartedAt:     time.UnixMilli(100),
+		UpdatedAt:     time.UnixMilli(200),
+	}
+	require.NoError(t, store.SetBackfillCheckpoint(checkpoint, nil))
+
+	loaded, err := store.GetBackfillCheckpoint("metadata", nil)
+	require.NoError(t, err)
+	require.Equal(t, checkpoint.ID, loaded.ID)
+	require.NotNil(t, loaded.LastIndexID)
+	require.Equal(t, lastIndexID, *loaded.LastIndexID)
+	require.Equal(t, lastBlockHash, loaded.LastBlockHash)
+
+	checkpoint.LastIndexID = nil
+	checkpoint.LastBlockHash = nil
+	require.NoError(t, store.SetBackfillCheckpoint(checkpoint, nil))
+	loaded, err = store.GetBackfillCheckpoint("metadata", nil)
+	require.NoError(t, err)
+	require.Nil(t, loaded.LastIndexID)
+	require.Nil(t, loaded.LastBlockHash)
+
+	_, err = db.Exec(
+		"UPDATE backfill_checkpoint SET last_index_id = -1 WHERE phase = ?",
+		"metadata",
+	)
+	require.NoError(t, err)
+	_, err = store.GetBackfillCheckpoint("metadata", nil)
+	require.ErrorContains(t, err, "last index ID")
+}
+
 func TestSharedSQLStoreAccountParity(t *testing.T) {
 	t.Parallel()
 	store, _ := newSharedSQLStore(t)
