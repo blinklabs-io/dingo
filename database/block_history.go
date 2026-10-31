@@ -26,7 +26,8 @@ import (
 // to be complete.
 //
 // Two things leave gaps. A bootstrap applies no block at or below its anchor,
-// so a range reaching the anchor is never covered. Nonce pruning deletes every
+// so a range reaching the anchor is covered only once the historical backfill
+// has completed and written the rows below it. Nonce pruning deletes every
 // non-checkpoint row below an epoch-start cutoff and keeps each epoch's
 // checkpoint rows, so the epoch holding the earliest non-checkpoint row is
 // where retained history begins, and any row below it belongs to a pruned
@@ -46,11 +47,20 @@ func BlockHistoryRetained(
 		return false, err
 	}
 	var from uint64
+	var backfilled bool
 	if anchored {
-		if startSlot <= anchor {
-			return false, nil
+		if startSlot > anchor {
+			from = anchor + 1
+		} else {
+			covered, err := backfilledBelowAnchor(meta, metaTxn, anchor)
+			if err != nil {
+				return false, err
+			}
+			if !covered {
+				return false, nil
+			}
+			backfilled = true
 		}
-		from = anchor + 1
 	}
 	upper := endSlot
 	first, found, err := meta.GetEarliestNonCheckpointBlockSlot(from, metaTxn)
@@ -71,6 +81,12 @@ func BlockHistoryRetained(
 		if startSlot >= floor {
 			return true, nil
 		}
+		// The backfill writes no row for Byron blocks, so a range reaching
+		// below the first indexed epoch cannot be told apart from one with
+		// no blocks and must not be reported as complete.
+		if backfilled {
+			return false, nil
+		}
 		upper = min(upper, floor-1)
 	}
 	_, below, err := meta.GetBlockHashesInSlotRange(
@@ -80,4 +96,31 @@ func BlockHistoryRetained(
 		return false, err
 	}
 	return below == 0, nil
+}
+
+// backfillPhase mirrors node.BackfillPhase, the checkpoint phase of the
+// historical metadata backfill.
+const backfillPhase = "metadata"
+
+// backfilledBelowAnchor reports whether the historical backfill completed and
+// left block_nonce rows at or below the Mithril anchor. A backfill that ran
+// with nonce rows disabled completes without writing any, so the checkpoint
+// alone is not enough.
+func backfilledBelowAnchor(
+	meta metadata.MetadataStore,
+	metaTxn types.Txn,
+	anchor uint64,
+) (bool, error) {
+	cp, err := meta.GetBackfillCheckpoint(backfillPhase, metaTxn)
+	if err != nil {
+		return false, fmt.Errorf("get backfill checkpoint: %w", err)
+	}
+	if cp == nil || !cp.Completed {
+		return false, nil
+	}
+	first, found, err := meta.GetEarliestNonCheckpointBlockSlot(0, metaTxn)
+	if err != nil {
+		return false, err
+	}
+	return found && first <= anchor, nil
 }

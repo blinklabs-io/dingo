@@ -610,6 +610,60 @@ func TestNodeAdapterBlockListsRefuseUnretainedHistory(t *testing.T) {
 	})
 }
 
+// A Mithril-bootstrapped node applies no block at or below its anchor, so the
+// block lists refuse that range until the historical backfill has completed
+// and left block_nonce rows there.
+func TestNodeAdapterBlockListsAfterBackfillBelowAnchor(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	asc := PaginationParams{Count: 100, Page: 1, Order: PaginationOrderAsc}
+	hexOf := func(b byte) string { return hex.EncodeToString(fill32(b)) }
+	setup := func(t *testing.T, completed bool) *epochFixture {
+		t.Helper()
+		fx := newEpochFixture(t)
+		meta := fx.adapter.ledgerState.Database().Metadata()
+		require.NoError(t, meta.SetSyncState("mithril_ledger_slot", "100000", nil))
+		require.NoError(t, meta.SetBackfillCheckpoint(&models.BackfillCheckpoint{
+			Phase:     "metadata",
+			LastSlot:  100000,
+			Completed: completed,
+		}, nil))
+		return fx
+	}
+
+	t.Run("completed backfill serves history below the anchor", func(t *testing.T) {
+		t.Parallel()
+		fx := setup(t, true)
+		hashes, total, err := fx.adapter.EpochBlocks(ctx, 1, asc)
+		require.NoError(t, err)
+		assert.Equal(t, 3, total)
+		assert.Equal(t, []string{hexOf(0x11), hexOf(0x12), hexOf(0x13)}, hashes)
+	})
+
+	t.Run("epoch before the first indexed block is not retained", func(t *testing.T) {
+		t.Parallel()
+		fx := setup(t, true)
+		_, _, err := fx.adapter.EpochBlocks(ctx, 0, asc)
+		assert.ErrorIs(t, err, ErrHistoryNotRetained)
+	})
+
+	t.Run("interrupted backfill is not retained", func(t *testing.T) {
+		t.Parallel()
+		fx := setup(t, false)
+		_, _, err := fx.adapter.EpochBlocks(ctx, 1, asc)
+		assert.ErrorIs(t, err, ErrHistoryNotRetained)
+	})
+
+	t.Run("backfill that wrote no rows is not retained", func(t *testing.T) {
+		t.Parallel()
+		fx := setup(t, true)
+		_, err := fx.raw.Exec(`DELETE FROM block_nonce WHERE slot <= 100000`)
+		require.NoError(t, err)
+		_, _, err = fx.adapter.EpochBlocks(ctx, 1, asc)
+		assert.ErrorIs(t, err, ErrHistoryNotRetained)
+	})
+}
+
 func TestNodeAdapterEpochStakes(t *testing.T) {
 	t.Parallel()
 	fx := newEpochFixture(t)

@@ -1825,7 +1825,6 @@ func Sync(
 				err,
 			)
 		}
-		bf.DisableNonceComputation()
 		bf.SetProgressFunc(func(p node.BackfillProgress) {
 			cfg.emit(SyncProgress{
 				Phase:          PhaseBackfill,
