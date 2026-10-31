@@ -61,6 +61,7 @@ func TestStartWithoutRegistryLeavesMetricsDisabled(t *testing.T) {
 }
 
 func TestNewRejectsOnDiskCompressionWithoutBlockCache(t *testing.T) {
+	t.Parallel()
 	store, err := New(
 		WithDataDir(t.TempDir()),
 		WithBlockCacheSize(0),
