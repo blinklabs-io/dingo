@@ -485,6 +485,13 @@ func (ls *LedgerState) withStableHeaderVerificationContext(
 // the chain and the published ledger tip has reached its slot. An unpublished
 // tip counts as not applied, so the header is verified.
 func (ls *LedgerState) headerApplied(header ledger.BlockHeader) bool {
+	return ls.headerAppliedWithContext(context.Background(), header)
+}
+
+func (ls *LedgerState) headerAppliedWithContext(
+	ctx context.Context,
+	header ledger.BlockHeader,
+) bool {
 	if ls.chain == nil {
 		return false
 	}
@@ -492,7 +499,7 @@ func (ls *LedgerState) headerApplied(header ledger.BlockHeader) bool {
 	if tip == nil || tip.currentTip.Point.Slot < header.SlotNumber() {
 		return false
 	}
-	return ls.chain.HoldsPoint(context.Background(), ocommon.NewPoint(
+	return ls.chain.HoldsPoint(ctx, ocommon.NewPoint(
 		header.SlotNumber(),
 		header.Hash().Bytes(),
 	))

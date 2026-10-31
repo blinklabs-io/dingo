@@ -364,3 +364,19 @@ func TestAppliedHeaderAdmissionTransitionWaitStopsOnClose(t *testing.T) {
 		"shutdown must not authorize an unsettled header",
 	)
 }
+
+func TestAppliedHeaderAdmissionMembershipHonorsCancellation(t *testing.T) {
+	t.Parallel()
+	f := newAppliedAdmissionFixture(t)
+	f.ls.publishSnapshotsLocked()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	f.ls.ctx = ctx
+	f.pending.flush()
+	admitted := testutil.RequireReceive(t, f.admitted, testutil.AsyncWait,
+		"cancelled membership read must resolve deferred admission")
+	require.False(t, admitted,
+		"a cancelled membership read must not restore expired admission")
+	require.EqualValues(t, 1, f.invalidated.Load(),
+		"cancelled recovery must retain strict rejection")
+}

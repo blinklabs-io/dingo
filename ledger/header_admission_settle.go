@@ -36,13 +36,11 @@ func (ls *LedgerState) pinSettledHeaderAdmission(
 	if generation == 0 || e == nil {
 		return nil, false
 	}
-	var cancel context.CancelFunc
-	defer func() {
-		if cancel != nil {
-			cancel()
-		}
-	}()
-	waitCtx := ctx
+	if release, current := ls.PinHeaderCryptoVerificationGeneration(generation); current {
+		return release, true
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, blockfetchBusyTimeout)
+	defer cancel()
 	for range maxHeaderAdmissionSettleAttempts {
 		settled := ls.txValidationSettledChan()
 		if release, current := ls.PinHeaderCryptoVerificationGeneration(generation); current {
@@ -50,10 +48,11 @@ func (ls *LedgerState) pinSettledHeaderAdmission(
 		}
 		currentGeneration := ls.CurrentHeaderCryptoVerificationGeneration()
 		if currentGeneration != 0 {
-			applied := e.BlockHeader != nil && pointMatches(e.Point, ocommon.NewPoint(
-				e.BlockHeader.SlotNumber(), e.BlockHeader.Hash().Bytes(),
-			)) &&
-				ls.headerApplied(e.BlockHeader)
+			applied := e.BlockHeader != nil &&
+				pointMatches(e.Point, ocommon.NewPoint(
+					e.BlockHeader.SlotNumber(), e.BlockHeader.Hash().Bytes(),
+				)) &&
+				ls.headerAppliedWithContext(waitCtx, e.BlockHeader)
 			release, current := ls.PinHeaderCryptoVerificationGeneration(
 				currentGeneration,
 			)
@@ -69,9 +68,6 @@ func (ls *LedgerState) pinSettledHeaderAdmission(
 				e.PeerTipUpdate.HeaderCryptoVerificationGeneration = currentGeneration
 			}
 			return release, true
-		}
-		if cancel == nil {
-			waitCtx, cancel = context.WithTimeout(ctx, blockfetchBusyTimeout)
 		}
 		select {
 		case <-settled:
