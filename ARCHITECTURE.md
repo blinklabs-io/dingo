@@ -10444,12 +10444,13 @@ extraction budget. Only the bootstrap carries the 24-hour deadline, since a
 stream catch-up of a long gap can outlast it.
 
 Without an `ExpectedSize`, which v2 artifacts cannot supply, a resume request
-for a file already at the server's size is answered 416 and the cached file
-is accepted as complete. A v2 bootstrap therefore removes a fully downloaded
-digests or ancillary archive once it fails extraction or verification, so the
-next run fetches it again instead of re-accepting the same bad bytes. A failed
-download keeps its partial file for resumption, and a cancelled run keeps its
-archive, since neither says anything about the bytes already on disk.
+for a file already at the server's size can be answered 416. The cached file is
+accepted only when the response supplies a matching total size. Otherwise the
+downloader keeps the named cache and performs a bounded full download through
+the same restricted client into a private staging file. It replaces the cache
+only after that transfer succeeds; archive extraction and digest checks still
+admit the downloaded bytes. A failed or cancelled replacement leaves the cache
+available for another attempt.
 The zstd decoder separately defaults to a 512 MiB window and 256 MiB decoder
 memory limit, configurable through `WithZstdLimits`. For a streaming decode
 the smaller of the two bounds the history buffer the decoder allocates from the
