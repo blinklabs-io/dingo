@@ -209,6 +209,8 @@ return no file location. MCP owns the extra connection pool and closes it when
 the API stops; it never borrows or closes the provider's pools. At most four
 calls to the SQL tools, `get_asset_info`, `get_utxos_by_asset`, and
 raw-credential `get_utxos` execute concurrently; excess calls fail immediately.
+`sqlite_query` and `sqlite_explain`, which run caller-supplied SQL, may hold at
+most two of those slots.
 While the metadata `-wal` file exceeds 128 MiB, twice the `journal_size_limit`,
 every MCP tool call and resource read is refused: at that size the WAL has been
 neither reset nor truncated since it grew past the limit, and an open reader
