@@ -85,11 +85,11 @@ func TestResolvePeerSharing(t *testing.T) {
 			want:          false,
 		},
 		{
-			name:          "unset off BP, cardano-node nil defaults off",
+			name:          "unset off BP, cardano-node nil defaults on",
 			dingoNative:   nil,
 			blockProducer: false,
 			cardanoNode:   nil,
-			want:          false,
+			want:          true,
 		},
 	}
 	for _, tc := range tests {

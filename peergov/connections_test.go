@@ -1401,6 +1401,7 @@ func TestLocalChainsyncRestartPreservesFailureHistory(t *testing.T) {
 		event.ChainsyncResyncReasonIngressPromotion,
 		event.ChainsyncResyncReasonPromotedObserverAhead,
 		event.ChainsyncResyncReasonHeaderValidationRecovery,
+		event.ChainsyncResyncReasonHeaderAuthorizationChanged,
 	} {
 		t.Run(reason, func(t *testing.T) {
 			pg := NewPeerGovernor(PeerGovernorConfig{
@@ -1454,6 +1455,10 @@ func TestLocalChainsyncRestartDoesNotMaskPeerFailure(t *testing.T) {
 	t.Parallel()
 	for _, e := range []connmanager.ConnectionClosedEvent{
 		{LocalCloseReason: "unknown reason"},
+		{
+			LocalCloseReason: event.ChainsyncResyncReasonHeaderAuthorizationChanged,
+			Error:            io.EOF,
+		},
 		{LocalCloseReason: event.ChainsyncResyncReasonRollbackExceedsK},
 		{LocalCloseReason: event.
 			ChainsyncResyncReasonDeferredHeaderValidationFailure},

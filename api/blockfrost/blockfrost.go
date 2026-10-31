@@ -59,8 +59,9 @@ type Blockfrost struct {
 	drepAdmission      *requestAdmission
 	// addressSummaryAdmission is shared by every route that scans a whole
 	// address or account history: the base and extended summaries, the
-	// account summary, the address and account totals, the account asset
-	// balances, and the account associated-address pages.
+	// address transaction pages, the account summary, the address and account
+	// totals, the account asset balances, and the account associated-address
+	// pages.
 	addressSummaryAdmission *requestAdmission
 	// chainSummaryAdmission is shared by the routes that aggregate over the
 	// whole chain or a whole epoch: the network supply and stake summary, the

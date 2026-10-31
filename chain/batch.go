@@ -64,11 +64,13 @@ func (c *Chain) restoreBatchBlocksLocked(snapshot chainBatchSnapshot) {
 	if !c.persistent {
 		c.blocks = snapshot.blocks
 	}
+	c.withdrawalGeneration.Add(1)
 }
 
 func (c *Chain) restoreBatchHeadersLocked(snapshot chainBatchSnapshot) {
 	c.headerMutationGeneration = snapshot.headerGeneration
 	c.setHeadersLocked(snapshot.headers)
+	c.withdrawalGeneration.Add(1)
 }
 
 // The caller holds the batch-commit barrier. A commit failure must not

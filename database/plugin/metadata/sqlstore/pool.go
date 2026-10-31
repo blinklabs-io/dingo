@@ -1212,6 +1212,17 @@ WHERE pool_key_hash = ?`,
 	return decodeOpCertSequence(sequence.Int64), true, nil
 }
 
+// latestPoolOpCertSequenceAfterSQL is the statement LatestPoolOpCertSequenceAfter
+// issues. MAX(sequence) stays the only aggregate so SQLite can answer it from
+// idx_pool_opcert_sequence_pool_sequence; a NULL result means no matching row.
+// The unary plus on slot has the same purpose as in
+// latestPoolOpCertSequenceAtOrBeforeSQL: without planner statistics SQLite
+// otherwise takes the pool_slot range, which visits every row after the slot.
+const latestPoolOpCertSequenceAfterSQL = `-- name: GetLatestPoolOpCertSequenceAfter :one
+SELECT MAX(sequence)
+FROM pool_opcert_sequence
+WHERE pool_key_hash = ? AND +slot > ?`
+
 // LatestPoolOpCertSequenceAfter returns the highest sequence recorded for a
 // pool after afterSlot. A Mithril-restored ledger uses this to distinguish
 // replayed counter history from rows imported at its trust boundary.
@@ -1224,19 +1235,15 @@ func (s *Store) LatestPoolOpCertSequenceAfter(
 	if err != nil {
 		return 0, false, err
 	}
-	var sequence int64
-	var count int64
-	err = db.QueryRowContext(ctx, `-- name: GetLatestPoolOpCertSequenceAfter :one
-SELECT COALESCE(MAX(sequence), 0), COUNT(*)
-FROM pool_opcert_sequence
-WHERE pool_key_hash = ? AND slot > ?`,
+	var sequence sql.NullInt64
+	err = db.QueryRowContext(ctx, s.dialect.Rebind(latestPoolOpCertSequenceAfterSQL),
 		poolKeyHash.Bytes(),
 		afterSlot,
-	).Scan(&sequence, &count)
-	if err != nil || count == 0 {
+	).Scan(&sequence)
+	if err != nil || !sequence.Valid {
 		return 0, false, err
 	}
-	return decodeOpCertSequence(sequence), true, nil
+	return decodeOpCertSequence(sequence.Int64), true, nil
 }
 
 // PoolOpCertSequencesExistAtSlot reports whether any pool_opcert_sequence row
@@ -1270,6 +1277,21 @@ LIMIT 1`,
 	return true, nil
 }
 
+// latestPoolOpCertSequenceAtOrBeforeSQL is the statement LatestPoolOpCertSequenceAtOrBefore
+// issues. MAX(sequence) stays the only aggregate so SQLite can answer it from
+// idx_pool_opcert_sequence_pool_sequence; a NULL result means no matching row.
+// The unary plus on slot keeps the planner off the pool_slot index, whose
+// range scan visits every earlier row of the pool before MAX can be taken,
+// and on the sequence index, which descends from the pool's highest sequence
+// and stops at the first row inside the slot bound. Counters rise with slot
+// on a valid chain, so that costs one row per later block of the pool: cheap
+// for the near-tip slots callers pass, linear for a slot deep in history.
+// It is a no-op on every dialect's semantics.
+const latestPoolOpCertSequenceAtOrBeforeSQL = `-- name: GetLatestPoolOpCertSequenceAtOrBefore :one
+SELECT MAX(sequence)
+FROM pool_opcert_sequence
+WHERE pool_key_hash = ? AND +slot <= ?`
+
 func (s *Store) LatestPoolOpCertSequenceAtOrBefore(
 	poolKeyHash lcommon.PoolKeyHash,
 	slot uint64,
@@ -1283,20 +1305,28 @@ func (s *Store) LatestPoolOpCertSequenceAtOrBefore(
 	if err != nil {
 		return 0, false, err
 	}
-	var sequence int64
-	var count int64
-	err = db.QueryRowContext(ctx, `-- name: GetLatestPoolOpCertSequenceAtOrBefore :one
-SELECT COALESCE(MAX(sequence), 0), COUNT(*)
-FROM pool_opcert_sequence
-WHERE pool_key_hash = ? AND slot <= ?`,
+	var sequence sql.NullInt64
+	err = db.QueryRowContext(ctx, s.dialect.Rebind(latestPoolOpCertSequenceAtOrBeforeSQL),
 		poolKeyHash.Bytes(),
 		slotValue,
-	).Scan(&sequence, &count)
-	if err != nil || count == 0 {
+	).Scan(&sequence)
+	if err != nil || !sequence.Valid {
 		return 0, false, err
 	}
-	return decodeOpCertSequence(sequence), true, nil
+	return decodeOpCertSequence(sequence.Int64), true, nil
 }
+
+// latestPoolOpCertSequenceInRangeSQL is the statement LatestPoolOpCertSequenceInRange
+// issues. MAX(sequence) stays the only aggregate so SQLite can answer it from
+// idx_pool_opcert_sequence_pool_sequence; a NULL result means no matching row.
+// The unary plus on slot has the same purpose as in
+// latestPoolOpCertSequenceAtOrBeforeSQL: a Mithril-restored ledger passes its
+// boundary as the lower bound, so the pool_slot range would visit every row
+// since the boundary.
+const latestPoolOpCertSequenceInRangeSQL = `-- name: GetLatestPoolOpCertSequenceInRange :one
+SELECT MAX(sequence)
+FROM pool_opcert_sequence
+WHERE pool_key_hash = ? AND +slot >= ? AND +slot <= ?`
 
 func (s *Store) LatestPoolOpCertSequenceInRange(
 	poolKeyHash lcommon.PoolKeyHash,
@@ -1319,20 +1349,16 @@ func (s *Store) LatestPoolOpCertSequenceInRange(
 	if err != nil {
 		return 0, false, err
 	}
-	var sequence int64
-	var count int64
-	err = db.QueryRowContext(ctx, `-- name: GetLatestPoolOpCertSequenceInRange :one
-SELECT COALESCE(MAX(sequence), 0), COUNT(*)
-FROM pool_opcert_sequence
-WHERE pool_key_hash = ? AND slot >= ? AND slot <= ?`,
+	var sequence sql.NullInt64
+	err = db.QueryRowContext(ctx, s.dialect.Rebind(latestPoolOpCertSequenceInRangeSQL),
 		poolKeyHash.Bytes(),
 		startValue,
 		endValue,
-	).Scan(&sequence, &count)
-	if err != nil || count == 0 {
+	).Scan(&sequence)
+	if err != nil || !sequence.Valid {
 		return 0, false, err
 	}
-	return decodeOpCertSequence(sequence), true, nil
+	return decodeOpCertSequence(sequence.Int64), true, nil
 }
 
 // LatestPoolOpCertSequencesSQL is the statement LatestPoolOpCertSequences

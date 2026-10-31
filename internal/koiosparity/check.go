@@ -108,7 +108,7 @@ func Check(
 ) (*CheckResult, error) {
 	// Check works entirely from the cache and never constructs a
 	// KoiosClient (unlike Fetch), so nothing else validates cfg.Network —
-	// without this, an unsupported network (e.g. "mainnet") would reach
+	// without this, an unsupported network (e.g. "sanchonet") would reach
 	// compareEpochAccounts/StakeAddressFromCredential unrejected. See
 	// validateKoiosNetwork's doc comment.
 	if err := validateKoiosNetwork(cfg.Network); err != nil {
@@ -1316,9 +1316,13 @@ func compareEpochAccounts(
 		}}, koiosRows, true
 	}
 
-	dingoRows, credentialErrs, poolErrs := creditedAccountRewards(dingoOutputs)
+	dingoRows, credentialErrs, poolErrs := creditedAccountRewards(
+		network,
+		dingoOutputs,
+	)
 	for _, refund := range refunds.Refunds {
 		addr, err := StakeAddressFromCredential(
+			network,
 			refund.StakingKey,
 			refund.CredentialTag,
 		)
@@ -1445,11 +1449,13 @@ func compareEpochAccounts(
 // one slice made a corrupt pool_key_hash read as a stake-address problem
 // during triage.
 func creditedAccountRewards(
+	network string,
 	outputs []*models.RewardAccountOutput,
 ) (rows []DingoAccountReward, credentialErrs, poolErrs []error) {
 	rows = make([]DingoAccountReward, 0, len(outputs))
 	for _, row := range outputs {
 		addr, err := StakeAddressFromCredential(
+			network,
 			row.StakingKey,
 			row.CredentialTag,
 		)
@@ -1597,8 +1603,8 @@ func accountLifecycleMismatches(
 	// underlying rows) — only previousOutputs has no other reporting path,
 	// since nothing else in this package ever decodes the previous stake
 	// epoch's addresses.
-	prevSet, prevDecodeErrs := dingoRewardAddressSet(previousOutputs)
-	currSet, currDecodeErrs := dingoRewardAddressSet(currentOutputs)
+	prevSet, prevDecodeErrs := dingoRewardAddressSet(network, previousOutputs)
+	currSet, currDecodeErrs := dingoRewardAddressSet(network, currentOutputs)
 	if prevDecodeErrs > 0 {
 		out = append(out, CheckMismatch{
 			Network: network,
@@ -1672,11 +1678,16 @@ func accountLifecycleMismatches(
 // mismatch when there's no other reporting path for this specific input
 // (see accountLifecycleMismatches's call site).
 func dingoRewardAddressSet(
+	network string,
 	outputs []*models.RewardAccountOutput,
 ) (set map[string]bool, decodeErrs int) {
 	set = make(map[string]bool, len(outputs))
 	for _, o := range outputs {
-		addr, err := StakeAddressFromCredential(o.StakingKey, o.CredentialTag)
+		addr, err := StakeAddressFromCredential(
+			network,
+			o.StakingKey,
+			o.CredentialTag,
+		)
 		if err != nil {
 			decodeErrs++
 			continue

@@ -877,6 +877,44 @@ func TestPeerGovernor_PeerSharing(t *testing.T) {
 	assert.Len(t, peers, 3) // 2 original + 1 new
 }
 
+// While bootstrap peers are in use the node is in a sensitive state and must
+// not learn peers by peer sharing; only after bootstrap exit may it gossip.
+func TestPeerGovernor_PeerSharingSuppressedDuringBootstrap(t *testing.T) {
+	peerRequestCount := 0
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:     newMockEventBus(),
+		PromRegistry: prometheus.NewRegistry(),
+		PeerRequestFunc: func(peer *Peer) []string {
+			peerRequestCount++
+			return []string{"44.0.0.9:3001"}
+		},
+	})
+
+	require.NoError(
+		t,
+		pg.AddPeer("44.0.0.1:3001", PeerSourceTopologyBootstrapPeer),
+	)
+	pg.mu.Lock()
+	pg.peers[0].State = PeerStateHot
+	pg.peers[0].Connection = &PeerConnection{IsClient: true}
+	pg.mu.Unlock()
+
+	pg.reconcile(t.Context())
+
+	assert.Equal(t, 0, peerRequestCount)
+
+	// A fresh exit holds off bootstrap recovery for its cooldown.
+	pg.mu.Lock()
+	pg.bootstrapExited = true
+	pg.lastBootstrapExit = time.Now()
+	pg.mu.Unlock()
+
+	pg.reconcile(t.Context())
+
+	assert.Equal(t, 1, peerRequestCount)
+}
+
 func TestPeerGovernor_SetPeerHotByConnId(t *testing.T) {
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),

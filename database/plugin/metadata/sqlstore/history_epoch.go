@@ -19,6 +19,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math/big"
 	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -39,64 +40,56 @@ func orderDirectionFromString(order string) string {
 // collateral return of a phase-2 invalid one. A Leios closure transaction is
 // stored at its certifying block's slot but counts at the slot it executes
 // in (leios_transaction_context), as SumTransactionFeesInSlotRange counts its
-// fee, so an epoch's outputs and fees cover the same transactions.
+// fee, so an epoch's outputs and fees cover the same transactions. Output flow
+// has no supply bound: the same lovelace can be transferred repeatedly.
 func (s *Store) SumTransactionOutputsInSlotRange(
 	startSlot uint64,
 	endSlot uint64,
 	txn types.Txn,
-) (uint64, error) {
+) (*big.Int, error) {
 	if endSlot < startSlot {
-		return 0, nil
+		return new(big.Int), nil
 	}
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	start, err := checkedInt64(startSlot)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	end, err := checkedInt64(endSlot)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	var total uint64
+	total := new(big.Int)
 	for _, query := range []string{
-		`SELECT COALESCE(SUM(CAST(u.amount AS ` + s.pendingCreditCastType() + `)), 0)
+		`-- name: SumValidTransactionOutputsInSlotRange :one
+SELECT ` + s.wideSumExpr("u.amount") + `
 FROM utxo u
 JOIN "transaction" tx ON tx.id = u.transaction_id
 LEFT JOIN leios_transaction_context lc ON lc.transaction_id = tx.id
 WHERE COALESCE(lc.slot, tx.slot) >= ? AND COALESCE(lc.slot, tx.slot) <= ?
-  AND tx.valid = TRUE`,
-		`SELECT COALESCE(SUM(CAST(u.amount AS ` + s.pendingCreditCastType() + `)), 0)
+ AND tx.valid = TRUE`,
+		`-- name: SumCollateralReturnsInSlotRange :one
+SELECT ` + s.wideSumExpr("u.amount") + `
 FROM utxo u
 JOIN "transaction" tx ON tx.id = u.collateral_return_for_tx_id
 LEFT JOIN leios_transaction_context lc ON lc.transaction_id = tx.id
 WHERE COALESCE(lc.slot, tx.slot) >= ? AND COALESCE(lc.slot, tx.slot) <= ?
-  AND tx.valid = FALSE`,
+ AND tx.valid = FALSE`,
 	} {
-		var raw any
-		if err := db.QueryRowContext(ctx, query, start, end).Scan(&raw); err != nil {
-			return 0, fmt.Errorf(
+		value, err := s.sumWide(ctx, db, query, start, end)
+		if err != nil {
+			return nil, fmt.Errorf(
 				"sum transaction outputs in slot range: %w",
 				err,
 			)
 		}
-		text, err := decimalAmountText(raw)
-		if err != nil {
-			return 0, err
+		if value.Sign() < 0 {
+			return nil, errors.New("transaction output sum is negative")
 		}
-		if text == "" {
-			continue
-		}
-		value, err := parseUint64("transaction output sum", text)
-		if err != nil {
-			return 0, err
-		}
-		if ^uint64(0)-total < value {
-			return 0, errors.New("transaction output sum overflow")
-		}
-		total += value
+		total.Add(total, value)
 	}
 	return total, nil
 }

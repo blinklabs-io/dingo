@@ -96,13 +96,15 @@ func (ls *LedgerState) flushQueuedBlockfetchAfterWait(
 	if count == 0 || !pointMatches(head, flush.head) {
 		return
 	}
+	// With no selected peer (after selected-to-none), fetch from the pipeline
+	// owner, as threshold dispatch and the stalled-queue path do: the queued
+	// headers already passed the ingress gates, and this deadline is one-shot,
+	// so returning here strands a quiet queue below the batch threshold.
 	conn := ls.headerPipelineConnId
 	if ls.config.GetActiveConnectionFunc != nil {
-		active := ls.config.GetActiveConnectionFunc()
-		if active == nil {
-			return
+		if active := ls.config.GetActiveConnectionFunc(); active != nil {
+			conn = *active
 		}
-		conn = *active
 	}
 	if connIdKey(conn) == "" || !ls.isConnectionLive(conn) {
 		return

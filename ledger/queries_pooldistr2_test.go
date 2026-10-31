@@ -876,6 +876,15 @@ func TestQueryShelleyStakeDistribution2_ViaGetCBORBytes(t *testing.T) {
 	t.Parallel()
 
 	ls := seedPoolDistr2SinglePool(t)
+	seedLiveStakeFixture(
+		t,
+		ls.db,
+		bytes.Repeat([]byte{0x11}, 28),
+		bytes.Repeat([]byte{0xAA}, 32),
+		3_000_000,
+		1,
+	)
+	seedLiveTip(t, ls)
 	query := &olocalstatequery.BlockQuery{
 		Query: &olocalstatequery.ShelleyQuery{
 			Query: &olocalstatequery.ShelleyCborQuery{
