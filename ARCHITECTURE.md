@@ -1113,6 +1113,10 @@ The inbound TxSubmission server applies a per-peer token bucket to the
 transaction IDs a peer offers before requesting any bodies. `Node` sets it
 through `defaultMaxTxSubmissionsPerSecond` in `newOuroborosConfig`; the
 `ouroboros` package itself leaves the limiter off when the setting is zero.
+The `TxSubmissionLogicVersion` compatibility setting defaults to
+`TxSubmissionLogicV1`. Dingo implements that per-peer inbound strategy and
+rejects `TxSubmissionLogicV2`, whose shared multi-peer coordination is not
+implemented.
 
 On the client path, BlockFetch events carry fully decoded blocks. The ledger
 subscriber therefore buffers one eight-block chain-store commit batch; when it
