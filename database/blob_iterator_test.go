@@ -15,10 +15,12 @@
 package database
 
 import (
+	"context"
 	"crypto/rand"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -85,6 +87,73 @@ func TestBlobBlockIterator_EmptyDatabase(t *testing.T) {
 	result, err := iter.NextRaw()
 	require.NoError(t, err)
 	assert.Nil(t, result, "result should be nil for empty database")
+}
+
+func TestCanonicalBlobBlockIterator_SparseIndexesAndSlots(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	blocks := []models.Block{
+		{
+			ID:   BlockInitialIndex,
+			Slot: 10,
+			Hash: randomHash(t),
+			Cbor: []byte{0x82, 0x01},
+			Type: 1,
+		},
+		{
+			ID:   1_000_000,
+			Slot: 30,
+			Hash: randomHash(t),
+			Cbor: []byte{0x82, 0x02},
+			Type: 1,
+		},
+	}
+	for _, block := range blocks {
+		require.NoError(t, db.BlockCreate(block, nil))
+	}
+
+	iter, err := db.CanonicalBlocksFromSlot(context.Background(), 20)
+	require.NoError(t, err)
+	defer iter.Close()
+
+	result, err := iter.NextRaw()
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, blocks[1].Slot, result.Slot)
+	assert.Equal(t, blocks[1].Hash, result.Hash)
+
+	result, err = iter.NextRaw()
+	require.NoError(t, err)
+	assert.Nil(t, result)
+}
+
+func TestCanonicalBlobBlockIterator_PreservesHistoryExpiry(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	block := models.Block{
+		ID:   BlockInitialIndex,
+		Slot: 10,
+		Hash: randomHash(t),
+		Cbor: []byte{0x82, 0x01},
+		Type: 1,
+	}
+	require.NoError(t, db.BlockCreate(block, nil))
+	txn := db.BlobTxn(true)
+	require.NoError(t, txn.Do(func(txn *Txn) error {
+		return txn.BlobStore().TombstoneBlock(
+			txn.Blob(), block.Slot, block.Hash,
+		)
+	}))
+
+	iter, err := db.CanonicalBlocksFromSlot(context.Background(), 0)
+	require.NoError(t, err)
+	defer iter.Close()
+
+	result, err := iter.NextRaw()
+	assert.Nil(t, result)
+	require.ErrorIs(t, err, types.ErrHistoryExpired)
 }
 
 // collectIterSlots drains a BlobBlockIterator via NextRaw and returns

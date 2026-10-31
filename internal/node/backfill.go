@@ -1030,7 +1030,10 @@ func (b *Backfill) Run(ctx context.Context) error {
 		}
 	}
 
-	it := b.db.BlocksFromSlot(startSlot)
+	it, err := b.db.CanonicalBlocksFromSlot(ctx, startSlot)
+	if err != nil {
+		return fmt.Errorf("opening canonical block iterator: %w", err)
+	}
 	defer it.Close()
 
 	// Keep one accumulator across multiple blocks. Queued rows can be drained

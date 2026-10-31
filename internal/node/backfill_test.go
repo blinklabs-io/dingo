@@ -1346,6 +1346,37 @@ func TestRun_EndSlotLeavesLaterBlocksForLedgerReplay(t *testing.T) {
 	require.Equal(t, uint64(1), checkpoint.TotalSlots)
 }
 
+func TestRun_RejectsMissingCanonicalBlockBody(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	addValidBackfillBlocks(t, db, 3)
+
+	middle, err := db.BlockByIndex(database.BlockInitialIndex+1, nil)
+	require.NoError(t, err)
+	txn := db.BlobTxn(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		return txn.BlobStore().Delete(
+			txn.Blob(),
+			types.BlockBlobKey(middle.Slot, middle.Hash),
+		)
+	}))
+
+	bf := NewBackfill(db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	err = bf.Run(context.Background())
+	require.ErrorIs(t, err, types.ErrBlobKeyNotFound)
+	require.ErrorContains(t, err, fmt.Sprintf("slot %d", middle.Slot))
+
+	checkpoint, checkpointErr := db.Metadata().GetBackfillCheckpoint(
+		BackfillPhase,
+		nil,
+	)
+	require.NoError(t, checkpointErr)
+	require.NotNil(t, checkpoint)
+	assert.False(t, checkpoint.Completed)
+	assert.Zero(t, checkpoint.LastSlot)
+}
+
 // TestRun_ResumeStopsAtRecordedMithrilAnchor covers a Mithril API backfill
 // resumed by `dingo serve`, which calls Run without SetEndSlot. Blocks after
 // the recorded ledger anchor belong to ledger replay: a historical pass over

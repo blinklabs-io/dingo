@@ -3377,6 +3377,15 @@ point from the old store snapshot, while its committed prefix remains held.
 Pruning content preserves membership when the exact metadata/index pair stays
 canonical. Ephemeral and in-memory chains retain their own index checks.
 
+Historical API metadata backfill also traverses the active `bi` index rather
+than discovering blocks from the `bp` body-key namespace. Empty slots require
+no special handling, and sparse imported index IDs are valid. Every indexed
+point in the replay range must resolve to a block body whose metadata ID
+matches the index key. A missing body, an expired-history tombstone, or a
+mismatched index stops backfill before later blocks are applied; the current
+transaction is rolled back and the checkpoint remains at the last committed
+block.
+
 `Database.CountBlocksAndOldestSlot` (`database/block_inventory.go`) reads the retained block count and oldest retained slot from the checksummed `dingo:block-inventory:v1` blob record. `database.New` creates the record and an ordered retained-block membership index before the database becomes available, scanning legacy block content once only when the record is absent. Block insert, delete, history-expiry tombstone, rollback, truncate, and orphan cleanup paths update both in the same blob transaction as the block mutation. Stores without optimistic write-conflict detection serialize block-inventory mutations before opening backend transactions; conflict-detecting stores rely on backend write conflicts to prevent lost updates. Deleting or tombstoning the current oldest block seeks the first membership key to resolve its successor, including another retained block at the same slot, without walking block content. Bark's `GetDatabaseInfo` reads this record and never walks the block keyspace in request handling.
 
 `DOFF` references are 52 bytes:

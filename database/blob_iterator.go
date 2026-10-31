@@ -16,10 +16,13 @@ package database
 
 import (
 	"bytes"
+	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"sync"
 
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/types"
 )
@@ -41,9 +44,10 @@ const (
 
 // blobBlockEntry holds a block key discovered during batch scanning.
 type blobBlockEntry struct {
-	key  []byte
-	slot uint64
-	hash []byte
+	key   []byte
+	slot  uint64
+	hash  []byte
+	index uint64
 }
 
 // BlobBlockIterator iterates blocks from the blob store in slot order.
@@ -58,6 +62,8 @@ type BlobBlockIterator struct {
 	startSlot  uint64
 	endSlot    uint64
 	hasEndSlot bool
+	canonical  bool
+	startIndex uint64
 
 	// internal state
 	mu          sync.Mutex
@@ -91,6 +97,57 @@ func (d *Database) BlocksFromSlot(startSlot uint64) *BlobBlockIterator {
 		db:        d,
 		startSlot: startSlot,
 	}
+}
+
+// CanonicalBlocksFromSlot returns an iterator over the primary-chain block
+// index starting at startSlot. Unlike the block-key iterator, an index entry
+// whose block body is absent is reported as an error instead of being skipped.
+func (d *Database) CanonicalBlocksFromSlot(
+	ctx context.Context,
+	startSlot uint64,
+) (*BlobBlockIterator, error) {
+	startIndex := BlockInitialIndex
+	ctx = nonNilContext(ctx)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	txn := d.BlobTxn(false)
+	err := txn.Do(func(txn *Txn) error {
+		bound, err := ResolveBlockNumberBoundTxn(txn)
+		if err != nil {
+			return err
+		}
+		if !bound.Resolved || startSlot == 0 {
+			return nil
+		}
+		point, err := BlockPointAtOrBeforeSlotBoundedTxn(
+			txn, startSlot, bound.HighestID,
+		)
+		if errors.Is(err, models.ErrBlockNotFound) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		id, err := BlockIDByPointLocalTxn(txn, point)
+		if err != nil {
+			return err
+		}
+		startIndex = id
+		if point.Slot < startSlot {
+			startIndex++
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &BlobBlockIterator{
+		db:         d,
+		startSlot:  startSlot,
+		canonical:  true,
+		startIndex: startIndex,
+	}, nil
 }
 
 // BlocksInRange returns an iterator for a specific slot range [start, end].
@@ -157,7 +214,7 @@ func (it *BlobBlockIterator) NextRaw() (*BlobBlockResult, error) {
 			entry.hash,
 		)
 		if fetchErr != nil {
-			if errors.Is(fetchErr, types.ErrBlobKeyNotFound) {
+			if !it.canonical && errors.Is(fetchErr, types.ErrBlobKeyNotFound) {
 				it.db.logger.Warn(
 					"blob iterator: skipping block with missing CBOR",
 					"slot", entry.slot,
@@ -168,6 +225,12 @@ func (it *BlobBlockIterator) NextRaw() (*BlobBlockResult, error) {
 			return nil, fmt.Errorf(
 				"fetching block at slot %d: %w",
 				entry.slot, fetchErr,
+			)
+		}
+		if it.canonical && meta.ID != entry.index {
+			return nil, fmt.Errorf(
+				"canonical block at slot %d has metadata index %d, expected %d",
+				entry.slot, meta.ID, entry.index,
 			)
 		}
 
@@ -242,9 +305,11 @@ func (it *BlobBlockIterator) fetchBatch() error {
 	txn := store.NewTransaction(false)
 	defer txn.Rollback() //nolint:errcheck
 
-	iterOpts := types.BlobIteratorOptions{
-		Prefix: []byte(types.BlockBlobKeyPrefix),
+	prefix := []byte(types.BlockBlobKeyPrefix)
+	if it.canonical {
+		prefix = []byte(types.BlockBlobIndexKeyPrefix)
 	}
+	iterOpts := types.BlobIteratorOptions{Prefix: prefix}
 	blobIter := store.NewIterator(txn, iterOpts)
 	if blobIter == nil {
 		return errors.New("blob iterator is nil")
@@ -257,8 +322,12 @@ func (it *BlobBlockIterator) fetchBatch() error {
 		// Seek past the last key we processed
 		seekKey = it.resumeKey
 	} else {
-		// Start from the configured start slot
-		seekKey = buildSlotSeekKey(it.startSlot)
+		if it.canonical {
+			seekKey = types.BlockBlobIndexKey(it.startIndex)
+		} else {
+			// Start from the configured start slot
+			seekKey = buildSlotSeekKey(it.startSlot)
+		}
 	}
 
 	// Build end prefix for range limiting.
@@ -270,8 +339,6 @@ func (it *BlobBlockIterator) fetchBatch() error {
 	}
 
 	batch := make([]blobBlockEntry, 0, blobIteratorBatchSize)
-	prefix := []byte(types.BlockBlobKeyPrefix)
-
 	resuming := it.resumeKey != nil
 
 	for blobIter.Seek(seekKey); blobIter.ValidForPrefix(prefix); blobIter.Next() {
@@ -284,9 +351,24 @@ func (it *BlobBlockIterator) fetchBatch() error {
 			continue
 		}
 
-		// Skip metadata keys
-		if bytes.HasSuffix(key, []byte(types.BlockBlobMetadataKeySuffix)) {
-			continue
+		var blockKey []byte
+		var blockIndex uint64
+		if it.canonical {
+			if len(key) != len(prefix)+8 {
+				return fmt.Errorf("invalid canonical block index key: %x", key)
+			}
+			blockIndex = binary.BigEndian.Uint64(key[len(prefix):])
+			var err error
+			blockKey, err = item.ValueCopy(nil)
+			if err != nil {
+				return fmt.Errorf("reading canonical block index %d: %w", blockIndex, err)
+			}
+		} else {
+			// Skip metadata keys
+			if bytes.HasSuffix(key, []byte(types.BlockBlobMetadataKeySuffix)) {
+				continue
+			}
+			blockKey = key
 		}
 
 		// When resuming, skip the exact key we left off at.
@@ -301,24 +383,37 @@ func (it *BlobBlockIterator) fetchBatch() error {
 		}
 
 		// Check end range
-		if endPrefix != nil && bytes.Compare(key, endPrefix) >= 0 {
+		if !it.canonical && endPrefix != nil && bytes.Compare(key, endPrefix) >= 0 {
 			break
 		}
 
 		// Parse slot and hash from key
-		point, parseErr := BlockBlobKeyToPoint(key)
+		point, parseErr := BlockBlobKeyToPoint(blockKey)
 		if parseErr != nil {
+			if it.canonical {
+				return fmt.Errorf(
+					"parsing canonical block index %d value: %w",
+					blockIndex, parseErr,
+				)
+			}
 			it.db.logger.Warn(
 				"blob iterator: skipping unparseable key",
 				"error", parseErr,
 			)
 			continue
 		}
+		if point.Slot < it.startSlot {
+			continue
+		}
+		if it.hasEndSlot && point.Slot > it.endSlot {
+			break
+		}
 
 		entry := blobBlockEntry{
-			key:  make([]byte, len(key)),
-			slot: point.Slot,
-			hash: point.Hash,
+			key:   make([]byte, len(key)),
+			slot:  point.Slot,
+			hash:  point.Hash,
+			index: blockIndex,
 		}
 		copy(entry.key, key)
 
