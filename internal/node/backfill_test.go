@@ -1436,6 +1436,70 @@ func TestRun_ResumeRejectsBackwardCanonicalBlockMapping(t *testing.T) {
 	assert.Equal(t, uint64(1), checkpoint.LastSlot)
 }
 
+func TestRun_RejectsCanonicalBlockBeyondTip(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	blocks, err := testfixtures.GenerateConwayChainAt(1, 1, 5)
+	require.NoError(t, err)
+	for _, i := range []int{0, 4, 2} {
+		block := blocks[i]
+		require.NoError(t, db.BlockCreate(models.Block{
+			Slot:   block.SlotNumber(),
+			Hash:   block.Hash().Bytes(),
+			Number: block.BlockNumber(),
+			Cbor:   block.Cbor(),
+			Type:   uint(block.Type()),
+		}, nil))
+	}
+
+	bf := NewBackfill(db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	bf.SetBatchSize(1)
+	err = bf.Run(context.Background())
+	require.ErrorContains(
+		t, err, "canonical block at slot 5 exceeds backfill tip slot 3",
+	)
+
+	checkpoint, checkpointErr := db.Metadata().GetBackfillCheckpoint(
+		BackfillPhase,
+		nil,
+	)
+	require.NoError(t, checkpointErr)
+	require.NotNil(t, checkpoint)
+	assert.False(t, checkpoint.Completed)
+	assert.Equal(t, uint64(1), checkpoint.LastSlot)
+	assert.Equal(t, uint64(3), checkpoint.TotalSlots)
+}
+
+func TestRun_EndSlotBetweenCanonicalBlocksCompletes(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	blocks, err := testfixtures.GenerateConwayChainAt(1, 1, 3)
+	require.NoError(t, err)
+	for _, i := range []int{0, 2} {
+		block := blocks[i]
+		require.NoError(t, db.BlockCreate(models.Block{
+			Slot:   block.SlotNumber(),
+			Hash:   block.Hash().Bytes(),
+			Number: block.BlockNumber(),
+			Cbor:   block.Cbor(),
+			Type:   uint(block.Type()),
+		}, nil))
+	}
+
+	bf := NewBackfill(db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	bf.SetEndSlot(2)
+	require.NoError(t, bf.Run(context.Background()))
+
+	checkpoint, err := db.Metadata().GetBackfillCheckpoint(BackfillPhase, nil)
+	require.NoError(t, err)
+	require.NotNil(t, checkpoint)
+	assert.True(t, checkpoint.Completed)
+	assert.Equal(t, uint64(1), checkpoint.LastSlot)
+	assert.Equal(t, uint64(2), checkpoint.TotalSlots)
+}
+
 // TestRun_ResumeStopsAtRecordedMithrilAnchor covers a Mithril API backfill
 // resumed by `dingo serve`, which calls Run without SetEndSlot. Blocks after
 // the recorded ledger anchor belong to ledger replay: a historical pass over

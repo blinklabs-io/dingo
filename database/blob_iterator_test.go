@@ -215,6 +215,44 @@ func TestCanonicalBlobBlockIterator_PreservesHistoryExpiry(t *testing.T) {
 	require.ErrorIs(t, err, types.ErrHistoryExpired)
 }
 
+func TestCanonicalBlobBlockIteratorRejectsNonIncreasingSlots(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	blocks := []models.Block{
+		{
+			ID: BlockInitialIndex, Slot: 10, Hash: randomHash(t),
+			Cbor: []byte{0x82, 0x01}, Type: 1,
+		},
+		{
+			ID: BlockInitialIndex + 1, Slot: 30, Hash: randomHash(t),
+			Cbor: []byte{0x82, 0x02}, Type: 1,
+		},
+		{
+			ID: BlockInitialIndex + 2, Slot: 20, Hash: randomHash(t),
+			Cbor: []byte{0x82, 0x03}, Type: 1,
+		},
+	}
+	for _, block := range blocks {
+		require.NoError(t, db.BlockCreate(block, nil))
+	}
+
+	iter, err := db.CanonicalBlocksFromSlot(t.Context(), 0)
+	require.NoError(t, err)
+	t.Cleanup(iter.Close)
+	for _, want := range []uint64{10, 30} {
+		result, nextErr := iter.NextRaw()
+		require.NoError(t, nextErr)
+		require.NotNil(t, result)
+		require.Equal(t, want, result.Slot)
+	}
+	result, err := iter.NextRaw()
+	require.Nil(t, result)
+	require.ErrorContains(
+		t, err, "non-increasing slot 20 after slot 30",
+	)
+}
+
 func TestCanonicalBlobBlockIteratorReadsOneIndexValuePerBlock(t *testing.T) {
 	t.Parallel()
 

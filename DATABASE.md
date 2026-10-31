@@ -3388,6 +3388,11 @@ block. Index keys are listed in bounded batches, while their values are read
 one at a time as replay consumes each block so a cancelled remote read cannot
 be amplified across a whole batch. On resume, an index value that points to a
 slot before the requested start also stops the run instead of being skipped.
+Canonical index slots must increase strictly as replay consumes them, and a
+mapping that jumps beyond the index-derived chain tip is an error; neither case
+can complete the checkpoint. An explicit historical end slot remains a bound:
+the first later canonical block ends that bounded replay when no block exists
+at the exact end slot.
 
 `Database.CountBlocksAndOldestSlot` (`database/block_inventory.go`) reads the retained block count and oldest retained slot from the checksummed `dingo:block-inventory:v1` blob record. `database.New` creates the record and an ordered retained-block membership index before the database becomes available, scanning legacy block content once only when the record is absent. Block insert, delete, history-expiry tombstone, rollback, truncate, and orphan cleanup paths update both in the same blob transaction as the block mutation. Stores without optimistic write-conflict detection serialize block-inventory mutations before opening backend transactions; conflict-detecting stores rely on backend write conflicts to prevent lost updates. Deleting or tombstoning the current oldest block seeks the first membership key to resolve its successor, including another retained block at the same slot, without walking block content. Bark's `GetDatabaseInfo` reads this record and never walks the block keyspace in request handling.
 

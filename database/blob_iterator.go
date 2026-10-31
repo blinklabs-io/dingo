@@ -67,12 +67,14 @@ type BlobBlockIterator struct {
 	startIndex uint64
 
 	// internal state
-	mu          sync.Mutex
-	batch       []blobBlockEntry
-	batchIdx    int
-	currentSlot uint64
-	exhausted   bool
-	closed      bool
+	mu                sync.Mutex
+	batch             []blobBlockEntry
+	batchIdx          int
+	currentSlot       uint64
+	lastCanonicalSlot uint64
+	hasCanonicalSlot  bool
+	exhausted         bool
+	closed            bool
 
 	// resumeKey is the blob key to seek past when fetching the next batch.
 	// nil means start from the beginning (or from startSlot).
@@ -245,13 +247,23 @@ func (it *BlobBlockIterator) NextRaw() (*BlobBlockResult, error) {
 				)
 			}
 		}
-		it.currentSlot = entry.slot
 		if it.canonical && meta.ID != entry.index {
 			return nil, fmt.Errorf(
 				"canonical block at slot %d has metadata index %d, expected %d",
 				entry.slot, meta.ID, entry.index,
 			)
 		}
+		if it.canonical {
+			if it.hasCanonicalSlot && entry.slot <= it.lastCanonicalSlot {
+				return nil, fmt.Errorf(
+					"canonical block index %d points to non-increasing slot %d after slot %d",
+					entry.index, entry.slot, it.lastCanonicalSlot,
+				)
+			}
+			it.lastCanonicalSlot = entry.slot
+			it.hasCanonicalSlot = true
+		}
+		it.currentSlot = entry.slot
 
 		return &BlobBlockResult{
 			Slot:      entry.slot,

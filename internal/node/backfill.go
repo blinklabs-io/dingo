@@ -912,7 +912,8 @@ func (b *Backfill) Run(ctx context.Context) error {
 		}
 		endSlot, endSlotSet = anchor, anchor > 0
 	}
-	if endSlotSet && endSlot < tipSlot {
+	tipBoundedByEndSlot := endSlotSet && endSlot < tipSlot
+	if tipBoundedByEndSlot {
 		tipSlot = endSlot
 	}
 
@@ -1155,7 +1156,14 @@ func (b *Backfill) Run(ctx context.Context) error {
 			break // iteration complete
 		}
 		if blk.Slot > tipSlot {
-			break
+			if tipBoundedByEndSlot {
+				break
+			}
+			saveCommittedCheckpoint()
+			return fmt.Errorf(
+				"canonical block at slot %d exceeds backfill tip slot %d",
+				blk.Slot, tipSlot,
+			)
 		}
 		ensureBatchTxn()
 		// Include the current block while its metadata is accumulated so row
@@ -1290,6 +1298,9 @@ func (b *Backfill) Run(ctx context.Context) error {
 			tipSlot, startSlot, startTime, &lastLogTime,
 			&intervalStats, false,
 		)
+		if blk.Slot == tipSlot {
+			break
+		}
 	}
 
 	// Flush the final partial batch (may be < backfillBatchSize blocks).
