@@ -25,7 +25,7 @@ import (
 
 func TestGenesisControlGroupsCanonicalDefaults(t *testing.T) {
 	t.Parallel()
-	for _, network := range []string{"dijkstra", "musashi", "preview"} {
+	for _, network := range []string{"dijkstra", "musashi"} {
 		t.Run(network, func(t *testing.T) {
 			t.Parallel()
 			cfg, err := cardano.NewCardanoNodeConfigFromEmbedFS(
@@ -71,6 +71,61 @@ func TestGenesisControlGroupsCanonicalDefaults(t *testing.T) {
 			)
 			WithGenesisControlGroups(nil)(&n.config)
 			require.Len(t, n.genesisControlGroups(), 2, "nil restores defaults")
+			n.config.genesisBootstrap = false
+			require.Empty(
+				t,
+				n.genesisControlGroups(),
+				"Praos does not add default roots",
+			)
+		})
+	}
+}
+
+func TestGenesisControlGroupsPublicNetworkDefaults(t *testing.T) {
+	t.Parallel()
+	want := map[string][]string{
+		"mainnet": {"iog", "cardano-foundation", "blinklabs"},
+		"preprod": {"iog", "blinklabs"},
+		"preview": {"iog", "blinklabs"},
+	}
+	for network, identities := range want {
+		t.Run(network, func(t *testing.T) {
+			t.Parallel()
+			cfg, err := cardano.NewCardanoNodeConfigFromEmbedFS(
+				cardano.EmbeddedConfigFS,
+				cardano.EmbeddedConfigPath(network),
+			)
+			require.NoError(t, err)
+			n := &Node{
+				config: Config{cardanoNodeConfig: cfg, genesisBootstrap: true},
+			}
+			n.config.networkMagic = cfg.ShelleyGenesis().NetworkMagic
+			groups := n.genesisControlGroups()
+			var got []string
+			for _, g := range groups {
+				require.NoError(t, g.Validate())
+				got = append(got, g.Identity)
+			}
+			require.Equal(t, identities, got)
+			for _, name := range []string{"ShelleyGenesisHash", "ByronGenesisHash", "AlonzoGenesisHash", "ConwayGenesisHash"} {
+				field := reflect.ValueOf(cfg).Elem().FieldByName(name)
+				original := field.String()
+				field.SetString("private genesis")
+				require.Empty(
+					t,
+					n.genesisControlGroups(),
+					"private %s cannot inherit public trust",
+					name,
+				)
+				field.SetString(original)
+			}
+			n.config.networkMagic++
+			require.Empty(
+				t,
+				n.genesisControlGroups(),
+				"a reused magic cannot inherit public trust",
+			)
+			n.config.networkMagic--
 			n.config.genesisBootstrap = false
 			require.Empty(
 				t,
