@@ -13,11 +13,13 @@ Genesis trust model**.
 Genesis mode is used only when **all** of these hold:
 
 - `genesisBootstrap.enabled: true` (the default), and
-- the node is starting **from origin** (no `intersectTip`, no explicit
-  intersect points), i.e. an empty database syncing from slot 0.
+- no `intersectTip` or explicit intersect points are configured, and
+- the network configuration does not select Praos consensus mode.
 
-A node bootstrapped from a Mithril snapshot, or resuming an existing database,
-does not enter Genesis mode — it syncs with normal Praos chain selection.
+This decision does not inspect database contents. A resumed database with the
+same configuration can enter Genesis mode at its persisted tip and rebuild
+its peer candidate histories. Explicit intersection options select normal
+Praos chain selection.
 
 ## Trust model at a glance
 

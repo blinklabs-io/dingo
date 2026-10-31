@@ -261,8 +261,9 @@ type ChainSelector struct {
 	peerTips        map[ouroboros.ConnectionId]*PeerChainTip
 	// deliveredPeerTips survives admission-frontier rebuilds so delivered,
 	// verified headers remain available as corroboration evidence.
-	deliveredPeerTips map[ouroboros.ConnectionId]*PeerChainTip
-	pendingPeerTips   map[ouroboros.ConnectionId][]peerTipAdmissionCandidate
+	deliveredPeerTips   map[ouroboros.ConnectionId]*PeerChainTip
+	eagernessDeliveries map[ouroboros.ConnectionId]eagernessDelivery
+	pendingPeerTips     map[ouroboros.ConnectionId][]peerTipAdmissionCandidate
 	// One rolling snapshot per peer; candidate events retain only the bounded
 	// admission updates needed to promote or rebuild that snapshot.
 	pendingPeerTipFrontiers map[ouroboros.ConnectionId]*PeerChainTip
@@ -644,6 +645,7 @@ func NewChainSelector(cfg ChainSelectorConfig) *ChainSelector {
 		mode:                      SelectionModePraos,
 		peerTips:                  make(map[ouroboros.ConnectionId]*PeerChainTip),
 		deliveredPeerTips:         make(map[ouroboros.ConnectionId]*PeerChainTip),
+		eagernessDeliveries:       make(map[ouroboros.ConnectionId]eagernessDelivery),
 		pendingPeerTips:           make(map[ouroboros.ConnectionId][]peerTipAdmissionCandidate),
 		pendingPeerTipFrontiers:   make(map[ouroboros.ConnectionId]*PeerChainTip),
 		forecastHorizonWitnesses:  make(map[ouroboros.ConnectionId]forecastHorizonWitness),
@@ -887,6 +889,7 @@ func (cs *ChainSelector) advanceSelectionModeWithBestKnownBlockLocked(
 		peerTip.observedPointBaseBlock = 0
 	}
 	clear(cs.deliveredPeerTips)
+	clear(cs.eagernessDeliveries)
 	cs.lastCorroborationFailedConn = nil
 	cs.config.Logger.Info(
 		"exiting Genesis selection mode",
@@ -3139,6 +3142,7 @@ func (cs *ChainSelector) evictLeastRecentPeerLocked() *ouroboros.ConnectionId {
 func (cs *ChainSelector) deletePeerLocked(connId ouroboros.ConnectionId) {
 	delete(cs.peerTips, connId)
 	delete(cs.deliveredPeerTips, connId)
+	delete(cs.eagernessDeliveries, connId)
 	delete(cs.pendingPeerTips, connId)
 	delete(cs.pendingPeerTipFrontiers, connId)
 	delete(cs.forecastHorizonWitnesses, connId)
@@ -4792,6 +4796,7 @@ func (cs *ChainSelector) HandlePeerRollbackEvent(evt event.Event) {
 		defer cs.mutex.Unlock()
 		delete(cs.pendingPeerTips, e.ConnectionId)
 		delete(cs.pendingPeerTipFrontiers, e.ConnectionId)
+		cs.rollbackEagernessDeliveryLocked(e.ConnectionId, e.Point)
 		if deliveredTip := cs.deliveredPeerTips[e.ConnectionId]; deliveredTip != nil {
 			deliveredTip.ApplyRollback(e.Point, e.Tip)
 		}
@@ -4842,6 +4847,7 @@ func (cs *ChainSelector) applyRollbackToTrackedPeer(e PeerRollbackEvent) bool {
 	delete(cs.pendingPeerTipFrontiers, e.ConnectionId)
 	cs.prunePeerTipRejectionReportsLocked()
 	peerTip.ApplyRollback(e.Point, e.Tip)
+	cs.rollbackEagernessDeliveryLocked(e.ConnectionId, e.Point)
 	if deliveredTip := cs.deliveredPeerTips[e.ConnectionId]; deliveredTip != nil {
 		deliveredTip.ApplyRollback(e.Point, e.Tip)
 	}
@@ -5085,6 +5091,7 @@ func (cs *ChainSelector) sweepDeadDeliveredPeerTips() {
 	for _, connId := range dead {
 		if _, tracked := cs.peerTips[connId]; !tracked {
 			delete(cs.deliveredPeerTips, connId)
+			delete(cs.eagernessDeliveries, connId)
 		}
 	}
 }

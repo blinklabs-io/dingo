@@ -89,6 +89,7 @@ func (cs *ChainSelector) RecordDeliveredPeerTip(update PeerTipUpdateEvent) {
 		}
 		cs.deliveredPeerTips[update.ConnectionId] = peerTip
 	}
+	cs.recordEagernessDeliveryLocked(update)
 	cs.applyPeerTipAdmissionUpdateLocked(peerTip, update)
 	cs.signalIngressChange()
 }
@@ -99,6 +100,7 @@ func (cs *ChainSelector) RecordDeliveredPeerTip(update PeerTipUpdateEvent) {
 func (cs *ChainSelector) RecordDeliveredPeerRollback(e PeerRollbackEvent) {
 	cs.mutex.Lock()
 	defer cs.mutex.Unlock()
+	cs.rollbackEagernessDeliveryLocked(e.ConnectionId, e.Point)
 	deliveredTip := cs.deliveredPeerTips[e.ConnectionId]
 	if deliveredTip == nil {
 		return

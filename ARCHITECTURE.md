@@ -7113,6 +7113,23 @@ blockfetch latency, and then connection ID break the tie in place of the Praos
 comparison. `ChainSelector.SelectedTip` returns the selected
 peer's tip truncated at the limit.
 
+While corroboration is active, authenticated observer deliveries also retain
+a separate, bounded LoE continuity fragment per tracked connection. A delivery
+extends it only by the exact parent hash, next block height and increasing
+slot, or repeats its exact head. A gap, replacement or unrepresentable boundary
+discards the extension. The fragment can replace the admission frontier for
+the limit calculation only while its latest verification generation is current
+and all overlapping admitted or staged points agree at the same heights.
+The temporary limit view keeps any older admission prefix that the rolling
+delivery window has dropped, preserving known fork intersections.
+The admission frontier still supplies eligibility, staleness and pause state;
+the continuity fragment never promotes a selectable tip or admits a ledger
+header. This prevents keepalive activity from preserving an obsolete admission
+fragment as the peer's only candidate while authenticated delivery advances.
+Each fragment has the existing candidate-window bound, connections share the
+tracked-peer limit, and rollback trims it to an exact retained point or clears
+it. Disconnect, eviction and Genesis exit release the retained evidence.
+
 The limit also bounds selection-eligible ingress streams, including headers
 whose ledger application is withheld by Genesis corroboration or whose
 corroboration hold has expired. These streams still advance candidate history;

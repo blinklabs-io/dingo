@@ -183,10 +183,7 @@ func (cs *ChainSelector) computeEagernessLimitFromPeersLocked(
 		}
 		// A read-only view: callers hold the selector lock, so the retained
 		// frontier does not need to be copied for this calculation.
-		fragment := CandidateFragment{
-			points:    peerTip.observedPoints,
-			baseBlock: peerTip.observedPointBaseBlock,
-		}
+		fragment := cs.eagernessFragmentLocked(connId, peerTip)
 		if fragment.Len() == 0 {
 			continue
 		}
