@@ -20436,6 +20436,15 @@ URI. Before an upload, `MirrorToCloud` requires the existing manifest to
 authenticate under the configured trust key and verifies both payloads against
 its signed sizes and digests. An unsigned local snapshot cannot acquire the
 cloud trust root through automatic retry; it must be recreated explicitly.
+Marker reads accept only a regular, non-symlink file and stop after the fixed
+digest-plus-newline size. The snapshot directory handle used to open the
+authenticated upload files remains live through the cloud upload, catalog
+reconciliation, and marker publication. The marker is written through that
+same handle, then the directory path is checked again before the handle closes.
+Publication writes and synchronizes a private temporary regular file,
+atomically replaces the marker, synchronizes the directory, and rejects a
+directory replacement. An existing symlink, device, or FIFO at the marker name
+is replaced as a directory entry and is never opened.
 S3 and GCS open the snapshot directory through one held `os.Root`, authenticate
 the manifest and verify both payloads through the same stable regular-file
 handles they upload, and upload the manifest last. They do not enumerate or

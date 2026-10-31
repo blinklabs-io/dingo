@@ -118,24 +118,25 @@ func (d *s3Destination) UploadDir(
 	ctx context.Context,
 	localDir string,
 ) (retErr error) {
-	_, err := d.uploadAuthenticatedSnapshot(ctx, localDir)
-	return err
+	result, err := d.uploadAuthenticatedSnapshot(ctx, localDir)
+	if err != nil {
+		return err
+	}
+	return result.close()
 }
 
 func (d *s3Destination) uploadAuthenticatedSnapshot(
 	ctx context.Context,
 	localDir string,
 	opts ...ManifestOption,
-) (_ Manifest, retErr error) {
-	files, manifest, err := openSnapshotUploadFiles(
+) (result snapshotUploadResult, retErr error) {
+	files, manifest, root, err := openSnapshotUploadFiles(
 		ctx, localDir, d.maxManifestBytes, opts...,
 	)
 	if err != nil {
-		return Manifest{}, err
+		return snapshotUploadResult{}, err
 	}
-	defer func() {
-		retErr = errors.Join(retErr, closeSnapshotUploadFiles(files))
-	}()
+	defer finishSnapshotUpload(files, root, &result, &retErr)
 	// manager.Uploader is deprecated in favor of feature/s3/transfermanager,
 	// but remains fully supported; migrating is tracked as follow-up work
 	// rather than done here to avoid pulling in a newer, less-established
@@ -152,7 +153,7 @@ func (d *s3Destination) uploadAuthenticatedSnapshot(
 			},
 		)
 		if uploadErr != nil {
-			return Manifest{}, fmt.Errorf(
+			return snapshotUploadResult{}, fmt.Errorf(
 				"upload snapshot file %q to s3://%s/%s: %w",
 				file.name,
 				d.bucket,
@@ -166,9 +167,14 @@ func (d *s3Destination) uploadAuthenticatedSnapshot(
 		Bucket: &d.bucket,
 		Key:    &key,
 	}); err != nil && !isS3NotFoundError(err) {
-		return Manifest{}, fmt.Errorf("remove legacy cloud mirror marker object %q: %w", key, err)
+		return snapshotUploadResult{}, fmt.Errorf(
+			"remove legacy cloud mirror marker object %q: %w", key, err,
+		)
 	}
-	return manifest, nil
+	return snapshotUploadResult{
+		manifest: manifest,
+		root:     root,
+	}, nil
 }
 
 // DownloadFiles downloads exactly the named objects into localDir, never
