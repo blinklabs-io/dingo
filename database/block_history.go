@@ -47,6 +47,7 @@ func BlockHistoryRetained(
 		return false, err
 	}
 	var from uint64
+	var backfilled bool
 	if anchored {
 		if startSlot > anchor {
 			from = anchor + 1
@@ -58,6 +59,7 @@ func BlockHistoryRetained(
 			if !covered {
 				return false, nil
 			}
+			backfilled = true
 		}
 	}
 	upper := endSlot
@@ -78,6 +80,12 @@ func BlockHistoryRetained(
 		}
 		if startSlot >= floor {
 			return true, nil
+		}
+		// The backfill writes no row for Byron blocks, so a range reaching
+		// below the first indexed epoch cannot be told apart from one with
+		// no blocks and must not be reported as complete.
+		if backfilled {
+			return false, nil
 		}
 		upper = min(upper, floor-1)
 	}

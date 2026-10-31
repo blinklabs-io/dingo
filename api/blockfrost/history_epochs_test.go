@@ -639,6 +639,13 @@ func TestNodeAdapterBlockListsAfterBackfillBelowAnchor(t *testing.T) {
 		assert.Equal(t, []string{hexOf(0x11), hexOf(0x12), hexOf(0x13)}, hashes)
 	})
 
+	t.Run("epoch before the first indexed block is not retained", func(t *testing.T) {
+		t.Parallel()
+		fx := setup(t, true)
+		_, _, err := fx.adapter.EpochBlocks(ctx, 0, asc)
+		assert.ErrorIs(t, err, ErrHistoryNotRetained)
+	})
+
 	t.Run("interrupted backfill is not retained", func(t *testing.T) {
 		t.Parallel()
 		fx := setup(t, false)

@@ -269,7 +269,9 @@ prunes them outside the three-epoch nonce window, keeping each epoch's
 checkpoint rows. The historical metadata backfill writes a `block_nonce` row
 for every block it replays below the Mithril anchor, but not for the anchor
 block itself, whose row the import seeded from the ledger state; Byron blocks
-have no nonce function and get no row. `database.BlockHistoryRetained` refuses a
+have no nonce function and get no row, so after a backfill a range starting
+before the first indexed epoch is also refused. `database.BlockHistoryRetained`
+refuses a
 list whose range reaches a bootstrap anchor until a completed backfill has left
 rows at or below it, or lies before the epoch of the earliest
 non-checkpoint row (`GetEarliestNonCheckpointBlockSlot`), so a database pruned
