@@ -19,6 +19,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strconv"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	sqlitequery "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/internal/query/sqlite"
@@ -166,46 +167,73 @@ func (s *Store) GetAssetByPolicyAndName(
 	}, nil
 }
 
+// GetAssetQuantityByPolicyAndName sums the live holdings of an asset in the
+// database, so one row crosses the driver however many UTxOs hold it. It reads
+// at most models.MaxAssetQuantityHoldings holdings and fails with
+// models.ErrUtxoQueryBudgetExceeded for an asset held by more, so one request
+// cannot make the database scan without limit. The scan runs under the
+// transaction's context, so it stops when the caller's request does.
 func (s *Store) GetAssetQuantityByPolicyAndName(
 	policyID lcommon.Blake2b224,
 	assetName []byte,
+	txn types.Txn,
+) (uint64, error) {
+	return s.assetQuantity(
+		policyID,
+		assetName,
+		models.MaxAssetQuantityHoldings,
+		txn,
+	)
+}
+
+func (s *Store) assetQuantity(
+	policyID lcommon.Blake2b224,
+	assetName []byte,
+	maxHoldings int,
 	txn types.Txn,
 ) (uint64, error) {
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return 0, err
 	}
-	rows, err := db.QueryContext(ctx, s.dialect.Rebind(`
-SELECT asset.amount
-FROM asset
-INNER JOIN utxo ON asset.utxo_id = utxo.id
-WHERE asset.policy_id = ? AND asset.name = ? AND utxo.deleted_slot = 0`),
-		policyID[:], assetName,
+	sumExpression := "SUM(CAST(amount AS DECIMAL(20, 0)))"
+	if s.dialect.Name() == "sqlite" {
+		sumExpression = "dingo_uint64_sum(amount)"
+	}
+	// The inner LIMIT is what bounds the scan: one row past the cap shows
+	// the asset has more holdings than are allowed to be read.
+	var (
+		count int
+		raw   sql.NullString
 	)
+	err = db.QueryRowContext(ctx, s.dialect.Rebind(`
+SELECT COUNT(*), `+sumExpression+`
+FROM (
+  SELECT asset.amount AS amount
+  FROM asset
+  INNER JOIN utxo ON asset.utxo_id = utxo.id
+  WHERE asset.policy_id = ? AND asset.name = ? AND utxo.deleted_slot = 0
+    AND asset.amount IS NOT NULL
+  LIMIT ?
+) AS holdings`),
+		policyID[:], assetName, maxHoldings+1,
+	).Scan(&count, &raw)
 	if err != nil {
+		// The sqlite aggregate refuses a sum beyond 64 bits itself.
 		return 0, err
 	}
-	defer rows.Close()
-	var total uint64
-	for rows.Next() {
-		var raw sql.NullString
-		if err := rows.Scan(&raw); err != nil {
-			return 0, err
-		}
-		if !raw.Valid {
-			continue
-		}
-		amount, err := parseUint64("asset amount", raw.String)
-		if err != nil {
-			return 0, err
-		}
-		if ^uint64(0)-total < amount {
+	if count > maxHoldings {
+		return 0, models.ErrUtxoQueryBudgetExceeded
+	}
+	if !raw.Valid {
+		return 0, nil
+	}
+	total, err := strconv.ParseUint(raw.String, 10, 64)
+	if err != nil {
+		if errors.Is(err, strconv.ErrRange) {
 			return 0, errors.New("asset quantity overflow")
 		}
-		total += amount
-	}
-	if err := rows.Err(); err != nil {
-		return 0, err
+		return 0, fmt.Errorf("decode asset quantity: %w", err)
 	}
 	return total, nil
 }

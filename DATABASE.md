@@ -4520,8 +4520,19 @@ FROM asset a
 JOIN utxo u ON u.id = a.utxo_id
 WHERE a.policy_id = decode($1, 'hex')
   AND a.name = decode($2, 'hex')
+  AND a.amount IS NOT NULL
   AND u.deleted_slot = 0;
 ```
+
+`GetAssetQuantityByPolicyAndName` runs this as one aggregate row, so the sum
+is computed by the database and no row per holding crosses the driver (SQLite
+uses `dingo_uint64_sum`, which refuses a total past 64 bits; other backends
+sum `DECIMAL(20, 0)` and the store rejects a total past 64 bits). The holdings
+are read through an inner `LIMIT models.MaxAssetQuantityHoldings + 1`
+(1,000,000); an asset held by more fails with `ErrUtxoQueryBudgetExceeded`
+instead of scanning without limit. The scan runs under the caller's
+transaction context and stops when that context ends. The Blockfrost asset
+routes add a request deadline and an admission pool.
 
 `GetAssetMintBurnInfo` (Blockfrost `/assets/{asset}` `initial_mint_tx_hash` and
 `mint_or_burn_count`) reads the mint/burn history rather than live holdings:
@@ -4865,13 +4876,19 @@ Only the persist-time capture can resolve that era.
 row and the enactment that decides its era are written in the same transaction,
 so every era lookup it makes resolves the *outgoing* epoch's era whatever
 `boundarySlot` it passes. `CaptureEpochBoundarySnapshot` therefore discards a
-stashed SNAP-point distribution whenever the epoch at `BoundarySlot` runs at a
-different era than the epoch at `SnapshotSlot`, and reconstructs the boundary
+stashed SNAP-point distribution whenever the pointer-stake gate
+(`models.PointerStakeCountedInEra`) answers differently for the era at
+`BoundarySlot` than for the era at `SnapshotSlot`, and reconstructs the boundary
 with `calculateHistoricalBoundaryStakeDistributionInTxn` instead -- by then the
 incoming epoch's row exists, so the gate resolves the era the mark snapshot is
 actually produced under. Without that, the fast path would count pointer stake
 at the Babbage->Conway boundary while the fallback did not, and the two Mark
-capture routes would persist different stake for the same epoch.
+capture routes would persist different stake for the same epoch. An era change
+that leaves the gate unchanged (Shelley->Allegra through Alonzo->Babbage, and
+Conway onward) keeps the stashed read: the historical reconstruction scans
+every delegation and UTxO at the boundary inside the rollover transaction, and
+on mainnet it runs long enough to stall header verification at the last block
+of the outgoing era.
 
 `GetRewardStakeInputsForPools` takes the same `slot`, `expiryEpoch`, and
 `inactivityPeriod` arguments. With the gate off (`expiryEpoch == 0`) it reads the

@@ -291,11 +291,12 @@ func (n *Node) initLeiosVoteManager(ctx context.Context) error {
 		// committee computation and the stake snapshot queries behind
 		// it.
 		SlotProvider: n.ledgerState,
-		// Source the vote-acceptance past bound from the same pipeline
-		// timing the pipeline manager uses, so the two components admit
-		// votes over the same window and cannot drift.
-		VoteWindowSlots: n.leiosPipelineTiming().VoteWindowSlots,
-		PromRegistry:    n.config.promRegistry,
+		// Source local vote production and relayed vote acceptance from the
+		// pipeline's corresponding boundaries. Relayed votes remain useful
+		// until the certification deadline even after local voting closes.
+		VoteWindowSlots:        n.leiosPipelineTiming().VoteWindowSlots,
+		CertifyByDeadlineSlots: n.leiosPipelineTiming().CertifyByDeadlineSlots,
+		PromRegistry:           n.config.promRegistry,
 	})
 	if err != nil {
 		return fmt.Errorf("create leios vote manager: %w", err)

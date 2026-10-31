@@ -62,11 +62,10 @@ const (
 	voteRecordMaxEntries = 4 * voteStoreMaxEntries
 	// slotWindowFutureTolerance bounds how far ahead of the current (or
 	// tip) slot a vote is accepted, allowing for clock skew and diffusion
-	// delay. The past bound is the pipeline's VoteWindowSlots (the offset
-	// after an EB's produce slot at which voting closes), supplied via
-	// VoteManagerConfig so the vote manager and pipeline admit votes over
-	// the same window. Both keep the forgeable vote-id space (window x
-	// committee size) small.
+	// delay. Relayed votes use the pipeline's certification deadline as their
+	// past bound because they can still complete a usable certificate after
+	// local vote production closes. Both bounds keep the forgeable vote-id
+	// space (window x committee size) small.
 	slotWindowFutureTolerance  = 60
 	voteVerificationWindow     = time.Minute
 	voteVerificationMaxPerPeer = 128
@@ -101,10 +100,10 @@ var (
 		"peer vote verification budget exhausted",
 	)
 	errVoteEquivocation = errors.New("vote equivocation")
-	// errVoteWindowClosed marks a vote whose slot is behind the voting
-	// window. Honest relays forward such votes without an age check, so
-	// the drop is not counted toward the per-connection invalid-vote
-	// limit.
+	// errVoteWindowClosed marks a vote whose slot is behind the applicable
+	// local-production or peer-acceptance bound. Honest relays forward aged
+	// votes without an age check, so the drop is not counted toward the
+	// per-connection invalid-vote limit.
 	errVoteWindowClosed = errors.New("vote window closed")
 )
 
@@ -295,13 +294,14 @@ type VoteManagerConfig struct {
 	// is nil. Production composition always supplies KeyProvider.
 	Registry     *VoterRegistry
 	PromRegistry prometheus.Registerer
-	// VoteWindowSlots is the offset after an EB's produce slot at which
-	// voting closes: a vote whose slot is this many slots or more behind
-	// the current (or tip) slot is rejected. It is the pipeline's
-	// VoteWindowSlots, passed here so the vote manager and pipeline admit
-	// votes over the same window. Zero falls back to
+	// VoteWindowSlots is the offset after an EB's produce slot at which this
+	// node stops producing its own votes. Zero falls back to
 	// DefaultPipelineTiming().VoteWindowSlots.
 	VoteWindowSlots uint64
+	// CertifyByDeadlineSlots is the offset after an EB's produce slot at
+	// which a relayed vote can no longer contribute to a usable certificate.
+	// Zero falls back to DefaultPipelineTiming().CertifyByDeadlineSlots.
+	CertifyByDeadlineSlots uint64
 }
 
 // storedVote is one retained vote with its serving metadata.
@@ -458,13 +458,14 @@ type VoteManager struct {
 	paramsProvider CommitteeParamsProvider
 	keyProvider    LeiosKeyProvider // nil explicitly enables Registry-only mode
 	slotProvider   SlotProvider     // nil disables the slot window check
-	// voteWindowSlots is the past bound of the vote acceptance window: a
-	// vote whose slot is this many slots or more behind the current slot
-	// is rejected. It is the pipeline's VoteWindowSlots so the two
-	// components admit votes over the same window.
+	// voteWindowSlots is the past bound for producing local votes.
 	voteWindowSlots uint64
-	registry        *VoterRegistry
-	metrics         *voteManagerMetrics
+	// certifyByDeadlineSlots is the past bound for peer vote acceptance.
+	// Relayed votes remain useful after local vote production closes, while
+	// the pipeline can still build and accept a certificate.
+	certifyByDeadlineSlots uint64
+	registry               *VoterRegistry
+	metrics                *voteManagerMetrics
 	// now is the clock used for vote TTL expiry; tests may override it.
 	now func() time.Time
 	// signVote is the local vote signer; tests may override it to synchronize
@@ -605,33 +606,45 @@ func NewVoteManager(cfg VoteManagerConfig) (*VoteManager, error) {
 	if voteWindowSlots == 0 {
 		voteWindowSlots = DefaultPipelineTiming().VoteWindowSlots
 	}
+	certifyByDeadlineSlots := cfg.CertifyByDeadlineSlots
+	if certifyByDeadlineSlots == 0 {
+		certifyByDeadlineSlots = DefaultPipelineTiming().CertifyByDeadlineSlots
+	}
+	if certifyByDeadlineSlots < voteWindowSlots {
+		return nil, fmt.Errorf(
+			"leios vote manager: certification deadline %d precedes vote window %d",
+			certifyByDeadlineSlots,
+			voteWindowSlots,
+		)
+	}
 	m := &VoteManager{
-		logger:              logger.With("component", "leios"),
-		eventBus:            cfg.EventBus,
-		stakeProvider:       cfg.StakeProvider,
-		epochProvider:       cfg.EpochProvider,
-		paramsProvider:      cfg.ParamsProvider,
-		keyProvider:         cfg.KeyProvider,
-		slotProvider:        cfg.SlotProvider,
-		voteWindowSlots:     voteWindowSlots,
-		registry:            registry,
-		now:                 time.Now,
-		signVote:            SignVote,
-		verifyVoteSignature: VerifyVoteSignature,
-		voteTTL:             voteStoreTTL,
-		maxVotes:            voteStoreMaxEntries,
-		maxRecords:          voteRecordMaxEntries,
-		committees:          make(map[uint64]*epochEntry),
-		committeeInFlight:   make(map[uint64]*committeeComputation),
-		committeeStopCh:     make(chan struct{}),
-		votesById:           make(map[lcommon.LeiosVoteId]*storedVote),
-		voteLog:             make([]*storedVote, 0),
-		voteRecords:         make(map[lcommon.LeiosVoteId]voteRecord),
-		cursors:             make(map[string]uint64),
-		wakeCh:              make(chan struct{}),
-		tallies:             make(map[tallyKey]*ebTally),
-		announcements:       make(map[lcommon.Blake2b256]announcementRecord),
-		acquiredEbs:         make(map[lcommon.Blake2b256]acquiredEbRecord),
+		logger:                 logger.With("component", "leios"),
+		eventBus:               cfg.EventBus,
+		stakeProvider:          cfg.StakeProvider,
+		epochProvider:          cfg.EpochProvider,
+		paramsProvider:         cfg.ParamsProvider,
+		keyProvider:            cfg.KeyProvider,
+		slotProvider:           cfg.SlotProvider,
+		voteWindowSlots:        voteWindowSlots,
+		certifyByDeadlineSlots: certifyByDeadlineSlots,
+		registry:               registry,
+		now:                    time.Now,
+		signVote:               SignVote,
+		verifyVoteSignature:    VerifyVoteSignature,
+		voteTTL:                voteStoreTTL,
+		maxVotes:               voteStoreMaxEntries,
+		maxRecords:             voteRecordMaxEntries,
+		committees:             make(map[uint64]*epochEntry),
+		committeeInFlight:      make(map[uint64]*committeeComputation),
+		committeeStopCh:        make(chan struct{}),
+		votesById:              make(map[lcommon.LeiosVoteId]*storedVote),
+		voteLog:                make([]*storedVote, 0),
+		voteRecords:            make(map[lcommon.LeiosVoteId]voteRecord),
+		cursors:                make(map[string]uint64),
+		wakeCh:                 make(chan struct{}),
+		tallies:                make(map[tallyKey]*ebTally),
+		announcements:          make(map[lcommon.Blake2b256]announcementRecord),
+		acquiredEbs:            make(map[lcommon.Blake2b256]acquiredEbRecord),
 		validatedAnnouncements: make(
 			map[lcommon.Blake2b256]validatedAnnouncementRecord,
 		),
@@ -1679,24 +1692,20 @@ func (m *VoteManager) resolveVoterKey(
 	return m.registry.PublicKeyFor(poolKeyHash)
 }
 
-// slotWindowCheck reports whether a vote slot falls within the
-// acceptance window around the current (or tip) slot, returning a
-// descriptive error when it does not. A nil slot provider disables the
-// check. The past bound is the pipeline's vote window (voteWindowSlots):
-// once a vote's slot is that many slots behind the current slot, voting
-// has closed for that EB, matching stageFor's StageVote boundary. The
-// future bound allows for clock skew and diffusion delay.
-func (m *VoteManager) slotWindowCheck(slot uint64) error {
+// slotWindowCheck reports whether a vote slot falls within the supplied past
+// bound and the shared future bound around the current (or tip) slot. A nil
+// slot provider disables the check.
+func (m *VoteManager) slotWindowCheck(slot, pastBound uint64) error {
 	if m.slotProvider == nil {
 		return nil
 	}
 	cur := m.slotProvider.CurrentOrTipSlot()
-	if slot < cur && cur-slot >= m.voteWindowSlots {
+	if slot < cur && cur-slot >= pastBound {
 		return fmt.Errorf(
 			"%w: vote slot %d is %d or more slots behind current slot %d",
 			errVoteWindowClosed,
 			slot,
-			m.voteWindowSlots,
+			pastBound,
 			cur,
 		)
 	}
@@ -1827,7 +1836,10 @@ func (m *VoteManager) HandleVote(
 	// EpochForSlot projects future slots indefinitely and committee
 	// computation reaches the stake snapshot in the database, so
 	// out-of-window slots must not get that far.
-	if err := m.slotWindowCheck(vote.SlotNo); err != nil {
+	if err := m.slotWindowCheck(
+		vote.SlotNo,
+		m.certifyByDeadlineSlots,
+	); err != nil {
 		return m.rejectIncomingVote(connKey, "slot_window", vote, err)
 	}
 	reserved, err := m.reserveIncomingVoteVerification(connKey, vote)
@@ -1941,7 +1953,10 @@ func (m *VoteManager) handleResolvedPrototypeVote(
 		VoterId:           vote.VoterId,
 		VoteSignature:     vote.VoteSignature,
 	}
-	if err := m.slotWindowCheck(record.slot); err != nil {
+	if err := m.slotWindowCheck(
+		record.slot,
+		m.certifyByDeadlineSlots,
+	); err != nil {
 		return m.rejectIncomingVote(
 			connKey,
 			"slot_window",
@@ -2711,7 +2726,7 @@ func (m *VoteManager) emitPrototypeVoteLocked(
 		)
 		return
 	}
-	if err := m.slotWindowCheck(record.slot); err != nil {
+	if err := m.slotWindowCheck(record.slot, m.voteWindowSlots); err != nil {
 		m.noteVoteNotEmitted(voteNotEmittedSlotWindow)
 		// Reaching here means seating is already established: the
 		// committee resolved above and VoterIdFor returned this node's

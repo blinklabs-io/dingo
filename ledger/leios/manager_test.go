@@ -2865,6 +2865,13 @@ func TestNewVoteManagerValidatesConfig(t *testing.T) {
 		{"nil stake provider", func(c *VoteManagerConfig) { c.StakeProvider = nil }},
 		{"nil epoch provider", func(c *VoteManagerConfig) { c.EpochProvider = nil }},
 		{"nil params provider", func(c *VoteManagerConfig) { c.ParamsProvider = nil }},
+		{
+			"certification deadline before vote window",
+			func(c *VoteManagerConfig) {
+				c.VoteWindowSlots = 10
+				c.CertifyByDeadlineSlots = 5
+			},
+		},
 	} {
 		cfg := valid
 		tc.mutate(&cfg)
@@ -6715,6 +6722,7 @@ func TestVoteManagerSlotWindowRejects(t *testing.T) {
 		func(f *managerFixture, cfg *VoteManagerConfig) {
 			cfg.SlotProvider = &fakeSlotProvider{slot: 1000}
 			cfg.VoteWindowSlots = voteWindow
+			cfg.CertifyByDeadlineSlots = voteWindow
 		},
 	)
 	ebHash := lcommon.NewBlake2b256([]byte("eb"))
@@ -6765,6 +6773,51 @@ func TestVoteManagerSlotWindowRejects(t *testing.T) {
 		),
 		"no local vote for an out-of-window endorser block",
 	)
+}
+
+func TestVoteManagerAcceptsRelayedPrototypeVoteDuringCertificationWindow(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	const (
+		voteWindow      = 10
+		certifyDeadline = 20
+		currentSlot     = 1013
+		voteSlot        = 1000
+	)
+	fixture := newManagerFixture(
+		t,
+		func(_ *managerFixture, cfg *VoteManagerConfig) {
+			cfg.SlotProvider = &fakeSlotProvider{slot: currentSlot}
+			cfg.VoteWindowSlots = voteWindow
+			cfg.CertifyByDeadlineSlots = certifyDeadline
+		},
+	)
+	ebHash := lcommon.NewBlake2b256([]byte("certification-window-eb"))
+	rbHash := lcommon.NewBlake2b256([]byte("certification-window-rb"))
+
+	// Local production has closed for this announcement.
+	member := fixture.members[3]
+	var poolKeyHash lcommon.PoolKeyHash
+	copy(poolKeyHash[:], member.PoolKeyHash)
+	require.NoError(t, fixture.mgr.EnableVoting(poolKeyHash, fixture.keys[3]))
+	fixture.mgr.HandleValidatedEndorserBlock(voteSlot, rbHash, ebHash)
+	fixture.mgr.ObserveAnnouncement(voteSlot, rbHash, ebHash)
+	assert.Empty(t, fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{{
+		SlotNo:  voteSlot,
+		VoterId: 3,
+	}}))
+
+	// A vote relayed by the prototype node is still useful while the
+	// certification phase remains open.
+	vote := fixture.makePrototypeVote(t, 0, rbHash)
+
+	require.NoError(t, fixture.mgr.HandlePrototypeVote("relay", vote))
+	assert.Len(t, fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{{
+		SlotNo:  voteSlot,
+		VoterId: vote.VoterId,
+	}}), 1)
 }
 
 func TestVoteManagerRollbackAllowsReVoteForNewChain(t *testing.T) {
@@ -6921,6 +6974,7 @@ func TestVoteManagerLateVotesAreNotPeerMisbehavior(t *testing.T) {
 			cfg.PromRegistry = prometheus.NewRegistry()
 			cfg.SlotProvider = &fakeSlotProvider{slot: 1000}
 			cfg.VoteWindowSlots = voteWindow
+			cfg.CertifyByDeadlineSlots = voteWindow
 		},
 	)
 	ebHash := lcommon.NewBlake2b256([]byte("late-eb"))
@@ -6997,6 +7051,7 @@ func TestVoteManagerLatePrototypeVotesAreNotPeerMisbehavior(t *testing.T) {
 			cfg.PromRegistry = prometheus.NewRegistry()
 			cfg.SlotProvider = &fakeSlotProvider{slot: 1000}
 			cfg.VoteWindowSlots = voteWindow
+			cfg.CertifyByDeadlineSlots = voteWindow
 		},
 	)
 	rejected := fixture.mgr.metrics.votesRejectedTotal.WithLabelValues(
