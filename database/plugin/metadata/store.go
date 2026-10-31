@@ -2425,6 +2425,12 @@ type MetadataStore interface {
 		types.Txn,
 	) (map[string]uint64, map[string]uint64, error)
 
+	// GetActivePoolStakeTotal returns the total delegated stake across every
+	// currently active pool: the sum GetStakeByPools reports for the pools
+	// GetActivePoolKeyHashes returns. The database computes the total, so the
+	// work done by the caller does not grow with the number of delegators.
+	GetActivePoolStakeTotal(types.Txn) (uint64, error)
+
 	// GetLiveStakeInputsForPools returns every registered credential (including
 	// zero-stake credentials) from the transactionally maintained live reward
 	// aggregate for the requested pools. expiryEpoch applies the live

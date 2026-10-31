@@ -46,6 +46,8 @@ const (
 	defaultMaxChainSummariesPerClient           = 2
 	defaultMaxMempoolAddresses             uint = 4
 	defaultMaxMempoolAddressesPerClient         = 1
+	defaultMaxPoolAggregates               uint = 4
+	defaultMaxPoolAggregatesPerClient           = 2
 )
 
 // Blockfrost is the Blockfrost-compatible REST API server.
@@ -69,6 +71,9 @@ type Blockfrost struct {
 	// starve these routes, and the reverse.
 	chainSummaryAdmission   *requestAdmission
 	mempoolAddressAdmission *requestAdmission
+	// poolAggregateAdmission is shared by the pool detail and the extended
+	// pool list, whose live stake is aggregated over the pool's delegators.
+	poolAggregateAdmission *requestAdmission
 	// listener owns the start/stop protocol, including releasing the
 	// listening socket as part of what Stop waits for -- see
 	// internal/apilistener.
@@ -123,6 +128,10 @@ func New(
 		mempoolAddressAdmission: newRequestAdmission(
 			defaultMaxMempoolAddresses,
 			defaultMaxMempoolAddressesPerClient,
+		),
+		poolAggregateAdmission: newRequestAdmission(
+			defaultMaxPoolAggregates,
+			defaultMaxPoolAggregatesPerClient,
 		),
 		listener: apilistener.New("Blockfrost API", logger),
 	}
