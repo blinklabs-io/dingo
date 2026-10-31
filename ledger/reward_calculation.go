@@ -3397,6 +3397,7 @@ func (ls *LedgerState) rebuildPrunedRewardStakeInputs(
 		poolKeyHashes,
 		rewardSnapshot.CapturedSlot,
 		rewardSnapshot.BoundarySlot,
+		nil,
 		expiryEpoch,
 		inactivityPeriod,
 		metaTxn,

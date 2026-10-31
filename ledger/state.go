@@ -4405,7 +4405,7 @@ func (ls *LedgerState) discardDeferredRewardStakeInputs(txn *database.Txn) {
 // currentBoundarySPOStakeHookHolder wraps the optional same-boundary SPO
 // stake-rows callback so it can live in an atomic.Pointer.
 type currentBoundarySPOStakeHookHolder struct {
-	fn func(*database.Txn, event.EpochTransitionEvent) ([]*models.PoolStakeSnapshot, error)
+	fn func(*database.Txn, event.EpochTransitionEvent, uint) ([]*models.PoolStakeSnapshot, error)
 }
 
 // SetCurrentBoundarySPOStakeHook installs (or clears, with a nil fn) the
@@ -4432,9 +4432,10 @@ type currentBoundarySPOStakeHookHolder struct {
 // outcome: it ratifies nothing and reports no error, which
 // TestHardForkInitiation_NeverRatifiesWithoutCurrentBoundaryHook pins. A
 // production node must always wire this alongside the other two
-// epoch-boundary hooks.
+// epoch-boundary hooks. The callback also receives the incoming era ID because
+// RATIFY runs before the epoch row carrying that ID is persisted.
 func (ls *LedgerState) SetCurrentBoundarySPOStakeHook(
-	fn func(*database.Txn, event.EpochTransitionEvent) ([]*models.PoolStakeSnapshot, error),
+	fn func(*database.Txn, event.EpochTransitionEvent, uint) ([]*models.PoolStakeSnapshot, error),
 ) {
 	if fn == nil {
 		ls.currentBoundarySPOStakeHook.Store(nil)
@@ -4447,7 +4448,7 @@ func (ls *LedgerState) SetCurrentBoundarySPOStakeHook(
 
 // currentBoundarySPOStakeHookFn returns the installed same-boundary SPO
 // stake-rows hook, or nil when none is set.
-func (ls *LedgerState) currentBoundarySPOStakeHookFn() func(*database.Txn, event.EpochTransitionEvent) ([]*models.PoolStakeSnapshot, error) {
+func (ls *LedgerState) currentBoundarySPOStakeHookFn() func(*database.Txn, event.EpochTransitionEvent, uint) ([]*models.PoolStakeSnapshot, error) {
 	if h := ls.currentBoundarySPOStakeHook.Load(); h != nil {
 		return h.fn
 	}

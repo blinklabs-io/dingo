@@ -88,7 +88,11 @@ func pointerStakeCounted(
 	db queryer,
 	slot uint64,
 	boundarySlot uint64,
+	incomingEraID *uint,
 ) (bool, error) {
+	if incomingEraID != nil {
+		return models.PointerStakeCountedInEra(*incomingEraID), nil
+	}
 	eraSlot := max(boundarySlot, slot)
 	slotValue, err := checkedInt64(eraSlot)
 	if err != nil {
@@ -266,7 +270,7 @@ func (s *Store) GetPointerStakeInputsForPools(
 			err,
 		)
 	}
-	counted, err := pointerStakeCounted(ctx, db, slot, boundarySlot)
+	counted, err := pointerStakeCounted(ctx, db, slot, boundarySlot, nil)
 	if err != nil {
 		return nil, err
 	}
