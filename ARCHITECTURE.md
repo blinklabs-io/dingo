@@ -5684,9 +5684,11 @@ distribution from the second.
 
 `GetChainDepState` serialises the consensus chain-dependent state, and which
 record it writes depends on the era at the acquired tip: Shelley through Alonzo
-take the TPraos layout (`encodeVersion 1` wrapping a nested `PrtclState`),
-Babbage onwards the Praos one (`encodeVersion 0` wrapping a flat eight-field
-record whose extra nonces TPraos does not carry). The version tag selects the
+take the TPraos layout (`encodeVersion 1` wrapping a StrictMaybe last slot
+and a ledger state containing `PrtclState`, the epoch and previous hash
+nonces, and the lab nonce). Babbage onwards use the Praos layout
+(`encodeVersion 0` wrapping a flat eight-field record with a WithOrigin last
+slot and an additional last epoch block nonce). The version tag selects the
 shape rather than merely labelling it, so a node serving the wrong one during a
 sync through the TPraos eras hands the client a payload it cannot read as
 promised. Which era is which is not restated for the wire: the layout is chosen
