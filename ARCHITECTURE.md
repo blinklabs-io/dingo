@@ -6064,58 +6064,30 @@ is recorded as having delivered nothing: the advertised tip is never
 substituted for a missing observed frontier, and the peer is bounded and
 compared as block 0 until it delivers a header.
 
-A delivered frontier beyond the catch-up allowance is not rejected outright.
-A rejected frontier is never recorded, so without a second path a node whose
-honest peers deliver more than `2*securityParam` blocks ahead of a
-slow-to-apply local tip could never accept them. Such a frontier is too far
-ahead of local ledger state for its VRF/KES check to run
-(`ledger.ValidateChainSelectionHeaderCrypto` defers), so no single claim is
-trusted: `checkPeerTipPlausibleLocked` records it per connection
-(`ChainSelector.farTipClaims`, bounded to `maxTrackedPeers` and pruned with the
-peer in `deletePeerLocked`; a frontier that does not fit is still compared
-against the recorded ones) and accepts it once another connection has
-recorded a frontier within `securityParam` of it
-(`corroborateFarTipClaimLocked`). The earlier claim is then marked
-corroborated and becomes that connection's own reference, like a known peer's
-previous frontier: its next update is accepted within `securityParam` of its
-claim even when the corroborating frontier sits up to `securityParam` below
-it, and the entry is cleared once the connection is accepted.
-The stale-reference recovery also applies when the tracked reference is ahead
-of the local tip by more than `securityParam`, including beyond the
-`localTip + 2*securityParam` catch-up ceiling; a snapshot-backed or
-from-genesis local tip can lag its delivered peer references without making
-those references current enough to rule out catch-up. Up to that ceiling a
-frontier past the reference plus `securityParam` is accepted with the same
-corroboration or connected-chain evidence. Beyond it nothing anchors the
-frontier near the local chain and one peer can fabricate any number of
-self-linked headers, so only a connection in another identity group
-(`ChainSelectorConfig.PeerIdentity`, or the remote host when unset)
-corroborates it, and a connected header chain from one connection is not
-accepted (`corroborateIndependentFarTipClaimLocked`).
+A staged delivered frontier beyond `localTip + 2*securityParam` remains a
+bounded pending candidate and cannot enter ledger ingress. The ceiling is
+anchored to applied ledger state or an explicit trusted checkpoint, including
+the origin. Peer agreement and a run of self-linked delivered headers do not
+move it: relevant VRF/KES checks can be unavailable beyond the ledger forecast
+horizon, so those observations are not verified chain evidence. The ceiling
+only defers a frontier the peer-relative bound accepts; a frontier that bound
+refuses is rejected however far past the ceiling it is. Staging and the
+unstaged update path read the current applied tip from
+`ChainSelectorConfig.AppliedTip` and rebuild the pending candidates against
+it. Applied ledger progress therefore releases an
+honest frontier as soon as it falls within the moving allowance, including
+while replaying blocks after a snapshot import, without trusting remote claims
+to expand the bound.
 In Genesis mode, a run of connected headers can continue across a short
 reconnect from the same identity. The selector retains only the last block,
 slot, hash, Byron boundary marker, and run count, bounded to
 `maxTrackedPeers` and expired after twice the stale-tip threshold. The next
 header must link to that exact point; the retained state carries no peer
 acceptance or corroboration status.
-Staging a peer tip reads the local tip from `ChainSelectorConfig.AppliedTip`
-(the live applied ledger tip) rather than from the last `SetLocalTip`, which
-the node calls only at startup and on the stall recycler's tick. A node
-replaying blocks it already stored, as after a Mithril import, applies
-hundreds of blocks in that interval, and a ceiling measured from the tip it
-started at rejects headers the ledger has already passed.
 A peer whose advertised tip is wall-clock stale is never a new peer's
 reference. It serves an abandoned chain and is never selectable; from
 genesis, where the advertised bound applies, its short advertisement would
 otherwise reject every honest peer that advertises the real tip.
-A delivered frontier beyond the catch-up allowance is not rejected outright.
-`checkPeerTipPlausibleLocked` holds bounded far-tip evidence per connection. A
-far frontier is supported by another distinct connection within
-`securityParam`, or by more than `securityParam` consecutive connected headers.
-The connected-header check uses the delivered parent hash, block number, slot,
-and Byron boundary marker; a lone accepted frontier must continue that chain
-or the peer is removed. A lone frontier is not independent evidence for a new
-peer, and the check counts connections rather than operators.
 A reference inside `(localTip, localTip + securityParam]` gets no catch-up
 relaxation, so a header past `reference + securityParam` is rejected, which
 closes the connection, though an honest peer is only ahead of a ledger that
@@ -6128,14 +6100,19 @@ admitted, verified, observed, or published,
 so it requests no further headers, until the header is admissible. It re-reads
 the live applied tip, the reference and the tracked peers every 100ms and takes
 the selector lock only for each check, never while parked. A connection is held
-only from inside the band; once held it stays held after the reference passes
-the local tip until the header is within `max(reference + securityParam,
-localTip + 2 * securityParam)`, because releasing it into the far-claim path
-would withhold the header from the connection's observed ancestry and defer
-every later header's verification. The wait records no frontier, claim or
-witness, so a waiting connection can neither be selected nor corroborate
-another, and a header no chain could have reached from the local tip is not
-held and is still rejected. It ends on connection close or node shutdown (the
+from inside the band, or from outside it when its header is within
+`reference + securityParam` but past `localTip + 2 * securityParam`, the applied
+catch-up ceiling. Once held it stays held after the reference leaves the band
+until the header is within the applied catch-up ceiling, because admission
+keeps a header past it pending whatever the peer evidence, which would
+withhold the header from the connection's observed ancestry and defer every
+later header's verification. The reference node's ChainSync client likewise
+waits when a header is beyond its ledger view forecast range, and other peers'
+claims do not extend that forecast. The wait records no
+frontier, claim or witness, so a waiting connection can neither be selected
+nor corroborate another, and a header no chain could have reached from the
+local tip is not held and is still rejected. It ends on connection close or
+node shutdown (the
 admission context), and after 60 seconds, or half the operator's chainsync
 stall timeout if that is lower (`catchUpBandWaitTimeoutFor`), below the 135 to
 269 second MustReply, 269 second minimum CanAwait and 3673 second Idle
