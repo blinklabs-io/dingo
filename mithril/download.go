@@ -1063,6 +1063,68 @@ func downloadSnapshotOnce(
 	defer func() { resp.Body.Close() }()
 
 	var totalSize int64
+	restartDownload := func() error {
+		_ = resp.Body.Close()
+		discardPartial()
+		existingSize = 0
+		if err := resetDownloadFile(file); err != nil {
+			return fmt.Errorf("resetting download staging file: %w", err)
+		}
+		restartReq, err := http.NewRequestWithContext(
+			downloadCtx,
+			http.MethodGet,
+			cfg.URL,
+			nil,
+		)
+		if err != nil {
+			return fmt.Errorf("creating restart request: %w", err)
+		}
+		httpuseragent.Set(restartReq)
+		headerTimer = cfg.newIdleWatchdog(func() {
+			cancelDownload(downloadIdleTimeoutCause(idleTimeout))
+		})
+		restartResp, err := client.Do( //nolint:gosec // same secured URL without a Range header
+			restartReq,
+		)
+		if headerTimer != nil {
+			headerTimer.Stop()
+			headerTimer = nil
+		}
+		if err != nil {
+			if cause := context.Cause(downloadCtx); errors.Is(
+				cause,
+				errDownloadIdleTimeout,
+			) {
+				return fmt.Errorf("restarting download: %w", cause)
+			}
+			return fmt.Errorf(
+				"restarting download: %w",
+				redactLocationError(err, cfg.URL),
+			)
+		}
+		if restartResp == nil || restartResp.Body == nil {
+			return errors.New("nil response on download restart")
+		}
+		if restartResp.StatusCode != http.StatusOK {
+			bodyBytes, _ := io.ReadAll(
+				io.LimitReader(restartResp.Body, 1024),
+			)
+			restartResp.Body.Close()
+			return redactLocationError(fmt.Errorf(
+				"restart download failed with status %d: %s",
+				restartResp.StatusCode,
+				EscapeText(string(bodyBytes)),
+			), cfg.URL)
+		}
+		resp = restartResp
+		if resp.ContentLength > cfg.sizeLimit() {
+			return cfg.sizeLimitError()
+		}
+		if resp.ContentLength > 0 {
+			totalSize = resp.ContentLength
+		}
+		return nil
+	}
 
 	switch resp.StatusCode {
 	case http.StatusOK:
@@ -1091,10 +1153,6 @@ func downloadSnapshotOnce(
 			resp.Header.Get("Content-Range"),
 		)
 		if rangeStart < 0 || rangeStart != existingSize {
-			resp.Body.Close()
-			// Replace the closed body with a no-op closer
-			// so the deferred resp.Body.Close() is safe.
-			resp.Body = io.NopCloser(strings.NewReader(""))
 			reason := "Content-Range mismatch"
 			if rangeStart < 0 {
 				reason = "Content-Range missing or malformed"
@@ -1105,75 +1163,8 @@ func downloadSnapshotOnce(
 				"expected_start", existingSize,
 				"actual_start", rangeStart,
 			)
-			// Discard partial file and restart from scratch
-			existingSize = 0
-			if err := resetDownloadFile(file); err != nil {
-				return "", fmt.Errorf(
-					"resetting download staging file: %w",
-					err,
-				)
-			}
-			// Re-issue request without Range header
-			req, err = http.NewRequestWithContext(
-				downloadCtx,
-				http.MethodGet,
-				cfg.URL,
-				nil,
-			)
-			if err != nil {
-				return "", fmt.Errorf(
-					"creating restart request: %w",
-					err,
-				)
-			}
-			httpuseragent.Set(req)
-			headerTimer = cfg.newIdleWatchdog(func() {
-				cancelDownload(downloadIdleTimeoutCause(idleTimeout))
-			})
-			resp2, err := client.Do( //nolint:gosec // same URL retried after Content-Range mismatch
-				req,
-			)
-			if headerTimer != nil {
-				headerTimer.Stop()
-				headerTimer = nil
-			}
-			if err != nil {
-				if cause := context.Cause(downloadCtx); errors.Is(
-					cause,
-					errDownloadIdleTimeout,
-				) {
-					return "", fmt.Errorf("restarting download: %w", cause)
-				}
-				return "", fmt.Errorf(
-					"restarting download: %w",
-					redactLocationError(err, cfg.URL),
-				)
-			}
-			if resp2 == nil || resp2.Body == nil {
-				return "", errors.New(
-					"nil response on download restart",
-				)
-			}
-			if resp2.StatusCode != http.StatusOK {
-				bodyBytes, _ := io.ReadAll(
-					io.LimitReader(resp2.Body, 1024),
-				)
-				resp2.Body.Close()
-				return "", redactLocationError(fmt.Errorf(
-					"restart download failed with "+
-						"status %d: %s",
-					resp2.StatusCode,
-					EscapeText(string(bodyBytes)),
-				), cfg.URL)
-			}
-			// Replace the original response body with the
-			// fresh full-download stream.
-			resp.Body = resp2.Body
-			if resp2.ContentLength > cfg.sizeLimit() {
-				return "", cfg.sizeLimitError()
-			}
-			if resp2.ContentLength > 0 {
-				totalSize = resp2.ContentLength
+			if err := restartDownload(); err != nil {
+				return "", err
 			}
 		} else {
 			// Resume supported with matching offset
@@ -1218,11 +1209,15 @@ func downloadSnapshotOnce(
 				)
 			}
 		} else {
-			return "", fmt.Errorf(
-				"server returned 416 without "+
-					"verifiable size for %s",
-				destPath,
+			cfg.Logger.Warn(
+				"download size unavailable, restarting download",
+				"component", "mithril",
+				"path", destPath,
 			)
+			if err := restartDownload(); err != nil {
+				return "", err
+			}
+			break
 		}
 		cfg.Logger.Debug(
 			"download already complete",

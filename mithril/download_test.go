@@ -1962,6 +1962,50 @@ func TestDownloadSnapshotRangeNotSatisfiableMismatchDiscardsPartial(t *testing.T
 	require.Empty(t, entries, "staging files must not be left behind")
 }
 
+// A server may omit Content-Range from a 416 response when a resume offset
+// equals the object's length. Without an expected size, the cached prefix
+// cannot be trusted as complete and must be replaced by a fresh download.
+func TestDownloadSnapshotRangeNotSatisfiableWithoutSizeRestarts(t *testing.T) {
+	t.Parallel()
+	content := []byte("complete archive")
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "archive")
+	require.NoError(t, os.WriteFile(dest, content, 0o600))
+
+	var ranges []string
+	cacheRemovedOnRestart := false
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		ranges = append(ranges, req.Header.Get("Range"))
+		if req.Header.Get("Range") != "" {
+			return &http.Response{
+				StatusCode: http.StatusRequestedRangeNotSatisfiable,
+				Body:       io.NopCloser(strings.NewReader("range rejected")),
+				Header:     make(http.Header),
+			}, nil
+		}
+		_, err := os.Stat(dest)
+		cacheRemovedOnRestart = errors.Is(err, os.ErrNotExist)
+		return &http.Response{
+			StatusCode:    http.StatusOK,
+			Body:          io.NopCloser(bytes.NewReader(content)),
+			ContentLength: int64(len(content)),
+			Header:        make(http.Header),
+		}, nil
+	})}
+
+	path, err := DownloadSnapshot(context.Background(), DownloadConfig{
+		URL: "https://example.test/archive", AllowInsecureHTTP: true,
+		DestDir: dir, Filename: "archive", HTTPClient: client,
+		MaxTransientRetries: -1,
+	})
+	require.NoError(t, err)
+	require.Equal(t, []string{"bytes=16-", ""}, ranges)
+	require.True(t, cacheRemovedOnRestart)
+	got, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, content, got)
+}
+
 // TestDownloadSnapshotFreeSpaceFailureDiscardsPartials pins that a download
 // stopped by the free-space reserve leaves neither its staging file nor the
 // owned partial it resumed from, so disk pressure does not persist.
