@@ -411,3 +411,53 @@ func TestPeerChainSelectionEpochNonceWithholdsUnknownParent(t *testing.T) {
 	require.ErrorIs(t, err, ErrHeaderVerificationWithheld)
 	require.False(t, fork)
 }
+
+// TestPeerForkOpCertCountersClassifiesContextChange covers a snapshot
+// publication or validation transition landing while a candidate's opcert
+// counters are checked. The check ran against a superseded ledger view, so the
+// header must be retried against the new one, even when it extends the local
+// chain; a replaced candidate path is a different condition.
+func TestPeerForkOpCertCountersClassifiesContextChange(t *testing.T) {
+	t.Parallel()
+	f := newForkPathFreshnessFixture(t, 1)
+	connID := ouroboros.ConnectionId{}
+	key := connIdKey(connID)
+	target := f.headers[0]
+	ancestor, path, found, err := f.ls.peerHeaderForkPath(connID, target)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Len(t, path, 1)
+
+	prefix, generation, err := f.ls.peerForkOpCertPrefix(key, ancestor)
+	require.NoError(t, err)
+	require.NotZero(t, generation)
+
+	finish := f.ls.beginTxValidationTransition()
+	_, _, err = f.ls.peerForkOpCertPrefix(key, ancestor)
+	finish()
+	require.ErrorIs(t, err, errHeaderVerificationDeferred)
+	require.True(t, IsHeaderVerificationContextTransient(err),
+		"a transition after the path lookup must retry the header")
+
+	_, _, err = f.ls.peerForkOpCertPrefix(
+		key,
+		ocommon.NewPoint(ancestor.Slot+1, ancestor.Hash),
+	)
+	require.ErrorIs(t, err, errHeaderVerificationDeferred)
+	require.False(t, IsHeaderVerificationContextTransient(err),
+		"a replaced candidate path is not a context change")
+
+	counters := map[lcommon.PoolKeyHash]opCertCounterSnapshot{}
+	f.ls.publishSnapshotsLocked()
+	err = f.ls.commitPeerForkOpCertCounters(
+		key, prefix, ancestor, target, generation, counters,
+	)
+	require.ErrorIs(t, err, errHeaderVerificationDeferred)
+	require.True(t, IsHeaderVerificationContextTransient(err),
+		"a publication during the counter check must retry the header")
+
+	current, _ := f.ls.currentHeaderVerificationContext()
+	require.NoError(t, f.ls.commitPeerForkOpCertCounters(
+		key, prefix, ancestor, target, current, counters,
+	))
+}

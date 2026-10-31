@@ -23,6 +23,7 @@ import (
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
 func (ls *LedgerState) validatePeerForkOpCertCounters(
@@ -66,25 +67,10 @@ func (ls *LedgerState) validatePeerForkOpCertCounters(
 		)
 	}
 
-	generation, contextGeneration := ls.currentHeaderVerificationContext()
 	key := connIdKey(connID)
-	ls.forkHeaderNonceCacheMutex.Lock()
-	prefix, ok := ls.forkHeaderPathCache[key]
-	ls.forkHeaderNonceCacheMutex.Unlock()
-	// A tip-only publication advances generation without changing the
-	// consensus context; headerVerdictInContext is the freshness check.
-	if !ok ||
-		prefix.ancestor.Slot != ancestor.Slot ||
-		!bytes.Equal(prefix.ancestor.Hash, ancestor.Hash) ||
-		!headerVerdictInContext(
-			prefix.generation,
-			contextGeneration,
-			generation,
-		) {
-		return fmt.Errorf(
-			"%w: candidate opcert state changed during header verification",
-			errHeaderVerificationDeferred,
-		)
+	prefix, generation, err := ls.peerForkOpCertPrefix(key, ancestor)
+	if err != nil {
+		return err
 	}
 
 	counters := clonePeerOpCertCounters(prefix.opCertCounters)
@@ -156,10 +142,67 @@ func (ls *LedgerState) validatePeerForkOpCertCounters(
 		}
 	}
 
+	return ls.commitPeerForkOpCertCounters(
+		key,
+		prefix,
+		ancestor,
+		target,
+		generation,
+		counters,
+	)
+}
+
+// peerForkOpCertPrefix returns the cached candidate path that the counter
+// check extends and the generation it runs under. A context that moved since
+// the path was built is a transient condition, retried against the new
+// context; a replaced path is not.
+func (ls *LedgerState) peerForkOpCertPrefix(
+	key string,
+	ancestor ocommon.Point,
+) (peerForkPathPrefix, uint64, error) {
+	generation, contextGeneration := ls.currentHeaderVerificationContext()
+	ls.forkHeaderNonceCacheMutex.Lock()
+	prefix, ok := ls.forkHeaderPathCache[key]
+	ls.forkHeaderNonceCacheMutex.Unlock()
+	if !ok ||
+		prefix.ancestor.Slot != ancestor.Slot ||
+		!bytes.Equal(prefix.ancestor.Hash, ancestor.Hash) {
+		return peerForkPathPrefix{}, 0, fmt.Errorf(
+			"%w: candidate opcert path changed during header verification",
+			errHeaderVerificationDeferred,
+		)
+	}
+	// A tip-only publication advances generation without changing the
+	// consensus context; headerVerdictInContext is the freshness check.
+	if !headerVerdictInContext(
+		prefix.generation,
+		contextGeneration,
+		generation,
+	) {
+		return peerForkPathPrefix{}, 0, fmt.Errorf(
+			"%w: candidate opcert state changed during header verification",
+			errHeaderVerificationContextChanged,
+		)
+	}
+	return prefix, generation, nil
+}
+
+// commitPeerForkOpCertCounters records counters checked through target on
+// the cached path. A generation that moved during the check is transient:
+// the counters were validated against a superseded ledger view, so they are
+// discarded and the header is checked again rather than accepted.
+func (ls *LedgerState) commitPeerForkOpCertCounters(
+	key string,
+	prefix peerForkPathPrefix,
+	ancestor ocommon.Point,
+	target gledger.BlockHeader,
+	generation uint64,
+	counters map[lcommon.PoolKeyHash]opCertCounterSnapshot,
+) error {
 	if !ls.headerCryptoVerificationGenerationCurrent(generation) {
 		return fmt.Errorf(
 			"%w: candidate opcert state changed before commit",
-			errHeaderVerificationDeferred,
+			errHeaderVerificationContextChanged,
 		)
 	}
 	ls.forkHeaderNonceCacheMutex.Lock()
