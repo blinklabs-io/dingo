@@ -178,16 +178,18 @@ func (m *Manager) peekBoundaryDistribution(
 	return pending.distribution
 }
 
-// boundaryChangesEra reports whether the epoch the boundary slot opens runs at
-// a different era than the epoch the snapshot slot closes.
+// boundaryChangesStakeRules reports whether an era-gated stake rule gives a
+// different answer for the epoch the boundary slot opens than for the epoch
+// the snapshot slot closes.
 //
 // Era-sensitive stake rules are resolved against the incoming epoch's era,
 // because cardano-ledger's hard-fork combinator translates the ledger state
 // into that era in extendToSlot before the TICK whose SNAP produces the mark
 // snapshot (ouroboros-consensus HardFork/Combinator/Ledger.hs,
-// applyChainTickLedgerResult). The current such rule is the pointer-address
-// stake gate in database/plugin/metadata/sqlstore/pointer_stake.go: the
-// Babbage->Conway translation rebuilds the instant stake as
+// applyChainTickLedgerResult). The only such rule is the pointer-address
+// stake gate (models.PointerStakeCountedInEra, applied by
+// database/plugin/metadata/sqlstore/pointer_stake.go): the Babbage->Conway
+// translation rebuilds the instant stake as
 // `ConwayInstantStake . sisCredentialStake` (Conway/Translation.hs), dropping
 // sisPtrStake, so the mark snapshot at that boundary carries no pointer stake.
 //
@@ -197,12 +199,19 @@ func (m *Manager) peekBoundaryDistribution(
 // written near the end of the same transaction. Every era lookup it makes
 // therefore resolves the outgoing epoch's era. The persist half runs after that
 // row exists, so it can detect the difference and drop a SNAP-point read that
-// was taken under the wrong era, deferring to the boundary-aware historical
+// was taken under the wrong rule, deferring to the boundary-aware historical
 // reconstruction below, which resolves the era correctly.
+//
+// An era change that leaves the rule unchanged keeps the SNAP-point read. The
+// historical reconstruction scans every delegation and UTxO at the boundary
+// inside the rollover transaction; on mainnet that takes long enough that
+// header verification, which has no stable ledger context while the rollover
+// is in flight, defers every header and the node stops at the last block of
+// the outgoing era.
 //
 // A missing epoch row on either side is not treated as a change: an era that
 // cannot be resolved at all is one no era-gated rule acts on.
-func (m *Manager) boundaryChangesEra(
+func (m *Manager) boundaryChangesStakeRules(
 	txn *database.Txn,
 	evt event.EpochTransitionEvent,
 ) (bool, error) {
@@ -221,7 +230,8 @@ func (m *Manager) boundaryChangesEra(
 	if snapshotEpoch == nil || boundaryEpoch == nil {
 		return false, nil
 	}
-	return snapshotEpoch.EraId != boundaryEpoch.EraId, nil
+	return models.PointerStakeCountedInEra(snapshotEpoch.EraId) !=
+		models.PointerStakeCountedInEra(boundaryEpoch.EraId), nil
 }
 
 // NewManager creates a new snapshot manager.
@@ -809,7 +819,7 @@ func (m *Manager) CaptureEpochBoundarySnapshot(
 
 	distribution := m.takeBoundaryDistribution(txn, evt, expiryEpoch)
 	if distribution != nil {
-		crossed, err := m.boundaryChangesEra(txn, evt)
+		crossed, err := m.boundaryChangesStakeRules(txn, evt)
 		if err != nil {
 			if m.metrics != nil {
 				m.metrics.captureFailureTotal.Inc()
@@ -822,7 +832,8 @@ func (m *Manager) CaptureEpochBoundarySnapshot(
 		if crossed {
 			m.logger.Info(
 				"discarding snap-point stake distribution across an era "+
-					"change; reconstructing at persist time",
+					"change that alters the stake rules; reconstructing at "+
+					"persist time",
 				"component", "snapshot",
 				"epoch", evt.NewEpoch,
 				"boundary_slot", evt.BoundarySlot,
@@ -943,7 +954,7 @@ func (m *Manager) CaptureEpochBoundarySnapshot(
 // undisturbed), falling back to the same historical boundary reconstruction
 // CaptureEpochBoundarySnapshot itself falls back to when nothing is stashed
 // (no ComputeEpochBoundarySnapshot hook installed, or its read failed), and
-// applying the same era-crossing discard rule via boundaryChangesEra.
+// applying the same era-crossing discard rule via boundaryChangesStakeRules.
 //
 // On the peek path this returns byte-for-byte what the later persisted row
 // holds, because both read the one stashed distribution. On the fallback path
@@ -1182,7 +1193,7 @@ func (m *Manager) CurrentBoundarySPOStakeRows(
 
 	distribution := m.peekBoundaryDistribution(txn, evt, expiryEpoch)
 	if distribution != nil {
-		crossed, err := m.boundaryChangesEra(txn, evt)
+		crossed, err := m.boundaryChangesStakeRules(txn, evt)
 		if err != nil {
 			return nil, err
 		}

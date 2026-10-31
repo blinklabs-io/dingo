@@ -17682,7 +17682,11 @@ already reconstructed historically and resolved pointer stake; the SNAP-point
 hook read only this aggregate and did not. The
 SNAP-point read cannot resolve the incoming epoch's era, because it runs before
 that epoch's row is written, so the persist half discards its distribution
-whenever the boundary changes era and reconstructs historically instead; see
+whenever the boundary changes era in a way that flips the pointer-stake gate
+(`models.PointerStakeCountedInEra`, only Babbage->Conway) and reconstructs
+historically instead; an era change that leaves the gate unchanged keeps the
+SNAP-point read, because the reconstruction is slow enough on mainnet to stall
+header verification for the whole rollover. See
 `GetPointerStakeInputsForPools` in `DATABASE.md`. Every
 other consumer of this aggregate -- `GetStakeByPools`, DRep voting power, and a
 `GetRewardStakeInputsForPools` query with `expiryEpoch == 0`, `boundarySlot == 0`
