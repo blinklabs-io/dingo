@@ -165,12 +165,21 @@ func (d *BlobStoreGCS) objects(
 }
 
 func (d *BlobStoreGCS) opContext() (context.Context, context.CancelFunc) {
+	return d.opContextFrom(context.Background())
+}
+
+func (d *BlobStoreGCS) opContextFrom(
+	ctx context.Context,
+) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	timeout := d.timeout
 	if timeout == 0 {
 		timeout = 60 * time.Second
 	}
 	return context.WithTimeout(
-		context.Background(),
+		ctx,
 		timeout,
 	) //nolint:gosec // G118: cancel func is returned to caller
 }
@@ -398,11 +407,21 @@ func (d *BlobStoreGCS) resolveKey(
 
 // Get retrieves a value from GCS within a transaction
 func (d *BlobStoreGCS) Get(txn types.Txn, key []byte) ([]byte, error) {
+	return d.GetContext(context.Background(), txn, key)
+}
+
+// GetContext retrieves a value from GCS within a transaction and allows the
+// caller to cancel the remote request.
+func (d *BlobStoreGCS) GetContext(
+	ctx context.Context,
+	txn types.Txn,
+	key []byte,
+) ([]byte, error) {
 	if err := d.validateTxn(txn); err != nil {
 		return nil, err
 	}
 	t := txn.(*gcsTxn) // safe after validateTxn
-	ctx, cancel := d.opContext()
+	ctx, cancel := d.opContextFrom(ctx)
 	defer cancel()
 	return d.resolveKey(ctx, t, key)
 }

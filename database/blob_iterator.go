@@ -59,6 +59,7 @@ type blobBlockEntry struct {
 // call to NextRaw.
 type BlobBlockIterator struct {
 	db         *Database
+	ctx        context.Context
 	startSlot  uint64
 	endSlot    uint64
 	hasEndSlot bool
@@ -144,6 +145,7 @@ func (d *Database) CanonicalBlocksFromSlot(
 	}
 	return &BlobBlockIterator{
 		db:         d,
+		ctx:        ctx,
 		startSlot:  startSlot,
 		canonical:  true,
 		startIndex: startIndex,
@@ -186,6 +188,12 @@ func (it *BlobBlockIterator) NextRaw() (*BlobBlockResult, error) {
 	}
 
 	for {
+		if it.ctx != nil {
+			if err := it.ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
+
 		// Refill batch if needed
 		if it.batchIdx >= len(it.batch) {
 			if it.exhausted {
@@ -206,15 +214,23 @@ func (it *BlobBlockIterator) NextRaw() (*BlobBlockResult, error) {
 
 		entry := it.batch[it.batchIdx]
 		it.batchIdx++
-		it.currentSlot = entry.slot
-
-		// Fetch CBOR and metadata from blob store
-		cbor, meta, fetchErr := it.fetchBlock(
-			entry.slot,
-			entry.hash,
+		var (
+			cbor []byte
+			meta types.BlockMetadata
 		)
-		if fetchErr != nil {
-			if !it.canonical && errors.Is(fetchErr, types.ErrBlobKeyNotFound) {
+		if it.canonical {
+			var err error
+			entry, cbor, meta, err = it.fetchCanonicalBlock(entry)
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			var fetchErr error
+			cbor, meta, fetchErr = it.fetchBlock(
+				entry.slot,
+				entry.hash,
+			)
+			if errors.Is(fetchErr, types.ErrBlobKeyNotFound) {
 				it.db.logger.Warn(
 					"blob iterator: skipping block with missing CBOR",
 					"slot", entry.slot,
@@ -222,11 +238,14 @@ func (it *BlobBlockIterator) NextRaw() (*BlobBlockResult, error) {
 				)
 				continue
 			}
-			return nil, fmt.Errorf(
-				"fetching block at slot %d: %w",
-				entry.slot, fetchErr,
-			)
+			if fetchErr != nil {
+				return nil, fmt.Errorf(
+					"fetching block at slot %d: %w",
+					entry.slot, fetchErr,
+				)
+			}
 		}
+		it.currentSlot = entry.slot
 		if it.canonical && meta.ID != entry.index {
 			return nil, fmt.Errorf(
 				"canonical block at slot %d has metadata index %d, expected %d",
@@ -351,24 +370,17 @@ func (it *BlobBlockIterator) fetchBatch() error {
 			continue
 		}
 
-		var blockKey []byte
 		var blockIndex uint64
 		if it.canonical {
 			if len(key) != len(prefix)+8 {
 				return fmt.Errorf("invalid canonical block index key: %x", key)
 			}
 			blockIndex = binary.BigEndian.Uint64(key[len(prefix):])
-			var err error
-			blockKey, err = item.ValueCopy(nil)
-			if err != nil {
-				return fmt.Errorf("reading canonical block index %d: %w", blockIndex, err)
-			}
 		} else {
 			// Skip metadata keys
 			if bytes.HasSuffix(key, []byte(types.BlockBlobMetadataKeySuffix)) {
 				continue
 			}
-			blockKey = key
 		}
 
 		// When resuming, skip the exact key we left off at.
@@ -387,35 +399,29 @@ func (it *BlobBlockIterator) fetchBatch() error {
 			break
 		}
 
-		// Parse slot and hash from key
-		point, parseErr := BlockBlobKeyToPoint(blockKey)
-		if parseErr != nil {
-			if it.canonical {
-				return fmt.Errorf(
-					"parsing canonical block index %d value: %w",
-					blockIndex, parseErr,
-				)
-			}
-			it.db.logger.Warn(
-				"blob iterator: skipping unparseable key",
-				"error", parseErr,
-			)
-			continue
-		}
-		if point.Slot < it.startSlot {
-			continue
-		}
-		if it.hasEndSlot && point.Slot > it.endSlot {
-			break
-		}
-
 		entry := blobBlockEntry{
-			key:   make([]byte, len(key)),
-			slot:  point.Slot,
-			hash:  point.Hash,
+			key:   append([]byte(nil), key...),
 			index: blockIndex,
 		}
-		copy(entry.key, key)
+		if !it.canonical {
+			// Parse slot and hash from key
+			point, parseErr := BlockBlobKeyToPoint(key)
+			if parseErr != nil {
+				it.db.logger.Warn(
+					"blob iterator: skipping unparseable key",
+					"error", parseErr,
+				)
+				continue
+			}
+			if point.Slot < it.startSlot {
+				continue
+			}
+			if it.hasEndSlot && point.Slot > it.endSlot {
+				break
+			}
+			entry.slot = point.Slot
+			entry.hash = point.Hash
+		}
 
 		batch = append(batch, entry)
 		if len(batch) >= blobIteratorBatchSize {
@@ -441,6 +447,70 @@ func (it *BlobBlockIterator) fetchBatch() error {
 
 	scanned = true
 	return nil
+}
+
+type contextBlobGetter interface {
+	GetContext(context.Context, types.Txn, []byte) ([]byte, error)
+}
+
+// fetchCanonicalBlock reads and validates one canonical index value when its
+// block is requested, then reads the body in the same transaction. Keeping
+// value reads out of fetchBatch prevents a remote store from issuing a full
+// batch of serial GETs before returning the first block.
+func (it *BlobBlockIterator) fetchCanonicalBlock(
+	entry blobBlockEntry,
+) (blobBlockEntry, []byte, types.BlockMetadata, error) {
+	store := it.batchStore
+	if store == nil {
+		return entry, nil, types.BlockMetadata{}, types.ErrBlobStoreUnavailable
+	}
+	ctx := nonNilContext(it.ctx)
+	if err := ctx.Err(); err != nil {
+		return entry, nil, types.BlockMetadata{}, err
+	}
+
+	txn := store.NewTransaction(false)
+	defer txn.Rollback() //nolint:errcheck
+
+	var (
+		blockKey []byte
+		err      error
+	)
+	if getter, ok := store.(contextBlobGetter); ok {
+		blockKey, err = getter.GetContext(ctx, txn, entry.key)
+	} else {
+		blockKey, err = store.Get(txn, entry.key)
+	}
+	if err != nil {
+		return entry, nil, types.BlockMetadata{}, fmt.Errorf(
+			"reading canonical block index %d: %w", entry.index, err,
+		)
+	}
+	if err := ctx.Err(); err != nil {
+		return entry, nil, types.BlockMetadata{}, err
+	}
+	point, err := BlockBlobKeyToPoint(blockKey)
+	if err != nil {
+		return entry, nil, types.BlockMetadata{}, fmt.Errorf(
+			"parsing canonical block index %d value: %w",
+			entry.index, err,
+		)
+	}
+	if point.Slot < it.startSlot {
+		return entry, nil, types.BlockMetadata{}, fmt.Errorf(
+			"canonical block index %d points backward to slot %d before start slot %d",
+			entry.index, point.Slot, it.startSlot,
+		)
+	}
+	entry.slot = point.Slot
+	entry.hash = point.Hash
+	cbor, meta, err := store.GetBlock(txn, entry.slot, entry.hash)
+	if err != nil {
+		return entry, nil, types.BlockMetadata{}, fmt.Errorf(
+			"fetching block at slot %d: %w", entry.slot, err,
+		)
+	}
+	return entry, cbor, meta, nil
 }
 
 // fetchBlock retrieves the raw CBOR bytes and metadata for a block.

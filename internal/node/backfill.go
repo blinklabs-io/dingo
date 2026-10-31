@@ -613,7 +613,9 @@ func (b *Backfill) recoverNonce(lastSlot uint64) {
 	// Get the block at lastSlot to look up its stored nonce
 	it := b.db.BlocksFromSlot(lastSlot)
 	defer it.Close()
-	blk, err := it.NextRaw()
+	// This iterator walks local block keys and performs no context-aware
+	// canonical index read.
+	blk, err := it.NextRaw() //nolint:contextcheck
 	if err != nil || blk == nil || blk.Slot != lastSlot {
 		b.logger.Warn(
 			"cannot find block for nonce recovery, "+
@@ -1016,8 +1018,9 @@ func (b *Backfill) Run(ctx context.Context) error {
 				"batch_byte_limit", DefaultBackfillBatchBytes,
 			)
 			// Recover running nonce from the last processed
-			// block so nonce computation can continue.
-			b.recoverNonce(cp.LastSlot)
+			// block so nonce computation can continue. The lookup uses the
+			// noncanonical local block iterator described in recoverNonce.
+			b.recoverNonce(cp.LastSlot) //nolint:contextcheck
 
 			// Set epoch tracking to resume point.
 			epochId, eraId := b.slotToEpoch(cp.LastSlot)
@@ -1141,7 +1144,9 @@ func (b *Backfill) Run(ctx context.Context) error {
 		}
 
 		readDecodeStart := time.Now()
-		blk, err := it.NextRaw()
+		// CanonicalBlocksFromSlot binds ctx to the iterator so NextRaw can
+		// cancel a remote canonical index value read.
+		blk, err := it.NextRaw() //nolint:contextcheck
 		if err != nil {
 			saveCommittedCheckpoint()
 			return fmt.Errorf("iterating blocks: %w", err)

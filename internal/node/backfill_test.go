@@ -1377,6 +1377,65 @@ func TestRun_RejectsMissingCanonicalBlockBody(t *testing.T) {
 	assert.Zero(t, checkpoint.LastSlot)
 }
 
+func TestRun_ResumeRejectsBackwardCanonicalBlockMapping(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	blocks, err := testfixtures.GenerateConwayChainAt(1, 0, 4)
+	require.NoError(t, err)
+	ids := []uint64{
+		database.BlockInitialIndex,
+		database.BlockInitialIndex + 1,
+		1000,
+		1001,
+	}
+	for i, block := range blocks {
+		require.NoError(t, db.BlockCreate(models.Block{
+			ID:     ids[i],
+			Slot:   block.SlotNumber(),
+			Hash:   block.Hash().Bytes(),
+			Number: block.BlockNumber(),
+			Cbor:   block.Cbor(),
+			Type:   uint(block.Type()),
+		}, nil))
+	}
+
+	now := time.Now()
+	require.NoError(t, db.Metadata().SetBackfillCheckpoint(
+		&models.BackfillCheckpoint{
+			Phase:      BackfillPhase,
+			LastSlot:   1,
+			TotalSlots: 3,
+			StartedAt:  now,
+			UpdatedAt:  now,
+			Completed:  false,
+		},
+		nil,
+	))
+	backwardKey := types.BlockBlobKey(
+		blocks[1].SlotNumber(), blocks[1].Hash().Bytes(),
+	)
+	txn := db.BlobTxn(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		return txn.BlobStore().Set(
+			txn.Blob(), types.BlockBlobIndexKey(ids[2]), backwardKey,
+		)
+	}))
+
+	bf := NewBackfill(db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	err = bf.Run(context.Background())
+	require.ErrorContains(t, err, "points backward to slot 1 before start slot 2")
+
+	checkpoint, checkpointErr := db.Metadata().GetBackfillCheckpoint(
+		BackfillPhase,
+		nil,
+	)
+	require.NoError(t, checkpointErr)
+	require.NotNil(t, checkpoint)
+	assert.False(t, checkpoint.Completed)
+	assert.Equal(t, uint64(1), checkpoint.LastSlot)
+}
+
 // TestRun_ResumeStopsAtRecordedMithrilAnchor covers a Mithril API backfill
 // resumed by `dingo serve`, which calls Run without SetEndSlot. Blocks after
 // the recorded ledger anchor belong to ledger replay: a historical pass over

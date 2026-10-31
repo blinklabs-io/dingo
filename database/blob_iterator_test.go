@@ -17,13 +17,72 @@ package database
 import (
 	"context"
 	"crypto/rand"
+	"encoding/binary"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type canonicalReadCountingItem struct {
+	types.BlobItem
+	valueReads *int
+}
+
+func (i canonicalReadCountingItem) ValueCopy(dst []byte) ([]byte, error) {
+	(*i.valueReads)++
+	return i.BlobItem.ValueCopy(dst)
+}
+
+type canonicalReadCountingIterator struct {
+	types.BlobIterator
+	valueReads *int
+}
+
+func (i canonicalReadCountingIterator) Item() types.BlobItem {
+	item := i.BlobIterator.Item()
+	if item == nil {
+		return nil
+	}
+	return canonicalReadCountingItem{
+		BlobItem:   item,
+		valueReads: i.valueReads,
+	}
+}
+
+type canonicalReadCountingStore struct {
+	blob.BlobStore
+	valueReads   int
+	contextReads int
+	readStarted  chan struct{}
+}
+
+func (s *canonicalReadCountingStore) NewIterator(
+	txn types.Txn,
+	opts types.BlobIteratorOptions,
+) types.BlobIterator {
+	return canonicalReadCountingIterator{
+		BlobIterator: s.BlobStore.NewIterator(txn, opts),
+		valueReads:   &s.valueReads,
+	}
+}
+
+func (s *canonicalReadCountingStore) GetContext(
+	ctx context.Context,
+	txn types.Txn,
+	key []byte,
+) ([]byte, error) {
+	s.contextReads++
+	if s.readStarted != nil {
+		close(s.readStarted)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	return s.BlobStore.Get(txn, key)
+}
 
 // newTestDB creates an in-memory Database instance for testing.
 func newTestDB(t *testing.T) *Database {
@@ -154,6 +213,62 @@ func TestCanonicalBlobBlockIterator_PreservesHistoryExpiry(t *testing.T) {
 	result, err := iter.NextRaw()
 	assert.Nil(t, result)
 	require.ErrorIs(t, err, types.ErrHistoryExpired)
+}
+
+func TestCanonicalBlobBlockIteratorReadsOneIndexValuePerBlock(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	for i := range blobIteratorBatchSize {
+		hash := make([]byte, 32)
+		binary.BigEndian.PutUint64(hash[24:], uint64(i+1))
+		insertTestBlock(
+			t, db, uint64(i), hash, []byte{0x82, byte(i)},
+		)
+	}
+	iter, err := db.CanonicalBlocksFromSlot(t.Context(), 0)
+	require.NoError(t, err)
+	t.Cleanup(iter.Close)
+
+	base := db.Blob()
+	store := &canonicalReadCountingStore{BlobStore: base}
+	db.SetBlobStore(store)
+	t.Cleanup(func() { db.SetBlobStore(base) })
+
+	result, err := iter.NextRaw()
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Zero(t, store.valueReads)
+	require.Equal(t, 1, store.contextReads)
+}
+
+func TestCanonicalBlobBlockIteratorCancelsIndexValueRead(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	insertTestBlock(t, db, 1, randomHash(t), []byte{0x82, 0x01})
+	ctx, cancel := context.WithCancel(t.Context())
+	iter, err := db.CanonicalBlocksFromSlot(ctx, 0)
+	require.NoError(t, err)
+	t.Cleanup(iter.Close)
+
+	base := db.Blob()
+	store := &canonicalReadCountingStore{
+		BlobStore:   base,
+		readStarted: make(chan struct{}),
+	}
+	db.SetBlobStore(store)
+	t.Cleanup(func() { db.SetBlobStore(base) })
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, nextErr := iter.NextRaw()
+		errCh <- nextErr
+	}()
+	<-store.readStarted
+	cancel()
+	require.ErrorIs(t, <-errCh, context.Canceled)
+	require.Equal(t, 1, store.contextReads)
 }
 
 // collectIterSlots drains a BlobBlockIterator via NextRaw and returns

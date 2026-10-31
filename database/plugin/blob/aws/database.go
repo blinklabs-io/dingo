@@ -164,12 +164,21 @@ func NewWithOptions(opts ...BlobStoreS3OptionFunc) (*BlobStoreS3, error) {
 }
 
 func (d *BlobStoreS3) opContext() (context.Context, context.CancelFunc) {
+	return d.opContextFrom(context.Background())
+}
+
+func (d *BlobStoreS3) opContextFrom(
+	ctx context.Context,
+) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	timeout := d.timeout
 	if timeout == 0 {
 		timeout = 60 * time.Second
 	}
 	return context.WithTimeout(
-		context.Background(),
+		ctx,
 		timeout,
 	) //nolint:gosec // G118: cancel func is returned to caller
 }
@@ -298,11 +307,21 @@ func (d *BlobStoreS3) resolveKey(
 
 // Get retrieves a value from S3 within a transaction
 func (d *BlobStoreS3) Get(txn types.Txn, key []byte) ([]byte, error) {
+	return d.GetContext(context.Background(), txn, key)
+}
+
+// GetContext retrieves a value from S3 within a transaction and allows the
+// caller to cancel the remote request.
+func (d *BlobStoreS3) GetContext(
+	ctx context.Context,
+	txn types.Txn,
+	key []byte,
+) ([]byte, error) {
 	t, err := d.validateTxn(txn)
 	if err != nil {
 		return nil, err
 	}
-	ctx, cancel := d.opContext()
+	ctx, cancel := d.opContextFrom(ctx)
 	defer cancel()
 	return d.resolveKey(ctx, t, key)
 }

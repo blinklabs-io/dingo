@@ -3384,7 +3384,10 @@ point in the replay range must resolve to a block body whose metadata ID
 matches the index key. A missing body, an expired-history tombstone, or a
 mismatched index stops backfill before later blocks are applied; the current
 transaction is rolled back and the checkpoint remains at the last committed
-block.
+block. Index keys are listed in bounded batches, while their values are read
+one at a time as replay consumes each block so a cancelled remote read cannot
+be amplified across a whole batch. On resume, an index value that points to a
+slot before the requested start also stops the run instead of being skipped.
 
 `Database.CountBlocksAndOldestSlot` (`database/block_inventory.go`) reads the retained block count and oldest retained slot from the checksummed `dingo:block-inventory:v1` blob record. `database.New` creates the record and an ordered retained-block membership index before the database becomes available, scanning legacy block content once only when the record is absent. Block insert, delete, history-expiry tombstone, rollback, truncate, and orphan cleanup paths update both in the same blob transaction as the block mutation. Stores without optimistic write-conflict detection serialize block-inventory mutations before opening backend transactions; conflict-detecting stores rely on backend write conflicts to prevent lost updates. Deleting or tombstoning the current oldest block seeks the first membership key to resolve its successor, including another retained block at the same slot, without walking block content. Bark's `GetDatabaseInfo` reads this record and never walks the block keyspace in request handling.
 
