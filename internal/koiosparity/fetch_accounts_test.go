@@ -1683,12 +1683,14 @@ func TestBuildAccountAddressUniverseUnionsKoiosAndDingo(t *testing.T) {
 		Spendable:     true,
 	}).Error)
 
-	wantAddr, err := StakeAddressFromCredential(stakingKey, 0)
+	wantAddr, err := StakeAddressFromCredential(
+		"preview", stakingKey, 0)
 	require.NoError(t, err)
 
 	koiosAddrs := []string{"stake1koiosonly"}
 	universe, err := BuildAccountAddressUniverse(
 		context.Background(),
+		"preview",
 		dingo,
 		99,
 		koiosAddrs,
@@ -1707,6 +1709,7 @@ func TestBuildAccountAddressUniverseNilSourceIsKoiosOnly(t *testing.T) {
 
 	universe, err := BuildAccountAddressUniverse(
 		context.Background(),
+		"preview",
 		nil,
 		99,
 		[]string{"stake1a", "stake1b"},

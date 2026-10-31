@@ -321,6 +321,10 @@ type ChainsyncConfig struct {
 // GenesisBootstrapConfig holds configuration for Genesis-mode chain
 // selection and bootstrap-time peer promotion.
 type GenesisBootstrapConfig struct {
+	// ControlGroups overrides network relay control metadata. Nil selects network
+	// defaults; an explicit empty list disables those defaults.
+	ControlGroups []topology.PeerControlGroup `yaml:"controlGroups" ignored:"true"`
+
 	// Enabled controls whether Genesis bootstrap mode is used when the node
 	// starts from origin.
 	Enabled bool `yaml:"enabled"                     envconfig:"DINGO_GENESIS_BOOTSTRAP_ENABLED"`
@@ -375,8 +379,9 @@ type HistoryExpiryConfig struct {
 type KoiosParityConfig struct {
 	// Enabled subscribes the observer to epoch.transition when true.
 	Enabled bool `yaml:"enabled"              envconfig:"DINGO_KOIOS_PARITY_ENABLED"`
-	// Network is the Koios network to validate against: "preview" or
-	// "preprod". Empty defaults to the node's own configured Network.
+	// Network is the Koios network to validate against: "preview",
+	// "preprod" or "mainnet". Empty defaults to the node's own configured
+	// Network.
 	Network string `yaml:"network"              envconfig:"DINGO_KOIOS_PARITY_NETWORK"`
 	// CachePath is the Koios reference cache.db path. Empty defaults to
 	// {DatabasePath}/.koios/cache.db, matching cmd/koios-parity's own
@@ -1099,7 +1104,8 @@ type Config struct {
 	// to advertise known peers to other nodes on request. Pointer
 	// distinguishes "operator did not set this" (nil) from "explicitly
 	// false". On a block producer the resolved default is false unless
-	// this field is explicitly set to true.
+	// this field is explicitly set to true. Otherwise the default is the
+	// cardano-node config.json PeerSharing value, or true when that is unset.
 	PeerSharing *bool `yaml:"peerSharing" envconfig:"DINGO_PEER_SHARING"`
 
 	// Storage mode: "core" (default) or "api".
@@ -1622,7 +1628,7 @@ func newDefaultConfig() *Config {
 		// Defaults for database worker pool and API backfill tuning
 		DatabaseWorkers:   5,
 		DatabaseQueueSize: 50,
-		BackfillBatchSize: 100,
+		BackfillBatchSize: 200,
 		// CIP-50 default L (feature disabled by default via PledgeLeverageEnabled)
 		PledgeLeverage: 100,
 		// Cache configuration defaults
@@ -1764,6 +1770,9 @@ func cloneConfig(cfg *Config) *Config {
 		return nil
 	}
 	clone := *cfg
+	clone.GenesisBootstrap.ControlGroups = topology.ClonePeerControlGroups(
+		cfg.GenesisBootstrap.ControlGroups,
+	)
 	clone.TokenRegistry.HeaderSecrets = maps.Clone(cfg.TokenRegistry.HeaderSecrets)
 	clone.BarkBlockDownloadHosts = append(
 		[]string(nil),

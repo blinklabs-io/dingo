@@ -158,6 +158,10 @@ type Peer struct {
 	// discovery metadata. Empty means this peer cannot establish an
 	// independent Genesis corroboration witness.
 	CorroborationIdentity string
+	// A tracked bearer may lose configured trust, but cannot be renamed to an
+	// independent operator while its previously delivered frontier is retained.
+	configuredControlIdentity string
+	configuredControlConflict bool
 
 	// Inbound admission metadata (phase 2). These fields are only
 	// populated on inbound arrivals, but they live on every Peer so that

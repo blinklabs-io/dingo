@@ -22,7 +22,9 @@ import "log/slog"
 // PeerSharing defaults to off and only the Dingo-native flag can turn it
 // on; cardano-node config.json is ignored. Off block-producers, the
 // cardano-node value acts as a fallback default when the Dingo-native
-// value is unconfigured.
+// value is unconfigured, and absent that PeerSharing defaults to on, as in
+// the reference node. The handshake only negotiates peer sharing when both
+// sides advertise it, so a node advertising none can never request peers.
 //
 // The reason this lives at the node-startup boundary rather than inside the
 // ouroboros wrapper or the gouroboros library: PeerSharing leaks topology
@@ -68,5 +70,5 @@ func resolvePeerSharing(
 		}
 		return *cardanoNode
 	}
-	return false
+	return true
 }

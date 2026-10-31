@@ -2849,14 +2849,25 @@ func (n *Node) chainsyncConfig() chainsync.Config {
 		if !active {
 			return 0
 		}
-		if window > uint64(math.MaxInt) {
-			return math.MaxInt
-		}
-		// The MaxInt check above makes this conversion safe on both 32- and
-		// 64-bit platforms.
-		return int(window) //nolint:gosec // G115: window is bounded by MaxInt
+		return chainselection.GenesisCandidateHeaderLimit(
+			window,
+			n.shelleySecurityParam(),
+		)
 	}
 	return chainsyncCfg
+}
+
+// shelleySecurityParam returns the Shelley genesis security parameter, or zero
+// when it is unknown.
+func (n *Node) shelleySecurityParam() uint64 {
+	if n.config.cardanoNodeConfig == nil {
+		return 0
+	}
+	sg := n.config.cardanoNodeConfig.ShelleyGenesis()
+	if sg == nil || sg.SecurityParam <= 0 {
+		return 0
+	}
+	return uint64(sg.SecurityParam) //nolint:gosec // checked positive above
 }
 
 // wireDeferredRewardStakeInputs lets the authoritative boundary capture leave

@@ -171,6 +171,7 @@ func accountUniverseFresh(fetchedAt, notBefore time.Time) bool {
 // allowed to abort fetch for every other, well-formed account.
 func BuildAccountAddressUniverse(
 	ctx context.Context,
+	network string,
 	source RewardParitySource,
 	stakeEpoch uint64,
 	koiosAddrs []string,
@@ -200,6 +201,7 @@ func BuildAccountAddressUniverse(
 			continue
 		}
 		addr, addrErr := StakeAddressFromCredential(
+			network,
 			row.StakingKey,
 			row.CredentialTag,
 		)
@@ -751,6 +753,7 @@ func FetchEpochAccountsWithAddrs(
 	}
 	universe, err := BuildAccountAddressUniverse(
 		ctx,
+		network,
 		source,
 		stakeEpoch,
 		koiosAddrs,

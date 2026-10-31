@@ -636,6 +636,10 @@ func ImportLedgerState(
 			)
 		}
 	}
+	rewardLiveStakeCursor, rewardLiveStakeStarted, err := models.RewardLiveStakeImportCursor(completedPhase)
+	if err != nil {
+		return fmt.Errorf("loading reward live stake checkpoint: %w", err)
+	}
 
 	cfg.Logger.Info(
 		"starting ledger state import",
@@ -986,25 +990,94 @@ func ImportLedgerState(
 		}
 	}
 
-	// RebuildRewardLiveStake is a full-table rebuild in a single expensive
-	// transaction. Check cancellation before starting; the rebuild also checks
-	// the caller context between SQL batches.
-	if err := ctx.Err(); err != nil {
-		return fmt.Errorf(
-			"cancelled before rebuilding reward live stake: %w",
-			err,
+	if !models.IsPhaseCompleted(
+		completedPhase,
+		models.ImportPhaseRewardLiveStake,
+	) {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf(
+				"cancelled before rebuilding reward live stake: %w",
+				err,
+			)
+		}
+		if cfg.ImportKey != "" && !cfg.Reconcile {
+			err := cfg.Database.RebuildRewardLiveStakeResumable(
+				ctx,
+				slot,
+				rewardLiveStakeCursor,
+				rewardLiveStakeStarted,
+				func(
+					txn *database.Txn,
+					cursor []byte,
+					current int64,
+					total int64,
+					done bool,
+				) error {
+					phase := models.RewardLiveStakeImportCheckpoint(cursor)
+					if done {
+						phase = models.ImportPhaseRewardLiveStake
+					}
+					if err := cfg.Database.Metadata().SetImportCheckpoint(
+						&models.ImportCheckpoint{
+							ImportKey: cfg.ImportKey,
+							Phase:     phase,
+						},
+						txn.Metadata(),
+					); err != nil {
+						return fmt.Errorf(
+							"saving reward live stake checkpoint: %w",
+							err,
+						)
+					}
+					return nil
+				},
+				func(
+					_ []byte,
+					current int64,
+					total int64,
+					done bool,
+				) {
+					percent := float64(0)
+					if total > 0 {
+						percent = float64(current) / float64(total) * 100
+					} else if done {
+						percent = 100
+					}
+					// #nosec G115 -- progress counts cannot exceed addressable rows.
+					progress(ImportProgress{
+						Stage:       "reward_live_stake",
+						Current:     int(current),
+						Total:       int(total),
+						Percent:     percent,
+						Description: "rebuilding reward live stake",
+					})
+				},
+			)
+			if err != nil {
+				return fmt.Errorf("rebuilding reward live stake: %w", err)
+			}
+		} else {
+			if err := cfg.Database.RebuildRewardLiveStake(
+				ctx,
+				slot,
+				nil,
+			); err != nil {
+				return fmt.Errorf("rebuilding reward live stake: %w", err)
+			}
+			progress(ImportProgress{
+				Stage:       "reward_live_stake",
+				Current:     1,
+				Total:       1,
+				Percent:     100,
+				Description: "reward live stake rebuilt",
+			})
+		}
+	} else {
+		cfg.Logger.Info(
+			"skipping reward live stake rebuild (already completed)",
+			"component", "ledgerstate",
 		)
 	}
-	if err := cfg.Database.RebuildRewardLiveStake(ctx, slot, nil); err != nil {
-		return fmt.Errorf("rebuilding reward live stake: %w", err)
-	}
-	progress(ImportProgress{
-		Stage:       "reward_live_stake",
-		Current:     1,
-		Total:       1,
-		Percent:     100,
-		Description: "reward live stake rebuilt",
-	})
 
 	// Set the chain tip
 	if !models.IsPhaseCompleted(

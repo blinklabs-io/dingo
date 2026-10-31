@@ -15,6 +15,8 @@
 package metadata
 
 import (
+	"math/big"
+
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 )
@@ -33,12 +35,13 @@ type HistoryStore interface {
 	// transactions in the inclusive slot range put on chain: the outputs of a
 	// valid transaction, or the collateral return of an invalid one. Spent
 	// outputs count only while the store retains them, which holds in API
-	// storage mode.
+	// storage mode. The total is not bounded by the circulating supply because
+	// the same lovelace can be transferred repeatedly. On success it is non-nil.
 	SumTransactionOutputsInSlotRange(
 		startSlot uint64,
 		endSlot uint64,
 		txn types.Txn,
-	) (uint64, error)
+	) (*big.Int, error)
 
 	// GetBlockHashesInSlotRange returns the hashes of canonical blocks in the
 	// inclusive slot range ordered by slot, along with the unpaginated count.

@@ -882,10 +882,9 @@ type NetworkIngestHoldTracker interface {
 // arrive after teardown.
 type ConnectionLiveFunc func(ouroboros.ConnectionId) bool
 
-// ForgedBlockChecker is an interface for checking whether the local
-// node recently forged a block for a given slot. This is used by
-// chainsync to detect slot battles when an incoming block from a
-// peer occupies the same slot as a locally forged block.
+// ForgedBlockChecker is an interface for checking whether the local node
+// recently forged a block for a given slot. Chainsync uses it to attribute the
+// local side of same-slot and restricted-window Praos battles.
 type ForgedBlockChecker interface {
 	// WasForgedByUs returns the block hash and true if the local node
 	// forged a block for the given slot, or nil and false otherwise.
@@ -1405,9 +1404,14 @@ type LedgerState struct {
 	// evalAdmission bounds concurrent EvaluateTx calls globally and per remote
 	// source. Nil means unbounded.
 	evalAdmission *evaluationLimiter
-	metrics       stateMetrics
-	consensus     atomic.Pointer[consensusSnapshot]
-	tip           atomic.Pointer[tipSnapshot]
+	// utxoWholeAdmission permits one complete GetUTxOWhole materialization at
+	// a time. It is initialized lazily so test-only LedgerState values that do
+	// not use NewLedgerState receive the same admission bound.
+	utxoWholeAdmission     chan struct{}
+	utxoWholeAdmissionOnce sync.Once
+	metrics                stateMetrics
+	consensus              atomic.Pointer[consensusSnapshot]
+	tip                    atomic.Pointer[tipSnapshot]
 	// tachysMu serializes construction of the full public leader selector.
 	// The cache is bounded to the same three-epoch window as pool snapshots
 	// and keyed by the published consensus context so rollback or state
@@ -1421,6 +1425,9 @@ type LedgerState struct {
 	// publication, so a reader waiting for the ledger to advance can block
 	// until the published state changes instead of polling it.
 	snapshotPublished atomic.Pointer[chan struct{}]
+	// forkForecastSummaries caches fork-anchored forecast summaries for the
+	// current consensus snapshot. See forecastSummaryFrom.
+	forkForecastSummaries atomic.Pointer[forkForecastSummaries]
 	// txValidationSettled is closed and replaced after every snapshot
 	// publication and every finished validation transition: the two events
 	// that can turn a non-current validation session current again.
@@ -2246,6 +2253,9 @@ type LedgerState struct {
 	forkHeaderNonceCacheMutex sync.Mutex
 	forkHeaderNonceCache      map[string]map[uint64]peerForkNoncePrefix
 	forkHeaderPathCache       map[string]peerForkPathPrefix
+	// onPeerForkAncestorStateCheck, when set by a test, observes each
+	// ledger-state verification of a peer fork ancestor.
+	onPeerForkAncestorStateCheck func(slot uint64)
 	// Test hook for fork ancestor lookups.
 	lookupBlockByHash func([]byte) (models.Block, error)
 	// Test hook called after Close releases the blockfetch continuation mutex
@@ -7357,10 +7367,14 @@ func (ls *LedgerState) ledgerReadChainIterator(
 					// clears, so the pair confines the wait to initial
 					// catch-up, where rollbacks are rare and no forging
 					// depends on them.
+					// Applying the drained network frontier can publish the state the
+					// next header needs. Offline import keeps its gap coalescing.
 					if len(rawBatch) > 0 && len(rawBatch) < cap(rawBatch) &&
 						coalesceAttempts < gatherCoalesceMaxAttempts &&
 						gapAttempts < gatherCoalesceMaxGapAttempts &&
 						!ls.reachedTip.Load() &&
+						(ls.config.GetActiveConnectionFunc == nil ||
+							ls.chain == nil || ls.chain.HeaderCount() > 0) &&
 						!nearKnownUpstreamTip(
 							rawBatch[len(rawBatch)-1].Slot,
 							upstreamTipSlot,

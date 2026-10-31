@@ -78,6 +78,13 @@ type Pool struct {
 // scan. Worth the write cost for a one-shot query behind
 // `leadership-schedule`; it would not be for something on a hot path.
 //
+// The per-pool slot-bounded lookups (LatestPoolOpCertSequenceAfter,
+// AtOrBefore and InRange) read it too, and those do sit on header and block
+// validation. Each takes a lone MAX(sequence), descends the pool's entries
+// from the highest counter, and stops at the first row inside the slot bound.
+// Counters rise with slot on a valid chain, so the cost is the pool's rows
+// above the bound rather than every row at or below it.
+//
 // Migration v1 declares it; the schema lives in SQL rather than in tags on this
 // struct.
 type PoolOpCertSequence struct {
