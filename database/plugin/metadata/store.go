@@ -1445,10 +1445,14 @@ type StakeSnapshotStore interface {
 	// boundary, and none of the POOLREAP/MIR/enactment credits that follow it.
 	// Only the epoch-boundary mark-snapshot fallback may use this; use
 	// GetStakeByPoolsAtSlot for a plain "stake at slot" query.
+	// incomingEraID supplies the hard-fork result when the caller is inside the
+	// rollover transaction before the incoming epoch row has been inserted;
+	// nil resolves it from the epoch table.
 	GetEpochBoundaryStakeByPools(
 		[][]byte, // poolKeyHashes
 		uint64, // snapshotSlot
 		uint64, // boundarySlot
+		*uint, // incomingEraID (nil resolves it from epoch rows)
 		uint64, // expiryEpoch (0 = gate off)
 		uint64, // inactivityPeriod
 		types.Txn,
@@ -1465,6 +1469,7 @@ type StakeSnapshotStore interface {
 		[][]byte, // poolKeyHashes
 		uint64, // snapshotSlot
 		uint64, // boundarySlot
+		*uint, // incomingEraID (nil resolves it from epoch rows)
 		uint64, // expiryEpoch (0 = gate off)
 		uint64, // inactivityPeriod
 		types.Txn,
