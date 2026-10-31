@@ -59,3 +59,19 @@ func TestStartWithoutRegistryLeavesMetricsDisabled(t *testing.T) {
 	t.Cleanup(func() { assert.NoError(t, store.Stop()) })
 	assert.Nil(t, store.promRegistry)
 }
+
+func TestNewRejectsOnDiskCompressionWithoutBlockCache(t *testing.T) {
+	t.Parallel()
+	store, err := New(
+		WithDataDir(t.TempDir()),
+		WithBlockCacheSize(0),
+		WithCompressionEnabled(true),
+		WithDeferOpen(),
+	)
+	require.Nil(t, store)
+	require.EqualError(
+		t,
+		err,
+		"badger block cache size must be greater than zero when compression is enabled",
+	)
+}
