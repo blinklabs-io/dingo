@@ -319,12 +319,13 @@ func TestQueryShelleyDebugChainDepState_TPraosEraUsesTPraosLayout(
 		},
 		*decoded.EpochNonce,
 	)
+	// The shared decoder names TPraos's previous hash nonce PreviousEpochNonce.
 	require.NotNil(t, decoded.PreviousEpochNonce)
 	assert.Equal(
 		t,
 		lcommon.Nonce{
 			Type:  lcommon.NonceTypeNonce,
-			Value: [32]byte(bytes.Repeat([]byte{3}, 32)),
+			Value: [32]byte(bytes.Repeat([]byte{5}, 32)),
 		},
 		*decoded.PreviousEpochNonce,
 	)

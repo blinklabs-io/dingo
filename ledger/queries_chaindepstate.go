@@ -71,10 +71,11 @@ type tpraosPrtclState struct {
 	CandidateNonce lcommon.Nonce
 }
 
+// TICKN retains the previous hash nonce, not the previous epoch nonce.
 type tpraosTicknState struct {
 	cbor.StructAsArray
-	EpochNonce         lcommon.Nonce
-	PreviousEpochNonce lcommon.Nonce
+	EpochNonce        lcommon.Nonce
+	PreviousHashNonce lcommon.Nonce
 }
 
 type tpraosLedgerState struct {
@@ -362,8 +363,8 @@ func (ls *LedgerState) queryShelleyDebugChainDepState(
 						CandidateNonce: candidateNonce,
 					},
 					TicknState: tpraosTicknState{
-						EpochNonce:         state.EpochNonce,
-						PreviousEpochNonce: state.PreviousEpochNonce,
+						EpochNonce:        state.EpochNonce,
+						PreviousHashNonce: state.LastEpochBlockNonce,
 					},
 					LabNonce: state.LabNonce,
 				},
