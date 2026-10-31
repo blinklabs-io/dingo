@@ -107,7 +107,7 @@ func TestGenesisControlGroupsPublicNetworkDefaults(t *testing.T) {
 				got = append(got, g.Identity)
 			}
 			require.Equal(t, identities, got)
-			for _, name := range []string{"ShelleyGenesisHash", "ByronGenesisHash", "AlonzoGenesisHash", "ConwayGenesisHash"} {
+			for _, name := range []string{"ShelleyGenesisHash", "ByronGenesisHash", "AlonzoGenesisHash", "ConwayGenesisHash", "DijkstraGenesisHash"} {
 				field := reflect.ValueOf(cfg).Elem().FieldByName(name)
 				original := field.String()
 				field.SetString("private genesis")
@@ -179,9 +179,18 @@ func TestEffectiveGenesisCorroborationPeers(t *testing.T) {
 	})
 	t.Run("private genesis keeps the threshold", func(t *testing.T) {
 		t.Parallel()
-		n := newNode(t, "prime-testnet", 1)
-		n.config.cardanoNodeConfig.ShelleyGenesisHash = "private genesis"
-		require.Equal(t, 1, n.effectiveGenesisCorroborationPeers())
+		for _, name := range []string{"ShelleyGenesisHash", "ByronGenesisHash", "AlonzoGenesisHash", "ConwayGenesisHash", "DijkstraGenesisHash"} {
+			n := newNode(t, "prime-testnet", 1)
+			reflect.ValueOf(n.config.cardanoNodeConfig).Elem().
+				FieldByName(name).SetString("private genesis")
+			require.Equal(
+				t,
+				1,
+				n.effectiveGenesisCorroborationPeers(),
+				"private %s cannot inherit density-only selection",
+				name,
+			)
+		}
 	})
 	t.Run("a reused magic keeps the threshold", func(t *testing.T) {
 		t.Parallel()
