@@ -1893,6 +1893,44 @@ func (o *Ouroboros) clearObserverHeaderGapAtRollback(
 	o.futureHeaderResyncMu.Unlock()
 }
 
+// clearObserverHeaderGapAtAppliedExtension clears connId's observer gap when
+// header is the direct child of the exact applied tip. The skipped observer
+// headers are then ancestors already on the local chain, and the peer's cursor
+// is anchored on it as after a rollback to that tip, so no fresh intersection
+// is needed. The peer's delivered history is trimmed to the applied tip first,
+// as a rollback there would. It reports whether a gap was cleared.
+func (o *Ouroboros) clearObserverHeaderGapAtAppliedExtension(
+	connId ouroboros.ConnectionId,
+	session chainsync.ClientSessionToken,
+	header gledger.BlockHeader,
+	tip ochainsync.Tip,
+) bool {
+	if o.chainsyncState == nil || o.ledgerState == nil ||
+		!o.chainsyncState.ClientObserverHeaderGap(connId) {
+		return false
+	}
+	applied := o.ledgerState.Tip()
+	if len(applied.Point.Hash) == 0 ||
+		header.BlockNumber() != applied.BlockNumber+1 ||
+		header.SlotNumber() <= applied.Point.Slot {
+		return false
+	}
+	prevHash := header.PrevHash()
+	if !bytes.Equal(prevHash[:], applied.Point.Hash) {
+		return false
+	}
+	if o.config.ChainsyncRecordDeliveredPeerRollback != nil {
+		o.config.ChainsyncRecordDeliveredPeerRollback(
+			chainselection.PeerRollbackEvent{
+				ConnectionId: connId,
+				Point:        applied.Point,
+				Tip:          tip,
+			},
+		)
+	}
+	return o.chainsyncState.ClearClientObserverHeaderGap(connId, session)
+}
+
 // chainsyncCursorFarBehindLocalTip reports whether a header with the given
 // block number trails the local tip by more than the security parameter while
 // the peer's advertised tip does not. Only that shape is a stale cursor that
@@ -2218,10 +2256,18 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			o.releasePromotedAheadRecycle(claimedAt)
 		}
 		// A promoting header that continues the local chain needs no fresh
-		// intersection: the observer contributes from the tip.
-		if ingressEligible && wasObserver && o.chainsyncState != nil &&
-			!o.chainsyncState.ClientObserverHeaderGap(ctx.ConnectionId) {
-			o.cancelPendingIngressPromotionResync(ctx.ConnectionId)
+		// intersection: the observer contributes from the tip. A header whose
+		// parent is the exact applied tip resolves an observer gap the same
+		// way a rollback to that tip does, so the connection is not closed
+		// under the header (e.g. a local block producer's new block).
+		if ingressEligible && o.chainsyncState != nil {
+			extendsApplied := o.clearObserverHeaderGapAtAppliedExtension(
+				ctx.ConnectionId, clientSession, v, tip,
+			)
+			if (wasObserver || extendsApplied) &&
+				!o.chainsyncState.ClientObserverHeaderGap(ctx.ConnectionId) {
+				o.cancelPendingIngressPromotionResync(ctx.ConnectionId)
+			}
 		}
 		// A header past the peer-relative bound only because the ledger lags
 		// is not a peer fault, and rejecting it closes the connection while
