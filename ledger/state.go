@@ -1668,6 +1668,11 @@ type LedgerState struct {
 	// threshold and is about to wait, the point after which a test may drain
 	// headers and observe the hysteresis rather than the first check.
 	chainsyncCapacityWaitHook func()
+	// headerVerificationEpochLookupHook is a test seam, nil in production. It
+	// runs after each successful epoch lookup in
+	// headerVerificationEpochWithCache, before the snapshot is re-read, so a
+	// test can publish a new snapshot mid-lookup.
+	headerVerificationEpochLookupHook func()
 	// blockfetchContinuationPending prevents a chainsync handler from starting
 	// a competing batch in the short interval after the blockfetch subscriber
 	// schedules its next request on a worker. The worker must run outside the

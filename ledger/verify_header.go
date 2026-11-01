@@ -947,13 +947,20 @@ func (ls *LedgerState) headerVerificationEpochWithCache(
 		if err != nil {
 			return models.Epoch{}, nil, err
 		}
+		if ls.headerVerificationEpochLookupHook != nil {
+			ls.headerVerificationEpochLookupHook()
+		}
 		after := ls.loadConsensusSnapshot()
 		if before == after {
 			return epoch, after.epochCache, nil
 		}
 	}
-	return models.Epoch{}, nil, errors.New(
-		"block header verification deferred: epoch cache changed during lookup",
+	// Every attempt resolved the epoch; only the snapshot pairing failed, which
+	// says nothing about the header.
+	return models.Epoch{}, nil, fmt.Errorf(
+		"%w during epoch lookup for slot %d",
+		errHeaderVerificationContextChanged,
+		blockSlot,
 	)
 }
 
