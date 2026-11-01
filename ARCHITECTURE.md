@@ -4484,7 +4484,10 @@ tip and before any later block applies. The background validator in
 node (`LedgerStateConfig.LeiosAnnouncementAtTip`) as soon as the chunk ending
 with the live announcing block commits, which retries the background
 validation. Without that notification a voter would vote only when the next
-block arrived, possibly past the vote window. Competing or queued
+block arrived, possibly past the vote window. A retry skips an endorser block
+whose attempt is still running and drops one with no free validation slot, so
+each attempt records a retry counter when scheduled and, if a retry was
+requested meanwhile, re-runs it once it finishes. Competing or queued
 headers therefore cannot each consume a diffusion-window wait. A locally
 forged header is checked after block self-validation and before adoption,
 when the forged block is not yet the tip, so it validates on the block's
