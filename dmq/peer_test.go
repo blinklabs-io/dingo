@@ -326,13 +326,18 @@ func TestPeerSkipsMessagesAlreadyHeld(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	attachPair(t, a, b)
+	pa, pb := attachPair(t, a, b)
 	// A message sent after the connection is up proves the exchange is live,
 	// and that the shared one was settled before it.
 	addMessages(t, a, "later", 1)
 	waitFor(t, "b receives the later message", func() bool {
 		return b.pool.Len() == 2
 	})
+	// The sent counter is bumped on the replying goroutine after the reply is
+	// queued, so b can hold the message before a counts it. Teardown waits for
+	// those goroutines, which makes the counters final.
+	pa.Close()
+	requireClosed(t, "b's side closes", pb.Done())
 	require.Equal(t, 1.0, counter(t, regA, "dingo_dmq_messages_sent_total")())
 	require.Zero(t, counter(t, regB, "dingo_dmq_messages_sent_total")())
 }
