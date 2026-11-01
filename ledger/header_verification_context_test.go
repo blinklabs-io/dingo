@@ -104,3 +104,53 @@ func TestPeerForkPathClassifiesContextChangedDuringLookup(t *testing.T) {
 	require.True(t, found)
 	require.Len(t, path, 1)
 }
+
+func TestHeaderVerificationEpochClassifiesPersistentSnapshotChurn(t *testing.T) {
+	t.Parallel()
+
+	newState := func() *LedgerState {
+		ls := &LedgerState{
+			epochCache: []models.Epoch{{
+				EpochId:       0,
+				StartSlot:     0,
+				SlotLength:    1_000,
+				LengthInSlots: 100,
+				Nonce:         make([]byte, 32),
+			}},
+		}
+		ls.publishSnapshotsLocked()
+		return ls
+	}
+
+	ls := newState()
+	lookups := 0
+	ls.headerVerificationEpochLookupHook = func() {
+		lookups++
+		ls.publishSnapshotsLocked()
+	}
+	_, cache, err := ls.headerVerificationEpochWithCache(
+		context.Background(), 10, false,
+	)
+	require.Equal(t, 3, lookups, "every retry must resolve the epoch")
+	require.Nil(t, cache)
+	require.ErrorIs(t, err, errHeaderVerificationDeferred)
+	require.True(t, IsHeaderVerificationContextTransient(err),
+		"a snapshot replaced during every lookup must retry the header")
+	require.False(t, headerFailureBlamesPeer(err))
+
+	ls = newState()
+	lookups = 0
+	ls.headerVerificationEpochLookupHook = func() {
+		lookups++
+		if lookups < 3 {
+			ls.publishSnapshotsLocked()
+		}
+	}
+	epoch, cache, err := ls.headerVerificationEpochWithCache(
+		context.Background(), 10, false,
+	)
+	require.NoError(t, err)
+	require.Equal(t, 3, lookups)
+	require.Equal(t, uint64(0), epoch.EpochId)
+	require.Equal(t, ls.loadConsensusSnapshot().epochCache, cache)
+}
