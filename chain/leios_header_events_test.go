@@ -96,10 +96,12 @@ func TestAddBlockHeaderQueuesLeiosAnnouncement(t *testing.T) {
 		blockNumber: 1,
 		slot:        577,
 	}
+	wantIssuer := lcommon.PoolKeyHash(lcommon.IssuerVkey{}.Hash())
 	for _, tc := range []struct {
 		name             string
 		header           interface{ Hash() lcommon.Blake2b256 }
 		wantAnnouncement bool
+		wantNoEvent      bool
 	}{
 		{
 			name: "announcing header",
@@ -119,8 +121,9 @@ func TestAddBlockHeaderQueuesLeiosAnnouncement(t *testing.T) {
 			},
 		},
 		{
-			name:   "pre-leios header",
-			header: base,
+			name:        "pre-leios header",
+			header:      base,
+			wantNoEvent: true,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -141,6 +144,15 @@ func TestAddBlockHeaderQueuesLeiosAnnouncement(t *testing.T) {
 			}
 			c.PublishPendingChainUpdates()
 
+			if tc.wantNoEvent {
+				testutil.RequireNoReceive(
+					t,
+					ch,
+					300*time.Millisecond,
+					"no header lifecycle event for a pre-Leios header",
+				)
+				return
+			}
 			evt := testutil.RequireReceive(
 				t, ch, 2*time.Second, "header lifecycle event",
 			)
@@ -149,6 +161,7 @@ func TestAddBlockHeaderQueuesLeiosAnnouncement(t *testing.T) {
 				require.True(t, ok)
 				assert.Equal(t, uint64(577), data.Slot)
 				assert.Equal(t, base.hash, data.RbHash)
+				assert.Equal(t, wantIssuer, data.Issuer)
 				assert.NotZero(t, data.Seq)
 				return
 			}
@@ -157,6 +170,7 @@ func TestAddBlockHeaderQueuesLeiosAnnouncement(t *testing.T) {
 			assert.Equal(t, uint64(577), data.Slot)
 			assert.Equal(t, base.hash, data.RbHash)
 			assert.Equal(t, ebHash, data.EbHash)
+			assert.Equal(t, wantIssuer, data.Issuer)
 			assert.NotZero(t, data.Seq)
 			assert.False(t, data.ArrivedAt.IsZero())
 		})

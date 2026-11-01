@@ -962,31 +962,67 @@ func TestVoteManagerCIP164LocalVoteTiming(t *testing.T) {
 		}}))
 	})
 
-	t.Run("rejects an equivocating RB slot", func(t *testing.T) {
-		fixture, _, now := newCIP164TimingFixture(t, base, 603)
-		firstRb := lcommon.NewBlake2b256([]byte("first-rb"))
-		secondRb := lcommon.NewBlake2b256([]byte("second-rb"))
-		firstEb := lcommon.NewBlake2b256([]byte("first-eb"))
-		*now = base.Add(2 * time.Second)
-		fixture.mgr.observeAnnouncement(600, firstRb, firstEb, 1, base)
-		fixture.mgr.handleChainHeaderObserved(chain.ChainHeaderObservedEvent{
-			Slot:   600,
-			RbHash: secondRb,
-			Seq:    2,
+	// Equivocation is one block producer issuing two headers for one slot,
+	// so the second header's issuer decides whether the slot is equivocal.
+	for _, tc := range []struct {
+		name         string
+		secondIssuer lcommon.PoolKeyHash
+		wantVote     bool
+	}{
+		{
+			name:         "rejects an equivocating RB slot",
+			secondIssuer: lcommon.PoolKeyHash{0x01},
+		},
+		{
+			name:         "votes when another issuer shares the RB slot",
+			secondIssuer: lcommon.PoolKeyHash{0x02},
+			wantVote:     true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture, _, now := newCIP164TimingFixture(t, base, 603)
+			firstIssuer := lcommon.PoolKeyHash{0x01}
+			firstRb := lcommon.NewBlake2b256([]byte("first-rb"))
+			secondRb := lcommon.NewBlake2b256([]byte("second-rb"))
+			firstEb := lcommon.NewBlake2b256([]byte("first-eb"))
+			*now = base.Add(2 * time.Second)
+			fixture.mgr.handleChainHeaderAnnouncement(
+				chain.ChainHeaderAnnouncementEvent{
+					Slot:      600,
+					RbHash:    firstRb,
+					EbHash:    firstEb,
+					Issuer:    firstIssuer,
+					Seq:       1,
+					ArrivedAt: base,
+				},
+			)
+			fixture.mgr.handleChainHeaderObserved(
+				chain.ChainHeaderObservedEvent{
+					Slot:   600,
+					RbHash: secondRb,
+					Issuer: tc.secondIssuer,
+					Seq:    2,
+				},
+			)
+			fixture.mgr.HandleValidatedEndorserBlock(600, firstRb, firstEb)
+			enableFixtureVoting(t, fixture)
+			*now = base.Add(3 * time.Second)
+
+			fixture.mgr.mu.Lock()
+			first := fixture.mgr.announcements[firstRb]
+			fixture.mgr.mu.Unlock()
+			fixture.mgr.emitPrototypeVote(firstRb, first)
+
+			votes := fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{{
+				SlotNo: 600, VoterId: headerArmingSeatedVoterId,
+			}})
+			if tc.wantVote {
+				assert.Len(t, votes, 1)
+				return
+			}
+			assert.Empty(t, votes)
 		})
-		fixture.mgr.HandleValidatedEndorserBlock(600, firstRb, firstEb)
-		enableFixtureVoting(t, fixture)
-		*now = base.Add(3 * time.Second)
-
-		fixture.mgr.mu.Lock()
-		first := fixture.mgr.announcements[firstRb]
-		fixture.mgr.mu.Unlock()
-		fixture.mgr.emitPrototypeVote(firstRb, first)
-
-		assert.Empty(t, fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{{
-			SlotNo: 600, VoterId: headerArmingSeatedVoterId,
-		}}))
-	})
+	}
 
 	t.Run("uses the protocol vote deadline", func(t *testing.T) {
 		fixture, _, now := newCIP164TimingFixture(t, base, 607)
@@ -1644,14 +1680,13 @@ func TestVoteManagerLateRollbackStillPrunesAbandonedChainState(t *testing.T) {
 	)
 }
 
-// TestVoteManagerInvalidationDropsDerivedVoteAndDeclinesEquivocation covers a header
+// TestVoteManagerInvalidationDropsDerivedVoteAndAllowsRevote covers a header
 // cleared *after* its endorser block arrived and the vote was emitted --
 // blockfetch startup failing on an admitted announcing header, for instance.
-// Its derived state is removed, while the observed same-slot RB equivocation
-// still prevents a replacement local vote under CIP-164.
-func TestVoteManagerInvalidationDropsDerivedVoteAndDeclinesEquivocation(
-	t *testing.T,
-) {
+// Leaving the vote, tally and dedup record behind would keep the (slot, voter)
+// vote id occupied, so the replacement chain's vote at the same slot would be
+// read as equivocation and dropped.
+func TestVoteManagerInvalidationDropsDerivedVoteAndAllowsRevote(t *testing.T) {
 	slots := &fakeSlotProvider{slot: headerArmingEbAcquiredAt}
 	fixture := newHeaderArmingFixture(t, slots)
 	subId, emittedCh := fixture.eventBus.Subscribe(VoteEmittedEventType)
@@ -1690,26 +1725,22 @@ func TestVoteManagerInvalidationDropsDerivedVoteAndDeclinesEquivocation(
 	assert.Empty(t, fixture.mgr.tallies)
 	fixture.mgr.mu.Unlock()
 
-	// The vote id is free again, but observing two RB headers for the slot
-	// prohibits a replacement local vote.
+	// The vote id is free again, so the replacement chain's announcing
+	// block at the same slot is voted on rather than being read as
+	// equivocation.
 	replacementRb := lcommon.NewBlake2b256([]byte("replacement-rb"))
 	replacementEb := lcommon.NewBlake2b256([]byte("replacement-eb"))
-	publishHeaderAnnouncement(
+	revote := armAndVote(
+		t,
 		fixture,
+		emittedCh,
 		headerArmingRbSlot,
 		replacementRb,
 		replacementEb,
 		3,
 	)
-	waitForAnnouncement(t, fixture, replacementRb)
-	fixture.mgr.HandleValidatedEndorserBlock(
-		headerArmingRbSlot, replacementRb, replacementEb,
-	)
-	testutil.RequireNoReceive(
-		t, emittedCh, 300*time.Millisecond,
-		"same-slot RB equivocation prevents a replacement vote",
-	)
-	assert.Empty(t, fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{voteId}))
+	assert.Equal(t, replacementRb, revote.Vote.AnnouncingRbHash)
+	assert.Len(t, fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{voteId}), 1)
 }
 
 // TestVoteManagerInvalidationKeepsUnrelatedAnnouncementState pins that the
@@ -1964,7 +1995,7 @@ func TestVoteManagerLocalBlockInvalidationKeepsUnnamedAnnouncements(
 // the ordered header stream immediately behind the invalidation, so the id is
 // always free by the time the announcement is armed. This test delivers the
 // two in that order and requires the local vote.
-func TestVoteManagerSameSlotLocalForgeDeclinesAfterRbEquivocation(t *testing.T) {
+func TestVoteManagerSameSlotLocalForgeStillVotes(t *testing.T) {
 	slots := &fakeSlotProvider{slot: headerArmingEbAcquiredAt}
 	fixture := newHeaderArmingFixture(t, slots)
 	subId, emittedCh := fixture.eventBus.Subscribe(VoteEmittedEventType)
@@ -2015,21 +2046,36 @@ func TestVoteManagerSameSlotLocalForgeDeclinesAfterRbEquivocation(t *testing.T) 
 		fixture, headerArmingRbSlot, localRb, localEb, 3,
 	)
 
+	emitted := testutil.RequireReceive(
+		t,
+		emittedCh,
+		testutil.AsyncWait,
+		"the forged block's own vote is emitted once the id is freed",
+	)
+	local, ok := emitted.Data.(VoteEmittedEvent)
+	require.True(t, ok)
+	assert.Equal(t, localRb, local.Vote.AnnouncingRbHash)
+
+	// Exactly one vote, and it is the local one.
 	testutil.RequireNoReceive(
 		t,
 		emittedCh,
 		300*time.Millisecond,
-		"an observed same-slot RB equivocation prevents another local vote",
+		"exactly one vote for the slot",
 	)
 	raws := fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{voteId})
-	require.Empty(t, raws)
+	require.Len(t, raws, 1)
+	var stored lcommon.LeiosVote
+	_, err := cbor.Decode(raws[0], &stored)
+	require.NoError(t, err)
+	assert.Equal(t, localEb, stored.EndorserBlockHash)
 
 	fixture.mgr.mu.Lock()
 	defer fixture.mgr.mu.Unlock()
 	assert.NotContains(t, fixture.mgr.announcements, peerRb)
 	assert.NotContains(t, fixture.mgr.acquiredEbs, peerEb)
 	assert.Contains(t, fixture.mgr.announcements, localRb)
-	assert.NotContains(t, fixture.mgr.votedAnnouncements, localRb)
+	assert.Contains(t, fixture.mgr.votedAnnouncements, localRb)
 	for key := range fixture.mgr.tallies {
 		assert.NotEqual(
 			t,
@@ -2285,7 +2331,7 @@ func TestOrderingDemoRollbackThenLateHeader(t *testing.T) {
 // vote once the invalidation has freed it -- which rule 3 guarantees, by
 // putting the forged block's announcement behind the invalidation on the same
 // stream instead of on chain.update.
-func TestOrderingDemoLocalForgeDeclinesAfterRbEquivocation(t *testing.T) {
+func TestOrderingDemoLocalForgeDisplacingQueuedHeader(t *testing.T) {
 	fixture, votes := newOrderingDemo(t)
 	peerRb := lcommon.NewBlake2b256([]byte("peer-rb"))
 	peerEb := lcommon.NewBlake2b256([]byte("peer-eb"))
@@ -2319,15 +2365,14 @@ func TestOrderingDemoLocalForgeDeclinesAfterRbEquivocation(t *testing.T) {
 	)
 	publishHeaderAnnouncement(fixture, demoSlot, localRb, localEb, 3)
 
+	requireVoteFor(t, votes, localRb, "the forged block gets its own vote")
 	testutil.RequireNoReceive(
-		t,
-		votes,
-		300*time.Millisecond,
-		"the forged block is not voted for after a same-slot RB equivocation",
+		t, votes, 300*time.Millisecond, "exactly one vote for the slot",
 	)
-	assert.Empty(
+	assert.Len(
 		t,
 		fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{demoVoteId()}),
+		1,
 	)
 	fixture.mgr.mu.Lock()
 	defer fixture.mgr.mu.Unlock()

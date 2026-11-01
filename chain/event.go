@@ -64,14 +64,23 @@ type ChainForkEvent struct {
 	CanonicalHead ocommon.Point
 }
 
-// ChainHeaderObservedEvent records an authenticated ranking-block header that
-// carries no Leios endorser-block announcement. Announcement-bearing headers
-// use ChainHeaderAnnouncementEvent instead, so each admitted header produces
-// exactly one ordered lifecycle event.
+// ChainHeaderObservedEvent records an authenticated Leios-era ranking-block
+// header, admitted to the header queue, that carries no endorser-block
+// announcement. Announcement-bearing headers use ChainHeaderAnnouncementEvent
+// instead, so each such header produces exactly one ordered lifecycle event.
+// Headers from eras without announcements produce none, and neither does a
+// non-announcing block added without the header queue (a local forge, a bulk
+// restore); consumers see those on ChainUpdateEventType.
 type ChainHeaderObservedEvent struct {
-	Slot   uint64
+	// Slot is the ranking block's slot.
+	Slot uint64
+	// RbHash is the ranking block's header hash.
 	RbHash lcommon.Blake2b256
-	Seq    uint64
+	// Issuer is the pool key hash of the header's issuer. Two distinct
+	// headers for one slot are RB equivocation only when they share it.
+	Issuer lcommon.PoolKeyHash
+	// Seq is this header admission's chain-mutation sequence number.
+	Seq uint64
 }
 
 // ChainHeaderAnnouncementEvent is published when a ranking block announcing a
@@ -107,6 +116,10 @@ type ChainHeaderAnnouncementEvent struct {
 	RbHash lcommon.Blake2b256
 	// EbHash is the announced endorser block's hash.
 	EbHash lcommon.Blake2b256
+	// Issuer is the pool key hash of the announcing header's issuer. Two
+	// distinct headers for one slot are RB equivocation only when they
+	// share it.
+	Issuer lcommon.PoolKeyHash
 	// Seq is this header admission's chain-mutation sequence number.
 	Seq uint64
 	// ArrivedAt is when the authenticated header entered the local chain.

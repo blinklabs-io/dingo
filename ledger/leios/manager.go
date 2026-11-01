@@ -382,6 +382,14 @@ type announcementRecord struct {
 	headerSeq uint64
 }
 
+// observedRbKey identifies one Praos election: a slot and the pool that
+// issued a header for it. A second distinct header under the same key is RB
+// equivocation; a header from another pool in the same slot is not.
+type observedRbKey struct {
+	slot   uint64
+	issuer lcommon.PoolKeyHash
+}
+
 type observedRbRecord struct {
 	rbHash lcommon.Blake2b256
 	epoch  uint64
@@ -554,7 +562,7 @@ type VoteManager struct {
 	announcements          map[lcommon.Blake2b256]announcementRecord
 	equivocatingRbSlots    map[uint64]uint64
 	localVoteTimers        map[lcommon.Blake2b256]*time.Timer
-	observedRbSlots        map[uint64]observedRbRecord
+	observedRbs            map[observedRbKey]observedRbRecord
 	latestRbSlot           uint64
 	latestRbSeq            uint64
 	acquiredEbs            map[lcommon.Blake2b256]acquiredEbRecord
@@ -663,7 +671,7 @@ func NewVoteManager(cfg VoteManagerConfig) (*VoteManager, error) {
 		announcements:          make(map[lcommon.Blake2b256]announcementRecord),
 		equivocatingRbSlots:    make(map[uint64]uint64),
 		localVoteTimers:        make(map[lcommon.Blake2b256]*time.Timer),
-		observedRbSlots:        make(map[uint64]observedRbRecord),
+		observedRbs:            make(map[observedRbKey]observedRbRecord),
 		acquiredEbs:            make(map[lcommon.Blake2b256]acquiredEbRecord),
 		validatedAnnouncements: make(
 			map[lcommon.Blake2b256]validatedAnnouncementRecord,
@@ -3221,23 +3229,29 @@ func (m *VoteManager) handleChainHeaderInvalidation(
 func (m *VoteManager) handleChainHeaderObserved(
 	evt chain.ChainHeaderObservedEvent,
 ) {
-	m.recordLatestRb(evt.Slot, evt.RbHash, evt.Seq)
+	m.recordLatestRb(evt.Slot, evt.RbHash, evt.Issuer, evt.Seq)
 }
 
+// recordLatestRb tracks the latest authenticated RB and detects RB
+// equivocation. A zero issuer is unknown -- ObserveAnnouncement carries none
+// -- and records no equivocation evidence, because two headers for one slot
+// equivocate only when one pool issued both.
 func (m *VoteManager) recordLatestRb(
 	slot uint64,
 	rbHash lcommon.Blake2b256,
+	issuer lcommon.PoolKeyHash,
 	seq uint64,
 ) {
 	epoch, epochErr := m.epochProvider.EpochForSlot(slot)
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if epochErr == nil {
-		if observed, ok := m.observedRbSlots[slot]; ok &&
+	if epochErr == nil && issuer != (lcommon.PoolKeyHash{}) {
+		key := observedRbKey{slot: slot, issuer: issuer}
+		if observed, ok := m.observedRbs[key]; ok &&
 			observed.rbHash != rbHash {
 			m.equivocatingRbSlots[slot] = epoch
-		} else {
-			m.observedRbSlots[slot] = observedRbRecord{
+		} else if !ok {
+			m.observedRbs[key] = observedRbRecord{
 				rbHash: rbHash,
 				epoch:  epoch,
 			}
@@ -3339,10 +3353,11 @@ func (m *VoteManager) dropAnnouncementDerivedStateLocked(
 func (m *VoteManager) handleChainHeaderAnnouncement(
 	evt chain.ChainHeaderAnnouncementEvent,
 ) {
-	m.observeAnnouncement(
+	m.observeIssuedAnnouncement(
 		evt.Slot,
 		evt.RbHash,
 		evt.EbHash,
+		evt.Issuer,
 		evt.Seq,
 		evt.ArrivedAt,
 	)
@@ -3365,19 +3380,22 @@ func (m *VoteManager) handleChainBlock(evt chain.ChainBlockEvent) {
 	}
 	header := block.Header()
 	rbHash := lcommon.NewBlake2b256(header.Hash().Bytes())
+	issuer := lcommon.PoolKeyHash(header.IssuerVkey().Hash())
 	announcer, ok := header.(interface {
 		LeiosAnnouncement() (lcommon.Blake2b256, uint64, bool)
 	})
 	if !ok {
-		m.recordLatestRb(header.SlotNumber(), rbHash, 0)
+		m.recordLatestRb(header.SlotNumber(), rbHash, issuer, 0)
 		return
 	}
 	ebHash, _, ok := announcer.LeiosAnnouncement()
 	if !ok {
-		m.recordLatestRb(header.SlotNumber(), rbHash, 0)
+		m.recordLatestRb(header.SlotNumber(), rbHash, issuer, 0)
 		return
 	}
-	m.ObserveAnnouncement(header.SlotNumber(), rbHash, ebHash)
+	m.observeIssuedAnnouncement(
+		header.SlotNumber(), rbHash, ebHash, issuer, 0, m.now(),
+	)
 }
 
 // ObserveAnnouncement records the ranking-block identity used by current
@@ -3400,7 +3418,22 @@ func (m *VoteManager) observeAnnouncement(
 	headerSeq uint64,
 	arrivedAt time.Time,
 ) {
-	m.recordLatestRb(slot, rbHash, headerSeq)
+	m.observeIssuedAnnouncement(
+		slot, rbHash, ebHash, lcommon.PoolKeyHash{}, headerSeq, arrivedAt,
+	)
+}
+
+// observeIssuedAnnouncement is observeAnnouncement with the announcing
+// header's issuer, which RB equivocation detection keys on.
+func (m *VoteManager) observeIssuedAnnouncement(
+	slot uint64,
+	rbHash lcommon.Blake2b256,
+	ebHash lcommon.Blake2b256,
+	issuer lcommon.PoolKeyHash,
+	headerSeq uint64,
+	arrivedAt time.Time,
+) {
+	m.recordLatestRb(slot, rbHash, issuer, headerSeq)
 	epoch, err := m.epochProvider.EpochForSlot(slot)
 	if err != nil {
 		m.logger.Debug(
@@ -3506,9 +3539,9 @@ func (m *VoteManager) handleEpochTransition(
 			delete(m.equivocatingRbSlots, slot)
 		}
 	}
-	for slot, record := range m.observedRbSlots {
+	for key, record := range m.observedRbs {
 		if record.epoch < keepFrom {
-			delete(m.observedRbSlots, slot)
+			delete(m.observedRbs, key)
 		}
 	}
 	for ebHash, record := range m.acquiredEbs {
