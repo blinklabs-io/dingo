@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"cmp"
 	"context"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -32,6 +33,7 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/common/script"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/blinklabs-io/plutigo/cek"
 	"github.com/blinklabs-io/plutigo/data"
 	"github.com/blinklabs-io/plutigo/lang"
@@ -1299,12 +1301,26 @@ func evaluateConwayPlutusScript(
 			evalContext,
 		)
 		if err != nil {
-			return lcommon.ExUnits{}, err, nil
+			return lcommon.ExUnits{}, newPlutusExecutionFailure(
+				err,
+				protocolMajorVersion(pp),
+				[]byte(s),
+				data.Normalize(ctx.ToPlutusData()),
+				pp.MaxTxExUnits,
+				costModel,
+			), nil
 		}
 		if restrictive && (usedBudget.Steps > budget.Steps || usedBudget.Memory > budget.Memory) {
-			return usedBudget, fmt.Errorf(
-				"script exceeded declared budget: used (%d cpu, %d mem), declared (%d cpu, %d mem)",
-				usedBudget.Steps, usedBudget.Memory, budget.Steps, budget.Memory,
+			return usedBudget, newPlutusExecutionFailure(
+				fmt.Errorf(
+					"script exceeded declared budget: used (%d cpu, %d mem), declared (%d cpu, %d mem)",
+					usedBudget.Steps, usedBudget.Memory, budget.Steps, budget.Memory,
+				),
+				protocolMajorVersion(pp),
+				[]byte(s),
+				data.Normalize(ctx.ToPlutusData()),
+				pp.MaxTxExUnits,
+				costModel,
 			), nil
 		}
 		return usedBudget, nil, nil
@@ -1352,12 +1368,26 @@ func evaluateConwayPlutusScript(
 			evalContext,
 		)
 		if err != nil {
-			return lcommon.ExUnits{}, err, nil
+			return lcommon.ExUnits{}, newPlutusExecutionFailure(
+				err,
+				protocolMajorVersion(pp),
+				[]byte(s),
+				legacyPlutusArguments(datum, redeemer.Data, ctx.ToPlutusData()),
+				pp.MaxTxExUnits,
+				costModel,
+			), nil
 		}
 		if restrictive && (usedBudget.Steps > budget.Steps || usedBudget.Memory > budget.Memory) {
-			return usedBudget, fmt.Errorf(
-				"script exceeded declared budget: used (%d cpu, %d mem), declared (%d cpu, %d mem)",
-				usedBudget.Steps, usedBudget.Memory, budget.Steps, budget.Memory,
+			return usedBudget, newPlutusExecutionFailure(
+				fmt.Errorf(
+					"script exceeded declared budget: used (%d cpu, %d mem), declared (%d cpu, %d mem)",
+					usedBudget.Steps, usedBudget.Memory, budget.Steps, budget.Memory,
+				),
+				protocolMajorVersion(pp),
+				[]byte(s),
+				legacyPlutusArguments(datum, redeemer.Data, ctx.ToPlutusData()),
+				pp.MaxTxExUnits,
+				costModel,
 			), nil
 		}
 		return usedBudget, nil, nil
@@ -1395,12 +1425,26 @@ func evaluateConwayPlutusScript(
 			evalContext,
 		)
 		if err != nil {
-			return lcommon.ExUnits{}, err, nil
+			return lcommon.ExUnits{}, newPlutusExecutionFailure(
+				err,
+				protocolMajorVersion(pp),
+				[]byte(s),
+				legacyPlutusArguments(datum, redeemer.Data, ctx.ToPlutusData()),
+				pp.MaxTxExUnits,
+				costModel,
+			), nil
 		}
 		if restrictive && (usedBudget.Steps > budget.Steps || usedBudget.Memory > budget.Memory) {
-			return usedBudget, fmt.Errorf(
-				"script exceeded declared budget: used (%d cpu, %d mem), declared (%d cpu, %d mem)",
-				usedBudget.Steps, usedBudget.Memory, budget.Steps, budget.Memory,
+			return usedBudget, newPlutusExecutionFailure(
+				fmt.Errorf(
+					"script exceeded declared budget: used (%d cpu, %d mem), declared (%d cpu, %d mem)",
+					usedBudget.Steps, usedBudget.Memory, budget.Steps, budget.Memory,
+				),
+				protocolMajorVersion(pp),
+				[]byte(s),
+				legacyPlutusArguments(datum, redeemer.Data, ctx.ToPlutusData()),
+				pp.MaxTxExUnits,
+				costModel,
 			), nil
 		}
 		return usedBudget, nil, nil
@@ -1410,6 +1454,84 @@ func evaluateConwayPlutusScript(
 			plutusScript,
 		)
 	}
+}
+
+type plutusExecutionFailure struct {
+	err               error
+	reconstruction    []byte
+	reconstructionErr error
+}
+
+func (e plutusExecutionFailure) Error() string {
+	return e.err.Error()
+}
+
+func (e plutusExecutionFailure) Unwrap() error {
+	return e.err
+}
+
+func (e plutusExecutionFailure) PlutusFailureReconstruction() ([]byte, error) {
+	return e.reconstruction, e.reconstructionErr
+}
+
+func newPlutusExecutionFailure(
+	err error,
+	protocolMajor uint,
+	plutusScript []byte,
+	args any,
+	budget lcommon.ExUnits,
+	costModel []int64,
+) plutusExecutionFailure {
+	reconstruction, reconstructionErr := plutusFailureReconstruction(
+		protocolMajor,
+		plutusScript,
+		args,
+		budget,
+		costModel,
+	)
+	return plutusExecutionFailure{
+		err:               err,
+		reconstruction:    reconstruction,
+		reconstructionErr: reconstructionErr,
+	}
+}
+
+func legacyPlutusArguments(
+	datum data.PlutusData,
+	redeemer data.PlutusData,
+	ctx data.PlutusData,
+) []data.PlutusData {
+	args := make([]data.PlutusData, 0, 3)
+	if datum != nil {
+		args = append(args, data.Normalize(datum))
+	}
+	return append(
+		args,
+		data.Normalize(redeemer),
+		data.Normalize(ctx),
+	)
+}
+
+func plutusFailureReconstruction(
+	protocolMajor uint,
+	plutusScript []byte,
+	args any,
+	budget lcommon.ExUnits,
+	costModel []int64,
+) ([]byte, error) {
+	wire, err := cbor.Encode([]any{
+		protocolMajor,
+		plutusScript,
+		args,
+		[]any{budget.Memory, budget.Steps},
+		costModel,
+	})
+	if err != nil {
+		return nil, err
+	}
+	encoded := make([]byte, base64.StdEncoding.EncodedLen(len(wire)))
+	base64.StdEncoding.Encode(encoded, wire)
+	return encoded, nil
 }
 
 func buildConwayScriptPurpose(
@@ -1494,12 +1616,17 @@ func ValidateTxFeeConway(
 	if txFee.Cmp(minFeeBig) >= 0 {
 		return nil
 	}
-	return fmt.Errorf(
-		"transaction fee %d is less than the calculated "+
-			"minimum fee %d",
-		txFee,
-		minFeeBig,
-	)
+	return validationErrorWithCause{
+		message: fmt.Sprintf(
+			"transaction fee %d is less than the calculated minimum fee %d",
+			txFee,
+			minFeeBig,
+		),
+		cause: shelley.FeeTooSmallUtxoError{
+			Provided: txFee,
+			Min:      minFeeBig,
+		},
+	}
 }
 
 func EvaluateTxConway(

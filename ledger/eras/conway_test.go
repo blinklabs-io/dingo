@@ -17,6 +17,7 @@ package eras
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -1304,6 +1305,30 @@ func TestConwayPlutusBudgetComparisonIncludesFinalSlippageBatch(t *testing.T) {
 		plutusErr.Err.Error(),
 		"script exceeded declared budget: used (112100 cpu, 800 mem)",
 	)
+	var reconstructor interface {
+		PlutusFailureReconstruction() ([]byte, error)
+	}
+	require.ErrorAs(t, plutusErr.Err, &reconstructor)
+	reconstruction, err := reconstructor.PlutusFailureReconstruction()
+	require.NoError(t, err)
+	reconstructionWire, err := base64.StdEncoding.DecodeString(string(reconstruction))
+	require.NoError(t, err)
+	var reconstructionRecord []cbor.RawMessage
+	_, err = cbor.Decode(reconstructionWire, &reconstructionRecord)
+	require.NoError(t, err)
+	require.Len(t, reconstructionRecord, 5)
+	var protocolMajor uint
+	_, err = cbor.Decode(reconstructionRecord[0], &protocolMajor)
+	require.NoError(t, err)
+	assert.Equal(t, uint(9), protocolMajor)
+	var reconstructedScript []byte
+	_, err = cbor.Decode(reconstructionRecord[1], &reconstructedScript)
+	require.NoError(t, err)
+	assert.Equal(t, scriptBytes, reconstructedScript)
+	var reconstructedBudget []uint64
+	_, err = cbor.Decode(reconstructionRecord[3], &reconstructedBudget)
+	require.NoError(t, err)
+	assert.Equal(t, []uint64{1_000_000, 1_000_000}, reconstructedBudget)
 
 	t.Run(
 		"restrictive evaluation is capped by protocol transaction budget",

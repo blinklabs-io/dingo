@@ -18,12 +18,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/big"
+	"slices"
 	"time"
 
 	"github.com/blinklabs-io/dingo/mempool"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	olocaltxsubmission "github.com/blinklabs-io/gouroboros/protocol/localtxsubmission"
 )
@@ -256,6 +260,21 @@ func (e *hardForkApplyTxError) Unwrap() error {
 }
 
 func (e *hardForkApplyTxError) MarshalCBOR() ([]byte, error) {
+	if e.era == gledger.EraIdConway {
+		failures := make([]any, 0, 1)
+		for _, cause := range localTxSubmissionCauses(e.err) {
+			failure, ok, err := conwayLedgerFailure(cause)
+			if err != nil {
+				return nil, err
+			}
+			if !ok {
+				failure = []any{conwayLedgerMempoolFailure, cause.Error()}
+			}
+			failures = append(failures, failure)
+		}
+		return cbor.Encode([]any{[]any{e.era, failures}})
+	}
+
 	var failure []any
 	switch {
 	case e.inputSetEmpty && e.era == gledger.EraIdDijkstra:
@@ -269,16 +288,159 @@ func (e *hardForkApplyTxError) MarshalCBOR() ([]byte, error) {
 		failure = []any{gledger.ApplyTxErrorUtxowFailure, e.utxowFailure()}
 	case e.era == gledger.EraIdDijkstra:
 		failure = []any{dijkstraMempoolFailure, e.err.Error()}
-	case e.era == gledger.EraIdConway:
-		// ConwayApplyTxError contains ledger predicate failures directly. The
-		// ConwayMempoolFailure constructor is tag 7; it is not a UTXOW failure.
-		failure = []any{conwayLedgerMempoolFailure, e.err.Error()}
 	default:
 		return nil, errors.New(
 			"transaction rejection cause is not representable as a ledger UTXOW failure",
 		)
 	}
 	return cbor.Encode([]any{[]any{e.era, []any{failure}}})
+}
+
+type joinedErrors interface {
+	Unwrap() []error
+}
+
+type plutusFailureReconstructor interface {
+	PlutusFailureReconstruction() ([]byte, error)
+}
+
+func localTxSubmissionCauses(err error) []error {
+	if err == nil {
+		return nil
+	}
+	if joined, ok := err.(joinedErrors); ok {
+		var causes []error
+		for _, child := range joined.Unwrap() {
+			causes = append(causes, localTxSubmissionCauses(child)...)
+		}
+		return causes
+	}
+	// Descend before matching: conwayLedgerFailure matches through wrappers,
+	// so matching first would collapse a wrapped join into its first
+	// recognized cause. Keep the wrapper itself when nothing below it is
+	// recognized, so the mempool-failure text retains its context.
+	if cause := errors.Unwrap(err); cause != nil {
+		causes := localTxSubmissionCauses(cause)
+		if slices.ContainsFunc(causes, isConwayLedgerFailure) {
+			return causes
+		}
+	}
+	return []error{err}
+}
+
+func isConwayLedgerFailure(cause error) bool {
+	_, ok, _ := conwayLedgerFailure(cause)
+	return ok
+}
+
+func conwayLedgerFailure(cause error) (any, bool, error) {
+	if fee, ok := errorValue[shelley.FeeTooSmallUtxoError](cause); ok {
+		provided, convErr := ledgerCoin(fee.Provided, "provided fee")
+		if convErr != nil {
+			return nil, true, convErr
+		}
+		minimum, convErr := ledgerCoin(fee.Min, "minimum fee")
+		if convErr != nil {
+			return nil, true, convErr
+		}
+		return conwayUtxoFailure([]any{
+			gledger.ConwayUtxoFeeTooSmallUTxO,
+			minimum,
+			provided,
+		}), true, nil
+	}
+	if _, ok := errorValue[alonzo.NoCollateralInputsError](cause); ok {
+		return conwayUtxoFailure(
+			[]any{gledger.ConwayUtxoNoCollateralInputs},
+		), true, nil
+	}
+	if isInputSetEmpty(cause) {
+		return conwayUtxoFailure(
+			[]any{gledger.ConwayUtxoInputSetEmptyUTxO},
+		), true, nil
+	}
+	if mismatch, ok := errorValue[lcommon.ScriptDataHashMismatchError](cause); ok {
+		return []any{
+			gledger.ConwayLedgerUtxowFailure,
+			[]any{
+				gledger.ConwayUtxowPPViewHashesDontMatch,
+				// Mismatch (StrictMaybe ScriptIntegrityHash): each side is a
+				// zero- or one-element list, supplied before expected.
+				[]any{mismatch.Declared},
+				[]any{mismatch.Computed},
+			},
+		}, true, nil
+	}
+	if _, ok := errorValue[lcommon.UnexpectedPlutusScriptSuccessError](cause); ok {
+		return conwayUtxosFailure([]any{
+			conwayUtxosValidationTagMismatch,
+			false,
+			[]any{conwayTagMismatchPassedUnexpectedly},
+		}), true, nil
+	}
+	if scriptFailure, ok := errorValue[lcommon.PlutusScriptFailedError](cause); ok {
+		var reconstructor plutusFailureReconstructor
+		if !errors.As(cause, &reconstructor) {
+			return nil, false, nil
+		}
+		reconstruction, reconstructionErr := reconstructor.PlutusFailureReconstruction()
+		if reconstructionErr != nil {
+			return nil, true, fmt.Errorf(
+				"local-tx-submission: encode Plutus failure reconstruction: %w",
+				reconstructionErr,
+			)
+		}
+		message := scriptFailure.Error()
+		if scriptFailure.Err != nil {
+			message = scriptFailure.Err.Error()
+		}
+		return conwayUtxosFailure([]any{
+			conwayUtxosValidationTagMismatch,
+			true,
+			[]any{
+				conwayTagMismatchFailedUnexpectedly,
+				[]any{[]any{conwayPlutusFailure, message, reconstruction}},
+			},
+		}), true, nil
+	}
+	return nil, false, nil
+}
+
+func isInputSetEmpty(cause error) bool {
+	if _, ok := errorValue[shelley.InputSetEmptyUtxoError](cause); ok {
+		return true
+	}
+	var ptr *shelley.InputSetEmptyUtxoError
+	return errors.As(cause, &ptr) && ptr != nil
+}
+
+func conwayUtxoFailure(failure any) []any {
+	return []any{
+		gledger.ConwayLedgerUtxowFailure,
+		[]any{gledger.ConwayUtxowUtxoFailure, failure},
+	}
+}
+
+func conwayUtxosFailure(failure any) []any {
+	return conwayUtxoFailure([]any{gledger.ConwayUtxoUtxosFailure, failure})
+}
+
+func errorValue[T error](err error) (T, bool) {
+	var value T
+	if errors.As(err, &value) {
+		return value, true
+	}
+	return value, false
+}
+
+func ledgerCoin(value *big.Int, field string) (uint64, error) {
+	if value == nil || value.Sign() < 0 || !value.IsUint64() {
+		return 0, fmt.Errorf(
+			"local-tx-submission: %s is outside the ledger coin domain",
+			field,
+		)
+	}
+	return value.Uint64(), nil
 }
 
 func (e *unrepresentableTxSubmissionError) Error() string {
@@ -300,10 +462,14 @@ func (e *unrepresentableTxSubmissionError) MarshalCBOR() ([]byte, error) {
 }
 
 const (
-	conwayLedgerMempoolFailure   = 7
-	dijkstraMempoolFailure       = 2
-	dijkstraMempoolLedgerFailure = 1
-	dijkstraLedgerUtxowFailure   = 1
+	conwayLedgerMempoolFailure          = 7
+	conwayUtxosValidationTagMismatch    = 0
+	conwayTagMismatchPassedUnexpectedly = 0
+	conwayTagMismatchFailedUnexpectedly = 1
+	conwayPlutusFailure                 = 1
+	dijkstraMempoolFailure              = 2
+	dijkstraMempoolLedgerFailure        = 1
+	dijkstraLedgerUtxowFailure          = 1
 )
 
 func (e *hardForkApplyTxError) utxowFailure() []any {
