@@ -186,3 +186,59 @@ func TestCardanoNodeConfigFlatUnchanged(t *testing.T) {
 	require.NotNil(t, cfg.TestConwayHardForkAtEpoch)
 	assert.Equal(t, 5, cfg.TargetNumberOfRootPeers)
 }
+
+// A repeated key anywhere the envelope loader selects values from is
+// rejected rather than resolved to one of the occurrences, matching the flat
+// format, whose struct decode rejects a repeated field.
+func TestCardanoNodeConfigEnvelopeDuplicateKeysRejected(t *testing.T) {
+	t.Parallel()
+
+	for name, body := range map[string]string{
+		"root Version": `{"Version": 2, "Version": 3, "Configuration": {}}`,
+		"root Configuration": `{"Version": 2,
+  "Configuration": {"Network": {"PeerSharing": true}},
+  "Configuration": {"Network": {"PeerSharing": false}}}`,
+		"root schema": `{"$schema": "a", "$schema": "b", "Version": 2,
+  "Configuration": {}}`,
+		"section Network": `{"Version": 2, "Configuration": {
+  "Network": {"PeerSharing": true},
+  "Network": {"PeerSharing": false}}}`,
+		"section Protocol": `{"Version": 2, "Configuration": {
+  "Protocol": {"ShelleyGenesisFile": "a.json"},
+  "Protocol": {"ShelleyGenesisFile": "b.json"}}}`,
+		"unsupported section": `{"Version": 2, "Configuration": {
+  "HermodTracing": {}, "HermodTracing": {}}}`,
+		"key within section": `{"Version": 2, "Configuration": {
+  "Network": {"PeerSharing": true, "PeerSharing": false}}}`,
+		"unknown key within section": `{"Version": 2, "Configuration": {
+  "Network": {"Other": 1, "Other": 2}}}`,
+		"key across sections": `{"Version": 2, "Configuration": {
+  "Protocol": {"ConsensusMode": "PraosMode"},
+  "Consensus": {"ConsensusMode": "GenesisMode"}}}`,
+		"flat and deadline peer target": `{"Version": 2, "Configuration": {
+  "Network": {"TargetNumberOfRootPeers": 5,
+    "DeadlineTargetNumberOfRootPeers": 7}}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			_, err := NewCardanoNodeConfigFromReader(strings.NewReader(body))
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "cardano node config")
+			assert.Contains(t, err.Error(), "duplicate")
+		})
+	}
+}
+
+func TestCardanoNodeConfigEnvelopeTxSubmissionLogic(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := NewCardanoNodeConfigFromReader(
+		strings.NewReader(`{"Version": 2, "Configuration": {}}`),
+	)
+	require.NoError(t, err)
+	assert.Equal(t, TxSubmissionLogicV1, cfg.TxSubmissionLogicVersion)
+
+	_, err = NewCardanoNodeConfigFromReader(strings.NewReader(`{"Version": 2,
+  "Configuration": {"Network": {"TxSubmissionLogicVersion": "TxSubmissionLogicV2"}}}`))
+	require.ErrorContains(t, err, "TxSubmissionLogicV2")
+}

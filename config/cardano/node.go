@@ -27,6 +27,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strings"
 
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
@@ -236,7 +237,38 @@ func isEnvelopeConfig(root *yaml.Node) bool {
 		mappingValue(root, "Configuration") != nil
 }
 
+// rejectDuplicateKeys returns an error naming the first key that occurs more
+// than once in mapping m. Decoding into a yaml.Node skips the decoder's
+// duplicate-key check, and mappingValue would otherwise silently select the
+// first occurrence.
+func rejectDuplicateKeys(m *yaml.Node, path string) error {
+	seen := make(map[string]int, len(m.Content)/2)
+	for i := 0; i+1 < len(m.Content); i += 2 {
+		k := m.Content[i]
+		if line, ok := seen[k.Value]; ok {
+			return fmt.Errorf(
+				"cardano node config: duplicate key %s at line %d (first at line %d)",
+				path+k.Value, k.Line, line,
+			)
+		}
+		seen[k.Value] = k.Line
+	}
+	return nil
+}
+
+// envelopeV2FieldKey maps a key of a version 2 section to the flat-format key
+// it sets, so that two keys setting the same field are detected.
+func envelopeV2FieldKey(section, key string) string {
+	if section == "Network" && strings.HasPrefix(key, "DeadlineTargetNumberOf") {
+		return strings.TrimPrefix(key, "Deadline")
+	}
+	return key
+}
+
 func (c *CardanoNodeConfig) decodeEnvelope(root *yaml.Node) error {
+	if err := rejectDuplicateKeys(root, ""); err != nil {
+		return err
+	}
 	versionNode := mappingValue(root, "Version")
 	if versionNode == nil {
 		return errors.New(
@@ -269,6 +301,12 @@ func (c *CardanoNodeConfig) decodeEnvelope(root *yaml.Node) error {
 			"cardano node config: Configuration must be an object",
 		)
 	}
+	if err := rejectDuplicateKeys(cfg, "Configuration."); err != nil {
+		return err
+	}
+	// The supported sections are decoded onto one struct, so a field set from
+	// two sections would silently take the later value.
+	setBy := make(map[string]string)
 	for _, name := range envelopeV2Sections {
 		section := mappingValue(cfg, name)
 		if section == nil {
@@ -279,6 +317,18 @@ func (c *CardanoNodeConfig) decodeEnvelope(root *yaml.Node) error {
 				"cardano node config: Configuration.%s must be an object",
 				name,
 			)
+		}
+		for i := 0; i+1 < len(section.Content); i += 2 {
+			k := section.Content[i]
+			where := "Configuration." + name + "." + k.Value
+			field := envelopeV2FieldKey(name, k.Value)
+			if prev, ok := setBy[field]; ok {
+				return fmt.Errorf(
+					"cardano node config: duplicate key %s at line %d sets the same setting as %s",
+					where, k.Line, prev,
+				)
+			}
+			setBy[field] = where
 		}
 		if err := section.Decode(c); err != nil {
 			return fmt.Errorf(
