@@ -1785,32 +1785,18 @@ func (a *NodeAdapter) drepAnchorMetadata(
 	return ret
 }
 
-// liveStake sums delegated stake across every active pool for the
-// network-wide live-stake total. txn scopes the reads to the caller's
-// transaction (nil for no transaction, matching every other call in this
-// file that takes a *types.Txn-shaped parameter): passing the caller's txn
+// liveStake returns the delegated stake across every active pool for the
+// network-wide live-stake total, summed by the database. txn scopes the read
+// to the caller's transaction (nil for no transaction, matching every other
+// call in this file that takes a *types.Txn-shaped parameter): passing the
+// caller's txn
 // keeps this read in the same snapshot as the caller's other reads, rather
 // than potentially straddling a block boundary against them.
 func (a *NodeAdapter) liveStake(txn dbtypes.Txn) (uint64, error) {
-	poolKeyHashes, err := a.ledgerState.Database().Metadata().
-		GetActivePoolKeyHashes(txn)
+	total, err := a.ledgerState.Database().Metadata().
+		GetActivePoolStakeTotal(txn)
 	if err != nil {
-		return 0, fmt.Errorf(
-			"get active pool key hashes: %w",
-			err,
-		)
-	}
-	if len(poolKeyHashes) == 0 {
-		return 0, nil
-	}
-	stakeByPool, _, err := a.ledgerState.Database().Metadata().
-		GetStakeByPools(poolKeyHashes, txn)
-	if err != nil {
-		return 0, fmt.Errorf("get live stake by pools: %w", err)
-	}
-	total := uint64(0)
-	for _, stake := range stakeByPool {
-		total += stake
+		return 0, fmt.Errorf("get active pool stake total: %w", err)
 	}
 	return total, nil
 }

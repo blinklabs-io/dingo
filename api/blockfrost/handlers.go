@@ -827,8 +827,16 @@ func (b *Blockfrost) handlePoolsExtended(
 		return
 	}
 
+	release, ok := b.admitPoolAggregate(w, r)
+	if !ok {
+		return
+	}
+	defer release()
 	pools, totalItems, err := b.node.PoolsExtended(r.Context(), params)
 	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return
+		}
 		b.logger.Error(
 			"failed to get extended pools",
 			"error", err,

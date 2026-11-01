@@ -12553,6 +12553,15 @@ The base and extended summaries, the account summary, the address total, and
 the two account aggregate routes share one admission pool (4 active, 2 per
 client address) that answers 429 with `Retry-After` when full.
 
+Pool detail and the extended pool list share a separate admission pool (4
+active, 2 per client address) that answers 429 with `Retry-After` when full.
+The pool id and the page are validated before admission, a cancelled request
+writes no response, and the request context reaches the aggregate statements.
+Live stake and delegator counts are database-side aggregates, one row per
+selected pool, and the pool detail's network total is a single aggregate row;
+no tip-keyed cache sits in front of it, because the total must stay in the
+caller's read snapshot.
+
 Blockfrost submission and both evaluation endpoints bound request body reads
 by their existing byte limits and a 15-second read deadline. The deadline is
 cleared after a successful read, before transaction processing; stalled or
