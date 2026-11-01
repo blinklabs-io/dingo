@@ -6599,23 +6599,27 @@ Ordinary Praos sessions continue to use primary-chain intersection points.
   through `PeerGovernor.CorroborationIdentityByConnId`, wired to
   `ChainSelectorConfig.PeerIdentity`. Configured control groups, when present,
   form the exclusive operator witness set described above. Otherwise live
-  ledger peers use the pool control key that registered the relay. Snapshot peers use the snapshot's existing pool
-  grouping, so its IPv4, IPv6, and hostname relays share one identity before the
-  live ledger is available. A topology peer that is also matched to a ledger
-  relay retains that ledger control identity, including when an inbound duplex
-  connection reuses the peer entry. A peer from the operator's own topology
-  (local root, public root or bootstrap peer) that no ledger or snapshot
-  describes, and a ledger or snapshot
-  relay whose endpoint is registered under conflicting control keys, is grouped by the address group of its connection
-  (/24, /64 or hostname), so a node syncing from genesis, which has few usable
-  ledger or snapshot identities, can still corroborate. Topology valency groups
-  are never an identity. All peers learned through peer sharing form a single group, so they can corroborate an
-  identified peer but not each other. Unmatched inbound connections stay unidentified. Those connections fail closed: as candidates they have no
-  corroborators, and as witnesses they do not count. Without a hook the
-  selector groups by remote host. Pool control is a lower bound on operator independence; multiple pool
-  keys can still share an operator. Raising `corroborationPeers` raises the
-  count required, while the trusted ledger or snapshot source establishes the
-  available control groups.
+  ledger peers use the pool control key that registered the relay. Snapshot
+  peers use the snapshot's existing pool grouping, so its IPv4, IPv6, and
+  hostname relays share one identity before the live ledger is available. A
+  topology peer that is also matched to a ledger relay retains that ledger
+  control identity, including when an inbound duplex connection reuses the peer
+  entry. A peer from the operator's own topology (local root, public root or
+  bootstrap peer) that no ledger or snapshot describes, and a ledger or snapshot
+  relay with a missing or conflicting control identity (no control key, a relay
+  delisted while connected, or an endpoint registered under several control
+  keys), are grouped by the address group of their connection (/24, /64 or
+  hostname; an IPv6 zone is ignored), so a node syncing from genesis, which has
+  few usable ledger or snapshot identities, can still corroborate. An address
+  group is only a lower bound on independence. Topology valency groups are never
+  an identity. All peers learned through peer sharing form a single group, so
+  they can corroborate an identified peer but not each other. Unmatched inbound
+  connections stay unidentified. Those connections fail closed: as candidates
+  they have no corroborators, and as witnesses they do not count. Without a hook
+  the selector groups by remote host. Pool control is a lower bound on operator
+  independence; multiple pool keys can still share an operator. Raising
+  `corroborationPeers` raises the count required, while the trusted ledger or
+  snapshot source establishes the available control groups.
 - **Candidate exclusion uses a trusted frontier, whatever the threshold.** In
   Genesis mode the "behind the best known tip" filter
   (`bestKnownBlockNumber`) takes its frontier only from a live, eligible,
@@ -8433,10 +8437,11 @@ Snapshot-seeded ledger peers provide historical corroborators for the Genesis
 corroboration gate (see Chain Selection → Ouroboros Genesis trust model).
 Configured operator groups override the snapshot's pool grouping for witness
 identity. Without them, trusted snapshot pool groups and later ledger control
-keys supply the available identities, and topology peers that neither
-describes, and relays with ambiguous control keys, are grouped by address; peer-sharing peers form one group. The operator remains responsible for choosing independently
-controlled witnesses and a satisfiable `genesisBootstrap.corroborationPeers`
-threshold. The candidate's own operator never counts as its witness.
+keys supply the available identities. Topology peers that neither describes,
+and relays with a missing or conflicting control identity, are grouped by
+address; peer-sharing peers form one group. The operator remains responsible
+for choosing independently controlled witnesses and a satisfiable
+`genesisBootstrap.corroborationPeers` threshold. The candidate's own operator never counts as its witness.
 
 Live ledger peer discovery is adapted at the node composition boundary:
 `ledger/` exposes stake pool relay data and current slot through neutral

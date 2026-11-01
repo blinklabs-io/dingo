@@ -1133,8 +1133,9 @@ func TestPeerGovernor_ConnectedAddressGroupsUnidentifiedRoot(t *testing.T) {
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
-	// A hostname root is normalized to the first address DNS returned when
-	// the topology loaded; the live connection can use another one.
+	// An IP root with no control identity whose live connection uses another
+	// address, as a hostname root does when DNS returns a different address
+	// at dial time than when the topology loaded.
 	pg.AddPeer("44.0.0.1:3001", PeerSourceTopologyLocalRoot)
 	localAddr, _ := net.ResolveTCPAddr("tcp", "127.0.0.1:6000")
 	remoteAddr, _ := net.ResolveTCPAddr("tcp", "45.0.0.1:3001")
@@ -8941,6 +8942,26 @@ func TestAddressHost(t *testing.T) {
 	}
 }
 
+func TestAddressGroup(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		in, want string
+	}{
+		{"44.0.0.1:3001", "ipv4:44.0.0.0/24"},
+		{"[2001:db8::1]:3001", "ipv6:2001:db8::/64"},
+		{"[fe80::1%eth0]:3001", "ipv6:fe80::/64"},
+		{"[fe80::2%eth1]:3001", "ipv6:fe80::/64"},
+		{"fe80::1%eth0", "ipv6:fe80::/64"},
+		{"Relay.Example.COM:3001", "host:relay.example.com"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.in, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, addressGroup(tc.in))
+		})
+	}
+}
+
 func TestPeerGovernor_CorroborationFallbackExcludesUntrustedSources(
 	t *testing.T,
 ) {
@@ -8985,7 +9006,7 @@ func TestPeerGovernor_CorroborationFallbackExcludesUntrustedSources(
 		t,
 		"ipv4:48.0.0.0/24",
 		pg.CorroborationIdentityByConnId(connFor("48.0.0.1:3001")),
-		"a ledger relay with an ambiguous identity is grouped by address",
+		"a ledger relay without a control identity is grouped by address",
 	)
 	assert.Equal(
 		t,
