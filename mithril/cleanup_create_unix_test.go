@@ -23,7 +23,10 @@ import (
 
 func TestCanonicalBootstrapParentResolvesAlias(t *testing.T) {
 	t.Parallel()
-	base := t.TempDir()
+	// The temporary directory can itself sit below a symlink, such as
+	// /var -> /private/var on macOS, so the expected path must be resolved.
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
 	realParent := filepath.Join(base, "real")
 	require.NoError(t, os.Mkdir(realParent, 0o700))
 	alias := filepath.Join(base, "alias")
