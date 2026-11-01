@@ -1408,6 +1408,13 @@ func (o *Ouroboros) updateLeiosEndorserBlockValidation(
 	return &updated
 }
 
+// RetryLeiosEndorserBlockValidations schedules background validation of every
+// cached endorser block whose last attempt found its basis block not yet the
+// ledger tip. It does not block.
+func (o *Ouroboros) RetryLeiosEndorserBlockValidations() {
+	o.retryLeiosEndorserBlockValidations()
+}
+
 func (o *Ouroboros) retryLeiosEndorserBlockValidations() {
 	blocks := o.retryableLeiosEndorserBlocks()
 	for _, data := range blocks {
