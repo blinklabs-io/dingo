@@ -646,6 +646,16 @@ func TestNodeAdapterBlockListsAfterBackfillBelowAnchor(t *testing.T) {
 		assert.ErrorIs(t, err, ErrHistoryNotRetained)
 	})
 
+	t.Run("pool blocks are served although Byron is unindexed", func(t *testing.T) {
+		t.Parallel()
+		fx := setup(t, true)
+		poolID := fx.addPool(t, fx.poolA, nil)
+		hashes, total, err := fx.adapter.PoolBlocks(ctx, poolID, asc)
+		require.NoError(t, err)
+		assert.Equal(t, 3, total)
+		assert.Equal(t, []string{hexOf(0x11), hexOf(0x13), hexOf(0x14)}, hashes)
+	})
+
 	t.Run("interrupted backfill is not retained", func(t *testing.T) {
 		t.Parallel()
 		fx := setup(t, false)

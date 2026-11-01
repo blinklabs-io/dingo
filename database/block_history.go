@@ -39,6 +39,29 @@ func BlockHistoryRetained(
 	startSlot uint64,
 	endSlot uint64,
 ) (bool, error) {
+	return blockHistoryRetained(meta, metaTxn, startSlot, endSlot, false)
+}
+
+// PoolBlockHistoryRetained is BlockHistoryRetained for a list of one stake
+// pool's blocks. A pool never produced a Byron block, so the Byron blocks a
+// backfill leaves unindexed do not make such a list incomplete; pruned and
+// unbackfilled history still does.
+func PoolBlockHistoryRetained(
+	meta metadata.MetadataStore,
+	metaTxn types.Txn,
+	startSlot uint64,
+	endSlot uint64,
+) (bool, error) {
+	return blockHistoryRetained(meta, metaTxn, startSlot, endSlot, true)
+}
+
+func blockHistoryRetained(
+	meta metadata.MetadataStore,
+	metaTxn types.Txn,
+	startSlot uint64,
+	endSlot uint64,
+	skipUnindexedByron bool,
+) (bool, error) {
 	if endSlot < startSlot {
 		return true, nil
 	}
@@ -84,7 +107,7 @@ func BlockHistoryRetained(
 		// The backfill writes no row for Byron blocks, so a range reaching
 		// below the first indexed epoch cannot be told apart from one with
 		// no blocks and must not be reported as complete.
-		if backfilled {
+		if backfilled && !skipUnindexedByron {
 			return false, nil
 		}
 		upper = min(upper, floor-1)

@@ -271,7 +271,7 @@ func (a *NodeAdapter) PoolBlocks(
 	db := a.ledgerState.Database()
 	txn := db.Transaction(ctx, false)
 	defer txn.Release()
-	if err := checkBlockHistoryRetained(
+	if err := checkPoolBlockHistoryRetained(
 		db, txn, 0, a.ledgerState.Tip().Point.Slot,
 	); err != nil {
 		return nil, 0, fmt.Errorf("pool blocks: %w", err)
