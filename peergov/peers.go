@@ -1119,10 +1119,24 @@ func (p *PeerGovernor) TouchPeerByConnId(connId ouroboros.ConnectionId) {
 	}
 }
 
-// CorroborationIdentityByConnId returns a trusted control identity for the
-// peer holding connId. Address and topology diversity do not prove independent
-// control. Configured control groups form an exclusive witness set; otherwise
-// ledger-backed control metadata is required.
+// peerSharingCorroborationIdentity is the single independence group shared by
+// all peers learned through peer sharing.
+const peerSharingCorroborationIdentity = "peer-sharing"
+
+// CorroborationIdentityByConnId returns the independence group of the peer
+// holding connId for Genesis corroboration, or "" when no tracked peer holds
+// it.
+//
+// With configured control groups only their trusted endpoints are witnesses.
+// Otherwise a peer discovered through the ledger or a peer snapshot uses its
+// control identity. An outbound peer from the operator's own topology, or a
+// ledger or snapshot relay whose control identity is missing or ambiguous
+// because several pools list the same endpoint, falls back to the address group (/24, /64 or hostname) of the address its connection uses. A
+// node syncing from genesis has few or no usable control identities, so
+// refusing those peers would leave it unable to corroborate anything and
+// chain selection would never start. All peer-sharing peers form one group.
+// Unmatched inbound connections stay unidentified. The address group is a lower bound on independence, never the
+// topology GroupID: a valency group can list several operators' relays.
 func (p *PeerGovernor) CorroborationIdentityByConnId(
 	connId ouroboros.ConnectionId,
 ) string {
@@ -1132,10 +1146,30 @@ func (p *PeerGovernor) CorroborationIdentityByConnId(
 	if peerIdx == -1 {
 		return ""
 	}
+	peer := p.peers[peerIdx]
 	if len(p.config.ControlGroups) > 0 {
-		return p.configuredCorroborationIdentityLocked(p.peers[peerIdx])
+		return p.configuredCorroborationIdentityLocked(peer)
 	}
-	return p.peers[peerIdx].CorroborationIdentity
+	if peer.CorroborationIdentity != "" {
+		return peer.CorroborationIdentity
+	}
+	switch peer.Source {
+	case PeerSourceP2PGossip:
+		// Remote parties choose the addresses they share, so every
+		// peer-sharing peer counts as one group: they can corroborate an
+		// identified peer but never each other.
+		return peerSharingCorroborationIdentity
+	case PeerSourceP2PLedger,
+		PeerSourceTopologyLocalRoot,
+		PeerSourceTopologyPublicRoot,
+		PeerSourceTopologyBootstrapPeer:
+	default:
+		return ""
+	}
+	if connId.RemoteAddr != nil {
+		return addressGroup(connId.RemoteAddr.String())
+	}
+	return peerAddressGroup(peer)
 }
 
 func (p *PeerGovernor) IsChainSelectionEligible(
