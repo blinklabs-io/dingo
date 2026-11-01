@@ -969,8 +969,11 @@ func (o *Ouroboros) scheduleLeiosEndorserBlockValidation(
 			o.leiosEndorserBlocks[cacheKey] = &pending
 		}
 	}
-	// Read under leiosMu with the block already marked pending: a retry
-	// that counts after this point scans the pending block and skips it.
+	// Read under leiosMu with the block already marked pending. A retry
+	// that counts after this read may skip the pending block, so the
+	// attempt reruns the retry when the counter has moved. A retry counted
+	// before it needs no rerun: the attempt starts after the request and
+	// validates against the ledger tip published before it was made.
 	retryGen := o.leiosValidationRetryGen.Load()
 	o.leiosValidationWG.Add(1)
 	o.leiosMu.Unlock()
