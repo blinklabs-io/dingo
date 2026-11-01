@@ -116,6 +116,9 @@ type pendingBoundarySnapshot struct {
 	snapshotSlot   uint64
 	expiryEpoch    uint64
 	afterEnactment bool
+	// incomingEraApplied means governance reconstructed this distribution with
+	// the incoming era's stake rule before the epoch row was written.
+	incomingEraApplied bool
 }
 
 func (m *Manager) stashBoundaryDistribution(
@@ -134,22 +137,50 @@ func (m *Manager) takeBoundaryDistribution(
 	txn *database.Txn,
 	evt event.EpochTransitionEvent,
 	expiryEpoch uint64,
-) *StakeDistribution {
+) (*StakeDistribution, bool) {
 	m.mu.Lock()
 	pending := m.pendingBoundary
 	m.pendingBoundary = nil
 	m.mu.Unlock()
 	if pending == nil || pending.txn != txn ||
 		(evt.ProtocolVersion >= lcommon.ProtocolVersionDijkstra && !pending.afterEnactment) {
-		return nil
+		return nil, false
 	}
 	if pending.newEpoch != evt.NewEpoch ||
 		pending.boundarySlot != evt.BoundarySlot ||
 		pending.snapshotSlot != evt.SnapshotSlot ||
 		pending.expiryEpoch != expiryEpoch {
-		return nil
+		return nil, false
 	}
-	return pending.distribution
+	return pending.distribution, pending.incomingEraApplied
+}
+
+func (m *Manager) stashIncomingEraDistribution(
+	txn *database.Txn,
+	evt event.EpochTransitionEvent,
+	expiryEpoch uint64,
+	distribution *StakeDistribution,
+) {
+	m.mu.Lock()
+	pending := m.pendingBoundary
+	if pending == nil || pending.txn != txn ||
+		pending.newEpoch != evt.NewEpoch ||
+		pending.boundarySlot != evt.BoundarySlot ||
+		pending.snapshotSlot != evt.SnapshotSlot ||
+		pending.expiryEpoch != expiryEpoch {
+		pending = &pendingBoundarySnapshot{
+			txn:            txn,
+			newEpoch:       evt.NewEpoch,
+			boundarySlot:   evt.BoundarySlot,
+			snapshotSlot:   evt.SnapshotSlot,
+			expiryEpoch:    expiryEpoch,
+			afterEnactment: evt.ProtocolVersion >= lcommon.ProtocolVersionDijkstra,
+		}
+		m.pendingBoundary = pending
+	}
+	pending.distribution = distribution
+	pending.incomingEraApplied = true
+	m.mu.Unlock()
 }
 
 // peekBoundaryDistribution returns the SNAP-point distribution computed for
@@ -178,33 +209,42 @@ func (m *Manager) peekBoundaryDistribution(
 	return pending.distribution
 }
 
-// boundaryChangesEra reports whether the epoch the boundary slot opens runs at
-// a different era than the epoch the snapshot slot closes.
+// boundaryChangesStakeRules reports whether an era-gated stake rule gives a
+// different answer for the epoch the boundary slot opens than for the epoch
+// the snapshot slot closes.
 //
 // Era-sensitive stake rules are resolved against the incoming epoch's era,
 // because cardano-ledger's hard-fork combinator translates the ledger state
 // into that era in extendToSlot before the TICK whose SNAP produces the mark
 // snapshot (ouroboros-consensus HardFork/Combinator/Ledger.hs,
-// applyChainTickLedgerResult). The current such rule is the pointer-address
-// stake gate in database/plugin/metadata/sqlstore/pointer_stake.go: the
-// Babbage->Conway translation rebuilds the instant stake as
+// applyChainTickLedgerResult). The only such rule is the pointer-address
+// stake gate (models.PointerStakeCountedInEra, applied by
+// database/plugin/metadata/sqlstore/pointer_stake.go): the Babbage->Conway
+// translation rebuilds the instant stake as
 // `ConwayInstantStake . sisCredentialStake` (Conway/Translation.hs), dropping
 // sisPtrStake, so the mark snapshot at that boundary carries no pointer stake.
 //
-// ComputeEpochBoundarySnapshot cannot apply that rule. It runs at
-// processEpochRollover's SNAP read, step 3 of its documented ordering, while
-// the incoming epoch's row -- and the enactment that decides its era -- are
-// written near the end of the same transaction. Every era lookup it makes
-// therefore resolves the outgoing epoch's era. The persist half runs after that
-// row exists, so it can detect the difference and drop a SNAP-point read that
-// was taken under the wrong era, deferring to the boundary-aware historical
-// reconstruction below, which resolves the era correctly.
+// ComputeEpochBoundarySnapshot runs before the incoming epoch row exists, so
+// its SQL era lookup resolves the outgoing epoch. The governance read receives
+// the already-decided incoming era from the rollover and reconstructs only if
+// that changes a stake rule. It stashes that corrected distribution for the
+// later persist step, avoiding a second mainnet-wide historical scan. If
+// governance does not request the read, persist detects the rule change after
+// the incoming row is written and reconstructs there.
 //
-// A missing epoch row on either side is not treated as a change: an era that
-// cannot be resolved at all is one no era-gated rule acts on.
-func (m *Manager) boundaryChangesEra(
+// An era change that leaves the rule unchanged keeps the SNAP-point read. The
+// historical reconstruction scans every delegation and UTxO at the boundary
+// inside the rollover transaction; on mainnet that takes long enough that
+// header verification, which has no stable ledger context while the rollover
+// is in flight, defers every header and the node stops at the last block of
+// the outgoing era.
+//
+// Without an explicit incoming era, a missing epoch row is not treated as a
+// change: an era that cannot be resolved is one no era-gated rule acts on.
+func (m *Manager) boundaryChangesStakeRules(
 	txn *database.Txn,
 	evt event.EpochTransitionEvent,
+	incomingEraID *uint,
 ) (bool, error) {
 	snapshotEpoch, err := m.db.GetEpochBySlot(evt.SnapshotSlot, txn)
 	if err != nil {
@@ -212,16 +252,26 @@ func (m *Manager) boundaryChangesEra(
 			"resolve era at snapshot slot %d: %w", evt.SnapshotSlot, err,
 		)
 	}
-	boundaryEpoch, err := m.db.GetEpochBySlot(evt.BoundarySlot, txn)
-	if err != nil {
-		return false, fmt.Errorf(
-			"resolve era at boundary slot %d: %w", evt.BoundarySlot, err,
-		)
-	}
-	if snapshotEpoch == nil || boundaryEpoch == nil {
+	if snapshotEpoch == nil {
 		return false, nil
 	}
-	return snapshotEpoch.EraId != boundaryEpoch.EraId, nil
+	var boundaryEraID uint
+	if incomingEraID != nil {
+		boundaryEraID = *incomingEraID
+	} else {
+		boundaryEpoch, err := m.db.GetEpochBySlot(evt.BoundarySlot, txn)
+		if err != nil {
+			return false, fmt.Errorf(
+				"resolve era at boundary slot %d: %w", evt.BoundarySlot, err,
+			)
+		}
+		if boundaryEpoch == nil {
+			return false, nil
+		}
+		boundaryEraID = boundaryEpoch.EraId
+	}
+	return models.PointerStakeCountedInEra(snapshotEpoch.EraId) !=
+		models.PointerStakeCountedInEra(boundaryEraID), nil
 }
 
 // NewManager creates a new snapshot manager.
@@ -792,10 +842,10 @@ func (m *Manager) ComputeEpochBoundarySnapshot(
 // new epoch row have been applied, because the row it writes needs the new
 // epoch's nonce and the post-enactment protocol version.
 //
-// The stake distribution it persists is the one ComputeEpochBoundarySnapshot
-// read at the SNAP point earlier in this same transaction. When no matching
-// SNAP-point distribution exists — the compute hook is not installed, or its
-// read failed — it reconstructs the exact boundary with slot-aware reward
+// The stake distribution it persists is the SNAP-point read, normalized for
+// the incoming era's stake rules when governance needed that correction before
+// the incoming epoch row existed. Otherwise, when no matching SNAP-point
+// distribution exists, it reconstructs the boundary with slot-aware reward
 // semantics. It never falls back to the live aggregate, whose post-SNAP
 // credits would corrupt the Mark snapshot.
 func (m *Manager) CaptureEpochBoundarySnapshot(
@@ -807,9 +857,11 @@ func (m *Manager) CaptureEpochBoundarySnapshot(
 	start := time.Now()
 	expiryEpoch := m.expiryEpoch(evt.NewEpoch)
 
-	distribution := m.takeBoundaryDistribution(txn, evt, expiryEpoch)
+	distribution, incomingEraApplied := m.takeBoundaryDistribution(
+		txn, evt, expiryEpoch,
+	)
 	if distribution != nil {
-		crossed, err := m.boundaryChangesEra(txn, evt)
+		crossed, err := m.boundaryChangesStakeRules(txn, evt, nil)
 		if err != nil {
 			if m.metrics != nil {
 				m.metrics.captureFailureTotal.Inc()
@@ -819,10 +871,11 @@ func (m *Manager) CaptureEpochBoundarySnapshot(
 			}
 			return err
 		}
-		if crossed {
+		if crossed && !incomingEraApplied {
 			m.logger.Info(
 				"discarding snap-point stake distribution across an era "+
-					"change; reconstructing at persist time",
+					"change that alters the stake rules; reconstructing at "+
+					"persist time",
 				"component", "snapshot",
 				"epoch", evt.NewEpoch,
 				"boundary_slot", evt.BoundarySlot,
@@ -853,6 +906,7 @@ func (m *Manager) CaptureEpochBoundarySnapshot(
 			evt.BoundarySlot,
 			expiryEpoch,
 			m.inactivityPeriod(),
+			nil,
 		)
 		if err != nil {
 			if m.metrics != nil {
@@ -938,23 +992,17 @@ func (m *Manager) CaptureEpochBoundarySnapshot(
 // RATIFY, which runs first.
 //
 // It prefers the SNAP-point distribution ComputeEpochBoundarySnapshot already
-// stashed earlier in this same transaction (peeked, not consumed, so
-// CaptureEpochBoundarySnapshot's later take of the same value is
-// undisturbed), falling back to the same historical boundary reconstruction
-// CaptureEpochBoundarySnapshot itself falls back to when nothing is stashed
-// (no ComputeEpochBoundarySnapshot hook installed, or its read failed), and
-// applying the same era-crossing discard rule via boundaryChangesEra.
+// stashed earlier in this same transaction. When its pointer-stake rule differs
+// from incomingEraID, it reconstructs once with that explicit era and replaces
+// the stash so the later persist does not repeat the mainnet-wide scan. If no
+// SNAP-point read exists, it uses that same incoming-era reconstruction.
+// incomingEraID is supplied by the ledger's hard-fork transition.
 //
-// On the peek path this returns byte-for-byte what the later persisted row
-// holds, because both read the one stashed distribution. On the fallback path
-// it does not: the caller runs this at the SNAP point, while
-// CaptureEpochBoundarySnapshot runs its own fallback at the end of the
-// rollover, and the reconstruction counts reward deltas up to and including
-// the boundary slot -- so the persisted row also absorbs the POOLREAP deposit
-// refunds and enactment credits recorded there. The SNAP-point value is the
-// one cardano-ledger's RATIFY consumes, which is why this is called where it
-// is; ledger's TestProcessEpochRollover_SnapStakeReadOrdering locks that
-// position.
+// The caller supplies incomingEraID because the target epoch row is written
+// after RATIFY. Historical boundary reconstruction includes the rewards that
+// precede SNAP and excludes POOLREAP and enactment credits that follow it. This
+// is the value cardano-ledger's RATIFY consumes; ledger's
+// TestProcessEpochRollover_SnapStakeReadOrdering locks that position.
 // DeferredEpochBoundarySnapshot is a boundary's mark snapshot prepared on a
 // read transaction, to be written through another.
 type DeferredEpochBoundarySnapshot struct {
@@ -1176,18 +1224,23 @@ func (m *Manager) CurrentBoundarySPOStakeRows(
 	ctx context.Context,
 	txn *database.Txn,
 	evt event.EpochTransitionEvent,
+	incomingEraID uint,
 ) ([]*models.PoolStakeSnapshot, error) {
 	m.lockConfiguration()
 	expiryEpoch := m.expiryEpoch(evt.NewEpoch)
 
 	distribution := m.peekBoundaryDistribution(txn, evt, expiryEpoch)
+	usedHistorical := distribution == nil
 	if distribution != nil {
-		crossed, err := m.boundaryChangesEra(txn, evt)
+		crossed, err := m.boundaryChangesStakeRules(
+			txn, evt, &incomingEraID,
+		)
 		if err != nil {
 			return nil, err
 		}
 		if crossed {
 			distribution = nil
+			usedHistorical = true
 		}
 	}
 	if distribution == nil {
@@ -1200,10 +1253,16 @@ func (m *Manager) CurrentBoundarySPOStakeRows(
 			evt.BoundarySlot,
 			expiryEpoch,
 			m.inactivityPeriod(),
+			&incomingEraID,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("calculate stake distribution: %w", err)
 		}
+	}
+	if usedHistorical {
+		m.stashIncomingEraDistribution(
+			txn, evt, expiryEpoch, distribution,
+		)
 	}
 
 	rows := make(

@@ -232,6 +232,7 @@ func (a *NodeAdapter) assetHasOnchainMetadata(
 	var info AssetInfo
 	if err := a.populateAssetOnchainMetadata(
 		ctx,
+		nil,
 		&info,
 		mintTxHash,
 		policyID,

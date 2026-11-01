@@ -23,13 +23,21 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// OwnerOnlyTempDir returns a test temporary directory with permissions that
+// do not depend on the process umask.
+func OwnerOnlyTempDir(t testing.TB) string {
+	t.Helper()
+	dir := t.TempDir()
+	require.NoError(t, os.Chmod(dir, 0o700))
+	return dir
+}
+
 // MakeDirectoryUnwritable removes write permission from a test directory and
 // restores it before the test's temporary-directory cleanup runs.
 //
 // Both modes are derived from what the directory already has rather than
-// written literally: t.TempDir() creates 0o700, so restoring a fixed 0o755
-// would hand the caller a more permissive directory than it passed in, and
-// clearing to a fixed 0o555 would do the same for anything created stricter.
+// written literally, so restoring a fixed mode could hand the caller a more
+// permissive directory than it passed in.
 func MakeDirectoryUnwritable(t testing.TB, path string) {
 	t.Helper()
 	info, err := os.Stat(path)

@@ -39,7 +39,7 @@ func TestSnapshotWritesManifestAndBackupFiles(t *testing.T) {
 	db := newTestDB(t)
 	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
 
-	dir := filepath.Join(t.TempDir(), "snap1")
+	dir := snapshotTestDir(t, "snap1")
 	m, err := lifecycle.Snapshot(
 		context.Background(),
 		db,
@@ -146,7 +146,7 @@ func TestSnapshotRefusingExistingDirectoryDoesNotDeleteItsContents(
 
 	db := newTestDB(t)
 
-	dir := filepath.Join(t.TempDir(), "snap-contested")
+	dir := snapshotTestDir(t, "snap-contested")
 	require.NoError(t, os.MkdirAll(dir, 0o755))
 	winnerFile := filepath.Join(dir, "blob.bak")
 	require.NoError(t, os.WriteFile(winnerFile, []byte("winner's data"), 0o644))
@@ -190,7 +190,7 @@ func TestSnapshotConcurrentCallsToSameDirLeaveWinnersFilesIntact(t *testing.T) {
 	db := newTestDB(t)
 	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
 
-	dir := filepath.Join(t.TempDir(), "snap-race")
+	dir := snapshotTestDir(t, "snap-race")
 
 	start := make(chan struct{})
 	var wg sync.WaitGroup
@@ -281,7 +281,7 @@ func TestSnapshotConsistentUnderConcurrentWrites(t *testing.T) {
 		}
 	})
 
-	dir := filepath.Join(t.TempDir(), "snap-concurrent")
+	dir := snapshotTestDir(t, "snap-concurrent")
 	_, err := lifecycle.Snapshot(
 		context.Background(),
 		db,
@@ -315,7 +315,7 @@ func TestSnapshotCleansUpOnFailure(t *testing.T) {
 	t.Parallel()
 
 	db := newTestDB(t)
-	dir := filepath.Join(t.TempDir(), "snap-fail")
+	dir := snapshotTestDir(t, "snap-fail")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

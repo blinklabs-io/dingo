@@ -190,13 +190,9 @@ func (a *NodeAdapter) PoolDetail(ctx context.Context, poolID string) (PoolDetail
 		)
 	}
 
-	// Network-wide total live stake, for live_size. Unlike active stake's
-	// total, there is no pre-aggregated column to query directly here, so
-	// this genuinely requires summing every pool's delegated stake — the
-	// same cost PoolsExtended and Network already pay for the same
-	// number. liveStake reads within txn so this stays in the same
-	// snapshot as the reads above (see liveStake's doc comment for the
-	// one read that still can't).
+	// Network-wide total live stake, for live_size, summed by the database
+	// within txn so it stays in the same snapshot as the reads above (see
+	// liveStake's doc comment for the one read that still can't).
 	totalLiveStake, err := a.liveStake(txn.Metadata())
 	if err != nil {
 		return PoolDetailInfo{}, err

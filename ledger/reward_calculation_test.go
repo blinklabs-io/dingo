@@ -7956,11 +7956,13 @@ func (f *epochBoundaryBenchFixture) wire(tb testing.TB) {
 		func(
 			txn *database.Txn,
 			evt event.EpochTransitionEvent,
+			incomingEraID uint,
 		) ([]*models.PoolStakeSnapshot, error) {
 			return mgr.CurrentBoundarySPOStakeRows(
 				context.Background(),
 				txn,
 				evt,
+				incomingEraID,
 			)
 		},
 	)

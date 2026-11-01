@@ -379,8 +379,9 @@ type HistoryExpiryConfig struct {
 type KoiosParityConfig struct {
 	// Enabled subscribes the observer to epoch.transition when true.
 	Enabled bool `yaml:"enabled"              envconfig:"DINGO_KOIOS_PARITY_ENABLED"`
-	// Network is the Koios network to validate against: "preview" or
-	// "preprod". Empty defaults to the node's own configured Network.
+	// Network is the Koios network to validate against: "preview",
+	// "preprod" or "mainnet". Empty defaults to the node's own configured
+	// Network.
 	Network string `yaml:"network"              envconfig:"DINGO_KOIOS_PARITY_NETWORK"`
 	// CachePath is the Koios reference cache.db path. Empty defaults to
 	// {DatabasePath}/.koios/cache.db, matching cmd/koios-parity's own
@@ -1103,7 +1104,8 @@ type Config struct {
 	// to advertise known peers to other nodes on request. Pointer
 	// distinguishes "operator did not set this" (nil) from "explicitly
 	// false". On a block producer the resolved default is false unless
-	// this field is explicitly set to true.
+	// this field is explicitly set to true. Otherwise the default is the
+	// cardano-node config.json PeerSharing value, or true when that is unset.
 	PeerSharing *bool `yaml:"peerSharing" envconfig:"DINGO_PEER_SHARING"`
 
 	// Storage mode: "core" (default) or "api".

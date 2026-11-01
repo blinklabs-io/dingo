@@ -183,7 +183,7 @@ func initForgingMetrics(
 	m.slotBattlesTotal = factory.NewCounter(
 		prometheus.CounterOpts{
 			Name: "dingo_metrics_slotBattlesTotal_int",
-			Help: "slot battles detected (competing blocks at same slot)",
+			Help: "battles between locally forged and peer blocks detected by active Praos chain selection",
 		},
 	)
 	m.forgeFenceBlocked = factory.NewCounter(

@@ -1499,9 +1499,27 @@ func (o *Ouroboros) chainsyncServerAwaitNext(
 				appliedTip := o.ledgerState.Tip().Point
 				if appliedTip.Slot == next.Point.Slot &&
 					!bytes.Equal(appliedTip.Hash, next.Point.Hash) {
-					// A different block reached the same slot. Wait for the
-					// iterator's rollback event and serve that instead.
-					continue
+					isParent, err := o.chainsyncServerAppliedParent(
+						appliedTip,
+						next.Point,
+					)
+					if err != nil {
+						// applied has fired and will not fire again, so
+						// retrying here would park the peer until a rollback
+						// that a same-chain tip never produces.
+						cancel()
+						o.closeChainsyncServerConn(
+							conn,
+							ctx.ConnectionId.String(),
+							fmt.Errorf("resolve applied tip parent: %w", err),
+						)
+						return
+					}
+					if !isParent {
+						// A different block reached the same slot. Wait for
+						// the iterator's rollback event and serve that instead.
+						continue
+					}
 				}
 				cancel()
 				o.chainsyncServerServeAwaited(ctx, conn, next, nextErr)
@@ -1510,6 +1528,41 @@ func (o *Ouroboros) chainsyncServerAwaitNext(
 		}
 	}
 	o.chainsyncServerServeAwaited(ctx, conn, next, nextErr)
+}
+
+// chainsyncServerAppliedParent reports whether next is the parent of the
+// applied tip. A Byron epoch-boundary block shares its slot with the block
+// after it, so the ledger can apply both before the waiter wakes and leave a
+// tip at next's slot with a different hash. That is not a fork: no rollback
+// will follow, and treating it as one parks the client indefinitely.
+func (o *Ouroboros) chainsyncServerAppliedParent(
+	appliedTip ocommon.Point,
+	next ocommon.Point,
+) (bool, error) {
+	prevHash, err := o.chainsyncServerPrevHash(appliedTip)
+	if err != nil {
+		return false, err
+	}
+	return bytes.Equal(prevHash, next.Hash), nil
+}
+
+// chainsyncServerPrevHash returns the previous hash of the block at point on
+// the primary chain.
+func (o *Ouroboros) chainsyncServerPrevHash(
+	point ocommon.Point,
+) ([]byte, error) {
+	if o.chainsyncServerPrevHashFunc != nil {
+		return o.chainsyncServerPrevHashFunc(point)
+	}
+	block, err := o.ledgerState.Chain().BlockByPoint(
+		context.Background(),
+		point,
+		nil,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return block.PrevHash, nil
 }
 
 // closeAbandonedChainsyncServerConn drops the transport when the connection is
@@ -1880,6 +1933,12 @@ func (o *Ouroboros) headerAtOrBelowLocalTip(header gledger.BlockHeader) bool {
 		return false
 	}
 	tipBlock, _ := o.chainsyncLocalTipBlock()
+	// Origin and the first applied block both have block number zero. Only
+	// a nonempty applied point can make the first header historical.
+	if tipBlock == 0 && (o.ledgerState == nil ||
+		len(o.ledgerState.Tip().Point.Hash) == 0) {
+		return false
+	}
 	if _, boundary := header.(*byron.ByronEpochBoundaryBlockHeader); boundary {
 		return header.BlockNumber() < tipBlock
 	}
@@ -2190,6 +2249,18 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				return ochainsync.ErrStopSyncProcess
 			}
 		}
+		// An observer is not held by the waits above, so without this it
+		// would read headers to the peer tip while the ledger cannot forecast
+		// them, authenticating and retaining each one. Park it at the horizon
+		// like an ingress connection; its delivered history is kept.
+		if !ingressEligible && o.chainsyncObserverHorizonWait != nil {
+			if err := o.awaitObserverHorizon(ctx, chainsyncEvent); err != nil {
+				return err
+			}
+			if o.recordHeldChainsyncTip(ctx.ConnectionId, tip) {
+				return ochainsync.ErrStopSyncProcess
+			}
+		}
 		// Verify header crypto (VRF/KES and, once local state has caught up,
 		// leader eligibility) before this header is allowed to influence
 		// Genesis chain-selection density or corroboration. Without this
@@ -2219,6 +2290,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		// excludes the header and recycles the connection.
 		selectionEligible := ingressEligible
 		deferredVerification := false
+		transientVerification := false
 		shouldVerifyHeader := o.chainSelectionShouldVerifyHeaderCrypto != nil &&
 			o.chainSelectionShouldVerifyHeaderCrypto(blockSlot)
 		deliveryVerified := !shouldVerifyHeader
@@ -2226,12 +2298,17 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		var verificationTipBaseline ochainsync.Tip
 		if ingressEligible && shouldVerifyHeader {
 			verificationAttempted = true
-			if o.ledgerState != nil {
-				verificationTipBaseline = o.ledgerState.Tip()
-			}
-			verificationGeneration, verifyErr := o.chainSelectionVerifyHeaderCrypto(
-				ctx.ConnectionId,
+			// One wait budget covers both verifications below, so a header
+			// re-admitted past the forecast horizon cannot double it.
+			// The wait holds a goroutine watching the connection until
+			// released; the defer covers re-admission returning early.
+			var deferredWait deferredVerificationWait
+			defer deferredWait.close()
+			verificationGeneration, verifyErr := o.verifyHeaderAwaitingLedger(
+				ctx,
 				v,
+				&verificationTipBaseline,
+				&deferredWait,
 			)
 			if errors.Is(verifyErr, ledger.ErrHeaderBeyondForecastHorizon) &&
 				o.chainsyncHeaderAdmission != nil {
@@ -2244,14 +2321,14 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				if o.recordHeldChainsyncTip(ctx.ConnectionId, tip) {
 					return ochainsync.ErrStopSyncProcess
 				}
-				if o.ledgerState != nil {
-					verificationTipBaseline = o.ledgerState.Tip()
-				}
-				verificationGeneration, verifyErr = o.chainSelectionVerifyHeaderCrypto(
-					ctx.ConnectionId,
+				verificationGeneration, verifyErr = o.verifyHeaderAwaitingLedger(
+					ctx,
 					v,
+					&verificationTipBaseline,
+					&deferredWait,
 				)
 			}
+			deferredWait.close()
 			if verifyErr == nil {
 				chainsyncEvent.HeaderCryptoVerificationGeneration = verificationGeneration
 				deliveryVerified = true
@@ -2276,6 +2353,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				} else if ledger.IsHeaderVerificationDeferred(verifyErr) {
 					selectionEligible = false
 					deferredVerification = true
+					transientVerification = ledger.IsHeaderVerificationContextTransient(verifyErr)
 					o.config.Logger.Debug(
 						"chainsync: header producer authorization deferred",
 						"component", "ouroboros",
@@ -2387,7 +2465,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 					},
 				)
 			}
-			if !extendsLocalChain {
+			if !extendsLocalChain || transientVerification {
 				// Do not advance peer cursors, dedup state, or publish to
 				// selector/ledger until this header passes strict verification.
 				o.markDeferredHeaderRecovery(
@@ -2509,13 +2587,41 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				appliedTip = o.ledgerState.Tip
 			}
 			admissionCtx, cancelAdmission := chainsyncAdmissionContext(ctx)
-			err := o.config.ChainsyncAwaitEagerness(
+			waitCtx, cancelWait := context.WithTimeout(
 				admissionCtx,
+				o.eagernessWaitTimeout,
+			)
+			err := o.config.ChainsyncAwaitEagerness(
+				waitCtx,
 				ctx.ConnectionId,
 				v.BlockNumber(),
 				appliedTip,
 			)
+			waitExpired := errors.Is(err, context.DeadlineExceeded) &&
+				admissionCtx.Err() == nil
+			cancelWait()
 			cancelAdmission()
+			if waitExpired {
+				// A callback parked past the protocol's reply timers would
+				// tear the connection down. The header is still past the
+				// limit, so it is not queued; re-intersecting from the local
+				// chain redelivers it and keeps this peer's observed history
+				// from advancing beyond the limit meanwhile.
+				tipAccepted = false
+				o.config.Logger.Debug(
+					"chainsync: eagerness wait expired",
+					"component", "ouroboros",
+					"slot", blockSlot,
+					"block_number", v.BlockNumber(),
+					"connection_id", ctx.ConnectionId.String(),
+				)
+				o.scheduleHeaderResync(
+					ctx.ConnectionId,
+					time.Now(),
+					event.ChainsyncResyncReasonEagernessWaitExpired,
+				)
+				return nil
+			}
 			if err != nil {
 				// The header never reaches the ledger queue.
 				tipAccepted = false
@@ -2775,6 +2881,101 @@ func (o *Ouroboros) recordHeldChainsyncTip(
 	return true
 }
 
+// maxDeferredVerificationWaits bounds how many ledger settle signals one
+// roll-forward waits out before its deferral is parked for recovery.
+const maxDeferredVerificationWaits = 4
+
+// verifyHeaderAwaitingLedger verifies header for chain selection. A deferred
+// result means local state was not ready (a block-apply commit or snapshot
+// publication in progress, or the published epoch data not yet covering the
+// header's slot), which says nothing about the header. A header that does not
+// extend the local chain would be parked for a re-intersection, which closes
+// the connection, so the callback instead waits for the ledger's next settle
+// signal and verifies the same header again, as the reference ChainSync
+// client blocks until the ledger view can validate a header. A local extension
+// also waits when a validation transition or snapshot publication invalidated
+// its verification context. Other local-extension deferrals are returned at
+// once: missing epoch data may need its own block applied to settle. wait bounds
+// every wait of one roll-forward to catchUpBandWaitTimeout, which stays under
+// the protocol state timers, and to maxDeferredVerificationWaits, and ends at
+// connection close. A header beyond the forecast horizon has its own
+// admission wait and is returned immediately. When a bound is reached the
+// last result is returned unchanged. baseline receives the applied tip
+// observed before the last attempt.
+func (o *Ouroboros) verifyHeaderAwaitingLedger(
+	ctx ochainsync.CallbackContext,
+	header gledger.BlockHeader,
+	baseline *ochainsync.Tip,
+	wait *deferredVerificationWait,
+) (uint64, error) {
+	for {
+		// The channel is taken before the attempt so a publication that lands
+		// during it still wakes the wait.
+		var settled <-chan struct{}
+		if o.config.ChainsyncHeaderVerificationSettled != nil {
+			settled = o.config.ChainsyncHeaderVerificationSettled()
+		}
+		if o.ledgerState != nil {
+			*baseline = o.ledgerState.Tip()
+		}
+		generation, err := o.chainSelectionVerifyHeaderCrypto(
+			ctx.ConnectionId,
+			header,
+		)
+		if err == nil || settled == nil ||
+			!ledger.IsHeaderVerificationDeferred(err) ||
+			errors.Is(err, ledger.ErrHeaderBeyondForecastHorizon) ||
+			wait.waits >= maxDeferredVerificationWaits ||
+			(!ledger.IsHeaderVerificationContextTransient(err) &&
+				o.deferredHeaderExtendsLocalChain(ctx.ConnectionId, header)) {
+			return generation, err
+		}
+		if !wait.await(ctx, o.catchUpBandWaitTimeout, settled) {
+			return generation, err
+		}
+	}
+}
+
+// deferredVerificationWait is the bounded context shared by every wait of one
+// roll-forward, created on the first wait so a header that verifies pays
+// nothing.
+type deferredVerificationWait struct {
+	ctx    context.Context
+	cancel func()
+	waits  int
+}
+
+func (w *deferredVerificationWait) close() {
+	if w.cancel != nil {
+		w.cancel()
+	}
+}
+
+// await blocks until settled closes and reports true, or reports false once
+// the shared bound or the connection ends.
+func (w *deferredVerificationWait) await(
+	cb ochainsync.CallbackContext,
+	bound time.Duration,
+	settled <-chan struct{},
+) bool {
+	if w.ctx == nil {
+		admissionCtx, cancelAdmission := chainsyncAdmissionContext(cb)
+		waitCtx, cancelWait := context.WithTimeout(admissionCtx, bound)
+		w.ctx = waitCtx
+		w.cancel = func() {
+			cancelWait()
+			cancelAdmission()
+		}
+	}
+	w.waits++
+	select {
+	case <-settled:
+		return true
+	case <-w.ctx.Done():
+		return false
+	}
+}
+
 // awaitCatchUpBand parks the callback while the header overshoots the
 // catch-up band. A wait that reaches its bound is not an error: the header
 // then meets the ordinary plausibility verdict, so the bound only limits how
@@ -2810,6 +3011,32 @@ func (o *Ouroboros) awaitCatchUpBand(
 		return nil
 	}
 	return fmt.Errorf("chainsync: await catch-up band: %w", err)
+}
+
+// awaitObserverHorizon parks an observer's callback while its header lies past
+// the ledger's forecast horizon. Like awaitCatchUpBand, a wait that reaches
+// its bound is not an error: the header then takes the ordinary observer path,
+// so the bound limits how long a promotion can go unnoticed. Cancellation is
+// returned.
+func (o *Ouroboros) awaitObserverHorizon(
+	ctx ochainsync.CallbackContext,
+	e ledger.ChainsyncEvent,
+) error {
+	admissionCtx, cancelAdmission := chainsyncAdmissionContext(ctx)
+	defer cancelAdmission()
+	waitCtx, cancelWait := context.WithTimeout(
+		admissionCtx,
+		o.catchUpBandWaitTimeout,
+	)
+	defer cancelWait()
+	err := o.chainsyncObserverHorizonWait(waitCtx, e)
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, context.DeadlineExceeded) && admissionCtx.Err() == nil {
+		return nil
+	}
+	return fmt.Errorf("chainsync: await observer forecast horizon: %w", err)
 }
 
 // admitChainsyncHeader runs the future-header admission for one delivered

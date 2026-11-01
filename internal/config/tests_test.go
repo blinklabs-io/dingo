@@ -19,10 +19,12 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/blinklabs-io/dingo/internal/apiconfig"
+	"github.com/blinklabs-io/dingo/internal/koiosparity"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -219,6 +221,51 @@ func TestValidate_InvalidAPITLSMode(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "api.tls.mode")
 	assert.Contains(t, err.Error(), "invalid mode")
+}
+
+// TestValidate_KoiosParityNetwork pins the accepted koiosParity.network set.
+// Not t.Parallel: resetGlobalConfig replaces the process-global config that
+// GetConfig and Validate read.
+func TestValidate_KoiosParityNetwork(t *testing.T) {
+	for _, net := range []string{"", "preview", "preprod", "mainnet"} {
+		resetGlobalConfig()
+		cfg := GetConfig()
+		cfg.ApplyDefaults()
+		cfg.KoiosParity.Network = net
+		err := cfg.Validate(RunModeLoad)
+		if err != nil {
+			assert.NotContains(t, err.Error(), "koiosParity.network", net)
+		}
+	}
+
+	resetGlobalConfig()
+	cfg := GetConfig()
+	cfg.ApplyDefaults()
+	cfg.KoiosParity.Network = "sanchonet"
+	err := cfg.Validate(RunModeLoad)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid koiosParity.network")
+}
+
+// TestValidate_KoiosParityNetworkMatchesKoiosParity pins Validate's
+// hardcoded koiosParity.network set to the one koiosparity.ValidateNetwork
+// accepts, so a network added to one side cannot pass config validation and
+// then fail at observer startup, or the reverse.
+// Not t.Parallel: resetGlobalConfig replaces the process-global config.
+func TestValidate_KoiosParityNetworkMatchesKoiosParity(t *testing.T) {
+	for _, net := range []string{
+		"preview", "preprod", "mainnet", "sanchonet", "devnet", "musashi",
+	} {
+		resetGlobalConfig()
+		cfg := GetConfig()
+		cfg.ApplyDefaults()
+		cfg.KoiosParity.Network = net
+		err := cfg.Validate(RunModeLoad)
+		configAccepts := err == nil ||
+			!strings.Contains(err.Error(), "koiosParity.network")
+		koiosAccepts := koiosparity.ValidateNetwork(net) == nil
+		assert.Equal(t, koiosAccepts, configAccepts, net)
+	}
 }
 
 // TestGetConfigSnapshotDoesNotShareAPIPolicy asserts GetConfig's snapshot

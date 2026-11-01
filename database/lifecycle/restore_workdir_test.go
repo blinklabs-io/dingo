@@ -80,7 +80,7 @@ func TestRestoreLocalPayloadCopiesStayBesideTarget(t *testing.T) {
 	// Not t.Parallel: t.Setenv.
 	db := newTestDB(t)
 	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
-	snapshotDir := filepath.Join(t.TempDir(), "snap")
+	snapshotDir := snapshotTestDir(t, "snap")
 	_, err := lifecycle.Snapshot(
 		context.Background(), db, snapshotDir,
 		lifecycle.TriggerManual, "test", "badger", "sqlite",

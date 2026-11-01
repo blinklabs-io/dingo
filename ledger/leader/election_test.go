@@ -656,6 +656,7 @@ type mockStakeProvider struct {
 	poolStakes map[string]uint64
 	totalStake uint64
 	err        error
+	calls      atomic.Int64
 }
 
 func newMockStakeProvider() *mockStakeProvider {
@@ -668,6 +669,7 @@ func (m *mockStakeProvider) GetPoolAndTotalActiveStake(
 	_ uint64,
 	poolKeyHash []byte,
 ) (uint64, uint64, error) {
+	m.calls.Add(1)
 	if m.err != nil {
 		return 0, 0, m.err
 	}
@@ -1378,16 +1380,14 @@ func TestElectionPrecomputesNextEpochAtStartupWhenNonceReady(t *testing.T) {
 		"next epoch schedule should be persisted at startup")
 }
 
-func TestElectionZeroPoolStake(t *testing.T) {
+func TestElectionCachesZeroStakeSchedule(t *testing.T) {
 	poolId := lcommon.PoolKeyHash{}
 	stakeProvider := newMockStakeProvider()
 	stakeProvider.totalStake = 10000
-	// No pool stake set (zero)
 
 	epochProvider := newMockEpochProvider()
 	epochProvider.currentEpoch.Store(10)
-	electionTestNonce11 := makeDistinctNonce(electionTestNonce)
-	epochProvider.SetEpochNonceForEpoch(11, electionTestNonce11)
+	epochProvider.activeSlotCoeff = 1.0
 
 	eventBus := event.NewEventBus(nil, nil)
 	defer eventBus.Stop()
@@ -1405,13 +1405,38 @@ func TestElectionZeroPoolStake(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = election.Stop() }()
 
-	// With zero pool stake, computeSchedule returns nil (no VRF needed).
-	// Verify the schedule stays nil after the background goroutine has
-	// time to process the request.
-	assert.Never(t, func() bool {
-		return election.CurrentSchedule() != nil
-	}, 500*time.Millisecond, 50*time.Millisecond,
-		"schedule should remain nil with zero pool stake")
+	zeroStakeSchedule := waitForSchedule(t, election, testutil.AsyncWait)
+	require.Empty(t, zeroStakeSchedule.LeaderSlotsSnapshot())
+	require.Zero(t, zeroStakeSchedule.PoolStake)
+	require.Equal(t, int64(1), stakeProvider.calls.Load())
+
+	for slot := uint64(100); slot < 110; slot++ {
+		require.False(t, election.ShouldProduceBlock(slot))
+	}
+	require.Equal(t, int64(1), stakeProvider.calls.Load(),
+		"an empty schedule must satisfy every lookup in its epoch")
+
+	stakeProvider.poolStakes[string(poolId[:])] = stakeProvider.totalStake
+	epochProvider.currentEpoch.Store(11)
+	epochProvider.SetEpochNonceForEpoch(11, makeDistinctNonce(electionTestNonce))
+	eventBus.Publish(
+		event.EpochTransitionEventType,
+		event.NewEvent(
+			event.EpochTransitionEventType,
+			event.EpochTransitionEvent{NewEpoch: 11},
+		),
+	)
+
+	var stakedSchedule *Schedule
+	require.Eventually(t, func() bool {
+		stakedSchedule = election.ScheduleForEpoch(11)
+		return stakedSchedule != nil
+	}, 30*time.Second, 50*time.Millisecond)
+	require.Equal(t, int64(2), stakeProvider.calls.Load(),
+		"each epoch must compute its schedule once")
+	for slot := uint64(110); slot < 120; slot++ {
+		require.True(t, election.ShouldProduceBlock(slot), "slot %d", slot)
+	}
 }
 
 func TestElectionShouldProduceBlock(t *testing.T) {

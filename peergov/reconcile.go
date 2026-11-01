@@ -528,9 +528,12 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 	p.redialDisconnectedPeersLocked()
 
 	// Collect eligible peers for peer sharing
-	// Copy peer data while holding lock to avoid race conditions
+	// Copy peer data while holding lock to avoid race conditions.
+	// While bootstrap peers are in use the node is in a sensitive state and
+	// does not learn peers by peer sharing, as in the reference node.
 	var eligiblePeersCopy []Peer
-	if p.config.PeerRequestFunc != nil {
+	if p.config.PeerRequestFunc != nil &&
+		(p.bootstrapExited || !p.hasBootstrapPeersLocked()) {
 		for _, peer := range p.peers {
 			if peer != nil && peer.State == PeerStateHot &&
 				peer.Connection != nil {

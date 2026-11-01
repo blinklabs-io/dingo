@@ -231,7 +231,7 @@ var flagSpecs = []flagSpec{
 	boolPtrFlag(
 		"PeerSharing",
 		"peer-sharing",
-		"enable peer sharing protocol (default: cardano-node config.json fallback for non-block-producers; false for block producers)",
+		"enable peer sharing protocol (default: cardano-node config.json fallback for non-block-producers, else true; false for block producers)",
 	),
 
 	// APIs
@@ -570,7 +570,7 @@ var flagSpecs = []flagSpec{
 		"KoiosParity.Network",
 		"koios-parity-network",
 		"",
-		"Koios network to validate against: preview or preprod (default: node's own --network)",
+		"Koios network to validate against: preview, preprod or mainnet (default: node's own --network)",
 	),
 	stringFlag(
 		"KoiosParity.CachePath",

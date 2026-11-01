@@ -335,7 +335,7 @@ func alonzoPParamsUnitBackfillDB(
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	require.Len(t, registry, 50)
+	require.Len(t, registry, 51)
 
 	runTo := func(versions []migrations.Migration) {
 		runner := migrations.Runner{
@@ -463,7 +463,7 @@ func depositHeldBackfillDB(
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	require.Len(t, registry, 50)
+	require.Len(t, registry, 51)
 
 	runTo := func(versions []migrations.Migration) {
 		runner := migrations.Runner{

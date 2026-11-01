@@ -991,8 +991,10 @@ func (a *NodeAdapter) Genesis() (GenesisInfo, error) {
 }
 
 // Asset returns native asset information for a policy ID
-// and raw asset name bytes.
+// and raw asset name bytes. The quantity totals every live holding of the
+// asset, so the reads run in one transaction bound to ctx and stop with it.
 func (a *NodeAdapter) Asset(
+	ctx context.Context,
 	policyID string,
 	assetName []byte,
 ) (AssetInfo, error) {
@@ -1008,9 +1010,15 @@ func (a *NodeAdapter) Asset(
 	if err != nil {
 		return AssetInfo{}, fmt.Errorf("asset policy ID %q: %w", policyID, err)
 	}
-	asset, err := a.ledgerState.Database().
-		Metadata().
-		GetAssetByPolicyAndName(policyHash, assetName, nil)
+	db := a.ledgerState.Database()
+	txn := db.Transaction(ctx, false)
+	defer txn.Release()
+	meta := db.Metadata()
+	asset, err := meta.GetAssetByPolicyAndName(
+		policyHash,
+		assetName,
+		txn.Metadata(),
+	)
 	if err != nil {
 		return AssetInfo{}, fmt.Errorf(
 			"get asset by policy %s and name %x: %w",
@@ -1027,9 +1035,11 @@ func (a *NodeAdapter) Asset(
 			ErrAssetNotFound,
 		)
 	}
-	quantity, err := a.ledgerState.Database().
-		Metadata().
-		GetAssetQuantityByPolicyAndName(policyHash, assetName, nil)
+	quantity, err := meta.GetAssetQuantityByPolicyAndName(
+		policyHash,
+		assetName,
+		txn.Metadata(),
+	)
 	if err != nil {
 		return AssetInfo{}, fmt.Errorf(
 			"get asset quantity by policy %s and name %x: %w",
@@ -1039,9 +1049,11 @@ func (a *NodeAdapter) Asset(
 		)
 	}
 
-	initialMintTxHash, mintOrBurnCount, err := a.ledgerState.Database().
-		Metadata().
-		GetAssetMintBurnInfo(policyHash, assetName, nil)
+	initialMintTxHash, mintOrBurnCount, err := meta.GetAssetMintBurnInfo(
+		policyHash,
+		assetName,
+		txn.Metadata(),
+	)
 	if err != nil {
 		return AssetInfo{}, fmt.Errorf(
 			"get asset mint/burn info by policy %s and name %x: %w",
@@ -1063,7 +1075,8 @@ func (a *NodeAdapter) Asset(
 	if len(initialMintTxHash) > 0 {
 		info.InitialMintTxHash = hex.EncodeToString(initialMintTxHash)
 		if err := a.populateAssetOnchainMetadata(
-			context.Background(),
+			ctx,
+			txn,
 			&info,
 			initialMintTxHash,
 			policyID,
@@ -1075,6 +1088,7 @@ func (a *NodeAdapter) Asset(
 	// The CIP-26 off-chain registry is independent of the mint transaction,
 	// so this runs whether or not the asset has on-chain metadata.
 	if err := a.populateAssetRegistryMetadata(
+		txn.Metadata(),
 		&info,
 		policyID,
 		assetName,
@@ -1087,16 +1101,18 @@ func (a *NodeAdapter) Asset(
 // populateAssetOnchainMetadata resolves the CIP-25 on-chain metadata for an
 // asset from its initial mint transaction and fills the metadata fields on
 // info. A mint transaction without (matching) metadata is not an error; the
-// fields are simply left unset.
+// fields are simply left unset. A non-nil txn is reused so the read does not
+// wait for a second pooled connection while the caller holds one.
 func (a *NodeAdapter) populateAssetOnchainMetadata(
 	ctx context.Context,
+	txn *database.Txn,
 	info *AssetInfo,
 	initialMintTxHash []byte,
 	policyID string,
 	assetName []byte,
 ) error {
 	metadataCbor, err := a.ledgerState.Database().
-		GetTransactionMetadataByHash(ctx, initialMintTxHash, nil)
+		GetTransactionMetadataByHash(ctx, initialMintTxHash, txn)
 	if err != nil {
 		return fmt.Errorf(
 			"get initial mint tx %x metadata for asset %s%x: %w",
@@ -1769,32 +1785,18 @@ func (a *NodeAdapter) drepAnchorMetadata(
 	return ret
 }
 
-// liveStake sums delegated stake across every active pool for the
-// network-wide live-stake total. txn scopes the reads to the caller's
-// transaction (nil for no transaction, matching every other call in this
-// file that takes a *types.Txn-shaped parameter): passing the caller's txn
+// liveStake returns the delegated stake across every active pool for the
+// network-wide live-stake total, summed by the database. txn scopes the read
+// to the caller's transaction (nil for no transaction, matching every other
+// call in this file that takes a *types.Txn-shaped parameter): passing the
+// caller's txn
 // keeps this read in the same snapshot as the caller's other reads, rather
 // than potentially straddling a block boundary against them.
 func (a *NodeAdapter) liveStake(txn dbtypes.Txn) (uint64, error) {
-	poolKeyHashes, err := a.ledgerState.Database().Metadata().
-		GetActivePoolKeyHashes(txn)
+	total, err := a.ledgerState.Database().Metadata().
+		GetActivePoolStakeTotal(txn)
 	if err != nil {
-		return 0, fmt.Errorf(
-			"get active pool key hashes: %w",
-			err,
-		)
-	}
-	if len(poolKeyHashes) == 0 {
-		return 0, nil
-	}
-	stakeByPool, _, err := a.ledgerState.Database().Metadata().
-		GetStakeByPools(poolKeyHashes, txn)
-	if err != nil {
-		return 0, fmt.Errorf("get live stake by pools: %w", err)
-	}
-	total := uint64(0)
-	for _, stake := range stakeByPool {
-		total += stake
+		return 0, fmt.Errorf("get active pool stake total: %w", err)
 	}
 	return total, nil
 }

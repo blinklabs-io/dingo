@@ -266,3 +266,47 @@ func TestUncorroboratedEagernessPreservesOverlapUntilSlowerPeerCatchesUp(t *test
 	default:
 	}
 }
+
+// A callback parked in the eagerness wait stops the protocol's receive loop,
+// so the wait must end before the protocol's reply timers do. Expiry is not a
+// failure: the header stays out of the ledger and the connection re-intersects.
+func TestEagernessWaitExpiresIntoResync(t *testing.T) {
+	t.Parallel()
+	f := newPatienceRollForwardFixture(t, true)
+	_, ledgerCh := f.o.eventBus.Subscribe(ledger.ChainsyncEventType)
+	f.o.eagernessWaitTimeout = 10 * time.Millisecond
+	f.o.chainsyncScheduleAt = func(time.Time, func()) func() { return func() {} }
+	f.o.config.ChainsyncApplyEligible = func(ouroboros.ConnectionId) bool { return false }
+	f.o.config.ChainsyncAwaitEagerness = func(ctx context.Context, _ ouroboros.ConnectionId, _ uint64, _ func() ochainsync.Tip) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	connectionDone := make(chan any)
+	var once sync.Once
+	closeConn := func() { once.Do(func() { close(connectionDone) }) }
+	// A callback that never returns on a broken build still ends with the test.
+	t.Cleanup(closeConn)
+	header := newTestBlockHeader(100, 7, 0xaa)
+	done := make(chan error, 1)
+	go func() {
+		done <- f.o.chainsyncClientRollForwardAt(ochainsync.CallbackContext{
+			ConnectionId: f.conn, ConnectionDoneChan: connectionDone,
+		}, 0, header, ochainsync.Tip{Point: ocommon.NewPoint(100, header.Hash().Bytes()), BlockNumber: 7}, f.now)
+	}()
+	select {
+	case err := <-done:
+		require.NoError(t, err, "an expired eagerness wait must not fail the connection")
+	case <-time.After(5 * time.Second):
+		t.Fatal("eagerness wait was not bounded")
+	}
+	f.o.futureHeaderResyncMu.Lock()
+	scheduled := f.o.futureHeaderResyncs[f.conn]
+	f.o.futureHeaderResyncMu.Unlock()
+	require.NotNil(t, scheduled, "expiry must re-intersect the connection")
+	require.Equal(t, event.ChainsyncResyncReasonEagernessWaitExpired, scheduled.reason)
+	select {
+	case <-ledgerCh:
+		t.Fatal("a header past the limit entered the ledger")
+	default:
+	}
+}

@@ -23,6 +23,18 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// OwnerOnlyTempDir returns a test temporary directory with a protected DACL
+// that grants access only to the current user and the system account.
+func OwnerOnlyTempDir(t testing.TB) string {
+	t.Helper()
+	dir := t.TempDir()
+	userSID := currentUserSID(t)
+	require.NoError(t, applyDACL(dir, fmt.Sprintf(
+		"D:P(A;;FA;;;%s)(A;;FA;;;SY)", userSID,
+	)))
+	return dir
+}
+
 // MakeDirectoryUnwritable denies the current user access to a test directory
 // and restores an owner-only DACL before the test's temporary-directory
 // cleanup runs. Windows does not use Unix mode bits for access checks.

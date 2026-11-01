@@ -260,9 +260,10 @@ INSERT INTO auth_committee_hot (
 			func(
 				txn *database.Txn,
 				evt event.EpochTransitionEvent,
+				incomingEraID uint,
 			) ([]*models.PoolStakeSnapshot, error) {
 				return snapshotMgr.CurrentBoundarySPOStakeRows(
-					context.Background(), txn, evt,
+					context.Background(), txn, evt, incomingEraID,
 				)
 			},
 		)

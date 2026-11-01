@@ -174,6 +174,9 @@ func (s *cborValue) UnmarshalCBOR(data []byte) error {
 	s.Script = nil
 	switch s.Type {
 	case common.ScriptRefTypeNativeScript:
+		if err := validateConwayNativeScriptCBOR(items[1]); err != nil {
+			return fmt.Errorf("validate Conway native script shape: %w", err)
+		}
 		if _, err := cbor.Decode(items[1], &s.Native); err != nil {
 			return fmt.Errorf("decode native script: %w", err)
 		}
@@ -236,6 +239,15 @@ func reencode(rule string, raw []byte) ([]byte, error) {
 	case "auxiliary_data_map":
 		return reencodeConwayAuxiliaryData(raw, "map")
 	case "auxiliary_scripts":
+		var rawScripts []cbor.RawMessage
+		if _, err := cbor.DecodeExact(raw, &rawScripts); err != nil {
+			return nil, err
+		}
+		for index, script := range rawScripts {
+			if err := validateConwayNativeScriptCBOR(script); err != nil {
+				return nil, fmt.Errorf("auxiliary native script %d: %w", index, err)
+			}
+		}
 		return reencodeChecked[[]common.NativeScript](raw, func(scripts []common.NativeScript) error {
 			return common.ValidateNativeScriptConstructors(scripts, 5)
 		})
@@ -255,6 +267,9 @@ func reencode(rule string, raw []byte) ([]byte, error) {
 	case "asset_name":
 		return reencodeBytes(raw, 0, 32)
 	case "big_int":
+		if err := validateConwayBigIntCBOR(raw); err != nil {
+			return nil, err
+		}
 		return reencodeTyped[big.Int](raw)
 	case "block":
 		if err := validateConwayBlockCBOR(raw); err != nil {
@@ -277,7 +292,7 @@ func reencode(rule string, raw []byte) ([]byte, error) {
 	case "bootstrap_witness":
 		return reencodeTyped[common.BootstrapWitness](raw)
 	case "bounded_bytes":
-		return reencodeBytes(raw, 0, 64)
+		return reencodeByteString(raw, 0, 64, false)
 	case "certificate":
 		if err := requireCBORMajorType(raw, 4); err != nil {
 			return nil, err
@@ -371,6 +386,9 @@ func reencode(rule string, raw []byte) ([]byte, error) {
 			return nil
 		})
 	case "ex_units":
+		if err := validateUnsignedArrayFields(raw, "execution units", 2); err != nil {
+			return nil, err
+		}
 		return reencodeTyped[common.ExUnits](raw)
 	case "gov_action":
 		if err := validateConwayHardForkVersion(raw); err != nil {
@@ -386,6 +404,9 @@ func reencode(rule string, raw []byte) ([]byte, error) {
 		}
 		return storedEncoding(header)
 	case "header_body":
+		if err := validateConwayHeaderBodyCBOR(raw); err != nil {
+			return nil, err
+		}
 		return reencodeStored[babbage.BabbageBlockHeaderBody](raw)
 	case "ipv4":
 		return reencodeBytes(raw, 4, 4)
@@ -768,6 +789,68 @@ func validateConwayBlockCBOR(raw []byte) error {
 		if err := requireCBORMajorType(invalidTransactions, 4); err != nil {
 			return fmt.Errorf("conway block field 4: %w", err)
 		}
+		var indexes []uint64
+		if _, err := cbor.DecodeExact(invalidTransactions, &indexes); err != nil {
+			return fmt.Errorf("decode Conway block invalid transaction indexes: %w", err)
+		}
+		for index := 1; index < len(indexes); index++ {
+			if indexes[index] <= indexes[index-1] {
+				return errors.New("conway block invalid transaction indexes must be strictly increasing")
+			}
+		}
+	}
+	return nil
+}
+
+func validateConwayBigIntCBOR(raw []byte) error {
+	node, err := cbor.ParseDiagnostic(raw)
+	if err != nil {
+		return err
+	}
+	if node.Type == cbor.DiagTypeUint || node.Type == cbor.DiagTypeNint {
+		return nil
+	}
+	if node.Type != cbor.DiagTypeTag || node.Tag == nil ||
+		(*node.Tag != 2 && *node.Tag != 3) || len(node.Children) != 1 ||
+		node.Children[0].Type != cbor.DiagTypeBytes {
+		return errors.New("big integer must be an integer or a CBOR bignum")
+	}
+	value, ok := node.Children[0].Value.([]byte)
+	if !ok {
+		return errors.New("CBOR bignum does not contain a byte string")
+	}
+	if len(value) > 64 {
+		return fmt.Errorf("CBOR bignum magnitude is %d bytes, maximum is 64", len(value))
+	}
+	return nil
+}
+
+func validateUnsignedArrayFields(raw []byte, name string, count int) error {
+	var fields []cbor.RawMessage
+	if _, err := cbor.DecodeExact(raw, &fields); err != nil {
+		return err
+	}
+	if len(fields) != count {
+		return fmt.Errorf("%s must contain %d fields, got %d", name, count, len(fields))
+	}
+	for index, field := range fields {
+		if err := requireCBORMajorType(field, 0); err != nil {
+			return fmt.Errorf("%s field %d must be an unsigned integer: %w", name, index, err)
+		}
+	}
+	return nil
+}
+
+func validateConwayHeaderBodyCBOR(raw []byte) error {
+	var fields []cbor.RawMessage
+	if _, err := cbor.DecodeExact(raw, &fields); err != nil {
+		return err
+	}
+	if len(fields) != 10 {
+		return fmt.Errorf("conway header body must contain 10 fields, got %d", len(fields))
+	}
+	if err := requireCBORDefiniteMajorType(fields[5], 4); err != nil {
+		return fmt.Errorf("conway header body VRF result: %w", err)
 	}
 	return nil
 }
@@ -789,6 +872,9 @@ func validateConwayTransactionBodyMap(raw []byte) error {
 }
 
 func reencodeConwayNativeScript(raw []byte) ([]byte, error) {
+	if err := validateConwayNativeScriptCBOR(raw); err != nil {
+		return nil, err
+	}
 	var decoded common.NativeScript
 	if _, err := cbor.DecodeExact(raw, &decoded); err != nil {
 		return nil, err
@@ -799,6 +885,48 @@ func reencodeConwayNativeScript(raw []byte) ([]byte, error) {
 		return nil, err
 	}
 	return storedEncoding(decoded)
+}
+
+func validateConwayNativeScriptCBOR(raw []byte) error {
+	node, err := cbor.ParseDiagnostic(raw)
+	if err != nil {
+		return err
+	}
+	return validateConwayNativeScriptNode(node)
+}
+
+func validateConwayNativeScriptNode(node *cbor.DiagnosticNode) error {
+	if node.Type != cbor.DiagTypeArray || len(node.Children) == 0 ||
+		node.Children[0].Type != cbor.DiagTypeUint {
+		return errors.New("native script must begin with an unsigned constructor")
+	}
+	constructor, ok := node.Children[0].Value.(uint64)
+	if !ok {
+		return errors.New("native script constructor is not uint64")
+	}
+	if constructor == 3 {
+		if len(node.Children) != 3 ||
+			(node.Children[1].Type != cbor.DiagTypeUint &&
+				node.Children[1].Type != cbor.DiagTypeNint) {
+			return errors.New("native script n-of-k threshold must be an integer")
+		}
+	}
+	if constructor < 1 || constructor > 3 {
+		return nil
+	}
+	childrenIndex := 1
+	if constructor == 3 {
+		childrenIndex = 2
+	}
+	if len(node.Children) <= childrenIndex || node.Children[childrenIndex].Type != cbor.DiagTypeArray {
+		return errors.New("native script children must be an array")
+	}
+	for index := range node.Children[childrenIndex].Children {
+		if err := validateConwayNativeScriptNode(&node.Children[childrenIndex].Children[index]); err != nil {
+			return fmt.Errorf("native script child %d: %w", index, err)
+		}
+	}
+	return nil
 }
 
 func reencodeWrappedPlutusData(raw []byte) ([]byte, error) {
@@ -1182,6 +1310,9 @@ func validateUnitIntervals(values ...cbor.Rat) error {
 }
 
 func reencodeConwayRedeemer(raw []byte) ([]byte, error) {
+	if err := validateConwayRedeemerNode(raw); err != nil {
+		return nil, err
+	}
 	var decoded alonzo.AlonzoRedeemer
 	if _, err := cbor.DecodeExact(raw, &decoded); err != nil {
 		return nil, err
@@ -1193,6 +1324,9 @@ func reencodeConwayRedeemer(raw []byte) ([]byte, error) {
 }
 
 func reencodeConwayRedeemers(raw []byte) ([]byte, error) {
+	if err := validateConwayRedeemersCBOR(raw); err != nil {
+		return nil, err
+	}
 	var decoded conway.ConwayRedeemers
 	if _, err := cbor.DecodeExact(raw, &decoded); err != nil {
 		return nil, err
@@ -1204,6 +1338,78 @@ func reencodeConwayRedeemers(raw []byte) ([]byte, error) {
 		return nil, err
 	}
 	return storedEncoding(&decoded)
+}
+
+func validateConwayRedeemerNode(raw []byte) error {
+	node, err := cbor.ParseDiagnostic(raw)
+	if err != nil {
+		return err
+	}
+	if node.Type != cbor.DiagTypeArray || len(node.Children) != 4 {
+		return errors.New("conway redeemer must contain four array fields")
+	}
+	if node.Children[0].Type != cbor.DiagTypeUint {
+		return errors.New("conway redeemer tag must be an unsigned integer")
+	}
+	return validateConwayExUnitsNode(&node.Children[3])
+}
+
+func validateConwayExUnitsNode(node *cbor.DiagnosticNode) error {
+	if node.Type != cbor.DiagTypeArray || len(node.Children) != 2 ||
+		node.Children[0].Type != cbor.DiagTypeUint ||
+		node.Children[1].Type != cbor.DiagTypeUint {
+		return errors.New("conway execution units must contain two unsigned integers")
+	}
+	return nil
+}
+
+func validateConwayRedeemersCBOR(raw []byte) error {
+	node, err := cbor.ParseDiagnostic(raw)
+	if err != nil {
+		return err
+	}
+	switch node.Type {
+	case cbor.DiagTypeArray:
+		for index := range node.Children {
+			redeemer := &node.Children[index]
+			if redeemer.Type != cbor.DiagTypeArray ||
+				len(redeemer.Children) != 4 ||
+				redeemer.Children[0].Type != cbor.DiagTypeUint {
+				return fmt.Errorf("conway redeemer %d tag must be an unsigned integer", index)
+			}
+			if err := validateConwayExUnitsNode(&redeemer.Children[3]); err != nil {
+				return fmt.Errorf("conway redeemer %d: %w", index, err)
+			}
+		}
+	case cbor.DiagTypeMap:
+		if len(node.Children)%2 != 0 {
+			return errors.New("conway redeemer map must contain key-value pairs")
+		}
+		for index := 0; index < len(node.Children); index += 2 {
+			key := &node.Children[index]
+			if key.Type != cbor.DiagTypeArray || len(key.Children) != 2 ||
+				key.Children[0].Type != cbor.DiagTypeUint ||
+				key.Children[1].Type != cbor.DiagTypeUint {
+				return errors.New("conway redeemer map key must contain an unsigned tag and index")
+			}
+			value := &node.Children[index+1]
+			if value.Type != cbor.DiagTypeArray || len(value.Children) != 2 {
+				return errors.New("conway redeemer map value must contain data and execution units")
+			}
+			if err := validateConwayExUnitsNode(&value.Children[1]); err != nil {
+				return fmt.Errorf("conway redeemer map value: %w", err)
+			}
+		}
+	case cbor.DiagTypeUint,
+		cbor.DiagTypeNint,
+		cbor.DiagTypeBytes,
+		cbor.DiagTypeText,
+		cbor.DiagTypeTag,
+		cbor.DiagTypeSimple,
+		cbor.DiagTypeFloat:
+		return errors.New("conway redeemers must be an array or map")
+	}
+	return nil
 }
 
 func reencodeTyped[T any](raw []byte) ([]byte, error) {
@@ -1226,7 +1432,17 @@ func reencodeChecked[T any](raw []byte, validate func(T) error) ([]byte, error) 
 }
 
 func reencodeBytes(raw []byte, min, max int) ([]byte, error) {
-	if err := requireCBORDefiniteMajorType(raw, 2); err != nil {
+	return reencodeByteString(raw, min, max, true)
+}
+
+func reencodeByteString(raw []byte, min, max int, definite bool) ([]byte, error) {
+	var err error
+	if definite {
+		err = requireCBORDefiniteMajorType(raw, 2)
+	} else {
+		err = requireCBORMajorType(raw, 2)
+	}
+	if err != nil {
 		return nil, err
 	}
 	var decoded []byte

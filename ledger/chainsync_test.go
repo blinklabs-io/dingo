@@ -6832,9 +6832,29 @@ func TestPinnedForkRollbackResyncsWithoutGenerationLockDeadlock(t *testing.T) {
 	ls.config.EventBus = bus
 	resyncCh := subscribeChainsyncResync(t, bus)
 
+	truncateEntered := make(chan struct{})
+	allowTruncate := make(chan struct{})
+	var truncateOnce sync.Once
+	releaseTruncate := func() { truncateOnce.Do(func() { close(allowTruncate) }) }
+	ls.rollbackTruncateAfterSlotFunc = func(
+		point ocommon.Point,
+		trustSlot uint64,
+		txn *database.Txn,
+	) (ochainsync.Tip, []byte, error) {
+		close(truncateEntered)
+		<-allowTruncate
+		return ls.db.TruncateAfterSlot(
+			ls.lifecycleContext(),
+			point,
+			trustSlot,
+			txn,
+		)
+	}
+
 	decisionEntered := make(chan struct{})
 	releaseDecision := make(chan struct{})
-	var blockOnce sync.Once
+	var blockOnce, decisionOnce sync.Once
+	releaseForkDecision := func() { decisionOnce.Do(func() { close(releaseDecision) }) }
 	ls.config.GenesisSelectionStateFunc = func() (bool, uint64) {
 		blockOnce.Do(func() {
 			close(decisionEntered)
@@ -6861,7 +6881,15 @@ func TestPinnedForkRollbackResyncsWithoutGenerationLockDeadlock(t *testing.T) {
 	}
 	admission := make(chan bool, 1)
 	handled := make(chan error, 1)
+	handlerExited := make(chan struct{})
+	defer func() {
+		releaseForkDecision()
+		releaseTruncate()
+		testutil.RequireReceive(t, handlerExited, 30*time.Second,
+			"fork handler should finish before fixture cleanup")
+	}()
 	go func() {
+		defer close(handlerExited)
 		handled <- ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
 			ConnectionId: fixture.connId,
 			HeaderCryptoVerificationGeneration: ls.
@@ -6891,17 +6919,26 @@ func TestPinnedForkRollbackResyncsWithoutGenerationLockDeadlock(t *testing.T) {
 	}()
 	testutil.RequireNoReceive(t, writerDone, 100*time.Millisecond,
 		"a generation writer should wait for the fork decision")
-	close(releaseDecision)
-	require.NoError(t, testutil.RequireReceive(t, handled, time.Second,
-		"pinned fork handling must not deadlock on rollback"))
-	testutil.RequireReceive(t, writerDone, time.Second,
-		"the generation writer should resume after fork handling")
+	releaseForkDecision()
+	// The writer must progress before the real SQL rollback sweep; its cost
+	// under parallel fixtures is independent of the generation lock cycle.
+	testutil.RequireReceive(t, writerDone, testutil.AsyncWait,
+		"rollback must release the pinned generation for the waiting writer")
+	testutil.RequireReceive(t, truncateEntered, 30*time.Second,
+		"fork handling should reach the real rollback sweep")
+	releaseTruncate()
+	require.NoError(t, testutil.RequireReceive(t, handled, 30*time.Second,
+		"fork handling should finish the real rollback"))
 	assert.False(t, testutil.RequireReceive(t, admission, time.Second,
 		"a header must not be selector-admitted across a rollback generation"))
 	// The rollback publishes its own "local ledger rollback" resync first.
 	resync := testutil.RequireReceive(t, resyncCh, time.Second,
 		"the peer should re-intersect after the rollback")
-	assert.Equal(t, event.ChainsyncResyncReasonLocalLedgerRollback, resync.Reason)
+	assert.Equal(
+		t,
+		event.ChainsyncResyncReasonLocalLedgerRollback,
+		resync.Reason,
+	)
 	resync = testutil.RequireReceive(t, resyncCh, time.Second,
 		"the peer should re-intersect before replaying the winning fork")
 	assert.Equal(t, event.ChainsyncResyncReasonPersistentFork, resync.Reason)
@@ -6914,6 +6951,10 @@ func TestPinnedForkExtensionAvoidsLedgerGenerationLockCycle(t *testing.T) {
 
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
+	bus := newTestEventBus(t, nil)
+	t.Cleanup(bus.Stop)
+	ls.config.EventBus = bus
+	resyncCh := subscribeChainsyncResync(t, bus)
 	requestDone := make(chan struct{})
 	oldBatchReady := make(chan struct{})
 	ls.activeBlockfetchConnId = fixture.connId
@@ -7037,6 +7078,14 @@ func TestPinnedForkExtensionAvoidsLedgerGenerationLockCycle(t *testing.T) {
 		"fork extension did not resume after the prior request completed"))
 	assert.False(t, testutil.RequireReceive(t, admission, time.Second,
 		"snapshot publication before the deferred callback must reject selector admission"))
+	resync := testutil.RequireReceive(t, resyncCh, time.Second,
+		"changed authorization must re-intersect before replay")
+	require.Equal(t, fixture.connId, resync.ConnectionId)
+	require.Equal(
+		t, event.ChainsyncResyncReasonHeaderAuthorizationChanged, resync.Reason,
+	)
+	require.True(t, event.IsLocalChainsyncResyncReason(resync.Reason),
+		"local snapshot publication must not penalize a healthy peer")
 	assert.Zero(t, ls.chain.HeaderCount(),
 		"the stale queued header must be removed with selector admission")
 	assert.Equal(t, upstreamTipBefore, ls.syncUpstreamTipSlot.Load(),
@@ -14095,7 +14144,7 @@ func TestHandleChainSwitchEventFallbackReplaysBufferedActiveHeaders(
 			BlockHeader: mockHeader{
 				hash:        bufferedHeaderHash,
 				prevHash:    lcommon.NewBlake2b256(nil),
-				blockNumber: 1,
+				blockNumber: 0,
 				slot:        1,
 			},
 			Point: ocommon.NewPoint(1, bufferedHeaderHash.Bytes()),
@@ -17182,6 +17231,193 @@ func TestCalculateEpochNonce_MissingByronGenesisInByronEra(t *testing.T) {
 // mockForgedBlockChecker is a test implementation of ForgedBlockChecker.
 type mockForgedBlockChecker struct {
 	forgedSlots map[uint64][]byte
+}
+
+func (ls *LedgerState) compareIncomingHeaderToLocalTip(
+	e ChainsyncEvent,
+	localTip ochainsync.Tip,
+) praos.ChainComparisonResult {
+	result, _, _ := ls.incomingHeaderTipComparison(e, localTip)
+	return result
+}
+
+func TestCheckComparedTipSlotBattleRestrictedWindow(t *testing.T) {
+	t.Parallel()
+
+	const (
+		localSlot        = uint64(100)
+		localBlockNumber = uint64(20)
+	)
+	localHash := bytes.Repeat([]byte{0x11}, 32)
+	remoteHash := bytes.Repeat([]byte{0x22}, 32)
+	restricted := praos.PraosTiebreakerView{
+		TiebreakerConfig: praos.PraosTiebreakerConfigConway(),
+	}
+	unrestricted := praos.PraosTiebreakerView{
+		TiebreakerConfig: praos.PraosTiebreakerConfigBeforeConway(),
+	}
+
+	tests := []struct {
+		name         string
+		remoteSlot   uint64
+		remoteBlock  uint64
+		comparison   praos.ChainComparisonResult
+		incomingView praos.PraosTiebreakerView
+		trackedHash  []byte
+		wantBattles  int64
+	}{
+		{
+			name:         "remote wins below boundary",
+			remoteSlot:   localSlot + 4,
+			remoteBlock:  localBlockNumber,
+			comparison:   praos.ChainABetter,
+			incomingView: restricted,
+			trackedHash:  localHash,
+			wantBattles:  1,
+		},
+		{
+			name:         "local wins at boundary",
+			remoteSlot:   localSlot + 5,
+			remoteBlock:  localBlockNumber,
+			comparison:   praos.ChainBBetter,
+			incomingView: restricted,
+			trackedHash:  localHash,
+			wantBattles:  1,
+		},
+		{
+			name:         "above boundary",
+			remoteSlot:   localSlot + 6,
+			remoteBlock:  localBlockNumber,
+			comparison:   praos.ChainABetter,
+			incomingView: restricted,
+			trackedHash:  localHash,
+		},
+		{
+			name:         "unresolved comparison",
+			remoteSlot:   localSlot + 4,
+			remoteBlock:  localBlockNumber,
+			comparison:   praos.ChainEqual,
+			incomingView: restricted,
+			trackedHash:  localHash,
+		},
+		{
+			name:         "different block height",
+			remoteSlot:   localSlot + 4,
+			remoteBlock:  localBlockNumber + 1,
+			comparison:   praos.ChainABetter,
+			incomingView: restricted,
+			trackedHash:  localHash,
+		},
+		{
+			name:         "tracked block is not local tip",
+			remoteSlot:   localSlot + 4,
+			remoteBlock:  localBlockNumber,
+			comparison:   praos.ChainABetter,
+			incomingView: restricted,
+			trackedHash:  bytes.Repeat([]byte{0x33}, 32),
+		},
+		{
+			name:         "unrestricted era stays on body detection",
+			remoteSlot:   localSlot + 4,
+			remoteBlock:  localBlockNumber,
+			comparison:   praos.ChainABetter,
+			incomingView: unrestricted,
+			trackedHash:  localHash,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSiblingFixture(t)
+			recorder := &countingSlotBattleRecorder{}
+			f.ls.SetSlotBattleRecorder(recorder)
+			f.ls.SetForgedBlockChecker(&mockForgedBlockChecker{
+				forgedSlots: map[uint64][]byte{localSlot: tc.trackedHash},
+			})
+			f.ls.checkComparedTipSlotBattle(
+				ochainsync.Tip{
+					Point:       ocommon.NewPoint(tc.remoteSlot, remoteHash),
+					BlockNumber: tc.remoteBlock,
+				},
+				ochainsync.Tip{
+					Point:       ocommon.NewPoint(localSlot, localHash),
+					BlockNumber: localBlockNumber,
+				},
+				tc.comparison,
+				tc.incomingView,
+				praos.PraosTiebreakerView{},
+			)
+
+			if got := recorder.n.Load(); got != tc.wantBattles {
+				t.Fatalf(
+					"restricted tip battle count = %d, want %d",
+					got,
+					tc.wantBattles,
+				)
+			}
+			if tc.wantBattles == 0 {
+				assert.Empty(t, f.ls.slotBattles.pending)
+				return
+			}
+			require.Len(t, f.ls.slotBattles.pending, 1)
+			battle := f.ls.slotBattles.pending[0]
+			assert.Equal(t, localSlot, battle.slot)
+			assert.Equal(t, tc.remoteSlot, battle.remoteSlot)
+			assert.Equal(t, localHash, battle.localHash)
+			assert.Equal(t, remoteHash, battle.remoteHash)
+		})
+	}
+}
+
+func TestRestrictedWindowSlotBattleEventCarriesBothSlots(t *testing.T) {
+	t.Parallel()
+
+	f := newSiblingFixture(t)
+	localTip := f.ls.chain.Tip()
+	remoteSlot := localTip.Point.Slot + 4
+	remoteHash := bytes.Repeat([]byte{0x22}, 32)
+	bus := newTestEventBus(t, nil)
+	defer bus.Stop()
+	f.ls.config.EventBus = bus
+	f.ls.SetForgedBlockChecker(&mockForgedBlockChecker{
+		forgedSlots: map[uint64][]byte{
+			localTip.Point.Slot: localTip.Point.Hash,
+		},
+	})
+	_, evtCh := bus.Subscribe(forging.SlotBattleEventType)
+
+	f.ls.checkComparedTipSlotBattle(
+		ochainsync.Tip{
+			Point:       ocommon.NewPoint(remoteSlot, remoteHash),
+			BlockNumber: localTip.BlockNumber,
+		},
+		localTip,
+		praos.ChainABetter,
+		praos.PraosTiebreakerView{
+			TiebreakerConfig: praos.PraosTiebreakerConfigConway(),
+		},
+		praos.PraosTiebreakerView{},
+	)
+
+	require.Len(t, f.ls.slotBattles.pending, 1)
+	f.ls.slotBattles.mu.Lock()
+	f.ls.slotBattles.pending[0].settleAt = localTip.BlockNumber
+	f.ls.slotBattles.mu.Unlock()
+	f.ls.resolveSlotBattles()
+
+	evt := testutil.RequireReceive(
+		t,
+		evtCh,
+		testutil.AsyncWait,
+		"timeout waiting for restricted-window SlotBattleEvent",
+	)
+	battle, ok := evt.Data.(forging.SlotBattleEvent)
+	require.True(t, ok)
+	assert.Equal(t, localTip.Point.Slot, battle.Slot)
+	assert.Equal(t, remoteSlot, battle.RemoteSlot)
+	assert.Equal(t, localTip.Point.Hash, battle.LocalBlockHash)
+	assert.Equal(t, remoteHash, battle.RemoteBlockHash)
+	assert.True(t, battle.Won)
 }
 
 func TestCheckSlotBattle_DetectsConflict(t *testing.T) {

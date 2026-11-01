@@ -74,6 +74,10 @@ type CardanoNodeConfig struct {
 	// PraosConsensusMode.
 	ConsensusMode string `yaml:"ConsensusMode"`
 
+	// TxSubmissionLogicVersion selects the cardano-node inbound transaction
+	// submission strategy.
+	TxSubmissionLogicVersion TxSubmissionLogicVersion `yaml:"TxSubmissionLogicVersion"`
+
 	// Hard fork epoch configuration. Pointer types distinguish
 	// "not set" (nil) from "set to 0" (*0), which is critical
 	// because setting these to 0 instructs the node to perform
@@ -102,6 +106,38 @@ type CardanoNodeConfig struct {
 	// a fallback default for non-block-producing nodes when the
 	// Dingo-native peerSharing value is unset.
 	PeerSharing *bool `yaml:"PeerSharing"`
+}
+
+// TxSubmissionLogicVersion identifies a cardano-node inbound transaction
+// submission strategy.
+type TxSubmissionLogicVersion string
+
+const (
+	// TxSubmissionLogicV1 is the legacy per-peer inbound strategy implemented
+	// by Dingo.
+	TxSubmissionLogicV1 TxSubmissionLogicVersion = "TxSubmissionLogicV1"
+	// TxSubmissionLogicV2 is the coordinated multi-peer inbound strategy.
+	TxSubmissionLogicV2 TxSubmissionLogicVersion = "TxSubmissionLogicV2"
+)
+
+func (v TxSubmissionLogicVersion) validate() error {
+	switch v {
+	case TxSubmissionLogicV1:
+		return nil
+	case TxSubmissionLogicV2:
+		return fmt.Errorf(
+			"TxSubmissionLogicVersion %q is not supported by Dingo; only %q is implemented",
+			v,
+			TxSubmissionLogicV1,
+		)
+	default:
+		return fmt.Errorf(
+			"invalid TxSubmissionLogicVersion %q: expected %q or %q",
+			v,
+			TxSubmissionLogicV1,
+			TxSubmissionLogicV2,
+		)
+	}
 }
 
 // CardanoNodeDouble is a numeric node-config value that cardano-node reads as
@@ -162,7 +198,9 @@ func NewCardanoNodeConfigFromReader(r io.Reader) (*CardanoNodeConfig, error) {
 	if err := dec.Decode(&doc); err != nil {
 		return nil, err
 	}
-	var ret CardanoNodeConfig
+	ret := CardanoNodeConfig{
+		TxSubmissionLogicVersion: TxSubmissionLogicV1,
+	}
 	if len(doc.Content) == 0 {
 		return &ret, nil
 	}
@@ -171,9 +209,10 @@ func NewCardanoNodeConfigFromReader(r io.Reader) (*CardanoNodeConfig, error) {
 		if err := ret.decodeEnvelope(root); err != nil {
 			return nil, err
 		}
-		return &ret, nil
+	} else if err := root.Decode(&ret); err != nil {
+		return nil, err
 	}
-	if err := root.Decode(&ret); err != nil {
+	if err := ret.TxSubmissionLogicVersion.validate(); err != nil {
 		return nil, err
 	}
 	return &ret, nil

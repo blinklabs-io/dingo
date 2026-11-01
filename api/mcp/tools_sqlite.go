@@ -77,8 +77,6 @@ func registerSQLiteTools(
 	if maxRows <= 0 {
 		maxRows = 100
 	}
-	releaseQuery := limits.release
-
 	// Tool: sqlite_query
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "sqlite_query",
@@ -105,10 +103,10 @@ func registerSQLiteTools(
 				},
 			}, nil, nil
 		}
-		if err := limits.admit(); err != nil {
+		if err := limits.admitCallerSQL(); err != nil {
 			return nil, nil, err
 		}
-		defer releaseQuery()
+		defer limits.releaseCallerSQL()
 
 		effectiveLimit := input.Limit
 		if effectiveLimit <= 0 {
@@ -263,10 +261,10 @@ func registerSQLiteTools(
 				},
 			}, nil, nil
 		}
-		if err := limits.admit(); err != nil {
+		if err := limits.admitCallerSQL(); err != nil {
 			return nil, nil, err
 		}
-		defer releaseQuery()
+		defer limits.releaseCallerSQL()
 
 		// #nosec G202 //nolint:gosec // cleanQ is validated by ValidateReadOnlyQuery
 		explainQuery := "EXPLAIN QUERY PLAN " + cleanQ
@@ -345,7 +343,7 @@ func registerSQLiteTools(
 		if err := limits.admit(); err != nil {
 			return nil, nil, err
 		}
-		defer releaseQuery()
+		defer limits.release()
 
 		tableName := strings.TrimSpace(input.TableName)
 		// Table name must be alphanumeric or underscore

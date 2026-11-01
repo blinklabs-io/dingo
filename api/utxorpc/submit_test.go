@@ -929,6 +929,17 @@ func txPatternTestUtxorpc(t *testing.T) *Utxorpc {
 	})
 }
 
+func (u *Utxorpc) matchesTxPattern(
+	tx gledger.Transaction,
+	pattern *cardano.TxPattern,
+) predOutcome {
+	return u.matchesTxPatternWithLookup(
+		tx,
+		pattern,
+		cacheSpentOutputLookup(u.lookupSpentOutput),
+	)
+}
+
 func TestTxPatternMatchProduces(t *testing.T) {
 	t.Parallel()
 	addrA := txPatternMustAddr(t, txPatternAddrA)

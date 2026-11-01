@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -195,7 +194,7 @@ func TestSnapshotMaxCommitPauseAbortsAndReleasesBarrier(t *testing.T) {
 		},
 	}
 	db := newHookedDB(t, nil, hooks)
-	dir := filepath.Join(t.TempDir(), "snap")
+	dir := snapshotTestDir(t, "snap")
 
 	// The outer deadline only keeps a regression from hanging the run.
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
@@ -230,7 +229,7 @@ func TestSnapshotMaxCommitPauseReleasesBarrierBeforeBackupStops(t *testing.T) {
 		},
 	}
 	db := newHookedDB(t, nil, hooks)
-	dir := filepath.Join(t.TempDir(), "snap")
+	dir := snapshotTestDir(t, "snap")
 	finished := make(chan error, 1)
 	go func() {
 		_, err := snapshotAt(
@@ -280,7 +279,7 @@ func TestSnapshotBackupFailureCancelsPeerAndReleasesBarrier(t *testing.T) {
 		},
 	}
 	db := newHookedDB(t, nil, hooks)
-	dir := filepath.Join(t.TempDir(), "snap")
+	dir := snapshotTestDir(t, "snap")
 	_, err := snapshotAt(
 		t.Context(), db, dir,
 		lifecycle.WithMaxCommitPause(5*time.Second),
@@ -311,7 +310,7 @@ func TestSnapshotCallerCancellationDoesNotPublishSuccessfulBackups(t *testing.T)
 		},
 	}
 	db := newHookedDB(t, nil, hooks)
-	dir := filepath.Join(t.TempDir(), "snap")
+	dir := snapshotTestDir(t, "snap")
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	finished := make(chan error, 1)
@@ -350,7 +349,7 @@ func TestSnapshotReturnsBothBackupFailures(t *testing.T) {
 			return errMetadataBackup
 		},
 	})
-	_, err := snapshotAt(t.Context(), db, filepath.Join(t.TempDir(), "snap"))
+	_, err := snapshotAt(t.Context(), db, snapshotTestDir(t, "snap"))
 	require.ErrorIs(t, err, errBlobBackup)
 	require.ErrorIs(t, err, errMetadataBackup)
 }
@@ -370,7 +369,7 @@ func TestSnapshotWithoutMaxCommitPauseIsUnbounded(t *testing.T) {
 		},
 	}
 	db := newHookedDB(t, nil, hooks)
-	_, err := snapshotAt(t.Context(), db, filepath.Join(t.TempDir(), "snap"))
+	_, err := snapshotAt(t.Context(), db, snapshotTestDir(t, "snap"))
 	require.NoError(t, err)
 }
 
@@ -407,7 +406,7 @@ func TestSnapshotMaxCommitPauseExcludesBarrierWait(t *testing.T) {
 	barrierWaiting := make(chan struct{})
 	deadlineCreated := make(chan time.Duration, 1)
 	result := make(chan error, 1)
-	dir := filepath.Join(t.TempDir(), "snapshot")
+	dir := snapshotTestDir(t, "snapshot")
 	go func() {
 		_, err := snapshotAt(
 			t.Context(), db, dir,
@@ -475,7 +474,7 @@ func TestSnapshotRejectsNegativeMaxCommitPause(t *testing.T) {
 	t.Parallel()
 
 	db := newTestDB(t)
-	dir := filepath.Join(t.TempDir(), "snap")
+	dir := snapshotTestDir(t, "snap")
 	_, err := snapshotAt(
 		t.Context(), db, dir, lifecycle.WithMaxCommitPause(-time.Second),
 	)
@@ -507,7 +506,7 @@ func TestSnapshotReleasesBarrierWhenBackupFails(t *testing.T) {
 			hooks := tc.hooks
 			reg := prometheus.NewRegistry()
 			db := newHookedDB(t, reg, &hooks)
-			dir := filepath.Join(t.TempDir(), "snap")
+			dir := snapshotTestDir(t, "snap")
 			_, err := snapshotAt(t.Context(), db, dir)
 			require.ErrorIs(t, err, errInjectedBackup)
 			require.NoDirExists(t, dir)
@@ -539,7 +538,7 @@ func TestSnapshotReleasesBarrierOnCancellation(t *testing.T) {
 		},
 	}
 	db := newHookedDB(t, nil, hooks)
-	dir := filepath.Join(t.TempDir(), "snap")
+	dir := snapshotTestDir(t, "snap")
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
@@ -570,7 +569,7 @@ func TestSnapshotRecordsCommitPauseAndBytesMetrics(t *testing.T) {
 
 	reg := prometheus.NewRegistry()
 	db := newHookedDB(t, reg, &backupHooks{})
-	m, err := snapshotAt(t.Context(), db, filepath.Join(t.TempDir(), "snap"))
+	m, err := snapshotAt(t.Context(), db, snapshotTestDir(t, "snap"))
 	require.NoError(t, err)
 
 	pause := gatherFamily(t, reg, "dingo_snapshot_commit_pause_seconds")
@@ -617,7 +616,7 @@ func TestSnapshotCommitPauseMetricExcludesBarrierWait(t *testing.T) {
 		},
 	}
 	db := newHookedDB(t, reg, hooks)
-	dir := filepath.Join(t.TempDir(), "snap")
+	dir := snapshotTestDir(t, "snap")
 	resume, err := db.PauseCommitsContext(t.Context())
 	require.NoError(t, err)
 	var resumeOnce sync.Once
@@ -686,7 +685,7 @@ func TestSnapshotRecordsPauseResultOnFailure(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	_, err := snapshotAt(
-		ctx, db, filepath.Join(t.TempDir(), "snap"),
+		ctx, db, snapshotTestDir(t, "snap"),
 		lifecycle.WithMaxCommitPause(20*time.Millisecond),
 	)
 	require.ErrorIs(t, err, lifecycle.ErrCommitPauseExceeded)
@@ -708,7 +707,7 @@ func TestSnapshotReusesMetricsForWrappedRegistry(t *testing.T) {
 	wrapped := prometheus.WrapRegistererWith(prometheus.Labels{"network": "test"}, reg)
 	db := newHookedDB(t, wrapped, &backupHooks{})
 	for i := range 2 {
-		dir := filepath.Join(t.TempDir(), fmt.Sprintf("snap-%d", i))
+		dir := snapshotTestDir(t, fmt.Sprintf("snap-%d", i))
 		_, err := snapshotAt(t.Context(), db, dir)
 		require.NoError(t, err)
 	}
@@ -738,7 +737,7 @@ func TestSnapshotRejectsSuccessfulBackupAfterPauseDeadline(t *testing.T) {
 			return finishAfterDeadline(ctx)
 		},
 	})
-	dir := filepath.Join(t.TempDir(), "snapshot")
+	dir := snapshotTestDir(t, "snapshot")
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	result := make(chan error, 1)
@@ -787,7 +786,7 @@ func TestSnapshotBoundsBlockedStateRead(t *testing.T) {
 			return ctx.Err()
 		}
 	}
-	dir := filepath.Join(t.TempDir(), "snapshot")
+	dir := snapshotTestDir(t, "snapshot")
 	result := make(chan error, 1)
 	go func() {
 		_, err := snapshotAt(
