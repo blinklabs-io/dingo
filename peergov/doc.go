@@ -36,7 +36,9 @@
 // Network-learned peer candidates must resolve to publicly routable unicast
 // addresses. Private, loopback, link-local, multicast, unspecified,
 // benchmarking, reserved, and documentation-only ranges (including RFC 5737
-// TEST-NET and RFC 3849 2001:db8::/32) are rejected by IsRoutableIP. Topology
+// TEST-NET and RFC 3849 2001:db8::/32) are rejected by IsRoutableIP. An IPv6
+// literal carrying a zone (fe80::1%eth0) is rejected whatever its address,
+// because the zone names an interface on this host. Topology
 // entries are operator-configured and may use private addresses; an already
 // established inbound peer is not reclassified by this admission check.
 //

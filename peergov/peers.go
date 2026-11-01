@@ -185,6 +185,10 @@ var ErrUnroutableAddress = errors.New("unroutable peer address")
 // publicly-routable unicast IP. It returns false for private (RFC 1918 /
 // RFC 4193), loopback, link-local, multicast, unspecified, and
 // documentation-only addresses.
+// An IPv6 literal carrying a zone (fe80::1%eth0) is never routable: the zone
+// names an interface on this host, which no publicly routable peer needs, and
+// accepting one would let zone variants of one address occupy separate peer
+// entries.
 // If the host is not a valid IP (e.g. unresolved hostname), it is
 // considered routable so that DNS-based topology peers still work.
 func isRoutableAddr(address string) bool {
@@ -193,12 +197,41 @@ func isRoutableAddr(address string) bool {
 		// Bare host or malformed — treat as routable to be safe
 		host = address
 	}
-	ip := net.ParseIP(host)
-	if ip == nil {
+	ip, zone, ok := parseIPLiteral(host)
+	if !ok {
 		// Not an IP literal (hostname) — allow it
 		return true
 	}
+	if zone != "" {
+		return false
+	}
 	return IsRoutableIP(ip)
+}
+
+// parseIPLiteral parses host as an IP literal, returning any IPv6 zone
+// separately. net.ParseIP rejects a scoped literal such as fe80::1%eth0, so a
+// caller using it alone treats the literal as a hostname, and resolving that
+// "hostname" returns the address with its zone discarded.
+func parseIPLiteral(host string) (net.IP, string, bool) {
+	if ip := net.ParseIP(host); ip != nil {
+		return ip, "", true
+	}
+	addr, err := netip.ParseAddr(host)
+	if err != nil || addr.Zone() == "" {
+		return nil, "", false
+	}
+	return net.IP(addr.AsSlice()), addr.Zone(), true
+}
+
+// formatIPLiteral returns the canonical text of an address returned by
+// parseIPLiteral. A zoned address keeps the netip form, because net.IP prints
+// an IPv4-mapped address as dotted IPv4, which cannot carry a zone.
+func formatIPLiteral(ip net.IP, zone string) string {
+	if zone == "" {
+		return ip.String()
+	}
+	addr, _ := netip.AddrFromSlice(ip)
+	return addr.WithZone(zone).String()
 }
 
 // unreachablePrefixes are ranges that net.IP's own class predicates report as
@@ -428,10 +461,9 @@ func (p *PeerGovernor) normalizeAddress(address string) string {
 	}
 
 	// Try to parse as IP first
-	ip := net.ParseIP(host)
-	if ip != nil {
+	if ip, zone, ok := parseIPLiteral(host); ok {
 		// Normalize IPv6 addresses (e.g., ::1 vs 0:0:0:0:0:0:0:1)
-		return net.JoinHostPort(ip.String(), port)
+		return net.JoinHostPort(formatIPLiteral(ip, zone), port)
 	}
 
 	// It's a hostname - just lowercase it (no DNS lookup)
@@ -450,10 +482,9 @@ func (p *PeerGovernor) resolveAddress(address string) string {
 	}
 
 	// Try to parse as IP first
-	ip := net.ParseIP(host)
-	if ip != nil {
+	if ip, zone, ok := parseIPLiteral(host); ok {
 		// Already an IP, normalize it
-		return net.JoinHostPort(ip.String(), port)
+		return net.JoinHostPort(formatIPLiteral(ip, zone), port)
 	}
 
 	// Port 0 marks a MultiHostName relay, whose port lives in an SRV record.
@@ -685,7 +716,7 @@ func (p *PeerGovernor) resolveDialAddress(
 		return address
 	}
 	// IP literals dial exactly as before: no re-resolution, no rotation.
-	if net.ParseIP(host) != nil {
+	if _, _, ok := parseIPLiteral(host); ok {
 		return address
 	}
 	if port == multiHostPort {

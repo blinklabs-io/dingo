@@ -7573,9 +7573,13 @@ Network-learned gossip, ledger, and peer-sharing candidates are admitted only
 when their literal or resolved address passes `peergov.IsRoutableIP`. This
 rejects private, loopback, link-local, multicast, unspecified, reserved,
 benchmarking, and documentation-only ranges such as RFC 5737 TEST-NET and
-RFC 3849 `2001:db8::/32`. Operator-configured topology peers intentionally
+RFC 3849 `2001:db8::/32`. An IPv6 literal carrying a zone (`fe80::1%eth0`)
+is rejected whatever its address, because the zone names an interface on this
+host. Operator-configured topology peers intentionally
 retain their separate exemption for private addresses, and an already
-established inbound peer is not reclassified by this admission check.
+established inbound peer is not reclassified by this admission check. A
+topology peer's scoped literal is treated as an IP literal, not a hostname:
+it is never resolved, and its zone is kept when it is normalized and dialed.
 
 Hot and warm selection targets govern outbound peers only. Inbound peers are
 not counted toward, and are never removed by, the `TargetNumberOfActivePeers`

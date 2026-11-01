@@ -803,6 +803,24 @@ func TestNormalizePeerAddr(t *testing.T) {
 	}
 }
 
+func TestNormalizePeerAddr_ScopedIPv6(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"[FE80::0:1%eth0]:3001", "[fe80::1%eth0]:3001"},
+		// Interface names are case-sensitive, so the zone is kept as given.
+		{"[fe80::1%Eth0]:3001", "[fe80::1%Eth0]:3001"},
+	}
+	for _, test := range tests {
+		t.Run(test.input, func(t *testing.T) {
+			assert.Equal(t, test.expected, NormalizePeerAddr(test.input))
+		})
+	}
+}
+
 func TestHasInboundPeerAddress(t *testing.T) {
 	t.Parallel()
 
