@@ -4778,11 +4778,28 @@ func TestCanonicalFrontierCrossingDoesNotCloseAPeerAheadOfLocalTip(
 	_, switchCh := selectorBus.Subscribe(chainselection.ChainSwitchEventType)
 
 	const securityParam = 432 // Preview k
+	// Delivered frontiers are selectable only within 2k of the applied tip, so
+	// the selector's applied tip keeps pace with them while the ledger's own
+	// chain, which decides the fresh cursor, stays at the local block.
+	var appliedBlock atomic.Uint64
 	selector := chainselection.NewChainSelector(
 		chainselection.ChainSelectorConfig{
 			EventBus:      selectorBus,
 			SecurityParam: securityParam,
 			Logger:        slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			AppliedTip: func() (ochainsync.Tip, bool) {
+				block := appliedBlock.Load()
+				if block == 0 {
+					return localTip, true
+				}
+				return ochainsync.Tip{
+					Point: ocommon.NewPoint(
+						600000+block,
+						[]byte("applied-"+strconv.FormatUint(block, 10)),
+					),
+					BlockNumber: block,
+				}, true
+			},
 			// The rollback subscription is not needed here and would race with
 			// the synchronous tip updates below.
 			DisableEventSubscriptions: true,
@@ -4811,6 +4828,9 @@ func TestCanonicalFrontierCrossingDoesNotCloseAPeerAheadOfLocalTip(
 	}
 	deliver := func(connId ouroboros.ConnectionId, block uint64) {
 		t.Helper()
+		if block > 2*securityParam && block-2*securityParam > appliedBlock.Load() {
+			appliedBlock.Store(block - 2*securityParam)
+		}
 		observed := frontier(block)
 		selector.HandlePeerTipUpdateEvent(event.NewEvent(
 			chainselection.PeerTipUpdateEventType,
