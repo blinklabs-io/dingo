@@ -24,6 +24,7 @@ import (
 	"slices"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -769,13 +770,14 @@ func (c *Chain) addBlockHeader(
 	//
 	// No votable announcement is lost by the gate. The other two unverified
 	// admissions are the validation-disabled and Mithril-covered paths, both
-	// of which are far enough behind the tip that VoteManager.slotWindowCheck
-	// declines anyway, and every unverified header that does turn out to be
-	// real is still announced from ChainUpdateEventType once its block is
-	// fetched, validated and applied (VoteManager.handleChainBlock), which is
-	// where all arming happened before the header stream existed.
+	// of which are far enough behind the tip that the VoteManager's L_hdr
+	// header-arrival rule declines anyway, and every unverified header that
+	// does turn out to be real is still announced from ChainUpdateEventType
+	// once its block is fetched, validated and applied
+	// (VoteManager.handleChainBlock), which is where all arming happened
+	// before the header stream existed.
 	if cryptoVerified {
-		if evt, ok := leiosAnnouncementEvent(
+		if evt, ok := leiosHeaderEvent(
 			header,
 			headerHash,
 			c.nextHeaderSeqLocked(),
@@ -786,12 +788,12 @@ func (c *Chain) addBlockHeader(
 	return nil
 }
 
-// leiosAnnouncementEvent builds the header-arrival event for a ranking-block
-// header that announces a Leios endorser block. Headers from eras without
-// announcements, and announcement-capable headers that announce nothing,
-// return false, so a chain carrying no Leios traffic pays one type assertion
-// per header and enqueues nothing.
-func leiosAnnouncementEvent(
+// leiosHeaderEvent builds the header-arrival event for a Leios-era
+// ranking-block header: ChainHeaderAnnouncementEvent when it announces an
+// endorser block, ChainHeaderObservedEvent otherwise. Headers from eras
+// without announcements return false, so a chain carrying no Leios traffic
+// pays one type assertion per header and enqueues nothing.
+func leiosHeaderEvent(
 	header ledger.BlockHeader,
 	headerHash lcommon.Blake2b256,
 	seq uint64,
@@ -805,22 +807,34 @@ func leiosAnnouncementEvent(
 	if !ok {
 		return event.Event{}, false
 	}
-	ebHash, _, ok := announcer.LeiosAnnouncement()
-	if !ok {
-		return event.Event{}, false
+	rbHash := lcommon.NewBlake2b256(headerHash.Bytes())
+	issuer := lcommon.PoolKeyHash(header.IssuerVkey().Hash())
+	ebHash, _, announces := announcer.LeiosAnnouncement()
+	if !announces {
+		return event.NewEvent(
+			ChainHeaderEventType,
+			ChainHeaderObservedEvent{
+				Slot:   header.SlotNumber(),
+				RbHash: rbHash,
+				Issuer: issuer,
+				Seq:    seq,
+			},
+		), true
 	}
 	return event.NewEvent(
 		ChainHeaderEventType,
 		ChainHeaderAnnouncementEvent{
-			Slot:   header.SlotNumber(),
-			RbHash: lcommon.NewBlake2b256(headerHash.Bytes()),
-			EbHash: ebHash,
-			Seq:    seq,
+			Slot:      header.SlotNumber(),
+			RbHash:    rbHash,
+			EbHash:    ebHash,
+			Issuer:    issuer,
+			Seq:       seq,
+			ArrivedAt: time.Now(),
 		},
 	), true
 }
 
-// headerInvalidationEvent builds the counterpart to leiosAnnouncementEvent:
+// headerInvalidationEvent builds the counterpart to leiosHeaderEvent:
 // every announcement above point describes a ranking block that is no longer
 // on our chain.
 func headerInvalidationEvent(
@@ -1371,14 +1385,19 @@ func (c *Chain) addBlockLocked(
 	// a duplicate, and the invalidation above then frees the id with nothing
 	// left to retry. Announcing it here, sequenced immediately behind that
 	// invalidation, means the id is always free before the consumer arms it.
-	// The apply-driven path stays as an idempotent backstop.
+	// The apply-driven path stays as an idempotent backstop. A block that
+	// announces nothing has no vote id to race for, so it publishes nothing
+	// here; the consumer learns of it from ChainUpdateEventType.
 	if !matchPendingHeader {
-		if evt, ok := leiosAnnouncementEvent(
+		if evt, ok := leiosHeaderEvent(
 			block.Header(),
 			lcommon.NewBlake2b256(blockHashBytes),
 			c.nextHeaderSeqLocked(),
 		); ok {
-			c.queueDeferredTxnEventLocked(evt, txn)
+			_, announces := evt.Data.(ChainHeaderAnnouncementEvent)
+			if announces {
+				c.queueDeferredTxnEventLocked(evt, txn)
+			}
 		}
 	}
 	if notifyWaiters {

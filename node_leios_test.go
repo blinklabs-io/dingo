@@ -212,6 +212,31 @@ func TestLeiosCommitteeParamsFromPParamsUsesDijkstraFields(t *testing.T) {
 	assert.Equal(t, 0, tau.Cmp(big.NewRat(3, 4)))
 }
 
+func TestLeiosVotingPeriodsFromPParamsUsesMilliseconds(t *testing.T) {
+	t.Parallel()
+
+	header, vote, err := leiosVotingPeriodsFromPParams(
+		42,
+		&gdijkstra.DijkstraProtocolParameters{
+			LeiosAnnouncementPeriodLength: 1250,
+			LeiosVotePeriodLength:         4750,
+		},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 1250*time.Millisecond, header)
+	assert.Equal(t, 4750*time.Millisecond, vote)
+}
+
+func TestLeiosVotingPeriodsFromPParamsRejectsMissingPeriods(t *testing.T) {
+	t.Parallel()
+
+	_, _, err := leiosVotingPeriodsFromPParams(
+		42,
+		&gdijkstra.DijkstraProtocolParameters{},
+	)
+	require.ErrorContains(t, err, "invalid Leios voting periods")
+}
+
 func TestLeiosDijkstraPParamsFallbackUsesFirstEraRow(t *testing.T) {
 	t.Parallel()
 
@@ -267,11 +292,11 @@ func TestLeiosDijkstraPParamsFallbackUsesFirstEraRow(t *testing.T) {
 	txn := db.MetadataTxn(context.Background(), false)
 	defer txn.Rollback()
 
-	pp, err := leiosDijkstraPParamsForSnapshot(db, 9, txn)
+	pp, err := leiosDijkstraPParamsForEpoch(db, 9, txn)
 	require.NoError(t, err)
 	assert.Equal(t, uint16(17), pp.LeiosCommitteeSize)
 
-	pp, err = leiosDijkstraPParamsForSnapshot(db, 23, txn)
+	pp, err = leiosDijkstraPParamsForEpoch(db, 23, txn)
 	require.NoError(t, err)
 	assert.Equal(t, uint16(23), pp.LeiosCommitteeSize)
 }

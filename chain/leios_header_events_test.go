@@ -96,10 +96,12 @@ func TestAddBlockHeaderQueuesLeiosAnnouncement(t *testing.T) {
 		blockNumber: 1,
 		slot:        577,
 	}
+	wantIssuer := lcommon.PoolKeyHash(lcommon.IssuerVkey{}.Hash())
 	for _, tc := range []struct {
-		name        string
-		header      interface{ Hash() lcommon.Blake2b256 }
-		wantPublish bool
+		name             string
+		header           interface{ Hash() lcommon.Blake2b256 }
+		wantAnnouncement bool
+		wantNoEvent      bool
 	}{
 		{
 			name: "announcing header",
@@ -109,7 +111,7 @@ func TestAddBlockHeaderQueuesLeiosAnnouncement(t *testing.T) {
 				ebSize:             4096,
 				announces:          true,
 			},
-			wantPublish: true,
+			wantAnnouncement: true,
 		},
 		{
 			name: "announcement-capable header announcing nothing",
@@ -119,8 +121,9 @@ func TestAddBlockHeaderQueuesLeiosAnnouncement(t *testing.T) {
 			},
 		},
 		{
-			name:   "pre-leios header",
-			header: base,
+			name:        "pre-leios header",
+			header:      base,
+			wantNoEvent: true,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -141,24 +144,35 @@ func TestAddBlockHeaderQueuesLeiosAnnouncement(t *testing.T) {
 			}
 			c.PublishPendingChainUpdates()
 
-			if !tc.wantPublish {
+			if tc.wantNoEvent {
 				testutil.RequireNoReceive(
 					t,
 					ch,
 					300*time.Millisecond,
-					"no header announcement expected",
+					"no header lifecycle event for a pre-Leios header",
 				)
 				return
 			}
 			evt := testutil.RequireReceive(
-				t, ch, 2*time.Second, "header announcement",
+				t, ch, 2*time.Second, "header lifecycle event",
 			)
+			if !tc.wantAnnouncement {
+				data, ok := evt.Data.(chain.ChainHeaderObservedEvent)
+				require.True(t, ok)
+				assert.Equal(t, uint64(577), data.Slot)
+				assert.Equal(t, base.hash, data.RbHash)
+				assert.Equal(t, wantIssuer, data.Issuer)
+				assert.NotZero(t, data.Seq)
+				return
+			}
 			data, ok := evt.Data.(chain.ChainHeaderAnnouncementEvent)
 			require.True(t, ok)
 			assert.Equal(t, uint64(577), data.Slot)
 			assert.Equal(t, base.hash, data.RbHash)
 			assert.Equal(t, ebHash, data.EbHash)
+			assert.Equal(t, wantIssuer, data.Issuer)
 			assert.NotZero(t, data.Seq)
+			assert.False(t, data.ArrivedAt.IsZero())
 		})
 	}
 }

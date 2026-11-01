@@ -83,10 +83,6 @@ const (
 	// harness/devnet mode where slotProvider is nil and EpochForSlot
 	// projects arbitrarily far.
 	committeeInFlightMaxEpochs = 16
-	// slotWindowWarnInterval throttles the seated-but-outside-vote-window
-	// warning so catching up cannot flood the log; the
-	// dingo_metrics_leios_votes_not_emitted_total counter carries the rate.
-	slotWindowWarnInterval = 30 * time.Second
 )
 
 var (
@@ -133,6 +129,16 @@ const (
 	// voteNotEmittedSlotWindow: the announcing ranking block is outside the
 	// vote window.
 	voteNotEmittedSlotWindow = "slot_window"
+	// voteNotEmittedLateHeader: the announcing RB header missed L_hdr.
+	voteNotEmittedLateHeader = "late_header"
+	// voteNotEmittedRbEquivocation: two RB headers were seen for the slot.
+	voteNotEmittedRbEquivocation = "rb_equivocation"
+	// voteNotEmittedValidationDeadline: EB validation missed the vote deadline.
+	voteNotEmittedValidationDeadline = "validation_deadline"
+	// voteNotEmittedNotLatestRb: a later RB announcement is on the chain.
+	voteNotEmittedNotLatestRb = "not_latest_rb"
+	// voteNotEmittedTimingUnavailable: protocol timing could not be resolved.
+	voteNotEmittedTimingUnavailable = "timing_unavailable"
 	// voteNotEmittedCommitteeUnavailable: the epoch's committee could not be
 	// computed.
 	voteNotEmittedCommitteeUnavailable = "committee_unavailable"
@@ -157,6 +163,11 @@ var voteNotEmittedReasons = []string{
 	voteNotEmittedDuplicate,
 	voteNotEmittedNoKey,
 	voteNotEmittedSlotWindow,
+	voteNotEmittedLateHeader,
+	voteNotEmittedRbEquivocation,
+	voteNotEmittedValidationDeadline,
+	voteNotEmittedNotLatestRb,
+	voteNotEmittedTimingUnavailable,
 	voteNotEmittedCommitteeUnavailable,
 	voteNotEmittedNotSeated,
 	voteNotEmittedUnknownMember,
@@ -266,6 +277,12 @@ type SlotProvider interface {
 	CurrentOrTipSlot() uint64
 }
 
+// SlotTimeProvider resolves the wall-clock onset of a slot. CIP-164 local
+// voting uses wall-clock protocol durations rather than slot offsets.
+type SlotTimeProvider interface {
+	SlotToTime(slot uint64) (time.Time, error)
+}
+
 // CommitteeParamsProvider supplies the committee size and quorum threshold
 // captured by the mark snapshot used for the requested epoch.
 type CommitteeParamsProvider interface {
@@ -274,30 +291,34 @@ type CommitteeParamsProvider interface {
 	) (committeeSize uint16, tau *big.Rat, err error)
 }
 
+// VotingParamsProvider supplies the wall-clock voting periods captured by the
+// protocol parameters for an announcing RB's epoch.
+type VotingParamsProvider interface {
+	LeiosVotingParameters(
+		epoch uint64,
+	) (headerPeriod time.Duration, votePeriod time.Duration, err error)
+}
+
 // VoteManagerConfig configures a VoteManager.
 type VoteManagerConfig struct {
-	Logger         *slog.Logger
-	EventBus       *event.EventBus
-	StakeProvider  StakeDistributionProvider
-	EpochProvider  EpochProvider
-	ParamsProvider CommitteeParamsProvider
+	Logger               *slog.Logger
+	EventBus             *event.EventBus
+	StakeProvider        StakeDistributionProvider
+	EpochProvider        EpochProvider
+	ParamsProvider       CommitteeParamsProvider
+	VotingParamsProvider VotingParamsProvider
 	// KeyProvider supplies on-chain registered BLS keys per epoch. When
 	// non-nil it is the authoritative key source: a key absent from its
 	// PoP-verified result is a keyless seat and Registry is ignored. Nil
 	// explicitly selects the Registry-only private test/devnet seam.
 	KeyProvider LeiosKeyProvider
-	// SlotProvider enables the vote slot acceptance window. When nil
-	// the window check is disabled and votes for any resolvable slot
-	// are accepted.
+	// SlotProvider enables local wall-clock voting rules and the relayed vote
+	// slot window. Nil is the private test seam that disables both checks.
 	SlotProvider SlotProvider
 	// Registry is a private test/devnet key source used only when KeyProvider
 	// is nil. Production composition always supplies KeyProvider.
 	Registry     *VoterRegistry
 	PromRegistry prometheus.Registerer
-	// VoteWindowSlots is the offset after an EB's produce slot at which this
-	// node stops producing its own votes. Zero falls back to
-	// DefaultPipelineTiming().VoteWindowSlots.
-	VoteWindowSlots uint64
 	// CertifyByDeadlineSlots is the offset after an EB's produce slot at
 	// which a relayed vote can no longer contribute to a usable certificate.
 	// Zero falls back to DefaultPipelineTiming().CertifyByDeadlineSlots.
@@ -346,10 +367,11 @@ type tallyKey struct {
 }
 
 type announcementRecord struct {
-	slot   uint64
-	epoch  uint64
-	ebHash lcommon.Blake2b256
-	seenAt time.Time
+	slot      uint64
+	epoch     uint64
+	ebHash    lcommon.Blake2b256
+	seenAt    time.Time
+	arrivedAt time.Time
 	// headerSeq is the chain-mutation sequence number of the header
 	// admission that armed this announcement, or zero when it was armed
 	// from the apply-path backstop rather than the ordered header stream.
@@ -358,6 +380,19 @@ type announcementRecord struct {
 	// replaced it. Never decreases: re-observing the same announcing
 	// ranking block keeps the highest sequence seen.
 	headerSeq uint64
+}
+
+// observedRbKey identifies one Praos election: a slot and the pool that
+// issued a header for it. A second distinct header under the same key is RB
+// equivocation; a header from another pool in the same slot is not.
+type observedRbKey struct {
+	slot   uint64
+	issuer lcommon.PoolKeyHash
+}
+
+type observedRbRecord struct {
+	rbHash lcommon.Blake2b256
+	epoch  uint64
 }
 
 type readyAnnouncement struct {
@@ -369,6 +404,7 @@ type votingConfigurationSnapshot struct {
 	generation uint64
 	pool       []byte
 	key        *VoteSigningKey
+	deadline   time.Time
 }
 
 type pendingPrototypeVote struct {
@@ -451,15 +487,14 @@ type committeeResult struct {
 // separate record ledger pruned in lockstep with tallies (see
 // voteRecord), and committees are recomputed on demand.
 type VoteManager struct {
-	logger         *slog.Logger
-	eventBus       *event.EventBus
-	stakeProvider  StakeDistributionProvider
-	epochProvider  EpochProvider
-	paramsProvider CommitteeParamsProvider
-	keyProvider    LeiosKeyProvider // nil explicitly enables Registry-only mode
-	slotProvider   SlotProvider     // nil disables the slot window check
-	// voteWindowSlots is the past bound for producing local votes.
-	voteWindowSlots uint64
+	logger               *slog.Logger
+	eventBus             *event.EventBus
+	stakeProvider        StakeDistributionProvider
+	epochProvider        EpochProvider
+	paramsProvider       CommitteeParamsProvider
+	votingParamsProvider VotingParamsProvider
+	keyProvider          LeiosKeyProvider // nil explicitly enables Registry-only mode
+	slotProvider         SlotProvider
 	// certifyByDeadlineSlots is the past bound for peer vote acceptance.
 	// Relayed votes remain useful after local vote production closes, while
 	// the pipeline can still build and accept a certificate.
@@ -525,6 +560,11 @@ type VoteManager struct {
 	wakeCh                 chan struct{}     // closed and replaced on every insert
 	tallies                map[tallyKey]*ebTally
 	announcements          map[lcommon.Blake2b256]announcementRecord
+	equivocatingRbSlots    map[uint64]uint64
+	localVoteTimers        map[lcommon.Blake2b256]*time.Timer
+	observedRbs            map[observedRbKey]observedRbRecord
+	latestRbSlot           uint64
+	latestRbSeq            uint64
 	acquiredEbs            map[lcommon.Blake2b256]acquiredEbRecord
 	validatedAnnouncements map[lcommon.Blake2b256]validatedAnnouncementRecord
 	votedAnnouncements     map[lcommon.Blake2b256]struct{}
@@ -552,10 +592,6 @@ type VoteManager struct {
 	// configuration. Every initial lookup or retry receives a generation when
 	// it starts; only the newest generation may change voting state.
 	votingLookupGeneration uint64
-
-	// lastSlotWindowWarn throttles the seated-but-outside-vote-window
-	// warning. Guarded by mu.
-	lastSlotWindowWarn time.Time
 
 	// lastHeaderStreamSeq is the highest chain-mutation sequence number
 	// applied from the ordered header stream. It is a progress watermark
@@ -602,20 +638,9 @@ func NewVoteManager(cfg VoteManagerConfig) (*VoteManager, error) {
 			return nil, err
 		}
 	}
-	voteWindowSlots := cfg.VoteWindowSlots
-	if voteWindowSlots == 0 {
-		voteWindowSlots = DefaultPipelineTiming().VoteWindowSlots
-	}
 	certifyByDeadlineSlots := cfg.CertifyByDeadlineSlots
 	if certifyByDeadlineSlots == 0 {
 		certifyByDeadlineSlots = DefaultPipelineTiming().CertifyByDeadlineSlots
-	}
-	if certifyByDeadlineSlots < voteWindowSlots {
-		return nil, fmt.Errorf(
-			"leios vote manager: certification deadline %d precedes vote window %d",
-			certifyByDeadlineSlots,
-			voteWindowSlots,
-		)
 	}
 	m := &VoteManager{
 		logger:                 logger.With("component", "leios"),
@@ -623,9 +648,9 @@ func NewVoteManager(cfg VoteManagerConfig) (*VoteManager, error) {
 		stakeProvider:          cfg.StakeProvider,
 		epochProvider:          cfg.EpochProvider,
 		paramsProvider:         cfg.ParamsProvider,
+		votingParamsProvider:   cfg.VotingParamsProvider,
 		keyProvider:            cfg.KeyProvider,
 		slotProvider:           cfg.SlotProvider,
-		voteWindowSlots:        voteWindowSlots,
 		certifyByDeadlineSlots: certifyByDeadlineSlots,
 		registry:               registry,
 		now:                    time.Now,
@@ -644,6 +669,9 @@ func NewVoteManager(cfg VoteManagerConfig) (*VoteManager, error) {
 		wakeCh:                 make(chan struct{}),
 		tallies:                make(map[tallyKey]*ebTally),
 		announcements:          make(map[lcommon.Blake2b256]announcementRecord),
+		equivocatingRbSlots:    make(map[uint64]uint64),
+		localVoteTimers:        make(map[lcommon.Blake2b256]*time.Timer),
+		observedRbs:            make(map[observedRbKey]observedRbRecord),
 		acquiredEbs:            make(map[lcommon.Blake2b256]acquiredEbRecord),
 		validatedAnnouncements: make(
 			map[lcommon.Blake2b256]validatedAnnouncementRecord,
@@ -760,6 +788,10 @@ func (m *VoteManager) stopLocked() {
 	// stopped lifecycle's providers and configuration, and must not become
 	// the next lifecycle's memoized committee.
 	m.committeeGeneration++
+	for rbHash, timer := range m.localVoteTimers {
+		timer.Stop()
+		delete(m.localVoteTimers, rbHash)
+	}
 }
 
 // Stop stops the vote manager and unblocks any NextVotes waiters.
@@ -2179,6 +2211,7 @@ func (m *VoteManager) prunePrototypeStateLocked(now time.Time) {
 	cutoff := now.Add(-m.voteTTL)
 	for rbHash, record := range m.announcements {
 		if record.seenAt.Before(cutoff) {
+			m.cancelLocalVoteTimerLocked(rbHash)
 			delete(m.announcements, rbHash)
 			delete(m.validatedAnnouncements, rbHash)
 			delete(m.votedAnnouncements, rbHash)
@@ -2215,6 +2248,15 @@ func (m *VoteManager) prunePrototypeStateLocked(now time.Time) {
 		if len(byVoter) == 0 {
 			delete(m.pendingVotes, rbHash)
 		}
+	}
+}
+
+func (m *VoteManager) cancelLocalVoteTimerLocked(
+	rbHash lcommon.Blake2b256,
+) {
+	if timer := m.localVoteTimers[rbHash]; timer != nil {
+		timer.Stop()
+		delete(m.localVoteTimers, rbHash)
 	}
 }
 
@@ -2262,6 +2304,15 @@ func (m *VoteManager) insertVote(
 			if !ok || validated.ebHash != current.ebHash {
 				m.mu.Unlock()
 				return false
+			}
+			if expectedVoting != nil && !expectedVoting.deadline.IsZero() {
+				_, equivocated := m.equivocatingRbSlots[current.slot]
+				if equivocated || current.slot != m.latestRbSlot ||
+					!validated.seenAt.Before(expectedVoting.deadline) ||
+					!now.Before(expectedVoting.deadline) {
+					m.mu.Unlock()
+					return false
+				}
 			}
 			if _, voted := m.votedAnnouncements[announcingRbHash]; voted {
 				m.mu.Unlock()
@@ -2686,6 +2737,127 @@ func (m *VoteManager) emitPrototypeVote(
 	m.emitPrototypeVoteLocked(rbHash, record)
 }
 
+// localVoteReadiness applies the node-local CIP-164 timing and chain-choice
+// rules. A positive wait means the equivocation-detection period is still
+// running; a non-empty reason means this announcement must not be voted on.
+func (m *VoteManager) localVoteReadiness(
+	rbHash lcommon.Blake2b256,
+	record announcementRecord,
+) (time.Duration, time.Time, string, error) {
+	if m.slotProvider == nil {
+		// The nil provider is the explicit private test seam documented on
+		// VoteManagerConfig. Production always supplies LedgerState.
+		return 0, time.Time{}, "", nil
+	}
+	if m.votingParamsProvider == nil {
+		return 0, time.Time{}, voteNotEmittedTimingUnavailable,
+			errors.New("leios voting protocol parameters are unavailable")
+	}
+	slotTimes, ok := m.slotProvider.(SlotTimeProvider)
+	if !ok {
+		return 0, time.Time{}, voteNotEmittedTimingUnavailable,
+			errors.New("leios slot-time conversion is unavailable")
+	}
+	headerPeriod, votePeriod, err := m.votingParamsProvider.LeiosVotingParameters(record.epoch)
+	if err != nil {
+		return 0, time.Time{}, voteNotEmittedTimingUnavailable, err
+	}
+	if headerPeriod <= 0 || votePeriod <= 0 {
+		return 0, time.Time{}, voteNotEmittedTimingUnavailable, fmt.Errorf(
+			"invalid leios voting periods: header %s, vote %s",
+			headerPeriod,
+			votePeriod,
+		)
+	}
+	slotStart, err := slotTimes.SlotToTime(record.slot)
+	if err != nil {
+		return 0, time.Time{}, voteNotEmittedTimingUnavailable,
+			fmt.Errorf("resolve announcing slot onset: %w", err)
+	}
+	if record.arrivedAt.IsZero() {
+		return 0, time.Time{}, voteNotEmittedTimingUnavailable,
+			errors.New("announcing header arrival time is unavailable")
+	}
+	if record.arrivedAt.After(slotStart.Add(headerPeriod)) {
+		return 0, time.Time{}, voteNotEmittedLateHeader, nil
+	}
+	voteStart := slotStart.Add(3 * headerPeriod)
+	voteDeadline := voteStart.Add(votePeriod)
+	now := m.now()
+
+	m.mu.Lock()
+	validated, validatedOK := m.validatedAnnouncements[rbHash]
+	_, equivocated := m.equivocatingRbSlots[record.slot]
+	latest := record.slot == m.latestRbSlot
+	m.mu.Unlock()
+
+	if !validatedOK || validated.ebHash != record.ebHash {
+		return 0, voteDeadline, voteNotEmittedTimingUnavailable,
+			errors.New("validated announcement is unavailable")
+	}
+	if equivocated {
+		return 0, voteDeadline, voteNotEmittedRbEquivocation, nil
+	}
+	if !latest {
+		return 0, voteDeadline, voteNotEmittedNotLatestRb, nil
+	}
+	if !validated.seenAt.Before(voteDeadline) || !now.Before(voteDeadline) {
+		return 0, voteDeadline, voteNotEmittedValidationDeadline, nil
+	}
+	if now.Before(voteStart) {
+		return voteStart.Sub(now), voteDeadline, "", nil
+	}
+	return 0, voteDeadline, "", nil
+}
+
+func (m *VoteManager) scheduleLocalVote(
+	rbHash lcommon.Blake2b256,
+	wait time.Duration,
+) {
+	if wait <= 0 {
+		return
+	}
+	m.mu.Lock()
+	if !m.running {
+		m.mu.Unlock()
+		return
+	}
+	if _, exists := m.localVoteTimers[rbHash]; exists {
+		m.mu.Unlock()
+		return
+	}
+	m.localVoteTimers[rbHash] = time.AfterFunc(wait, func() {
+		m.mu.Lock()
+		delete(m.localVoteTimers, rbHash)
+		record, announced := m.announcements[rbHash]
+		validated, validatedOK := m.validatedAnnouncements[rbHash]
+		running := m.running
+		m.mu.Unlock()
+		if !running || !announced || !validatedOK ||
+			validated.ebHash != record.ebHash {
+			return
+		}
+		m.emitPrototypeVote(rbHash, record)
+	})
+	m.mu.Unlock()
+}
+
+func (m *VoteManager) declineLocalVote(
+	reason string,
+	rbHash lcommon.Blake2b256,
+	record announcementRecord,
+	err error,
+) {
+	m.noteVoteNotEmitted(reason)
+	m.logger.Debug(
+		"leios announcement is not eligible for a local vote",
+		"reason", reason,
+		"slot", record.slot,
+		"announcing_rb_hash", rbHash.String(),
+		"error", err,
+	)
+}
+
 func (m *VoteManager) emitPrototypeVoteLocked(
 	rbHash lcommon.Blake2b256,
 	record announcementRecord,
@@ -2702,6 +2874,15 @@ func (m *VoteManager) emitPrototypeVoteLocked(
 	}
 	if len(votingPool) == 0 || votingKey == nil {
 		m.noteVoteNotEmitted(voteNotEmittedNoKey)
+		return
+	}
+	wait, deadline, reason, timingErr := m.localVoteReadiness(rbHash, record)
+	if timingErr != nil || reason != "" {
+		m.declineLocalVote(reason, rbHash, record, timingErr)
+		return
+	}
+	if wait > 0 {
+		m.scheduleLocalVote(rbHash, wait)
 		return
 	}
 	entry, err := m.committeeAndParamsForEpoch(record.epoch)
@@ -2724,36 +2905,6 @@ func (m *VoteManager) emitPrototypeVoteLocked(
 			"slot", record.slot,
 			"epoch", record.epoch,
 		)
-		return
-	}
-	if err := m.slotWindowCheck(record.slot, m.voteWindowSlots); err != nil {
-		m.noteVoteNotEmitted(voteNotEmittedSlotWindow)
-		// Reaching here means seating is already established: the
-		// committee resolved above and VoterIdFor returned this node's
-		// voter id, or the declination would have been classified as
-		// not-seated. So this is the seated-node case, which is
-		// otherwise silently green -- committee size, key loaded, EBs
-		// observed and certificates built all read healthy. Warn on it,
-		// but throttle it -- catch-up replays every announcement it
-		// passes -- and let the counter carry the true rate.
-		if m.slotWindowWarnDue() {
-			m.markSlotWindowWarned()
-			m.logger.Warn(
-				"announcing ranking block outside vote window, not voting; this node is seated on the leios committee and holds a voting key",
-				"slot",
-				record.slot,
-				"epoch",
-				record.epoch,
-				"error",
-				err,
-			)
-		} else {
-			m.logger.Debug(
-				"announcing ranking block outside vote window, not voting",
-				"slot", record.slot,
-				"error", err,
-			)
-		}
 		return
 	}
 	member, ok := committee.Member(voterId)
@@ -2805,6 +2956,7 @@ func (m *VoteManager) emitPrototypeVoteLocked(
 			generation: votingGeneration,
 			pool:       votingPool,
 			key:        votingKey,
+			deadline:   deadline,
 		},
 	)
 	if inserted {
@@ -2841,26 +2993,6 @@ func (m *VoteManager) noteVoteNotEmitted(reason string) {
 		return
 	}
 	m.metrics.votesNotEmittedTotal.WithLabelValues(reason).Inc()
-}
-
-// slotWindowWarnDue rate-limits the seated-but-not-voting warning. Catching up
-// replays every announcement between the local tip and the network tip, and
-// every one of those is legitimately outside the vote window.
-//
-// Peek and commit are separate rather than one test-and-set so the window is
-// only marked warned on the branch that actually logs. Two emissions racing
-// between the two calls costs at most an extra warning line.
-func (m *VoteManager) slotWindowWarnDue() bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.lastSlotWindowWarn.IsZero() ||
-		m.now().Sub(m.lastSlotWindowWarn) >= slotWindowWarnInterval
-}
-
-func (m *VoteManager) markSlotWindowWarned() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.lastSlotWindowWarn = m.now()
 }
 
 // RemoveConnection drops the vote-serving cursor for a closed connection.
@@ -2917,6 +3049,8 @@ func (m *VoteManager) eventLoop(
 				continue
 			}
 			switch data := evt.Data.(type) {
+			case chain.ChainHeaderObservedEvent:
+				m.handleChainHeaderObserved(data)
 			case chain.ChainHeaderAnnouncementEvent:
 				m.handleChainHeaderAnnouncement(data)
 			case chain.ChainHeaderInvalidationEvent:
@@ -3049,6 +3183,10 @@ func (m *VoteManager) handleChainHeaderInvalidation(
 	if evt.Seq > m.lastHeaderStreamSeq {
 		m.lastHeaderStreamSeq = evt.Seq
 	}
+	if evt.Seq >= m.latestRbSeq {
+		m.latestRbSlot = evt.Point.Slot
+		m.latestRbSeq = evt.Seq
+	}
 	// Two rules, because a chain can lose headers by shrinking or by
 	// growing past them. Point covers the shrink (rollback, discarded
 	// queue): everything above it is gone. RbHashes covers the grow (a
@@ -3067,6 +3205,7 @@ func (m *VoteManager) handleChainHeaderInvalidation(
 			continue
 		}
 		delete(m.announcements, rbHash)
+		m.cancelLocalVoteTimerLocked(rbHash)
 		delete(m.validatedAnnouncements, rbHash)
 		delete(m.votedAnnouncements, rbHash)
 		m.removePendingAnnouncementLocked(rbHash)
@@ -3085,6 +3224,52 @@ func (m *VoteManager) handleChainHeaderInvalidation(
 		"dropped_announcements", len(invalidated),
 		"dropped_votes", droppedVotes,
 	)
+}
+
+func (m *VoteManager) handleChainHeaderObserved(
+	evt chain.ChainHeaderObservedEvent,
+) {
+	m.recordLatestRb(evt.Slot, evt.RbHash, evt.Issuer, evt.Seq)
+}
+
+// recordLatestRb tracks the latest authenticated RB and detects RB
+// equivocation. A zero issuer is unknown -- ObserveAnnouncement carries none
+// -- and records no equivocation evidence, because two headers for one slot
+// equivocate only when one pool issued both.
+func (m *VoteManager) recordLatestRb(
+	slot uint64,
+	rbHash lcommon.Blake2b256,
+	issuer lcommon.PoolKeyHash,
+	seq uint64,
+) {
+	epoch, epochErr := m.epochProvider.EpochForSlot(slot)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if epochErr == nil && issuer != (lcommon.PoolKeyHash{}) {
+		key := observedRbKey{slot: slot, issuer: issuer}
+		if observed, ok := m.observedRbs[key]; ok &&
+			observed.rbHash != rbHash {
+			m.equivocatingRbSlots[slot] = epoch
+		} else if !ok {
+			m.observedRbs[key] = observedRbRecord{
+				rbHash: rbHash,
+				epoch:  epoch,
+			}
+		}
+	}
+	if seq != 0 && seq < m.latestRbSeq {
+		return
+	}
+	if seq == 0 && slot < m.latestRbSlot {
+		return
+	}
+	m.latestRbSlot = slot
+	if seq != 0 {
+		m.latestRbSeq = seq
+	}
+	if seq > m.lastHeaderStreamSeq {
+		m.lastHeaderStreamSeq = seq
+	}
 }
 
 // dropAnnouncementDerivedStateLocked removes the votes, tallies and dedup
@@ -3168,21 +3353,14 @@ func (m *VoteManager) dropAnnouncementDerivedStateLocked(
 func (m *VoteManager) handleChainHeaderAnnouncement(
 	evt chain.ChainHeaderAnnouncementEvent,
 ) {
-	m.advanceHeaderStreamSeq(evt.Seq)
-	m.observeAnnouncement(evt.Slot, evt.RbHash, evt.EbHash, evt.Seq)
-}
-
-// advanceHeaderStreamSeq records how far the ordered header stream has been
-// applied.
-func (m *VoteManager) advanceHeaderStreamSeq(seq uint64) {
-	if seq == 0 {
-		return
-	}
-	m.mu.Lock()
-	if seq > m.lastHeaderStreamSeq {
-		m.lastHeaderStreamSeq = seq
-	}
-	m.mu.Unlock()
+	m.observeIssuedAnnouncement(
+		evt.Slot,
+		evt.RbHash,
+		evt.EbHash,
+		evt.Issuer,
+		evt.Seq,
+		evt.ArrivedAt,
+	)
 }
 
 // handleChainBlock arms an announcement from an applied ranking block. It is a
@@ -3201,18 +3379,23 @@ func (m *VoteManager) handleChainBlock(evt chain.ChainBlockEvent) {
 		return
 	}
 	header := block.Header()
+	rbHash := lcommon.NewBlake2b256(header.Hash().Bytes())
+	issuer := lcommon.PoolKeyHash(header.IssuerVkey().Hash())
 	announcer, ok := header.(interface {
 		LeiosAnnouncement() (lcommon.Blake2b256, uint64, bool)
 	})
 	if !ok {
+		m.recordLatestRb(header.SlotNumber(), rbHash, issuer, 0)
 		return
 	}
 	ebHash, _, ok := announcer.LeiosAnnouncement()
 	if !ok {
+		m.recordLatestRb(header.SlotNumber(), rbHash, issuer, 0)
 		return
 	}
-	rbHash := lcommon.NewBlake2b256(header.Hash().Bytes())
-	m.ObserveAnnouncement(header.SlotNumber(), rbHash, ebHash)
+	m.observeIssuedAnnouncement(
+		header.SlotNumber(), rbHash, ebHash, issuer, 0, m.now(),
+	)
 }
 
 // ObserveAnnouncement records the ranking-block identity used by current
@@ -3222,7 +3405,7 @@ func (m *VoteManager) ObserveAnnouncement(
 	rbHash lcommon.Blake2b256,
 	ebHash lcommon.Blake2b256,
 ) {
-	m.observeAnnouncement(slot, rbHash, ebHash, 0)
+	m.observeAnnouncement(slot, rbHash, ebHash, 0, m.now())
 }
 
 // observeAnnouncement is ObserveAnnouncement with the chain-mutation sequence
@@ -3233,7 +3416,24 @@ func (m *VoteManager) observeAnnouncement(
 	rbHash lcommon.Blake2b256,
 	ebHash lcommon.Blake2b256,
 	headerSeq uint64,
+	arrivedAt time.Time,
 ) {
+	m.observeIssuedAnnouncement(
+		slot, rbHash, ebHash, lcommon.PoolKeyHash{}, headerSeq, arrivedAt,
+	)
+}
+
+// observeIssuedAnnouncement is observeAnnouncement with the announcing
+// header's issuer, which RB equivocation detection keys on.
+func (m *VoteManager) observeIssuedAnnouncement(
+	slot uint64,
+	rbHash lcommon.Blake2b256,
+	ebHash lcommon.Blake2b256,
+	issuer lcommon.PoolKeyHash,
+	headerSeq uint64,
+	arrivedAt time.Time,
+) {
+	m.recordLatestRb(slot, rbHash, issuer, headerSeq)
 	epoch, err := m.epochProvider.EpochForSlot(slot)
 	if err != nil {
 		m.logger.Debug(
@@ -3243,18 +3443,26 @@ func (m *VoteManager) observeAnnouncement(
 		)
 		return
 	}
+	seenAt := m.now()
+	if arrivedAt.IsZero() {
+		arrivedAt = seenAt
+	}
 	record := announcementRecord{
-		slot: slot, epoch: epoch, ebHash: ebHash, seenAt: m.now(),
-		headerSeq: headerSeq,
+		slot: slot, epoch: epoch, ebHash: ebHash, seenAt: seenAt,
+		arrivedAt: arrivedAt, headerSeq: headerSeq,
 	}
 	m.mu.Lock()
 	m.prunePrototypeStateLocked(record.seenAt)
 	// The apply-path backstop re-observes announcements the header stream
 	// already armed; keep the sequence that records where on the chain
 	// this announcement came from rather than clearing it to zero.
-	if existing, ok := m.announcements[rbHash]; ok &&
-		existing.headerSeq > record.headerSeq {
-		record.headerSeq = existing.headerSeq
+	if existing, ok := m.announcements[rbHash]; ok {
+		if existing.headerSeq > record.headerSeq {
+			record.headerSeq = existing.headerSeq
+		}
+		if existing.arrivedAt.Before(record.arrivedAt) {
+			record.arrivedAt = existing.arrivedAt
+		}
 	}
 	m.announcements[rbHash] = record
 	validated, ok := m.validatedAnnouncements[rbHash]
@@ -3319,10 +3527,21 @@ func (m *VoteManager) handleEpochTransition(
 	}
 	for rbHash, record := range m.announcements {
 		if record.epoch < keepFrom {
+			m.cancelLocalVoteTimerLocked(rbHash)
 			delete(m.announcements, rbHash)
 			delete(m.validatedAnnouncements, rbHash)
 			delete(m.votedAnnouncements, rbHash)
 			m.removePendingAnnouncementLocked(rbHash)
+		}
+	}
+	for slot, epoch := range m.equivocatingRbSlots {
+		if epoch < keepFrom {
+			delete(m.equivocatingRbSlots, slot)
+		}
+	}
+	for key, record := range m.observedRbs {
+		if record.epoch < keepFrom {
+			delete(m.observedRbs, key)
 		}
 	}
 	for ebHash, record := range m.acquiredEbs {
@@ -3381,6 +3600,12 @@ func (m *VoteManager) handleRollback(evt chain.ChainRollbackEvent) {
 	defer m.prototypeEmissionMu.Unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if evt.Seq == 0 || evt.Seq >= m.latestRbSeq {
+		m.latestRbSlot = evt.Point.Slot
+		if evt.Seq != 0 {
+			m.latestRbSeq = evt.Seq
+		}
+	}
 	// chain.update and the ordered header stream are delivered on
 	// independent channels, so this rollback can arrive after the header
 	// stream has already applied the matching invalidation *and* re-armed
@@ -3436,6 +3661,7 @@ func (m *VoteManager) handleRollback(evt chain.ChainRollbackEvent) {
 		if _, protected := protectedRbs[rbHash]; protected {
 			continue
 		}
+		m.cancelLocalVoteTimerLocked(rbHash)
 		delete(m.announcements, rbHash)
 		delete(m.validatedAnnouncements, rbHash)
 		delete(m.votedAnnouncements, rbHash)

@@ -15,17 +15,14 @@
 package leios
 
 import (
-	"bytes"
 	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"log/slog"
 	"maps"
 	"math"
 	"math/big"
 	"slices"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -699,25 +696,6 @@ const (
 	headerArmingSeatedVoterId = 3
 )
 
-// syncBuffer is a bytes.Buffer safe for the vote manager's event loop
-// goroutine to write log records into while the test reads them.
-type syncBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
-
-func (b *syncBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.Write(p)
-}
-
-func (b *syncBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.String()
-}
-
 // newHeaderArmingFixture builds a fixture whose local pool is seated on the
 // committee with a loaded signing key, with the vote window and wall-clock
 // slot under the test's control.
@@ -728,13 +706,16 @@ func newHeaderArmingFixture(
 ) *managerFixture {
 	t.Helper()
 	opts := []func(*managerFixture, *VoteManagerConfig){
-		func(_ *managerFixture, cfg *VoteManagerConfig) {
+		func(f *managerFixture, cfg *VoteManagerConfig) {
 			cfg.SlotProvider = slots
-			cfg.VoteWindowSlots = headerArmingVoteWindow
+			f.params.headerPeriod = time.Nanosecond
+			f.params.votePeriod = 10 * time.Minute
 		},
 	}
 	opts = append(opts, extra...)
 	fixture := newManagerFixture(t, opts...)
+	_, err := slots.SlotToTime(slots.CurrentOrTipSlot())
+	require.NoError(t, err)
 	member := fixture.members[headerArmingSeatedVoterId]
 	var poolKeyHash lcommon.PoolKeyHash
 	copy(poolKeyHash[:], member.PoolKeyHash)
@@ -753,18 +734,39 @@ func publishHeaderAnnouncement(
 	rbHash, ebHash lcommon.Blake2b256,
 	seq uint64,
 ) {
+	arrivedAt := time.Now()
+	if slotTimes, ok := fixture.mgr.slotProvider.(SlotTimeProvider); ok {
+		if slotStart, err := slotTimes.SlotToTime(slot); err == nil {
+			arrivedAt = slotStart
+		}
+	}
 	fixture.eventBus.Publish(
 		chain.ChainHeaderEventType,
 		event.NewEvent(
 			chain.ChainHeaderEventType,
 			chain.ChainHeaderAnnouncementEvent{
-				Slot:   slot,
-				RbHash: rbHash,
-				EbHash: ebHash,
-				Seq:    seq,
+				Slot:      slot,
+				RbHash:    rbHash,
+				EbHash:    ebHash,
+				Seq:       seq,
+				ArrivedAt: arrivedAt,
 			},
 		),
 	)
+}
+
+func observeOnTimeAnnouncement(
+	t *testing.T,
+	fixture *managerFixture,
+	slot uint64,
+	rbHash, ebHash lcommon.Blake2b256,
+) {
+	t.Helper()
+	slotTimes, ok := fixture.mgr.slotProvider.(SlotTimeProvider)
+	require.True(t, ok)
+	arrivedAt, err := slotTimes.SlotToTime(slot)
+	require.NoError(t, err)
+	fixture.mgr.observeAnnouncement(slot, rbHash, ebHash, 0, arrivedAt)
 }
 
 // TestVoteManagerVotesFromHeaderArrivalBeforeRankingBlockApplies is the
@@ -849,8 +851,10 @@ func TestVoteManagerVotesOnlyForValidatedAnnouncement(t *testing.T) {
 		validatedRbHash,
 		ebHash,
 	)
-	fixture.mgr.ObserveAnnouncement(
-		headerArmingRbSlot,
+	observeOnTimeAnnouncement(
+		t,
+		fixture,
+		headerArmingRbSlot-1,
 		otherRbHash,
 		ebHash,
 	)
@@ -861,7 +865,9 @@ func TestVoteManagerVotesOnlyForValidatedAnnouncement(t *testing.T) {
 		"vote for an announcement that was not semantically validated",
 	)
 
-	fixture.mgr.ObserveAnnouncement(
+	observeOnTimeAnnouncement(
+		t,
+		fixture,
 		headerArmingRbSlot,
 		validatedRbHash,
 		ebHash,
@@ -875,6 +881,217 @@ func TestVoteManagerVotesOnlyForValidatedAnnouncement(t *testing.T) {
 	vote, ok := emitted.Data.(VoteEmittedEvent)
 	require.True(t, ok)
 	assert.Equal(t, validatedRbHash, vote.Vote.AnnouncingRbHash)
+}
+
+func newCIP164TimingFixture(
+	t *testing.T,
+	base time.Time,
+	currentSlot uint64,
+) (*managerFixture, *fakeSlotProvider, *time.Time) {
+	t.Helper()
+	slots := &fakeSlotProvider{
+		slot:       currentSlot,
+		originSlot: 600,
+		originTime: base,
+	}
+	fixture := newManagerFixture(
+		t,
+		func(f *managerFixture, cfg *VoteManagerConfig) {
+			cfg.SlotProvider = slots
+			f.params.headerPeriod = time.Second
+			f.params.votePeriod = 4 * time.Second
+		},
+	)
+	now := base
+	fixture.mgr.now = func() time.Time { return now }
+	return fixture, slots, &now
+}
+
+func enableFixtureVoting(t *testing.T, fixture *managerFixture) {
+	t.Helper()
+	member := fixture.members[headerArmingSeatedVoterId]
+	var poolKeyHash lcommon.PoolKeyHash
+	copy(poolKeyHash[:], member.PoolKeyHash)
+	require.NoError(
+		t,
+		fixture.mgr.EnableVoting(
+			poolKeyHash,
+			fixture.keys[headerArmingSeatedVoterId],
+		),
+	)
+}
+
+func TestVoteManagerCIP164LocalVoteTiming(t *testing.T) {
+	t.Parallel()
+	base := time.Unix(1_800_000_000, 0)
+
+	t.Run("waits through equivocation detection", func(t *testing.T) {
+		fixture, _, now := newCIP164TimingFixture(t, base, 601)
+		rbHash := lcommon.NewBlake2b256([]byte("wait-rb"))
+		ebHash := lcommon.NewBlake2b256([]byte("wait-eb"))
+		*now = base.Add(time.Second)
+		fixture.mgr.observeAnnouncement(600, rbHash, ebHash, 1, base)
+		fixture.mgr.HandleValidatedEndorserBlock(600, rbHash, ebHash)
+
+		fixture.mgr.mu.Lock()
+		record := fixture.mgr.announcements[rbHash]
+		fixture.mgr.mu.Unlock()
+		wait, _, reason, err := fixture.mgr.localVoteReadiness(rbHash, record)
+		require.NoError(t, err)
+		assert.Empty(t, reason)
+		assert.Equal(t, 2*time.Second, wait)
+	})
+
+	t.Run("rejects a header after L-hdr", func(t *testing.T) {
+		fixture, _, now := newCIP164TimingFixture(t, base, 603)
+		enableFixtureVoting(t, fixture)
+		rbHash := lcommon.NewBlake2b256([]byte("late-header-rb"))
+		ebHash := lcommon.NewBlake2b256([]byte("late-header-eb"))
+		*now = base.Add(3 * time.Second)
+		fixture.mgr.observeAnnouncement(
+			600,
+			rbHash,
+			ebHash,
+			1,
+			base.Add(time.Second+time.Nanosecond),
+		)
+		fixture.mgr.HandleValidatedEndorserBlock(600, rbHash, ebHash)
+
+		assert.Empty(t, fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{{
+			SlotNo: 600, VoterId: headerArmingSeatedVoterId,
+		}}))
+	})
+
+	// Equivocation is one block producer issuing two headers for one slot,
+	// so the replaced header's issuer decides whether the slot is
+	// equivocal. A chain holds one header per slot, so the replaced header
+	// is rolled back before the announcing one is admitted.
+	for _, tc := range []struct {
+		name           string
+		replacedIssuer lcommon.PoolKeyHash
+		wantVote       bool
+	}{
+		{
+			name:           "rejects an equivocating RB slot",
+			replacedIssuer: lcommon.PoolKeyHash{0x01},
+		},
+		{
+			name:           "votes when another issuer shares the RB slot",
+			replacedIssuer: lcommon.PoolKeyHash{0x02},
+			wantVote:       true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture, _, now := newCIP164TimingFixture(t, base, 603)
+			firstIssuer := lcommon.PoolKeyHash{0x01}
+			firstRb := lcommon.NewBlake2b256([]byte("first-rb"))
+			replacedRb := lcommon.NewBlake2b256([]byte("replaced-rb"))
+			firstEb := lcommon.NewBlake2b256([]byte("first-eb"))
+			*now = base.Add(2 * time.Second)
+			fixture.mgr.handleChainHeaderObserved(
+				chain.ChainHeaderObservedEvent{
+					Slot:   600,
+					RbHash: replacedRb,
+					Issuer: tc.replacedIssuer,
+					Seq:    1,
+				},
+			)
+			fixture.mgr.handleChainHeaderInvalidation(
+				chain.ChainHeaderInvalidationEvent{
+					Point:    ocommon.Point{Slot: 599},
+					RbHashes: []lcommon.Blake2b256{replacedRb},
+					Reason:   chain.HeaderInvalidationRollback,
+					Seq:      2,
+				},
+			)
+			fixture.mgr.handleChainHeaderAnnouncement(
+				chain.ChainHeaderAnnouncementEvent{
+					Slot:      600,
+					RbHash:    firstRb,
+					EbHash:    firstEb,
+					Issuer:    firstIssuer,
+					Seq:       3,
+					ArrivedAt: base,
+				},
+			)
+			fixture.mgr.HandleValidatedEndorserBlock(600, firstRb, firstEb)
+			enableFixtureVoting(t, fixture)
+			*now = base.Add(3 * time.Second)
+
+			fixture.mgr.mu.Lock()
+			first := fixture.mgr.announcements[firstRb]
+			fixture.mgr.mu.Unlock()
+			fixture.mgr.emitPrototypeVote(firstRb, first)
+
+			votes := fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{{
+				SlotNo: 600, VoterId: headerArmingSeatedVoterId,
+			}})
+			if tc.wantVote {
+				assert.Len(t, votes, 1)
+				return
+			}
+			assert.Empty(t, votes)
+		})
+	}
+
+	t.Run("uses the protocol vote deadline", func(t *testing.T) {
+		fixture, _, now := newCIP164TimingFixture(t, base, 607)
+		enableFixtureVoting(t, fixture)
+		rbHash := lcommon.NewBlake2b256([]byte("deadline-rb"))
+		ebHash := lcommon.NewBlake2b256([]byte("deadline-eb"))
+		*now = base.Add(7 * time.Second)
+		fixture.mgr.observeAnnouncement(600, rbHash, ebHash, 1, base)
+		fixture.mgr.HandleValidatedEndorserBlock(600, rbHash, ebHash)
+
+		assert.Empty(t, fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{{
+			SlotNo: 600, VoterId: headerArmingSeatedVoterId,
+		}}))
+	})
+
+	t.Run("rechecks the deadline after signing", func(t *testing.T) {
+		fixture, _, now := newCIP164TimingFixture(t, base, 603)
+		enableFixtureVoting(t, fixture)
+		fixture.mgr.signVote = func(
+			key *VoteSigningKey,
+			msg []byte,
+		) ([]byte, error) {
+			*now = base.Add(7 * time.Second)
+			return SignVote(key, msg)
+		}
+		rbHash := lcommon.NewBlake2b256([]byte("signing-deadline-rb"))
+		ebHash := lcommon.NewBlake2b256([]byte("signing-deadline-eb"))
+		*now = base.Add(3 * time.Second)
+		fixture.mgr.observeAnnouncement(600, rbHash, ebHash, 1, base)
+		fixture.mgr.HandleValidatedEndorserBlock(600, rbHash, ebHash)
+
+		assert.Empty(t, fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{{
+			SlotNo: 600, VoterId: headerArmingSeatedVoterId,
+		}}))
+	})
+
+	t.Run("votes only when the announcement is the latest RB", func(t *testing.T) {
+		fixture, _, now := newCIP164TimingFixture(t, base, 604)
+		oldRb := lcommon.NewBlake2b256([]byte("old-rb"))
+		oldEb := lcommon.NewBlake2b256([]byte("old-eb"))
+		*now = base.Add(2 * time.Second)
+		fixture.mgr.observeAnnouncement(600, oldRb, oldEb, 1, base)
+		fixture.mgr.handleChainHeaderObserved(chain.ChainHeaderObservedEvent{
+			Slot: 601,
+			Seq:  2,
+		})
+		fixture.mgr.HandleValidatedEndorserBlock(600, oldRb, oldEb)
+		enableFixtureVoting(t, fixture)
+		*now = base.Add(4 * time.Second)
+
+		fixture.mgr.mu.Lock()
+		oldRecord := fixture.mgr.announcements[oldRb]
+		fixture.mgr.mu.Unlock()
+		fixture.mgr.emitPrototypeVote(oldRb, oldRecord)
+
+		assert.Empty(t, fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{{
+			SlotNo: 600, VoterId: headerArmingSeatedVoterId,
+		}}))
+	})
 }
 
 // TestVoteManagerHeaderAndApplyArmingDoNotDoubleVote pins the idempotency of
@@ -979,23 +1196,16 @@ func TestVoteManagerRolledBackHeaderAnnouncementDoesNotVote(t *testing.T) {
 	)
 }
 
-// TestVoteManagerSlotWindowDeclineIsCountedAndWarned covers the second half
-// of the reported failure: the decline was logged at Debug and incremented no
-// metric, so a permanently non-voting producer looked green on every health
-// signal an operator checks.
-func TestVoteManagerSlotWindowDeclineIsCountedAndWarned(t *testing.T) {
+func TestVoteManagerValidationDeadlineDeclineIsCounted(t *testing.T) {
 	reg := prometheus.NewRegistry()
-	logBuf := &syncBuffer{}
 	slots := &fakeSlotProvider{slot: 1000}
 	fixture := newHeaderArmingFixture(
 		t,
 		slots,
-		func(_ *managerFixture, cfg *VoteManagerConfig) {
+		func(f *managerFixture, cfg *VoteManagerConfig) {
 			cfg.PromRegistry = reg
-			cfg.Logger = slog.New(slog.NewJSONHandler(
-				logBuf,
-				&slog.HandlerOptions{Level: slog.LevelWarn},
-			))
+			f.params.headerPeriod = time.Nanosecond
+			f.params.votePeriod = 2 * time.Second
 		},
 	)
 
@@ -1004,8 +1214,10 @@ func TestVoteManagerSlotWindowDeclineIsCountedAndWarned(t *testing.T) {
 	// An announcement whose ranking block slot is far behind the wall clock,
 	// exactly what the apply-driven path used to hand the emitter.
 	staleSlot := uint64(1000 - headerArmingVoteWindow - 100)
+	slotStart, err := slots.SlotToTime(staleSlot)
+	require.NoError(t, err)
+	fixture.mgr.observeAnnouncement(staleSlot, rbHash, ebHash, 1, slotStart)
 	fixture.mgr.HandleValidatedEndorserBlock(staleSlot, rbHash, ebHash)
-	fixture.mgr.ObserveAnnouncement(staleSlot, rbHash, ebHash)
 
 	assert.Empty(t, fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{{
 		SlotNo:  staleSlot,
@@ -1016,47 +1228,23 @@ func TestVoteManagerSlotWindowDeclineIsCountedAndWarned(t *testing.T) {
 		float64(1),
 		promtestutil.ToFloat64(
 			fixture.mgr.metrics.votesNotEmittedTotal.WithLabelValues(
-				voteNotEmittedSlotWindow,
+				voteNotEmittedValidationDeadline,
 			),
 		),
-		"slot-window decline is counted",
-	)
-	assert.Contains(
-		t,
-		logBuf.String(),
-		"outside vote window",
-		"a seated node holding a key warns rather than staying silent",
-	)
-	assert.True(
-		t,
-		strings.Contains(logBuf.String(), `"level":"WARN"`),
-		"the decline is logged at warn level, got: %s",
-		logBuf.String(),
+		"validation-deadline decline is counted",
 	)
 }
 
-// TestVoteManagerNonSeatedOutsideWindowUsesNotSeatedReason ensures committee
-// membership is classified before the slot-window shortcut. A configured pool
-// that is not selected should not be reported as merely late to vote.
-//
-// This ordering is also what makes the slot-window branch's seating check
-// unnecessary: that branch is only reachable once VoterIdFor has already
-// succeeded, so the "this node is seated" warning cannot be attached to a
-// pool that holds no seat. The log assertion below pins that half.
-func TestVoteManagerNonSeatedOutsideWindowUsesNotSeatedReason(t *testing.T) {
+func TestVoteManagerTimingDeclinePrecedesCommitteeLookup(t *testing.T) {
 	reg := prometheus.NewRegistry()
-	logBuf := &syncBuffer{}
 	slots := &fakeSlotProvider{slot: 1000}
 	fixture := newManagerFixture(
 		t,
-		func(_ *managerFixture, cfg *VoteManagerConfig) {
+		func(f *managerFixture, cfg *VoteManagerConfig) {
 			cfg.SlotProvider = slots
-			cfg.VoteWindowSlots = headerArmingVoteWindow
 			cfg.PromRegistry = reg
-			cfg.Logger = slog.New(slog.NewJSONHandler(
-				logBuf,
-				&slog.HandlerOptions{Level: slog.LevelWarn},
-			))
+			f.params.headerPeriod = time.Nanosecond
+			f.params.votePeriod = 2 * time.Second
 		},
 	)
 	var poolHash lcommon.PoolKeyHash
@@ -1074,25 +1262,21 @@ func TestVoteManagerNonSeatedOutsideWindowUsesNotSeatedReason(t *testing.T) {
 	ebHash := lcommon.NewBlake2b256([]byte("unseated-eb"))
 	rbHash := lcommon.NewBlake2b256([]byte("unseated-rb"))
 	staleSlot := uint64(1000 - headerArmingVoteWindow - 100)
+	slotStart, err := slots.SlotToTime(staleSlot)
+	require.NoError(t, err)
+	fixture.mgr.observeAnnouncement(staleSlot, rbHash, ebHash, 1, slotStart)
 	fixture.mgr.HandleValidatedEndorserBlock(staleSlot, rbHash, ebHash)
-	fixture.mgr.ObserveAnnouncement(staleSlot, rbHash, ebHash)
 
-	assert.Equal(t, float64(1), promtestutil.ToFloat64(
+	assert.Equal(t, float64(0), promtestutil.ToFloat64(
 		fixture.mgr.metrics.votesNotEmittedTotal.WithLabelValues(
 			voteNotEmittedNotSeated,
 		),
 	))
-	assert.Equal(t, float64(0), promtestutil.ToFloat64(
+	assert.Equal(t, float64(1), promtestutil.ToFloat64(
 		fixture.mgr.metrics.votesNotEmittedTotal.WithLabelValues(
-			voteNotEmittedSlotWindow,
+			voteNotEmittedValidationDeadline,
 		),
 	))
-	assert.NotContains(
-		t,
-		logBuf.String(),
-		"seated on the leios committee",
-		"an unseated pool must never take the seated-but-not-voting warning",
-	)
 }
 
 // TestVoteManagerVotesNotEmittedCountsMissingKey pins a second reason label so
@@ -1104,7 +1288,6 @@ func TestVoteManagerVotesNotEmittedCountsMissingKey(t *testing.T) {
 		t,
 		func(_ *managerFixture, cfg *VoteManagerConfig) {
 			cfg.SlotProvider = slots
-			cfg.VoteWindowSlots = headerArmingVoteWindow
 			cfg.PromRegistry = reg
 		},
 	)
@@ -1850,7 +2033,9 @@ func TestVoteManagerSameSlotLocalForgeStillVotes(t *testing.T) {
 	// The apply-driven backstop arms the forged block first, while the id is
 	// still held by the peer vote. The attempt is rejected, but it must not
 	// mark the announcement as voted.
-	fixture.mgr.ObserveAnnouncement(headerArmingRbSlot, localRb, localEb)
+	observeOnTimeAnnouncement(
+		t, fixture, headerArmingRbSlot, localRb, localEb,
+	)
 	testutil.RequireNoReceive(
 		t,
 		emittedCh,
@@ -2173,7 +2358,7 @@ func TestOrderingDemoLocalForgeDisplacingQueuedHeader(t *testing.T) {
 	// apply-driven backstop arms it early, while the id is still taken; the
 	// attempt is refused and must stay retryable.
 	fixture.mgr.HandleValidatedEndorserBlock(demoSlot, localRb, localEb)
-	fixture.mgr.ObserveAnnouncement(demoSlot, localRb, localEb)
+	observeOnTimeAnnouncement(t, fixture, demoSlot, localRb, localEb)
 	testutil.RequireNoReceive(
 		t, votes, 300*time.Millisecond,
 		"the vote id is still held by the peer vote",
@@ -2469,14 +2654,27 @@ func (f *fakeEpochProvider) EpochForSlot(slot uint64) (uint64, error) {
 }
 
 type fakeSlotProvider struct {
-	mu   sync.Mutex
-	slot uint64
+	mu         sync.Mutex
+	slot       uint64
+	originSlot uint64
+	originTime time.Time
 }
 
 func (f *fakeSlotProvider) CurrentOrTipSlot() uint64 {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.slot
+}
+
+func (f *fakeSlotProvider) SlotToTime(slot uint64) (time.Time, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.originTime.IsZero() {
+		f.originSlot = f.slot
+		f.originTime = time.Now()
+	}
+	offset := int64(slot) - int64(f.originSlot) // #nosec G115 -- test slots
+	return f.originTime.Add(time.Duration(offset) * time.Second), nil
 }
 
 // setSlot advances (or rewinds) the wall-clock slot the vote window is
@@ -2492,6 +2690,29 @@ type fakeParamsProvider struct {
 	committeeSize uint16
 	tau           *big.Rat
 	err           error
+	headerPeriod  time.Duration
+	votePeriod    time.Duration
+}
+
+func (f *fakeParamsProvider) LeiosVotingParameters(uint64) (
+	time.Duration,
+	time.Duration,
+	error,
+) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.err != nil {
+		return 0, 0, f.err
+	}
+	headerPeriod := f.headerPeriod
+	if headerPeriod == 0 {
+		headerPeriod = time.Nanosecond
+	}
+	votePeriod := f.votePeriod
+	if votePeriod == 0 {
+		votePeriod = 2 * time.Second
+	}
+	return headerPeriod, votePeriod, nil
 }
 
 type blockingParamsProvider struct {
@@ -2570,8 +2791,7 @@ func newManagerFixture(
 		)
 		require.NoError(t, err)
 		keys[member.VoterId] = key
-		registryEntries[hex.EncodeToString(member.PoolKeyHash)] =
-			hex.EncodeToString(key.PublicKeyBytes())
+		registryEntries[hex.EncodeToString(member.PoolKeyHash)] = hex.EncodeToString(key.PublicKeyBytes())
 	}
 	registry, err := NewVoterRegistry(registryEntries)
 	require.NoError(t, err)
@@ -2592,11 +2812,12 @@ func newManagerFixture(
 		registryEntries: registryEntries,
 	}
 	cfg := VoteManagerConfig{
-		EventBus:       fixture.eventBus,
-		StakeProvider:  fixture.stake,
-		EpochProvider:  fixture.epochs,
-		ParamsProvider: fixture.params,
-		Registry:       registry,
+		EventBus:             fixture.eventBus,
+		StakeProvider:        fixture.stake,
+		EpochProvider:        fixture.epochs,
+		ParamsProvider:       fixture.params,
+		VotingParamsProvider: fixture.params,
+		Registry:             registry,
 	}
 	for _, opt := range opts {
 		opt(fixture, &cfg)
@@ -2865,13 +3086,6 @@ func TestNewVoteManagerValidatesConfig(t *testing.T) {
 		{"nil stake provider", func(c *VoteManagerConfig) { c.StakeProvider = nil }},
 		{"nil epoch provider", func(c *VoteManagerConfig) { c.EpochProvider = nil }},
 		{"nil params provider", func(c *VoteManagerConfig) { c.ParamsProvider = nil }},
-		{
-			"certification deadline before vote window",
-			func(c *VoteManagerConfig) {
-				c.VoteWindowSlots = 10
-				c.CertifyByDeadlineSlots = 5
-			},
-		},
 	} {
 		cfg := valid
 		tc.mutate(&cfg)
@@ -6721,7 +6935,6 @@ func TestVoteManagerSlotWindowRejects(t *testing.T) {
 		t,
 		func(f *managerFixture, cfg *VoteManagerConfig) {
 			cfg.SlotProvider = &fakeSlotProvider{slot: 1000}
-			cfg.VoteWindowSlots = voteWindow
 			cfg.CertifyByDeadlineSlots = voteWindow
 		},
 	)
@@ -6790,7 +7003,6 @@ func TestVoteManagerAcceptsRelayedPrototypeVoteDuringCertificationWindow(
 		t,
 		func(_ *managerFixture, cfg *VoteManagerConfig) {
 			cfg.SlotProvider = &fakeSlotProvider{slot: currentSlot}
-			cfg.VoteWindowSlots = voteWindow
 			cfg.CertifyByDeadlineSlots = certifyDeadline
 		},
 	)
@@ -6973,7 +7185,6 @@ func TestVoteManagerLateVotesAreNotPeerMisbehavior(t *testing.T) {
 		func(f *managerFixture, cfg *VoteManagerConfig) {
 			cfg.PromRegistry = prometheus.NewRegistry()
 			cfg.SlotProvider = &fakeSlotProvider{slot: 1000}
-			cfg.VoteWindowSlots = voteWindow
 			cfg.CertifyByDeadlineSlots = voteWindow
 		},
 	)
@@ -7050,7 +7261,6 @@ func TestVoteManagerLatePrototypeVotesAreNotPeerMisbehavior(t *testing.T) {
 		func(f *managerFixture, cfg *VoteManagerConfig) {
 			cfg.PromRegistry = prometheus.NewRegistry()
 			cfg.SlotProvider = &fakeSlotProvider{slot: 1000}
-			cfg.VoteWindowSlots = voteWindow
 			cfg.CertifyByDeadlineSlots = voteWindow
 		},
 	)
