@@ -31,6 +31,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"slices"
 	"sync"
 	"time"
@@ -87,17 +88,22 @@ var txInfoIndexWaits = []time.Duration{
 // capture and the capture never completed.
 const ntcKeepaliveInterval = 30 * time.Second
 
-// keepNtCConnAlive runs a cheap LocalStateQuery round trip (acquire the
-// volatile tip, read the current era, release) on lsq every interval until ctx
-// ends, so the connection lsq shares with chainsync is never idle long enough
-// for Dingo to close it. Failures are ignored: a dead connection already ends
-// the session through its error channel.
+// keepNtCConnAlive runs a LocalTxMonitor round trip (acquire a mempool
+// snapshot, read its sizes, release) on conn every interval until ctx ends, so
+// the connection is never idle long enough for Dingo to close it.
+// LocalTxMonitor rather than LocalStateQuery: Dingo serves a mempool snapshot
+// without touching the ledger, while every LocalStateQuery Acquire opens a
+// ledger read snapshot, which pauses Dingo's commits and, when Dingo is busy,
+// failed with a deadline error that closed the whole connection. Failures are
+// ignored: a dead connection already ends the session through its error
+// channel.
 func keepNtCConnAlive(
 	ctx context.Context,
-	lsq *localstatequery.LocalStateQuery,
+	conn *ouroboros.Connection,
 	interval time.Duration,
 ) {
-	if lsq == nil || lsq.Client == nil {
+	mon := conn.LocalTxMonitor()
+	if mon == nil || mon.Client == nil {
 		return
 	}
 	ticker := time.NewTicker(interval)
@@ -108,11 +114,11 @@ func keepNtCConnAlive(
 			return
 		case <-ticker.C:
 		}
-		if err := lsq.Client.AcquireVolatileTip(); err != nil {
+		if err := mon.Client.Acquire(); err != nil {
 			continue
 		}
-		_, _ = lsq.Client.GetCurrentEra()
-		_ = lsq.Client.Release()
+		_, _, _, _ = mon.Client.GetSizes()
+		_ = mon.Client.Release()
 	}
 }
 
@@ -830,7 +836,12 @@ func RunFromGenesis(
 	logf func(format string, args ...any),
 	resumeFrom *Tip,
 	skipUTxO bool,
+	opts ...FromGenesisOption,
 ) error {
+	var options fromGenesisOptions
+	for _, opt := range opts {
+		opt(&options)
+	}
 	if !KoiosNetworks[network] {
 		return fmt.Errorf(
 			"koios-backed comparison only supports preview, preprod or mainnet, got %q",
@@ -844,6 +855,38 @@ func RunFromGenesis(
 	startPoint, err := resolveStartPoint(resumeFrom)
 	if err != nil {
 		return err
+	}
+
+	var captures *boundaryCaptures
+	if options.captureDir != "" && !skipUTxO {
+		if err := os.MkdirAll(options.captureDir, 0o700); err != nil {
+			return fmt.Errorf("boundary capture directory: %w", err)
+		}
+		captures = newBoundaryCaptures(options.captureDir)
+		followerCtx, stopFollower := context.WithCancel(ctx)
+		var followerDone sync.WaitGroup
+		defer func() {
+			stopFollower()
+			followerDone.Wait()
+			captures.close()
+		}()
+		// Its own oracle: the main loop's is not safe for concurrent use.
+		followerOracle := newEpochOracle(func(ctx context.Context) ([]eraSpan, error) {
+			return fetchEraSpans(ctx, dingoAddr, magic)
+		})
+		followerDone.Go(func() {
+			runBoundaryFollower(
+				followerCtx, dingoAddr, magic, startPoint,
+				followerOracle.epoch,
+				func(ctx context.Context, point pcommon.Point, epoch uint64) *boundaryCapture {
+					return captureBoundary(
+						ctx, dingoAddr, magic, point, epoch, koios, cache,
+						network, options.captureDir,
+					)
+				},
+				captures, logf,
+			)
+		})
 	}
 
 	var (
@@ -1372,6 +1415,24 @@ func RunFromGenesis(
 						}
 
 						result := EpochResult{Epoch: epoch}
+						var capture *boundaryCapture
+						if captures != nil {
+							capture = captures.take(epoch, point)
+						}
+						// loadCapturedUTxO reads Dingo's set at point from the
+						// capture, removing the file: it is read at most once.
+						loadCapturedUTxO := func() (UTxOSet, error) {
+							if capture.utxoErr != nil {
+								return nil, capture.utxoErr
+							}
+							set, err := readUTxOSetFile(capture.utxoPath)
+							_ = os.Remove(capture.utxoPath)
+							capture.utxoPath = ""
+							capture.utxoErr = errors.New(
+								"captured UTxO set already used",
+							)
+							return set, err
+						}
 
 						// Protocol params and stake share one connection/Acquire
 						// per attempt, separate from UTxO's own -- see
@@ -1381,12 +1442,20 @@ func RunFromGenesis(
 						// own doc comment for why a connection that dies
 						// during or between the two calls is retried, not
 						// reported as an immediate hard failure.
-						psStart := time.Now()
-						result.ProtocolParamsMismatches, result.ProtocolParamsErr,
-							result.StakeMismatches, result.StakeErr = runProtocolParamsAndStake(
-							sessionCtx, dingoAddr, magic, point, koios, cache, network, epoch,
-						)
-						result.ProtocolParamsAndStakeElapsed = time.Since(psStart)
+						if capture != nil {
+							result.ProtocolParamsMismatches = capture.ppMismatches
+							result.ProtocolParamsErr = capture.ppErr
+							result.StakeMismatches = capture.stakeMismatches
+							result.StakeErr = capture.stakeErr
+							result.ProtocolParamsAndStakeElapsed = capture.psElapsed
+						} else {
+							psStart := time.Now()
+							result.ProtocolParamsMismatches, result.ProtocolParamsErr,
+								result.StakeMismatches, result.StakeErr = runProtocolParamsAndStake(
+								sessionCtx, dingoAddr, magic, point, koios, cache, network, epoch,
+							)
+							result.ProtocolParamsAndStakeElapsed = time.Since(psStart)
+						}
 						if sessionCtx.Err() != nil {
 							return interrupted()
 						}
@@ -1409,9 +1478,17 @@ func RunFromGenesis(
 						// attempt above (same block, same point) is not
 						// immediately redialed a second time here.
 						if !skipUTxO && utxoAttempted && utxoRefs == nil {
-							refs, err := captureGenesisBaseline(
-								sessionCtx, dingoAddr, magic, point,
+							var (
+								refs UTxOSet
+								err  error
 							)
+							if capture != nil {
+								refs, err = loadCapturedUTxO()
+							} else {
+								refs, err = captureGenesisBaseline(
+									sessionCtx, dingoAddr, magic, point,
+								)
+							}
 							if sessionCtx.Err() != nil {
 								// utxoRefs is still nil, so the rerun
 								// retries the capture.
@@ -1454,9 +1531,21 @@ func RunFromGenesis(
 							result.UTxOErr = verdictErr
 						case utxoVerdictCompare:
 							result.UTxOAttempted = true
-							cmp, err := compareUTxOWithRetry(
-								sessionCtx, dingoAddr, magic, point, utxoRefs,
+							var (
+								cmp utxoComparison
+								err error
 							)
+							if capture != nil {
+								var got UTxOSet
+								if got, err = loadCapturedUTxO(); err == nil {
+									cmp.refCount = len(got)
+									cmp.missing, cmp.extra, cmp.differs = UTxODiff(utxoRefs, got)
+								}
+							} else {
+								cmp, err = compareUTxOWithRetry(
+									sessionCtx, dingoAddr, magic, point, utxoRefs,
+								)
+							}
 							if sessionCtx.Err() != nil {
 								// The comparison only reads utxoRefs, and
 								// utxoTaintCause is reset only once a
@@ -1474,6 +1563,9 @@ func RunFromGenesis(
 							}
 						case utxoVerdictNoBaseline:
 							result.UTxOAttempted = false
+						}
+						if capture != nil && capture.utxoPath != "" {
+							_ = os.Remove(capture.utxoPath)
 						}
 						result.UTxOElapsed = time.Since(utxoStart)
 						utxoTaintCause = ""
@@ -1672,7 +1764,7 @@ func RunFromGenesis(
 			continue
 		}
 		csDone := cs.Client.DoneChan()
-		go keepNtCConnAlive(sessionCtx, csConn.LocalStateQuery(), ntcKeepaliveInterval)
+		go keepNtCConnAlive(sessionCtx, csConn, ntcKeepaliveInterval)
 
 		var sessionErr error
 		select {

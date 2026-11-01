@@ -22,7 +22,7 @@ import (
 	"time"
 
 	ouroboros "github.com/blinklabs-io/gouroboros"
-	"github.com/blinklabs-io/gouroboros/protocol/localstatequery"
+	"github.com/blinklabs-io/gouroboros/protocol/localtxmonitor"
 	"github.com/stretchr/testify/require"
 )
 
@@ -31,7 +31,7 @@ import (
 // Dingo's 2-minute idle deadline, and that it stops once the session ends.
 func TestKeepNtCConnAliveSendsUntilCancelled(t *testing.T) {
 	const magic = 764824073
-	var acquires, releases atomic.Int64
+	var acquires atomic.Int64
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
@@ -48,26 +48,12 @@ func TestKeepNtCConnAliveSendsUntilCancelled(t *testing.T) {
 					ouroboros.WithServer(true),
 					ouroboros.WithNetworkMagic(magic),
 					ouroboros.WithNodeToNode(false),
-					ouroboros.WithLocalStateQueryConfig(localstatequery.NewConfig(
-						localstatequery.WithAcquireFunc(func(
-							localstatequery.CallbackContext,
-							localstatequery.AcquireTarget,
-							bool,
-						) error {
+					ouroboros.WithLocalTxMonitorConfig(localtxmonitor.NewConfig(
+						localtxmonitor.WithGetMempoolFunc(func(
+							localtxmonitor.CallbackContext,
+						) (uint64, uint32, []localtxmonitor.TxAndEraId, error) {
 							acquires.Add(1)
-							return nil
-						}),
-						localstatequery.WithQueryFunc(func(
-							localstatequery.CallbackContext,
-							localstatequery.QueryWrapper,
-						) (any, error) {
-							return 1, nil
-						}),
-						localstatequery.WithReleaseFunc(func(
-							localstatequery.CallbackContext,
-						) error {
-							releases.Add(1)
-							return nil
+							return 1, 1 << 20, nil, nil
 						}),
 					)),
 				)
@@ -94,12 +80,12 @@ func TestKeepNtCConnAliveSendsUntilCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		keepNtCConnAlive(ctx, client.LocalStateQuery(), 10*time.Millisecond)
+		keepNtCConnAlive(ctx, client, 10*time.Millisecond)
 		close(done)
 	}()
 
 	require.Eventually(t, func() bool {
-		return acquires.Load() >= 3 && releases.Load() >= 3
+		return acquires.Load() >= 3
 	}, 5*time.Second, 5*time.Millisecond)
 
 	cancel()
