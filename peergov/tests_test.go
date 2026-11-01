@@ -21,6 +21,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
@@ -133,6 +134,8 @@ func FuzzIsRoutableAddr(f *testing.F) {
 	f.Add("240.0.0.1:3001")
 	f.Add("[100::1]:3001")
 	f.Add("[::ffff:100.64.0.1]:3001")
+	// A scoped literal fails net.ParseIP but is still an IP literal.
+	f.Add("[fe80::1%eth0]:3001")
 
 	f.Fuzz(func(t *testing.T, address string) {
 		routable := isRoutableAddr(address)
@@ -142,6 +145,16 @@ func FuzzIsRoutableAddr(f *testing.F) {
 		}
 		ip := net.ParseIP(host)
 		if ip == nil {
+			if addr, perr := netip.ParseAddr(host); perr == nil &&
+				addr.Zone() != "" {
+				if routable {
+					t.Fatalf(
+						"scoped IPv6 literal %q should be unroutable",
+						address,
+					)
+				}
+				return
+			}
 			if !routable {
 				t.Fatalf(
 					"hostname or malformed address %q should be treated as routable",
