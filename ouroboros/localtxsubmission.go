@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"slices"
 	"time"
 
 	"github.com/blinklabs-io/dingo/mempool"
@@ -314,13 +315,22 @@ func localTxSubmissionCauses(err error) []error {
 		}
 		return causes
 	}
-	if _, ok, _ := conwayLedgerFailure(err); ok {
-		return []error{err}
-	}
+	// Descend before matching: conwayLedgerFailure matches through wrappers,
+	// so matching first would collapse a wrapped join into its first
+	// recognized cause. Keep the wrapper itself when nothing below it is
+	// recognized, so the mempool-failure text retains its context.
 	if cause := errors.Unwrap(err); cause != nil {
-		return localTxSubmissionCauses(cause)
+		causes := localTxSubmissionCauses(cause)
+		if slices.ContainsFunc(causes, isConwayLedgerFailure) {
+			return causes
+		}
 	}
 	return []error{err}
+}
+
+func isConwayLedgerFailure(cause error) bool {
+	_, ok, _ := conwayLedgerFailure(cause)
+	return ok
 }
 
 func conwayLedgerFailure(cause error) (any, bool, error) {
@@ -354,8 +364,10 @@ func conwayLedgerFailure(cause error) (any, bool, error) {
 			gledger.ConwayLedgerUtxowFailure,
 			[]any{
 				gledger.ConwayUtxowPPViewHashesDontMatch,
-				mismatch.Declared,
-				mismatch.Computed,
+				// Mismatch (StrictMaybe ScriptIntegrityHash): each side is a
+				// zero- or one-element list, supplied before expected.
+				[]any{mismatch.Declared},
+				[]any{mismatch.Computed},
 			},
 		}, true, nil
 	}

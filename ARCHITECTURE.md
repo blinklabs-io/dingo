@@ -1319,8 +1319,12 @@ large trusted LocalStateQuery limit is not allocated at connection setup; the
 muxer reserves bytes only as an incomplete message arrives, subject to its
 per-connection budget.
 
-LocalTxSubmission preserves typed CBOR rejection reasons. Untyped Conway
-failures use the ledger's `ConwayMempoolFailure` constructor; Dijkstra uses its
+LocalTxSubmission preserves typed CBOR rejection reasons. A Conway rejection
+lists one ledger failure per joined cause, including joins under a wrapper.
+Recognized causes (fee too small, missing collateral, script integrity hash
+mismatch, Plutus tag mismatch) use their structured UTXOW, UTXO, or UTXOS
+constructors. Other Conway causes use the ledger's `ConwayMempoolFailure`
+constructor with the full wrapped error text; Dijkstra uses its
 separate MEMPOOL text constructor. Only an actual empty-input validation error
 is encoded as `InputSetEmpty`. The nested UTXOW payload carries its constructor
 directly, with the era in the outer hard-fork envelope. Dijkstra adds the

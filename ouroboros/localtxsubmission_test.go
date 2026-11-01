@@ -214,13 +214,68 @@ func TestLocalTxSubmissionRejectReason_ConwayScriptDataHashMismatchWire(
 			gledger.ConwayLedgerUtxowFailure,
 			[]any{
 				gledger.ConwayUtxowPPViewHashesDontMatch,
-				declared,
-				computed,
+				// Mismatch (StrictMaybe ScriptIntegrityHash) encodes each
+				// side as a zero- or one-element list.
+				[]any{declared},
+				[]any{computed},
 			},
 		}},
 	}})
 	require.NoError(t, err)
 	assert.Equal(t, expected, wire)
+}
+
+func TestLocalTxSubmissionRejectReason_ConwayUnrecognizedKeepsWrapperContext(
+	t *testing.T,
+) {
+	t.Parallel()
+	cause := fmt.Errorf(
+		"calculating declared execution units: %w",
+		errors.New("redeemer missing"),
+	)
+	reason := newLocalTxSubmissionRejectReason(gledger.EraIdConway, cause)
+	var cborReason cborRejectReason
+	require.ErrorAs(t, reason, &cborReason)
+	wire, err := cborReason.MarshalCBOR()
+	require.NoError(t, err)
+	expected, err := cbor.Encode([]any{[]any{
+		gledger.EraIdConway,
+		[]any{[]any{conwayLedgerMempoolFailure, cause.Error()}},
+	}})
+	require.NoError(t, err)
+	assert.Equal(t, expected, wire)
+}
+
+func TestLocalTxSubmissionRejectReason_ConwayWrappedJoinedFailures(
+	t *testing.T,
+) {
+	t.Parallel()
+	reason := newLocalTxSubmissionRejectReason(
+		gledger.EraIdConway,
+		fmt.Errorf("validate transaction: %w", errors.Join(
+			shelley.FeeTooSmallUtxoError{
+				Provided: big.NewInt(10),
+				Min:      big.NewInt(20),
+			},
+			alonzo.NoCollateralInputsError{},
+			errors.New("unrecognized rule failure"),
+		)),
+	)
+	var cborReason cborRejectReason
+	require.ErrorAs(t, reason, &cborReason)
+	wire, err := cborReason.MarshalCBOR()
+	require.NoError(t, err)
+	decoded, err := gledger.NewTxSubmitErrorFromCbor(wire)
+	require.NoError(t, err)
+	validation, ok := decoded.(*gledger.ShelleyTxValidationError)
+	require.True(t, ok)
+	require.Len(t, validation.Err.Failures, 3)
+	_, ok = requireConwayUtxoFailure(t, validation.Err.Failures[0]).
+		Err.(*gledger.FeeTooSmallUtxo)
+	require.True(t, ok)
+	_, ok = requireConwayUtxoFailure(t, validation.Err.Failures[1]).
+		Err.(*gledger.NoCollateralInputs)
+	require.True(t, ok)
 }
 
 func TestLocalTxSubmissionRejectReason_ConwayPreservesJoinedFailures(t *testing.T) {
