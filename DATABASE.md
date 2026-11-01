@@ -209,6 +209,8 @@ return no file location. MCP owns the extra connection pool and closes it when
 the API stops; it never borrows or closes the provider's pools. At most four
 calls to the SQL tools, `get_asset_info`, `get_utxos_by_asset`, and
 raw-credential `get_utxos` execute concurrently; excess calls fail immediately.
+`sqlite_query` and `sqlite_explain`, which run caller-supplied SQL, may hold at
+most two of those slots.
 While the metadata `-wal` file exceeds 128 MiB, twice the `journal_size_limit`,
 every MCP tool call and resource read is refused: at that size the WAL has been
 neither reset nor truncated since it grew past the limit, and an open reader
@@ -378,6 +380,10 @@ until recovery has run, which is what wrapping rather than retiring it
 achieves.
 
 The Badger provider threads the host's stop context through its close path.
+On-disk Badger configuration rejects compression with a zero-byte block cache
+before the store opens, because Badger requires a block cache for compressed
+tables. Core mode keeps both disabled by default; enabling compression also
+requires a positive `blockCacheSize`.
 Stopping periodic value-log GC prevents a successful rewrite from starting a
 second pass. Badger does not expose cancellation for a rewrite already in
 flight, so that rewrite drains through a one-time background close while the
@@ -948,6 +954,25 @@ survive cleanup rather than be replaced by an older value read by the import.
   attempts to remove objects written to the failed namespace. Cleanup failures
   are reported as `ErrRestoreRollbackPending`. The existing atomic
   directory rename activates the local store and its cloud namespace selector.
+
+  Local restore staging uses a unique sibling name and retains open handles on
+  both the staging directory and any accepted empty target. Failure cleanup
+  recursively removes entries through the retained staging handle; stale-work
+  cleanup opens and identity-checks each enumerated directory before doing the
+  same. On Unix, each staging, payload-copy, and cloud-download directory is
+  held with an exclusive `flock` on its own descriptor from creation until
+  removal or activation. The kernel drops that lock when the process exits,
+  including on SIGKILL, so the next restore into the same parent removes a
+  populated directory no process holds before it starts, and never removes
+  one that is still held, whatever its age. Activation moves an existing empty target and the completed staging
+  tree through random quarantine names with no-replace renames and checks their
+  identities after each move. Failed rollback retains the last confirmed
+  quarantine name for stale-work recovery. A writer that replaces one of the
+  saved names can therefore make the restore fail, but cannot redirect
+  recursive cleanup into the replacement or publish the replacement as
+  validated data. Activation fails closed when the running operating system or
+  kernel cannot provide an atomic no-replace directory rename.
+
   PostgreSQL/MySQL metadata changes before that rename, so live restore also
   fsyncs a recovery record beside the staging directory before mutation.
   Startup uses that record and the live/backup directory state to compensate an
@@ -1196,7 +1221,7 @@ incomplete.
 
 The truncate deletion range ends at the newest block in the indexed blob chain, not at the metadata ledger tip. During live synchronization, BlockFetch can have persisted a speculative blob tail that the ledger has not applied yet. If the requested target equals the metadata tip, that tail must still be deleted; treating the operation as a no-op would leave non-contiguous block indexes visible after the live node rebuild and prevent ChainSync from making forward progress.
 
-`lifecycle.Restore` accepts either a local directory or a cloud destination URI for `snapshotDir` — a cloud URI first fetches the manifest, then downloads only its two declared payloads into a temporary local directory (`downloadCloudFiles`), before proceeding with restore. A local snapshot's payloads are copied the same way before verification, so a file replaced after its digest check is never read. Both the downloads and the copies are created beside the restore target, on the volume sized for the restored data, never in the system temp directory, and are removed when the restore returns. Restore and snapshot verification remove matching sibling work directories older than seven days before starting; newer directories may belong to another active operation. Bark snapshot verification authenticates and inspects the manifest before resolving storage providers and supports only Badger plus SQLite, whose complete restore fits inside the temporary local target. It rejects PostgreSQL/MySQL metadata and S3/GCS blobs before starting a provider because they need separately configured disposable resources; reusing the live provider configuration would mutate the active database or leave a new object namespace behind. Restoring from the cloud requires the full per-snapshot URI (`<cloudDest>/<snapshotID>`, the same one `SnapshotToCloud` uploaded to), not the bare base destination, which is a catalog of potentially many snapshots. This is also how a snapshot captured on one node can be restored onto another, since the two never need to share a filesystem.
+`lifecycle.Restore` accepts either a local directory or a cloud destination URI for `snapshotDir` — a cloud URI first fetches the manifest, then downloads only its two declared payloads into a temporary local directory (`downloadCloudFiles`), before proceeding with restore. A local snapshot's payloads are copied the same way before verification, so a file replaced after its digest check is never read. Both the downloads and the copies are created beside the restore target, on the volume sized for the restored data, never in the system temp directory, and are removed when the restore returns. Restore and snapshot verification remove matching sibling work directories older than seven days before starting, unless a running restore still holds them; newer directories may belong to another active operation. On Unix, a populated staging, payload-copy, or cloud-download directory left by a restore that exited without cleaning up is removed at once, since no process holds its lock. Windows directory handles take no such lock, so there only the seven-day cutoff applies. Bark snapshot verification authenticates and inspects the manifest before resolving storage providers and supports only Badger plus SQLite, whose complete restore fits inside the temporary local target. It rejects PostgreSQL/MySQL metadata and S3/GCS blobs before starting a provider because they need separately configured disposable resources; reusing the live provider configuration would mutate the active database or leave a new object namespace behind. Restoring from the cloud requires the full per-snapshot URI (`<cloudDest>/<snapshotID>`, the same one `SnapshotToCloud` uploaded to), not the bare base destination, which is a catalog of potentially many snapshots. This is also how a snapshot captured on one node can be restored onto another, since the two never need to share a filesystem.
 
 Local restore copies the two manifest-declared payloads into a private temporary
 directory, bounded by their declared sizes, and verifies and consumes those
@@ -4538,8 +4563,19 @@ FROM asset a
 JOIN utxo u ON u.id = a.utxo_id
 WHERE a.policy_id = decode($1, 'hex')
   AND a.name = decode($2, 'hex')
+  AND a.amount IS NOT NULL
   AND u.deleted_slot = 0;
 ```
+
+`GetAssetQuantityByPolicyAndName` runs this as one aggregate row, so the sum
+is computed by the database and no row per holding crosses the driver (SQLite
+uses `dingo_uint64_sum`, which refuses a total past 64 bits; other backends
+sum `DECIMAL(20, 0)` and the store rejects a total past 64 bits). The holdings
+are read through an inner `LIMIT models.MaxAssetQuantityHoldings + 1`
+(1,000,000); an asset held by more fails with `ErrUtxoQueryBudgetExceeded`
+instead of scanning without limit. The scan runs under the caller's
+transaction context and stops when that context ends. The Blockfrost asset
+routes add a request deadline and an admission pool.
 
 `GetAssetMintBurnInfo` (Blockfrost `/assets/{asset}` `initial_mint_tx_hash` and
 `mint_or_burn_count`) reads the mint/burn history rather than live holdings:
@@ -4764,13 +4800,26 @@ AND a.active = true
 
 ### `GetStakeByPools`
 
-Current live stake by pool reads the maintained `reward_live_stake.utxo_stake`
-value once per active credential, preserving exact decimal `uint64` arithmetic
-without materializing every live UTxO. If a requested active credential lacks a
-current aggregate row, the store falls back to the canonical account/UTxO scan
-until `RebuildRewardLiveStake` completes; this preserves correctness while
-making steady-state ledger-peer and pool-detail requests proportional to
-credentials.
+Current live stake by pool is one `GROUP BY account.pool` aggregate over
+`account LEFT JOIN reward_live_stake`, returning one row per requested pool:
+the delegator count, the count of credentials with a non-empty
+`utxo_stake`, and the exact stake sum. The sum uses the engine-side wide
+aggregate described under the account totals (`NUMERIC`, `DECIMAL(65, 0)`, or
+`dingo_bigint_sum`), so the work in Go follows the requested pools rather than
+their delegators, and a total outside `uint64` is an error rather than a
+wrapped value. If any requested active credential lacks a current aggregate
+row (the two counts differ), the store falls back to the canonical
+account/UTxO scan until `RebuildRewardLiveStake` completes; this preserves
+correctness.
+
+### `GetActivePoolStakeTotal`
+
+The network-wide live stake of every active pool, as one aggregate row: the
+same statement as `GetStakeByPools` without the `GROUP BY`, restricted to the
+active pool set `GetActivePoolKeyHashes` resolves (the tip slot and the
+registration/retirement CTE). Completeness and the fallback are the same as for
+`GetStakeByPools`, evaluated across the whole active set. It runs on the
+caller's transaction, so its context cancels the statement.
 
 ### `GetStakeByPoolsAtSlot`
 
@@ -4883,13 +4932,19 @@ Only the persist-time capture can resolve that era.
 row and the enactment that decides its era are written in the same transaction,
 so every era lookup it makes resolves the *outgoing* epoch's era whatever
 `boundarySlot` it passes. `CaptureEpochBoundarySnapshot` therefore discards a
-stashed SNAP-point distribution whenever the epoch at `BoundarySlot` runs at a
-different era than the epoch at `SnapshotSlot`, and reconstructs the boundary
+stashed SNAP-point distribution whenever the pointer-stake gate
+(`models.PointerStakeCountedInEra`) answers differently for the era at
+`BoundarySlot` than for the era at `SnapshotSlot`, and reconstructs the boundary
 with `calculateHistoricalBoundaryStakeDistributionInTxn` instead -- by then the
 incoming epoch's row exists, so the gate resolves the era the mark snapshot is
 actually produced under. Without that, the fast path would count pointer stake
 at the Babbage->Conway boundary while the fallback did not, and the two Mark
-capture routes would persist different stake for the same epoch.
+capture routes would persist different stake for the same epoch. An era change
+that leaves the gate unchanged (Shelley->Allegra through Alonzo->Babbage, and
+Conway onward) keeps the stashed read: the historical reconstruction scans
+every delegation and UTxO at the boundary inside the rollover transaction, and
+on mainnet it runs long enough to stall header verification at the last block
+of the outgoing era.
 
 `GetRewardStakeInputsForPools` takes the same `slot`, `expiryEpoch`, and
 `inactivityPeriod` arguments. With the gate off (`expiryEpoch == 0`) it reads the

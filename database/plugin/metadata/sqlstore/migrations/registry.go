@@ -90,6 +90,7 @@ const (
 	addressTransactionCredentialKindSchemaRelease       = "address-transaction-credential-kind"
 	opCertCounterEncodingSchemaRelease                  = "opcert-counter-unsigned-order"
 	utxoSpenderPartialIndexSchemaRelease                = "utxo-spender-partial-indexes"
+	leiosKeyLookupIndexSchemaRelease                    = "leios-key-lookup-indexes"
 	backfillCheckpointIdentitySchemaRelease             = "backfill-checkpoint-identity"
 )
 
@@ -253,7 +254,8 @@ var schemaVersions = []struct {
 	{Version: 48, Name: governanceVoteCastSchemaRelease, Dir: "v48"},
 	{Version: 49, Name: opCertCounterEncodingSchemaRelease, Dir: "v49"},
 	{Version: 50, Name: utxoSpenderPartialIndexSchemaRelease, Dir: "v50"},
-	{Version: 51, Name: backfillCheckpointIdentitySchemaRelease, Dir: "v51"},
+	{Version: 51, Name: leiosKeyLookupIndexSchemaRelease, Dir: "v51"},
+	{Version: 52, Name: backfillCheckpointIdentitySchemaRelease, Dir: "v52"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.

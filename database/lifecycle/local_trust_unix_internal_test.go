@@ -32,9 +32,7 @@ import (
 // test set.
 func privateSnapshotBase(t *testing.T) string {
 	t.Helper()
-	base := t.TempDir()
-	require.NoError(t, os.Chmod(base, 0o755))
-	return base
+	return testutil.OwnerOnlyTempDir(t)
 }
 
 func snapshotForTrustTest(

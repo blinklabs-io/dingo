@@ -1919,7 +1919,7 @@ func TestPointerAddressStakeEraGateUsesTheIncomingEpochAtTheBoundary(
 					"must still see Babbage, regardless of the incoming era")
 
 			boundaryStakes, _, err := f.store.GetEpochBoundaryStakeByPools(
-				[][]byte{f.pool}, 299, 300, 0, 0, nil,
+				[][]byte{f.pool}, 299, 300, nil, 0, 0, nil,
 			)
 			require.NoError(t, err)
 			require.Equal(t, tc.want, boundaryStakes[string(f.pool)],
@@ -3163,7 +3163,7 @@ func TestEpochBoundaryStakeRetainsBoundaryRewardUpdate(t *testing.T) {
 	require.Equal(t, uint64(1), delegators[string(pool)])
 
 	stakes, delegators, err = store.GetEpochBoundaryStakeByPools(
-		[][]byte{pool}, snapshotSlot, boundarySlot, 0, 0, nil,
+		[][]byte{pool}, snapshotSlot, boundarySlot, nil, 0, 0, nil,
 	)
 	require.NoError(t, err)
 	require.Equal(
@@ -3175,7 +3175,7 @@ func TestEpochBoundaryStakeRetainsBoundaryRewardUpdate(t *testing.T) {
 	require.Equal(t, uint64(1), delegators[string(pool)])
 
 	inputs, err := store.GetEpochBoundaryRewardStakeInputsForPools(
-		[][]byte{pool}, snapshotSlot, boundarySlot, 0, 0, nil,
+		[][]byte{pool}, snapshotSlot, boundarySlot, nil, 0, 0, nil,
 	)
 	require.NoError(t, err)
 	require.Len(t, inputs, 1)
@@ -3230,7 +3230,7 @@ func TestEpochBoundaryStakeHandlesBoundaryWithdrawal(t *testing.T) {
 	))
 
 	stakes, _, err := store.GetEpochBoundaryStakeByPools(
-		[][]byte{pool}, snapshotSlot, boundarySlot, 0, 0, nil,
+		[][]byte{pool}, snapshotSlot, boundarySlot, nil, 0, 0, nil,
 	)
 	require.NoError(t, err)
 	require.Equal(t, uint64(150), stakes[string(pool)],
@@ -3294,7 +3294,7 @@ func TestEpochBoundaryStakeIncludesPreSnapshotCreditsOnly(t *testing.T) {
 	}
 
 	stakes, _, err := store.GetEpochBoundaryStakeByPools(
-		[][]byte{pool}, snapshotSlot, boundarySlot, 0, 0, nil,
+		[][]byte{pool}, snapshotSlot, boundarySlot, nil, 0, 0, nil,
 	)
 	require.NoError(t, err)
 	// 1000 utxo + 50 reward update + 3 MIR; the 7 + 11 + 13 post-SNAP credits
@@ -3303,7 +3303,7 @@ func TestEpochBoundaryStakeIncludesPreSnapshotCreditsOnly(t *testing.T) {
 		"only pre-SNAP boundary credits belong in the mark snapshot")
 
 	inputs, err := store.GetEpochBoundaryRewardStakeInputsForPools(
-		[][]byte{pool}, snapshotSlot, boundarySlot, 0, 0, nil,
+		[][]byte{pool}, snapshotSlot, boundarySlot, nil, 0, 0, nil,
 	)
 	require.NoError(t, err)
 	require.Len(t, inputs, 1)

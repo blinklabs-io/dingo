@@ -39,7 +39,7 @@ func TestSnapshotDurabilityBeforeManifest(t *testing.T) {
 				t,
 				db.BlockCreate(newRestoreInternalTestBlock(), nil),
 			)
-			base := t.TempDir()
+			base := snapshotTestParent(t)
 			dir := filepath.Join(base, "snapshot")
 			originalFileSync, originalDirSync := syncSnapshotFile, syncDir
 			t.Cleanup(
@@ -274,7 +274,7 @@ func TestSnapshotInterruptedBeforeManifest(t *testing.T) {
 
 	for _, stage := range []string{BlobBackupFileName, MetadataBackupFileName, "directory", "parent"} {
 		t.Run(stage, func(t *testing.T) {
-			base := t.TempDir()
+			base := snapshotTestParent(t)
 			dir := filepath.Join(base, "interrupted")
 			// The child seeds its test database from the template built
 			// above instead of running its own migration, but still needs
@@ -326,7 +326,7 @@ func TestSnapshotInterruptedBeforeManifest(t *testing.T) {
 
 func TestSnapshotRepairsCatalogAfterDurableManifestWrite(t *testing.T) {
 	db := newRestoreInternalTestDB(t)
-	base := t.TempDir()
+	base := snapshotTestParent(t)
 	require.NoError(t, EnsureSnapshotCatalog(base))
 	require.NoError(t, os.WriteFile(
 		snapshotCatalogPath(base), []byte("not a sqlite database"), 0o600,
@@ -353,7 +353,7 @@ func TestSnapshotDurableAncestors(t *testing.T) {
 	for _, failAt := range []string{"", "outer", "base"} {
 		t.Run("failure_"+failAt, func(t *testing.T) {
 			db := newRestoreInternalTestDB(t)
-			base := t.TempDir()
+			base := snapshotTestParent(t)
 			outer := filepath.Join(base, "outer")
 			parent := filepath.Join(outer, "inner")
 			dir := filepath.Join(parent, "snapshot")

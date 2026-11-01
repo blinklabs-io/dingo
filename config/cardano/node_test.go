@@ -81,11 +81,58 @@ var expectedCardanoNodeConfig = &CardanoNodeConfig{
 	CheckpointsFile:                            "checkpoints.json",
 	CheckpointsFileHash:                        "bb5056ff1ced9d68dd99720695789664f6bf6f0cb02a4010df09b813e225ac51",
 	ConsensusMode:                              "GenesisMode",
+	TxSubmissionLogicVersion:                   TxSubmissionLogicV1,
 	ExperimentalHardForksEnabled:               new(false),
 	TestShelleyHardForkAtEpoch:                 ptrUint64(0),
 	TestAllegraHardForkAtEpoch:                 ptrUint64(0),
 	TestMaryHardForkAtEpoch:                    ptrUint64(0),
 	TestAlonzoHardForkAtEpoch:                  ptrUint64(0),
+}
+
+func TestTxSubmissionLogicVersion(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		config    string
+		want      TxSubmissionLogicVersion
+		wantError string
+	}{
+		{
+			name:   "absent defaults to V1",
+			config: `{}`,
+			want:   TxSubmissionLogicV1,
+		},
+		{
+			name:   "V1",
+			config: `{"TxSubmissionLogicVersion":"TxSubmissionLogicV1"}`,
+			want:   TxSubmissionLogicV1,
+		},
+		{
+			name:      "V2 is not implemented",
+			config:    `{"TxSubmissionLogicVersion":"TxSubmissionLogicV2"}`,
+			wantError: `TxSubmissionLogicV2" is not supported by Dingo`,
+		},
+		{
+			name:      "unknown",
+			config:    `{"TxSubmissionLogicVersion":"TxSubmissionLogicV3"}`,
+			wantError: `invalid TxSubmissionLogicVersion "TxSubmissionLogicV3"`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			config, err := NewCardanoNodeConfigFromReader(
+				bytes.NewBufferString(test.config),
+			)
+			if test.wantError != "" {
+				require.ErrorContains(t, err, test.wantError)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, test.want, config.TxSubmissionLogicVersion)
+		})
+	}
 }
 
 func TestCardanoNodeConfig(t *testing.T) {

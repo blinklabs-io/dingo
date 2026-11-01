@@ -23,7 +23,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
-	ledger "github.com/blinklabs-io/gouroboros/ledger"
 )
 
 // Pointer addresses (types 4 and 5) designate a stake credential by the
@@ -89,7 +88,11 @@ func pointerStakeCounted(
 	db queryer,
 	slot uint64,
 	boundarySlot uint64,
+	incomingEraID *uint,
 ) (bool, error) {
+	if incomingEraID != nil {
+		return models.PointerStakeCountedInEra(*incomingEraID), nil
+	}
 	eraSlot := max(boundarySlot, slot)
 	slotValue, err := checkedInt64(eraSlot)
 	if err != nil {
@@ -112,11 +115,10 @@ LIMIT 1`,
 	if err != nil {
 		return false, fmt.Errorf("resolve era for slot %d: %w", eraSlot, err)
 	}
-	if !eraID.Valid {
+	if !eraID.Valid || eraID.Int64 < 0 {
 		return false, nil
 	}
-	return eraID.Int64 >= ledger.EraIdShelley &&
-		eraID.Int64 <= ledger.EraIdBabbage, nil
+	return models.PointerStakeCountedInEra(uint(eraID.Int64)), nil
 }
 
 // persistUtxoPointer records the certificate position a pointer address names.
@@ -268,7 +270,7 @@ func (s *Store) GetPointerStakeInputsForPools(
 			err,
 		)
 	}
-	counted, err := pointerStakeCounted(ctx, db, slot, boundarySlot)
+	counted, err := pointerStakeCounted(ctx, db, slot, boundarySlot, nil)
 	if err != nil {
 		return nil, err
 	}

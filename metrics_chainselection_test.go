@@ -284,7 +284,7 @@ func TestBuildChainSelectorConfigWiresPeerIdentity(t *testing.T) {
 			DisableOutbound: true,
 		}),
 	}
-	const expectedGroup = ""
+	const expectedGroup = "ipv4:44.0.0.0/24"
 	for _, peerGov := range peerGovs {
 		t.Cleanup(func() {
 			assert.NoError(t, peerGov.Stop(context.Background()))
@@ -317,7 +317,7 @@ func TestBuildChainSelectorConfigWiresPeerIdentity(t *testing.T) {
 			t,
 			expectedGroup,
 			peerGov.CorroborationIdentityByConnId(conn),
-			"topology address alone has no control identity",
+			"an unidentified topology root is grouped by address",
 		)
 		assert.Equal(t, expectedGroup, cfg.PeerIdentity(conn))
 		require.NoError(t, peerGov.Stop(context.Background()))

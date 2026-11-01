@@ -2290,6 +2290,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		// excludes the header and recycles the connection.
 		selectionEligible := ingressEligible
 		deferredVerification := false
+		transientVerification := false
 		shouldVerifyHeader := o.chainSelectionShouldVerifyHeaderCrypto != nil &&
 			o.chainSelectionShouldVerifyHeaderCrypto(blockSlot)
 		deliveryVerified := !shouldVerifyHeader
@@ -2352,6 +2353,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				} else if ledger.IsHeaderVerificationDeferred(verifyErr) {
 					selectionEligible = false
 					deferredVerification = true
+					transientVerification = ledger.IsHeaderVerificationContextTransient(verifyErr)
 					o.config.Logger.Debug(
 						"chainsync: header producer authorization deferred",
 						"component", "ouroboros",
@@ -2463,7 +2465,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 					},
 				)
 			}
-			if !extendsLocalChain {
+			if !extendsLocalChain || transientVerification {
 				// Do not advance peer cursors, dedup state, or publish to
 				// selector/ledger until this header passes strict verification.
 				o.markDeferredHeaderRecovery(
@@ -2890,10 +2892,10 @@ const maxDeferredVerificationWaits = 4
 // extend the local chain would be parked for a re-intersection, which closes
 // the connection, so the callback instead waits for the ledger's next settle
 // signal and verifies the same header again, as the reference ChainSync
-// client blocks until the ledger view can validate a header. A header that
-// extends the local chain is returned at once: it is forwarded unverified and
-// the body path verifies it, and when its deferral clears only by applying
-// its own block no settle signal can arrive while it is held. wait bounds
+// client blocks until the ledger view can validate a header. A local extension
+// also waits when a validation transition or snapshot publication invalidated
+// its verification context. Other local-extension deferrals are returned at
+// once: missing epoch data may need its own block applied to settle. wait bounds
 // every wait of one roll-forward to catchUpBandWaitTimeout, which stays under
 // the protocol state timers, and to maxDeferredVerificationWaits, and ends at
 // connection close. A header beyond the forecast horizon has its own
@@ -2924,7 +2926,8 @@ func (o *Ouroboros) verifyHeaderAwaitingLedger(
 			!ledger.IsHeaderVerificationDeferred(err) ||
 			errors.Is(err, ledger.ErrHeaderBeyondForecastHorizon) ||
 			wait.waits >= maxDeferredVerificationWaits ||
-			o.deferredHeaderExtendsLocalChain(ctx.ConnectionId, header) {
+			(!ledger.IsHeaderVerificationContextTransient(err) &&
+				o.deferredHeaderExtendsLocalChain(ctx.ConnectionId, header)) {
 			return generation, err
 		}
 		if !wait.await(ctx, o.catchUpBandWaitTimeout, settled) {

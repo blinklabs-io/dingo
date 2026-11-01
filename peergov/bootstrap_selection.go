@@ -70,6 +70,12 @@ func addressGroup(address string) string {
 		host = address
 	}
 	host = strings.ToLower(host)
+	// net.ParseIP rejects a scoped IPv6 literal, so without dropping the zone
+	// each scoped address in one /64 would form its own host group.
+	if addr, zone, ok := strings.Cut(host, "%"); ok && zone != "" &&
+		strings.Contains(addr, ":") {
+		host = addr
+	}
 
 	ip := net.ParseIP(host)
 	if ip == nil {

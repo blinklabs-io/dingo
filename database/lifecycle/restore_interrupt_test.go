@@ -90,7 +90,7 @@ func TestRestoreInterruptedByProcessKillLeavesTargetUntouched(t *testing.T) {
 	db := newTestDB(t)
 	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
 
-	snapshotDir := filepath.Join(t.TempDir(), "snap")
+	snapshotDir := snapshotTestDir(t, "snap")
 	_, err := lifecycle.Snapshot(
 		context.Background(), db, snapshotDir,
 		lifecycle.TriggerManual, "test", "badger", "sqlite",
@@ -172,4 +172,90 @@ func runRestoreInterruptHelper() {
 	// finished (not expected: the FIFO blocks it first); exit quietly
 	// either way, since the parent's own assertion is what actually
 	// matters.
+}
+
+// TestRestoreRetryReclaimsKilledAttemptWork kills a restore while it is
+// copying payloads, exactly as the test above does, then retries in this
+// process. The killed attempt's populated work directory is held by no
+// process, so the retry must reclaim it before succeeding rather than leave
+// a snapshot-sized copy beside the target until the age cutoff.
+func TestRestoreRetryReclaimsKilledAttemptWork(t *testing.T) {
+	t.Parallel()
+
+	if os.Getenv(restoreInterruptHelperEnv) != "" {
+		runRestoreInterruptHelper()
+		return
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("FIFO-based synchronization is POSIX-only")
+	}
+
+	db := newTestDB(t)
+	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
+
+	snapshotDir := filepath.Join(t.TempDir(), "snap")
+	_, err := lifecycle.Snapshot(
+		context.Background(), db, snapshotDir,
+		lifecycle.TriggerManual, "test", "badger", "sqlite",
+		lifecycle.WithManifestKey(testTrustKey),
+	)
+	require.NoError(t, err)
+
+	backupPath := filepath.Join(snapshotDir, lifecycle.MetadataBackupFileName)
+	backup, err := os.ReadFile(backupPath)
+	require.NoError(t, err)
+	require.NoError(t, os.Remove(backupPath))
+	require.NoError(t, syscall.Mkfifo(backupPath, 0o600))
+
+	targetDir := filepath.Join(t.TempDir(), "restored")
+
+	require.NotEmpty(t, os.Args)
+	cmd := exec.Command( //nolint:gosec
+		os.Args[0],
+		"-test.run=^TestRestoreRetryReclaimsKilledAttemptWork$",
+	)
+	cmd.Env = append(
+		os.Environ(),
+		restoreInterruptHelperEnv+"=1",
+		"DINGO_TEST_RESTORE_SNAPSHOT_DIR="+snapshotDir,
+		"DINGO_TEST_RESTORE_TARGET_DIR="+targetDir,
+	)
+	require.NoError(t, cmd.Start())
+	t.Cleanup(func() { _ = cmd.Process.Kill() })
+
+	var writer *os.File
+	testutil.WaitForCondition(t, func() bool {
+		var openErr error
+		writer, openErr = os.OpenFile(
+			backupPath, os.O_WRONLY|syscall.O_NONBLOCK, 0,
+		)
+		return openErr == nil
+	}, 5*time.Second, "child never reached payload copying")
+	_, err = writer.Write(backup[:min(len(backup), 1024)])
+	require.NoError(t, err)
+
+	require.NoError(t, cmd.Process.Kill())
+	_ = cmd.Wait()
+	_ = writer.Close()
+
+	entries, err := os.ReadDir(filepath.Dir(targetDir))
+	require.NoError(t, err)
+	require.NotEmpty(t, entries, "killed attempt left no work directory")
+
+	require.NoError(t, os.Remove(backupPath))
+	require.NoError(t, os.WriteFile(backupPath, backup, 0o600))
+	host := plugin.NewHost()
+	require.NoError(t, badger.RegisterProvider(host))
+	require.NoError(t, sqlite.RegisterProvider(host))
+	_, err = lifecycle.Restore(
+		context.Background(),
+		host,
+		nil,
+		snapshotDir,
+		targetDir,
+		lifecycle.RestoreStorageConfig{Blob: testutil.BadgerBlobConfig()},
+		lifecycle.WithManifestKey(testTrustKey),
+	)
+	require.NoError(t, err)
+	requireOnlyTarget(t, targetDir)
 }

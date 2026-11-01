@@ -125,6 +125,19 @@ func openRelative(
 	access uint32,
 	options uint32,
 ) (windows.Handle, error) {
+	return openRelativeWithShare(
+		dir, name, access, options,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+	)
+}
+
+func openRelativeWithShare(
+	dir windows.Handle,
+	name string,
+	access uint32,
+	options uint32,
+	share uint32,
+) (windows.Handle, error) {
 	objectName, err := windows.NewNTUnicodeString(name)
 	if err != nil {
 		return 0, err
@@ -144,7 +157,7 @@ func openRelative(
 		&iosb,
 		nil,
 		windows.FILE_ATTRIBUTE_NORMAL,
-		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		share,
 		windows.FILE_OPEN,
 		options,
 		0,

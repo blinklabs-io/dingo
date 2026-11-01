@@ -107,7 +107,7 @@ func TestHistoricalStakeQueryCursorsStayBounded(t *testing.T) {
 					}
 					query, args, err := store.historicalStakeCTE(
 						t.Context(), store.writeDB, 1_999, 2_000,
-						expiryEpoch, period,
+						nil, expiryEpoch, period,
 						"active_delegation.pool_key_hash IN (?)",
 						[]any{[]byte{1}},
 					)

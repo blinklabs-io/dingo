@@ -20,6 +20,7 @@ import (
 	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	dbtypes "github.com/blinklabs-io/dingo/database/types"
 )
 
 // tokenRegistrySubjectFor builds the CIP-26 registry subject for an asset:
@@ -76,8 +77,10 @@ func tokenRegistryMetadataValue(entry *models.TokenRegistryEntry) *any {
 //
 // An asset missing from the registry is the common case, not an error: most
 // native assets are never registered, and the registry sync is off by default.
-// Only a store failure is reported.
+// Only a store failure is reported. A non-nil txn is reused so the read does
+// not wait for a second pooled connection while the caller holds one.
 func (a *NodeAdapter) populateAssetRegistryMetadata(
+	txn dbtypes.Txn,
 	info *AssetInfo,
 	policyID string,
 	assetName []byte,
@@ -85,7 +88,7 @@ func (a *NodeAdapter) populateAssetRegistryMetadata(
 	subject := tokenRegistrySubjectFor(policyID, assetName)
 	entry, err := a.ledgerState.Database().
 		Metadata().
-		GetTokenRegistryEntry(subject, nil)
+		GetTokenRegistryEntry(subject, txn)
 	if err != nil {
 		return fmt.Errorf(
 			"get token registry metadata for asset %s: %w",

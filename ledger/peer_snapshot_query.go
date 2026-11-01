@@ -36,9 +36,9 @@ import (
 // bigLedgerPeerQuota is the cumulative relative-stake threshold that
 // delimits the "big" ledger peers: walking pools from highest to lowest
 // stake, a pool belongs to the big set while the stake accumulated by the
-// pools before it has not yet reached this quota (so the first pool that
-// reaches or crosses the quota is the last one included). The value mirrors
-// the bigLedgerPeerQuota default (0.9) used by ouroboros-network's
+// pools before it has not exceeded this quota (so a pool whose predecessors
+// total exactly the quota is still included). The value mirrors the
+// bigLedgerPeerQuota default (0.9) used by ouroboros-network's
 // PeerSelection.LedgerPeers. It is applied only when a client requests
 // LedgerPeerKindBig; LedgerPeerKindAll returns every relay-advertising pool.
 //
@@ -279,15 +279,14 @@ type poolLedgerPeer struct {
 // tested without a live database.
 //
 //   - stakeByPool is keyed by string(poolKeyHash) and holds the delegated
-//     stake of every active pool (including pools without relays). Its sum is
-//     the denominator for relative stake; pools missing from the map are
-//     treated as zero stake.
+//     stake of every active pool (including pools without relays). Pools
+//     missing from the map are treated as zero stake.
 //   - pools carries the per-pool registration detail (including relays) for
 //     the same active pools.
 //
-// Pools that advertise no usable relay are omitted from the result list but
-// still contribute to the total-stake denominator, matching the Cardano
-// ledger's pool-distribution semantics.
+// Pools that advertise no usable relay are omitted from the result list. They
+// contribute to the all-peer denominator, while the big-peer denominator is
+// renormalized over pools that can actually be selected as peers.
 func assembleLedgerPeerSnapshot(
 	slot olocalstatequery.WithOriginSlot,
 	stakeByPool map[string]uint64,
@@ -295,16 +294,6 @@ func assembleLedgerPeerSnapshot(
 	peerKind olocalstatequery.LedgerPeerKind,
 ) olocalstatequery.LedgerPeerSnapshotResult {
 	result := emptyLedgerPeerSnapshot(slot)
-
-	// Total stake across all active pools is the relative-stake denominator.
-	totalStake := new(big.Int)
-	for _, s := range stakeByPool {
-		totalStake.Add(totalStake, new(big.Int).SetUint64(s))
-	}
-	if totalStake.Sign() == 0 {
-		// No measurable stake yet (e.g. early chain); nothing to weight.
-		return result
-	}
 
 	entries := make([]poolLedgerPeer, 0, len(pools))
 	for _, pool := range pools {
@@ -319,6 +308,23 @@ func assembleLedgerPeerSnapshot(
 		})
 	}
 
+	// All-peer snapshots retain the ledger distribution's denominator. Big
+	// peer snapshots match the reference implementation by renormalizing over
+	// pools with a usable relay, which are the only pools eligible for the set.
+	totalStake := new(big.Int)
+	if peerKind == olocalstatequery.LedgerPeerKindBig {
+		for _, entry := range entries {
+			totalStake.Add(totalStake, new(big.Int).SetUint64(entry.stake))
+		}
+	} else {
+		for _, stake := range stakeByPool {
+			totalStake.Add(totalStake, new(big.Int).SetUint64(stake))
+		}
+	}
+	if totalStake.Sign() == 0 {
+		return result
+	}
+
 	// Order by descending stake (the big-peer accumulation order), with the
 	// pool key hash as a deterministic tie-breaker.
 	sort.Slice(entries, func(i, j int) bool {
@@ -330,13 +336,11 @@ func assembleLedgerPeerSnapshot(
 
 	acc := new(big.Rat)
 	for _, e := range entries {
-		// For the big-peer set, stop once the stake accumulated by the
-		// preceding pools has reached the quota. The pool that first reaches
-		// or crosses the quota is the last one included; pools after it
-		// (including zero-stake relayed pools sitting exactly on a 0.9
-		// boundary) are excluded.
+		// The reference set keeps taking pools while the stake accumulated by
+		// their predecessors is at most the quota. A pool immediately after an
+		// exact 0.9 boundary is therefore included.
 		if peerKind == olocalstatequery.LedgerPeerKindBig &&
-			acc.Cmp(bigLedgerPeerQuota) >= 0 {
+			acc.Cmp(bigLedgerPeerQuota) > 0 {
 			break
 		}
 		poolStake := new(big.Rat).SetFrac(
@@ -378,8 +382,8 @@ func relayAccessPointsFromPool(
 // Dingo normalises each on-chain PoolRelay into one row carrying optional
 // IPv4/IPv6 addresses, an optional hostname, and a port:
 //
-//   - SingleHostAddr  -> IPv4 and/or IPv6 set, port set (a dual-stack relay
-//     yields one access point per address family).
+//   - SingleHostAddr  -> IPv4 and/or IPv6 set, port set (IPv4 takes
+//     precedence when both address families are present).
 //   - SingleHostName  -> hostname + port, no IP (an A/AAAA-record domain).
 //   - MultiHostName   -> hostname only, no port (an SRV record; the resolver
 //     supplies the port).
@@ -388,7 +392,6 @@ func relayAccessPointsFromPool(
 func relayAccessPoints(
 	relay models.PoolRegistrationRelay,
 ) []olocalstatequery.RelayAccessPoint {
-	var out []olocalstatequery.RelayAccessPoint
 	// On-chain relay ports are Word16; the column is a wider uint, so guard
 	// the narrowing conversion. An out-of-range value is malformed data and
 	// is treated as no port.
@@ -396,26 +399,28 @@ func relayAccessPoints(
 	if relay.Port <= math.MaxUint16 {
 		port = uint16(relay.Port)
 	}
+	// A SingleHostAddr without a usable port cannot become a ledger relay
+	// access point. Hostname rows retain their Domain/SRV mapping below.
+	if port == 0 && (relay.Ipv4 != nil || relay.Ipv6 != nil) {
+		return nil
+	}
 	if relay.Ipv4 != nil {
 		ip := append(net.IP(nil), *relay.Ipv4...)
 		p := port
-		out = append(out, olocalstatequery.RelayAccessPoint{
+		return []olocalstatequery.RelayAccessPoint{{
 			Kind: olocalstatequery.RelayKindIPv4,
 			IPv4: &ip,
 			Port: &p,
-		})
+		}}
 	}
 	if relay.Ipv6 != nil {
 		ip := append(net.IP(nil), *relay.Ipv6...)
 		p := port
-		out = append(out, olocalstatequery.RelayAccessPoint{
+		return []olocalstatequery.RelayAccessPoint{{
 			Kind: olocalstatequery.RelayKindIPv6,
 			IPv6: &ip,
 			Port: &p,
-		})
-	}
-	if len(out) > 0 {
-		return out
+		}}
 	}
 	if relay.Hostname == "" {
 		return nil

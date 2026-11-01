@@ -18,14 +18,13 @@ import (
 	"context"
 	"io"
 	"log/slog"
-	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
-	"github.com/blinklabs-io/dingo/internal/dblifecycle"
 	internalconfig "github.com/blinklabs-io/dingo/internal/config"
+	"github.com/blinklabs-io/dingo/internal/dblifecycle"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/require"
 )
@@ -114,7 +113,7 @@ func TestLiveRestoreOfMidCatchUpSnapshotRepairsIndexes(t *testing.T) {
 	manager, ok := n.db.Metadata().(metadata.CatchUpIndexManager)
 	require.True(t, ok)
 	require.NoError(t, manager.DropCatchUpIndexesContext(t.Context()))
-	snapshotDir := filepath.Join(t.TempDir(), "snap")
+	snapshotDir := snapshotTestDir(t, "snap")
 	_, err := lifecycleSnapshot(t, n, snapshotDir)
 	require.NoError(t, err)
 	require.NoError(t, manager.BuildCatchUpIndexesContext(t.Context()))

@@ -393,7 +393,7 @@ func TestBlockfrostRejectsMalformedStoredHashes(t *testing.T) {
 			name:  "Asset",
 			store: &malformedHashStore{},
 			call: func(_ *testing.T, a *NodeAdapter) error {
-				_, err := a.Asset(hex.EncodeToString(short), nil)
+				_, err := a.Asset(context.Background(), hex.EncodeToString(short), nil)
 				return err
 			},
 			want: "asset policy ID",

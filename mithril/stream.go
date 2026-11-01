@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -384,9 +385,6 @@ func openStreamSource(
 	}
 	digests, err := fetchVerifiedDigests(ctx, client, dcfg, artifact, dir)
 	closeDigestClient()
-	// The archive is only needed to build the map, and a failed fetch can
-	// leave it behind.
-	removeDigestsCache(artifact, dir)
 	if err != nil {
 		return nil, err
 	}
@@ -567,10 +565,15 @@ func closeFeed(feed *ChunkFeed, logger *slog.Logger) {
 // else would, and each would hold up to a window of trios forever. Only
 // directories named the way NewChunkFeed names them are touched.
 func sweepStaleFeedDirs(dir string, logger *slog.Logger) error {
-	entries, err := os.ReadDir(dir)
+	parent, err := os.OpenRoot(dir)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
+	if err != nil {
+		return fmt.Errorf("opening download directory: %w", err)
+	}
+	defer parent.Close() //nolint:errcheck // primary sweep error is returned
+	entries, err := fs.ReadDir(parent.FS(), ".")
 	if err != nil {
 		return fmt.Errorf("listing download directory: %w", err)
 	}
@@ -579,8 +582,34 @@ func sweepStaleFeedDirs(dir string, logger *slog.Logger) error {
 		if !entry.IsDir() || !chunkFeedDirPattern.MatchString(entry.Name()) {
 			continue
 		}
+		info, err := entry.Info()
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("inspecting stale chunk feed directory: %w", err)
+		}
+		root, err := parent.OpenRoot(entry.Name())
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("opening stale chunk feed directory: %w", err)
+		}
+		opened, err := root.Stat(".")
+		if err != nil || !os.SameFile(info, opened) {
+			_ = root.Close()
+			return errors.Join(
+				fmt.Errorf("%w: stale chunk feed directory changed", errBootstrapCleanupIdentity),
+				err,
+			)
+		}
 		path := filepath.Join(dir, entry.Name())
-		if err := os.RemoveAll(path); err != nil {
+		if err := cleanupRetainedDir(
+			parent, &root, opened, entry.Name(), path,
+		); errors.Is(err, os.ErrNotExist) {
+			continue
+		} else if err != nil {
 			return fmt.Errorf("removing stale chunk feed directory: %w", err)
 		}
 		logger.Info(

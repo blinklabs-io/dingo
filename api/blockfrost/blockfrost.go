@@ -44,8 +44,12 @@ const (
 	defaultMaxAddressSummariesPerClient         = 2
 	defaultMaxChainSummaries               uint = 4
 	defaultMaxChainSummariesPerClient           = 2
+	defaultMaxAssetDetails                 uint = 4
+	defaultMaxAssetDetailsPerClient             = 2
 	defaultMaxMempoolAddresses             uint = 4
 	defaultMaxMempoolAddressesPerClient         = 1
+	defaultMaxPoolAggregates               uint = 4
+	defaultMaxPoolAggregatesPerClient           = 2
 )
 
 // Blockfrost is the Blockfrost-compatible REST API server.
@@ -68,8 +72,14 @@ type Blockfrost struct {
 	// latest epoch, a single epoch and the epochs before and after one. It is
 	// separate from addressSummaryAdmission so a burst of address scans cannot
 	// starve these routes, and the reverse.
-	chainSummaryAdmission   *requestAdmission
+	chainSummaryAdmission *requestAdmission
+	// assetDetailAdmission bounds concurrent asset lookups, each of which
+	// totals every live holding of the asset.
+	assetDetailAdmission    *requestAdmission
 	mempoolAddressAdmission *requestAdmission
+	// poolAggregateAdmission is shared by the pool detail and the extended
+	// pool list, whose live stake is aggregated over the pool's delegators.
+	poolAggregateAdmission *requestAdmission
 	// listener owns the start/stop protocol, including releasing the
 	// listening socket as part of what Stop waits for -- see
 	// internal/apilistener.
@@ -121,9 +131,17 @@ func New(
 			defaultMaxChainSummaries,
 			defaultMaxChainSummariesPerClient,
 		),
+		assetDetailAdmission: newRequestAdmission(
+			defaultMaxAssetDetails,
+			defaultMaxAssetDetailsPerClient,
+		),
 		mempoolAddressAdmission: newRequestAdmission(
 			defaultMaxMempoolAddresses,
 			defaultMaxMempoolAddressesPerClient,
+		),
+		poolAggregateAdmission: newRequestAdmission(
+			defaultMaxPoolAggregates,
+			defaultMaxPoolAggregatesPerClient,
 		),
 		listener: apilistener.New("Blockfrost API", logger),
 	}

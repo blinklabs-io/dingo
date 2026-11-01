@@ -379,6 +379,7 @@ type BlockfrostNode interface {
 	// Asset returns native asset information for a
 	// concatenated hex asset ID ({policy_id}{asset_name}).
 	Asset(
+		ctx context.Context,
 		policyID string,
 		assetName []byte,
 	) (AssetInfo, error)

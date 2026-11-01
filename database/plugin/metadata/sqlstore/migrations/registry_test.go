@@ -31,7 +31,7 @@ func TestSQLiteRegistry(t *testing.T) {
 	registry, err := SQLiteRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "sqlite"))
-	require.Len(t, registry, 51)
+	require.Len(t, registry, 52)
 
 	require.Equal(t, accountDRepClearSchemaRelease, registry[34].Name)
 	require.Contains(t, registry[34].SQL["sqlite"].Expand[0],
@@ -46,6 +46,13 @@ func TestSQLiteRegistry(t *testing.T) {
 		registry[0].SQL["sqlite"].Expand,
 		"CREATE INDEX IF NOT EXISTS `idx_pool_opcert_sequence_pool_sequence` ON `pool_opcert_sequence`(`pool_key_hash`,`sequence`)",
 	)
+	require.Equal(t, leiosKeyLookupIndexSchemaRelease, registry[50].Name)
+	require.Equal(t, []string{
+		"CREATE INDEX IF NOT EXISTS `idx_pool_registration_snapshot_current`\n" +
+			"    ON `pool_registration`(`pool_id`, `certificate_id`, `registration_index`, `added_slot`, `id`)",
+		"CREATE INDEX IF NOT EXISTS `idx_pool_retirement_pool_slot`\n" +
+			"    ON `pool_retirement`(`pool_id`, `added_slot`)",
+	}, registry[50].SQL["sqlite"].Expand)
 	require.Equal(t, 2, registry[1].Version)
 	require.Equal(t, "leios-key-registration", registry[1].Name)
 	require.Contains(
@@ -328,8 +335,8 @@ func TestBackfillCheckpointIdentityMigrationTranslation(t *testing.T) {
 			t.Parallel()
 			registry, err := registryForDialect(testCase.dialect)
 			require.NoError(t, err)
-			require.Len(t, registry, 51)
-			migration := registry[50]
+			require.Len(t, registry, 52)
+			migration := registry[51]
 			require.Equal(t, backfillCheckpointIdentitySchemaRelease, migration.Name)
 			require.Contains(t, migration.SQL[testCase.dialect].Expand,
 				"ALTER TABLE backfill_checkpoint ADD COLUMN last_index_id "+
@@ -358,7 +365,7 @@ func TestDrepDormancySeedUsesPortableIdempotentInsert(t *testing.T) {
 			registry, err := tc.registry()
 			require.NoError(t, err)
 			require.NoError(t, validateRegistry(registry, tc.dialect))
-			require.Len(t, registry, 51)
+			require.Len(t, registry, 52)
 			migration := registry[39]
 			require.Equal(t, drepDormancyStateSchemaRelease, migration.Name)
 			seed := strings.Join(migration.SQL[tc.dialect].Expand, "\n")
@@ -587,7 +594,7 @@ func TestMySQLRegistryPrefixesPoolOpCertSequenceIndex(t *testing.T) {
 	registry, err := MySQLRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "mysql"))
-	require.Len(t, registry, 51)
+	require.Len(t, registry, 52)
 
 	require.Contains(
 		t,
@@ -659,6 +666,27 @@ func TestRewardCreditRoundMigrationTranslatesForProviders(t *testing.T) {
 	mysqlSQL := strings.Join(mysql[30].SQL["mysql"].Expand, "\n")
 	require.Contains(t, mysqlSQL, "CREATE INDEX `idx_reward_account_output_pending_round`")
 	require.Contains(t, mysqlSQL, "ON `reward_account_output`(`spendable`, `guarded`, `folded`, `epoch`)")
+	require.NotContains(t, mysqlSQL, "CREATE INDEX IF NOT EXISTS")
+}
+
+func TestLeiosKeyLookupIndexesTranslateForProviders(t *testing.T) {
+	t.Parallel()
+
+	postgres, err := PostgresRegistry()
+	require.NoError(t, err)
+	postgresSQL := strings.Join(postgres[50].SQL["postgres"].Expand, "\n")
+	require.Contains(t, postgresSQL,
+		`ON "pool_registration"("pool_id", "certificate_id", "registration_index", "added_slot", "id")`)
+	require.Contains(t, postgresSQL,
+		`ON "pool_retirement"("pool_id", "added_slot")`)
+
+	mysql, err := MySQLRegistry()
+	require.NoError(t, err)
+	mysqlSQL := strings.Join(mysql[50].SQL["mysql"].Expand, "\n")
+	require.Contains(t, mysqlSQL,
+		"ON `pool_registration`(`pool_id`, `certificate_id`, `registration_index`, `added_slot`, `id`)")
+	require.Contains(t, mysqlSQL,
+		"ON `pool_retirement`(`pool_id`, `added_slot`)")
 	require.NotContains(t, mysqlSQL, "CREATE INDEX IF NOT EXISTS")
 }
 

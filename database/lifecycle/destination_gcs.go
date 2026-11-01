@@ -190,31 +190,32 @@ func (d *gcsDestination) UploadDir(
 	ctx context.Context,
 	localDir string,
 ) (retErr error) {
-	_, err := d.uploadAuthenticatedSnapshot(ctx, localDir)
-	return err
+	result, err := d.uploadAuthenticatedSnapshot(ctx, localDir)
+	if err != nil {
+		return err
+	}
+	return result.close()
 }
 
 func (d *gcsDestination) uploadAuthenticatedSnapshot(
 	ctx context.Context,
 	localDir string,
 	opts ...ManifestOption,
-) (_ Manifest, retErr error) {
-	files, manifest, err := openSnapshotUploadFiles(
+) (result snapshotUploadResult, retErr error) {
+	files, manifest, root, err := openSnapshotUploadFiles(
 		ctx, localDir, d.maxManifestBytes, opts...,
 	)
 	if err != nil {
-		return Manifest{}, err
+		return snapshotUploadResult{}, err
 	}
-	defer func() {
-		retErr = errors.Join(retErr, closeSnapshotUploadFiles(files))
-	}()
+	defer finishSnapshotUpload(files, root, &result, &retErr)
 	for _, file := range files {
 		key := d.objectKey(file.name)
 		w := d.bucket.Object(key).NewWriter(ctx)
 		_, copyErr := io.Copy(w, file.file)
 		closeWErr := w.Close()
 		if copyErr != nil {
-			return Manifest{}, fmt.Errorf(
+			return snapshotUploadResult{}, fmt.Errorf(
 				"upload snapshot file %q to gcs object %q: %w",
 				file.name,
 				key,
@@ -222,7 +223,7 @@ func (d *gcsDestination) uploadAuthenticatedSnapshot(
 			)
 		}
 		if closeWErr != nil {
-			return Manifest{}, fmt.Errorf(
+			return snapshotUploadResult{}, fmt.Errorf(
 				"close gcs object %q after upload: %w",
 				key,
 				closeWErr,
@@ -232,9 +233,14 @@ func (d *gcsDestination) uploadAuthenticatedSnapshot(
 	key := d.objectKey(cloudMirrorMarkerName)
 	if err := d.bucket.Object(key).Delete(ctx); err != nil &&
 		!errors.Is(err, storage.ErrObjectNotExist) {
-		return Manifest{}, fmt.Errorf("remove legacy cloud mirror marker object %q: %w", key, err)
+		return snapshotUploadResult{}, fmt.Errorf(
+			"remove legacy cloud mirror marker object %q: %w", key, err,
+		)
 	}
-	return manifest, nil
+	return snapshotUploadResult{
+		manifest: manifest,
+		root:     root,
+	}, nil
 }
 
 // DownloadFiles downloads exactly the named objects into localDir, never

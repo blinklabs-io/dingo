@@ -559,7 +559,7 @@ func TestCurrentBoundarySPOStakeRows_FallsBackToHistoricalReconstruction(
 
 	txn := db.Transaction(context.Background(), true)
 	rows, err := mgr.CurrentBoundarySPOStakeRows(
-		context.Background(), txn, evt,
+		context.Background(), txn, evt, eras.ShelleyEraDesc.Id,
 	)
 	require.NoError(t, err)
 	require.NoError(t, txn.Commit())
@@ -648,7 +648,7 @@ func TestCurrentBoundarySPOStakeRows_PeeksWithoutConsumingComputedStash(
 	// persist -- must see the mutated stash via peek, not take it, and must
 	// not recompute from the (unmutated) live/historical state.
 	rows, err := mgr.CurrentBoundarySPOStakeRows(
-		context.Background(), txn, evt,
+		context.Background(), txn, evt, eras.ShelleyEraDesc.Id,
 	)
 	require.NoError(t, err)
 	require.Len(t, rows, 1)
