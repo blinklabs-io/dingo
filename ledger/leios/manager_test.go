@@ -963,45 +963,55 @@ func TestVoteManagerCIP164LocalVoteTiming(t *testing.T) {
 	})
 
 	// Equivocation is one block producer issuing two headers for one slot,
-	// so the second header's issuer decides whether the slot is equivocal.
+	// so the replaced header's issuer decides whether the slot is
+	// equivocal. A chain holds one header per slot, so the replaced header
+	// is rolled back before the announcing one is admitted.
 	for _, tc := range []struct {
-		name         string
-		secondIssuer lcommon.PoolKeyHash
-		wantVote     bool
+		name           string
+		replacedIssuer lcommon.PoolKeyHash
+		wantVote       bool
 	}{
 		{
-			name:         "rejects an equivocating RB slot",
-			secondIssuer: lcommon.PoolKeyHash{0x01},
+			name:           "rejects an equivocating RB slot",
+			replacedIssuer: lcommon.PoolKeyHash{0x01},
 		},
 		{
-			name:         "votes when another issuer shares the RB slot",
-			secondIssuer: lcommon.PoolKeyHash{0x02},
-			wantVote:     true,
+			name:           "votes when another issuer shares the RB slot",
+			replacedIssuer: lcommon.PoolKeyHash{0x02},
+			wantVote:       true,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fixture, _, now := newCIP164TimingFixture(t, base, 603)
 			firstIssuer := lcommon.PoolKeyHash{0x01}
 			firstRb := lcommon.NewBlake2b256([]byte("first-rb"))
-			secondRb := lcommon.NewBlake2b256([]byte("second-rb"))
+			replacedRb := lcommon.NewBlake2b256([]byte("replaced-rb"))
 			firstEb := lcommon.NewBlake2b256([]byte("first-eb"))
 			*now = base.Add(2 * time.Second)
+			fixture.mgr.handleChainHeaderObserved(
+				chain.ChainHeaderObservedEvent{
+					Slot:   600,
+					RbHash: replacedRb,
+					Issuer: tc.replacedIssuer,
+					Seq:    1,
+				},
+			)
+			fixture.mgr.handleChainHeaderInvalidation(
+				chain.ChainHeaderInvalidationEvent{
+					Point:    ocommon.Point{Slot: 599},
+					RbHashes: []lcommon.Blake2b256{replacedRb},
+					Reason:   chain.HeaderInvalidationRollback,
+					Seq:      2,
+				},
+			)
 			fixture.mgr.handleChainHeaderAnnouncement(
 				chain.ChainHeaderAnnouncementEvent{
 					Slot:      600,
 					RbHash:    firstRb,
 					EbHash:    firstEb,
 					Issuer:    firstIssuer,
-					Seq:       1,
+					Seq:       3,
 					ArrivedAt: base,
-				},
-			)
-			fixture.mgr.handleChainHeaderObserved(
-				chain.ChainHeaderObservedEvent{
-					Slot:   600,
-					RbHash: secondRb,
-					Issuer: tc.secondIssuer,
-					Seq:    2,
 				},
 			)
 			fixture.mgr.HandleValidatedEndorserBlock(600, firstRb, firstEb)
