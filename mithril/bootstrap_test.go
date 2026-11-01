@@ -333,16 +333,22 @@ func TestBootstrapResultCleanup(t *testing.T) {
 
 	ancillaryDir := filepath.Join(tmpDir, "ancillary")
 	require.NoError(t, os.MkdirAll(ancillaryDir, 0o750))
+	extractRoot, err := os.OpenRoot(extractDir)
+	require.NoError(t, err)
+	ancillaryRoot, err := os.OpenRoot(ancillaryDir)
+	require.NoError(t, err)
 
 	result := &BootstrapResult{
-		ExtractDir:   extractDir,
-		AncillaryDir: ancillaryDir,
+		ExtractDir:    extractDir,
+		ExtractRoot:   extractRoot,
+		AncillaryDir:  ancillaryDir,
+		AncillaryRoot: ancillaryRoot,
 	}
 
 	result.Cleanup(nil)
 
 	// Individual paths should be removed
-	_, err := os.Stat(extractDir)
+	_, err = os.Stat(extractDir)
 	require.True(t, os.IsNotExist(err))
 	_, err = os.Stat(ancillaryDir)
 	require.True(t, os.IsNotExist(err))
@@ -367,14 +373,282 @@ func TestBootstrapResultCleanupRemovesTempDir(t *testing.T) {
 			0o640,
 		),
 	)
+	tempRoot, err := os.OpenRoot(autoTempDir)
+	require.NoError(t, err)
 
 	result := &BootstrapResult{
-		TempDir: autoTempDir,
+		TempDir:  autoTempDir,
+		TempRoot: tempRoot,
 	}
 	result.Cleanup(nil)
 
-	_, err := os.Stat(autoTempDir)
+	_, err = os.Stat(autoTempDir)
 	require.True(t, os.IsNotExist(err))
+}
+
+func TestBootstrapResultCleanupKeepsSubstitutedDirectory(t *testing.T) {
+	t.Parallel()
+
+	parent := t.TempDir()
+	tempDir := filepath.Join(parent, "auto-temp")
+	require.NoError(t, os.Mkdir(tempDir, 0o700))
+	tempRoot, err := os.OpenRoot(tempDir)
+	require.NoError(t, err)
+	extractDir := filepath.Join(tempDir, "extract")
+	require.NoError(t, os.Mkdir(extractDir, 0o750))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(extractDir, "ours"), []byte("ours"), 0o600,
+	))
+	extractRoot, err := os.OpenRoot(extractDir)
+	require.NoError(t, err)
+
+	movedDir := filepath.Join(tempDir, "moved")
+	require.NoError(t, os.Rename(extractDir, movedDir))
+	require.NoError(t, os.Mkdir(extractDir, 0o750))
+	replacement := filepath.Join(extractDir, "replacement")
+	require.NoError(t, os.WriteFile(replacement, []byte("keep"), 0o600))
+
+	result := &BootstrapResult{
+		ExtractDir:  extractDir,
+		ExtractRoot: extractRoot,
+		TempDir:     tempDir,
+		TempRoot:    tempRoot,
+	}
+	result.Cleanup(slog.New(slog.DiscardHandler))
+
+	data, err := os.ReadFile(replacement)
+	require.NoError(t, err)
+	require.Equal(t, []byte("keep"), data)
+	_, err = os.Stat(filepath.Join(movedDir, "ours"))
+	require.True(t, os.IsNotExist(err))
+}
+
+func TestBootstrapResultCleanupKeepsSubstitutedArchive(t *testing.T) {
+	t.Parallel()
+	testBootstrapResultArchiveProtection(t)
+}
+
+func TestBootstrapResultCleanupKeepsSubstitutedTempDirectory(t *testing.T) {
+	t.Parallel()
+
+	parent := t.TempDir()
+	tempDir := filepath.Join(parent, "auto-temp")
+	require.NoError(t, os.Mkdir(tempDir, 0o700))
+	tempRoot, err := os.OpenRoot(tempDir)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(
+		filepath.Join(tempDir, "ours"), []byte("ours"), 0o600,
+	))
+
+	movedDir := filepath.Join(parent, "moved")
+	require.NoError(t, os.Rename(tempDir, movedDir))
+	require.NoError(t, os.Mkdir(tempDir, 0o700))
+	replacement := filepath.Join(tempDir, "replacement")
+	require.NoError(t, os.WriteFile(replacement, []byte("keep"), 0o600))
+
+	result := &BootstrapResult{TempDir: tempDir, TempRoot: tempRoot}
+	result.Cleanup(slog.New(slog.DiscardHandler))
+
+	data, err := os.ReadFile(replacement)
+	require.NoError(t, err)
+	require.Equal(t, []byte("keep"), data)
+	_, err = os.Stat(filepath.Join(movedDir, "ours"))
+	require.True(t, os.IsNotExist(err))
+}
+
+func TestBootstrapTempFailureCleanupKeepsSubstitutedDirectory(t *testing.T) {
+	t.Parallel()
+
+	parent := t.TempDir()
+	tempDir := filepath.Join(parent, "auto-temp")
+	require.NoError(t, os.Mkdir(tempDir, 0o700))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(tempDir, "partial"), []byte("partial"), 0o600,
+	))
+	tempRoot, err := os.OpenRoot(tempDir)
+	require.NoError(t, err)
+
+	movedDir := filepath.Join(parent, "moved")
+	require.NoError(t, os.Rename(tempDir, movedDir))
+	require.NoError(t, os.Mkdir(tempDir, 0o700))
+	replacement := filepath.Join(tempDir, "replacement")
+	require.NoError(t, os.WriteFile(replacement, []byte("keep"), 0o600))
+
+	err = cleanupBootstrapDir(&tempRoot, tempDir, nil)
+	require.ErrorIs(t, err, errBootstrapCleanupIdentity)
+	require.Nil(t, tempRoot)
+	data, err := os.ReadFile(replacement)
+	require.NoError(t, err)
+	require.Equal(t, []byte("keep"), data)
+	_, err = os.Stat(filepath.Join(movedDir, "partial"))
+	require.True(t, os.IsNotExist(err))
+}
+
+func TestCleanupBootstrapDirClearsClosedRoot(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	root, err := os.OpenRoot(dir)
+	require.NoError(t, err)
+	require.NoError(t, root.Close())
+
+	err = cleanupBootstrapDir(&root, dir, nil)
+	require.Error(t, err)
+	require.Nil(t, root)
+}
+
+func TestCleanupRetainedDirectoriesRefuseFinalFileSubstitution(t *testing.T) {
+	t.Parallel()
+
+	for _, cleanupKind := range []string{"owned", "vetted"} {
+		t.Run(cleanupKind, func(t *testing.T) {
+			t.Parallel()
+			parentPath := t.TempDir()
+			name := "cleanup"
+			path := filepath.Join(parentPath, name)
+			require.NoError(t, os.Mkdir(path, 0o700))
+			root, err := os.OpenRoot(path)
+			require.NoError(t, err)
+			info, err := root.Stat(".")
+			require.NoError(t, err)
+
+			remove := func(parent *os.Root, name, path string) error {
+				require.NoError(t, os.Remove(path))
+				require.NoError(t, os.WriteFile(path, []byte("keep"), 0o600))
+				return removeEmptyExtractDir(parent, name, path)
+			}
+
+			var cleanupErr error
+			if cleanupKind == "owned" {
+				parent, openErr := os.OpenRoot(parentPath)
+				require.NoError(t, openErr)
+				t.Cleanup(func() { _ = parent.Close() })
+				cleanupErr = cleanupRetainedDirKeepingWithRemover(
+					parent, &root, info, name, path, nil, nil, remove,
+				)
+			} else {
+				cleanupErr = cleanupBootstrapDirWithRemover(
+					&root, path, nil, remove,
+				)
+			}
+			require.Error(t, cleanupErr)
+			data, readErr := os.ReadFile(path)
+			require.NoError(t, readErr)
+			require.Equal(t, []byte("keep"), data)
+		})
+	}
+}
+
+func TestCleanupRetainedDirectoriesAllowFinalDisappearance(t *testing.T) {
+	t.Parallel()
+
+	for _, cleanupKind := range []string{"owned", "vetted"} {
+		t.Run(cleanupKind, func(t *testing.T) {
+			t.Parallel()
+			parentPath := t.TempDir()
+			name := "cleanup"
+			path := filepath.Join(parentPath, name)
+			require.NoError(t, os.Mkdir(path, 0o700))
+			root, err := os.OpenRoot(path)
+			require.NoError(t, err)
+			info, err := root.Stat(".")
+			require.NoError(t, err)
+			remove := func(parent *os.Root, name, path string) error {
+				require.NoError(t, os.Remove(path))
+				return removeEmptyExtractDir(parent, name, path)
+			}
+
+			if cleanupKind == "owned" {
+				parent, openErr := os.OpenRoot(parentPath)
+				require.NoError(t, openErr)
+				t.Cleanup(func() { _ = parent.Close() })
+				require.NoError(t, cleanupRetainedDirKeepingWithRemover(
+					parent, &root, info, name, path, nil, nil, remove,
+				))
+			} else {
+				require.NoError(t, cleanupBootstrapDirWithRemover(
+					&root, path, nil, remove,
+				))
+			}
+		})
+	}
+}
+
+func TestRemoveRetainedDirectoryShellAllowsPriorDisappearance(t *testing.T) {
+	t.Parallel()
+	parentPath := t.TempDir()
+	name := "cleanup"
+	path := filepath.Join(parentPath, name)
+	require.NoError(t, os.Mkdir(path, 0o700))
+	info, err := os.Lstat(path)
+	require.NoError(t, err)
+	parent, err := os.OpenRoot(parentPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = parent.Close() })
+	require.NoError(t, os.Remove(path))
+	require.NoError(t, removeRetainedDirShell(
+		parent, info, name, path, removeEmptyExtractDir,
+	))
+}
+
+func TestCleanupCreatedBootstrapDirectoryRefusesFinalFileSubstitution(t *testing.T) {
+	t.Parallel()
+	parentPath := t.TempDir()
+	name := "created"
+	path := filepath.Join(parentPath, name)
+	require.NoError(t, os.Mkdir(path, 0o700))
+	created, err := os.Lstat(path)
+	require.NoError(t, err)
+	parent, err := os.OpenRoot(parentPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = parent.Close() })
+
+	err = cleanupCreatedBootstrapDirWithRemover(
+		parent,
+		name,
+		path,
+		created,
+		func(parent *os.Root, name, path string) error {
+			require.NoError(t, os.Remove(path))
+			require.NoError(t, os.WriteFile(path, []byte("keep"), 0o600))
+			return removeEmptyExtractDir(parent, name, path)
+		},
+	)
+	require.Error(t, err)
+	data, readErr := os.ReadFile(path)
+	require.NoError(t, readErr)
+	require.Equal(t, []byte("keep"), data)
+}
+
+func TestBootstrapDirectoryCloseReleasesHandlesWithoutRemoving(t *testing.T) {
+	t.Parallel()
+	parent := t.TempDir()
+	path, owned, err := createBootstrapDir(parent, "persistent-*")
+	require.NoError(t, err)
+
+	require.NoError(t, owned.close())
+	require.Nil(t, owned.root)
+	require.Nil(t, owned.parent)
+	require.Nil(t, owned.childLock)
+	require.Nil(t, owned.parentLock)
+	require.DirExists(t, path)
+
+	moved := path + "-moved"
+	require.NoError(t, os.Rename(path, moved), "all lifetime locks must be released")
+}
+
+func TestRetainOrCreateBootstrapDirCreatesMissingAncestors(t *testing.T) {
+	t.Parallel()
+	downloadDir := filepath.Join(t.TempDir(), "a", "b", "download")
+
+	path, owned, err := retainOrCreateBootstrapDir(downloadDir)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, owned.close()) })
+	require.DirExists(t, downloadDir)
+	info, err := os.Stat(downloadDir)
+	require.NoError(t, err)
+	require.True(t, os.SameFile(info, owned.info))
+	require.Equal(t, filepath.Base(downloadDir), filepath.Base(path))
 }
 
 func TestVerifyCertificateChainAllowsDeepChains(t *testing.T) {

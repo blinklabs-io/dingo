@@ -317,11 +317,21 @@ type BootstrapResult struct {
 	// AncillaryArchivePath is the path to the downloaded ancillary
 	// archive file. Empty if no ancillary data was downloaded.
 	AncillaryArchivePath string
+	// ancillaryArchiveRoot retains the parent directory used to create the
+	// ancillary archive, and ancillaryArchiveInfo records the file created
+	// there. Cleanup uses both rather than resolving the saved path again.
+	ancillaryArchiveRoot  *os.Root
+	ancillaryArchiveInfo  os.FileInfo
+	ancillaryArchiveGuard *bootstrapFileGuard
 	// TempDir is the auto-created temporary directory that holds
 	// all downloaded and extracted files. Set only when
 	// BootstrapConfig.DownloadDir was empty. Cleanup() removes it
 	// after removing its children.
 	TempDir string
+	// TempRoot is the retained handle for TempDir. It is set only when TempDir
+	// is set and lets Cleanup remove that exact temporary tree.
+	TempRoot  *os.Root
+	tempOwned *bootstrapDir
 }
 
 // Bootstrap validates cfg, resolves the aggregator URL, and delegates to the
@@ -403,37 +413,76 @@ func (r *BootstrapResult) Cleanup(logger *slog.Logger) {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	// Released before the directories go, so Windows — which refuses to remove
-	// a directory with an open handle beneath it — can remove the tree.
-	r.CloseHandles()
-	paths := []string{
-		r.ExtractDir,
-		r.AncillaryArchivePath,
-		r.AncillaryDir,
+	if r == nil {
+		return
 	}
-	for _, p := range paths {
-		if p == "" {
+	// ImmutableRoot is beneath ExtractRoot. Close it before removing entries
+	// through ExtractRoot so Windows does not retain a child handle.
+	if r.ImmutableRoot != nil {
+		_ = r.ImmutableRoot.Close()
+		r.ImmutableRoot = nil
+	}
+	dirs := []struct {
+		path string
+		root **os.Root
+	}{
+		{path: r.ExtractDir, root: &r.ExtractRoot},
+		{path: r.AncillaryDir, root: &r.AncillaryRoot},
+	}
+	keepInTemp := make(map[string]struct{}, len(dirs)+1)
+	for _, dir := range dirs {
+		if dir.path == "" {
 			continue
 		}
-		if err := os.RemoveAll(p); err != nil {
+		keepInTemp[filepath.Base(filepath.Clean(dir.path))] = struct{}{}
+		if err := cleanupBootstrapDir(dir.root, dir.path, nil); err != nil {
 			logger.Warn(
 				"failed to clean up Mithril temp file",
 				"component", "mithril",
-				"path", p,
+				"path", dir.path,
 				"error", err,
 			)
 		} else {
 			logger.Info(
 				"cleaned up Mithril temp file",
 				"component", "mithril",
-				"path", p,
+				"path", dir.path,
+			)
+		}
+	}
+	if r.AncillaryArchivePath != "" {
+		keepInTemp[filepath.Base(filepath.Clean(r.AncillaryArchivePath))] = struct{}{}
+		if err := cleanupBootstrapFile(
+			&r.ancillaryArchiveRoot,
+			r.AncillaryArchivePath,
+			r.ancillaryArchiveInfo,
+			&r.ancillaryArchiveGuard,
+		); err != nil {
+			logger.Warn(
+				"failed to clean up Mithril temp file",
+				"component", "mithril",
+				"path", r.AncillaryArchivePath,
+				"error", err,
 			)
 		}
 	}
 	// Remove auto-created temp directory and any remaining contents
 	// (e.g. a partially-extracted ancillary archive).
 	if r.TempDir != "" {
-		if err := os.RemoveAll(r.TempDir); err != nil {
+		var err error
+		if r.tempOwned != nil {
+			r.tempOwned.root = r.TempRoot
+			err = r.tempOwned.cleanupKeeping(keepInTemp)
+			r.TempRoot = r.tempOwned.root
+			r.tempOwned = nil
+		} else {
+			err = cleanupBootstrapDir(
+				&r.TempRoot,
+				r.TempDir,
+				keepInTemp,
+			)
+		}
+		if err != nil {
 			logger.Warn(
 				"failed to remove Mithril temp directory",
 				"component", "mithril",
@@ -448,6 +497,7 @@ func (r *BootstrapResult) Cleanup(logger *slog.Logger) {
 			)
 		}
 	}
+	r.CloseHandles()
 }
 
 // CloseHandles releases the directory handles the result carries. It is
@@ -471,6 +521,27 @@ func (r *BootstrapResult) CloseHandles() {
 			_ = (*root).Close()
 			*root = nil
 		}
+	}
+	if r.ancillaryArchiveGuard != nil {
+		_ = r.ancillaryArchiveGuard.Close()
+		r.ancillaryArchiveGuard = nil
+	}
+	if r.ancillaryArchiveRoot != nil {
+		_ = r.ancillaryArchiveRoot.Close()
+		r.ancillaryArchiveRoot = nil
+	}
+	if r.tempOwned != nil {
+		r.tempOwned.root = r.TempRoot
+		if r.tempOwned.root != nil {
+			_ = r.tempOwned.root.Close()
+			r.tempOwned.root = nil
+		}
+		_ = r.tempOwned.closeParentHandles()
+		r.tempOwned = nil
+		r.TempRoot = nil
+	} else if r.TempRoot != nil {
+		_ = r.TempRoot.Close()
+		r.TempRoot = nil
 	}
 }
 
