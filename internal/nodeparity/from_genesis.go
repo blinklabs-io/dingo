@@ -79,6 +79,43 @@ var txInfoIndexWaits = []time.Duration{
 	40 * time.Second,
 }
 
+// ntcKeepaliveInterval is how often keepNtCConnAlive sends on the chainsync
+// connection. Dingo closes a local connection it has read nothing from for 2
+// minutes, and a chainsync callback sends nothing while it waits on a long
+// query over another connection: a mainnet GetUTxOWhole of about 2.1 million
+// entries took longer than that, so every session ended inside the baseline
+// capture and the capture never completed.
+const ntcKeepaliveInterval = 30 * time.Second
+
+// keepNtCConnAlive runs a cheap LocalStateQuery round trip (acquire the
+// volatile tip, read the current era, release) on lsq every interval until ctx
+// ends, so the connection lsq shares with chainsync is never idle long enough
+// for Dingo to close it. Failures are ignored: a dead connection already ends
+// the session through its error channel.
+func keepNtCConnAlive(
+	ctx context.Context,
+	lsq *localstatequery.LocalStateQuery,
+	interval time.Duration,
+) {
+	if lsq == nil || lsq.Client == nil {
+		return
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		if err := lsq.Client.AcquireVolatileTip(); err != nil {
+			continue
+		}
+		_, _ = lsq.Client.GetCurrentEra()
+		_ = lsq.Client.Release()
+	}
+}
+
 // fetchTxInfoChunks fetches every chunk with at most txInfoConcurrency
 // requests in flight, then, after each wait in waits, fetches again each
 // chunk that failed with koiosparity.ErrTxInfoMissing. A chunk is fetched
@@ -1635,6 +1672,7 @@ func RunFromGenesis(
 			continue
 		}
 		csDone := cs.Client.DoneChan()
+		go keepNtCConnAlive(sessionCtx, csConn.LocalStateQuery(), ntcKeepaliveInterval)
 
 		var sessionErr error
 		select {
