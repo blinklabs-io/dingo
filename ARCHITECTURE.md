@@ -6605,11 +6605,12 @@ Ordinary Praos sessions continue to use primary-chain intersection points.
   relay retains that ledger control identity, including when an inbound duplex
   connection reuses the peer entry. A peer from the operator's own topology
   (local root, public root or bootstrap peer) that no ledger or snapshot
-  describes, a peer learned through peer sharing, and a ledger or snapshot
+  describes, and a ledger or snapshot
   relay whose endpoint is registered under conflicting control keys, is grouped by the address group of its connection
   (/24, /64 or hostname), so a node syncing from genesis, which has few usable
   ledger or snapshot identities, can still corroborate. Topology valency groups
-  are never an identity. Unmatched inbound connections stay unidentified. Those connections fail closed: as candidates they have no
+  are never an identity. All peers learned through peer sharing form a single group, so they can corroborate an
+  identified peer but not each other. Unmatched inbound connections stay unidentified. Those connections fail closed: as candidates they have no
   corroborators, and as witnesses they do not count. Without a hook the
   selector groups by remote host. Pool control is a lower bound on operator independence; multiple pool
   keys can still share an operator. Raising `corroborationPeers` raises the
@@ -8433,7 +8434,7 @@ corroboration gate (see Chain Selection → Ouroboros Genesis trust model).
 Configured operator groups override the snapshot's pool grouping for witness
 identity. Without them, trusted snapshot pool groups and later ledger control
 keys supply the available identities, and topology peers that neither
-describes, peer-sharing peers, and relays with ambiguous control keys, are grouped by address. The operator remains responsible for choosing independently
+describes, and relays with ambiguous control keys, are grouped by address; peer-sharing peers form one group. The operator remains responsible for choosing independently
 controlled witnesses and a satisfiable `genesisBootstrap.corroborationPeers`
 threshold. The candidate's own operator never counts as its witness.
 

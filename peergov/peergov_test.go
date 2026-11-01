@@ -1066,9 +1066,9 @@ func TestPeerGovernor_CorroborationIdentityUsesPoolControlKey(t *testing.T) {
 	pg.mu.Unlock()
 	assert.Equal(
 		t,
-		"ipv4:45.0.0.0/24",
+		peerSharingCorroborationIdentity,
 		pg.CorroborationIdentityByConnId(gossipConn),
-		"a peer-sharing address has no pool identity and is grouped by address",
+		"peer-sharing peers share one group, not one per address",
 	)
 }
 
@@ -8994,9 +8994,9 @@ func TestPeerGovernor_CorroborationFallbackExcludesUntrustedSources(
 	)
 	assert.Equal(
 		t,
-		"ipv4:45.0.0.0/24",
+		peerSharingCorroborationIdentity,
 		pg.CorroborationIdentityByConnId(connFor("45.0.0.1:3001")),
-		"a peer-sharing address is grouped by the address it connected on",
+		"peer-sharing peers form one group",
 	)
 	for _, address := range []string{
 		"46.0.0.1:3001", "47.0.0.1:3001",
