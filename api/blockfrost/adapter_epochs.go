@@ -510,7 +510,32 @@ func checkBlockHistoryRetained(
 	startSlot uint64,
 	endSlot uint64,
 ) error {
-	retained, err := database.BlockHistoryRetained(
+	return checkRetained(
+		database.BlockHistoryRetained, db, txn, startSlot, endSlot,
+	)
+}
+
+// checkPoolBlockHistoryRetained is checkBlockHistoryRetained for one pool's
+// blocks, which never include a Byron block.
+func checkPoolBlockHistoryRetained(
+	db *database.Database,
+	txn *database.Txn,
+	startSlot uint64,
+	endSlot uint64,
+) error {
+	return checkRetained(
+		database.PoolBlockHistoryRetained, db, txn, startSlot, endSlot,
+	)
+}
+
+func checkRetained(
+	retainedFn func(metadata.MetadataStore, types.Txn, uint64, uint64) (bool, error),
+	db *database.Database,
+	txn *database.Txn,
+	startSlot uint64,
+	endSlot uint64,
+) error {
+	retained, err := retainedFn(
 		db.Metadata(), txn.Metadata(), startSlot, endSlot,
 	)
 	if err != nil {
