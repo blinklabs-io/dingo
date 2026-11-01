@@ -1584,7 +1584,8 @@ func (q *Queries) GetAssetsByUtxoID(ctx context.Context, utxoID sql.NullInt64) (
 }
 
 const getBackfillCheckpoint = `-- name: GetBackfillCheckpoint :one
-SELECT id, phase, last_slot, total_slots, started_at, updated_at, completed
+SELECT id, phase, last_slot, last_index_id, last_block_hash,
+    total_slots, started_at, updated_at, completed
 FROM backfill_checkpoint
 WHERE phase = ?
 `
@@ -1596,6 +1597,8 @@ func (q *Queries) GetBackfillCheckpoint(ctx context.Context, phase string) (Back
 		&i.ID,
 		&i.Phase,
 		&i.LastSlot,
+		&i.LastIndexID,
+		&i.LastBlockHash,
 		&i.TotalSlots,
 		&i.StartedAt,
 		&i.UpdatedAt,
@@ -4829,10 +4832,13 @@ func (q *Queries) SaveRewardStakeInput(ctx context.Context, arg SaveRewardStakeI
 
 const setBackfillCheckpoint = `-- name: SetBackfillCheckpoint :one
 INSERT INTO backfill_checkpoint (
-    phase, last_slot, total_slots, started_at, updated_at, completed
-) VALUES (?, ?, ?, ?, ?, ?)
+    phase, last_slot, last_index_id, last_block_hash,
+    total_slots, started_at, updated_at, completed
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (phase) DO UPDATE SET
     last_slot = excluded.last_slot,
+    last_index_id = excluded.last_index_id,
+    last_block_hash = excluded.last_block_hash,
     total_slots = excluded.total_slots,
     updated_at = excluded.updated_at,
     completed = excluded.completed
@@ -4840,18 +4846,22 @@ RETURNING id
 `
 
 type SetBackfillCheckpointParams struct {
-	Phase      string
-	LastSlot   sql.NullInt64
-	TotalSlots sql.NullInt64
-	StartedAt  sql.NullTime
-	UpdatedAt  sql.NullTime
-	Completed  sql.NullBool
+	Phase         string
+	LastSlot      sql.NullInt64
+	LastIndexID   sql.NullInt64
+	LastBlockHash []byte
+	TotalSlots    sql.NullInt64
+	StartedAt     sql.NullTime
+	UpdatedAt     sql.NullTime
+	Completed     sql.NullBool
 }
 
 func (q *Queries) SetBackfillCheckpoint(ctx context.Context, arg SetBackfillCheckpointParams) (int64, error) {
 	row := q.db.QueryRowContext(ctx, setBackfillCheckpoint,
 		arg.Phase,
 		arg.LastSlot,
+		arg.LastIndexID,
+		arg.LastBlockHash,
 		arg.TotalSlots,
 		arg.StartedAt,
 		arg.UpdatedAt,

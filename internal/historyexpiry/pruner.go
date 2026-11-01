@@ -138,7 +138,8 @@ func (p *Pruner) prune(ctx context.Context) {
 			p.saveCursor(cursor)
 		}
 	}()
-	iter := p.db.BlocksInRange(
+	iter := p.db.BlocksInRangeContext(
+		ctx,
 		start,
 		currentSlot-stabilityWindow-1,
 	)
@@ -151,6 +152,9 @@ func (p *Pruner) prune(ctx context.Context) {
 		default:
 			next, err := iter.NextRaw()
 			if err != nil {
+				if ctx.Err() != nil {
+					return
+				}
 				if errors.Is(err, types.ErrHistoryExpired) {
 					cursor, _ = iter.Progress()
 					continue

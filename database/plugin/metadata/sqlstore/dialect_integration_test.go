@@ -364,12 +364,15 @@ func testSQLStoreIntegration(
 	settings, err = store.GetNodeSettings(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, "legacy-fixed", settings.Network)
+	lastIndexID := uint64(3)
 	checkpoint := &models.BackfillCheckpoint{
-		Phase:      "integration",
-		LastSlot:   7,
-		TotalSlots: 11,
-		StartedAt:  time.UnixMilli(100),
-		UpdatedAt:  time.UnixMilli(200),
+		Phase:         "integration",
+		LastSlot:      7,
+		LastIndexID:   &lastIndexID,
+		LastBlockHash: []byte{1, 2, 3},
+		TotalSlots:    11,
+		StartedAt:     time.UnixMilli(100),
+		UpdatedAt:     time.UnixMilli(200),
 	}
 	require.NoError(t, store.SetBackfillCheckpoint(checkpoint, nil))
 	require.NotZero(t, checkpoint.ID)
@@ -377,6 +380,8 @@ func testSQLStoreIntegration(
 	require.NoError(t, err)
 	require.Equal(t, checkpoint.ID, loadedCheckpoint.ID)
 	require.Equal(t, checkpoint.LastSlot, loadedCheckpoint.LastSlot)
+	require.Equal(t, checkpoint.LastIndexID, loadedCheckpoint.LastIndexID)
+	require.Equal(t, checkpoint.LastBlockHash, loadedCheckpoint.LastBlockHash)
 
 	account := &models.Account{
 		StakingKey:    []byte{1, 2, 3},

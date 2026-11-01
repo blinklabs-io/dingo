@@ -31,7 +31,7 @@ func TestSQLiteRegistry(t *testing.T) {
 	registry, err := SQLiteRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "sqlite"))
-	require.Len(t, registry, 51)
+	require.Len(t, registry, 52)
 
 	require.Equal(t, accountDRepClearSchemaRelease, registry[34].Name)
 	require.Contains(t, registry[34].SQL["sqlite"].Expand[0],
@@ -318,6 +318,38 @@ func TestSQLiteRegistry(t *testing.T) {
 		"ADD COLUMN `cert_index`")
 }
 
+func TestBackfillCheckpointIdentityMigrationTranslation(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		dialect     string
+		integerType string
+		blobType    string
+	}{
+		{dialect: "sqlite", integerType: "INTEGER", blobType: "BLOB"},
+		{dialect: "postgres", integerType: "BIGINT", blobType: "BYTEA"},
+		{dialect: "mysql", integerType: "BIGINT", blobType: "BLOB"},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.dialect, func(t *testing.T) {
+			t.Parallel()
+			registry, err := registryForDialect(testCase.dialect)
+			require.NoError(t, err)
+			require.Len(t, registry, 52)
+			migration := registry[51]
+			require.Equal(t, backfillCheckpointIdentitySchemaRelease, migration.Name)
+			require.Contains(t, migration.SQL[testCase.dialect].Expand,
+				"ALTER TABLE backfill_checkpoint ADD COLUMN last_index_id "+
+					testCase.integerType)
+			require.Contains(t, migration.SQL[testCase.dialect].Expand,
+				"ALTER TABLE backfill_checkpoint ADD COLUMN last_block_hash "+
+					testCase.blobType)
+			require.Contains(t, migration.SQL[testCase.dialect].Expand[2],
+				"completed IS NOT TRUE")
+		})
+	}
+}
+
 func TestDrepDormancySeedUsesPortableIdempotentInsert(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -333,7 +365,7 @@ func TestDrepDormancySeedUsesPortableIdempotentInsert(t *testing.T) {
 			registry, err := tc.registry()
 			require.NoError(t, err)
 			require.NoError(t, validateRegistry(registry, tc.dialect))
-			require.Len(t, registry, 51)
+			require.Len(t, registry, 52)
 			migration := registry[39]
 			require.Equal(t, drepDormancyStateSchemaRelease, migration.Name)
 			seed := strings.Join(migration.SQL[tc.dialect].Expand, "\n")
@@ -562,7 +594,7 @@ func TestMySQLRegistryPrefixesPoolOpCertSequenceIndex(t *testing.T) {
 	registry, err := MySQLRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "mysql"))
-	require.Len(t, registry, 51)
+	require.Len(t, registry, 52)
 
 	require.Contains(
 		t,

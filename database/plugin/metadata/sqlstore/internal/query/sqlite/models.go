@@ -61,13 +61,15 @@ type AssetMintBurn struct {
 }
 
 type BackfillCheckpoint struct {
-	ID         int64
-	Phase      string
-	LastSlot   sql.NullInt64
-	TotalSlots sql.NullInt64
-	StartedAt  sql.NullTime
-	UpdatedAt  sql.NullTime
-	Completed  sql.NullBool
+	ID            int64
+	Phase         string
+	LastSlot      sql.NullInt64
+	LastIndexID   sql.NullInt64
+	LastBlockHash []byte
+	TotalSlots    sql.NullInt64
+	StartedAt     sql.NullTime
+	UpdatedAt     sql.NullTime
+	Completed     sql.NullBool
 }
 
 type BlockNonce struct {

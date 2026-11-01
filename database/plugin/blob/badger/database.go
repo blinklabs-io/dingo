@@ -773,8 +773,31 @@ func (d *BlobStoreBadger) Get(
 	txn types.Txn,
 	key []byte,
 ) ([]byte, error) {
+	return d.GetContextLimited(context.Background(), txn, key, math.MaxInt64)
+}
+
+// GetContextLimited retrieves at most maxBytes from badger within a
+// transaction. Badger does not provide a cancellable value-copy operation, so
+// ctx is checked before and after the copy.
+//
+//nolint:contextcheck // optional store interface receives caller context
+func (d *BlobStoreBadger) GetContextLimited(
+	ctx context.Context,
+	txn types.Txn,
+	key []byte,
+	maxBytes int64,
+) ([]byte, error) {
 	badgerTxn, err := d.validateTxn(txn)
 	if err != nil {
+		return nil, err
+	}
+	if maxBytes < 0 {
+		return nil, fmt.Errorf("invalid maximum blob size %d", maxBytes)
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	item, err := badgerTxn.tx.Get(key)
@@ -784,7 +807,26 @@ func (d *BlobStoreBadger) Get(
 		}
 		return nil, err
 	}
-	return item.ValueCopy(nil)
+	if item.ValueSize() > maxBytes {
+		return nil, fmt.Errorf(
+			"blob object exceeds maximum size of %d bytes",
+			maxBytes,
+		)
+	}
+	value, err := item.ValueCopy(nil)
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(value)) > maxBytes {
+		return nil, fmt.Errorf(
+			"blob object exceeds maximum size of %d bytes",
+			maxBytes,
+		)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return value, nil
 }
 
 // Set stores a key-value pair in badger within a transaction
