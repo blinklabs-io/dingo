@@ -426,7 +426,7 @@ func TestSnapshotToCloudEmptyDestinationIsLocalOnly(t *testing.T) {
 	db := newTestDB(t)
 	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
 
-	dir := filepath.Join(t.TempDir(), "snap-local-only")
+	dir := snapshotTestDir(t, "snap-local-only")
 	m, err := lifecycle.SnapshotToCloud(
 		context.Background(),
 		testDestinationRegistry,
@@ -456,7 +456,7 @@ func TestSnapshotToCloudRequiresTrustKey(t *testing.T) {
 	db := newTestDB(t)
 	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
 
-	dir := filepath.Join(t.TempDir(), "snap-cloud")
+	dir := snapshotTestDir(t, "snap-cloud")
 	_, err := lifecycle.SnapshotToCloud(
 		context.Background(), testDestinationRegistry, db, dir,
 		lifecycle.TriggerManual, "test-version", "badger", "sqlite",
@@ -477,7 +477,7 @@ func TestSnapshotToCloudUploadsUnderPerSnapshotSubPath(t *testing.T) {
 	db := newTestDB(t)
 	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
 
-	dir := filepath.Join(t.TempDir(), "snap-cloud")
+	dir := snapshotTestDir(t, "snap-cloud")
 	_, err := lifecycle.SnapshotToCloud(
 		context.Background(),
 		testDestinationRegistry,
@@ -533,7 +533,7 @@ func TestSnapshotToCloudInvalidDestinationStillErrorsButKeepsLocal(
 	db := newTestDB(t)
 	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
 
-	dir := filepath.Join(t.TempDir(), "snap-bad-cloud")
+	dir := snapshotTestDir(t, "snap-bad-cloud")
 	_, err := lifecycle.SnapshotToCloud(
 		context.Background(),
 		testDestinationRegistry,
@@ -564,7 +564,7 @@ func TestRestoreAcceptsCloudURI(t *testing.T) {
 	db := newTestDB(t)
 	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
 
-	localDir := filepath.Join(t.TempDir(), "snap-src")
+	localDir := snapshotTestDir(t, "snap-src")
 	_, err := lifecycle.SnapshotToCloud(
 		context.Background(),
 		testDestinationRegistry,
@@ -612,7 +612,7 @@ func TestListCloudSnapshotsReturnsEveryUploadedSnapshot(t *testing.T) {
 			context.Background(),
 			testDestinationRegistry,
 			db,
-			filepath.Join(t.TempDir(), name),
+			snapshotTestDir(t, name),
 			lifecycle.TriggerManual,
 			"test-version",
 			"badger",

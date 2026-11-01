@@ -725,7 +725,7 @@ func TestMirrorMarkerWaitsForCatalogRepair(t *testing.T) {
 func TestSnapshotCloudRepairRepopulatesCloudRowsAfterTotalCatalogCorruption(
 	t *testing.T,
 ) {
-	base := t.TempDir()
+	base := snapshotTestParent(t)
 	cloudRoot := t.TempDir()
 	cloudBase := filepath.Join(cloudRoot, "snapshots")
 	cloudOnlyDir := filepath.Join(cloudBase, "cloud-only")
