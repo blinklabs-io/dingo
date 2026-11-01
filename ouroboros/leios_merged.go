@@ -969,11 +969,17 @@ func (o *Ouroboros) scheduleLeiosEndorserBlockValidation(
 			o.leiosEndorserBlocks[cacheKey] = &pending
 		}
 	}
+	// Read under leiosMu with the block already marked pending. A retry
+	// that counts after this read may skip the pending block, so the
+	// attempt reruns the retry when the counter has moved. A retry counted
+	// before it needs no rerun: the attempt starts after the request and
+	// validates against the ledger tip published before it was made.
+	retryGen := o.leiosValidationRetryGen.Load()
 	o.leiosValidationWG.Add(1)
 	o.leiosMu.Unlock()
 	o.leiosValidationMu.Unlock()
 
-	go o.validateLeiosEndorserBlock(key, pending)
+	go o.validateLeiosEndorserBlock(key, pending, retryGen)
 }
 
 // ValidateLeiosEndorserBlockForHeader waits through the configured diffusion
@@ -1242,8 +1248,12 @@ func (o *Ouroboros) selectedLeiosHeaderForDataLocked(
 func (o *Ouroboros) validateLeiosEndorserBlock(
 	key string,
 	data leiosEndorserBlockData,
+	retryGen uint64,
 ) {
 	defer o.leiosValidationWG.Done()
+	// Deferred calls run in reverse: the slot is freed, and the cache entry
+	// already updated, before the retry looks for work.
+	defer o.rerunLeiosValidationRetry(retryGen)
 	defer func() { <-o.leiosValidationSlots }()
 	header, err := gdijkstra.NewDijkstraBlockHeaderFromCbor(
 		data.announcementHeaderRaw,
@@ -1408,7 +1418,29 @@ func (o *Ouroboros) updateLeiosEndorserBlockValidation(
 	return &updated
 }
 
+// RetryLeiosEndorserBlockValidations schedules background validation of every
+// cached endorser block whose last attempt found its basis block not yet the
+// ledger tip. A block whose attempt is still running is retried when that
+// attempt finishes. It does not block.
+func (o *Ouroboros) RetryLeiosEndorserBlockValidations() {
+	o.retryLeiosEndorserBlockValidations()
+}
+
 func (o *Ouroboros) retryLeiosEndorserBlockValidations() {
+	o.leiosValidationRetryGen.Add(1)
+	o.scheduleRetryableLeiosEndorserBlockValidations()
+}
+
+// rerunLeiosValidationRetry runs, without counting a new request, a retry
+// that was requested after the finishing attempt was scheduled. Counting it
+// would make concurrent attempts re-trigger each other indefinitely.
+func (o *Ouroboros) rerunLeiosValidationRetry(scheduledGen uint64) {
+	if o.leiosValidationRetryGen.Load() != scheduledGen {
+		o.scheduleRetryableLeiosEndorserBlockValidations()
+	}
+}
+
+func (o *Ouroboros) scheduleRetryableLeiosEndorserBlockValidations() {
 	blocks := o.retryableLeiosEndorserBlocks()
 	for _, data := range blocks {
 		o.scheduleLeiosEndorserBlockValidation(data.point, data)

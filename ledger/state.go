@@ -537,6 +537,19 @@ func (ls *LedgerState) validateLeiosAnnouncementBeforeApply(
 	return ls.config.ValidateLeiosAnnouncement(ctx, header)
 }
 
+// notifyLeiosAnnouncementAtTip tells the node that the live announcing block
+// recorded by the chunk just committed is now the ledger tip. The next chunk
+// validates its endorser block only once another block arrives, which can be
+// longer than the vote window.
+func (ls *LedgerState) notifyLeiosAnnouncementAtTip(tipHash []byte) {
+	header := ls.leiosApplyAnnouncer
+	if header == nil || ls.config.LeiosAnnouncementAtTip == nil ||
+		!bytes.Equal(tipHash, LeiosEndorserBlockBasisHash(header)) {
+		return
+	}
+	ls.config.LeiosAnnouncementAtTip(header)
+}
+
 func (ls *LedgerState) waitForLeiosBeforeApply(
 	ctx context.Context,
 	blocks []ledger.Block,
@@ -985,6 +998,12 @@ type LedgerStateConfig struct {
 	// admission remains independent: an unavailable or invalid endorser block
 	// receives no vote but does not invalidate its ranking block.
 	ValidateLeiosAnnouncement func(context.Context, ledger.BlockHeader) error
+	// LeiosAnnouncementAtTip is called, without blocking, when an apply chunk
+	// commits with a live announcing ranking block as the ledger tip. That
+	// is the state its endorser block validates against, so a voter acts on
+	// it now instead of at the next block, which may be outside the vote
+	// window by then. Nil disables the notification.
+	LeiosAnnouncementAtTip func(ledger.BlockHeader)
 	// EndorserBlockWaitSlots is the number of slots that block processing
 	// waits at the chain tip for a Dijkstra ranking block's referenced
 	// endorser block to finish fetching before applying it. It is sourced from
@@ -10038,6 +10057,7 @@ func (ls *LedgerState) processBlocksFromSource(
 					ls.observeBlockAdoptions(chunkAdopted)
 				}
 				ls.maybeQueueStakeRewardPrecomputeRetry(pendingTip.Point.Slot)
+				ls.notifyLeiosAnnouncementAtTip(pendingTip.Point.Hash)
 				// Restore normal DB options outside the lock after validation is enabled
 				if wantEnableValidation && bulkLoadActive &&
 					bulkOptimizer != nil {
