@@ -137,7 +137,8 @@ func (d *Database) CanonicalBlocksFromIndex(
 }
 
 // BlocksInRange returns an iterator for a specific slot range [start, end].
-// Both endpoints are inclusive.
+// Both endpoints are inclusive. The iterator ignores cancellation; use
+// BlocksInRangeContext when the scan must stop with a caller's context.
 func (d *Database) BlocksInRange(
 	startSlot, endSlot uint64,
 ) *BlobBlockIterator {
@@ -147,6 +148,19 @@ func (d *Database) BlocksInRange(
 		endSlot:    endSlot,
 		hasEndSlot: true,
 	}
+}
+
+// BlocksInRangeContext returns an iterator for the inclusive slot range
+// [start, end] that stops with ctx. NextRaw returns ctx.Err() before each
+// key batch scan and block read once ctx is done, so a canceled scan never
+// reports a partial range as complete. A nil ctx is never canceled.
+func (d *Database) BlocksInRangeContext(
+	ctx context.Context,
+	startSlot, endSlot uint64,
+) *BlobBlockIterator {
+	ret := d.BlocksInRange(startSlot, endSlot)
+	ret.ctx = nonNilContext(ctx)
+	return ret
 }
 
 // BlobBlockResult holds the data returned by BlobBlockIterator.NextRaw.

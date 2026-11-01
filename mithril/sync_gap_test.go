@@ -25,6 +25,8 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/blob"
+	"github.com/blinklabs-io/dingo/database/types"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	testfixtures "github.com/blinklabs-io/dingo/internal/test/fixtures"
 	"github.com/blinklabs-io/dingo/ledgerstate"
@@ -1223,6 +1225,56 @@ func TestDeleteBlobBlocksAboveSlot(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, remaining, 1)
 	assert.Equal(t, uint64(100), remaining[0].Slot)
+}
+
+// cancelOnBlockReadStore cancels a context when the first block body is
+// read, so a scan observes cancellation partway through rather than before
+// it starts.
+type cancelOnBlockReadStore struct {
+	blob.BlobStore
+	cancel context.CancelFunc
+}
+
+func (s *cancelOnBlockReadStore) GetBlock(
+	txn types.Txn,
+	slot uint64,
+	hash []byte,
+) ([]byte, types.BlockMetadata, error) {
+	s.cancel()
+	return s.BlobStore.GetBlock(txn, slot, hash)
+}
+
+func TestLoadGapBlocksFromBlobStopsWhenCanceledMidScan(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	defer dbtest.CloseDatabase(db)
+
+	for slot, seed := range map[uint64]string{
+		100: "cancel-100",
+		200: "cancel-200",
+	} {
+		require.NoError(t, db.BlockCreate(models.Block{
+			Slot: slot,
+			Hash: testGapHash32(seed),
+			Cbor: []byte{0x82, 0x01},
+			Type: 1,
+		}, nil))
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	base := db.Blob()
+	db.SetBlobStore(&cancelOnBlockReadStore{BlobStore: base, cancel: cancel})
+	defer func() { db.SetBlobStore(base) }()
+
+	blocks, err := loadGapBlocksFromBlob(ctx, db, 0, 1000)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Nil(t, blocks)
 }
 
 func TestDeleteBlobBlocksAboveSlotKeepsBoundaryTip(t *testing.T) {

@@ -138,7 +138,8 @@ func (p *Pruner) prune(ctx context.Context) {
 			p.saveCursor(cursor)
 		}
 	}()
-	iter := p.db.BlocksInRange(
+	iter := p.db.BlocksInRangeContext(
+		ctx,
 		start,
 		currentSlot-stabilityWindow-1,
 	)
@@ -149,9 +150,11 @@ func (p *Pruner) prune(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		default:
-			// BlocksInRange walks local slot keys and has no context API.
-			next, err := iter.NextRaw() //nolint:contextcheck
+			next, err := iter.NextRaw()
 			if err != nil {
+				if ctx.Err() != nil {
+					return
+				}
 				if errors.Is(err, types.ErrHistoryExpired) {
 					cursor, _ = iter.Progress()
 					continue
