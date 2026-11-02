@@ -73,14 +73,19 @@ type Chain struct {
 	// c.mutex.
 	mutationGeneration       uint64
 	headerMutationGeneration uint64
-	// withdrawalGeneration advances after every operation that removes a
+	// withdrawalGeneration advances before and after each operation that removes a
 	// block from the chain or discards queued headers without adding the
 	// block they announced: rollbacks, the restores that undo a failed add,
 	// and header-queue clears. Unlike mutationGeneration it is never
-	// restored, and it is bumped after the change, so a reader that loads it
-	// before consulting chain membership and finds it unchanged later knows
-	// nothing it saw held has been withdrawn since.
+	// restored. Invalidating before mutation also fences readers that retain
+	// authenticated ancestry while a withdrawal is still in progress. A reader
+	// captures it before taking a chain read lock, then checks it again after
+	// its unlocked storage reads; a token observed mid-withdrawal cannot survive
+	// the completion bump performed before releasing the chain lock.
 	withdrawalGeneration atomic.Uint64
+	// onWithdrawalStarted is a test hook after evidence invalidation and
+	// before the first withdrawal mutation, with the chain mutex held.
+	onWithdrawalStarted  func()
 	lastCommonBlockIndex uint64
 	id                   ChainId
 	mutex                sync.RWMutex
@@ -217,7 +222,7 @@ func (c *Chain) setHeadersLocked(headers []queuedHeader) {
 	}
 }
 
-// WithdrawalGeneration returns a counter that advances after every operation
+// WithdrawalGeneration returns a counter that advances before and after each operation
 // that removes a block from the chain or discards queued headers without
 // adding their blocks. A caller that reads it before consulting HoldsPoint or
 // HoldsQueuedHeader may reuse a positive answer while it is unchanged; blocks
@@ -227,6 +232,14 @@ func (c *Chain) WithdrawalGeneration() uint64 {
 		return 0
 	}
 	return c.withdrawalGeneration.Load()
+}
+
+func (c *Chain) beginWithdrawalLocked() func() {
+	c.withdrawalGeneration.Add(1)
+	if c.onWithdrawalStarted != nil {
+		c.onWithdrawalStarted()
+	}
+	return func() { c.withdrawalGeneration.Add(1) }
 }
 
 func (c *Chain) Tip() ochainsync.Tip {
@@ -1334,10 +1347,11 @@ func (c *Chain) addBlockLocked(
 		c.setHeadersLocked(slices.Delete(c.headers, 0, 1))
 	} else if !matchPendingHeader {
 		discardedHeaders = c.queuedHeaderHashes()
-		c.setHeadersLocked(c.headers[:0])
 		if len(discardedHeaders) > 0 {
-			defer c.withdrawalGeneration.Add(1)
+			finishWithdrawal := c.beginWithdrawalLocked()
+			defer finishWithdrawal()
 		}
+		c.setHeadersLocked(c.headers[:0])
 	}
 	// Update tip
 	c.currentTip = ochainsync.Tip{
@@ -2241,6 +2255,7 @@ func (c *Chain) rollbackWithMutationBarrierHeld(
 			// to void it.
 			discarded := c.queuedHeaderHashes()[idx+1:]
 			dropped := len(discarded)
+			finishWithdrawal := c.beginWithdrawalLocked()
 			c.setHeadersLocked(slices.Delete(c.headers, idx+1, len(c.headers)))
 			if dropped > 0 {
 				c.headerMutationGeneration++
@@ -2251,6 +2266,7 @@ func (c *Chain) rollbackWithMutationBarrierHeld(
 					discarded,
 				))
 			}
+			finishWithdrawal()
 			c.mutex.Unlock()
 			return nil, nil
 		}
@@ -2287,6 +2303,8 @@ func (c *Chain) rollbackWithMutationBarrierHeld(
 			// after it and leave the matched header itself queued.
 			discarded := c.queuedHeaderHashes()[idx+1:]
 			dropped := len(discarded)
+			finishWithdrawal := c.beginWithdrawalLocked()
+			defer finishWithdrawal()
 			c.setHeadersLocked(slices.Delete(c.headers, idx+1, len(c.headers)))
 			// Those headers never become blocks, so any announcement
 			// they carried is void. This path returns no chain.update
@@ -2365,6 +2383,8 @@ func (c *Chain) rollbackWithMutationBarrierHeld(
 		}
 	}
 	// Delete only after every fallible ephemeral lookup has succeeded.
+	finishWithdrawal := c.beginWithdrawalLocked()
+	defer finishWithdrawal()
 	for i := c.tipBlockIndex; i > rollbackBlockIndex; i-- {
 		if c.persistent {
 			// Remove block from persistent store, returns the removed block
@@ -2542,10 +2562,11 @@ func (c *Chain) ClearHeaders() {
 	defer c.mutex.Unlock()
 	discarded := c.queuedHeaderHashes()
 	hadHeaders := len(discarded) > 0
-	c.setHeadersLocked(c.headers[:0])
 	if hadHeaders {
-		defer c.withdrawalGeneration.Add(1)
+		finishWithdrawal := c.beginWithdrawalLocked()
+		defer finishWithdrawal()
 	}
+	c.setHeadersLocked(c.headers[:0])
 	// Discarded headers never become blocks, so any announcement they
 	// carried is void, and no rollback is published for them because no
 	// block was ever added. Everything at or below the block tip survives;

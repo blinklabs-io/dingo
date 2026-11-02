@@ -2034,6 +2034,14 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		if o.chainsyncState != nil {
 			clientSession = o.chainsyncState.ClientSession(ctx.ConnectionId)
 		}
+		if o.config.ChainsyncRecoverDeliveredPeerTip != nil && o.chainsyncState != nil {
+			refreshCtx, cancelRefresh := chainsyncAdmissionContext(ctx)
+			stopRefresh := o.startChainsyncEagernessRecovery(refreshCtx, ctx, clientSession)
+			defer func() {
+				cancelRefresh()
+				stopRefresh()
+			}()
+		}
 		// Every path that does not accept this header clears the
 		// connection's accepted tip, so a later deferred header cannot count
 		// as a linear extension of one that never reached the ledger queue.
@@ -2391,7 +2399,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		// Observer deliveries may become corroboration evidence after promotion,
 		// so they need the same producer authentication as ingress candidates.
 		if !verificationAttempted && !deliveryVerified &&
-			o.config.ChainsyncRecordDeliveredPeerTip != nil {
+			(o.config.ChainsyncRecordDeliveredPeerTip != nil || o.config.ChainsyncRecoverDeliveredPeerTip != nil) {
 			if o.chainsyncState != nil {
 				client := o.chainsyncState.GetTrackedClient(ctx.ConnectionId)
 				if client != nil && client.Status == chainsync.ClientStatusFailed {
@@ -2504,6 +2512,22 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		if deliveryVerified && o.config.ChainsyncRecordDeliveredPeerTip != nil {
 			o.config.ChainsyncRecordDeliveredPeerTip(update)
 		}
+		if deliveryVerified && o.chainsyncState != nil {
+			o.chainsyncState.RecordAuthenticatedDeliveryForSession(clientSession, chainsync.ObservedHeader{
+				ConnectionId: ctx.ConnectionId, BlockHeader: v, ArrivalTime: arrivalTime,
+				Point: point, Tip: tip, BlockNumber: v.BlockNumber(), Type: blockType,
+				HeaderCryptoVerificationGeneration: chainsyncEvent.HeaderCryptoVerificationGeneration,
+			})
+		}
+		sessionCurrent := func() bool {
+			return o.chainsyncState == nil ||
+				o.chainsyncState.ClientSession(ctx.ConnectionId) == clientSession
+		}
+		if deliveryVerified && o.config.ChainsyncRecoverDeliveredPeerTip != nil {
+			recoveryCtx, cancelRecovery := chainsyncAdmissionContext(ctx)
+			o.config.ChainsyncRecoverDeliveredPeerTip(recoveryCtx, ctx, update, v, sessionCurrent)
+			cancelRecovery()
+		}
 		var peerTipUpdate *chainselection.PeerTipUpdateEvent
 		if selectionEligible {
 			update.AdmissionID = o.chainsyncAdmissionSequence.Add(1)
@@ -2511,7 +2535,11 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			update.PraosView = praosView
 			disposition := chainselection.PeerTipUpdateUnhandled
 			if o.config.ChainsyncObservePeerTip != nil {
-				disposition = o.config.ChainsyncObservePeerTip(update)
+				var observeErr error
+				disposition, observeErr = o.observeChainsyncPeerTip(ctx, &chainsyncEvent, &update, clientSession)
+				if observeErr != nil {
+					return observeErr
+				}
 			}
 			switch disposition {
 			case chainselection.PeerTipUpdateUnhandled:
@@ -2530,6 +2558,10 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				peerTipUpdate = &update
 			case chainselection.PeerTipUpdateRejected:
 				return errChainsyncCandidateRejected
+			case chainselection.PeerTipUpdateDeferred:
+				o.markDeferredHeaderRecovery(ctx.ConnectionId, verificationTipBaseline, point, tip, false)
+				o.updateChainsyncMetrics(ctx.ConnectionId, tip)
+				return nil
 			default:
 				return fmt.Errorf("invalid peer tip disposition: %d", disposition)
 			}

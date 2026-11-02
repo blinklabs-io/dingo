@@ -343,8 +343,14 @@ func TestPeerForkAncestorCryptoCacheStillChecksStateAfterCryptoSuccess(
 	)
 	badNonce := bytes.Clone(epochNonce)
 	badNonce[0] ^= 0xff
-	err = ls.verifyPeerForkTargetEpochAncestors(conn, cached.headers, epoch,
-		badNonce, ls.loadConsensusSnapshot())
+	err = ls.verifyPeerForkTargetEpochAncestors(
+		t.Context(),
+		conn,
+		cached.headers,
+		epoch,
+		badNonce,
+		ls.loadConsensusSnapshot(),
+	)
 	require.Error(t, err)
 	require.False(t, IsHeaderVerificationDeferred(err))
 	require.ErrorContains(t, err, "VRF")

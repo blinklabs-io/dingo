@@ -8631,6 +8631,26 @@ func TestHandleConnClosedEventPreservesLocalRestartStability(t *testing.T) {
 			closeErr: io.EOF,
 		},
 		{
+			name:   "header past local forecast horizon",
+			reason: event.ChainsyncResyncReasonHeaderPastForecastHorizon,
+			local:  true,
+		},
+		{
+			name:     "forecast restart cannot mask transport error",
+			reason:   event.ChainsyncResyncReasonHeaderPastForecastHorizon,
+			closeErr: io.EOF,
+		},
+		{
+			name:   "local buffer capacity restart",
+			reason: event.ChainsyncResyncReasonBufferedHeaderLimitExceeded,
+			local:  true,
+		},
+		{
+			name:     "buffer restart cannot mask transport error",
+			reason:   event.ChainsyncResyncReasonBufferedHeaderLimitExceeded,
+			closeErr: io.EOF,
+		},
+		{
 			name:   "peer fault",
 			reason: event.ChainsyncResyncReasonRollbackExceedsK,
 		},

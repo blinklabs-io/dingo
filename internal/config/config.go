@@ -321,8 +321,8 @@ type ChainsyncConfig struct {
 // GenesisBootstrapConfig holds configuration for Genesis-mode chain
 // selection and bootstrap-time peer promotion.
 type GenesisBootstrapConfig struct {
-	// ControlGroups overrides network relay control metadata. Nil selects network
-	// defaults; an explicit empty list disables those defaults.
+	// ControlGroups declares optional relay operator identities and roots.
+	// Without explicit groups, discovery uses the configured network topology.
 	ControlGroups []topology.PeerControlGroup `yaml:"controlGroups" ignored:"true"`
 
 	// Enabled controls whether Genesis bootstrap mode is used when the node
@@ -334,15 +334,12 @@ type GenesisBootstrapConfig struct {
 	// PromotionMinDiversityGroups sets the minimum number of diversity groups
 	// to prefer while promoting peers during bootstrap.
 	PromotionMinDiversityGroups int `yaml:"promotionMinDiversityGroups" envconfig:"DINGO_GENESIS_BOOTSTRAP_PROMOTION_MIN_DIVERSITY_GROUPS"`
-	// CorroborationPeers sets the number of independent peers that must report
-	// the same recent blocks before a fast (shallow) block source may drive
-	// Genesis-mode chain selection. This is the Ouroboros Genesis trust control
-	// for biased fast-sync sources: an uncorroborated or divergent fast source
-	// is denied selection and stalls rather than steering the local chain.
-	// The default is one independent peer. An explicitly configured zero
-	// disables the selection gate (density-only Genesis selection); a peer's
-	// frontier still needs one independent witness before it can exclude other
-	// candidates as behind.
+	// CorroborationPeers adds an optional independent-operator quorum before a
+	// source may drive Genesis selection. The default is zero. Genesis density,
+	// eagerness, patience and header verification remain active without this
+	// extra policy. A positive value requires independently identified witnesses;
+	// a peer's frontier always needs one independent witness before it can
+	// exclude other candidates as behind.
 	CorroborationPeers int `yaml:"corroborationPeers"          envconfig:"DINGO_GENESIS_BOOTSTRAP_CORROBORATION_PEERS"`
 	// LimitOnPatienceEnabled turns on the Genesis Limit on Patience: while
 	// Genesis selection is syncing, a ChainSync peer that delivers its
@@ -550,7 +547,7 @@ func DefaultChainsyncConfig() ChainsyncConfig {
 func DefaultGenesisBootstrapConfig() GenesisBootstrapConfig {
 	return GenesisBootstrapConfig{
 		Enabled:                true,
-		CorroborationPeers:     1,
+		CorroborationPeers:     0,
 		LimitOnPatienceEnabled: true,
 	}
 }

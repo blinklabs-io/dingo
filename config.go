@@ -1062,8 +1062,8 @@ func clonePluginConfig(in map[string]any) map[string]any {
 	return out
 }
 
-// WithGenesisControlGroups replaces network relay control defaults. An empty
-// non-nil slice disables defaults; nil selects the network defaults.
+// WithGenesisControlGroups configures optional relay operator identities and
+// roots. Nil or an empty slice leaves discovery to the network topology.
 func WithGenesisControlGroups(groups []topology.PeerControlGroup) ConfigOptionFunc {
 	owned := topology.ClonePeerControlGroups(groups)
 	return func(c *Config) {

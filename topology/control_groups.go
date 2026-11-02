@@ -27,8 +27,8 @@ type PeerControlGroup struct {
 	AccessPoints []TopologyConfigP2PAccessPoint `json:"accessPoints" yaml:"accessPoints"`
 }
 
-// ClonePeerControlGroups preserves nil (network defaults) versus an explicit
-// empty list (no configured groups), and owns each endpoint slice.
+// ClonePeerControlGroups owns each endpoint slice and preserves nil and empty
+// configuration values.
 func ClonePeerControlGroups(groups []PeerControlGroup) []PeerControlGroup {
 	if groups == nil {
 		return nil

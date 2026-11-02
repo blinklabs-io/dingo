@@ -572,6 +572,8 @@ type OuroborosConfig struct {
 	// candidate event. Pending far-tip claims are withheld from ingress;
 	// rejected candidates terminate the protocol. Unhandled updates use the
 	// async event path when no resolver is configured.
+	// Deferred updates require a fresh verification of the same header and
+	// must not penalize the peer for local ledger publication.
 	// Candidates may inform Genesis corroboration and eagerness but must not
 	// affect selection until the ledger admits the accompanying header.
 	ChainsyncObservePeerTip func(chainselection.PeerTipUpdateEvent) chainselection.PeerTipUpdateDisposition
@@ -579,6 +581,18 @@ type OuroborosConfig struct {
 	// bounded corroboration history, including observer connections that are
 	// not eligible for chain-selection admission.
 	ChainsyncRecordDeliveredPeerTip func(chainselection.PeerTipUpdateEvent)
+	// ChainsyncRecoverDeliveredPeerTip may rebuild missing eagerness evidence
+	// after authenticated delivery. The session predicate must remain true at
+	// consumption; a retained raw header alone is not a verified path.
+	// It may be called again for a retained authenticated delivery while the
+	// next callback is parked, and must honor cancellation when it ends.
+	ChainsyncRecoverDeliveredPeerTip func(
+		context.Context,
+		ochainsync.CallbackContext,
+		chainselection.PeerTipUpdateEvent,
+		gledger.BlockHeader,
+		func() bool,
+	)
 	// ChainsyncRecordDeliveredPeerRollback trims a peer's bounded delivered
 	// history after a rollback, including observer connections that are not
 	// eligible for chain-selection admission and so never reach

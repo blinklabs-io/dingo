@@ -69,6 +69,7 @@ type peerForkNoncePrefix struct {
 // peerChainSelectionEpochNonce returns a candidate-chain nonce when the
 // header's retained peer ancestry reaches the primary chain.
 func (ls *LedgerState) peerChainSelectionEpochNonce(
+	ctx context.Context,
 	connId ouroboros.ConnectionId,
 	header gledger.BlockHeader,
 	snapshot *consensusSnapshot,
@@ -76,7 +77,11 @@ func (ls *LedgerState) peerChainSelectionEpochNonce(
 	if header.Era().Id == byron.EraIdByron {
 		return nil, models.Epoch{}, false, nil
 	}
-	ancestor, forkHeaders, found, err := ls.peerHeaderForkPath(connId, header)
+	ancestor, forkHeaders, found, err := ls.peerHeaderForkPathContext(
+		ctx,
+		connId,
+		header,
+	)
 	if err != nil {
 		return nil, models.Epoch{}, false, err
 	}
@@ -118,7 +123,7 @@ func (ls *LedgerState) peerChainSelectionEpochNonce(
 		return nil, models.Epoch{}, false, nil
 	}
 	if _, err := ls.headerVerificationEpoch(
-		context.Background(),
+		ctx,
 		header.SlotNumber(),
 		false,
 	); err != nil {
@@ -162,6 +167,7 @@ func (ls *LedgerState) peerChainSelectionEpochNonce(
 	}
 	if targetEpoch.EpochId == sourceEpoch.EpochId {
 		if err := ls.verifyPeerForkTargetEpochAncestors(
+			ctx,
 			connId,
 			forkHeaders,
 			targetEpoch,
@@ -174,6 +180,7 @@ func (ls *LedgerState) peerChainSelectionEpochNonce(
 	}
 	if sourceEpoch.EraId == uint(byron.EraIdByron) {
 		if err := ls.verifyByronTransitionAncestry(
+			ctx,
 			forkHeaders,
 			targetEpoch,
 			snapshot.epochCache,
@@ -184,6 +191,7 @@ func (ls *LedgerState) peerChainSelectionEpochNonce(
 	}
 
 	return ls.peerChainSelectionEpochNonceAcrossEpochs(
+		ctx,
 		connId,
 		ancestor,
 		forkHeaders,
@@ -194,6 +202,7 @@ func (ls *LedgerState) peerChainSelectionEpochNonce(
 }
 
 func (ls *LedgerState) verifyPeerForkTargetEpochAncestors(
+	ctx context.Context,
 	connID ouroboros.ConnectionId,
 	headers []gledger.BlockHeader,
 	epoch models.Epoch,
@@ -205,8 +214,11 @@ func (ls *LedgerState) verifyPeerForkTargetEpochAncestors(
 	}
 	epochEnd := epoch.StartSlot + uint64(epoch.LengthInSlots)
 	for index, header := range headers[:len(headers)-1] {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if header.SlotNumber() < epoch.StartSlot ||
-			header.SlotNumber() >= epochEnd || ls.headerApplied(header) {
+			header.SlotNumber() >= epochEnd || ls.headerApplied(ctx, header) {
 			continue
 		}
 		hash := header.Hash().Bytes()
@@ -238,6 +250,7 @@ func (ls *LedgerState) verifyPeerForkTargetEpochAncestors(
 		if err := ls.verifyPeerForkAncestorCrypto(connID, headers, index,
 			epoch.EpochId, epochNonce, snapshot.contextGeneration, func() error {
 				return ls.verifyBlockHeaderStatelessCryptoWithEpochNonce(
+					ctx,
 					block,
 					epoch,
 					epochNonce,
@@ -254,7 +267,7 @@ func (ls *LedgerState) verifyPeerForkTargetEpochAncestors(
 				}
 				return chainSelectionHeaderStateError(
 					ls.verifySelectedBlockHeaderStateWithCache(
-						context.Background(),
+						ctx,
 						block,
 						epoch.EpochId,
 						snapshot.epochCache,
@@ -269,6 +282,7 @@ func (ls *LedgerState) verifyPeerForkTargetEpochAncestors(
 }
 
 func (ls *LedgerState) peerChainSelectionEpochNonceAcrossEpochs(
+	ctx context.Context,
 	connId ouroboros.ConnectionId,
 	ancestor ocommon.Point,
 	forkHeaders []gledger.BlockHeader,
@@ -278,6 +292,9 @@ func (ls *LedgerState) peerChainSelectionEpochNonceAcrossEpochs(
 ) ([]byte, models.Epoch, bool, error) {
 	retainedEpochs := map[uint64]struct{}{sourceEpoch.EpochId: {}}
 	for _, header := range forkHeaders {
+		if err := ctx.Err(); err != nil {
+			return nil, models.Epoch{}, false, err
+		}
 		if epoch, err := epochForSlotInCache(
 			snapshot.epochCache,
 			header.SlotNumber(),
@@ -290,7 +307,7 @@ func (ls *LedgerState) peerChainSelectionEpochNonceAcrossEpochs(
 	ancestorBlock := models.Block{}
 	var err error
 	if !originAncestor {
-		ancestorBlock, err = ls.blockByHash(context.Background(), ancestor.Hash)
+		ancestorBlock, err = ls.blockByHash(ctx, ancestor.Hash)
 		if err != nil {
 			return nil, models.Epoch{}, false, fmt.Errorf(
 				"%w: lookup candidate intersection block: %w",
@@ -305,7 +322,7 @@ func (ls *LedgerState) peerChainSelectionEpochNonceAcrossEpochs(
 	var initialEvolvingNonce, initialCandidateNonce []byte
 	if originAncestor {
 		_, initialEvolvingNonce, initialCandidateNonce, _, err = ls.computeEpochNonceForSlot(
-			context.Background(),
+			ctx,
 			0,
 			models.Epoch{},
 		)
@@ -362,6 +379,9 @@ func (ls *LedgerState) peerChainSelectionEpochNonceAcrossEpochs(
 	candidateNonce := cloneNonce(initialCandidateNonce)
 
 	for epochID := sourceEpoch.EpochId; epochID < targetEpoch.EpochId; epochID++ {
+		if err := ctx.Err(); err != nil {
+			return nil, models.Epoch{}, false, err
+		}
 		if epochID != sourceEpoch.EpochId {
 			var ok bool
 			currentEpoch, ok = epochByIDInCache(snapshot.epochCache, epochID)
@@ -402,6 +422,9 @@ func (ls *LedgerState) peerChainSelectionEpochNonceAcrossEpochs(
 		var lastFolded gledger.BlockHeader
 		epochEnd := currentEpoch.StartSlot + uint64(currentEpoch.LengthInSlots)
 		for index, forkHeader := range forkHeaders {
+			if err := ctx.Err(); err != nil {
+				return nil, models.Epoch{}, false, err
+			}
 			if index < startIndex {
 				continue
 			}
@@ -413,6 +436,7 @@ func (ls *LedgerState) peerChainSelectionEpochNonceAcrossEpochs(
 			}
 			block := headerOnlyBlock{header: forkHeader, peerRelative: true}
 			if err := ls.verifyBlockHeaderStatelessCryptoWithEpochNonce(
+				ctx,
 				block,
 				currentEpoch,
 				epochNonce,
@@ -421,7 +445,7 @@ func (ls *LedgerState) peerChainSelectionEpochNonceAcrossEpochs(
 			}
 			if err := chainSelectionHeaderStateError(
 				ls.verifySelectedBlockHeaderStateWithCache(
-					context.Background(),
+					ctx,
 					block,
 					currentEpoch.EpochId,
 					snapshot.epochCache,
@@ -497,6 +521,7 @@ func (ls *LedgerState) peerChainSelectionEpochNonceAcrossEpochs(
 		}
 		if nextEpoch.EpochId == targetEpoch.EpochId {
 			if err := ls.verifyPeerForkTargetEpochAncestors(
+				ctx,
 				connId,
 				forkHeaders,
 				targetEpoch,
@@ -708,6 +733,7 @@ func (ls *LedgerState) removePeerForkNoncePrefix(key string) {
 }
 
 func (ls *LedgerState) verifyByronTransitionAncestry(
+	ctx context.Context,
 	headers []gledger.BlockHeader,
 	targetEpoch models.Epoch,
 	epochCache []models.Epoch,
@@ -716,9 +742,13 @@ func (ls *LedgerState) verifyByronTransitionAncestry(
 		return nil
 	}
 	for _, header := range headers[:len(headers)-1] {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		block := headerOnlyBlock{header: header, peerRelative: true}
 		if header.Era().Id == byron.EraIdByron {
 			if err := ls.verifyBlockHeaderStatelessCryptoWithEpochNonce(
+				ctx,
 				block,
 				models.Epoch{},
 				nil,
@@ -728,6 +758,7 @@ func (ls *LedgerState) verifyByronTransitionAncestry(
 			continue
 		}
 		if err := ls.verifyBlockHeaderStatelessCryptoWithEpochNonce(
+			ctx,
 			block,
 			targetEpoch,
 			targetEpoch.Nonce,
@@ -736,7 +767,7 @@ func (ls *LedgerState) verifyByronTransitionAncestry(
 		}
 		if err := chainSelectionHeaderStateError(
 			ls.verifySelectedBlockHeaderStateWithCache(
-				context.Background(),
+				ctx,
 				block,
 				targetEpoch.EpochId,
 				epochCache,
@@ -747,13 +778,6 @@ func (ls *LedgerState) verifyByronTransitionAncestry(
 		}
 	}
 	return nil
-}
-
-func (ls *LedgerState) peerHeaderForkPath(
-	connId ouroboros.ConnectionId,
-	header gledger.BlockHeader,
-) (ocommon.Point, []gledger.BlockHeader, bool, error) {
-	return ls.peerHeaderForkPathContext(context.Background(), connId, header)
 }
 
 func (ls *LedgerState) peerHeaderForkPathContext(

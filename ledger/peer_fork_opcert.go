@@ -110,6 +110,9 @@ func (ls *LedgerState) validatePeerForkOpCertCounters(
 	}
 
 	for _, header := range headers[startIndex:] {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		opCert, hasOpCert := opCertFromHeader(header)
 		if hasOpCert {
 			if opCert == nil {
