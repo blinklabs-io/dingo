@@ -8,6 +8,11 @@ ENV COMMIT_HASH=${COMMIT_HASH}
 WORKDIR /code
 RUN go env -w GOCACHE=/go-cache
 RUN go env -w GOMODCACHE=/gomod-cache
+# A comma after a proxy falls back to the next entry only on a 404 or 410, so
+# a dropped proxy connection fails the download outright. A pipe falls back
+# on any error; go.sum still verifies what a direct fetch returns.
+ARG GOPROXY="https://proxy.golang.org|direct"
+ENV GOPROXY=${GOPROXY}
 COPY go.* .
 RUN go mod download
 COPY . .
