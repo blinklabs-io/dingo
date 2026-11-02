@@ -732,7 +732,18 @@ Reference-conformance scenario
 |------|-------------------|
 | `TestCardanoProducerChainAdvances` | `cardano-producer`'s tip advances (sanity check on the reference node) |
 | `TestLedgerStateConsensus` | dingo-producer's and cardano-producer's ledger state (protocol parameters, stake distribution, whole UTxO set) match at a point acquired on both nodes in epochs 1 and 2; fails with a diagnostic naming every divergence found |
+| `TestPlutusBoundedArgsConformance` | Submits PlutusV3 script spends to both producers and requires the same verdict for the protocol-version dependent evaluator limits (integer arguments beyond +/-2^262143, byte strings beyond 65536 bytes), and checks that verdict against plutigo's assumption for the running protocol version (10 or 11). |
 | `TestPoolQueriesMatchReference` | dingo-producer's and cardano-producer's answers to `GetRewardProvenance` and `GetPoolState` match at a point acquired on both nodes; the reward account and relays of the genesis pools are not compared |
+
+`TestPlutusBoundedArgsConformance` runs on whatever protocol version the Shelley
+genesis starts at. `run-tests.sh` accepts `DEVNET_SPEC_OVERRIDE=./<spec>.yaml`
+to select a spec other than the stock ones; `testnet-accelerated-pv11.yaml`
+starts at protocol version 11.
+
+```bash
+DEVNET_SPEC_OVERRIDE=./testnet-accelerated-pv11.yaml \
+  ./run-tests.sh --conformance --accelerated -run TestPlutusBoundedArgsConformance
+```
 
 Dingo-only feature scenario
 (`//go:build linux && devnet && !devnet_conformance`) runs only in the default
