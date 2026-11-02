@@ -57,9 +57,9 @@ import (
 // to keep defaults consistent.
 const defaultMaxChainsyncClients = chainsync.DefaultMaxClients
 
-// defaultCatchUpBandWaitTimeout bounds a catch-up band wait. A parked
-// roll-forward callback stops its protocol's receive loop. The protocol state
-// timers that can run meanwhile are the chainsync Idle timeout (3673s), the
+// defaultCatchUpBandWaitTimeout bounds a catch-up band wait and a Limit on
+// Eagerness wait. A parked roll-forward callback stops its protocol's receive
+// loop. The protocol state timers that can run meanwhile are the chainsync Idle timeout (3673s), the
 // CanAwait timeout (ChainsyncBlockTimeout, at least 269s), the MustReply
 // timeout (135-269s), and dingo's own stall timeout (2m by default, measured
 // from the last delivered header). The bound stays under all of them.
@@ -300,6 +300,9 @@ type Ouroboros struct {
 	// catchUpBandWaitTimeout bounds how long a roll-forward callback waits
 	// in ChainsyncAwaitCatchUpBand.
 	catchUpBandWaitTimeout time.Duration
+	// eagernessWaitTimeout bounds how long a roll-forward callback waits in
+	// ChainsyncAwaitEagerness.
+	eagernessWaitTimeout time.Duration
 	// chainsyncArrivalNow is an instance-local clock seam for deterministic
 	// arrival-order tests. Production instances use time.Now.
 	chainsyncArrivalNow      func() time.Time
@@ -620,6 +623,12 @@ type OuroborosConfig struct {
 		connId ouroboros.ConnectionId,
 		observedTip ochainsync.Tip,
 	) error
+	// ChainsyncHeaderVerificationSettled returns a channel closed by the
+	// ledger's next snapshot publication or finished validation transition.
+	// A roll-forward whose header verification is deferred takes it before
+	// each attempt and waits on it, bounded, before verifying the header
+	// again. When nil, a deferred header is parked at once.
+	ChainsyncHeaderVerificationSettled func() <-chan struct{}
 	// ChainsyncAwaitCorroboration holds a roll-forward that ChainsyncApplyEligible
 	// denied, while the denial is only a lack of Genesis corroboration, and
 	// reports whether the header may then be applied. The peer's cursor stays
@@ -881,6 +890,7 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		chainsyncScheduleAt:      defaultChainsyncScheduleAt,
 		corroborationHoldTimeout: defaultCorroborationHoldTimeout,
 		catchUpBandWaitTimeout:   catchUpBandWait,
+		eagernessWaitTimeout:     catchUpBandWait,
 		chainsyncArrivalNow:      time.Now,
 		futureHeaderResyncs: make(
 			map[ouroboros.ConnectionId]*scheduledChainsyncResync,

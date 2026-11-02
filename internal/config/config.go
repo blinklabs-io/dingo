@@ -379,8 +379,9 @@ type HistoryExpiryConfig struct {
 type KoiosParityConfig struct {
 	// Enabled subscribes the observer to epoch.transition when true.
 	Enabled bool `yaml:"enabled"              envconfig:"DINGO_KOIOS_PARITY_ENABLED"`
-	// Network is the Koios network to validate against: "preview" or
-	// "preprod". Empty defaults to the node's own configured Network.
+	// Network is the Koios network to validate against: "preview",
+	// "preprod" or "mainnet". Empty defaults to the node's own configured
+	// Network.
 	Network string `yaml:"network"              envconfig:"DINGO_KOIOS_PARITY_NETWORK"`
 	// CachePath is the Koios reference cache.db path. Empty defaults to
 	// {DatabasePath}/.koios/cache.db, matching cmd/koios-parity's own

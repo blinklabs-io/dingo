@@ -165,13 +165,13 @@ var koiosCoverageMatrix = []KoiosFieldCoverage{
 		Endpoint: "/epoch_info",
 		Field:    "pool_cnt",
 		Class:    CoverageUnsupported,
-		Reason:   "Koios preview/preprod do not return this documented field",
+		Reason:   "Koios does not return this documented field",
 	},
 	{
 		Endpoint: "/epoch_info",
 		Field:    "delegator_cnt",
 		Class:    CoverageUnsupported,
-		Reason:   "Koios preview/preprod do not return this documented field",
+		Reason:   "Koios does not return this documented field",
 	},
 
 	// /totals.

@@ -928,8 +928,11 @@ func LoadWithDB(
 		func(
 			txn *database.Txn,
 			evt event.EpochTransitionEvent,
+			incomingEraID uint,
 		) ([]*models.PoolStakeSnapshot, error) {
-			return snapshotMgr.CurrentBoundarySPOStakeRows(ctx, txn, evt)
+			return snapshotMgr.CurrentBoundarySPOStakeRows(
+				ctx, txn, evt, incomingEraID,
+			)
 		},
 	)
 	if err := installEpochBoundarySnapshotHookForLoad(

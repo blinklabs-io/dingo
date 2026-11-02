@@ -238,6 +238,14 @@ func (n *blockingAddressNode) AddressExtended(
 	return AddressExtendedInfo{Address: "addr1"}, n.wait(ctx)
 }
 
+func (n *blockingAddressNode) AddressTransactions(
+	ctx context.Context,
+	_ string,
+	_ TransactionRangeParams,
+) ([]AddressTransactionInfo, int, error) {
+	return nil, 0, n.wait(ctx)
+}
+
 func newBlockingAddressNode() *blockingAddressNode {
 	return &blockingAddressNode{
 		mockNode: &mockNode{},
@@ -357,6 +365,64 @@ func TestHandleAddressSummaryAdmissionCap(t *testing.T) {
 		),
 	)
 	require.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestHandleAddressTransactionRoutesShareAdmission(t *testing.T) {
+	t.Parallel()
+	node := newBlockingAddressNode()
+	b := newTestBlockfrost(node)
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(node.release) }) }
+	defer release()
+
+	var wg sync.WaitGroup
+	for _, path := range []string{
+		"/api/v0/addresses/addr1/transactions",
+		"/api/v0/addresses/addr1/txs",
+	} {
+		wg.Go(func() {
+			b.handler().ServeHTTP(
+				httptest.NewRecorder(),
+				addressSummaryRequest(context.Background(), path),
+			)
+		})
+	}
+	for range 2 {
+		testutil.RequireReceive(
+			t, node.entered, 5*time.Second, "request admitted",
+		)
+	}
+
+	for _, path := range []string{
+		"/api/v0/addresses/addr1",
+		"/api/v0/addresses/addr1/transactions",
+		"/api/v0/addresses/addr1/txs",
+	} {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		w := httptest.NewRecorder()
+		b.handler().ServeHTTP(
+			w,
+			addressSummaryRequest(ctx, path),
+		)
+		cancel()
+		require.Equal(t, http.StatusTooManyRequests, w.Code, path)
+		require.Equal(t, "1", w.Header().Get("Retry-After"), path)
+	}
+
+	// Invalid pagination is rejected before admission, preserving the route's
+	// public validation behavior when the shared pool is full.
+	w := httptest.NewRecorder()
+	b.handler().ServeHTTP(
+		w,
+		addressSummaryRequest(
+			context.Background(),
+			"/api/v0/addresses/addr1/transactions?count=0",
+		),
+	)
+	require.Equal(t, http.StatusBadRequest, w.Code)
+
+	release()
+	wg.Wait()
 }
 
 func TestHandleAddressSummaryTooLarge(t *testing.T) {

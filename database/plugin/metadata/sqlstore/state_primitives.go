@@ -43,15 +43,27 @@ func (s *Store) GetBackfillCheckpoint(
 	if err != nil {
 		return nil, fmt.Errorf("get backfill checkpoint: %w", err)
 	}
-	return &models.BackfillCheckpoint{
-		ID:         uint(row.ID),
-		Phase:      row.Phase,
-		LastSlot:   uint64(row.LastSlot.Int64),
-		TotalSlots: uint64(row.TotalSlots.Int64),
-		StartedAt:  row.StartedAt.Time,
-		UpdatedAt:  row.UpdatedAt.Time,
-		Completed:  row.Completed.Bool,
-	}, nil
+	checkpoint := &models.BackfillCheckpoint{
+		ID:            uint(row.ID),
+		Phase:         row.Phase,
+		LastSlot:      uint64(row.LastSlot.Int64),
+		LastBlockHash: append([]byte(nil), row.LastBlockHash...),
+		TotalSlots:    uint64(row.TotalSlots.Int64),
+		StartedAt:     row.StartedAt.Time,
+		UpdatedAt:     row.UpdatedAt.Time,
+		Completed:     row.Completed.Bool,
+	}
+	if row.LastIndexID.Valid {
+		lastIndexID, err := checkedUint64(row.LastIndexID.Int64)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"get backfill checkpoint last index ID: %w",
+				err,
+			)
+		}
+		checkpoint.LastIndexID = &lastIndexID
+	}
+	return checkpoint, nil
 }
 
 func (s *Store) SetBackfillCheckpoint(
@@ -74,12 +86,22 @@ func (s *Store) SetBackfillCheckpoint(
 	if err != nil {
 		return fmt.Errorf("set backfill checkpoint total slots: %w", err)
 	}
+	var lastIndexID sql.NullInt64
+	if checkpoint.LastIndexID != nil {
+		value, indexErr := checkedInt64(*checkpoint.LastIndexID)
+		if indexErr != nil {
+			return fmt.Errorf("set backfill checkpoint last index ID: %w", indexErr)
+		}
+		lastIndexID = sql.NullInt64{Int64: value, Valid: true}
+	}
 	id, err := queries.SetBackfillCheckpoint(
 		ctx,
 		sqlitequery.SetBackfillCheckpointParams{
-			Phase:      checkpoint.Phase,
-			LastSlot:   sql.NullInt64{Int64: lastSlot, Valid: true},
-			TotalSlots: sql.NullInt64{Int64: totalSlots, Valid: true},
+			Phase:         checkpoint.Phase,
+			LastSlot:      sql.NullInt64{Int64: lastSlot, Valid: true},
+			LastIndexID:   lastIndexID,
+			LastBlockHash: append([]byte(nil), checkpoint.LastBlockHash...),
+			TotalSlots:    sql.NullInt64{Int64: totalSlots, Valid: true},
 			StartedAt: sql.NullTime{
 				Time:  checkpoint.StartedAt,
 				Valid: true,

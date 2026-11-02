@@ -105,6 +105,8 @@ CREATE TABLE backfill_checkpoint (
     id INTEGER PRIMARY KEY,
     phase TEXT NOT NULL UNIQUE,
     last_slot INTEGER,
+    last_index_id INTEGER,
+    last_block_hash BLOB,
     total_slots INTEGER,
     started_at DATETIME,
     updated_at DATETIME,

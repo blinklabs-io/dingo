@@ -452,8 +452,8 @@ LIMIT 1`
 // latestSnapshotCurrent reads the pool's latest snapshot-imported current
 // parameters -- its registration without a certificate at index zero --
 // executed at or after slot start and strictly before `at`. A snapshot row's
-// execution slot is the slot it was added at, so the added-slot lower bound
-// keeps the scan on the (pool_id, added_slot) index.
+// execution slot is the slot it was added at. The snapshot index selects the
+// synthetic current-parameter rows before applying the added-slot bounds.
 func latestSnapshotCurrent(
 	ctx context.Context,
 	db Querier,
@@ -465,7 +465,7 @@ func latestSnapshotCurrent(
 	query := "-- name: LeiosKeyLatestSnapshotCurrent" +
 		registrationColumns + predicate + `
   AND pr.added_slot >= ?
-  AND COALESCE(pr.certificate_id, 0) = 0
+  AND pr.certificate_id = 0
   AND pr.registration_index = 0
 ORDER BY pr.added_slot DESC, pr.id DESC
 LIMIT 1`
@@ -583,34 +583,80 @@ func latestRetirement(
 	at Position,
 	executedBefore *uint64,
 ) (retirementRow, bool, error) {
-	predicate, args := positionPredicate("rt", at, "COALESCE(t.block_index, 0)")
-	label := "LeiosKeyLatestRetirement"
 	if executedBefore != nil {
-		label += "ExecutedBefore"
+		return latestRetirementExecutedBefore(
+			ctx, db, poolID, at, *executedBefore,
+		)
 	}
-	query := "-- name: " + label + `
-SELECT rt.epoch, rt.added_slot, COALESCE(t.block_index, 0),
-       COALESCE(c.cert_index, 0)
+	predicate, args := positionPredicate("rt", at, "COALESCE(t.block_index, 0)")
+	query := "-- name: LeiosKeyLatestRetirement" + retirementSelect + `
+  AND rt.added_slot <= ?
+  AND ` + predicate + retirementOrder
+	args = append([]any{poolID, at.Slot}, args...)
+	return scanRetirement(db.QueryRowContext(ctx, query, args...))
+}
+
+const retirementSelect = `
+SELECT rt.epoch, rt.added_slot, COALESCE(t.block_index, 0) AS block_index,
+       COALESCE(c.cert_index, 0) AS cert_index
 FROM pool_retirement rt
 LEFT JOIN certs c ON c.id = rt.certificate_id
 LEFT JOIN "transaction" t ON t.id = c.transaction_id
-WHERE rt.pool_id = ?
-  AND rt.added_slot <= ?
-  AND ` + predicate
-	args = append([]any{poolID, at.Slot}, args...)
-	if executedBefore != nil {
-		query += `
-  AND COALESCE((
-      SELECT lc.slot FROM leios_transaction_context lc
-      WHERE lc.transaction_id = c.transaction_id), rt.added_slot) < ?`
-		args = append(args, *executedBefore)
-	}
-	query += `
+WHERE rt.pool_id = ?`
+
+const retirementOrder = `
 ORDER BY rt.added_slot DESC, COALESCE(t.block_index, 0) DESC,
          COALESCE(c.cert_index, 0) DESC, rt.id DESC
 LIMIT 1`
+
+// latestRetirementExecutedBefore reads the latest retirement executed before
+// start without scanning the pool's current-epoch retirements. Rows added
+// before start necessarily qualify. A qualifying row added later can only be
+// a boundary closure stored by the first block at or after start, so it is at
+// the pool's first retirement slot from start on.
+func latestRetirementExecutedBefore(
+	ctx context.Context,
+	db Querier,
+	poolID int64,
+	at Position,
+	start uint64,
+) (retirementRow, bool, error) {
+	seekBefore := start
+	if at.Slot < math.MaxUint64 && at.Slot+1 < seekBefore {
+		seekBefore = at.Slot + 1
+	}
+	predicate, positionArgs := positionPredicate(
+		"rt", at, "COALESCE(t.block_index, 0)",
+	)
+	query := `-- name: LeiosKeyLatestRetirementExecutedBefore
+SELECT u.epoch, u.added_slot, u.block_index, u.cert_index
+FROM (
+    SELECT 0 AS source, s.* FROM (` + retirementSelect + `
+      AND rt.added_slot < ?
+      AND ` + predicate + retirementOrder + `) s
+    UNION ALL
+    SELECT 1 AS source, b.* FROM (` + retirementSelect + `
+      AND rt.added_slot = (
+          SELECT MIN(r0.added_slot) FROM pool_retirement r0
+          WHERE r0.pool_id = ? AND r0.added_slot >= ?)
+      AND COALESCE((
+          SELECT lc.slot FROM leios_transaction_context lc
+          WHERE lc.transaction_id = c.transaction_id), rt.added_slot) < ?
+      AND ` + predicate + retirementOrder + `) b
+) u
+ORDER BY u.source DESC
+LIMIT 1`
+	args := make([]any, 0, 2*len(positionArgs)+6)
+	args = append(args, poolID, seekBefore)
+	args = append(args, positionArgs...)
+	args = append(args, poolID, poolID, start, start)
+	args = append(args, positionArgs...)
+	return scanRetirement(db.QueryRowContext(ctx, query, args...))
+}
+
+func scanRetirement(row *sql.Row) (retirementRow, bool, error) {
 	var epoch, addedSlot, blockIdx, certIdx int64
-	err := db.QueryRowContext(ctx, query, args...).Scan(
+	err := row.Scan(
 		&epoch, &addedSlot, &blockIdx, &certIdx,
 	)
 	if errors.Is(err, sql.ErrNoRows) {

@@ -1646,6 +1646,10 @@ func TestLocalstatequeryProtocol_UnansweredQueryEndsConnection(t *testing.T) {
 	)
 	require.ErrorIs(t, err, ledger.ErrQueryNotAnswered)
 	require.ErrorContains(t, err, "GetRewardInfoPools")
+	// The session pins a metadata read connection. Held, it makes the wire
+	// Acquire below open a new SQLite connection inside the Acquire wait, which
+	// a fully parallel race run can push past the client's Acquire timeout.
+	require.NoError(t, o.localstatequeryServerRelease(ctx))
 
 	client := newLocalStateQueryTestClient(t, o)
 	require.NoError(t, client.AcquireVolatileTip())

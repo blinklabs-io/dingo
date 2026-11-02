@@ -1481,8 +1481,16 @@ func (n *Node) Restore(
 		return lifecycle.Manifest{}, err
 	}
 
+	// Every removal and rename below works by pathname in dataDir's
+	// parent, so that parent must be one no other user can modify. This
+	// check runs before the first of them, while the node is still serving.
+	if err := lifecycle.ValidateRestoreWorkParent(
+		filepath.Dir(n.config.dataDir),
+	); err != nil {
+		return lifecycle.Manifest{}, fmt.Errorf("restore: %w", err)
+	}
 	stagingDir := n.config.dataDir + restoreStagingSuffix
-	if err := os.RemoveAll(stagingDir); err != nil {
+	if err := lifecycle.RemoveRestoreWorkDir(stagingDir); err != nil {
 		return lifecycle.Manifest{}, fmt.Errorf(
 			"clear restore staging directory: %w", err,
 		)
@@ -1622,7 +1630,7 @@ func (n *Node) Restore(
 		manifestOpts...,
 	)
 	if err != nil {
-		_ = os.RemoveAll(stagingDir)
+		_ = lifecycle.RemoveRestoreWorkDir(stagingDir)
 		if stopErr := n.stopForPendingRestoreRollback(err, recovery); stopErr != nil {
 			return lifecycle.Manifest{}, stopErr
 		}
@@ -1707,7 +1715,7 @@ func finalizeSuccessfulRestore(commit func() error, backupDir string) error {
 	if err := commit(); err != nil {
 		return fmt.Errorf("commit remote restore recovery: %w", err)
 	}
-	if err := os.RemoveAll(backupDir); err != nil {
+	if err := lifecycle.RemoveRestoreWorkDir(backupDir); err != nil {
 		return fmt.Errorf("remove pre-restore backup: %w", err)
 	}
 	return nil
@@ -1790,7 +1798,12 @@ func (n *Node) swapInRestoredDataDir(
 	dataDir := n.config.dataDir
 	parentDir := filepath.Dir(dataDir)
 	backupDir = dataDir + preRestoreBackupSuffix
-	_ = os.RemoveAll(backupDir)
+	if err := lifecycle.ValidateRestoreWorkParent(parentDir); err != nil {
+		return "", fmt.Errorf("swap restored data directory: %w", err)
+	}
+	if err := lifecycle.RemoveRestoreWorkDir(backupDir); err != nil {
+		return "", fmt.Errorf("clear pre-restore backup: %w", err)
+	}
 	if err := os.Rename(dataDir, backupDir); err != nil {
 		return "", fmt.Errorf("move aside current data directory: %w", err)
 	}
@@ -1868,8 +1881,8 @@ func (n *Node) swapInRestoredDataDir(
 //   - Neither exists, or only stagingDir exists (no completed swap ever
 //     started, or one was interrupted before the first rename): nothing to
 //     reconcile. A leftover stagingDir is harmless -- the next Restore
-//     call's own os.RemoveAll(stagingDir) clears it -- and is deliberately
-//     left in place here rather than removed, so an operator has
+//     call clears it through lifecycle.RemoveRestoreWorkDir -- and is
+//     deliberately left in place here rather than removed, so an operator has
 //     something to inspect if a restore keeps failing before ever
 //     reaching the swap.
 //   - backupDir exists, dataDir does not: interrupted between the swap's
@@ -1884,6 +1897,11 @@ func (n *Node) swapInRestoredDataDir(
 //     data actually works, at which point Run() removes backupDir itself
 //     (mirroring Restore's own in-process backup removal once
 //     reinitializeAndResume proves the same thing without a restart).
+//
+// Whenever backupDir exists, dataDir's parent must pass
+// lifecycle.ValidateRestoreWorkParent before anything is renamed or removed;
+// otherwise this returns an error and startup stops with every directory
+// left as found.
 func (n *Node) reconcileInterruptedLiveRestoreSwap() error {
 	dataDir := n.config.dataDir
 	backupDir := dataDir + preRestoreBackupSuffix
@@ -1901,6 +1919,14 @@ func (n *Node) reconcileInterruptedLiveRestoreSwap() error {
 		)
 	}
 
+	// Both outcomes below rename or remove by pathname in dataDir's parent.
+	// Refuse to start rather than act on names another user could have
+	// pointed at the live data directory.
+	if err := lifecycle.ValidateRestoreWorkParent(
+		filepath.Dir(dataDir),
+	); err != nil {
+		return fmt.Errorf("reconcile interrupted restore swap: %w", err)
+	}
 	_, dataErr := os.Stat(dataDir)
 	switch {
 	case os.IsNotExist(dataErr):
@@ -1922,7 +1948,7 @@ func (n *Node) reconcileInterruptedLiveRestoreSwap() error {
 				filepath.Dir(dataDir), err,
 			)
 		}
-		_ = os.RemoveAll(stagingDir)
+		_ = lifecycle.RemoveRestoreWorkDir(stagingDir)
 		return nil
 	case dataErr != nil:
 		return fmt.Errorf("stat data directory %q: %w", dataDir, dataErr)
@@ -1934,7 +1960,7 @@ func (n *Node) reconcileInterruptedLiveRestoreSwap() error {
 			"backup_dir", backupDir,
 			"data_dir", dataDir,
 		)
-		_ = os.RemoveAll(stagingDir)
+		_ = lifecycle.RemoveRestoreWorkDir(stagingDir)
 		return nil
 	}
 }
@@ -2021,6 +2047,16 @@ func (n *Node) removeConfirmedRestoreBackup() {
 	if _, err := os.Stat(backupDir); err != nil {
 		return
 	}
+	if err := lifecycle.ValidateRestoreWorkParent(
+		filepath.Dir(n.config.dataDir),
+	); err != nil {
+		n.config.logger.Warn(
+			"kept pre-restore backup: data directory parent is not trusted",
+			"dir", backupDir,
+			"error", err,
+		)
+		return
+	}
 	recoveryDir := lifecycle.RestoreRecoveryDir(
 		n.config.dataDir + restoreStagingSuffix,
 	)
@@ -2056,7 +2092,7 @@ func (n *Node) removeConfirmedRestoreBackup() {
 		)
 		return
 	}
-	if err := os.RemoveAll(backupDir); err != nil {
+	if err := lifecycle.RemoveRestoreWorkDir(backupDir); err != nil {
 		n.config.logger.Warn(
 			"failed to remove confirmed pre-restore backup after startup",
 			"dir", backupDir,

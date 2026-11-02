@@ -423,7 +423,6 @@ func RunSnapshotBackfill(
 	digests, err := fetchVerifiedDigests(
 		ctx, client, dcfg, artifact, downloadDir,
 	)
-	removeDigestsCache(artifact, downloadDir)
 	if err != nil {
 		return ocommon.Point{}, err
 	}
@@ -470,10 +469,10 @@ func RunSnapshotBackfill(
 		}
 	}
 
-	ancillary, ancillaryDigests, archivePath, err := downloadAncillaryV2(
+	ancillary, ancillaryDigests, archive, err := downloadAncillaryV2(
 		ctx, dcfg, artifact, downloadDir,
 	)
-	defer removeAncillary(logger, ancillary, archivePath)
+	defer removeAncillary(logger, ancillary, archive)
 	if err != nil {
 		return ocommon.Point{}, fmt.Errorf(
 			"verified Mithril ancillary data unavailable: %w", err,
@@ -823,11 +822,13 @@ func blocksContain(blocks []models.Block, p ocommon.Point) bool {
 
 // removeAncillary releases and deletes the ancillary download. The ledger
 // state it held has either been imported or will be downloaded again.
-func removeAncillary(logger *slog.Logger, tree *vettedDir, archive string) {
+func removeAncillary(
+	logger *slog.Logger,
+	tree *vettedDir,
+	archive *bootstrapFile,
+) {
 	if tree != nil {
-		path := tree.Path()
-		tree.Close()
-		if err := os.RemoveAll(path); err != nil {
+		if err := cleanupVettedDir(tree); err != nil {
 			logger.Warn(
 				"mithril: removing ancillary data",
 				"component", "mithril",
@@ -835,9 +836,8 @@ func removeAncillary(logger *slog.Logger, tree *vettedDir, archive string) {
 			)
 		}
 	}
-	if archive != "" {
-		if err := os.Remove(archive); err != nil &&
-			!errors.Is(err, os.ErrNotExist) {
+	if archive != nil {
+		if err := archive.cleanup(); err != nil {
 			logger.Warn(
 				"mithril: removing ancillary archive",
 				"component", "mithril",
@@ -860,6 +860,7 @@ type snapshotProbes struct {
 	keep     int
 
 	storeDir  string
+	store     *bootstrapDir
 	storeRoot *os.Root
 	probed    map[uint64]probeResult
 	onDisk    map[uint64]struct{}
@@ -885,7 +886,7 @@ func newSnapshotProbes(
 	}
 	// Named as a feed's directory is, so a crashed restore's probes are
 	// swept with the feeds'.
-	dir, err := os.MkdirTemp(
+	dir, store, err := createBootstrapDir(
 		bcfg.DownloadDir,
 		chunkFeedDirPrefix+truncateDigest(artifact.Hash)+"-*",
 	)
@@ -894,7 +895,7 @@ func newSnapshotProbes(
 	}
 	_, root, err := openImmutableRoot(filepath.Join(dir, "extract"))
 	if err != nil {
-		_ = os.RemoveAll(dir)
+		_ = store.cleanup()
 		return nil, err
 	}
 	return &snapshotProbes{
@@ -905,6 +906,7 @@ func newSnapshotProbes(
 		logger:    logger,
 		keep:      max(keep, 1),
 		storeDir:  dir,
+		store:     store,
 		storeRoot: root,
 		probed:    map[uint64]probeResult{},
 		onDisk:    map[uint64]struct{}{},
@@ -918,7 +920,7 @@ func (p *snapshotProbes) close() {
 			"component", "mithril", "error", err,
 		)
 	}
-	if err := os.RemoveAll(p.storeDir); err != nil {
+	if err := p.store.cleanup(); err != nil {
 		p.logger.Warn(
 			"mithril: removing probe directory",
 			"component", "mithril", "error", err,

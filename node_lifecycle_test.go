@@ -400,6 +400,11 @@ func lifecycleSnapshot(
 	)
 }
 
+func snapshotTestDir(t testing.TB, name string) string {
+	t.Helper()
+	return filepath.Join(testutil.OwnerOnlyTempDir(t), name)
+}
+
 // TestLiveSnapshotAppliesMaxCommitPause verifies the live-node path passes
 // databaseLifecycle.snapshotMaxCommitPause to lifecycle.Snapshot. A
 // nanosecond bound has always elapsed by the time the state reads finish.
@@ -407,7 +412,7 @@ func TestLiveSnapshotAppliesMaxCommitPause(t *testing.T) {
 	n, _ := newLiveLifecycleTestNode(t, 1)
 	n.config.databaseLifecycle.SnapshotMaxCommitPause = time.Nanosecond
 
-	snapshotDir := filepath.Join(t.TempDir(), "snap")
+	snapshotDir := snapshotTestDir(t, "snap")
 	_, err := n.Snapshot(context.Background(), snapshotDir, "", "")
 	require.ErrorIs(t, err, lifecycle.ErrCommitPauseExceeded)
 	require.NoDirExists(t, snapshotDir)
@@ -1086,7 +1091,7 @@ func TestLiveRestorePreservesGenesisForkSelection(t *testing.T) {
 	const numBlocks = 25
 	n, points, keys := newGenesisSelectionTestNode(t, numBlocks)
 
-	snapshotDir := filepath.Join(t.TempDir(), "snap-3273")
+	snapshotDir := snapshotTestDir(t, "snap-3273")
 	manifest, err := lifecycleSnapshot(t, n, snapshotDir)
 	require.NoError(t, err)
 	require.Equal(t, points[len(points)-1].Slot, manifest.TipSlot)
@@ -1537,7 +1542,7 @@ func TestLiveRestoreRebuildsStorageAndKeepsNodeUsable(t *testing.T) {
 	const numBlocks = 10
 	n, points := newLiveLifecycleTestNode(t, numBlocks)
 
-	snapshotDir := filepath.Join(t.TempDir(), "snap")
+	snapshotDir := snapshotTestDir(t, "snap")
 	manifest, err := lifecycleSnapshot(t, n, snapshotDir)
 	require.NoError(t, err)
 	require.Equal(t, points[len(points)-1].Slot, manifest.TipSlot)
@@ -1605,7 +1610,7 @@ func TestLiveRestoreRejectsCorruptedSnapshotWithoutDataLoss(t *testing.T) {
 	const numBlocks = 10
 	n, points := newLiveLifecycleTestNode(t, numBlocks)
 
-	snapshotDir := filepath.Join(t.TempDir(), "snap")
+	snapshotDir := snapshotTestDir(t, "snap")
 	_, err := lifecycleSnapshot(t, n, snapshotDir)
 	require.NoError(t, err)
 
@@ -1685,7 +1690,7 @@ func TestLiveRestoreRejectsNetworkMismatchWithoutDataLoss(t *testing.T) {
 		BlockNumber: 0,
 	}, nil))
 
-	snapshotDir := filepath.Join(t.TempDir(), "snap")
+	snapshotDir := snapshotTestDir(t, "snap")
 	_, err = lifecycle.Snapshot(
 		context.Background(),
 		otherDB,

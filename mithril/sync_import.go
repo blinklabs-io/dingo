@@ -125,7 +125,8 @@ func ensureMithrilBackfillCheckpoint(db *database.Database) error {
 		return fmt.Errorf("reading backfill checkpoint: %w", err)
 	}
 
-	if cp != nil && !cp.Completed {
+	if cp != nil && !cp.Completed && cp.LastIndexID != nil &&
+		len(cp.LastBlockHash) == 32 {
 		return nil
 	}
 
@@ -139,6 +140,10 @@ func ensureMithrilBackfillCheckpoint(db *database.Database) error {
 			Completed: false,
 		}
 	} else {
+		cp.LastSlot = 0
+		cp.LastIndexID = nil
+		cp.LastBlockHash = nil
+		cp.TotalSlots = 0
 		cp.Completed = false
 		cp.UpdatedAt = now
 	}
@@ -161,6 +166,8 @@ func resetMithrilBackfillCheckpoint(db *database.Database) error {
 		cp = &models.BackfillCheckpoint{Phase: node.BackfillPhase}
 	}
 	cp.LastSlot = 0
+	cp.LastIndexID = nil
+	cp.LastBlockHash = nil
 	cp.TotalSlots = 0
 	cp.Completed = false
 	cp.StartedAt = now

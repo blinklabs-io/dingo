@@ -545,11 +545,17 @@ func (c *Config) experimentalLeiosNetworkingEnabled() bool {
 }
 
 // experimentalDijkstraEnabled reports whether the Dijkstra ledger era is
-// active. Beyond the explicit opt-ins, the Musashi testnet hard-forks into
-// Dijkstra, so syncing it requires the Dijkstra era table even over base
-// protocols.
+// active. Beyond the explicit opt-ins, the Musashi and Dijkstra testnets
+// hard-fork into Dijkstra, so syncing either requires the Dijkstra era table.
+// DijkstraNet keeps the base Ouroboros protocols unless Leios is explicitly
+// enabled.
 func (c *Config) experimentalDijkstraEnabled() bool {
-	return c.experimentalLeiosNetworkingEnabled() || c.isMusashiNetwork()
+	if c.cfg == nil {
+		return false
+	}
+	return c.experimentalLeiosNetworkingEnabled() ||
+		c.cfg.Network == ouroboros.NetworkCardanoDijkstra.Name ||
+		c.cfg.NetworkMagic == ouroboros.NetworkCardanoDijkstra.NetworkMagic
 }
 
 func (n *Node) configValidate() error {

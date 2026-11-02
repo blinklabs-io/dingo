@@ -8942,7 +8942,7 @@ func TestHardForkBoundaryDiscardsDeferredSnapshotCapture(t *testing.T) {
 	f.ls.SetEpochBoundarySnapshotHook(noop)
 	f.ls.SetCurrentBoundarySPOStakeHook(
 		func(
-			*database.Txn, event.EpochTransitionEvent,
+			*database.Txn, event.EpochTransitionEvent, uint,
 		) ([]*models.PoolStakeSnapshot, error) {
 			return nil, nil
 		},

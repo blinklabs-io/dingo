@@ -431,7 +431,7 @@ func observePendingRoundReaders(
 	ret.liveInputs = strings.Join(lines, "\n")
 
 	stakes, delegators, err := meta.GetEpochBoundaryStakeByPools(
-		pools, boundary-1, boundary, 0, 0, nil,
+		pools, boundary-1, boundary, nil, 0, 0, nil,
 	)
 	require.NoError(t, err)
 	ret.boundaryStake = renderStakeMaps(stakes, delegators)

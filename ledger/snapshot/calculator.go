@@ -165,6 +165,7 @@ func (c *Calculator) CalculateStakeDistribution(
 		0,
 		0,
 		0,
+		nil,
 	)
 	return dist, err
 }
@@ -187,6 +188,7 @@ func (c *Calculator) CalculateStakeDistributionInTxn(
 		0,
 		0,
 		0,
+		nil,
 	)
 }
 
@@ -267,7 +269,7 @@ func (c *Calculator) calculateBoundaryStakeDistributionInTxn(
 		)
 	}
 	return c.calculateHistoricalBoundaryStakeDistributionInTxn(
-		ctx, txn, slot, boundarySlot, expiryEpoch, inactivityPeriod,
+		ctx, txn, slot, boundarySlot, expiryEpoch, inactivityPeriod, nil,
 	)
 }
 
@@ -283,16 +285,19 @@ func (c *Calculator) calculateHistoricalBoundaryStakeDistributionInTxn(
 	boundarySlot uint64,
 	expiryEpoch uint64,
 	inactivityPeriod uint64,
+	incomingEraID *uint,
 ) (*StakeDistribution, error) {
 	rewardSlot := boundaryRewardSlot(slot, boundarySlot)
 	dist, err := c.calculateHistoricalStakeDistributionInTxn(
 		ctx, txn, slot, rewardSlot, expiryEpoch, inactivityPeriod,
+		incomingEraID,
 	)
 	if err != nil {
 		return nil, err
 	}
 	stakeInputs, totalActiveStake, err := c.rewardStakeInputsInTxn(
 		ctx, txn, slot, rewardSlot, expiryEpoch, inactivityPeriod,
+		incomingEraID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("calculate reward stake inputs: %w", err)
@@ -460,6 +465,7 @@ func (c *Calculator) calculateHistoricalStakeDistributionInTxn(
 	boundarySlot uint64,
 	expiryEpoch uint64,
 	inactivityPeriod uint64,
+	incomingEraID *uint,
 ) (*StakeDistribution, error) {
 	dist := &StakeDistribution{
 		Slot:           slot,
@@ -468,7 +474,8 @@ func (c *Calculator) calculateHistoricalStakeDistributionInTxn(
 	}
 
 	err := c.calculateFromHistoricalStake(
-		ctx, txn, slot, boundarySlot, expiryEpoch, inactivityPeriod, dist,
+		ctx, txn, slot, boundarySlot, expiryEpoch, inactivityPeriod,
+		incomingEraID, dist,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("calculate from historical stake: %w", err)
@@ -492,6 +499,7 @@ func (c *Calculator) rewardStakeInputsInTxn(
 	boundarySlot uint64,
 	expiryEpoch uint64,
 	inactivityPeriod uint64,
+	incomingEraID *uint,
 ) ([]StakeInput, uint64, error) {
 	meta := c.db.Metadata()
 	metaTxn := (*txn).Metadata()
@@ -549,6 +557,7 @@ func (c *Calculator) rewardStakeInputsInTxn(
 		boundarySlot,
 		expiryEpoch,
 		inactivityPeriod,
+		incomingEraID,
 	)
 	if err != nil {
 		return nil, 0, fmt.Errorf("get batch reward stake inputs: %w", err)
@@ -579,6 +588,7 @@ func (c *Calculator) calculateFromHistoricalStake(
 	boundarySlot uint64,
 	expiryEpoch uint64,
 	inactivityPeriod uint64,
+	incomingEraID *uint,
 	dist *StakeDistribution,
 ) error {
 	meta := c.db.Metadata()
@@ -607,6 +617,7 @@ func (c *Calculator) calculateFromHistoricalStake(
 		boundarySlot,
 		expiryEpoch,
 		inactivityPeriod,
+		incomingEraID,
 	)
 	if err != nil {
 		return fmt.Errorf("get batch pools historical stake: %w", err)
@@ -674,6 +685,7 @@ func (c *Calculator) getBatchPoolsDelegatedStake(
 	boundarySlot uint64,
 	expiryEpoch uint64,
 	inactivityPeriod uint64,
+	incomingEraID *uint,
 ) (*rewardStakeAggregation, error) {
 	// Initialize result maps
 	stakeMap := &rewardStakeAggregation{
@@ -705,6 +717,7 @@ func (c *Calculator) getBatchPoolsDelegatedStake(
 		poolKeyHashBytes,
 		slot,
 		boundarySlot,
+		incomingEraID,
 		expiryEpoch,
 		inactivityPeriod,
 		metaTxn,
@@ -751,6 +764,7 @@ func (c *Calculator) getBatchPoolsHistoricalStake(
 	boundarySlot uint64,
 	expiryEpoch uint64,
 	inactivityPeriod uint64,
+	incomingEraID *uint,
 ) (map[lcommon.PoolKeyHash]uint64, map[lcommon.PoolKeyHash]uint64, error) {
 	stakeMap := make(map[lcommon.PoolKeyHash]uint64, len(pools))
 	delegatorMap := make(map[lcommon.PoolKeyHash]uint64, len(pools))
@@ -769,6 +783,7 @@ func (c *Calculator) getBatchPoolsHistoricalStake(
 		poolKeyHashBytes,
 		slot,
 		boundarySlot,
+		incomingEraID,
 		expiryEpoch,
 		inactivityPeriod,
 		metaTxn,

@@ -100,18 +100,23 @@ func TestCatchUpBandHoldMatchesPlausibilityBound(t *testing.T) {
 			t.Run(fmt.Sprintf("ref=%d/observed=%d", reference, observed), func(t *testing.T) {
 				t.Parallel()
 
-				admitted := newBandSelector(t, reference, nil).
-					PreparePeerTipAdmissionDisposition(bandUpdate(observed)) ==
-					PeerTipUpdateAccepted
+				disposition := newBandSelector(t, reference, nil).
+					PreparePeerTipAdmissionDisposition(bandUpdate(observed))
+				admitted := disposition == PeerTipUpdateAccepted
 				inBand := reference > bandLocal && reference <= bandLocal+bandK
+				// Within reference+K a pending disposition means only the
+				// applied catch-up ceiling defers the header.
+				deferred := disposition == PeerTipUpdatePending &&
+					observed <= reference+bandK
 				cs := newBandSelector(t, reference, nil)
 				cs.mutex.RLock()
 				defer cs.mutex.RUnlock()
 				observedTip := bandChain().tip(observed)
 				localTip := bandChain().tip(bandLocal)
-				require.Equal(t, inBand && !admitted,
+				require.Equal(t, !admitted && (inBand || deferred),
 					cs.catchUpBandHoldLocked(conn, observedTip, localTip, false),
-					"a fresh connection is held only from inside the band")
+					"a fresh connection is held from inside the band, or "+
+						"when only the applied ceiling defers its header")
 				require.Equal(t, !admitted,
 					cs.catchUpBandHoldLocked(conn, observedTip, localTip, true),
 					"a held connection waits until the admission bound passes it")

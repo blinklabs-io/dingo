@@ -254,8 +254,11 @@ func (n *Node) configureSnapshotManager() error {
 		func(
 			txn *database.Txn,
 			evt event.EpochTransitionEvent,
+			incomingEraID uint,
 		) ([]*models.PoolStakeSnapshot, error) {
-			return n.snapshotMgr.CurrentBoundarySPOStakeRows(n.ctx, txn, evt)
+			return n.snapshotMgr.CurrentBoundarySPOStakeRows(
+				n.ctx, txn, evt, incomingEraID,
+			)
 		},
 	)
 	return nil

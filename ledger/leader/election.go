@@ -1004,7 +1004,7 @@ func (e *Election) computeSchedule(
 	)
 	if poolStake == 0 {
 		e.logger.Info(
-			"pool has no stake in active snapshot, skipping schedule computation",
+			"pool has no stake in active snapshot, recording empty schedule",
 			"component",
 			"leader",
 			"epoch",
@@ -1012,7 +1012,6 @@ func (e *Election) computeSchedule(
 			"snapshot_epoch",
 			snapshotEpoch,
 		)
-		return nil, nil
 	}
 
 	e.logger.Info(
