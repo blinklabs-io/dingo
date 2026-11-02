@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"time"
 
 	"github.com/blinklabs-io/dingo/chainselection"
 	"github.com/blinklabs-io/dingo/database"
@@ -240,6 +241,54 @@ func leiosDijkstraPParamsForSnapshot(
 	return dijkstraPParams, nil
 }
 
+// leiosVoteTimingAdapter adapts ledger.LedgerState to leios.VoteTimingProvider
+// from the current Dijkstra protocol parameters.
+type leiosVoteTimingAdapter struct {
+	ledgerState *ledger.LedgerState
+}
+
+func (a *leiosVoteTimingAdapter) LeiosVoteTiming() (
+	time.Duration,
+	time.Duration,
+	error,
+) {
+	if a.ledgerState == nil {
+		return 0, 0, errors.New("ledger state unavailable")
+	}
+	pparams := a.ledgerState.GetCurrentPParams()
+	dijkstraPParams, ok := pparams.(*gdijkstra.DijkstraProtocolParameters)
+	if !ok {
+		return 0, 0, fmt.Errorf(
+			"leios vote timing requires the dijkstra era, current pparams are %T",
+			pparams,
+		)
+	}
+	return leiosVoteTimingFromPParams(dijkstraPParams)
+}
+
+// leiosVoteTimingFromPParams derives the vote window from the announcement and
+// vote period lengths, both in milliseconds. Voting opens three announcement
+// periods after the announcing slot begins, the wait that lets a competing
+// header for the slot appear before a vote is cast.
+func leiosVoteTimingFromPParams(
+	dijkstraPParams *gdijkstra.DijkstraProtocolParameters,
+) (time.Duration, time.Duration, error) {
+	if dijkstraPParams == nil {
+		return 0, 0, errors.New("nil Dijkstra protocol parameters")
+	}
+	if dijkstraPParams.LeiosAnnouncementPeriodLength == 0 ||
+		dijkstraPParams.LeiosVotePeriodLength == 0 {
+		return 0, 0, errors.New("leios announcement or vote period is zero")
+	}
+	opens := 3 * time.Duration(
+		dijkstraPParams.LeiosAnnouncementPeriodLength,
+	) * time.Millisecond
+	window := time.Duration(
+		dijkstraPParams.LeiosVotePeriodLength,
+	) * time.Millisecond
+	return opens, window, nil
+}
+
 // leiosCommitteeParamsFromPParams extracts the Dijkstra committee size and
 // quorum threshold. These consensus values must be present in the historical
 // parameters captured for the committee's mark snapshot.
@@ -291,6 +340,11 @@ func (n *Node) initLeiosVoteManager(ctx context.Context) error {
 		// committee computation and the stake snapshot queries behind
 		// it.
 		SlotProvider: n.ledgerState,
+		// Votes follow the protocol parameters' wall-clock window.
+		VoteTimingProvider: &leiosVoteTimingAdapter{
+			ledgerState: n.ledgerState,
+		},
+		SlotOnsetProvider: n.ledgerState,
 		// Source local vote production and relayed vote acceptance from the
 		// pipeline's corresponding boundaries. Relayed votes remain useful
 		// until the certification deadline even after local voting closes.

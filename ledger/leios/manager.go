@@ -133,6 +133,9 @@ const (
 	// voteNotEmittedSlotWindow: the announcing ranking block is outside the
 	// vote window.
 	voteNotEmittedSlotWindow = "slot_window"
+	// voteNotEmittedTooLate: the parameter-derived voting window closed
+	// before this node could sign.
+	voteNotEmittedTooLate = "too_late"
 	// voteNotEmittedCommitteeUnavailable: the epoch's committee could not be
 	// computed.
 	voteNotEmittedCommitteeUnavailable = "committee_unavailable"
@@ -149,6 +152,9 @@ const (
 	// voteNotEmittedNotInserted: the signed vote was refused by the store
 	// (dedup or equivocation guard).
 	voteNotEmittedNotInserted = "not_inserted"
+	// voteNotEmittedSuperseded: the announcement was rolled back, or the
+	// manager stopped, between the decision to vote and its commit.
+	voteNotEmittedSuperseded = "superseded"
 )
 
 // voteNotEmittedReasons is every label the counter can carry, so all of them
@@ -157,12 +163,14 @@ var voteNotEmittedReasons = []string{
 	voteNotEmittedDuplicate,
 	voteNotEmittedNoKey,
 	voteNotEmittedSlotWindow,
+	voteNotEmittedTooLate,
 	voteNotEmittedCommitteeUnavailable,
 	voteNotEmittedNotSeated,
 	voteNotEmittedUnknownMember,
 	voteNotEmittedKeyMismatch,
 	voteNotEmittedSigningFailed,
 	voteNotEmittedNotInserted,
+	voteNotEmittedSuperseded,
 }
 
 // ErrVoteManagerStopped is returned by blocking calls when the vote
@@ -266,6 +274,19 @@ type SlotProvider interface {
 	CurrentOrTipSlot() uint64
 }
 
+// VoteTimingProvider supplies the wall-clock voting window from the current
+// protocol parameters.
+type VoteTimingProvider interface {
+	// LeiosVoteTiming returns how long after the onset of the announcing slot
+	// voting opens, and how long it then stays open.
+	LeiosVoteTiming() (opens, window time.Duration, err error)
+}
+
+// SlotOnsetProvider converts a slot to the wall-clock time it begins.
+type SlotOnsetProvider interface {
+	SlotToTime(slot uint64) (time.Time, error)
+}
+
 // CommitteeParamsProvider supplies the committee size and quorum threshold
 // captured by the mark snapshot used for the requested epoch.
 type CommitteeParamsProvider interface {
@@ -290,6 +311,12 @@ type VoteManagerConfig struct {
 	// the window check is disabled and votes for any resolvable slot
 	// are accepted.
 	SlotProvider SlotProvider
+	// VoteTimingProvider and SlotOnsetProvider together schedule local votes
+	// on the protocol parameters' window. When either is nil, or the window
+	// cannot be resolved for an announcement, a validated announcement is
+	// voted on immediately, bounded only by VoteWindowSlots.
+	VoteTimingProvider VoteTimingProvider
+	SlotOnsetProvider  SlotOnsetProvider
 	// Registry is a private test/devnet key source used only when KeyProvider
 	// is nil. Production composition always supplies KeyProvider.
 	Registry     *VoterRegistry
@@ -365,10 +392,21 @@ type readyAnnouncement struct {
 	record announcementRecord
 }
 
+// votingConfigurationSnapshot is what a local vote was decided under. insertVote
+// commits the vote only if all of it still holds under mu, and records in
+// rejection why it did not.
 type votingConfigurationSnapshot struct {
 	generation uint64
 	pool       []byte
 	key        *VoteSigningKey
+	// lifecycle is the manager lifecycle the vote belongs to; Stop advances
+	// it, so a vote decided before Stop never commits after it.
+	lifecycle uint64
+	// closesAt is the end of the wall-clock vote window, zero when unknown.
+	closesAt time.Time
+	// rejection is set by insertVote to the not-emitted reason when the
+	// vote is refused for one of the conditions above.
+	rejection string
 }
 
 type pendingPrototypeVote struct {
@@ -466,6 +504,15 @@ type VoteManager struct {
 	certifyByDeadlineSlots uint64
 	registry               *VoterRegistry
 	metrics                *voteManagerMetrics
+	voteTimingProvider     VoteTimingProvider // nil disables vote scheduling
+	slotOnsetProvider      SlotOnsetProvider  // nil disables vote scheduling
+	// scheduledVotes holds the timer of each announcement waiting for its
+	// vote window to open, guarded by mu. A timer fires at most once, and
+	// only while its entry is still present, so stopping clears the map.
+	scheduledVotes map[lcommon.Blake2b256]scheduledVote
+	nextVoteTimer  uint64
+	// scheduleAfter arms a timer; tests replace it to avoid real delays.
+	scheduleAfter func(d time.Duration, f func()) (stop func() bool)
 	// now is the clock used for vote TTL expiry; tests may override it.
 	now func() time.Time
 	// signVote is the local vote signer; tests may override it to synchronize
@@ -491,9 +538,13 @@ type VoteManager struct {
 	prototypeEmissionMu sync.Mutex
 	running             bool
 	stopping            bool
-	cancel              context.CancelFunc
-	loopWg              sync.WaitGroup
-	subs                []managerSubscription
+	// lifecycle advances on every stop. Local emission captures it where it
+	// decides to vote, and a vote whose lifecycle has ended is not committed:
+	// a check of running alone would accept it after a later Start.
+	lifecycle uint64
+	cancel    context.CancelFunc
+	loopWg    sync.WaitGroup
+	subs      []managerSubscription
 
 	committees map[uint64]*epochEntry
 	// committeeInFlight coalesces concurrent computation of one epoch's
@@ -618,13 +669,19 @@ func NewVoteManager(cfg VoteManagerConfig) (*VoteManager, error) {
 		)
 	}
 	m := &VoteManager{
-		logger:                 logger.With("component", "leios"),
-		eventBus:               cfg.EventBus,
-		stakeProvider:          cfg.StakeProvider,
-		epochProvider:          cfg.EpochProvider,
-		paramsProvider:         cfg.ParamsProvider,
-		keyProvider:            cfg.KeyProvider,
-		slotProvider:           cfg.SlotProvider,
+		logger:             logger.With("component", "leios"),
+		eventBus:           cfg.EventBus,
+		stakeProvider:      cfg.StakeProvider,
+		epochProvider:      cfg.EpochProvider,
+		paramsProvider:     cfg.ParamsProvider,
+		keyProvider:        cfg.KeyProvider,
+		slotProvider:       cfg.SlotProvider,
+		voteTimingProvider: cfg.VoteTimingProvider,
+		slotOnsetProvider:  cfg.SlotOnsetProvider,
+		scheduledVotes:     make(map[lcommon.Blake2b256]scheduledVote),
+		scheduleAfter: func(d time.Duration, f func()) func() bool {
+			return time.AfterFunc(d, f).Stop
+		},
 		voteWindowSlots:        voteWindowSlots,
 		certifyByDeadlineSlots: certifyByDeadlineSlots,
 		registry:               registry,
@@ -733,6 +790,11 @@ func (m *VoteManager) stopLocked() {
 		return
 	}
 	m.running = false
+	m.lifecycle++
+	for _, v := range m.scheduledVotes {
+		v.stop()
+	}
+	m.scheduledVotes = make(map[lcommon.Blake2b256]scheduledVote)
 	if m.cancel != nil {
 		m.cancel()
 		m.cancel = nil
@@ -1055,6 +1117,7 @@ func (m *VoteManager) activateDeferredVotingLocked(
 ) (bool, error) {
 	replayPrepared := false
 	var ready []readyAnnouncement
+	var lifecycle uint64
 	for {
 		m.mu.Lock()
 		if m.votingLookupGeneration != lookupGeneration ||
@@ -1067,6 +1130,7 @@ func (m *VoteManager) activateDeferredVotingLocked(
 		}
 		m.deferredVotingAuthorized = true
 		ready = m.readyAnnouncementsForEpochLocked(currentEpoch)
+		lifecycle = m.lifecycle
 		if len(ready) == 0 || replayPrepared {
 			m.votingPool = slices.Clone(poolKeyHash)
 			m.votingKey = key
@@ -1095,7 +1159,7 @@ func (m *VoteManager) activateDeferredVotingLocked(
 		return slices.Compare(ready[i].rbHash[:], ready[j].rbHash[:]) < 0
 	})
 	for _, item := range ready {
-		m.emitPrototypeVoteLocked(item.rbHash, item.record)
+		m.emitPrototypeVoteLocked(item.rbHash, item.record, lifecycle)
 	}
 
 	m.mu.Lock()
@@ -2240,26 +2304,46 @@ func (m *VoteManager) insertVote(
 		SlotNo:  vote.SlotNo,
 		VoterId: vote.VoterId,
 	}
-	now := m.now()
 
 	m.mu.Lock()
-	if expectedVoting != nil &&
-		(m.votingLookupGeneration != expectedVoting.generation ||
+	// Read the clock under the lock: the vote deadline below must hold at
+	// the commit, not before waiting for the lock.
+	now := m.now()
+	if expectedVoting != nil {
+		if m.votingLookupGeneration != expectedVoting.generation ||
 			m.votingKey != expectedVoting.key ||
-			!slices.Equal(m.votingPool, expectedVoting.pool)) {
-		m.mu.Unlock()
-		return false
+			!slices.Equal(m.votingPool, expectedVoting.pool) {
+			m.mu.Unlock()
+			return false
+		}
+		if m.lifecycle != expectedVoting.lifecycle {
+			expectedVoting.rejection = voteNotEmittedSuperseded
+			m.mu.Unlock()
+			return false
+		}
+		if !expectedVoting.closesAt.IsZero() &&
+			now.After(expectedVoting.closesAt) {
+			expectedVoting.rejection = voteNotEmittedTooLate
+			m.mu.Unlock()
+			return false
+		}
 	}
 	if announcingRbHash != (lcommon.Blake2b256{}) {
 		current, ok := m.announcements[announcingRbHash]
 		if !ok || current.slot != vote.SlotNo || current.epoch != epoch ||
 			current.ebHash != vote.EndorserBlockHash {
+			if expectedVoting != nil {
+				expectedVoting.rejection = voteNotEmittedSuperseded
+			}
 			m.mu.Unlock()
 			return false
 		}
 		if originConn == "" {
 			validated, ok := m.validatedAnnouncements[announcingRbHash]
 			if !ok || validated.ebHash != current.ebHash {
+				if expectedVoting != nil {
+					expectedVoting.rejection = voteNotEmittedSuperseded
+				}
 				m.mu.Unlock()
 				return false
 			}
@@ -2671,24 +2755,30 @@ func (m *VoteManager) HandleValidatedEndorserBlock(
 	}
 	record, ready := m.announcements[rbHash]
 	ready = ready && record.ebHash == ebHash
+	lifecycle := m.lifecycle
 	m.mu.Unlock()
 	if ready {
-		m.emitPrototypeVote(rbHash, record)
+		m.emitPrototypeVote(rbHash, record, lifecycle)
 	}
 }
 
+// emitPrototypeVote signs and commits the local vote for an announcement. The
+// caller passes the lifecycle it observed the announcement under, so a
+// decision made before Stop cannot commit after it.
 func (m *VoteManager) emitPrototypeVote(
 	rbHash lcommon.Blake2b256,
 	record announcementRecord,
+	lifecycle uint64,
 ) {
 	m.localEmissionMu.Lock()
 	defer m.localEmissionMu.Unlock()
-	m.emitPrototypeVoteLocked(rbHash, record)
+	m.emitPrototypeVoteLocked(rbHash, record, lifecycle)
 }
 
 func (m *VoteManager) emitPrototypeVoteLocked(
 	rbHash lcommon.Blake2b256,
 	record announcementRecord,
+	lifecycle uint64,
 ) {
 	m.mu.Lock()
 	votingPool := slices.Clone(m.votingPool)
@@ -2756,6 +2846,10 @@ func (m *VoteManager) emitPrototypeVoteLocked(
 		}
 		return
 	}
+	open, closesAt := m.voteWindowOpen(rbHash, record, lifecycle)
+	if !open {
+		return
+	}
 	member, ok := committee.Member(voterId)
 	if !ok {
 		m.noteVoteNotEmitted(voteNotEmittedUnknownMember)
@@ -2780,6 +2874,13 @@ func (m *VoteManager) emitPrototypeVoteLocked(
 		)
 		return
 	}
+	// A timer outlives a rollback or a Stop. Signing is the expensive step,
+	// so recheck the announcement before it; insertVote checks again at the
+	// commit, which covers state that moves while signing.
+	if !m.localVoteCurrent(rbHash, record, lifecycle) {
+		m.noteVoteNotEmitted(voteNotEmittedSuperseded)
+		return
+	}
 	msg := PrototypeVoteMessageBytes(rbHash)
 	sig, err := m.signVote(votingKey, msg)
 	if err != nil {
@@ -2799,13 +2900,16 @@ func (m *VoteManager) emitPrototypeVoteLocked(
 		VoteSignature:     sig,
 	}
 	m.prototypeEmissionMu.Lock()
+	snapshot := &votingConfigurationSnapshot{
+		generation: votingGeneration,
+		pool:       votingPool,
+		key:        votingKey,
+		lifecycle:  lifecycle,
+		closesAt:   closesAt,
+	}
 	inserted := m.insertVote(
 		"", vote, record.epoch, committee, member, true, entry.tau, rbHash,
-		&votingConfigurationSnapshot{
-			generation: votingGeneration,
-			pool:       votingPool,
-			key:        votingKey,
-		},
+		snapshot,
 	)
 	if inserted {
 		if m.metrics != nil {
@@ -2826,10 +2930,129 @@ func (m *VoteManager) emitPrototypeVoteLocked(
 				VoteSignature:    sig,
 			}},
 		))
+	} else if snapshot.rejection != "" {
+		m.noteVoteNotEmitted(snapshot.rejection)
 	} else {
 		m.noteVoteNotEmitted(voteNotEmittedNotInserted)
 	}
 	m.prototypeEmissionMu.Unlock()
+}
+
+// localVoteCurrent reports whether a local vote decided under lifecycle for
+// record is still wanted: the manager has not stopped since, and the
+// announcement is neither rolled back, replaced, nor already voted.
+func (m *VoteManager) localVoteCurrent(
+	rbHash lcommon.Blake2b256,
+	record announcementRecord,
+	lifecycle uint64,
+) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.lifecycle != lifecycle {
+		return false
+	}
+	current, ok := m.announcements[rbHash]
+	if !ok || current.slot != record.slot || current.epoch != record.epoch ||
+		current.ebHash != record.ebHash {
+		return false
+	}
+	validated, ok := m.validatedAnnouncements[rbHash]
+	return ok && validated.ebHash == record.ebHash
+}
+
+// scheduledVote is a pending timer for an announcement whose vote window has
+// not opened.
+type scheduledVote struct {
+	id   uint64
+	stop func() bool
+}
+
+// voteWindowOpen reports whether the announcement may be signed now, and when
+// the window closes; the close is zero when it cannot be resolved. The
+// window is measured in wall-clock time from the onset of the announcing slot:
+// it opens after the equivocation-detection wait, three announcement periods,
+// and closes one vote period later. Before it opens the vote is deferred to a
+// timer; after it closes the vote is dropped. When the parameters or the slot
+// time are unavailable the announcement is not delayed, which leaves only the
+// slot-count bound.
+func (m *VoteManager) voteWindowOpen(
+	rbHash lcommon.Blake2b256,
+	record announcementRecord,
+	lifecycle uint64,
+) (bool, time.Time) {
+	if m.voteTimingProvider == nil || m.slotOnsetProvider == nil {
+		return true, time.Time{}
+	}
+	opens, window, err := m.voteTimingProvider.LeiosVoteTiming()
+	if err != nil {
+		m.logger.Debug(
+			"leios vote timing unavailable, voting without delay",
+			"slot", record.slot,
+			"error", err,
+		)
+		return true, time.Time{}
+	}
+	onset, err := m.slotOnsetProvider.SlotToTime(record.slot)
+	if err != nil {
+		m.logger.Debug(
+			"leios slot onset unavailable, voting without delay",
+			"slot", record.slot,
+			"error", err,
+		)
+		return true, time.Time{}
+	}
+	opensAt := onset.Add(opens)
+	closesAt := opensAt.Add(window)
+	now := m.now()
+	if now.After(closesAt) {
+		m.noteVoteNotEmitted(voteNotEmittedTooLate)
+		m.logger.Debug(
+			"leios vote window closed, not voting",
+			"slot", record.slot,
+			"closed_ago", now.Sub(closesAt),
+		)
+		return false, closesAt
+	}
+	if now.Before(opensAt) {
+		m.scheduleVote(rbHash, record, lifecycle, opensAt.Sub(now))
+		return false, closesAt
+	}
+	return true, closesAt
+}
+
+// scheduleVote arms a single timer per announcement that re-runs emission
+// once the vote window opens. The timer carries the lifecycle that armed it,
+// and emission revalidates both it and the announcement before signing and
+// again at the commit, so a timer outliving a rollback or a Stop casts
+// nothing.
+func (m *VoteManager) scheduleVote(
+	rbHash lcommon.Blake2b256,
+	record announcementRecord,
+	lifecycle uint64,
+	delay time.Duration,
+) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.lifecycle != lifecycle {
+		return
+	}
+	if _, pending := m.scheduledVotes[rbHash]; pending {
+		return
+	}
+	m.nextVoteTimer++
+	id := m.nextVoteTimer
+	stop := m.scheduleAfter(delay, func() {
+		m.mu.Lock()
+		current, ok := m.scheduledVotes[rbHash]
+		if !ok || current.id != id {
+			m.mu.Unlock()
+			return
+		}
+		delete(m.scheduledVotes, rbHash)
+		m.mu.Unlock()
+		m.emitPrototypeVote(rbHash, record, lifecycle)
+	})
+	m.scheduledVotes[rbHash] = scheduledVote{id: id, stop: stop}
 }
 
 // noteVoteNotEmitted counts one declined local vote emission. The reasons
@@ -3260,9 +3483,10 @@ func (m *VoteManager) observeAnnouncement(
 	validated, ok := m.validatedAnnouncements[rbHash]
 	ready := ok && validated.ebHash == ebHash
 	pendingMap := m.removePendingAnnouncementLocked(rbHash)
+	lifecycle := m.lifecycle
 	m.mu.Unlock()
 	if ready {
-		m.emitPrototypeVote(rbHash, record)
+		m.emitPrototypeVote(rbHash, record, lifecycle)
 	}
 	for _, candidates := range pendingMap {
 		for _, pending := range candidates {

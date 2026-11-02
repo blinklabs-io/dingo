@@ -696,3 +696,35 @@ func TestLedgerCertificateCallbackReadsVoteManagerSafely(t *testing.T) {
 	assert.NotContains(t, fmt.Sprint(err), "vote manager is unavailable",
 		"the callback must see the installed vote manager")
 }
+
+func TestLeiosVoteTimingFromPParams(t *testing.T) {
+	t.Parallel()
+	opens, window, err := leiosVoteTimingFromPParams(
+		&gdijkstra.DijkstraProtocolParameters{
+			LeiosAnnouncementPeriodLength: 1000,
+			LeiosVotePeriodLength:         4000,
+		},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 3*time.Second, opens)
+	assert.Equal(t, 4*time.Second, window)
+
+	opens, window, err = leiosVoteTimingFromPParams(
+		&gdijkstra.DijkstraProtocolParameters{
+			LeiosAnnouncementPeriodLength: 2500,
+			LeiosVotePeriodLength:         6000,
+		},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 7500*time.Millisecond, opens)
+	assert.Equal(t, 6*time.Second, window)
+
+	for name, pp := range map[string]*gdijkstra.DijkstraProtocolParameters{
+		"nil":               nil,
+		"zero announcement": {LeiosVotePeriodLength: 4000},
+		"zero vote":         {LeiosAnnouncementPeriodLength: 1000},
+	} {
+		_, _, err := leiosVoteTimingFromPParams(pp)
+		require.Error(t, err, name)
+	}
+}
