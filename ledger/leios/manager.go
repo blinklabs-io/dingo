@@ -32,6 +32,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/ratewindow"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	oleiosvotes "github.com/blinklabs-io/gouroboros/protocol/leiosvotes"
 	bls12381 "github.com/consensys/gnark-crypto/ecc/bls12-381"
 	"github.com/prometheus/client_golang/prometheus"
@@ -564,6 +565,7 @@ type VoteManager struct {
 	localVoteTimers        map[lcommon.Blake2b256]*time.Timer
 	observedRbs            map[observedRbKey]observedRbRecord
 	latestRbSlot           uint64
+	latestRbHash           lcommon.Blake2b256 // see recordLatestRb
 	latestRbSeq            uint64
 	acquiredEbs            map[lcommon.Blake2b256]acquiredEbRecord
 	validatedAnnouncements map[lcommon.Blake2b256]validatedAnnouncementRecord
@@ -2308,6 +2310,7 @@ func (m *VoteManager) insertVote(
 			if expectedVoting != nil && !expectedVoting.deadline.IsZero() {
 				_, equivocated := m.equivocatingRbSlots[current.slot]
 				if equivocated || current.slot != m.latestRbSlot ||
+					announcingRbHash != m.latestRbHash ||
 					!validated.seenAt.Before(expectedVoting.deadline) ||
 					!now.Before(expectedVoting.deadline) {
 					m.mu.Unlock()
@@ -2788,7 +2791,7 @@ func (m *VoteManager) localVoteReadiness(
 	m.mu.Lock()
 	validated, validatedOK := m.validatedAnnouncements[rbHash]
 	_, equivocated := m.equivocatingRbSlots[record.slot]
-	latest := record.slot == m.latestRbSlot
+	latest := record.slot == m.latestRbSlot && rbHash == m.latestRbHash
 	m.mu.Unlock()
 
 	if !validatedOK || validated.ebHash != record.ebHash {
@@ -3184,7 +3187,7 @@ func (m *VoteManager) handleChainHeaderInvalidation(
 		m.lastHeaderStreamSeq = evt.Seq
 	}
 	if evt.Seq >= m.latestRbSeq {
-		m.latestRbSlot = evt.Point.Slot
+		m.setLatestRbPointLocked(evt.Point)
 		m.latestRbSeq = evt.Seq
 	}
 	// Two rules, because a chain can lose headers by shrinking or by
@@ -3236,6 +3239,11 @@ func (m *VoteManager) handleChainHeaderObserved(
 // equivocation. A zero issuer is unknown -- ObserveAnnouncement carries none
 // -- and records no equivocation evidence, because two headers for one slot
 // equivocate only when one pool issued both.
+//
+// The latest RB is identified by its hash, not its slot: headers from two
+// pools can share a slot without either equivocating, and CIP-164 votes only
+// for the EB announced by the latest RB itself. A zero latestRbHash names no
+// RB, so no announcement matches it.
 func (m *VoteManager) recordLatestRb(
 	slot uint64,
 	rbHash lcommon.Blake2b256,
@@ -3264,11 +3272,23 @@ func (m *VoteManager) recordLatestRb(
 		return
 	}
 	m.latestRbSlot = slot
+	m.latestRbHash = rbHash
 	if seq != 0 {
 		m.latestRbSeq = seq
 	}
 	if seq > m.lastHeaderStreamSeq {
 		m.lastHeaderStreamSeq = seq
+	}
+}
+
+// setLatestRbPointLocked makes the tip a rollback or header invalidation left
+// behind the latest RB. The origin point carries no hash and names no RB.
+// Callers must hold mu.
+func (m *VoteManager) setLatestRbPointLocked(point ocommon.Point) {
+	m.latestRbSlot = point.Slot
+	m.latestRbHash = lcommon.Blake2b256{}
+	if len(point.Hash) == len(m.latestRbHash) {
+		m.latestRbHash = lcommon.NewBlake2b256(point.Hash)
 	}
 }
 
@@ -3601,7 +3621,7 @@ func (m *VoteManager) handleRollback(evt chain.ChainRollbackEvent) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if evt.Seq == 0 || evt.Seq >= m.latestRbSeq {
-		m.latestRbSlot = evt.Point.Slot
+		m.setLatestRbPointLocked(evt.Point)
 		if evt.Seq != 0 {
 			m.latestRbSeq = evt.Seq
 		}

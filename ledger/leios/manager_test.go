@@ -1069,6 +1069,82 @@ func TestVoteManagerCIP164LocalVoteTiming(t *testing.T) {
 		}}))
 	})
 
+	// Two pools elected in one slot is a slot battle, not equivocation, so
+	// the slot alone cannot say which header is the latest RB: the
+	// announcing header must be that header itself.
+	t.Run("rejects a same-slot announcement that is no longer the latest RB", func(t *testing.T) {
+		fixture, _, now := newCIP164TimingFixture(t, base, 603)
+		announcingRb := lcommon.NewBlake2b256([]byte("same-slot-announcing-rb"))
+		announcedEb := lcommon.NewBlake2b256([]byte("same-slot-announced-eb"))
+		*now = base.Add(2 * time.Second)
+		fixture.mgr.handleChainHeaderAnnouncement(
+			chain.ChainHeaderAnnouncementEvent{
+				Slot:      600,
+				RbHash:    announcingRb,
+				EbHash:    announcedEb,
+				Issuer:    lcommon.PoolKeyHash{0x01},
+				Seq:       1,
+				ArrivedAt: base,
+			},
+		)
+		fixture.mgr.handleChainHeaderObserved(chain.ChainHeaderObservedEvent{
+			Slot:   600,
+			RbHash: lcommon.NewBlake2b256([]byte("same-slot-latest-rb")),
+			Issuer: lcommon.PoolKeyHash{0x02},
+			Seq:    2,
+		})
+		fixture.mgr.HandleValidatedEndorserBlock(600, announcingRb, announcedEb)
+		enableFixtureVoting(t, fixture)
+		*now = base.Add(3 * time.Second)
+
+		fixture.mgr.mu.Lock()
+		record := fixture.mgr.announcements[announcingRb]
+		fixture.mgr.mu.Unlock()
+		_, _, reason, err := fixture.mgr.localVoteReadiness(announcingRb, record)
+		require.NoError(t, err)
+		assert.Equal(t, voteNotEmittedNotLatestRb, reason)
+		fixture.mgr.emitPrototypeVote(announcingRb, record)
+
+		assert.Empty(t, fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{{
+			SlotNo: 600, VoterId: headerArmingSeatedVoterId,
+		}}))
+	})
+
+	t.Run("rechecks the latest RB after signing", func(t *testing.T) {
+		fixture, _, now := newCIP164TimingFixture(t, base, 603)
+		enableFixtureVoting(t, fixture)
+		rbHash := lcommon.NewBlake2b256([]byte("signing-latest-rb"))
+		ebHash := lcommon.NewBlake2b256([]byte("signing-latest-eb"))
+		fixture.mgr.signVote = func(
+			key *VoteSigningKey,
+			msg []byte,
+		) ([]byte, error) {
+			fixture.mgr.handleChainHeaderObserved(chain.ChainHeaderObservedEvent{
+				Slot:   600,
+				RbHash: lcommon.NewBlake2b256([]byte("signing-same-slot-rb")),
+				Issuer: lcommon.PoolKeyHash{0x02},
+				Seq:    2,
+			})
+			return SignVote(key, msg)
+		}
+		*now = base.Add(3 * time.Second)
+		fixture.mgr.handleChainHeaderAnnouncement(
+			chain.ChainHeaderAnnouncementEvent{
+				Slot:      600,
+				RbHash:    rbHash,
+				EbHash:    ebHash,
+				Issuer:    lcommon.PoolKeyHash{0x01},
+				Seq:       1,
+				ArrivedAt: base,
+			},
+		)
+		fixture.mgr.HandleValidatedEndorserBlock(600, rbHash, ebHash)
+
+		assert.Empty(t, fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{{
+			SlotNo: 600, VoterId: headerArmingSeatedVoterId,
+		}}))
+	})
+
 	t.Run("votes only when the announcement is the latest RB", func(t *testing.T) {
 		fixture, _, now := newCIP164TimingFixture(t, base, 604)
 		oldRb := lcommon.NewBlake2b256([]byte("old-rb"))
