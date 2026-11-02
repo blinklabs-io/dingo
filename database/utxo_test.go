@@ -344,9 +344,6 @@ func TestBackfillUtxoAddressesSkipsCoreMode(t *testing.T) {
 	})
 	require.NoError(t, err)
 	seedLegacyAssetUtxosWithoutAddress(t, db, raw, 1, outputCbor)
-	// Core-mode startup may already have recorded completion on the empty
-	// database; clear it so only the storage-mode gate can skip the work.
-	require.NoError(t, db.SetSyncState(utxoAddressBackfillSyncKey, "", nil))
 
 	require.NoError(t, db.backfillUtxoAddresses(context.Background()))
 	var count int
@@ -354,6 +351,7 @@ func TestBackfillUtxoAddressesSkipsCoreMode(t *testing.T) {
 		"SELECT COUNT(*) FROM utxo_address",
 	).Scan(&count))
 	require.Zero(t, count)
+	// Core mode returns before writing the completion marker.
 	complete, err := db.GetSyncState(utxoAddressBackfillSyncKey, nil)
 	require.NoError(t, err)
 	require.NotEqual(t, "true", complete)
