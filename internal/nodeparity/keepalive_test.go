@@ -78,6 +78,7 @@ func TestKeepNtCConnAliveSendsUntilCancelled(t *testing.T) {
 	t.Cleanup(func() { _ = client.Close() })
 
 	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
 	done := make(chan struct{})
 	go func() {
 		keepNtCConnAlive(ctx, client, 10*time.Millisecond)
