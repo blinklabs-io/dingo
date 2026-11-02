@@ -2911,7 +2911,7 @@ func TestFetchTxInfoChunksRetriesATxKoiosHasNotIndexed(t *testing.T) {
 	schedule := []time.Duration{time.Second, 2 * time.Second}
 
 	results, errs, err := fetchTxInfoChunks(
-		context.Background(), chunks, f.fetch, schedule, waits.wait,
+		context.Background(), chunks, f.fetch, schedule, false, waits.wait,
 		func(string, ...any) {},
 	)
 	require.NoError(t, err)
@@ -2949,7 +2949,7 @@ func TestFetchTxInfoChunksGivesUpAfterTheLastWait(t *testing.T) {
 	schedule := []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}
 
 	results, errs, err := fetchTxInfoChunks(
-		context.Background(), chunks, f.fetch, schedule, waits.wait,
+		context.Background(), chunks, f.fetch, schedule, false, waits.wait,
 		func(string, ...any) {},
 	)
 	require.NoError(t, err)
@@ -2965,6 +2965,46 @@ func TestFetchTxInfoChunksGivesUpAfterTheLastWait(t *testing.T) {
 		applyTxInfoResults(UTxOSet{}, chunks, results, errs, t.Logf),
 		"a hash still missing after the last wait must taint the epoch",
 	)
+}
+
+// TestFetchTxInfoChunksRetriesTransientFailuresWhenAsked covers the mainnet
+// failure: a Koios gateway timeout on one chunk re-baselined the
+// reconstruction and left the epoch's UTxO check not run. With
+// retryTransient the chunk is fetched again and applies; a permanent
+// rejection still is not.
+func TestFetchTxInfoChunksRetriesTransientFailuresWhenAsked(t *testing.T) {
+	t.Parallel()
+	chunks := [][]string{{"aa"}, {"ba"}, {"ca"}}
+	f := &txInfoChunkFake{
+		attempts: map[string]int{},
+		respond: func(chunk []string, attempt int) error {
+			switch chunk[0] {
+			case "aa":
+				if attempt <= 2 {
+					return errors.New("koios /tx_info: status 504")
+				}
+			case "ba":
+				return fmt.Errorf("status 400: %w", koiosparity.ErrKoiosPermanent)
+			}
+			return nil
+		},
+	}
+	waits := &recordingWait{}
+	schedule := []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}
+
+	results, errs, err := fetchTxInfoChunks(
+		context.Background(), chunks, f.fetch, schedule, true, waits.wait,
+		func(string, ...any) {},
+	)
+	require.NoError(t, err)
+	assert.NoError(t, errs[0])
+	assert.ErrorIs(t, errs[1], koiosparity.ErrKoiosPermanent)
+	assert.NoError(t, errs[2])
+	assert.Equal(t, schedule[:2], waits.waits)
+	assert.Equal(t, 3, f.attemptsFor("aa"))
+	assert.Equal(t, 1, f.attemptsFor("ba"), "a permanent failure is not refetched")
+	assert.Equal(t, 1, f.attemptsFor("ca"))
+	assert.True(t, applyTxInfoResults(UTxOSet{}, chunks, results, errs, t.Logf))
 }
 
 // TestFetchTxInfoChunksStopsWaitingWhenCancelled proves a session end during
@@ -2992,7 +3032,7 @@ func TestFetchTxInfoChunksStopsWaitingWhenCancelled(t *testing.T) {
 	done := make(chan result, 1)
 	go func() {
 		r, e, err := fetchTxInfoChunks(
-			ctx, [][]string{{"aa"}}, f.fetch, []time.Duration{time.Hour},
+			ctx, [][]string{{"aa"}}, f.fetch, []time.Duration{time.Hour}, false,
 			cancelThenWait, func(string, ...any) {},
 		)
 		done <- result{r, e, err}

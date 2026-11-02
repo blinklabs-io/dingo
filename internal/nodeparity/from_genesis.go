@@ -80,6 +80,21 @@ var txInfoIndexWaits = []time.Duration{
 	40 * time.Second,
 }
 
+// txInfoOutageWaits extends txInfoIndexWaits when Dingo's boundary state is
+// captured. The reconstruction then has no deadline, so a Koios gateway
+// timeout or overload is waited out, about an hour in all, rather than
+// re-baselining and leaving the epoch's UTxO check not run.
+var txInfoOutageWaits = []time.Duration{
+	time.Minute,
+	2 * time.Minute,
+	5 * time.Minute,
+	10 * time.Minute,
+	10 * time.Minute,
+	10 * time.Minute,
+	10 * time.Minute,
+	10 * time.Minute,
+}
+
 // ntcKeepaliveInterval is how often keepNtCConnAlive sends on the chainsync
 // connection. Dingo closes a local connection it has read nothing from for 2
 // minutes, and a chainsync callback sends nothing while it waits on a long
@@ -124,16 +139,20 @@ func keepNtCConnAlive(
 
 // fetchTxInfoChunks fetches every chunk with at most txInfoConcurrency
 // requests in flight, then, after each wait in waits, fetches again each
-// chunk that failed with koiosparity.ErrTxInfoMissing. A chunk is fetched
-// whole every time, so a result is only ever a complete chunk. Other
-// failures are not fetched again: the shared Koios client has already
-// retried them. It returns ctx's error when ctx ends during a fetch or a
-// wait, and the caller must then discard results and errs.
+// chunk that failed with koiosparity.ErrTxInfoMissing, or with any failure
+// that is not koiosparity.ErrKoiosPermanent when retryTransient is set. A
+// chunk is fetched whole every time, so a result is only ever a complete
+// chunk. Without retryTransient other failures are not fetched again: the
+// shared Koios client has already retried them, and a caller racing Dingo's
+// rollback window cannot wait longer. It returns ctx's error when ctx ends
+// during a fetch or a wait, and the caller must then discard results and
+// errs.
 func fetchTxInfoChunks(
 	ctx context.Context,
 	chunks [][]string,
 	fetch func(context.Context, []string) ([]koiosparity.KoiosTxInfoItem, error),
 	waits []time.Duration,
+	retryTransient bool,
 	wait func(context.Context, time.Duration) error,
 	logf func(format string, args ...any),
 ) ([][]koiosparity.KoiosTxInfoItem, []error, error) {
@@ -161,7 +180,11 @@ func fetchTxInfoChunks(
 	for _, d := range waits {
 		pending = pending[:0]
 		for i, err := range errs {
-			if errors.Is(err, koiosparity.ErrTxInfoMissing) {
+			if err == nil {
+				continue
+			}
+			if errors.Is(err, koiosparity.ErrTxInfoMissing) ||
+				(retryTransient && !errors.Is(err, koiosparity.ErrKoiosPermanent)) {
 				pending = append(pending, i)
 			}
 		}
@@ -169,7 +192,7 @@ func fetchTxInfoChunks(
 			break
 		}
 		logf(
-			"nodeparity: koios has not indexed every pending tx yet; "+
+			"nodeparity: koios has not answered every pending tx yet; "+
 				"fetching %d chunk(s) again in %s: %v",
 			len(pending), d, errs[pending[0]],
 		)
@@ -978,7 +1001,10 @@ func RunFromGenesis(
 	})
 	// Read once: a callback can outlive the return on ctx cancellation.
 	lookupTimeout := epochLookupTimeout
-	indexWaits := slices.Clone(txInfoIndexWaits)
+	txInfoWaits := slices.Clone(txInfoIndexWaits)
+	if captures != nil {
+		txInfoWaits = append(txInfoWaits, txInfoOutageWaits...)
+	}
 	// epochAt resolves point's epoch from Dingo's era history, or from Dingo
 	// directly for a point the history does not cover. skip is true when
 	// Dingo refused point as too old before ever answering: the caller
@@ -1112,7 +1138,7 @@ func RunFromGenesis(
 			) ([]koiosparity.KoiosTxInfoItem, error) {
 				return fetchTxInfosCached(ctx, koios, cache, network, chunk)
 			},
-			indexWaits, waitStakeRetry, logf,
+			txInfoWaits, captures != nil, waitStakeRetry, logf,
 		)
 		if err != nil {
 			return err
