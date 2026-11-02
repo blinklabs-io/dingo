@@ -16,13 +16,17 @@ package nodeparity
 
 import (
 	"context"
+	"errors"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	pcommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -118,4 +122,119 @@ func TestRunBoundaryFollowerCapturesFirstBlockOfEachEpoch(t *testing.T) {
 	assert.Equal(t, []uint64{2, 3}, captured)
 	assert.NotNil(t, captures.take(2, server.chain.Points[2]))
 	assert.NotNil(t, captures.take(3, server.chain.Points[4]))
+}
+
+// TestCaptureBoundaryReadsUTxOSetFirst covers the mainnet failure where the
+// stake check's Koios wait outlasted Dingo's rollback window and the UTxO
+// read that followed it was refused as too old.
+func TestCaptureBoundaryReadsUTxOSetFirst(t *testing.T) {
+	t.Parallel()
+	var order []string
+	point := pcommon.NewPoint(10, []byte{0x01})
+	c := captureBoundaryInOrder(
+		3, point,
+		func() (string, error) {
+			order = append(order, "utxo")
+			return "utxo-epoch-3-slot-10.gob", nil
+		},
+		func(c *boundaryCapture) {
+			order = append(order, "checks")
+			assert.Equal(t, "utxo-epoch-3-slot-10.gob", c.utxoPath,
+				"the UTxO set is already read when the Koios-bound checks start")
+		},
+	)
+	assert.Equal(t, []string{"utxo", "checks"}, order)
+	assert.Equal(t, uint64(3), c.epoch)
+	assert.True(t, pointsEqual(point, c.point))
+}
+
+// TestCaptureBoundaryRunsChecksWhenUTxOReadFails proves a failed UTxO read
+// still leaves the protocol-parameter and stake checks to run.
+func TestCaptureBoundaryRunsChecksWhenUTxOReadFails(t *testing.T) {
+	t.Parallel()
+	ran := false
+	c := captureBoundaryInOrder(
+		3, pcommon.NewPoint(10, []byte{0x01}),
+		func() (string, error) { return "", errors.New("point too old") },
+		func(*boundaryCapture) { ran = true },
+	)
+	assert.True(t, ran)
+	assert.Empty(t, c.utxoPath)
+	assert.EqualError(t, c.utxoErr, "point too old")
+}
+
+func withBoundaryFollower(
+	f func(context.Context, *boundaryCaptures),
+) FromGenesisOption {
+	return func(o *fromGenesisOptions) { o.follower = f }
+}
+
+// TestRunFromGenesis_ComparesAgainstBoundaryCapture drives the main loop
+// through an epoch boundary that has a capture. The capture's UTxO set holds
+// one ref the fake Dingo's live answer lacks, and its protocol-parameter
+// result is a marker error, so both reaching the epoch result proves the
+// boundary was checked against the capture rather than queried live. The
+// capture file is removed once compared.
+func TestRunFromGenesis_ComparesAgainstBoundaryCapture(t *testing.T) {
+	const magic = 42
+	server := newGenesisFakeServer(t, 3)
+	server.epochBySlot = map[uint64]int{
+		server.chain.Points[0].Slot: 1,
+		server.chain.Points[1].Slot: 2,
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	server.serve(t, listener, magic)
+
+	koiosSrv := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(koiosSrv.Close)
+	koios, err := NewKoiosClient("preview", "", koiosSrv.URL, true, true)
+	require.NoError(t, err)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "utxo-epoch-2.gob")
+	require.NoError(t, writeUTxOSetFile(path, UTxOSet{"ff#0": "addr|1"}))
+	ppMarker := errors.New("protocol params read at the boundary capture")
+	put := make(chan struct{})
+	follower := func(_ context.Context, captures *boundaryCaptures) {
+		captures.put(&boundaryCapture{
+			epoch:    2,
+			point:    server.chain.Points[1],
+			ppErr:    ppMarker,
+			utxoPath: path,
+		})
+		close(put)
+	}
+
+	results := make(chan EpochResult, 8)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- RunFromGenesis(
+			ctx, listener.Addr().String(), "preview", magic, koios, nil,
+			func(r EpochResult) { results <- r },
+			nil, nil, false,
+			WithBoundaryCaptureDir(dir), withBoundaryFollower(follower),
+		)
+	}()
+	testutil.RequireReceive(t, put, 5*time.Second, "capture handed to the main loop")
+
+	server.allowStep(t) // block 0: the UTxO baseline
+	server.allowStep(t) // block 1: the epoch 2 boundary
+	r := testutil.RequireReceive(t, results, 10*time.Second, "epoch 2 result")
+
+	assert.Equal(t, uint64(2), r.Epoch)
+	assert.ErrorIs(t, r.ProtocolParamsErr, ppMarker)
+	assert.True(t, r.UTxOAttempted)
+	require.NoError(t, r.UTxOErr)
+	assert.Equal(t, []string{"ff#0"}, r.UTxOExtra)
+	assert.Empty(t, r.UTxOMissing)
+	_, err = os.Stat(path)
+	assert.ErrorIs(t, err, os.ErrNotExist, "a compared capture is removed")
+
+	cancel()
+	err = testutil.RequireReceive(t, done, 10*time.Second, "RunFromGenesis exit")
+	assert.True(t, err == nil || errors.Is(err, context.Canceled))
 }

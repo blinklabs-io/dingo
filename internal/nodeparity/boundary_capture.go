@@ -38,6 +38,9 @@ type FromGenesisOption func(*fromGenesisOptions)
 
 type fromGenesisOptions struct {
 	captureDir string
+	// follower replaces runBoundaryFollower; only tests set it, since the
+	// fake Dingo cannot serve a second chainsync session.
+	follower func(context.Context, *boundaryCaptures)
 }
 
 // WithBoundaryCaptureDir makes RunFromGenesis read Dingo's side of every
@@ -178,12 +181,31 @@ func captureBoundary(
 	network string,
 	dir string,
 ) *boundaryCapture {
-	c := &boundaryCapture{epoch: epoch, point: point}
-	c.utxoPath, c.utxoErr = captureUTxOSetFile(ctx, dingoAddr, magic, point, epoch, dir)
-	psStart := time.Now()
-	c.ppMismatches, c.ppErr, c.stakeMismatches, c.stakeErr = runProtocolParamsAndStake(
-		ctx, dingoAddr, magic, point, koios, cache, network, epoch,
+	return captureBoundaryInOrder(
+		epoch, point,
+		func() (string, error) {
+			return captureUTxOSetFile(ctx, dingoAddr, magic, point, epoch, dir)
+		},
+		func(c *boundaryCapture) {
+			c.ppMismatches, c.ppErr, c.stakeMismatches, c.stakeErr = runProtocolParamsAndStake(
+				ctx, dingoAddr, magic, point, koios, cache, network, epoch,
+			)
+		},
 	)
+}
+
+// captureBoundaryInOrder runs readUTxO to completion before checks, which
+// fills in the protocol-parameter and stake results.
+func captureBoundaryInOrder(
+	epoch uint64,
+	point pcommon.Point,
+	readUTxO func() (string, error),
+	checks func(*boundaryCapture),
+) *boundaryCapture {
+	c := &boundaryCapture{epoch: epoch, point: point}
+	c.utxoPath, c.utxoErr = readUTxO()
+	psStart := time.Now()
+	checks(c)
 	c.psElapsed = time.Since(psStart)
 	return c
 }

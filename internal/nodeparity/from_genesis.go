@@ -898,6 +898,10 @@ func RunFromGenesis(
 			return fetchEraSpans(ctx, dingoAddr, magic)
 		})
 		followerDone.Go(func() {
+			if options.follower != nil {
+				options.follower(followerCtx, captures)
+				return
+			}
 			runBoundaryFollower(
 				followerCtx, dingoAddr, magic, startPoint,
 				followerOracle.epoch,
