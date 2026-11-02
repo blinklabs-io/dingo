@@ -119,3 +119,107 @@ func TestLeiosValidationRetryDuringPendingAttemptIsNotLost(t *testing.T) {
 			leiosEBValidationValid
 	}, 5*time.Second, 10*time.Millisecond)
 }
+
+// concurrentLeiosValidationLedger serves endorser-block validation from
+// concurrent attempts; fakeLeiosAnnouncementLedger counts calls without
+// synchronization.
+type concurrentLeiosValidationLedger struct {
+	fakeLeiosAnnouncementLedger
+	validate func(gledger.BlockHeader) error
+}
+
+func (l *concurrentLeiosValidationLedger) ValidateLeiosEndorserBlockTransactions(
+	_ context.Context,
+	header gledger.BlockHeader,
+	_ []byte,
+	_ [][]byte,
+) error {
+	return l.validate(header)
+}
+
+func testLeiosValidationEntry(
+	t *testing.T,
+	slot uint64,
+	txIndex byte,
+) (string, *leiosEndorserBlockData) {
+	t.Helper()
+	txRaw := testDijkstraTx(t, txIndex)
+	blockRaw, err := cbor.Encode(&lcommon.LeiosEndorserBlock{
+		TransactionReferences: []lcommon.LeiosTransactionReference{{
+			TransactionHash: lcommon.Blake2b256Hash(txRaw),
+			TransactionSize: uint32(len(txRaw)),
+		}},
+	})
+	require.NoError(t, err)
+	point := ocommon.NewPoint(slot, lcommon.Blake2b256Hash(blockRaw).Bytes())
+	key := leiosBlockKey(point.Slot, point.Hash)
+	return key, &leiosEndorserBlockData{
+		point:    point,
+		blockRaw: blockRaw,
+		txCount:  1,
+		txsRaw:   []cbor.RawMessage{txRaw},
+		announcementHeaderRaw: testDijkstraAnnouncementHeaderRawFor(
+			t,
+			point.Slot,
+			testEbHash(point),
+			uint64(len(blockRaw)),
+		),
+		semanticValidationStatus: leiosEBValidationUnknown,
+		slotVerified:             true,
+		cacheKeys:                []string{key},
+	}
+}
+
+// An endorser block that arrives while every validation slot is busy must be
+// validated once a slot frees, even when no retry was requested meanwhile.
+// Otherwise it waits for the next ranking block and its vote window can close
+// first.
+func TestLeiosValidationSkippedForCapacityRunsWhenSlotFrees(t *testing.T) {
+	t.Parallel()
+
+	const busySlots = 2
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseBusy := func() { releaseOnce.Do(func() { close(release) }) }
+	validationLedger := &concurrentLeiosValidationLedger{
+		validate: func(header gledger.BlockHeader) error {
+			if header.SlotNumber() <= busySlots {
+				<-release
+			}
+			return nil
+		},
+	}
+	o := newOuroboros(OuroborosConfig{
+		EnableLeios:             true,
+		LeiosAnnouncementLedger: validationLedger,
+	})
+	defer func() { require.NoError(t, o.Close()) }()
+	defer releaseBusy()
+
+	for slot := uint64(1); slot <= busySlots; slot++ {
+		key, data := testLeiosValidationEntry(t, slot, byte(slot))
+		o.leiosMu.Lock()
+		o.leiosEndorserBlocks[key] = data
+		o.leiosMu.Unlock()
+		o.scheduleLeiosEndorserBlockValidation(data.point, data)
+	}
+	require.Len(t, o.leiosValidationSlots, busySlots)
+
+	key, data := testLeiosValidationEntry(t, busySlots+1, busySlots+1)
+	o.leiosMu.Lock()
+	o.leiosEndorserBlocks[key] = data
+	o.leiosMu.Unlock()
+	o.scheduleLeiosEndorserBlockValidation(data.point, data)
+
+	releaseBusy()
+	// A follow-up attempt is scheduled before the finishing attempt leaves
+	// the wait group, so this returns only after it completes too.
+	o.leiosValidationWG.Wait()
+	o.leiosMu.RLock()
+	defer o.leiosMu.RUnlock()
+	require.Equal(
+		t,
+		leiosEBValidationValid,
+		o.leiosEndorserBlocks[key].semanticValidationStatus,
+	)
+}
