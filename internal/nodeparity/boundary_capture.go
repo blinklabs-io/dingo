@@ -163,7 +163,10 @@ func readUTxOSetFile(path string) (UTxOSet, error) {
 	return UTxOSet(set), nil
 }
 
-// captureBoundary reads Dingo's side of epoch's checks at point.
+// captureBoundary reads Dingo's side of epoch's checks at point. The UTxO set
+// is read first: the protocol-parameter and stake checks wait on Koios, and
+// on mainnet that wait has outlasted Dingo's rollback window, so a UTxO read
+// after them was refused as too old.
 func captureBoundary(
 	ctx context.Context,
 	dingoAddr string,
@@ -176,25 +179,34 @@ func captureBoundary(
 	dir string,
 ) *boundaryCapture {
 	c := &boundaryCapture{epoch: epoch, point: point}
+	c.utxoPath, c.utxoErr = captureUTxOSetFile(ctx, dingoAddr, magic, point, epoch, dir)
 	psStart := time.Now()
 	c.ppMismatches, c.ppErr, c.stakeMismatches, c.stakeErr = runProtocolParamsAndStake(
 		ctx, dingoAddr, magic, point, koios, cache, network, epoch,
 	)
 	c.psElapsed = time.Since(psStart)
+	return c
+}
+
+func captureUTxOSetFile(
+	ctx context.Context,
+	dingoAddr string,
+	magic uint32,
+	point pcommon.Point,
+	epoch uint64,
+	dir string,
+) (string, error) {
 	set, err := captureGenesisBaseline(ctx, dingoAddr, magic, point)
 	if err != nil {
-		c.utxoErr = fmt.Errorf("read Dingo's UTxO set at slot %d: %w", point.Slot, err)
-		return c
+		return "", fmt.Errorf("read Dingo's UTxO set at slot %d: %w", point.Slot, err)
 	}
 	path := filepath.Join(
 		dir, fmt.Sprintf("utxo-epoch-%d-slot-%d.gob", epoch, point.Slot),
 	)
 	if err := writeUTxOSetFile(path, set); err != nil {
-		c.utxoErr = fmt.Errorf("store Dingo's UTxO set at slot %d: %w", point.Slot, err)
-		return c
+		return "", fmt.Errorf("store Dingo's UTxO set at slot %d: %w", point.Slot, err)
 	}
-	c.utxoPath = path
-	return c
+	return path, nil
 }
 
 // runBoundaryFollower follows Dingo's chain from start on its own chainsync
