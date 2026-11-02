@@ -19,8 +19,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
@@ -218,4 +220,101 @@ func TestVoteManagerStopCancelsScheduledVotes(t *testing.T) {
 	h.fire[0]()
 	testutil.WaitForCondition(t, func() bool { return !h.voted() },
 		testutil.AsyncWait, "no vote after Stop")
+}
+
+// signHook replaces the local signer with one that calls during before it
+// signs, and returns the number of signatures attempted. Signing happens outside the state lock, so this is where a slow signature
+// lets the manager's state move on under an emission that already passed its
+// checks.
+func (h *voteWindowHarness) signHook(during func()) *int {
+	calls := 0
+	h.fixture.mgr.signVote = func(
+		key *VoteSigningKey,
+		msg []byte,
+	) ([]byte, error) {
+		calls++
+		if during != nil {
+			during()
+		}
+		return SignVote(key, msg)
+	}
+	return &calls
+}
+
+func TestVoteManagerDropsVoteSignedPastDeadline(t *testing.T) {
+	t.Parallel()
+	onset := time.Unix(1_700_000_000, 0)
+	h := newVoteWindowHarness(
+		t,
+		fakeVoteTiming{opens: voteWindowOpens, window: voteWindowLength},
+		fakeSlotOnset{onset: onset},
+	)
+	h.clock = onset.Add(voteWindowOpens + voteWindowLength)
+	h.signHook(func() {
+		h.clock = h.clock.Add(time.Millisecond)
+	})
+
+	h.announce()
+	assert.False(t, h.voted(), "a signature finished after the window closed")
+	assert.Equal(t, float64(1), h.notEmitted(voteNotEmittedTooLate))
+	assert.Equal(t, float64(0), h.notEmitted(voteNotEmittedNotInserted))
+}
+
+func TestVoteManagerScheduledVoteAcrossStopCastsNothing(t *testing.T) {
+	t.Parallel()
+	cases := map[string]bool{"stop": false, "stop then start": true}
+	for name, restart := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			onset := time.Unix(1_700_000_000, 0)
+			h := newVoteWindowHarness(
+				t,
+				fakeVoteTiming{
+					opens: voteWindowOpens, window: voteWindowLength,
+				},
+				fakeSlotOnset{onset: onset},
+			)
+			h.clock = onset
+			h.announce()
+			require.Len(t, h.fire, 1)
+
+			// The timer has already passed its map check and is signing
+			// when the manager stops.
+			mgr := h.fixture.mgr
+			h.signHook(func() {
+				require.NoError(t, mgr.Stop())
+				if restart {
+					require.NoError(t, mgr.Start(t.Context()))
+				}
+			})
+			h.clock = onset.Add(voteWindowOpens)
+			h.fire[0]()
+			assert.False(t, h.voted(), "a timer of a stopped lifecycle voted")
+			assert.Equal(t, float64(1), h.notEmitted(voteNotEmittedSuperseded))
+		})
+	}
+}
+
+func TestVoteManagerScheduledVoteAfterRollbackSignsNothing(t *testing.T) {
+	t.Parallel()
+	onset := time.Unix(1_700_000_000, 0)
+	h := newVoteWindowHarness(
+		t,
+		fakeVoteTiming{opens: voteWindowOpens, window: voteWindowLength},
+		fakeSlotOnset{onset: onset},
+	)
+	h.clock = onset
+	h.announce()
+	require.Len(t, h.fire, 1)
+	signed := h.signHook(nil)
+
+	h.fixture.mgr.handleRollback(chain.ChainRollbackEvent{
+		Point: ocommon.Point{Slot: headerArmingRbSlot - 1},
+	})
+	h.clock = onset.Add(voteWindowOpens)
+	h.fire[0]()
+	assert.False(t, h.voted())
+	assert.Zero(t, *signed, "a rolled-back announcement was signed")
+	assert.Equal(t, float64(1), h.notEmitted(voteNotEmittedSuperseded))
+	assert.Equal(t, float64(0), h.notEmitted(voteNotEmittedNotInserted))
 }
