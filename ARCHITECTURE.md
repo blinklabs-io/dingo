@@ -3679,9 +3679,9 @@ listener lifecycle" below.
 
 A caller-supplied `connmanager.ListenerConfig.Listener` (a test harness binding an OS-assigned port up front and handing the listener object itself to the node, rather than an address string, so a peer can be told the exact port with no discovery race — see `node_lifecycle_multinode_integration_test.go`'s `newLoopbackListener`) needs its own handling across this quiesce/reinit cycle: `ConnectionManager.Stop`'s `stopListeners` closes every listener it is tracking unconditionally, with no way to distinguish one it created itself from one a caller handed it, and a closed `net.Listener` can never be reused. `reinitializeNetworkingCore` rebuilds `connManager` from `n.config.listeners` via `ouroboros.ConfigureListeners`, which only appends connection options and never touches `.Listener` — so without further handling, the same now-closed listener object would be fed straight back in, `connmanager.startListener` would skip rebinding (it only binds fresh when `.Listener == nil`), and the accept loop launched on it would exit immediately on `net.ErrClosed` while `connManager.Start` still returned successfully, silently leaving that listener permanently deaf to new inbound connections after the very first live Restore/Truncate. `ConnectionManager.ResolvedListeners` (called right after every successful `connManager.Start`, both at initial startup in `node.go` and after every reinit in `node_lifecycle.go`) closes this gap: for any listener config entry that came in with a caller-supplied `Listener`, it replaces that field with the concrete `ListenNetwork`/`ListenAddress` the listener actually resolved to (nil-ing `Listener` out), so the next reinit rebinds a fresh listener at that same address instead of trying to reuse the dead object — exactly the self-healing behavior an address-configured entry already had. Entries that started address-configured are left untouched entirely. A caller-supplied Windows named-pipe listener is a special case even though it does get its `Listener` field cleared here: `ListenNetwork` is deliberately *not* overwritten with the resolved listener's own `Addr().Network()` when it is already `"unix"`, because on Windows that value is a cross-platform sentinel meaning "reconstruct via `createPipeListener`" (checked by `startListener`'s pipe-creation branch), while the real `go-winio` pipe listener's `Addr().Network()` reports `"pipe"` — copying that raw value in would silently break the sentinel and make the next reinit's rebind fail.
 
-`(*Node).Restore` quiesces storage-dependent components and closes the live handles first, because an external provider's configured target cannot be safely reset while the running node still has its connections open. `lifecycle.RestoreRecoverable` then checks the resolved manifest against the running node's configured network, storage mode, providers, and consensus gates, and performs archive validation, rollback capture, and replacement. That compatibility check still precedes every storage mutation, but follows the quiesce, so an incompatible snapshot costs a quiesce and reopen cycle rather than any data. Local Badger/SQLite data is restored in `<dataDir>.restore-staging`, opened again through the node's actual configuration, and atomically swapped by `swapInRestoredDataDir` (rename the current data directory to `<dataDir>.pre-restore`, then rename staging into place, rolling the first rename back if activation fails). S3/GCS data is restored into the namespace selected by the staged directory, so the same swap activates metadata and cloud blobs together. Remote recovery records carry a random operation ID whose matching marker is written inside the active data directory before any external store changes. The marker follows that directory into the pre-restore backup during a swap, and startup refuses to reset an external store unless the record matches a marker in one of those trusted locations. Remote metadata replacement failures compensate the external database and failed cloud staging discards only the new namespace before `Restore` attempts `reinitializeAndResume`, so the node resumes on the original pair rather than stopping on mixed metadata/blob state. A parent-directory sync failure after the second rename is already an activated swap: `Restore` preserves both local and remote recovery state and stops for startup reconciliation instead of rolling back the external stores under the active restored directory. `n.cancel()` remains reserved for an unconfirmed storage drain, an activated but not durably confirmed or unrecoverable local directory swap, remote rollback failure, or reinitialization failure.
+`(*Node).Restore` quiesces storage-dependent components and closes the live handles first, because an external provider's configured target cannot be safely reset while the running node still has its connections open. `lifecycle.RestoreRecoverable` then checks the resolved manifest against the running node's configured network, storage mode, providers, and consensus gates, and performs archive validation, rollback capture, and replacement. That compatibility check still precedes every storage mutation, but follows the quiesce, so an incompatible snapshot costs a quiesce and reopen cycle rather than any data. Before the first removal by name, `Restore` requires `dataDir`'s parent to pass `lifecycle.ValidateRestoreWorkParent` (on Unix, every ancestor owned by the current user or root and writable by others only with the sticky bit), and the staging and backup directories are removed through `lifecycle.RemoveRestoreWorkDir`, which recurses through a retained directory handle and never follows a substituted name. Local Badger/SQLite data is restored in `<dataDir>.restore-staging`, opened again through the node's actual configuration, and atomically swapped by `swapInRestoredDataDir` (rename the current data directory to `<dataDir>.pre-restore`, then rename staging into place, rolling the first rename back if activation fails). S3/GCS data is restored into the namespace selected by the staged directory, so the same swap activates metadata and cloud blobs together. Remote recovery records carry a random operation ID whose matching marker is written inside the active data directory before any external store changes. The marker follows that directory into the pre-restore backup during a swap, and startup refuses to reset an external store unless the record matches a marker in one of those trusted locations. Remote metadata replacement failures compensate the external database and failed cloud staging discards only the new namespace before `Restore` attempts `reinitializeAndResume`, so the node resumes on the original pair rather than stopping on mixed metadata/blob state. A parent-directory sync failure after the second rename is already an activated swap: `Restore` preserves both local and remote recovery state and stops for startup reconciliation instead of rolling back the external stores under the active restored directory. `n.cancel()` remains reserved for an unconfirmed storage drain, an activated but not durably confirmed or unrecoverable local directory swap, remote rollback failure, or reinitialization failure.
 
-The swap is crash-recoverable, not just correct in the no-failure case. Both renames are followed by an `internal/fsyncdir.Sync` of `dataDir`'s parent directory: POSIX `rename()` is atomic the instant it returns, but that instant alone doesn't make the containing directory's updated entry durable — a crash or power failure immediately after a rename returns can still lose the directory-entry update, independently of the renamed data's own content already being on disk. And unlike the previous version of this swap, `swapInRestoredDataDir` on success deliberately does *not* remove `<dataDir>.pre-restore` — a completed rename only proves the two directories swapped names, not that the restored data actually starts, so the backup is retained until `reinitializeAndResume` (the same call that would otherwise leave the node not-yet-confirmed-working) actually proves that, and only then removed. Every one of the intermediate states either fsync gap could still leave behind — interrupted between the two renames (backup exists, no data directory at all), or interrupted after the swap completed but before this same process could confirm and remove the backup (both exist) — is reconciled by `reconcileInterruptedLiveRestoreSwap`, which `Run()` calls before anything else opens `n.config.dataDir`: the backup and staging directories' own presence or absence is the marker, needing no separate marker file. The former state is rolled back (rename the backup back into place); the latter is left as-is (the restored data is what `Run()` is about to start on) with the backup kept until `Run()` itself completes startup successfully, at which point `removeConfirmedRestoreBackup()` removes it — mirroring `reinitializeAndResume`'s role for the in-process path with a full restart's own successful startup as the equivalent proof. `Truncate` is unaffected by this staging — it has no separate snapshot to validate, so it still opens its resolution/mutation handle directly against the live data directory after quiesce/close, same as before. It does, however, make the equivalent distinction for its own failure modes: `dblifecycle.ResolveTarget` and `lifecycle.Truncate`'s own pre-delete validation (target ahead of tip, target before the Mithril trust boundary) are read-only and provably safe — a failure there (or a context cancellation caught before `DeleteBlocksAfter` starts) is wrapped in `lifecycle.ErrTruncateNotStarted`, and `Node.Truncate` resumes normally on it instead of calling `n.cancel()`. Before the first batched blob delete, truncate writes a durable `database_lifecycle_truncate_pending` `sync_state` marker containing its target and original tip. If a later batch fails, normal node startup detects the marker and refuses to serve the partially completed database; rerunning the offline truncate resumes the recorded ID range, then truncates metadata and clears the marker in that same metadata transaction. This turns the former undetectable intermediate state into an explicit, resumable recovery state.
+The swap is crash-recoverable, not just correct in the no-failure case. Both renames are followed by an `internal/fsyncdir.Sync` of `dataDir`'s parent directory: POSIX `rename()` is atomic the instant it returns, but that instant alone doesn't make the containing directory's updated entry durable — a crash or power failure immediately after a rename returns can still lose the directory-entry update, independently of the renamed data's own content already being on disk. And unlike the previous version of this swap, `swapInRestoredDataDir` on success deliberately does *not* remove `<dataDir>.pre-restore` — a completed rename only proves the two directories swapped names, not that the restored data actually starts, so the backup is retained until `reinitializeAndResume` (the same call that would otherwise leave the node not-yet-confirmed-working) actually proves that, and only then removed. Every one of the intermediate states either fsync gap could still leave behind — interrupted between the two renames (backup exists, no data directory at all), or interrupted after the swap completed but before this same process could confirm and remove the backup (both exist) — is reconciled by `reconcileInterruptedLiveRestoreSwap`, which `Run()` calls before anything else opens `n.config.dataDir`: the backup and staging directories' own presence or absence is the marker, needing no separate marker file. Both states are acted on only after `lifecycle.ValidateRestoreWorkParent` accepts `dataDir`'s parent; otherwise startup stops with every directory left as found, because a user who could write that parent could have renamed the live data directory onto the staging or backup name. The former state is rolled back (rename the backup back into place); the latter is left as-is (the restored data is what `Run()` is about to start on) with the backup kept until `Run()` itself completes startup successfully, at which point `removeConfirmedRestoreBackup()` removes it — mirroring `reinitializeAndResume`'s role for the in-process path with a full restart's own successful startup as the equivalent proof. `Truncate` is unaffected by this staging — it has no separate snapshot to validate, so it still opens its resolution/mutation handle directly against the live data directory after quiesce/close, same as before. It does, however, make the equivalent distinction for its own failure modes: `dblifecycle.ResolveTarget` and `lifecycle.Truncate`'s own pre-delete validation (target ahead of tip, target before the Mithril trust boundary) are read-only and provably safe — a failure there (or a context cancellation caught before `DeleteBlocksAfter` starts) is wrapped in `lifecycle.ErrTruncateNotStarted`, and `Node.Truncate` resumes normally on it instead of calling `n.cancel()`. Before the first batched blob delete, truncate writes a durable `database_lifecycle_truncate_pending` `sync_state` marker containing its target and original tip. If a later batch fails, normal node startup detects the marker and refuses to serve the partially completed database; rerunning the offline truncate resumes the recorded ID range, then truncates metadata and clears the marker in that same metadata transaction. This turns the former undetectable intermediate state into an explicit, resumable recovery state.
 
 `Service.SetLiveNode` lets a caller reach this path through the same `Snapshot`/`Restore`/`Truncate` call shapes as the offline path; `*dingo.Node` satisfies `dblifecycle.LiveNode` structurally (the interface is defined in `internal/dblifecycle`, not `dingo`, so the dependency only goes one way). `node.go`'s `Run()` is the one place that actually does this today: when bark is enabled with a snapshot directory configured, it builds a `dblifecycle.Service`, binds it via `SetLiveNode(n)`, and hands it to `bark.BarkConfig.Lifecycle` for `bark/database.go`'s `DatabaseService` handler to call.
 
@@ -6070,58 +6070,30 @@ is recorded as having delivered nothing: the advertised tip is never
 substituted for a missing observed frontier, and the peer is bounded and
 compared as block 0 until it delivers a header.
 
-A delivered frontier beyond the catch-up allowance is not rejected outright.
-A rejected frontier is never recorded, so without a second path a node whose
-honest peers deliver more than `2*securityParam` blocks ahead of a
-slow-to-apply local tip could never accept them. Such a frontier is too far
-ahead of local ledger state for its VRF/KES check to run
-(`ledger.ValidateChainSelectionHeaderCrypto` defers), so no single claim is
-trusted: `checkPeerTipPlausibleLocked` records it per connection
-(`ChainSelector.farTipClaims`, bounded to `maxTrackedPeers` and pruned with the
-peer in `deletePeerLocked`; a frontier that does not fit is still compared
-against the recorded ones) and accepts it once another connection has
-recorded a frontier within `securityParam` of it
-(`corroborateFarTipClaimLocked`). The earlier claim is then marked
-corroborated and becomes that connection's own reference, like a known peer's
-previous frontier: its next update is accepted within `securityParam` of its
-claim even when the corroborating frontier sits up to `securityParam` below
-it, and the entry is cleared once the connection is accepted.
-The stale-reference recovery also applies when the tracked reference is ahead
-of the local tip by more than `securityParam`, including beyond the
-`localTip + 2*securityParam` catch-up ceiling; a snapshot-backed or
-from-genesis local tip can lag its delivered peer references without making
-those references current enough to rule out catch-up. Up to that ceiling a
-frontier past the reference plus `securityParam` is accepted with the same
-corroboration or connected-chain evidence. Beyond it nothing anchors the
-frontier near the local chain and one peer can fabricate any number of
-self-linked headers, so only a connection in another identity group
-(`ChainSelectorConfig.PeerIdentity`, or the remote host when unset)
-corroborates it, and a connected header chain from one connection is not
-accepted (`corroborateIndependentFarTipClaimLocked`).
+A staged delivered frontier beyond `localTip + 2*securityParam` remains a
+bounded pending candidate and cannot enter ledger ingress. The ceiling is
+anchored to applied ledger state or an explicit trusted checkpoint, including
+the origin. Peer agreement and a run of self-linked delivered headers do not
+move it: relevant VRF/KES checks can be unavailable beyond the ledger forecast
+horizon, so those observations are not verified chain evidence. The ceiling
+only defers a frontier the peer-relative bound accepts; a frontier that bound
+refuses is rejected however far past the ceiling it is. Staging and the
+unstaged update path read the current applied tip from
+`ChainSelectorConfig.AppliedTip` and rebuild the pending candidates against
+it. Applied ledger progress therefore releases an
+honest frontier as soon as it falls within the moving allowance, including
+while replaying blocks after a snapshot import, without trusting remote claims
+to expand the bound.
 In Genesis mode, a run of connected headers can continue across a short
 reconnect from the same identity. The selector retains only the last block,
 slot, hash, Byron boundary marker, and run count, bounded to
 `maxTrackedPeers` and expired after twice the stale-tip threshold. The next
 header must link to that exact point; the retained state carries no peer
 acceptance or corroboration status.
-Staging a peer tip reads the local tip from `ChainSelectorConfig.AppliedTip`
-(the live applied ledger tip) rather than from the last `SetLocalTip`, which
-the node calls only at startup and on the stall recycler's tick. A node
-replaying blocks it already stored, as after a Mithril import, applies
-hundreds of blocks in that interval, and a ceiling measured from the tip it
-started at rejects headers the ledger has already passed.
 A peer whose advertised tip is wall-clock stale is never a new peer's
 reference. It serves an abandoned chain and is never selectable; from
 genesis, where the advertised bound applies, its short advertisement would
 otherwise reject every honest peer that advertises the real tip.
-A delivered frontier beyond the catch-up allowance is not rejected outright.
-`checkPeerTipPlausibleLocked` holds bounded far-tip evidence per connection. A
-far frontier is supported by another distinct connection within
-`securityParam`, or by more than `securityParam` consecutive connected headers.
-The connected-header check uses the delivered parent hash, block number, slot,
-and Byron boundary marker; a lone accepted frontier must continue that chain
-or the peer is removed. A lone frontier is not independent evidence for a new
-peer, and the check counts connections rather than operators.
 A reference inside `(localTip, localTip + securityParam]` gets no catch-up
 relaxation, so a header past `reference + securityParam` is rejected, which
 closes the connection, though an honest peer is only ahead of a ledger that
@@ -6134,14 +6106,19 @@ admitted, verified, observed, or published,
 so it requests no further headers, until the header is admissible. It re-reads
 the live applied tip, the reference and the tracked peers every 100ms and takes
 the selector lock only for each check, never while parked. A connection is held
-only from inside the band; once held it stays held after the reference passes
-the local tip until the header is within `max(reference + securityParam,
-localTip + 2 * securityParam)`, because releasing it into the far-claim path
-would withhold the header from the connection's observed ancestry and defer
-every later header's verification. The wait records no frontier, claim or
-witness, so a waiting connection can neither be selected nor corroborate
-another, and a header no chain could have reached from the local tip is not
-held and is still rejected. It ends on connection close or node shutdown (the
+from inside the band, or from outside it when its header is within
+`reference + securityParam` but past `localTip + 2 * securityParam`, the applied
+catch-up ceiling. Once held it stays held after the reference leaves the band
+until the header is within the applied catch-up ceiling, because admission
+keeps a header past it pending whatever the peer evidence, which would
+withhold the header from the connection's observed ancestry and defer every
+later header's verification. The reference node's ChainSync client likewise
+waits when a header is beyond its ledger view forecast range, and other peers'
+claims do not extend that forecast. The wait records no
+frontier, claim or witness, so a waiting connection can neither be selected
+nor corroborate another, and a header no chain could have reached from the
+local tip is not held and is still rejected. It ends on connection close or
+node shutdown (the
 admission context), and after 60 seconds, or half the operator's chainsync
 stall timeout if that is lower (`catchUpBandWaitTimeoutFor`), below the 135 to
 269 second MustReply, 269 second minimum CanAwait and 3673 second Idle
@@ -6536,8 +6513,8 @@ removes peers from the candidate set that cap is measured across.
 Core Genesis selection assumes an available honest upstream and uses Limit on
 Eagerness, density disconnection, patience and authenticated headers to constrain
 competing candidates. It does not require named operators. An optional
-**corroboration gate** (`chainselection/genesis_corroboration.go`) adds an
-independent-operator quorum for deployments with biased fast-sync sources such
+**corroboration gate** (`chainselection/genesis_corroboration.go`) adds a
+peer corroboration threshold for deployments with biased fast-sync sources such
 as a shallow local peer or the Genesis Sync Accelerator. This additional policy
 is controlled by `genesisBootstrap.corroborationPeers` (`MinCorroboratingPeers`):
 
@@ -6597,20 +6574,27 @@ Ordinary Praos sessions continue to use primary-chain intersection points.
   through `PeerGovernor.CorroborationIdentityByConnId`, wired to
   `ChainSelectorConfig.PeerIdentity`. Configured control groups, when present,
   form the exclusive operator witness set described above. Otherwise live
-  ledger peers use the pool control key that registered the relay. Snapshot peers use the snapshot's existing pool
-  grouping, so its IPv4, IPv6, and hostname relays share one identity before the
-  live ledger is available. A topology peer that is also matched to a ledger
-  relay retains that ledger control identity, including when an inbound duplex
-  connection reuses the peer entry. Topology valency groups, peer-sharing
-  addresses, unmatched inbound connections, and network prefixes do not prove
-  independent control and therefore supply no corroboration identity. A relay
-  endpoint registered under conflicting control keys is also untrusted. These
-  connections fail closed: as candidates they have no corroborators, and as
-  witnesses they do not count. Without a hook the selector groups by remote
-  host. Pool control is a lower bound on operator independence; multiple pool
-  keys can still share an operator. Raising `corroborationPeers` raises the
-  count required, while the trusted ledger or snapshot source establishes the
-  available control groups.
+  ledger peers use the pool control key that registered the relay. Snapshot
+  peers use the snapshot's existing pool grouping, so its IPv4, IPv6, and
+  hostname relays share one identity before the live ledger is available. A
+  topology peer that is also matched to a ledger relay retains that ledger
+  control identity, including when an inbound duplex connection reuses the peer
+  entry. A peer from the operator's own topology (local root, public root or
+  bootstrap peer) that no ledger or snapshot describes, and a ledger or snapshot
+  relay with a missing or conflicting control identity (no control key, a relay
+  delisted while connected, or an endpoint registered under several control
+  keys), are grouped by the address group of their connection (/24, /64 or
+  hostname; an IPv6 zone is ignored), so a node syncing from genesis, which has
+  few usable ledger or snapshot identities, can still corroborate. An address
+  group is only a lower bound on independence. Topology valency groups are never
+  an identity. All peers learned through peer sharing form a single group, so
+  they can corroborate an identified peer but not each other. Unmatched inbound
+  connections stay unidentified. Those connections fail closed: as candidates
+  they have no corroborators, and as witnesses they do not count. Without a hook
+  the selector groups by remote host. Pool control is a lower bound on operator
+  independence; multiple pool keys can still share an operator. Raising
+  `corroborationPeers` raises the count required, while the trusted ledger or
+  snapshot source establishes the available control groups.
 - **Candidate exclusion uses a trusted frontier, whatever the threshold.** In
   Genesis mode the "behind the best known tip" filter
   (`bestKnownBlockNumber`) takes its frontier only from a live, eligible,
@@ -7660,9 +7644,14 @@ Network-learned gossip, ledger, and peer-sharing candidates are admitted only
 when their literal or resolved address passes `peergov.IsRoutableIP`. This
 rejects private, loopback, link-local, multicast, unspecified, reserved,
 benchmarking, and documentation-only ranges such as RFC 5737 TEST-NET and
-RFC 3849 `2001:db8::/32`. Operator-configured topology peers intentionally
+RFC 3849 `2001:db8::/32`. The admission check also rejects an IPv6 literal
+carrying a zone (`fe80::1%eth0`) whatever its address, because the zone names
+an interface on this host; `IsRoutableIP` takes a `net.IP`, which has no zone.
+Operator-configured topology peers intentionally
 retain their separate exemption for private addresses, and an already
-established inbound peer is not reclassified by this admission check.
+established inbound peer is not reclassified by this admission check. A
+topology peer's scoped literal is treated as an IP literal, not a hostname:
+it is never resolved, and its zone is kept when it is normalized and dialed.
 
 Hot and warm selection targets govern outbound peers only. Inbound peers are
 not counted toward, and are never removed by, the `TargetNumberOfActivePeers`
@@ -8517,10 +8506,11 @@ Snapshot-seeded ledger peers provide historical corroborators for the Genesis
 corroboration gate (see Chain Selection → Ouroboros Genesis trust model).
 Configured operator groups override the snapshot's pool grouping for witness
 identity. Without them, trusted snapshot pool groups and later ledger control
-keys supply the available identities; remote hosts alone do not establish
-independence. The operator remains responsible for choosing independently
-controlled witnesses and a satisfiable `genesisBootstrap.corroborationPeers`
-threshold. The candidate's own operator never counts as its witness.
+keys supply the available identities. Topology peers that neither describes,
+and relays with a missing or conflicting control identity, are grouped by
+address; peer-sharing peers form one group. The operator remains responsible
+for choosing independently controlled witnesses and a satisfiable
+`genesisBootstrap.corroborationPeers` threshold. The candidate's own operator never counts as its witness.
 
 Live ledger peer discovery is adapted at the node composition boundary:
 `ledger/` exposes stake pool relay data and current slot through neutral
@@ -10635,6 +10625,24 @@ Inspecting components and then opening by absolute path cannot offer that, and
 `O_NOFOLLOW` would not close it either — it constrains only the final
 component, not traversal through a replaced parent.
 
+The same handle lifetime extends through `BootstrapResult.Cleanup`. Cleanup
+closes nested readers, recursively removes entries through the retained
+extraction and ancillary roots, and only then removes an empty directory name
+if it still identifies the opened object. A writer can rename the opened tree
+or replace its saved name, but the replacement is never traversed. The
+auto-created temporary root is retained on the same terms. Cleanup also
+retains the archive's parent handle and file identity, so a file or directory
+substituted at the archive name is preserved.
+
+Temporary feed, extraction, and probe directories are created privately before
+their names are exposed. On Unix, each real directory in the absolute ancestor
+chain must be owned by the current user or root and may be group- or
+other-writable only when a trusted owner also set the sticky bit. On Windows,
+creation installs a protected inheritable ACL and retains no-delete handles on
+the created directory and every ancestor until cleanup or publication. The
+identity returned by native creation must match the directory opened for later
+work.
+
 Entries are additionally rejected if a symlink already sits anywhere along the
 path they are written to, not only at its last component. `os.Root` refuses an
 absolute symlink outright and refuses a relative one whose target leaves the
@@ -12639,6 +12647,15 @@ to the budget instead of a single page.
 The base and extended summaries, the account summary, the address total, and
 the two account aggregate routes share one admission pool (4 active, 2 per
 client address) that answers 429 with `Retry-After` when full.
+
+Pool detail and the extended pool list share a separate admission pool (4
+active, 2 per client address) that answers 429 with `Retry-After` when full.
+The pool id and the page are validated before admission, a cancelled request
+writes no response, and the request context reaches the aggregate statements.
+Live stake and delegator counts are database-side aggregates, one row per
+selected pool, and the pool detail's network total is a single aggregate row;
+no tip-keyed cache sits in front of it, because the total must stay in the
+caller's read snapshot.
 
 Blockfrost submission and both evaluation endpoints bound request body reads
 by their existing byte limits and a 15-second read deadline. The deadline is

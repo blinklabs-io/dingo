@@ -334,12 +334,13 @@ type GenesisBootstrapConfig struct {
 	// PromotionMinDiversityGroups sets the minimum number of diversity groups
 	// to prefer while promoting peers during bootstrap.
 	PromotionMinDiversityGroups int `yaml:"promotionMinDiversityGroups" envconfig:"DINGO_GENESIS_BOOTSTRAP_PROMOTION_MIN_DIVERSITY_GROUPS"`
-	// CorroborationPeers adds an optional independent-operator quorum before a
-	// source may drive Genesis selection. The default is zero. Genesis density,
-	// eagerness, patience and header verification remain active without this
-	// extra policy. A positive value requires independently identified witnesses;
-	// a peer's frontier always needs one independent witness before it can
-	// exclude other candidates as behind.
+	// CorroborationPeers adds an optional peer corroboration gate before a
+	// source may drive Genesis selection. The default is zero. Density,
+	// eagerness, patience and header verification remain active at zero.
+	// Positive values require witnesses in distinct independence groups;
+	// explicit ControlGroups assert operator control, while unidentified
+	// topology/ledger peers otherwise use address groups. A frontier always
+	// needs an independent witness before excluding other candidates as behind.
 	CorroborationPeers int `yaml:"corroborationPeers"          envconfig:"DINGO_GENESIS_BOOTSTRAP_CORROBORATION_PEERS"`
 	// LimitOnPatienceEnabled turns on the Genesis Limit on Patience: while
 	// Genesis selection is syncing, a ChainSync peer that delivers its

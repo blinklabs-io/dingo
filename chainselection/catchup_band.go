@@ -30,11 +30,14 @@ import (
 //
 // entered is false for a connection that has not yet been held. It is held
 // when the reference is inside (localTip, localTip+K], where neither stale nor
-// catch-up relaxation applies, and the frontier is past reference+K. A
-// connection that is already held (entered) stays held after the reference
-// passes the local tip, until the frontier is within the bound that then
-// applies, max(reference+K, localTip+2K); otherwise the first header released
-// would meet the far-claim path that cannot corroborate a lone header.
+// catch-up relaxation applies, and the frontier is past reference+K. Outside
+// the band it is held when the frontier is within reference+K but past
+// localTip+2K, which admission would keep pending until the ledger advances.
+// A connection that is already held (entered) stays held after the reference
+// leaves the band, until the frontier is within localTip+2K; otherwise the
+// first header released would stay pending, since admission holds anything
+// past localTip+2K whatever the peer evidence. No reference or corroborated
+// claim releases a connection past that ceiling.
 //
 // A frontier no chain could have reached from the local tip is never held, so
 // it still meets the plausibility rejection at once.
@@ -57,6 +60,9 @@ func (cs *ChainSelector) catchUpBandHoldLocked(
 		return false
 	}
 	local := localTip.BlockNumber
+	appliedCeiling := safeAddUint64(
+		local, safeAddUint64(cs.securityParam, cs.securityParam),
+	)
 	ceiling := safeAddUint64(ref.block, cs.securityParam)
 	if claim, ok := claims[connId]; ok && claim.corroborated {
 		// A corroborated far claim is the connection's own reference.
@@ -64,15 +70,21 @@ func (cs *ChainSelector) catchUpBandHoldLocked(
 	}
 	inBand := ref.block > local &&
 		ref.block <= safeAddUint64(local, cs.securityParam)
-	if !inBand {
-		if !entered {
-			return false
-		}
-		// Past the band the catch-up ceiling applies as well.
-		ceiling = max(ceiling, safeAddUint64(
-			local, safeAddUint64(cs.securityParam, cs.securityParam),
-		))
+	if !inBand && !entered {
+		// The peer-relative bound admits this frontier, but admission keeps
+		// it pending past the applied ceiling and the header would leave the
+		// connection's observed ancestry. Hold it until the ledger catches up.
+		return observedTip.BlockNumber > appliedCeiling &&
+			observedTip.BlockNumber <= ceiling &&
+			cs.blockWithinSlotDistanceFromLocked(localTip, observedTip)
 	}
+	if !inBand {
+		// Past the band the catch-up ceiling applies as well.
+		ceiling = max(ceiling, appliedCeiling)
+	}
+	// Admission keeps anything past localTip+2K pending whatever the peer
+	// evidence, so releasing such a header would only stage it unadmitted.
+	ceiling = min(ceiling, appliedCeiling)
 	return observedTip.BlockNumber > ceiling &&
 		cs.blockWithinSlotDistanceFromLocked(localTip, observedTip)
 }
@@ -103,7 +115,8 @@ func (cs *ChainSelector) catchUpBandHold(
 // AwaitCatchUpBand blocks while connId's next delivered frontier is held by
 // catchUpBandHoldLocked, and returns the context's error if it is cancelled
 // first. It returns at once when the frontier is not held, so only a
-// connection whose header overshoots the band because the ledger lags waits.
+// connection whose header is past an admission bound because the ledger lags
+// waits.
 //
 // The wait reads selector state and records nothing: no frontier, claim, or
 // witness, so a waiting connection can neither be selected nor corroborate

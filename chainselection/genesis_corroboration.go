@@ -25,7 +25,7 @@ import (
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
-// Genesis corroboration adds an optional independent-operator policy for fast
+// Genesis corroboration adds an optional peer corroboration policy for fast
 // block sources. Core Genesis eagerness and density rules apply independently
 // of this policy. A candidate peer is "corroborated" when at least
 // MinCorroboratingPeers other eligible, live, non-stale peers report the same
@@ -58,7 +58,7 @@ func (cs *ChainSelector) GenesisCorroborationActive() bool {
 }
 
 // RecordDeliveredPeerTip keeps bounded authenticated Genesis delivery history
-// separate from admission. It supports eagerness even without an operator quorum.
+// separate from admission. It supports eagerness even without a corroboration quorum.
 func (cs *ChainSelector) RecordDeliveredPeerTip(update PeerTipUpdateEvent) {
 	if update.ObservedTip.Point.Slot == 0 &&
 		len(update.ObservedTip.Point.Hash) == 0 {
@@ -303,7 +303,7 @@ func (cs *ChainSelector) isPeerCorroboratedLocked(
 
 // ShouldApplyIngress reports whether headers/blocks from connId may be applied.
 // Genesis mode denies stale advertised tips and waits for a current ledger
-// generation. With a positive operator quorum it also withholds uncorroborated
+// generation. With a positive corroboration threshold it also withholds uncorroborated
 // peers, including unknown peers, until independent witnesses agree. Observing
 // their authenticated headers does not itself authorize ledger application.
 
@@ -406,7 +406,7 @@ func (cs *ChainSelector) pointOnAppliedChain(
 // the header may then be applied. It returns false at once when the denial has
 // another cause (the advertised tip is stale or the peer is untracked under
 // an active quorum). A temporarily unavailable ledger generation also waits in
-// Genesis mode, including with no operator quorum. Cancellation ends the wait.
+// Genesis mode, including with no corroboration quorum. Cancellation ends the wait.
 //
 // The caller's chainsync callback blocks here while witnesses can advance.
 // The caller bounds that wait; on expiry it withholds the header but keeps the

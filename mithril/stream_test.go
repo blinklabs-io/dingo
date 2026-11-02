@@ -605,10 +605,20 @@ func TestStreamCatchUpSweepsStaleFeedDirs(t *testing.T) {
 	stale := filepath.Join(
 		dir, "chunkfeed-0123456789abcdef-12345", "extract", "immutable",
 	)
+	currentStale := filepath.Join(
+		dir,
+		"chunkfeed-0123456789abcdef-ABCDEFGHIJKLMNOPQRSTUVWXYZ234567",
+		"extract",
+		"immutable",
+	)
 	require.NoError(t, os.MkdirAll(stale, 0o750))
+	require.NoError(t, os.MkdirAll(currentStale, 0o750))
 	for _, ext := range []string{"chunk", "primary", "secondary"} {
 		require.NoError(t, os.WriteFile(
 			filepath.Join(stale, "00000."+ext), []byte("stale"), 0o600,
+		))
+		require.NoError(t, os.WriteFile(
+			filepath.Join(currentStale, "00000."+ext), []byte("stale"), 0o600,
 		))
 	}
 	keep := filepath.Join(dir, "chunkfeed-not-ours")
@@ -645,6 +655,7 @@ func TestStreamCatchUpSweepsStaleFeedDirs(t *testing.T) {
 		assert.Equal(t, 1, n, "feed dirs holding trios")
 	}
 	assert.NoDirExists(t, filepath.Dir(filepath.Dir(stale)))
+	assert.NoDirExists(t, filepath.Dir(filepath.Dir(currentStale)))
 	assert.DirExists(t, keep)
 	assert.FileExists(t, keepFile)
 }

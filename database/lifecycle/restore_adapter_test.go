@@ -57,7 +57,7 @@ func newAdapterRestoreFixture(t *testing.T) *adapterRestoreFixture {
 		ID: 1, Slot: 10, Number: 1, Type: 1,
 		Hash: bytes.Repeat([]byte{0x01}, 32), Cbor: []byte{0x80},
 	}, nil))
-	snapshotDir := filepath.Join(t.TempDir(), "snap")
+	snapshotDir := snapshotTestDir(t, "snap")
 	manifest, err := Snapshot(
 		t.Context(), db, snapshotDir, TriggerManual, "test", "badger", "sqlite",
 		WithManifestKey(adapterTrustKey),

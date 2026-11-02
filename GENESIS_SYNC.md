@@ -3,8 +3,8 @@
 This guide covers Dingo's from-origin sync using Genesis density selection,
 Limit on Eagerness, density disconnection, patience and authenticated headers.
 The default uses the network's published topology and stake snapshot without
-adding operator roots or requiring an operator quorum. Deployments with a
-biased fast-sync source can opt into additional independent-operator corroboration.
+adding operator roots or requiring a corroboration quorum. Deployments with a
+biased fast-sync source can opt into additional peer corroboration.
 
 For the internal design, see `ARCHITECTURE.md` → **Chain Selection → Ouroboros
 Genesis trust model**.
@@ -37,15 +37,18 @@ intersection, while density disconnection and patience remove unsuitable peers.
 The fully fetched local and peer fork paths are compared from their exact common
 intersection. See the [reference Genesis design](https://ouroboros-consensus.cardano.intersectmbo.org/docs/references/miscellaneous/genesis_design/).
 
-A positive `corroborationPeers` adds a separate policy: independently identified
-peers must confirm a source's recent chain before it can drive selection.
-Every overlapping block must agree; one shared old ancestor does not confirm a
-divergent suffix. Missing identities or witnesses stall that deployment rather
-than silently disabling its configured policy. The candidate's own operator
-never counts as an independent witness. This extra policy requires reachable,
-honest witnesses within the Genesis window; raising the count cannot establish
-their independence. With the default zero, the ordinary Genesis mechanisms
-remain active and do not require a second named operator.
+A positive `corroborationPeers` adds a separate policy: peers in distinct
+independence groups must confirm a source's recent chain before it can drive
+selection. Every overlapping block must agree; one shared old ancestor does not
+confirm a divergent suffix. Configured `controlGroups` assert common operator
+control and form an exclusive witness set. Otherwise trusted ledger/snapshot
+pool groups are used where available, with address groups as a fallback for
+unidentified topology or ledger peers. Address groups do not prove different
+operators. Missing witnesses stall the configured policy rather than silently
+disabling it. Its security assumption requires reachable, honest, independently
+controlled witnesses within the Genesis window; raising the count cannot
+establish their independence. The default zero retains the ordinary Genesis
+mechanisms without requiring a second independence group.
 
 ## Configuration
 
@@ -56,9 +59,9 @@ genesisBootstrap:
   enabled: true
   # 0 auto-derives the density window from Shelley genesis params (3k/f).
   windowSlots: 0
-  # Optional independent-operator quorum. Default 0 retains all Genesis checks
+  # Optional peer corroboration quorum. Default 0 retains all Genesis checks
   # without requiring operator labels. A positive value requires that many
-  # reachable, independently identified witnesses and stalls if they are absent.
+  # reachable witnesses in distinct groups and stalls if they are absent.
   corroborationPeers: 0
   # Genesis Limit on Patience: disconnect a ChainSync peer that delivers its
   # advertised progress more slowly than limitOnPatienceRate headers per
@@ -88,7 +91,8 @@ outbound startup — these are the corroborators.
 
 **Validate corroborator independence.** Optional `controlGroups` declare common
 operator control and add roots; without them, trusted ledger/snapshot pool
-identities supply the available grouping. Remote IPs, DNS aliases, valency groups
+identities supply grouping where available and unidentified topology/ledger
+peers fall back to address groups. Remote IPs, DNS aliases, valency groups
 and multiple stake entries sharing one endpoint do not prove independence.
 Configured groups form the exclusive witness set, with aliases counted once and
 conflicts rejected. Choose independently controlled witnesses and a satisfiable
@@ -195,10 +199,10 @@ credit is added by reconstruction.
 
 ## Tuning `corroborationPeers`
 
-- **0 (default)** — no additional operator quorum. Genesis eagerness, density,
+- **0 (default)** — no additional corroboration quorum. Genesis eagerness, density,
   patience, ancestry and header verification remain active.
-- **1** — require one independent witness before a source drives selection.
-- **2+** — require that many independently identified witnesses. Missing or
+- **1** — require a witness in another independence group before selection.
+- **2+** — require that many witnesses in distinct groups. Missing or
   disagreeing witnesses stall selection. Raising the count does not establish
   operator independence; choose the peer sources accordingly.
 

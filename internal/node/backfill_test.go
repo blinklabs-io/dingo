@@ -100,6 +100,28 @@ func addValidBackfillBlocksFrom(
 	}
 }
 
+func bindBackfillCheckpointIdentity(
+	t *testing.T,
+	db *database.Database,
+	cp *models.BackfillCheckpoint,
+) {
+	t.Helper()
+	txn := db.BlobTxn(false)
+	var (
+		point ocommon.Point
+		index uint64
+	)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		var err error
+		point, index, err = database.CanonicalBlockIdentityAtSlotTxn(
+			context.Background(), txn, cp.LastSlot,
+		)
+		return err
+	}))
+	cp.LastIndexID = &index
+	cp.LastBlockHash = append([]byte(nil), point.Hash...)
+}
+
 func TestBackfillProcessBlockGovernanceRecordsDRepActivityFromCertificateOnly(
 	t *testing.T,
 ) {
@@ -1346,6 +1368,351 @@ func TestRun_EndSlotLeavesLaterBlocksForLedgerReplay(t *testing.T) {
 	require.Equal(t, uint64(1), checkpoint.TotalSlots)
 }
 
+func TestRun_RejectsMissingCanonicalBlockBody(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	addValidBackfillBlocks(t, db, 3)
+
+	middle, err := db.BlockByIndex(database.BlockInitialIndex+1, nil)
+	require.NoError(t, err)
+	txn := db.BlobTxn(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		return txn.BlobStore().Delete(
+			txn.Blob(),
+			types.BlockBlobKey(middle.Slot, middle.Hash),
+		)
+	}))
+
+	bf := NewBackfill(db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	err = bf.Run(context.Background())
+	require.ErrorIs(t, err, types.ErrBlobKeyNotFound)
+	require.ErrorContains(t, err, fmt.Sprintf("slot %d", middle.Slot))
+
+	checkpoint, checkpointErr := db.Metadata().GetBackfillCheckpoint(
+		BackfillPhase,
+		nil,
+	)
+	require.NoError(t, checkpointErr)
+	require.NotNil(t, checkpoint)
+	assert.False(t, checkpoint.Completed)
+	assert.Zero(t, checkpoint.LastSlot)
+}
+
+func TestRun_ResumeRejectsBackwardCanonicalBlockMapping(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	blocks, err := testfixtures.GenerateConwayChainAt(1, 0, 4)
+	require.NoError(t, err)
+	ids := []uint64{
+		database.BlockInitialIndex,
+		database.BlockInitialIndex + 1,
+		1000,
+		1001,
+	}
+	for i, block := range blocks {
+		require.NoError(t, db.BlockCreate(models.Block{
+			ID:     ids[i],
+			Slot:   block.SlotNumber(),
+			Hash:   block.Hash().Bytes(),
+			Number: block.BlockNumber(),
+			Cbor:   block.Cbor(),
+			Type:   uint(block.Type()),
+		}, nil))
+	}
+
+	now := time.Now()
+	cp := &models.BackfillCheckpoint{
+		Phase:      BackfillPhase,
+		LastSlot:   1,
+		TotalSlots: 3,
+		StartedAt:  now,
+		UpdatedAt:  now,
+		Completed:  false,
+	}
+	bindBackfillCheckpointIdentity(t, db, cp)
+	require.NoError(t, db.Metadata().SetBackfillCheckpoint(cp, nil))
+	backwardKey := types.BlockBlobKey(
+		blocks[1].SlotNumber(), blocks[1].Hash().Bytes(),
+	)
+	txn := db.BlobTxn(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		return txn.BlobStore().Set(
+			txn.Blob(), types.BlockBlobIndexKey(ids[2]), backwardKey,
+		)
+	}))
+
+	bf := NewBackfill(db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	err = bf.Run(context.Background())
+	require.ErrorContains(t, err, "non-increasing slot 1 after slot 1")
+
+	checkpoint, checkpointErr := db.Metadata().GetBackfillCheckpoint(
+		BackfillPhase,
+		nil,
+	)
+	require.NoError(t, checkpointErr)
+	require.NotNil(t, checkpoint)
+	assert.False(t, checkpoint.Completed)
+	assert.Equal(t, uint64(1), checkpoint.LastSlot)
+}
+
+func TestRun_RejectsCanonicalBlockBeyondTip(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	blocks, err := testfixtures.GenerateConwayChainAt(1, 1, 5)
+	require.NoError(t, err)
+	for _, i := range []int{0, 4, 2} {
+		block := blocks[i]
+		require.NoError(t, db.BlockCreate(models.Block{
+			Slot:   block.SlotNumber(),
+			Hash:   block.Hash().Bytes(),
+			Number: block.BlockNumber(),
+			Cbor:   block.Cbor(),
+			Type:   uint(block.Type()),
+		}, nil))
+	}
+
+	bf := NewBackfill(db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	bf.SetBatchSize(1)
+	err = bf.Run(context.Background())
+	require.ErrorContains(
+		t, err, "canonical block at slot 5 exceeds backfill tip slot 3",
+	)
+
+	checkpoint, checkpointErr := db.Metadata().GetBackfillCheckpoint(
+		BackfillPhase,
+		nil,
+	)
+	require.NoError(t, checkpointErr)
+	require.NotNil(t, checkpoint)
+	assert.False(t, checkpoint.Completed)
+	assert.Equal(t, uint64(1), checkpoint.LastSlot)
+	assert.Equal(t, uint64(3), checkpoint.TotalSlots)
+}
+
+func TestRun_BoundedBackfillAuditsCanonicalTail(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	blocks, err := testfixtures.GenerateConwayChainAt(1, 1, 20)
+	require.NoError(t, err)
+	for idOffset, blockOffset := range []int{0, 9, 2, 19} {
+		block := blocks[blockOffset]
+		require.NoError(t, db.BlockCreate(models.Block{
+			ID:     database.BlockInitialIndex + uint64(idOffset),
+			Slot:   block.SlotNumber(),
+			Hash:   block.Hash().Bytes(),
+			Number: block.BlockNumber(),
+			Cbor:   block.Cbor(),
+			Type:   uint(block.Type()),
+		}, nil))
+	}
+
+	bf := NewBackfill(db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	bf.SetBatchSize(1)
+	bf.SetEndSlot(5)
+	err = bf.Run(context.Background())
+	require.ErrorContains(t, err, "non-increasing slot 3 after slot 10")
+
+	checkpoint, checkpointErr := db.Metadata().GetBackfillCheckpoint(
+		BackfillPhase, nil,
+	)
+	require.NoError(t, checkpointErr)
+	require.NotNil(t, checkpoint)
+	assert.False(t, checkpoint.Completed)
+	assert.Equal(t, uint64(1), checkpoint.LastSlot)
+	require.NotNil(t, checkpoint.LastIndexID)
+	assert.Equal(t, database.BlockInitialIndex, *checkpoint.LastIndexID)
+	assert.Equal(t, blocks[0].Hash().Bytes(), checkpoint.LastBlockHash)
+}
+
+func TestRun_LegacyCheckpointWithoutIdentityReplaysFromStart(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	addValidBackfillBlocks(t, db, 3)
+	now := time.Now()
+	require.NoError(t, db.Metadata().SetBackfillCheckpoint(
+		&models.BackfillCheckpoint{
+			Phase:      BackfillPhase,
+			LastSlot:   1,
+			TotalSlots: 2,
+			StartedAt:  now,
+			UpdatedAt:  now,
+		},
+		nil,
+	))
+
+	var progress []BackfillProgress
+	bf := NewBackfill(db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	bf.SetProgressFunc(func(p BackfillProgress) {
+		progress = append(progress, p)
+	})
+	require.NoError(t, bf.Run(context.Background()))
+	require.Len(t, progress, 1)
+	assert.Equal(t, uint64(3), progress[0].Stats.Blocks)
+
+	cp, err := db.Metadata().GetBackfillCheckpoint(BackfillPhase, nil)
+	require.NoError(t, err)
+	require.NotNil(t, cp)
+	require.True(t, cp.Completed)
+	require.NotNil(t, cp.LastIndexID)
+	assert.Equal(t, database.BlockInitialIndex+2, *cp.LastIndexID)
+	require.Len(t, cp.LastBlockHash, 32)
+}
+
+func TestRun_RejectsCheckpointIdentityMismatch(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	addValidBackfillBlocks(t, db, 2)
+	now := time.Now()
+	cp := &models.BackfillCheckpoint{
+		Phase:      BackfillPhase,
+		LastSlot:   1,
+		TotalSlots: 1,
+		StartedAt:  now,
+		UpdatedAt:  now,
+	}
+	bindBackfillCheckpointIdentity(t, db, cp)
+	cp.LastBlockHash = bytes.Repeat([]byte{0xff}, 32)
+	require.NoError(t, db.Metadata().SetBackfillCheckpoint(cp, nil))
+
+	bf := NewBackfill(db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	err := bf.Run(context.Background())
+	require.ErrorContains(t, err, "does not match canonical block")
+
+	stored, checkpointErr := db.Metadata().GetBackfillCheckpoint(
+		BackfillPhase, nil,
+	)
+	require.NoError(t, checkpointErr)
+	require.NotNil(t, stored)
+	require.False(t, stored.Completed)
+	require.Equal(t, uint64(1), stored.LastSlot)
+	require.Equal(t, bytes.Repeat([]byte{0xff}, 32), stored.LastBlockHash)
+}
+
+func TestRun_ResumeAuditsFirstCanonicalIndexAfterCheckpoint(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	blocks, err := testfixtures.GenerateConwayChainAt(1, 1, 20)
+	require.NoError(t, err)
+	for idOffset, blockOffset := range []int{0, 9, 2, 19} {
+		block := blocks[blockOffset]
+		require.NoError(t, db.BlockCreate(models.Block{
+			ID:     database.BlockInitialIndex + uint64(idOffset),
+			Slot:   block.SlotNumber(),
+			Hash:   block.Hash().Bytes(),
+			Number: block.BlockNumber(),
+			Cbor:   block.Cbor(),
+			Type:   uint(block.Type()),
+		}, nil))
+	}
+	now := time.Now()
+	cp := &models.BackfillCheckpoint{
+		Phase:      BackfillPhase,
+		LastSlot:   10,
+		TotalSlots: 20,
+		StartedAt:  now,
+		UpdatedAt:  now,
+	}
+	bindBackfillCheckpointIdentity(t, db, cp)
+	require.Equal(t, database.BlockInitialIndex+1, *cp.LastIndexID)
+	require.NoError(t, db.Metadata().SetBackfillCheckpoint(cp, nil))
+
+	bf := NewBackfill(db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	err = bf.Run(context.Background())
+	require.ErrorContains(t, err, "non-increasing slot 3 after slot 10")
+
+	checkpoint, checkpointErr := db.Metadata().GetBackfillCheckpoint(
+		BackfillPhase, nil,
+	)
+	require.NoError(t, checkpointErr)
+	require.NotNil(t, checkpoint)
+	assert.False(t, checkpoint.Completed)
+	assert.Equal(t, uint64(10), checkpoint.LastSlot)
+	require.NotNil(t, checkpoint.LastIndexID)
+	assert.Equal(t, database.BlockInitialIndex+1, *checkpoint.LastIndexID)
+	assert.Equal(t, blocks[9].Hash().Bytes(), checkpoint.LastBlockHash)
+}
+
+func TestRun_RejectsDuplicateCanonicalTailAtTip(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	blocks, err := testfixtures.GenerateConwayChainAt(1, 1, 3)
+	require.NoError(t, err)
+	for i, block := range blocks {
+		require.NoError(t, db.BlockCreate(models.Block{
+			ID:     database.BlockInitialIndex + uint64(i),
+			Slot:   block.SlotNumber(),
+			Hash:   block.Hash().Bytes(),
+			Number: block.BlockNumber(),
+			Cbor:   block.Cbor(),
+			Type:   uint(block.Type()),
+		}, nil))
+	}
+
+	precedingKey := types.BlockBlobKey(
+		blocks[1].SlotNumber(), blocks[1].Hash().Bytes(),
+	)
+	txn := db.BlobTxn(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		return txn.BlobStore().Set(
+			txn.Blob(),
+			types.BlockBlobIndexKey(database.BlockInitialIndex+2),
+			precedingKey,
+		)
+	}))
+
+	bf := NewBackfill(db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	bf.SetBatchSize(1)
+	err = bf.Run(context.Background())
+	require.ErrorContains(t, err, "non-increasing slot 2 after slot 2")
+
+	checkpoint, checkpointErr := db.Metadata().GetBackfillCheckpoint(
+		BackfillPhase,
+		nil,
+	)
+	require.NoError(t, checkpointErr)
+	require.NotNil(t, checkpoint)
+	assert.False(t, checkpoint.Completed)
+	assert.Equal(t, uint64(2), checkpoint.LastSlot)
+	assert.Equal(t, uint64(2), checkpoint.TotalSlots)
+}
+
+func TestRun_EndSlotBetweenCanonicalBlocksCompletes(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	blocks, err := testfixtures.GenerateConwayChainAt(1, 1, 3)
+	require.NoError(t, err)
+	for _, i := range []int{0, 2} {
+		block := blocks[i]
+		require.NoError(t, db.BlockCreate(models.Block{
+			Slot:   block.SlotNumber(),
+			Hash:   block.Hash().Bytes(),
+			Number: block.BlockNumber(),
+			Cbor:   block.Cbor(),
+			Type:   uint(block.Type()),
+		}, nil))
+	}
+
+	bf := NewBackfill(db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	bf.SetEndSlot(2)
+	require.NoError(t, bf.Run(context.Background()))
+
+	checkpoint, err := db.Metadata().GetBackfillCheckpoint(BackfillPhase, nil)
+	require.NoError(t, err)
+	require.NotNil(t, checkpoint)
+	assert.True(t, checkpoint.Completed)
+	assert.Equal(t, uint64(1), checkpoint.LastSlot)
+	assert.Equal(t, uint64(2), checkpoint.TotalSlots)
+}
+
 // TestRun_ResumeStopsAtRecordedMithrilAnchor covers a Mithril API backfill
 // resumed by `dingo serve`, which calls Run without SetEndSlot. Blocks after
 // the recorded ledger anchor belong to ledger replay: a historical pass over
@@ -1394,15 +1761,16 @@ func TestRun_ConsumedInputRecoveryDependsOnFreshBootstrap(t *testing.T) {
 			}
 
 			now := time.Now()
-			require.NoError(t, db.Metadata().SetBackfillCheckpoint(
-				&models.BackfillCheckpoint{
-					Phase:     BackfillPhase,
-					LastSlot:  tc.lastSlot,
-					StartedAt: now,
-					UpdatedAt: now,
-				},
-				nil,
-			))
+			cp := &models.BackfillCheckpoint{
+				Phase:     BackfillPhase,
+				LastSlot:  tc.lastSlot,
+				StartedAt: now,
+				UpdatedAt: now,
+			}
+			if tc.lastSlot > 0 {
+				bindBackfillCheckpointIdentity(t, db, cp)
+			}
+			require.NoError(t, db.Metadata().SetBackfillCheckpoint(cp, nil))
 
 			var progress []BackfillProgress
 			bf := NewBackfill(
@@ -2517,6 +2885,7 @@ func TestRun_CancelledContext_WithBlocks(t *testing.T) {
 	)
 	assert.ErrorIs(t, err, context.Canceled)
 }
+
 func TestBackfillProcessBlockTxsBatchedStoresDijkstraSubtransaction(
 	t *testing.T,
 ) {

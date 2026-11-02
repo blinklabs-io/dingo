@@ -15,6 +15,7 @@
 package node
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -601,37 +602,22 @@ func (b *Backfill) processEpochBoundary(
 // recoverNonce loads the running nonce from the DB for resume.
 // If the last block's nonce can't be found (e.g. previous run
 // didn't compute nonces), nonce computation is disabled.
-func (b *Backfill) recoverNonce(lastSlot uint64) {
+func (b *Backfill) recoverNonce(point ocommon.Point) {
 	if !b.computeNonces {
 		return
 	}
 	// Byron era: nonce starts as nil
-	_, eraId := b.slotToEpoch(lastSlot)
+	_, eraId := b.slotToEpoch(point.Slot)
 	if eraId == 0 {
 		return
 	}
-	// Get the block at lastSlot to look up its stored nonce
-	it := b.db.BlocksFromSlot(lastSlot)
-	defer it.Close()
-	blk, err := it.NextRaw()
-	if err != nil || blk == nil || blk.Slot != lastSlot {
-		b.logger.Warn(
-			"cannot find block for nonce recovery, "+
-				"disabling nonce computation",
-			"component", "backfill",
-			"slot", lastSlot,
-		)
-		b.computeNonces = false
-		return
-	}
-	point := ocommon.NewPoint(blk.Slot, blk.Hash)
 	nonce, err := b.db.GetBlockNonce(point, nil)
 	if err != nil || len(nonce) == 0 {
 		b.logger.Warn(
 			"no stored nonce for resume point, "+
 				"disabling nonce computation",
 			"component", "backfill",
-			"slot", lastSlot,
+			"slot", point.Slot,
 		)
 		b.computeNonces = false
 		return
@@ -832,6 +818,46 @@ func (b *Backfill) Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("reading backfill checkpoint: %w", err)
 	}
+	if cp != nil {
+		hasIndex := cp.LastIndexID != nil
+		hasHash := len(cp.LastBlockHash) > 0
+		if hasIndex != hasHash {
+			return errors.New(
+				"backfill checkpoint has incomplete block identity",
+			)
+		}
+		if hasHash && len(cp.LastBlockHash) != 32 {
+			return fmt.Errorf(
+				"backfill checkpoint has invalid block hash length %d",
+				len(cp.LastBlockHash),
+			)
+		}
+		if !hasIndex && cp.LastSlot > 0 && !cp.Completed {
+			cp.LastSlot = 0
+			cp.TotalSlots = 0
+			cp.LastIndexID = nil
+			cp.LastBlockHash = nil
+			cp.UpdatedAt = time.Now()
+			if err := b.db.Metadata().SetBackfillCheckpoint(cp, nil); err != nil {
+				return fmt.Errorf(
+					"resetting legacy backfill checkpoint: %w", err,
+				)
+			}
+		}
+		if cp.Completed && !hasIndex &&
+			(cp.LastSlot != 0 || cp.TotalSlots != 0) {
+			cp.LastSlot = 0
+			cp.TotalSlots = 0
+			cp.LastIndexID = nil
+			cp.LastBlockHash = nil
+			cp.UpdatedAt = time.Now()
+			if err := b.db.Metadata().SetBackfillCheckpoint(cp, nil); err != nil {
+				return fmt.Errorf(
+					"clearing legacy completed backfill progress: %w", err,
+				)
+			}
+		}
+	}
 	if cp != nil && cp.Completed {
 		b.logger.Info(
 			"backfill already completed",
@@ -910,7 +936,8 @@ func (b *Backfill) Run(ctx context.Context) error {
 		}
 		endSlot, endSlotSet = anchor, anchor > 0
 	}
-	if endSlotSet && endSlot < tipSlot {
+	tipBoundedByEndSlot := endSlotSet && endSlot < tipSlot
+	if tipBoundedByEndSlot {
 		tipSlot = endSlot
 	}
 
@@ -934,8 +961,54 @@ func (b *Backfill) Run(ctx context.Context) error {
 			}
 		}
 	}
+	copyIndexID := func(value *uint64) *uint64 {
+		if value == nil {
+			return nil
+		}
+		ret := *value
+		return &ret
+	}
+	var (
+		resumePoint *ocommon.Point
+		resumeIndex uint64
+	)
+	if cp != nil && cp.LastIndexID != nil {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		txn := b.db.BlobTxn(false)
+		var point ocommon.Point
+		var index uint64
+		if err := txn.Do(func(txn *database.Txn) error {
+			var identityErr error
+			point, index, identityErr = database.CanonicalBlockIdentityAtSlotTxn(
+				ctx, txn, cp.LastSlot,
+			)
+			return identityErr
+		}); err != nil {
+			return fmt.Errorf(
+				"resolving backfill checkpoint identity at slot %d: %w",
+				cp.LastSlot, err,
+			)
+		}
+		if index != *cp.LastIndexID ||
+			!bytes.Equal(point.Hash, cp.LastBlockHash) {
+			return fmt.Errorf(
+				"backfill checkpoint identity at slot %d does not match canonical block",
+				cp.LastSlot,
+			)
+		}
+		if index == ^uint64(0) {
+			return errors.New("backfill checkpoint index overflows resume position")
+		}
+		if point.Slot == ^uint64(0) {
+			return errors.New("backfill checkpoint slot overflows resume position")
+		}
+		resumePoint = &point
+		resumeIndex = index
+	}
 	var resolveThrough uint64
-	if cp != nil && cp.LastSlot > 0 {
+	if resumePoint != nil {
 		resolveThrough, _ = b.slotToEpoch(cp.LastSlot)
 	} else if len(b.epochs) > 0 {
 		resolveThrough = b.epochs[0].EpochId
@@ -946,7 +1019,11 @@ func (b *Backfill) Run(ctx context.Context) error {
 		)
 	}
 
-	var startSlot uint64
+	var (
+		startSlot    uint64
+		startIndex   = database.BlockInitialIndex
+		previousSlot *uint64
+	)
 	now := time.Now()
 	// Mithril pre-seeds a zero-slot checkpoint before importing a fresh
 	// database, so the caller's bootstrap classification is also needed to
@@ -954,7 +1031,7 @@ func (b *Backfill) Run(ctx context.Context) error {
 	// optimization is safe only for this monotonic replay; resumed runs may
 	// have inconsistencies from interrupted batches that need repair.
 	isFreshStart := cp == nil ||
-		(b.freshDatabaseBootstrap && cp.LastSlot == 0)
+		(b.freshDatabaseBootstrap && resumePoint == nil)
 	// The bootstrap classification applies only to the first attempt. A retry,
 	// even before checkpoint progress, must run consumed-input recovery.
 	b.freshDatabaseBootstrap = false
@@ -987,14 +1064,7 @@ func (b *Backfill) Run(ctx context.Context) error {
 		b.initializeFromFirstEpoch()
 	} else {
 		cp.TotalSlots = tipSlot
-		startSlot = cp.LastSlot + 1
-		if cp.LastSlot == 0 {
-			// LastSlot 0 is ambiguous: it can mean either
-			// slot 0 was processed or an initial checkpoint
-			// was written before any block completed. Resume
-			// from 0 so a pre-seeded checkpoint cannot skip
-			// the first real block.
-			startSlot = 0
+		if resumePoint == nil {
 			b.logger.Info(
 				"reinitializing metadata backfill from first block",
 				"component", "backfill",
@@ -1006,6 +1076,9 @@ func (b *Backfill) Run(ctx context.Context) error {
 			)
 			b.initializeFromFirstEpoch()
 		} else {
+			startSlot = resumePoint.Slot + 1
+			startIndex = resumeIndex + 1
+			previousSlot = &resumePoint.Slot
 			b.logger.Info(
 				"resuming metadata backfill",
 				"component", "backfill",
@@ -1015,9 +1088,9 @@ func (b *Backfill) Run(ctx context.Context) error {
 				"batch_row_limit", DefaultBackfillBatchRows,
 				"batch_byte_limit", DefaultBackfillBatchBytes,
 			)
-			// Recover running nonce from the last processed
-			// block so nonce computation can continue.
-			b.recoverNonce(cp.LastSlot)
+			// Recover running nonce from the exact processed point so a
+			// same-slot fork cannot seed resumed nonce computation.
+			b.recoverNonce(*resumePoint)
 
 			// Set epoch tracking to resume point.
 			epochId, eraId := b.slotToEpoch(cp.LastSlot)
@@ -1030,7 +1103,16 @@ func (b *Backfill) Run(ctx context.Context) error {
 		}
 	}
 
-	it := b.db.BlocksFromSlot(startSlot)
+	var iteratorEndSlot *uint64
+	if tipBoundedByEndSlot {
+		iteratorEndSlot = &endSlot
+	}
+	it, err := b.db.CanonicalBlocksFromIndex(
+		ctx, startIndex, previousSlot, iteratorEndSlot,
+	)
+	if err != nil {
+		return fmt.Errorf("opening canonical block iterator: %w", err)
+	}
 	defer it.Close()
 
 	// Keep one accumulator across multiple blocks. Queued rows can be drained
@@ -1064,10 +1146,12 @@ func (b *Backfill) Run(ctx context.Context) error {
 		intervalStats   dbtypes.BackfillHotPathStats
 		// batchBlockCount tracks blocks accumulated since the last flush.
 		batchBlockCount int
-		// committedSlot is the latest slot durably committed by a batch.
-		committedSlot = cp.LastSlot
-		lastLogTime   = time.Now()
-		startTime     = time.Now()
+		// committed identity is the latest block durably committed by a batch.
+		committedSlot      = cp.LastSlot
+		committedIndexID   = copyIndexID(cp.LastIndexID)
+		committedBlockHash = append([]byte(nil), cp.LastBlockHash...)
+		lastLogTime        = time.Now()
+		startTime          = time.Now()
 	)
 
 	ensureBatchTxn := func() {
@@ -1106,6 +1190,10 @@ func (b *Backfill) Run(ctx context.Context) error {
 		}
 		oldTxn.Release()
 		committedSlot = cp.LastSlot
+		committedIndexID = copyIndexID(cp.LastIndexID)
+		committedBlockHash = append(
+			committedBlockHash[:0], cp.LastBlockHash...,
+		)
 		acc.Reset()
 		batchTxn = nil
 		batchBlockCount = 0
@@ -1117,9 +1205,15 @@ func (b *Backfill) Run(ctx context.Context) error {
 	saveCommittedCheckpoint := func() {
 		rollbackBatch()
 		currentSlot := cp.LastSlot
+		currentIndexID := cp.LastIndexID
+		currentBlockHash := cp.LastBlockHash
 		cp.LastSlot = committedSlot
+		cp.LastIndexID = copyIndexID(committedIndexID)
+		cp.LastBlockHash = append([]byte(nil), committedBlockHash...)
 		b.saveCheckpoint(cp)
 		cp.LastSlot = currentSlot
+		cp.LastIndexID = currentIndexID
+		cp.LastBlockHash = currentBlockHash
 	}
 
 	for {
@@ -1138,7 +1232,9 @@ func (b *Backfill) Run(ctx context.Context) error {
 		}
 
 		readDecodeStart := time.Now()
-		blk, err := it.NextRaw()
+		// CanonicalBlocksFromIndex binds ctx to the iterator so NextRaw can
+		// cancel a remote canonical index value read.
+		blk, err := it.NextRaw() //nolint:contextcheck
 		if err != nil {
 			saveCommittedCheckpoint()
 			return fmt.Errorf("iterating blocks: %w", err)
@@ -1147,7 +1243,11 @@ func (b *Backfill) Run(ctx context.Context) error {
 			break // iteration complete
 		}
 		if blk.Slot > tipSlot {
-			break
+			saveCommittedCheckpoint()
+			return fmt.Errorf(
+				"canonical block at slot %d exceeds backfill tip slot %d",
+				blk.Slot, tipSlot,
+			)
 		}
 		ensureBatchTxn()
 		// Include the current block while its metadata is accumulated so row
@@ -1245,6 +1345,9 @@ func (b *Backfill) Run(ctx context.Context) error {
 		// Common tail: update progress for every block.
 		processedTxs += blockTxCount
 		cp.LastSlot = blk.Slot
+		lastIndexID := blk.Index
+		cp.LastIndexID = &lastIndexID
+		cp.LastBlockHash = append(cp.LastBlockHash[:0], blk.Hash...)
 		processedBlocks++
 		batchBlockCount++
 

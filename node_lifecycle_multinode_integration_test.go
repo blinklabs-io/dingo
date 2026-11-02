@@ -459,7 +459,7 @@ func TestLiveRestoreUnderRealForgingAndNetworking(t *testing.T) {
 	_, syncer, syncerLn := startTwoNodeDevnet(t)
 	waitForTipSlotAtLeast(t, syncer, 10)
 
-	snapshotDir := t.TempDir() + "/snap"
+	snapshotDir := snapshotTestDir(t, "snap")
 	syncer.liveLifecycleMu.Lock()
 	manifest, err := lifecycleSnapshot(t, syncer, snapshotDir)
 	tipBeforeRestore, tipErr := syncer.db.GetTip(nil)
