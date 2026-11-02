@@ -127,6 +127,14 @@ type LedgerView struct {
 	// in charge, which is correct for every caller with no applied block in
 	// hand (mempool validation, standalone evaluation).
 	horizonAnchorSlot uint64
+	// forecastBasisSlot is the slot the ledger rules are validating at, set
+	// by extendForecastFrom when forecastBasisSet is true. SlotToTime extends
+	// the era history linearly past it, as cardano-ledger's
+	// unsafeLinearExtendEpochInfo does for Alonzo's OutsideForecast check and
+	// Plutus script contexts. Views without a basis stay bounded by the
+	// forecast horizon.
+	forecastBasisSlot uint64
+	forecastBasisSet  bool
 	// epochStartSlot is the current epoch's start slot, pinned from the same
 	// snapshot pp was captured from at every real validation/evaluation call
 	// site (see the pinCommitteeState call sites in state.go). IsVrfKeyInUse
@@ -230,6 +238,32 @@ func storageFaultOrErr(lv *LedgerView, ruleErr error) error {
 // committee state alongside pp also pins this.
 func (lv *LedgerView) pinSyntheticV2CostModel(inEffect bool) *LedgerView {
 	lv.syntheticV2CostModel = inEffect
+	return lv
+}
+
+// extendForecastFrom makes SlotToTime extend the era history linearly past
+// slot when the ledger is in the Alonzo era, and leaves it bounded otherwise.
+// ledgerEraID is the ledger's era, whose rules the reference applies to every
+// transaction it validates, not the era of the transaction's encoding.
+//
+// The era matters because the extended epoch info reaches the Plutus script
+// context only in Alonzo. Its LEDGERS rule and mempool build every
+// transaction's context through unsafeLinearExtendEpochInfo
+// (Cardano.Ledger.Alonzo.Rules.Ledgers, Cardano.Ledger.Alonzo), while
+// Babbage's LEDGERS rule, which Conway and Dijkstra reuse, and the shared
+// mempool defaultApplyTxWithValidation pass the bounded HFC epoch info, so a
+// validity bound past the horizon fails translation there
+// (TimeTranslationPastHorizon) and the transaction is rejected. A bounded view
+// rejects it here too.
+func (lv *LedgerView) extendForecastFrom(
+	ledgerEraID uint,
+	slot uint64,
+) *LedgerView {
+	if ledgerEraID != alonzo.EraIdAlonzo {
+		return lv
+	}
+	lv.forecastBasisSlot = slot
+	lv.forecastBasisSet = true
 	return lv
 }
 
@@ -1116,13 +1150,22 @@ func (lv *LedgerView) IsBlsKeyInUse(
 
 // SlotToTime returns the current time for a given slot based on known epochs.
 //
-// This is the converter transaction validation sees, and a Plutus script
-// context must convert the transaction's validity interval through it. The
-// forecast horizon stays in force, matching cardano-ledger's
-// TimeTranslationPastHorizon failure, but it is measured from this view's
-// horizon anchor so a block being applied is judged against its own
-// predecessor rather than a tip that has not been published yet.
+// This is the converter transaction validation sees: the OutsideForecast rule
+// and every Plutus script context convert the transaction's validity interval
+// through it. The era history is measured from this view's horizon anchor, so
+// a block being applied is judged against its own predecessor rather than a
+// tip that has not been published yet. When the view has a forecast basis,
+// slots past it are extended linearly as cardano-ledger does (see
+// SlotTimeConverter.SlotToTimeExtendedFrom), so a validity bound past the
+// forecast horizon still translates.
 func (lv *LedgerView) SlotToTime(slot uint64) (time.Time, error) {
+	if lv.forecastBasisSet {
+		return lv.ls.SlotToTimeExtendedFrom(
+			lv.horizonAnchorSlot,
+			lv.forecastBasisSlot,
+			slot,
+		)
+	}
 	return lv.ls.SlotToTimeWithHorizonFrom(lv.horizonAnchorSlot, slot)
 }
 
