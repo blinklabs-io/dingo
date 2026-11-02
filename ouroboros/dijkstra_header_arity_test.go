@@ -71,9 +71,17 @@ type headerArityCase struct {
 	valid bool
 }
 
+// tenFields reports whether the case is the ten-field Praos header body,
+// which is valid everywhere except Musashi and a Leios announcement.
+func (c headerArityCase) tenFields() bool {
+	return c.keep == 10 && len(c.extra) == 0
+}
+
 // headerArityCases cover every arity a header body can take and the
-// announcement shapes of the twelve-field form. Only a boolean followed by a
-// null or an exactly [hash32, uint32] announcement is a current header.
+// announcement shapes of the twelve-field form. On Musashi, and for a Leios
+// announcement, only a boolean followed by a null or an exactly
+// [hash32, uint32] announcement is a current header. Elsewhere the
+// ten-field Praos body is also valid; see headerArityCase.tenFields.
 func headerArityCases() []headerArityCase {
 	hash := bytes.Repeat([]byte{0x5a}, 32)
 	const babbageFields = 10
@@ -159,7 +167,9 @@ func TestDecodeChainsyncHeaderEnforcesDijkstraBodyArity(t *testing.T) {
 					t.Parallel()
 					raw := headerBodyVariant(t, valid, tc.keep, tc.extra...)
 					header, err := o.decodeChainsyncHeader(blockType, raw)
-					if !tc.valid {
+					wantValid := tc.valid ||
+						(tc.tenFields() && network.magic != musashiNetworkMagic)
+					if !wantValid {
 						require.Error(t, err)
 						require.Nil(t, header)
 						return
