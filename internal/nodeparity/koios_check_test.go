@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"math/big"
 	"net"
@@ -2341,9 +2342,7 @@ func TestReturnRedeemUTxOsMainnetGenesis(t *testing.T) {
 		"kept1#0": "DdzFFzCqrhsdnK3RRGGRXkLQ3K1rPySKAMuYqg62ECg3CGSz79Aq5LBQKKWsCGuS57LwuiumHxXpLzYPsmDFGfX7NzxzrBqKmJSfrdsq|2000000",
 		"kept2#0": "addr1q9t4zmhtx9exsl74825c2fj2hlx484x8nurhtae2478d4ycs4kvr6l0wrwsnqx9ad5km074nxgngdx6z5vhycsrsydvq2ddmtg|3000000",
 	}
-	for ref, entry := range kept {
-		set[ref] = entry
-	}
+	maps.Copy(set, kept)
 
 	removed := ReturnRedeemUTxOs(set)
 
