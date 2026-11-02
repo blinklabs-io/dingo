@@ -39,6 +39,7 @@ import (
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/allegra"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/mary"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
@@ -3089,4 +3090,41 @@ func TestRunFromGenesis_TxInfoIndexLagDoesNotTaintEpoch(t *testing.T) {
 		t, done, 10*time.Second, "RunFromGenesis exit after cancellation",
 	)
 	assert.True(t, err == nil || errors.Is(err, context.Canceled))
+}
+
+// TestAllegraCrossingCountsAgainAfterRollbackBeforeHardFork covers a
+// rollback from the first Allegra block to the last Shelley one: the
+// reconstruction is re-baselined from Dingo's Shelley-era set, which still
+// holds the redeem UTxOs, so the next Allegra block must apply the removal
+// again. A same-point reconnect never calls rollback.
+func TestAllegraCrossingCountsAgainAfterRollbackBeforeHardFork(t *testing.T) {
+	t.Parallel()
+	var c allegraCrossing
+	c.forward(shelley.EraIdShelley, 100)
+	require.True(t, c.crosses(allegra.EraIdAllegra))
+	c.forward(allegra.EraIdAllegra, 120)
+	assert.False(t, c.crosses(allegra.EraIdAllegra))
+
+	c.rollback(120)
+	assert.False(t, c.crosses(allegra.EraIdAllegra),
+		"a rollback to the first Allegra block keeps the crossing applied")
+
+	c.rollback(100)
+	assert.True(t, c.crosses(allegra.EraIdAllegra),
+		"a rollback before the hard fork must make the next Allegra block cross again")
+	c.forward(allegra.EraIdAllegra, 121)
+	assert.False(t, c.crosses(allegra.EraIdAllegra))
+}
+
+// TestAllegraCrossingAfterPostHardForkStart covers a run that starts past the
+// hard fork: no block crosses, since Dingo's baseline already lacks the
+// redeem UTxOs, unless a rollback reaches below the start.
+func TestAllegraCrossingAfterPostHardForkStart(t *testing.T) {
+	t.Parallel()
+	var c allegraCrossing
+	assert.False(t, c.crosses(allegra.EraIdAllegra))
+	c.forward(allegra.EraIdAllegra, 500)
+	assert.False(t, c.crosses(allegra.EraIdAllegra))
+	c.rollback(400)
+	assert.True(t, c.crosses(allegra.EraIdAllegra))
 }
