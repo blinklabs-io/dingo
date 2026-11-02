@@ -146,11 +146,24 @@ func writeUTxOSetFile(path string, set UTxOSet) (err error) {
 			_ = os.Remove(path)
 		}
 	}()
+	// One gob message per entry: encoding the map as a single value would
+	// buffer the whole encoding, a second copy of a mainnet-sized set.
 	w := bufio.NewWriterSize(f, 1<<20)
-	if err := gob.NewEncoder(w).Encode(map[string]string(set)); err != nil {
+	enc := gob.NewEncoder(w)
+	if err := enc.Encode(len(set)); err != nil {
 		return err
 	}
+	for ref, entry := range set {
+		if err := enc.Encode(utxoSetFileEntry{Ref: ref, Entry: entry}); err != nil {
+			return err
+		}
+	}
 	return w.Flush()
+}
+
+type utxoSetFileEntry struct {
+	Ref   string
+	Entry string
 }
 
 func readUTxOSetFile(path string) (UTxOSet, error) {
@@ -159,11 +172,20 @@ func readUTxOSetFile(path string) (UTxOSet, error) {
 		return nil, err
 	}
 	defer f.Close() //nolint:errcheck
-	var set map[string]string
-	if err := gob.NewDecoder(bufio.NewReaderSize(f, 1<<20)).Decode(&set); err != nil {
+	dec := gob.NewDecoder(bufio.NewReaderSize(f, 1<<20))
+	var n int
+	if err := dec.Decode(&n); err != nil {
 		return nil, err
 	}
-	return UTxOSet(set), nil
+	set := make(UTxOSet, n)
+	for range n {
+		var e utxoSetFileEntry
+		if err := dec.Decode(&e); err != nil {
+			return nil, err
+		}
+		set[e.Ref] = e.Entry
+	}
+	return set, nil
 }
 
 // captureBoundary reads Dingo's side of epoch's checks at point. The UTxO set
@@ -223,7 +245,9 @@ func captureUTxOSetFile(
 		return "", fmt.Errorf("read Dingo's UTxO set at slot %d: %w", point.Slot, err)
 	}
 	path := filepath.Join(
-		dir, fmt.Sprintf("utxo-epoch-%d-slot-%d.gob", epoch, point.Slot),
+		dir, fmt.Sprintf(
+			"utxo-epoch-%d-slot-%d-%x.gob", epoch, point.Slot, point.Hash,
+		),
 	)
 	if err := writeUTxOSetFile(path, set); err != nil {
 		return "", fmt.Errorf("store Dingo's UTxO set at slot %d: %w", point.Slot, err)
@@ -259,37 +283,45 @@ func runBoundaryFollower(
 	for ctx.Err() == nil {
 		sessionCtx, endSession := context.WithCancel(ctx)
 		err := followBoundariesOnce(sessionCtx, dingoAddr, magic, &mu, &lastPoint,
-			func(cbCtx context.Context, block lcommon.Block) {
+			func(cbCtx context.Context, block lcommon.Block) error {
 				if block.Era().Id == byron.EraIdByron {
-					return
+					return nil
 				}
+				// An error ends the session before the block counts as
+				// seen, so the next session delivers it again: skipping it
+				// would capture the epoch's second block instead, which the
+				// main loop never asks for.
 				epoch, err := epochOf(cbCtx, block.SlotNumber())
 				if err != nil {
-					return
+					return fmt.Errorf("epoch of slot %d: %w", block.SlotNumber(), err)
 				}
 				if haveEpoch && epoch <= prevEpoch {
-					return
+					return nil
 				}
-				prevEpoch, haveEpoch = epoch, true
 				point := pcommon.NewPoint(block.SlotNumber(), block.Hash().Bytes())
 				c := capture(cbCtx, point, epoch)
-				if cbCtx.Err() != nil {
-					return
+				if err := cbCtx.Err(); err != nil {
+					if c.utxoPath != "" {
+						_ = os.Remove(c.utxoPath)
+					}
+					return err
 				}
 				captures.put(c)
+				prevEpoch, haveEpoch = epoch, true
 				if c.utxoErr != nil {
 					logf(
 						"nodeparity: captured Dingo's epoch %d boundary checks at "+
 							"slot %d, but not its UTxO set: %v",
 						epoch, point.Slot, c.utxoErr,
 					)
-					return
+				} else {
+					logf(
+						"nodeparity: captured Dingo's epoch %d boundary at slot %d "+
+							"for the UTxO comparison",
+						epoch, point.Slot,
+					)
 				}
-				logf(
-					"nodeparity: captured Dingo's epoch %d boundary at slot %d "+
-						"for the UTxO comparison",
-					epoch, point.Slot,
-				)
+				return nil
 			},
 			func(cbCtx context.Context, point pcommon.Point) {
 				if point.Slot == 0 && len(point.Hash) == 0 {
@@ -316,14 +348,15 @@ func runBoundaryFollower(
 }
 
 // followBoundariesOnce runs one chainsync session from *lastPoint until it
-// ends, calling onBlock and onRollback under mu.
+// ends, calling onBlock and onRollback under mu. A block becomes *lastPoint
+// only once onBlock succeeds; an onBlock error ends the session.
 func followBoundariesOnce(
 	ctx context.Context,
 	dingoAddr string,
 	magic uint32,
 	mu *sync.Mutex,
 	lastPoint *pcommon.Point,
-	onBlock func(context.Context, lcommon.Block),
+	onBlock func(context.Context, lcommon.Block) error,
 	onRollback func(context.Context, pcommon.Point),
 ) error {
 	rawConn, err := dialRaw(ctx, protoFromAddr(dingoAddr), dingoAddr)
@@ -346,8 +379,10 @@ func followBoundariesOnce(
 				}
 				mu.Lock()
 				defer mu.Unlock()
+				if err := onBlock(ctx, block); err != nil {
+					return err
+				}
 				*lastPoint = pcommon.NewPoint(block.SlotNumber(), block.Hash().Bytes())
-				onBlock(ctx, block)
 				return nil
 			}),
 			chainsync.WithRollBackwardFunc(func(

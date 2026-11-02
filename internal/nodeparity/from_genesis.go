@@ -1446,8 +1446,22 @@ func RunFromGenesis(
 
 						result := EpochResult{Epoch: epoch}
 						var capture *boundaryCapture
+						captureCompared := false
 						if captures != nil {
 							capture = captures.take(epoch, point)
+						}
+						if capture != nil {
+							// An interrupted callback hands the capture back:
+							// the resumed session delivers this block again.
+							defer func() {
+								switch {
+								case capture.utxoPath == "":
+								case captureCompared:
+									_ = os.Remove(capture.utxoPath)
+								default:
+									captures.put(capture)
+								}
+							}()
 						}
 						// loadCapturedUTxO reads Dingo's set at point from the
 						// capture, removing the file: it is read at most once.
@@ -1594,9 +1608,7 @@ func RunFromGenesis(
 						case utxoVerdictNoBaseline:
 							result.UTxOAttempted = false
 						}
-						if capture != nil && capture.utxoPath != "" {
-							_ = os.Remove(capture.utxoPath)
-						}
+						captureCompared = true
 						result.UTxOElapsed = time.Since(utxoStart)
 						utxoTaintCause = ""
 

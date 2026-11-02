@@ -124,6 +124,72 @@ func TestRunBoundaryFollowerCapturesFirstBlockOfEachEpoch(t *testing.T) {
 	assert.NotNil(t, captures.take(3, server.chain.Points[4]))
 }
 
+// TestRunBoundaryFollowerRetriesABoundaryItCouldNotPlace covers an epoch
+// lookup that fails on an epoch's first block: the session ends before the
+// block counts as seen, so the reconnect delivers it again and the capture
+// lands on that block, the one the main loop asks for, not on the next one.
+func TestRunBoundaryFollowerRetriesABoundaryItCouldNotPlace(t *testing.T) {
+	const magic = 42
+	server := newGenesisFakeServer(t, 6)
+	server.ungated = true
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	server.serve(t, listener, magic)
+
+	epochBySlot := map[uint64]uint64{}
+	for i, p := range server.chain.Points {
+		epochBySlot[p.Slot] = uint64(1 + i/2)
+	}
+	var (
+		mu       sync.Mutex
+		failed   bool
+		captured []uint64
+	)
+	boundary := server.chain.Points[2]
+	epochOf := func(_ context.Context, slot uint64) (uint64, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if slot == boundary.Slot && !failed {
+			failed = true
+			return 0, errors.New("simulated era history lookup failure")
+		}
+		return epochBySlot[slot], nil
+	}
+
+	captures := newBoundaryCaptures(t.TempDir())
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runBoundaryFollower(
+			ctx, listener.Addr().String(), magic, pcommon.NewPointOrigin(),
+			epochOf,
+			func(_ context.Context, point pcommon.Point, epoch uint64) *boundaryCapture {
+				mu.Lock()
+				captured = append(captured, epoch)
+				mu.Unlock()
+				return &boundaryCapture{epoch: epoch, point: point}
+			},
+			captures, t.Logf,
+		)
+	}()
+
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(captured) >= 2
+	}, 20*time.Second, 10*time.Millisecond)
+	cancel()
+	<-done
+
+	assert.Equal(t, []uint64{2, 3}, captured)
+	assert.NotNil(t, captures.take(2, boundary),
+		"the epoch 2 capture must be at its first block")
+	assert.NotNil(t, captures.take(3, server.chain.Points[4]))
+}
+
 // TestCaptureBoundaryReadsUTxOSetFirst covers the mainnet failure where the
 // stake check's Koios wait outlasted Dingo's rollback window and the UTxO
 // read that followed it was refused as too old.
