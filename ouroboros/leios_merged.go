@@ -937,6 +937,14 @@ func (o *Ouroboros) scheduleLeiosEndorserBlockValidation(
 	select {
 	case o.leiosValidationSlots <- struct{}{}:
 	default:
+		// Both slots belong to running attempts: slots are only taken
+		// under leiosValidationMu, and a rejected entry frees its slot
+		// before unlocking. One of them schedules this block when it
+		// finishes.
+		if o.leiosValidationDeferred == nil {
+			o.leiosValidationDeferred = make(map[string]struct{})
+		}
+		o.leiosValidationDeferred[key] = struct{}{}
 		o.leiosValidationMu.Unlock()
 		return
 	}
@@ -969,11 +977,17 @@ func (o *Ouroboros) scheduleLeiosEndorserBlockValidation(
 			o.leiosEndorserBlocks[cacheKey] = &pending
 		}
 	}
+	// Read under leiosMu with the block already marked pending. A retry
+	// that counts after this read may skip the pending block, so the
+	// attempt reruns the retry when the counter has moved. A retry counted
+	// before it needs no rerun: the attempt starts after the request and
+	// validates against the ledger tip published before it was made.
+	retryGen := o.leiosValidationRetryGen.Load()
 	o.leiosValidationWG.Add(1)
 	o.leiosMu.Unlock()
 	o.leiosValidationMu.Unlock()
 
-	go o.validateLeiosEndorserBlock(key, pending)
+	go o.validateLeiosEndorserBlock(key, pending, retryGen)
 }
 
 // ValidateLeiosEndorserBlockForHeader waits through the configured diffusion
@@ -1242,8 +1256,13 @@ func (o *Ouroboros) selectedLeiosHeaderForDataLocked(
 func (o *Ouroboros) validateLeiosEndorserBlock(
 	key string,
 	data leiosEndorserBlockData,
+	retryGen uint64,
 ) {
 	defer o.leiosValidationWG.Done()
+	// Deferred calls run in reverse: the slot is freed, and the cache entry
+	// already updated, before the follow-up work is scheduled.
+	defer o.rerunLeiosValidationRetry(retryGen)
+	defer o.scheduleDeferredLeiosEndorserBlockValidations()
 	defer func() { <-o.leiosValidationSlots }()
 	header, err := gdijkstra.NewDijkstraBlockHeaderFromCbor(
 		data.announcementHeaderRaw,
@@ -1408,7 +1427,54 @@ func (o *Ouroboros) updateLeiosEndorserBlockValidation(
 	return &updated
 }
 
+// RetryLeiosEndorserBlockValidations schedules background validation of every
+// cached endorser block whose last attempt found its basis block not yet the
+// ledger tip. A block whose attempt is still running is retried when that
+// attempt finishes. It does not block.
+func (o *Ouroboros) RetryLeiosEndorserBlockValidations() {
+	o.retryLeiosEndorserBlockValidations()
+}
+
 func (o *Ouroboros) retryLeiosEndorserBlockValidations() {
+	o.leiosValidationRetryGen.Add(1)
+	o.scheduleRetryableLeiosEndorserBlockValidations()
+}
+
+// rerunLeiosValidationRetry runs, without counting a new request, a retry
+// that was requested after the finishing attempt was scheduled. Counting it
+// would make concurrent attempts re-trigger each other indefinitely.
+func (o *Ouroboros) rerunLeiosValidationRetry(scheduledGen uint64) {
+	if o.leiosValidationRetryGen.Load() != scheduledGen {
+		o.scheduleRetryableLeiosEndorserBlockValidations()
+	}
+}
+
+// scheduleDeferredLeiosEndorserBlockValidations schedules the blocks that
+// found no free validation slot. Each deferred block is attempted once per
+// deferral, so finishing attempts cannot re-trigger each other.
+func (o *Ouroboros) scheduleDeferredLeiosEndorserBlockValidations() {
+	o.leiosValidationMu.Lock()
+	keys := o.leiosValidationDeferred
+	o.leiosValidationDeferred = nil
+	o.leiosValidationMu.Unlock()
+	if len(keys) == 0 {
+		return
+	}
+	blocks := make([]*leiosEndorserBlockData, 0, len(keys))
+	o.leiosMu.RLock()
+	for key := range keys {
+		if data := o.leiosEndorserBlocks[key]; data != nil {
+			blocks = append(blocks, data)
+		}
+	}
+	o.leiosMu.RUnlock()
+	sortLeiosEndorserBlocksNewestFirst(blocks)
+	for _, data := range blocks {
+		o.scheduleLeiosEndorserBlockValidation(data.point, data)
+	}
+}
+
+func (o *Ouroboros) scheduleRetryableLeiosEndorserBlockValidations() {
 	blocks := o.retryableLeiosEndorserBlocks()
 	for _, data := range blocks {
 		o.scheduleLeiosEndorserBlockValidation(data.point, data)
@@ -1431,13 +1497,17 @@ func (o *Ouroboros) retryableLeiosEndorserBlocks() []*leiosEndorserBlockData {
 		}
 	}
 	o.leiosMu.RUnlock()
+	sortLeiosEndorserBlocksNewestFirst(blocks)
+	return blocks
+}
+
+func sortLeiosEndorserBlocksNewestFirst(blocks []*leiosEndorserBlockData) {
 	slices.SortFunc(blocks, func(a, b *leiosEndorserBlockData) int {
 		if order := cmp.Compare(b.point.Slot, a.point.Slot); order != 0 {
 			return order
 		}
 		return slices.Compare(a.point.Hash, b.point.Hash)
 	})
-	return blocks
 }
 
 func (o *Ouroboros) publishValidatedLeiosEndorserBlock(

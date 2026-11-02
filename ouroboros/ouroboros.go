@@ -159,7 +159,16 @@ type Ouroboros struct {
 	leiosValidationWG             sync.WaitGroup
 	leiosValidationMu             sync.Mutex
 	leiosValidationClosed         bool
-	config                        OuroborosConfig
+	// leiosValidationDeferred holds the keys of endorser blocks that found
+	// no free validation slot. Guarded by leiosValidationMu; a finishing
+	// attempt schedules them.
+	leiosValidationDeferred map[string]struct{}
+	// leiosValidationRetryGen counts retry requests. A validation attempt
+	// records it when scheduled; a request arriving while the attempt runs
+	// skips that block, so the attempt re-runs the retry when it finishes
+	// and the counter has moved.
+	leiosValidationRetryGen atomic.Uint64
+	config                  OuroborosConfig
 	// registerer wraps config.PromRegistry and tracks every collector this
 	// instance registers, so Close can hand them all back. See lifecycle.go.
 	registerer *trackingRegisterer
