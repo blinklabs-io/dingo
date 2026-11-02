@@ -43,14 +43,33 @@ const (
 // byte of it would be a bug in this check rather than in the operator's
 // configuration.
 func socketPathLimit(path string) int {
+	return socketPathLimitFor(runtime.GOOS, path)
+}
+
+// socketPathLimitFor returns the longest socket path goos accepts.
+func socketPathLimitFor(goos, path string) int {
 	sunPath := sunPathLenOther
-	if runtime.GOOS == "darwin" {
+	if goos == "darwin" {
 		sunPath = sunPathLenDarwin
 	}
-	if isAbstractSocketPath(path) {
+	if isAbstractSocketPathFor(goos, path) && abstractNameFillsSunPath(goos) {
 		return sunPath
 	}
 	return sunPath - 1
+}
+
+// abstractNameFillsSunPath reports whether Go's syscall package lets an
+// abstract name use every byte of sun_path on goos. Linux and Windows do.
+// Solaris and illumos rewrite "@" too, but reject any name as long as
+// sun_path before checking for it, so an abstract name there still loses the
+// byte a NUL terminator would take.
+func abstractNameFillsSunPath(goos string) bool {
+	switch goos {
+	case "linux", "android", "windows":
+		return true
+	default:
+		return false
+	}
 }
 
 // isAbstractSocketPath reports whether path is an abstract address on this

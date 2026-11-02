@@ -107,7 +107,9 @@ func TestNewClientAcceptsPathAtTheLimit(t *testing.T) {
 	t.Parallel()
 
 	if runtime.GOOS == "windows" {
-		t.Skip("the sun_path limit applies to Unix-style paths; Windows resolves the path with a drive letter")
+		t.Skip(
+			"the sun_path limit applies to Unix-style paths; Windows resolves the path with a drive letter",
+		)
 	}
 
 	sunPath := sunPathLenOther
@@ -130,7 +132,7 @@ func TestSocketPathLimitIsPlatformCorrect(t *testing.T) {
 
 	named := socketPathLimit("/run/kes-agent.sock")
 	atPrefix := socketPathLimit("@kes-agent")
-	if hasAbstractSocketNamespace(runtime.GOOS) {
+	if abstractNameFillsSunPath(runtime.GOOS) {
 		require.Equal(t, named+1, atPrefix, "abstract addresses carry no NUL")
 	} else {
 		require.Equal(t, named, atPrefix, "@ is not abstract on this platform, so it costs a NUL too")
@@ -157,6 +159,28 @@ func TestAtPrefixIsAbstractWhereGoRewritesIt(t *testing.T) {
 		require.False(t, isAbstractSocketPathFor(goos, "@kes-agent"), goos)
 	}
 	require.False(t, isAbstractSocketPathFor("linux", "/run/kes-agent.sock"))
+}
+
+// TestAbstractSocketPathLimitMatchesGoSyscall pins the length budget of an
+// abstract address to what Go's syscall package accepts on each platform.
+// Linux, Android and Windows accept a name that fills sun_path. Solaris and
+// illumos return EINVAL for one, so allowing it there would pass the startup
+// check and fail on connect with a bare "invalid argument".
+func TestAbstractSocketPathLimitMatchesGoSyscall(t *testing.T) {
+	t.Parallel()
+
+	const abstract = "@kes-agent"
+	for _, goos := range []string{"linux", "android", "windows"} {
+		limit := socketPathLimitFor(goos, abstract)
+		require.Equal(t, sunPathLenOther, limit, goos)
+	}
+	for _, goos := range []string{"solaris", "illumos"} {
+		limit := socketPathLimitFor(goos, abstract)
+		require.Equal(t, sunPathLenOther-1, limit, goos)
+	}
+	require.Equal(t, sunPathLenDarwin-1, socketPathLimitFor("darwin", abstract))
+	named := socketPathLimitFor("linux", "/run/kes-agent.sock")
+	require.Equal(t, sunPathLenOther-1, named)
 }
 
 // TestAtPrefixIsRelativeWhereGoDoesNotRewriteIt pins the other half of the rule.
