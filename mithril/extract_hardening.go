@@ -125,6 +125,9 @@ type extractConfig struct {
 	maxZstdMemory     uint64
 	decoders          *decoderMemoryBudget
 	limits            archiveLimits
+	publishedIdentity *os.FileInfo
+	releasePublished  func(*bootstrapDir) error
+	createStaging     func(string, string) (string, *bootstrapDir, error)
 }
 
 // ExtractOption configures how ExtractArchive treats its destination.
@@ -174,10 +177,16 @@ func withDecoderBudget(b *decoderMemoryBudget) ExtractOption {
 	return func(c *extractConfig) { c.decoders = b }
 }
 
+func withPublishedIdentity(identity *os.FileInfo) ExtractOption {
+	return func(c *extractConfig) { c.publishedIdentity = identity }
+}
+
 func newExtractConfig(opts []ExtractOption) extractConfig {
 	cfg := extractConfig{
 		maxZstdWindowSize: maxZstdWindowSize,
 		maxZstdMemory:     maxZstdDecoderMemory,
+		releasePublished:  releasePublishedBootstrapDir,
+		createStaging:     createBootstrapDir,
 		limits: archiveLimits{
 			maxEntries:     maxArchiveEntries,
 			maxMemberBytes: maxExtractFileSize,
@@ -192,14 +201,25 @@ func newExtractConfig(opts []ExtractOption) extractConfig {
 	return cfg
 }
 
+func releasePublishedBootstrapDir(owned *bootstrapDir) error {
+	if owned == nil {
+		return nil
+	}
+	var rootErr error
+	if owned.root != nil {
+		rootErr = owned.root.Close()
+		owned.root = nil
+	}
+	return errors.Join(rootErr, owned.closeParentHandles())
+}
+
 // assertSafeExtractRoot checks the extraction root itself, rejecting a root
 // that is a symlink or an existing non-directory.
 //
-// Only the root entry is inspected, never its ancestors. Directories above the
-// root are chosen by the operator and are outside the threat this guards
-// against, which is content planted inside the destination. Walking to the
-// filesystem root would also reject ordinary layouts: on macOS every temporary
-// path sits under /var, which is a symlink to /private/var.
+// This check covers the root entry. Exclusive extraction separately validates
+// and retains the staging ancestor chain when it creates private staging.
+// Merge mode writes only through retained handles and keeps its configured
+// destination semantics.
 func assertSafeExtractRoot(root string) error {
 	info, err := os.Lstat(root)
 	if err != nil {
@@ -581,49 +601,47 @@ func prepareExtractDestination(
 	}
 
 	// Staged alongside the destination so publishing is a rename within one
-	// filesystem. MkdirTemp creates with 0700 and never reuses a name; the
+	// filesystem. Creation retains the directory identity before exposing it
+	// to extraction; the
 	// mode is widened to extractDirMode at publication, once the tree is
 	// complete, so a partially written extraction is never group-readable.
-	staging, err := os.MkdirTemp(parent, ".extract-*")
+	_ = parentRoot.Close()
+	createStaging := cfg.createStaging
+	if createStaging == nil {
+		createStaging = createBootstrapDir
+	}
+	_, stagingOwned, err := createStaging(parent, ".extract-")
 	if err != nil {
-		_ = parentRoot.Close()
 		return nil, nil, nil, fmt.Errorf(
 			"creating extraction staging directory: %w", err,
 		)
 	}
-	stagingName := filepath.Base(staging)
-	stagingRoot, err := parentRoot.OpenRoot(stagingName)
-	if err != nil {
-		_ = os.RemoveAll(staging)
-		_ = parentRoot.Close()
-		return nil, nil, nil, fmt.Errorf(
-			"%w: opening staging root %s: %w",
-			ErrExtractUnsafePath, staging, err,
+	if stagingOwned == nil {
+		return nil, nil, nil, errors.New(
+			"creating extraction staging directory: missing retained identity",
 		)
 	}
+	parentRoot = stagingOwned.parent
+	stagingName := stagingOwned.name
+	stagingRoot := stagingOwned.root
 	// Identity of the directory extraction actually writes into, taken
 	// through the handle. Renaming can only name its source, so this is what
 	// lets publication tell the staging directory apart from anything that
 	// later occupies its name.
-	stagingInfo, err := stagingRoot.Stat(".")
-	if err != nil {
-		_ = stagingRoot.Close()
-		_ = os.RemoveAll(staging)
-		_ = parentRoot.Close()
-		return nil, nil, nil, fmt.Errorf(
-			"inspecting extraction staging directory: %w", err,
-		)
-	}
+	stagingInfo := stagingOwned.info
 
+	publishedOK := false
 	cleanup = func() {
-		_ = stagingRoot.Close()
-		// Removal goes through the parent handle for the same reason
-		// publication does.
-		_ = parentRoot.RemoveAll(stagingName)
-		_ = parentRoot.Close()
+		if !publishedOK {
+			stagingOwned.root = stagingRoot
+			_ = stagingOwned.cleanup()
+			stagingRoot = stagingOwned.root
+			return
+		}
+		_ = stagingOwned.closeParentHandles()
 	}
 	publish = func() error {
-		// MkdirTemp creates the staging directory 0700 and rename preserves
+		// Private staging creation uses 0700 and rename preserves
 		// the source mode, so without this the published destination would
 		// inherit 0700 rather than the 0750 the extracted tree is expected to
 		// carry, silently dropping group traversal.
@@ -635,20 +653,20 @@ func prepareExtractDestination(
 		if err := stagingRoot.Chmod(".", extractDirMode); err != nil {
 			return fmt.Errorf("setting extraction destination mode: %w", err)
 		}
-		// Release the handle before moving the directory it refers to.
-		if err := stagingRoot.Close(); err != nil {
-			return fmt.Errorf("closing staging root: %w", err)
-		}
 		// Replacing is destructive by request, so the existing destination
-		// goes first. RemoveAll unlinks a symlink at the destination rather
-		// than following it, and resolving through the parent handle means a
-		// swapped parent cannot redirect it.
+		// goes first, but only through a handle whose identity still agrees
+		// with the entry being removed.
 		if cfg.replace {
-			if err := parentRoot.RemoveAll(destName); err != nil {
+			if err := clearExtractDestination(
+				parentRoot, destName, cleanDest,
+			); err != nil {
 				return fmt.Errorf(
 					"clearing extraction destination: %w", err,
 				)
 			}
+		}
+		if err := stagingOwned.closeChildLock(); err != nil {
+			return fmt.Errorf("unlocking extraction staging directory: %w", err)
 		}
 		// The rename goes first, before anything inspects or clears the
 		// destination, because on a POSIX filesystem it already is the whole
@@ -704,18 +722,54 @@ func prepareExtractDestination(
 		}
 		if published.Mode()&os.ModeSymlink != 0 ||
 			!os.SameFile(stagingInfo, published) {
-			// Only this rename put anything here — the destination was
-			// left empty or absent above — so removing it restores the
-			// prior state rather than destroying anyone's content.
-			_ = parentRoot.RemoveAll(destName)
 			return fmt.Errorf(
 				"%w: staging directory was substituted before publication",
 				ErrExtractUnsafePath,
 			)
 		}
+		if cfg.publishedIdentity != nil {
+			*cfg.publishedIdentity = published
+		}
+		publishedOK = true
+		releasePublished := cfg.releasePublished
+		if releasePublished == nil {
+			releasePublished = releasePublishedBootstrapDir
+		}
+		_ = releasePublished(stagingOwned)
+		stagingRoot = nil
 		return nil
 	}
 	return stagingRoot, publish, cleanup, nil
+}
+
+func clearExtractDestination(
+	parentRoot *os.Root,
+	destName, cleanDest string,
+) error {
+	info, err := parentRoot.Lstat(destName)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return fmt.Errorf("%w: %s", ErrExtractDestinationNotEmpty, cleanDest)
+	}
+	root, err := parentRoot.OpenRoot(destName)
+	if err != nil {
+		return err
+	}
+	opened, err := root.Stat(".")
+	if err != nil || !os.SameFile(info, opened) {
+		_ = root.Close()
+		return errors.Join(
+			fmt.Errorf("%w: %s", ErrExtractUnsafePath, cleanDest), err,
+		)
+	}
+	return cleanupRetainedDir(
+		parentRoot, &root, opened, destName, cleanDest,
+	)
 }
 
 // clearEmptyDestination removes an empty directory occupying the destination
@@ -747,7 +801,34 @@ func clearEmptyDestination(
 			ErrExtractDestinationNotEmpty, cleanDest,
 		)
 	}
-	if err := removeEmptyExtractDir(parentRoot, destName, cleanDest); err != nil {
+	root, err := parentRoot.OpenRoot(destName)
+	if err != nil {
+		return fmt.Errorf("inspecting extraction destination: %w", err)
+	}
+	opened, statErr := root.Stat(".")
+	if statErr != nil || !os.SameFile(info, opened) {
+		_ = root.Close()
+		return errors.Join(
+			fmt.Errorf("%w: %s", ErrExtractUnsafePath, cleanDest), statErr,
+		)
+	}
+	entries, readErr := fs.ReadDir(root.FS(), ".")
+	closeErr := root.Close()
+	if readErr != nil || closeErr != nil {
+		return errors.Join(readErr, closeErr)
+	}
+	if len(entries) != 0 {
+		return fmt.Errorf("%w: %s", ErrExtractDestinationNotEmpty, cleanDest)
+	}
+	named, err := parentRoot.Lstat(destName)
+	if err != nil || !os.SameFile(opened, named) {
+		return errors.Join(
+			fmt.Errorf("%w: %s", ErrExtractUnsafePath, cleanDest), err,
+		)
+	}
+	if err := removeEmptyExtractDir(
+		parentRoot, destName, cleanDest,
+	); err != nil {
 		return fmt.Errorf(
 			"%w: %s: %w", ErrExtractDestinationNotEmpty, cleanDest, err,
 		)

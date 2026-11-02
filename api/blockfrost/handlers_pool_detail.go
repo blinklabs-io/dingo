@@ -15,11 +15,36 @@
 package blockfrost
 
 import (
+	"context"
 	"errors"
 	"net/http"
 
 	"github.com/blinklabs-io/dingo/database/models"
 )
+
+// admitPoolAggregate reserves one pool aggregate slot for the request's
+// client. When the cap is reached it writes the 429 response and reports
+// false.
+func (b *Blockfrost) admitPoolAggregate(
+	w http.ResponseWriter,
+	r *http.Request,
+) (func(), bool) {
+	release, ok := b.poolAggregateAdmission.acquire(
+		r.Context(),
+		requestClient(r),
+	)
+	if !ok {
+		w.Header().Set("Retry-After", "1")
+		writeError(
+			w,
+			http.StatusTooManyRequests,
+			"Too Many Requests",
+			"pool stake capacity reached, try again later",
+		)
+		return nil, false
+	}
+	return release, true
+}
 
 // handlePoolDetail handles GET /api/v0/pools/{pool_id} and returns the
 // OpenAPI pool detail object for the requested pool.
@@ -28,8 +53,20 @@ func (b *Blockfrost) handlePoolDetail(
 	r *http.Request,
 ) {
 	poolID := r.PathValue("pool_id")
+	// A malformed id is rejected by the node before any database read, so
+	// it neither takes an admission slot nor reads as capacity.
+	if _, err := parsePoolID(poolID); err == nil {
+		release, ok := b.admitPoolAggregate(w, r)
+		if !ok {
+			return
+		}
+		defer release()
+	}
 	info, err := b.node.PoolDetail(r.Context(), poolID)
 	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return
+		}
 		if errors.Is(err, ErrInvalidPoolID) {
 			writeError(
 				w,

@@ -436,14 +436,18 @@ func TestFarTipAdmissionClaimsStayProvisionalUntilCommit(t *testing.T) {
 		"the bounded provisional chain may establish evidence while staged")
 	assert.False(t, selector.pendingPeerTips[farConn][0].plausible)
 	assert.False(t, selector.pendingPeerTips[farConn][1].plausible)
-	assert.True(t, selector.pendingPeerTips[farConn][2].plausible)
+	assert.False(t, selector.pendingPeerTips[farConn][2].plausible,
+		"a connected remote chain must not advance the applied catch-up ceiling")
 
-	for i, update := range updates {
+	selector.SetLocalTip(ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 103, Hash: []byte("applied-13")},
+		BlockNumber: 13,
+	})
+	require.True(t, selector.pendingPeerTips[farConn][2].plausible,
+		"trusted applied progress must release a frontier inside the ceiling")
+
+	for _, update := range updates {
 		require.True(t, selector.CommitPeerTipAdmission(update))
-		if i < len(updates)-1 {
-			assert.Nil(t, selector.GetPeerTip(farConn),
-				"an admitted prefix shorter than K+1 remains evidence only")
-		}
 	}
 	require.NotNil(t, selector.GetPeerTip(farConn))
 	assert.Equal(t, updates[2].ObservedTip.Point,
@@ -6016,7 +6020,10 @@ func (c loneFarChain) first() uint64 {
 func (c loneFarChain) newSelector(t *testing.T) *ChainSelector {
 	t.Helper()
 	cs := NewChainSelector(ChainSelectorConfig{SecurityParam: c.k})
-	cs.SetLocalTip(c.tip(c.localBlock))
+	// These legacy plausibility tests use a synthetic reference without an
+	// applied-tip source. Tests for the applied catch-up ceiling explicitly
+	// establish the trusted local tip with SetLocalTip.
+	cs.localTip = c.tip(c.localBlock)
 	// A lagging peer makes every reference stale, so the ahead peer takes the
 	// catch-up branch.
 	require.True(t, cs.UpdatePeerTip(
@@ -6090,36 +6097,80 @@ func newLoneFarChain() loneFarChain {
 	return loneFarChain{localBlock: 175516, k: 432}
 }
 
-// TestLoneFarFrontierAcceptsConnectedChain covers a far-behind node whose only
-// ahead peer serves the real chain: more than K connected headers are accepted,
-// fewer are not.
-func TestLoneFarFrontierAcceptsConnectedChain(t *testing.T) {
+// TestLoneFarFrontierWaitsForAppliedCatchUpCeiling covers a far-behind node
+// whose only ahead peer serves a connected chain. Remote continuity can retain
+// the claim, but only applied progress can make the frontier selectable.
+func TestLoneFarFrontierWaitsForAppliedCatchUpCeiling(t *testing.T) {
 	t.Parallel()
 
 	c := newLoneFarChain()
 	cs := c.newSelector(t)
+	cs.SetLocalTip(c.tip(c.localBlock))
 	conn := newTestConnectionId(2)
 	first := c.first()
-	for i := range c.k {
+	for i := uint64(0); i <= c.k; i++ {
 		require.False(
 			t,
 			c.deliver(cs, conn, first+i, c.prevHash(first+i)),
-			"header %d of the run must not be accepted yet", i+1,
+			"remote continuity must not advance the applied catch-up ceiling",
 		)
 	}
+	require.Nil(t, cs.GetPeerTip(conn))
+
+	next := first + c.k + 1
+	cs.SetLocalTip(c.tip(next - 2*c.k))
 	require.True(
 		t,
-		c.deliver(cs, conn, first+c.k, c.prevHash(first+c.k)),
-		"the connected header after K+1 consecutive headers must be accepted",
+		c.deliver(cs, conn, next, c.prevHash(next)),
+		"applied progress must release the connected frontier",
 	)
 	require.NotNil(t, cs.GetPeerTip(conn))
-	// The peer keeps making progress: the next connected headers stay accepted.
-	for i := c.k + 1; i < c.k+20; i++ {
-		require.True(
-			t,
-			c.deliver(cs, conn, first+i, c.prevHash(first+i)),
-			"header %d after acceptance must stay accepted", i,
-		)
+}
+
+func TestUnstagedPeerTipAdmissionWaitsForAppliedCatchUpCeiling(t *testing.T) {
+	t.Parallel()
+
+	for _, admissionID := range []uint64{0, 1} {
+		t.Run(fmt.Sprintf("admission_id=%d", admissionID), func(t *testing.T) {
+			t.Parallel()
+
+			c := loneFarChain{localBlock: 1_000, k: 2}
+			cs := c.newSelector(t)
+			cs.SetLocalTip(c.tip(c.localBlock))
+			conn := newTestConnectionId(2)
+			first := c.first()
+			for i := uint64(0); i <= c.k; i++ {
+				block := first + i
+				id := admissionID
+				if id != 0 {
+					id += i
+				}
+				update := PeerTipUpdateEvent{
+					ConnectionId:     conn,
+					AdmissionID:      id,
+					Tip:              c.tip(100_000),
+					ObservedTip:      c.tip(block),
+					ObservedPrevHash: c.prevHash(block),
+				}
+				require.False(t, cs.CommitPeerTipAdmission(update))
+			}
+			require.Nil(t, cs.GetPeerTip(conn))
+
+			next := first + c.k + 1
+			cs.SetLocalTip(c.tip(next - 2*c.k))
+			id := admissionID
+			if id != 0 {
+				id += c.k + 1
+			}
+			require.True(t, cs.CommitPeerTipAdmission(PeerTipUpdateEvent{
+				ConnectionId:     conn,
+				AdmissionID:      id,
+				Tip:              c.tip(100_000),
+				ObservedTip:      c.tip(next),
+				ObservedPrevHash: c.prevHash(next),
+			}))
+			require.NotNil(t, cs.GetPeerTip(conn))
+		})
 	}
 }
 
@@ -6160,8 +6211,10 @@ func TestLoneFarFrontierRunContinuesAcrossReconnectsByIdentity(t *testing.T) {
 	cs.RemovePeer(secondConn)
 
 	thirdConn := newTestConnectionId(4)
-	require.Equal(t, PeerTipUpdateAccepted,
+	require.Equal(t, PeerTipUpdatePending,
 		c.prepareGenesis(cs, thirdConn, 1, first+8),
+		"a connected run must not advance the applied catch-up ceiling")
+	assert.Equal(t, c.k+1, cs.pendingFarTipClaims[thirdConn].run,
 		"the ninth linked header from the same identity must continue the run")
 }
 
@@ -6198,8 +6251,10 @@ func TestLoneFarFrontierRunDoesNotCrossPeerIdentities(t *testing.T) {
 			c.prepareGenesis(cs, secondConn, i-3, first+i),
 			"a different identity must start its own connected-header run")
 	}
-	require.Equal(t, PeerTipUpdateAccepted,
+	require.Equal(t, PeerTipUpdatePending,
 		c.prepareGenesis(cs, secondConn, 9, first+12))
+	assert.Equal(t, c.k+1, cs.pendingFarTipClaims[secondConn].run,
+		"a different identity must start its own connected-header run")
 }
 
 func TestLoneFarFrontierRunRestartsAfterBrokenReconnect(t *testing.T) {
@@ -6238,8 +6293,10 @@ func TestLoneFarFrontierRunRestartsAfterBrokenReconnect(t *testing.T) {
 			c.prepareGenesis(cs, secondConn, i-4, first+i),
 			"the run must remain below K+1 after the gap")
 	}
-	require.Equal(t, PeerTipUpdateAccepted,
+	require.Equal(t, PeerTipUpdatePending,
 		c.prepareGenesis(cs, secondConn, 9, first+13))
+	assert.Equal(t, c.k+1, cs.pendingFarTipClaims[secondConn].run,
+		"a gap must restart the connected-header run")
 }
 
 func TestLoneFarFrontierRunExpiresAfterDisconnect(t *testing.T) {
@@ -6334,6 +6391,7 @@ func TestStagedLoneFarFrontierIsCommittedAfterKConnectedHeaders(t *testing.T) {
 		t.Run(fmt.Sprintf("k=%d", securityParam), func(t *testing.T) {
 			c := loneFarChain{localBlock: 175516, k: securityParam}
 			cs := c.newSelector(t)
+			cs.SetLocalTip(c.tip(c.localBlock))
 			conn := newTestConnectionId(2)
 			first := c.first()
 			var last PeerTipUpdateEvent
@@ -6348,17 +6406,20 @@ func TestStagedLoneFarFrontierIsCommittedAfterKConnectedHeaders(t *testing.T) {
 					ObservedPrevHash: c.prevHash(block),
 				}
 				disposition := cs.PreparePeerTipAdmissionDisposition(last)
-				if i < securityParam {
-					require.Equal(t, PeerTipUpdatePending, disposition)
-				} else {
-					require.Equal(t, PeerTipUpdateAccepted, disposition)
-				}
+				require.Equal(t, PeerTipUpdatePending, disposition)
 			}
 
 			claim, ok := cs.pendingFarTipClaims[conn]
 			require.True(t, ok)
 			assert.Equal(t, securityParam+1, claim.run)
 			assert.True(t, claim.lone)
+			cs.SetLocalTip(c.tip(
+				last.ObservedTip.BlockNumber - 2*securityParam,
+			))
+			require.True(t,
+				cs.pendingPeerTips[conn][len(cs.pendingPeerTips[conn])-1].plausible,
+				"trusted applied progress must release the connected frontier",
+			)
 
 			require.True(t, cs.CommitPeerTipAdmission(last))
 			peerTip := cs.GetPeerTip(conn)
@@ -6375,12 +6436,9 @@ func TestStagedFarFrontierCatchUpWithReferenceAheadOfLocalTip(t *testing.T) {
 	for _, tc := range []struct {
 		name            string
 		referenceOffset uint64
-		accepted        bool
 	}{
-		{name: "below catch-up ceiling", referenceOffset: 3, accepted: true},
-		{name: "at catch-up ceiling", referenceOffset: 4, accepted: true},
-		// Beyond the ceiling one connection's own header chain is never
-		// enough: the claim waits for another identity group.
+		{name: "below catch-up ceiling", referenceOffset: 3},
+		{name: "at catch-up ceiling", referenceOffset: 4},
 		{name: "above catch-up ceiling", referenceOffset: 5},
 		{name: "far above catch-up ceiling", referenceOffset: 30},
 	} {
@@ -6414,40 +6472,14 @@ func TestStagedFarFrontierCatchUpWithReferenceAheadOfLocalTip(t *testing.T) {
 				}
 				updates = append(updates, update)
 				disposition := cs.PreparePeerTipAdmissionDisposition(update)
-				if !tc.accepted {
-					require.Equal(t, PeerTipUpdatePending, disposition)
-					continue
-				}
-				if i < c.k {
-					require.Equal(t, PeerTipUpdatePending, disposition)
-				} else {
-					require.Equal(t, PeerTipUpdateAccepted, disposition)
-				}
+				require.Equal(t, PeerTipUpdatePending, disposition)
 			}
 
-			if !tc.accepted {
-				claim, ok := cs.pendingFarTipClaims[conn]
-				require.True(t, ok)
-				assert.False(t, claim.lone)
-				assert.False(t, claim.corroborated)
-				assert.Nil(t, cs.GetPeerTip(conn))
-				return
+			assert.Nil(t, cs.GetPeerTip(conn))
+			for _, candidate := range cs.pendingPeerTips[conn] {
+				assert.False(t, candidate.plausible,
+					"peer evidence must not advance the applied catch-up ceiling")
 			}
-
-			claim, ok := cs.pendingFarTipClaims[conn]
-			require.True(t, ok)
-			assert.True(t, claim.lone)
-			assert.Equal(t, c.k+1, claim.run)
-			for _, update := range updates {
-				require.True(t, cs.CommitPeerTipAdmission(update))
-			}
-			peerTip := cs.GetPeerTip(conn)
-			require.NotNil(t, peerTip)
-			assert.Equal(
-				t,
-				updates[len(updates)-1].ObservedTip.Point,
-				peerTip.SelectionTip().Point,
-			)
 		})
 	}
 }
@@ -7986,7 +8018,7 @@ func TestPendingHeaderFirstRefusedOnReplayIsReported(t *testing.T) {
 	for i, ref := range []struct {
 		conn  ouroboros.ConnectionId
 		block uint64
-	}{{far, 1_018}, {near, 1_009}, {bystander, 1_005}} {
+	}{{far, 1_016}, {near, 1_004}, {bystander, 1_005}} {
 		refUpdate := PeerTipUpdateEvent{
 			ConnectionId:     ref.conn,
 			AdmissionID:      1,
@@ -8004,9 +8036,9 @@ func TestPendingHeaderFirstRefusedOnReplayIsReported(t *testing.T) {
 	update := PeerTipUpdateEvent{
 		ConnectionId:     other,
 		AdmissionID:      1,
-		Tip:              c.tip(1_023),
-		ObservedTip:      c.tip(1_023),
-		ObservedPrevHash: c.prevHash(1_023),
+		Tip:              c.tip(1_015),
+		ObservedTip:      c.tip(1_015),
+		ObservedPrevHash: c.prevHash(1_015),
 	}
 	require.Equal(
 		t,

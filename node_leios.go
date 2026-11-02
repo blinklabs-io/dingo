@@ -187,6 +187,11 @@ func (a *leiosCommitteeParamsAdapter) dijkstraPParams(
 	return leiosDijkstraPParamsForEpoch(db, epoch, txn)
 }
 
+// leiosVotingPeriodsFromPParams returns the CIP-164 header and vote periods,
+// L_hdr and L_vote, from the announcement and vote period lengths, both in
+// milliseconds. Local voting opens three header periods after the announcing
+// slot begins, the wait that lets a competing header for the slot appear, and
+// closes one vote period later.
 func leiosVotingPeriodsFromPParams(
 	epoch uint64,
 	pparams *gdijkstra.DijkstraProtocolParameters,

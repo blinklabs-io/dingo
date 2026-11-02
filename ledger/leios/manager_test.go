@@ -1020,8 +1020,9 @@ func TestVoteManagerCIP164LocalVoteTiming(t *testing.T) {
 
 			fixture.mgr.mu.Lock()
 			first := fixture.mgr.announcements[firstRb]
+			lifecycle := fixture.mgr.lifecycle
 			fixture.mgr.mu.Unlock()
-			fixture.mgr.emitPrototypeVote(firstRb, first)
+			fixture.mgr.emitPrototypeVote(firstRb, first, lifecycle)
 
 			votes := fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{{
 				SlotNo: 600, VoterId: headerArmingSeatedVoterId,
@@ -1099,11 +1100,12 @@ func TestVoteManagerCIP164LocalVoteTiming(t *testing.T) {
 
 		fixture.mgr.mu.Lock()
 		record := fixture.mgr.announcements[announcingRb]
+		lifecycle := fixture.mgr.lifecycle
 		fixture.mgr.mu.Unlock()
 		_, _, reason, err := fixture.mgr.localVoteReadiness(announcingRb, record)
 		require.NoError(t, err)
 		assert.Equal(t, voteNotEmittedNotLatestRb, reason)
-		fixture.mgr.emitPrototypeVote(announcingRb, record)
+		fixture.mgr.emitPrototypeVote(announcingRb, record, lifecycle)
 
 		assert.Empty(t, fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{{
 			SlotNo: 600, VoterId: headerArmingSeatedVoterId,
@@ -1161,8 +1163,9 @@ func TestVoteManagerCIP164LocalVoteTiming(t *testing.T) {
 
 		fixture.mgr.mu.Lock()
 		oldRecord := fixture.mgr.announcements[oldRb]
+		lifecycle := fixture.mgr.lifecycle
 		fixture.mgr.mu.Unlock()
-		fixture.mgr.emitPrototypeVote(oldRb, oldRecord)
+		fixture.mgr.emitPrototypeVote(oldRb, oldRecord, lifecycle)
 
 		assert.Empty(t, fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{{
 			SlotNo: 600, VoterId: headerArmingSeatedVoterId,

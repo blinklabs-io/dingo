@@ -95,7 +95,7 @@ func TestSnapshotRecordsPayloadDigests(t *testing.T) {
 
 	db := newTestDB(t)
 	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
-	dir := filepath.Join(t.TempDir(), "snap")
+	dir := snapshotTestDir(t, "snap")
 	m, err := lifecycle.Snapshot(
 		context.Background(), db, dir, lifecycle.TriggerManual, "test",
 		"badger", "sqlite", lifecycle.WithManifestKey(key),

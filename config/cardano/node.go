@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -26,6 +27,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strings"
 
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
@@ -165,18 +167,197 @@ const (
 	defaultMithrilGenesisAncillaryVerificationKeyFile = "ancillary.vkey"
 )
 
+// envelopeConfigVersion is the cardano-config envelope format version this
+// loader understands. cardano-node 11.2.0 ships configs as an envelope of
+// "$schema", "Version", "MinNodeVersion" and "Configuration", with settings
+// grouped into sections under "Configuration". The cardano-config v2 schema
+// describes Version as "currently 2"; a parser of version N reads every
+// version up to N, so a later version may carry keys or a layout this loader
+// does not know and is refused rather than read partially.
+const envelopeConfigVersion = 2
+
+// envelopeV2Sections lists the "Configuration" sections of a version 2
+// envelope whose keys keep their flat-format names, in the order they are
+// applied. Protocol carries the Byron to Conway genesis files and hashes and
+// the checkpoints file, Testing the Dijkstra genesis and the hard fork
+// overrides, Consensus the consensus mode, and Network peer sharing.
+var envelopeV2Sections = []string{"Protocol", "Testing", "Consensus", "Network"}
+
+// envelopeV2Network holds the version 2 Network keys whose names differ from
+// the flat format. The flat TargetNumberOf*Peers keys are the deadline (caught
+// up) peer targets, which version 2 names DeadlineTargetNumberOf*Peers.
+type envelopeV2Network struct {
+	DeadlineTargetNumberOfRootPeers        *int `yaml:"DeadlineTargetNumberOfRootPeers"`
+	DeadlineTargetNumberOfKnownPeers       *int `yaml:"DeadlineTargetNumberOfKnownPeers"`
+	DeadlineTargetNumberOfEstablishedPeers *int `yaml:"DeadlineTargetNumberOfEstablishedPeers"`
+	DeadlineTargetNumberOfActivePeers      *int `yaml:"DeadlineTargetNumberOfActivePeers"`
+}
+
 func NewCardanoNodeConfigFromReader(r io.Reader) (*CardanoNodeConfig, error) {
+	var doc yaml.Node
+	dec := yaml.NewDecoder(r)
+	if err := dec.Decode(&doc); err != nil {
+		return nil, err
+	}
 	ret := CardanoNodeConfig{
 		TxSubmissionLogicVersion: TxSubmissionLogicV1,
 	}
-	dec := yaml.NewDecoder(r)
-	if err := dec.Decode(&ret); err != nil {
+	if len(doc.Content) == 0 {
+		return &ret, nil
+	}
+	root := doc.Content[0]
+	if root.Kind == yaml.MappingNode && isEnvelopeConfig(root) {
+		if err := ret.decodeEnvelope(root); err != nil {
+			return nil, err
+		}
+	} else if err := root.Decode(&ret); err != nil {
 		return nil, err
 	}
 	if err := ret.TxSubmissionLogicVersion.validate(); err != nil {
 		return nil, err
 	}
 	return &ret, nil
+}
+
+// mappingValue returns the value of key in a YAML mapping node, or nil.
+func mappingValue(m *yaml.Node, key string) *yaml.Node {
+	for i := 0; i+1 < len(m.Content); i += 2 {
+		if m.Content[i].Value == key {
+			return m.Content[i+1]
+		}
+	}
+	return nil
+}
+
+// isEnvelopeConfig reports whether a config uses the cardano-config envelope.
+// "Version" and "Configuration" are required envelope keys and are not keys of
+// the flat format.
+func isEnvelopeConfig(root *yaml.Node) bool {
+	return mappingValue(root, "Version") != nil ||
+		mappingValue(root, "Configuration") != nil
+}
+
+// rejectDuplicateKeys returns an error naming the first key that occurs more
+// than once in mapping m. Decoding into a yaml.Node skips the decoder's
+// duplicate-key check, and mappingValue would otherwise silently select the
+// first occurrence.
+func rejectDuplicateKeys(m *yaml.Node, path string) error {
+	seen := make(map[string]int, len(m.Content)/2)
+	for i := 0; i+1 < len(m.Content); i += 2 {
+		k := m.Content[i]
+		if line, ok := seen[k.Value]; ok {
+			return fmt.Errorf(
+				"cardano node config: duplicate key %s at line %d (first at line %d)",
+				path+k.Value, k.Line, line,
+			)
+		}
+		seen[k.Value] = k.Line
+	}
+	return nil
+}
+
+// envelopeV2FieldKey maps a key of a version 2 section to the flat-format key
+// it sets, so that two keys setting the same field are detected.
+func envelopeV2FieldKey(section, key string) string {
+	if section == "Network" && strings.HasPrefix(key, "DeadlineTargetNumberOf") {
+		return strings.TrimPrefix(key, "Deadline")
+	}
+	return key
+}
+
+func (c *CardanoNodeConfig) decodeEnvelope(root *yaml.Node) error {
+	if err := rejectDuplicateKeys(root, ""); err != nil {
+		return err
+	}
+	versionNode := mappingValue(root, "Version")
+	if versionNode == nil {
+		return errors.New(
+			"cardano node config: envelope config has no Version",
+		)
+	}
+	var version int
+	if versionNode.Kind != yaml.ScalarNode || versionNode.Tag != "!!int" ||
+		versionNode.Decode(&version) != nil {
+		return fmt.Errorf(
+			"cardano node config: Version must be an integer, got %q",
+			versionNode.Value,
+		)
+	}
+	if version != envelopeConfigVersion {
+		return fmt.Errorf(
+			"cardano node config: unsupported config Version %d (supported: %d)",
+			version,
+			envelopeConfigVersion,
+		)
+	}
+	cfg := mappingValue(root, "Configuration")
+	if cfg == nil {
+		return errors.New(
+			"cardano node config: envelope config has no Configuration",
+		)
+	}
+	if cfg.Kind != yaml.MappingNode {
+		return errors.New(
+			"cardano node config: Configuration must be an object",
+		)
+	}
+	if err := rejectDuplicateKeys(cfg, "Configuration."); err != nil {
+		return err
+	}
+	// The supported sections are decoded onto one struct, so a field set from
+	// two sections would silently take the later value.
+	setBy := make(map[string]string)
+	for _, name := range envelopeV2Sections {
+		section := mappingValue(cfg, name)
+		if section == nil {
+			continue
+		}
+		if section.Kind != yaml.MappingNode {
+			return fmt.Errorf(
+				"cardano node config: Configuration.%s must be an object",
+				name,
+			)
+		}
+		for i := 0; i+1 < len(section.Content); i += 2 {
+			k := section.Content[i]
+			where := "Configuration." + name + "." + k.Value
+			field := envelopeV2FieldKey(name, k.Value)
+			if prev, ok := setBy[field]; ok {
+				return fmt.Errorf(
+					"cardano node config: duplicate key %s at line %d sets the same setting as %s",
+					where, k.Line, prev,
+				)
+			}
+			setBy[field] = where
+		}
+		if err := section.Decode(c); err != nil {
+			return fmt.Errorf(
+				"cardano node config: Configuration.%s: %w", name, err,
+			)
+		}
+	}
+	if network := mappingValue(cfg, "Network"); network != nil {
+		var n envelopeV2Network
+		if err := network.Decode(&n); err != nil {
+			return fmt.Errorf(
+				"cardano node config: Configuration.Network: %w", err,
+			)
+		}
+		setIfPresent(&c.TargetNumberOfRootPeers, n.DeadlineTargetNumberOfRootPeers)
+		setIfPresent(&c.TargetNumberOfKnownPeers, n.DeadlineTargetNumberOfKnownPeers)
+		setIfPresent(
+			&c.TargetNumberOfEstablishedPeers,
+			n.DeadlineTargetNumberOfEstablishedPeers,
+		)
+		setIfPresent(&c.TargetNumberOfActivePeers, n.DeadlineTargetNumberOfActivePeers)
+	}
+	return nil
+}
+
+func setIfPresent(dst *int, src *int) {
+	if src != nil {
+		*dst = *src
+	}
 }
 
 // PBFTSignatureLimit returns the most blocks one genesis key may sign in a

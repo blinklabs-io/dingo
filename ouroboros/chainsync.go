@@ -2223,9 +2223,10 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			!o.chainsyncState.ClientObserverHeaderGap(ctx.ConnectionId) {
 			o.cancelPendingIngressPromotionResync(ctx.ConnectionId)
 		}
-		// A header past the peer-relative bound only because the ledger lags
-		// is not a peer fault, and rejecting it closes the connection while
-		// holding it would drop it from the connection's observed ancestry.
+		// A header past the peer-relative bound or the applied catch-up
+		// ceiling only because the ledger lags is not a peer fault, and
+		// rejecting it closes the connection while staging it pending would
+		// drop it from the connection's observed ancestry.
 		// Wait on this connection's callback, before anything is recorded or
 		// published, so the header is then processed in full.
 		if ingressEligible && o.config.ChainsyncAwaitCatchUpBand != nil {

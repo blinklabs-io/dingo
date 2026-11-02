@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -339,6 +340,115 @@ func TestPeerTipAdmissionBoundsCatchUpByAppliedTip(t *testing.T) {
 		run(t, 150),
 		"a frontier within 2k of the applied tip was bounded by a stale local tip",
 	)
+}
+
+func TestPeerClaimsCannotAdvanceAppliedCatchUpCeiling(t *testing.T) {
+	t.Parallel()
+	const (
+		k          = uint64(2)
+		appliedTip = uint64(100)
+	)
+	var applied atomic.Uint64
+	applied.Store(appliedTip)
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam: k,
+		AppliedTip: func() (ochainsync.Tip, bool) {
+			block := applied.Load()
+			return genesisTip(block*20, fmt.Sprintf("h%d", block), block), true
+		},
+	})
+	cs.SetLocalTip(genesisTip(appliedTip*20, "local", appliedTip))
+
+	// Establish the highest admissible frontier at the applied-tip ceiling.
+	reference := genesisTip(104*20, "h104", 104)
+	require.True(t, cs.UpdatePeerTip(corrConn(1), reference, nil))
+
+	prepare := func(conn int, admissionID, block uint64) PeerTipUpdateDisposition {
+		tip := genesisTip(block*20, fmt.Sprintf("h%d", block), block)
+		return cs.PreparePeerTipAdmissionDisposition(PeerTipUpdateEvent{
+			ConnectionId: corrConn(conn),
+			AdmissionID:  admissionID,
+			Tip:          tip,
+			ObservedTip:  tip,
+		})
+	}
+
+	require.NotEqual(t, PeerTipUpdateAccepted, prepare(2, 1, 108))
+	require.NotEqual(t, PeerTipUpdateAccepted, prepare(3, 1, 107),
+		"matching peer claims advanced the applied catch-up ceiling")
+
+	// Verified ledger progress moves the same frontier inside the ceiling.
+	applied.Store(104)
+	require.Equal(t, PeerTipUpdateAccepted, prepare(3, 1, 107))
+}
+
+// The applied catch-up ceiling only defers frontiers the peer-relative bound
+// would accept. A frontier that bound refuses keeps its rejection however far
+// past the ceiling it is, so a newcomer cannot stay connected by claiming an
+// extremely high block number.
+func TestAppliedCatchUpCeilingKeepsImplausibleFrontierRejected(t *testing.T) {
+	t.Parallel()
+	const k = uint64(4)
+	for _, path := range []string{"staged", "unstaged"} {
+		t.Run(path, func(t *testing.T) {
+			t.Parallel()
+			cs := NewChainSelector(ChainSelectorConfig{SecurityParam: k})
+			cs.SetLocalTip(genesisTip(1000*20, "local", 1000))
+			// A fresh reference inside (localTip, localTip+K] gets no catch-up
+			// relaxation, so anything past reference+K is implausible.
+			require.True(t, cs.UpdatePeerTip(
+				corrConn(1), genesisTip(1002*20, "h1002", 1002), nil,
+			))
+			for i, block := range []uint64{1_007, 1_012, 1_000_000} {
+				tip := genesisTip(block*20, fmt.Sprintf("h%d", block), block)
+				update := PeerTipUpdateEvent{
+					ConnectionId: corrConn(2 + i),
+					Tip:          tip,
+					ObservedTip:  tip,
+				}
+				var disposition PeerTipUpdateDisposition
+				if path == "staged" {
+					update.AdmissionID = 1
+					disposition = cs.PreparePeerTipAdmissionDisposition(update)
+				} else {
+					disposition = cs.ObservePeerTipUpdate(update)
+				}
+				require.Equal(t, PeerTipUpdateRejected, disposition,
+					"block %d", block)
+			}
+		})
+	}
+}
+
+// The unstaged update path bounds a frontier by the live applied tip, as
+// staging does, rather than by the last SetLocalTip, which the node calls only
+// at startup and on the stall recycler's tick.
+func TestUnstagedPeerTipUpdateReadsAppliedCatchUpCeiling(t *testing.T) {
+	t.Parallel()
+	const k = uint64(4)
+	var applied atomic.Uint64
+	applied.Store(1000)
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam: k,
+		AppliedTip: func() (ochainsync.Tip, bool) {
+			block := applied.Load()
+			return genesisTip(block*20, fmt.Sprintf("h%d", block), block), true
+		},
+	})
+	cs.SetLocalTip(genesisTip(1000*20, "h1000", 1000))
+	require.True(t, cs.UpdatePeerTip(
+		corrConn(1), genesisTip(1008*20, "h1008", 1008), nil,
+	))
+	applied.Store(1004)
+
+	tip := genesisTip(1011*20, "h1011", 1011)
+	require.Equal(t, PeerTipUpdateAccepted, cs.ObservePeerTipUpdate(
+		PeerTipUpdateEvent{
+			ConnectionId: corrConn(1),
+			Tip:          tip,
+			ObservedTip:  tip,
+		},
+	), "the ledger has applied block 1004, so 1011 is inside its ceiling")
 }
 
 // A chain's first block can sit at slot 0, as Preview's does. It carries a

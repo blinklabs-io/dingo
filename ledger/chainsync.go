@@ -9738,7 +9738,7 @@ func (ls *LedgerState) processEpochRolloverWithClassicPParamsContext(
 			currentEpoch.EpochId+1, "spo_state_resolve", func() error {
 				var err error
 				currentBoundarySPOState, err = ls.currentBoundarySPOStakeState(
-					txn, currentEpoch, epochStartSlot,
+					txn, currentEpoch, epochStartSlot, currentEra.Id,
 				)
 				return err
 			},
@@ -9892,7 +9892,7 @@ func (ls *LedgerState) processEpochRolloverWithClassicPParamsContext(
 						hardForkHere {
 						if currentBoundarySPOState == nil {
 							state, err := ls.currentBoundarySPOStakeState(
-								txn, currentEpoch, epochStartSlot,
+								txn, currentEpoch, epochStartSlot, currentEra.Id,
 							)
 							if err != nil {
 								return fmt.Errorf(
@@ -10178,6 +10178,7 @@ func (ls *LedgerState) processEpochRolloverWithClassicPParamsContext(
 			txn,
 			currentEpoch,
 			epochStartSlot,
+			result.NewCurrentEpoch.EraId,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("resolve post-enactment SPO stake: %w", err)
@@ -10326,11 +10327,13 @@ func (ls *LedgerState) captureEpochBoundarySnapshotStake(
 // must always have this wired). An un-wired rollover does not silently
 // tally zero stake: governance.ProcessEpoch fails the boundary with
 // governance.ErrMissingCurrentBoundarySPOState once the fallback read comes
-// back empty while the previous boundary's mark holds stake.
+// back empty while the previous boundary's mark holds stake. incomingEraID is
+// already chosen by the hard-fork transition, before its epoch row is stored.
 func (ls *LedgerState) currentBoundarySPOStakeState(
 	txn *database.Txn,
 	prevEpoch models.Epoch,
 	boundarySlot uint64,
+	incomingEraID uint,
 ) (*governance.SPOVotingState, error) {
 	hook := ls.currentBoundarySPOStakeHookFn()
 	if hook == nil {
@@ -10342,7 +10345,7 @@ func (ls *LedgerState) currentBoundarySPOStakeState(
 		BoundarySlot:  boundarySlot,
 		SnapshotSlot:  epochBoundarySnapshotSlot(boundarySlot),
 	}
-	rows, err := hook(txn, evt)
+	rows, err := hook(txn, evt, incomingEraID)
 	if err != nil {
 		return nil, err
 	}

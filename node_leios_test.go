@@ -215,26 +215,40 @@ func TestLeiosCommitteeParamsFromPParamsUsesDijkstraFields(t *testing.T) {
 func TestLeiosVotingPeriodsFromPParamsUsesMilliseconds(t *testing.T) {
 	t.Parallel()
 
-	header, vote, err := leiosVotingPeriodsFromPParams(
-		42,
-		&gdijkstra.DijkstraProtocolParameters{
-			LeiosAnnouncementPeriodLength: 1250,
-			LeiosVotePeriodLength:         4750,
-		},
-	)
-	require.NoError(t, err)
-	assert.Equal(t, 1250*time.Millisecond, header)
-	assert.Equal(t, 4750*time.Millisecond, vote)
+	for _, tc := range []struct {
+		announcementMs, voteMs uint32
+		header, vote           time.Duration
+	}{
+		{1250, 4750, 1250 * time.Millisecond, 4750 * time.Millisecond},
+		{1000, 4000, time.Second, 4 * time.Second},
+		{2500, 6000, 2500 * time.Millisecond, 6 * time.Second},
+	} {
+		header, vote, err := leiosVotingPeriodsFromPParams(
+			42,
+			&gdijkstra.DijkstraProtocolParameters{
+				LeiosAnnouncementPeriodLength: tc.announcementMs,
+				LeiosVotePeriodLength:         tc.voteMs,
+			},
+		)
+		require.NoError(t, err)
+		assert.Equal(t, tc.header, header)
+		assert.Equal(t, tc.vote, vote)
+	}
 }
 
 func TestLeiosVotingPeriodsFromPParamsRejectsMissingPeriods(t *testing.T) {
 	t.Parallel()
 
-	_, _, err := leiosVotingPeriodsFromPParams(
-		42,
-		&gdijkstra.DijkstraProtocolParameters{},
-	)
-	require.ErrorContains(t, err, "invalid Leios voting periods")
+	_, _, err := leiosVotingPeriodsFromPParams(42, nil)
+	require.ErrorContains(t, err, "unavailable")
+	for name, pp := range map[string]*gdijkstra.DijkstraProtocolParameters{
+		"both zero":         {},
+		"zero announcement": {LeiosVotePeriodLength: 4000},
+		"zero vote":         {LeiosAnnouncementPeriodLength: 1000},
+	} {
+		_, _, err := leiosVotingPeriodsFromPParams(42, pp)
+		require.ErrorContains(t, err, "invalid Leios voting periods", name)
+	}
 }
 
 func TestLeiosDijkstraPParamsFallbackUsesFirstEraRow(t *testing.T) {

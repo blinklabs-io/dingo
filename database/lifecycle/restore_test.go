@@ -66,7 +66,7 @@ func TestRestoreResolvesBlobStoreWithLoadRunMode(t *testing.T) {
 	src := newTestDB(t)
 	require.NoError(t, src.BlockCreate(testBlock(1, 0x01), nil))
 
-	snapshotDir := filepath.Join(t.TempDir(), "snap1")
+	snapshotDir := snapshotTestDir(t, "snap1")
 	_, err := lifecycle.Snapshot(
 		context.Background(),
 		src,
@@ -487,7 +487,7 @@ func runRemoteRestoreFailureRollback(
 
 	incoming := newTestDB(t)
 	require.NoError(t, incoming.BlockCreate(testBlock(1, 0x99), nil))
-	snapshotDir := filepath.Join(t.TempDir(), "incoming")
+	snapshotDir := snapshotTestDir(t, "incoming")
 	_, err = lifecycle.Snapshot(
 		ctx,
 		incoming,
@@ -564,7 +564,7 @@ func TestRestoreRecoverableRetainsHandleWhenAutomaticRollbackFails(
 
 	incoming := newTestDB(t)
 	require.NoError(t, incoming.BlockCreate(testBlock(1, 0x99), nil))
-	snapshotDir := filepath.Join(t.TempDir(), "incoming")
+	snapshotDir := snapshotTestDir(t, "incoming")
 	_, err := lifecycle.Snapshot(
 		ctx,
 		incoming,
@@ -659,7 +659,7 @@ func TestCloudRestoreFailureNeverMutatesActiveBlobNamespace(t *testing.T) {
 
 	incoming := newTestDB(t)
 	require.NoError(t, incoming.BlockCreate(testBlock(1, 0x99), nil))
-	snapshotDir := filepath.Join(t.TempDir(), "incoming")
+	snapshotDir := snapshotTestDir(t, "incoming")
 	_, err := lifecycle.Snapshot(
 		ctx,
 		incoming,
@@ -712,7 +712,7 @@ func makeCloudRestoreSnapshot(
 	db := newTestDB(t)
 	require.NoError(t, db.BlockCreate(testBlock(1, fill), nil))
 	blobs := readBlobContents(t, db)
-	dir := filepath.Join(t.TempDir(), "snapshot")
+	dir := snapshotTestDir(t, "snapshot")
 	_, err := lifecycle.Snapshot(
 		context.Background(),
 		db,
@@ -1072,7 +1072,7 @@ func TestRestoreSuccessfulRemoteReplacementRemainsRecoverableUntilCommit(
 	incomingBlobs := readBlobContents(t, incoming)
 	incomingTip, err := incoming.GetTip(nil)
 	require.NoError(t, err)
-	snapshotDir := filepath.Join(t.TempDir(), "incoming")
+	snapshotDir := snapshotTestDir(t, "incoming")
 	_, err = lifecycle.Snapshot(
 		ctx,
 		incoming,
@@ -1302,7 +1302,7 @@ func TestSnapshotRestoreRoundTrip(t *testing.T) {
 	require.NoError(t, src.BlockCreate(testBlock(1, 0x01), nil))
 	require.NoError(t, src.BlockCreate(testBlock(2, 0x02), nil))
 
-	snapshotDir := filepath.Join(t.TempDir(), "snap1")
+	snapshotDir := snapshotTestDir(t, "snap1")
 	snapMan, err := lifecycle.Snapshot(
 		context.Background(),
 		src,
@@ -1348,7 +1348,7 @@ func TestRestoreRebuildsDeferredIndexes(t *testing.T) {
 	require.True(t, ok)
 	require.NoError(t, manager.DropDeferredIndexes())
 
-	snapshotDir := filepath.Join(t.TempDir(), "snapshot")
+	snapshotDir := snapshotTestDir(t, "snapshot")
 	_, err := lifecycle.Snapshot(
 		context.Background(),
 		src,
@@ -1391,7 +1391,7 @@ func TestRestoreRefusesNonEmptyTargetDirectory(t *testing.T) {
 	src := newTestDB(t)
 	require.NoError(t, src.BlockCreate(testBlock(1, 0x01), nil))
 
-	snapshotDir := filepath.Join(t.TempDir(), "snap1")
+	snapshotDir := snapshotTestDir(t, "snap1")
 	_, err := lifecycle.Snapshot(
 		context.Background(),
 		src,
@@ -1440,7 +1440,7 @@ func TestRestoreRejectsConfiguredDataDirOverrideWithoutTouchingTarget(
 	src := newTestDB(t)
 	require.NoError(t, src.BlockCreate(testBlock(1, 0x01), nil))
 
-	snapshotDir := filepath.Join(t.TempDir(), "snap1")
+	snapshotDir := snapshotTestDir(t, "snap1")
 	_, err := lifecycle.Snapshot(
 		context.Background(),
 		src,
@@ -1478,7 +1478,7 @@ func TestRestoreRejectsNonStringDataDirOverride(t *testing.T) {
 
 	src := newTestDB(t)
 	require.NoError(t, src.BlockCreate(testBlock(1, 0x01), nil))
-	snapshotDir := filepath.Join(t.TempDir(), "snapshot")
+	snapshotDir := snapshotTestDir(t, "snapshot")
 	_, err := lifecycle.Snapshot(
 		context.Background(),
 		src,
@@ -1519,7 +1519,7 @@ func TestManifestCheckPluginMatch(t *testing.T) {
 	src := newTestDB(t)
 	require.NoError(t, src.BlockCreate(testBlock(1, 0x01), nil))
 
-	snapshotDir := filepath.Join(t.TempDir(), "snap1")
+	snapshotDir := snapshotTestDir(t, "snap1")
 	m, err := lifecycle.Snapshot(
 		context.Background(),
 		src,
@@ -1552,7 +1552,7 @@ func TestRestoreValidatedRejectsPluginMismatchWithoutTouchingTarget(
 	src := newTestDB(t)
 	require.NoError(t, src.BlockCreate(testBlock(1, 0x01), nil))
 
-	snapshotDir := filepath.Join(t.TempDir(), "snap1")
+	snapshotDir := snapshotTestDir(t, "snap1")
 	_, err := lifecycle.Snapshot(
 		context.Background(),
 		src,
@@ -1600,7 +1600,7 @@ func TestRestoreRejectsMismatchedTipBlockNumber(t *testing.T) {
 	require.NoError(t, src.BlockCreate(testBlock(1, 0x01), nil))
 	require.NoError(t, src.BlockCreate(testBlock(2, 0x02), nil))
 
-	snapshotDir := filepath.Join(t.TempDir(), "snap1")
+	snapshotDir := snapshotTestDir(t, "snap1")
 	m, err := lifecycle.Snapshot(
 		context.Background(),
 		src,
@@ -1816,7 +1816,7 @@ func TestPeekManifestFallsBackToDownloadWhenCloudDestinationLacksManifestFetcher
 	backingDir := t.TempDir()
 	setFakeCloudBackingDir(t, backingDir)
 
-	snapshotDir := filepath.Join(t.TempDir(), "snap-peek")
+	snapshotDir := snapshotTestDir(t, "snap-peek")
 	m, err := lifecycle.SnapshotToCloud(
 		context.Background(), testDestinationRegistry, db, snapshotDir,
 		lifecycle.TriggerManual, "test-version", "badger", "sqlite",

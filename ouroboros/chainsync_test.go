@@ -648,17 +648,45 @@ func TestChainsyncPendingFarTipRunRemainsConnectedUntilAccepted(t *testing.T) {
 		}
 	}
 	require.Equal(t,
-		chainselection.PeerTipUpdateAccepted,
+		chainselection.PeerTipUpdatePending,
 		dispositions[securityParam],
+	)
+	testutil.RequireNoReceive(
+		t, ledgerCh, 20*time.Millisecond,
+		"remote continuity must not advance the applied catch-up ceiling",
+	)
+
+	next := securityParam + 1
+	nextBlock := localBlock + 2*securityParam + 36 + next
+	selector.SetLocalTip(ochainsync.Tip{
+		Point:       ocommon.NewPoint(101, []byte("advanced-local")),
+		BlockNumber: nextBlock - 2*securityParam,
+	})
+	header := newTestBlockHeader(
+		1_000+next,
+		nextBlock,
+		byte(0xa0+next),
+	).(*testBlockHeader)
+	header.prevHash = previous
+	require.NoError(t, o.chainsyncClientRollForwardAt(
+		ochainsync.CallbackContext{ConnectionId: connId},
+		gledger.BlockTypeByronMain,
+		header,
+		tip,
+		time.Now(),
+	))
+	require.Equal(t,
+		chainselection.PeerTipUpdateAccepted,
+		dispositions[next],
 	)
 	admitted := testutil.RequireReceive(
 		t, ledgerCh, time.Second,
-		"connected far-tip run must proceed after K+1 headers",
+		"applied progress must release the connected far-tip run",
 	)
 	admission := admitted.Data.(ledger.ChainsyncEvent)
 	require.NotNil(t, admission.PeerTipAdmission)
 	admission.PeerTipAdmission(true)
-	assert.Equal(t, uint64(1_000)+securityParam, state.GetTrackedClient(connId).Cursor.Slot)
+	assert.Equal(t, uint64(1_000)+next, state.GetTrackedClient(connId).Cursor.Slot)
 }
 
 func TestChainsyncHeaderBackpressurePrecedesAdmissionAndCrypto(t *testing.T) {

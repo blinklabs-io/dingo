@@ -205,3 +205,47 @@ func TestCaptureEpochBoundaryDiscardsSnapPointStakeWhenPointerStakeRuleChanges(
 		"the persisted Mark stake must be reconstructed at persist time "+
 			"when the incoming era changes the pointer-stake rule")
 }
+
+func TestCurrentBoundarySPOStakeRowsUsesIncomingEraBeforeEpochRowExists(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ctx := context.Background()
+	db := setupTestDB(t)
+	seedEpochRow(t, db, nil, 0, 0, 300, eras.BabbageEraDesc.Id)
+	poolHash := bytes.Repeat([]byte{0xb7}, 28)
+	seedPointerStakeFixture(t, db, poolHash)
+
+	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+	evt := event.EpochTransitionEvent{
+		PreviousEpoch:   0,
+		NewEpoch:        1,
+		BoundarySlot:    300,
+		EpochNonce:      []byte{0x0a, 0x0b},
+		ProtocolVersion: 8,
+		SnapshotSlot:    299,
+	}
+	txn := db.Transaction(ctx, true)
+	require.NoError(t, mgr.ComputeEpochBoundarySnapshot(ctx, txn, evt))
+
+	rows, err := mgr.CurrentBoundarySPOStakeRows(
+		ctx, txn, evt, eras.ConwayEraDesc.Id,
+	)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	require.Equal(t, uint64(700), uint64(rows[0].TotalStake),
+		"the Conway tally must exclude pointer stake before its epoch row exists")
+
+	seedEpochRow(t, db, txn, 300, 1, 300, eras.ConwayEraDesc.Id)
+	require.NoError(t, mgr.CaptureEpochBoundarySnapshot(ctx, txn, evt))
+	require.NoError(t, txn.Commit())
+
+	persisted, err := db.Metadata().GetPoolStakeSnapshot(
+		1, "mark", poolHash, nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, persisted)
+	require.Equal(t, uint64(rows[0].TotalStake), uint64(persisted.TotalStake),
+		"RATIFY and the persisted boundary must use the same incoming-era stake")
+}

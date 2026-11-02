@@ -20,6 +20,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/netip"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1203,6 +1204,12 @@ func NormalizePeerAddr(peerAddr string) string {
 	}
 	if ip := net.ParseIP(host); ip != nil {
 		return net.JoinHostPort(ip.String(), port)
+	}
+	// net.ParseIP rejects a scoped IPv6 literal (fe80::1%eth0). The zone is
+	// an interface name, which is case-sensitive, so it must not be lowered
+	// with the hostname.
+	if addr, err := netip.ParseAddr(host); err == nil {
+		return net.JoinHostPort(addr.String(), port)
 	}
 	return net.JoinHostPort(strings.ToLower(host), port)
 }
