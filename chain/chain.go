@@ -875,13 +875,10 @@ func (c *Chain) queuedHeaderHashes() []lcommon.Blake2b256 {
 // must hold c.mutex, so the number orders this chain's mutations exactly as
 // the sequencer orders the events they produce.
 //
-// The counter belongs to the ChainManager rather than to the Chain because
-// ChainHeaderEventType is one topic on the one event bus the manager hands to
-// every chain it builds, and a consumer compares the sequence numbers it
-// receives as a single total order. A per-chain counter would restart at 1 on
-// any second publishing chain, so that consumer would protect or prune state
-// belonging to the wrong mutation. It starts at 1: zero means "unsequenced" to
-// consumers.
+// The counter belongs to the ChainManager rather than to the Chain so that a
+// number is never reused by two chains the manager owns, although only the
+// primary chain publishes it: fork chains are built without the event bus.
+// It starts at 1: zero means "unsequenced" to consumers.
 //
 // A Chain constructed without a manager -- only this package's tests do that,
 // by building the struct literal directly -- falls back to a chain-local
