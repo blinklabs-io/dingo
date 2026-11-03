@@ -894,6 +894,36 @@ func TestBuildBlockSupportsAllEras(t *testing.T) {
 // block/header layout, so the forged block round-trips through the
 // Dijkstra block constructor.
 func TestBuildBlockSupportsDijkstraEra(t *testing.T) {
+	// cardano-node 11.2.0 forges and requires the 10-field Praos header body
+	// on a Dijkstra chain; the 12-field Leios prototype body is rejected
+	// ("Size mismatch when decoding Record HeaderBody"). The extension is
+	// emitted only on a Leios network.
+	for _, tc := range []struct {
+		name            string
+		leiosExtension  bool
+		wantBodyFields  int
+		wantExtensionOK bool
+	}{
+		{"praos header body", false, 10, false},
+		{"leios header extension", true, 12, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			testBuildBlockSupportsDijkstraEra(
+				t,
+				tc.leiosExtension,
+				tc.wantBodyFields,
+				tc.wantExtensionOK,
+			)
+		})
+	}
+}
+
+func testBuildBlockSupportsDijkstraEra(
+	t *testing.T,
+	leiosExtension bool,
+	wantBodyFields int,
+	wantExtension bool,
+) {
 	creds := setupTestCredentials(t)
 
 	// DijkstraProtocolParameters embeds ConwayProtocolParameters, so the
@@ -929,6 +959,8 @@ func TestBuildBlockSupportsDijkstraEra(t *testing.T) {
 			nonce: make([]byte, 32),
 		},
 		Credentials: creds,
+
+		LeiosHeaderExtension: leiosExtension,
 	})
 	require.NoError(t, err)
 
@@ -965,11 +997,18 @@ func TestBuildBlockSupportsDijkstraEra(t *testing.T) {
 	// mismatch means the network would reject the block.
 	dblock := block.(*dijkstra.DijkstraBlock)
 	certified, present := dblock.BlockHeader.LeiosCertified()
-	require.True(
+	assert.Equal(
 		t,
+		wantExtension,
 		present,
-		"Dijkstra forge must emit the Leios header extension",
+		"Leios header extension presence",
 	)
+	var headerItems, headerBody []cbor.RawMessage
+	_, err = cbor.Decode(blockItems[0], &headerItems)
+	require.NoError(t, err)
+	_, err = cbor.Decode(headerItems[0], &headerBody)
+	require.NoError(t, err)
+	assert.Len(t, headerBody, wantBodyFields, "header body field count")
 	assert.False(t, certified)
 	_, _, announced := dblock.BlockHeader.LeiosAnnouncement()
 	assert.False(t, announced)
