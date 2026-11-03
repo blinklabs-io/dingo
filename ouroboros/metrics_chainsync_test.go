@@ -160,6 +160,7 @@ func TestChainsyncResyncsCountedByReason(t *testing.T) {
 	publish(event.ChainsyncResyncReasonHeaderValidationRecovery)
 	publish(event.ChainsyncResyncReasonHeaderValidationRecovery)
 	publish(event.ChainsyncResyncReasonRollbackLoop)
+	publish(event.ChainsyncResyncReasonHeaderAuthorizationChanged)
 	publish("blockfetch start failed: connection 10.0.0.1:3001 closed")
 	publish("blockfetch start failed: connection 10.0.0.2:3001 closed")
 
@@ -172,6 +173,12 @@ func TestChainsyncResyncsCountedByReason(t *testing.T) {
 				t, reg, resyncs, event.ChainsyncResyncReasonRollbackLoop,
 			) == 1 &&
 			chainsyncMetricValue(
+				t,
+				reg,
+				resyncs,
+				event.ChainsyncResyncReasonHeaderAuthorizationChanged,
+			) == 1 &&
+			chainsyncMetricValue(
 				t, reg, resyncs, chainsyncResyncOtherReason,
 			) == 2
 	}, 5*time.Second, 10*time.Millisecond)
@@ -179,7 +186,7 @@ func TestChainsyncResyncsCountedByReason(t *testing.T) {
 	require.NoError(t, err)
 	for _, mf := range families {
 		if mf.GetName() == resyncs {
-			require.Len(t, mf.GetMetric(), 3,
+			require.Len(t, mf.GetMetric(), 4,
 				"formatted reasons must not add series")
 		}
 	}

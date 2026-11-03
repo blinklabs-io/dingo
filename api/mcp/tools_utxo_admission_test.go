@@ -28,6 +28,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// utxoAdmissionDeadline bounds the server's queries and the client session.
+// The tests assert admission and paging behaviour, not latency, and a query
+// that pages past maxToolOffset rows scans that many, which takes seconds on
+// a loaded race-detector run. A deadline near that cost turns the scan time
+// into a failure of the behaviour under test.
+const utxoAdmissionDeadline = 5 * time.Minute
+
 const (
 	utxoAdmissionCredential = "5e68f6d9c3203ea691221f59a3988477cfaeda716e2b7bf60b216ae0"
 	utxoAdmissionPolicy     = "a0000000000000000000000000000000000000000000000000000001"
@@ -85,10 +92,10 @@ func newUTxOAdmissionSession(
 		&mcp.Implementation{Name: "test-server", Version: "1.0"}, nil,
 	)
 	registerCardanoTools(
-		server, db, nil, nil, "preview", 5*time.Second, limits,
+		server, db, nil, nil, "preview", utxoAdmissionDeadline, limits,
 	)
-	registerSQLiteTools(server, db, 5*time.Second, 200, limits)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	registerSQLiteTools(server, db, utxoAdmissionDeadline, 200, limits)
+	ctx, cancel := context.WithTimeout(context.Background(), utxoAdmissionDeadline)
 	t.Cleanup(cancel)
 	ct, st := mcp.NewInMemoryTransports()
 	_, err = server.Connect(ctx, st, nil)

@@ -74,6 +74,14 @@ var (
 	errHeaderVerificationDeferred = errors.New(
 		"header verification deferred",
 	)
+	errHeaderVerificationContextUnavailable = fmt.Errorf(
+		"%w: ledger verification context is unavailable",
+		errHeaderVerificationDeferred,
+	)
+	errHeaderVerificationContextChanged = fmt.Errorf(
+		"%w: ledger verification context changed",
+		errHeaderVerificationDeferred,
+	)
 	errEpochCacheForecastBoundary = errors.New(
 		"epoch cache forecast crosses era boundary",
 	)
@@ -169,6 +177,15 @@ func headerStateLookupErr(err error) error {
 func IsHeaderVerificationDeferred(err error) bool {
 	return errors.Is(err, errHeaderVerificationDeferred) ||
 		errors.Is(err, errEpochNonceUnavailable)
+}
+
+// IsHeaderVerificationContextTransient reports a snapshot publication or
+// validation transition that requires retrying the same header against a
+// stable ledger view. Unlike missing epoch data, this can settle without
+// applying the header's own block.
+func IsHeaderVerificationContextTransient(err error) bool {
+	return errors.Is(err, errHeaderVerificationContextUnavailable) ||
+		errors.Is(err, errHeaderVerificationContextChanged)
 }
 
 // IsHeaderVerificationWithheld reports that a header lacks enough
@@ -316,10 +333,7 @@ func (ls *LedgerState) validateChainSelectionHeaderCrypto(
 	if peerRelative {
 		snapshot, _ := ls.loadConsensusAndTipSnapshots()
 		if snapshot == nil {
-			return fmt.Errorf(
-				"%w: ledger verification context is unavailable",
-				errHeaderVerificationDeferred,
-			)
+			return errHeaderVerificationContextUnavailable
 		}
 		epochNonce, epoch, fork, err := ls.peerChainSelectionEpochNonce(
 			connId,
@@ -457,10 +471,7 @@ func (ls *LedgerState) withStableHeaderVerificationContext(
 	if ls.txValidationTransitions.Load() != 0 ||
 		beforeConsensus == nil || beforeTip == nil ||
 		beforeConsensus.generation != beforeTip.generation {
-		return 0, fmt.Errorf(
-			"%w: ledger verification context is unavailable",
-			errHeaderVerificationDeferred,
-		)
+		return 0, errHeaderVerificationContextUnavailable
 	}
 	if err := verify(); err != nil {
 		return 0, err
@@ -473,10 +484,7 @@ func (ls *LedgerState) withStableHeaderVerificationContext(
 		beforeConsensus != afterConsensus || beforeTip != afterTip ||
 		afterConsensus == nil || afterTip == nil ||
 		afterConsensus.generation != afterTip.generation {
-		return 0, fmt.Errorf(
-			"%w: ledger verification context changed",
-			errHeaderVerificationDeferred,
-		)
+		return 0, errHeaderVerificationContextChanged
 	}
 	return beforeConsensus.generation, nil
 }
@@ -2987,7 +2995,7 @@ func (ls *LedgerState) electingVrfKeyHashFromSnapshotWithTxn(
 			poolKeyHash[:],
 		)
 	}
-	pool, err := ls.db.GetPool(ctx, poolKeyHash, true, txn)
+	pool, err := ls.db.GetPoolVrfState(ctx, poolKeyHash, txn)
 	if err != nil {
 		return lcommon.Blake2b256{}, false, headerStateLookupErr(err)
 	}

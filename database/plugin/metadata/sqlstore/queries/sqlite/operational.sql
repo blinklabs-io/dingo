@@ -218,16 +218,20 @@ VALUES (?, ?)
 ON CONFLICT (import_key) DO UPDATE SET phase = excluded.phase;
 
 -- name: GetBackfillCheckpoint :one
-SELECT id, phase, last_slot, total_slots, started_at, updated_at, completed
+SELECT id, phase, last_slot, last_index_id, last_block_hash,
+    total_slots, started_at, updated_at, completed
 FROM backfill_checkpoint
 WHERE phase = ?;
 
 -- name: SetBackfillCheckpoint :one
 INSERT INTO backfill_checkpoint (
-    phase, last_slot, total_slots, started_at, updated_at, completed
-) VALUES (?, ?, ?, ?, ?, ?)
+    phase, last_slot, last_index_id, last_block_hash,
+    total_slots, started_at, updated_at, completed
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (phase) DO UPDATE SET
     last_slot = excluded.last_slot,
+    last_index_id = excluded.last_index_id,
+    last_block_hash = excluded.last_block_hash,
     total_slots = excluded.total_slots,
     updated_at = excluded.updated_at,
     completed = excluded.completed

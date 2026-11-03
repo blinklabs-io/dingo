@@ -17,6 +17,8 @@ package ouroboros
 import (
 	"context"
 	"errors"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -286,4 +288,94 @@ func TestChainsyncObserverVerificationFailureRecyclesOnlyDefiniteErrors(
 			}
 		})
 	}
+}
+
+// An observer header past the forecast horizon is parked before it is
+// authenticated or retained, and is processed in full once released.
+func TestChainsyncObserverHeaderWaitsAtForecastHorizon(t *testing.T) {
+	t.Parallel()
+	f := newPatienceRollForwardFixture(t, false)
+	f.o.catchUpBandWaitTimeout = time.Minute
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseWait := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseWait()
+	f.o.chainsyncObserverHorizonWait = func(
+		ctx context.Context, _ ledger.ChainsyncEvent,
+	) error {
+		close(entered)
+		select {
+		case <-release:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	f.o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
+	var verifyCalls atomic.Int32
+	f.o.chainSelectionVerifyHeaderCrypto = func(
+		ouroboros.ConnectionId, gledger.BlockHeader,
+	) (uint64, error) {
+		verifyCalls.Add(1)
+		return 42, nil
+	}
+	f.o.config.ChainsyncRecordDeliveredPeerTip = func(
+		chainselection.PeerTipUpdateEvent,
+	) {
+	}
+	header := newTestBlockHeader(100, 1, 0xaa)
+	done := make(chan error, 1)
+	go func() { done <- f.rollForwardError(header) }()
+	testutil.RequireReceive(t, entered, testutil.AsyncWait,
+		"observer header did not reach the horizon wait")
+	testutil.RequireNoReceive(t, done, 100*time.Millisecond,
+		"observer callback must not return while parked at the horizon")
+	require.Zero(t, verifyCalls.Load(),
+		"a parked observer header must not be authenticated")
+	_, _, stored := f.state.LookupObservedHeader(f.conn, header.Hash().Bytes())
+	require.False(t, stored, "a parked observer header must not be retained")
+
+	releaseWait()
+	require.NoError(t, testutil.RequireReceive(t, done, testutil.AsyncWait,
+		"observer callback did not resume"))
+	require.EqualValues(t, 1, verifyCalls.Load())
+	_, _, stored = f.state.LookupObservedHeader(f.conn, header.Hash().Bytes())
+	require.True(t, stored,
+		"a released observer header keeps its corroboration role")
+}
+
+// A wait that reaches its bound is not an error and does not drop the header.
+func TestChainsyncObserverHorizonWaitTimeoutIsNotAnError(t *testing.T) {
+	t.Parallel()
+	f := newPatienceRollForwardFixture(t, false)
+	f.o.catchUpBandWaitTimeout = 20 * time.Millisecond
+	var waits atomic.Int32
+	f.o.chainsyncObserverHorizonWait = func(
+		ctx context.Context, _ ledger.ChainsyncEvent,
+	) error {
+		waits.Add(1)
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	f.o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
+	var verifyCalls atomic.Int32
+	f.o.chainSelectionVerifyHeaderCrypto = func(
+		ouroboros.ConnectionId, gledger.BlockHeader,
+	) (uint64, error) {
+		verifyCalls.Add(1)
+		return 42, nil
+	}
+	f.o.config.ChainsyncRecordDeliveredPeerTip = func(
+		chainselection.PeerTipUpdateEvent,
+	) {
+	}
+	header := newTestBlockHeader(100, 1, 0xaa)
+	f.rollForward(t, header)
+	require.EqualValues(t, 1, waits.Load(), "the observer wait never ran")
+	require.EqualValues(t, 1, verifyCalls.Load(),
+		"a header whose wait timed out must still be authenticated")
+	_, _, stored := f.state.LookupObservedHeader(f.conn, header.Hash().Bytes())
+	require.True(t, stored,
+		"a header whose wait timed out must still be retained")
 }

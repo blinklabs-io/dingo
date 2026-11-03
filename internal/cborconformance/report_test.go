@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -34,6 +35,43 @@ func makeCompleteCorpus(t *testing.T, corpus string) {
 		); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+func completeCoverageMetadata() corpusCoverage {
+	rules := ruleNames()
+	coverageRules := make([]corpusCoverageRule, 0, len(rules))
+	for _, rule := range rules {
+		coverageRules = append(coverageRules, corpusCoverageRule{
+			Name: rule,
+			Coverage: corpusCoverageCounts{
+				Fulfilled: 1,
+			},
+			Obligations: []corpusCoverageObligation{{
+				Verdict: "fulfilled",
+				Witness: path.Join(rule, "invalid-zap-1", "complete"),
+			}},
+		})
+	}
+	return corpusCoverage{
+		Rules:   coverageRules,
+		Samples: len(rules),
+	}
+}
+
+func writeCompleteCoverageMetadata(t *testing.T, corpus string) {
+	t.Helper()
+	writeCoverageMetadata(t, corpus, completeCoverageMetadata())
+}
+
+func writeCoverageMetadata(t *testing.T, corpus string, coverage corpusCoverage) {
+	t.Helper()
+	data, err := json.Marshal(coverage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(corpus, "coverage.json"), data, 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -273,6 +311,47 @@ func TestGenerateReportRejectsIncompleteCorpusInventory(t *testing.T) {
 	}
 }
 
+func TestGenerateReportAcceptsCoverageMetadata(t *testing.T) {
+	t.Parallel()
+	corpus := filepath.Join(t.TempDir(), "conway")
+	makeCompleteCorpus(t, corpus)
+	writeCompleteCoverageMetadata(t, corpus)
+
+	report, err := generateReport(corpus, testCorpusRevision, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.Successful {
+		t.Fatalf("report has failures: %+v", report.Failures)
+	}
+}
+
+func TestGenerateReportRejectsMalformedCoverageMetadata(t *testing.T) {
+	t.Parallel()
+	corpus := filepath.Join(t.TempDir(), "conway")
+	makeCompleteCorpus(t, corpus)
+	if err := os.WriteFile(filepath.Join(corpus, "coverage.json"), []byte(`{"rules":`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := generateReport(corpus, testCorpusRevision, ""); err == nil ||
+		!strings.Contains(err.Error(), "decode corpus coverage metadata") {
+		t.Fatalf("GenerateReport error = %v, want malformed coverage metadata", err)
+	}
+}
+
+func TestGenerateReportRejectsUnknownCoverageWitness(t *testing.T) {
+	t.Parallel()
+	corpus := filepath.Join(t.TempDir(), "conway")
+	makeCompleteCorpus(t, corpus)
+	coverage := completeCoverageMetadata()
+	coverage.Rules[0].Obligations[0].Witness = coverage.Rules[0].Name + "/valid/missing"
+	writeCoverageMetadata(t, corpus, coverage)
+	if _, err := generateReport(corpus, testCorpusRevision, ""); err == nil ||
+		!strings.Contains(err.Error(), "references unknown witness") {
+		t.Fatalf("GenerateReport error = %v, want unknown coverage witness", err)
+	}
+}
+
 func TestGenerateReportAppliesExplicitSampleWaivers(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -307,6 +386,27 @@ func TestGenerateReportAppliesExplicitSampleWaivers(t *testing.T) {
 	if report.Totals.ZapMustBeRejectedExpected != wantZapCount ||
 		report.Totals.ZapMustBeRejectedActual != wantZapCount {
 		t.Fatalf("zap totals = %+v, want %d expected and actual", report.Totals, wantZapCount)
+	}
+}
+
+func TestGenerateReportAppliesVerifiedParentDivergences(t *testing.T) {
+	t.Parallel()
+	corpus := filepath.Join(t.TempDir(), "conway")
+	makeCompleteCorpus(t, corpus)
+	metadata := `{"divergences":[` +
+		`{"rule":"credential","kind":"verified-by-parent","reason":"checked by parent rule","samples":["credential/invalid/zap-1/complete"]},` +
+		`{"kind":"decoder-exception","reason":"reference decoder exception","samples":["credential/invalid/zap-1/complete"]}` +
+		`]}`
+	if err := os.WriteFile(filepath.Join(corpus, "corpus.json"), []byte(metadata), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := generateReport(corpus, testCorpusRevision, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.Successful || len(report.WaivedSamples) != 1 {
+		t.Fatalf("report = %+v, want one verified-by-parent waiver", report)
 	}
 }
 
@@ -356,10 +456,13 @@ func TestReencodeAcceptsIndefiniteCostModelMap(t *testing.T) {
 	}
 }
 
-func TestReencodeRejectsIndefiniteBoundedBytes(t *testing.T) {
+func TestReencodeAcceptsIndefiniteBoundedBytes(t *testing.T) {
 	t.Parallel()
+	if _, err := reencode("bounded_bytes", []byte{0x5f, 0x41, 'a', 0xff}); err != nil {
+		t.Fatalf("rejected an indefinite bounded byte string: %v", err)
+	}
 	if _, err := reencode("asset_name", []byte{0x5f, 0x41, 'a', 0xff}); err == nil {
-		t.Fatal("accepted an indefinite byte string for a bounded asset name")
+		t.Fatal("accepted an indefinite byte string for an asset name")
 	}
 }
 

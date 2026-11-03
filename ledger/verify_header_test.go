@@ -1052,20 +1052,30 @@ func TestEpochForSlot_SkipsZeroLengthEpochs(t *testing.T) {
 // loaded for use in verifyBlockHeaderCrypto tests.
 func newTestShelleyGenesisCfg(t testing.TB) *cardano.CardanoNodeConfig {
 	t.Helper()
-	shelleyGenesisJSON := `{
+	return newTestShelleyGenesisCfgWithSecurityParam(t, 432)
+}
+
+// newTestShelleyGenesisCfgWithSecurityParam matches newTestShelleyGenesisCfg
+// with the Byron and Shelley security parameter set to k.
+func newTestShelleyGenesisCfgWithSecurityParam(
+	t testing.TB,
+	k int,
+) *cardano.CardanoNodeConfig {
+	t.Helper()
+	shelleyGenesisJSON := fmt.Sprintf(`{
 		"activeSlotsCoeff": 0.05,
-		"securityParam": 432,
+		"securityParam": %d,
 		"slotLength": 1,
 		"epochLength": 432000,
 		"slotsPerKESPeriod": 129600,
 		"maxKESEvolutions": 62,
 		"systemStart": "2022-10-25T00:00:00Z"
-	}`
+	}`, k)
 	cfg := &cardano.CardanoNodeConfig{}
-	byronGenesisJSON := `{
+	byronGenesisJSON := fmt.Sprintf(`{
 		"blockVersionData": { "slotDuration": "20000" },
-		"protocolConsts": { "k": 432 }
-	}`
+		"protocolConsts": { "k": %d }
+	}`, k)
 	err := loadByronGenesisForTest(t, cfg,
 		strings.NewReader(byronGenesisJSON),
 	)

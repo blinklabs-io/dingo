@@ -437,7 +437,7 @@ func TestRestoreValidatedFailsClosedWhenStagingSyncFails(t *testing.T) {
 	db := newRestoreInternalTestDB(t)
 	require.NoError(t, db.BlockCreate(newRestoreInternalTestBlock(), nil))
 
-	snapshotDir := filepath.Join(t.TempDir(), "snap")
+	snapshotDir := snapshotTestDir(t, "snap")
 	_, err := Snapshot(
 		context.Background(),
 		db,
@@ -482,7 +482,7 @@ func TestRestoreValidatedSurfacesPostRenameSyncFailure(t *testing.T) {
 	db := newRestoreInternalTestDB(t)
 	require.NoError(t, db.BlockCreate(newRestoreInternalTestBlock(), nil))
 
-	snapshotDir := filepath.Join(t.TempDir(), "snap")
+	snapshotDir := snapshotTestDir(t, "snap")
 	_, err := Snapshot(
 		context.Background(),
 		db,

@@ -45,7 +45,7 @@ func cloudSnapshot(
 	if key != nil {
 		opts = append(opts, lifecycle.WithManifestKey(key))
 	}
-	snapshotDir := filepath.Join(t.TempDir(), "snap")
+	snapshotDir := snapshotTestDir(t, "snap")
 	m, err := lifecycle.SnapshotToCloud(
 		context.Background(), testDestinationRegistry, src, snapshotDir,
 		lifecycle.TriggerManual, "test", "badger", "sqlite",

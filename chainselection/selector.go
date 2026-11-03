@@ -276,6 +276,10 @@ type ChainSelector struct {
 	evaluationTrigger        chan struct{}
 	bestPeerConn             *ouroboros.ConnectionId
 	localTip                 ochainsync.Tip
+	// localTipKnown records that localTip came from applied ledger state or
+	// an explicitly trusted checkpoint. Its zero value is a valid origin, so
+	// the tip's block number cannot encode this provenance.
+	localTipKnown bool
 	// farTipClaims records, per connection, the most recent delivered
 	// frontier that exceeded the catch-up plausibility ceiling. Entries are
 	// provisional: they never enter peerTips and so never influence chain
@@ -290,6 +294,10 @@ type ChainSelector struct {
 	// Guarded by mutex.
 	farTipClaims        map[ouroboros.ConnectionId]farTipClaim
 	pendingFarTipClaims map[ouroboros.ConnectionId]farTipClaim
+	// farTipRunsByIdentity retains only the last connected-header frontier so
+	// an honest run can survive a short Genesis-mode reconnect. It carries no
+	// acceptance or corroboration state and is bounded and expired.
+	farTipRunsByIdentity map[string]farTipRunContinuity
 	// rejectedAdvertisedClaims holds the advertised tips of connections the
 	// bootstrap advertised bound refused, oldest first, so a later connection
 	// from another remote host advertising a tip within securityParam is
@@ -645,6 +653,7 @@ func NewChainSelector(cfg ChainSelectorConfig) *ChainSelector {
 		forecastHorizonWitnesses:  make(map[ouroboros.ConnectionId]forecastHorizonWitness),
 		farTipClaims:              make(map[ouroboros.ConnectionId]farTipClaim),
 		pendingFarTipClaims:       make(map[ouroboros.ConnectionId]farTipClaim),
+		farTipRunsByIdentity:      make(map[string]farTipRunContinuity),
 		reportedPeerTipRejections: make(map[peerTipRejectionKey]struct{}),
 		committedPeerTips:         make(map[ouroboros.ConnectionId]uint64),
 		eligible:                  make(map[ouroboros.ConnectionId]bool),
@@ -962,7 +971,7 @@ func (cs *ChainSelector) updatePeerTipObservedLinked(
 	link deliveredLink,
 ) bool {
 	return cs.updatePeerTipObservedLinkedDisposition(
-		connId, tip, observedTip, vrfOutput, praosView, link, false,
+		connId, tip, observedTip, vrfOutput, praosView, link, false, false,
 	) == PeerTipUpdateAccepted
 }
 
@@ -979,6 +988,7 @@ func (cs *ChainSelector) updatePeerTipObservedLinkedDisposition(
 	praosView PraosTiebreakerView,
 	link deliveredLink,
 	generationPinned bool,
+	enforceCatchUpCeiling bool,
 ) PeerTipUpdateDisposition {
 	if cs.config.ConnectionLive != nil &&
 		!cs.config.ConnectionLive(connId) {
@@ -1003,10 +1013,21 @@ func (cs *ChainSelector) updatePeerTipObservedLinkedDisposition(
 		if cs.loneFrontierBrokenLocked(
 			connId, observedTip, link, cs.farTipClaims,
 		) {
+			cs.clearFarTipRunContinuityForConnLocked(connId)
 			revoke = true
 			disposition = PeerTipUpdateRejected
 			return
 		}
+		// The ceiling is measured from the live applied tip, as staging
+		// measures it; SetLocalTip alone lags a replaying ledger.
+		if enforceCatchUpCeiling && cs.refreshAppliedLocalTipLocked() &&
+			len(cs.pendingPeerTips) > 0 {
+			cs.rebuildPendingAdmissionStateLocked()
+		}
+		beyondCatchUpCeiling := enforceCatchUpCeiling &&
+			cs.peerTipBeyondCatchUpCeilingLocked(
+				PeerTipUpdateEvent{ObservedTip: observedTip},
+			)
 		if !cs.checkPeerTipPlausibleLocked(
 			connId, tip, observedTip, link,
 		) {
@@ -1018,6 +1039,11 @@ func (cs *ChainSelector) updatePeerTipObservedLinkedDisposition(
 				claim.boundary == link.boundary {
 				disposition = PeerTipUpdatePending
 			}
+			return
+		}
+		cs.syncFarTipRunContinuityLocked(connId, cs.farTipClaims)
+		if beyondCatchUpCeiling {
+			disposition = PeerTipUpdatePending
 			return
 		}
 
@@ -1172,7 +1198,9 @@ func (cs *ChainSelector) PreparePeerTipAdmissionDisposition(
 	func() {
 		cs.mutex.Lock()
 		defer cs.mutex.Unlock()
-		cs.refreshAppliedLocalTipLocked()
+		if cs.refreshAppliedLocalTipLocked() && len(cs.pendingPeerTips) > 0 {
+			cs.rebuildPendingAdmissionStateLocked()
+		}
 		if cs.truncateStalePendingPeerTipsLocked() {
 			cs.rebuildPendingAdmissionStateLocked()
 		}
@@ -1206,6 +1234,13 @@ func (cs *ChainSelector) PreparePeerTipAdmissionDisposition(
 			prevHash: update.ObservedPrevHash,
 			boundary: update.ObservedBoundary,
 		}
+		// Remote agreement cannot extend the catch-up ceiling because the
+		// relevant header cryptography can be beyond the ledger forecast.
+		// Keep the candidate pending until applied ledger progress or a
+		// trusted checkpoint moves the bound over it. The ceiling only defers
+		// a frontier the peer-relative bound accepts; one it refuses stays
+		// refused however far past the ceiling it is.
+		beyondCatchUpCeiling := cs.peerTipBeyondCatchUpCeilingLocked(update)
 		plausible, claimsChanged := cs.checkPeerTipPlausibleWithClaimsTrackedLocked(
 			update.ConnectionId,
 			update.Tip,
@@ -1214,10 +1249,18 @@ func (cs *ChainSelector) PreparePeerTipAdmissionDisposition(
 			cs.pendingFarTipClaims,
 			true,
 		)
+		deferred := beyondCatchUpCeiling && plausible
+		if beyondCatchUpCeiling {
+			plausible = false
+		}
 		claim, hasClaim := cs.pendingFarTipClaims[update.ConnectionId]
-		evidence := hasClaim &&
-			claim.slot == update.ObservedTip.Point.Slot &&
-			bytes.Equal(claim.hash, update.ObservedTip.Point.Hash)
+		cs.syncFarTipRunContinuityLocked(
+			update.ConnectionId,
+			cs.pendingFarTipClaims,
+		)
+		evidence := deferred ||
+			(hasClaim && claim.slot == update.ObservedTip.Point.Slot &&
+				bytes.Equal(claim.hash, update.ObservedTip.Point.Hash))
 		if !plausible && !evidence {
 			cs.rebuildPendingAdmissionStateLocked()
 			return
@@ -1499,9 +1542,15 @@ func (cs *ChainSelector) rebuildPendingAdmissionStateLocked() {
 			claims,
 			true,
 		)
+		beyondCatchUpCeiling := cs.peerTipBeyondCatchUpCeilingLocked(update)
+		deferred := beyondCatchUpCeiling && plausible
+		if beyondCatchUpCeiling {
+			plausible = false
+		}
 		claim, hasClaim := claims[update.ConnectionId]
-		evidence := hasClaim && claim.slot == update.ObservedTip.Point.Slot &&
-			bytes.Equal(claim.hash, update.ObservedTip.Point.Hash)
+		evidence := deferred ||
+			(hasClaim && claim.slot == update.ObservedTip.Point.Slot &&
+				bytes.Equal(claim.hash, update.ObservedTip.Point.Hash))
 		candidate.plausible = plausible
 		candidate.farTipClaim = cloneCandidateFarTipClaim(
 			update,
@@ -1562,6 +1611,7 @@ func (cs *ChainSelector) RejectPeerTipAdmission(
 			pruned = true
 		}
 		if pruned {
+			cs.clearFarTipRunContinuityForConnLocked(update.ConnectionId)
 			cs.rebuildPendingAdmissionStateLocked()
 			cs.signalIngressChange()
 			shouldEvaluate = cs.genesisCorroborationActiveLocked()
@@ -1609,6 +1659,7 @@ func (cs *ChainSelector) pruneMatchingPendingPeerTipsLocked(
 			if candidatePoint.Slot == point.Slot &&
 				bytes.Equal(candidatePoint.Hash, point.Hash) {
 				cs.truncatePendingPeerTipsLocked(connId, i)
+				cs.clearFarTipRunContinuityForConnLocked(connId)
 				pruned = true
 				break
 			}
@@ -1684,6 +1735,7 @@ func (cs *ChainSelector) commitPeerTipAdmissionResolved(
 				boundary: update.ObservedBoundary,
 			},
 			generationPinned,
+			true,
 		) == PeerTipUpdateAccepted
 		if !accepted {
 			return false
@@ -1786,6 +1838,7 @@ func (cs *ChainSelector) commitPeerTipAdmission(
 				link,
 				cs.farTipClaims,
 			) {
+				cs.clearFarTipRunContinuityForConnLocked(update.ConnectionId)
 				cs.deletePeerLocked(update.ConnectionId)
 				shouldEvaluate = true
 				accepted = true
@@ -1810,6 +1863,10 @@ func (cs *ChainSelector) commitPeerTipAdmission(
 					cs.farTipClaims[update.ConnectionId] = claim
 				}
 			}
+			cs.syncFarTipRunContinuityLocked(
+				update.ConnectionId,
+				cs.farTipClaims,
+			)
 			cs.committedPeerTips[update.ConnectionId] = update.AdmissionID
 			if i == len(pending)-1 {
 				delete(cs.pendingPeerTips, update.ConnectionId)
@@ -1901,6 +1958,7 @@ func (cs *ChainSelector) commitPeerTipAdmission(
 				boundary: update.ObservedBoundary,
 			},
 			generationPinned,
+			true,
 		) == PeerTipUpdateAccepted
 		if accepted {
 			cs.mutex.Lock()
@@ -2583,18 +2641,23 @@ func (cs *ChainSelector) corroborateFarTipClaimWithLocked(
 	// limit. A claim that does not fit is still compared against the recorded
 	// ones, so a full table cannot keep its own claims from being
 	// corroborated.
-	prev, exists := claims[connId]
+	prev, connectionHasClaim := claims[connId]
+	hasPrevious := connectionHasClaim
+	identity, hasIdentity := cs.corroboratorIdentity(connId)
+	if !hasPrevious && cs.genesisCorroborationActiveLocked() && hasIdentity {
+		prev, hasPrevious = cs.farTipRunForIdentityLocked(identity, connId)
+	}
 	updated := farTipClaim{
 		block:        claimed,
 		slot:         observedTip.Point.Slot,
 		hash:         bytes.Clone(observedTip.Point.Hash),
 		boundary:     link.boundary,
-		corroborated: prev.corroborated,
-		lone:         prev.lone,
+		corroborated: connectionHasClaim && prev.corroborated,
+		lone:         connectionHasClaim && prev.lone,
 		run:          1,
 	}
 	switch {
-	case !exists:
+	case !hasPrevious:
 	case len(observedTip.Point.Hash) > 0 &&
 		bytes.Equal(observedTip.Point.Hash, prev.hash):
 		// A repeat shows no progress and does not break the run.
@@ -2608,11 +2671,10 @@ func (cs *ChainSelector) corroborateFarTipClaimWithLocked(
 		case stepBroken:
 		}
 	}
-	if exists || len(claims) < cs.maxTrackedPeers {
-		changed = !exists || !farTipClaimEqual(prev, updated)
+	if connectionHasClaim || len(claims) < cs.maxTrackedPeers {
+		changed = !connectionHasClaim || !farTipClaimEqual(prev, updated)
 		claims[connId] = updated
 	}
-	identity, hasIdentity := cs.corroboratorIdentity(connId)
 	corroborated := false
 	for otherConn, other := range claims {
 		if otherConn == connId || other.lone {
@@ -2836,10 +2898,141 @@ type farTipClaim struct {
 	// lone marks a claim accepted on the connection's own header chain rather
 	// than by another connection's agreement.
 	lone bool
-	// run counts the connection's consecutive connected headers, starting at
-	// 1. A repeated header leaves it unchanged; anything else that does not
-	// continue the previous header restarts it at 1.
+	// run counts connected headers, starting at 1 or continuing a recent run
+	// from the same identity in Genesis mode. A repeated header leaves it
+	// unchanged; a broken link restarts it at 1.
 	run uint64
+}
+
+type farTipRunContinuity struct {
+	connection ouroboros.ConnectionId
+	block      uint64
+	slot       uint64
+	hash       []byte
+	boundary   bool
+	run        uint64
+	updatedAt  time.Time
+	base       farTipClaim
+	hasBase    bool
+}
+
+func (cs *ChainSelector) farTipRunForIdentityLocked(
+	identity string,
+	connId ouroboros.ConnectionId,
+) (farTipClaim, bool) {
+	if identity == "" || cs.farTipRunsByIdentity == nil {
+		return farTipClaim{}, false
+	}
+	continuity, ok := cs.farTipRunsByIdentity[identity]
+	if !ok {
+		return farTipClaim{}, false
+	}
+	if continuity.connection == connId {
+		if !continuity.hasBase {
+			return farTipClaim{}, false
+		}
+		return continuity.base, true
+	}
+	if cs.now().Sub(continuity.updatedAt) > cs.config.StaleTipThreshold*2 {
+		delete(cs.farTipRunsByIdentity, identity)
+		return farTipClaim{}, false
+	}
+	return farTipClaim{
+		block:    continuity.block,
+		slot:     continuity.slot,
+		hash:     bytes.Clone(continuity.hash),
+		boundary: continuity.boundary,
+		run:      continuity.run,
+	}, true
+}
+
+func (cs *ChainSelector) clearFarTipRunContinuityForConnLocked(
+	connId ouroboros.ConnectionId,
+) {
+	if cs.farTipRunsByIdentity == nil {
+		return
+	}
+	if identity, ok := cs.corroboratorIdentity(connId); ok {
+		delete(cs.farTipRunsByIdentity, identity)
+	}
+	for identity, continuity := range cs.farTipRunsByIdentity {
+		if continuity.connection == connId {
+			delete(cs.farTipRunsByIdentity, identity)
+		}
+	}
+}
+
+func (cs *ChainSelector) syncFarTipRunContinuityLocked(
+	connId ouroboros.ConnectionId,
+	claims map[ouroboros.ConnectionId]farTipClaim,
+) {
+	if !cs.genesisCorroborationActiveLocked() {
+		return
+	}
+	claim, hasClaim := claims[connId]
+	if !hasClaim || claim.run == 0 || len(claim.hash) == 0 {
+		for identity, continuity := range cs.farTipRunsByIdentity {
+			if continuity.connection == connId {
+				delete(cs.farTipRunsByIdentity, identity)
+			}
+		}
+		return
+	}
+	identity, hasIdentity := cs.corroboratorIdentity(connId)
+	if !hasIdentity {
+		return
+	}
+	if cs.farTipRunsByIdentity == nil {
+		cs.farTipRunsByIdentity = make(map[string]farTipRunContinuity)
+	}
+	var base farTipClaim
+	hasBase := false
+	if previous, exists := cs.farTipRunsByIdentity[identity]; exists {
+		if previous.connection == connId {
+			base = previous.base
+			hasBase = previous.hasBase
+		} else {
+			base = farTipClaim{
+				block:    previous.block,
+				slot:     previous.slot,
+				hash:     bytes.Clone(previous.hash),
+				boundary: previous.boundary,
+				run:      previous.run,
+			}
+			hasBase = true
+		}
+	}
+	if _, exists := cs.farTipRunsByIdentity[identity]; !exists &&
+		len(cs.farTipRunsByIdentity) >= cs.maxTrackedPeers {
+		oldestIdentity := ""
+		var oldest time.Time
+		for trackedIdentity, continuity := range cs.farTipRunsByIdentity {
+			if oldestIdentity == "" || continuity.updatedAt.Before(oldest) {
+				oldestIdentity = trackedIdentity
+				oldest = continuity.updatedAt
+			}
+		}
+		delete(cs.farTipRunsByIdentity, oldestIdentity)
+	}
+	updatedAt := cs.now()
+	// Re-reporting the same point must not keep an old run alive indefinitely.
+	if previous, exists := cs.farTipRunsByIdentity[identity]; exists &&
+		previous.block == claim.block && previous.slot == claim.slot &&
+		previous.boundary == claim.boundary &&
+		bytes.Equal(previous.hash, claim.hash) {
+		updatedAt = previous.updatedAt
+	}
+	cs.farTipRunsByIdentity[identity] = farTipRunContinuity{
+		connection: connId,
+		block:      claim.block,
+		slot:       claim.slot,
+		hash:       bytes.Clone(claim.hash),
+		boundary:   claim.boundary,
+		run:        claim.run,
+		updatedAt:  updatedAt,
+		base:       base,
+		hasBase:    hasBase,
+	}
 }
 
 // makeRoomForNewPeerLocked makes room in the tracked-peer table for a new
@@ -3103,7 +3296,8 @@ func (cs *ChainSelector) SetLocalTip(tip ochainsync.Tip) {
 		}
 		cs.localTipProgressBlock = tip.BlockNumber
 		cs.localTip = tip
-		if len(cs.pendingFarTipClaims) > 0 {
+		cs.localTipKnown = true
+		if len(cs.pendingFarTipClaims) > 0 || len(cs.pendingPeerTips) > 0 {
 			cs.rebuildPendingAdmissionStateLocked()
 		}
 		shouldEvaluate = cs.advanceSelectionModeLocked()
@@ -3114,16 +3308,35 @@ func (cs *ChainSelector) SetLocalTip(tip ochainsync.Tip) {
 }
 
 // refreshAppliedLocalTipLocked replaces the local tip with the live applied
-// tip when an AppliedTip source is configured. It leaves the progress clock
-// that SetLocalTip maintains to SetLocalTip. Must be called with cs.mutex held
-// for writing.
-func (cs *ChainSelector) refreshAppliedLocalTipLocked() {
+// tip when an AppliedTip source is configured and reports whether its block
+// number changed. It leaves the progress clock that SetLocalTip maintains to
+// SetLocalTip. Must be called with cs.mutex held for writing.
+func (cs *ChainSelector) refreshAppliedLocalTipLocked() bool {
 	if cs.config.AppliedTip == nil {
-		return
+		return false
 	}
 	if tip, ok := cs.config.AppliedTip(); ok {
+		changed := !cs.localTipKnown || tip.BlockNumber != cs.localTip.BlockNumber
 		cs.localTip = tip
+		cs.localTipKnown = true
+		return changed
 	}
+	return false
+}
+
+// peerTipBeyondCatchUpCeilingLocked reports whether staged header admission
+// must wait for applied ledger progress. Remote claims do not move this bound.
+// Must be called with cs.mutex held.
+func (cs *ChainSelector) peerTipBeyondCatchUpCeilingLocked(
+	update PeerTipUpdateEvent,
+) bool {
+	if cs.securityParam == 0 || !cs.localTipKnown {
+		return false
+	}
+	return update.ObservedTip.BlockNumber > safeAddUint64(
+		cs.localTip.BlockNumber,
+		safeAddUint64(cs.securityParam, cs.securityParam),
+	)
 }
 
 // now returns the current time via the injectable clock. Must be called with
@@ -4522,7 +4735,7 @@ func (cs *ChainSelector) HandlePeerTipUpdateEvent(evt event.Event) {
 		return
 	}
 	if e.AdmissionID == 0 {
-		cs.updatePeerTipObservedLinked(
+		cs.updatePeerTipObservedLinkedDisposition(
 			e.ConnectionId,
 			e.Tip,
 			e.ObservedTip,
@@ -4532,6 +4745,8 @@ func (cs *ChainSelector) HandlePeerTipUpdateEvent(evt event.Event) {
 				prevHash: e.ObservedPrevHash,
 				boundary: e.ObservedBoundary,
 			},
+			false,
+			true,
 		)
 		return
 	}
@@ -4568,6 +4783,7 @@ func (cs *ChainSelector) ObservePeerTipUpdate(
 			boundary: e.ObservedBoundary,
 		},
 		false,
+		true,
 	)
 }
 

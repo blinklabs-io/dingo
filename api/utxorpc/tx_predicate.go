@@ -200,7 +200,11 @@ func (u *Utxorpc) matchTxPredicateNode(
 	tx gledger.Transaction,
 	node *txPredicateNode,
 ) bool {
-	return evalTxPredicateOutcome(tx, node, u.matchesTxPattern) == predMatch
+	lookup := cacheSpentOutputLookup(u.lookupSpentOutput)
+	leaf := func(tx gledger.Transaction, pattern *cardano.TxPattern) predOutcome {
+		return u.matchesTxPatternWithLookup(tx, pattern, lookup)
+	}
+	return evalTxPredicateOutcome(tx, node, leaf) == predMatch
 }
 
 // andOutcome combines two conjuncts. A definite non-match dominates

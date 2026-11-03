@@ -194,8 +194,17 @@ func TestChainsyncClientRollForwardBackpressuresCatchUpOvershoot(t *testing.T) {
 	require.False(t, f.observed(bandTestFirst))
 	testutil.RequireNoReceive(t, f.ledgerCh, 10*time.Millisecond,
 		"a still-parked header must not reach the ledger")
-	f.applied.Store(bandTestFirst - 2*bandTestK)
+	// The applied catch-up ceiling, not the connection's own frontier, bounds
+	// each header, so every header waits for the ledger to come within 2K of
+	// it and is then released in order without leaving the observed ancestry.
 	for i := range uint64(headers) {
+		if i > 0 {
+			testutil.RequireNoReceive(t, results, 400*time.Millisecond,
+				"a header past the applied ceiling must park the callback")
+			require.False(t, f.observed(bandTestFirst+i),
+				"a parked header must not enter the observed ancestry early")
+		}
+		f.applied.Store(bandTestFirst + i - 2*bandTestK)
 		require.NoError(t, testutil.RequireReceive(t, results, 10*time.Second,
 			"headers must be processed once the applied tip advances"),
 			"header %d must not close the connection", i+1)

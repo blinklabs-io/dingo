@@ -146,7 +146,15 @@ type shapeRows struct {
 type rowBatch struct {
 	entries            []shapeRows
 	estimatedSizeBytes int64
+	rowCount           int
 	trackSize          bool
+	// Backfill sets these only on a transaction level's temporary row buffer.
+	maxSizeBytes   int64
+	maxRows        int
+	flushAtLimit   func() error
+	onLimitFlushed func(int64)
+	nextLimit      func() (int64, int)
+	flushErr       error
 	// queued records which transactions have rows pending, so replacing a
 	// transaction's rows only scans when it actually has some.
 	queued map[int64]struct{}
@@ -157,13 +165,30 @@ func (b *rowBatch) empty() bool {
 }
 
 func (b *rowBatch) add(shape rowShape, row ...any) {
-	i := b.entryIndex(shape)
-	if len(row) != len(b.entries[i].shape.columns) {
+	if b.flushErr != nil {
+		return
+	}
+	if len(row) != len(shape.columns) {
 		panic("sqlstore: row width does not match shape")
 	}
-	b.entries[i].rows = append(b.entries[i].rows, row)
+	var rowSize int64
 	if b.trackSize {
-		rowSize := estimateRowSizeBytes(row)
+		rowSize = estimateRowSizeBytes(row)
+	}
+	// Flush before adding a row that would cross the cap. One row larger than
+	// the cap is still inserted and flushed as the minimum unit.
+	if b.flushAtLimit != nil && !b.empty() &&
+		((b.maxRows > 0 && b.rowCount >= b.maxRows) ||
+			(b.maxSizeBytes > 0 && b.estimatedSizeBytes+rowSize > b.maxSizeBytes)) {
+		b.flushForLimit()
+		if b.flushErr != nil {
+			return
+		}
+	}
+	i := b.entryIndex(shape)
+	b.entries[i].rows = append(b.entries[i].rows, row)
+	b.rowCount++
+	if b.trackSize {
 		b.entries[i].estimatedSizeBytes += rowSize
 		b.estimatedSizeBytes += rowSize
 	}
@@ -173,6 +198,42 @@ func (b *rowBatch) add(shape rowShape, row ...any) {
 		}
 		id, _ := row[col].(int64)
 		b.queued[id] = struct{}{}
+	}
+	if b.flushAtLimit != nil &&
+		((b.maxRows > 0 && b.rowCount >= b.maxRows) ||
+			(b.maxSizeBytes > 0 && b.estimatedSizeBytes >= b.maxSizeBytes)) {
+		b.flushForLimit()
+	}
+}
+
+func (b *rowBatch) setFlushLimit(
+	maxBytes int64,
+	maxRows int,
+	flush func() error,
+	onFlushed func(int64),
+	nextLimit func() (int64, int),
+) {
+	b.maxSizeBytes = maxBytes
+	b.maxRows = maxRows
+	b.flushAtLimit = flush
+	b.onLimitFlushed = onFlushed
+	b.nextLimit = nextLimit
+}
+
+func (b *rowBatch) flushForLimit() {
+	if b.flushErr != nil || b.flushAtLimit == nil || b.empty() {
+		return
+	}
+	flushedBytes := b.estimatedSizeBytes
+	if err := b.flushAtLimit(); err != nil {
+		b.flushErr = err
+		return
+	}
+	if b.onLimitFlushed != nil {
+		b.onLimitFlushed(flushedBytes)
+	}
+	if b.nextLimit != nil {
+		b.maxSizeBytes, b.maxRows = b.nextLimit()
 	}
 }
 
@@ -215,6 +276,7 @@ func (b *rowBatch) dropTransaction(transactionID int64) {
 				b.estimatedSizeBytes -= rowSize
 			}
 		}
+		b.rowCount -= len(entry.rows) - len(kept)
 		clear(entry.rows[len(kept):])
 		entry.rows = kept
 	}
@@ -244,8 +306,19 @@ func (b *rowBatch) merge(other *rowBatch) {
 }
 
 func (b *rowBatch) reset() {
+	b.clearRows()
+	b.maxSizeBytes = 0
+	b.maxRows = 0
+	b.flushAtLimit = nil
+	b.onLimitFlushed = nil
+	b.nextLimit = nil
+	b.flushErr = nil
+}
+
+func (b *rowBatch) clearRows() {
 	b.entries = nil
 	b.estimatedSizeBytes = 0
+	b.rowCount = 0
 	b.queued = nil
 }
 
@@ -267,7 +340,7 @@ func (b *rowBatch) flush(
 	if b.empty() {
 		return nil
 	}
-	defer b.reset()
+	defer b.clearRows()
 	for _, entry := range b.entries {
 		width := len(entry.shape.columns)
 		perStatement := max(1, parameterLimit/width)

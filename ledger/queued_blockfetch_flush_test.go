@@ -96,7 +96,7 @@ func TestQueuedBlockfetchBatchHasBoundedAccumulation(t *testing.T) {
 							Point:        ocommon.NewPoint(i, hash.Bytes()),
 							BlockHeader: mockHeader{
 								hash: hash, prevHash: prev,
-								blockNumber: i, slot: i,
+								blockNumber: i - 1, slot: i,
 							},
 							Tip: ochainsync.Tip{
 								Point:       ocommon.NewPoint(1280, []byte("tip")),
@@ -107,11 +107,25 @@ func TestQueuedBlockfetchBatchHasBoundedAccumulation(t *testing.T) {
 					prev = hash
 				}
 			}},
-		{name: "no selected peer", change: func(
+		// A selected-to-none transition clears the active connection while
+		// admitted headers are still queued; the flush fetches them from the
+		// header pipeline owner.
+		{name: "no selected peer falls back to header source", want: true,
+			change: func(
+				_ *testing.T, ls *LedgerState, _ *ouroboros.ConnectionId,
+			) {
+				ls.config.GetActiveConnectionFunc = func() *ouroboros.ConnectionId {
+					return nil
+				}
+			}},
+		{name: "no selected peer and disconnected header source", change: func(
 			_ *testing.T, ls *LedgerState, _ *ouroboros.ConnectionId,
 		) {
 			ls.config.GetActiveConnectionFunc = func() *ouroboros.ConnectionId {
 				return nil
+			}
+			ls.config.ConnectionLiveFunc = func(ouroboros.ConnectionId) bool {
+				return false
 			}
 		}},
 		{name: "disconnected selected peer", change: func(
@@ -198,7 +212,7 @@ func TestQueuedBlockfetchBatchHasBoundedAccumulation(t *testing.T) {
 						Point:        point,
 						BlockHeader: mockHeader{
 							hash: hash, prevHash: prevHash,
-							blockNumber: i, slot: i,
+							blockNumber: i - 1, slot: i,
 						},
 						Tip: ochainsync.Tip{
 							Point:       ocommon.NewPoint(1280, []byte("tip")),
@@ -242,7 +256,7 @@ func TestQueuedBlockfetchBatchHasBoundedAccumulation(t *testing.T) {
 				require.Equal(t, last, request.end)
 			} else {
 				require.Empty(t, requests,
-					"timer cannot bypass selection, lifecycle, or active work")
+					"timer cannot bypass liveness, lifecycle, or active work")
 			}
 			timer.callback()
 			ls.blockfetchContinuationWG.Wait()

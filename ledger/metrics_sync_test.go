@@ -262,3 +262,46 @@ func TestSyncMetricsExportLastBlockAdded(t *testing.T) {
 		t, reg, "dingo_ledger_last_block_added_timestamp_seconds",
 	), float64(before.Unix()))
 }
+
+func TestObserverHorizonParkMetrics(t *testing.T) {
+	t.Parallel()
+
+	ls, _, _, e, _ := newObserverForkTestLedger(t)
+	reg := prometheus.NewRegistry()
+	ls.metrics.init(reg)
+	ls.registerSyncGauges(reg)
+	const parked = "dingo_ledger_observer_horizon_parked_callbacks"
+	require.Zero(t, syncMetricValue(t, reg, parked))
+
+	ctx, cancel := context.WithCancel(t.Context())
+	results := make(chan error, 1)
+	go func() { results <- ls.AwaitObserverHeaderHorizon(ctx, e) }()
+	require.Eventually(t, func() bool {
+		return syncMetricValue(t, reg, parked) == 1
+	}, testutil.AsyncWait, time.Millisecond,
+		"a callback held at the horizon must be counted")
+
+	families, err := reg.Gather()
+	require.NoError(t, err)
+	var samples uint64
+	var sum float64
+	for _, family := range families {
+		if family.GetName() ==
+			"dingo_ledger_observer_horizon_overshoot_slots" {
+			samples = family.GetMetric()[0].GetHistogram().GetSampleCount()
+			sum = family.GetMetric()[0].GetHistogram().GetSampleSum()
+		}
+	}
+	require.Equal(t, uint64(1), samples,
+		"the overshoot is observed once per parked header")
+	// The header is at slot 500_000; the forecast from the stored parent
+	// (slot 300_000) ends at the 432_000 epoch boundary.
+	require.Equal(t, float64(68_000), sum)
+
+	cancel()
+	require.ErrorIs(t, testutil.RequireReceive(
+		t, results, testutil.AsyncWait, "cancellation must release the wait",
+	), context.Canceled)
+	require.Zero(t, syncMetricValue(t, reg, parked),
+		"a released callback must leave the gauge")
+}
