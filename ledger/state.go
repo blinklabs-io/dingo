@@ -1508,6 +1508,12 @@ type LedgerState struct {
 	// the key (see PlutusEvalContextCache's doc comment). Set once in NewLedgerState
 	// and never reassigned; safe for concurrent readers without a lock.
 	plutusEvalCtxCache *eras.PlutusEvalContextCache
+	// phase2Results remembers transactions whose scripts succeeded, keyed by
+	// everything evaluation reads, so the repeated validations of one
+	// transaction (mempool admission and revalidation, forging, block
+	// application) run its scripts once. Set once in NewLedgerState and never
+	// reassigned; the cache locks internally.
+	phase2Results *eras.Phase2ResultCache
 	// syntheticV2CostModel is true from the moment HardForkBabbage fabricates
 	// a PlutusV2 cost model (real mainnet/preview/preprod never had one in
 	// genesis -- PlutusV2 postdates the Alonzo genesis format entirely, so
@@ -2400,6 +2406,7 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 		epochNonceHexCache: make(map[uint64]epochNonceHexCacheEntry),
 		validationEnabled:  cfg.ValidateHistorical,
 		plutusEvalCtxCache: eras.NewPlutusEvalContextCache(),
+		phase2Results:      eras.NewPhase2ResultCache(),
 		byronPBFT:          byronPBFT,
 		evalAdmission:      newEvaluationLimiter(evaluationCapacity(cfg)),
 	}
@@ -14296,6 +14303,13 @@ func (ls *LedgerState) persistedMaxBlockSize() uint64 {
 // nil cache as "no cache available" rather than dereferencing it.
 func (ls *LedgerState) PlutusEvalContextCache() *eras.PlutusEvalContextCache {
 	return ls.plutusEvalCtxCache
+}
+
+// Phase2ResultCache returns the cache of transactions whose scripts
+// succeeded. Returns nil for a bare-constructed LedgerState that skipped
+// NewLedgerState (test-only), which validation treats as no cache.
+func (ls *LedgerState) Phase2ResultCache() *eras.Phase2ResultCache {
+	return ls.phase2Results
 }
 
 // GetCurrentPParamsForReporting returns the current protocol parameters with
