@@ -206,6 +206,7 @@ func TestPhase2ResultCacheDoesNotCacheFailure(t *testing.T) {
 }
 
 func TestConwayPhase2ResultKeyCoversEvaluationInputs(t *testing.T) {
+	t.Parallel()
 	pp := preprodFixtureProtocolParams(t)
 	c := loadPreprodPhase2Case(t, preprodPlutusFixtures[0])
 	key := func(
@@ -284,6 +285,7 @@ func TestConwayPhase2ResultKeyCoversEvaluationInputs(t *testing.T) {
 }
 
 func TestPhase2ResultCacheKeepsRecentKeys(t *testing.T) {
+	t.Parallel()
 	c := NewPhase2ResultCache()
 	keyOf := func(i int) phase2ResultKey {
 		var k phase2ResultKey
@@ -336,4 +338,21 @@ func BenchmarkValidateTxConwayPhase2Cache(b *testing.B) {
 			})
 		}
 	}
+}
+
+func TestPhase2ResultCacheReAddKeepsOlderGeneration(t *testing.T) {
+	t.Parallel()
+	c := NewPhase2ResultCache()
+	keyOf := func(i int) phase2ResultKey {
+		var k phase2ResultKey
+		k[0], k[1], k[2] = byte(i), byte(i>>8), 0x5a
+		return k
+	}
+	for i := range 2 * phase2ResultCacheGeneration {
+		c.add(keyOf(i))
+	}
+	// The newer generation is full. Adding a key it already holds must not
+	// start another generation and drop the older one.
+	c.add(keyOf(2*phase2ResultCacheGeneration - 1))
+	require.True(t, c.contains(keyOf(0)))
 }

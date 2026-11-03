@@ -108,6 +108,9 @@ func (c *Phase2ResultCache) add(key phase2ResultKey) {
 }
 
 func (c *Phase2ResultCache) addLocked(key phase2ResultKey) {
+	if _, ok := c.current[key]; ok {
+		return
+	}
 	if len(c.current) >= phase2ResultCacheGeneration {
 		c.previous = c.current
 		c.current = make(
