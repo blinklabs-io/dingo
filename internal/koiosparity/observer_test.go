@@ -569,7 +569,7 @@ func TestNewObserverRejectsNilSourceAndBadNetwork(t *testing.T) {
 	db := newTestDatabaseSourceDB(t)
 	source, err := NewDatabaseSource(db)
 	require.NoError(t, err)
-	_, err = NewObserver(ObserverConfig{Network: "mainnet", Source: source})
+	_, err = NewObserver(ObserverConfig{Network: "sanchonet", Source: source})
 	require.Error(t, err)
 }
 
@@ -1000,7 +1000,8 @@ func TestObserverStrictModeCancelsOnAccountMismatch(t *testing.T) {
 	const stakeEpoch = koiosEpoch - 1
 
 	stakingKey := testPoolKeyHash(t, 0x55)
-	addr, err := StakeAddressFromCredential(stakingKey, 0)
+	addr, err := StakeAddressFromCredential(
+		"preview", stakingKey, 0)
 	require.NoError(t, err)
 
 	srv := newFakeKoiosServer(t, map[uint64]*fakeEpochRef{
@@ -1431,7 +1432,8 @@ func TestObserverStartSeedsBacklogForMissingAccountCoverage(t *testing.T) {
 	const stakeEpoch = koiosEpoch - 1
 
 	stakingKey := testPoolKeyHash(t, 0x77)
-	addr, err := StakeAddressFromCredential(stakingKey, 0)
+	addr, err := StakeAddressFromCredential(
+		"preview", stakingKey, 0)
 	require.NoError(t, err)
 
 	// Zero pools/epoch reference data served -- the pool side is never
@@ -1871,7 +1873,8 @@ func TestObserverAggregateCheckDoesNotWaitForSlowAccountFetch(t *testing.T) {
 	const mismatchEpoch = uint64(6)
 
 	stakingKey := testPoolKeyHash(t, 0x99)
-	addr, err := StakeAddressFromCredential(stakingKey, 0)
+	addr, err := StakeAddressFromCredential(
+		"preview", stakingKey, 0)
 	require.NoError(t, err)
 
 	blockAccountFetch := make(chan struct{})
@@ -2209,12 +2212,14 @@ func TestObserverFailureReportsSignificantMismatchCount(t *testing.T) {
 	const stakeEpoch = koiosEpoch - 1
 
 	stakingKey := testPoolKeyHash(t, 0x55)
-	addr, err := StakeAddressFromCredential(stakingKey, 0)
+	addr, err := StakeAddressFromCredential(
+		"preview", stakingKey, 0)
 	require.NoError(t, err)
 	// A second address in the requested universe that neither side ever pays.
 	// It becomes an acct_zero_reward row: descriptive state, never a reason
 	// for the failure, and exactly the kind of row that inflated the count.
-	quietAddr, err := StakeAddressFromCredential(testPoolKeyHash(t, 0x77), 0)
+	quietAddr, err := StakeAddressFromCredential(
+		"preview", testPoolKeyHash(t, 0x77), 0)
 	require.NoError(t, err)
 
 	srv := newFakeKoiosServer(t, map[uint64]*fakeEpochRef{

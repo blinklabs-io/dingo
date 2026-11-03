@@ -563,6 +563,10 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 		require.NotNil(t, checkpoint)
 		require.True(t, checkpoint.Completed)
 		require.GreaterOrEqual(t, checkpoint.LastSlot, uint64(1000))
+		nonces, err := db.Metadata().GetBlockNoncesInSlotRange(0, 1_000_000, nil)
+		require.NoError(t, err)
+		require.Len(t, nonces, 1,
+			"the backfill must write the block_nonce row the epoch block lists read")
 		require.NoError(t, dbtest.CloseDatabase(db))
 	})
 }

@@ -26,6 +26,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/topology"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -252,6 +253,10 @@ type PeerGovernor struct {
 }
 
 type PeerGovernorConfig struct {
+	// ControlGroups contains trusted relay operator declarations, separate from
+	// topology valencies and ledger stake. Nil supplies no additional identities.
+	ControlGroups []topology.PeerControlGroup
+
 	PromRegistry                 prometheus.Registerer
 	Logger                       *slog.Logger
 	EventBus                     *event.EventBus
@@ -355,6 +360,7 @@ type pendingEvent struct {
 }
 
 func NewPeerGovernor(cfg PeerGovernorConfig) *PeerGovernor {
+	cfg.ControlGroups = topology.ClonePeerControlGroups(cfg.ControlGroups)
 	if cfg.Logger == nil {
 		cfg.Logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	}

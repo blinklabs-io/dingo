@@ -35,13 +35,16 @@ import "github.com/blinklabs-io/dingo/event"
 // SlotBattleEventType is the event type for slot battles (competing blocks)
 const SlotBattleEventType = event.EventType("forging.slot_battle")
 
-// SlotBattleEvent is emitted when a slot battle settles: the node forged a
-// block for a slot and a peer delivered a different block for it. It is
-// published once the chain has advanced a security parameter of blocks past
-// the battle, because the winner can change until then.
+// SlotBattleEvent is emitted when a slot battle settles: a locally forged tip
+// and a peer tip competed under the active Praos rules. The tips can occupy
+// different slots inside the restricted tiebreak window. It is published once
+// the chain has advanced a security parameter of blocks past the battle,
+// because the winner can change until then.
 type SlotBattleEvent struct {
-	// Slot is the slot number where the battle occurred
+	// Slot is the slot of the locally forged block.
 	Slot uint64
+	// RemoteSlot is the slot of the competing peer block.
+	RemoteSlot uint64
 	// LocalBlockHash is the hash of our locally forged block (if any)
 	LocalBlockHash []byte
 	// RemoteBlockHash is the hash of the competing block from peers

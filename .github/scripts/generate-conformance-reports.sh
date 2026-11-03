@@ -9,8 +9,7 @@
 # and the cause is written in its place so every report kind is still
 # published.
 #
-# The UPLC turbo run is Linux-only and measures up to 10,000 evenly spaced
-# programs from the corpus.
+# The UPLC turbo run is Linux-only and measures every program in the corpus.
 #
 # Inputs:
 #   RELEASE_TAG           required, for example v0.71.0
@@ -22,7 +21,7 @@
 #   UPLC_CORPUS_SHA256     required, digest of the NDC UPLC corpus archive
 #   TURBO_CORPUS_SHA256    required, digest of the NDC Turbo corpus archive
 #   TURBO_SAMPLES         optional, timed samples per program, defaults to 50
-#   TURBO_MAX_PROGRAMS    optional, programs measured, defaults to 10000
+#   TURBO_MAX_PROGRAMS    optional, programs measured; 0 (the default) means all
 
 set -euo pipefail
 
@@ -35,7 +34,7 @@ set -euo pipefail
 DIST_DIR="${DIST_DIR:-dist}"
 CONFORMANCE_DIR="${CONFORMANCE_DIR:-.conformance}"
 TURBO_SAMPLES="${TURBO_SAMPLES:-50}"
-TURBO_MAX_PROGRAMS="${TURBO_MAX_PROGRAMS:-10000}"
+TURBO_MAX_PROGRAMS="${TURBO_MAX_PROGRAMS:-0}"
 
 # The report step has a 60-minute limit. Generator budgets total 43 minutes;
 # corpus preparation is capped at six minutes, leaving 11 minutes for gzip.

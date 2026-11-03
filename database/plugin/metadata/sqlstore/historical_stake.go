@@ -548,7 +548,7 @@ func (s *Store) GetStakeByPoolsAtSlot(
 	txn types.Txn,
 ) (map[string]uint64, map[string]uint64, error) {
 	return s.getStakeByPoolsAtSlot(
-		poolKeyHashes, slot, 0, expiryEpoch, inactivityPeriod, txn,
+		poolKeyHashes, slot, 0, nil, expiryEpoch, inactivityPeriod, txn,
 	)
 }
 
@@ -556,15 +556,17 @@ func (s *Store) GetEpochBoundaryStakeByPools(
 	poolKeyHashes [][]byte,
 	snapshotSlot uint64,
 	boundarySlot uint64,
+	incomingEraID *uint,
 	expiryEpoch uint64,
 	inactivityPeriod uint64,
 	txn types.Txn,
 ) (map[string]uint64, map[string]uint64, error) {
 	if boundarySlot <= snapshotSlot {
 		boundarySlot = 0
+		incomingEraID = nil
 	}
 	return s.getStakeByPoolsAtSlot(
-		poolKeyHashes, snapshotSlot, boundarySlot,
+		poolKeyHashes, snapshotSlot, boundarySlot, incomingEraID,
 		expiryEpoch, inactivityPeriod, txn,
 	)
 }
@@ -573,6 +575,7 @@ func (s *Store) getStakeByPoolsAtSlot(
 	poolKeyHashes [][]byte,
 	slot uint64,
 	boundarySlot uint64,
+	incomingEraID *uint,
 	expiryEpoch uint64,
 	inactivityPeriod uint64,
 	txn types.Txn,
@@ -598,6 +601,7 @@ func (s *Store) getStakeByPoolsAtSlot(
 			db,
 			slot,
 			boundarySlot,
+			incomingEraID,
 			expiryEpoch,
 			inactivityPeriod,
 			"active_delegation.pool_key_hash IN ("+
@@ -703,6 +707,7 @@ func (s *Store) GetPoolOwnerStakeAtSlot(
 			db,
 			slot,
 			0,
+			nil,
 			expiryEpoch,
 			inactivityPeriod,
 			"active_delegation.credential_tag = 0 AND "+
@@ -783,7 +788,8 @@ func (s *Store) GetRewardStakeInputsForPools(
 	txn types.Txn,
 ) ([]*models.RewardStakeInput, error) {
 	return s.getRewardStakeInputsForPools(
-		poolKeyHashes, slot, 0, false, expiryEpoch, inactivityPeriod, txn,
+		poolKeyHashes, slot, 0, false, nil,
+		expiryEpoch, inactivityPeriod, txn,
 	)
 }
 
@@ -791,15 +797,17 @@ func (s *Store) GetEpochBoundaryRewardStakeInputsForPools(
 	poolKeyHashes [][]byte,
 	snapshotSlot uint64,
 	boundarySlot uint64,
+	incomingEraID *uint,
 	expiryEpoch uint64,
 	inactivityPeriod uint64,
 	txn types.Txn,
 ) ([]*models.RewardStakeInput, error) {
 	if boundarySlot <= snapshotSlot {
 		boundarySlot = 0
+		incomingEraID = nil
 	}
 	return s.getRewardStakeInputsForPools(
-		poolKeyHashes, snapshotSlot, boundarySlot, true,
+		poolKeyHashes, snapshotSlot, boundarySlot, true, incomingEraID,
 		expiryEpoch, inactivityPeriod, txn,
 	)
 }
@@ -809,6 +817,7 @@ func (s *Store) getRewardStakeInputsForPools(
 	slot uint64,
 	boundarySlot uint64,
 	boundaryAware bool,
+	incomingEraID *uint,
 	expiryEpoch uint64,
 	inactivityPeriod uint64,
 	txn types.Txn,
@@ -842,6 +851,7 @@ func (s *Store) getRewardStakeInputsForPools(
 			db,
 			slot,
 			boundarySlot,
+			incomingEraID,
 			expiryEpoch,
 			inactivityPeriod,
 			"active_delegation.pool_key_hash IN ("+
@@ -946,6 +956,7 @@ func (s *Store) historicalStakeCTE(
 	db queryer,
 	slot uint64,
 	boundarySlot uint64,
+	incomingEraID *uint,
 	expiryEpoch uint64,
 	inactivityPeriod uint64,
 	predicate string,
@@ -965,7 +976,9 @@ func (s *Store) historicalStakeCTE(
 	// When it is not counted the query is exactly what it was before pointer
 	// resolution existed, and when no output uses a pointer address the extra
 	// branch produces no rows.
-	countPointerStake, err := pointerStakeCounted(ctx, db, slot, boundarySlot)
+	countPointerStake, err := pointerStakeCounted(
+		ctx, db, slot, boundarySlot, incomingEraID,
+	)
 	if err != nil {
 		return "", nil, err
 	}
@@ -1456,6 +1469,7 @@ func (s *Store) GetEpochBoundaryDelegatedPoolKeyHashes(
 		db,
 		snapshotSlot,
 		boundarySlot,
+		nil,
 		0,
 		0,
 		"active_delegation.pool_key_hash IS NOT NULL",

@@ -140,9 +140,11 @@ func TestAccountLifecycleMismatchesReportsNewlyRegisteredAndDeregistered(
 		ctx, cache, dingo, "preview", 500, 499, currentOutputs, now,
 	)
 
-	wantNewAddr, err := StakeAddressFromCredential(addrNewKey, 0)
+	wantNewAddr, err := StakeAddressFromCredential(
+		"preview", addrNewKey, 0)
 	require.NoError(t, err)
-	wantOldAddr, err := StakeAddressFromCredential(addrOldKey, 0)
+	wantOldAddr, err := StakeAddressFromCredential(
+		"preview", addrOldKey, 0)
 	require.NoError(t, err)
 
 	var sawNew, sawDeregistered bool
@@ -935,7 +937,9 @@ func TestNewKoiosClientCustomHostDropsBurstCap(t *testing.T) {
 }
 
 // TestNewKoiosClientRejectsUnsupportedNetworkWithOverride pins that supplying a
-// host does not bypass network validation.
+// host does not bypass network validation: StakeAddressFromCredential only
+// knows the supported networks' address network IDs, so an unvalidated
+// network would silently generate wrong-network stake addresses.
 func TestNewKoiosClientRejectsUnsupportedNetworkWithOverride(t *testing.T) {
 	_, err := NewKoiosClient(
 		"sanchonet",
@@ -947,34 +951,30 @@ func TestNewKoiosClientRejectsUnsupportedNetworkWithOverride(t *testing.T) {
 	require.Error(t, err)
 }
 
-// TestAccountComparisonRejectsMainnet pins that mainnet, which NewKoiosClient
-// accepts for node-parity, still cannot reach the reward/account comparison:
-// StakeAddressFromCredential hardcodes the testnet address network ID, so
-// mainnet would silently generate wrong-network stake addresses. Each entry
+// TestAccountComparisonRejectsUnsupportedNetwork pins that a network with no
+// Koios root cannot reach the reward/account comparison:
+// StakeAddressFromCredential has no address network ID for it. Each entry
 // point must refuse before touching its cache.
-func TestAccountComparisonRejectsMainnet(t *testing.T) {
+func TestAccountComparisonRejectsUnsupportedNetwork(t *testing.T) {
 	t.Parallel()
 
-	_, err := NewKoiosClient("mainnet", "", "", false, false)
-	require.NoError(t, err)
-
 	cachePath := filepath.Join(t.TempDir(), "cache.db")
-	_, err = Fetch(
+	_, err := Fetch(
 		context.Background(),
-		FetchConfig{Network: "mainnet", CachePath: cachePath},
+		FetchConfig{Network: "sanchonet", CachePath: cachePath},
 		slog.New(slog.DiscardHandler),
 	)
-	require.ErrorContains(t, err, "unsupported network \"mainnet\"")
+	require.ErrorContains(t, err, "unsupported network \"sanchonet\"")
 	_, err = Check(
 		context.Background(),
-		CheckConfig{Network: "mainnet", CachePath: cachePath},
+		CheckConfig{Network: "sanchonet", CachePath: cachePath},
 		slog.New(slog.DiscardHandler),
 	)
-	require.ErrorContains(t, err, "unsupported network \"mainnet\"")
+	require.ErrorContains(t, err, "unsupported network \"sanchonet\"")
 	_, err = CheckEpoch(
-		context.Background(), nil, nil, "mainnet", 300, 0, true, nil,
+		context.Background(), nil, nil, "sanchonet", 300, 0, true, nil,
 	)
-	require.ErrorContains(t, err, "unsupported network \"mainnet\"")
+	require.ErrorContains(t, err, "unsupported network \"sanchonet\"")
 	_, statErr := os.Stat(cachePath)
 	require.ErrorIs(t, statErr, os.ErrNotExist)
 }
@@ -1172,7 +1172,7 @@ func TestCreditedAccountRewardsSkipsUncredited(t *testing.T) {
 		"F8ADA2B9A94FDD95D35D482BDDDF5A66FFA5B330B539B4613255C1DC",
 	)
 
-	rows, credentialErrs, poolErrs := creditedAccountRewards([]*models.RewardAccountOutput{
+	rows, credentialErrs, poolErrs := creditedAccountRewards("preview", []*models.RewardAccountOutput{
 		{
 			StakingKey: unspendable,
 			RewardType: "member",
@@ -1212,7 +1212,7 @@ func TestCreditedAccountRewardsKeepsLeaderRewards(t *testing.T) {
 		t,
 		"F8ADA2B9A94FDD95D35D482BDDDF5A66FFA5B330B539B4613255C1DC",
 	)
-	rows, credentialErrs, poolErrs := creditedAccountRewards([]*models.RewardAccountOutput{
+	rows, credentialErrs, poolErrs := creditedAccountRewards("preview", []*models.RewardAccountOutput{
 		{
 			StakingKey: key,
 			RewardType: "leader",
@@ -1232,7 +1232,7 @@ func TestCreditedAccountRewardsKeepsLeaderRewards(t *testing.T) {
 func TestCreditedAccountRewardsReportsDecodeFailure(t *testing.T) {
 	t.Parallel()
 
-	rows, credentialErrs, poolErrs := creditedAccountRewards([]*models.RewardAccountOutput{
+	rows, credentialErrs, poolErrs := creditedAccountRewards("preview", []*models.RewardAccountOutput{
 		{
 			StakingKey: []byte{0x01, 0x02},
 			RewardType: "member",
@@ -1261,7 +1261,7 @@ func TestCreditedAccountRewardsReportsDecodeFailure(t *testing.T) {
 func TestCreditedAccountRewardsReportsUncreditedDecodeFailure(t *testing.T) {
 	t.Parallel()
 
-	rows, credentialErrs, poolErrs := creditedAccountRewards([]*models.RewardAccountOutput{
+	rows, credentialErrs, poolErrs := creditedAccountRewards("preview", []*models.RewardAccountOutput{
 		{
 			StakingKey: []byte{0x01, 0x02},
 			RewardType: "member",
@@ -1310,7 +1310,7 @@ func TestCreditedAccountRewardsCarriesPoolID(t *testing.T) {
 	t.Run("credited row carries its pool", func(t *testing.T) {
 		t.Parallel()
 
-		rows, credentialErrs, poolErrs := creditedAccountRewards([]*models.RewardAccountOutput{
+		rows, credentialErrs, poolErrs := creditedAccountRewards("preview", []*models.RewardAccountOutput{
 			{
 				StakingKey:  key,
 				PoolKeyHash: poolHash,
@@ -1328,7 +1328,7 @@ func TestCreditedAccountRewardsCarriesPoolID(t *testing.T) {
 	t.Run("absent pool key hash is not a failure", func(t *testing.T) {
 		t.Parallel()
 
-		rows, credentialErrs, poolErrs := creditedAccountRewards([]*models.RewardAccountOutput{
+		rows, credentialErrs, poolErrs := creditedAccountRewards("preview", []*models.RewardAccountOutput{
 			{
 				StakingKey: key,
 				RewardType: "member",
@@ -1345,7 +1345,7 @@ func TestCreditedAccountRewardsCarriesPoolID(t *testing.T) {
 	t.Run("malformed pool key hash is reported", func(t *testing.T) {
 		t.Parallel()
 
-		rows, credentialErrs, poolErrs := creditedAccountRewards([]*models.RewardAccountOutput{
+		rows, credentialErrs, poolErrs := creditedAccountRewards("preview", []*models.RewardAccountOutput{
 			{
 				StakingKey:  key,
 				PoolKeyHash: []byte{0x01, 0x02},
@@ -1364,7 +1364,7 @@ func TestCreditedAccountRewardsCarriesPoolID(t *testing.T) {
 	t.Run("uncredited row's pool is never decoded", func(t *testing.T) {
 		t.Parallel()
 
-		rows, credentialErrs, poolErrs := creditedAccountRewards([]*models.RewardAccountOutput{
+		rows, credentialErrs, poolErrs := creditedAccountRewards("preview", []*models.RewardAccountOutput{
 			{
 				StakingKey:  key,
 				PoolKeyHash: []byte{0x01, 0x02},

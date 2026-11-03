@@ -211,10 +211,10 @@ func TestAssembleLedgerPeerSnapshotStakeAndOrdering(t *testing.T) {
 	assert.Equal(t, "1/1", second.AccumulatedStake.String())
 }
 
-// TestAssembleLedgerPeerSnapshotRelaylessPoolCounted proves a pool without
-// relays is excluded from the result list yet still counts toward the
-// total-stake denominator.
-func TestAssembleLedgerPeerSnapshotRelaylessPoolCounted(t *testing.T) {
+// TestAssembleLedgerPeerSnapshotRelaylessPoolDenominators proves all-peer
+// snapshots retain the full ledger denominator while big-peer snapshots
+// renormalize over pools that advertise a usable relay.
+func TestAssembleLedgerPeerSnapshotRelaylessPoolDenominators(t *testing.T) {
 	t.Parallel()
 
 	khRelay := poolKeyHash28(0x01)
@@ -228,16 +228,25 @@ func TestAssembleLedgerPeerSnapshotRelaylessPoolCounted(t *testing.T) {
 		string(khNoRelay): 90,
 	} // total = 100
 
-	snapshot := assembleLedgerPeerSnapshot(
+	all := assembleLedgerPeerSnapshot(
 		atSlot(1),
 		stake,
 		pools,
 		olocalstatequery.LedgerPeerKindAll,
 	)
 
-	require.Len(t, snapshot.Pools, 1, "relayless pool is not listed")
+	require.Len(t, all.Pools, 1, "relayless pool is not listed")
 	// 10/100 = 1/10 proves the relayless pool's 90 stayed in the denominator.
-	assert.Equal(t, "1/10", snapshot.Pools[0].Detail.PoolStake.String())
+	assert.Equal(t, "1/10", all.Pools[0].Detail.PoolStake.String())
+
+	big := assembleLedgerPeerSnapshot(
+		atSlot(1),
+		stake,
+		pools,
+		olocalstatequery.LedgerPeerKindBig,
+	)
+	require.Len(t, big.Pools, 1)
+	assert.Equal(t, "1/1", big.Pools[0].Detail.PoolStake.String())
 }
 
 // --- big-peer selection ----------------------------------------------------
@@ -275,16 +284,14 @@ func TestAssembleLedgerPeerSnapshotBigPeerQuota(t *testing.T) {
 	assert.Equal(t, "19/20", big.Pools[0].Detail.PoolStake.String())
 }
 
-// TestAssembleLedgerPeerSnapshotBigPeerExactThreshold proves that a pool which
-// lands the cumulative stake exactly on the 0.9 quota terminates the big set:
-// pools after it (including same-stake or zero-stake relayed pools) are
-// excluded rather than admitted by an off-by-one boundary.
+// TestAssembleLedgerPeerSnapshotBigPeerExactThreshold proves the reference
+// quota includes a pool whose predecessors total exactly 0.9.
 func TestAssembleLedgerPeerSnapshotBigPeerExactThreshold(t *testing.T) {
 	t.Parallel()
 
 	khA := poolKeyHash28(0xA0) // 80%
 	khB := poolKeyHash28(0xB0) // 10% -> cumulative exactly 0.9
-	khC := poolKeyHash28(0xC0) // 10% -> must be excluded
+	khC := poolKeyHash28(0xC0) // prior cumulative is exactly 0.9
 	pools := []models.Pool{
 		poolWithRelays(khA, ipv4Relay("10.0.0.1", 3001)),
 		poolWithRelays(khB, ipv4Relay("10.0.0.2", 3001)),
@@ -299,9 +306,10 @@ func TestAssembleLedgerPeerSnapshotBigPeerExactThreshold(t *testing.T) {
 	big := assembleLedgerPeerSnapshot(
 		atSlot(1), stake, pools, olocalstatequery.LedgerPeerKindBig,
 	)
-	require.Len(t, big.Pools, 2, "exact 0.9 boundary terminates the big set")
+	require.Len(t, big.Pools, 3, "pool after exact 0.9 boundary is included")
 	// The second (boundary) pool's cumulative stake is exactly 9/10.
 	assert.Equal(t, "9/10", big.Pools[1].AccumulatedStake.String())
+	assert.Equal(t, "1/1", big.Pools[2].AccumulatedStake.String())
 
 	// LedgerPeerKindAll still returns all three relay-advertising pools.
 	all := assembleLedgerPeerSnapshot(
@@ -314,7 +322,7 @@ func TestAssembleLedgerPeerSnapshotBigPeerExactThreshold(t *testing.T) {
 
 // TestAssembleLedgerPeerSnapshotRelayKinds proves every stored relay shape is
 // mapped to the correct RelayAccessPoint kind, including multi-host (SRV) and
-// dual-stack single-host-address relays.
+// IPv4 precedence for dual-stack single-host-address relays.
 func TestAssembleLedgerPeerSnapshotRelayKinds(t *testing.T) {
 	t.Parallel()
 
@@ -330,7 +338,7 @@ func TestAssembleLedgerPeerSnapshotRelayKinds(t *testing.T) {
 		ipv6Relay("2001:db8::1", 3002),
 		models.PoolRegistrationRelay{Hostname: hostPort, Port: 3003},
 		models.PoolRegistrationRelay{Hostname: srvHost}, // port 0 -> SRV
-		// dual-stack single-host-address row -> two access points
+		// A dual-stack SingleHostAddr maps to IPv4, matching the reference.
 		models.PoolRegistrationRelay{Ipv4: &dualV4, Ipv6: &dualV6, Port: 3004},
 	)
 	stake := map[string]uint64{string(kh): 1}
@@ -345,7 +353,7 @@ func TestAssembleLedgerPeerSnapshotRelayKinds(t *testing.T) {
 	)
 	require.Len(t, snapshot.Pools, 1)
 	relays := snapshot.Pools[0].Detail.Relays
-	require.Len(t, relays, 6, "dual-stack row expands to two access points")
+	require.Len(t, relays, 5)
 
 	// IPv4
 	assert.Equal(t, olocalstatequery.RelayKindIPv4, relays[0].Kind)
@@ -374,13 +382,52 @@ func TestAssembleLedgerPeerSnapshotRelayKinds(t *testing.T) {
 	assert.Equal(t, srvHost, *relays[3].Domain)
 	assert.Nil(t, relays[3].Port, "SRV relay carries no port")
 
-	// Dual-stack expansion: IPv4 then IPv6, both with the row's port.
+	// Dual-stack SingleHostAddr chooses IPv4 rather than expanding the row.
 	assert.Equal(t, olocalstatequery.RelayKindIPv4, relays[4].Kind)
 	assert.Equal(t, "9.9.9.9", relays[4].IPv4.String())
 	assert.Equal(t, uint16(3004), *relays[4].Port)
-	assert.Equal(t, olocalstatequery.RelayKindIPv6, relays[5].Kind)
-	assert.Equal(t, "2001:db8::99", relays[5].IPv6.String())
-	assert.Equal(t, uint16(3004), *relays[5].Port)
+}
+
+func TestAssembleLedgerPeerSnapshotDropsUnusableAddressRelays(t *testing.T) {
+	t.Parallel()
+
+	khPortless := poolKeyHash28(0x01)
+	khNoAddress := poolKeyHash28(0x02)
+	khIPv6 := poolKeyHash28(0x03)
+	portlessIP := net.ParseIP("1.2.3.4").To4()
+	pools := []models.Pool{
+		poolWithRelays(
+			khPortless,
+			models.PoolRegistrationRelay{Ipv4: &portlessIP},
+		),
+		poolWithRelays(
+			khNoAddress,
+			models.PoolRegistrationRelay{Port: 3001},
+		),
+		poolWithRelays(khIPv6, ipv6Relay("2001:db8::1", 3001)),
+	}
+	stake := map[string]uint64{
+		string(khPortless):  3,
+		string(khNoAddress): 2,
+		string(khIPv6):      1,
+	}
+
+	all := assembleLedgerPeerSnapshot(
+		atSlot(1), stake, pools, olocalstatequery.LedgerPeerKindAll,
+	)
+	require.Len(t, all.Pools, 1)
+	assert.Equal(t, "1/6", all.Pools[0].Detail.PoolStake.String())
+	assert.Equal(
+		t,
+		olocalstatequery.RelayKindIPv6,
+		all.Pools[0].Detail.Relays[0].Kind,
+	)
+
+	big := assembleLedgerPeerSnapshot(
+		atSlot(1), stake, pools, olocalstatequery.LedgerPeerKindBig,
+	)
+	require.Len(t, big.Pools, 1)
+	assert.Equal(t, "1/1", big.Pools[0].Detail.PoolStake.String())
 }
 
 // TestAssembleLedgerPeerSnapshotMalformedPort proves a hostname relay with an

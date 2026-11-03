@@ -17,6 +17,7 @@ package ledger
 import (
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
+	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	"github.com/blinklabs-io/gouroboros/ledger/mary"
 )
 
@@ -25,9 +26,23 @@ import (
 // A Babbage output containing only ADA and no datum or reference script uses
 // the backwards-compatible two-element array, even when its transaction used
 // the post-Alonzo map form.
+//
+// A Byron output is stored in its Byron encoding, where the address is the
+// CBOR structure itself. Every post-Byron era carries it as a Shelley output
+// whose address is a byte string holding that structure
+// (translateTxOutByronToShelley in ByronTranslation.hs), so serving the stored
+// bytes would put a Byron address where a client decodes bytes.
 func localStateQueryTransactionOutput(
 	txOut ledger.TransactionOutput,
 ) ledger.TransactionOutput {
+	if byronOut, ok := txOut.(*byron.ByronTransactionOutput); ok {
+		return &mary.MaryTransactionOutput{
+			OutputAddress: byronOut.OutputAddress,
+			OutputAmount: mary.MaryTransactionOutputValue{
+				Amount: byronOut.OutputAmount,
+			},
+		}
+	}
 	babbageOut, ok := txOut.(*babbage.BabbageTransactionOutput)
 	if !ok || babbageOut.DatumOption != nil ||
 		babbageOut.TxOutScriptRef != nil ||

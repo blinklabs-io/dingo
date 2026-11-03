@@ -17,6 +17,7 @@ package blockfrost
 import (
 	"context"
 	"database/sql"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"net/http"
@@ -609,6 +610,70 @@ func TestNodeAdapterBlockListsRefuseUnretainedHistory(t *testing.T) {
 	})
 }
 
+// A Mithril-bootstrapped node applies no block at or below its anchor, so the
+// block lists refuse that range until the historical backfill has completed
+// and left block_nonce rows there.
+func TestNodeAdapterBlockListsAfterBackfillBelowAnchor(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	asc := PaginationParams{Count: 100, Page: 1, Order: PaginationOrderAsc}
+	hexOf := func(b byte) string { return hex.EncodeToString(fill32(b)) }
+	setup := func(t *testing.T, completed bool) *epochFixture {
+		t.Helper()
+		fx := newEpochFixture(t)
+		meta := fx.adapter.ledgerState.Database().Metadata()
+		require.NoError(t, meta.SetSyncState("mithril_ledger_slot", "100000", nil))
+		require.NoError(t, meta.SetBackfillCheckpoint(&models.BackfillCheckpoint{
+			Phase:     "metadata",
+			LastSlot:  100000,
+			Completed: completed,
+		}, nil))
+		return fx
+	}
+
+	t.Run("completed backfill serves history below the anchor", func(t *testing.T) {
+		t.Parallel()
+		fx := setup(t, true)
+		hashes, total, err := fx.adapter.EpochBlocks(ctx, 1, asc)
+		require.NoError(t, err)
+		assert.Equal(t, 3, total)
+		assert.Equal(t, []string{hexOf(0x11), hexOf(0x12), hexOf(0x13)}, hashes)
+	})
+
+	t.Run("epoch before the first indexed block is not retained", func(t *testing.T) {
+		t.Parallel()
+		fx := setup(t, true)
+		_, _, err := fx.adapter.EpochBlocks(ctx, 0, asc)
+		assert.ErrorIs(t, err, ErrHistoryNotRetained)
+	})
+
+	t.Run("pool blocks are served although Byron is unindexed", func(t *testing.T) {
+		t.Parallel()
+		fx := setup(t, true)
+		poolID := fx.addPool(t, fx.poolA, nil)
+		hashes, total, err := fx.adapter.PoolBlocks(ctx, poolID, asc)
+		require.NoError(t, err)
+		assert.Equal(t, 3, total)
+		assert.Equal(t, []string{hexOf(0x11), hexOf(0x13), hexOf(0x14)}, hashes)
+	})
+
+	t.Run("interrupted backfill is not retained", func(t *testing.T) {
+		t.Parallel()
+		fx := setup(t, false)
+		_, _, err := fx.adapter.EpochBlocks(ctx, 1, asc)
+		assert.ErrorIs(t, err, ErrHistoryNotRetained)
+	})
+
+	t.Run("backfill that wrote no rows is not retained", func(t *testing.T) {
+		t.Parallel()
+		fx := setup(t, true)
+		_, err := fx.raw.Exec(`DELETE FROM block_nonce WHERE slot <= 100000`)
+		require.NoError(t, err)
+		_, _, err = fx.adapter.EpochBlocks(ctx, 1, asc)
+		assert.ErrorIs(t, err, ErrHistoryNotRetained)
+	})
+}
+
 func TestNodeAdapterEpochStakes(t *testing.T) {
 	t.Parallel()
 	fx := newEpochFixture(t)
@@ -744,4 +809,95 @@ func TestNodeAdapterEpochOutputUsesLeiosExecutionSlot(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "7", info.Fees)
 	assert.Equal(t, "70", info.Output)
+}
+
+func TestNodeAdapterEpochOutputBeyondUint64(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		valid int
+	}{
+		{"valid_outputs", 500}, {"collateral_returns", 0}, {"combined", 250},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fx := newEpochFixture(t)
+			const amount = 45_000_000_000_000_000
+			for i := range 500 {
+				hash := make([]byte, 32)
+				hash[0] = 0xa0
+				binary.BigEndian.PutUint64(hash[24:], uint64(i+1))
+				tx := &models.Transaction{
+					Hash:  hash,
+					Slot:  100001,
+					Valid: i < tc.valid,
+				}
+				if tx.Valid {
+					tx.Outputs = []models.Utxo{{TxId: hash, Amount: amount}}
+				} else {
+					tx.Outputs = []models.Utxo{{TxId: hash, Amount: 1}}
+					tx.CollateralReturn = &models.Utxo{TxId: hash, OutputIdx: 1, Amount: amount}
+				}
+				insertAdapterTransaction(t, fx.raw, tx)
+			}
+			fx.adapter.ledgerState.SetTipForTesting(
+				ochainsync.Tip{
+					Point: ocommon.Point{
+						Slot: 110001,
+						Hash: fill32(0xef),
+					},
+					BlockNumber: 5,
+				},
+			)
+			for _, route := range []string{"/api/v0/epochs/1", "/api/v0/epochs/latest"} {
+				response := get(t, fx.adapter, route)
+				require.Equal(
+					t,
+					http.StatusOK,
+					response.Code,
+					"epoch output flow exceeds uint64: %s",
+					response.Body.String(),
+				)
+				var body map[string]any
+				require.NoError(t, jsonDecode(response, &body))
+				assert.Equal(
+					t,
+					"22500000000000000650",
+					body["output"],
+					"epoch output flow must remain exact",
+				)
+				assert.Equal(t, "35", body["fees"])
+			}
+		})
+	}
+}
+
+func TestNodeAdapterEpochOutputRejectsNegativeSubtotal(t *testing.T) {
+	t.Parallel()
+	for _, valid := range []bool{true, false} {
+		name := "collateral_returns"
+		if valid {
+			name = "valid_outputs"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			fx := newEpochFixture(t)
+			if valid {
+				_, err := fx.raw.Exec(
+					`UPDATE utxo SET amount = '-10000' WHERE transaction_id IN (SELECT id FROM "transaction" WHERE valid = TRUE AND slot < 172800)`,
+				)
+				require.NoError(t, err)
+			} else {
+				_, err := fx.raw.Exec(`UPDATE utxo SET amount = '-1' WHERE collateral_return_for_tx_id IS NOT NULL`)
+				require.NoError(t, err)
+			}
+			response := get(t, fx.adapter, "/api/v0/epochs/1")
+			require.Equal(
+				t,
+				http.StatusInternalServerError,
+				response.Code,
+				"negative output subtotal must be rejected even when another subtotal is positive",
+			)
+		})
+	}
 }

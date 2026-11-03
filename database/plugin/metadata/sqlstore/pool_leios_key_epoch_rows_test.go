@@ -99,19 +99,6 @@ func classifyLeiosKeyStatement(t *testing.T, query string) leiosKeyStatement {
 	return ""
 }
 
-// stillUnbounded lists the statements whose work is not yet independent of the
-// pool's in-epoch certificates.
-var stillUnbounded = map[leiosKeyStatement]string{
-	// The remaining unbounded lookup: the only index that serves it orders
-	// added_slot before certificate_id, so finding the latest snapshot
-	// row walks every live row added since the epoch started.
-	stmtLatestSnapshot: "snapshot row is found by a walk over live rows",
-	// pool_retirement is indexed by pool_id alone, so every statement reads
-	// all of the pool's retirements.
-	stmtLatestRetirement:   "pool_retirement has no (pool_id, added_slot) index",
-	stmtLatestRetireBefore: "pool_retirement has no (pool_id, added_slot) index",
-}
-
 type statementWork struct {
 	statement leiosKeyStatement
 	visited   int64
@@ -321,13 +308,6 @@ func TestPoolLeiosKeyEpochRowsVisitedIndependentOfInEpochRegistrations(t *testin
 				slices.Sorted(maps.Keys(large)),
 			)
 			for statement, visited := range small {
-				if reason, ok := stillUnbounded[statement]; ok {
-					t.Logf(
-						"%s excluded (%s): %d rows at n=10, %d at n=300",
-						statement, reason, visited, large[statement],
-					)
-					continue
-				}
 				require.Equalf(
 					t, visited, large[statement],
 					"%s visited %d rows at n=10 and %d at n=300",

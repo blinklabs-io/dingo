@@ -1212,6 +1212,17 @@ WHERE pool_key_hash = ?`,
 	return decodeOpCertSequence(sequence.Int64), true, nil
 }
 
+// latestPoolOpCertSequenceAfterSQL is the statement LatestPoolOpCertSequenceAfter
+// issues. MAX(sequence) stays the only aggregate so SQLite can answer it from
+// idx_pool_opcert_sequence_pool_sequence; a NULL result means no matching row.
+// The unary plus on slot has the same purpose as in
+// latestPoolOpCertSequenceAtOrBeforeSQL: without planner statistics SQLite
+// otherwise takes the pool_slot range, which visits every row after the slot.
+const latestPoolOpCertSequenceAfterSQL = `-- name: GetLatestPoolOpCertSequenceAfter :one
+SELECT MAX(sequence)
+FROM pool_opcert_sequence
+WHERE pool_key_hash = ? AND +slot > ?`
+
 // LatestPoolOpCertSequenceAfter returns the highest sequence recorded for a
 // pool after afterSlot. A Mithril-restored ledger uses this to distinguish
 // replayed counter history from rows imported at its trust boundary.
@@ -1224,19 +1235,15 @@ func (s *Store) LatestPoolOpCertSequenceAfter(
 	if err != nil {
 		return 0, false, err
 	}
-	var sequence int64
-	var count int64
-	err = db.QueryRowContext(ctx, `-- name: GetLatestPoolOpCertSequenceAfter :one
-SELECT COALESCE(MAX(sequence), 0), COUNT(*)
-FROM pool_opcert_sequence
-WHERE pool_key_hash = ? AND slot > ?`,
+	var sequence sql.NullInt64
+	err = db.QueryRowContext(ctx, s.dialect.Rebind(latestPoolOpCertSequenceAfterSQL),
 		poolKeyHash.Bytes(),
 		afterSlot,
-	).Scan(&sequence, &count)
-	if err != nil || count == 0 {
+	).Scan(&sequence)
+	if err != nil || !sequence.Valid {
 		return 0, false, err
 	}
-	return decodeOpCertSequence(sequence), true, nil
+	return decodeOpCertSequence(sequence.Int64), true, nil
 }
 
 // PoolOpCertSequencesExistAtSlot reports whether any pool_opcert_sequence row
@@ -1270,6 +1277,21 @@ LIMIT 1`,
 	return true, nil
 }
 
+// latestPoolOpCertSequenceAtOrBeforeSQL is the statement LatestPoolOpCertSequenceAtOrBefore
+// issues. MAX(sequence) stays the only aggregate so SQLite can answer it from
+// idx_pool_opcert_sequence_pool_sequence; a NULL result means no matching row.
+// The unary plus on slot keeps the planner off the pool_slot index, whose
+// range scan visits every earlier row of the pool before MAX can be taken,
+// and on the sequence index, which descends from the pool's highest sequence
+// and stops at the first row inside the slot bound. Counters rise with slot
+// on a valid chain, so that costs one row per later block of the pool: cheap
+// for the near-tip slots callers pass, linear for a slot deep in history.
+// It is a no-op on every dialect's semantics.
+const latestPoolOpCertSequenceAtOrBeforeSQL = `-- name: GetLatestPoolOpCertSequenceAtOrBefore :one
+SELECT MAX(sequence)
+FROM pool_opcert_sequence
+WHERE pool_key_hash = ? AND +slot <= ?`
+
 func (s *Store) LatestPoolOpCertSequenceAtOrBefore(
 	poolKeyHash lcommon.PoolKeyHash,
 	slot uint64,
@@ -1283,20 +1305,28 @@ func (s *Store) LatestPoolOpCertSequenceAtOrBefore(
 	if err != nil {
 		return 0, false, err
 	}
-	var sequence int64
-	var count int64
-	err = db.QueryRowContext(ctx, `-- name: GetLatestPoolOpCertSequenceAtOrBefore :one
-SELECT COALESCE(MAX(sequence), 0), COUNT(*)
-FROM pool_opcert_sequence
-WHERE pool_key_hash = ? AND slot <= ?`,
+	var sequence sql.NullInt64
+	err = db.QueryRowContext(ctx, s.dialect.Rebind(latestPoolOpCertSequenceAtOrBeforeSQL),
 		poolKeyHash.Bytes(),
 		slotValue,
-	).Scan(&sequence, &count)
-	if err != nil || count == 0 {
+	).Scan(&sequence)
+	if err != nil || !sequence.Valid {
 		return 0, false, err
 	}
-	return decodeOpCertSequence(sequence), true, nil
+	return decodeOpCertSequence(sequence.Int64), true, nil
 }
+
+// latestPoolOpCertSequenceInRangeSQL is the statement LatestPoolOpCertSequenceInRange
+// issues. MAX(sequence) stays the only aggregate so SQLite can answer it from
+// idx_pool_opcert_sequence_pool_sequence; a NULL result means no matching row.
+// The unary plus on slot has the same purpose as in
+// latestPoolOpCertSequenceAtOrBeforeSQL: a Mithril-restored ledger passes its
+// boundary as the lower bound, so the pool_slot range would visit every row
+// since the boundary.
+const latestPoolOpCertSequenceInRangeSQL = `-- name: GetLatestPoolOpCertSequenceInRange :one
+SELECT MAX(sequence)
+FROM pool_opcert_sequence
+WHERE pool_key_hash = ? AND +slot >= ? AND +slot <= ?`
 
 func (s *Store) LatestPoolOpCertSequenceInRange(
 	poolKeyHash lcommon.PoolKeyHash,
@@ -1319,20 +1349,16 @@ func (s *Store) LatestPoolOpCertSequenceInRange(
 	if err != nil {
 		return 0, false, err
 	}
-	var sequence int64
-	var count int64
-	err = db.QueryRowContext(ctx, `-- name: GetLatestPoolOpCertSequenceInRange :one
-SELECT COALESCE(MAX(sequence), 0), COUNT(*)
-FROM pool_opcert_sequence
-WHERE pool_key_hash = ? AND slot >= ? AND slot <= ?`,
+	var sequence sql.NullInt64
+	err = db.QueryRowContext(ctx, s.dialect.Rebind(latestPoolOpCertSequenceInRangeSQL),
 		poolKeyHash.Bytes(),
 		startValue,
 		endValue,
-	).Scan(&sequence, &count)
-	if err != nil || count == 0 {
+	).Scan(&sequence)
+	if err != nil || !sequence.Valid {
 		return 0, false, err
 	}
-	return decodeOpCertSequence(sequence), true, nil
+	return decodeOpCertSequence(sequence.Int64), true, nil
 }
 
 // LatestPoolOpCertSequencesSQL is the statement LatestPoolOpCertSequences
@@ -1950,23 +1976,37 @@ func (s *Store) GetActivePoolKeyHashes(
 	if err != nil {
 		return nil, fmt.Errorf("GetActivePoolKeyHashes: resolve db: %w", err)
 	}
-	slot, err := currentTipSlot(ctx, db)
+	slot, ok, err := activePoolTipSlot(ctx, db)
 	if err != nil {
 		return nil, err
 	}
-	if slot == 0 {
-		var exists bool
-		if err := db.QueryRowContext(
-			ctx,
-			"SELECT EXISTS(SELECT 1 FROM tip WHERE id = 1)",
-		).Scan(&exists); err != nil {
-			return nil, err
-		}
-		if !exists {
-			return [][]byte{}, nil
-		}
+	if !ok {
+		return [][]byte{}, nil
 	}
 	return s.GetActivePoolKeyHashesAtSlot(slot, txn)
+}
+
+// activePoolTipSlot returns the slot the active pool set is evaluated at.
+// ok is false when no tip has been recorded, in which case no pool is active.
+func activePoolTipSlot(
+	ctx context.Context,
+	db queryer,
+) (slot uint64, ok bool, err error) {
+	slot, err = currentTipSlot(ctx, db)
+	if err != nil {
+		return 0, false, err
+	}
+	if slot != 0 {
+		return slot, true, nil
+	}
+	var exists bool
+	if err := db.QueryRowContext(
+		ctx,
+		"SELECT EXISTS(SELECT 1 FROM tip WHERE id = 1)",
+	).Scan(&exists); err != nil {
+		return 0, false, err
+	}
+	return 0, exists, nil
 }
 
 func (s *Store) GetActivePoolKeyHashesPage(
@@ -2510,6 +2550,96 @@ func (s *Store) GetStakeByPools(
 	return s.getStakeByPoolsDirect(poolKeyHashes, txn)
 }
 
+// GetActivePoolStakeTotal returns the total delegated stake across every
+// active pool. The live aggregate is summed in one database-side statement;
+// when it is incomplete the total is rebuilt from the per-pool path, which
+// falls back to the UTxO table exactly as GetStakeByPools does.
+func (s *Store) GetActivePoolStakeTotal(txn types.Txn) (uint64, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return 0, err
+	}
+	slot, ok, err := activePoolTipSlot(ctx, db)
+	if err != nil {
+		return 0, err
+	}
+	if !ok {
+		return 0, nil
+	}
+	epochID, err := activePoolEpochAtSlots(ctx, db, slot, slot)
+	if err != nil {
+		return 0, err
+	}
+	var delegators, withStake int64
+	var raw any
+	err = db.QueryRowContext(ctx,
+		activePoolKeyHashesAtSlotCTE+`
+SELECT COUNT(*), COUNT(NULLIF(reward_live_stake.utxo_stake, '')), `+
+			s.wideSumExpr("NULLIF(reward_live_stake.utxo_stake, '')")+`
+FROM account
+LEFT JOIN reward_live_stake
+  ON reward_live_stake.credential_tag = account.credential_tag
+ AND reward_live_stake.staking_key = account.staking_key
+ AND reward_live_stake.calculation_version = ?
+WHERE account.active = TRUE AND account.pool IN (
+SELECT p.pool_key_hash `+activePoolKeyHashesAtSlotFromSQL+`)`,
+		slot, slot, models.RewardStakeCalculationVersion, epochID,
+	).Scan(&delegators, &withStake, &raw)
+	if err == nil && delegators == withStake {
+		total, err := poolStakeSumUint64(raw, nil)
+		if err != nil {
+			return 0, err
+		}
+		return total, nil
+	}
+	if err != nil &&
+		!strings.Contains(strings.ToLower(err.Error()), "no such table") {
+		return 0, err
+	}
+	poolKeyHashes, err := s.GetActivePoolKeyHashes(txn)
+	if err != nil {
+		return 0, err
+	}
+	stakes, _, err := s.GetStakeByPools(poolKeyHashes, txn)
+	if err != nil {
+		return 0, err
+	}
+	var total uint64
+	for _, stake := range stakes {
+		if ^uint64(0)-total < stake {
+			return 0, errors.New("active pool stake total overflow")
+		}
+		total += stake
+	}
+	return total, nil
+}
+
+// poolStakeSumUint64 decodes a database-side SUM of coin amounts. A total
+// outside uint64 is an error rather than a wrapped value; pool names the pool
+// in the message when the sum is per pool.
+func poolStakeSumUint64(raw any, pool []byte) (uint64, error) {
+	text, err := signedAmountText(raw)
+	if err != nil {
+		return 0, err
+	}
+	if text == "" {
+		return 0, nil
+	}
+	total, err := parseBigInt("pool stake amount", text)
+	if err != nil {
+		return 0, err
+	}
+	if total.Sign() < 0 || !total.IsUint64() {
+		if pool == nil {
+			return 0, fmt.Errorf(
+				"active pool stake total %s outside uint64", total,
+			)
+		}
+		return 0, fmt.Errorf("pool stake overflow for %x", pool)
+	}
+	return total.Uint64(), nil
+}
+
 func emptyPoolStakeMaps(
 	poolKeyHashes [][]byte,
 ) (map[string]uint64, map[string]uint64) {
@@ -2538,40 +2668,39 @@ func (s *Store) getStakeByPoolsFromLive(
 			args = append(args, hash)
 		}
 		rows, err := db.QueryContext(ctx, `
-SELECT account.pool, reward_live_stake.utxo_stake
+SELECT account.pool, COUNT(*),
+       COUNT(NULLIF(reward_live_stake.utxo_stake, '')), `+
+			s.wideSumExpr("NULLIF(reward_live_stake.utxo_stake, '')")+`
 FROM account
 LEFT JOIN reward_live_stake
   ON reward_live_stake.credential_tag = account.credential_tag
  AND reward_live_stake.staking_key = account.staking_key
  AND reward_live_stake.calculation_version = ?
-WHERE account.active = TRUE AND account.pool IN (`+bindPlaceholders(len(chunk))+`)`, args...)
+WHERE account.active = TRUE AND account.pool IN (`+bindPlaceholders(len(chunk))+`)
+GROUP BY account.pool`, args...)
 		if err != nil {
 			return false, err
 		}
 		complete := true
 		for rows.Next() {
 			var hash []byte
-			var raw sql.NullString
-			if err := rows.Scan(&hash, &raw); err != nil {
+			var count, withStake int64
+			var raw any
+			if err := rows.Scan(&hash, &count, &withStake, &raw); err != nil {
 				rows.Close()
 				return false, err
 			}
-			key := string(hash)
-			delegators[key]++
-			if !raw.Valid || raw.String == "" {
-				complete = false
-				continue
-			}
-			amount, err := parseUint64("pool stake amount", raw.String)
+			stake, err := poolStakeSumUint64(raw, hash)
 			if err != nil {
 				rows.Close()
 				return false, err
 			}
-			if ^uint64(0)-stakes[key] < amount {
-				rows.Close()
-				return false, fmt.Errorf("pool stake overflow for %x", hash)
+			key := string(hash)
+			delegators[key] = uint64(count)
+			stakes[key] = stake
+			if count != withStake {
+				complete = false
 			}
-			stakes[key] += amount
 		}
 		if err := rows.Err(); err != nil {
 			rows.Close()

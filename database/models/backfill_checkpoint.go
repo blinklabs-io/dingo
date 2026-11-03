@@ -21,11 +21,13 @@ import "time"
 // stored blocks are replayed to populate transaction metadata. The
 // checkpoint enables resumable progress if the process is interrupted.
 type BackfillCheckpoint struct {
-	ID         uint
-	Phase      string // "metadata"
-	LastSlot   uint64 // Last successfully processed slot
-	TotalSlots uint64 // Total slots to process (for progress)
-	StartedAt  time.Time
-	UpdatedAt  time.Time
-	Completed  bool
+	ID            uint
+	Phase         string // "metadata"
+	LastSlot      uint64 // Last successfully processed slot
+	LastIndexID   *uint64
+	LastBlockHash []byte
+	TotalSlots    uint64 // Total slots to process (for progress)
+	StartedAt     time.Time
+	UpdatedAt     time.Time
+	Completed     bool
 }

@@ -220,6 +220,14 @@ func testGetPoolDoesNotCorruptConnection(
 		require.NotNil(t, got)
 		require.Len(t, got.Registration, 1)
 		require.Len(t, got.Registration[0].Owners, 1)
+		projected, err := store.GetPoolVrfState(keyHash, readTxn)
+		require.NoError(t, err)
+		require.NotNil(t, projected)
+		require.Equal(t, got.PoolKeyHash, projected.PoolKeyHash)
+		require.Equal(t, got.VrfKeyHash, projected.VrfKeyHash)
+		require.Len(t, projected.Registration, 1)
+		require.Equal(t, got.Registration[0].VrfKeyHash,
+			projected.Registration[0].VrfKeyHash)
 	}
 }
 

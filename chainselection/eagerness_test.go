@@ -17,6 +17,7 @@ package chainselection
 import (
 	"context"
 	"fmt"
+	"iter"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -420,6 +421,8 @@ func TestAwaitEagernessLimitAllowsUntrackedSenderWhenInactive(t *testing.T) {
 // Once the candidates have shared a point, a later loss of that point from a
 // window must not hand the limit to the applied ledger tip: that tip follows
 // the selected peer's blocks, so the cap would move with the chain it bounds.
+// The applied tip only matters through the immutable tip it implies, which is
+// still at the shared point here.
 func TestAwaitEagernessLimitIgnoresAppliedTipOnceAnchored(t *testing.T) {
 	t.Parallel()
 	var applied atomic.Uint64
@@ -441,7 +444,7 @@ func TestAwaitEagernessLimitIgnoresAppliedTipOnceAnchored(t *testing.T) {
 	require.False(t, cs.EagernessLimit().Intersected)
 	require.Equal(t, uint64(10+loeTestK), cs.EagernessLimit().BlockNumber)
 
-	applied.Store(40 - loeTestK)
+	applied.Store(10 + loeTestK)
 	assert.False(t, cs.withinEagernessLimit(a, 40, appliedTip))
 	assert.Equal(t, uint64(10+loeTestK), cs.EagernessLimit().BlockNumber)
 }
@@ -642,4 +645,121 @@ func TestCandidateFragmentContainsPoint(t *testing.T) {
 	assert.False(t, f.containsPoint(loeTip("c", 0).Point))
 	assert.False(t, f.containsPoint(ocommon.Point{Slot: 450, Hash: []byte("c4")}))
 	assert.False(t, CandidateFragment{}.containsPoint(loeTip("c", 1).Point))
+}
+
+// Candidates shared a point once, then one peer's fragment stayed behind while
+// the local chain advanced past it. A fragment that ends below the immutable
+// tip cannot take part in a selection, so it must not keep the limit at the
+// stale shared point.
+func TestLimitOnEagernessFragmentBelowImmutableTipReleasesStaleAnchor(
+	t *testing.T,
+) {
+	t.Parallel()
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:   true,
+		SecurityParam: loeTestK,
+	})
+	a := newTestConnectionId(1)
+	b := newTestConnectionId(2)
+	feedLoEChain(cs, a, "c", 1, 10)
+	feedLoEChain(cs, b, "c", 1, 10)
+	require.Equal(t, uint64(10+loeTestK), cs.EagernessLimit().BlockNumber)
+	feedLoEChain(cs, a, "a", 11, 40)
+	feedLoEChain(cs, b, "b", 11, 12)
+	cs.SetLocalTip(loeTip("c", 10))
+	appliedTip := func() ochainsync.Tip { return loeTip("a", 38) }
+
+	assert.True(t, cs.withinEagernessLimit(a, 40+loeTestK, appliedTip),
+		"the limit stayed at the anchor the local chain had left behind")
+	assert.False(t, cs.withinEagernessLimit(a, 40+loeTestK+1, appliedTip))
+}
+
+// A fragment that is still within k of the local tip but shares no point with
+// the others keeps the limit from falling below the immutable tip.
+func TestLimitOnEagernessFallbackNeverFallsBelowImmutableTip(t *testing.T) {
+	t.Parallel()
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:   true,
+		SecurityParam: loeTestK,
+	})
+	a := newTestConnectionId(1)
+	b := newTestConnectionId(2)
+	feedLoEChain(cs, a, "c", 1, 10)
+	feedLoEChain(cs, b, "c", 1, 10)
+	require.Equal(t, uint64(10+loeTestK), cs.EagernessLimit().BlockNumber)
+	feedLoEChain(cs, a, "a", 11, 40)
+	feedLoEChain(cs, b, "b", 11, 36)
+	cs.SetLocalTip(loeTip("c", 10))
+	appliedTip := func() ochainsync.Tip { return loeTip("a", 38) }
+
+	assert.True(t, cs.withinEagernessLimit(a, 38, appliedTip),
+		"the limit fell below the applied immutable tip plus k")
+	assert.False(t, cs.withinEagernessLimit(a, 39, appliedTip),
+		"a fragment sharing no point with the others must still hold the cap")
+}
+
+// Candidates that still retain their fork point intersect there even when it
+// is below the immutable tip. The limit must not fall below the immutable tip
+// on that path either, or it would sit below the applied tip.
+func TestLimitOnEagernessIntersectionNeverFallsBelowImmutableTip(t *testing.T) {
+	t.Parallel()
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:   true,
+		SecurityParam: loeTestK,
+	})
+	a := newTestConnectionId(1)
+	b := newTestConnectionId(2)
+	feedLoEChain(cs, a, "c", 1, 20)
+	feedLoEChain(cs, b, "c", 1, 20)
+	feedLoEChain(cs, a, "a", 21, 30)
+	feedLoEChain(cs, b, "b", 21, 25)
+	cs.SetLocalTip(loeTip("c", 10))
+	appliedTip := func() ochainsync.Tip { return loeTip("a", 30) }
+
+	assert.True(t, cs.withinEagernessLimit(a, 30, appliedTip),
+		"the limit fell below the applied immutable tip plus k")
+	assert.False(t, cs.withinEagernessLimit(a, 31, appliedTip))
+}
+
+func TestLimitOnEagernessForcedSenderDoesNotAdmitOldPeer(t *testing.T) {
+	t.Parallel()
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:   true,
+		SecurityParam: loeTestK,
+	})
+	sender := newTestConnectionId(1)
+	oldPeer := newTestConnectionId(2)
+	feedLoEChain(cs, sender, "sender", 1, 40)
+	feedLoEChain(cs, oldPeer, "old", 1, 12)
+	cs.SetLocalTip(loeTip("base", 10))
+	cs.SetConnectionEligible(sender, false)
+
+	peerTips := cs.peerTips
+	require.NotNil(t, peerTips[sender])
+	require.NotNil(t, peerTips[oldPeer])
+	orderedPeers := func(order []ouroboros.ConnectionId) iter.Seq2[ouroboros.ConnectionId, *PeerChainTip] {
+		return func(yield func(ouroboros.ConnectionId, *PeerChainTip) bool) {
+			for _, connId := range order {
+				if !yield(connId, peerTips[connId]) {
+					return
+				}
+			}
+		}
+	}
+	include := sender
+	// The sender's forced inclusion must not leak into the old peer's filter,
+	// regardless of the order in which the selector visits candidates.
+	for _, order := range [][]ouroboros.ConnectionId{
+		{sender, oldPeer},
+		{oldPeer, sender},
+	} {
+		limit := cs.computeEagernessLimitFromPeersLocked(
+			&include,
+			loeTip("sender", 38),
+			orderedPeers(order),
+		)
+		require.True(t, limit.Intersected)
+		assert.Equal(t, uint64(40+loeTestK), limit.BlockNumber)
+		assert.Equal(t, loeTip("sender", 40).Point, limit.Point)
+	}
 }

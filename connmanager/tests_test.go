@@ -17,6 +17,7 @@ package connmanager
 import (
 	"errors"
 	"net"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
@@ -38,6 +39,7 @@ func FuzzNormalizePeerAddr(f *testing.F) {
 	f.Add("127.000.000.001:3001")
 	f.Add("[0:0:0:0:0:0:0:1]:3001")
 	f.Add("malformed:address:with:colons")
+	f.Add("[fe80::1%Eth0]:3001")
 
 	f.Fuzz(func(t *testing.T, peerAddr string) {
 		normalized := NormalizePeerAddr(peerAddr)
@@ -67,7 +69,22 @@ func FuzzNormalizePeerAddr(f *testing.F) {
 		if port != inputPort {
 			t.Fatalf("normalized port = %q, want %q", port, inputPort)
 		}
-		if net.ParseIP(inputHost) == nil && host != strings.ToLower(inputHost) {
+		if net.ParseIP(inputHost) != nil {
+			return
+		}
+		// A scoped IPv6 literal is an address, and its zone is an interface
+		// name that lowercasing would change.
+		if addr, err := netip.ParseAddr(inputHost); err == nil {
+			if host != addr.String() {
+				t.Fatalf(
+					"normalized scoped address = %q, want %q",
+					host,
+					addr.String(),
+				)
+			}
+			return
+		}
+		if host != strings.ToLower(inputHost) {
 			t.Fatalf(
 				"normalized hostname = %q, want %q",
 				host,
@@ -798,6 +815,24 @@ func TestNormalizePeerAddr(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			assert.Equal(t, test.expected, NormalizePeerAddr(test.input))
+		})
+	}
+}
+
+func TestNormalizePeerAddr_ScopedIPv6(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"[FE80::0:1%eth0]:3001", "[fe80::1%eth0]:3001"},
+		// Interface names are case-sensitive, so the zone is kept as given.
+		{"[fe80::1%Eth0]:3001", "[fe80::1%Eth0]:3001"},
+	}
+	for _, test := range tests {
+		t.Run(test.input, func(t *testing.T) {
 			assert.Equal(t, test.expected, NormalizePeerAddr(test.input))
 		})
 	}

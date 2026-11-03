@@ -208,7 +208,7 @@ var koiosBaseURLs = map[string]string{
 // KoiosEpochInfoResp is the Koios /epoch_info response shape, covering every
 // field in the documented schema (components/schemas/epoch_info in
 // https://api.koios.rest/koiosapi.yaml).
-// Note: pool_cnt and delegator_cnt are not returned by preview/preprod and are omitted.
+// Note: pool_cnt and delegator_cnt are not returned by Koios and are omitted.
 // active_stake, fees, and total_rewards are documented nullable on early
 // epochs (pre-staking, pre-rewards). out_sum and avg_blk_reward are not
 // documented nullable but are defensively typed as pointers because Koios has
@@ -405,26 +405,21 @@ func validateKoiosClientNetwork(network string) error {
 }
 
 // validateKoiosNetwork rejects any network the reward/account comparison
-// doesn't support (currently "preview"/"preprod" only). Called by Fetch (the
-// live-fetch path) and by Check/CheckEpoch (the cache-only path, which never
-// constructs a KoiosClient and so would otherwise let an unsupported network
-// — e.g. "mainnet" — reach compareEpochAccounts/StakeAddressFromCredential
-// unvalidated; StakeAddressFromCredential hardcodes the testnet address
-// network ID since preview/preprod are the only networks this comparison
-// ever validates against, so an unvalidated "mainnet" would silently
-// generate wrong-network stake addresses instead of erroring).
-//
-// mainnet has a Koios root for node-parity's from-genesis comparison, which
-// builds no stake addresses, so it is refused here explicitly rather than by
-// its absence from koiosBaseURLs.
+// doesn't support. Called by Fetch (the live-fetch path) and by
+// Check/CheckEpoch (the cache-only path, which never constructs a KoiosClient
+// and so would otherwise let an unsupported network reach
+// compareEpochAccounts/StakeAddressFromCredential unvalidated, deriving stake
+// addresses with the wrong network ID instead of erroring). Every network
+// with a Koios root is comparable, so this defers to the client check.
 func validateKoiosNetwork(network string) error {
-	if network == "mainnet" {
-		return fmt.Errorf(
-			"unsupported network %q; supported: preview, preprod",
-			network,
-		)
-	}
 	return validateKoiosClientNetwork(network)
+}
+
+// ValidateNetwork reports whether network is one koios-parity can validate
+// against. The node wiring and the CLI use it so the supported set has a single
+// definition.
+func ValidateNetwork(network string) error {
+	return validateKoiosNetwork(network)
 }
 
 // NewKoiosClient creates a client for the given network.
