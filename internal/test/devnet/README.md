@@ -737,7 +737,7 @@ Reference-conformance scenario
 
 `TestPlutusBoundedArgsConformance` runs at the protocol version the Shelley
 genesis starts at when that is 10 or 11, and skips at 12 or later.
-`run-tests.sh` accepts `DEVNET_SPEC_OVERRIDE=./<spec>.yaml`
+`run-tests.sh` accepts `DEVNET_SPEC_OVERRIDE=./testnet*.yaml`
 to select a spec file in this directory other than the stock ones, and
 rejects any other value; `testnet-accelerated-pv11.yaml`
 starts at protocol version 11.

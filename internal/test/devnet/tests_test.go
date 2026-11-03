@@ -1047,6 +1047,9 @@ func TestRunTestsRejectsInvalidSpecOverride(t *testing.T) {
 		"../devnet/testnet.yaml",
 		filepath.Join(devnetDir, "testnet.yaml"),
 		"./",
+		// Files in the directory that are not network specs.
+		"./README.md",
+		"./docker-compose.yml",
 	} {
 		t.Run(override, func(t *testing.T) {
 			result := runFakeDevnetWithEnv(t, 0, false, map[string]string{

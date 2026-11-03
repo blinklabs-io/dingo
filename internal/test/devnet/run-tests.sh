@@ -196,8 +196,11 @@ fi
 if [[ -n "${DEVNET_SPEC_OVERRIDE:-}" ]]; then
   # The spec is mounted from this directory by a ./-relative name, so a
   # path elsewhere would reach the configurator as a file it cannot read.
+  # Every network spec here is named testnet*.yaml; any other file in the
+  # directory would reach the spec loader as a document it cannot parse.
   spec_name="${DEVNET_SPEC_OVERRIDE#./}"
-  if [[ -z "${spec_name}" || "${spec_name}" == */* || ! -f "${SCRIPT_DIR}/${spec_name}" ]]; then
+  if [[ -z "${spec_name}" || "${spec_name}" == */* || "${spec_name}" != testnet*.yaml ||
+    ! -f "${SCRIPT_DIR}/${spec_name}" ]]; then
     echo "[run-tests] ERROR: DEVNET_SPEC_OVERRIDE=${DEVNET_SPEC_OVERRIDE} is not a spec file in ${SCRIPT_DIR}" >&2
     exit 1
   fi
