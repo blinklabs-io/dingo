@@ -52,6 +52,14 @@ type localRuleValidationError struct {
 func (e *localRuleValidationError) Error() string { return e.err.Error() }
 func (e *localRuleValidationError) Unwrap() error { return e.err }
 
+type validationErrorWithCause struct {
+	message string
+	cause   error
+}
+
+func (e validationErrorWithCause) Error() string { return e.message }
+func (e validationErrorWithCause) Unwrap() error { return e.cause }
+
 // IsSemanticRuleValidationError reports whether an error came from a
 // deterministic era validation rule. Callers use the rule boundary rather
 // than concrete error types so new ledger verdicts inherit the right
@@ -619,9 +627,10 @@ func validatePlutusOutcome(tx lcommon.Transaction, phase2Err error) error {
 		return phase2Err
 	}
 	if phase2Err == nil {
-		return errors.New(
-			"transaction declared invalid but Plutus scripts succeeded",
-		)
+		return validationErrorWithCause{
+			message: "transaction declared invalid but Plutus scripts succeeded",
+			cause:   lcommon.UnexpectedPlutusScriptSuccessError{},
+		}
 	}
 	if _, ok := errors.AsType[conway.PlutusScriptFailedError](phase2Err); ok {
 		return nil
