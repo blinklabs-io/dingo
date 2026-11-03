@@ -566,6 +566,11 @@ func verifyBlockHeaderHex(
 			err,
 		)
 	}
+	// VerifyBlock checks the leader VRF and, for Shelley-through-Alonzo
+	// headers, the separate nonce VRF certificate against the same epoch
+	// nonce (gouroboros verifyNonceVrf). TestVerifyBlockHeaderTPraosNonceVRF
+	// pins that it rejects a nonce certificate from another key or with an
+	// altered proof.
 	isValid, _, _, _, err := ledger.VerifyBlock(
 		headerOnlyBlock{header: header},
 		epochNonceHex,
