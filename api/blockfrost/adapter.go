@@ -498,7 +498,7 @@ func (a *NodeAdapter) blockOutputAndFees(
 	totals, err := a.ledgerState.Database().GetBlockTransactionTotals(ctx, blockHash, nil)
 	if err != nil {
 		return "", "", fmt.Errorf(
-			"get transactions for block %x: %w",
+			"get block transaction totals for block %x: %w",
 			blockHash,
 			err,
 		)

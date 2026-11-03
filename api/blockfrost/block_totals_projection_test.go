@@ -16,6 +16,7 @@ package blockfrost
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"sync/atomic"
 	"testing"
@@ -59,6 +60,42 @@ func (s *blockTotalsProjectionStore) GetBlockTransactionTotals(
 	return s.projection.GetBlockTransactionTotals(hash, txn)
 }
 
+func newBlockTotalsProjectionAdapter(
+	t *testing.T,
+	projected bool,
+) (*NodeAdapter, *sql.DB, *blockTotalsLegacyStore, *blockTotalsProjectionStore) {
+	t.Helper()
+	var legacy *blockTotalsLegacyStore
+	var projection *blockTotalsProjectionStore
+	db, err := dbtest.NewDatabaseWithMetadataWrapper(
+		t, dbtest.Options{Config: &database.Config{DataDir: t.TempDir()}},
+		func(store metadata.MetadataStore) metadata.MetadataStore {
+			legacy = &blockTotalsLegacyStore{MetadataStore: store}
+			if !projected {
+				return legacy
+			}
+			capability, ok := store.(metadata.BlockTransactionTotalsStore)
+			require.True(t, ok)
+			projection = &blockTotalsProjectionStore{
+				blockTotalsLegacyStore: legacy, projection: capability,
+			}
+			return projection
+		},
+	)
+	require.NoError(t, err)
+	cm, err := chain.NewManager(t.Context(), db, nil)
+	require.NoError(t, err)
+	ls, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
+		Database: db, ChainManager: cm,
+	})
+	require.NoError(t, err)
+	adapter, err := NewNodeAdapter(ls, nil)
+	require.NoError(t, err)
+	raw, err := dbtest.RawSQLiteMetadata(t, db)
+	require.NoError(t, err)
+	return adapter, raw, legacy, projection
+}
+
 func TestNodeAdapterBlockTotalsProjectionAndLegacyProvider(t *testing.T) {
 	t.Parallel()
 	for _, projected := range []bool{false, true} {
@@ -68,34 +105,7 @@ func TestNodeAdapterBlockTotalsProjectionAndLegacyProvider(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			var legacy *blockTotalsLegacyStore
-			var projection *blockTotalsProjectionStore
-			db, err := dbtest.NewDatabaseWithMetadataWrapper(
-				t, dbtest.Options{Config: &database.Config{DataDir: t.TempDir()}},
-				func(store metadata.MetadataStore) metadata.MetadataStore {
-					legacy = &blockTotalsLegacyStore{MetadataStore: store}
-					if !projected {
-						return legacy
-					}
-					capability, ok := store.(metadata.BlockTransactionTotalsStore)
-					require.True(t, ok)
-					projection = &blockTotalsProjectionStore{
-						blockTotalsLegacyStore: legacy, projection: capability,
-					}
-					return projection
-				},
-			)
-			require.NoError(t, err)
-			cm, err := chain.NewManager(t.Context(), db, nil)
-			require.NoError(t, err)
-			ls, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
-				Database: db, ChainManager: cm,
-			})
-			require.NoError(t, err)
-			adapter, err := NewNodeAdapter(ls, nil)
-			require.NoError(t, err)
-			raw, err := dbtest.RawSQLiteMetadata(t, db)
-			require.NoError(t, err)
+			adapter, raw, legacy, projection := newBlockTotalsProjectionAdapter(t, projected)
 			hash := fill32(0xa5)
 			insertAdapterTransaction(t, raw, &models.Transaction{
 				Hash: fill32(1), BlockHash: hash, Valid: true, Fee: 7,
@@ -131,37 +141,53 @@ func TestNodeAdapterBlockTotalsCancellation(t *testing.T) {
 
 func TestNodeAdapterBlockOutputAndFeesRetainsOutputHistory(t *testing.T) {
 	t.Parallel()
-	adapter, raw, _ := newDBBackedAdapter(t)
-	hash := fill32(0xb5)
-	for i, valid := range []bool{true, false, false} {
-		id := fill32(byte(i + 1))
-		tx := &models.Transaction{
-			Hash: id, BlockHash: hash, Valid: valid, Fee: 7,
-			Outputs: []models.Utxo{{TxId: id, Amount: 11}},
+
+	for _, projected := range []bool{false, true} {
+		name := "legacy"
+		if projected {
+			name = "projection"
 		}
-		if i < 2 {
-			tx.CollateralReturn = &models.Utxo{
-				TxId: fill32(byte(i + 21)), Amount: 19,
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			adapter, raw, legacy, projection := newBlockTotalsProjectionAdapter(t, projected)
+			hash := fill32(0xb5)
+			for i, valid := range []bool{true, false, false} {
+				id := fill32(byte(i + 1))
+				tx := &models.Transaction{
+					Hash: id, BlockHash: hash, Valid: valid, Fee: 7,
+					Outputs: []models.Utxo{{TxId: id, Amount: 11}},
+				}
+				if i < 2 {
+					tx.CollateralReturn = &models.Utxo{
+						TxId: fill32(byte(i + 21)), Amount: 19,
+					}
+				}
+				insertAdapterTransaction(t, raw, tx)
 			}
-		}
-		insertAdapterTransaction(t, raw, tx)
+			insertAdapterTransaction(t, raw, &models.Transaction{
+				Hash: fill32(40), BlockHash: fill32(0xc5), Valid: true, Fee: 99,
+				Outputs: []models.Utxo{{TxId: fill32(40), Amount: 99}},
+			})
+			// Block totals retain produced outputs after they have been spent.
+			_, err := raw.Exec(`UPDATE utxo SET deleted_slot = 100`)
+			require.NoError(t, err)
+			output, fees, err := adapter.blockOutputAndFees(t.Context(), hash)
+			require.NoError(t, err)
+			require.Equal(t, "41", output)
+			require.Equal(t, "21", fees)
+			// Legacy nullable validity is decoded as false by the hydrated path.
+			_, err = raw.Exec(`UPDATE "transaction" SET valid = NULL WHERE hash = ?`, fill32(2))
+			require.NoError(t, err)
+			output, fees, err = adapter.blockOutputAndFees(t.Context(), hash)
+			require.NoError(t, err)
+			require.Equal(t, "41", output)
+			require.Equal(t, "21", fees)
+			if projected {
+				require.Equal(t, uint64(2), projection.reads.Load())
+				require.Zero(t, legacy.hydratedReads.Load())
+			} else {
+				require.Equal(t, uint64(2), legacy.hydratedReads.Load())
+			}
+		})
 	}
-	insertAdapterTransaction(t, raw, &models.Transaction{
-		Hash: fill32(40), BlockHash: fill32(0xc5), Valid: true, Fee: 99,
-		Outputs: []models.Utxo{{TxId: fill32(40), Amount: 99}},
-	})
-	// Block totals retain produced outputs after they have been spent.
-	_, err := raw.Exec(`UPDATE utxo SET deleted_slot = 100`)
-	require.NoError(t, err)
-	output, fees, err := adapter.blockOutputAndFees(t.Context(), hash)
-	require.NoError(t, err)
-	require.Equal(t, "41", output)
-	require.Equal(t, "21", fees)
-	// Legacy nullable validity is decoded as false by the hydrated path.
-	_, err = raw.Exec(`UPDATE "transaction" SET valid = NULL WHERE hash = ?`, fill32(2))
-	require.NoError(t, err)
-	output, fees, err = adapter.blockOutputAndFees(t.Context(), hash)
-	require.NoError(t, err)
-	require.Equal(t, "41", output)
-	require.Equal(t, "21", fees)
 }
