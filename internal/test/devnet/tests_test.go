@@ -1037,6 +1037,47 @@ func TestRunTestsLeiosRejectsIncompatibleModes(t *testing.T) {
 	}
 }
 
+// DEVNET_SPEC_OVERRIDE must name a spec file in the devnet directory; any
+// other value is rejected before the network starts rather than reaching
+// the configurator as a path it cannot read.
+func TestRunTestsRejectsInvalidSpecOverride(t *testing.T) {
+	devnetDir := filepath.Join(repoRootDir(t), "internal", "test", "devnet")
+	for _, override := range []string{
+		"./testnet-missing.yaml",
+		"../devnet/testnet.yaml",
+		filepath.Join(devnetDir, "testnet.yaml"),
+		"./",
+		// Files in the directory that are not network specs.
+		"./README.md",
+		"./docker-compose.yml",
+	} {
+		t.Run(override, func(t *testing.T) {
+			result := runFakeDevnetWithEnv(t, 0, false, map[string]string{
+				"DEVNET_SPEC_OVERRIDE": override,
+			})
+			require.NotZero(t, result.exitCode, result.output)
+			require.Contains(t, result.output, "DEVNET_SPEC_OVERRIDE")
+			require.NotContains(t, result.dockerLog, " up -d")
+		})
+	}
+}
+
+func TestRunTestsAppliesSpecOverride(t *testing.T) {
+	for _, override := range []string{
+		"./testnet-accelerated.yaml",
+		"testnet-accelerated.yaml",
+	} {
+		t.Run(override, func(t *testing.T) {
+			result := runFakeDevnetWithEnv(t, 0, false, map[string]string{
+				"DEVNET_SPEC_OVERRIDE": override,
+			})
+			require.Zero(t, result.exitCode, result.output)
+			require.Contains(t, result.dockerLog,
+				"DINGO_SPEC=./testnet-accelerated.yaml\n")
+		})
+	}
+}
+
 func TestRunTestsCompileFailureDoesNotStartGenesis(t *testing.T) {
 	t.Parallel()
 	result := runFakeDevnetWithEnv(t, 0, false, map[string]string{
@@ -1271,6 +1312,7 @@ func cleanRunnerEnv(overrides map[string]string) []string {
 		"DEVNET_ARTIFACT_DIR":                {},
 		"DEVNET_CIP50_TEST":                  {},
 		"DEVNET_TESTNET_YAML":                {},
+		"DEVNET_SPEC_OVERRIDE":               {},
 		"FAKE_DOCKER_LOG":                    {},
 		"FAKE_GO_EXIT":                       {},
 		"FAKE_GO_COMPILE_EXIT":               {},
