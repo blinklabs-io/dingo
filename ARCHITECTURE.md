@@ -12532,6 +12532,13 @@ before seeking.
 
 ### Blockfrost API (`api/blockfrost/`)
 
+Block summaries obtain output and fee totals through
+`Database.GetBlockTransactionTotals`. The shared SQL provider projects only
+the amounts; it does not hydrate every transaction association for latest-block
+polls or block listings. The optional storage capability preserves the existing
+hydrated fallback for other providers. Response fields and amount semantics
+are unchanged.
+
 The latest-block transaction list validates `count`, `page`, and `order`
 with the shared pagination rules. It pages transaction hashes in block-index
 order, reverses that order for descending requests, and reports pagination
