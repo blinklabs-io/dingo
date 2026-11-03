@@ -1577,6 +1577,7 @@ type LedgerState struct {
 	currentBoundarySPOStakeHook atomic.Pointer[currentBoundarySPOStakeHookHolder] // optional same-boundary SPO stake rows for governance's RATIFY phase (nil = governance falls back to reading the not-yet-written persisted row)
 	reachedTip                  atomic.Bool
 	currentTip                  ochainsync.Tip
+	electingVrfMemo             electingVrfMemo // immutable electing VRF key hashes below the stability window (see electing_vrf_memo.go)
 	byronPBFT                   byronPBFTCache
 	currentEpoch                models.Epoch
 	dbWorkerPool                *DatabaseWorkerPool
