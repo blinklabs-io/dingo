@@ -274,6 +274,19 @@ func (lv *LedgerView) MinPoolMargin() *big.Rat {
 // silent runtime no-op for the CIP-23 pool-margin-floor certificate rule.
 var _ eras.MinPoolMarginProvider = (*LedgerView)(nil)
 
+// SignatureResultCache forwards the underlying LedgerState's
+// SignatureResultCache, so a *LedgerView satisfies
+// eras.SignatureResultCacheProvider. Returns nil for a bare-constructed
+// LedgerView with no ls (test-only).
+func (lv *LedgerView) SignatureResultCache() *eras.SignatureResultCache {
+	if lv.ls == nil {
+		return nil
+	}
+	return lv.ls.SignatureResultCache()
+}
+
+var _ eras.SignatureResultCacheProvider = (*LedgerView)(nil)
+
 // PlutusEvalContextCache forwards the underlying LedgerState's shared
 // PlutusEvalContextCache so that a *LedgerView (the value passed to
 // ValidateTx*/EvaluateTx*) satisfies eras.PlutusEvalContextCacheProvider.
@@ -291,19 +304,6 @@ func (lv *LedgerView) PlutusEvalContextCache() *eras.PlutusEvalContextCache {
 // compile error instead of a silent fallback to uncached EvalContext
 // construction.
 var _ eras.PlutusEvalContextCacheProvider = (*LedgerView)(nil)
-
-// SignatureResultCache forwards the underlying LedgerState's
-// SignatureResultCache, so a *LedgerView satisfies
-// eras.SignatureResultCacheProvider. Returns nil for a bare-constructed
-// LedgerView with no ls (test-only).
-func (lv *LedgerView) SignatureResultCache() *eras.SignatureResultCache {
-	if lv.ls == nil {
-		return nil
-	}
-	return lv.ls.SignatureResultCache()
-}
-
-var _ eras.SignatureResultCacheProvider = (*LedgerView)(nil)
 
 // MIRDelegState returns the move instantaneous rewards DELEG state that a
 // certificate at slot is checked against: the chain account pots, the
