@@ -271,13 +271,35 @@ func ValidateTxConway(
 	if shouldSkipPhase2Validation(ls) {
 		return nil
 	}
-	phase2Err := validateTxPlutusConwayWithContext(
+	// A transaction declared invalid must fail phase-2; only the success of
+	// a valid one is cached.
+	resultCache := phase2ResultCacheFor(ls)
+	var (
+		resultKey   phase2ResultKey
+		resultKeyOK bool
+	)
+	if resultCache != nil && tx.IsValid() && txHasRedeemers(tx) {
+		resultKey, resultKeyOK = conwayPhase2ResultKey(
+			tx,
+			ls,
+			tmpPparams,
+			plutusCtx.scriptInputs.resolvedAllInputs,
+			syntheticV2CostModelInEffect(ls),
+		)
+		if resultKeyOK && resultCache.contains(resultKey) {
+			return nil
+		}
+	}
+	phase2Err := validateConwayPhase2(
 		tx,
 		ls,
 		tmpPparams,
 		plutusCtx,
 		false,
 	)
+	if phase2Err == nil && resultKeyOK {
+		resultCache.add(resultKey)
+	}
 	if phase2Err != nil {
 		phase2Err = fmt.Errorf("conway plutus validation: %w", phase2Err)
 	}
@@ -567,6 +589,11 @@ func validateTxPlutusConway(
 	)
 	return validatePlutusOutcome(tx, phase2Err)
 }
+
+// validateConwayPhase2 is a test seam: production always resolves to
+// validateTxPlutusConwayWithContext. Tests substitute a counting wrapper to
+// prove the phase-2 result cache skips repeated evaluations.
+var validateConwayPhase2 = validateTxPlutusConwayWithContext
 
 func validateTxPlutusConwayWithContext(
 	tx lcommon.Transaction,
