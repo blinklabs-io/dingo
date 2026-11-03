@@ -2542,7 +2542,7 @@ func (preprodLedgerState) TimeToSlot(t time.Time) (uint64, error) {
 	return preprodByronSlots + uint64(t.Unix()-byronEnd), nil
 }
 
-func readErasFixture(t *testing.T, name string) []byte {
+func readErasFixture(t testing.TB, name string) []byte {
 	t.Helper()
 	raw, err := os.ReadFile(filepath.Join("testdata", name))
 	require.NoError(t, err)
@@ -2550,7 +2550,7 @@ func readErasFixture(t *testing.T, name string) []byte {
 }
 
 func preprodFixtureProtocolParams(
-	t *testing.T,
+	t testing.TB,
 ) *conway.ConwayProtocolParameters {
 	t.Helper()
 	var costModels struct {

@@ -1112,6 +1112,12 @@ type txInfoCache struct {
 	txInfoV1Built  bool
 	txInfoV2Built  bool
 	txInfoV3Built  bool
+	// contextV1, contextV2 and contextV3 wrap the TxInfo of each version
+	// so that its PlutusData conversion, which the script context of every
+	// redeemer embeds unchanged, runs once per transaction.
+	contextV1 *script.CachedTxInfo
+	contextV2 *script.CachedTxInfo
+	contextV3 *script.CachedTxInfo
 }
 
 // newTxInfoCache builds the per-tx PlutusV1/V2/V3 TxInfo cache, shared by
@@ -1229,6 +1235,43 @@ func (c *txInfoCache) v3() (script.TxInfoV3, error) {
 	return c.txInfoV3, nil
 }
 
+// v1Context returns the PlutusV1 TxInfo for building script contexts,
+// converted to PlutusData at most once per transaction.
+func (c *txInfoCache) v1Context() (*script.CachedTxInfo, error) {
+	if c.contextV1 == nil {
+		txInfo, err := c.v1()
+		if err != nil {
+			return nil, err
+		}
+		c.contextV1 = script.NewCachedTxInfo(txInfo)
+	}
+	return c.contextV1, nil
+}
+
+// v2Context is v1Context for PlutusV2.
+func (c *txInfoCache) v2Context() (*script.CachedTxInfo, error) {
+	if c.contextV2 == nil {
+		txInfo, err := c.v2()
+		if err != nil {
+			return nil, err
+		}
+		c.contextV2 = script.NewCachedTxInfo(txInfo)
+	}
+	return c.contextV2, nil
+}
+
+// v3Context is v1Context for PlutusV3.
+func (c *txInfoCache) v3Context() (*script.CachedTxInfo, error) {
+	if c.contextV3 == nil {
+		txInfo, err := c.v3()
+		if err != nil {
+			return nil, err
+		}
+		c.contextV3 = script.NewCachedTxInfo(txInfo)
+	}
+	return c.contextV3, nil
+}
+
 func evaluateConwayPlutusScript(
 	plutusScript lcommon.Script,
 	purpose script.ScriptPurpose,
@@ -1268,7 +1311,7 @@ func evaluateConwayPlutusScript(
 				Err: err,
 			}
 		}
-		txInfoV3, err := txInfos.v3()
+		txInfoV3, err := txInfos.v3Context()
 		if err != nil {
 			return lcommon.ExUnits{}, nil, err
 		}
@@ -1319,7 +1362,7 @@ func evaluateConwayPlutusScript(
 				ErrNoCostModelForPlutusV2,
 			)
 		}
-		txInfoV2, err := txInfos.v2()
+		txInfoV2, err := txInfos.v2Context()
 		if err != nil {
 			return lcommon.ExUnits{}, nil, err
 		}
@@ -1362,7 +1405,7 @@ func evaluateConwayPlutusScript(
 		}
 		return usedBudget, nil, nil
 	case lcommon.PlutusV1Script:
-		txInfoV1, err := txInfos.v1()
+		txInfoV1, err := txInfos.v1Context()
 		if err != nil {
 			return lcommon.ExUnits{}, nil, err
 		}
