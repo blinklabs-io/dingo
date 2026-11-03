@@ -406,3 +406,55 @@ func TestVoteManagerCommitRechecksChainChoice(t *testing.T) {
 		})
 	}
 }
+
+// CIP-164 equivocation is two headers for one Praos election, a slot and its
+// issuer. A pool that equivocates in the announcing slot taints only its own
+// election, so another pool's announcement for that slot keeps its vote.
+func TestVoteManagerRbEquivocationIsPerIssuer(t *testing.T) {
+	t.Parallel()
+	announcer := lcommon.PoolKeyHash{0x01}
+	cases := map[string]struct {
+		equivocator lcommon.PoolKeyHash
+		voted       bool
+	}{
+		"another pool equivocates": {
+			equivocator: lcommon.PoolKeyHash{0x02},
+			voted:       true,
+		},
+		"announcing pool equivocates": {
+			equivocator: announcer,
+			voted:       false,
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			onset := time.Unix(1_700_000_000, 0)
+			h := newVoteWindowHarness(
+				t,
+				onTimeVoteTiming,
+				fakeSlotOnset{onset: onset},
+			)
+			h.clock = onset.Add(voteWindowOpens)
+			mgr := h.fixture.mgr
+			for _, name := range []string{"equivocal-a", "equivocal-b"} {
+				mgr.handleChainHeaderObserved(chain.ChainHeaderObservedEvent{
+					Slot:   headerArmingRbSlot,
+					RbHash: lcommon.NewBlake2b256([]byte(name)),
+					Issuer: tc.equivocator,
+				})
+			}
+			h.validate()
+			mgr.observeIssuedAnnouncement(
+				headerArmingRbSlot, voteWindowRbHash, voteWindowEbHash,
+				announcer, 0, h.onset,
+			)
+			assert.Equal(t, tc.voted, h.voted())
+			want := float64(1)
+			if tc.voted {
+				want = 0
+			}
+			assert.Equal(t, want, h.notEmitted(voteNotEmittedRbEquivocation))
+		})
+	}
+}

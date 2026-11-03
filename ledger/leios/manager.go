@@ -132,7 +132,8 @@ const (
 	voteNotEmittedSlotWindow = "slot_window"
 	// voteNotEmittedLateHeader: the announcing RB header missed L_hdr.
 	voteNotEmittedLateHeader = "late_header"
-	// voteNotEmittedRbEquivocation: two RB headers were seen for the slot.
+	// voteNotEmittedRbEquivocation: the announcing pool issued two RB
+	// headers for the slot.
 	voteNotEmittedRbEquivocation = "rb_equivocation"
 	// voteNotEmittedValidationDeadline: EB validation missed the vote deadline.
 	voteNotEmittedValidationDeadline = "validation_deadline"
@@ -376,8 +377,11 @@ type tallyKey struct {
 }
 
 type announcementRecord struct {
-	slot      uint64
-	epoch     uint64
+	slot  uint64
+	epoch uint64
+	// issuer is the announcing header's pool, or zero when it was armed
+	// through ObserveAnnouncement, which carries none.
+	issuer    lcommon.PoolKeyHash
 	ebHash    lcommon.Blake2b256
 	seenAt    time.Time
 	arrivedAt time.Time
@@ -592,7 +596,7 @@ type VoteManager struct {
 	wakeCh                 chan struct{}     // closed and replaced on every insert
 	tallies                map[tallyKey]*ebTally
 	announcements          map[lcommon.Blake2b256]announcementRecord
-	equivocatingRbSlots    map[uint64]uint64
+	equivocatingRbs        map[observedRbKey]uint64
 	observedRbs            map[observedRbKey]observedRbRecord
 	latestRbSlot           uint64
 	latestRbHash           lcommon.Blake2b256 // see recordLatestRb
@@ -705,7 +709,7 @@ func NewVoteManager(cfg VoteManagerConfig) (*VoteManager, error) {
 		wakeCh:                 make(chan struct{}),
 		tallies:                make(map[tallyKey]*ebTally),
 		announcements:          make(map[lcommon.Blake2b256]announcementRecord),
-		equivocatingRbSlots:    make(map[uint64]uint64),
+		equivocatingRbs:        make(map[observedRbKey]uint64),
 		observedRbs:            make(map[observedRbKey]observedRbRecord),
 		acquiredEbs:            make(map[lcommon.Blake2b256]acquiredEbRecord),
 		validatedAnnouncements: make(
@@ -2371,7 +2375,7 @@ func (m *VoteManager) insertVote(
 			// arrived since emission checked them.
 			if expectedVoting != nil && !expectedVoting.deadline.IsZero() {
 				if reason := m.localVoteChainReasonLocked(
-					announcingRbHash, current.slot, validated,
+					announcingRbHash, current, validated,
 					expectedVoting.deadline,
 				); reason != "" {
 					expectedVoting.rejection = reason
@@ -2863,7 +2867,7 @@ func (m *VoteManager) localVoteReadiness(
 	reason := ""
 	if validatedOK {
 		reason = m.localVoteChainReasonLocked(
-			rbHash, record.slot, validated, voteDeadline,
+			rbHash, record, validated, voteDeadline,
 		)
 	}
 	m.mu.Unlock()
@@ -2886,26 +2890,47 @@ func (m *VoteManager) localVoteReadiness(
 }
 
 // localVoteChainReasonLocked reports which CIP-164 chain-choice rule forbids a
-// local vote for the announcement, or "" when none does: its slot carries RB
-// equivocation, it is not the latest RB (matched by header hash, since two
-// pools can issue headers for one slot), or its EB validated at or after the
-// vote deadline. Callers must hold mu.
+// local vote for the announcement, or "" when none does: its issuer
+// equivocated in its slot, it is not the latest RB (matched by header hash,
+// since two pools can issue headers for one slot), or its EB validated at or
+// after the vote deadline. Callers must hold mu.
 func (m *VoteManager) localVoteChainReasonLocked(
 	rbHash lcommon.Blake2b256,
-	slot uint64,
+	record announcementRecord,
 	validated validatedAnnouncementRecord,
 	deadline time.Time,
 ) string {
-	if _, equivocated := m.equivocatingRbSlots[slot]; equivocated {
+	if m.rbEquivocatedLocked(record.slot, record.issuer) {
 		return voteNotEmittedRbEquivocation
 	}
-	if slot != m.latestRbSlot || rbHash != m.latestRbHash {
+	if record.slot != m.latestRbSlot || rbHash != m.latestRbHash {
 		return voteNotEmittedNotLatestRb
 	}
 	if !validated.seenAt.Before(deadline) {
 		return voteNotEmittedValidationDeadline
 	}
 	return ""
+}
+
+// rbEquivocatedLocked reports whether the Praos election of slot and issuer
+// carries RB equivocation. Equivocation by another pool in the same slot does
+// not taint this election. An unknown (zero) issuer cannot be told apart from
+// an equivocating pool, so any equivocation in the slot counts. Callers must
+// hold mu.
+func (m *VoteManager) rbEquivocatedLocked(
+	slot uint64,
+	issuer lcommon.PoolKeyHash,
+) bool {
+	if issuer != (lcommon.PoolKeyHash{}) {
+		_, ok := m.equivocatingRbs[observedRbKey{slot: slot, issuer: issuer}]
+		return ok
+	}
+	for key := range m.equivocatingRbs {
+		if key.slot == slot {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *VoteManager) declineLocalVote(
@@ -3398,7 +3423,7 @@ func (m *VoteManager) recordLatestRb(
 		key := observedRbKey{slot: slot, issuer: issuer}
 		if observed, ok := m.observedRbs[key]; ok &&
 			observed.rbHash != rbHash {
-			m.equivocatingRbSlots[slot] = epoch
+			m.equivocatingRbs[key] = epoch
 		} else if !ok {
 			m.observedRbs[key] = observedRbRecord{
 				rbHash: rbHash,
@@ -3609,8 +3634,8 @@ func (m *VoteManager) observeIssuedAnnouncement(
 		arrivedAt = seenAt
 	}
 	record := announcementRecord{
-		slot: slot, epoch: epoch, ebHash: ebHash, seenAt: seenAt,
-		arrivedAt: arrivedAt, headerSeq: headerSeq,
+		slot: slot, epoch: epoch, issuer: issuer, ebHash: ebHash,
+		seenAt: seenAt, arrivedAt: arrivedAt, headerSeq: headerSeq,
 	}
 	m.mu.Lock()
 	m.prunePrototypeStateLocked(record.seenAt)
@@ -3623,6 +3648,9 @@ func (m *VoteManager) observeIssuedAnnouncement(
 		}
 		if existing.arrivedAt.Before(record.arrivedAt) {
 			record.arrivedAt = existing.arrivedAt
+		}
+		if record.issuer == (lcommon.PoolKeyHash{}) {
+			record.issuer = existing.issuer
 		}
 	}
 	m.announcements[rbHash] = record
@@ -3696,9 +3724,9 @@ func (m *VoteManager) handleEpochTransition(
 			m.removePendingAnnouncementLocked(rbHash)
 		}
 	}
-	for slot, epoch := range m.equivocatingRbSlots {
+	for key, epoch := range m.equivocatingRbs {
 		if epoch < keepFrom {
-			delete(m.equivocatingRbSlots, slot)
+			delete(m.equivocatingRbs, key)
 		}
 	}
 	for key, record := range m.observedRbs {
