@@ -194,7 +194,14 @@ fi
 # scenarios that need a network the stock specs do not describe (for
 # example a different starting protocol version).
 if [[ -n "${DEVNET_SPEC_OVERRIDE:-}" ]]; then
-  ACTIVE_SPEC="${DEVNET_SPEC_OVERRIDE}"
+  # The spec is mounted from this directory by a ./-relative name, so a
+  # path elsewhere would reach the configurator as a file it cannot read.
+  spec_name="${DEVNET_SPEC_OVERRIDE#./}"
+  if [[ -z "${spec_name}" || "${spec_name}" == */* || ! -f "${SCRIPT_DIR}/${spec_name}" ]]; then
+    echo "[run-tests] ERROR: DEVNET_SPEC_OVERRIDE=${DEVNET_SPEC_OVERRIDE} is not a spec file in ${SCRIPT_DIR}" >&2
+    exit 1
+  fi
+  ACTIVE_SPEC="./${spec_name}"
 fi
 export "${SPEC_VAR}=${ACTIVE_SPEC}"
 export DEVNET_TESTNET_YAML="${SCRIPT_DIR}/${ACTIVE_SPEC#./}"
