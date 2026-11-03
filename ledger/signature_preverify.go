@@ -149,8 +149,10 @@ func preverifiedSignaturesForTx(
 // transaction body and witness set, so it can only stand in for the
 // cryptographic check of the transaction it was computed from; witness
 // presence and every other rule still run against the write transaction.
-// Results live in memory and are discarded with the chunk, so a failed or
-// rolled-back chunk leaves nothing behind.
+// Results live in memory and are discarded with the chunk. When a
+// SignatureResultCache is supplied they are also kept there, which outlives
+// the chunk: a signature outcome depends on the transaction alone, not on
+// ledger state, so it stays correct after a failed or rolled-back chunk.
 type signaturePreverifyAhead struct {
 	ctx    context.Context
 	cancel context.CancelFunc

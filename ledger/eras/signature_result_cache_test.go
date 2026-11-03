@@ -95,12 +95,23 @@ func TestSignatureResultCacheVerifiesEachTransactionOnce(t *testing.T) {
 	}
 	require.Equal(t, 1, *calls, "signatures must be verified once")
 
-	// Without a cache every validation verifies inline.
+	// Without a cache every validation verifies inline: a corrupted
+	// signature still fails, and the cache's verifier is never called.
 	*calls = 0
+	forged := signedConwayTestTransaction(t, 1, 1, true)
 	for range 2 {
 		require.NoError(t, rule(tx, 0, newMockLedgerState(), nil))
+		require.Error(t, rule(forged, 0, newMockLedgerState(), nil))
 	}
 	require.Zero(t, *calls)
+}
+
+func TestSignatureResultCacheZeroValueIsUsable(t *testing.T) {
+	var c SignatureResultCache
+	tx := signedConwayTestTransaction(t, 4, 1, false)
+	first := c.Verify(tx)
+	require.NotNil(t, first)
+	require.Same(t, first, c.Verify(tx))
 }
 
 func TestSignatureResultCacheResultCoversOnlyItsWitnesses(t *testing.T) {

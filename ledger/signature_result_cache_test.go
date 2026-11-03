@@ -16,8 +16,11 @@ package ledger
 
 import (
 	"context"
+	"io"
+	"log/slog"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -51,4 +54,30 @@ func TestBlockSignaturePreverifyReusesCachedResults(t *testing.T) {
 	// Without a cache the block verifies afresh.
 	uncached := preverifyTransactionSignatures([]lcommon.Transaction{tx}, nil)
 	require.NotSame(t, admitted, uncached[tx.LeiosHash()])
+}
+
+// TestNewLedgerStateSharesSignatureResultCache checks that a LedgerState
+// built by NewLedgerState holds a signature result cache and that every
+// LedgerView exposes that same cache to the era rules.
+func TestNewLedgerStateSharesSignatureResultCache(t *testing.T) {
+	db := newTestDB(t)
+	cm, err := chain.NewManager(t.Context(), db, nil)
+	require.NoError(t, err)
+	ls, err := NewLedgerState(LedgerStateConfig{
+		Database:          db,
+		ChainManager:      cm,
+		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
+		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	cache := ls.SignatureResultCache()
+	require.NotNil(t, cache)
+	for range 2 {
+		lv := &LedgerView{ls: ls}
+		require.Same(t, cache, lv.SignatureResultCache())
+		var state lcommon.LedgerState = lv
+		provider, ok := lcommon.UnwrapLedgerState(state).(eras.SignatureResultCacheProvider)
+		require.True(t, ok)
+		require.Same(t, cache, provider.SignatureResultCache())
+	}
 }

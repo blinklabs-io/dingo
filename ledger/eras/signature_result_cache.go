@@ -32,8 +32,9 @@ import (
 // validation has already computed. The ID omits the witnesses, but gouroboros
 // checks each result's binding to the transaction body and witness set before
 // using it and verifies inline on a mismatch, so a result never stands in for
-// another witness set's signatures and no entry needs invalidating. A body
-// seen with a second witness set replaces the first one's entry.
+// another witness set's signatures and no entry needs invalidating. When one
+// body is seen with two witness sets, the first set's entry stays cached and
+// each validation of the second verifies inline.
 //
 // The cache holds two generations of at most signatureResultCacheGeneration
 // entries each. A lookup that hits the older generation moves the entry to
@@ -119,6 +120,14 @@ func (c *SignatureResultCache) addLocked(
 	key lcommon.Blake2b256,
 	result *lcommon.PreverifiedSignatures,
 ) {
+	if c.current == nil {
+		c.current = make(map[lcommon.Blake2b256]*lcommon.PreverifiedSignatures)
+	}
+	// Concurrent callers may both verify one transaction; the second store
+	// must not rotate the generations.
+	if _, ok := c.current[key]; ok {
+		return
+	}
 	if len(c.current) >= signatureResultCacheGeneration {
 		c.previous = c.current
 		c.current = make(
