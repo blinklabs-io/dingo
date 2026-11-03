@@ -54,6 +54,10 @@ var koiosFlags struct {
 	cachePath string
 }
 
+// utxoRefSample bounds the refs a UTxO mismatch logs at Warn, enough to
+// identify a class of divergence without logging a whole set.
+const utxoRefSample = 20
+
 // splitStakeMismatches partitions mismatches into real Dingo/Koios
 // divergences and KoiosFault entries (an unparseable koios active_stake
 // value -- a comparison Koios's own data made untrustworthy, not a Dingo
@@ -253,7 +257,9 @@ func (c *fromGenesisCounters) recordEpoch(
 		logger.Warn("utxo set mismatch",
 			"epoch", r.Epoch, "missing", len(r.UTxOMissing),
 			"extra", len(r.UTxOExtra), "differs", len(r.UTxODiffers),
-			"dingo_ref_count", r.UTxORefCount)
+			"dingo_ref_count", r.UTxORefCount,
+			"missing_sample", r.UTxOMissing[:min(len(r.UTxOMissing), utxoRefSample)],
+			"extra_sample", r.UTxOExtra[:min(len(r.UTxOExtra), utxoRefSample)])
 		for _, d := range r.UTxODiffers {
 			logger.Debug("utxo content differs", "epoch", r.Epoch, "detail", d)
 		}
