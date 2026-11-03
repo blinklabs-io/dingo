@@ -14,14 +14,19 @@
 
 package dingo
 
-import "github.com/blinklabs-io/dingo/topology"
+import (
+	"github.com/blinklabs-io/dingo/topology"
+)
 
-// genesisControlGroups returns only explicitly configured operator roots.
+// genesisControlGroups returns the operator-configured relay control groups.
+// Dingo supplies no default groups for any network: without configuration,
+// witness identities come from the ledger, a peer snapshot, or the address of
+// the connection.
 func (n *Node) genesisControlGroups() []topology.PeerControlGroup {
-	if n.config.cfg == nil {
-		return nil
+	if n.config.cfg != nil {
+		if groups := n.config.cfg.GenesisBootstrap.ControlGroups; groups != nil {
+			return topology.ClonePeerControlGroups(groups)
+		}
 	}
-	return topology.ClonePeerControlGroups(
-		n.config.cfg.GenesisBootstrap.ControlGroups,
-	)
+	return nil
 }

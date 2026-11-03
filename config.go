@@ -1062,8 +1062,10 @@ func clonePluginConfig(in map[string]any) map[string]any {
 	return out
 }
 
-// WithGenesisControlGroups configures optional relay operator identities and
-// roots. Nil or an empty slice leaves discovery to the network topology.
+// WithGenesisControlGroups sets the trusted relay operator groups that form the
+// exclusive Genesis witness set. Dingo supplies no network defaults, so nil and
+// an empty slice both leave witness identities to the ledger, a peer snapshot,
+// or the connection address. The option copies its input.
 func WithGenesisControlGroups(groups []topology.PeerControlGroup) ConfigOptionFunc {
 	owned := topology.ClonePeerControlGroups(groups)
 	return func(c *Config) {

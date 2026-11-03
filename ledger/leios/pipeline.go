@@ -56,9 +56,10 @@ const (
 	// StageDiffuse is the propagation grace period after production,
 	// during which the EB is fetched and cached across peers.
 	StageDiffuse
-	// StageVote is the committee's local voting window. Relayed votes remain
-	// useful in StageCertify and are admitted until the certification
-	// deadline.
+	// StageVote is the provisional phase in which committee votes are
+	// expected; local vote production is timed by the CIP-164 header and
+	// vote periods, not by this stage. Relayed votes remain useful in
+	// StageCertify and are admitted until the certification deadline.
 	StageVote
 	// StageCertify is the window in which collected votes must reach
 	// quorum and a certificate must be built.
@@ -114,8 +115,9 @@ type PipelineTiming struct {
 	// DiffuseWindowSlots is the cumulative offset by which diffusion is
 	// expected to complete.
 	DiffuseWindowSlots uint64
-	// VoteWindowSlots is the cumulative offset by which local vote production
-	// closes; stageFor surfaces the same boundary as StageVote.
+	// VoteWindowSlots is the cumulative offset that ends StageVote in
+	// stageFor. It does not gate local vote production, which follows the
+	// CIP-164 wall-clock header and vote periods.
 	VoteWindowSlots uint64
 	// CertifyByDeadlineSlots is the cumulative offset by which a
 	// certificate must be observed; past it an uncertified EB expires.

@@ -789,7 +789,7 @@ var flagSpecs = []flagSpec{
 	intFlag(
 		"GenesisBootstrap.CorroborationPeers",
 		"genesis-bootstrap-corroboration-peers",
-		"optional Genesis peer corroboration threshold (default 0; Genesis safety checks remain active)",
+		"independent peers that must corroborate a fast source before it drives Genesis selection (default 0, which disables the gate)",
 	),
 	boolFlag(
 		"GenesisBootstrap.LimitOnPatienceEnabled",

@@ -25,7 +25,9 @@ import (
 
 func TestGenesisControlGroupsUsePublishedTopologyByDefault(t *testing.T) {
 	t.Parallel()
-	for _, network := range []string{"dijkstra", "musashi", "preview"} {
+	for _, network := range []string{
+		"dijkstra", "musashi", "preview", "preprod", "mainnet",
+	} {
 		t.Run(network, func(t *testing.T) {
 			t.Parallel()
 			cardanoCfg, err := cardano.NewCardanoNodeConfigFromEmbedFS(

@@ -15,6 +15,7 @@
 package nodeparity
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -39,6 +40,7 @@ import (
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/allegra"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/mary"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
@@ -47,6 +49,7 @@ import (
 	pcommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 	csmock "github.com/blinklabs-io/ouroboros-mock/chainsync"
+	mockfixtures "github.com/blinklabs-io/ouroboros-mock/fixtures"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -1058,6 +1061,10 @@ type genesisFakeServer struct {
 	// utxoWhole, when non-nil, is the answer to ShelleyUtxoWholeQuery in
 	// place of the empty set.
 	utxoWhole map[localstatequery.UtxoId]ledger.BabbageTransactionOutput
+	// utxoWholeBySlot, when it has an entry for the slot last Acquired,
+	// answers ShelleyUtxoWholeQuery there in place of utxoWhole, for a test
+	// whose Dingo set changes between the baseline and a comparison.
+	utxoWholeBySlot map[uint64]map[localstatequery.UtxoId]ledger.BabbageTransactionOutput
 
 	// eraHistory, when non-nil, is the answer to HardForkEraHistoryQuery.
 	// Left nil, that query fails like any other unexpected one, so
@@ -1532,6 +1539,9 @@ func (s *genesisFakeServer) lsqConfig() localstatequery.Config {
 						}
 						s.mu.Lock()
 						whole := s.utxoWhole
+						if at, ok := s.utxoWholeBySlot[s.lastAcquiredSlot]; ok {
+							whole = at
+						}
 						s.mu.Unlock()
 						if whole == nil {
 							whole = map[localstatequery.UtxoId]ledger.BabbageTransactionOutput{}
@@ -3089,4 +3099,216 @@ func TestRunFromGenesis_TxInfoIndexLagDoesNotTaintEpoch(t *testing.T) {
 		t, done, 10*time.Second, "RunFromGenesis exit after cancellation",
 	)
 	assert.True(t, err == nil || errors.Is(err, context.Canceled))
+}
+
+// TestRunFromGenesis_AllegraCrossingReturnsRedeemUTxOs drives RunFromGenesis
+// across the Shelley-to-Allegra hard fork. Blocks 0 and 1 are Shelley, in
+// epoch 1; blocks 2 and 3 are Allegra, in epoch 2. Dingo's baseline at block
+// 0 holds one redeem UTxO and one ordinary one. Block 1's transaction, still
+// buffered when block 2 crosses the hard fork, creates an output at a second
+// redeem address. Dingo's set at block 2 holds only the ordinary UTxO, so
+// epoch 2 matches only if the crossing removed the baseline's redeem UTxO
+// and, having applied the buffered transaction first, the one it created.
+func TestRunFromGenesis_AllegraCrossingReturnsRedeemUTxOs(t *testing.T) {
+	t.Parallel()
+	const magic = 42
+
+	blocks := make([]ledger.Block, 0, 4)
+	var prev lcommon.Blake2b256
+	for i, era := range []uint8{
+		shelley.EraIdShelley, shelley.EraIdShelley,
+		allegra.EraIdAllegra, allegra.EraIdAllegra,
+	} {
+		builder := mockfixtures.NewBlockBuilder(ledger.GetEraById(era)).
+			WithBlockNumber(uint64(i + 1)).
+			WithSlot(uint64(100 + i*20)).
+			WithPreviousHash(prev)
+		if i == 1 {
+			builder = builder.WithTransactions(&shelley.ShelleyTransaction{
+				Body: shelley.ShelleyTransactionBody{
+					TxInputs: shelley.NewShelleyTransactionInputSet(
+						[]shelley.ShelleyTransactionInput{{}},
+					),
+					TxFee: 1,
+					Ttl:   1000,
+				},
+			})
+		}
+		block, err := builder.Build()
+		require.NoError(t, err)
+		blocks = append(blocks, block)
+		prev = block.Hash()
+	}
+	require.Len(t, blocks[1].Transactions(), 1)
+	chain := csmock.Chain{
+		Blocks: blocks,
+		Points: make([]pcommon.Point, len(blocks)),
+		Tips:   make([]chainsync.Tip, len(blocks)),
+	}
+	for i, block := range blocks {
+		chain.Points[i] = csmock.PointOf(block)
+		chain.Tips[i] = csmock.TipOf(block)
+	}
+	server := &genesisFakeServer{
+		chain:          chain,
+		step:           make(chan struct{}),
+		sessionStarted: make(chan struct{}, 16),
+	}
+	server.epochBySlot = map[uint64]int{
+		chain.Points[0].Slot: 1,
+		chain.Points[1].Slot: 1,
+		chain.Points[2].Slot: 2,
+		chain.Points[3].Slot: 2,
+	}
+
+	redeemAddr := func(b byte) lcommon.Address {
+		addr, err := lcommon.NewByronAddressRedeem(
+			bytes.Repeat([]byte{b}, 32), lcommon.ByronAddressAttributes{},
+		)
+		require.NoError(t, err)
+		return addr
+	}
+	ordinary, err := lcommon.NewByronAddressFromParts(
+		lcommon.ByronAddressTypePubkey,
+		bytes.Repeat([]byte{0x02}, lcommon.AddressHashSize),
+		lcommon.ByronAddressAttributes{},
+	)
+	require.NoError(t, err)
+	output := func(addr lcommon.Address, amount uint64) ledger.BabbageTransactionOutput {
+		return ledger.BabbageTransactionOutput{
+			OutputAddress: addr,
+			OutputAmount:  mary.MaryTransactionOutputValue{Amount: amount},
+		}
+	}
+	redeemRef := localstatequery.UtxoId{Hash: lcommon.Blake2b256{0xaa}}
+	ordinaryRef := localstatequery.UtxoId{Hash: lcommon.Blake2b256{0xbb}, Idx: 1}
+	server.utxoWholeBySlot = map[uint64]map[localstatequery.UtxoId]ledger.BabbageTransactionOutput{
+		chain.Points[0].Slot: {
+			redeemRef:   output(redeemAddr(0x01), 1_000_000),
+			ordinaryRef: output(ordinary, 2_000_000),
+		},
+		chain.Points[2].Slot: {
+			ordinaryRef: output(ordinary, 2_000_000),
+		},
+	}
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	server.serve(t, listener, magic)
+
+	// /tx_info answers block 1's transaction with one output at a redeem
+	// address. Everything else 404s, as in the sibling tests.
+	pendingRedeem := redeemAddr(0x03).String()
+	koiosSrv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			if !strings.HasSuffix(r.URL.Path, "/tx_info") {
+				http.NotFound(w, r)
+				return
+			}
+			var body struct {
+				TxHashes []string `json:"_tx_hashes"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			items := make([]koiosparity.KoiosTxInfoItem, 0, len(body.TxHashes))
+			for _, h := range body.TxHashes {
+				var out koiosparity.KoiosTxInfoOutput
+				out.TxHash = h
+				out.PaymentAddr.Bech32 = pendingRedeem
+				out.Value = "3000000"
+				items = append(items, koiosparity.KoiosTxInfoItem{
+					TxHash:  h,
+					Outputs: []koiosparity.KoiosTxInfoOutput{out},
+				})
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(items)
+		},
+	))
+	t.Cleanup(koiosSrv.Close)
+	koios, err := NewKoiosClient("preview", "", koiosSrv.URL, true, true)
+	require.NoError(t, err)
+
+	logs := newLogCollector()
+	results := make(chan EpochResult, 8)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- RunFromGenesis(
+			ctx, listener.Addr().String(), "preview", magic, koios, nil,
+			func(r EpochResult) { results <- r },
+			logs.logf, nil, false,
+		)
+	}()
+
+	// Block 0: baseline. Block 1: its transaction is buffered. Block 2: the
+	// crossing, then the epoch 2 comparison.
+	server.allowStep(t)
+	server.allowStep(t)
+	server.allowStep(t)
+	report := testutil.RequireReceive(
+		t, results, 20*time.Second, "epoch 2 result",
+	)
+	assert.Equal(t, uint64(2), report.Epoch)
+	assert.True(t, report.UTxOAttempted)
+	assert.NoError(t, report.UTxOErr)
+	assert.Empty(t, report.UTxOMissing,
+		"a redeem UTxO survived the Allegra crossing")
+	assert.Empty(t, report.UTxOExtra)
+	assert.Empty(t, report.UTxODiffers)
+	assert.Contains(t, logs.all(),
+		fmt.Sprintf(
+			"nodeparity: applied the Allegra hard fork's redeem-address "+
+				"UTxO removal at slot %d: 2 refs removed",
+			chain.Points[2].Slot,
+		),
+	)
+
+	cancel()
+	err = testutil.RequireReceive(
+		t, done, 10*time.Second, "RunFromGenesis exit after cancellation",
+	)
+	assert.True(t, err == nil || errors.Is(err, context.Canceled))
+}
+
+// TestAllegraCrossingCountsAgainAfterRollbackBeforeHardFork covers a
+// rollback from the first Allegra block to the last Shelley one: the
+// reconstruction is re-baselined from Dingo's Shelley-era set, which still
+// holds the redeem UTxOs, so the next Allegra block must apply the removal
+// again. A same-point reconnect never calls rollback.
+func TestAllegraCrossingCountsAgainAfterRollbackBeforeHardFork(t *testing.T) {
+	t.Parallel()
+	var c allegraCrossing
+	c.forward(shelley.EraIdShelley, 100)
+	require.True(t, c.crosses(allegra.EraIdAllegra))
+	c.forward(allegra.EraIdAllegra, 120)
+	assert.False(t, c.crosses(allegra.EraIdAllegra))
+
+	c.rollback(120)
+	assert.False(t, c.crosses(allegra.EraIdAllegra),
+		"a rollback to the first Allegra block keeps the crossing applied")
+
+	c.rollback(100)
+	assert.True(t, c.crosses(allegra.EraIdAllegra),
+		"a rollback before the hard fork must make the next Allegra block cross again")
+	c.forward(allegra.EraIdAllegra, 121)
+	assert.False(t, c.crosses(allegra.EraIdAllegra))
+}
+
+// TestAllegraCrossingAfterPostHardForkStart covers a run that starts past the
+// hard fork: no block crosses, since Dingo's baseline already lacks the
+// redeem UTxOs, unless a rollback reaches below the start.
+func TestAllegraCrossingAfterPostHardForkStart(t *testing.T) {
+	t.Parallel()
+	var c allegraCrossing
+	assert.False(t, c.crosses(allegra.EraIdAllegra))
+	c.forward(allegra.EraIdAllegra, 500)
+	assert.False(t, c.crosses(allegra.EraIdAllegra))
+	c.rollback(400)
+	assert.True(t, c.crosses(allegra.EraIdAllegra))
 }

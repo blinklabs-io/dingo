@@ -37,8 +37,10 @@ import (
 
 	"github.com/blinklabs-io/dingo/internal/koiosparity"
 	ouroboros "github.com/blinklabs-io/gouroboros"
+	"github.com/blinklabs-io/gouroboros/ledger/allegra"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/blinklabs-io/gouroboros/protocol"
 	"github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	pcommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -748,6 +750,41 @@ func applyTxInfoResults(
 	return anyFailed
 }
 
+// allegraCrossing recognises the first block past the Allegra hard fork, so
+// the hard fork's redeem-UTxO removal is applied exactly once on the way
+// across. A baseline taken after the hard fork never sees the crossing and
+// needs no removal: Dingo's own set already lacks them. A rollback to a block
+// before the hard fork re-baselines from a set that still holds them, so the
+// next Allegra block must count as the crossing again.
+type allegraCrossing struct {
+	prevEra   uint8
+	havePrev  bool
+	firstSlot uint64 // first Allegra-or-later block rolled forward
+	haveFirst bool
+}
+
+// crosses reports whether a block of era is the first past the hard fork.
+func (c *allegraCrossing) crosses(era uint8) bool {
+	return c.havePrev && c.prevEra < allegra.EraIdAllegra &&
+		era >= allegra.EraIdAllegra
+}
+
+// forward records a block whose roll-forward succeeded.
+func (c *allegraCrossing) forward(era uint8, slot uint64) {
+	if era >= allegra.EraIdAllegra && (!c.havePrev || c.prevEra < allegra.EraIdAllegra) {
+		c.firstSlot, c.haveFirst = slot, true
+	}
+	c.prevEra, c.havePrev = era, true
+}
+
+// rollback records a rollback to slot that invalidated the reconstruction.
+func (c *allegraCrossing) rollback(slot uint64) {
+	if c.haveFirst && slot < c.firstSlot {
+		c.prevEra, c.havePrev = shelley.EraIdShelley, true
+		c.haveFirst = false
+	}
+}
+
 // pointsEqual reports whether a and b name the same block.
 func pointsEqual(a, b pcommon.Point) bool {
 	return a.Slot == b.Slot && bytes.Equal(a.Hash, b.Hash)
@@ -815,6 +852,7 @@ func RunFromGenesis(
 		utxoRefs           UTxOSet
 		utxoAttempted      bool
 		pendingTxHashes    []string
+		crossing           allegraCrossing
 		txInfoFlushCount   int
 		txInfoFlushElapsed time.Duration
 		// lastPoint is the most recent chain point either callback below has
@@ -1174,7 +1212,7 @@ func RunFromGenesis(
 						_ uint,
 						blockData any,
 						_ chainsync.Tip,
-					) error {
+					) (retErr error) {
 						if err := enterCallback(); err != nil {
 							return err
 						}
@@ -1192,6 +1230,14 @@ func RunFromGenesis(
 						// Recorded before any of this block's own work runs --
 						// see lastPoint's doc comment above.
 						lastPoint = point
+						// Only a block whose callback succeeded counts: a
+						// failed one is delivered again by the resumed
+						// session, which must still see the crossing.
+						defer func() {
+							if retErr == nil {
+								crossing.forward(block.Era().Id, block.SlotNumber())
+							}
+						}()
 
 						if !utxoAttempted && !skipUTxO {
 							utxoAttempted = true
@@ -1224,6 +1270,28 @@ func RunFromGenesis(
 								)
 							}
 						} else if utxoRefs != nil {
+							if crossing.crosses(block.Era().Id) {
+								// The pre-hard-fork transactions still
+								// buffered are applied first, so a redeem
+								// output one of them created is removed too.
+								if err := flushPendingTxInfos(
+									sessionCtx, point,
+								); err != nil {
+									return callbackErr(
+										"flush tx_info at slot %d: %w",
+										point.Slot, err,
+									)
+								}
+								if utxoRefs != nil {
+									removed := ReturnRedeemUTxOs(utxoRefs)
+									logf(
+										"nodeparity: applied the Allegra hard "+
+											"fork's redeem-address UTxO removal "+
+											"at slot %d: %d refs removed",
+										point.Slot, len(removed),
+									)
+								}
+							}
 							for _, tx := range block.Transactions() {
 								pendingTxHashes = append(
 									pendingTxHashes, tx.Hash().String(),
@@ -1492,6 +1560,7 @@ func RunFromGenesis(
 						// disabled) reconstruction below.
 						if rollbackInvalidates {
 							pendingTxHashes = pendingTxHashes[:0]
+							crossing.rollback(point.Slot)
 						}
 
 						if rollbackInvalidates && utxoRefs != nil {

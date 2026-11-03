@@ -479,7 +479,6 @@ func resumeBackfill(
 			err,
 		)
 	}
-	bf.DisableNonceComputation()
 	needed, err := bf.NeedsBackfill()
 	if err != nil {
 		return fmt.Errorf("checking backfill state: %w", err)

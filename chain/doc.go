@@ -30,8 +30,12 @@
 //   - ChainUpdateEventType      — a block was added to the primary chain, or
 //     the primary chain was rolled back to a point
 //   - ChainForkEventType        — a fork was observed against the primary chain
-//   - ChainHeaderEventType      — ordered header-lifecycle stream: a
-//     ranking-block header carrying a Leios endorser-block announcement
-//     entered the header queue (header arrival, not block application), or
-//     queued headers left it again without becoming blocks
+//   - ChainHeaderEventType      — ordered header-lifecycle stream: an
+//     authenticated Leios-era ranking-block header entered the header queue
+//     (header arrival, not block application), or queued headers left it
+//     again without becoming blocks
+//
+// Only the primary chain publishes. Fork chains built by NewChain and
+// NewChainFromIntersect carry no event bus, because their headers and blocks
+// are not the node's chain.
 package chain
