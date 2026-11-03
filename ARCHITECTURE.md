@@ -6298,14 +6298,11 @@ once. Conflicting declarations fail closed, and a retained peer can lose its
 identity but cannot be renamed to a different operator while its delivered
 frontier remains tracked.
 
-Canonical Dijkstra Genesis startup supplies IOG and Blink Labs relay groups by
-default. Defaults require matching network magic and every canonical genesis
-hash; private networks reusing a magic do not inherit them. Musashi receives the
-same operator defaults only when its configuration selects Genesis mode; its
-canonical Praos mode is unchanged. A nil `controlGroups` selects these defaults;
-an explicit empty list disables them and retains ledger/snapshot identity
-selection. Explicit groups replace defaults. The public
-`WithGenesisControlGroups` option owns its input, including endpoint slices.
+Dingo supplies no default control groups for any network. A nil or empty
+`controlGroups` retains ledger/snapshot identity selection, with the address
+group of the connection as the fallback described below. Explicit groups are
+the exclusive witness set. The public `WithGenesisControlGroups` option owns its
+input, including endpoint slices.
 
 The node passes a frozen group set to each replacement peer governor on startup,
 restore and truncate. The governor overlays one local root per operator group
@@ -6785,10 +6782,10 @@ Ordinary Praos sessions continue to use primary-chain intersection points.
   A best-peer → none transition publishes `chainselection.selected_none` for
   observability of the stall; peer governance may also subscribe to the
   corroboration-failure event to react.
-- `corroborationPeers` defaults to 1, so a fresh node needs one independent
-  witness before a fast source can drive Genesis selection. Setting it to 0
-  explicitly disables the gate and trusts every configured source for fork
-  choice (density-only Genesis selection). The per-peer hash frontier is
+- `corroborationPeers` defaults to 0, so the gate is off and a node with a
+  single upstream peer syncs by density-only Genesis selection, as the reference
+  node does. Setting it to N requires N independent witnesses before a fast
+  source can drive Genesis selection. The per-peer hash frontier is
   tracked in every Genesis mode (the trusted-frontier rule above needs it) and
   dropped in Praos, so normal Praos operation carries no extra state.
 - **Header-crypto verification gates observation, independent of

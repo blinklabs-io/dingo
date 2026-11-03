@@ -271,7 +271,7 @@ mithril:
 			Enabled:                     false,
 			WindowSlots:                 4321,
 			PromotionMinDiversityGroups: 4,
-			CorroborationPeers:          1,
+			CorroborationPeers:          0,
 			// Unset in the file, so the defaults survive.
 			LimitOnPatienceEnabled: true,
 		},
@@ -541,7 +541,7 @@ func TestLoad_GenesisCorroborationDefaultsSecurely(t *testing.T) {
 	resetGlobalConfig()
 	cfg, err := LoadConfig(emptyConfig)
 	require.NoError(t, err)
-	require.Equal(t, 1, cfg.GenesisBootstrap.CorroborationPeers)
+	require.Zero(t, cfg.GenesisBootstrap.CorroborationPeers)
 
 	explicitDisable := filepath.Join(t.TempDir(), "disable.yaml")
 	require.NoError(t, os.WriteFile(explicitDisable, []byte(`

@@ -15,7 +15,6 @@
 package dingo
 
 import (
-	"reflect"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
@@ -23,9 +22,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestGenesisControlGroupsCanonicalDefaults(t *testing.T) {
+func TestGenesisControlGroupsHaveNoNetworkDefaults(t *testing.T) {
 	t.Parallel()
-	for _, network := range []string{"dijkstra", "musashi", "preview"} {
+	for _, network := range []string{
+		"dijkstra", "musashi", "preview", "preprod", "mainnet",
+	} {
 		t.Run(network, func(t *testing.T) {
 			t.Parallel()
 			cfg, err := cardano.NewCardanoNodeConfigFromEmbedFS(
@@ -37,46 +38,9 @@ func TestGenesisControlGroupsCanonicalDefaults(t *testing.T) {
 				config: Config{cardanoNodeConfig: cfg, genesisBootstrap: true},
 			}
 			n.config.networkMagic = cfg.ShelleyGenesis().NetworkMagic
-			groups := n.genesisControlGroups()
-			if network != "dijkstra" {
-				require.Empty(t, groups)
-				return
-			}
-			require.Len(t, groups, 2)
-			require.Len(t, groups[0].AccessPoints, 1)
-			require.Len(t, groups[1].AccessPoints, 2)
-			for _, g := range groups {
-				require.NoError(t, g.Validate())
-			}
-			groups[0].Identity = "mutated"
-			require.Equal(t, "iog", n.genesisControlGroups()[0].Identity)
-			for _, name := range []string{"ShelleyGenesisHash", "ByronGenesisHash", "AlonzoGenesisHash", "ConwayGenesisHash", "DijkstraGenesisHash"} {
-				field := reflect.ValueOf(cfg).Elem().FieldByName(name)
-				original := field.String()
-				field.SetString("private genesis")
-				require.Empty(
-					t,
-					n.genesisControlGroups(),
-					"private %s cannot inherit public trust",
-					name,
-				)
-				field.SetString(original)
-			}
+			require.Empty(t, n.genesisControlGroups())
 			n.config.cfg = NewConfig().cfg
-			WithGenesisControlGroups([]topology.PeerControlGroup{})(&n.config)
-			require.Empty(
-				t,
-				n.genesisControlGroups(),
-				"explicit empty list overrides canonical defaults",
-			)
-			WithGenesisControlGroups(nil)(&n.config)
-			require.Len(t, n.genesisControlGroups(), 2, "nil restores defaults")
-			n.config.genesisBootstrap = false
-			require.Empty(
-				t,
-				n.genesisControlGroups(),
-				"Praos does not add default roots",
-			)
+			require.Empty(t, n.genesisControlGroups())
 		})
 	}
 }
