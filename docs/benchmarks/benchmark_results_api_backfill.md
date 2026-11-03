@@ -1,8 +1,27 @@
 # Dingo Mithril API Backfill Benchmark Results
 
 Focused Mithril API-mode metadata backfill results are tracked here separately
-from the broader ledger and database benchmark table. This is a historical
-snapshot, not a measurement of the current branch or current releases.
+from the broader ledger and database benchmark table. Each section identifies
+the measured release or commit; the figures apply only to those runs.
+
+## v0.89.0 batch-size comparison
+
+These full Mithril API syncs used the v0.89.0 release binary, a fresh database
+and cache for each run, and the same pinned snapshot and host within each
+network. Batch size was the only changed setting. Each network has one batch-
+100 control and repeated batch-200 runs; the positive result is consistent,
+but a single control per network does not measure control-run variation.
+
+| Network | Batch-100 control | Batch-200 runs | Batch-200 mean | Mean change |
+| --- | ---: | --- | ---: | ---: |
+| Preview | 3h18m37.118s | 3h13m09.320s; 3h14m06.301s | 3h13m37.811s | 4m59.307s faster (2.512%) |
+| Preprod | 4h30m10.063s | 4h11m39.175s; 4h15m45.012s; 4h23m14.841s | 4h16m53.009s | 13m17.054s faster (4.917%) |
+
+Every batch-200 run completed sooner than its network's shared batch-100
+control. This supports changing the default to 200 as an additive improvement;
+it does not establish the 20% target. The captures do not include comparable
+resource samples, and the shared control leaves run-to-run variation
+unmeasured.
 
 ## May 29-30, 2026 Preview Backfill
 

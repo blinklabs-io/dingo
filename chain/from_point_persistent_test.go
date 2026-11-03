@@ -324,6 +324,52 @@ func TestChainHoldsPointRejectsConcurrentRollback(t *testing.T) {
 	require.False(t, c.HoldsPoint(t.Context(), point))
 }
 
+// A mutation that overlaps the read leaves the membership unknown, which a
+// caller must be able to tell from a point that is not held.
+func TestChainHoldsPointSettledReportsOverlappingMutation(t *testing.T) {
+	t.Parallel()
+	db, store := newLocalProbeDB(t, nil)
+	cm, err := chain.NewManager(t.Context(), db, nil)
+	require.NoError(t, err)
+	mustSetLedger(t, cm, 100)
+	c := cm.PrimaryChain()
+	for _, block := range testBlocks {
+		require.NoError(t, c.AddBlock(t.Context(), block, nil))
+	}
+	last := blockPoint(testBlocks[len(testBlocks)-1])
+	survivor := blockPoint(testBlocks[len(testBlocks)-2])
+
+	held, settled := c.HoldsPointSettled(t.Context(), survivor)
+	require.True(t, held)
+	require.True(t, settled)
+	held, settled = c.HoldsPointSettled(t.Context(), ocommon.NewPoint(
+		survivor.Slot+1, survivor.Hash,
+	))
+	require.False(t, held)
+	require.True(t, settled, "an absent point is a settled answer")
+
+	var rolledBack atomic.Bool
+	hook := func() {
+		require.NoError(t, c.Rollback(t.Context(), survivor))
+		rolledBack.Store(true)
+	}
+	store.indexKey = dbtypes.BlockBlobIndexKey(uint64(len(testBlocks) - 1))
+	db.SetBlobStore(store)
+	store.afterIndexGet.Store(&hook)
+	held, settled = c.HoldsPointSettled(t.Context(), survivor)
+	require.True(t, rolledBack.Load(), "force the rollback/read interleaving")
+	require.False(t, held)
+	require.False(t, settled,
+		"a read a rollback overlapped must not report the block absent")
+
+	held, settled = c.HoldsPointSettled(t.Context(), survivor)
+	require.True(t, held)
+	require.True(t, settled)
+	held, settled = c.HoldsPointSettled(t.Context(), last)
+	require.False(t, held)
+	require.True(t, settled)
+}
+
 func TestChainHoldsPointRejectsUncommittedCallerAdd(t *testing.T) {
 	t.Parallel()
 	for _, outcome := range []string{"commit", "rollback"} {

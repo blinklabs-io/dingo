@@ -185,6 +185,10 @@ var ErrUnroutableAddress = errors.New("unroutable peer address")
 // publicly-routable unicast IP. It returns false for private (RFC 1918 /
 // RFC 4193), loopback, link-local, multicast, unspecified, and
 // documentation-only addresses.
+// An IPv6 literal carrying a zone (fe80::1%eth0) is never routable: the zone
+// names an interface on this host, which no publicly routable peer needs, and
+// accepting one would let zone variants of one address occupy separate peer
+// entries.
 // If the host is not a valid IP (e.g. unresolved hostname), it is
 // considered routable so that DNS-based topology peers still work.
 func isRoutableAddr(address string) bool {
@@ -193,12 +197,41 @@ func isRoutableAddr(address string) bool {
 		// Bare host or malformed — treat as routable to be safe
 		host = address
 	}
-	ip := net.ParseIP(host)
-	if ip == nil {
+	ip, zone, ok := parseIPLiteral(host)
+	if !ok {
 		// Not an IP literal (hostname) — allow it
 		return true
 	}
+	if zone != "" {
+		return false
+	}
 	return IsRoutableIP(ip)
+}
+
+// parseIPLiteral parses host as an IP literal, returning any IPv6 zone
+// separately. net.ParseIP rejects a scoped literal such as fe80::1%eth0, so a
+// caller using it alone treats the literal as a hostname, and resolving that
+// "hostname" returns the address with its zone discarded.
+func parseIPLiteral(host string) (net.IP, string, bool) {
+	if ip := net.ParseIP(host); ip != nil {
+		return ip, "", true
+	}
+	addr, err := netip.ParseAddr(host)
+	if err != nil || addr.Zone() == "" {
+		return nil, "", false
+	}
+	return net.IP(addr.AsSlice()), addr.Zone(), true
+}
+
+// formatIPLiteral returns the canonical text of an address returned by
+// parseIPLiteral. A zoned address keeps the netip form, because net.IP prints
+// an IPv4-mapped address as dotted IPv4, which cannot carry a zone.
+func formatIPLiteral(ip net.IP, zone string) string {
+	if zone == "" {
+		return ip.String()
+	}
+	addr, _ := netip.AddrFromSlice(ip)
+	return addr.WithZone(zone).String()
 }
 
 // unreachablePrefixes are ranges that net.IP's own class predicates report as
@@ -428,10 +461,9 @@ func (p *PeerGovernor) normalizeAddress(address string) string {
 	}
 
 	// Try to parse as IP first
-	ip := net.ParseIP(host)
-	if ip != nil {
+	if ip, zone, ok := parseIPLiteral(host); ok {
 		// Normalize IPv6 addresses (e.g., ::1 vs 0:0:0:0:0:0:0:1)
-		return net.JoinHostPort(ip.String(), port)
+		return net.JoinHostPort(formatIPLiteral(ip, zone), port)
 	}
 
 	// It's a hostname - just lowercase it (no DNS lookup)
@@ -450,10 +482,9 @@ func (p *PeerGovernor) resolveAddress(address string) string {
 	}
 
 	// Try to parse as IP first
-	ip := net.ParseIP(host)
-	if ip != nil {
+	if ip, zone, ok := parseIPLiteral(host); ok {
 		// Already an IP, normalize it
-		return net.JoinHostPort(ip.String(), port)
+		return net.JoinHostPort(formatIPLiteral(ip, zone), port)
 	}
 
 	// Port 0 marks a MultiHostName relay, whose port lives in an SRV record.
@@ -685,7 +716,7 @@ func (p *PeerGovernor) resolveDialAddress(
 		return address
 	}
 	// IP literals dial exactly as before: no re-resolution, no rotation.
-	if net.ParseIP(host) != nil {
+	if _, _, ok := parseIPLiteral(host); ok {
 		return address
 	}
 	if port == multiHostPort {
@@ -1119,9 +1150,24 @@ func (p *PeerGovernor) TouchPeerByConnId(connId ouroboros.ConnectionId) {
 	}
 }
 
-// CorroborationIdentityByConnId returns a trusted control identity for the
-// peer holding connId. Address and topology diversity do not prove independent
-// control, so peers without ledger-backed control metadata fail closed.
+// peerSharingCorroborationIdentity is the single independence group shared by
+// all peers learned through peer sharing.
+const peerSharingCorroborationIdentity = "peer-sharing"
+
+// CorroborationIdentityByConnId returns the independence group of the peer
+// holding connId for Genesis corroboration, or "" when no tracked peer holds
+// it.
+//
+// With configured control groups only their trusted endpoints are witnesses.
+// Otherwise a peer discovered through the ledger or a peer snapshot uses its
+// control identity. An outbound peer from the operator's own topology, or a
+// ledger or snapshot relay whose control identity is missing or ambiguous
+// because several pools list the same endpoint, falls back to the address group (/24, /64 or hostname) of the address its connection uses. A
+// node syncing from genesis has few or no usable control identities, so
+// refusing those peers would leave it unable to corroborate anything and
+// chain selection would never start. All peer-sharing peers form one group.
+// Unmatched inbound connections stay unidentified. The address group is a lower bound on independence, never the
+// topology GroupID: a valency group can list several operators' relays.
 func (p *PeerGovernor) CorroborationIdentityByConnId(
 	connId ouroboros.ConnectionId,
 ) string {
@@ -1131,7 +1177,30 @@ func (p *PeerGovernor) CorroborationIdentityByConnId(
 	if peerIdx == -1 {
 		return ""
 	}
-	return p.peers[peerIdx].CorroborationIdentity
+	peer := p.peers[peerIdx]
+	if len(p.config.ControlGroups) > 0 {
+		return p.configuredCorroborationIdentityLocked(peer)
+	}
+	if peer.CorroborationIdentity != "" {
+		return peer.CorroborationIdentity
+	}
+	switch peer.Source {
+	case PeerSourceP2PGossip:
+		// Remote parties choose the addresses they share, so every
+		// peer-sharing peer counts as one group: they can corroborate an
+		// identified peer but never each other.
+		return peerSharingCorroborationIdentity
+	case PeerSourceP2PLedger,
+		PeerSourceTopologyLocalRoot,
+		PeerSourceTopologyPublicRoot,
+		PeerSourceTopologyBootstrapPeer:
+	default:
+		return ""
+	}
+	if connId.RemoteAddr != nil {
+		return addressGroup(connId.RemoteAddr.String())
+	}
+	return peerAddressGroup(peer)
 }
 
 func (p *PeerGovernor) IsChainSelectionEligible(

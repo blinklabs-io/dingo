@@ -442,9 +442,14 @@ func bootstrapV2(
 	// Step 2: Set up download directory
 	downloadDir := cfg.DownloadDir
 	createdTempDir := false
+	var tempRoot *os.Root
+	var tempOwned *bootstrapDir
+	var downloadOwned *bootstrapDir
 	if downloadDir == "" {
 		var err error
-		downloadDir, err = os.MkdirTemp("", "dingo-mithril-*")
+		downloadDir, tempOwned, err = createBootstrapDir(
+			"", "dingo-mithril-*",
+		)
 		if err != nil {
 			return nil, fmt.Errorf(
 				"creating temp directory: %w",
@@ -452,12 +457,47 @@ func bootstrapV2(
 			)
 		}
 		createdTempDir = true
+		tempRoot = tempOwned.root
+	} else {
+		var err error
+		downloadDir, downloadOwned, err = retainOrCreateBootstrapDir(downloadDir)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"retaining bootstrap download directory %s: %w",
+				downloadDir,
+				err,
+			)
+		}
+	}
+	downloadRoot, err := os.OpenRoot(downloadDir)
+	if err != nil {
+		if createdTempDir && tempOwned != nil {
+			tempOwned.root = tempRoot
+			_ = tempOwned.cleanup()
+		} else if downloadOwned != nil {
+			_ = downloadOwned.close()
+		}
+		return nil, fmt.Errorf(
+			"retaining bootstrap download directory %s: %w",
+			downloadDir,
+			err,
+		)
 	}
 	// Clean up temp dir on error to avoid leaking disk space
 	success := false
 	defer func() {
+		if downloadRoot != nil {
+			_ = downloadRoot.Close()
+			downloadRoot = nil
+		}
 		if !success && createdTempDir {
-			os.RemoveAll(downloadDir)
+			tempOwned.root = tempRoot
+			_ = tempOwned.cleanup()
+			tempRoot = tempOwned.root
+		}
+		if downloadOwned != nil {
+			_ = downloadOwned.close()
+			downloadOwned = nil
 		}
 	}()
 	cfg.extractionBudget, err = newBootstrapExtractionBudget(downloadDir)
@@ -500,13 +540,14 @@ func bootstrapV2(
 	)
 	var ancillaryTree *vettedDir
 	var ancillaryDigests map[string]string
-	var ancillaryArchivePath string
+	var ancillaryArchive *bootstrapFile
 	var ancillaryErr error
 	// Closed only when the result that would own it is never returned; on
 	// success it is carried to the ledger-state import and released by Cleanup.
 	defer func() {
 		if !success {
 			ancillaryTree.Close()
+			_ = ancillaryArchive.close()
 		}
 	}()
 
@@ -541,7 +582,6 @@ func bootstrapV2(
 			if cached := ledgerDir(candidateDir); cached != nil {
 				cachedDigests, err := verifyAncillaryExtraction(cfg, cached)
 				if err != nil {
-					cached.Close()
 					cfg.Logger.Warn(
 						"cached ancillary data failed "+
 							"verification, redownloading",
@@ -549,7 +589,7 @@ func bootstrapV2(
 						"path", candidateDir,
 						"error", err,
 					)
-					if err := os.RemoveAll(candidateDir); err != nil {
+					if err := cleanupVettedDir(cached); err != nil {
 						cfg.Logger.Warn(
 							"failed to remove unverified ancillary data",
 							"component", "mithril",
@@ -557,13 +597,23 @@ func bootstrapV2(
 							"error", err,
 						)
 					}
-					if err := os.Remove(candidateArchive); err != nil &&
-						!errors.Is(err, os.ErrNotExist) {
+					archiveRoot, openErr := downloadRoot.OpenRoot(".")
+					var cachedArchive *bootstrapFile
+					if openErr == nil {
+						cachedArchive, openErr = retainBootstrapFile(
+							candidateArchive,
+							archiveRoot,
+						)
+					}
+					if openErr == nil {
+						openErr = cachedArchive.cleanup()
+					}
+					if openErr != nil && !errors.Is(openErr, os.ErrNotExist) {
 						cfg.Logger.Warn(
 							"failed to remove stale ancillary archive",
 							"component", "mithril",
 							"path", candidateArchive,
-							"error", err,
+							"error", openErr,
 						)
 					}
 				} else {
@@ -575,19 +625,29 @@ func bootstrapV2(
 					)
 					ancillaryTree = cached
 					ancillaryDigests = cachedDigests
-					if _, err := os.Stat(candidateArchive); err == nil {
-						ancillaryArchivePath = candidateArchive
+					archiveRoot, openErr := downloadRoot.OpenRoot(".")
+					if openErr == nil {
+						ancillaryArchive, openErr = retainBootstrapFile(
+							candidateArchive,
+							archiveRoot,
+						)
+					}
+					if openErr != nil && !errors.Is(openErr, os.ErrNotExist) {
+						ancillaryErr = fmt.Errorf(
+							"retaining cached ancillary archive: %w",
+							openErr,
+						)
 					}
 					return
 				}
 			}
-			tree, treeDigests, archPath, ancErr := downloadAncillaryV2(
+			tree, treeDigests, archive, ancErr := downloadAncillaryV2(
 				ancCtx, cfg, artifact, downloadDir,
 			)
 			// Recorded whether or not the tree turned out usable, so a
 			// downloaded archive still gets cleaned up.
-			if archPath != "" {
-				ancillaryArchivePath = archPath
+			if archive != nil {
+				ancillaryArchive = archive
 			}
 			if ancErr != nil {
 				ancillaryErr = ancErr
@@ -600,11 +660,18 @@ func bootstrapV2(
 				// and a cancelled run keeps its archive: an interrupted
 				// extraction says nothing about the bytes.
 				var dlErr *ancillaryDownloadError
-				if archPath != "" && ancCtx.Err() == nil &&
+				if archive != nil && ancCtx.Err() == nil &&
 					!errors.As(ancErr, &dlErr) {
-					ancillaryArchivePath = removeBadAncillaryArchive(
-						cfg.Logger, archPath,
-					)
+					if cleanupErr := archive.cleanup(); cleanupErr != nil {
+						cfg.Logger.Warn(
+							"failed to remove bad ancillary archive",
+							"component", "mithril",
+							"path", archive.path,
+							"error", cleanupErr,
+						)
+					} else {
+						ancillaryArchive = nil
+					}
 				}
 				return
 			}
@@ -680,7 +747,6 @@ func bootstrapV2(
 		"ancillary_dir", ancillaryTree.Path(),
 	)
 
-	success = true
 	result := &BootstrapResult{
 		// Synthesize a SnapshotListItem so downstream consumers
 		// (sync flow, metrics) stay backend-agnostic.
@@ -714,12 +780,22 @@ func bootstrapV2(
 		// the only thing that makes it worth anything.
 		AncillaryVerified: ancillaryTree != nil &&
 			cfg.VerifyCertificateChain,
-		AncillaryDigests:     ancillaryDigests,
-		AncillaryArchivePath: ancillaryArchivePath,
+		AncillaryDigests: ancillaryDigests,
+	}
+	if ancillaryArchive != nil {
+		result.AncillaryArchivePath = ancillaryArchive.path
+		result.ancillaryArchiveRoot = ancillaryArchive.root
+		result.ancillaryArchiveInfo = ancillaryArchive.info
+		result.ancillaryArchiveGuard = ancillaryArchive.guard
+		ancillaryArchive.root = nil
+		ancillaryArchive.guard = nil
 	}
 	if createdTempDir {
 		result.TempDir = downloadDir
+		result.TempRoot = tempRoot
+		result.tempOwned = tempOwned
 	}
+	success = true
 	return result, nil
 }
 
@@ -932,7 +1008,6 @@ func fetchVerifiedDigests(
 				"type", loc.Type,
 				"error", lastErr,
 			)
-			removeDigestsCache(artifact, downloadDir)
 			continue
 		}
 		fetched = true
@@ -990,20 +1065,6 @@ func verifyDigestMerkleRoot(
 	return nil
 }
 
-func removeDigestsCache(
-	artifact *CardanoDatabaseSnapshot,
-	downloadDir string,
-) {
-	suffix := truncateDigest(artifact.Hash)
-	_ = os.Remove(filepath.Join(downloadDir, filepath.Base(fmt.Sprintf(
-		"digests-%s.tar.zst",
-		suffix,
-	))))
-	_ = os.RemoveAll(
-		filepath.Join(downloadDir, filepath.Base("digests-"+suffix)),
-	)
-}
-
 // downloadDigestsArchive downloads the snapshot-specific digest
 // archive (tar.zst containing a single JSON file) and parses it.
 func downloadDigestsArchive(
@@ -1013,48 +1074,77 @@ func downloadDigestsArchive(
 	artifact *CardanoDatabaseSnapshot,
 	downloadDir string,
 ) (_ []CardanoDatabaseDigestEntry, retErr error) {
-	archivePath, err := DownloadSnapshot(
-		ctx, DownloadConfig{
-			MaxBytes:    cfg.objectMaxBytes(digestListMaxBytes),
-			spaceBudget: cfg.downloadSpaceBudget,
-			URL:         uri,
-			DestDir:     downloadDir,
-			Filename: filepath.Base(fmt.Sprintf(
-				"digests-%s.tar.zst",
-				truncateDigest(artifact.Hash),
-			)),
-			Logger: cfg.Logger,
-			OnProgress: withProgressContext(
-				cfg.OnProgress,
-				"immutable_digest_list",
-				artifact.Hash,
-			),
-			IdleTimeout:         cfg.DownloadIdleTimeout,
-			MaxIdleRetries:      cfg.DownloadMaxIdleRetries,
-			MaxTransientRetries: cfg.DownloadMaxTransientRetries,
-			AllowInsecureHTTP:   cfg.AllowInsecureHTTP,
-			HTTPClient:          cfg.httpClient,
-		},
-	)
+	downloadCfg := DownloadConfig{
+		MaxBytes:    cfg.objectMaxBytes(digestListMaxBytes),
+		spaceBudget: cfg.downloadSpaceBudget,
+		URL:         uri,
+		DestDir:     downloadDir,
+		Filename: filepath.Base(fmt.Sprintf(
+			"digests-%s.tar.zst",
+			truncateDigest(artifact.Hash),
+		)),
+		Logger: cfg.Logger,
+		OnProgress: withProgressContext(
+			cfg.OnProgress,
+			"immutable_digest_list",
+			artifact.Hash,
+		),
+		IdleTimeout:         cfg.DownloadIdleTimeout,
+		MaxIdleRetries:      cfg.DownloadMaxIdleRetries,
+		MaxTransientRetries: cfg.DownloadMaxTransientRetries,
+		AllowInsecureHTTP:   cfg.AllowInsecureHTTP,
+		HTTPClient:          cfg.httpClient,
+	}
+	archivePath, downloadRoot, err := downloadSnapshot(ctx, downloadCfg)
 	if err != nil {
+		if downloadRoot != nil {
+			_ = downloadRoot.Close()
+		}
 		return nil, err
 	}
-	// Once the archive is fully downloaded, any failure to use it discards
-	// it: a cached file of the right size is otherwise accepted again by the
-	// resume request's 416 answer. Cancellation is not such a failure.
-	defer func() {
-		if retErr != nil && ctx.Err() == nil {
-			removeDigestsCache(artifact, downloadDir)
+	archive, err := retainBootstrapFile(archivePath, downloadRoot)
+	if err != nil {
+		return nil, fmt.Errorf("retaining digests archive: %w", err)
+	}
+	archiveFile, err := archive.root.Open(filepath.Base(archivePath))
+	if err != nil {
+		_ = archive.close()
+		return nil, fmt.Errorf("opening digests archive: %w", err)
+	}
+	openedArchive, err := archiveFile.Stat()
+	if err != nil || !os.SameFile(archive.info, openedArchive) {
+		_ = archiveFile.Close()
+		_ = archive.close()
+		if err != nil {
+			return nil, fmt.Errorf("inspecting digests archive: %w", err)
 		}
+		return nil, fmt.Errorf(
+			"%w: %q", errBootstrapCleanupIdentity, archivePath,
+		)
+	}
+	var extracted *vettedDir
+	defer func() {
+		closeErr := archiveFile.Close()
+		if ctx.Err() != nil {
+			extracted.Close()
+			closeErr = errors.Join(closeErr, archive.close())
+		} else {
+			closeErr = errors.Join(
+				closeErr,
+				cleanupVettedDir(extracted),
+				archive.cleanup(),
+			)
+		}
+		retErr = errors.Join(retErr, closeErr)
 	}()
 	destDir := filepath.Join(
 		downloadDir,
 		filepath.Base("digests-"+truncateDigest(artifact.Hash)),
 	)
-	// Replace: removeDigestsCache may not have run if a previous attempt
-	// was interrupted, leaving a stale digests directory.
-	if _, err := ExtractArchive(
+	var published os.FileInfo
+	if _, err := extractArchiveFile(
 		ctx,
+		archiveFile,
 		archivePath,
 		destDir,
 		cfg.Logger.With(
@@ -1066,10 +1156,27 @@ func downloadDigestsArchive(
 		withArchiveLimits(withBootstrapExtractionBudget(
 			digestListLimits(), cfg.extractionBudget,
 		)),
+		withPublishedIdentity(&published),
 	); err != nil {
 		return nil, fmt.Errorf("extracting digests archive: %w", err)
 	}
-	dirEntries, err := os.ReadDir(destDir)
+	extractedRoot, err := openVerifiedDir(destDir)
+	if err != nil {
+		return nil, fmt.Errorf("retaining digests directory: %w", err)
+	}
+	openedExtracted, err := extractedRoot.Stat(".")
+	if err != nil || published == nil ||
+		!os.SameFile(published, openedExtracted) {
+		_ = extractedRoot.Close()
+		if err != nil {
+			return nil, fmt.Errorf("inspecting digests directory: %w", err)
+		}
+		return nil, fmt.Errorf(
+			"%w: %q", errBootstrapCleanupIdentity, destDir,
+		)
+	}
+	extracted = &vettedDir{root: extractedRoot, path: destDir}
+	dirEntries, err := fs.ReadDir(extracted.root.FS(), ".")
 	if err != nil {
 		return nil, fmt.Errorf("reading digests directory: %w", err)
 	}
@@ -1079,7 +1186,7 @@ func downloadDigestsArchive(
 			!strings.HasSuffix(entry.Name(), ".json") {
 			continue
 		}
-		jsonPath = filepath.Join(destDir, entry.Name())
+		jsonPath = entry.Name()
 		break
 	}
 	if jsonPath == "" {
@@ -1087,11 +1194,16 @@ func downloadDigestsArchive(
 			"no digest JSON file found in digests archive",
 		)
 	}
-	data, err := os.ReadFile(
-		jsonPath,
-	) //nolint:gosec // path is constructed from our own extraction directory
+	jsonFile, err := extracted.root.Open(jsonPath)
 	if err != nil {
 		return nil, fmt.Errorf("reading digest JSON: %w", err)
+	}
+	data, readErr := io.ReadAll(jsonFile)
+	closeErr := jsonFile.Close()
+	if readErr != nil || closeErr != nil {
+		return nil, fmt.Errorf(
+			"reading digest JSON: %w", errors.Join(readErr, closeErr),
+		)
 	}
 	var entries []CardanoDatabaseDigestEntry
 	if err := json.Unmarshal(data, &entries); err != nil {
@@ -1681,23 +1793,6 @@ func sha256Reader(r io.Reader, name string) (string, int64, error) {
 	return hex.EncodeToString(hasher.Sum(nil)), size, nil
 }
 
-// removeBadAncillaryArchive deletes an ancillary archive that failed
-// extraction or verification and returns the path still left for Cleanup
-// to remove: empty once the file is gone.
-func removeBadAncillaryArchive(logger *slog.Logger, path string) string {
-	if err := os.Remove(path); err != nil &&
-		!errors.Is(err, os.ErrNotExist) {
-		logger.Warn(
-			"failed to remove bad ancillary archive",
-			"component", "mithril",
-			"path", path,
-			"error", err,
-		)
-		return path
-	}
-	return ""
-}
-
 // ancillaryDownloadError marks a failure to fetch the ancillary archive, as
 // opposed to a failure to use a complete one.
 type ancillaryDownloadError struct{ err error }
@@ -1726,9 +1821,9 @@ func downloadAncillaryV2(
 	cfg BootstrapConfig,
 	artifact *CardanoDatabaseSnapshot,
 	downloadDir string,
-) (*vettedDir, map[string]string, string, error) {
+) (*vettedDir, map[string]string, *bootstrapFile, error) {
 	if len(artifact.Ancillary.Locations) == 0 {
-		return nil, nil, "", errors.New(
+		return nil, nil, nil, errors.New(
 			"no ancillary locations in Cardano database snapshot",
 		)
 	}
@@ -1748,33 +1843,72 @@ func downloadAncillaryV2(
 		truncateDigest(artifact.Hash),
 	))
 
-	var ancillaryPath string
+	var archive *bootstrapFile
+	var archiveFile *os.File
 	var err error
+	downloadFailed := false
 	for i, loc := range artifact.Ancillary.Locations {
+		if archive != nil {
+			_ = archive.close()
+			archive = nil
+		}
 		if loc.URI == "" {
 			continue
 		}
-		ancillaryPath, err = DownloadSnapshot(
-			ctx, DownloadConfig{
-				MaxBytes:    cfg.objectMaxBytes(ancillaryMaxBytes),
-				spaceBudget: cfg.downloadSpaceBudget,
-				URL:         loc.URI,
-				DestDir:     downloadDir,
-				Filename:    ancillaryFilename,
-				Logger:      cfg.Logger,
-				OnProgress: withProgressContext(
-					cfg.OnProgress,
-					"ancillary_ledger_state",
-					artifact.Hash,
-				),
-				IdleTimeout:         cfg.DownloadIdleTimeout,
-				MaxIdleRetries:      cfg.DownloadMaxIdleRetries,
-				MaxTransientRetries: cfg.DownloadMaxTransientRetries,
-				AllowInsecureHTTP:   cfg.AllowInsecureHTTP,
-				HTTPClient:          cfg.httpClient,
-			},
-		)
-		if err == nil {
+		downloadCfg := DownloadConfig{
+			MaxBytes:    cfg.objectMaxBytes(ancillaryMaxBytes),
+			spaceBudget: cfg.downloadSpaceBudget,
+			URL:         loc.URI,
+			DestDir:     downloadDir,
+			Filename:    ancillaryFilename,
+			Logger:      cfg.Logger,
+			OnProgress: withProgressContext(
+				cfg.OnProgress,
+				"ancillary_ledger_state",
+				artifact.Hash,
+			),
+			IdleTimeout:         cfg.DownloadIdleTimeout,
+			MaxIdleRetries:      cfg.DownloadMaxIdleRetries,
+			MaxTransientRetries: cfg.DownloadMaxTransientRetries,
+			AllowInsecureHTTP:   cfg.AllowInsecureHTTP,
+			HTTPClient:          cfg.httpClient,
+		}
+		ancillaryPath, downloadRoot, downloadErr := downloadSnapshot(ctx, downloadCfg)
+		downloadFailed = downloadErr != nil
+		if downloadRoot != nil {
+			candidatePath := ancillaryPath
+			if candidatePath == "" {
+				candidatePath = downloadDestinationPath(downloadCfg)
+			}
+			candidate, retainErr := retainBootstrapFile(
+				candidatePath, downloadRoot,
+			)
+			if retainErr == nil {
+				archive = candidate
+			} else if !errors.Is(retainErr, os.ErrNotExist) && downloadErr == nil {
+				downloadErr = retainErr
+			}
+		}
+		err = downloadErr
+		if err == nil && archive != nil {
+			archiveFile, err = archive.root.Open(ancillaryFilename)
+			if err == nil {
+				opened, statErr := archiveFile.Stat()
+				if statErr != nil || !os.SameFile(archive.info, opened) {
+					if statErr != nil {
+						err = statErr
+					} else {
+						err = fmt.Errorf(
+							"%w: %q", errBootstrapCleanupIdentity,
+							archive.path,
+						)
+					}
+					_ = archiveFile.Close()
+					archiveFile = nil
+				}
+			}
+		}
+		if err == nil && archiveFile != nil {
 			break
 		}
 		cfg.Logger.Warn(
@@ -1785,8 +1919,17 @@ func downloadAncillaryV2(
 			"error", err,
 		)
 	}
-	if ancillaryPath == "" && err == nil {
-		err = errors.New("no usable ancillary locations")
+	if archive == nil {
+		if err == nil {
+			err = errors.New("no usable ancillary locations")
+			downloadFailed = true
+		}
+		if downloadFailed {
+			return nil, nil, nil, &ancillaryDownloadError{err: err}
+		}
+		return nil, nil, nil, fmt.Errorf(
+			"retaining downloaded ancillary archive: %w", err,
+		)
 	}
 	if err != nil {
 		// The destination path, not the (empty) return of a failed download:
@@ -1795,23 +1938,19 @@ func downloadAncillaryV2(
 		//
 		// Asked of the downloader rather than assembled here, so the two
 		// cannot name different files.
-		dest := downloadDestinationPath(DownloadConfig{
-			DestDir:  downloadDir,
-			Filename: ancillaryFilename,
-		})
-		return nil, nil, dest, &ancillaryDownloadError{err: err}
+		if downloadFailed {
+			return nil, nil, archive, &ancillaryDownloadError{err: err}
+		}
+		return nil, nil, archive, fmt.Errorf(
+			"retaining downloaded ancillary archive: %w", err,
+		)
 	}
+	ancillaryPath := archive.path
 
 	ancillaryDir := filepath.Join(
 		downloadDir,
 		filepath.Base("ancillary-"+artifact.Hash),
 	)
-	archiveFile, err := os.Open(ancillaryPath)
-	if err != nil {
-		return nil, nil, ancillaryPath, fmt.Errorf(
-			"opening ancillary archive: %w", err,
-		)
-	}
 	defer archiveFile.Close()
 	limits := withBootstrapExtractionBudget(
 		ancillaryLimits(), cfg.extractionBudget,
@@ -1822,7 +1961,7 @@ func downloadAncillaryV2(
 			cfg.decoderBudget,
 		)
 		if preflightErr != nil {
-			return nil, nil, ancillaryPath, fmt.Errorf(
+			return nil, nil, archive, fmt.Errorf(
 				"verifying ancillary manifest before extraction: %w",
 				preflightErr,
 			)
@@ -1832,12 +1971,13 @@ func downloadAncillaryV2(
 		)
 	}
 	if _, err := archiveFile.Seek(0, io.SeekStart); err != nil {
-		return nil, nil, ancillaryPath, fmt.Errorf(
+		return nil, nil, archive, fmt.Errorf(
 			"rewinding ancillary archive: %w", err,
 		)
 	}
 	// Replace: the resume path above may have removed an unverified
 	// extraction, but an interrupted run can still leave one behind.
+	var published os.FileInfo
 	if _, extractErr := extractArchiveFile(
 		ctx,
 		archiveFile,
@@ -1850,8 +1990,9 @@ func downloadAncillaryV2(
 		WithReplaceDestination(),
 		withDecoderBudget(cfg.decoderBudget),
 		withArchiveLimits(limits),
+		withPublishedIdentity(&published),
 	); extractErr != nil {
-		return nil, nil, ancillaryPath, fmt.Errorf(
+		return nil, nil, archive, fmt.Errorf(
 			"extracting ancillary archive: %w",
 			extractErr,
 		)
@@ -1861,29 +2002,66 @@ func downloadAncillaryV2(
 	// returned. Anything else leaves the manifest check describing a tree the
 	// caller does not go on to read.
 	extracted := ledgerDir(ancillaryDir)
+	if extracted != nil {
+		opened, statErr := extracted.root.Stat(".")
+		if statErr != nil || published == nil ||
+			!os.SameFile(published, opened) {
+			extracted.Close()
+			if statErr != nil {
+				return nil, nil, archive, fmt.Errorf(
+					"inspecting ancillary directory: %w", statErr,
+				)
+			}
+			return nil, nil, archive, fmt.Errorf(
+				"%w: %q", errBootstrapCleanupIdentity, ancillaryDir,
+			)
+		}
+	}
 	if extracted == nil {
 		// Unverified bootstraps reach here too — verifyAncillaryExtraction is
 		// a no-op for them — so an ancillary archive carrying no ledger state
 		// has to be caught on its own.
-		os.RemoveAll(ancillaryDir)
+		unusable, cleanupErr := openVerifiedDir(ancillaryDir)
+		if cleanupErr == nil {
+			opened, statErr := unusable.Stat(".")
+			if statErr != nil || published == nil ||
+				!os.SameFile(published, opened) {
+				_ = unusable.Close()
+				if statErr != nil {
+					cleanupErr = statErr
+				} else {
+					cleanupErr = fmt.Errorf(
+						"%w: %q", errBootstrapCleanupIdentity,
+						ancillaryDir,
+					)
+				}
+			} else {
+				cleanupErr = cleanupVettedDir(&vettedDir{
+					root: unusable,
+					path: ancillaryDir,
+				})
+			}
+		}
 		// The archive path goes back even so, since it was downloaded and
 		// still wants cleaning up.
-		return nil, nil, ancillaryPath, fmt.Errorf(
-			"extracted ancillary data at %s holds no ledger state",
-			ancillaryDir,
+		return nil, nil, archive, errors.Join(
+			fmt.Errorf(
+				"extracted ancillary data at %s holds no ledger state",
+				ancillaryDir,
+			),
+			cleanupErr,
 		)
 	}
 	digests, verifyErr := verifyAncillaryExtraction(cfg, extracted)
 	if verifyErr != nil {
 		// Remove the unverified extraction so it cannot be
 		// picked up by the resume path on a later run.
-		extracted.Close()
-		os.RemoveAll(ancillaryDir)
+		cleanupErr := cleanupVettedDir(extracted)
 		// The extraction goes, the archive stays — and stays reported.
 		// Cleanup removes the two separately, so an unverified manifest that
 		// cleared this path would leave the download behind in a directory the
 		// operator supplied and nothing else sweeps.
-		return nil, nil, ancillaryPath, verifyErr
+		return nil, nil, archive, errors.Join(verifyErr, cleanupErr)
 	}
 
 	cfg.Logger.Info(
@@ -1892,7 +2070,7 @@ func downloadAncillaryV2(
 		"path", extracted.Path(),
 	)
 
-	return extracted, digests, ancillaryPath, nil
+	return extracted, digests, archive, nil
 }
 
 // verifyAncillaryExtraction checks a verified bootstrap's ancillary tree

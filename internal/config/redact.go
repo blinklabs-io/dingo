@@ -184,6 +184,7 @@ var logPlainConfigFields = []string{
 	"ForgeSyncToleranceSlots",
 	"ForgeUpstreamStalenessSlots",
 	"FullPotRewardsEnabled",
+	"GenesisBootstrap.ControlGroups",
 	"GenesisBootstrap.CorroborationPeers",
 	"GenesisBootstrap.Enabled",
 	"GenesisBootstrap.LimitOnPatienceCapacity",

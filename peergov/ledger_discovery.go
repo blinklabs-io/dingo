@@ -546,8 +546,20 @@ func (p *PeerGovernor) addResolvedLedgerPeerContext(
 		if peer == nil {
 			continue
 		}
+		// A peer retained under the relay's own name because resolution failed
+		// when it was admitted has that name as its NormalizedAddress. The
+		// candidate is then one of the addresses the name now expands to, so
+		// it is the same relay and must not be added beside the peer. A peer
+		// that did resolve holds an address instead, and keeps admitting the
+		// name's other addresses. A bootstrap peer is not matched once
+		// bootstrap has exited: it is no longer dialed
+		// (spawnOutboundConnectionLocked), so the relay still needs a dialable
+		// peer of its own.
+		dormantBootstrap := p.isBootstrapPeer(peer) &&
+			!p.canPromoteBootstrapPeer()
 		if peer.NormalizedAddress == normalized ||
 			peer.NormalizedAddress == hostnameNormalized ||
+			(peer.NormalizedAddress == relayNormalized && !dormantBootstrap) ||
 			p.normalizeAddress(peer.Address) == hostnameNormalized {
 			existingPeer = peer
 			break

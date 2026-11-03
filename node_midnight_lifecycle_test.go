@@ -16,7 +16,6 @@ package dingo
 
 import (
 	"context"
-	"path/filepath"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
@@ -96,7 +95,7 @@ func TestLiveRestoreReinitializesMidnightIndexerByEnableGate(t *testing.T) {
 					t, numBlocks, nil,
 					disabledLiveLifecycleTestWorkerPoolCfg, StorageModeAPI, 0,
 				)
-				snapshotDir := filepath.Join(t.TempDir(), "snapshot")
+				snapshotDir := snapshotTestDir(t, "snapshot")
 				_, err := lifecycleSnapshot(t, n, snapshotDir)
 				require.NoError(t, err)
 				n.config.midnight = MidnightConfig{Enabled: enabled}

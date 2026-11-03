@@ -537,6 +537,19 @@ func (ls *LedgerState) validateLeiosAnnouncementBeforeApply(
 	return ls.config.ValidateLeiosAnnouncement(ctx, header)
 }
 
+// notifyLeiosAnnouncementAtTip tells the node that the live announcing block
+// recorded by the chunk just committed is now the ledger tip. The next chunk
+// validates its endorser block only once another block arrives, which can be
+// longer than the vote window.
+func (ls *LedgerState) notifyLeiosAnnouncementAtTip(tipHash []byte) {
+	header := ls.leiosApplyAnnouncer
+	if header == nil || ls.config.LeiosAnnouncementAtTip == nil ||
+		!bytes.Equal(tipHash, LeiosEndorserBlockBasisHash(header)) {
+		return
+	}
+	ls.config.LeiosAnnouncementAtTip(header)
+}
+
 func (ls *LedgerState) waitForLeiosBeforeApply(
 	ctx context.Context,
 	blocks []ledger.Block,
@@ -882,10 +895,9 @@ type NetworkIngestHoldTracker interface {
 // arrive after teardown.
 type ConnectionLiveFunc func(ouroboros.ConnectionId) bool
 
-// ForgedBlockChecker is an interface for checking whether the local
-// node recently forged a block for a given slot. This is used by
-// chainsync to detect slot battles when an incoming block from a
-// peer occupies the same slot as a locally forged block.
+// ForgedBlockChecker is an interface for checking whether the local node
+// recently forged a block for a given slot. Chainsync uses it to attribute the
+// local side of same-slot and restricted-window Praos battles.
 type ForgedBlockChecker interface {
 	// WasForgedByUs returns the block hash and true if the local node
 	// forged a block for the given slot, or nil and false otherwise.
@@ -986,6 +998,12 @@ type LedgerStateConfig struct {
 	// admission remains independent: an unavailable or invalid endorser block
 	// receives no vote but does not invalidate its ranking block.
 	ValidateLeiosAnnouncement func(context.Context, ledger.BlockHeader) error
+	// LeiosAnnouncementAtTip is called, without blocking, when an apply chunk
+	// commits with a live announcing ranking block as the ledger tip. That
+	// is the state its endorser block validates against, so a voter acts on
+	// it now instead of at the next block, which may be outside the vote
+	// window by then. Nil disables the notification.
+	LeiosAnnouncementAtTip func(ledger.BlockHeader)
 	// EndorserBlockWaitSlots is the number of slots that block processing
 	// waits at the chain tip for a Dijkstra ranking block's referenced
 	// endorser block to finish fetching before applying it. It is sourced from
@@ -1405,9 +1423,14 @@ type LedgerState struct {
 	// evalAdmission bounds concurrent EvaluateTx calls globally and per remote
 	// source. Nil means unbounded.
 	evalAdmission *evaluationLimiter
-	metrics       stateMetrics
-	consensus     atomic.Pointer[consensusSnapshot]
-	tip           atomic.Pointer[tipSnapshot]
+	// utxoWholeAdmission permits one complete GetUTxOWhole materialization at
+	// a time. It is initialized lazily so test-only LedgerState values that do
+	// not use NewLedgerState receive the same admission bound.
+	utxoWholeAdmission     chan struct{}
+	utxoWholeAdmissionOnce sync.Once
+	metrics                stateMetrics
+	consensus              atomic.Pointer[consensusSnapshot]
+	tip                    atomic.Pointer[tipSnapshot]
 	// tachysMu serializes construction of the full public leader selector.
 	// The cache is bounded to the same three-epoch window as pool snapshots
 	// and keyed by the published consensus context so rollback or state
@@ -1421,6 +1444,9 @@ type LedgerState struct {
 	// publication, so a reader waiting for the ledger to advance can block
 	// until the published state changes instead of polling it.
 	snapshotPublished atomic.Pointer[chan struct{}]
+	// forkForecastSummaries caches fork-anchored forecast summaries for the
+	// current consensus snapshot. See forecastSummaryFrom.
+	forkForecastSummaries atomic.Pointer[forkForecastSummaries]
 	// txValidationSettled is closed and replaced after every snapshot
 	// publication and every finished validation transition: the two events
 	// that can turn a non-current validation session current again.
@@ -2252,6 +2278,9 @@ type LedgerState struct {
 	// Test hook called each time stateless header crypto actually runs
 	// instead of being answered from statelessHeaderVerdicts.
 	statelessHeaderCryptoRunHook func()
+	// onPeerForkAncestorStateCheck, when set by a test, observes each
+	// ledger-state verification of a peer fork ancestor.
+	onPeerForkAncestorStateCheck func(slot uint64)
 	// Test hook for fork ancestor lookups.
 	lookupBlockByHash func([]byte) (models.Block, error)
 	// Test hook called after Close releases the blockfetch continuation mutex
@@ -2593,6 +2622,14 @@ func (ls *LedgerState) txValidationSettledChan() <-chan struct{} {
 			return ch
 		}
 	}
+}
+
+// HeaderVerificationSettledChan returns a channel closed by the next snapshot
+// publication or finished validation transition. Callers retrying a deferred
+// header verification obtain it before the attempt, so a publication during
+// the attempt still wakes them.
+func (ls *LedgerState) HeaderVerificationSettledChan() <-chan struct{} {
+	return ls.txValidationSettledChan()
 }
 
 // notifyTxValidationSettled wakes every txValidationSettledChan waiter. It
@@ -4393,7 +4430,7 @@ func (ls *LedgerState) discardDeferredRewardStakeInputs(txn *database.Txn) {
 // currentBoundarySPOStakeHookHolder wraps the optional same-boundary SPO
 // stake-rows callback so it can live in an atomic.Pointer.
 type currentBoundarySPOStakeHookHolder struct {
-	fn func(*database.Txn, event.EpochTransitionEvent) ([]*models.PoolStakeSnapshot, error)
+	fn func(*database.Txn, event.EpochTransitionEvent, uint) ([]*models.PoolStakeSnapshot, error)
 }
 
 // SetCurrentBoundarySPOStakeHook installs (or clears, with a nil fn) the
@@ -4420,9 +4457,10 @@ type currentBoundarySPOStakeHookHolder struct {
 // outcome: it ratifies nothing and reports no error, which
 // TestHardForkInitiation_NeverRatifiesWithoutCurrentBoundaryHook pins. A
 // production node must always wire this alongside the other two
-// epoch-boundary hooks.
+// epoch-boundary hooks. The callback also receives the incoming era ID because
+// RATIFY runs before the epoch row carrying that ID is persisted.
 func (ls *LedgerState) SetCurrentBoundarySPOStakeHook(
-	fn func(*database.Txn, event.EpochTransitionEvent) ([]*models.PoolStakeSnapshot, error),
+	fn func(*database.Txn, event.EpochTransitionEvent, uint) ([]*models.PoolStakeSnapshot, error),
 ) {
 	if fn == nil {
 		ls.currentBoundarySPOStakeHook.Store(nil)
@@ -4435,7 +4473,7 @@ func (ls *LedgerState) SetCurrentBoundarySPOStakeHook(
 
 // currentBoundarySPOStakeHookFn returns the installed same-boundary SPO
 // stake-rows hook, or nil when none is set.
-func (ls *LedgerState) currentBoundarySPOStakeHookFn() func(*database.Txn, event.EpochTransitionEvent) ([]*models.PoolStakeSnapshot, error) {
+func (ls *LedgerState) currentBoundarySPOStakeHookFn() func(*database.Txn, event.EpochTransitionEvent, uint) ([]*models.PoolStakeSnapshot, error) {
 	if h := ls.currentBoundarySPOStakeHook.Load(); h != nil {
 		return h.fn
 	}
@@ -7355,10 +7393,14 @@ func (ls *LedgerState) ledgerReadChainIterator(
 					// clears, so the pair confines the wait to initial
 					// catch-up, where rollbacks are rare and no forging
 					// depends on them.
+					// Applying the drained network frontier can publish the state the
+					// next header needs. Offline import keeps its gap coalescing.
 					if len(rawBatch) > 0 && len(rawBatch) < cap(rawBatch) &&
 						coalesceAttempts < gatherCoalesceMaxAttempts &&
 						gapAttempts < gatherCoalesceMaxGapAttempts &&
 						!ls.reachedTip.Load() &&
+						(ls.config.GetActiveConnectionFunc == nil ||
+							ls.chain == nil || ls.chain.HeaderCount() > 0) &&
 						!nearKnownUpstreamTip(
 							rawBatch[len(rawBatch)-1].Slot,
 							upstreamTipSlot,
@@ -10021,6 +10063,7 @@ func (ls *LedgerState) processBlocksFromSource(
 					ls.observeBlockAdoptions(chunkAdopted)
 				}
 				ls.maybeQueueStakeRewardPrecomputeRetry(pendingTip.Point.Slot)
+				ls.notifyLeiosAnnouncementAtTip(pendingTip.Point.Hash)
 				// Restore normal DB options outside the lock after validation is enabled
 				if wantEnableValidation && bulkLoadActive &&
 					bulkOptimizer != nil {

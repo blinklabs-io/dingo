@@ -320,6 +320,37 @@ func TestChainsyncConfigCarriesLimitOnPatience(t *testing.T) {
 	assert.False(t, cfg.PatienceActiveFunc(), "Praos selection")
 }
 
+// The observed-header history counts headers, but the Genesis window is
+// measured in slots. The per-connection limit must cover the candidate
+// fragment (k headers plus every header the forecast range can hold, at most
+// one per window slot) so a dense candidate keeps its intersection.
+func TestChainsyncConfigObservedHeaderLimitCoversForecastRange(
+	t *testing.T,
+) {
+	t.Parallel()
+	cardanoCfg := newNodeTestCardanoNodeCfg(t)
+	k := uint64(cardanoCfg.ShelleyGenesis().SecurityParam) //nolint:gosec
+	require.NotZero(t, k)
+	window := chainselection.GenesisWindowSlotsForParams(
+		k,
+		cardanoCfg.ShelleyGenesis().ActiveSlotsCoeff.Rat,
+	)
+	require.Greater(t, window, 4*k, "window in slots must exceed 4k headers")
+	want := int(window + k) //nolint:gosec
+
+	n := &Node{config: NewConfig(WithCardanoNodeConfig(cardanoCfg))}
+	n.chainSelector = chainselection.NewChainSelector(
+		chainselection.ChainSelectorConfig{
+			GenesisMode:        true,
+			GenesisWindowSlots: window,
+		},
+	)
+	cfg := n.chainsyncConfig()
+	require.NotNil(t, cfg.ObservedHeaderLimitFunc)
+	assert.Equal(t, want, cfg.ObservedHeaderLimitFunc(),
+		"observed headers must cover k plus the forecast range")
+}
+
 func TestChainsyncConfigLimitOnPatienceDefaults(t *testing.T) {
 	t.Parallel()
 	n := &Node{config: NewConfig()}

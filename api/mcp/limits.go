@@ -32,6 +32,13 @@ const (
 	// maxConcurrentSQLiteQueries bounds the expensive database reads that
 	// may run at once on one server.
 	maxConcurrentSQLiteQueries = 4
+	// maxConcurrentCallerSQLQueries bounds the caller-supplied SQL
+	// (sqlite_query, sqlite_explain) running at once. A caller controls how
+	// long such a query holds its slot, up to the query timeout, so it also
+	// holds one of the maxConcurrentSQLiteQueries shared slots. Keeping this
+	// below that total leaves shared slots that caller SQL can never take, so
+	// the built-in tools keep a slot however many slow queries are submitted.
+	maxConcurrentCallerSQLQueries = 2
 	// maxAssetInfoRows bounds the live asset rows one get_asset_info call
 	// scans. A call that would exceed it fails instead of returning a
 	// partial supply or holder count.
@@ -70,6 +77,9 @@ var (
 // share one value so the concurrency slots are a server-wide budget.
 type readLimits struct {
 	slots chan struct{}
+	// callerSlots is the sub-budget for caller-supplied SQL; see
+	// maxConcurrentCallerSQLQueries.
+	callerSlots chan struct{}
 	// parseSlots bounds the caller-supplied payloads parsed at once; see
 	// runAdmitted.
 	parseSlots   chan struct{}
@@ -83,6 +93,7 @@ type readLimits struct {
 func newReadLimits() *readLimits {
 	return &readLimits{
 		slots:        make(chan struct{}, maxConcurrentSQLiteQueries),
+		callerSlots:  make(chan struct{}, maxConcurrentCallerSQLQueries),
 		parseSlots:   make(chan struct{}, maxConcurrentPayloadParses),
 		maxAssetRows: maxAssetInfoRows,
 		maxWALBytes:  maxSQLiteWALBytes,
@@ -173,6 +184,31 @@ func (l *readLimits) admit() error {
 		return errReadsBusy
 	}
 	return nil
+}
+
+// admitCallerSQL takes a caller-SQL slot and a shared query slot for a query
+// whose text the caller supplied, or refuses it under WAL pressure or when
+// either budget is full. A successful call must be paired with
+// releaseCallerSQL.
+func (l *readLimits) admitCallerSQL() error {
+	if err := l.walPressure(); err != nil {
+		return err
+	}
+	select {
+	case l.callerSlots <- struct{}{}:
+	default:
+		return errReadsBusy
+	}
+	if !l.acquire() {
+		<-l.callerSlots
+		return errReadsBusy
+	}
+	return nil
+}
+
+func (l *readLimits) releaseCallerSQL() {
+	l.release()
+	<-l.callerSlots
 }
 
 // acquire takes a query slot without blocking and reports whether it got one.

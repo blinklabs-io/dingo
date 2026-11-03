@@ -82,6 +82,69 @@ type stakeDistributionEntry = struct {
 func (ls *LedgerState) queryShelleyStakeDistribution(ctx context.Context, at QueryPoint,
 	txn *database.Txn,
 ) (any, error) {
+	live, err := ls.liveStakeDistribution(ctx, at, txn)
+	if err != nil {
+		return nil, err
+	}
+	result := olocalstatequery.StakeDistributionResult{
+		Results: make(
+			map[ledger.PoolId]stakeDistributionEntry,
+			len(live.pools),
+		),
+	}
+	for _, pool := range live.pools {
+		result.Results[ledger.PoolId(pool.poolKeyHash)] = stakeDistributionEntry{
+			StakeFraction: live.fraction(pool.stake),
+			VrfHash:       pool.vrfKeyHash,
+		}
+	}
+	// Client.GetStakeDistribution decodes the wire reply directly into a
+	// StakeDistributionResult (client.go's runQuery does a plain cbor.Decode
+	// with no extra wrapping), so the one field must be the top-level array
+	// element here. Returning the struct itself would let its own
+	// StructAsArray encoding nest inside this slice's, producing a spurious
+	// extra array layer that no real NtC client can decode.
+	return []any{result.Results}, nil
+}
+
+// livePoolStake is one pool of a liveStakeDistribution.
+type livePoolStake struct {
+	poolKeyHash lcommon.PoolKeyHash
+	stake       uint64
+	vrfKeyHash  ledger.Blake2b256
+}
+
+// liveStakeDistribution is dingo's equivalent of cardano-ledger's
+// poolsByTotalStakeFraction: pool stake reconstructed from live (or
+// pinned-slot) delegation and UTxO state rather than an epoch snapshot, with
+// each fraction taken over total circulating supply. GetStakeDistribution
+// and GetStakeDistribution2 both answer from it.
+type liveStakeDistribution struct {
+	// pools is ordered by pool key hash and holds only pools with non-zero
+	// delegated stake: calculatePoolDistr keeps a pool only when it has a
+	// delegator in the snapshot's active stake, whose balances are NonZero.
+	pools []livePoolStake
+	// totalActiveStake is the sum of delegated stake across the reconstructed
+	// pools, clamped to one because the GetStakeDistribution2 reply types it
+	// as a NonZero Coin.
+	totalActiveStake uint64
+	circulation      *big.Int
+}
+
+func (d *liveStakeDistribution) fraction(stake uint64) *cbor.Rat {
+	return &cbor.Rat{Rat: new(big.Rat).SetFrac(
+		new(big.Int).SetUint64(stake),
+		d.circulation,
+	)}
+}
+
+// liveStakeDistribution reconstructs the distribution as of at, with the
+// pinning semantics queryShelleyStakeDistribution documents.
+func (ls *LedgerState) liveStakeDistribution(
+	ctx context.Context,
+	at QueryPoint,
+	txn *database.Txn,
+) (*liveStakeDistribution, error) {
 	if txn == nil {
 		txn = ls.db.Transaction(ctx, false)
 		defer txn.Release()
@@ -139,8 +202,19 @@ func (ls *LedgerState) queryShelleyStakeDistribution(ctx context.Context, at Que
 	}
 
 	keyHashes := make([]lcommon.PoolKeyHash, 0, len(live.PoolStakes))
-	for pkh := range live.PoolStakes {
+	var totalActiveStake uint64
+	for pkh, stake := range live.PoolStakes {
+		if stake == 0 {
+			continue
+		}
 		keyHashes = append(keyHashes, pkh)
+		if totalActiveStake > ^uint64(0)-stake {
+			return nil, errors.New("total live pool stake overflow")
+		}
+		totalActiveStake += stake
+	}
+	if totalActiveStake == 0 {
+		totalActiveStake = 1
 	}
 	// Sorted before the VRF lookup so both the reported order and the
 	// omission warnings below are a function of the reconstructed stake
@@ -165,12 +239,10 @@ func (ls *LedgerState) queryShelleyStakeDistribution(ctx context.Context, at Que
 		return nil, err
 	}
 
-	circulation := new(big.Int).SetUint64(totalCirculatingSupply)
-	result := olocalstatequery.StakeDistributionResult{
-		Results: make(
-			map[ledger.PoolId]stakeDistributionEntry,
-			len(keyHashes),
-		),
+	dist := &liveStakeDistribution{
+		pools:            make([]livePoolStake, 0, len(keyHashes)),
+		totalActiveStake: totalActiveStake,
+		circulation:      new(big.Int).SetUint64(totalCirculatingSupply),
 	}
 	for _, pkh := range keyHashes {
 		stake := live.PoolStakes[pkh]
@@ -190,20 +262,11 @@ func (ls *LedgerState) queryShelleyStakeDistribution(ctx context.Context, at Que
 			)
 			continue
 		}
-		fraction := new(big.Rat).SetFrac(
-			new(big.Int).SetUint64(stake),
-			circulation,
-		)
-		result.Results[ledger.PoolId(pkh)] = stakeDistributionEntry{
-			StakeFraction: &cbor.Rat{Rat: fraction},
-			VrfHash:       vrf,
-		}
+		dist.pools = append(dist.pools, livePoolStake{
+			poolKeyHash: pkh,
+			stake:       stake,
+			vrfKeyHash:  vrf,
+		})
 	}
-	// Client.GetStakeDistribution decodes the wire reply directly into a
-	// StakeDistributionResult (client.go's runQuery does a plain cbor.Decode
-	// with no extra wrapping), so the one field must be the top-level array
-	// element here. Returning the struct itself would let its own
-	// StructAsArray encoding nest inside this slice's, producing a spurious
-	// extra array layer that no real NtC client can decode.
-	return []any{result.Results}, nil
+	return dist, nil
 }

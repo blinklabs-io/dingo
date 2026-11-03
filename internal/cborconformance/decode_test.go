@@ -53,6 +53,46 @@ func TestConwayRedeemerRejectsDijkstraTag(t *testing.T) {
 	}
 }
 
+func TestConwayCorpusShapeConstraints(t *testing.T) {
+	tests := []struct {
+		name string
+		rule string
+		raw  []byte
+	}{
+		{name: "bignum over 64 bytes", rule: "big_int", raw: append([]byte{0xc2, 0x58, 0x41}, make([]byte, 65)...)},
+		{name: "execution memory not integer", rule: "ex_units", raw: []byte{0x82, 0xf6, 0x00}},
+		{name: "native script threshold not integer", rule: "native_script", raw: []byte{0x83, 0x03, 0xf6, 0x80}},
+		{name: "auxiliary native script threshold not integer", rule: "auxiliary_scripts", raw: []byte{0x81, 0x83, 0x03, 0xf6, 0x80}},
+		{name: "wrapped native script threshold not integer", rule: "script", raw: []byte{0x82, 0x00, 0x83, 0x03, 0xf6, 0x80}},
+		{name: "redeemer tag not integer", rule: "redeemer", raw: []byte{0x84, 0xf6, 0x00, 0x00, 0x82, 0x00, 0x00}},
+		{name: "redeemer execution memory not integer", rule: "redeemer", raw: []byte{0x84, 0x00, 0x00, 0x00, 0x82, 0xf6, 0x00}},
+		{name: "redeemer map key tag not integer", rule: "redeemers", raw: []byte{0xa1, 0x82, 0xf6, 0x00, 0x82, 0x00, 0x82, 0x00, 0x00}},
+		{name: "redeemer array execution memory not integer", rule: "redeemers", raw: []byte{0x81, 0x84, 0x00, 0x00, 0x00, 0x82, 0xf6, 0x00}},
+		{name: "redeemer map execution memory not integer", rule: "redeemers", raw: []byte{0xa1, 0x82, 0x00, 0x00, 0x82, 0x00, 0x82, 0xf6, 0x00}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := reencode(test.rule, test.raw); err == nil {
+				t.Fatalf("accepted invalid %s CBOR", test.rule)
+			}
+		})
+	}
+}
+
+func TestConwayHeaderBodyRejectsIndefiniteVRFResult(t *testing.T) {
+	fields := []cbor.RawMessage{
+		{0x00}, {0x00}, {0xf6}, {0x40}, {0x40},
+		{0x9f, 0x40, 0x40, 0xff}, {0x00}, {0x40}, {0x80}, {0x82, 0x00, 0x00},
+	}
+	raw, err := cbor.Encode(fields)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateConwayHeaderBodyCBOR(raw); err == nil {
+		t.Fatal("accepted an indefinite header-body VRF result")
+	}
+}
+
 func TestConwayVotingProcedureRejectsIndefiniteArray(t *testing.T) {
 	if _, err := reencode("voting_procedure", []byte{0x9f, 0x01, 0xf6, 0xff}); err == nil {
 		t.Fatal("accepted an indefinite Conway voting procedure")
@@ -197,6 +237,18 @@ func TestConwayBlockRejectsNullMapAndArrayFields(t *testing.T) {
 	}
 	if err := validateConwayBlockCBOR([]byte{0x84, 0x80, 0x80, 0x80, 0xa0}); err != nil {
 		t.Fatalf("rejected a block without optional invalid-transaction indices: %v", err)
+	}
+}
+
+func TestConwayBlockRejectsUnorderedInvalidTransactionIndexes(t *testing.T) {
+	for _, indexes := range [][]uint64{{0, 0}, {1, 0}} {
+		raw, err := cbor.Encode([]any{[]any{}, []any{}, []any{}, map[uint]any{}, indexes})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := validateConwayBlockCBOR(raw); err == nil {
+			t.Fatalf("accepted invalid transaction indexes %v", indexes)
+		}
 	}
 }
 

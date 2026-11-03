@@ -130,10 +130,12 @@ func (ls *LedgerState) queryShelleyPoolDistr(
 }
 
 // queryShelleyStakeDistribution2 answers GetStakeDistribution2, which replaces
-// GetStakeDistribution from node-to-client protocol version 21. It reports the
-// same pool distribution as GetPoolDistr2 with no pool filter, so both read
-// through PoolStakeDistribution and cannot disagree about the snapshot or the
-// VRF keys.
+// GetStakeDistribution from node-to-client protocol version 21. cardano-node
+// answers both from poolsByTotalStakeFraction, so this reads the same live
+// reconstruction as queryShelleyStakeDistribution -- not the mark snapshot
+// GetPoolDistr2 reads -- and takes each StakeFraction over total circulating
+// supply. Unlike GetStakeDistribution, the reply also carries each pool's
+// stake and the total delegated stake across the reported pools.
 //
 // Client.GetStakeDistribution2 decodes the reply into a StakeDistribution2Result,
 // a one-field struct around the distribution, so the result is a one-element
@@ -143,20 +145,20 @@ func (ls *LedgerState) queryShelleyStakeDistribution2(
 	at QueryPoint,
 	txn *database.Txn,
 ) (any, error) {
-	dist, err := ls.PoolStakeDistribution(ctx, nil, at, txn)
+	live, err := ls.liveStakeDistribution(ctx, at, txn)
 	if err != nil {
 		return nil, err
 	}
 	pools := make(
 		map[ledger.PoolId]olocalstatequery.IndividualPoolStake,
-		len(dist.Pools),
+		len(live.pools),
 	)
-	for _, pool := range dist.Pools {
-		pools[ledger.PoolId(pool.PoolKeyHash)] = olocalstatequery.IndividualPoolStake{
-			StakeFraction:  pool.StakeFraction,
-			TotalPoolStake: pool.Stake,
-			VrfHash:        pool.VrfKeyHash,
+	for _, pool := range live.pools {
+		pools[ledger.PoolId(pool.poolKeyHash)] = olocalstatequery.IndividualPoolStake{
+			StakeFraction:  live.fraction(pool.stake),
+			TotalPoolStake: pool.stake,
+			VrfHash:        pool.vrfKeyHash,
 		}
 	}
-	return []any{[]any{pools, dist.TotalActiveStake}}, nil
+	return []any{[]any{pools, live.totalActiveStake}}, nil
 }

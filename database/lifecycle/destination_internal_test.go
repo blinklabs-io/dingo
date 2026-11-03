@@ -177,11 +177,15 @@ func TestOpenSnapshotUploadFilesUsesDeclaredFilesInPublicationOrder(t *testing.T
 		filepath.Join(dir, "unrelated"), []byte("secret"), 0o600,
 	))
 
-	files, _, err := openSnapshotUploadFiles(
+	files, _, root, err := openSnapshotUploadFiles(
 		t.Context(), dir, MaxManifestBytes,
 	)
 	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, closeSnapshotUploadFiles(files)) })
+	t.Cleanup(func() {
+		require.NoError(t, errors.Join(
+			closeSnapshotUploadFiles(files), root.Close(),
+		))
+	})
 
 	names := make([]string, 0, len(files))
 	for _, file := range files {
@@ -204,7 +208,7 @@ func TestOpenSnapshotUploadFilesRejectsSymlink(t *testing.T) {
 	require.NoError(t, os.Remove(filepath.Join(dir, BlobBackupFileName)))
 	require.NoError(t, os.Symlink(outside, filepath.Join(dir, BlobBackupFileName)))
 
-	files, _, err := openSnapshotUploadFiles(
+	files, _, _, err := openSnapshotUploadFiles(
 		t.Context(), dir, MaxManifestBytes,
 	)
 	require.ErrorContains(t, err, "open snapshot upload file")
@@ -216,11 +220,15 @@ func TestOpenSnapshotUploadFilesKeepsOpenedFileAfterPathSwap(t *testing.T) {
 
 	dir := t.TempDir()
 	writeTestUploadSnapshot(t, dir)
-	files, _, err := openSnapshotUploadFiles(
+	files, _, root, err := openSnapshotUploadFiles(
 		t.Context(), dir, MaxManifestBytes,
 	)
 	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, closeSnapshotUploadFiles(files)) })
+	t.Cleanup(func() {
+		require.NoError(t, errors.Join(
+			closeSnapshotUploadFiles(files), root.Close(),
+		))
+	})
 
 	outside := filepath.Join(t.TempDir(), "outside")
 	require.NoError(t, os.WriteFile(outside, []byte("secret"), 0o600))
@@ -419,4 +427,21 @@ func TestHashFileContextRejectsCancellation(t *testing.T) {
 	cancel()
 	_, _, err := hashFileContext(ctx, path)
 	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestOpenSnapshotUploadFilesRejectsSymlinkedDirectory(t *testing.T) {
+	t.Parallel()
+
+	real := filepath.Join(t.TempDir(), "epoch-real")
+	require.NoError(t, os.Mkdir(real, 0o700))
+	writeTestUploadSnapshot(t, real)
+	link := filepath.Join(t.TempDir(), "epoch-real")
+	require.NoError(t, os.Symlink(real, link))
+
+	files, _, root, err := openSnapshotUploadFiles(
+		t.Context(), link, MaxManifestBytes,
+	)
+	require.ErrorIs(t, err, ErrSnapshotDirectoryReplaced)
+	require.Empty(t, files)
+	require.Nil(t, root)
 }

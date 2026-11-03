@@ -398,6 +398,76 @@ func (b *BlobStoreBark) Get(txn types.Txn, key []byte) ([]byte, error) {
 	return b.upstream.Get(txn, key)
 }
 
+type contextBlobGetter interface {
+	GetContext(context.Context, types.Txn, []byte) ([]byte, error)
+}
+
+type contextLimitedBlobGetter interface {
+	GetContextLimited(
+		context.Context,
+		types.Txn,
+		[]byte,
+		int64,
+	) ([]byte, error)
+}
+
+// GetContext forwards a cancellable key read to the wrapped store.
+//
+//nolint:contextcheck // optional store interface receives caller context
+func (b *BlobStoreBark) GetContext(
+	ctx context.Context,
+	txn types.Txn,
+	key []byte,
+) ([]byte, error) {
+	if getter, ok := b.upstream.(contextBlobGetter); ok {
+		return getter.GetContext(ctx, txn, key)
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	value, err := b.upstream.Get(txn, key)
+	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return value, nil
+}
+
+// GetContextLimited forwards a cancellable, bounded key read to the wrapped
+// store. Bark archive fallback applies only to block bodies, never index or
+// metadata keys.
+//
+//nolint:contextcheck // optional store interface receives caller context
+func (b *BlobStoreBark) GetContextLimited(
+	ctx context.Context,
+	txn types.Txn,
+	key []byte,
+	maxBytes int64,
+) ([]byte, error) {
+	if maxBytes < 0 {
+		return nil, fmt.Errorf("invalid maximum blob size %d", maxBytes)
+	}
+	if getter, ok := b.upstream.(contextLimitedBlobGetter); ok {
+		return getter.GetContextLimited(ctx, txn, key, maxBytes)
+	}
+	value, err := b.GetContext(ctx, txn, key)
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(value)) > maxBytes {
+		return nil, fmt.Errorf(
+			"blob object exceeds maximum size of %d bytes",
+			maxBytes,
+		)
+	}
+	return value, nil
+}
+
 func (b *BlobStoreBark) Set(txn types.Txn, key, val []byte) error {
 	return b.upstream.Set(txn, key, val)
 }

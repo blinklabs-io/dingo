@@ -66,9 +66,10 @@ when a generator crashes or its inputs cannot be prepared, an `error` report
 naming the scenario and the cause is uploaded in its place. Generator and
 corpus preparation deadlines leave time to write all four reports and compress
 them within the 60-minute report step. The Linux release job has a 90-minute
-limit for setup and asset publishing. The turbo report measures up to
-`TURBO_MAX_PROGRAMS` programs (10,000 by default) from NDC's curated corpus,
-using 50 samples per program and the mean of the best 30. A program that cannot
+limit for setup and asset publishing. The turbo report measures every program
+in NDC's curated corpus by default; `TURBO_MAX_PROGRAMS` can select an evenly
+spaced subset for diagnostics. It uses 50 samples per program and the mean of
+the best 30. A program that cannot
 be decoded or evaluated is omitted from measurements, and the generation log
 records the error; NDC counts a missing benchmark as a failure.
 

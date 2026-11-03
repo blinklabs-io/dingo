@@ -1094,6 +1094,24 @@ func TestRowBatchFlushSplitsAtParameterLimit(t *testing.T) {
 	require.True(t, rows.empty())
 }
 
+func TestRowBatchTracksEstimatedPayloadBytes(t *testing.T) {
+	t.Parallel()
+
+	var rows rowBatch
+	rows.enableSizeTracking()
+	payload := make([]byte, 4, 16)
+	rows.add(witnessScriptShape, payload, int64(1), 0)
+	expectedSize := rowBatchRowOverheadBytes +
+		3*rowBatchValueOverheadBytes + int64(cap(payload))
+	require.Equal(t, expectedSize, rows.EstimatedSizeBytes())
+
+	cloned := rows.clone()
+	require.Equal(t, expectedSize, cloned.EstimatedSizeBytes())
+	cloned.dropTransaction(1)
+	require.Zero(t, cloned.EstimatedSizeBytes())
+	require.Equal(t, expectedSize, rows.EstimatedSizeBytes())
+}
+
 func TestRowBatchFlushAssetMintBurnKeepsUniqueEvents(t *testing.T) {
 	t.Parallel()
 	store := newAPIModeSQLiteStore(t, nil)

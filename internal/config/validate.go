@@ -937,6 +937,13 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		))
 	}
 
+	for i, group := range c.GenesisBootstrap.ControlGroups {
+		if err := group.Validate(); err != nil {
+			errs = append(errs, fmt.Errorf(
+				"invalid genesisBootstrap.controlGroups[%d]: %w", i, err,
+			))
+		}
+	}
 	// Genesis corroboration is a security gate: a negative value must fail
 	// closed rather than silently disabling it (only 0 disables it).
 	if c.GenesisBootstrap.CorroborationPeers < 0 {
@@ -1235,16 +1242,18 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		}
 	}
 
-	// Koios parity observer: network mirrors the same
-	// preview/preprod restriction internal/koiosparity.NewObserver enforces
-	// at construction time, checked here too so a bad value fails fast at
-	// config-validation time instead of only once the node reaches
-	// startKoiosParityObserver. Empty is valid -- it defers to the node's
-	// own configured Network.
+	// Koios parity observer: network mirrors the set
+	// internal/koiosparity.ValidateNetwork accepts, checked here too so a bad
+	// value fails fast at config-validation time instead of only once the
+	// node reaches startKoiosParityObserver. The set is duplicated rather
+	// than imported to keep internal/config free of the koiosparity
+	// dependency graph; a test pins the two together. Empty is valid -- it
+	// defers to the node's own configured Network.
 	if net := c.KoiosParity.Network; net != "" && net != "preview" &&
-		net != "preprod" {
+		net != "preprod" && net != "mainnet" {
 		errs = append(errs, fmt.Errorf(
-			"invalid koiosParity.network %q: must be empty, \"preview\", or \"preprod\"",
+			"invalid koiosParity.network %q: must be empty, "+
+				"\"preview\", \"preprod\", or \"mainnet\"",
 			net,
 		))
 	}

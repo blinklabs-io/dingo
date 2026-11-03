@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/btcsuite/btcd/btcutil/bech32"
@@ -509,6 +510,68 @@ func (b *Blockfrost) handleGenesis(
 	writeJSON(w, http.StatusOK, GenesisResponse(info))
 }
 
+// assetDetailTimeout bounds how long one asset lookup may run.
+const assetDetailTimeout = 15 * time.Second
+
+// admitAssetLookup reserves a slot in the asset lookup pool for the request's
+// client. Every route that totals the live holdings of an asset shares the
+// pool. When it is full it writes the 429 response and reports false. The
+// caller runs its lookup under context.WithTimeout(r.Context(),
+// assetDetailTimeout), so the lookup stops when the client disconnects or the
+// deadline passes.
+func (b *Blockfrost) admitAssetLookup(
+	w http.ResponseWriter,
+	r *http.Request,
+) (func(), bool) {
+	release, ok := b.assetDetailAdmission.acquire(
+		r.Context(),
+		requestClient(r),
+	)
+	if !ok {
+		w.Header().Set("Retry-After", "1")
+		writeError(
+			w,
+			http.StatusTooManyRequests,
+			"Too Many Requests",
+			"asset lookup capacity reached, try again later",
+		)
+		return nil, false
+	}
+	return release, true
+}
+
+// writeAssetLookupLimitError answers the failures an admitted asset lookup can
+// hit because of its bounds, and reports whether it did. A disconnected client
+// gets no response, a lookup past its deadline is retryable, and an asset held
+// by more UTxOs than one lookup may read exceeds the service limit.
+func (b *Blockfrost) writeAssetLookupLimitError(
+	w http.ResponseWriter,
+	err error,
+) bool {
+	switch {
+	case errors.Is(err, context.Canceled):
+		// The client is gone, so there is nobody to answer.
+	case errors.Is(err, context.DeadlineExceeded):
+		w.Header().Set("Retry-After", "1")
+		writeError(
+			w,
+			http.StatusServiceUnavailable,
+			"Service Unavailable",
+			"asset lookup deadline exceeded, try again later",
+		)
+	case isUtxoQueryBudgetError(err):
+		writeError(
+			w,
+			http.StatusBadRequest,
+			"Bad Request",
+			"The requested asset holdings exceed the service limit.",
+		)
+	default:
+		return false
+	}
+	return true
+}
+
 // handleAsset handles GET /api/v0/assets/{asset} and
 // returns native asset information.
 func (b *Blockfrost) handleAsset(
@@ -528,8 +591,19 @@ func (b *Blockfrost) handleAsset(
 		return
 	}
 
-	asset, err := b.node.Asset(policyID, assetName)
+	release, ok := b.admitAssetLookup(w, r)
+	if !ok {
+		return
+	}
+	defer release()
+	ctx, cancel := context.WithTimeout(r.Context(), assetDetailTimeout)
+	defer cancel()
+
+	asset, err := b.node.Asset(ctx, policyID, assetName)
 	if err != nil {
+		if b.writeAssetLookupLimitError(w, err) {
+			return
+		}
 		if errors.Is(err, ErrAssetNotFound) {
 			writeError(
 				w,
@@ -753,8 +827,16 @@ func (b *Blockfrost) handlePoolsExtended(
 		return
 	}
 
+	release, ok := b.admitPoolAggregate(w, r)
+	if !ok {
+		return
+	}
+	defer release()
 	pools, totalItems, err := b.node.PoolsExtended(r.Context(), params)
 	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return
+		}
 		b.logger.Error(
 			"failed to get extended pools",
 			"error", err,
@@ -1056,6 +1138,11 @@ func (b *Blockfrost) handleAddressTransactions(
 	if !ok {
 		return
 	}
+	release, ok := b.admitAddressSummary(w, r)
+	if !ok {
+		return
+	}
+	defer release()
 	address := r.PathValue("address")
 	txs, total, err := b.node.AddressTransactions(r.Context(), address, params)
 	if err != nil {
@@ -2308,13 +2395,31 @@ func (b *Blockfrost) handleAccountAssociatedAddresses(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
-	handlePaginatedAccountRequest(
-		b, w, r, b.node.AccountAssociatedAddresses,
-		func(item AccountAssociatedAddressInfo) AccountAssociatedAddressResponse {
-			return AccountAssociatedAddressResponse(item)
-		},
-		"failed to retrieve account addresses",
+	params, ok := parsePaginationOrWriteError(w, r)
+	if !ok {
+		return
+	}
+	// The page and the total each aggregate the credential's whole
+	// address_transaction history, so the route shares the whole-history scan
+	// pool. Bad pagination is rejected above so it never holds a slot.
+	release, ok := b.admitAddressSummary(w, r)
+	if !ok {
+		return
+	}
+	defer release()
+	items, total, err := b.node.AccountAssociatedAddresses(
+		r.Context(), r.PathValue("stake_address"), params,
 	)
+	if err != nil {
+		b.writeAccountError(w, err, "failed to retrieve account addresses")
+		return
+	}
+	SetPaginationHeaders(w, total, params)
+	resp := make([]AccountAssociatedAddressResponse, len(items))
+	for i, item := range items {
+		resp[i] = AccountAssociatedAddressResponse(item)
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (b *Blockfrost) handleAccountDelegationHistory(

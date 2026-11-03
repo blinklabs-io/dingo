@@ -22,6 +22,13 @@ import (
 	"strings"
 )
 
+// These conservative accounting weights include row/value descriptors and
+// variable payload capacity; they bound queued row data, not process RSS.
+const (
+	rowBatchRowOverheadBytes   = int64(24)
+	rowBatchValueOverheadBytes = int64(40)
+)
+
 // rowShape is one INSERT form. key_witness has two shapes (vkey and
 // bootstrap) with different column lists, so rows are grouped by shape rather
 // than by table. suffix is appended after the VALUES list, for an ON CONFLICT
@@ -128,15 +135,26 @@ var (
 // shapeRows holds rows queued for one shape. txIDCol indexes the
 // "transaction_id" column, or is -1 when the shape has none.
 type shapeRows struct {
-	shape   rowShape
-	txIDCol int
-	rows    [][]any
+	shape              rowShape
+	txIDCol            int
+	rows               [][]any
+	estimatedSizeBytes int64
 }
 
 // rowBatch queues rows for multi-row insertion. Shapes are kept in
 // first-queued order so a flush is deterministic.
 type rowBatch struct {
-	entries []shapeRows
+	entries            []shapeRows
+	estimatedSizeBytes int64
+	rowCount           int
+	trackSize          bool
+	// Backfill sets these only on a transaction level's temporary row buffer.
+	maxSizeBytes   int64
+	maxRows        int
+	flushAtLimit   func() error
+	onLimitFlushed func(int64)
+	nextLimit      func() (int64, int)
+	flushErr       error
 	// queued records which transactions have rows pending, so replacing a
 	// transaction's rows only scans when it actually has some.
 	queued map[int64]struct{}
@@ -147,17 +165,75 @@ func (b *rowBatch) empty() bool {
 }
 
 func (b *rowBatch) add(shape rowShape, row ...any) {
-	i := b.entryIndex(shape)
-	if len(row) != len(b.entries[i].shape.columns) {
+	if b.flushErr != nil {
+		return
+	}
+	if len(row) != len(shape.columns) {
 		panic("sqlstore: row width does not match shape")
 	}
+	var rowSize int64
+	if b.trackSize {
+		rowSize = estimateRowSizeBytes(row)
+	}
+	// Flush before adding a row that would cross the cap. One row larger than
+	// the cap is still inserted and flushed as the minimum unit.
+	if b.flushAtLimit != nil && !b.empty() &&
+		((b.maxRows > 0 && b.rowCount >= b.maxRows) ||
+			(b.maxSizeBytes > 0 && b.estimatedSizeBytes+rowSize > b.maxSizeBytes)) {
+		b.flushForLimit()
+		if b.flushErr != nil {
+			return
+		}
+	}
+	i := b.entryIndex(shape)
 	b.entries[i].rows = append(b.entries[i].rows, row)
+	b.rowCount++
+	if b.trackSize {
+		b.entries[i].estimatedSizeBytes += rowSize
+		b.estimatedSizeBytes += rowSize
+	}
 	if col := b.entries[i].txIDCol; col >= 0 {
 		if b.queued == nil {
 			b.queued = make(map[int64]struct{})
 		}
 		id, _ := row[col].(int64)
 		b.queued[id] = struct{}{}
+	}
+	if b.flushAtLimit != nil &&
+		((b.maxRows > 0 && b.rowCount >= b.maxRows) ||
+			(b.maxSizeBytes > 0 && b.estimatedSizeBytes >= b.maxSizeBytes)) {
+		b.flushForLimit()
+	}
+}
+
+func (b *rowBatch) setFlushLimit(
+	maxBytes int64,
+	maxRows int,
+	flush func() error,
+	onFlushed func(int64),
+	nextLimit func() (int64, int),
+) {
+	b.maxSizeBytes = maxBytes
+	b.maxRows = maxRows
+	b.flushAtLimit = flush
+	b.onLimitFlushed = onFlushed
+	b.nextLimit = nextLimit
+}
+
+func (b *rowBatch) flushForLimit() {
+	if b.flushErr != nil || b.flushAtLimit == nil || b.empty() {
+		return
+	}
+	flushedBytes := b.estimatedSizeBytes
+	if err := b.flushAtLimit(); err != nil {
+		b.flushErr = err
+		return
+	}
+	if b.onLimitFlushed != nil {
+		b.onLimitFlushed(flushedBytes)
+	}
+	if b.nextLimit != nil {
+		b.maxSizeBytes, b.maxRows = b.nextLimit()
 	}
 }
 
@@ -194,10 +270,30 @@ func (b *rowBatch) dropTransaction(transactionID int64) {
 		for _, row := range entry.rows {
 			if id, _ := row[entry.txIDCol].(int64); id != transactionID {
 				kept = append(kept, row)
+			} else if b.trackSize {
+				rowSize := estimateRowSizeBytes(row)
+				entry.estimatedSizeBytes -= rowSize
+				b.estimatedSizeBytes -= rowSize
 			}
 		}
+		b.rowCount -= len(entry.rows) - len(kept)
+		clear(entry.rows[len(kept):])
 		entry.rows = kept
 	}
+}
+
+func estimateRowSizeBytes(row []any) int64 {
+	size := rowBatchRowOverheadBytes +
+		int64(len(row))*rowBatchValueOverheadBytes
+	for _, value := range row {
+		switch typed := value.(type) {
+		case []byte:
+			size += int64(cap(typed))
+		case string:
+			size += int64(len(typed))
+		}
+	}
+	return size
 }
 
 // merge moves every queued row of other into b.
@@ -210,8 +306,28 @@ func (b *rowBatch) merge(other *rowBatch) {
 }
 
 func (b *rowBatch) reset() {
+	b.clearRows()
+	b.maxSizeBytes = 0
+	b.maxRows = 0
+	b.flushAtLimit = nil
+	b.onLimitFlushed = nil
+	b.nextLimit = nil
+	b.flushErr = nil
+}
+
+func (b *rowBatch) clearRows() {
 	b.entries = nil
+	b.estimatedSizeBytes = 0
+	b.rowCount = 0
 	b.queued = nil
+}
+
+func (b *rowBatch) enableSizeTracking() {
+	b.trackSize = true
+}
+
+func (b *rowBatch) EstimatedSizeBytes() int64 {
+	return b.estimatedSizeBytes
 }
 
 // flush writes the queued rows with multi-row INSERTs bounded by
@@ -224,7 +340,7 @@ func (b *rowBatch) flush(
 	if b.empty() {
 		return nil
 	}
-	defer b.reset()
+	defer b.clearRows()
 	for _, entry := range b.entries {
 		width := len(entry.shape.columns)
 		perStatement := max(1, parameterLimit/width)
@@ -259,7 +375,12 @@ func (b *rowBatch) flush(
 // clone retains the queue at a transaction or savepoint boundary. Mutation
 // replaces row slices but never changes individual SQL argument values.
 func (b *rowBatch) clone() rowBatch {
-	ret := rowBatch{queued: maps.Clone(b.queued), entries: slices.Clone(b.entries)}
+	ret := rowBatch{
+		queued:             maps.Clone(b.queued),
+		entries:            slices.Clone(b.entries),
+		estimatedSizeBytes: b.estimatedSizeBytes,
+		trackSize:          b.trackSize,
+	}
 	for i := range ret.entries {
 		ret.entries[i].rows = slices.Clone(ret.entries[i].rows)
 	}
@@ -270,6 +391,8 @@ func (b *rowBatch) clone() rowBatch {
 // datums and script-related rows remain visible before the next tx validates.
 func (b *rowBatch) flushExceptClosureAPIRows(ctx context.Context, db queryer, parameterLimit int) error {
 	var immediate, deferred rowBatch
+	immediate.trackSize = b.trackSize
+	deferred.trackSize = b.trackSize
 	for _, entry := range b.entries {
 		target := &immediate
 		switch entry.shape.table {

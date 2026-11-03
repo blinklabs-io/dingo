@@ -47,12 +47,12 @@ var ErrChunkNotDelivered = errors.New(
 
 // chunkFeedDirPrefix starts the name of each feed's own directory beneath the
 // download directory; chunkFeedDirPattern matches the whole name, which is
-// the prefix, the truncated artifact digest, and os.MkdirTemp's numeric
+// the prefix, the truncated artifact digest, and a random
 // suffix.
 const chunkFeedDirPrefix = "chunkfeed-"
 
 var chunkFeedDirPattern = regexp.MustCompile(
-	`^` + chunkFeedDirPrefix + `[0-9a-f]{1,16}-[0-9]+$`,
+	`^` + chunkFeedDirPrefix + `[0-9a-f]{1,16}-([0-9]+|[A-Z2-7]+)$`,
 )
 
 // ChunkFeedConfig configures NewChunkFeed.
@@ -154,6 +154,8 @@ type ChunkFeed struct {
 
 	tempDir    string // set only when the feed created its own download dir
 	feedDir    string // this feed's own directory beneath the download dir
+	tempOwned  *bootstrapDir
+	feedOwned  *bootstrapDir
 	extractDir string
 	archiveDir string
 	immDir     string
@@ -387,9 +389,11 @@ func newVerifiedChunkFeed(
 
 	downloadDir := bcfg.DownloadDir
 	if downloadDir == "" {
-		downloadDir, err = os.MkdirTemp("", "dingo-mithril-feed-*")
+		downloadDir, f.tempOwned, err = createBootstrapDir(
+			"", "dingo-mithril-feed-*",
+		)
 		if err != nil {
-			return nil, fmt.Errorf("creating temp directory: %w", err)
+			return nil, fmt.Errorf("creating and retaining temp directory: %w", err)
 		}
 		f.tempDir = downloadDir
 	}
@@ -405,9 +409,6 @@ func newVerifiedChunkFeed(
 		f.digests, err = fetchVerifiedDigests(
 			ctx, client, f.cfg, artifact, downloadDir,
 		)
-		// The digest archive is only needed to build the map, and a failed
-		// fetch can leave it behind in a caller-supplied directory.
-		removeDigestsCache(artifact, downloadDir)
 		if err != nil {
 			return nil, err
 		}
@@ -419,11 +420,11 @@ func newVerifiedChunkFeed(
 	if err := os.MkdirAll(downloadDir, extractDirMode); err != nil {
 		return nil, fmt.Errorf("creating download directory: %w", err)
 	}
-	f.feedDir, err = os.MkdirTemp(
+	f.feedDir, f.feedOwned, err = createBootstrapDir(
 		downloadDir, chunkFeedDirPrefix+truncateDigest(artifact.Hash)+"-*",
 	)
 	if err != nil {
-		return nil, fmt.Errorf("creating chunk feed directory: %w", err)
+		return nil, fmt.Errorf("creating and retaining chunk feed directory: %w", err)
 	}
 	f.extractDir = filepath.Join(f.feedDir, "extract")
 	f.archiveDir = filepath.Join(f.feedDir, "archives")
@@ -844,10 +845,16 @@ func (f *ChunkFeed) removeFiles() error {
 	if f.immRoot != nil {
 		errs = append(errs, f.immRoot.Close())
 	}
-	for _, dir := range []string{f.feedDir, f.tempDir} {
-		if dir != "" {
-			errs = append(errs, os.RemoveAll(dir))
-		}
+	feedErr := f.feedOwned.cleanup()
+	var keep map[string]struct{}
+	if feedErr != nil && f.tempOwned != nil && f.feedDir != "" &&
+		filepath.Clean(filepath.Dir(f.feedDir)) == filepath.Clean(f.tempDir) {
+		keep = map[string]struct{}{filepath.Base(f.feedDir): {}}
 	}
+	errs = append(
+		errs,
+		feedErr,
+		f.tempOwned.cleanupKeeping(keep),
+	)
 	return errors.Join(errs...)
 }

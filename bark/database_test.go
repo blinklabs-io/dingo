@@ -92,6 +92,31 @@ func TestBlobStoreBarkForwardsWriteConflictDetection(t *testing.T) {
 	require.False(t, wrapped.DetectsWriteConflicts())
 }
 
+func TestBlobStoreBarkForwardsBoundedContextRead(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	wrapped := &BlobStoreBark{upstream: db.Blob()}
+	txn := wrapped.NewTransaction(true)
+	t.Cleanup(func() { _ = txn.Rollback() })
+	require.NoError(t, wrapped.Set(txn, []byte("key"), []byte("value")))
+
+	_, err := wrapped.GetContextLimited(
+		t.Context(), txn, []byte("key"), 4,
+	)
+	require.ErrorContains(t, err, "exceeds maximum size")
+	value, err := wrapped.GetContextLimited(
+		t.Context(), txn, []byte("key"), 5,
+	)
+	require.NoError(t, err)
+	require.Equal(t, []byte("value"), value)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, err = wrapped.GetContextLimited(ctx, txn, []byte("key"), 5)
+	require.ErrorIs(t, err, context.Canceled)
+}
+
 // barkFakeCloudDestination is a minimal stand-in for a real cloud
 // destination (S3/GCS), backed by an ordinary local directory — the same
 // pattern database/lifecycle/destination_test.go uses, redeclared here
