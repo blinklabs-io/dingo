@@ -317,6 +317,9 @@ func BenchmarkValidateTxConwayPhase2Cache(b *testing.B) {
 	pp := preprodValidationProtocolParams(b)
 	for _, fixture := range preprodPlutusFixtures {
 		c := loadPreprodPhase2Case(b, fixture)
+		// Production validation reuses evaluation contexts, and with them
+		// the pooled machines that evaluate scripts.
+		c.ls.plutusEvalContextCache = NewPlutusEvalContextCache()
 		for _, cached := range []bool{false, true} {
 			name := fixture.name + "/uncached"
 			var ls lcommon.LedgerState = c.ls
