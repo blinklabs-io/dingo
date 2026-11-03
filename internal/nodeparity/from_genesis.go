@@ -1038,6 +1038,13 @@ func RunFromGenesis(
 				)
 			}
 		}()
+		// A captured boundary already carries its epoch, and resolving it any
+		// other way can need Dingo to answer for that point: when the era
+		// history is unavailable the per-point fallback is refused as too
+		// old, and the capture is never used.
+		if epoch, ok := captures.epochAt(point); ok {
+			return epoch, false, nil
+		}
 		epoch, oracleErr := oracle.epoch(lookupCtx, point.Slot)
 		if oracleErr == nil {
 			return epoch, false, nil

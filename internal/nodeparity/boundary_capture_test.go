@@ -419,3 +419,74 @@ func TestRunFromGenesis_HandsBackACaptureInterruptedAfterItsRead(t *testing.T) {
 		})
 	}
 }
+
+// TestRunFromGenesis_ResolvesACapturedBoundaryWithoutDingo covers a boundary
+// Dingo has moved too far past to answer for, reached while its era history
+// is unavailable. The epoch must come from the capture rather than from Dingo
+// at that point, or the lookup is refused, the session resumes past the
+// boundary block, and the capture is never used.
+func TestRunFromGenesis_ResolvesACapturedBoundaryWithoutDingo(t *testing.T) {
+	const magic = 42
+	server := newGenesisFakeServer(t, 3)
+	server.epochBySlot = map[uint64]int{
+		server.chain.Points[0].Slot: 1,
+		server.chain.Points[1].Slot: 2,
+		server.chain.Points[2].Slot: 2,
+	}
+	boundary := server.chain.Points[1]
+	server.refuseAcquireFn = func(p pcommon.Point) bool {
+		return pointsEqual(p, boundary)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	server.serve(t, listener, magic)
+
+	koiosSrv := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(koiosSrv.Close)
+	koios, err := NewKoiosClient("preview", "", koiosSrv.URL, true, true)
+	require.NoError(t, err)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "utxo-epoch-2.gob")
+	require.NoError(t, writeUTxOSetFile(path, UTxOSet{"ff#0": "addr|1"}))
+	ppMarker := errors.New("protocol params read at the boundary capture")
+	put := make(chan struct{})
+	follower := func(_ context.Context, captures *boundaryCaptures) {
+		captures.put(&boundaryCapture{
+			epoch:    2,
+			point:    boundary,
+			ppErr:    ppMarker,
+			utxoPath: path,
+		})
+		close(put)
+	}
+
+	results := make(chan EpochResult, 8)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- RunFromGenesis(
+			ctx, listener.Addr().String(), "preview", magic, koios, nil,
+			func(r EpochResult) { results <- r },
+			nil, nil, false,
+			WithBoundaryCaptureDir(dir), withBoundaryFollower(follower),
+		)
+	}()
+	testutil.RequireReceive(t, put, 5*time.Second, "capture handed to the main loop")
+
+	server.allowStep(t) // block 0: the UTxO baseline
+	server.allowStep(t) // block 1: the epoch 2 boundary
+	r := testutil.RequireReceive(t, results, 10*time.Second, "epoch 2 result")
+
+	assert.Equal(t, uint64(2), r.Epoch)
+	assert.ErrorIs(t, r.ProtocolParamsErr, ppMarker,
+		"the boundary was not checked against its capture")
+	require.NoError(t, r.UTxOErr)
+	assert.Equal(t, []string{"ff#0"}, r.UTxOExtra)
+
+	cancel()
+	err = testutil.RequireReceive(t, done, 10*time.Second, "RunFromGenesis exit")
+	assert.True(t, err == nil || errors.Is(err, context.Canceled))
+}

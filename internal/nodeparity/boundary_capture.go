@@ -125,6 +125,22 @@ func (b *boundaryCaptures) take(
 	return c
 }
 
+// epochAt returns the epoch of the capture read at exactly point, if one is
+// held. A nil receiver holds none.
+func (b *boundaryCaptures) epochAt(point pcommon.Point) (uint64, bool) {
+	if b == nil {
+		return 0, false
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, c := range b.byEpoch {
+		if pointsEqual(c.point, point) {
+			return c.epoch, true
+		}
+	}
+	return 0, false
+}
+
 // close removes every capture file still held.
 func (b *boundaryCaptures) close() {
 	b.mu.Lock()
