@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -303,4 +304,118 @@ func TestRunFromGenesis_ComparesAgainstBoundaryCapture(t *testing.T) {
 	cancel()
 	err = testutil.RequireReceive(t, done, 10*time.Second, "RunFromGenesis exit")
 	assert.True(t, err == nil || errors.Is(err, context.Canceled))
+}
+
+// TestRunFromGenesis_HandsBackACaptureInterruptedAfterItsRead ends the session
+// right after the epoch 2 boundary's capture is read, before the boundary is
+// reported. The resumed session delivers that block again and must check it
+// against the same capture, not live: the protocol-parameter marker proves
+// the capture's checks were kept, for a capture with a UTxO file and for one
+// whose UTxO read had failed.
+func TestRunFromGenesis_HandsBackACaptureInterruptedAfterItsRead(t *testing.T) {
+	ppMarker := errors.New("protocol params read at the boundary capture")
+	utxoMarker := errors.New("UTxO set unreadable at the boundary capture")
+	for _, tc := range []struct {
+		name    string
+		utxoErr error
+	}{
+		{name: "with UTxO file"},
+		{name: "without UTxO set", utxoErr: utxoMarker},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const magic = 42
+			server := newGenesisFakeServer(t, 3)
+			server.epochBySlot = map[uint64]int{
+				server.chain.Points[0].Slot: 1,
+				server.chain.Points[1].Slot: 2,
+			}
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = listener.Close() })
+			server.serve(t, listener, magic)
+
+			koiosSrv := httptest.NewServer(http.NotFoundHandler())
+			t.Cleanup(koiosSrv.Close)
+			koios, err := NewKoiosClient("preview", "", koiosSrv.URL, true, true)
+			require.NoError(t, err)
+
+			dir := t.TempDir()
+			capture := &boundaryCapture{
+				epoch:   2,
+				point:   server.chain.Points[1],
+				ppErr:   ppMarker,
+				utxoErr: tc.utxoErr,
+			}
+			if tc.utxoErr == nil {
+				capture.utxoPath = filepath.Join(dir, "utxo-epoch-2.gob")
+				require.NoError(t, writeUTxOSetFile(
+					capture.utxoPath, UTxOSet{"ff#0": "addr|1"},
+				))
+			}
+			put := make(chan struct{})
+			follower := func(_ context.Context, captures *boundaryCaptures) {
+				captures.put(capture)
+				close(put)
+			}
+			var interrupted atomic.Bool
+			interrupt := func(sessionCtx context.Context) {
+				if !interrupted.CompareAndSwap(false, true) {
+					return
+				}
+				server.mu.Lock()
+				conn := server.conns[server.chainSyncAddr]
+				server.mu.Unlock()
+				require.NotNil(t, conn)
+				_ = conn.Close()
+				select {
+				case <-sessionCtx.Done():
+				case <-time.After(10 * time.Second):
+					t.Error("closing the chainsync connection did not end the session")
+				}
+			}
+
+			logs := newLogCollector()
+			results := make(chan EpochResult, 8)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := make(chan error, 1)
+			go func() {
+				done <- RunFromGenesis(
+					ctx, listener.Addr().String(), "preview", magic, koios, nil,
+					func(r EpochResult) { results <- r },
+					logs.logf, nil, false,
+					WithBoundaryCaptureDir(dir), withBoundaryFollower(follower),
+					func(o *fromGenesisOptions) {
+						o.afterCapturedUTxORead = interrupt
+					},
+				)
+			}()
+			testutil.RequireReceive(t, put, 5*time.Second, "capture handed to the main loop")
+
+			server.allowStep(t) // block 0: the UTxO baseline
+			server.allowStep(t) // block 1: the epoch 2 boundary, interrupted
+			server.waitForSessions(t, 2)
+			server.allowStep(t) // block 1 again, on the resumed session
+			t.Cleanup(func() { t.Logf("logs: %q", logs.all()) })
+			r := testutil.RequireReceive(t, results, 20*time.Second, "epoch 2 result")
+
+			require.True(t, interrupted.Load())
+			assert.Equal(t, uint64(2), r.Epoch)
+			assert.ErrorIs(t, r.ProtocolParamsErr, ppMarker,
+				"the boundary was checked live, not against its capture")
+			if tc.utxoErr != nil {
+				assert.ErrorIs(t, r.UTxOErr, utxoMarker)
+			} else {
+				require.NoError(t, r.UTxOErr)
+				assert.Equal(t, []string{"ff#0"}, r.UTxOExtra)
+				_, err = os.Stat(capture.utxoPath)
+				assert.ErrorIs(t, err, os.ErrNotExist,
+					"a compared capture is removed")
+			}
+
+			cancel()
+			err = testutil.RequireReceive(t, done, 10*time.Second, "RunFromGenesis exit")
+			assert.True(t, err == nil || errors.Is(err, context.Canceled))
+		})
+	}
 }

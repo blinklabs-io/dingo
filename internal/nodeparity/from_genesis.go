@@ -968,7 +968,8 @@ func RunFromGenesis(
 		// so the next block in lastEpoch runs them instead of being skipped as
 		// already checked. A resumed session starts after lastPoint, the block
 		// whose checks were abandoned, so the re-run is at a later block of the
-		// same epoch.
+		// same epoch -- unless the block had a boundary capture, which steps
+		// lastPoint back so the block itself is delivered again.
 		lastEpochInterrupted bool
 	)
 	// taint records cause unless an earlier one this epoch already did.
@@ -1301,6 +1302,7 @@ func RunFromGenesis(
 						)
 						// Recorded before any of this block's own work runs --
 						// see lastPoint's doc comment above.
+						parentPoint := lastPoint
 						lastPoint = point
 
 						if !utxoAttempted && !skipUTxO {
@@ -1408,8 +1410,17 @@ func RunFromGenesis(
 						// Logged here because the reconnect loop usually
 						// reports the session's own end instead: the
 						// callback error arrives after it.
+						var capture *boundaryCapture
 						interrupted := func() error {
 							lastEpochInterrupted = true
+							if capture != nil {
+								// A capture answers only for this exact
+								// block, so the resumed session must deliver
+								// it again rather than resume after it.
+								// Applying its transactions a second time
+								// deletes and adds the same entries.
+								lastPoint = parentPoint
+							}
 							err := callbackErr(
 								"%w: epoch %d at slot %d: %w",
 								errEpochChecksInterrupted, epoch,
@@ -1445,36 +1456,33 @@ func RunFromGenesis(
 						}
 
 						result := EpochResult{Epoch: epoch}
-						var capture *boundaryCapture
 						captureCompared := false
 						if captures != nil {
 							capture = captures.take(epoch, point)
 						}
 						if capture != nil {
-							// An interrupted callback hands the capture back:
-							// the resumed session delivers this block again.
+							// A callback that ends before reporting this
+							// boundary hands the capture back whole, file
+							// included: the resumed session delivers this
+							// block again, and Dingo may no longer answer
+							// for it.
 							defer func() {
-								switch {
-								case capture.utxoPath == "":
-								case captureCompared:
-									_ = os.Remove(capture.utxoPath)
-								default:
+								if !captureCompared {
 									captures.put(capture)
 								}
 							}()
 						}
 						// loadCapturedUTxO reads Dingo's set at point from the
-						// capture, removing the file: it is read at most once.
+						// capture. The file outlives the read until the
+						// boundary is reported.
 						loadCapturedUTxO := func() (UTxOSet, error) {
-							if capture.utxoErr != nil {
-								return nil, capture.utxoErr
+							set, err := UTxOSet(nil), capture.utxoErr
+							if err == nil {
+								set, err = readUTxOSetFile(capture.utxoPath)
 							}
-							set, err := readUTxOSetFile(capture.utxoPath)
-							_ = os.Remove(capture.utxoPath)
-							capture.utxoPath = ""
-							capture.utxoErr = errors.New(
-								"captured UTxO set already used",
-							)
+							if options.afterCapturedUTxORead != nil {
+								options.afterCapturedUTxORead(sessionCtx)
+							}
 							return set, err
 						}
 
@@ -1609,6 +1617,9 @@ func RunFromGenesis(
 							result.UTxOAttempted = false
 						}
 						captureCompared = true
+						if capture != nil && capture.utxoPath != "" {
+							_ = os.Remove(capture.utxoPath)
+						}
 						result.UTxOElapsed = time.Since(utxoStart)
 						utxoTaintCause = ""
 

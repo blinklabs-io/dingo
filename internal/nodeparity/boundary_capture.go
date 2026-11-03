@@ -41,6 +41,10 @@ type fromGenesisOptions struct {
 	// follower replaces runBoundaryFollower; only tests set it, since the
 	// fake Dingo cannot serve a second chainsync session.
 	follower func(context.Context, *boundaryCaptures)
+	// afterCapturedUTxORead runs once a capture's UTxO set is read, or found
+	// unreadable; only tests set it, to end the session before the boundary
+	// is reported.
+	afterCapturedUTxORead func(context.Context)
 }
 
 // WithBoundaryCaptureDir makes RunFromGenesis read Dingo's side of every
