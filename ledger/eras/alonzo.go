@@ -265,6 +265,9 @@ func ValidateTxAlonzo(
 			return err
 		}
 	}
+	// Every redeemer's script context embeds the same TxInfo; convert it to
+	// PlutusData once.
+	txInfoV1Context := script.NewCachedTxInfo(txInfoV1)
 	for _, redeemerPair := range txInfoV1.Redeemers {
 		purpose := redeemerPair.Key
 		if purpose == nil {
@@ -286,7 +289,7 @@ func ValidateTxAlonzo(
 			if tmp, ok := purpose.(script.ScriptPurposeSpending); ok {
 				datum = tmp.Datum
 			}
-			sc := script.NewScriptContextV1V2(txInfoV1, purpose)
+			sc := script.NewScriptContextV1V2(txInfoV1Context, purpose)
 			costModel, err := requiredCostModel(tmpPparams.CostModels, 0, "PlutusV1")
 			if err != nil {
 				return err
@@ -433,6 +436,9 @@ func EvaluateTxAlonzo(
 			return 0, lcommon.ExUnits{}, nil, err
 		}
 	}
+	// Every redeemer's script context embeds the same TxInfo; convert it to
+	// PlutusData once.
+	txInfoV1Context := script.NewCachedTxInfo(txInfoV1)
 	for _, redeemerPair := range txInfoV1.Redeemers {
 		if err := checkEvaluationCanceled(ls); err != nil {
 			return 0, lcommon.ExUnits{}, nil, err
@@ -458,7 +464,7 @@ func EvaluateTxAlonzo(
 			if tmp, ok := purpose.(script.ScriptPurposeSpending); ok {
 				datum = tmp.Datum
 			}
-			sc := script.NewScriptContextV1V2(txInfoV1, purpose)
+			sc := script.NewScriptContextV1V2(txInfoV1Context, purpose)
 			costModel, err := requiredCostModel(tmpPparams.CostModels, 0, "PlutusV1")
 			if err != nil {
 				return 0, lcommon.ExUnits{}, nil, err
