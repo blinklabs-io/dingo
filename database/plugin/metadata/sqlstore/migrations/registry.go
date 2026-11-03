@@ -92,6 +92,7 @@ const (
 	utxoSpenderPartialIndexSchemaRelease                = "utxo-spender-partial-indexes"
 	leiosKeyLookupIndexSchemaRelease                    = "leios-key-lookup-indexes"
 	backfillCheckpointIdentitySchemaRelease             = "backfill-checkpoint-identity"
+	rewardOutputCredentialPendingIndexSchemaRelease     = "reward-account-output-credential-pending-index"
 )
 
 const mithrilRewardRepairPendingKey = "mithril_reward_repair_pending"
@@ -256,6 +257,11 @@ var schemaVersions = []struct {
 	{Version: 50, Name: utxoSpenderPartialIndexSchemaRelease, Dir: "v50"},
 	{Version: 51, Name: leiosKeyLookupIndexSchemaRelease, Dir: "v51"},
 	{Version: 52, Name: backfillCheckpointIdentitySchemaRelease, Dir: "v52"},
+	{
+		Version: 53,
+		Name:    rewardOutputCredentialPendingIndexSchemaRelease,
+		Dir:     "v53",
+	},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.

@@ -31,7 +31,7 @@ func TestSQLiteRegistry(t *testing.T) {
 	registry, err := SQLiteRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "sqlite"))
-	require.Len(t, registry, 52)
+	require.Len(t, registry, 53)
 
 	require.Equal(t, accountDRepClearSchemaRelease, registry[34].Name)
 	require.Contains(t, registry[34].SQL["sqlite"].Expand[0],
@@ -316,6 +316,13 @@ func TestSQLiteRegistry(t *testing.T) {
 	require.Equal(t, governanceVoteCastSchemaRelease, registry[47].Name)
 	require.Contains(t, strings.Join(registry[47].SQL["sqlite"].Expand, "\n"),
 		"ADD COLUMN `cert_index`")
+	require.Equal(t, 53, registry[52].Version)
+	require.Equal(t, rewardOutputCredentialPendingIndexSchemaRelease,
+		registry[52].Name)
+	require.Len(t, registry[52].SQL["sqlite"].Expand, 1)
+	require.Contains(t, registry[52].SQL["sqlite"].Expand[0],
+		"`idx_reward_account_output_credential_pending`")
+	require.Empty(t, registry[52].Backfill)
 }
 
 func TestBackfillCheckpointIdentityMigrationTranslation(t *testing.T) {
@@ -335,7 +342,7 @@ func TestBackfillCheckpointIdentityMigrationTranslation(t *testing.T) {
 			t.Parallel()
 			registry, err := registryForDialect(testCase.dialect)
 			require.NoError(t, err)
-			require.Len(t, registry, 52)
+			require.Len(t, registry, 53)
 			migration := registry[51]
 			require.Equal(t, backfillCheckpointIdentitySchemaRelease, migration.Name)
 			require.Contains(t, migration.SQL[testCase.dialect].Expand,
@@ -365,7 +372,7 @@ func TestDrepDormancySeedUsesPortableIdempotentInsert(t *testing.T) {
 			registry, err := tc.registry()
 			require.NoError(t, err)
 			require.NoError(t, validateRegistry(registry, tc.dialect))
-			require.Len(t, registry, 52)
+			require.Len(t, registry, 53)
 			migration := registry[39]
 			require.Equal(t, drepDormancyStateSchemaRelease, migration.Name)
 			seed := strings.Join(migration.SQL[tc.dialect].Expand, "\n")
@@ -594,7 +601,7 @@ func TestMySQLRegistryPrefixesPoolOpCertSequenceIndex(t *testing.T) {
 	registry, err := MySQLRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "mysql"))
-	require.Len(t, registry, 52)
+	require.Len(t, registry, 53)
 
 	require.Contains(
 		t,

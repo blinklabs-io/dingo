@@ -15,204 +15,180 @@
 package sqlstore
 
 import (
+	"encoding/binary"
+	"fmt"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
-	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
-	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
-	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	"github.com/stretchr/testify/require"
 )
 
-type pendingLiveStake struct {
-	utxo   uint64
-	reward uint64
-	total  uint64
+// TestGetLiveStakeInputsForPoolsMatchesPerRowPendingCredits pins the live
+// stake read against the per-row formulation it replaced: total_stake plus
+// pendingRewardCreditSubquery evaluated for every row. The fixture spans two
+// pool chunks, credited and uncredited rounds, and outputs the subquery
+// excludes (guarded, unspendable, folded), so the once-per-call totals must
+// land on exactly the rows, in exactly the order, the subquery produced.
+func TestGetLiveStakeInputsForPoolsMatchesPerRowPendingCredits(t *testing.T) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+	require.NoError(t, store.SetPendingRewardCreditRounds(
+		[]models.RewardCreditRound{
+			{SnapshotEpoch: 1, BoundarySlot: 100},
+			{SnapshotEpoch: 2, BoundarySlot: 200},
+		}, nil,
+	))
+	poolCount := store.dialect.ParameterLimit() + 2
+	pools := make([][]byte, 0, poolCount)
+	for i := range poolCount {
+		pool := bytesRepeat(0x00, 28)
+		binary.BigEndian.PutUint32(pool, uint32(i+1)) //nolint:gosec // bounded fixture index
+		pools = append(pools, pool)
+	}
+	credited := bytesRepeat(0xa1, 28)
+	bare := bytesRepeat(0xa2, 28)
+	lastChunk := bytesRepeat(0xa3, 28)
+	output := func(
+		epoch uint64, key []byte, pool []byte, amount uint64,
+		spendable, guarded bool,
+	) *models.RewardAccountOutput {
+		return &models.RewardAccountOutput{
+			Epoch: epoch, CredentialTag: 0, StakingKey: key,
+			PoolKeyHash: pool, RewardType: "member",
+			Amount: types.Uint64(amount), Spendable: spendable,
+			Guarded: guarded, CapturedSlot: epoch * 100, BoundarySlot: epoch * 100,
+		}
+	}
+	require.NoError(t, store.SaveRewardAccountOutputs(
+		[]*models.RewardAccountOutput{
+			output(1, credited, pools[0], 25, true, false),
+			output(2, credited, pools[0], 10, true, false),
+			// Excluded: guarded, unspendable, and a round not yet credited.
+			output(2, credited, pools[1], 7, true, true),
+			output(2, credited, pools[2], 9, false, false),
+			output(3, credited, pools[0], 11, true, false),
+			// The same credential's leader reward in the credited round.
+			output(2, credited, pools[3], 4, true, false),
+			output(2, lastChunk, pools[poolCount-1], 5, true, false),
+			// Folded below.
+			output(1, lastChunk, pools[0], 13, true, false),
+		}, nil,
+	))
+	_, err := store.writeDB.Exec(
+		`UPDATE reward_account_output SET folded = TRUE WHERE epoch = 1 AND staking_key = ?`,
+		lastChunk,
+	)
+	require.NoError(t, err)
+	insert := func(pool, key []byte, total string) {
+		_, err := store.writeDB.Exec(store.dialect.Rebind(`
+INSERT INTO reward_live_stake (
+    pool_key_hash, staking_key, credential_tag, utxo_stake, reward_stake,
+    total_stake, registered, updated_slot, calculation_version
+) VALUES (?, ?, 0, ?, '0', ?, TRUE, 1, ?)`),
+			pool, key, total, total, models.RewardStakeCalculationVersion,
+		)
+		require.NoError(t, err)
+	}
+	insert(pools[0], credited, "1000")
+	insert(pools[0], bare, "2000")
+	insert(pools[poolCount-1], lastChunk, "3000")
+	for i, pool := range pools[1 : poolCount-1] {
+		filler := bytesRepeat(0xb0, 28)
+		binary.BigEndian.PutUint32(filler[24:], uint32(i+1)) //nolint:gosec // bounded fixture index
+		insert(pool, filler, "1")
+	}
+
+	inputs, err := store.GetLiveStakeInputsForPools(pools, 0, nil)
+	require.NoError(t, err)
+	require.Len(t, inputs, poolCount+1)
+	got := make([]string, 0, len(inputs))
+	for _, input := range inputs {
+		got = append(got, fmt.Sprintf("%x %d %x %d",
+			input.PoolKeyHash, input.CredentialTag, input.StakingKey,
+			uint64(input.Stake)))
+	}
+
+	// The per-row formulation, chunked exactly as the read is.
+	var want []string
+	chunkSize := store.dialect.ParameterLimit()
+	for start := 0; start < len(pools); start += chunkSize {
+		end := min(start+chunkSize, len(pools))
+		rows, err := store.readDB.Query(`
+SELECT rls.pool_key_hash, rls.staking_key, rls.credential_tag,
+       CAST(rls.total_stake AS INTEGER) + `+
+			store.pendingRewardCreditSubquery(
+				"rls.credential_tag", "rls.staking_key",
+			)+`
+FROM reward_live_stake rls
+WHERE rls.pool_key_hash IN (`+bindPlaceholders(end-start)+`)
+  AND rls.registered = TRUE
+ORDER BY rls.pool_key_hash ASC, rls.credential_tag ASC,
+         rls.staking_key ASC`, byteSliceArgs(pools[start:end])...)
+		require.NoError(t, err)
+		for rows.Next() {
+			var pool, key []byte
+			var tag, stake int64
+			require.NoError(t, rows.Scan(&pool, &key, &tag, &stake))
+			want = append(want, fmt.Sprintf("%x %d %x %d", pool, tag, key, stake))
+		}
+		require.NoError(t, rows.Err())
+		require.NoError(t, rows.Close())
+	}
+	require.Equal(t, want, got)
+	require.Contains(t, got, fmt.Sprintf("%x 0 %x 1039", pools[0], credited),
+		"credited rounds 1 and 2 add 25+10+4; guarded, unspendable and "+
+			"uncredited outputs do not")
+	require.Contains(t, got, fmt.Sprintf("%x 0 %x 2000", pools[0], bare))
+	require.Contains(t, got,
+		fmt.Sprintf("%x 0 %x 3005", pools[poolCount-1], lastChunk),
+		"the second chunk receives its pending credit; the folded one does not")
 }
 
-// TestReSumCountsPendingBatchedStakeOnce queues a batched payment to
-// credential C and then, before the accumulator flushes, runs each write
-// that re-sums C's live stake from the utxo table: a reward withdrawal (with
-// the accumulator bound to an outer transaction, and with none), a direct
-// reward credit, and a batch of reward credits. The re-sum already sees the
-// payment's utxo row, so after the flush reward_live_stake must count it
-// once.
-func TestReSumCountsPendingBatchedStakeOnce(t *testing.T) {
+// TestPendingRewardCreditTotalsReadTheCoveringIndex is the regression for the
+// boundary stake read: totalling every credential's unfolded credits used to
+// fetch a table row per output to read folded and amount, millions of random
+// page reads on mainnet at every epoch boundary. The pass must be served by
+// idx_reward_account_output_credential_pending alone, in its order, whether or
+// not sqlite_stat1 has been populated: a node runs ANALYZE only around an
+// import, so the boundary read normally runs without current stats.
+func TestPendingRewardCreditTotalsReadTheCoveringIndex(t *testing.T) {
 	t.Parallel()
-	const (
-		startReward = uint64(5_000_000)
-		payment     = uint64(2_000_000)
-		amount      = uint64(1_000_000)
-	)
-	stakingKey := lcommon.NewBlake2b224([]byte("pending-stake-key"))
-	paymentKey := lcommon.NewBlake2b224([]byte("pending-payment-key"))
-	credential := models.NewStakeCredentialRef(0, stakingKey.Bytes())
-	baseAddress, err := lcommon.NewAddressFromParts(
-		lcommon.AddressTypeKeyKey,
-		lcommon.AddressNetworkTestnet,
-		paymentKey.Bytes(),
-		stakingKey.Bytes(),
-	)
-	require.NoError(t, err)
-	rewardAddress, err := lcommon.NewAddressFromParts(
-		lcommon.AddressTypeNoneKey,
-		lcommon.AddressNetworkTestnet,
-		nil,
-		stakingKey.Bytes(),
-	)
-	require.NoError(t, err)
-
-	pay := func(
-		t *testing.T,
-		store *Store,
-		acc types.MetadataBatchAccumulator,
-		txn types.Txn,
-	) {
-		t.Helper()
-		output, err := mockledger.NewTransactionOutputBuilder().
-			WithAddress(baseAddress.String()).
-			WithLovelace(payment).
-			Build()
-		require.NoError(t, err)
-		txID := make([]byte, 32)
-		txID[0] = 1
-		tx := mockledger.NewTransactionBuilder()
-		tx.WithId(txID)
-		tx.WithOutputs(output)
-		tx.WithValid(true)
-		require.NoError(t, store.SetTransactionBatched(
-			tx, ocommon.Point{Slot: 100, Hash: txID}, 0, nil, true, acc, txn, 0,
-		))
-	}
-	withdraw := func(
-		t *testing.T,
-		store *Store,
-		acc types.MetadataBatchAccumulator,
-		txn types.Txn,
-	) {
-		t.Helper()
-		txID := make([]byte, 32)
-		txID[0] = 2
-		tx := mockledger.NewTransactionBuilder()
-		tx.WithId(txID)
-		tx.WithValid(true)
-		tx.WithWithdrawals(map[*lcommon.Address]uint64{&rewardAddress: amount})
-		require.NoError(t, store.SetTransactionBatched(
-			tx, ocommon.Point{Slot: 100, Hash: txID}, 1, nil, true, acc, txn, 0,
-		))
-	}
-
-	for _, tc := range []struct {
-		name     string
-		boundTxn bool
-		reSum    func(
-			*testing.T, *Store, types.MetadataBatchAccumulator, types.Txn,
-		)
-		wantReward uint64
+	for _, stats := range []struct {
+		name    string
+		analyze bool
 	}{
-		{
-			name:       "withdrawal_in_outer_txn",
-			boundTxn:   true,
-			reSum:      withdraw,
-			wantReward: startReward - amount,
-		},
-		{
-			name:       "withdrawal_without_txn",
-			reSum:      withdraw,
-			wantReward: startReward - amount,
-		},
-		{
-			name:     "reward_credit",
-			boundTxn: true,
-			reSum: func(
-				t *testing.T,
-				store *Store,
-				_ types.MetadataBatchAccumulator,
-				txn types.Txn,
-			) {
-				t.Helper()
-				require.NoError(t, store.AddAccountRewardByCredential(
-					credential.Tag, credential.Key, amount, 100,
-					[]byte{0x03}, txn,
-				))
-			},
-			wantReward: startReward + amount,
-		},
-		{
-			name:     "reward_credit_batch",
-			boundTxn: true,
-			reSum: func(
-				t *testing.T,
-				store *Store,
-				_ types.MetadataBatchAccumulator,
-				txn types.Txn,
-			) {
-				t.Helper()
-				require.NoError(t, store.AddAccountRewardsByCredential(
-					[]models.AccountRewardCredit{{
-						StakingKey:    credential.Key,
-						CredentialTag: credential.Tag,
-						SourceHash:    []byte{0x04},
-						Amount:        amount,
-						Slot:          100,
-					}},
-					txn,
-				))
-			},
-			wantReward: startReward + amount,
-		},
+		{name: "without_planner_stats"},
+		{name: "with_planner_stats", analyze: true},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
+		t.Run(stats.name, func(t *testing.T) {
 			t.Parallel()
-			store := newAPIModeSQLiteStore(t, nil)
-			require.NoError(t, store.CreateAccount(nil, &models.Account{
-				StakingKey:    credential.Key,
-				CredentialTag: credential.Tag,
-				Reward:        types.Uint64(startReward),
-				Active:        true,
-			}))
-			acc := store.NewBatchAccumulator()
-			defer acc.Reset()
-			var txn types.Txn
-			if tc.boundTxn {
-				txn = store.Transaction(t.Context())
-				t.Cleanup(func() { _ = txn.Rollback() })
+			store := newManagementTestStore(t)
+			require.NoError(t, store.SetPendingRewardCreditRounds(
+				[]models.RewardCreditRound{{SnapshotEpoch: 1, BoundarySlot: 100}},
+				nil,
+			))
+			outputs := make([]*models.RewardAccountOutput, 0, 64)
+			for i := range 64 {
+				key := bytesRepeat(0xc0, 28)
+				key[27] = byte(i)
+				outputs = append(outputs, &models.RewardAccountOutput{
+					Epoch: 1, CredentialTag: 0, StakingKey: key,
+					PoolKeyHash: bytesRepeat(0xc1, 28), RewardType: "member",
+					Amount: types.Uint64(uint64(i)), Spendable: i%4 != 0,
+					Guarded: i%8 == 1, CapturedSlot: 100, BoundarySlot: 100,
+				})
 			}
-			pay(t, store, acc, txn)
-			tc.reSum(t, store, acc, txn)
-			require.NoError(t, store.FlushBatch(acc, txn))
-
-			want := pendingLiveStake{
-				utxo:   payment,
-				reward: tc.wantReward,
-				total:  payment + tc.wantReward,
+			require.NoError(t, store.SaveRewardAccountOutputs(outputs, nil))
+			if stats.analyze {
+				analyzeStore(t, store)
 			}
-			db, ctx, err := store.dbFromTxn(txn)
-			require.NoError(t, err)
-			var independent pendingLiveStake
-			require.NoError(t, db.QueryRowContext(ctx, `
-SELECT COALESCE(SUM(CAST(amount AS INTEGER)), 0) FROM utxo
-WHERE credential_tag = ? AND staking_key = ? AND deleted_slot = 0`,
-				credential.Tag, credential.Key,
-			).Scan(&independent.utxo))
-			require.NoError(t, db.QueryRowContext(ctx, `
-SELECT CAST(reward AS INTEGER) FROM account
-WHERE credential_tag = ? AND staking_key = ?`,
-				credential.Tag, credential.Key,
-			).Scan(&independent.reward))
-			independent.total = independent.utxo + independent.reward
-			require.Equal(t, want, independent,
-				"final UTxO set and reward balance")
-			var stored pendingLiveStake
-			require.NoError(t, db.QueryRowContext(ctx, `
-SELECT CAST(utxo_stake AS INTEGER), CAST(reward_stake AS INTEGER),
-       CAST(total_stake AS INTEGER)
-FROM reward_live_stake WHERE credential_tag = ? AND staking_key = ?`,
-				credential.Tag, credential.Key,
-			).Scan(&stored.utxo, &stored.reward, &stored.total))
-			require.Equal(t, want, stored,
-				"reward_live_stake must count the queued payment once")
+			plan := queryPlan(t, store.readDB, store.pendingRewardCreditTotalsSQL())
+			require.Contains(t, plan,
+				"SCAN prc USING COVERING INDEX idx_reward_account_output_credential_pending",
+				"plan %s", plan)
+			require.NotContains(t, plan, "USE TEMP B-TREE FOR GROUP BY",
+				"the index supplies the group order: plan %s", plan)
 		})
 	}
 }

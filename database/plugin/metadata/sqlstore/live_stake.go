@@ -2010,18 +2010,20 @@ func (s *Store) GetLiveStakeInputsForPools(
 	}
 	poolKeyHashes = dedupeByteSlices(poolKeyHashes)
 	// reward_stake carries account.reward; a credited round's unfolded
-	// credits are the rest of the balance.
-	stakeExpr := "rls.total_stake"
+	// credits are the rest of the balance. They are totalled once per call
+	// rather than once per row: this read covers every delegator, and the
+	// per-row subquery made the boundary stake read cost a random index probe
+	// and table fetch per unfolded output.
 	hasPending, err := s.HasPendingRewardCreditRounds(txn)
 	if err != nil {
 		return nil, fmt.Errorf("GetLiveStakeInputsForPools: %w", err)
 	}
+	var pending map[string]uint64
 	if hasPending {
-		pendingExpr := s.pendingRewardCreditSubquery(
-			"rls.credential_tag", "rls.staking_key",
-		)
-		stakeExpr = "CAST(rls.total_stake AS " + s.pendingCreditCastType() +
-			") + " + pendingExpr
+		pending, err = s.pendingRewardCreditTotals(ctx, db)
+		if err != nil {
+			return nil, fmt.Errorf("GetLiveStakeInputsForPools: %w", err)
+		}
 	}
 	chunkSize := s.dialect.ParameterLimit()
 	if expiryEpoch > 0 {
@@ -2056,7 +2058,7 @@ LEFT JOIN account acct
 		}
 		query := `
 SELECT rls.pool_key_hash, rls.staking_key, rls.credential_tag,
-       ` + stakeExpr + `
+       rls.total_stake
 FROM reward_live_stake rls` + join + `
 WHERE rls.pool_key_hash IN (` + bindPlaceholders(len(chunk)) + `)
   AND rls.registered = TRUE` + expiry + `
@@ -2087,6 +2089,19 @@ ORDER BY rls.pool_key_hash ASC, rls.credential_tag ASC,
 			if err != nil {
 				rows.Close()
 				return nil, err
+			}
+			if credit, ok := pending[pendingRewardCreditKey(
+				uint8(credentialTag), item.StakingKey,
+			)]; ok {
+				if value > ^uint64(0)-credit {
+					rows.Close()
+					return nil, fmt.Errorf(
+						"GetLiveStakeInputsForPools: stake overflow for credential %d:%x",
+						credentialTag,
+						item.StakingKey,
+					)
+				}
+				value += credit
 			}
 			item.CredentialTag = uint8(credentialTag)
 			item.Stake = types.Uint64(value)

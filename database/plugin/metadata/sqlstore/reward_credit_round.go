@@ -526,6 +526,72 @@ func (s *Store) pendingCreditCastType() string {
 	}
 }
 
+// pendingRewardCreditTotals returns every credential's pending credit total:
+// the rows pendingRewardCreditSubquery sums, read in one pass and grouped by
+// credential. The subquery is right for a lookup of a few credentials, but a
+// read of every delegator pays it once per row, which is one index probe plus
+// one fetch per unfolded output across every credited round. On
+// idx_reward_account_output_credential_pending the single pass is a scan of
+// the index in group order with no table access at all.
+//
+// The key is the credential tag byte followed by the staking key. A credential
+// absent from the map has no pending credit, which is the subquery's
+// COALESCE(..., 0).
+func (s *Store) pendingRewardCreditTotals(
+	ctx context.Context,
+	db queryer,
+) (map[string]uint64, error) {
+	rows, err := db.QueryContext(ctx, s.pendingRewardCreditTotalsSQL())
+	if err != nil {
+		return nil, fmt.Errorf("get pending reward credit totals: %w", err)
+	}
+	defer rows.Close()
+	ret := make(map[string]uint64)
+	for rows.Next() {
+		var tag uint8
+		var key []byte
+		var raw sql.NullString
+		if err := rows.Scan(&tag, &key, &raw); err != nil {
+			return nil, err
+		}
+		if !raw.Valid || raw.String == "" {
+			continue
+		}
+		amount, err := parseUint64("pending reward credit total", raw.String)
+		if err != nil {
+			return nil, err
+		}
+		ret[pendingRewardCreditKey(tag, key)] = amount
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("get pending reward credit totals: %w", err)
+	}
+	return ret, nil
+}
+
+// pendingRewardCreditTotalsSQL is the query behind pendingRewardCreditTotals.
+// The flag tests are written as boolean expressions rather than equalities so
+// they match no index prefix: as equalities they fit the (spendable, guarded,
+// folded, epoch) index, which SQLite picks without current planner stats and
+// which walks every output of those flags with a table fetch each and a sort
+// for the grouping. With nothing to search by, the covering credential index
+// is the cheapest access path whatever the stats say: it is scanned once, in
+// group order, with no table access.
+func (s *Store) pendingRewardCreditTotalsSQL() string {
+	return `
+SELECT prc.credential_tag, prc.staking_key,
+       SUM(CAST(prc.amount AS ` + s.pendingCreditCastType() + `))
+FROM reward_account_output prc
+WHERE prc.spendable AND NOT prc.guarded AND NOT prc.folded
+  AND EXISTS (SELECT 1 FROM reward_credit_round rcr
+              WHERE rcr.snapshot_epoch = prc.epoch)
+GROUP BY prc.credential_tag, prc.staking_key`
+}
+
+func pendingRewardCreditKey(tag uint8, stakingKey []byte) string {
+	return string([]byte{tag}) + string(stakingKey)
+}
+
 // pendingRewardCreditSubquery is a scalar subquery totalling the pending
 // rounds' spendable, unguarded outputs for the credential named by tagCol and
 // keyCol. The indexed round lookup keeps the query's bind count independent
