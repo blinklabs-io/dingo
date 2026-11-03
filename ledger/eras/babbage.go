@@ -292,15 +292,17 @@ func ValidateTxBabbage(
 		slices.Concat(resolvedInputs, resolvedRefInputs),
 		tmpPparams.ProtocolMajor,
 	)
+	// Every PlutusV2 redeemer's script context embeds the same TxInfo;
+	// convert it to PlutusData once. A transaction without redeemers needs
+	// neither.
+	var txInfoV2Context *script.CachedTxInfo
 	if txHasRedeemers(tx) {
 		txInfoV2, err = txInfos.v2()
 		if err != nil {
 			return err
 		}
+		txInfoV2Context = script.NewCachedTxInfo(txInfoV2)
 	}
-	// Every PlutusV2 redeemer's script context embeds the same TxInfo;
-	// convert it to PlutusData once.
-	txInfoV2Context := script.NewCachedTxInfo(txInfoV2)
 	for _, redeemerPair := range txInfoV2.Redeemers {
 		purpose := redeemerPair.Key
 		if purpose == nil {
@@ -547,15 +549,17 @@ func EvaluateTxBabbage(
 		slices.Concat(resolvedInputs, resolvedRefInputs),
 		tmpPparams.ProtocolMajor,
 	)
+	// Every PlutusV2 redeemer's script context embeds the same TxInfo;
+	// convert it to PlutusData once. A transaction without redeemers needs
+	// neither.
+	var txInfoV2Context *script.CachedTxInfo
 	if txHasRedeemers(tx) {
 		txInfoV2, err = txInfos.v2()
 		if err != nil {
 			return 0, lcommon.ExUnits{}, nil, err
 		}
+		txInfoV2Context = script.NewCachedTxInfo(txInfoV2)
 	}
-	// Every PlutusV2 redeemer's script context embeds the same TxInfo;
-	// convert it to PlutusData once.
-	txInfoV2Context := script.NewCachedTxInfo(txInfoV2)
 	for _, redeemerPair := range txInfoV2.Redeemers {
 		if err := checkEvaluationCanceled(ls); err != nil {
 			return 0, lcommon.ExUnits{}, nil, err
