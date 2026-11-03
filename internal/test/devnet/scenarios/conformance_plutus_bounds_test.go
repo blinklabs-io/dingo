@@ -412,7 +412,9 @@ func TestPlutusBoundedArgsConformance(t *testing.T) {
 		"protocol version differs between dingo and cardano-node")
 	eraTag = cardanoEra
 
-	time.Sleep(30 * time.Second)
+	// txpump is stopped, but a transaction it submitted earlier can still be
+	// pending and holding a genesis UTxO this test would otherwise pick.
+	env.waitMempoolsEmpty()
 
 	keys := loadPlutusGenesisKeys(t, keysDir)
 	require.NotEmpty(t, keys)
@@ -480,8 +482,10 @@ func TestPlutusBoundedArgsConformance(t *testing.T) {
 		allRefs = append(allRefs, plutusRef{hash: fundBase.hash, idx: uint32(i)}) //nolint:gosec
 	}
 	env.waitBoth(allRefs, true)
-	// Let both nodes settle the funding block before spending from it.
-	time.Sleep(15 * time.Second)
+	// The spends must be judged against a ledger that has applied the
+	// funding block on both nodes, with the funding transaction no longer
+	// pending in either mempool.
+	env.waitMempoolsEmpty()
 
 	type outcome struct {
 		c                    boundsCase
@@ -531,6 +535,61 @@ func TestPlutusBoundedArgsConformance(t *testing.T) {
 			env.waitBoth([]plutusRef{{hash: txIDFromTx(t, o.tx), idx: 0}}, true)
 		}
 	}
+}
+
+// waitMempoolsEmpty waits until neither producer's mempool holds a
+// transaction, read through LocalTxMonitor.
+func (e *plutusEnv) waitMempoolsEmpty() {
+	e.t.Helper()
+	deadline := time.Now().Add(plutusConfirmTimeout)
+	var last string
+	for time.Now().Before(deadline) {
+		empty := true
+		for _, addr := range []string{e.dingoNtc, e.cardanoNtc} {
+			n, err := boundsMempoolTxCount(addr, e.magic)
+			if err != nil {
+				last = err.Error()
+				empty = false
+				break
+			}
+			if n != 0 {
+				last = fmt.Sprintf("%d transactions pending at %s", n, addr)
+				empty = false
+				break
+			}
+		}
+		if empty {
+			return
+		}
+		time.Sleep(2 * time.Second)
+	}
+	require.FailNowf(e.t, "mempool timeout", "mempools not empty: %s", last)
+}
+
+// boundsMempoolTxCount returns the number of transactions in the mempool of
+// the node at addr.
+func boundsMempoolTxCount(addr string, magic uint32) (uint32, error) {
+	conn, err := ouroboros.New(
+		ouroboros.WithNetworkMagic(magic),
+		ouroboros.WithNodeToNode(false),
+	)
+	if err != nil {
+		return 0, fmt.Errorf("ouroboros.New: %w", err)
+	}
+	defer conn.Close() //nolint:errcheck
+	if err := conn.DialTimeout("tcp", addr, 10*time.Second); err != nil {
+		return 0, fmt.Errorf("dial %s: %w", addr, err)
+	}
+	protocol := conn.LocalTxMonitor()
+	if protocol == nil || protocol.Client == nil {
+		return 0, fmt.Errorf("LocalTxMonitor unavailable at %s", addr)
+	}
+	defer protocol.Client.Release() //nolint:errcheck
+	_, _, count, err := protocol.Client.GetSizes()
+	if err != nil {
+		return 0, fmt.Errorf("mempool sizes at %s: %w", addr, err)
+	}
+	return count, nil
 }
 
 func verdictWord(ok bool) string {
