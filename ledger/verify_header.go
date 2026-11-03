@@ -153,6 +153,15 @@ var ErrHeaderBeyondForecastHorizon = errors.New(
 	"header beyond the ledger forecast horizon",
 )
 
+// ErrHeaderAncestryUnavailable means a peer header's retained predecessors
+// cannot be reconstructed. It is deferred, not evidence of an invalid header.
+// With no local block to apply, recovery requires re-delivery of that history
+// rather than waiting for a ledger snapshot publication.
+var ErrHeaderAncestryUnavailable = fmt.Errorf(
+	"%w: retained header ancestry unavailable",
+	errHeaderVerificationDeferred,
+)
+
 // headerStateLookupErr marks err, a failure reading local state, with
 // errHeaderStateLookupFailed. models.ErrPoolNotFound is an answer rather than a
 // failure and is returned unchanged.
@@ -164,8 +173,9 @@ func headerStateLookupErr(err error) error {
 }
 
 // IsHeaderVerificationDeferred reports whether header-only verification could
-// not proceed because required ledger state, epoch data, or stake snapshot
-// data is not available yet. errEpochNonceUnavailable is included: a cached
+// not proceed because required ledger state, retained peer ancestry, epoch
+// data, or stake snapshot data is not available yet. errEpochNonceUnavailable
+// is included: a cached
 // epoch entry with no published nonce yet (Byron always, or a post-Byron
 // epoch transiently) is the same "not ready, not proof of invalidity"
 // condition as a slot outside the published cache entirely -- treating it as

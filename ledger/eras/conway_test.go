@@ -4434,7 +4434,9 @@ func TestEvaluateTxConwayCancelsActivePlutusMachine(t *testing.T) {
 		},
 		MaxTxExUnits: lcommon.ExUnits{
 			Memory: 10_000_000,
-			Steps:  100_000_000,
+			// Cancellation is polled per CEK step batch; leave enough budget
+			// for the context to cancel inside the running machine.
+			Steps: 1_000_000_000,
 		},
 	}
 	pending := lcommon.NewBlockLedgerState(ls)

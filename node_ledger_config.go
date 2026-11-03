@@ -22,6 +22,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/chainselection"
 	"github.com/blinklabs-io/dingo/chainsync"
+	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/leios"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -78,12 +79,17 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 				ref.scheduler.ConsensusStateRestored()
 			}
 		},
-		ChainManager:       n.chainManager,
-		Database:           n.db,
-		EventBus:           n.eventBus,
-		Logger:             n.config.logger,
-		CardanoNodeConfig:  n.config.cardanoNodeConfig,
-		Network:            n.config.network,
+		ChainManager:      n.chainManager,
+		Database:          n.db,
+		EventBus:          n.eventBus,
+		Logger:            n.config.logger,
+		CardanoNodeConfig: n.config.cardanoNodeConfig,
+		Network:           n.config.network,
+		DijkstraBlsProofDomain: cardano.DijkstraPoolBlsProofDomain(
+			n.config.cardanoNodeConfig,
+			n.config.network,
+			n.config.networkMagic,
+		),
 		PromRegistry:       n.config.promRegistry,
 		ValidateHistorical: n.config.validateHistorical,
 		EnableDijkstra:     n.config.experimentalDijkstraEnabled(),

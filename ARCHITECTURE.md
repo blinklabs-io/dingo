@@ -751,9 +751,9 @@ available. A header beyond the forecast horizon or with unavailable ancestry
 or context is deferred.
 
 A deferred result other than the forecast horizon means local state was not
-ready (a block-apply commit or snapshot publication in progress, a candidate
-ancestor no longer available, or published epoch data not yet covering the
-header's slot). For a header that does not extend the local chain,
+ready (a block-apply commit or snapshot publication in progress, or published
+epoch data not yet covering the header's slot). For a header that does not
+extend the local chain,
 `Ouroboros.verifyHeaderAwaitingLedger` waits inside the roll-forward callback
 for the ledger's next snapshot publication or finished validation transition
 (`LedgerState.HeaderVerificationSettledChan`) and verifies the same header
@@ -766,6 +766,18 @@ also waits and retries a local extension: otherwise an unstamped header can
 be withheld by corroboration while its peer cursor advances past it. Other
 deferrals on local extensions are forwarded unverified at once because
 missing epoch data may require applying that header's own block to settle.
+
+Missing retained predecessor data is classified as
+`ledger.ErrHeaderAncestryUnavailable`. It remains a deferred result, but bypasses
+the publication wait so `markDeferredHeaderRecovery` can re-intersect an idle
+connection or retry after queued blocks apply. A publication without local
+progress cannot reconstruct discarded peer history. Competing candidates remain
+withheld from selection and blockfetch until the ordinary verifier accepts them;
+local extensions retain the deferred block-validation path described above.
+Other non-transient deferrals also bypass the wait when the stored block tip,
+header tip and applied ledger tip are equal: no queued header or unapplied block
+can produce the required publication. Unknown tips, queued headers, fetched
+blocks ahead of the ledger, and transient publication changes retain the wait.
 
 Header parking and resyncs are exported as metrics.
 `dingo_chainsync_deferred_headers_total` counts each header
@@ -4101,6 +4113,20 @@ checks are dependency-owned so Dingo does not maintain a second, potentially
 divergent decoder or rule implementation.
 
 The `ledger/eras/` package provides era-specific validation rules for each Cardano era. The default active era table is Byron through Conway. Experimental Dijkstra support is added to the active table when Dingo starts on the `musashi` network (the IOG Leios prototype testnet, matched by network name or magic 164), the `dijkstra` network (matched by network name or magic 6), with `runMode: "leios"`, or with `startEra: "dijkstra"` — see `Config.experimentalDijkstraEnabled`. Keying on the network lets the node follow each testnet past its Conway-to-Dijkstra hard fork without an explicit run mode. DijkstraNet keeps the base Ouroboros protocols unless Leios is explicitly enabled. The Dijkstra descriptor uses `github.com/blinklabs-io/gouroboros/ledger/dijkstra`, including that release's generated CDDL shape for the nullable Leios/Peras certificate slots.
+
+The shared Dijkstra header decoder accepts the ten-field Praos body used by
+DijkstraNet and the twelve-field Leios prototype body. It preserves original
+header and header-body CBOR for hashing and KES verification, and rejects other
+arities and malformed Leios extensions. A plain DijkstraNet header has no Leios
+announcement or certificate flag.
+
+DijkstraNet's canonical genesis identity selects the older Haskell `BLS_SIG`
+domain for pool-registration proofs of possession. Other chains retain the
+IETF `BLS_POP` domain. Node startup, storage reinitialization, and immutable
+replay supply that immutable policy through `LedgerStateConfig` and
+`LedgerView`; gOuroboros resolves it through pending and cached validation
+views. Validation checks exactly the selected domain. This pool-registration
+policy does not change Leios committee or aggregate-certificate verification.
 
 Several eras replace or drop an upstream `UtxoValidationRules` entry so Dingo
 can run its own implementation — the reference-script-aware fee rule, local

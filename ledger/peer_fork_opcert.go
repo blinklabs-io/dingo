@@ -51,7 +51,7 @@ func (ls *LedgerState) validatePeerForkOpCertCounters(
 		}
 		return fmt.Errorf(
 			"%w: candidate opcert ancestry is unavailable for header at slot %d",
-			errHeaderVerificationDeferred,
+			ErrHeaderAncestryUnavailable,
 			target.SlotNumber(),
 		)
 	}
@@ -61,7 +61,7 @@ func (ls *LedgerState) validatePeerForkOpCertCounters(
 	) {
 		return fmt.Errorf(
 			"%w: candidate opcert ancestry is unavailable for header at slot %d",
-			errHeaderVerificationDeferred,
+			ErrHeaderAncestryUnavailable,
 			target.SlotNumber(),
 		)
 	}

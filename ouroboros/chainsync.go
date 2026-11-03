@@ -2935,6 +2935,8 @@ const maxDeferredVerificationWaits = 4
 // admission wait and is returned immediately. When a bound is reached the
 // last result is returned unchanged. baseline receives the applied tip
 // observed before the last attempt.
+// Missing retained ancestry returns immediately so the recovery path can
+// re-deliver predecessors instead of awaiting an unrelated publication.
 func (o *Ouroboros) verifyHeaderAwaitingLedger(
 	ctx ochainsync.CallbackContext,
 	header gledger.BlockHeader,
@@ -2957,16 +2959,30 @@ func (o *Ouroboros) verifyHeaderAwaitingLedger(
 		)
 		if err == nil || settled == nil ||
 			!ledger.IsHeaderVerificationDeferred(err) ||
+			errors.Is(err, ledger.ErrHeaderAncestryUnavailable) ||
 			errors.Is(err, ledger.ErrHeaderBeyondForecastHorizon) ||
 			wait.waits >= maxDeferredVerificationWaits ||
 			(!ledger.IsHeaderVerificationContextTransient(err) &&
-				o.deferredHeaderExtendsLocalChain(ctx.ConnectionId, header)) {
+				(o.deferredHeaderExtendsLocalChain(ctx.ConnectionId, header) ||
+					o.chainsyncLedgerIdleAt(*baseline))) {
 			return generation, err
 		}
 		if !wait.await(ctx, o.catchUpBandWaitTimeout, settled) {
 			return generation, err
 		}
 	}
+}
+
+// chainsyncLedgerIdleAt requires no queued header and no fetched block ahead
+// of the applied tip. A non-transient deferral cannot be resolved by local
+// application in this state; returning it lets cursor recovery obtain work.
+func (o *Ouroboros) chainsyncLedgerIdleAt(applied ochainsync.Tip) bool {
+	if o.chainsyncLocalChainTips == nil {
+		return false
+	}
+	tip, headerTip := o.chainsyncLocalChainTips()
+	return len(tip) > 0 && bytes.Equal(tip, applied.Point.Hash) &&
+		bytes.Equal(tip, headerTip)
 }
 
 // deferredVerificationWait is the bounded context shared by every wait of one

@@ -228,7 +228,7 @@ func (ls *LedgerState) verifyPeerForkTargetEpochAncestors(
 			!bytes.Equal(event.BlockHeader.Hash().Bytes(), hash) {
 			return fmt.Errorf(
 				"%w: candidate ancestor at slot %d is no longer available",
-				errHeaderVerificationDeferred,
+				ErrHeaderAncestryUnavailable,
 				header.SlotNumber(),
 			)
 		}
