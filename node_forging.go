@@ -915,7 +915,7 @@ func (n *Node) initBlockForger(
 		Credentials:     creds,
 		TxValidator:     n.ledgerState,
 		// The 12-field prototype header body belongs to Leios networks only.
-		LeiosHeaderExtension: n.config.experimentalLeiosNetworkingEnabled(),
+		LeiosHeaderExtension: n.config.leiosForgingEnabled(),
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create block builder: %w", err)
@@ -1010,7 +1010,7 @@ func (n *Node) initBlockForger(
 	var leiosParent forging.LeiosParentAnnouncementProvider
 	var leiosEBCaster forging.EndorserBlockBroadcaster
 	var leiosMempool forging.MempoolProvider
-	if n.config.experimentalLeiosNetworkingEnabled() &&
+	if n.config.leiosForgingEnabled() &&
 		n.leiosPipelineManager != nil && n.ouroboros() != nil {
 		adapter := &leiosPipelineAdapter{
 			mgr:              n.leiosPipelineManager,

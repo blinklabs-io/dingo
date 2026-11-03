@@ -275,8 +275,8 @@ type BlockBuilderConfig struct {
 	// LeiosHeaderExtension makes every Dijkstra ranking block carry the
 	// ouroboros-leios prototype header extension (leios_certified and
 	// leios_announcement, a 12-field header body). Set it only on a network
-	// whose peers expect the prototype header, i.e. when Leios networking is
-	// enabled. Left unset, a Dijkstra block gets the 12-field body only when
+	// whose peers expect the prototype header (Musashi, or leios run mode).
+	// Left unset, a Dijkstra block gets the 12-field body only when
 	// it carries Leios data; any other block gets the 10-field Praos body
 	// that cardano-node 11.2.0 produces and requires.
 	LeiosHeaderExtension bool
