@@ -1791,20 +1791,49 @@ dingo/
 ```
 
 Tracing is off unless `tracing` is set or `tracingEndpoint` is non-empty.
-`setupTracing` installs an OTLP HTTP (or stdout) exporter with `service.name`/`service.version` resource attributes
-and a parent-based trace-ID-ratio sampler (`tracingSampleRatio`, default 1).
-`tracingEndpoint` sets the collector URL and must be an `http` or `https` URL;
-empty defers to the standard `OTEL_EXPORTER_OTLP_*` variables. Hot paths start spans through
-`internal/tracing`: `chain.add_blocks`, `ledger.process_block`,
-`ledger.epoch_transition`, `chainsync.roll_forward`,
-`chainsync.roll_backward`, `blockfetch.block` and `mempool.add_transaction`.
-`Chain.AddBlocks`, `Mempool.AddTransaction` and the ledger block and epoch
-steps take a `context.Context`, so their spans nest under the caller's span;
-the API submit handlers pass the request context through mempool admission
-and overlay reconciliation. The epoch-transition span wraps the shared rollover
-implementation, including era-transition rollovers. The Ouroboros chainsync,
-blockfetch and transaction-submission callbacks carry no context, so their
-spans are roots.
+`setupTracing` selects the span exporter (stdout when `tracingStdout`, OTLP
+HTTP to `tracingEndpoint` when set, otherwise whatever the standard
+`OTEL_TRACES_EXPORTER` and `OTEL_EXPORTER_OTLP_*` variables choose), builds
+the telemetry resource (`service.name` from `tracingServiceName`, else
+`OTEL_SERVICE_NAME`, else `dingo`; `service.version`; `cardano.network.name`
+and `cardano.network.magic`; plus `OTEL_RESOURCE_ATTRIBUTES`, which dingo's
+own attributes override), and installs a parent-based trace-ID-ratio sampler
+(`tracingSampleRatio`, default 1). An explicit dingo setting always beats the
+corresponding `OTEL_*` variable.
+
+Block traces join across nodes without anything on the wire. A block's
+trace ID is the first 16 bytes of its hash, and every stage span hangs from a
+synthetic remote parent whose span ID is the next 8 bytes, so every node's
+spans for one block land in one trace with a shared, never-exported root.
+The sampling decision is a pure function of the block: the trace-ID ratio
+test (identical to the SDK's `TraceIDRatioBased`), or the block's issuer
+being listed in `tracingAlwaysSamplePools`. Nodes given the same ratio and
+pool list therefore keep and drop the same blocks. A pool-forced decision is
+remembered by hash in a bounded set so that a later rollback span, which
+knows only the hash, joins the same trace. When block tracing is off, or a
+block is not sampled, `internal/tracing` returns a non-recording span without
+calling the tracer, hashing the header, or allocating.
+
+Stage spans, all in the block's trace: `block.header_received` (one per
+delivering peer), `block.header_validated`, `block.body_received`,
+`block.apply`, `block.commit` (one per sampled block of a committed batch,
+spanning the batch's commit), `block.rolled_back`, and on a producer
+`block.forge`. Until the ledger first reaches the upstream tip only the core
+stages (apply, commit, rollback, forge) are recorded, so a sync from genesis
+produces a reduced span set. A transaction's mempool admission records
+`tx.mempool_add` in a trace derived the same way from the transaction hash.
+
+Session spans use ordinary trace IDs: `ledger.catchup` from ledger start to
+first tip, with each `ledger.epoch_transition` crossed meanwhile as a child;
+`mithril.bootstrap` with a child per phase; and `dblifecycle.epoch_snapshot`
+with its `mirror_retry` and `prune` children. SQL query spans from the
+metadata store are recorded only inside an existing trace.
+
+Log records written with a context that holds a recording span carry
+`trace_id` and `span_id`. When `OTEL_LOGS_EXPORTER` is set, records are also
+exported over OTLP at the configured log level; stdout logging is unchanged.
+When `OTEL_METRICS_EXPORTER` is set, the Prometheus registry behind
+`/metrics` is also pushed over OTLP through the Prometheus bridge.
 
 ## Core Node Structure
 

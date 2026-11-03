@@ -2241,6 +2241,7 @@ func (f *BlockForger) checkAndForgeProduction(ctx context.Context) error {
 		"slot", currentSlot,
 		"hash", hex.EncodeToString(block.Hash().Bytes()),
 	)
+	traceForgedBlock(ctx, block, currentSlot, forgeStartTime)
 	return nil
 }
 

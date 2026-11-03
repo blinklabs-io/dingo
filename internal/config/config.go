@@ -874,6 +874,11 @@ type Config struct {
 	TracingServiceName string `yaml:"tracingServiceName"                  envconfig:"DINGO_TRACING_SERVICE_NAME"`
 	// TracingSampleRatio is the fraction of new traces sampled, from 0 to 1.
 	TracingSampleRatio float64 `yaml:"tracingSampleRatio"                  envconfig:"DINGO_TRACING_SAMPLE_RATIO"`
+
+	// TracingAlwaysSamplePools lists stake pool IDs (bech32 or hex key hash)
+	// whose blocks are traced regardless of TracingSampleRatio.
+	TracingAlwaysSamplePools []string `yaml:"tracingAlwaysSamplePools" envconfig:"DINGO_TRACING_ALWAYS_SAMPLE_POOLS"`
+
 	// TracingStdout redirects spans to stdout instead of OTLP. Requires
 	// Tracing to also be enabled. Mostly useful for local debugging.
 	TracingStdout   bool     `yaml:"tracingStdout"                       envconfig:"DINGO_TRACING_STDOUT"`
@@ -1596,7 +1601,6 @@ func newDefaultConfig() *Config {
 		StrictUtxoValidation:                true,
 		Tracing:                             false,
 		TracingStdout:                       false,
-		TracingServiceName:                  "dingo",
 		TracingSampleRatio:                  1,
 		Network:                             "preview",
 		NetworkMagic:                        0,

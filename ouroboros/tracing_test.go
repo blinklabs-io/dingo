@@ -15,11 +15,11 @@
 package ouroboros
 
 import (
-	"encoding/hex"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/blinklabs-io/dingo/internal/tracing"
 	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -68,6 +68,7 @@ func newTracingTestOuroboros(t *testing.T) *Ouroboros {
 // process global.
 func TestChainsyncClientRollForwardRecordsSpan(t *testing.T) {
 	recorder := testutil.RecordSpans(t)
+	testutil.ConfigureBlockTracing(t, tracing.Config{SampleRatio: 1})
 	o := newTracingTestOuroboros(t)
 	connID := newTestConnId("127.0.0.1:6000", "1.1.1.1:3001")
 	header := newTestBlockHeader(100, 1, 0xaa)
@@ -83,40 +84,64 @@ func TestChainsyncClientRollForwardRecordsSpan(t *testing.T) {
 		tip,
 	))
 
-	attrs := onlySpan(t, recorder, "chainsync.roll_forward")
-	require.Equal(t, connID.String(), attrs["connection.id"].AsString())
+	attrs := onlySpan(t, recorder, "block.header_received")
+	require.Equal(t, connID.String(), attrs["peer.connection_id"].AsString())
 	require.Equal(t, int64(100), attrs["block.slot"].AsInt64())
+	require.Equal(t, int64(1), attrs["block.number"].AsInt64())
 	require.Equal(
 		t,
-		hex.EncodeToString(header.Hash().Bytes()),
-		attrs["block.hash"].AsString(),
+		tracing.BlockTraceID(header.Hash().Bytes()),
+		recorder.Ended()[0].SpanContext().TraceID(),
 	)
 }
 
 // Not t.Parallel: installs a recording OpenTelemetry provider, which is a
 // process global.
-func TestChainsyncClientRollBackwardRecordsSpan(t *testing.T) {
+func TestHeaderFromTwoPeersTwoSpansOneTrace(t *testing.T) {
 	recorder := testutil.RecordSpans(t)
-	o := newTracingTestOuroboros(t)
-	connID := newTestConnId("127.0.0.1:6000", "1.1.1.1:3001")
-	point := ocommon.NewPoint(90, []byte{0xbb})
+	testutil.ConfigureBlockTracing(t, tracing.Config{SampleRatio: 1})
+	header := newTestBlockHeader(100, 1, 0xbb)
+	tip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(100, header.Hash().Bytes()),
+		BlockNumber: 1,
+	}
+	for _, remote := range []string{"1.1.1.1:3001", "2.2.2.2:3001"} {
+		o := newTracingTestOuroboros(t)
+		_ = o.chainsyncClientRollForward(
+			ochainsync.CallbackContext{
+				ConnectionId: newTestConnId("127.0.0.1:6000", remote),
+			},
+			0,
+			header,
+			tip,
+		)
+	}
 
-	require.NoError(t, o.chainsyncClientRollBackward(
-		ochainsync.CallbackContext{ConnectionId: connID},
-		point,
-		ochainsync.Tip{Point: ocommon.NewPoint(100, []byte{0xaa})},
-	))
-
-	attrs := onlySpan(t, recorder, "chainsync.roll_backward")
-	require.Equal(t, connID.String(), attrs["connection.id"].AsString())
-	require.Equal(t, int64(90), attrs["block.slot"].AsInt64())
-	require.Equal(t, "bb", attrs["block.hash"].AsString())
+	var peers []string
+	for _, span := range recorder.Ended() {
+		if span.Name() != "block.header_received" {
+			continue
+		}
+		require.Equal(
+			t,
+			tracing.BlockTraceID(header.Hash().Bytes()),
+			span.SpanContext().TraceID(),
+		)
+		for _, kv := range span.Attributes() {
+			if kv.Key == "peer.connection_id" {
+				peers = append(peers, kv.Value.AsString())
+			}
+		}
+	}
+	require.Len(t, peers, 2)
+	require.NotEqual(t, peers[0], peers[1])
 }
 
 // Not t.Parallel: installs a recording OpenTelemetry provider, which is a
 // process global.
 func TestBlockfetchClientBlockRawRecordsSpan(t *testing.T) {
 	recorder := testutil.RecordSpans(t)
+	testutil.ConfigureBlockTracing(t, tracing.Config{SampleRatio: 1})
 	o := newTracingTestOuroboros(t)
 	connID := testConnId()
 	raw := testutil.BuildDecodableConwayBlockBytes(t, 42, 7)
@@ -129,36 +154,28 @@ func TestBlockfetchClientBlockRawRecordsSpan(t *testing.T) {
 		raw,
 	))
 
-	attrs := onlySpan(t, recorder, "blockfetch.block")
-	require.Equal(t, connID.String(), attrs["connection.id"].AsString())
+	attrs := onlySpan(t, recorder, "block.body_received")
+	require.Equal(t, connID.String(), attrs["peer.connection_id"].AsString())
 	require.Equal(t, int64(42), attrs["block.slot"].AsInt64())
 	require.Equal(
 		t,
-		block.Hash().String(),
-		attrs["block.hash"].AsString(),
+		tracing.BlockTraceID(block.Hash().Bytes()),
+		recorder.Ended()[0].SpanContext().TraceID(),
 	)
 }
 
 // Not t.Parallel: installs a recording OpenTelemetry provider, which is a
 // process global.
-func TestBlockfetchClientBlockRawTracesDecodeFailure(t *testing.T) {
+func TestBlockfetchDecodeFailureRecordsNoBlockSpan(t *testing.T) {
 	recorder := testutil.RecordSpans(t)
+	testutil.ConfigureBlockTracing(t, tracing.Config{SampleRatio: 1})
 	o := newTracingTestOuroboros(t)
-	connID := testConnId()
 
 	require.Error(t, o.blockfetchClientBlockRaw(
-		blockfetch.CallbackContext{ConnectionId: connID},
+		blockfetch.CallbackContext{ConnectionId: testConnId()},
 		gledger.BlockTypeConway,
 		[]byte{0xff},
 	))
 
-	ended := recorder.Ended()
-	require.Len(t, ended, 1)
-	require.Equal(t, "blockfetch.block", ended[0].Name())
-	require.Equal(t, codes.Error, ended[0].Status().Code)
-	require.Contains(
-		t,
-		ended[0].Attributes(),
-		attribute.String("connection.id", connID.String()),
-	)
+	require.Empty(t, recorder.Ended())
 }

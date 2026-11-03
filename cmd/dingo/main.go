@@ -26,15 +26,19 @@ import (
 	"runtime/pprof"
 	"strings"
 	"syscall"
+	"time"
 
+	dingo "github.com/blinklabs-io/dingo"
 	"github.com/blinklabs-io/dingo/internal/config"
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
 	"github.com/blinklabs-io/dingo/internal/settingsresolve"
+	"github.com/blinklabs-io/dingo/internal/tracing"
 	"github.com/blinklabs-io/dingo/internal/version"
 	"github.com/blinklabs-io/dingo/mithril"
 	"github.com/blinklabs-io/dingo/plugin"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
+	"go.opentelemetry.io/otel/sdk/resource"
 	"go.uber.org/automaxprocs/maxprocs"
 )
 
@@ -53,9 +57,14 @@ var (
 		debug bool
 	}{}
 	configFile string
+	// logExportShutdown flushes OTLP log export at exit; commonRun sets it.
+	logExportShutdown = func(context.Context) error { return nil }
 )
 
-func commonRun(cfg *config.Config) (*slog.Logger, error) {
+func commonRun(
+	ctx context.Context,
+	cfg *config.Config,
+) (*slog.Logger, error) {
 	// Configure logger from config. The --debug flag is the highest-precedence
 	// override (CLI > env > YAML > defaults): it forces debug level and source
 	// locations regardless of the configured level.
@@ -64,6 +73,19 @@ func commonRun(cfg *config.Config) (*slog.Logger, error) {
 		cfg.Logging.Format,
 		cfg.Logging.Level,
 		globalFlags.debug,
+	)
+	logger, logExportShutdown = withOTLPLogs(
+		ctx,
+		logger,
+		func(ctx context.Context) (*resource.Resource, error) {
+			return dingo.NewTelemetryResource(
+				ctx,
+				cfg.TracingServiceName,
+				cfg.Network,
+				0,
+			)
+		},
+		os.Stderr,
 	)
 	slog.SetDefault(logger)
 	// Config-validation warnings go to stderr, not the logger: a high
@@ -122,7 +144,7 @@ func newLogger(
 	} else {
 		handler = slog.NewTextHandler(w, opts)
 	}
-	return slog.New(handler), levelOK, formatOK
+	return slog.New(tracing.NewLogHandler(handler)), levelOK, formatOK
 }
 
 // parseLogLevel maps a config level string to a slog.Level. It returns
@@ -558,6 +580,12 @@ Database Workers:
 		logExecuteError(slog.Default(), err)
 		exitCode = 1
 	}
+	flushCtx, cancelFlush := context.WithTimeout(
+		context.Background(),
+		5*time.Second,
+	)
+	_ = logExportShutdown(flushCtx)
+	cancelFlush()
 
 	// Finalize memory profiling before exit
 	if memprofile != "" {

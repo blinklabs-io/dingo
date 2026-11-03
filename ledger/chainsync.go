@@ -9468,7 +9468,11 @@ func (ls *LedgerState) processEpochRolloverWithClassicPParamsContext(
 	plutusV2CostModelWritten bool,
 	transitionHardForkMajors []uint,
 ) (result *EpochRolloverResult, err error) {
-	_, span := tracing.Start(ctx, "ledger.epoch_transition", tracing.Uint64("epoch", currentEpoch.EpochId))
+	_, span := tracing.Start(
+		ls.catchupContext(ctx),
+		"ledger.epoch_transition",
+		tracing.Uint64("epoch", currentEpoch.EpochId),
+	)
 	defer func() { tracing.End(span, err) }()
 	// Fail closed at the top of the production rollover path rather than
 	// letting a nil config reach one of the several unchecked

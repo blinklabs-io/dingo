@@ -1,0 +1,128 @@
+{
+  "title": "Dingo Traces and Logs",
+  "uid": "dingo-traces-logs",
+  "tags": ["dingo", "tracing"],
+  "timezone": "browser",
+  "schemaVersion": 41,
+  "time": { "from": "now-1h", "to": "now" },
+  "refresh": "1m",
+  "templating": {
+    "list": [
+      {
+        "name": "tempo",
+        "label": "Tempo",
+        "type": "datasource",
+        "query": "tempo",
+        "hide": 0
+      },
+      {
+        "name": "loki",
+        "label": "Loki",
+        "type": "datasource",
+        "query": "loki",
+        "hide": 0
+      },
+      {
+        "name": "service",
+        "label": "Service",
+        "type": "textbox",
+        "query": ".*",
+        "hide": 0
+      },
+      {
+        "name": "trace_id",
+        "label": "Trace ID",
+        "type": "textbox",
+        "query": "",
+        "hide": 0
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "table",
+      "title": "Slowest block adoptions",
+      "description": "Sampled blocks by apply duration. A block's trace ID is the first 16 bytes of its hash, so one trace holds every node's view of the block.",
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 0 },
+      "datasource": { "type": "tempo", "uid": "${tempo}" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "tempo", "uid": "${tempo}" },
+          "queryType": "traceql",
+          "query": "{ resource.service.name =~ \"$service\" && name = \"block.apply\" } | duration > 0s",
+          "limit": 50,
+          "tableType": "traces"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "table",
+      "title": "Forged blocks",
+      "description": "Blocks this fleet forged; each trace shows the forge and every node's receipt of the block.",
+      "gridPos": { "h": 10, "w": 12, "x": 0, "y": 10 },
+      "datasource": { "type": "tempo", "uid": "${tempo}" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "tempo", "uid": "${tempo}" },
+          "queryType": "traceql",
+          "query": "{ name = \"block.forge\" }",
+          "limit": 50,
+          "tableType": "traces"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "table",
+      "title": "Rollbacks",
+      "gridPos": { "h": 10, "w": 12, "x": 12, "y": 10 },
+      "datasource": { "type": "tempo", "uid": "${tempo}" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "tempo", "uid": "${tempo}" },
+          "queryType": "traceql",
+          "query": "{ resource.service.name =~ \"$service\" && name = \"block.rolled_back\" }",
+          "limit": 50,
+          "tableType": "spans"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "table",
+      "title": "Sync and bootstrap sessions",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 20 },
+      "datasource": { "type": "tempo", "uid": "${tempo}" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "tempo", "uid": "${tempo}" },
+          "queryType": "traceql",
+          "query": "{ resource.service.name =~ \"$service\" && name =~ \"ledger.catchup|mithril.bootstrap|dblifecycle.epoch_snapshot\" }",
+          "limit": 20,
+          "tableType": "traces"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "logs",
+      "title": "Logs for trace $trace_id",
+      "description": "Dingo log lines written inside a span carry trace_id and span_id.",
+      "gridPos": { "h": 12, "w": 24, "x": 0, "y": 28 },
+      "datasource": { "type": "loki", "uid": "${loki}" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "loki", "uid": "${loki}" },
+          "expr": "{service_name=~\"$service\"} |= \"$trace_id\""
+        }
+      ]
+    }
+  ]
+}

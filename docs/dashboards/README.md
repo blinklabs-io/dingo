@@ -12,6 +12,7 @@ Monitoring dashboards for [Dingo](https://github.com/blinklabs-io/dingo), the Go
 | **Mempool** | `mempool.json` | Pending TXs, mempool size, TX lifecycle, CBOR cache, event bus |
 | **Resource Usage** | `resources.json` | CPU, memory, GC heatmap, disk I/O, IOPS, PSI pressure, Badger, file descriptors |
 | **Leios** | `leios.json` | Voting committee, block lanes (each RB's header arrival, time before the request, fetch and adoption beside each EB's arrival), endorser block lifecycle against the CIP-164 header, vote and diffusion periods, own votes not cast by reason, votes received and rejected, endorser block pipeline and stages, diffusion waits, endorser block forging, RB/EB timing, chainsync deferred headers and resyncs, ledger stage time, RB and EB detail tables |
+| **Traces and Logs** | `traces-and-logs.json` | Slowest block adoptions, forged blocks, rollbacks and sync/bootstrap sessions from Tempo, and the Loki log lines of one trace. Needs Tempo and Loki datasources and a dingo exporting OTLP traces (and, for the log panel, logs) |
 
 ## Prerequisites
 
@@ -193,6 +194,7 @@ docs/dashboards/
   mempool.json             Mempool dashboard
   resources.json           Resource Usage dashboard
   leios.json               Leios dashboard
+  traces-and-logs.json     Traces and Logs dashboard (Tempo and Loki)
   provisioning.yaml        Grafana provisioning config
   prometheus.yaml          Prometheus scrape config snippet
   alerts.yaml              Prometheus alert rules

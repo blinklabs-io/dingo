@@ -15,10 +15,13 @@
 package sqlstore
 
 import (
+	"context"
 	"database/sql"
+	"database/sql/driver"
 
 	"github.com/XSAM/otelsql"
 	semconv "go.opentelemetry.io/otel/semconv/v1.40.0"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // OpenDB opens a database/sql pool, instrumented with OpenTelemetry tracing
@@ -47,5 +50,17 @@ func OpenDB(
 		otelsql.WithAttributes(
 			semconv.DBSystemNameKey.String(systemName),
 		),
+		// A query with no span to join would start a root trace of its own
+		// for every statement; record queries only inside an existing trace.
+		otelsql.WithSpanOptions(otelsql.SpanOptions{
+			SpanFilter: func(
+				ctx context.Context,
+				_ otelsql.Method,
+				_ string,
+				_ []driver.NamedValue,
+			) bool {
+				return trace.SpanContextFromContext(ctx).IsValid()
+			},
+		}),
 	)
 }

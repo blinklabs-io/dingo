@@ -30,13 +30,11 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
-	"github.com/blinklabs-io/dingo/internal/tracing"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
-	"go.opentelemetry.io/otel/attribute"
 )
 
 const (
@@ -1418,12 +1416,6 @@ func (c *Chain) AddBlocks(
 	ctx context.Context,
 	blocks []ledger.Block,
 ) (err error) {
-	_, span := tracing.Start(
-		ctx,
-		"chain.add_blocks",
-		attribute.Int("blocks.count", len(blocks)),
-	)
-	defer func() { tracing.End(span, err) }()
 	if c == nil {
 		return errors.New("chain is nil")
 	}

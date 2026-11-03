@@ -15,6 +15,7 @@
 package config
 
 import (
+	"encoding/hex"
 	"math"
 	"os"
 	"path/filepath"
@@ -25,6 +26,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/internal/apiconfig"
 	"github.com/blinklabs-io/dingo/internal/koiosparity"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -336,7 +338,10 @@ func TestForgeEBCapsExplicitZeroDisablesThem(t *testing.T) {
 // on purpose; ledger/forging asserts the same literals from its side.
 func TestForgeEBCapDefaultsArePinned(t *testing.T) {
 	if DefaultForgeEBMaxTxRefs != 20000 {
-		t.Fatalf("forgeEbMaxTxRefs default drifted: %d", DefaultForgeEBMaxTxRefs)
+		t.Fatalf(
+			"forgeEbMaxTxRefs default drifted: %d",
+			DefaultForgeEBMaxTxRefs,
+		)
 	}
 	if DefaultForgeEBMaxBytes != 25165824 {
 		t.Fatalf("forgeEbMaxBytes default drifted: %d", DefaultForgeEBMaxBytes)
@@ -1144,4 +1149,54 @@ func TestApplyDefaultsTracingEndpointEnablesTracing(t *testing.T) {
 	cfg = &Config{TracingEndpoint: "http://localhost:4318"}
 	cfg.ApplyDefaults()
 	require.True(t, cfg.Tracing)
+}
+
+func TestParsePoolKeyHash(t *testing.T) {
+	t.Parallel()
+
+	const hexID = "0f292fcaa02b8b2f9b3c8f9fd8e0bb21abedb692a6d5058df3ef2735"
+	want, err := hex.DecodeString(hexID)
+	require.NoError(t, err)
+	bech := lcommon.PoolId([28]byte(want)).String()
+
+	for _, in := range []string{
+		hexID,
+		strings.ToUpper(hexID),
+		bech,
+		" " + bech + " ",
+	} {
+		got, err := ParsePoolKeyHash(in)
+		require.NoError(t, err, in)
+		require.Equal(t, [28]byte(want), got, in)
+	}
+	for _, in := range []string{"", "pool1bad", hexID[:55], hexID + "00"} {
+		_, err := ParsePoolKeyHash(in)
+		require.Error(t, err, in)
+		require.Contains(t, err.Error(), in)
+	}
+}
+
+// Not t.Parallel: LoadConfig reads the process environment and the global
+// config.
+func TestAlwaysSamplePoolsFromEnv(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	const a = "0f292fcaa02b8b2f9b3c8f9fd8e0bb21abedb692a6d5058df3ef2735"
+	const b = "1f292fcaa02b8b2f9b3c8f9fd8e0bb21abedb692a6d5058df3ef2735"
+	t.Setenv("DINGO_TRACING_ALWAYS_SAMPLE_POOLS", a+","+b)
+
+	cfg, err := LoadConfig("")
+	require.NoError(t, err)
+	require.Equal(t, []string{a, b}, cfg.TracingAlwaysSamplePools)
+}
+
+func TestValidateRejectsBadAlwaysSamplePool(t *testing.T) {
+	t.Parallel()
+
+	cfg := newDefaultConfig()
+	cfg.DatabasePath = t.TempDir()
+	cfg.TracingAlwaysSamplePools = []string{"pool1bad"}
+	err := cfg.Validate(RunModeServe)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "pool1bad")
 }

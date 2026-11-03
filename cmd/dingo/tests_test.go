@@ -16,6 +16,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"log/slog"
 	"maps"
@@ -29,6 +30,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
 // newTestRootCmd wires the real subcommands under a root command,
@@ -528,5 +530,28 @@ func TestMithrilPprofServerUsesDedicatedBindAddress(t *testing.T) {
 	}
 	if got, want := srv.Addr, "0.0.0.0:6060"; got != want {
 		t.Fatalf("explicit wildcard pprof address = %q, want %q", got, want)
+	}
+}
+
+func TestNewLogger_AddsTraceIDsInsideSpan(t *testing.T) {
+	t.Parallel()
+
+	for _, format := range []string{"json", "text"} {
+		var buf bytes.Buffer
+		logger, _, _ := newLogger(&buf, format, "info", false)
+		provider := sdktrace.NewTracerProvider()
+		ctx, span := provider.Tracer("test").Start(
+			context.Background(),
+			"probe",
+		)
+		logger.InfoContext(ctx, "inside")
+		span.End()
+		require.NoError(t, provider.Shutdown(context.Background()))
+		require.Contains(
+			t,
+			buf.String(),
+			span.SpanContext().TraceID().String(),
+			format,
+		)
 	}
 }

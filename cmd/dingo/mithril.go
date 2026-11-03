@@ -23,6 +23,7 @@ import (
 	"slices"
 	"time"
 
+	dingo "github.com/blinklabs-io/dingo"
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/node"
 	"github.com/blinklabs-io/dingo/ledgerstate"
@@ -303,7 +304,7 @@ func mithrilSyncRunE(
 	if cfg.DelegatorInactivityEnabled {
 		return errMithrilInactivityIncompatible()
 	}
-	logger, err := commonRun(cfg)
+	logger, err := commonRun(cmd.Context(), cfg)
 	if err != nil {
 		return err
 	}
@@ -323,9 +324,42 @@ func mithrilSyncRunE(
 			"error", healthErr,
 		)
 	}
+	defer startStandaloneTracing(cmd.Context(), cfg, logger)()
 	return runMithrilSyncForCommand(
 		cmd.Context(), cfg, logger, network, healthProbe,
 	)
+}
+
+// startStandaloneTracing traces a Mithril bootstrap that runs before, or
+// without, a Node, which is otherwise what installs the tracer. A tracing
+// failure never stops the bootstrap. The returned function flushes it.
+func startStandaloneTracing(
+	ctx context.Context,
+	cfg *config.Config,
+	logger *slog.Logger,
+) func() {
+	noop := func() {}
+	dingoCfg, err := dingo.NewConfigFromInternal(cfg, logger, nil, nil, nil)
+	if err == nil {
+		var shutdown func(context.Context) error
+		shutdown, err = dingo.SetupStandaloneTracing(ctx, dingoCfg)
+		if err == nil {
+			return func() {
+				flushCtx, cancel := context.WithTimeout(
+					context.WithoutCancel(ctx),
+					5*time.Second,
+				)
+				defer cancel()
+				_ = shutdown(flushCtx)
+			}
+		}
+	}
+	logger.Warn(
+		"tracing disabled for Mithril bootstrap",
+		"component", "mithril",
+		"error", err,
+	)
+	return noop
 }
 
 // errMithrilInactivityIncompatible reports why Mithril bootstrap and the

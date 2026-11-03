@@ -214,11 +214,14 @@ type Config struct {
 	listeners         []ListenerConfig
 
 	// Programmatic API-only fields (not in YAML/env):
-	tracing             bool
-	tracingStdout       bool
-	tracingEndpoint     string
-	tracingServiceName  string
-	tracingSampleRatio  float64
+	tracing            bool
+	tracingStdout      bool
+	tracingEndpoint    string
+	tracingServiceName string
+	tracingSampleRatio float64
+
+	tracingAlwaysSamplePools []string
+
 	ledgerPeerTarget    int
 	leiosPipelineTiming *leios.PipelineTiming
 	// Runtime-only, programmatic offchain metadata config (preserves HTTPClient)
@@ -824,7 +827,6 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 		// Default logger will throw away logs
 		// We do this so we don't have to add guards around every log operation
 		logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		tracingServiceName: "dingo",
 		tracingSampleRatio: 1,
 	}
 	// Apply options
@@ -1178,6 +1180,9 @@ func NewConfigFromInternal(
 		tracingEndpoint:       cfg.TracingEndpoint,
 		tracingServiceName:    cfg.TracingServiceName,
 		tracingSampleRatio:    cfg.TracingSampleRatio,
+
+		tracingAlwaysSamplePools: cfg.TracingAlwaysSamplePools,
+
 		// The loaded config already resolved the capacity default from its
 		// run mode and network.
 		mempoolCapacitySet: true,
@@ -1356,6 +1361,14 @@ func WithTracingServiceName(name string) ConfigOptionFunc {
 func WithTracingSampleRatio(ratio float64) ConfigOptionFunc {
 	return func(c *Config) {
 		c.tracingSampleRatio = ratio
+	}
+}
+
+// WithTracingAlwaysSamplePools sets the stake pool IDs, bech32 or hex key
+// hash, whose blocks are traced regardless of the sample ratio.
+func WithTracingAlwaysSamplePools(pools []string) ConfigOptionFunc {
+	return func(c *Config) {
+		c.tracingAlwaysSamplePools = pools
 	}
 }
 

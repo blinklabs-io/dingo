@@ -739,6 +739,9 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			return fmt.Errorf("failed to set up tracing: %w", err)
 		}
 	}
+	if err := n.setupMetricExport(ctx); err != nil {
+		return fmt.Errorf("failed to set up metric export: %w", err)
+	}
 	n.ctx, n.cancel = context.WithCancel(ctx)
 	defer func() {
 		runErr = n.resolveRunError(runErr)

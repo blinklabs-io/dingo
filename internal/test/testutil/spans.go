@@ -15,8 +15,10 @@
 package testutil
 
 import (
+	"context"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/internal/tracing"
 	"go.opentelemetry.io/otel"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
@@ -35,4 +37,39 @@ func RecordSpans(t *testing.T) *tracetest.SpanRecorder {
 	)
 	t.Cleanup(func() { otel.SetTracerProvider(previous) })
 	return recorder
+}
+
+// InstallUnsampledTracing installs an SDK tracer provider that samples
+// nothing and enables block tracing at a zero ratio, restoring both when tb
+// ends. Benchmarks use it to measure the cost tracing adds to a path whose
+// spans are all dropped.
+func InstallUnsampledTracing(tb testing.TB) {
+	tb.Helper()
+	previous := otel.GetTracerProvider()
+	provider := sdktrace.NewTracerProvider(
+		sdktrace.WithSampler(sdktrace.NeverSample()),
+	)
+	otel.SetTracerProvider(provider)
+	// Block tracing on with a zero ratio, near the tip: every stage takes
+	// the sampling decision and drops the block.
+	tracing.Configure(tracing.Config{SampleRatio: 0})
+	tracing.SetNearTip(true)
+	tb.Cleanup(func() {
+		tracing.Disable()
+		tracing.SetNearTip(false)
+		otel.SetTracerProvider(previous)
+		_ = provider.Shutdown(context.Background())
+	})
+}
+
+// ConfigureBlockTracing enables block tracing with cfg, marks the node near
+// the tip so every stage is traced, and disables it again when t ends.
+func ConfigureBlockTracing(t testing.TB, cfg tracing.Config) {
+	t.Helper()
+	tracing.Configure(cfg)
+	tracing.SetNearTip(true)
+	t.Cleanup(func() {
+		tracing.Disable()
+		tracing.SetNearTip(false)
+	})
 }

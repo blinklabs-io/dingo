@@ -1764,14 +1764,6 @@ func (o *Ouroboros) chainsyncClientRollBackward(
 	point ocommon.Point,
 	tip ochainsync.Tip,
 ) (err error) {
-	_, span := tracing.Start(
-		context.Background(),
-		"chainsync.roll_backward",
-		attribute.String("connection.id", ctx.ConnectionId.String()),
-		tracing.Uint64("block.slot", point.Slot),
-		attribute.String("block.hash", hex.EncodeToString(point.Hash)),
-	)
-	defer func() { tracing.End(span, err) }()
 	var clientSession chainsync.ClientSessionToken
 	if o.chainsyncState != nil {
 		clientSession = o.chainsyncState.ClientSession(ctx.ConnectionId)
@@ -2086,13 +2078,23 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		}
 		blockSlot := v.SlotNumber()
 		blockHash := v.Hash().Bytes()
-		_, span := tracing.Start(
+		_, span := tracing.StartHeader(
 			context.Background(),
-			"chainsync.roll_forward",
-			attribute.String("connection.id", ctx.ConnectionId.String()),
-			tracing.Uint64("block.slot", blockSlot),
-			attribute.String("block.hash", hex.EncodeToString(blockHash)),
+			tracing.StageHeaderReceived,
+			"block.header_received",
+			v,
 		)
+		if span.IsRecording() {
+			span.SetAttributes(
+				attribute.String(
+					"peer.connection_id",
+					ctx.ConnectionId.String(),
+				),
+				tracing.Uint64("block.slot", blockSlot),
+				tracing.Uint64("block.number", v.BlockNumber()),
+				attribute.String("block.hash", hex.EncodeToString(blockHash)),
+			)
+		}
 		defer func() { tracing.End(span, err) }()
 		point := ocommon.NewPoint(blockSlot, blockHash)
 		// Genesis Limit on Patience: the peer is charged up to the header's
