@@ -31,10 +31,10 @@
 #   - cardano-relay:    Relay connecting both producers (no block production)
 #   NtN host ports: 3010 (dingo-producer), 3011 (cardano-producer),
 #   3012 (cardano-relay).
-#   NtC host ports: 3030 (dingo-producer), 3031 (cardano-producer, bridged
-#   from its unix socket by socat via SOCAT_PORT). cardano-relay has no NtC
-#   host port; only the two producers' ledger states are compared
-#   (blinklabs-io/dingo#1900).
+#   - cardano-ntc-bridge: socat bridging cardano-producer's NtC socket to TCP
+#   NtC host ports: 3030 (dingo-producer), 3031 (cardano-producer, through
+#   cardano-ntc-bridge). cardano-relay has no NtC host port; only the two
+#   producers' ledger states are compared.
 #
 # Opt-in profile: koios-parity (Preview sync and observability)
 #   - dingo-preview:          Dingo node syncing Preview, optional Koios parity
@@ -274,7 +274,7 @@ services:
       # antithesis dingo-praos testnet. dingo-1 binds N2C on 0.0.0.0:3002
       # via DINGO_PRIVATE_BIND_ADDR.
       TXPUMP_NODE_ADDR: "dingo-1:3002"
-      TXPUMP_NETWORK_MAGIC: "42"
+      TXPUMP_NETWORK_MAGIC: "${DEVNET_NETWORK_MAGIC:-42}"
       # Submit one transaction per round so txpump cannot immediately spend
       # an unconfirmed output from an earlier transaction in the same batch.
       TXPUMP_TX_COUNT_MIN: "1"
@@ -363,15 +363,8 @@ services:
     environment:
       CARDANO_BLOCK_PRODUCER: "true"
       RESTORE_SNAPSHOT: "false"
-      # Bridge node-to-client (LocalStateQuery) to TCP so the host test
-      # harness can query cardano-producer's ledger state and compare it
-      # against dingo-producer's (cross-node ledger-state conformance,
-      # blinklabs-io/dingo#1900). cardano-node has no built-in TCP NtC
-      # support; the run-node entrypoint spawns "socat TCP-LISTEN:<port>
-      # ... UNIX-CLIENT:<socket-path>" in the background when SOCAT_PORT is
-      # set. Mirrors the private port dingo binds its own NtC TCP listener
-      # on via DINGO_PRIVATE_BIND_ADDR.
-      SOCAT_PORT: "3002"
+      # NtC is served on /ipc/node.socket only; cardano-ntc-bridge exposes
+      # it over TCP.
     command:
       - "run"
       - "--config"
@@ -407,8 +400,10 @@ services:
       retries: 30
       start_period: 10s
 
-  # The upstream cardano-node 11.2.0 image has no socat; bridge the
-  # producer's NtC unix socket to TCP from the blinklabs image (which does).
+  # cardano-node serves NtC (LocalStateQuery, LocalTxSubmission) only on a
+  # unix socket. The host test harness needs it over TCP, and the upstream
+  # cardano-node 11.2.0 image has no socat, so the bridge runs from the
+  # blinklabs image against the producer's shared IPC volume.
   cardano-ntc-bridge:
     image: ghcr.io/blinklabs-io/cardano-node:11.1.3-2@sha256:dc2b885811294fc497bcd50224bdf1e51d693f6113c749a3b21be1428af79ef8
     profiles: ["conformance"]

@@ -861,6 +861,7 @@ case "${1:-}" in
     printf 'DINGO_RUN_MODE=%s\n' "${DEVNET_DINGO_RUN_MODE:-}" >>"${FAKE_DOCKER_LOG}"
     printf 'DINGO_START_ERA=%s\n' "${DEVNET_DINGO_START_ERA:-}" >>"${FAKE_DOCKER_LOG}"
     printf 'TXPUMP_TRANSACTION_ERA=%s\n' "${DEVNET_TXPUMP_TRANSACTION_ERA:-}" >>"${FAKE_DOCKER_LOG}"
+    printf 'NETWORK_MAGIC=%s\n' "${DEVNET_NETWORK_MAGIC:-}" >>"${FAKE_DOCKER_LOG}"
     printf 'TXPUMP_START_DELAY=%s\n' "${DEVNET_TXPUMP_START_DELAY_SECONDS:-0}" >>"${FAKE_DOCKER_LOG}"
     case " $* " in
       *" ps --status running --quiet "*) printf 'fake-container\n' ;;
@@ -1047,6 +1048,9 @@ func TestRunTestsRejectsInvalidSpecOverride(t *testing.T) {
 		"../devnet/testnet.yaml",
 		filepath.Join(devnetDir, "testnet.yaml"),
 		"./",
+		// Files in the directory that are not network specs.
+		"./README.md",
+		"./docker-compose.yml",
 	} {
 		t.Run(override, func(t *testing.T) {
 			result := runFakeDevnetWithEnv(t, 0, false, map[string]string{
@@ -1071,6 +1075,28 @@ func TestRunTestsAppliesSpecOverride(t *testing.T) {
 			require.Zero(t, result.exitCode, result.output)
 			require.Contains(t, result.dockerLog,
 				"DINGO_SPEC=./testnet-accelerated.yaml\n")
+		})
+	}
+}
+
+// The network magic is read from the active spec, so txpump and the Go
+// harness use the same magic whichever spec is selected, and an inherited
+// value cannot override it.
+func TestRunTestsTakesNetworkMagicFromSpec(t *testing.T) {
+	for override, want := range map[string]string{
+		"":                                "42",
+		"./testnet-accelerated-pv11.yaml": "42",
+		"./testnet-accelerated-pv12.yaml": "6",
+	} {
+		t.Run(override, func(t *testing.T) {
+			env := map[string]string{"DEVNET_NETWORK_MAGIC": "1"}
+			if override != "" {
+				env["DEVNET_SPEC_OVERRIDE"] = override
+			}
+			result := runFakeDevnetWithEnv(t, 0, false, env, "--conformance", "--accelerated")
+			require.Zero(t, result.exitCode, result.output)
+			require.Contains(t, result.dockerLog, "NETWORK_MAGIC="+want+"\n")
+			require.NotContains(t, result.dockerLog, "NETWORK_MAGIC=1\n")
 		})
 	}
 }
@@ -1310,6 +1336,7 @@ func cleanRunnerEnv(overrides map[string]string) []string {
 		"DEVNET_CIP50_TEST":                  {},
 		"DEVNET_TESTNET_YAML":                {},
 		"DEVNET_SPEC_OVERRIDE":               {},
+		"DEVNET_NETWORK_MAGIC":               {},
 		"FAKE_DOCKER_LOG":                    {},
 		"FAKE_GO_EXIT":                       {},
 		"FAKE_GO_COMPILE_EXIT":               {},

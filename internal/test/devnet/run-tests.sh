@@ -196,8 +196,11 @@ fi
 if [[ -n "${DEVNET_SPEC_OVERRIDE:-}" ]]; then
   # The spec is mounted from this directory by a ./-relative name, so a
   # path elsewhere would reach the configurator as a file it cannot read.
+  # Every network spec here is named testnet*.yaml; any other file in the
+  # directory would reach the spec loader as a document it cannot parse.
   spec_name="${DEVNET_SPEC_OVERRIDE#./}"
-  if [[ -z "${spec_name}" || "${spec_name}" == */* || ! -f "${SCRIPT_DIR}/${spec_name}" ]]; then
+  if [[ -z "${spec_name}" || "${spec_name}" == */* || "${spec_name}" != testnet*.yaml ||
+    ! -f "${SCRIPT_DIR}/${spec_name}" ]]; then
     echo "[run-tests] ERROR: DEVNET_SPEC_OVERRIDE=${DEVNET_SPEC_OVERRIDE} is not a spec file in ${SCRIPT_DIR}" >&2
     exit 1
   fi
@@ -214,6 +217,14 @@ else
 fi
 export "${SPEC_VAR}=${ACTIVE_SPEC}"
 export DEVNET_TESTNET_YAML="${SCRIPT_DIR}/${ACTIVE_SPEC#./}"
+# The spec is the single source of the network magic: the configurator and
+# the Go harness read it there, and txpump receives it from here.
+DEVNET_NETWORK_MAGIC="$(sed -n 's/^networkMagic:[[:space:]]*\([0-9][0-9]*\)[[:space:]]*$/\1/p' "${DEVNET_TESTNET_YAML}")"
+if [[ -z "${DEVNET_NETWORK_MAGIC}" ]]; then
+  echo "[run-tests] ERROR: ${DEVNET_TESTNET_YAML} sets no numeric networkMagic" >&2
+  exit 1
+fi
+export DEVNET_NETWORK_MAGIC
 # The scenario stops and starts containers, and captures compose logs and
 # status on failure.
 export DEVNET_COMPOSE_FILE="${COMPOSE_FILE}"
