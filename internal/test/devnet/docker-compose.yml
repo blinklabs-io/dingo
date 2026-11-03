@@ -314,9 +314,10 @@ services:
       CARDANO_NODE_SOCKET_PATH: /ipc/dingo.socket
       DINGO_DEBUG: "1"
       # Block production credentials (pool 1)
-      # false when the network is Dijkstra at slot 0: cardano-node 11.2.0 cannot decode the
-      # Dijkstra headers dingo serves (HeaderBody has 10 fields, it expects 12), so dingo
-      # blocks never reach the node and dingo would stay on its own fork.
+      # run-tests.sh sets this to false when the network is Dijkstra at slot 0 unless
+      # DEVNET_FORCE_DINGO_BLOCK_PRODUCER=true. Dingo forges the 10-field Praos header
+      # body there (the 12-field Leios prototype body is rejected by cardano-node 11.2.0),
+      # so forcing it on is safe.
       CARDANO_BLOCK_PRODUCER: "${DEVNET_DINGO_BLOCK_PRODUCER:-true}"
       CARDANO_SHELLEY_VRF_KEY: /configs/keys/vrf.skey
       CARDANO_SHELLEY_KES_KEY: /configs/keys/kes.skey
