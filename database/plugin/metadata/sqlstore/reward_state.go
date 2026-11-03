@@ -23,6 +23,7 @@ import (
 	"math/big"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	sqlitequery "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/internal/query/sqlite"
@@ -1526,74 +1527,308 @@ func (s *Store) DeleteRewardStateAfterSlot(
 	return nil
 }
 
-func (s *Store) DeleteRewardStateBeforeEpoch(
-	epoch uint64,
-	txn types.Txn,
-) error {
-	err := s.deleteRewardPair(
-		"state before epoch",
-		epoch,
-		txn,
-		func(q *sqlitequery.Queries, ctx context.Context, value int64) error {
-			return q.DeleteRewardStakeInputsBeforeEpoch(
-				ctx,
-				value,
-			)
-		},
-	)
-	if err != nil {
-		return err
-	}
-	return s.withWriteTransaction(
-		txn,
-		func(db queryer, ctx context.Context) error {
-			return s.deleteRewardAccountOutputsBeforeEpoch(ctx, db, epoch)
-		},
-	)
+// The reward-state prune runs at the epoch boundary against the single
+// SQLite write connection that block application also needs. It deletes in
+// batches, each its own transaction, and sizes them by the time the previous
+// batch held the connection: the aim is rewardStatePruneTargetHold per
+// transaction, long enough that a million-row prune takes tens of
+// transactions rather than hundreds, each of which otherwise queues behind
+// block-apply transactions for the connection, and short enough that a block
+// never waits more than about a second for it. A fixed row count cannot do
+// both: reward_stake_input rows delete about five times faster than
+// reward_account_output rows, which touch seven indexes, and a cold page
+// cache changes either by an order of magnitude.
+const (
+	rewardStatePruneTargetHold  = 750 * time.Millisecond
+	rewardStatePruneInitialRows = 5000
+	// Bounds relative to the initial size: a batch never shrinks below a
+	// fifth of it nor grows beyond twenty times it, and never changes by more
+	// than a factor of two per step, so one mismeasured batch cannot swing
+	// the next one far.
+	rewardStatePruneMinFraction = 5
+	rewardStatePruneMaxFactor   = 20
+)
+
+// rewardStatePruneBatch describes one committed prune batch for the test
+// hook.
+type rewardStatePruneBatch struct {
+	table     string
+	requested int
+	deleted   int
+	hold      time.Duration
 }
 
-// deleteRewardAccountOutputsBeforeEpoch prunes reward outputs before epoch
-// except a credited round's unfolded credits, which are part of their
-// account's balance until a withdrawal folds them.
-func (s *Store) deleteRewardAccountOutputsBeforeEpoch(
-	ctx context.Context,
-	db queryer,
-	epoch uint64,
-) error {
-	sqlEpoch, err := checkedInt64(epoch)
-	if err != nil {
-		return err
+func (s *Store) rewardStatePruneInitial() int {
+	if s.rewardStatePruneInitialRows > 0 {
+		return s.rewardStatePruneInitialRows
 	}
-	if _, err := db.ExecContext(ctx, s.dialect.Rebind(`
-DELETE FROM reward_account_output
-WHERE epoch < ?
+	return rewardStatePruneInitialRows
+}
+
+// rewardStatePruneBatchRows returns the batch size to start table's prune
+// with: the size the previous prune of that table settled on, else the
+// initial size. A fixed size disables adaptation.
+func (s *Store) rewardStatePruneBatchRows(table string) int {
+	if s.rewardStateDeleteBatchSize > 0 {
+		return s.rewardStateDeleteBatchSize
+	}
+	s.rewardStatePruneMu.Lock()
+	defer s.rewardStatePruneMu.Unlock()
+	if rows, ok := s.rewardStatePruneRows[table]; ok {
+		return rows
+	}
+	return s.rewardStatePruneInitial()
+}
+
+func (s *Store) rememberRewardStatePruneBatchRows(table string, rows int) {
+	s.rewardStatePruneMu.Lock()
+	defer s.rewardStatePruneMu.Unlock()
+	if s.rewardStatePruneRows == nil {
+		s.rewardStatePruneRows = make(map[string]int)
+	}
+	s.rewardStatePruneRows[table] = rows
+}
+
+// nextRewardStatePruneBatchRows sizes the batch after one of rows rows held
+// the connection for hold, aiming the next hold at the target.
+func (s *Store) nextRewardStatePruneBatchRows(
+	rows int,
+	hold time.Duration,
+) int {
+	if s.rewardStateDeleteBatchSize > 0 {
+		return s.rewardStateDeleteBatchSize
+	}
+	next := rows * 2
+	if hold > 0 {
+		scaled := float64(rows) * float64(rewardStatePruneTargetHold) /
+			float64(hold)
+		if scaled < float64(next) {
+			next = int(scaled)
+		}
+	}
+	next = max(next, rows/2)
+	initial := s.rewardStatePruneInitial()
+	next = max(next, max(1, initial/rewardStatePruneMinFraction))
+	next = min(next, initial*rewardStatePruneMaxFactor)
+	return next
+}
+
+func (s *Store) rewardStatePruneClock() time.Time {
+	if s.rewardStatePruneNow != nil {
+		return s.rewardStatePruneNow()
+	}
+	return time.Now()
+}
+
+// rewardAccountOutputPrunePredicate selects the reward outputs before epoch
+// that the prune removes: all of them except a credited round's unfolded
+// credits, which are part of their account's balance until a withdrawal
+// folds them.
+const rewardAccountOutputPrunePredicate = `epoch < ?
   AND NOT (
       spendable = TRUE AND guarded = FALSE AND folded = FALSE
       AND EXISTS (
           SELECT 1 FROM reward_credit_round rcr
           WHERE rcr.snapshot_epoch = reward_account_output.epoch
       )
-  )`), sqlEpoch); err != nil {
+  )`
+
+const rewardStakeInputPrunePredicate = `epoch < ?`
+
+// DeleteRewardStateBeforeEpoch prunes reward_stake_input and
+// reward_account_output below epoch.
+//
+// With a nil txn the rows are removed in bounded batches, each in its own
+// write transaction, so that the epoch-boundary prune never holds the write
+// connection for longer than one batch (see rewardStatePruneTargetHold). The
+// predicate is monotone in epoch and every batch is idempotent, so a prune
+// interrupted between batches, by a crash or an error, leaves a state the
+// next boundary's prune completes: nothing reads the absence of a pruned row.
+// A caller-supplied txn cannot be split, so the rows are removed in single
+// statements inside it.
+func (s *Store) DeleteRewardStateBeforeEpoch(
+	epoch uint64,
+	txn types.Txn,
+) error {
+	if err := s.DeleteRewardStakeInputBeforeEpoch(epoch, txn); err != nil {
+		return err
+	}
+	if err := s.pruneRewardRowsBeforeEpoch(
+		"reward_account_output",
+		rewardAccountOutputPrunePredicate,
+		epoch,
+		txn,
+	); err != nil {
 		return fmt.Errorf("delete reward account outputs before epoch: %w", err)
 	}
 	return nil
 }
 
+// DeleteRewardStakeInputBeforeEpoch prunes reward_stake_input below epoch,
+// batched exactly as DeleteRewardStateBeforeEpoch describes.
 func (s *Store) DeleteRewardStakeInputBeforeEpoch(
 	epoch uint64,
 	txn types.Txn,
 ) error {
-	return s.deleteRewardPair(
-		"stake input before epoch",
+	if err := s.pruneRewardRowsBeforeEpoch(
+		"reward_stake_input",
+		rewardStakeInputPrunePredicate,
 		epoch,
 		txn,
-		func(q *sqlitequery.Queries, ctx context.Context, value int64) error {
-			return q.DeleteRewardStakeInputsBeforeEpoch(
-				ctx,
-				value,
-			)
-		},
+	); err != nil {
+		return fmt.Errorf("delete reward stake input before epoch: %w", err)
+	}
+	return nil
+}
+
+// pruneRewardRowsBeforeEpoch removes the rows of table that predicate (with
+// a single epoch placeholder) selects. Inside a caller's txn it is one
+// DELETE; on its own it deletes by primary key in batches sized by
+// nextRewardStatePruneBatchRows, one write transaction each, until a batch
+// comes back short. Selecting the keys first and deleting by key is the one
+// shape of a bounded delete that SQLite, PostgreSQL and MySQL all accept.
+//
+// The key select walks the table in primary-key order from the last key the
+// previous batch removed, so the whole prune is a single forward pass: a
+// select that restarted from the beginning would re-read every surviving row
+// below the cutoff on every batch, which on mainnet is millions of credited
+// outputs that the prune keeps.
+func (s *Store) pruneRewardRowsBeforeEpoch(
+	table string,
+	predicate string,
+	epoch uint64,
+	txn types.Txn,
+) error {
+	sqlEpoch, err := checkedInt64(epoch)
+	if err != nil {
+		return err
+	}
+	if txn != nil {
+		return s.withWriteTransaction(
+			txn,
+			func(db queryer, ctx context.Context) error {
+				_, err := db.ExecContext(
+					ctx,
+					s.dialect.Rebind(
+						`DELETE FROM `+table+` WHERE `+predicate,
+					),
+					sqlEpoch,
+				)
+				return err
+			},
+		)
+	}
+	if err := s.ensureReady(); err != nil {
+		return err
+	}
+	rows := s.rewardStatePruneBatchRows(table)
+	var afterID int64
+	for {
+		ctx := context.Background()
+		sqlTransaction, release, err := s.beginWriteTx(ctx)
+		if err != nil {
+			return err
+		}
+		started := s.rewardStatePruneClock()
+		state := &sqlTxn{
+			owner:   s,
+			tx:      sqlTransaction,
+			ctx:     ctx,
+			release: release,
+		}
+		db := s.instrumentedQueryer(sqlTransaction)
+		ids, err := s.selectRewardRowIDs(
+			ctx, db, table, predicate, afterID, sqlEpoch, rows,
+		)
+		if err == nil {
+			err = s.deleteRewardRowsByID(ctx, db, table, ids)
+		}
+		if err != nil {
+			return errors.Join(err, state.Rollback())
+		}
+		if err := state.Commit(); err != nil {
+			return err
+		}
+		hold := s.rewardStatePruneClock().Sub(started)
+		deleted := len(ids)
+		if deleted > 0 {
+			afterID = ids[deleted-1]
+		}
+		requested := rows
+		rows = s.nextRewardStatePruneBatchRows(rows, hold)
+		s.rememberRewardStatePruneBatchRows(table, rows)
+		if s.rewardStateDeleteBatchDone != nil {
+			if err := s.rewardStateDeleteBatchDone(rewardStatePruneBatch{
+				table:     table,
+				requested: requested,
+				deleted:   deleted,
+				hold:      hold,
+			}); err != nil {
+				return err
+			}
+		}
+		if deleted < requested {
+			return nil
+		}
+	}
+}
+
+func (s *Store) selectRewardRowIDs(
+	ctx context.Context,
+	db queryer,
+	table string,
+	predicate string,
+	afterID int64,
+	epoch int64,
+	limit int,
+) ([]int64, error) {
+	rows, err := db.QueryContext(
+		ctx,
+		s.dialect.Rebind(`SELECT id FROM `+table+`
+WHERE id > ? AND `+predicate+`
+ORDER BY id LIMIT ?`),
+		afterID,
+		epoch,
+		limit,
 	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ids := make([]int64, 0, limit)
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+func (s *Store) deleteRewardRowsByID(
+	ctx context.Context,
+	db queryer,
+	table string,
+	ids []int64,
+) error {
+	chunkSize := s.dialect.ParameterLimit()
+	for start := 0; start < len(ids); start += chunkSize {
+		end := min(start+chunkSize, len(ids))
+		args := make([]any, 0, end-start)
+		for _, id := range ids[start:end] {
+			args = append(args, id)
+		}
+		if _, err := db.ExecContext(
+			ctx,
+			s.dialect.Rebind(`DELETE FROM `+table+` WHERE id IN (`+
+				bindPlaceholders(end-start)+`)`),
+			args...,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Store) saveRewardRows(
