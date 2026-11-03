@@ -735,9 +735,11 @@ Reference-conformance scenario
 | `TestPlutusBoundedArgsConformance` | Submits PlutusV3 script spends to both producers and requires the same verdict for the protocol-version dependent evaluator limits (integer arguments beyond +/-2^262143, byte strings beyond 65536 bytes), and checks that verdict against plutigo's assumption for the running protocol version (10 or 11). |
 | `TestPoolQueriesMatchReference` | dingo-producer's and cardano-producer's answers to `GetRewardProvenance` and `GetPoolState` match at a point acquired on both nodes; the reward account and relays of the genesis pools are not compared |
 
-`TestPlutusBoundedArgsConformance` runs on whatever protocol version the Shelley
-genesis starts at. `run-tests.sh` accepts `DEVNET_SPEC_OVERRIDE=./<spec>.yaml`
-to select a spec other than the stock ones; `testnet-accelerated-pv11.yaml`
+`TestPlutusBoundedArgsConformance` runs at the protocol version the Shelley
+genesis starts at when that is 10 or 11, and skips at 12 or later.
+`run-tests.sh` accepts `DEVNET_SPEC_OVERRIDE=./<spec>.yaml`
+to select a spec file in this directory other than the stock ones, and
+rejects any other value; `testnet-accelerated-pv11.yaml`
 starts at protocol version 11.
 
 ```bash
