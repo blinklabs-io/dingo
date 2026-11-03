@@ -70,7 +70,7 @@ func TestPreverifyTransactionSignaturesBindsEveryResult(t *testing.T) {
 		transactions[idx] = preverifyTestTransaction(t, uint64(idx+1))
 	}
 
-	results := preverifyTransactionSignatures(transactions)
+	results := preverifyTransactionSignatures(transactions, nil)
 	require.Len(t, results, len(transactions))
 	ctx := withPreverifiedSignatures(context.Background(), results)
 	for _, tx := range transactions {
@@ -94,6 +94,7 @@ func TestPreverifyTransactionSignaturesSeparatesWitnessSets(t *testing.T) {
 
 	results := preverifyTransactionSignatures(
 		[]lcommon.Transaction{first, second},
+		nil,
 	)
 	require.Len(
 		t,
@@ -117,7 +118,7 @@ func TestPreverifyTransactionSignaturesSeparatesWitnessSets(t *testing.T) {
 func TestPreverifyTransactionSignaturesEmptyInput(t *testing.T) {
 	t.Parallel()
 
-	require.Nil(t, preverifyTransactionSignatures(nil))
+	require.Nil(t, preverifyTransactionSignatures(nil, nil))
 	ctx := context.Background()
 	require.Equal(t, ctx, withPreverifiedSignatures(ctx, nil))
 }
@@ -139,7 +140,7 @@ func BenchmarkEndorserBlockSignaturePreverification(b *testing.B) {
 	b.Run("bounded_workers", func(b *testing.B) {
 		b.ReportAllocs()
 		for b.Loop() {
-			_ = preverifyTransactionSignatures(txs)
+			_ = preverifyTransactionSignatures(txs, nil)
 		}
 	})
 }

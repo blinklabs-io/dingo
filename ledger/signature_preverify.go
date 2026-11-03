@@ -20,6 +20,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -29,8 +30,24 @@ import (
 // preverification results for identical bodies with different signature sets.
 type preverifiedSignatureSet map[lcommon.Blake2b256]*lcommon.PreverifiedSignatures
 
+// verifyTransactionSignatures verifies tx's signatures, through cache when
+// there is one so a transaction validated before is not verified again.
+func verifyTransactionSignatures(
+	cache *eras.SignatureResultCache,
+	tx lcommon.Transaction,
+) *lcommon.PreverifiedSignatures {
+	if cache != nil {
+		return cache.Verify(tx)
+	}
+	return lcommon.PreverifySignatures(tx)
+}
+
+// preverifyTransactionSignatures verifies the signatures of transactions in
+// parallel. cache, when not nil, supplies the outcomes of earlier validations
+// and keeps the new ones.
 func preverifyTransactionSignatures(
 	transactions []lcommon.Transaction,
+	cache *eras.SignatureResultCache,
 ) preverifiedSignatureSet {
 	if len(transactions) == 0 {
 		return nil
@@ -42,7 +59,7 @@ func preverifyTransactionSignatures(
 	for range workers {
 		wg.Go(func() {
 			for idx := range jobs {
-				results[idx] = lcommon.PreverifySignatures(transactions[idx])
+				results[idx] = verifyTransactionSignatures(cache, transactions[idx])
 			}
 		})
 	}
@@ -132,8 +149,10 @@ func preverifiedSignaturesForTx(
 // transaction body and witness set, so it can only stand in for the
 // cryptographic check of the transaction it was computed from; witness
 // presence and every other rule still run against the write transaction.
-// Results live in memory and are discarded with the chunk, so a failed or
-// rolled-back chunk leaves nothing behind.
+// Results live in memory and are discarded with the chunk. When a
+// SignatureResultCache is supplied they are also kept there, which outlives
+// the chunk: a signature outcome depends on the transaction alone, not on
+// ledger state, so it stays correct after a failed or rolled-back chunk.
 type signaturePreverifyAhead struct {
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -156,7 +175,9 @@ type signaturePreverifyJob struct {
 }
 
 // startSignaturePreverifyAhead launches the workers for a chunk. wanted[k]
-// reports whether block k is validated. A feeder goroutine extracts each
+// reports whether block k is validated. cache, when not nil, supplies the
+// outcomes of earlier validations, such as the mempool's, and keeps the new
+// ones. A feeder goroutine extracts each
 // wanted block's transactions and queues them in block order, so the apply
 // loop pays for neither the extraction nor the verification, and earlier
 // blocks finish first. The caller must call stop on every exit path.
@@ -164,6 +185,7 @@ func startSignaturePreverifyAhead(
 	ctx context.Context,
 	blocks []ledger.Block,
 	wanted []bool,
+	cache *eras.SignatureResultCache,
 ) *signaturePreverifyAhead {
 	//nolint:gosec // cancel is stored in p.cancel and called by stop
 	ctx, cancel := context.WithCancel(ctx)
@@ -193,7 +215,7 @@ func startSignaturePreverifyAhead(
 	for range runtime.GOMAXPROCS(0) {
 		wg.Go(func() {
 			for job := range queue {
-				*job.result = lcommon.PreverifySignatures(job.tx)
+				*job.result = verifyTransactionSignatures(cache, job.tx)
 				if job.remaining.Add(-1) == 0 {
 					close(job.ready)
 				}
