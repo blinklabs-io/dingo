@@ -3622,9 +3622,22 @@ func (o *Ouroboros) decodeChainsyncHeader(
 	}()
 	if o.config.NetworkMagic == ouroboros.NetworkCardanoMusashi.NetworkMagic &&
 		blockType == gledger.BlockTypeConway {
-		return gdijkstra.NewDijkstraBlockHeaderFromCbor(raw)
+		dijkstraHeader, err := gdijkstra.NewDijkstraBlockHeaderFromCbor(raw)
+		if err != nil {
+			return nil, err
+		}
+		if err := requireLeiosHeaderExtension(dijkstraHeader); err != nil {
+			return nil, err
+		}
+		return dijkstraHeader, nil
 	}
 	header, err = gledger.NewBlockHeaderFromCbor(blockType, raw)
+	if err == nil && blockType == gledger.BlockTypeDijkstra &&
+		o.requiresLeiosDijkstraHeader() {
+		if err := requireLeiosHeaderExtension(header); err != nil {
+			return nil, err
+		}
+	}
 	if err == nil || blockType != gledger.BlockTypeByronEbb {
 		// The caller wraps decode errors with the block type.
 		return header, err

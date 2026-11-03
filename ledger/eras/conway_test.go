@@ -4432,9 +4432,12 @@ func TestEvaluateTxConwayCancelsActivePlutusMachine(t *testing.T) {
 		CostModels: map[uint][]int64{
 			2: defaultMachineCostModel(t, lang.LanguageVersionV3),
 		},
+		// plutigo polls cancellation once per slippage batch (200 steps),
+		// so the budget must outlast ctx.limit batches of the divergent
+		// script for cancellation, not budget exhaustion, to stop it.
 		MaxTxExUnits: lcommon.ExUnits{
 			Memory: 10_000_000,
-			Steps:  100_000_000,
+			Steps:  1_000_000_000,
 		},
 	}
 	pending := lcommon.NewBlockLedgerState(ls)
