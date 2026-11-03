@@ -736,11 +736,24 @@ Reference-conformance scenario
 | `TestPoolQueriesMatchReference` | dingo-producer's and cardano-producer's answers to `GetRewardProvenance` and `GetPoolState` match at a point acquired on both nodes; the reward account and relays of the genesis pools are not compared |
 
 `TestPlutusBoundedArgsConformance` runs at the protocol version the Shelley
-genesis starts at when that is 10 or 11, and skips at 12 or later.
-`run-tests.sh` accepts `DEVNET_SPEC_OVERRIDE=./<spec>.yaml`
-to select a spec file in this directory other than the stock ones, and
-rejects any other value; `testnet-accelerated-pv11.yaml`
-starts at protocol version 11.
+genesis starts at (10, 11 or 12). `run-tests.sh` accepts
+`DEVNET_SPEC_OVERRIDE=./<spec>.yaml` to select a spec file in this directory
+other than the stock ones, and rejects any other value.
+`testnet-accelerated-pv11.yaml` starts at protocol version 11.
+
+`testnet-accelerated-pv12.yaml` starts at protocol version 12 with the Dijkstra
+hard fork at epoch 0. It needs `cardano-node` 11.2.0 (earlier releases do not
+enter Dijkstra on a private network) and network magic 6, because Dingo only
+enables the Dijkstra era for that magic or the `dijkstra` network:
+
+```bash
+DEVNET_CARDANO_NODE_IMAGE=ghcr.io/intersectmbo/cardano-node:11.2.0 \
+DEVNET_NODE_DIJKSTRA_GENESIS=1 DEVNET_DINGO_NETWORK=dijkstra DEVNET_NETWORK_MAGIC=6 \
+DEVNET_SPEC_OVERRIDE=./testnet-accelerated-pv12.yaml \
+  ./run-tests.sh --conformance --accelerated -run TestPlutusBoundedArgsConformance
+```
+
+PV11 uses the stock node image:
 
 ```bash
 DEVNET_SPEC_OVERRIDE=./testnet-accelerated-pv11.yaml \

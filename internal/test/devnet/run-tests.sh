@@ -203,6 +203,15 @@ if [[ -n "${DEVNET_SPEC_OVERRIDE:-}" ]]; then
   fi
   ACTIVE_SPEC="./${spec_name}"
 fi
+# A spec that starts in Dijkstra (fork at epoch 0) needs dingo to follow the
+# node rather than forge, and transactions in the Dijkstra era.
+if [[ "${MODE}" == "conformance" ]] &&
+  grep -qE '^TestDijkstraHardForkAtEpoch:[[:space:]]*0([[:space:]]|$)' "${SCRIPT_DIR}/${ACTIVE_SPEC#./}"; then
+  export DEVNET_DINGO_BLOCK_PRODUCER=false
+  export DEVNET_TXPUMP_TRANSACTION_ERA=dijkstra
+else
+  unset DEVNET_DINGO_BLOCK_PRODUCER
+fi
 export "${SPEC_VAR}=${ACTIVE_SPEC}"
 export DEVNET_TESTNET_YAML="${SCRIPT_DIR}/${ACTIVE_SPEC#./}"
 # The scenario stops and starts containers, and captures compose logs and
