@@ -121,9 +121,21 @@ func (c *Phase2ResultCache) addLocked(key phase2ResultKey) {
 	c.current[key] = struct{}{}
 }
 
-// phase2KeyDomainConway separates Conway keys from any other era's, whose
-// evaluation rules differ for the same inputs.
-const phase2KeyDomainConway = "dingo/phase2/conway/v1"
+// Key domains separate one era's keys from another's, whose evaluation rules
+// differ for the same inputs.
+const (
+	phase2KeyDomainConway   = "dingo/phase2/conway/v1"
+	phase2KeyDomainDijkstra = "dingo/phase2/dijkstra/v1"
+)
+
+// phase2Level is one transaction level whose script context evaluation
+// reads: its body, for the validity interval, and the outputs its spent and
+// reference inputs resolve to. A Conway transaction has one level; a Dijkstra
+// transaction has one for each sub-transaction and one for itself.
+type phase2Level struct {
+	body           lcommon.TransactionBody
+	resolvedInputs []lcommon.Utxo
+}
 
 // conwayPhase2ResultKey returns the cache key for evaluating tx's scripts
 // under Conway rules, and false when some input to evaluation has no stable
@@ -140,6 +152,71 @@ func conwayPhase2ResultKey(
 	resolvedInputs []lcommon.Utxo,
 	syntheticV2 bool,
 ) (phase2ResultKey, bool) {
+	return phase2ResultKeyFor(
+		phase2KeyDomainConway,
+		tx,
+		ls,
+		pp,
+		[]phase2Level{{body: tx, resolvedInputs: resolvedInputs}},
+		syntheticV2,
+	)
+}
+
+// dijkstraPhase2ResultKey returns the cache key for evaluating tx's scripts
+// under Dijkstra rules, as conwayPhase2ResultKey does for Conway. The script
+// contexts of a Dijkstra transaction cover its sub-transactions too, so the
+// key covers every level's resolved inputs and validity interval. It returns
+// false when an input does not resolve, which leaves the error to
+// evaluation.
+func dijkstraPhase2ResultKey(
+	tx lcommon.Transaction,
+	ls lcommon.LedgerState,
+	pp *conway.ConwayProtocolParameters,
+) (phase2ResultKey, bool) {
+	subBodies := lcommon.SubTransactionBodiesFromTransaction(tx)
+	levels := make([]phase2Level, 0, len(subBodies)+1)
+	resolve := func(body lcommon.TransactionBody) bool {
+		inputs := slices.Concat(body.Inputs(), body.ReferenceInputs())
+		resolved := make([]lcommon.Utxo, 0, len(inputs))
+		for _, input := range inputs {
+			utxo, err := ls.UtxoById(input)
+			if err != nil {
+				return false
+			}
+			resolved = append(resolved, utxo)
+		}
+		levels = append(levels, phase2Level{
+			body:           body,
+			resolvedInputs: resolved,
+		})
+		return true
+	}
+	for _, body := range subBodies {
+		if body == nil || !resolve(body) {
+			return phase2ResultKey{}, false
+		}
+	}
+	if !resolve(tx) {
+		return phase2ResultKey{}, false
+	}
+	return phase2ResultKeyFor(
+		phase2KeyDomainDijkstra,
+		tx,
+		ls,
+		pp,
+		levels,
+		false,
+	)
+}
+
+func phase2ResultKeyFor(
+	domain string,
+	tx lcommon.Transaction,
+	ls lcommon.LedgerState,
+	pp *conway.ConwayProtocolParameters,
+	levels []phase2Level,
+	syntheticV2 bool,
+) (phase2ResultKey, bool) {
 	txCbor := tx.Cbor()
 	if len(txCbor) == 0 {
 		return phase2ResultKey{}, false
@@ -154,23 +231,8 @@ func conwayPhase2ResultKey(
 		writeUint(uint64(len(b)))
 		h.Write(b)
 	}
-	writeBytes([]byte(phase2KeyDomainConway))
+	writeBytes([]byte(domain))
 	writeBytes(txCbor)
-
-	writeUint(uint64(len(resolvedInputs)))
-	for _, utxo := range resolvedInputs {
-		if utxo.Id == nil || utxo.Output == nil {
-			return phase2ResultKey{}, false
-		}
-		outputCbor := utxo.Output.Cbor()
-		if len(outputCbor) == 0 {
-			return phase2ResultKey{}, false
-		}
-		id := utxo.Id.Id()
-		writeBytes(id[:])
-		writeUint(uint64(utxo.Id.Index()))
-		writeBytes(outputCbor)
-	}
 
 	writeUint(uint64(pp.ProtocolVersion.Major))
 	writeUint(uint64(pp.ProtocolVersion.Minor))
@@ -199,24 +261,44 @@ func conwayPhase2ResultKey(
 		}
 	}
 
-	// The script context carries the validity interval in POSIX time, which
-	// depends on the era history as well as on the transaction.
-	for _, bound := range []func(lcommon.TransactionBody) (uint64, bool){
-		lcommon.TransactionValidityIntervalLowerBound,
-		lcommon.TransactionValidityIntervalUpperBound,
-	} {
-		slot, present := bound(tx)
-		if !present {
-			writeUint(0)
-			continue
+	writeUint(uint64(len(levels)))
+	for _, level := range levels {
+		writeUint(uint64(len(level.resolvedInputs)))
+		for _, utxo := range level.resolvedInputs {
+			if utxo.Id == nil || utxo.Output == nil {
+				return phase2ResultKey{}, false
+			}
+			// Only an output's stored CBOR identifies it reliably: an
+			// output built in memory may encode lossily, and two such
+			// outputs could share a key.
+			outputCbor := utxo.Output.Cbor()
+			if len(outputCbor) == 0 {
+				return phase2ResultKey{}, false
+			}
+			id := utxo.Id.Id()
+			writeBytes(id[:])
+			writeUint(uint64(utxo.Id.Index()))
+			writeBytes(outputCbor)
 		}
-		t, err := ls.SlotToTime(slot)
-		if err != nil {
-			return phase2ResultKey{}, false
+		// The script context carries the validity interval in POSIX time,
+		// which depends on the era history as well as on the transaction.
+		for _, bound := range []func(lcommon.TransactionBody) (uint64, bool){
+			lcommon.TransactionValidityIntervalLowerBound,
+			lcommon.TransactionValidityIntervalUpperBound,
+		} {
+			slot, present := bound(level.body)
+			if !present {
+				writeUint(0)
+				continue
+			}
+			t, err := ls.SlotToTime(slot)
+			if err != nil {
+				return phase2ResultKey{}, false
+			}
+			writeUint(1)
+			// #nosec G115 -- a bit-preserving reinterpretation, not arithmetic
+			writeUint(uint64(t.UnixMilli()))
 		}
-		writeUint(1)
-		// #nosec G115 -- a bit-preserving reinterpretation, not arithmetic
-		writeUint(uint64(t.UnixMilli()))
 	}
 
 	var key phase2ResultKey
