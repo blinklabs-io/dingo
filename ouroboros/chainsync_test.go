@@ -2216,7 +2216,7 @@ func TestChainsyncClientRollForwardWithholdsUnauthenticatedCandidate(
 	require.True(t, found, "withheld ancestry must remain reconstructable")
 }
 
-func TestChainsyncClientRollForwardRejectsVerdictStaleBeforeObservation(
+func TestChainsyncClientRollForwardDefersVerdictStaleBeforeObservation(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -2267,11 +2267,14 @@ func TestChainsyncClientRollForwardRejectsVerdictStaleBeforeObservation(
 		header,
 		tip,
 	)
-	require.ErrorIs(t, err, errChainsyncCandidateRejected)
+	require.NoError(t, err,
+		"publication expiry must not terminate an honest peer's protocol")
 	testutil.RequireNoReceive(t, ledgerCh, 200*time.Millisecond,
-		"a stale verdict must be rejected before ledger publication")
+		"a stale verdict must remain withheld from ledger publication")
+	require.Nil(t, selector.GetPeerTip(conn))
 	_, _, retained := state.LookupObservedHeader(conn, header.Hash().Bytes())
-	require.False(t, retained)
+	require.True(t, retained,
+		"retained bytes are not a current admission verdict")
 }
 
 // deferredHeaderFixture drives chainsyncClientRollForward with a verifier that
