@@ -942,7 +942,7 @@
   # corroborationPeers: 1
   # Optional trusted relay operator metadata. All endpoints of an operator must
   # use one identity. Configured groups form the exclusive Genesis witness set.
-  # Omit for canonical network defaults; [] disables those extra defaults.
+  # Omit to use ledger, snapshot and address-based identities.
   # controlGroups:
   #   - identity: operator-one
   #     accessPoints:

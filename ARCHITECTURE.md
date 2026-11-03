@@ -6298,14 +6298,11 @@ once. Conflicting declarations fail closed, and a retained peer can lose its
 identity but cannot be renamed to a different operator while its delivered
 frontier remains tracked.
 
-Canonical Dijkstra Genesis startup supplies IOG and Blink Labs relay groups by
-default. Defaults require matching network magic and every canonical genesis
-hash; private networks reusing a magic do not inherit them. Musashi receives the
-same operator defaults only when its configuration selects Genesis mode; its
-canonical Praos mode is unchanged. A nil `controlGroups` selects these defaults;
-an explicit empty list disables them and retains ledger/snapshot identity
-selection. Explicit groups replace defaults. The public
-`WithGenesisControlGroups` option owns its input, including endpoint slices.
+Dingo supplies no default control groups for any network. A nil or empty
+`controlGroups` retains ledger/snapshot identity selection, with the address
+group of the connection as the fallback described below. Explicit groups are
+the exclusive witness set. The public `WithGenesisControlGroups` option owns its
+input, including endpoint slices.
 
 The node passes a frozen group set to each replacement peer governor on startup,
 restore and truncate. The governor overlays one local root per operator group
