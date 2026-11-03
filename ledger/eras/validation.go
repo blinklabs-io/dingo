@@ -215,8 +215,18 @@ func reusePreverifiedSignatures(
 		ls lcommon.LedgerState,
 		pp lcommon.ProtocolParameters,
 	) error {
-		provider, ok := stateCapability[preverifiedSignaturesProvider](ls)
-		if !ok || provider.PreverifiedSignatures() == nil {
+		var signatures *lcommon.PreverifiedSignatures
+		if provider, ok := stateCapability[preverifiedSignaturesProvider](ls); ok {
+			signatures = provider.PreverifiedSignatures()
+		}
+		// Without a result computed ahead for this validation, reuse the
+		// outcome of an earlier validation of the same transaction.
+		if signatures == nil {
+			if cache := signatureResultCacheFor(ls); cache != nil {
+				signatures = cache.Verify(tx)
+			}
+		}
+		if signatures == nil {
 			return validationFunc(tx, slot, ls, pp)
 		}
 		err := lcommon.VerifyTransactionWithSignatures(
@@ -225,7 +235,7 @@ func reusePreverifiedSignatures(
 			ls,
 			pp,
 			[]lcommon.UtxoValidationRuleFunc{validationFunc},
-			provider.PreverifiedSignatures(),
+			signatures,
 		)
 		if err == nil {
 			return nil

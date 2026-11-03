@@ -292,6 +292,19 @@ func (lv *LedgerView) PlutusEvalContextCache() *eras.PlutusEvalContextCache {
 // construction.
 var _ eras.PlutusEvalContextCacheProvider = (*LedgerView)(nil)
 
+// SignatureResultCache forwards the underlying LedgerState's
+// SignatureResultCache, so a *LedgerView satisfies
+// eras.SignatureResultCacheProvider. Returns nil for a bare-constructed
+// LedgerView with no ls (test-only).
+func (lv *LedgerView) SignatureResultCache() *eras.SignatureResultCache {
+	if lv.ls == nil {
+		return nil
+	}
+	return lv.ls.SignatureResultCache()
+}
+
+var _ eras.SignatureResultCacheProvider = (*LedgerView)(nil)
+
 // MIRDelegState returns the move instantaneous rewards DELEG state that a
 // certificate at slot is checked against: the chain account pots, the
 // distributions and pot transfers committed this epoch at or before slot, and

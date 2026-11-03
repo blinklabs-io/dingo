@@ -1508,6 +1508,12 @@ type LedgerState struct {
 	// the key (see PlutusEvalContextCache's doc comment). Set once in NewLedgerState
 	// and never reassigned; safe for concurrent readers without a lock.
 	plutusEvalCtxCache *eras.PlutusEvalContextCache
+	// sigResults remembers the outcome of verifying each transaction's
+	// witness signatures, so the repeated validations of one transaction
+	// (mempool admission and revalidation, forging, block application)
+	// verify them once. Set once in NewLedgerState and never reassigned; the
+	// cache locks internally.
+	sigResults *eras.SignatureResultCache
 	// syntheticV2CostModel is true from the moment HardForkBabbage fabricates
 	// a PlutusV2 cost model (real mainnet/preview/preprod never had one in
 	// genesis -- PlutusV2 postdates the Alonzo genesis format entirely, so
@@ -2400,6 +2406,7 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 		epochNonceHexCache: make(map[uint64]epochNonceHexCacheEntry),
 		validationEnabled:  cfg.ValidateHistorical,
 		plutusEvalCtxCache: eras.NewPlutusEvalContextCache(),
+		sigResults:         eras.NewSignatureResultCache(),
 		byronPBFT:          byronPBFT,
 		evalAdmission:      newEvaluationLimiter(evaluationCapacity(cfg)),
 	}
@@ -9471,8 +9478,11 @@ func (ls *LedgerState) processBlocksFromSource(
 					}
 				}
 			}
+			// Replayed transactions are verified once, so their outcomes
+			// are not worth caching.
 			preverifiedSignatures := preverifyTransactionSignatures(
 				trustedReplayTransactions,
+				nil,
 			)
 			// prepare and commit are observed only beside the batch latency
 			// below, so a chunk that applies no block or fails records
@@ -9561,6 +9571,7 @@ func (ls *LedgerState) processBlocksFromSource(
 								ctx,
 								chunk,
 								signatureCheckedBlocks(chunk, validated),
+								ls.sigResults,
 							)
 							defer aheadSignatures.stop()
 						}
@@ -14296,6 +14307,13 @@ func (ls *LedgerState) persistedMaxBlockSize() uint64 {
 // nil cache as "no cache available" rather than dereferencing it.
 func (ls *LedgerState) PlutusEvalContextCache() *eras.PlutusEvalContextCache {
 	return ls.plutusEvalCtxCache
+}
+
+// SignatureResultCache returns the cache of witness signature verification
+// outcomes. Returns nil for a bare-constructed LedgerState that skipped
+// NewLedgerState (test-only), which validation treats as no cache.
+func (ls *LedgerState) SignatureResultCache() *eras.SignatureResultCache {
+	return ls.sigResults
 }
 
 // GetCurrentPParamsForReporting returns the current protocol parameters with
