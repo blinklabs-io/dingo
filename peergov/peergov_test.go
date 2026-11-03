@@ -788,9 +788,11 @@ func TestPeerGovernor_TransitionMetrics_GossipChurnLegacyCounters(
 	t *testing.T,
 ) {
 	reg := prometheus.NewRegistry()
+	eventBus := newMockEventBus()
+	t.Cleanup(eventBus.Stop)
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		EventBus:           newMockEventBus(),
+		EventBus:           eventBus,
 		PromRegistry:       reg,
 		GossipChurnPercent: 0.50,
 		MinScoreThreshold:  0.3,
@@ -829,9 +831,11 @@ func TestPeerGovernor_TransitionMetrics_GossipChurnLegacyCounters(
 
 func TestPeerGovernor_TransitionMetrics_ReconcilePromotion(t *testing.T) {
 	reg := prometheus.NewRegistry()
+	eventBus := newMockEventBus()
+	t.Cleanup(eventBus.Stop)
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		EventBus:     newMockEventBus(),
+		EventBus:     eventBus,
 		PromRegistry: reg,
 		MinHotPeers:  1,
 	})
