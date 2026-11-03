@@ -1723,15 +1723,27 @@ func (m *Manager) hasExistingPostMithrilSnapshotWindow() (
 				err,
 			)
 		}
-		if len(snapshots) == 0 {
-			return false, 0, 0, 0, nil
-		}
 		var totalStake uint64
 		for _, snapshot := range snapshots {
 			totalStake += uint64(snapshot.TotalStake)
 		}
 		if totalStake == 0 {
-			return false, 0, 0, 0, nil
+			// A mark captured at a stakeless boundary is genuinely empty --
+			// on mainnet the one taken entering Shelley, before any pool
+			// registered -- and its epoch summary records that capture.
+			// Treating it as missing would reseed the window from current
+			// stake and overwrite the recorded snapshots around it.
+			summary, err := meta.GetEpochSummary(epoch, nil)
+			if err != nil {
+				return false, 0, 0, 0, fmt.Errorf(
+					"load epoch summary for epoch %d: %w",
+					epoch,
+					err,
+				)
+			}
+			if summary == nil || !summary.SnapshotReady {
+				return false, 0, 0, 0, nil
+			}
 		}
 		if offset == 0 {
 			currentPools = uint64(len(snapshots))

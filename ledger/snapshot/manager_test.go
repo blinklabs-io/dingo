@@ -2522,3 +2522,73 @@ func TestCaptureGenesisSnapshot_EpochLookupFailureIsNotAFreshSync(
 			"current epoch could not be determined",
 	)
 }
+
+// TestCaptureGenesisSnapshot_RestartKeepsWindowWithEmptyMark covers a
+// from-genesis database restarted in the first Shelley epochs: the mark
+// captured at the Byron-to-Shelley boundary is genuinely empty, which must
+// still count as a captured window rather than send the restart down the
+// post-Mithril reseed that overwrites recorded history.
+func TestCaptureGenesisSnapshot_RestartKeepsWindowWithEmptyMark(t *testing.T) {
+	t.Parallel()
+
+	db := setupTestDB(t)
+
+	seedEpochs(t, db, []models.Epoch{
+		{EpochId: 0, StartSlot: 0, LengthInSlots: 432000},
+		{EpochId: 148, StartSlot: 63936000, LengthInSlots: 432000},
+		{EpochId: 149, StartSlot: 64368000, LengthInSlots: 432000},
+		{EpochId: 150, StartSlot: 64800000, LengthInSlots: 432000},
+	})
+
+	poolHash := []byte("poolR_12345678901234567890EF")
+	seedPoolAndDelegations(t, db, poolHash, []struct {
+		stakingKey  []byte
+		utxoAmounts []types.Uint64
+	}{
+		{
+			stakingKey:  []byte("aliceRE_staking_key_12345678"),
+			utxoAmounts: []types.Uint64{50000000},
+		},
+	}, 64800000)
+
+	require.NoError(t, db.Metadata().SaveEpochSummary(
+		&models.EpochSummary{Epoch: 0, SnapshotReady: true}, nil,
+	))
+	require.NoError(t, db.Metadata().SaveEpochSummary(
+		&models.EpochSummary{
+			Epoch: 148, BoundarySlot: 63936000, SnapshotReady: true,
+		}, nil,
+	))
+	for _, epoch := range []uint64{149, 150} {
+		require.NoError(t, db.Metadata().SavePoolStakeSnapshot(
+			&models.PoolStakeSnapshot{
+				Epoch:          epoch,
+				SnapshotType:   "mark",
+				PoolKeyHash:    poolHash,
+				TotalStake:     types.Uint64(1000 + epoch),
+				DelegatorCount: 1,
+				CapturedSlot:   64800000,
+			},
+			nil,
+		))
+	}
+
+	eventBus := event.NewEventBus(nil, nil)
+	mgr := NewManager(db, eventBus, nil)
+
+	require.NoError(t, mgr.CaptureGenesisSnapshot(context.Background()))
+
+	genesis, err := db.Metadata().GetPoolStakeSnapshot(0, "mark", poolHash, nil)
+	require.NoError(t, err)
+	require.Nil(t, genesis, "restart must not reseed the epoch-0 mark")
+	recorded, err := db.Metadata().GetPoolStakeSnapshot(
+		149, "mark", poolHash, nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, recorded)
+	require.Equal(t, types.Uint64(1149), recorded.TotalStake,
+		"restart must not overwrite a recorded mark snapshot")
+	empty, err := db.Metadata().GetPoolStakeSnapshotsByEpoch(148, "mark", nil)
+	require.NoError(t, err)
+	require.Empty(t, empty, "restart must not fill the genuinely empty mark")
+}
