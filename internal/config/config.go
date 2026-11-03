@@ -321,8 +321,10 @@ type ChainsyncConfig struct {
 // GenesisBootstrapConfig holds configuration for Genesis-mode chain
 // selection and bootstrap-time peer promotion.
 type GenesisBootstrapConfig struct {
-	// ControlGroups overrides network relay control metadata. Nil selects network
-	// defaults; an explicit empty list disables those defaults.
+	// ControlGroups declares trusted relay operators, which form the exclusive
+	// Genesis witness set. There are no network defaults: nil or an empty list
+	// leaves witness identities to the ledger, a peer snapshot, or the
+	// connection address.
 	ControlGroups []topology.PeerControlGroup `yaml:"controlGroups" ignored:"true"`
 
 	// Enabled controls whether Genesis bootstrap mode is used when the node
