@@ -4876,7 +4876,7 @@
         }
       ],
       "transparent": true,
-      "description": "Badger blob store block cache hit ratio. Higher is better \u2014 reduces disk reads."
+      "description": "Badger blob store block cache hit ratio. Higher is better \u2014 reduces disk reads. Badger's block cache is off in the core storage mode (its default block cache size is 0, with compression off), so these read 0 there; dingo's block LRU and CBOR caches in the header cover that mode. The cache runs in the api storage mode."
     },
     {
       "type": "gauge",
@@ -5125,7 +5125,7 @@
         }
       ],
       "transparent": true,
-      "description": "Badger cache hits versus misses over time."
+      "description": "Badger cache hits versus misses over time. Badger's block cache is off in the core storage mode (its default block cache size is 0, with compression off), so these read 0 there; dingo's block LRU and CBOR caches in the header cover that mode. The cache runs in the api storage mode."
     },
     {
       "type": "timeseries",
