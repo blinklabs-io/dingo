@@ -82,6 +82,7 @@ func countSignatureVerifications(t *testing.T) *int {
 	return &calls
 }
 
+// Not t.Parallel: swaps the package-level preverifySignaturesFunc seam.
 func TestSignatureResultCacheVerifiesEachTransactionOnce(t *testing.T) {
 	calls := countSignatureVerifications(t)
 	ls := signatureCachingLedgerState{
@@ -107,6 +108,7 @@ func TestSignatureResultCacheVerifiesEachTransactionOnce(t *testing.T) {
 }
 
 func TestSignatureResultCacheZeroValueIsUsable(t *testing.T) {
+	t.Parallel()
 	var c SignatureResultCache
 	tx := signedConwayTestTransaction(t, 4, 1, false)
 	first := c.Verify(tx)
@@ -115,6 +117,7 @@ func TestSignatureResultCacheZeroValueIsUsable(t *testing.T) {
 }
 
 func TestSignatureResultCacheResultCoversOnlyItsWitnesses(t *testing.T) {
+	t.Parallel()
 	ls := signatureCachingLedgerState{
 		mockLedgerState: newMockLedgerState(),
 		cache:           NewSignatureResultCache(),
@@ -132,6 +135,7 @@ func TestSignatureResultCacheResultCoversOnlyItsWitnesses(t *testing.T) {
 	require.Error(t, rule(forged, 0, ls, nil))
 }
 
+// Not t.Parallel: swaps the package-level preverifySignaturesFunc seam.
 func TestSignatureResultCacheKeepsRecentEntries(t *testing.T) {
 	calls := countSignatureVerifications(t)
 	c := NewSignatureResultCache()
@@ -165,6 +169,7 @@ func TestSignatureResultCacheKeepsRecentEntries(t *testing.T) {
 	require.Equal(t, 1, *calls, "the oldest entries must be dropped")
 }
 
+// Not t.Parallel: swaps the package-level preverifySignaturesFunc seam.
 func TestSignatureResultCacheNilVerifiesWithoutCaching(t *testing.T) {
 	calls := countSignatureVerifications(t)
 	var c *SignatureResultCache

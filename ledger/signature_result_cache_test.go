@@ -60,6 +60,7 @@ func TestBlockSignaturePreverifyReusesCachedResults(t *testing.T) {
 // built by NewLedgerState holds a signature result cache and that every
 // LedgerView exposes that same cache to the era rules.
 func TestNewLedgerStateSharesSignatureResultCache(t *testing.T) {
+	t.Parallel()
 	db := newTestDB(t)
 	cm, err := chain.NewManager(t.Context(), db, nil)
 	require.NoError(t, err)
