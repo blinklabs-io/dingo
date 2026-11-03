@@ -389,6 +389,11 @@ type KoiosClient struct {
 	koios408MaxRetries     int
 	koios408InitialBackoff time.Duration
 	koios408MaxBackoff     time.Duration
+
+	// txInfoBatchSize and txInfoConcurrency are SetTxInfoLimits' values;
+	// zero means the package default.
+	txInfoBatchSize   int
+	txInfoConcurrency int
 }
 
 // validateKoiosClientNetwork rejects any network with no public Koios root
@@ -1808,18 +1813,76 @@ func (k *KoiosClient) GetAccountRewardHistory(
 	return items, nil
 }
 
-// KoiosTxInfoBatchSize bounds how many transaction hashes go into a single
-// /tx_info request: each 64-char hex hash plus JSON quoting/comma overhead is
-// ~70 bytes, so this many hashes stays comfortably under Koios's request-body
-// size cap (confirmed live: an unbatched request for a full block's worth of
-// hashes was rejected outright with a plain-text "Payload too large" body
-// that fails JSON decoding, rather than any structured error).
+// KoiosTxInfoBatchSize is the default number of transaction hashes in a
+// single /tx_info request. The public host refuses a request body over 5120
+// bytes with a plain-text "Payload too large" that fails JSON decoding, and
+// each 64-char hex hash plus JSON quoting is ~70 bytes, so this many stays
+// under it. SetTxInfoLimits raises it for a host that accepts more.
 //
 // Exported so a caller accumulating hashes across multiple blocks before
 // calling GetTxInfos (e.g. nodeparity's from-genesis UTxO reconstruction)
-// can flush at the same size GetTxInfos itself
-// batches at, rather than duplicating this number.
+// has a default to size its flushes by; such a caller reads the client's own
+// TxInfoBatchSize.
 const KoiosTxInfoBatchSize = 40
+
+// KoiosTxInfoConcurrency is the default number of /tx_info requests a caller
+// keeps in flight at once. Individual requests stall often enough that
+// sequential batches stack their stalls additively, so independent batches
+// are fetched concurrently and their stalls overlap.
+const KoiosTxInfoConcurrency = 8
+
+// SetTxInfoLimits sets how many hashes go into one /tx_info request and how
+// many such requests a caller keeps in flight, for a host whose limits differ
+// from the public one's. Call it before the client is used.
+//
+// The best limits depend on the host and on the blocks being fetched, and
+// more requests in flight than the host serves comfortably turn into stalls.
+// Measured against one self-hosted mirror: 40 hashes and 8 in flight fetched
+// 20 transactions a second with a quarter of the requests stalling past
+// koiosRequestTimeout, and 250 hashes and 4 in flight fetched 61 with none.
+// In Alonzo-era blocks, whose transactions carry more assets and scripts,
+// 250-hash requests ran past koiosResponseHeaderTimeout or failed with 504,
+// while 50 hashes and 16 in flight fetched about 45 a second; 24 or more in
+// flight stalled again.
+//
+// batchSize must stay below koiosPageSize. Koios answers at most that many
+// rows, and asked for more it returns the first koiosPageSize with status 200
+// (2000- and 4000-hash requests each came back with 1000), which GetTxInfos
+// would report as ErrTxInfoMissing on every attempt.
+func (k *KoiosClient) SetTxInfoLimits(batchSize, concurrency int) error {
+	if batchSize < 1 || batchSize >= koiosPageSize {
+		return fmt.Errorf(
+			"tx_info batch size %d out of range: must be 1 to %d",
+			batchSize, koiosPageSize-1,
+		)
+	}
+	if concurrency < 1 {
+		return fmt.Errorf(
+			"tx_info concurrency %d out of range: must be at least 1",
+			concurrency,
+		)
+	}
+	k.txInfoBatchSize = batchSize
+	k.txInfoConcurrency = concurrency
+	return nil
+}
+
+// TxInfoBatchSize returns how many hashes GetTxInfos puts in one request.
+func (k *KoiosClient) TxInfoBatchSize() int {
+	if k.txInfoBatchSize == 0 {
+		return KoiosTxInfoBatchSize
+	}
+	return k.txInfoBatchSize
+}
+
+// TxInfoConcurrency returns how many /tx_info requests a caller should keep
+// in flight at once.
+func (k *KoiosClient) TxInfoConcurrency() int {
+	if k.txInfoConcurrency == 0 {
+		return KoiosTxInfoConcurrency
+	}
+	return k.txInfoConcurrency
+}
 
 // KoiosTxInfoUtxoRef is one entry in a KoiosTxInfoItem's Inputs: just enough
 // to identify a UTxO ref ("<tx_hash>#<tx_index>"), not its content -- an
@@ -2319,8 +2382,9 @@ func (k *KoiosClient) GetTxInfos(
 	txHashes []string,
 ) ([]KoiosTxInfoItem, error) {
 	byHash := make(map[string]KoiosTxInfoItem, len(txHashes))
-	for start := 0; start < len(txHashes); start += KoiosTxInfoBatchSize {
-		end := min(start+KoiosTxInfoBatchSize, len(txHashes))
+	batch := k.TxInfoBatchSize()
+	for start := 0; start < len(txHashes); start += batch {
+		end := min(start+batch, len(txHashes))
 		payload := struct {
 			TxHashes []string `json:"_tx_hashes"`
 			Inputs   bool     `json:"_inputs"`

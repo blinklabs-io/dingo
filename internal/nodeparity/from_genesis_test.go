@@ -2921,7 +2921,7 @@ func TestFetchTxInfoChunksRetriesATxKoiosHasNotIndexed(t *testing.T) {
 	schedule := []time.Duration{time.Second, 2 * time.Second}
 
 	results, errs, err := fetchTxInfoChunks(
-		context.Background(), chunks, f.fetch, schedule, false, waits.wait,
+		context.Background(), chunks, koiosparity.KoiosTxInfoConcurrency, f.fetch, schedule, false, waits.wait,
 		func(string, ...any) {},
 	)
 	require.NoError(t, err)
@@ -2959,7 +2959,7 @@ func TestFetchTxInfoChunksGivesUpAfterTheLastWait(t *testing.T) {
 	schedule := []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}
 
 	results, errs, err := fetchTxInfoChunks(
-		context.Background(), chunks, f.fetch, schedule, false, waits.wait,
+		context.Background(), chunks, koiosparity.KoiosTxInfoConcurrency, f.fetch, schedule, false, waits.wait,
 		func(string, ...any) {},
 	)
 	require.NoError(t, err)
@@ -3003,7 +3003,7 @@ func TestFetchTxInfoChunksRetriesTransientFailuresWhenAsked(t *testing.T) {
 	schedule := []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}
 
 	results, errs, err := fetchTxInfoChunks(
-		context.Background(), chunks, f.fetch, schedule, true, waits.wait,
+		context.Background(), chunks, koiosparity.KoiosTxInfoConcurrency, f.fetch, schedule, true, waits.wait,
 		func(string, ...any) {},
 	)
 	require.NoError(t, err)
@@ -3042,7 +3042,7 @@ func TestFetchTxInfoChunksStopsWaitingWhenCancelled(t *testing.T) {
 	done := make(chan result, 1)
 	go func() {
 		r, e, err := fetchTxInfoChunks(
-			ctx, [][]string{{"aa"}}, f.fetch, []time.Duration{time.Hour}, false,
+			ctx, [][]string{{"aa"}}, koiosparity.KoiosTxInfoConcurrency, f.fetch, []time.Duration{time.Hour}, false,
 			cancelThenWait, func(string, ...any) {},
 		)
 		done <- result{r, e, err}
@@ -3351,4 +3351,37 @@ func TestAllegraCrossingAfterPostHardForkStart(t *testing.T) {
 	assert.False(t, c.crosses(allegra.EraIdAllegra))
 	c.rollback(400)
 	assert.True(t, c.crosses(allegra.EraIdAllegra))
+}
+
+// TestFetchTxInfoChunksKeepsConcurrencyInFlight proves the flush keeps at
+// most the Koios client's TxInfoConcurrency requests in flight: a host that
+// stalls under more load is given only what it was configured for.
+func TestFetchTxInfoChunksKeepsConcurrencyInFlight(t *testing.T) {
+	t.Parallel()
+	var inFlight, peak atomic.Int32
+	fetch := func(
+		_ context.Context, chunk []string,
+	) ([]koiosparity.KoiosTxInfoItem, error) {
+		n := inFlight.Add(1)
+		for {
+			p := peak.Load()
+			if n <= p || peak.CompareAndSwap(p, n) {
+				break
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+		inFlight.Add(-1)
+		return []koiosparity.KoiosTxInfoItem{{TxHash: chunk[0]}}, nil
+	}
+	chunks := [][]string{{"a"}, {"b"}, {"c"}, {"d"}, {"e"}, {"f"}}
+	_, errs, err := fetchTxInfoChunks(
+		context.Background(), chunks, 2, fetch, nil, false,
+		func(context.Context, time.Duration) error { return nil },
+		func(string, ...any) {},
+	)
+	require.NoError(t, err)
+	for _, e := range errs {
+		require.NoError(t, e)
+	}
+	assert.Equal(t, int32(2), peak.Load())
 }

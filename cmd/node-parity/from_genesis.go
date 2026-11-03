@@ -39,6 +39,8 @@ var koiosFlags struct {
 	verbose               bool
 	skipUTxO              bool
 	captureDir            string
+	txInfoBatchSize       int
+	txInfoConcurrency     int
 	// cachePath, when set, points this run's CheckProtocolParams,
 	// CheckStakeDistribution and /tx_info lookups at a koiosparity.Cache
 	// (koios_check.go's doc comments on those functions) instead of calling
@@ -366,6 +368,16 @@ of re-deriving them from scratch.`,
 		&koiosFlags.skipUTxO, "skip-utxo", false,
 		"skip the UTxO-set comparison: no baseline is captured and no /tx_info is fetched; protocol parameters and stake are still compared",
 	)
+	cmd.Flags().IntVar(
+		&koiosFlags.txInfoBatchSize, "koios-tx-info-batch-size",
+		koiosparity.KoiosTxInfoBatchSize,
+		"transaction hashes per /tx_info request, 1 to 999; the public host refuses request bodies over 5120 bytes, so raise it only for a host that accepts more",
+	)
+	cmd.Flags().IntVar(
+		&koiosFlags.txInfoConcurrency, "koios-tx-info-concurrency",
+		koiosparity.KoiosTxInfoConcurrency,
+		"/tx_info requests kept in flight at once",
+	)
 	cmd.Flags().StringVar(
 		&koiosFlags.captureDir, "boundary-capture-dir", "",
 		"directory for Dingo's whole UTxO set at each epoch boundary, read as Dingo crosses it, so the UTxO comparison still runs when the reconstruction reaches the boundary after Dingo has moved past its rollback window (optional; each file is removed once compared; default: query Dingo live at the boundary)",
@@ -446,10 +458,19 @@ func newFromGenesisKoiosClient(
 	if err != nil {
 		return nil, err
 	}
-	return nodeparity.NewKoiosClient(
+	koios, err := nodeparity.NewKoiosClient(
 		network, apiKey, koiosFlags.baseURL, koiosFlags.allowInsecureHTTP,
 		koiosFlags.allowPrivateAddresses,
 	)
+	if err != nil {
+		return nil, err
+	}
+	if err := koios.SetTxInfoLimits(
+		koiosFlags.txInfoBatchSize, koiosFlags.txInfoConcurrency,
+	); err != nil {
+		return nil, err
+	}
+	return koios, nil
 }
 
 func fromGenesisRun(cmd *cobra.Command, _ []string) error {

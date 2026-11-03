@@ -17,11 +17,13 @@ package koiosparity
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -825,6 +827,69 @@ func TestGetTxInfosReturnsResultsInRequestOrder(t *testing.T) {
 	require.Len(t, items, 2)
 	require.Equal(t, "aaa", items[0].TxHash)
 	require.Equal(t, "bbb", items[1].TxHash)
+}
+
+// TestGetTxInfosBatchesBySetTxInfoLimits proves GetTxInfos splits its
+// request by the client's configured batch size, so a host that accepts
+// larger bodies gets fewer, larger requests.
+func TestGetTxInfosBatchesBySetTxInfoLimits(t *testing.T) {
+	t.Parallel()
+
+	var mu sync.Mutex
+	var sizes []int
+	srv := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var body struct {
+				TxHashes []string `json:"_tx_hashes"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			mu.Lock()
+			sizes = append(sizes, len(body.TxHashes))
+			mu.Unlock()
+			items := make([]map[string]any, 0, len(body.TxHashes))
+			for _, h := range body.TxHashes {
+				items = append(items, map[string]any{
+					"tx_hash": h, "inputs": []any{}, "outputs": []any{},
+				})
+			}
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(items)
+		}),
+	)
+	defer srv.Close()
+
+	k := newTestKoiosClient(srv.URL)
+	require.NoError(t, k.SetTxInfoLimits(3, 2))
+	hashes := []string{"a1", "a2", "a3", "a4", "a5", "a6", "a7"}
+	items, err := k.GetTxInfos(context.Background(), hashes)
+	require.NoError(t, err)
+	require.Len(t, items, len(hashes))
+	mu.Lock()
+	defer mu.Unlock()
+	require.Equal(t, []int{3, 3, 1}, sizes)
+}
+
+func TestSetTxInfoLimitsBounds(t *testing.T) {
+	t.Parallel()
+
+	k := newTestKoiosClient("http://127.0.0.1:1")
+	require.Equal(t, KoiosTxInfoBatchSize, k.TxInfoBatchSize())
+	require.Equal(t, KoiosTxInfoConcurrency, k.TxInfoConcurrency())
+
+	// Koios answers at most koiosPageSize rows, so a batch that large could
+	// come back silently cut short.
+	require.Error(t, k.SetTxInfoLimits(koiosPageSize, 4))
+	require.Error(t, k.SetTxInfoLimits(0, 4))
+	require.Error(t, k.SetTxInfoLimits(250, 0))
+	require.Equal(t, KoiosTxInfoBatchSize, k.TxInfoBatchSize(),
+		"a rejected setting leaves the client unchanged")
+
+	require.NoError(t, k.SetTxInfoLimits(koiosPageSize-1, 4))
+	require.Equal(t, koiosPageSize-1, k.TxInfoBatchSize())
+	require.Equal(t, 4, k.TxInfoConcurrency())
 }
 
 // TestGetTxInfosErrorsOnIncompleteResponse proves that a transaction hash
