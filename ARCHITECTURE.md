@@ -6298,14 +6298,11 @@ once. Conflicting declarations fail closed, and a retained peer can lose its
 identity but cannot be renamed to a different operator while its delivered
 frontier remains tracked.
 
-Canonical Dijkstra Genesis startup supplies IOG and Blink Labs relay groups by
-default. Defaults require matching network magic and every canonical genesis
-hash; private networks reusing a magic do not inherit them. Musashi receives the
-same operator defaults only when its configuration selects Genesis mode; its
-canonical Praos mode is unchanged. A nil `controlGroups` selects these defaults;
-an explicit empty list disables them and retains ledger/snapshot identity
-selection. Explicit groups replace defaults. The public
-`WithGenesisControlGroups` option owns its input, including endpoint slices.
+Dingo supplies no default control groups for any network. A nil or empty
+`controlGroups` retains ledger/snapshot identity selection, with the address
+group of the connection as the fallback described below. Explicit groups are
+the exclusive witness set. The public `WithGenesisControlGroups` option owns its
+input, including endpoint slices.
 
 The node passes a frozen group set to each replacement peer governor on startup,
 restore and truncate. The governor overlays one local root per operator group
@@ -6785,10 +6782,10 @@ Ordinary Praos sessions continue to use primary-chain intersection points.
   A best-peer → none transition publishes `chainselection.selected_none` for
   observability of the stall; peer governance may also subscribe to the
   corroboration-failure event to react.
-- `corroborationPeers` defaults to 1, so a fresh node needs one independent
-  witness before a fast source can drive Genesis selection. Setting it to 0
-  explicitly disables the gate and trusts every configured source for fork
-  choice (density-only Genesis selection). The per-peer hash frontier is
+- `corroborationPeers` defaults to 0, so the gate is off and a node with a
+  single upstream peer syncs by density-only Genesis selection, as the reference
+  node does. Setting it to N requires N independent witnesses before a fast
+  source can drive Genesis selection. The per-peer hash frontier is
   tracked in every Genesis mode (the trusted-frontier rule above needs it) and
   dropped in Praos, so normal Praos operation carries no extra state.
 - **Header-crypto verification gates observation, independent of
@@ -7452,6 +7449,7 @@ The `chainsync.State` tracks multiple concurrent chainsync clients:
 - Grace period before recycling stalled connections
 - Cooldown to prevent rapid reconnection flapping
 - Configured roots take client slots first. `chainsync.Config.IsRoot` (wired to `PeerGovernor.IsConfiguredRootConnection`, local and public roots with a client connection) lets a root displace the longest-idle non-root, non-active client when every slot is taken; the displaced client stays connected as an observer. A peer that finds every slot taken is tracked as an observer rather than left without a client, and an observed root is promoted into a slot freed by a disconnect or a demotion without waiting for its next message. The root check takes the peer governor mutex while the chainsync client lock is held, so the governor must not call into chainsync or ledger progress providers with that mutex held.
+- While Genesis corroboration is in effect, a corroboration witness candidate also claims a slot. `chainsync.Config.CorroborationIdentity` (wired to `Node.corroborationIdentityForIngress`: Genesis selection active, `MinCorroboratingPeers` positive, and the non-empty `PeerGovernor.CorroborationIdentityByConnId`) returns a peer's identity. A peer whose identity no other ingress client carries displaces the longest-idle non-root, non-active client that either has no identity or shares its identity with another ingress client, identity-less clients first. A configured root keeps its claim regardless of identities: it takes an identity-less client first, then a duplicate, and only then the sole ingress client of an identity. Genesis selection counts an identity once, so several connections of one pool identity, for example one per registered relay, claim at most one slot among them and cannot crowd out distinct witnesses. Peers without ledger or snapshot identity cannot be witnesses and cannot pass the corroboration gate, so an identity-less peer holding an ingress slot cannot apply blocks while identified peers sit as observers. Displaced clients stay connected and keep feeding witness tips as observers. A displaced duplicate cannot reclaim a slot while its identity is represented, so displacement cannot cycle. The hook reads the selector's lock-free Genesis state, because the selector mutex must not be taken while the chainsync client lock is held. Peer governor hot or warm state is not an input: chainsync runs on warm peers and witness counting does not read governor state.
 - Observer promotion preserves its connection unless this tracked session actually dropped headers while observing. A bounded gap flag in `TrackedClient` survives demotion and promotion; the drop carries an opaque session token so a callback from a replaced bearer cannot mark its replacement. Marking also checks the current role atomically, so an eligibility event that promotes an observer before its callback finishes dropping the header still requests replay. Selector-pending admission does not mark an observer gap. A gap schedules a fresh intersection using `ChainsyncResyncReasonIngressPromotion`; a capacity-only observer with a fresh cursor continues without a reconnect. Returning to origin or the exact applied-tip point clears the flag and cancels only an unfired promotion timer; a different hash at the same slot cannot clear it. Disconnect and new registration discard the old session's flag.
 - `State.RecordBlockfetchThroughput` and `RecordBlockfetchLatency` keep a per-connection delivery model (first-block latency plus per-byte cost, both EWMA). `State.SelectBlockfetchPeer` ranks the header peer and every other eligible peer that announced the last header of the range (headers chain by hash, so that peer holds the whole range, while one that announced only its start may have forked away) by the time that model predicts for a typical batch. Estimates within 5% tie and a per-node salt decides, so near-equal peers do not flap. An unsampled peer is explored for one range in eight using the salted range hash; when every candidate is unsampled, the header peer is used outside those exploration ranges. With no other holder, the header peer is always used. The ledger asks once per batch window (`selectBlockfetchConnForWindow`): at the first batch, at each continuation, and during deep catch-up when a promoted pre-queued request would top its pipeline up, where a preference for another peer leaves the pipeline empty. A better peer therefore takes over at a batch boundary while the batch in flight finishes on its own peer. Decisions and peer changes are counted in `dingo_blockfetch_peer_selections_total` and `dingo_blockfetch_peer_handoffs_total`. The node no longer wires the shadow duplicate-dispatch inputs (`PeersWithBlockFunc`, `BlockfetchLatencyFunc`, `BlockfetchLatencyMedianFunc`), so that path stays off.
 - A rollback to the cursor a peer already sits at does not refresh its stall clock or clear a stalled status (`UpdateClientRollback`). The ledger recognizes a rollback to its own tip before tracking it; it keeps a bounded `maxRollbackHistory` event history and a separate per-connection/point count window so event eviction does not hide a repeated rollback.
