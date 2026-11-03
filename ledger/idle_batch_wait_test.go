@@ -215,7 +215,7 @@ func (h *idleFlushHarness) admit(t *testing.T) {
 		ConnectionId: h.conn,
 		Point:        point,
 		BlockHeader: mockHeader{
-			hash: hash, prevHash: h.prevHash, blockNumber: i, slot: i,
+			hash: hash, prevHash: h.prevHash, blockNumber: i - 1, slot: i,
 		},
 		Tip: ochainsync.Tip{
 			Point:       ocommon.NewPoint(1280, []byte("tip")),
