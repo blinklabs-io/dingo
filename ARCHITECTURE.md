@@ -688,14 +688,20 @@ never cancelled by a switch.
 
 Batch accumulation has a one-second maximum wait for the exact admitted queue
 head. Further headers keep its first deadline, so slow authentication or a
-quiet stream cannot indefinitely strand a partial batch. Expiry fetches only
+quiet stream cannot indefinitely strand a partial batch. Accumulation also ends
+once no header has joined the queue for `queuedBlockfetchIdleWait` (250ms): a
+queue that has stopped growing, such as one whose next header is held at
+ingress until this block applies, gains nothing from the rest of the maximum.
+A steady stream keeps postponing that idle cutoff, never past the first
+deadline, so it still accumulates the larger batch. Expiry fetches only
 headers already in the authorized queue, through the current selected peer or,
 when selection is empty after a selected-to-none transition, through the header
 pipeline owner; it does not admit a new header, advance LoE, or bypass
-validation. Because the deadline is one-shot, a no-op at expiry with no selected
-peer would leave a quiet queue below the batch threshold with nothing to fetch
-it. An empty or replaced queue, a fetch peer that is no longer live, an active
-fetch, a canceled context, or a closed ledger makes the callback a no-op. Queue clearing, normal dispatch,
+validation. Because the flush fires once per queue head, a no-op at expiry with
+no selected peer would leave a quiet queue below the batch threshold with
+nothing to fetch it. An empty or replaced queue, a fetch peer that is no longer
+live, an active fetch, a canceled context, or a closed ledger makes the
+callback a no-op. Queue clearing, normal dispatch,
 and Close cancel the deadline. The existing tracked continuation owns network
 work and shutdown draining; the timer does not own a separate network worker.
 
@@ -19226,7 +19232,12 @@ gather pass rather than for each gap, so about five seconds per pass, with
 any single gap capped at `gatherCoalesceMaxGapAttempts` retries (default 200,
 about two seconds) so blocks the chain is not following up are applied
 promptly — but only while `rawBatch` already holds at least one real block,
-the node has not reached tip since boot (`ls.reachedTip`), and the last gathered slot is not near the upstream tip.
+the node has not reached tip since boot (`ls.reachedTip`), the last gathered slot is not near the upstream tip,
+and the primary chain still has a queued header. Queued headers pop only when
+their block is added, so an empty queue means no blockfetch batch is in flight
+and every admitted header's block is already on the chain; the next block is
+then a header admission and a fetch round trip away, and the pass applies what
+it has. That check takes the chain mutex the iterator probe already takes.
 Once at or near the live upstream tip, the wait is skipped entirely: a
 solitary new block still commits immediately, matching the pre-existing
 latency behavior.
