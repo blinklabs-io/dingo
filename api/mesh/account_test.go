@@ -19,8 +19,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -960,4 +963,95 @@ func TestAccountBalanceCurrentTipCancellationReachesRead(t *testing.T) {
 
 	response := postJSON(t, h, "/account/balance", balanceRequest(addr))
 	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+}
+
+// recordingHandler captures log records so a test can assert the level a
+// request logged at.
+type recordingHandler struct {
+	mu     sync.Mutex
+	levels []slog.Level
+}
+
+func (h *recordingHandler) Enabled(context.Context, slog.Level) bool {
+	return true
+}
+
+func (h *recordingHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.levels = append(h.levels, r.Level)
+	return nil
+}
+
+func (h *recordingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+
+func (h *recordingHandler) WithGroup(string) slog.Handler { return h }
+
+func (h *recordingHandler) has(level slog.Level) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return slices.Contains(h.levels, level)
+}
+
+func TestAccountBalanceCanceledReadWritesNoErrorResponse(t *testing.T) {
+	t.Parallel()
+
+	for _, historical := range []bool{false, true} {
+		t.Run(fmt.Sprintf("historical=%t", historical), func(t *testing.T) {
+			t.Parallel()
+
+			deps := newTestDeps()
+			addr := testAddress(
+				t, lcommon.AddressTypeKeyNone, testKeyHash(0x39), nil,
+			)
+			requestCtx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			deps.ledger.utxosComplete = func(
+				ctx context.Context,
+				_ []lcommon.Address,
+			) ([]models.Utxo, error) {
+				cancel()
+				return nil, ctx.Err()
+			}
+			deps.ledger.balanceAtSlot = func(
+				ctx context.Context,
+				_ lcommon.Address,
+				_ uint64,
+			) (models.AddressBalance, error) {
+				cancel()
+				return models.AddressBalance{}, ctx.Err()
+			}
+			deps.database.blockByIndex = func(
+				uint64,
+			) (models.Block, error) {
+				return models.Block{
+					Hash: testHash(0x3a), Number: 120, Slot: 1200,
+				}, nil
+			}
+			deps.chain.tip = ochainsync.Tip{
+				Point:       ocommon.NewPoint(9000, testHash(0x3b)),
+				BlockNumber: 900,
+			}
+			logs := &recordingHandler{}
+			h := newTestHandler(t, deps, func(c *ServerConfig) {
+				c.Logger = slog.New(logs)
+			})
+
+			reqBody := balanceRequest(addr)
+			if historical {
+				reqBody.BlockIdentifier = byIndex(120)
+			}
+			body, err := json.Marshal(reqBody)
+			require.NoError(t, err)
+			request := httptest.NewRequest(
+				http.MethodPost, "/account/balance",
+				bytes.NewReader(body),
+			).WithContext(requestCtx)
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, request)
+
+			require.Zero(t, rec.Body.Len(), rec.Body.String())
+			require.False(t, logs.has(slog.LevelError))
+		})
+	}
 }
