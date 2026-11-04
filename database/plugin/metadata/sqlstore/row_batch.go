@@ -282,6 +282,31 @@ func (b *rowBatch) dropTransaction(transactionID int64) {
 	}
 }
 
+func (b *rowBatch) dropUtxoAddress(id int64) {
+	for i := range b.entries {
+		entry := &b.entries[i]
+		if entry.shape.table != "utxo_address" {
+			continue
+		}
+		kept := entry.rows[:0]
+		for _, row := range entry.rows {
+			if rowID, _ := row[0].(int64); rowID != id {
+				kept = append(kept, row)
+				continue
+			}
+			b.rowCount--
+			if b.trackSize {
+				size := estimateRowSizeBytes(row)
+				entry.estimatedSizeBytes -= size
+				b.estimatedSizeBytes -= size
+			}
+		}
+		clear(entry.rows[len(kept):])
+		entry.rows = kept
+		return
+	}
+}
+
 func estimateRowSizeBytes(row []any) int64 {
 	size := rowBatchRowOverheadBytes +
 		int64(len(row))*rowBatchValueOverheadBytes
