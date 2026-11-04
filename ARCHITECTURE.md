@@ -7103,10 +7103,15 @@ Dingo's only sync-state signal (there is no Genesis State Machine equivalent):
   applied tip less `k`), so a point the local chain has moved more than `k` past
   cannot hold it below the applied tip. A fragment whose head is
   below the immutable tip is left out of the candidate set: switching to it
-  needs a rollback past `k`, and the reference disconnects such a peer. The
-  recorded point is cleared when no candidate remains or Genesis mode ends. A
-  single candidate is its own intersection, so the cap never holds back a lone
-  peer.
+  needs a rollback past `k`, and the reference disconnects such a peer. A
+  fragment ending exactly at the immutable tip is also left out when it is a
+  strict prefix of a candidate that extends past the immutable tip, or shares
+  no point with any such candidate, since a peer stalled there would otherwise
+  pin the limit at the applied tip. Fragments stalled at the same head are judged against
+  the extending candidates only, so their agreement with each other does not
+  keep them. The recorded point is cleared when no candidate remains or
+  Genesis mode ends. A single candidate is its own intersection, so the cap
+  never holds back a lone peer.
 - Praos mode (caught up): the cap is disabled and `EagernessLimit().Active` is
   false.
 
