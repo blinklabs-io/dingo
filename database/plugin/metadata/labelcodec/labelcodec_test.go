@@ -263,8 +263,15 @@ func TestDeepMetadataRemainsIndexableWithoutJSON(t *testing.T) {
 				t.Fatalf("expected one retained label, got %d entries", len(entries))
 			}
 			got := entries[0]
-			if !bytes.Equal(got.CborValue, raw) || got.JsonValue != "" || !errors.Is(got.JSONError, ErrJSONUnavailable) {
-				t.Fatalf("expected exact CBOR and unavailable JSON: sameCBOR=%v cborLen=%d jsonLen=%d error=%v", bytes.Equal(got.CborValue, raw), len(got.CborValue), len(got.JsonValue), got.JSONError)
+			if !bytes.Equal(got.CborValue, raw) || got.JsonValue != "" ||
+				!errors.Is(got.JSONError, ErrJSONUnavailable) {
+				t.Fatalf(
+					"expected exact CBOR and unavailable JSON: sameCBOR=%v cborLen=%d jsonLen=%d error=%v",
+					bytes.Equal(got.CborValue, raw),
+					len(got.CborValue),
+					len(got.JsonValue),
+					got.JSONError,
+				)
 			}
 		})
 	}

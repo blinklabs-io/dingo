@@ -262,7 +262,12 @@ func extractFromMetadatum(
 		if err == nil {
 			jsonBytes, marshalErr := json.Marshal(jsonValueAny)
 			if marshalErr != nil {
-				err = fmt.Errorf("%w: encode metadata label %s JSON: %w", ErrJSONUnavailable, keyInt.Value.String(), marshalErr)
+				err = fmt.Errorf(
+					"%w: encode metadata label %s JSON: %w",
+					ErrJSONUnavailable,
+					keyInt.Value.String(),
+					marshalErr,
+				)
 			} else {
 				jsonValue = string(jsonBytes)
 			}
@@ -288,7 +293,11 @@ func metadatumToJSONValue(md lcommon.TransactionMetadatum) (any, error) {
 
 func metadatumToJSONValueAtDepth(md lcommon.TransactionMetadatum, depth int) (any, error) {
 	if depth >= lcommon.MetadataJSONMaxNestingDepth {
-		return nil, fmt.Errorf("%w: metadata JSON exceeds maximum nesting depth %d", ErrJSONUnavailable, lcommon.MetadataJSONMaxNestingDepth)
+		return nil, fmt.Errorf(
+			"%w: metadata JSON exceeds maximum nesting depth %d",
+			ErrJSONUnavailable,
+			lcommon.MetadataJSONMaxNestingDepth,
+		)
 	}
 	switch m := md.(type) {
 	case lcommon.MetaInt:
