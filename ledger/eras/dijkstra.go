@@ -517,14 +517,39 @@ func ValidateTxDijkstra(
 	if err := validateDijkstraPlutusV4ReferenceInputOverlap(phase2Tx, ls); err != nil {
 		return semanticRuleValidationErrorFor(err)
 	}
-	phase2Err := gdijkstra.UtxoValidatePlutusScripts(
+	// A transaction declared invalid must fail phase-2; only the success of
+	// a valid one is cached.
+	resultCache := phase2ResultCacheFor(ls)
+	var (
+		resultKey   phase2ResultKey
+		resultKeyOK bool
+	)
+	if resultCache != nil && tx.IsValid() {
+		resultKey, resultKeyOK = dijkstraPhase2ResultKey(
+			tx,
+			ls,
+			&tmpPparams.ConwayProtocolParameters,
+		)
+		if resultKeyOK && resultCache.contains(resultKey) {
+			return nil
+		}
+	}
+	phase2Err := validateDijkstraPhase2(
 		phase2Tx,
 		slot,
 		ls,
 		tmpPparams,
 	)
+	if phase2Err == nil && resultKeyOK {
+		resultCache.add(resultKey)
+	}
 	return semanticRuleValidationErrorFor(validatePlutusOutcome(tx, phase2Err))
 }
+
+// validateDijkstraPhase2 is a test seam: production always resolves to
+// gdijkstra.UtxoValidatePlutusScripts. Tests substitute a counting wrapper
+// to prove the phase-2 result cache skips repeated evaluations.
+var validateDijkstraPhase2 = gdijkstra.UtxoValidatePlutusScripts
 
 func validateDijkstraPoolBlsKeyUniqueness(
 	tx lcommon.Transaction,

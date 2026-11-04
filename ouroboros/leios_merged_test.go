@@ -210,7 +210,7 @@ func testDijkstraAnnouncementHeaderRaw(t *testing.T) []byte {
 	var headerBody []cbor.RawMessage
 	_, err = cbor.Decode(headerTop[0], &headerBody)
 	require.NoError(t, err)
-	require.Len(t, headerBody, 12)
+	require.Contains(t, []int{10, 12}, len(headerBody))
 	headerBody = append(
 		headerBody[:10],
 		mustCbor(t, false),
@@ -552,7 +552,7 @@ func TestLeiosNotifyBlockAnnouncementIsConsumedAndDeduplicated(t *testing.T) {
 	var headerBody []cbor.RawMessage
 	_, err = cbor.Decode(headerTop[0], &headerBody)
 	require.NoError(t, err)
-	require.Len(t, headerBody, 12)
+	require.Contains(t, []int{10, 12}, len(headerBody))
 	headerBody = append(
 		headerBody[:10],
 		mustCbor(t, false),
@@ -3545,7 +3545,7 @@ func testDijkstraAnnouncingBlockRaw(
 	var headerBody []cbor.RawMessage
 	_, err = cbor.Decode(headerTop[0], &headerBody)
 	require.NoError(t, err)
-	require.Len(t, headerBody, 12)
+	require.Contains(t, []int{10, 12}, len(headerBody))
 	headerBody = append(
 		headerBody[:10],
 		mustCbor(t, false),

@@ -1004,6 +1004,76 @@ func TestExperimentalLeiosNetworkingEnabled(t *testing.T) {
 	}
 }
 
+// TestLeiosForgingEnabled pins which configurations forge the 12-field Leios
+// prototype header body and endorser blocks. A Dijkstra start era selects the
+// ledger era only: cardano-node peers on such a chain decode only the
+// 10-field Praos header body.
+func TestLeiosForgingEnabled(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		cfg  Config
+		want bool
+	}{
+		{name: "no config", cfg: Config{}, want: false},
+		{
+			name: "default",
+			cfg:  Config{cfg: &internalconfig.Config{}},
+			want: false,
+		},
+		{
+			name: "leios run mode",
+			cfg: Config{cfg: &internalconfig.Config{
+				RunMode: internalconfig.RunModeLeios,
+			}},
+			want: true,
+		},
+		{
+			name: "musashi network",
+			cfg: Config{cfg: &internalconfig.Config{
+				Network: "musashi",
+			}},
+			want: true,
+		},
+		{
+			name: "musashi network by magic",
+			cfg: Config{cfg: &internalconfig.Config{
+				NetworkMagic: ouroboros.NetworkCardanoMusashi.NetworkMagic,
+			}},
+			want: true,
+		},
+		{
+			name: "dijkstra start era",
+			cfg: Config{cfg: &internalconfig.Config{
+				StartEra: internalconfig.StartEraDijkstra,
+			}},
+			want: false,
+		},
+		{
+			name: "dijkstra start era with leios run mode",
+			cfg: Config{cfg: &internalconfig.Config{
+				StartEra: internalconfig.StartEraDijkstra,
+				RunMode:  internalconfig.RunModeLeios,
+			}},
+			want: true,
+		},
+		{
+			name: "dijkstra network",
+			cfg: Config{cfg: &internalconfig.Config{
+				Network: ouroboros.NetworkCardanoDijkstra.Name,
+			}},
+			want: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, tt.cfg.leiosForgingEnabled())
+		})
+	}
+}
+
 func TestPeerGovernorOptionsIgnoreNonPositiveValues(t *testing.T) {
 	t.Parallel()
 

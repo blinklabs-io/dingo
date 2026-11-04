@@ -17,6 +17,7 @@ package eras
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -1304,6 +1305,30 @@ func TestConwayPlutusBudgetComparisonIncludesFinalSlippageBatch(t *testing.T) {
 		plutusErr.Err.Error(),
 		"script exceeded declared budget: used (112100 cpu, 800 mem)",
 	)
+	var reconstructor interface {
+		PlutusFailureReconstruction() ([]byte, error)
+	}
+	require.ErrorAs(t, plutusErr.Err, &reconstructor)
+	reconstruction, err := reconstructor.PlutusFailureReconstruction()
+	require.NoError(t, err)
+	reconstructionWire, err := base64.StdEncoding.DecodeString(string(reconstruction))
+	require.NoError(t, err)
+	var reconstructionRecord []cbor.RawMessage
+	_, err = cbor.Decode(reconstructionWire, &reconstructionRecord)
+	require.NoError(t, err)
+	require.Len(t, reconstructionRecord, 5)
+	var protocolMajor uint
+	_, err = cbor.Decode(reconstructionRecord[0], &protocolMajor)
+	require.NoError(t, err)
+	assert.Equal(t, uint(9), protocolMajor)
+	var reconstructedScript []byte
+	_, err = cbor.Decode(reconstructionRecord[1], &reconstructedScript)
+	require.NoError(t, err)
+	assert.Equal(t, scriptBytes, reconstructedScript)
+	var reconstructedBudget []uint64
+	_, err = cbor.Decode(reconstructionRecord[3], &reconstructedBudget)
+	require.NoError(t, err)
+	assert.Equal(t, []uint64{1_000_000, 1_000_000}, reconstructedBudget)
 
 	t.Run(
 		"restrictive evaluation is capped by protocol transaction budget",
@@ -2542,7 +2567,7 @@ func (preprodLedgerState) TimeToSlot(t time.Time) (uint64, error) {
 	return preprodByronSlots + uint64(t.Unix()-byronEnd), nil
 }
 
-func readErasFixture(t *testing.T, name string) []byte {
+func readErasFixture(t testing.TB, name string) []byte {
 	t.Helper()
 	raw, err := os.ReadFile(filepath.Join("testdata", name))
 	require.NoError(t, err)
@@ -2550,7 +2575,7 @@ func readErasFixture(t *testing.T, name string) []byte {
 }
 
 func preprodFixtureProtocolParams(
-	t *testing.T,
+	t testing.TB,
 ) *conway.ConwayProtocolParameters {
 	t.Helper()
 	var costModels struct {
@@ -4432,9 +4457,12 @@ func TestEvaluateTxConwayCancelsActivePlutusMachine(t *testing.T) {
 		CostModels: map[uint][]int64{
 			2: defaultMachineCostModel(t, lang.LanguageVersionV3),
 		},
+		// plutigo polls cancellation once per slippage batch (200 steps),
+		// so the budget must outlast ctx.limit batches of the divergent
+		// script for cancellation, not budget exhaustion, to stop it.
 		MaxTxExUnits: lcommon.ExUnits{
 			Memory: 10_000_000,
-			Steps:  100_000_000,
+			Steps:  1_000_000_000,
 		},
 	}
 	pending := lcommon.NewBlockLedgerState(ls)

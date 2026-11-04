@@ -15046,11 +15046,20 @@ func TestNonOwnerHeaderOverflowLeavesInFlightBatchAlone(t *testing.T) {
 func TestBufferHeaderOverflowRejectsDependentHistory(t *testing.T) {
 	t.Parallel()
 
+	bus := newTestEventBus(t, nil)
+	t.Cleanup(bus.Stop)
+	resyncs := make(chan event.ChainsyncResyncEvent, 1)
+	bus.SubscribeFunc(event.ChainsyncResyncEventType, func(evt event.Event) {
+		if resync, ok := evt.Data.(event.ChainsyncResyncEvent); ok {
+			resyncs <- resync
+		}
+	})
 	connID := testRecycleConnId()
 	ls := &LedgerState{
 		chain: &chain.Chain{},
 		config: LedgerStateConfig{
-			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			Logger:   slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			EventBus: bus,
 		},
 	}
 	var pending pendingPublishes
@@ -15082,6 +15091,12 @@ func TestBufferHeaderOverflowRejectsDependentHistory(t *testing.T) {
 	require.Equal(t, maxBufferedHeadersPerConn+1, rejected)
 	require.Empty(t, ls.bufferedHeaderEvents)
 	require.Empty(t, ls.peerHeaderHistory[connIdKey(connID)])
+	resync := testutil.RequireReceive(t, resyncs, testutil.AsyncWait,
+		"local buffer overflow must re-intersect its connection")
+	require.Equal(t, connID, resync.ConnectionId)
+	require.Equal(t, event.ChainsyncResyncReasonBufferedHeaderLimitExceeded, resync.Reason)
+	require.True(t, event.IsLocalChainsyncResyncReason(resync.Reason),
+		"local buffer capacity must not accumulate peer-instability backoff")
 }
 
 func TestHandleEventChainsyncBlockHeader_ProcessesEligibleNonActivePeer(

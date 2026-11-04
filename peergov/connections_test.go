@@ -1402,6 +1402,8 @@ func TestLocalChainsyncRestartPreservesFailureHistory(t *testing.T) {
 		event.ChainsyncResyncReasonPromotedObserverAhead,
 		event.ChainsyncResyncReasonHeaderValidationRecovery,
 		event.ChainsyncResyncReasonHeaderAuthorizationChanged,
+		event.ChainsyncResyncReasonHeaderPastForecastHorizon,
+		event.ChainsyncResyncReasonBufferedHeaderLimitExceeded,
 	} {
 		t.Run(reason, func(t *testing.T) {
 			pg := NewPeerGovernor(PeerGovernorConfig{
@@ -1455,6 +1457,8 @@ func TestLocalChainsyncRestartDoesNotMaskPeerFailure(t *testing.T) {
 	t.Parallel()
 	for _, e := range []connmanager.ConnectionClosedEvent{
 		{LocalCloseReason: "unknown reason"},
+		{LocalCloseReason: event.ChainsyncResyncReasonHeaderPastForecastHorizon, Error: io.EOF},
+		{LocalCloseReason: event.ChainsyncResyncReasonBufferedHeaderLimitExceeded, Error: io.EOF},
 		{
 			LocalCloseReason: event.ChainsyncResyncReasonHeaderAuthorizationChanged,
 			Error:            io.EOF,

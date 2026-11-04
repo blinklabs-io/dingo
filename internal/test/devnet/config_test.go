@@ -18,6 +18,7 @@ package devnet
 
 import (
 	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
@@ -35,25 +36,38 @@ import (
 // outside the epoch, which fails here rather than as a mystifying DevNet
 // stall.
 func TestCheckedInSpecsAreValid(t *testing.T) {
-	for _, spec := range []struct {
-		file      string
-		poolCount int
-	}{
-		{"testnet.yaml", 2},
-		{"testnet-dingo.yaml", 3},
-		{"testnet-dingo-tachys.yaml", 3},
-		{"testnet-accelerated.yaml", 2},
-		{"testnet-dingo-accelerated.yaml", 3},
-		{"testnet-dingo-leios.yaml", 3},
-	} {
-		t.Run(spec.file, func(t *testing.T) {
-			cfg, err := LoadDevNetConfigFrom(spec.file)
+	poolCounts := map[string]int{
+		"testnet.yaml":                   2,
+		"testnet-dingo.yaml":             3,
+		"testnet-dingo-tachys.yaml":      3,
+		"testnet-accelerated.yaml":       2,
+		"testnet-accelerated-pv11.yaml":  2,
+		"testnet-dingo-accelerated.yaml": 3,
+		"testnet-dingo-leios.yaml":       3,
+	}
+	// The table is keyed by file so that a new spec cannot be added to
+	// this directory without also being validated here.
+	for _, file := range checkedInSpecs(t, "testnet*.yaml") {
+		t.Run(file, func(t *testing.T) {
+			poolCount, ok := poolCounts[file]
+			require.True(t, ok, "%s has no expected pool count in this test", file)
+			cfg, err := LoadDevNetConfigFrom(file)
 			require.NoError(t, err)
 			require.NoError(t, cfg.Validate())
-			require.Equal(t, spec.poolCount, cfg.PoolCount)
+			require.Equal(t, poolCount, cfg.PoolCount)
 			require.Equal(t, uint32(42), cfg.NetworkMagic)
 		})
 	}
+}
+
+// checkedInSpecs returns the network spec files in this directory that
+// match pattern.
+func checkedInSpecs(t *testing.T, pattern string) []string {
+	t.Helper()
+	files, err := filepath.Glob(pattern)
+	require.NoError(t, err)
+	require.NotEmpty(t, files, "no spec matches %s", pattern)
+	return files
 }
 
 func TestLeiosSpecSchedulesDijkstraAfterConwayEpoch(t *testing.T) {
@@ -71,10 +85,7 @@ func TestLeiosSpecSchedulesDijkstraAfterConwayEpoch(t *testing.T) {
 // runner budget; if someone relaxes their timing back toward canonical,
 // this fails before CI spends five minutes discovering it.
 func TestAcceleratedSpecsMeetTheRunnerBudget(t *testing.T) {
-	for _, file := range []string{
-		"testnet-accelerated.yaml",
-		"testnet-dingo-accelerated.yaml",
-	} {
+	for _, file := range checkedInSpecs(t, "testnet*accelerated*.yaml") {
 		t.Run(file, func(t *testing.T) {
 			cfg, err := LoadDevNetConfigFrom(file)
 			require.NoError(t, err)

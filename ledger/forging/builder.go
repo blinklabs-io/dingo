@@ -254,6 +254,9 @@ type DefaultBlockBuilder struct {
 	epochNonce      EpochNonceProvider
 	creds           *PoolCredentials
 	txValidator     TxValidator
+	// leiosHeaderExtension selects the 12-field Dijkstra header body for
+	// every ranking block, not only those carrying Leios data.
+	leiosHeaderExtension bool
 }
 
 // BlockBuilderConfig holds configuration for the DefaultBlockBuilder.
@@ -269,6 +272,14 @@ type BlockBuilderConfig struct {
 	// When nil, ledger-level re-validation is skipped (but
 	// intra-block double-spend detection still applies).
 	TxValidator TxValidator
+	// LeiosHeaderExtension makes every Dijkstra ranking block carry the
+	// ouroboros-leios prototype header extension (leios_certified and
+	// leios_announcement, a 12-field header body). Set it only on a network
+	// whose peers expect the prototype header (Musashi, or leios run mode).
+	// Left unset, a Dijkstra block gets the 12-field body only when
+	// it carries Leios data; any other block gets the 10-field Praos body
+	// that cardano-node 11.2.0 produces and requires.
+	LeiosHeaderExtension bool
 }
 
 // NewDefaultBlockBuilder creates a new DefaultBlockBuilder.
@@ -303,6 +314,8 @@ func NewDefaultBlockBuilder(
 		epochNonce:      cfg.EpochNonce,
 		creds:           cfg.Credentials,
 		txValidator:     cfg.TxValidator,
+
+		leiosHeaderExtension: cfg.LeiosHeaderExtension,
 	}, nil
 }
 
@@ -1298,7 +1311,8 @@ func (b *DefaultBlockBuilder) buildBlock(ctx context.Context,
 			ProtoMajorVersion:    limits.protoMajor,
 			ProtoMinorVersion:    dingoversion.BlockHeaderProtocolMinor,
 		}
-	} else if limits.era == eraDijkstra {
+	} else if limits.era == eraDijkstra &&
+		(b.leiosHeaderExtension || !leios.empty() || leiosCert != nil) {
 		leiosAnnouncement, err := dijkstraLeiosAnnouncementForHeader(leios)
 		if err != nil {
 			return nil, nil, err

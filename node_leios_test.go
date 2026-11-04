@@ -212,6 +212,45 @@ func TestLeiosCommitteeParamsFromPParamsUsesDijkstraFields(t *testing.T) {
 	assert.Equal(t, 0, tau.Cmp(big.NewRat(3, 4)))
 }
 
+func TestLeiosVotingPeriodsFromPParamsUsesMilliseconds(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		announcementMs, voteMs uint32
+		header, vote           time.Duration
+	}{
+		{1250, 4750, 1250 * time.Millisecond, 4750 * time.Millisecond},
+		{1000, 4000, time.Second, 4 * time.Second},
+		{2500, 6000, 2500 * time.Millisecond, 6 * time.Second},
+	} {
+		header, vote, err := leiosVotingPeriodsFromPParams(
+			42,
+			&gdijkstra.DijkstraProtocolParameters{
+				LeiosAnnouncementPeriodLength: tc.announcementMs,
+				LeiosVotePeriodLength:         tc.voteMs,
+			},
+		)
+		require.NoError(t, err)
+		assert.Equal(t, tc.header, header)
+		assert.Equal(t, tc.vote, vote)
+	}
+}
+
+func TestLeiosVotingPeriodsFromPParamsRejectsMissingPeriods(t *testing.T) {
+	t.Parallel()
+
+	_, _, err := leiosVotingPeriodsFromPParams(42, nil)
+	require.ErrorContains(t, err, "unavailable")
+	for name, pp := range map[string]*gdijkstra.DijkstraProtocolParameters{
+		"both zero":         {},
+		"zero announcement": {LeiosVotePeriodLength: 4000},
+		"zero vote":         {LeiosAnnouncementPeriodLength: 1000},
+	} {
+		_, _, err := leiosVotingPeriodsFromPParams(42, pp)
+		require.ErrorContains(t, err, "invalid Leios voting periods", name)
+	}
+}
+
 func TestLeiosDijkstraPParamsFallbackUsesFirstEraRow(t *testing.T) {
 	t.Parallel()
 
@@ -267,11 +306,11 @@ func TestLeiosDijkstraPParamsFallbackUsesFirstEraRow(t *testing.T) {
 	txn := db.MetadataTxn(context.Background(), false)
 	defer txn.Rollback()
 
-	pp, err := leiosDijkstraPParamsForSnapshot(db, 9, txn)
+	pp, err := leiosDijkstraPParamsForEpoch(db, 9, txn)
 	require.NoError(t, err)
 	assert.Equal(t, uint16(17), pp.LeiosCommitteeSize)
 
-	pp, err = leiosDijkstraPParamsForSnapshot(db, 23, txn)
+	pp, err = leiosDijkstraPParamsForEpoch(db, 23, txn)
 	require.NoError(t, err)
 	assert.Equal(t, uint16(23), pp.LeiosCommitteeSize)
 }
@@ -695,36 +734,4 @@ func TestLedgerCertificateCallbackReadsVoteManagerSafely(t *testing.T) {
 	err := validate(0, make([]byte, 32), nil, nil)
 	assert.NotContains(t, fmt.Sprint(err), "vote manager is unavailable",
 		"the callback must see the installed vote manager")
-}
-
-func TestLeiosVoteTimingFromPParams(t *testing.T) {
-	t.Parallel()
-	opens, window, err := leiosVoteTimingFromPParams(
-		&gdijkstra.DijkstraProtocolParameters{
-			LeiosAnnouncementPeriodLength: 1000,
-			LeiosVotePeriodLength:         4000,
-		},
-	)
-	require.NoError(t, err)
-	assert.Equal(t, 3*time.Second, opens)
-	assert.Equal(t, 4*time.Second, window)
-
-	opens, window, err = leiosVoteTimingFromPParams(
-		&gdijkstra.DijkstraProtocolParameters{
-			LeiosAnnouncementPeriodLength: 2500,
-			LeiosVotePeriodLength:         6000,
-		},
-	)
-	require.NoError(t, err)
-	assert.Equal(t, 7500*time.Millisecond, opens)
-	assert.Equal(t, 6*time.Second, window)
-
-	for name, pp := range map[string]*gdijkstra.DijkstraProtocolParameters{
-		"nil":               nil,
-		"zero announcement": {LeiosVotePeriodLength: 4000},
-		"zero vote":         {LeiosAnnouncementPeriodLength: 1000},
-	} {
-		_, _, err := leiosVoteTimingFromPParams(pp)
-		require.Error(t, err, name)
-	}
 }

@@ -477,3 +477,31 @@ func TestSnapshotUTxOCarriesReferenceScriptHash(t *testing.T) {
 		withPlutus.ReferenceScriptHash,
 	)
 }
+
+// A MemPack CompactAddr is canonical: the ledger crops pre-Babbage trailing
+// address bytes before building it and rejects them from Babbage, so bytes
+// after the address payload mean a corrupt snapshot, not a legacy output.
+func TestParseMempackTxOutRejectsTrailingAddressBytes(t *testing.T) {
+	t.Parallel()
+
+	payment := bytes.Repeat([]byte{0x11}, 28)
+	address := buildShelleyAddr(7, 1, payment, nil)
+	txHash := bytes.Repeat([]byte{0x24}, 32)
+
+	build := func(addr []byte) []byte {
+		mempack := []byte{babbageTxOutCompact, byte(len(addr))}
+		mempack = append(mempack, addr...)
+		return append(mempack, 0, 1)
+	}
+
+	parsed, err := parseMempackTxOut(txHash, 0, build(address))
+	require.NoError(t, err)
+	want, err := lcommon.NewAddressFromBytes(address)
+	require.NoError(t, err)
+	require.Equal(t, []byte(want.String()), parsed.RenderedAddress)
+
+	_, err = parseMempackTxOut(
+		txHash, 0, build(append(bytes.Clone(address), 0x00, 0xff)),
+	)
+	require.ErrorContains(t, err, "unexpected trailing byte")
+}

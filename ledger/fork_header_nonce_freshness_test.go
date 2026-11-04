@@ -342,7 +342,7 @@ func TestPeerChainSelectionEpochNonceTreatsQueuedParentAsLocalChain(
 	)
 	snapshot, _ := f.ls.loadConsensusAndTipSnapshots()
 
-	_, _, fork, err := f.ls.peerChainSelectionEpochNonce(
+	_, _, fork, err := f.ls.peerChainSelectionEpochNonce(t.Context(),
 		ouroboros.ConnectionId{},
 		f.headers[1],
 		snapshot,
@@ -365,7 +365,7 @@ func TestPeerChainSelectionEpochNonceTreatsUnverifiedQueuedParentAsLocalChain(
 	)
 	snapshot, _ := f.ls.loadConsensusAndTipSnapshots()
 
-	_, _, fork, err := f.ls.peerChainSelectionEpochNonce(
+	_, _, fork, err := f.ls.peerChainSelectionEpochNonce(t.Context(),
 		connID,
 		f.headers[1],
 		snapshot,
@@ -403,7 +403,7 @@ func TestPeerChainSelectionEpochNonceWithholdsUnknownParent(t *testing.T) {
 	f := newForkPathFreshnessFixture(t, 2)
 	snapshot, _ := f.ls.loadConsensusAndTipSnapshots()
 
-	_, _, fork, err := f.ls.peerChainSelectionEpochNonce(
+	_, _, fork, err := f.ls.peerChainSelectionEpochNonce(t.Context(),
 		ouroboros.ConnectionId{},
 		f.headers[1],
 		snapshot,
