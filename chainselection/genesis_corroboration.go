@@ -64,9 +64,11 @@ func (cs *ChainSelector) RecordDeliveredPeerTip(update PeerTipUpdateEvent) {
 		len(update.ObservedTip.Point.Hash) == 0 {
 		return
 	}
-	if !cs.peerTipAdmissionGenerationCurrent(update) {
+	release, current := cs.pinPeerTipAdmissionGeneration(update)
+	if !current {
 		return
 	}
+	defer release()
 	if cs.config.ConnectionLive != nil &&
 		!cs.config.ConnectionLive(update.ConnectionId) {
 		return

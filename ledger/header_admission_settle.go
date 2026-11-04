@@ -48,11 +48,15 @@ func (ls *LedgerState) pinSettledHeaderAdmission(
 		}
 		currentGeneration := ls.CurrentHeaderCryptoVerificationGeneration()
 		if currentGeneration != 0 {
-			applied := e.BlockHeader != nil &&
-				pointMatches(e.Point, ocommon.NewPoint(
-					e.BlockHeader.SlotNumber(), e.BlockHeader.Hash().Bytes(),
-				)) &&
-				ls.headerApplied(waitCtx, e.BlockHeader)
+			applied, membershipSettled := false, true
+			if e.BlockHeader != nil && pointMatches(e.Point, ocommon.NewPoint(
+				e.BlockHeader.SlotNumber(), e.BlockHeader.Hash().Bytes(),
+			)) {
+				applied, membershipSettled = ls.headerAppliedSettled(waitCtx, e.BlockHeader)
+			}
+			if !membershipSettled {
+				continue
+			}
 			release, current := ls.PinHeaderCryptoVerificationGeneration(
 				currentGeneration,
 			)

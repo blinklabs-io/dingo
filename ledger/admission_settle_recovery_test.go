@@ -22,6 +22,8 @@ import (
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/chainselection"
+	"github.com/blinklabs-io/dingo/database/plugin/blob"
+	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -379,4 +381,45 @@ func TestAppliedHeaderAdmissionMembershipHonorsCancellation(t *testing.T) {
 		"a cancelled membership read must not restore expired admission")
 	require.EqualValues(t, 1, f.invalidated.Load(),
 		"cancelled recovery must retain strict rejection")
+}
+
+type admissionMembershipMutationStore struct {
+	blob.BlobStore
+	mutated atomic.Bool
+	reads   atomic.Int32
+	mutate  func()
+}
+
+func (s *admissionMembershipMutationStore) Get(txn dbtypes.Txn, key []byte) ([]byte, error) {
+	value, err := s.BlobStore.Get(txn, key)
+	s.reads.Add(1)
+	if s.mutated.CompareAndSwap(false, true) {
+		s.mutate()
+	}
+	return value, err
+}
+
+func TestAppliedHeaderAdmissionRetriesUnsettledMembership(t *testing.T) {
+	t.Parallel()
+	f := newChainsyncRollbackFixture(t)
+	old := f.ls.CurrentHeaderCryptoVerificationGeneration()
+	f.ls.publishSnapshotsLocked()
+	current := f.ls.CurrentHeaderCryptoVerificationGeneration()
+	base := f.ls.db.Blob()
+	store := &admissionMembershipMutationStore{BlobStore: base, mutate: func() {
+		require.NoError(t, f.ls.chain.AddRawBlocks(t.Context(), []chain.RawBlock{{Slot: 30, BlockNumber: 3, Hash: testHashBytes("membership-race-child"), PrevHash: f.currentTip.Point.Hash, Type: 1, Cbor: []byte{0x80}}}))
+	}}
+	_, drain := f.ls.db.SetBlobStore(store)
+	drain()
+	t.Cleanup(func() { _, drain := f.ls.db.SetBlobStore(base); drain() })
+	e := ChainsyncEvent{Point: f.currentTip.Point, BlockHeader: mockHeader{hash: lcommon.NewBlake2b256(f.currentTip.Point.Hash), slot: f.currentTip.Point.Slot, blockNumber: f.currentTip.BlockNumber}}
+	release, ok := f.ls.pinSettledHeaderAdmission(t.Context(), &e, old)
+	if release != nil {
+		defer release()
+	}
+	require.True(t, store.mutated.Load(), "the membership read must overlap a real chain mutation")
+	require.Equal(t, current, f.ls.CurrentHeaderCryptoVerificationGeneration(), "stored block progress must not publish ledger state in this control")
+	require.True(t, ok, "unknown membership during an append must be read again before rejecting admission")
+	require.Equal(t, current, e.HeaderCryptoVerificationGeneration)
+	require.GreaterOrEqual(t, store.reads.Load(), int32(4), "both membership reads must reach persistent indexes")
 }

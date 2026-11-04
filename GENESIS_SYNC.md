@@ -2,8 +2,9 @@
 
 This guide covers Dingo's from-origin sync using Genesis density selection,
 Limit on Eagerness, density disconnection, patience and authenticated headers.
-The default uses the network's published topology and stake snapshot without
-adding operator roots or requiring a corroboration quorum. Deployments with a
+The default uses the network's published topology without adding operator roots
+or requiring a corroboration quorum. A configured peer snapshot can supply
+additional relays. Deployments with a
 biased fast-sync source can opt into additional peer corroboration.
 
 For the internal design, see `ARCHITECTURE.md` → **Chain Selection → Ouroboros

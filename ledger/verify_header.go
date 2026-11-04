@@ -525,14 +525,22 @@ func (ls *LedgerState) headerApplied(
 	ctx context.Context,
 	header ledger.BlockHeader,
 ) bool {
+	held, _ := ls.headerAppliedSettled(ctx, header)
+	return held
+}
+
+func (ls *LedgerState) headerAppliedSettled(
+	ctx context.Context,
+	header ledger.BlockHeader,
+) (bool, bool) {
 	if ls.chain == nil {
-		return false
+		return false, true
 	}
 	tip := ls.loadTipSnapshot()
 	if tip == nil || tip.currentTip.Point.Slot < header.SlotNumber() {
-		return false
+		return false, true
 	}
-	return ls.chain.HoldsPoint(ctx, ocommon.NewPoint(
+	return ls.chain.HoldsPointSettled(ctx, ocommon.NewPoint(
 		header.SlotNumber(),
 		header.Hash().Bytes(),
 	))
@@ -598,14 +606,11 @@ func verifyBlockHeaderHex(
 			err,
 		)
 	}
-	if err := verifyTPraosNonceVrfHex(header, epochNonceHex); err != nil {
-		return fmt.Errorf(
-			"block header verification failed at slot %d: %w",
-			block.SlotNumber(),
-			err,
-		)
-	}
-
+	// VerifyBlock checks the leader VRF and, for Shelley-through-Alonzo
+	// headers, the separate nonce VRF certificate against the same epoch
+	// nonce (gouroboros verifyNonceVrf). TestVerifyBlockHeaderTPraosNonceVRF
+	// pins that it rejects a nonce certificate from another key or with an
+	// altered proof.
 	isValid, _, _, _, err := ledger.VerifyBlock(
 		headerOnlyBlock{header: header},
 		epochNonceHex,

@@ -344,3 +344,29 @@ func TestEagernessVerifiedPathChecksFenceUnderSelectorLock(t *testing.T) {
 		})
 	}
 }
+
+func TestEagernessVerifiedPathDoesNotOverwriteNewerDelivery(t *testing.T) {
+	t.Parallel()
+	for _, mode := range []string{"delivery", "repair"} {
+		t.Run(mode, func(t *testing.T) {
+			t.Parallel()
+			f := newEagernessDeliveryFixture(t, 100, 0)
+			peer := corrConn(119)
+			repairAdmit(t, f, peer, 10)
+			valid := func() bool { return true }
+			anchor := repairTip("c", 10)
+			require.True(t, f.selector.RecordVerifiedEagernessPath(repairUpdate(f, peer, 16), anchor, repairPath(10, 16), 1, valid, valid))
+			if mode == "delivery" {
+				f.selector.RecordDeliveredPeerTip(repairUpdate(f, peer, 17))
+			} else {
+				require.True(t, f.selector.RecordVerifiedEagernessPath(repairUpdate(f, peer, 17), anchor, repairPath(10, 17), 1, valid, valid))
+			}
+			require.False(t, f.selector.RecordVerifiedEagernessPath(repairUpdate(f, peer, 16), anchor, repairPath(10, 16), 1, valid, valid), "an older in-flight proof must not replace newer continuity")
+			f.selector.mutex.RLock()
+			head, ok := eagernessFragmentHead(f.selector.eagernessDeliveries[peer].fragment)
+			f.selector.mutex.RUnlock()
+			require.True(t, ok)
+			require.EqualValues(t, 17, head)
+		})
+	}
+}

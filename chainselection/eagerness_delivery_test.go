@@ -17,11 +17,13 @@ package chainselection
 import (
 	"context"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -554,4 +556,46 @@ func TestEagernessAuthenticatedDeliveryPreservesOlderForkPoint(t *testing.T) {
 			)
 		})
 	}
+}
+
+func TestEagernessAuthenticatedDeliveryPinsPublicationAcrossRecording(t *testing.T) {
+	t.Parallel()
+	f := newEagernessDeliveryFixture(t, 100, 0)
+	peer := corrConn(120)
+	repairAdmit(t, f, peer, 10)
+	var publication sync.RWMutex
+	pinned := make(chan struct{}, 1)
+	f.selector.config.PinHeaderCryptoVerificationGeneration = func(g uint64) (func(), bool) {
+		publication.RLock()
+		if g != f.generation.Load() {
+			publication.RUnlock()
+			return nil, false
+		}
+		select {
+		case pinned <- struct{}{}:
+		default:
+		}
+		return publication.RUnlock, true
+	}
+	update := repairUpdate(f, peer, 11)
+	recorded := make(chan struct{})
+	f.selector.mutex.Lock()
+	var unlocked sync.Once
+	unlock := func() { unlocked.Do(f.selector.mutex.Unlock) }
+	t.Cleanup(func() { unlock(); testutil.RequireReceive(t, recorded, 5*time.Second, "recording cleanup") })
+	go func() { defer close(recorded); f.selector.RecordDeliveredPeerTip(update) }()
+	testutil.RequireReceive(t, pinned, 5*time.Second, "delivery must pin its generation before waiting for the selector")
+	published := make(chan struct{})
+	go func() { publication.Lock(); f.generation.Store(2); publication.Unlock(); close(published) }()
+	testutil.RequireNoReceive(t, published, 100*time.Millisecond, "publication must not overtake the blocked delivery write")
+	unlock()
+	testutil.RequireReceive(t, recorded, 5*time.Second, "delivery recording must complete")
+	testutil.RequireReceive(t, published, 5*time.Second, "publication must proceed after delivery releases its pin")
+	f.selector.mutex.RLock()
+	delivery := f.selector.deliveredPeerTips[peer]
+	head := f.selector.eagernessDeliveries[peer]
+	f.selector.mutex.RUnlock()
+	require.NotNil(t, delivery)
+	require.EqualValues(t, 11, delivery.ObservedTip.BlockNumber)
+	require.EqualValues(t, 1, head.generation)
 }

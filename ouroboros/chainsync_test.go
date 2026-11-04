@@ -2269,6 +2269,8 @@ func TestChainsyncClientRollForwardDefersVerdictStaleBeforeObservation(
 	)
 	require.NoError(t, err,
 		"publication expiry must not terminate an honest peer's protocol")
+	require.EqualValues(t, 2, current.Load(),
+		"observation must expire the verdict before staging")
 	testutil.RequireNoReceive(t, ledgerCh, 200*time.Millisecond,
 		"a stale verdict must remain withheld from ledger publication")
 	require.Nil(t, selector.GetPeerTip(conn))
