@@ -55,11 +55,7 @@ func TestHardForkDijkstraSkipsEmptyGenesis(t *testing.T) {
 	require.Equal(t, uint64(42), dijkstraPParams.GovActionDeposit)
 	require.Equal(t, uint64(84), dijkstraPParams.DRepDeposit)
 	require.Equal(t, uint64(99), dijkstraPParams.GovActionValidityPeriod)
-	require.Equal(
-		t,
-		uint(dijkstra.MinProtocolVersionDijkstra),
-		dijkstraPParams.ProtocolVersion.Major,
-	)
+	require.Equal(t, uint(10), dijkstraPParams.ProtocolVersion.Major)
 	if dijkstraPParams.CostModels == nil || prev.CostModels == nil ||
 		dijkstraPParams.CostModels[0] == nil || prev.CostModels[0] == nil {
 		t.Fatal("expected cost models")
@@ -362,4 +358,27 @@ func TestHardForkDijkstraAcceptsValidGenesisParameterDomains(t *testing.T) {
 		lcommon.ExUnits{Memory: 1, Steps: 2},
 		pparams.MaxEndorserBlockExUnits,
 	)
+}
+
+// A hard fork trigger alone must not change the protocol version: only an
+// enacted HardForkInitiation does, so a schedule-driven entry into Dijkstra
+// from a major-11 chain keeps reporting 11.
+func TestHardForkDijkstraKeepsPreviousProtocolVersion(t *testing.T) {
+	t.Parallel()
+	prev := &conway.ConwayProtocolParameters{
+		ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+			Major: dijkstra.MinProtocolVersionDijkstra - 1,
+			Minor: 0,
+		},
+	}
+	got, err := eras.HardForkDijkstra(&cardano.CardanoNodeConfig{}, prev)
+	require.NoError(t, err)
+	pparams, ok := got.(*dijkstra.DijkstraProtocolParameters)
+	require.True(t, ok)
+	require.Equal(
+		t,
+		uint(dijkstra.MinProtocolVersionDijkstra-1),
+		pparams.ProtocolVersion.Major,
+	)
+	require.Equal(t, uint(0), pparams.ProtocolVersion.Minor)
 }
