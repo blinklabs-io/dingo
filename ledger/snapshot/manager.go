@@ -1732,7 +1732,10 @@ func (m *Manager) hasExistingPostMithrilSnapshotWindow() (
 			// on mainnet the one taken entering Shelley, before any pool
 			// registered -- and its epoch summary records that capture.
 			// Treating it as missing would reseed the window from current
-			// stake and overwrite the recorded snapshots around it.
+			// stake and overwrite the recorded snapshots around it. The
+			// summary must also record the same empty totals: summaries
+			// survive pool-row pruning and a deep truncate, so a ready
+			// summary alone does not prove the rows were never there.
 			summary, err := meta.GetEpochSummary(epoch, nil)
 			if err != nil {
 				return false, 0, 0, 0, fmt.Errorf(
@@ -1741,7 +1744,9 @@ func (m *Manager) hasExistingPostMithrilSnapshotWindow() (
 					err,
 				)
 			}
-			if summary == nil || !summary.SnapshotReady {
+			if summary == nil || !summary.SnapshotReady ||
+				uint64(summary.TotalActiveStake) != totalStake ||
+				summary.TotalPoolCount != uint64(len(snapshots)) {
 				return false, 0, 0, 0, nil
 			}
 		}
