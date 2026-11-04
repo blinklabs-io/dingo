@@ -54,6 +54,14 @@ func benchCommittee(
 	return keys, pubs, votes
 }
 
+// resetVerifiedLeiosKeys empties the verified-key cache so each measured
+// verification runs cold.
+func resetVerifiedLeiosKeys() {
+	verifiedLeiosKeys.Lock()
+	verifiedLeiosKeys.keys = make(map[verifiedLeiosKeyID]*bls12381.G2Affine)
+	verifiedLeiosKeys.Unlock()
+}
+
 func BenchmarkLeiosCommitteeCrypto(b *testing.B) {
 	const seats = 900
 	msg := VoteMessageBytes(1, lcommon.Blake2b256{1})
@@ -64,6 +72,9 @@ func BenchmarkLeiosCommitteeCrypto(b *testing.B) {
 	}
 	b.Run("VerifyLeiosKeyProofOfPossession", func(b *testing.B) {
 		for b.Loop() {
+			b.StopTimer()
+			resetVerifiedLeiosKeys()
+			b.StartTimer()
 			if err := VerifyLeiosKeyProofOfPossession(keys[0]); err != nil {
 				b.Fatal(err)
 			}
@@ -85,9 +96,7 @@ func BenchmarkLeiosCommitteeCrypto(b *testing.B) {
 	})
 	b.Run(fmt.Sprintf("VerifyCommitteeKeysCold/%d", seats), func(b *testing.B) {
 		for b.Loop() {
-			verifiedLeiosKeys.Lock()
-			verifiedLeiosKeys.keys = make(map[verifiedLeiosKeyID]*bls12381.G2Affine)
-			verifiedLeiosKeys.Unlock()
+			resetVerifiedLeiosKeys()
 			errs := make([]error, seats)
 			parallelFor(seats, func(i int) {
 				_, errs[i] = verifiedLeiosKey(keys[i])
