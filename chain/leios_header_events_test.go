@@ -96,10 +96,12 @@ func TestAddBlockHeaderQueuesLeiosAnnouncement(t *testing.T) {
 		blockNumber: 1,
 		slot:        577,
 	}
+	wantIssuer := lcommon.PoolKeyHash(lcommon.IssuerVkey{}.Hash())
 	for _, tc := range []struct {
-		name        string
-		header      interface{ Hash() lcommon.Blake2b256 }
-		wantPublish bool
+		name             string
+		header           interface{ Hash() lcommon.Blake2b256 }
+		wantAnnouncement bool
+		wantNoEvent      bool
 	}{
 		{
 			name: "announcing header",
@@ -109,7 +111,7 @@ func TestAddBlockHeaderQueuesLeiosAnnouncement(t *testing.T) {
 				ebSize:             4096,
 				announces:          true,
 			},
-			wantPublish: true,
+			wantAnnouncement: true,
 		},
 		{
 			name: "announcement-capable header announcing nothing",
@@ -119,8 +121,9 @@ func TestAddBlockHeaderQueuesLeiosAnnouncement(t *testing.T) {
 			},
 		},
 		{
-			name:   "pre-leios header",
-			header: base,
+			name:        "pre-leios header",
+			header:      base,
+			wantNoEvent: true,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -141,24 +144,35 @@ func TestAddBlockHeaderQueuesLeiosAnnouncement(t *testing.T) {
 			}
 			c.PublishPendingChainUpdates()
 
-			if !tc.wantPublish {
+			if tc.wantNoEvent {
 				testutil.RequireNoReceive(
 					t,
 					ch,
 					300*time.Millisecond,
-					"no header announcement expected",
+					"no header lifecycle event for a pre-Leios header",
 				)
 				return
 			}
 			evt := testutil.RequireReceive(
-				t, ch, 2*time.Second, "header announcement",
+				t, ch, 2*time.Second, "header lifecycle event",
 			)
+			if !tc.wantAnnouncement {
+				data, ok := evt.Data.(chain.ChainHeaderObservedEvent)
+				require.True(t, ok)
+				assert.Equal(t, uint64(577), data.Slot)
+				assert.Equal(t, base.hash, data.RbHash)
+				assert.Equal(t, wantIssuer, data.Issuer)
+				assert.NotZero(t, data.Seq)
+				return
+			}
 			data, ok := evt.Data.(chain.ChainHeaderAnnouncementEvent)
 			require.True(t, ok)
 			assert.Equal(t, uint64(577), data.Slot)
 			assert.Equal(t, base.hash, data.RbHash)
 			assert.Equal(t, ebHash, data.EbHash)
+			assert.Equal(t, wantIssuer, data.Issuer)
 			assert.NotZero(t, data.Seq)
+			assert.False(t, data.ArrivedAt.IsZero())
 		})
 	}
 }
@@ -848,4 +862,80 @@ func TestAddLocalBlockAnnouncesItselfAfterInvalidation(t *testing.T) {
 		invalid.Seq,
 		"the forged block is announced behind the invalidation that frees the vote id",
 	)
+}
+
+// TestForkChainPublishesNoEvents pins that only the primary chain speaks on
+// the event bus. A fork chain shares the manager's bus, but its headers and
+// blocks are not the node's chain: a fork header on chain.header would move
+// the VoteManager's latest-RB tracking and arm votes for a ranking block the
+// node never selected, and a fork block on chain.update would reach every
+// consumer of the primary chain's blocks.
+//
+// The primary rollback at the end is the barrier: the bus delivers each
+// subscriber's events in publish order, so anything the fork published would
+// be received before the primary chain's rollback events.
+func TestForkChainPublishesNoEvents(t *testing.T) {
+	ctx := context.Background()
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Stop)
+	cm, err := chain.NewManager(ctx, nil, bus)
+	require.NoError(t, err)
+	primary := cm.PrimaryChain()
+
+	blocks, err := testfixtures.GenerateConwayChain(3)
+	require.NoError(t, err)
+	for _, block := range blocks[:2] {
+		require.NoError(t, primary.AddBlock(ctx, block, nil))
+	}
+	headerSubId, headerCh := bus.Subscribe(chain.ChainHeaderEventType)
+	defer bus.Unsubscribe(chain.ChainHeaderEventType, headerSubId)
+	updateSubId, updateCh := bus.Subscribe(chain.ChainUpdateEventType)
+	defer bus.Unsubscribe(chain.ChainUpdateEventType, updateSubId)
+
+	fork, err := cm.NewChain(ctx, ocommon.Point{
+		Slot: blocks[1].SlotNumber(),
+		Hash: blocks[1].Hash().Bytes(),
+	})
+	require.NoError(t, err)
+	require.NoError(t, fork.AddBlock(ctx, blocks[2], nil))
+	require.NoError(
+		t,
+		fork.AddVerifiedBlockHeader(ctx, announcingStreamHeader{
+			headerStreamHeader: headerStreamHeader{
+				hash:        lcommon.NewBlake2b256([]byte("fork-hdr")),
+				prevHash:    blocks[2].Hash(),
+				blockNumber: blocks[2].BlockNumber() + 1,
+				slot:        blocks[2].SlotNumber() + 1,
+			},
+			ebHash:    lcommon.NewBlake2b256([]byte("fork-eb")),
+			ebSize:    4096,
+			announces: true,
+		}),
+	)
+	fork.PublishPendingChainUpdates()
+	fork.ClearHeaders()
+	fork.PublishPendingChainUpdates()
+
+	rollbackPoint := ocommon.Point{
+		Slot: blocks[0].SlotNumber(),
+		Hash: blocks[0].Hash().Bytes(),
+	}
+	require.NoError(t, primary.RollbackUnbounded(ctx, rollbackPoint))
+
+	headerEvt := testutil.RequireReceive(
+		t, headerCh, 2*time.Second, "primary rollback invalidation",
+	)
+	invalid, ok := headerEvt.Data.(chain.ChainHeaderInvalidationEvent)
+	require.True(t, ok, "fork published on chain.header: %T %+v",
+		headerEvt.Data, headerEvt.Data)
+	assert.Equal(t, chain.HeaderInvalidationRollback, invalid.Reason)
+	assert.Equal(t, rollbackPoint.Slot, invalid.Point.Slot)
+
+	updateEvt := testutil.RequireReceive(
+		t, updateCh, 2*time.Second, "primary rollback",
+	)
+	rollback, ok := updateEvt.Data.(chain.ChainRollbackEvent)
+	require.True(t, ok, "fork published on chain.update: %T %+v",
+		updateEvt.Data, updateEvt.Data)
+	assert.Equal(t, rollbackPoint.Slot, rollback.Point.Slot)
 }

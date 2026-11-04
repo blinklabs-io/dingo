@@ -1499,6 +1499,12 @@ type LedgerState struct {
 	activeBlockfetchTimeout            time.Duration
 	currentPParams                     lcommon.ProtocolParameters
 	prevEraPParams                     lcommon.ProtocolParameters // pparams from the immediately previous era (for era-1 TX validation)
+	// sigResults remembers the outcome of verifying each transaction's
+	// witness signatures, so the repeated validations of one transaction
+	// (mempool admission and revalidation, forging, block application)
+	// verify them once. Set once in NewLedgerState and never reassigned; the
+	// cache locks internally.
+	sigResults *eras.SignatureResultCache
 	// plutusEvalCtxCache holds one *cek.EvalContext per distinct (language
 	// version, protocol major version, cost-model parameter list,
 	// synthetic-V2 flag) combination observed by script evaluation, bounded
@@ -1508,6 +1514,12 @@ type LedgerState struct {
 	// the key (see PlutusEvalContextCache's doc comment). Set once in NewLedgerState
 	// and never reassigned; safe for concurrent readers without a lock.
 	plutusEvalCtxCache *eras.PlutusEvalContextCache
+	// phase2Results remembers transactions whose scripts succeeded, keyed by
+	// everything evaluation reads, so the repeated validations of one
+	// transaction (mempool admission and revalidation, forging, block
+	// application) run its scripts once. Set once in NewLedgerState and never
+	// reassigned; the cache locks internally.
+	phase2Results *eras.Phase2ResultCache
 	// syntheticV2CostModel is true from the moment HardForkBabbage fabricates
 	// a PlutusV2 cost model (real mainnet/preview/preprod never had one in
 	// genesis -- PlutusV2 postdates the Alonzo genesis format entirely, so
@@ -2398,8 +2410,10 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 		db:                 cfg.Database,
 		chain:              cfg.ChainManager.PrimaryChain(),
 		epochNonceHexCache: make(map[uint64]epochNonceHexCacheEntry),
+		sigResults:         eras.NewSignatureResultCache(),
 		validationEnabled:  cfg.ValidateHistorical,
 		plutusEvalCtxCache: eras.NewPlutusEvalContextCache(),
+		phase2Results:      eras.NewPhase2ResultCache(),
 		byronPBFT:          byronPBFT,
 		evalAdmission:      newEvaluationLimiter(evaluationCapacity(cfg)),
 	}
@@ -9471,8 +9485,11 @@ func (ls *LedgerState) processBlocksFromSource(
 					}
 				}
 			}
+			// Replayed transactions are verified once, so their outcomes
+			// are not worth caching.
 			preverifiedSignatures := preverifyTransactionSignatures(
 				trustedReplayTransactions,
+				nil,
 			)
 			// prepare and commit are observed only beside the batch latency
 			// below, so a chunk that applies no block or fails records
@@ -9561,6 +9578,7 @@ func (ls *LedgerState) processBlocksFromSource(
 								ctx,
 								chunk,
 								signatureCheckedBlocks(chunk, validated),
+								ls.sigResults,
 							)
 							defer aheadSignatures.stop()
 						}
@@ -14290,6 +14308,13 @@ func (ls *LedgerState) persistedMaxBlockSize() uint64 {
 	return size
 }
 
+// SignatureResultCache returns the cache of witness signature verification
+// outcomes. Returns nil for a bare-constructed LedgerState that skipped
+// NewLedgerState (test-only), which validation treats as no cache.
+func (ls *LedgerState) SignatureResultCache() *eras.SignatureResultCache {
+	return ls.sigResults
+}
+
 // PlutusEvalContextCache returns the shared PlutusEvalContextCache script
 // evaluation reuses across every redeemer, transaction, and block this
 // LedgerState validates or evaluates. Returns nil for a bare-constructed
@@ -14297,6 +14322,13 @@ func (ls *LedgerState) persistedMaxBlockSize() uint64 {
 // nil cache as "no cache available" rather than dereferencing it.
 func (ls *LedgerState) PlutusEvalContextCache() *eras.PlutusEvalContextCache {
 	return ls.plutusEvalCtxCache
+}
+
+// Phase2ResultCache returns the cache of transactions whose scripts
+// succeeded. Returns nil for a bare-constructed LedgerState that skipped
+// NewLedgerState (test-only), which validation treats as no cache.
+func (ls *LedgerState) Phase2ResultCache() *eras.Phase2ResultCache {
+	return ls.phase2Results
 }
 
 // GetCurrentPParamsForReporting returns the current protocol parameters with

@@ -298,3 +298,129 @@ func TestObserverGapOriginResetPreservesOtherRecovery(t *testing.T) {
 	require.False(t, other.cancelled.Load(), "safe intersection cannot cancel another recovery reason")
 	f.noTimer(t)
 }
+
+// A gapped observer promoted by a header that is the direct child of the
+// applied tip (a local block producer's new block) must keep its connection:
+// the skipped headers are already on the local chain, so the promotion resync
+// would only close the connection under the new block (#5812).
+func TestObserverGapPromotedByAppliedTipChildKeepsConnection(t *testing.T) {
+	t.Parallel()
+	ls := newTestLedgerState(t)
+	f := newPromotionGapFixture(t)
+	f.o.ledgerState = ls
+	var appliedHash gledger.Blake2b256
+	appliedHash[0] = 0xaa
+	applied := ocommon.NewPoint(50, appliedHash.Bytes())
+	ls.SetTipForTesting(ochainsync.Tip{Point: applied, BlockNumber: 2})
+	var trimmed []ocommon.Point
+	f.o.config.ChainsyncRecordDeliveredPeerRollback = func(e chainselection.PeerRollbackEvent) {
+		trimmed = append(trimmed, e.Point)
+	}
+	// The peer re-sends the applied tip while it only observes: dropped, gap.
+	require.NoError(t, f.header(50, 2, 0xaa))
+	require.True(t, f.o.chainsyncState.ClientObserverHeaderGap(f.conn))
+	f.noTimer(t)
+	// A slot frees; the next header promotes the observer.
+	f.o.chainsyncState.RemoveClientConnId(f.fillers[0])
+	child := &testBlockHeader{slotNumber: 60, blockNumber: 3, prevHash: appliedHash}
+	child.hash[0] = 0xbb
+	require.NoError(t, f.o.chainsyncClientRollForwardAt(
+		ochainsync.CallbackContext{ConnectionId: f.conn}, 0, child,
+		ochainsync.Tip{Point: ocommon.NewPoint(60, child.hash.Bytes()), BlockNumber: 3},
+		time.Now(),
+	))
+	timer := testutil.RequireReceive(t, f.timers, time.Second, "promotion arms the fallback resync")
+	require.True(t, timer.cancelled.Load(), "a child of the applied tip must cancel the promotion resync")
+	require.False(t, f.o.chainsyncState.ClientObserverHeaderGap(f.conn))
+	require.Equal(t, []ocommon.Point{applied}, trimmed, "delivered history is trimmed to the applied tip")
+	evt := testutil.RequireReceive(t, f.ledgerCh, time.Second, "the new block's header must reach ledger ingress")
+	require.EqualValues(t, 60, evt.Data.(ledger.ChainsyncEvent).Point.Slot)
+	timer.fire()
+	select {
+	case <-f.resyncCh:
+		t.Fatal("the connection must not be resynced under the new block")
+	case <-time.After(50 * time.Millisecond):
+	}
+	require.NotNil(t, f.o.connManager.GetConnectionById(f.conn), "connection must stay open")
+}
+
+// A promoting header that does not descend from the applied tip still needs
+// the fresh intersection.
+func TestObserverGapPromotedByNonChildStillResyncs(t *testing.T) {
+	t.Parallel()
+	ls := newTestLedgerState(t)
+	f := newPromotionGapFixture(t)
+	f.o.ledgerState = ls
+	var appliedHash gledger.Blake2b256
+	appliedHash[0] = 0xaa
+	ls.SetTipForTesting(ochainsync.Tip{Point: ocommon.NewPoint(50, appliedHash.Bytes()), BlockNumber: 2})
+	require.NoError(t, f.header(50, 2, 0xaa))
+	require.True(t, f.o.chainsyncState.ClientObserverHeaderGap(f.conn))
+	f.o.chainsyncState.RemoveClientConnId(f.fillers[0])
+	var otherParent gledger.Blake2b256
+	otherParent[0] = 0xcc
+	child := &testBlockHeader{slotNumber: 60, blockNumber: 3, prevHash: otherParent}
+	child.hash[0] = 0xbb
+	require.NoError(t, f.o.chainsyncClientRollForwardAt(
+		ochainsync.CallbackContext{ConnectionId: f.conn}, 0, child,
+		ochainsync.Tip{Point: ocommon.NewPoint(60, child.hash.Bytes()), BlockNumber: 3},
+		time.Now(),
+	))
+	timer := testutil.RequireReceive(t, f.timers, time.Second, "promotion arms the fallback resync")
+	require.False(t, timer.cancelled.Load())
+	require.True(t, f.o.chainsyncState.ClientObserverHeaderGap(f.conn))
+	timer.fire()
+	evt := testutil.RequireReceive(t, f.resyncCh, time.Second, "a gap off the applied chain must re-intersect")
+	require.Equal(t, event.ChainsyncResyncReasonIngressPromotion, evt.Data.(event.ChainsyncResyncEvent).Reason)
+}
+
+// The promotion fallback timer is armed before the header backpressure wait.
+// A child of the applied tip must cancel it before that wait, or a wait longer
+// than the fallback delay lets it close the connection first.
+func TestObserverGapAppliedTipChildSurvivesHeaderBackpressure(t *testing.T) {
+	t.Parallel()
+	ls := newTestLedgerState(t)
+	f := newPromotionGapFixture(t)
+	f.o.ledgerState = ls
+	var appliedHash gledger.Blake2b256
+	appliedHash[0] = 0xaa
+	ls.SetTipForTesting(ochainsync.Tip{Point: ocommon.NewPoint(50, appliedHash.Bytes()), BlockNumber: 2})
+	require.NoError(t, f.header(50, 2, 0xaa))
+	require.True(t, f.o.chainsyncState.ClientObserverHeaderGap(f.conn))
+	f.noTimer(t)
+	waiting, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	t.Cleanup(unblock)
+	f.o.chainsyncHeaderBackpressure = func(context.Context, int) error {
+		close(waiting)
+		<-release
+		return nil
+	}
+	f.o.chainsyncState.RemoveClientConnId(f.fillers[0])
+	child := &testBlockHeader{slotNumber: 60, blockNumber: 3, prevHash: appliedHash}
+	child.hash[0] = 0xbb
+	result := make(chan error, 1)
+	go func() {
+		result <- f.o.chainsyncClientRollForwardAt(
+			ochainsync.CallbackContext{ConnectionId: f.conn}, 0, child,
+			ochainsync.Tip{Point: ocommon.NewPoint(60, child.hash.Bytes()), BlockNumber: 3},
+			time.Now(),
+		)
+	}()
+	testutil.RequireReceive(t, waiting, time.Second, "the header must reach the backpressure wait")
+	timer := testutil.RequireReceive(t, f.timers, time.Second, "promotion arms the fallback resync")
+	// The fallback deadline passes while the header is still held.
+	timer.fire()
+	select {
+	case <-f.resyncCh:
+		t.Fatal("the fallback must not resync the connection during backpressure")
+	case <-time.After(50 * time.Millisecond):
+	}
+	require.NotNil(t, f.o.connManager.GetConnectionById(f.conn), "connection must stay open")
+	unblock()
+	require.NoError(t, testutil.RequireReceive(t, result, time.Second, "header callback must finish"))
+	evt := testutil.RequireReceive(t, f.ledgerCh, time.Second, "the new block's header must reach ledger ingress")
+	require.EqualValues(t, 60, evt.Data.(ledger.ChainsyncEvent).Point.Slot)
+	require.NotNil(t, f.o.connManager.GetConnectionById(f.conn))
+}

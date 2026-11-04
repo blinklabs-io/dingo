@@ -69,6 +69,7 @@ func TestSignaturePreverifyAheadServesEveryWantedBlock(t *testing.T) {
 		context.Background(),
 		blocks,
 		[]bool{true, false, true},
+		nil,
 	)
 	defer stopSignaturesWithin(t, p)
 
@@ -102,6 +103,7 @@ func TestSignaturePreverifyAheadStopWithoutTake(t *testing.T) {
 			signatureAheadBlock(txs...),
 		},
 		[]bool{true, true},
+		nil,
 	)
 	stopSignaturesWithin(t, p)
 	stopSignaturesWithin(t, p)
@@ -138,7 +140,7 @@ func TestPreverifiedSignaturesForTxPrefersBlockPosition(t *testing.T) {
 	require.Nil(t, got)
 	require.False(t, ahead)
 
-	byHash := preverifyTransactionSignatures([]lcommon.Transaction{first})
+	byHash := preverifyTransactionSignatures([]lcommon.Transaction{first}, nil)
 	ctx = withPreverifiedSignatures(context.Background(), byHash)
 	got, ahead = preverifiedSignaturesForTx(ctx, 0, first)
 	require.Same(t, byHash[first.LeiosHash()], got)

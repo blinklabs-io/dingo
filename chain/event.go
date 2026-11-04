@@ -15,6 +15,8 @@
 package chain
 
 import (
+	"time"
+
 	"github.com/blinklabs-io/dingo/database/models"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -24,9 +26,9 @@ const (
 	ChainUpdateEventType = "chain.update"
 	ChainForkEventType   = "chain.fork_detected"
 	// ChainHeaderEventType is the ordered header-lifecycle stream. It
-	// carries ChainHeaderAnnouncementEvent when a ranking-block header
-	// bearing a Leios endorser-block announcement enters the header queue,
-	// and ChainHeaderInvalidationEvent when queued headers leave it again.
+	// carries ChainHeaderObservedEvent or ChainHeaderAnnouncementEvent when
+	// an authenticated ranking-block header enters the chain, and
+	// ChainHeaderInvalidationEvent when queued headers leave it again.
 	// Both are enqueued on the chain-level sequencer under c.mutex, so a
 	// single subscriber observes them in true chain-mutation order.
 	ChainHeaderEventType = "chain.header"
@@ -62,6 +64,25 @@ type ChainForkEvent struct {
 	CanonicalHead ocommon.Point
 }
 
+// ChainHeaderObservedEvent records an authenticated Leios-era ranking-block
+// header, admitted to the header queue, that carries no endorser-block
+// announcement. Announcement-bearing headers use ChainHeaderAnnouncementEvent
+// instead, so each such header produces exactly one ordered lifecycle event.
+// Headers from eras without announcements produce none, and neither does a
+// non-announcing block added without the header queue (a local forge, a bulk
+// restore); consumers see those on ChainUpdateEventType.
+type ChainHeaderObservedEvent struct {
+	// Slot is the ranking block's slot.
+	Slot uint64
+	// RbHash is the ranking block's header hash.
+	RbHash lcommon.Blake2b256
+	// Issuer is the pool key hash of the header's issuer. Two distinct
+	// headers for one slot are RB equivocation only when they share it.
+	Issuer lcommon.PoolKeyHash
+	// Seq is this header admission's chain-mutation sequence number.
+	Seq uint64
+}
+
 // ChainHeaderAnnouncementEvent is published when a ranking block announcing a
 // Leios endorser block enters the chain, by either of the two routes a ranking
 // block can take:
@@ -95,8 +116,15 @@ type ChainHeaderAnnouncementEvent struct {
 	RbHash lcommon.Blake2b256
 	// EbHash is the announced endorser block's hash.
 	EbHash lcommon.Blake2b256
+	// Issuer is the pool key hash of the announcing header's issuer. Two
+	// distinct headers for one slot are RB equivocation only when they
+	// share it.
+	Issuer lcommon.PoolKeyHash
 	// Seq is this header admission's chain-mutation sequence number.
 	Seq uint64
+	// ArrivedAt is when the authenticated header entered the local chain.
+	// Leios voting compares this instant with the slot onset and L_hdr.
+	ArrivedAt time.Time
 }
 
 // ChainHeaderInvalidationEvent is published when queued headers leave the

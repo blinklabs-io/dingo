@@ -360,14 +360,15 @@ func (c *Chain) finishCallerTxnAdd(txn *database.Txn) {
 			)
 			break
 		}
+		finishWithdrawal := c.beginWithdrawalLocked()
 		c.currentTip = add.tip
 		c.tipBlockIndex = add.tipIndex
 		c.mutationGeneration = add.generation
-		c.withdrawalGeneration.Add(1)
 		if c.headerMutationGeneration == add.headerGeneration+1 {
 			c.headerMutationGeneration = add.headerGeneration
 			c.headers = add.headers
 		}
+		finishWithdrawal()
 	}
 	c.mutex.Unlock()
 	c.finishPendingTxnEvents(txn, false)

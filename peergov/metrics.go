@@ -98,19 +98,19 @@ func (p *PeerGovernor) initMetrics() {
 	p.metrics.coldPeersPromotions = promautoFactory.NewCounter(
 		prometheus.CounterOpts{
 			Name: "cardano_node_metrics_peerSelection_ColdPeersPromotions",
-			Help: "number of cold peers promoted to warm",
+			Help: "number of peers promoted out of cold",
 		},
 	)
 	p.metrics.warmPeersPromotions = promautoFactory.NewCounter(
 		prometheus.CounterOpts{
 			Name: "cardano_node_metrics_peerSelection_WarmPeersPromotions",
-			Help: "number of warm peers promoted to hot",
+			Help: "number of peers promoted to hot",
 		},
 	)
 	p.metrics.warmPeersDemotions = promautoFactory.NewCounter(
 		prometheus.CounterOpts{
 			Name: "cardano_node_metrics_peerSelection_WarmPeersDemotions",
-			Help: "number of hot peers demoted to warm",
+			Help: "number of peers demoted out of hot, to warm or cold",
 		},
 	)
 	p.metrics.increasedKnownPeers = promautoFactory.NewCounter(
@@ -128,13 +128,13 @@ func (p *PeerGovernor) initMetrics() {
 	p.metrics.increasedActivePeers = promautoFactory.NewCounter(
 		prometheus.CounterOpts{
 			Name: "cardano_node_metrics_peerSelection_churn_IncreasedActivePeers",
-			Help: "number of active peers increased",
+			Help: "number of peers that became hot (active)",
 		},
 	)
 	p.metrics.decreasedActivePeers = promautoFactory.NewCounter(
 		prometheus.CounterOpts{
 			Name: "cardano_node_metrics_peerSelection_churn_DecreasedActivePeers",
-			Help: "number of active peers decreased",
+			Help: "number of peers that left hot (active)",
 		},
 	)
 	// Per-source promotion/demotion metrics (matching Cardano node naming)
@@ -324,6 +324,29 @@ func (p *PeerGovernor) recordPeerStateChange(from, to PeerState) {
 		p.metrics.peerPromotions.WithLabelValues(fromLabel, toLabel).Inc()
 	} else {
 		p.metrics.peerDemotions.WithLabelValues(fromLabel, toLabel).Inc()
+	}
+	// The cardano-node-compatible counters follow every transition here,
+	// not only reconcile's, since churn, connection events and inbound
+	// handling move peers too. Leaving hot counts as a hot demotion whether
+	// the peer lands warm or cold.
+	if from == PeerStateCold && p.metrics.coldPeersPromotions != nil {
+		p.metrics.coldPeersPromotions.Inc()
+	}
+	if to == PeerStateHot {
+		if p.metrics.warmPeersPromotions != nil {
+			p.metrics.warmPeersPromotions.Inc()
+		}
+		if p.metrics.increasedActivePeers != nil {
+			p.metrics.increasedActivePeers.Inc()
+		}
+	}
+	if from == PeerStateHot {
+		if p.metrics.warmPeersDemotions != nil {
+			p.metrics.warmPeersDemotions.Inc()
+		}
+		if p.metrics.decreasedActivePeers != nil {
+			p.metrics.decreasedActivePeers.Inc()
+		}
 	}
 }
 

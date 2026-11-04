@@ -3355,6 +3355,10 @@ func TestValidateTxFeeConwayIncludesReferenceScripts(t *testing.T) {
 	err := ValidateTxFeeConway(tx, ls, pp)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "minimum fee 450")
+	var feeTooSmall shelley.FeeTooSmallUtxoError
+	require.ErrorAs(t, err, &feeTooSmall)
+	assert.Equal(t, big.NewInt(449), feeTooSmall.Provided)
+	assert.Equal(t, big.NewInt(450), feeTooSmall.Min)
 }
 
 func TestValidateTxFeeConwayDeduplicatesOverlappingReferenceScriptInput(

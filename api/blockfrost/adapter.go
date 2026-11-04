@@ -495,34 +495,15 @@ func (a *NodeAdapter) blockOutputAndFees(
 	ctx context.Context,
 	blockHash []byte,
 ) (output string, fees string, err error) {
-	txs, err := a.ledgerState.Database().GetTransactionsByBlockHash(ctx, blockHash, nil)
+	totals, err := a.ledgerState.Database().GetBlockTransactionTotals(ctx, blockHash, nil)
 	if err != nil {
 		return "", "", fmt.Errorf(
-			"get transactions for block %x: %w",
+			"get block transaction totals for block %x: %w",
 			blockHash,
 			err,
 		)
 	}
-	// Accumulate in big.Int: a block's summed lovelace is bounded by the ADA
-	// supply and stays well under uint64 in practice, but big.Int keeps the
-	// response totals correct even if a chained aggregate ever exceeds uint64
-	// rather than silently wrapping.
-	totalOutput := new(big.Int)
-	totalFees := new(big.Int)
-	for _, tx := range txs {
-		totalFees.Add(totalFees, new(big.Int).SetUint64(uint64(tx.Fee)))
-		outputs := tx.Outputs
-		if !tx.Valid && tx.CollateralReturn != nil {
-			outputs = []models.Utxo{*tx.CollateralReturn}
-		}
-		for _, out := range outputs {
-			totalOutput.Add(
-				totalOutput,
-				new(big.Int).SetUint64(uint64(out.Amount)),
-			)
-		}
-	}
-	return totalOutput.String(), totalFees.String(), nil
+	return totals.Output, totals.Fees, nil
 }
 
 // nextBlockHash returns the hash of the block that directly follows the block

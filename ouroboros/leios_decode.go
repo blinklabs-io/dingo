@@ -88,20 +88,35 @@ func decodeLeiosAnnouncementHeader(
 	raw []byte,
 ) (*gdijkstra.DijkstraBlockHeader, error) {
 	return guardedDecode(raw, func(data []byte) (*gdijkstra.DijkstraBlockHeader, error) {
-		var parts []cbor.RawMessage
-		bytesRead, err := cbor.Decode(data, &parts)
-		if err == nil && bytesRead == len(data) && len(parts) == 2 {
-			var era uint8
-			if _, err := cbor.Decode(parts[0], &era); err == nil {
-				if era != gledger.EraIdDijkstra {
-					return nil, fmt.Errorf(
-						"unexpected era in Leios announcement header: %d",
-						era,
-					)
-				}
-				return gdijkstra.NewDijkstraBlockHeaderFromCbor(parts[1])
-			}
+		header, err := decodeLeiosAnnouncementHeaderBody(data)
+		if err != nil {
+			return nil, err
 		}
-		return gdijkstra.NewDijkstraBlockHeaderFromCbor(data)
+		// An announcement is carried in the Leios header fields, so a
+		// ten-field header announces nothing on any network.
+		if err := requireLeiosHeaderExtension(header); err != nil {
+			return nil, err
+		}
+		return header, nil
 	})
+}
+
+func decodeLeiosAnnouncementHeaderBody(
+	data []byte,
+) (*gdijkstra.DijkstraBlockHeader, error) {
+	var parts []cbor.RawMessage
+	bytesRead, err := cbor.Decode(data, &parts)
+	if err == nil && bytesRead == len(data) && len(parts) == 2 {
+		var era uint8
+		if _, err := cbor.Decode(parts[0], &era); err == nil {
+			if era != gledger.EraIdDijkstra {
+				return nil, fmt.Errorf(
+					"unexpected era in Leios announcement header: %d",
+					era,
+				)
+			}
+			return gdijkstra.NewDijkstraBlockHeaderFromCbor(parts[1])
+		}
+	}
+	return gdijkstra.NewDijkstraBlockHeaderFromCbor(data)
 }

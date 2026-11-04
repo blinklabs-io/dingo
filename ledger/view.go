@@ -94,6 +94,20 @@ type LedgerView struct {
 	// Output and must not mutate it. Lazily allocated; never shared across
 	// views.
 	utxoMemo map[utxoref.Key]lcommon.Utxo
+	// mirPendingMu guards mirPending.
+	mirPendingMu sync.Mutex
+	// mirPending holds the per-(pot, credential type, credential) totals of
+	// every MIR distribution stored from epochStartSlot on, built by the
+	// first PendingInstantaneousRewards call. A MIR certificate is stored
+	// only after the transaction carrying it validates, and every validation
+	// path builds one view per transaction, so the stored set cannot change
+	// during a view's lifetime. A view that outlives a MIR write would
+	// answer from stale totals. Never shared across views.
+	mirPending map[mirPendingKey]*big.Int
+	// onMIRCertsLoad, when non-nil, is called each time
+	// PendingInstantaneousRewards reads the stored MIR certificates. It is a
+	// test hook that makes the one-read-per-view contract observable.
+	onMIRCertsLoad func()
 	// prefetchedUtxos holds the live UTxOs a block's transactions reference,
 	// resolved with one batch query before the first transaction is
 	// validated (see prefetchBlockUtxos). It is owned by block application,
@@ -294,6 +308,19 @@ func (lv *LedgerView) MinPoolMargin() *big.Rat {
 // silent runtime no-op for the CIP-23 pool-margin-floor certificate rule.
 var _ eras.MinPoolMarginProvider = (*LedgerView)(nil)
 
+// SignatureResultCache forwards the underlying LedgerState's
+// SignatureResultCache, so a *LedgerView satisfies
+// eras.SignatureResultCacheProvider. Returns nil for a bare-constructed
+// LedgerView with no ls (test-only).
+func (lv *LedgerView) SignatureResultCache() *eras.SignatureResultCache {
+	if lv.ls == nil {
+		return nil
+	}
+	return lv.ls.SignatureResultCache()
+}
+
+var _ eras.SignatureResultCacheProvider = (*LedgerView)(nil)
+
 // PlutusEvalContextCache forwards the underlying LedgerState's shared
 // PlutusEvalContextCache so that a *LedgerView (the value passed to
 // ValidateTx*/EvaluateTx*) satisfies eras.PlutusEvalContextCacheProvider.
@@ -311,6 +338,18 @@ func (lv *LedgerView) PlutusEvalContextCache() *eras.PlutusEvalContextCache {
 // compile error instead of a silent fallback to uncached EvalContext
 // construction.
 var _ eras.PlutusEvalContextCacheProvider = (*LedgerView)(nil)
+
+// Phase2ResultCache forwards the underlying LedgerState's Phase2ResultCache,
+// so a *LedgerView satisfies eras.Phase2ResultCacheProvider. Returns nil for
+// a bare-constructed LedgerView with no ls (test-only).
+func (lv *LedgerView) Phase2ResultCache() *eras.Phase2ResultCache {
+	if lv.ls == nil {
+		return nil
+	}
+	return lv.ls.Phase2ResultCache()
+}
+
+var _ eras.Phase2ResultCacheProvider = (*LedgerView)(nil)
 
 // MIRDelegState returns the move instantaneous rewards DELEG state that a
 // certificate at slot is checked against: the chain account pots, the
@@ -412,30 +451,65 @@ func (lv *LedgerView) PendingInstantaneousRewards(
 	source uint,
 	cred lcommon.Credential,
 ) (*big.Int, error) {
+	if cred.CredType > math.MaxUint8 {
+		// No stored reward carries a tag this wide.
+		return nil, nil
+	}
+	lv.mirPendingMu.Lock()
+	defer lv.mirPendingMu.Unlock()
+	if lv.mirPending == nil {
+		totals, err := lv.loadMIRPending()
+		if err != nil {
+			return nil, err
+		}
+		lv.mirPending = totals
+	}
+	total, ok := lv.mirPending[mirPendingKey{
+		pot:        source,
+		tag:        uint8(cred.CredType), // #nosec G115 -- bounded above
+		credential: string(cred.Credential[:]),
+	}]
+	if !ok {
+		return nil, nil
+	}
+	return new(big.Int).Set(total), nil
+}
+
+// loadMIRPending reads the MIR distributions stored in the current epoch once
+// and folds them into per-credential totals. Pot transfers (OtherPot > 0) and
+// rewards without an amount carry no credential credit and are skipped.
+func (lv *LedgerView) loadMIRPending() (map[mirPendingKey]*big.Int, error) {
+	if lv.onMIRCertsLoad != nil {
+		lv.onMIRCertsLoad()
+	}
 	effects, err := lv.ls.db.GetMIRCertsInSlotRange(
 		lv.EvaluationContext(), lv.epochStartSlot, math.MaxInt64, lv.txn,
 	)
 	if err != nil {
 		return nil, lv.storageFault("get MIR certs in slot range: %w", err)
 	}
-	var total *big.Int
+	totals := make(map[mirPendingKey]*big.Int)
 	for _, effect := range effects {
-		if effect.Pot != source || effect.OtherPot > 0 {
+		if effect.OtherPot > 0 {
 			continue
 		}
 		for _, reward := range effect.Rewards {
-			if reward.Amount == nil ||
-				uint(reward.CredentialTag) != cred.CredType ||
-				!bytes.Equal(reward.Credential, cred.Credential[:]) {
+			if reward.Amount == nil {
 				continue
 			}
-			if total == nil {
-				total = new(big.Int)
+			key := mirPendingKey{
+				pot:        effect.Pot,
+				tag:        reward.CredentialTag,
+				credential: string(reward.Credential),
 			}
-			total.Add(total, reward.Amount)
+			if total, ok := totals[key]; ok {
+				total.Add(total, reward.Amount)
+			} else {
+				totals[key] = new(big.Int).Set(reward.Amount)
+			}
 		}
 	}
-	return total, nil
+	return totals, nil
 }
 
 // The gouroboros DELEG rule discovers this capability with a runtime type

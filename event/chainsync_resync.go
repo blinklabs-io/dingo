@@ -91,6 +91,14 @@ const (
 	// the forecast horizon. It is not a peer-fault signal and does not impose
 	// a peer cooldown.
 	ChainsyncResyncReasonForecastHorizonNoWork = "forecast horizon has no local block work"
+	// ChainsyncResyncReasonHeaderPastForecastHorizon replays a header when
+	// ledger admission finds its local forecast no longer covers that point.
+	// This restart does not establish a peer or transport failure.
+	ChainsyncResyncReasonHeaderPastForecastHorizon = "header past forecast horizon"
+	// ChainsyncResyncReasonBufferedHeaderLimitExceeded replays a connection
+	// after the local secondary-header buffer fills. No invalid header verdict
+	// is implied by this capacity limit.
+	ChainsyncResyncReasonBufferedHeaderLimitExceeded = "buffered header limit exceeded"
 	// ChainsyncResyncReasonBehindLocalTip re-intersects an ingress-eligible
 	// ChainSync connection whose delivered header trails the local tip by more
 	// than the security parameter while the peer's advertised tip does not,
@@ -139,6 +147,8 @@ func IsLocalChainsyncResyncReason(reason string) bool {
 		ChainsyncResyncReasonGenesisCorroborationHoldExpired,
 		ChainsyncResyncReasonEagernessWaitExpired,
 		ChainsyncResyncReasonForecastHorizonNoWork,
+		ChainsyncResyncReasonHeaderPastForecastHorizon,
+		ChainsyncResyncReasonBufferedHeaderLimitExceeded,
 		ChainsyncResyncReasonBehindLocalTip,
 		ChainsyncResyncReasonNetworkIngestReleased,
 		ChainsyncResyncReasonLocalLedgerRollback:

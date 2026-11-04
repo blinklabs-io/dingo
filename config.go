@@ -544,6 +544,21 @@ func (c *Config) experimentalLeiosNetworkingEnabled() bool {
 		c.cfg.StartEra.IsDijkstra()
 }
 
+// leiosForgingEnabled reports whether the forger emits the ouroboros-leios
+// prototype header extension (the 12-field Dijkstra header body) on every
+// ranking block and produces endorser blocks. Only a network that runs the
+// Leios prototype expects that header: Musashi, or an explicit leios run
+// mode. A Dijkstra start era is not a Leios opt-in here, because it is also
+// how a plain Dijkstra devnet starts, and cardano-node peers on such a chain
+// decode only the 10-field Praos header body.
+func (c *Config) leiosForgingEnabled() bool {
+	if c.cfg == nil {
+		return false
+	}
+	return c.isMusashiNetwork() ||
+		c.cfg.RunMode == internalconfig.RunModeLeios
+}
+
 // experimentalDijkstraEnabled reports whether the Dijkstra ledger era is
 // active. Beyond the explicit opt-ins, the Musashi and Dijkstra testnets
 // hard-fork into Dijkstra, so syncing either requires the Dijkstra era table.
@@ -1062,8 +1077,10 @@ func clonePluginConfig(in map[string]any) map[string]any {
 	return out
 }
 
-// WithGenesisControlGroups replaces network relay control defaults. An empty
-// non-nil slice disables defaults; nil selects the network defaults.
+// WithGenesisControlGroups sets the trusted relay operator groups that form the
+// exclusive Genesis witness set. Dingo supplies no network defaults, so nil and
+// an empty slice both leave witness identities to the ledger, a peer snapshot,
+// or the connection address. The option copies its input.
 func WithGenesisControlGroups(groups []topology.PeerControlGroup) ConfigOptionFunc {
 	owned := topology.ClonePeerControlGroups(groups)
 	return func(c *Config) {
