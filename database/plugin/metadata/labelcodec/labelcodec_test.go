@@ -239,6 +239,25 @@ func TestEntriesFromCBORRejectsEncodedKeyCollisions(t *testing.T) {
 	}
 }
 
+func TestMetadataJSONNestingBoundary(t *testing.T) {
+	t.Parallel()
+	for _, depth := range []int{lcommon.MetadataJSONMaxNestingDepth, lcommon.MetadataJSONMaxNestingDepth + 1} {
+		raw := append(bytes.Repeat([]byte{0x81}, depth), 0)
+		entries, err := EntriesFromCBOR(append([]byte{0xa1, 0x01}, raw...))
+		if err != nil || len(entries) != 1 {
+			t.Fatalf("depth %d must remain indexable: %v", depth, err)
+		}
+		if depth == lcommon.MetadataJSONMaxNestingDepth {
+			want := strings.Repeat("[", depth) + "0" + strings.Repeat("]", depth)
+			if entries[0].JSONError != nil || entries[0].JsonValue != want {
+				t.Fatalf("scalar at container depth limit must retain JSON: %v", entries[0].JSONError)
+			}
+		} else if !errors.Is(entries[0].JSONError, ErrJSONUnavailable) {
+			t.Fatal("container beyond the depth limit must mark JSON unavailable")
+		}
+	}
+}
+
 func TestDeepMetadataRemainsIndexableWithoutJSON(t *testing.T) {
 	t.Parallel()
 	raw := append(bytes.Repeat([]byte{0x81}, 11000), 0)

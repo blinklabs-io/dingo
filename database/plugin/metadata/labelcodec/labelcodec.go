@@ -293,11 +293,14 @@ func metadatumToJSONValue(md lcommon.TransactionMetadatum) (any, error) {
 
 func metadatumToJSONValueAtDepth(md lcommon.TransactionMetadatum, depth int) (any, error) {
 	if depth >= lcommon.MetadataJSONMaxNestingDepth {
-		return nil, fmt.Errorf(
-			"%w: metadata JSON exceeds maximum nesting depth %d",
-			ErrJSONUnavailable,
-			lcommon.MetadataJSONMaxNestingDepth,
-		)
+		switch md.(type) {
+		case lcommon.MetaList, lcommon.MetaMap:
+			return nil, fmt.Errorf(
+				"%w: metadata JSON exceeds maximum nesting depth %d",
+				ErrJSONUnavailable,
+				lcommon.MetadataJSONMaxNestingDepth,
+			)
+		}
 	}
 	switch m := md.(type) {
 	case lcommon.MetaInt:
