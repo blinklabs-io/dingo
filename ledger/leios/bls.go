@@ -18,6 +18,9 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"runtime"
+	"sync"
+	"sync/atomic"
 
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	bls12381 "github.com/consensys/gnark-crypto/ecc/bls12-381"
@@ -184,24 +187,65 @@ func verifySignatureWithDST(
 // checks only field lengths (LeiosKey.validate), not the proof itself --
 // callers must not treat an on-chain leios_key as usable until this passes.
 func VerifyLeiosKeyProofOfPossession(key *lcommon.LeiosKey) error {
+	_, err := verifiedLeiosKey(key)
+	return err
+}
+
+// verifiedLeiosKeyCacheMax bounds verifiedLeiosKeys. A committee holds 900
+// seats and its keys change only with pool registrations, so the cache
+// holds several committees' keys; filling it empties it.
+const verifiedLeiosKeyCacheMax = 8192
+
+// verifiedLeiosKeys maps a registered key's public key and proof of
+// possession, as bytes, to the decoded public key, for keys whose proof has
+// verified. Each check is a G2 decompression with a subgroup check, a hash
+// to G1 and a pairing, about 10ms, and every epoch's committee resolves
+// every key again. The outcome is a function of the bytes it is keyed on, so
+// an entry is never stale. Failures are not cached.
+var verifiedLeiosKeys = struct {
+	sync.RWMutex
+	keys map[verifiedLeiosKeyID]*bls12381.G2Affine
+}{keys: make(map[verifiedLeiosKeyID]*bls12381.G2Affine)}
+
+type verifiedLeiosKeyID struct {
+	publicKey [VotePublicKeySize]byte
+	proof     [lcommon.LeiosBlsPossessionProofSize]byte
+}
+
+// verifiedLeiosKey returns key's decoded public key once its proof of
+// possession verifies under the Leios PoP domain. The returned point is
+// shared and must not be modified.
+func verifiedLeiosKey(key *lcommon.LeiosKey) (*bls12381.G2Affine, error) {
 	if key == nil {
-		return errors.New("nil leios key")
+		return nil, errors.New("nil leios key")
 	}
 	if len(key.PublicKey) != VotePublicKeySize {
-		return fmt.Errorf(
+		return nil, fmt.Errorf(
 			"leios key public key must be %d bytes, got %d",
 			VotePublicKeySize,
 			len(key.PublicKey),
 		)
 	}
+	cacheable := len(key.PossessionProof) == lcommon.LeiosBlsPossessionProofSize
+	var id verifiedLeiosKeyID
+	if cacheable {
+		copy(id.publicKey[:], key.PublicKey)
+		copy(id.proof[:], key.PossessionProof)
+		verifiedLeiosKeys.RLock()
+		pub, ok := verifiedLeiosKeys.keys[id]
+		verifiedLeiosKeys.RUnlock()
+		if ok {
+			return pub, nil
+		}
+	}
 	var pub bls12381.G2Affine
 	// SetBytes validates curve membership and subgroup order, matching
 	// ParseVoterPublicKey's checks.
 	if _, err := pub.SetBytes(key.PublicKey); err != nil {
-		return fmt.Errorf("%w: %w", ErrInvalidPublicKey, err)
+		return nil, fmt.Errorf("%w: %w", ErrInvalidPublicKey, err)
 	}
 	if pub.IsInfinity() {
-		return fmt.Errorf("%w: point is infinity", ErrInvalidPublicKey)
+		return nil, fmt.Errorf("%w: point is infinity", ErrInvalidPublicKey)
 	}
 	if err := verifySignatureWithDST(
 		&pub,
@@ -209,9 +253,19 @@ func VerifyLeiosKeyProofOfPossession(key *lcommon.LeiosKey) error {
 		key.PossessionProof,
 		LeiosPoPDST,
 	); err != nil {
-		return fmt.Errorf("leios key proof of possession: %w", err)
+		return nil, fmt.Errorf("leios key proof of possession: %w", err)
 	}
-	return nil
+	if cacheable {
+		verifiedLeiosKeys.Lock()
+		if len(verifiedLeiosKeys.keys) >= verifiedLeiosKeyCacheMax {
+			verifiedLeiosKeys.keys = make(
+				map[verifiedLeiosKeyID]*bls12381.G2Affine,
+			)
+		}
+		verifiedLeiosKeys.keys[id] = &pub
+		verifiedLeiosKeys.Unlock()
+	}
+	return &pub, nil
 }
 
 // AggregateSignatures sums the given 48-byte compressed G1 signatures into
@@ -220,20 +274,65 @@ func AggregateSignatures(sigs [][]byte) ([]byte, error) {
 	if len(sigs) == 0 {
 		return nil, errors.New("no signatures to aggregate")
 	}
-	var agg bls12381.G1Affine
-	for i, sig := range sigs {
-		point, err := decodeSignaturePoint(sig)
+	// Decoding a signature decompresses a G1 point and checks its subgroup,
+	// which for a 900-seat committee dominates aggregation, so it runs in
+	// parallel. The sum is taken in Jacobian coordinates: an affine addition
+	// inverts a field element.
+	points, err := decodeSignaturePoints(sigs)
+	if err != nil {
+		return nil, err
+	}
+	var agg bls12381.G1Jac
+	agg.FromAffine(points[0])
+	for _, point := range points[1:] {
+		agg.AddMixed(point)
+	}
+	var aggAffine bls12381.G1Affine
+	aggAffine.FromJacobian(&agg)
+	aggBytes := aggAffine.Bytes()
+	return aggBytes[:], nil
+}
+
+// decodeSignaturePoints decodes sigs on up to GOMAXPROCS goroutines and
+// returns the first failure by index.
+func decodeSignaturePoints(sigs [][]byte) ([]*bls12381.G1Affine, error) {
+	points := make([]*bls12381.G1Affine, len(sigs))
+	errs := make([]error, len(sigs))
+	parallelFor(len(sigs), func(i int) {
+		points[i], errs[i] = decodeSignaturePoint(sigs[i])
+	})
+	for i, err := range errs {
 		if err != nil {
 			return nil, fmt.Errorf("signature %d: %w", i, err)
 		}
-		if i == 0 {
-			agg = *point
-			continue
-		}
-		agg.Add(&agg, point)
 	}
-	aggBytes := agg.Bytes()
-	return aggBytes[:], nil
+	return points, nil
+}
+
+// parallelFor calls fn(i) for every i in [0, n) on up to GOMAXPROCS
+// goroutines and returns when all calls have.
+func parallelFor(n int, fn func(int)) {
+	workers := min(runtime.GOMAXPROCS(0), n)
+	if workers <= 1 {
+		for i := range n {
+			fn(i)
+		}
+		return
+	}
+	var next atomic.Int64
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Go(func() {
+			for {
+				i := int(next.Add(1) - 1)
+				if i >= n {
+					return
+				}
+				fn(i)
+			}
+		})
+	}
+	wg.Wait()
 }
 
 // VerifyAggregateSignature verifies an aggregate signature over a single
@@ -255,16 +354,20 @@ func VerifyAggregateSignature(
 	if len(pubs) == 0 {
 		return errors.New("no public keys to verify against")
 	}
-	var aggPub bls12381.G2Affine
+	// Summed in Jacobian coordinates: an affine addition inverts a field
+	// element, which for a large committee costs more than the pairing.
+	var aggJac bls12381.G2Jac
 	for i, pub := range pubs {
 		if pub == nil || pub.IsInfinity() {
 			return fmt.Errorf("invalid public key %d", i)
 		}
 		if i == 0 {
-			aggPub = *pub
+			aggJac.FromAffine(pub)
 			continue
 		}
-		aggPub.Add(&aggPub, pub)
+		aggJac.AddMixed(pub)
 	}
+	var aggPub bls12381.G2Affine
+	aggPub.FromJacobian(&aggJac)
 	return VerifyVoteSignature(&aggPub, msg, aggSig)
 }
