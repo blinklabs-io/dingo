@@ -72,12 +72,15 @@ func TestPeerNonceLookupClassifiesChangedContext(t *testing.T) {
 	f.stamp(0)
 	snapshot := f.ls.loadConsensusSnapshot()
 	f.ls.publishSnapshotsLocked()
-	_, _, _, err := f.ls.peerChainSelectionEpochNonce(
+	_, _, _, err := f.ls.peerChainSelectionEpochNonce(t.Context(),
 		ouroboros.ConnectionId{}, f.headers[1], snapshot,
 	)
 	require.ErrorIs(t, err, errHeaderVerificationDeferred)
-	require.True(t, IsHeaderVerificationContextTransient(err),
-		"a context replaced before ancestry lookup must retry even a local extension")
+	require.True(
+		t,
+		IsHeaderVerificationContextTransient(err),
+		"a context replaced before ancestry lookup must retry even a local extension",
+	)
 }
 
 func TestPeerForkPathClassifiesContextChangedDuringLookup(t *testing.T) {

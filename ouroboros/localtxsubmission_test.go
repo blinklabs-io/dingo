@@ -15,11 +15,13 @@
 package ouroboros
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/big"
 	"net"
 	"sync"
 	"testing"
@@ -32,6 +34,8 @@ import (
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/connection"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	olocaltxsubmission "github.com/blinklabs-io/gouroboros/protocol/localtxsubmission"
 	"github.com/stretchr/testify/assert"
@@ -89,6 +93,223 @@ func TestLocalTxSubmissionRejectReason_ConwayGenericUsesMempoolFailure(
 	)
 	require.NoError(t, decodeErr)
 	assert.Equal(t, expected, wire)
+}
+
+func TestLocalTxSubmissionRejectReason_ConwayStructuredFailures(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		cause  error
+		assert func(*testing.T, error)
+	}{
+		"fee too small": {
+			cause: shelley.FeeTooSmallUtxoError{
+				Provided: big.NewInt(10),
+				Min:      big.NewInt(20),
+			},
+			assert: func(t *testing.T, failure error) {
+				utxo := requireConwayUtxoFailure(t, failure)
+				fee, ok := utxo.Err.(*gledger.FeeTooSmallUtxo)
+				require.True(t, ok)
+				assert.Equal(t, uint64(20), fee.MinimumFee)
+				assert.Equal(t, uint64(10), fee.SuppliedFee)
+			},
+		},
+		"missing collateral": {
+			cause: alonzo.NoCollateralInputsError{},
+			assert: func(t *testing.T, failure error) {
+				utxo := requireConwayUtxoFailure(t, failure)
+				_, ok := utxo.Err.(*gledger.NoCollateralInputs)
+				require.True(t, ok)
+			},
+		},
+		"invalid transaction scripts succeeded": {
+			cause: lcommon.UnexpectedPlutusScriptSuccessError{},
+			assert: func(t *testing.T, failure error) {
+				utxo := requireConwayUtxoFailure(t, failure)
+				utxos, ok := utxo.Err.(*gledger.UtxosFailure)
+				require.True(t, ok)
+				assert.Contains(t, fmt.Sprint(utxos.Err.Value), "false")
+			},
+		},
+		"script execution failed": {
+			cause: lcommon.PlutusScriptFailedError{
+				Err: testPlutusExecutionFailure{
+					err:            errors.New("execution budget exhausted"),
+					reconstruction: []byte("cGx1dHVzLWNvbnRleHQ="),
+				},
+			},
+			assert: func(t *testing.T, failure error) {
+				utxo := requireConwayUtxoFailure(t, failure)
+				utxos, ok := utxo.Err.(*gledger.UtxosFailure)
+				require.True(t, ok)
+				assert.Contains(
+					t,
+					fmt.Sprint(utxos.Err.Value),
+					"execution budget exhausted",
+				)
+			},
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			reason := newLocalTxSubmissionRejectReason(
+				gledger.EraIdConway,
+				tc.cause,
+			)
+			var cborReason cborRejectReason
+			require.ErrorAs(t, reason, &cborReason)
+			wire, err := cborReason.MarshalCBOR()
+			require.NoError(t, err)
+			decoded, err := gledger.NewTxSubmitErrorFromCbor(wire)
+			require.NoError(t, err)
+			validation, ok := decoded.(*gledger.ShelleyTxValidationError)
+			require.True(t, ok, "decoded %T from %x", decoded, wire)
+			require.Len(t, validation.Err.Failures, 1)
+			_, unknown := validation.Err.Failures[0].(*gledger.UnknownApplyTxFailureError)
+			require.False(t, unknown)
+			tc.assert(t, validation.Err.Failures[0])
+		})
+	}
+}
+
+type testPlutusExecutionFailure struct {
+	err            error
+	reconstruction []byte
+}
+
+func (e testPlutusExecutionFailure) Error() string {
+	return e.err.Error()
+}
+
+func (e testPlutusExecutionFailure) Unwrap() error {
+	return e.err
+}
+
+func (e testPlutusExecutionFailure) PlutusFailureReconstruction() ([]byte, error) {
+	return e.reconstruction, nil
+}
+
+func TestLocalTxSubmissionRejectReason_ConwayScriptDataHashMismatchWire(
+	t *testing.T,
+) {
+	t.Parallel()
+	declared := lcommon.NewBlake2b256(bytes.Repeat([]byte{0x11}, 32))
+	computed := lcommon.NewBlake2b256(bytes.Repeat([]byte{0x22}, 32))
+	reason := newLocalTxSubmissionRejectReason(
+		gledger.EraIdConway,
+		lcommon.ScriptDataHashMismatchError{
+			Declared: declared,
+			Computed: computed,
+		},
+	)
+	var cborReason cborRejectReason
+	require.ErrorAs(t, reason, &cborReason)
+	wire, err := cborReason.MarshalCBOR()
+	require.NoError(t, err)
+	expected, err := cbor.Encode([]any{[]any{
+		gledger.EraIdConway,
+		[]any{[]any{
+			gledger.ConwayLedgerUtxowFailure,
+			[]any{
+				gledger.ConwayUtxowPPViewHashesDontMatch,
+				// Mismatch (StrictMaybe ScriptIntegrityHash) encodes each
+				// side as a zero- or one-element list.
+				[]any{declared},
+				[]any{computed},
+			},
+		}},
+	}})
+	require.NoError(t, err)
+	assert.Equal(t, expected, wire)
+}
+
+func TestLocalTxSubmissionRejectReason_ConwayUnrecognizedKeepsWrapperContext(
+	t *testing.T,
+) {
+	t.Parallel()
+	cause := fmt.Errorf(
+		"calculating declared execution units: %w",
+		errors.New("redeemer missing"),
+	)
+	reason := newLocalTxSubmissionRejectReason(gledger.EraIdConway, cause)
+	var cborReason cborRejectReason
+	require.ErrorAs(t, reason, &cborReason)
+	wire, err := cborReason.MarshalCBOR()
+	require.NoError(t, err)
+	expected, err := cbor.Encode([]any{[]any{
+		gledger.EraIdConway,
+		[]any{[]any{conwayLedgerMempoolFailure, cause.Error()}},
+	}})
+	require.NoError(t, err)
+	assert.Equal(t, expected, wire)
+}
+
+func TestLocalTxSubmissionRejectReason_ConwayWrappedJoinedFailures(
+	t *testing.T,
+) {
+	t.Parallel()
+	reason := newLocalTxSubmissionRejectReason(
+		gledger.EraIdConway,
+		fmt.Errorf("validate transaction: %w", errors.Join(
+			shelley.FeeTooSmallUtxoError{
+				Provided: big.NewInt(10),
+				Min:      big.NewInt(20),
+			},
+			alonzo.NoCollateralInputsError{},
+			errors.New("unrecognized rule failure"),
+		)),
+	)
+	var cborReason cborRejectReason
+	require.ErrorAs(t, reason, &cborReason)
+	wire, err := cborReason.MarshalCBOR()
+	require.NoError(t, err)
+	decoded, err := gledger.NewTxSubmitErrorFromCbor(wire)
+	require.NoError(t, err)
+	validation, ok := decoded.(*gledger.ShelleyTxValidationError)
+	require.True(t, ok)
+	require.Len(t, validation.Err.Failures, 3)
+	_, ok = requireConwayUtxoFailure(t, validation.Err.Failures[0]).
+		Err.(*gledger.FeeTooSmallUtxo)
+	require.True(t, ok)
+	_, ok = requireConwayUtxoFailure(t, validation.Err.Failures[1]).
+		Err.(*gledger.NoCollateralInputs)
+	require.True(t, ok)
+}
+
+func TestLocalTxSubmissionRejectReason_ConwayPreservesJoinedFailures(t *testing.T) {
+	t.Parallel()
+	reason := newLocalTxSubmissionRejectReason(
+		gledger.EraIdConway,
+		errors.Join(
+			shelley.FeeTooSmallUtxoError{
+				Provided: big.NewInt(10),
+				Min:      big.NewInt(20),
+			},
+			alonzo.NoCollateralInputsError{},
+		),
+	)
+	var cborReason cborRejectReason
+	require.ErrorAs(t, reason, &cborReason)
+	wire, err := cborReason.MarshalCBOR()
+	require.NoError(t, err)
+	decoded, err := gledger.NewTxSubmitErrorFromCbor(wire)
+	require.NoError(t, err)
+	validation, ok := decoded.(*gledger.ShelleyTxValidationError)
+	require.True(t, ok)
+	require.Len(t, validation.Err.Failures, 2)
+	requireConwayUtxoFailure(t, validation.Err.Failures[0])
+	requireConwayUtxoFailure(t, validation.Err.Failures[1])
+}
+
+func requireConwayUtxoFailure(t *testing.T, failure error) *gledger.UtxoFailure {
+	t.Helper()
+	utxow, ok := failure.(*gledger.UtxowFailure)
+	require.True(t, ok)
+	utxo, ok := utxow.Err.(*gledger.UtxoFailure)
+	require.True(t, ok)
+	return utxo
 }
 
 func TestLocalTxSubmissionRejectReason_NilCauseIsGeneric(t *testing.T) {

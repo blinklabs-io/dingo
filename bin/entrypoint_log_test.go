@@ -276,3 +276,19 @@ func TestEntrypointLogFileModeIgnoresDefaultACL(t *testing.T) {
 		strings.TrimSpace(string(out)),
 	)
 }
+
+func TestEntrypointLogFileReportsCreateFailureCause(t *testing.T) {
+	t.Parallel()
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permissions")
+	}
+	root := t.TempDir()
+	logDir := filepath.Join(root, "logs")
+	require.NoError(t, os.Mkdir(logDir, 0o500))
+
+	out, err := runEntrypointWithLogFile(t, root, filepath.Join(logDir, "dingo.log"))
+	require.Error(t, err, string(out))
+	require.Contains(t, string(out), "DINGO_LOG_FILE cannot create")
+	require.Contains(t, string(out), "Permission denied")
+	require.NotContains(t, string(out), "must name a new file")
+}

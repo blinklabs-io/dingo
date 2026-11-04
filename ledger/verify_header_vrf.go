@@ -15,9 +15,7 @@
 package ledger
 
 import (
-	"encoding/hex"
 	"fmt"
-	"math"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
@@ -29,7 +27,6 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/ledger/mary"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
-	"github.com/blinklabs-io/gouroboros/vrf"
 )
 
 const (
@@ -336,102 +333,6 @@ func headerWithNonceVrfResult(
 	default:
 		return header
 	}
-}
-
-// verifyTPraosNonceVrfHex verifies the independent bheaderEta certificate
-// carried by Shelley-through-Alonzo headers. Its output is folded into epoch
-// nonce state, so this check must run before a header can reach ledger apply.
-// Babbage and later Praos headers carry only the single leader VRF result and
-// therefore have no separate nonce certificate to verify here.
-func verifyTPraosNonceVrfHex(
-	header ledger.BlockHeader,
-	epochNonceHex string,
-) error {
-	var (
-		vrfKey   []byte
-		nonceVrf lcommon.VrfResult
-	)
-	switch h := header.(type) {
-	case *shelley.ShelleyBlockHeader:
-		vrfKey = h.Body.VrfKey
-		nonceVrf = h.Body.NonceVrf
-	case *allegra.AllegraBlockHeader:
-		vrfKey = h.Body.VrfKey
-		nonceVrf = h.Body.NonceVrf
-	case *mary.MaryBlockHeader:
-		vrfKey = h.Body.VrfKey
-		nonceVrf = h.Body.NonceVrf
-	case *alonzo.AlonzoBlockHeader:
-		vrfKey = h.Body.VrfKey
-		nonceVrf = h.Body.NonceVrf
-	default:
-		return nil
-	}
-
-	epochNonce, err := hex.DecodeString(epochNonceHex)
-	if err != nil {
-		return fmt.Errorf(
-			"decode epoch nonce for nonce VRF verification: %w",
-			err,
-		)
-	}
-	if len(epochNonce) != 32 {
-		return fmt.Errorf(
-			"epoch nonce for nonce VRF verification must be 32 bytes, got %d",
-			len(epochNonce),
-		)
-	}
-	if len(vrfKey) != vrf.PublicKeySize {
-		return fmt.Errorf(
-			"invalid nonce VRF key size: expected %d, got %d",
-			vrf.PublicKeySize,
-			len(vrfKey),
-		)
-	}
-	if len(nonceVrf.Proof) != vrf.ProofSize {
-		return fmt.Errorf(
-			"invalid nonce VRF proof size: expected %d, got %d",
-			vrf.ProofSize,
-			len(nonceVrf.Proof),
-		)
-	}
-	if len(nonceVrf.Output) != vrf.OutputSize {
-		return fmt.Errorf(
-			"invalid nonce VRF output size: expected %d, got %d",
-			vrf.OutputSize,
-			len(nonceVrf.Output),
-		)
-	}
-	if header.SlotNumber() > math.MaxInt64 {
-		return fmt.Errorf(
-			"slot %d exceeds maximum int64 value for nonce VRF input",
-			header.SlotNumber(),
-		)
-	}
-	vrfInput, err := vrf.MkSeedTPraos(
-		int64(header.SlotNumber()), //nolint:gosec // checked above
-		epochNonce,
-		vrf.SeedEta(),
-	)
-	if err != nil {
-		return fmt.Errorf("create nonce VRF input: %w", err)
-	}
-	valid, err := vrf.Verify(
-		vrfKey,
-		nonceVrf.Proof,
-		nonceVrf.Output,
-		vrfInput,
-	)
-	if err != nil {
-		return fmt.Errorf("nonce VRF verification failed: %w", err)
-	}
-	if !valid {
-		return fmt.Errorf(
-			"nonce VRF proof verification returned false at slot %d",
-			header.SlotNumber(),
-		)
-	}
-	return nil
 }
 
 func cloneVrfResult(vrfResult lcommon.VrfResult) lcommon.VrfResult {

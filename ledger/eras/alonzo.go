@@ -253,6 +253,9 @@ func ValidateTxAlonzo(
 	}
 	// Evaluate scripts
 	var txInfoV1 script.TxInfoV1
+	// Every redeemer's script context embeds the same TxInfo; convert it to
+	// PlutusData once. A transaction without redeemers needs neither.
+	var txInfoV1Context *script.CachedTxInfo
 	if txHasRedeemers(tx) {
 		txInfoV1, err = script.NewTxInfoV1FromTransaction(
 			ls,
@@ -264,6 +267,7 @@ func ValidateTxAlonzo(
 		if err != nil {
 			return err
 		}
+		txInfoV1Context = script.NewCachedTxInfo(txInfoV1)
 	}
 	for _, redeemerPair := range txInfoV1.Redeemers {
 		purpose := redeemerPair.Key
@@ -286,7 +290,7 @@ func ValidateTxAlonzo(
 			if tmp, ok := purpose.(script.ScriptPurposeSpending); ok {
 				datum = tmp.Datum
 			}
-			sc := script.NewScriptContextV1V2(txInfoV1, purpose)
+			sc := script.NewScriptContextV1V2(txInfoV1Context, purpose)
 			costModel, err := requiredCostModel(tmpPparams.CostModels, 0, "PlutusV1")
 			if err != nil {
 				return err
@@ -421,6 +425,9 @@ func EvaluateTxAlonzo(
 	retRedeemerExUnits := make(map[lcommon.RedeemerKey]lcommon.ExUnits)
 	var err error
 	var txInfoV1 script.TxInfoV1
+	// Every redeemer's script context embeds the same TxInfo; convert it to
+	// PlutusData once. A transaction without redeemers needs neither.
+	var txInfoV1Context *script.CachedTxInfo
 	if txHasRedeemers(tx) {
 		txInfoV1, err = script.NewTxInfoV1FromTransaction(
 			ls,
@@ -432,6 +439,7 @@ func EvaluateTxAlonzo(
 		if err != nil {
 			return 0, lcommon.ExUnits{}, nil, err
 		}
+		txInfoV1Context = script.NewCachedTxInfo(txInfoV1)
 	}
 	for _, redeemerPair := range txInfoV1.Redeemers {
 		if err := checkEvaluationCanceled(ls); err != nil {
@@ -458,7 +466,7 @@ func EvaluateTxAlonzo(
 			if tmp, ok := purpose.(script.ScriptPurposeSpending); ok {
 				datum = tmp.Datum
 			}
-			sc := script.NewScriptContextV1V2(txInfoV1, purpose)
+			sc := script.NewScriptContextV1V2(txInfoV1Context, purpose)
 			costModel, err := requiredCostModel(tmpPparams.CostModels, 0, "PlutusV1")
 			if err != nil {
 				return 0, lcommon.ExUnits{}, nil, err

@@ -141,6 +141,10 @@ func BuildDijkstraBlockBytesWithTx(t testing.TB, txBytes []byte) []byte {
 			},
 			Signature: make([]byte, 448),
 		},
+		// leios_certified = false, leios_announcement = null: the
+		// twelve-field Leios header a Musashi peer sends. Without it the
+		// header encodes the ten-field Praos body.
+		LeiosHeaderExtension: []cbor.RawMessage{{0xf4}, {0xf6}},
 	}
 	return shapeEncode(t, []any{header, blockBody})
 }

@@ -490,6 +490,11 @@ func parseMempackTxOut(
 	if err := extractAddressKeys(decoded.Address, result); err != nil {
 		return nil, err
 	}
+	// A CompactAddr never carries bytes after the address payload: before
+	// Babbage fromCborBackwardsBothAddr crops them before building the
+	// CompactAddr, and from Babbage the output decoder rejects them
+	// (cardano-ledger Cardano/Ledger/Address.hs). Strict decoding is
+	// therefore safe for every era here.
 	address, err := lcommon.NewAddressFromBytes(decoded.Address)
 	if err != nil {
 		return nil, fmt.Errorf("decoding MemPack address: %w", err)

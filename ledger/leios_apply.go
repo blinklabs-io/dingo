@@ -388,7 +388,7 @@ func (ls *LedgerState) validateAndApplyEndorserBlockTransactions(
 				for i, idx := range indexes {
 					selected[i] = txs[idx]
 				}
-				signatures = preverifyTransactionSignatures(selected)
+				signatures = preverifyTransactionSignatures(selected, ls.sigResults)
 				if err := ctx.Err(); err != nil {
 					return 0, 0, err
 				}
