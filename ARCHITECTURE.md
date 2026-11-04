@@ -751,9 +751,9 @@ available. A header beyond the forecast horizon or with unavailable ancestry
 or context is deferred.
 
 A deferred result other than the forecast horizon means local state was not
-ready (a block-apply commit or snapshot publication in progress, a candidate
-ancestor no longer available, or published epoch data not yet covering the
-header's slot). For a header that does not extend the local chain,
+ready (a block-apply commit or snapshot publication in progress, or published
+epoch data not yet covering the header's slot). For a header that does not
+extend the local chain,
 `Ouroboros.verifyHeaderAwaitingLedger` waits inside the roll-forward callback
 for the ledger's next snapshot publication or finished validation transition
 (`LedgerState.HeaderVerificationSettledChan`) and verifies the same header
@@ -766,6 +766,18 @@ also waits and retries a local extension: otherwise an unstamped header can
 be withheld by corroboration while its peer cursor advances past it. Other
 deferrals on local extensions are forwarded unverified at once because
 missing epoch data may require applying that header's own block to settle.
+
+Missing retained predecessor data is classified as
+`ledger.ErrHeaderAncestryUnavailable`. It remains a deferred result, but bypasses
+the publication wait so `markDeferredHeaderRecovery` can re-intersect an idle
+connection or retry after queued blocks apply. A publication without local
+progress cannot reconstruct discarded peer history. Competing candidates remain
+withheld from selection and blockfetch until the ordinary verifier accepts them;
+local extensions retain the deferred block-validation path described above.
+Other non-transient deferrals also bypass the wait when the stored block tip,
+header tip and applied ledger tip are equal: no queued header or unapplied block
+can produce the required publication. Unknown tips, queued headers, fetched
+blocks ahead of the ledger, and transient publication changes retain the wait.
 
 Header parking and resyncs are exported as metrics.
 `dingo_chainsync_deferred_headers_total` counts each header
@@ -6521,13 +6533,13 @@ Forks held at the Limit on Eagerness are resolved by the same pass (see
 Limit on Eagerness); the disconnector itself does not apply the cap, and only
 removes peers from the candidate set that cap is measured across.
 
-The trust problem Genesis solves for **biased fast-sync sources** — e.g. a
-local shallow peer or the Genesis Sync Accelerator (GSA), which serve blocks
-quickly but are not themselves trustworthy — is that the densest/longest source
-must not be allowed to steer the local chain unless independent peers confirm
-it. Dingo implements this as a **corroboration gate**
-(`chainselection/genesis_corroboration.go`), controlled by
-`genesisBootstrap.corroborationPeers` (`MinCorroboratingPeers`):
+Core Genesis selection assumes an available honest upstream and uses Limit on
+Eagerness, density disconnection, patience and authenticated headers to constrain
+competing candidates. It does not require named operators. An optional
+**corroboration gate** (`chainselection/genesis_corroboration.go`) adds a
+peer corroboration threshold for deployments with biased fast-sync sources such
+as a shallow local peer or the Genesis Sync Accelerator. This additional policy
+is controlled by `genesisBootstrap.corroborationPeers` (`MinCorroboratingPeers`):
 
 A retained peer fork path also records two ancestor prefixes for one consensus
 context generation, epoch, and candidate nonce: the longest prefix whose
@@ -6786,12 +6798,16 @@ Ordinary Praos sessions continue to use primary-chain intersection points.
   A best-peer → none transition publishes `chainselection.selected_none` for
   observability of the stall; peer governance may also subscribe to the
   corroboration-failure event to react.
-- `corroborationPeers` defaults to 0, so the gate is off and a node with a
-  single upstream peer syncs by density-only Genesis selection, as the reference
-  node does. Setting it to N requires N independent witnesses before a fast
-  source can drive Genesis selection. The per-peer hash frontier is
-  tracked in every Genesis mode (the trusted-frontier rule above needs it) and
-  dropped in Praos, so normal Praos operation carries no extra state.
+- `corroborationPeers` defaults to 0: ordinary network topology does not need
+  operator labels to sync. A positive value requires independent witnesses
+  before a source can drive selection and fails closed when they are absent.
+  Eagerness, authenticated delivery and full-path repair, density disconnection,
+  patience, stale-tip checks and header verification remain active at zero.
+  Genesis sessions intersect at the applied ledger tip to anchor candidate
+  histories. Admission and peer removal reevaluate Genesis selection regardless
+  of the quorum setting. A temporarily unavailable ledger generation holds
+  ingress for bounded retry instead of rejecting the header. Per-peer hash
+  history is retained in Genesis and dropped in Praos.
 - **Header-crypto verification gates observation, independent of
   corroboration.** Density and the corroboration hash frontier are both
   populated from `recordObservedPoint`, driven by `PeerTipUpdateEvent`
@@ -7105,6 +7121,91 @@ first, and when it is equal connection priority, then the incumbent, then
 blockfetch latency, and then connection ID break the tie in place of the Praos
 comparison. `ChainSelector.SelectedTip` returns the selected
 peer's tip truncated at the limit.
+
+While corroboration is active, authenticated observer deliveries also retain
+a separate, bounded LoE continuity fragment per tracked connection. A delivery
+extends it only by the exact parent hash, next block height and increasing
+slot, or repeats its exact head. A gap, replacement or unrepresentable boundary
+discards the extension. The fragment can replace the admission frontier for
+the limit calculation only while its latest verification generation is current
+and all overlapping admitted or staged points agree at the same heights.
+The temporary limit view keeps any older admission prefix that the rolling
+delivery window has dropped, preserving known fork intersections.
+The admission frontier still supplies eligibility, staleness and pause state;
+the continuity fragment never promotes a selectable tip or admits a ledger
+header. This prevents keepalive activity from preserving an obsolete admission
+fragment as the peer's only candidate while authenticated delivery advances.
+Each fragment has the existing candidate-window bound, connections share the
+tracked-peer limit, and rollback trims it to an exact retained point or clears
+it. Disconnect, eviction and Genesis exit release the retained evidence.
+
+When local verification withholds an intermediate header, the next authenticated
+delivery can request a bounded continuity repair through the node composition
+layer. Ledger re-verifies the exact target against its peer-relative ancestry
+and requires a complete path, including operational-certificate counters; the
+queued-parent fallback is insufficient. A single read-only blob snapshot joins
+any older applied prefix using canonical indexes, metadata heights and parent
+hashes. It also checks the captured raw and applied tips against that snapshot,
+so an in-memory advance preceding its transaction commit cannot certify a
+path. Missing links, sparse indexes and Byron suffixes or epoch boundary blocks
+are refused. A base on an unapplied fork must occur on the authenticated suffix
+itself. Storage reads occur outside selector locks and ledger-generation pins.
+
+The selector consumes the result only with the verification generation pinned,
+the exact repair anchor unchanged and the original bearer session current.
+The retained fragment keeps a storage-free withdrawal, session and ledger-instance
+fence, checked on every limit view and before a later delivery inherits it.
+Chain withdrawal counters invalidate evidence before the first mutation and
+again before releasing the chain lock. Proof construction samples the counter
+before reading the raw tip under that lock, so a mid-withdrawal token cannot
+survive the completion bump. Repair never promotes admission, changes the cap
+formula or substitutes an advertised peer tip for authenticated ancestry.
+
+A gap in delivered corroboration history can hide an older candidate point even
+when its independent witness is ahead. Repair starts from the lower exact applied
+point when the admission head is above that gap, and the verified path must agree
+with every overlapping admitted point. A divergent fork that lacks this canonical
+anchor is refused. The retained fragment separately marks only the strict proof's
+bounded range and generation; an older admission prefix is not certified. Ordinary
+linked deliveries can refresh LoE continuity but cannot extend or refresh this
+certificate. Cropping and rollback trim its range, and expiry, withdrawal or bearer
+replacement makes it unavailable.
+
+When ordinary delivered history cannot confirm an exact candidate point, the
+selector can use that current certificate as an additional read-only witness.
+Its overlap with the latest delivered history must agree at every shared height.
+The exact-point, suffix, liveness and independent-identity checks still apply.
+The view never changes density observations, candidate selection or admission.
+A current certificate covering the missing range can survive ordinary linked
+appends without repeating full ancestry reconstruction for every new endpoint.
+
+Each ChainSync header callback can refresh continuity evidence every 100ms
+while it is held, including before validation at the observer forecast gate.
+A publication can expire an earlier successful proof while the next header
+is parked; the unchanged cursor cannot deliver another authenticated update.
+ChainSync marks the last authenticated delivery separately within its existing
+bounded raw history. This marker never stamps raw ancestry for admission and
+cannot retain a header beyond the history's byte/count budgets. The callback's
+single retry worker reads only that retained delivery for its original bearer,
+then performs the same complete verification and exact-generation consumption
+as delivery-time repair. Its pending raw header is never substituted as trusted
+evidence. Returning from the callback cancels and joins the worker.
+
+Snapshot publication can also expire a header's verdict between authentication
+and synchronous candidate staging. The selector reports this as a local deferral,
+separately from an invalid or implausible peer claim. ChainSync retries the exact
+header through the ordinary verifier before staging it again, for at most four
+staging attempts within one callback-bound wait budget. A renewed verdict updates
+both the event and its paired selector update; failure cannot publish the header
+to the ledger. Exhausted local retries use deferred-header recovery, while a
+genuine selector rejection still terminates the protocol. This prevents local
+publication races from accumulating peer-instability backoff on honest witnesses.
+Clean restarts after the local forecast horizon no longer covers a header or
+the local secondary-header buffer fills use the same local-recovery
+classification. They preserve connection stability and accumulated real-failure
+counters while using the ordinary short reconnect delay; a transport or protocol
+error still receives normal failure handling. Buffer capacity still discards the
+bounded candidate history and requests a fresh intersection.
 
 The limit also bounds selection-eligible ingress streams, including headers
 whose ledger application is withheld by Genesis corroboration or whose
@@ -16696,6 +16797,18 @@ and chain-selection evaluation they trigger instead of re-pinning the current
 generation. The selector releases its current-generation pin together with
 its in-memory ingress decision, before checking applied-chain membership in the
 database, so a slow storage read cannot block snapshot publication.
+
+A deferred ChainSync admission callback can find that its original generation
+is no longer pinnable. With no ledger or ChainSync mutex held, it waits within
+the block-fetch busy budget for a local validation transition to settle, for
+at most four attempts. Ledger close and lifecycle cancellation interrupt the
+wait. A still-current original verdict retains its pin. An expired verdict is
+recoverable only when the exact event point and header hash
+have already been applied on the current chain: membership is read before a
+fresh pin, which rejects any intervening publication or transition. The shared
+selector update then receives that fresh generation. Unapplied or replaced
+points retain ordinary rejection and history invalidation. Recovering an
+applied header preserves queued descendants without refreshing their verdicts.
 
 ## Configuration
 

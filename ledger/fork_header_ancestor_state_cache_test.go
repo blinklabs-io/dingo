@@ -151,7 +151,7 @@ func newPeerForkAncestorStateFixture(
 			connIdKey(conn), anchorBlock, headers,
 			snapshot.generation, snapshot.contextGeneration,
 		)
-		return ls.verifyPeerForkTargetEpochAncestors(
+		return ls.verifyPeerForkTargetEpochAncestors(t.Context(),
 			conn, headers, epoch, epochNonce, snapshot,
 		)
 	}
