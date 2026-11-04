@@ -4790,6 +4790,8 @@ LIMIT 100;
 
 API-mode ingestion stores each unique metadata label with its raw CBOR value.
 If distinct ledger map keys cannot be represented uniquely as JSON object keys,
+the JSON representation exceeds the metadata JSON nesting bound, or JSON
+encoding fails,
 the label remains indexed and `json_value` is NULL; this does not reject an
 otherwise valid transaction. The label-transaction JSON endpoint emits
 `json_metadata: null`, while CBOR endpoints continue to serve the raw value.
