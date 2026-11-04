@@ -259,6 +259,12 @@ retain their pagination and matching semantics. See the
 [MCP guide](docs/mcp/README.md#metadata-and-query-semantics) for page bounds and
 live-state consistency semantics.
 
+Certified Leios closures batch API-only output-address rows with transaction
+address history, witnesses and metadata labels. UTxO rows, native assets,
+datums and live stake changes remain visible before the next transaction
+validates. The queued indexes flush inside the closure transaction before
+commit; rollback discards them with the transaction.
+
 Blockfrost historical and governance reads are served from existing tables
 through `HistoryStore` (`database/plugin/metadata/history_store.go`); migration
 v47 only adds the `reward_stake_input (credential_tag, staking_key, epoch)`

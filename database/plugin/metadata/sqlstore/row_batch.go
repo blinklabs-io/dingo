@@ -396,7 +396,7 @@ func (b *rowBatch) flushExceptClosureAPIRows(ctx context.Context, db queryer, pa
 	for _, entry := range b.entries {
 		target := &immediate
 		switch entry.shape.table {
-		case "key_witness", "address_transaction", "transaction_metadata_label":
+		case "key_witness", "address_transaction", "transaction_metadata_label", "utxo_address":
 			target = &deferred
 		}
 		for _, row := range entry.rows {

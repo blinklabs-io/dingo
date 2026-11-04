@@ -19693,8 +19693,12 @@ from the `utxo` table while its delta is still queued stores the sum less that
 delta, so the flush counts the queued change once (`DATABASE.md`,
 "Incremental live-UTxO stake maintenance").
 Validated blocks apply each transaction as it is validated and keep the
-per-transaction path for the donation-only delta they return, as do Leios
-endorser-block applies and closure-context batches, in every storage mode.
+per-transaction path for the donation-only delta they return. Leios
+endorser-block applies and closure-context batches also apply state immediately,
+but in API mode their accumulator groups output-address, transaction-address,
+witness and metadata-label rows across the closure before flushing inside the
+same transaction. Those indexes are not validation inputs; assets and datums
+remain immediately readable by the next transaction.
 Regression tests: `TestApplyRowBatchingSerialEquivalence`,
 `TestApplyRowBatchingSameChunkDependencies` and
 `TestApplyRowBatchingSkipsValidatedDeltas` (`ledger/apply_row_batching_test.go`),
