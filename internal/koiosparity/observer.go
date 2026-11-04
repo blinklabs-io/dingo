@@ -733,7 +733,7 @@ func (o *Observer) processEpoch(ctx context.Context, epoch uint64) {
 			)
 			return
 		}
-		o.reportError(epoch, false, fmt.Errorf("fetch koios reference: %w", err))
+		o.reportReferenceError(epoch, false, fmt.Errorf("fetch koios reference: %w", err))
 		return
 	}
 
@@ -808,7 +808,7 @@ func (o *Observer) processAccountEpoch(ctx context.Context, epoch uint64) {
 			)
 			return
 		}
-		o.reportError(epoch, true, fmt.Errorf("fetch koios reference: %w", err))
+		o.reportReferenceError(epoch, true, fmt.Errorf("fetch koios reference: %w", err))
 		return
 	}
 	if err := o.fetchAccountsIfNeeded(ctx, epoch); err != nil {
@@ -824,7 +824,7 @@ func (o *Observer) processAccountEpoch(ctx context.Context, epoch uint64) {
 			)
 			return
 		}
-		o.reportError(epoch, true, fmt.Errorf("fetch koios reference: %w", err))
+		o.reportReferenceError(epoch, true, fmt.Errorf("fetch koios reference: %w", err))
 		return
 	}
 
@@ -924,6 +924,26 @@ func (o *Observer) reportError(
 	accountsChecked bool,
 	err error,
 ) {
+	o.reportErrorFatal(epoch, accountsChecked, err, true)
+}
+
+// reportReferenceError reports a failure to obtain the Koios reference. It is
+// never fatal: an unreachable or failing reference says nothing about whether
+// dingo's state agrees with it, and the epoch is already scheduled for retry.
+func (o *Observer) reportReferenceError(
+	epoch uint64,
+	accountsChecked bool,
+	err error,
+) {
+	o.reportErrorFatal(epoch, accountsChecked, err, false)
+}
+
+func (o *Observer) reportErrorFatal(
+	epoch uint64,
+	accountsChecked bool,
+	err error,
+	fatal bool,
+) {
 	if persistErr := o.cache.RecordObserverError(o.cfg.Network, epoch, accountsChecked); persistErr != nil {
 		err = errors.Join(
 			err,
@@ -931,7 +951,7 @@ func (o *Observer) reportError(
 		)
 	}
 	o.scheduleErrorRetry(epoch, accountsChecked, StatusError)
-	o.fail(epoch, err, true)
+	o.fail(epoch, err, fatal)
 	now := time.Now()
 	o.emitResult(&EpochCompareResult{
 		Network:       o.cfg.Network,

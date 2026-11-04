@@ -411,3 +411,50 @@ func TestAccountRetryUsesItsOwnCompletedPhase(t *testing.T) {
 		})
 	}
 }
+
+func TestStrictReferenceFetchErrorIsRetriedNotFatal(t *testing.T) {
+	t.Parallel()
+	for _, reference := range []bool{true, false} {
+		t.Run(
+			map[bool]string{true: "reference", false: "other"}[reference],
+			func(t *testing.T) {
+				t.Parallel()
+				cache, err := openTestCache(
+					filepath.Join(t.TempDir(), "cache.db"),
+					nil,
+				)
+				require.NoError(t, err)
+				t.Cleanup(func() { require.NoError(t, cache.Close()) })
+				var fatals []error
+				o := &Observer{
+					cache: cache,
+					cfg: ObserverConfig{
+						Network:         "preview",
+						Logger:          slog.New(slog.DiscardHandler),
+						ErrorRetryDelay: time.Hour,
+						Strict:          true,
+						FatalFunc:       func(err error) { fatals = append(fatals, err) },
+					},
+					retry:         make(map[uint64]time.Time),
+					retryAccounts: make(map[uint64]time.Time),
+				}
+				failure := errors.New("koios server error: status 504")
+				if reference {
+					o.reportReferenceError(5, false, failure)
+				} else {
+					o.reportError(5, false, failure)
+				}
+				retrying, err := cache.GetEpochsNeedingRetry("preview", false)
+				require.NoError(t, err)
+				require.Equal(t, []uint64{5}, retrying)
+				if reference {
+					require.Empty(t, fatals,
+						"an unavailable reference must not stop the node")
+					require.False(t, o.stopping())
+				} else {
+					require.Len(t, fatals, 1)
+				}
+			},
+		)
+	}
+}

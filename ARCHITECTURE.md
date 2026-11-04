@@ -14145,10 +14145,14 @@ second sync:
   - **Strict mode** (`ObserverConfig.Strict`, the default via
     `KoiosParityConfig`) calls `FatalFunc` — wired by `node.go` to
     `n.cancelForFatal` — exactly once, on the first fatal-eligible failure,
-    and stops processing the rest of the current batch. Every Koios/tool
-    error (`reportError`) and every non-pass parity result is fatal-eligible,
-    from either queue (`processEpoch` and `processAccountEpoch`), with one
-    exception: a result whose significant mismatches are all
+    and stops processing the rest of the current batch. Every tool error
+    (`reportError`) and every non-pass parity result is fatal-eligible,
+    from either queue (`processEpoch` and `processAccountEpoch`). A failure
+    to fetch the Koios reference (`reportReferenceError`) never is: an
+    unreachable or failing reference says nothing about whether Dingo's
+    state agrees with it, so the error is persisted and the epoch is retried
+    like any other error, but the node keeps running. The one non-pass
+    result that is not fatal-eligible is a result whose significant mismatches are all
     `reference_lag` (`referenceLagOnly`). That means Koios's own data for the
     epoch has not caught up, not that Dingo is wrong, so it is logged and
     persisted like any other non-pass result but never calls `FatalFunc` and
