@@ -38,6 +38,7 @@ var koiosFlags struct {
 	allowPrivateAddresses bool
 	verbose               bool
 	skipUTxO              bool
+	captureDir            string
 	// cachePath, when set, points this run's CheckProtocolParams,
 	// CheckStakeDistribution and /tx_info lookups at a koiosparity.Cache
 	// (koios_check.go's doc comments on those functions) instead of calling
@@ -53,6 +54,10 @@ var koiosFlags struct {
 	// --koios-base-url.
 	cachePath string
 }
+
+// utxoRefSample bounds the refs a UTxO mismatch logs at Warn, enough to
+// identify a class of divergence without logging a whole set.
+const utxoRefSample = 20
 
 // splitStakeMismatches partitions mismatches into real Dingo/Koios
 // divergences and KoiosFault entries (an unparseable koios active_stake
@@ -253,7 +258,9 @@ func (c *fromGenesisCounters) recordEpoch(
 		logger.Warn("utxo set mismatch",
 			"epoch", r.Epoch, "missing", len(r.UTxOMissing),
 			"extra", len(r.UTxOExtra), "differs", len(r.UTxODiffers),
-			"dingo_ref_count", r.UTxORefCount)
+			"dingo_ref_count", r.UTxORefCount,
+			"missing_sample", r.UTxOMissing[:min(len(r.UTxOMissing), utxoRefSample)],
+			"extra_sample", r.UTxOExtra[:min(len(r.UTxOExtra), utxoRefSample)])
 		for _, d := range r.UTxODiffers {
 			logger.Debug("utxo content differs", "epoch", r.Epoch, "detail", d)
 		}
@@ -358,6 +365,10 @@ of re-deriving them from scratch.`,
 	cmd.Flags().BoolVar(
 		&koiosFlags.skipUTxO, "skip-utxo", false,
 		"skip the UTxO-set comparison: no baseline is captured and no /tx_info is fetched; protocol parameters and stake are still compared",
+	)
+	cmd.Flags().StringVar(
+		&koiosFlags.captureDir, "boundary-capture-dir", "",
+		"directory for Dingo's whole UTxO set at each epoch boundary, read as Dingo crosses it, so the UTxO comparison still runs when the reconstruction reaches the boundary after Dingo has moved past its rollback window (optional; each file is removed once compared; default: query Dingo live at the boundary)",
 	)
 	cmd.Flags().StringVar(
 		&koiosFlags.cachePath, "koios-cache-path", "",
@@ -513,6 +524,7 @@ func fromGenesisRun(cmd *cobra.Command, _ []string) error {
 	err = nodeparity.RunFromGenesis(
 		cmd.Context(), globalFlags.dingoAddr, network, magic, koios, cache, report, logf,
 		resumeFrom, koiosFlags.skipUTxO,
+		nodeparity.WithBoundaryCaptureDir(koiosFlags.captureDir),
 	)
 
 	logger.Info("run summary",

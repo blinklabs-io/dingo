@@ -7485,7 +7485,7 @@ func TestValidatePeerChainSelectionHeaderCryptoUsesForkNonce(
 	ls.config.PeerHeaderLookupFunc = peerLookup(forkHeader)
 
 	peerNonce, peerEpoch, fork, nonceErr :=
-		ls.peerChainSelectionEpochNonce(
+		ls.peerChainSelectionEpochNonce(t.Context(),
 			ouroboros.ConnectionId{},
 			target.block.Header(),
 			ls.loadConsensusSnapshot(),
@@ -7582,7 +7582,7 @@ func TestValidatePeerChainSelectionHeaderCryptoUsesForkNonce(
 	ls.epochCache = ls.epochCache[:1]
 	ls.publishSnapshotsLocked()
 	_, _, lateTargetIsFork, lateTargetNonceErr :=
-		ls.peerChainSelectionEpochNonce(
+		ls.peerChainSelectionEpochNonce(t.Context(),
 			ouroboros.ConnectionId{},
 			lateTarget.block.Header(),
 			ls.loadConsensusSnapshot(),
@@ -7894,7 +7894,7 @@ func TestValidatePeerChainSelectionHeaderCryptoUsesForkNonce(
 		}, lateAnchor.block.Hash().Bytes(), true
 	}
 	derivedMultiEpochNonce, _, isMultiEpochFork, deriveMultiEpochErr :=
-		ls.peerChainSelectionEpochNonce(
+		ls.peerChainSelectionEpochNonce(t.Context(),
 			ouroboros.ConnectionId{},
 			multiEpochForkTarget.block.Header(),
 			ls.loadConsensusSnapshot(),
@@ -8024,7 +8024,7 @@ func TestValidatePeerChainSelectionHeaderCryptoUsesForkNonce(
 		}, peerHeader.block.Header().PrevHash().Bytes(), true
 	}
 	derivedEpoch8Nonce, _, isEpoch8Fork, deriveEpoch8Err :=
-		ls.peerChainSelectionEpochNonce(
+		ls.peerChainSelectionEpochNonce(t.Context(),
 			ouroboros.ConnectionId{},
 			epoch8Target.block.Header(),
 			ls.loadConsensusSnapshot(),
@@ -8391,7 +8391,7 @@ func TestPeerChainSelectionEpochNonceUsesSeededShelleyBoundaryNonce(
 	require.NoError(t, err)
 	require.Empty(t, byronNonce)
 
-	nonce, epoch, candidate, err := ls.peerChainSelectionEpochNonce(
+	nonce, epoch, candidate, err := ls.peerChainSelectionEpochNonce(t.Context(),
 		ouroboros.ConnectionId{},
 		shelleyBlock.Header(),
 		ls.loadConsensusSnapshot(),

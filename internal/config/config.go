@@ -321,8 +321,10 @@ type ChainsyncConfig struct {
 // GenesisBootstrapConfig holds configuration for Genesis-mode chain
 // selection and bootstrap-time peer promotion.
 type GenesisBootstrapConfig struct {
-	// ControlGroups overrides network relay control metadata. Nil selects network
-	// defaults; an explicit empty list disables those defaults.
+	// ControlGroups declares trusted relay operators, which form the exclusive
+	// Genesis witness set. There are no network defaults: nil or an empty list
+	// leaves witness identities to the ledger, a peer snapshot, or the
+	// connection address.
 	ControlGroups []topology.PeerControlGroup `yaml:"controlGroups" ignored:"true"`
 
 	// Enabled controls whether Genesis bootstrap mode is used when the node
@@ -339,8 +341,8 @@ type GenesisBootstrapConfig struct {
 	// Genesis-mode chain selection. This is the Ouroboros Genesis trust control
 	// for biased fast-sync sources: an uncorroborated or divergent fast source
 	// is denied selection and stalls rather than steering the local chain.
-	// The default is one independent peer. An explicitly configured zero
-	// disables the selection gate (density-only Genesis selection); a peer's
+	// The default is zero, which leaves the gate off (density-only Genesis
+	// selection), so a node with a single upstream peer syncs. A peer's
 	// frontier still needs one independent witness before it can exclude other
 	// candidates as behind.
 	CorroborationPeers int `yaml:"corroborationPeers"          envconfig:"DINGO_GENESIS_BOOTSTRAP_CORROBORATION_PEERS"`
@@ -550,7 +552,7 @@ func DefaultChainsyncConfig() ChainsyncConfig {
 func DefaultGenesisBootstrapConfig() GenesisBootstrapConfig {
 	return GenesisBootstrapConfig{
 		Enabled:                true,
-		CorroborationPeers:     1,
+		CorroborationPeers:     0,
 		LimitOnPatienceEnabled: true,
 	}
 }

@@ -331,7 +331,19 @@ UPDATE utxo SET deleted_slot = 20, spent_at_tx_id = ?`, spenderHash)
 func TestBackfillUtxoAddressesSkipsCoreMode(t *testing.T) {
 	db := openTestDB(t)
 	raw := rawSQLiteMetadataFixture(t, db)
-	seedLegacyAssetUtxosWithoutAddress(t, db, raw, 1, []byte{0xff})
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		bytes.Repeat([]byte{0x51}, lcommon.AddressHashSize),
+		nil,
+	)
+	require.NoError(t, err)
+	outputCbor, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
+		OutputAddress: addr,
+		OutputAmount:  1,
+	})
+	require.NoError(t, err)
+	seedLegacyAssetUtxosWithoutAddress(t, db, raw, 1, outputCbor)
 
 	require.NoError(t, db.backfillUtxoAddresses(context.Background()))
 	var count int
@@ -339,6 +351,10 @@ func TestBackfillUtxoAddressesSkipsCoreMode(t *testing.T) {
 		"SELECT COUNT(*) FROM utxo_address",
 	).Scan(&count))
 	require.Zero(t, count)
+	// Core mode returns before writing the completion marker.
+	complete, err := db.GetSyncState(utxoAddressBackfillSyncKey, nil)
+	require.NoError(t, err)
+	require.NotEqual(t, "true", complete)
 }
 
 func TestBackfillUtxoAddressesSkipsCompletedMarker(t *testing.T) {
