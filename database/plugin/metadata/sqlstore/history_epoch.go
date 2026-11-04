@@ -63,23 +63,16 @@ func (s *Store) SumTransactionOutputsInSlotRange(
 		return nil, err
 	}
 	total := new(big.Int)
-	for _, query := range []string{
-		`-- name: SumValidTransactionOutputsInSlotRange :one
-SELECT ` + s.wideSumExpr("u.amount") + `
-FROM utxo u
-JOIN "transaction" tx ON tx.id = u.transaction_id
-LEFT JOIN leios_transaction_context lc ON lc.transaction_id = tx.id
-WHERE COALESCE(lc.slot, tx.slot) >= ? AND COALESCE(lc.slot, tx.slot) <= ?
- AND tx.valid = TRUE`,
-		`-- name: SumCollateralReturnsInSlotRange :one
-SELECT ` + s.wideSumExpr("u.amount") + `
-FROM utxo u
-JOIN "transaction" tx ON tx.id = u.collateral_return_for_tx_id
-LEFT JOIN leios_transaction_context lc ON lc.transaction_id = tx.id
-WHERE COALESCE(lc.slot, tx.slot) >= ? AND COALESCE(lc.slot, tx.slot) <= ?
- AND tx.valid = FALSE`,
-	} {
-		value, err := s.sumWide(ctx, db, query, start, end)
+	for _, collateral := range []bool{false, true} {
+		value, err := s.sumWide(
+			ctx,
+			db,
+			s.transactionOutputRangeQuery(collateral),
+			start,
+			end,
+			start,
+			end,
+		)
 		if err != nil {
 			return nil, fmt.Errorf(
 				"sum transaction outputs in slot range: %w",
@@ -92,6 +85,35 @@ WHERE COALESCE(lc.slot, tx.slot) >= ? AND COALESCE(lc.slot, tx.slot) <= ?
 		total.Add(total, value)
 	}
 	return total, nil
+}
+
+// The range predicates must select transactions before their output rows.
+// COALESCE(context.slot, tx.slot) hides both range indexes and scans history.
+// CROSS JOIN fixes that loop order on SQLite; INDEXED BY also protects sparse
+// collateral lookups when statistics mostly describe NULL foreign keys.
+func (s *Store) transactionOutputRangeQuery(collateral bool) string {
+	name, column, valid := "SumValidTransactionOutputsInSlotRange", "transaction_id", "TRUE"
+	if collateral {
+		name, column, valid = "SumCollateralReturnsInSlotRange", "collateral_return_for_tx_id", "FALSE"
+	}
+	outputs := "utxo u"
+	if collateral && s.dialect.Name() == "sqlite" {
+		outputs += " INDEXED BY idx_utxo_" + column
+	}
+	transaction := s.dialect.QuoteIdentifier("transaction")
+	return fmt.Sprintf(`-- name: %s :one
+SELECT %s FROM (
+ SELECT u.amount
+ FROM %s tx CROSS JOIN %s
+ WHERE tx.slot >= ? AND tx.slot <= ? AND tx.valid = %s
+  AND u.%s = tx.id
+  AND NOT EXISTS (SELECT 1 FROM leios_transaction_context lc WHERE lc.transaction_id = tx.id)
+ UNION ALL
+ SELECT u.amount
+ FROM leios_transaction_context lc CROSS JOIN %s tx CROSS JOIN %s
+ WHERE lc.slot >= ? AND lc.slot <= ? AND tx.valid = %s
+  AND tx.id = lc.transaction_id AND u.%s = tx.id
+) AS output_amounts`, name, s.wideSumExpr("amount"), transaction, outputs, valid, column, transaction, outputs, valid, column)
 }
 
 func (s *Store) GetBlockHashesInSlotRange(
