@@ -530,7 +530,7 @@ func TestLoad_GenesisBootstrapEnvVars(t *testing.T) {
 	}
 }
 
-func TestLoad_GenesisCorroborationDefaultsSecurely(t *testing.T) {
+func TestLoad_GenesisCorroborationIsOptional(t *testing.T) {
 	// Not t.Parallel: LoadConfig and resetGlobalConfig replace process-global
 	// configuration state.
 	unsetEnv(t, "DINGO_GENESIS_BOOTSTRAP_CORROBORATION_PEERS")
@@ -543,15 +543,15 @@ func TestLoad_GenesisCorroborationDefaultsSecurely(t *testing.T) {
 	require.NoError(t, err)
 	require.Zero(t, cfg.GenesisBootstrap.CorroborationPeers)
 
-	explicitDisable := filepath.Join(t.TempDir(), "disable.yaml")
-	require.NoError(t, os.WriteFile(explicitDisable, []byte(`
+	explicitPolicy := filepath.Join(t.TempDir(), "policy.yaml")
+	require.NoError(t, os.WriteFile(explicitPolicy, []byte(`
 genesisBootstrap:
-  corroborationPeers: 0
+  corroborationPeers: 2
 `), 0o600))
 	resetGlobalConfig()
-	cfg, err = LoadConfig(explicitDisable)
+	cfg, err = LoadConfig(explicitPolicy)
 	require.NoError(t, err)
-	require.Zero(t, cfg.GenesisBootstrap.CorroborationPeers)
+	require.Equal(t, 2, cfg.GenesisBootstrap.CorroborationPeers)
 }
 
 func TestLoad_HistoryExpiryConfig(t *testing.T) {

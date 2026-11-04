@@ -25,9 +25,9 @@ import (
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
-// Genesis corroboration implements the Ouroboros Genesis trust property that a
-// fast (shallow) block source is followed only while corroborated by
-// independent peers. A candidate peer is "corroborated" when at least
+// Genesis corroboration adds an optional peer corroboration policy for fast
+// block sources. Core Genesis eagerness and density rules apply independently
+// of this policy. A candidate peer is "corroborated" when at least
 // MinCorroboratingPeers other eligible, live, non-stale peers report the same
 // recent block(s) within the Genesis density window (identical slot+hash in
 // their observed frontier). An uncorroborated fast source — including a
@@ -40,9 +40,8 @@ import (
 // Genesis trust model").
 
 // genesisCorroborationActiveLocked reports whether the Genesis corroboration
-// gate is in effect (Genesis mode with a positive threshold). When false the
-// selector behaves as before (density-only / Praos) and does not track the
-// per-peer hash frontier used for corroboration.
+// gate is in effect (Genesis mode with a positive threshold). Genesis protocol
+// state and authenticated delivery history are tracked regardless of this gate.
 func (cs *ChainSelector) genesisCorroborationActiveLocked() bool {
 	return cs.mode == SelectionModeGenesis &&
 		cs.config.MinCorroboratingPeers > 0
@@ -58,24 +57,25 @@ func (cs *ChainSelector) GenesisCorroborationActive() bool {
 	return cs.genesisCorroborationActiveLocked()
 }
 
-// RecordDeliveredPeerTip keeps a bounded corroboration history separate from
-// the admission frontier, whose contents can be discarded after rejection or
-// rebuilt from a later intersection.
+// RecordDeliveredPeerTip keeps bounded authenticated Genesis delivery history
+// separate from admission. It supports eagerness even without a corroboration quorum.
 func (cs *ChainSelector) RecordDeliveredPeerTip(update PeerTipUpdateEvent) {
 	if update.ObservedTip.Point.Slot == 0 &&
 		len(update.ObservedTip.Point.Hash) == 0 {
 		return
 	}
-	if !cs.peerTipAdmissionGenerationCurrent(update) {
+	release, current := cs.pinPeerTipAdmissionGeneration(update)
+	if !current {
 		return
 	}
+	defer release()
 	if cs.config.ConnectionLive != nil &&
 		!cs.config.ConnectionLive(update.ConnectionId) {
 		return
 	}
 	cs.mutex.Lock()
 	defer cs.mutex.Unlock()
-	if !cs.genesisCorroborationActiveLocked() {
+	if cs.mode != SelectionModeGenesis {
 		return
 	}
 	peerTip := cs.deliveredPeerTips[update.ConnectionId]
@@ -89,6 +89,7 @@ func (cs *ChainSelector) RecordDeliveredPeerTip(update PeerTipUpdateEvent) {
 		}
 		cs.deliveredPeerTips[update.ConnectionId] = peerTip
 	}
+	cs.recordEagernessDeliveryLocked(update)
 	cs.applyPeerTipAdmissionUpdateLocked(peerTip, update)
 	cs.signalIngressChange()
 }
@@ -99,6 +100,7 @@ func (cs *ChainSelector) RecordDeliveredPeerTip(update PeerTipUpdateEvent) {
 func (cs *ChainSelector) RecordDeliveredPeerRollback(e PeerRollbackEvent) {
 	cs.mutex.Lock()
 	defer cs.mutex.Unlock()
+	cs.rollbackEagernessDeliveryLocked(e.ConnectionId, e.Point)
 	deliveredTip := cs.deliveredPeerTips[e.ConnectionId]
 	if deliveredTip == nil {
 		return
@@ -213,10 +215,16 @@ func (cs *ChainSelector) corroboratingPeersIncludingCandidatesLocked(
 			!cs.peerCanCorroborateLocked(connId, peerTip) {
 			return
 		}
-		if !candidateTip.confirmsRecentChainWithin(
-			peerTip,
-			cs.genesisWindowSlotsLocked(),
-		) || !cs.witnessSupportsSuffixLocked(candidateTip, peerTip) {
+		confirms := func(witness *PeerChainTip) bool {
+			return candidateTip.confirmsRecentChainWithin(
+				witness,
+				cs.genesisWindowSlotsLocked(),
+			) && cs.witnessSupportsSuffixLocked(candidateTip, witness)
+		}
+		if !confirms(peerTip) &&
+			!confirms(cs.verifiedCorroborationWitnessLocked(
+				connId, peerTip, candidateTip,
+			)) {
 			return
 		}
 		identity, ok := cs.corroboratorIdentity(connId)
@@ -295,22 +303,12 @@ func (cs *ChainSelector) isPeerCorroboratedLocked(
 		cs.config.MinCorroboratingPeers
 }
 
-// ShouldApplyIngress reports whether headers/blocks from connId may be applied
-// to the ledger. It returns false only while Genesis corroboration is active
-// (Genesis mode with a positive threshold) and the peer is not corroborated, so
-// an uncorroborated or divergent fast source is OBSERVED — its tips still feed
-// corroboration via PeerTipUpdateEvent — but its blocks are not applied and it
-// cannot steer the ledger. Enforcing the stall here (ledger application) rather
-// than only at peer selection is required because ingress is gated on peer-
-// governance eligibility, independent of the selected best peer: clearing the
-// active chainsync driver alone would not stop an eligible uncorroborated peer's
-// headers from being applied.
-//
-// An unknown peer (no tips observed yet) is treated as uncorroborated and denied
-// while the gate is active — fail closed until corroboration forms. Outside
-// Genesis corroboration it returns true unless the peer's advertised tip is more
-// than a Genesis window older than the wall clock, which is denied in Genesis
-// mode regardless of corroboration (see advertisedTipStaleLocked).
+// ShouldApplyIngress reports whether headers/blocks from connId may be applied.
+// Genesis mode denies stale advertised tips and waits for a current ledger
+// generation. With a positive corroboration threshold it also withholds uncorroborated
+// peers, including unknown peers, until independent witnesses agree. Observing
+// their authenticated headers does not itself authorize ledger application.
+
 func (cs *ChainSelector) ShouldApplyIngress(
 	connId ouroboros.ConnectionId,
 ) bool {
@@ -321,8 +319,8 @@ type ingressVerdict int
 
 const (
 	ingressApply ingressVerdict = iota
-	// ingressAwaitCorroboration: the peer is denied only because no
-	// independent witness has delivered its latest header yet.
+	// ingressAwaitCorroboration also covers a locally unavailable ledger
+	// generation; neither temporary condition rejects the held header.
 	ingressAwaitCorroboration
 	ingressDeny
 )
@@ -332,7 +330,7 @@ func (cs *ChainSelector) ingressDecision(
 ) ingressVerdict {
 	releaseGeneration, generationCurrent := cs.pinCurrentHeaderCryptoGeneration()
 	if !generationCurrent {
-		if cs.GenesisCorroborationActive() {
+		if genesis, _ := cs.GenesisSelectionState(); genesis {
 			// The ledger is publishing a new snapshot; the verdict is only
 			// unavailable for the moment.
 			return ingressAwaitCorroboration
@@ -408,9 +406,9 @@ func (cs *ChainSelector) pointOnAppliedChain(
 // AwaitIngressCorroboration holds a header from connId that ShouldApplyIngress
 // denies only because the peer is not yet corroborated, and reports whether
 // the header may then be applied. It returns false at once when the denial has
-// another cause (Genesis corroboration is off, the advertised tip is stale, or
-// the peer is untracked), and returns the context's error if it is cancelled
-// while waiting.
+// another cause (the advertised tip is stale or the peer is untracked under
+// an active quorum). A temporarily unavailable ledger generation also waits in
+// Genesis mode, including with no corroboration quorum. Cancellation ends the wait.
 //
 // The caller's chainsync callback blocks here while witnesses can advance.
 // The caller bounds that wait; on expiry it withholds the header but keeps the

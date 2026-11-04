@@ -2072,6 +2072,14 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		if o.chainsyncState != nil {
 			clientSession = o.chainsyncState.ClientSession(ctx.ConnectionId)
 		}
+		if o.config.ChainsyncRecoverDeliveredPeerTip != nil && o.chainsyncState != nil {
+			refreshCtx, cancelRefresh := chainsyncAdmissionContext(ctx)
+			stopRefresh := o.startChainsyncEagernessRecovery(refreshCtx, ctx, clientSession)
+			defer func() {
+				cancelRefresh()
+				stopRefresh()
+			}()
+		}
 		// Every path that does not accept this header clears the
 		// connection's accepted tip, so a later deferred header cannot count
 		// as a linear extension of one that never reached the ledger queue.
@@ -2440,7 +2448,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		// Observer deliveries may become corroboration evidence after promotion,
 		// so they need the same producer authentication as ingress candidates.
 		if !verificationAttempted && !deliveryVerified &&
-			o.config.ChainsyncRecordDeliveredPeerTip != nil {
+			(o.config.ChainsyncRecordDeliveredPeerTip != nil || o.config.ChainsyncRecoverDeliveredPeerTip != nil) {
 			if o.chainsyncState != nil {
 				client := o.chainsyncState.GetTrackedClient(ctx.ConnectionId)
 				if client != nil && client.Status == chainsync.ClientStatusFailed {
@@ -2553,6 +2561,22 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		if deliveryVerified && o.config.ChainsyncRecordDeliveredPeerTip != nil {
 			o.config.ChainsyncRecordDeliveredPeerTip(update)
 		}
+		if deliveryVerified && o.chainsyncState != nil {
+			o.chainsyncState.RecordAuthenticatedDeliveryForSession(clientSession, chainsync.ObservedHeader{
+				ConnectionId: ctx.ConnectionId, BlockHeader: v, ArrivalTime: arrivalTime,
+				Point: point, Tip: tip, BlockNumber: v.BlockNumber(), Type: blockType,
+				HeaderCryptoVerificationGeneration: chainsyncEvent.HeaderCryptoVerificationGeneration,
+			})
+		}
+		sessionCurrent := func() bool {
+			return o.chainsyncState == nil ||
+				o.chainsyncState.ClientSession(ctx.ConnectionId) == clientSession
+		}
+		if deliveryVerified && o.config.ChainsyncRecoverDeliveredPeerTip != nil {
+			recoveryCtx, cancelRecovery := chainsyncAdmissionContext(ctx)
+			o.config.ChainsyncRecoverDeliveredPeerTip(recoveryCtx, ctx, update, v, sessionCurrent)
+			cancelRecovery()
+		}
 		var peerTipUpdate *chainselection.PeerTipUpdateEvent
 		if selectionEligible {
 			update.AdmissionID = o.chainsyncAdmissionSequence.Add(1)
@@ -2560,7 +2584,11 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			update.PraosView = praosView
 			disposition := chainselection.PeerTipUpdateUnhandled
 			if o.config.ChainsyncObservePeerTip != nil {
-				disposition = o.config.ChainsyncObservePeerTip(update)
+				var observeErr error
+				disposition, observeErr = o.observeChainsyncPeerTip(ctx, &chainsyncEvent, &update, clientSession, &verificationTipBaseline)
+				if observeErr != nil {
+					return observeErr
+				}
 			}
 			switch disposition {
 			case chainselection.PeerTipUpdateUnhandled:
@@ -2579,6 +2607,10 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				peerTipUpdate = &update
 			case chainselection.PeerTipUpdateRejected:
 				return errChainsyncCandidateRejected
+			case chainselection.PeerTipUpdateDeferred:
+				o.markDeferredHeaderRecovery(ctx.ConnectionId, verificationTipBaseline, point, tip, false)
+				o.updateChainsyncMetrics(ctx.ConnectionId, tip)
+				return nil
 			default:
 				return fmt.Errorf("invalid peer tip disposition: %d", disposition)
 			}
@@ -2951,6 +2983,8 @@ const maxDeferredVerificationWaits = 4
 // admission wait and is returned immediately. When a bound is reached the
 // last result is returned unchanged. baseline receives the applied tip
 // observed before the last attempt.
+// Missing retained ancestry returns immediately so the recovery path can
+// re-deliver predecessors instead of awaiting an unrelated publication.
 func (o *Ouroboros) verifyHeaderAwaitingLedger(
 	ctx ochainsync.CallbackContext,
 	header gledger.BlockHeader,
@@ -2973,16 +3007,30 @@ func (o *Ouroboros) verifyHeaderAwaitingLedger(
 		)
 		if err == nil || settled == nil ||
 			!ledger.IsHeaderVerificationDeferred(err) ||
+			errors.Is(err, ledger.ErrHeaderAncestryUnavailable) ||
 			errors.Is(err, ledger.ErrHeaderBeyondForecastHorizon) ||
 			wait.waits >= maxDeferredVerificationWaits ||
 			(!ledger.IsHeaderVerificationContextTransient(err) &&
-				o.deferredHeaderExtendsLocalChain(ctx.ConnectionId, header)) {
+				(o.deferredHeaderExtendsLocalChain(ctx.ConnectionId, header) ||
+					o.chainsyncLedgerIdleAt(*baseline))) {
 			return generation, err
 		}
 		if !wait.await(ctx, o.catchUpBandWaitTimeout, settled) {
 			return generation, err
 		}
 	}
+}
+
+// chainsyncLedgerIdleAt requires no queued header and no fetched block ahead
+// of the applied tip. A non-transient deferral cannot be resolved by local
+// application in this state; returning it lets cursor recovery obtain work.
+func (o *Ouroboros) chainsyncLedgerIdleAt(applied ochainsync.Tip) bool {
+	if o.chainsyncLocalChainTips == nil {
+		return false
+	}
+	tip, headerTip := o.chainsyncLocalChainTips()
+	return len(tip) > 0 && bytes.Equal(tip, applied.Point.Hash) &&
+		bytes.Equal(tip, headerTip)
 }
 
 // deferredVerificationWait is the bounded context shared by every wait of one
