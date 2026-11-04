@@ -62,12 +62,12 @@ type ChainManager struct {
 	// independent channels, with no ordering between them -- can still tell
 	// which mutation came first.
 	//
-	// It lives here rather than on Chain because ChainHeaderEventType is a
-	// single topic on the single event bus this manager hands to every
-	// chain it builds (the primary chain and both fork constructors), and a
-	// consumer treats the numbers from all of them as one total order. It
-	// is atomic because a chain stamps under its own c.mutex, not under
-	// cm.mutex.
+	// It lives here rather than on Chain because a fork chain stamps
+	// numbers too, and a fork's header mutations must not reuse a number
+	// the primary chain has published. Only the primary chain publishes:
+	// the fork constructors build chains without the event bus, because a
+	// fork's headers and blocks are not the node's chain. It is atomic
+	// because a chain stamps under its own c.mutex, not under cm.mutex.
 	headerSeq atomic.Uint64
 	// headerQueueFullObserver, when set, is called for every header the
 	// primary chain rejects with ErrHeaderQueueFull.
@@ -224,7 +224,8 @@ func (cm *ChainManager) Chain(id ChainId) *Chain {
 	return cm.chains[id]
 }
 
-// NewChain creates a new Chain that forks from the primary chain at the specified point. This is useful for managing outbound ChainSync clients
+// NewChain creates a new Chain that forks from the primary chain at the specified point. This is useful for managing outbound ChainSync clients.
+// The fork publishes no events: only the primary chain is the node's chain.
 func (cm *ChainManager) NewChain(
 	ctx context.Context,
 	point ocommon.Point,
@@ -250,7 +251,6 @@ func (cm *ChainManager) NewChain(
 	c := &Chain{
 		id:                   chainId,
 		manager:              cm,
-		eventBus:             cm.eventBus,
 		persistent:           false,
 		lastCommonBlockIndex: intersectBlock.ID,
 		tipBlockIndex:        intersectBlock.ID,
@@ -267,6 +267,7 @@ func (cm *ChainManager) NewChain(
 }
 
 // NewChainFromIntersect creates a new Chain that forks the primary chain at the latest common point.
+// The fork publishes no events: only the primary chain is the node's chain.
 func (cm *ChainManager) NewChainFromIntersect(
 	ctx context.Context,
 	points []ocommon.Point,
@@ -331,7 +332,6 @@ func (cm *ChainManager) NewChainFromIntersect(
 	c := &Chain{
 		id:                   chainId,
 		manager:              cm,
-		eventBus:             cm.eventBus,
 		persistent:           false,
 		lastCommonBlockIndex: intersectBlock.ID,
 		tipBlockIndex:        intersectBlock.ID,

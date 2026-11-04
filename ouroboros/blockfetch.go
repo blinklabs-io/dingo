@@ -251,7 +251,16 @@ func (o *Ouroboros) decodeBlockfetchBlock(
 		return models.DecodeConwayPeerBlock(raw)
 	}
 	if blockType == gledger.BlockTypeDijkstra {
-		return models.DecodeDijkstraPeerBlock(raw)
+		block, err = models.DecodeDijkstraPeerBlock(raw)
+		if err != nil {
+			return nil, err
+		}
+		if o.requiresLeiosDijkstraHeader() {
+			if err := requireLeiosHeaderExtension(block.Header()); err != nil {
+				return nil, err
+			}
+		}
+		return block, nil
 	}
 	return gledger.NewBlockFromCbor(blockType, raw)
 }

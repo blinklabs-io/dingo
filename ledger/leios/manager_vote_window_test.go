@@ -29,16 +29,21 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// fakeVoteTiming supplies the CIP-164 header and vote periods.
 type fakeVoteTiming struct {
-	opens, window time.Duration
-	err           error
+	header, vote time.Duration
+	err          error
 }
 
-func (f fakeVoteTiming) LeiosVoteTiming() (time.Duration, time.Duration, error) {
-	return f.opens, f.window, f.err
+func (f fakeVoteTiming) LeiosVotingParameters(
+	uint64,
+) (time.Duration, time.Duration, error) {
+	return f.header, f.vote, f.err
 }
 
+// fakeSlotOnset is a slot provider on which every slot begins at onset.
 type fakeSlotOnset struct {
+	*fakeSlotProvider
 	onset time.Time
 	err   error
 }
@@ -59,9 +64,17 @@ type voteWindowHarness struct {
 }
 
 const (
-	voteWindowOpens  = 3 * time.Second
+	voteHeaderPeriod = time.Second
+	// voteWindowOpens is the equivocation-detection wait, three header
+	// periods after the announcing slot begins.
+	voteWindowOpens  = 3 * voteHeaderPeriod
 	voteWindowLength = 4 * time.Second
 )
+
+// onTimeVoteTiming is a header and vote period pair with a resolvable window.
+var onTimeVoteTiming = fakeVoteTiming{
+	header: voteHeaderPeriod, vote: voteWindowLength,
+}
 
 func newVoteWindowHarness(
 	t *testing.T,
@@ -71,13 +84,14 @@ func newVoteWindowHarness(
 	t.Helper()
 	h := &voteWindowHarness{onset: onset.onset}
 	slots := &fakeSlotProvider{slot: headerArmingEbAcquiredAt}
+	onset.fakeSlotProvider = slots
 	h.fixture = newHeaderArmingFixture(
 		t,
 		slots,
 		func(_ *managerFixture, cfg *VoteManagerConfig) {
 			cfg.PromRegistry = prometheus.NewRegistry()
-			cfg.VoteTimingProvider = timing
-			cfg.SlotOnsetProvider = onset
+			cfg.VotingParamsProvider = timing
+			cfg.SlotProvider = onset
 		},
 	)
 	mgr := h.fixture.mgr
@@ -93,14 +107,29 @@ func newVoteWindowHarness(
 	return h
 }
 
-func (h *voteWindowHarness) announce() (lcommon.Blake2b256, lcommon.Blake2b256) {
-	ebHash := lcommon.NewBlake2b256([]byte("announced-eb"))
-	rbHash := lcommon.NewBlake2b256([]byte("announcing-rb"))
+var (
+	voteWindowRbHash = lcommon.NewBlake2b256([]byte("announcing-rb"))
+	voteWindowEbHash = lcommon.NewBlake2b256([]byte("announced-eb"))
+)
+
+// validate records the EB's semantic validation at the harness clock.
+func (h *voteWindowHarness) validate() {
 	h.fixture.mgr.HandleValidatedEndorserBlock(
-		headerArmingRbSlot, rbHash, ebHash,
+		headerArmingRbSlot, voteWindowRbHash, voteWindowEbHash,
 	)
-	h.fixture.mgr.ObserveAnnouncement(headerArmingRbSlot, rbHash, ebHash)
-	return rbHash, ebHash
+}
+
+// observe arms the announcement from a header that arrived at the onset of
+// its slot, inside the header period.
+func (h *voteWindowHarness) observe() {
+	h.fixture.mgr.observeAnnouncement(
+		headerArmingRbSlot, voteWindowRbHash, voteWindowEbHash, 0, h.onset,
+	)
+}
+
+func (h *voteWindowHarness) announce() {
+	h.validate()
+	h.observe()
 }
 
 func (h *voteWindowHarness) voted() bool {
@@ -121,7 +150,7 @@ func TestVoteManagerHoldsVoteUntilWindowOpens(t *testing.T) {
 	onset := time.Unix(1_700_000_000, 0)
 	h := newVoteWindowHarness(
 		t,
-		fakeVoteTiming{opens: voteWindowOpens, window: voteWindowLength},
+		onTimeVoteTiming,
 		fakeSlotOnset{onset: onset},
 	)
 	h.clock = onset.Add(time.Second)
@@ -144,13 +173,13 @@ func TestVoteManagerVotesImmediatelyInsideWindow(t *testing.T) {
 	onset := time.Unix(1_700_000_000, 0)
 	h := newVoteWindowHarness(
 		t,
-		fakeVoteTiming{opens: voteWindowOpens, window: voteWindowLength},
+		onTimeVoteTiming,
 		fakeSlotOnset{onset: onset},
 	)
-	h.clock = onset.Add(voteWindowOpens + voteWindowLength)
+	h.clock = onset.Add(voteWindowOpens + voteWindowLength - time.Millisecond)
 
 	h.announce()
-	assert.True(t, h.voted(), "the deadline itself is still inside the window")
+	assert.True(t, h.voted(), "the instant before the deadline is inside the window")
 	assert.Empty(t, h.armed)
 }
 
@@ -159,18 +188,25 @@ func TestVoteManagerDropsVoteAfterWindowCloses(t *testing.T) {
 	onset := time.Unix(1_700_000_000, 0)
 	h := newVoteWindowHarness(
 		t,
-		fakeVoteTiming{opens: voteWindowOpens, window: voteWindowLength},
+		onTimeVoteTiming,
 		fakeSlotOnset{onset: onset},
 	)
-	h.clock = onset.Add(voteWindowOpens + voteWindowLength + time.Millisecond)
-
-	h.announce()
+	// The EB validated inside the window; the announcement is only seen
+	// once the window has closed. CIP-164 requires the vote before the
+	// deadline, so the deadline itself is already closed.
+	h.clock = onset.Add(voteWindowOpens)
+	h.validate()
+	h.clock = onset.Add(voteWindowOpens + voteWindowLength)
+	h.observe()
 	assert.False(t, h.voted())
 	assert.Empty(t, h.armed, "a closed window arms no timer")
 	assert.Equal(t, float64(1), h.notEmitted(voteNotEmittedTooLate))
 }
 
-func TestVoteManagerFallsBackToImmediateVoteWithoutWindow(t *testing.T) {
+// CIP-164 defines the voting window only through the protocol parameters
+// and the slot onset, so an announcement whose window cannot be resolved is
+// not voted on rather than voted on without one.
+func TestVoteManagerDeclinesVoteWithoutWindow(t *testing.T) {
 	t.Parallel()
 	onset := time.Unix(1_700_000_000, 0)
 	cases := map[string]struct {
@@ -182,10 +218,8 @@ func TestVoteManagerFallsBackToImmediateVoteWithoutWindow(t *testing.T) {
 			onset:  fakeSlotOnset{onset: onset},
 		},
 		"slot onset unavailable": {
-			timing: fakeVoteTiming{
-				opens: voteWindowOpens, window: voteWindowLength,
-			},
-			onset: fakeSlotOnset{err: errors.New("past the horizon")},
+			timing: onTimeVoteTiming,
+			onset:  fakeSlotOnset{err: errors.New("past the horizon")},
 		},
 	}
 	for name, tc := range cases {
@@ -194,8 +228,10 @@ func TestVoteManagerFallsBackToImmediateVoteWithoutWindow(t *testing.T) {
 			h := newVoteWindowHarness(t, tc.timing, tc.onset)
 			h.clock = onset
 			h.announce()
-			assert.True(t, h.voted())
+			assert.False(t, h.voted())
 			assert.Empty(t, h.armed)
+			assert.Equal(t, float64(1),
+				h.notEmitted(voteNotEmittedTimingUnavailable))
 		})
 	}
 }
@@ -205,7 +241,7 @@ func TestVoteManagerStopCancelsScheduledVotes(t *testing.T) {
 	onset := time.Unix(1_700_000_000, 0)
 	h := newVoteWindowHarness(
 		t,
-		fakeVoteTiming{opens: voteWindowOpens, window: voteWindowLength},
+		onTimeVoteTiming,
 		fakeSlotOnset{onset: onset},
 	)
 	h.clock = onset
@@ -246,10 +282,10 @@ func TestVoteManagerDropsVoteSignedPastDeadline(t *testing.T) {
 	onset := time.Unix(1_700_000_000, 0)
 	h := newVoteWindowHarness(
 		t,
-		fakeVoteTiming{opens: voteWindowOpens, window: voteWindowLength},
+		onTimeVoteTiming,
 		fakeSlotOnset{onset: onset},
 	)
-	h.clock = onset.Add(voteWindowOpens + voteWindowLength)
+	h.clock = onset.Add(voteWindowOpens + voteWindowLength - time.Millisecond)
 	h.signHook(func() {
 		h.clock = h.clock.Add(time.Millisecond)
 	})
@@ -269,9 +305,7 @@ func TestVoteManagerScheduledVoteAcrossStopCastsNothing(t *testing.T) {
 			onset := time.Unix(1_700_000_000, 0)
 			h := newVoteWindowHarness(
 				t,
-				fakeVoteTiming{
-					opens: voteWindowOpens, window: voteWindowLength,
-				},
+				onTimeVoteTiming,
 				fakeSlotOnset{onset: onset},
 			)
 			h.clock = onset
@@ -300,7 +334,7 @@ func TestVoteManagerScheduledVoteAfterRollbackSignsNothing(t *testing.T) {
 	onset := time.Unix(1_700_000_000, 0)
 	h := newVoteWindowHarness(
 		t,
-		fakeVoteTiming{opens: voteWindowOpens, window: voteWindowLength},
+		onTimeVoteTiming,
 		fakeSlotOnset{onset: onset},
 	)
 	h.clock = onset
@@ -317,4 +351,110 @@ func TestVoteManagerScheduledVoteAfterRollbackSignsNothing(t *testing.T) {
 	assert.Zero(t, *signed, "a rolled-back announcement was signed")
 	assert.Equal(t, float64(1), h.notEmitted(voteNotEmittedSuperseded))
 	assert.Equal(t, float64(0), h.notEmitted(voteNotEmittedNotInserted))
+}
+
+// A competing header can arrive while the vote is being signed outside the
+// state lock, so the commit reapplies the CIP-164 chain-choice rules and
+// counts the reason rather than a generic refusal.
+func TestVoteManagerCommitRechecksChainChoice(t *testing.T) {
+	t.Parallel()
+	issuer := lcommon.PoolKeyHash{0x01}
+	cases := map[string]struct {
+		during func(*VoteManager)
+		reason string
+	}{
+		"newer RB": {
+			during: func(m *VoteManager) {
+				m.handleChainHeaderObserved(chain.ChainHeaderObservedEvent{
+					Slot:   headerArmingRbSlot,
+					RbHash: lcommon.NewBlake2b256([]byte("same-slot-rb")),
+					Issuer: lcommon.PoolKeyHash{0x02},
+				})
+			},
+			reason: voteNotEmittedNotLatestRb,
+		},
+		"RB equivocation": {
+			during: func(m *VoteManager) {
+				for _, name := range []string{"equivocal-a", "equivocal-b"} {
+					m.handleChainHeaderObserved(chain.ChainHeaderObservedEvent{
+						Slot:   headerArmingRbSlot,
+						RbHash: lcommon.NewBlake2b256([]byte(name)),
+						Issuer: issuer,
+					})
+				}
+			},
+			reason: voteNotEmittedRbEquivocation,
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			onset := time.Unix(1_700_000_000, 0)
+			h := newVoteWindowHarness(
+				t,
+				onTimeVoteTiming,
+				fakeSlotOnset{onset: onset},
+			)
+			h.clock = onset.Add(voteWindowOpens)
+			signed := h.signHook(func() { tc.during(h.fixture.mgr) })
+
+			h.announce()
+			assert.Equal(t, 1, *signed, "the rules held when signing began")
+			assert.False(t, h.voted())
+			assert.Equal(t, float64(1), h.notEmitted(tc.reason))
+			assert.Equal(t, float64(0), h.notEmitted(voteNotEmittedNotInserted))
+		})
+	}
+}
+
+// CIP-164 equivocation is two headers for one Praos election, a slot and its
+// issuer. A pool that equivocates in the announcing slot taints only its own
+// election, so another pool's announcement for that slot keeps its vote.
+func TestVoteManagerRbEquivocationIsPerIssuer(t *testing.T) {
+	t.Parallel()
+	announcer := lcommon.PoolKeyHash{0x01}
+	cases := map[string]struct {
+		equivocator lcommon.PoolKeyHash
+		voted       bool
+	}{
+		"another pool equivocates": {
+			equivocator: lcommon.PoolKeyHash{0x02},
+			voted:       true,
+		},
+		"announcing pool equivocates": {
+			equivocator: announcer,
+			voted:       false,
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			onset := time.Unix(1_700_000_000, 0)
+			h := newVoteWindowHarness(
+				t,
+				onTimeVoteTiming,
+				fakeSlotOnset{onset: onset},
+			)
+			h.clock = onset.Add(voteWindowOpens)
+			mgr := h.fixture.mgr
+			for _, name := range []string{"equivocal-a", "equivocal-b"} {
+				mgr.handleChainHeaderObserved(chain.ChainHeaderObservedEvent{
+					Slot:   headerArmingRbSlot,
+					RbHash: lcommon.NewBlake2b256([]byte(name)),
+					Issuer: tc.equivocator,
+				})
+			}
+			h.validate()
+			mgr.observeIssuedAnnouncement(
+				headerArmingRbSlot, voteWindowRbHash, voteWindowEbHash,
+				announcer, 0, h.onset,
+			)
+			assert.Equal(t, tc.voted, h.voted())
+			want := float64(1)
+			if tc.voted {
+				want = 0
+			}
+			assert.Equal(t, want, h.notEmitted(voteNotEmittedRbEquivocation))
+		})
+	}
 }

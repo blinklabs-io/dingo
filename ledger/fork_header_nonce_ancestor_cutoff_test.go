@@ -176,7 +176,7 @@ func TestPeerChainSelectionEpochNonceAncestorAfterCutoffWithoutStoredNonce(t *te
 	forkPool := forkHeader.block.IssuerVkey().Hash()
 	seedPoolStakeSnapshot(t, db, 4, forkPool[:], 1_000_000_000)
 
-	nonce, _, _, err := ls.peerChainSelectionEpochNonce(
+	nonce, _, _, err := ls.peerChainSelectionEpochNonce(t.Context(),
 		ouroboros.ConnectionId{},
 		targetHeader.block.Header(),
 		ls.loadConsensusSnapshot(),

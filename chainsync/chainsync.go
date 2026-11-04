@@ -216,6 +216,14 @@ type Config struct {
 	// displace a non-root client when every slot is taken, and a freed slot
 	// goes to a connected root first. When nil no connection is a root.
 	IsRoot func(ouroboros.ConnectionId) bool
+	// CorroborationIdentity returns the Genesis corroboration identity of a
+	// connection, or "" when corroboration is not in effect or the peer has
+	// none. A peer with an identity can displace a client that has none, or a
+	// client whose identity another ingress client already represents, when
+	// every eligible slot is taken, provided no other ingress client carries its
+	// identity. It must not take locks that are held while calling into State.
+	// When nil no connection is preferred on this basis.
+	CorroborationIdentity func(ouroboros.ConnectionId) string
 }
 
 // DefaultConfig returns the default chainsync configuration.
@@ -331,15 +339,17 @@ type headerRecord struct {
 }
 
 type observedHeaderRecord struct {
-	header   ObservedHeader
-	prevHash []byte
-	bytes    int
+	header             ObservedHeader
+	prevHash           []byte
+	bytes              int
+	deliveryGeneration uint64
 }
 
 type observedHeaderChain struct {
-	order         []string
-	byHash        map[string]observedHeaderRecord
-	retainedBytes int
+	order             []string
+	byHash            map[string]observedHeaderRecord
+	retainedBytes     int
+	authenticatedHead string
 }
 
 const (
@@ -1063,25 +1073,63 @@ func (s *State) SetClientObservabilityOnly(
 }
 
 // preemptForRootLocked frees one eligible slot for connId when it is a
-// configured root: the longest-idle non-root client that is not the active
-// one becomes observability-only and stays connected. It reports false when
-// connId is not a root or every eligible client is a root or the active one.
+// configured root or, while corroboration is in effect, a corroboration
+// witness candidate. A candidate is a peer with a corroboration identity that
+// no other ingress client already carries: Genesis selection counts an
+// identity once, so a second connection of the same identity adds no witness.
+// The longest-idle client that is neither a root nor the active one becomes
+// observability-only and stays connected. A candidate displaces only a client
+// that has no identity or shares its identity with another ingress client, so
+// every client it displaces lacks an identity or is a duplicate, and a
+// duplicate cannot reclaim a slot while its identity is represented, so
+// displacement cannot cycle. A root may also displace the only ingress client
+// of an identity, so root capacity does not depend on corroboration state.
+// Identity-less victims are taken before duplicates, and duplicates before
+// distinct identities. It reports false when connId has no claim or no client
+// can be displaced.
 // Caller must hold clientConnIdMutex.
 func (s *State) preemptForRootLocked(
 	connId ouroboros.ConnectionId,
 ) (*ClientRemovedEvent, bool) {
-	if s.config.IsRoot == nil || !s.config.IsRoot(connId) {
-		return nil, false
+	ingressIdentities := s.ingressIdentityCountsLocked()
+	root := s.isRoot(connId)
+	if !root {
+		identity := s.corroborationIdentity(connId)
+		if identity == "" || ingressIdentities[identity] > 0 {
+			return nil, false
+		}
 	}
+	// Victim rank: identity-less, then duplicate identity, then the sole
+	// ingress client of an identity, which only a root may displace.
+	const (
+		rankIdentityLess = iota
+		rankDuplicate
+		rankDistinct
+	)
 	var victim *TrackedClient
+	victimRank := 0
 	for id, tc := range s.trackedClients {
 		if tc.ObservabilityOnly ||
 			(s.activeClientConnId != nil && *s.activeClientConnId == id) ||
-			s.config.IsRoot(id) {
+			s.isRoot(id) {
 			continue
 		}
-		if victim == nil || tc.LastActivity.Before(victim.LastActivity) {
+		rank := rankIdentityLess
+		if identity := s.corroborationIdentity(id); identity != "" {
+			rank = rankDuplicate
+			if ingressIdentities[identity] < 2 {
+				if !root {
+					continue
+				}
+				rank = rankDistinct
+			}
+		}
+		if victim == nil ||
+			rank < victimRank ||
+			(rank == victimRank &&
+				tc.LastActivity.Before(victim.LastActivity)) {
 			victim = tc
+			victimRank = rank
 		}
 	}
 	if victim == nil {
@@ -1095,6 +1143,33 @@ func (s *State) preemptForRootLocked(
 		ConnId:       victim.ConnId,
 		TotalClients: s.eligibleClientCountLocked(),
 	}, true
+}
+
+// ingressIdentityCountsLocked counts the corroboration identities carried by
+// clients that currently hold an ingress slot. Caller must hold
+// clientConnIdMutex.
+func (s *State) ingressIdentityCountsLocked() map[string]int {
+	counts := make(map[string]int)
+	for id, tc := range s.trackedClients {
+		if tc.ObservabilityOnly {
+			continue
+		}
+		if identity := s.corroborationIdentity(id); identity != "" {
+			counts[identity]++
+		}
+	}
+	return counts
+}
+
+func (s *State) isRoot(connId ouroboros.ConnectionId) bool {
+	return s.config.IsRoot != nil && s.config.IsRoot(connId)
+}
+
+func (s *State) corroborationIdentity(connId ouroboros.ConnectionId) string {
+	if s.config.CorroborationIdentity == nil {
+		return ""
+	}
+	return s.config.CorroborationIdentity(connId)
 }
 
 func (s *State) publishClientRemoved(removed *ClientRemovedEvent) {
@@ -1391,7 +1466,7 @@ func (s *State) RewindTrackedClientsTo(
 // ledger fork resolution can use it only as candidate-path input and must
 // validate the complete linked path before caching a verdict.
 func (s *State) RecordObservedHeader(h ObservedHeader) {
-	s.recordObservedHeader(h, nil)
+	s.recordObservedHeader(h, nil, 0)
 }
 
 // RecordObservedHeaderForSession stores ancestry only while session still owns
@@ -1401,12 +1476,27 @@ func (s *State) RecordObservedHeaderForSession(
 	session ClientSessionToken,
 	h ObservedHeader,
 ) {
-	s.recordObservedHeader(h, &session)
+	s.recordObservedHeader(h, &session, 0)
+}
+
+// RecordAuthenticatedDeliveryForSession remembers an authenticated delivery
+// inside the existing bounded history without authorizing its raw ancestry.
+func (s *State) RecordAuthenticatedDeliveryForSession(
+	session ClientSessionToken,
+	h ObservedHeader,
+) {
+	generation := h.HeaderCryptoVerificationGeneration
+	if generation == 0 {
+		return
+	}
+	h.HeaderCryptoVerificationGeneration = 0
+	s.recordObservedHeader(h, &session, generation)
 }
 
 func (s *State) recordObservedHeader(
 	h ObservedHeader,
 	session *ClientSessionToken,
+	deliveryGeneration uint64,
 ) {
 	if h.BlockHeader == nil || len(h.Point.Hash) == 0 {
 		return
@@ -1446,8 +1536,12 @@ func (s *State) recordObservedHeader(
 	if existing, exists := chainHistory.byHash[hashKey]; exists {
 		if h.HeaderCryptoVerificationGeneration != 0 {
 			existing.header.HeaderCryptoVerificationGeneration = h.HeaderCryptoVerificationGeneration
-			chainHistory.byHash[hashKey] = existing
 		}
+		if deliveryGeneration != 0 {
+			existing.deliveryGeneration = deliveryGeneration
+			chainHistory.authenticatedHead = hashKey
+		}
+		chainHistory.byHash[hashKey] = existing
 		return
 	}
 	recordBytes := observedHeaderRecordOverhead + len(h.BlockHeader.Cbor())
@@ -1461,9 +1555,13 @@ func (s *State) recordObservedHeader(
 	h.Tip.Point.Hash = cloneBytes(h.Tip.Point.Hash)
 	chainHistory.order = append(chainHistory.order, hashKey)
 	chainHistory.byHash[hashKey] = observedHeaderRecord{
-		header:   h,
-		prevHash: append([]byte(nil), prevHash...),
-		bytes:    recordBytes,
+		header:             h,
+		prevHash:           append([]byte(nil), prevHash...),
+		bytes:              recordBytes,
+		deliveryGeneration: deliveryGeneration,
+	}
+	if deliveryGeneration != 0 {
+		chainHistory.authenticatedHead = hashKey
 	}
 	chainHistory.retainedBytes += recordBytes
 	s.observedHeaderBytes += recordBytes
@@ -1546,6 +1644,36 @@ func (s *State) LookupObservedHeader(
 	return record.header, append([]byte(nil), record.prevHash...), true
 }
 
+// LatestAuthenticatedDeliveryForSession returns the last authenticated
+// delivery only while its original bearer and bounded history still retain
+// it. Its generation records past authentication, not a current verdict.
+func (s *State) LatestAuthenticatedDeliveryForSession(
+	session ClientSessionToken,
+	connId ouroboros.ConnectionId,
+) (ObservedHeader, bool) {
+	s.clientConnIdMutex.RLock()
+	defer s.clientConnIdMutex.RUnlock()
+	client := s.trackedClients[connId]
+	if client == nil || client != session.client {
+		return ObservedHeader{}, false
+	}
+	s.observedHeadersMutex.RLock()
+	defer s.observedHeadersMutex.RUnlock()
+	history := s.observedHeaders[connId]
+	if history == nil {
+		return ObservedHeader{}, false
+	}
+	record, ok := history.byHash[history.authenticatedHead]
+	if !ok || record.deliveryGeneration == 0 {
+		return ObservedHeader{}, false
+	}
+	h := record.header
+	h.Point.Hash = cloneBytes(h.Point.Hash)
+	h.Tip.Point.Hash = cloneBytes(h.Tip.Point.Hash)
+	h.HeaderCryptoVerificationGeneration = record.deliveryGeneration
+	return h, true
+}
+
 func (s *State) clearObservedHeaderHistory(
 	connId ouroboros.ConnectionId,
 ) {
@@ -1601,6 +1729,15 @@ func (s *State) ClearObservedHeaderHistoryFrom(
 		return
 	}
 	chainHistory.order = append([]string(nil), chainHistory.order[:index]...)
+	if _, retained := chainHistory.byHash[chainHistory.authenticatedHead]; !retained {
+		chainHistory.authenticatedHead = ""
+		for _, key := range slices.Backward(chainHistory.order) {
+			if chainHistory.byHash[key].deliveryGeneration != 0 {
+				chainHistory.authenticatedHead = key
+				break
+			}
+		}
+	}
 }
 
 func (s *State) updateTrackedClientTip(

@@ -111,6 +111,10 @@ const (
 	PeerTipUpdatePending
 	// PeerTipUpdateRejected refuses an update that cannot become a candidate.
 	PeerTipUpdateRejected
+	// PeerTipUpdateDeferred withholds an update whose local verification
+	// generation expired before staging. The caller must reverify the exact
+	// header before retrying; this is not evidence of peer misbehavior.
+	PeerTipUpdateDeferred
 )
 
 // PeerActivityEvent is published when a peer has recent protocol activity
