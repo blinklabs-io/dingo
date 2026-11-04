@@ -152,13 +152,14 @@ type Store struct {
 	rewardLiveStakeBatchSize int
 
 	// rewardStateDeleteBatchSize fixes the prune batch at that many rows
-	// when non-zero, in place of the adaptive sizing; rewardStatePruneInitialRows
-	// overrides rewardStatePruneInitialRows when non-zero; rewardStatePruneNow
-	// replaces time.Now for the hold measurement; rewardStateDeleteBatchDone
-	// runs after each committed batch. Only tests set them, to drive the prune
-	// across batch boundaries, to stop it between two of them, and to feed the
-	// sizing a scripted clock. rewardStatePruneRows carries each table's
-	// learned batch size from one prune to the next, under rewardStatePruneMu.
+	// when non-zero, in place of the adaptive sizing;
+	// rewardStatePruneInitialRows replaces the 5000-row starting batch size
+	// when non-zero; rewardStatePruneNow replaces time.Now for the hold
+	// measurement; rewardStateDeleteBatchDone runs after each committed
+	// batch. Only tests set them, to drive the prune across batch
+	// boundaries, to stop it between two of them, and to feed the sizing a
+	// scripted clock. rewardStatePruneRows carries each table's learned
+	// batch size from one prune to the next, under rewardStatePruneMu.
 	rewardStateDeleteBatchSize  int
 	rewardStatePruneInitialRows int
 	rewardStatePruneNow         func() time.Time

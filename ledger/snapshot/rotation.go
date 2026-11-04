@@ -1397,6 +1397,7 @@ func (m *Manager) cleanupOldSnapshots(
 		// The in-process Koios parity observer needs reward_account_output
 		// only (see doc comment above).
 		if err := meta.DeleteRewardStakeInputBeforeEpoch(
+			ctx,
 			deleteBeforeEpoch,
 			metaTxn,
 		); err != nil {
@@ -1404,6 +1405,7 @@ func (m *Manager) cleanupOldSnapshots(
 		}
 	default:
 		if err := meta.DeleteRewardStateBeforeEpoch(
+			ctx,
 			deleteBeforeEpoch,
 			metaTxn,
 		); err != nil {

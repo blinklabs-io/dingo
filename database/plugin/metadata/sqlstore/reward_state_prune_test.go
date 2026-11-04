@@ -112,7 +112,10 @@ func TestDeleteRewardStateBeforeEpochBatchesMatchSingleDelete(t *testing.T) {
 	single := newManagementTestStore(t)
 	seedRewardPruneFixture(t, single)
 	txn := single.Transaction(context.Background())
-	require.NoError(t, single.DeleteRewardStateBeforeEpoch(4, txn))
+	require.NoError(
+		t,
+		single.DeleteRewardStateBeforeEpoch(context.Background(), 4, txn),
+	)
 	require.NoError(t, txn.Commit())
 	want := rewardRowsSnapshot(t, single)
 	require.NotEmpty(t, want)
@@ -127,7 +130,10 @@ func TestDeleteRewardStateBeforeEpochBatchesMatchSingleDelete(t *testing.T) {
 		batches++
 		return nil
 	}
-	require.NoError(t, batched.DeleteRewardStateBeforeEpoch(4, nil))
+	require.NoError(
+		t,
+		batched.DeleteRewardStateBeforeEpoch(context.Background(), 4, nil),
+	)
 	require.Equal(t, want, rewardRowsSnapshot(t, batched))
 	require.Greater(t, batches, 2,
 		"the prune must have crossed several batch boundaries")
@@ -138,12 +144,23 @@ func TestDeleteRewardStateBeforeEpochBatchesMatchSingleDelete(t *testing.T) {
 		_, err := fmt.Sscanf(row, "%s %d %d", &kind, &epoch, &tag)
 		require.NoError(t, err)
 		if kind == "input" {
-			require.GreaterOrEqual(t, epoch, 4, "stake inputs keep only the window: %s", row)
+			require.GreaterOrEqual(
+				t,
+				epoch,
+				4,
+				"stake inputs keep only the window: %s",
+				row,
+			)
 			continue
 		}
 		if epoch < 4 {
-			require.Contains(t, []int{1, 3}, epoch,
-				"only a credited round's rows survive below the window: %s", row)
+			require.Contains(
+				t,
+				[]int{1, 3},
+				epoch,
+				"only a credited round's rows survive below the window: %s",
+				row,
+			)
 			require.Contains(t, row, " true false false",
 				"only unfolded spendable unguarded credits survive: %s", row)
 		}
@@ -154,12 +171,17 @@ func TestDeleteRewardStateBeforeEpochBatchesMatchSingleDelete(t *testing.T) {
 // crash-safety argument behind batching: a prune that stops between two
 // committed batches leaves nothing inconsistent, and the next prune of the
 // same epoch finishes the job to the identical end state.
-func TestDeleteRewardStateBeforeEpochResumesAfterInterruptedBatch(t *testing.T) {
+func TestDeleteRewardStateBeforeEpochResumesAfterInterruptedBatch(
+	t *testing.T,
+) {
 	t.Parallel()
 	single := newManagementTestStore(t)
 	seedRewardPruneFixture(t, single)
 	txn := single.Transaction(context.Background())
-	require.NoError(t, single.DeleteRewardStateBeforeEpoch(4, txn))
+	require.NoError(
+		t,
+		single.DeleteRewardStateBeforeEpoch(context.Background(), 4, txn),
+	)
 	require.NoError(t, txn.Commit())
 	want := rewardRowsSnapshot(t, single)
 
@@ -171,7 +193,7 @@ func TestDeleteRewardStateBeforeEpochResumesAfterInterruptedBatch(t *testing.T) 
 	store.rewardStateDeleteBatchDone = func(rewardStatePruneBatch) error {
 		return stop
 	}
-	err := store.DeleteRewardStateBeforeEpoch(4, nil)
+	err := store.DeleteRewardStateBeforeEpoch(context.Background(), 4, nil)
 	require.ErrorIs(t, err, stop)
 	partial := rewardRowsSnapshot(t, store)
 	require.Less(t, len(partial), len(initial), "the first batch committed")
@@ -182,10 +204,16 @@ func TestDeleteRewardStateBeforeEpochResumesAfterInterruptedBatch(t *testing.T) 
 	}
 
 	store.rewardStateDeleteBatchDone = nil
-	require.NoError(t, store.DeleteRewardStateBeforeEpoch(4, nil))
+	require.NoError(
+		t,
+		store.DeleteRewardStateBeforeEpoch(context.Background(), 4, nil),
+	)
 	require.Equal(t, want, rewardRowsSnapshot(t, store))
-	require.NoError(t, store.DeleteRewardStateBeforeEpoch(4, nil),
-		"a prune with nothing left to do succeeds")
+	require.NoError(
+		t,
+		store.DeleteRewardStateBeforeEpoch(context.Background(), 4, nil),
+		"a prune with nothing left to do succeeds",
+	)
 	require.Equal(t, want, rewardRowsSnapshot(t, store))
 }
 
@@ -210,7 +238,8 @@ func TestRewardStatePruneBatchesAreSizedByHoldTime(t *testing.T) {
 		10 * time.Second,        // 4 rows, far too slow: halving floor -> 2
 		0,                       // 2 rows, instant: grow x2 -> 4
 		0,                       // 4 rows, instant -> 8
-		0,                       // 8 rows requested, 6 left: short batch ends it, -> 16
+		0,                       // 8 requested, 6 left: short batch ends it, stays 8
+		0,                       // next prune: 8 requested, none left, stays 8
 	}
 	calls := 0
 	now := time.Unix(1_700_000_000, 0)
@@ -239,22 +268,73 @@ func TestRewardStatePruneBatchesAreSizedByHoldTime(t *testing.T) {
 		requested = append(requested, b.requested)
 		return nil
 	}
-	require.NoError(t, store.DeleteRewardStakeInputBeforeEpoch(2, nil))
+	require.NoError(
+		t,
+		store.DeleteRewardStakeInputBeforeEpoch(context.Background(), 2, nil),
+	)
 	require.Equal(t, []int{4, 8, 16, 8, 8, 4, 2, 4, 8}, requested,
 		"4+8+16+8+8+4+2+4 = 54 rows, then a short batch of 6 ends the prune")
-	require.Equal(t, 16, store.rewardStatePruneBatchRows("reward_stake_input"),
-		"the next prune starts from the size this one settled on")
-	require.Equal(t, initial*rewardStatePruneMaxFactor,
-		store.nextRewardStatePruneBatchRows(initial*rewardStatePruneMaxFactor, 0),
-		"growth stops at twenty times the initial size")
-	require.Equal(t, max(1, initial/rewardStatePruneMinFraction),
-		store.nextRewardStatePruneBatchRows(1, time.Hour),
-		"shrinking stops at a fifth of the initial size, never below one row")
-	require.Equal(t, initial, store.rewardStatePruneBatchRows("reward_account_output"),
-		"each table learns its own size")
+	require.Equal(t, 8, store.rewardStatePruneBatchRows("reward_stake_input"),
+		"the next prune starts from the size the last full batch settled on, "+
+			"not one scaled from the short final batch")
+	require.Equal(
+		t,
+		initial,
+		store.rewardStatePruneBatchRows("reward_account_output"),
+		"each table learns its own size",
+	)
+
+	requested = nil
+	require.NoError(t, store.DeleteRewardStakeInputBeforeEpoch(
+		context.Background(), 2, nil,
+	))
+	require.Equal(t, []int{8}, requested)
+	require.Equal(t, 8, store.rewardStatePruneBatchRows("reward_stake_input"),
+		"an empty batch does not resize either")
 
 	var remaining int
 	require.NoError(t, store.readDB.QueryRow(
 		`SELECT count(*) FROM reward_stake_input`).Scan(&remaining))
 	require.Zero(t, remaining)
+}
+
+// TestNextRewardStatePruneBatchRowsBounds pins the sizing bounds as
+// literal row counts: growth caps at twenty times the initial size and
+// shrinking floors at a fifth of it, but never below one row.
+func TestNextRewardStatePruneBatchRowsBounds(t *testing.T) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+	store.rewardStatePruneInitialRows = 50
+	require.Equal(t, 1000, store.nextRewardStatePruneBatchRows(800, 0),
+		"growth stops at twenty times the initial size")
+	require.Equal(t, 1000, store.nextRewardStatePruneBatchRows(1000, 0))
+	require.Equal(t, 10, store.nextRewardStatePruneBatchRows(12, time.Hour),
+		"shrinking stops at a fifth of the initial size")
+	store.rewardStatePruneInitialRows = 4
+	require.Equal(t, 1, store.nextRewardStatePruneBatchRows(1, time.Hour),
+		"a fifth of a tiny initial size rounds up to one row")
+}
+
+// TestDeleteRewardStateBeforeEpochStopsWhenContextCancelled pins that the
+// batched prune honours its caller's context between batches: a cancelled
+// prune returns the cancellation and leaves the rest for the next boundary.
+func TestDeleteRewardStateBeforeEpochStopsWhenContextCancelled(t *testing.T) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+	seedRewardPruneFixture(t, store)
+	initial := rewardRowsSnapshot(t, store)
+	store.rewardStateDeleteBatchSize = 3
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	batches := 0
+	store.rewardStateDeleteBatchDone = func(rewardStatePruneBatch) error {
+		batches++
+		cancel()
+		return nil
+	}
+	err := store.DeleteRewardStateBeforeEpoch(ctx, 4, nil)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Equal(t, 1, batches, "no batch starts after cancellation")
+	require.Len(t, rewardRowsSnapshot(t, store), len(initial)-3,
+		"only the batch committed before cancellation was removed")
 }

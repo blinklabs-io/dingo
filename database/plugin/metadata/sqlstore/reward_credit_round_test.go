@@ -145,7 +145,9 @@ func TestDeleteRewardStateBeforeEpochPreservesPendingCreditBalance(t *testing.T)
 	)
 	require.NoError(t, err)
 
-	require.NoError(t, store.DeleteRewardStateBeforeEpoch(2, nil))
+	require.NoError(t, store.DeleteRewardStateBeforeEpoch(
+		context.Background(), 2, nil,
+	))
 	outputs, err := store.GetRewardAccountOutputs(1, nil)
 	require.NoError(t, err)
 	require.Len(t, outputs, 1, "only the applied round's unfolded output survives")

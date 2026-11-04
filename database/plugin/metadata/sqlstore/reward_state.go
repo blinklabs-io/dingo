@@ -1644,16 +1644,19 @@ const rewardStakeInputPrunePredicate = `epoch < ?`
 // predicate is monotone in epoch and every batch is idempotent, so a prune
 // interrupted between batches, by a crash or an error, leaves a state the
 // next boundary's prune completes: nothing reads the absence of a pruned row.
-// A caller-supplied txn cannot be split, so the rows are removed in single
-// statements inside it.
+// Cancelling ctx stops the prune before its next batch. A caller-supplied
+// txn cannot be split, so the rows are removed in single statements inside
+// it, under the txn's own context.
 func (s *Store) DeleteRewardStateBeforeEpoch(
+	ctx context.Context,
 	epoch uint64,
 	txn types.Txn,
 ) error {
-	if err := s.DeleteRewardStakeInputBeforeEpoch(epoch, txn); err != nil {
+	if err := s.DeleteRewardStakeInputBeforeEpoch(ctx, epoch, txn); err != nil {
 		return err
 	}
 	if err := s.pruneRewardRowsBeforeEpoch(
+		ctx,
 		"reward_account_output",
 		rewardAccountOutputPrunePredicate,
 		epoch,
@@ -1667,10 +1670,12 @@ func (s *Store) DeleteRewardStateBeforeEpoch(
 // DeleteRewardStakeInputBeforeEpoch prunes reward_stake_input below epoch,
 // batched exactly as DeleteRewardStateBeforeEpoch describes.
 func (s *Store) DeleteRewardStakeInputBeforeEpoch(
+	ctx context.Context,
 	epoch uint64,
 	txn types.Txn,
 ) error {
 	if err := s.pruneRewardRowsBeforeEpoch(
+		ctx,
 		"reward_stake_input",
 		rewardStakeInputPrunePredicate,
 		epoch,
@@ -1694,6 +1699,7 @@ func (s *Store) DeleteRewardStakeInputBeforeEpoch(
 // below the cutoff on every batch, which on mainnet is millions of credited
 // outputs that the prune keeps.
 func (s *Store) pruneRewardRowsBeforeEpoch(
+	ctx context.Context,
 	table string,
 	predicate string,
 	epoch uint64,
@@ -1704,7 +1710,8 @@ func (s *Store) pruneRewardRowsBeforeEpoch(
 		return err
 	}
 	if txn != nil {
-		return s.withWriteTransaction(
+		return s.withWriteTransactionContext(
+			ctx,
 			txn,
 			func(db queryer, ctx context.Context) error {
 				_, err := db.ExecContext(
@@ -1724,7 +1731,9 @@ func (s *Store) pruneRewardRowsBeforeEpoch(
 	rows := s.rewardStatePruneBatchRows(table)
 	var afterID int64
 	for {
-		ctx := context.Background()
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		sqlTransaction, release, err := s.beginWriteTx(ctx)
 		if err != nil {
 			return err
@@ -1740,10 +1749,10 @@ func (s *Store) pruneRewardRowsBeforeEpoch(
 		ids, err := s.selectRewardRowIDs(
 			ctx, db, table, predicate, afterID, sqlEpoch, rows,
 		)
-		if err == nil {
-			err = s.deleteRewardRowsByID(ctx, db, table, ids)
-		}
 		if err != nil {
+			return errors.Join(err, state.Rollback())
+		}
+		if err := s.deleteRewardRowsByID(ctx, db, table, ids); err != nil {
 			return errors.Join(err, state.Rollback())
 		}
 		if err := state.Commit(); err != nil {
@@ -1755,8 +1764,12 @@ func (s *Store) pruneRewardRowsBeforeEpoch(
 			afterID = ids[deleted-1]
 		}
 		requested := rows
-		rows = s.nextRewardStatePruneBatchRows(rows, hold)
-		s.rememberRewardStatePruneBatchRows(table, rows)
+		// A short batch ends the prune and its hold reflects fewer rows than
+		// were asked for, so only a full batch measures the size.
+		if deleted == requested {
+			rows = s.nextRewardStatePruneBatchRows(rows, hold)
+			s.rememberRewardStatePruneBatchRows(table, rows)
+		}
 		if s.rewardStateDeleteBatchDone != nil {
 			if err := s.rewardStateDeleteBatchDone(rewardStatePruneBatch{
 				table:     table,

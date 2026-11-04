@@ -2616,6 +2616,16 @@ Pruned at `epoch < current-3`:
 | `reward_stake_input` | delegators per epoch | `DeleteRewardStateBeforeEpoch` (CORE mode) / `DeleteRewardStakeInputBeforeEpoch` (Koios parity observer); never in API mode |
 | `reward_account_output` | delegators per epoch | `DeleteRewardStateBeforeEpoch` (CORE mode, observer disabled only) |
 
+`cleanupOldSnapshots` calls both reward prunes with no transaction, so the
+store deletes by primary key in batches, each in its own write transaction,
+walking the table forward from the last key removed. A batch is sized from how
+long the previous full batch held the write connection, aiming at 750ms, and
+each table's settled size carries to the next prune. Block application can take
+the connection between batches. Cancelling the caller's context stops the prune
+before its next batch; the predicate is monotone in epoch and every batch is
+idempotent, so an interrupted prune is completed at the next boundary. Inside a
+caller-supplied transaction the prune is a single statement.
+
 Retained for the life of the database: `epoch`, `epoch_summary`,
 `reward_ada_pots`, `reward_snapshot`, `reward_seed_failure`,
 `imported_pool_block_count`, `imported_epoch_block_total`,
