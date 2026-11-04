@@ -7107,11 +7107,13 @@ Dingo's only sync-state signal (there is no Genesis State Machine equivalent):
   fragment ending exactly at the immutable tip is also left out when it is a
   strict prefix of a candidate that extends past the immutable tip, or shares
   no point with any such candidate, since a peer stalled there would otherwise
-  pin the limit at the applied tip. Fragments stalled at the same head are judged against
-  the extending candidates only, so their agreement with each other does not
-  keep them. The recorded point is cleared when no candidate remains or
-  Genesis mode ends. A single candidate is its own intersection, so the cap
-  never holds back a lone peer.
+  pin the limit at the applied tip. Fragments stalled at the same head are
+  judged against the extending candidates only, so their agreement with each
+  other does not keep them. A sender counted only for its own header, though
+  stale or ineligible, keeps its fragment, and nothing is left out when no
+  candidate extends past the immutable tip. The recorded point is cleared
+  when no candidate remains or Genesis mode ends. A single candidate is its
+  own intersection, so the cap never holds back a lone peer.
 - Praos mode (caught up): the cap is disabled and `EagernessLimit().Active` is
   false.
 
