@@ -27,6 +27,7 @@ import (
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
 
@@ -208,4 +209,25 @@ func TestChainsyncAdmissionExpiryRetainsFailureBoundaries(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestChainsyncAdmissionExpiryRefreshesDeferredRecoveryBaseline(t *testing.T) {
+	t.Parallel()
+	f := newPatienceRollForwardFixture(t, true)
+	f.o.ledgerState = newTestLedgerState(t)
+	baseline := ochainsync.Tip{Point: ocommon.NewPoint(100, []byte("old")), BlockNumber: 1}
+	current := ochainsync.Tip{Point: ocommon.NewPoint(200, []byte("published")), BlockNumber: 2}
+	setTestLedgerTip(t, f.o, current)
+	f.o.config.ChainsyncObservePeerTip = func(chainselection.PeerTipUpdateEvent) chainselection.PeerTipUpdateDisposition {
+		return chainselection.PeerTipUpdateDeferred
+	}
+	f.o.chainSelectionVerifyHeaderCrypto = func(ouroboros.ConnectionId, gledger.BlockHeader) (uint64, error) {
+		return 0, ledger.ErrHeaderAncestryUnavailable
+	}
+	e := ledger.ChainsyncEvent{BlockHeader: newTestBlockHeader(400, 3, 0xb9)}
+	update := chainselection.PeerTipUpdateEvent{HeaderCryptoVerificationGeneration: 217}
+	disposition, err := f.o.observeChainsyncPeerTip(ochainsync.CallbackContext{ConnectionId: f.conn}, &e, &update, f.state.ClientSession(f.conn), &baseline)
+	require.NoError(t, err)
+	require.Equal(t, chainselection.PeerTipUpdateDeferred, disposition)
+	require.Equal(t, current, baseline, "recovery must use the ledger baseline from the final verification attempt")
 }

@@ -147,3 +147,32 @@ func TestAuthenticatedDeliveryHistory(t *testing.T) {
 		})
 	}
 }
+
+func TestAuthenticatedDeliveryHistoryRetainsAuthenticatedPrefixAfterTruncation(t *testing.T) {
+	t.Parallel()
+	s := newTestState(t, newTestEventBus(t), chainsync.DefaultConfig())
+	conn := newTestConnId(441)
+	require.True(t, s.AddClientConnId(conn))
+	session := s.ClientSession(conn)
+	var headers []chainsync.ObservedHeader
+	for number := uint64(1); number <= 4; number++ {
+		hash := sha256.Sum256([]byte(fmt.Sprint(number)))
+		h := chainsync.ObservedHeader{ConnectionId: conn, Point: ocommon.NewPoint(number, hash[:]), BlockNumber: number,
+			BlockHeader:                        testBlockHeader{hash: lcommon.NewBlake2b256(hash[:]), prevHash: lcommon.NewBlake2b256([]byte("parent")), blockNumber: number, slot: number},
+			HeaderCryptoVerificationGeneration: 217}
+		headers = append(headers, h)
+		if number == 1 || number == 3 {
+			s.RecordAuthenticatedDeliveryForSession(session, h)
+		} else {
+			s.RecordObservedHeaderForSession(session, h)
+		}
+	}
+	s.ClearObservedHeaderHistoryFrom(conn, headers[2].Point)
+	got, ok := s.LatestAuthenticatedDeliveryForSession(session, conn)
+	require.True(t, ok, "truncation must preserve the authenticated predecessor")
+	require.Equal(t, headers[0].Point, got.Point, "the retained raw child must not become authenticated")
+	require.EqualValues(t, 217, got.HeaderCryptoVerificationGeneration)
+	s.ClearObservedHeaderHistoryFrom(conn, headers[0].Point)
+	_, ok = s.LatestAuthenticatedDeliveryForSession(session, conn)
+	require.False(t, ok, "withdrawing the entire prefix must clear authentication")
+}

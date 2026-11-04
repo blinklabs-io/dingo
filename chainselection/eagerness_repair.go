@@ -123,6 +123,15 @@ func (cs *ChainSelector) RecordVerifiedEagernessPath(
 	if !ok || peer == nil || peer.awaitingFirstHeader {
 		return false
 	}
+	// A retry authenticates outside the selector lock. A newer delivery may
+	// already have extended this fragment while that storage read was in flight.
+	if previous, exists := cs.eagernessDeliveries[update.ConnectionId]; exists &&
+		(previous.valid == nil || previous.valid()) {
+		if head, valid := eagernessFragmentHead(previous.fragment); valid &&
+			head > update.ObservedTip.BlockNumber {
+			return false
+		}
+	}
 	base := fragmentOf(peer)
 	head, ok := eagernessFragmentHead(base)
 	if !ok || !sameEagernessTip(cs.eagernessRepairAnchorLocked(update.ConnectionId, base), anchor) ||

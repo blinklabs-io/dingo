@@ -7122,8 +7122,10 @@ blockfetch latency, and then connection ID break the tie in place of the Praos
 comparison. `ChainSelector.SelectedTip` returns the selected
 peer's tip truncated at the limit.
 
-While corroboration is active, authenticated observer deliveries also retain
-a separate, bounded LoE continuity fragment per tracked connection. A delivery
+In Genesis selection mode, authenticated observer deliveries also retain
+a separate, bounded LoE continuity fragment per tracked connection. Recording
+holds the ledger generation pin across continuity and delivered-history writes;
+an older repair cannot replace a newer retained continuity head. A delivery
 extends it only by the exact parent hash, next block height and increasing
 slot, or repeats its exact head. A gap, replacement or unrepresentable boundary
 discards the extension. The fragment can replace the admission frontier for

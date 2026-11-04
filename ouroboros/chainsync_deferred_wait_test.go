@@ -17,6 +17,9 @@ package ouroboros
 import (
 	"context"
 	"errors"
+	"io"
+	"log/slog"
+	"net"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -24,6 +27,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/chainselection"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/test/fixtures"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -500,4 +504,82 @@ func TestChainsyncClientRollForwardReleasesDeferredWaitOnReadmissionReturn(
 	require.EqualValues(t, 2, attempts.Load())
 	require.EqualValues(t, 2, admissions.Load())
 	goleak.VerifyNone(t, ignore)
+}
+
+func TestChainsyncDeferredVerificationEndsOnRealTransportClose(t *testing.T) {
+	t.Parallel()
+	f := newPatienceRollForwardFixture(t, true)
+	f.o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
+	settle := newSettleSignal()
+	f.o.config.ChainsyncHeaderVerificationSettled = settle.current
+	f.o.catchUpBandWaitTimeout = time.Minute
+	deferred := transientContextErr(t)
+	var cleanupRelease atomic.Bool
+	entered := make(chan struct{}, 1)
+	returned := make(chan error, 1)
+	f.o.chainSelectionVerifyHeaderCrypto = func(ouroboros.ConnectionId, gledger.BlockHeader) (uint64, error) {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		if cleanupRelease.Load() {
+			return 42, nil
+		}
+		return 0, deferred
+	}
+	_, ledgerCh := f.o.eventBus.Subscribe(ledger.ChainsyncEventType)
+	t.Cleanup(f.o.stopFutureHeaderResyncs)
+	blocks, err := fixtures.GenerateBabbageChainAt(10, 400, 1)
+	require.NoError(t, err)
+	block := blocks[0]
+	require.NotEmpty(t, block.Cbor())
+	tip := ochainsync.Tip{Point: ocommon.NewPoint(block.SlotNumber(), block.Hash().Bytes()), BlockNumber: block.BlockNumber()}
+	serverPipe, clientPipe := net.Pipe()
+	t.Cleanup(func() { _ = serverPipe.Close(); _ = clientPipe.Close() })
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	serverConfig := ochainsync.NewConfig(
+		ochainsync.WithFindIntersectFunc(func(ochainsync.CallbackContext, []ocommon.Point) (ocommon.Point, ochainsync.Tip, error) {
+			return ocommon.NewPointOrigin(), tip, nil
+		}),
+		ochainsync.WithRequestNextFunc(func(cb ochainsync.CallbackContext) error {
+			return cb.Server.RollForward(gledger.BlockTypeBabbage, block.Cbor(), tip)
+		}),
+	)
+	type serverResult struct {
+		conn *ouroboros.Connection
+		err  error
+	}
+	serverReady := make(chan serverResult, 1)
+	go func() {
+		c, err := ouroboros.New(ouroboros.WithConnection(serverPipe), ouroboros.WithServer(true), ouroboros.WithNodeToNode(true), ouroboros.WithNetworkMagic(42), ouroboros.WithDelayProtocolStart(true), ouroboros.WithLogger(logger), ouroboros.WithChainSyncConfig(serverConfig))
+		serverReady <- serverResult{c, err}
+	}()
+	clientConfig := ochainsync.NewConfig(ochainsync.WithPipelineLimit(1), ochainsync.WithRollForwardFunc(func(cb ochainsync.CallbackContext, typ uint, v any, tip ochainsync.Tip) error {
+		err := f.o.chainsyncClientRollForward(cb, typ, v, tip)
+		returned <- err
+		return err
+	}))
+	client, err := ouroboros.New(ouroboros.WithConnection(clientPipe), ouroboros.WithNodeToNode(true), ouroboros.WithNetworkMagic(42), ouroboros.WithDelayProtocolStart(true), ouroboros.WithLogger(logger), ouroboros.WithChainSyncConfig(clientConfig))
+	require.NoError(t, err)
+	server := testutil.RequireReceive(t, serverReady, 5*time.Second, "server handshake")
+	require.NoError(t, server.err)
+	t.Cleanup(func() { cleanupRelease.Store(true); settle.publish(); _ = client.Close(); _ = server.conn.Close() })
+	require.True(t, f.state.AddClientConnId(client.Id()))
+	f.state.SetClientConnId(client.Id())
+	server.conn.ChainSync().Server.Start()
+	client.ChainSync().Client.Start()
+	require.NoError(t, client.ChainSync().Client.Sync(nil))
+	select {
+	case <-entered:
+	case err := <-client.ErrorChan():
+		t.Fatalf("client failed before deferred verification: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("wire-delivered header never entered deferred verification")
+	}
+	testutil.RequireNoReceive(t, returned, 100*time.Millisecond, "callback must really be parked before disconnect")
+	closed := make(chan error, 1)
+	go func() { closed <- client.Close() }()
+	testutil.RequireReceive(t, returned, 5*time.Second, "connection shutdown must release verification before protocol completion")
+	require.NoError(t, testutil.RequireReceive(t, closed, 5*time.Second, "connection close must join the protocol callback"))
+	testutil.RequireNoReceive(t, ledgerCh, 100*time.Millisecond, "a disconnected unverified header must not reach the ledger")
 }

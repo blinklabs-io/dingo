@@ -34,6 +34,7 @@ func (o *Ouroboros) observeChainsyncPeerTip(
 	e *ledger.ChainsyncEvent,
 	update *chainselection.PeerTipUpdateEvent,
 	session chainsync.ClientSessionToken,
+	baseline *ochainsync.Tip,
 ) (chainselection.PeerTipUpdateDisposition, error) {
 	sessionCurrent := func() bool {
 		return o.chainsyncState == nil ||
@@ -69,11 +70,10 @@ func (o *Ouroboros) observeChainsyncPeerTip(
 		if !sessionCurrent() {
 			return disposition, ochainsync.ErrStopSyncProcess
 		}
-		var baseline ochainsync.Tip
 		generation, err := o.verifyHeaderAwaitingLedger(
 			cb,
 			e.BlockHeader,
-			&baseline,
+			baseline,
 			&wait,
 		)
 		if !sessionCurrent() {

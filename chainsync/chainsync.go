@@ -1729,6 +1729,15 @@ func (s *State) ClearObservedHeaderHistoryFrom(
 		return
 	}
 	chainHistory.order = append([]string(nil), chainHistory.order[:index]...)
+	if _, retained := chainHistory.byHash[chainHistory.authenticatedHead]; !retained {
+		chainHistory.authenticatedHead = ""
+		for _, key := range slices.Backward(chainHistory.order) {
+			if chainHistory.byHash[key].deliveryGeneration != 0 {
+				chainHistory.authenticatedHead = key
+				break
+			}
+		}
+	}
 }
 
 func (s *State) updateTrackedClientTip(

@@ -525,14 +525,22 @@ func (ls *LedgerState) headerApplied(
 	ctx context.Context,
 	header ledger.BlockHeader,
 ) bool {
+	held, _ := ls.headerAppliedSettled(ctx, header)
+	return held
+}
+
+func (ls *LedgerState) headerAppliedSettled(
+	ctx context.Context,
+	header ledger.BlockHeader,
+) (bool, bool) {
 	if ls.chain == nil {
-		return false
+		return false, true
 	}
 	tip := ls.loadTipSnapshot()
 	if tip == nil || tip.currentTip.Point.Slot < header.SlotNumber() {
-		return false
+		return false, true
 	}
-	return ls.chain.HoldsPoint(ctx, ocommon.NewPoint(
+	return ls.chain.HoldsPointSettled(ctx, ocommon.NewPoint(
 		header.SlotNumber(),
 		header.Hash().Bytes(),
 	))

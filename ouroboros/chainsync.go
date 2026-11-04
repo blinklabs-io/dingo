@@ -2585,7 +2585,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			disposition := chainselection.PeerTipUpdateUnhandled
 			if o.config.ChainsyncObservePeerTip != nil {
 				var observeErr error
-				disposition, observeErr = o.observeChainsyncPeerTip(ctx, &chainsyncEvent, &update, clientSession)
+				disposition, observeErr = o.observeChainsyncPeerTip(ctx, &chainsyncEvent, &update, clientSession, &verificationTipBaseline)
 				if observeErr != nil {
 					return observeErr
 				}

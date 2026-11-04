@@ -137,8 +137,10 @@ func TestChainsyncEagernessRecoveryRefreshesProofWhileHeld(t *testing.T) {
 	)
 	require.EqualValues(t, 7642, selector.EagernessLimit().BlockNumber)
 	f.o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
+	var verifications atomic.Int64
 	f.o.chainSelectionVerifyHeaderCrypto = func(ouroboros.ConnectionId, gledger.BlockHeader) (uint64, error) {
-		return 217, nil
+		verifications.Add(1)
+		return generation.Load(), nil
 	}
 	f.o.config.ChainsyncObservePeerTip = func(chainselection.PeerTipUpdateEvent) chainselection.PeerTipUpdateDisposition {
 		return chainselection.PeerTipUpdateAccepted
@@ -146,16 +148,18 @@ func TestChainsyncEagernessRecoveryRefreshesProofWhileHeld(t *testing.T) {
 	var attempts atomic.Int64
 	f.o.config.ChainsyncRecoverDeliveredPeerTip = func(
 		_ context.Context, _ ochainsync.CallbackContext, update chainselection.PeerTipUpdateEvent,
-		_ gledger.BlockHeader, sessionCurrent func() bool,
+		h gledger.BlockHeader, sessionCurrent func() bool,
 	) {
 		attempts.Add(1)
 		anchor, _, needed := selector.EagernessDeliveryRepair(update)
 		if needed {
+			verifiedGeneration, err := f.o.chainSelectionVerifyHeaderCrypto(update.ConnectionId, h)
+			require.NoError(t, err)
 			selector.RecordVerifiedEagernessPath(
 				update,
 				anchor,
 				path,
-				generation.Load(),
+				verifiedGeneration,
 				sessionCurrent,
 				sessionCurrent,
 			)
@@ -180,6 +184,8 @@ func TestChainsyncEagernessRecoveryRefreshesProofWhileHeld(t *testing.T) {
 		return selector.AwaitEagernessLimit(ctx, conn, block, applied)
 	}
 	f.rollForward(t, header)
+	require.GreaterOrEqual(t, verifications.Load(), int64(3),
+		"both initial and renewed path recovery must invoke authentication")
 	require.GreaterOrEqual(
 		t,
 		attempts.Load(),
