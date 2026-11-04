@@ -145,9 +145,6 @@ func HardForkDijkstra(
 	if err := validateDijkstraProtocolParameterDomains(&ret, dijkstraGenesis); err != nil {
 		return nil, fmt.Errorf("validate Dijkstra genesis parameters: %w", err)
 	}
-	if ret.ProtocolVersion.Major < gdijkstra.MinProtocolVersionDijkstra {
-		ret.ProtocolVersion.Major = gdijkstra.MinProtocolVersionDijkstra
-	}
 	return &ret, nil
 }
 
