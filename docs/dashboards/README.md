@@ -12,7 +12,7 @@ Monitoring dashboards for [Dingo](https://github.com/blinklabs-io/dingo), the Go
 | **Mempool** | `mempool.json` | Pending TXs, mempool size, TX lifecycle, CBOR cache, event bus |
 | **Resource Usage** | `resources.json` | CPU, memory, GC heatmap, disk I/O, IOPS, PSI pressure, Badger, file descriptors |
 | **Leios** | `leios.json` | Voting committee, block lanes (each RB's header arrival, time before the request, fetch and adoption beside each EB's arrival), endorser block lifecycle against the CIP-164 header, vote and diffusion periods, own votes not cast by reason, votes received and rejected, endorser block pipeline and stages, diffusion waits, endorser block forging, RB/EB timing, chainsync deferred headers and resyncs, ledger stage time, RB and EB detail tables |
-| **Traces and Logs** | `traces-and-logs.json` | Slowest block adoptions, forged blocks, rollbacks and sync/bootstrap sessions from Tempo, and the Loki log lines of one trace. Needs Tempo and Loki datasources and a dingo exporting OTLP traces (and, for the log panel, logs) |
+| **Traces and Logs** | `traces-and-logs.json` | Block adoptions over one second, forged blocks, rollbacks and sync/bootstrap sessions from Tempo, and the Loki log lines of one trace. Needs Tempo and Loki datasources and a dingo exporting OTLP traces (and, for the log panel, logs) |
 
 ## Prerequisites
 
@@ -21,7 +21,7 @@ Before you begin, make sure you have:
 - **Grafana 12+** (tested on 12.4) — [install guide](https://grafana.com/docs/grafana/latest/setup-grafana/installation/)
 - **Prometheus** scraping your Dingo node on port `12798` (configured in step 2 below)
 - **Dingo** node with metrics enabled (default port `12798`, bound to loopback; remote scraping sets `metricsBindAddr`, uses `metricsAuthToken`, and carries the plain HTTP listener through a TLS reverse proxy or authenticated encrypted tunnel)
-- **[Business Text plugin](https://grafana.com/grafana/plugins/marcusolsson-dynamictext-panel/)** — required by all dashboards for the header panel
+- **[Business Text plugin](https://grafana.com/grafana/plugins/marcusolsson-dynamictext-panel/)** — required by every dashboard except Traces and Logs for the header panel
 - **[prometheus-node-exporter](https://github.com/prometheus/node_exporter)** — required only by the Resource Usage dashboard for host-level CPU, memory, and disk metrics
 
 ## Quick start
@@ -80,7 +80,7 @@ sudo chown -R grafana:grafana /var/lib/grafana/dashboards/dingo/
 sudo systemctl restart grafana-server
 ```
 
-After restarting, go to **Dashboards → Browse** in the Grafana UI and search for "Dingo". All six dashboards appear in a **Dingo** folder automatically.
+After restarting, go to **Dashboards → Browse** in the Grafana UI and search for "Dingo". All seven dashboards appear in a **Dingo** folder automatically.
 
 **Note:** `allowUiUpdates: true` lets you edit dashboards in the Grafana UI, but changes will be overwritten on the next provision cycle (every 30 seconds). To make permanent edits, modify the JSON files directly.
 
@@ -90,7 +90,7 @@ After restarting, go to **Dashboards → Browse** in the Grafana UI and search f
 2. Go to **Dashboards → New → Import**
 3. Upload each JSON file
 
-Dashboards use your default Prometheus datasource automatically — see [Datasource](#datasource) below.
+Dashboards other than Traces and Logs use your default Prometheus datasource automatically — see [Datasource](#datasource) below.
 
 ### 4. Alert rules (optional)
 
@@ -130,7 +130,7 @@ sudo systemctl reload prometheus
 
 ## Datasource
 
-All dashboards reference their Prometheus datasource with UID `default`, Grafana's built-in alias for whichever datasource is currently marked as default. As long as you have a Prometheus datasource configured (and it's your only one, or you've marked it default under **Connections → Data sources**), the dashboards resolve it automatically — no UID renaming needed.
+All dashboards except Traces and Logs reference their Prometheus datasource with UID `default`, Grafana's built-in alias for whichever datasource is currently marked as default. As long as you have a Prometheus datasource configured (and it's your only one, or you've marked it default under **Connections → Data sources**), the dashboards resolve it automatically — no UID renaming needed.
 
 ## Template variables
 
@@ -211,7 +211,7 @@ Install the plugin (step 1 above) and restart Grafana. If running in a managed e
 Check that Prometheus is scraping your Dingo node: open Prometheus in the browser, go to **Status → Targets**, and confirm the `dingo` job is up. Also verify the `$network` and `$instance` template variables at the top of the dashboard are set to the correct values.
 
 **Datasource UID mismatch ("datasource not found")**
-All JSON files reference the datasource UID `default`, which Grafana resolves to whichever datasource is marked default. If you have multiple Prometheus datasources and the wrong one is default, mark the correct one as default in **Connections → Data sources**, or do a find-and-replace of `"default"` with your actual datasource UID in the JSON files before importing.
+All JSON files except `traces-and-logs.json` (which selects Tempo and Loki through its own datasource variables) reference the datasource UID `default`, which Grafana resolves to whichever datasource is marked default. If you have multiple Prometheus datasources and the wrong one is default, mark the correct one as default in **Connections → Data sources**, or do a find-and-replace of `"default"` with your actual datasource UID in the JSON files before importing.
 
 **Dashboards not appearing after provisioning**
 Confirm `/etc/grafana/provisioning/dashboards/dingo.yaml` references the correct path. Grafana auto-reloads provisioned dashboards every 30 seconds; if it hasn't appeared after a minute, check the Grafana log (`journalctl -u grafana-server`) for errors.

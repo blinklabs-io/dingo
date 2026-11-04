@@ -2189,6 +2189,9 @@ func (f *BlockForger) checkAndForgeProduction(ctx context.Context) error {
 	}
 	forgeAdopted = true
 	leaderSlotMissed = false
+	// Traced here so the span ends at adoption, before the observer below,
+	// which may be slow.
+	traceForgedBlock(ctx, block, currentSlot, forgeStartTime)
 
 	// Publish only after durable acceptance. The observer republishes the
 	// block on the event bus and enqueues its Leios announcement for
@@ -2241,7 +2244,6 @@ func (f *BlockForger) checkAndForgeProduction(ctx context.Context) error {
 		"slot", currentSlot,
 		"hash", hex.EncodeToString(block.Hash().Bytes()),
 	)
-	traceForgedBlock(ctx, block, currentSlot, forgeStartTime)
 	return nil
 }
 

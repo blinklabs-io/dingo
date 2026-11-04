@@ -33,6 +33,7 @@ func TestMithrilBootstrapPhaseSpans(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.NotNil(t, result)
+	t.Cleanup(result.CloseHandles)
 
 	byName := map[string]int{}
 	var root string

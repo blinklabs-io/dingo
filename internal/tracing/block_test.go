@@ -17,6 +17,7 @@ package tracing
 import (
 	"context"
 	"crypto/rand"
+	"encoding/hex"
 	"testing"
 
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -318,4 +319,39 @@ func TestStartHeaderSkipsIssuerWhenRatioDecides(t *testing.T) {
 	require.True(t, span.IsRecording())
 	span.End()
 	require.Equal(t, 1, issuerCalls)
+}
+
+func TestReconfigureForgetsPoolForcedDecisions(t *testing.T) {
+	pool := [28]byte{7}
+	configure(t, Config{SampleRatio: 0, AlwaysSamplePools: [][28]byte{pool}})
+	h := randomHash(t)
+	require.True(t, BlockSampled(h, pool[:]))
+	require.True(t, BlockSampled(h, nil))
+
+	Configure(Config{SampleRatio: 0})
+	require.False(t, BlockSampled(h, nil))
+
+	Configure(Config{SampleRatio: 0, AlwaysSamplePools: [][28]byte{pool}})
+	require.True(t, BlockSampled(h, pool[:]))
+	Disable()
+	Configure(Config{SampleRatio: 0})
+	require.False(t, BlockSampled(h, nil))
+}
+
+func TestSpanCarriesFullBlockHash(t *testing.T) {
+	configure(t, Config{SampleRatio: 1})
+	recorder := recordSpans(t)
+	h := randomHash(t)
+	_, span := StartBlock(
+		context.Background(), StageApply, "block.apply", h, nil,
+	)
+	span.End()
+	require.Len(t, recorder.Ended(), 1)
+	var got string
+	for _, kv := range recorder.Ended()[0].Attributes() {
+		if kv.Key == "block.hash" {
+			got = kv.Value.AsString()
+		}
+	}
+	require.Equal(t, hex.EncodeToString(h), got)
 }

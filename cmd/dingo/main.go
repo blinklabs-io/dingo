@@ -82,7 +82,7 @@ func commonRun(
 				ctx,
 				cfg.TracingServiceName,
 				cfg.Network,
-				0,
+				cfg.NetworkMagic,
 			)
 		},
 		os.Stderr,
@@ -584,7 +584,13 @@ Database Workers:
 		context.Background(),
 		5*time.Second,
 	)
-	_ = logExportShutdown(flushCtx)
+	if err := logExportShutdown(flushCtx); err != nil {
+		fmt.Fprintf(
+			os.Stderr,
+			"%s: flushing exported logs: %v\n",
+			programName, err,
+		)
+	}
 	cancelFlush()
 
 	// Finalize memory profiling before exit

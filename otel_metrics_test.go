@@ -17,10 +17,12 @@ package dingo
 import (
 	"bytes"
 	"context"
+	"io"
 	"log/slog"
 	"strings"
 	"testing"
 
+	internalconfig "github.com/blinklabs-io/dingo/internal/config"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
@@ -75,13 +77,39 @@ func TestMetricExportRequiresGatherer(t *testing.T) {
 
 type registererOnly struct{ prometheus.Registerer }
 
+// The node wraps its registerer with a network label and then a rebuildable
+// wrapper, neither of which is a Gatherer, so export must read the registry
+// kept from before the wrap.
+func TestMetricExportWorksThroughWrappedRegistry(t *testing.T) {
+	t.Setenv("OTEL_METRICS_EXPORTER", "console")
+	reg := prometheus.NewRegistry()
+	n := &Node{config: Config{
+		promRegistry: reg,
+		cfg:          &internalconfig.Config{Network: "preview"},
+		logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}}
+	n.configWrapPromRegistry()
+	n.rebuildableMetrics = newRebuildableRegisterer(n.config.promRegistry)
+	n.config.promRegistry = n.rebuildableMetrics
+	_, isGatherer := n.config.promRegistry.(prometheus.Gatherer)
+	require.False(t, isGatherer)
+
+	require.NoError(t, n.setupMetricExport(context.Background()))
+	require.Len(t, n.shutdownFuncs, 1)
+	require.NoError(t, n.shutdownFuncs[0](context.Background()))
+}
+
 func TestInvalidMetricsExporterIsNotFatal(t *testing.T) {
 	t.Setenv("OTEL_METRICS_EXPORTER", "bogus")
 	var logs bytes.Buffer
-	n := &Node{config: Config{
-		promRegistry: prometheus.NewRegistry(),
-		logger:       slog.New(slog.NewTextHandler(&logs, nil)),
-	}}
+	reg := prometheus.NewRegistry()
+	n := &Node{
+		config: Config{
+			promRegistry: reg,
+			logger:       slog.New(slog.NewTextHandler(&logs, nil)),
+		},
+		promGatherer: reg,
+	}
 	require.NoError(t, n.setupMetricExport(context.Background()))
 	require.Empty(t, n.shutdownFuncs)
 	require.Contains(t, logs.String(), "bogus")

@@ -112,7 +112,8 @@ func TestBlockApplyUnaffectedByStalledExporter(t *testing.T) {
 		close(exporter.release)
 		_ = provider.Shutdown(context.Background())
 		otel.SetTracerProvider(previous)
-		tracing.Configure(tracing.Config{})
+		tracing.Disable()
+		tracing.SetNearTip(false)
 	})
 
 	hash := make([]byte, 32)
@@ -153,8 +154,10 @@ func TestResourceToleratesMalformedOTELResourceAttributes(t *testing.T) {
 func TestInvalidTracesExporterIsNotFatal(t *testing.T) {
 	t.Setenv("OTEL_TRACES_EXPORTER", "bogus")
 	previous := otel.GetTracerProvider()
+	previousPropagator := otel.GetTextMapPropagator()
 	t.Cleanup(func() {
 		otel.SetTracerProvider(previous)
+		otel.SetTextMapPropagator(previousPropagator)
 		tracing.Disable()
 	})
 	tracing.Disable()
@@ -179,7 +182,11 @@ func TestStandaloneTracingExportsSpans(t *testing.T) {
 	))
 	t.Cleanup(server.Close)
 	previous := otel.GetTracerProvider()
-	t.Cleanup(func() { otel.SetTracerProvider(previous) })
+	previousPropagator := otel.GetTextMapPropagator()
+	t.Cleanup(func() {
+		otel.SetTracerProvider(previous)
+		otel.SetTextMapPropagator(previousPropagator)
+	})
 
 	shutdown, err := SetupStandaloneTracing(
 		context.Background(),

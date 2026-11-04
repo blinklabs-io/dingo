@@ -47,7 +47,6 @@ func TestCatchupSessionSpanPerEpoch(t *testing.T) {
 	after.End()
 
 	var session string
-	children := 0
 	for _, span := range spans.Ended() {
 		if span.Name() == "ledger.catchup" {
 			require.Empty(t, session, "one catch-up session span")
@@ -55,11 +54,23 @@ func TestCatchupSessionSpanPerEpoch(t *testing.T) {
 		}
 	}
 	require.NotEmpty(t, session)
+	attached := map[int64]bool{}
 	for _, span := range spans.Ended() {
-		if span.Name() == "ledger.epoch_transition" &&
-			span.Parent().SpanID().String() == session {
-			children++
+		if span.Name() != "ledger.epoch_transition" {
+			continue
 		}
+		isChild := span.Parent().SpanID().String() == session
+		epoch := int64(-1)
+		for _, kv := range span.Attributes() {
+			if kv.Key == "epoch" {
+				epoch = kv.Value.AsInt64()
+			}
+		}
+		if epoch < 0 {
+			require.False(t, isChild, "span after the session ended")
+			continue
+		}
+		attached[epoch] = isChild
 	}
-	require.Equal(t, 2, children)
+	require.Equal(t, map[int64]bool{4: true, 5: true}, attached)
 }

@@ -279,7 +279,7 @@ func (o *Ouroboros) blockfetchClientBlockRaw(
 	ctx blockfetch.CallbackContext,
 	blockType uint,
 	blockData []byte,
-) error {
+) (err error) {
 	// The block's trace is only known once it has decoded, so the span is
 	// started afterwards and backdated to cover the decode.
 	received := time.Now()
@@ -340,9 +340,8 @@ func (o *Ouroboros) blockfetchClientBlockRaw(
 			attribute.Int("block.size", len(blockData)),
 		)
 	}
-	err = o.blockfetchClientBlock(ctx, blockType, block)
-	tracing.End(span, err)
-	return err
+	defer func() { tracing.End(span, err) }()
+	return o.blockfetchClientBlock(ctx, blockType, block)
 }
 
 // InvalidateBlockDecodeCache removes a decoded block when the ledger rejects it

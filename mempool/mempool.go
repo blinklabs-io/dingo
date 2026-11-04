@@ -2068,10 +2068,11 @@ func (m *Mempool) AddTransaction(
 	if err != nil {
 		return fmt.Errorf("decode transaction: %w", err)
 	}
+	txHashRaw := tmpTx.Hash()
 	ctx, span = tracing.StartTx(
 		ctx,
 		"tx.mempool_add",
-		tmpTx.Hash().Bytes(),
+		txHashRaw.Bytes(),
 		trace.WithTimestamp(received),
 	)
 	// Early reject TXs whose validity interval hasn't started yet.
@@ -2091,7 +2092,7 @@ func (m *Mempool) AddTransaction(
 			}
 		}
 	}
-	txHash := tmpTx.Hash().String()
+	txHash := txHashRaw.String()
 	var addEvent *event.Event
 	var evictedEvents []event.Event
 	// Each attempt validates against the pool's state overlay. When the ledger

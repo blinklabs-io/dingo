@@ -50,13 +50,20 @@ func InstallUnsampledTracing(tb testing.TB) {
 		sdktrace.WithSampler(sdktrace.NeverSample()),
 	)
 	otel.SetTracerProvider(provider)
+	wasEnabled := tracing.Enabled()
+	wasNearTip := tracing.NearTip()
+	prior := tracing.CurrentConfig()
 	// Block tracing on with a zero ratio, near the tip: every stage takes
 	// the sampling decision and drops the block.
 	tracing.Configure(tracing.Config{SampleRatio: 0})
 	tracing.SetNearTip(true)
 	tb.Cleanup(func() {
-		tracing.Disable()
-		tracing.SetNearTip(false)
+		if wasEnabled {
+			tracing.Configure(prior)
+		} else {
+			tracing.Disable()
+		}
+		tracing.SetNearTip(wasNearTip)
 		otel.SetTracerProvider(previous)
 		_ = provider.Shutdown(context.Background())
 	})

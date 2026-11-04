@@ -350,7 +350,13 @@ func startStandaloneTracing(
 					5*time.Second,
 				)
 				defer cancel()
-				_ = shutdown(flushCtx)
+				if err := shutdown(flushCtx); err != nil {
+					logger.Warn(
+						"tracing shutdown failed; bootstrap spans may be lost",
+						"component", "mithril",
+						"error", err,
+					)
+				}
 			}
 		}
 	}

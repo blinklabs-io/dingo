@@ -3024,6 +3024,7 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 	// under ManualBlockProcessing (see NewLedgerState), so this is a plain
 	// nil check rather than also re-checking that mode here.
 	if !ls.reachedTip.Load() {
+		tracing.SetNearTip(false)
 		ls.beginCatchupTrace(ctx)
 	}
 	if ls.blockPipeline != nil {
@@ -5210,6 +5211,7 @@ func (ls *LedgerState) rollbackWithBlocksAndIntent(
 			pruneFloor,
 		)
 	}
+	traceBlocks := ls.rollbackTraceBlocks(ctx, point, rollbackBlocks)
 	if err := ls.prepareRollbackIntent(ctx, point, rollbackBlocks); err != nil {
 		if !errors.Is(err, errRollbackIntentTooLarge) {
 			return fmt.Errorf("prepare rollback intent: %w", err)
@@ -5404,7 +5406,7 @@ func (ls *LedgerState) rollbackWithBlocksAndIntent(
 	}
 	// The blocks are gone from the ledger from here on, whichever path
 	// returns, including a rollbackCommittedError.
-	defer traceRollback(ctx, point, rollbackBlocks)
+	defer traceRollback(ctx, point, traceBlocks)
 	ls.rewardPrecomputeMu.Lock()
 	if snapshot := ls.rewardPrecomputeRollback; snapshot != nil {
 		snapshot.committed = true

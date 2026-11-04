@@ -51,7 +51,8 @@ func OpenDB(
 			semconv.DBSystemNameKey.String(systemName),
 		),
 		// A query with no span to join would start a root trace of its own
-		// for every statement; record queries only inside an existing trace.
+		// for every statement, and one inside an unsampled trace could never
+		// export; record queries only inside a sampled trace.
 		otelsql.WithSpanOptions(otelsql.SpanOptions{
 			SpanFilter: func(
 				ctx context.Context,
@@ -59,7 +60,8 @@ func OpenDB(
 				_ string,
 				_ []driver.NamedValue,
 			) bool {
-				return trace.SpanContextFromContext(ctx).IsValid()
+				sc := trace.SpanContextFromContext(ctx)
+				return sc.IsValid() && sc.IsSampled()
 			},
 		}),
 	)

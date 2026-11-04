@@ -343,6 +343,9 @@ func (n *Node) configWrapPromRegistry() {
 	if n.config.promRegistry == nil {
 		return
 	}
+	if g, ok := n.config.promRegistry.(prometheus.Gatherer); ok {
+		n.promGatherer = g
+	}
 	// Determine the network name: prefer the configured name, fall back to
 	// reverse-lookup by network magic.
 	networkName := n.config.cfg.Network

@@ -26,7 +26,7 @@ import (
 // string or as the 56-character hex encoding of its 28-byte key hash.
 func ParsePoolKeyHash(s string) ([28]byte, error) {
 	v := strings.TrimSpace(s)
-	if strings.HasPrefix(v, "pool1") {
+	if strings.HasPrefix(strings.ToLower(v), "pool1") {
 		id, err := lcommon.NewPoolIdFromBech32(v)
 		if err != nil {
 			return [28]byte{}, fmt.Errorf("invalid pool ID %q: %w", s, err)

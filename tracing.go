@@ -34,6 +34,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/resource"
 	"go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.40.0"
+	tracenoop "go.opentelemetry.io/otel/trace/noop"
 )
 
 // warnIfTracingMisconfigured logs a warning when stdout span export is
@@ -279,11 +280,23 @@ func SetupStandaloneTracing(
 		cfg.logger = slog.New(slog.DiscardHandler)
 	}
 	n := &Node{config: cfg}
+	previousProvider := otel.GetTracerProvider()
+	previousPropagator := otel.GetTextMapPropagator()
 	if err := n.setupTracing(ctx); err != nil {
 		return nil, err
 	}
 	return func(ctx context.Context) error {
 		tracing.Disable()
+		defer func() {
+			otel.SetTextMapPropagator(previousPropagator)
+			// A provider that was never configured forwards to the one
+			// just shut down, so leave a no-op in its place.
+			if sdk, ok := previousProvider.(*trace.TracerProvider); ok {
+				otel.SetTracerProvider(sdk)
+			} else {
+				otel.SetTracerProvider(tracenoop.NewTracerProvider())
+			}
+		}()
 		var errs error
 		for _, shutdown := range n.shutdownFuncs {
 			errs = errors.Join(errs, shutdown(ctx))

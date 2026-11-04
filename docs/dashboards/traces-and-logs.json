@@ -33,7 +33,7 @@
         "name": "trace_id",
         "label": "Trace ID",
         "type": "textbox",
-        "query": "",
+        "query": "00000000000000000000000000000000",
         "hide": 0
       }
     ]
@@ -42,8 +42,8 @@
     {
       "id": 1,
       "type": "table",
-      "title": "Slowest block adoptions",
-      "description": "Sampled blocks by apply duration. A block's trace ID is the first 16 bytes of its hash, so one trace holds every node's view of the block.",
+      "title": "Block adoptions over one second",
+      "description": "Sampled blocks whose apply took longer than one second. A block's trace ID is the first 16 bytes of its hash, so one trace holds every node's view of the block.",
       "gridPos": { "h": 10, "w": 24, "x": 0, "y": 0 },
       "datasource": { "type": "tempo", "uid": "${tempo}" },
       "targets": [
@@ -51,7 +51,7 @@
           "refId": "A",
           "datasource": { "type": "tempo", "uid": "${tempo}" },
           "queryType": "traceql",
-          "query": "{ resource.service.name =~ \"$service\" && name = \"block.apply\" } | duration > 0s",
+          "query": "{ resource.service.name =~ \"$service\" && name = \"block.apply\" && duration > 1s }",
           "limit": 50,
           "tableType": "traces"
         }
@@ -69,7 +69,7 @@
           "refId": "A",
           "datasource": { "type": "tempo", "uid": "${tempo}" },
           "queryType": "traceql",
-          "query": "{ name = \"block.forge\" }",
+          "query": "{ resource.service.name =~ \"$service\" && name = \"block.forge\" }",
           "limit": 50,
           "tableType": "traces"
         }
@@ -113,7 +113,7 @@
       "id": 5,
       "type": "logs",
       "title": "Logs for trace $trace_id",
-      "description": "Dingo log lines written inside a span carry trace_id and span_id.",
+      "description": "Dingo log lines written inside a span carry trace_id and span_id. Enter a trace ID above; the default matches no log line.",
       "gridPos": { "h": 12, "w": 24, "x": 0, "y": 28 },
       "datasource": { "type": "loki", "uid": "${loki}" },
       "targets": [

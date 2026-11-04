@@ -31,8 +31,8 @@ func (n *Node) setupMetricExport(ctx context.Context) error {
 	if v := os.Getenv("OTEL_METRICS_EXPORTER"); v == "" || v == "none" {
 		return nil
 	}
-	gatherer, ok := n.config.promRegistry.(prometheus.Gatherer)
-	if !ok {
+	gatherer := n.promGatherer
+	if gatherer == nil {
 		return errors.New(
 			"OTEL_METRICS_EXPORTER is set but the metrics registry " +
 				"cannot be gathered",

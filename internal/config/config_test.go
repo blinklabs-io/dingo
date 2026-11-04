@@ -2101,6 +2101,13 @@ func TestGetConfigSnapshotDoesNotShareNestedPluginConfig(t *testing.T) {
 	)
 }
 
+func TestCloneConfigDoesNotShareTracingPools(t *testing.T) {
+	cfg := &Config{TracingAlwaysSamplePools: []string{"a", "b"}}
+	clone := cloneConfig(cfg)
+	clone.TracingAlwaysSamplePools[0] = "mutated"
+	assert.Equal(t, "a", cfg.TracingAlwaysSamplePools[0])
+}
+
 // exampleConfigPath returns the path to the repo's bundled
 // dingo.yaml.example, independent of the working directory the test binary
 // runs from.

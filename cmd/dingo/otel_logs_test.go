@@ -57,6 +57,8 @@ func TestLogExportFansOut(t *testing.T) {
 	t.Setenv("OTEL_LOGS_EXPORTER", "otlp")
 	t.Setenv("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf")
 	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", server.URL)
+	t.Setenv("OTEL_EXPORTER_OTLP_LOGS_PROTOCOL", "http/protobuf")
+	t.Setenv("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", server.URL+"/v1/logs")
 
 	var buf bytes.Buffer
 	base := slog.New(slog.NewJSONHandler(&buf, nil))

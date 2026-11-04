@@ -98,6 +98,7 @@ func TestLogHandlerUntouchedForNonRecordingSpan(t *testing.T) {
 	)
 	rec := logOnce(t, ctx, nil)
 	require.NotContains(t, rec, "trace_id")
+	require.NotContains(t, rec, "span_id")
 }
 
 func TestLogHandlerSurvivesWithAttrsAndGroup(t *testing.T) {

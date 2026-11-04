@@ -17,11 +17,14 @@ package tracing
 import (
 	"context"
 	"encoding/binary"
+	"encoding/hex"
+	"slices"
 	"sync"
 	"sync/atomic"
 
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -39,6 +42,7 @@ type Config struct {
 }
 
 type blockConfig struct {
+	cfg        Config
 	ratioBound uint64
 	all        bool
 	pools      map[[28]byte]struct{}
@@ -59,6 +63,10 @@ const forcedSetSize = 4096
 // and StartTx return non-recording spans without touching the tracer.
 func Configure(cfg Config) {
 	bc := &blockConfig{
+		cfg: Config{
+			SampleRatio:       cfg.SampleRatio,
+			AlwaysSamplePools: slices.Clone(cfg.AlwaysSamplePools),
+		},
 		all:   cfg.SampleRatio >= 1,
 		pools: make(map[[28]byte]struct{}, len(cfg.AlwaysSamplePools)),
 	}
@@ -69,6 +77,7 @@ func Configure(cfg Config) {
 		bc.pools[p] = struct{}{}
 	}
 	state.Store(bc)
+	forced.reset()
 }
 
 // Enabled reports whether block tracing is configured, so a caller can skip
@@ -81,6 +90,26 @@ func Enabled() bool {
 // non-recording spans until the next Configure.
 func Disable() {
 	state.Store(nil)
+	forced.reset()
+}
+
+// CurrentConfig returns the configuration block tracing was last configured
+// with, or the zero Config while it is disabled. Tests use it to restore the
+// state they found.
+func CurrentConfig() Config {
+	bc := state.Load()
+	if bc == nil {
+		return Config{}
+	}
+	return Config{
+		SampleRatio:       bc.cfg.SampleRatio,
+		AlwaysSamplePools: slices.Clone(bc.cfg.AlwaysSamplePools),
+	}
+}
+
+// NearTip reports the value last given to SetNearTip.
+func NearTip() bool {
+	return nearTip.Load()
 }
 
 // SetNearTip records whether the node is near the upstream tip. While it is
@@ -189,7 +218,7 @@ func StartBlock(
 		!bc.sampled(hash, issuerKeyHash) {
 		return ctx, trace.SpanFromContext(context.Background())
 	}
-	return startUnder(ctx, name, hash, opts)
+	return startUnder(ctx, name, hash, "block.hash", opts)
 }
 
 // StartHeader is StartBlock for a header or block. It reads the hash only
@@ -215,7 +244,7 @@ func StartHeader(
 	if !sampled {
 		return ctx, trace.SpanFromContext(context.Background())
 	}
-	return startUnder(ctx, name, hash, opts)
+	return startUnder(ctx, name, hash, "block.hash", opts)
 }
 
 // StartTx starts a span in the trace derived from a transaction's hash,
@@ -230,15 +259,26 @@ func StartTx(
 	if bc == nil || !bc.ratioSampled(BlockTraceID(txHash)) {
 		return ctx, trace.SpanFromContext(context.Background())
 	}
-	return startUnder(ctx, name, txHash, opts)
+	return startUnder(ctx, name, txHash, "tx.hash", opts)
 }
 
 func startUnder(
 	ctx context.Context,
 	name string,
 	hash []byte,
+	hashAttr string,
 	opts []trace.SpanStartOption,
 ) (context.Context, trace.Span) {
+	// The trace ID keeps only 16 bytes of the hash, so the full hash is
+	// carried as an attribute for mapping a trace back to its block.
+	opts = append(
+		[]trace.SpanStartOption{
+			trace.WithAttributes(
+				attribute.String(hashAttr, hex.EncodeToString(hash)),
+			),
+		},
+		opts...,
+	)
 	parent := trace.NewSpanContext(trace.SpanContextConfig{
 		TraceID:    BlockTraceID(hash),
 		SpanID:     blockRootSpanID(hash),
@@ -276,6 +316,16 @@ func newForcedSet(size int) *forcedSet {
 		set:  make(map[string]struct{}, size),
 		ring: make([]string, size),
 	}
+}
+
+// reset forgets every forced decision, so a decision made under one pool
+// list is never honored under another.
+func (f *forcedSet) reset() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	clear(f.set)
+	clear(f.ring)
+	f.next = 0
 }
 
 func (f *forcedSet) add(hash []byte) {

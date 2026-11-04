@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/tracing"
 	"github.com/blinklabs-io/gouroboros/ledger"
@@ -81,6 +82,37 @@ func traceRollback(
 		}
 		span.End()
 	}
+}
+
+// rollbackTraceBlocks returns the blocks a rollback to point removes, for
+// traceRollback. Callers usually pass nil and leave the payload to be read
+// from the chain, and that read yields nothing when no event consumer is
+// subscribed, so the blocks are read here, before they are deleted, whenever
+// tracing is enabled. A failed read only loses the spans.
+func (ls *LedgerState) rollbackTraceBlocks(
+	ctx context.Context,
+	point ocommon.Point,
+	provided []models.Block,
+) []models.Block {
+	if provided != nil || !tracing.Enabled() || ls.db == nil {
+		return provided
+	}
+	var blocks []models.Block
+	txn := ls.db.Transaction(ctx, false)
+	err := txn.Do(func(txn *database.Txn) error {
+		var err error
+		blocks, err = database.BlocksAfterSlotTxn(txn, point.Slot)
+		return err
+	})
+	if err != nil {
+		ls.config.Logger.Debug(
+			"cannot read blocks for rollback trace",
+			"component", "ledger",
+			"error", err,
+		)
+		return nil
+	}
+	return blocks
 }
 
 // catchupTrace is the ledger.catchup session span, open from startup until

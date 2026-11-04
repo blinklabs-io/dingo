@@ -1808,11 +1808,16 @@ spans for one block land in one trace with a shared, never-exported root.
 The sampling decision is a pure function of the block: the trace-ID ratio
 test (identical to the SDK's `TraceIDRatioBased`), or the block's issuer
 being listed in `tracingAlwaysSamplePools`. Nodes given the same ratio and
-pool list therefore keep and drop the same blocks. A pool-forced decision is
-remembered by hash in a bounded set so that a later rollback span, which
-knows only the hash, joins the same trace. When block tracing is off, or a
-block is not sampled, `internal/tracing` returns a non-recording span without
-calling the tracer, hashing the header, or allocating.
+pool list therefore make the same initial decision for a block. A
+pool-forced decision is remembered by hash in a bounded set, cleared
+whenever tracing is configured or disabled, so that a later rollback span,
+which knows only the hash, joins the same trace. A rollback past the set's
+capacity falls back to the ratio decision and can lose the rollback span of a
+pool-forced block. When block tracing is off, `internal/tracing` returns a
+non-recording span without calling the tracer, hashing the header, or
+allocating. When it is on, a stage started from a header hashes the header to
+decide; a block that is not sampled still starts no span and allocates
+nothing.
 
 Stage spans, all in the block's trace: `block.header_received` (one per
 delivering peer), `block.header_validated`, `block.body_received`,

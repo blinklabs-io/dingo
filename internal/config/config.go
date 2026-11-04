@@ -1793,6 +1793,10 @@ func cloneConfig(cfg *Config) *Config {
 		cfg.BarkLifecycleOperatorCertificateFingerprints...,
 	)
 	clone.CORSAllowedOrigins = append([]string(nil), cfg.CORSAllowedOrigins...)
+	clone.TracingAlwaysSamplePools = append(
+		[]string(nil),
+		cfg.TracingAlwaysSamplePools...,
+	)
 	if cfg.PeerSharing != nil {
 		peerSharing := *cfg.PeerSharing
 		clone.PeerSharing = &peerSharing

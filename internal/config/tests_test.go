@@ -1163,6 +1163,7 @@ func TestParsePoolKeyHash(t *testing.T) {
 		hexID,
 		strings.ToUpper(hexID),
 		bech,
+		strings.ToUpper(bech),
 		" " + bech + " ",
 	} {
 		got, err := ParsePoolKeyHash(in)
@@ -1183,6 +1184,13 @@ func TestAlwaysSamplePoolsFromEnv(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	const a = "0f292fcaa02b8b2f9b3c8f9fd8e0bb21abedb692a6d5058df3ef2735"
 	const b = "1f292fcaa02b8b2f9b3c8f9fd8e0bb21abedb692a6d5058df3ef2735"
+	// The prefixed spelling wins over the bare one; make sure it is unset,
+	// restoring any value afterwards.
+	t.Setenv("CARDANO_DINGO_TRACING_ALWAYS_SAMPLE_POOLS", "")
+	require.NoError(
+		t,
+		os.Unsetenv("CARDANO_DINGO_TRACING_ALWAYS_SAMPLE_POOLS"),
+	)
 	t.Setenv("DINGO_TRACING_ALWAYS_SAMPLE_POOLS", a+","+b)
 
 	cfg, err := LoadConfig("")

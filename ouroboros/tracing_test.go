@@ -107,14 +107,14 @@ func TestHeaderFromTwoPeersTwoSpansOneTrace(t *testing.T) {
 	}
 	for _, remote := range []string{"1.1.1.1:3001", "2.2.2.2:3001"} {
 		o := newTracingTestOuroboros(t)
-		_ = o.chainsyncClientRollForward(
+		require.NoError(t, o.chainsyncClientRollForward(
 			ochainsync.CallbackContext{
 				ConnectionId: newTestConnId("127.0.0.1:6000", remote),
 			},
 			0,
 			header,
 			tip,
-		)
+		))
 	}
 
 	var peers []string
