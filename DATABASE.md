@@ -105,6 +105,11 @@ reload the statistics on each batch's transaction connection before preparing
 the join, so pooled connections with independent planner caches use the updated
 estimates.
 
+Single-output SQLite inserts return their generated ID from the driver result
+after checking the affected-row count. An ignored conflict preserves its
+existing output ID and provenance-repair behavior. Other metadata backends
+retain their native returning or upsert paths.
+
 SQLite keeps planner statistics current while the node runs. A node synced
 from genesis never ran `ANALYZE`, and without `sqlite_stat1` the planner picks
 indexes by shape alone: the batched spend `UPDATE` in `consumeUtxosBatchQuery`

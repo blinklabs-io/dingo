@@ -38,6 +38,8 @@ var hotStatements = func() []string {
 		rewardLiveStakeUtxoStakeQuery,
 		insertUtxoQuery,
 		insertUtxoQueryIgnoreConflict,
+		insertUtxoResultQuery,
+		insertUtxoResultIgnoreConflictQuery,
 		repairConflictedUtxoQuery,
 		importAssetQuery,
 		getAssetIDQuery,
