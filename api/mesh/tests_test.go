@@ -940,8 +940,12 @@ func (f *fakeLedgerState) SlotToTime(
 }
 
 func (f *fakeLedgerState) UtxosByAddress(
+	ctx context.Context,
 	addrs []lcommon.Address,
 ) ([]models.Utxo, error) {
+	if f.utxosComplete != nil {
+		return f.utxosComplete(ctx, addrs)
+	}
 	if f.utxos == nil {
 		return nil, nil
 	}
@@ -965,7 +969,7 @@ func (f *fakeLedgerState) ScanUtxosByAddress(
 	if f.utxosComplete != nil {
 		utxos, err = f.utxosComplete(ctx, nil)
 	} else {
-		utxos, err = f.UtxosByAddress(nil)
+		utxos, err = f.UtxosByAddress(ctx, nil)
 	}
 	if err != nil {
 		return ochainsync.Tip{}, err

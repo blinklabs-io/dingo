@@ -15148,10 +15148,11 @@ func (ls *LedgerState) UtxosByRefsBounded(
 
 // UtxosByAddress returns all UTxOs that belong to any of the specified addresses
 func (ls *LedgerState) UtxosByAddress(
+	ctx context.Context,
 	addrs []ledger.Address,
 ) ([]models.Utxo, error) {
 	utxos, err := ls.db.UtxosByAddress(
-		context.Background(),
+		ctx,
 		addrs,
 		database.MaxUtxosByAddressResults,
 		nil,

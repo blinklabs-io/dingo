@@ -835,3 +835,129 @@ func TestAccountCoinsCancellationReleasesAdmission(t *testing.T) {
 	response := postJSON(t, h, "/account/coins", coinsRequest(addr))
 	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
 }
+
+func TestAccountBalanceCurrentTipRefusesWhenBulkSlotBusy(t *testing.T) {
+	t.Parallel()
+
+	deps := newTestDeps()
+	addr := testAddress(
+		t, lcommon.AddressTypeKeyNone, testKeyHash(0x37), nil,
+	)
+	readEntered := make(chan struct{}, 1)
+	readRelease := make(chan struct{})
+	var firstRead sync.Once
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(readRelease) }) }
+	defer release()
+	deps.ledger.utxosComplete = func(
+		context.Context,
+		[]lcommon.Address,
+	) ([]models.Utxo, error) {
+		// Only the first read blocks, so a second read that wrongly
+		// bypasses the slot fails the assertion instead of hanging.
+		block := false
+		firstRead.Do(func() { block = true })
+		if block {
+			readEntered <- struct{}{}
+			<-readRelease
+		}
+		return nil, nil
+	}
+	h := newTestHandler(t, deps, func(c *ServerConfig) {
+		c.maxConcurrentBulkReads = 1
+	})
+	body, err := json.Marshal(balanceRequest(addr))
+	require.NoError(t, err)
+	first := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		req := httptest.NewRequest(
+			http.MethodPost, "/account/balance", bytes.NewReader(body),
+		)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		first <- rec
+	}()
+	testutil.RequireReceive(
+		t, readEntered, 10*time.Second, "first balance read starts",
+	)
+
+	got := requireMeshError(
+		t,
+		postJSON(t, h, "/account/balance", balanceRequest(addr)),
+		ErrUnavailable,
+		http.StatusInternalServerError,
+	)
+	require.True(t, got.Retriable)
+
+	release()
+	firstRec := testutil.RequireReceive(
+		t, first, 10*time.Second, "first balance read completes",
+	)
+	require.Equal(t, http.StatusOK, firstRec.Code)
+
+	third := postJSON(t, h, "/account/balance", balanceRequest(addr))
+	require.Equal(t, http.StatusOK, third.Code)
+}
+
+func TestAccountBalanceCurrentTipCancellationReachesRead(t *testing.T) {
+	t.Parallel()
+
+	deps := newTestDeps()
+	addr := testAddress(
+		t, lcommon.AddressTypeKeyNone, testKeyHash(0x38), nil,
+	)
+	started := make(chan struct{})
+	readErr := make(chan error, 1)
+	var first sync.Once
+	deps.ledger.utxosComplete = func(
+		ctx context.Context,
+		_ []lcommon.Address,
+	) ([]models.Utxo, error) {
+		block := false
+		first.Do(func() {
+			block = true
+			close(started)
+		})
+		if block {
+			// Bounded so a context that is never canceled fails the
+			// test instead of hanging it.
+			select {
+			case <-ctx.Done():
+				readErr <- ctx.Err()
+				return nil, ctx.Err()
+			case <-time.After(5 * time.Second):
+				readErr <- errors.New("request context not canceled")
+				return nil, errors.New("request context not canceled")
+			}
+		}
+		return nil, nil
+	}
+	h := newTestHandler(t, deps, func(c *ServerConfig) {
+		c.maxConcurrentBulkReads = 1
+	})
+	body, err := json.Marshal(balanceRequest(addr))
+	require.NoError(t, err)
+	requestCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	request := httptest.NewRequest(
+		http.MethodPost, "/account/balance", bytes.NewReader(body),
+	).WithContext(requestCtx)
+	done := make(chan struct{})
+	go func() {
+		h.ServeHTTP(httptest.NewRecorder(), request)
+		close(done)
+	}()
+	testutil.RequireReceive(t, started, 10*time.Second, "balance read starts")
+	cancel()
+	testutil.RequireReceive(t, done, 10*time.Second, "canceled read stops")
+	require.ErrorIs(
+		t,
+		testutil.RequireReceive(
+			t, readErr, 10*time.Second, "read observes cancellation",
+		),
+		context.Canceled,
+	)
+
+	response := postJSON(t, h, "/account/balance", balanceRequest(addr))
+	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+}

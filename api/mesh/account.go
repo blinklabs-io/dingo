@@ -71,7 +71,14 @@ func (s *Server) handleAccountBalance(
 		}
 		balances = aggregateAddressBalance(historical)
 	} else {
+		release, ok := s.acquireBulk()
+		if !ok {
+			writeError(w, ErrUnavailable)
+			return
+		}
+		defer release()
 		utxos, err := s.config.LedgerState.UtxosByAddress(
+			r.Context(),
 			[]ledger.Address{addr},
 		)
 		if err != nil {
