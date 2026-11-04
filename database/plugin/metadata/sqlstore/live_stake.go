@@ -1993,6 +1993,14 @@ ORDER BY credential_tag, staking_key, id`, slotValue)
 	return ret, nil
 }
 
+// liveStakeGroupedPendingMinPools is the smallest pool count for which
+// GetLiveStakeInputsForPools totals pending credits in one grouped pass. That
+// pass reads every credential's unfolded credits whichever pools were asked
+// for, which pays off only when the read covers most delegators, as the
+// boundary stake distribution does. A smaller read, such as the retiring-pool
+// capture, keeps the per-row subquery and touches only its own delegators.
+const liveStakeGroupedPendingMinPools = 64
+
 func (s *Store) GetLiveStakeInputsForPools(
 	poolKeyHashes [][]byte,
 	expiryEpoch uint64,
@@ -2000,6 +2008,20 @@ func (s *Store) GetLiveStakeInputsForPools(
 ) ([]*models.RewardStakeInput, error) {
 	if len(poolKeyHashes) == 0 {
 		return nil, nil
+	}
+	if txn == nil {
+		// The pending totals and the pool reads are separate statements. In
+		// autocommit they would read different snapshots, and a fold
+		// committing between them would count its credits twice: once in
+		// the totals and again in total_stake.
+		if err := s.ensureReady(); err != nil {
+			return nil, fmt.Errorf(
+				"GetLiveStakeInputsForPools: resolve db: %w", err,
+			)
+		}
+		readTxn := s.ReadTransaction(context.Background())
+		defer func() { _ = readTxn.Rollback() }()
+		txn = readTxn
 	}
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
@@ -2010,19 +2032,28 @@ func (s *Store) GetLiveStakeInputsForPools(
 	}
 	poolKeyHashes = dedupeByteSlices(poolKeyHashes)
 	// reward_stake carries account.reward; a credited round's unfolded
-	// credits are the rest of the balance. They are totalled once per call
-	// rather than once per row: this read covers every delegator, and the
-	// per-row subquery made the boundary stake read cost a random index probe
-	// and table fetch per unfolded output.
+	// credits are the rest of the balance. A read covering most delegators
+	// totals them once per call rather than once per row: there the per-row
+	// subquery costs an index probe per delegator, and the grouped pass is
+	// one scan of the covering index.
 	hasPending, err := s.HasPendingRewardCreditRounds(txn)
 	if err != nil {
 		return nil, fmt.Errorf("GetLiveStakeInputsForPools: %w", err)
 	}
+	stakeExpr := "rls.total_stake"
 	var pending map[string]uint64
-	if hasPending {
+	if hasPending && len(poolKeyHashes) < liveStakeGroupedPendingMinPools {
+		stakeExpr = "CAST(rls.total_stake AS " + s.pendingCreditCastType() +
+			") + " + s.pendingRewardCreditSubquery(
+			"rls.credential_tag", "rls.staking_key",
+		)
+	} else if hasPending {
 		pending, err = s.pendingRewardCreditTotals(ctx, db)
 		if err != nil {
 			return nil, fmt.Errorf("GetLiveStakeInputsForPools: %w", err)
+		}
+		if s.liveStakePendingTotalsRead != nil {
+			s.liveStakePendingTotalsRead()
 		}
 	}
 	chunkSize := s.dialect.ParameterLimit()
@@ -2058,7 +2089,7 @@ LEFT JOIN account acct
 		}
 		query := `
 SELECT rls.pool_key_hash, rls.staking_key, rls.credential_tag,
-       rls.total_stake
+       ` + stakeExpr + `
 FROM reward_live_stake rls` + join + `
 WHERE rls.pool_key_hash IN (` + bindPlaceholders(len(chunk)) + `)
   AND rls.registered = TRUE` + expiry + `

@@ -15,9 +15,14 @@
 package sqlstore
 
 import (
+	"context"
+	"database/sql"
 	"encoding/binary"
 	"fmt"
+	"path/filepath"
 	"testing"
+
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -190,5 +195,129 @@ func TestPendingRewardCreditTotalsReadTheCoveringIndex(t *testing.T) {
 			require.NotContains(t, plan, "USE TEMP B-TREE FOR GROUP BY",
 				"the index supplies the group order: plan %s", plan)
 		})
+	}
+}
+
+// newLiveStakeSnapshotTestStore opens a file-backed WAL database with separate
+// read and write pools, so a write can commit while a read transaction holds
+// its snapshot. The shared-cache in-memory stores lock tables instead.
+func newLiveStakeSnapshotTestStore(t *testing.T) *Store {
+	t.Helper()
+	dsn := "file:" + filepath.Join(t.TempDir(), "live_stake.db") +
+		"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)"
+	writeDB, err := sql.Open("sqlite", dsn)
+	require.NoError(t, err)
+	writeDB.SetMaxOpenConns(1)
+	readDB, err := sql.Open("sqlite", dsn)
+	require.NoError(t, err)
+	readDB.SetMaxOpenConns(2)
+	registry, err := migrations.SQLiteRegistry()
+	require.NoError(t, err)
+	store, err := New(Config{
+		WriteDB:         writeDB,
+		ReadDB:          readDB,
+		Dialect:         SQLiteDialect(),
+		Migrations:      registry,
+		MigrationLocker: migrations.NewProcessLocker(),
+	})
+	require.NoError(t, err)
+	require.NoError(t, store.Start(context.Background()))
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	return store
+}
+
+// seedLiveStakePools registers one delegator per pool, each with total_stake
+// 1000 and one unfolded 25-lovelace credit in credited round 1.
+func seedLiveStakePools(t *testing.T, store *Store, count int) [][]byte {
+	t.Helper()
+	require.NoError(t, store.SetPendingRewardCreditRounds(
+		[]models.RewardCreditRound{{SnapshotEpoch: 1, BoundarySlot: 100}}, nil,
+	))
+	pools := make([][]byte, 0, count)
+	outputs := make([]*models.RewardAccountOutput, 0, count)
+	for i := range count {
+		pool := bytesRepeat(0x00, 28)
+		binary.BigEndian.PutUint32(pool, uint32(i+1)) //nolint:gosec // bounded fixture index
+		key := bytesRepeat(0xd0, 28)
+		binary.BigEndian.PutUint32(key[24:], uint32(i+1)) //nolint:gosec // bounded fixture index
+		pools = append(pools, pool)
+		outputs = append(outputs, &models.RewardAccountOutput{
+			Epoch: 1, CredentialTag: 0, StakingKey: key, PoolKeyHash: pool,
+			RewardType: "member", Amount: 25, Spendable: true,
+			CapturedSlot: 100, BoundarySlot: 100,
+		})
+		_, err := store.writeDB.Exec(`
+INSERT INTO reward_live_stake (
+    pool_key_hash, staking_key, credential_tag, utxo_stake, reward_stake,
+    total_stake, registered, updated_slot, calculation_version
+) VALUES (?, ?, 0, '1000', '0', '1000', TRUE, 1, ?)`,
+			pool, key, models.RewardStakeCalculationVersion,
+		)
+		require.NoError(t, err)
+	}
+	require.NoError(t, store.SaveRewardAccountOutputs(outputs, nil))
+	return pools
+}
+
+// TestGetLiveStakeInputsForPoolsReadsOneSnapshotWithoutTxn pins the
+// autocommit path to one snapshot. The pending totals and the pool reads are
+// separate statements; a fold committing between them moves the credit into
+// total_stake after the totals already counted it. Read in one snapshot the
+// delegator's stake is 1025 whichever side of the fold the snapshot falls on.
+func TestGetLiveStakeInputsForPoolsReadsOneSnapshotWithoutTxn(t *testing.T) {
+	t.Parallel()
+	store := newLiveStakeSnapshotTestStore(t)
+	pools := seedLiveStakePools(t, store, liveStakeGroupedPendingMinPools)
+	folds := 0
+	store.liveStakePendingTotalsRead = func() {
+		folds++
+		_, err := store.writeDB.Exec(
+			`UPDATE reward_account_output SET folded = TRUE`,
+		)
+		require.NoError(t, err)
+		_, err = store.writeDB.Exec(
+			`UPDATE reward_live_stake SET total_stake = '1025'`,
+		)
+		require.NoError(t, err)
+	}
+
+	inputs, err := store.GetLiveStakeInputsForPools(pools, 0, nil)
+	require.NoError(t, err)
+	require.Equal(t, 1, folds, "the grouped totals pass must have run")
+	require.Len(t, inputs, len(pools))
+	for _, input := range inputs {
+		require.EqualValues(t, 1025, input.Stake,
+			"credential %x", input.StakingKey)
+	}
+}
+
+// TestGetLiveStakeInputsForPoolsSmallReadSkipsGroupedTotals pins the scope of
+// the grouped pass. It totals every credential's pending credits, which only
+// pays for itself on a read covering most delegators; a read of a few pools,
+// such as the retiring-pool capture, keeps the per-row subquery and touches
+// only its own delegators' outputs. Both paths return the same stake.
+func TestGetLiveStakeInputsForPoolsSmallReadSkipsGroupedTotals(t *testing.T) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+	pools := seedLiveStakePools(t, store, liveStakeGroupedPendingMinPools)
+	grouped := 0
+	store.liveStakePendingTotalsRead = func() { grouped++ }
+
+	small, err := store.GetLiveStakeInputsForPools(
+		pools[:liveStakeGroupedPendingMinPools-1], 0, nil,
+	)
+	require.NoError(t, err)
+	require.Zero(t, grouped, "a small read must not total every credential")
+	require.Len(t, small, liveStakeGroupedPendingMinPools-1)
+	for _, input := range small {
+		require.EqualValues(t, 1025, input.Stake)
+	}
+
+	full, err := store.GetLiveStakeInputsForPools(pools, 0, nil)
+	require.NoError(t, err)
+	require.Equal(t, 1, grouped)
+	require.Len(t, full, liveStakeGroupedPendingMinPools)
+	for _, input := range full {
+		require.EqualValues(t, 1025, input.Stake)
 	}
 }

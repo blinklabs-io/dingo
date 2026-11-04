@@ -362,6 +362,13 @@ func registryForDialect(dialect string) ([]Migration, error) {
 			migration.BackfillRevision = "1"
 			migration.Backfill = addressTransactionCredentialKindBackfill
 		}
+		// MySQL indexes blob and text columns by prefix, and a prefix index
+		// never covers its column, so the pending-credit covering index would
+		// cost every reward output write there and save no table fetch.
+		if version.Name == rewardOutputCredentialPendingIndexSchemaRelease &&
+			dialect == "mysql" {
+			migration.SQL[dialect] = SQL{}
+		}
 		// MySQL has no partial indexes and keeps the full indexes its
 		// foreign keys require.
 		if version.Name == utxoSpenderPartialIndexSchemaRelease &&

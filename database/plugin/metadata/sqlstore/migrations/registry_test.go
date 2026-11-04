@@ -697,6 +697,31 @@ func TestLeiosKeyLookupIndexesTranslateForProviders(t *testing.T) {
 	require.NotContains(t, mysqlSQL, "CREATE INDEX IF NOT EXISTS")
 }
 
+// TestRewardOutputCredentialPendingIndexSkipsMySQL pins the covering index to
+// the providers that can cover with it. MySQL indexes the blob staking_key and
+// text amount by prefix, and a prefix index never covers a column, so the
+// index would cost every reward output write and save no table fetch.
+func TestRewardOutputCredentialPendingIndexSkipsMySQL(t *testing.T) {
+	t.Parallel()
+
+	postgres, err := PostgresRegistry()
+	require.NoError(t, err)
+	require.Equal(t, rewardOutputCredentialPendingIndexSchemaRelease,
+		postgres[52].Name)
+	require.Contains(t,
+		strings.Join(postgres[52].SQL["postgres"].Expand, "\n"),
+		`ON "reward_account_output"`+"\n"+
+			`       ("credential_tag", "staking_key", "spendable", "guarded", "folded",`)
+
+	mysql, err := MySQLRegistry()
+	require.NoError(t, err)
+	require.NoError(t, validateRegistry(mysql, "mysql"))
+	require.Equal(t, rewardOutputCredentialPendingIndexSchemaRelease,
+		mysql[52].Name)
+	require.Empty(t, mysql[52].SQL["mysql"].Expand)
+	require.Empty(t, mysql[52].SQL["mysql"].Contract)
+}
+
 func TestRatificationHistoryMigrationTranslatesForProviders(t *testing.T) {
 	t.Parallel()
 

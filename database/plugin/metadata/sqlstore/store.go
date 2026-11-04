@@ -175,6 +175,9 @@ type Store struct {
 	// Test hook runs after a prune has selected its horizon. Production leaves
 	// it nil.
 	committeeAuthPruneLocked func()
+	// Test hook runs after GetLiveStakeInputsForPools has totalled pending
+	// reward credits and before its pool reads. Production leaves it nil.
+	liveStakePendingTotalsRead func()
 
 	migrations          []migrations.Migration
 	genesisStakingEmpty bool
