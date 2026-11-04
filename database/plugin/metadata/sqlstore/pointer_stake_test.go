@@ -180,11 +180,13 @@ func TestActiveDelegationScopedSQLWithoutScopeIsUnscoped(t *testing.T) {
 func TestPointerStakeInputsSQLReadsHistoryByCredential(t *testing.T) {
 	t.Parallel()
 	store := newDepositHeldStore(t)
+	analyzeStore(t, store)
 	scanned := func(plan string) []string {
 		var hits []string
-		for _, step := range strings.Split(plan, "\n") {
+		for step := range strings.SplitSeq(plan, "\n") {
 			if strings.HasPrefix(step, "SCAN account") ||
-				strings.HasPrefix(step, "SCAN event") {
+				strings.HasPrefix(step, "SCAN event") ||
+				strings.HasPrefix(step, "SCAN history") {
 				hits = append(hits, step)
 			}
 		}

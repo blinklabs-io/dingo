@@ -1132,7 +1132,9 @@ func activeDelegationScopedSQL(
 	// CROSS JOIN is an ordering constraint in SQLite: the scope is read
 	// first and each source is probed by its (credential_tag, staking_key)
 	// index. A plain JOIN leaves the order to the planner's row estimate for
-	// the CTE, which on a large source can still choose the full scan.
+	// the CTE, which on a large source can still choose the full scan. The
+	// join condition goes in WHERE (scopedWhere) because PostgreSQL rejects
+	// ON after CROSS JOIN.
 	scopedFrom := func(table string, alias string) string {
 		if scopeSQL == "" {
 			if alias == table {
@@ -1140,10 +1142,14 @@ func activeDelegationScopedSQL(
 			}
 			return "FROM " + table + " " + alias
 		}
-		return `FROM credential_scope scope
-CROSS JOIN ` + table + ` ` + alias + `
-  ON ` + alias + `.credential_tag = scope.credential_tag
- AND ` + alias + `.staking_key = scope.staking_key`
+		return "FROM credential_scope scope\nCROSS JOIN " + table + " " + alias
+	}
+	scopedWhere := func(alias string) string {
+		if scopeSQL == "" {
+			return ""
+		}
+		return alias + ".credential_tag = scope.credential_tag\n AND " +
+			alias + ".staking_key = scope.staking_key\n AND "
 	}
 	prefix := `
 WITH `
@@ -1164,7 +1170,7 @@ SELECT event.credential_tag, event.staking_key, event.pool_key_hash,
 %[2]s
 JOIN certs ON certs.id = event.certificate_id AND certs.cert_type = ?
 JOIN "transaction" tx ON tx.id = certs.transaction_id
-WHERE COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_cert ON lc_cert.transaction_id = lc.transaction_id WHERE lc_cert.id = event.certificate_id), event.added_slot) <= ?`, source.table, scopedFrom(source.table, "event")))
+WHERE %[3]sCOALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_cert ON lc_cert.transaction_id = lc.transaction_id WHERE lc_cert.id = event.certificate_id), event.added_slot) <= ?`, source.table, scopedFrom(source.table, "event"), scopedWhere("event")))
 		args = append(args, source.certType, slot)
 	}
 	allHistoryTables := make(
@@ -1183,7 +1189,7 @@ WHERE COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_c
 SELECT account.credential_tag, account.staking_key, account.pool,
        account.added_slot, account.added_slot, 0, 0
 `+scopedFrom("account", "account")+`
-WHERE account.added_slot <= ? AND account.active = TRUE
+WHERE `+scopedWhere("account")+`account.added_slot <= ? AND account.active = TRUE
   AND account.pool IS NOT NULL AND length(account.pool) > 0`+
 		noHistorySQL("account", allHistoryTables))
 	args = append(args, slot)
@@ -1202,9 +1208,10 @@ SELECT event.credential_tag, event.staking_key, %d AS registered, COALESCE((SELE
 %s
 JOIN certs ON certs.id = event.certificate_id AND certs.cert_type = ?
 JOIN "transaction" tx ON tx.id = certs.transaction_id
-WHERE COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_cert ON lc_cert.transaction_id = lc.transaction_id WHERE lc_cert.id = event.certificate_id), event.added_slot) <= ?`,
+WHERE %sCOALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_cert ON lc_cert.transaction_id = lc.transaction_id WHERE lc_cert.id = event.certificate_id), event.added_slot) <= ?`,
 			source.registered,
 			scopedFrom(source.table, "event"),
+			scopedWhere("event"),
 		))
 		args = append(args, source.certType, slot)
 	}
@@ -1221,7 +1228,7 @@ SELECT account.credential_tag, account.staking_key,
        CASE WHEN account.active THEN 1 ELSE 0 END,
        account.created_slot, account.created_slot, 0, 0
 `+scopedFrom("account", "account")+`
-WHERE account.created_slot <= ?`+
+WHERE `+scopedWhere("account")+`account.created_slot <= ?`+
 		noHistorySQL("account", registrationTables))
 	args = append(args, slot)
 	for range registrationTables {
