@@ -284,7 +284,9 @@ aggregation selects normal transactions by their slot index and closure
 transactions by their execution-slot index in disjoint branches before reading
 outputs by transaction ID; it does not scan retained transaction history for a
 single epoch. The exact arbitrary-precision sum includes valid outputs and
-phase-2-invalid collateral returns, including spent history. Epoch and pool block lists read
+phase-2-invalid collateral returns, including spent outputs while retained.
+Complete historical totals require API storage mode; core mode prunes spent
+outputs. Epoch and pool block lists read
 `block_nonce` joined to `pool_opcert_sequence`. API storage mode keeps every
 non-checkpoint `block_nonce` row for those lists (one row per block); core mode
 prunes them outside the three-epoch nonce window, keeping each epoch's
