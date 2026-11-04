@@ -45,6 +45,23 @@ func timeToReach(
 	return time.Since(start)
 }
 
+// publishBurst adds n distinct messages to the stack's pool and reports the
+// first one the pool does not admit. It is safe to call from any goroutine.
+func publishBurst(s *Stack, prefix string, n int) error {
+	for i := range n {
+		added, err := s.pool.Add(newTestMessage(
+			[]byte(fmt.Sprintf("%s-%d", prefix, i)), soonExpiry(),
+		))
+		if err != nil {
+			return fmt.Errorf("adding %s-%d: %w", prefix, i, err)
+		}
+		if !added {
+			return fmt.Errorf("%s-%d was not admitted", prefix, i)
+		}
+	}
+	return nil
+}
+
 // Three stacks joined in a line, A to B and B to C, so a message from either
 // end reaches the other only by crossing B.
 func TestDiffusionAcrossThreeNodesInALine(t *testing.T) {
@@ -69,14 +86,13 @@ func TestDiffusionAcrossThreeNodesInALine(t *testing.T) {
 	t.Logf("C to A across B: %s", took)
 	assert.Less(t, took, diffusionLatencyBound)
 
-	// Each message is held once per node: relaying does not duplicate it.
 	for name, s := range map[string]*Stack{"a": a, "b": b, "c": c} {
 		assert.Equal(t, 2, s.pool.Len(), "node %s", name)
 	}
 }
 
-// A burst of messages from every node reaches every other node, with no
-// duplicates, within the latency bound.
+// A burst of messages from every node reaches every other node within the
+// latency bound.
 func TestDiffusionOfABurstAcrossThreeNodes(t *testing.T) {
 	t.Parallel()
 	const perNode = 50
@@ -90,11 +106,18 @@ func TestDiffusionOfABurstAcrossThreeNodes(t *testing.T) {
 		return b.PeerCount() == 2 && c.PeerCount() == 2
 	})
 
+	// The publishers run off the test goroutine, so they return their
+	// errors instead of failing the test themselves.
+	errs := make(chan error, 3)
 	var wg sync.WaitGroup
 	for name, s := range map[string]*Stack{"a": a, "b": b, "c": c} {
-		wg.Go(func() { addMessages(t, s, "burst-"+name, perNode) })
+		wg.Go(func() { errs <- publishBurst(s, "burst-"+name, perNode) })
 	}
 	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
 
 	for name, s := range map[string]*Stack{"a": a, "b": b, "c": c} {
 		took := timeToReach(t, s, 3*perNode)
@@ -163,7 +186,7 @@ func TestMempoolStaysBoundedAtMainnetSignerScale(t *testing.T) {
 	}
 	t.Logf("one message a minute at %d bytes: peak %d messages, %d bytes",
 		minBody, peak, pool.SizeBytes())
-	assert.LessOrEqual(t, peak, signers*int(ttl/time.Minute)+signers)
+	assert.Equal(t, signers*int(ttl/time.Minute), peak)
 
 	advance(ttl + time.Minute)
 	pool.removeExpired()
