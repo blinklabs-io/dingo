@@ -3655,7 +3655,6 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 ) error {
 	connKey := connIdKey(e.ConnectionId)
 	ls.removePeerForkNoncePrefix(connKey)
-	ls.electingVrfMemo.clear()
 
 	// Filter events from non-active connections when chain selection is enabled
 	if activeConnId, configured := ls.detectConnectionSwitch(pending); configured {

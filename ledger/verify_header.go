@@ -2888,6 +2888,9 @@ func (ls *LedgerState) electingVrfKeyHashFromSnapshotWithTxn(
 			cutoffSlot:   cutoffSlot,
 			capturedSlot: capturedSlot,
 		}
+		// Captured before electingVrfMemoStable reads the tip; see
+		// electingVrfMemo for the ordering this relies on.
+		memoGeneration := ls.electingVrfMemo.currentGeneration()
 		memoizable := ls.mithrilLedgerSlot == 0 &&
 			ls.electingVrfMemoStable(cutoffSlot, capturedSlot)
 		if memoizable {
@@ -2945,7 +2948,7 @@ func (ls *LedgerState) electingVrfKeyHashFromSnapshotWithTxn(
 				))
 			}
 			if memoizable {
-				ls.electingVrfMemo.put(memoKey, hash)
+				ls.electingVrfMemo.put(memoGeneration, memoKey, hash)
 			}
 			return hash, true, nil
 		}
@@ -2979,7 +2982,7 @@ func (ls *LedgerState) electingVrfKeyHashFromSnapshotWithTxn(
 				))
 			}
 			if memoizable {
-				ls.electingVrfMemo.put(memoKey, hash)
+				ls.electingVrfMemo.put(memoGeneration, memoKey, hash)
 			}
 			return hash, true, nil
 		}

@@ -34,9 +34,23 @@ type electingVrfMemoKey struct {
 // stored for slots at or below the applied tip minus the stability window
 // (see electingVrfMemoStable), so registration history up to them can no
 // longer change through a rollback or a late-applied block.
+//
+// A ledger rollback clears the memo after it publishes the rolled-back tip.
+// A lookup captures the generation before it reads the tip, so a lookup that
+// judged stability against the pre-rollback tip carries a generation that
+// clear has since advanced, and its put is dropped instead of reinstalling a
+// pre-rollback answer.
 type electingVrfMemo struct {
-	mu      sync.RWMutex
-	entries map[electingVrfMemoKey]lcommon.Blake2b256
+	mu         sync.RWMutex
+	entries    map[electingVrfMemoKey]lcommon.Blake2b256
+	generation uint64
+}
+
+// currentGeneration returns the generation a lookup must pass to put.
+func (m *electingVrfMemo) currentGeneration() uint64 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.generation
 }
 
 func (m *electingVrfMemo) get(
@@ -48,12 +62,17 @@ func (m *electingVrfMemo) get(
 	return hash, ok
 }
 
+// put stores hash unless clear has run since generation was captured.
 func (m *electingVrfMemo) put(
+	generation uint64,
 	key electingVrfMemoKey,
 	hash lcommon.Blake2b256,
 ) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if generation != m.generation {
+		return
+	}
 	if m.entries == nil || len(m.entries) >= electingVrfMemoMaxEntries {
 		m.entries = make(map[electingVrfMemoKey]lcommon.Blake2b256)
 	}
@@ -63,6 +82,7 @@ func (m *electingVrfMemo) put(
 func (m *electingVrfMemo) clear() {
 	m.mu.Lock()
 	m.entries = nil
+	m.generation++
 	m.mu.Unlock()
 }
 

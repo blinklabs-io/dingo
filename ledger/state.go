@@ -5667,6 +5667,10 @@ func (ls *LedgerState) rollbackWithBlocksAndIntent(
 	ls.resetNextEpochNonceReady()
 	ls.updateTipMetrics(newTipDensity)
 	ls.publishSnapshotsLocked()
+	// Every rollback that truncates metadata reaches this point, whether a
+	// peer rollback, a fork switch or a recovery rewind. Clear after the
+	// rolled-back tip is published; see electingVrfMemo.
+	ls.electingVrfMemo.clear()
 	ls.Unlock()
 	finishValidationTransition()
 	// Reconstruct the new tip's block_nonce if TruncateAfterSlot above
