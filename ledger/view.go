@@ -553,6 +553,14 @@ var _ eras.ByronProtocolParametersProvider = (*LedgerView)(nil)
 // which is exactly why it has to be a compile error here.
 var _ lcommon.StakeCredentialDepositState = (*LedgerView)(nil)
 
+var _ lcommon.DijkstraBlsProofDomainState = (*LedgerView)(nil)
+
+// DijkstraBlsProofDomain returns the immutable pool-proof policy shared by
+// block application, mempool validation, and transaction evaluation.
+func (lv *LedgerView) DijkstraBlsProofDomain() lcommon.DijkstraBlsProofDomain {
+	return lv.ls.config.DijkstraBlsProofDomain
+}
+
 func (lv *LedgerView) NetworkId() uint {
 	genesis := lv.ls.config.CardanoNodeConfig.ShelleyGenesis()
 	if genesis == nil {

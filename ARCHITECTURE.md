@@ -4106,6 +4106,20 @@ divergent decoder or rule implementation.
 
 The `ledger/eras/` package provides era-specific validation rules for each Cardano era. The default active era table is Byron through Conway. Experimental Dijkstra support is added to the active table when Dingo starts on the `musashi` network (the IOG Leios prototype testnet, matched by network name or magic 164), the `dijkstra` network (matched by network name or magic 6), with `runMode: "leios"`, or with `startEra: "dijkstra"` — see `Config.experimentalDijkstraEnabled`. Keying on the network lets the node follow each testnet past its Conway-to-Dijkstra hard fork without an explicit run mode. DijkstraNet keeps the base Ouroboros protocols unless Leios is explicitly enabled. The Dijkstra descriptor uses `github.com/blinklabs-io/gouroboros/ledger/dijkstra`, including that release's generated CDDL shape for the nullable Leios/Peras certificate slots.
 
+The shared Dijkstra header decoder accepts the ten-field Praos body used by
+DijkstraNet and the twelve-field Leios prototype body. It preserves original
+header and header-body CBOR for hashing and KES verification, and rejects other
+arities and malformed Leios extensions. A plain DijkstraNet header has no Leios
+announcement or certificate flag.
+
+DijkstraNet's canonical genesis identity selects the older Haskell `BLS_SIG`
+domain for pool-registration proofs of possession. Other chains retain the
+IETF `BLS_POP` domain. Node startup, storage reinitialization, and immutable
+replay supply that immutable policy through `LedgerStateConfig` and
+`LedgerView`; gOuroboros resolves it through pending and cached validation
+views. Validation checks exactly the selected domain. This pool-registration
+policy does not change Leios committee or aggregate-certificate verification.
+
 Several eras replace or drop an upstream `UtxoValidationRules` entry so Dingo
 can run its own implementation — the reference-script-aware fee rule, local
 Plutus execution, and the credential-tag-preserving committee and voter rules.

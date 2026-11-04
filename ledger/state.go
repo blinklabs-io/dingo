@@ -954,7 +954,10 @@ type LedgerStateConfig struct {
 	// reuses its identity for wire compatibility -- see isMainnet in
 	// header_protocol_version.go. Empty when dingo was configured with a
 	// raw NetworkMagic instead of a named network.
-	Network                       string
+	Network string
+	// DijkstraBlsProofDomain selects the network's pool-registration proof
+	// domain. Zero retains the IETF proof domain.
+	DijkstraBlsProofDomain        lcommon.DijkstraBlsProofDomain
 	BlockfetchRequestRangeFunc    BlockfetchRequestRangeFunc
 	RejectBlockDecodeCacheFunc    func(uint, []byte)
 	PeersWithBlockFunc            PeersWithBlockFunc
