@@ -377,10 +377,12 @@ func TestPlutusBoundedArgsConformance(t *testing.T) {
 	}
 
 	// The test only starts once both nodes are in the wanted era: Conway
-	// (6) below protocol version 12, Dijkstra (7) at protocol version 12.
+	// (6) unless the spec starts in Dijkstra at epoch 0; a later scheduled
+	// fork keeps the Conway expectation.
 	wantEra := 6
 	if spec, specErr := devnet.LoadDevNetConfig(); specErr == nil &&
-		spec.DijkstraHardForkAtEpoch != nil {
+		spec.DijkstraHardForkAtEpoch != nil &&
+		*spec.DijkstraHardForkAtEpoch == 0 {
 		wantEra = 7
 	}
 	var cardanoParams, dingoParams *conway.ConwayProtocolParameters
