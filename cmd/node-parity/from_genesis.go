@@ -38,6 +38,7 @@ var koiosFlags struct {
 	allowPrivateAddresses bool
 	verbose               bool
 	skipUTxO              bool
+	captureDir            string
 	// cachePath, when set, points this run's CheckProtocolParams,
 	// CheckStakeDistribution and /tx_info lookups at a koiosparity.Cache
 	// (koios_check.go's doc comments on those functions) instead of calling
@@ -366,6 +367,10 @@ of re-deriving them from scratch.`,
 		"skip the UTxO-set comparison: no baseline is captured and no /tx_info is fetched; protocol parameters and stake are still compared",
 	)
 	cmd.Flags().StringVar(
+		&koiosFlags.captureDir, "boundary-capture-dir", "",
+		"directory for Dingo's whole UTxO set at each epoch boundary, read as Dingo crosses it, so the UTxO comparison still runs when the reconstruction reaches the boundary after Dingo has moved past its rollback window (optional; each file is removed once compared; default: query Dingo live at the boundary)",
+	)
+	cmd.Flags().StringVar(
 		&koiosFlags.cachePath, "koios-cache-path", "",
 		"path to a koios-parity cache.db for protocol-params, stake-distribution and /tx_info reference data (optional; safe to share a dingo instance's own --koios-parity-cache-path, but its recorded Koios API root must match --koios-base-url); default: fetch fresh from Koios with no caching",
 	)
@@ -519,6 +524,7 @@ func fromGenesisRun(cmd *cobra.Command, _ []string) error {
 	err = nodeparity.RunFromGenesis(
 		cmd.Context(), globalFlags.dingoAddr, network, magic, koios, cache, report, logf,
 		resumeFrom, koiosFlags.skipUTxO,
+		nodeparity.WithBoundaryCaptureDir(koiosFlags.captureDir),
 	)
 
 	logger.Info("run summary",
