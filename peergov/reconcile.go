@@ -70,7 +70,7 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 	events = append(events, p.checkBootstrapRecoveryLocked()...)
 
 	// Track changes for metrics
-	var coldPromotions, warmPromotions, warmDemotions, knownRemoved, activeIncreased, activeDecreased int
+	var coldPromotions, warmPromotions, warmDemotions, knownRemoved int
 
 	// Demotion/Promotion Logic
 	for i, peer := range slices.Backward(p.peers) {
@@ -90,7 +90,6 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 				p.recordPeerStateChange(peer.State, PeerStateWarm)
 				peer.State = PeerStateWarm
 				warmDemotions++
-				activeDecreased++
 				p.config.Logger.Debug(
 					"demoted peer to warm due to inactivity",
 					"address",
@@ -381,7 +380,6 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 			peer.State = PeerStateHot
 			peer.LastActivity = now
 			warmPromotions++
-			activeIncreased++
 			// Inbound promotions have their own budget and must not use up
 			// the outbound refill slots counted by promoted and hotCount.
 			if peer.Source == PeerSourceInboundConn {
@@ -545,12 +543,8 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 	// Update metrics
 	p.updatePeerMetrics()
 	if p.metrics != nil {
-		p.metrics.coldPeersPromotions.Add(float64(coldPromotions))
-		p.metrics.warmPeersPromotions.Add(float64(warmPromotions))
-		p.metrics.warmPeersDemotions.Add(float64(warmDemotions))
+		// The transition counters are updated by recordPeerStateChange.
 		p.metrics.decreasedKnownPeers.Add(float64(knownRemoved))
-		p.metrics.increasedActivePeers.Add(float64(activeIncreased))
-		p.metrics.decreasedActivePeers.Add(float64(activeDecreased))
 	}
 
 	p.config.Logger.Debug(

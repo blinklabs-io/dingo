@@ -4048,6 +4048,20 @@ WHERE block_hash = decode($1, 'hex')
 ORDER BY block_index ASC;
 ```
 
+### `GetBlockTransactionTotals`
+
+`Database.GetBlockTransactionTotals` uses the optional
+`metadata.BlockTransactionTotalsStore` projection when supported. The shared
+SQL store reads only recorded transaction fees and effective output amounts
+in one statement, without transaction witnesses, scripts, assets, certificates
+or input associations. It includes spent outputs and uses an invalid
+transaction's collateral return instead of its regular outputs when present.
+The recorded body fee retains the existing block API meaning. Decimal totals
+are accumulated in Go so neither SQL integer aggregation nor `uint64` limits
+can truncate them. Empty blocks return zeroes, and the caller's context and
+read transaction govern the query. Providers without the optional capability
+use the existing hydrated transaction read. No schema or retention changes.
+
 ### `GetUtxo` and `GetUtxoIncludingSpent`
 
 ```sql

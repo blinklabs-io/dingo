@@ -31,14 +31,17 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"slices"
 	"sync"
 	"time"
 
 	"github.com/blinklabs-io/dingo/internal/koiosparity"
 	ouroboros "github.com/blinklabs-io/gouroboros"
+	"github.com/blinklabs-io/gouroboros/ledger/allegra"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/blinklabs-io/gouroboros/protocol"
 	"github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	pcommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -79,18 +82,79 @@ var txInfoIndexWaits = []time.Duration{
 	40 * time.Second,
 }
 
+// txInfoOutageWaits extends txInfoIndexWaits when Dingo's boundary state is
+// captured. The reconstruction then has no deadline, so a Koios gateway
+// timeout or overload is waited out, about an hour in all, rather than
+// re-baselining and leaving the epoch's UTxO check not run.
+var txInfoOutageWaits = []time.Duration{
+	time.Minute,
+	2 * time.Minute,
+	5 * time.Minute,
+	10 * time.Minute,
+	10 * time.Minute,
+	10 * time.Minute,
+	10 * time.Minute,
+	10 * time.Minute,
+}
+
+// ntcKeepaliveInterval is how often keepNtCConnAlive sends on the chainsync
+// connection. Dingo closes a local connection it has read nothing from for 2
+// minutes, and a chainsync callback sends nothing while it waits on a long
+// query over another connection: a mainnet GetUTxOWhole of about 2.1 million
+// entries took longer than that, so every session ended inside the baseline
+// capture and the capture never completed.
+const ntcKeepaliveInterval = 30 * time.Second
+
+// keepNtCConnAlive runs a LocalTxMonitor round trip (acquire a mempool
+// snapshot, read its sizes, release) on conn every interval until ctx ends, so
+// the connection is never idle long enough for Dingo to close it.
+// LocalTxMonitor rather than LocalStateQuery: Dingo serves a mempool snapshot
+// without touching the ledger, while every LocalStateQuery Acquire opens a
+// ledger read snapshot, which pauses Dingo's commits and, when Dingo is busy,
+// failed with a deadline error that closed the whole connection. Failures are
+// ignored: a dead connection already ends the session through its error
+// channel.
+func keepNtCConnAlive(
+	ctx context.Context,
+	conn *ouroboros.Connection,
+	interval time.Duration,
+) {
+	mon := conn.LocalTxMonitor()
+	if mon == nil || mon.Client == nil {
+		return
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		if err := mon.Client.Acquire(); err != nil {
+			continue
+		}
+		_, _, _, _ = mon.Client.GetSizes()
+		_ = mon.Client.Release()
+	}
+}
+
 // fetchTxInfoChunks fetches every chunk with at most txInfoConcurrency
 // requests in flight, then, after each wait in waits, fetches again each
-// chunk that failed with koiosparity.ErrTxInfoMissing. A chunk is fetched
-// whole every time, so a result is only ever a complete chunk. Other
-// failures are not fetched again: the shared Koios client has already
-// retried them. It returns ctx's error when ctx ends during a fetch or a
-// wait, and the caller must then discard results and errs.
+// chunk that failed with koiosparity.ErrTxInfoMissing, or with any failure
+// that is not koiosparity.ErrKoiosPermanent when retryTransient is set. A
+// chunk is fetched whole every time, so a result is only ever a complete
+// chunk. Without retryTransient other failures are not fetched again: the
+// shared Koios client has already retried them, and a caller racing Dingo's
+// rollback window cannot wait longer. It returns ctx's error when ctx ends
+// during a fetch or a wait, and the caller must then discard results and
+// errs.
 func fetchTxInfoChunks(
 	ctx context.Context,
 	chunks [][]string,
 	fetch func(context.Context, []string) ([]koiosparity.KoiosTxInfoItem, error),
 	waits []time.Duration,
+	retryTransient bool,
 	wait func(context.Context, time.Duration) error,
 	logf func(format string, args ...any),
 ) ([][]koiosparity.KoiosTxInfoItem, []error, error) {
@@ -118,7 +182,11 @@ func fetchTxInfoChunks(
 	for _, d := range waits {
 		pending = pending[:0]
 		for i, err := range errs {
-			if errors.Is(err, koiosparity.ErrTxInfoMissing) {
+			if err == nil {
+				continue
+			}
+			if errors.Is(err, koiosparity.ErrTxInfoMissing) ||
+				(retryTransient && !errors.Is(err, koiosparity.ErrKoiosPermanent)) {
 				pending = append(pending, i)
 			}
 		}
@@ -126,7 +194,7 @@ func fetchTxInfoChunks(
 			break
 		}
 		logf(
-			"nodeparity: koios has not indexed every pending tx yet; "+
+			"nodeparity: koios has not answered every pending tx yet; "+
 				"fetching %d chunk(s) again in %s: %v",
 			len(pending), d, errs[pending[0]],
 		)
@@ -748,6 +816,41 @@ func applyTxInfoResults(
 	return anyFailed
 }
 
+// allegraCrossing recognises the first block past the Allegra hard fork, so
+// the hard fork's redeem-UTxO removal is applied exactly once on the way
+// across. A baseline taken after the hard fork never sees the crossing and
+// needs no removal: Dingo's own set already lacks them. A rollback to a block
+// before the hard fork re-baselines from a set that still holds them, so the
+// next Allegra block must count as the crossing again.
+type allegraCrossing struct {
+	prevEra   uint8
+	havePrev  bool
+	firstSlot uint64 // first Allegra-or-later block rolled forward
+	haveFirst bool
+}
+
+// crosses reports whether a block of era is the first past the hard fork.
+func (c *allegraCrossing) crosses(era uint8) bool {
+	return c.havePrev && c.prevEra < allegra.EraIdAllegra &&
+		era >= allegra.EraIdAllegra
+}
+
+// forward records a block whose roll-forward succeeded.
+func (c *allegraCrossing) forward(era uint8, slot uint64) {
+	if era >= allegra.EraIdAllegra && (!c.havePrev || c.prevEra < allegra.EraIdAllegra) {
+		c.firstSlot, c.haveFirst = slot, true
+	}
+	c.prevEra, c.havePrev = era, true
+}
+
+// rollback records a rollback to slot that invalidated the reconstruction.
+func (c *allegraCrossing) rollback(slot uint64) {
+	if c.haveFirst && slot < c.firstSlot {
+		c.prevEra, c.havePrev = shelley.EraIdShelley, true
+		c.haveFirst = false
+	}
+}
+
 // pointsEqual reports whether a and b name the same block.
 func pointsEqual(a, b pcommon.Point) bool {
 	return a.Slot == b.Slot && bytes.Equal(a.Hash, b.Hash)
@@ -793,7 +896,12 @@ func RunFromGenesis(
 	logf func(format string, args ...any),
 	resumeFrom *Tip,
 	skipUTxO bool,
+	opts ...FromGenesisOption,
 ) error {
+	var options fromGenesisOptions
+	for _, opt := range opts {
+		opt(&options)
+	}
 	if !KoiosNetworks[network] {
 		return fmt.Errorf(
 			"koios-backed comparison only supports preview, preprod or mainnet, got %q",
@@ -809,12 +917,49 @@ func RunFromGenesis(
 		return err
 	}
 
+	var captures *boundaryCaptures
+	if options.captureDir != "" && !skipUTxO {
+		if err := os.MkdirAll(options.captureDir, 0o700); err != nil {
+			return fmt.Errorf("boundary capture directory: %w", err)
+		}
+		captures = newBoundaryCaptures(options.captureDir)
+		followerCtx, stopFollower := context.WithCancel(ctx)
+		var followerDone sync.WaitGroup
+		defer func() {
+			stopFollower()
+			followerDone.Wait()
+			captures.close()
+		}()
+		// Its own oracle: the main loop's is not safe for concurrent use.
+		followerOracle := newEpochOracle(func(ctx context.Context) ([]eraSpan, error) {
+			return fetchEraSpans(ctx, dingoAddr, magic)
+		})
+		followerDone.Go(func() {
+			if options.follower != nil {
+				options.follower(followerCtx, captures)
+				return
+			}
+			runBoundaryFollower(
+				followerCtx, dingoAddr, magic, startPoint,
+				followerOracle.epoch,
+				func(ctx context.Context, point pcommon.Point, epoch uint64) *boundaryCapture {
+					return captureBoundary(
+						ctx, dingoAddr, magic, point, epoch, koios, cache,
+						network, options.captureDir,
+					)
+				},
+				captures, logf,
+			)
+		})
+	}
+
 	var (
 		lastEpoch          uint64
 		haveLastEpoch      bool
 		utxoRefs           UTxOSet
 		utxoAttempted      bool
 		pendingTxHashes    []string
+		crossing           allegraCrossing
 		txInfoFlushCount   int
 		txInfoFlushElapsed time.Duration
 		// lastPoint is the most recent chain point either callback below has
@@ -861,7 +1006,8 @@ func RunFromGenesis(
 		// so the next block in lastEpoch runs them instead of being skipped as
 		// already checked. A resumed session starts after lastPoint, the block
 		// whose checks were abandoned, so the re-run is at a later block of the
-		// same epoch.
+		// same epoch -- unless the block had a boundary capture, which steps
+		// lastPoint back so the block itself is delivered again.
 		lastEpochInterrupted bool
 	)
 	// taint records cause unless an earlier one this epoch already did.
@@ -898,7 +1044,10 @@ func RunFromGenesis(
 	})
 	// Read once: a callback can outlive the return on ctx cancellation.
 	lookupTimeout := epochLookupTimeout
-	indexWaits := slices.Clone(txInfoIndexWaits)
+	txInfoWaits := slices.Clone(txInfoIndexWaits)
+	if captures != nil {
+		txInfoWaits = append(txInfoWaits, txInfoOutageWaits...)
+	}
 	// epochAt resolves point's epoch from Dingo's era history, or from Dingo
 	// directly for a point the history does not cover. skip is true when
 	// Dingo refused point as too old before ever answering: the caller
@@ -927,6 +1076,13 @@ func RunFromGenesis(
 				)
 			}
 		}()
+		// A captured boundary already carries its epoch, and resolving it any
+		// other way can need Dingo to answer for that point: when the era
+		// history is unavailable the per-point fallback is refused as too
+		// old, and the capture is never used.
+		if epoch, ok := captures.epochAt(point); ok {
+			return epoch, false, nil
+		}
 		epoch, oracleErr := oracle.epoch(lookupCtx, point.Slot)
 		if oracleErr == nil {
 			return epoch, false, nil
@@ -1032,7 +1188,7 @@ func RunFromGenesis(
 			) ([]koiosparity.KoiosTxInfoItem, error) {
 				return fetchTxInfosCached(ctx, koios, cache, network, chunk)
 			},
-			indexWaits, waitStakeRetry, logf,
+			txInfoWaits, captures != nil, waitStakeRetry, logf,
 		)
 		if err != nil {
 			return err
@@ -1174,7 +1330,7 @@ func RunFromGenesis(
 						_ uint,
 						blockData any,
 						_ chainsync.Tip,
-					) error {
+					) (retErr error) {
 						if err := enterCallback(); err != nil {
 							return err
 						}
@@ -1191,7 +1347,16 @@ func RunFromGenesis(
 						)
 						// Recorded before any of this block's own work runs --
 						// see lastPoint's doc comment above.
+						parentPoint := lastPoint
 						lastPoint = point
+						// Only a block whose callback succeeded counts: a
+						// failed one is delivered again by the resumed
+						// session, which must still see the crossing.
+						defer func() {
+							if retErr == nil {
+								crossing.forward(block.Era().Id, block.SlotNumber())
+							}
+						}()
 
 						if !utxoAttempted && !skipUTxO {
 							utxoAttempted = true
@@ -1224,6 +1389,28 @@ func RunFromGenesis(
 								)
 							}
 						} else if utxoRefs != nil {
+							if crossing.crosses(block.Era().Id) {
+								// The pre-hard-fork transactions still
+								// buffered are applied first, so a redeem
+								// output one of them created is removed too.
+								if err := flushPendingTxInfos(
+									sessionCtx, point,
+								); err != nil {
+									return callbackErr(
+										"flush tx_info at slot %d: %w",
+										point.Slot, err,
+									)
+								}
+								if utxoRefs != nil {
+									removed := ReturnRedeemUTxOs(utxoRefs)
+									logf(
+										"nodeparity: applied the Allegra hard "+
+											"fork's redeem-address UTxO removal "+
+											"at slot %d: %d refs removed",
+										point.Slot, len(removed),
+									)
+								}
+							}
 							for _, tx := range block.Transactions() {
 								pendingTxHashes = append(
 									pendingTxHashes, tx.Hash().String(),
@@ -1298,8 +1485,17 @@ func RunFromGenesis(
 						// Logged here because the reconnect loop usually
 						// reports the session's own end instead: the
 						// callback error arrives after it.
+						var capture *boundaryCapture
 						interrupted := func() error {
 							lastEpochInterrupted = true
+							if capture != nil {
+								// A capture answers only for this exact
+								// block, so the resumed session must deliver
+								// it again rather than resume after it.
+								// Applying its transactions a second time
+								// deletes and adds the same entries.
+								lastPoint = parentPoint
+							}
 							err := callbackErr(
 								"%w: epoch %d at slot %d: %w",
 								errEpochChecksInterrupted, epoch,
@@ -1335,6 +1531,35 @@ func RunFromGenesis(
 						}
 
 						result := EpochResult{Epoch: epoch}
+						captureCompared := false
+						if captures != nil {
+							capture = captures.take(epoch, point)
+						}
+						if capture != nil {
+							// A callback that ends before reporting this
+							// boundary hands the capture back whole, file
+							// included: the resumed session delivers this
+							// block again, and Dingo may no longer answer
+							// for it.
+							defer func() {
+								if !captureCompared {
+									captures.put(capture)
+								}
+							}()
+						}
+						// loadCapturedUTxO reads Dingo's set at point from the
+						// capture. The file outlives the read until the
+						// boundary is reported.
+						loadCapturedUTxO := func() (UTxOSet, error) {
+							set, err := UTxOSet(nil), capture.utxoErr
+							if err == nil {
+								set, err = readUTxOSetFile(capture.utxoPath)
+							}
+							if options.afterCapturedUTxORead != nil {
+								options.afterCapturedUTxORead(sessionCtx)
+							}
+							return set, err
+						}
 
 						// Protocol params and stake share one connection/Acquire
 						// per attempt, separate from UTxO's own -- see
@@ -1344,12 +1569,20 @@ func RunFromGenesis(
 						// own doc comment for why a connection that dies
 						// during or between the two calls is retried, not
 						// reported as an immediate hard failure.
-						psStart := time.Now()
-						result.ProtocolParamsMismatches, result.ProtocolParamsErr,
-							result.StakeMismatches, result.StakeErr = runProtocolParamsAndStake(
-							sessionCtx, dingoAddr, magic, point, koios, cache, network, epoch,
-						)
-						result.ProtocolParamsAndStakeElapsed = time.Since(psStart)
+						if capture != nil {
+							result.ProtocolParamsMismatches = capture.ppMismatches
+							result.ProtocolParamsErr = capture.ppErr
+							result.StakeMismatches = capture.stakeMismatches
+							result.StakeErr = capture.stakeErr
+							result.ProtocolParamsAndStakeElapsed = capture.psElapsed
+						} else {
+							psStart := time.Now()
+							result.ProtocolParamsMismatches, result.ProtocolParamsErr,
+								result.StakeMismatches, result.StakeErr = runProtocolParamsAndStake(
+								sessionCtx, dingoAddr, magic, point, koios, cache, network, epoch,
+							)
+							result.ProtocolParamsAndStakeElapsed = time.Since(psStart)
+						}
 						if sessionCtx.Err() != nil {
 							return interrupted()
 						}
@@ -1372,9 +1605,17 @@ func RunFromGenesis(
 						// attempt above (same block, same point) is not
 						// immediately redialed a second time here.
 						if !skipUTxO && utxoAttempted && utxoRefs == nil {
-							refs, err := captureGenesisBaseline(
-								sessionCtx, dingoAddr, magic, point,
+							var (
+								refs UTxOSet
+								err  error
 							)
+							if capture != nil {
+								refs, err = loadCapturedUTxO()
+							} else {
+								refs, err = captureGenesisBaseline(
+									sessionCtx, dingoAddr, magic, point,
+								)
+							}
 							if sessionCtx.Err() != nil {
 								// utxoRefs is still nil, so the rerun
 								// retries the capture.
@@ -1417,9 +1658,21 @@ func RunFromGenesis(
 							result.UTxOErr = verdictErr
 						case utxoVerdictCompare:
 							result.UTxOAttempted = true
-							cmp, err := compareUTxOWithRetry(
-								sessionCtx, dingoAddr, magic, point, utxoRefs,
+							var (
+								cmp utxoComparison
+								err error
 							)
+							if capture != nil {
+								var got UTxOSet
+								if got, err = loadCapturedUTxO(); err == nil {
+									cmp.refCount = len(got)
+									cmp.missing, cmp.extra, cmp.differs = UTxODiff(utxoRefs, got)
+								}
+							} else {
+								cmp, err = compareUTxOWithRetry(
+									sessionCtx, dingoAddr, magic, point, utxoRefs,
+								)
+							}
 							if sessionCtx.Err() != nil {
 								// The comparison only reads utxoRefs, and
 								// utxoTaintCause is reset only once a
@@ -1437,6 +1690,10 @@ func RunFromGenesis(
 							}
 						case utxoVerdictNoBaseline:
 							result.UTxOAttempted = false
+						}
+						captureCompared = true
+						if capture != nil && capture.utxoPath != "" {
+							_ = os.Remove(capture.utxoPath)
 						}
 						result.UTxOElapsed = time.Since(utxoStart)
 						utxoTaintCause = ""
@@ -1492,6 +1749,7 @@ func RunFromGenesis(
 						// disabled) reconstruction below.
 						if rollbackInvalidates {
 							pendingTxHashes = pendingTxHashes[:0]
+							crossing.rollback(point.Slot)
 						}
 
 						if rollbackInvalidates && utxoRefs != nil {
@@ -1635,6 +1893,7 @@ func RunFromGenesis(
 			continue
 		}
 		csDone := cs.Client.DoneChan()
+		go keepNtCConnAlive(sessionCtx, csConn, ntcKeepaliveInterval)
 
 		var sessionErr error
 		select {

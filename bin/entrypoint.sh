@@ -351,7 +351,8 @@ for my $part (@parts) {
   chdir($dir) or fail("cannot enter $walked: $!");
 }
 sysopen(my $log, $name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0644)
-  or fail("must name a new file: $path");
+  or fail($! == EEXIST ? "must name a new file: $path"
+                       : "cannot create $path: $!");
 chmod(0644, $log) or fail("cannot set mode on $path: $!");
 chdir($cwd) or fail("cannot restore the working directory: $!");
 open(STDOUT, q(>&), $log) or fail("cannot redirect stdout: $!");

@@ -196,7 +196,9 @@ type blockingLedgerPeerProvider struct {
 	release   chan struct{}
 }
 
-func (m *blockingLedgerPeerProvider) GetPoolRelays(ctx context.Context) ([]PoolRelay, error) {
+func (m *blockingLedgerPeerProvider) GetPoolRelays(
+	ctx context.Context,
+) ([]PoolRelay, error) {
 	m.startOnce.Do(func() { close(m.started) })
 	<-m.release
 	return m.mockLedgerPeerProvider.GetPoolRelays(ctx)
@@ -733,11 +735,107 @@ func TestPeerGovernor_RecordPeerStateChange(t *testing.T) {
 	)
 }
 
-func TestPeerGovernor_TransitionMetrics_ReconcilePromotion(t *testing.T) {
+// The cardano-node-compatible transition counters must follow every state
+// change, not only the ones reconcile makes: gossip churn, connection
+// events and inbound handling move peers too. A drop out of hot counts as a
+// hot demotion whether the peer lands warm or cold.
+func TestPeerGovernor_RecordPeerStateChange_LegacyCounters(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		EventBus:     newMockEventBus(),
+		PromRegistry: reg,
+	})
+
+	pg.recordPeerStateChange(PeerStateCold, PeerStateWarm)
+	pg.recordPeerStateChange(PeerStateWarm, PeerStateHot)
+	pg.recordPeerStateChange(PeerStateCold, PeerStateHot)
+	pg.recordPeerStateChange(PeerStateHot, PeerStateWarm)
+	pg.recordPeerStateChange(PeerStateHot, PeerStateCold)
+	pg.recordPeerStateChange(PeerStateWarm, PeerStateCold)
+	pg.recordPeerStateChange(PeerStateHot, PeerStateHot)
+
+	// cold->warm and cold->hot leave cold
+	assert.Equal(
+		t,
+		float64(2),
+		testutil.ToFloat64(pg.metrics.coldPeersPromotions),
+	)
+	// warm->hot and cold->hot reach hot
+	assert.Equal(
+		t,
+		float64(2),
+		testutil.ToFloat64(pg.metrics.warmPeersPromotions),
+	)
+	assert.Equal(
+		t,
+		float64(2),
+		testutil.ToFloat64(pg.metrics.increasedActivePeers),
+	)
+	// hot->warm and hot->cold leave hot; warm->cold does not
+	assert.Equal(
+		t,
+		float64(2),
+		testutil.ToFloat64(pg.metrics.warmPeersDemotions),
+	)
+	assert.Equal(
+		t,
+		float64(2),
+		testutil.ToFloat64(pg.metrics.decreasedActivePeers),
+	)
+}
+
+func TestPeerGovernor_TransitionMetrics_GossipChurnLegacyCounters(
+	t *testing.T,
+) {
+	reg := prometheus.NewRegistry()
+	eventBus := newMockEventBus()
+	t.Cleanup(eventBus.Stop)
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:           eventBus,
+		PromRegistry:       reg,
+		GossipChurnPercent: 0.50,
+		MinScoreThreshold:  0.3,
+	})
+
+	pg.peers = []*Peer{
+		{
+			Address: "gossip1:3001", Source: PeerSourceP2PGossip,
+			State: PeerStateHot, PerformanceScore: 0.9,
+		},
+		{
+			Address: "gossip2:3001", Source: PeerSourceP2PGossip,
+			State: PeerStateHot, PerformanceScore: 0.2,
+		},
+		{
+			Address: "gossip3:3001", Source: PeerSourceP2PGossip,
+			State: PeerStateWarm, PerformanceScore: 0.5,
+			Connection: &PeerConnection{IsClient: true},
+		},
+	}
+
+	pg.gossipChurn()
+
+	// churn demotes hot->cold outside reconcile
+	assert.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(pg.metrics.warmPeersDemotions),
+	)
+	assert.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(pg.metrics.decreasedActivePeers),
+	)
+}
+
+func TestPeerGovernor_TransitionMetrics_ReconcilePromotion(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	eventBus := newMockEventBus()
+	t.Cleanup(eventBus.Stop)
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:     eventBus,
 		PromRegistry: reg,
 		MinHotPeers:  1,
 	})
@@ -763,6 +861,17 @@ func TestPeerGovernor_TransitionMetrics_ReconcilePromotion(t *testing.T) {
 		testutil.ToFloat64(
 			pg.metrics.peerDemotions.WithLabelValues("hot", "warm"),
 		),
+	)
+	// reconcile's promotion is counted once, not again by reconcile itself
+	assert.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(pg.metrics.warmPeersPromotions),
+	)
+	assert.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(pg.metrics.increasedActivePeers),
 	)
 }
 
@@ -1043,7 +1152,11 @@ func TestPeerGovernor_CorroborationIdentityUsesPoolControlKey(t *testing.T) {
 	pg.mu.Unlock()
 
 	firstIdentity := pg.CorroborationIdentityByConnId(connections[0])
-	require.NotEmpty(t, firstIdentity, "a ledger control key establishes identity")
+	require.NotEmpty(
+		t,
+		firstIdentity,
+		"a ledger control key establishes identity",
+	)
 	assert.Equal(
 		t,
 		firstIdentity,
@@ -2156,7 +2269,9 @@ type mockLedgerPeerProvider struct {
 	err         error
 }
 
-func (m *mockLedgerPeerProvider) GetPoolRelays(ctx context.Context) ([]PoolRelay, error) {
+func (m *mockLedgerPeerProvider) GetPoolRelays(
+	ctx context.Context,
+) ([]PoolRelay, error) {
 	if m.err != nil {
 		return nil, m.err
 	}

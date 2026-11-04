@@ -190,6 +190,22 @@ else
   unset DEVNET_ACCELERATED
   export DEVNET_TXPUMP_CONFIRMATION_SLOTS=600
 fi
+# DEVNET_SPEC_OVERRIDE selects another spec file in this directory, for
+# scenarios that need a network the stock specs do not describe (for
+# example a different starting protocol version).
+if [[ -n "${DEVNET_SPEC_OVERRIDE:-}" ]]; then
+  # The spec is mounted from this directory by a ./-relative name, so a
+  # path elsewhere would reach the configurator as a file it cannot read.
+  # Every network spec here is named testnet*.yaml; any other file in the
+  # directory would reach the spec loader as a document it cannot parse.
+  spec_name="${DEVNET_SPEC_OVERRIDE#./}"
+  if [[ -z "${spec_name}" || "${spec_name}" == */* || "${spec_name}" != testnet*.yaml ||
+    ! -f "${SCRIPT_DIR}/${spec_name}" ]]; then
+    echo "[run-tests] ERROR: DEVNET_SPEC_OVERRIDE=${DEVNET_SPEC_OVERRIDE} is not a spec file in ${SCRIPT_DIR}" >&2
+    exit 1
+  fi
+  ACTIVE_SPEC="./${spec_name}"
+fi
 export "${SPEC_VAR}=${ACTIVE_SPEC}"
 export DEVNET_TESTNET_YAML="${SCRIPT_DIR}/${ACTIVE_SPEC#./}"
 # The scenario stops and starts containers, and captures compose logs and

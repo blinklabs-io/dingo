@@ -239,7 +239,8 @@ func TestChainsyncClientRollForwardCatchUpBandWaitIsBounded(t *testing.T) {
 	testutil.RequireNoReceive(t, f.ledgerCh, 100*time.Millisecond,
 		"a header that was never admissible must not reach the ledger")
 	require.Nil(t, f.selector.GetPeerTip(f.conn))
-	require.False(t, f.observed(bandTestFirst))
+	require.True(t, f.observed(bandTestFirst),
+		"retained ancestry must not grant candidate or ledger admission")
 }
 
 // Not t.Parallel: goleak inspects every goroutine in the process.
