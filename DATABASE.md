@@ -4445,6 +4445,10 @@ with the same overflow-free engine-side aggregate as
 so no UTxO row is streamed to the caller. It runs on the caller's transaction
 context.
 
+The SQLite aggregate reuses a private scratch integer for each group and uses
+64-bit parsing when a value fits; wider decimal values still use exact
+arbitrary-precision parsing. Step and inverse operations share those rules.
+
 `GetUtxosByAddress` accepts multiple address patterns and OR-joins their coarse
 SQL branches into a single query, mirroring `GetUtxosByAddressWithOrdering`.
 The coordinated `Database.UtxosByAddress` builds one exact-address pattern per
