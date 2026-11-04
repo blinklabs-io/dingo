@@ -121,6 +121,20 @@ func keepNtCConnAlive(
 	}
 }
 
+// txInfoFlushRounds is how many rounds of concurrent /tx_info requests a
+// mid-epoch flush holds. A flush waits for its slowest request before the
+// chain is read further, so with a single round one stalled request leaves
+// every other slot idle; measured on mainnet at 250 hashes and 4 requests in
+// flight, single-round flushes fetched about half of what the same Koios host
+// answered with requests kept in flight.
+const txInfoFlushRounds = 4
+
+// txInfoFlushThreshold is how many hashes accumulate before a mid-epoch
+// flush.
+func txInfoFlushThreshold(koios *koiosparity.KoiosClient) int {
+	return txInfoFlushRounds * koios.TxInfoConcurrency() * koios.TxInfoBatchSize()
+}
+
 // fetchTxInfoChunks fetches every chunk with at most concurrency requests
 // in flight, then, after each wait in waits, fetches again each
 // chunk that failed with koiosparity.ErrTxInfoMissing, or with any failure
@@ -1110,11 +1124,9 @@ func RunFromGenesis(
 		return 0, false, err
 	}
 
-	// txInfoFlushThreshold is how many hashes accumulate before a mid-epoch
-	// flush; one always runs before each epoch-boundary comparison
-	// regardless. It gives the flush a full set of concurrent batches to fan
-	// out, rather than one batch at a time with nothing to parallelize.
-	txInfoFlushThreshold := koios.TxInfoConcurrency() * koios.TxInfoBatchSize()
+	// One flush always runs before each epoch-boundary comparison regardless
+	// of the threshold.
+	flushThreshold := txInfoFlushThreshold(koios)
 
 	// flushPendingTxInfos applies every buffered transaction hash's
 	// input/output changes to utxoRefs. Hashes accumulate across blocks
@@ -1406,7 +1418,7 @@ func RunFromGenesis(
 									pendingTxHashes, tx.Hash().String(),
 								)
 							}
-							if len(pendingTxHashes) >= txInfoFlushThreshold {
+							if len(pendingTxHashes) >= flushThreshold {
 								if err := flushPendingTxInfos(
 									sessionCtx, point,
 								); err != nil {

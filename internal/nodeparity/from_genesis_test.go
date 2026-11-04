@@ -3356,6 +3356,15 @@ func TestAllegraCrossingAfterPostHardForkStart(t *testing.T) {
 // TestFetchTxInfoChunksKeepsConcurrencyInFlight proves the flush keeps at
 // most the Koios client's TxInfoConcurrency requests in flight: a host that
 // stalls under more load is given only what it was configured for.
+func TestTxInfoFlushThresholdHoldsSeveralRounds(t *testing.T) {
+	t.Parallel()
+	koios := &koiosparity.KoiosClient{}
+	require.NoError(t, koios.SetTxInfoLimits(250, 4))
+	// A flush of a single round waits on its slowest request with every
+	// other slot idle.
+	require.Equal(t, 4*4*250, txInfoFlushThreshold(koios))
+}
+
 func TestFetchTxInfoChunksKeepsConcurrencyInFlight(t *testing.T) {
 	t.Parallel()
 	var inFlight, peak atomic.Int32
