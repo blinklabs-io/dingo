@@ -154,7 +154,7 @@ func TestPeerHeaderForkPathTrimsOnlyAtExactAppliedPoint(t *testing.T) {
 				)
 				require.NoError(
 					t,
-					ls.verifyPeerForkTargetEpochAncestors(
+					ls.verifyPeerForkTargetEpochAncestors(t.Context(),
 						conn,
 						path,
 						ls.currentEpoch,
@@ -163,6 +163,7 @@ func TestPeerHeaderForkPathTrimsOnlyAtExactAppliedPoint(t *testing.T) {
 					),
 				)
 				gotNonce, epoch, fork, err := ls.peerChainSelectionEpochNonce(
+					t.Context(),
 					conn,
 					headers[3],
 					ls.loadConsensusSnapshot(),

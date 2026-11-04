@@ -443,7 +443,9 @@ func TestChainsyncHeaderPastForecastHorizonIsNotQueued(t *testing.T) {
 				"a withheld header must re-intersect its connection",
 			)
 			require.Equal(t, connId, got.ConnectionId)
-			require.Equal(t, "header past forecast horizon", got.Reason)
+			require.Equal(t, event.ChainsyncResyncReasonHeaderPastForecastHorizon, got.Reason)
+			require.True(t, event.IsLocalChainsyncResyncReason(got.Reason),
+				"local forecast recovery must not accumulate peer-instability backoff")
 		})
 	}
 }
@@ -1992,7 +1994,9 @@ func TestFarFromTipBlockfetchLowWatermarkAfterHorizonRelease(t *testing.T) {
 				testutil.AsyncWait,
 				"a header past the horizon must re-intersect its connection",
 			)
-			require.Equal(t, "header past forecast horizon", got.Reason)
+			require.Equal(t, event.ChainsyncResyncReasonHeaderPastForecastHorizon, got.Reason)
+			require.True(t, event.IsLocalChainsyncResyncReason(got.Reason),
+				"local forecast recovery must not accumulate peer-instability backoff")
 			testutil.RequireNoReceive(
 				t,
 				requests,

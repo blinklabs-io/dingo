@@ -2320,7 +2320,7 @@ func (ls *LedgerState) bufferHeaderEvent(
 		ls.bufferedHeaderMutex.Unlock()
 		ls.requestChainsyncResync(
 			e.ConnectionId,
-			"buffered header limit exceeded",
+			event.ChainsyncResyncReasonBufferedHeaderLimitExceeded,
 			pending,
 		)
 		return
@@ -4958,7 +4958,7 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 		)
 		ls.requestChainsyncResync(
 			e.ConnectionId,
-			"header past forecast horizon",
+			event.ChainsyncResyncReasonHeaderPastForecastHorizon,
 			pending,
 		)
 		return nil
@@ -5011,8 +5011,8 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 			// The queue mutation is complete. Release before later ledger reads so
 			// a snapshot publisher holding the ledger write lock cannot form a
 			// lock cycle with this generation pin. The deferred selector callback
-			// reacquires the same generation and rejects admission if publication
-			// occurred in the gap.
+			// waits out a local transition and can recover an expired verdict only
+			// when the exact header has already been applied.
 			releaseVerificationGeneration()
 			releaseVerificationGeneration = nil
 			if e.PeerTipAdmission != nil {
@@ -5022,10 +5022,11 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 						admit(false)
 						return
 					}
-					release, current := ls.
-						PinHeaderCryptoVerificationGeneration(
-							headerCryptoVerificationGeneration,
-						)
+					release, current := ls.pinSettledHeaderAdmission(
+						ls.lifecycleContext(),
+						&e,
+						headerCryptoVerificationGeneration,
+					)
 					if !current {
 						cleanup := ls.invalidateChainsyncHeaderAdmission(e)
 						admit(false)

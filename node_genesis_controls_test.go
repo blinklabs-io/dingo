@@ -17,30 +17,37 @@ package dingo
 import (
 	"testing"
 
+	"github.com/blinklabs-io/dingo/chainselection"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/topology"
 	"github.com/stretchr/testify/require"
 )
 
-func TestGenesisControlGroupsHaveNoNetworkDefaults(t *testing.T) {
+func TestGenesisControlGroupsUsePublishedTopologyByDefault(t *testing.T) {
 	t.Parallel()
 	for _, network := range []string{
 		"dijkstra", "musashi", "preview", "preprod", "mainnet",
 	} {
 		t.Run(network, func(t *testing.T) {
 			t.Parallel()
-			cfg, err := cardano.NewCardanoNodeConfigFromEmbedFS(
-				cardano.EmbeddedConfigFS,
-				cardano.EmbeddedConfigPath(network),
+			cardanoCfg, err := cardano.NewCardanoNodeConfigFromEmbedFS(
+				cardano.EmbeddedConfigFS, cardano.EmbeddedConfigPath(network),
 			)
 			require.NoError(t, err)
-			n := &Node{
-				config: Config{cardanoNodeConfig: cfg, genesisBootstrap: true},
+			cfg := NewConfig()
+			cfg.cardanoNodeConfig = cardanoCfg
+			cfg.networkMagic = cardanoCfg.ShelleyGenesis().NetworkMagic
+			n := &Node{config: cfg}
+			require.Zero(t, cfg.cfg.GenesisBootstrap.CorroborationPeers)
+			for range 2 {
+				pg := n.newPeerGovernor()
+				pg.LoadTopologyConfig(&topology.TopologyConfig{})
+				require.Empty(
+					t,
+					pg.GetPeers(),
+					"only the supplied topology may add roots",
+				)
 			}
-			n.config.networkMagic = cfg.ShelleyGenesis().NetworkMagic
-			require.Empty(t, n.genesisControlGroups())
-			n.config.cfg = NewConfig().cfg
-			require.Empty(t, n.genesisControlGroups())
 		})
 	}
 }
@@ -105,4 +112,21 @@ func TestGenesisControlGroupsReachReplacementGovernors(t *testing.T) {
 			"configured roots do not invent stake",
 		)
 	}
+}
+
+func TestChainsyncGenesisIntersectionDoesNotRequireOperatorQuorum(
+	t *testing.T,
+) {
+	t.Parallel()
+	for _, genesis := range []bool{false, true} {
+		cs := chainselection.NewChainSelector(
+			chainselection.ChainSelectorConfig{
+				GenesisMode: genesis, SecurityParam: 20,
+			},
+		)
+		n := &Node{chainSelector: cs}
+		require.False(t, cs.GenesisCorroborationActive())
+		require.Equal(t, genesis, n.chainsyncIntersectAtLedgerTip())
+	}
+	require.False(t, (&Node{}).chainsyncIntersectAtLedgerTip())
 }

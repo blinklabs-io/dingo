@@ -653,6 +653,7 @@ func (n *Node) newOuroborosConfig(
 		ChainsyncIntersectAtLedgerTip:        n.chainsyncIntersectAtLedgerTip,
 		ChainsyncObservePeerTip:              n.chainsyncObservePeerTip,
 		ChainsyncRecordDeliveredPeerTip:      n.chainsyncRecordDeliveredPeerTip,
+		ChainsyncRecoverDeliveredPeerTip:     n.chainsyncRecoverDeliveredPeerTip,
 		ChainsyncRecordDeliveredPeerRollback: n.chainsyncRecordDeliveredPeerRollback,
 		ChainsyncPrepareForecastWitness:      n.chainsyncPrepareForecastWitness,
 		ChainsyncRemoveForecastWitness:       n.chainsyncRemoveForecastWitness,

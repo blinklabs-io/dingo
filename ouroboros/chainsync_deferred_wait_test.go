@@ -17,11 +17,17 @@ package ouroboros
 import (
 	"context"
 	"errors"
+	"io"
+	"log/slog"
+	"net"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/chainselection"
+	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/test/fixtures"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -31,6 +37,176 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
 )
+
+func TestChainsyncMissingAncestryRecoversWithoutPublicationWait(t *testing.T) {
+	t.Parallel()
+	f := newDeferredHeaderRecoveryFixture(t, "127.0.0.1:6049")
+	f.o.chainSelectionVerifyHeaderCrypto = func(
+		ouroboros.ConnectionId, gledger.BlockHeader,
+	) (uint64, error) {
+		return 0, ledger.ErrHeaderAncestryUnavailable
+	}
+	requirePromptDeferredRecovery(t, f)
+}
+
+func TestChainsyncIdleDeferralRecoversWithoutPublicationWait(t *testing.T) {
+	t.Parallel()
+	f := newDeferredHeaderRecoveryFixture(t, "127.0.0.1:6050")
+	_, err := f.o.chainSelectionVerifyHeaderCrypto(f.conn, nil)
+	require.True(t, ledger.IsHeaderVerificationDeferred(err))
+	require.False(t, ledger.IsHeaderVerificationContextTransient(err))
+	setTestLedgerTip(t, f.o, ochainsync.Tip{
+		Point:       ocommon.NewPoint(100, gledger.Blake2b256{0xa0}.Bytes()),
+		BlockNumber: 1,
+	})
+	requirePromptDeferredRecovery(t, f)
+}
+
+func requirePromptDeferredRecovery(
+	t *testing.T,
+	f deferredHeaderRecoveryFixture,
+) {
+	t.Helper()
+	t.Cleanup(f.o.stopFutureHeaderResyncs)
+	_, ledgerCh := f.o.eventBus.Subscribe(ledger.ChainsyncEventType)
+	_, tipCh := f.o.eventBus.Subscribe(chainselection.PeerTipUpdateEventType)
+	_, recycleCh := f.o.eventBus.Subscribe(
+		ledger.ConnectionRecycleRequestedEventType,
+	)
+	f.o.catchUpBandWaitTimeout = time.Minute
+	f.o.config.ChainsyncHeaderVerificationSettled = newSettleSignal().current
+	f.o.chainsyncLocalChainTips = func() ([]byte, []byte) {
+		hash := gledger.Blake2b256{0xa0}.Bytes()
+		return hash, hash
+	}
+	var attempts atomic.Int32
+	verify := f.o.chainSelectionVerifyHeaderCrypto
+	f.o.chainSelectionVerifyHeaderCrypto = func(
+		conn ouroboros.ConnectionId, header gledger.BlockHeader,
+	) (uint64, error) {
+		attempts.Add(1)
+		return verify(conn, header)
+	}
+	header := nonByronTestHeader{&testBlockHeader{
+		hash: gledger.Blake2b256{0xb9}, prevHash: gledger.Blake2b256{0xb8},
+		slotNumber: 400, blockNumber: 10,
+	}}
+	connDone := make(chan any)
+	finished := make(chan struct{})
+	result := make(chan error, 1)
+	t.Cleanup(func() {
+		close(connDone)
+		testutil.RequireReceive(t, finished, testutil.AsyncWait,
+			"the roll-forward callback must exit on connection close")
+	})
+	go func() {
+		defer close(finished)
+		result <- f.o.chainsyncClientRollForward(ochainsync.CallbackContext{
+			ConnectionId: f.conn, ConnectionDoneChan: connDone,
+		}, 0, header, ochainsync.Tip{
+			Point:       ocommon.NewPoint(400, header.Hash().Bytes()),
+			BlockNumber: 10,
+		})
+	}()
+	require.NoError(t, testutil.RequireReceive(t, result, 5*time.Second,
+		"an idle deferred header must not wait for a publication"))
+	require.EqualValues(t, 1, attempts.Load())
+	recovery := testutil.RequireReceive(t, f.resyncCh, testutil.AsyncWait,
+		"an idle peer must re-intersect to recover discarded predecessors")
+	require.Equal(t, event.ChainsyncResyncReasonHeaderValidationRecovery,
+		recovery.Data.(event.ChainsyncResyncEvent).Reason)
+	for _, ch := range []<-chan event.Event{ledgerCh, tipCh, recycleCh} {
+		testutil.RequireNoReceive(
+			t,
+			ch,
+			100*time.Millisecond,
+			"unverified ancestry must neither admit the header nor penalize its peer",
+		)
+	}
+}
+
+func TestChainsyncDeferredPublicationWaitPreservesPendingWork(t *testing.T) {
+	t.Parallel()
+	for _, name := range []string{"queued-header", "unapplied-block", "unknown-tips", "transient-idle"} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := newForecastHorizonFixture(t, "10.0.0.50:3001")
+			f.o.ledgerState = newTestLedgerState(t)
+			applied := gledger.Blake2b256{0xa0}.Bytes()
+			pending := gledger.Blake2b256{0xb0}.Bytes()
+			setTestLedgerTip(t, f.o, ochainsync.Tip{
+				Point: ocommon.NewPoint(100, applied), BlockNumber: 1,
+			})
+			f.o.chainsyncLocalChainTips = func() ([]byte, []byte) {
+				switch name {
+				case "queued-header":
+					return applied, pending
+				case "unapplied-block":
+					return pending, pending
+				case "transient-idle":
+					return applied, applied
+				default:
+					return nil, nil
+				}
+			}
+			deferred := deferredVerificationErr(t)
+			if name == "transient-idle" {
+				deferred = transientContextErr(t)
+			}
+			settle := newSettleSignal()
+			f.o.config.ChainsyncHeaderVerificationSettled = settle.current
+			f.o.catchUpBandWaitTimeout = time.Minute
+			attempted := make(chan struct{}, 1)
+			var attempts atomic.Int32
+			f.o.chainSelectionVerifyHeaderCrypto = func(
+				ouroboros.ConnectionId, gledger.BlockHeader,
+			) (uint64, error) {
+				if attempts.Add(1) == 1 {
+					attempted <- struct{}{}
+					return 0, deferred
+				}
+				return 42, nil
+			}
+			connDone := make(chan any)
+			finished := make(chan struct{})
+			t.Cleanup(func() {
+				close(connDone)
+				testutil.RequireReceive(t, finished, testutil.AsyncWait,
+					"the verification waiter must exit on connection close")
+			})
+			type verdict struct {
+				generation uint64
+				err        error
+			}
+			result := make(chan verdict, 1)
+			go func() {
+				defer close(finished)
+				var baseline ochainsync.Tip
+				var wait deferredVerificationWait
+				defer wait.close()
+				generation, err := f.o.verifyHeaderAwaitingLedger(
+					ochainsync.CallbackContext{
+						ConnectionId: f.conn, ConnectionDoneChan: connDone,
+					},
+					newTestBlockHeader(400, 10, 0xb9),
+					&baseline,
+					&wait,
+				)
+				result <- verdict{generation, err}
+			}()
+			testutil.RequireReceive(t, attempted, testutil.AsyncWait,
+				"verification must reach the deferral before testing the wait")
+			testutil.RequireNoReceive(t, result, 100*time.Millisecond,
+				"pending work or a transient publication must retain the wait")
+			settle.publish()
+			got := testutil.RequireReceive(t, result, testutil.AsyncWait,
+				"the next publication must retry verification")
+			require.NoError(t, got.err)
+			require.EqualValues(t, 42, got.generation)
+			require.EqualValues(t, 2, attempts.Load())
+		})
+	}
+}
 
 // deferredVerificationErr returns a real deferred verification result by
 // verifying a header against a ledger with no published state for its slot.
@@ -328,4 +504,82 @@ func TestChainsyncClientRollForwardReleasesDeferredWaitOnReadmissionReturn(
 	require.EqualValues(t, 2, attempts.Load())
 	require.EqualValues(t, 2, admissions.Load())
 	goleak.VerifyNone(t, ignore)
+}
+
+func TestChainsyncDeferredVerificationEndsOnRealTransportClose(t *testing.T) {
+	t.Parallel()
+	f := newPatienceRollForwardFixture(t, true)
+	f.o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
+	settle := newSettleSignal()
+	f.o.config.ChainsyncHeaderVerificationSettled = settle.current
+	f.o.catchUpBandWaitTimeout = time.Minute
+	deferred := transientContextErr(t)
+	var cleanupRelease atomic.Bool
+	entered := make(chan struct{}, 1)
+	returned := make(chan error, 1)
+	f.o.chainSelectionVerifyHeaderCrypto = func(ouroboros.ConnectionId, gledger.BlockHeader) (uint64, error) {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		if cleanupRelease.Load() {
+			return 42, nil
+		}
+		return 0, deferred
+	}
+	_, ledgerCh := f.o.eventBus.Subscribe(ledger.ChainsyncEventType)
+	t.Cleanup(f.o.stopFutureHeaderResyncs)
+	blocks, err := fixtures.GenerateBabbageChainAt(10, 400, 1)
+	require.NoError(t, err)
+	block := blocks[0]
+	require.NotEmpty(t, block.Cbor())
+	tip := ochainsync.Tip{Point: ocommon.NewPoint(block.SlotNumber(), block.Hash().Bytes()), BlockNumber: block.BlockNumber()}
+	serverPipe, clientPipe := net.Pipe()
+	t.Cleanup(func() { _ = serverPipe.Close(); _ = clientPipe.Close() })
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	serverConfig := ochainsync.NewConfig(
+		ochainsync.WithFindIntersectFunc(func(ochainsync.CallbackContext, []ocommon.Point) (ocommon.Point, ochainsync.Tip, error) {
+			return ocommon.NewPointOrigin(), tip, nil
+		}),
+		ochainsync.WithRequestNextFunc(func(cb ochainsync.CallbackContext) error {
+			return cb.Server.RollForward(gledger.BlockTypeBabbage, block.Cbor(), tip)
+		}),
+	)
+	type serverResult struct {
+		conn *ouroboros.Connection
+		err  error
+	}
+	serverReady := make(chan serverResult, 1)
+	go func() {
+		c, err := ouroboros.New(ouroboros.WithConnection(serverPipe), ouroboros.WithServer(true), ouroboros.WithNodeToNode(true), ouroboros.WithNetworkMagic(42), ouroboros.WithDelayProtocolStart(true), ouroboros.WithLogger(logger), ouroboros.WithChainSyncConfig(serverConfig))
+		serverReady <- serverResult{c, err}
+	}()
+	clientConfig := ochainsync.NewConfig(ochainsync.WithPipelineLimit(1), ochainsync.WithRollForwardFunc(func(cb ochainsync.CallbackContext, typ uint, v any, tip ochainsync.Tip) error {
+		err := f.o.chainsyncClientRollForward(cb, typ, v, tip)
+		returned <- err
+		return err
+	}))
+	client, err := ouroboros.New(ouroboros.WithConnection(clientPipe), ouroboros.WithNodeToNode(true), ouroboros.WithNetworkMagic(42), ouroboros.WithDelayProtocolStart(true), ouroboros.WithLogger(logger), ouroboros.WithChainSyncConfig(clientConfig))
+	require.NoError(t, err)
+	server := testutil.RequireReceive(t, serverReady, 5*time.Second, "server handshake")
+	require.NoError(t, server.err)
+	t.Cleanup(func() { cleanupRelease.Store(true); settle.publish(); _ = client.Close(); _ = server.conn.Close() })
+	require.True(t, f.state.AddClientConnId(client.Id()))
+	f.state.SetClientConnId(client.Id())
+	server.conn.ChainSync().Server.Start()
+	client.ChainSync().Client.Start()
+	require.NoError(t, client.ChainSync().Client.Sync(nil))
+	select {
+	case <-entered:
+	case err := <-client.ErrorChan():
+		t.Fatalf("client failed before deferred verification: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("wire-delivered header never entered deferred verification")
+	}
+	testutil.RequireNoReceive(t, returned, 100*time.Millisecond, "callback must really be parked before disconnect")
+	closed := make(chan error, 1)
+	go func() { closed <- client.Close() }()
+	testutil.RequireReceive(t, returned, 5*time.Second, "connection shutdown must release verification before protocol completion")
+	require.NoError(t, testutil.RequireReceive(t, closed, 5*time.Second, "connection close must join the protocol callback"))
+	testutil.RequireNoReceive(t, ledgerCh, 100*time.Millisecond, "a disconnected unverified header must not reach the ledger")
 }

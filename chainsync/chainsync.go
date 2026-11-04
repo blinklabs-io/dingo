@@ -339,15 +339,17 @@ type headerRecord struct {
 }
 
 type observedHeaderRecord struct {
-	header   ObservedHeader
-	prevHash []byte
-	bytes    int
+	header             ObservedHeader
+	prevHash           []byte
+	bytes              int
+	deliveryGeneration uint64
 }
 
 type observedHeaderChain struct {
-	order         []string
-	byHash        map[string]observedHeaderRecord
-	retainedBytes int
+	order             []string
+	byHash            map[string]observedHeaderRecord
+	retainedBytes     int
+	authenticatedHead string
 }
 
 const (
@@ -1464,7 +1466,7 @@ func (s *State) RewindTrackedClientsTo(
 // ledger fork resolution can use it only as candidate-path input and must
 // validate the complete linked path before caching a verdict.
 func (s *State) RecordObservedHeader(h ObservedHeader) {
-	s.recordObservedHeader(h, nil)
+	s.recordObservedHeader(h, nil, 0)
 }
 
 // RecordObservedHeaderForSession stores ancestry only while session still owns
@@ -1474,12 +1476,27 @@ func (s *State) RecordObservedHeaderForSession(
 	session ClientSessionToken,
 	h ObservedHeader,
 ) {
-	s.recordObservedHeader(h, &session)
+	s.recordObservedHeader(h, &session, 0)
+}
+
+// RecordAuthenticatedDeliveryForSession remembers an authenticated delivery
+// inside the existing bounded history without authorizing its raw ancestry.
+func (s *State) RecordAuthenticatedDeliveryForSession(
+	session ClientSessionToken,
+	h ObservedHeader,
+) {
+	generation := h.HeaderCryptoVerificationGeneration
+	if generation == 0 {
+		return
+	}
+	h.HeaderCryptoVerificationGeneration = 0
+	s.recordObservedHeader(h, &session, generation)
 }
 
 func (s *State) recordObservedHeader(
 	h ObservedHeader,
 	session *ClientSessionToken,
+	deliveryGeneration uint64,
 ) {
 	if h.BlockHeader == nil || len(h.Point.Hash) == 0 {
 		return
@@ -1519,8 +1536,12 @@ func (s *State) recordObservedHeader(
 	if existing, exists := chainHistory.byHash[hashKey]; exists {
 		if h.HeaderCryptoVerificationGeneration != 0 {
 			existing.header.HeaderCryptoVerificationGeneration = h.HeaderCryptoVerificationGeneration
-			chainHistory.byHash[hashKey] = existing
 		}
+		if deliveryGeneration != 0 {
+			existing.deliveryGeneration = deliveryGeneration
+			chainHistory.authenticatedHead = hashKey
+		}
+		chainHistory.byHash[hashKey] = existing
 		return
 	}
 	recordBytes := observedHeaderRecordOverhead + len(h.BlockHeader.Cbor())
@@ -1534,9 +1555,13 @@ func (s *State) recordObservedHeader(
 	h.Tip.Point.Hash = cloneBytes(h.Tip.Point.Hash)
 	chainHistory.order = append(chainHistory.order, hashKey)
 	chainHistory.byHash[hashKey] = observedHeaderRecord{
-		header:   h,
-		prevHash: append([]byte(nil), prevHash...),
-		bytes:    recordBytes,
+		header:             h,
+		prevHash:           append([]byte(nil), prevHash...),
+		bytes:              recordBytes,
+		deliveryGeneration: deliveryGeneration,
+	}
+	if deliveryGeneration != 0 {
+		chainHistory.authenticatedHead = hashKey
 	}
 	chainHistory.retainedBytes += recordBytes
 	s.observedHeaderBytes += recordBytes
@@ -1619,6 +1644,36 @@ func (s *State) LookupObservedHeader(
 	return record.header, append([]byte(nil), record.prevHash...), true
 }
 
+// LatestAuthenticatedDeliveryForSession returns the last authenticated
+// delivery only while its original bearer and bounded history still retain
+// it. Its generation records past authentication, not a current verdict.
+func (s *State) LatestAuthenticatedDeliveryForSession(
+	session ClientSessionToken,
+	connId ouroboros.ConnectionId,
+) (ObservedHeader, bool) {
+	s.clientConnIdMutex.RLock()
+	defer s.clientConnIdMutex.RUnlock()
+	client := s.trackedClients[connId]
+	if client == nil || client != session.client {
+		return ObservedHeader{}, false
+	}
+	s.observedHeadersMutex.RLock()
+	defer s.observedHeadersMutex.RUnlock()
+	history := s.observedHeaders[connId]
+	if history == nil {
+		return ObservedHeader{}, false
+	}
+	record, ok := history.byHash[history.authenticatedHead]
+	if !ok || record.deliveryGeneration == 0 {
+		return ObservedHeader{}, false
+	}
+	h := record.header
+	h.Point.Hash = cloneBytes(h.Point.Hash)
+	h.Tip.Point.Hash = cloneBytes(h.Tip.Point.Hash)
+	h.HeaderCryptoVerificationGeneration = record.deliveryGeneration
+	return h, true
+}
+
 func (s *State) clearObservedHeaderHistory(
 	connId ouroboros.ConnectionId,
 ) {
@@ -1674,6 +1729,15 @@ func (s *State) ClearObservedHeaderHistoryFrom(
 		return
 	}
 	chainHistory.order = append([]string(nil), chainHistory.order[:index]...)
+	if _, retained := chainHistory.byHash[chainHistory.authenticatedHead]; !retained {
+		chainHistory.authenticatedHead = ""
+		for _, key := range slices.Backward(chainHistory.order) {
+			if chainHistory.byHash[key].deliveryGeneration != 0 {
+				chainHistory.authenticatedHead = key
+				break
+			}
+		}
+	}
 }
 
 func (s *State) updateTrackedClientTip(
