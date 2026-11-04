@@ -198,13 +198,16 @@ func TestPendingRewardCreditTotalsReadTheCoveringIndex(t *testing.T) {
 	}
 }
 
-// newLiveStakeSnapshotTestStore opens a file-backed WAL database with separate
-// read and write pools, so a write can commit while a read transaction holds
-// its snapshot. The shared-cache in-memory stores lock tables instead.
+// newLiveStakeSnapshotTestStore opens a file-backed database with separate
+// read and write pools. It needs WAL rather than the MEMORY journal other
+// file-backed tests use: only WAL lets a write commit while a read
+// transaction holds its snapshot, and the shared-cache in-memory stores lock
+// tables instead.
 func newLiveStakeSnapshotTestStore(t *testing.T) *Store {
 	t.Helper()
 	dsn := "file:" + filepath.Join(t.TempDir(), "live_stake.db") +
-		"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)"
+		"?_pragma=synchronous(OFF)&_pragma=journal_mode(WAL)" +
+		"&_pragma=busy_timeout(5000)"
 	writeDB, err := sql.Open("sqlite", dsn)
 	require.NoError(t, err)
 	writeDB.SetMaxOpenConns(1)
@@ -246,11 +249,11 @@ func seedLiveStakePools(t *testing.T, store *Store, count int) [][]byte {
 			RewardType: "member", Amount: 25, Spendable: true,
 			CapturedSlot: 100, BoundarySlot: 100,
 		})
-		_, err := store.writeDB.Exec(`
+		_, err := store.writeDB.Exec(store.dialect.Rebind(`
 INSERT INTO reward_live_stake (
     pool_key_hash, staking_key, credential_tag, utxo_stake, reward_stake,
     total_stake, registered, updated_slot, calculation_version
-) VALUES (?, ?, 0, '1000', '0', '1000', TRUE, 1, ?)`,
+) VALUES (?, ?, 0, '1000', '0', '1000', TRUE, 1, ?)`),
 			pool, key, models.RewardStakeCalculationVersion,
 		)
 		require.NoError(t, err)
