@@ -431,7 +431,7 @@ func (s *Store) insertUtxoModelsChecked(
 		for i, utxo := range batch {
 			key := utxoIdentityKey(utxo.TxId, utxo.OutputIdx)
 			if _, duplicate := processed[key]; duplicate {
-				if err := s.repairConflictedUtxo(ctx, db, utxo); err != nil {
+				if err := s.repairConflictedUtxo(ctx, db, utxo, deferredRows); err != nil {
 					return nil, err
 				}
 				continue
@@ -439,7 +439,7 @@ func (s *Store) insertUtxoModelsChecked(
 			processed[key] = struct{}{}
 			id, created := createdIDs[key]
 			if !created {
-				if err := s.repairConflictedUtxo(ctx, db, utxo); err != nil {
+				if err := s.repairConflictedUtxo(ctx, db, utxo, deferredRows); err != nil {
 					return nil, err
 				}
 				continue
@@ -466,6 +466,7 @@ func (s *Store) repairConflictedUtxo(
 	ctx context.Context,
 	db queryer,
 	utxo *models.Utxo,
+	addressRows *rowBatch,
 ) error {
 	params, err := createUtxoParams(utxo)
 	if err != nil {
@@ -481,7 +482,7 @@ func (s *Store) repairConflictedUtxo(
 		return err
 	}
 	utxo.ID = uint(id)
-	return s.persistUtxoRelations(ctx, db, utxo, uint(id))
+	return s.persistUtxoRelationsWithAddressRows(ctx, db, utxo, uint(id), addressRows)
 }
 
 func (s *Store) insertTransactionUnbatched(
@@ -957,6 +958,7 @@ func (s *Store) setTransactionWithAccumulator(
 		// The API write path uses this to avoid empty replay-cleanup deletes.
 		transactionIsNew   bool
 		batchedStakeDeltas []stakeCredentialDelta
+		repairedUtxoIDs    []int64
 	)
 	err := s.withWriteTransaction(
 		txn,
@@ -1154,6 +1156,13 @@ func (s *Store) setTransactionWithAccumulator(
 			)
 			if err != nil {
 				return fmt.Errorf("create transaction outputs: %w", err)
+			}
+			if batchedAccumulator != nil && s.storageMode == types.StorageModeAPI {
+				for i, created := range producedInserted {
+					if !created {
+						repairedUtxoIDs = append(repairedUtxoIDs, int64(producedModels[i].ID))
+					}
+				}
 			}
 			producedStakeDeltas := make([]stakeCredentialDelta, 0)
 			for i := range producedModels {
@@ -1413,6 +1422,11 @@ func (s *Store) setTransactionWithAccumulator(
 	// The per-transaction cleanup deletes only reach flushed rows, so rows
 	// an earlier application of this transaction queued in the same window
 	// are replaced here.
+	// A replay repairs the same output IDs that an earlier successful write
+	// may already have queued; PostgreSQL cannot upsert one ID twice in a statement.
+	for _, id := range repairedUtxoIDs {
+		batchedAccumulator.rows.dropUtxoAddress(id)
+	}
 	batchedAccumulator.rows.dropTransaction(transactionID)
 	batchedAccumulator.rows.merge(&staged)
 	return nil
@@ -1920,7 +1934,7 @@ WHERE id = ?`,
 			ctx, db, utxo, uint(id), deferredRows,
 		)
 	} else {
-		relationErr = s.persistUtxoRelations(ctx, db, utxo, uint(id))
+		relationErr = s.persistUtxoRelationsWithAddressRows(ctx, db, utxo, uint(id), deferredRows)
 	}
 	if relationErr != nil {
 		return false, relationErr
@@ -1929,13 +1943,23 @@ WHERE id = ?`,
 }
 
 func (s *Store) persistUtxoRelations(
-	ctx context.Context,
-	db queryer,
-	utxo *models.Utxo,
-	id uint,
+	ctx context.Context, db queryer, utxo *models.Utxo, id uint,
+) error {
+	return s.persistUtxoRelationsWithAddressRows(ctx, db, utxo, id, nil)
+}
+
+func (s *Store) persistUtxoRelationsWithAddressRows(
+	ctx context.Context, db queryer, utxo *models.Utxo, id uint, addressRows *rowBatch,
 ) error {
 	utxo.ID = id
-	if err := s.persistUtxoAddress(ctx, db, int64(id), utxo); err != nil {
+	if addressRows != nil && s.storageMode == types.StorageModeAPI {
+		address, err := utxoAddress(utxo)
+		if err != nil {
+			return err
+		}
+		addressRows.dropUtxoAddress(int64(id))
+		addressRows.add(utxoAddressShape, int64(id), address)
+	} else if err := s.persistUtxoAddress(ctx, db, int64(id), utxo); err != nil {
 		return err
 	}
 	if err := persistUtxoPointer(ctx, db, int64(id), utxo.Pointer); err != nil {

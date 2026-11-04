@@ -16,9 +16,10 @@ package sqlstore
 
 import (
 	"context"
+	"testing"
+
 	"github.com/blinklabs-io/dingo/database/models"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
-	"testing"
 
 	"github.com/stretchr/testify/require"
 )

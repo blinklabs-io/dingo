@@ -213,3 +213,45 @@ func BenchmarkLeiosClosureAddressBatch(b *testing.B) {
 		acc.Reset()
 	}
 }
+
+func TestLeiosAPIBatchDefersRepairedOutputAddresses(t *testing.T) {
+	t.Parallel()
+	for _, flushed := range []bool{false, true} {
+		name := "queued"
+		if flushed {
+			name = "flushed"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			store := newAPIModeSQLiteStore(t, nil)
+			txn := store.Transaction(t.Context())
+			t.Cleanup(func() { _ = txn.Rollback() })
+			acc := store.NewLeiosClosureBatchAccumulator()
+			defer acc.Reset()
+			tx, point, _, _ := assetOutputTx(t, 85)
+			require.NoError(t, store.SetTransactionLeiosClosureBatched(tx, point, 0, nil, true, nil, acc, txn, 0))
+			if flushed {
+				require.NoError(t, store.FlushBatch(acc, txn))
+			}
+			db, ctx, err := store.dbFromTxn(txn)
+			require.NoError(t, err)
+			_, err = db.ExecContext(ctx, "DELETE FROM utxo_address")
+			require.NoError(t, err)
+			_, err = db.ExecContext(ctx, "DELETE FROM asset")
+			require.NoError(t, err)
+			require.NoError(t, store.SetTransactionLeiosClosureBatched(tx, point, 0, nil, true, nil, acc, txn, 0))
+			require.Zero(t, tableCounts(t, store, txn, "utxo_address")["utxo_address"], "repaired output addresses must wait for the closure flush")
+			stored, err := store.GetUtxoIncludingSpent(tx.Hash().Bytes(), 0, txn)
+			require.NoError(t, err)
+			require.NotNil(t, stored)
+			require.Len(t, stored.Assets, 1, "asset repair must be immediately visible")
+			for _, entry := range acc.(*transactionBatchAccumulator).rows.entries {
+				if entry.shape.table == "utxo_address" {
+					require.Len(t, entry.rows, 1, "one queued upsert per repaired output ID")
+				}
+			}
+			require.NoError(t, store.FlushBatch(acc, txn))
+			require.Equal(t, 1, tableCounts(t, store, txn, "utxo_address")["utxo_address"])
+		})
+	}
+}

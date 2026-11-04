@@ -265,8 +265,8 @@ retain their pagination and matching semantics. See the
 live-state consistency semantics.
 
 Certified Leios closures batch API-only output-address rows with transaction
-address history, witnesses and metadata labels. UTxO rows, native assets,
-datums and live stake changes remain visible before the next transaction
+address history, key witnesses and metadata labels. UTxO rows, native assets,
+datums, scripts and live stake changes remain visible before the next transaction
 validates. The queued indexes flush inside the closure transaction before
 commit; rollback discards them with the transaction.
 
