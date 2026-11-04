@@ -1,0 +1,2 @@
+-- The backfill replaces the two stake-key lookup indexes with partial
+-- indexes. The retained live-stake index is rebuilt even during bulk load.
