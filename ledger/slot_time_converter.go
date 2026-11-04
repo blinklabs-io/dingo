@@ -250,10 +250,6 @@ func (c *SlotTimeConverter) SlotToTimeWithHorizonFrom(
 	return sum.SlotToTime(slot)
 }
 
-// maxUnixSeconds is the largest Unix second time.Unix accepts without its
-// internal conversion to seconds since year 1 overflowing int64.
-const maxUnixSeconds = math.MaxInt64 - 62_135_596_800
-
 // SlotToTimeExtendedFrom converts a slot the way the ledger rules do when they
 // validate a transaction at basisSlot: through the era history anchored at
 // horizonAnchorSlot, linearly extended past basisSlot.
@@ -270,8 +266,12 @@ const maxUnixSeconds = math.MaxInt64 - 62_135_596_800
 // lies, so a validity interval's upper bound is never refused for being past
 // the horizon. Only a basis the underlying epoch info cannot translate fails.
 //
-// The reference computes in unbounded precision. The only refusal here that it
-// lacks is a time too far out for time.Time to represent.
+// The reference computes in unbounded precision, and a Plutus POSIXTime is an
+// unbounded Integer of milliseconds. The script context receives this time as
+// time.Time.UnixMilli, an int64, so a result whose POSIX milliseconds do not
+// fit in int64 returns hardfork.ErrDurationOverflow rather than a time the
+// context would wrap around to an unrelated value. That refusal is the only
+// one here the reference lacks.
 func (c *SlotTimeConverter) SlotToTimeExtendedFrom(
 	horizonAnchorSlot uint64,
 	basisSlot uint64,
@@ -310,9 +310,14 @@ func (c *SlotTimeConverter) SlotToTimeExtendedFrom(
 		new(big.Int),
 	)
 	sec.Add(sec, big.NewInt(basisTime.Unix()))
-	if !sec.IsInt64() || sec.Int64() > maxUnixSeconds {
+	millis := new(big.Int).Mul(sec, big.NewInt(1000))
+	millis.Add(
+		millis,
+		new(big.Int).Quo(nsec, big.NewInt(int64(time.Millisecond))),
+	)
+	if !millis.IsInt64() {
 		return time.Time{}, fmt.Errorf(
-			"%w: slot %d extended from basis slot %d",
+			"%w: POSIX milliseconds of slot %d extended from basis slot %d exceed int64",
 			hardfork.ErrDurationOverflow,
 			slot,
 			basisSlot,

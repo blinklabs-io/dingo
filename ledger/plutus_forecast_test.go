@@ -16,6 +16,8 @@ package ledger
 
 import (
 	"context"
+	"math"
+	"math/big"
 	"os"
 	"path/filepath"
 	"strings"
@@ -30,10 +32,12 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/common/script"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	omockfixtures "github.com/blinklabs-io/ouroboros-mock/fixtures"
+	"github.com/blinklabs-io/plutigo/data"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -159,6 +163,12 @@ func mainnetForecastTx(t testing.TB) *alonzo.AlonzoTransaction {
 // 6400998, and runs the real transaction through the OutsideForecast rule with
 // it.
 //
+// Every case probes that view, not the era's own validator: the callback
+// ignores the block's transaction and applies the mainnet Alonzo transaction
+// to the shared UtxoValidateOutsideForecast rule. The Babbage and Conway cases
+// pin that a ledger in those eras hands the rules a bounded view; the era
+// validators then see the same SlotToTime result.
+//
 // cardano-ledger's Alonzo LEDGERS rule builds every transaction's Plutus
 // script context through unsafeLinearExtendEpochInfo slot ei
 // (Cardano.Ledger.Alonzo.Rules.Ledgers, mkStAnnTx), and the UTXO rule's
@@ -260,7 +270,9 @@ func TestLedgerProcessBlockExtendsPlutusForecastFromBlockSlot(t *testing.T) {
 					{},
 				}
 				return block, &conway.ConwayProtocolParameters{
-					ProtocolVersion:    lcommon.ProtocolParametersProtocolVersion{Major: 9},
+					ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+						Major: 9,
+					},
 					MaxBlockBodySize:   100_000,
 					MaxBlockHeaderSize: 100_000,
 				}
@@ -440,8 +452,14 @@ func TestSlotToTimeExtendedFromMirrorsLinearExtension(t *testing.T) {
 			// the bounded summary cannot express at all.
 			name:     "beyond a time.Duration from system start",
 			basis:    mainnetForecastBlockSlot,
-			slot:     1 << 62,
-			wantUnix: at(1 << 62),
+			slot:     1 << 52,
+			wantUnix: at(1 << 52),
+		},
+		{
+			name:    "POSIX milliseconds past int64",
+			basis:   mainnetForecastBlockSlot,
+			slot:    1 << 62,
+			wantErr: hardfork.ErrDurationOverflow,
 		},
 		{
 			name:    "basis past the horizon",
@@ -475,4 +493,91 @@ func TestSlotToTimeExtendedFromMirrorsLinearExtension(t *testing.T) {
 		horizonAnchorSlot: mainnetForecastParentSlot,
 	}).SlotToTime(mainnetForecastUpperBound)
 	require.ErrorIs(t, err, hardfork.ErrPastHorizon)
+}
+
+// TestAlonzoPlutusValidityRangeMilliseconds builds the Plutus V1 TxInfo an
+// Alonzo script receives through an extended view and reads its validity
+// interval upper bound back out of the encoded context.
+//
+// cardano-ledger's POSIXTime is an unbounded Integer of milliseconds, while
+// the script context carries them as int64 (time.Time.UnixMilli). A bound
+// whose milliseconds fit must arrive exact; one whose milliseconds do not fit
+// must fail translation rather than reach the script wrapped around to an
+// unrelated time.
+func TestAlonzoPlutusValidityRangeMilliseconds(t *testing.T) {
+	t.Parallel()
+
+	ls := mainnetForecastLedgerState(t, eras.AlonzoEraDesc)
+	view := (&LedgerView{
+		ls:                ls,
+		horizonAnchorSlot: mainnetForecastParentSlot,
+	}).extendForecastFrom(eras.AlonzoEraDesc.Id, mainnetForecastBlockSlot)
+
+	// The last slot whose start, in POSIX milliseconds, still fits in int64.
+	lastSlot := uint64(math.MaxInt64/1000) -
+		uint64(mainnetForecastBlockUnix) + mainnetForecastBlockSlot
+
+	upperBound := func(t *testing.T, ttl uint64) (*big.Int, error) {
+		t.Helper()
+		tx := &alonzo.AlonzoTransaction{
+			Body: alonzo.AlonzoTransactionBody{},
+		}
+		tx.Body.Ttl = ttl
+		info, err := script.NewTxInfoV1FromTransaction(view, tx, nil, false, 6)
+		if err != nil {
+			return nil, err
+		}
+		rng, ok := info.ValidRange.ToPlutusData().(*data.Constr)
+		require.True(t, ok)
+		require.Len(t, rng.Fields, 2)
+		upper, ok := rng.Fields[1].(*data.Constr)
+		require.True(t, ok)
+		finite, ok := upper.Fields[0].(*data.Constr)
+		require.True(t, ok)
+		require.Zero(t, finite.Tag.Cmp(big.NewInt(1)), "finite upper bound")
+		ms, ok := finite.Fields[0].(*data.Integer)
+		require.True(t, ok)
+		return ms.Inner, nil
+	}
+
+	tests := []struct {
+		name   string
+		ttl    uint64
+		wantMs *big.Int
+	}{
+		{
+			name:   "the mainnet transaction's upper bound",
+			ttl:    mainnetForecastUpperBound,
+			wantMs: big.NewInt(int64(mainnetForecastUpperBoundUnix) * 1000),
+		},
+		{
+			name:   "last slot whose milliseconds fit",
+			ttl:    lastSlot,
+			wantMs: big.NewInt(math.MaxInt64 / 1000 * 1000),
+		},
+		{
+			name: "first slot whose milliseconds overflow",
+			ttl:  lastSlot + 1,
+		},
+		{
+			name: "far-future TTL",
+			ttl:  1 << 62,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := upperBound(t, test.ttl)
+			if test.wantMs == nil {
+				require.ErrorIs(t, err, hardfork.ErrDurationOverflow,
+					"a bound the script context cannot carry exactly "+
+						"must not be translated")
+				return
+			}
+			require.NoError(t, err)
+			assert.Zero(t, test.wantMs.Cmp(got),
+				"script POSIX upper bound: want %s, got %s",
+				test.wantMs, got)
+		})
+	}
 }
