@@ -58,6 +58,7 @@ type transactionBatchAccumulator struct {
 	leiosAPIRowsOnly     bool
 	transactionInsert    *sql.Stmt
 	mysql                bool
+	sqlite               bool
 	backfillBatchLimits  func() (int64, int)
 	backfillBatchFlushed func(int64)
 	// sqlOperations is the same counter instrumentedQueryer increments for
@@ -171,7 +172,9 @@ func (a *transactionBatchAccumulator) restore(
 	a.Reset()
 	a.rows = checkpoint.rows.clone()
 	a.stakeDeltaOrder = append([]string(nil), checkpoint.stakeDeltaOrder...)
-	a.opCertOrder = append([]poolOpCertSequenceKey(nil), checkpoint.opCertOrder...)
+	a.opCertOrder = append(
+		[]poolOpCertSequenceKey(nil),
+		checkpoint.opCertOrder...)
 	if len(checkpoint.stakeDeltas) > 0 {
 		a.stakeDeltas = make(
 			map[string]pendingStakeCredentialDelta,
@@ -216,6 +219,13 @@ INSERT INTO "transaction" (
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (hash) DO NOTHING
 RETURNING id`
+
+var transactionBatchInsertResultSQL = strings.Replace(
+	strings.TrimSuffix(transactionBatchInsertSQL, "\nRETURNING id"),
+	"InsertTransactionIfAbsent :one",
+	"InsertTransactionIfAbsentResult :execresult",
+	1,
+)
 
 const transactionBatchConflictUpdateSQL = `-- name: UpdateTransactionOnConflict :exec
 UPDATE "transaction"
@@ -484,20 +494,50 @@ func (s *Store) repairConflictedUtxo(
 	return s.persistUtxoRelations(ctx, db, utxo, uint(id))
 }
 
+// A no-op conflict retains SQLite's preceding last-insert ID. Check the
+// captured result before using that ID to distinguish a fresh transaction.
+func sqliteTransactionInsertID(result sql.Result) (int64, error) {
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if affected == 0 {
+		return 0, sql.ErrNoRows
+	}
+	return result.LastInsertId()
+}
+
 func (s *Store) insertTransactionUnbatched(
 	ctx context.Context,
 	db queryer,
 	args ...any,
 ) (int64, bool, error) {
 	if len(args) != 10 {
-		return 0, false, fmt.Errorf("insert transaction: got %d arguments, want 10", len(args))
+		return 0, false, fmt.Errorf(
+			"insert transaction: got %d arguments, want 10",
+			len(args),
+		)
 	}
 	var id int64
 	if s.dialect.Name() == "mysql" {
-		err := s.queryRowCached(ctx, db, transactionInsertSQL, args...).Scan(&id)
+		err := s.queryRowCached(ctx, db, transactionInsertSQL, args...).
+			Scan(&id)
 		return id, false, err
 	}
-	err := s.queryRowCached(ctx, db, transactionBatchInsertSQL, args...).Scan(&id)
+	var err error
+	if s.dialect.Name() == "sqlite" {
+		var result sql.Result
+		result, err = s.execCached(
+			ctx,
+			db,
+			transactionBatchInsertResultSQL,
+			args...)
+		if err == nil {
+			id, err = sqliteTransactionInsertID(result)
+		}
+	} else {
+		err = s.queryRowCached(ctx, db, transactionBatchInsertSQL, args...).Scan(&id)
+	}
 	if err == nil {
 		return id, true, nil
 	}
@@ -530,9 +570,12 @@ func (a *transactionBatchAccumulator) insertTransaction(
 		// insert down the RETURNING-id path MySQL cannot serve.
 		if dialect, ok := unwrapDialectQueryer(db); ok {
 			a.mysql = dialect.dialect == "mysql"
+			a.sqlite = dialect.dialect == "sqlite"
 		}
 		query := transactionBatchInsertSQL
-		if a.mysql {
+		if a.sqlite {
+			query = transactionBatchInsertResultSQL
+		} else if a.mysql {
 			query = transactionInsertSQL
 		}
 		stmt, err := db.PrepareContext(ctx, query)
@@ -557,9 +600,20 @@ func (a *transactionBatchAccumulator) insertTransaction(
 		return uint(id), false, nil
 	}
 	var id int64
-	if err := a.transactionInsert.QueryRowContext(ctx, args...).Scan(&id); err == nil {
+	var err error
+	if a.sqlite {
+		var result sql.Result
+		result, err = a.transactionInsert.ExecContext(ctx, args...)
+		if err == nil {
+			id, err = sqliteTransactionInsertID(result)
+		}
+	} else {
+		err = a.transactionInsert.QueryRowContext(ctx, args...).Scan(&id)
+	}
+	if err == nil {
 		return uint(id), true, nil
-	} else if !errors.Is(err, sql.ErrNoRows) {
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
 		return 0, false, err
 	}
 	if len(args) != 10 {
@@ -635,7 +689,10 @@ func (a *transactionBatchAccumulator) SetBackfillBatchLimitCallbacks(
 }
 
 func (s *Store) NewBatchAccumulator() types.MetadataBatchAccumulator {
-	return &transactionBatchAccumulator{sqlOperations: s.sqlOperations}
+	return &transactionBatchAccumulator{
+		sqlite:        s.dialect.Name() == "sqlite",
+		sqlOperations: s.sqlOperations,
+	}
 }
 
 func (s *Store) FlushBatch(
@@ -819,7 +876,11 @@ func (s *Store) NewLeiosClosureBatchAccumulator() types.MetadataBatchAccumulator
 	if s.storageMode != types.StorageModeAPI {
 		return nil
 	}
-	return &transactionBatchAccumulator{leiosAPIRowsOnly: true, sqlOperations: s.sqlOperations}
+	return &transactionBatchAccumulator{
+		sqlite:           s.dialect.Name() == "sqlite",
+		leiosAPIRowsOnly: true,
+		sqlOperations:    s.sqlOperations,
+	}
 }
 
 // LeiosClosureRowsOnly reports whether this accumulator defers only API detail rows.
@@ -843,8 +904,19 @@ func (s *Store) SetTransactionLeiosClosureBatched(
 	if contextSlot != nil && *contextSlot >= point.Slot {
 		return errors.New("closure context must precede its certifying block")
 	}
-	return s.setTransactionWithAccumulator(transaction, point, index, certDeposits,
-		skipWithdrawalWitness, false, true, accumulator, contextSlot, txn, protocolMajor)
+	return s.setTransactionWithAccumulator(
+		transaction,
+		point,
+		index,
+		certDeposits,
+		skipWithdrawalWitness,
+		false,
+		true,
+		accumulator,
+		contextSlot,
+		txn,
+		protocolMajor,
+	)
 }
 
 // SetTransactionLeiosClosure applies a certified closure, tolerating inputs
@@ -866,11 +938,32 @@ func (s *Store) SetTransactionLeiosClosure(
 
 // SetTransactionLeiosClosureInContext records the execution context before
 // certificates are applied, so epoch-dependent effects use the unticked state.
-func (s *Store) SetTransactionLeiosClosureInContext(transaction lcommon.Transaction, point ocommon.Point, index uint32, certDeposits map[int]uint64, skipWithdrawalWitness bool, slot uint64, txn types.Txn, protocolMajor uint64) error {
+func (s *Store) SetTransactionLeiosClosureInContext(
+	transaction lcommon.Transaction,
+	point ocommon.Point,
+	index uint32,
+	certDeposits map[int]uint64,
+	skipWithdrawalWitness bool,
+	slot uint64,
+	txn types.Txn,
+	protocolMajor uint64,
+) error {
 	if slot >= point.Slot {
 		return errors.New("closure context must precede its certifying block")
 	}
-	return s.setTransactionWithAccumulator(transaction, point, index, certDeposits, skipWithdrawalWitness, false, true, nil, &slot, txn, protocolMajor)
+	return s.setTransactionWithAccumulator(
+		transaction,
+		point,
+		index,
+		certDeposits,
+		skipWithdrawalWitness,
+		false,
+		true,
+		nil,
+		&slot,
+		txn,
+		protocolMajor,
+	)
 }
 
 func (s *Store) setTransaction(
@@ -1184,7 +1277,8 @@ func (s *Store) setTransactionWithAccumulator(
 			); err != nil {
 				return err
 			}
-			if batchedAccumulator != nil && batchedAccumulator.leiosAPIRowsOnly {
+			if batchedAccumulator != nil &&
+				batchedAccumulator.leiosAPIRowsOnly {
 				if err := staged.flushExceptClosureAPIRows(ctx, db, s.dialect.ParameterLimit()); err != nil {
 					return err
 				}
@@ -1207,7 +1301,11 @@ func (s *Store) setTransactionWithAccumulator(
 			// write touches is unchanged from the full-scan path.
 			var spentRefs []models.UtxoId
 			if s.dialect.Name() != "sqlite" {
-				spentRefs = make([]models.UtxoId, 0, len(transaction.Consumed()))
+				spentRefs = make(
+					[]models.UtxoId,
+					0,
+					len(transaction.Consumed()),
+				)
 			}
 			var skippedRefs []models.UtxoId
 			consumedStakeDeltas := make(
@@ -1229,7 +1327,10 @@ func (s *Store) setTransactionWithAccumulator(
 					if err != nil {
 						return err
 					}
-					updatedRows, deltas, scanErr := scanConsumedUtxoRows(rows, true)
+					updatedRows, deltas, scanErr := scanConsumedUtxoRows(
+						rows,
+						true,
+					)
 					if scanErr != nil {
 						return scanErr
 					}
@@ -1389,7 +1490,8 @@ func (s *Store) setTransactionWithAccumulator(
 				skippedStakeDeltas,
 				producedStakeDeltas,
 			)
-			if batchedAccumulator != nil && !batchedAccumulator.leiosAPIRowsOnly {
+			if batchedAccumulator != nil &&
+				!batchedAccumulator.leiosAPIRowsOnly {
 				return nil
 			}
 			return s.refreshRewardLiveStakeDeltas(
@@ -1452,7 +1554,10 @@ func (s *Store) SetGapBlockTransaction(
 			if err != nil {
 				return err
 			}
-			transactionID, err := queryReturnedID(ctx, db, `-- name: UpsertTransactionWithoutMetadata :one
+			transactionID, err := queryReturnedID(
+				ctx,
+				db,
+				`-- name: UpsertTransactionWithoutMetadata :one
 INSERT INTO "transaction" (
     hash, block_hash, metadata, slot, type, fee, collateral_fee, ttl,
     block_index, valid
@@ -1478,8 +1583,16 @@ RETURNING id`,
 			if transaction.IsValid() {
 				var err error
 				certificateRefs, err = s.applyTransactionCertificates(
-					ctx, db, transactionID, transaction.Certificates(),
-					point, index, certDeposits, allowUnknownDeposits, false, protocolMajor,
+					ctx,
+					db,
+					transactionID,
+					transaction.Certificates(),
+					point,
+					index,
+					certDeposits,
+					allowUnknownDeposits,
+					false,
+					protocolMajor,
 				)
 				if err != nil {
 					return err
@@ -1556,7 +1669,9 @@ func (s *Store) RecomputeGapCollateralFee(
 			if err != nil {
 				return err
 			}
-			_, err = db.ExecContext(ctx, `-- name: UpdateTransactionCollateralFee :exec
+			_, err = db.ExecContext(
+				ctx,
+				`-- name: UpdateTransactionCollateralFee :exec
 UPDATE "transaction" SET collateral_fee = ? WHERE hash = ?`,
 				decimalUint64(types.Uint64(fee)),
 				transaction.Hash().Bytes(),
@@ -1575,7 +1690,10 @@ func (s *Store) SetGenesisTransaction(
 	return s.withWriteTransaction(
 		txn,
 		func(db queryer, ctx context.Context) error {
-			id, err := queryReturnedID(ctx, db, `-- name: UpsertGenesisTransaction :one
+			id, err := queryReturnedID(
+				ctx,
+				db,
+				`-- name: UpsertGenesisTransaction :one
 INSERT INTO "transaction" (
     hash, block_hash, slot, type, fee, collateral_fee, ttl,
     block_index, valid
@@ -1883,7 +2001,9 @@ SELECT id FROM utxo WHERE tx_id = ? AND output_idx = ?`,
 			// pointer address's credential is not stored on the row at all
 			// (see pointer_stake.go); every other address form carries its
 			// credential in the address, so an imported row already has it.
-			_, err = db.ExecContext(ctx, `-- name: RepairConflictedUtxoByID :exec
+			_, err = db.ExecContext(
+				ctx,
+				`-- name: RepairConflictedUtxoByID :exec
 UPDATE utxo
 SET transaction_id = COALESCE(transaction_id, ?),
     collateral_return_for_tx_id = COALESCE(collateral_return_for_tx_id, ?)
@@ -2253,7 +2373,12 @@ func (s *Store) applyTransactionWithdrawals(
 	return nil
 }
 
-func recordTransactionLedgerContext(ctx context.Context, db queryer, transactionID int64, slot uint64) error {
+func recordTransactionLedgerContext(
+	ctx context.Context,
+	db queryer,
+	transactionID int64,
+	slot uint64,
+) error {
 	value, err := checkedInt64(slot)
 	if err != nil {
 		return err

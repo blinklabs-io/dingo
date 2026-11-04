@@ -1393,6 +1393,13 @@ unaffected: it never prunes spent rows, so no cap or announced floor applies.
 
 ### Transactions and UTxO
 
+SQLite transaction inserts use the captured `ExecContext` result instead of
+`RETURNING id`. `RowsAffected` distinguishes a fresh row from an ignored hash
+conflict before `LastInsertId` is read; SQLite retains the preceding insert ID
+when a conflict inserts nothing. Replays still update the existing row and
+look up its ID by hash. Batch accumulators retain the storage dialect across
+reset, and non-SQLite providers do not prepare the SQLite result statement.
+
 ```mermaid
 erDiagram
     TRANSACTION ||--o{ UTXO : "transaction_id outputs"

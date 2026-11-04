@@ -454,28 +454,41 @@ func BenchmarkRefreshRewardLiveStakeAggregateRepeatedTouch(b *testing.B) {
 		}
 		seedCredentialUtxos(b, store, n, ref, amounts, nil)
 
-		b.Run(fmt.Sprintf("n=%d/refreshed_twice_unmerged", n), func(b *testing.B) {
-			for b.Loop() {
-				err := store.withWriteTransaction(
-					nil,
-					func(db queryer, ctx context.Context) error {
-						if err := store.refreshRewardLiveStakeAggregate(ctx, db, ref, 1); err != nil {
-							return err
-						}
-						return store.refreshRewardLiveStakeAggregate(ctx, db, ref, 1)
-					},
-				)
-				if err != nil {
-					b.Fatal(err)
+		b.Run(
+			fmt.Sprintf("n=%d/refreshed_twice_unmerged", n),
+			func(b *testing.B) {
+				for b.Loop() {
+					err := store.withWriteTransaction(
+						nil,
+						func(db queryer, ctx context.Context) error {
+							if err := store.refreshRewardLiveStakeAggregate(ctx, db, ref, 1); err != nil {
+								return err
+							}
+							return store.refreshRewardLiveStakeAggregate(
+								ctx,
+								db,
+								ref,
+								1,
+							)
+						},
+					)
+					if err != nil {
+						b.Fatal(err)
+					}
 				}
-			}
-		})
+			},
+		)
 		b.Run(fmt.Sprintf("n=%d/refreshed_once_merged", n), func(b *testing.B) {
 			for b.Loop() {
 				err := store.withWriteTransaction(
 					nil,
 					func(db queryer, ctx context.Context) error {
-						return store.refreshRewardLiveStakeAggregate(ctx, db, ref, 1)
+						return store.refreshRewardLiveStakeAggregate(
+							ctx,
+							db,
+							ref,
+							1,
+						)
 					},
 				)
 				if err != nil {
@@ -659,21 +672,27 @@ func TestInsertUtxoBatchConflictAvoidsPerRowInsertAndSelect(t *testing.T) {
 	require.NoError(t, store.withWriteTransaction(nil,
 		func(db queryer, ctx context.Context) error {
 			var err error
-			inserted, err = store.insertUtxoModelsChecked(ctx, db, []*models.Utxo{
-				{
-					TxId:          conflictTxID,
-					Amount:        types.Uint64(1),
-					OutputIdx:     0,
-					TransactionID: &transactionID,
+			inserted, err = store.insertUtxoModelsChecked(
+				ctx,
+				db,
+				[]*models.Utxo{
+					{
+						TxId:          conflictTxID,
+						Amount:        types.Uint64(1),
+						OutputIdx:     0,
+						TransactionID: &transactionID,
+					},
+					{
+						TxId:                    conflictCollateralTxID,
+						Amount:                  types.Uint64(1),
+						OutputIdx:               0,
+						CollateralReturnForTxID: &collateralReturnID,
+					},
+					{TxId: newTxID, Amount: types.Uint64(2), OutputIdx: 0},
 				},
-				{
-					TxId:                    conflictCollateralTxID,
-					Amount:                  types.Uint64(1),
-					OutputIdx:               0,
-					CollateralReturnForTxID: &collateralReturnID,
-				},
-				{TxId: newTxID, Amount: types.Uint64(2), OutputIdx: 0},
-			}, true, nil)
+				true,
+				nil,
+			)
 			return err
 		},
 	))
@@ -696,7 +715,11 @@ func TestInsertUtxoBatchConflictAvoidsPerRowInsertAndSelect(t *testing.T) {
 	require.Equal(t, &transactionID, repaired.TransactionID)
 	repairedCollateral, err := store.GetUtxo(conflictCollateralTxID, 0, nil)
 	require.NoError(t, err)
-	require.Equal(t, &collateralReturnID, repairedCollateral.CollateralReturnForTxID)
+	require.Equal(
+		t,
+		&collateralReturnID,
+		repairedCollateral.CollateralReturnForTxID,
+	)
 }
 
 // TestSetTransactionReapplyAppliesNoSecondDelta covers the invariant the
@@ -862,7 +885,7 @@ func TestInsertTransactionReportsFreshAndReplayedRows(t *testing.T) {
 	txn := store.Transaction(context.Background())
 	db, ctx, err := store.dbFromTxn(txn)
 	require.NoError(t, err)
-	acc := &transactionBatchAccumulator{}
+	acc := store.NewBatchAccumulator().(*transactionBatchAccumulator)
 	defer acc.Reset()
 
 	args := []any{
@@ -907,7 +930,7 @@ func TestTransactionBatchAccumulatorResetClosesStatement(t *testing.T) {
 	db, ctx, err := store.dbFromTxn(txn)
 	require.NoError(t, err)
 
-	acc := &transactionBatchAccumulator{}
+	acc := store.NewBatchAccumulator().(*transactionBatchAccumulator)
 	oldStmtArgs := []any{
 		[]byte{0x01}, []byte{0x02}, nil, 1, 0,
 		"0", "0", "0", 0, true,
@@ -920,7 +943,11 @@ func TestTransactionBatchAccumulatorResetClosesStatement(t *testing.T) {
 	acc.Reset()
 	require.Nil(t, acc.transactionInsert)
 	_, err = stmt.ExecContext(ctx, oldStmtArgs...)
-	require.Error(t, err, "reset must close statements bound to the batch transaction")
+	require.Error(
+		t,
+		err,
+		"reset must close statements bound to the batch transaction",
+	)
 
 	require.NoError(t, txn.Rollback())
 	var count int
@@ -929,7 +956,11 @@ func TestTransactionBatchAccumulatorResetClosesStatement(t *testing.T) {
 		`SELECT COUNT(*) FROM "transaction" WHERE hash = ?`,
 		[]byte{0x01},
 	).Scan(&count))
-	require.Zero(t, count, "rollback must discard writes made through the accumulator")
+	require.Zero(
+		t,
+		count,
+		"rollback must discard writes made through the accumulator",
+	)
 }
 
 func TestTransactionBatchAccumulatorLen(t *testing.T) {

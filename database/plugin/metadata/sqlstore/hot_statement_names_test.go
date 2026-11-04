@@ -140,7 +140,7 @@ func TestHotStatementsAreRecordedUnderTheirName(t *testing.T) {
 		))
 	}
 	for _, want := range []struct{ op, name string }{
-		{"insert", "InsertTransactionIfAbsent"},
+		{"insert", "InsertTransactionIfAbsentResult"},
 		{"update", "UpdateTransactionOnConflict"},
 		{"select", "GetTransactionIDOnConflict"},
 		{"update", "ConsumeUtxoReturningStake"},
