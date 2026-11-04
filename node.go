@@ -97,6 +97,7 @@ type Node struct {
 	chainSelector           *chainselection.ChainSelector
 	chainSelectionMetrics   *chainSelectionMetrics
 	chainSelectorForGauges  atomic.Pointer[chainselection.ChainSelector]
+	lastEagernessLimit      atomic.Pointer[chainselection.EagernessLimit]
 	equivocation            *equivocationDetector
 	eventBus                *event.EventBus
 	pluginHost              *plugin.Host

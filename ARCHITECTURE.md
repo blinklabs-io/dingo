@@ -7293,7 +7293,9 @@ exempt from those comparisons, only from the recycler. The Limit on Patience
 is separate: a held header's wait is not charged to it, as above.
 
 The limit is exported as the `dingo_chainselection_loe_block_number` and
-`dingo_chainselection_loe_intersection_slot` gauges (0 while inactive). The
+`dingo_chainselection_loe_intersection_slot` gauges (0 while inactive). A
+scrape never waits for a ledger state transition: while a block batch holds
+one, the gauges report the last value computed outside a transition. The
 slot gauge reports the point the limit is measured from: the common point, or
 the last one the candidates shared once they stop overlapping, and 0 while the
 limit is measured from the local tip.
