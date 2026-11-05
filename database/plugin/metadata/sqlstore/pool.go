@@ -656,7 +656,7 @@ epoch_bound AS (
 ),
 pre_boundary_events AS (
     SELECT pr.pool_id, pr.id registration_id, 0 is_retirement,
-           pr.registration_key, pr.added_slot,
+           pr.registration_key, pr.added_slot, 0 synthetic_ret,
            COALESCE(t.block_index, 0) blk_idx,
            COALESCE(c.cert_index, 0) cert_idx,
            pr.registration_index reg_idx
@@ -669,14 +669,17 @@ pre_boundary_events AS (
     -- Only the pool's latest pre-boundary retirement counts: a later one
     -- replaces the earlier schedule (POOL).
     SELECT pool_id, 0 registration_id, 1 is_retirement,
-           NULL registration_key, added_slot, blk_idx, cert_idx, 0 reg_idx
+           NULL registration_key, added_slot, synthetic_ret, blk_idx,
+           cert_idx, 0 reg_idx
     FROM (
         SELECT rt.pool_id, rt.epoch, rt.added_slot,
+               CASE WHEN rt.certificate_id = 0 THEN 1 ELSE 0 END synthetic_ret,
                COALESCE(t.block_index, 0) blk_idx,
                COALESCE(c.cert_index, 0) cert_idx,
                ROW_NUMBER() OVER (
                    PARTITION BY rt.pool_id
                    ORDER BY rt.added_slot DESC,
+                            CASE WHEN rt.certificate_id = 0 THEN 1 ELSE 0 END DESC,
                             COALESCE(t.block_index, 0) DESC,
                             COALESCE(c.cert_index, 0) DESC,
                             rt.id DESC
@@ -695,8 +698,10 @@ pre_boundary_state AS (
            added_slot, blk_idx, cert_idx, reg_idx,
            ROW_NUMBER() OVER (
                PARTITION BY pool_id
-               ORDER BY added_slot DESC, blk_idx DESC, cert_idx DESC,
-                        is_retirement DESC, reg_idx DESC,
+               -- A snapshot import's synthetic retirement (certificate_id = 0)
+               -- has no block position, so it wins a same-slot tie by flag.
+               ORDER BY added_slot DESC, synthetic_ret DESC, blk_idx DESC,
+                        cert_idx DESC, is_retirement DESC, reg_idx DESC,
                         registration_id DESC
            ) rn
     FROM pre_boundary_events
@@ -2942,7 +2947,9 @@ func (s *Store) GetPoolRegistrationsEffectiveForEpoch(
 		rows, err := db.QueryContext(ctx, `
 WITH events AS (
     SELECT registration.pool_key_hash, registration.id registration_id,
-           0 is_retirement, registration.added_slot,
+           0 is_retirement,
+           COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_cert ON lc_cert.transaction_id = lc.transaction_id WHERE lc_cert.id = registration.certificate_id), registration.added_slot) effective_slot,
+           registration.added_slot, 0 synthetic_ret,
            COALESCE(tx.block_index, 0) block_index,
            COALESCE(certs.cert_index, 0) cert_index,
            registration.registration_index registration_index
@@ -2956,15 +2963,20 @@ WITH events AS (
     -- Only the pool's latest retirement counts: a later one replaces the
     -- earlier schedule (POOL), so filtering on epoch before picking the
     -- latest would let a superseded retirement retire the pool early.
-    SELECT pool_key_hash, 0, 1, added_slot, block_index, cert_index, 0
+    SELECT pool_key_hash, 0, 1, effective_slot, added_slot, synthetic_ret,
+           block_index, cert_index, 0
     FROM (
         SELECT retirement.pool_key_hash, retirement.epoch,
+               COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_cert ON lc_cert.transaction_id = lc.transaction_id WHERE lc_cert.id = retirement.certificate_id), retirement.added_slot) effective_slot,
                retirement.added_slot,
+               CASE WHEN retirement.certificate_id = 0 THEN 1 ELSE 0 END synthetic_ret,
                COALESCE(tx.block_index, 0) block_index,
                COALESCE(certs.cert_index, 0) cert_index,
                ROW_NUMBER() OVER (
                    PARTITION BY retirement.pool_key_hash
-                   ORDER BY retirement.added_slot DESC,
+                   ORDER BY COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_cert ON lc_cert.transaction_id = lc.transaction_id WHERE lc_cert.id = retirement.certificate_id), retirement.added_slot) DESC,
+                            retirement.added_slot DESC,
+                            CASE WHEN retirement.certificate_id = 0 THEN 1 ELSE 0 END DESC,
                             COALESCE(tx.block_index, 0) DESC,
                             COALESCE(certs.cert_index, 0) DESC,
                             retirement.id DESC
@@ -2982,7 +2994,10 @@ ranked AS (
     SELECT pool_key_hash, registration_id, is_retirement,
            ROW_NUMBER() OVER (
                PARTITION BY pool_key_hash
-               ORDER BY added_slot DESC, block_index DESC, cert_index DESC,
+               -- A snapshot import's synthetic retirement (certificate_id = 0)
+               -- has no block position, so it wins a same-slot tie by flag.
+               ORDER BY effective_slot DESC, added_slot DESC,
+                        synthetic_ret DESC, block_index DESC, cert_index DESC,
                         is_retirement DESC, registration_index DESC,
                         registration_id DESC
            ) rn

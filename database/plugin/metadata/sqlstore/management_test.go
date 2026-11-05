@@ -1320,3 +1320,59 @@ func TestPoolLookupsHonorSupersedingRetirement(t *testing.T) {
 		})
 	}
 }
+
+// TestPoolLookupsOrderSameSlotRetirements covers the tie-breaks inside one
+// slot: a second retirement later in the same block replaces the first, and a
+// snapshot import's synthetic retirement (certificate_id = 0) wins a tie with a
+// certificate registration at the same slot, as GetPoolKeyHashesRetiredByEpoch
+// resolves it.
+func TestPoolLookupsOrderSameSlotRetirements(t *testing.T) {
+	t.Parallel()
+	vrfKey := depositHeldRegistration(depositHeldPoolKey(0)).VrfKeyHash.Bytes()
+	for _, tc := range []struct {
+		name       string
+		seed       func(*testing.T, *Store, lcommon.PoolKeyHash)
+		registered bool
+	}{
+		{
+			name: "later transaction in the block supersedes",
+			seed: func(t *testing.T, store *Store, pool lcommon.PoolKeyHash) {
+				writeDepositHeldCert(t, store, 100, 0, depositHeldRegistration(pool), 500)
+				writeDepositHeldCert(t, store, 1_200, 0, depositHeldRetirement(pool, 2), 0)
+				writeDepositHeldCert(t, store, 1_200, 1, depositHeldRetirement(pool, 4), 0)
+			},
+			registered: true,
+		},
+		{
+			name: "synthetic retirement wins the slot",
+			seed: func(t *testing.T, store *Store, pool lcommon.PoolKeyHash) {
+				writeDepositHeldCert(t, store, 100, 1, depositHeldRegistration(pool), 500)
+				require.NoError(t, store.RetirePools(nil, [][]byte{pool.Bytes()}, 1, 100))
+			},
+			registered: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := newDepositHeldStore(t)
+			depositHeldEpochs(t, store, 6)
+			pool := depositHeldPoolKey(0xb1)
+			tc.seed(t, store, pool)
+
+			regs, err := store.GetPoolRegistrationsEffectiveForEpoch(
+				[]lcommon.PoolKeyHash{pool}, 2_000, 2, math.MaxInt64, nil,
+			)
+			require.NoError(t, err)
+			got, err := store.GetPoolByVrfKeyHash(vrfKey, 2_000, nil)
+			require.NoError(t, err)
+			if tc.registered {
+				require.Len(t, regs, 1)
+				require.NotNil(t, got)
+				require.Equal(t, pool.Bytes(), got.PoolKeyHash)
+			} else {
+				require.Empty(t, regs)
+				require.Nil(t, got)
+			}
+		})
+	}
+}
