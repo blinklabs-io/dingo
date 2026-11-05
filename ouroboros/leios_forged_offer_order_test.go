@@ -22,6 +22,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	oleiosfetch "github.com/blinklabs-io/gouroboros/protocol/leiosfetch"
 	"github.com/stretchr/testify/require"
 )
 
@@ -118,6 +119,16 @@ func TestForgedEndorserBlockOffersFollowItsAnnouncement(t *testing.T) {
 	require.Equal(t, uint64(len(ebRaw)), entries[1].size)
 	require.NotNil(t, entries[2].txOffer, "then the closure offer")
 	require.Equal(t, ebPoint, *entries[2].txOffer)
+
+	// A peer acting on the offer fetches the manifest by the offered point.
+	resp, err := o.leiosfetchServerBlockRequest(
+		oleiosfetch.CallbackContext{},
+		*entries[1].point,
+	)
+	require.NoError(t, err)
+	block, ok := resp.(*oleiosfetch.MsgBlock)
+	require.True(t, ok)
+	require.Equal(t, []byte(ebRaw), []byte(block.BlockRaw))
 
 	// A repeated announcement does not offer the block a second time.
 	o.EnqueueLeiosBlockAnnouncement(testDijkstraHeaderAnnouncing(t, ebRaw))
