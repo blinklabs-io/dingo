@@ -759,14 +759,14 @@ func (o *Ouroboros) queueForgedEndorserBlockOffers(
 	if o.leiosPendingForgedOffers == nil {
 		o.leiosPendingForgedOffers = make(map[string]leiosPendingForgedOffer)
 	}
-	o.leiosPendingForgedOffers[leiosBlockKey(point.Slot, point.Hash)] =
-		leiosPendingForgedOffer{
-			point: ocommon.Point{
-				Slot: point.Slot,
-				Hash: slices.Clone(point.Hash),
-			},
-			size: size,
-		}
+	key := leiosBlockKey(point.Slot, point.Hash)
+	o.leiosPendingForgedOffers[key] = leiosPendingForgedOffer{
+		point: ocommon.Point{
+			Slot: point.Slot,
+			Hash: slices.Clone(point.Hash),
+		},
+		size: size,
+	}
 	for len(o.leiosPendingForgedOffers) > leiosMaxPendingForgedOffers {
 		oldestKey := ""
 		var oldestSlot uint64
