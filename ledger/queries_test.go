@@ -4679,3 +4679,58 @@ func TestReconstructTransitionInfo_ScheduledDijkstraForkNamesItsEpoch(
 	assert.Equal(t, hardfork.TransitionKnown, ls.transitionInfo.State)
 	assert.Equal(t, dijkstraAt, ls.transitionInfo.KnownEpoch)
 }
+
+// TestQueryHardForkEraHistory_ScheduledForkEndsEraAtStoredBoundaryEpoch pins
+// that a past era which stored the scheduled epoch itself ends at that
+// epoch's start, the confirmed boundary, whatever its parameters carry.
+func TestQueryHardForkEraHistory_ScheduledForkEndsEraAtStoredBoundaryEpoch(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	const (
+		epochLen  = uint(432_000)
+		slotLenMs = uint(1_000)
+	)
+	db := newTestDB(t)
+	for epoch := range uint64(2) {
+		require.NoError(t, db.SetEpoch(
+			epoch*uint64(epochLen), epoch, nil, nil, nil, nil,
+			eras.ConwayEraDesc.Id, slotLenMs, epochLen, nil,
+		))
+	}
+	require.NoError(t, db.SetEpoch(
+		2*uint64(epochLen), 2, nil, nil, nil, nil,
+		eras.DijkstraEraDesc.Id, slotLenMs, epochLen, nil,
+	))
+
+	cfg := newTestEraHistoryCfg(t)
+	enabled := true
+	dijkstraAt := uint64(1)
+	cfg.ExperimentalHardForksEnabled = &enabled
+	cfg.TestDijkstraHardForkAtEpoch = &dijkstraAt
+	ls := &LedgerState{
+		db:             db,
+		currentEra:     eras.DijkstraEraDesc,
+		activeEras:     eras.ErasWithDijkstra,
+		transitionInfo: hardfork.NewTransitionUnknown(),
+		currentTip: ochainsync.Tip{
+			Point: ocommon.NewPoint(2*uint64(epochLen)+1, []byte("tip")),
+		},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			EnableDijkstra:    true,
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	ls.publishSnapshotsLocked()
+
+	result, err := ls.queryHardForkEraHistory(context.Background(), nil)
+	require.NoError(t, err)
+	eraList := result.(cbor.IndefLengthList)
+	require.Len(t, eraList, 2)
+	conwayEnd := eraList[0].([]any)[1].([]any)
+	assert.Equal(t, uint64(epochLen), conwayEnd[1],
+		"Conway ends where the scheduled epoch starts")
+	assert.Equal(t, uint64(1), conwayEnd[2])
+}

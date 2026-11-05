@@ -1000,32 +1000,38 @@ func (ls *LedgerState) queryHardForkEraHistory(
 		// next era's Start.relTime stays contiguous.
 		//
 		// A scheduled hard fork names its boundary epoch, so the parameters'
-		// version says nothing more about where the era ends.
-		if eraDesc.DecodePParamsFunc == nil ||
-			entry.NextEraTrigger.Kind == hardfork.TriggerAtEpoch {
+		// version says nothing about where the era ends: the era has run into
+		// its transition only when it stores the scheduled epoch itself.
+		if eraDesc.DecodePParamsFunc == nil {
 			continue
 		}
-		pp, ppErr := ls.loadPersistedProtocolParameters(
-			lastEp.EpochId, eraDesc, txn,
-		)
-		if ppErr != nil {
-			return nil, fmt.Errorf(
-				"getting pparams for epoch %d: %w", lastEp.EpochId, ppErr,
+		if entry.NextEraTrigger.Kind == hardfork.TriggerAtEpoch {
+			if lastEp.EpochId < entry.NextEraTrigger.Epoch {
+				continue
+			}
+		} else {
+			pp, ppErr := ls.loadPersistedProtocolParameters(
+				lastEp.EpochId, eraDesc, txn,
 			)
-		}
-		if pp == nil {
-			continue
-		}
-		ver, verErr := GetProtocolVersion(pp)
-		if verErr != nil {
-			return nil, fmt.Errorf(
-				"extracting protocol version for epoch %d: %w",
-				lastEp.EpochId, verErr,
-			)
-		}
-		pparamsEraId, ok := ls.eraForVersion(ver.Major)
-		if !ok || pparamsEraId <= entry.EraID {
-			continue
+			if ppErr != nil {
+				return nil, fmt.Errorf(
+					"getting pparams for epoch %d: %w", lastEp.EpochId, ppErr,
+				)
+			}
+			if pp == nil {
+				continue
+			}
+			ver, verErr := GetProtocolVersion(pp)
+			if verErr != nil {
+				return nil, fmt.Errorf(
+					"extracting protocol version for epoch %d: %w",
+					lastEp.EpochId, verErr,
+				)
+			}
+			pparamsEraId, ok := ls.eraForVersion(ver.Major)
+			if !ok || pparamsEraId <= entry.EraID {
+				continue
+			}
 		}
 		epPc := epochPicoseconds(lastEp.SlotLength, lastEp.LengthInSlots)
 		perEra[i].end = []any{
