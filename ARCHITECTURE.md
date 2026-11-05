@@ -10660,6 +10660,13 @@ auto-created temporary root is retained on the same terms. Cleanup also
 retains the archive's parent handle and file identity, so a file or directory
 substituted at the archive name is preserved.
 
+With `CleanupAfterLoad` set, an API-mode `Sync` runs `Cleanup` as soon as
+`sync_status` becomes `backfill`, before the metadata backfill starts: the
+backfill reads blocks from the blob store, and on mainnet it runs for days
+while the extracted immutable tree holds hundreds of GB. `serve` resumes an
+interrupted backfill without the tree; re-running `dingo mithril sync` instead
+downloads the immutable archives again. Core mode cleans up at completion.
+
 Temporary feed, extraction, and probe directories are created privately before
 their names are exposed. On Unix, each real directory in the absolute ancestor
 chain must be owned by the current user or root and may be group- or
