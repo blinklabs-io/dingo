@@ -592,3 +592,20 @@ func TestAwaitAgreementAboveRequiresConnectedNodesAndStrictWatermark(
 	require.NoError(t, err)
 	require.Equal(t, fresh, got)
 }
+
+func TestAwaitAgreementAboveRequiresMultipleNodes(t *testing.T) {
+	t.Parallel()
+	for _, names := range [][]string{nil, {"single"}} {
+		group := NewChainGroup(names...)
+		if len(names) == 1 {
+			node := group.Chain(names[0])
+			node.Connected()
+			fresh := hdr(241, 44, 'c')
+			node.RollForward(fresh, tipOf(fresh))
+		}
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		_, err := group.AwaitAgreementAbove(ctx, "multiple connected nodes", 240)
+		require.ErrorIs(t, err, context.Canceled)
+	}
+}
