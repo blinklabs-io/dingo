@@ -314,6 +314,9 @@ func reencode(rule string, raw []byte) ([]byte, error) {
 			return nil, err
 		}
 		certificates := decoded.Items()
+		if len(certificates) == 0 {
+			return nil, errors.New("certificates must not be empty")
+		}
 		if err := common.ValidateCertificateSet(certificates); err != nil {
 			return nil, err
 		}
@@ -467,6 +470,9 @@ func reencode(rule string, raw []byte) ([]byte, error) {
 		return reencodeChecked[common.MultiAsset[*big.Int]](
 			raw,
 			func(decoded common.MultiAsset[*big.Int]) error {
+				if len(decoded.Policies()) == 0 {
+					return errors.New("mint must not be empty")
+				}
 				if err := decoded.CheckForDuplicateKeys(); err != nil {
 					return err
 				}
@@ -557,6 +563,9 @@ func reencode(rule string, raw []byte) ([]byte, error) {
 		var decoded cbor.SetType[conway.ConwayProposalProcedure]
 		if _, err := cbor.DecodeExact(raw, &decoded); err != nil {
 			return nil, err
+		}
+		if len(decoded.Items()) == 0 {
+			return nil, errors.New("proposal procedures must not be empty")
 		}
 		if err := decoded.CheckForDuplicatesAlways(); err != nil {
 			return nil, err
@@ -1049,7 +1058,7 @@ func reencodeConwayVotingProcedures(raw []byte) ([]byte, error) {
 		return nil, err
 	}
 	if len(loose) == 0 {
-		return cbor.Encode(loose)
+		return nil, errors.New("voting procedures must not be empty")
 	}
 	var decoded common.VotingProcedures
 	if _, err := cbor.DecodeExact(raw, &decoded); err != nil {
@@ -1175,6 +1184,9 @@ func reencodeWithdrawals(raw []byte) ([]byte, error) {
 	var withdrawals map[*common.Address]uint64
 	if _, err := cbor.DecodeExact(raw, &withdrawals); err != nil {
 		return nil, err
+	}
+	if len(withdrawals) == 0 {
+		return nil, errors.New("withdrawals must not be empty")
 	}
 	if err := common.ValidateWithdrawalAddresses(withdrawals); err != nil {
 		return nil, err
