@@ -129,11 +129,12 @@ migration locks, and repeatable-read snapshots. All three return
 `sqlstore` and dialect translation is limited to SQL mechanics.
 
 Metadata indexing treats raw CBOR as the lossless storage and API JSON as an
-optional representation. A label whose map keys collide after JSON
-stringification keeps its label and CBOR row but has no JSON representation;
-readers handle that condition per record rather than aborting indexing or
-dropping pagination rows. Duplicate top-level labels remain rejected because
-the relational label key is unique and no deterministic row selection exists.
+optional representation. A label with a container-valued map key, or whose map
+keys collide after JSON stringification, keeps its label and CBOR row but has no
+JSON representation; readers handle that condition per record rather than
+aborting indexing or dropping pagination rows. Duplicate top-level labels
+remain rejected because the relational label key is unique and no deterministic
+row selection exists.
 
 Transaction application records collateral through the durable
 `utxo_collateral_input` association table. Hydration joins that table per
