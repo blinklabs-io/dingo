@@ -36,7 +36,7 @@ import (
 func serveRun(
 	cmd *cobra.Command, _ []string, cfg *config.Config,
 ) error {
-	logger, err := commonRun(cfg)
+	logger, err := commonRun(cmd.Context(), cfg)
 	if err != nil {
 		return err
 	}
@@ -222,7 +222,8 @@ func repairPendingMithrilRewardState(
 	if err != nil {
 		return err
 	}
-	if err := retryMithrilRewardStateRepair(
+	stopTracing := startStandaloneTracing(ctx, repairCfg, logger)
+	err = retryMithrilRewardStateRepair(
 		ctx,
 		logger,
 		mithrilRewardRepairRetryInterval,
@@ -231,7 +232,9 @@ func repairPendingMithrilRewardState(
 				ctx, repairCfg, logger, network,
 			)
 		},
-	); err != nil {
+	)
+	stopTracing()
+	if err != nil {
 		return fmt.Errorf("repairing legacy Mithril reward state: %w", err)
 	}
 	pending, err = mithrilRewardRepairPending(ctx, cfg, logger)

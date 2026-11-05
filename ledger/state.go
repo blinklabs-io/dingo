@@ -1596,6 +1596,7 @@ type LedgerState struct {
 	deferredStakeInputsHook     atomic.Pointer[epochBoundaryDeferredStakeInputsHookHolder]
 	currentBoundarySPOStakeHook atomic.Pointer[currentBoundarySPOStakeHookHolder] // optional same-boundary SPO stake rows for governance's RATIFY phase (nil = governance falls back to reading the not-yet-written persisted row)
 	reachedTip                  atomic.Bool
+	catchup                     catchupTrace
 	currentTip                  ochainsync.Tip
 	byronPBFT                   byronPBFTCache
 	currentEpoch                models.Epoch
@@ -3049,6 +3050,10 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 	// live database restore/truncate never cancels. blockPipeline is nil
 	// under ManualBlockProcessing (see NewLedgerState), so this is a plain
 	// nil check rather than also re-checking that mode here.
+	if !ls.reachedTip.Load() {
+		tracing.SetNearTip(false)
+		ls.beginCatchupTrace(ctx)
+	}
 	if ls.blockPipeline != nil {
 		if err := ls.blockPipeline.Start(ctx); err != nil {
 			return fmt.Errorf("failed to start block-decode pipeline: %w", err)
@@ -3662,6 +3667,7 @@ var (
 )
 
 func (ls *LedgerState) Close() (retErr error) {
+	ls.endCatchupTrace()
 	// Close can be called once by the live lifecycle operation and again by
 	// the node's normal shutdown after that operation cancels the node. Keep
 	// the first result visible to every caller: returning nil from the second
@@ -5232,6 +5238,7 @@ func (ls *LedgerState) rollbackWithBlocksAndIntent(
 			pruneFloor,
 		)
 	}
+	traceBlocks := ls.rollbackTraceBlocks(ctx, point, rollbackBlocks)
 	if err := ls.prepareRollbackIntent(ctx, point, rollbackBlocks); err != nil {
 		if !errors.Is(err, errRollbackIntentTooLarge) {
 			return fmt.Errorf("prepare rollback intent: %w", err)
@@ -5424,6 +5431,9 @@ func (ls *LedgerState) rollbackWithBlocksAndIntent(
 	if err != nil {
 		return err
 	}
+	// The blocks are gone from the ledger from here on, whichever path
+	// returns, including a rollbackCommittedError.
+	defer traceRollback(ctx, point, traceBlocks)
 	ls.rewardPrecomputeMu.Lock()
 	if snapshot := ls.rewardPrecomputeRollback; snapshot != nil {
 		snapshot.committed = true
@@ -9525,6 +9535,7 @@ func (ls *LedgerState) processBlocksFromSource(
 			// The body's wall time, subtracted from the submit's to leave
 			// the commit stage.
 			var bodyElapsed time.Duration
+			var tracedBlocks []ledger.Block
 			err = ls.submitBlockApplyDBTxn(
 				ctx,
 				snapshotTip,
@@ -9532,6 +9543,7 @@ func (ls *LedgerState) processBlocksFromSource(
 				func(txn *database.Txn) error { //nolint:contextcheck
 					bodyStart := time.Now()
 					defer func() { bodyElapsed = time.Since(bodyStart) }()
+					tracedBlocks = tracedBlocks[:0]
 					replayWorkers := startReplayHeaderJobs(
 						ctx, nextBatch[i:end], verifiedReplayHeaders,
 						replayHeaderJobs, verifyReplayHeader,
@@ -9835,6 +9847,9 @@ func (ls *LedgerState) processBlocksFromSource(
 						if opts.beforeCommit != nil {
 							appliedBlocks = append(appliedBlocks, next)
 						}
+						if tracing.Enabled() {
+							tracedBlocks = append(tracedBlocks, next)
+						}
 						// Update expected prev hash for next block in batch
 						expectedPrevHash = tmpPoint.Hash
 						parentEnvelope = envelopeParentFromBlock(next)
@@ -10036,6 +10051,12 @@ func (ls *LedgerState) processBlocksFromSource(
 				completeReadResult()
 				return fmt.Errorf("process block batch: %w", err)
 			}
+			traceBatchCommit(
+				ctx,
+				tracedBlocks,
+				submitStart.Add(bodyElapsed),
+				time.Now(),
+			)
 			transactionOpCertCounters.promote()
 			trustedReplayUtxos = transactionReplayUtxos
 			trimTrustedReplayUtxos(trustedReplayUtxos)
@@ -10073,6 +10094,8 @@ func (ls *LedgerState) processBlocksFromSource(
 				if wantEnableValidation {
 					ls.validationEnabled = true
 					ls.reachedTip.Store(true)
+					tracing.SetNearTip(true)
+					ls.endCatchupTrace()
 				}
 				ls.updateTipMetrics(tipDensity)
 				// This chunk's new tip is now reflected in
@@ -10241,13 +10264,21 @@ func (ls *LedgerState) ledgerProcessBlock(
 	epochStartSlot uint64,
 	syntheticV2CostModel bool,
 ) (delta *LedgerDelta, err error) {
-	_, span := tracing.Start(
+	ctx, span := tracing.StartHeader(
 		ctx,
-		"ledger.process_block",
-		tracing.Uint64("block.slot", point.Slot),
-		attribute.String("block.hash", hex.EncodeToString(point.Hash)),
+		tracing.StageApply,
+		"block.apply",
+		block,
 	)
-	defer func() { tracing.End(span, err) }()
+	if span.IsRecording() {
+		span.SetAttributes(tracing.Uint64("block.slot", point.Slot))
+	}
+	defer func() {
+		if err != nil {
+			span.SetAttributes(attribute.String("block.outcome", "error"))
+		}
+		tracing.End(span, err)
+	}()
 	// Check that we're processing things in order
 	if len(expectedPrevHash) > 0 {
 		if string(
