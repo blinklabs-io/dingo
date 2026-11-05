@@ -440,6 +440,11 @@ func ValidateTxDijkstra(
 		)
 	}
 	tx = normalizedTx
+	// The rules below share one transaction-scoped state, as in
+	// ValidateTxConway. Its memo is keyed by transaction object, so the
+	// phase-2 copy and each sub-transaction get their own entries.
+	// Capability lookups, including blsstate.ProviderFor, unwrap it.
+	ls = lcommon.NewTransactionScopedLedgerState(ls)
 	errs := []error{}
 	// Phase-1 rules apply to every transaction regardless of its declared
 	// phase-2 result. A declared-invalid transaction still has to prove its
