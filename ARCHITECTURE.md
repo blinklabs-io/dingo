@@ -19814,9 +19814,11 @@ accumulator. SQLite can additionally stage UTxO changes for a bounded plain
 closure through `metadata.LeiosClosureUtxoOverlay`: preflight changes no rows,
 parents and contexts remain immediate, and every output, spent marker and
 address row survives the final flush. Known exact reads use staged metadata;
-other readers materialize it before querying. Ineligible closures and other
-providers retain immediate UTxO writes. The outer metadata transaction owns
-rollback of every effect, including failures after staging begins.
+other UTxO readers materialize it before querying. API-detail indexes remain
+queued until the final closure flush. The shared `internal/sqlreadonly` parser
+classifies SQLite reads for both MCP and the retained overlay. Ineligible
+closures and other providers retain immediate UTxO writes. The outer metadata
+transaction owns rollback of every effect, including failures after staging begins.
 Regression tests: `TestApplyRowBatchingSerialEquivalence`,
 `TestApplyRowBatchingSameChunkDependencies` and
 `TestApplyRowBatchingSkipsValidatedDeltas` (`ledger/apply_row_batching_test.go`),

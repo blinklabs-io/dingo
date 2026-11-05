@@ -64,7 +64,10 @@ func plainOverlayChain(
 		tx.WithOutputs(output())
 		tx.WithValid(true)
 		tx.WithMetadata([]byte{0xa1, 0x01, 0x02})
-		tx.WithWitnesses(mockledger.NewMockTransactionWitnessSet().WithVkeyWitnesses(lcommon.VkeyWitness{Vkey: []byte{byte(i), 0x01}, Signature: []byte{0x02, byte(i)}}))
+		tx.WithWitnesses(
+			mockledger.NewMockTransactionWitnessSet().
+				WithVkeyWitnesses(lcommon.VkeyWitness{Vkey: []byte{byte(i), 0x01}, Signature: []byte{0x02, byte(i)}}),
+		)
 		transactions = append(transactions, tx)
 		prior = tx.Hash().Bytes()
 	}
@@ -167,7 +170,13 @@ func TestLeiosRetainedUtxoOverlayMatchesPerRowHistory(t *testing.T) {
 				0,
 			),
 		)
-		metadataViews[i] = applyPlainOverlayChain(t, store, transactions, enabled, true)
+		metadataViews[i] = applyPlainOverlayChain(
+			t,
+			store,
+			transactions,
+			enabled,
+			true,
+		)
 		states[i] = retainedOverlayAPIState(t, store)
 		for _, table := range []string{"transaction", "leios_transaction_context", "address_transaction"} {
 			var count int
@@ -254,7 +263,18 @@ func TestLeiosRetainedUtxoOverlayFallsBackForSpentInput(t *testing.T) {
 	spender.WithInputs(transactions[0].Inputs()...)
 	spender.WithOutputs(transactions[0].Outputs()...)
 	spender.WithValid(true)
-	require.NoError(t, store.SetTransactionLeiosClosure(spender, ocommon.Point{Slot: 50, Hash: overlayTxID(0x54, 0)}, 0, nil, true, nil, 0))
+	require.NoError(
+		t,
+		store.SetTransactionLeiosClosure(
+			spender,
+			ocommon.Point{Slot: 50, Hash: overlayTxID(0x54, 0)},
+			0,
+			nil,
+			true,
+			nil,
+			0,
+		),
+	)
 
 	txn := store.Transaction(context.Background())
 	defer func() { _ = txn.Rollback() }()
@@ -355,25 +375,71 @@ func retainedOverlayAPIState(t testing.TB, store *Store) string {
 
 func TestLeiosRetainedUtxoOverlayRejectsExternalMutation(t *testing.T) {
 	t.Parallel()
-	seed, transactions := plainOverlayChain(t, 4)
-	store := newForeignKeySQLiteStore(t)
-	store.storageMode = types.StorageModeAPI
-	require.NoError(t, store.SetTransaction(seed, ocommon.Point{Slot: 10, Hash: seed.Hash().Bytes()}, 0, nil, true, nil, 0))
-	txn := store.Transaction(context.Background())
-	defer func() { _ = txn.Rollback() }()
-	acc := store.NewLeiosClosureBatchAccumulator()
-	defer acc.Reset()
-	enabled, err := store.EnableLeiosClosureUtxoOverlay(acc, txn, transactions)
-	require.NoError(t, err)
-	require.True(t, enabled)
-	require.NoError(t, store.SetTransactionLeiosClosureBatched(transactions[0], ocommon.Point{Slot: 100, Hash: overlayTxID(0x53, 0)}, 0, nil, true, nil, acc, txn, 0))
-	db, ctx, err := store.dbFromTxn(txn)
-	require.NoError(t, err)
-	_, err = db.ExecContext(ctx, `DELETE FROM utxo WHERE tx_id = ?`, seed.Hash().Bytes())
-	require.ErrorContains(t, err, "external mutation")
-	_, err = store.GetUtxo(transactions[0].Hash().Bytes(), 0, txn)
-	require.ErrorContains(t, err, "external mutation")
-	require.ErrorContains(t, store.FlushBatch(acc, txn), "external mutation")
+	for _, query := range []string{
+		`DELETE FROM utxo WHERE tx_id = ?`,
+		`WITH x AS (SELECT id FROM utxo) DELETE FROM utxo WHERE tx_id = ?`,
+		`WITH x AS (SELECT id FROM utxo) UPDATE utxo SET amount='9' WHERE tx_id = ?`,
+	} {
+		t.Run(query, func(t *testing.T) {
+			t.Parallel()
+
+			seed, transactions := plainOverlayChain(t, 4)
+			store := newForeignKeySQLiteStore(t)
+			store.storageMode = types.StorageModeAPI
+			require.NoError(
+				t,
+				store.SetTransaction(
+					seed,
+					ocommon.Point{Slot: 10, Hash: seed.Hash().Bytes()},
+					0,
+					nil,
+					true,
+					nil,
+					0,
+				),
+			)
+			txn := store.Transaction(context.Background())
+			defer func() { _ = txn.Rollback() }()
+			acc := store.NewLeiosClosureBatchAccumulator()
+			defer acc.Reset()
+			enabled, err := store.EnableLeiosClosureUtxoOverlay(
+				acc,
+				txn,
+				transactions,
+			)
+			require.NoError(t, err)
+			require.True(t, enabled)
+			require.NoError(
+				t,
+				store.SetTransactionLeiosClosureBatched(
+					transactions[0],
+					ocommon.Point{Slot: 100, Hash: overlayTxID(0x53, 0)},
+					0,
+					nil,
+					true,
+					nil,
+					acc,
+					txn,
+					0,
+				),
+			)
+			db, ctx, err := store.dbFromTxn(txn)
+			require.NoError(t, err)
+			_, err = db.ExecContext(
+				ctx,
+				query,
+				seed.Hash().Bytes(),
+			)
+			require.ErrorContains(t, err, "external mutation")
+			_, err = store.GetUtxo(transactions[0].Hash().Bytes(), 0, txn)
+			require.ErrorContains(t, err, "external mutation")
+			require.ErrorContains(
+				t,
+				store.FlushBatch(acc, txn),
+				"external mutation",
+			)
+		})
+	}
 }
 
 func TestLeiosRetainedUtxoOverlayRejectsPointerInput(t *testing.T) {
@@ -381,8 +447,22 @@ func TestLeiosRetainedUtxoOverlayRejectsPointerInput(t *testing.T) {
 	seed, transactions := plainOverlayChain(t, 4)
 	store := newForeignKeySQLiteStore(t)
 	store.storageMode = types.StorageModeAPI
-	require.NoError(t, store.SetTransaction(seed, ocommon.Point{Slot: 10, Hash: seed.Hash().Bytes()}, 0, nil, true, nil, 0))
-	_, err := store.writeDB.Exec(`INSERT INTO utxo_pointer(utxo_id, ptr_slot, ptr_tx_index, ptr_cert_index) SELECT id, 1, 0, 0 FROM utxo WHERE tx_id = ?`, seed.Hash().Bytes())
+	require.NoError(
+		t,
+		store.SetTransaction(
+			seed,
+			ocommon.Point{Slot: 10, Hash: seed.Hash().Bytes()},
+			0,
+			nil,
+			true,
+			nil,
+			0,
+		),
+	)
+	_, err := store.writeDB.Exec(
+		`INSERT INTO utxo_pointer(utxo_id, ptr_slot, ptr_tx_index, ptr_cert_index) SELECT id, 1, 0, 0 FROM utxo WHERE tx_id = ?`,
+		seed.Hash().Bytes(),
+	)
 	require.NoError(t, err)
 	txn := store.Transaction(context.Background())
 	defer func() { _ = txn.Rollback() }()
@@ -395,10 +475,24 @@ func TestLeiosRetainedUtxoOverlayRejectsPointerInput(t *testing.T) {
 
 func TestLeiosRetainedUtxoOverlayClosureBound(t *testing.T) {
 	t.Parallel()
-	seed, transactions := plainOverlayChain(t, maxLeiosUtxoOverlayTransactions+1)
+	seed, transactions := plainOverlayChain(
+		t,
+		maxLeiosUtxoOverlayTransactions+1,
+	)
 	store := newForeignKeySQLiteStore(t)
 	store.storageMode = types.StorageModeAPI
-	require.NoError(t, store.SetTransaction(seed, ocommon.Point{Slot: 10, Hash: seed.Hash().Bytes()}, 0, nil, true, nil, 0))
+	require.NoError(
+		t,
+		store.SetTransaction(
+			seed,
+			ocommon.Point{Slot: 10, Hash: seed.Hash().Bytes()},
+			0,
+			nil,
+			true,
+			nil,
+			0,
+		),
+	)
 	txn := store.Transaction(context.Background())
 	defer func() { _ = txn.Rollback() }()
 	acc := store.NewLeiosClosureBatchAccumulator()
@@ -406,7 +500,11 @@ func TestLeiosRetainedUtxoOverlayClosureBound(t *testing.T) {
 	enabled, err := store.EnableLeiosClosureUtxoOverlay(acc, txn, transactions)
 	require.NoError(t, err)
 	require.False(t, enabled)
-	enabled, err = store.EnableLeiosClosureUtxoOverlay(acc, txn, transactions[:maxLeiosUtxoOverlayTransactions])
+	enabled, err = store.EnableLeiosClosureUtxoOverlay(
+		acc,
+		txn,
+		transactions[:maxLeiosUtxoOverlayTransactions],
+	)
 	require.NoError(t, err)
 	require.True(t, enabled)
 }
@@ -416,12 +514,25 @@ func TestLeiosRetainedUtxoOverlayOutputByteBound(t *testing.T) {
 	seed, transactions := plainOverlayChain(t, 2)
 	store := newForeignKeySQLiteStore(t)
 	store.storageMode = types.StorageModeAPI
-	require.NoError(t, store.SetTransaction(seed, ocommon.Point{Slot: 10, Hash: seed.Hash().Bytes()}, 0, nil, true, nil, 0))
+	require.NoError(
+		t,
+		store.SetTransaction(
+			seed,
+			ocommon.Point{Slot: 10, Hash: seed.Hash().Bytes()},
+			0,
+			nil,
+			true,
+			nil,
+			0,
+		),
+	)
 	txn := store.Transaction(context.Background())
 	defer func() { _ = txn.Rollback() }()
 	acc := store.NewLeiosClosureBatchAccumulator()
 	defer acc.Reset()
-	secondSize, err := lcommon.TransactionOutputCborSize(transactions[1].Outputs()[0])
+	secondSize, err := lcommon.TransactionOutputCborSize(
+		transactions[1].Outputs()[0],
+	)
 	require.NoError(t, err)
 	output := transactions[0].Outputs()[0].(interface{ SetCbor([]byte) })
 	output.SetCbor(make([]byte, maxLeiosUtxoOverlayOutputBytes))
@@ -432,4 +543,66 @@ func TestLeiosRetainedUtxoOverlayOutputByteBound(t *testing.T) {
 	enabled, err = store.EnableLeiosClosureUtxoOverlay(acc, txn, transactions)
 	require.NoError(t, err)
 	require.True(t, enabled)
+}
+
+func TestLeiosRetainedUtxoOverlayCTEReadBarrier(t *testing.T) {
+	t.Parallel()
+	for _, query := range []string{
+		`WITH outputs AS (SELECT id FROM utxo) SELECT COUNT(*) FROM outputs`,
+		`WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<2), outputs AS NOT MATERIALIZED (SELECT id FROM utxo WHERE id IN (SELECT id FROM utxo)) SELECT COUNT(*) FROM outputs`,
+		`/* leading comment */ WITH "select" AS (SELECT ') DELETE' AS label, id FROM utxo) SELECT COUNT(*) FROM "select"`,
+	} {
+		t.Run(query, func(t *testing.T) {
+			t.Parallel()
+			seed, txs := plainOverlayChain(t, 2)
+			store := newForeignKeySQLiteStore(t)
+			store.storageMode = types.StorageModeAPI
+			require.NoError(
+				t,
+				store.SetTransaction(
+					seed,
+					ocommon.Point{Slot: 10, Hash: seed.Hash().Bytes()},
+					0,
+					nil,
+					true,
+					nil,
+					0,
+				),
+			)
+			txn := store.Transaction(t.Context())
+			defer func() { _ = txn.Rollback() }()
+			acc := store.NewLeiosClosureBatchAccumulator()
+			defer acc.Reset()
+			enabled, err := store.EnableLeiosClosureUtxoOverlay(acc, txn, txs)
+			require.NoError(t, err)
+			require.True(t, enabled)
+			for i, tx := range txs {
+				require.NoError(
+					t,
+					store.SetTransactionLeiosClosureBatched(
+						tx,
+						ocommon.Point{Slot: 100, Hash: overlayTxID(0x53, 0)},
+						uint32(i),
+						nil,
+						true,
+						nil,
+						acc,
+						txn,
+						0,
+					),
+				)
+			}
+			db, ctx, err := store.dbFromTxn(txn)
+			require.NoError(t, err)
+			rows, err := db.QueryContext(ctx, query)
+			require.NoError(t, err)
+			require.True(t, rows.Next())
+			var count int
+			require.NoError(t, rows.Scan(&count))
+			require.NoError(t, rows.Close())
+			require.Equal(t, 3, count)
+			require.NoError(t, store.FlushBatch(acc, txn))
+			require.NoError(t, txn.Commit())
+		})
+	}
 }

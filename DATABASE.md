@@ -1339,7 +1339,10 @@ transactions. Other closures and providers use the ordinary ordered writer.
 Transaction parents and execution contexts remain immediate. Every created
 UTxO, including outputs spent inside the closure, retains its ordinary ID,
 spend markers and address row. Exact known reads resolve from the staged
-models; other readers first materialize all pending UTxO and address rows.
+models; other UTxO readers first materialize pending UTxO and output-address
+rows. API indexes such as `address_transaction` retain their existing deferred
+visibility until the final closure flush. Read-only CTEs use the shared
+`internal/sqlreadonly` validator, also used by MCP.
 Unexpected writes to staged tables fail the batch rather than leave cached
 state stale. API detail rows keep their closure flush ordering. Validation
 still runs in transaction order, and a failure rolls back the outer metadata

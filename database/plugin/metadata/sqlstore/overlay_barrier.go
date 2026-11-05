@@ -20,6 +20,8 @@ import (
 	"errors"
 	"regexp"
 	"strings"
+
+	"github.com/blinklabs-io/dingo/internal/sqlreadonly"
 )
 
 // barrierQueryer is the handle dbFromTxn returns for a transaction with an
@@ -38,9 +40,10 @@ type barrierQueryer struct {
 func (q barrierQueryer) barrier(ctx context.Context, query string) error {
 	if o := q.accumulator.overlay; o != nil && o.retainHistory && !o.flushing &&
 		(readsOverlayTables(query) || containsIdentifier(query, "utxo_address") || containsIdentifier(query, "asset")) {
-		op, _ := classifySQLStatement(query)
-		if op != "select" {
-			o.err = errors.New("external mutation inside API closure UTxO overlay")
+		if err := sqlreadonly.ValidateSQLite(query); err != nil {
+			o.err = errors.New(
+				"external mutation inside API closure UTxO overlay",
+			)
 			return o.err
 		}
 	}
