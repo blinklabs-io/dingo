@@ -203,7 +203,14 @@ type ChainSelectorConfig struct {
 	// "" has no trustworthy independence evidence and
 	// fails closed in corroboration: it is not corroborated as a candidate
 	// and does not count as a witness. A nil hook groups by remote host.
-	PeerIdentity       func(ouroboros.ConnectionId) string
+	PeerIdentity func(ouroboros.ConnectionId) string
+	// ConnectionEligible reports whether the connection may be a Limit on
+	// Eagerness candidate, in addition to the SetConnectionEligible state. It
+	// does not gate selection or corroboration witnesses. It is called under
+	// the selector lock, so it must not call back into the selector. The node
+	// backs it with chainsync ingress admission: a peer demoted to
+	// observability-only has its headers dropped, so its fragment can freeze
+	// and it must not hold the limit. A nil hook admits every connection.
 	ConnectionEligible func(ouroboros.ConnectionId) bool
 	ConnectionPriority func(ouroboros.ConnectionId) int
 	MaxTrackedPeers    int // 0 means use DefaultMaxTrackedPeers
@@ -3967,6 +3974,16 @@ func (cs *ChainSelector) isConnectionEligible(
 		return true
 	}
 	return eligible
+}
+
+// eagernessCandidateAdmittedLocked reports whether the ConnectionEligible hook
+// admits connId as a Limit on Eagerness candidate. It is consulted only by the
+// candidate set, after the peer-governance check, so it can only exclude.
+func (cs *ChainSelector) eagernessCandidateAdmittedLocked(
+	connId ouroboros.ConnectionId,
+) bool {
+	return cs.config.ConnectionEligible == nil ||
+		cs.config.ConnectionEligible(connId)
 }
 
 func (cs *ChainSelector) connectionPriority(

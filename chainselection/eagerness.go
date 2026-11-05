@@ -172,9 +172,12 @@ func (cs *ChainSelector) computeEagernessLimitFromPeersLocked(
 		peerForced := false
 		// A peer advertising a wall-clock-stale tip is never selectable, so
 		// there is no switch to it for the limit to protect; counting it would
-		// pin the limit at k past its fork point while it stays connected.
+		// pin the limit at k past its fork point while it stays connected. The
+		// ConnectionEligible hook drops a chainsync observer the same way: its
+		// headers are not ingested, so its fragment can freeze.
 		if !cs.peerLiveEligibleNonStaleLocked(connId, peerTip) ||
-			cs.advertisedTipStaleLocked(peerTip) {
+			cs.advertisedTipStaleLocked(peerTip) ||
+			!cs.eagernessCandidateAdmittedLocked(connId) {
 			if include == nil || *include != connId {
 				continue
 			}

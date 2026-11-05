@@ -7097,7 +7097,18 @@ is computed from the candidate fragments of live, eligible, non-stale peers
 that have delivered a header, excluding peers the Genesis stale-tip rule
 treats as stale (`advertisedTipStaleLocked`): such a peer is never selectable,
 so its fork needs no protection, and counting it would hold every other peer at
-`k` past its fork point while it stays connected. The limit is gated on the selection mode, which is
+`k` past its fork point while it stays connected. Eligibility has two inputs:
+the peer-governance state kept by `SetConnectionEligible`, and the read-only
+`ChainSelectorConfig.ConnectionEligible` hook, which the node backs with
+chainsync ingress admission (`Node.chainsyncIngressAdmitted`). A peer demoted to
+observability-only has its headers dropped from ingress, so its fragment can
+freeze; the hook excludes it from the candidate set until it is promoted again,
+and it can only exclude, never re-enable a peer that peer governance excluded.
+The hook gates only this candidate set: an observer still counts as a Genesis
+corroboration witness through its verified deliveries. The selector pulls the
+hook on every limit evaluation, so no notification is needed. A re-promoted
+peer still holds its frozen fragment until the resync rollback registers it
+again. The limit is gated on the selection mode, which is
 Dingo's only sync-state signal (there is no Genesis State Machine equivalent):
 
 - Genesis mode (syncing): the cap is active. Before any candidate has

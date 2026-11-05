@@ -2197,6 +2197,9 @@ func (n *Node) buildChainSelectorConfig(
 			return n.connManager != nil &&
 				n.connManager.GetConnectionById(connId) != nil
 		},
+		ConnectionEligible: func(connId ouroboros.ConnectionId) bool {
+			return n.chainsyncIngressAdmitted(connId)
+		},
 		PeerIdentity: func(connId ouroboros.ConnectionId) string {
 			return n.peerCorroborationIdentityByConnId(connId)
 		},
