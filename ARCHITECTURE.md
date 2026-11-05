@@ -3761,9 +3761,11 @@ its block deltas and flushes it before the surrounding database transaction
 commits. Core storage mode does the same only when
 `LedgerStateConfig.ApplyRowBatchingEnabled` is set (see "Batched apply for
 unvalidated blocks") or the batch is applied by `ApplyTrustedBatch`, whose
-blocks are never validated. Batches with closure-context, conflict-tolerant, or
-strict consumed-input semantics, and the delta a validated block returns, keep
-the unbatched write path in every mode. A trusted
+blocks are never validated. Closure-context batches apply validation state
+immediately in every mode; API storage defers output-address, transaction-address,
+key witness and metadata-label indexes until the closure finishes. Other
+conflict-tolerant or strict consumed-input batches, and the delta a validated
+block returns, keep the unbatched write path. A trusted
 immutable replay can omit consumed-input blob recovery because the complete
 history supplies each producer output earlier in slot order; transaction
 conflict checks still run.
@@ -19880,8 +19882,12 @@ from the `utxo` table while its delta is still queued stores the sum less that
 delta, so the flush counts the queued change once (`DATABASE.md`,
 "Incremental live-UTxO stake maintenance").
 Validated blocks apply each transaction as it is validated and keep the
-per-transaction path for the donation-only delta they return, as do Leios
-endorser-block applies and closure-context batches, in every storage mode.
+per-transaction path for the donation-only delta they return. Leios
+endorser-block applies and closure-context batches also apply state immediately,
+but in API mode their accumulator groups output-address, transaction-address,
+key witness and metadata-label rows across the closure before flushing inside the
+same transaction. Those indexes are not validation inputs; assets and datums
+remain immediately readable by the next transaction.
 Regression tests: `TestApplyRowBatchingSerialEquivalence`,
 `TestApplyRowBatchingSameChunkDependencies` and
 `TestApplyRowBatchingSkipsValidatedDeltas` (`ledger/apply_row_batching_test.go`),

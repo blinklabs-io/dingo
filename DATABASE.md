@@ -105,6 +105,11 @@ reload the statistics on each batch's transaction connection before preparing
 the join, so pooled connections with independent planner caches use the updated
 estimates.
 
+Single-output SQLite inserts return their generated ID from the driver result
+after checking the affected-row count. An ignored conflict preserves its
+existing output ID and provenance-repair behavior. Other metadata backends
+retain their native returning or upsert paths.
+
 SQLite keeps planner statistics current while the node runs. A node synced
 from genesis never ran `ANALYZE`, and without `sqlite_stat1` the planner picks
 indexes by shape alone: the batched spend `UPDATE` in `consumeUtxosBatchQuery`
@@ -258,6 +263,12 @@ filter. The integer liveness filter still applies. Existing nonpaged callers
 retain their pagination and matching semantics. See the
 [MCP guide](docs/mcp/README.md#metadata-and-query-semantics) for page bounds and
 live-state consistency semantics.
+
+Certified Leios closures batch API-only output-address rows with transaction
+address history, key witnesses and metadata labels. UTxO rows, native assets,
+datums, scripts and live stake changes remain visible before the next transaction
+validates. The queued indexes flush inside the closure transaction before
+commit; rollback discards them with the transaction.
 
 Blockfrost historical and governance reads are served from existing tables
 through `HistoryStore` (`database/plugin/metadata/history_store.go`); migration
