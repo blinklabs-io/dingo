@@ -168,12 +168,6 @@ SQLite already re-plans a statement on the connection that ran the analysis, so
 the swap matters for statements whose cached plan could outlive the change on
 another connection, not for the write connection.
 
-Sync-state reads on a write transaction reuse the prepared statement cache,
-including repeated absent trust-boundary lookups during genesis sync. Reads
-using a separate read pool keep their ordinary query path, so a reader never
-waits for the single write connection it may already hold. Values are read
-from the database each time, including changes made in the same transaction.
-
 The growth rule never revisits statistics that are wrong rather than small.
 A Mithril bootstrap analyzes `utxo` before any imported output has been
 spent, and the table stays near that size afterwards. A full index on a
@@ -1331,6 +1325,15 @@ failure rewinds that blob suffix to the last applied metadata tip before the
 command returns, so a rejected batch cannot become the next run's canonical
 starting point. If the storage backend refuses that rewind, the command returns
 both errors and the database requires recovery before another load.
+
+## Sync-state reads
+
+SQLite, PostgreSQL and MySQL reuse the prepared statement cache for sync-state
+reads on a write transaction, including absent trust-boundary lookups during
+genesis sync. Reads using a separate read pool keep their ordinary query path,
+so a reader never waits for the single write connection it may already hold.
+Values are read from the database each time, including changes made in the
+same transaction.
 
 ## SQL Conventions
 
