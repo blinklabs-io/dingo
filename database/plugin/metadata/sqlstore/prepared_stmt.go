@@ -80,6 +80,7 @@ var hotStatements = func() []string {
 		insertWithdrawalRewardDeltaSQL,
 		sqlitequery.GetAccountByCredentialQuery,
 		sqlitequery.GetActiveAccountByCredentialQuery,
+		sqlitequery.GetSyncStateQuery,
 		sqlitequery.SetTipQuery,
 		sqlitequery.SetBlockNonceQuery,
 		utxoStakeConsumedDeltaQuery(1),

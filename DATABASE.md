@@ -168,6 +168,12 @@ SQLite already re-plans a statement on the connection that ran the analysis, so
 the swap matters for statements whose cached plan could outlive the change on
 another connection, not for the write connection.
 
+Sync-state reads on a write transaction reuse the prepared statement cache,
+including repeated absent trust-boundary lookups during genesis sync. Reads
+using a separate read pool keep their ordinary query path, so a reader never
+waits for the single write connection it may already hold. Values are read
+from the database each time, including changes made in the same transaction.
+
 The growth rule never revisits statistics that are wrong rather than small.
 A Mithril bootstrap analyzes `utxo` before any imported output has been
 spent, and the table stays near that size afterwards. A full index on a
