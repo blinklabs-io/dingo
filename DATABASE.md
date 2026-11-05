@@ -288,8 +288,14 @@ aggregation and return a non-nil `*big.Int` from
 `SumTransactionOutputsInSlotRange`; repeated transfers can exceed both signed
 and unsigned 64-bit totals without exceeding the supply in any one output.
 The Blockfrost response preserves the total as a decimal string. Totals count
-a Leios closure transaction at its
-`leios_transaction_context` slot, and epoch and pool block lists read
+a Leios closure transaction at its `leios_transaction_context` slot. Output
+aggregation selects normal transactions by their slot index and closure
+transactions by their execution-slot index in disjoint branches before reading
+outputs by transaction ID; it does not scan retained transaction history for a
+single epoch. The exact arbitrary-precision sum includes valid outputs and
+phase-2-invalid collateral returns, including spent outputs while retained.
+Complete historical totals require API storage mode; core mode prunes spent
+outputs. Epoch and pool block lists read
 `block_nonce` joined to `pool_opcert_sequence`. API storage mode keeps every
 non-checkpoint `block_nonce` row for those lists (one row per block); core mode
 prunes them outside the three-epoch nonce window, keeping each epoch's
@@ -1443,6 +1449,13 @@ unaffected: it never prunes spent rows, so no cap or announced floor applies.
 ## ER Diagrams
 
 ### Transactions and UTxO
+
+Normal and batched SQLite transaction inserts use the captured
+`ExecContext` result instead of `RETURNING id`. `RowsAffected` distinguishes a fresh row from an ignored hash
+conflict before `LastInsertId` is read; SQLite retains the preceding insert ID
+when a conflict inserts nothing. Replays still update the existing row and
+look up its ID by hash. Batch accumulators retain the storage dialect across
+reset, and non-SQLite providers do not prepare the SQLite result statement.
 
 ```mermaid
 erDiagram
