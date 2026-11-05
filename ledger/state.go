@@ -1420,6 +1420,10 @@ type tipSnapshot struct {
 }
 
 type LedgerState struct {
+	// A single successful-decode receipt retains only a manifest hash. Count
+	// readers still reload and hash every body before reusing that proof.
+	certifiedClosureReceipt atomic.Pointer[lcommon.Blake2b256]
+
 	// evalAdmission bounds concurrent EvaluateTx calls globally and per remote
 	// source. Nil means unbounded.
 	evalAdmission *evaluationLimiter

@@ -20649,3 +20649,13 @@ its requests without canceling a replacement instance for the same connection
 identifier. UTxO RPC stake-distribution queries use their RPC request context.
 UTxO whole-query cancellation stops feeding new resolution work and drains
 in-flight results before releasing worker transactions and returning the error.
+
+Block transaction counts reuse a single successful typed-decode receipt per
+ledger instance, identified by the certified endorser-block manifest hash.
+Every count read still loads the parent, manifest and raw bodies, validates
+the manifest and body count, and checks each body hash and size. Only bytes
+matching a previously completed decode skip typed transaction allocation.
+An anomaly follows the full decode path to preserve error ordering. The
+receipt retains no bodies, has no time-based validity, and is replaced by the
+next successful closure decode. Blockfrost block summaries use this count
+path; consumers needing transaction objects retain the full reader.
