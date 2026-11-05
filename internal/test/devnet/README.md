@@ -439,6 +439,12 @@ inside what the security parameter can reconcile — rather than for a fixed
 wall-clock time. That keeps the disruption equally meaningful on a fast
 and a slow runner.
 
+Recovery waits for a matching new header above the highest server tip captured
+after the restarted node catches up. Every observer must be connected and
+must have progressed past that watermark. Agreement on an old shared ancestor
+or forward progress by only one node cannot start the next disruption while
+newer forks are still divergent.
+
 The whole schedule is derived from the network spec by
 `devnet.NewScenarioPlan`. For the accelerated spec it works out as
 `readiness<=45s propagation<=1m10s agreement<=1m22.5s
