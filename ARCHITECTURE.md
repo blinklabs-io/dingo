@@ -2019,6 +2019,11 @@ When `Node.Run()` is called, components are initialized in this order:
     experimental Shelley hard-fork epoch is the explicit exception used by
     Shelley-at-slot-zero test profiles; this keeps absolute slots aligned for
     genesis-overlay delegation on networks with a Byron prefix.
+    A Shelley genesis protocol major that names Dijkstra starts the epoch
+    cache in Dijkstra only when no Dijkstra hard-fork epoch above 0 is
+    scheduled (`TestDijkstraHardForkAtEpoch` with
+    `ExperimentalHardForksEnabled`); otherwise it starts in Conway and the
+    scheduled trigger enters Dijkstra at that epoch.
     This applies to the empty-database branch only, which is what keeps an
     already-synced node's data untouched. A database written before the Byron
     prefix was retained still has epoch 0 tagged with a post-Byron era and
@@ -4156,7 +4161,7 @@ from Babbage onward, and the collateral rules use ceiling arithmetic. These
 checks are dependency-owned so Dingo does not maintain a second, potentially
 divergent decoder or rule implementation.
 
-The `ledger/eras/` package provides era-specific validation rules for each Cardano era. The default active era table is Byron through Conway. Experimental Dijkstra support is added to the active table when Dingo starts on the `musashi` network (the IOG Leios prototype testnet, matched by network name or magic 164), the `dijkstra` network (matched by network name or magic 6), with `runMode: "leios"`, or with `startEra: "dijkstra"` — see `Config.experimentalDijkstraEnabled`. Keying on the network lets the node follow each testnet past its Conway-to-Dijkstra hard fork without an explicit run mode. DijkstraNet keeps the base Ouroboros protocols unless Leios is explicitly enabled. The Dijkstra descriptor uses `github.com/blinklabs-io/gouroboros/ledger/dijkstra`, including that release's generated CDDL shape for the nullable Leios/Peras certificate slots.
+The `ledger/eras/` package provides era-specific validation rules for each Cardano era. The active era table is Byron through Dijkstra on every network (`Config.experimentalDijkstraEnabled`), so a private network that schedules the Conway-to-Dijkstra hard fork, or a node that follows a testnet past it, needs no opt-in; the era is entered only by an enacted hard fork or a scheduled `TestDijkstraHardForkAtEpoch`. The Leios vote and pipeline managers are a separate gate (`Config.leiosRuntimeEnabled`): they run on the `musashi` network (matched by network name or magic 164), the `dijkstra` network (matched by network name or magic 6), with `runMode: "leios"`, or with `startEra: "dijkstra"`. DijkstraNet keeps the base Ouroboros protocols unless Leios is explicitly enabled. Genesis stake warming for the bootstrap reward rounds (`LedgerStateConfig.WarmGenesisStake`) follows the same Leios runtime gate rather than the era table: a standard `cardano-node` leaves those rounds empty. The Dijkstra descriptor uses `github.com/blinklabs-io/gouroboros/ledger/dijkstra`, including that release's generated CDDL shape for the nullable Leios/Peras certificate slots.
 
 The shared Dijkstra header decoder accepts the ten-field Praos body used by
 DijkstraNet and the twelve-field Leios prototype body. It preserves original

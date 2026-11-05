@@ -566,11 +566,19 @@ func (c *Config) leiosForgingEnabled() bool {
 }
 
 // experimentalDijkstraEnabled reports whether the Dijkstra ledger era is
-// active. Beyond the explicit opt-ins, the Musashi and Dijkstra testnets
-// hard-fork into Dijkstra, so syncing either requires the Dijkstra era table.
-// DijkstraNet keeps the base Ouroboros protocols unless Leios is explicitly
-// enabled.
-func (c *Config) experimentalDijkstraEnabled() bool {
+// active. It is active on every network: a node that serves a chain carrying
+// Dijkstra's hard fork, or a private network that schedules it, must know the
+// era, and without a Dijkstra block or an enacted hard fork the era is never
+// entered. Leios runtime components stay gated by leiosRuntimeEnabled.
+func (*Config) experimentalDijkstraEnabled() bool {
+	return true
+}
+
+// leiosRuntimeEnabled reports whether the Leios vote and pipeline managers
+// run. Beyond the explicit opt-ins, the Musashi and Dijkstra testnets
+// hard-fork into Dijkstra and run them. DijkstraNet keeps the base Ouroboros
+// protocols unless Leios is explicitly enabled.
+func (c *Config) leiosRuntimeEnabled() bool {
 	if c.cfg == nil {
 		return false
 	}
