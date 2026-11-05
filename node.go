@@ -949,9 +949,9 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	// protocols dingo offers beyond what the prototype relays serve — the
 	// standalone leios-votes protocol and leios-fetch BlockTxsRequest — are
 	// gated off for the prototype network below, since initiating them resets
-	// the connection. See Config.experimentalDijkstraEnabled /
+	// the connection. See Config.leiosRuntimeEnabled /
 	// experimentalLeiosNetworkingEnabled.
-	enableDijkstra := n.config.experimentalDijkstraEnabled()
+	enableLeiosRuntime := n.config.leiosRuntimeEnabled()
 	enableLeiosNetworking := n.config.experimentalLeiosNetworkingEnabled()
 	// Initialize Ouroboros
 	// The endorser-block tx fetch keeps re-requesting an EB's still-diffusing
@@ -1222,7 +1222,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	}
 	started = append(started, func() { _ = n.plannerStatsMgr.Stop() })
 	// Initialize Leios vote manager (experimental)
-	if enableDijkstra {
+	if enableLeiosRuntime {
 		//nolint:contextcheck // n.ctx is the node's lifecycle context
 		if err := n.initLeiosVoteManager(n.ctx); err != nil {
 			return fmt.Errorf(

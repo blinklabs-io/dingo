@@ -874,7 +874,7 @@ func (n *Node) reinitializeBackgroundManagers(ctx context.Context) error {
 		)
 	}
 
-	if n.config.experimentalDijkstraEnabled() {
+	if n.config.leiosRuntimeEnabled() {
 		if err := n.initLeiosVoteManager(n.ctx); err != nil { //nolint:contextcheck
 			return fmt.Errorf(
 				"failed to reinitialize leios vote manager: %w",

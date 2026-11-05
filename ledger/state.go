@@ -11255,6 +11255,10 @@ func (ls *LedgerState) reconstructTransitionInfo() {
 	// upcoming era boundary.
 	if pparamsEraId > ls.currentEra.Id {
 		ls.transitionInfo = hardfork.NewTransitionKnown(ls.currentEpoch.EpochId)
+		// A scheduled hard fork names its own epoch, which the version
+		// alone cannot: parameters already at the next era's major do not
+		// put the boundary at the current epoch.
+		ls.evaluateTriggerAtEpoch()
 	}
 }
 
@@ -12173,6 +12177,18 @@ func (ls *LedgerState) warnOnPreByronPrefixEpochCache() {
 	)
 }
 
+// dijkstraScheduledAfterGenesis reports whether the configuration schedules
+// the Dijkstra hard fork at an epoch after genesis. HardForkEpoch ignores the
+// override unless ExperimentalHardForksEnabled is set, as the era shape does,
+// so the start era and the transition trigger always agree.
+func dijkstraScheduledAfterGenesis(cfg *cardano.CardanoNodeConfig) bool {
+	if cfg == nil {
+		return false
+	}
+	epoch, scheduled := cfg.HardForkEpoch("dijkstra")
+	return scheduled && epoch > 0
+}
+
 // shelleyDeclaredAtGenesis reports whether the configuration declares that
 // Shelley is already active at epoch 0, which is what distinguishes a network
 // with no Byron prefix from one that reaches Shelley on chain.
@@ -12256,6 +12272,15 @@ func (ls *LedgerState) setEpochCache(
 		!ls.config.StartInDijkstra &&
 		!shelleyDeclaredAtGenesis(ls.config.CardanoNodeConfig) {
 		startEraId = eras.ByronEraDesc.Id
+	}
+	// A Shelley genesis protocol major of 12 identifies Dijkstra, but a
+	// configuration that schedules the Dijkstra hard fork at a later epoch
+	// keeps the earlier epochs in Conway. Starting in Dijkstra would forge
+	// Dijkstra blocks before the fork, which a reference node rejects.
+	if startEraId == eras.DijkstraEraDesc.Id &&
+		!ls.config.StartInDijkstra &&
+		dijkstraScheduledAfterGenesis(ls.config.CardanoNodeConfig) {
+		startEraId = eras.ConwayEraDesc.Id
 	}
 	if ls.config.StartInDijkstra {
 		startEraId = eras.DijkstraEraDesc.Id

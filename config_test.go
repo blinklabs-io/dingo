@@ -836,7 +836,24 @@ func TestWithDelegatorInactivity(t *testing.T) {
 	assert.Zero(t, cfg.delegatorInactivity)
 }
 
+// TestExperimentalDijkstraEnabled pins that the Dijkstra ledger era is known
+// on every network, with or without a node configuration.
 func TestExperimentalDijkstraEnabled(t *testing.T) {
+	t.Parallel()
+
+	for _, cfg := range []Config{
+		{},
+		{cfg: &internalconfig.Config{Network: "mainnet"}},
+		{cfg: &internalconfig.Config{Network: "preview", NetworkMagic: 2}},
+		{cfg: &internalconfig.Config{NetworkMagic: 42}},
+	} {
+		assert.True(t, cfg.experimentalDijkstraEnabled())
+	}
+}
+
+// TestLeiosRuntimeEnabled pins which configurations run the Leios vote and
+// pipeline managers, which the always-on Dijkstra era no longer implies.
+func TestLeiosRuntimeEnabled(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -915,7 +932,7 @@ func TestExperimentalDijkstraEnabled(t *testing.T) {
 			assert.Equal(
 				t,
 				tt.expected,
-				tt.cfg.experimentalDijkstraEnabled(),
+				tt.cfg.leiosRuntimeEnabled(),
 			)
 		})
 	}
@@ -939,7 +956,7 @@ func TestExperimentalLeiosNetworkingEnabled(t *testing.T) {
 			name:              "default",
 			cfg:               Config{},
 			expectNetworking:  false,
-			expectDijkstraEra: false,
+			expectDijkstraEra: true,
 		},
 		{
 			name: "leios run mode enables both",

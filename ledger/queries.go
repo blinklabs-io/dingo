@@ -998,7 +998,11 @@ func (ls *LedgerState) queryHardForkEraHistory(
 		// window that completed. The confirmed boundary is at lastEp.StartSlot,
 		// not lastEp.StartSlot + length; roll back timespan accordingly so the
 		// next era's Start.relTime stays contiguous.
-		if eraDesc.DecodePParamsFunc == nil {
+		//
+		// A scheduled hard fork names its boundary epoch, so the parameters'
+		// version says nothing more about where the era ends.
+		if eraDesc.DecodePParamsFunc == nil ||
+			entry.NextEraTrigger.Kind == hardfork.TriggerAtEpoch {
 			continue
 		}
 		pp, ppErr := ls.loadPersistedProtocolParameters(
