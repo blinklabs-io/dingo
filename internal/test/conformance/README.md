@@ -2,17 +2,17 @@
 
 This package runs the pinned [Cardano Blueprint ledger conformance
 corpus](https://github.com/cardano-scaling/cardano-blueprint/tree/main/src/ledger/conformance-test-vectors)
-against Dingo's ledger implementation. The shared harness and embedded test
-data live in `github.com/blinklabs-io/ouroboros-mock/conformance`; this package
+against Dingo's ledger implementation. The shared harness and embedded test data
+live in `github.com/blinklabs-io/ouroboros-mock/conformance`; this package
 provides `DingoStateManager`, an adapter that drives Dingo's real
 `database.Database` and `ledger/governance` packages -- the same production
-persistence code the node uses, not a hand-rolled second implementation --
-so every vector's UTxO/certificate/governance writes and reads go through a
-real, configured metadata backend. The same adapter runs against a real,
-local SQLite backend (the default, no setup required -- see
+persistence code the node uses, not a hand-rolled second implementation -- so
+every vector's UTxO/certificate/governance writes and reads go through a real,
+configured metadata backend. The same adapter runs against a real, local SQLite
+backend (the default, no setup required -- see
 [`state_manager.go`](state_manager.go)), a real PostgreSQL backend (see
-[PostgreSQL backend](#postgresql-backend)), or a real MySQL backend (see
-[MySQL backend](#mysql-backend)).
+[PostgreSQL backend](#postgresql-backend)), or a real MySQL backend (see [MySQL
+backend](#mysql-backend)).
 
 `ratifyProposals` decides most action types' ratification with its own
 vote-shape heuristic ("did each voter group say yes"), not by calling
@@ -79,10 +79,10 @@ first header and is never served.
 [tweag/cardano-conformance-testing-of-consensus](https://github.com/tweag/cardano-conformance-testing-of-consensus)
 designs three tools around `ouroboros-consensus`'s Node-vs-Environment tests:
 `testgen` generates a test file holding a point schedule and a property,
-`runner` serves that schedule from simulated upstream peers and judges the
-node under test through a downstream observer peer, and `shrinkview` prints
-shrunk counterexamples. Each `testgen`/`runner` pair is one property-test
-case, to be run in a loop.
+`runner` serves that schedule from simulated upstream peers and judges the node
+under test through a downstream observer peer, and `shrinkview` prints shrunk
+counterexamples. Each `testgen`/`runner` pair is one property-test case, to be
+run in a loop.
 
 Dingo does not consume it yet:
 
@@ -188,29 +188,29 @@ hashes and are simply never looked up again -- harmless, see
 schema and removes this directory once, after every test in the process
 has finished -- see `process_cleanup_test.go`.
 
-**Reset semantics.** Between vectors, `DingoStateManager.Reset()` does not
-call the metadata store's own `Resettable.Reset` (`database/plugin/metadata/postgres`'s
-`resetDatabase`): that callback drops tables outright, without recreating
-them, requiring a fresh migration run before the store is usable again --
-and, more importantly, scans and drops tables across *every* non-system
-schema in the target database, not just the process-scoped conformance
-schema, so calling it here would also destroy `database/plugin/metadata/postgres`'s
-own concurrently running tests' tables in the shared `dingo_test` database.
-Reset instead empties every dirty table in that process-scoped schema in
-place, over a separate admin connection, discovering the table list from
-`information_schema` rather than hardcoding it (see
-`state_manager_postgres.go`'s `wipeMetadata`). It deletes rather than
+**Reset semantics.** Between vectors, `DingoStateManager.Reset()` does not call
+the metadata store's own `Resettable.Reset`
+(`database/plugin/metadata/postgres`'s `resetDatabase`): that callback drops
+tables outright, without recreating them, requiring a fresh migration run before
+the store is usable again -- and, more importantly, scans and drops tables
+across *every* non-system schema in the target database, not just the
+process-scoped conformance schema, so calling it here would also destroy
+`database/plugin/metadata/postgres`'s own concurrently running tests' tables in
+the shared `dingo_test` database. Reset instead empties every dirty table in
+that process-scoped schema in place, over a separate admin connection,
+discovering the table list from `information_schema` rather than hardcoding it
+(see `state_manager_postgres.go`'s `wipeMetadata`). It deletes rather than
 truncates: `TRUNCATE` rewrites each table's relation file, so its cost is per
 table and does not fall when the table holds only what one vector wrote —
-measured on a `postgres:16` container configured like the CI service, 12
-dirty tables cost 501ms as one `TRUNCATE ... CASCADE` against 22ms as a
-single statement of data-modifying CTEs. That one statement is also what
-removes the need to order the deletes by dependency, since the schema's
-foreign keys are `NOT DEFERRABLE`; see `deletePostgresTables`. This keeps the already-open
-store's connection pool live throughout -- no close, no reopen, no
-re-migration -- which is what keeps the cost of a Reset (and so the whole
-vector suite, which resets once per vector) from being a real
-close/reopen/re-migrate network round trip every time.
+measured on a `postgres:16` container configured like the CI service, 12 dirty
+tables cost 501ms as one `TRUNCATE ... CASCADE` against 22ms as a single
+statement of data-modifying CTEs. That one statement is also what removes the
+need to order the deletes by dependency, since the schema's foreign keys are
+`NOT DEFERRABLE`; see `deletePostgresTables`. This keeps the already-open
+store's connection pool live throughout -- no close, no reopen, no re-migration
+-- which is what keeps the cost of a Reset (and so the whole vector suite, which
+resets once per vector) from being a real close/reopen/re-migrate network round
+trip every time.
 
 `TestRulesConformanceVectorsPostgres` also compares its results against the
 SQLite baseline rather than asserting a hardcoded number, so the two backends
@@ -243,20 +243,20 @@ queue. As with Postgres above, `gate (race)` runs without these services, so
 the MySQL variant is covered uninstrumented rather than under `-race`.
 
 **Database isolation.** MySQL has no schema/database distinction the way
-Postgres does — a MySQL "schema" *is* a database. `database/plugin/metadata/mysql`'s
-own tests connect to the shared `dingo_test` database with a user the
-official `mysql` image's bootstrap grants access to *only* that database, so
-this suite can't reuse that user to carve out an isolated namespace the way
-the Postgres one does with `CREATE SCHEMA`. Instead,
-`NewDingoMysqlStateManager` authenticates as `root` (the one account
-guaranteed to have `CREATE DATABASE` privileges) and migrates into a
-database unique to this one test binary process
-(`dingo_conformance_<pid>_<timestamp>`, computed once at package load and
-shared by every call within that process; the mysql metadata plugin's own
-`openStore` provisions it automatically -- `CREATE DATABASE IF NOT EXISTS`,
-via its `ensureDatabaseExists` step -- whenever the DSN it's given names a
-database). This is why the MySQL tests key off `MYSQL_ROOT_PASSWORD`
-specifically rather than the `MYSQL_PASSWORD` the plugin's own tests use.
+Postgres does — a MySQL "schema" *is* a database.
+`database/plugin/metadata/mysql`'s own tests connect to the shared `dingo_test`
+database with a user the official `mysql` image's bootstrap grants access to
+*only* that database, so this suite can't reuse that user to carve out an
+isolated namespace the way the Postgres one does with `CREATE SCHEMA`. Instead,
+`NewDingoMysqlStateManager` authenticates as `root` (the one account guaranteed
+to have `CREATE DATABASE` privileges) and migrates into a database unique to
+this one test binary process (`dingo_conformance_<pid>_<timestamp>`, computed
+once at package load and shared by every call within that process; the mysql
+metadata plugin's own `openStore` provisions it automatically -- `CREATE
+DATABASE IF NOT EXISTS`, via its `ensureDatabaseExists` step -- whenever the DSN
+it's given names a database). This is why the MySQL tests key off
+`MYSQL_ROOT_PASSWORD` specifically rather than the `MYSQL_PASSWORD` the plugin's
+own tests use.
 
 **Local blob directory and reset semantics** follow the same reasoning as
 the Postgres backend above: `NewDingoMysqlStateManager` creates one

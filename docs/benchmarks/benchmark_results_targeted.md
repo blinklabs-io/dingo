@@ -8,12 +8,15 @@
 - **OS**: Linux
 - **Architecture**: aarch64
 - **CPU Cores**: 128
-- **Data Source**: database/immutable/testdata plus synthetic relay fanout/control-loop benchmarks
+- **Data Source**: database/immutable/testdata plus synthetic relay
+  fanout/control-loop benchmarks
 - **Scope**: BP and relay runtime paths
 
 ### Benchmark Results
 
-All benchmarks run with `-benchmem` flag. Iterations are Go benchmark iteration counts; benchmark-specific throughput metrics (for example `blocks/sec`) are reported separately.
+All benchmarks run with `-benchmem` flag. Iterations are Go benchmark iteration
+counts; benchmark-specific throughput metrics (for example `blocks/sec`) are
+reported separately.
 
 | Benchmark | Iterations | Time/op | Extra Metrics | Memory/op | Allocs/op |
 |-----------|------------|---------|---------------|-----------|-----------|

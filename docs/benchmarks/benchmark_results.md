@@ -8,11 +8,14 @@
 - **OS**: Linux
 - **Architecture**: aarch64
 - **CPU Cores**: 128
-- **Data Source**: Real Cardano preview testnet data (40k+ blocks, slots 0-863,996)
+- **Data Source**: Real Cardano preview testnet data (40k+ blocks, slots
+  0-863,996)
 
 ### Benchmark Results
 
-All benchmarks run with `-benchmem` flag. Iterations are Go benchmark iteration counts; benchmark-specific throughput metrics (for example `blocks/sec`) are reported separately.
+All benchmarks run with `-benchmem` flag. Iterations are Go benchmark iteration
+counts; benchmark-specific throughput metrics (for example `blocks/sec`) are
+reported separately.
 
 | Benchmark | Iterations | Time/op | Extra Metrics | Memory/op | Allocs/op |
 |-----------|------------|---------|---------------|-----------|-----------|

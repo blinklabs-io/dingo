@@ -6,7 +6,8 @@ Assumptions:
 - `GOMAXPROCS=4`
 - target peak RSS: `<= 1024 MB`
 - immutable fixture: `database/immutable/testdata`
-- measurements were collected on non-Pi hardware and are a sizing proxy, not Raspberry Pi device benchmarks
+- measurements were collected on non-Pi hardware and are a sizing proxy, not
+  Raspberry Pi device benchmarks
 - block producer peer count remains small; this is not a relay profile
 
 ## Load Footprint
@@ -17,10 +18,12 @@ Assumptions:
 
 ## Recommendation
 
-For Raspberry Pi-class sizing in `storageMode=core`, keep production defaults aligned with normal Badger behavior and use explicit memory/cache constraints only in this harness when validating low-memory targets.
-This run stayed under the configured `1024 MB` RSS limit.
-Explicit Badger cache settings still override these defaults if an operator wants to tune further.
-Treat this as a sizing baseline rather than a direct Raspberry Pi hardware measurement.
+For Raspberry Pi-class sizing in `storageMode=core`, keep production defaults
+aligned with normal Badger behavior and use explicit memory/cache constraints
+only in this harness when validating low-memory targets. This run stayed under
+the configured `1024 MB` RSS limit. Explicit Badger cache settings still
+override these defaults if an operator wants to tune further. Treat this as a
+sizing baseline rather than a direct Raspberry Pi hardware measurement.
 
 # Four-Thread Block Producer Sizing Benchmark Results (Non-Pi Host)
 
@@ -33,11 +36,14 @@ Treat this as a sizing baseline rather than a direct Raspberry Pi hardware measu
 - **Architecture**: aarch64
 - **CPU Cores**: 128
 - **Data Source**: database/immutable/testdata plus local immutable load runs
-- **Scope**: Four-thread block producer path (GOMAXPROCS=4) in core mode on a non-Pi host
+- **Scope**: Four-thread block producer path (GOMAXPROCS=4) in core mode on a
+  non-Pi host
 
 ### Benchmark Results
 
-All benchmarks run with `-benchmem` flag. Iterations are Go benchmark iteration counts; benchmark-specific throughput metrics (for example `blocks/sec`) are reported separately.
+All benchmarks run with `-benchmem` flag. Iterations are Go benchmark iteration
+counts; benchmark-specific throughput metrics (for example `blocks/sec`) are
+reported separately.
 
 | Benchmark | Iterations | Time/op | Extra Metrics | Memory/op | Allocs/op |
 |-----------|------------|---------|---------------|-----------|-----------|
