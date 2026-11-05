@@ -253,3 +253,38 @@ func TestLeiosEBCapacityMatchesManifestEncoding(t *testing.T) {
 		}
 	}
 }
+
+// The limits are read per slot from the parameters in force, not fixed at
+// genesis. Musashi raised them on chain (to a 308000-byte manifest and
+// 2000000 bytes of transactions), so a forger still holding the genesis
+// values would shrink every endorser block. After an update raising the
+// limit, the next endorser block uses the new one.
+func TestCheckAndForgeLeiosEBFollowsProtocolParameterUpdate(t *testing.T) {
+	t.Parallel()
+	txs := leiosCandidateTxs(t, 10)
+	txSize := uint32(len(blockTxFromMempool(t, txs[0].Cbor))) // #nosec G115 -- small fixture
+	current := &dijkstra.DijkstraProtocolParameters{
+		MaxEndorserBlockTxsSize:        2 * txSize,
+		MaxEndorserBlockReferencesSize: 40000,
+	}
+	caster := &forgerTestLeiosCaster{}
+	forger := leiosCapacityForger(txs, nil, caster)
+	forger.eraParams = funcParamsProvider(
+		func(uint64) lcommon.ProtocolParameters { return current },
+	)
+
+	_, err := forger.checkAndForgeLeiosEB(context.Background(), 10,
+		leiosSelectionBasis{})
+	require.NoError(t, err)
+	require.Len(t, caster.txBodies, 2)
+
+	// A parameter update raising both limits takes effect.
+	current = &dijkstra.DijkstraProtocolParameters{
+		MaxEndorserBlockTxsSize:        2000000,
+		MaxEndorserBlockReferencesSize: 308000,
+	}
+	_, err = forger.checkAndForgeLeiosEB(context.Background(), 11,
+		leiosSelectionBasis{})
+	require.NoError(t, err)
+	require.Len(t, caster.txBodies, 10)
+}
