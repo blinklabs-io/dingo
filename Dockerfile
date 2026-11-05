@@ -59,12 +59,12 @@ FROM debian:bookworm-slim@sha256:99c0b25c46d0214d5a2091092e7908907dcaecd6a962cde
 # (and re-verify pg_restore against every currently-supported server
 # version, not just the newest) if that becomes a real requirement.
 RUN sed -i \
-    -e 's|http://deb.debian.org/debian-security|http://snapshot.debian.org/archive/debian-security/20261020T000000Z|g' \
-    -e 's|http://deb.debian.org/debian|http://snapshot.debian.org/archive/debian/20261020T000000Z|g' \
+    -e 's|http://deb.debian.org/debian-security|http://snapshot.debian.org/archive/debian-security/20261027T000000Z|g' \
+    -e 's|http://deb.debian.org/debian|http://snapshot.debian.org/archive/debian/20261027T000000Z|g' \
     /etc/apt/sources.list.d/debian.sources && \
   apt-get -o Acquire::Check-Valid-Until=false update -y && \
   apt-get install -y --no-install-recommends \
-    ca-certificates=20250419~deb12u1 \
+    ca-certificates=20250419~deb12u2 \
     wget=1.21.3-1+deb12u1 && \
   arch="$(dpkg --print-architecture)" && \
   case "$arch" in \
@@ -92,10 +92,10 @@ RUN sed -i \
     a4e2461975abffae23688fc95c4fdc97fea4c4c9cc096c2c4a7a4e334dfc3353 "/tmp/${common_deb}" \
     | sha256sum --check --strict - && \
   apt-get install -y \
-    ca-certificates=20250419~deb12u1 \
+    ca-certificates=20250419~deb12u2 \
     default-mysql-client=1.1.0 \
     liblmdb0=0.9.24-1 \
-    libssl3=3.0.22-1~deb12u1 \
+    libssl3=3.0.22-1~deb12u2 \
     sqlite3=3.40.1-2+deb12u2 \
     "/tmp/${libpq_deb}" \
     "/tmp/${common_deb}" \
