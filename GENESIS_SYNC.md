@@ -153,8 +153,8 @@ Snapshot relays must have a host/IP address and an explicit TCP port from 1 to
 
 - **Log at startup**: `Genesis chain selection enabled` with
   `genesis_window_slots`, `security_param`, and `min_corroborating_peers`.
-- **Uncorroborated fast source**: a throttled warning `genesis fast source lacks
-  corroboration; denying chain selection` and a
+- **Uncorroborated fast source**: a throttled warning
+  `genesis fast source lacks corroboration; denying chain selection` and a
   `chainselection.genesis_corroboration_failed` event carrying the source
   connection, its observed density, the corroborator count, and the required
   count. While this persists the source's **blocks are withheld from the

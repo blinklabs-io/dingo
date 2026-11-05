@@ -252,10 +252,10 @@ isolated namespace the way the Postgres one does with `CREATE SCHEMA`. Instead,
 to have `CREATE DATABASE` privileges) and migrates into a database unique to
 this one test binary process (`dingo_conformance_<pid>_<timestamp>`, computed
 once at package load and shared by every call within that process; the mysql
-metadata plugin's own `openStore` provisions it automatically -- `CREATE
-DATABASE IF NOT EXISTS`, via its `ensureDatabaseExists` step -- whenever the DSN
-it's given names a database). This is why the MySQL tests key off
-`MYSQL_ROOT_PASSWORD` specifically rather than the `MYSQL_PASSWORD` the plugin's
+metadata plugin's own `openStore` provisions it automatically --
+`CREATE DATABASE IF NOT EXISTS`, via its `ensureDatabaseExists` step --
+whenever the DSN it's given names a database). This is why the MySQL tests key
+off `MYSQL_ROOT_PASSWORD` specifically rather than the `MYSQL_PASSWORD` the plugin's
 own tests use.
 
 **Local blob directory and reset semantics** follow the same reasoning as
