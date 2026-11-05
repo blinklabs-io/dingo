@@ -7106,9 +7106,10 @@ freeze; the hook excludes it from the candidate set until it is promoted again,
 and it can only exclude, never re-enable a peer that peer governance excluded.
 The hook gates only this candidate set: an observer still counts as a Genesis
 corroboration witness through its verified deliveries. The selector pulls the
-hook on every limit evaluation, so no notification is needed. A re-promoted
-peer still holds its frozen fragment until the resync rollback registers it
-again. The limit is gated on the selection mode, which is
+hook on every limit evaluation, so no notification is needed; the node reads
+the chainsync state for it through an atomic, because the selector outlives a
+live Restore that republishes that state. A re-promoted peer still holds its
+frozen fragment until the resync rollback trims it. The limit is gated on the selection mode, which is
 Dingo's only sync-state signal (there is no Genesis State Machine equivalent):
 
 - Genesis mode (syncing): the cap is active. Before any candidate has

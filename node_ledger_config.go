@@ -434,5 +434,6 @@ func (n *Node) networkIngestHold() *chainsync.IngestHold {
 // restore rebuilds it.
 func (n *Node) publishChainsyncState(state *chainsync.State) {
 	n.chainsyncState = state
+	n.selectorChainsyncState.Store(state)
 	n.networkIngestHold().Attach(state)
 }

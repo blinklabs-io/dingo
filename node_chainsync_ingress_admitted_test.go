@@ -15,6 +15,7 @@
 package dingo
 
 import (
+	"sync"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/chainsync"
@@ -57,4 +58,24 @@ func TestChainsyncIngressAdmittedWithoutChainsyncState(t *testing.T) {
 	t.Parallel()
 	n := &Node{}
 	assert.True(t, n.chainsyncIngressAdmitted(newNodeTestConnId(9203)))
+}
+
+// The selector outlives a live Restore, which republishes the chainsync state
+// while the hook is still being called under the selector lock.
+func TestChainsyncIngressAdmittedDuringStateRepublish(t *testing.T) {
+	t.Parallel()
+	n := &Node{}
+	n.publishChainsyncState(chainsync.NewState(nil, nil))
+	conn := newNodeTestConnId(9204)
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		for range 200 {
+			n.publishChainsyncState(nil)
+			n.publishChainsyncState(chainsync.NewState(nil, nil))
+		}
+	})
+	for range 200 {
+		assert.True(t, n.chainsyncIngressAdmitted(conn))
+	}
+	wg.Wait()
 }

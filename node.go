@@ -245,6 +245,10 @@ type Node struct {
 	// so a ledger is published only after it (publishStartedLedgerState) and
 	// withdrawn before it is replaced or closed (setLedgerState).
 	wallClockLedger atomic.Pointer[ledger.LedgerState]
+	// selectorChainsyncState mirrors n.chainsyncState for chain selector
+	// hooks, which run under the selector lock across live rebuilds and so
+	// cannot read the plain field. publishChainsyncState keeps them in step.
+	selectorChainsyncState atomic.Pointer[chainsync.State]
 
 	// A selected-to-none transition cannot be dropped while a live database
 	// lifecycle operation holds liveLifecycleMu. One node-owned worker retains

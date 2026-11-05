@@ -250,9 +250,9 @@ func (n *Node) isChainsyncIngressEligible(
 func (n *Node) chainsyncIngressAdmitted(
 	connId ouroboros.ConnectionId,
 ) bool {
-	// Read once: a live Restore publishes nil while the selector keeps
-	// calling this hook.
-	state := n.chainsyncState
+	// The selector keeps calling this hook while a live Restore republishes
+	// the chainsync state, so read it through the atomic mirror.
+	state := n.selectorChainsyncState.Load()
 	if state == nil {
 		return true
 	}
