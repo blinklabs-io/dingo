@@ -63,7 +63,8 @@ chain-selection tests.
 |--------------------|---------------------------------------|---------------|---------------|----------------------------------|
 | `configurator`     | One-shot: generates keys + genesis  | —             | —             | —                                 |
 | `dingo-producer`   | Dingo, forging with pool 1 keys     | `172.20.0.10` | `3010`        | `3030`                            |
-| `cardano-producer` | `cardano-node`, forging with pool 2 | `172.20.0.11` | `3011`        | `3031`                            |
+| `cardano-producer` | `cardano-node`, forging with pool 2 | `172.20.0.11` | `3011`        | via `cardano-ntc-bridge`          |
+| `cardano-ntc-bridge` | socat: `cardano-producer` NtC socket to TCP | `172.20.0.22` | —   | `3031`                            |
 | `cardano-relay`    | `cardano-node` relay (no forging)   | `172.20.0.12` | `3012`        | —                                 |
 | `txpump`           | Submits payment txs into Dingo      | `172.20.0.20` | —             | —                                 |
 
@@ -613,13 +614,12 @@ chain tip/growth) can be compared against the reference implementation
   or `DEVNET_DINGO_NTC_PORT`.
 - `cardano-producer` (in `--conformance` mode) has no built-in TCP NtC
   support — cardano-node only serves LocalStateQuery over its unix socket.
-  The `ghcr.io/blinklabs-io/cardano-node` image's `run-node` entrypoint
-  bridges this: setting `SOCAT_PORT` spawns a background `socat
-  TCP-LISTEN:<port>,fork UNIX-CLIENT:<socket-path>` inside the container.
-  `docker-compose.yml` sets `SOCAT_PORT: "3002"` on `cardano-producer` (the
-  same private-port number Dingo uses, purely by convention — it has no
-  special meaning to cardano-node), mapped to host port `3031` unless
-  overridden with `DEVNET_CARDANO_NTC_ADDR` or `DEVNET_CARDANO_NTC_PORT`.
+  The `cardano-ntc-bridge` service runs `socat TCP-LISTEN:3002,fork
+  UNIX-CLIENT:/ipc/node.socket` from the `ghcr.io/blinklabs-io/cardano-node`
+  image against `cardano-producer`'s IPC volume, so the bridge works with
+  any `cardano-node` image, including upstream ones without socat. Its port
+  3002 is mapped to host port `3031` unless overridden with
+  `DEVNET_CARDANO_NTC_ADDR` or `DEVNET_CARDANO_NTC_PORT`.
 
 `internal/test/devnet/endpoints_conformance.go`'s `DingoProducerNtcAddr()`
 and `CardanoProducerNtcAddr()` return these host addresses, and
@@ -732,15 +732,35 @@ Reference-conformance scenario
 |------|-------------------|
 | `TestCardanoProducerChainAdvances` | `cardano-producer`'s tip advances (sanity check on the reference node) |
 | `TestLedgerStateConsensus` | dingo-producer's and cardano-producer's ledger state (protocol parameters, stake distribution, whole UTxO set) match at a point acquired on both nodes in epochs 1 and 2; fails with a diagnostic naming every divergence found |
-| `TestPlutusBoundedArgsConformance` | Submits PlutusV3 script spends to both producers and requires the same verdict for the protocol-version dependent evaluator limits (integer arguments beyond +/-2^262143, byte strings beyond 65536 bytes), and checks that verdict against plutigo's assumption for the running protocol version (10 or 11). |
+| `TestPlutusBoundedArgsConformance` | Submits PlutusV3 script spends to both producers and requires the same verdict for the protocol-version dependent evaluator limits (integer arguments beyond +/-2^262143, byte strings beyond 65536 bytes), and checks that verdict against plutigo's assumption for the running protocol version (10, 11 or 12). |
 | `TestPoolQueriesMatchReference` | dingo-producer's and cardano-producer's answers to `GetRewardProvenance` and `GetPoolState` match at a point acquired on both nodes; the reward account and relays of the genesis pools are not compared |
 
 `TestPlutusBoundedArgsConformance` runs at the protocol version the Shelley
-genesis starts at when that is 10 or 11, and skips at 12 or later.
-`run-tests.sh` accepts `DEVNET_SPEC_OVERRIDE=./testnet*.yaml`
-to select a spec file in this directory other than the stock ones, and
-rejects any other value; `testnet-accelerated-pv11.yaml`
-starts at protocol version 11.
+genesis starts at (10, 11 or 12). `run-tests.sh` accepts
+`DEVNET_SPEC_OVERRIDE=./testnet*.yaml` to select a spec file in this directory
+other than the stock ones, and rejects any other value.
+`testnet-accelerated-pv11.yaml` starts at protocol version 11.
+
+`testnet-accelerated-pv12.yaml` starts at protocol version 12 with the Dijkstra
+hard fork at epoch 0. It needs `cardano-node` 11.2.0 (earlier releases do not
+enter Dijkstra on a private network) and network magic 6, because Dingo only
+enables the Dijkstra era for that magic or the `dijkstra` network.
+`run-tests.sh` passes the spec's `networkMagic` to txpump, so the spec is the
+only place the magic is set. On this spec `dingo-producer` follows the chain
+without forging: `cardano-node` 11.2.0 cannot decode the Dijkstra block headers
+Dingo produces (it expects 12 header body fields where Dingo writes 10), so
+Dingo-forged blocks would never reach it and Dingo would stay on its own fork.
+`run-tests.sh` sets `DEVNET_DINGO_BLOCK_PRODUCER=false` for any spec whose
+Dijkstra hard fork is at epoch 0.
+
+```bash
+DEVNET_CARDANO_NODE_IMAGE=ghcr.io/intersectmbo/cardano-node:11.2.0 \
+DEVNET_NODE_DIJKSTRA_GENESIS=1 DEVNET_DINGO_NETWORK=dijkstra \
+DEVNET_SPEC_OVERRIDE=./testnet-accelerated-pv12.yaml \
+  ./run-tests.sh --conformance --accelerated -run TestPlutusBoundedArgsConformance
+```
+
+PV11 uses the stock node image:
 
 ```bash
 DEVNET_SPEC_OVERRIDE=./testnet-accelerated-pv11.yaml \
@@ -790,7 +810,7 @@ Conformance mode:
 | `DEVNET_CARDANO_PORT`    | `3011`  | docker-compose host port for cardano NtN   |
 | `DEVNET_RELAY_PORT`      | `3012`  | docker-compose host port for relay NtN     |
 | `DEVNET_DINGO_NTC_PORT`  | `3030`  | docker-compose host port for `dingo-producer` NtC |
-| `DEVNET_CARDANO_NTC_PORT`| `3031`  | docker-compose host port for `cardano-producer` NtC (bridged by socat) |
+| `DEVNET_CARDANO_NTC_PORT`| `3031`  | docker-compose host port for `cardano-producer` NtC (bridged by `cardano-ntc-bridge`) |
 | `DEVNET_DINGO_NTC_ADDR`  | `localhost:<port above>` | `DingoProducerNtcAddr()` override |
 | `DEVNET_CARDANO_NTC_ADDR`| `localhost:<port above>` | `CardanoProducerNtcAddr()` override |
 | `DINGO_PORT`          | falls back to `DEVNET_DINGO_PORT`   | `run-tests.sh` only |
