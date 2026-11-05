@@ -191,6 +191,15 @@ them partial; the version-50 migration only drops them while that rebuild is
 pending. MySQL has no partial indexes and keeps the full indexes its foreign
 keys require.
 
+The stake-key lookup indexes `idx_utxo_staking_key` and
+`idx_utxo_staking_deleted_amount` include only outputs with a non-NULL
+`staking_key` on SQLite and PostgreSQL (schema version 53). Enterprise
+outputs cannot contribute to credential stake totals and need no entries in
+these indexes. The deleted-slot-leading indexes remain complete for rollback
+and supply queries. Upgrade builds the retained live-stake index immediately;
+the simple stake-key index waits if a deferred rebuild is pending. A deferred
+rebuild preserves both partial predicates. MySQL keeps full indexes.
+
 `dingo_database_sql_planner_stats_runs_total{trigger,result}`,
 `dingo_database_sql_planner_stats_duration_seconds{trigger}` and
 `dingo_database_sql_planner_stats_errors_total` report runs
@@ -279,8 +288,14 @@ aggregation and return a non-nil `*big.Int` from
 `SumTransactionOutputsInSlotRange`; repeated transfers can exceed both signed
 and unsigned 64-bit totals without exceeding the supply in any one output.
 The Blockfrost response preserves the total as a decimal string. Totals count
-a Leios closure transaction at its
-`leios_transaction_context` slot, and epoch and pool block lists read
+a Leios closure transaction at its `leios_transaction_context` slot. Output
+aggregation selects normal transactions by their slot index and closure
+transactions by their execution-slot index in disjoint branches before reading
+outputs by transaction ID; it does not scan retained transaction history for a
+single epoch. The exact arbitrary-precision sum includes valid outputs and
+phase-2-invalid collateral returns, including spent outputs while retained.
+Complete historical totals require API storage mode; core mode prunes spent
+outputs. Epoch and pool block lists read
 `block_nonce` joined to `pool_opcert_sequence`. API storage mode keeps every
 non-checkpoint `block_nonce` row for those lists (one row per block); core mode
 prunes them outside the three-epoch nonce window, keeping each epoch's
@@ -1337,6 +1352,15 @@ command returns, so a rejected batch cannot become the next run's canonical
 starting point. If the storage backend refuses that rewind, the command returns
 both errors and the database requires recovery before another load.
 
+## Sync-state reads
+
+SQLite, PostgreSQL and MySQL reuse the prepared statement cache for sync-state
+reads on a write transaction, including absent trust-boundary lookups during
+genesis sync. Reads using a separate read pool keep their ordinary query path,
+so a reader never waits for the single write connection it may already hold.
+Values are read from the database each time, including changes made in the
+same transaction.
+
 ## SQL Conventions
 
 - Table and column names are the snake_case names declared by versioned SQL DDL.
@@ -1403,6 +1427,13 @@ unaffected: it never prunes spent rows, so no cap or announced floor applies.
 ## ER Diagrams
 
 ### Transactions and UTxO
+
+Normal and batched SQLite transaction inserts use the captured
+`ExecContext` result instead of `RETURNING id`. `RowsAffected` distinguishes a fresh row from an ignored hash
+conflict before `LastInsertId` is read; SQLite retains the preceding insert ID
+when a conflict inserts nothing. Replays still update the existing row and
+look up its ID by hash. Batch accumulators retain the storage dialect across
+reset, and non-SQLite providers do not prepare the SQLite result statement.
 
 ```mermaid
 erDiagram
