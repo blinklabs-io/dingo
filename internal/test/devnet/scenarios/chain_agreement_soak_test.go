@@ -70,6 +70,7 @@ func TestChainAgreementSoak(t *testing.T) {
 	}
 	duration, err := time.ParseDuration(raw)
 	require.NoError(t, err, "invalid %s", soakDurationEnv)
+	require.Positive(t, duration, "%s must be positive", soakDurationEnv)
 
 	cfg, err := devnet.LoadDevNetConfig()
 	require.NoError(t, err, "failed to load devnet config from testnet.yaml")
@@ -97,9 +98,14 @@ func TestChainAgreementSoak(t *testing.T) {
 		snaps := obs.Group().Snapshots()
 		line := ""
 		for _, s := range snaps {
+			// Observers have no tip until their first block arrives.
+			short := hex.EncodeToString(s.Tip.Hash)
+			if len(short) > 8 {
+				short = short[:8]
+			}
 			line += fmt.Sprintf(
 				" %s=slot %d/block %d/%s", s.Node, s.Tip.SlotNumber,
-				s.Tip.BlockNumber, hex.EncodeToString(s.Tip.Hash)[:8],
+				s.Tip.BlockNumber, short,
 			)
 		}
 		samples++
