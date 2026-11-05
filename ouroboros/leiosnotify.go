@@ -717,11 +717,95 @@ func (o *Ouroboros) BroadcastEndorserBlock(
 	); err != nil {
 		return fmt.Errorf("store forged endorser block: %w", err)
 	}
-	o.leiosEBLog.append(
-		leiosForgedEBEntry{point: &point, size: uint64(len(data))},
-	)
-	o.leiosEBLog.append(leiosForgedEBEntry{txOffer: &point})
+	o.queueForgedEndorserBlockOffers(point, uint64(len(data)))
 	return nil
+}
+
+// leiosMaxPendingForgedOffers bounds the forged endorser blocks held for
+// their announcement. A forger has at most one per slot, and one whose ranking
+// block is never announced (self-validation or adoption failed) is never
+// offered, so only a few recent ones are worth keeping.
+const leiosMaxPendingForgedOffers = 8
+
+// leiosPendingForgedOffer is a forged endorser block awaiting its announcing
+// header.
+type leiosPendingForgedOffer struct {
+	point ocommon.Point
+	size  uint64
+}
+
+// queueForgedEndorserBlockOffers offers a locally forged endorser block over
+// LeiosNotify once the header announcing it has been queued.
+//
+// A peer may offer only an endorser block it has itself announced: the
+// reference node disconnects a peer whose block or closure offer names an
+// endorser block that peer never announced to it
+// (ExnLeiosBlockOfferWithoutAnnouncement and
+// ExnLeiosClosureOfferWithoutAnnouncement in ouroboros-consensus
+// LeiosDemoLogic). The forger stores the endorser block before the ranking
+// block announcing it is built, self-validated and adopted, and the
+// announcement is queued only after adoption, so offering at store time put
+// both offers ahead of the announcement on every connection.
+func (o *Ouroboros) queueForgedEndorserBlockOffers(
+	point ocommon.Point,
+	size uint64,
+) {
+	o.leiosAnnouncementsMu.Lock()
+	defer o.leiosAnnouncementsMu.Unlock()
+	if o.leiosAnnouncementBindsSlotLocked(point.Hash, point.Slot) {
+		o.appendEndorserBlockOffersLocked(point, size)
+		return
+	}
+	if o.leiosPendingForgedOffers == nil {
+		o.leiosPendingForgedOffers = make(map[string]leiosPendingForgedOffer)
+	}
+	o.leiosPendingForgedOffers[leiosBlockKey(point.Slot, point.Hash)] =
+		leiosPendingForgedOffer{
+			point: ocommon.Point{
+				Slot: point.Slot,
+				Hash: slices.Clone(point.Hash),
+			},
+			size: size,
+		}
+	for len(o.leiosPendingForgedOffers) > leiosMaxPendingForgedOffers {
+		oldestKey := ""
+		var oldestSlot uint64
+		for key, pending := range o.leiosPendingForgedOffers {
+			if oldestKey == "" || pending.point.Slot < oldestSlot {
+				oldestKey, oldestSlot = key, pending.point.Slot
+			}
+		}
+		delete(o.leiosPendingForgedOffers, oldestKey)
+	}
+}
+
+// releaseForgedEndorserBlockOffersLocked queues the offers of a forged
+// endorser block whose announcement has just been queued. The caller must
+// hold leiosAnnouncementsMu.
+func (o *Ouroboros) releaseForgedEndorserBlockOffersLocked(
+	slot uint64,
+	ebHash []byte,
+) {
+	key := leiosBlockKey(slot, ebHash)
+	pending, ok := o.leiosPendingForgedOffers[key]
+	if !ok {
+		return
+	}
+	delete(o.leiosPendingForgedOffers, key)
+	o.appendEndorserBlockOffersLocked(pending.point, pending.size)
+}
+
+// appendEndorserBlockOffersLocked queues the block offer and the closure
+// offer for an announced endorser block. The caller must hold
+// leiosAnnouncementsMu.
+func (o *Ouroboros) appendEndorserBlockOffersLocked(
+	point ocommon.Point,
+	size uint64,
+) {
+	blockPoint := ocommon.Point{Slot: point.Slot, Hash: slices.Clone(point.Hash)}
+	txPoint := ocommon.Point{Slot: point.Slot, Hash: slices.Clone(point.Hash)}
+	o.leiosEBLog.append(leiosForgedEBEntry{point: &blockPoint, size: size})
+	o.leiosEBLog.append(leiosForgedEBEntry{txOffer: &txPoint})
 }
 
 func (o *Ouroboros) leiosnotifyServerConnOpts() []oleiosnotify.LeiosNotifyOptionFunc {
@@ -2642,8 +2726,8 @@ func (o *Ouroboros) pruneLeiosAnnouncements() {
 // announcements and peer announcements, and optionally queues a valid
 // announcement for relay. A recorded announcement is authoritative for its
 // endorser block's slot, so it also reconciles any endorser block cached before
-// it arrived: the relay (and dingo's own forge path) offer the block before
-// announcing it, so the cached entry routinely carries an as-yet-unverified
+// it arrived: a relay can store the block before its announcement reaches
+// it, so the cached entry routinely carries an as-yet-unverified
 // peer-supplied slot.
 func (o *Ouroboros) recordLeiosAnnouncement(
 	raw []byte,
@@ -2786,6 +2870,9 @@ func (o *Ouroboros) recordLeiosAnnouncementLocked(
 		o.leiosEBLog.append(
 			leiosForgedEBEntry{announcement: append([]byte(nil), raw...)},
 		)
+		// A forged endorser block is offered only now, behind the header
+		// that announces it.
+		o.releaseForgedEndorserBlockOffersLocked(slot, ebHash.Bytes())
 	}
 	return nil
 }

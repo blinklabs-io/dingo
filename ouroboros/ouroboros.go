@@ -432,6 +432,12 @@ type Ouroboros struct {
 	// second description of the same ranking block from being relayed.
 	leiosAnnouncementsMu       sync.Mutex
 	leiosAnnouncements         map[string]leiosAnnouncement
+	// leiosPendingForgedOffers holds this node's forged endorser blocks
+	// whose announcing ranking-block header has not been sent yet. A peer may
+	// offer only an endorser block it has announced, so their LeiosNotify
+	// offers are queued only after that header. Guarded by
+	// leiosAnnouncementsMu.
+	leiosPendingForgedOffers map[string]leiosPendingForgedOffer
 	leiosAnnouncementInFlight  map[string]struct{}
 	leiosInvalidAnnouncements  *ratewindow.FixedWindow
 	leiosInvalidAnnouncementMu sync.Mutex
