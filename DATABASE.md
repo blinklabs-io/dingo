@@ -1337,6 +1337,15 @@ command returns, so a rejected batch cannot become the next run's canonical
 starting point. If the storage backend refuses that rewind, the command returns
 both errors and the database requires recovery before another load.
 
+## Sync-state reads
+
+SQLite, PostgreSQL and MySQL reuse the prepared statement cache for sync-state
+reads on a write transaction, including absent trust-boundary lookups during
+genesis sync. Reads using a separate read pool keep their ordinary query path,
+so a reader never waits for the single write connection it may already hold.
+Values are read from the database each time, including changes made in the
+same transaction.
+
 ## SQL Conventions
 
 - Table and column names are the snake_case names declared by versioned SQL DDL.
