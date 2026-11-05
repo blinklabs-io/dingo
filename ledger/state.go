@@ -1105,9 +1105,15 @@ type LedgerStateConfig struct {
 	DelegatorInactivityEnabled bool
 	// DelegatorInactivity is the inactivity window in epochs, used only when
 	// DelegatorInactivityEnabled is true.
-	DelegatorInactivity      uint64
-	ValidateHistorical       bool
-	EnableDijkstra           bool
+	DelegatorInactivity uint64
+	ValidateHistorical  bool
+	EnableDijkstra      bool
+	// WarmGenesisStake makes the first reward rounds of a network that
+	// declares Shelley at epoch 0 pay from genesis staking, as the Leios
+	// prototype networks do. A standard cardano-node leaves those rounds
+	// empty, so only prototype networks set it; knowing the Dijkstra era is
+	// not a reason to.
+	WarmGenesisStake         bool
 	StartInDijkstra          bool
 	TrustedReplay            bool
 	ManualBlockProcessing    bool

@@ -1500,3 +1500,33 @@ func TestGenesisSelectionModeHonorsConsensusMode(t *testing.T) {
 		})
 	}
 }
+
+// TestLedgerStateConfigWarmsGenesisStakeOnPrototypeNetworks pins the
+// production wiring: every network knows the Dijkstra era, but only a network
+// that runs the Leios prototype warms genesis staking, because a standard
+// cardano-node leaves the bootstrap reward rounds empty.
+func TestLedgerStateConfigWarmsGenesisStakeOnPrototypeNetworks(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name string
+		cfg  *internalconfig.Config
+		warm bool
+	}{
+		{"preview", &internalconfig.Config{Network: "preview"}, false},
+		{"mainnet", &internalconfig.Config{Network: "mainnet"}, false},
+		{"musashi", &internalconfig.Config{Network: "musashi"}, true},
+		{
+			"leios run mode",
+			&internalconfig.Config{RunMode: internalconfig.RunModeLeios},
+			true,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			n := &Node{config: Config{cfg: tt.cfg}}
+			cfg := n.ledgerStateConfig()
+			assert.True(t, cfg.EnableDijkstra)
+			assert.Equal(t, tt.warm, cfg.WarmGenesisStake)
+		})
+	}
+}
