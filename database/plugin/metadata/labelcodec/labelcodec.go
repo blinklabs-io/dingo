@@ -362,15 +362,13 @@ func metadatumMapKeyToString(md lcommon.TransactionMetadatum) (string, error) {
 		return m.Value, nil
 	case lcommon.MetaBytes:
 		return hex.EncodeToString(m.Value), nil
+	case lcommon.MetaList, lcommon.MetaMap:
+		return "", fmt.Errorf(
+			"%w: metadata %s key cannot be represented as a JSON object key",
+			ErrJSONUnavailable,
+			md.TypeName(),
+		)
 	default:
-		tmp, err := metadatumToJSONValue(md)
-		if err != nil {
-			return "", err
-		}
-		jsonBytes, err := json.Marshal(tmp)
-		if err != nil {
-			return "", fmt.Errorf("%w: encode metadata map key JSON: %w", ErrJSONUnavailable, err)
-		}
-		return string(jsonBytes), nil
+		return "", fmt.Errorf("unsupported metadatum map key type: %T", md)
 	}
 }
