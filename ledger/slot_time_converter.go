@@ -222,11 +222,12 @@ func (c *SlotTimeConverter) SlotToTime(slot uint64) (time.Time, error) {
 // horizon: a slot past the anchored bound still returns hardfork.ErrPastHorizon.
 //
 // Transaction validation needs this. Building a Plutus script context converts
-// the transaction's validity interval to POSIX time, and cardano-ledger fails
-// the transaction when that translation is refused
+// the transaction's validity interval to POSIX time, and from Babbage on
+// cardano-ledger fails the transaction when that translation is refused
 // (TimeTranslationPastHorizon, eras/alonzo/impl Cardano.Ledger.Alonzo.Plutus.TxInfo),
-// so the bound itself is consensus-relevant and must stay. What diverged was
-// the horizon's input: the published tip advances only when a whole block batch
+// so the bound itself is consensus-relevant and must stay. Alonzo extends it
+// linearly instead; see SlotToTimeExtendedFrom. What diverged was the
+// horizon's input: the published tip advances only when a whole block batch
 // commits, while the reference measures the safe zone from the applied block's
 // immediate predecessor. applySafeZone snaps up to an epoch boundary, so a tip
 // trailing by a single block can cost a full epoch of horizon and reject a
@@ -247,6 +248,82 @@ func (c *SlotTimeConverter) SlotToTimeWithHorizonFrom(
 		return time.Time{}, err
 	}
 	return sum.SlotToTime(slot)
+}
+
+// SlotToTimeExtendedFrom converts a slot the way the ledger rules do when they
+// validate a transaction at basisSlot: through the era history anchored at
+// horizonAnchorSlot, linearly extended past basisSlot.
+//
+// cardano-ledger wraps the HFC epoch info in unsafeLinearExtendEpochInfo
+// (cardano-slotting Cardano.Slotting.EpochInfo.Extend) with the slot being
+// validated as the basis for the UTXO rule's OutsideForecast check
+// (Cardano.Ledger.Alonzo.Rules.Utxo.validateOutsideForecast) and, in the
+// Alonzo era only, for every Plutus script context
+// (Cardano.Ledger.Alonzo.Rules.Ledgers and the mempool applyTx in
+// Cardano.Ledger.Alonzo, through mkStAnnTx). A slot at or before the basis is
+// answered by the underlying epoch info. A later slot is the basis time plus
+// one basis slot length per slot, however far past the forecast horizon it
+// lies, so a validity interval's upper bound is never refused for being past
+// the horizon. Only a basis the underlying epoch info cannot translate fails.
+//
+// The reference computes in unbounded precision, and a Plutus POSIXTime is an
+// unbounded Integer of milliseconds. The script context receives this time as
+// time.Time.UnixMilli, an int64, so a result whose POSIX milliseconds do not
+// fit in int64 returns hardfork.ErrDurationOverflow rather than a time the
+// context would wrap around to an unrelated value. That refusal is the only
+// one here the reference lacks.
+func (c *SlotTimeConverter) SlotToTimeExtendedFrom(
+	horizonAnchorSlot uint64,
+	basisSlot uint64,
+	slot uint64,
+) (time.Time, error) {
+	if slot <= basisSlot {
+		return c.SlotToTimeWithHorizonFrom(horizonAnchorSlot, slot)
+	}
+	basisTime, err := c.SlotToTimeWithHorizonFrom(horizonAnchorSlot, basisSlot)
+	if err != nil {
+		return time.Time{}, err
+	}
+	sum, err := c.hardForkSummary(horizonAnchorSlot)
+	if err != nil {
+		return time.Time{}, err
+	}
+	basisEpoch, err := sum.SlotToEpoch(basisSlot)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if basisEpoch.SlotLength <= 0 {
+		return time.Time{}, fmt.Errorf(
+			"ledger: non-positive slot length %s at basis slot %d",
+			basisEpoch.SlotLength,
+			basisSlot,
+		)
+	}
+	nanos := new(big.Int).Mul(
+		new(big.Int).SetUint64(slot-basisSlot),
+		big.NewInt(int64(basisEpoch.SlotLength)),
+	)
+	nanos.Add(nanos, big.NewInt(int64(basisTime.Nanosecond())))
+	sec, nsec := new(big.Int).QuoRem(
+		nanos,
+		big.NewInt(int64(time.Second)),
+		new(big.Int),
+	)
+	sec.Add(sec, big.NewInt(basisTime.Unix()))
+	millis := new(big.Int).Mul(sec, big.NewInt(1000))
+	millis.Add(
+		millis,
+		new(big.Int).Quo(nsec, big.NewInt(int64(time.Millisecond))),
+	)
+	if !millis.IsInt64() {
+		return time.Time{}, fmt.Errorf(
+			"%w: POSIX milliseconds of slot %d extended from basis slot %d exceed int64",
+			hardfork.ErrDurationOverflow,
+			slot,
+			basisSlot,
+		)
+	}
+	return time.Unix(sec.Int64(), nsec.Int64()).In(basisTime.Location()), nil
 }
 
 // TimeToSlot returns the slot containing the given wall-clock time.
