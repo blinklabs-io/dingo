@@ -114,8 +114,15 @@ func TestChainAgreementSoak(t *testing.T) {
 		for _, s := range snaps[1:] {
 			d, ok := forkDepth(snaps[0], s)
 			if !ok {
-				unmatched++
-				continue
+				// Observers retain a bounded header window, so two
+				// populated chains with no shared block have forked
+				// past everything retained, which is deeper than k.
+				if len(snaps[0].Headers) > 0 && len(s.Headers) > 0 {
+					d, ok = k+1, true
+				} else {
+					unmatched++
+					continue
+				}
 			}
 			worst = max(worst, d)
 		}
