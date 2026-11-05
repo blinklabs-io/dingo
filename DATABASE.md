@@ -287,19 +287,26 @@ aggregation and return a non-nil `*big.Int` from
 `SumTransactionOutputsInSlotRange`; repeated transfers can exceed both signed
 and unsigned 64-bit totals without exceeding the supply in any one output. The
 Blockfrost response preserves the total as a decimal string. Totals count a
-Leios closure transaction at its `leios_transaction_context` slot, and epoch and
-pool block lists read `block_nonce` joined to `pool_opcert_sequence`. API
-storage mode keeps every non-checkpoint `block_nonce` row for those lists (one
-row per block); core mode prunes them outside the three-epoch nonce window,
-keeping each epoch's checkpoint rows. The historical metadata backfill writes a
-`block_nonce` row for every block it replays below the Mithril anchor, but not
-for the anchor block itself, whose row the import seeded from the ledger state;
-Byron blocks have no nonce function and get no row, so after a backfill a range
-starting before the first indexed epoch is also refused, except for a single
-pool's block list (`database.PoolBlockHistoryRetained`), since no pool produced
-a Byron block. `database.BlockHistoryRetained` refuses a list whose range
-reaches a bootstrap anchor until a completed backfill has left rows at or below
-it, or lies before the epoch of the earliest non-checkpoint row
+Leios closure transaction at its `leios_transaction_context` slot. Output
+aggregation selects normal transactions by their slot index and closure
+transactions by their execution-slot index in disjoint branches before reading
+outputs by transaction ID; it does not scan retained transaction history for a
+single epoch. The exact arbitrary-precision sum includes valid outputs and
+phase-2-invalid collateral returns, including spent outputs while retained.
+Complete historical totals require API storage mode; core mode prunes spent
+outputs. Epoch and pool block lists read `block_nonce` joined to
+`pool_opcert_sequence`. API storage mode keeps every non-checkpoint
+`block_nonce` row for those lists (one row per block); core mode prunes them
+outside the three-epoch nonce window, keeping each epoch's checkpoint rows. The
+historical metadata backfill writes a `block_nonce` row for every block it
+replays below the Mithril anchor, but not for the anchor block itself, whose row
+the import seeded from the ledger state; Byron blocks have no nonce function and
+get no row, so after a backfill a range starting before the first indexed epoch
+is also refused, except for a single pool's block list
+(`database.PoolBlockHistoryRetained`), since no pool produced a Byron block.
+`database.BlockHistoryRetained` refuses a list whose range reaches a bootstrap
+anchor until a completed backfill has left rows at or below it, or lies before
+the epoch of the earliest non-checkpoint row
 (`GetEarliestNonCheckpointBlockSlot`), so a database pruned before this rule
 applied answers "not retained" rather than a short list. Pool history adds a
 bootstrap snapshot's imported block counts for epochs at or below the Mithril
@@ -2497,6 +2504,13 @@ unaffected: it never prunes spent rows, so no cap or announced floor applies.
 ## ER Diagrams
 
 ### Transactions and UTxO
+
+Normal and batched SQLite transaction inserts use the captured
+`ExecContext` result instead of `RETURNING id`. `RowsAffected` distinguishes a
+fresh row from an ignored hash conflict before `LastInsertId` is read; SQLite retains the preceding insert ID
+when a conflict inserts nothing. Replays still update the existing row and
+look up its ID by hash. Batch accumulators retain the storage dialect across
+reset, and non-SQLite providers do not prepare the SQLite result statement.
 
 ```mermaid
 erDiagram

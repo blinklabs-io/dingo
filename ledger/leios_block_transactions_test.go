@@ -136,7 +136,9 @@ func TestBlockTransactionsUsesLiveEndorserBlockBeforePersistence(t *testing.T) {
 	require.Equal(t, f.ebTx.Cbor(), txs[0].Cbor())
 }
 
-func TestBlockTransactionsForCertifiedEndorserBlockRejectsInvalidStoredBody(t *testing.T) {
+func TestBlockTransactionsForCertifiedEndorserBlockRejectsInvalidStoredBody(
+	t *testing.T,
+) {
 	t.Parallel()
 	f := newLeiosCertApplyFixture(t)
 	manifest := testLeiosManifest(f)
@@ -167,4 +169,135 @@ func testLeiosManifest(f *leiosCertApplyFixture) *lcommon.LeiosEndorserBlock {
 			TransactionSize: uint32(len(f.ebTxs[0])),
 		}},
 	}
+}
+
+func TestBlockTransactionCountReceiptRechecksStoredContent(t *testing.T) {
+	t.Parallel()
+	for _, change := range []string{"body", "count", "manifest", "pruned"} {
+		t.Run(change, func(t *testing.T) {
+			t.Parallel()
+			f := newLeiosCertApplyFixture(t)
+			manifest := testLeiosManifest(f)
+			f.ebHash = manifest.Hash()
+			parent := f.announce()
+			certifier, _, _ := f.certifyingChild(parent)
+			raw, err := manifest.MarshalCBOR()
+			require.NoError(t, err)
+			require.NoError(
+				t,
+				f.db.SetLeiosEB(
+					parent.SlotNumber(),
+					f.ebHash.Bytes(),
+					raw,
+					f.ebTxs,
+				),
+			)
+			stored := models.Block{
+				Slot:     certifier.SlotNumber(),
+				Hash:     certifier.Hash().Bytes(),
+				PrevHash: certifier.PrevHash().Bytes(),
+				Number:   certifier.BlockNumber(),
+				Type:     gledger.BlockTypeDijkstra,
+				Cbor:     certifier.Cbor(),
+			}
+			count, err := f.ls.BlockTransactionCount(t.Context(), stored)
+			require.NoError(t, err)
+			require.Equal(t, 1, count)
+			receipt := f.ls.certifiedClosureReceipt.Load()
+			require.NotNil(t, receipt)
+			count, err = f.ls.BlockTransactionCount(t.Context(), stored)
+			require.NoError(t, err)
+			require.Equal(t, 1, count)
+			require.Same(
+				t,
+				receipt,
+				f.ls.certifiedClosureReceipt.Load(),
+				"verified count must reuse the completed decode",
+			)
+			switch change {
+			case "body":
+				require.NoError(
+					t,
+					f.db.SetLeiosEBTxs(
+						parent.SlotNumber(),
+						f.ebHash.Bytes(),
+						[]cbor.RawMessage{{0x80}},
+					),
+				)
+			case "count":
+				require.NoError(
+					t,
+					f.db.SetLeiosEBTxs(
+						parent.SlotNumber(),
+						f.ebHash.Bytes(),
+						[]cbor.RawMessage{},
+					),
+				)
+			case "manifest":
+				require.NoError(
+					t,
+					f.db.SetLeiosEBManifest(
+						parent.SlotNumber(),
+						f.ebHash.Bytes(),
+						[]byte{0x80},
+					),
+				)
+			case "pruned":
+				_, err := f.db.PruneLeiosEBBeforeSlot(
+					t.Context(),
+					parent.SlotNumber()+1,
+				)
+				require.NoError(t, err)
+			}
+			_, fullErr := f.ls.BlockTransactions(t.Context(), stored)
+			require.Error(t, fullErr)
+			_, countErr := f.ls.BlockTransactionCount(t.Context(), stored)
+			require.EqualError(t, countErr, fullErr.Error())
+			require.Same(
+				t,
+				receipt,
+				f.ls.certifiedClosureReceipt.Load(),
+				"failed reads must not publish a receipt",
+			)
+			ctx, cancel := context.WithCancel(t.Context())
+			cancel()
+			_, err = f.ls.BlockTransactionCount(ctx, stored)
+			require.ErrorIs(t, err, context.Canceled)
+		})
+	}
+}
+
+func TestBlockTransactionCountKeepsTopLevelSemantics(t *testing.T) {
+	t.Parallel()
+	f := newLeiosCertApplyFixtureWith(
+		t,
+		pathTx{top: pathLevel{funds: 1}, children: []pathLevel{{funds: 1}}},
+	)
+	manifest := testLeiosManifest(f)
+	f.ebHash = manifest.Hash()
+	parent := f.announce()
+	certifier, _, _ := f.certifyingChild(parent)
+	raw, err := manifest.MarshalCBOR()
+	require.NoError(t, err)
+	require.NoError(
+		t,
+		f.db.SetLeiosEB(parent.SlotNumber(), f.ebHash.Bytes(), raw, f.ebTxs),
+	)
+	stored := models.Block{
+		Slot:     certifier.SlotNumber(),
+		Hash:     certifier.Hash().Bytes(),
+		PrevHash: certifier.PrevHash().Bytes(),
+		Number:   certifier.BlockNumber(),
+		Type:     gledger.BlockTypeDijkstra,
+		Cbor:     certifier.Cbor(),
+	}
+	txs, err := f.ls.BlockTransactions(t.Context(), stored)
+	require.NoError(t, err)
+	require.Len(t, txs, 1)
+	receipt := f.ls.certifiedClosureReceipt.Load()
+	require.NotNil(t, receipt)
+	count, err := f.ls.BlockTransactionCount(t.Context(), stored)
+	require.NoError(t, err)
+	require.Equal(t, len(txs), count)
+	require.Same(t, receipt, f.ls.certifiedClosureReceipt.Load())
 }

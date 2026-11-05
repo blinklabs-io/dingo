@@ -22,6 +22,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/safedecode"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
@@ -51,7 +52,10 @@ func (ls *LedgerState) BlockTransactions(
 	transactions := decoded.Transactions()
 	if _, ok := decoded.Header().(leiosBlockCertifierHeader); !ok &&
 		block.Type == uint(dijkstra.BlockTypeDijkstra) {
-		return nil, fmt.Errorf("dijkstra block %x has no Leios header", block.Hash)
+		return nil, fmt.Errorf(
+			"dijkstra block %x has no Leios header",
+			block.Hash,
+		)
 	}
 	closure, err := ls.CertifiedClosureTransactions(ctx, decoded)
 	if err != nil {
@@ -80,6 +84,22 @@ func (ls *LedgerState) CertifiedClosureTransactions(
 	ctx context.Context,
 	decoded ledger.Block,
 ) ([]lcommon.Transaction, error) {
+	data, err := ls.loadCertifiedClosure(ctx, decoded)
+	if err != nil || data == nil {
+		return nil, err
+	}
+	return ls.decodeCertifiedClosure(data)
+}
+
+type certifiedClosureData struct {
+	manifest     *lcommon.LeiosEndorserBlock
+	transactions []cbor.RawMessage
+}
+
+func (ls *LedgerState) loadCertifiedClosure(
+	ctx context.Context,
+	decoded ledger.Block,
+) (*certifiedClosureData, error) {
 	if decoded == nil {
 		return nil, nil
 	}
@@ -108,49 +128,83 @@ func (ls *LedgerState) CertifiedClosureTransactions(
 	}
 	announcer, ok := parentBlock.Header().(leiosBlockAnnouncerHeader)
 	if !ok {
-		return nil, errors.New("certifying block parent has no Leios announcement")
+		return nil, errors.New(
+			"certifying block parent has no Leios announcement",
+		)
 	}
 	ebHash, _, announced := announcer.LeiosAnnouncement()
 	if !announced {
-		return nil, errors.New("certifying block parent announced no endorser block")
+		return nil, errors.New(
+			"certifying block parent announced no endorser block",
+		)
 	}
 
-	manifestRaw, manifestErr := ls.db.GetLeiosEBManifest(ebHash.Bytes(), parent.Slot)
+	manifestRaw, manifestErr := ls.db.GetLeiosEBManifest(
+		ebHash.Bytes(),
+		parent.Slot,
+	)
 	blockTransactions, txErr := ls.db.GetLeiosEBTxs(ebHash.Bytes(), parent.Slot)
 	if manifestErr != nil && !errors.Is(manifestErr, types.ErrBlobKeyNotFound) {
-		return nil, fmt.Errorf("load certified endorser-block manifest: %w", manifestErr)
+		return nil, fmt.Errorf(
+			"load certified endorser-block manifest: %w",
+			manifestErr,
+		)
 	}
 	if txErr != nil && !errors.Is(txErr, types.ErrBlobKeyNotFound) {
-		return nil, fmt.Errorf("load certified endorser-block transactions: %w", txErr)
+		return nil, fmt.Errorf(
+			"load certified endorser-block transactions: %w",
+			txErr,
+		)
 	}
 	if errors.Is(manifestErr, types.ErrBlobKeyNotFound) ||
 		errors.Is(txErr, types.ErrBlobKeyNotFound) {
 		if ls.config.EndorserBlockDataProvider == nil {
 			if manifestErr != nil {
-				return nil, fmt.Errorf("load certified endorser-block manifest: %w", manifestErr)
+				return nil, fmt.Errorf(
+					"load certified endorser-block manifest: %w",
+					manifestErr,
+				)
 			}
-			return nil, fmt.Errorf("load certified endorser-block transactions: %w", txErr)
+			return nil, fmt.Errorf(
+				"load certified endorser-block transactions: %w",
+				txErr,
+			)
 		}
 		var ok bool
 		manifestRaw, blockTransactions, ok = ls.config.EndorserBlockDataProvider(
-			ebHash.Bytes(), parent.Slot,
+			ebHash.Bytes(),
+			parent.Slot,
 		)
 		if !ok {
 			if manifestErr != nil {
-				return nil, fmt.Errorf("load certified endorser-block manifest: %w", manifestErr)
+				return nil, fmt.Errorf(
+					"load certified endorser-block manifest: %w",
+					manifestErr,
+				)
 			}
-			return nil, fmt.Errorf("load certified endorser-block transactions: %w", txErr)
+			return nil, fmt.Errorf(
+				"load certified endorser-block transactions: %w",
+				txErr,
+			)
 		}
 	}
 	manifest, err := lcommon.NewLeiosEndorserBlockFromCbor(manifestRaw)
 	if err != nil {
-		return nil, fmt.Errorf("decode certified endorser-block manifest: %w", err)
+		return nil, fmt.Errorf(
+			"decode certified endorser-block manifest: %w",
+			err,
+		)
 	}
 	if err := manifest.Validate(); err != nil {
-		return nil, fmt.Errorf("validate certified endorser-block manifest: %w", err)
+		return nil, fmt.Errorf(
+			"validate certified endorser-block manifest: %w",
+			err,
+		)
 	}
 	if manifest.Hash() != ebHash {
-		return nil, errors.New("certified endorser-block manifest hash mismatch")
+		return nil, errors.New(
+			"certified endorser-block manifest hash mismatch",
+		)
 	}
 
 	if len(blockTransactions) != len(manifest.TransactionReferences) {
@@ -161,22 +215,100 @@ func (ls *LedgerState) CertifiedClosureTransactions(
 		)
 	}
 
+	return &certifiedClosureData{
+		manifest:     manifest,
+		transactions: blockTransactions,
+	}, nil
+}
+
+func (ls *LedgerState) decodeCertifiedClosure(
+	data *certifiedClosureData,
+) ([]lcommon.Transaction, error) {
+	manifest, blockTransactions := data.manifest, data.transactions
 	ret := make([]lcommon.Transaction, 0, len(blockTransactions))
 	for i, raw := range blockTransactions {
 		tx, err := safedecode.DijkstraBlockTransaction(raw)
 		if err != nil {
-			return nil, fmt.Errorf("decode certified endorser transaction %d: %w", i, err)
+			return nil, fmt.Errorf(
+				"decode certified endorser transaction %d: %w",
+				i,
+				err,
+			)
 		}
 		reference := manifest.TransactionReferences[i]
 		// The manifest reference hashes the full block_transaction CBOR,
 		// not the Cardano transaction body.
 		if lcommon.Blake2b256Hash(raw) != reference.TransactionHash {
-			return nil, fmt.Errorf("certified endorser transaction %d hash mismatch", i)
+			return nil, fmt.Errorf(
+				"certified endorser transaction %d hash mismatch",
+				i,
+			)
 		}
 		if uint64(len(raw)) != uint64(reference.TransactionSize) {
-			return nil, fmt.Errorf("certified endorser transaction %d size mismatch", i)
+			return nil, fmt.Errorf(
+				"certified endorser transaction %d size mismatch",
+				i,
+			)
 		}
 		ret = append(ret, tx)
 	}
+	hash := manifest.Hash()
+	ls.certifiedClosureReceipt.Store(&hash)
 	return ret, nil
+}
+
+// BlockTransactionCount counts the top-level transactions represented by a
+// stored block, retaining the integrity checks used by BlockTransactions.
+func (ls *LedgerState) BlockTransactionCount(
+	ctx context.Context,
+	block models.Block,
+) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	decoded, err := block.Decode()
+	if err != nil {
+		return 0, fmt.Errorf("decode block %x: %w", block.Hash, err)
+	}
+	transactions := decoded.Transactions()
+	if _, ok := decoded.Header().(leiosBlockCertifierHeader); !ok &&
+		block.Type == uint(dijkstra.BlockTypeDijkstra) {
+		return 0, fmt.Errorf(
+			"dijkstra block %x has no Leios header",
+			block.Hash,
+		)
+	}
+	data, err := ls.loadCertifiedClosure(ctx, decoded)
+	if err != nil {
+		return 0, err
+	}
+	if data == nil {
+		return len(transactions), nil
+	}
+	receipt := ls.certifiedClosureReceipt.Load()
+	verified := receipt != nil && *receipt == data.manifest.Hash()
+	if verified {
+		for i, raw := range data.transactions {
+			reference := data.manifest.TransactionReferences[i]
+			if uint64(len(raw)) != uint64(reference.TransactionSize) ||
+				lcommon.Blake2b256Hash(raw) != reference.TransactionHash {
+				verified = false
+				break
+			}
+		}
+	}
+	if !verified {
+		// Decode failures precede hash/size errors in the full reader. Reuse
+		// that path on anomalies so callers observe the same error.
+		if _, err := ls.decodeCertifiedClosure(data); err != nil {
+			return 0, err
+		}
+	}
+	if len(transactions) != 0 {
+		return 0, fmt.Errorf(
+			"certifying Dijkstra block %x also contains ranking-block transactions",
+			block.Hash,
+		)
+	}
+	return len(data.transactions), nil
 }
