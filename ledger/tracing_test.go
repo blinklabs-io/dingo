@@ -24,6 +24,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/blinklabs-io/dingo/internal/tracing"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -47,19 +48,21 @@ func spanAttributes(
 func TestLedgerProcessBlockRecordsSpan(t *testing.T) {
 	fx := loadUtxoMemoPreprodFixture(t)
 	spans := testutil.RecordSpans(t)
+	testutil.ConfigureBlockTracing(t, tracing.Config{SampleRatio: 1})
 
 	require.NoError(t, processFixtureBlock(t, fx, []lcommon.Transaction{fx.tx}))
 
-	var found []sdktrace.ReadOnlySpan
-	for _, span := range spans.Ended() {
-		if span.Name() == "ledger.process_block" {
-			found = append(found, span)
-		}
-	}
+	found := spansNamed(spans.Ended(), "block.apply")
 	require.Len(t, found, 1)
 	attrs := spanAttributes(found[0])
 	require.Equal(t, int64(fx.blockSlot), attrs["block.slot"].AsInt64())
-	require.NotEmpty(t, attrs["block.hash"].AsString())
+	require.Equal(
+		t,
+		tracing.BlockTraceID(
+			(&validityOutcomeTestBlock{}).Hash().Bytes(),
+		),
+		found[0].SpanContext().TraceID(),
+	)
 }
 
 // Not t.Parallel: installs a recording OpenTelemetry provider, which is a

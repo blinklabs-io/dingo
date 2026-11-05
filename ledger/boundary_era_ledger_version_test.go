@@ -1018,6 +1018,36 @@ func TestBoundaryBlockEraFollowsEnactedHardForkInitiation(t *testing.T) {
 		assert.Equal(t, uint(11), ver.Major)
 		assert.Equal(t, uint(0), ver.Minor)
 	})
+	// A private network whose genesis already carries Dijkstra's major and
+	// schedules the fork reaches Dijkstra only at the scheduled boundary.
+	t.Run("a genesis dijkstra major enters dijkstra at the scheduled epoch", func(t *testing.T) {
+		t.Parallel()
+		tc := newCase(12, 0, true, k)
+		tc.configure = func(cfg *cardano.CardanoNodeConfig) {
+			enabled := true
+			cfg.ExperimentalHardForksEnabled = &enabled
+			epoch := uint64(1)
+			cfg.TestDijkstraHardForkAtEpoch = &epoch
+		}
+		ls, err := runBoundaryEraCase(t, tc)
+		requireEra(t, ls, err, eras.DijkstraEraDesc.Id)
+		ver, verErr := GetProtocolVersion(ls.currentPParams)
+		require.NoError(t, verErr)
+		assert.Equal(t, uint(12), ver.Major)
+		assert.Equal(t, uint(0), ver.Minor)
+	})
+	t.Run("a genesis dijkstra major stays in conway before the scheduled epoch", func(t *testing.T) {
+		t.Parallel()
+		tc := newCase(12, 0, true, k)
+		tc.configure = func(cfg *cardano.CardanoNodeConfig) {
+			enabled := true
+			cfg.ExperimentalHardForksEnabled = &enabled
+			epoch := uint64(2)
+			cfg.TestDijkstraHardForkAtEpoch = &epoch
+		}
+		ls, err := runBoundaryEraCase(t, tc)
+		requireStaysConway(t, ls, err)
+	})
 	t.Run("conway block after an enacted initiation to the next era is rejected", func(t *testing.T) {
 		t.Parallel()
 		ls, err := runBoundaryEraCase(t, newCase(11, 12, false, k))

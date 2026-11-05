@@ -36,7 +36,7 @@ import (
 )
 
 func newAPIModeSQLiteStore(
-	t *testing.T,
+	t testing.TB,
 	reg *prometheus.Registry,
 ) *Store {
 	t.Helper()

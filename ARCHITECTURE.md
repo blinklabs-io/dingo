@@ -688,14 +688,20 @@ never cancelled by a switch.
 
 Batch accumulation has a one-second maximum wait for the exact admitted queue
 head. Further headers keep its first deadline, so slow authentication or a
-quiet stream cannot indefinitely strand a partial batch. Expiry fetches only
+quiet stream cannot indefinitely strand a partial batch. Accumulation also ends
+once no header has joined the queue for `queuedBlockfetchIdleWait` (250ms): a
+queue that has stopped growing, such as one whose next header is held at
+ingress until this block applies, gains nothing from the rest of the maximum.
+A steady stream keeps postponing that idle cutoff, never past the first
+deadline, so it still accumulates the larger batch. Expiry fetches only
 headers already in the authorized queue, through the current selected peer or,
 when selection is empty after a selected-to-none transition, through the header
 pipeline owner; it does not admit a new header, advance LoE, or bypass
-validation. Because the deadline is one-shot, a no-op at expiry with no selected
-peer would leave a quiet queue below the batch threshold with nothing to fetch
-it. An empty or replaced queue, a fetch peer that is no longer live, an active
-fetch, a canceled context, or a closed ledger makes the callback a no-op. Queue clearing, normal dispatch,
+validation. Because the flush fires once per queue head, a no-op at expiry with
+no selected peer would leave a quiet queue below the batch threshold with
+nothing to fetch it. An empty or replaced queue, a fetch peer that is no longer
+live, an active fetch, a canceled context, or a closed ledger makes the
+callback a no-op. Queue clearing, normal dispatch,
 and Close cancel the deadline. The existing tracked continuation owns network
 work and shutdown draining; the timer does not own a separate network worker.
 
@@ -1807,20 +1813,54 @@ dingo/
 ```
 
 Tracing is off unless `tracing` is set or `tracingEndpoint` is non-empty.
-`setupTracing` installs an OTLP HTTP (or stdout) exporter with `service.name`/`service.version` resource attributes
-and a parent-based trace-ID-ratio sampler (`tracingSampleRatio`, default 1).
-`tracingEndpoint` sets the collector URL and must be an `http` or `https` URL;
-empty defers to the standard `OTEL_EXPORTER_OTLP_*` variables. Hot paths start spans through
-`internal/tracing`: `chain.add_blocks`, `ledger.process_block`,
-`ledger.epoch_transition`, `chainsync.roll_forward`,
-`chainsync.roll_backward`, `blockfetch.block` and `mempool.add_transaction`.
-`Chain.AddBlocks`, `Mempool.AddTransaction` and the ledger block and epoch
-steps take a `context.Context`, so their spans nest under the caller's span;
-the API submit handlers pass the request context through mempool admission
-and overlay reconciliation. The epoch-transition span wraps the shared rollover
-implementation, including era-transition rollovers. The Ouroboros chainsync,
-blockfetch and transaction-submission callbacks carry no context, so their
-spans are roots.
+`setupTracing` selects the span exporter (stdout when `tracingStdout`, OTLP
+HTTP to `tracingEndpoint` when set, otherwise whatever the standard
+`OTEL_TRACES_EXPORTER` and `OTEL_EXPORTER_OTLP_*` variables choose), builds
+the telemetry resource (`service.name` from `tracingServiceName`, else
+`OTEL_SERVICE_NAME`, else `dingo`; `service.version`; `cardano.network.name`
+and `cardano.network.magic`; plus `OTEL_RESOURCE_ATTRIBUTES`, which dingo's
+own attributes override), and installs a parent-based trace-ID-ratio sampler
+(`tracingSampleRatio`, default 1). An explicit dingo setting always beats the
+corresponding `OTEL_*` variable.
+
+Block traces join across nodes without anything on the wire. A block's
+trace ID is the first 16 bytes of its hash, and every stage span hangs from a
+synthetic remote parent whose span ID is the next 8 bytes, so every node's
+spans for one block land in one trace with a shared, never-exported root.
+The sampling decision is a pure function of the block: the trace-ID ratio
+test (identical to the SDK's `TraceIDRatioBased`), or the block's issuer
+being listed in `tracingAlwaysSamplePools`. Nodes given the same ratio and
+pool list therefore make the same initial decision for a block. A
+pool-forced decision is remembered by hash in a bounded set, cleared
+whenever tracing is configured or disabled, so that a later rollback span,
+which knows only the hash, joins the same trace. A rollback past the set's
+capacity falls back to the ratio decision and can lose the rollback span of a
+pool-forced block. When block tracing is off, `internal/tracing` returns a
+non-recording span without calling the tracer, hashing the header, or
+allocating. When it is on, a stage started from a header hashes the header to
+decide; a block that is not sampled still starts no span and allocates
+nothing.
+
+Stage spans, all in the block's trace: `block.header_received` (one per
+delivering peer), `block.header_validated`, `block.body_received`,
+`block.apply`, `block.commit` (one per sampled block of a committed batch,
+spanning the batch's commit), `block.rolled_back`, and on a producer
+`block.forge`. Until the ledger first reaches the upstream tip only the core
+stages (apply, commit, rollback, forge) are recorded, so a sync from genesis
+produces a reduced span set. A transaction's mempool admission records
+`tx.mempool_add` in a trace derived the same way from the transaction hash.
+
+Session spans use ordinary trace IDs: `ledger.catchup` from ledger start to
+first tip, with each `ledger.epoch_transition` crossed meanwhile as a child;
+`mithril.bootstrap` with a child per phase; and `dblifecycle.epoch_snapshot`
+with its `mirror_retry` and `prune` children. SQL query spans from the
+metadata store are recorded only inside an existing trace.
+
+Log records written with a context that holds a recording span carry
+`trace_id` and `span_id`. When `OTEL_LOGS_EXPORTER` is set, records are also
+exported over OTLP at the configured log level; stdout logging is unchanged.
+When `OTEL_METRICS_EXPORTER` is set, the Prometheus registry behind
+`/metrics` is also pushed over OTLP through the Prometheus bridge.
 
 ## Core Node Structure
 
@@ -1979,6 +2019,11 @@ When `Node.Run()` is called, components are initialized in this order:
     experimental Shelley hard-fork epoch is the explicit exception used by
     Shelley-at-slot-zero test profiles; this keeps absolute slots aligned for
     genesis-overlay delegation on networks with a Byron prefix.
+    A Shelley genesis protocol major that names Dijkstra starts the epoch
+    cache in Dijkstra only when no Dijkstra hard-fork epoch above 0 is
+    scheduled (`TestDijkstraHardForkAtEpoch` with
+    `ExperimentalHardForksEnabled`); otherwise it starts in Conway and the
+    scheduled trigger enters Dijkstra at that epoch.
     This applies to the empty-database branch only, which is what keeps an
     already-synced node's data untouched. A database written before the Byron
     prefix was retained still has epoch 0 tagged with a post-Byron era and
@@ -3716,9 +3761,11 @@ its block deltas and flushes it before the surrounding database transaction
 commits. Core storage mode does the same only when
 `LedgerStateConfig.ApplyRowBatchingEnabled` is set (see "Batched apply for
 unvalidated blocks") or the batch is applied by `ApplyTrustedBatch`, whose
-blocks are never validated. Batches with closure-context, conflict-tolerant, or
-strict consumed-input semantics, and the delta a validated block returns, keep
-the unbatched write path in every mode. A trusted
+blocks are never validated. Closure-context batches apply validation state
+immediately in every mode; API storage defers output-address, transaction-address,
+key witness and metadata-label indexes until the closure finishes. Other
+conflict-tolerant or strict consumed-input batches, and the delta a validated
+block returns, keep the unbatched write path. A trusted
 immutable replay can omit consumed-input blob recovery because the complete
 history supplies each producer output earlier in slot order; transaction
 conflict checks still run.
@@ -4116,7 +4163,21 @@ from Babbage onward, and the collateral rules use ceiling arithmetic. These
 checks are dependency-owned so Dingo does not maintain a second, potentially
 divergent decoder or rule implementation.
 
-The `ledger/eras/` package provides era-specific validation rules for each Cardano era. The default active era table is Byron through Conway. Experimental Dijkstra support is added to the active table when Dingo starts on the `musashi` network (the IOG Leios prototype testnet, matched by network name or magic 164), the `dijkstra` network (matched by network name or magic 6), with `runMode: "leios"`, or with `startEra: "dijkstra"` — see `Config.experimentalDijkstraEnabled`. Keying on the network lets the node follow each testnet past its Conway-to-Dijkstra hard fork without an explicit run mode. DijkstraNet keeps the base Ouroboros protocols unless Leios is explicitly enabled. The Dijkstra descriptor uses `github.com/blinklabs-io/gouroboros/ledger/dijkstra`, including that release's generated CDDL shape for the nullable Leios/Peras certificate slots.
+The `ledger/eras/` package provides era-specific validation rules for each Cardano era. The active era table is Byron through Dijkstra on every network (`Config.experimentalDijkstraEnabled`), so a private network that schedules the Conway-to-Dijkstra hard fork, or a node that follows a testnet past it, needs no opt-in; the era is entered only by an enacted hard fork or a scheduled `TestDijkstraHardForkAtEpoch`. The Leios vote and pipeline managers are a separate gate (`Config.leiosRuntimeEnabled`): they run on the `musashi` network (matched by network name or magic 164), the `dijkstra` network (matched by network name or magic 6), with `runMode: "leios"`, or with `startEra: "dijkstra"`. DijkstraNet keeps the base Ouroboros protocols unless Leios is explicitly enabled. Genesis stake warming for the bootstrap reward rounds (`LedgerStateConfig.WarmGenesisStake`) follows the same Leios runtime gate rather than the era table: a standard `cardano-node` leaves those rounds empty. The Dijkstra descriptor uses `github.com/blinklabs-io/gouroboros/ledger/dijkstra`, including that release's generated CDDL shape for the nullable Leios/Peras certificate slots.
+
+The shared Dijkstra header decoder accepts the ten-field Praos body used by
+DijkstraNet and the twelve-field Leios prototype body. It preserves original
+header and header-body CBOR for hashing and KES verification, and rejects other
+arities and malformed Leios extensions. A plain DijkstraNet header has no Leios
+announcement or certificate flag.
+
+DijkstraNet's canonical genesis identity selects the older Haskell `BLS_SIG`
+domain for pool-registration proofs of possession. Other chains retain the
+IETF `BLS_POP` domain. Node startup, storage reinitialization, and immutable
+replay supply that immutable policy through `LedgerStateConfig` and
+`LedgerView`; gOuroboros resolves it through pending and cached validation
+views. Validation checks exactly the selected domain. This pool-registration
+policy does not change Leios committee or aggregate-certificate verification.
 
 Several eras replace or drop an upstream `UtxoValidationRules` entry so Dingo
 can run its own implementation — the reference-script-aware fee rule, local
@@ -7103,10 +7164,17 @@ Dingo's only sync-state signal (there is no Genesis State Machine equivalent):
   applied tip less `k`), so a point the local chain has moved more than `k` past
   cannot hold it below the applied tip. A fragment whose head is
   below the immutable tip is left out of the candidate set: switching to it
-  needs a rollback past `k`, and the reference disconnects such a peer. The
-  recorded point is cleared when no candidate remains or Genesis mode ends. A
-  single candidate is its own intersection, so the cap never holds back a lone
-  peer.
+  needs a rollback past `k`, and the reference disconnects such a peer. A
+  fragment ending exactly at the immutable tip is also left out when it is a
+  strict prefix of a candidate that extends past the immutable tip, or shares
+  no point with any such candidate, since a peer stalled there would otherwise
+  pin the limit at the applied tip. Fragments stalled at the same head are
+  judged against the extending candidates only, so their agreement with each
+  other does not keep them. A sender counted only for its own header, though
+  stale or ineligible, keeps its fragment, and nothing is left out when no
+  candidate extends past the immutable tip. The recorded point is cleared
+  when no candidate remains or Genesis mode ends. A single candidate is its
+  own intersection, so the cap never holds back a lone peer.
 - Praos mode (caught up): the cap is disabled and `EagernessLimit().Active` is
   false.
 
@@ -12615,8 +12683,9 @@ client that stops reading ends its stream before the lifetime expires. For an
 origin allowed by `corsAllowedOrigins`, `Access-Control-Expose-Headers` also
 names `ETag`, `Retry-After`, `X-Block-Header-Hash` and
 `X-Most-Recent-Checkpoint`, the non-safelisted headers Kupo sets, which
-browsers otherwise hide from scripts; other API servers expose only the gRPC
-status headers.
+browsers otherwise hide from scripts. Blockfrost also exposes `Retry-After`
+for admission rejections; other API servers expose only the gRPC status
+headers.
 
 `/matches` follows the upstream Kupo contract: an ordinary request streams the
 complete filtered array, with no Dingo pagination parameters, headers or
@@ -19226,7 +19295,12 @@ gather pass rather than for each gap, so about five seconds per pass, with
 any single gap capped at `gatherCoalesceMaxGapAttempts` retries (default 200,
 about two seconds) so blocks the chain is not following up are applied
 promptly — but only while `rawBatch` already holds at least one real block,
-the node has not reached tip since boot (`ls.reachedTip`), and the last gathered slot is not near the upstream tip.
+the node has not reached tip since boot (`ls.reachedTip`), the last gathered slot is not near the upstream tip,
+and the primary chain still has a queued header. Queued headers pop only when
+their block is added, so an empty queue means no blockfetch batch is in flight
+and every admitted header's block is already on the chain; the next block is
+then a header admission and a fetch round trip away, and the pass applies what
+it has. That check takes the chain mutex the iterator probe already takes.
 Once at or near the live upstream tip, the wait is skipped entirely: a
 solitary new block still commits immediately, matching the pre-existing
 latency behavior.
@@ -19810,15 +19884,19 @@ delta, so the flush counts the queued change once (`DATABASE.md`,
 Validated blocks apply each transaction as it is validated and keep the
 per-transaction path for the donation-only delta they return. Leios certified
 closures retain ordered validation and use the provider's optional API-detail
-accumulator. SQLite can additionally stage UTxO changes for a bounded plain
-closure through `metadata.LeiosClosureUtxoOverlay`: preflight changes no rows,
-parents and contexts remain immediate, and every output, spent marker and
-address row survives the final flush. Known exact reads use staged metadata;
-other UTxO readers materialize it before querying. API-detail indexes remain
-queued until the final closure flush. The shared `internal/sqlreadonly` parser
-classifies SQLite reads for both MCP and the retained overlay. Ineligible
-closures and other providers retain immediate UTxO writes. The outer metadata
-transaction owns rollback of every effect, including failures after staging begins.
+accumulator; in API mode it groups output-address, transaction-address, key
+witness and metadata-label rows across the closure before flushing inside the
+same transaction. Those indexes are not validation inputs; assets and datums
+remain immediately readable by the next transaction. SQLite can additionally
+stage UTxO changes for a bounded plain closure through
+`metadata.LeiosClosureUtxoOverlay`: preflight changes no rows, parents and
+contexts remain immediate, and every output, spent marker and address row
+survives the final flush. Known exact reads use staged metadata; other UTxO
+readers materialize it before querying. API-detail indexes remain queued until
+the final closure flush. The shared `internal/sqlreadonly` parser classifies
+SQLite reads for both MCP and the retained overlay. Ineligible closures and
+other providers retain immediate UTxO writes. The outer metadata transaction
+owns rollback of every effect, including failures after staging begins.
 Regression tests: `TestApplyRowBatchingSerialEquivalence`,
 `TestApplyRowBatchingSameChunkDependencies` and
 `TestApplyRowBatchingSkipsValidatedDeltas` (`ledger/apply_row_batching_test.go`),

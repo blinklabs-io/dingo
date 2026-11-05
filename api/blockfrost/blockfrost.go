@@ -633,6 +633,7 @@ func (b *Blockfrost) handler() http.Handler {
 		limited,
 		httpcors.Config{
 			AllowedOrigins: b.config.CORSAllowedOrigins,
+			ExposeHeaders:  []string{"Retry-After"},
 		},
 	)
 }

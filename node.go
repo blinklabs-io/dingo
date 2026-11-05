@@ -57,6 +57,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/plannerstats"
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
 	"github.com/blinklabs-io/dingo/internal/promutil"
+	"github.com/blinklabs-io/dingo/internal/tracing"
 	"github.com/blinklabs-io/dingo/kesagent"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/forging"
@@ -155,9 +156,13 @@ type Node struct {
 	leaderElection  nodeconsensus.LeaderScheduler
 	// leaderSchedulerRef mirrors leaderElection for readers outside the
 	// node lifecycle goroutine, such as the ledger rollback callback.
-	leaderSchedulerRef           atomic.Pointer[leaderSchedulerRef]
-	rtsMetrics                   *rtsMetrics
-	shutdownFuncs                []func(context.Context) error
+	leaderSchedulerRef atomic.Pointer[leaderSchedulerRef]
+	rtsMetrics         *rtsMetrics
+	shutdownFuncs      []func(context.Context) error
+	// promGatherer reads the registry the node's metrics live in. The
+	// configured registerer is wrapped before use, and the wrappers hide
+	// the Gatherer, so it is kept from before the wrap.
+	promGatherer                 prometheus.Gatherer
 	deferredIndexMaintenanceDone chan struct{}
 	config                       Config
 	ctx                          context.Context
@@ -740,6 +745,9 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			return fmt.Errorf("failed to set up tracing: %w", err)
 		}
 	}
+	if err := n.setupMetricExport(ctx); err != nil {
+		return fmt.Errorf("failed to set up metric export: %w", err)
+	}
 	n.ctx, n.cancel = context.WithCancel(ctx)
 	defer func() {
 		runErr = n.resolveRunError(runErr)
@@ -949,9 +957,9 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	// protocols dingo offers beyond what the prototype relays serve — the
 	// standalone leios-votes protocol and leios-fetch BlockTxsRequest — are
 	// gated off for the prototype network below, since initiating them resets
-	// the connection. See Config.experimentalDijkstraEnabled /
+	// the connection. See Config.leiosRuntimeEnabled /
 	// experimentalLeiosNetworkingEnabled.
-	enableDijkstra := n.config.experimentalDijkstraEnabled()
+	enableLeiosRuntime := n.config.leiosRuntimeEnabled()
 	enableLeiosNetworking := n.config.experimentalLeiosNetworkingEnabled()
 	// Initialize Ouroboros
 	// The endorser-block tx fetch keeps re-requesting an EB's still-diffusing
@@ -1222,7 +1230,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	}
 	started = append(started, func() { _ = n.plannerStatsMgr.Stop() })
 	// Initialize Leios vote manager (experimental)
-	if enableDijkstra {
+	if enableLeiosRuntime {
 		//nolint:contextcheck // n.ctx is the node's lifecycle context
 		if err := n.initLeiosVoteManager(n.ctx); err != nil {
 			return fmt.Errorf(
@@ -1877,6 +1885,25 @@ func (n *Node) cleanupFailedStartup(started []func()) {
 	for _, stop := range slices.Backward(started) {
 		stop()
 	}
+	n.shutdownTelemetry()
+}
+
+// shutdownTelemetry flushes and stops the tracer and meter providers that
+// Run set up, so a failed startup does not leave their exporters running.
+func (n *Node) shutdownTelemetry() {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for _, fn := range n.shutdownFuncs {
+		if err := fn(ctx); err != nil {
+			n.config.logger.Warn(
+				"telemetry shutdown failed after startup error",
+				"component", "node",
+				"error", err,
+			)
+		}
+	}
+	n.shutdownFuncs = nil
+	tracing.Disable()
 }
 
 // cancelForFatal records the first component failure before cancelling the

@@ -105,6 +105,11 @@ reload the statistics on each batch's transaction connection before preparing
 the join, so pooled connections with independent planner caches use the updated
 estimates.
 
+Single-output SQLite inserts return their generated ID from the driver result
+after checking the affected-row count. An ignored conflict preserves its
+existing output ID and provenance-repair behavior. Other metadata backends
+retain their native returning or upsert paths.
+
 SQLite keeps planner statistics current while the node runs. A node synced
 from genesis never ran `ANALYZE`, and without `sqlite_stat1` the planner picks
 indexes by shape alone: the batched spend `UPDATE` in `consumeUtxosBatchQuery`
@@ -258,6 +263,12 @@ filter. The integer liveness filter still applies. Existing nonpaged callers
 retain their pagination and matching semantics. See the
 [MCP guide](docs/mcp/README.md#metadata-and-query-semantics) for page bounds and
 live-state consistency semantics.
+
+Certified Leios closures batch API-only output-address rows with transaction
+address history, key witnesses and metadata labels. UTxO rows, native assets,
+datums, scripts and live stake changes remain visible before the next transaction
+validates. The queued indexes flush inside the closure transaction before
+commit; rollback discards them with the transaction.
 
 Blockfrost historical and governance reads are served from existing tables
 through `HistoryStore` (`database/plugin/metadata/history_store.go`); migration
@@ -4467,6 +4478,10 @@ with the same overflow-free engine-side aggregate as
 so no UTxO row is streamed to the caller. It runs on the caller's transaction
 context.
 
+The SQLite aggregate reuses a private scratch integer for each group and uses
+64-bit parsing when a value fits; wider decimal values still use exact
+arbitrary-precision parsing. Step and inverse operations share those rules.
+
 `GetUtxosByAddress` accepts multiple address patterns and OR-joins their coarse
 SQL branches into a single query, mirroring `GetUtxosByAddressWithOrdering`.
 The coordinated `Database.UtxosByAddress` builds one exact-address pattern per
@@ -4812,6 +4827,8 @@ LIMIT 100;
 
 API-mode ingestion stores each unique metadata label with its raw CBOR value.
 If distinct ledger map keys cannot be represented uniquely as JSON object keys,
+the JSON representation exceeds the metadata JSON nesting bound, or JSON
+encoding fails,
 the label remains indexed and `json_value` is NULL; this does not reject an
 otherwise valid transaction. The label-transaction JSON endpoint emits
 `json_metadata: null`, while CBOR endpoints continue to serve the raw value.

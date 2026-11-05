@@ -857,7 +857,7 @@ func (ls *LedgerState) calculateStakeRewardApplication(
 	// Prototype test networks warm Set/Go from genesis staking. Standard
 	// cardano-node leaves Go empty until the snapshot pipeline advances.
 	genesisConfig := ls.config.CardanoNodeConfig
-	warmGenesis := ls.config.EnableDijkstra && genesisConfig != nil &&
+	warmGenesis := ls.config.WarmGenesisStake && genesisConfig != nil &&
 		genesisConfig.TestShelleyHardForkAtEpoch != nil &&
 		*genesisConfig.TestShelleyHardForkAtEpoch == 0
 	if epochs.bootstrap && !warmGenesis {

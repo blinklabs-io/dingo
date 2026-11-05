@@ -64,7 +64,7 @@ func databaseSnapshotCommand() *cobra.Command {
 			if destDir == "" {
 				return errors.New("--dir is required")
 			}
-			logger, err := commonRun(cfg)
+			logger, err := commonRun(cmd.Context(), cfg)
 			if err != nil {
 				return err
 			}
@@ -106,7 +106,7 @@ func databaseRestoreCommand() *cobra.Command {
 			if cfg == nil {
 				return errors.New("no config found in context")
 			}
-			logger, err := commonRun(cfg)
+			logger, err := commonRun(cmd.Context(), cfg)
 			if err != nil {
 				return err
 			}
@@ -177,7 +177,7 @@ path, not a shallower local target.`,
 			if cmd.Flags().Changed("block-number") {
 				target.BlockNumber = &blockNumber
 			}
-			logger, err := commonRun(cfg)
+			logger, err := commonRun(cmd.Context(), cfg)
 			if err != nil {
 				return err
 			}

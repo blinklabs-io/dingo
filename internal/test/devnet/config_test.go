@@ -42,6 +42,7 @@ func TestCheckedInSpecsAreValid(t *testing.T) {
 		"testnet-dingo-tachys.yaml":      3,
 		"testnet-accelerated.yaml":       2,
 		"testnet-accelerated-pv11.yaml":  2,
+		"testnet-accelerated-pv12.yaml":  2,
 		"testnet-dingo-accelerated.yaml": 3,
 		"testnet-dingo-leios.yaml":       3,
 	}
@@ -55,7 +56,12 @@ func TestCheckedInSpecsAreValid(t *testing.T) {
 			require.NoError(t, err)
 			require.NoError(t, cfg.Validate())
 			require.Equal(t, poolCount, cfg.PoolCount)
-			require.Equal(t, uint32(42), cfg.NetworkMagic)
+			wantMagic := uint32(42)
+			if file == "testnet-accelerated-pv12.yaml" {
+				// Dingo only enables the Dijkstra era for the Dijkstra magic.
+				wantMagic = 6
+			}
+			require.Equal(t, wantMagic, cfg.NetworkMagic)
 		})
 	}
 }
