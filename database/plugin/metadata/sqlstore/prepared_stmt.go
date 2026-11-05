@@ -47,6 +47,7 @@ var hotStatements = func() []string {
 		getUtxoIncludingSpentByRefQuery,
 		transactionInsertSQL,
 		transactionBatchInsertSQL,
+		transactionBatchInsertResultSQL,
 		transactionBatchConflictUpdateSQL,
 		transactionBatchConflictIDSQL,
 		committeeHotAuthorizationDeleteIDQuery,
@@ -147,6 +148,7 @@ var hotStatements = func() []string {
 // and are excluded from other dialects.
 func cacheableForDialect(dialect, query string) bool {
 	if dialect != "sqlite" && (isSQLiteBatchQuery(query) ||
+		query == transactionBatchInsertResultSQL ||
 		query == insertUtxoResultQuery || query == insertUtxoResultIgnoreConflictQuery) {
 		return false
 	}
