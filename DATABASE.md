@@ -1326,6 +1326,25 @@ command returns, so a rejected batch cannot become the next run's canonical
 starting point. If the storage backend refuses that rewind, the command returns
 both errors and the database requires recovery before another load.
 
+## Retained API closure UTxO batches
+
+SQLite can stage a certified closure of at most 8,192 plain, valid,
+single-input/single-output transactions and 8 MiB of output CBOR in one
+metadata transaction. The
+preflight requires fresh transaction/output keys and live external inputs,
+without staking credentials, assets, pointers, datums, reference scripts,
+collateral, certificates, withdrawals, mint, governance, script witnesses or nested
+transactions. Other closures and providers use the ordinary ordered writer.
+
+Transaction parents and execution contexts remain immediate. Every created
+UTxO, including outputs spent inside the closure, retains its ordinary ID,
+spend markers and address row. Exact known reads resolve from the staged
+models; other readers first materialize all pending UTxO and address rows.
+Unexpected writes to staged tables fail the batch rather than leave cached
+state stale. API detail rows keep their closure flush ordering. Validation
+still runs in transaction order, and a failure rolls back the outer metadata
+transaction; the core overlay's pruning behavior is unchanged.
+
 ## SQL Conventions
 
 - Table and column names are the snake_case names declared by versioned SQL DDL.

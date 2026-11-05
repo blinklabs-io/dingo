@@ -490,14 +490,19 @@ func (s *Store) insertTransactionUnbatched(
 	args ...any,
 ) (int64, bool, error) {
 	if len(args) != 10 {
-		return 0, false, fmt.Errorf("insert transaction: got %d arguments, want 10", len(args))
+		return 0, false, fmt.Errorf(
+			"insert transaction: got %d arguments, want 10",
+			len(args),
+		)
 	}
 	var id int64
 	if s.dialect.Name() == "mysql" {
-		err := s.queryRowCached(ctx, db, transactionInsertSQL, args...).Scan(&id)
+		err := s.queryRowCached(ctx, db, transactionInsertSQL, args...).
+			Scan(&id)
 		return id, false, err
 	}
-	err := s.queryRowCached(ctx, db, transactionBatchInsertSQL, args...).Scan(&id)
+	err := s.queryRowCached(ctx, db, transactionBatchInsertSQL, args...).
+		Scan(&id)
 	if err == nil {
 		return id, true, nil
 	}
@@ -819,14 +824,18 @@ func (s *Store) NewLeiosClosureBatchAccumulator() types.MetadataBatchAccumulator
 	if s.storageMode != types.StorageModeAPI {
 		return nil
 	}
-	return &transactionBatchAccumulator{leiosAPIRowsOnly: true, sqlOperations: s.sqlOperations}
+	return &transactionBatchAccumulator{
+		leiosAPIRowsOnly: true,
+		sqlOperations:    s.sqlOperations,
+	}
 }
 
-// LeiosClosureRowsOnly reports whether this accumulator defers only API detail rows.
+// LeiosClosureRowsOnly identifies the ordered API-detail accumulator.
+// Retained UTxO staging is a separate optional capability.
 func (a *transactionBatchAccumulator) LeiosClosureRowsOnly() bool { return a.leiosAPIRowsOnly }
 
-// SetTransactionLeiosClosureBatched preserves the ordinary closure write order
-// and conflict tolerance while deferring only API detail rows until FlushBatch.
+// SetTransactionLeiosClosureBatched preserves ordered closure effects and
+// conflict tolerance, with optional retained UTxO staging until FlushBatch.
 func (s *Store) SetTransactionLeiosClosureBatched(
 	transaction lcommon.Transaction, point ocommon.Point, index uint32,
 	certDeposits map[int]uint64, skipWithdrawalWitness bool,
@@ -834,7 +843,8 @@ func (s *Store) SetTransactionLeiosClosureBatched(
 	txn types.Txn, protocolMajor uint64,
 ) error {
 	acc, ok := accumulator.(*transactionBatchAccumulator)
-	if !ok || !acc.leiosAPIRowsOnly || acc.overlay != nil {
+	if !ok || !acc.leiosAPIRowsOnly ||
+		(acc.overlay != nil && !acc.overlay.retainHistory) {
 		return errors.New("closure batching requires an API-only accumulator")
 	}
 	if txn == nil {
@@ -843,8 +853,19 @@ func (s *Store) SetTransactionLeiosClosureBatched(
 	if contextSlot != nil && *contextSlot >= point.Slot {
 		return errors.New("closure context must precede its certifying block")
 	}
-	return s.setTransactionWithAccumulator(transaction, point, index, certDeposits,
-		skipWithdrawalWitness, false, true, accumulator, contextSlot, txn, protocolMajor)
+	return s.setTransactionWithAccumulator(
+		transaction,
+		point,
+		index,
+		certDeposits,
+		skipWithdrawalWitness,
+		false,
+		true,
+		accumulator,
+		contextSlot,
+		txn,
+		protocolMajor,
+	)
 }
 
 // SetTransactionLeiosClosure applies a certified closure, tolerating inputs
@@ -866,11 +887,32 @@ func (s *Store) SetTransactionLeiosClosure(
 
 // SetTransactionLeiosClosureInContext records the execution context before
 // certificates are applied, so epoch-dependent effects use the unticked state.
-func (s *Store) SetTransactionLeiosClosureInContext(transaction lcommon.Transaction, point ocommon.Point, index uint32, certDeposits map[int]uint64, skipWithdrawalWitness bool, slot uint64, txn types.Txn, protocolMajor uint64) error {
+func (s *Store) SetTransactionLeiosClosureInContext(
+	transaction lcommon.Transaction,
+	point ocommon.Point,
+	index uint32,
+	certDeposits map[int]uint64,
+	skipWithdrawalWitness bool,
+	slot uint64,
+	txn types.Txn,
+	protocolMajor uint64,
+) error {
 	if slot >= point.Slot {
 		return errors.New("closure context must precede its certifying block")
 	}
-	return s.setTransactionWithAccumulator(transaction, point, index, certDeposits, skipWithdrawalWitness, false, true, nil, &slot, txn, protocolMajor)
+	return s.setTransactionWithAccumulator(
+		transaction,
+		point,
+		index,
+		certDeposits,
+		skipWithdrawalWitness,
+		false,
+		true,
+		nil,
+		&slot,
+		txn,
+		protocolMajor,
+	)
 }
 
 func (s *Store) setTransaction(
@@ -946,6 +988,23 @@ func (s *Store) setTransactionWithAccumulator(
 	if batchedAccumulator != nil {
 		overlay = batchedAccumulator.overlay
 	}
+	if overlay != nil && overlay.retainHistory {
+		if !batchedAccumulator.leiosAPIRowsOnly ||
+			!tolerateConsumedInputConflict ||
+			historicalBackfill ||
+			!plainLeiosOverlayTransaction(transaction) {
+			return errors.New(
+				"unsupported transaction in API closure UTxO overlay",
+			)
+		}
+		if _, ok := overlay.apiTransactions[string(hash)]; !ok {
+			return errors.New(
+				"transaction was not preflighted for API closure UTxO overlay",
+			)
+		}
+		delete(overlay.apiTransactions, string(hash))
+		overlay.mutations++
+	}
 	// Detail rows are staged here and reach the accumulator only once the
 	// write succeeds, so a failed write cannot leave rows queued for a
 	// transaction that was rolled back, nor drop the rows an earlier
@@ -994,7 +1053,7 @@ func (s *Store) setTransactionWithAccumulator(
 			if err != nil {
 				return err
 			}
-			if overlay != nil {
+			if overlay != nil && !overlay.retainHistory {
 				transactionID, err = overlay.stageTransaction(
 					hash,
 					point.Hash,
@@ -1139,6 +1198,24 @@ func (s *Store) setTransactionWithAccumulator(
 					skipped,
 					produced,
 				)
+				if overlay.retainHistory {
+					for i := range producedModels {
+						output := overlay.created[newOverlayKey(producedModels[i].TxId, producedModels[i].OutputIdx)]
+						producedModels[i].ID = uint(output.id)
+					}
+					if err := s.applyTransactionAPIDetails(ctx, db, transactionID, transaction, point.Slot, index, producedModels, &staged, transactionIsNew); err != nil {
+						return err
+					}
+					if err := staged.flushExceptClosureAPIRows(ctx, db, s.dialect.ParameterLimit()); err != nil {
+						return err
+					}
+					return s.refreshRewardLiveStakeDeltas(
+						ctx,
+						db,
+						batchedStakeDeltas,
+						point.Slot,
+					)
+				}
 				return nil
 			}
 			producedModelPtrs := make([]*models.Utxo, len(producedModels))
@@ -1207,7 +1284,11 @@ func (s *Store) setTransactionWithAccumulator(
 			// write touches is unchanged from the full-scan path.
 			var spentRefs []models.UtxoId
 			if s.dialect.Name() != "sqlite" {
-				spentRefs = make([]models.UtxoId, 0, len(transaction.Consumed()))
+				spentRefs = make(
+					[]models.UtxoId,
+					0,
+					len(transaction.Consumed()),
+				)
 			}
 			var skippedRefs []models.UtxoId
 			consumedStakeDeltas := make(
@@ -1229,7 +1310,10 @@ func (s *Store) setTransactionWithAccumulator(
 					if err != nil {
 						return err
 					}
-					updatedRows, deltas, scanErr := scanConsumedUtxoRows(rows, true)
+					updatedRows, deltas, scanErr := scanConsumedUtxoRows(
+						rows,
+						true,
+					)
 					if scanErr != nil {
 						return scanErr
 					}
@@ -2253,7 +2337,12 @@ func (s *Store) applyTransactionWithdrawals(
 	return nil
 }
 
-func recordTransactionLedgerContext(ctx context.Context, db queryer, transactionID int64, slot uint64) error {
+func recordTransactionLedgerContext(
+	ctx context.Context,
+	db queryer,
+	transactionID int64,
+	slot uint64,
+) error {
 	value, err := checkedInt64(slot)
 	if err != nil {
 		return err

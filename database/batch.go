@@ -93,6 +93,26 @@ func (d *Database) EnableBatchUtxoOverlay(
 	)
 }
 
+// EnableLeiosClosureUtxoOverlay enables retained UTxO staging when the
+// provider supports the complete closure. Unsupported providers or closures
+// continue through the ordinary ordered API writer.
+func (d *Database) EnableLeiosClosureUtxoOverlay(
+	acc BatchAccumulator, txn *Txn, transactions []lcommon.Transaction,
+) (bool, error) {
+	if acc == nil || txn == nil {
+		return false, nil
+	}
+	overlay, ok := d.transactionStore().(metadata.LeiosClosureUtxoOverlay)
+	if !ok {
+		return false, nil
+	}
+	metadataTxn := txn.Metadata()
+	if metadataTxn == nil {
+		return false, types.ErrNilTxn
+	}
+	return overlay.EnableLeiosClosureUtxoOverlay(acc, metadataTxn, transactions)
+}
+
 // WithBatchUtxoOverlayError joins err with the error acc's batch UTxO overlay
 // recorded. A read barrier inside QueryRowContext cannot return its error, so
 // the statement and those after it run against tables the barrier failed to

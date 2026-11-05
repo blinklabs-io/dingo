@@ -347,6 +347,15 @@ func (ls *LedgerState) validateAndApplyEndorserBlockTransactions(
 	if acc != nil {
 		defer acc.Reset()
 	}
+	if acc != nil {
+		selected := make([]lcommon.Transaction, len(indexes))
+		for i, index := range indexes {
+			selected[i] = txs[index]
+		}
+		if _, err := ls.db.EnableLeiosClosureUtxoOverlay(acc, txn, selected); err != nil {
+			return 0, 0, fmt.Errorf("prepare endorser UTxO batch: %w", err)
+		}
+	}
 	var signatures preverifiedSignatureSet
 	created := make(map[utxoref.Key]lcommon.Utxo, len(indexes)*2)
 	consumed := make(map[utxoref.Key]struct{}, len(indexes)*2)
