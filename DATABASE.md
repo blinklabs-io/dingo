@@ -4452,6 +4452,10 @@ with the same overflow-free engine-side aggregate as
 so no UTxO row is streamed to the caller. It runs on the caller's transaction
 context.
 
+The SQLite aggregate reuses a private scratch integer for each group and uses
+64-bit parsing when a value fits; wider decimal values still use exact
+arbitrary-precision parsing. Step and inverse operations share those rules.
+
 `GetUtxosByAddress` accepts multiple address patterns and OR-joins their coarse
 SQL branches into a single query, mirroring `GetUtxosByAddressWithOrdering`.
 The coordinated `Database.UtxosByAddress` builds one exact-address pattern per
@@ -4797,6 +4801,8 @@ LIMIT 100;
 
 API-mode ingestion stores each unique metadata label with its raw CBOR value.
 If distinct ledger map keys cannot be represented uniquely as JSON object keys,
+the JSON representation exceeds the metadata JSON nesting bound, or JSON
+encoding fails,
 the label remains indexed and `json_value` is NULL; this does not reject an
 otherwise valid transaction. The label-transaction JSON endpoint emits
 `json_metadata: null`, while CBOR endpoints continue to serve the raw value.

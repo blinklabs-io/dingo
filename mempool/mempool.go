@@ -43,6 +43,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const (
@@ -2022,8 +2023,14 @@ func (m *Mempool) AddTransaction(
 	txType uint,
 	txBytes []byte,
 ) (err error) {
-	_, span := tracing.Start(ctx, "mempool.add_transaction")
+	// A transaction's trace is derived from its hash, which is only known
+	// once it decodes; the span is started then, backdated to here.
+	received := time.Now()
+	var span trace.Span
 	defer func() {
+		if span == nil || !span.IsRecording() {
+			return
+		}
 		result := "accepted"
 		switch {
 		case errors.Is(err, ErrNilValidator),
@@ -2061,6 +2068,13 @@ func (m *Mempool) AddTransaction(
 	if err != nil {
 		return fmt.Errorf("decode transaction: %w", err)
 	}
+	txHashRaw := tmpTx.Hash()
+	ctx, span = tracing.StartTx(
+		ctx,
+		"tx.mempool_add",
+		txHashRaw.Bytes(),
+		trace.WithTimestamp(received),
+	)
 	// Early reject TXs whose validity interval hasn't started yet.
 	// Compare against the current wall-clock slot rather than the last
 	// block slot. Quiet networks often have a tip that lags the current
@@ -2078,7 +2092,7 @@ func (m *Mempool) AddTransaction(
 			}
 		}
 	}
-	txHash := tmpTx.Hash().String()
+	txHash := txHashRaw.String()
 	var addEvent *event.Event
 	var evictedEvents []event.Event
 	// Each attempt validates against the pool's state overlay. When the ledger

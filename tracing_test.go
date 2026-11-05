@@ -87,7 +87,13 @@ func TestNewTracerProviderResourceAndSampler(t *testing.T) {
 	spanCount := func(t *testing.T, ratio float64) (int, tracetest.SpanStub) {
 		t.Helper()
 		exporter := tracetest.NewInMemoryExporter()
-		provider := newTracerProvider(exporter, "dingo-test", ratio)
+		n := &Node{config: Config{
+			tracingServiceName: "dingo-test",
+			logger:             slog.Default(),
+		}}
+		res, err := n.telemetryResource(context.Background())
+		require.NoError(t, err)
+		provider := newTracerProvider(exporter, res, ratio)
 		for range 50 {
 			_, span := provider.Tracer("dingo").Start(
 				context.Background(),

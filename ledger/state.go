@@ -108,7 +108,9 @@ var snapshotGenerationCounter atomic.Uint64
 // two seconds. A gap that long means the chain has stopped growing for now --
 // a few blocks added with nothing behind them, or an upstream that went quiet
 // -- so the pass applies what it has rather than holding it for the rest of
-// the budget.
+// the budget. A chain with no queued header cannot grow without a new header
+// admission and fetch round trip, so the wait is skipped there too (see
+// queuedHeadersCanExtendGather).
 // Once the node is at or near the tip, this wait is skipped entirely: a
 // solitary new block at live tip must still commit promptly rather than wait
 // for a batch that will never fill. Vars, not consts, so tests can shrink the
@@ -954,7 +956,10 @@ type LedgerStateConfig struct {
 	// reuses its identity for wire compatibility -- see isMainnet in
 	// header_protocol_version.go. Empty when dingo was configured with a
 	// raw NetworkMagic instead of a named network.
-	Network                       string
+	Network string
+	// DijkstraBlsProofDomain selects the network's pool-registration proof
+	// domain. Zero retains the IETF proof domain.
+	DijkstraBlsProofDomain        lcommon.DijkstraBlsProofDomain
 	BlockfetchRequestRangeFunc    BlockfetchRequestRangeFunc
 	RejectBlockDecodeCacheFunc    func(uint, []byte)
 	PeersWithBlockFunc            PeersWithBlockFunc
@@ -1105,9 +1110,15 @@ type LedgerStateConfig struct {
 	DelegatorInactivityEnabled bool
 	// DelegatorInactivity is the inactivity window in epochs, used only when
 	// DelegatorInactivityEnabled is true.
-	DelegatorInactivity      uint64
-	ValidateHistorical       bool
-	EnableDijkstra           bool
+	DelegatorInactivity uint64
+	ValidateHistorical  bool
+	EnableDijkstra      bool
+	// WarmGenesisStake makes the first reward rounds of a network that
+	// declares Shelley at epoch 0 pay from genesis staking, as the Leios
+	// prototype networks do. A standard cardano-node leaves those rounds
+	// empty, so only prototype networks set it; knowing the Dijkstra era is
+	// not a reason to.
+	WarmGenesisStake         bool
 	StartInDijkstra          bool
 	TrustedReplay            bool
 	ManualBlockProcessing    bool
@@ -1487,6 +1498,9 @@ type LedgerState struct {
 	queuedBlockfetchFlush   *queuedBlockfetchFlush
 	// queuedBlockfetchSchedule substitutes only timer delivery in tests.
 	queuedBlockfetchSchedule func(time.Duration, func()) func()
+	// queuedBlockfetchNow substitutes the clock the accumulation flush reads
+	// in tests.
+	queuedBlockfetchNow func() time.Time
 
 	// The fields below are writer-owned working state. Lock-free readers use
 	// consensus and tip snapshots; writers update these fields under Lock and
@@ -1588,6 +1602,7 @@ type LedgerState struct {
 	deferredStakeInputsHook     atomic.Pointer[epochBoundaryDeferredStakeInputsHookHolder]
 	currentBoundarySPOStakeHook atomic.Pointer[currentBoundarySPOStakeHookHolder] // optional same-boundary SPO stake rows for governance's RATIFY phase (nil = governance falls back to reading the not-yet-written persisted row)
 	reachedTip                  atomic.Bool
+	catchup                     catchupTrace
 	currentTip                  ochainsync.Tip
 	byronPBFT                   byronPBFTCache
 	currentEpoch                models.Epoch
@@ -1699,6 +1714,11 @@ type LedgerState struct {
 	// threshold and is about to wait, the point after which a test may drain
 	// headers and observe the hysteresis rather than the first check.
 	chainsyncCapacityWaitHook func()
+	// headerVerificationEpochLookupHook is a test seam, nil in production. It
+	// runs after each successful epoch lookup in
+	// headerVerificationEpochWithCache, before the snapshot is re-read, so a
+	// test can publish a new snapshot mid-lookup.
+	headerVerificationEpochLookupHook func()
 	// blockfetchContinuationPending prevents a chainsync handler from starting
 	// a competing batch in the short interval after the blockfetch subscriber
 	// schedules its next request on a worker. The worker must run outside the
@@ -3036,6 +3056,10 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 	// live database restore/truncate never cancels. blockPipeline is nil
 	// under ManualBlockProcessing (see NewLedgerState), so this is a plain
 	// nil check rather than also re-checking that mode here.
+	if !ls.reachedTip.Load() {
+		tracing.SetNearTip(false)
+		ls.beginCatchupTrace(ctx)
+	}
 	if ls.blockPipeline != nil {
 		if err := ls.blockPipeline.Start(ctx); err != nil {
 			return fmt.Errorf("failed to start block-decode pipeline: %w", err)
@@ -3649,6 +3673,7 @@ var (
 )
 
 func (ls *LedgerState) Close() (retErr error) {
+	ls.endCatchupTrace()
 	// Close can be called once by the live lifecycle operation and again by
 	// the node's normal shutdown after that operation cancels the node. Keep
 	// the first result visible to every caller: returning nil from the second
@@ -5219,6 +5244,7 @@ func (ls *LedgerState) rollbackWithBlocksAndIntent(
 			pruneFloor,
 		)
 	}
+	traceBlocks := ls.rollbackTraceBlocks(ctx, point, rollbackBlocks)
 	if err := ls.prepareRollbackIntent(ctx, point, rollbackBlocks); err != nil {
 		if !errors.Is(err, errRollbackIntentTooLarge) {
 			return fmt.Errorf("prepare rollback intent: %w", err)
@@ -5411,6 +5437,9 @@ func (ls *LedgerState) rollbackWithBlocksAndIntent(
 	if err != nil {
 		return err
 	}
+	// The blocks are gone from the ledger from here on, whichever path
+	// returns, including a rollbackCommittedError.
+	defer traceRollback(ctx, point, traceBlocks)
 	ls.rewardPrecomputeMu.Lock()
 	if snapshot := ls.rewardPrecomputeRollback; snapshot != nil {
 		snapshot.committed = true
@@ -7202,6 +7231,18 @@ func (ls *LedgerState) ledgerReadChain(
 	}
 }
 
+// queuedHeadersCanExtendGather reports whether a block can still reach the
+// chain without a further header being admitted. Queued headers pop only when
+// their block is added, so an empty queue means every admitted header's block
+// is already on the chain and no blockfetch batch is in flight: the next block
+// is at least a header admission and a fetch round trip away, which no
+// coalescing gap is sized to bridge. It takes only the chain mutex the
+// iterator probe already takes, so it adds no lock to the gather span. A nil
+// chain reports true, keeping the coalescing wait when nothing is known.
+func (ls *LedgerState) queuedHeadersCanExtendGather() bool {
+	return ls.chain == nil || ls.chain.HeaderCount() > 0
+}
+
 func (ls *LedgerState) ledgerReadChainIterator(
 	ctx context.Context,
 	iter ledgerReadIterator,
@@ -7413,7 +7454,8 @@ func (ls *LedgerState) ledgerReadChainIterator(
 							rawBatch[len(rawBatch)-1].Slot,
 							upstreamTipSlot,
 							stabilityWindow,
-						) {
+						) &&
+						ls.queuedHeadersCanExtendGather() {
 						coalesceAttempts++
 						gapAttempts++
 						select {
@@ -9499,6 +9541,7 @@ func (ls *LedgerState) processBlocksFromSource(
 			// The body's wall time, subtracted from the submit's to leave
 			// the commit stage.
 			var bodyElapsed time.Duration
+			var tracedBlocks []ledger.Block
 			err = ls.submitBlockApplyDBTxn(
 				ctx,
 				snapshotTip,
@@ -9506,6 +9549,7 @@ func (ls *LedgerState) processBlocksFromSource(
 				func(txn *database.Txn) error { //nolint:contextcheck
 					bodyStart := time.Now()
 					defer func() { bodyElapsed = time.Since(bodyStart) }()
+					tracedBlocks = tracedBlocks[:0]
 					replayWorkers := startReplayHeaderJobs(
 						ctx, nextBatch[i:end], verifiedReplayHeaders,
 						replayHeaderJobs, verifyReplayHeader,
@@ -9809,6 +9853,9 @@ func (ls *LedgerState) processBlocksFromSource(
 						if opts.beforeCommit != nil {
 							appliedBlocks = append(appliedBlocks, next)
 						}
+						if tracing.Enabled() {
+							tracedBlocks = append(tracedBlocks, next)
+						}
 						// Update expected prev hash for next block in batch
 						expectedPrevHash = tmpPoint.Hash
 						parentEnvelope = envelopeParentFromBlock(next)
@@ -10010,6 +10057,12 @@ func (ls *LedgerState) processBlocksFromSource(
 				completeReadResult()
 				return fmt.Errorf("process block batch: %w", err)
 			}
+			traceBatchCommit(
+				ctx,
+				tracedBlocks,
+				submitStart.Add(bodyElapsed),
+				time.Now(),
+			)
 			transactionOpCertCounters.promote()
 			trustedReplayUtxos = transactionReplayUtxos
 			trimTrustedReplayUtxos(trustedReplayUtxos)
@@ -10047,6 +10100,8 @@ func (ls *LedgerState) processBlocksFromSource(
 				if wantEnableValidation {
 					ls.validationEnabled = true
 					ls.reachedTip.Store(true)
+					tracing.SetNearTip(true)
+					ls.endCatchupTrace()
 				}
 				ls.updateTipMetrics(tipDensity)
 				// This chunk's new tip is now reflected in
@@ -10215,13 +10270,21 @@ func (ls *LedgerState) ledgerProcessBlock(
 	epochStartSlot uint64,
 	syntheticV2CostModel bool,
 ) (delta *LedgerDelta, err error) {
-	_, span := tracing.Start(
+	ctx, span := tracing.StartHeader(
 		ctx,
-		"ledger.process_block",
-		tracing.Uint64("block.slot", point.Slot),
-		attribute.String("block.hash", hex.EncodeToString(point.Hash)),
+		tracing.StageApply,
+		"block.apply",
+		block,
 	)
-	defer func() { tracing.End(span, err) }()
+	if span.IsRecording() {
+		span.SetAttributes(tracing.Uint64("block.slot", point.Slot))
+	}
+	defer func() {
+		if err != nil {
+			span.SetAttributes(attribute.String("block.outcome", "error"))
+		}
+		tracing.End(span, err)
+	}()
 	// Check that we're processing things in order
 	if len(expectedPrevHash) > 0 {
 		if string(
@@ -11255,6 +11318,10 @@ func (ls *LedgerState) reconstructTransitionInfo() {
 	// upcoming era boundary.
 	if pparamsEraId > ls.currentEra.Id {
 		ls.transitionInfo = hardfork.NewTransitionKnown(ls.currentEpoch.EpochId)
+		// A scheduled hard fork names its own epoch, which the version
+		// alone cannot: parameters already at the next era's major do not
+		// put the boundary at the current epoch.
+		ls.evaluateTriggerAtEpoch()
 	}
 }
 
@@ -12173,6 +12240,18 @@ func (ls *LedgerState) warnOnPreByronPrefixEpochCache() {
 	)
 }
 
+// dijkstraScheduledAfterGenesis reports whether the configuration schedules
+// the Dijkstra hard fork at an epoch after genesis. HardForkEpoch ignores the
+// override unless ExperimentalHardForksEnabled is set, as the era shape does,
+// so the start era and the transition trigger always agree.
+func dijkstraScheduledAfterGenesis(cfg *cardano.CardanoNodeConfig) bool {
+	if cfg == nil {
+		return false
+	}
+	epoch, scheduled := cfg.HardForkEpoch("dijkstra")
+	return scheduled && epoch > 0
+}
+
 // shelleyDeclaredAtGenesis reports whether the configuration declares that
 // Shelley is already active at epoch 0, which is what distinguishes a network
 // with no Byron prefix from one that reaches Shelley on chain.
@@ -12256,6 +12335,15 @@ func (ls *LedgerState) setEpochCache(
 		!ls.config.StartInDijkstra &&
 		!shelleyDeclaredAtGenesis(ls.config.CardanoNodeConfig) {
 		startEraId = eras.ByronEraDesc.Id
+	}
+	// A Shelley genesis protocol major of 12 identifies Dijkstra, but a
+	// configuration that schedules the Dijkstra hard fork at a later epoch
+	// keeps the earlier epochs in Conway. Starting in Dijkstra would forge
+	// Dijkstra blocks before the fork, which a reference node rejects.
+	if startEraId == eras.DijkstraEraDesc.Id &&
+		!ls.config.StartInDijkstra &&
+		dijkstraScheduledAfterGenesis(ls.config.CardanoNodeConfig) {
+		startEraId = eras.ConwayEraDesc.Id
 	}
 	if ls.config.StartInDijkstra {
 		startEraId = eras.DijkstraEraDesc.Id
@@ -15148,10 +15236,11 @@ func (ls *LedgerState) UtxosByRefsBounded(
 
 // UtxosByAddress returns all UTxOs that belong to any of the specified addresses
 func (ls *LedgerState) UtxosByAddress(
+	ctx context.Context,
 	addrs []ledger.Address,
 ) ([]models.Utxo, error) {
 	utxos, err := ls.db.UtxosByAddress(
-		context.Background(),
+		ctx,
 		addrs,
 		database.MaxUtxosByAddressResults,
 		nil,

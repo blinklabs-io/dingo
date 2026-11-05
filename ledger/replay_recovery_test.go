@@ -59,6 +59,20 @@ import (
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/cardano"
 )
 
+// The ledger can schedule recovery work before Start. Register its close
+// after database construction so that cleanup joins it before closing storage.
+func newReplayRecoveryLedgerState(
+	t *testing.T,
+	config LedgerStateConfig,
+) (*LedgerState, error) {
+	t.Helper()
+	ls, err := NewLedgerState(config)
+	if ls != nil {
+		t.Cleanup(func() { require.NoError(t, ls.Close()) })
+	}
+	return ls, err
+}
+
 // TestReplayRecoveryRollbackLockOrder protects the lock-order contract shared
 // with rollbackChainAndStateDeferred. The blockfetch lock must be acquired
 // before transactionEventMutex. The old implementation acquired those locks
@@ -209,7 +223,7 @@ func TestTryRecoverFromTxValidationErrorRollsBackToEarliestProducerParent(
 		),
 	)
 
-	ls, err := NewLedgerState(LedgerStateConfig{
+	ls, err := newReplayRecoveryLedgerState(t, LedgerStateConfig{
 		Database:          db,
 		ChainManager:      cm,
 		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
@@ -340,7 +354,7 @@ func TestFindReplayRecoveryCandidateFallsBackWhenProducerParentIsMissing(
 
 	nodeConfig := newTestShelleyGenesisCfg(t)
 	nodeConfig.ShelleyGenesis().SecurityParam = 3
-	ls, err := NewLedgerState(LedgerStateConfig{
+	ls, err := newReplayRecoveryLedgerState(t, LedgerStateConfig{
 		Database:          db,
 		ChainManager:      cm,
 		CardanoNodeConfig: nodeConfig,
@@ -436,7 +450,7 @@ func TestFindReplayRecoveryCandidateHandlesPrunedFallbackTail(
 
 			nodeConfig := newTestShelleyGenesisCfg(t)
 			nodeConfig.ShelleyGenesis().SecurityParam = tc.securityParam
-			ls, err := NewLedgerState(LedgerStateConfig{
+			ls, err := newReplayRecoveryLedgerState(t, LedgerStateConfig{
 				Database:          db,
 				ChainManager:      cm,
 				CardanoNodeConfig: nodeConfig,
@@ -544,7 +558,7 @@ func TestFindReplayRecoveryCandidateFlagsUnresolvedWithoutLocalFallbackAnchor(
 
 				nodeConfig := newTestShelleyGenesisCfg(t)
 				nodeConfig.ShelleyGenesis().SecurityParam = securityParam
-				ls, err := NewLedgerState(LedgerStateConfig{
+				ls, err := newReplayRecoveryLedgerState(t, LedgerStateConfig{
 					Database:          db,
 					ChainManager:      cm,
 					CardanoNodeConfig: nodeConfig,
@@ -670,7 +684,7 @@ func newPrunedProducerLedger(
 
 	nodeConfig := newTestShelleyGenesisCfg(t)
 	nodeConfig.ShelleyGenesis().SecurityParam = securityParam
-	ls, err := NewLedgerState(LedgerStateConfig{
+	ls, err := newReplayRecoveryLedgerState(t, LedgerStateConfig{
 		Database:          db,
 		ChainManager:      cm,
 		CardanoNodeConfig: nodeConfig,
@@ -853,7 +867,7 @@ func TestTryRecoverFromTxValidationErrorRejectsReplayBelowMithrilBoundary(
 			Port: 3001,
 		},
 	}
-	ls, err := NewLedgerState(LedgerStateConfig{
+	ls, err := newReplayRecoveryLedgerState(t, LedgerStateConfig{
 		Database:          db,
 		ChainManager:      cm,
 		EventBus:          bus,
@@ -1007,7 +1021,7 @@ func TestTryRecoverFromTxValidationErrorAtTipRewindsPrimaryChain(
 		),
 	)
 
-	ls, err := NewLedgerState(LedgerStateConfig{
+	ls, err := newReplayRecoveryLedgerState(t, LedgerStateConfig{
 		Database:          db,
 		ChainManager:      cm,
 		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
@@ -1148,7 +1162,7 @@ func newAtTipDescentLedger(t *testing.T) (*LedgerState, ochainsync.Tip) {
 		),
 	)
 
-	ls, err := NewLedgerState(LedgerStateConfig{
+	ls, err := newReplayRecoveryLedgerState(t, LedgerStateConfig{
 		Database:          db,
 		ChainManager:      cm,
 		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
@@ -1428,7 +1442,7 @@ func TestTryRecoverFromTxValidationErrorAtTipRejectsRewindBelowMithrilBoundary(
 			Port: 3001,
 		},
 	}
-	ls, err := NewLedgerState(LedgerStateConfig{
+	ls, err := newReplayRecoveryLedgerState(t, LedgerStateConfig{
 		Database:          db,
 		ChainManager:      cm,
 		EventBus:          bus,
@@ -1533,7 +1547,7 @@ func TestTryRecoverFromTxValidationErrorFallsBackToTxBlobOffsets(
 		),
 	)
 
-	ls, err := NewLedgerState(LedgerStateConfig{
+	ls, err := newReplayRecoveryLedgerState(t, LedgerStateConfig{
 		Database:          db,
 		ChainManager:      cm,
 		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
@@ -1718,7 +1732,7 @@ func TestTryRecoverFromTxValidationErrorFallsBackToChainScan(t *testing.T) {
 	)
 	require.NoError(t, db.SetTip(currentTip, nil))
 
-	ls, err := NewLedgerState(LedgerStateConfig{
+	ls, err := newReplayRecoveryLedgerState(t, LedgerStateConfig{
 		Database:          db,
 		ChainManager:      cm,
 		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
@@ -1883,7 +1897,7 @@ func TestTryRecoverFromTxValidationErrorRecoversDependencyClosure(
 		),
 	)
 	require.NoError(t, err)
-	ls, err := NewLedgerState(LedgerStateConfig{
+	ls, err := newReplayRecoveryLedgerState(t, LedgerStateConfig{
 		Database:          db,
 		ChainManager:      cm,
 		CardanoNodeConfig: recoveryCfg,
@@ -1985,7 +1999,7 @@ func TestTryRecoverFromTxValidationErrorFallsBackToSecurityParamWindow(
 
 	nodeConfig := newTestShelleyGenesisCfg(t)
 	nodeConfig.ShelleyGenesis().SecurityParam = 2
-	ls, err := NewLedgerState(LedgerStateConfig{
+	ls, err := newReplayRecoveryLedgerState(t, LedgerStateConfig{
 		Database:          db,
 		ChainManager:      cm,
 		EventBus:          bus,
@@ -2190,7 +2204,7 @@ func TestTryRecoverFromTxValidationErrorReplayFallbackStopsNonConvergingRewinds(
 
 	nodeConfig := newTestShelleyGenesisCfg(t)
 	nodeConfig.ShelleyGenesis().SecurityParam = 2
-	ls, err := NewLedgerState(LedgerStateConfig{
+	ls, err := newReplayRecoveryLedgerState(t, LedgerStateConfig{
 		Database:          db,
 		ChainManager:      cm,
 		EventBus:          bus,
@@ -2350,7 +2364,7 @@ func newReplayRecoveryAuditLedger(
 
 	nodeConfig := newTestShelleyGenesisCfg(t)
 	nodeConfig.ShelleyGenesis().SecurityParam = 2
-	ls, err := NewLedgerState(LedgerStateConfig{
+	ls, err := newReplayRecoveryLedgerState(t, LedgerStateConfig{
 		Database:          db,
 		ChainManager:      cm,
 		CardanoNodeConfig: nodeConfig,
@@ -3389,7 +3403,7 @@ func TestReplayRecoveryParentPointGenesisPredecessor(t *testing.T) {
 	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 
-	ls, err := NewLedgerState(LedgerStateConfig{
+	ls, err := newReplayRecoveryLedgerState(t, LedgerStateConfig{
 		Database:          db,
 		ChainManager:      cm,
 		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
@@ -3517,7 +3531,7 @@ func TestTryRecoverFromTxValidationErrorIgnoresFailureWithResolvableInputs(
 		[]chain.RawBlock{parentBlock, producerBlock, currentBlock},
 	))
 
-	ls, err := NewLedgerState(LedgerStateConfig{
+	ls, err := newReplayRecoveryLedgerState(t, LedgerStateConfig{
 		Database:          db,
 		ChainManager:      cm,
 		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
@@ -3596,7 +3610,7 @@ func TestResolveReplayRecoveryProducerReportsPresentInput(t *testing.T) {
 	require.NoError(t, err)
 	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
-	ls, err := NewLedgerState(LedgerStateConfig{
+	ls, err := newReplayRecoveryLedgerState(t, LedgerStateConfig{
 		Database:          db,
 		ChainManager:      cm,
 		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
@@ -3940,7 +3954,7 @@ func newTrustWindowLedger(
 		RemoteAddr: &net.TCPAddr{IP: net.IPv4(192, 0, 2, 61), Port: 32611},
 	}
 
-	ls, err := NewLedgerState(LedgerStateConfig{
+	ls, err := newReplayRecoveryLedgerState(t, LedgerStateConfig{
 		Database:          db,
 		ChainManager:      cm,
 		EventBus:          bus,
@@ -4403,7 +4417,7 @@ func TestDeterministicTxRecoveryHaltsOnUnreachableRewind(t *testing.T) {
 	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 
-	ls, err := NewLedgerState(LedgerStateConfig{
+	ls, err := newReplayRecoveryLedgerState(t, LedgerStateConfig{
 		Database:          db,
 		ChainManager:      cm,
 		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
@@ -4468,7 +4482,7 @@ func TestRecoveryRewindHaltBudgetResetsOnTipProgress(t *testing.T) {
 	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 
-	ls, err := NewLedgerState(LedgerStateConfig{
+	ls, err := newReplayRecoveryLedgerState(t, LedgerStateConfig{
 		Database:          db,
 		ChainManager:      cm,
 		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
@@ -4543,7 +4557,7 @@ func TestRecoveryRewindHaltsThoughTargetMovesAndDepthGrows(t *testing.T) {
 	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 
-	ls, err := NewLedgerState(LedgerStateConfig{
+	ls, err := newReplayRecoveryLedgerState(t, LedgerStateConfig{
 		Database:          db,
 		ChainManager:      cm,
 		CardanoNodeConfig: newTestShelleyGenesisCfgWithK(t, ledgerWindow),
@@ -4683,7 +4697,7 @@ func TestWindowedRewindRefusesRecoveryTargetTheChainDoesNotHold(t *testing.T) {
 	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 
-	ls, err := NewLedgerState(LedgerStateConfig{
+	ls, err := newReplayRecoveryLedgerState(t, LedgerStateConfig{
 		Database:          db,
 		ChainManager:      cm,
 		CardanoNodeConfig: newTestShelleyGenesisCfgWithK(t, securityParam),
@@ -4763,7 +4777,7 @@ func TestWindowedRewindRefusesSlotZeroTargetTheStoreDoesNotHold(t *testing.T) {
 	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 
-	ls, err := NewLedgerState(LedgerStateConfig{
+	ls, err := newReplayRecoveryLedgerState(t, LedgerStateConfig{
 		Database:          db,
 		ChainManager:      cm,
 		CardanoNodeConfig: newTestShelleyGenesisCfgWithK(t, securityParam),

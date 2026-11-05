@@ -1687,25 +1687,29 @@ func (m *VoteManager) resolveOnChainKeys(
 			err,
 		)
 	}
-	for poolHashHex, key := range raw {
-		if err := VerifyLeiosKeyProofOfPossession(key); err != nil {
+	// Each key's proof check costs a pairing; a committee's keys verify in
+	// parallel, and keys verified for an earlier epoch come from the cache.
+	pools := make([]string, 0, len(raw))
+	for poolHashHex := range raw {
+		pools = append(pools, poolHashHex)
+	}
+	pubs := make([]*bls12381.G2Affine, len(pools))
+	errs := make([]error, len(pools))
+	parallelFor(len(pools), func(i int) {
+		pubs[i], errs[i] = verifiedLeiosKey(raw[pools[i]])
+	})
+	for i, poolHashHex := range pools {
+		if errs[i] != nil {
 			m.logger.Warn(
 				"registered leios key failed proof of possession, treating as absent",
 				"pool",
 				poolHashHex,
 				"error",
-				err,
+				errs[i],
 			)
 			continue
 		}
-		var pub bls12381.G2Affine
-		if _, err := pub.SetBytes(key.PublicKey); err != nil {
-			// Already validated by VerifyLeiosKeyProofOfPossession; this
-			// cannot fail in practice, but skip defensively rather than
-			// panic.
-			continue
-		}
-		verified[poolHashHex] = &pub
+		verified[poolHashHex] = pubs[i]
 	}
 	return verified, nil
 }

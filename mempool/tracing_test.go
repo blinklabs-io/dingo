@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/blinklabs-io/dingo/internal/tracing"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/attribute"
@@ -29,18 +30,26 @@ import (
 // process global.
 func TestAddTransactionRecordsSpanWithValidationResult(t *testing.T) {
 	spans := testutil.RecordSpans(t)
+	testutil.ConfigureBlockTracing(t, tracing.Config{SampleRatio: 1})
 	m := newTestMempool(t)
 	t.Cleanup(func() { _ = m.Stop(context.Background()) })
 	txType := uint(conway.EraIdConway)
 
 	txBytes := getTestTxBytes(t)
+	tx, err := conway.NewConwayTransactionFromCbor(txBytes)
+	require.NoError(t, err)
 	validator := m.validator.(*mockValidator)
 
 	validator.setFailAll(true)
 	require.Error(t, m.AddTransaction(context.Background(), txType, txBytes))
 	ended := spans.Ended()
 	require.Len(t, ended, 1)
-	require.Equal(t, "mempool.add_transaction", ended[0].Name())
+	require.Equal(t, "tx.mempool_add", ended[0].Name())
+	require.Equal(
+		t,
+		tracing.BlockTraceID(tx.Hash().Bytes()),
+		ended[0].SpanContext().TraceID(),
+	)
 	require.Contains(
 		t,
 		ended[0].Attributes(),
@@ -59,17 +68,13 @@ func TestAddTransactionRecordsSpanWithValidationResult(t *testing.T) {
 	)
 	require.Equal(t, codes.Unset, ended[1].Status().Code)
 
+	// A pool with no validator fails before the transaction is decoded, so
+	// there is no transaction hash and therefore no trace to record into.
 	m.validator = nil
 	require.ErrorIs(
 		t,
 		m.AddTransaction(context.Background(), txType, txBytes),
 		ErrNilValidator,
 	)
-	ended = spans.Ended()
-	require.Len(t, ended, 3)
-	require.Contains(
-		t,
-		ended[2].Attributes(),
-		attribute.String("mempool.validation_result", "unavailable"),
-	)
+	require.Len(t, spans.Ended(), 2)
 }

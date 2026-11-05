@@ -66,16 +66,23 @@ func (s *Server) handleAccountBalance(
 		historical, err := s.config.LedgerState.
 			UtxoBalanceByAddressAtSlot(r.Context(), addr, point.slot)
 		if err != nil {
-			s.writeAccountBalanceError(w, req, point, err)
+			s.writeAccountBalanceError(w, r, req, point, err)
 			return
 		}
 		balances = aggregateAddressBalance(historical)
 	} else {
+		release, ok := s.acquireBulk()
+		if !ok {
+			writeError(w, ErrUnavailable)
+			return
+		}
+		defer release()
 		utxos, err := s.config.LedgerState.UtxosByAddress(
+			r.Context(),
 			[]ledger.Address{addr},
 		)
 		if err != nil {
-			s.writeAccountBalanceError(w, req, point, err)
+			s.writeAccountBalanceError(w, r, req, point, err)
 			return
 		}
 		balances = aggregateBalances(utxos)
@@ -89,10 +96,16 @@ func (s *Server) handleAccountBalance(
 
 func (s *Server) writeAccountBalanceError(
 	w http.ResponseWriter,
+	r *http.Request,
 	req AccountBalanceRequest,
 	point balancePoint,
 	err error,
 ) {
+	if r.Context().Err() != nil {
+		// The client is gone: there is nobody to read a response.
+		s.logger.Debug("account balance read canceled", "error", err)
+		return
+	}
 	s.logger.Error(
 		"failed to query account balance",
 		"address", req.AccountIdentifier.Address,
