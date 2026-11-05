@@ -85,8 +85,8 @@ plugins:
         bucket: blocks
 ```
 
-Selector flags include `--consensus praos` and `--blob example`. Generic environment paths flatten the
-capability and config field names, for example:
+Selector flags include `--consensus praos` and `--blob example`. Generic
+environment paths flatten the capability and config field names, for example:
 
 ```text
 DINGO_PLUGINS_STORAGE_BLOB_PROVIDER=example
