@@ -1831,6 +1831,13 @@ const KoiosTxInfoBatchSize = 40
 // are fetched concurrently and their stalls overlap.
 const KoiosTxInfoConcurrency = 8
 
+// KoiosTxInfoMaxConcurrency is the most /tx_info requests SetTxInfoLimits
+// accepts in flight. Hosts measured stalled from 24 in flight, and a caller
+// buffers hashes in proportion to it (nodeparity flushes after several rounds
+// of concurrency times batch size), so a mistyped value would otherwise hold
+// an epoch's hashes in memory instead of failing.
+const KoiosTxInfoMaxConcurrency = 64
+
 // SetTxInfoLimits sets how many hashes go into one /tx_info request and how
 // many such requests a caller keeps in flight, for a host whose limits differ
 // from the public one's. Call it before the client is used.
@@ -1856,10 +1863,10 @@ func (k *KoiosClient) SetTxInfoLimits(batchSize, concurrency int) error {
 			batchSize, koiosPageSize-1,
 		)
 	}
-	if concurrency < 1 {
+	if concurrency < 1 || concurrency > KoiosTxInfoMaxConcurrency {
 		return fmt.Errorf(
-			"tx_info concurrency %d out of range: must be at least 1",
-			concurrency,
+			"tx_info concurrency %d out of range: must be 1 to %d",
+			concurrency, KoiosTxInfoMaxConcurrency,
 		)
 	}
 	k.txInfoBatchSize = batchSize

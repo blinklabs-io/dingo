@@ -376,7 +376,7 @@ of re-deriving them from scratch.`,
 	cmd.Flags().IntVar(
 		&koiosFlags.txInfoConcurrency, "koios-tx-info-concurrency",
 		koiosparity.KoiosTxInfoConcurrency,
-		"/tx_info requests kept in flight at once",
+		fmt.Sprintf("/tx_info requests kept in flight at once, 1 to %d", koiosparity.KoiosTxInfoMaxConcurrency),
 	)
 	cmd.Flags().StringVar(
 		&koiosFlags.captureDir, "boundary-capture-dir", "",

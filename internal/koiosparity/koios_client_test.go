@@ -884,12 +884,16 @@ func TestSetTxInfoLimitsBounds(t *testing.T) {
 	require.Error(t, k.SetTxInfoLimits(koiosPageSize, 4))
 	require.Error(t, k.SetTxInfoLimits(0, 4))
 	require.Error(t, k.SetTxInfoLimits(250, 0))
+	require.Error(t, k.SetTxInfoLimits(250, KoiosTxInfoMaxConcurrency+1))
 	require.Equal(t, KoiosTxInfoBatchSize, k.TxInfoBatchSize(),
 		"a rejected setting leaves the client unchanged")
 
 	require.NoError(t, k.SetTxInfoLimits(koiosPageSize-1, 4))
 	require.Equal(t, koiosPageSize-1, k.TxInfoBatchSize())
 	require.Equal(t, 4, k.TxInfoConcurrency())
+
+	require.NoError(t, k.SetTxInfoLimits(50, KoiosTxInfoMaxConcurrency))
+	require.Equal(t, KoiosTxInfoMaxConcurrency, k.TxInfoConcurrency())
 }
 
 // TestGetTxInfosErrorsOnIncompleteResponse proves that a transaction hash
