@@ -1264,3 +1264,59 @@ func TestSettingsOperationsHonorCancelledContext(t *testing.T) {
 	require.NoError(t, err)
 	require.NotContains(t, gates, "cancel_probe")
 }
+
+// TestPoolLookupsHonorSupersedingRetirement covers a pool that files a
+// retirement for the current epoch and then, before that epoch begins, a
+// second one for a later epoch. The second replaces the first (POOL), so the
+// pool is still registered and still holds its VRF key. The reverse order,
+// a later retirement moving the epoch earlier, retires it.
+func TestPoolLookupsHonorSupersedingRetirement(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name       string
+		first      uint64
+		second     uint64
+		registered bool
+	}{
+		{name: "later epoch replaces current", first: 2, second: 4, registered: true},
+		{name: "current epoch replaces later", first: 4, second: 2, registered: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := newManagementTestStore(t)
+			poolKey := make([]byte, 28)
+			poolKey[0] = 1
+			vrfKey := make([]byte, 32)
+			vrfKey[0] = 2
+			require.NoError(t, store.ImportPool(
+				&models.Pool{PoolKeyHash: poolKey, VrfKeyHash: vrfKey},
+				&models.PoolRegistration{
+					PoolKeyHash: poolKey,
+					VrfKeyHash:  vrfKey,
+					AddedSlot:   10,
+				},
+				nil,
+			))
+			require.NoError(t, store.RetirePools(nil, [][]byte{poolKey}, tc.first, 20))
+			require.NoError(t, store.RetirePools(nil, [][]byte{poolKey}, tc.second, 30))
+			require.NoError(t, store.SetEpoch(0, 1, nil, nil, nil, nil, 0, 1, 100, nil))
+			require.NoError(t, store.SetEpoch(100, 2, nil, nil, nil, nil, 0, 1, 100, nil))
+
+			regs, err := store.GetPoolRegistrationsEffectiveForEpoch(
+				[]lcommon.PoolKeyHash{lcommon.PoolKeyHash(poolKey)},
+				100, 2, math.MaxInt64, nil,
+			)
+			require.NoError(t, err)
+			got, err := store.GetPoolByVrfKeyHash(vrfKey, 100, nil)
+			require.NoError(t, err)
+			if tc.registered {
+				require.Len(t, regs, 1)
+				require.NotNil(t, got)
+				require.Equal(t, poolKey, got.PoolKeyHash)
+			} else {
+				require.Empty(t, regs)
+				require.Nil(t, got)
+			}
+		})
+	}
+}
