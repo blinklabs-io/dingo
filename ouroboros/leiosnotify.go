@@ -2875,13 +2875,13 @@ func (o *Ouroboros) recordLeiosAnnouncementLocked(
 		// A forged endorser block is offered only now, behind the header
 		// that announces it, in the same log append so a peer registering
 		// concurrently cannot receive the offers without the header.
-		entries := []leiosForgedEBEntry{
-			{announcement: append([]byte(nil), raw...)},
-		}
+		offers := o.takeForgedEndorserBlockOffersLocked(slot, ebHash.Bytes())
+		entries := make([]leiosForgedEBEntry, 0, 1+len(offers))
 		entries = append(
 			entries,
-			o.takeForgedEndorserBlockOffersLocked(slot, ebHash.Bytes())...,
+			leiosForgedEBEntry{announcement: append([]byte(nil), raw...)},
 		)
+		entries = append(entries, offers...)
 		o.leiosEBLog.append(entries...)
 	}
 	return nil
