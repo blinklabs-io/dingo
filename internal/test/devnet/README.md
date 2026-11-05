@@ -741,6 +741,9 @@ genesis starts at (10, 11 or 12). `run-tests.sh` accepts
 `DEVNET_SPEC_OVERRIDE=./testnet*.yaml` to select a spec file in this directory
 other than the stock ones, and rejects any other value.
 `testnet-accelerated-pv11.yaml` starts at protocol version 11.
+`testnet-soak-praos.yaml` uses mainnet-like density (`f=0.05`, 0.2s slots, `k=20`)
+for `TestChainAgreementSoak`; the accelerated specs use `f=0.4`, where equal pools
+forge in the same slot about every 15 seconds.
 
 `testnet-accelerated-pv12.yaml` starts at protocol version 12 with the Dijkstra
 hard fork at epoch 0. It needs `cardano-node` 11.2.0 (earlier releases do not
