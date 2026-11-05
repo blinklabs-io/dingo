@@ -3353,21 +3353,24 @@ func TestAllegraCrossingAfterPostHardForkStart(t *testing.T) {
 	assert.True(t, c.crosses(allegra.EraIdAllegra))
 }
 
-// TestFetchTxInfoChunksKeepsConcurrencyInFlight proves the flush keeps at
-// most the Koios client's TxInfoConcurrency requests in flight: a host that
-// stalls under more load is given only what it was configured for.
+// TestTxInfoFlushThresholdHoldsSeveralRounds proves a mid-epoch flush holds
+// several rounds of requests: a flush of a single round waits on its slowest
+// request with every other slot idle.
 func TestTxInfoFlushThresholdHoldsSeveralRounds(t *testing.T) {
 	t.Parallel()
 	koios := &koiosparity.KoiosClient{}
 	require.NoError(t, koios.SetTxInfoLimits(250, 4))
-	// A flush of a single round waits on its slowest request with every
-	// other slot idle.
 	require.Equal(t, 4*4*250, txInfoFlushThreshold(koios))
 }
 
+// TestFetchTxInfoChunksKeepsConcurrencyInFlight proves the flush keeps at
+// most the Koios client's TxInfoConcurrency requests in flight: a host that
+// stalls under more load is given only what it was configured for.
 func TestFetchTxInfoChunksKeepsConcurrencyInFlight(t *testing.T) {
 	t.Parallel()
 	var inFlight, peak atomic.Int32
+	started := make(chan struct{}, 6)
+	release := make(chan struct{})
 	fetch := func(
 		_ context.Context, chunk []string,
 	) ([]koiosparity.KoiosTxInfoItem, error) {
@@ -3378,18 +3381,43 @@ func TestFetchTxInfoChunksKeepsConcurrencyInFlight(t *testing.T) {
 				break
 			}
 		}
-		time.Sleep(20 * time.Millisecond)
+		started <- struct{}{}
+		<-release
 		inFlight.Add(-1)
 		return []koiosparity.KoiosTxInfoItem{{TxHash: chunk[0]}}, nil
 	}
 	chunks := [][]string{{"a"}, {"b"}, {"c"}, {"d"}, {"e"}, {"f"}}
-	_, errs, err := fetchTxInfoChunks(
-		context.Background(), chunks, 2, fetch, nil, false,
-		func(context.Context, time.Duration) error { return nil },
-		func(string, ...any) {},
-	)
-	require.NoError(t, err)
-	for _, e := range errs {
+	type result struct {
+		errs []error
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		_, errs, err := fetchTxInfoChunks(
+			context.Background(), chunks, 2, fetch, nil, false,
+			func(context.Context, time.Duration) error { return nil },
+			func(string, ...any) {},
+		)
+		done <- result{errs, err}
+	}()
+	// Hold the first requests until two are in flight together, so the
+	// peak is measured at the limit rather than left to scheduling.
+	for range 2 {
+		select {
+		case <-started:
+		case <-time.After(5 * time.Second):
+			t.Fatal("fewer than 2 requests started")
+		}
+	}
+	close(release)
+	var r result
+	select {
+	case r = <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("fetchTxInfoChunks did not return")
+	}
+	require.NoError(t, r.err)
+	for _, e := range r.errs {
 		require.NoError(t, e)
 	}
 	assert.Equal(t, int32(2), peak.Load())
