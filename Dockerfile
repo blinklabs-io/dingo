@@ -62,6 +62,8 @@ RUN sed -i \
     -e 's|http://deb.debian.org/debian-security|http://snapshot.debian.org/archive/debian-security/20261020T000000Z|g' \
     -e 's|http://deb.debian.org/debian|http://snapshot.debian.org/archive/debian/20261020T000000Z|g' \
     /etc/apt/sources.list.d/debian.sources && \
+  printf 'Acquire::Retries "8";\nAcquire::http::Timeout "30";\n' \
+    > /etc/apt/apt.conf.d/80-retries && \
   apt-get -o Acquire::Check-Valid-Until=false update -y && \
   apt-get install -y --no-install-recommends \
     ca-certificates=20250419~deb12u1 \
