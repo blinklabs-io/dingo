@@ -19,40 +19,22 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/ledger"
-	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	oleiosfetch "github.com/blinklabs-io/gouroboros/protocol/leiosfetch"
 	"github.com/stretchr/testify/require"
 )
 
-// testDijkstraHeaderAnnouncing is testDijkstraAnnouncementHeaderRaw for a
-// given endorser block: a slot-1 ranking-block header announcing ebRaw.
+// testDijkstraHeaderAnnouncing returns a slot-1 ranking-block header
+// announcing ebRaw.
 func testDijkstraHeaderAnnouncing(t *testing.T, ebRaw []byte) []byte {
 	t.Helper()
-	_, blockRaw := testDijkstraBlockRaw(t, 1)
-	var components []cbor.RawMessage
-	_, err := cbor.Decode(blockRaw, &components)
-	require.NoError(t, err)
-	var headerTop []cbor.RawMessage
-	_, err = cbor.Decode(components[0], &headerTop)
-	require.NoError(t, err)
-	var headerBody []cbor.RawMessage
-	_, err = cbor.Decode(headerTop[0], &headerBody)
-	require.NoError(t, err)
-	headerBody = append(
-		headerBody[:10],
-		mustCbor(t, false),
-		mustCbor(t, []any{
-			lcommon.Blake2b256Hash(ebRaw).Bytes(),
-			uint64(len(ebRaw)),
-		}),
+	return testDijkstraAnnouncementHeaderRawFor(
+		t,
+		1,
+		lcommon.Blake2b256Hash(ebRaw),
+		uint64(len(ebRaw)),
 	)
-	headerTop[0], err = cbor.Encode(headerBody)
-	require.NoError(t, err)
-	headerRaw, err := cbor.Encode(headerTop)
-	require.NoError(t, err)
-	return headerRaw
 }
 
 // drainLeiosNotify returns every entry the leios-notify server would send
@@ -149,7 +131,9 @@ func TestUnannouncedForgedEndorserBlockIsNeverOffered(t *testing.T) {
 	))
 	_, otherRaw := testLeiosEndorserBlockRaw(t, 2)
 	o.EnqueueLeiosBlockAnnouncement(testDijkstraHeaderAnnouncing(t, otherRaw))
-	for _, entry := range drainLeiosNotify(o, conn) {
+	entries := drainLeiosNotify(o, conn)
+	require.NotEmpty(t, entries, "the unrelated announcement must be queued")
+	for _, entry := range entries {
 		require.Nil(t, entry.point)
 		require.Nil(t, entry.txOffer)
 	}

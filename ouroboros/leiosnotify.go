@@ -267,32 +267,36 @@ func newLeiosForgedEBLog() *leiosForgedEBLog {
 	}
 }
 
-// append adds an entry, prunes head entries that all registered connections
-// have advanced past (or all unpinned entries when none are registered), and
-// signals all server goroutines waiting for new entries to wake and retry.
-func (l *leiosForgedEBLog) append(entry leiosForgedEBEntry) {
+// append adds entries as one unit, prunes head entries that all registered
+// connections have advanced past (or all unpinned entries when none are
+// registered), and signals all server goroutines waiting for new entries to
+// wake and retry. Entries passed together are never split by a concurrent
+// registerConn, so a connection sees all of them or none.
+func (l *leiosForgedEBLog) append(entries ...leiosForgedEBEntry) {
 	l.mu.Lock()
-	l.pruneLocked()
-	if !entry.isEndorserBlockOffer() &&
-		l.transientEntriesLocked() >= leiosEBLogMaxTransientEntries {
-		l.evictOldestTransientLocked()
+	for _, entry := range entries {
+		l.pruneLocked()
+		if !entry.isEndorserBlockOffer() &&
+			l.transientEntriesLocked() >= leiosEBLogMaxTransientEntries {
+			l.evictOldestTransientLocked()
+		}
+		l.items = append(l.items, leiosForgedEBLogItem{
+			index: l.tail,
+			entry: entry,
+		})
+		if !entry.isEndorserBlockOffer() {
+			l.transientCount++
+		}
+		l.tail++
+		// A caught-up origin already has the entry, so do not retain it
+		// waiting for that connection to issue another RequestNext. Origins
+		// that are behind advance across the exclusion when their preceding
+		// delivery is completed.
+		if entry.excludeConnKey != "" {
+			l.skipExcludedLocked(entry.excludeConnKey)
+		}
+		l.pruneLocked()
 	}
-	l.items = append(l.items, leiosForgedEBLogItem{
-		index: l.tail,
-		entry: entry,
-	})
-	if !entry.isEndorserBlockOffer() {
-		l.transientCount++
-	}
-	l.tail++
-	// A caught-up origin already has the entry, so do not retain it waiting
-	// for that connection to issue another RequestNext. Origins that are
-	// behind advance across the exclusion when their preceding delivery is
-	// completed.
-	if entry.excludeConnKey != "" {
-		l.skipExcludedLocked(entry.excludeConnKey)
-	}
-	l.pruneLocked()
 	wake := l.wakeCh
 	l.wakeCh = make(chan struct{})
 	l.mu.Unlock()
@@ -753,7 +757,7 @@ func (o *Ouroboros) queueForgedEndorserBlockOffers(
 	o.leiosAnnouncementsMu.Lock()
 	defer o.leiosAnnouncementsMu.Unlock()
 	if o.leiosAnnouncementBindsSlotLocked(point.Hash, point.Slot) {
-		o.appendEndorserBlockOffersLocked(point, size)
+		o.leiosEBLog.append(endorserBlockOfferEntries(point, size)...)
 		return
 	}
 	if o.leiosPendingForgedOffers == nil {
@@ -779,33 +783,34 @@ func (o *Ouroboros) queueForgedEndorserBlockOffers(
 	}
 }
 
-// releaseForgedEndorserBlockOffersLocked queues the offers of a forged
-// endorser block whose announcement has just been queued. The caller must
-// hold leiosAnnouncementsMu.
-func (o *Ouroboros) releaseForgedEndorserBlockOffersLocked(
+// takeForgedEndorserBlockOffersLocked removes and returns the offers of a
+// forged endorser block whose announcement is about to be queued. The caller
+// must hold leiosAnnouncementsMu.
+func (o *Ouroboros) takeForgedEndorserBlockOffersLocked(
 	slot uint64,
 	ebHash []byte,
-) {
+) []leiosForgedEBEntry {
 	key := leiosBlockKey(slot, ebHash)
 	pending, ok := o.leiosPendingForgedOffers[key]
 	if !ok {
-		return
+		return nil
 	}
 	delete(o.leiosPendingForgedOffers, key)
-	o.appendEndorserBlockOffersLocked(pending.point, pending.size)
+	return endorserBlockOfferEntries(pending.point, pending.size)
 }
 
-// appendEndorserBlockOffersLocked queues the block offer and the closure
-// offer for an announced endorser block. The caller must hold
-// leiosAnnouncementsMu.
-func (o *Ouroboros) appendEndorserBlockOffersLocked(
+// endorserBlockOfferEntries returns the block offer and the closure offer for
+// an announced endorser block.
+func endorserBlockOfferEntries(
 	point ocommon.Point,
 	size uint64,
-) {
+) []leiosForgedEBEntry {
 	blockPoint := ocommon.Point{Slot: point.Slot, Hash: slices.Clone(point.Hash)}
 	txPoint := ocommon.Point{Slot: point.Slot, Hash: slices.Clone(point.Hash)}
-	o.leiosEBLog.append(leiosForgedEBEntry{point: &blockPoint, size: size})
-	o.leiosEBLog.append(leiosForgedEBEntry{txOffer: &txPoint})
+	return []leiosForgedEBEntry{
+		{point: &blockPoint, size: size},
+		{txOffer: &txPoint},
+	}
 }
 
 func (o *Ouroboros) leiosnotifyServerConnOpts() []oleiosnotify.LeiosNotifyOptionFunc {
@@ -2867,12 +2872,17 @@ func (o *Ouroboros) recordLeiosAnnouncementLocked(
 	}
 	slots[slot] = struct{}{}
 	if relay {
-		o.leiosEBLog.append(
-			leiosForgedEBEntry{announcement: append([]byte(nil), raw...)},
-		)
 		// A forged endorser block is offered only now, behind the header
-		// that announces it.
-		o.releaseForgedEndorserBlockOffersLocked(slot, ebHash.Bytes())
+		// that announces it, in the same log append so a peer registering
+		// concurrently cannot receive the offers without the header.
+		entries := []leiosForgedEBEntry{
+			{announcement: append([]byte(nil), raw...)},
+		}
+		entries = append(
+			entries,
+			o.takeForgedEndorserBlockOffersLocked(slot, ebHash.Bytes())...,
+		)
+		o.leiosEBLog.append(entries...)
 	}
 	return nil
 }
