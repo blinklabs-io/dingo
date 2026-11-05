@@ -147,7 +147,7 @@ func TestHotStatementsAreRecordedUnderTheirName(t *testing.T) {
 		{"select", "GetUtxoSpendState"},
 		{"select", "SumCredentialUtxoStake"},
 		{"insert", "UpsertRewardLiveStake"},
-		{"insert", "InsertUtxoIfAbsent"},
+		{"insert", "InsertUtxoIfAbsentResult"},
 	} {
 		require.NotZero(
 			t,
