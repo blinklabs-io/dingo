@@ -73,6 +73,9 @@ for target in $BUILD_TARGETS; do
   echo "::group::build ${goos}/${goarch}"
   GOOS="$goos" GOARCH="$goarch" make build
   echo "::endgroup::"
+  # Each target adds a GOOS/GOARCH-specific slice of the build cache; the
+  # trace shows which target a disk-full failure belongs to.
+  df -h . | tail -n 1
 
   for name in "${binaries[@]}"; do
     if [ ! -f "${name}${suffix}" ]; then
