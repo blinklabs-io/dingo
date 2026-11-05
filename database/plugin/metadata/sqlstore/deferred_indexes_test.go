@@ -73,7 +73,10 @@ func TestDropDeferredIndexesContextCancelsWhileWriteLocked(t *testing.T) {
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = holder.Rollback() })
-	forceRelease := time.AfterFunc(time.Second, func() { _ = holder.Rollback() })
+	forceRelease := time.AfterFunc(
+		time.Second,
+		func() { _ = holder.Rollback() },
+	)
 	defer forceRelease.Stop()
 
 	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
@@ -194,7 +197,11 @@ func TestBuildDeferredIndexesContextCommitsEachSQLiteIndex(t *testing.T) {
 		firstBuilt,
 		"the completed index remains committed after cancellation",
 	)
-	require.NotEmpty(t, missingAfter, "cancellation leaves unfinished indexes to resume")
+	require.NotEmpty(
+		t,
+		missingAfter,
+		"cancellation leaves unfinished indexes to resume",
+	)
 
 	require.NoError(t, store.BuildDeferredIndexesContext(t.Context()))
 	pending, err = store.HasDeferredIndexesPending()
@@ -367,4 +374,24 @@ func TestDeferredIndexSQLPartialPredicateByDialect(t *testing.T) {
 		"CREATE INDEX `idx_utxo_spent_at_tx_id` ON `utxo` (`spent_at_tx_id`(255))",
 		deferredIndexCreateSQL(MySQLDialect(), index),
 	)
+}
+
+func TestDeferredRebuildKeepsUtxoStakingIndexesPartial(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	check := func(name string) {
+		t.Helper()
+		var definition string
+		require.NoError(
+			t,
+			store.readDB.QueryRow("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?", name).
+				Scan(&definition),
+		)
+		require.Contains(t, definition, "WHERE staking_key IS NOT NULL")
+	}
+	require.NoError(t, store.DropDeferredIndexes())
+	check("idx_utxo_staking_deleted_amount")
+	require.NoError(t, store.BuildDeferredIndexes())
+	check("idx_utxo_staking_key")
+	check("idx_utxo_staking_deleted_amount")
 }
