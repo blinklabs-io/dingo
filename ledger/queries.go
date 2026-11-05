@@ -300,15 +300,27 @@ func errEpochNotResolved(at QueryPoint) error {
 func (ls *LedgerState) queryShelleyEpochNo(ctx context.Context, at QueryPoint,
 	txn *database.Txn,
 ) (any, error) {
+	epoch, err := ls.shelleyEpochNo(ctx, at, txn)
+	if err != nil {
+		return nil, err
+	}
+	return []any{epoch}, nil
+}
+
+// shelleyEpochNo returns the epoch at the query point, by the same rules as
+// queryShelleyEpochNo.
+func (ls *LedgerState) shelleyEpochNo(ctx context.Context, at QueryPoint,
+	txn *database.Txn,
+) (uint64, error) {
 	if !at.pinned() {
 		row, err := ls.snapshotEpoch(txn, at)
 		if err != nil {
-			return nil, err
+			return 0, err
 		}
 		if row != nil {
-			return []any{row.EpochId}, nil
+			return row.EpochId, nil
 		}
-		return []any{ls.loadConsensusSnapshot().currentEpoch.EpochId}, nil
+		return ls.loadConsensusSnapshot().currentEpoch.EpochId, nil
 	}
 	if txn == nil {
 		txn = ls.db.Transaction(ctx, false)
@@ -316,12 +328,12 @@ func (ls *LedgerState) queryShelleyEpochNo(ctx context.Context, at QueryPoint,
 	}
 	epoch, found, err := ls.resolveAsOfEpoch(txn, at)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 	if !found {
-		return nil, errEpochNotResolved(at)
+		return 0, errEpochNotResolved(at)
 	}
-	return []any{epoch}, nil
+	return epoch, nil
 }
 
 // VerifyPointQueryable checks that at, once Acquired, is guaranteed to be
@@ -1411,6 +1423,14 @@ func (ls *LedgerState) queryShelleyLeaf(ctx context.Context, query any,
 			return nil, fmt.Errorf("unsupported query type: %T", q)
 		}
 		return ls.queryShelleyStakePoolState(ctx, q, txn)
+	case *olocalstatequery.ShelleyLeiosCommitteeQuery:
+		// Released nodes do not support GetLeiosCommittee, so only the
+		// Leios prototype answers it; elsewhere it is unsupported like any
+		// other query dingo does not implement.
+		if ls.config.LeiosCommittee == nil {
+			return nil, fmt.Errorf("unsupported query type: %T", q)
+		}
+		return ls.queryShelleyLeiosCommittee(ctx, at, txn)
 	case *olocalstatequery.ShelleyRewardProvenanceQuery:
 		return ls.queryShelleyRewardProvenance()
 	case *olocalstatequery.ShelleyPoolStateQuery:

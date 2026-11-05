@@ -1355,6 +1355,49 @@ func (m *VoteManager) CommitteeForEpoch(epoch uint64) (*Committee, error) {
 	return entry.committee, nil
 }
 
+// CommitteeSeat is one seat of an epoch's voting committee as served over
+// local state query: the seat's share of the active stake and the BLS key
+// that votes for it.
+type CommitteeSeat struct {
+	// Weight is the member's stake over the total active stake, the same
+	// fraction certificate quorum is measured against.
+	Weight *big.Rat
+	// PublicKey is the compressed BLS verification key, nil while the seat
+	// has no resolved key.
+	PublicKey []byte
+}
+
+// CommitteeSeatsForEpoch returns the seats of an epoch's voting committee in
+// voter id order, which is the order votes and certificates index.
+func (m *VoteManager) CommitteeSeatsForEpoch(
+	epoch uint64,
+) ([]CommitteeSeat, error) {
+	entry, err := m.committeeAndParamsForEpoch(epoch)
+	if err != nil {
+		return nil, err
+	}
+	committee := entry.committee
+	if committee.TotalActiveStake == 0 {
+		return nil, ErrZeroTotalActiveStake
+	}
+	seats := make([]CommitteeSeat, 0, len(committee.Members))
+	for _, member := range committee.Members {
+		seat := CommitteeSeat{
+			Weight: new(big.Rat).SetFrac(
+				new(big.Int).SetUint64(member.Stake),
+				new(big.Int).SetUint64(committee.TotalActiveStake),
+			),
+		}
+		if pub, ok := m.resolveVoterKey(entry, member.PoolKeyHash); ok &&
+			pub != nil {
+			key := pub.Bytes()
+			seat.PublicKey = key[:]
+		}
+		seats = append(seats, seat)
+	}
+	return seats, nil
+}
+
 // ValidateDijkstraCertificate verifies a Dijkstra certificate against the
 // historical committee and keys resolved for epoch. Unlike vote admission,
 // block admission is strict: every selected signer must have a verified key.

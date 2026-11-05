@@ -5470,6 +5470,13 @@ point from the registrations added at or before it, so a re-registration made
 during that epoch is not reported until the next one),
 which returns genesis relay addresses in ledger wire order and includes an
 optional BLS key when protocol version 12 or later applies),
+Leios committee (`GetLeiosCommittee`, gated the same way through
+`LedgerStateConfig.LeiosCommittee`, which the node sets only from the strict
+Musashi identity and backs with the vote manager's
+`CommitteeSeatsForEpoch`: seats in voter id order, each weighted by its stake
+over the total active stake and carrying the member's BLS key; the epoch at
+the acquired point is required, and the next epoch's committee is left out of
+the reply when it cannot be built yet),
 stake pool state (`GetStakePoolState`, answered only on the Leios prototype
 network because released nodes do not support it:
 `LedgerStateConfig.StakePoolStateQuery` is set only from the strict Musashi

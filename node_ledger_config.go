@@ -30,6 +30,7 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 )
 
 // errOuroborosNotStarted is returned by ledger callbacks that run before the
@@ -236,6 +237,10 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 		// is answered only on the Leios prototype network, identified
 		// strictly.
 		StakePoolStateQuery: n.config.musashiPrototypeIdentity(),
+		// GetLeiosCommittee is likewise a prototype extension, answered
+		// only on the Leios prototype network and only while a vote manager
+		// is running.
+		LeiosCommittee: n.leiosCommitteeQuery(),
 		// The Leios prototype's Dijkstra era runs Praos2, whose chain-dependent
 		// state has a ninth field. Gated on the strict prototype identity,
 		// never on the era or a run mode alone: a released node runs Dijkstra
@@ -443,4 +448,33 @@ func (n *Node) publishChainsyncState(state *chainsync.State) {
 	n.chainsyncState = state
 	n.selectorChainsyncState.Store(state)
 	n.networkIngestHold().Attach(state)
+}
+
+// leiosCommitteeQuery returns the LedgerStateConfig.LeiosCommittee callback,
+// or nil off the Leios prototype network, where the query is unsupported.
+func (n *Node) leiosCommitteeQuery() func(
+	uint64,
+) ([]olocalstatequery.LeiosCommitteeSeat, error) {
+	if !n.config.musashiPrototypeIdentity() {
+		return nil
+	}
+	return func(epoch uint64) ([]olocalstatequery.LeiosCommitteeSeat, error) {
+		voteManager := n.leiosCertificateVerifier.Load()
+		if voteManager == nil {
+			return nil, errors.New("leios vote manager is unavailable")
+		}
+		seats, err := voteManager.CommitteeSeatsForEpoch(epoch)
+		if err != nil {
+			return nil, err
+		}
+		// Never nil, so a committee with no seats is not read as absent.
+		out := make([]olocalstatequery.LeiosCommitteeSeat, 0, len(seats))
+		for _, seat := range seats {
+			out = append(out, olocalstatequery.LeiosCommitteeSeat{
+				Weight: seat.Weight,
+				VKey:   seat.PublicKey,
+			})
+		}
+		return out, nil
+	}
 }
