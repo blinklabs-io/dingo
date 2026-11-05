@@ -19,6 +19,7 @@ package sqlitequery
 // send to the database. Defined as aliases (not copies) so regenerating this
 // package can never leave the cache keyed by stale SQL.
 const (
+	GetSyncStateQuery                 = getSyncState
 	SetTipQuery                       = setTip
 	SetBlockNonceQuery                = setBlockNonce
 	GetAccountByCredentialQuery       = getAccountByCredential

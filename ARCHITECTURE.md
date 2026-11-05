@@ -7152,7 +7152,19 @@ is computed from the candidate fragments of live, eligible, non-stale peers
 that have delivered a header, excluding peers the Genesis stale-tip rule
 treats as stale (`advertisedTipStaleLocked`): such a peer is never selectable,
 so its fork needs no protection, and counting it would hold every other peer at
-`k` past its fork point while it stays connected. The limit is gated on the selection mode, which is
+`k` past its fork point while it stays connected. Eligibility has two inputs:
+the peer-governance state kept by `SetConnectionEligible`, and the read-only
+`ChainSelectorConfig.ConnectionEligible` hook, which the node backs with
+chainsync ingress admission (`Node.chainsyncIngressAdmitted`). A peer demoted to
+observability-only has its headers dropped from ingress, so its fragment can
+freeze; the hook excludes it from the candidate set until it is promoted again,
+and it can only exclude, never re-enable a peer that peer governance excluded.
+The hook gates only this candidate set: an observer still counts as a Genesis
+corroboration witness through its verified deliveries. The selector pulls the
+hook on every limit evaluation, so no notification is needed; the node reads
+the chainsync state for it through an atomic, because the selector outlives a
+live Restore that republishes that state. A re-promoted peer still holds its
+frozen fragment until the resync rollback trims it. The limit is gated on the selection mode, which is
 Dingo's only sync-state signal (there is no Genesis State Machine equivalent):
 
 - Genesis mode (syncing): the cap is active. Before any candidate has
@@ -10727,6 +10739,13 @@ or replace its saved name, but the replacement is never traversed. The
 auto-created temporary root is retained on the same terms. Cleanup also
 retains the archive's parent handle and file identity, so a file or directory
 substituted at the archive name is preserved.
+
+With `CleanupAfterLoad` set, an API-mode `Sync` runs `Cleanup` as soon as
+`sync_status` becomes `backfill`, before the metadata backfill starts: the
+backfill reads blocks from the blob store, and on mainnet it runs for days
+while the extracted immutable tree holds hundreds of GB. `serve` resumes an
+interrupted backfill without the tree; re-running `dingo mithril sync` instead
+downloads the immutable archives again. Core mode cleans up at completion.
 
 Temporary feed, extraction, and probe directories are created privately before
 their names are exposed. On Unix, each real directory in the absolute ancestor
