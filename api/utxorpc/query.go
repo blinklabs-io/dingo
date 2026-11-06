@@ -853,12 +853,16 @@ func (s *queryServiceServer) ReadTx(
 				fmt.Errorf("block not found: %x", txRecord.BlockHash),
 			)
 		}
-		return nil, fmt.Errorf("lookup block: %w", err)
+		return nil, mapHistoryExpired(
+			fmt.Errorf("lookup block: %w", err),
+		)
 	}
 
 	transactions, err := s.utxorpc.config.LedgerState.BlockTransactions(ctx, block)
 	if err != nil {
-		return nil, fmt.Errorf("get block transactions: %w", err)
+		return nil, mapHistoryExpired(
+			fmt.Errorf("get block transactions: %w", err),
+		)
 	}
 
 	// Find the transaction by index first, then fall back to a hash scan.

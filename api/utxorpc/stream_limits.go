@@ -158,7 +158,7 @@ func (u *Utxorpc) checkReplayDistance(point ocommon.Point) error {
 	if len(point.Hash) > 0 {
 		block, err := u.config.LedgerState.GetBlock(point)
 		if err != nil {
-			return err
+			return mapHistoryExpired(err)
 		}
 		pointHeight = block.Number
 	}

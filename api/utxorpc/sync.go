@@ -92,7 +92,7 @@ func (s *syncServiceServer) FetchBlock(
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return nil, readStateContextError(ctxErr)
 			}
-			return nil, err
+			return nil, mapHistoryExpired(err)
 		}
 		if !budget.fits(len(block.Cbor)) {
 			return nil, budget.exceeded()
@@ -172,7 +172,7 @@ func (s *syncServiceServer) DumpHistory(
 				fmt.Errorf("start_token not on chain: %w", err),
 			)
 		}
-		return nil, err
+		return nil, mapHistoryExpired(err)
 	}
 	defer chainIter.Cancel()
 
@@ -184,7 +184,7 @@ func (s *syncServiceServer) DumpHistory(
 		s.utxorpc.config.MaxHistoryBytes,
 	)
 	if err != nil {
-		return nil, err
+		return nil, mapHistoryExpired(err)
 	}
 	resp.Block = blocks
 
@@ -246,7 +246,7 @@ func (s *syncServiceServer) FollowTip(
 			"failed to get points",
 			"error", err,
 		)
-		return err
+		return mapHistoryExpired(err)
 	}
 	if point == nil {
 		s.utxorpc.config.Logger.Error(
@@ -266,7 +266,7 @@ func (s *syncServiceServer) FollowTip(
 			"failed to get chain iterator",
 			"error", err,
 		)
-		return err
+		return mapHistoryExpired(err)
 	}
 
 	defer chainIter.Cancel()
@@ -300,7 +300,7 @@ func (s *syncServiceServer) FollowTip(
 				"failed to iterate chain",
 				"error", err,
 			)
-			return err
+			return mapHistoryExpired(err)
 		}
 		if next != nil {
 			// A block behind the tip is replayed history and is charged
@@ -379,7 +379,7 @@ func (s *syncServiceServer) followTipResponse(
 					"failed to get rollback block",
 					"error", err,
 				)
-				return nil, err
+				return nil, mapHistoryExpired(err)
 			}
 			height = rollbackBlock.Number
 			// Convert slot to timestamp (milliseconds)
