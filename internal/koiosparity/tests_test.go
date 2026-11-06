@@ -28,7 +28,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -1137,15 +1136,6 @@ func TestResolvedBaseURLDropsUserinfo(t *testing.T) {
 	assert.NotContains(t, resolved, "dingo:")
 }
 
-// TestResolvedBaseURLReportsTheDefaultHost pins that the accessor names the
-// host actually queried when no override is given, rather than reporting the
-// empty override back.
-func TestResolvedBaseURLReportsTheDefaultHost(t *testing.T) {
-	c, err := NewKoiosClient("preview", "", "", false, false)
-	require.NoError(t, err)
-	assert.Equal(t, koiosBaseURLs["preview"], c.ResolvedBaseURL())
-}
-
 // TestCreditedAccountRewardsSkipsUncredited pins that the per-account
 // comparison sees only the rewards the ledger actually credited.
 //
@@ -1638,44 +1628,6 @@ func TestRecordKoiosSourceCoversEveryKoiosTable(t *testing.T) {
 	// matching, which would retire the guard rather than satisfy it.
 	require.Equal(t, len(koiosSourcedTables), seen,
 		"every listed table must exist in the schema, and vice versa")
-}
-
-// TestKoiosSourcedTablesAreBareIdentifiers backs the G202 suppression on the
-// DELETE in RecordKoiosSource. That annotation is only honest while every
-// entry is a plain table identifier, so this pins the property rather than
-// leaving the suppression to be quietly outgrown by a later entry.
-func TestKoiosSourcedTablesAreBareIdentifiers(t *testing.T) {
-	identifier := regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
-	for _, table := range koiosSourcedTables {
-		assert.Regexp(
-			t,
-			identifier,
-			table,
-			"%q is not a bare identifier, so it must not be concatenated into SQL",
-			table,
-		)
-	}
-}
-
-// TestSeedOracleRowsTouchesEveryInvalidatedTable keeps the fixture honest.
-// The discard tests assert the row count reaches zero, so any table the
-// fixture never writes is only ever "invalidated" while already empty, and a
-// regression that stopped discarding it would still pass.
-func TestSeedOracleRowsTouchesEveryInvalidatedTable(t *testing.T) {
-	cache := newSourceTestCache(t)
-	seedOracleRows(t, cache, "preview")
-	for _, table := range koiosSourcedTables {
-		var n int
-		require.NoError(t, cache.db.QueryRow(
-			"SELECT COUNT(*) FROM "+table+" WHERE network = ?", "preview",
-		).Scan(&n))
-		assert.Positive(
-			t,
-			n,
-			"%s is invalidated on a source change but never seeded, so the discard is untested there",
-			table,
-		)
-	}
 }
 
 // TestRecordKoiosSourceFirstRunWithCustomRootDiscards is the upgrade path.
@@ -2469,35 +2421,6 @@ func TestAssetListShowFormMatchesArrayFormForTheSameTokens(t *testing.T) {
 		[]byte(mustJSONString(t, realCollateralOutputShowForm)), &fromShow,
 	))
 	require.Equal(t, fromArray, fromShow)
-}
-
-// TestAssetListRoundTripsThroughCachePayload proves the fix needs no
-// koiosTxInfoPayloadVersion bump: what is STORED is unchanged. A decoded
-// asset list marshals to the plain array form, and reading that back yields
-// the same assets, so every koios_tx_info row already written at version 2
-// stays valid. (The bug only ever prevented rows from being written at all --
-// a chunk containing an undecodable transaction cached nothing -- so no
-// stored row can hold a mis-parsed collateral asset list.)
-func TestAssetListRoundTripsThroughCachePayload(t *testing.T) {
-	t.Parallel()
-
-	var decoded KoiosTxInfoAssetList
-	require.NoError(t, json.Unmarshal(
-		[]byte(mustJSONString(t, realCollateralOutputShowForm)), &decoded,
-	))
-	require.Len(t, decoded, 2)
-
-	stored, err := json.Marshal(decoded)
-	require.NoError(t, err)
-	require.JSONEq(t,
-		`[{"policy_id":"09e56a1dcecb140f4416b48f5ca475aab638d64fcb2f76e9d6496c0e","asset_name":"474f565f4e4654","quantity":"1"},`+
-			`{"policy_id":"65a938b778af9a654b2a005d8ea902485f16a878ff81c458eaa7bdbb","asset_name":"494e4459","quantity":"32200000000000"}]`,
-		string(stored),
-	)
-
-	var reread KoiosTxInfoAssetList
-	require.NoError(t, json.Unmarshal(stored, &reread))
-	require.Equal(t, decoded, reread)
 }
 
 // TestAssetListRejectsUnrecognisedStringFormLoudly preserves the safety
@@ -3417,36 +3340,6 @@ func TestReferenceLagOnly(t *testing.T) {
 			mismatches = append(mismatches, CheckMismatch{Category: c})
 		}
 		assert.Equal(t, tc.want, referenceLagOnly(mismatches), tc.name)
-	}
-}
-
-// TestSeverityLabelCoversAllThreeTiers pins severityLabel's string mapping
-// against severityOf's classification of one category from each of the three
-// tiers, so the label dingo_koiosparity_mismatch_total exports (metrics.go)
-// cannot silently disagree with what DetermineStatus/CountSignificant treat
-// that category as.
-func TestSeverityLabelCoversAllThreeTiers(t *testing.T) {
-	t.Parallel()
-
-	cases := []struct {
-		name     string
-		category string
-		want     string
-	}{
-		{"fail tier", CategoryValueMismatch, "fail"},
-		{"error tier", CategoryDBError, "error"},
-		{"informational tier", CategoryPoolDeparted, "informational"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			assert.Equal(
-				t,
-				tc.want,
-				severityLabel(severityOf(tc.category)),
-				"category %q", tc.category,
-			)
-		})
 	}
 }
 

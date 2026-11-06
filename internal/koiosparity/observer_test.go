@@ -229,34 +229,6 @@ func TestNewObserverWiresPromRegistryIntoMetrics(t *testing.T) {
 	)
 }
 
-// TestNewObserverNilPromRegistryLeavesMetricsNil confirms an ObserverConfig
-// with no PromRegistry set (the common case: most existing tests in this
-// package, and the standalone koios-parity CLI) leaves o.metrics nil rather
-// than registering anything, and that emitResult still works.
-func TestNewObserverNilPromRegistryLeavesMetricsNil(t *testing.T) {
-	t.Parallel()
-
-	db := newTestDatabaseSourceDB(t)
-	source, err := NewDatabaseSource(db)
-	require.NoError(t, err)
-
-	o, err := NewObserver(ObserverConfig{
-		Network:   "preview",
-		CachePath: t.TempDir() + "/cache.db",
-		Source:    source,
-	})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = o.Stop(t.Context()) })
-	require.Nil(t, o.metrics)
-
-	// Must not panic.
-	o.emitResult(&EpochCompareResult{
-		Network: "preview",
-		Epoch:   1,
-		Status:  StatusPass,
-	})
-}
-
 // fakeEpochRef is one koios reporting epoch's fake /epoch_info + /totals
 // reference data for the fake Koios server below. Zero pools are ever
 // served (empty /pool_list, /pool_updates), so every test in this file

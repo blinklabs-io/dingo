@@ -29,6 +29,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"modernc.org/sqlite"
 )
+
 // TestSaveAccountFetchChunkProgressConcurrentWritersDoNotHitSQLiteBusy
 // drives fetch_accounts.go's actual dispatch shape — accountFetchConcurrency
 // (5) chunk workers calling SaveAccountFetchChunkProgress in parallel via

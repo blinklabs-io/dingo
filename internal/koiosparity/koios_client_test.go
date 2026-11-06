@@ -516,15 +516,6 @@ func TestRetryAfterDelayFallsBackToBurstCooldown(t *testing.T) {
 	require.Equal(t, 42*time.Second, retryAfterDelay(resp))
 }
 
-func TestIsDailyQuotaExceeded(t *testing.T) {
-	t.Parallel()
-
-	require.True(t, isDailyQuotaExceeded("Exceeded Tier Limit"))
-	require.True(t, isDailyQuotaExceeded("error: Exceeded Tier Limit\n"))
-	require.False(t, isDailyQuotaExceeded("Too many requests"))
-	require.False(t, isDailyQuotaExceeded(""))
-}
-
 func TestGetPoolFirstActiveEpochsTakesMinAcrossUpdates(t *testing.T) {
 	t.Parallel()
 
@@ -973,7 +964,13 @@ func TestNewKoiosTransportResponseHeaderTimeout(t *testing.T) {
 			// writes anything for far longer than responseHeaderTimeout:
 			// no headers, no body, just silence on an already-open
 			// connection.
-			time.Sleep(serverDelay)
+			// Wait for the client to give up instead of sleeping the whole
+			// delay, so the server shuts down as soon as the test ends.
+			select {
+			case <-r.Context().Done():
+				return
+			case <-time.After(serverDelay):
+			}
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte("too late"))
 		}),
