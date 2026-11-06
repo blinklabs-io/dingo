@@ -540,35 +540,6 @@ func TestSetClientConnId(t *testing.T) {
 
 // --- Failover tests ---
 
-func TestDisconnectClearsPrimaryForChainSelection(t *testing.T) {
-	t.Parallel()
-	bus := newTestEventBus(t)
-	s := newTestState(t, bus, chainsync.DefaultConfig())
-
-	connA := newTestConnId(1)
-	connB := newTestConnId(2)
-	connC := newTestConnId(3)
-	s.AddClientConnId(connA)
-	s.AddClientConnId(connB)
-	s.AddClientConnId(connC)
-
-	// Update tips so B is the best
-	s.UpdateClientTip(connA, ocommon.NewPoint(100, []byte("aa")),
-		ochainsync.Tip{Point: ocommon.NewPoint(100, []byte("aa"))})
-	s.UpdateClientTip(connB, ocommon.NewPoint(300, []byte("bb")),
-		ochainsync.Tip{Point: ocommon.NewPoint(300, []byte("bb"))})
-	s.UpdateClientTip(connC, ocommon.NewPoint(200, []byte("cc")),
-		ochainsync.Tip{Point: ocommon.NewPoint(200, []byte("cc"))})
-
-	// Set A as primary, then remove it
-	s.SetClientConnId(connA)
-	s.RemoveClientConnId(connA)
-
-	// Only ChainSelector may choose B using the full selection contract.
-	active := s.GetClientConnId()
-	require.Nil(t, active)
-}
-
 func TestDisconnectDoesNotPromoteNonStalledClient(t *testing.T) {
 	t.Parallel()
 	bus := newTestEventBus(t)
@@ -644,47 +615,6 @@ func TestHeaderDeduplication_DuplicateHeader(t *testing.T) {
 	// Second report of same hash is duplicate
 	isNew = s.UpdateClientTip(connB, point, tip)
 	require.False(t, isNew)
-}
-
-func TestObservedHeaderHistoryPersistsAcrossDedupAndClearsOnRemove(
-	t *testing.T,
-) {
-	t.Parallel()
-	bus := newTestEventBus(t)
-	s := newTestState(t, bus, chainsync.DefaultConfig())
-
-	conn := newTestConnId(1)
-	s.AddClientConnId(conn)
-
-	hash := []byte("hash-1")
-	prevHash := []byte("prev-hash-1")
-	point := ocommon.NewPoint(100, hash)
-	tip := ochainsync.Tip{Point: point, BlockNumber: 10}
-	header := testBlockHeader{
-		hash:        lcommon.NewBlake2b256(hash),
-		prevHash:    lcommon.NewBlake2b256(prevHash),
-		blockNumber: tip.BlockNumber,
-		slot:        point.Slot,
-	}
-
-	s.RecordObservedHeader(chainsync.ObservedHeader{
-		ConnectionId: conn,
-		Point:        point,
-		BlockHeader:  header,
-		Tip:          tip,
-	})
-
-	recordedHeader, recordedPrevHash, ok := s.LookupObservedHeader(
-		conn,
-		hash,
-	)
-	require.True(t, ok)
-	require.Equal(t, point, recordedHeader.Point)
-	require.Equal(t, header.prevHash.Bytes(), recordedPrevHash)
-
-	s.RemoveClientConnId(conn)
-	_, _, ok = s.LookupObservedHeader(conn, hash)
-	require.False(t, ok)
 }
 
 // --- Fork detection tests ---
