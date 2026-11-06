@@ -30,5 +30,9 @@ import (
 // explicitly.
 func TestMain(m *testing.M) {
 	syscall.Umask(0o022)
-	os.Exit(m.Run())
+	code := m.Run()
+	if SharedFixtureCleanup != nil {
+		SharedFixtureCleanup()
+	}
+	os.Exit(code)
 }
