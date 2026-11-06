@@ -339,6 +339,12 @@ type leiosEndorserBlockData struct {
 	// the shared bearer. Keeping one bounded source lets historical backfill
 	// try a peer known to hold the requested point first.
 	relayOfferSource string
+	// intentOwner is the connection whose offer created an intent-only entry.
+	// It bounds how many such entries one connection may hold and, unlike
+	// relayOfferSource, is never transferred by a later offer of the same
+	// point, so re-offering another peer's entry cannot change whose cap it
+	// counts against or let it be evicted on that peer's behalf.
+	intentOwner string
 	// seq is a monotonic insertion sequence assigned while leiosMu is held
 	// (see Ouroboros.leiosEndorserBlockSeq), used to order eviction instead of
 	// insertedAt. insertedAt is a wall-clock timestamp captured before the
@@ -888,6 +894,7 @@ func (o *Ouroboros) markLeiosEndorserBlockRelayOfferFrom(
 			insertedAt:          now,
 			relayOfferRequested: true,
 			relayOfferSource:    connectionID,
+			intentOwner:         connectionID,
 			seq:                 o.leiosEndorserBlockSeq,
 		}
 		o.pruneLeiosEndorserBlockCacheLocked(now)
@@ -925,7 +932,7 @@ func (o *Ouroboros) evictLeiosIntentOnlyOverflowLocked(connectionID string) {
 		var oldest *leiosEndorserBlockData
 		for _, data := range o.leiosEndorserBlocks {
 			if data == nil || data.hasManifest() ||
-				data.relayOfferSource != connectionID {
+				data.intentOwner != connectionID {
 				continue
 			}
 			if oldest == nil || data.seq < oldest.seq {
@@ -934,6 +941,9 @@ func (o *Ouroboros) evictLeiosIntentOnlyOverflowLocked(connectionID string) {
 			count++
 		}
 		if count < leiosMaxIntentOnlyPerConn {
+			return
+		}
+		if oldest == nil {
 			return
 		}
 		o.deleteLeiosEndorserBlockDataLocked(oldest)

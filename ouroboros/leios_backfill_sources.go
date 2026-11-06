@@ -115,6 +115,9 @@ func (o *Ouroboros) evictLeiosBackfillConnOverflowLocked(
 			return
 		}
 		sources := o.leiosBackfillSources[oldestKey]
+		if sources == nil {
+			return
+		}
 		delete(sources.announcers, connId)
 		if len(sources.announcers) == 0 {
 			delete(o.leiosBackfillSources, oldestKey)

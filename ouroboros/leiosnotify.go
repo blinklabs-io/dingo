@@ -139,10 +139,11 @@ const (
 	// leiosOfferWindow and leiosOfferMaxPerPeer bound offers per connection.
 	// An honest relay offers each endorser block twice (manifest, then
 	// transactions) per slot, far below this. There is deliberately no
-	// process-wide limit, so one peer cannot starve the others.
+	// process-wide limit and no cap on tracked connections, so neither one
+	// peer nor connection churn can lock out the others; the counters reset
+	// every window and the connection manager bounds the keys.
 	leiosOfferWindow     = time.Minute
 	leiosOfferMaxPerPeer = 128
-	leiosOfferMaxPeers   = 1024
 )
 
 // admitLeiosOffer charges one offer to the connection's per-window budget.
@@ -155,7 +156,7 @@ func (o *Ouroboros) admitLeiosOffer(connectionID string) bool {
 			leiosOfferWindow,
 			leiosOfferMaxPerPeer,
 			0,
-			leiosOfferMaxPeers,
+			0,
 		)
 	}
 	return o.leiosOfferBudget.Admit(connectionID, time.Now()) ==

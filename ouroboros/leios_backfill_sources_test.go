@@ -236,6 +236,11 @@ func TestLeiosBackfillSourceOverflowOnlyEvictsOwnConnection(t *testing.T) {
 	}
 	o.leiosBackfillSourcesMu.Unlock()
 	require.Equal(t, leiosBackfillMaxPointsPerConn, held)
+	require.False(t, o.leiosRecordedBackfillSource(
+		ocommon.Point{Slot: 100, Hash: bytes.Repeat([]byte{2}, 32)},
+		noisy,
+		noisyOwner,
+	), "the noisy connection's oldest point must be the one evicted")
 	// Newest points are kept, the oldest replaced.
 	require.True(t, o.leiosRecordedBackfillSource(
 		ocommon.Point{
@@ -278,6 +283,49 @@ func TestLeiosIntentOnlyOffersOverflowOnlyEvictsOwnConnection(t *testing.T) {
 		}
 	}
 	require.Equal(t, leiosMaxIntentOnlyPerConn, noisy)
+	total := 3 * leiosMaxIntentOnlyPerConn
+	require.NotContains(
+		t,
+		o.leiosEndorserBlocks,
+		leiosBlockKey(100, bytes.Repeat([]byte{2}, 32)),
+		"the noisy connection's oldest entry must be the one evicted",
+	)
+	require.Contains(
+		t,
+		o.leiosEndorserBlocks,
+		leiosBlockKey(
+			uint64(100+total-1),
+			bytes.Repeat([]byte{byte(total + 1)}, 32),
+		),
+		"the noisy connection's newest entry must be kept",
+	)
+}
+
+// TestLeiosIntentOnlyReofferDoesNotTransferOwnership proves a connection
+// re-offering another connection's intent-only point neither takes over its
+// eviction ownership nor keeps the cap from applying to its own entries,
+// while relayOfferSource still tracks the latest offerer.
+func TestLeiosIntentOnlyReofferDoesNotTransferOwnership(t *testing.T) {
+	t.Parallel()
+	o := newOuroboros(OuroborosConfig{})
+	shared := ocommon.Point{Slot: 1, Hash: bytes.Repeat([]byte{0x01}, 32)}
+	o.markLeiosEndorserBlockRelayOfferFrom(shared, "owner")
+	o.markLeiosEndorserBlockRelayOfferFrom(shared, "other")
+	for i := range 3 * leiosMaxIntentOnlyPerConn {
+		o.markLeiosEndorserBlockRelayOfferFrom(
+			ocommon.Point{
+				Slot: uint64(100 + i),
+				Hash: bytes.Repeat([]byte{byte(i + 2)}, 32),
+			},
+			"other",
+		)
+	}
+	o.leiosMu.Lock()
+	defer o.leiosMu.Unlock()
+	data := o.leiosEndorserBlocks[leiosBlockKey(shared.Slot, shared.Hash)]
+	require.NotNil(t, data, "the owner's entry must survive the other peer's overflow")
+	require.Equal(t, "owner", data.intentOwner)
+	require.Equal(t, "other", data.relayOfferSource)
 }
 
 // TestLeiosOfferBudgetIsPerConnection proves a connection past its offer

@@ -5281,7 +5281,9 @@ announcement clock-skew bound and the cache TTL when a ledger is wired, and each
 connection has a per-minute offer budget (no process-wide limit, so one peer
 cannot starve others). Each connection may also hold only a bounded number of
 intent-only cache entries and backfill-source points, replacing its own oldest
-past the cap, so offers for arbitrary points cannot evict another peer's sources.
+past the cap, so one connection cannot churn others' entries; the shared global
+cache and table bounds still apply. An intent entry's owner is the connection
+that created it and is not transferred by a later offer of the same point.
 Dropped offers are not penalized. On a notify
 block offer, `ouroboros/` fetches the endorser-block manifest over leios-fetch,
 decodes and hash-validates it, rejects it if the fetched body's length does not
