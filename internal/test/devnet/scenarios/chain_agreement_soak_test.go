@@ -34,32 +34,74 @@ import (
 // regular conformance run keeps its length.
 const soakDurationEnv = "DEVNET_AGREEMENT_SOAK_DURATION"
 
+// forkRelation classifies how two observed chains relate.
+type forkRelation int
+
+const (
+	// relIndeterminate means the retained headers cannot show how the chains
+	// relate: a chain has no headers yet, or the two retained windows cover
+	// disjoint block numbers, so one node is further behind than the window.
+	relIndeterminate forkRelation = iota
+	// relCommon means the chains share a block; depth is blocks beyond it.
+	relCommon
+	// relBeyondWindow means both windows cover the same block numbers with
+	// different hashes everywhere, so the fork is deeper than anything retained.
+	relBeyondWindow
+)
+
 // forkDepth returns how many blocks the longer of two observed chains holds
 // beyond their deepest common block, matched by hash at the same block
-// number. It is 0 when one tip is an ancestor of the other. ok is false when
-// the retained headers share no block, so no depth can be stated.
-func forkDepth(a, b devnet.ChainSnapshot) (depth uint64, ok bool) {
+// number. The depth is 0 when one tip is an ancestor of the other, because a
+// node that is merely behind on the same chain has not diverged.
+func forkDepth(a, b devnet.ChainSnapshot) (uint64, forkRelation) {
 	byBlock := make(map[uint64]string, len(b.Headers))
 	for _, h := range b.Headers {
 		byBlock[h.BlockNumber] = hex.EncodeToString(h.Hash)
 	}
 	var common uint64
+	var found, overlap bool
 	for _, h := range a.Headers {
-		if bh, have := byBlock[h.BlockNumber]; have &&
-			bh == hex.EncodeToString(h.Hash) && h.BlockNumber >= common {
+		bh, have := byBlock[h.BlockNumber]
+		if !have {
+			continue
+		}
+		overlap = true
+		if bh == hex.EncodeToString(h.Hash) && (!found || h.BlockNumber >= common) {
 			common = h.BlockNumber
-			ok = true
+			found = true
 		}
 	}
-	if !ok {
-		return 0, false
+	if !found {
+		if overlap {
+			return 0, relBeyondWindow
+		}
+		return 0, relIndeterminate
 	}
-	// A common block at the shorter tip means that node is merely behind on
-	// the same chain; lag is not divergence.
 	if common >= min(a.Tip.BlockNumber, b.Tip.BlockNumber) {
-		return 0, true
+		return 0, relCommon
 	}
-	return max(a.Tip.BlockNumber, b.Tip.BlockNumber) - common, true
+	return max(a.Tip.BlockNumber, b.Tip.BlockNumber) - common, relCommon
+}
+
+// worstForkDepth compares every distinct pair of snapshots, so a lagging
+// first node cannot hide a fork between two others. unmatched counts pairs
+// whose relation could not be determined.
+func worstForkDepth(snaps []devnet.ChainSnapshot, k uint64) (worst uint64, unmatched int) {
+	for i := range snaps {
+		for j := i + 1; j < len(snaps); j++ {
+			d, rel := forkDepth(snaps[i], snaps[j])
+			switch rel {
+			case relBeyondWindow:
+				d = k + 1
+			case relIndeterminate:
+				unmatched++
+				continue
+			case relCommon:
+			}
+			worst = max(worst, d)
+		}
+	}
+	return worst, unmatched
 }
 
 // TestChainAgreementSoak follows every node's chain for
@@ -68,6 +110,9 @@ func forkDepth(a, b devnet.ChainSnapshot) (depth uint64, ok bool) {
 // slot-battle behaviour; one deeper than k cannot be resolved and is a
 // permanent split. Tips and the fork depth are logged every sample so the run
 // is evidence of what the chains did, not only of the verdict.
+//
+// The Go test timeout (TEST_TIMEOUT in run-tests.sh, -timeout for direct runs)
+// must exceed the soak duration plus setup and the other scenarios.
 func TestChainAgreementSoak(t *testing.T) {
 	raw := os.Getenv(soakDurationEnv)
 	if raw == "" {
@@ -114,23 +159,8 @@ func TestChainAgreementSoak(t *testing.T) {
 			)
 		}
 		samples++
-		// Every node is compared with the first one (dingo-producer).
-		var worst uint64
-		for _, s := range snaps[1:] {
-			d, ok := forkDepth(snaps[0], s)
-			if !ok {
-				// Observers retain a bounded header window, so two
-				// populated chains with no shared block have forked
-				// past everything retained, which is deeper than k.
-				if len(snaps[0].Headers) > 0 && len(s.Headers) > 0 {
-					d, ok = k+1, true
-				} else {
-					unmatched++
-					continue
-				}
-			}
-			worst = max(worst, d)
-		}
+		worst, um := worstForkDepth(snaps, k)
+		unmatched += um
 		depthSamples[worst]++
 		if worst > 0 {
 			forked++
@@ -175,4 +205,42 @@ func TestChainAgreementSoak(t *testing.T) {
 			" max depth %d",
 		samples, forked, beyondK, unmatched, maxDepth,
 	)
+}
+
+func TestForkDepth(t *testing.T) {
+	mk := func(blocks ...[2]byte) devnet.ChainSnapshot {
+		var snap devnet.ChainSnapshot
+		for _, b := range blocks {
+			snap.Headers = append(snap.Headers, devnet.ObservedHeader{
+				BlockNumber: uint64(b[0]), Hash: []byte{b[1]},
+			})
+			snap.Tip.BlockNumber = uint64(b[0])
+		}
+		return snap
+	}
+	long := mk([2]byte{1, 1}, [2]byte{2, 2}, [2]byte{3, 3}, [2]byte{4, 4})
+	behind := mk([2]byte{1, 1}, [2]byte{2, 2})
+	forked := mk([2]byte{1, 1}, [2]byte{2, 2}, [2]byte{3, 9}, [2]byte{4, 9})
+	other := mk([2]byte{1, 7}, [2]byte{2, 7})
+	far := mk([2]byte{50, 1})
+	var empty devnet.ChainSnapshot
+
+	d, rel := forkDepth(long, behind)
+	require.Equal(t, relCommon, rel)
+	require.Zero(t, d)
+	d, rel = forkDepth(long, forked)
+	require.Equal(t, relCommon, rel)
+	require.EqualValues(t, 2, d)
+	_, rel = forkDepth(long, other)
+	require.Equal(t, relBeyondWindow, rel)
+	_, rel = forkDepth(long, far)
+	require.Equal(t, relIndeterminate, rel)
+	_, rel = forkDepth(long, empty)
+	require.Equal(t, relIndeterminate, rel)
+
+	// A lagging first node must not hide a fork between the others.
+	worst, _ := worstForkDepth([]devnet.ChainSnapshot{behind, long, forked}, 20)
+	require.EqualValues(t, 2, worst)
+	worst, _ = worstForkDepth([]devnet.ChainSnapshot{behind, long, other}, 20)
+	require.EqualValues(t, 21, worst)
 }
