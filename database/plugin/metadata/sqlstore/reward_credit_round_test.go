@@ -30,9 +30,14 @@ import (
 func TestPendingRewardCreditRoundReadersScalePastParameterLimit(t *testing.T) {
 	t.Parallel()
 	store := newManagementTestStore(t)
+	// A tiny parameter limit makes a few rounds exceed it, instead of
+	// inserting more rounds than the real limit.
+	d := store.dialect.(dialect)
+	d.parameterLimit = 10
+	store.dialect = d
 	limitSQLiteVariableNumber(t, store.readDB, store.dialect.ParameterLimit())
 	limitSQLiteVariableNumber(t, store.writeDB, store.dialect.ParameterLimit())
-	const roundCount = 1_000
+	const roundCount = 25
 	poolKey := bytesRepeat(0x31, 28)
 	stakingKey := bytesRepeat(0x41, 28)
 	drepKey := bytesRepeat(0x51, 28)

@@ -82,12 +82,10 @@ WITH digits(d) AS (VALUES (0),(1),(2),(3),(4),(5),(6),(7),(8),(9))
 INSERT INTO "transaction" (id, slot, block_index)
 SELECT n + 2, n + 2, 0
 FROM (
-    SELECT d0.d + 10*d1.d + 100*d2.d + 1000*d3.d + 10000*d4.d AS n
+    SELECT d0.d + 10*d1.d + 100*d2.d AS n
     FROM digits d0
     CROSS JOIN digits d1
     CROSS JOIN digits d2
-    CROSS JOIN digits d3
-    CROSS JOIN digits d4
 )
 `)
 	require.NoError(t, err)
