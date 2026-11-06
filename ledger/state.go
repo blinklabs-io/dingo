@@ -4983,15 +4983,15 @@ func (ls *LedgerState) resolveRollbackTarget(
 	sameSlotCompetitor := point.Slot == currentTip.Point.Slot &&
 		!bytes.Equal(point.Hash, currentTip.Point.Hash)
 	if sameSlotCompetitor {
-		tipNonce, nonceErr := ls.db.GetBlockNonce(currentTip.Point, nil)
-		if nonceErr != nil {
+		durableTip, tipErr := ls.db.GetTip(nil)
+		if tipErr != nil {
 			return ocommon.Point{}, fmt.Errorf(
-				"read applied nonce for contested tip at slot %d: %w",
+				"read durable tip for contested slot %d: %w",
 				currentTip.Point.Slot,
-				nonceErr,
+				tipErr,
 			)
 		}
-		sameSlotCompetitor = len(tipNonce) > 0
+		sameSlotCompetitor = pointMatches(durableTip.Point, currentTip.Point)
 	}
 	if sameSlotCompetitor {
 		// latestLedgerPrimaryChainAncestor searches block nonces over the
@@ -5198,11 +5198,11 @@ func (ls *LedgerState) rollbackWithBlocksAndIntent(
 	// point is then re-applied by the pipeline, which is what makes recovery
 	// converge instead of rewinding to the same non-repairing target forever.
 	//
-	// This applies only when the competing tip was genuinely applied, which a
-	// recorded block nonce witnesses. A tip that carries no nonce was never
-	// applied -- enforceDurableTipFloor also repairs an in-memory tip that
-	// leads the durable state -- so there is nothing at the contested slot to
-	// undo and the slot-only predicates are already correct for it.
+	// This applies only when the competing tip was genuinely applied, which
+	// the durable tip witnesses. Byron blocks have no nonce, so a nonempty
+	// block nonce is not evidence of whether a tip was applied. An in-memory
+	// tip that leads the durable state has no effects at the contested slot to
+	// undo; enforceDurableTipFloor also repairs it.
 	resolved, resolveErr := ls.resolveRollbackTarget(ctx, point, currentTip)
 	if resolveErr != nil {
 		return resolveErr
