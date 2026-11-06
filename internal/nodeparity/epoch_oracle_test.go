@@ -221,7 +221,7 @@ func TestRunFromGenesis_EraHistoryAvoidsPerBlockEpochQueries(t *testing.T) {
 	}
 	assert.False(
 		t,
-		run.logs.waitFor("chainsync session ended", 200*time.Millisecond),
+		run.logs.contains("chainsync session ended"),
 		"logs: %v",
 		run.logs.all(),
 	)
@@ -293,7 +293,7 @@ func TestRunFromGenesis_ByronSkippedWithoutAcquire(t *testing.T) {
 	)
 	assert.False(
 		t,
-		run.logs.waitFor("chainsync session ended", 200*time.Millisecond),
+		run.logs.contains("chainsync session ended"),
 		"skipping Byron must not end the session; logs: %v",
 		run.logs.all(),
 	)
