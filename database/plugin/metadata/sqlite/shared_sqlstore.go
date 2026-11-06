@@ -530,8 +530,10 @@ func NewSQLStore(
 // of every file-backed store immediately before the database file is opened.
 // It exists so a test binary can place an already-migrated database in the
 // directory and skip the schema migration, which dominates the cost of opening
-// a store under the race detector. Production code never sets it, and it must
-// only be assigned before any store is opened.
+// a store under the race detector. Production code never sets it. It is a plain
+// package variable, so it must be assigned only from a test package's init
+// function, which completes before any goroutine that opens a store starts;
+// that ordering is what excludes a data race with the readers.
 var BeforeOpenDataDir func(dataDir string) error
 
 func openSQLStore(

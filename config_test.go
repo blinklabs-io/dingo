@@ -1397,3 +1397,71 @@ func TestLedgerStateConfigWarmsGenesisStakeOnPrototypeNetworks(t *testing.T) {
 		})
 	}
 }
+
+func TestWithStorageMode(t *testing.T) {
+	t.Parallel()
+
+	cfg := &Config{}
+
+	// Default should be zero value (empty string)
+	assert.Equal(t, StorageMode(""), cfg.storageMode)
+
+	// Apply API mode
+	WithStorageMode(StorageModeAPI)(cfg)
+	assert.Equal(t, StorageModeAPI, cfg.storageMode)
+
+	// Apply core mode
+	WithStorageMode(StorageModeCore)(cfg)
+	assert.Equal(t, StorageModeCore, cfg.storageMode)
+}
+
+func TestWithFullPotRewards(t *testing.T) {
+	t.Parallel()
+
+	cfg := &Config{}
+	WithFullPotRewards(true)(cfg)
+	assert.True(t, cfg.fullPotRewardsEnabled)
+	WithFullPotRewards(false)(cfg)
+	assert.False(t, cfg.fullPotRewardsEnabled)
+}
+
+func TestWithDelegatorInactivity(t *testing.T) {
+	t.Parallel()
+
+	cfg := &Config{}
+	WithDelegatorInactivity(true, 90)(cfg)
+	assert.True(t, cfg.delegatorInactivityEnabled)
+	assert.Equal(t, uint64(90), cfg.delegatorInactivity)
+	WithDelegatorInactivity(false, 0)(cfg)
+	assert.False(t, cfg.delegatorInactivityEnabled)
+	assert.Zero(t, cfg.delegatorInactivity)
+}
+
+func TestPeerGovernorOptionsApplyPositiveValues(t *testing.T) {
+	t.Parallel()
+
+	cfg := &Config{cfg: &internalconfig.Config{}}
+
+	WithMinHotPeers(3)(cfg)
+	WithReconcileInterval(30 * time.Second)(cfg)
+	WithInactivityTimeout(2 * time.Minute)(cfg)
+	WithMaxConnectionsPerIP(4)(cfg)
+	WithMaxInboundConns(25)(cfg)
+	WithMaxNtCConns(30)(cfg)
+	WithMaxNtCConnectionsPerIP(6)(cfg)
+	WithMaxTrustedLocalNtCConns(8)(cfg)
+
+	assert.Equal(t, 3, cfg.cfg.MinHotPeers)
+	assert.Equal(t, 30*time.Second, cfg.cfg.ReconcileInterval)
+	assert.Equal(t, 2*time.Minute, cfg.cfg.InactivityTimeout)
+	assert.Equal(t, 4, cfg.cfg.MaxConnectionsPerIP)
+	assert.Equal(t, 25, cfg.cfg.MaxInboundConns)
+	assert.Equal(t, 30, cfg.cfg.MaxNtCConns)
+	assert.Equal(t, 6, cfg.cfg.MaxNtCConnectionsPerIP)
+	assert.Equal(t, 8, cfg.cfg.MaxTrustedLocalNtCConns)
+
+	cfg.syncCompatFields()
+	assert.Equal(t, 30, cfg.maxNtCConns)
+	assert.Equal(t, 6, cfg.maxNtCConnectionsPerIP)
+	assert.Equal(t, 8, cfg.maxTrustedLocalNtCConns)
+}
