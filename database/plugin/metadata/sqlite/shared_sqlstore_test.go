@@ -3225,3 +3225,214 @@ func TestSharedSQLStorePoolRetirementAndDepositAtSlot(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, map[string]uint64{string(poolBytes): 200}, latest)
 }
+
+func TestSharedSQLStoreMidnightParity(t *testing.T) {
+	t.Parallel()
+	store, _ := newSharedSQLStore(t)
+
+	txn := store.Transaction(t.Context())
+	for _, row := range []*models.MidnightAssetCreate{
+		{
+			Address: []byte("address-a"), Quantity: 10,
+			TxHash: []byte("create-a"), OutputIndex: 0,
+			BlockNumber: 10, BlockHash: []byte("block-10"), TxIndex: 1,
+			BlockTimestampMs: 1000,
+		},
+		{
+			Address: []byte("address-b"), Quantity: 20,
+			TxHash: []byte("create-b"), OutputIndex: 0,
+			BlockNumber: 10, BlockHash: []byte("block-10"), TxIndex: 1,
+			BlockTimestampMs: 1000,
+		},
+		{
+			Address: []byte("address-c"), Quantity: 30,
+			TxHash: []byte("create-c"), OutputIndex: 0,
+			BlockNumber: 11, BlockHash: []byte("block-11"), TxIndex: 0,
+			BlockTimestampMs: 1100,
+		},
+	} {
+		require.NoError(t, store.CreateMidnightAssetCreate(txn, row))
+	}
+	require.NoError(t, store.CreateMidnightAssetSpend(
+		txn,
+		&models.MidnightAssetSpend{
+			Address: []byte("address-a"), Quantity: 10,
+			SpendingTxHash: []byte("spend-a"),
+			UtxoTxHash:     []byte("create-a"), UtxoIndex: 0,
+			BlockNumber: 12, BlockHash: []byte("block-12"),
+			TxIndex: 0, BlockTimestampMs: 1200,
+		},
+	))
+	for _, row := range []*models.MidnightRegistration{
+		{
+			FullDatum: []byte("registration-a"), TxHash: []byte("reg-a"),
+			OutputIndex: 0, BlockNumber: 10, BlockHash: []byte("block-10"),
+			TxIndex: 1, BlockTimestampMs: 1000,
+		},
+		{
+			FullDatum: []byte("registration-b"), TxHash: []byte("reg-b"),
+			OutputIndex: 0, BlockNumber: 11, BlockHash: []byte("block-11"),
+			TxIndex: 0, BlockTimestampMs: 1100,
+		},
+	} {
+		require.NoError(t, store.CreateMidnightRegistration(txn, row))
+	}
+	require.NoError(t, store.CreateMidnightDeregistration(
+		txn,
+		&models.MidnightDeregistration{
+			FullDatum: []byte("deregistration-a"),
+			TxHash:    []byte("dereg-a"), UtxoTxHash: []byte("reg-a"),
+			UtxoIndex: 0, BlockNumber: 12, BlockHash: []byte("block-12"),
+			TxIndex: 0, BlockTimestampMs: 1200,
+		},
+	))
+	require.NoError(t, store.InsertMidnightGovernanceDatum(
+		txn,
+		&models.MidnightGovernanceDatum{
+			DatumType: models.MidnightGovernanceDatumTypeCouncil,
+			TxHash:    []byte("gov-a"), Datum: []byte("datum-a"),
+			BlockNumber: 10,
+		},
+	))
+	require.NoError(t, store.UpsertMidnightAriadneParams(
+		txn,
+		&models.MidnightAriadneParams{Epoch: 1, Datum: []byte("ariadne-a")},
+	))
+	require.NoError(t, store.UpsertMidnightAriadneParams(
+		txn,
+		&models.MidnightAriadneParams{Epoch: 2, Datum: []byte("ariadne-b")},
+	))
+	require.NoError(t, store.CreateMidnightAriadneRollback(
+		txn,
+		&models.MidnightAriadneRollback{
+			BlockNumber: 12, Epoch: 2, PreviousExists: true,
+			PreviousDatum: []byte("ariadne-a"),
+		},
+	))
+	require.NoError(t, store.UpsertMidnightEpochCandidates(
+		txn,
+		&models.MidnightEpochCandidates{
+			Epoch: 2, BlockNumber: 12, CandidatesCbor: []byte("candidates"),
+		},
+	))
+	require.NoError(t, store.InsertMidnightCommitteeCandidateRegistration(
+		txn,
+		&models.MidnightCommitteeCandidateRegistration{
+			TxHash: []byte("candidate-a"), BlockNumber: 12, SlotNumber: 120,
+			TxIndex: 1, TxInputsCbor: []byte("inputs"),
+		},
+	))
+	require.NoError(t, txn.Commit())
+
+	var err error
+	gotUnspentAssets, err := store.FindUnspentMidnightAssetCreates()
+	require.NoError(t, err)
+	gotUnspentRegistrations, err := store.FindUnspentMidnightRegistrations()
+	require.NoError(t, err)
+	gotPage, err := store.FindMidnightAssetCreatesFrom(0, 0, 1, nil)
+	require.NoError(t, err)
+	gotGovernance, err := store.GetLatestMidnightGovernanceDatum(
+		models.MidnightGovernanceDatumTypeCouncil,
+		11,
+		nil,
+	)
+	require.NoError(t, err)
+	gotLatestAriadne, err := store.GetLatestMidnightAriadneParams(nil)
+	require.NoError(t, err)
+	gotHistoricalAriadne, err :=
+		store.GetMidnightAriadneParamsAtOrBeforeEpoch(1, nil)
+	require.NoError(t, err)
+	gotRollbacks, err := store.FindMidnightAriadneRollbacksByBlock(nil, 12)
+	require.NoError(t, err)
+	gotCandidates, err := store.GetMidnightEpochCandidatesByEpoch(2, nil)
+	require.NoError(t, err)
+	gotRegistrations, err :=
+		store.GetMidnightCommitteeCandidateRegistrationsByTxHashes(
+			[][]byte{[]byte("candidate-a"), []byte("missing")},
+			nil,
+		)
+	require.NoError(t, err)
+
+	rollback := store.Transaction(t.Context())
+	gotDeletedCreates, err := store.DeleteMidnightAssetCreatesByBlock(
+		rollback,
+		11,
+	)
+	require.NoError(t, err)
+	_, err = store.DeleteMidnightAssetSpendsByBlock(
+		rollback,
+		12,
+	)
+	require.NoError(t, err)
+	gotDeletedRegistrations, err := store.DeleteMidnightRegistrationsByBlock(
+		rollback,
+		11,
+	)
+	require.NoError(t, err)
+	_, err =
+		store.DeleteMidnightDeregistrationsByBlock(rollback, 12)
+	require.NoError(t, err)
+	require.NoError(t, rollback.Commit())
+	assetTxHashes := make([]string, len(gotUnspentAssets))
+	for i, asset := range gotUnspentAssets {
+		assetTxHashes[i] = string(asset.TxHash)
+	}
+	require.ElementsMatch(t, []string{"create-b", "create-c"}, assetTxHashes)
+	registrationTxHashes := make([]string, len(gotUnspentRegistrations))
+	for i, registration := range gotUnspentRegistrations {
+		registrationTxHashes[i] = string(registration.TxHash)
+	}
+	require.ElementsMatch(t, []string{"reg-b"}, registrationTxHashes)
+	pageTxHashes := make([]string, len(gotPage))
+	for i, asset := range gotPage {
+		pageTxHashes[i] = string(asset.TxHash)
+	}
+	require.Equal(t, []string{"create-a", "create-b"}, pageTxHashes)
+	require.NotNil(t, gotGovernance)
+	require.Equal(t, []byte("gov-a"), gotGovernance.TxHash)
+	require.Equal(t, []byte("datum-a"), gotGovernance.Datum)
+	require.Equal(t, uint64(10), gotGovernance.BlockNumber)
+	require.NotNil(t, gotLatestAriadne)
+	require.Equal(t, uint64(2), gotLatestAriadne.Epoch)
+	require.Equal(t, []byte("ariadne-b"), gotLatestAriadne.Datum)
+	require.NotNil(t, gotHistoricalAriadne)
+	require.Equal(t, uint64(1), gotHistoricalAriadne.Epoch)
+	require.Equal(t, []byte("ariadne-a"), gotHistoricalAriadne.Datum)
+	require.Len(t, gotRollbacks, 1)
+	require.NotNil(t, gotCandidates)
+	require.Equal(t, uint64(2), gotCandidates.Epoch)
+	require.Equal(t, uint64(12), gotCandidates.BlockNumber)
+	require.Equal(t, []byte("candidates"), gotCandidates.CandidatesCbor)
+	require.Len(t, gotRegistrations, 1)
+	deletedCreateTxHashes := make([]string, len(gotDeletedCreates))
+	for i, create := range gotDeletedCreates {
+		deletedCreateTxHashes[i] = string(create.TxHash)
+	}
+	require.ElementsMatch(t, []string{"create-c"}, deletedCreateTxHashes)
+	deletedRegistrationTxHashes := make([]string, len(gotDeletedRegistrations))
+	for i, registration := range gotDeletedRegistrations {
+		deletedRegistrationTxHashes[i] = string(registration.TxHash)
+	}
+	require.ElementsMatch(t, []string{"reg-b"}, deletedRegistrationTxHashes)
+	// The rollback must also remove the rows, not just report them: deleting
+	// the spend at block 12 makes create-a unspent again and the create at
+	// block 11 is gone, and the same holds for registrations.
+	afterAssets, err := store.FindUnspentMidnightAssetCreates()
+	require.NoError(t, err)
+	afterAssetTxHashes := make([]string, len(afterAssets))
+	for i, asset := range afterAssets {
+		afterAssetTxHashes[i] = string(asset.TxHash)
+	}
+	require.ElementsMatch(
+		t,
+		[]string{"create-a", "create-b"},
+		afterAssetTxHashes,
+	)
+	afterRegistrations, err := store.FindUnspentMidnightRegistrations()
+	require.NoError(t, err)
+	afterRegistrationTxHashes := make([]string, len(afterRegistrations))
+	for i, registration := range afterRegistrations {
+		afterRegistrationTxHashes[i] = string(registration.TxHash)
+	}
+	require.ElementsMatch(t, []string{"reg-a"}, afterRegistrationTxHashes)
+}
