@@ -1264,7 +1264,15 @@ func validateImportedRewardBases(cfg ImportConfig) error {
 				rewardEpoch, err,
 			)
 		}
-		if existing != nil && existing.Authoritative {
+		complete, err := importedAuthoritativeRewardBasisComplete(
+			store,
+			nil,
+			existing,
+		)
+		if err != nil {
+			return err
+		}
+		if complete {
 			continue
 		}
 		if err := validateImportedRewardPParams(

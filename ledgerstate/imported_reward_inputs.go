@@ -16,6 +16,7 @@ package ledgerstate
 
 import (
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/big"
@@ -393,16 +394,14 @@ func (b *rewardInputBundle) validate() error {
 	return nil
 }
 
-// rewardInputStore is the slice of the metadata store this seeding needs.
 type rewardInputStore interface {
-	GetRewardSnapshot(uint64, string, types.Txn) (*models.RewardSnapshot, error)
+	RewardInputRepairStore
+	GetSyncState(string, types.Txn) (string, error)
 	DeleteRewardSeedFailure(uint64, string, types.Txn) error
 	SaveRewardSnapshot(*models.RewardSnapshot, types.Txn) error
 	DeleteProvisionalRewardSnapshot(uint64, string, types.Txn) error
 	SaveRewardPoolInputs([]*models.RewardPoolInput, types.Txn) error
-	SaveRewardStakeInputs([]*models.RewardStakeInput, types.Txn) error
 	DeleteRewardInputsForEpoch(uint64, types.Txn) error
-	DeleteRewardOutputsForEpoch(uint64, types.Txn) error
 }
 
 // rewardPParamsValidator checks that the protocol-parameter history needed to
@@ -476,7 +475,17 @@ func seedImportedRewardInputs(
 				c.epoch, err,
 			)
 		}
-		if existing != nil && existing.Authoritative {
+		complete, err := importedAuthoritativeRewardBasisComplete(
+			store,
+			txn,
+			existing,
+		)
+		if err != nil {
+			return err
+		}
+		repairAuthoritative := existing != nil && existing.Authoritative &&
+			!complete
+		if complete {
 			if err := store.DeleteRewardSeedFailure(c.epoch, "mark", txn); err != nil {
 				return fmt.Errorf(
 					"clearing prior reward seed failure for epoch %d: %w",
@@ -497,7 +506,7 @@ func seedImportedRewardInputs(
 			}
 			continue
 		}
-		if existing != nil {
+		if existing != nil && !repairAuthoritative {
 			if err := store.DeleteRewardInputsForEpoch(c.epoch, txn); err != nil {
 				return fmt.Errorf(
 					"deleting provisional reward inputs for epoch %d: %w",
@@ -566,6 +575,19 @@ func seedImportedRewardInputs(
 			capturedSlot,
 			0,
 		)
+		if repairAuthoritative {
+			params, err := authoritativeRewardInputPoolParams(store, txn, c.snap, existing)
+			if err != nil {
+				return err
+			}
+			bundle = deriveRewardInputs(
+				c.snap,
+				params,
+				c.epoch,
+				existing.CapturedSlot,
+				existing.BoundarySlot,
+			)
+		}
 		// A snapshot with no delegated stake derives an empty basis that
 		// reconciles, and is seeded like any other: its round still moves the
 		// treasury and reserves. An empty basis that does not reconcile had
@@ -614,6 +636,16 @@ func seedImportedRewardInputs(
 					err,
 				)
 			}
+		}
+		if repairAuthoritative {
+			if _, err := repairRewardStakeInputBundle(store, txn, bundle, existing, true); err != nil {
+				return fmt.Errorf(
+					"repairing incomplete authoritative epoch %d: %w",
+					c.epoch,
+					err,
+				)
+			}
+			continue
 		}
 		if err := store.SaveRewardSnapshot(bundle.snapshot, txn); err != nil {
 			return fmt.Errorf(
@@ -856,4 +888,56 @@ func effectiveRewardPoolParams(
 		effective[key] = pool
 	}
 	return effective
+}
+
+func importedAuthoritativeRewardBasisComplete(
+	store rewardInputStore,
+	txn types.Txn,
+	snapshot *models.RewardSnapshot,
+) (bool, error) {
+	if snapshot == nil || !snapshot.Authoritative {
+		return false, nil
+	}
+	raw, err := store.GetSyncState(
+		models.StakeRewardSourcePrefix+"stake-inputs-pending",
+		txn,
+	)
+	if err != nil {
+		return false, err
+	}
+	if raw != "" {
+		var envelope map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(raw), &envelope); err != nil {
+			return false, fmt.Errorf("reading pending reward inputs: %w", err)
+		}
+		entries, present := envelope["entries"]
+		if !present || len(envelope) != 1 {
+			return false, errors.New("reading pending reward inputs: unknown state format")
+		}
+		var pending struct {
+			Entries []struct {
+				Epoch        uint64 `json:"epoch"`
+				BoundarySlot uint64 `json:"boundary_slot"`
+			} `json:"entries"`
+		}
+		decoder := json.NewDecoder(strings.NewReader(string(entries)))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&pending.Entries); err != nil {
+			return false, fmt.Errorf("reading pending reward inputs: %w", err)
+		}
+		for _, entry := range pending.Entries {
+			if entry.BoundarySlot == 0 {
+				return false, errors.New("reading pending reward inputs: invalid boundary slot")
+			}
+			if entry.Epoch == snapshot.Epoch &&
+				entry.BoundarySlot == snapshot.BoundarySlot {
+				return false, nil
+			}
+		}
+	}
+	rows, err := store.GetRewardStakeInputs(snapshot.Epoch, txn)
+	if err != nil {
+		return false, err
+	}
+	return uint64(len(rows)) == snapshot.TotalDelegators, nil
 }
