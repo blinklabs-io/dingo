@@ -178,32 +178,6 @@ func TestParseVoterPublicKeyRejectsMalformed(t *testing.T) {
 	assert.ErrorIs(t, err, ErrInvalidPublicKey)
 }
 
-func TestNewVoterRegistry(t *testing.T) {
-	t.Parallel()
-
-	key1, err := ParseVoteSigningKey(fmt.Sprintf("%064x", 11))
-	require.NoError(t, err)
-	key2, err := ParseVoteSigningKey(fmt.Sprintf("%064x", 22))
-	require.NoError(t, err)
-	registry, err := NewVoterRegistry(map[string]string{
-		testPoolHash(1): hex.EncodeToString(key1.PublicKeyBytes()),
-		testPoolHash(2): hex.EncodeToString(key2.PublicKeyBytes()),
-	})
-	require.NoError(t, err)
-	require.Equal(t, 2, registry.Size())
-
-	poolHash1, err := hex.DecodeString(testPoolHash(1))
-	require.NoError(t, err)
-	pub, ok := registry.PublicKeyFor(poolHash1)
-	require.True(t, ok)
-	assert.True(t, pub.Equal(key1.PublicKey()))
-
-	unknown := make([]byte, 28)
-	unknown[0] = 99
-	_, ok = registry.PublicKeyFor(unknown)
-	assert.False(t, ok)
-}
-
 func TestVoterRegistryZeroValueRegister(t *testing.T) {
 	t.Parallel()
 

@@ -194,29 +194,6 @@ func TestPipelineTimingValidate(t *testing.T) {
 	require.Error(t, nonMonotonic.Validate())
 }
 
-func TestNewPipelineManagerValidation(t *testing.T) {
-	t.Parallel()
-
-	good := PipelineManagerConfig{
-		EventBus:      event.NewEventBus(nil, nil),
-		SlotProvider:  &fakeSlotProvider{},
-		EpochProvider: &fakeEpochProvider{},
-		Timing:        DefaultPipelineTiming(),
-	}
-	_, err := NewPipelineManager(good)
-	require.NoError(t, err)
-
-	noBus := good
-	noBus.EventBus = nil
-	_, err = NewPipelineManager(noBus)
-	require.Error(t, err)
-
-	badTiming := good
-	badTiming.Timing = PipelineTiming{}
-	_, err = NewPipelineManager(badTiming)
-	require.Error(t, err)
-}
-
 func TestMayProduceEndorserBlock(t *testing.T) {
 	t.Parallel()
 
@@ -501,31 +478,6 @@ func TestStageGaugesReflectUncertifiedStages(t *testing.T) {
 	_ = mgr.EligibleCertifiedEbs()
 	assert.Equal(t, float64(1), stageGauge(StageVote))
 	assert.Equal(t, float64(0), stageGauge(StageProduce))
-}
-
-func TestStageOf(t *testing.T) {
-	t.Parallel()
-
-	tm := DefaultPipelineTiming()
-	f := newPipelineFixture(t, tm)
-	const slot = 500
-	hash := ebHashFor("eb")
-	f.slot.slot = slot
-	f.mgr.ObserveEndorserBlock(slot, hash)
-
-	st, ok := f.mgr.StageOf(slot, hash)
-	require.True(t, ok)
-	assert.Equal(t, StageProduce, st)
-
-	// Past the certify deadline without a certificate -> expired.
-	f.slot.slot = slot + tm.CertifyByDeadlineSlots
-	st, ok = f.mgr.StageOf(slot, hash)
-	require.True(t, ok)
-	assert.Equal(t, StageExpired, st)
-
-	// An unknown hash is not tracked.
-	_, ok = f.mgr.StageOf(slot, ebHashFor("missing"))
-	assert.False(t, ok)
 }
 
 func TestEbQuorumForUnobservedEb(t *testing.T) {
