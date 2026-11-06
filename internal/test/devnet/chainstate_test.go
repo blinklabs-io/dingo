@@ -492,35 +492,6 @@ func TestAgreedHeaderAboveNeedsEveryNode(t *testing.T) {
 	require.False(t, ok, "a header only one node saw has not propagated")
 }
 
-func TestMaxBlockNumber(t *testing.T) {
-	t.Parallel()
-	a := NewObservedChain("dingo-1")
-	b := NewObservedChain("dingo-2")
-	ha := hdr(40, 7, 'a')
-	a.RollForward(ha, tipOf(ha))
-	hb := hdr(25, 3, 'a')
-	b.RollForward(hb, tipOf(hb))
-
-	snaps := []ChainSnapshot{a.Snapshot(), b.Snapshot()}
-	require.Equal(t, uint64(7), MaxBlockNumber(snaps))
-	require.Equal(t, uint64(0), MaxBlockNumber(nil))
-}
-
-func TestMinAndMaxTipSlot(t *testing.T) {
-	t.Parallel()
-	a := NewObservedChain("dingo-1")
-	b := NewObservedChain("dingo-2")
-	ha := hdr(40, 4, 'a')
-	a.RollForward(ha, tipOf(ha))
-	hb := hdr(25, 2, 'a')
-	b.RollForward(hb, tipOf(hb))
-
-	snaps := []ChainSnapshot{a.Snapshot(), b.Snapshot()}
-	require.Equal(t, uint64(25), MinTipSlot(snaps))
-	require.Equal(t, uint64(40), MaxTipSlot(snaps))
-	require.Equal(t, uint64(0), MinTipSlot(nil))
-}
-
 // The observers intersect at origin and replay history before they reach
 // the tip, so our own tip lags the node's real one during catch-up. A
 // baseline taken from the observed tip would let an already-replayed

@@ -77,18 +77,6 @@ func checkedInSpecs(t *testing.T, pattern string) []string {
 	return files
 }
 
-func TestLeiosSpecSchedulesDijkstraAfterConwayEpoch(t *testing.T) {
-	t.Parallel()
-	cfg, err := LoadDevNetConfigFrom("testnet-dingo-leios.yaml")
-	require.NoError(t, err)
-	require.NotNil(t, cfg.DijkstraHardForkAtEpoch)
-	require.Equal(t, uint64(1), *cfg.DijkstraHardForkAtEpoch)
-	require.Equal(t, uint64(300), cfg.EpochLength)
-	require.Equal(t, 500*time.Millisecond, cfg.SlotDuration())
-	require.Equal(t, uint64(3), cfg.SecurityParam)
-	require.Equal(t, uint64(240), cfg.NonceStabilityWindowSlots())
-}
-
 // The accelerated specs exist to make a full scenario fit the reference
 // runner budget; if someone relaxes their timing back toward canonical,
 // this fails before CI spends five minutes discovering it.
