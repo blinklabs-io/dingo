@@ -853,14 +853,14 @@ func (s *queryServiceServer) ReadTx(
 				fmt.Errorf("block not found: %x", txRecord.BlockHash),
 			)
 		}
-		return nil, mapHistoryExpired(
+		return nil, s.utxorpc.historyExpiredError(ctx,
 			fmt.Errorf("lookup block: %w", err),
 		)
 	}
 
 	transactions, err := s.utxorpc.config.LedgerState.BlockTransactions(ctx, block)
 	if err != nil {
-		return nil, mapHistoryExpired(
+		return nil, s.utxorpc.historyExpiredError(ctx,
 			fmt.Errorf("get block transactions: %w", err),
 		)
 	}

@@ -450,3 +450,67 @@ func TestPruneBlockCancellationAfterMetadataReadPreservesBlob(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, n)
 }
+
+// pruneSeededBlocks seeds one block per slot, then expires the first pruned.
+// Seeding finishes first: inserting after an expiry trips over the tombstone.
+func pruneSeededBlocks(t *testing.T, db *Database, slots []uint64, pruned int) {
+	t.Helper()
+	hashes := make([][]byte, len(slots))
+	for i, slot := range slots {
+		txId := bytes.Repeat([]byte{byte(i + 1)}, 32)
+		hashes[i], _ = seedPrunableBlock(
+			t, db, slot, txId, map[uint32][]byte{0: []byte("payload")},
+		)
+	}
+	for i := range pruned {
+		_, err := db.PruneBlock(context.Background(), slots[i], hashes[i])
+		require.NoError(t, err)
+	}
+}
+
+func TestOldestRetainedSlot(t *testing.T) {
+	t.Parallel()
+	slots := []uint64{100, 200, 300, 400}
+
+	cases := []struct {
+		name   string
+		cursor string
+		want   uint64
+		wantOK bool
+	}{
+		{name: "no cursor is unknown"},
+		// The pruner leaves the cursor on the last expired block, so the
+		// cursor slot itself is not retained.
+		{name: "cursor on last expired block", cursor: "300", want: 400, wantOK: true},
+		// A rollback can lower the cursor below blocks already expired.
+		{name: "lowered cursor walks past tombstones", cursor: "0", want: 400, wantOK: true},
+		{name: "cursor past every block is unknown", cursor: "401"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			db := newTestDB(t)
+			pruneSeededBlocks(t, db, slots, 3)
+			if tc.cursor != "" {
+				require.NoError(t, db.SetSyncState(
+					HistoryExpiryCursorSyncKey, tc.cursor, nil,
+				))
+			}
+			got, ok, err := db.OldestRetainedSlot(context.Background())
+			require.NoError(t, err)
+			require.Equal(t, tc.wantOK, ok)
+			require.Equal(t, tc.want, got)
+		})
+	}
+}
+
+func TestOldestRetainedSlot_MalformedCursorIsError(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	require.NoError(t, db.SetSyncState(
+		HistoryExpiryCursorSyncKey, "not-a-slot", nil,
+	))
+	_, ok, err := db.OldestRetainedSlot(context.Background())
+	require.Error(t, err)
+	require.False(t, ok)
+}

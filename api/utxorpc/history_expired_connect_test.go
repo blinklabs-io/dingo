@@ -17,10 +17,12 @@ package utxorpc
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"testing"
 	"time"
 
 	"connectrpc.com/connect"
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/stretchr/testify/require"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/query"
@@ -202,4 +204,37 @@ func requireHistoryExpiredAt(t *testing.T, err error, slot uint64) {
 	t.Helper()
 	requireHistoryExpired(t, err)
 	require.ErrorContains(t, err, fmt.Sprintf("block at slot=%d hash=", slot))
+}
+
+// The pruner leaves its cursor on the last block it expired. The error names
+// the first block that still reads back, not the cursor slot.
+func TestConnect_FetchBlock_NamesOldestRetainedSlot(t *testing.T) {
+	t.Parallel()
+	h, blocks := newPrunedHistoryHarness(t, 2)
+	pruneHarnessBlock(t, h, blocks[0].Slot, blocks[0].Hash)
+	pruneHarnessBlock(t, h, blocks[1].Slot, blocks[1].Hash)
+	require.NoError(t, h.DB.SetSyncState(
+		database.HistoryExpiryCursorSyncKey,
+		strconv.FormatUint(blocks[2].Slot, 10),
+		nil,
+	))
+	cli := syncconnect.NewSyncServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
+	_, err := cli.FetchBlock(
+		expiredHistoryContext(t),
+		connect.NewRequest(&sync.FetchBlockRequest{
+			Ref: []*sync.BlockRef{
+				{Slot: blocks[0].Slot, Hash: blocks[0].Hash},
+			},
+		}),
+	)
+	requireHistoryExpiredAt(t, err, blocks[0].Slot)
+	require.ErrorContains(
+		t,
+		err,
+		fmt.Sprintf("oldest retained slot=%d", blocks[3].Slot),
+	)
 }

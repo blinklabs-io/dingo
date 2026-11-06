@@ -17,6 +17,7 @@ package utxorpc
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"sync/atomic"
 	"testing"
@@ -41,6 +42,16 @@ import (
 type expiredHistoryLedger struct {
 	UtxorpcLedgerState
 	expired error
+	// oldest, oldestKnown and oldestErr drive OldestRetainedSlot.
+	oldest      uint64
+	oldestKnown bool
+	oldestErr   error
+}
+
+func (l *expiredHistoryLedger) OldestRetainedSlot(
+	context.Context,
+) (uint64, bool, error) {
+	return l.oldest, l.oldestKnown, l.oldestErr
 }
 
 func newExpiredHistoryLedger(slot uint64) *expiredHistoryLedger {
@@ -276,8 +287,132 @@ func (l *expiredIteratorLedger) GetChainFromPointContext(
 func TestHistoryExpiredError_LeavesOtherErrorsAlone(t *testing.T) {
 	t.Parallel()
 	other := fmt.Errorf("disk on fire")
-	require.Same(t, other, mapHistoryExpired(other))
-	require.NoError(t, mapHistoryExpired(nil))
+	require.Same(t, other, mapHistoryExpiredAt(other, 0, false))
+	require.NoError(t, mapHistoryExpiredAt(nil, 0, false))
 	nf := connect.NewError(connect.CodeNotFound, other)
-	require.Same(t, nf, mapHistoryExpired(nf))
+	require.Same(t, nf, mapHistoryExpiredAt(nf, 0, false))
+}
+
+func TestMapHistoryExpiredAt_NamesOldestRetainedSlot(t *testing.T) {
+	t.Parallel()
+	typed := fmt.Errorf(
+		"get block: %w",
+		&types.HistoryExpiredError{Slot: 10, Hash: expiredHash()},
+	)
+	untyped := fmt.Errorf("get block: %w", types.ErrHistoryExpired)
+	for name, err := range map[string]error{"typed": typed, "untyped": untyped} {
+		t.Run(name+" known", func(t *testing.T) {
+			t.Parallel()
+			got := mapHistoryExpiredAt(err, 4242, true)
+			require.Equal(t, connect.CodeFailedPrecondition, connect.CodeOf(got))
+			require.ErrorContains(t, got, "oldest retained slot=4242")
+			require.ErrorIs(t, got, types.ErrHistoryExpired)
+		})
+		t.Run(name+" unknown", func(t *testing.T) {
+			t.Parallel()
+			got := mapHistoryExpiredAt(err, 0, false)
+			require.Equal(t, connect.CodeFailedPrecondition, connect.CodeOf(got))
+			require.NotContains(t, got.Error(), "oldest retained")
+		})
+	}
+}
+
+func TestHistoryExpired_OldestRetainedSlotLookup(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name        string
+		ledger      func() *expiredHistoryLedger
+		wantMessage string
+		wantAbsent  string
+	}{
+		{
+			name: "known bound",
+			ledger: func() *expiredHistoryLedger {
+				l := newExpiredHistoryLedger(10)
+				l.oldest, l.oldestKnown = 777, true
+				return l
+			},
+			wantMessage: "oldest retained slot=777",
+		},
+		{
+			name:       "unknown bound",
+			ledger:     func() *expiredHistoryLedger { return newExpiredHistoryLedger(10) },
+			wantAbsent: "oldest retained",
+		},
+		{
+			name: "lookup error keeps FailedPrecondition",
+			ledger: func() *expiredHistoryLedger {
+				l := newExpiredHistoryLedger(10)
+				l.oldestErr = errors.New("sync state unavailable")
+				return l
+			},
+			wantAbsent: "oldest retained",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			u := newExpiredHistoryServer(tc.ledger())
+			_, err := (&syncServiceServer{utxorpc: u}).FetchBlock(
+				t.Context(),
+				connect.NewRequest(&syncapi.FetchBlockRequest{
+					Ref: []*syncapi.BlockRef{{Slot: 10, Hash: expiredHash()}},
+				}),
+			)
+			requireHistoryExpired(t, err)
+			if tc.wantMessage != "" {
+				require.ErrorContains(t, err, tc.wantMessage)
+			}
+			if tc.wantAbsent != "" {
+				require.NotContains(t, err.Error(), tc.wantAbsent)
+				require.NotContains(t, err.Error(), "sync state unavailable")
+			}
+		})
+	}
+}
+
+// WatchTx replay distance and ReadTx go through different call sites than
+// FetchBlock; each must carry the bound.
+func TestHistoryExpired_OldestRetainedSlotAtEveryCallSite(t *testing.T) {
+	t.Parallel()
+	ledger := func() *expiredHistoryLedger {
+		l := newExpiredHistoryLedger(10)
+		l.oldest, l.oldestKnown = 777, true
+		return l
+	}
+	t.Run("ReadTx", func(t *testing.T) {
+		t.Parallel()
+		_, err := (&queryServiceServer{utxorpc: newExpiredHistoryServer(ledger())}).ReadTx(
+			t.Context(),
+			connect.NewRequest(
+				&query.ReadTxRequest{Hash: bytes.Repeat([]byte{0x01}, 32)},
+			),
+		)
+		requireHistoryExpired(t, err)
+		require.ErrorContains(t, err, "oldest retained slot=777")
+	})
+	t.Run("FollowTip", func(t *testing.T) {
+		t.Parallel()
+		err := (&syncServiceServer{utxorpc: newExpiredHistoryServer(ledger())}).FollowTip(
+			t.Context(),
+			connect.NewRequest(&syncapi.FollowTipRequest{
+				Intersect: []*syncapi.BlockRef{{Slot: 10, Hash: expiredHash()}},
+			}),
+			nil,
+		)
+		requireHistoryExpired(t, err)
+		require.ErrorContains(t, err, "oldest retained slot=777")
+	})
+	t.Run("WatchTx", func(t *testing.T) {
+		t.Parallel()
+		err := (&watchServiceServer{utxorpc: newExpiredHistoryServer(ledger())}).WatchTx(
+			t.Context(),
+			connect.NewRequest(&watchapi.WatchTxRequest{
+				Intersect: []*watchapi.BlockRef{{Slot: 10, Hash: expiredHash()}},
+			}),
+			nil,
+		)
+		requireHistoryExpired(t, err)
+		require.ErrorContains(t, err, "oldest retained slot=777")
+	})
 }

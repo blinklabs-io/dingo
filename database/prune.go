@@ -33,6 +33,53 @@ import (
 // it to the rollback point, the slot above which replay stores new blocks.
 const HistoryExpiryCursorSyncKey = "history_expiry_cursor"
 
+// oldestRetainedScanLimit bounds how many consecutive expired blocks
+// OldestRetainedSlot walks past the history-expiry cursor before giving up.
+const oldestRetainedScanLimit = 4096
+
+// OldestRetainedSlot returns the slot of the oldest block whose body is still
+// stored, for naming the start of retained history in errors. It reports
+// ok=false when history expiry has never run (no cursor) or when no retained
+// block is found within oldestRetainedScanLimit expired blocks past the
+// cursor.
+//
+// The cursor alone is not the answer: it is the slot below which every block
+// is expired, and the pruner leaves it on the last block it expired, so that
+// slot itself is usually expired too. A rollback also lowers it below blocks
+// that were already expired. The cursor is therefore a lower bound, and this
+// walks forward from it past tombstones to the first block that reads back.
+func (d *Database) OldestRetainedSlot(
+	ctx context.Context,
+) (slot uint64, ok bool, err error) {
+	raw, err := d.GetSyncState(HistoryExpiryCursorSyncKey, nil)
+	if err != nil {
+		return 0, false, fmt.Errorf("read history expiry cursor: %w", err)
+	}
+	if raw == "" {
+		return 0, false, nil
+	}
+	cursor, err := strconv.ParseUint(raw, 10, 64)
+	if err != nil {
+		return 0, false, fmt.Errorf("parse history expiry cursor: %w", err)
+	}
+	iter := d.BlocksInRangeContext(ctx, cursor, ^uint64(0))
+	defer iter.Close()
+	for range oldestRetainedScanLimit {
+		next, err := iter.NextRaw()
+		if err != nil {
+			if errors.Is(err, types.ErrHistoryExpired) {
+				continue
+			}
+			return 0, false, fmt.Errorf("scan retained history: %w", err)
+		}
+		if next == nil {
+			return 0, false, nil
+		}
+		return next.Slot, true, nil
+	}
+	return 0, false, nil
+}
+
 // lowerHistoryExpiryCursor caps the history-expiry cursor at slot. A cursor
 // at or below slot, or an absent one, is left unchanged: blocks at or below
 // the rollback point survive it, so a routine rollback does not send the
