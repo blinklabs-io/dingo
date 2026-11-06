@@ -36,7 +36,6 @@ import (
 	"github.com/blinklabs-io/dingo/internal/test/devnet"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
-	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	"github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/common/script"
@@ -528,23 +527,7 @@ func plutusUTxOsByRef(
 	return out, nil
 }
 
-func plutusParams(
-	addr string, magic uint32,
-) (*conway.ConwayProtocolParameters, error) {
-	params, err := plutusQuery(addr, magic, func(c *olsq.Client) (common.ProtocolParameters, error) {
-		return c.GetCurrentProtocolParams()
-	})
-	if err != nil {
-		return nil, err
-	}
-	cp, ok := params.(*conway.ConwayProtocolParameters)
-	if !ok {
-		return nil, fmt.Errorf("unexpected protocol parameter type %T", params)
-	}
-	return cp, nil
-}
-
-func plutusSubmit(addr string, magic uint32, tx []byte) error {
+func plutusSubmit(addr string, magic uint32, era int, tx []byte) error {
 	conn, err := ouroboros.New(
 		ouroboros.WithNetworkMagic(magic),
 		ouroboros.WithNodeToNode(false),
@@ -560,12 +543,15 @@ func plutusSubmit(addr string, magic uint32, tx []byte) error {
 	if protocol == nil || protocol.Client == nil {
 		return fmt.Errorf("LocalTxSubmission unavailable at %s", addr)
 	}
-	return protocol.Client.SubmitTx(uint16(gledger.EraIdConway), tx)
+	return protocol.Client.SubmitTx(uint16(era), tx) //nolint:gosec
 }
 
 // ---------------------------------------------------------------------------
 // Transaction assembly
 // ---------------------------------------------------------------------------
+
+// plutusDijkstraEra is the LocalTxSubmission era tag of Dijkstra.
+const plutusDijkstraEra = 7
 
 type plutusEnv struct {
 	t          *testing.T
@@ -573,6 +559,7 @@ type plutusEnv struct {
 	dingoNtc   string
 	cardanoNtc string
 	params     *conway.ConwayProtocolParameters
+	era        int // ledger era both nodes run; also the LocalTxSubmission era tag
 	key        *plutusKey
 	noted      bool
 }
@@ -819,8 +806,8 @@ type plutusVerdict struct {
 
 func (e *plutusEnv) submitBoth(tx []byte) plutusVerdict {
 	return plutusVerdict{
-		dingoErr:   plutusSubmit(e.dingoNtc, e.magic, tx),
-		cardanoErr: plutusSubmit(e.cardanoNtc, e.magic, tx),
+		dingoErr:   plutusSubmit(e.dingoNtc, e.magic, e.era, tx),
+		cardanoErr: plutusSubmit(e.cardanoNtc, e.magic, e.era, tx),
 	}
 }
 
@@ -965,11 +952,15 @@ func TestPlutusScriptConformance(t *testing.T) {
 	}
 
 	// Protocol parameters must agree before anything is built from them.
-	dingoParams, err := plutusParams(env.dingoNtc, env.magic)
+	// Transactions are submitted tagged with the era the ledgers are in
+	// (Conway, or Dijkstra on a PV12 network), as a node client does.
+	dingoParams, dingoEra, err := boundsParams(env.dingoNtc, env.magic)
 	require.NoError(t, err)
-	cardanoParams, err := plutusParams(env.cardanoNtc, env.magic)
+	cardanoParams, cardanoEra, err := boundsParams(env.cardanoNtc, env.magic)
 	require.NoError(t, err)
+	require.Equal(t, cardanoEra, dingoEra, "dingo and cardano-node are in different eras")
 	env.params = cardanoParams
+	env.era = cardanoEra
 	require.Equal(t, cardanoParams.CostModels, dingoParams.CostModels,
 		"PlutusV3 cost models differ between dingo and cardano-node")
 	require.Equal(t, cardanoParams.MaxTxExUnits, dingoParams.MaxTxExUnits)
@@ -1312,7 +1303,15 @@ func TestPlutusScriptConformance(t *testing.T) {
 			t.Errorf("DISAGREEMENT on isValid=false collateral path: dingo=%v cardano-node=%v",
 				shortErr(v.dingoErr), shortErr(v.cardanoErr))
 		}
-		if v.dingoErr == nil && v.cardanoErr == nil {
+		if env.era >= plutusDijkstraEra {
+			// The Dijkstra transaction has no is_valid field, so a failed
+			// phase-2 transaction is not representable at submission and
+			// both implementations must refuse the encoding.
+			if v.dingoErr == nil || v.cardanoErr == nil {
+				t.Errorf("isValid=false transaction must be refused by both in era %d: dingo=%v cardano-node=%v",
+					env.era, shortErr(v.dingoErr), shortErr(v.cardanoErr))
+			}
+		} else if v.dingoErr == nil && v.cardanoErr == nil {
 			txid := txIDFromTx(t, tx)
 			env.waitBoth([]plutusRef{coll}, false)
 			ret := plutusRef{hash: txid, idx: 1}
