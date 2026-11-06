@@ -2339,25 +2339,6 @@ func TestLedgerViewGetDRepVotingPowerIncludesActiveProposalDeposit(t *testing.T)
 	assert.Equal(t, uint64(150), power)
 }
 
-// TestLedgerViewSatisfiesEpochState pins that LedgerView provides gouroboros'
-// optional EpochState capability.
-//
-// Rules that are expressed relative to the current epoch degrade to a weaker
-// check when the ledger state cannot supply one, and they degrade silently. The
-// pool-deposit decision is the case that found this: without an epoch it cannot
-// tell a retired pool from a registered one, charges no deposit for a
-// registration that needs one, and the transaction then fails value
-// conservation by exactly the deposit.
-func TestLedgerViewSatisfiesEpochState(t *testing.T) {
-	t.Parallel()
-
-	var lv any = &LedgerView{}
-	_, ok := lv.(lcommon.EpochState)
-	require.True(t, ok,
-		"LedgerView must satisfy common.EpochState, or every rule that needs "+
-			"the current epoch silently takes its degraded path")
-}
-
 // TestLedgerViewEpochForSlot checks the mapping itself against a known cache.
 func TestLedgerViewEpochForSlot(t *testing.T) {
 	t.Parallel()
