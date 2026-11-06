@@ -910,6 +910,15 @@ rewinds perform the normal full rollback. Replay-holding, deterministic
 transaction, and header-validation recovery use the same option so the repair
 rule stays consistent across all recovery entry points.
 
+At-tip transaction recovery pins the block at depth K from the primary tip at
+the first failure. Later retries may choose a deeper slot target, but they
+cannot remove that block or an older one. The current K boundary can move
+forward as the chain grows, and the later of the two boundaries limits the
+rewind. This recovery makes one bounded primary-chain rollback; it does not
+use replay recovery's multi-step descent, which can cross K in aggregate.
+If the pinned block is no longer on the primary chain, the ledger pipeline
+halts instead of continuing below the boundary.
+
 `rollbackWithOptions` reloads `epochCache`, `currentEra`, `currentPParams` and
 the synthetic-PlutusV2-cost-model marker from the database *after* the
 metadata transaction that truncates it has already committed. A failure to
