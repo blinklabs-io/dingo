@@ -56,6 +56,7 @@ type peerForkPathPrefix struct {
 }
 
 type peerForkNoncePrefix struct {
+	contextGeneration     uint64
 	sourceEpoch           uint64
 	cutoff                uint64
 	sourceNonce           []byte
@@ -404,6 +405,7 @@ func (ls *LedgerState) peerChainSelectionEpochNonceAcrossEpochs(
 		startIndex := 0
 		if cachedEvolving, cachedCandidate, next, ok := ls.peerForkNoncePrefix(
 			connId,
+			snapshot.contextGeneration,
 			currentEpoch,
 			cutoff,
 			initialEvolvingNonce,
@@ -467,6 +469,7 @@ func (ls *LedgerState) peerChainSelectionEpochNonceAcrossEpochs(
 		if lastFolded != nil {
 			ls.storePeerForkNoncePrefix(
 				connId,
+				snapshot.contextGeneration,
 				currentEpoch,
 				cutoff,
 				initialEvolvingNonce,
@@ -657,6 +660,7 @@ func peerHeaderPathHasParentPoint(
 
 func (ls *LedgerState) peerForkNoncePrefix(
 	connId ouroboros.ConnectionId,
+	contextGeneration uint64,
 	sourceEpoch models.Epoch,
 	cutoff uint64,
 	initialEvolvingNonce []byte,
@@ -667,7 +671,9 @@ func (ls *LedgerState) peerForkNoncePrefix(
 	ls.forkHeaderNonceCacheMutex.Lock()
 	entry, ok := ls.forkHeaderNonceCache[key][sourceEpoch.EpochId]
 	ls.forkHeaderNonceCacheMutex.Unlock()
-	if !ok || entry.sourceEpoch != sourceEpoch.EpochId ||
+	if !ok || contextGeneration == 0 ||
+		entry.contextGeneration != contextGeneration ||
+		entry.sourceEpoch != sourceEpoch.EpochId ||
 		entry.cutoff != cutoff ||
 		!bytes.Equal(entry.sourceNonce, sourceEpoch.Nonce) ||
 		!bytes.Equal(entry.initialEvolvingNonce, initialEvolvingNonce) ||
@@ -689,6 +695,7 @@ func (ls *LedgerState) peerForkNoncePrefix(
 
 func (ls *LedgerState) storePeerForkNoncePrefix(
 	connId ouroboros.ConnectionId,
+	contextGeneration uint64,
 	sourceEpoch models.Epoch,
 	cutoff uint64,
 	initialEvolvingNonce []byte,
@@ -709,6 +716,7 @@ func (ls *LedgerState) storePeerForkNoncePrefix(
 		ls.forkHeaderNonceCache[key] = make(map[uint64]peerForkNoncePrefix)
 	}
 	ls.forkHeaderNonceCache[key][sourceEpoch.EpochId] = peerForkNoncePrefix{
+		contextGeneration:     contextGeneration,
 		sourceEpoch:           sourceEpoch.EpochId,
 		cutoff:                cutoff,
 		sourceNonce:           cloneNonce(sourceEpoch.Nonce),
