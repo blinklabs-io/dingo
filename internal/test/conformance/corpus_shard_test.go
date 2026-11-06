@@ -110,7 +110,17 @@ func replayCorpusSharded(
 		if err := shardCorpusRoot(
 			root, roots[shard], vectorShard, shard,
 		); err != nil {
-			return corpusRun{err: fmt.Errorf("build shard %d: %w", shard, err)}
+			// Linking can be refused (Windows without the symlink
+			// privilege). Replay the whole corpus with one state manager
+			// rather than failing.
+			sm, smErr := newStateManager()
+			if smErr != nil {
+				return corpusRun{err: fmt.Errorf(
+					"new state manager: %w", smErr,
+				)}
+			}
+			defer sm.Close()
+			return replayCorpusRoot(sm, root)
 		}
 	}
 	runs := make([]corpusRun, workers)
@@ -143,12 +153,28 @@ func replayCorpusSharded(
 			merged = append(merged, result)
 		}
 	}
+	// Every vector must have run exactly once: the shards partition the
+	// corpus, so a missing or repeated result means a shard lost or
+	// duplicated work.
+	seen := make(map[string]struct{}, len(merged))
 	for _, result := range merged {
 		if _, ok := order[result.Path]; !ok {
 			return corpusRun{err: fmt.Errorf(
 				"shard replay reported unknown vector %s", result.Path,
 			)}
 		}
+		if _, dup := seen[result.Path]; dup {
+			return corpusRun{err: fmt.Errorf(
+				"shard replay ran vector %s twice", result.Path,
+			)}
+		}
+		seen[result.Path] = struct{}{}
+	}
+	if len(merged) != len(vectors) {
+		return corpusRun{err: fmt.Errorf(
+			"shard replay ran %d vectors, corpus has %d",
+			len(merged), len(vectors),
+		)}
 	}
 	sort.Slice(merged, func(i, j int) bool {
 		return order[merged[i].Path] < order[merged[j].Path]
