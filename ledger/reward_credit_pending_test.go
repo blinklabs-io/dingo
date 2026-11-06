@@ -308,7 +308,7 @@ func TestPendingRewardStakeInputsHoldBackTheRound(t *testing.T) {
 func TestDeferredStakeInputWriteRetriesAfterError(t *testing.T) {
 	t.Parallel()
 	stakeInputs := func(t *testing.T, fail bool) string {
-		f := newEpochBoundaryBenchFixture(t, epochBoundaryDumpShape(), "")
+		f := newEpochBoundaryBenchFixture(t, smallEpochBoundaryBenchShape(), "")
 		require.NoError(t, f.ls.precomputeStakeRewardsAfterEpochTransition(
 			epochBoundaryBenchPrecomputeEvent(),
 		))
@@ -349,7 +349,9 @@ func TestDeferredStakeInputWriteRetriesAfterError(t *testing.T) {
 // rewrite would count its folded credits again.
 func TestPrecomputeLeavesCreditedRoundAlone(t *testing.T) {
 	t.Parallel()
-	f := newEpochBoundaryBenchFixture(t, epochBoundaryDumpShape(), "")
+	shape := epochBoundaryDumpShape()
+	shape.delegators = 248
+	f := newEpochBoundaryBenchFixture(t, shape, "")
 	require.NoError(t, f.ls.precomputeStakeRewardsAfterEpochTransition(
 		epochBoundaryBenchPrecomputeEvent(),
 	))
@@ -358,7 +360,7 @@ func TestPrecomputeLeavesCreditedRoundAlone(t *testing.T) {
 	raw, err := dbtest.RawSQLiteMetadata(t, f.db)
 	require.NoError(t, err)
 	defer raw.Close()
-	deregisterEpochBoundaryDumpDelegators(t, raw)
+	deregisterEpochBoundaryDelegators(t, raw, shape.delegators, 11)
 	f.rollover(t)
 	f.ls.waitEpochBoundaryBenchBackground()
 	credits := rewardedCredentials(t, f)
