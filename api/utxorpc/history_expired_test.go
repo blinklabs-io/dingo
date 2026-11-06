@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"sync/atomic"
 	"testing"
 
 	"connectrpc.com/connect"
@@ -226,6 +227,49 @@ func TestWatchTx_ExpiredIntersectIsFailedPrecondition(t *testing.T) {
 		nil,
 	)
 	requireHistoryExpired(t, err)
+}
+
+// The intersect block is retained, so the replay check passes and the
+// expiry surfaces when the chain iterator is created.
+func TestWatchTx_ExpiredIteratorStartIsFailedPrecondition(t *testing.T) {
+	t.Parallel()
+	ls := &expiredIteratorLedger{
+		expiredHistoryLedger: *newExpiredHistoryLedger(10),
+	}
+	u := newExpiredHistoryServer(ls)
+	err := (&watchServiceServer{utxorpc: u}).WatchTx(
+		t.Context(),
+		connect.NewRequest(&watchapi.WatchTxRequest{
+			Intersect: []*watchapi.BlockRef{{Slot: 10, Hash: expiredHash()}},
+		}),
+		nil,
+	)
+	require.True(t, ls.iteratorRequested.Load(), "chain iterator not reached")
+	requireHistoryExpired(t, err)
+}
+
+type expiredIteratorLedger struct {
+	expiredHistoryLedger
+	iteratorRequested atomic.Bool
+}
+
+func (l *expiredIteratorLedger) GetBlock(
+	ocommon.Point,
+) (models.Block, error) {
+	return models.Block{Slot: 10, Hash: expiredHash(), Number: 89}, nil
+}
+
+func (l *expiredIteratorLedger) GetChainFromPointContext(
+	ctx context.Context,
+	point ocommon.Point,
+	inclusive bool,
+) (*chain.ChainIterator, error) {
+	l.iteratorRequested.Store(true)
+	return l.expiredHistoryLedger.GetChainFromPointContext(
+		ctx,
+		point,
+		inclusive,
+	)
 }
 
 // A non-expiry failure must keep its original code.

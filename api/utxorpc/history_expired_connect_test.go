@@ -16,6 +16,7 @@ package utxorpc
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -88,7 +89,7 @@ func TestConnect_FetchBlock_PrunedBlockIsFailedPrecondition(t *testing.T) {
 			},
 		}),
 	)
-	requireHistoryExpired(t, err)
+	requireHistoryExpiredAt(t, err, blocks[2].Slot)
 }
 
 // The start token is retained; the next block is not, so the failure comes
@@ -112,7 +113,7 @@ func TestConnect_DumpHistory_PrunedBlockIsFailedPrecondition(t *testing.T) {
 			MaxItems: 5,
 		}),
 	)
-	requireHistoryExpired(t, err)
+	requireHistoryExpiredAt(t, err, blocks[2].Slot)
 }
 
 func TestConnect_FollowTip_PrunedReplayIsFailedPrecondition(t *testing.T) {
@@ -140,7 +141,7 @@ func TestConnect_FollowTip_PrunedReplayIsFailedPrecondition(t *testing.T) {
 			"no block after the intersect is retained",
 		)
 	}
-	requireHistoryExpired(t, stream.Err())
+	requireHistoryExpiredAt(t, stream.Err(), blocks[2].Slot)
 }
 
 func TestConnect_WatchTx_PrunedReplayIsFailedPrecondition(t *testing.T) {
@@ -168,7 +169,7 @@ func TestConnect_WatchTx_PrunedReplayIsFailedPrecondition(t *testing.T) {
 			"no block after the intersect is retained",
 		)
 	}
-	requireHistoryExpired(t, stream.Err())
+	requireHistoryExpiredAt(t, stream.Err(), blocks[2].Slot)
 }
 
 func TestConnect_ReadTx_PrunedBlockIsFailedPrecondition(t *testing.T) {
@@ -192,5 +193,13 @@ func TestConnect_ReadTx_PrunedBlockIsFailedPrecondition(t *testing.T) {
 		expiredHistoryContext(t),
 		connect.NewRequest(&query.ReadTxRequest{Hash: txHash}),
 	)
+	requireHistoryExpiredAt(t, err, rec.Slot)
+}
+
+// requireHistoryExpiredAt also pins the reported point, so a failure on a
+// retained neighbour (such as the start point) cannot satisfy the check.
+func requireHistoryExpiredAt(t *testing.T, err error, slot uint64) {
+	t.Helper()
 	requireHistoryExpired(t, err)
+	require.ErrorContains(t, err, fmt.Sprintf("block at slot=%d hash=", slot))
 }
