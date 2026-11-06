@@ -551,7 +551,13 @@ type VoteManager struct {
 	maxRecords                int
 	voteVerificationBudget    *ratewindow.FixedWindow
 	voteVerificationsInFlight map[lcommon.LeiosVoteId]lcommon.Blake2b256
-	voteInvalidBudget         *ratewindow.FixedWindow
+	// keylessSeatDrops remembers (slot, voter) ids whose vote was dropped
+	// because the seat has no verified key. Such votes are never stored, so
+	// without this a repeated copy would pass the dedup check and spend the
+	// shared verification budget every time. Bounded by maxRecords and
+	// voteTTL; protected by mu.
+	keylessSeatDrops  map[lcommon.LeiosVoteId]time.Time
+	voteInvalidBudget *ratewindow.FixedWindow
 
 	mu sync.Mutex
 	// localEmissionMu keeps activation replay ahead of ordinary local emission
@@ -731,6 +737,7 @@ func NewVoteManager(cfg VoteManagerConfig) (*VoteManager, error) {
 			voteVerificationMaxProcess,
 			voteVerificationMaxPeers,
 		),
+		keylessSeatDrops: make(map[lcommon.LeiosVoteId]time.Time),
 		voteVerificationsInFlight: make(
 			map[lcommon.LeiosVoteId]lcommon.Blake2b256,
 		),
@@ -1841,6 +1848,13 @@ func (m *VoteManager) reserveIncomingVoteVerification(
 		return false, nil
 	}
 	m.pruneExpiredLocked(now)
+	if droppedAt, ok := m.keylessSeatDrops[id]; ok &&
+		now.Sub(droppedAt) < m.voteTTL {
+		// The seat was already found keyless: drop the repeat before it can
+		// spend verification budget. Not a stored vote, so no equivocation.
+		m.mu.Unlock()
+		return false, nil
+	}
 	if inFlightHash, ok := m.voteVerificationsInFlight[id]; ok {
 		m.mu.Unlock()
 		if inFlightHash != vote.EndorserBlockHash {
@@ -1866,6 +1880,22 @@ func (m *VoteManager) reserveIncomingVoteVerification(
 	m.voteVerificationsInFlight[id] = vote.EndorserBlockHash
 	m.mu.Unlock()
 	return true, nil
+}
+
+// rejectKeylessSeatVote drops a vote for a seat without a verified key and
+// remembers the (slot, voter) id so repeats are dropped before admission.
+func (m *VoteManager) rejectKeylessSeatVote(
+	connKey string,
+	vote lcommon.LeiosVote,
+) error {
+	id := lcommon.LeiosVoteId{SlotNo: vote.SlotNo, VoterId: vote.VoterId}
+	m.mu.Lock()
+	if _, ok := m.keylessSeatDrops[id]; ok ||
+		len(m.keylessSeatDrops) < m.maxRecords {
+		m.keylessSeatDrops[id] = m.now()
+	}
+	m.mu.Unlock()
+	return m.rejectIncomingVote(connKey, "no_key", vote, errVoteKeylessSeat)
 }
 
 func (m *VoteManager) rejectIncomingVote(
@@ -1962,12 +1992,7 @@ func (m *VoteManager) HandleVote(
 	// slot with an unverifiable signature and have it relayed.
 	pub, ok := m.resolveVoterKey(entry, member.PoolKeyHash)
 	if !ok {
-		return m.rejectIncomingVote(
-			connKey,
-			"no_key",
-			vote,
-			errVoteKeylessSeat,
-		)
+		return m.rejectKeylessSeatVote(connKey, vote)
 	}
 	if err := m.verifyVoteSignature(
 		pub,
@@ -2078,12 +2103,7 @@ func (m *VoteManager) handleResolvedPrototypeVote(
 	// than store it first-wins and relay it.
 	pub, ok := m.resolveVoterKey(entry, member.PoolKeyHash)
 	if !ok {
-		return m.rejectIncomingVote(
-			connKey,
-			"no_key",
-			resolved,
-			errVoteKeylessSeat,
-		)
+		return m.rejectKeylessSeatVote(connKey, resolved)
 	}
 	if err := m.verifyVoteSignature(
 		pub,
@@ -2637,6 +2657,11 @@ func (m *VoteManager) pruneExpiredLocked(now time.Time) {
 			continue
 		}
 		delete(m.voteRecords, id)
+	}
+	for id, droppedAt := range m.keylessSeatDrops {
+		if droppedAt.Before(cutoff) {
+			delete(m.keylessSeatDrops, id)
+		}
 	}
 	m.updateRecordsGaugeLocked()
 }

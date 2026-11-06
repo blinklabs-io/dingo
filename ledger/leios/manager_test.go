@@ -4645,9 +4645,8 @@ func TestVoteManagerResolvesOnChainKeyWithoutRegistryEntry(t *testing.T) {
 
 // TestVoteManagerReferenceModeIgnoresStaticRegistryForKeylessSeat proves a
 // production-shaped manager (non-nil ledger key provider) never promotes a
-// keyless seat through the private-harness static registry. The vote remains
-// observable for membership/stake diagnostics, but it is not verified and
-// cannot contribute to a certificate.
+// keyless seat through the private-harness static registry. The vote is
+// rejected outright: it is neither stored, tallied nor relayed.
 func TestVoteManagerReferenceModeIgnoresStaticRegistryForKeylessSeat(
 	t *testing.T,
 ) {
@@ -4790,8 +4789,8 @@ func TestVoteManagerReferenceModeUsesOnChainKeyOverStaticMismatch(
 // TestVoteManagerTreatsInvalidPoPOnChainKeyAsAbsent proves an on-chain
 // key whose proof of possession does not verify is excluded entirely,
 // matching upstream's "invalid proofs are treated as absent" rule: the
-// member's vote is still accepted (membership-valid) but stays
-// unverified, exactly like a genuinely keyless committee seat.
+// member's vote is dropped, exactly like a vote for a genuinely keyless
+// committee seat.
 func TestVoteManagerTreatsInvalidPoPOnChainKeyAsAbsent(t *testing.T) {
 	t.Parallel()
 
@@ -7276,5 +7275,56 @@ func TestVoteManagerLatePrototypeVotesAreNotPeerMisbehavior(t *testing.T) {
 		t,
 		fixture.mgr.HandleVote("relay", invalid),
 		ErrPeerMisbehavior,
+	)
+}
+
+// TestVoteManagerRepeatedKeylessVotesDoNotExhaustVerificationBudget proves a
+// peer resending a vote for a keyless seat cannot use up its verification
+// budget: keyless votes are not stored, so without a remembered drop every
+// copy would be admitted and a later valid vote would be dropped.
+func TestVoteManagerRepeatedKeylessVotesDoNotExhaustVerificationBudget(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	fixture := newManagerFixture(
+		t,
+		func(f *managerFixture, cfg *VoteManagerConfig) {
+			partial := maps.Clone(f.registryEntries)
+			for _, member := range f.members {
+				if member.VoterId == 0 {
+					delete(partial, hex.EncodeToString(member.PoolKeyHash))
+				}
+			}
+			registry, err := NewVoterRegistry(partial)
+			require.NoError(t, err)
+			cfg.Registry = registry
+		},
+	)
+	ebHash := lcommon.NewBlake2b256([]byte("eb"))
+	keyless := fixture.makeVote(t, 0, 577, ebHash)
+	for range 2 * voteVerificationMaxPerPeer {
+		require.NoError(t, fixture.mgr.HandleVote("conn-a", keyless))
+	}
+	require.NoError(
+		t,
+		fixture.mgr.HandleVote(
+			"conn-a",
+			fixture.makeVote(t, 1, 577, ebHash),
+		),
+	)
+	assert.Len(
+		t,
+		fixture.mgr.VotesByIds(
+			[]lcommon.LeiosVoteId{{SlotNo: 577, VoterId: 1}},
+		),
+		1,
+		"a valid vote must still be admitted after repeated keyless votes",
+	)
+	assert.Empty(
+		t,
+		fixture.mgr.VotesByIds(
+			[]lcommon.LeiosVoteId{{SlotNo: 577, VoterId: 0}},
+		),
 	)
 }
