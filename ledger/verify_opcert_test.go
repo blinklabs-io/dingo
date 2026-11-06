@@ -233,6 +233,8 @@ func TestVerifyOpCertHeaderCrypto_MaxKESEvolutionsZeroFailsClosed(
 func TestVerifyOpCertHeaderCrypto_SlotsPerKesPeriodZeroFailsClosed(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{17}, 18, tamperNone)
 	err := verifyOpCertHeaderCrypto(
 		tb.block.Header(),
