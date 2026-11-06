@@ -11840,7 +11840,7 @@ func (ls *LedgerState) evaluateHardForkInitiationStability(
 	decodeFailures := ls.metrics.governanceProposalDecodeFailures
 	onDecodeFailure := func(proposal *models.GovernanceProposal, err error) {
 		logger.Warn(
-			"skipping ratifiable HardForkInitiation: decode failed",
+			"skipping governance action during hardfork stability check: decode failed",
 			"proposal_id", proposal.ID,
 			"error", err,
 		)

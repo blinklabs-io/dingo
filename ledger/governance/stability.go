@@ -18,6 +18,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
+	"sort"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -80,7 +82,9 @@ type RatifiableHardForkInitiation struct {
 // EvaluateRatifiableHardForkInitiation searches the active proposal set
 // for a HardForkInitiation that would be marked Ratified by the
 // boundary tick if it ran right now, and returns the first such
-// proposal along with the protocol version it would enact.
+// proposal along with the protocol version it would enact. It evaluates
+// proposals in the boundary's priority order so an earlier delaying action
+// prevents a later HardForkInitiation from being forecast.
 //
 // "Would ratify now" means: tally + ShouldRatify against the live vote
 // state, current pparams, and the current snapshots of active DReps
@@ -127,16 +131,14 @@ func EvaluateRatifiableHardForkInitiation(
 		return nil, fmt.Errorf("get active proposals: %w", err)
 	}
 
-	hardForkProposals := make([]*models.GovernanceProposal, 0)
-	for _, p := range proposals {
-		if lcommon.GovActionType(p.ActionType) ==
-			lcommon.GovActionTypeHardForkInitiation {
-			hardForkProposals = append(hardForkProposals, p)
-		}
-	}
-	if len(hardForkProposals) == 0 {
+	if len(proposals) == 0 {
 		return nil, nil
 	}
+	proposals = orderParameterChangeChains(proposals)
+	sort.SliceStable(proposals, func(i, j int) bool {
+		return govActionPriority(proposals[i]) <
+			govActionPriority(proposals[j])
+	})
 
 	// Build the inputs ShouldRatify needs. The active-DRep, committee
 	// state, parent-chain root, and quorum reads are the same the
@@ -170,14 +172,25 @@ func EvaluateRatifiableHardForkInitiation(
 	}
 	tallyCtx.CommitteeState = committeeState
 
-	committeeRoot, err := in.DB.GetLastEnactedGovernanceProposal(
-		ctx,
-		purposeActionTypes(purposeCommittee), in.Txn,
+	rootsByPurpose := make(
+		map[govActionPurpose]*models.GovernanceProposal,
+		len(chainedPurposes),
 	)
-	if err != nil {
-		return nil, fmt.Errorf("get committee root: %w", err)
+	for _, purpose := range chainedPurposes {
+		root, err := in.DB.GetLastEnactedGovernanceProposal(
+			ctx,
+			purposeActionTypes(purpose), in.Txn,
+		)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"get current root for purpose %d: %w", purpose, err,
+			)
+		}
+		rootsByPurpose[purpose] = root
 	}
-	committeeNoConfidence := committeeNoConfidenceState(committeeRoot)
+	committeeNoConfidence := committeeNoConfidenceState(
+		rootsByPurpose[purposeCommittee],
+	)
 
 	ccQuorum, err := conwayRatifyQuorum(
 		ctx,
@@ -186,20 +199,17 @@ func EvaluateRatifiableHardForkInitiation(
 	if err != nil {
 		return nil, fmt.Errorf("compute committee quorum: %w", err)
 	}
+	hardForkPriority := govActionPriority(&models.GovernanceProposal{
+		ActionType: uint8(lcommon.GovActionTypeHardForkInitiation),
+	})
 
-	// Parent-chain root for HardForkInitiation lineage: a HardForkInitiation
-	// must descend from the most recently enacted HardForkInitiation, or
-	// from genesis if none has enacted yet.
-	hardForkRoot, err := in.DB.GetLastEnactedGovernanceProposal(
-		ctx,
-		purposeActionTypes(purposeHardFork), in.Txn,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("get hardfork root: %w", err)
-	}
-
-	for _, proposal := range hardForkProposals {
-		if !validateParentChain(proposal, hardForkRoot) {
+	for _, proposal := range proposals {
+		actionType := lcommon.GovActionType(proposal.ActionType)
+		if govActionPriority(proposal) > hardForkPriority {
+			break
+		}
+		purpose := govActionPurposeOf(actionType)
+		if !validateParentChain(proposal, rootsByPurpose[purpose]) {
 			continue
 		}
 		// Decode before ratification so the same decoded-action-aware input
@@ -225,7 +235,7 @@ func EvaluateRatifiableHardForkInitiation(
 			ActiveDRepCount: activeDRepCount,
 			ActiveCCCount:   committeeState.ActiveMemberCount,
 			CommitteeAbsent: committeeAbsent(
-				committeeRoot, in.ConwayGenesis,
+				rootsByPurpose[purposeCommittee], in.ConwayGenesis,
 				committeeState.CommitteePresent,
 			),
 			CCQuorum:              ccQuorum,
@@ -233,6 +243,20 @@ func EvaluateRatifiableHardForkInitiation(
 			CommitteeNoConfidence: committeeNoConfidence,
 		})
 		if !decision.Ratified {
+			continue
+		}
+		if _, err := ratificationEnactmentPrecondition(
+			in.PParams,
+			nil,
+			proposal,
+			math.MaxUint64,
+		); err != nil {
+			continue
+		}
+		if actionType != lcommon.GovActionTypeHardForkInitiation {
+			if isDelayingActionPurpose(purpose) {
+				return nil, nil
+			}
 			continue
 		}
 		hf, ok := action.(*lcommon.HardForkInitiationGovAction)

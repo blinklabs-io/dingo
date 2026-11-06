@@ -13121,7 +13121,7 @@ func seedRatifiableBootstrapHardForkInitiation(
 		ActionType:    uint8(lcommon.GovActionTypeHardForkInitiation),
 		ProposedEpoch: currentEpoch - 1,
 		ExpiresEpoch:  currentEpoch + 10,
-		Deposit:       1_000,
+		Deposit:       0,
 		ReturnAddress: repeatByte(29, 0),
 		AnchorURL:     "https://example.invalid/anchor",
 		AnchorHash:    repeatByte(32, 0xEE),
