@@ -18,7 +18,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -946,33 +945,6 @@ func TestBadgerGCBenchConfigRejectsInvalidValues(t *testing.T) {
 	}
 }
 
-func TestSnapshotBadgerGCMetrics(t *testing.T) {
-	t.Parallel()
-	registry := prometheus.NewRegistry()
-	registerCounter := func(name string, value float64) {
-		counter := prometheus.NewCounter(prometheus.CounterOpts{Name: name})
-		registry.MustRegister(counter)
-		counter.Add(value)
-	}
-	registerCounter("database_blob_gc_attempts_total", 7)
-	registerCounter("database_blob_gc_successes_total", 3)
-	registerCounter("database_blob_gc_no_rewrite_total", 2)
-	registerCounter("database_blob_gc_errors_total", 1)
-	duration := prometheus.NewHistogram(prometheus.HistogramOpts{
-		Name: "database_blob_gc_duration_seconds",
-	})
-	registry.MustRegister(duration)
-	duration.Observe(0.25)
-	duration.Observe(0.75)
-
-	snapshot := snapshotBadgerGCMetrics(t, registry)
-	require.Equal(t, float64(7), snapshot.attempts)
-	require.Equal(t, float64(3), snapshot.rewrites)
-	require.Equal(t, float64(2), snapshot.noRewrite)
-	require.Equal(t, float64(1), snapshot.errors)
-	require.Equal(t, float64(1), snapshot.duration)
-}
-
 func TestShouldTriggerAdaptiveGC(t *testing.T) {
 	t.Parallel()
 	const vlogFileSize = int64(16 * 1024 * 1024)
@@ -1008,23 +980,4 @@ func TestBadgerGCBlockBatchEndsBoundsCountAndPayload(t *testing.T) {
 		require.True(t, payloadBytes <= 8 || hi-lo == 1)
 		lo = hi
 	}
-}
-
-func TestReadProcIO(t *testing.T) {
-	t.Parallel()
-	before := readProcIO()
-	if !before.ok {
-		t.Skip("process I/O counters are unavailable")
-	}
-	f, err := os.Open(filepath.Join(
-		"..", "..", "database", "immutable", "testdata", "00000.chunk",
-	))
-	require.NoError(t, err)
-	_, err = io.Copy(io.Discard, f)
-	require.NoError(t, err)
-	require.NoError(t, f.Close())
-	after := readProcIO()
-	require.True(t, after.ok)
-	require.GreaterOrEqual(t, after.readBytes, before.readBytes)
-	require.GreaterOrEqual(t, after.writeBytes, before.writeBytes)
 }

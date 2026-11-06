@@ -1281,6 +1281,7 @@ func TestProcessEpochRatifiesConwayAndDijkstra(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			db, _ := newTallyTestDB(t)
 			actionCbor, err := cbor.Encode(&lcommon.NoConfidenceGovAction{
 				Type: uint(lcommon.GovActionTypeNoConfidence),
@@ -1506,6 +1507,7 @@ func TestProcessEpochRatifiesAndEnactsDijkstraOnlyParameterChanges(
 
 	for index, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			db, store := newTallyTestDB(t)
 			actionCbor, err := cbor.Encode(
 				&gdijkstra.DijkstraParameterChangeGovAction{
@@ -2242,6 +2244,7 @@ func TestProcessEpochCommitteeTermLimit(t *testing.T) {
 
 	for testIndex, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			db, _ := newTallyTestDB(t)
 			var action lcommon.GovAction
 			switch test.actionType {

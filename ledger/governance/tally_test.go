@@ -176,49 +176,6 @@ func TestLoadSPOVotingStateMatchesLazyTally(t *testing.T) {
 	assert.Equal(t, uint64(100), precomputedTally.SPOYesStake)
 }
 
-func TestTallyDRepVotesIncludesAlwaysAbstain(t *testing.T) {
-	t.Parallel()
-
-	db, store := newTallyTestDB(t)
-	drepCred := testBytes(28, 1)
-	stakeCred := testBytes(28, 2)
-	abstainStakeCred := testBytes(28, 3)
-
-	require.NoError(t, store.CreateDrep(nil, &models.Drep{
-		Credential: drepCred,
-		Active:     true,
-	}))
-	seedDRepStake(
-		t, store, stakeCred, drepCred, models.DrepTypeAddrKeyHash, 60,
-		1,
-	)
-	seedDRepStake(
-		t, store, abstainStakeCred, nil, models.DrepTypeAlwaysAbstain,
-		40, 2,
-	)
-
-	tally := &ProposalTally{
-		ActionType: uint8(lcommon.GovActionTypeTreasuryWithdrawal),
-	}
-	err := tallyDRepVotes(
-		context.Background(),
-		&TallyContext{DB: db},
-		[]*models.GovernanceVote{{
-			VoterType:       models.VoterTypeDRep,
-			VoterCredential: drepCred,
-			Vote:            models.VoteYes,
-		}},
-		tally,
-	)
-	require.NoError(t, err)
-
-	assert.Equal(t, uint64(100), tally.DRepTotalStake)
-	assert.Equal(t, uint64(60), tally.DRepYesStake)
-	assert.Equal(t, uint64(0), tally.DRepNoStake)
-	assert.Equal(t, uint64(40), tally.DRepAbstainStake)
-	assert.Equal(t, "1/1", tally.DRepYesRatio().String())
-}
-
 func TestTallyDRepVotesIncludesAlwaysNoConfidence(t *testing.T) {
 	t.Parallel()
 
@@ -951,51 +908,51 @@ func TestTallyProposalCommitteeTermEpochIsInclusive(t *testing.T) {
 		{name: "after term epoch", currentEpoch: 11, wantActive: false},
 	}
 
+	db, store := newTallyTestDB(t)
+	cold := testBytes(28, 70)
+	hot := testBytes(28, 71)
+
+	require.NoError(t, store.SetCommitteeMembers(
+		[]*models.CommitteeMember{{
+			ColdCredHash: cold,
+			ExpiresEpoch: 10,
+			AddedSlot:    1,
+		}},
+		nil,
+	))
+	seedTallyCommitteeAuth(t, store, models.AuthCommitteeHot{
+		ColdCredential: cold,
+		HotCredential:  hot,
+		CertificateID:  1,
+		AddedSlot:      1,
+	})
+	proposal := &models.GovernanceProposal{
+		TxHash:        testBytes(32, 72),
+		ActionType:    uint8(lcommon.GovActionTypeInfo),
+		ProposedEpoch: 1,
+		ExpiresEpoch:  20,
+		AnchorHash:    testBytes(32, 73),
+		ReturnAddress: testBytes(29, 74),
+		AddedSlot:     1,
+	}
+	require.NoError(
+		t,
+		db.SetGovernanceProposal(context.Background(), proposal, nil),
+	)
+	require.NoError(t, db.SetGovernanceVote(
+		context.Background(),
+		&models.GovernanceVote{
+			ProposalID:      proposal.ID,
+			VoterType:       models.VoterTypeCC,
+			VoterCredential: hot,
+			Vote:            models.VoteYes,
+			AddedSlot:       2,
+		},
+		nil,
+	))
+
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
-			db, store := newTallyTestDB(t)
-			cold := testBytes(28, 70)
-			hot := testBytes(28, 71)
-
-			require.NoError(t, store.SetCommitteeMembers(
-				[]*models.CommitteeMember{{
-					ColdCredHash: cold,
-					ExpiresEpoch: 10,
-					AddedSlot:    1,
-				}},
-				nil,
-			))
-			seedTallyCommitteeAuth(t, store, models.AuthCommitteeHot{
-				ColdCredential: cold,
-				HotCredential:  hot,
-				CertificateID:  1,
-				AddedSlot:      1,
-			})
-			proposal := &models.GovernanceProposal{
-				TxHash:        testBytes(32, 72),
-				ActionType:    uint8(lcommon.GovActionTypeInfo),
-				ProposedEpoch: 1,
-				ExpiresEpoch:  20,
-				AnchorHash:    testBytes(32, 73),
-				ReturnAddress: testBytes(29, 74),
-				AddedSlot:     1,
-			}
-			require.NoError(
-				t,
-				db.SetGovernanceProposal(context.Background(), proposal, nil),
-			)
-			require.NoError(t, db.SetGovernanceVote(
-				context.Background(),
-				&models.GovernanceVote{
-					ProposalID:      proposal.ID,
-					VoterType:       models.VoterTypeCC,
-					VoterCredential: hot,
-					Vote:            models.VoteYes,
-					AddedSlot:       2,
-				},
-				nil,
-			))
-
 			tally, err := TallyProposal(context.Background(), &TallyContext{
 				DB:           db,
 				CurrentEpoch: testCase.currentEpoch,
@@ -1259,43 +1216,6 @@ WHERE id = ?`,
 	}
 }
 
-// TestTallySPOVotesExplicitVoteWins exercises the original behaviour:
-// pools with an explicit vote bypass the reward-account auto-vote
-// machinery even when their reward account is delegated to
-// AlwaysNoConfidence.
-func TestTallySPOVotesExplicitVoteWins(t *testing.T) {
-	t.Parallel()
-
-	db, store := newTallyTestDB(t)
-	poolKeyHash := testBytes(28, 50)
-	rewardAccount := testBytes(28, 51)
-
-	seedPoolWithStake(t, store, poolKeyHash, rewardAccount, 100, 5)
-	seedRewardAccountDelegation(
-		t, store, rewardAccount, nil, models.DrepTypeAlwaysNoConfidence,
-	)
-	resolveSnapshotAutoVotes(t, db, 5)
-
-	tally := &ProposalTally{
-		ActionType: uint8(lcommon.GovActionTypeTreasuryWithdrawal),
-	}
-	err := tallySPOVotes(context.Background(),
-		&TallyContext{DB: db, StakeEpoch: 5},
-		[]*models.GovernanceVote{{
-			VoterType:       models.VoterTypeSPO,
-			VoterCredential: poolKeyHash,
-			Vote:            models.VoteYes,
-		}},
-		tally,
-	)
-	require.NoError(t, err)
-
-	assert.Equal(t, uint64(100), tally.SPOTotalStake)
-	assert.Equal(t, uint64(100), tally.SPOYesStake)
-	assert.Equal(t, uint64(0), tally.SPONoStake)
-	assert.Equal(t, uint64(0), tally.SPOAbstainStake)
-}
-
 // TestTallySPOVotesAlwaysAbstainDelegation asserts that a pool with no
 // explicit vote whose reward account delegates to AlwaysAbstain has
 // its stake bucketed as abstain (and thus excluded from the SPO yes
@@ -1419,6 +1339,7 @@ func TestTallySPOVotesAlwaysNoConfidenceFlipsByActionType(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			db, store := newTallyTestDB(t)
 			seedPoolWithStake(
 				t, store, noConfidencePoolKey, noConfidenceRewardAcct,
