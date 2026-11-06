@@ -9428,8 +9428,14 @@ eligible upstream so its last leads back onto the network are never discarded.
 Peer sharing is an address-validation boundary in both directions. The server
 callback exports only sharable, nonzero-port IP literals accepted by the shared
 peer-governor routability policy; operator-configured private peers remain
-usable locally but are not advertised. Valid candidates are ordered by a salted
-hash of the address and the reply is capped at 10 addresses and at the
+usable locally but are not advertised. A local-root or public-root peer is
+sharable when its group sets `advertise`, and a bootstrap peer never is. A
+gossip or ledger peer becomes sharable only after an outbound connection to it
+succeeds, as the reference node shares only peers it has connected to. An
+inbound connection never makes its remote address sharable: a duplex handshake
+does not prove the source port is a listening port, since Dingo negotiates
+duplex mode whether or not it dials from its listening port. Valid candidates
+are ordered by a salted hash of the address and the reply is capped at 10 addresses and at the
 requested count, as in the reference node. The salt is regenerated every 823
 seconds, so a requester sees a stable answer within a window and a different
 subset after it. A received reply is capped to the
