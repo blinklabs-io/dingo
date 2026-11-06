@@ -42,7 +42,7 @@ func overBudgetBlockHash(i int) []byte {
 // before the inventory existed.
 func seedLegacyRetainedBlocks(t *testing.T, db *Database, count int) {
 	t.Helper()
-	const batch = 2_000
+	const batch = 100
 	for start := 0; start < count; start += batch {
 		end := min(start+batch, count)
 		txn := NewBlobOnlyTxn(db, true)
@@ -106,7 +106,7 @@ func TestBlockInventoryClearsOverBudgetStaleIndex(t *testing.T) {
 	db := newOnDiskTestDB(t)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 
-	const batch = 2_000
+	const batch = 100
 	for start := 0; start < overBudgetRetainedBlocks; start += batch {
 		end := min(start+batch, overBudgetRetainedBlocks)
 		txn := NewBlobOnlyTxn(db, true)

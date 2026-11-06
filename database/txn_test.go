@@ -582,6 +582,7 @@ func TestTerminalTxnPathsReleaseCommitBarrierExactlyOnce(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			db := tc.newDB(t)
 			txn := tc.run(t, db)
 			requireCommitBarrierFree(t, db)
@@ -659,6 +660,7 @@ func TestOnFinishFiresOnEveryTerminalPath(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			db := newTestDB(t)
 			txn := db.BlobTxn(tc.readWrite)
 			var calls int

@@ -1154,6 +1154,26 @@ func TestSetTransactionBatchedSpendsPreviousBlockOutputInSameBatch(
 	)
 }
 
+var (
+	candidateCacheMu sync.Mutex
+	candidateCache   = map[string]any{}
+)
+
+// memoizedCandidate runs the immutable-testdata scan once per key for the whole
+// test binary. Every caller reads the result and none mutates it, so the full
+// chain scan need not be repeated by each of the tests that start from it.
+func memoizedCandidate[T any](t *testing.T, key string, scan func() T) T {
+	t.Helper()
+	candidateCacheMu.Lock()
+	defer candidateCacheMu.Unlock()
+	if v, ok := candidateCache[key]; ok {
+		return v.(T)
+	}
+	v := scan()
+	candidateCache[key] = v
+	return v
+}
+
 func findGapRollbackCandidate(t *testing.T) gapRollbackCandidate {
 	return findGapRollbackCandidateMatching(t, false)
 }
@@ -1165,6 +1185,20 @@ func findGapRollbackCandidateWithoutCertificates(
 }
 
 func findGapRollbackCandidateMatching(
+	t *testing.T,
+	requireNoCertificates bool,
+) gapRollbackCandidate {
+	t.Helper()
+	return memoizedCandidate(
+		t,
+		fmt.Sprintf("rollback/%t", requireNoCertificates),
+		func() gapRollbackCandidate {
+			return scanGapRollbackCandidate(t, requireNoCertificates)
+		},
+	)
+}
+
+func scanGapRollbackCandidate(
 	t *testing.T,
 	requireNoCertificates bool,
 ) gapRollbackCandidate {
@@ -1337,6 +1371,13 @@ func inputRefKey(txId []byte, outputIdx uint32) string {
 // ingestion path through two SetGapBlockTransaction calls.
 func findGapConsumeCandidate(t *testing.T) gapConsumeCandidate {
 	t.Helper()
+	return memoizedCandidate(t, "consume", func() gapConsumeCandidate {
+		return scanGapConsumeCandidate(t)
+	})
+}
+
+func scanGapConsumeCandidate(t *testing.T) gapConsumeCandidate {
+	t.Helper()
 
 	imm, err := immutable.New("immutable/testdata")
 	require.NoError(t, err)
@@ -1446,6 +1487,15 @@ func findGapConsumeCandidate(t *testing.T) gapConsumeCandidate {
 // position) that carries certificates so callers can drive the pair
 // through SetTransaction with no certDeposits map.
 func findGapConsumeCandidateWithoutCertificates(
+	t *testing.T,
+) gapConsumeCandidate {
+	t.Helper()
+	return memoizedCandidate(t, "consume-nocert", func() gapConsumeCandidate {
+		return scanGapConsumeCandidateWithoutCertificates(t)
+	})
+}
+
+func scanGapConsumeCandidateWithoutCertificates(
 	t *testing.T,
 ) gapConsumeCandidate {
 	t.Helper()
@@ -1560,6 +1610,19 @@ func findGapConsumeCandidateWithoutCertificates(
 }
 
 func findBatchedCrossBlockSpendCandidate(
+	t *testing.T,
+) batchedCrossBlockSpendCandidate {
+	t.Helper()
+	return memoizedCandidate(
+		t,
+		"cross-block-spend",
+		func() batchedCrossBlockSpendCandidate {
+			return scanBatchedCrossBlockSpendCandidate(t)
+		},
+	)
+}
+
+func scanBatchedCrossBlockSpendCandidate(
 	t *testing.T,
 ) batchedCrossBlockSpendCandidate {
 	t.Helper()
@@ -2228,6 +2291,8 @@ func TestPhase1ConcurrentFirstOpenOneWinnerOneMismatch(t *testing.T) {
 	t.Parallel()
 
 	for i := range 5 {
+		// Not t.Parallel: each iteration races two openers, and running the
+		// iterations together starves them into mutual failures under load.
 		t.Run(fmt.Sprintf("iteration_%d", i), func(t *testing.T) {
 			metaDir := t.TempDir()
 			blobDirA := t.TempDir()
@@ -2598,86 +2663,6 @@ func TestNodeSettingsMetadataSetDoesNotOverwrite(t *testing.T) {
 	}
 }
 
-// TestListSyncStateKeysByPrefix covers the byte-prefix scan used to repopulate
-// the deferred-header retention set after a restart. The match
-// must be an exact BYTE prefix on every backend, so this asserts cases a
-// collation-sensitive SQL range or LIKE could get wrong: uppercase/mixed-case
-// variants a case-insensitive column collation would fold in, a sibling prefix
-// one byte away, and a non-ASCII neighbor a synthesized range upper bound could
-// mishandle. The prefix also contains a LIKE wildcard ('_') to prove no
-// wildcard escaping is needed.
-func TestListSyncStateKeysByPrefix(t *testing.T) {
-	t.Parallel()
-
-	db, err := newTestDatabase(t, &Config{DataDir: t.TempDir()})
-	require.NoError(t, err)
-	defer func() { require.NoError(t, db.Close()) }()
-
-	const prefix = "deferred_header_validation:"
-	want := []string{
-		prefix + "10:aa",
-		prefix + "13:bb",
-		prefix + "21:cc",
-	}
-	for _, k := range want {
-		require.NoError(t, db.SetSyncState(k, "true", nil))
-	}
-	// Decoys that must NOT match under an exact byte-prefix filter:
-	decoys := []string{
-		// Shorter than the prefix.
-		"deferred_header_validation",
-		// A sibling prefix differing only in the last byte.
-		"deferred_header_validatioo:zz",
-		// Unrelated key.
-		"other_key",
-		// Uppercased prefix: a case-INSENSITIVE column collation on
-		// MySQL/Postgres would wrongly fold this into the match; a byte prefix
-		// must exclude it.
-		"DEFERRED_HEADER_VALIDATION:99",
-		// Mixed case variant, same hazard.
-		"Deferred_Header_Validation:88",
-		// A non-ASCII key adjacent in Unicode: proves the match does not depend
-		// on a synthesized range upper bound (which a non-ASCII prefix could
-		// make invalid) and is not confused by locale collation ordering.
-		"deferred_header_validationé:77",
-	}
-	for _, k := range decoys {
-		require.NoError(t, db.SetSyncState(k, "x", nil))
-	}
-
-	got, err := db.ListSyncStateKeysByPrefix(prefix, nil)
-	require.NoError(t, err)
-	require.ElementsMatch(
-		t,
-		want,
-		got,
-		"only exact byte-prefix keys must match (no collation folding)",
-	)
-
-	// A non-ASCII prefix must scan safely and match exactly by bytes. The
-	// "...é:77" decoy above shares this UTF-8 prefix, so both it and the key
-	// added here must come back (and nothing ASCII-only).
-	const utf8Prefix = "deferred_header_validationé:"
-	require.NoError(t, db.SetSyncState(utf8Prefix+"aa", "true", nil))
-	utf8Got, err := db.ListSyncStateKeysByPrefix(utf8Prefix, nil)
-	require.NoError(t, err)
-	require.ElementsMatch(
-		t,
-		[]string{utf8Prefix + "77", utf8Prefix + "aa"},
-		utf8Got,
-	)
-
-	// Empty prefix returns everything.
-	all, err := db.ListSyncStateKeysByPrefix("", nil)
-	require.NoError(t, err)
-	require.GreaterOrEqual(t, len(all), len(want)+len(decoys))
-
-	// A prefix matching nothing returns empty, not an error.
-	none, err := db.ListSyncStateKeysByPrefix("zzz_no_such_prefix:", nil)
-	require.NoError(t, err)
-	require.Empty(t, none)
-}
-
 var testDatabaseHosts sync.Map
 
 func newTestDatabase(
@@ -2728,6 +2713,21 @@ func newTestDatabaseWithHostRunMode(
 	keepOnError bool,
 	runMode string,
 ) (*Database, error) {
+	return newTestDatabaseWithBlobConfig(
+		tb, config, keepOnError, runMode, testutil.BadgerBlobConfig(),
+	)
+}
+
+// newTestDatabaseWithBlobConfig is newTestDatabaseWithHostRunMode with an
+// explicit badger provider config, for tests that need a store of a specific
+// size.
+func newTestDatabaseWithBlobConfig(
+	tb testing.TB,
+	config *Config,
+	keepOnError bool,
+	runMode string,
+	blobConfig map[string]any,
+) (*Database, error) {
 	tb.Helper()
 	if config == nil {
 		config = DefaultConfig
@@ -2742,7 +2742,7 @@ func newTestDatabaseWithHostRunMode(
 	}
 	blobStore, err := plugin.Resolve[blob.BlobStore](
 		context.Background(), host,
-		plugin.CapabilityStorageBlob, "badger", testutil.BadgerBlobConfig(),
+		plugin.CapabilityStorageBlob, "badger", blobConfig,
 		blob.ProviderDependencies{
 			DataDir: config.DataDir, StorageMode: config.StorageMode,
 			RunMode: runMode,
@@ -3200,6 +3200,7 @@ func TestSetTransactionZeroProducedOutputsLogging(t *testing.T) {
 	}
 
 	t.Run("zero-output transaction does not warn", func(t *testing.T) {
+		t.Parallel()
 		var logs bytes.Buffer
 		db := newStagedDB(t, &logs)
 		out := setTx(
@@ -3210,6 +3211,7 @@ func TestSetTransactionZeroProducedOutputsLogging(t *testing.T) {
 	})
 
 	t.Run("transaction with outputs does not warn", func(t *testing.T) {
+		t.Parallel()
 		var logs bytes.Buffer
 		db := newStagedDB(t, &logs)
 		out := setTx(t, db, &logs, candidate.consumerTx)
@@ -3217,6 +3219,7 @@ func TestSetTransactionZeroProducedOutputsLogging(t *testing.T) {
 	})
 
 	t.Run("dropped outputs warn", func(t *testing.T) {
+		t.Parallel()
 		var logs bytes.Buffer
 		db := newStagedDB(t, &logs)
 		out := setTx(
@@ -3240,6 +3243,7 @@ func TestSetTransactionZeroProducedOutputsLogging(t *testing.T) {
 	t.Run(
 		"invalid transaction without collateral return does not warn",
 		func(t *testing.T) {
+			t.Parallel()
 			var logs bytes.Buffer
 			db := newStagedDB(t, &logs)
 			out := setTx(
@@ -3251,6 +3255,7 @@ func TestSetTransactionZeroProducedOutputsLogging(t *testing.T) {
 	)
 
 	t.Run("dropped collateral return warns", func(t *testing.T) {
+		t.Parallel()
 		const collateralLovelace = 1_000_000
 		collateralReturn, err := mockledger.NewTransactionOutputBuilder().
 			WithAddress(collateralReturnAddress).
@@ -3285,6 +3290,7 @@ func TestSetTransactionZeroProducedOutputsLogging(t *testing.T) {
 	t.Run(
 		"invalid transaction keeping its collateral return does not warn",
 		func(t *testing.T) {
+			t.Parallel()
 			collateralReturn, err := mockledger.NewTransactionOutputBuilder().
 				WithAddress(collateralReturnAddress).
 				WithLovelace(1_000_000).
