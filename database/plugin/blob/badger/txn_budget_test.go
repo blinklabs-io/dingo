@@ -52,6 +52,7 @@ func budgetTestKey(i int) []byte {
 // stages that many is full, and no fewer, so a caller that reserves headroom
 // really has it.
 func TestRemainingTxnEntriesIsExact(t *testing.T) {
+	t.Parallel()
 	store := newBudgetTestStore(t)
 
 	txn := store.NewTransaction(true)
@@ -85,6 +86,7 @@ func TestRemainingTxnEntriesIsExact(t *testing.T) {
 // the transaction commits. Running the budget to zero instead is what wedges
 // a startup rollback.
 func TestRemainingTxnEntriesLeavesRoomForCommitTimestamp(t *testing.T) {
+	t.Parallel()
 	store := newBudgetTestStore(t)
 
 	txn := store.NewTransaction(true)
@@ -109,6 +111,7 @@ func TestRemainingTxnEntriesLeavesRoomForCommitTimestamp(t *testing.T) {
 // than a number for a handle it does not own, so a caller falls back to
 // staging unbounded instead of trusting a budget from the wrong store.
 func TestRemainingTxnEntriesRejectsForeignTxn(t *testing.T) {
+	t.Parallel()
 	store := newBudgetTestStore(t)
 	other := newBudgetTestStore(t)
 

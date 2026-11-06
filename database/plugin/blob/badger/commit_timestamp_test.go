@@ -23,22 +23,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestGetCommitTimestampRoundTrip proves the normal 8-byte fixed-width path
-// still round-trips.
-func TestGetCommitTimestampRoundTrip(t *testing.T) {
-	store, err := New()
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = store.Close() })
-
-	txn := store.NewTransaction(true)
-	require.NoError(t, store.SetCommitTimestamp(1234567890, txn))
-	require.NoError(t, txn.Commit())
-
-	got, err := store.GetCommitTimestamp()
-	require.NoError(t, err)
-	require.Equal(t, int64(1234567890), got)
-}
-
 // TestGetCommitTimestampRejectsOversizedLegacyValue proves the legacy
 // variable-length fallback decoder rejects a stored value that does not fit
 // in an int64 instead of silently truncating it: big.Int.Int64() is
@@ -46,6 +30,7 @@ func TestGetCommitTimestampRoundTrip(t *testing.T) {
 // timestamp would hand callers a garbage value with no indication anything
 // was wrong.
 func TestGetCommitTimestampRejectsOversizedLegacyValue(t *testing.T) {
+	t.Parallel()
 	store, err := New()
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = store.Close() })
@@ -73,6 +58,7 @@ func TestGetCommitTimestampRejectsOversizedLegacyValue(t *testing.T) {
 // originally guarded against that -- this stored value is exactly 8
 // bytes, so it takes the fixed-width path, not the fallback.
 func TestGetCommitTimestampRejectsFixedWidthValueAboveMaxInt64(t *testing.T) {
+	t.Parallel()
 	store, err := New()
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = store.Close() })

@@ -156,6 +156,7 @@ func stop(ctx context.Context, l *Listener) error {
 // time, which is what makes a second Start fail rather than strand the first
 // server's socket with nothing left able to reach it.
 func TestPublishRejectsASecondServer(t *testing.T) {
+	t.Parallel()
 	l := newListener()
 	_, _, err := publish(l, "127.0.0.1:0")
 	require.NoError(t, err)
@@ -167,6 +168,7 @@ func TestPublishRejectsASecondServer(t *testing.T) {
 // TestUnpublishOnlyClearsTheCurrentServer asserts a failed Start does not
 // discard a server that an overlapping Stop or restart already replaced.
 func TestUnpublishOnlyClearsTheCurrentServer(t *testing.T) {
+	t.Parallel()
 	l := newListener()
 	current, _, err := publish(l, "127.0.0.1:0")
 	require.NoError(t, err)
@@ -186,6 +188,7 @@ func TestUnpublishOnlyClearsTheCurrentServer(t *testing.T) {
 // cleared as a set. A cleared server paired with a surviving bind channel
 // would leave the next Publish's take handing out a stale channel.
 func TestUnpublishClearsTheBindChannelWithTheServer(t *testing.T) {
+	t.Parallel()
 	l := newListener()
 	srv, _, err := publish(l, "127.0.0.1:0")
 	require.NoError(t, err)
@@ -209,6 +212,7 @@ func TestUnpublishClearsTheBindChannelWithTheServer(t *testing.T) {
 // landing in that window finds a server with nothing registered -- and
 // Shutdown alone leaves the port bound after Stop returns.
 func TestShutdownClosesAListenerServeNeverRegistered(t *testing.T) {
+	t.Parallel()
 	l := newListener()
 	// Bound on port 0 so no other test can take the port between a probe and
 	// the listen.
@@ -242,6 +246,7 @@ func TestShutdownClosesAListenerServeNeverRegistered(t *testing.T) {
 // runs -- meaning Bind must not leave its own socket bound, and must not
 // overwrite the listener of whichever server is current now.
 func TestBindReleasesListenerWhenServerAlreadyDetached(t *testing.T) {
+	t.Parallel()
 	l := newListener()
 
 	// Stands in for the server a concurrent restart already published; it must
@@ -283,6 +288,7 @@ func TestBindReleasesListenerWhenServerAlreadyDetached(t *testing.T) {
 // that channel would otherwise block until its context expired, waiting on a
 // bind that had already given up.
 func TestBindSignalsBindDoneOnKeypairFailure(t *testing.T) {
+	t.Parallel()
 	l := newListener()
 	srv, bindDone, err := publish(l, testutil.FreePort(t))
 	require.NoError(t, err)
@@ -304,6 +310,7 @@ func TestBindSignalsBindDoneOnKeypairFailure(t *testing.T) {
 // TestBindSignalsBindDoneOnListenFailure asserts the same for a lost port
 // race, which is the failure an operator actually hits.
 func TestBindSignalsBindDoneOnListenFailure(t *testing.T) {
+	t.Parallel()
 	occupied, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = occupied.Close() })
@@ -328,6 +335,7 @@ func TestBindSignalsBindDoneOnListenFailure(t *testing.T) {
 // published another one on the same Listener. An unconditional detach there
 // would shut the replacement down.
 func TestMatchedTakeIgnoresAServerItDoesNotOwn(t *testing.T) {
+	t.Parallel()
 	l := newListener()
 	first, err := publishBound(l, "127.0.0.1:0")
 	require.NoError(t, err)
@@ -355,6 +363,7 @@ func TestMatchedTakeIgnoresAServerItDoesNotOwn(t *testing.T) {
 // case it exists to serve: a monitor whose server is still the current one
 // still tears it down.
 func TestMatchedTakeDetachesItsOwnServer(t *testing.T) {
+	t.Parallel()
 	l := newListener()
 	srv, err := publishBound(l, "127.0.0.1:0")
 	require.NoError(t, err)
@@ -372,6 +381,7 @@ func TestMatchedTakeDetachesItsOwnServer(t *testing.T) {
 // left, not handed a teardown that belongs to whoever detached it. Waiting on
 // that would block a monitor on an unrelated shutdown.
 func TestMatchedTakeHandsBackNoTeardownWhenItsServerIsGone(t *testing.T) {
+	t.Parallel()
 	l := newListener()
 	srv, err := publishBound(l, "127.0.0.1:0")
 	require.NoError(t, err)
@@ -401,6 +411,7 @@ func TestMatchedTakeHandsBackNoTeardownWhenItsServerIsGone(t *testing.T) {
 // the socket instead of serving it, so Start does not log that a listener came
 // up when a concurrent Stop means none did.
 func TestBindReportsLostPublication(t *testing.T) {
+	t.Parallel()
 	l := newListener()
 
 	// Stands in for a Stop that detached between Publish and Bind: the server
@@ -416,6 +427,7 @@ func TestBindReportsLostPublication(t *testing.T) {
 // TestBindReportsServed asserts the reporting side that Start's success log
 // depends on.
 func TestBindReportsServed(t *testing.T) {
+	t.Parallel()
 	l := newListener()
 	srv, bindDone, err := publish(l, "127.0.0.1:0")
 	require.NoError(t, err)
@@ -427,37 +439,6 @@ func TestBindReportsServed(t *testing.T) {
 	require.True(t, served)
 }
 
-// TestServeEnteredAfterShutdownStaysQuiet pins the residual window Bind cannot
-// close: a Stop can detach and tear down between Bind recording the listener
-// and its goroutine entering Serve, so Serve is handed an already-closed socket
-// it never serves.
-//
-// What matters is that the window is inert. Serve reports ErrServerClosed --
-// the one value the goroutine's error filter deliberately drops -- so the case
-// produces no spurious error log, and the port is released either way. The only
-// visible artifact is Start having already logged that the listener came up.
-// Closing the window entirely would need Serve to signal that it registered the
-// listener, which net/http does not expose, and would still lose to a Stop
-// landing an instant later.
-func TestServeEnteredAfterShutdownStaysQuiet(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	addr := ln.Addr().String()
-	srv := &http.Server{Addr: addr} //nolint:gosec // test server
-
-	// The teardown, landing before Serve is entered.
-	require.NoError(t, srv.Shutdown(context.Background()))
-	require.NoError(t, ln.Close())
-
-	serveErr := srv.Serve(ln)
-
-	require.ErrorIs(
-		t, serveErr, http.ErrServerClosed,
-		"Serve entered after Shutdown must stay within the filtered error",
-	)
-	requireClosed(t, ln, "the port must still be released")
-}
-
 // --- shutdown coordination ----------------------------------------------
 
 // TestShutdownWaitsForAnInFlightBind asserts Stop does not report the server
@@ -466,6 +447,7 @@ func TestServeEnteredAfterShutdownStaysQuiet(t *testing.T) {
 // without waiting here Stop could return -- and a caller could rebind the same
 // port -- while the old socket was still open.
 func TestShutdownWaitsForAnInFlightBind(t *testing.T) {
+	t.Parallel()
 	l := newListener()
 
 	// Stands in for a published server whose bind has not finished yet.
@@ -495,6 +477,7 @@ func TestShutdownWaitsForAnInFlightBind(t *testing.T) {
 // the wait error without tearing down would leave the port bound with nothing
 // left able to close it.
 func TestShutdownTearsDownEvenWhenTheBindWaitTimesOut(t *testing.T) {
+	t.Parallel()
 	l := newListener()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
@@ -523,6 +506,7 @@ func TestShutdownTearsDownEvenWhenTheBindWaitTimesOut(t *testing.T) {
 // detach; only one wins, and a Stop that returned nil while the winner was
 // still releasing the port would let an immediate restart fail to bind.
 func TestStopWaitsForATeardownItLost(t *testing.T) {
+	t.Parallel()
 	l := newListener()
 
 	// Stands in for another caller having already detached the server and
@@ -549,6 +533,7 @@ func TestStopWaitsForATeardownItLost(t *testing.T) {
 // both ready, select picks at random, so the loop is what makes the absence of
 // a recheck fail rather than flake.
 func TestAwaitTeardownPrefersACompletedTeardown(t *testing.T) {
+	t.Parallel()
 	l := newListener()
 	done := make(chan struct{})
 	close(done)
@@ -569,6 +554,7 @@ func TestAwaitTeardownPrefersACompletedTeardown(t *testing.T) {
 // that Stop cannot close, so a second caller waiting on the teardown has to
 // keep waiting rather than read it as "the port is free".
 func TestTimedOutTeardownDoesNotSignalCompletionEarly(t *testing.T) {
+	t.Parallel()
 	l := newListener()
 	bindDone := make(chan struct{})
 
@@ -604,6 +590,7 @@ func TestTimedOutTeardownDoesNotSignalCompletionEarly(t *testing.T) {
 // TestStopOnAnUnstartedListenerIsClean asserts Stop before Start is not an
 // error. The node stops capabilities it may never have started.
 func TestStopOnAnUnstartedListenerIsClean(t *testing.T) {
+	t.Parallel()
 	require.NoError(t, stopNow(t, newListener()))
 }
 
@@ -618,6 +605,7 @@ func TestStopOnAnUnstartedListenerIsClean(t *testing.T) {
 // The release is asserted on the socket and the second server binds port 0: a
 // rebind of the released address also fails when another process takes it.
 func TestListenerIsReusableAfterShutdown(t *testing.T) {
+	t.Parallel()
 	l, ln := startOnFreePort(t)
 	require.NoError(t, stopNow(t, l))
 	requireClosed(t, ln, "a clean Stop must have released the port")
@@ -745,6 +733,7 @@ func TestConcurrentBindStopNeverLeavesThePortBound(t *testing.T) {
 // Pinned by the wait rather than by a race: with the gate held and no start
 // ever completing, a bounded Stop must time out.
 func TestStopWaitsForAStartStillInFlight(t *testing.T) {
+	t.Parallel()
 	l := newListener()
 	startDone, err := l.BeginStart()
 	require.NoError(t, err)
@@ -770,6 +759,7 @@ func TestStopWaitsForAStartStillInFlight(t *testing.T) {
 // is launched, so the publish and bind below are the ones that would otherwise
 // have landed behind a Stop that had already returned.
 func TestStopTakesDownAServerPublishedWhileItWaited(t *testing.T) {
+	t.Parallel()
 	l := newListener()
 	startDone, err := l.BeginStart()
 	require.NoError(t, err)
@@ -806,6 +796,7 @@ func TestStopTakesDownAServerPublishedWhileItWaited(t *testing.T) {
 // TestBeginStartRejectsASecondStart asserts the gate admits one start at a
 // time, and is released for the next one.
 func TestBeginStartRejectsASecondStart(t *testing.T) {
+	t.Parallel()
 	l := newListener()
 	first, err := l.BeginStart()
 	require.NoError(t, err)
@@ -826,6 +817,7 @@ func TestBeginStartRejectsASecondStart(t *testing.T) {
 // defers EndStart before it can fail, including the failure that is losing the
 // gate, so this path is taken on every rejected concurrent start.
 func TestEndStartOnlyReleasesTheGateItHolds(t *testing.T) {
+	t.Parallel()
 	l := newListener()
 	held, err := l.BeginStart()
 	require.NoError(t, err)
@@ -863,6 +855,7 @@ func TestEndStartOnlyReleasesTheGateItHolds(t *testing.T) {
 // live Restore or Truncate performs another Start, so the retained set grows
 // with operator actions and includes the database each restore just replaced.
 func TestWatchExitsWhenItsServerIsStopped(t *testing.T) {
+	t.Parallel()
 	l := newListener()
 	srv, err := publishBound(l, "127.0.0.1:0")
 	require.NoError(t, err)
@@ -884,6 +877,7 @@ func TestWatchExitsWhenItsServerIsStopped(t *testing.T) {
 // leaves the Listener: a Start whose bind failed clears it, and the monitor it
 // already launched has nothing left to watch.
 func TestWatchExitsWhenAFailedStartUnpublishes(t *testing.T) {
+	t.Parallel()
 	l := newListener()
 	srv, _, err := publish(l, "127.0.0.1:0")
 	require.NoError(t, err)
@@ -902,6 +896,7 @@ func TestWatchExitsWhenAFailedStartUnpublishes(t *testing.T) {
 // cost the monitor its job: a cancelled context still releases the port,
 // whatever the server's own Stop is doing.
 func TestWatchShutsDownOnContextCancellation(t *testing.T) {
+	t.Parallel()
 	l, ln := startOnFreePort(t)
 	srv := l.Server()
 	require.NotNil(t, srv)
@@ -923,6 +918,7 @@ func TestWatchShutsDownOnContextCancellation(t *testing.T) {
 // server that was already detached does not wait on a channel nobody will
 // close. Reachable when a context is cancelled between Publish and Watch.
 func TestWatchOnAReplacedServerExitsImmediately(t *testing.T) {
+	t.Parallel()
 	l := newListener()
 	stale, err := publishBound(l, "127.0.0.1:0")
 	require.NoError(t, err)

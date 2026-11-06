@@ -23,6 +23,7 @@ import (
 )
 
 func TestTriggerHardFork_String(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		in   hardfork.TriggerHardFork
 		want string

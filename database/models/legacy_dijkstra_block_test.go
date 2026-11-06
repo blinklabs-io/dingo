@@ -28,6 +28,7 @@ import (
 )
 
 func TestDecodeDijkstraPeerBlockRejectsLegacyMusashiBody(t *testing.T) {
+	t.Parallel()
 	rawText, err := os.ReadFile("testdata/musashi_dijkstra_block.hex")
 	require.NoError(t, err)
 	raw, err := hex.DecodeString(strings.TrimSpace(string(rawText)))
@@ -39,6 +40,7 @@ func TestDecodeDijkstraPeerBlockRejectsLegacyMusashiBody(t *testing.T) {
 }
 
 func TestDecodeDijkstraBlockPreservesLegacyMusashiBody(t *testing.T) {
+	t.Parallel()
 	rawText, err := os.ReadFile("testdata/musashi_dijkstra_block.hex")
 	require.NoError(t, err)
 	raw, err := hex.DecodeString(strings.TrimSpace(string(rawText)))
