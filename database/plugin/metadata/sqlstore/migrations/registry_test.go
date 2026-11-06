@@ -358,8 +358,8 @@ func TestDrepDormancySeedUsesPortableIdempotentInsert(t *testing.T) {
 		dialect  string
 	}{
 		{name: "sqlite", registry: SQLiteRegistry, dialect: "sqlite"},
-		{name: "postgres", registry: PostgresRegistry, dialect: "postgres"},
-		{name: "mysql", registry: MySQLRegistry, dialect: "mysql"},
+		{name: "postgres", registry: cachedPostgresRegistry, dialect: "postgres"},
+		{name: "mysql", registry: cachedMySQLRegistry, dialect: "mysql"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			registry, err := tc.registry()
@@ -622,14 +622,14 @@ func TestUtxoAddressIdentityMigrationTranslatesForProviders(t *testing.T) {
 			indexFragment: "ON `utxo_address` (`address`)",
 		},
 		{
-			name: "postgres", registry: PostgresRegistry, dialect: "postgres",
+			name: "postgres", registry: cachedPostgresRegistry, dialect: "postgres",
 			idDefinition:  "\"utxo_id\" BIGINT PRIMARY KEY",
 			addressType:   "\"address\" BYTEA NOT NULL",
 			foreignKey:    "FOREIGN KEY (\"utxo_id\")",
 			indexFragment: "ON \"utxo_address\" (\"address\")",
 		},
 		{
-			name: "mysql", registry: MySQLRegistry, dialect: "mysql",
+			name: "mysql", registry: cachedMySQLRegistry, dialect: "mysql",
 			idDefinition:  "`utxo_id` BIGINT PRIMARY KEY",
 			addressType:   "`address` BLOB NOT NULL",
 			foreignKey:    "FOREIGN KEY (`utxo_id`)",

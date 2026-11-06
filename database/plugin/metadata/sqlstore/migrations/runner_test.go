@@ -644,8 +644,8 @@ func TestAddColumnPatternMatchesShippedMigrations(t *testing.T) {
 		load func() ([]Migration, error)
 	}{
 		{name: "sqlite", load: SQLiteRegistry},
-		{name: "postgres", load: PostgresRegistry},
-		{name: "mysql", load: MySQLRegistry},
+		{name: "postgres", load: cachedPostgresRegistry},
+		{name: "mysql", load: cachedMySQLRegistry},
 	} {
 		registry, err := dialect.load()
 		require.NoError(t, err)
