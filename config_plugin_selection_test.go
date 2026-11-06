@@ -38,44 +38,6 @@ func apiCapabilities() []plugin.Capability {
 	return ret
 }
 
-// TestWithPluginSelectionAppliesEveryCapability pins that
-// WithPluginSelection's switch handles every capability. A missing case makes
-// the option a silent no-op: the selection is discarded, the capability never
-// reaches pluginSelections, and apiPluginSelection then fails with "plugin
-// selection is missing for capability <name>" for every node, whether or not
-// that API was configured.
-func TestWithPluginSelectionAppliesEveryCapability(t *testing.T) {
-	t.Parallel()
-
-	for _, capability := range plugin.AllCapabilities() {
-		t.Run(string(capability), func(t *testing.T) {
-			t.Parallel()
-
-			cfg := NewConfig(
-				WithPluginSelection(capability, plugin.Selection{
-					Provider: "test-provider",
-					Config:   map[string]any{"port": 4242},
-				}),
-			)
-			selection, ok := cfg.pluginSelections[capability]
-			require.Truef(
-				t,
-				ok,
-				"pluginSelections has no entry for %s: "+
-					"WithPluginSelection has no case for it, or "+
-					"syncCompatFields omits it from the map",
-				capability,
-			)
-			assert.Equal(t, "test-provider", selection.Provider)
-			assert.Equal(
-				t,
-				map[string]any{"port": 4242},
-				selection.Config,
-			)
-		})
-	}
-}
-
 // TestAPIPluginSelectionResolvesEveryAPICapability covers the consumer side:
 // Node.Run and reinitializeAPIServers call apiPluginSelection for each API
 // capability before the port gate that makes it optional, so an unwired

@@ -655,16 +655,14 @@ func TestLedgerStateConfigPraos2OnlyForMusashi(t *testing.T) {
 				RunMode:      tt.runMode,
 				StartEra:     tt.startEra,
 			}}}
-			assert.Equal(
-				t,
-				tt.want,
-				n.ledgerStateConfig().Praos2ChainDepState,
-			)
+			cfg := n.ledgerStateConfig()
+			assert.Equal(t, tt.want, cfg.Praos2ChainDepState)
+			// The stake pool state query is gated on the same network
+			// identity.
+			assert.Equal(t, tt.want, cfg.StakePoolStateQuery)
 		})
 	}
-	assert.False(
-		t,
-		(&Node{config: Config{}}).ledgerStateConfig().Praos2ChainDepState,
-		"a zero config keeps Praos",
-	)
+	zero := (&Node{config: Config{}}).ledgerStateConfig()
+	assert.False(t, zero.Praos2ChainDepState, "a zero config keeps Praos")
+	assert.False(t, zero.StakePoolStateQuery)
 }
