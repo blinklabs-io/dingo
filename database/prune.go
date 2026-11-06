@@ -51,6 +51,15 @@ const oldestRetainedScanLimit = 4096
 func (d *Database) OldestRetainedSlot(
 	ctx context.Context,
 ) (slot uint64, ok bool, err error) {
+	return d.oldestRetainedSlot(ctx, oldestRetainedScanLimit)
+}
+
+// oldestRetainedSlot is OldestRetainedSlot with the tombstone limit as a
+// parameter.
+func (d *Database) oldestRetainedSlot(
+	ctx context.Context,
+	limit int,
+) (slot uint64, ok bool, err error) {
 	raw, err := d.GetSyncState(HistoryExpiryCursorSyncKey, nil)
 	if err != nil {
 		return 0, false, fmt.Errorf("read history expiry cursor: %w", err)
@@ -64,10 +73,15 @@ func (d *Database) OldestRetainedSlot(
 	}
 	iter := d.BlocksInRangeContext(ctx, cursor, ^uint64(0))
 	defer iter.Close()
-	for range oldestRetainedScanLimit {
+	skipped := 0
+	for {
 		next, err := iter.NextRaw()
 		if err != nil {
 			if errors.Is(err, types.ErrHistoryExpired) {
+				if skipped >= limit {
+					return 0, false, nil
+				}
+				skipped++
 				continue
 			}
 			return 0, false, fmt.Errorf("scan retained history: %w", err)
@@ -77,7 +91,6 @@ func (d *Database) OldestRetainedSlot(
 		}
 		return next.Slot, true, nil
 	}
-	return 0, false, nil
 }
 
 // lowerHistoryExpiryCursor caps the history-expiry cursor at slot. A cursor

@@ -17,6 +17,7 @@ package database
 import (
 	"bytes"
 	"context"
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -497,6 +498,36 @@ func TestOldestRetainedSlot(t *testing.T) {
 				))
 			}
 			got, ok, err := db.OldestRetainedSlot(context.Background())
+			require.NoError(t, err)
+			require.Equal(t, tc.wantOK, ok)
+			require.Equal(t, tc.want, got)
+		})
+	}
+}
+
+// The scan limit counts expired blocks skipped, not blocks read: with three
+// tombstones before the retained block, a limit of three finds it and a limit
+// of two reports unknown.
+func TestOldestRetainedSlot_ScanLimit(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		limit  int
+		want   uint64
+		wantOK bool
+	}{
+		{limit: 2},
+		{limit: 3, want: 400, wantOK: true},
+	} {
+		t.Run(strconv.Itoa(tc.limit), func(t *testing.T) {
+			t.Parallel()
+			db := newTestDB(t)
+			pruneSeededBlocks(t, db, []uint64{100, 200, 300, 400}, 3)
+			require.NoError(t, db.SetSyncState(
+				HistoryExpiryCursorSyncKey, "100", nil,
+			))
+			got, ok, err := db.oldestRetainedSlot(
+				context.Background(), tc.limit,
+			)
 			require.NoError(t, err)
 			require.Equal(t, tc.wantOK, ok)
 			require.Equal(t, tc.want, got)
