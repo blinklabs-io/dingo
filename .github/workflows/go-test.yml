@@ -66,6 +66,13 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.event.merge_group.head_ref || github.run_id }}
   cancel-in-progress: true
 
+env:
+  # A comma after a proxy falls back to the next entry only on a 404 or 410,
+  # so a dropped proxy connection fails the download outright. A pipe falls
+  # back on any error; go.sum and the checksum database still verify what a
+  # direct fetch returns.
+  GOPROXY: 'https://proxy.golang.org|direct'
+
 jobs:
   # Tier 1. One runner for the whole developer loop, cheapest steps first, so
   # a change that does not compile fails in minutes without a second job ever
@@ -194,6 +201,9 @@ jobs:
       - name: npm-test
         if: steps.detect.outputs.run-ci == 'true'
         run: npm test
+      - name: test-merge-group-cancellation
+        if: steps.detect.outputs.run-ci == 'true'
+        run: node --test .github/scripts/test-cancel-obsolete-merge-groups.cjs
       - name: go-test
         # No services and no -race: the Postgres and MySQL variants in
         # internal/test/conformance gate on POSTGRES_PASSWORD / MYSQL_DSN and

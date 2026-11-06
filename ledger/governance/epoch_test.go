@@ -2518,7 +2518,10 @@ func TestProcessEpochEnactedChildPreserved(t *testing.T) {
 		NewEpoch:     5,
 		BoundarySlot: 500,
 		PParams:      conwayPParamsFixture(10),
-		UpdateFn: func(p lcommon.ProtocolParameters, _ any) (lcommon.ProtocolParameters, error) {
+		UpdateFn: func(
+			p lcommon.ProtocolParameters,
+			_ any,
+		) (lcommon.ProtocolParameters, error) {
 			return p, nil
 		},
 	})
@@ -2992,6 +2995,75 @@ func TestProcessEpochOrphanAfterExpiry(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, account)
 	assert.Equal(t, uint64(30), uint64(account.Reward))
+}
+
+func TestDeferredRatificationUsesBoundaryProposalAndDRepState(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	db, _ := newTallyTestDB(t)
+	oldCredential := testBytes(28, 0xb1)
+	newCredential := testBytes(28, 0xb2)
+	require.NoError(t, db.CreateDrep(ctx, nil, &models.Drep{
+		Credential: oldCredential, Active: true, ExpiryEpoch: 20,
+	}))
+	parentHash := testBytes(32, 0xb3)
+	childHash := testBytes(32, 0xb4)
+	returnAddr := buildRewardAddr(t, testBytes(28, 0xb5))
+	require.NoError(t, db.SetGovernanceProposal(ctx,
+		buildInfoProposal(t, parentHash, 0, 4, 0, returnAddr, 400,
+			nil, nil, nil, nil), nil))
+
+	boundaryTxn := db.MetadataTxn(ctx, true)
+	out, err := ProcessEpoch(ctx, &EpochInput{
+		DB: db, Txn: boundaryTxn, PrevEpoch: 4, NewEpoch: 5,
+		BoundarySlot: 500, PParams: conwayPParamsFixture(10),
+		CurrentBoundarySPOState: &SPOVotingState{},
+		DeferRatification:       true,
+		UpdateFn: func(p lcommon.ProtocolParameters, _ any) (lcommon.ProtocolParameters, error) {
+			return p, nil
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, boundaryTxn.Commit())
+	boundaryTxn.Release()
+	require.NotNil(t, out.Ratification)
+
+	readTxn := db.MetadataTxn(ctx, false)
+	decision, err := out.Ratification.Decide(ctx, readTxn)
+	readTxn.Release()
+	require.NoError(t, err)
+	require.Len(t, decision.Expired, 1)
+
+	childIndex := uint32(0)
+	require.NoError(t, db.SetGovernanceProposal(ctx,
+		buildInfoProposal(t, childHash, 0, 15, 0, returnAddr, 501,
+			parentHash, &childIndex, nil, nil), nil))
+	require.NoError(t, db.CreateDrep(ctx, nil, &models.Drep{
+		Credential: newCredential, Active: true, ExpiryEpoch: 20,
+	}))
+
+	rolledBackTxn := db.MetadataTxn(ctx, true)
+	_, err = out.Ratification.Apply(ctx, decision, rolledBackTxn)
+	require.NoError(t, err)
+	require.NoError(t, rolledBackTxn.Rollback())
+	rolledBackTxn.Release()
+
+	applyTxn := db.MetadataTxn(ctx, true)
+	orphanCount, err := out.Ratification.Apply(ctx, decision, applyTxn)
+	require.NoError(t, err)
+	require.NoError(t, applyTxn.Commit())
+	applyTxn.Release()
+	assert.Zero(t, orphanCount)
+	child, err := db.GetGovernanceProposal(ctx, childHash, 0, nil)
+	require.NoError(t, err)
+	assert.Nil(t, child.ExpiredEpoch)
+	oldDRep, err := db.GetDrepByCredential(ctx, 0, oldCredential, true, nil)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(21), oldDRep.ExpiryEpoch)
+	newDRep, err := db.GetDrepByCredential(ctx, 0, newCredential, true, nil)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(20), newDRep.ExpiryEpoch)
 }
 
 // The RATIFY and EXPIRY verdicts must be computable from a read-only view of

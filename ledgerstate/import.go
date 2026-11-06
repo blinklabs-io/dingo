@@ -830,6 +830,12 @@ func ImportLedgerState(
 				)
 			}
 		}
+		if cfg.State.CertStateData != nil {
+			if err := foldImportedRewardCredits(ctx, cfg, slot); err != nil {
+				return err
+			}
+		}
+
 		if err := setCheckpoint(
 			ctx,
 			cfg, models.ImportPhaseCertState,
@@ -858,6 +864,9 @@ func ImportLedgerState(
 			if err := rollbackResumedAccountRewardJournal(
 				ctx, cfg, slot,
 			); err != nil {
+				return err
+			}
+			if err := foldImportedRewardCredits(ctx, cfg, slot); err != nil {
 				return err
 			}
 		}
@@ -1264,7 +1273,15 @@ func validateImportedRewardBases(cfg ImportConfig) error {
 				rewardEpoch, err,
 			)
 		}
-		if existing != nil && existing.Authoritative {
+		complete, err := importedAuthoritativeRewardBasisComplete(
+			store,
+			nil,
+			existing,
+		)
+		if err != nil {
+			return err
+		}
+		if complete {
 			continue
 		}
 		if err := validateImportedRewardPParams(
@@ -1837,6 +1854,17 @@ func importAccounts(
 		}
 	}()
 
+	rounds, err := store.GetPendingRewardCreditRounds(txn.Metadata())
+	if err != nil {
+		return fmt.Errorf("reading applied reward rounds before account import: %w", err)
+	}
+	coveredRewardEpochs := make([]uint64, 0, len(rounds))
+	for _, round := range rounds {
+		if round.BoundarySlot <= slot {
+			coveredRewardEpochs = append(coveredRewardEpochs, round.SnapshotEpoch)
+		}
+	}
+
 	inBatch := 0
 	for _, acct := range accounts {
 		select {
@@ -1890,6 +1918,14 @@ func importAccounts(
 				acct.StakingKey.Hash,
 				err,
 			)
+		}
+
+		// The imported balance already includes every covered round, including
+		// credits later withdrawn. Folding them must commit with that balance.
+		if len(coveredRewardEpochs) > 0 {
+			if err := store.FoldRewardAccountOutputs(coveredRewardEpochs, credentialTag, acct.StakingKey.Hash, txn.Metadata()); err != nil {
+				return fmt.Errorf("folding imported account reward credits: %w", err)
+			}
 		}
 
 		inBatch++

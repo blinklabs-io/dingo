@@ -258,6 +258,72 @@ func TestMetadataJSONNestingBoundary(t *testing.T) {
 	}
 }
 
+func TestContainerMapKeyKeepsCBORWithoutJSON(t *testing.T) {
+	t.Parallel()
+	key := lcommon.TransactionMetadatum(lcommon.MetaText{Value: "leaf"})
+	for range 8 {
+		key = lcommon.MetaMap{Pairs: []lcommon.MetaPair{{
+			Key:   key,
+			Value: lcommon.MetaInt{Value: big.NewInt(0)},
+		}}}
+	}
+	value := lcommon.MetaMap{Pairs: []lcommon.MetaPair{{
+		Key:   key,
+		Value: lcommon.MetaText{Value: "value"},
+	}}}
+	rawValue, err := metadatumCbor(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata := lcommon.MetaMap{Pairs: []lcommon.MetaPair{{
+		Key:   lcommon.MetaInt{Value: big.NewInt(721)},
+		Value: value,
+	}}}
+	metadataCBOR, err := metadatumCbor(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for name, extract := range map[string]func() ([]Entry, error){
+		"metadatum": func() ([]Entry, error) {
+			return extractFromMetadatum(metadata)
+		},
+		"cbor": func() ([]Entry, error) {
+			return EntriesFromCBOR(metadataCBOR)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			entries, err := extract()
+			if err != nil || len(entries) != 1 {
+				t.Fatalf("container-keyed metadata must remain indexed: %#v, %v", entries, err)
+			}
+			got := entries[0]
+			if got.Label != 721 || !bytes.Equal(got.CborValue, rawValue) ||
+				got.JsonValue != "" || !errors.Is(got.JSONError, ErrJSONUnavailable) {
+				t.Fatalf(
+					"container map key must retain exact CBOR without JSON: label=%d sameCBOR=%v jsonLen=%d error=%v",
+					got.Label,
+					bytes.Equal(got.CborValue, rawValue),
+					len(got.JsonValue),
+					got.JSONError,
+				)
+			}
+		})
+	}
+
+	jsonValue, gotRawValue, err := RawValues(metadataCBOR, 721)
+	if len(jsonValue) != 0 || !bytes.Equal(gotRawValue, rawValue) ||
+		!errors.Is(err, ErrJSONUnavailable) {
+		t.Fatalf(
+			"RawValues must retain exact CBOR without JSON: sameCBOR=%v jsonLen=%d error=%v",
+			bytes.Equal(gotRawValue, rawValue),
+			len(jsonValue),
+			err,
+		)
+	}
+}
+
 func TestDeepMetadataRemainsIndexableWithoutJSON(t *testing.T) {
 	t.Parallel()
 	raw := append(bytes.Repeat([]byte{0x81}, 11000), 0)

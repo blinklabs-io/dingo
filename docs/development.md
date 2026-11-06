@@ -40,6 +40,15 @@ The workflow still starts for documentation-only PRs so existing required job
 checks can report skipped instead of remaining pending. Commit-message checks
 continue to run.
 
+The `cancel-obsolete-merge-groups` workflow scans active merge-group runs when
+queue CI is requested or completed, and when a queue branch is deleted. It
+cancels a run only after the GitHub API confirms that its queue ref is absent.
+Existing queue refs keep their runs. The cleanup uses the default-branch
+workflow without checking out merge-group code; test jobs retain read-only
+permissions.
+Normal cancellation gives runner cleanup 30 seconds to finish before forcing
+any obsolete runs that remain active to stop.
+
 ## Conformance profiles
 
 Dingo reports compatibility in separate layers; a green ledger result is not
@@ -53,8 +62,9 @@ complete node conformance.
 
 The release and Linux CI gates run the ledger and deterministic consensus
 profiles as part of `./...`, and their verbose output reports the exact corpus
-and scenario counts. The [conformance tests](../internal/test/conformance/README.md)
-document what each profile proves and excludes.
+and scenario counts. The [conformance
+tests](../internal/test/conformance/README.md) document what each profile proves
+and excludes.
 
 The Linux tag workflow generates four conformance reports and uploads them as
 dated JSON release assets: Conway CBOR decoding, ledger rules, UPLC
@@ -77,7 +87,8 @@ records the error; NDC counts a missing benchmark as a failure.
 
 - [Run Dingo on the local DevNet](devnet.md).
 - [Run benchmarks and collect profiles](benchmarks.md).
-- Read the [architecture](../ARCHITECTURE.md) and [database design](../DATABASE.md)
-  when a change affects component ownership or persisted state.
+- Read the [architecture](../ARCHITECTURE.md) and [database
+  design](../DATABASE.md) when a change affects component ownership or persisted
+  state.
 - Use the [documentation index](README.md) to find package, integration, and
   operator documentation.

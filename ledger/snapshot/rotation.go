@@ -36,6 +36,15 @@ var errRewardInputEpochUnavailable = errors.New(
 	"reward input epoch metadata unavailable",
 )
 
+// PoolRegistrationSnapshotWindow selects the pool registration state frozen
+// by SNAP.
+func PoolRegistrationSnapshotWindow(
+	evt event.EpochTransitionEvent,
+	previousEpochStartSlot uint64,
+) (uint64, uint64) {
+	return poolRegistrationSnapshotWindow(evt, previousEpochStartSlot)
+}
+
 func poolRegistrationSnapshotWindow(
 	evt event.EpochTransitionEvent,
 	previousEpochStartSlot uint64,
