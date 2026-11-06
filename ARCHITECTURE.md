@@ -8132,15 +8132,17 @@ Ordinary Praos sessions continue to use primary-chain intersection points.
   re-intersection; the connection retains its header for later ancestry lookups
   but does not re-deliver it. Bounded-history exhaustion defers verification
   instead, so the peer is re-intersected after the applied tip advances and the
-  header can be checked again. Retained ancestry with a missing
-  crypto-verification generation, or one stamped before the current consensus
-  context began, also defers the candidate and re-intersects; a point that
-  became applied during lookup is trusted as part of the primary chain. A direct
-  child of the applied tip can use the local verifier's immutable next-epoch
-  forecast when the shared epoch cache has not yet reached its slot. Multi-epoch
-  peer forks derive each intermediate epoch nonce from the retained, verified
-  candidate path. When the applied tip advances during ancestry lookup and
-  becomes the candidate's parent, verification switches to the local-chain
+  header can be checked again. Retained ancestry with a missing or stale
+  crypto-verification generation is reconstructed from its header bytes and
+  checked against the current consensus context before the candidate enters
+  selection. The old verdict is never reused. If the ancestry or state needed
+  for that check is unavailable, the candidate defers and re-intersects; a point
+  that became applied during lookup is trusted as part of the primary chain. A
+  direct child of the applied tip can use the local verifier's immutable
+  next-epoch forecast when the shared epoch cache has not yet reached its slot.
+  Multi-epoch peer forks derive each intermediate epoch nonce from the retained,
+  verified candidate path. When the applied tip advances during ancestry lookup
+  and becomes the candidate's parent, verification switches to the local-chain
   verifier against the newly published ledger state. A header whose point (slot
   and hash) is on the chain (`Chain.HoldsPoint`) at or below the ledger tip
   returns success without re-verification: it was fully verified when applied,

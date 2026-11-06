@@ -56,6 +56,7 @@ type peerForkPathPrefix struct {
 }
 
 type peerForkNoncePrefix struct {
+	contextGeneration     uint64
 	sourceEpoch           uint64
 	cutoff                uint64
 	sourceNonce           []byte
@@ -239,13 +240,8 @@ func (ls *LedgerState) verifyPeerForkTargetEpochAncestors(
 		) {
 			continue
 		}
-		if event.HeaderCryptoVerificationGeneration != 0 {
-			return fmt.Errorf(
-				"%w: candidate ancestor at slot %d was verified in a stale context",
-				errHeaderVerificationDeferred,
-				header.SlotNumber(),
-			)
-		}
+		// A retained header with an old verdict is still ancestry. Verify its
+		// crypto and state against this snapshot before using the candidate.
 		block := headerOnlyBlock{header: header, peerRelative: true}
 		if err := ls.verifyPeerForkAncestorCrypto(connID, headers, index,
 			epoch.EpochId, epochNonce, snapshot.contextGeneration, func() error {
@@ -409,6 +405,7 @@ func (ls *LedgerState) peerChainSelectionEpochNonceAcrossEpochs(
 		startIndex := 0
 		if cachedEvolving, cachedCandidate, next, ok := ls.peerForkNoncePrefix(
 			connId,
+			snapshot.contextGeneration,
 			currentEpoch,
 			cutoff,
 			initialEvolvingNonce,
@@ -472,6 +469,7 @@ func (ls *LedgerState) peerChainSelectionEpochNonceAcrossEpochs(
 		if lastFolded != nil {
 			ls.storePeerForkNoncePrefix(
 				connId,
+				snapshot.contextGeneration,
 				currentEpoch,
 				cutoff,
 				initialEvolvingNonce,
@@ -662,6 +660,7 @@ func peerHeaderPathHasParentPoint(
 
 func (ls *LedgerState) peerForkNoncePrefix(
 	connId ouroboros.ConnectionId,
+	contextGeneration uint64,
 	sourceEpoch models.Epoch,
 	cutoff uint64,
 	initialEvolvingNonce []byte,
@@ -672,7 +671,9 @@ func (ls *LedgerState) peerForkNoncePrefix(
 	ls.forkHeaderNonceCacheMutex.Lock()
 	entry, ok := ls.forkHeaderNonceCache[key][sourceEpoch.EpochId]
 	ls.forkHeaderNonceCacheMutex.Unlock()
-	if !ok || entry.sourceEpoch != sourceEpoch.EpochId ||
+	if !ok || contextGeneration == 0 ||
+		entry.contextGeneration != contextGeneration ||
+		entry.sourceEpoch != sourceEpoch.EpochId ||
 		entry.cutoff != cutoff ||
 		!bytes.Equal(entry.sourceNonce, sourceEpoch.Nonce) ||
 		!bytes.Equal(entry.initialEvolvingNonce, initialEvolvingNonce) ||
@@ -694,6 +695,7 @@ func (ls *LedgerState) peerForkNoncePrefix(
 
 func (ls *LedgerState) storePeerForkNoncePrefix(
 	connId ouroboros.ConnectionId,
+	contextGeneration uint64,
 	sourceEpoch models.Epoch,
 	cutoff uint64,
 	initialEvolvingNonce []byte,
@@ -714,6 +716,7 @@ func (ls *LedgerState) storePeerForkNoncePrefix(
 		ls.forkHeaderNonceCache[key] = make(map[uint64]peerForkNoncePrefix)
 	}
 	ls.forkHeaderNonceCache[key][sourceEpoch.EpochId] = peerForkNoncePrefix{
+		contextGeneration:     contextGeneration,
 		sourceEpoch:           sourceEpoch.EpochId,
 		cutoff:                cutoff,
 		sourceNonce:           cloneNonce(sourceEpoch.Nonce),
@@ -913,10 +916,9 @@ func (ls *LedgerState) peerHeaderForkPathContext(
 				if ls.chain.HoldsQueuedHeaderHash(parentPoint.Hash) {
 					return ocommon.Point{}, nil, false, nil
 				}
-				if (!ok || event.HeaderCryptoVerificationGeneration != 0) &&
-					!ls.chain.HoldsPoint(ctx, parentPoint) {
+				if !ok && !ls.chain.HoldsPoint(ctx, parentPoint) {
 					return ocommon.Point{}, nil, false, fmt.Errorf(
-						"%w: candidate parent at slot %d has no current crypto verdict",
+						"%w: candidate parent at slot %d is unavailable",
 						errHeaderVerificationDeferred,
 						parentPoint.Slot,
 					)
@@ -1026,8 +1028,9 @@ func (ls *LedgerState) peerHeaderForkPathContext(
 			) {
 			return ocommon.Point{}, nil, false, nil
 		}
-		// Do not use an unverified queued header as fork ancestry; its child
-		// must go through local admission or wait for a current verdict.
+		// A queued header follows the local admission path. A retained peer
+		// header may have an old verdict; the caller rechecks it before using
+		// this path for chain selection.
 		if !headerVerdictInContext(
 			event.HeaderCryptoVerificationGeneration,
 			contextGeneration,
@@ -1035,14 +1038,6 @@ func (ls *LedgerState) peerHeaderForkPathContext(
 		) {
 			if ls.chain.HoldsQueuedHeaderHash(prevHash) {
 				return ocommon.Point{}, nil, false, nil
-			}
-			if event.HeaderCryptoVerificationGeneration != 0 &&
-				!ls.chain.HoldsPoint(ctx, event.Point) {
-				return ocommon.Point{}, nil, false, fmt.Errorf(
-					"%w: candidate ancestor at slot %d has no current crypto verdict",
-					errHeaderVerificationDeferred,
-					event.Point.Slot,
-				)
 			}
 		}
 		pathReversed = append(pathReversed, event.BlockHeader)
