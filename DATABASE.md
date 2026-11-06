@@ -1362,6 +1362,9 @@ without staking credentials, assets, pointers, datums, reference scripts,
 collateral, certificates, withdrawals, mint, governance, script witnesses or nested
 transactions. Other closures and providers use the ordinary ordered writer.
 
+Closures with Dijkstra direct deposits keep immediate UTxO writes because
+reward-account credits update live stake outside the retained overlay.
+
 Transaction parents and execution contexts remain immediate. Every created
 UTxO, including outputs spent inside the closure, retains its ordinary ID,
 spend markers and address row. Exact known reads resolve from the staged

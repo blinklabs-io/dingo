@@ -25,6 +25,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 )
 
 const (
@@ -216,8 +217,13 @@ SELECT EXISTS(SELECT 1 FROM utxo_pointer WHERE utxo_id IN (` + placeholders + `)
 }
 
 func plainLeiosOverlayTransaction(tx lcommon.Transaction) bool {
-	if tx == nil || !tx.IsValid() || len(tx.Inputs()) != 1 || len(tx.Consumed()) != 1 ||
-		len(tx.Outputs()) != 1 || len(tx.Produced()) != 1 ||
+	if tx == nil {
+		return false
+	}
+	inputs, consumed := tx.Inputs(), tx.Consumed()
+	outputs, produced := tx.Outputs(), tx.Produced()
+	if !tx.IsValid() || len(inputs) != 1 || len(consumed) != 1 ||
+		len(outputs) != 1 || len(produced) != 1 ||
 		len(tx.Collateral()) != 0 || tx.CollateralReturn() != nil ||
 		len(tx.ReferenceInputs()) != 0 || len(tx.Certificates()) != 0 ||
 		len(tx.Withdrawals()) != 0 || tx.AssetMint() != nil ||
@@ -227,16 +233,30 @@ func plainLeiosOverlayTransaction(tx lcommon.Transaction) bool {
 		len(lcommon.SubTransactionWitnessSetsFromTransaction(tx)) != 0 {
 		return false
 	}
+	// Direct deposits update reward live stake outside the retained overlay.
+	switch source := tx.(type) {
+	case interface {
+		DijkstraDirectDeposits() dijkstra.DijkstraDirectDeposits
+	}:
+		if len(source.DijkstraDirectDeposits()) != 0 {
+			return false
+		}
+	case *dijkstra.DijkstraTransaction:
+		if len(source.Body.TxDirectDeposits) != 0 {
+			return false
+		}
+	}
 	_, updates := tx.ProtocolParameterUpdates()
 	if len(updates) != 0 {
 		return false
 	}
-	input, consumed := tx.Inputs()[0], tx.Consumed()[0]
-	if input.Id() != consumed.Id() || input.Index() != consumed.Index() {
+	input, consumedInput := inputs[0], consumed[0]
+	if input == nil || consumedInput == nil ||
+		input.Id() != consumedInput.Id() || input.Index() != consumedInput.Index() {
 		return false
 	}
-	out := tx.Produced()[0]
-	if out.Output.Datum() != nil || out.Output.DatumHash() != nil ||
+	out := produced[0]
+	if out.Output == nil || out.Id == nil || out.Output.Datum() != nil || out.Output.DatumHash() != nil ||
 		out.Output.ScriptRef() != nil {
 		return false
 	}
