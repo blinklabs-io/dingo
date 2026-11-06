@@ -3225,7 +3225,12 @@ func (c *Chain) HoldsPointSettled(
 	}
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
-	return c.holdsBlockAtIndex(ctx, blk.ID, point.Hash), ctx.Err() == nil
+	held = c.holdsBlockAtIndex(ctx, blk.ID, point.Hash)
+	if ctx.Err() != nil {
+		// A membership read that overlapped cancellation proves nothing.
+		return false, false
+	}
+	return held, true
 }
 
 // holdsPersistentPoint needs only the retained metadata and active index.
@@ -3253,7 +3258,7 @@ func (c *Chain) holdsPersistentPoint(
 	defer txn.Rollback() //nolint:errcheck
 	index, err := database.BlockIDByPointMetadataTxn(txn, point)
 	if ctx.Err() != nil {
-		return false, true
+		return false, false
 	}
 	if err != nil {
 		return false, !c.blockMutatedSince(generation)

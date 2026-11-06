@@ -1457,3 +1457,18 @@ func TestApplyTrustedBatchPruneStopsAtTrustedTip(t *testing.T) {
 	require.Equal(t, trusted.Slot, floor,
 		"the owed cleanup raised the prune floor above the trusted tip")
 }
+
+// A cancelled context makes the chain report every block absent. Storing
+// must surface the cancellation instead of treating the batch as new blocks.
+func TestStoreTrustedBatchBlocksCancelled(t *testing.T) {
+	t.Parallel()
+
+	h := newExternalIngestHarness(t, false)
+	blocks, _ := externalIngestBlocks(t, 0)
+	require.NoError(t, h.cm.PrimaryChain().AddBlocks(t.Context(), blocks))
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	err := h.ls.storeTrustedBatchBlocks(ctx, ocommon.Point{}, blocks)
+	require.ErrorIs(t, err, context.Canceled)
+}

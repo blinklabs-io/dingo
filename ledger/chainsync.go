@@ -5635,6 +5635,11 @@ func (ls *LedgerState) awaitForecastHorizon(
 			return ctx.Err()
 		}
 		if ls.chainsyncHeaderDisconnected(ctx, e) {
+			// Cancellation during the ancestry walk reads every block as
+			// absent, which is indistinguishable from a real disconnect.
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			if !ls.flushQueuedHeadersForHorizonWait(e.ConnectionId) &&
 				!ls.chainAheadOfAppliedTip() {
 				return ErrChainsyncHeaderDisconnected
