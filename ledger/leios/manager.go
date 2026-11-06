@@ -102,6 +102,11 @@ var (
 	// votes without an age check, so the drop is not counted toward the
 	// per-connection invalid-vote limit.
 	errVoteWindowClosed = errors.New("vote window closed")
+	// errVoteKeylessSeat marks a vote from a committee seat with no
+	// authoritative key. It cannot be verified, so it is dropped rather
+	// than stored or relayed. Peers can legitimately disagree on a pool's
+	// key status, so it is not counted toward the invalid-vote limit.
+	errVoteKeylessSeat = errors.New("committee seat has no verified voting key")
 )
 
 // Reasons recorded by dingo_metrics_leios_votes_not_emitted_total. They
@@ -546,7 +551,13 @@ type VoteManager struct {
 	maxRecords                int
 	voteVerificationBudget    *ratewindow.FixedWindow
 	voteVerificationsInFlight map[lcommon.LeiosVoteId]lcommon.Blake2b256
-	voteInvalidBudget         *ratewindow.FixedWindow
+	// keylessSeatDrops remembers (slot, voter) ids whose vote was dropped
+	// because the seat has no verified key. Such votes are never stored, so
+	// without this a repeated copy would pass the dedup check and spend the
+	// shared verification budget every time. Bounded by maxRecords and
+	// voteTTL; protected by mu.
+	keylessSeatDrops  map[lcommon.LeiosVoteId]time.Time
+	voteInvalidBudget *ratewindow.FixedWindow
 
 	mu sync.Mutex
 	// localEmissionMu keeps activation replay ahead of ordinary local emission
@@ -726,6 +737,7 @@ func NewVoteManager(cfg VoteManagerConfig) (*VoteManager, error) {
 			voteVerificationMaxProcess,
 			voteVerificationMaxPeers,
 		),
+		keylessSeatDrops: make(map[lcommon.LeiosVoteId]time.Time),
 		voteVerificationsInFlight: make(
 			map[lcommon.LeiosVoteId]lcommon.Blake2b256,
 		),
@@ -1885,6 +1897,13 @@ func (m *VoteManager) reserveIncomingVoteVerification(
 		return false, nil
 	}
 	m.pruneExpiredLocked(now)
+	if droppedAt, ok := m.keylessSeatDrops[id]; ok &&
+		now.Sub(droppedAt) < m.voteTTL {
+		// The seat was already found keyless: drop the repeat before it can
+		// spend verification budget. Not a stored vote, so no equivocation.
+		m.mu.Unlock()
+		return false, nil
+	}
 	if inFlightHash, ok := m.voteVerificationsInFlight[id]; ok {
 		m.mu.Unlock()
 		if inFlightHash != vote.EndorserBlockHash {
@@ -1912,6 +1931,22 @@ func (m *VoteManager) reserveIncomingVoteVerification(
 	return true, nil
 }
 
+// rejectKeylessSeatVote drops a vote for a seat without a verified key and
+// remembers the (slot, voter) id so repeats are dropped before admission.
+func (m *VoteManager) rejectKeylessSeatVote(
+	connKey string,
+	vote lcommon.LeiosVote,
+) error {
+	id := lcommon.LeiosVoteId{SlotNo: vote.SlotNo, VoterId: vote.VoterId}
+	m.mu.Lock()
+	if _, ok := m.keylessSeatDrops[id]; ok ||
+		len(m.keylessSeatDrops) < m.maxRecords {
+		m.keylessSeatDrops[id] = m.now()
+	}
+	m.mu.Unlock()
+	return m.rejectIncomingVote(connKey, "no_key", vote, errVoteKeylessSeat)
+}
+
 func (m *VoteManager) rejectIncomingVote(
 	connKey string,
 	reason string,
@@ -1923,6 +1958,7 @@ func (m *VoteManager) rejectIncomingVote(
 		errors.Is(err, errVoteVerificationPeerTrackingBudget) ||
 		errors.Is(err, errVoteVerificationPeerBudget) ||
 		errors.Is(err, errVoteEquivocation) ||
+		errors.Is(err, errVoteKeylessSeat) ||
 		errors.Is(err, errVoteWindowClosed) {
 		return nil
 	}
@@ -2000,27 +2036,21 @@ func (m *VoteManager) HandleVote(
 			),
 		)
 	}
-	verified := false
-	if pub, ok := m.resolveVoterKey(entry, member.PoolKeyHash); ok {
-		msg := VoteMessageBytes(vote.SlotNo, vote.EndorserBlockHash)
-		if err := m.verifyVoteSignature(
-			pub,
-			msg,
-			vote.VoteSignature,
-		); err != nil {
-			return m.rejectIncomingVote(connKey, "signature", vote, err)
-		}
-		verified = true
-	} else {
-		// Keyless committee seat: the pool has no usable authoritative key,
-		// so the vote counts toward observed
-		// stake but cannot be verified or aggregated into a certificate.
-		m.logger.Debug(
-			"no registered voting key for leios voter, skipping signature verification",
-			"slot", vote.SlotNo,
-			"voter_id", vote.VoterId,
-		)
+	// A keyless committee seat has no key to verify against, so its vote
+	// is dropped: storing it would let any peer fill the seat's first-wins
+	// slot with an unverifiable signature and have it relayed.
+	pub, ok := m.resolveVoterKey(entry, member.PoolKeyHash)
+	if !ok {
+		return m.rejectKeylessSeatVote(connKey, vote)
 	}
+	if err := m.verifyVoteSignature(
+		pub,
+		VoteMessageBytes(vote.SlotNo, vote.EndorserBlockHash),
+		vote.VoteSignature,
+	); err != nil {
+		return m.rejectIncomingVote(connKey, "signature", vote, err)
+	}
+	const verified = true
 	m.insertVote(
 		connKey,
 		vote,
@@ -2118,21 +2148,20 @@ func (m *VoteManager) handleResolvedPrototypeVote(
 			errors.New("voter id outside committee"),
 		)
 	}
-	verified := false
-	// A member resolving to no key here is a keyless committee seat: its
-	// stake still counts toward membership, but its vote can never be
-	// verified or aggregated into a certificate.
-	pub, _ := m.resolveVoterKey(entry, member.PoolKeyHash)
-	if pub != nil {
-		if err := m.verifyVoteSignature(
-			pub,
-			PrototypeVoteMessageBytes(vote.AnnouncingRbHash),
-			vote.VoteSignature,
-		); err != nil {
-			return m.rejectIncomingVote(connKey, "signature", resolved, err)
-		}
-		verified = true
+	// A keyless seat has no key to verify against: drop the vote rather
+	// than store it first-wins and relay it.
+	pub, ok := m.resolveVoterKey(entry, member.PoolKeyHash)
+	if !ok {
+		return m.rejectKeylessSeatVote(connKey, resolved)
 	}
+	if err := m.verifyVoteSignature(
+		pub,
+		PrototypeVoteMessageBytes(vote.AnnouncingRbHash),
+		vote.VoteSignature,
+	); err != nil {
+		return m.rejectIncomingVote(connKey, "signature", resolved, err)
+	}
+	const verified = true
 	inserted := m.insertVote(
 		connKey,
 		resolved,
@@ -2677,6 +2706,11 @@ func (m *VoteManager) pruneExpiredLocked(now time.Time) {
 			continue
 		}
 		delete(m.voteRecords, id)
+	}
+	for id, droppedAt := range m.keylessSeatDrops {
+		if droppedAt.Before(cutoff) {
+			delete(m.keylessSeatDrops, id)
+		}
 	}
 	m.updateRecordsGaugeLocked()
 }

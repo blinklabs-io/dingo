@@ -12191,8 +12191,12 @@ votes:
   captured key whose proof fails `VerifyLeiosKeyProofOfPossession`. A post-SNAP
   registration or rotation therefore cannot change an already-selected
   committee. A member without a captured usable key is a keyless committee seat:
-  membership and stake still count, but its vote can never be verified or
-  aggregated into a certificate. There is no more derivation fallback — that
+  membership and stake still count, but a peer vote for that seat cannot be
+  verified, so it is dropped (`no_key` rejection) rather than stored, tallied or
+  relayed, and is not counted toward the per-connection invalid-vote limit. The
+  dropped `(slot, voter)` id is remembered for the vote TTL (bounded by the
+  record cap) so repeated copies are discarded before spending the shared
+  verification budget. There is no more derivation fallback — that
   insecure shortcut (deriving a key from the pool's cold-key hash) was removed
   upstream in `prototype-2026w32` and here in the same change.
 - Full votes and resolved prototype votes use the shared bounded one-minute
@@ -12210,15 +12214,17 @@ votes:
   limit. Repeated vote ids coalesce while their first check is in flight, before
   committee lookup and signature verification can be repeated.
 - **Stake quorum and certificates**: per endorser block and signing context, the
-  manager tracks observed stake (all membership-valid votes) and verified stake
-  (signature-verified votes). When verified stake reaches
+  manager tracks observed stake (all admitted votes) and verified stake
+  (signature-verified votes); a peer vote is admitted only after its signature
+  verifies, so the two match for peer votes. When verified stake reaches
   `LeiosQuorumStakeThreshold` (tau) of *total active stake* (exact rational
   arithmetic, never a head count), it builds a `LeiosEbCertificate` — signers
   bitfield over the committee plus one aggregated BLS12-381 MinSig signature —
   from verified votes only, and publishes `leios.eb_quorum` with the announcing
   ranking-block hash that every prototype vote signed. Certificate validation
-  reports `sigChecked bool`; false means quorum passed but one or more signer
-  keys were unavailable, so production callers must reject that result. The
+  (`ValidateEbCertificate`, `ValidatePrototypeEbCertificate`) fails with
+  `ErrUnknownSignerKey` when any signer's key is unavailable, so a stake quorum
+  alone never validates. The
   pipeline preserves signing context, and the forge loop only adapts the
   certificate to the prototype's in-body `DijkstraLeiosCertificate` shape when
   its announcing RB is the actual parent CertRB.
