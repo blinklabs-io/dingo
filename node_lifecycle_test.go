@@ -1151,54 +1151,6 @@ func TestLiveTruncateIsSerializedAgainstConcurrentCalls(t *testing.T) {
 	require.NoError(t, err2)
 }
 
-// TestLiveTruncateRejectsTargetAheadOfTipWithoutTearingDownNode guards
-// against a severe finding from live testing: a
-// live Truncate whose target is rejected during read-only validation (here,
-// a block number ahead of the current tip — unlike a too-high slot, which
-// ResolveTargetBySlot treats as a no-op resolving to the tip itself, an
-// out-of-range block number is a real ResolveTarget error) used to
-// unconditionally call n.cancel(), tearing down the entire node over a
-// request that never touched any data. Since ResolveTarget/
-// lifecycle.Truncate's own pre-DeleteBlocksAfter checks are provably
-// read-only, lifecycle.ErrTruncateNotStarted now lets Node.Truncate resume
-// normally instead.
-func TestLiveTruncateRejectsTargetAheadOfTipWithoutTearingDownNode(
-	t *testing.T,
-) {
-	t.Parallel()
-
-	const numBlocks = 10
-	n, points := newLiveLifecycleTestNode(t, numBlocks)
-
-	oldCtx := n.ctx
-	aheadNumber := uint64(len(points)) + 1_000_000
-
-	_, err := n.Truncate(
-		context.Background(),
-		dblifecycle.TruncateTarget{BlockNumber: &aheadNumber},
-	)
-	require.Error(t, err)
-	require.ErrorIs(t, err, lifecycle.ErrTruncateNotStarted)
-
-	require.Same(t, oldCtx, n.ctx)
-	require.NoError(t, n.ctx.Err())
-	require.NotNil(t, n.mempool)
-	require.NotNil(t, n.chainsyncState)
-	require.NotNil(t, n.connManager)
-	require.NotNil(t, n.peerGov)
-
-	tip, tipErr := n.db.GetTip(nil)
-	require.NoError(t, tipErr)
-	require.Equal(t, points[len(points)-1].Slot, tip.Point.Slot)
-	for _, p := range points {
-		_, blockErr := database.BlockByHash(context.Background(), n.db, p.Hash)
-		require.NoErrorf(
-			t, blockErr,
-			"block at slot %d missing after a rejected truncate", p.Slot,
-		)
-	}
-}
-
 // TestLiveTruncateCancelsWhenStorageProviderDrainIsUnconfirmed guards the
 // boundary between context-bounded provider shutdown and live storage reopen.
 // A provider may honor the deadline by returning while its one-time cleanup
@@ -1594,142 +1546,6 @@ func TestStopForPendingRestoreRollbackCancelsNode(t *testing.T) {
 		n.ctx.Err(),
 		"node must stop instead of reopening unsafe stores",
 	)
-}
-
-// TestLiveRestoreRejectsCorruptedSnapshotWithoutDataLoss guards against a
-// severe regression found via manual live testing:
-// a Restore that failed because the blob backup was corrupted used to
-// delete the node's OWN current data directory before validating the
-// incoming snapshot at all, then bring the whole node process down — an
-// operator who tried to restore from a bad snapshot lost the running node
-// AND its existing database, with nothing left to restart into. Restore
-// now stages the incoming snapshot in a sibling directory and validates it
-// fully before touching the node's real data directory, so a corrupted
-// snapshot must be rejected with the node's original data and tip
-// completely intact and the node still usable.
-func TestLiveRestoreRejectsCorruptedSnapshotWithoutDataLoss(t *testing.T) {
-	t.Parallel()
-
-	const numBlocks = 10
-	n, points := newLiveLifecycleTestNode(t, numBlocks)
-
-	snapshotDir := snapshotTestDir(t, "snap")
-	_, err := lifecycleSnapshot(t, n, snapshotDir)
-	require.NoError(t, err)
-
-	// Corrupt the blob backup's content without touching manifest.json, so
-	// ReadManifest still succeeds and the corruption is only caught once
-	// Badger's own restore-stream parsing runs. Garbage bytes (rather than
-	// e.g. flipping a few bytes in place, which can land inside an entry's
-	// payload and still parse structurally) reliably fail Badger's
-	// internal length-prefix parsing — same technique already proven in
-	// bark's TestVerifySnapshotFailsForCorruptedSnapshot.
-	blobPath := filepath.Join(snapshotDir, lifecycle.BlobBackupFileName)
-	require.NoError(t, os.WriteFile(
-		blobPath, []byte("not a valid badger backup stream"), 0o644,
-	))
-
-	oldCtx := n.ctx
-	_, err = n.Restore(context.Background(), snapshotDir)
-	require.Error(t, err)
-
-	// The node must still be alive and usable: n.ctx untouched, no
-	// cancellation, unchanged tip and blocks. n.db is deliberately not
-	// asserted to be the same pointer: Restore now quiesces and closes
-	// storage before validating the incoming snapshot at all (a Resettable
-	// provider's Reset+RestoreFrom has no staging copy to validate against
-	// first the way file-based storage does, so it must never run before
-	// this node's own connection to a live client/server database is
-	// closed — see Restore's own doc comment), so even a rejected restore
-	// reaches reinitializeAndResume and ends up with a freshly reopened,
-	// but equally valid, *database.Database over the same untouched data.
-	require.Same(t, oldCtx, n.ctx)
-	require.NoError(t, n.ctx.Err())
-
-	tip, tipErr := n.db.GetTip(nil)
-	require.NoError(t, tipErr)
-	require.Equal(t, points[len(points)-1].Slot, tip.Point.Slot)
-	for _, p := range points {
-		_, blockErr := database.BlockByHash(context.Background(), n.db, p.Hash)
-		require.NoErrorf(
-			t, blockErr,
-			"block at slot %d missing after a rejected restore", p.Slot,
-		)
-	}
-
-	// No leftover staging or backup directory should remain.
-	_, statErr := os.Stat(n.config.dataDir + restoreStagingSuffix)
-	require.True(t, os.IsNotExist(statErr))
-	_, statErr = os.Stat(n.config.dataDir + preRestoreBackupSuffix)
-	require.True(t, os.IsNotExist(statErr))
-}
-
-// TestLiveRestoreRejectsNetworkMismatchWithoutDataLoss confirms the other
-// half of the same fix: restoring a snapshot from a genuinely different
-// network onto a running node must be rejected by the manifest compatibility
-// callback before restore preflight can reset either remote store, with the node's own
-// data and tip left completely untouched and the node still usable,
-// rather than the node being torn down.
-func TestLiveRestoreRejectsNetworkMismatchWithoutDataLoss(t *testing.T) {
-	t.Parallel()
-
-	const numBlocks = 10
-	n, points := newLiveLifecycleTestNode(t, numBlocks)
-
-	// Build a standalone database configured for a different network and
-	// snapshot IT, rather than hand-tampering a preview snapshot's
-	// manifest: this way the snapshot is entirely self-consistent (valid
-	// checksum, tip matches its own data) and only mismatches what n is
-	// actually configured to run — the real-world scenario this guards.
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	otherDB, err := dbtest.NewDatabase(t, &database.Config{
-		DataDir: t.TempDir(),
-		Logger:  logger,
-		Network: "devnet",
-	})
-	require.NoError(t, err)
-	require.NoError(t, otherDB.SetTip(ochainsync.Tip{
-		Point:       ocommon.Point{Slot: 0, Hash: []byte{}},
-		BlockNumber: 0,
-	}, nil))
-
-	snapshotDir := snapshotTestDir(t, "snap")
-	_, err = lifecycle.Snapshot(
-		context.Background(),
-		otherDB,
-		snapshotDir,
-		lifecycle.TriggerManual,
-		"test",
-		"badger",
-		"sqlite",
-	)
-	require.NoError(t, err)
-	require.NoError(t, dbtest.CloseDatabase(otherDB))
-
-	oldCtx := n.ctx
-	_, err = n.Restore(context.Background(), snapshotDir)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "manifest network")
-
-	// n.db is deliberately not asserted to be the same pointer here --
-	// see TestLiveRestoreRejectsCorruptedSnapshotWithoutDataLoss's
-	// identical comment: Restore now quiesces and closes storage before
-	// the manifest compatibility callback runs, so a rejected restore
-	// still ends up with a freshly reopened *database.Database over the
-	// same untouched data, not the original pointer.
-	require.Same(t, oldCtx, n.ctx)
-	require.NoError(t, n.ctx.Err())
-
-	tip, tipErr := n.db.GetTip(nil)
-	require.NoError(t, tipErr)
-	require.Equal(t, points[len(points)-1].Slot, tip.Point.Slot)
-	for _, p := range points {
-		_, blockErr := database.BlockByHash(context.Background(), n.db, p.Hash)
-		require.NoErrorf(
-			t, blockErr,
-			"block at slot %d missing after a rejected restore", p.Slot,
-		)
-	}
 }
 
 // --- Crash-recoverable directory swap ---
@@ -2411,4 +2227,97 @@ func TestStorageDependenciesWithoutInternalConfig(t *testing.T) {
 			require.Equal(t, tc.want, deps.GenesisStakingEmpty)
 		})
 	}
+}
+
+// A rejected live truncate or restore must leave the node running over its
+// original data. A request that never touched data used to cancel the whole
+// node; a restore from a corrupted or foreign-network snapshot used to delete
+// the node's own data directory first. Restore now stages and validates the
+// incoming snapshot before touching anything, and a truncate rejected before it
+// deletes resumes normally. The three rejections share one node and each is
+// followed by the same intactness check; a rejected restore may reopen the
+// database, so the database handle itself is not compared.
+func TestLiveLifecycleRejectionsLeaveNodeIntact(t *testing.T) {
+	t.Parallel()
+
+	const numBlocks = 10
+	n, points := newLiveLifecycleTestNode(t, numBlocks)
+	oldCtx := n.ctx
+	requireIntact := func(t *testing.T, what string) {
+		t.Helper()
+		require.Same(t, oldCtx, n.ctx)
+		require.NoError(t, n.ctx.Err())
+		require.NotNil(t, n.mempool)
+		require.NotNil(t, n.chainsyncState)
+		require.NotNil(t, n.connManager)
+		require.NotNil(t, n.peerGov)
+		tip, err := n.db.GetTip(nil)
+		require.NoError(t, err)
+		require.Equal(t, points[len(points)-1].Slot, tip.Point.Slot)
+		for _, p := range points {
+			_, err := database.BlockByHash(context.Background(), n.db, p.Hash)
+			require.NoErrorf(
+				t, err, "block at slot %d missing after %s", p.Slot, what,
+			)
+		}
+	}
+
+	t.Run("truncate target ahead of the tip", func(t *testing.T) {
+		aheadNumber := uint64(len(points)) + 1_000_000
+		_, err := n.Truncate(
+			context.Background(),
+			dblifecycle.TruncateTarget{BlockNumber: &aheadNumber},
+		)
+		require.ErrorIs(t, err, lifecycle.ErrTruncateNotStarted)
+		requireIntact(t, "a rejected truncate")
+	})
+
+	t.Run("restore of a corrupted snapshot", func(t *testing.T) {
+		snapshotDir := snapshotTestDir(t, "snap")
+		_, err := lifecycleSnapshot(t, n, snapshotDir)
+		require.NoError(t, err)
+		// Garbage bytes rather than flipped bytes: a flip can land inside an
+		// entry payload and still parse, while a bad length prefix always
+		// fails Badger's restore stream, leaving manifest.json readable.
+		require.NoError(t, os.WriteFile(
+			filepath.Join(snapshotDir, lifecycle.BlobBackupFileName),
+			[]byte("not a valid badger backup stream"), 0o644,
+		))
+
+		_, err = n.Restore(context.Background(), snapshotDir)
+		require.Error(t, err)
+		requireIntact(t, "a rejected restore")
+		_, statErr := os.Stat(n.config.dataDir + restoreStagingSuffix)
+		require.True(t, os.IsNotExist(statErr))
+		_, statErr = os.Stat(n.config.dataDir + preRestoreBackupSuffix)
+		require.True(t, os.IsNotExist(statErr))
+	})
+
+	t.Run("restore of a snapshot from another network", func(t *testing.T) {
+		// A standalone database for another network is snapshotted rather than
+		// hand-tampering a manifest, so the snapshot is self-consistent and
+		// only mismatches what the node runs.
+		otherDB, err := dbtest.NewDatabase(t, &database.Config{
+			DataDir: t.TempDir(),
+			Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+			Network: "devnet",
+		})
+		require.NoError(t, err)
+		require.NoError(t, otherDB.SetTip(ochainsync.Tip{
+			Point:       ocommon.Point{Slot: 0, Hash: []byte{}},
+			BlockNumber: 0,
+		}, nil))
+		snapshotDir := snapshotTestDir(t, "snap-other")
+		_, err = lifecycle.Snapshot(
+			context.Background(), otherDB, snapshotDir,
+			lifecycle.TriggerManual, "test", "badger", "sqlite",
+		)
+		require.NoError(t, err)
+		require.NoError(t, dbtest.CloseDatabase(otherDB))
+
+		_, err = n.Restore(context.Background(), snapshotDir)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "manifest network")
+		requireIntact(t, "a rejected restore")
+	})
 }
