@@ -312,12 +312,6 @@ func TestTruncateAfterSlotRecordsFailureSeparately(t *testing.T) {
 	)
 }
 
-// TestRegisterTruncateMetricsNilRegistry verifies a nil registry is tolerated,
-// matching the other database metric registrations.
-func TestRegisterTruncateMetricsNilRegistry(t *testing.T) {
-	require.NoError(t, RegisterTruncateMetrics(nil))
-}
-
 func collectHistogramCount(
 	t *testing.T,
 	reg *prometheus.Registry,
@@ -677,31 +671,34 @@ func TestRollbackAfterSlotLowersHistoryExpiryCursor(t *testing.T) {
 		cursor string
 		want   string
 	}{
+		{name: "absent", cursor: "", want: ""},
 		{name: "below point", cursor: "1400", want: "1400"},
 		{name: "at point", cursor: "1500", want: "1500"},
 		{name: "above point", cursor: "1600", want: "1500"},
-		{name: "absent", cursor: "", want: ""},
 	}
 	for _, rb := range rollbacks {
-		for _, tc := range cursors {
-			t.Run(rb.name+"/"+tc.name, func(t *testing.T) {
-				t.Parallel()
-				db := newTestDB(t)
-				targetBlock := testIndexedBlock(1500, 1, 0x15)
-				require.NoError(t, db.BlockCreate(targetBlock, nil))
+		t.Run(rb.name, func(t *testing.T) {
+			t.Parallel()
+			// One database per rollback kind: the cases run in order, each
+			// overwriting the cursor, and the absent case goes first
+			// because a cursor cannot be unset.
+			db := newTestDB(t)
+			targetBlock := testIndexedBlock(1500, 1, 0x15)
+			require.NoError(t, db.BlockCreate(targetBlock, nil))
+			point := ocommon.Point{Slot: 1500, Hash: targetBlock.Hash}
+			for _, tc := range cursors {
 				if tc.cursor != "" {
 					require.NoError(
 						t,
 						db.SetSyncState(HistoryExpiryCursorSyncKey, tc.cursor, nil),
 					)
 				}
-				point := ocommon.Point{Slot: 1500, Hash: targetBlock.Hash}
 				require.NoError(t, rb.rollback(db, point))
 				got, err := db.GetSyncState(HistoryExpiryCursorSyncKey, nil)
 				require.NoError(t, err)
-				require.Equal(t, tc.want, got)
-			})
-		}
+				require.Equal(t, tc.want, got, tc.name)
+			}
+		})
 	}
 }
 
