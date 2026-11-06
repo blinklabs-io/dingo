@@ -28,6 +28,7 @@ import (
 func TestMain(m *testing.M) {
 	acquireRetryDelay = 10 * time.Millisecond
 	sessionRetryDelay = 20 * time.Millisecond
+	boundaryFollowerRetryDelay = 20 * time.Millisecond
 	watcherMinBackoff = 20 * time.Millisecond
 	watcherMaxBackoff = 500 * time.Millisecond
 	koiosparity.SetRetryBackoff5xxForTesting(time.Millisecond)

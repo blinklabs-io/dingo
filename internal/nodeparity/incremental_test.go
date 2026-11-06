@@ -2391,4 +2391,3 @@ func TestDecideFullCheckReason(t *testing.T) {
 func testDiscardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
-
