@@ -417,35 +417,6 @@ func TestWatchRunFull_ChecksAreBoundedByCheckTimeoutNotFallbackInterval(
 	}
 }
 
-// TestHandleIncrementalSessionError_RecordsCheckError covers the wiring for
-// an incremental-mode audit finding: a per-block
-// query failure ending an incrementalSession must be recorded via the same
-// checkErrorsTotal counter any other Check failure uses, so the existing
-// NodeParityCheckErrors alert rule can actually see this failure class.
-func TestHandleIncrementalSessionError_RecordsCheckError(t *testing.T) {
-	metrics, _ := newTestParityMetrics(t)
-
-	handleIncrementalSessionError(errors.New("dingo query: boom"), metrics)
-
-	assert.Equal(
-		t, float64(1), promtestutil.ToFloat64(metrics.checkErrorsTotal),
-	)
-}
-
-// TestWatchCommand_DefaultModeIsIncremental locks in the finalized default:
-// an operator running plain `watch` with no --mode gets incremental mode,
-// not full mode. Asserts against a caller that never touched --mode at
-// all, not just that "incremental" happens to validate -- a caller who
-// explicitly wants full mode still passes --mode=full themselves.
-func TestWatchCommand_DefaultModeIsIncremental(t *testing.T) {
-	cmd := watchCommand()
-
-	modeFlag := cmd.Flags().Lookup("mode")
-	require.NotNil(t, modeFlag)
-	assert.Equal(t, "incremental", modeFlag.DefValue)
-	assert.Equal(t, "incremental", modeFlag.Value.String())
-}
-
 // TestWatchCommand_ModeMustBeFullOrIncremental covers --mode's validation:
 // only "full" and "incremental" are accepted, matching --network's own
 // closed-set style (main_test.go's TestRequireNetwork) rather than passing

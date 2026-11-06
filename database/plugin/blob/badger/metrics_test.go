@@ -28,6 +28,7 @@ import (
 )
 
 func TestRegisterBlobMetricsReusesSharedGCCollectors(t *testing.T) {
+	t.Parallel()
 	registry := prometheus.NewRegistry()
 	first := &BlobStoreBadger{promRegistry: registry}
 	second := &BlobStoreBadger{promRegistry: registry}
@@ -46,6 +47,7 @@ func TestRegisterBlobMetricsReusesSharedGCCollectors(t *testing.T) {
 }
 
 func TestRegisterBlobMetricsAllowsLabelWrappedReuse(t *testing.T) {
+	t.Parallel()
 	registry := prometheus.NewRegistry()
 	firstRegisterer := prometheus.WrapRegistererWith(
 		prometheus.Labels{"network": "preview"},
@@ -65,6 +67,7 @@ func TestRegisterBlobMetricsAllowsLabelWrappedReuse(t *testing.T) {
 }
 
 func TestRegisterBlobMetricsRemovesClosedStoreSeries(t *testing.T) {
+	t.Parallel()
 	registry := prometheus.NewRegistry()
 	store := &BlobStoreBadger{promRegistry: registry}
 	store.registerBlobMetrics()
@@ -81,6 +84,7 @@ func TestRegisterBlobMetricsRemovesClosedStoreSeries(t *testing.T) {
 }
 
 func TestValueLogGCMetricsReportReclaimedBytes(t *testing.T) {
+	t.Parallel()
 	registry := prometheus.NewRegistry()
 	store, err := New(
 		WithDataDir(t.TempDir()),

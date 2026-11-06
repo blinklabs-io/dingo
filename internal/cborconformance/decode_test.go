@@ -13,6 +13,7 @@ import (
 )
 
 func TestConwayNativeScriptRejectsDijkstraConstructor(t *testing.T) {
+	t.Parallel()
 	raw, err := cbor.Encode(common.NativeScriptRequireGuard{
 		Type: 6,
 		Credential: common.Credential{
@@ -39,6 +40,7 @@ func TestConwayNativeScriptRejectsDijkstraConstructor(t *testing.T) {
 }
 
 func TestConwayRedeemerRejectsDijkstraTag(t *testing.T) {
+	t.Parallel()
 	raw, err := cbor.Encode([]any{
 		uint8(6),
 		uint32(0),
@@ -54,6 +56,7 @@ func TestConwayRedeemerRejectsDijkstraTag(t *testing.T) {
 }
 
 func TestConwayCorpusShapeConstraints(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		rule string
@@ -87,6 +90,7 @@ func TestConwayCorpusShapeConstraints(t *testing.T) {
 }
 
 func TestConwayHeaderBodyRejectsIndefiniteVRFResult(t *testing.T) {
+	t.Parallel()
 	fields := []cbor.RawMessage{
 		{0x00}, {0x00}, {0xf6}, {0x40}, {0x40},
 		{0x9f, 0x40, 0x40, 0xff}, {0x00}, {0x40}, {0x80}, {0x82, 0x00, 0x00},
@@ -101,12 +105,14 @@ func TestConwayHeaderBodyRejectsIndefiniteVRFResult(t *testing.T) {
 }
 
 func TestConwayVotingProcedureRejectsIndefiniteArray(t *testing.T) {
+	t.Parallel()
 	if _, err := reencode("voting_procedure", []byte{0x9f, 0x01, 0xf6, 0xff}); err == nil {
 		t.Fatal("accepted an indefinite Conway voting procedure")
 	}
 }
 
 func TestConwayAuxiliaryDataEnforcesMetadataValueLimit(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name     string
 		value    any
@@ -145,6 +151,7 @@ func TestConwayAuxiliaryDataEnforcesMetadataValueLimit(t *testing.T) {
 }
 
 func TestConwayDataRequiresTag24WrappedPlutusData(t *testing.T) {
+	t.Parallel()
 	inner := []byte{0x01}
 	wrapper, err := cbor.Encode(cbor.WrappedCbor(inner))
 	if err != nil {
@@ -175,6 +182,7 @@ func TestConwayDataRequiresTag24WrappedPlutusData(t *testing.T) {
 }
 
 func TestConwayPoolMetadataRejectsIndefiniteStrings(t *testing.T) {
+	t.Parallel()
 	hash := append([]byte{0x58, 0x20}, make([]byte, 32)...)
 	validFields := []cbor.RawMessage{{0x60}, hash}
 	valid, err := cbor.Encode(validFields)
@@ -204,6 +212,7 @@ func TestConwayPoolMetadataRejectsIndefiniteStrings(t *testing.T) {
 }
 
 func TestConwayMultiAssetRejectsIndefiniteStrings(t *testing.T) {
+	t.Parallel()
 	policyID := append([]byte{0x58, 0x1c}, make([]byte, 28)...)
 	valid := append([]byte{0xa1}, policyID...)
 	valid = append(valid, 0xa1, 0x41, 'a', 0x01)
@@ -224,18 +233,21 @@ func TestConwayMultiAssetRejectsIndefiniteStrings(t *testing.T) {
 }
 
 func TestConwayMetadataRejectsDuplicateLabels(t *testing.T) {
+	t.Parallel()
 	if _, err := reencode("metadata", []byte{0xa2, 0x01, 0x80, 0x01, 0x80}); err == nil {
 		t.Fatal("accepted duplicate top-level metadata labels")
 	}
 }
 
 func TestConwayTransactionBodyRejectsNullFieldValues(t *testing.T) {
+	t.Parallel()
 	if _, err := reencode("transaction_body", []byte{0xa1, 0x03, 0xf6}); err == nil {
 		t.Fatal("accepted a null transaction-body field value")
 	}
 }
 
 func TestConwayBlockRejectsNullMapAndArrayFields(t *testing.T) {
+	t.Parallel()
 	if err := validateConwayBlockCBOR([]byte{0x85, 0x80, 0x80, 0x80, 0xf6, 0x80}); err == nil {
 		t.Fatal("accepted null for the block auxiliary-data map")
 	}
@@ -248,6 +260,7 @@ func TestConwayBlockRejectsNullMapAndArrayFields(t *testing.T) {
 }
 
 func TestConwayBlockRejectsUnorderedInvalidTransactionIndexes(t *testing.T) {
+	t.Parallel()
 	for _, indexes := range [][]uint64{{0, 0}, {1, 0}} {
 		raw, err := cbor.Encode([]any{[]any{}, []any{}, []any{}, map[uint]any{}, indexes})
 		if err != nil {
@@ -260,6 +273,7 @@ func TestConwayBlockRejectsUnorderedInvalidTransactionIndexes(t *testing.T) {
 }
 
 func TestConwayOperationalCertRejectsIndefiniteByteStrings(t *testing.T) {
+	t.Parallel()
 	valid, err := cbor.Encode([]any{
 		make([]byte, 32), uint64(0), uint64(0), make([]byte, 64),
 	})
@@ -280,6 +294,7 @@ func TestConwayOperationalCertRejectsIndefiniteByteStrings(t *testing.T) {
 }
 
 func TestConwayConstitutionRejectsIndefiniteScriptHash(t *testing.T) {
+	t.Parallel()
 	indefiniteHash := append([]byte{0x82, 0x82, 0x60, 0x58, 0x20}, make([]byte, 32)...)
 	indefiniteHash = append(indefiniteHash, 0xff, 0x5f, 0x58, 0x1c)
 	indefiniteHash = append(indefiniteHash, make([]byte, 28)...)
@@ -297,6 +312,7 @@ func TestConwayConstitutionRejectsIndefiniteScriptHash(t *testing.T) {
 }
 
 func TestConwayConstitutionRejectsIndefiniteOuterArray(t *testing.T) {
+	t.Parallel()
 	anchor, err := cbor.Encode(common.GovAnchor{
 		Url:      "https://example.com",
 		DataHash: [32]byte{},
@@ -320,6 +336,7 @@ func TestConwayConstitutionRejectsIndefiniteOuterArray(t *testing.T) {
 }
 
 func TestConwayMetadatumEnforcesMetadataValueLimit(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name     string
 		value    any
@@ -347,6 +364,7 @@ func TestConwayMetadatumEnforcesMetadataValueLimit(t *testing.T) {
 }
 
 func TestConwayCostModelsRejectNullParameters(t *testing.T) {
+	t.Parallel()
 	if _, err := reencode("cost_models", []byte{0xa1, 0x03, 0x82, 0xf6, 0x00}); err == nil {
 		t.Fatal("accepted null as a cost-model integer")
 	}
@@ -356,6 +374,7 @@ func TestConwayCostModelsRejectNullParameters(t *testing.T) {
 }
 
 func TestConwayWithdrawalsRejectNullAmounts(t *testing.T) {
+	t.Parallel()
 	address := make([]byte, 29)
 	address[0] = 0xe0
 	key, err := cbor.Encode(cbor.NewByteString(address))
@@ -375,6 +394,7 @@ func TestConwayWithdrawalsRejectNullAmounts(t *testing.T) {
 }
 
 func TestConwayWithdrawalsUseLedgerMapOrder(t *testing.T) {
+	t.Parallel()
 	hash := bytes.Repeat([]byte{0x33}, common.AddressHashSize)
 	testnetScript, err := common.NewAddressFromParts(
 		common.AddressTypeNoneScript,
@@ -440,6 +460,7 @@ func TestConwayWithdrawalsUseLedgerMapOrder(t *testing.T) {
 }
 
 func TestConwayProtocolVersionUsesSpecifiedIntegerWidths(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name     string
 		rule     string
@@ -465,6 +486,7 @@ func TestConwayProtocolVersionUsesSpecifiedIntegerWidths(t *testing.T) {
 }
 
 func TestConwayAuxiliaryDataMapRejectsNullScript(t *testing.T) {
+	t.Parallel()
 	content, err := cbor.Encode(map[uint][]any{2: {nil}})
 	if err != nil {
 		t.Fatal(err)
@@ -479,6 +501,7 @@ func TestConwayAuxiliaryDataMapRejectsNullScript(t *testing.T) {
 }
 
 func TestConwayTransactionOutputMapsRequireAddressAndValue(t *testing.T) {
+	t.Parallel()
 	address := make([]byte, 29)
 	address[0] = 0x61
 	raw, err := cbor.Encode(map[uint]any{0: cbor.NewByteString(address)})
@@ -495,6 +518,7 @@ func TestConwayTransactionOutputMapsRequireAddressAndValue(t *testing.T) {
 }
 
 func TestConwayProposalProceduresRejectDuplicateElements(t *testing.T) {
+	t.Parallel()
 	rewardAccount := make([]byte, 29)
 	rewardAccount[0] = 0xe0
 	proposal, err := cbor.Encode([]any{
@@ -520,6 +544,7 @@ func TestConwayProposalProceduresRejectDuplicateElements(t *testing.T) {
 }
 
 func TestConwayCertificateSetsCanonicalizePoolOwners(t *testing.T) {
+	t.Parallel()
 	operator := make([]byte, 28)
 	vrfKeyHash := make([]byte, 32)
 	rewardAccount := make([]byte, 29)
@@ -570,6 +595,7 @@ func TestConwayCertificateSetsCanonicalizePoolOwners(t *testing.T) {
 }
 
 func TestConwayProposalProcedureSetsUseTag258(t *testing.T) {
+	t.Parallel()
 	rewardAccount := make([]byte, 29)
 	rewardAccount[0] = 0xe0
 	anchorHash := make([]byte, 32)
@@ -608,6 +634,7 @@ func TestConwayProposalProcedureSetsUseTag258(t *testing.T) {
 }
 
 func TestBabbageTransactionOutputUsesLedgerEncoding(t *testing.T) {
+	t.Parallel()
 	address := make([]byte, 29)
 	address[0] = 0x61
 	datumHash := make([]byte, 32)
@@ -672,6 +699,7 @@ func TestBabbageTransactionOutputUsesLedgerEncoding(t *testing.T) {
 }
 
 func TestConwayHardForkActionRejectsOversizedProtocolVersion(t *testing.T) {
+	t.Parallel()
 	raw, err := cbor.Encode([]any{
 		uint8(1),
 		nil,

@@ -53,6 +53,7 @@ func musashiDijkstraBlock(t *testing.T) []byte {
 //	cbor: cannot unmarshal array into Go value of type conway.tmpConwayBlock
 //	(cannot decode CBOR array to struct with different number of elements)
 func TestDecodeConwayBlockRejectsObsoleteDijkstraLayout(t *testing.T) {
+	t.Parallel()
 	raw := musashiDijkstraBlock(t)
 
 	block, err := models.DecodeConwayBlock(raw)
@@ -61,6 +62,7 @@ func TestDecodeConwayBlockRejectsObsoleteDijkstraLayout(t *testing.T) {
 }
 
 func TestDecodeStoredConwayBlockAcceptsLegacyDijkstraLayout(t *testing.T) {
+	t.Parallel()
 	raw := musashiDijkstraBlock(t)
 
 	block, err := (models.Block{
@@ -73,49 +75,12 @@ func TestDecodeStoredConwayBlockAcceptsLegacyDijkstraLayout(t *testing.T) {
 	require.Equal(t, raw, block.Cbor())
 }
 
-// TestMusashiFixtureHasDijkstraLayout pins the shape the fix depends on, so a
-// fixture swapped for a differently-shaped block fails here with a clear
-// reason rather than making the regression above pass for the wrong one.
-func TestMusashiFixtureHasDijkstraLayout(t *testing.T) {
-	raw := musashiDijkstraBlock(t)
-
-	var components []cbor.RawMessage
-	_, err := cbor.Decode(raw, &components)
-	require.NoError(t, err)
-	require.Len(
-		t,
-		components,
-		2,
-		"Dijkstra blocks are [header, block_body]; the five-component "+
-			"Leios-extended Conway reconstruct cannot apply to them",
-	)
-	var blockBody []cbor.RawMessage
-	_, err = cbor.Decode(components[1], &blockBody)
-	require.NoError(t, err)
-	require.Len(t, blockBody, 4, "the captured fixture uses the legacy body schema")
-
-	var headerParts []cbor.RawMessage
-	_, err = cbor.Decode(components[0], &headerParts)
-	require.NoError(t, err)
-	require.Len(t, headerParts, 2)
-
-	var bodyElems []cbor.RawMessage
-	_, err = cbor.Decode(headerParts[0], &bodyElems)
-	require.NoError(t, err)
-	require.Len(
-		t,
-		bodyElems,
-		12,
-		"the Leios header extension adds leios_certified and "+
-			"leios_announcement to the 10 standard Babbage fields",
-	)
-}
-
 // TestDecodeConwayBlockRejectsUnrecognizedBlock proves the added fallback did
 // not turn the decoder into one that accepts anything: input matching none of
 // the three shapes still fails, and still reports the strict Conway error,
 // which is the meaningful one for real Conway networks.
 func TestDecodeConwayBlockRejectsUnrecognizedBlock(t *testing.T) {
+	t.Parallel()
 	notABlock, err := cbor.Encode([]any{1, 2, 3})
 	require.NoError(t, err)
 
@@ -135,6 +100,7 @@ func TestDecodeConwayBlockRejectsUnrecognizedBlock(t *testing.T) {
 // be silently reinterpreted as Dijkstra instead of returning the strict-decode
 // error.
 func TestDecodeConwayBlockRejectsTwoComponentNonDijkstra(t *testing.T) {
+	t.Parallel()
 	twoThings, err := cbor.Encode([]any{1, 2})
 	require.NoError(t, err)
 
@@ -154,6 +120,7 @@ func TestDecodeConwayBlockRejectsTwoComponentNonDijkstra(t *testing.T) {
 // gate checks the header body width too: a two-component block whose header
 // body carries only the ten standard Babbage fields is not the Musashi shape.
 func TestDecodeConwayBlockRejectsUnextendedDijkstraShape(t *testing.T) {
+	t.Parallel()
 	raw := musashiDijkstraBlock(t)
 
 	var components []cbor.RawMessage

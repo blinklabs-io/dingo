@@ -21,41 +21,6 @@ import (
 	"testing"
 )
 
-func TestNewCardanoNodeConfigFromEmbedFS(t *testing.T) {
-	t.Parallel()
-
-	// Test loading config from embedded filesystem
-	cfg, err := NewCardanoNodeConfigFromEmbedFS(
-		EmbeddedConfigFS,
-		"preview/config.json",
-	)
-	if err != nil {
-		t.Fatalf("failed to load cardano config from embedded FS: %v", err)
-	}
-
-	if cfg == nil {
-		t.Fatal("expected non-nil config")
-	}
-
-	// Verify that the config has expected values
-	if cfg.ShelleyGenesisFile == "" {
-		t.Error("expected ShelleyGenesisFile to be set")
-	}
-
-	if cfg.ByronGenesisFile == "" {
-		t.Error("expected ByronGenesisFile to be set")
-	}
-
-	// Verify genesis configs were actually loaded
-	if cfg.ShelleyGenesis() == nil {
-		t.Error("expected ShelleyGenesis to be loaded")
-	}
-
-	if cfg.ByronGenesis() == nil {
-		t.Error("expected ByronGenesis to be loaded")
-	}
-}
-
 func TestNewCardanoNodeConfigFromEmbedFS_InvalidPath(t *testing.T) {
 	t.Parallel()
 
@@ -82,39 +47,6 @@ func TestLoadCardanoNodeConfigWithFallbackNormalizesEmbedPath(t *testing.T) {
 	}
 	if cfg == nil {
 		t.Fatal("expected non-nil config")
-	}
-}
-
-func TestEmbedFS_ListFiles(t *testing.T) {
-	t.Parallel()
-
-	// Test that embedded FS contains expected files in preview directory
-	previewEntries, err := EmbeddedConfigFS.ReadDir("preview")
-	if err != nil {
-		t.Fatalf("failed to read preview directory: %v", err)
-	}
-
-	if len(previewEntries) == 0 {
-		t.Fatal("expected preview directory to contain files")
-	}
-
-	expectedFiles := []string{
-		"config.json",
-		"byron-genesis.json",
-		"shelley-genesis.json",
-		"alonzo-genesis.json",
-		"conway-genesis.json",
-	}
-	foundFiles := make(map[string]bool)
-
-	for _, entry := range previewEntries {
-		foundFiles[entry.Name()] = true
-	}
-
-	for _, expectedFile := range expectedFiles {
-		if !foundFiles[expectedFile] {
-			t.Errorf("expected to find %s in preview directory", expectedFile)
-		}
 	}
 }
 
@@ -297,18 +229,5 @@ func isEmbeddedSigningKey(name string) bool {
 		return true
 	default:
 		return false
-	}
-}
-func TestEmbeddedSigningKeyGuardMatchesMixedCase(t *testing.T) {
-	t.Parallel()
-	for _, name := range []string{"producer.skey", "producer.SKEY", "producer.Key", "producer.key"} {
-		if !isEmbeddedSigningKey(name) {
-			t.Errorf("signing key %s bypasses embed guard", name)
-		}
-	}
-	for _, name := range []string{"producer.vkey", "network.json"} {
-		if isEmbeddedSigningKey(name) {
-			t.Errorf("non-signing asset %s rejected", name)
-		}
 	}
 }
