@@ -48,6 +48,11 @@ concurrency:
 env:
   APPLICATION_NAME: 'dingo'
   RELEASE_TAG: ${{ github.ref_name }}
+  # A comma after a proxy falls back to the next entry only on a 404 or 410,
+  # so a dropped proxy connection fails the download outright. A pipe falls
+  # back on any error; go.sum and the checksum database still verify what a
+  # direct fetch returns.
+  GOPROXY: 'https://proxy.golang.org|direct'
 
 jobs:
   # A tag cannot publish while govulncheck is failing. This was lost once

@@ -53,14 +53,15 @@ and includes commands for discovering additional package and symbol docs.
 ## Public documentation
 
 Operator-facing installation, quick-start, Cardano CLI, stake-pool, monitoring,
-and release documentation is published in the
-[Dingo guide on docs.blinklabs.io](https://docs.blinklabs.io/guides/dingo/001-dingo/).
+and release documentation is published in the [Dingo guide on
+docs.blinklabs.io](https://docs.blinklabs.io/guides/dingo/001-dingo/).
 
 The same public documentation is available in machine-readable forms:
 
 - [`llms.txt`](https://docs.blinklabs.io/llms.txt) indexes every documentation
   set.
-- The [Cardano nodes and operations set](https://docs.blinklabs.io/_llms-txt/cardano-nodes-and-operations.txt)
+- The [Cardano nodes and operations
+  set](https://docs.blinklabs.io/_llms-txt/cardano-nodes-and-operations.txt)
   contains the focused Dingo and node-operations material.
 - [`llms-full.txt`](https://docs.blinklabs.io/llms-full.txt) contains the full
   public documentation corpus.

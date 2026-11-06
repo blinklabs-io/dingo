@@ -582,11 +582,6 @@ func loadSampleWaivers(
 		sampleRules[file.name] = file.rule
 	}
 	waivers := append([]corpusWaiver(nil), metadata.Waivers...)
-	for _, divergence := range metadata.Divergences {
-		if divergence.Kind == "verified-by-parent" {
-			waivers = append(waivers, divergence)
-		}
-	}
 	waived := make(map[string]WaivedSample)
 	for _, waiver := range waivers {
 		if len(waiver.Samples) == 0 {
