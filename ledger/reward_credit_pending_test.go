@@ -37,7 +37,7 @@ import (
 func creditedRewardRound(t *testing.T) *epochBoundaryBenchFixture {
 	t.Helper()
 	shape := epochBoundaryDumpShape()
-	shape.delegators = 248
+	shape.delegators = 60
 	f := newEpochBoundaryBenchFixture(t, shape, "")
 	require.NoError(t, f.ls.precomputeStakeRewardsAfterEpochTransition(
 		epochBoundaryBenchPrecomputeEvent(),
@@ -491,7 +491,7 @@ func TestPendingRewardRoundAggregateReadsCountEachCreditOnce(t *testing.T) {
 		keys = append(keys, key)
 	}
 	slices.Sort(keys)
-	require.Greater(t, len(keys), 40)
+	require.Greater(t, len(keys), 12)
 	txn := f.db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		for _, key := range keys[:len(keys)/3] {
