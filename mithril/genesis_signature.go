@@ -58,11 +58,32 @@ func VerifyGenesisCertificateSignature(
 		}
 		for _, msg := range messageCandidates {
 			if ed25519.Verify(pubKey, msg, sig) {
-				return nil
+				return verifyGenesisSignedFields(cert)
 			}
 		}
 	}
 	return errors.New("genesis signature verification failed")
+}
+
+func verifyGenesisSignedFields(cert *Certificate) error {
+	if cert.ProtocolMessage.ComputeHash() != cert.SignedMessage {
+		return errors.New(
+			"genesis signed message does not match protocol message",
+		)
+	}
+	avk, ok := cert.ProtocolMessage.MessageParts["next_aggregate_verification_key"]
+	if !ok || avk != cert.AggregateVerificationKey {
+		return errors.New(
+			"genesis aggregate verification key does not match signed protocol message",
+		)
+	}
+	parameters, ok := cert.ProtocolMessage.MessageParts["next_protocol_parameters"]
+	if !ok || parameters != cert.Metadata.Parameters.ComputeHash() {
+		return errors.New(
+			"genesis protocol parameters do not match signed protocol message",
+		)
+	}
+	return nil
 }
 
 func decodeByteCandidates(data string, includeRaw bool) [][]byte {
