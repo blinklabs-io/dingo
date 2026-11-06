@@ -18,6 +18,20 @@ Limit violations wrap `lifecycle.ErrManifestTooLarge`. Bark snapshot verify
 and restore report this as `ResourceExhausted` for local and cloud manifests,
 distinct from missing snapshots, checksum corruption, or cloud transport errors.
 
+## Imported reward credit completion
+
+A certified account balance already includes applied reward rounds at or before
+the snapshot anchor, including rewards subsequently withdrawn. Account import
+marks those rounds' spendable, unguarded outputs folded in the same transaction
+as each balance replacement. It preserves applied-round markers, journals,
+already folded outputs, and later rounds.
+
+Before checkpointing cert state, import drains remaining covered outputs without
+adding credits, including credentials absent from the certified account set.
+The drain commits bounded batches and repeats after interruption. A resumed
+cert-state checkpoint from an older importer also drains covered outputs; a
+completed tip checkpoint leaves subsequent ledger activity unchanged.
+
 ## Mithril MemPack datum hashes
 
 The UTxO-HD MemPack tag-3 output stores its `DataHash32` as four

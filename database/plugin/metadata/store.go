@@ -3173,7 +3173,7 @@ type MetadataStore interface {
 
 	// FoldRewardAccountOutputs marks a credential's unfolded credits of the
 	// given credited rounds as added to account.reward. Call it in the
-	// transaction that adds them.
+	// transaction that establishes that balance.
 	FoldRewardAccountOutputs(
 		[]uint64, // snapshot epochs of the credited rounds
 		uint8, // credentialTag
@@ -3217,7 +3217,8 @@ type MetadataStore interface {
 
 	// ClaimUnfoldedRewardCredits marks up to limit unfolded credits of one
 	// credited round folded and returns them, for the caller to write to
-	// their accounts in the same transaction.
+	// their accounts in the same transaction, or to acknowledge a certified
+	// imported state that already covers those credits.
 	ClaimUnfoldedRewardCredits(
 		uint64, // snapshotEpoch
 		int, // limit
