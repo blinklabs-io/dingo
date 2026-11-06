@@ -416,3 +416,53 @@ func TestHistoryExpired_OldestRetainedSlotAtEveryCallSite(t *testing.T) {
 		require.ErrorContains(t, err, "oldest retained slot=777")
 	})
 }
+
+// expiredRollbackLedger serves the WatchTx rollback undo walk. With
+// bodyExpired unset the rolled-back block itself is expired; with it set the
+// block resolves and its transactions are expired.
+type expiredRollbackLedger struct {
+	expiredHistoryLedger
+	bodyExpired bool
+}
+
+func (l *expiredRollbackLedger) SecurityParam() int { return 3 }
+
+func (l *expiredRollbackLedger) BlockByHashIncludingRolledBack(
+	context.Context,
+	[]byte,
+) (models.Block, error) {
+	if l.bodyExpired {
+		return models.Block{Slot: 10, Hash: expiredHash()}, nil
+	}
+	return models.Block{}, l.expired
+}
+
+// The rollback undo walk maps expiry at its own two call sites; both carry
+// the bound.
+func TestWatchTxRollbackUndo_ExpiredHistoryNamesOldestRetainedSlot(
+	t *testing.T,
+) {
+	t.Parallel()
+	for name, bodyExpired := range map[string]bool{
+		"block lookup": false,
+		"block body":   true,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			ls := &expiredRollbackLedger{
+				expiredHistoryLedger: *newExpiredHistoryLedger(10),
+				bodyExpired:          bodyExpired,
+			}
+			ls.oldest, ls.oldestKnown = 777, true
+			s := &watchServiceServer{utxorpc: newExpiredHistoryServer(ls)}
+			_, err := s.watchTxFetchRollbackUndoFromBlocks(
+				t.Context(),
+				expiredHash(),
+				ocommon.NewPoint(5, bytes.Repeat([]byte{0xcc}, 32)),
+				func(lcommon.Transaction) bool { return true },
+			)
+			requireHistoryExpired(t, err)
+			require.ErrorContains(t, err, "oldest retained slot=777")
+		})
+	}
+}
