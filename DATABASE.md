@@ -6425,7 +6425,7 @@ cleanup (`UtxosDeleteConsumed`, persisting the floor first) up to the
 committed tip, which lies at or below the certified immutable tip, after the
 first batch it commits in a process and then once every
 `trustedBatchPruneEvery` (16) committed batches, in deletes of
-`trustedBatchPruneRows` (20,000) rows until none is left or 30 seconds have
+`trustedBatchPruneRows` (10,000) rows until none is left or 30 seconds have
 passed. A spent row costs less to delete the more rows its transaction
 deletes with it, so draining several batches' spends in a few large
 transactions costs less than draining each batch's in one or two small ones.
