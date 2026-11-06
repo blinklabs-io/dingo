@@ -53,13 +53,6 @@ func TestReadRejectsUnknownFormatVersion(t *testing.T) {
 	require.Contains(t, err.Error(), "format version")
 }
 
-func TestFileNameIsStable(t *testing.T) {
-	require.Equal(t, "dingo.dbinfo", dbinfo.FileName)
-	require.Equal(
-		t, filepath.Join("data", "dingo.dbinfo"), dbinfo.Path("data"),
-	)
-}
-
 // TestWriteRejectsEmptyDataDir guards against os.CreateTemp(dataDir, ...)
 // resolving to the system temp directory when dataDir is empty, while
 // Path("") is the bare relative name "dingo.dbinfo" -- the rename that

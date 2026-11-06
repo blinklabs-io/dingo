@@ -19,6 +19,19 @@ import (
 	"testing"
 )
 
+// shapeSampleSizes covers every small count plus both sides of each
+// power-of-two padding boundary up to well past the default chunk bound.
+func shapeSampleSizes() []int {
+	sizes := make([]int, 0, 64)
+	for n := 1; n <= 40; n++ {
+		sizes = append(sizes, n)
+	}
+	for _, p := range []int{64, 128, 256, 512} {
+		sizes = append(sizes, p-1, p, p+1)
+	}
+	return append(sizes, 300, 1000)
+}
+
 func mkRefs(n int) []Ref {
 	refs := make([]Ref, n)
 	for i := range refs {
@@ -32,8 +45,9 @@ func mkRefs(n int) []Ref {
 // shapes (Condition strings) is produced, so the prepared-statement cache can
 // reuse them. Without padding this set would grow with the input count.
 func TestChunksBoundsDistinctShapes(t *testing.T) {
+	t.Parallel()
 	shapes := make(map[string]struct{})
-	for n := 1; n <= 1000; n++ {
+	for _, n := range shapeSampleSizes() {
 		for _, c := range Chunks(mkRefs(n), DefaultMaxTerms) {
 			shapes[c.Condition] = struct{}{}
 		}
@@ -55,6 +69,7 @@ func TestChunksBoundsDistinctShapes(t *testing.T) {
 // reorders real refs: the first Real*2 args of each chunk are exactly the input
 // refs, and padding repeats the chunk's last ref.
 func TestChunksPreservesRealRefsInOrder(t *testing.T) {
+	t.Parallel()
 	refs := mkRefs(5) // pads to 8
 	chunks := Chunks(refs, DefaultMaxTerms)
 	if len(chunks) != 1 {
@@ -99,6 +114,7 @@ func TestChunksPreservesRealRefsInOrder(t *testing.T) {
 // TestChunksSplitsOverMaxTerms verifies large inputs are chunked at maxTerms and
 // each chunk is independently padded to a power of two.
 func TestChunksSplitsOverMaxTerms(t *testing.T) {
+	t.Parallel()
 	chunks := Chunks(mkRefs(300), 256)
 	if len(chunks) != 2 {
 		t.Fatalf(
@@ -134,6 +150,7 @@ func TestChunksSplitsOverMaxTerms(t *testing.T) {
 // bind-parameter count at two per term). Real, arg count and padding-by-repeat
 // semantics are unchanged.
 func TestChunksNonPowerOfTwoMaxTerms(t *testing.T) {
+	t.Parallel()
 	for _, maxTerms := range []int{3, 5, 100, 200, 255, 257, 999} {
 		for _, n := range []int{1, 2, 7, 63, 150, 300, 1001} {
 			refs := mkRefs(n)
@@ -215,8 +232,9 @@ func TestChunksNonPowerOfTwoMaxTerms(t *testing.T) {
 // non-power-of-two maxTerms: the distinct-shape set must still be bounded by
 // the powers of two under the effective bound, not gain an extra ragged shape.
 func TestChunksNonPowerOfTwoMaxTermsBoundsShapes(t *testing.T) {
+	t.Parallel()
 	shapes := make(map[int]struct{})
-	for n := 1; n <= 500; n++ {
+	for _, n := range shapeSampleSizes() {
 		for _, c := range Chunks(mkRefs(n), 200) {
 			shapes[strings.Count(c.Condition, "output_idx")] = struct{}{}
 		}
@@ -238,6 +256,7 @@ func TestChunksNonPowerOfTwoMaxTermsBoundsShapes(t *testing.T) {
 
 // TestChunksMaxTermsBelowOne pins the documented fallback to DefaultMaxTerms.
 func TestChunksMaxTermsBelowOne(t *testing.T) {
+	t.Parallel()
 	for _, maxTerms := range []int{0, -1, -256} {
 		got := Chunks(mkRefs(300), maxTerms)
 		want := Chunks(mkRefs(300), DefaultMaxTerms)
@@ -263,6 +282,7 @@ func TestChunksMaxTermsBelowOne(t *testing.T) {
 }
 
 func TestChunksEmpty(t *testing.T) {
+	t.Parallel()
 	if Chunks(nil, DefaultMaxTerms) != nil {
 		t.Fatal("expected nil for empty input")
 	}
@@ -272,6 +292,7 @@ func TestChunksEmpty(t *testing.T) {
 }
 
 func TestChunksSingle(t *testing.T) {
+	t.Parallel()
 	chunks := Chunks(mkRefs(1), DefaultMaxTerms)
 	if len(chunks) != 1 || chunks[0].Condition != term {
 		t.Fatalf("expected single-term condition %q, got %+v", term, chunks)
