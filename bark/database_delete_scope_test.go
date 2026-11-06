@@ -27,6 +27,7 @@ import (
 )
 
 func TestDeleteSnapshotLeavesNonSnapshotEntriesAlone(t *testing.T) {
+	t.Parallel()
 	snapshotDir := t.TempDir()
 	h := newTestDatabaseServiceHandlerWithTrustKey(t, nil, t.TempDir())
 	h.bark.config.SnapshotDir = snapshotDir
@@ -43,13 +44,28 @@ func TestDeleteSnapshotLeavesNonSnapshotEntriesAlone(t *testing.T) {
 	require.NoError(t, os.Mkdir(plainDir, 0o755))
 	plainFile := filepath.Join(snapshotDir, "some-file")
 	require.NoError(t, os.WriteFile(plainFile, []byte("data"), 0o600))
+	// A manifest.json that is not a regular file does not make its parent a
+	// snapshot.
+	manifestDir := filepath.Join(snapshotDir, "manifest-dir")
+	require.NoError(t, os.MkdirAll(
+		filepath.Join(manifestDir, lifecycle.ManifestFileName), 0o755,
+	))
+	manifestLink := filepath.Join(snapshotDir, "manifest-symlink")
+	require.NoError(t, os.Mkdir(manifestLink, 0o755))
+	require.NoError(t, os.Symlink(
+		filepath.Join(snapshotDir, "missing-target"),
+		filepath.Join(manifestLink, lifecycle.ManifestFileName),
+	))
 
-	for _, id := range []string{
-		".dingo-snapshot-catalog-v1.sqlite",
-		".dingo-verify-snapshot-123",
-		"not-a-snapshot",
-		"some-file",
-	} {
+	wantCodes := map[string]connect.Code{
+		".dingo-snapshot-catalog-v1.sqlite": connect.CodeInvalidArgument,
+		".dingo-verify-snapshot-123":        connect.CodeInvalidArgument,
+		"not-a-snapshot":                    connect.CodeNotFound,
+		"some-file":                         connect.CodeNotFound,
+		"manifest-dir":                      connect.CodeNotFound,
+		"manifest-symlink":                  connect.CodeNotFound,
+	}
+	for id, wantCode := range wantCodes {
 		_, err := h.DeleteSnapshot(
 			context.Background(),
 			connect.NewRequest(
@@ -57,20 +73,19 @@ func TestDeleteSnapshotLeavesNonSnapshotEntriesAlone(t *testing.T) {
 			),
 		)
 		require.Error(t, err, "snapshot id %q", id)
-		require.Contains(t, []connect.Code{
-			connect.CodeInvalidArgument,
-			connect.CodeNotFound,
-			connect.CodeFailedPrecondition,
-		}, connect.CodeOf(err), "snapshot id %q", id)
+		require.Equal(t, wantCode, connect.CodeOf(err), "snapshot id %q", id)
 	}
 
 	require.FileExists(t, catalog)
 	require.DirExists(t, verifyDir)
 	require.DirExists(t, plainDir)
 	require.FileExists(t, plainFile)
+	require.DirExists(t, manifestDir)
+	require.DirExists(t, manifestLink)
 }
 
 func TestDeleteSnapshotRemovesSnapshotWithCorruptManifest(t *testing.T) {
+	t.Parallel()
 	snapshotDir := t.TempDir()
 	h := newTestDatabaseServiceHandlerWithTrustKey(t, nil, t.TempDir())
 	h.bark.config.SnapshotDir = snapshotDir

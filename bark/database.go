@@ -1294,7 +1294,9 @@ func (h *databaseServiceHandler) resolveCloudAfterLocalIntegrityFailure(
 const internalSnapshotEntryPrefix = ".dingo-"
 
 // localSnapshotExists reports whether dir is a directory that holds a
-// manifest file, without parsing it.
+// manifest file, without parsing it. The manifest must be a regular file: a
+// directory, symlink or special file named manifest.json does not make dir a
+// snapshot.
 func localSnapshotExists(dir string) (bool, error) {
 	info, err := os.Lstat(dir)
 	if err != nil {
@@ -1306,15 +1308,16 @@ func localSnapshotExists(dir string) (bool, error) {
 	if !info.IsDir() {
 		return false, nil
 	}
-	if _, err := os.Lstat(
+	manifestInfo, err := os.Lstat(
 		filepath.Join(dir, lifecycle.ManifestFileName),
-	); err != nil {
+	)
+	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return false, nil
 		}
 		return false, err
 	}
-	return true, nil
+	return manifestInfo.Mode().IsRegular(), nil
 }
 
 // DeleteSnapshot removes snapshotID's local copy, its cloud copy, or both
