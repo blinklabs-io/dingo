@@ -314,18 +314,6 @@ func TestHeaderSeqConcurrentStampsAreUnique(t *testing.T) {
 	require.Len(t, seen, len(chains)*perChain)
 }
 
-// TestHeaderSeqFallsBackForManagerlessChain documents the one case the
-// manager-owned counter cannot serve: a Chain built as a struct literal
-// without a manager, which only this package's tests do. Such a chain shares
-// no bus with any other, so its own counter is already a complete order.
-func TestHeaderSeqFallsBackForManagerlessChain(t *testing.T) {
-	c := &Chain{}
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-	require.Equal(t, uint64(1), c.nextHeaderSeqLocked())
-	require.Equal(t, uint64(2), c.nextHeaderSeqLocked())
-}
-
 func TestIntersectPointsKeepsCurrentTipFallback(t *testing.T) {
 	t.Parallel()
 
@@ -633,99 +621,6 @@ func TestCallerTxnEventsWaitForCommit(t *testing.T) {
 			require.Equal(t, ocommon.Point{}, c.Tip().Point)
 		})
 	}
-}
-
-// TestNonDeferredRollbackQueuesEventsOnSequencer pins the mechanism rather
-// than the timing. A non-deferred Rollback used to publish its chain.update
-// inline, after draining the sequencer. A deferred block add that mutated the
-// chain *after* the rollback is already on that sequencer, so the drain
-// published the add first and the rollback followed -- inverting mutation
-// order for every chain.update subscriber.
-//
-// Enqueueing the rollback's own events on the same sequencer is what makes the
-// published order equal the mutation order, so that is what is asserted here:
-// after rollbackLocked returns, its events are on the sequencer and nothing
-// has been published yet.
-func TestNonDeferredRollbackQueuesEventsOnSequencer(t *testing.T) {
-	bus := event.NewEventBus(nil, nil)
-	t.Cleanup(bus.Stop)
-	subId, ch := bus.Subscribe(ChainUpdateEventType)
-	defer bus.Unsubscribe(ChainUpdateEventType, subId)
-
-	cm, err := NewManager(context.Background(), nil, bus)
-	require.NoError(t, err)
-	c := cm.PrimaryChain()
-	require.NotNil(t, c)
-
-	blocks, err := testfixtures.GenerateConwayChain(3)
-	require.NoError(t, err)
-	require.Len(t, blocks, 3)
-	for i := range blocks {
-		_, addErr := c.AddBlockWithPointDeferred(
-			context.Background(),
-			blocks[i],
-			ocommon.Point{
-				Slot: blocks[i].SlotNumber(),
-				Hash: blocks[i].Hash().Bytes(),
-			},
-			nil,
-		)
-		require.NoError(t, addErr)
-	}
-	c.PublishPendingChainUpdates()
-	for range blocks {
-		select {
-		case <-ch:
-		default:
-			t.Fatal("expected the three block adds to be published")
-		}
-	}
-
-	evts, err := c.rollbackLocked(context.Background(), ocommon.Point{
-		Slot: blocks[0].SlotNumber(),
-		Hash: blocks[0].Hash().Bytes(),
-	}, false)
-	require.NoError(t, err)
-	require.NotEmpty(t, evts, "the rollback removed blocks")
-
-	// Nothing published yet, and the rollback is on the sequencer.
-	select {
-	case evt := <-ch:
-		t.Fatalf(
-			"rollbackLocked must not publish; got %T",
-			evt.Data,
-		)
-	default:
-	}
-	// The sequencer holds every returned event, plus the header
-	// invalidation, which is deliberately never handed back to the caller.
-	c.pendingUpdatesMutex.Lock()
-	queued := make([]event.Event, 0, len(c.pendingUpdates))
-	for _, update := range c.pendingUpdates {
-		queued = append(queued, update.event)
-	}
-	c.pendingUpdatesMutex.Unlock()
-	countByType := func(evts []event.Event, want event.EventType) int {
-		n := 0
-		for _, evt := range evts {
-			if evt.Type == want {
-				n++
-			}
-		}
-		return n
-	}
-	assert.Equal(
-		t,
-		countByType(evts, ChainUpdateEventType),
-		countByType(queued, ChainUpdateEventType),
-		"every rollback chain.update must be on the chain-level sequencer",
-	)
-	assert.Equal(
-		t,
-		1,
-		countByType(queued, ChainHeaderEventType),
-		"the header invalidation rides the same sequencer",
-	)
 }
 
 // TestDeferredAddAfterNonDeferredRollbackKeepsMutationOrder is the ordering

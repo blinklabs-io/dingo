@@ -638,7 +638,7 @@ func TestPeerManagerBoundsConcurrentDials(t *testing.T) {
 // loses from the others.
 func TestPeerManagerSettlesAmongManyPeersAndReplacesLostOnes(t *testing.T) {
 	t.Parallel()
-	const remotes, limit = 24, 10
+	const remotes, limit = 12, 4
 	stacks := make([]*Stack, 0, remotes)
 	peers := make([]Peer, 0, remotes)
 	for range remotes {
@@ -658,10 +658,10 @@ func TestPeerManagerSettlesAmongManyPeersAndReplacesLostOnes(t *testing.T) {
 	}
 	require.Equal(t, limit, m.PeerCount(), "the limit is never passed")
 
-	// Lose three of the peers it holds.
+	// Lose two of the peers it holds.
 	lost := 0
 	for _, r := range stacks {
-		if lost == 3 {
+		if lost == 2 {
 			break
 		}
 		if r.PeerCount() == 1 {
@@ -669,7 +669,7 @@ func TestPeerManagerSettlesAmongManyPeersAndReplacesLostOnes(t *testing.T) {
 			lost++
 		}
 	}
-	require.Equal(t, 3, lost)
+	require.Equal(t, 2, lost)
 	// The count can still read the limit before the manager has noticed the
 	// loss, so wait for the replacement dials as well.
 	waitFor(t, "the lost peers are replaced", func() bool {

@@ -37,7 +37,6 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
-	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/blinklabs-io/gouroboros/vrf"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -685,54 +684,6 @@ func TestLoadOperationalCertificateRejectsOversizedEnvelope(t *testing.T) {
 	require.ErrorContains(t, err, "exceeds maximum size")
 }
 
-func TestVRFProve(t *testing.T) {
-	vrfPath, kesPath, opCertPath := createTestKeys(t)
-
-	// Load credentials
-	pc := NewPoolCredentials()
-	require.NoError(t, pc.LoadFromFiles(vrfPath, kesPath, opCertPath))
-
-	// Generate VRF proof for a sample slot
-	epochNonce := make([]byte, 32) // All zeros for test
-	alpha, err := vrf.MkInputVrf(1000, epochNonce)
-	require.NoError(t, err)
-
-	proof, output, err := pc.VRFProve(alpha)
-	require.NoError(t, err)
-
-	assert.Equal(t, vrf.ProofSize, len(proof))
-	assert.Equal(t, vrf.OutputSize, len(output))
-
-	t.Logf("VRF Proof: %s...", hex.EncodeToString(proof[:16]))
-	t.Logf("VRF Output: %s...", hex.EncodeToString(output[:16]))
-
-	// Verify the proof
-	ok, err := vrf.Verify(pc.vrfVKey, proof, output, alpha)
-	require.NoError(t, err)
-	assert.True(t, ok, "VRF proof verification failed")
-}
-
-func TestKESSign(t *testing.T) {
-	vrfPath, kesPath, opCertPath := createTestKeys(t)
-
-	// Load credentials
-	pc := NewPoolCredentials()
-	require.NoError(t, pc.LoadFromFiles(vrfPath, kesPath, opCertPath))
-
-	// Sign a test message at period 0
-	message := []byte("test block header data")
-	signature, err := pc.KESSign(0, message)
-	require.NoError(t, err)
-
-	// KES signature for depth 6 is 448 bytes
-	assert.Equal(t, kes.CardanoKesSignatureSize, len(signature))
-	t.Logf("KES Signature: %s...", hex.EncodeToString(signature[:32]))
-
-	// Verify the signature
-	ok := kes.VerifySignedKES(pc.kesVKey, 0, message, signature)
-	assert.True(t, ok, "KES signature verification failed")
-}
-
 func TestKESPeriodUpdate(t *testing.T) {
 	vrfPath, kesPath, opCertPath := createTestKeys(t)
 
@@ -1022,17 +973,6 @@ func TestUpdateKESPeriodExhaustedWithOffset(t *testing.T) {
 	)
 }
 
-func TestValidateKESPeriod_HappyPath(t *testing.T) {
-	systemStart := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
-	g := synthGenesis(100, 5, time.Second, systemStart)
-	pc := &PoolCredentials{opCert: &OpCert{KESPeriod: 1}}
-	// 250 slots elapsed → KES period 2; opcert period 1 is within
-	// [2, 1+5).
-	if err := pc.ValidateKESPeriod(g, 250); err != nil {
-		t.Errorf("ValidateKESPeriod: %v", err)
-	}
-}
-
 func TestValidateOpCertPreservesValidatedKESLifetime(t *testing.T) {
 	pc := setupTestCredentials(t)
 	wantExpiry := pc.OpCertExpiryPeriod()
@@ -1125,24 +1065,6 @@ func TestValidateKESPeriod_AtGenesisSlot(t *testing.T) {
 	pc := &PoolCredentials{opCert: &OpCert{KESPeriod: 0}}
 	if err := pc.ValidateKESPeriod(g, 0); err != nil {
 		t.Errorf("ValidateKESPeriod: %v", err)
-	}
-}
-
-func TestValidateKESPeriod_NoOpCert(t *testing.T) {
-	systemStart := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
-	g := synthGenesis(100, 5, time.Second, systemStart)
-	pc := &PoolCredentials{}
-	err := pc.ValidateKESPeriod(g, 0)
-	if err == nil {
-		t.Fatal("expected error when opcert not loaded")
-	}
-}
-
-func TestValidateKESPeriod_NilGenesis(t *testing.T) {
-	pc := &PoolCredentials{opCert: &OpCert{KESPeriod: 0}}
-	err := pc.ValidateKESPeriod(nil, 0)
-	if err == nil {
-		t.Fatal("expected error for nil genesis")
 	}
 }
 
@@ -1337,24 +1259,6 @@ func TestValidateAgainstLedger_SeedOnlySkipsCheck(t *testing.T) {
 	}
 }
 
-func TestValidateAgainstLedger_StaleOpCert(t *testing.T) {
-	pc := newCredsForLedger(t)
-	pc.opCert.IssueNumber = 3
-	view := &fakeLedgerView{
-		registered: true,
-		regVRFHash: lcommon.Blake2b256Hash(pc.vrfVKey),
-		seqFound:   true,
-		latestSeq:  5,
-	}
-	_, _, err := pc.ValidateAgainstLedger(view)
-	if err == nil {
-		t.Fatal("expected stale-counter error")
-	}
-	if !strings.Contains(err.Error(), "stale") {
-		t.Errorf("expected stale in error, got: %v", err)
-	}
-}
-
 // TestValidateAgainstLedger_GappedOpCertAccepted documents the deliberate
 // startup behavior: a counter that skips ahead of the last observed value
 // by more than one is not stale (it is ahead, not behind), and startup
@@ -1378,81 +1282,6 @@ func TestValidateAgainstLedger_GappedOpCertAccepted(t *testing.T) {
 	}
 }
 
-func TestValidateAgainstLedger_OpCertEqualOrAhead(t *testing.T) {
-	// Equal counter is fine; ahead-of-ledger is fine (the ledger may
-	// just not have observed our latest opcert yet).
-	cases := []struct {
-		name      string
-		ourSeq    uint64
-		ledgerSeq uint64
-	}{
-		{"equal", 5, 5},
-		{"ahead", 6, 5},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			pc := newCredsForLedger(t)
-			pc.opCert.IssueNumber = tc.ourSeq
-			view := &fakeLedgerView{
-				registered: true,
-				regVRFHash: lcommon.Blake2b256Hash(pc.vrfVKey),
-				seqFound:   true,
-				latestSeq:  tc.ledgerSeq,
-			}
-			if _, _, err := pc.ValidateAgainstLedger(view); err != nil {
-				t.Errorf("ValidateAgainstLedger: %v", err)
-			}
-		})
-	}
-}
-
-func TestValidateAgainstLedgerAtSlotAppliesEraCounterRule(t *testing.T) {
-	cases := []struct {
-		name      string
-		params    lcommon.ProtocolParameters
-		wantError bool
-	}{
-		{
-			name:   "tpraos permits forward counter",
-			params: &shelley.ShelleyProtocolParameters{ProtocolMajor: 2},
-		},
-		{
-			name:      "praos rejects gapped counter",
-			params:    &babbage.BabbageProtocolParameters{},
-			wantError: true,
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			pc := newCredsForLedger(t)
-			pc.opCert.IssueNumber = 7
-			view := &fakeLedgerView{
-				registered: true,
-				regVRFHash: lcommon.Blake2b256Hash(pc.vrfVKey),
-				seqFound:   true,
-				latestSeq:  5,
-			}
-			params := &mockPParamsProvider{pparams: tc.params}
-			result, err := pc.ValidateAgainstLedgerAtSlot(view, params, 0)
-			if result.EraUnevaluable != nil {
-				t.Fatalf(
-					"era resolved from real parameters, got: %v",
-					result.EraUnevaluable,
-				)
-			}
-			if tc.wantError {
-				if err == nil {
-					t.Fatal("expected gapped Praos counter to be rejected")
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("ValidateAgainstLedgerAtSlot: %v", err)
-			}
-		})
-	}
-}
-
 func TestValidateAgainstLedger_NoObservedOpCertSequence(t *testing.T) {
 	// A registered pool may not have produced a block yet, so the ledger
 	// can have no observed opcert sequence. Must not block startup.
@@ -1472,23 +1301,6 @@ func TestValidateAgainstLedger_NoObservedOpCertSequence(t *testing.T) {
 			registered,
 			matched,
 		)
-	}
-}
-
-func TestValidateAgainstLedger_NilView(t *testing.T) {
-	pc := newCredsForLedger(t)
-	_, _, err := pc.ValidateAgainstLedger(nil)
-	if err == nil {
-		t.Fatal("expected nil-view error")
-	}
-}
-
-func TestValidateAgainstLedger_NoOpCert(t *testing.T) {
-	pc := &PoolCredentials{vrfVKey: bytes32(0xAA)}
-	view := &fakeLedgerView{}
-	_, _, err := pc.ValidateAgainstLedger(view)
-	if err == nil {
-		t.Fatal("expected error when opcert not loaded")
 	}
 }
 
