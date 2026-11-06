@@ -3734,7 +3734,7 @@ func TestVoteManagerRejectsInvalidVotes(t *testing.T) {
 	assert.Empty(t, raws, "invalid votes must not be stored")
 }
 
-func TestVoteManagerLenientUnknownPubkey(t *testing.T) {
+func TestVoteManagerRejectsKeylessSeatVote(t *testing.T) {
 	t.Parallel()
 
 	fixture := newManagerFixture(
@@ -3748,8 +3748,8 @@ func TestVoteManagerLenientUnknownPubkey(t *testing.T) {
 	subId, quorumCh := fixture.eventBus.Subscribe(EbQuorumEventType)
 	defer fixture.eventBus.Unsubscribe(EbQuorumEventType, subId)
 
-	// Without registered keys the votes pass membership checks and are
-	// stored, but cannot contribute verified stake.
+	// Without registered keys the votes cannot be verified, so they are
+	// neither stored nor relayed.
 	ebHash := lcommon.NewBlake2b256([]byte("eb"))
 	for voterId := range uint64(10) {
 		require.NoError(
@@ -3763,7 +3763,7 @@ func TestVoteManagerLenientUnknownPubkey(t *testing.T) {
 	raws := fixture.mgr.VotesByIds(
 		[]lcommon.LeiosVoteId{{SlotNo: 577, VoterId: 9}},
 	)
-	assert.Len(t, raws, 1, "unverified votes are stored leniently")
+	assert.Empty(t, raws, "keyless seat votes must not be stored")
 	testutil.RequireNoReceive(
 		t,
 		quorumCh,
@@ -3836,8 +3836,8 @@ func TestVoteManagerQuorumBuildsCertificate(t *testing.T) {
 func TestVoteManagerQuorumRequiresVerifiedStake(t *testing.T) {
 	t.Parallel()
 
-	// Registry missing voter 0's key: their stake (100) is observed but
-	// not verified.
+	// Registry missing voter 0's key: their vote is dropped, so their
+	// stake (100) is never observed.
 	fixture := newManagerFixture(
 		t,
 		func(f *managerFixture, cfg *VoteManagerConfig) {
@@ -3859,7 +3859,7 @@ func TestVoteManagerQuorumRequiresVerifiedStake(t *testing.T) {
 	defer fixture.eventBus.Unsubscribe(EbQuorumEventType, subId)
 
 	ebHash := lcommon.NewBlake2b256([]byte("eb"))
-	// Observed 400 >= 385 but verified only 300: no certificate
+	// Voter 0's keyless vote is dropped; voters 1..4 give 300 < 385.
 	for voterId := range uint64(5) {
 		require.NoError(
 			t,
@@ -3873,7 +3873,7 @@ func TestVoteManagerQuorumRequiresVerifiedStake(t *testing.T) {
 		t,
 		quorumCh,
 		300*time.Millisecond,
-		"observed-but-unverified stake must not certify",
+		"keyless seat vote must not count toward the quorum",
 	)
 
 	// Verified 300+50+40 = 390 >= 385: certificate now builds
@@ -3900,8 +3900,8 @@ func TestVoteManagerQuorumRequiresVerifiedStake(t *testing.T) {
 	quorum, ok := evt.Data.(EbQuorumEvent)
 	require.True(t, ok)
 	assert.Equal(t, uint64(390), quorum.VerifiedStake)
-	assert.Equal(t, uint64(490), quorum.ObservedStake)
-	// Voter 0's unverified vote must not be in the signers bitfield
+	assert.Equal(t, uint64(390), quorum.ObservedStake)
+	// Voter 0's dropped vote must not be in the signers bitfield
 	assert.False(t, quorum.Certificate.Signer(0))
 	assert.True(t, quorum.Certificate.Signer(1))
 }
@@ -4668,10 +4668,18 @@ func TestVoteManagerReferenceModeIgnoresStaticRegistryForKeylessSeat(
 	ebHash := lcommon.NewBlake2b256([]byte("keyless-static-fallback-eb"))
 	fixture.mgr.ObserveAnnouncement(577, rbHash, ebHash)
 
+	subID, relayCh := fixture.eventBus.Subscribe(VoteReceivedEventType)
+	defer fixture.eventBus.Unsubscribe(VoteReceivedEventType, subID)
 	require.NoError(t, fixture.mgr.HandlePrototypeVote(
 		"peer",
 		fixture.makePrototypeVote(t, member.VoterId, rbHash),
 	))
+	testutil.RequireNoReceive(
+		t,
+		relayCh,
+		300*time.Millisecond,
+		"a keyless seat vote must not be relayed",
+	)
 	voteID := lcommon.LeiosVoteId{SlotNo: 577, VoterId: member.VoterId}
 	fixture.mgr.mu.Lock()
 	stored := fixture.mgr.votesById[voteID]
@@ -4682,18 +4690,12 @@ func TestVoteManagerReferenceModeIgnoresStaticRegistryForKeylessSeat(
 	}]
 	fixture.mgr.mu.Unlock()
 
-	require.NotNil(t, stored)
-	assert.False(
+	assert.Nil(
 		t,
-		stored.verified,
-		"static registry must not verify a keyless on-chain seat in reference mode",
+		stored,
+		"static registry must not admit a vote for a keyless on-chain seat in reference mode",
 	)
-	require.NotNil(t, tally)
-	assert.Zero(
-		t,
-		tally.verifiedStake,
-		"a static fallback vote must not contribute certificate stake",
-	)
+	assert.Nil(t, tally, "a dropped vote must not create a tally")
 }
 
 // TestVoteManagerReferenceModeRejectsLocalStaticFallback proves production
@@ -4825,12 +4827,11 @@ func TestVoteManagerTreatsInvalidPoPOnChainKeyAsAbsent(t *testing.T) {
 		VoteSignature:     sig,
 	}))
 	fixture.mgr.mu.Lock()
-	stored, ok := fixture.mgr.votesById[lcommon.LeiosVoteId{
+	_, ok := fixture.mgr.votesById[lcommon.LeiosVoteId{
 		SlotNo: 577, VoterId: member.VoterId,
 	}]
 	fixture.mgr.mu.Unlock()
-	require.True(t, ok)
-	assert.False(t, stored.verified)
+	assert.False(t, ok, "a vote for a seat with an invalid-PoP key is dropped")
 }
 
 // TestVoteManagerRetriesOnChainKeyResolutionAfterTransientFailure proves a
@@ -6845,127 +6846,6 @@ func TestVoteManagerRecordsRetainedWhileTallyLive(t *testing.T) {
 		),
 		1,
 		"vote accepted fresh after its tally expired",
-	)
-}
-
-// partialRegistryOpt removes the registered public keys for the given
-// voter ids so their votes pass lenient validation as unverified.
-func partialRegistryOpt(
-	t *testing.T,
-	unregistered ...uint64,
-) func(*managerFixture, *VoteManagerConfig) {
-	t.Helper()
-	return func(f *managerFixture, cfg *VoteManagerConfig) {
-		partial := maps.Clone(f.registryEntries)
-		for _, member := range f.members {
-			for _, voterId := range unregistered {
-				if member.VoterId == voterId {
-					delete(
-						partial,
-						hex.EncodeToString(member.PoolKeyHash),
-					)
-				}
-			}
-		}
-		registry, err := NewVoterRegistry(partial)
-		require.NoError(t, err)
-		cfg.Registry = registry
-	}
-}
-
-func TestVoteManagerRecordCapacityRejectsNewVotes(t *testing.T) {
-	t.Parallel()
-
-	// Voters 0..2 have no registered keys: their votes are unverified
-	// and subject to the record admission cap.
-	fixture := newManagerFixture(t, partialRegistryOpt(t, 0, 1, 2))
-	fixture.mgr.maxRecords = 2
-	ebHash := lcommon.NewBlake2b256([]byte("eb"))
-	for voterId := range uint64(2) {
-		require.NoError(
-			t,
-			fixture.mgr.HandleVote(
-				"conn-a",
-				fixture.makeVote(t, voterId, 577, ebHash),
-			),
-		)
-	}
-	// The ledger is full: a new unverified vote id is rejected
-	// outright rather than evicting an existing record
-	require.NoError(
-		t,
-		fixture.mgr.HandleVote(
-			"conn-a",
-			fixture.makeVote(t, 2, 577, ebHash),
-		),
-	)
-	assert.Empty(
-		t,
-		fixture.mgr.VotesByIds(
-			[]lcommon.LeiosVoteId{{SlotNo: 577, VoterId: 2}},
-		),
-		"unverified vote beyond the record capacity is rejected",
-	)
-	// Recorded votes are unaffected
-	assert.Len(
-		t,
-		fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{
-			{SlotNo: 577, VoterId: 0},
-			{SlotNo: 577, VoterId: 1},
-		}),
-		2,
-	)
-}
-
-func TestVoteManagerVerifiedVoteBypassesRecordCapacity(t *testing.T) {
-	t.Parallel()
-
-	// Voters 0..2 have no registered keys; voter 3 stays registered.
-	fixture := newManagerFixture(t, partialRegistryOpt(t, 0, 1, 2))
-	fixture.mgr.maxRecords = 2
-	ebHash := lcommon.NewBlake2b256([]byte("eb"))
-	// Unverified votes fill the record ledger
-	for voterId := range uint64(2) {
-		require.NoError(
-			t,
-			fixture.mgr.HandleVote(
-				"conn-a",
-				fixture.makeVote(t, voterId, 577, ebHash),
-			),
-		)
-	}
-	// A verified vote must be admitted despite the full ledger:
-	// unverifiable noise cannot starve the votes that feed
-	// certificates
-	require.NoError(
-		t,
-		fixture.mgr.HandleVote(
-			"conn-a",
-			fixture.makeVote(t, 3, 577, ebHash),
-		),
-	)
-	assert.Len(
-		t,
-		fixture.mgr.VotesByIds(
-			[]lcommon.LeiosVoteId{{SlotNo: 577, VoterId: 3}},
-		),
-		1,
-		"verified vote admitted past the record capacity",
-	)
-	// Unverified votes remain capped
-	require.NoError(
-		t,
-		fixture.mgr.HandleVote(
-			"conn-a",
-			fixture.makeVote(t, 2, 577, ebHash),
-		),
-	)
-	assert.Empty(
-		t,
-		fixture.mgr.VotesByIds(
-			[]lcommon.LeiosVoteId{{SlotNo: 577, VoterId: 2}},
-		),
-		"unverified vote still rejected at capacity",
 	)
 }
 

@@ -102,6 +102,11 @@ var (
 	// votes without an age check, so the drop is not counted toward the
 	// per-connection invalid-vote limit.
 	errVoteWindowClosed = errors.New("vote window closed")
+	// errVoteKeylessSeat marks a vote from a committee seat with no
+	// authoritative key. It cannot be verified, so it is dropped rather
+	// than stored or relayed. Peers can legitimately disagree on a pool's
+	// key status, so it is not counted toward the invalid-vote limit.
+	errVoteKeylessSeat = errors.New("committee seat has no verified voting key")
 )
 
 // Reasons recorded by dingo_metrics_leios_votes_not_emitted_total. They
@@ -1874,6 +1879,7 @@ func (m *VoteManager) rejectIncomingVote(
 		errors.Is(err, errVoteVerificationPeerTrackingBudget) ||
 		errors.Is(err, errVoteVerificationPeerBudget) ||
 		errors.Is(err, errVoteEquivocation) ||
+		errors.Is(err, errVoteKeylessSeat) ||
 		errors.Is(err, errVoteWindowClosed) {
 		return nil
 	}
@@ -1951,27 +1957,26 @@ func (m *VoteManager) HandleVote(
 			),
 		)
 	}
-	verified := false
-	if pub, ok := m.resolveVoterKey(entry, member.PoolKeyHash); ok {
-		msg := VoteMessageBytes(vote.SlotNo, vote.EndorserBlockHash)
-		if err := m.verifyVoteSignature(
-			pub,
-			msg,
-			vote.VoteSignature,
-		); err != nil {
-			return m.rejectIncomingVote(connKey, "signature", vote, err)
-		}
-		verified = true
-	} else {
-		// Keyless committee seat: the pool has no usable authoritative key,
-		// so the vote counts toward observed
-		// stake but cannot be verified or aggregated into a certificate.
-		m.logger.Debug(
-			"no registered voting key for leios voter, skipping signature verification",
-			"slot", vote.SlotNo,
-			"voter_id", vote.VoterId,
+	// A keyless committee seat has no key to verify against, so its vote
+	// is dropped: storing it would let any peer fill the seat's first-wins
+	// slot with an unverifiable signature and have it relayed.
+	pub, ok := m.resolveVoterKey(entry, member.PoolKeyHash)
+	if !ok {
+		return m.rejectIncomingVote(
+			connKey,
+			"no_key",
+			vote,
+			errVoteKeylessSeat,
 		)
 	}
+	if err := m.verifyVoteSignature(
+		pub,
+		VoteMessageBytes(vote.SlotNo, vote.EndorserBlockHash),
+		vote.VoteSignature,
+	); err != nil {
+		return m.rejectIncomingVote(connKey, "signature", vote, err)
+	}
+	const verified = true
 	m.insertVote(
 		connKey,
 		vote,
@@ -2069,21 +2074,25 @@ func (m *VoteManager) handleResolvedPrototypeVote(
 			errors.New("voter id outside committee"),
 		)
 	}
-	verified := false
-	// A member resolving to no key here is a keyless committee seat: its
-	// stake still counts toward membership, but its vote can never be
-	// verified or aggregated into a certificate.
-	pub, _ := m.resolveVoterKey(entry, member.PoolKeyHash)
-	if pub != nil {
-		if err := m.verifyVoteSignature(
-			pub,
-			PrototypeVoteMessageBytes(vote.AnnouncingRbHash),
-			vote.VoteSignature,
-		); err != nil {
-			return m.rejectIncomingVote(connKey, "signature", resolved, err)
-		}
-		verified = true
+	// A keyless seat has no key to verify against: drop the vote rather
+	// than store it first-wins and relay it.
+	pub, ok := m.resolveVoterKey(entry, member.PoolKeyHash)
+	if !ok {
+		return m.rejectIncomingVote(
+			connKey,
+			"no_key",
+			resolved,
+			errVoteKeylessSeat,
+		)
 	}
+	if err := m.verifyVoteSignature(
+		pub,
+		PrototypeVoteMessageBytes(vote.AnnouncingRbHash),
+		vote.VoteSignature,
+	); err != nil {
+		return m.rejectIncomingVote(connKey, "signature", resolved, err)
+	}
+	const verified = true
 	inserted := m.insertVote(
 		connKey,
 		resolved,

@@ -12118,8 +12118,9 @@ votes:
   captured key whose proof fails `VerifyLeiosKeyProofOfPossession`. A post-SNAP
   registration or rotation therefore cannot change an already-selected
   committee. A member without a captured usable key is a keyless committee seat:
-  membership and stake still count, but its vote can never be verified or
-  aggregated into a certificate. There is no more derivation fallback — that
+  membership and stake still count, but a peer vote for that seat cannot be
+  verified, so it is dropped (`no_key` rejection) rather than stored, tallied or
+  relayed, and is not counted toward the per-connection invalid-vote limit. There is no more derivation fallback — that
   insecure shortcut (deriving a key from the pool's cold-key hash) was removed
   upstream in `prototype-2026w32` and here in the same change.
 - Full votes and resolved prototype votes use the shared bounded one-minute
