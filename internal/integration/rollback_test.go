@@ -646,7 +646,8 @@ func TestChainIteratorAfterRollback(t *testing.T) {
 	}
 
 	// Load blocks
-	numBlocks := 20
+	// The iterator must be positioned past the midpoint rollback target.
+	numBlocks := 30
 	blocks, points := loadBlocksFromImmutable(t, c, numBlocks)
 
 	if len(blocks) < numBlocks || len(points) < numBlocks {
