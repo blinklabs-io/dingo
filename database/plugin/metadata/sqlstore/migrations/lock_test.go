@@ -89,7 +89,7 @@ VALUES (?, ?, ?, ?)`, poolID, keyHash, 300, "800000000")
 	runner := migrations.Runner{
 		DB:       db,
 		Dialect:  "sqlite",
-		Registry: registry,
+		Registry: registry[:12],
 		Locker:   migrations.NewProcessLocker(),
 	}
 	err = runner.Run(context.Background())

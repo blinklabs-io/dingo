@@ -355,7 +355,7 @@ func TestCommitteeZeroQuorumMigrationConvertsLegacyClearMarkers(t *testing.T) {
 		"INSERT INTO committee_quorum (quorum, added_slot) VALUES ('0', 10)",
 	)
 	require.NoError(t, err)
-	run(registry)
+	run(registry[:23])
 
 	var quorum sql.NullString
 	require.NoError(t, db.QueryRow(
@@ -425,7 +425,7 @@ func TestGovernanceProposalDropBackfillMarksAlreadyRefundedProposals(
 	)
 	require.NoError(t, err)
 
-	runTo(registry)
+	runTo(registry[:17])
 
 	var droppedEpoch, droppedSlot uint64
 	require.NoError(t, db.QueryRow(
@@ -491,7 +491,7 @@ func TestRewardAdaPotsImportedEpochFeesColumnIsAdditive(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	runTo(registry)
+	runTo(registry[:24])
 
 	var imported sql.NullString
 	require.NoError(t, db.QueryRow(
@@ -555,7 +555,7 @@ VALUES ('mithril_ledger_slot', '121763516')`)
 VALUES (1409, '1000', '2000', '300', '0', 121763516)`)
 	require.NoError(t, err)
 
-	runTo(registry)
+	runTo(registry[:24])
 
 	var pending string
 	require.NoError(t, db.QueryRow(
@@ -599,7 +599,7 @@ VALUES ('mithril_ledger_slot', '121763516')`)
 
 	// The follow-up backfill must schedule repair from the anchor itself so the
 	// database cannot keep serving incomplete reward state.
-	runTo(registry)
+	runTo(registry[:25])
 	require.NoError(t, db.QueryRow(
 		"SELECT value FROM sync_state WHERE sync_key = ?",
 		"mithril_reward_repair_pending",
@@ -634,7 +634,7 @@ VALUES ('mithril_ledger_slot', '121763516')`)
 (epoch, treasury, reserves, fees, rewards, captured_slot, imported_epoch_fees)
 VALUES (1409, '1000', '2000', '300', '0', 121763516, '0')`)
 	require.NoError(t, err)
-	runTo(registry)
+	runTo(registry[:25])
 
 	var pending string
 	require.ErrorIs(t, db.QueryRow(

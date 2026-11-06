@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
 package migrations
 
 import (
@@ -89,4 +88,17 @@ func prefixBaseline(tb testing.TB, n int) []byte {
 func SeedMigratedPrefix(tb testing.TB, path string, n int) {
 	tb.Helper()
 	require.NoError(tb, os.WriteFile(path, prefixBaseline(tb, n), 0o600))
+}
+
+// cachedRegistryForDialect is registryForDialect through the per-binary caches
+// above.
+func cachedRegistryForDialect(dialect string) ([]Migration, error) {
+	switch dialect {
+	case "postgres":
+		return cachedPostgresRegistry()
+	case "mysql":
+		return cachedMySQLRegistry()
+	default:
+		return registryForDialect(dialect)
+	}
 }

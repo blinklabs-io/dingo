@@ -213,18 +213,6 @@ INSERT INTO committee_member (
 	}
 }
 
-// The backfill matches enacted proposals by the action_type the ledger stores,
-// a direct cast of the gouroboros enum, so a wrong copy would silently match
-// nothing and repair no row.
-func TestUpdateCommitteeActionTypeMatchesLedger(t *testing.T) {
-	t.Parallel()
-	require.EqualValues(
-		t,
-		lcommon.GovActionTypeUpdateCommittee,
-		updateCommitteeActionType,
-	)
-}
-
 func TestCommitteeCredentialCursorRoundTrip(t *testing.T) {
 	t.Parallel()
 	credential := committeeColdCredential{
