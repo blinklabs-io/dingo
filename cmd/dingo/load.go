@@ -38,7 +38,7 @@ func loadRun(ctx context.Context, args []string, cfg *config.Config) error {
 		)
 	}
 
-	logger, err := commonRun(cfg)
+	logger, err := commonRun(ctx, cfg)
 	if err != nil {
 		return err
 	}

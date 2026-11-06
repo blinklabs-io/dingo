@@ -239,6 +239,63 @@ func TestEntriesFromCBORRejectsEncodedKeyCollisions(t *testing.T) {
 	}
 }
 
+func TestMetadataJSONNestingBoundary(t *testing.T) {
+	t.Parallel()
+	for _, depth := range []int{lcommon.MetadataJSONMaxNestingDepth, lcommon.MetadataJSONMaxNestingDepth + 1} {
+		raw := append(bytes.Repeat([]byte{0x81}, depth), 0)
+		entries, err := EntriesFromCBOR(append([]byte{0xa1, 0x01}, raw...))
+		if err != nil || len(entries) != 1 {
+			t.Fatalf("depth %d must remain indexable: %v", depth, err)
+		}
+		if depth == lcommon.MetadataJSONMaxNestingDepth {
+			want := strings.Repeat("[", depth) + "0" + strings.Repeat("]", depth)
+			if entries[0].JSONError != nil || entries[0].JsonValue != want {
+				t.Fatalf("scalar at container depth limit must retain JSON: %v", entries[0].JSONError)
+			}
+		} else if !errors.Is(entries[0].JSONError, ErrJSONUnavailable) {
+			t.Fatal("container beyond the depth limit must mark JSON unavailable")
+		}
+	}
+}
+
+func TestDeepMetadataRemainsIndexableWithoutJSON(t *testing.T) {
+	t.Parallel()
+	raw := append(bytes.Repeat([]byte{0x81}, 11000), 0)
+	value, err := lcommon.DecodeMetadatumRaw(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	md := lcommon.MetaMap{Pairs: []lcommon.MetaPair{{
+		Key: lcommon.MetaInt{Value: big.NewInt(1)}, Value: value,
+	}}}
+	metadataCBOR := append([]byte{0xa1, 0x01}, raw...)
+	for name, extract := range map[string]func() ([]Entry, error){
+		"metadatum": func() ([]Entry, error) { return extractFromMetadatum(md) },
+		"cbor":      func() ([]Entry, error) { return EntriesFromCBOR(metadataCBOR) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			entries, err := extract()
+			if err != nil {
+				t.Fatalf("valid metadata must remain indexable when JSON encoding fails: %v", err)
+			}
+			if len(entries) != 1 || entries[0].Label != 1 {
+				t.Fatalf("expected one retained label, got %d entries", len(entries))
+			}
+			got := entries[0]
+			if !bytes.Equal(got.CborValue, raw) || got.JsonValue != "" ||
+				!errors.Is(got.JSONError, ErrJSONUnavailable) {
+				t.Fatalf(
+					"expected exact CBOR and unavailable JSON: sameCBOR=%v cborLen=%d jsonLen=%d error=%v",
+					bytes.Equal(got.CborValue, raw),
+					len(got.CborValue),
+					len(got.JsonValue),
+					got.JSONError,
+				)
+			}
+		})
+	}
+}
+
 func TestEncodeAndExtractKeepsAmbiguousLabelAndCBOR(t *testing.T) {
 	md := lcommon.MetaMap{Pairs: []lcommon.MetaPair{{
 		Key: lcommon.MetaInt{Value: big.NewInt(721)},

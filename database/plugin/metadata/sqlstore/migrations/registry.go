@@ -92,6 +92,7 @@ const (
 	utxoSpenderPartialIndexSchemaRelease                = "utxo-spender-partial-indexes"
 	leiosKeyLookupIndexSchemaRelease                    = "leios-key-lookup-indexes"
 	backfillCheckpointIdentitySchemaRelease             = "backfill-checkpoint-identity"
+	utxoStakingPartialIndexSchemaRelease                = "utxo-staking-partial-indexes"
 	rewardOutputCredentialPendingIndexSchemaRelease     = "reward-account-output-credential-pending-index"
 )
 
@@ -246,7 +247,11 @@ var schemaVersions = []struct {
 		Dir:     "v44",
 	},
 	{Version: 45, Name: scriptIndexSchemaRelease, Dir: "v45"},
-	{Version: 46, Name: addressTransactionCredentialKindSchemaRelease, Dir: "v46"},
+	{
+		Version: 46,
+		Name:    addressTransactionCredentialKindSchemaRelease,
+		Dir:     "v46",
+	},
 	{
 		Version: 47,
 		Name:    rewardStakeInputCredentialIndexSchemaRelease,
@@ -257,10 +262,11 @@ var schemaVersions = []struct {
 	{Version: 50, Name: utxoSpenderPartialIndexSchemaRelease, Dir: "v50"},
 	{Version: 51, Name: leiosKeyLookupIndexSchemaRelease, Dir: "v51"},
 	{Version: 52, Name: backfillCheckpointIdentitySchemaRelease, Dir: "v52"},
+	{Version: 53, Name: utxoStakingPartialIndexSchemaRelease, Dir: "v53"},
 	{
-		Version: 53,
+		Version: 54,
 		Name:    rewardOutputCredentialPendingIndexSchemaRelease,
-		Dir:     "v53",
+		Dir:     "v54",
 	},
 }
 
@@ -376,6 +382,11 @@ func registryForDialect(dialect string) ([]Migration, error) {
 			migration.BackfillRevision = "1"
 			migration.Backfill = utxoSpenderPartialIndexBackfill
 		}
+		if version.Name == utxoStakingPartialIndexSchemaRelease &&
+			dialect != "mysql" {
+			migration.BackfillRevision = "1"
+			migration.Backfill = utxoStakingPartialIndexBackfill
+		}
 		if version.Name == poolDepositHeldSchemaRelease {
 			migration.BackfillRevision = "1"
 			migration.Backfill = poolDepositHeldBackfill
@@ -428,7 +439,10 @@ func accountDRepClearBackfill(
 SELECT cbor, added_slot FROM pparams
 WHERE era_id = ? ORDER BY added_slot ASC, id ASC`), conway.EraIdConway)
 	if err != nil {
-		return BatchResult{}, fmt.Errorf("read Conway protocol parameters: %w", err)
+		return BatchResult{}, fmt.Errorf(
+			"read Conway protocol parameters: %w",
+			err,
+		)
 	}
 	var boundary uint64
 	foundBoundary := false
@@ -535,7 +549,10 @@ WHERE a.created_slot <= ?
         ), -1)
   ))`), mithrilBoundary, mithrilBoundary, mithrilBoundary,
 		mithrilBoundary).Scan(&incomplete); err != nil {
-		return BatchResult{}, fmt.Errorf("verify Mithril account baseline: %w", err)
+		return BatchResult{}, fmt.Errorf(
+			"verify Mithril account baseline: %w",
+			err,
+		)
 	}
 	if incomplete != 0 {
 		return BatchResult{}, fmt.Errorf(
@@ -1578,15 +1595,24 @@ func formatCommitteeCredentialCursor(
 func parseCommitteeCredentialCursor(cursor string) (int64, []byte, error) {
 	rawTag, rawHash, ok := strings.Cut(cursor, ":")
 	if !ok {
-		return 0, nil, fmt.Errorf("committee credential cursor %q is malformed", cursor)
+		return 0, nil, fmt.Errorf(
+			"committee credential cursor %q is malformed",
+			cursor,
+		)
 	}
 	tag, err := strconv.ParseInt(rawTag, 10, 64)
 	if err != nil {
-		return 0, nil, fmt.Errorf("parse committee credential cursor tag: %w", err)
+		return 0, nil, fmt.Errorf(
+			"parse committee credential cursor tag: %w",
+			err,
+		)
 	}
 	hash, err := hex.DecodeString(rawHash)
 	if err != nil {
-		return 0, nil, fmt.Errorf("parse committee credential cursor hash: %w", err)
+		return 0, nil, fmt.Errorf(
+			"parse committee credential cursor hash: %w",
+			err,
+		)
 	}
 	return tag, hash, nil
 }
@@ -1679,7 +1705,10 @@ WHERE transaction_id > ?
 ORDER BY transaction_id
 LIMIT ?`), lastID, batch.Limit)
 	if err != nil {
-		return BatchResult{}, fmt.Errorf("read address transaction rebuild source: %w", err)
+		return BatchResult{}, fmt.Errorf(
+			"read address transaction rebuild source: %w",
+			err,
+		)
 	}
 	defer rows.Close()
 	var ids []int64
@@ -1700,7 +1729,10 @@ LIMIT ?`), lastID, batch.Limit)
 		if _, err := batch.Tx.ExecContext(ctx, batch.Rebind(
 			"INSERT INTO address_transaction_rebuild_source (transaction_id) VALUES (?)",
 		), id); err != nil {
-			return BatchResult{}, fmt.Errorf("save address transaction rebuild source: %w", err)
+			return BatchResult{}, fmt.Errorf(
+				"save address transaction rebuild source: %w",
+				err,
+			)
 		}
 	}
 	return BatchResult{
@@ -2215,6 +2247,44 @@ SELECT 1 FROM sync_state WHERE sync_key = ?`),
 				column+" IS NOT NULL",
 		); err != nil {
 			return BatchResult{}, fmt.Errorf("create %s: %w", name, err)
+		}
+	}
+	return BatchResult{Cursor: batch.Cursor, Done: true}, nil
+}
+
+// utxoStakingPartialIndexBackfill excludes outputs without a stake credential
+// while keeping the deleted-slot-leading indexes used by rollback and supply
+// queries complete. The retained stake index must exist even during bulk load.
+func utxoStakingPartialIndexBackfill(
+	ctx context.Context,
+	batch Batch,
+) (BatchResult, error) {
+	var pending int
+	err := batch.Tx.QueryRowContext(ctx, batch.Rebind(`
+SELECT 1 FROM sync_state WHERE sync_key = ?`), deferred.SyncStateKey).Scan(&pending)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return BatchResult{}, fmt.Errorf("read deferred index marker: %w", err)
+	}
+	indexes := []struct {
+		name, columns string
+		retained      bool
+	}{
+		{"idx_utxo_staking_key", "staking_key", false},
+		{
+			"idx_utxo_staking_deleted_amount",
+			"credential_tag, staking_key, deleted_slot, amount",
+			true,
+		},
+	}
+	for _, index := range indexes {
+		if _, err := batch.Tx.ExecContext(ctx, "DROP INDEX IF EXISTS "+index.name); err != nil {
+			return BatchResult{}, fmt.Errorf("drop %s: %w", index.name, err)
+		}
+		if pending != 0 && !index.retained {
+			continue
+		}
+		if _, err := batch.Tx.ExecContext(ctx, "CREATE INDEX "+index.name+" ON utxo ("+index.columns+") WHERE staking_key IS NOT NULL"); err != nil {
+			return BatchResult{}, fmt.Errorf("create %s: %w", index.name, err)
 		}
 	}
 	return BatchResult{Cursor: batch.Cursor, Done: true}, nil

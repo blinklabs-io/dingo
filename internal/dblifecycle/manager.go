@@ -30,6 +30,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/config"
+	"github.com/blinklabs-io/dingo/internal/tracing"
 	"github.com/blinklabs-io/dingo/internal/version"
 )
 
@@ -373,7 +374,13 @@ func (m *Manager) handleEpochTransitionEvent(
 func (m *Manager) handleEpochTransition(
 	ctx context.Context,
 	evt event.EpochTransitionEvent,
-) error {
+) (retErr error) {
+	ctx, span := tracing.Start(
+		ctx,
+		"dblifecycle.epoch_snapshot",
+		tracing.Uint64("epoch", evt.NewEpoch),
+	)
+	defer func() { tracing.End(span, retErr) }()
 	// Give every epoch transition -- not just a redelivery of the exact
 	// epoch that failed to mirror -- a chance to heal an older epoch's
 	// snapshot that was written locally but never made it to the cloud.
@@ -516,6 +523,8 @@ func (m *Manager) handleEpochTransition(
 // since this is opportunistic healing on top of whatever handling already
 // happened for the snapshot that triggered this call.
 func (m *Manager) retryUnmirroredSnapshots(ctx context.Context) {
+	ctx, span := tracing.Start(ctx, "dblifecycle.mirror_retry")
+	defer span.End()
 	cloudDest := m.effectiveCloudDestination()
 	if cloudDest == "" {
 		return
@@ -608,6 +617,8 @@ func (m *Manager) retryMirrorToCloud(
 // returned: pruning is best-effort and must never fail an otherwise
 // successful snapshot.
 func (m *Manager) pruneOldSnapshots(ctx context.Context) {
+	ctx, span := tracing.Start(ctx, "dblifecycle.prune")
+	defer span.End()
 	entries, err := os.ReadDir(m.cfg.SnapshotDir)
 	if err != nil {
 		m.logger.Warn(

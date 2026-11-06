@@ -206,8 +206,25 @@ if [[ -n "${DEVNET_SPEC_OVERRIDE:-}" ]]; then
   fi
   ACTIVE_SPEC="./${spec_name}"
 fi
+# A spec that starts in Dijkstra (fork at epoch 0) needs dingo to follow the
+# node rather than forge, and transactions in the Dijkstra era.
+if [[ "${MODE}" == "conformance" ]] &&
+  grep -qE '^TestDijkstraHardForkAtEpoch:[[:space:]]*0([[:space:]]|$)' "${SCRIPT_DIR}/${ACTIVE_SPEC#./}"; then
+  export DEVNET_DINGO_BLOCK_PRODUCER=false
+  export DEVNET_TXPUMP_TRANSACTION_ERA=dijkstra
+else
+  unset DEVNET_DINGO_BLOCK_PRODUCER
+fi
 export "${SPEC_VAR}=${ACTIVE_SPEC}"
 export DEVNET_TESTNET_YAML="${SCRIPT_DIR}/${ACTIVE_SPEC#./}"
+# The spec is the single source of the network magic: the configurator and
+# the Go harness read it there, and txpump receives it from here.
+DEVNET_NETWORK_MAGIC="$(sed -n 's/^networkMagic:[[:space:]]*\([0-9][0-9]*\)[[:space:]]*$/\1/p' "${DEVNET_TESTNET_YAML}")"
+if [[ -z "${DEVNET_NETWORK_MAGIC}" ]]; then
+  echo "[run-tests] ERROR: ${DEVNET_TESTNET_YAML} sets no numeric networkMagic" >&2
+  exit 1
+fi
+export DEVNET_NETWORK_MAGIC
 # The scenario stops and starts containers, and captures compose logs and
 # status on failure.
 export DEVNET_COMPOSE_FILE="${COMPOSE_FILE}"

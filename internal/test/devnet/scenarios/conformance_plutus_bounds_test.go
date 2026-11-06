@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -59,11 +60,14 @@ type boundsCase struct {
 	program     string
 	acceptPV10  bool
 	acceptPV11  bool
+	acceptPV12  bool
 	explanation string
 }
 
 func (c boundsCase) wantAccept(pv uint) bool {
 	switch {
+	case pv >= 12:
+		return c.acceptPV12
 	case pv == 11:
 		return c.acceptPV11
 	default:
@@ -166,33 +170,33 @@ func boundsBytes2Program(f string) string {
 func boundsCases() []boundsCase {
 	return []boundsCase{
 		{"add max in-range integer 2^262143-1", 3, boundsIntegerProgram("max"),
-			true, true, "last in-range integer"},
+			true, true, true, "last in-range integer"},
 		{"add min in-range integer -(2^262143)", 3, boundsIntegerProgram("min"),
-			true, true, "last in-range negative integer"},
+			true, true, true, "last in-range negative integer"},
 		{"add integer 2^262143", 3, boundsIntegerProgram("over"),
-			true, false, "PV11 bound fails"},
+			true, false, true, "PV11 bound fails"},
 		{"add integer -(2^262143)-1", 3, boundsIntegerProgram("under"),
-			true, false, "PV11 bound fails"},
+			true, false, true, "PV11 bound fails"},
 		{"multiply integer 2^262143 by 1", 3,
 			boundsIntegerBuiltinProgram("multiplyInteger", "over", uInt(1)),
-			true, false, "PV11 bound fails"},
+			true, false, true, "PV11 bound fails"},
 		{"equalsInteger of 2^262143 and 0 (unbounded builtin)", 3,
 			boundsIntegerBuiltinProgram("equalsInteger", "over", uInt(0)),
-			true, true, "not in plutigo's bounded list"},
+			true, true, true, "not in plutigo's bounded list"},
 		{"sha2_256 of 65536 bytes", 3, boundsBytesProgram("sha2_256", false),
-			true, true, "largest allowed byte string"},
+			true, true, true, "largest allowed byte string"},
 		{"sha2_256 of 65537 bytes", 3, boundsBytesProgram("sha2_256", true),
-			true, false, "PV11+ byte string bound"},
+			true, false, false, "PV11+ byte string bound"},
 		{"appendByteString of 65537 bytes and empty", 3, boundsBytes2Program("appendByteString"),
-			true, false, "PV11+ byte string bound"},
+			true, false, false, "PV11+ byte string bound"},
 		{"equalsByteString of 65537 bytes and empty", 3, boundsBytes2Program("equalsByteString"),
-			true, false, "PV11+ byte string bound"},
+			true, false, false, "PV11+ byte string bound"},
 		{"lengthOfByteString of 65537 bytes (unbounded builtin)", 3, boundsBytesProgram("lengthOfByteString", true),
-			true, true, "not in plutigo's bounded list"},
+			true, true, true, "not in plutigo's bounded list"},
 		{"V3 dropList (PV11 builtin, no cost params)", 3, uProgram(uLam("ctx",
 			uLet("r", uApp(uplc("(force (builtin dropList))"), uInt(1),
 				uplc("(con (list integer) [1,2,3])")), uUnit))),
-			false, false, "PV11 cost params absent from genesis"},
+			false, false, false, "PV11 cost params absent from genesis"},
 	}
 }
 
@@ -372,8 +376,15 @@ func TestPlutusBoundedArgsConformance(t *testing.T) {
 		}
 	}
 
-	// The test only starts once both nodes are in Conway.
-	const wantEra = 6
+	// The test only starts once both nodes are in the wanted era: Conway
+	// (6) unless the spec starts in Dijkstra at epoch 0; a later scheduled
+	// fork keeps the Conway expectation.
+	wantEra := 6
+	if spec, specErr := devnet.LoadDevNetConfig(); specErr == nil &&
+		spec.DijkstraHardForkAtEpoch != nil &&
+		*spec.DijkstraHardForkAtEpoch == 0 {
+		wantEra = 7
+	}
 	var cardanoParams, dingoParams *conway.ConwayProtocolParameters
 	var cardanoEra, dingoEra int
 	deadline := time.Now().Add(6 * time.Minute)
@@ -393,9 +404,6 @@ func TestPlutusBoundedArgsConformance(t *testing.T) {
 	}
 	env.params = cardanoParams
 	pv := cardanoParams.ProtocolMajorVersion()
-	if pv >= 12 {
-		t.Skipf("protocol version %d is not covered: cardano-node does not enter the Dijkstra era on this devnet", pv)
-	}
 	t.Logf("PROTOCOL cardano-node: era=%d pv=%d.%d | dingo: era=%d pv=%d.%d",
 		cardanoEra, pv, cardanoParams.ProtocolVersion.Minor,
 		dingoEra, dingoParams.ProtocolMajorVersion(), dingoParams.ProtocolVersion.Minor)
@@ -430,9 +438,13 @@ func TestPlutusBoundedArgsConformance(t *testing.T) {
 	require.NoError(t, err)
 	cUtxos, err := plutusUTxOsByAddress(env.cardanoNtc, env.magic, addrs)
 	require.NoError(t, err)
-	var fundIn plutusRef
-	var fundValue uint64
-	fundRank := -1
+	type fundCandidate struct {
+		in    plutusRef
+		value uint64
+		rank  int
+		key   *plutusKey
+	}
+	var candidates []fundCandidate
 	for id, out := range dUtxos {
 		if _, ok := cUtxos[id]; !ok {
 			continue
@@ -446,37 +458,65 @@ func TestPlutusBoundedArgsConformance(t *testing.T) {
 		if addrBytes[0]>>4 != 0x6 {
 			rank = 1
 		}
-		if rank > fundRank || (rank == fundRank && out.OutputAmount.Amount > fundValue) {
-			fundRank, fundValue = rank, out.OutputAmount.Amount
-			fundIn = plutusRef{hash: id.Hash, idx: uint32(id.Idx)} //nolint:gosec
-			env.key = key
-		}
+		candidates = append(candidates, fundCandidate{
+			in:    plutusRef{hash: id.Hash, idx: uint32(id.Idx)}, //nolint:gosec
+			value: out.OutputAmount.Amount, rank: rank, key: key,
+		})
 	}
-	require.NotNil(t, env.key, "no genesis UTxO is spendable with a known key")
+	require.NotEmpty(t, candidates, "no genesis UTxO is spendable with a known key")
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].rank != candidates[j].rank {
+			return candidates[i].rank > candidates[j].rank
+		}
+		return candidates[i].value > candidates[j].value
+	})
 
 	cases := boundsCases()
 	scripts := make([][]byte, len(cases))
-	var fundOutputs [][]byte
 	for i, c := range cases {
-		w := boundsScript(t, c.program)
-		scripts[i] = w
-		hash := boundsScriptHash(c.lang, w)
-		addr := append([]byte{0x70}, hash[:]...)
-		fundOutputs = append(fundOutputs, plutusOutput(addr, plutusScriptOutput, mustHex("d87980")))
-		t.Logf("script %-45s PlutusV%d hash=%x size=%d", c.name, c.lang, hash, len(w))
+		scripts[i] = boundsScript(t, c.program)
+		t.Logf("script %-45s PlutusV%d hash=%x size=%d", c.name, c.lang,
+			boundsScriptHash(c.lang, scripts[i]), len(scripts[i]))
 	}
-	for range cases {
-		fundOutputs = append(fundOutputs, plutusOutput(env.key.address, plutusCollateralOut, nil))
+	// A genesis UTxO can already be spent by a transaction still pending in
+	// one node's mempool (txpump's last submission), which that node then
+	// rejects as consumed. Submit to dingo first and, if it refuses an
+	// input, move on to the next candidate without involving cardano-node.
+	var fundBase plutusRef
+	funded := false
+	for _, cand := range candidates {
+		env.key = cand.key
+		var fundOutputs [][]byte
+		for i, c := range cases {
+			hash := boundsScriptHash(c.lang, scripts[i])
+			addr := append([]byte{0x70}, hash[:]...)
+			fundOutputs = append(fundOutputs, plutusOutput(addr, plutusScriptOutput, mustHex("d87980")))
+		}
+		for range cases {
+			fundOutputs = append(fundOutputs, plutusOutput(env.key.address, plutusCollateralOut, nil))
+		}
+		totalOut := uint64(len(cases)) * (plutusScriptOutput + plutusCollateralOut)
+		if cand.value < totalOut+2_000_000 {
+			continue
+		}
+		var fundTx []byte
+		fundTx, fundBase = env.fundingTx(cand.in, cand.value, fundOutputs, totalOut)
+		// The funding transaction carries no script, so its shape is the
+		// same in every era.
+		dErr := boundsSubmit(env.dingoNtc, env.magic, eraTag, fundTx)
+		if dErr != nil {
+			t.Logf("FUNDING tx %x from %x#%d: dingo %s; trying the next UTxO",
+				fundBase.hash, cand.in.hash, cand.in.idx, shortErr(dErr))
+			continue
+		}
+		cErr := boundsSubmit(env.cardanoNtc, env.magic, eraTag, fundTx)
+		t.Logf("FUNDING tx %x from %x#%d: dingo accepted | cardano-node %s",
+			fundBase.hash, cand.in.hash, cand.in.idx, shortErr(cErr))
+		require.NoError(t, cErr)
+		funded = true
+		break
 	}
-	totalOut := uint64(len(cases)) * (plutusScriptOutput + plutusCollateralOut)
-	fundTx, fundBase := env.fundingTx(fundIn, fundValue, fundOutputs, totalOut)
-	// The funding transaction carries no script, so its shape is the same
-	// in every era.
-	fv := submit(fundTx)
-	t.Logf("FUNDING tx %x: dingo %s | cardano-node %s", fundBase.hash,
-		shortErr(fv.dingoErr), shortErr(fv.cardanoErr))
-	require.NoError(t, fv.dingoErr)
-	require.NoError(t, fv.cardanoErr)
+	require.True(t, funded, "no genesis UTxO could fund the scripts on both nodes")
 	var allRefs []plutusRef
 	for i := range 2 * len(cases) {
 		allRefs = append(allRefs, plutusRef{hash: fundBase.hash, idx: uint32(i)}) //nolint:gosec

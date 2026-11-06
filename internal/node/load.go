@@ -864,11 +864,16 @@ func LoadWithDB(
 	// Load state
 	ls, err := newLedgerStateForLoad(
 		ledger.LedgerStateConfig{
-			Database:           db,
-			ChainManager:       cm,
-			Logger:             logger,
-			CardanoNodeConfig:  nodeCfg,
-			Network:            cfg.Network,
+			Database:          db,
+			ChainManager:      cm,
+			Logger:            logger,
+			CardanoNodeConfig: nodeCfg,
+			Network:           cfg.Network,
+			DijkstraBlsProofDomain: cardano.DijkstraPoolBlsProofDomain(
+				nodeCfg,
+				cfg.Network,
+				cfg.NetworkMagic,
+			),
 			ValidateHistorical: cfg.ValidateHistorical,
 			// CIP-0163 full-pot reward distribution is consensus-affecting and
 			// deterministically changes the reward state written during replay,

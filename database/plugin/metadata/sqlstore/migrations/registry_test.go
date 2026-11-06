@@ -31,7 +31,7 @@ func TestSQLiteRegistry(t *testing.T) {
 	registry, err := SQLiteRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "sqlite"))
-	require.Len(t, registry, 53)
+	require.Len(t, registry, 54)
 
 	require.Equal(t, accountDRepClearSchemaRelease, registry[34].Name)
 	require.Contains(t, registry[34].SQL["sqlite"].Expand[0],
@@ -316,13 +316,13 @@ func TestSQLiteRegistry(t *testing.T) {
 	require.Equal(t, governanceVoteCastSchemaRelease, registry[47].Name)
 	require.Contains(t, strings.Join(registry[47].SQL["sqlite"].Expand, "\n"),
 		"ADD COLUMN `cert_index`")
-	require.Equal(t, 53, registry[52].Version)
+	require.Equal(t, 54, registry[53].Version)
 	require.Equal(t, rewardOutputCredentialPendingIndexSchemaRelease,
-		registry[52].Name)
-	require.Len(t, registry[52].SQL["sqlite"].Expand, 1)
-	require.Contains(t, registry[52].SQL["sqlite"].Expand[0],
+		registry[53].Name)
+	require.Len(t, registry[53].SQL["sqlite"].Expand, 1)
+	require.Contains(t, registry[53].SQL["sqlite"].Expand[0],
 		"`idx_reward_account_output_credential_pending`")
-	require.Empty(t, registry[52].Backfill)
+	require.Empty(t, registry[53].Backfill)
 }
 
 func TestBackfillCheckpointIdentityMigrationTranslation(t *testing.T) {
@@ -342,7 +342,7 @@ func TestBackfillCheckpointIdentityMigrationTranslation(t *testing.T) {
 			t.Parallel()
 			registry, err := registryForDialect(testCase.dialect)
 			require.NoError(t, err)
-			require.Len(t, registry, 53)
+			require.Len(t, registry, 54)
 			migration := registry[51]
 			require.Equal(t, backfillCheckpointIdentitySchemaRelease, migration.Name)
 			require.Contains(t, migration.SQL[testCase.dialect].Expand,
@@ -372,7 +372,7 @@ func TestDrepDormancySeedUsesPortableIdempotentInsert(t *testing.T) {
 			registry, err := tc.registry()
 			require.NoError(t, err)
 			require.NoError(t, validateRegistry(registry, tc.dialect))
-			require.Len(t, registry, 53)
+			require.Len(t, registry, 54)
 			migration := registry[39]
 			require.Equal(t, drepDormancyStateSchemaRelease, migration.Name)
 			seed := strings.Join(migration.SQL[tc.dialect].Expand, "\n")
@@ -601,7 +601,7 @@ func TestMySQLRegistryPrefixesPoolOpCertSequenceIndex(t *testing.T) {
 	registry, err := MySQLRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "mysql"))
-	require.Len(t, registry, 53)
+	require.Len(t, registry, 54)
 
 	require.Contains(
 		t,
@@ -707,9 +707,9 @@ func TestRewardOutputCredentialPendingIndexSkipsMySQL(t *testing.T) {
 	postgres, err := PostgresRegistry()
 	require.NoError(t, err)
 	require.Equal(t, rewardOutputCredentialPendingIndexSchemaRelease,
-		postgres[52].Name)
+		postgres[53].Name)
 	require.Contains(t,
-		strings.Join(postgres[52].SQL["postgres"].Expand, "\n"),
+		strings.Join(postgres[53].SQL["postgres"].Expand, "\n"),
 		`ON "reward_account_output"`+"\n"+
 			`       ("credential_tag", "staking_key", "spendable", "guarded", "folded",`)
 
@@ -717,9 +717,9 @@ func TestRewardOutputCredentialPendingIndexSkipsMySQL(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(mysql, "mysql"))
 	require.Equal(t, rewardOutputCredentialPendingIndexSchemaRelease,
-		mysql[52].Name)
-	require.Empty(t, mysql[52].SQL["mysql"].Expand)
-	require.Empty(t, mysql[52].SQL["mysql"].Contract)
+		mysql[53].Name)
+	require.Empty(t, mysql[53].SQL["mysql"].Expand)
+	require.Empty(t, mysql[53].SQL["mysql"].Contract)
 }
 
 func TestRatificationHistoryMigrationTranslatesForProviders(t *testing.T) {
