@@ -521,7 +521,8 @@ func ValidateTxDijkstra(
 		resultKey   phase2ResultKey
 		resultKeyOK bool
 	)
-	if resultCache != nil && tx.IsValid() {
+	if resultCache != nil && tx.IsValid() &&
+		dijkstraTransactionHasRedeemers(tx) {
 		resultKey, resultKeyOK = dijkstraPhase2ResultKey(
 			tx,
 			ls,
@@ -541,6 +542,24 @@ func ValidateTxDijkstra(
 		resultCache.add(resultKey)
 	}
 	return semanticRuleValidationErrorFor(validatePlutusOutcome(tx, phase2Err))
+}
+
+func dijkstraTransactionHasRedeemers(tx lcommon.Transaction) bool {
+	hasRedeemers := func(witness lcommon.TransactionWitnessSet) bool {
+		if witness != nil && witness.Redeemers() != nil {
+			for range witness.Redeemers().Iter() {
+				return true
+			}
+		}
+		return false
+	}
+	if hasRedeemers(tx.Witnesses()) {
+		return true
+	}
+	return slices.ContainsFunc(
+		lcommon.SubTransactionWitnessSetsFromTransaction(tx),
+		hasRedeemers,
+	)
 }
 
 // validateDijkstraPhase2 is a test seam: production always resolves to
