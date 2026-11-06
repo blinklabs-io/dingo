@@ -523,3 +523,89 @@ func TestMaxServerTipSlotIgnoresReplayLag(t *testing.T) {
 		"the peer-reported tip reflects where the chain actually is")
 	require.Equal(t, uint64(0), MaxServerTipSlot(nil))
 }
+
+func TestAwaitAgreementAboveRejectsStaleSharedAncestry(t *testing.T) {
+	t.Parallel()
+	group := NewChainGroup("dingo", "reference")
+	a, b := group.Chain("dingo"), group.Chain("reference")
+	a.Connected()
+	b.Connected()
+	common := hdr(187, 42, 'a')
+	a.RollForward(common, tipOf(common))
+	b.RollForward(common, tipOf(common))
+	left, right := hdr(194, 43, 'a'), hdr(220, 43, 'b')
+	a.RollForward(left, tipOf(left))
+	b.RollForward(right, tipOf(right))
+	stale, ok := AgreementAtDeepestCommonSlot(group.Snapshots())
+	require.True(t, ok)
+	require.True(t, stale.Agree)
+	require.Equal(t, uint64(187), stale.Slot)
+	watermark := MaxServerTipSlot(group.Snapshots())
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, err := group.AwaitAgreementAbove(ctx, "recovered chain", watermark)
+	require.ErrorIs(
+		t,
+		err,
+		context.Canceled,
+		"old shared ancestry cannot satisfy recovery",
+	)
+	fresh := hdr(241, 44, 'c')
+	a.RollForward(fresh, tipOf(fresh))
+	_, err = group.AwaitAgreementAbove(ctx, "lagging peer", watermark)
+	require.ErrorIs(
+		t,
+		err,
+		context.Canceled,
+		"every node must observe the fresh block",
+	)
+	b.RollForward(fresh, tipOf(fresh))
+	got, err := group.AwaitAgreementAbove(
+		t.Context(),
+		"recovered chain",
+		watermark,
+	)
+	require.NoError(t, err)
+	require.Equal(t, fresh, got)
+}
+
+func TestAwaitAgreementAboveRequiresConnectedNodesAndStrictWatermark(
+	t *testing.T,
+) {
+	t.Parallel()
+	group := NewChainGroup("producer", "relay")
+	a, b := group.Chain("producer"), group.Chain("relay")
+	a.Connected()
+	b.Connected()
+	fresh := hdr(241, 44, 'c')
+	a.RollForward(fresh, tipOf(fresh))
+	b.RollForward(fresh, tipOf(fresh))
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, err := group.AwaitAgreementAbove(ctx, "strict watermark", 241)
+	require.ErrorIs(t, err, context.Canceled)
+	b.Disconnected(nil)
+	_, err = group.AwaitAgreementAbove(ctx, "disconnected peer", 240)
+	require.ErrorIs(t, err, context.Canceled)
+	b.Connected()
+	got, err := group.AwaitAgreementAbove(t.Context(), "connected peers", 240)
+	require.NoError(t, err)
+	require.Equal(t, fresh, got)
+}
+
+func TestAwaitAgreementAboveRequiresMultipleNodes(t *testing.T) {
+	t.Parallel()
+	for _, names := range [][]string{nil, {"single"}} {
+		group := NewChainGroup(names...)
+		if len(names) == 1 {
+			node := group.Chain(names[0])
+			node.Connected()
+			fresh := hdr(241, 44, 'c')
+			node.RollForward(fresh, tipOf(fresh))
+		}
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		_, err := group.AwaitAgreementAbove(ctx, "multiple connected nodes", 240)
+		require.ErrorIs(t, err, context.Canceled)
+	}
+}
