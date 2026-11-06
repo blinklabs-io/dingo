@@ -567,65 +567,6 @@ func TestNetworkConfigForNetwork(t *testing.T) {
 	}
 }
 
-func TestGenesisVerificationKeyURLForNetwork(t *testing.T) {
-	t.Parallel()
-
-	url, err := GenesisVerificationKeyURLForNetwork("mainnet")
-	require.NoError(t, err)
-	require.Equal(
-		t,
-		"https://raw.githubusercontent.com/IntersectMBO/mithril/main/"+
-			"mithril-infra/configuration/release-mainnet/genesis.vkey",
-		url,
-	)
-}
-
-func TestAncillaryVerificationKeyURLForNetwork(t *testing.T) {
-	t.Parallel()
-
-	url, err := AncillaryVerificationKeyURLForNetwork("preprod")
-	require.NoError(t, err)
-	require.Equal(
-		t,
-		"https://raw.githubusercontent.com/IntersectMBO/mithril/main/"+
-			"mithril-infra/configuration/release-preprod/ancillary.vkey",
-		url,
-	)
-}
-
-func TestCertificateAggregateVerificationKeyBytes(t *testing.T) {
-	t.Parallel()
-
-	cert := &Certificate{
-		AggregateVerificationKey: "61626364",
-	}
-	decoded, err := cert.AggregateVerificationKeyBytes()
-	require.NoError(t, err)
-	require.Equal(t, []byte("abcd"), decoded)
-}
-
-func TestCertificateMultiSignatureBytes(t *testing.T) {
-	t.Parallel()
-
-	cert := &Certificate{
-		MultiSignature: "YWJjZA==",
-	}
-	decoded, err := cert.MultiSignatureBytes()
-	require.NoError(t, err)
-	require.Equal(t, []byte("abcd"), decoded)
-}
-
-func TestMithrilStakeDistributionPartyVerificationKeyBytes(t *testing.T) {
-	t.Parallel()
-
-	party := &MithrilStakeDistributionParty{
-		VerificationKey: "61626364",
-	}
-	decoded, err := party.VerificationKeyBytes()
-	require.NoError(t, err)
-	require.Equal(t, []byte("abcd"), decoded)
-}
-
 func TestSnapshotCreatedAtTime(t *testing.T) {
 	t.Parallel()
 

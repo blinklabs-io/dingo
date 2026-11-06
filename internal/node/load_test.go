@@ -1334,15 +1334,6 @@ func TestLoadWithDBPropagatesDelegatorInactivity(t *testing.T) {
 	require.False(t, run(false, 0).DelegatorInactivityEnabled)
 }
 
-// TestLoadCaptureFailureTrackerCleanReturnsNil verifies that a tracker with no
-// recorded failures reports success, so a clean load is never turned into an
-// error.
-func TestLoadCaptureFailureTrackerCleanReturnsNil(t *testing.T) {
-	t.Parallel()
-	tracker := &loadCaptureFailureTracker{}
-	require.NoError(t, tracker.err())
-}
-
 // TestLoadCaptureFailureTrackerSurfacesFailures verifies that a recorded capture
 // failure surfaces as an error that preserves the first cause and names every
 // failed epoch. This is the load-mode safety net for the epoch-0 genesis

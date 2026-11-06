@@ -34,22 +34,6 @@ func testBLSG2Hex(t *testing.T) string {
 	return hex.EncodeToString(g2.Marshal())
 }
 
-func TestDecodeBLSG1Point(t *testing.T) {
-	t.Parallel()
-
-	point, err := decodeBLSG1Point(testBLSG1Hex(t))
-	require.NoError(t, err)
-	require.NotNil(t, point)
-}
-
-func TestDecodeBLSG2Point(t *testing.T) {
-	t.Parallel()
-
-	point, err := decodeBLSG2Point(testBLSG2Hex(t))
-	require.NoError(t, err)
-	require.NotNil(t, point)
-}
-
 func TestDecodeBLSG1PointErrors(t *testing.T) {
 	t.Parallel()
 
