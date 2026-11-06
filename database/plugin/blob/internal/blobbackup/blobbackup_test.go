@@ -137,8 +137,9 @@ func TestReadRecordRejectsOversizedValueLength(t *testing.T) {
 // successfully, producing a backup file that is silently guaranteed to
 // fail every future Restore instead of failing loudly at Backup time.
 func TestWriteRecordRejectsOversizedValue(t *testing.T) {
-	oversized := make([]byte, testMaxValueLen+1)
-	err := WriteRecord(io.Discard, []byte("k"), oversized, testMaxValueLen)
+	const smallMax int64 = 16
+	oversized := make([]byte, smallMax+1)
+	err := WriteRecord(io.Discard, []byte("k"), oversized, smallMax)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "exceeds")
 }
