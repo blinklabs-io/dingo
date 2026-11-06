@@ -4448,7 +4448,7 @@ source take that role at runtime, without the construction-time
   loop has moved the ledger tip) rather than the stability window behind it,
   after the first batch a process commits and then once every
   `trustedBatchPruneEvery` (16) committed batches. It deletes
-  `trustedBatchPruneRows` (20,000) rows at a time until nothing prunable is left
+  `trustedBatchPruneRows` (10,000) rows at a time until nothing prunable is left
   or `trustedBatchPruneBudget` (30 s) has passed: a spent row costs less to
   delete the more rows its transaction deletes with it, so a few large deletes
   every sixteen batches cost less than one or two small ones after each. A
