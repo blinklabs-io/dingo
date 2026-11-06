@@ -413,6 +413,7 @@ func TestAccountRetryUsesItsOwnCompletedPhase(t *testing.T) {
 }
 
 func TestAccountQueueHandsAggregateErrorToAggregateRetry(t *testing.T) {
+	t.Parallel()
 	source, err := NewDatabaseSource(newTestDatabaseSourceDB(t))
 	require.NoError(t, err)
 	srv := newFakeKoiosServer(t, map[uint64]*fakeEpochRef{
