@@ -18,6 +18,8 @@ import (
 	"os"
 	"testing"
 	"time"
+
+	"github.com/blinklabs-io/dingo/internal/koiosparity"
 )
 
 // TestMain shortens the retry and reconnect waits for every test in the
@@ -28,5 +30,6 @@ func TestMain(m *testing.M) {
 	sessionRetryDelay = 20 * time.Millisecond
 	watcherMinBackoff = 20 * time.Millisecond
 	watcherMaxBackoff = 500 * time.Millisecond
+	koiosparity.SetRetryBackoff5xxForTesting(time.Millisecond)
 	os.Exit(m.Run())
 }
