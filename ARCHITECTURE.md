@@ -4013,7 +4013,9 @@ source take that role at runtime, without the construction-time
   stake before any statement reads `utxo`, `utxo_pointer` or
   `reward_live_stake`, and the staged transaction rows before any statement
   naming `transaction` or a table with a foreign key to it. Dijkstra and later eras
-  keep the per-row path. Stored state, row ids included, is
+  keep the per-row path, and so does a batch committed while a pending reward
+  stake input snapshot exists, because the overlay's intra-batch deletion would
+  advance the history floor that snapshot still needs. Stored state, row ids included, is
   the per-row path's; see `DATABASE.md`, "Trusted batch UTxO overlay". When
   the overlay's write hits a `UNIQUE` or foreign-key conflict
   (`types.ErrBatchUtxoOverlayConflict`) -- including one a read barrier
