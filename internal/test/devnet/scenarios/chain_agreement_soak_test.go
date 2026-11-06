@@ -54,6 +54,11 @@ func forkDepth(a, b devnet.ChainSnapshot) (depth uint64, ok bool) {
 	if !ok {
 		return 0, false
 	}
+	// A common block at the shorter tip means that node is merely behind on
+	// the same chain; lag is not divergence.
+	if common >= min(a.Tip.BlockNumber, b.Tip.BlockNumber) {
+		return 0, true
+	}
 	return max(a.Tip.BlockNumber, b.Tip.BlockNumber) - common, true
 }
 
