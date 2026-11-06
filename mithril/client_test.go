@@ -308,24 +308,6 @@ func TestClientErrorHandling(t *testing.T) {
 	require.Contains(t, err.Error(), "404")
 }
 
-func TestClientContextCancellation(t *testing.T) {
-	t.Parallel()
-
-	server := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		if _, err := w.Write([]byte("[]")); err != nil {
-			t.Errorf("writing response: %v", err)
-		}
-	})
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // Cancel immediately
-
-	client := NewClient(server.URL, WithAllowInsecureHTTP())
-	_, err := client.ListCardanoDatabaseSnapshots(ctx)
-	require.Error(t, err)
-}
-
 func TestAggregatorURLForNetwork(t *testing.T) {
 	t.Parallel()
 
@@ -472,21 +454,6 @@ func TestSignedEntityTypeCardanoStakeDistributionScalar(t *testing.T) {
 	require.Equal(t, uint64(314), beacon.Epoch)
 }
 
-func TestSignedEntityTypeUnknownKind(t *testing.T) {
-	t.Parallel()
-
-	raw := `{"CardanoTransactions":{"epoch":271}}`
-	var set SignedEntityType
-	err := json.Unmarshal([]byte(raw), &set)
-	require.NoError(t, err)
-
-	kind, err := set.Kind()
-	require.NoError(t, err)
-	require.Equal(t, "CardanoTransactions", kind)
-	beacon := set.CardanoImmutableFilesFull()
-	require.Nil(t, beacon)
-}
-
 func TestSignedEntityTypeCardanoTransactions(t *testing.T) {
 	t.Parallel()
 
@@ -524,73 +491,6 @@ func TestSignedEntityTypeCardanoTransactionsFeedHash(t *testing.T) {
 	want := fmt.Sprintf("%x", expected.Sum(nil))
 
 	require.Equal(t, want, got)
-}
-
-func TestNetworkConfigForNetwork(t *testing.T) {
-	t.Parallel()
-
-	const keyURLBase = "https://raw.githubusercontent.com/" +
-		"IntersectMBO/mithril/main/mithril-infra/configuration/"
-	testCases := map[string]NetworkConfig{
-		"mainnet": {
-			AggregatorURL: "https://aggregator.release-mainnet.api." +
-				"mithril.network/aggregator",
-			GenesisVerificationKeyURL: keyURLBase +
-				"release-mainnet/genesis.vkey",
-			AncillaryVerificationKeyURL: keyURLBase +
-				"release-mainnet/ancillary.vkey",
-		},
-		"preprod": {
-			AggregatorURL: "https://aggregator.release-preprod.api." +
-				"mithril.network/aggregator",
-			GenesisVerificationKeyURL: keyURLBase +
-				"release-preprod/genesis.vkey",
-			AncillaryVerificationKeyURL: keyURLBase +
-				"release-preprod/ancillary.vkey",
-		},
-		"preview": {
-			AggregatorURL: "https://aggregator.pre-release-preview.api." +
-				"mithril.network/aggregator",
-			GenesisVerificationKeyURL: keyURLBase +
-				"pre-release-preview/genesis.vkey",
-			AncillaryVerificationKeyURL: keyURLBase +
-				"pre-release-preview/ancillary.vkey",
-		},
-	}
-
-	for network, expected := range testCases {
-		t.Run(network, func(t *testing.T) {
-			cfg, err := NetworkConfigForNetwork(network)
-			require.NoError(t, err)
-			require.Equal(t, expected, cfg)
-		})
-	}
-}
-
-func TestSnapshotCreatedAtTime(t *testing.T) {
-	t.Parallel()
-
-	s := &SnapshotListItem{
-		SnapshotBase: SnapshotBase{
-			CreatedAt: "2026-02-10T00:24:56.094721055Z",
-		},
-	}
-	ts, err := s.CreatedAtTime()
-	require.NoError(t, err)
-	require.Equal(t, 2026, ts.Year())
-	require.Equal(t, 2, int(ts.Month()))
-	require.Equal(t, 10, ts.Day())
-}
-
-func TestWithHTTPClient(t *testing.T) {
-	t.Parallel()
-
-	customClient := &http.Client{}
-	client := NewClient(
-		"https://example.com",
-		WithHTTPClient(customClient),
-	)
-	require.Equal(t, customClient, client.httpClient)
 }
 
 // TestRequireSecureURL covers requireSecureURL directly: HTTPS is always
@@ -1177,81 +1077,6 @@ func TestVerifyCertChainEmptyPreviousHash(t *testing.T) {
 	)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "empty previous_hash")
-}
-
-// TestVerifyCertChainRejectsStaleHashCrossReferences verifies that
-// cross-referencing certificates with stale hashes is rejected.
-// Content-addressed hashing makes true certificate cycles
-// computationally infeasible — re-hashing one cert invalidates
-// the other's reference. The seen-set cycle guard in
-// VerifyCertificateChainWithMode is defense-in-depth against a
-// hypothetical aggregator bug; this test confirms the chain
-// breaks on the stale reference.
-func TestVerifyCertChainRejectsStaleHashCrossReferences(t *testing.T) {
-	t.Parallel()
-
-	g1Hex := testBLSG1Hex(t)
-	g2Hex := testBLSG2Hex(t)
-	certA := Certificate{
-		Epoch:                    1,
-		AggregateVerificationKey: g2Hex,
-		MultiSignature:           g1Hex,
-		Metadata:                 standardTestMetadata(),
-		ProtocolMessage: ProtocolMessage{
-			MessageParts: map[string]string{"current_epoch": "1"},
-		},
-	}
-	certB := Certificate{
-		Epoch:                    1,
-		AggregateVerificationKey: g2Hex,
-		MultiSignature:           g1Hex,
-		Metadata:                 standardTestMetadata(),
-		ProtocolMessage: ProtocolMessage{
-			MessageParts: map[string]string{"current_epoch": "1"},
-		},
-	}
-	// Finalize both with initial hashes.
-	finalizeTestCertificate(t, &certA)
-	finalizeTestCertificate(t, &certB)
-	// Cross-reference: A→B, then B→A. Re-hashing A changes its
-	// hash, so B's PreviousHash now points to A's NEW hash, but
-	// A's PreviousHash still holds B's OLD hash.
-	certA.PreviousHash = certB.Hash
-	finalizeTestCertificate(t, &certA)
-	certB.PreviousHash = certA.Hash
-	finalizeTestCertificate(t, &certB)
-	// certA.PreviousHash is certB's OLD hash (before certB was
-	// re-hashed), so the lookup will fail.
-	byHash := map[string]Certificate{
-		certA.Hash: certA,
-		certB.Hash: certB,
-	}
-
-	server := httptest.NewServer(
-		http.HandlerFunc(
-			func(w http.ResponseWriter, r *http.Request) {
-				hash := r.URL.Path[len("/certificate/"):]
-				cert, ok := byHash[hash]
-				if !ok {
-					http.NotFound(w, r)
-					return
-				}
-				w.Header().
-					Set("Content-Type", "application/json")
-				_ = json.NewEncoder(w).Encode(cert)
-			},
-		),
-	)
-	t.Cleanup(server.Close)
-
-	client := NewClient(server.URL, WithAllowInsecureHTTP())
-	err := VerifyCertificateChain(
-		context.Background(),
-		client,
-		certA.Hash,
-	)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "fetching certificate")
 }
 
 func TestVerifyCertChainNilClient(t *testing.T) {

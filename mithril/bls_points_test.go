@@ -55,6 +55,7 @@ func TestDecodeBLSG1PointErrors(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			_, err := decodeBLSG1Point(tt.input)
 			require.Error(t, err)
 		})
@@ -82,6 +83,7 @@ func TestDecodeBLSG2PointErrors(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			_, err := decodeBLSG2Point(tt.input)
 			require.Error(t, err)
 		})

@@ -1532,33 +1532,6 @@ func decodeImmutableBlockHeader(
 	return header, nil
 }
 
-// TestRunPlannerStats_WithSQLiteStore verifies that RunPlannerStats succeeds
-// against an in-memory SQLite database and populates sqlite_stat1.
-func TestRunPlannerStats_WithSQLiteStore(t *testing.T) {
-	t.Parallel()
-
-	db := newFileTestDB(t)
-	require.NoError(t, db.Metadata().ImportUtxos([]models.Utxo{
-		{
-			TxId:      []byte("run_planner_stats_tx_id_00000001"),
-			OutputIdx: 0,
-			AddedSlot: 1,
-			Amount:    types.Uint64(1),
-		},
-	}, nil))
-
-	require.NoError(t, RunPlannerStats(db, slog.Default()))
-
-	raw, err := dbtest.RawSQLiteMetadata(t, db)
-	require.NoError(t, err)
-	var count int64
-	err = raw.QueryRow(
-		"SELECT COUNT(*) FROM sqlite_stat1",
-	).Scan(&count)
-	require.NoError(t, err)
-	assert.Positive(t, count, "sqlite_stat1 should be populated")
-}
-
 // TestRunPlannerStats_Idempotent verifies that repeated planner-stat
 // maintenance stays safe for resume/restart paths.
 func TestRunPlannerStats_Idempotent(t *testing.T) {

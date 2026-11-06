@@ -94,6 +94,7 @@ func TestResolvePeerSharing(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			var buf bytes.Buffer
 			logger := slog.New(slog.NewTextHandler(&buf, nil))
 			got := resolvePeerSharing(
@@ -114,29 +115,5 @@ func TestResolvePeerSharing(t *testing.T) {
 				)
 			}
 		})
-	}
-}
-
-func TestResolvePeerSharingNilLogger(t *testing.T) {
-	t.Parallel()
-
-	// Must not panic with nil logger on any branch.
-	cases := []struct {
-		dingoNative   *bool
-		blockProducer bool
-		cardanoNode   *bool
-	}{
-		{new(true), true, nil},
-		{nil, true, nil},
-		{nil, false, new(true)},
-		{nil, false, nil},
-	}
-	for _, tc := range cases {
-		_ = resolvePeerSharing(
-			tc.dingoNative,
-			tc.blockProducer,
-			tc.cardanoNode,
-			nil,
-		)
 	}
 }

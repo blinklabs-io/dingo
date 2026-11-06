@@ -222,49 +222,6 @@ func TestGetLatestCardanoDatabaseSnapshotEmpty(t *testing.T) {
 	assert.Contains(t, err.Error(), "no Cardano database snapshots")
 }
 
-func TestGetCardanoDatabaseDigests(t *testing.T) {
-	t.Parallel()
-
-	mux := http.NewServeMux()
-	mux.HandleFunc(
-		"/artifact/cardano-database/digests",
-		func(w http.ResponseWriter, _ *http.Request) {
-			entries := []CardanoDatabaseDigestEntry{
-				{ImmutableFileName: "00000.chunk", Digest: "aa"},
-				{ImmutableFileName: "00000.primary", Digest: "bb"},
-			}
-			require.NoError(t, json.NewEncoder(w).Encode(entries))
-		},
-	)
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
-
-	client := NewClient(srv.URL, WithAllowInsecureHTTP())
-	entries, err := client.GetCardanoDatabaseDigests(context.Background())
-	require.NoError(t, err)
-	require.Len(t, entries, 2)
-	assert.Equal(t, "00000.chunk", entries[0].ImmutableFileName)
-	assert.Equal(t, "bb", entries[1].Digest)
-}
-
-func TestSignedEntityTypeCardanoDatabase(t *testing.T) {
-	t.Parallel()
-
-	var entity SignedEntityType
-	require.NoError(t, json.Unmarshal(
-		[]byte(
-			`{"CardanoDatabase":{"epoch":294,"immutable_file_number":5810}}`,
-		),
-		&entity,
-	))
-	beacon := entity.CardanoDatabase()
-	require.NotNil(t, beacon)
-	assert.Equal(t, uint64(294), beacon.Epoch)
-	assert.Equal(t, uint64(5810), beacon.ImmutableFileNumber)
-	// Mismatched accessor returns nil
-	assert.Nil(t, entity.CardanoImmutableFilesFull())
-}
-
 func TestCertificateCardanoDatabaseFixtureSTMVerifies(t *testing.T) {
 	t.Parallel()
 

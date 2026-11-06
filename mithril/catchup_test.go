@@ -1366,6 +1366,7 @@ func TestVerifyCatchupIntersection(t *testing.T) {
 	slot, hash := firstImmutableBlock(t)
 
 	t.Run("matching tip is accepted", func(t *testing.T) {
+		t.Parallel()
 		db := newSyncModeTestDB(t)
 		require.NoError(t, db.BlockCreate(models.Block{
 			Slot:     slot,
@@ -1381,6 +1382,7 @@ func TestVerifyCatchupIntersection(t *testing.T) {
 	})
 
 	t.Run("mismatched tip diverges", func(t *testing.T) {
+		t.Parallel()
 		db := newSyncModeTestDB(t)
 		wrong := bytes.Clone(hash)
 		wrong[0] ^= 0xff
@@ -1445,6 +1447,7 @@ func TestVerifyCatchupIntersectionLocalAhead(t *testing.T) {
 
 	t.Run("ahead chain with no block at or below the artifact tip diverges",
 		func(t *testing.T) {
+			t.Parallel()
 			db := newSyncModeTestDB(t)
 			require.NoError(t, db.BlockCreate(catchupTestBlock(
 				artSlot+5000,
@@ -1460,6 +1463,7 @@ func TestVerifyCatchupIntersectionLocalAhead(t *testing.T) {
 
 	t.Run("ahead chain without the artifact tip block diverges",
 		func(t *testing.T) {
+			t.Parallel()
 			db := newSyncModeTestDB(t)
 			wrong := bytes.Clone(artHash)
 			wrong[0] ^= 0xff
@@ -1475,6 +1479,7 @@ func TestVerifyCatchupIntersectionLocalAhead(t *testing.T) {
 
 	t.Run("ahead chain with artifact tip only on stale fork diverges",
 		func(t *testing.T) {
+			t.Parallel()
 			db := newSyncModeTestDB(t)
 			wrong := bytes.Clone(artHash)
 			wrong[0] ^= 0xff
@@ -1492,6 +1497,7 @@ func TestVerifyCatchupIntersectionLocalAhead(t *testing.T) {
 		})
 
 	t.Run("descendant chain is reported ahead", func(t *testing.T) {
+		t.Parallel()
 		db := newSyncModeTestDB(t)
 		require.NoError(t, db.BlockCreate(atArtifactTip(artHash), nil))
 		require.NoError(t, db.BlockCreate(catchupTestBlock(
@@ -1518,6 +1524,7 @@ func TestVerifyCatchupBeforeImport(t *testing.T) {
 	)
 
 	t.Run("ancestor tip proceeds with the import", func(t *testing.T) {
+		t.Parallel()
 		db := newSyncModeTestDB(t)
 		require.NoError(t, db.BlockCreate(artBlock, nil))
 		upToDate, err := verifyCatchupBeforeImport(
@@ -1533,6 +1540,7 @@ func TestVerifyCatchupBeforeImport(t *testing.T) {
 
 	t.Run("local-ahead marks up to date and records the marker",
 		func(t *testing.T) {
+			t.Parallel()
 			db := newSyncModeTestDB(t)
 			require.NoError(t, db.BlockCreate(artBlock, nil))
 			require.NoError(t, db.BlockCreate(catchupTestBlock(
@@ -1557,6 +1565,7 @@ func TestVerifyCatchupBeforeImport(t *testing.T) {
 	// runs. The marker must not move either — completion records it.
 	t.Run("local-ahead while resuming proceeds without moving the marker",
 		func(t *testing.T) {
+			t.Parallel()
 			db := newSyncModeTestDB(t)
 			require.NoError(t, db.BlockCreate(artBlock, nil))
 			require.NoError(t, db.BlockCreate(catchupTestBlock(
@@ -1580,6 +1589,7 @@ func TestVerifyCatchupBeforeImport(t *testing.T) {
 		})
 
 	t.Run("divergent tip aborts", func(t *testing.T) {
+		t.Parallel()
 		db := newSyncModeTestDB(t)
 		wrong := bytes.Clone(artHash)
 		wrong[0] ^= 0xff
