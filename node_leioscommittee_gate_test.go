@@ -15,9 +15,13 @@
 package dingo
 
 import (
+	"errors"
+	"fmt"
 	"testing"
 
 	internalconfig "github.com/blinklabs-io/dingo/internal/config"
+	"github.com/blinklabs-io/dingo/ledger"
+	"github.com/blinklabs-io/dingo/ledger/leios"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -98,4 +102,30 @@ func TestLeiosCommitteeQueryWithoutVoteManager(t *testing.T) {
 	seats, err := query(5)
 	require.ErrorContains(t, err, "leios vote manager is unavailable")
 	require.Nil(t, seats)
+}
+
+// Only an empty stake snapshot is reported as a committee that is not yet
+// available; any other failure reaches the query unchanged.
+func TestLeiosCommitteeQueryError(t *testing.T) {
+	t.Parallel()
+	for _, notYet := range []error{
+		leios.ErrEmptyStakeDistribution,
+		fmt.Errorf("compute committee for epoch 3: %w", leios.ErrEmptyStakeDistribution),
+		leios.ErrZeroTotalActiveStake,
+	} {
+		assert.ErrorIs(
+			t,
+			leiosCommitteeQueryError(notYet),
+			ledger.ErrLeiosCommitteeNotYetAvailable,
+		)
+	}
+	for _, operational := range []error{
+		leios.ErrVoteManagerStopped,
+		leios.ErrCommitteeComputationBacklog,
+		errors.New("get pool stake snapshots: database is closed"),
+	} {
+		got := leiosCommitteeQueryError(operational)
+		assert.ErrorIs(t, got, operational)
+		assert.NotErrorIs(t, got, ledger.ErrLeiosCommitteeNotYetAvailable)
+	}
 }

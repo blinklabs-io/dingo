@@ -1304,6 +1304,8 @@ func (ls *LedgerState) queryShelley(ctx context.Context, query *olocalstatequery
 // their delegators as GetAccountsByCredentialAtSlot reads accounts), and
 // ShelleyGetProposalsQuery (the proposals set at at.Slot from the lifecycle
 // slots, with votes from governance_vote_history), and
+// ShelleyLeiosCommitteeQuery (queryShelleyLeiosCommittee: the committees of
+// at's epoch and the next, each built from persisted per-epoch snapshots),
 // ShelleyDebugChainDepStateQuery (queryShelleyDebugChainDepState: the epoch
 // rows of at's epoch, the nonce fold stopped at at.Slot, the lab from the
 // acquired block's parent hash, and the op-cert counters observed at or

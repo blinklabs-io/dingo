@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"encoding/hex"
 	"errors"
 	"math/big"
 	"testing"
@@ -38,6 +39,10 @@ func runLeiosCommittee(
 	t.Helper()
 	got, err := ls.Query(t.Context(), leiosCommitteeQuery(), QueryPoint{})
 	require.NoError(t, err)
+	// Leaf handlers answer in the single-element []any{value} form.
+	values, ok := got.([]any)
+	require.True(t, ok, "expected the []any result wrapper, got %T", got)
+	require.Len(t, values, 1)
 	wire, err := cbor.Encode(got)
 	require.NoError(t, err)
 	var result olocalstatequery.LeiosCommitteeResult
@@ -97,7 +102,7 @@ func TestQueryLeiosCommittee_NextCommitteeUnavailable(t *testing.T) {
 		epoch uint64,
 	) ([]olocalstatequery.LeiosCommitteeSeat, error) {
 		if epoch != 0 {
-			return nil, errors.New("snapshot not available")
+			return nil, ErrLeiosCommitteeNotYetAvailable
 		}
 		return []olocalstatequery.LeiosCommitteeSeat{
 			{Weight: big.NewRat(1, 1)},
@@ -121,5 +126,93 @@ func TestQueryLeiosCommittee_CurrentCommitteeFailureFailsQuery(t *testing.T) {
 
 	got, err := ls.Query(t.Context(), leiosCommitteeQuery(), QueryPoint{})
 	require.ErrorContains(t, err, "leios committee for epoch 0")
+	require.Nil(t, got)
+}
+
+// TestQueryLeiosCommittee_DirectReplyBytes pins the direct reply to the one
+// era result wrapper around [current, StrictMaybe next]: the wrapper is not
+// doubled by the leaf handler form.
+func TestQueryLeiosCommittee_DirectReplyBytes(t *testing.T) {
+	t.Parallel()
+	ls := newStakePoolStateLedger(t)
+	ls.config.LeiosCommittee = func(
+		uint64,
+	) ([]olocalstatequery.LeiosCommitteeSeat, error) {
+		return []olocalstatequery.LeiosCommitteeSeat{
+			{Weight: big.NewRat(1, 2)},
+		}, nil
+	}
+
+	got, err := ls.Query(t.Context(), leiosCommitteeQuery(), QueryPoint{})
+	require.NoError(t, err)
+	wire, err := cbor.Encode(got)
+	require.NoError(t, err)
+	// [ [ [seat], [ [seat] ] ] ], weight as tag 30 [1, 2], no key.
+	require.Equal(
+		t,
+		"81"+"82"+"81"+"82d81e82010280"+"81"+"81"+"82d81e82010280",
+		hex.EncodeToString(wire),
+	)
+}
+
+// TestQueryLeiosCommittee_ViaGetCBOR answers the query inside GetCBOR with the
+// bare [current, next] as tag-24 content, as the ledger encodes it.
+func TestQueryLeiosCommittee_ViaGetCBOR(t *testing.T) {
+	t.Parallel()
+	ls := newStakePoolStateLedger(t)
+	ls.config.LeiosCommittee = func(
+		uint64,
+	) ([]olocalstatequery.LeiosCommitteeSeat, error) {
+		return []olocalstatequery.LeiosCommitteeSeat{
+			{Weight: big.NewRat(1, 2)},
+		}, nil
+	}
+	query := &olocalstatequery.BlockQuery{
+		Query: &olocalstatequery.ShelleyQuery{
+			Query: &olocalstatequery.ShelleyCborQuery{
+				Query: &olocalstatequery.ShelleyLeiosCommitteeQuery{},
+			},
+		},
+	}
+
+	got, err := ls.Query(t.Context(), query, QueryPoint{})
+	require.NoError(t, err)
+	values, ok := got.([]any)
+	require.True(t, ok, "expected the []any result wrapper, got %T", got)
+	require.Len(t, values, 1)
+	tag, ok := values[0].(cbor.Tag)
+	require.True(t, ok, "expected a tag-24 value, got %T", values[0])
+	require.EqualValues(t, cbor.CborTagCbor, tag.Number)
+	content, ok := tag.Content.([]byte)
+	require.True(t, ok, "tag content must be CBOR bytes, got %T", tag.Content)
+	require.Equal(
+		t,
+		"82"+"81"+"82d81e82010280"+"81"+"81"+"82d81e82010280",
+		hex.EncodeToString(content),
+	)
+}
+
+// Only a committee that cannot be built yet is left out of the reply; a
+// shutdown, backlog or storage failure on the next epoch fails the query.
+func TestQueryLeiosCommittee_NextCommitteeOperationalFailureFailsQuery(
+	t *testing.T,
+) {
+	t.Parallel()
+	ls := newStakePoolStateLedger(t)
+	storageErr := errors.New("storage fault")
+	ls.config.LeiosCommittee = func(
+		epoch uint64,
+	) ([]olocalstatequery.LeiosCommitteeSeat, error) {
+		if epoch != 0 {
+			return nil, storageErr
+		}
+		return []olocalstatequery.LeiosCommitteeSeat{
+			{Weight: big.NewRat(1, 1)},
+		}, nil
+	}
+
+	got, err := ls.Query(t.Context(), leiosCommitteeQuery(), QueryPoint{})
+	require.ErrorIs(t, err, storageErr)
+	require.ErrorContains(t, err, "leios committee for epoch 1")
 	require.Nil(t, got)
 }

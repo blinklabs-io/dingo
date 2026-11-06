@@ -450,6 +450,18 @@ func (n *Node) publishChainsyncState(state *chainsync.State) {
 	n.networkIngestHold().Attach(state)
 }
 
+// leiosCommitteeQueryError marks a committee that cannot be built because its
+// stake snapshot has no pools as ledger.ErrLeiosCommitteeNotYetAvailable, the
+// one failure the query answers by leaving the next committee out. Any other
+// error is returned unchanged and fails the query.
+func leiosCommitteeQueryError(err error) error {
+	if errors.Is(err, leios.ErrEmptyStakeDistribution) ||
+		errors.Is(err, leios.ErrZeroTotalActiveStake) {
+		return fmt.Errorf("%w: %w", ledger.ErrLeiosCommitteeNotYetAvailable, err)
+	}
+	return err
+}
+
 // leiosCommitteeQuery returns the LedgerStateConfig.LeiosCommittee callback,
 // or nil off the Leios prototype network, where the query is unsupported.
 func (n *Node) leiosCommitteeQuery() func(
@@ -465,7 +477,7 @@ func (n *Node) leiosCommitteeQuery() func(
 		}
 		seats, err := voteManager.CommitteeSeatsForEpoch(epoch)
 		if err != nil {
-			return nil, err
+			return nil, leiosCommitteeQueryError(err)
 		}
 		// Never nil, so a committee with no seats is not read as absent.
 		out := make([]olocalstatequery.LeiosCommitteeSeat, 0, len(seats))

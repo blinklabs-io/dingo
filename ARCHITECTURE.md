@@ -5474,9 +5474,10 @@ Leios committee (`GetLeiosCommittee`, gated the same way through
 `LedgerStateConfig.LeiosCommittee`, which the node sets only from the strict
 Musashi identity and backs with the vote manager's
 `CommitteeSeatsForEpoch`: seats in voter id order, each weighted by its stake
-over the total active stake and carrying the member's BLS key; the epoch at
-the acquired point is required, and the next epoch's committee is left out of
-the reply when it cannot be built yet),
+over the total active stake and carrying the member's BLS key when one
+resolves, and none otherwise; the epoch at the acquired point is required,
+and the next epoch's committee is left out of the reply only when its stake
+snapshot has no pools yet, while any other failure fails the query),
 stake pool state (`GetStakePoolState`, answered only on the Leios prototype
 network because released nodes do not support it:
 `LedgerStateConfig.StakePoolStateQuery` is set only from the strict Musashi

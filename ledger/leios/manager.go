@@ -1376,6 +1376,12 @@ func (m *VoteManager) CommitteeSeatsForEpoch(
 	if err != nil {
 		return nil, err
 	}
+	// committeeAndParamsForEpoch returns a nil entry only alongside a non-nil
+	// error, as CommitteeForEpoch relies on; the guard keeps a broken
+	// invariant an error instead of a nil dereference.
+	if entry == nil || entry.committee == nil {
+		return nil, errors.New("leios committee unavailable")
+	}
 	committee := entry.committee
 	if committee.TotalActiveStake == 0 {
 		return nil, ErrZeroTotalActiveStake
