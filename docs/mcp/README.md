@@ -1,6 +1,9 @@
 # Model Context Protocol (MCP) Server in Dingo
 
-Dingo includes a built-in **Model Context Protocol (MCP)** server that allows Large Language Models (LLMs) and AI agents (such as Claude Code CLI, Claude Desktop, Cursor, and custom agents) to safely inspect the live Cardano blockchain and query Dingo's SQLite metadata directly.
+Dingo includes a built-in **Model Context Protocol (MCP)** server that allows
+Large Language Models (LLMs) and AI agents (such as Claude Code CLI, Claude
+Desktop, Cursor, and custom agents) to safely inspect the live Cardano
+blockchain and query Dingo's SQLite metadata directly.
 
 ---
 
@@ -28,8 +31,8 @@ curl -s http://127.0.0.1:8088/healthz
   ```bash
   claude mcp add --transport sse dingo http://127.0.0.1:8088/sse
   ```
-- **Cursor / Windsurf** (SSE):
-  In Settings > Features > MCP, add an SSE server with URL `http://127.0.0.1:8088/sse`.
+- **Cursor / Windsurf** (SSE): In Settings > Features > MCP, add an SSE server
+  with URL `http://127.0.0.1:8088/sse`.
 - **Claude Desktop** (Streamable HTTP):
   Add to `claude_desktop_config.json`:
   ```json
@@ -41,21 +44,27 @@ curl -s http://127.0.0.1:8088/healthz
     }
   }
   ```
-- **Codex / Custom Agents** (Streamable HTTP):
-  Target `http://127.0.0.1:8088/mcp` with header `Accept: application/json, text/event-stream`.
+- **Codex / Custom Agents** (Streamable HTTP): Target
+  `http://127.0.0.1:8088/mcp` with header `Accept: application/json,
+  text/event-stream`.
 
 ### Step 4: Run an Inspection Prompt
 Ask your AI assistant:
-> *"What is the current sync slot of my Dingo node, and which blocks did Dingo mint?"*
+> *"What is the current sync slot of my Dingo node, and which blocks did Dingo
+> mint?"*
 
 ---
 
 ## 2. Architecture & Subsystem Overview
 
 ### Transports
-- **Streamable HTTP** (`POST/GET /mcp`): Modern bi-directional JSON-RPC 2.0 communication with session state.
-- **Server-Sent Events (SSE)** (`GET /sse`): Streaming event transport for CLI and IDE agents.
-- **Health Endpoint** (`GET /healthz`): Listener health probe returning `{"service":"dingo-mcp","status":"ok"}`; it does not probe database connectivity.
+- **Streamable HTTP** (`POST/GET /mcp`): Modern bi-directional JSON-RPC 2.0
+  communication with session state.
+- **Server-Sent Events (SSE)** (`GET /sse`): Streaming event transport for CLI
+  and IDE agents.
+- **Health Endpoint** (`GET /healthz`): Listener health probe returning
+  `{"service":"dingo-mcp","status":"ok"}`; it does not probe database
+  connectivity.
 
 Both session transports share a 128-session cap and an eight-session cap per
 client address. A session closes after five idle minutes, after one hour total,
@@ -64,65 +73,99 @@ full.
 
 ### 21 Registered Tools
 Dingo registers 21 typed, read-only tools:
-- **SQLite Tools (3)**: `sqlite_query` (safe SELECT execution), `sqlite_explain` (query plan analysis), `sqlite_table_schema` (DDL schema inspection).
+- **SQLite Tools (3)**: `sqlite_query` (safe SELECT execution), `sqlite_explain`
+  (query plan analysis), `sqlite_table_schema` (DDL schema inspection).
 - **Cardano Domain Tools (18)**:
   - Consensus & Chain Tip: `get_cardano_tip`, `get_block`, `get_transaction`.
-  - Ledger, Protocol & UTxO: `get_utxos`, `get_account`, `get_asset_info`, `get_utxos_by_asset`, `get_protocol_parameters`, `calculate_min_utxo`, `decode_address`.
+  - Ledger, Protocol & UTxO: `get_utxos`, `get_account`, `get_asset_info`,
+    `get_utxos_by_asset`, `get_protocol_parameters`, `calculate_min_utxo`,
+    `decode_address`.
   - Mempool & Propagation: `get_mempool_info`.
-  - SPO & Governance: `get_pool_performance`, `get_governance_state`, `get_governance_proposal`, `get_epoch_summary`.
-  - Smart Contracts: `resolve_datum_or_script`, `evaluate_tx` (pure-Go Plutus V1/V2/V3 simulation).
+  - SPO & Governance: `get_pool_performance`, `get_governance_state`,
+    `get_governance_proposal`, `get_epoch_summary`.
+  - Smart Contracts: `resolve_datum_or_script`, `evaluate_tx` (pure-Go Plutus
+    V1/V2/V3 simulation).
   - Node Identity & Docs: `get_node_info` (identity, faq, architecture).
 
 ### MCP Resources
 Passively accessible reference context and schema DDL. Six fixed resources are
 always registered; the server also registers one schema resource for each
 discovered non-internal SQLite table, so the total varies by database:
-- `dingo://docs/identity`: Node architecture, block header fingerprint (Protocol Minor Version 69), durable forge fencing.
+- `dingo://docs/identity`: Node architecture, block header fingerprint (Protocol
+  Minor Version 69), durable forge fencing.
 - `dingo://docs/faq`: Storage profiles, memory footprint, Mithril fast-sync.
 - `dingo://docs/architecture`: Node pipeline and indexer overview.
-- `dingo://node/status`: Live tip slot, block height, block hash, sync status, and metadata maintenance status.
-- `dingo://dbsync/cheatsheet`: PostgreSQL-to-SQLite schema translation reference.
-- `dingo://schema/tables` and `dingo://schema/table/{name}`: DDL and column catalog for discovered SQLite tables.
+- `dingo://node/status`: Live tip slot, block height, block hash, sync status,
+  and metadata maintenance status.
+- `dingo://dbsync/cheatsheet`: PostgreSQL-to-SQLite schema translation
+  reference.
+- `dingo://schema/tables` and `dingo://schema/table/{name}`: DDL and column
+  catalog for discovered SQLite tables.
 
 ### 6 Pre-Engineered Prompts (Official Agent Workflows)
-Pre-packaged diagnostic and forensic protocols exposed via `prompts/list` and `prompts/get`:
-- `diagnose_node_health`: Reported tip and sync status, minor 69 fingerprint, and any forge fence in `sync_state`.
-- `simulate_and_diagnose_tx`: Pre-flight dry-run of Plutus redeemers, ExUnits, fees, and datums.
-- `audit_pool_rewards`: Recorded block, stake, pledge, cost, margin, performance, and reward snapshots plus a current active account count.
-- `track_asset_portfolio`: Asset metadata, circulating supply, holding UTxOs, and paginated asset UTxO inspection.
-- `conway_governance_brief`: CIP-1694 Constitution, CC quorum, DReps, and active proposals.
-- `investigate_address`: EUTxO forensic audit, token portfolio, datums, and staking delegation.
+Pre-packaged diagnostic and forensic protocols exposed via `prompts/list` and
+`prompts/get`:
+- `diagnose_node_health`: Reported tip and sync status, minor 69 fingerprint,
+  and any forge fence in `sync_state`.
+- `simulate_and_diagnose_tx`: Pre-flight dry-run of Plutus redeemers, ExUnits,
+  fees, and datums.
+- `audit_pool_rewards`: Recorded block, stake, pledge, cost, margin,
+  performance, and reward snapshots plus a current active account count.
+- `track_asset_portfolio`: Asset metadata, circulating supply, holding UTxOs,
+  and paginated asset UTxO inspection.
+- `conway_governance_brief`: CIP-1694 Constitution, CC quorum, DReps, and active
+  proposals.
+- `investigate_address`: EUTxO forensic audit, token portfolio, datums, and
+  staking delegation.
 
 ### Read-Only Security Boundary
-- **Pure-Go SQLite Enforcement**: The `modernc.org/sqlite` connection uses `mode=ro` and `PRAGMA query_only = ON`.
-- **SQL Statement Validation**: A tokenizer identifies the main statement after any CTE definitions and rejects writes before execution. Read-only EXPLAIN and metadata PRAGMAs are supported.
-- **Immutable Ledger State**: Cardano domain tools read immutable in-memory ledger state or read-only database connections.
-- **Rate Limiting**: Per-IP token bucket (default 60 req/s, burst 15) prevents runaway agent loops from exhausting CPU or disk I/O. Pre-authentication state is capped at 4096 identities and entries expire after 30 idle minutes independently of incoming traffic.
-- **Output Sanitization**: External asset text is length-bounded, stripped of control characters and invisible formatting, JSON-quoted, and escaped for Markdown. Markdown tables wrap sanitized cells in an explicit untrusted-data envelope. Clients must not follow instructions contained in it.
+- **Pure-Go SQLite Enforcement**: The `modernc.org/sqlite` connection uses
+  `mode=ro` and `PRAGMA query_only = ON`.
+- **SQL Statement Validation**: A tokenizer identifies the main statement after
+  any CTE definitions and rejects writes before execution. Read-only EXPLAIN and
+  metadata PRAGMAs are supported.
+- **Immutable Ledger State**: Cardano domain tools read immutable in-memory
+  ledger state or read-only database connections.
+- **Rate Limiting**: Per-IP token bucket (default 60 req/s, burst 15) prevents
+  runaway agent loops from exhausting CPU or disk I/O. Pre-authentication state
+  is capped at 4096 identities and entries expire after 30 idle minutes
+  independently of incoming traffic.
+- **Output Sanitization**: External asset text is length-bounded, stripped of
+  control characters and invisible formatting, JSON-quoted, and escaped for
+  Markdown. Markdown tables wrap sanitized cells in an explicit untrusted-data
+  envelope. Clients must not follow instructions contained in it.
 
 ---
 
 ## 3. Architecture & Request Workflow Diagrams
 
-The Dingo MCP server's end-to-end request flow, security boundary, tool registries, storage layer, and execution lifecycle are illustrated below:
+The Dingo MCP server's end-to-end request flow, security boundary, tool
+registries, storage layer, and execution lifecycle are illustrated below:
 
 ### Visual Subsystem Architecture
 
 ![Dingo MCP Subsystem Architecture](architecture.svg)
 
-Edit the [Excalidraw source](architecture.excalidraw) and export an updated SVG to refresh this preview.
+Edit the [Excalidraw source](architecture.excalidraw) and export an updated SVG
+to refresh this preview.
 
 ---
 
 ## 4. Semantic Architecture & Intent Mapping Taxonomy
 
 ### 4.1 Why Semantic Categorization Matters
-In automated AI agent systems, role-based archetypes ("personas") do not correspond to the physical architecture of the blockchain or the protocol primitives of the Model Context Protocol. An LLM reasoning over an MCP request does not operate on *who* is asking; it reasons over **what state machine, mutability boundary, graph topology, or data lifecycle** it must inspect.
+In automated AI agent systems, role-based archetypes ("personas") do not
+correspond to the physical architecture of the blockchain or the protocol
+primitives of the Model Context Protocol. An LLM reasoning over an MCP request
+does not operate on *who* is asking; it reasons over **what state machine,
+mutability boundary, graph topology, or data lifecycle** it must inspect.
 
 Dingo organizes its MCP subsystem across four primary semantic angles:
 
 #### A. Protocol State & Temporal Mutability (The Cardano Ledger Dimension)
-Cardano's ledger divides information into distinct temporal and mutability tiers. Slicing tools along this axis reflects how the node, consensus engine, and indexer handle data lifecycles:
+Cardano's ledger divides information into distinct temporal and mutability
+tiers. Slicing tools along this axis reflects how the node, consensus engine,
+and indexer handle data lifecycles:
 
 | Semantic State Tier | Semantics & Data Lifecycle | Dingo Tools / Resources | Under-the-Hood Subsystem |
 | :--- | :--- | :--- | :--- |
@@ -133,34 +176,62 @@ Cardano's ledger divides information into distinct temporal and mutability tiers
 | **Off-Chain & Semantic Anchors** | Off-chain metadata referenced by on-chain hashes (Token Registry, IPFS Constitution, CIP-25 NFT labels). | `get_asset_info`, `resolve_datum_or_script`, `get_governance_state` | CIP-26 registry cache and decoded CBOR payloads. |
 
 #### B. MCP Protocol Primitives: Tools, Resources, and Prompts
-The Model Context Protocol specification defines three distinct server capabilities:
+The Model Context Protocol specification defines three distinct server
+capabilities:
 
-1. **Tools (`tools/*`)**: *Active execution & computation* — parameterized functions that the LLM invokes dynamically (e.g., simulating a transaction via `evaluate_tx` or filtering assets via `get_utxos_by_asset`).
-2. **Resources (`resources/*`)**: *Passive context injection* — deterministic, read-only documents and schemas read directly into the context window (e.g., table DDLs via `dingo://schema/tables` or node operational state via `dingo://node/status`).
-3. **Prompts (`prompts/*`)**: *Structured semantic playbooks* — pre-engineered, multi-turn prompt templates guiding agents through standard analytical workflows (e.g., automated transaction failure diagnostics, SPO reward audits, or Conway governance briefs).
+1. **Tools (`tools/*`)**: *Active execution & computation* — parameterized
+   functions that the LLM invokes dynamically (e.g., simulating a transaction
+   via `evaluate_tx` or filtering assets via `get_utxos_by_asset`).
+2. **Resources (`resources/*`)**: *Passive context injection* — deterministic,
+   read-only documents and schemas read directly into the context window (e.g.,
+   table DDLs via `dingo://schema/tables` or node operational state via
+   `dingo://node/status`).
+3. **Prompts (`prompts/*`)**: *Structured semantic playbooks* — pre-engineered,
+   multi-turn prompt templates guiding agents through standard analytical
+   workflows (e.g., automated transaction failure diagnostics, SPO reward
+   audits, or Conway governance briefs).
 
 #### C. The EUTxO Graph Dimension (Graph vs Key-Value Semantics)
-Cardano's Extended UTxO (EUTxO) model is fundamentally a **directed acyclic graph (DAG)** of value and state transformations, rather than an account balance table:
-- **Graph Nodes (State Carriers)**: UTxOs, Datums (`resolve_datum_or_script`), Asset bundles (`get_utxos_by_asset`).
-- **Graph Edges (State Transitions)**: Transactions (`get_transaction`), Inputs/Outputs, Redeemer spending paths.
-- **Graph Validators (Guards)**: Plutus scripts (V1/V2/V3), Native multisig scripts, ExUnit budgets (`evaluate_tx`).
-- **Global Invariants (State Machines)**: Conway CIP-1694 governance proposals, CC votes, DRep delegations (`get_governance_state`).
+Cardano's Extended UTxO (EUTxO) model is fundamentally a **directed acyclic
+graph (DAG)** of value and state transformations, rather than an account balance
+table:
+- **Graph Nodes (State Carriers)**: UTxOs, Datums (`resolve_datum_or_script`),
+  Asset bundles (`get_utxos_by_asset`).
+- **Graph Edges (State Transitions)**: Transactions (`get_transaction`),
+  Inputs/Outputs, Redeemer spending paths.
+- **Graph Validators (Guards)**: Plutus scripts (V1/V2/V3), Native multisig
+  scripts, ExUnit budgets (`evaluate_tx`).
+- **Global Invariants (State Machines)**: Conway CIP-1694 governance proposals,
+  CC votes, DRep delegations (`get_governance_state`).
 
 #### D. Execution Cost & Latency Tiers (Systems Engineering Dimension)
-For automated agents operating in tight loops, tools differ significantly in resource utilization and execution isolation:
-- **L1 Microsecond (Lock-free In-Memory)**: `get_cardano_tip`, `get_node_info` (atomic memory pointers; $<2\text{ms}$).
-- **L2 Millisecond (Indexed Relational I/O)**: `sqlite_query`, `get_utxos`, `get_transaction` (bounded by SQLite read pool and indexes; $5\text{--}25\text{ms}$).
-- **L3 Sandboxed Compute (Pure-Go Plutus VM)**: `evaluate_tx` (executes untrusted Plutus scripts in a step-budgeted CEK machine; CPU and memory bound).
+For automated agents operating in tight loops, tools differ significantly in
+resource utilization and execution isolation:
+- **L1 Microsecond (Lock-free In-Memory)**: `get_cardano_tip`, `get_node_info`
+  (atomic memory pointers; $<2\text{ms}$).
+- **L2 Millisecond (Indexed Relational I/O)**: `sqlite_query`, `get_utxos`,
+  `get_transaction` (bounded by SQLite read pool and indexes;
+  $5\text{--}25\text{ms}$).
+- **L3 Sandboxed Compute (Pure-Go Plutus VM)**: `evaluate_tx` (executes
+  untrusted Plutus scripts in a step-budgeted CEK machine; CPU and memory
+  bound).
 
 ---
 
 ### 4.2 Intent Mapping Matrix Across Core Cardano Domains
 
-When an operator, developer, or AI agent interacts with Dingo via MCP, the user poses a question in natural language (e.g., *"What is my node's sync tip?"*, *"Find UTxOs holding token policy X"*, or *"Why is my Plutus script failing?"*).
+When an operator, developer, or AI agent interacts with Dingo via MCP, the user
+poses a question in natural language (e.g., *"What is my node's sync tip?"*,
+*"Find UTxOs holding token policy X"*, or *"Why is my Plutus script failing?"*).
 
-During MCP initialization (`initialize`), Dingo advertises capabilities and server instructions. Clients then call `tools/list`, `resources/list`, and `prompts/list` to discover the **21 tools**, six fixed resources plus database-dependent table-schema resources, and **6 prompt workflows**. The LLM maps the user's intent to the appropriate tool or resource.
+During MCP initialization (`initialize`), Dingo advertises capabilities and
+server instructions. Clients then call `tools/list`, `resources/list`, and
+`prompts/list` to discover the **21 tools**, six fixed resources plus
+database-dependent table-schema resources, and **6 prompt workflows**. The LLM
+maps the user's intent to the appropriate tool or resource.
 
-The matrix below details how question styles and intents map across 5 core Cardano domains:
+The matrix below details how question styles and intents map across 5 core
+Cardano domains:
 
 ### 1. Cardano Core & Ledger State
 | Question Style / Intent | Example Natural Language Query | Mapped Tool / Resource | Parameters | Under-the-Hood Behavior |
@@ -219,30 +290,46 @@ The matrix below details how question styles and intents map across 5 core Carda
 The complete lifecycle of a request consists of 6 distinct phases:
 
 1. **Phase 1: Handshake & Discovery (`initialize`)**:
-   - The AI client (Claude, Cursor, Codex) initiates a session via `POST /mcp` or `GET /sse`.
-   - Dingo responds with server capabilities and instructions detailing block identity and forge fencing. The client completes `notifications/initialized`, then calls `tools/list`, `resources/list`, and `prompts/list` for the registered schemas and entries.
+   - The AI client (Claude, Cursor, Codex) initiates a session via `POST /mcp`
+     or `GET /sse`.
+   - Dingo responds with server capabilities and instructions detailing block
+     identity and forge fencing. The client completes
+     `notifications/initialized`, then calls `tools/list`, `resources/list`, and
+     `prompts/list` for the registered schemas and entries.
 2. **Phase 2: Intent Classification & Tool Invocation (`tools/call`)**:
-   - The LLM parses the user prompt, determines the required data, and emits a JSON-RPC 2.0 tool invocation.
+   - The LLM parses the user prompt, determines the required data, and emits a
+     JSON-RPC 2.0 tool invocation.
 3. **Phase 3: Ingress Security Perimeter**:
-   - **Authentication**: If configured, `Authorization: Bearer <token>` is validated using `crypto/subtle.ConstantTimeCompare`.
-   - **Rate Limiting**: Per-client IP token bucket (default 60 req/s, burst 15) decrements tokens. Excess requests receive HTTP 429.
-   - **SQL Statement Validation**: SQL tools tokenize comments, quoted data, and CTE definitions to identify the main statement. Rejected queries return an MCP tool error before execution.
+   - **Authentication**: If configured, `Authorization: Bearer <token>` is
+     validated using `crypto/subtle.ConstantTimeCompare`.
+   - **Rate Limiting**: Per-client IP token bucket (default 60 req/s, burst 15)
+     decrements tokens. Excess requests receive HTTP 429.
+   - **SQL Statement Validation**: SQL tools tokenize comments, quoted data, and
+     CTE definitions to identify the main statement. Rejected queries return an
+     MCP tool error before execution.
 4. **Phase 4: Tool Routing & Engine Execution**:
    - The MCP dispatcher routes the call:
-     - **Cardano Domain Tools**: Access immutable in-memory ledger state or compiled pure-Go Ouroboros APIs.
-     - **SQLite Tools**: Execute queries against `metadata.sqlite` using a dedicated read-only connection pool (`PRAGMA query_only = ON`).
+     - **Cardano Domain Tools**: Access immutable in-memory ledger state or
+       compiled pure-Go Ouroboros APIs.
+     - **SQLite Tools**: Execute queries against `metadata.sqlite` using a
+       dedicated read-only connection pool (`PRAGMA query_only = ON`).
 5. **Phase 5: Output Formatting & Sanitization**:
-   - Binary hashes (TX IDs, pool hashes, policy IDs) are formatted into uppercase hex strings.
-   - Results are rendered into structured GitHub-flavored Markdown tables with automatic row and column caps.
-   - External text is length-bounded and stripped of invisible formatting and control characters; metadata remains untrusted.
+   - Binary hashes (TX IDs, pool hashes, policy IDs) are formatted into
+     uppercase hex strings.
+   - Results are rendered into structured GitHub-flavored Markdown tables with
+     automatic row and column caps.
+   - External text is length-bounded and stripped of invisible formatting and
+     control characters; metadata remains untrusted.
 6. **Phase 6: AI Synthesis & Response Delivery**:
-   - The AI client ingests the sanitized Markdown table and synthesizes a natural language answer with verified facts.
+   - The AI client ingests the sanitized Markdown table and synthesizes a
+     natural language answer with verified facts.
 
 ---
 
 ## 6. Enabling the MCP Server
 
-The MCP server is compiled in as a modular API provider under capability `api.mcp`. It is disabled until a positive port is configured.
+The MCP server is compiled in as a modular API provider under capability
+`api.mcp`. It is disabled until a positive port is configured.
 
 ### Command Line Flags
 
@@ -255,7 +342,9 @@ DINGO_PLUGINS_API_MCP_CONFIG_PORT=8088 ./dingo serve \
   --mcp-provider builtin
 ```
 
-> **Note**: SQL-backed tools require the SQLite metadata provider. Live ledger tools remain available with other metadata providers; `storage-mode` controls indexing depth independently of the provider.
+> **Note**: SQL-backed tools require the SQLite metadata provider. Live ledger
+> tools remain available with other metadata providers; `storage-mode` controls
+> indexing depth independently of the provider.
 
 To explicitly disable MCP:
 ```bash
@@ -322,13 +411,15 @@ otherwise the compatibility variable overrides YAML `authToken`. The
 compatibility variable preserves its value verbatim. Canonical plugin variables
 use the generic YAML scalar convention; quote token values that resemble YAML
 numbers or booleans. Non-loopback binds require both an auth token and server
-TLS; loopback remains the default and supports local clients without credentials.
+TLS; loopback remains the default and supports local clients without
+credentials.
 
 Clients without an `Origin` header remain supported. Browser requests must be
-same-origin on loopback or match an explicit entry in root `corsAllowedOrigins`; an empty
-list or `"*"` does not allow arbitrary browser origins for MCP. Invalid or
-untrusted origins receive HTTP 403 on both transports, including preflight.
-For a browser Inspector, add the exact origin shown by the Inspector, for example:
+same-origin on loopback or match an explicit entry in root `corsAllowedOrigins`;
+an empty list or `"*"` does not allow arbitrary browser origins for MCP. Invalid
+or untrusted origins receive HTTP 403 on both transports, including preflight.
+For a browser Inspector, add the exact origin shown by the Inspector, for
+example:
 
 ```yaml
 corsAllowedOrigins:
@@ -350,41 +441,42 @@ MCP opens a separate read-only connection to the active SQLite provider's
 resolved file. Provider `dataDir` overrides are honored. With a different
 metadata backend or an in-memory SQLite store, file-based SQL tools are
 unavailable. Full-address UTxO lookup uses the active database's exact CBOR
-address matcher in ascending ledger order. Full addresses use `cursor` pagination
-and reject nonzero `offset`; raw payment credentials retain offset pagination,
-capped at 10,000, and intentionally search across address forms. When a full
-page from a raw-credential `get_utxos`, `get_utxos_by_asset`, or `sqlite_query`
-call ends where the next offset would exceed 10,000, the response states that
-the offset limit was reached and later rows are not retrievable through that
-tool. Stake addresses and CIP-129 DRep
-identifiers preserve key/script types; raw hashes mean key credentials. An
-all-zero stake credential remains a valid lookup.
+address matcher in ascending ledger order. Full addresses use `cursor`
+pagination and reject nonzero `offset`; raw payment credentials retain offset
+pagination, capped at 10,000, and intentionally search across address forms.
+When a full page from a raw-credential `get_utxos`, `get_utxos_by_asset`, or
+`sqlite_query` call ends where the next offset would exceed 10,000, the response
+states that the offset limit was reached and later rows are not retrievable
+through that tool. Stake addresses and CIP-129 DRep identifiers preserve
+key/script types; raw hashes mean key credentials. An all-zero stake credential
+remains a valid lookup.
 
 Each full-address request examines at most 2,000 candidates and returns at most
 100 matches (default 20). Responses include structured `utxos`, `next_cursor`,
-`complete`, `candidates_scanned`, `stop_reason` and `consistency` fields. Continue
-with `next_cursor` until `complete` is true, even when a page contains no matches.
-Cursors identify the last fully examined candidate and are bound to the address
-and network. Do not combine a cursor with an offset.
+`complete`, `candidates_scanned`, `stop_reason` and `consistency` fields.
+Continue with `next_cursor` until `complete` is true, even when a page contains
+no matches. Cursors identify the last fully examined candidate and are bound to
+the address and network. Do not combine a cursor with an offset.
 
 The query deadline reaches the coordinated read transaction and SQL operations;
 cancellation is also checked between CBOR loads/decodes. If the deadline expires
 after progress, the response carries the completed results and continuation
-cursor with `stop_reason: deadline`. With no progress, it returns a timeout error.
-Client cancellation stops the operation. Blob-store operations already in progress
-must return before cooperative cancellation can be observed.
+cursor with `stop_reason: deadline`. With no progress, it returns a timeout
+error. Client cancellation stops the operation. Blob-store operations already in
+progress must return before cooperative cancellation can be observed.
 
 Pages observe live ledger state independently, not a fixed snapshot. Outputs may
 be spent or added between requests. Restart pagination after a rollback. These
 pages do not provide a complete balance at a single ledger snapshot.
 
-`sqlite_query` applies `offset` and the effective row limit while reading results,
-including PRAGMA and EXPLAIN results and SQL containing its own LIMIT. The
-result cap is the smallest of the requested limit (default 50), configured
-`maxRows`, and 200. Offsets above 10,000 are rejected. Before execution,
-SQL longer than 64 KiB is rejected before tokenization. SQLite enforces a 1 MiB value/encoded-row limit, 64 KiB SQL limit, and 128-column
-limit. Arbitrary SQL runs with connection-level `query_only`, including injected
-pools, and the previous connection settings are restored afterward.
+`sqlite_query` applies `offset` and the effective row limit while reading
+results, including PRAGMA and EXPLAIN results and SQL containing its own LIMIT.
+The result cap is the smallest of the requested limit (default 50), configured
+`maxRows`, and 200. Offsets above 10,000 are rejected. Before execution, SQL
+longer than 64 KiB is rejected before tokenization. SQLite enforces a 1 MiB
+value/encoded-row limit, 64 KiB SQL limit, and 128-column limit. Arbitrary SQL
+runs with connection-level `query_only`, including injected pools, and the
+previous connection settings are restored afterward.
 
 `evaluate_tx` permits one evaluation at a time per MCP server. The request
 returns on cancellation or the configured timeout, and the ledger evaluator
@@ -413,11 +505,12 @@ DINGO_MCP_PREVIEW_TEST_DB=/path/to/metadata.sqlite \
 go test ./api/mcp -run TestPreviewLiveSQL -v -count=1
 ```
 
-This test opens the database read-only, starts an in-memory MCP session using the
-current implementation, and executes the resource SQL examples and a metadata
-PRAGMA. It does not evaluate or submit transactions. This run uses the production
-five-second query budget. Run correctness checks under race instrumentation with
-an explicit, separate budget; this does not change the server timeout:
+This test opens the database read-only, starts an in-memory MCP session using
+the current implementation, and executes the resource SQL examples and a
+metadata PRAGMA. It does not evaluate or submit transactions. This run uses the
+production five-second query budget. Run correctness checks under race
+instrumentation with an explicit, separate budget; this does not change the
+server timeout:
 
 ```sh
 DINGO_MCP_PREVIEW_TEST_DB=/path/to/metadata.sqlite \
@@ -440,13 +533,14 @@ go test -race ./api/mcp -run TestPreviewLiveEvaluation -v -count=1
 
 The database must belong to the Preview endpoint. This checks a no-script
 transaction and a Plutus minting template using an unspent input. Templates are
-unsigned; successful evaluation is not full transaction validation or acceptance.
-Deterministic real-chain evaluator fixtures are covered by
+unsigned; successful evaluation is not full transaction validation or
+acceptance. Deterministic real-chain evaluator fixtures are covered by
 `TestEvaluateTxBabbagePreviewDuplicateRequiredSigner`,
 `TestEvaluateTxConwayPreprodFixtures`, and
 `TestEvaluateTxConwayPreprodSerialiseData` in `ledger/eras`.
 
-The official [MCP Inspector](https://github.com/modelcontextprotocol/inspector) is the easiest way to test and interact with the server.
+The official [MCP Inspector](https://github.com/modelcontextprotocol/inspector)
+is the easiest way to test and interact with the server.
 
 ### A. Web UI (Interactive Dashboard)
 
@@ -458,7 +552,8 @@ npx @modelcontextprotocol/inspector --web --server-url http://127.0.0.1:8088/mcp
 
 1. Open the URL shown in the terminal (e.g. `http://127.0.0.1:6274?...`).
 2. Click the **Tools** tab at the top.
-3. Select any tool (e.g. `get_cardano_tip` or `sqlite_query`) and click **Execute Tool**.
+3. Select any tool (e.g. `get_cardano_tip` or `sqlite_query`) and click
+   **Execute Tool**.
 
 If Dingo requires an authentication token:
 ```bash
@@ -503,7 +598,9 @@ You can run automated queries or test without a browser:
 
 ### Claude Code CLI
 
-Anthropic's [Claude Code](https://docs.anthropic.com/en/docs/agents-and-tools/claude-code/overview) CLI supports MCP servers out-of-the-box over HTTP/SSE.
+Anthropic's [Claude
+Code](https://docs.anthropic.com/en/docs/agents-and-tools/claude-code/overview)
+CLI supports MCP servers out-of-the-box over HTTP/SSE.
 
 #### A. Add Dingo MCP via CLI Command
 
@@ -531,7 +628,8 @@ claude mcp add --transport sse dingo http://127.0.0.1:8088/sse --header "Authori
 
 #### C. Manual Configuration (`.claude.json`)
 
-Alternatively, configure MCP directly in your global `~/.claude.json` or project-root `.claude.json`:
+Alternatively, configure MCP directly in your global `~/.claude.json` or
+project-root `.claude.json`:
 
 ```json
 {
@@ -547,10 +645,16 @@ Alternatively, configure MCP directly in your global `~/.claude.json` or project
 
 ### Codex CLI / AI Agents
 
-For Codex-based CLI utilities or custom agent frameworks supporting the Model Context Protocol:
+For Codex-based CLI utilities or custom agent frameworks supporting the Model
+Context Protocol:
 
-1. **Remote SSE Endpoint**: Point your client's MCP configuration to `http://127.0.0.1:8088/sse` (or Streamable HTTP at `http://127.0.0.1:8088/mcp`).
-2. **Session Lifecycle**: Dingo handles standard MCP JSON-RPC 2.0 handshakes (`initialize` -> `notifications/initialized`). During `initialize`, Dingo automatically provides **System Instructions** steering the model to its Cardano tools and documentation resources.
+1. **Remote SSE Endpoint**: Point your client's MCP configuration to
+   `http://127.0.0.1:8088/sse` (or Streamable HTTP at
+   `http://127.0.0.1:8088/mcp`).
+2. **Session Lifecycle**: Dingo handles standard MCP JSON-RPC 2.0 handshakes
+   (`initialize` -> `notifications/initialized`). During `initialize`, Dingo
+   automatically provides **System Instructions** steering the model to its
+   Cardano tools and documentation resources.
 
 ---
 
@@ -605,7 +709,8 @@ In Cursor or VS Code (with an MCP extension):
 
 ## 10. Prompting & Steering the Agent to Use MCP Docs
 
-When an AI agent connects to Dingo MCP, Dingo automatically transmits guidance instructions via the `initialize` handshake.
+When an AI agent connects to Dingo MCP, Dingo automatically transmits guidance
+instructions via the `initialize` handshake.
 
 You can steer the agent in conversation with prompts like:
 
@@ -656,13 +761,26 @@ a reward address and `credential_type` are supplied, they must agree.
 ### Protocol Parameters & Ledger Economy
 
 #### `get_protocol_parameters`
-Retrieves current active protocol parameters governing ledger consensus, fee computation, and Plutus execution. Explicit `epoch` requests return an unsupported error; the tool does not forecast or label current values as historical parameters:
-- **Linear Fee Formula**: Base linear parameters $a$ (`min_fee_a`) and $b$ (`min_fee_b`) for calculating minimum transaction fee ($\text{fee} = a \times \text{size}(tx) + b$).
-- **Min UTxO Value**: Shelley/Allegra/Mary report `min_utxo_value` in Lovelace; Alonzo reports `coins_per_utxo_word` in Lovelace per 8-byte word; Babbage/Conway/Dijkstra report `coins_per_utxo_byte` in Lovelace per byte.
-- **Plutus Execution Unit Prices**: Step price per CPU unit and memory unit fractions for Plutus script validation.
-- **Execution Budget Caps**: Maximum ExUnits allowable per individual transaction and per block (`max_tx_ex_mem`, `max_tx_ex_steps`, `max_block_ex_mem`, `max_block_ex_steps`).
-- **Collateral & Security Constraints**: Minimum collateral percentage (e.g. 150%) and maximum collateral inputs (`max_collateral_inputs`).
-- **Voltaire Governance Deposits**: Minimum DRep registration deposit (`drep_deposit`) and governance proposal action deposit (`gov_action_deposit`).
+Retrieves current active protocol parameters governing ledger consensus, fee
+computation, and Plutus execution. Explicit `epoch` requests return an
+unsupported error; the tool does not forecast or label current values as
+historical parameters:
+- **Linear Fee Formula**: Base linear parameters $a$ (`min_fee_a`) and $b$
+  (`min_fee_b`) for calculating minimum transaction fee ($\text{fee} = a \times
+  \text{size}(tx) + b$).
+- **Min UTxO Value**: Shelley/Allegra/Mary report `min_utxo_value` in Lovelace;
+  Alonzo reports `coins_per_utxo_word` in Lovelace per 8-byte word;
+  Babbage/Conway/Dijkstra report `coins_per_utxo_byte` in Lovelace per byte.
+- **Plutus Execution Unit Prices**: Step price per CPU unit and memory unit
+  fractions for Plutus script validation.
+- **Execution Budget Caps**: Maximum ExUnits allowable per individual
+  transaction and per block (`max_tx_ex_mem`, `max_tx_ex_steps`,
+  `max_block_ex_mem`, `max_block_ex_steps`).
+- **Collateral & Security Constraints**: Minimum collateral percentage (e.g.
+  150%) and maximum collateral inputs (`max_collateral_inputs`).
+- **Voltaire Governance Deposits**: Minimum DRep registration deposit
+  (`drep_deposit`) and governance proposal action deposit
+  (`gov_action_deposit`).
 
 #### `calculate_min_utxo`
 
@@ -672,9 +790,9 @@ Calculates the Babbage/Conway minimum using gouroboros `babbage.MinCoinTxOut`:
 - Supply `output_cbor_hex` with the complete serialized output, including its
   address, coin value, assets, datum and reference script. The result applies to
   those exact bytes; recalculate after modifying the output.
-- For an ADA-only output, supply `address` or omit it to use a testnet enterprise
-  address with a zero key hash. The tool adjusts the coin value until the output
-  contains its own minimum deposit.
+- For an ADA-only output, supply `address` or omit it to use a testnet
+  enterprise address with a zero key hash. The tool adjusts the coin value until
+  the output contains its own minimum deposit.
 - `coins_per_utxo_byte` overrides the active Babbage/Conway parameter. When no
   parameter is available, the fallback is 4,310 lovelace per byte.
 - Counts and partial datum/script descriptions cannot determine an exact size.
@@ -688,96 +806,150 @@ without relying on average asset sizes.
 ### Mempool & In-Flight Diagnostics
 
 #### `get_mempool_info`
-Inspects Dingo's live in-memory transaction buffer (mempool) awaiting inclusion in upcoming forged blocks:
+Inspects Dingo's live in-memory transaction buffer (mempool) awaiting inclusion
+in upcoming forged blocks:
 - **Global Mempool Health (when called with `{}`)**:
-  - `pending_tx_count`: Total number of validated transactions currently queued in memory.
-  - `mempool_bytes`: Bytes retained by buffered transactions (CBOR plus decoded outputs), the figure capacity and admission are measured against.
-  - `max_mempool_bytes`: Configured maximum memory pool capacity (default 1 MiB in standard modes, 25 MiB in Leios).
-  - `saturation_pct`: Real-time percentage saturation of the node's mempool buffer.
-  - `transactions`: The first `limit` pending transactions (default 10, at most 50) in queue order, with hash, size in bytes, type, and age.
+  - `pending_tx_count`: Total number of validated transactions currently queued
+    in memory.
+  - `mempool_bytes`: Bytes retained by buffered transactions (CBOR plus decoded
+    outputs), the figure capacity and admission are measured against.
+  - `max_mempool_bytes`: Configured maximum memory pool capacity (default 1 MiB
+    in standard modes, 25 MiB in Leios).
+  - `saturation_pct`: Real-time percentage saturation of the node's mempool
+    buffer.
+  - `transactions`: The first `limit` pending transactions (default 10, at
+    most 50) in queue order, with hash, size in bytes, type, and age.
 - **Single Transaction Inspection (when called with `{"tx_hash": "..."}`)**:
-  - Verifies whether an emitted transaction has been admitted into the local mempool, its queued slot, fee, and byte size.
+  - Verifies whether an emitted transaction has been admitted into the local
+    mempool, its queued slot, fee, and byte size.
 
 ### Cryptographic Address Inspection
 
 #### `decode_address`
-Cryptographically parses any Cardano address (Bech32 or uppercase/lowercase hex) using pure-Go Ouroboros ledger primitives without external network lookups:
-- **Network ID**: Distinguishes Mainnet (`1`) from Testnet/Preview/Preprod (`0`).
-- **Address Type**: Identifies address standard (`Shelley Base`, `Enterprise`, `Reward Account`, `Pointer`, `Byron`).
+Cryptographically parses any Cardano address (Bech32 or uppercase/lowercase hex)
+using pure-Go Ouroboros ledger primitives without external network lookups:
+- **Network ID**: Distinguishes Mainnet (`1`) from Testnet/Preview/Preprod
+  (`0`).
+- **Address Type**: Identifies address standard (`Shelley Base`, `Enterprise`,
+  `Reward Account`, `Pointer`, `Byron`).
 - **Payment Credential**:
-  - `Kind`: `KeyHash` (standard Ed25519 public key hash) or `ScriptHash` (Plutus/Native script).
+  - `Kind`: `KeyHash` (standard Ed25519 public key hash) or `ScriptHash`
+    (Plutus/Native script).
   - `Hash`: 28-byte hex credential hash.
 - **Stake Credential**:
-  - `Kind`: `KeyHash` or `ScriptHash` if delegated, or `None` for enterprise/byron addresses.
+  - `Kind`: `KeyHash` or `ScriptHash` if delegated, or `None` for
+    enterprise/byron addresses.
   - `Hash`: 28-byte hex stake credential hash.
-- **Derived Stake Address**: Formats the associated Bech32 reward account (`stake1...` or `stake_test1...`) directly from the stake credential.
+- **Derived Stake Address**: Formats the associated Bech32 reward account
+  (`stake1...` or `stake_test1...`) directly from the stake credential.
 
 ### Native Asset & Kupo-Style Pattern Matching
 
 #### `get_utxos_by_asset`
-Mirrors Kupo-style indexing by finding all unspent UTxOs containing assets under a specific minting policy:
-- Supports matching by `policy_id` alone (wildcard asset name) or exact `policy_id` + `asset_name`. Asset names accept hex or literal UTF-8, up to 32 decoded bytes. Hex takes precedence: `AB` selects byte `0xab`; use `4142` to select the text `AB`. Whitespace in literal names is significant.
-- Returns a markdown table detailing UTxO reference (`tx_hash#index`), payment credential hash, lovelace balance, asset amount, asset fingerprint, and datum hash.
+Mirrors Kupo-style indexing by finding all unspent UTxOs containing assets under
+a specific minting policy:
+- Supports matching by `policy_id` alone (wildcard asset name) or exact
+  `policy_id` + `asset_name`. Asset names accept hex or literal UTF-8, up to 32
+  decoded bytes. Hex takes precedence: `AB` selects byte `0xab`; use `4142` to
+  select the text `AB`. Whitespace in literal names is significant.
+- Returns a markdown table detailing UTxO reference (`tx_hash#index`), payment
+  credential hash, lovelace balance, asset amount, asset fingerprint, and datum
+  hash.
 - Filters out spent outputs (`deleted_slot = 0`).
 
 #### `get_asset_info`
 Consolidates on-chain and off-chain asset intelligence into a unified profile:
-- **Cardano Token Registry**: Pulls off-chain name, ticker, description, website URL, and decimals from the synchronized token registry.
-- **On-Chain Circulation**: Aggregates total live unspent quantity and the count of holding UTxOs. This count is not a unique wallet or address count. When more than 50,000 live asset rows match, the tool returns an incomplete-result error instead of partial totals.
-- **Mint / Burn History**: Shows initial mint transaction hash, slot, and total minted/burned quantity.
-- **CIP-25 NFT Metadata**: Returns sanitized, JSON-quoted text from transaction label 721 when available; the result is marked as untrusted data.
+- **Cardano Token Registry**: Pulls off-chain name, ticker, description, website
+  URL, and decimals from the synchronized token registry.
+- **On-Chain Circulation**: Aggregates total live unspent quantity and the count
+  of holding UTxOs. This count is not a unique wallet or address count. When
+  more than 50,000 live asset rows match, the tool returns an incomplete-result
+  error instead of partial totals.
+- **Mint / Burn History**: Shows initial mint transaction hash, slot, and total
+  minted/burned quantity.
+- **CIP-25 NFT Metadata**: Returns sanitized, JSON-quoted text from transaction
+  label 721 when available; the result is marked as untrusted data.
 
 ### Conway CIP-1694 Governance
 
 #### `get_governance_state`
 Inspects on-chain governance state introduced in the Conway era:
-- **Constitution**: Anchor URL, 32-byte anchor hash, script hash, and slot ratified.
-- **Constitutional Committee**: Voting quorum threshold (e.g. `2/3`), cold credential hashes, term start slot, and expiration epoch.
-- **Delegated Representatives (DReps)**: Active registered DRep counts, activity and expiry epochs. If `drep_credential` is specified (in Bech32 `drep1...` or hex), inspects that specific DRep's registration anchor and status.
+- **Constitution**: Anchor URL, 32-byte anchor hash, script hash, and slot
+  ratified.
+- **Constitutional Committee**: Voting quorum threshold (e.g. `2/3`), cold
+  credential hashes, term start slot, and expiration epoch.
+- **Delegated Representatives (DReps)**: Active registered DRep counts, activity
+  and expiry epochs. If `drep_credential` is specified (in Bech32 `drep1...` or
+  hex), inspects that specific DRep's registration anchor and status.
 
 #### `get_governance_proposal`
-Queries submitted CIP-1694 governance proposals from the SQLite indexer and tallies live votes:
-- **Filtering Options**: Filter by separate `tx_hash` and `action_index` parameters or governance lifecycle status:
+Queries submitted CIP-1694 governance proposals from the SQLite indexer and
+tallies live votes:
+- **Filtering Options**: Filter by separate `tx_hash` and `action_index`
+  parameters or governance lifecycle status:
   - `active`: Currently undergoing voting in the current voting window.
   - `ratified`: Passed vote thresholds and approved for enactment.
   - `enacted`: Executed on-chain across epoch boundaries.
   - `expired`: Dropped without passing required quorum.
   - `all`: Unfiltered inspection.
-- **Live Multi-Role Voting Breakdown**: Automatically counts and tallies votes across:
+- **Live Multi-Role Voting Breakdown**: Automatically counts and tallies votes
+  across:
   - **Constitutional Committee (CC)**: Yes / No / Abstain counts.
   - **Delegated Representatives (DReps)**: Yes / No / Abstain counts.
   - **Stake Pool Operators (SPOs)**: Yes / No / Abstain counts.
-- **Proposal Metadata**: Displays proposal action type (e.g. `ParameterChange`, `HardForkInitiation`, `TreasuryWithdrawals`, `InfoAction`), Lovelace deposit, return address, submission slot, and anchor URL/hash.
+- **Proposal Metadata**: Displays proposal action type (e.g. `ParameterChange`,
+  `HardForkInitiation`, `TreasuryWithdrawals`, `InfoAction`), Lovelace deposit,
+  return address, submission slot, and anchor URL/hash.
 
 ### Stake Pool Operator (SPO) Performance
 
 #### `get_pool_performance`
 Provides historical staking and rewards analytics for any stake pool:
 - Accepts pool ID in Bech32 format (`pool1...`) or 56-character hex hash.
-- Displays recorded blocks, delegated stake and pledge (lovelace), fixed cost (lovelace), margin, apparent performance ratio, and reward totals per epoch.
-- Allows filtering by a specific epoch or viewing recent epochs (`limit` defaults to 10 and is capped at 50).
+- Displays recorded blocks, delegated stake and pledge (lovelace), fixed cost
+  (lovelace), margin, apparent performance ratio, and reward totals per epoch.
+- Allows filtering by a specific epoch or viewing recent epochs (`limit`
+  defaults to 10 and is capped at 50).
 
 ### Plutus Smart Contract & DevOps Tools
 
 #### `resolve_datum_or_script`
 Resolves 28-byte script hashes or 32-byte datum hashes stored on-chain:
-- For **Datums**: Decodes raw Plutus CBOR data into structured JSON, displaying constructor tags, fields, and the slot it was added.
-- For **Scripts**: Identifies script type (`Native / MultiSig`, `PlutusV1`, `PlutusV2`, `PlutusV3`), size in bytes, and slot created.
-- **Coverage**: Core mode does not populate the API-mode datum, script, or redeemer detail indexes. API mode indexes details from transactions it processes; available and retained history still limits results. Dingo rejects switching an existing core-mode database to API mode in place, so use a separate API-mode database when these indexes are required. An empty table or missing hash is not evidence that the blockchain has no such data. SQL failures are reported as query errors, separately from missing rows.
+- For **Datums**: Decodes raw Plutus CBOR data into structured JSON, displaying
+  constructor tags, fields, and the slot it was added.
+- For **Scripts**: Identifies script type (`Native / MultiSig`, `PlutusV1`,
+  `PlutusV2`, `PlutusV3`), size in bytes, and slot created.
+- **Coverage**: Core mode does not populate the API-mode datum, script, or
+  redeemer detail indexes. API mode indexes details from transactions it
+  processes; available and retained history still limits results. Dingo rejects
+  switching an existing core-mode database to API mode in place, so use a
+  separate API-mode database when these indexes are required. An empty table or
+  missing hash is not evidence that the blockchain has no such data. SQL
+  failures are reported as query errors, separately from missing rows.
 
 #### `evaluate_tx`
-Dry-runs a signed or unsigned transaction against Dingo's active ledger state and protocol parameters without broadcasting it to the network:
-- Computes exact **CPU steps** and **Memory units** consumed by each Plutus redeemer.
-- Formats results in a clean markdown breakdown table indexed by redeemer purpose (`spend`, `mint`, `cert`, `reward`, `voting`, `proposing`, `guarding`) and index.
+Dry-runs a signed or unsigned transaction against Dingo's active ledger state
+and protocol parameters without broadcasting it to the network:
+- Computes exact **CPU steps** and **Memory units** consumed by each Plutus
+  redeemer.
+- Formats results in a clean markdown breakdown table indexed by redeemer
+  purpose (`spend`, `mint`, `cert`, `reward`, `voting`, `proposing`, `guarding`)
+  and index.
 - Calculates total estimated Plutus script execution fee.
-- If evaluation fails (e.g. Phase-2 validation failure or missing input UTxO), returns structured diagnostic guidance for the agent to recommend fixes.
+- If evaluation fails (e.g. Phase-2 validation failure or missing input UTxO),
+  returns structured diagnostic guidance for the agent to recommend fixes.
 
 ### Read-Only Query Guardrails
 
 The `sqlite_query` tool strictly verifies queries before execution:
-- SELECT and VALUES reads, including recursive CTEs, are permitted. The main statement after WITH must be a read. EXPLAIN and EXPLAIN QUERY PLAN can inspect ordinary SQL, including DDL and DML, without executing the statement.
+- SELECT and VALUES reads, including recursive CTEs, are permitted. The main
+  statement after WITH must be a read. EXPLAIN and EXPLAIN QUERY PLAN can
+  inspect ordinary SQL, including DDL and DML, without executing the statement.
 - Multi-statement execution (semicolons separating queries) is blocked.
-- Executable mutations are rejected. Metadata PRAGMAs `table_info`, `index_list`, `index_info`, and `foreign_key_list` are allowed and paginated during row iteration. Other PRAGMAs, including `EXPLAIN PRAGMA query_only=OFF`, are rejected.
+- Executable mutations are rejected. Metadata PRAGMAs `table_info`,
+  `index_list`, `index_info`, and `foreign_key_list` are allowed and paginated
+  during row iteration. Other PRAGMAs, including `EXPLAIN PRAGMA
+  query_only=OFF`, are rejected.
 
 ---
 
@@ -799,7 +971,11 @@ MCP Resources allow LLMs to passively read context without invoking functions:
 
 ## 13. Prompts Reference (Official Agent Workflows)
 
-Dingo implements official agent workflows natively in Go using the Model Context Protocol prompts capability (`prompts/list` and `prompts/get`). These workflows package domain-expert Cardano diagnostic and forensic procedures into standardized prompt templates that AI clients and CLI inspectors can execute interactively.
+Dingo implements official agent workflows natively in Go using the Model Context
+Protocol prompts capability (`prompts/list` and `prompts/get`). These workflows
+package domain-expert Cardano diagnostic and forensic procedures into
+standardized prompt templates that AI clients and CLI inspectors can execute
+interactively.
 
 | Prompt | Title | Key Arguments | Target Persona & Workflow Protocol |
 | :--- | :--- | :--- | :--- |

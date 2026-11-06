@@ -49,24 +49,6 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-// txInfoConcurrency bounds how many /tx_info batch requests
-// flushPendingTxInfos has in flight at once -- matches
-// koios_check.go's stakeCheckConcurrency: confirmed live against the same
-// Koios mirror that individual requests stall often enough (not just a
-// rare one-off) that sequential batches stack their stalls additively
-// (e.g. 3 stalled batches in one epoch costing 3x a single stall's
-// latency). Concurrency lets independent batches overlap instead.
-const txInfoConcurrency = 8
-
-// txInfoOpportunisticFlushThreshold is how many hashes accumulate before
-// flushPendingTxInfos is called mid-epoch (a forced flush still always
-// happens right before each epoch-boundary comparison regardless of this
-// threshold -- see that call site). Sized to give the concurrent flush
-// below a full set of batches to fan out, rather than flushing a single
-// koiosparity.KoiosTxInfoBatchSize-sized batch at a time with nothing to
-// parallelize.
-const txInfoOpportunisticFlushThreshold = txInfoConcurrency * koiosparity.KoiosTxInfoBatchSize
-
 // txInfoIndexWaits is the wait before each round that fetches again the
 // /tx_info chunks Koios had no result for. Following the tip, Dingo serves a
 // block before Koios has indexed it: on preprod a flush at the tip failed on
@@ -139,8 +121,22 @@ func keepNtCConnAlive(
 	}
 }
 
-// fetchTxInfoChunks fetches every chunk with at most txInfoConcurrency
-// requests in flight, then, after each wait in waits, fetches again each
+// txInfoFlushRounds is how many rounds of concurrent /tx_info requests a
+// mid-epoch flush holds. A flush waits for its slowest request before the
+// chain is read further, so with a single round one stalled request leaves
+// every other slot idle; measured on mainnet at 250 hashes and 4 requests in
+// flight, single-round flushes fetched about half of what the same Koios host
+// answered with requests kept in flight.
+const txInfoFlushRounds = 4
+
+// txInfoFlushThreshold is how many hashes accumulate before a mid-epoch
+// flush.
+func txInfoFlushThreshold(koios *koiosparity.KoiosClient) int {
+	return txInfoFlushRounds * koios.TxInfoConcurrency() * koios.TxInfoBatchSize()
+}
+
+// fetchTxInfoChunks fetches every chunk with at most concurrency requests
+// in flight, then, after each wait in waits, fetches again each
 // chunk that failed with koiosparity.ErrTxInfoMissing, or with any failure
 // that is not koiosparity.ErrKoiosPermanent when retryTransient is set. A
 // chunk is fetched whole every time, so a result is only ever a complete
@@ -152,6 +148,7 @@ func keepNtCConnAlive(
 func fetchTxInfoChunks(
 	ctx context.Context,
 	chunks [][]string,
+	concurrency int,
 	fetch func(context.Context, []string) ([]koiosparity.KoiosTxInfoItem, error),
 	waits []time.Duration,
 	retryTransient bool,
@@ -162,7 +159,7 @@ func fetchTxInfoChunks(
 	errs := make([]error, len(chunks))
 	fetchAll := func(indexes []int) error {
 		var g errgroup.Group
-		g.SetLimit(txInfoConcurrency)
+		g.SetLimit(concurrency)
 		for _, i := range indexes {
 			g.Go(func() error {
 				results[i], errs[i] = fetch(ctx, chunks[i])
@@ -1127,6 +1124,10 @@ func RunFromGenesis(
 		return 0, false, err
 	}
 
+	// One flush always runs before each epoch-boundary comparison regardless
+	// of the threshold.
+	flushThreshold := txInfoFlushThreshold(koios)
+
 	// flushPendingTxInfos applies every buffered transaction hash's
 	// input/output changes to utxoRefs. Hashes accumulate across blocks
 	// rather than being fetched per block: the cost of a /tx_info lookup is
@@ -1134,8 +1135,8 @@ func RunFromGenesis(
 	// per block with a transaction in it collapses a run's epoch cadence
 	// from seconds to tens of minutes once chain activity picks up.
 	//
-	// Splits pendingTxHashes into koiosparity.KoiosTxInfoBatchSize-sized
-	// chunks and fetches them with bounded concurrency (txInfoConcurrency)
+	// Splits pendingTxHashes into chunks of the Koios client's
+	// TxInfoBatchSize and fetches them with its TxInfoConcurrency in flight
 	// rather than one at a time: confirmed live that individual requests to
 	// this Koios mirror stall often enough that sequential batches stack
 	// their stalls additively (multiple ~20s-60s stalls in a single busy
@@ -1175,14 +1176,15 @@ func RunFromGenesis(
 		if utxoRefs == nil || len(pendingTxHashes) == 0 {
 			return nil
 		}
-		chunks := make([][]string, 0, (len(pendingTxHashes)+koiosparity.KoiosTxInfoBatchSize-1)/koiosparity.KoiosTxInfoBatchSize)
-		for start := 0; start < len(pendingTxHashes); start += koiosparity.KoiosTxInfoBatchSize {
-			end := min(start+koiosparity.KoiosTxInfoBatchSize, len(pendingTxHashes))
+		batch := koios.TxInfoBatchSize()
+		chunks := make([][]string, 0, (len(pendingTxHashes)+batch-1)/batch)
+		for start := 0; start < len(pendingTxHashes); start += batch {
+			end := min(start+batch, len(pendingTxHashes))
 			chunks = append(chunks, pendingTxHashes[start:end])
 		}
 		flushStart := time.Now()
 		results, errs, err := fetchTxInfoChunks(
-			sessionCtx, chunks,
+			sessionCtx, chunks, koios.TxInfoConcurrency(),
 			func(
 				ctx context.Context, chunk []string,
 			) ([]koiosparity.KoiosTxInfoItem, error) {
@@ -1416,7 +1418,7 @@ func RunFromGenesis(
 									pendingTxHashes, tx.Hash().String(),
 								)
 							}
-							if len(pendingTxHashes) >= txInfoOpportunisticFlushThreshold {
+							if len(pendingTxHashes) >= flushThreshold {
 								if err := flushPendingTxInfos(
 									sessionCtx, point,
 								); err != nil {
