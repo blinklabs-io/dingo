@@ -56,6 +56,7 @@ func sqlcHotQueries() []string {
 	return []string{
 		sqlitequery.GetAccountByCredentialQuery,
 		sqlitequery.GetActiveAccountByCredentialQuery,
+		sqlitequery.GetSyncStateQuery,
 		sqlitequery.SetTipQuery,
 		sqlitequery.SetBlockNonceQuery,
 	}
@@ -140,7 +141,7 @@ func TestHotStatementsAreRecordedUnderTheirName(t *testing.T) {
 		))
 	}
 	for _, want := range []struct{ op, name string }{
-		{"insert", "InsertTransactionIfAbsent"},
+		{"insert", "InsertTransactionIfAbsentResult"},
 		{"update", "UpdateTransactionOnConflict"},
 		{"select", "GetTransactionIDOnConflict"},
 		{"update", "ConsumeUtxoReturningStake"},

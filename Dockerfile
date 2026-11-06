@@ -8,6 +8,11 @@ ENV COMMIT_HASH=${COMMIT_HASH}
 WORKDIR /code
 RUN go env -w GOCACHE=/go-cache
 RUN go env -w GOMODCACHE=/gomod-cache
+# A comma after a proxy falls back to the next entry only on a 404 or 410, so
+# a dropped proxy connection fails the download outright. A pipe falls back
+# on any error; go.sum still verifies what a direct fetch returns.
+ARG GOPROXY="https://proxy.golang.org|direct"
+ENV GOPROXY=${GOPROXY}
 COPY go.* .
 RUN go mod download
 COPY . .
@@ -62,8 +67,8 @@ RUN printf 'Acquire::Retries "8";\nAcquire::http::Timeout "30";\n' \
     > /etc/apt/apt.conf.d/80-retries && \
   use_snapshot() { \
     sed -i \
-      -e 's|http://deb.debian.org/debian-security|http://snapshot.debian.org/archive/debian-security/20261020T000000Z|g' \
-      -e 's|http://deb.debian.org/debian|http://snapshot.debian.org/archive/debian/20261020T000000Z|g' \
+      -e 's|http://deb.debian.org/debian-security|http://snapshot.debian.org/archive/debian-security/20261027T000000Z|g' \
+      -e 's|http://deb.debian.org/debian|http://snapshot.debian.org/archive/debian/20261027T000000Z|g' \
       /etc/apt/sources.list.d/debian.sources; \
   } && \
   use_mirror() { \
@@ -83,7 +88,7 @@ RUN printf 'Acquire::Retries "8";\nAcquire::http::Timeout "30";\n' \
     }; \
   } && \
   pinned_install --no-install-recommends \
-    ca-certificates=20250419~deb12u1 \
+    ca-certificates=20250419~deb12u2 \
     wget=1.21.3-1+deb12u1 && \
   arch="$(dpkg --print-architecture)" && \
   case "$arch" in \
@@ -111,10 +116,10 @@ RUN printf 'Acquire::Retries "8";\nAcquire::http::Timeout "30";\n' \
     a4e2461975abffae23688fc95c4fdc97fea4c4c9cc096c2c4a7a4e334dfc3353 "/tmp/${common_deb}" \
     | sha256sum --check --strict - && \
   pinned_install \
-    ca-certificates=20250419~deb12u1 \
+    ca-certificates=20250419~deb12u2 \
     default-mysql-client=1.1.0 \
     liblmdb0=0.9.24-1 \
-    libssl3=3.0.22-1~deb12u1 \
+    libssl3=3.0.22-1~deb12u2 \
     sqlite3=3.40.1-2+deb12u2 \
     "/tmp/${libpq_deb}" \
     "/tmp/${common_deb}" \
@@ -185,8 +190,8 @@ FROM dingo AS antithesis
 USER root
 RUN use_snapshot() { \
     sed -i \
-      -e 's|http://deb.debian.org/debian-security|http://snapshot.debian.org/archive/debian-security/20261020T000000Z|g' \
-      -e 's|http://deb.debian.org/debian|http://snapshot.debian.org/archive/debian/20261020T000000Z|g' \
+      -e 's|http://deb.debian.org/debian-security|http://snapshot.debian.org/archive/debian-security/20261027T000000Z|g' \
+      -e 's|http://deb.debian.org/debian|http://snapshot.debian.org/archive/debian/20261027T000000Z|g' \
       /etc/apt/sources.list.d/debian.sources; \
   } && \
   use_mirror() { \

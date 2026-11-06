@@ -15,6 +15,7 @@
 package uplcconformance
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -70,7 +71,6 @@ type TurboBenchmark struct {
 }
 
 type turboSample struct {
-	duration           time.Duration
 	evaluationDuration time.Duration
 	flatDuration       time.Duration
 	memBytes           uint64
@@ -87,7 +87,9 @@ type turboCase struct {
 
 // GenerateTurboReport measures flat UPLC programs. Memory is measured as Go
 // heap allocation during evaluation; this captures the evaluator's arena
-// growth and other evaluation allocations while excluding Flat decoding.
+// growth and other evaluation allocations while excluding Flat decoding and
+// structural preparation. Evaluation uses the production ledger path, which
+// does not materialize the resulting closure or data as a standalone term.
 //
 // A positive maxPrograms measures an evenly spaced, name-ordered subset of
 // that size, so the selection is the same on every run; zero measures the
@@ -320,19 +322,24 @@ func measureTurboCase(
 			return nil, fmt.Errorf("decode Flat program: %w", err)
 		}
 		decodeDuration := time.Since(decodeStart)
+		prepared, err := cek.PrepareDecodedProgram(program, syn.ProgramContext{
+			LedgerLanguage: tc.version,
+			ProtocolMajor:  uint(tc.protocolMajor),
+		})
+		if err != nil {
+			return nil, fmt.Errorf("prepare Flat program: %w", err)
+		}
 		var before, after runtime.MemStats
 		runtime.ReadMemStats(&before)
 		initial := cek.ExBudget{Cpu: math.MaxInt64, Mem: math.MaxInt64}
 		machine.ExBudget = initial
 		evaluationStart := time.Now()
-		if _, err := machine.Run(program.Term); err != nil {
+		if _, err := cek.RunPreparedScriptContext(context.Background(), machine, prepared); err != nil {
 			return nil, fmt.Errorf("evaluate Flat program: %w", err)
 		}
 		evaluationDuration := time.Since(evaluationStart)
-		duration := decodeDuration + evaluationDuration
 		runtime.ReadMemStats(&after)
 		measurements = append(measurements, turboSample{
-			duration:           duration,
 			evaluationDuration: evaluationDuration,
 			flatDuration:       decodeDuration,
 			memBytes:           after.TotalAlloc - before.TotalAlloc,
@@ -391,7 +398,7 @@ func bestTurboSamples(samples []turboSample) []turboSample {
 	}
 	best := append([]turboSample(nil), samples...)
 	sort.SliceStable(best, func(i, j int) bool {
-		return best[i].duration < best[j].duration
+		return best[i].evaluationDuration < best[j].evaluationDuration
 	})
 	return best[:turboBestSamples]
 }
