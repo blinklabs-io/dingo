@@ -544,22 +544,21 @@ func ValidateTxDijkstra(
 	return semanticRuleValidationErrorFor(validatePlutusOutcome(tx, phase2Err))
 }
 
-func dijkstraTransactionHasRedeemers(tx lcommon.Transaction) bool {
-	hasRedeemers := func(witness lcommon.TransactionWitnessSet) bool {
-		if witness != nil && witness.Redeemers() != nil {
-			for range witness.Redeemers().Iter() {
-				return true
-			}
+func transactionWitnessSetHasRedeemers(witness lcommon.TransactionWitnessSet) bool {
+	if witness != nil && witness.Redeemers() != nil {
+		for range witness.Redeemers().Iter() {
+			return true
 		}
-		return false
 	}
-	if hasRedeemers(tx.Witnesses()) {
-		return true
-	}
-	return slices.ContainsFunc(
-		lcommon.SubTransactionWitnessSetsFromTransaction(tx),
-		hasRedeemers,
-	)
+	return false
+}
+
+func dijkstraTransactionHasRedeemers(tx lcommon.Transaction) bool {
+	return transactionWitnessSetHasRedeemers(tx.Witnesses()) ||
+		slices.ContainsFunc(
+			lcommon.SubTransactionWitnessSetsFromTransaction(tx),
+			transactionWitnessSetHasRedeemers,
+		)
 }
 
 // validateDijkstraPhase2 is a test seam: production always resolves to
@@ -892,15 +891,9 @@ func validateDijkstraPlutusV4ReferenceInputOverlap(
 }
 
 func dijkstraLevelsHaveRedeemers(levels []dijkstraPlutusScriptLevel) bool {
-	for _, level := range levels {
-		if level.witnesses == nil || level.witnesses.Redeemers() == nil {
-			continue
-		}
-		for range level.witnesses.Redeemers().Iter() {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(levels, func(level dijkstraPlutusScriptLevel) bool {
+		return transactionWitnessSetHasRedeemers(level.witnesses)
+	})
 }
 
 func resolveDijkstraScriptLevelInputs(
