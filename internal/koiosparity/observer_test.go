@@ -1311,37 +1311,6 @@ func TestObserverCancellationStopsPromptly(t *testing.T) {
 	require.NoError(t, o.Stop(stopCtx))
 }
 
-// TestObserverStopIsIdempotent confirms Stop can be called more than once on
-// the same Observer instance without panicking. This models a real
-// double-invocation: node.go's own started-stack cleanup calls Stop() on a
-// startup failure that occurs after the koios-parity observer has already
-// been started but before Run() finishes, and node_shutdown.go's shutdown()
-// (the normal shutdown path, e.g. via Node.Stop() or a signal) independently
-// calls Stop() again on the same instance. Stop() must not close an owned
-// "done" channel unconditionally -- doing so panics on the second call with
-// "close of closed channel".
-func TestObserverStopIsIdempotent(t *testing.T) {
-	t.Parallel()
-
-	db := newTestDatabaseSourceDB(t)
-	source, err := NewDatabaseSource(db)
-	require.NoError(t, err)
-
-	o, err := NewObserver(ObserverConfig{
-		Network:   "preview",
-		CachePath: filepath.Join(t.TempDir(), "cache.db"),
-		Source:    source,
-		Logger:    slog.New(slog.DiscardHandler),
-	})
-	require.NoError(t, err)
-	require.NoError(t, o.Start(context.Background()))
-
-	require.NotPanics(t, func() {
-		require.NoError(t, o.Stop(context.Background()))
-		require.NoError(t, o.Stop(context.Background()))
-	}, "Stop must be safe to call more than once on the same Observer")
-}
-
 // TestObserverConcurrentStopCallsDoNotPanic exercises the same double
 // invocation but from two goroutines racing each other, matching the actual
 // shape of the regression: node.go's started-stack cleanup (on a startup
