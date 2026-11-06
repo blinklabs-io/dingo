@@ -15,6 +15,7 @@
 package ledgerstate
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -834,7 +835,7 @@ func TestParseSnapshotBytesParsesWhatTheCallerHolds(t *testing.T) {
 	}
 }
 
-func TestSnapshotFileReadersRejectOversizedStateBeforeAllocation(t *testing.T) {
+func TestSnapshotFileReadersRejectOversizedState(t *testing.T) {
 	// Not t.Parallel: this lowers the package-wide byte-limit test seam.
 	oldLimit := ledgerStateSnapshotByteLimit
 	ledgerStateSnapshotByteLimit = 4
@@ -896,6 +897,32 @@ func TestSnapshotFileReadersRejectOversizedStateBeforeAllocation(t *testing.T) {
 				t.Fatalf("expected size-limit error, got %v", err)
 			}
 		})
+	}
+}
+
+func TestReadSnapshotFileStartsAtBeginning(t *testing.T) {
+	t.Parallel()
+
+	want := []byte("ledger state")
+	path := filepath.Join(t.TempDir(), "state")
+	if err := os.WriteFile(path, want, 0o600); err != nil {
+		t.Fatalf("writing state file: %s", err)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("opening state file: %s", err)
+	}
+	defer file.Close()
+	if _, err := file.Seek(3, io.SeekStart); err != nil {
+		t.Fatalf("advancing state file: %s", err)
+	}
+
+	got, err := ReadSnapshotFile(file)
+	if err != nil {
+		t.Fatalf("reading state file: %s", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("got %q, want %q", got, want)
 	}
 }
 

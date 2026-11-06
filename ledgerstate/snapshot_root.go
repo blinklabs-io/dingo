@@ -569,13 +569,16 @@ func openUTxOHDSnapshot(
 	return files, nil
 }
 
-// ReadSnapshotFile reads an already-open ledger-state file into one bounded
-// buffer. The caller closes f.
+// ReadSnapshotFile reads an already-open ledger-state file from its beginning
+// into one bounded buffer. The caller closes f.
 func ReadSnapshotFile(f *os.File) ([]byte, error) {
 	return readSnapshotFile(f, ledgerStateSnapshotByteLimit)
 }
 
 func readSnapshotFile(f *os.File, maxBytes int64) ([]byte, error) {
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return nil, fmt.Errorf("seeking snapshot file: %w", err)
+	}
 	info, err := f.Stat()
 	if err != nil {
 		return nil, fmt.Errorf("stating snapshot file: %w", err)
@@ -587,6 +590,13 @@ func readSnapshotFile(f *os.File, maxBytes int64) ([]byte, error) {
 }
 
 func readSnapshotFileAtSize(f *os.File, size int64) ([]byte, error) {
+	if size < 0 || uint64(size) > uint64(^uint(0)>>1) {
+		return nil, fmt.Errorf(
+			"%w: %d bytes cannot fit in a memory buffer",
+			ErrLedgerStateSnapshotTooLarge,
+			size,
+		)
+	}
 	data := make([]byte, int(size))
 	if _, err := io.ReadFull(f, data); err != nil {
 		return nil, fmt.Errorf("reading snapshot file: %w", err)
