@@ -317,12 +317,13 @@ func isLedgerStateFile(name string) bool {
 // the OS page cache as the backing store rather than allocating a
 // separate heap buffer.
 func ParseSnapshot(path string) (*RawLedgerState, error) {
-	data, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("reading snapshot file: %w", err)
 	}
+	defer f.Close()
 
-	return parseSnapshotData(data)
+	return ParseSnapshotFile(f)
 }
 
 // parseSnapshotData decodes the snapshot CBOR data. It handles both

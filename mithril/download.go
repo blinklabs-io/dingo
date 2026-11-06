@@ -1619,6 +1619,9 @@ func extractArchiveFile(
 				err,
 			)
 		}
+		if err := rejectSparseMember(header); err != nil {
+			return "", err
+		}
 
 		if err := entryCounter.reserveHeader(); err != nil {
 			return "", err

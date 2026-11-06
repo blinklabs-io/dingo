@@ -10459,7 +10459,10 @@ future network blocks.
 Archive extraction counts decompressed bytes beneath Go's tar reader against a
 bootstrap-wide budget; ancillary preflight has a per-archive stream limit. Both
 readers check cancellation on each read, so metadata and skipped member bodies
-count toward these limits.
+count toward these limits. Both readers reject GNU and PAX sparse members as
+soon as the tar header is decoded: Go's tar reader synthesizes sparse holes
+above the compressed-stream accounting, so accepting them would make the
+reported expanded-byte and cancellation boundaries incomplete.
 
 The post-download ImmutableDB copy completes before ledger-state import starts.
 The copy persists block and transaction metadata as well as block blobs, so it
@@ -10670,7 +10673,11 @@ first pass decompresses without writing, finds the manifest, validates its
 Ed25519 signature, and rejects unsupported paths or malformed digests. The
 second pass admits only the manifest, its signed files, and their parent
 directories; it checks every digest while writing. The ordinary post-extraction
-verification still binds the resulting directory handle to the importer.
+verification still binds the resulting directory handle to the importer. The
+encoded ledger-state file is limited to 1 GiB before it is read into memory and
+again before parsing. UTxO-HD table files are not subject to that bound: they
+remain separate, signed files and are mapped and decoded separately rather than
+copied into the ledger-state buffer.
 
 All v2 extractions share a one-million-entry and 1 TiB expanded-byte ceiling,
 further reduced to the filesystem's available space minus the larger of 1 GiB
