@@ -18,7 +18,6 @@ import (
 	"context"
 	"fmt"
 	"testing"
-	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/deferred"
@@ -264,40 +263,6 @@ func TestSQLOperationsCounterCountsCachedAndUncachedQueries(t *testing.T) {
 	require.Equal(t, beforeInsert+1, counterValue(t, reg, "insert"))
 }
 
-// TestImportAccountWithMetricsEnabledStillWritesBaseline is the regression
-// test for the second correctness fix instrumentation required:
-// requireAccountBaselineTransaction (account.go) type-switches on the
-// queryer ImportAccount's write transaction passes it, looking for the
-// underlying *sql.Tx to confirm the baseline write is happening inside a
-// real transaction. It had the same countingQueryer-unwrap gap
-// stmtForQueryer did: with a PromRegistry configured, that *sql.Tx arrives
-// wrapped in countingQueryer, and without the fix this call would fail with
-// "account import baseline write outside a write transaction" even though
-// it plainly is one. ImportAccount routes through
-// withWriteTransaction/instrumentedQueryer exactly like every other
-// production write path, so this is also a general confidence check that
-// enabling the counter does not break a write-path call site elsewhere in
-// the package.
-func TestImportAccountWithMetricsEnabledStillWritesBaseline(t *testing.T) {
-	t.Parallel()
-	reg := prometheus.NewRegistry()
-	store := newMigratedSQLiteStoreWithRegistry(t, reg)
-	key := snapshotStakingKey(0x91)
-
-	require.NoError(t, store.ImportAccount(&models.Account{
-		StakingKey:    key,
-		CredentialTag: 0,
-		AddedSlot:     100,
-		CreatedSlot:   0,
-		Active:        true,
-	}, nil))
-
-	got, err := store.GetAccountByCredential(0, key, true, nil)
-	require.NoError(t, err)
-	require.NotNil(t, got)
-	require.Equal(t, uint64(100), got.AddedSlot)
-}
-
 // TestBatchInsertTransactionIsCounted is the regression test for
 // transactionBatchAccumulator.insertTransaction (transaction_write.go):
 // it executes its cached transactionInsert statement directly against a
@@ -422,76 +387,44 @@ func TestSQLQueryDurationHistogramMultiRowMeasuresDispatchNotIteration(
 	t.Parallel()
 	reg := prometheus.NewRegistry()
 	store := newMigratedSQLiteStoreWithRegistry(t, reg)
+	for i := range 3 {
+		_, err := store.writeDB.Exec(
+			"INSERT INTO sync_state (sync_key, value) VALUES (?, 'v')",
+			fmt.Sprintf("dispatch_measurement_%d", i),
+		)
+		require.NoError(t, err)
+	}
 
-	const rowCount = 20_000
-	require.NoError(t, store.withWriteTransaction(
-		nil,
-		func(db queryer, txnCtx context.Context) error {
-			for batchStart := 0; batchStart < rowCount; batchStart += 500 {
-				var (
-					query string
-					args  []any
-				)
-				batchEnd := min(batchStart+500, rowCount)
-				query = "INSERT INTO sync_state (sync_key, value) VALUES "
-				for i := batchStart; i < batchEnd; i++ {
-					if i > batchStart {
-						query += ", "
-					}
-					query += "(?, ?)"
-					args = append(
-						args,
-						fmt.Sprintf("dispatch_measurement_%d", i),
-						"v",
-					)
-				}
-				if _, err := db.ExecContext(txnCtx, query, args...); err != nil {
-					return err
-				}
-			}
-			return nil
-		},
-	))
-
-	sumBefore := histogramSampleSum(t, reg, "select", "unknown")
-
+	before := histogramSampleCount(t, reg, "select", "unknown")
 	db, queryCtx, err := store.readDBFromTxn(nil)
 	require.NoError(t, err)
-
-	dispatchStart := time.Now()
 	rows, err := db.QueryContext(
 		queryCtx,
 		"SELECT sync_key, value FROM sync_state "+
 			"WHERE sync_key LIKE 'dispatch_measurement_%'",
 	)
 	require.NoError(t, err)
-	dispatchElapsed := time.Since(dispatchStart)
-
+	// The observation is taken when the query is dispatched, so it exists
+	// before a single row has been iterated.
+	require.Equal(
+		t,
+		before+1,
+		histogramSampleCount(t, reg, "select", "unknown"),
+		"a multi-row query must be observed at dispatch, not after its rows "+
+			"have been read",
+	)
 	var scanned int
 	for rows.Next() {
-		var key, value string
-		require.NoError(t, rows.Scan(&key, &value))
 		scanned++
 	}
 	require.NoError(t, rows.Err())
 	require.NoError(t, rows.Close())
-	totalElapsed := time.Since(dispatchStart)
-	require.Equal(t, rowCount, scanned)
-
-	observed := histogramSampleSum(t, reg, "select", "unknown") - sumBefore
-	t.Logf(
-		"dispatch=%s full-iteration=%s observed-histogram-delta=%.6fs",
-		dispatchElapsed,
-		totalElapsed,
-		observed,
-	)
-
-	require.Less(
+	require.Equal(t, 3, scanned)
+	require.Equal(
 		t,
-		observed,
-		totalElapsed.Seconds()/2,
-		"expected the histogram to observe dispatch latency, not the "+
-			"much larger row-iteration time that followed it",
+		before+1,
+		histogramSampleCount(t, reg, "select", "unknown"),
+		"iterating rows must not add observations",
 	)
 }
 

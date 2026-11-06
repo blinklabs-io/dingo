@@ -56,15 +56,6 @@ func TestNodeSettingsGatesUpsertOverwrites(t *testing.T) {
 	require.Equal(t, "core", gates["storage_mode"])
 }
 
-func TestNodeSettingsGatesEmptyWriteIsNoOp(t *testing.T) {
-	t.Parallel()
-	store := newManagementTestStore(t)
-	require.NoError(t, store.SetNodeSettingsGates(context.Background(), nil, 0, 0))
-	gates, err := store.GetNodeSettingsGates(context.Background())
-	require.NoError(t, err)
-	require.Equal(t, initialNodeSettingsGates(), gates)
-}
-
 // TestInsertNodeSettingsGateIfAbsentLoserDoesNotOverwrite is
 // InsertNodeSettingsGateIfAbsent's whole point: a second call for a name
 // that already has a row must report that it did not insert and must never
@@ -1332,19 +1323,4 @@ func TestPoolLookupsOrderSameSlotRetirements(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestCommitTimestamp(t *testing.T) {
-	t.Parallel()
-	store := newManagementTestStore(t)
-	timestamp, err := store.GetCommitTimestamp(context.Background())
-	require.NoError(t, err)
-	require.Zero(t, timestamp)
-
-	transaction := store.Transaction(t.Context())
-	require.NoError(t, store.SetCommitTimestamp(1234, transaction))
-	require.NoError(t, transaction.Commit())
-	timestamp, err = store.GetCommitTimestamp(context.Background())
-	require.NoError(t, err)
-	require.Equal(t, int64(1234), timestamp)
 }

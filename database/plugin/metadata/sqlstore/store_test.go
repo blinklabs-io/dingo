@@ -286,7 +286,7 @@ func TestRebuildRewardLiveStakeBatchesCredentials(t *testing.T) {
 	t.Parallel()
 	store := newManagementTestStore(t)
 	// More than one full upsert statement (32 rows) plus a partial one.
-	const count = 40
+	const count = 33
 	for index := range count {
 		account := &models.Account{
 			StakingKey:    []byte{0x42, byte(index >> 8), byte(index)},
