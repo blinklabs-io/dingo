@@ -1,6 +1,7 @@
 # Dingo Grafana Dashboards
 
-Monitoring dashboards for [Dingo](https://github.com/blinklabs-io/dingo), the Go Cardano node by Blink Labs.
+Monitoring dashboards for [Dingo](https://github.com/blinklabs-io/dingo), the Go
+Cardano node by Blink Labs.
 
 ## Dashboards
 
@@ -18,11 +19,20 @@ Monitoring dashboards for [Dingo](https://github.com/blinklabs-io/dingo), the Go
 
 Before you begin, make sure you have:
 
-- **Grafana 12+** (tested on 12.4) — [install guide](https://grafana.com/docs/grafana/latest/setup-grafana/installation/)
-- **Prometheus** scraping your Dingo node on port `12798` (configured in step 2 below)
-- **Dingo** node with metrics enabled (default port `12798`, bound to loopback; remote scraping sets `metricsBindAddr`, uses `metricsAuthToken`, and carries the plain HTTP listener through a TLS reverse proxy or authenticated encrypted tunnel)
-- **[Business Text plugin](https://grafana.com/grafana/plugins/marcusolsson-dynamictext-panel/)** — required by every dashboard except Traces and Logs for the header panel
-- **[prometheus-node-exporter](https://github.com/prometheus/node_exporter)** — required only by the Resource Usage dashboard for host-level CPU, memory, and disk metrics
+- **Grafana 12+** (tested on 12.4) — [install
+  guide](https://grafana.com/docs/grafana/latest/setup-grafana/installation/)
+- **Prometheus** scraping your Dingo node on port `12798` (configured in step 2
+  below)
+- **Dingo** node with metrics enabled (default port `12798`, bound to loopback;
+  remote scraping sets `metricsBindAddr`, uses `metricsAuthToken`, and carries
+  the plain HTTP listener through a TLS reverse proxy or authenticated encrypted
+  tunnel)
+- **[Business Text
+  plugin](https://grafana.com/grafana/plugins/marcusolsson-dynamictext-panel/)**
+  — required by every dashboard except Traces and Logs for the header panel
+- **[prometheus-node-exporter](https://github.com/prometheus/node_exporter)** —
+  required only by the Resource Usage dashboard for host-level CPU, memory, and
+  disk metrics
 
 ## Quick start
 
@@ -35,7 +45,8 @@ grafana-cli plugins install marcusolsson-dynamictext-panel
 sudo systemctl restart grafana-server
 ```
 
-If you are running Grafana in Docker or Kubernetes, set the environment variable instead:
+If you are running Grafana in Docker or Kubernetes, set the environment variable
+instead:
 
 ```text
 GF_INSTALL_PLUGINS=marcusolsson-dynamictext-panel
@@ -43,7 +54,8 @@ GF_INSTALL_PLUGINS=marcusolsson-dynamictext-panel
 
 ### 2. Configure Prometheus scrape targets
 
-Prometheus needs to know where to find your Dingo node. Add the following to your `prometheus.yml` under `scrape_configs`:
+Prometheus needs to know where to find your Dingo node. Add the following to
+your `prometheus.yml` under `scrape_configs`:
 
 ```yaml
 - job_name: dingo
@@ -70,7 +82,8 @@ There are two ways to get the dashboards into Grafana.
 
 **Option A: Provisioning (recommended)**
 
-Provisioning automatically loads dashboards from files on disk. Grafana will pick them up on startup or within about 30 seconds if already running.
+Provisioning automatically loads dashboards from files on disk. Grafana will
+pick them up on startup or within about 30 seconds if already running.
 
 ```bash
 sudo cp docs/dashboards/provisioning.yaml /etc/grafana/provisioning/dashboards/dingo.yaml
@@ -80,9 +93,12 @@ sudo chown -R grafana:grafana /var/lib/grafana/dashboards/dingo/
 sudo systemctl restart grafana-server
 ```
 
-After restarting, go to **Dashboards → Browse** in the Grafana UI and search for "Dingo". All seven dashboards appear in a **Dingo** folder automatically.
+After restarting, go to **Dashboards → Browse** in the Grafana UI and search for
+"Dingo". All seven dashboards appear in a **Dingo** folder automatically.
 
-**Note:** `allowUiUpdates: true` lets you edit dashboards in the Grafana UI, but changes will be overwritten on the next provision cycle (every 30 seconds). To make permanent edits, modify the JSON files directly.
+**Note:** `allowUiUpdates: true` lets you edit dashboards in the Grafana UI, but
+changes will be overwritten on the next provision cycle (every 30 seconds). To
+make permanent edits, modify the JSON files directly.
 
 **Option B: Manual import**
 
@@ -90,7 +106,8 @@ After restarting, go to **Dashboards → Browse** in the Grafana UI and search f
 2. Go to **Dashboards → New → Import**
 3. Upload each JSON file
 
-Dashboards other than Traces and Logs use your default Prometheus datasource automatically — see [Datasource](#datasource) below.
+Dashboards other than Traces and Logs use your default Prometheus datasource
+automatically — see [Datasource](#datasource) below.
 
 ### 4. Alert rules (optional)
 
@@ -130,20 +147,28 @@ sudo systemctl reload prometheus
 
 ## Datasource
 
-All dashboards except Traces and Logs reference their Prometheus datasource with UID `default`, Grafana's built-in alias for whichever datasource is currently marked as default. As long as you have a Prometheus datasource configured (and it's your only one, or you've marked it default under **Connections → Data sources**), the dashboards resolve it automatically — no UID renaming needed.
+All dashboards except Traces and Logs reference their Prometheus datasource with
+UID `default`, Grafana's built-in alias for whichever datasource is currently
+marked as default. As long as you have a Prometheus datasource configured (and
+it's your only one, or you've marked it default under **Connections → Data
+sources**), the dashboards resolve it automatically — no UID renaming needed.
 
 ## Template variables
 
-All dashboards include two template variables that auto-discover dingo instances:
+All dashboards include two template variables that auto-discover dingo
+instances:
 
 | Variable | Query | Purpose |
 |----------|-------|---------|
 | `$network` | `label_values(dingo_build_info, network)` | Selects the Cardano network (`preview`, `preprod`, `mainnet`). |
 | `$instance` | `label_values(dingo_build_info{network="$network"}, instance)` | Selects specific dingo instance(s). Multi-select with "All" default. |
 
-`dingo_build_info` is a metric only dingo exposes (includes `network`, `version`, `commit` labels). This ensures dropdowns show only dingo targets, never Haskell cardano-node.
+`dingo_build_info` is a metric only dingo exposes (includes `network`,
+`version`, `commit` labels). This ensures dropdowns show only dingo targets,
+never Haskell cardano-node.
 
-All panel queries use `{network="$network", instance=~"$instance"}` as their selector.
+All panel queries use `{network="$network", instance=~"$instance"}` as their
+selector.
 
 The **Resource Usage** dashboard adds a third variable:
 
@@ -151,15 +176,18 @@ The **Resource Usage** dashboard adds a third variable:
 |----------|-------|---------|
 | `$node_instance` | `label_values(node_uname_info, instance)` | Selects the node_exporter target for host-level metrics (CPU, memory, disk, network). node_exporter runs on a different port (default `9100`) from the dingo metrics port, so it needs its own instance dropdown. |
 
-Set `$node_instance` to the hostname/port reported by your node_exporter scrape target (typically `localhost:9100` or the host IP).
+Set `$node_instance` to the hostname/port reported by your node_exporter scrape
+target (typically `localhost:9100` or the host IP).
 
 ## Navigation
 
-Dashboard-level links at the top of each dashboard connect all 6 dashboards. Links preserve the selected time range and template variables.
+Dashboard-level links at the top of each dashboard connect all 6 dashboards.
+Links preserve the selected time range and template variables.
 
 ## Dormant metrics
 
-Some metrics only emit when their feature is active. Panels display "No data" until activated:
+Some metrics only emit when their feature is active. Panels display "No data"
+until activated:
 
 | Metric | Activates when |
 |--------|---------------|
@@ -204,14 +232,26 @@ docs/dashboards/
 
 ## Troubleshooting
 
-**Business Text plugin not found / panels show "Panel plugin not found: marcusolsson-dynamictext-panel"**
-Install the plugin (step 1 above) and restart Grafana. If running in a managed environment, add `marcusolsson-dynamictext-panel` to your `GF_INSTALL_PLUGINS` list.
+**Business Text plugin not found / panels show "Panel plugin not found:
+marcusolsson-dynamictext-panel"** Install the plugin (step 1 above) and restart
+Grafana. If running in a managed environment, add
+`marcusolsson-dynamictext-panel` to your `GF_INSTALL_PLUGINS` list.
 
-**Panels show "No data"**
-Check that Prometheus is scraping your Dingo node: open Prometheus in the browser, go to **Status → Targets**, and confirm the `dingo` job is up. Also verify the `$network` and `$instance` template variables at the top of the dashboard are set to the correct values.
+**Panels show "No data"** Check that Prometheus is scraping your Dingo node:
+open Prometheus in the browser, go to **Status → Targets**, and confirm the
+`dingo` job is up. Also verify the `$network` and `$instance` template variables
+at the top of the dashboard are set to the correct values.
 
-**Datasource UID mismatch ("datasource not found")**
-All JSON files except `traces-and-logs.json` (which selects Tempo and Loki through its own datasource variables) reference the datasource UID `default`, which Grafana resolves to whichever datasource is marked default. If you have multiple Prometheus datasources and the wrong one is default, mark the correct one as default in **Connections → Data sources**, or do a find-and-replace of `"default"` with your actual datasource UID in the JSON files before importing.
+**Datasource UID mismatch ("datasource not found")** All JSON files except
+`traces-and-logs.json` (which selects Tempo and Loki through its own datasource
+variables) reference the datasource UID `default`, which Grafana resolves to
+whichever datasource is marked default. If you have multiple Prometheus
+datasources and the wrong one is default, mark the correct one as default in
+**Connections → Data sources**, or do a find-and-replace of `"default"` with
+your actual datasource UID in the JSON files before importing.
 
-**Dashboards not appearing after provisioning**
-Confirm `/etc/grafana/provisioning/dashboards/dingo.yaml` references the correct path. Grafana auto-reloads provisioned dashboards every 30 seconds; if it hasn't appeared after a minute, check the Grafana log (`journalctl -u grafana-server`) for errors.
+**Dashboards not appearing after provisioning** Confirm
+`/etc/grafana/provisioning/dashboards/dingo.yaml` references the correct path.
+Grafana auto-reloads provisioned dashboards every 30 seconds; if it hasn't
+appeared after a minute, check the Grafana log (`journalctl -u grafana-server`)
+for errors.

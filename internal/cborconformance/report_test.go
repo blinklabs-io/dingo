@@ -389,7 +389,7 @@ func TestGenerateReportAppliesExplicitSampleWaivers(t *testing.T) {
 	}
 }
 
-func TestGenerateReportAppliesVerifiedParentDivergences(t *testing.T) {
+func TestGenerateReportEvaluatesVerifiedParentDivergences(t *testing.T) {
 	t.Parallel()
 	corpus := filepath.Join(t.TempDir(), "conway")
 	makeCompleteCorpus(t, corpus)
@@ -405,8 +405,12 @@ func TestGenerateReportAppliesVerifiedParentDivergences(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !report.Successful || len(report.WaivedSamples) != 1 {
-		t.Fatalf("report = %+v, want one verified-by-parent waiver", report)
+	if !report.Successful || len(report.WaivedSamples) != 0 {
+		t.Fatalf("report = %+v, want successful evaluation without waivers", report)
+	}
+	if report.Totals.ZapMustBeRejectedExpected != len(ruleNames()) ||
+		report.Totals.ZapMustBeRejectedActual != len(ruleNames()) {
+		t.Fatalf("zap totals = %+v, want every sample evaluated", report.Totals)
 	}
 }
 

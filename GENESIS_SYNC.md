@@ -32,11 +32,12 @@ Praos chain selection.
 | **Genesis** (from origin) | Authenticated chains, eagerness bounded by candidate intersections, and density within a `3k/f`-slot window. |
 
 Genesis assumes at least one honest, caught-up, available upstream peer. Peer
-discovery must make that peer reachable; endpoint or operator labels cannot prove
-this assumption. Limit on Eagerness constrains progress past competing candidates'
-intersection, while density disconnection and patience remove unsuitable peers.
-The fully fetched local and peer fork paths are compared from their exact common
-intersection. See the [reference Genesis design](https://ouroboros-consensus.cardano.intersectmbo.org/docs/references/miscellaneous/genesis_design/).
+discovery must make that peer reachable; endpoint or operator labels cannot
+prove this assumption. Limit on Eagerness constrains progress past competing
+candidates' intersection, while density disconnection and patience remove
+unsuitable peers. The fully fetched local and peer fork paths are compared from
+their exact common intersection. See the [reference Genesis
+design](https://ouroboros-consensus.cardano.intersectmbo.org/docs/references/miscellaneous/genesis_design/).
 
 A positive `corroborationPeers` adds a separate policy: peers in distinct
 independence groups must confirm a source's recent chain before it can drive
@@ -77,10 +78,14 @@ Equivalent CLI flags / environment variables:
 
 - `--genesis-bootstrap-enabled` / `DINGO_GENESIS_BOOTSTRAP_ENABLED`
 - `--genesis-bootstrap-window-slots` / `DINGO_GENESIS_BOOTSTRAP_WINDOW_SLOTS`
-- `--genesis-bootstrap-corroboration-peers` / `DINGO_GENESIS_BOOTSTRAP_CORROBORATION_PEERS`
-- `--genesis-bootstrap-limit-on-patience-enabled` / `DINGO_GENESIS_BOOTSTRAP_LIMIT_ON_PATIENCE_ENABLED`
-- `--genesis-bootstrap-limit-on-patience-capacity` / `DINGO_GENESIS_BOOTSTRAP_LIMIT_ON_PATIENCE_CAPACITY`
-- `--genesis-bootstrap-limit-on-patience-rate` / `DINGO_GENESIS_BOOTSTRAP_LIMIT_ON_PATIENCE_RATE`
+- `--genesis-bootstrap-corroboration-peers` /
+  `DINGO_GENESIS_BOOTSTRAP_CORROBORATION_PEERS`
+- `--genesis-bootstrap-limit-on-patience-enabled` /
+  `DINGO_GENESIS_BOOTSTRAP_LIMIT_ON_PATIENCE_ENABLED`
+- `--genesis-bootstrap-limit-on-patience-capacity` /
+  `DINGO_GENESIS_BOOTSTRAP_LIMIT_ON_PATIENCE_CAPACITY`
+- `--genesis-bootstrap-limit-on-patience-rate` /
+  `DINGO_GENESIS_BOOTSTRAP_LIMIT_ON_PATIENCE_RATE`
 
 ## Optional topology: fast source + corroborating snapshot
 
@@ -146,14 +151,14 @@ Snapshot relays must have a host/IP address and an explicit TCP port from 1 to
 
 ## What you should observe
 
-- **Log at startup**: `Genesis chain selection enabled` with `genesis_window_slots`,
-  `security_param`, and `min_corroborating_peers`.
+- **Log at startup**: `Genesis chain selection enabled` with
+  `genesis_window_slots`, `security_param`, and `min_corroborating_peers`.
 - **Uncorroborated fast source**: a throttled warning
   `genesis fast source lacks corroboration; denying chain selection` and a
   `chainselection.genesis_corroboration_failed` event carrying the source
   connection, its observed density, the corroborator count, and the required
-  count. While this persists the source's **blocks are withheld from the ledger**
-  (its tips are still observed so corroboration can form, but its
+  count. While this persists the source's **blocks are withheld from the
+  ledger** (its tips are still observed so corroboration can form, but its
   `ledger.ChainsyncEvent`/blockfetch is gated off), so the node makes no forward
   progress on that source — this is expected and safe. A best-peer → none
   transition also logs `chain selection stalled: no selectable peer` and emits
@@ -178,30 +183,30 @@ fast source, and per-peer density/corroboration for metrics or debugging.
 
 Authenticated delivered headers can maintain the Limit on Eagerness frontier
 without promoting a peer's ledger-admission tip. If local verification omitted
-an intermediate delivery, Dingo attempts a bounded reconstruction from the
-exact admission point, or a lower applied anchor needed to recover a witness
-gap, through applied canonical blocks and fully verified peer ancestry. Missing, withdrawn or unverified links keep the original limit. This
-recovery preserves the independent-peer checks and requires no configuration.
-A parked callback can reverify its last authenticated delivery when a ledger
-publication expires that evidence, including while its next raw header waits
-at the observer forecast gate. This never advances the cursor or authorizes
-the pending raw header. The retry ends with the callback.
-An authenticated header whose verdict expires before candidate staging is
-reverified on that callback. Local publication races do not count as peer
-rejections; invalid claims and failed renewed authentication remain excluded.
-A clean restart caused by the local forecast horizon also avoids peer-instability
-backoff. Actual connection and protocol failures retain normal retry penalties.
-A fully authenticated path can also supply a missing exact corroboration point
-when independent peers' delivered histories no longer overlap. Only the strict
-proof range counts, with current generation and original-session/withdrawal
-fences; ordinary linked delivery cannot refresh that certificate. Identity,
-exact-point and suffix checks remain unchanged, and no density or admission
-credit is added by reconstruction.
+an intermediate delivery, Dingo attempts a bounded reconstruction from the exact
+admission point, or a lower applied anchor needed to recover a witness gap,
+through applied canonical blocks and fully verified peer ancestry. Missing,
+withdrawn or unverified links keep the original limit. This recovery preserves
+the independent-peer checks and requires no configuration. A parked callback can
+reverify its last authenticated delivery when a ledger publication expires that
+evidence, including while its next raw header waits at the observer forecast
+gate. This never advances the cursor or authorizes the pending raw header. The
+retry ends with the callback. An authenticated header whose verdict expires
+before candidate staging is reverified on that callback. Local publication races
+do not count as peer rejections; invalid claims and failed renewed
+authentication remain excluded. A clean restart caused by the local forecast
+horizon also avoids peer-instability backoff. Actual connection and protocol
+failures retain normal retry penalties. A fully authenticated path can also
+supply a missing exact corroboration point when independent peers' delivered
+histories no longer overlap. Only the strict proof range counts, with current
+generation and original-session/withdrawal fences; ordinary linked delivery
+cannot refresh that certificate. Identity, exact-point and suffix checks remain
+unchanged, and no density or admission credit is added by reconstruction.
 
 ## Tuning `corroborationPeers`
 
-- **0 (default)** — no additional corroboration quorum. Genesis eagerness, density,
-  patience, ancestry and header verification remain active.
+- **0 (default)** — no additional corroboration quorum. Genesis eagerness,
+  density, patience, ancestry and header verification remain active.
 - **1** — require a witness in another independence group before selection.
 - **2+** — require that many witnesses in distinct groups. Missing or
   disagreeing witnesses stall selection. Raising the count does not establish

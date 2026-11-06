@@ -774,3 +774,28 @@ func TestFromGenesisKoiosClientUsesKeyFile(t *testing.T) {
 	require.EqualValues(t, 7, epoch)
 	require.Equal(t, "Bearer from-file", authorization.Load())
 }
+
+func TestFromGenesisKoiosClientAppliesTxInfoLimits(t *testing.T) {
+	// Not t.Parallel: fromGenesisCommand binds its flags to the
+	// package-level koiosFlags.
+	cmd := fromGenesisCommand()
+	t.Cleanup(func() {
+		koiosFlags.txInfoBatchSize = koiosparity.KoiosTxInfoBatchSize
+		koiosFlags.txInfoConcurrency = koiosparity.KoiosTxInfoConcurrency
+	})
+	client, err := newFromGenesisKoiosClient(cmd, "preview")
+	require.NoError(t, err)
+	require.Equal(t, koiosparity.KoiosTxInfoBatchSize, client.TxInfoBatchSize())
+	require.Equal(t, koiosparity.KoiosTxInfoConcurrency, client.TxInfoConcurrency())
+
+	require.NoError(t, cmd.Flags().Set("koios-tx-info-batch-size", "250"))
+	require.NoError(t, cmd.Flags().Set("koios-tx-info-concurrency", "4"))
+	client, err = newFromGenesisKoiosClient(cmd, "preview")
+	require.NoError(t, err)
+	require.Equal(t, 250, client.TxInfoBatchSize())
+	require.Equal(t, 4, client.TxInfoConcurrency())
+
+	require.NoError(t, cmd.Flags().Set("koios-tx-info-batch-size", "1000"))
+	_, err = newFromGenesisKoiosClient(cmd, "preview")
+	require.ErrorContains(t, err, "tx_info batch size 1000 out of range")
+}

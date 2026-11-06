@@ -53,8 +53,9 @@ complete node conformance.
 
 The release and Linux CI gates run the ledger and deterministic consensus
 profiles as part of `./...`, and their verbose output reports the exact corpus
-and scenario counts. The [conformance tests](../internal/test/conformance/README.md)
-document what each profile proves and excludes.
+and scenario counts. The [conformance
+tests](../internal/test/conformance/README.md) document what each profile proves
+and excludes.
 
 The Linux tag workflow generates four conformance reports and uploads them as
 dated JSON release assets: Conway CBOR decoding, ledger rules, UPLC
@@ -77,7 +78,8 @@ records the error; NDC counts a missing benchmark as a failure.
 
 - [Run Dingo on the local DevNet](devnet.md).
 - [Run benchmarks and collect profiles](benchmarks.md).
-- Read the [architecture](../ARCHITECTURE.md) and [database design](../DATABASE.md)
-  when a change affects component ownership or persisted state.
+- Read the [architecture](../ARCHITECTURE.md) and [database
+  design](../DATABASE.md) when a change affects component ownership or persisted
+  state.
 - Use the [documentation index](README.md) to find package, integration, and
   operator documentation.

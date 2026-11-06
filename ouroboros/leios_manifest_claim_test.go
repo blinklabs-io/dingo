@@ -675,9 +675,13 @@ func testLeiosTxOfferDeadlineFixture(
 func TestLeiosTxsOfferDeadlineHandsDribblingOwnerToHealthyWaiter(t *testing.T) {
 	t.Parallel()
 	o, point, txs := testLeiosTxOfferDeadlineFixture(t, 465)
-	o.leiosTxFetchAttemptTimeoutOverride = 100 * time.Millisecond
+	// The budget applies to each owner in turn, so the owner's first batch
+	// and the waiter's whole resumed fetch must each finish inside it even
+	// on a starved race-instrumented runner. The owner stalls until its
+	// attempt context ends, so a larger budget costs wall time, not flakiness.
+	o.leiosTxFetchAttemptTimeoutOverride = 3 * time.Second
 	owner := &leiosTxOfferTestRequester{
-		txs: txs, perRound: time.Second, immediateFirst: true,
+		txs: txs, perRound: time.Hour, immediateFirst: true,
 	}
 	healthy := &leiosTxOfferTestRequester{txs: txs}
 	ownerGuard := &leiosFetchGuard{}
