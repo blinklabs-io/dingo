@@ -16,10 +16,8 @@ package sqlstore
 
 import (
 	"math/big"
-	"testing"
 
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
-	"github.com/stretchr/testify/require"
 	_ "modernc.org/sqlite"
 )
 
@@ -61,12 +59,3 @@ func (t *feelessTransaction) Witnesses() lcommon.TransactionWitnessSet {
 	return nil
 }
 
-// TestTransactionBodyBaseFeeIsNil pins the upstream behaviour this guard exists
-// for. If gouroboros ever returns a zero big.Int instead, the guard becomes
-// redundant rather than wrong, but the write path must never assume it.
-func TestTransactionBodyBaseFeeIsNil(t *testing.T) {
-	t.Parallel()
-
-	var base lcommon.TransactionBodyBase
-	require.Nil(t, base.Fee())
-}

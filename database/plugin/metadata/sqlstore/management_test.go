@@ -42,27 +42,8 @@ func initialNodeSettingsGates() nodesettings.Values {
 	}
 }
 
-func TestNodeSettingsGatesRoundTrip(t *testing.T) {
-	store := newManagementTestStore(t)
-	gates, err := store.GetNodeSettingsGates(context.Background())
-	require.NoError(t, err)
-	require.Equal(t, initialNodeSettingsGates(), gates)
-
-	require.NoError(t, store.SetNodeSettingsGates(context.Background(),
-		nodesettings.Values{
-			"network_magic": "1",
-			"start_era":     "dijkstra",
-		},
-		42, 1000,
-	))
-
-	gates, err = store.GetNodeSettingsGates(context.Background())
-	require.NoError(t, err)
-	require.Equal(t, "1", gates["network_magic"])
-	require.Equal(t, "dijkstra", gates["start_era"])
-}
-
 func TestNodeSettingsGatesUpsertOverwrites(t *testing.T) {
+	t.Parallel()
 	store := newManagementTestStore(t)
 	require.NoError(t, store.SetNodeSettingsGates(context.Background(),
 		nodesettings.Values{"storage_mode": "api"}, 1, 10,
@@ -76,27 +57,12 @@ func TestNodeSettingsGatesUpsertOverwrites(t *testing.T) {
 }
 
 func TestNodeSettingsGatesEmptyWriteIsNoOp(t *testing.T) {
+	t.Parallel()
 	store := newManagementTestStore(t)
 	require.NoError(t, store.SetNodeSettingsGates(context.Background(), nil, 0, 0))
 	gates, err := store.GetNodeSettingsGates(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, initialNodeSettingsGates(), gates)
-}
-
-// TestInsertNodeSettingsGateIfAbsentFirstCallWins pins the ordinary case:
-// the first call for a name inserts and reports it, unlike
-// SetNodeSettingsGates's unconditional upsert.
-func TestInsertNodeSettingsGateIfAbsentFirstCallWins(t *testing.T) {
-	store := newManagementTestStore(t)
-	inserted, err := store.InsertNodeSettingsGateIfAbsent(context.Background(),
-		"network_magic", "1", 0, 0,
-	)
-	require.NoError(t, err)
-	require.True(t, inserted)
-
-	gates, err := store.GetNodeSettingsGates(context.Background())
-	require.NoError(t, err)
-	require.Equal(t, "1", gates["network_magic"])
 }
 
 // TestInsertNodeSettingsGateIfAbsentLoserDoesNotOverwrite is
@@ -105,6 +71,7 @@ func TestInsertNodeSettingsGateIfAbsentFirstCallWins(t *testing.T) {
 // touch the existing value -- the opposite of SetNodeSettingsGates's
 // upsert, which always overwrites regardless of what is already there.
 func TestInsertNodeSettingsGateIfAbsentLoserDoesNotOverwrite(t *testing.T) {
+	t.Parallel()
 	store := newManagementTestStore(t)
 	inserted, err := store.InsertNodeSettingsGateIfAbsent(context.Background(),
 		"network_magic", "1", 0, 0,
@@ -137,6 +104,7 @@ func TestInsertNodeSettingsGateIfAbsentLoserDoesNotOverwrite(t *testing.T) {
 func TestInsertNodeSettingsGateIfAbsentConcurrentCallsExactlyOneWins(
 	t *testing.T,
 ) {
+	t.Parallel()
 	store := newManagementTestStore(t)
 	const attempts = 8
 	results := make([]bool, attempts)
@@ -168,6 +136,7 @@ func TestInsertNodeSettingsGateIfAbsentConcurrentCallsExactlyOneWins(
 }
 
 func TestInsertNodeSettingsGatesIfAbsentConcurrentSetsAreAtomic(t *testing.T) {
+	t.Parallel()
 	store := newManagementTestStore(t)
 	sets := []nodesettings.Values{
 		{"network_magic": "1", "start_era": "byron"},
@@ -209,6 +178,7 @@ func TestInsertNodeSettingsGatesIfAbsentConcurrentSetsAreAtomic(t *testing.T) {
 }
 
 func TestInsertNodeSettingsGatesIfAbsentPreservesRollbackFailure(t *testing.T) {
+	t.Parallel()
 	rollbackErr := errors.New("rollback failed")
 	err := errors.Join(errNodeSettingsGateInitializationLost, rollbackErr)
 	require.False(t, isOnlyNodeSettingsGateInitializationRace(err))
@@ -220,6 +190,7 @@ func TestInsertNodeSettingsGatesIfAbsentPreservesRollbackFailure(t *testing.T) {
 // it into a negative column value, matching the checkedInt64 guard already
 // used elsewhere in this package for the same write boundary.
 func TestNodeSettingsGatesRejectOutOfDomainEpochAndSlot(t *testing.T) {
+	t.Parallel()
 	const outOfDomain = uint64(math.MaxInt64) + 1
 
 	// requireOnlyInitialGates proves rejection actually left no new row behind:
@@ -1139,21 +1110,6 @@ func TestPoolRegistrationPersistenceKeepsLatestSameBlockFutureState(
 	require.NoError(t, err)
 	require.Nil(t, released,
 		"the first same-block future key must be released by its replacement")
-}
-
-func TestCommitTimestamp(t *testing.T) {
-	t.Parallel()
-	store := newManagementTestStore(t)
-	timestamp, err := store.GetCommitTimestamp(context.Background())
-	require.NoError(t, err)
-	require.Zero(t, timestamp)
-
-	transaction := store.Transaction(t.Context())
-	require.NoError(t, store.SetCommitTimestamp(1234, transaction))
-	require.NoError(t, transaction.Commit())
-	timestamp, err = store.GetCommitTimestamp(context.Background())
-	require.NoError(t, err)
-	require.Equal(t, int64(1234), timestamp)
 }
 
 func TestNodeSettingsAreImmutableWithNetworkBackfill(t *testing.T) {

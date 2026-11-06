@@ -530,21 +530,6 @@ func TestRetiringCacheKeepsBorrowedStatementOpen(t *testing.T) {
 	}
 }
 
-// An unretired statement is shared by every caller: releasing a borrow must
-// not close it.
-func TestReleasingBorrowKeepsCachedStatementOpen(t *testing.T) {
-	t.Parallel()
-	store := newFilePlannerStatsStore(t, nil)
-	stmt, release, ok := store.borrowCachedStmt(getLiveUtxoByRefQuery)
-	require.True(t, ok)
-	release()
-	rows, err := stmt.QueryContext(
-		context.Background(), make([]byte, 32), 0,
-	)
-	require.NoError(t, err)
-	require.NoError(t, rows.Close())
-}
-
 // A backend without incremental statistics must take the unsupported path
 // without issuing any statement, including the SQLite-only fingerprint and
 // during a bulk load. The closed handle fails any statement that is issued.

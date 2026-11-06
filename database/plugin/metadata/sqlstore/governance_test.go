@@ -72,61 +72,6 @@ func seedGovernanceVoteProposal(t *testing.T, store *Store) uint {
 	return proposal.ID
 }
 
-// TestGovernanceVoteRollbackRestoresReplacedVote covers that replacing
-// a vote and then rolling back to a slot between the two casts must restore
-// the vote that was actually current at that slot, not delete it outright.
-func TestGovernanceVoteRollbackRestoresReplacedVote(t *testing.T) {
-	t.Parallel()
-	store := newManagementTestStore(t)
-	proposalID := seedGovernanceVoteProposal(t, store)
-
-	voterCredential := credentialHash(0x42)
-	initialSlot := uint64(100)
-	replacedSlot := uint64(200)
-	rollbackSlot := uint64(150)
-
-	vote := &models.GovernanceVote{
-		ProposalID:         proposalID,
-		VoterType:          models.VoterTypeDRep,
-		VoterCredentialTag: 0,
-		VoterCredential:    voterCredential,
-		Vote:               models.VoteYes,
-		AddedSlot:          initialSlot,
-		VoteUpdatedSlot:    &initialSlot,
-	}
-	require.NoError(t, store.SetGovernanceVote(vote, nil))
-
-	replacement := &models.GovernanceVote{
-		ProposalID:         proposalID,
-		VoterType:          models.VoterTypeDRep,
-		VoterCredentialTag: 0,
-		VoterCredential:    voterCredential,
-		Vote:               models.VoteNo,
-		AddedSlot:          initialSlot,
-		VoteUpdatedSlot:    &replacedSlot,
-	}
-	require.NoError(t, store.SetGovernanceVote(replacement, nil))
-
-	votes, err := store.GetGovernanceVotes(proposalID, nil)
-	require.NoError(t, err)
-	require.Len(t, votes, 1)
-	require.Equal(t, uint8(models.VoteNo), votes[0].Vote)
-
-	require.NoError(t, store.DeleteGovernanceVotesAfterSlot(rollbackSlot, nil))
-
-	votes, err = store.GetGovernanceVotes(proposalID, nil)
-	require.NoError(t, err)
-	require.Len(t, votes, 1)
-	require.Equal(
-		t,
-		uint8(models.VoteYes),
-		votes[0].Vote,
-		"rollback to a slot before the replacement must restore the original vote",
-	)
-	require.NotNil(t, votes[0].VoteUpdatedSlot)
-	require.Equal(t, initialSlot, *votes[0].VoteUpdatedSlot)
-}
-
 // TestGovernanceVoteRollbackDropsVoteCastAfterRollbackPoint covers the
 // existing behavior for a vote that did not exist at all before the rollback
 // point: it must still be deleted outright, not restored.

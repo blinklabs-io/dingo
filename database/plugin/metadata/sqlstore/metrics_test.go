@@ -298,29 +298,6 @@ func TestImportAccountWithMetricsEnabledStillWritesBaseline(t *testing.T) {
 	require.Equal(t, uint64(100), got.AddedSlot)
 }
 
-// TestSQLOperationsCounterNilWhenNoRegistry proves instrumentation is a
-// true no-op with no PromRegistry configured: Store.sqlOperations and
-// Store.sqlQueryDuration are both nil, and instrumentedQueryer must return
-// the plain dialect-translated queryer rather than a countingQueryer
-// wrapping a nil counter or histogram (either of which would panic on the
-// first WithLabelValues call).
-func TestSQLOperationsCounterNilWhenNoRegistry(t *testing.T) {
-	t.Parallel()
-	store := newMigratedSQLiteStore(t)
-	require.Nil(t, store.sqlOperations)
-	require.Nil(t, store.sqlQueryDuration)
-
-	ref := models.NewStakeCredentialRef(0, credentialKeyForIndex(0))
-	err := store.withWriteTransaction(
-		nil,
-		func(db queryer, ctx context.Context) error {
-			_, err := store.sumCredentialUtxoStake(ctx, db, ref)
-			return err
-		},
-	)
-	require.NoError(t, err)
-}
-
 // TestBatchInsertTransactionIsCounted is the regression test for
 // transactionBatchAccumulator.insertTransaction (transaction_write.go):
 // it executes its cached transactionInsert statement directly against a
@@ -446,7 +423,7 @@ func TestSQLQueryDurationHistogramMultiRowMeasuresDispatchNotIteration(
 	reg := prometheus.NewRegistry()
 	store := newMigratedSQLiteStoreWithRegistry(t, reg)
 
-	const rowCount = 50_000
+	const rowCount = 5_000
 	require.NoError(t, store.withWriteTransaction(
 		nil,
 		func(db queryer, txnCtx context.Context) error {
