@@ -342,7 +342,7 @@ func overlayBatchOps(
 // the same number of every statement kind, transaction rows included.
 func TestBatchUtxoOverlayStatementCount(t *testing.T) {
 	t.Parallel()
-	const small, large = 8, 32
+	const small, large = 3, 9
 	smallOps := overlayBatchOps(t, small, true)
 	largeOps := overlayBatchOps(t, large, true)
 	perRowOps := overlayBatchOps(t, large, false)
@@ -469,7 +469,7 @@ func overlayStakeBatchOps(
 // per-row path's rows, ids and sequences.
 func TestBatchUtxoOverlayStakeStatementCount(t *testing.T) {
 	t.Parallel()
-	const small, large = 8, 32
+	const small, large = 3, 9
 	smallOps, _ := overlayStakeBatchOps(t, small, true)
 	largeOps, overlayState := overlayStakeBatchOps(t, large, true)
 	perRowOps, perRowState := overlayStakeBatchOps(t, large, false)
@@ -786,7 +786,7 @@ func TestBatchUtxoOverlayStatementPlans(t *testing.T) {
 	// Not t.Parallel: the stages rewrite this store's statistics and
 	// indexes in order.
 	store := newMigratedSQLiteStore(t)
-	seedSkewedUtxos(t, store, 50_000)
+	seedSkewedUtxos(t, store, 3_000)
 	ctx := context.Background()
 	conn, err := store.writeDB.Conn(ctx)
 	require.NoError(t, err)

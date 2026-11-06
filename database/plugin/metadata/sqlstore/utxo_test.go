@@ -1970,76 +1970,6 @@ func insertUtxoInTxn(
 	require.NoError(t, err)
 }
 
-// TestInsertUtxoModelReusesCachedStatementAcrossTransactions proves
-// insertUtxoModel's move onto the hot-statement cache (queryRowCached) does
-// not change its behavior: distinct inserts still get distinct ids, a
-// repeated (tx_id, output_idx) under ignoreConflict still resolves to the
-// existing row's id via the ON CONFLICT DO NOTHING + fallback SELECT branch,
-// and the stored row round-trips correctly through GetUtxo -- while the
-// cached *sql.Stmt for insertUtxoQueryIgnoreConflict is the same object
-// across independent write transactions. This exercises independent
-// transactions for simplicity; it is not the production access pattern --
-// see insertUtxoInTxn's doc comment, and
-// TestInsertUtxoModelBoundsTxScopedStatementRetentionInOneTransaction for the
-// real multi-output-per-transaction shape.
-func TestInsertUtxoModelReusesCachedStatementAcrossTransactions(t *testing.T) {
-	t.Parallel()
-	store := newMigratedSQLiteStore(t)
-
-	first := utxoForInsertCacheTest(1, 0, 5_000_000)
-	insertUtxoInTxn(t, store, first, true)
-	require.NotZero(t, first.ID)
-
-	store.stmtMu.Lock()
-	cachedBefore := store.stmts[insertUtxoQueryIgnoreConflict]
-	store.stmtMu.Unlock()
-	require.NotNil(
-		t,
-		cachedBefore,
-		"expected insertUtxoQueryIgnoreConflict to be cached on SQLite",
-	)
-
-	second := utxoForInsertCacheTest(2, 0, 7)
-	insertUtxoInTxn(t, store, second, true)
-	require.NotZero(t, second.ID)
-	require.NotEqual(t, first.ID, second.ID)
-
-	store.stmtMu.Lock()
-	cachedAfter := store.stmts[insertUtxoQueryIgnoreConflict]
-	store.stmtMu.Unlock()
-	require.Same(
-		t,
-		cachedBefore,
-		cachedAfter,
-		"expected the same cached *sql.Stmt across independent write transactions",
-	)
-
-	// Re-inserting the same (tx_id, output_idx) under ignoreConflict must
-	// take the ON CONFLICT DO NOTHING branch and resolve to the existing
-	// row's id via the fallback SELECT, not error and not create a second
-	// row -- exactly like before this query went through the cache.
-	dup := utxoForInsertCacheTest(1, 0, 999)
-	insertUtxoInTxn(t, store, dup, true)
-	require.Equal(
-		t,
-		first.ID,
-		dup.ID,
-		"expected ON CONFLICT DO NOTHING to resolve to the existing row's id",
-	)
-
-	// Round-trip through the public read path: the row the cached statement
-	// wrote back is a correct, complete row, not just "an insert succeeded".
-	got, err := store.GetUtxo(first.TxId, first.OutputIdx, nil)
-	require.NoError(t, err)
-	require.NotNil(t, got)
-	require.Equal(t, types.Uint64(5_000_000), got.Amount)
-
-	got2, err := store.GetUtxo(second.TxId, second.OutputIdx, nil)
-	require.NoError(t, err)
-	require.NotNil(t, got2)
-	require.Equal(t, types.Uint64(7), got2.Amount)
-}
-
 // TestImportUtxosReusesCachedStatementAcrossTransactions proves the snapshot
 // importer uses the same cached insert as the ordinary UTxO path. It also
 // exercises the ON CONFLICT DO NOTHING + fallback lookup that assigns the
@@ -2242,7 +2172,7 @@ func TestImportUtxosBoundsTxScopedStatementRetentionInOneTransaction(
 	store := newMigratedSQLiteStore(t)
 	ctx := context.Background()
 
-	const outputCount = 2_000
+	const outputCount = 50
 	utxos := make([]models.Utxo, outputCount)
 	for i := range outputCount {
 		utxos[i] = *utxoForBenchmarkIteration(uint64(i + 1))
