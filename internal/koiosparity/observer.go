@@ -908,8 +908,9 @@ func cancelled(ctx context.Context, err error) bool {
 		errors.Is(err, context.DeadlineExceeded)
 }
 
-// reportError records a genuine (non-shutdown) per-epoch fetch/check
-// failure: it logs and, in strict mode, fires FatalFunc via fail, and
+// reportError records a genuine (non-shutdown) per-epoch check failure
+// (fetch failures go through reportFetchError, which shares this path but
+// classifies fatality by provenance): it logs and, in strict mode, fires FatalFunc via fail, and
 // additionally invokes OnResult (when set) with a synthesized ERROR-status
 // result carrying err's text as a synthetic mismatch — otherwise these two
 // error branches in processEpoch would be invisible to OnResult callers,
@@ -995,7 +996,8 @@ func (o *Observer) reportErrorFatal(
 
 // emitResult is the single choke point every completed check result passes
 // through: processEpoch's success path, processAccountEpoch's success path,
-// and reportError's synthesized ERROR path (see their call sites) all call
+// and the synthesized ERROR path of reportError and reportFetchError (see
+// their call sites) all call
 // this rather than o.cfg.OnResult directly. Recording metrics here, once,
 // rather than at each call site individually, is what covers all three
 // without scattering dingo_koiosparity_* updates across observer.go.
