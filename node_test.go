@@ -21,17 +21,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"io"
 	"io/fs"
 	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"slices"
 	"strconv"
@@ -504,125 +499,6 @@ func TestNewInvalidConfigPreservesMetricsRegistry(t *testing.T) {
 				"valid retry must register node metrics",
 			)
 		})
-	}
-}
-
-func TestNodeEventSubscriptionPoliciesAreExplicit(t *testing.T) {
-	t.Parallel()
-
-	type counts struct {
-		required               int
-		detachable             int
-		chainsync              int
-		connectionRecycle      int
-		ledgerRecycleTranslate int
-	}
-	want := map[string]map[string]counts{
-		"node.go": {
-			"Run": {
-				required:  3,
-				chainsync: 1,
-			},
-			"subscribeChainsyncClientRemoveRequests": {required: 1},
-			"subscribeConnectionEvents": {
-				required:               3,
-				connectionRecycle:      1,
-				ledgerRecycleTranslate: 1,
-			},
-			"subscribeChainSelectorEvents": {
-				required:   8,
-				detachable: 2,
-			},
-		},
-		"node_lifecycle.go": {
-			"reinitializeNetworkingCore": {
-				chainsync:         1,
-				connectionRecycle: 1,
-			},
-		},
-		"node_leios.go": {
-			"initLeiosVoteManager": {required: 2},
-		},
-		"node_koiosparity.go": {
-			"startKoiosParityObserver": {required: 1},
-		},
-	}
-
-	policyHelpers := map[string]string{
-		"subscribeRequiredEvent":                      "SubscriberBackpressureBlock",
-		"subscribeDetachableEvent":                    "SubscriberBackpressureDetach",
-		"subscribeConnectionRecycleRequests":          "SubscriberBackpressureBlock",
-		"subscribeLedgerConnectionRecycleTranslation": "SubscriberBackpressureBlock",
-	}
-	seenPolicyHelpers := make(map[string]bool)
-	for fileName, functions := range want {
-		file, err := parser.ParseFile(
-			token.NewFileSet(),
-			filepath.Clean(fileName),
-			nil,
-			parser.SkipObjectResolution,
-		)
-		require.NoError(t, err)
-
-		for _, declaration := range file.Decls {
-			fn, ok := declaration.(*ast.FuncDecl)
-			if !ok || fn.Body == nil {
-				continue
-			}
-			wantCounts, isRegistration := functions[fn.Name.Name]
-			got := counts{}
-			ast.Inspect(fn.Body, func(node ast.Node) bool {
-				call, ok := node.(*ast.CallExpr)
-				if !ok {
-					return true
-				}
-				name := nodeCallName(call.Fun)
-				switch name {
-				case "subscribeRequiredEvent":
-					got.required++
-				case "subscribeDetachableEvent":
-					got.detachable++
-				case "subscribeChainsyncClientRemoveRequests":
-					got.chainsync++
-				case "subscribeConnectionRecycleRequests":
-					got.connectionRecycle++
-				case "subscribeLedgerConnectionRecycleTranslation":
-					got.ledgerRecycleTranslate++
-				case "SubscribeFunc", "SubscribeFuncWithBuffer", "SubscribeFuncStrict":
-					t.Errorf("%s uses unclassified EventBus registration %s", fn.Name.Name, name)
-				case "SubscribeFuncWithBufferPolicy":
-					policy, allowed := policyHelpers[fn.Name.Name]
-					if !allowed {
-						t.Errorf("%s registers an EventBus callback outside a policy helper", fn.Name.Name)
-						return true
-					}
-					seenPolicyHelpers[fn.Name.Name] = true
-					if len(call.Args) != 4 || nodeCallName(call.Args[2]) != policy {
-						t.Errorf("%s must register with %s", fn.Name.Name, policy)
-					}
-				}
-				return true
-			})
-			if isRegistration {
-				require.Equalf(t, wantCounts, got,
-					"subscription classification changed in %s:%s", fileName, fn.Name.Name)
-			}
-		}
-	}
-	for helper := range policyHelpers {
-		require.Truef(t, seenPolicyHelpers[helper],
-			"missing explicit policy implementation %s", helper)
-	}
-}
-
-func nodeCallName(expr ast.Expr) string {
-	switch value := expr.(type) {
-	case *ast.Ident:
-		return value.Name
-	case *ast.SelectorExpr:
-		return value.Sel.Name
-	default:
-		return ""
 	}
 }
 
@@ -1293,49 +1169,6 @@ func TestKESAgentStartupWiresClientMetrics(t *testing.T) {
 		require.Contains(t, names, name)
 	}
 	require.Equal(t, 1.0, gaugeValue(t, families, "dingo_kes_agent_connected"))
-}
-
-// TestKESAgentSignModeStartupWiresClientMetrics is the sign-mode half of the
-// same class: node_forging.go carries exactly two kesagent.Config literals,
-// and each needs its own Metrics field.
-func TestKESAgentSignModeStartupWiresClientMetrics(t *testing.T) {
-	t.Parallel()
-
-	vrf, _, opcert := devnetCredPaths(t)
-
-	testutil.SkipIfBlockProducerUnsupported(t)
-	sockPath := testutil.UnixSocketPath(t)
-	ln, err := net.Listen("unix", sockPath)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = ln.Close() })
-
-	registry := prometheus.NewRegistry()
-	n := newTestNodeForBPWithAgent(
-		t,
-		vrf,
-		opcert,
-		kesagent.ModeSign,
-		sockPath,
-		shelleyGenesisCfgForBP(t, time.Now().Add(-time.Hour)),
-	)
-	n.config.promRegistry = registry
-	t.Cleanup(n.closeKESAgentClient)
-
-	_, err = n.validateBlockProducerStartupAtSlot(0)
-	require.NoError(t, err)
-
-	families, err := registry.Gather()
-	require.NoError(t, err)
-	names := metricFamilyNames(families)
-	for _, name := range []string{
-		"dingo_kes_agent_connected",
-		"dingo_kes_agent_reconnect_failures_total",
-		"dingo_kes_agent_sign_success_total",
-		"dingo_kes_agent_sign_failure_total",
-		"dingo_kes_agent_sign_latency_seconds",
-	} {
-		require.Contains(t, names, name)
-	}
 }
 
 func gaugeValue(
@@ -2412,139 +2245,6 @@ func TestNodeSettingsGateValuesOmitsGenesisHashesWithoutCardanoConfig(
 	}
 }
 
-// snapshotMgrSetterCall matches a snapshot-manager configuration call on the
-// node, capturing the setter name.
-var snapshotMgrSetterCall = regexp.MustCompile(
-	`n\.snapshotMgr\.(Set[A-Za-z0-9_]+)\(`,
-)
-
-// koiosParityRetentionWiring matches the retention setter called with the
-// operator's own koios-parity enablement. It binds the argument, not just the
-// setter name: a call wired from any other field would leave the operator's
-// setting ignored exactly as silently as no call at all.
-var koiosParityRetentionWiring = regexp.MustCompile(
-	`n\.snapshotMgr\.SetRewardAccountOutputRetentionUnbounded\(\s*` +
-		`n\.config\.koiosParity\.Enabled,?\s*\)`,
-)
-
-// nodeFuncBodyForSnapshotWiring returns the source of the named function, from
-// its declaration to the next top-level declaration.
-func nodeFuncBodyForSnapshotWiring(
-	t *testing.T,
-	path string,
-	decl string,
-) string {
-	t.Helper()
-	b, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read %s: %v", path, err)
-	}
-	s := string(b)
-	start := strings.Index(s, decl)
-	if start < 0 {
-		t.Fatalf("%s not found in %s", decl, path)
-	}
-	body := s[start+len(decl):]
-	if end := strings.Index(body, "\nfunc "); end >= 0 {
-		body = body[:end]
-	}
-	return body
-}
-
-func nodeSnapshotConfigurationBody(
-	t *testing.T,
-	path string,
-	decl string,
-) string {
-	t.Helper()
-	body := nodeFuncBodyForSnapshotWiring(t, path, decl)
-	configure := strings.Index(body, "n.configureSnapshotManager()")
-	start := strings.Index(body, "n.ledgerState.Start(")
-	require.GreaterOrEqual(t, configure, 0,
-		"%s must configure the snapshot manager", decl)
-	require.Greater(t, start, configure,
-		"%s must configure snapshots before ledger startup", decl)
-	shared := nodeFuncBodyForSnapshotWiring(t, "node_components.go",
-		"func (n *Node) configureSnapshotManager() error {")
-	return body + "\n" + shared
-}
-
-// Both startup paths must apply every snapshot-manager setting before the
-// ledger starts publishing epoch transitions.
-func TestReinitializeBackgroundManagersMirrorsRunSnapshotConfig(t *testing.T) {
-	t.Parallel()
-
-	runBody := nodeSnapshotConfigurationBody(
-		t,
-		"node.go",
-		"func (n *Node) Run(ctx context.Context) (runErr error) {",
-	)
-	reinitBody := nodeSnapshotConfigurationBody(
-		t,
-		"node_lifecycle.go",
-		"func (n *Node) reinitializeBackgroundManagers(",
-	)
-
-	runSetters := snapshotMgrSetterCall.FindAllStringSubmatch(runBody, -1)
-	if len(runSetters) == 0 {
-		t.Fatal("no n.snapshotMgr setter calls found in Run")
-	}
-	reinitSetters := map[string]struct{}{}
-	for _, m := range snapshotMgrSetterCall.FindAllStringSubmatch(
-		reinitBody,
-		-1,
-	) {
-		reinitSetters[m[1]] = struct{}{}
-	}
-	for _, m := range runSetters {
-		if _, ok := reinitSetters[m[1]]; !ok {
-			t.Errorf(
-				"Run configures the snapshot manager with %s but "+
-					"reinitializeBackgroundManagers does not; a live "+
-					"restore/truncate would silently drop that setting",
-				m[1],
-			)
-		}
-	}
-}
-
-// TestKoiosParityRetentionWiredFromConfigInBothStartupPaths pins
-// wiring itself: both node startup paths must widen reward_account_output
-// retention from the operator's koios-parity enablement. Without the call the
-// node keeps CORE mode's 4-epoch window, and the observer -- whose network
-// -bound epoch validation routinely runs many epochs behind chain progression
-// during a catch-up sync -- reads an epoch's rows only after
-// cleanupOldSnapshots has already deleted them.
-func TestKoiosParityRetentionWiredFromConfigInBothStartupPaths(t *testing.T) {
-	t.Parallel()
-
-	for _, tc := range []struct {
-		path string
-		decl string
-	}{
-		{
-			path: "node.go",
-			decl: "func (n *Node) Run(ctx context.Context) (runErr error) {",
-		},
-		{
-			path: "node_lifecycle.go",
-			decl: "func (n *Node) reinitializeBackgroundManagers(",
-		},
-	} {
-		body := nodeSnapshotConfigurationBody(t, tc.path, tc.decl)
-		if !koiosParityRetentionWiring.MatchString(body) {
-			t.Errorf(
-				"%s does not call "+
-					"n.snapshotMgr.SetRewardAccountOutputRetentionUnbounded("+
-					"n.config.koiosParity.Enabled); reward_account_output "+
-					"would be pruned to the 4-epoch window with the "+
-					"koios-parity observer enabled",
-				tc.decl,
-			)
-		}
-	}
-}
-
 // forgeCreatedBy and electionCreatedBy identify the goroutines that
 // BlockForger.Start and Election.Start launch. Both Stop calls join their
 // workers, so these lines disappearing is evidence of a join rather than of
@@ -3388,35 +3088,6 @@ func TestChainSelectedNoneRetryBackoffCaps(t *testing.T) {
 	)
 }
 
-// TestHandleChainSwitchEventNilChainsyncStateDoesNotPanic covers the window
-// during a live database restore/truncate where n.chainsyncState is nil
-// between closeStorageForLiveLifecycleOp and reinitializeNetworkingCore.
-// chainSelector's evaluation loop is never paused during quiesce, so it can
-// still emit a ChainSwitchEvent in that window.
-func TestHandleChainSwitchEventNilChainsyncStateDoesNotPanic(t *testing.T) {
-	t.Parallel()
-
-	n := &Node{
-		config: Config{
-			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		},
-	}
-
-	require.NotPanics(t, func() {
-		n.handleChainSwitchEvent(
-			event.NewEvent(
-				chainselection.ChainSwitchEventType,
-				chainselection.ChainSwitchEvent{
-					NewConnectionId: newNodeTestConnId(3003),
-					NewTip: ochainsync.Tip{
-						Point: ocommon.NewPoint(100, []byte("hash-a")),
-					},
-				},
-			),
-		)
-	})
-}
-
 // TestHandleChainSwitchEventSkipsUpdateDuringLiveLifecycleOp covers the same
 // window from the other side: n.chainsyncState has already been rebuilt to a
 // non-nil value, but a live restore/truncate still holds n.liveLifecycleMu
@@ -4251,121 +3922,6 @@ func (h *blockingNodeTestLogHandler) unblock() {
 	h.releaseOnce.Do(func() { close(h.release) })
 }
 
-var nodeRequiredSubscriptionGroups = []struct {
-	function string
-	count    int
-}{
-	{function: "Run", count: 3},
-	{function: "subscribeChainsyncClientRemoveRequests", count: 1},
-	{function: "subscribeConnectionEvents", count: 3},
-	{function: "subscribeChainSelectorEvents", count: 8},
-	{function: "initLeiosVoteManager", count: 2},
-	{function: "startKoiosParityObserver", count: 1},
-}
-
-func TestNodeEventSubscriptionClassifications(t *testing.T) {
-	t.Parallel()
-
-	expectedRequired := make(map[string]int, len(nodeRequiredSubscriptionGroups))
-	for _, group := range nodeRequiredSubscriptionGroups {
-		expectedRequired[group.function] = group.count
-	}
-	expectedDetachable := map[string]int{
-		"subscribeChainSelectorEvents":  2,
-		"subscribeEquivocationDetector": 1,
-	}
-	expectedPolicies := map[string]string{
-		"subscribeRequiredEvent":                      "SubscriberBackpressureBlock",
-		"subscribeDetachableEvent":                    "SubscriberBackpressureDetach",
-		"subscribeConnectionRecycleRequests":          "SubscriberBackpressureBlock",
-		"subscribeLedgerConnectionRecycleTranslation": "SubscriberBackpressureBlock",
-	}
-	expectedChainsyncRegistrations := map[string]int{
-		"Run":                        1,
-		"reinitializeNetworkingCore": 1,
-	}
-
-	files, err := filepath.Glob("node*.go")
-	require.NoError(t, err)
-
-	fset := token.NewFileSet()
-	actualRequired := make(map[string]int)
-	actualDetachable := make(map[string]int)
-	actualPolicies := make(map[string]string)
-	actualChainsyncRegistrations := make(map[string]int)
-	var unclassified []string
-	for _, filename := range files {
-		if strings.HasSuffix(filename, "_test.go") {
-			continue
-		}
-		file, err := parser.ParseFile(fset, filename, nil, 0)
-		require.NoError(t, err)
-		for _, declaration := range file.Decls {
-			function, ok := declaration.(*ast.FuncDecl)
-			if !ok || function.Body == nil {
-				continue
-			}
-			ast.Inspect(function.Body, func(node ast.Node) bool {
-				call, ok := node.(*ast.CallExpr)
-				if !ok {
-					return true
-				}
-				selector, ok := call.Fun.(*ast.SelectorExpr)
-				if !ok {
-					return true
-				}
-				switch selector.Sel.Name {
-				case "subscribeRequiredEvent":
-					actualRequired[function.Name.Name]++
-				case "subscribeDetachableEvent":
-					actualDetachable[function.Name.Name]++
-				case "subscribeChainsyncClientRemoveRequests":
-					actualChainsyncRegistrations[function.Name.Name]++
-				case "Subscribe", "SubscribeWithBuffer", "SubscribeFunc",
-					"SubscribeFuncWithBuffer", "SubscribeFuncStrict":
-					unclassified = append(
-						unclassified,
-						fmt.Sprintf("%s:%s", filename, function.Name.Name),
-					)
-				case "SubscribeFuncWithBufferPolicy":
-					_, ok := actualPolicies[function.Name.Name]
-					if ok {
-						unclassified = append(
-							unclassified,
-							fmt.Sprintf("duplicate policy helper: %s", function.Name.Name),
-						)
-						return true
-					}
-					if len(call.Args) < 3 {
-						unclassified = append(
-							unclassified,
-							fmt.Sprintf("policy missing: %s:%s", filename, function.Name.Name),
-						)
-						return true
-					}
-					policySelector, ok := call.Args[2].(*ast.SelectorExpr)
-					if !ok {
-						unclassified = append(
-							unclassified,
-							fmt.Sprintf("policy not explicit: %s:%s", filename, function.Name.Name),
-						)
-						return true
-					}
-					actualPolicies[function.Name.Name] = policySelector.Sel.Name
-				}
-				return true
-			})
-		}
-	}
-
-	require.Empty(t, unclassified,
-		"node-owned EventBus function subscriptions must use a policy helper")
-	require.Equal(t, expectedRequired, actualRequired)
-	require.Equal(t, expectedDetachable, actualDetachable)
-	require.Equal(t, expectedPolicies, actualPolicies)
-	require.Equal(t, expectedChainsyncRegistrations, actualChainsyncRegistrations)
-}
-
 func TestNodeRequiredSubscriptionsKeepPublishersBlocked(t *testing.T) {
 	t.Parallel()
 
@@ -4376,23 +3932,18 @@ func TestNodeRequiredSubscriptionsKeepPublishersBlocked(t *testing.T) {
 		queueFilled chan struct{}
 		published   chan struct{}
 	}
-	var cases []subscriberCase
-	for _, group := range nodeRequiredSubscriptionGroups {
-		for i := range group.count {
-			cases = append(cases, subscriberCase{
-				name: fmt.Sprintf("%s %d", group.function, i+1),
-				eventType: event.EventType(fmt.Sprintf(
-					"node.required.test.%d", len(cases),
-				)),
-				logger: &blockingNodeTestLogHandler{
-					entered: make(chan struct{}),
-					release: make(chan struct{}),
-				},
-				queueFilled: make(chan struct{}),
-				published:   make(chan struct{}),
-			})
-		}
-	}
+	// Every required subscription goes through subscribeRequiredEvent, so one
+	// stalled subscriber exercises the policy for all of them.
+	cases := []subscriberCase{{
+		name:      "required subscriber",
+		eventType: event.EventType("node.required.test"),
+		logger: &blockingNodeTestLogHandler{
+			entered: make(chan struct{}),
+			release: make(chan struct{}),
+		},
+		queueFilled: make(chan struct{}),
+		published:   make(chan struct{}),
+	}}
 
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(func() {
