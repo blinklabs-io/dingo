@@ -1072,6 +1072,13 @@ type LeiosClosureBatcher interface {
 	) error
 }
 
+// ValidatedBlockBatcher optionally defers API-only transaction indexes until
+// the end of a validated block. UTxOs, assets, datums, scripts and stake must
+// remain visible to the next transaction's validation.
+type ValidatedBlockBatcher interface {
+	NewValidatedBlockBatchAccumulator() types.MetadataBatchAccumulator
+}
+
 // TransactionStore owns chain transactions: the transaction table, the
 // per-transaction metadata it carries, and the address and metadata-label
 // indexes derived from it.
