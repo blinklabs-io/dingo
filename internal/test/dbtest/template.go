@@ -21,6 +21,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -302,4 +303,16 @@ func RegisterSQLiteProvider(host *plugin.Host) error {
 			}, nil
 		},
 	)
+}
+
+// SeedMetadataTemplateDir seeds dir with the migrated template unless dir
+// already holds a metadata file. It is meant for sqlite.BeforeOpenDataDir,
+// which fires for every store a test binary opens, including the scratch store
+// that builds the template itself; that one is skipped, since seeding it would
+// wait on the template it is producing.
+func SeedMetadataTemplateDir(dir string) error {
+	if strings.HasPrefix(filepath.Base(dir), metadataTemplateDirPrefix()) {
+		return nil
+	}
+	return seedMetadataTemplate(dir)
 }
