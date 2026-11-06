@@ -877,6 +877,7 @@ func (o *Ouroboros) markLeiosEndorserBlockRelayOfferFrom(
 	o.pruneLeiosEndorserBlockCacheLocked(now)
 	current := o.leiosEndorserBlocks[key]
 	if current == nil {
+		o.evictLeiosIntentOnlyOverflowLocked(connectionID)
 		o.leiosEndorserBlockSeq++
 		o.leiosEndorserBlocks[key] = &leiosEndorserBlockData{
 			point: ocommon.Point{
@@ -905,6 +906,38 @@ func (o *Ouroboros) markLeiosEndorserBlockRelayOfferFrom(
 	}
 	o.leiosMu.Unlock()
 	o.enqueueLeiosRelayOffers(point, &updated)
+}
+
+// leiosMaxIntentOnlyPerConn bounds the intent-only cache entries one
+// connection may hold. Past it the connection replaces its own oldest, so
+// offers for arbitrary points cannot displace other peers' entries.
+const leiosMaxIntentOnlyPerConn = 32
+
+// evictLeiosIntentOnlyOverflowLocked drops connectionID's oldest intent-only
+// entries until it holds fewer than leiosMaxIntentOnlyPerConn. Callers hold
+// leiosMu. An empty connectionID (a local offer) is not limited.
+func (o *Ouroboros) evictLeiosIntentOnlyOverflowLocked(connectionID string) {
+	if connectionID == "" {
+		return
+	}
+	for {
+		count := 0
+		var oldest *leiosEndorserBlockData
+		for _, data := range o.leiosEndorserBlocks {
+			if data == nil || data.hasManifest() ||
+				data.relayOfferSource != connectionID {
+				continue
+			}
+			if oldest == nil || data.seq < oldest.seq {
+				oldest = data
+			}
+			count++
+		}
+		if count < leiosMaxIntentOnlyPerConn {
+			return
+		}
+		o.deleteLeiosEndorserBlockDataLocked(oldest)
+	}
 }
 
 func (o *Ouroboros) scheduleLeiosEndorserBlockValidation(

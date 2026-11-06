@@ -135,6 +135,33 @@ var errLeiosAnnouncementClockSkew = errors.New(
 	"announcement is within the permitted clock-skew window",
 )
 
+const (
+	// leiosOfferWindow and leiosOfferMaxPerPeer bound offers per connection.
+	// An honest relay offers each endorser block twice (manifest, then
+	// transactions) per slot, far below this. There is deliberately no
+	// process-wide limit, so one peer cannot starve the others.
+	leiosOfferWindow     = time.Minute
+	leiosOfferMaxPerPeer = 128
+	leiosOfferMaxPeers   = 1024
+)
+
+// admitLeiosOffer charges one offer to the connection's per-window budget.
+// It takes only its own small mutex, never the cache or source locks.
+func (o *Ouroboros) admitLeiosOffer(connectionID string) bool {
+	o.leiosOfferBudgetMu.Lock()
+	defer o.leiosOfferBudgetMu.Unlock()
+	if o.leiosOfferBudget == nil {
+		o.leiosOfferBudget = ratewindow.NewFixedWindow(
+			leiosOfferWindow,
+			leiosOfferMaxPerPeer,
+			0,
+			leiosOfferMaxPeers,
+		)
+	}
+	return o.leiosOfferBudget.Admit(connectionID, time.Now()) ==
+		ratewindow.Admitted
+}
+
 func (o *Ouroboros) recordInvalidLeiosAnnouncement(
 	connectionID string,
 	err error,
@@ -1292,6 +1319,51 @@ func (o *Ouroboros) handleInvalidLeiosAnnouncement(
 	return nil
 }
 
+// leiosOfferedPointPlausible reports whether a peer-offered endorser-block
+// point may be recorded. It needs no shared lock: the hash must be a
+// Blake2b-256 digest and, when the ledger can convert slots to time, the
+// slot must fall inside the window an announcement for it would be accepted
+// in (not in the future, not older than the cache TTL), and the connection
+// must be within its per-window offer budget. Offers outside it
+// are dropped without touching the endorser-block cache or the backfill
+// source table, so a peer cannot churn those structures, or evict sources
+// recorded for real points, with arbitrary points. Dropping is not
+// penalized: clock skew makes edge-of-window offers legitimate.
+func (o *Ouroboros) leiosOfferedPointPlausible(
+	point ocommon.Point,
+	connId string,
+) bool {
+	reason := ""
+	switch {
+	case !o.admitLeiosOffer(connId):
+		reason = "connection offer budget exceeded"
+	case len(point.Hash) != lcommon.Blake2b256Size:
+		reason = "invalid hash length"
+	case !isNilInterface(o.leiosAnnouncementLedger):
+		start, err := o.leiosAnnouncementLedger.SlotToTime(point.Slot)
+		switch {
+		case err != nil:
+			reason = "slot time unavailable"
+		case time.Until(start) > leiosAnnouncementClockSkew:
+			reason = "slot in the future"
+		case time.Since(start) > leiosEndorserBlockCacheTTL:
+			reason = "slot too old"
+		}
+	}
+	if reason == "" {
+		return true
+	}
+	o.config.Logger.Debug(
+		"dropping leios offer for implausible point",
+		"component", "network",
+		"protocol", "leios-notify",
+		"connection_id", connId,
+		"slot", point.Slot,
+		"reason", reason,
+	)
+	return false
+}
+
 func (o *Ouroboros) leiosnotifyClientNotification(
 	ctx oleiosnotify.CallbackContext,
 	msg protocol.Message,
@@ -1311,6 +1383,11 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 		}
 		return nil
 	case *oleiosnotify.MsgBlockOffer:
+		// Validate the peer-supplied point before it can touch the shared
+		// cache or its lock.
+		if !o.leiosOfferedPointPlausible(m.Point, connId) {
+			return nil
+		}
 		o.markLeiosEndorserBlockRelayOfferFrom(m.Point, connId)
 		// While the ledger is deeply behind the head, do not prefetch this
 		// head endorser block: it would expire before the ledger reaches it and
@@ -1444,6 +1521,11 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 			)
 		})
 	case *oleiosnotify.MsgBlockTxsOffer:
+		// Validate the peer-supplied point before it can touch the shared
+		// cache, the backfill-source table, or their locks.
+		if !o.leiosOfferedPointPlausible(m.Point, connId) {
+			return nil
+		}
 		o.markLeiosEndorserBlockRelayOfferFrom(m.Point, connId)
 		o.recordLeiosBackfillSource(
 			m.Point,

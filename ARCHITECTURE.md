@@ -5274,7 +5274,15 @@ transaction values are the unwrapped `block_transaction` CBOR, `[body,
 witnesses, auxiliary_data / null, is_valid]`, and the manifest hash and size
 cover exactly those bytes. The forger converts mempool encodings to that form
 with `is_valid` true, and the apply path decodes it so a transaction with
-`is_valid` false consumes its collateral and creates no outputs. On a notify
+`is_valid` false consumes its collateral and creates no outputs. Block and
+transactions offers are screened before they touch the endorser-block cache or the
+backfill-source table: the hash must be 32 bytes, the slot must lie between the
+announcement clock-skew bound and the cache TTL when a ledger is wired, and each
+connection has a per-minute offer budget (no process-wide limit, so one peer
+cannot starve others). Each connection may also hold only a bounded number of
+intent-only cache entries and backfill-source points, replacing its own oldest
+past the cap, so offers for arbitrary points cannot evict another peer's sources.
+Dropped offers are not penalized. On a notify
 block offer, `ouroboros/` fetches the endorser-block manifest over leios-fetch,
 decodes and hash-validates it, rejects it if the fetched body's length does not
 match the offer's declared size (`MsgBlockOffer.Size`) or if caching it would
