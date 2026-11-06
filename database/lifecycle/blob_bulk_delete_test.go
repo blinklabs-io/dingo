@@ -103,52 +103,6 @@ func TestDeleteBlocksAfterRemovesOnlyBlocksAboveThreshold(t *testing.T) {
 	}
 }
 
-// TestDeleteBlocksAfterNoopWhenTipAtOrBelowThreshold verifies that a
-// threshold at or above the current tip deletes nothing.
-func TestDeleteBlocksAfterNoopWhenTipAtOrBelowThreshold(t *testing.T) {
-	t.Parallel()
-
-	db := newTestDB(t)
-	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
-
-	blocksDeleted, err := lifecycle.DeleteBlocksAfter(
-		context.Background(), db, 5, 1, 0,
-	)
-	require.NoError(t, err)
-	require.Zero(t, blocksDeleted)
-
-	_, err = db.BlockByIndex(1, nil)
-	require.NoError(t, err)
-}
-
-// TestDeleteBlocksAfterStopsAtMaxUint64TipWithoutWrapping guards a
-// regression batchEnd's extraction could reintroduce: once the batch
-// whose end equals tipID finishes, advancing via start = end + 1 wraps to
-// 0 when tipID is math.MaxUint64. An unguarded loop would then reopen a
-// batch spanning [0, batchSize-1] and keep walking upward indefinitely,
-// deleting blocks far below afterID along the way. Block 1 sits well
-// below afterID here and must survive; a bounded context turns a
-// reintroduced wraparound into a fast, clear failure instead of a hang.
-func TestDeleteBlocksAfterStopsAtMaxUint64TipWithoutWrapping(t *testing.T) {
-	t.Parallel()
-
-	db := newTestDB(t)
-	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	tipID := uint64(math.MaxUint64)
-	blocksDeleted, err := lifecycle.DeleteBlocksAfter(
-		ctx, db, tipID-1, tipID, 0,
-	)
-	require.NoError(t, err)
-	require.Zero(t, blocksDeleted)
-
-	_, err = db.BlockByIndex(1, nil)
-	require.NoError(t, err, "block 1 is far below afterID and must survive")
-}
-
 // TestDeleteBlocksAfterRespectsSmallBatchSize verifies that a batch size
 // forcing multiple transactions still deletes exactly the same blocks.
 func TestDeleteBlocksAfterRespectsSmallBatchSize(t *testing.T) {
@@ -175,66 +129,6 @@ func TestDeleteBlocksAfterRespectsSmallBatchSize(t *testing.T) {
 		_, err := db.BlockByIndex(id, nil)
 		require.ErrorIs(t, err, models.ErrBlockNotFound)
 	}
-}
-
-// TestDeleteBlocksAfterNoticesCancellationMidBatch guards against
-// a real bug: ctx was only checked once per batch (before
-// entering that batch's transaction), so with the default 10,000-block
-// batch size, a cancellation landing partway through a single large batch
-// used to sit unnoticed until the entire batch finished deleting —
-// potentially a long delay for a disaster-recovery truncate an operator
-// just asked to cancel. This uses a single batch (batchSize larger than
-// the whole block range) and a context that reports "not yet cancelled"
-// for exactly the one check made before the batch starts, then
-// "cancelled" for every check after that: with only a once-per-batch
-// check, that single pre-batch check passes and the whole batch (all
-// blocks) completes with no error; with a per-block check, the very
-// first block inside the batch observes the cancellation, so the whole
-// batch's transaction rolls back and no blocks are deleted at all.
-func TestDeleteBlocksAfterNoticesCancellationMidBatch(t *testing.T) {
-	t.Parallel()
-
-	db := newTestDB(t)
-	const numBlocks = 20
-	for id := uint64(1); id <= numBlocks; id++ {
-		require.NoError(t, db.BlockCreate(testBlock(id, byte(id)), nil))
-	}
-
-	// batchSize=0 defaults to DefaultBlockDeleteBatchSize (10,000), well
-	// above numBlocks, so DeleteBlocksAfter processes every block in a
-	// single batch/transaction.
-	ctx := &cancelAfterNErrChecks{Context: context.Background(), n: 1}
-	blocksDeleted, err := lifecycle.DeleteBlocksAfter(ctx, db, 0, numBlocks, 0)
-	require.ErrorIs(t, err, context.Canceled)
-	require.Zero(
-		t, blocksDeleted,
-		"a rolled-back batch must not be counted as deleted",
-	)
-
-	for id := uint64(1); id <= numBlocks; id++ {
-		_, err := db.BlockByIndex(id, nil)
-		require.NoErrorf(
-			t, err,
-			"block %d must survive: the whole batch's transaction must "+
-				"roll back once cancellation is noticed mid-batch", id,
-		)
-	}
-}
-
-// TestDeleteBlocksAfterCanceledContext verifies that a pre-cancelled
-// context is caught before any batch runs, returning context.Canceled.
-func TestDeleteBlocksAfterCanceledContext(t *testing.T) {
-	t.Parallel()
-
-	db := newTestDB(t)
-	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
-	require.NoError(t, db.BlockCreate(testBlock(2, 0x02), nil))
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	blocksDeleted, err := lifecycle.DeleteBlocksAfter(ctx, db, 0, 2, 0)
-	require.ErrorIs(t, err, context.Canceled)
-	require.Zero(t, blocksDeleted)
 }
 
 // countingBlobStore wraps a real blob.BlobStore and counts calls to the
@@ -287,6 +181,22 @@ func (c *countingBlobStore) reset() {
 // measure how many times DeleteBlocksAfter calls into the blob store.
 func newCountingTestDB(t *testing.T) (*database.Database, *countingBlobStore) {
 	t.Helper()
+	var counting *countingBlobStore
+	db := newWrappedBlobTestDB(t, func(real blob.BlobStore) blob.BlobStore {
+		counting = &countingBlobStore{BlobStore: real}
+		return counting
+	})
+	return db, counting
+}
+
+// newWrappedBlobTestDB composes a real badger+sqlite test database whose blob
+// store is passed through wrap, so a test can inject a storage fault or count
+// calls without rebuilding the provider plumbing.
+func newWrappedBlobTestDB(
+	t *testing.T,
+	wrap func(blob.BlobStore) blob.BlobStore,
+) *database.Database {
+	t.Helper()
 	config := &database.Config{DataDir: t.TempDir()}
 	host := plugin.NewHost()
 	require.NoError(t, badger.RegisterProvider(host))
@@ -298,7 +208,6 @@ func newCountingTestDB(t *testing.T) (*database.Database, *countingBlobStore) {
 		blob.ProviderDependencies{DataDir: config.DataDir},
 	)
 	require.NoError(t, err)
-	counting := &countingBlobStore{BlobStore: realBlob}
 
 	metadataStore, err := plugin.Resolve[metadata.MetadataStore](
 		context.Background(), host,
@@ -310,14 +219,14 @@ func newCountingTestDB(t *testing.T) (*database.Database, *countingBlobStore) {
 	db, err := database.New(
 		context.Background(),
 		config,
-		database.Stores{Blob: counting, Metadata: metadataStore},
+		database.Stores{Blob: wrap(realBlob), Metadata: metadataStore},
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		_ = db.Close()
 		_ = host.Stop(context.Background())
 	})
-	return db, counting
+	return db
 }
 
 // TestDeleteBlocksAfterSkipsSparseGapWithoutPerIDLookups verifies sparse
@@ -419,42 +328,9 @@ func newErroringIteratorTestDB(
 	iterErr error,
 ) *database.Database {
 	t.Helper()
-	config := &database.Config{DataDir: t.TempDir()}
-	host := plugin.NewHost()
-	require.NoError(t, badger.RegisterProvider(host))
-	require.NoError(t, dbtest.RegisterSQLiteProvider(host))
-
-	realBlob, err := plugin.Resolve[blob.BlobStore](
-		context.Background(), host,
-		plugin.CapabilityStorageBlob, "badger", testutil.BadgerBlobConfig(),
-		blob.ProviderDependencies{DataDir: config.DataDir},
-	)
-	require.NoError(t, err)
-
-	metadataStore, err := plugin.Resolve[metadata.MetadataStore](
-		context.Background(), host,
-		plugin.CapabilityStorageMetadata, "sqlite", nil,
-		metadata.ProviderDependencies{DataDir: config.DataDir},
-	)
-	require.NoError(t, err)
-
-	db, err := database.New(
-		context.Background(),
-		config,
-		database.Stores{
-			Blob: &erroringIteratorBlobStore{
-				BlobStore: realBlob,
-				err:       iterErr,
-			},
-			Metadata: metadataStore,
-		},
-	)
-	require.NoError(t, err)
-	t.Cleanup(func() {
-		_ = db.Close()
-		_ = host.Stop(context.Background())
+	return newWrappedBlobTestDB(t, func(real blob.BlobStore) blob.BlobStore {
+		return &erroringIteratorBlobStore{BlobStore: real, err: iterErr}
 	})
-	return db
 }
 
 // TestDeleteBlocksAfterSurfacesIteratorErrorInsteadOfTreatingItAsEmptyRange
@@ -546,43 +422,9 @@ func newMidWalkErrorTestDB(
 	iterErr error,
 ) *database.Database {
 	t.Helper()
-	config := &database.Config{DataDir: t.TempDir()}
-	host := plugin.NewHost()
-	require.NoError(t, badger.RegisterProvider(host))
-	require.NoError(t, dbtest.RegisterSQLiteProvider(host))
-
-	realBlob, err := plugin.Resolve[blob.BlobStore](
-		context.Background(), host,
-		plugin.CapabilityStorageBlob, "badger", testutil.BadgerBlobConfig(),
-		blob.ProviderDependencies{DataDir: config.DataDir},
-	)
-	require.NoError(t, err)
-
-	metadataStore, err := plugin.Resolve[metadata.MetadataStore](
-		context.Background(), host,
-		plugin.CapabilityStorageMetadata, "sqlite", nil,
-		metadata.ProviderDependencies{DataDir: config.DataDir},
-	)
-	require.NoError(t, err)
-
-	db, err := database.New(
-		context.Background(),
-		config,
-		database.Stores{
-			Blob: &midWalkErrorBlobStore{
-				BlobStore: realBlob,
-				n:         n,
-				err:       iterErr,
-			},
-			Metadata: metadataStore,
-		},
-	)
-	require.NoError(t, err)
-	t.Cleanup(func() {
-		_ = db.Close()
-		_ = host.Stop(context.Background())
+	return newWrappedBlobTestDB(t, func(real blob.BlobStore) blob.BlobStore {
+		return &midWalkErrorBlobStore{BlobStore: real, n: n, err: iterErr}
 	})
-	return db
 }
 
 // TestDeleteBlocksAfterSurfacesIteratorErrorPartwayThroughWalk guards the
@@ -836,39 +678,9 @@ func (c *cloudLikeBlobStore) DeleteTx(txn types.Txn, txHash []byte) error {
 // the real GCS/S3 plugins behave.
 func newCloudLikeTestDB(t *testing.T) *database.Database {
 	t.Helper()
-	config := &database.Config{DataDir: t.TempDir()}
-	host := plugin.NewHost()
-	require.NoError(t, badger.RegisterProvider(host))
-	require.NoError(t, dbtest.RegisterSQLiteProvider(host))
-
-	realBlob, err := plugin.Resolve[blob.BlobStore](
-		context.Background(), host,
-		plugin.CapabilityStorageBlob, "badger", testutil.BadgerBlobConfig(),
-		blob.ProviderDependencies{DataDir: config.DataDir},
-	)
-	require.NoError(t, err)
-
-	metadataStore, err := plugin.Resolve[metadata.MetadataStore](
-		context.Background(), host,
-		plugin.CapabilityStorageMetadata, "sqlite", nil,
-		metadata.ProviderDependencies{DataDir: config.DataDir},
-	)
-	require.NoError(t, err)
-
-	db, err := database.New(
-		context.Background(),
-		config,
-		database.Stores{
-			Blob:     &cloudLikeBlobStore{BlobStore: realBlob},
-			Metadata: metadataStore,
-		},
-	)
-	require.NoError(t, err)
-	t.Cleanup(func() {
-		_ = db.Close()
-		_ = host.Stop(context.Background())
+	return newWrappedBlobTestDB(t, func(real blob.BlobStore) blob.BlobStore {
+		return &cloudLikeBlobStore{BlobStore: real}
 	})
-	return db
 }
 
 // TestDeleteBlocksAfterHonestlyReportsProgressOnCloudLikeMidBatchFailureAndResumeIsSafe
@@ -1016,40 +828,12 @@ func newPartialCommitTestDB(
 	t *testing.T,
 ) (*database.Database, *partialCommitBlobStore) {
 	t.Helper()
-	config := &database.Config{DataDir: t.TempDir()}
-	host := plugin.NewHost()
-	require.NoError(t, badger.RegisterProvider(host))
-	require.NoError(t, dbtest.RegisterSQLiteProvider(host))
-
-	realBlob, err := plugin.Resolve[blob.BlobStore](
-		context.Background(), host,
-		plugin.CapabilityStorageBlob, "badger", testutil.BadgerBlobConfig(),
-		blob.ProviderDependencies{DataDir: config.DataDir},
-	)
-	require.NoError(t, err)
-
-	metadataStore, err := plugin.Resolve[metadata.MetadataStore](
-		context.Background(), host,
-		plugin.CapabilityStorageMetadata, "sqlite", nil,
-		metadata.ProviderDependencies{DataDir: config.DataDir},
-	)
-	require.NoError(t, err)
-
-	blobStore := &partialCommitBlobStore{
-		cloudLikeBlobStore: &cloudLikeBlobStore{BlobStore: realBlob},
-	}
-	db, err := database.New(
-		context.Background(),
-		config,
-		database.Stores{
-			Blob:     blobStore,
-			Metadata: metadataStore,
-		},
-	)
-	require.NoError(t, err)
-	t.Cleanup(func() {
-		_ = db.Close()
-		_ = host.Stop(context.Background())
+	var blobStore *partialCommitBlobStore
+	db := newWrappedBlobTestDB(t, func(real blob.BlobStore) blob.BlobStore {
+		blobStore = &partialCommitBlobStore{
+			cloudLikeBlobStore: &cloudLikeBlobStore{BlobStore: real},
+		}
+		return blobStore
 	})
 	return db, blobStore
 }
@@ -1085,4 +869,65 @@ func TestDeleteBlocksAfterDoesNotClaimExactCountOnPartialCommit(t *testing.T) {
 		"the committed batch counts; the partially applied one contributes "+
 			"nothing because how much of it survived is not reported",
 	)
+}
+
+// None of these calls may delete anything, so they share one database and
+// each case re-checks that every block survived.
+func TestDeleteBlocksAfterLeavesBlocksUntouched(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	const numBlocks = 20
+	for id := uint64(1); id <= numBlocks; id++ {
+		require.NoError(t, db.BlockCreate(testBlock(id, byte(id)), nil))
+	}
+	requireAllPresent := func(t *testing.T, msg string) {
+		t.Helper()
+		for id := uint64(1); id <= numBlocks; id++ {
+			_, err := db.BlockByIndex(id, nil)
+			require.NoErrorf(t, err, "block %d must survive: %s", id, msg)
+		}
+	}
+
+	t.Run("tip at or below the threshold", func(t *testing.T) {
+		blocksDeleted, err := lifecycle.DeleteBlocksAfter(
+			context.Background(), db, 5, 1, 0,
+		)
+		require.NoError(t, err)
+		require.Zero(t, blocksDeleted)
+		requireAllPresent(t, "nothing lies above the threshold")
+	})
+	t.Run("max uint64 tip does not wrap", func(t *testing.T) {
+		// Once the batch ending at tipID finishes, start = end + 1 wraps to 0
+		// when tipID is MaxUint64; an unguarded loop would then walk upward
+		// through blocks far below afterID. The bounded context turns a
+		// reintroduced wraparound into a fast failure instead of a hang.
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		tipID := uint64(math.MaxUint64)
+		blocksDeleted, err := lifecycle.DeleteBlocksAfter(
+			ctx, db, tipID-1, tipID, 0,
+		)
+		require.NoError(t, err)
+		require.Zero(t, blocksDeleted)
+		requireAllPresent(t, "they are far below afterID")
+	})
+	t.Run("cancellation mid-batch rolls the batch back", func(t *testing.T) {
+		ctx := &cancelAfterNErrChecks{Context: context.Background(), n: 1}
+		blocksDeleted, err := lifecycle.DeleteBlocksAfter(ctx, db, 0, numBlocks, 0)
+		require.ErrorIs(t, err, context.Canceled)
+		require.Zero(
+			t, blocksDeleted,
+			"a rolled-back batch must not be counted as deleted",
+		)
+		requireAllPresent(t, "the whole batch must roll back once cancellation is noticed")
+	})
+	t.Run("already canceled context", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		blocksDeleted, err := lifecycle.DeleteBlocksAfter(ctx, db, 0, numBlocks, 0)
+		require.ErrorIs(t, err, context.Canceled)
+		require.Zero(t, blocksDeleted)
+		requireAllPresent(t, "the context was canceled before any work")
+	})
 }
