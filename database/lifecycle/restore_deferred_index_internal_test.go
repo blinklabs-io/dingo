@@ -433,20 +433,8 @@ func TestSyncDirTreeSyncsEveryDirectory(t *testing.T) {
 // failure earlier in the pipeline leaves it, not silently activated
 // anyway despite durability being unconfirmed.
 func TestRestoreValidatedFailsClosedWhenStagingSyncFails(t *testing.T) {
-	db := newRestoreInternalTestDB(t)
-	require.NoError(t, db.BlockCreate(newRestoreInternalTestBlock(), nil))
-
 	snapshotDir := snapshotTestDir(t, "snap")
-	_, err := Snapshot(
-		context.Background(),
-		db,
-		snapshotDir,
-		TriggerManual,
-		"test",
-		"badger",
-		"sqlite",
-	)
-	require.NoError(t, err)
+	snapshotForTrustTest(t, snapshotDir)
 
 	injectedErr := errors.New("injected staging sync failure")
 	orig := syncDir
@@ -454,7 +442,7 @@ func TestRestoreValidatedFailsClosedWhenStagingSyncFails(t *testing.T) {
 	t.Cleanup(func() { syncDir = orig })
 
 	targetDir := filepath.Join(t.TempDir(), "restored")
-	_, err = Restore(
+	_, err := Restore(
 		context.Background(),
 		newRestoreInternalTestHost(t),
 		nil,
@@ -478,20 +466,8 @@ func TestRestoreValidatedFailsClosedWhenStagingSyncFails(t *testing.T) {
 // renamed into place and is perfectly usable, "restore succeeded" must
 // not be reported when this durability guarantee could not be confirmed.
 func TestRestoreValidatedSurfacesPostRenameSyncFailure(t *testing.T) {
-	db := newRestoreInternalTestDB(t)
-	require.NoError(t, db.BlockCreate(newRestoreInternalTestBlock(), nil))
-
 	snapshotDir := snapshotTestDir(t, "snap")
-	_, err := Snapshot(
-		context.Background(),
-		db,
-		snapshotDir,
-		TriggerManual,
-		"test",
-		"badger",
-		"sqlite",
-	)
-	require.NoError(t, err)
+	snapshotForTrustTest(t, snapshotDir)
 
 	parentDir := t.TempDir()
 	targetDir := filepath.Join(parentDir, "restored")
@@ -506,7 +482,7 @@ func TestRestoreValidatedSurfacesPostRenameSyncFailure(t *testing.T) {
 	}
 	t.Cleanup(func() { syncDir = orig })
 
-	_, err = Restore(
+	_, err := Restore(
 		context.Background(),
 		newRestoreInternalTestHost(t),
 		nil,
