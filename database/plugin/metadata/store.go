@@ -1072,6 +1072,13 @@ type LeiosClosureBatcher interface {
 	) error
 }
 
+// ValidatedBlockBatcher optionally defers API-only transaction indexes until
+// the end of a validated block. UTxOs, assets, datums, scripts and stake must
+// remain visible to the next transaction's validation.
+type ValidatedBlockBatcher interface {
+	NewValidatedBlockBatchAccumulator() types.MetadataBatchAccumulator
+}
+
 // TransactionStore owns chain transactions: the transaction table, the
 // per-transaction metadata it carries, and the address and metadata-label
 // indexes derived from it.
@@ -3173,7 +3180,7 @@ type MetadataStore interface {
 
 	// FoldRewardAccountOutputs marks a credential's unfolded credits of the
 	// given credited rounds as added to account.reward. Call it in the
-	// transaction that adds them.
+	// transaction that establishes that balance.
 	FoldRewardAccountOutputs(
 		[]uint64, // snapshot epochs of the credited rounds
 		uint8, // credentialTag
@@ -3217,7 +3224,8 @@ type MetadataStore interface {
 
 	// ClaimUnfoldedRewardCredits marks up to limit unfolded credits of one
 	// credited round folded and returns them, for the caller to write to
-	// their accounts in the same transaction.
+	// their accounts in the same transaction, or to acknowledge a certified
+	// imported state that already covers those credits.
 	ClaimUnfoldedRewardCredits(
 		uint64, // snapshotEpoch
 		int, // limit

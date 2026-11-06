@@ -272,6 +272,14 @@ Existing nonpaged callers retain their pagination and matching semantics. See
 the [MCP guide](docs/mcp/README.md#metadata-and-query-semantics) for page bounds
 and live-state consistency semantics.
 
+Validated API-mode blocks batch output-address rows, transaction address history,
+key witnesses and metadata labels until block completion. UTxOs, assets, datums,
+scripts and live stake remain visible after each transaction. The block-local
+accumulator flushes before returning from block application; a flush failure
+aborts the enclosing transaction. Providers without the optional validated-block
+batch capability keep immediate index writes. Trusted replay retains its
+chunk-owned accumulator and flush boundary.
+
 Certified Leios closures batch API-only output-address rows with transaction
 address history, key witnesses and metadata labels. UTxO rows, native assets,
 datums, scripts and live stake changes remain visible before the next
@@ -3421,6 +3429,20 @@ prefers the newest row for an epoch, so a derived row would replace it. A row
 for an older epoch can only be one backfill derived, possibly before the
 proposals it depends on were stored, and is derived again.
 
+##### Imported reward credit completion
+
+A certified account balance already includes applied reward rounds at or before
+the snapshot anchor, including rewards subsequently withdrawn. Account import
+marks those rounds' spendable, unguarded outputs folded in the same transaction
+as each balance replacement. It preserves applied-round markers, journals,
+already folded outputs, and later rounds.
+
+Before checkpointing cert state, import drains remaining covered outputs without
+adding credits, including credentials absent from the certified account set.
+The drain commits bounded batches and repeats after interruption. A resumed
+cert-state checkpoint from an older importer also drains covered outputs; a
+completed tip checkpoint leaves subsequent ledger activity unchanged.
+
 ### Pools
 
 | Table | Columns | Keys / indexes | Relationships and notes |
@@ -3620,6 +3642,25 @@ validation treats anchor provenance as equivalent to the certified boundary
 provenance. Startup-reconstructed historical rows retain their post-boundary
 capture slot so they remain distinguishable and are not used for hard
 leader-threshold rejection.
+
+#### Imported authoritative reward inputs
+
+An authoritative reward snapshot records when the basis was captured; its stake
+rows may still be pending in the deferred writer. Import preserves an existing
+authoritative basis only when its expected stake-row count is present and its
+matching pending marker is absent. An incomplete basis is completed from the
+imported mark, set, or go distribution only after its aggregate totals and every
+retained pool stake, owner stake, and delegator count reconcile. Repair
+preserves the authoritative snapshot and pool rows, upserts missing or changed
+stake rows, and invalidates only that uncredited epoch's precomputed outputs and
+cursor in the same transaction. An already credited epoch cannot be repaired.
+
+`cmd/reward-input-repair` exposes the same derivation for offline SQLite core
+databases. The operator supplies a previously verified ledger snapshot and an
+epoch within its mark/set/go window. It holds the Badger lock, opens metadata
+read-only by default, and reports the canonical comparison without changing
+state. `--apply` commits only a fully reconciled single-epoch repair. It does
+not import UTxOs, migrate schema, replace account balances, or move the tip.
 
 #### RewardStakeCalculationVersion and the Startup Provenance Gate
 

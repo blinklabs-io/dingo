@@ -56,6 +56,7 @@ func transactionFee(transaction lcommon.Transaction) types.Uint64 {
 // prepared on a transaction must not escape it.
 type transactionBatchAccumulator struct {
 	leiosAPIRowsOnly     bool
+	validatedAPIRowsOnly bool
 	transactionInsert    *sql.Stmt
 	mysql                bool
 	sqlite               bool
@@ -884,6 +885,23 @@ func (s *Store) NewLeiosClosureBatchAccumulator() types.MetadataBatchAccumulator
 	}
 }
 
+// NewValidatedBlockBatchAccumulator defers API indexes while keeping every
+// stateful transaction effect visible to subsequent validation.
+func (s *Store) NewValidatedBlockBatchAccumulator() types.MetadataBatchAccumulator {
+	if s.storageMode != types.StorageModeAPI {
+		return nil
+	}
+	return &transactionBatchAccumulator{
+		sqlite:               s.dialect.Name() == "sqlite",
+		validatedAPIRowsOnly: true,
+		sqlOperations:        s.sqlOperations,
+	}
+}
+
+func (a *transactionBatchAccumulator) apiRowsOnly() bool {
+	return a.leiosAPIRowsOnly || a.validatedAPIRowsOnly
+}
+
 // LeiosClosureRowsOnly identifies the ordered API-detail accumulator.
 // Retained UTxO staging is a separate optional capability.
 func (a *transactionBatchAccumulator) LeiosClosureRowsOnly() bool { return a.leiosAPIRowsOnly }
@@ -1319,7 +1337,7 @@ func (s *Store) setTransactionWithAccumulator(
 				return err
 			}
 			if batchedAccumulator != nil &&
-				batchedAccumulator.leiosAPIRowsOnly {
+				batchedAccumulator.apiRowsOnly() {
 				if err := staged.flushExceptClosureAPIRows(ctx, db, s.dialect.ParameterLimit()); err != nil {
 					return err
 				}
@@ -1532,7 +1550,7 @@ func (s *Store) setTransactionWithAccumulator(
 				producedStakeDeltas,
 			)
 			if batchedAccumulator != nil &&
-				!batchedAccumulator.leiosAPIRowsOnly {
+				!batchedAccumulator.apiRowsOnly() {
 				return nil
 			}
 			return s.refreshRewardLiveStakeDeltas(
@@ -1549,7 +1567,7 @@ func (s *Store) setTransactionWithAccumulator(
 		return err
 	}
 	retained := batchedAccumulator.overlay != nil && batchedAccumulator.overlay.retainHistory
-	if !batchedAccumulator.leiosAPIRowsOnly || retained {
+	if !batchedAccumulator.apiRowsOnly() || retained {
 		if err := batchedAccumulator.addStakeDeltas(batchedStakeDeltas, point.Slot); err != nil {
 			return err
 		}

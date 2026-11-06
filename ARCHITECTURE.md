@@ -1223,7 +1223,12 @@ these series carries a connection or peer label.
   `apply` takes one sample per delta-batch flush (which includes the
   replay-row flush) and, on a validating block, one sample per validated
   transaction, because that write happens as soon as the transaction
-  validates and leaves the chunk's batch flush nearly empty. A certified Leios
+  validates and leaves the chunk's batch flush nearly empty. API-mode validated
+  blocks also record their final API-index flush as `apply`: query-only indexes
+  are queued until the block finishes, while every stateful transaction effect
+  stays visible to subsequent validation. Providers without this capability
+  retain immediate writes; trusted replay keeps its existing chunk-owned flush.
+  A certified Leios
   endorser block's transactions take the same per-transaction `validate` and
   `apply` samples; when its closure is applied at an epoch boundary those
   samples fall inside `epoch_rollover`. `prepare` and `commit` are recorded
@@ -12541,6 +12546,11 @@ Package layout:
    `bootstrap_v2.go`, which orchestrates the v2 digest/immutable/ancillary
    workflow
 
+At the chain root, the genesis signature authenticates the protocol message.
+Its signed next aggregate verification key and protocol-parameter hash must
+match the genesis certificate's own key and parameters, which same-epoch
+successors inherit.
+
 The certificate-chain walk (`bootstrap.go`) runs before any certificate is
 trusted, so it is bounded on every axis the aggregator controls. Each
 certificate body is read through a limit of 8 MiB with overflow detection, and
@@ -20909,9 +20919,15 @@ POOLREAP precedes SNAP.
    which pins a snapshot of the committed boundary before any later block
    commits. A background job decides RATIFY and EXPIRY on that snapshot and
    writes the marks, at the boundary slot, in its own transaction under
-   `rewardPrecomputeWriteMu`. The next boundary first writes a decision the
-   job has not, waiting for the job to decide but never for its write, so the
-   boundary holding the writer cannot wait on a transaction that needs it.
+   `rewardPrecomputeWriteMu`. The boundary transaction itself updates dormant
+   DRep expiries and records the dormant epoch when its new-epoch proposal set
+   is empty, before later blocks can register or update DReps. The job's
+   expiry-driven descendant removal uses the proposal set captured by its
+   pinned boundary read, so proposals submitted after the boundary cannot be
+   removed by that boundary's RATIFY result. The next boundary first writes a
+   decision the job has not, waiting for the job to decide but never for its
+   write, so the boundary holding the writer cannot wait on a transaction that
+   needs it.
    RATIFY stays in the boundary transaction when a major-version change runs
    HARDFORK after it and when no in-memory SPO state was resolved, because each
    would make the committed state differ from what RATIFY reads at its position

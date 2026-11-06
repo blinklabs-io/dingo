@@ -810,6 +810,7 @@ func newV2Fixture(t *testing.T, opts v2FixtureOptions) *v2Fixture {
 	genesis.ProtocolMessage.
 		MessageParts["next_aggregate_verification_key"] =
 		leaf.AggregateVerificationKey
+	genesis.AggregateVerificationKey = leaf.AggregateVerificationKey
 	signTestGenesisCertificate(t, &genesis, genesisPrivateKey)
 	leaf.PreviousHash = genesis.Hash
 	finalizeTestCertificate(t, &leaf)
