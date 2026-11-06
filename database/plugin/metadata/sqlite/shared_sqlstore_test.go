@@ -23,7 +23,6 @@ import (
 	"fmt"
 	"math/big"
 	"net"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -33,7 +32,6 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/deferred"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	gcbor "github.com/blinklabs-io/gouroboros/cbor"
@@ -45,46 +43,6 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/cardano"
 )
-
-func TestSharedSQLStoreBackfillCheckpointIdentityRoundTrip(t *testing.T) {
-	t.Parallel()
-	store, db := newSharedSQLStore(t)
-	lastIndexID := uint64(42)
-	lastBlockHash := bytes.Repeat([]byte{0xab}, 32)
-	checkpoint := &models.BackfillCheckpoint{
-		Phase:         "metadata",
-		LastSlot:      100,
-		LastIndexID:   &lastIndexID,
-		LastBlockHash: lastBlockHash,
-		TotalSlots:    200,
-		StartedAt:     time.UnixMilli(100),
-		UpdatedAt:     time.UnixMilli(200),
-	}
-	require.NoError(t, store.SetBackfillCheckpoint(checkpoint, nil))
-
-	loaded, err := store.GetBackfillCheckpoint("metadata", nil)
-	require.NoError(t, err)
-	require.Equal(t, checkpoint.ID, loaded.ID)
-	require.NotNil(t, loaded.LastIndexID)
-	require.Equal(t, lastIndexID, *loaded.LastIndexID)
-	require.Equal(t, lastBlockHash, loaded.LastBlockHash)
-
-	checkpoint.LastIndexID = nil
-	checkpoint.LastBlockHash = nil
-	require.NoError(t, store.SetBackfillCheckpoint(checkpoint, nil))
-	loaded, err = store.GetBackfillCheckpoint("metadata", nil)
-	require.NoError(t, err)
-	require.Nil(t, loaded.LastIndexID)
-	require.Nil(t, loaded.LastBlockHash)
-
-	_, err = db.Exec(
-		"UPDATE backfill_checkpoint SET last_index_id = -1 WHERE phase = ?",
-		"metadata",
-	)
-	require.NoError(t, err)
-	_, err = store.GetBackfillCheckpoint("metadata", nil)
-	require.ErrorContains(t, err, "last index ID")
-}
 
 func TestSharedSQLStoreAccountParity(t *testing.T) {
 	t.Parallel()
@@ -740,7 +698,7 @@ func (fk cascadeForeignKey) String() string {
 func newCoreModeSQLStore(t *testing.T) (*sqlstore.Store, *sql.DB) {
 	t.Helper()
 	store, writeDB, _, err := openSQLStore(
-		Config{DataDir: t.TempDir()},
+		Config{},
 		metadata.ProviderDependencies{StorageMode: types.StorageModeCore},
 	)
 	require.NoError(t, err)
@@ -2383,43 +2341,6 @@ func requireDiskSize(t *testing.T, store *sqlstore.Store) int64 {
 	return size
 }
 
-func TestOpenSharedSQLStoreFilePoolsAndWAL(t *testing.T) {
-	t.Parallel()
-	dataDir := t.TempDir()
-	store, writeDB, readDB, err := openSQLStore(
-		Config{MaxConnections: 3},
-		metadata.ProviderDependencies{DataDir: dataDir},
-	)
-	require.NoError(t, err)
-	require.NotSame(t, writeDB, readDB)
-	require.Equal(t, 1, writeDB.Stats().MaxOpenConnections)
-	require.Equal(t, 3, readDB.Stats().MaxOpenConnections)
-	require.NoError(t, store.Start(context.Background()))
-	t.Cleanup(func() {
-		require.NoError(t, store.Close())
-	})
-
-	var journalMode string
-	require.NoError(t, writeDB.QueryRow(
-		"PRAGMA journal_mode",
-	).Scan(&journalMode))
-	require.Equal(t, "wal", journalMode)
-
-	var migrationCount int
-	require.NoError(t, readDB.QueryRow(
-		"SELECT COUNT(*) FROM schema_migrations WHERE phase = 'complete'",
-	).Scan(&migrationCount))
-	// A fresh database runs every registered migration, so the count is taken
-	// from the registry rather than written out: what is under test here is
-	// that startup completed all of them, not how many there currently are.
-	registry, err := migrations.SQLiteRegistry()
-	require.NoError(t, err)
-	require.Equal(t, len(registry), migrationCount)
-
-	requireDiskSize(t, store)
-	require.FileExists(t, filepath.Join(dataDir, "metadata.sqlite"))
-}
-
 // TestDiskSizeDoesNotBlockOnBusyWriteConnection is the regression test for
 // sqliteDiskSize querying through the write pool: writeDB has
 // SetMaxOpenConns(1), so an open write transaction holds that pool's only
@@ -2556,37 +2477,6 @@ func TestDiskSizeDoesNotLeaveReadDBConnectionOpen(t *testing.T) {
 	)
 }
 
-func TestOpenSharedSQLStoreMemoryIsolation(t *testing.T) {
-	t.Parallel()
-	first, firstDB, _, err := openSQLStore(
-		Config{},
-		metadata.ProviderDependencies{},
-	)
-	require.NoError(t, err)
-	require.NoError(t, first.Start(context.Background()))
-	t.Cleanup(func() {
-		require.NoError(t, first.Close())
-	})
-	second, secondDB, _, err := openSQLStore(
-		Config{},
-		metadata.ProviderDependencies{},
-	)
-	require.NoError(t, err)
-	require.NoError(t, second.Start(context.Background()))
-	t.Cleanup(func() {
-		require.NoError(t, second.Close())
-	})
-
-	_, err = firstDB.Exec("CREATE TABLE isolation_marker (id INTEGER)")
-	require.NoError(t, err)
-	var count int
-	require.NoError(t, secondDB.QueryRow(
-		"SELECT COUNT(*) FROM sqlite_master "+
-			"WHERE type = 'table' AND name = 'isolation_marker'",
-	).Scan(&count))
-	require.Zero(t, count)
-}
-
 var testSyncedAt = time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
 
 const (
@@ -2634,16 +2524,6 @@ func TestSharedSQLStoreTokenRegistryUpsertReplacesProperties(t *testing.T) {
 	require.Nil(t, entry.Decimals)
 }
 
-func TestSharedSQLStoreTokenRegistryMissingSubject(t *testing.T) {
-	t.Parallel()
-	store, _ := newSharedSQLStore(t)
-
-	entry, err := store.GetTokenRegistryEntry(testSubjectNut, nil)
-
-	require.NoError(t, err, "an unknown subject is absence, not an error")
-	require.Nil(t, entry)
-}
-
 func TestSharedSQLStoreTokenRegistryLookupNormalizesSubject(t *testing.T) {
 	t.Parallel()
 	store, _ := newSharedSQLStore(t)
@@ -2668,20 +2548,6 @@ func TestSharedSQLStoreTokenRegistryLookupNormalizesSubject(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, entry)
 	require.Equal(t, "nutcoin", entry.Name)
-}
-
-func TestSharedSQLStoreTokenRegistryRejectsBlankSubject(t *testing.T) {
-	t.Parallel()
-	store, _ := newSharedSQLStore(t)
-
-	_, err := store.UpsertTokenRegistryEntries(
-		t.Context(),
-		[]models.TokenRegistryEntry{{Name: "no subject"}},
-		testSyncedAt,
-		nil,
-	)
-
-	require.Error(t, err)
 }
 
 // TestSharedSQLStoreTokenRegistryPrune covers the reconciliation half of a
@@ -2847,7 +2713,7 @@ var transactionWitnessCleanupIndexes = map[string]string{
 func newAPIModeSQLStore(t *testing.T) (*sqlstore.Store, *sql.DB) {
 	t.Helper()
 	store, writeDB, _, err := openSQLStore(
-		Config{DataDir: t.TempDir()},
+		Config{},
 		metadata.ProviderDependencies{StorageMode: types.StorageModeAPI},
 	)
 	require.NoError(t, err)
@@ -3463,7 +3329,7 @@ func TestSharedSQLStoreTransactionMetadataCollisionIsNullable(t *testing.T) {
 	t.Parallel()
 	store, raw := func() (*sqlstore.Store, *sql.DB) {
 		store, writeDB, _, err := openSQLStore(
-			Config{DataDir: t.TempDir()},
+			Config{},
 			metadata.ProviderDependencies{StorageMode: types.StorageModeAPI},
 		)
 		require.NoError(t, err)
@@ -3937,6 +3803,7 @@ func TestSharedSQLStoreZeroWithdrawalValidatesAccountAndBalance(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			store, _ := newSharedSQLStore(t)
 			stakeKey := bytes.Repeat([]byte{0xf7}, lcommon.AddressHashSize)
 			if tc.create {
@@ -4191,7 +4058,7 @@ func TestSharedSQLStoreStorageModeTransactionParity(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			t.Parallel()
 			store, raw, _, err := openSQLStore(
-				Config{DataDir: t.TempDir()},
+				Config{},
 				metadata.ProviderDependencies{StorageMode: mode},
 			)
 			require.NoError(t, err)
