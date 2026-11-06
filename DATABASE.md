@@ -3382,6 +3382,20 @@ prefers the newest row for an epoch, so a derived row would replace it. A row
 for an older epoch can only be one backfill derived, possibly before the
 proposals it depends on were stored, and is derived again.
 
+##### Imported reward credit completion
+
+A certified account balance already includes applied reward rounds at or before
+the snapshot anchor, including rewards subsequently withdrawn. Account import
+marks those rounds' spendable, unguarded outputs folded in the same transaction
+as each balance replacement. It preserves applied-round markers, journals,
+already folded outputs, and later rounds.
+
+Before checkpointing cert state, import drains remaining covered outputs without
+adding credits, including credentials absent from the certified account set.
+The drain commits bounded batches and repeats after interruption. A resumed
+cert-state checkpoint from an older importer also drains covered outputs; a
+completed tip checkpoint leaves subsequent ledger activity unchanged.
+
 ### Pools
 
 | Table | Columns | Keys / indexes | Relationships and notes |
