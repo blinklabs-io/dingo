@@ -24,6 +24,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -586,16 +587,19 @@ func TestLiveTruncateRebuildsStorageAndKeepsNodeUsable(t *testing.T) {
 // inactivity expiry must keep that gate enabled, with its exact
 // configured window, after a live truncate rebuilds its LedgerState --
 // not silently disabled until a full process restart.
-func TestLiveTruncateReinitializationPreservesDelegatorInactivityConfig(
+func TestLiveTruncateReinitializationPreservesConfig(
 	t *testing.T,
 ) {
 	t.Parallel()
 
-	const numBlocks = 20
+	const numBlocks = 25
 	n, points := newLiveLifecycleTestNode(t, numBlocks)
 
 	n.config.delegatorInactivityEnabled = true
 	n.config.delegatorInactivity = 42
+	require.NotNil(t, n.config.cfg)
+	n.config.cfg.GenesisBootstrap.LimitOnPatienceEnabled = true
+	n.config.cfg.GenesisBootstrap.LimitOnPatienceCapacity = 7
 
 	targetIndex := numBlocks / 2
 	targetSlot := points[targetIndex].Slot
@@ -617,36 +621,11 @@ func TestLiveTruncateReinitializationPreservesDelegatorInactivityConfig(
 		window,
 		"DelegatorInactivity window must survive live truncate reinitialization",
 	)
-}
 
-// TestLiveTruncateReinitializationPreservesSnapshotManagerDelegatorInactivityConfig
-// guards the companion gap to the test above: the rebuilt stake/reward
-// snapshot manager (n.snapshotMgr) also needs SetDelegatorInactivity called
-// with the operator's configured value before CaptureGenesisSnapshot/Start
-// locks its configuration -- reinitializeBackgroundManagers used to skip
-// this call entirely (unlike Run()'s identical one in node.go), so a live
-// restore/truncate would silently capture post-CIP-163 stake and reward
-// snapshots using pre-CIP behavior even though the operator enabled it.
-func TestLiveTruncateReinitializationPreservesSnapshotManagerDelegatorInactivityConfig(
-	t *testing.T,
-) {
-	t.Parallel()
-
-	const numBlocks = 20
-	n, points := newLiveLifecycleTestNode(t, numBlocks)
-
-	n.config.delegatorInactivityEnabled = true
-	n.config.delegatorInactivity = 42
-
-	targetIndex := numBlocks / 2
-	targetSlot := points[targetIndex].Slot
-
-	_, err := n.Truncate(context.Background(), dblifecycle.TruncateTarget{
-		Slot: &targetSlot,
-	})
-	require.NoError(t, err)
-
-	enabled, window := n.snapshotMgr.DelegatorInactivityConfig()
+	// The rebuilt stake/reward snapshot manager needs the same value before it
+	// locks its configuration, or post-CIP-163 snapshots would be captured
+	// with pre-CIP behavior.
+	enabled, window = n.snapshotMgr.DelegatorInactivityConfig()
 	require.True(
 		t,
 		enabled,
@@ -657,6 +636,30 @@ func TestLiveTruncateReinitializationPreservesSnapshotManagerDelegatorInactivity
 		uint64(42),
 		window,
 		"snapshot manager's DelegatorInactivity window must survive live truncate reinitialization",
+	)
+
+	// The chainsync state rebuilt by the truncate must use the configured
+	// Limit on Patience rather than the package defaults.
+	conn := gouroboros.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 3001},
+		RemoteAddr: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 4001},
+	}
+	require.True(t, n.chainsyncState.AddClientConnId(conn))
+	tc := n.chainsyncState.GetTrackedClient(conn)
+	require.NotNil(t, tc)
+	assert.InDelta(t, 7, tc.Patience.Tokens, 1e-9)
+
+	// The replacement handle may never have been analyzed, so the rebuilt
+	// planner statistics manager must run its startup pass on it and a
+	// further pass finds nothing to change.
+	require.NotNil(t, n.plannerStatsMgr)
+	result, err := n.plannerStatsMgr.RunStartup(context.Background())
+	require.NoError(t, err)
+	require.True(t, result.Supported)
+	require.False(
+		t,
+		result.Changed,
+		"the replacement handle must already have been optimized",
 	)
 }
 
@@ -2361,33 +2364,6 @@ func TestSecondLiveTruncateResumesTipAdvancement(t *testing.T) {
 	require.NoError(t, err)
 
 	addBlocksSerially(t, n, tailBlocks[5:], epochLength)
-}
-
-// A live truncate or restore replaces the database handle, possibly with one
-// that was never analyzed. The rebuilt planner statistics manager must run
-// its startup pass on the new handle rather than wait for the next epoch
-// rollover, so a further pass right after finds nothing to change.
-func TestLiveTruncateRunsPlannerStatsStartupOnReplacementHandle(t *testing.T) {
-	t.Parallel()
-
-	const numBlocks = 20
-	n, points := newLiveLifecycleTestNode(t, numBlocks)
-	targetSlot := points[numBlocks/2].Slot
-
-	_, err := n.Truncate(context.Background(), dblifecycle.TruncateTarget{
-		Slot: &targetSlot,
-	})
-	require.NoError(t, err)
-	require.NotNil(t, n.plannerStatsMgr)
-
-	result, err := n.plannerStatsMgr.RunStartup(context.Background())
-	require.NoError(t, err)
-	require.True(t, result.Supported)
-	require.False(
-		t,
-		result.Changed,
-		"the replacement handle must already have been optimized",
-	)
 }
 
 func TestStorageDependenciesResolveGenesisCertificate(t *testing.T) {

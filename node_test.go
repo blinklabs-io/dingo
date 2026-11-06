@@ -57,7 +57,6 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/apiconfig"
 	internalconfig "github.com/blinklabs-io/dingo/internal/config"
-	"github.com/blinklabs-io/dingo/internal/dblifecycle"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/kesagent"
@@ -442,32 +441,6 @@ func TestChainsyncConfigFitsConfiguredLocalRoots(t *testing.T) {
 	assert.Equal(t, 4, (&Node{config: NewConfig(WithTopologyConfig(mixed))}).chainsyncConfig().MaxClients)
 	n := &Node{config: NewConfig()}
 	assert.Equal(t, chainsync.DefaultMaxClients, n.chainsyncConfig().MaxClients)
-}
-
-// TestLiveTruncateKeepsLimitOnPatience pins that the chainsync state rebuilt
-// by a live truncate uses the configured Limit on Patience rather than the
-// package defaults.
-func TestLiveTruncateKeepsLimitOnPatience(t *testing.T) {
-	t.Parallel()
-	n, points := newLiveLifecycleTestNode(t, 25)
-	require.NotNil(t, n.config.cfg)
-	n.config.cfg.GenesisBootstrap.LimitOnPatienceEnabled = true
-	n.config.cfg.GenesisBootstrap.LimitOnPatienceCapacity = 7
-
-	targetSlot := points[10].Slot
-	_, err := n.Truncate(context.Background(), dblifecycle.TruncateTarget{
-		Slot: &targetSlot,
-	})
-	require.NoError(t, err)
-
-	conn := ouroboros.ConnectionId{
-		LocalAddr:  &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 3001},
-		RemoteAddr: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 4001},
-	}
-	require.True(t, n.chainsyncState.AddClientConnId(conn))
-	tc := n.chainsyncState.GetTrackedClient(conn)
-	require.NotNil(t, tc)
-	assert.InDelta(t, 7, tc.Patience.Tokens, 1e-9)
 }
 
 func TestNewInvalidConfigPreservesMetricsRegistry(t *testing.T) {
