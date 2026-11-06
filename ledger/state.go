@@ -1608,6 +1608,7 @@ type LedgerState struct {
 	reachedTip                  atomic.Bool
 	catchup                     catchupTrace
 	currentTip                  ochainsync.Tip
+	electingVrfMemo             electingVrfMemo // immutable electing VRF key hashes below the stability window (see electing_vrf_memo.go)
 	byronPBFT                   byronPBFTCache
 	currentEpoch                models.Epoch
 	dbWorkerPool                *DatabaseWorkerPool
@@ -5699,6 +5700,10 @@ func (ls *LedgerState) rollbackWithBlocksAndIntent(
 	ls.resetNextEpochNonceReady()
 	ls.updateTipMetrics(newTipDensity)
 	ls.publishSnapshotsLocked()
+	// Every rollback that truncates metadata reaches this point, whether a
+	// peer rollback, a fork switch or a recovery rewind. Clear after the
+	// rolled-back tip is published; see electingVrfMemo.
+	ls.electingVrfMemo.clear()
 	ls.Unlock()
 	finishValidationTransition()
 	// Reconstruct the new tip's block_nonce if TruncateAfterSlot above

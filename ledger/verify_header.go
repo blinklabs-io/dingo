@@ -2898,6 +2898,21 @@ func (ls *LedgerState) electingVrfKeyHashFromSnapshotWithTxn(
 	if ok {
 		var vrfKeyHash []byte
 		var found bool
+		memoKey := electingVrfMemoKey{
+			pool:         poolKeyHash,
+			cutoffSlot:   cutoffSlot,
+			capturedSlot: capturedSlot,
+		}
+		// Captured before electingVrfMemoStable reads the tip; see
+		// electingVrfMemo for the ordering this relies on.
+		memoGeneration := ls.electingVrfMemo.currentGeneration()
+		memoizable := ls.mithrilLedgerSlot == 0 &&
+			ls.electingVrfMemoStable(cutoffSlot, capturedSlot)
+		if memoizable {
+			if hash, hit := ls.electingVrfMemo.get(memoKey); hit {
+				return hash, true, nil
+			}
+		}
 		if ls.mithrilLedgerSlot != 0 && cutoffSlot == ls.mithrilLedgerSlot &&
 			capturedSlot == ls.mithrilLedgerSlot {
 			// Imported active distributions precede promotion even in Dijkstra;
@@ -2947,6 +2962,9 @@ func (ls *LedgerState) electingVrfKeyHashFromSnapshotWithTxn(
 					err,
 				))
 			}
+			if memoizable {
+				ls.electingVrfMemo.put(memoGeneration, memoKey, hash)
+			}
 			return hash, true, nil
 		}
 		// No registration in force at the cutoff. That is not a gap in
@@ -2977,6 +2995,9 @@ func (ls *LedgerState) electingVrfKeyHashFromSnapshotWithTxn(
 					poolKeyHash[:],
 					err,
 				))
+			}
+			if memoizable {
+				ls.electingVrfMemo.put(memoGeneration, memoKey, hash)
 			}
 			return hash, true, nil
 		}
