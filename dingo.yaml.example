@@ -924,6 +924,16 @@
 # CLI: --inbound-cooldown
 # inboundCooldown: 0s
 
+# Close a trusted local (Unix socket or loopback) node-to-client connection
+# that has been idle for this long, freeing its admission slot. 0 means no
+# limit, matching the reference node and CIP-0137, which define no idle limit
+# on the local protocols; a client waiting on a blocking notification request,
+# such as dmq-node, stays quiet by design. Requests in progress never count as
+# idle.
+# CLI: --trusted-ntc-idle-timeout
+# Env: DINGO_TRUSTED_NTC_IDLE_TIMEOUT
+# trustedNtCIdleTimeout: 0s
+
 # Genesis bootstrap configuration
 # Used only for from-origin sync. Default behavior keeps this enabled and
 # exits Genesis mode automatically near the best known peer tip. A Cardano node

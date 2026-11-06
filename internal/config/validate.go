@@ -326,6 +326,13 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		))
 	}
 
+	if c.TrustedNtCIdleTimeout < 0 {
+		errs = append(errs, fmt.Errorf(
+			"invalid trustedNtCIdleTimeout: %s (must be zero or positive)",
+			c.TrustedNtCIdleTimeout,
+		))
+	}
+
 	for _, pool := range c.TracingAlwaysSamplePools {
 		if _, err := ParsePoolKeyHash(pool); err != nil {
 			errs = append(errs, fmt.Errorf(

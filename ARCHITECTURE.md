@@ -15573,10 +15573,15 @@ activity-aware idle deadline described below. A listener that doesn't qualify
 address, not a loopback one) keeps gouroboros' default. Both use the same 1MiB
 LocalStateQuery request cap.
 
-Trusted-local admission still has a bounded idle state. After negotiation,
-`connmanager` gives an idle client two minutes to complete the next mux
-segment; only a complete segment refreshes that deadline, so partial header or
-payload traffic cannot extend it. The deadline is suspended while a decoded
+Trusted-local admission can bound the idle state. By default there is no
+limit: neither the reference node nor CIP-0137 closes an idle local client,
+and a client waiting on a blocking notification request is quiet by design.
+When `TrustedNtCIdleTimeout` (`--trusted-ntc-idle-timeout`,
+`DINGO_TRUSTED_NTC_IDLE_TIMEOUT`) is set above zero, `connmanager` gives an
+idle client that long to complete the next mux segment after negotiation; only
+a complete segment refreshes that deadline, so partial header or payload
+traffic cannot extend it. With no limit, an idle client keeps its admission
+slot until it disconnects. The deadline is suspended while a decoded
 NtC request is executing and while its first response segment is being
 prepared, then every complete response segment refreshes it. ChainSync keeps
 the request active across `AwaitReply` until the deferred reply finishes.

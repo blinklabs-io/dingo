@@ -161,8 +161,8 @@ func TestTrustedLocalNtCIdleAfterHandshakeReleasesAdmissionSlot(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = listener.Close() })
 	manager := startNtCAdmissionManager(t, ConnectionManagerConfig{
-		MaxTrustedLocalNtCConns:        1,
-		trustedNtCPostHandshakeTimeout: 50 * time.Millisecond,
+		MaxTrustedLocalNtCConns: 1,
+		TrustedNtCIdleTimeout:   50 * time.Millisecond,
 		Listeners: []ListenerConfig{{
 			Listener:     listener,
 			UseNtC:       true,
@@ -191,8 +191,8 @@ func TestTrustedLocalNtCIdleAfterProtocolActivityReleasesAdmissionSlot(
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = listener.Close() })
 	manager := startNtCAdmissionManager(t, ConnectionManagerConfig{
-		MaxTrustedLocalNtCConns:        1,
-		trustedNtCPostHandshakeTimeout: 50 * time.Millisecond,
+		MaxTrustedLocalNtCConns: 1,
+		TrustedNtCIdleTimeout:   50 * time.Millisecond,
 		Listeners: []ListenerConfig{{
 			Listener:     listener,
 			UseNtC:       true,
@@ -468,4 +468,33 @@ func TestNtCAdmissionConcurrentReservations(t *testing.T) {
 			require.Zero(t, sources)
 		})
 	}
+}
+
+func TestTrustedLocalNtCIdleTimeoutDisabledKeepsIdleClient(t *testing.T) {
+	t.Parallel()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	manager := startNtCAdmissionManager(t, ConnectionManagerConfig{
+		MaxTrustedLocalNtCConns: 1,
+		Listeners: []ListenerConfig{{
+			Listener:     listener,
+			UseNtC:       true,
+			TrustedLocal: true,
+			ConnectionOpts: []ouroboros.ConnectionOptionFunc{
+				ouroboros.WithNetworkMagic(1),
+				ouroboros.WithMuxerSegmentReadTimeout(0),
+			},
+		}},
+	})
+
+	connectNtCAdmissionClient(t, listener)
+	requireTrustedNtCAdmissionCount(t, manager, 1)
+	require.Never(t, func() bool {
+		manager.ntcAdmissionMutex.Lock()
+		defer manager.ntcAdmissionMutex.Unlock()
+		return manager.trustedLocalNtCCount != 1
+	}, 300*time.Millisecond, 5*time.Millisecond,
+		"idle trusted NtC client was closed with the idle timeout disabled")
 }
