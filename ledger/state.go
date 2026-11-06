@@ -10573,6 +10573,16 @@ func (ls *LedgerState) ledgerProcessBlock(
 			time.Since(blockValidateStart),
 		)
 	}
+	blockTransactions := block.Transactions()
+	var validatedBlockRows database.BatchAccumulator
+	if shouldValidate && len(blockTransactions) > 0 &&
+		validatedReplayAccumulatorFrom(ctx) == nil {
+		validatedBlockRows = ls.db.NewValidatedBlockBatchAccumulator()
+		if validatedBlockRows != nil {
+			defer validatedBlockRows.Reset()
+			ctx = withValidatedReplayAccumulator(ctx, validatedBlockRows)
+		}
+	}
 	// Process transactions
 	// Steady-state, at-tip, validated application refuses to recover an absent
 	// consumed-input producer from the blob store and treats it as a hard error
@@ -10587,7 +10597,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 	intraBlockUtxos := make(map[utxoref.Key]lcommon.Utxo)
 
 	var expandedIndexOffset uint64
-	for i, tx := range block.Transactions() {
+	for i, tx := range blockTransactions {
 		if delta == nil {
 			delta = NewLedgerDelta(
 				point,
@@ -10927,6 +10937,19 @@ func (ls *LedgerState) ledgerProcessBlock(
 		}
 		if cache := trustedReplayOpCertCounterCacheFrom(ctx); cache != nil {
 			cache.advance(opCertPoolKeyHash, opCertIssueNumber)
+		}
+	}
+	if validatedBlockRows != nil {
+		flushStart := time.Now()
+		err := ls.db.FlushBatch(validatedBlockRows, txn)
+		ls.metrics.observeBlockStage(blockStageApply, time.Since(flushStart))
+		if err != nil {
+			if delta != nil {
+				delta.Release()
+			}
+			return nil, fmt.Errorf(
+				"flush validated block API rows: %w", err,
+			)
 		}
 	}
 	if delta != nil {
