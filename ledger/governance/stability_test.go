@@ -451,31 +451,52 @@ func TestEvaluateRatifiableHardForkInitiation_EarlierDelayingActionWins(
 ) {
 	t.Parallel()
 
-	db, store := newTallyTestDB(t)
-	hardFork := seedHardForkInitiationProposal(
-		t, db, stabilityTestEpoch, 11, 1, stabilityProposalTx,
-	)
-	noConfidence := chainTestStore(t, db, chainTestProposal(
-		lcommon.GovActionTypeNoConfidence,
-		testBytes(32, 0xA3),
-		nil,
-		100,
-		0,
-		testBytes(29, 0),
-		chainTestDelayingAction(t, lcommon.GovActionTypeNoConfidence),
-	))[0]
-	drepCred := seedDRepWithStake(t, db, 1_000)
-	seedDRepYesVote(t, db, hardFork.ID, drepCred)
-	seedDRepYesVote(t, db, noConfidence.ID, drepCred)
-	seedHardForkCommitteeAndSPOVotes(t, db, store, hardFork, noConfidence)
+	for _, tc := range []struct {
+		name       string
+		actionType lcommon.GovActionType
+	}{
+		{name: "no confidence", actionType: lcommon.GovActionTypeNoConfidence},
+		{name: "update committee", actionType: lcommon.GovActionTypeUpdateCommittee},
+		{name: "new constitution", actionType: lcommon.GovActionTypeNewConstitution},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 
-	in := NewStabilityCheckInputs(
-		db, nil, stabilityTestEpoch, false, stabilityConwayPParams(10), nil, nil,
-	)
-	got, err := EvaluateRatifiableHardForkInitiation(t.Context(), in)
-	require.NoError(t, err)
-	assert.Nil(t, got,
-		"a higher-priority delaying action must stop the ratification pass")
+			db, store := newTallyTestDB(t)
+			hardFork := seedHardForkInitiationProposal(
+				t, db, stabilityTestEpoch, 11, 1, stabilityProposalTx,
+			)
+			delaying := chainTestStore(t, db, chainTestProposal(
+				tc.actionType,
+				testBytes(32, byte(0xA3+tc.actionType)),
+				nil,
+				100,
+				0,
+				testBytes(29, 0),
+				chainTestDelayingAction(t, tc.actionType),
+			))[0]
+			drepCred := seedDRepWithStake(t, db, 1_000)
+			seedDRepYesVote(t, db, hardFork.ID, drepCred)
+			seedDRepYesVote(t, db, delaying.ID, drepCred)
+			seedHardForkCommitteeAndSPOVotes(
+				t, db, store, hardFork, delaying,
+			)
+
+			in := NewStabilityCheckInputs(
+				db,
+				nil,
+				stabilityTestEpoch,
+				false,
+				stabilityConwayPParams(10),
+				nil,
+				nil,
+			)
+			got, err := EvaluateRatifiableHardForkInitiation(t.Context(), in)
+			require.NoError(t, err)
+			assert.Nil(t, got,
+				"a higher-priority delaying action must stop the ratification pass")
+		})
+	}
 }
 
 func TestEvaluateRatifiableHardForkInitiation_RequiresEnactmentPrecondition(

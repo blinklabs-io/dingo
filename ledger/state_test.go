@@ -8848,11 +8848,8 @@ INSERT INTO auth_committee_hot (
 		ActionType:    uint8(lcommon.GovActionTypeHardForkInitiation),
 		ProposedEpoch: 737,
 		ExpiresEpoch:  767,
-		// Deposit 0 keeps ratificationEnactmentPrecondition's return-address
-		// decode (which real proposals need) out of scope here -- this test
-		// is about the SPO stake epoch selection, not deposit handling.
-		Deposit:       0,
-		ReturnAddress: repeatByte(29, 0),
+		Deposit:       1_000,
+		ReturnAddress: append([]byte{0xe1}, repeatByte(28, 0)...),
 		AnchorURL:     "https://example.invalid/plomin",
 		AnchorHash:    repeatByte(32, 0x4a),
 		GovActionCbor: actionCbor,

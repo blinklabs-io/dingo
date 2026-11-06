@@ -131,10 +131,25 @@ func EvaluateRatifiableHardForkInitiation(
 		return nil, fmt.Errorf("get active proposals: %w", err)
 	}
 
-	if len(proposals) == 0 {
+	hardForkPriority := govActionPriority(&models.GovernanceProposal{
+		ActionType: uint8(lcommon.GovActionTypeHardForkInitiation),
+	})
+	forecastProposals := proposals[:0]
+	hasHardFork := false
+	for _, proposal := range proposals {
+		if govActionPriority(proposal) > hardForkPriority {
+			continue
+		}
+		forecastProposals = append(forecastProposals, proposal)
+		if lcommon.GovActionType(proposal.ActionType) ==
+			lcommon.GovActionTypeHardForkInitiation {
+			hasHardFork = true
+		}
+	}
+	if !hasHardFork {
 		return nil, nil
 	}
-	proposals = orderParameterChangeChains(proposals)
+	proposals = forecastProposals
 	sort.SliceStable(proposals, func(i, j int) bool {
 		return govActionPriority(proposals[i]) <
 			govActionPriority(proposals[j])
@@ -199,15 +214,8 @@ func EvaluateRatifiableHardForkInitiation(
 	if err != nil {
 		return nil, fmt.Errorf("compute committee quorum: %w", err)
 	}
-	hardForkPriority := govActionPriority(&models.GovernanceProposal{
-		ActionType: uint8(lcommon.GovActionTypeHardForkInitiation),
-	})
-
 	for _, proposal := range proposals {
 		actionType := lcommon.GovActionType(proposal.ActionType)
-		if govActionPriority(proposal) > hardForkPriority {
-			break
-		}
 		purpose := govActionPurposeOf(actionType)
 		if !validateParentChain(proposal, rootsByPurpose[purpose]) {
 			continue
