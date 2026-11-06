@@ -303,6 +303,10 @@ type Ouroboros struct {
 		gledger.BlockHeader,
 	) (uint64, error)
 	chainsyncScheduleAt chainsyncScheduleAtFunc
+	// chainsyncHeaderCheckpoint rejects a peer header at a checkpointed
+	// height whose hash differs from the configured checkpoint. It is nil
+	// when no ledger state is attached.
+	chainsyncHeaderCheckpoint func(gledger.BlockHeader) error
 	// corroborationHoldTimeout bounds how long a roll-forward callback holds
 	// a header for Genesis corroboration.
 	corroborationHoldTimeout time.Duration
@@ -969,6 +973,7 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 			k := max(o.ledgerState.SecurityParam(), 0)
 			return o.ledgerState.Tip().BlockNumber, uint64(k)
 		}
+		o.chainsyncHeaderCheckpoint = o.ledgerState.ValidateHeaderCheckpoint
 		o.chainSelectionShouldVerifyHeaderCrypto = o.ledgerState.ShouldVerifyChainSelectionHeaderCrypto
 		o.chainSelectionVerifyHeaderCrypto = o.ledgerState.ValidatePeerChainSelectionHeaderCryptoWithGeneration
 		o.chainsyncLocalChainTips = func() ([]byte, []byte) {

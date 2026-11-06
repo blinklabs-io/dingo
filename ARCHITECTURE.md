@@ -590,6 +590,7 @@ sequenceDiagram
 
     Note over Peer,DB: Stage 1 — Header Discovery (ChainSync)
     Peer->>OB: RollForward(header, tip)
+    OB->>OB: reject a header whose hash differs from a configured checkpoint, and recycle the connection
     OB->>OB: strictly verify header crypto against current ledger generation
     Note over OB: If verification is deferred, forward a header extending the local chain, unverified; for any other, wait for the next ledger publication and verify again, bounded, and if still deferred withhold it from peer selection and ledger state
     OB->>LS: await bounded header capacity
@@ -9012,6 +9013,22 @@ corroborates that peer's advertised tip; they see no target while no client is
 active or while corroboration is incomplete.
 
 #### Header Verification Handoff
+
+Every peer header, ingress or observer, enters through the chainsync roll-forward
+callback, and that callback first applies the configured chain checkpoints
+(`LedgerState.ValidateHeaderCheckpoint`). A header at a checkpointed block
+number whose hash differs is refused with `*ledger.CheckpointMismatchError`
+before it is recorded as observed history, reaches the chain selector, or
+enters the ledger header queue; the delivering connection is recycled the same
+way as a header-crypto failure. Candidate chains, the selector, and the
+rollback gate only see headers that passed this callback, so they carry no
+separate checkpoint check, and block apply still enforces the same rule on the
+fetched block. The check does not depend on validation mode or Mithril coverage.
+Byron epoch boundary headers share the preceding block's number and are
+skipped; the hash is computed only at a checkpointed height. A peer's
+advertised tip is not a header and is not checked until its header arrives.
+Networks whose configuration ships no `CheckpointsFile` (preprod, devnet, as in
+upstream `cardano-node`) enforce nothing here.
 
 When full-block header verification needs an epoch nonce that is not cached yet,
 blockfetch first flushes already-received predecessor blocks from the pending
