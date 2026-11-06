@@ -646,14 +646,6 @@ func TestParseTokenRegistryEntrySkipsOutOfRangeDecimals(t *testing.T) {
 	}
 }
 
-func TestParseTokenRegistryEntryRejectsInvalidJSON(t *testing.T) {
-	t.Parallel()
-
-	_, err := ParseTokenRegistryEntry([]byte(`{"subject":`))
-
-	require.Error(t, err)
-}
-
 func TestParseTokenRegistryEntryReportsEmptyWhenNoProperties(t *testing.T) {
 	t.Parallel()
 

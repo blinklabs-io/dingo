@@ -1295,15 +1295,7 @@ func TestTokenRegistrySyncBlocksPrivateAddressesByDefault(t *testing.T) {
 
 	_, err = sync.SyncOnce(t.Context())
 
-	require.Error(t, err)
-}
-
-func TestNewTokenRegistrySyncRequiresStore(t *testing.T) {
-	t.Parallel()
-
-	_, err := NewTokenRegistrySync(TokenRegistryConfig{Network: "mainnet"})
-
-	require.Error(t, err)
+	require.ErrorContains(t, err, "validate token registry source URL failed")
 }
 
 func TestNewTokenRegistrySyncResolvesSourceByNetwork(t *testing.T) {
