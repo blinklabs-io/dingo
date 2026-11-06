@@ -370,7 +370,9 @@ func decodeRollbackIntent(raw string) (durableRollbackIntent, error) {
 		case "hash":
 			err = dec.Decode(&intent.Hash)
 		case "blocks":
-			intent.Blocks, err = decodeRollbackBlocks(dec)
+			intent.Blocks, err = decodeRollbackBlocks(
+				dec, maxRollbackIntentPayloadBytes,
+			)
 		default:
 			// The writer emits exactly these fields. Skipping an unknown one
 			// would still materialize it, up to the encoded size limit.
@@ -392,7 +394,10 @@ func decodeRollbackIntent(raw string) (durableRollbackIntent, error) {
 	return intent, nil
 }
 
-func decodeRollbackBlocks(dec *json.Decoder) ([]durableRollbackBlock, error) {
+func decodeRollbackBlocks(
+	dec *json.Decoder,
+	maxPayload int,
+) ([]durableRollbackBlock, error) {
 	tok, err := dec.Token()
 	if err != nil {
 		return nil, err
@@ -418,11 +423,11 @@ func decodeRollbackBlocks(dec *json.Decoder) ([]durableRollbackBlock, error) {
 			return nil, err
 		}
 		total += len(block.Hash) + len(block.PrevHash) + len(block.Cbor)
-		if total > maxRollbackIntentPayloadBytes {
+		if total > maxPayload {
 			return nil, fmt.Errorf(
 				"%w: block bytes exceed %d",
 				errInvalidRollbackIntent,
-				maxRollbackIntentPayloadBytes,
+				maxPayload,
 			)
 		}
 		blocks = append(blocks, block)

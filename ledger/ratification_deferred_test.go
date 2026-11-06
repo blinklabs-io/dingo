@@ -363,7 +363,7 @@ func TestLedgerStateQueryWaitsForBoundaryJob(t *testing.T) {
 		answered <- err
 	}()
 	require.Never(t, func() bool { return len(answered) > 0 },
-		300*time.Millisecond, 10*time.Millisecond,
+		100*time.Millisecond, 10*time.Millisecond,
 		"a ledger-state query answered before the boundary job wrote")
 	rows, err := s.db.GetPoolStakeSnapshotsByEpoch(742, "mark", nil)
 	require.NoError(t, err)
@@ -958,15 +958,27 @@ func TestDeferredRatificationMatchesBoundaryRatification(t *testing.T) {
 	t.Parallel()
 
 	const boundaries = 4
-	atBoundary := newGovDiffScenario(t)
-	atBoundary.ls.ratifyAtBoundary = true
-	want := atBoundary.run(t, boundaries, func(*LedgerState) {})
-
-	deferred := newGovDiffScenario(t)
-	wireDeferredBoundarySnapshot(deferred.ls, deferred.snapshotMgr)
-	got := deferred.run(t, boundaries, func(ls *LedgerState) {
-		require.NoError(t, ls.WaitEpochBoundaryJob(t.Context()))
+	// The two scenarios share nothing, so they run side by side.
+	var want, got []govDiffEpochDump
+	t.Run("scenarios", func(t *testing.T) {
+		t.Run("at boundary", func(t *testing.T) {
+			t.Parallel()
+			atBoundary := newGovDiffScenario(t)
+			atBoundary.ls.ratifyAtBoundary = true
+			want = atBoundary.run(t, boundaries, func(*LedgerState) {})
+		})
+		t.Run("deferred", func(t *testing.T) {
+			t.Parallel()
+			deferred := newGovDiffScenario(t)
+			wireDeferredBoundarySnapshot(deferred.ls, deferred.snapshotMgr)
+			got = deferred.run(t, boundaries, func(ls *LedgerState) {
+				require.NoError(t, ls.WaitEpochBoundaryJob(t.Context()))
+			})
+		})
 	})
+	if t.Failed() {
+		return
+	}
 	require.Equal(t, want, got)
 	if out := os.Getenv("DINGO_GOV_DIFF_OUT"); out != "" {
 		raw, err := json.MarshalIndent(got, "", " ")

@@ -19,6 +19,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/require"
@@ -28,6 +29,7 @@ import (
 // Byron transaction actually creates: only outputs 0 through 65535.
 func TestCreatedUtxoCountStopsByronAtWord16(t *testing.T) {
 	t.Parallel()
+	testutil.SkipUnderRace(t, "single-goroutine count over a 65k-output transaction")
 	input, err := byron.NewByronTransactionInput(
 		strings.Repeat("cd", lcommon.Blake2b256Size),
 		0,

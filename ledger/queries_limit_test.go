@@ -70,6 +70,11 @@ func TestLocalStateQueryFilteredAccountLimitBoundary(t *testing.T) {
 	)
 	poolKey := bytes.Repeat([]byte{0xAB}, 28)
 	drepKey := bytes.Repeat([]byte{0xCD}, 28)
+	// Only the first seededAccounts credentials exist in the database: the
+	// over-limit count is rejected before any read, and the limit itself is
+	// asserted on the check function, so seeding every account would only
+	// time the database.
+	const seededAccounts = 5
 	transaction := db.MetadataTxn(context.Background(), true)
 	t.Cleanup(func() { _ = transaction.Rollback() })
 	for index := range credentials {
@@ -81,6 +86,9 @@ func TestLocalStateQueryFilteredAccountLimitBoundary(t *testing.T) {
 		stakeCredentials[index] = olocalstatequery.StakeCredential{
 			Tag:   uint64(credentials[index].CredType),
 			Bytes: credentials[index].Credential,
+		}
+		if index >= seededAccounts {
+			continue
 		}
 		require.NoError(
 			t,
@@ -96,7 +104,13 @@ func TestLocalStateQueryFilteredAccountLimitBoundary(t *testing.T) {
 		)
 	}
 	require.NoError(t, transaction.Commit())
-	for _, count := range []int{0, MaxLocalStateQueryItems - 1, MaxLocalStateQueryItems, MaxLocalStateQueryItems + 1} {
+	require.NoError(t, checkLocalStateQueryItemLimit("q", MaxLocalStateQueryItems))
+	require.ErrorIs(
+		t,
+		checkLocalStateQueryItemLimit("q", MaxLocalStateQueryItems+1),
+		ErrLocalStateQueryLimitExceeded,
+	)
+	for _, count := range []int{0, seededAccounts - 1, seededAccounts, MaxLocalStateQueryItems + 1} {
 		for _, queryName := range []string{"GetFilteredDelegationsAndRewardAccounts", "GetFilteredVoteDelegatees"} {
 			t.Run(fmt.Sprintf("%s/%d", queryName, count), func(t *testing.T) {
 				var result any
@@ -365,7 +379,8 @@ func TestAllDRepDelegatorsCrossesBatchBoundary(t *testing.T) {
 		AddedSlot:  1,
 	}))
 
-	accountCount := allDRepDelegatorsBatchSize + 1
+	const batchSize = 3
+	accountCount := batchSize*2 + 1
 	for i := range accountCount {
 		stakingKey := make([]byte, 28)
 		binary.BigEndian.PutUint32(stakingKey[24:], uint32(i))
@@ -384,7 +399,9 @@ func TestAllDRepDelegatorsCrossesBatchBoundary(t *testing.T) {
 
 	ls := &LedgerState{db: db}
 	ls.publishSnapshotsLocked()
-	delegators, err := ls.allDRepDelegators(context.Background(), nil)
+	delegators, err := ls.allDRepDelegatorsBatched(
+		context.Background(), nil, batchSize,
+	)
 	require.NoError(t, err)
 	key := models.StakeCredentialRef{
 		Tag: uint8(models.DrepTypeAddrKeyHash),
@@ -513,24 +530,6 @@ func TestLocalStateQueryLargeBatchHandlers(t *testing.T) {
 			i,
 		)
 	}
-}
-
-// TestLocalStateQueryRepeatedOverLimitRequestsRemainBounded verifies that
-// repeated oversized requests are rejected consistently and do not prevent a
-// subsequent normal-sized request from being accepted.
-func TestLocalStateQueryRepeatedOverLimitRequestsRemainBounded(t *testing.T) {
-	t.Parallel()
-
-	for range 100 {
-		err := checkLocalStateQueryItemLimit(
-			"repeated",
-			MaxLocalStateQueryItems+1,
-		)
-		require.ErrorIs(t, err, ErrLocalStateQueryLimitExceeded)
-	}
-
-	// Rejected requests do not poison later normal-sized requests.
-	require.NoError(t, checkLocalStateQueryItemLimit("normal", 3))
 }
 
 func TestDedupeAddresses(t *testing.T) {

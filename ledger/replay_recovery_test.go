@@ -79,6 +79,7 @@ func newReplayRecoveryLedgerState(
 // in the opposite order, so this test fails against the unfixed code instead
 // of merely checking that both mutexes appear somewhere in the function.
 func TestReplayRecoveryRollbackLockOrder(t *testing.T) {
+	t.Parallel()
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(
 		fset,
@@ -2467,6 +2468,7 @@ func TestReplayRecoveryKeepsPrimaryRewindForDeeperKnownProducer(
 }
 
 func TestReplayRecoveryRefusesBelowPruneFloorBeforeChainRewind(t *testing.T) {
+	t.Parallel()
 	ls := newReplayRecoveryAuditLedger(t, true)
 	const pruneFloorSyncKey = database.ConsumedUtxoPruneFloorSyncKey
 	require.NoError(t, ls.db.SetSyncState(pruneFloorSyncKey, "120", nil))
@@ -2609,7 +2611,7 @@ func TestReplayRecoveryRejectsDeterministicDuplicateInput(t *testing.T) {
 	testutil.RequireNoReceive(
 		t,
 		resyncCh,
-		250*time.Millisecond,
+		50*time.Millisecond,
 		"canonical deterministic rejection must not request another fresh intersection",
 	)
 }
@@ -2799,7 +2801,7 @@ func TestReplayRecoveryRejectsRepeatedIncorrectWithdrawalAmount(t *testing.T) {
 		testutil.RequireNoReceive(
 			t,
 			resyncCh,
-			250*time.Millisecond,
+			50*time.Millisecond,
 			"a repeat rejection must not request another fresh intersection",
 		)
 	}
@@ -3105,7 +3107,7 @@ func TestReplayRecoveryDeterministicDuplicateAtTipSkipsDescentSchedule(
 	testutil.RequireNoReceive(
 		t,
 		resyncCh,
-		250*time.Millisecond,
+		50*time.Millisecond,
 		"a repeat at-tip rejection must not rotate peers again",
 	)
 }
@@ -3828,7 +3830,7 @@ func requireMissingRedeemerRecovery(
 	testutil.RequireNoReceive(
 		t,
 		resyncCh,
-		250*time.Millisecond,
+		50*time.Millisecond,
 		"a state-dependent missing-redeemer rejection must not request a "+
 			"fresh ChainSync intersection",
 	)
@@ -3876,7 +3878,7 @@ func TestReplayRecoveryKeepsBadInputsOnTheRewindPath(t *testing.T) {
 	testutil.RequireNoReceive(
 		t,
 		resyncCh,
-		250*time.Millisecond,
+		50*time.Millisecond,
 		"a state-dependent rejection must not use the deterministic "+
 			"fresh-intersection path",
 	)

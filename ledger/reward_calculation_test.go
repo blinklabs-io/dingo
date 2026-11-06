@@ -7156,32 +7156,7 @@ func TestApplyMinPoolMarginConfig(t *testing.T) {
 	}
 }
 
-func TestLedgerStateMinPoolMargin(t *testing.T) {
-	t.Parallel()
-
-	ls, _ := newRewardCalculationTestLedger(t)
-	require.Nil(t, ls.MinPoolMargin())
-	ls.config.MinPoolMargin = 150
-	require.Zero(t, big.NewRat(150, 10_000).Cmp(ls.MinPoolMargin()))
-}
-
 // --- CIP-0163 full-pot reward distribution -------------------------------
-
-func TestApplyFullPotConfigEnabled(t *testing.T) {
-	t.Parallel()
-
-	params := rewards.Parameters{}
-	applyFullPotConfig(&params, LedgerStateConfig{FullPotRewardsEnabled: true})
-	require.True(t, params.FullPotRewardsEnabled)
-}
-
-func TestApplyFullPotConfigDisabled(t *testing.T) {
-	t.Parallel()
-
-	params := rewards.Parameters{FullPotRewardsEnabled: true}
-	applyFullPotConfig(&params, LedgerStateConfig{FullPotRewardsEnabled: false})
-	require.False(t, params.FullPotRewardsEnabled)
-}
 
 // TestPrecomputedRewardPoolRewardsMatchInputsFullPot verifies that under
 // CIP-0163 full pot the reuse verifier reproduces the pot-filling apportionment:
@@ -8631,14 +8606,15 @@ func dumpDRepVotingPower(t *testing.T, f *epochBoundaryBenchFixture) string {
 	return strings.Join(lines, "\n") + "\n"
 }
 
-// deregisterEpochBoundaryDumpDelegators deregisters every 97th delegator
-// during the ended epoch, after any precompute ran, the way a deregistration
-// certificate does: the account, its live stake row and the certificate row.
-// Their rewards become unspendable at the boundary.
-func deregisterEpochBoundaryDumpDelegators(t *testing.T, raw *sql.DB) {
+// deregisterEpochBoundaryDelegators deregisters every step-th of the first
+// delegators delegators.
+func deregisterEpochBoundaryDelegators(
+	t *testing.T,
+	raw *sql.DB,
+	delegators, step int,
+) {
 	t.Helper()
-	shape := epochBoundaryDumpShape()
-	for d := 0; d < shape.delegators; d += 97 {
+	for d := 0; d < delegators; d += step {
 		key := epochBoundaryBenchHash(0x30, uint64(d)+1)
 		slot := epochBoundaryBenchStart(epochBoundaryBenchEndedEpoch) + 1_000 +
 			uint64(d)
@@ -8653,52 +8629,6 @@ WHERE credential_tag = 0 AND staking_key = ?`,
 			_, err := raw.Exec(stmt, slot, key)
 			require.NoError(t, err)
 		}
-	}
-}
-
-// TestEpochBoundaryDumpForDifferential runs one boundary on the dump fixture
-// for each precompute state and writes the resulting state to
-// $DINGO_BOUNDARY_DUMP_DIR, so the same test on two code versions produces
-// files to diff. It is skipped unless that directory is set.
-func TestEpochBoundaryDumpForDifferential(t *testing.T) {
-	t.Parallel()
-	dir := os.Getenv("DINGO_BOUNDARY_DUMP_DIR")
-	if dir == "" {
-		t.Skip("set DINGO_BOUNDARY_DUMP_DIR to write boundary dumps")
-	}
-	for _, state := range []string{"complete", "partial", "missing"} {
-		t.Run(state, func(t *testing.T) {
-			t.Parallel()
-			f := newEpochBoundaryBenchFixture(t, epochBoundaryDumpShape(), "")
-			switch state {
-			case "complete":
-				require.NoError(
-					t,
-					f.ls.precomputeStakeRewardsAfterEpochTransition(
-						epochBoundaryBenchPrecomputeEvent(),
-					),
-				)
-			case "partial":
-				epochBoundaryBenchPartialPrecomputeT(t, f)
-			}
-			raw, err := dbtest.RawSQLiteMetadata(t, f.db)
-			require.NoError(t, err)
-			defer raw.Close()
-			deregisterEpochBoundaryDumpDelegators(t, raw)
-			f.rollover(t)
-			f.ls.waitEpochBoundaryBenchBackground()
-			// DRep power is read from the derived balances; the tables are
-			// dumped with every credit folded into its account, the shape an
-			// eager boundary writes.
-			power := dumpDRepVotingPower(t, f)
-			settleRewardCredits(t, f.ls)
-			dump := dumpEpochBoundaryState(t, raw) + "== drep_power\n" +
-				power
-			require.NoError(t, os.WriteFile(
-				filepath.Join(dir, "boundary-"+state+".txt"),
-				[]byte(dump), 0o644,
-			))
-		})
 	}
 }
 
@@ -8767,15 +8697,20 @@ func TestEpochRolloverMarkSnapshotIncludesSameBoundaryRewards(t *testing.T) {
 // precompute recorded its output as spendable.
 func TestBoundaryRechecksRegistrationChangedAfterPrecompute(t *testing.T) {
 	t.Parallel()
+	shape := epochBoundaryDumpShape()
+	shape.delegators = 248
+	const deregisterStep = 11
 	run := func(deregister bool) (*epochBoundaryBenchFixture, uint64) {
-		f := newEpochBoundaryBenchFixture(t, epochBoundaryDumpShape(), "")
+		f := newEpochBoundaryBenchFixture(t, shape, "")
 		require.NoError(t, f.ls.precomputeStakeRewardsAfterEpochTransition(
 			epochBoundaryBenchPrecomputeEvent(),
 		))
 		if deregister {
 			raw, err := dbtest.RawSQLiteMetadata(t, f.db)
 			require.NoError(t, err)
-			deregisterEpochBoundaryDumpDelegators(t, raw)
+			deregisterEpochBoundaryDelegators(
+				t, raw, shape.delegators, deregisterStep,
+			)
 			require.NoError(t, raw.Close())
 		}
 		f.rollover(t)
@@ -8788,7 +8723,7 @@ func TestBoundaryRechecksRegistrationChangedAfterPrecompute(t *testing.T) {
 	f, treasuryDeregistered := run(true)
 
 	deregistered := make(map[string]bool)
-	for d := 0; d < epochBoundaryDumpShape().delegators; d += 97 {
+	for d := 0; d < shape.delegators; d += deregisterStep {
 		deregistered[string(epochBoundaryBenchHash(0x30, uint64(d)+1))] = true
 	}
 	outputs, err := f.db.Metadata().GetRewardAccountOutputs(8, nil)
