@@ -6762,9 +6762,10 @@ Ordinary Praos sessions continue to use primary-chain intersection points.
   as any observer header. The wait resolves the
   header's fork anchor once and reuses it until a withdrawal from the local
   chain or a ledger tip at the anchor. A membership read that a chain mutation
-  overlapped (`Chain.HoldsPointSettled` reports it unsettled) is repeated up to
-  three times, and a walk still unsettled neither holds the header nor caches an
-  anchor: taking the overlap for an absent block would anchor the forecast at an
+  overlapped, or that a cancelled context cut short (`Chain.HoldsPointSettled`
+  reports it unsettled), is repeated up to three times unless the context has
+  ended, in which case the wait returns the context's error. A walk still
+  unsettled neither holds the header nor caches an anchor: taking the overlap for an absent block would anchor the forecast at an
   older ancestor. A walk that ends at a parent that is neither recorded, queued,
   nor held by the local chain (`resolveForkAnchor` reports it disconnected)
   holds the header too, even inside the ledger tip's horizon, because the peer's

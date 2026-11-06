@@ -5509,7 +5509,7 @@ func (ls *LedgerState) AwaitObserverHeaderHorizon(
 		if beyond, _ := ls.headerBeyondForecastHorizonFrom(
 			ctx, e, &anchor,
 		); !beyond && !anchor.disconnected {
-			return nil
+			return ctx.Err()
 		}
 		if !parked {
 			parked = true
@@ -5629,7 +5629,10 @@ func (ls *LedgerState) awaitForecastHorizon(
 		capacityChanged := ls.chainsyncCapacityChanged
 		ls.chainsyncBlockfetchMutex.Unlock()
 		if !ls.headerBeyondForecastHorizon(ctx, e) {
-			return nil
+			// A context that ended during the anchor walk reads every
+			// membership as absent, which looks like a header that is not
+			// past the horizon.
+			return ctx.Err()
 		}
 		if ls.chainsyncHeaderDisconnected(ctx, e) {
 			if !ls.flushQueuedHeadersForHorizonWait(e.ConnectionId) &&
@@ -5832,6 +5835,9 @@ func (ls *LedgerState) holdsPointSettled(
 		held, settled = ls.chain.HoldsPointSettled(ctx, point)
 		if settled {
 			return held, true
+		}
+		if ctx.Err() != nil {
+			return false, false
 		}
 	}
 	return false, false

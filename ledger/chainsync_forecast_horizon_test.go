@@ -666,14 +666,16 @@ func TestForecastSummaryFromIntersectionBeforeNonceCutoff(t *testing.T) {
 	)
 }
 
-// Admission measures a header's forecast from where the peer's chain leaves
-// the local chain. A fork that left before the epoch's nonce cutoff is held at
-// a slot the tip's own forecast covers; the same slot extending the local
-// chain is admitted.
-func TestAwaitChainsyncHeaderAdmissionForecastsForkFromIntersection(
+// newForecastForkFixture builds a local chain of two Conway blocks whose tip is the
+// second, with headerOn building a header that extends a chosen parent.
+func newForecastForkFixture(
 	t *testing.T,
+) (
+	*LedgerState,
+	[]lcommon.Block,
+	func(lcommon.Blake2b256, string) ChainsyncEvent,
 ) {
-	t.Parallel()
+	t.Helper()
 
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
@@ -748,7 +750,19 @@ func TestAwaitChainsyncHeaderAdmissionForecastsForkFromIntersection(
 			Point:       ocommon.NewPoint(headerSlot, header.Hash().Bytes()),
 		}
 	}
+	return ls, blocks, headerOn
+}
 
+// Admission measures a header's forecast from where the peer's chain leaves
+// the local chain. A fork that left before the epoch's nonce cutoff is held at
+// a slot the tip's own forecast covers; the same slot extending the local
+// chain is admitted.
+func TestAwaitChainsyncHeaderAdmissionForecastsForkFromIntersection(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ls, blocks, headerOn := newForecastForkFixture(t)
 	extending := headerOn(blocks[1].Hash(), "extending")
 	require.False(t, ls.headerBeyondForecastHorizon(t.Context(), extending))
 	accepted, err := ls.AwaitChainsyncHeaderAdmission(t.Context(), extending)
@@ -773,6 +787,34 @@ func TestAwaitChainsyncHeaderAdmissionForecastsForkFromIntersection(
 		"admission did not return after its context ended",
 	)
 	require.ErrorIs(t, got.err, context.Canceled)
+}
+
+// A context that ends while the fork anchor is being resolved makes the chain
+// answer "not held" for the intersection block. That must surface as the
+// context's error, not as a header whose ancestry leaves the chain nowhere and
+// so is admitted past its forecast horizon.
+func TestAwaitChainsyncHeaderAdmissionCancelledDuringAnchorLookup(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ls, blocks, headerOn := newForecastForkFixture(t)
+	fork := headerOn(blocks[0].Hash(), "fork")
+	require.True(t, ls.headerBeyondForecastHorizon(t.Context(), fork))
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	ls.lookupBlockByHash = func([]byte) (models.Block, error) {
+		cancel()
+		return models.Block{
+			Slot: blocks[0].SlotNumber(),
+			Hash: blocks[0].Hash().Bytes(),
+		}, nil
+	}
+
+	accepted, err := ls.AwaitChainsyncHeaderAdmission(ctx, fork)
+	require.ErrorIs(t, err, context.Canceled)
+	require.False(t, accepted)
 }
 
 // Headers queued behind a far-from-tip batch are what advance the ledger, and
