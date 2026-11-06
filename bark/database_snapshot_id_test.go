@@ -33,11 +33,9 @@ import (
 // Not t.Parallel: bark's snapshot RPC tests share the sequential database
 // handler fixtures.
 func TestSnapshotRPCRejectsSnapshotCopiedUnderNewerID(t *testing.T) {
-	t.Parallel()
 	for _, source := range []string{"local", "cloud"} {
 		for _, operation := range []string{"verify", "restore"} {
 			t.Run(source+"/"+operation, func(t *testing.T) {
-				t.Parallel()
 				snapshotRoot := t.TempDir()
 				olderID := "older-snapshot"
 				installTemplateSnapshot(
