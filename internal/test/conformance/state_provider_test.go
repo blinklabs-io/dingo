@@ -51,6 +51,7 @@ import (
 // reports. It previously returned an empty common.Constitution regardless
 // of what the backend held.
 func TestStateProviderConstitutionExposesStoredShape(t *testing.T) {
+	t.Parallel()
 	m, err := NewDingoStateManager()
 	require.NoError(t, err)
 	defer func() { require.NoError(t, m.Close()) }()
@@ -77,6 +78,7 @@ func TestStateProviderConstitutionExposesStoredShape(t *testing.T) {
 // gouroboros' guardrails rule reads as "proposals must carry no policy
 // hash".
 func TestStateProviderConstitutionWithoutPolicyHash(t *testing.T) {
+	t.Parallel()
 	m, err := NewDingoStateManager()
 	require.NoError(t, err)
 	defer func() { require.NoError(t, m.Close()) }()
@@ -101,6 +103,7 @@ func TestStateProviderConstitutionWithoutPolicyHash(t *testing.T) {
 // never reached the backend fails instead of silently passing guardrails
 // validation.
 func TestStateProviderConstitutionMissingFailsClosed(t *testing.T) {
+	t.Parallel()
 	m, err := NewDingoStateManager()
 	require.NoError(t, err)
 	defer func() { require.NoError(t, m.Close()) }()
@@ -114,6 +117,7 @@ func TestStateProviderConstitutionMissingFailsClosed(t *testing.T) {
 // constitution is written to the real backend, so the read side above has
 // something to read without consulting the pre-validation govState mirror.
 func TestLoadInitialStateSeedsConstitution(t *testing.T) {
+	t.Parallel()
 	m, err := NewDingoStateManager()
 	require.NoError(t, err)
 	defer func() { require.NoError(t, m.Close()) }()
@@ -262,6 +266,7 @@ func stakeDepositVectorTx(
 func TestConformanceProviderRefundsRecordedStakeDepositNotKeyDeposit(
 	t *testing.T,
 ) {
+	t.Parallel()
 	require.NotEqual(
 		t,
 		stakeDepositVectorKeyDeposit,
@@ -326,6 +331,7 @@ func TestConformanceProviderRefundsRecordedStakeDepositNotKeyDeposit(
 func TestConformanceProviderStakeDepositAbsentForUnregisteredCredential(
 	t *testing.T,
 ) {
+	t.Parallel()
 	m, err := NewDingoStateManager()
 	require.NoError(t, err)
 	defer func() { require.NoError(t, m.Close()) }()
@@ -346,6 +352,7 @@ func TestConformanceProviderStakeDepositAbsentForUnregisteredCredential(
 // production's ledger.LedgerView.TreasuryValue reports. It previously
 // returned a hardcoded zero regardless of backend state.
 func TestStateProviderTreasuryValueReportsBackendState(t *testing.T) {
+	t.Parallel()
 	m, err := NewDingoStateManager()
 	require.NoError(t, err)
 	defer func() { require.NoError(t, m.Close()) }()
@@ -368,6 +375,7 @@ func TestStateProviderTreasuryValueReportsBackendState(t *testing.T) {
 // every vector declaring a non-zero treasury and silently accept one
 // declaring zero.
 func TestStateProviderTreasuryValueMissingFailsClosed(t *testing.T) {
+	t.Parallel()
 	m, err := NewDingoStateManager()
 	require.NoError(t, err)
 	defer func() { require.NoError(t, m.Close()) }()
@@ -382,6 +390,7 @@ func TestStateProviderTreasuryValueMissingFailsClosed(t *testing.T) {
 // vector that advances the treasury is validated against the value the
 // backend currently holds.
 func TestStateProviderTreasuryValueTracksLatestSlot(t *testing.T) {
+	t.Parallel()
 	m, err := NewDingoStateManager()
 	require.NoError(t, err)
 	defer func() { require.NoError(t, m.Close()) }()
@@ -398,6 +407,7 @@ func TestStateProviderTreasuryValueTracksLatestSlot(t *testing.T) {
 // harness's committee lookups must fail rather than truncate them into a
 // 28-byte credential that matches a real hot key or cold credential.
 func TestCommitteeVotingStateRejectsMalformedStoredHashes(t *testing.T) {
+	t.Parallel()
 	hot := testHash28(0x91)
 	cold := testHash28(0x92)
 	keyCredential := func(hash common.Blake2b224) common.Credential {
@@ -409,6 +419,9 @@ func TestCommitteeVotingStateRejectsMalformedStoredHashes(t *testing.T) {
 	overlong := func(hash common.Blake2b224) []byte {
 		return append(append([]byte(nil), hash[:]...), 0xff)
 	}
+	m, err := NewDingoStateManager()
+	require.NoError(t, err)
+	defer func() { require.NoError(t, m.Close()) }()
 	for _, tc := range []struct {
 		name   string
 		mutate func(t *testing.T, raw *sql.DB)
@@ -489,9 +502,8 @@ func TestCommitteeVotingStateRejectsMalformedStoredHashes(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			m, err := NewDingoStateManager()
-			require.NoError(t, err)
-			defer func() { require.NoError(t, m.Close()) }()
+			// Reset empties the manager in place, so the cases share one.
+			require.NoError(t, m.Reset())
 			require.NoError(t, m.LoadInitialState(
 				&conformance.ParsedInitialState{
 					CurrentEpoch:     5,
@@ -894,6 +906,7 @@ func entryPointEraList() []eras.EraDesc {
 // Without this, the coverage assertion above would be unfalsifiable, which is
 // the same failure mode as the aggregate pass rate it exists to backstop.
 func TestEntryPointExecutionFaultDetectsBypassedValidator(t *testing.T) {
+	t.Parallel()
 	root, err := corpusTestdataRoot()
 	require.NoError(t, err)
 	entries, err := dingoEraEntryPoints(entryPointEraList())
@@ -1067,6 +1080,7 @@ func loadEntryPointProbeTransaction(
 // assertion is what makes this a detector rather than a restatement: the same
 // input is accepted by a validator that does nothing.
 func TestDingoEraEntryPointsRejectInputlessTransaction(t *testing.T) {
+	t.Parallel()
 	entries, err := dingoEraEntryPoints(entryPointEraList())
 	require.NoError(t, err)
 

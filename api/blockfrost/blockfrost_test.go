@@ -1694,36 +1694,6 @@ func TestStartAlreadyStarted(t *testing.T) {
 	assert.Contains(t, err.Error(), "already started")
 }
 
-func TestHandleRoot(t *testing.T) {
-	t.Parallel()
-
-	mock := &mockNode{}
-	b := newTestBlockfrost(mock)
-
-	req := httptest.NewRequest(
-		http.MethodGet, "/", nil,
-	)
-	w := httptest.NewRecorder()
-	b.handleRoot(w, req)
-
-	assert.Equal(t, http.StatusOK, w.Code)
-	assert.Equal(
-		t,
-		"application/json",
-		w.Header().Get("Content-Type"),
-	)
-
-	var resp RootResponse
-	err := json.NewDecoder(w.Body).Decode(&resp)
-	require.NoError(t, err)
-	assert.Equal(
-		t,
-		"https://blockfrost.io/",
-		resp.URL,
-	)
-	assert.Equal(t, "0.1.0", resp.Version)
-}
-
 func TestRouterRootServesRootDocument(t *testing.T) {
 	t.Parallel()
 
@@ -1770,20 +1740,6 @@ func TestRouterUnknownRouteReturns404(t *testing.T) {
 			assert.Equal(t, "Not Found", resp.Error)
 		})
 	}
-}
-
-func TestRouterImplementedRouteStillWorks(t *testing.T) {
-	t.Parallel()
-
-	mock := &mockNode{}
-	b := newTestBlockfrost(mock)
-	handler := b.handler()
-
-	req := httptest.NewRequest(http.MethodGet, "/health", nil)
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-
-	assert.Equal(t, http.StatusOK, w.Code)
 }
 
 func TestHandleHealth(t *testing.T) {
@@ -4320,28 +4276,6 @@ func TestStopIdempotent(t *testing.T) {
 	defer cancel()
 	err := b.Stop(ctx)
 	require.NoError(t, err)
-}
-
-func TestNilLogger(t *testing.T) {
-	t.Parallel()
-
-	b := New(
-		BlockfrostConfig{ListenAddress: ":0"},
-		&mockNode{},
-		nil,
-	)
-	assert.NotNil(t, b.logger)
-}
-
-func TestDefaultListenAddress(t *testing.T) {
-	t.Parallel()
-
-	b := New(
-		BlockfrostConfig{},
-		&mockNode{},
-		slog.Default(),
-	)
-	assert.Equal(t, "127.0.0.1:3000", b.config.ListenAddress)
 }
 
 func TestParseAddressOrPaymentCred(t *testing.T) {

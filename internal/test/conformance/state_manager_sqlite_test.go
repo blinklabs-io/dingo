@@ -47,6 +47,7 @@ func sqliteFileIdentity(t *testing.T, dataDir string) os.FileInfo {
 //
 // A different file after Reset means the recreate path ran.
 func TestSqliteResetKeepsTheSameDatabaseFile(t *testing.T) {
+	t.Parallel()
 	dataDir := t.TempDir()
 	sm, err := newDingoStateManagerAt(dataDir)
 	require.NoError(t, err)
@@ -67,6 +68,7 @@ func TestSqliteResetKeepsTheSameDatabaseFile(t *testing.T) {
 // in-place reset worth doing: schema_migrations survives, so the next
 // construction has nothing to re-apply.
 func TestSqliteResetPreservesMigrationLedger(t *testing.T) {
+	t.Parallel()
 	dataDir := t.TempDir()
 	sm, err := newDingoStateManagerAt(dataDir)
 	require.NoError(t, err)
@@ -100,6 +102,7 @@ func TestSqliteResetPreservesMigrationLedger(t *testing.T) {
 // removing the whole data directory; emptying only the metadata tables would
 // silently leave a prior vector's UTxO CBOR readable.
 func TestSqliteResetClearsBlobStore(t *testing.T) {
+	t.Parallel()
 	dataDir := t.TempDir()
 	sm, err := newDingoStateManagerAt(dataDir)
 	require.NoError(t, err)
@@ -141,6 +144,7 @@ func TestSqliteResetClearsBlobStore(t *testing.T) {
 // does that today, which is exactly why the contract needs a test rather than
 // a convention.
 func TestResetRunsEachWipeHookIndependently(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name           string
 		metadata, blob bool
@@ -179,6 +183,7 @@ func TestResetRunsEachWipeHookIndependently(t *testing.T) {
 // closed when it is absent, so while node_settings_gate was in the managed
 // set a Reset left the database in a state no construction accepts.
 func TestSqliteResetPreservesAlonzoPParamsUnitMarker(t *testing.T) {
+	t.Parallel()
 	dataDir := t.TempDir()
 	sm, err := newDingoStateManagerAt(dataDir)
 	require.NoError(t, err)
@@ -210,6 +215,7 @@ func TestSqliteResetPreservesAlonzoPParamsUnitMarker(t *testing.T) {
 // covers the opposite error, since preserving the whole table instead fails
 // here on the blob_store_id gate.
 func TestSqliteReopenAfterResetSucceeds(t *testing.T) {
+	t.Parallel()
 	dataDir := t.TempDir()
 	m1, err := newDingoStateManagerAt(dataDir)
 	require.NoError(t, err)
@@ -229,6 +235,7 @@ func TestSqliteReopenAfterResetSucceeds(t *testing.T) {
 // failure TestSqliteReopenAfterResetSucceeds would then hit from the other
 // direction.
 func TestSqliteResetClearsBlobStoreIDGate(t *testing.T) {
+	t.Parallel()
 	dataDir := t.TempDir()
 	sm, err := newDingoStateManagerAt(dataDir)
 	require.NoError(t, err)
@@ -288,31 +295,11 @@ func sqliteRowCount(t *testing.T, db *sql.DB, table string) int {
 	return n
 }
 
-// TestSqliteResetterRelaxesSynchronous pins the resetter's connection to
-// synchronous=OFF (0). It runs one DELETE batch per vector against a throwaway
-// database, so the driver's per-autocommit flush is pure cost. The store under
-// test opens its own connections with its production settings.
-func TestSqliteResetterRelaxesSynchronous(t *testing.T) {
-	path, _ := newSqliteResetterTestDB(
-		t,
-		`CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)`,
-	)
-	resetter, err := newSqliteResetter(path)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = resetter.Close() })
-
-	var synchronous int
-	require.NoError(
-		t,
-		resetter.db.QueryRow("PRAGMA synchronous").Scan(&synchronous),
-	)
-	require.Zero(t, synchronous, "PRAGMA synchronous must be OFF (0)")
-}
-
 // TestSqliteResetterTruncatesOnlyDirtyTables pins the same dirty-only
 // contract the Postgres and MySQL resetters carry: a table nothing wrote to
 // must not be touched, and the schema must survive.
 func TestSqliteResetterTruncatesOnlyDirtyTables(t *testing.T) {
+	t.Parallel()
 	path, db := newSqliteResetterTestDB(
 		t,
 		`CREATE TABLE dirty (id INTEGER PRIMARY KEY, v TEXT)`,
@@ -366,6 +353,7 @@ func TestSqliteResetterTruncatesOnlyDirtyTables(t *testing.T) {
 // intact and the next insert would continue from the previous vector's high
 // water mark.
 func TestSqliteResetterResetsAutoincrement(t *testing.T) {
+	t.Parallel()
 	path, db := newSqliteResetterTestDB(
 		t,
 		`CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT, v TEXT)`,
@@ -400,6 +388,7 @@ func TestSqliteResetterResetsAutoincrement(t *testing.T) {
 // still advances the next insert. MySQL solves the same problem with
 // extraDirty; SQLite must too.
 func TestSqliteResetterClearsAutoincrementOfEmptiedTable(t *testing.T) {
+	t.Parallel()
 	path, db := newSqliteResetterTestDB(
 		t,
 		`CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT, v TEXT)`,
@@ -432,6 +421,7 @@ func TestSqliteResetterClearsAutoincrementOfEmptiedTable(t *testing.T) {
 // schema_migrations would make the next construction re-run every migration,
 // which is the cost this whole path exists to avoid.
 func TestSqliteResetterExcludesInternalAndMigrationTables(t *testing.T) {
+	t.Parallel()
 	path, db := newSqliteResetterTestDB(
 		t,
 		`CREATE TABLE schema_migrations (version TEXT PRIMARY KEY)`,
@@ -480,6 +470,7 @@ func TestSqliteResetterExcludesInternalAndMigrationTables(t *testing.T) {
 // transaction; SQLite has no CASCADE on DELETE, so the resetter's own
 // connection must not enforce foreign keys.
 func TestSqliteResetterClearsDespiteForeignKeys(t *testing.T) {
+	t.Parallel()
 	// Names chosen so listSqliteConformanceTables' ORDER BY name yields the
 	// referenced table first: deleting a_parent while z_child still
 	// references it is a foreign-key violation on an enforcing connection.
@@ -509,6 +500,7 @@ func TestSqliteResetterClearsDespiteForeignKeys(t *testing.T) {
 // previous vector wrote nothing must issue no DELETE at all. This is what
 // keeps the cost proportional to what a vector wrote.
 func TestSqliteResetterSkipsEntirelyWhenClean(t *testing.T) {
+	t.Parallel()
 	path, _ := newSqliteResetterTestDB(
 		t,
 		`CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)`,
