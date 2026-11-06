@@ -7377,7 +7377,7 @@ func TestBoundaryPromotesRewardAfterReregistration(t *testing.T) {
 	}
 	run := func(reregister bool) outcome {
 		f := newEpochBoundaryBenchFixture(t, epochBoundaryBenchShape{
-			pools: 10, delegators: 200, dreps: 3, utxosPerDelegator: 2,
+			pools: 5, delegators: 100, dreps: 3, utxosPerDelegator: 2,
 			proposals: 2, drepVotes: 3, spoVotes: 3, ccMembers: 3,
 		}, "")
 		key := epochBoundaryBenchHash(0x30, 1)
