@@ -201,6 +201,9 @@ jobs:
       - name: npm-test
         if: steps.detect.outputs.run-ci == 'true'
         run: npm test
+      - name: test-merge-group-cancellation
+        if: steps.detect.outputs.run-ci == 'true'
+        run: node --test .github/scripts/test-cancel-obsolete-merge-groups.cjs
       - name: go-test
         # No services and no -race: the Postgres and MySQL variants in
         # internal/test/conformance gate on POSTGRES_PASSWORD / MYSQL_DSN and
