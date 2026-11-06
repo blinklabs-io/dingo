@@ -4726,8 +4726,14 @@ func (ls *LedgerState) pruneConsumedUtxosUpTo(
 ) (int, uint64, error) {
 	ls.consumedUtxoPruneMutex.Lock()
 	defer ls.consumedUtxoPruneMutex.Unlock()
-	pendingFloor, protected, err := pendingRewardStakeInputHistoryFloor(ls.db.Metadata(), nil)
+	guardTxn := ls.db.Metadata().ReadTransaction(ctx)
+	pendingFloor, protected, err := pendingRewardStakeInputHistoryFloor(ls.db.Metadata(), guardTxn)
+	releaseErr := guardTxn.Rollback()
+	if releaseErr != nil {
+		err = errors.Join(err, releaseErr)
+	}
 	if err != nil {
+		ls.config.Logger.Error("failed to inspect pending reward history; skipping consumed UTxO prune", "component", "ledger", "error", err)
 		return 0, 0, err
 	}
 	if protected {

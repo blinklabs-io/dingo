@@ -17,7 +17,10 @@ package ledger
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"testing"
+
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -40,7 +43,16 @@ func TestPendingRewardInputsRetainReconstructionHistory(t *testing.T) {
 		),
 	)
 	fixture.ls.rewardInputRollbackActive.Store(1)
-	require.NoError(t, fixture.ls.writeDeferredRewardStakeInputs(ctx, retentionRewardSnapshotEpoch, 100, fixture.capturedStakeInputs, fixture.ls.rewardInputGeneration.Load()))
+	require.NoError(
+		t,
+		fixture.ls.writeDeferredRewardStakeInputs(
+			ctx,
+			retentionRewardSnapshotEpoch,
+			100,
+			fixture.capturedStakeInputs,
+			fixture.ls.rewardInputGeneration.Load(),
+		),
+	)
 	fixture.ls.rewardInputRollbackActive.Store(0)
 	partial, err := meta.GetRewardStakeInputs(retentionRewardSnapshotEpoch, nil)
 	require.NoError(t, err)
@@ -61,6 +73,9 @@ func TestPendingRewardInputsRetainReconstructionHistory(t *testing.T) {
 	require.Zero(t, pruned)
 	require.Equal(t, uint64(99), floor)
 	require.Equal(t, uint64(99), fixture.ls.announcedUtxoPruneFloor())
+	durableFloor, err := fixture.db.ConsumedUtxoPruneFloor(nil)
+	require.NoError(t, err)
+	require.Equal(t, uint64(99), durableFloor)
 	tx := fixture.db.Transaction(ctx, true)
 	require.NoError(
 		t,
@@ -124,7 +139,9 @@ func TestPendingRewardInputsIgnoreRolledBackSnapshot(t *testing.T) {
 	fixture := seedRetentionReconstructionFixture(t)
 	meta := fixture.db.Metadata()
 	require.NoError(t, markRewardStakeInputsPending(meta, nil, 99, 999))
-	floor, protected, err := pendingRewardStakeInputHistoryFloor(meta, nil)
+	txn := meta.ReadTransaction(t.Context())
+	defer func() { _ = txn.Rollback() }()
+	floor, protected, err := pendingRewardStakeInputHistoryFloor(meta, txn)
 	require.NoError(t, err)
 	require.False(t, protected)
 	require.Zero(t, floor)
@@ -169,4 +186,164 @@ func TestPendingRewardInputsDisableTrustedBatchPruning(t *testing.T) {
 	require.NoError(t, err)
 	require.Positive(t, pruned)
 	require.False(t, utxoRowExists(t, h.db, names["register"].hash, 0))
+}
+
+type rewardRetentionHandoffStore struct {
+	metadata.MetadataStore
+	handoff func()
+}
+
+func (s *rewardRetentionHandoffStore) GetSyncState(
+	key string,
+	txn types.Txn,
+) (string, error) {
+	raw, err := s.MetadataStore.GetSyncState(key, txn)
+	if key == rewardStakeInputsPendingKey && s.handoff != nil {
+		handoff := s.handoff
+		s.handoff = nil
+		handoff()
+	}
+	return raw, err
+}
+
+func TestPendingRewardRetentionSnapshotHandoff(t *testing.T) {
+	t.Parallel()
+	f := seedRetentionReconstructionFixture(t)
+	meta := f.db.Metadata()
+	epoch, err := meta.GetEpoch(1, nil)
+	require.NoError(t, err)
+	require.NoError(
+		t,
+		meta.SetEpoch(100, 1, nil, nil, nil, nil, epoch.EraId, 1, 100, nil),
+	)
+	ctx := t.Context()
+	snapshot, err := meta.GetRewardSnapshot(
+		retentionRewardSnapshotEpoch,
+		"mark",
+		nil,
+	)
+	require.NoError(t, err)
+	pools, err := meta.GetRewardPoolInputs(retentionRewardSnapshotEpoch, nil)
+	require.NoError(t, err)
+	require.NoError(t, meta.DeleteRewardStateAfterSlot(98, nil))
+	record, _ := json.Marshal(
+		pendingRatificationRecord{
+			Epoch:        1,
+			BoundarySlot: 100,
+			ID:           1,
+			Snapshot:     true,
+		},
+	)
+	require.NoError(
+		t,
+		meta.SetSyncState(pendingRatificationSyncKey, string(record), nil),
+	)
+	require.NoError(
+		t,
+		f.db.MarkUtxosDeletedAtSlot(
+			ctx,
+			nil,
+			[]types.UtxoKey{
+				{TxId: bytes.Repeat([]byte{0x11}, 32), OutputIdx: 0},
+			},
+			150,
+		),
+	)
+	pruned, floor, err := f.ls.pruneConsumedUtxosUpTo(ctx, 200, 50, 1000)
+	require.NoError(t, err)
+	require.Zero(t, pruned)
+	require.Equal(t, uint64(99), floor)
+	handoff := func() {
+		tx := f.db.Transaction(ctx, true)
+		require.NoError(t, meta.SaveRewardSnapshot(snapshot, tx.Metadata()))
+		require.NoError(t, meta.SaveRewardPoolInputs(pools, tx.Metadata()))
+		require.NoError(
+			t,
+			markRewardStakeInputsPending(meta, tx.Metadata(), 1, 100),
+		)
+		require.NoError(
+			t,
+			meta.DeleteSyncState(pendingRatificationSyncKey, tx.Metadata()),
+		)
+		require.NoError(t, tx.Commit())
+	}
+	readTxn := meta.ReadTransaction(ctx)
+	spy := &rewardRetentionHandoffStore{MetadataStore: meta, handoff: handoff}
+	floor, protected, err := pendingRewardStakeInputHistoryFloor(spy, readTxn)
+	require.NoError(t, err)
+	require.True(t, protected)
+	require.Equal(t, uint64(99), floor)
+	require.NoError(t, readTxn.Rollback())
+	pruned, floor, err = f.ls.pruneConsumedUtxosUpTo(ctx, 200, 50, 1000)
+	require.NoError(t, err)
+	require.Zero(t, pruned)
+	require.Equal(t, uint64(99), floor)
+	tx := f.db.Transaction(ctx, true)
+	require.NoError(t, f.ls.ensureRewardStakeInputsReady(tx, 1))
+	require.NoError(t, tx.Commit())
+	rows, err := meta.GetRewardStakeInputs(1, nil)
+	require.NoError(t, err)
+	require.Len(t, rows, len(f.capturedStakeInputs))
+	pruned, _, err = f.ls.pruneConsumedUtxosUpTo(ctx, 200, 50, 1000)
+	require.NoError(t, err)
+	require.Equal(t, 1, pruned)
+}
+
+func TestPendingRewardRetentionRatificationRecordValidation(t *testing.T) {
+	t.Parallel()
+	f := seedRetentionReconstructionFixture(t)
+	meta := f.db.Metadata()
+	for _, raw := range []string{"null", "{}", `{"epoch":1,"boundary_slot":100,"id":1,"snapshot":null}`, `{"epoch":1,"boundary_slot":100,"id":1,"snapshot":true,"unknown":1}`, `{"epoch":1,"boundary_slot":101,"id":1,"snapshot":true}`, `{"epoch":99,"boundary_slot":100,"id":1,"snapshot":true}`} {
+		require.NoError(
+			t,
+			meta.SetSyncState(pendingRatificationSyncKey, raw, nil),
+		)
+		_, _, err := f.ls.pruneConsumedUtxosUpTo(t.Context(), 200, 50, 1000)
+		require.Error(t, err, raw)
+		require.Zero(t, f.ls.announcedUtxoPruneFloor())
+	}
+	require.NoError(
+		t,
+		meta.SetSyncState(
+			pendingRatificationSyncKey,
+			`{"epoch":99,"boundary_slot":100,"id":1}`,
+			nil,
+		),
+	)
+	_, floor, err := f.ls.pruneConsumedUtxosUpTo(t.Context(), 200, 50, 1000)
+	require.NoError(t, err)
+	require.Equal(t, uint64(200), floor)
+}
+
+func TestPendingRewardRetentionAcceptsNativeEmptyState(t *testing.T) {
+	t.Parallel()
+	f := seedRetentionReconstructionFixture(t)
+	meta := f.db.Metadata()
+	require.NoError(
+		t,
+		saveRewardStakeInputsPending(meta, nil, &rewardStakeInputsPending{}),
+	)
+	raw, err := meta.GetSyncState(rewardStakeInputsPendingKey, nil)
+	require.NoError(t, err)
+	require.JSONEq(t, `{"entries":null}`, raw)
+	require.NoError(
+		t,
+		f.db.MarkUtxosDeletedAtSlot(
+			t.Context(),
+			nil,
+			[]types.UtxoKey{
+				{TxId: bytes.Repeat([]byte{0x11}, 32), OutputIdx: 0},
+			},
+			150,
+		),
+	)
+	pruned, floor, err := f.ls.pruneConsumedUtxosUpTo(
+		t.Context(),
+		200,
+		50,
+		1000,
+	)
+	require.NoError(t, err)
+	require.Equal(t, 1, pruned)
+	require.Equal(t, uint64(200), floor)
 }
