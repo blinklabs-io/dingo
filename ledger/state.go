@@ -2603,16 +2603,30 @@ func sameHeaderVerificationContext(a, b *consensusSnapshot) bool {
 	return reflect.DeepEqual(a.epochCache, b.epochCache)
 }
 
-// sameProtocolParameters compares parameter sets by identity. Writers install
-// a new value when parameters change; a replacement with equal content is
-// treated as a change, which only costs a re-verification.
+// sameProtocolParameters reports whether two parameter sets have the same
+// content. Rollbacks and epoch reloads rebuild parameters from the database as
+// a new pointer with identical values, so identity alone would invalidate every
+// header verdict after each local rollback. Header verification depends only on
+// parameter values, so value equality is the correct test. The same pointer
+// short-circuits the comparison; types that cannot be compared (for example
+// holding a func) compare unequal, which only costs a re-verification.
 func sameProtocolParameters(a, b lcommon.ProtocolParameters) bool {
 	if a == nil || b == nil {
 		return a == nil && b == nil
 	}
 	av, bv := reflect.ValueOf(a), reflect.ValueOf(b)
-	return av.Type() == bv.Type() && av.Kind() == reflect.Pointer &&
-		av.Pointer() == bv.Pointer()
+	if av.Type() != bv.Type() {
+		return false
+	}
+	if av.Kind() == reflect.Pointer {
+		if av.IsNil() || bv.IsNil() {
+			return av.IsNil() && bv.IsNil()
+		}
+		if av.Pointer() == bv.Pointer() {
+			return true
+		}
+	}
+	return reflect.DeepEqual(a, b)
 }
 
 // snapshotPublishedChan returns a channel closed by the next snapshot

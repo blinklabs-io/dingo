@@ -157,7 +157,7 @@ func TestPeerForkVerdictsSurviveLocalRollbackInSameEpoch(t *testing.T) {
 		),
 		"a header verified before a same-epoch rollback must keep a current "+
 			"verdict after it: stamp=%d context=%d current=%d; consensus "+
-			"inputs unchanged by the rollback: era=%t pparams(by identity)=%t "+
+			"inputs unchanged by the rollback: era=%t pparams(by value)=%t "+
 			"prevEraPParams=%t transition=%t",
 		generationAtArrival, contextGeneration, generation,
 		before.currentEra.Id == after.currentEra.Id,
