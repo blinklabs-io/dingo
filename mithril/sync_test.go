@@ -47,6 +47,7 @@ func TestDetermineSyncMode(t *testing.T) {
 	t.Parallel()
 
 	t.Run("empty database is bootstrap", func(t *testing.T) {
+		t.Parallel()
 		db := newSyncModeTestDB(t)
 		mode, err := determineSyncMode(context.Background(), db)
 		require.NoError(t, err)
@@ -54,6 +55,7 @@ func TestDetermineSyncMode(t *testing.T) {
 	})
 
 	t.Run("in_progress is resume", func(t *testing.T) {
+		t.Parallel()
 		db := newSyncModeTestDB(t)
 		require.NoError(
 			t, db.SetSyncState("sync_status", syncStatusInProgress, nil),
@@ -64,6 +66,7 @@ func TestDetermineSyncMode(t *testing.T) {
 	})
 
 	t.Run("backfill is resume", func(t *testing.T) {
+		t.Parallel()
 		db := newSyncModeTestDB(t)
 		require.NoError(
 			t, db.SetSyncState("sync_status", syncStatusBackfill, nil),
@@ -74,6 +77,7 @@ func TestDetermineSyncMode(t *testing.T) {
 	})
 
 	t.Run("unknown non-empty status is resume", func(t *testing.T) {
+		t.Parallel()
 		db := newSyncModeTestDB(t)
 		require.NoError(t, db.BlockCreate(models.Block{
 			Slot:     42,
@@ -92,6 +96,7 @@ func TestDetermineSyncMode(t *testing.T) {
 	})
 
 	t.Run("complete database with blocks is catch-up", func(t *testing.T) {
+		t.Parallel()
 		db := newSyncModeTestDB(t)
 		block := models.Block{
 			Slot:     42,
@@ -154,45 +159,32 @@ func TestNeedsSyncReflectsSyncStatus(t *testing.T) {
 	t.Parallel()
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	dataDir := t.TempDir()
-	cfg := SyncConfig{
-		DataDir: dataDir,
-		Logger:  logger,
-	}
-
-	// setSyncStatus opens the database at dataDir, writes sync_status, and
-	// closes it so the subsequent NeedsSync call can acquire the lock.
-	setSyncStatus := func(status string) {
-		t.Helper()
-		db, err := dbtest.NewDatabase(t, &database.Config{
-			DataDir: dataDir,
-			Logger:  logger,
+	for _, tc := range []struct {
+		name   string
+		status string // "" leaves the database fresh
+		want   bool
+	}{
+		{"fresh database needs a sync", "", true},
+		{"in_progress needs a sync", syncStatusInProgress, true},
+		{"backfill is servable without a full resync", syncStatusBackfill, false},
+		{"unknown status is treated as incomplete", "unknown_interrupted_phase", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dataDir := t.TempDir()
+			if tc.status != "" {
+				// Close the handle before NeedsSync reopens by DataDir.
+				db, err := dbtest.NewDatabase(t, &database.Config{
+					DataDir: dataDir,
+					Logger:  logger,
+				})
+				require.NoError(t, err)
+				require.NoError(t, db.SetSyncState("sync_status", tc.status, nil))
+				require.NoError(t, dbtest.CloseDatabase(db))
+			}
+			need, err := NeedsSync(SyncConfig{DataDir: dataDir, Logger: logger})
+			require.NoError(t, err)
+			require.Equal(t, tc.want, need)
 		})
-		require.NoError(t, err)
-		require.NoError(t, db.SetSyncState("sync_status", status, nil))
-		require.NoError(t, dbtest.CloseDatabase(db))
 	}
-
-	// Fresh database: empty sync_status and no chain data → needs sync.
-	need, err := NeedsSync(cfg)
-	require.NoError(t, err)
-	require.True(t, need, "fresh database should need a sync")
-
-	// in_progress → needs sync.
-	setSyncStatus(syncStatusInProgress)
-	need, err = NeedsSync(cfg)
-	require.NoError(t, err)
-	require.True(t, need, "in_progress should need a sync")
-
-	// backfill → servable, no full resync.
-	setSyncStatus(syncStatusBackfill)
-	need, err = NeedsSync(cfg)
-	require.NoError(t, err)
-	require.False(t, need, "backfill should not need a full resync")
-
-	// Unknown non-empty statuses are treated as incomplete.
-	setSyncStatus("unknown_interrupted_phase")
-	need, err = NeedsSync(cfg)
-	require.NoError(t, err)
-	require.True(t, need, "unknown sync_status should need a sync")
 }
