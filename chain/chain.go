@@ -1907,6 +1907,11 @@ func (c *Chain) RollbackDeferredWithPreflight(
 	}
 	c.batchCommitMutex.Lock()
 	defer c.batchCommitMutex.Unlock()
+	if err := c.awaitPendingCallerAdds(); err != nil {
+		return nil, fmt.Errorf(
+			"wait for pending caller adds before preflight: %w", err,
+		)
+	}
 	if before != nil {
 		if err := before(); err != nil {
 			return nil, err

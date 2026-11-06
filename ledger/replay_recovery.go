@@ -1232,6 +1232,10 @@ func (ls *LedgerState) rollbackPrimaryChainInSecurityParamWindows(
 	}
 }
 
+var errAtTipRecoveryFloorAdvanced = errors.New(
+	"at-tip recovery floor advanced before rollback",
+)
+
 // At-tip recovery must make one bounded rollback. A series of individually
 // bounded steps can discard more than K blocks in total.
 func (ls *LedgerState) rollbackPrimaryChainWithinSecurityParam(
@@ -1261,6 +1265,16 @@ func (ls *LedgerState) rollbackPrimaryChainWithinSecurityParam(
 		context.Background(), point,
 		func() error {
 			tipBefore = ls.chain.Tip().Point
+			bounded, err := ls.clampAtTipRecoveryToImmutableFloor(point)
+			if err != nil {
+				return err
+			}
+			if !pointMatches(bounded, point) {
+				return fmt.Errorf(
+					"%w: target slot %d, current floor slot %d",
+					errAtTipRecoveryFloorAdvanced, point.Slot, bounded.Slot,
+				)
+			}
 			return ls.validateAndEmitRollbackUndo(ls.lifecycleContext(), point)
 		},
 	); err != nil {

@@ -1406,6 +1406,82 @@ func TestAtTipRollbackPreflightExcludesCompetingBlockAdd(t *testing.T) {
 	assert.False(t, pending)
 }
 
+func TestAtTipRollbackRefreshesFloorAfterConcurrentGrowth(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name         string
+		targetIndex  int
+		wantRejected bool
+	}{
+		{name: "legal target pins advanced floor", targetIndex: 18},
+		{name: "stale target is retried", targetIndex: 17, wantRejected: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			db := newTestDB(t)
+			cm, err := chain.NewManager(context.Background(), db, nil)
+			require.NoError(t, err)
+			raw := make([]chain.RawBlock, 20)
+			var prev []byte
+			for i := range raw {
+				raw[i] = testRawBlock(fmt.Sprintf("at-tip-gap-%d", i),
+					uint64((i+1)*5000), uint64(i+1), prev) //nolint:gosec
+				prev = raw[i].Hash
+			}
+			require.NoError(t, cm.PrimaryChain().AddRawBlocks(context.Background(), raw))
+			ls, err := newReplayRecoveryLedgerState(t, LedgerStateConfig{
+				Database: db, ChainManager: cm,
+				CardanoNodeConfig: newTestShelleyGenesisCfgWithK(t, 3),
+				Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+			})
+			require.NoError(t, err)
+			ls.currentEra = eras.ShelleyEraDesc
+			require.NoError(t, cm.SetLedger(ls))
+			tip := ochainsync.Tip{
+				Point:       ocommon.NewPoint(raw[19].Slot, raw[19].Hash),
+				BlockNumber: raw[19].BlockNumber,
+			}
+			require.NoError(t, db.SetTip(tip, nil))
+			ls.currentTip = tip
+			target := ocommon.NewPoint(raw[tc.targetIndex].Slot,
+				raw[tc.targetIndex].Hash)
+			bounded, err := ls.clampAtTipRecoveryToImmutableFloor(target)
+			require.NoError(t, err)
+			assert.Equal(t, target, bounded)
+
+			grown := []chain.RawBlock{
+				testRawBlock("at-tip-gap-new-1", 105000, 21, raw[19].Hash),
+			}
+			grown = append(grown, testRawBlock("at-tip-gap-new-2",
+				110000, 22, grown[0].Hash))
+			require.NoError(t, ls.chain.AddRawBlocks(context.Background(), grown))
+			grownTip := ls.chain.Tip().Point
+			committed, rollbackErr := ls.rollbackPrimaryChainWithinSecurityParam(target)
+			if tc.wantRejected {
+				require.ErrorIs(t, rollbackErr, errAtTipRecoveryFloorAdvanced)
+				assert.False(t, committed)
+				assert.Equal(t, grownTip, ls.chain.Tip().Point)
+				bounded, err = ls.clampAtTipRecoveryToImmutableFloor(target)
+				require.NoError(t, err)
+				assert.Equal(t, ocommon.NewPoint(raw[18].Slot, raw[18].Hash),
+					bounded)
+				committed, rollbackErr = ls.rollbackPrimaryChainWithinSecurityParam(bounded)
+			}
+			require.NoError(t, rollbackErr)
+			assert.True(t, committed)
+			assert.Equal(t, ocommon.NewPoint(raw[18].Slot, raw[18].Hash),
+				ls.chain.Tip().Point)
+			assert.Equal(t, ocommon.NewPoint(raw[18].Slot, raw[18].Hash),
+				ls.atTipRecoveryFloor.Point)
+			bounded, err = ls.clampAtTipRecoveryToImmutableFloor(
+				ocommon.NewPoint(raw[16].Slot, raw[16].Hash))
+			require.NoError(t, err)
+			assert.Equal(t, ls.atTipRecoveryFloor.Point, bounded)
+		})
+	}
+}
+
 // newAtTipDescentLedger builds a LedgerState sitting at a fixed tip with
 // at-tip validation enabled, for exercising the non-convergence guard in
 // recoverAtTipFromTxValidationError. The failing blocks fed in these tests are
