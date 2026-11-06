@@ -423,7 +423,7 @@ func TestSQLQueryDurationHistogramMultiRowMeasuresDispatchNotIteration(
 	reg := prometheus.NewRegistry()
 	store := newMigratedSQLiteStoreWithRegistry(t, reg)
 
-	const rowCount = 5_000
+	const rowCount = 20_000
 	require.NoError(t, store.withWriteTransaction(
 		nil,
 		func(db queryer, txnCtx context.Context) error {
