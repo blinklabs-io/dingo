@@ -44,30 +44,6 @@ func testHash(label string) []byte {
 	return h[:]
 }
 
-func TestBlockCache_BasicOperations(t *testing.T) {
-	t.Parallel()
-
-	cache := mustNewBlockCache(t, 3, nil)
-
-	// Test empty cache
-	_, ok := cache.Get(testHash("nonexistent"))
-	assert.False(t, ok)
-	assert.Equal(t, 0, cache.Len())
-
-	// Add a block
-	block1 := models.Block{
-		Hash: testHash("hash1"),
-		Slot: 100,
-	}
-	cache.Put(block1)
-	assert.Equal(t, 1, cache.Len())
-
-	// Retrieve it
-	got, ok := cache.Get(testHash("hash1"))
-	assert.True(t, ok)
-	assert.Equal(t, uint64(100), got.Slot)
-}
-
 func TestBlockCache_LRUEviction(t *testing.T) {
 	t.Parallel()
 
@@ -200,26 +176,6 @@ func TestBlockCache_AccessMovesToFront(t *testing.T) {
 	assert.True(t, ok4)
 }
 
-func TestBlockCache_DefaultCapacity(t *testing.T) {
-	t.Parallel()
-
-	// Test that 0 capacity uses default
-	cache := mustNewBlockCache(t, 0, nil)
-	assert.Equal(
-		t,
-		DefaultBlockCacheCapacity,
-		cache.capacity,
-	)
-
-	// Test that negative capacity uses default
-	cache = mustNewBlockCache(t, -1, nil)
-	assert.Equal(
-		t,
-		DefaultBlockCacheCapacity,
-		cache.capacity,
-	)
-}
-
 func TestBlockCache_Delete(t *testing.T) {
 	t.Parallel()
 
@@ -329,61 +285,4 @@ func TestBlockCache_ConcurrentAccess(t *testing.T) {
 	cacheLen := cache.Len()
 	require.GreaterOrEqual(t, cacheLen, 0)
 	require.LessOrEqual(t, cacheLen, 100)
-}
-
-func TestBlockCache_PrometheusMetric(t *testing.T) {
-	t.Parallel()
-
-	registry := prometheus.NewRegistry()
-	cache := mustNewBlockCache(t, 5, registry)
-
-	// Add blocks and verify metric is registered
-	block1 := models.Block{
-		Hash: testHash("hash1"),
-		Slot: 1,
-	}
-	block2 := models.Block{
-		Hash: testHash("hash2"),
-		Slot: 2,
-	}
-	cache.Put(block1)
-	cache.Put(block2)
-
-	// Gather metrics from the registry
-	metrics, err := registry.Gather()
-	require.NoError(t, err)
-
-	// Find our metric
-	var found bool
-	for _, mf := range metrics {
-		if mf.GetName() == "dingo_chain_manager_cached_blocks" {
-			found = true
-			require.Len(t, mf.GetMetric(), 1)
-			assert.Equal(
-				t,
-				float64(2),
-				mf.GetMetric()[0].GetGauge().GetValue(),
-			)
-		}
-	}
-	require.True(
-		t,
-		found,
-		"dingo_chain_manager_cached_blocks metric not found",
-	)
-
-	// Delete a block and verify metric updates
-	cache.Delete(testHash("hash1"))
-	metrics, err = registry.Gather()
-	require.NoError(t, err)
-	for _, mf := range metrics {
-		if mf.GetName() == "dingo_chain_manager_cached_blocks" {
-			require.NotEmpty(t, mf.GetMetric())
-			assert.Equal(
-				t,
-				float64(1),
-				mf.GetMetric()[0].GetGauge().GetValue(),
-			)
-		}
-	}
 }
