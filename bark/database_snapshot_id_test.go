@@ -26,7 +26,6 @@ import (
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
-	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/plugin"
 	"github.com/stretchr/testify/require"
 )
@@ -34,19 +33,17 @@ import (
 // Not t.Parallel: bark's snapshot RPC tests share the sequential database
 // handler fixtures.
 func TestSnapshotRPCRejectsSnapshotCopiedUnderNewerID(t *testing.T) {
+	t.Parallel()
 	for _, source := range []string{"local", "cloud"} {
 		for _, operation := range []string{"verify", "restore"} {
 			t.Run(source+"/"+operation, func(t *testing.T) {
-				dataDir := t.TempDir()
-				db := newDiskTestDB(t, dataDir)
-				require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
-				dbtest.CloseDatabase(db) //nolint:errcheck
-				creator := newTestDatabaseServiceHandlerWithTrustKey(t, nil, dataDir)
-				created := createAndAwaitSnapshot(
-					t, creator, &databasev1alpha1.CreateSnapshotRequest{},
+				t.Parallel()
+				snapshotRoot := t.TempDir()
+				olderID := "older-snapshot"
+				installTemplateSnapshot(
+					t, snapshotRoot, olderID,
+					lifecycle.WithManifestKey(testSnapshotTrustKey),
 				)
-				olderID := created.GetSnapshotId()
-				snapshotRoot := creator.bark.config.SnapshotDir
 				newerID := "newer-" + olderID
 				olderDir := filepath.Join(snapshotRoot, olderID)
 				newerDir := filepath.Join(snapshotRoot, newerID)

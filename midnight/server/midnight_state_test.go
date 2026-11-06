@@ -28,6 +28,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/midnight"
 	"github.com/blinklabs-io/dingo/midnight/server"
@@ -40,8 +41,14 @@ import (
 // same explicit schema migrations used by production.
 func setupTestStore(t *testing.T) *sqlstore.Store {
 	t.Helper()
+	// Seed the already-migrated metadata template: running the full schema
+	// migration per test dominates these tests' cost.
+	dataDir := t.TempDir()
+	template, err := dbtest.MetadataTemplateBytes()
+	require.NoError(t, err)
+	require.NoError(t, dbtest.SeedMetadataTemplateBytes(dataDir, template))
 	store, err := sqlite.NewSQLStore(
-		sqlite.Config{},
+		sqlite.Config{DataDir: dataDir},
 		metadata.ProviderDependencies{
 			Logger: slog.New(slog.NewTextHandler(os.Stderr, nil)),
 		},
@@ -54,9 +61,6 @@ func setupTestStore(t *testing.T) *sqlstore.Store {
 	return store
 }
 
-// startTestServerWithMetadata starts a server backed by md (with no block
-// resolver configured) and returns its dial address. The server is stopped
-// on test cleanup.
 func startTestServerWithMetadata(t *testing.T, md *sqlstore.Store) string {
 	t.Helper()
 	return startTestServerConfig(t, server.Config{Metadata: md})
@@ -68,26 +72,47 @@ func hashForByte(b byte) []byte {
 	return h
 }
 
-func TestGetAssetCreates_EmptyDatabase(t *testing.T) {
+func TestEventRPCs_EmptyDatabase(t *testing.T) {
 	t.Parallel()
 	store := setupTestStore(t)
 	client := midnight.NewMidnightStateClient(
 		dial(t, startTestServerWithMetadata(t, store)),
 	)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	resp, err := client.GetAssetCreates(
-		ctx,
-		&midnight.AssetCreatesRequest{UtxoCapacity: 10},
+
+	creates, err := client.GetAssetCreates(
+		ctx, &midnight.AssetCreatesRequest{UtxoCapacity: 10},
 	)
 	require.NoError(t, err)
-	require.Empty(t, resp.GetCreates())
+	require.Empty(t, creates.GetCreates())
+
+	spends, err := client.GetAssetSpends(
+		ctx, &midnight.AssetSpendsRequest{UtxoCapacity: 10},
+	)
+	require.NoError(t, err)
+	require.Empty(t, spends.GetSpends())
+
+	registrations, err := client.GetRegistrations(
+		ctx, &midnight.RegistrationsRequest{UtxoCapacity: 10},
+	)
+	require.NoError(t, err)
+	require.Empty(t, registrations.GetRegistrations())
+
+	deregistrations, err := client.GetDeregistrations(
+		ctx, &midnight.DeregistrationsRequest{UtxoCapacity: 10},
+	)
+	require.NoError(t, err)
+	require.Empty(t, deregistrations.GetDeregistrations())
+
+	events, err := client.GetUtxoEvents(
+		ctx, &midnight.UtxoEventsRequest{TxCapacity: 10},
+	)
+	require.NoError(t, err)
+	require.Empty(t, events.GetEvents())
+	require.Nil(t, events.GetNextPosition())
 }
 
-// TestGetAssetCreates_CursorPagination seeds rows across three blocks and
-// pages through them with a page size smaller than the total row count,
-// asserting every row is returned exactly once, in order, with no gaps.
 func TestGetAssetCreates_CursorPagination(t *testing.T) {
 	t.Parallel()
 	store := setupTestStore(t)
@@ -145,79 +170,6 @@ func TestGetAssetCreates_CursorPagination(t *testing.T) {
 	require.Equal(t, []pos{{1, 0}, {1, 1}, {2, 0}, {3, 0}}, got)
 }
 
-func TestGetAssetSpends_EmptyDatabase(t *testing.T) {
-	t.Parallel()
-	store := setupTestStore(t)
-	client := midnight.NewMidnightStateClient(
-		dial(t, startTestServerWithMetadata(t, store)),
-	)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	resp, err := client.GetAssetSpends(
-		ctx,
-		&midnight.AssetSpendsRequest{UtxoCapacity: 10},
-	)
-	require.NoError(t, err)
-	require.Empty(t, resp.GetSpends())
-}
-
-func TestGetRegistrations_EmptyDatabase(t *testing.T) {
-	t.Parallel()
-	store := setupTestStore(t)
-	client := midnight.NewMidnightStateClient(
-		dial(t, startTestServerWithMetadata(t, store)),
-	)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	resp, err := client.GetRegistrations(
-		ctx,
-		&midnight.RegistrationsRequest{UtxoCapacity: 10},
-	)
-	require.NoError(t, err)
-	require.Empty(t, resp.GetRegistrations())
-}
-
-func TestGetDeregistrations_EmptyDatabase(t *testing.T) {
-	t.Parallel()
-	store := setupTestStore(t)
-	client := midnight.NewMidnightStateClient(
-		dial(t, startTestServerWithMetadata(t, store)),
-	)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	resp, err := client.GetDeregistrations(
-		ctx,
-		&midnight.DeregistrationsRequest{UtxoCapacity: 10},
-	)
-	require.NoError(t, err)
-	require.Empty(t, resp.GetDeregistrations())
-}
-
-func TestGetUtxoEvents_EmptyDatabase(t *testing.T) {
-	t.Parallel()
-	store := setupTestStore(t)
-	client := midnight.NewMidnightStateClient(
-		dial(t, startTestServerWithMetadata(t, store)),
-	)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	resp, err := client.GetUtxoEvents(
-		ctx,
-		&midnight.UtxoEventsRequest{TxCapacity: 10},
-	)
-	require.NoError(t, err)
-	require.Empty(t, resp.GetEvents())
-	require.Nil(t, resp.GetNextPosition())
-}
-
-// TestGetUtxoEvents_NextPositionBlockNumberOutOfDomain seeds a row whose
-// stored block number exceeds uint32 range (CardanoPosition's wire type) and
-// verifies GetUtxoEvents rejects building next_position with a stable,
-// generic Internal error instead of silently wrapping the block number.
 func TestGetUtxoEvents_NextPositionBlockNumberOutOfDomain(t *testing.T) {
 	t.Parallel()
 	store := setupTestStore(t)

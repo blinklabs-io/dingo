@@ -30,6 +30,7 @@ import (
 // RPC increments requestsTotal and observes requestDuration, both labelled
 // with the bare method name (not the full "/service/Method" path).
 func TestUnaryInterceptor_RecordsCountAndDurationByMethod(t *testing.T) {
+	t.Parallel()
 	reg := prometheus.NewRegistry()
 	m := newServerMetrics(reg)
 	info := &grpc.UnaryServerInfo{
@@ -60,6 +61,7 @@ func TestUnaryInterceptor_RecordsCountAndDurationByMethod(t *testing.T) {
 // TestUnaryInterceptor_RecordsFailedRequestsToo verifies a handler error still
 // counts as a request under requestsTotal and is propagated back unchanged.
 func TestUnaryInterceptor_RecordsFailedRequestsToo(t *testing.T) {
+	t.Parallel()
 	reg := prometheus.NewRegistry()
 	m := newServerMetrics(reg)
 	info := &grpc.UnaryServerInfo{
@@ -87,6 +89,7 @@ func TestUnaryInterceptor_RecordsFailedRequestsToo(t *testing.T) {
 // TestNewServerMetrics_NilRegistryIsSafe verifies the interceptor stays usable
 // (no panic) when constructed with a nil Prometheus registry.
 func TestNewServerMetrics_NilRegistryIsSafe(t *testing.T) {
+	t.Parallel()
 	m := newServerMetrics(nil)
 	info := &grpc.UnaryServerInfo{
 		FullMethod: "/midnight_state.MidnightState/GetEpochNonce",

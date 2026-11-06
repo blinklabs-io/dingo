@@ -27,7 +27,6 @@ import (
 	"connectrpc.com/connect"
 	databasev1alpha1 "github.com/blinklabs-io/bark/proto/v1alpha1/database"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
-	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/stretchr/testify/require"
 )
 
@@ -79,24 +78,15 @@ type localAuthFixture struct {
 
 func newLocalAuthFixture(t *testing.T) *localAuthFixture {
 	t.Helper()
-	dataDir := t.TempDir()
-	db := newDiskTestDB(t, dataDir)
-	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
-
 	snapshotDir := t.TempDir()
 	cloudBackingDir := t.TempDir()
-	setBarkFakeCloudBackingDir(t, cloudBackingDir)
-	const cloudDest = "barkfaketest://bucket/prefix"
+	bucket := setBarkFakeCloudBackingDir(t, cloudBackingDir)
+	cloudDest := "barkfaketest://" + bucket + "/prefix"
 
 	localDir := filepath.Join(snapshotDir, localAuthSnapshotID)
-	_, err := lifecycle.SnapshotToCloud(
-		context.Background(), testDestinationRegistry, db, localDir,
-		lifecycle.TriggerManual, "test-version", "badger", "sqlite",
-		cloudDest, "", "",
-		lifecycle.WithManifestKey(testSnapshotTrustKey),
+	installTemplateSnapshotInCloud(
+		t, snapshotDir, localAuthSnapshotID, cloudDest, true,
 	)
-	require.NoError(t, err)
-	dbtest.CloseDatabase(db) //nolint:errcheck
 
 	h := newTestDatabaseServiceHandlerWithTrustKey(
 		t, nil, filepath.Join(t.TempDir(), "target"),
@@ -172,11 +162,10 @@ func (f *localAuthFixture) awaitCompleted(t *testing.T) {
 	)
 }
 
-// Not t.Parallel: the fake cloud scheme resolves against the
-// process-global barkFakeCloudDir, so every test using it is sequential.
 func TestRestoreUsesCloudMirrorWhenLocalManifestFailsAuthentication(
 	t *testing.T,
 ) {
+	t.Parallel()
 	f := newLocalAuthFixture(t)
 	rewriteManifestUnkeyed(t, f.localDir)
 
@@ -189,10 +178,10 @@ func TestRestoreUsesCloudMirrorWhenLocalManifestFailsAuthentication(
 	require.Contains(t, logs, "using cloud mirror")
 }
 
-// Not t.Parallel: uses the process-global barkFakeCloudDir fixture.
 func TestVerifySnapshotUsesCloudMirrorWhenLocalManifestFailsAuthentication(
 	t *testing.T,
 ) {
+	t.Parallel()
 	f := newLocalAuthFixture(t)
 	rewriteManifestUnkeyed(t, f.localDir)
 
@@ -204,8 +193,8 @@ func TestVerifySnapshotUsesCloudMirrorWhenLocalManifestFailsAuthentication(
 	require.Contains(t, logs, "using cloud mirror")
 }
 
-// Not t.Parallel: uses the process-global barkFakeCloudDir fixture.
 func TestLocalAuthFailureWithUnusableCloudMirrorReturnsError(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name  string
 		setup func(t *testing.T, f *localAuthFixture)
@@ -229,6 +218,7 @@ func TestLocalAuthFailureWithUnusableCloudMirrorReturnsError(t *testing.T) {
 	for _, tc := range cases {
 		for _, op := range []string{"restore", "verify"} {
 			t.Run(tc.name+"/"+op, func(t *testing.T) {
+				t.Parallel()
 				f := newLocalAuthFixture(t)
 				rewriteManifestUnkeyed(t, f.localDir)
 				tc.setup(t, f)
@@ -249,8 +239,8 @@ func TestLocalAuthFailureWithUnusableCloudMirrorReturnsError(t *testing.T) {
 	}
 }
 
-// Not t.Parallel: uses the process-global barkFakeCloudDir fixture.
 func TestValidLocalManifestIsChosenWithoutConsultingCloud(t *testing.T) {
+	t.Parallel()
 	f := newLocalAuthFixture(t)
 	// The cloud copy is made unusable so a lookup would surface in the log
 	// or the result.
@@ -264,8 +254,8 @@ func TestValidLocalManifestIsChosenWithoutConsultingCloud(t *testing.T) {
 	require.NotContains(t, f.logs.String(), "authentication")
 }
 
-// Not t.Parallel: uses the process-global barkFakeCloudDir fixture.
 func TestUnkeyedLocalProbeUnchangedWithoutTrustKey(t *testing.T) {
+	t.Parallel()
 	f := newLocalAuthFixture(t)
 	rewriteManifestUnkeyed(t, f.localDir)
 	h := newTestDatabaseServiceHandler(
@@ -317,9 +307,8 @@ func oversizeManifest(t *testing.T, dir string) {
 // Under a trust key the unkeyed checksum and the size bound are no stronger
 // than the tag: a writer to the snapshot directory can fail any of them, so
 // none may make the authenticated cloud mirror of the same ID unavailable.
-//
-// Not t.Parallel: uses the process-global barkFakeCloudDir fixture.
 func TestKeyedLocalManifestFailureUsesAuthenticatedCloudMirror(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name   string
 		damage func(t *testing.T, dir string)
@@ -357,6 +346,7 @@ func TestKeyedLocalManifestFailureUsesAuthenticatedCloudMirror(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			f := newLocalAuthFixture(t)
 			tc.damage(t, f.localDir)
 
@@ -380,10 +370,10 @@ func TestKeyedLocalManifestFailureUsesAuthenticatedCloudMirror(t *testing.T) {
 
 // Without a usable cloud mirror a keyed local failure keeps the code the
 // local failure alone would produce.
-//
-// Not t.Parallel: uses the process-global barkFakeCloudDir fixture.
 func TestKeyedLocalManifestFailureWithoutCloudKeepsLocalCode(t *testing.T) {
+	t.Parallel()
 	t.Run("corrupted", func(t *testing.T) {
+		t.Parallel()
 		f := newLocalAuthFixture(t)
 		require.NoError(t, os.RemoveAll(f.cloudDir))
 		tamperManifestChecksum(
@@ -395,6 +385,7 @@ func TestKeyedLocalManifestFailureWithoutCloudKeepsLocalCode(t *testing.T) {
 		require.Contains(t, err.Error(), "no copy in the configured cloud destination")
 	})
 	t.Run("oversized", func(t *testing.T) {
+		t.Parallel()
 		f := newLocalAuthFixture(t)
 		require.NoError(t, os.RemoveAll(f.cloudDir))
 		oversizeManifest(t, f.localDir)
@@ -407,9 +398,8 @@ func TestKeyedLocalManifestFailureWithoutCloudKeepsLocalCode(t *testing.T) {
 
 // A configured trust key that cannot be loaded fails the request before any
 // snapshot is read, rather than probing the local copy unkeyed.
-//
-// Not t.Parallel: uses the process-global barkFakeCloudDir fixture.
 func TestUnloadableTrustKeyFailsResolutionClosed(t *testing.T) {
+	t.Parallel()
 	f := newLocalAuthFixture(t)
 	h := newTestDatabaseServiceHandlerWithConfig(
 		t, nil, filepath.Join(t.TempDir(), "target"),
