@@ -5778,6 +5778,11 @@ transaction that does carry redeemers still translates its validity interval per
 redeemer language and still fails past the horizon, matching cardano-ledger's
 `TimeTranslationPastHorizon`.
 
+Dijkstra's phase-2 success cache admits only transactions with redeemers at
+some witness level. Script-free transactions still run the structural phase-2
+rule, but do not hash their resolved inputs and cost models for a cache key or
+evict cached script evaluations.
+
 `EvaluateTxDijkstra` evaluates every Plutus redeemer of a Dijkstra transaction
 through `gdijkstra.EvaluatePlutusScripts`: top-level and sub-transaction
 redeemers, guarding redeemers, and Plutus V1-V4 scripts witnessed or referenced
