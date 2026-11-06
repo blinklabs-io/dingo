@@ -4355,16 +4355,12 @@ connection merely attached to the pool blocks TRUNCATE": SQLite's own
 documentation for `wal_checkpoint` states that RESTART/TRUNCATE block only on an
 active writer or a reader still reading an old snapshot, not on a connection
 that is idle, and a direct reproduction confirms this for this exact driver and
-DSN -- `TestWALCheckpointTruncateIdleConnectionDoesNotBlock`
-(`shared_sqlstore_test.go`) runs `sqliteDiskSize`'s exact pre-fix query pattern
-(two `QueryRowContext(...).Scan(...)` calls against `readDB`, connection left
-open in the pool afterward) immediately before a `PRAGMA
-wal_checkpoint(TRUNCATE)` attempt against real, substantial WAL content and
-observes `busy=0`, a full truncation to zero bytes, and `readDB`'s own
-`OpenConnections` staying at 1 throughout -- while an actual held, uncommitted
-read transaction (the same test's positive control) does reproduce `busy=1`. So
-the specific, isolatable cause of the production symptom is not "the idle
-connection's mere presence in the pool"; it is left open here rather than
+DSN: an actual held, uncommitted read transaction blocks `TRUNCATE`
+(`busy=1`), while a connection that merely ran `sqliteDiskSize`'s pre-fix query
+pattern (two `QueryRowContext(...).Scan(...)` calls against `readDB`) and was
+left open in the pool does not. So the specific, isolatable cause of the
+production symptom is not "the idle connection's mere presence in the pool"; it
+is left open here rather than
 asserted, and the dedicated-connection fix stands on the production before/after
 evidence and on matching `checkpointWAL`'s already-established pattern,
 independent of a fully isolated microscopic explanation.

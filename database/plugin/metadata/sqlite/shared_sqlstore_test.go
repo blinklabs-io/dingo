@@ -185,7 +185,6 @@ func TestSharedSQLStoreAccountParity(t *testing.T) {
 	require.False(t, gotDeactivated.Active)
 }
 
-// The ordering test above pins the cause; this pins the symptom it produced.
 // Two openers racing to create the same metadata database must both get
 // through, because the loser waits out the winner's journal_mode conversion
 // instead of failing on it. Before the fix this surfaced as
@@ -1450,17 +1449,13 @@ func TestDiskSizeDoesNotBlockOnBusyWriteConnection(t *testing.T) {
 // fix, sqliteDiskSize opens and closes its own dedicated connection per
 // call, exactly like checkpointWAL already does, so readDB is never touched
 // and never gains one. It does not by itself show that an idle, otherwise
-// unused connection blocks wal_checkpoint(TRUNCATE) -- see
-// TestWALCheckpointTruncateIdleConnectionDoesNotBlock below, which tests
-// that specific claim directly and finds it false: a connection that runs
-// this same query pattern and is then left idle in the pool does not block
-// a subsequent TRUNCATE against real WAL content, while an actual held read
-// transaction does. The production mechanism connecting "DiskSize on
-// readDB" to the persistent busy=1 symptom is not fully isolated by either
-// test; the dedicated-connection fix is justified by the production
-// before/after observation and by matching checkpointWAL's own existing
-// design, not by a claim that mere pool attachment is sufficient to block a
-// checkpoint.
+// unused connection blocks wal_checkpoint(TRUNCATE): SQLite documents that
+// only an active writer or a reader on an old snapshot does. The production
+// mechanism connecting "DiskSize on readDB" to the persistent busy=1 symptom
+// is not isolated by this test; the dedicated-connection fix is justified by
+// the production before/after observation and by matching checkpointWAL's own
+// existing design, not by a claim that mere pool attachment is sufficient to
+// block a checkpoint.
 func TestDiskSizeDoesNotLeaveReadDBConnectionOpen(t *testing.T) {
 	t.Parallel()
 	dataDir := t.TempDir()
