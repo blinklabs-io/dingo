@@ -8,7 +8,10 @@
   <a href="https://discord.gg/5fPRZnX4qW"><img src="https://img.shields.io/badge/Discord-7289DA?style=flat&logo=discord&logoColor=white" alt="Discord"></a>
 </div>
 
-> ⚠️ **WARNING: Dingo is under heavy active development and is not yet ready for mainnet block production use. It should only be used on testnets (preview, preprod, musashi, dijkstra) and devnets. Do not use Dingo on mainnet for block production with real funds.**
+> ⚠️ **WARNING: Dingo is under heavy active development and is not yet ready for
+> mainnet block production use. It should only be used on testnets (preview,
+> preprod, musashi, dijkstra) and devnets. Do not use Dingo on mainnet for block
+> production with real funds.**
 
 Dingo is Blink Labs' Cardano node implementation in Go. It implements the
 Ouroboros networking and consensus protocols, validates ledger state, and
@@ -16,19 +19,26 @@ provides pluggable storage and client interfaces.
 
 ## Documentation by audience
 
-- **Node operators:** [Dingo guides](https://docs.blinklabs.io/guides/dingo/001-dingo/),
-  including the [quick start](https://docs.blinklabs.io/guides/dingo/002-quick-start-overview/),
-  [configuration and storage modes](https://docs.blinklabs.io/guides/dingo/005-node-configuration/),
-  [bootstrap and data maintenance](https://docs.blinklabs.io/guides/dingo/007-bootstrap-and-data-maintenance/),
-  and [stake pool operation](https://docs.blinklabs.io/guides/dingo/spo-guides/000-spo-guide/).
-- **Application developers:** [APIs and archive services](https://docs.blinklabs.io/guides/dingo/006-apis-and-archive/)
-  and [using Dingo with Cardano CLI](https://docs.blinklabs.io/guides/dingo/004-using-dingo-with-cardano-cli/).
+- **Node operators:** [Dingo
+  guides](https://docs.blinklabs.io/guides/dingo/001-dingo/), including the
+  [quick
+  start](https://docs.blinklabs.io/guides/dingo/002-quick-start-overview/),
+  [configuration and storage
+  modes](https://docs.blinklabs.io/guides/dingo/005-node-configuration/),
+  [bootstrap and data
+  maintenance](https://docs.blinklabs.io/guides/dingo/007-bootstrap-and-data-maintenance/),
+  and [stake pool
+  operation](https://docs.blinklabs.io/guides/dingo/spo-guides/000-spo-guide/).
+- **Application developers:** [APIs and archive
+  services](https://docs.blinklabs.io/guides/dingo/006-apis-and-archive/) and
+  [using Dingo with Cardano
+  CLI](https://docs.blinklabs.io/guides/dingo/004-using-dingo-with-cardano-cli/).
 - The Kupo-compatible API is disabled by default. To enable it, configure
   `DINGO_PLUGINS_API_KUPO_CONFIG_PORT` and use API storage mode.
-- **Dingo contributors:** [development guide](docs/development.md),
-  [local DevNet](docs/devnet.md), [benchmarks and profiling](docs/benchmarks.md),
-  [architecture](ARCHITECTURE.md), [database design](DATABASE.md), and
-  [plugin development](database/plugin/PLUGIN_DEVELOPMENT.md).
+- **Dingo contributors:** [development guide](docs/development.md), [local
+  DevNet](docs/devnet.md), [benchmarks and profiling](docs/benchmarks.md),
+  [architecture](ARCHITECTURE.md), [database design](DATABASE.md), and [plugin
+  development](database/plugin/PLUGIN_DEVELOPMENT.md).
 
 ## Codebase
 
@@ -78,10 +88,10 @@ are in the temporary directory printed at startup and are removed on exit.
 These public test keys must never hold real funds. See the
 [local DevNet guide](docs/devnet.md) for details.
 
-Run the test suite with race detection using `make test`. See the
-[development guide](docs/development.md) for repository checks, integration
-environments, and profiling. For basic node setup and usage, follow the
-[operator quick start](https://docs.blinklabs.io/guides/dingo/002-quick-start-overview/).
+Run the test suite with race detection using `make test`. See the [development
+guide](docs/development.md) for repository checks, integration environments, and
+profiling. For basic node setup and usage, follow the [operator quick
+start](https://docs.blinklabs.io/guides/dingo/002-quick-start-overview/).
 
 ## Repository documentation
 

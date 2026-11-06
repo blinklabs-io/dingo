@@ -1158,7 +1158,7 @@ func compareTotalActiveStake(
 //
 // Unlike those two, /tx_info is a BATCH endpoint, so an all-or-nothing cache
 // check would throw away almost all of the benefit: one uncached transaction
-// in a chunk of KoiosTxInfoBatchSize would re-fetch the other 39 that are
+// in a chunk of TxInfoBatchSize would re-fetch every other one that is
 // already known. This looks up the whole chunk, asks Koios for exactly the
 // misses, and merges -- so a chunk that is half cached costs half a request's
 // worth of hashes, and a fully cached chunk costs no request at all. The

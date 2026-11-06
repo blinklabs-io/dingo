@@ -43,6 +43,7 @@ func TestApplyPathStatementsArePreparedOnce(t *testing.T) {
 		{"pool by key hash", poolByKeyHashQuery},
 		{"account by credential", sqlitequery.GetAccountByCredentialQuery},
 		{"active account", sqlitequery.GetActiveAccountByCredentialQuery},
+		{"sync state", sqlitequery.GetSyncStateQuery},
 		{"set tip", sqlitequery.SetTipQuery},
 		{"set block nonce", sqlitequery.SetBlockNonceQuery},
 	}
@@ -70,7 +71,10 @@ func TestApplyPathStatementsArePreparedOnce(t *testing.T) {
 				fx.tx, fx.point, 0, fx.certDeposits, false, nil, 0,
 			))
 		}
-		_, err := store.GetAccountByCredential(0, fx.ref.Key, true, nil)
+		value, err := store.GetSyncState("absent-trust-boundary", nil)
+		require.NoError(t, err)
+		require.Empty(t, value)
+		_, err = store.GetAccountByCredential(0, fx.ref.Key, true, nil)
 		require.NoError(t, err)
 		_, err = store.GetAccountByCredential(0, fx.ref.Key, false, nil)
 		require.NoError(t, err)
@@ -178,4 +182,66 @@ func TestQueryRowsCachedFallsBackWhenTxScopedStmtClosed(t *testing.T) {
 	).Close())
 	require.NoError(t, query())
 	require.NoError(t, txn.Commit())
+}
+
+func TestSyncStatePreparedReadObservesTransactionWrites(t *testing.T) {
+	t.Parallel()
+	store, recorder := newRecordingSQLiteStore(t)
+	txn := store.Transaction(context.Background())
+	t.Cleanup(func() { require.NoError(t, txn.Rollback()) })
+	mark := len(recorder.snapshot())
+	value, err := store.GetSyncState("boundary", txn)
+	require.NoError(t, err)
+	require.Empty(t, value)
+	require.NoError(t, store.SetSyncState("boundary", "42", txn))
+	value, err = store.GetSyncState("boundary", txn)
+	require.NoError(t, err)
+	require.Equal(t, "42", value)
+	require.NoError(t, store.SetSyncState("boundary", "43", txn))
+	value, err = store.GetSyncState("boundary", txn)
+	require.NoError(t, err)
+	require.Equal(t, "43", value)
+	require.NoError(t, store.DeleteSyncState("boundary", txn))
+	value, err = store.GetSyncState("boundary", txn)
+	require.NoError(t, err)
+	require.Empty(t, value)
+	for _, query := range recorder.snapshot()[mark:] {
+		require.NotEqual(
+			t,
+			sqlitequery.GetSyncStateQuery,
+			query,
+			"sync-state reads must reuse the prepared statement",
+		)
+	}
+}
+
+func BenchmarkGetSyncStateInTransaction(b *testing.B) {
+	for _, name := range []string{"missing", "present"} {
+		b.Run(name, func(b *testing.B) {
+			store := newMigratedSQLiteStore(b)
+			expected := ""
+			if name == "present" {
+				expected = "42"
+				if err := store.SetSyncState("boundary", expected, nil); err != nil {
+					b.Fatal(err)
+				}
+			}
+			txn := store.Transaction(context.Background())
+			b.Cleanup(func() {
+				if err := txn.Rollback(); err != nil {
+					b.Error(err)
+				}
+			})
+			b.ReportAllocs()
+			for b.Loop() {
+				value, err := store.GetSyncState("boundary", txn)
+				if err != nil {
+					b.Fatal(err)
+				}
+				if value != expected {
+					b.Fatalf("sync state = %q, want %q", value, expected)
+				}
+			}
+		})
+	}
 }
