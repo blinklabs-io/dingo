@@ -12525,6 +12525,11 @@ Package layout:
    `bootstrap_v2.go`, which orchestrates the v2 digest/immutable/ancillary
    workflow
 
+At the chain root, the genesis signature authenticates the protocol message.
+Its signed next aggregate verification key and protocol-parameter hash must
+match the genesis certificate's own key and parameters, which same-epoch
+successors inherit.
+
 The certificate-chain walk (`bootstrap.go`) runs before any certificate is
 trusted, so it is bounded on every axis the aggregator controls. Each
 certificate body is read through a limit of 8 MiB with overflow detection, and
