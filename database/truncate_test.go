@@ -666,6 +666,7 @@ func TestRollbackAfterSlotLowersHistoryExpiryCursor(t *testing.T) {
 	for _, rb := range rollbacks {
 		for _, tc := range cursors {
 			t.Run(rb.name+"/"+tc.name, func(t *testing.T) {
+				t.Parallel()
 				db := newTestDB(t)
 				targetBlock := testIndexedBlock(1500, 1, 0x15)
 				require.NoError(t, db.BlockCreate(targetBlock, nil))
