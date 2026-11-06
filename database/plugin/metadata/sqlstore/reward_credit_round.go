@@ -279,7 +279,7 @@ GROUP BY rao.credential_tag, rao.staking_key`), args...)
 const credentialUnfoldedRewardCreditPredicate = `spendable = TRUE AND guarded = FALSE AND NOT folded`
 
 // FoldRewardAccountOutputs marks a credential's unfolded credits of the given
-// rounds as added to account.reward, in the transaction that adds them.
+// rounds as included in account.reward, in the transaction establishing it.
 func (s *Store) FoldRewardAccountOutputs(
 	epochs []uint64,
 	credentialTag uint8,

@@ -1608,6 +1608,7 @@ type LedgerState struct {
 	reachedTip                  atomic.Bool
 	catchup                     catchupTrace
 	currentTip                  ochainsync.Tip
+	electingVrfMemo             electingVrfMemo // immutable electing VRF key hashes below the stability window (see electing_vrf_memo.go)
 	byronPBFT                   byronPBFTCache
 	currentEpoch                models.Epoch
 	dbWorkerPool                *DatabaseWorkerPool
@@ -5699,6 +5700,10 @@ func (ls *LedgerState) rollbackWithBlocksAndIntent(
 	ls.resetNextEpochNonceReady()
 	ls.updateTipMetrics(newTipDensity)
 	ls.publishSnapshotsLocked()
+	// Every rollback that truncates metadata reaches this point, whether a
+	// peer rollback, a fork switch or a recovery rewind. Clear after the
+	// rolled-back tip is published; see electingVrfMemo.
+	ls.electingVrfMemo.clear()
 	ls.Unlock()
 	finishValidationTransition()
 	// Reconstruct the new tip's block_nonce if TruncateAfterSlot above
@@ -10631,9 +10636,10 @@ func (ls *LedgerState) ledgerProcessBlock(
 				// transaction.
 				pp := pparams
 				isCurrentEraPParams := true
-				if validationEra.Id != currentEra.Id &&
-					prevEraPParams != nil {
-					pp = prevEraPParams
+				if prev := previousEraPParams(
+					validationEra.Id, currentEra.Id, pparams, prevEraPParams,
+				); prev != nil {
+					pp = prev
 					isCurrentEraPParams = false
 				}
 				// syntheticV2CostModel is a parameter, captured under the same
@@ -15497,10 +15503,37 @@ func (s txValidationSnapshot) validationContext(
 func (s txValidationSnapshot) validationPParams(
 	txEraId uint,
 ) (lcommon.ProtocolParameters, bool) {
-	if txEraId != s.currentEra.Id && s.prevEraPParams != nil {
-		return s.prevEraPParams, false
+	if prev := previousEraPParams(
+		txEraId, s.currentEra.Id, s.currentPParams, s.prevEraPParams,
+	); prev != nil {
+		return prev, false
 	}
 	return s.currentPParams, true
+}
+
+// previousEraPParams returns the parameters that validate a transaction of
+// the era before the ledger's, or nil when txEraId is the ledger's own era or
+// no such parameters exist. They are the recorded previous-era parameters.
+// A network that starts in Dijkstra has no earlier epoch to record them
+// from, but Dijkstra's parameters extend Conway's, so a Conway transaction
+// there is validated with the Conway parameters they embed; cardano-node
+// likewise validates a Conway-tagged submission on such a network.
+func previousEraPParams(
+	txEraId, currentEraId uint,
+	current, prev lcommon.ProtocolParameters,
+) lcommon.ProtocolParameters {
+	if txEraId == currentEraId {
+		return nil
+	}
+	if prev != nil {
+		return prev
+	}
+	if dpp, ok := current.(*dijkstra.DijkstraProtocolParameters); ok &&
+		dpp != nil && txEraId == conway.EraIdConway &&
+		currentEraId == dijkstra.EraIdDijkstra {
+		return &dpp.ConwayProtocolParameters
+	}
+	return nil
 }
 
 func (s txValidationSnapshot) protocolParameters(
@@ -16321,8 +16354,11 @@ func (ls *LedgerState) EvaluateTxContext(
 		// a transaction from the immediately previous era (era-1).
 		pp := snapshotPParams
 		isCurrentEraPParams := true
-		if validationEra.Id != snapshotEra.Id && snapshotPrevEraPParams != nil {
-			pp = snapshotPrevEraPParams
+		if prev := previousEraPParams(
+			validationEra.Id, snapshotEra.Id, snapshotPParams,
+			snapshotPrevEraPParams,
+		); prev != nil {
+			pp = prev
 			isCurrentEraPParams = false
 		}
 		synthetic := syntheticV2CostModelForValidation(

@@ -842,8 +842,8 @@ const koiosTxInfoPayloadVersion = 2
 // txInfoLookupChunk bounds how many hashes go into one
 // "SELECT ... WHERE tx_hash IN (?, ?, ...)" so a caller that hands GetTxInfos
 // an arbitrarily long hash list never trips SQLite's bound-parameter limit
-// (999 by default). Callers in practice ask in KoiosTxInfoBatchSize-sized
-// chunks, well under this.
+// (999 by default). Callers in practice ask in chunks of a KoiosClient's
+// TxInfoBatchSize, at most koiosPageSize-1.
 const txInfoLookupChunk = 500
 
 // GetTxInfos returns every cached /tx_info item among txHashes, keyed by

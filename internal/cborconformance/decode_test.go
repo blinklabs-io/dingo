@@ -59,6 +59,13 @@ func TestConwayCorpusShapeConstraints(t *testing.T) {
 		rule string
 		raw  []byte
 	}{
+		{name: "empty certificates", rule: "certificates", raw: []byte{0x80}},
+		{name: "empty tagged certificates", rule: "certificates", raw: []byte{0xd9, 0x01, 0x02, 0x80}},
+		{name: "empty proposals", rule: "proposal_procedures", raw: []byte{0x80}},
+		{name: "empty tagged proposals", rule: "proposal_procedures", raw: []byte{0xd9, 0x01, 0x02, 0x80}},
+		{name: "empty mint", rule: "mint", raw: []byte{0xa0}},
+		{name: "empty votes", rule: "voting_procedures", raw: []byte{0xa0}},
+		{name: "empty withdrawals", rule: "withdrawals", raw: []byte{0xa0}},
 		{name: "bignum over 64 bytes", rule: "big_int", raw: append([]byte{0xc2, 0x58, 0x41}, make([]byte, 65)...)},
 		{name: "execution memory not integer", rule: "ex_units", raw: []byte{0x82, 0xf6, 0x00}},
 		{name: "native script threshold not integer", rule: "native_script", raw: []byte{0x83, 0x03, 0xf6, 0x80}},
