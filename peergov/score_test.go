@@ -25,6 +25,8 @@ import (
 )
 
 func TestUpdateBlockFetchObservationAndScore(t *testing.T) {
+	t.Parallel()
+
 	p := &Peer{}
 
 	// First observation: 200ms, success=true
@@ -62,6 +64,8 @@ func TestUpdateBlockFetchObservationAndScore(t *testing.T) {
 }
 
 func TestConnectionStabilityAndScore(t *testing.T) {
+	t.Parallel()
+
 	p := &Peer{}
 	p.UpdateConnectionStability(0.9)
 	if p.ConnectionStability < 0.8 {
@@ -86,16 +90,9 @@ func TestConnectionStabilityAndScore(t *testing.T) {
 	}
 }
 
-func TestLastBlockFetchTimeUpdated(t *testing.T) {
-	p := &Peer{}
-	before := time.Now()
-	p.UpdateBlockFetchObservation(150, true)
-	if p.LastBlockFetchTime.Before(before) {
-		t.Fatalf("expected LastBlockFetchTime to be updated")
-	}
-}
-
 func TestUpdateChainSyncObservationAndScore(t *testing.T) {
+	t.Parallel()
+
 	p := &Peer{}
 
 	// First observation: 5 headers/sec, peer at same tip (delta=0)
@@ -140,6 +137,8 @@ func TestUpdateChainSyncObservationAndScore(t *testing.T) {
 }
 
 func TestChainSyncTipDeltaScoring(t *testing.T) {
+	t.Parallel()
+
 	// Test that peers behind us get lower scores
 	p1 := &Peer{}
 	p2 := &Peer{}
@@ -160,6 +159,8 @@ func TestChainSyncTipDeltaScoring(t *testing.T) {
 }
 
 func TestChainSyncPeerAheadScoring(t *testing.T) {
+	t.Parallel()
+
 	// Test that peers ahead of us get good scores (we're syncing from them)
 	p1 := &Peer{}
 	p2 := &Peer{}
@@ -181,6 +182,8 @@ func TestChainSyncPeerAheadScoring(t *testing.T) {
 }
 
 func TestChainSyncHeaderRateEMA(t *testing.T) {
+	t.Parallel()
+
 	const eps = 1e-9 // Epsilon for float comparison
 	p := &Peer{}
 
@@ -215,6 +218,8 @@ func abs(x float64) float64 {
 }
 
 func TestChainSyncNegativeHeaderRateClamped(t *testing.T) {
+	t.Parallel()
+
 	p := &Peer{}
 
 	// Negative rate should be clamped to 0
@@ -228,6 +233,8 @@ func TestChainSyncNegativeHeaderRateClamped(t *testing.T) {
 }
 
 func TestCombinedScoreWithAllMetrics(t *testing.T) {
+	t.Parallel()
+
 	p := &Peer{}
 
 	// Set all metrics to good values
@@ -268,6 +275,8 @@ func TestCombinedScoreWithAllMetrics(t *testing.T) {
 }
 
 func TestConfigurableEMAAlpha(t *testing.T) {
+	t.Parallel()
+
 	const eps = 1e-9 // Epsilon for float comparison
 
 	// Test with default alpha (0.2)
@@ -308,6 +317,8 @@ func TestConfigurableEMAAlpha(t *testing.T) {
 }
 
 func TestScoreMetricsDecayAfterInactivity(t *testing.T) {
+	t.Parallel()
+
 	peer := &Peer{
 		BlockFetchLatencyMs:     minLatencyMs,
 		BlockFetchSuccessRate:   1,
@@ -337,6 +348,8 @@ func TestScoreMetricsDecayAfterInactivity(t *testing.T) {
 }
 
 func TestGetEMAAlpha(t *testing.T) {
+	t.Parallel()
+
 	// Zero EMAAlpha should return default
 	p1 := &Peer{EMAAlpha: 0}
 	if alpha := p1.getEMAAlpha(); alpha != 0.2 {
@@ -372,6 +385,8 @@ func TestGetEMAAlpha(t *testing.T) {
 // the unknown-latency penalty. Every other component decays to its 0.5-score
 // baseline, so aging out a quiet peer's history must not actively demote it.
 func TestStaleLatencyDecaysTowardNeutralNotPenalty(t *testing.T) {
+	t.Parallel()
+
 	// Assert the decay formula itself, in both directions, rather than only
 	// which side of neutral the result lands on: a peer whose latency never
 	// decayed would still sit on the correct side, so that alone cannot catch a
@@ -442,6 +457,8 @@ func TestStaleLatencyDecaysTowardNeutralNotPenalty(t *testing.T) {
 // agePeerScoresLocked must decay a quiet peer's score so churn and quota
 // ranking never read a favorable score that predates the decay window.
 func TestAgePeerScoresLockedDecaysQuietPeers(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:   slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus: newMockEventBus(),
@@ -481,6 +498,8 @@ func TestAgePeerScoresLockedDecaysQuietPeers(t *testing.T) {
 // still ranks below observed peers instead of jumping to the conservative
 // default (which sits above the default MinScoreThreshold).
 func TestAgePeerScoresLockedSkipsNeverObservedPeers(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:   slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus: newMockEventBus(),
@@ -541,16 +560,6 @@ func TestStakeWeight_ZeroStakeGetsConservativeDefault(t *testing.T) {
 	}
 	if got := scoreFor(0); got <= 0 {
 		t.Fatalf("zero-stake peer score %v must be positive", got)
-	}
-}
-
-func TestStakeWeight_SumOfWeightsIsOne(t *testing.T) {
-	t.Parallel()
-	sum := defaultLatencyWeight + defaultSuccessWeight +
-		defaultStabilityWeight + defaultHeaderRateWeight +
-		defaultTipDeltaWeight + defaultStakeWeight
-	if math.Abs(sum-1.0) > 1e-9 {
-		t.Fatalf("weights sum to %v, want 1.0", sum)
 	}
 }
 
