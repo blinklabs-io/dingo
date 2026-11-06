@@ -356,7 +356,6 @@ func TestExtractArchiveRejectsSparseMembers(t *testing.T) {
 		sparsePAX10,
 		sparseOldGNU,
 	} {
-		format := format
 		t.Run(string(format), func(t *testing.T) {
 			t.Parallel()
 			dest := filepath.Join(t.TempDir(), "out")
@@ -393,7 +392,6 @@ func TestAncillaryPreflightRejectsSparseMembersBeforeManifest(t *testing.T) {
 		sparsePAX10,
 		sparseOldGNU,
 	} {
-		format := format
 		t.Run(string(format), func(t *testing.T) {
 			t.Parallel()
 			file, err := os.Open(writeSparseArchive(
