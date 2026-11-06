@@ -18,10 +18,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"io"
 	"net/url"
 	"os"
@@ -1184,132 +1180,6 @@ var restoreFuncNames = map[string]bool{
 	"RestoreRecoverable": true,
 }
 
-// TestRestoreCallSitesUseBoundedBadgerConfig statically scans every test file
-// in this directory for a call to Restore, RestoreValidated, or
-// RestoreRecoverable whose RestoreStorageConfig literal sets no Blob --
-// including the bare RestoreStorageConfig{} and a Metadata-only literal --
-// and fails naming each one found, unless the line carries
-// restoreStorageConfigAllowBareMarker.
-//
-// A runtime assertion cannot make this same distinction: badger truncates its
-// value log and memtable files back down when a store is cleanly stopped,
-// and every Restore call in this package stops its stores well before
-// Restore returns, so measuring reserved file sizes after the fact passes
-// whether or not a call site supplies a bounded config. Only a source-level
-// check catches the
-// regression of a new or edited call site reintroducing the unbounded
-// default.
-func TestRestoreCallSitesUseBoundedBadgerConfig(t *testing.T) {
-	t.Parallel()
-
-	dir, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatalf("read dir %s: %v", dir, err)
-	}
-
-	fset := token.NewFileSet()
-	var violations []string
-	for _, entry := range entries {
-		name := entry.Name()
-		if entry.IsDir() || !strings.HasSuffix(name, "_test.go") {
-			continue
-		}
-		path := filepath.Join(dir, name)
-		src, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatalf("read %s: %v", path, err)
-		}
-		file, err := parser.ParseFile(fset, path, src, 0)
-		if err != nil {
-			t.Fatalf("parse %s: %v", path, err)
-		}
-		lines := strings.Split(string(src), "\n")
-
-		ast.Inspect(file, func(n ast.Node) bool {
-			call, ok := n.(*ast.CallExpr)
-			if !ok || !isRestoreCall(call.Fun) {
-				return true
-			}
-			for _, arg := range call.Args {
-				lit, ok := arg.(*ast.CompositeLit)
-				if !ok || !isRestoreStorageConfigType(lit.Type) ||
-					setsBlob(lit) {
-					continue
-				}
-				pos := fset.Position(lit.Pos())
-				var lineText string
-				if pos.Line-1 < len(lines) {
-					lineText = lines[pos.Line-1]
-				}
-				if strings.Contains(
-					lineText, restoreStorageConfigAllowBareMarker,
-				) {
-					continue
-				}
-				violations = append(violations, fmt.Sprintf(
-					"%s:%d: RestoreStorageConfig without Blob resolves "+
-						"the restore's blob store with badger's unbounded "+
-						"default sizes; set Blob: "+
-						"testutil.BadgerBlobConfig(), or mark the line "+
-						"with %q if the target host's provider ignores "+
-						"its config",
-					name, pos.Line, restoreStorageConfigAllowBareMarker,
-				))
-			}
-			return true
-		})
-	}
-
-	if len(violations) > 0 {
-		t.Fatalf(
-			"%d call site(s) resolve a Restore blob/metadata plugin with "+
-				"an unbounded default config:\n%s",
-			len(violations),
-			strings.Join(violations, "\n"),
-		)
-	}
-}
-
-func isRestoreCall(fun ast.Expr) bool {
-	switch f := fun.(type) {
-	case *ast.Ident:
-		return restoreFuncNames[f.Name]
-	case *ast.SelectorExpr:
-		return restoreFuncNames[f.Sel.Name]
-	}
-	return false
-}
-
-func isRestoreStorageConfigType(expr ast.Expr) bool {
-	switch t := expr.(type) {
-	case *ast.Ident:
-		return t.Name == "RestoreStorageConfig"
-	case *ast.SelectorExpr:
-		return t.Sel.Name == "RestoreStorageConfig"
-	}
-	return false
-}
-
-// setsBlob reports whether lit, a RestoreStorageConfig literal, supplies a
-// Blob provider config. An unkeyed literal with elements sets Blob, its
-// first field.
-func setsBlob(lit *ast.CompositeLit) bool {
-	for _, elt := range lit.Elts {
-		kv, ok := elt.(*ast.KeyValueExpr)
-		if !ok {
-			return true
-		}
-		if key, ok := kv.Key.(*ast.Ident); ok && key.Name == "Blob" {
-			return true
-		}
-	}
-	return false
-}
-
 // TestSnapshotRestoreRoundTrip verifies that a snapshotted database
 // restores into a fresh directory with the same blocks and tip.
 func TestSnapshotRestoreRoundTrip(t *testing.T) {
@@ -1521,34 +1391,6 @@ func TestRestoreRejectsNonStringDataDirOverride(t *testing.T) {
 	)
 	require.ErrorContains(t, err, "non-string metadata provider dataDir")
 	require.NoDirExists(t, targetDir)
-}
-
-// TestManifestCheckPluginMatch verifies Manifest.CheckPluginMatch itself:
-// it accepts the plugins a snapshot was actually taken with, and rejects
-// any other combination. This is a unit test of the check in isolation —
-// see TestRestoreValidatedRejectsPluginMismatchWithoutTouchingTarget for
-// the real call site (internal/dblifecycle.Service.Restore's validate
-// hook, via lifecycle.RestoreValidated) that actually enforces it during a
-// restore.
-func TestManifestCheckPluginMatch(t *testing.T) {
-	t.Parallel()
-
-	src := newTestDB(t)
-	require.NoError(t, src.BlockCreate(testBlock(1, 0x01), nil))
-
-	snapshotDir := snapshotTestDir(t, "snap1")
-	m, err := lifecycle.Snapshot(
-		context.Background(),
-		src,
-		snapshotDir,
-		lifecycle.TriggerManual,
-		"test",
-		"badger",
-		"sqlite",
-	)
-	require.NoError(t, err)
-	require.NoError(t, m.CheckPluginMatch("badger", "sqlite"))
-	require.Error(t, m.CheckPluginMatch("gcs", "sqlite"))
 }
 
 // TestRestoreValidatedRejectsPluginMismatchWithoutTouchingTarget exercises

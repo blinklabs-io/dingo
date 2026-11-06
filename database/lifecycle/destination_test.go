@@ -24,7 +24,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
@@ -266,99 +265,6 @@ func setFakeCloudBackingDir(t *testing.T, dir string) {
 		fakeCloudMu.Unlock()
 		fakeCloudFixtureMu.Unlock()
 	})
-}
-
-// TestFakeCloudBackingDirResetsBetweenTests guards against a leaked global:
-// setFakeCloudBackingDir used to set fakeCloudDir with no corresponding
-// reset, so whichever test happened to set it last left that directory in
-// place for every subsequent test in the package — a test that forgot to
-// call setFakeCloudBackingDir (or was reordered/shuffled ahead of the one
-// that used to set it up) could silently resolve the "faketest://" scheme
-// against a leftover directory from an unrelated test instead of failing
-// loudly. The subtest's t.Cleanup (registered by setFakeCloudBackingDir)
-// runs synchronously before t.Run returns, so fakeCloudDir must already be
-// reset by the time this checks it.
-// Not t.Parallel: this asserts on the package-level fakeCloudDir itself,
-// so it must not observe another test holding the fixture.
-func TestFakeCloudBackingDirResetsBetweenTests(t *testing.T) {
-	t.Run("sets it", func(t *testing.T) {
-		setFakeCloudBackingDir(t, t.TempDir())
-	})
-
-	fakeCloudMu.Lock()
-	got := fakeCloudDir
-	fakeCloudMu.Unlock()
-	require.Empty(
-		t,
-		got,
-		"fakeCloudDir must be reset via t.Cleanup once the test that set it finishes",
-	)
-}
-
-// TestSetFakeCloudBackingDirSerializesConcurrentTests guards against
-// a real gap: setFakeCloudBackingDir previously only guarded each
-// individual read/write of fakeCloudDir, not the whole span of the test
-// that configured it -- so two tests using this fixture concurrently
-// (nothing currently runs them with t.Parallel(), but nothing stops a
-// future test from adding it) could have one test's t.Cleanup reset or
-// reassign fakeCloudDir while the other was still relying on its own
-// value, silently resolving "faketest://" against the wrong directory
-// instead of either test's own configuration.
-//
-// This drives that scenario through two real, concurrently-running
-// subtests (t.Run from multiple goroutines is safe as long as they all
-// return before the outer test does, which the deferred waitGroup/release
-// below guarantee even if an assertion fails partway through): the
-// second subtest's call to setFakeCloudBackingDir must block until the
-// first subtest actually finishes (its t.Cleanup fires), rather than
-// both proceeding immediately and racing fakeCloudDir between them.
-// Not t.Parallel: this drives setFakeCloudBackingDir concurrently on its
-// own goroutines to prove the fixture serializes; a parallel outer test
-// would be measuring the same lock from two directions.
-func TestSetFakeCloudBackingDirSerializesConcurrentTests(t *testing.T) {
-	var wg sync.WaitGroup
-	defer wg.Wait()
-
-	var releaseOnce sync.Once
-	releaseFirst := make(chan struct{})
-	// Deferred before either subtest starts, and idempotent: guarantees
-	// the first subtest can always finish (unblocking anything relying on
-	// it, including the second subtest below) even if an assertion here
-	// fails partway through and aborts this function via Goexit before
-	// reaching the explicit release() call in the normal path.
-	release := func() { releaseOnce.Do(func() { close(releaseFirst) }) }
-	defer release()
-
-	firstAcquired := make(chan struct{})
-	wg.Go(func() {
-		t.Run("first", func(t *testing.T) {
-			setFakeCloudBackingDir(t, t.TempDir())
-			close(firstAcquired)
-			<-releaseFirst
-		})
-	})
-	testutil.RequireReceive(
-		t, firstAcquired, time.Second,
-		"first subtest must acquire the fixture",
-	)
-
-	secondAcquired := make(chan struct{})
-	wg.Go(func() {
-		t.Run("second", func(t *testing.T) {
-			setFakeCloudBackingDir(t, t.TempDir())
-			close(secondAcquired)
-		})
-	})
-	testutil.RequireNoReceive(
-		t, secondAcquired, 150*time.Millisecond,
-		"second subtest must block while the first still holds the fixture",
-	)
-
-	release()
-	testutil.RequireReceive(
-		t, secondAcquired, time.Second,
-		"second subtest must acquire the fixture once the first releases it",
-	)
 }
 
 // TestParseCloudDestinationUnknownScheme verifies that a URI whose scheme

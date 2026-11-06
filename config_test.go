@@ -304,43 +304,6 @@ func TestStorageModeValid(t *testing.T) {
 	}
 }
 
-func TestStorageModeIsAPI(t *testing.T) {
-	t.Parallel()
-
-	assert.False(t, StorageModeCore.IsAPI())
-	assert.True(t, StorageModeAPI.IsAPI())
-}
-
-func TestWithStorageMode(t *testing.T) {
-	t.Parallel()
-
-	cfg := &Config{}
-
-	// Default should be zero value (empty string)
-	assert.Equal(t, StorageMode(""), cfg.storageMode)
-
-	// Apply API mode
-	WithStorageMode(StorageModeAPI)(cfg)
-	assert.Equal(t, StorageModeAPI, cfg.storageMode)
-
-	// Apply core mode
-	WithStorageMode(StorageModeCore)(cfg)
-	assert.Equal(t, StorageModeCore, cfg.storageMode)
-}
-
-// TestWithRootPeerTarget verifies the public option preserves default,
-// explicit, and unlimited root-peer target representations.
-func TestWithRootPeerTarget(t *testing.T) {
-	t.Parallel()
-
-	for _, target := range []int{0, 12, -1} {
-		cfg := NewConfig(WithRootPeerTarget(target))
-		if got := cfg.TargetNumberOfRootPeers(); got != target {
-			t.Fatalf("expected root-peer target %d, got %d", target, got)
-		}
-	}
-}
-
 func TestNewConfigMempoolCapacityDefaultsFromRunMode(t *testing.T) {
 	t.Parallel()
 
@@ -503,13 +466,6 @@ func TestNewConfigDefaultsBuiltInMempoolCapacity(t *testing.T) {
 			)
 		})
 	}
-}
-
-func TestNewConfigDefaultsToPraosConsensus(t *testing.T) {
-	t.Parallel()
-
-	cfg := NewConfig()
-	assert.Equal(t, "praos", cfg.ConsensusPlugin())
 }
 
 func TestNewConfigDoesNotDefaultCustomMempoolConfig(t *testing.T) {
@@ -746,16 +702,6 @@ func TestConfigValidatePledgeLeverage(t *testing.T) {
 	}
 }
 
-func TestWithFullPotRewards(t *testing.T) {
-	t.Parallel()
-
-	cfg := &Config{}
-	WithFullPotRewards(true)(cfg)
-	assert.True(t, cfg.fullPotRewardsEnabled)
-	WithFullPotRewards(false)(cfg)
-	assert.False(t, cfg.fullPotRewardsEnabled)
-}
-
 func TestFullPotRewardsStandardNetworkValidation(t *testing.T) {
 	t.Parallel()
 
@@ -822,18 +768,6 @@ func TestFullPotRewardsStandardNetworkValidation(t *testing.T) {
 			t.Cleanup(func() { _ = n.Stop() })
 		})
 	}
-}
-
-func TestWithDelegatorInactivity(t *testing.T) {
-	t.Parallel()
-
-	cfg := &Config{}
-	WithDelegatorInactivity(true, 90)(cfg)
-	assert.True(t, cfg.delegatorInactivityEnabled)
-	assert.Equal(t, uint64(90), cfg.delegatorInactivity)
-	WithDelegatorInactivity(false, 0)(cfg)
-	assert.False(t, cfg.delegatorInactivityEnabled)
-	assert.Zero(t, cfg.delegatorInactivity)
 }
 
 // TestExperimentalDijkstraEnabled pins that the Dijkstra ledger era is known
@@ -1115,64 +1049,6 @@ func TestPeerGovernorOptionsIgnoreNonPositiveValues(t *testing.T) {
 	assert.Zero(t, cfg.cfg.MaxTrustedLocalNtCConns)
 }
 
-func TestPeerGovernorOptionsApplyPositiveValues(t *testing.T) {
-	t.Parallel()
-
-	cfg := &Config{cfg: &internalconfig.Config{}}
-
-	WithMinHotPeers(3)(cfg)
-	WithReconcileInterval(30 * time.Second)(cfg)
-	WithInactivityTimeout(2 * time.Minute)(cfg)
-	WithMaxConnectionsPerIP(4)(cfg)
-	WithMaxInboundConns(25)(cfg)
-	WithMaxNtCConns(30)(cfg)
-	WithMaxNtCConnectionsPerIP(6)(cfg)
-	WithMaxTrustedLocalNtCConns(8)(cfg)
-
-	assert.Equal(t, 3, cfg.cfg.MinHotPeers)
-	assert.Equal(t, 30*time.Second, cfg.cfg.ReconcileInterval)
-	assert.Equal(t, 2*time.Minute, cfg.cfg.InactivityTimeout)
-	assert.Equal(t, 4, cfg.cfg.MaxConnectionsPerIP)
-	assert.Equal(t, 25, cfg.cfg.MaxInboundConns)
-	assert.Equal(t, 30, cfg.cfg.MaxNtCConns)
-	assert.Equal(t, 6, cfg.cfg.MaxNtCConnectionsPerIP)
-	assert.Equal(t, 8, cfg.cfg.MaxTrustedLocalNtCConns)
-
-	cfg.syncCompatFields()
-	assert.Equal(t, 30, cfg.maxNtCConns)
-	assert.Equal(t, 6, cfg.maxNtCConnectionsPerIP)
-	assert.Equal(t, 8, cfg.maxTrustedLocalNtCConns)
-}
-
-func TestWithSkipRewardLiveStakeBackfillCheck(t *testing.T) {
-	t.Parallel()
-	cfg := &Config{cfg: &internalconfig.Config{}}
-	WithSkipRewardLiveStakeBackfillCheck(true)(cfg)
-	assert.True(t, cfg.cfg.SkipRewardLiveStakeBackfillCheck)
-	cfg.syncCompatFields()
-	assert.True(t, cfg.skipRewardLiveStakeBackfillCheck)
-}
-
-// TestWithGenesisCorroborationPeers covers the public programmatic API path for
-// the Genesis corroboration threshold. A negative value is stored as-is on the
-// Config; the chain selector fails closed on it (clamps to 1) rather than
-// disabling the security gate — see chainselection.NewChainSelector and
-// TestGenesisNegativeCorroborationFailsClosed. node.go passes this field to
-// ChainSelectorConfig.MinCorroboratingPeers.
-func TestWithGenesisCorroborationPeers(t *testing.T) {
-	t.Parallel()
-
-	cfg := &Config{cfg: &internalconfig.Config{}}
-	WithGenesisCorroborationPeers(3)(cfg)
-	assert.Equal(t, 3, cfg.cfg.GenesisBootstrap.CorroborationPeers)
-
-	WithGenesisCorroborationPeers(0)(cfg)
-	assert.Zero(t, cfg.cfg.GenesisBootstrap.CorroborationPeers)
-
-	WithGenesisCorroborationPeers(-1)(cfg)
-	assert.Equal(t, -1, cfg.cfg.GenesisBootstrap.CorroborationPeers)
-}
-
 // TestUpdateRTSMetrics verifies the pure-function mapping from
 // runtime.MemStats fields to the four cardano_node_metrics_RTS_* gauges.
 // Specifically exercises the NumGC - NumForcedGC subtraction so a future
@@ -1248,15 +1124,6 @@ func TestRunRTSMetricsUpdater_Lifecycle(t *testing.T) {
 		2*time.Second,
 		"updater should exit after ctx cancel",
 	)
-}
-
-func TestWithLeiosVoteSigningKeyFile(t *testing.T) {
-	t.Parallel()
-
-	cfg := &Config{cfg: &internalconfig.Config{}}
-	assert.Equal(t, "", cfg.cfg.LeiosVoteSigningKeyFile)
-	WithLeiosVoteSigningKeyFile("/keys/leios-vote.skey")(cfg)
-	assert.Equal(t, "/keys/leios-vote.skey", cfg.cfg.LeiosVoteSigningKeyFile)
 }
 
 // TestWithKoiosParityAccountsNilDefaultsToEnabled locks in

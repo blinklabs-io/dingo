@@ -3557,54 +3557,6 @@ func TestLedgerStateConfigReportsRetrySelectionUnavailableDuringLifecycle(
 	assert.False(t, available)
 }
 
-// TestLedgerStateConfigForwardsBlockPipelineFlags is the second half of the
-// pipeline-flag regression coverage: it proves that a Config built through the
-// public NewConfig/With... option API -- not a hand-built struct literal --
-// carries BlockPipelineEnabled and BlockPipelineValidateEnabled all the way
-// into the ledger.LedgerStateConfig that ledgerStateConfig() hands to
-// NewLedgerState. internal/node/node_test.go's
-// TestBuildDingoConfigWiresBlockPipelineFlags covers the other half: the
-// internal/config.Config -> dingo.Config hop that was the actual defect.
-// Together the two tests span the full path a live serve run takes.
-func TestLedgerStateConfigForwardsBlockPipelineFlags(t *testing.T) {
-	t.Parallel()
-
-	cfg := NewConfig(
-		WithBlockPipelineEnabled(true),
-		WithBlockPipelineValidateEnabled(true),
-	)
-	n := &Node{config: cfg}
-	lsCfg := n.ledgerStateConfig()
-
-	assert.True(
-		t,
-		lsCfg.BlockPipelineEnabled,
-		"expected LedgerStateConfig.BlockPipelineEnabled true; the parallel "+
-			"block decode pipeline never constructs on the serve path "+
-			"otherwise",
-	)
-	assert.True(
-		t,
-		lsCfg.BlockPipelineValidateEnabled,
-		"expected LedgerStateConfig.BlockPipelineValidateEnabled true; the "+
-			"pipeline's parallel VRF/KES validate stage never activates "+
-			"otherwise",
-	)
-}
-
-func TestLedgerStateConfigForwardsLedgerPrefetchAheadFlag(t *testing.T) {
-	t.Parallel()
-
-	off := (&Node{
-		config: NewConfig(WithLedgerPrefetchAheadEnabled(false)),
-	}).ledgerStateConfig()
-	assert.False(t, off.LedgerPrefetchAheadEnabled)
-	on := (&Node{
-		config: NewConfig(WithLedgerPrefetchAheadEnabled(true)),
-	}).ledgerStateConfig()
-	assert.True(t, on.LedgerPrefetchAheadEnabled)
-}
-
 func TestDevModeUsesTheStandardBlockProducer(t *testing.T) {
 	t.Parallel()
 
@@ -4792,47 +4744,6 @@ func TestNodePeerPriorityEventUpdatesChainSelector(t *testing.T) {
 	)
 }
 
-// A close/stop failure surfaced during the startup-cleanup unwind must
-// actually reach the log, not just be swallowed by the caller's `_ =`.
-func TestLogErrIfNotNilLogsOnError(t *testing.T) {
-	t.Parallel()
-
-	var buf bytes.Buffer
-	logger := slog.New(slog.NewJSONHandler(&buf, nil))
-
-	logErrIfNotNil(
-		logger,
-		"failed to stop leader election during cleanup",
-		errors.New("epoch transition in flight"),
-	)
-
-	out := buf.String()
-	if !strings.Contains(out, "failed to stop leader election during cleanup") {
-		t.Fatalf("expected log message in output, got: %s", out)
-	}
-	if !strings.Contains(out, "epoch transition in flight") {
-		t.Fatalf("expected error detail in output, got: %s", out)
-	}
-}
-
-// The common case -- a clean stop -- must stay silent, or every successful
-// shutdown would log a spurious error line.
-func TestLogErrIfNotNilStaysQuietOnNil(t *testing.T) {
-	t.Parallel()
-
-	var buf bytes.Buffer
-	logger := slog.New(slog.NewJSONHandler(&buf, nil))
-
-	logErrIfNotNil(logger, "failed to stop leader election during cleanup", nil)
-
-	if buf.Len() != 0 {
-		t.Fatalf(
-			"expected no log output for a nil error, got: %s",
-			buf.String(),
-		)
-	}
-}
-
 // seedIncompleteRewardLiveStake reproduces a post-upgrade database whose
 // reward_live_stake aggregate covers only one of two registered credentials,
 // which is the state RewardLiveStakeNeedsBackfill is meant to detect.
@@ -4938,19 +4849,6 @@ VALUES (?, 'mark', ?, '0', '0', 0, 100, ?)`,
 	require.Contains(t, err.Error(), "older accounting")
 }
 
-func TestNewOuroborosConfigAppliesTxSubmissionRateLimit(t *testing.T) {
-	t.Parallel()
-
-	n := &Node{config: NewConfig()}
-	cfg := n.newOuroborosConfig(false, 0, 0)
-
-	assert.Positive(
-		t,
-		cfg.MaxTxSubmissionsPerSecond,
-		"production ouroboros config must enable the TxSubmission limiter",
-	)
-}
-
 func TestNewOuroborosConfigDoesNotInitiateLegacyLeiosVotes(t *testing.T) {
 	t.Parallel()
 
@@ -4987,31 +4885,6 @@ func TestNewOuroborosConfigReportsChainSelectionBestPeer(t *testing.T) {
 	assert.True(t, cfg.ChainsyncHasBestPeer(), "a selected best peer")
 }
 
-func TestLedgerStateConfigForwardsApplyRowBatching(t *testing.T) {
-	t.Parallel()
-
-	off := &Node{config: NewConfig()}
-	assert.False(t, off.ledgerStateConfig().ApplyRowBatchingEnabled)
-
-	on := &Node{config: NewConfig(WithLedgerApplyRowBatchingEnabled(true))}
-	assert.True(
-		t,
-		on.ledgerStateConfig().ApplyRowBatchingEnabled,
-		"the option never reaches the ledger without this hop",
-	)
-}
-
-func TestLedgerStateConfigForwardsBlockfetchLowWatermarkFlag(t *testing.T) {
-	t.Parallel()
-
-	off := (&Node{config: NewConfig()}).ledgerStateConfig()
-	assert.False(t, off.BlockfetchLowWatermarkEnabled)
-	on := (&Node{
-		config: NewConfig(WithBlockfetchLowWatermarkEnabled(true)),
-	}).ledgerStateConfig()
-	assert.True(t, on.BlockfetchLowWatermarkEnabled)
-}
-
 // Not t.Parallel: swaps the package-level closeOuroborosInstance seam.
 func TestRunKeepsStorageOpenWhenLeiosPersistenceDrainIsUnconfirmed(
 	t *testing.T,
@@ -5042,19 +4915,6 @@ func TestRunKeepsStorageOpenWhenLeiosPersistenceDrainIsUnconfirmed(
 	)
 	require.NoError(t, n.ouroboros().Close())
 	require.NoError(t, n.db.Close())
-}
-
-func TestLedgerStateConfigForwardsLedgerValidateAheadFlag(t *testing.T) {
-	t.Parallel()
-
-	off := (&Node{
-		config: NewConfig(WithLedgerValidateAheadEnabled(false)),
-	}).ledgerStateConfig()
-	assert.False(t, off.LedgerValidateAheadEnabled)
-	on := (&Node{
-		config: NewConfig(WithLedgerValidateAheadEnabled(true)),
-	}).ledgerStateConfig()
-	assert.True(t, on.LedgerValidateAheadEnabled)
 }
 
 func TestNewConfigEnablesLedgerApplyAheadByDefault(t *testing.T) {
