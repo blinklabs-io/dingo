@@ -30,6 +30,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
+	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -38,6 +39,7 @@ import (
 )
 
 func TestRollbackIntentRoundTripsUndoBlocks(t *testing.T) {
+	t.Parallel()
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
 	point := ocommon.Point{Slot: 42, Hash: []byte{1, 2, 3}}
@@ -166,6 +168,7 @@ func TestRollbackNoopDoesNotFinishForeignIntent(t *testing.T) {
 }
 
 func TestRollbackUndoSurvivesMetadataTruncationFailure(t *testing.T) {
+	t.Parallel()
 	dataDir := t.TempDir()
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: dataDir})
 	require.NoError(t, err)
@@ -552,6 +555,7 @@ func TestDecodeRollbackIntentRefusesBlockBytesBeyondLimit(t *testing.T) {
 }
 
 func TestRollbackIntentAcceptsWriterMaximumBlockCount(t *testing.T) {
+	t.Parallel()
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
 	blocks := make([]models.Block, maxRollbackIntentBlocks)
@@ -573,6 +577,7 @@ func TestRollbackIntentAcceptsWriterMaximumBlockCount(t *testing.T) {
 }
 
 func TestLoadRollbackIntentRefusesOversizedStoredRecord(t *testing.T) {
+	t.Parallel()
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
 	require.NoError(t, db.SetSyncState(
@@ -588,18 +593,32 @@ func TestLoadRollbackIntentRefusesOversizedStoredRecord(t *testing.T) {
 
 // The stored value is sized inside the database, so an oversized record is
 // refused without being read into memory at all.
-func TestLoadRollbackIntentRefusesStoredRecordAboveEncodedLimit(t *testing.T) {
-	if testing.Short() {
-		t.Skip("stores a value above the durable encoded limit")
-	}
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
-	require.NoError(t, err)
-	require.NoError(t, db.SetSyncState(
-		durableRollbackIntentSyncKey,
-		strings.Repeat(" ", maxRollbackIntentEncodedBytes+1),
-		nil,
-	))
+type oversizedSyncStateStore struct {
+	metadata.MetadataStore
+}
 
+func (oversizedSyncStateStore) GetSyncStateBounded(
+	key string,
+	_ int,
+	_ dbtypes.Txn,
+) (string, error) {
+	return "", metadata.ErrSyncStateTooLarge
+}
+
+// The store refuses a record above its own size limit; the reader must map
+// that refusal to an invalid intent so recovery discards the record instead
+// of failing startup. The refusal is injected rather than produced by
+// writing an oversized value.
+func TestLoadRollbackIntentMapsStoreSizeRefusal(t *testing.T) {
+	t.Parallel()
+	db, err := dbtest.NewDatabaseWithMetadataWrapper(
+		t,
+		dbtest.Options{Config: &database.Config{DataDir: t.TempDir()}},
+		func(inner metadata.MetadataStore) metadata.MetadataStore {
+			return oversizedSyncStateStore{MetadataStore: inner}
+		},
+	)
+	require.NoError(t, err)
 	_, _, pending, err := loadRollbackIntent(db)
 	require.ErrorIs(t, err, errInvalidRollbackIntent)
 	require.ErrorIs(t, err, metadata.ErrSyncStateTooLarge)
