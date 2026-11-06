@@ -5522,6 +5522,19 @@ duplicate is excluded, so the final fallback receives the remaining deadline.
 Transient vote and ranking-block announcements evict the oldest transient entry
 at the 64-entry limit without displacing retained endorser-block offers.
 
+A peer may offer only an endorser block it has announced: the reference node
+disconnects a peer whose block or closure offer names an endorser block that
+peer never announced to it (`ExnLeiosBlockOfferWithoutAnnouncement`,
+`ExnLeiosClosureOfferWithoutAnnouncement`). The forger stores its endorser
+block (`BroadcastEndorserBlock`) before the announcing ranking block is built,
+self-validated and adopted, so the block and closure offers are held in
+`leiosPendingForgedOffers` and queued on leios-notify only after the
+announcing header (`EnqueueLeiosBlockAnnouncement`, from the forged-block
+observer), immediately behind it. A forged endorser block whose ranking block
+is never announced is never offered; at most eight pending ones are kept.
+Relayed endorser blocks already follow the same order, because
+`enqueueLeiosRelayOffers` waits for the announcement to verify the slot.
+
 
 Idle LeiosNotify requests observe the owning connection's shutdown channel. This
 also releases requests started before manager registration; protocol completion
