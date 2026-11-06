@@ -1371,7 +1371,12 @@ func (s *Store) replayStakeSegments(
 			if err != nil {
 				return err
 			}
-			if utxo == 0 && !st.account.existedAt(pending.slot) {
+			exists := st.account.existedAt(pending.slot)
+			if o.retainHistory {
+				// Retained closures cannot create or delete accounts.
+				exists = st.account.exists
+			}
+			if utxo == 0 && !exists {
 				st.id = 0
 				st.hasTotal = false
 				st.utxo = 0

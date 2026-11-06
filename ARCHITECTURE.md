@@ -2763,6 +2763,15 @@ paths, where the point is to report before the goroutine unwinds.
 
 ## Storage Architecture
 
+SQLite's retained API closure accumulator stages eligible payment UTxOs and
+one stake-delta segment per validated transaction. Transaction parents stay
+immediate. A live-stake read barrier materializes pending UTxOs and replays
+segments in transaction order; the final closure flush uses the same replay.
+This preserves stake visibility, credential zero crossings and sequence IDs
+while combining SQL writes. Eligible closures cannot change account state,
+and the metadata query wrapper rejects external account mutations while
+staging is active.
+
 Dingo uses a dual-layer storage architecture with pluggable backends:
 
 ```

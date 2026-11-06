@@ -1356,11 +1356,18 @@ both errors and the database requires recovery before another load.
 
 SQLite can stage a certified closure of at most 8,192 plain, valid,
 single-input/single-output transactions and 8 MiB of output CBOR in one
-metadata transaction. The
-preflight requires fresh transaction/output keys and live external inputs,
-without staking credentials, assets, pointers, datums, reference scripts,
-collateral, certificates, withdrawals, mint, governance, script witnesses or nested
-transactions. Other closures and providers use the ordinary ordered writer.
+metadata transaction. The preflight requires fresh transaction/output keys and
+live external inputs. Staking credentials are supported; assets, pointers, datums,
+reference scripts, collateral, certificates, withdrawals, mint, governance,
+script witnesses and nested transactions remain excluded. Other closures and providers use the ordinary ordered writer.
+
+Closures with Dijkstra direct deposits keep immediate UTxO writes because
+reward-account credits update live stake outside the retained overlay.
+
+Retained staking UTxOs queue one ordered stake segment per transaction. Reads of
+live stake first materialize pending UTxOs and replay those segments, preserving
+credential zero crossings, stake row IDs and sequence advancement. Account state
+stays constant inside eligible closures; external account writes abort the batch.
 
 Transaction parents and execution contexts remain immediate. Every created
 UTxO, including outputs spent inside the closure, retains its ordinary ID,

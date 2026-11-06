@@ -1264,12 +1264,7 @@ func (s *Store) setTransactionWithAccumulator(
 					if err := staged.flushExceptClosureAPIRows(ctx, db, s.dialect.ParameterLimit()); err != nil {
 						return err
 					}
-					return s.refreshRewardLiveStakeDeltas(
-						ctx,
-						db,
-						batchedStakeDeltas,
-						point.Slot,
-					)
+					return nil
 				}
 				return nil
 			}
@@ -1553,9 +1548,13 @@ func (s *Store) setTransactionWithAccumulator(
 	if err != nil || batchedAccumulator == nil {
 		return err
 	}
-	if !batchedAccumulator.leiosAPIRowsOnly {
+	retained := batchedAccumulator.overlay != nil && batchedAccumulator.overlay.retainHistory
+	if !batchedAccumulator.leiosAPIRowsOnly || retained {
 		if err := batchedAccumulator.addStakeDeltas(batchedStakeDeltas, point.Slot); err != nil {
 			return err
+		}
+		if retained {
+			batchedAccumulator.overlay.closeStakeSegment(batchedAccumulator)
 		}
 	}
 	// The per-transaction cleanup deletes only reach flushed rows, so rows
