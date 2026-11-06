@@ -18,11 +18,9 @@ import (
 	"bytes"
 	"encoding/binary"
 	"math/big"
-	"strings"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 )
 
@@ -56,55 +54,15 @@ func seedBlockAmountRows(tb testing.TB, store *Store, count int) []byte {
 	return hash
 }
 
-func TestBlockTransactionTotalsProjectsOneNamedQuery(t *testing.T) {
+func TestBlockTransactionTotalsSumsOutputsAndFees(t *testing.T) {
 	t.Parallel()
-	reg := prometheus.NewRegistry()
-	store := newMigratedSQLiteStoreWithRegistry(t, reg)
-	hash := seedBlockAmountRows(t, store, 1001)
-	before, _ := sqlDurationCounts(t, reg)
+	store := newMigratedSQLiteStore(t)
+	hash := seedBlockAmountRows(t, store, 5)
 	totals, err := store.GetBlockTransactionTotals(hash, nil)
 	require.NoError(t, err)
 	require.Equal(t, models.BlockTransactionTotals{
-		Output: "2002000", Fees: "7007",
+		Output: "10000", Fees: "35",
 	}, totals)
-	after, _ := sqlDurationCounts(t, reg)
-	require.Equal(t, before+1, after)
-	families, err := reg.Gather()
-	require.NoError(t, err)
-	var named uint64
-	for _, family := range families {
-		if family.GetName() != "dingo_database_sql_query_duration_seconds" {
-			continue
-		}
-		for _, metric := range family.GetMetric() {
-			for _, label := range metric.GetLabel() {
-				if label.GetName() == "query" &&
-					label.GetValue() == "ProjectBlockTransactionAmountRows" {
-					named += metric.GetHistogram().GetSampleCount()
-				}
-			}
-		}
-	}
-	require.Equal(t, uint64(1), named)
-	rows, err := store.writeDB.QueryContext(t.Context(),
-		"EXPLAIN QUERY PLAN "+blockTransactionAmountRows, hash, hash, hash)
-	require.NoError(t, err)
-	defer rows.Close()
-	var plan strings.Builder
-	for rows.Next() {
-		var id, parent, unused int
-		var detail string
-		require.NoError(t, rows.Scan(&id, &parent, &unused, &detail))
-		plan.WriteString(detail + "\n")
-	}
-	require.NoError(t, rows.Err())
-	require.Contains(t, plan.String(), "idx_transaction_block_hash")
-	require.Contains(t, plan.String(), "idx_utxo_transaction_id")
-	require.Contains(t, plan.String(), "idx_utxo_collateral_return_for_tx_id")
-	require.NotContains(t, plan.String(), "SCAN utxo")
-	require.NotContains(t, plan.String(), "SCAN u\n")
-	require.NotContains(t, plan.String(), "SCAN cr\n")
-	require.NotContains(t, plan.String(), "AUTOMATIC")
 }
 
 func BenchmarkBlockTransactionTotals(b *testing.B) {

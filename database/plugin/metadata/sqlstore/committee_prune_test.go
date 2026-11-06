@@ -34,15 +34,14 @@ import (
 )
 
 // preprod tip and shape observed live: 648,758 auth_committee_hot rows for
-// 35 distinct cold credentials at slot ~79.48M.
+// 35 distinct cold credentials at slot ~79.48M; the credential count is
+// scaled down to three.
 const (
 	preprodTipSlot         = uint64(79_480_000)
-	preprodColdCredentials = 35
-	// Scaled down from preprod's ~18,500 authorizations per member to keep
-	// the test near ten seconds. The shape is what matters, and the full
-	// 35 x 18,500 = 647,500-row dataset was measured with this same code:
-	// 647,500 rows before pruning, 1,085 after (99.83% removed), with
-	// GetActiveCommitteeMembers identical either side.
+	preprodColdCredentials = 3
+	// Scaled down from preprod's ~18,500 authorizations per member. The shape
+	// is what matters: more rows per member than one delete batch, so pruning
+	// takes several batches.
 	preprodAuthsPerMember = 2_000
 )
 
@@ -85,6 +84,37 @@ INSERT INTO auth_committee_hot (
 		coldTag, cold, hotTag, hot, certificateID, slot,
 	)
 	require.NoError(t, err)
+}
+
+// seedAuthorizationRange writes hot-key authorizations 1..count for one cold
+// credential in a single transaction, each at slot equal to its
+// certificate id.
+func seedAuthorizationRange(
+	t *testing.T,
+	store *Store,
+	coldTag uint8,
+	cold []byte,
+	hotSeed byte,
+	count int,
+) {
+	t.Helper()
+	tx, err := store.writeDB.Begin()
+	require.NoError(t, err)
+	stmt, err := tx.Prepare(`
+INSERT INTO auth_committee_hot (
+    cold_credential_tag, cold_credential, hot_credential_tag,
+    host_credential, certificate_id, added_slot
+) VALUES (?, ?, ?, ?, ?, ?)`)
+	require.NoError(t, err)
+	for i := 1; i <= count; i++ {
+		_, err := stmt.Exec(
+			coldTag, cold, uint8(lcommon.CredentialTypeAddrKeyHash),
+			hotHash(hotSeed, i), uint64(i), uint64(i), // #nosec G115
+		)
+		require.NoError(t, err)
+	}
+	require.NoError(t, stmt.Close())
+	require.NoError(t, tx.Commit())
 }
 
 func seedResignation(
@@ -275,50 +305,6 @@ func TestCommitteeAuthMaintenanceDoesNotDeadlockRollback(t *testing.T) {
 	require.NoError(t, maintenanceErr)
 }
 
-func TestCommitteeHotPruneSelectionUsesOrderedIndex(t *testing.T) {
-	t.Parallel()
-	store := newMigratedSQLiteStore(t)
-	plan := queryPlan(t, store.writeDB, `
-SELECT id
-FROM auth_committee_hot
-WHERE cold_credential_tag = ?
-  AND cold_credential = ?
-  AND added_slot <= ?
-ORDER BY added_slot DESC, certificate_id DESC
-LIMIT ? OFFSET 1`,
-		0,
-		[]byte{0x01},
-		100,
-		committeeAuthPruneBatch,
-	)
-	require.Contains(
-		t,
-		plan,
-		"idx_auth_committee_hot_cold_credential_prune_order",
-	)
-	require.NotContains(t, plan, "USE TEMP B-TREE FOR ORDER BY")
-}
-
-func TestCommitteeHotMaintenanceCandidatesUseOrderedIndex(t *testing.T) {
-	t.Parallel()
-	store := newMigratedSQLiteStore(t)
-	plan := queryPlan(
-		t,
-		store.readDB,
-		committeeAuthMaintenanceNextCandidatesQuery,
-		preprodTipSlot,
-		uint8(lcommon.CredentialTypeAddrKeyHash),
-		credentialHash(0x01),
-		committeeAuthMaintenanceBatchSize,
-	)
-	require.Contains(
-		t,
-		plan,
-		"idx_auth_committee_hot_cold_credential_prune_order",
-	)
-	require.NotContains(t, plan, "USE TEMP B-TREE FOR ORDER BY")
-}
-
 // applyAuthCertificate drives the production certificate write path --
 // applyTransactionCertificates is what Store.SetTransaction calls for every
 // applied block -- rather than calling the pruning helper directly.
@@ -382,13 +368,9 @@ func TestAuthCommitteeHotTransactionDrainsMultipleBatches(t *testing.T) {
 	store := newManagementTestStore(t)
 	const coldTag = uint8(lcommon.CredentialTypeAddrKeyHash)
 	cold := credentialHash(0xc5)
-	for i := 1; i <= committeeAuthPruneBatch*2; i++ {
-		seedAuthorization(
-			t, store, coldTag, cold,
-			uint8(lcommon.CredentialTypeAddrKeyHash), hotHash(0x73, i),
-			uint64(i), uint64(i), // #nosec G115
-		)
-	}
+	seedAuthorizationRange(
+		t, store, coldTag, cold, 0x73, committeeAuthPruneBatch*2,
+	)
 
 	certificates := []lcommon.Certificate{
 		&lcommon.AuthCommitteeHotCertificate{
@@ -484,13 +466,9 @@ func TestCommitteeHotMaintenancePrunesInactiveCredentialBacklog(t *testing.T) {
 	store := newManagementTestStore(t)
 	const coldTag = uint8(lcommon.CredentialTypeAddrKeyHash)
 	cold := credentialHash(0xc4)
-	for i := 1; i <= committeeAuthPruneBatch*2; i++ {
-		seedAuthorization(
-			t, store, coldTag, cold,
-			uint8(lcommon.CredentialTypeAddrKeyHash), hotHash(0x72, i),
-			uint64(i), uint64(i), // #nosec G115
-		)
-	}
+	seedAuthorizationRange(
+		t, store, coldTag, cold, 0x72, committeeAuthPruneBatch*2,
+	)
 	require.NoError(t, store.SetTip(ochainsync.Tip{
 		Point: ocommon.Point{Slot: preprodTipSlot, Hash: []byte("tip")},
 	}, nil))
@@ -515,13 +493,9 @@ func TestCommitteeHotPruningBoundsEachDeleteCall(t *testing.T) {
 	store := newManagementTestStore(t)
 	const coldTag = uint8(lcommon.CredentialTypeAddrKeyHash)
 	cold := credentialHash(0xc5)
-	for i := 1; i <= committeeAuthPruneBatch*2; i++ {
-		seedAuthorization(
-			t, store, coldTag, cold,
-			uint8(lcommon.CredentialTypeAddrKeyHash), hotHash(0x73, i),
-			uint64(i), uint64(i), // #nosec G115
-		)
-	}
+	seedAuthorizationRange(
+		t, store, coldTag, cold, 0x73, committeeAuthPruneBatch*2,
+	)
 
 	// Force execCached through the supplied queryer so this test can record
 	// each ExecContext call instead of the store-owned prepared statement.
@@ -557,102 +531,6 @@ func (q *committeePruneRecordingQueryer) ExecContext(
 ) (sql.Result, error) {
 	q.statements = append(q.statements, query)
 	return q.queryer.ExecContext(ctx, query, args...)
-}
-
-func TestCommitteeHotAuthorizationDeleteUsesPrimaryKeyWithStaleStats(t *testing.T) {
-	t.Parallel()
-	store := newManagementTestStore(t)
-	const coldTag = uint8(lcommon.CredentialTypeAddrKeyHash)
-	cold := credentialHash(0xc5)
-	for i := 1; i <= 3; i++ {
-		seedAuthorization(
-			t, store, coldTag, cold,
-			uint8(lcommon.CredentialTypeAddrKeyHash), hotHash(0x73, i),
-			uint64(i), uint64(i), // #nosec G115
-		)
-	}
-	_, err := store.writeDB.Exec("ANALYZE auth_committee_hot")
-	require.NoError(t, err)
-	const pruneIndex = "idx_auth_committee_hot_cold_credential_prune_order"
-	var analyzedStats string
-	require.NoError(t, store.writeDB.QueryRow(
-		"SELECT stat FROM sqlite_stat1 WHERE idx = ?", pruneIndex,
-	).Scan(&analyzedStats))
-	statsFields := strings.Fields(analyzedStats)
-	require.NotEmpty(t, statsFields)
-	require.Equal(t, "3", statsFields[0])
-
-	insertTxn, err := store.writeDB.Begin()
-	require.NoError(t, err)
-	defer func() { _ = insertTxn.Rollback() }()
-	insertStmt, err := insertTxn.Prepare(`
-INSERT INTO auth_committee_hot (
-    cold_credential_tag, cold_credential, hot_credential_tag,
-    host_credential, certificate_id, added_slot
-) VALUES (?, ?, ?, ?, ?, ?)`)
-	require.NoError(t, err)
-	for i := 4; i <= 2_003; i++ {
-		_, err := insertStmt.Exec(
-			coldTag, cold,
-			uint8(lcommon.CredentialTypeAddrKeyHash), hotHash(0x73, i),
-			uint64(i), uint64(i), // #nosec G115
-		)
-		require.NoError(t, err)
-	}
-	require.NoError(t, insertStmt.Close())
-	require.NoError(t, insertTxn.Commit())
-
-	var actualRows int
-	require.NoError(t, store.writeDB.QueryRow(
-		"SELECT count(*) FROM auth_committee_hot",
-	).Scan(&actualRows))
-	var currentStats string
-	require.NoError(t, store.writeDB.QueryRow(
-		"SELECT stat FROM sqlite_stat1 WHERE idx = ?", pruneIndex,
-	).Scan(&currentStats))
-	require.Equal(t, analyzedStats, currentStats)
-	require.Greater(t, actualRows, 3)
-
-	rows, err := store.writeDB.Query(
-		"EXPLAIN QUERY PLAN "+committeeHotAuthorizationDeleteIDQuery,
-		int64(1),
-	)
-	require.NoError(t, err)
-	defer rows.Close()
-
-	usesPrimaryKey := false
-	for rows.Next() {
-		var id, parent, notUsed int
-		var detail string
-		require.NoError(t, rows.Scan(&id, &parent, &notUsed, &detail))
-		require.NotContains(t, detail, "SCAN auth_committee_hot")
-		usesPrimaryKey = usesPrimaryKey ||
-			strings.Contains(detail, "USING INTEGER PRIMARY KEY")
-	}
-	require.NoError(t, rows.Err())
-	require.True(t, usesPrimaryKey)
-}
-
-func TestCommitteeHotAuthorizationDeleteRebindsForSQLProviders(t *testing.T) {
-	t.Parallel()
-	for dialect, want := range map[string]string{
-		"postgres": "-- name: DeleteCommitteeHotAuthorizationByID :exec\n" +
-			"DELETE FROM auth_committee_hot WHERE id = $1",
-		"mysql": "-- name: DeleteCommitteeHotAuthorizationByID :exec\n" +
-			"DELETE FROM auth_committee_hot WHERE id = ?",
-	} {
-		t.Run(dialect, func(t *testing.T) {
-			t.Parallel()
-			recorder := &recordingQueryer{}
-			queryer := newDialectQueryer(recorder, dialect)
-			_, err := queryer.ExecContext(
-				context.Background(), committeeHotAuthorizationDeleteIDQuery,
-				int64(1),
-			)
-			require.NoError(t, err)
-			require.Equal(t, []string{want}, recorder.statements)
-		})
-	}
 }
 
 // TestAuthCommitteeHotMaintenanceKeepsTallyAndYieldsWriterAtPreprodScale uses

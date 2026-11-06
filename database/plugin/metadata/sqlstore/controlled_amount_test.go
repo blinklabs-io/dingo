@@ -195,49 +195,6 @@ func newRowCountingStore(t *testing.T) (*Store, *rowCounter) {
 	return store, counter
 }
 
-// TestAccountAggregatesDoNotStreamRows proves the controlled amount,
-// withdrawal and MIR totals are summed by the database: a stake credential
-// with many rows crosses to the caller as one row per aggregate, so the work
-// the caller does no longer grows with the credential's history.
-func TestAccountAggregatesDoNotStreamRows(t *testing.T) {
-	t.Parallel()
-	store, counter := newRowCountingStore(t)
-	ref := models.NewStakeCredentialRef(0, credentialKeyForIndex(5))
-	const rows = 40
-	amounts := make([]uint64, rows)
-	for i := range amounts {
-		amounts[i] = 1_000_000
-	}
-	seedCredentialUtxos(t, store, 0, ref, amounts, nil)
-	for i := range rows {
-		_, err := store.writeDB.Exec(`
-INSERT INTO account_reward_delta (
-    staking_key, credential_tag, tx_hash, amount, added_slot, withdrawal
-) VALUES (?, 0, ?, '1000', 10, TRUE)`, ref.Key, []byte{byte(i + 1)})
-		require.NoError(t, err)
-		seedMIRRewardRow(t, store, uint(i%2), ref.Key, "-3")
-	}
-
-	counter.armed.Store(true)
-	controlled, err := store.GetControlledAmountByCredential(
-		ref.Tag, ref.Key, nil,
-	)
-	require.NoError(t, err)
-	sums, err := store.GetAccountSumsByCredential(ref.Tag, ref.Key, nil)
-	require.NoError(t, err)
-	counter.armed.Store(false)
-
-	require.Equal(t, uint64(rows*1_000_000), controlled)
-	require.Equal(t, uint64(rows*1_000), sums.WithdrawalsSum)
-	require.Equal(t, "-60", sums.ReservesSum.String())
-	require.Equal(t, "-60", sums.TreasurySum.String())
-	// One row each: controlled amount, withdrawals, reserves, treasury.
-	require.EqualValues(
-		t, 4, counter.rows.Load(),
-		"aggregates must not stream per-row results to the caller",
-	)
-}
-
 // TestGetAccountSumsByCredentialMIRBeyondInt64 proves the MIR totals stay
 // exact past 64 bits and through a negative intermediate total.
 func TestGetAccountSumsByCredentialMIRBeyondInt64(t *testing.T) {

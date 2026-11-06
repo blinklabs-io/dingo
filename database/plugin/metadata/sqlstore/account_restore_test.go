@@ -33,28 +33,34 @@ import (
 // form agree on results; this pins the result shape independently of which
 // one is in use.
 func TestGetAccountsByCredentialGroupedByTag(t *testing.T) {
+	t.Parallel()
 	store := newManagementTestStore(t)
 
 	// Larger than the SQLite dialect's 999-parameter limit, so the grouped
 	// IN list for each tag must itself be chunked (twice over per tag).
 	const perTag = 1200
 	refs := make([]models.StakeCredentialRef, 0, perTag*2)
+	tx, err := store.writeDB.Begin()
+	require.NoError(t, err)
+	insert, err := tx.Prepare(
+		"INSERT INTO account (staking_key, credential_tag, active) VALUES (?, ?, TRUE)",
+	)
+	require.NoError(t, err)
 	for tag := range uint8(2) {
 		for i := range perTag {
 			key := make([]byte, 28)
 			key[0] = tag
 			binary.BigEndian.PutUint32(key[24:], uint32(i))
-			require.NoError(t, store.ImportAccount(&models.Account{
-				StakingKey:    key,
-				CredentialTag: tag,
-				Active:        true,
-			}, nil))
+			_, err := insert.Exec(key, tag)
+			require.NoError(t, err)
 			refs = append(
 				refs,
 				models.StakeCredentialRef{Tag: tag, Key: key},
 			)
 		}
 	}
+	require.NoError(t, insert.Close())
+	require.NoError(t, tx.Commit())
 
 	inactiveKey := make([]byte, 28)
 	inactiveKey[0] = 0
@@ -114,6 +120,7 @@ func TestGetAccountsByCredentialGroupedByTag(t *testing.T) {
 // and whether ANALYZE has run, not on which predicate form generated it.
 // Asserting on the generated SQL text instead pins our intent directly.
 func TestAccountsByCredentialChunkQueryShape(t *testing.T) {
+	t.Parallel()
 	keys := [][]byte{
 		{0x01, 0x02},
 		{0x03, 0x04},
