@@ -272,6 +272,14 @@ Existing nonpaged callers retain their pagination and matching semantics. See
 the [MCP guide](docs/mcp/README.md#metadata-and-query-semantics) for page bounds
 and live-state consistency semantics.
 
+Validated API-mode blocks batch output-address rows, transaction address history,
+key witnesses and metadata labels until block completion. UTxOs, assets, datums,
+scripts and live stake remain visible after each transaction. The block-local
+accumulator flushes before returning from block application; a flush failure
+aborts the enclosing transaction. Providers without the optional validated-block
+batch capability keep immediate index writes. Trusted replay retains its
+chunk-owned accumulator and flush boundary.
+
 Certified Leios closures batch API-only output-address rows with transaction
 address history, key witnesses and metadata labels. UTxO rows, native assets,
 datums, scripts and live stake changes remain visible before the next

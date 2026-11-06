@@ -1223,7 +1223,12 @@ these series carries a connection or peer label.
   `apply` takes one sample per delta-batch flush (which includes the
   replay-row flush) and, on a validating block, one sample per validated
   transaction, because that write happens as soon as the transaction
-  validates and leaves the chunk's batch flush nearly empty. A certified Leios
+  validates and leaves the chunk's batch flush nearly empty. API-mode validated
+  blocks also record their final API-index flush as `apply`: query-only indexes
+  are queued until the block finishes, while every stateful transaction effect
+  stays visible to subsequent validation. Providers without this capability
+  retain immediate writes; trusted replay keeps its existing chunk-owned flush.
+  A certified Leios
   endorser block's transactions take the same per-transaction `validate` and
   `apply` samples; when its closure is applied at an epoch boundary those
   samples fall inside `epoch_rollover`. `prepare` and `commit` are recorded
