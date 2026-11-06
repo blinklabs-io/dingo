@@ -54,6 +54,9 @@ import (
 // interleaving with channels, wired through the real callbacks and the real
 // locks, so the deadlock is deterministic rather than timing-dependent.
 func TestChainSelectorChainsyncLockOrderDoesNotDeadlock(t *testing.T) {
+	// Not t.Parallel: it identifies the queued writer by scanning every
+	// goroutine's stack, which a concurrent test blocked in AddClientConnId
+	// would satisfy.
 	bus := newTestEventBus(t)
 
 	// cs and st forward-reference each other, mirroring the closures node.go

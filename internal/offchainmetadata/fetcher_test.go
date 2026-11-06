@@ -123,6 +123,8 @@ func (s *cancelCheckStore) SetOffchainMetadataFetchResult(
 }
 
 func TestFetchOneStoresVerifiedContent(t *testing.T) {
+	t.Parallel()
+
 	body := []byte(`{"name":"Test Pool"}`)
 	hash := blake2b.Sum256(body)
 	server := httptest.NewServer(http.HandlerFunc(
@@ -161,6 +163,8 @@ func TestFetchOneStoresVerifiedContent(t *testing.T) {
 }
 
 func TestFetchOneStoresVerifiedIPFSContent(t *testing.T) {
+	t.Parallel()
+
 	body := []byte(`{"abstract":"Proposal metadata"}`)
 	hash := blake2b.Sum256(body)
 	requestedPath := make(chan string, 1)
@@ -208,6 +212,8 @@ func TestFetchOneStoresVerifiedIPFSContent(t *testing.T) {
 }
 
 func TestResolveFetchURLAcceptsBase64URLCID(t *testing.T) {
+	t.Parallel()
+
 	cidStr := "uAVUSIGZoeq34Yr13bI_Bi46fjiAIlxSFbuIzs5AqWR0NXykl"
 
 	resolved, err := resolveFetchURL(
@@ -222,6 +228,8 @@ func TestResolveFetchURLAcceptsBase64URLCID(t *testing.T) {
 }
 
 func TestFetchOneSanitizesContentType(t *testing.T) {
+	t.Parallel()
+
 	testCases := []struct {
 		name         string
 		responseType string
@@ -255,6 +263,7 @@ func TestFetchOneSanitizesContentType(t *testing.T) {
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			body := []byte(`{"name":"Test Pool"}`)
 			hash := blake2b.Sum256(body)
 			server := httptest.NewServer(http.HandlerFunc(
@@ -285,6 +294,8 @@ func TestFetchOneSanitizesContentType(t *testing.T) {
 }
 
 func TestFetchOneRejectsHashMismatch(t *testing.T) {
+	t.Parallel()
+
 	body := []byte(`{"name":"bad"}`)
 	wrongHash := blake2b.Sum256([]byte("expected"))
 	actualHash := blake2b.Sum256(body)
@@ -319,6 +330,8 @@ func TestFetchOneRejectsHashMismatch(t *testing.T) {
 }
 
 func TestFetchOneRejectsPrivateURLByDefault(t *testing.T) {
+	t.Parallel()
+
 	body := []byte(`{"name":"local"}`)
 	hash := blake2b.Sum256(body)
 	fetcher, err := New(Config{
@@ -340,6 +353,8 @@ func TestFetchOneRejectsPrivateURLByDefault(t *testing.T) {
 }
 
 func TestNewSecuresCustomHTTPClientRedirects(t *testing.T) {
+	t.Parallel()
+
 	fetcher, err := New(Config{
 		Store: fakeStore{},
 		HTTPClient: &http.Client{
@@ -366,6 +381,8 @@ func TestNewSecuresCustomHTTPClientRedirects(t *testing.T) {
 }
 
 func TestNewSecuresCustomHTTPClientTransportDialers(t *testing.T) {
+	t.Parallel()
+
 	customDialCalled := false
 	customDial := func(context.Context, string, string) (net.Conn, error) {
 		customDialCalled = true
@@ -405,6 +422,8 @@ func TestNewSecuresCustomHTTPClientTransportDialers(t *testing.T) {
 }
 
 func TestNewRejectsCustomRoundTripperWhenPrivateAddressesBlocked(t *testing.T) {
+	t.Parallel()
+
 	_, err := New(Config{
 		Store: fakeStore{},
 		HTTPClient: &http.Client{
@@ -423,6 +442,8 @@ func TestNewRejectsCustomRoundTripperWhenPrivateAddressesBlocked(t *testing.T) {
 }
 
 func TestRunOnceSkipsFetchResultWhenCanceled(t *testing.T) {
+	t.Parallel()
+
 	requestStarted := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(
 		func(_ http.ResponseWriter, r *http.Request) {
@@ -473,6 +494,8 @@ func TestRunOnceSkipsFetchResultWhenCanceled(t *testing.T) {
 }
 
 func TestRunOnceSkipsStoreWhenCanceled(t *testing.T) {
+	t.Parallel()
+
 	store := &cancelCheckStore{}
 	fetcher, err := New(Config{
 		Store: store,
@@ -488,11 +511,15 @@ func TestRunOnceSkipsStoreWhenCanceled(t *testing.T) {
 }
 
 func TestReadLimitedRejectsOversizeBody(t *testing.T) {
+	t.Parallel()
+
 	_, err := readLimited(bytes.NewReader([]byte("abcd")), 3)
 	require.ErrorContains(t, err, "exceeds 3 bytes")
 }
 
 func TestResolveIPFSURLUsesGatewayIPFSPath(t *testing.T) {
+	t.Parallel()
+
 	fetchURL, err := resolveFetchURL(
 		"ipfs://bafkqaaa/some file.json",
 		"https://gateway.example",
@@ -508,6 +535,8 @@ func TestResolveIPFSURLUsesGatewayIPFSPath(t *testing.T) {
 }
 
 func TestResolveIPFSURLRejectsPathTraversal(t *testing.T) {
+	t.Parallel()
+
 	_, err := resolveFetchURL(
 		"ipfs://bafkqaaa/../secret.json",
 		"https://gateway.example/ipfs/",
@@ -518,6 +547,8 @@ func TestResolveIPFSURLRejectsPathTraversal(t *testing.T) {
 }
 
 func TestResolveFetchURLRejectsBroadcastIPv4(t *testing.T) {
+	t.Parallel()
+
 	_, err := resolveFetchURL(
 		"http://255.255.255.255/metadata.json",
 		"https://gateway.example/ipfs/",
@@ -565,6 +596,8 @@ func newFetchTestServerDoc(
 // generic max bytes (here left at the default 1 MiB) is far larger: pool
 // sources get the stake-pool-specific limit, not the generic one.
 func TestFetchOneEnforcesPerSourcePoolMetadataSizeLimit(t *testing.T) {
+	t.Parallel()
+
 	padding := strings.Repeat("a", 500)
 	body := []byte(
 		`{"name":"` + padding + `","description":"d","ticker":"TEST",` +
@@ -590,6 +623,8 @@ func TestFetchOneEnforcesPerSourcePoolMetadataSizeLimit(t *testing.T) {
 // limit but well under the generic limit) fetches successfully for a DRep
 // source, since only pool sources are capped at 512 bytes.
 func TestFetchOneDoesNotReducePoolLimitForOtherSources(t *testing.T) {
+	t.Parallel()
+
 	body := []byte(
 		`{"abstract":"` + strings.Repeat("a", 600) + `"}`,
 	)
@@ -611,6 +646,8 @@ func TestFetchOneDoesNotReducePoolLimitForOtherSources(t *testing.T) {
 // missing every required field) is marked failed with the decode-error
 // classification rather than stored as a successful fetch.
 func TestFetchOneRejectsInvalidPoolMetadataContent(t *testing.T) {
+	t.Parallel()
+
 	body := []byte(`{}`)
 	fetcher, doc := newFetchTestServerDoc(
 		t,
@@ -630,6 +667,8 @@ func TestFetchOneRejectsInvalidPoolMetadataContent(t *testing.T) {
 // schema-valid pool document is stored as a successful fetch, unaffected by
 // the new per-source validation.
 func TestFetchOneAcceptsValidPoolMetadataContent(t *testing.T) {
+	t.Parallel()
+
 	body := []byte(
 		`{"name":"Test Pool","description":"A pool used for testing.",` +
 			`"ticker":"TEST","homepage":"https://example.com"}`,

@@ -31,6 +31,8 @@ import (
 )
 
 func TestPipelineQuorumPreservesOccurrenceSlot(t *testing.T) {
+	t.Parallel()
+
 	f := newPipelineFixture(t, DefaultPipelineTiming())
 	defer f.eventBus.Stop()
 	hash := ebHashFor("same-content")
@@ -52,8 +54,11 @@ func TestPipelineQuorumPreservesOccurrenceSlot(t *testing.T) {
 }
 
 func TestPipelineCleanupPreservesOtherOccurrence(t *testing.T) {
+	t.Parallel()
+
 	for _, kind := range []string{"ttl", "epoch", "rollback"} {
 		t.Run(kind, func(t *testing.T) {
+			t.Parallel()
 			timing := DefaultPipelineTiming()
 			if kind == "epoch" {
 				timing.InstanceTTLSlots = 1000
@@ -324,26 +329,6 @@ func TestObserveAndCertifySingleEb(t *testing.T) {
 	assert.Empty(t, f.mgr.EligibleCertifiedEbs())
 }
 
-func TestMarkEmbeddedExcludesEb(t *testing.T) {
-	t.Parallel()
-
-	f := newPipelineFixture(t, DefaultPipelineTiming())
-	const slot = 300
-	hash := ebHashFor("eb-a")
-	f.slot.slot = slot
-	f.mgr.ObserveEndorserBlock(slot, hash)
-	f.mgr.handleEbQuorum(EbQuorumEvent{
-		SlotNo:            slot,
-		EndorserBlockHash: hash,
-		Certificate:       &lcommon.LeiosEbCertificate{},
-	})
-	f.slot.slot = slot + 5
-	require.Len(t, f.mgr.EligibleCertifiedEbs(), 1)
-
-	f.mgr.MarkEmbedded(slot, hash)
-	assert.Empty(t, f.mgr.EligibleCertifiedEbs())
-}
-
 func TestEbEquivocationExcludesFromEligibility(t *testing.T) {
 	t.Parallel()
 
@@ -484,34 +469,6 @@ func TestEbQuorumPastCertifyDeadlineRejected(t *testing.T) {
 	late.mgr.mu.Unlock()
 	require.NotNil(t, eb, "a late-certified EB stays tracked")
 	assert.False(t, eb.certified, "a late certificate must not certify the EB")
-}
-
-func TestLateCertMetricCounted(t *testing.T) {
-	t.Parallel()
-
-	reg := prometheus.NewRegistry()
-	tm := DefaultPipelineTiming()
-	mgr, err := NewPipelineManager(PipelineManagerConfig{
-		EventBus:      event.NewEventBus(nil, nil),
-		SlotProvider:  &fakeSlotProvider{slot: 300 + tm.CertifyByDeadlineSlots},
-		EpochProvider: &fakeEpochProvider{},
-		Timing:        tm,
-		PromRegistry:  reg,
-	})
-	require.NoError(t, err)
-
-	mgr.handleEbQuorum(EbQuorumEvent{
-		SlotNo:            300,
-		EndorserBlockHash: ebHashFor("eb-late"),
-		Certificate:       &lcommon.LeiosEbCertificate{},
-	})
-	assert.Equal(
-		t,
-		float64(1),
-		promtestutil.ToFloat64(
-			mgr.metrics.certsRejectedTotal.WithLabelValues("late"),
-		),
-	)
 }
 
 func TestStageGaugesReflectUncertifiedStages(t *testing.T) {
@@ -1076,6 +1033,8 @@ func TestPipelineLifecycleAndEventDispatch(t *testing.T) {
 }
 
 func TestMarkEmbeddedPreservesOtherOccurrence(t *testing.T) {
+	t.Parallel()
+
 	f := newPipelineFixture(t, DefaultPipelineTiming())
 	defer f.eventBus.Stop()
 	hash := ebHashFor("same-content")

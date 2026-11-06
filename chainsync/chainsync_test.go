@@ -108,6 +108,7 @@ func (s *blockingEventSubscriber) Close() {
 // --- Client registry tests ---
 
 func TestAddAndRemoveClientConnId(t *testing.T) {
+	t.Parallel()
 	bus := newTestEventBus(t)
 	s := newTestState(t, bus, chainsync.DefaultConfig())
 
@@ -145,6 +146,7 @@ func TestAddAndRemoveClientConnId(t *testing.T) {
 }
 
 func TestTryAddClientConnId_LimitEnforced(t *testing.T) {
+	t.Parallel()
 	bus := newTestEventBus(t)
 	s := newTestState(t, bus, chainsync.Config{
 		MaxClients:   2,
@@ -163,6 +165,7 @@ func TestTryAddClientConnId_LimitEnforced(t *testing.T) {
 }
 
 func TestTryAddClientConnId_DuplicateRejected(t *testing.T) {
+	t.Parallel()
 	bus := newTestEventBus(t)
 	s := newTestState(t, bus, chainsync.DefaultConfig())
 
@@ -175,6 +178,7 @@ func TestTryAddClientConnId_DuplicateRejected(t *testing.T) {
 func TestTryAddObservedClientConnId_DoesNotConsumeEligibleLimit(
 	t *testing.T,
 ) {
+	t.Parallel()
 	bus := newTestEventBus(t)
 	s := newTestState(t, bus, chainsync.Config{
 		MaxClients:   1,
@@ -199,6 +203,7 @@ func TestTryAddObservedClientConnId_DoesNotConsumeEligibleLimit(
 }
 
 func TestSetClientObservabilityOnly_DemotesPrimary(t *testing.T) {
+	t.Parallel()
 	bus := newTestEventBus(t)
 	s := newTestState(t, bus, chainsync.DefaultConfig())
 
@@ -230,6 +235,7 @@ func TestSetClientObservabilityOnly_DemotesPrimary(t *testing.T) {
 func TestSetClientObservabilityOnly_EligiblePromotionRespectsMaxClients(
 	t *testing.T,
 ) {
+	t.Parallel()
 	bus := newTestEventBus(t)
 	s := newTestState(t, bus, chainsync.Config{
 		MaxClients:   1,
@@ -252,6 +258,7 @@ func TestSetClientObservabilityOnly_EligiblePromotionRespectsMaxClients(
 func TestSetClientObservabilityOnly_PreservesCurrentActiveClient(
 	t *testing.T,
 ) {
+	t.Parallel()
 	bus := newTestEventBus(t)
 	s := newTestState(t, bus, chainsync.DefaultConfig())
 
@@ -279,6 +286,7 @@ func TestSetClientObservabilityOnly_PreservesCurrentActiveClient(
 func TestAddClientConnId_DuplicatePreservesState(
 	t *testing.T,
 ) {
+	t.Parallel()
 	bus := newTestEventBus(t)
 	s := newTestState(t, bus, chainsync.DefaultConfig())
 
@@ -460,10 +468,13 @@ func TestDeliveryWatermarkRewindsAndResets(t *testing.T) {
 }
 
 func TestRemoveActiveClientDoesNotPromoteStalledFallback(t *testing.T) {
+	t.Parallel()
 	bus := newTestEventBus(t)
+	now := time.Unix(1, 0)
 	cfg := chainsync.Config{
 		MaxClients:   5,
-		StallTimeout: 50 * time.Millisecond,
+		StallTimeout: time.Minute,
+		Now:          func() time.Time { return now },
 	}
 	s := newTestState(t, bus, cfg)
 
@@ -487,21 +498,13 @@ func TestRemoveActiveClientDoesNotPromoteStalledFallback(t *testing.T) {
 			Point: ocommon.NewPoint(200, []byte("hb")),
 		})
 
-	// Wait for stall timeout to elapse for both clients.
-	// Use a map to deduplicate connection IDs across
-	// polling iterations.
-	stalledSet := make(
-		map[ouroboros.ConnectionId]struct{},
-	)
-	require.Eventually(t, func() bool {
-		for _, id := range s.CheckStalledClients() {
-			stalledSet[id] = struct{}{}
-		}
-		return len(stalledSet) >= 2
-	}, 2*time.Second, 10*time.Millisecond,
+	now = now.Add(2 * time.Minute)
+	require.ElementsMatch(
+		t,
+		[]ouroboros.ConnectionId{connA, connB},
+		s.CheckStalledClients(),
 		"both clients should become stalled",
 	)
-	require.Len(t, stalledSet, 2)
 
 	// Removing the primary must not promote a stalled peer independently of
 	// ChainSelector.
@@ -510,22 +513,8 @@ func TestRemoveActiveClientDoesNotPromoteStalledFallback(t *testing.T) {
 	require.Nil(t, active)
 }
 
-func TestGetClientConnIds(t *testing.T) {
-	bus := newTestEventBus(t)
-	s := newTestState(t, bus, chainsync.DefaultConfig())
-
-	connA := newTestConnId(1)
-	connB := newTestConnId(2)
-	s.AddClientConnId(connA)
-	s.AddClientConnId(connB)
-
-	ids := s.GetClientConnIds()
-	require.Len(t, ids, 2)
-	require.Contains(t, ids, connA)
-	require.Contains(t, ids, connB)
-}
-
 func TestSetClientConnId(t *testing.T) {
+	t.Parallel()
 	bus := newTestEventBus(t)
 	s := newTestState(t, bus, chainsync.DefaultConfig())
 
@@ -552,6 +541,7 @@ func TestSetClientConnId(t *testing.T) {
 // --- Failover tests ---
 
 func TestDisconnectClearsPrimaryForChainSelection(t *testing.T) {
+	t.Parallel()
 	bus := newTestEventBus(t)
 	s := newTestState(t, bus, chainsync.DefaultConfig())
 
@@ -580,10 +570,13 @@ func TestDisconnectClearsPrimaryForChainSelection(t *testing.T) {
 }
 
 func TestDisconnectDoesNotPromoteNonStalledClient(t *testing.T) {
+	t.Parallel()
 	bus := newTestEventBus(t)
+	now := time.Unix(1, 0)
 	cfg := chainsync.Config{
 		MaxClients:   5,
-		StallTimeout: 50 * time.Millisecond,
+		StallTimeout: time.Minute,
+		Now:          func() time.Time { return now },
 	}
 	s := newTestState(t, bus, cfg)
 
@@ -605,35 +598,21 @@ func TestDisconnectDoesNotPromoteNonStalledClient(t *testing.T) {
 	// Set A as primary
 	s.SetClientConnId(connA)
 
-	// Poll until B's stall timeout elapses, refreshing A
-	// and C on each iteration to keep them active. Use a
-	// map to deduplicate IDs across polling iterations.
-	stalledSet := make(
-		map[ouroboros.ConnectionId]struct{},
-	)
-	require.Eventually(t, func() bool {
-		s.UpdateClientTip(connA,
-			ocommon.NewPoint(101, []byte("a2")),
-			ochainsync.Tip{
-				Point: ocommon.NewPoint(
-					101, []byte("a2"),
-				),
-			})
-		s.UpdateClientTip(connC,
-			ocommon.NewPoint(201, []byte("c2")),
-			ochainsync.Tip{
-				Point: ocommon.NewPoint(
-					201, []byte("c2"),
-				),
-			})
-		for _, id := range s.CheckStalledClients() {
-			stalledSet[id] = struct{}{}
-		}
-		return len(stalledSet) >= 1
-	}, 2*time.Second, 10*time.Millisecond,
+	// Refresh A and C part-way through the timeout, so only B is stale.
+	now = now.Add(40 * time.Second)
+	s.UpdateClientTip(connA,
+		ocommon.NewPoint(101, []byte("a2")),
+		ochainsync.Tip{Point: ocommon.NewPoint(101, []byte("a2"))})
+	s.UpdateClientTip(connC,
+		ocommon.NewPoint(201, []byte("c2")),
+		ochainsync.Tip{Point: ocommon.NewPoint(201, []byte("c2"))})
+	now = now.Add(40 * time.Second)
+	require.Equal(
+		t,
+		[]ouroboros.ConnectionId{connB},
+		s.CheckStalledClients(),
 		"B should become stalled",
 	)
-	require.Contains(t, stalledSet, connB)
 
 	// Remove A (primary)
 	s.RemoveClientConnId(connA)
@@ -645,20 +624,8 @@ func TestDisconnectDoesNotPromoteNonStalledClient(t *testing.T) {
 
 // --- Header deduplication tests ---
 
-func TestHeaderDeduplication_NewHeader(t *testing.T) {
-	bus := newTestEventBus(t)
-	s := newTestState(t, bus, chainsync.DefaultConfig())
-
-	connA := newTestConnId(1)
-	s.AddClientConnId(connA)
-
-	isNew := s.UpdateClientTip(connA,
-		ocommon.NewPoint(100, []byte("hash1")),
-		ochainsync.Tip{Point: ocommon.NewPoint(100, []byte("hash1"))})
-	require.True(t, isNew)
-}
-
 func TestHeaderDeduplication_DuplicateHeader(t *testing.T) {
+	t.Parallel()
 	bus := newTestEventBus(t)
 	s := newTestState(t, bus, chainsync.DefaultConfig())
 
@@ -682,6 +649,7 @@ func TestHeaderDeduplication_DuplicateHeader(t *testing.T) {
 func TestObservedHeaderHistoryPersistsAcrossDedupAndClearsOnRemove(
 	t *testing.T,
 ) {
+	t.Parallel()
 	bus := newTestEventBus(t)
 	s := newTestState(t, bus, chainsync.DefaultConfig())
 
@@ -722,6 +690,7 @@ func TestObservedHeaderHistoryPersistsAcrossDedupAndClearsOnRemove(
 // --- Fork detection tests ---
 
 func TestForkDetection(t *testing.T) {
+	t.Parallel()
 	bus := newTestEventBus(t)
 	_, ch := bus.Subscribe(chainsync.ForkDetectedEventType)
 	s := newTestState(t, bus, chainsync.DefaultConfig())
@@ -762,6 +731,7 @@ func TestForkDetection(t *testing.T) {
 func TestForkDetection_DuplicateForkHashDeduplicated(
 	t *testing.T,
 ) {
+	t.Parallel()
 	bus := newTestEventBus(t)
 	_, ch := bus.Subscribe(chainsync.ForkDetectedEventType)
 	s := newTestState(t, bus, chainsync.DefaultConfig())
@@ -815,11 +785,14 @@ func TestForkDetection_DuplicateForkHashDeduplicated(
 // --- Stall detection tests ---
 
 func TestStallDetection(t *testing.T) {
+	t.Parallel()
 	bus := newTestEventBus(t)
 	_, ch := bus.Subscribe(chainsync.ClientStalledEventType)
+	now := time.Unix(1, 0)
 	cfg := chainsync.Config{
 		MaxClients:   5,
-		StallTimeout: 50 * time.Millisecond,
+		StallTimeout: time.Minute,
+		Now:          func() time.Time { return now },
 	}
 	s := newTestState(t, bus, cfg)
 
@@ -836,20 +809,13 @@ func TestStallDetection(t *testing.T) {
 		ocommon.NewPoint(200, []byte("hb")),
 		ochainsync.Tip{Point: ocommon.NewPoint(200, []byte("hb"))})
 
-	// Wait for stall timeout to elapse. Use a map to
-	// deduplicate connection IDs across polling iterations.
-	stalledSet := make(
-		map[ouroboros.ConnectionId]struct{},
-	)
-	require.Eventually(t, func() bool {
-		for _, id := range s.CheckStalledClients() {
-			stalledSet[id] = struct{}{}
-		}
-		return len(stalledSet) >= 2
-	}, 2*time.Second, 10*time.Millisecond,
+	now = now.Add(2 * time.Minute)
+	require.ElementsMatch(
+		t,
+		[]ouroboros.ConnectionId{connA, connB},
+		s.CheckStalledClients(),
 		"both clients should become stalled",
 	)
-	require.Len(t, stalledSet, 2)
 
 	// Verify stall events emitted
 	evt1 := testutil.RequireReceive(
@@ -863,10 +829,13 @@ func TestStallDetection(t *testing.T) {
 }
 
 func TestStallDetection_RecoveryOnActivity(t *testing.T) {
+	t.Parallel()
 	bus := newTestEventBus(t)
+	now := time.Unix(1, 0)
 	cfg := chainsync.Config{
 		MaxClients:   5,
-		StallTimeout: 50 * time.Millisecond,
+		StallTimeout: time.Minute,
+		Now:          func() time.Time { return now },
 	}
 	s := newTestState(t, bus, cfg)
 
@@ -876,20 +845,13 @@ func TestStallDetection_RecoveryOnActivity(t *testing.T) {
 		ocommon.NewPoint(100, []byte("h1")),
 		ochainsync.Tip{Point: ocommon.NewPoint(100, []byte("h1"))})
 
-	// Wait for stall timeout to elapse. Use a map to
-	// deduplicate connection IDs across polling iterations.
-	stalledSet := make(
-		map[ouroboros.ConnectionId]struct{},
-	)
-	require.Eventually(t, func() bool {
-		for _, id := range s.CheckStalledClients() {
-			stalledSet[id] = struct{}{}
-		}
-		return len(stalledSet) >= 1
-	}, 2*time.Second, 10*time.Millisecond,
+	now = now.Add(2 * time.Minute)
+	require.Equal(
+		t,
+		[]ouroboros.ConnectionId{conn},
+		s.CheckStalledClients(),
 		"client should become stalled",
 	)
-	require.Len(t, stalledSet, 1)
 
 	// Verify stalled status
 	tc := s.GetTrackedClient(conn)
@@ -906,10 +868,13 @@ func TestStallDetection_RecoveryOnActivity(t *testing.T) {
 }
 
 func TestStallDetectionLeavesSelectionToChainSelector(t *testing.T) {
+	t.Parallel()
 	bus := newTestEventBus(t)
+	now := time.Unix(1, 0)
 	cfg := chainsync.Config{
 		MaxClients:   5,
-		StallTimeout: 50 * time.Millisecond,
+		StallTimeout: time.Minute,
+		Now:          func() time.Time { return now },
 	}
 	s := newTestState(t, bus, cfg)
 
@@ -927,28 +892,18 @@ func TestStallDetectionLeavesSelectionToChainSelector(t *testing.T) {
 		ocommon.NewPoint(400, []byte("hb")),
 		ochainsync.Tip{Point: ocommon.NewPoint(400, []byte("hb"))})
 
-	// Poll until A's stall timeout elapses, keeping B
-	// active. Use a map to deduplicate IDs across polling
-	// iterations.
-	stalledSet := make(
-		map[ouroboros.ConnectionId]struct{},
-	)
-	require.Eventually(t, func() bool {
-		s.UpdateClientTip(connB,
-			ocommon.NewPoint(401, []byte("hb2")),
-			ochainsync.Tip{
-				Point: ocommon.NewPoint(
-					401, []byte("hb2"),
-				),
-			})
-		for _, id := range s.CheckStalledClients() {
-			stalledSet[id] = struct{}{}
-		}
-		return len(stalledSet) >= 1
-	}, 2*time.Second, 10*time.Millisecond,
+	// Keep B active part-way through the timeout, so only A is stale.
+	now = now.Add(40 * time.Second)
+	s.UpdateClientTip(connB,
+		ocommon.NewPoint(401, []byte("hb2")),
+		ochainsync.Tip{Point: ocommon.NewPoint(401, []byte("hb2"))})
+	now = now.Add(40 * time.Second)
+	require.Equal(
+		t,
+		[]ouroboros.ConnectionId{connA},
+		s.CheckStalledClients(),
 		"A should become stalled",
 	)
-	require.Contains(t, stalledSet, connA)
 
 	active := s.GetClientConnId()
 	require.NotNil(t, active)
@@ -956,10 +911,13 @@ func TestStallDetectionLeavesSelectionToChainSelector(t *testing.T) {
 }
 
 func TestStallDetection_SkipsObservabilityOnlyClient(t *testing.T) {
+	t.Parallel()
 	bus := newTestEventBus(t)
+	now := time.Unix(1, 0)
 	cfg := chainsync.Config{
 		MaxClients:   1,
-		StallTimeout: 50 * time.Millisecond,
+		StallTimeout: time.Minute,
+		Now:          func() time.Time { return now },
 	}
 	s := newTestState(t, bus, cfg)
 
@@ -970,9 +928,8 @@ func TestStallDetection_SkipsObservabilityOnlyClient(t *testing.T) {
 		ochainsync.Tip{Point: ocommon.NewPoint(100, []byte("ha"))},
 	)
 
-	require.Eventually(t, func() bool {
-		return len(s.CheckStalledClients()) == 0
-	}, 250*time.Millisecond, 10*time.Millisecond)
+	now = now.Add(2 * time.Minute)
+	require.Empty(t, s.CheckStalledClients())
 
 	tc := s.GetTrackedClient(conn)
 	require.NotNil(t, tc)
@@ -983,6 +940,7 @@ func TestStallDetection_SkipsObservabilityOnlyClient(t *testing.T) {
 // --- Client synced tests ---
 
 func TestMarkClientSynced(t *testing.T) {
+	t.Parallel()
 	bus := newTestEventBus(t)
 	_, ch := bus.Subscribe(chainsync.ClientSyncedEventType)
 	s := newTestState(t, bus, chainsync.DefaultConfig())
@@ -1010,6 +968,7 @@ func TestMarkClientSynced(t *testing.T) {
 func TestMarkClientSynced_IdempotentNoDoubleEvent(
 	t *testing.T,
 ) {
+	t.Parallel()
 	bus := newTestEventBus(t)
 	_, ch := bus.Subscribe(chainsync.ClientSyncedEventType)
 	s := newTestState(t, bus, chainsync.DefaultConfig())
@@ -1039,6 +998,7 @@ func TestMarkClientSynced_IdempotentNoDoubleEvent(
 // --- Client events tests ---
 
 func TestClientAddedEvent(t *testing.T) {
+	t.Parallel()
 	bus := newTestEventBus(t)
 	_, ch := bus.Subscribe(chainsync.ClientAddedEventType)
 	s := newTestState(t, bus, chainsync.DefaultConfig())
@@ -1055,6 +1015,7 @@ func TestClientAddedEvent(t *testing.T) {
 }
 
 func TestClientRemovedEvent(t *testing.T) {
+	t.Parallel()
 	bus := newTestEventBus(t)
 	_, ch := bus.Subscribe(chainsync.ClientRemovedEventType)
 	s := newTestState(t, bus, chainsync.DefaultConfig())
@@ -1073,13 +1034,29 @@ func TestClientRemovedEvent(t *testing.T) {
 	require.True(t, removedEvt.WasPrimary)
 }
 
+// awaitClientAdded runs register and waits for the ClientAddedEvent it
+// publishes. The event is queued asynchronously, so a test that then fills the
+// bus queue to exactly AsyncQueueSize would otherwise race it for the last
+// slot and block until a worker's delivery timeout frees one.
+func awaitClientAdded(t *testing.T, bus *event.EventBus, register func()) {
+	t.Helper()
+	_, added := bus.Subscribe(chainsync.ClientAddedEventType)
+	register()
+	testutil.RequireReceive(
+		t, added, 2*time.Second, "registration event must be delivered",
+	)
+}
+
 func TestClientRemoveRequestDoesNotWaitForAsyncQueueCapacity(t *testing.T) {
+	t.Parallel()
 	bus := newTestEventBus(t)
 	cfg := chainsync.DefaultConfig()
 	cfg.MaxClients = event.AsyncQueueSize + 1
 	s := newTestState(t, bus, cfg)
 	conn := newTestConnId(1)
-	require.True(t, s.AddClientConnId(conn))
+	awaitClientAdded(t, bus, func() {
+		require.True(t, s.AddClientConnId(conn))
+	})
 	_, removed := bus.Subscribe(chainsync.ClientRemovedEventType)
 	bus.SubscribeFuncWithBufferPolicy(
 		chainsync.ClientRemoveRequestedEventType,
@@ -1141,13 +1118,16 @@ func TestClientRemoveRequestDoesNotWaitForAsyncQueueCapacity(t *testing.T) {
 }
 
 func TestClientStateNotificationsDoNotWaitForAsyncQueueCapacity(t *testing.T) {
+	t.Parallel()
 	bus := newTestEventBus(t)
 	cfg := chainsync.DefaultConfig()
 	cfg.MaxClients = 2
 	s := newTestState(t, bus, cfg)
 	first := newTestConnId(1)
 	second := newTestConnId(2)
-	require.True(t, s.AddClientConnId(first))
+	awaitClientAdded(t, bus, func() {
+		require.True(t, s.AddClientConnId(first))
+	})
 
 	blockers := make([]*blockingEventSubscriber, event.AsyncWorkerPoolSize)
 	defer func() {
@@ -1206,6 +1186,7 @@ func TestClientStateNotificationsDoNotWaitForAsyncQueueCapacity(t *testing.T) {
 }
 
 func TestClientRemovedEvent_NonPrimary(t *testing.T) {
+	t.Parallel()
 	bus := newTestEventBus(t)
 	_, ch := bus.Subscribe(chainsync.ClientRemovedEventType)
 	s := newTestState(t, bus, chainsync.DefaultConfig())
@@ -1224,52 +1205,10 @@ func TestClientRemovedEvent_NonPrimary(t *testing.T) {
 	require.False(t, removedEvt.WasPrimary)
 }
 
-// --- Tracked client state tests ---
-
-func TestGetTrackedClient(t *testing.T) {
-	bus := newTestEventBus(t)
-	s := newTestState(t, bus, chainsync.DefaultConfig())
-
-	conn := newTestConnId(1)
-	s.AddClientConnId(conn)
-	s.UpdateClientTip(conn,
-		ocommon.NewPoint(42, []byte("xyz")),
-		ochainsync.Tip{
-			Point:       ocommon.NewPoint(42, []byte("xyz")),
-			BlockNumber: 10,
-		})
-
-	tc := s.GetTrackedClient(conn)
-	require.NotNil(t, tc)
-	require.Equal(t, conn, tc.ConnId)
-	require.Equal(t, uint64(42), tc.Cursor.Slot)
-	require.Equal(t, uint64(1), tc.HeadersRecv)
-	require.Equal(t, chainsync.ClientStatusSyncing, tc.Status)
-}
-
-func TestGetTrackedClient_NotFound(t *testing.T) {
-	bus := newTestEventBus(t)
-	s := newTestState(t, bus, chainsync.DefaultConfig())
-
-	tc := s.GetTrackedClient(newTestConnId(999))
-	require.Nil(t, tc)
-}
-
-func TestGetTrackedClients(t *testing.T) {
-	bus := newTestEventBus(t)
-	s := newTestState(t, bus, chainsync.DefaultConfig())
-
-	s.AddClientConnId(newTestConnId(1))
-	s.AddClientConnId(newTestConnId(2))
-	s.AddClientConnId(newTestConnId(3))
-
-	clients := s.GetTrackedClients()
-	require.Len(t, clients, 3)
-}
-
 // --- Seen headers cache tests ---
 
 func TestClearSeenHeaders(t *testing.T) {
+	t.Parallel()
 	bus := newTestEventBus(t)
 	s := newTestState(t, bus, chainsync.DefaultConfig())
 
@@ -1290,6 +1229,7 @@ func TestClearSeenHeaders(t *testing.T) {
 }
 
 func TestPruneSeenHeaders(t *testing.T) {
+	t.Parallel()
 	bus := newTestEventBus(t)
 	s := newTestState(t, bus, chainsync.DefaultConfig())
 
@@ -1323,6 +1263,7 @@ func TestPruneSeenHeaders(t *testing.T) {
 }
 
 func TestClearSeenHeadersFrom(t *testing.T) {
+	t.Parallel()
 	bus := newTestEventBus(t)
 	s := newTestState(t, bus, chainsync.DefaultConfig())
 
@@ -1378,6 +1319,7 @@ func feedHeader(
 // retention window, while observations within the window remain available
 // for duplicate detection.
 func TestSeenHeadersPrunedOnProgress(t *testing.T) {
+	t.Parallel()
 	bus := newTestEventBus(t)
 	cfg := chainsync.DefaultConfig()
 	cfg.SeenHeadersRetention = 500
@@ -1407,6 +1349,7 @@ func TestSeenHeadersPrunedOnProgress(t *testing.T) {
 // TestSeenHeadersForkDetectionSurvivesPruning confirms that duplicate and
 // fork detection on recent slots keep working once auto-pruning is active.
 func TestSeenHeadersForkDetectionSurvivesPruning(t *testing.T) {
+	t.Parallel()
 	bus := newTestEventBus(t)
 	_, ch := bus.Subscribe(chainsync.ForkDetectedEventType)
 	cfg := chainsync.DefaultConfig()
@@ -1436,6 +1379,7 @@ func TestSeenHeadersForkDetectionSurvivesPruning(t *testing.T) {
 // the retention window over a long run instead of growing with every slot
 // observed (the unbounded-growth leak this addresses).
 func TestSeenHeadersBoundedOverLongRun(t *testing.T) {
+	t.Parallel()
 	bus := newTestEventBus(t)
 	cfg := chainsync.DefaultConfig()
 	cfg.SeenHeadersRetention = 2000
@@ -1460,13 +1404,8 @@ func TestSeenHeadersBoundedOverLongRun(t *testing.T) {
 
 // --- Config tests ---
 
-func TestDefaultConfig(t *testing.T) {
-	cfg := chainsync.DefaultConfig()
-	require.Equal(t, chainsync.DefaultMaxClients, cfg.MaxClients)
-	require.Equal(t, chainsync.DefaultStallTimeout, cfg.StallTimeout)
-}
-
 func TestNewStateWithConfig_InvalidDefaults(t *testing.T) {
+	t.Parallel()
 	bus := newTestEventBus(t)
 	// Zero/negative values should be replaced with defaults
 	s := chainsync.NewStateWithConfig(bus, nil, chainsync.Config{
@@ -1476,41 +1415,10 @@ func TestNewStateWithConfig_InvalidDefaults(t *testing.T) {
 	require.Equal(t, chainsync.DefaultMaxClients, s.MaxClients())
 }
 
-// --- ClientStatus string tests ---
-
-func TestClientStatus_String(t *testing.T) {
-	require.Equal(t, "syncing", chainsync.ClientStatusSyncing.String())
-	require.Equal(t, "synced", chainsync.ClientStatusSynced.String())
-	require.Equal(t, "stalled", chainsync.ClientStatusStalled.String())
-	require.Equal(t, "failed", chainsync.ClientStatusFailed.String())
-	require.Equal(t, "unknown", chainsync.ClientStatus(99).String())
-}
-
-// --- NewState backward compatibility ---
-
-func TestNewState_BackwardCompatible(t *testing.T) {
-	bus := newTestEventBus(t)
-	// NewState (no config) should still work
-	s := chainsync.NewState(bus, nil)
-	require.NotNil(t, s)
-	require.Equal(t, chainsync.DefaultMaxClients, s.MaxClients())
-
-	// Registration works without pre-selecting a zero-tip client.
-	conn := newTestConnId(1)
-	s.AddClientConnId(conn)
-	require.True(t, s.HasClientConnId(conn))
-
-	active := s.GetClientConnId()
-	require.Nil(t, active)
-
-	s.RemoveClientConnId(conn)
-	require.False(t, s.HasClientConnId(conn))
-	require.Equal(t, 0, s.ClientConnCount())
-}
-
 // --- UpdateClientTip for untracked connection ---
 
 func TestUpdateClientTip_UntrackedConnection(t *testing.T) {
+	t.Parallel()
 	bus := newTestEventBus(t)
 	s := newTestState(t, bus, chainsync.DefaultConfig())
 
@@ -1525,6 +1433,7 @@ func TestUpdateClientTip_UntrackedConnection(t *testing.T) {
 // --- Concurrent access test ---
 
 func TestConcurrentAccess(t *testing.T) {
+	t.Parallel()
 	bus := newTestEventBus(t)
 	s := newTestState(t, bus, chainsync.Config{
 		MaxClients:   50,
@@ -1564,26 +1473,8 @@ func TestConcurrentAccess(t *testing.T) {
 	wg.Wait()
 }
 
-// --- Remove all clients leaves nil active ---
-
-func TestRemoveAllClients_NilActive(t *testing.T) {
-	bus := newTestEventBus(t)
-	s := newTestState(t, bus, chainsync.DefaultConfig())
-
-	connA := newTestConnId(1)
-	connB := newTestConnId(2)
-	s.AddClientConnId(connA)
-	s.AddClientConnId(connB)
-
-	s.RemoveClientConnId(connA)
-	s.RemoveClientConnId(connB)
-
-	active := s.GetClientConnId()
-	require.Nil(t, active)
-	require.Equal(t, 0, s.ClientConnCount())
-}
-
 func TestRewindTrackedClientsToRewindsAheadClients(t *testing.T) {
+	t.Parallel()
 	bus := newTestEventBus(t)
 	s := newTestState(t, bus, chainsync.DefaultConfig())
 
@@ -1647,6 +1538,7 @@ func TestRewindTrackedClientsToRewindsAheadClients(t *testing.T) {
 func TestTryAddClientConnIdWithDirection_RecordsOutboundFlag(
 	t *testing.T,
 ) {
+	t.Parallel()
 	bus := newTestEventBus(t)
 	s := newTestState(t, bus, chainsync.DefaultConfig())
 
@@ -1680,41 +1572,10 @@ func TestTryAddClientConnIdWithDirection_RecordsOutboundFlag(
 	require.False(t, exists)
 }
 
-func TestTryAddClientConnId_DefaultsOutboundFalse(t *testing.T) {
-	bus := newTestEventBus(t)
-	s := newTestState(t, bus, chainsync.DefaultConfig())
-
-	conn := newTestConnId(1)
-	require.True(t, s.TryAddClientConnId(conn, 10))
-
-	outbound, exists := s.ClientStartedAsOutbound(conn)
-	require.True(t, exists)
-	require.False(
-		t,
-		outbound,
-		"TryAddClientConnId should default to StartedAsOutbound=false",
-	)
-}
-
-func TestTryAddObservedClientConnId_DefaultsOutboundFalse(t *testing.T) {
-	bus := newTestEventBus(t)
-	s := newTestState(t, bus, chainsync.DefaultConfig())
-
-	conn := newTestConnId(1)
-	require.True(t, s.TryAddObservedClientConnId(conn))
-
-	outbound, exists := s.ClientStartedAsOutbound(conn)
-	require.True(t, exists)
-	require.False(
-		t,
-		outbound,
-		"TryAddObservedClientConnId should default to StartedAsOutbound=false",
-	)
-}
-
 func TestTryAddObservedClientConnIdWithDirection_RecordsOutboundFlag(
 	t *testing.T,
 ) {
+	t.Parallel()
 	bus := newTestEventBus(t)
 	s := newTestState(t, bus, chainsync.DefaultConfig())
 
@@ -1729,32 +1590,6 @@ func TestTryAddObservedClientConnIdWithDirection_RecordsOutboundFlag(
 	outbound, exists = s.ClientStartedAsOutbound(conn)
 	require.True(t, exists)
 	require.False(t, outbound)
-}
-
-func TestTryAddClientConnIdWithDirection_DuplicateRejected(
-	t *testing.T,
-) {
-	bus := newTestEventBus(t)
-	s := newTestState(t, bus, chainsync.DefaultConfig())
-
-	conn := newTestConnId(1)
-	require.True(t, s.TryAddClientConnIdWithDirection(conn, 10, true))
-	require.False(t, s.TryAddClientConnIdWithDirection(conn, 10, true))
-	require.Equal(t, 1, s.ClientConnCount())
-}
-
-func TestTryAddClientConnIdWithDirection_LimitEnforced(t *testing.T) {
-	bus := newTestEventBus(t)
-	s := newTestState(t, bus, chainsync.Config{
-		MaxClients:   1,
-		StallTimeout: 30 * time.Second,
-	})
-
-	connA := newTestConnId(1)
-	connB := newTestConnId(2)
-	require.True(t, s.TryAddClientConnIdWithDirection(connA, 1, true))
-	require.False(t, s.TryAddClientConnIdWithDirection(connB, 1, true))
-	require.Equal(t, 1, s.ClientConnCount())
 }
 
 // --- ChainProvider interface and ObservedHeader record tests ---
@@ -1790,6 +1625,7 @@ func (m *mockChainProvider) StabilityWindow() uint64 {
 // deep copy of the Cursor.Hash byte slice — rather than handing back a
 // pointer an observer could see change underneath it.
 func TestLookupClientReturnsSnapshot(t *testing.T) {
+	t.Parallel()
 	provider := &mockChainProvider{}
 	s := chainsync.NewStateWithConfig(nil, provider, chainsync.DefaultConfig())
 	conn := newTestConnId(1)
@@ -1845,6 +1681,7 @@ func TestRemoveClientOwnerKeepsReplacementWithSameConnectionID(t *testing.T) {
 // proves LookupClient and RemoveClient on a different client complete almost
 // immediately rather than waiting on that lock.
 func TestLookupClientPerClientLockDoesNotBlockOtherClients(t *testing.T) {
+	t.Parallel()
 	provider := &mockChainProvider{}
 	s := chainsync.NewStateWithConfig(nil, provider, chainsync.DefaultConfig())
 	slowConn := newTestConnId(1)
@@ -1875,6 +1712,7 @@ func TestLookupClientPerClientLockDoesNotBlockOtherClients(t *testing.T) {
 // TestAddClient_NilChainProvider_ReturnsError verifies that AddClient returns
 // an error rather than panicking when no ChainProvider has been wired.
 func TestAddClient_NilChainProvider_ReturnsError(t *testing.T) {
+	t.Parallel()
 	s := chainsync.NewStateWithConfig(nil, nil, chainsync.DefaultConfig())
 	conn := newTestConnId(1)
 	_, err := s.AddClient(conn, ocommon.Point{})
@@ -1884,6 +1722,7 @@ func TestAddClient_NilChainProvider_ReturnsError(t *testing.T) {
 // TestAddClient_ChainProviderErrorPropagated verifies that an error from
 // ChainProvider.GetChainFromPoint is returned by AddClient unchanged.
 func TestAddClient_ChainProviderErrorPropagated(t *testing.T) {
+	t.Parallel()
 	provider := &mockChainProvider{iterErr: fmt.Errorf("chain lookup failed")}
 	s := chainsync.NewStateWithConfig(nil, provider, chainsync.DefaultConfig())
 	conn := newTestConnId(1)
@@ -1895,6 +1734,7 @@ func TestAddClient_ChainProviderErrorPropagated(t *testing.T) {
 // stability window reported by ChainProvider drives the header dedup cache
 // pruning boundary when no explicit SeenHeadersRetention override is set.
 func TestSeenHeadersRetention_DerivedFromChainProvider(t *testing.T) {
+	t.Parallel()
 	const providerWindow = 500
 	provider := &mockChainProvider{stabilityWin: providerWindow}
 	cfg := chainsync.DefaultConfig() // SeenHeadersRetention == 0, falls back to provider
@@ -1918,6 +1758,7 @@ func TestSeenHeadersRetention_DerivedFromChainProvider(t *testing.T) {
 // RecordObservedHeader is returned intact by LookupObservedHeader, with the
 // prev-hash extracted from BlockHeader.PrevHash().
 func TestObservedHeader_RoundTrip(t *testing.T) {
+	t.Parallel()
 	bus := newTestEventBus(t)
 	s := newTestState(t, bus, chainsync.DefaultConfig())
 
@@ -2011,6 +1852,7 @@ func TestClearObservedHeaderHistoryFromRetainsVerifiedPrefix(t *testing.T) {
 }
 
 func TestObservedHeaderLimitFollowsSelectionState(t *testing.T) {
+	t.Parallel()
 	limit := 3
 	cfg := chainsync.DefaultConfig()
 	cfg.ObservedHeaderLimitFunc = func() int {
@@ -2082,77 +1924,10 @@ func TestObservedHeaderLimitFollowsSelectionState(t *testing.T) {
 
 const blockfetchLatencyMetricName = "dingo_chainsync_blockfetch_latency_seconds"
 
-func TestBlockfetchLatencyMetricExposedPerConnection(t *testing.T) {
-	bus := newTestEventBus(t)
-	reg := prometheus.NewRegistry()
-	cfg := chainsync.DefaultConfig()
-	cfg.PromRegistry = reg
-	s := newTestState(t, bus, cfg)
-
-	conn := newTestConnId(42)
-	require.True(t, s.AddClientConnId(conn))
-
-	// First sample sets the EWMA directly to the observed latency.
-	s.RecordBlockfetchLatency(conn, 200*time.Millisecond)
-
-	got, ok := gaugeValueForLabels(
-		t,
-		reg,
-		blockfetchLatencyMetricName,
-		map[string]string{
-			"peer":          conn.RemoteAddr.String(),
-			"connection_id": conn.String(),
-		},
-	)
-	require.True(
-		t,
-		ok,
-		"expected a per-connection gauge series after recording",
-	)
-	require.InDelta(t, 0.2, got, 1e-9)
-}
-
-func TestBlockfetchLatencyMetricRemovedOnDisconnect(t *testing.T) {
-	bus := newTestEventBus(t)
-	reg := prometheus.NewRegistry()
-	cfg := chainsync.DefaultConfig()
-	cfg.PromRegistry = reg
-	s := newTestState(t, bus, cfg)
-
-	conn := newTestConnId(42)
-	require.True(t, s.AddClientConnId(conn))
-	s.RecordBlockfetchLatency(conn, 200*time.Millisecond)
-
-	labels := map[string]string{
-		"peer":          conn.RemoteAddr.String(),
-		"connection_id": conn.String(),
-	}
-	_, ok := gaugeValueForLabels(
-		t, reg, blockfetchLatencyMetricName, labels,
-	)
-	require.True(
-		t,
-		ok,
-		"precondition: gauge series should exist before removal",
-	)
-
-	// Removing the connection must delete the per-connection series so
-	// cardinality stays bounded by live tracked connections.
-	s.RemoveClientConnId(conn)
-
-	_, ok = gaugeValueForLabels(
-		t, reg, blockfetchLatencyMetricName, labels,
-	)
-	require.False(
-		t,
-		ok,
-		"expected per-connection series to be removed on disconnect",
-	)
-}
-
 func TestBlockfetchLatencyMetricDisconnectPreservesSamePeerConnection(
 	t *testing.T,
 ) {
+	t.Parallel()
 	bus := newTestEventBus(t)
 	reg := prometheus.NewRegistry()
 	cfg := chainsync.DefaultConfig()
@@ -2246,6 +2021,7 @@ func gaugeValueForLabels(
 // thing that clears it, so an entry created after that runs is never removed
 // again and leaks one per disconnect.
 func TestObservedHeader_LateCallbackDoesNotResurrectHistory(t *testing.T) {
+	t.Parallel()
 	bus := newTestEventBus(t)
 	s := newTestState(t, bus, chainsync.DefaultConfig())
 

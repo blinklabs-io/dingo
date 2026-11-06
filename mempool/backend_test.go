@@ -113,6 +113,7 @@ func runBackendContract(t *testing.T, factory backendContractFactory) {
 	txBytes := getTestTxBytes(t)
 
 	t.Run("admission snapshot removal and lifecycle", func(t *testing.T) {
+		t.Parallel()
 		pool := newBackendContractPool(t, factory, 1<<20)
 		require.NoError(
 			t,
@@ -146,6 +147,7 @@ func runBackendContract(t *testing.T, factory backendContractFactory) {
 	})
 
 	t.Run("relay cursor and advertised cache", func(t *testing.T) {
+		t.Parallel()
 		pool := newBackendContractPool(t, factory, 1<<20)
 		t.Cleanup(func() { _ = pool.Stop(context.Background()) })
 		require.NoError(
@@ -166,6 +168,7 @@ func runBackendContract(t *testing.T, factory backendContractFactory) {
 	})
 
 	t.Run("dependent relay removal and events", func(t *testing.T) {
+		t.Parallel()
 		parentBytes, childBytes, parentHash, childHash := getDependentTestTxBytes(
 			t,
 		)
@@ -237,6 +240,7 @@ func runBackendContract(t *testing.T, factory backendContractFactory) {
 	})
 
 	t.Run("capacity rejection", func(t *testing.T) {
+		t.Parallel()
 		pool := newBackendContractPool(t, factory, int64(len(txBytes)-1))
 		t.Cleanup(func() { _ = pool.Stop(context.Background()) })
 		assert.Equal(t, int64(len(txBytes)-1), pool.CapacityBytes())
@@ -247,6 +251,7 @@ func runBackendContract(t *testing.T, factory backendContractFactory) {
 	})
 
 	t.Run("concurrent duplicate admission", func(t *testing.T) {
+		t.Parallel()
 		pool := newBackendContractPool(t, factory, 1<<20)
 		t.Cleanup(func() { _ = pool.Stop(context.Background()) })
 		var wg sync.WaitGroup
@@ -266,9 +271,11 @@ func runBackendContract(t *testing.T, factory backendContractFactory) {
 }
 
 func TestFIFOBackendContract(t *testing.T) {
+	t.Parallel()
 	runBackendContract(t, fifoContractFactory)
 
 	t.Run("revalidation", func(t *testing.T) {
+		t.Parallel()
 		const inputHash = "0c07395aed88bdddc6de0518d1462dd0ec7e52e1e3a53599f7cdb24dc80237f8"
 		input := buildMockInput(t, inputHash, 1)
 		inputKey := utxoref.ForInput(input)
@@ -293,9 +300,11 @@ func TestFIFOBackendContract(t *testing.T) {
 }
 
 func TestDAGBackendContract(t *testing.T) {
+	t.Parallel()
 	runBackendContract(t, dagContractFactory)
 
 	t.Run("revalidation", func(t *testing.T) {
+		t.Parallel()
 		const inputHash = "0c07395aed88bdddc6de0518d1462dd0ec7e52e1e3a53599f7cdb24dc80237f8"
 		input := buildMockInput(t, inputHash, 1)
 		inputKey := utxoref.ForInput(input)
@@ -321,6 +330,7 @@ func TestDAGBackendContract(t *testing.T) {
 }
 
 func TestBackendFactorySelection(t *testing.T) {
+	t.Parallel()
 	config := MempoolConfig{
 		Validator:       newMockValidator(),
 		MempoolCapacity: 1 << 20,
@@ -348,11 +358,13 @@ func TestBackendFactorySelection(t *testing.T) {
 }
 
 func TestBackendIdentityMetric(t *testing.T) {
+	t.Parallel()
 	for _, implementation := range []Implementation{
 		ImplementationFIFO,
 		ImplementationDAG,
 	} {
 		t.Run(string(implementation), func(t *testing.T) {
+			t.Parallel()
 			testBackendIdentityMetric(t, implementation)
 		})
 	}
