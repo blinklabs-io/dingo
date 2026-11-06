@@ -6624,8 +6624,16 @@ pools, stake pool parameters (`GetStakePoolParams`, the parameters in effect in
 the epoch of the acquired point from the registrations added at or before it, so
 a re-registration made during that epoch is not reported until the next one),
 which returns genesis relay addresses in ledger wire order and includes an
-optional BLS key when protocol version 12 or later applies), stake pool state
-(`GetStakePoolState`, answered only on the Leios prototype network because
+optional BLS key when protocol version 12 or later applies), Leios committee
+(`GetLeiosCommittee`, gated the same way through
+`LedgerStateConfig.LeiosCommittee`, which the node sets only from the strict
+Musashi identity and backs with the vote manager's
+`CommitteeSeatsForEpoch`: seats in voter id order, each weighted by its stake
+over the total active stake and carrying the member's BLS key when one
+resolves, and none otherwise; the epoch at the acquired point is required,
+and the next epoch's committee is left out of the reply only when its stake
+snapshot has no pools yet, while any other failure fails the query), stake pool
+state (`GetStakePoolState`, answered only on the Leios prototype network because
 released nodes do not support it: `LedgerStateConfig.StakePoolStateQuery` is set
 only from the strict Musashi identity (`musashiPrototypeIdentity`), and every
 other network fails the query as unsupported. It reads the same registration

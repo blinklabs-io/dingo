@@ -68,6 +68,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/pipeline"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 	"github.com/prometheus/client_golang/prometheus"
 	"go.opentelemetry.io/otel/attribute"
 )
@@ -1067,6 +1068,15 @@ type LedgerStateConfig struct {
 	// configuration. The zero value leaves the query unsupported, exactly as
 	// for any other query dingo does not answer.
 	StakePoolStateQuery bool
+	// LeiosCommittee answers the GetLeiosCommittee local state query
+	// (Shelley sub-query 41) with the seats of the Leios voting committee of
+	// an epoch. Released Haskell nodes do not support that query, so it is a
+	// Leios prototype extension: node_ledger_config.go sets it only from
+	// Config.musashiPrototypeIdentity. A nil value leaves the query
+	// unsupported, exactly as for any other query dingo does not answer.
+	LeiosCommittee func(
+		epoch uint64,
+	) ([]olocalstatequery.LeiosCommitteeSeat, error)
 	// SkipDijkstraTxValidation, when true, skips the Dijkstra per-transaction
 	// validation rule set entirely. It applies to Dijkstra-era transactions
 	// only. Network profiles never enable this flag; it exists for explicit test
