@@ -35,25 +35,8 @@ func cloudSnapshot(
 	key []byte,
 ) (uri string, objects string, manifest lifecycle.Manifest) {
 	t.Helper()
-	src := newTestDB(t)
-	require.NoError(t, src.BlockCreate(testBlock(1, 0x01), nil))
-	require.NoError(t, src.BlockCreate(testBlock(2, 0x02), nil))
-
-	backing := t.TempDir()
-	setFakeCloudBackingDir(t, backing)
-	var opts []lifecycle.ManifestOption
-	if key != nil {
-		opts = append(opts, lifecycle.WithManifestKey(key))
-	}
-	snapshotDir := snapshotTestDir(t, "snap")
-	m, err := lifecycle.SnapshotToCloud(
-		context.Background(), testDestinationRegistry, src, snapshotDir,
-		lifecycle.TriggerManual, "test", "badger", "sqlite",
-		"faketest://bucket/prefix", "", "", opts...,
-	)
-	require.NoError(t, err)
-	return "faketest://bucket/prefix/snap",
-		filepath.Join(backing, "prefix", "snap"), m
+	require.Equal(t, testTrustKey, key, "the shared snapshot is signed with testTrustKey")
+	return copyTwoBlockCloudSnapshot(t)
 }
 
 func restoreFrom(

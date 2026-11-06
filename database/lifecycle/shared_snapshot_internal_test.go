@@ -12,8 +12,28 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+
 package lifecycle
 
-// SharedFixtureCleanup removes shared fixtures the external test package
-// builds once per test binary; TestMain runs it after the last test.
-var SharedFixtureCleanup func()
+import "sync"
+
+var (
+	sharedFixtureMu       sync.Mutex
+	sharedFixtureCleanups []func()
+)
+
+// RegisterSharedFixtureCleanup registers removal of a fixture built once per
+// test binary; TestMain runs the cleanups after the last test.
+func RegisterSharedFixtureCleanup(cleanup func()) {
+	sharedFixtureMu.Lock()
+	defer sharedFixtureMu.Unlock()
+	sharedFixtureCleanups = append(sharedFixtureCleanups, cleanup)
+}
+
+func runSharedFixtureCleanups() {
+	sharedFixtureMu.Lock()
+	defer sharedFixtureMu.Unlock()
+	for _, cleanup := range sharedFixtureCleanups {
+		cleanup()
+	}
+}

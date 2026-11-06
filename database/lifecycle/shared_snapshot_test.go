@@ -37,12 +37,75 @@ var oneBlockSnapshot struct {
 	err  error
 }
 
+// twoBlockCloudSnapshot is a snapshot of a two-block database, signed with
+// testTrustKey and uploaded once to a fake cloud directory. Each caller gets
+// its own copy of the uploaded objects because tests tamper with them.
+var twoBlockCloudSnapshot struct {
+	once     sync.Once
+	root     string
+	manifest lifecycle.Manifest
+	err      error
+}
+
 func init() {
-	lifecycle.SharedFixtureCleanup = func() {
+	lifecycle.RegisterSharedFixtureCleanup(func() {
 		if oneBlockSnapshot.dir != "" {
 			_ = os.RemoveAll(oneBlockSnapshot.dir)
 		}
+		if twoBlockCloudSnapshot.root != "" {
+			_ = os.RemoveAll(twoBlockCloudSnapshot.root)
+		}
+	})
+}
+
+func buildTwoBlockCloudSnapshot(t *testing.T) {
+	t.Helper()
+	root, err := os.MkdirTemp("", "dingo-lifecycle-cloud-")
+	twoBlockCloudSnapshot.root = root
+	if err != nil {
+		twoBlockCloudSnapshot.err = err
+		return
 	}
+	src := newTestDB(t)
+	for _, b := range []*struct {
+		id   uint64
+		fill byte
+	}{{1, 0x01}, {2, 0x02}} {
+		if err := src.BlockCreate(testBlock(b.id, b.fill), nil); err != nil {
+			twoBlockCloudSnapshot.err = err
+			return
+		}
+	}
+	setFakeCloudBackingDir(t, root)
+	m, err := lifecycle.SnapshotToCloud(
+		context.Background(), testDestinationRegistry, src,
+		snapshotTestDir(t, "snap"), lifecycle.TriggerManual, "test",
+		"badger", "sqlite", "faketest://bucket/prefix", "", "",
+		lifecycle.WithManifestKey(testTrustKey),
+	)
+	twoBlockCloudSnapshot.manifest, twoBlockCloudSnapshot.err = m, err
+}
+
+// copyTwoBlockCloudSnapshot places a private copy of the shared uploaded
+// objects in a fresh fake cloud backing directory and returns the snapshot
+// URI, the object directory and the manifest.
+func copyTwoBlockCloudSnapshot(
+	t *testing.T,
+) (string, string, lifecycle.Manifest) {
+	t.Helper()
+	twoBlockCloudSnapshot.once.Do(func() {
+		// A subtest, so the fake cloud fixture lock taken while building is
+		// released before this test takes it again for its own copy.
+		t.Run("build shared cloud snapshot", buildTwoBlockCloudSnapshot)
+	})
+	require.NoError(t, twoBlockCloudSnapshot.err)
+	backing := t.TempDir()
+	setFakeCloudBackingDir(t, backing)
+	objects := filepath.Join(backing, "prefix", "snap")
+	copyFlatDir(
+		t, filepath.Join(twoBlockCloudSnapshot.root, "prefix", "snap"), objects,
+	)
+	return "faketest://bucket/prefix/snap", objects, twoBlockCloudSnapshot.manifest
 }
 
 // copyOneBlockSnapshot returns a private copy of the shared snapshot, named
