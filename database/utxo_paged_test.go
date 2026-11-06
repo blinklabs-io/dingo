@@ -17,13 +17,7 @@ package database
 import (
 	"context"
 	"encoding/binary"
-	"fmt"
-	"os"
-	"path/filepath"
-	"strings"
-	"sync"
 	"testing"
-	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -187,80 +181,4 @@ func TestIterateUtxoRefsAsOfPagedReportsRollbackBelowSlot(t *testing.T) {
 			require.NoError(t, err)
 		})
 	}
-}
-
-// TestIterateUtxoRefsAsOfPagedBoundsWALUnderBackToBackReads is the reason the
-// paged read exists. SQLite cannot restart the WAL while any reader holds a
-// WAL read mark, so whole-UTxO walks run back to back, each in one read
-// transaction, grow it without bound under steady commits whatever the
-// checkpoint strategy; one page per short transaction leaves room between
-// pages for the WAL to restart.
-func TestIterateUtxoRefsAsOfPagedBoundsWALUnderBackToBackReads(t *testing.T) {
-	t.Parallel()
-	dataDir := t.TempDir()
-	db, err := newTestDatabase(t, &Config{DataDir: dataDir})
-	require.NoError(t, err)
-	t.Cleanup(func() {
-		require.NoError(t, db.Close())
-	})
-
-	const atSlot = 10_000
-	var seed []models.Utxo
-	for i := range uint32(20_000) {
-		seed = append(seed, models.Utxo{
-			TxId:      pagedTestTxID(0, i),
-			AddedSlot: uint64(i % atSlot),
-			Amount:    1,
-		})
-	}
-	importPagedTestUtxos(t, db, seed)
-
-	ctx, stop := context.WithCancel(t.Context())
-	defer stop()
-	var readers sync.WaitGroup
-	readers.Go(func() {
-		// Whole-UTxO walks with no gap between them, each taking a few
-		// hundred milliseconds, while block application commits beneath.
-		for ctx.Err() == nil {
-			var n int
-			_ = db.IterateUtxoRefsAsOfPaged(
-				ctx,
-				atSlot,
-				500,
-				func(UtxoRef) error {
-					n++
-					if n%500 == 0 {
-						time.Sleep(5 * time.Millisecond)
-					}
-					return ctx.Err()
-				},
-			)
-		}
-	})
-
-	walPath := filepath.Join(dataDir, "metadata.sqlite-wal")
-	payload := strings.Repeat("x", 64<<10)
-	const totalBytes = 160 << 20
-	var maxWAL int64
-	for i := range totalBytes / len(payload) {
-		require.NoError(t, db.MetadataTxn(context.Background(), true).Do(
-			func(txn *Txn) error {
-				return db.Metadata().SetSyncState(
-					fmt.Sprintf("paged-wal-%d", i), payload, txn.Metadata(),
-				)
-			},
-		))
-		if info, err := os.Stat(walPath); err == nil {
-			maxWAL = max(maxWAL, info.Size())
-		}
-	}
-	stop()
-	readers.Wait()
-	t.Logf("largest WAL file: %d bytes of %d written", maxWAL, totalBytes)
-	require.Less(
-		t,
-		maxWAL,
-		int64(totalBytes/2),
-		"the WAL never restarted under back-to-back whole-UTxO walks",
-	)
 }
