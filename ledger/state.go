@@ -4792,7 +4792,7 @@ func (ls *LedgerState) pruneConsumedUtxosUpTo(
 // batch's in a small one.
 const (
 	trustedBatchPruneEvery = 16
-	trustedBatchPruneRows  = 20_000
+	trustedBatchPruneRows  = 10_000
 )
 
 // trustedBatchPruneBudget bounds how long one run of the trusted-batch
