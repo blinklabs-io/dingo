@@ -13054,7 +13054,7 @@ a boundary that has already been crossed.
 
 That is a statement about who can attempt the write, not about whether it would
 be read, and the two are worth keeping apart: the layers above do not rely on
-it. An immutable entry up to 16 MiB is read once into a buffer; later in-place
+it. An immutable entry up to 128 MiB is read once into a buffer; later in-place
 writes cannot change the bytes its parsers walk.
 
 That is the shape of the gap on both sides. `checkImmutableTrio` hashes each
@@ -13069,7 +13069,7 @@ reader keeps:
 
 | tree | what travels | where it is re-checked |
 |---|---|---|
-| immutable (v2) | `BootstrapResult.ImmutableDigests`, the certified digest list the certificate's merkle root covers | `immutable.NewFromRootVerified` reads entries up to 16 MiB once, hashes the buffer, and gives that buffer to the chunk and index parsers; larger entries use a streaming verification pass, then are read and hashed into a buffer sized to the certified length |
+| immutable (v2) | `BootstrapResult.ImmutableDigests`, the certified digest list the certificate's merkle root covers | `immutable.NewFromRootVerified` reads entries up to 128 MiB once, hashes the buffer, and gives that buffer to the chunk and index parsers; larger entries use a streaming verification pass, then are read and hashed into a buffer sized to the certified length |
 | ancillary state (v2, verified) | `BootstrapResult.AncillaryDigests`, the signed manifest's map | the state is read once into a buffer; `verifySignedState` hashes that buffer and `ParseSnapshotBytes` parses the same one |
 | ancillary table (v2, verified) | the manifest's entry for it, carried down as `ImportConfig.State.UTxOTableDigest` | the table is gigabytes and is mapped rather than read, so the digest is checked against the mapped bytes the decoder then walks |
 
@@ -13082,7 +13082,7 @@ otherwise rest on a check nothing downstream can repeat.
 
 Note what none of these rows do: hash a descriptor and hand the parser that same
 descriptor. Rewinding does not detach it from its inode, so a writer can change
-the bytes the parser reads after the hash. Immutable entries up to 16 MiB use
+the bytes the parser reads after the hash. Immutable entries up to 128 MiB use
 one bounded read for both hash and parse. Larger entries retain the streaming
 size and digest check before reading the certified length into a buffer; that
 buffer is hashed before parsing. The ancillary state uses one buffer, and the
@@ -13091,16 +13091,23 @@ UTxO-HD table is verified and parsed through the same mapping.
 For the ImmutableDB that means the reader takes bytes rather than a file:
 `entryReader` (`database/immutable/entry.go`) is what the chunk and index
 parsers read through, and a verified open supplies a `bytesEntry` over the
-buffer it hashed. Entries up to 16 MiB use one read for verification and
+buffer it hashed. Entries up to 128 MiB use one read for verification and
 parsing. Larger entries keep the streaming verification pass before buffering;
 an ordinary local open still supplies a `fileEntry` over the descriptor, so a
 node reading its own ImmutableDB streams chunks from disk.
 
-The single-pass path holds at most 16 MiB for one entry. The larger-entry
-fallback keeps the certified-size allocation bound used by the previous
-verified reader.
+The single-pass path holds at most 128 MiB for one entry, and that bound is what
+a planted file can cost: the buffer is sized from the file's own reported
+length, capped at the bound, before the digest is known. 128 MiB covers every
+real mainnet chunk (21600 slots of full blocks at the 0.05 active slot
+coefficient is about 94 MiB; the largest certified mainnet chunk is about 91
+MiB), so the verified copy reads and hashes each chunk once instead of streaming
+it for its digest and then reading it again. A file that holds more than its
+reported length is not cut to a prefix; it falls through to the larger-entry
+path. That fallback keeps the certified-size allocation bound used by the
+previous verified reader.
 
-For entries above 16 MiB, the first pass is why the next allocation is safe.
+For entries above 128 MiB, the first pass is why the next allocation is safe.
 How large a file is, is whoever wrote it's choice; how large the *certified*
 file is, is not, because SHA-256 preimage resistance stands between the two.
 The streaming pass holds nothing and returns a size only for an entry whose
