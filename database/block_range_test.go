@@ -52,11 +52,11 @@ func (s invalidRangeStore) NewIterator(txn types.Txn, opts types.BlobIteratorOpt
 
 func TestBlockRangeRejectsInvalidIteratorItems(t *testing.T) {
 	t.Parallel()
+	db := newTestDB(t)
+	insertTestBlock(t, db, 1, randomHash(t), []byte{1})
+	base := db.Blob()
 	for _, nilItem := range []bool{true, false} {
 		t.Run(map[bool]string{true: "nil item", false: "nil key"}[nilItem], func(t *testing.T) {
-			db := newTestDB(t)
-			insertTestBlock(t, db, 1, randomHash(t), []byte{1})
-			base := db.Blob()
 			defer db.SetBlobStore(base)
 			db.SetBlobStore(invalidRangeStore{BlobStore: base, nilItem: nilItem})
 			visited := 0

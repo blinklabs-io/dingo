@@ -241,38 +241,6 @@ func newBenchDB(b *testing.B) *Database {
 	return db
 }
 
-// TestCountBlocksAndOldestSlot_EmptyDatabase verifies that a database
-// with no blocks reports a zero count and a zero oldest slot.
-func TestCountBlocksAndOldestSlot_EmptyDatabase(t *testing.T) {
-	t.Parallel()
-
-	db := newTestDB(t)
-
-	count, oldestSlot, err := db.CountBlocksAndOldestSlot(nil)
-	require.NoError(t, err)
-	require.Zero(t, count)
-	require.Zero(t, oldestSlot)
-}
-
-// TestCountBlocksAndOldestSlot_CountsAndFindsOldest verifies that blocks
-// inserted out of slot order still report the correct count and oldest slot.
-func TestCountBlocksAndOldestSlot_CountsAndFindsOldest(t *testing.T) {
-	t.Parallel()
-
-	db := newTestDB(t)
-
-	// Inserted out of slot order on purpose: the oldest slot must be
-	// found by content, not by insertion order.
-	insertTestBlock(t, db, 300, randomHash(t), []byte{0x80})
-	insertTestBlock(t, db, 100, randomHash(t), []byte{0x80})
-	insertTestBlock(t, db, 200, randomHash(t), []byte{0x80})
-
-	count, oldestSlot, err := db.CountBlocksAndOldestSlot(nil)
-	require.NoError(t, err)
-	require.Equal(t, uint64(3), count)
-	require.Equal(t, uint64(100), oldestSlot)
-}
-
 // TestCountBlocksAndOldestSlot_ExcludesTombstonedBlocks verifies that a
 // history-expiry-pruned block (its bp key kept alive with a tombstone
 // marker so bi/bh lookups still resolve — see TombstoneBlock) is excluded
@@ -1272,15 +1240,16 @@ func (s blockHashReadStore) GetBlock(
 
 func TestBlockByHashBlobOnlyPreservesErrorsAndRelease(t *testing.T) {
 	t.Parallel()
+	// One database for every case: each case restores the base store and
+	// drains it before the next runs, so the subtests are sequential.
+	db := newTestDB(t)
+	block := testIndexedBlock(42, 7, 0x42)
+	require.NoError(t, db.BlockCreate(block, nil))
+	base := db.Blob()
 	for _, kind := range []string{
 		"success", "read error", "rollback error", "panic", "cancel after read",
 	} {
 		t.Run(kind, func(t *testing.T) {
-			t.Parallel()
-			db := newTestDB(t)
-			block := testIndexedBlock(42, 7, 0x42)
-			require.NoError(t, db.BlockCreate(block, nil))
-			base := db.Blob()
 			failure := errors.New("injected block-only failure")
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()

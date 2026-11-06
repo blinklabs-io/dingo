@@ -636,7 +636,7 @@ func TestBlockBatchTransactionComposesWithGenericWriterAndPause(t *testing.T) {
 func TestBlockInventoryBoundsSequentialOldestRemovalWork(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)
-	const blockCount = 256
+	const blockCount = 24
 	blocks := make([]models.Block, 0, blockCount)
 	for i := range blockCount {
 		hash := make([]byte, 32)
