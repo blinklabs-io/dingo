@@ -44,7 +44,7 @@ func run() error {
 	snapshot := flag.String(
 		"snapshot",
 		"",
-		"verified signed ledger snapshot file",
+		"ledger snapshot; operator must verify digest and signature beforehand",
 	)
 	epoch := flag.Uint64("epoch", 0, "single reward epoch")
 	apply := flag.Bool(
@@ -53,7 +53,13 @@ func run() error {
 		"commit validated canonical stake inputs",
 	)
 	flag.Parse()
-	if *data == "" || *snapshot == "" || *epoch == 0 {
+	epochSupplied := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "epoch" {
+			epochSupplied = true
+		}
+	})
+	if *data == "" || *snapshot == "" || !epochSupplied {
 		return errors.New("data-dir, snapshot and epoch required")
 	}
 	lock, err := badger.Open(

@@ -473,10 +473,19 @@ func TestRewardInputRepairRequiresExplicitTransaction(t *testing.T) {
 	require.NoError(t, err)
 	bundle := deriveRewardInputs(twoPoolSnapshot(), nil, 10, 99, 100)
 	bundle.snapshot.Authoritative = true
-	require.NoError(t, db.Metadata().SaveRewardPoolInputs(bundle.poolInputs, nil))
+	require.NoError(
+		t,
+		db.Metadata().SaveRewardPoolInputs(bundle.poolInputs, nil),
+	)
 	key := models.StakeRewardSourcePrefix + "precompute-cursor:10"
 	require.NoError(t, db.Metadata().SetSyncState(key, "preserve", nil))
-	_, err = repairRewardStakeInputBundle(db.Metadata(), nil, bundle, bundle.snapshot, true)
+	_, err = repairRewardStakeInputBundle(
+		db.Metadata(),
+		nil,
+		bundle,
+		bundle.snapshot,
+		true,
+	)
 	require.ErrorContains(t, err, "explicit transaction")
 	rows, err := db.Metadata().GetRewardStakeInputs(10, nil)
 	require.NoError(t, err)
@@ -484,4 +493,85 @@ func TestRewardInputRepairRequiresExplicitTransaction(t *testing.T) {
 	cursor, err := db.Metadata().GetSyncState(key, nil)
 	require.NoError(t, err)
 	require.Equal(t, "preserve", cursor)
+}
+
+func TestRepairClearsOnlyCompletedPendingEpoch(t *testing.T) {
+	t.Parallel()
+	for _, complete := range []bool{false, true} {
+		t.Run(
+			map[bool]string{false: "missing rows", true: "rows already complete"}[complete],
+			func(t *testing.T) {
+				t.Parallel()
+				db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+				require.NoError(t, err)
+				meta := db.Metadata()
+				bundle := deriveRewardInputs(
+					twoPoolSnapshot(),
+					nil,
+					10,
+					99,
+					100,
+				)
+				bundle.snapshot.Authoritative = true
+				require.NoError(
+					t,
+					meta.SaveRewardPoolInputs(bundle.poolInputs, nil),
+				)
+				if complete {
+					require.NoError(
+						t,
+						meta.SaveRewardStakeInputs(bundle.stakeInputs, nil),
+					)
+				}
+				key := models.StakeRewardSourcePrefix + "stake-inputs-pending"
+				require.NoError(
+					t,
+					meta.SetSyncState(
+						key,
+						`{"entries":[{"epoch":10,"boundary_slot":100},{"epoch":11,"boundary_slot":200}]}`,
+						nil,
+					),
+				)
+				tx := db.MetadataTxn(t.Context(), true)
+				_, err = repairRewardStakeInputBundle(
+					meta,
+					tx.Metadata(),
+					bundle,
+					bundle.snapshot,
+					true,
+				)
+				require.NoError(t, err)
+				require.NoError(t, tx.Commit())
+				raw, err := meta.GetSyncState(key, nil)
+				require.NoError(t, err)
+				require.JSONEq(
+					t,
+					`{"entries":[{"epoch":11,"boundary_slot":200}]}`,
+					raw,
+				)
+				rows, err := meta.GetRewardStakeInputs(10, nil)
+				require.NoError(t, err)
+				require.Len(t, rows, 3)
+			},
+		)
+	}
+}
+
+func TestRetainedCaptureParamsExcludeZeroStakeDelegations(t *testing.T) {
+	t.Parallel()
+	selected := twoPoolSnapshot()
+	zeroPool := *selected.PoolParams[hex28(0xAA)]
+	zeroPool.PoolKeyHash = hash28(0xCC)
+	selected.Stake[hex28(0x44)] = 0
+	selected.Delegations[hex28(0x44)] = zeroPool.PoolKeyHash
+	historical := map[string]*ParsedPool{
+		hex28(0xAA): selected.PoolParams[hex28(0xAA)],
+		hex28(0xBB): selected.PoolParams[hex28(0xBB)],
+		hex28(0xCC): &zeroPool,
+	}
+	params := retainedCaptureRewardPoolParams(selected, historical)
+	require.Len(t, params, 2)
+	bundle := deriveRewardInputs(selected, params, 10, 99, 100)
+	require.NoError(t, bundle.validate())
+	require.Equal(t, uint64(2), bundle.snapshot.TotalPoolCount)
 }

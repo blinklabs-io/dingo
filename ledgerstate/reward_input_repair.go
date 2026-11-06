@@ -15,6 +15,7 @@
 package ledgerstate
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -27,6 +28,8 @@ import (
 
 // RewardInputRepairStore is the metadata boundary needed to reconcile one basis.
 type RewardInputRepairStore interface {
+	GetSyncState(string, types.Txn) (string, error)
+	SetSyncState(string, string, types.Txn) error
 	GetRewardSnapshot(uint64, string, types.Txn) (*models.RewardSnapshot, error)
 	GetEpoch(uint64, types.Txn) (*models.Epoch, error)
 	GetPoolRegistrationsEffectiveForEpoch(
@@ -123,6 +126,10 @@ func repairRewardStakeInputBundle(
 	}
 	if credited {
 		return nil, errors.New("cannot repair credited reward epoch")
+	}
+	pending, err := loadImportedRewardStakeInputsPending(store, txn)
+	if err != nil {
+		return nil, err
 	}
 	if bundle.snapshot.TotalActiveStake != retained.TotalActiveStake ||
 		bundle.snapshot.TotalDelegators != retained.TotalDelegators ||
@@ -224,6 +231,28 @@ func repairRewardStakeInputBundle(
 			return nil, err
 		}
 	}
+	if apply {
+		remaining := make(
+			[]importedRewardStakeInputsPendingEntry,
+			0,
+			len(pending.Entries),
+		)
+		for _, entry := range pending.Entries {
+			if entry.Epoch != epoch {
+				remaining = append(remaining, entry)
+			}
+		}
+		if len(remaining) != len(pending.Entries) {
+			pending.Entries = remaining
+			encoded, err := json.Marshal(pending)
+			if err != nil {
+				return nil, err
+			}
+			if err := store.SetSyncState(models.StakeRewardSourcePrefix+"stake-inputs-pending", string(encoded), txn); err != nil {
+				return nil, err
+			}
+		}
+	}
 	return report, nil
 }
 
@@ -285,7 +314,11 @@ func retainedCaptureRewardPoolParams(
 	historical map[string]*ParsedPool,
 ) map[string]*ParsedPool {
 	params := effectiveRewardPoolParams(selected, nil)
+	referenced := referencedRewardPools(selected)
 	for key, pool := range historical {
+		if _, ok := referenced[key]; !ok {
+			continue
+		}
 		params[key] = pool
 	}
 	return params

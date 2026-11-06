@@ -396,7 +396,6 @@ func (b *rewardInputBundle) validate() error {
 
 type rewardInputStore interface {
 	RewardInputRepairStore
-	GetSyncState(string, types.Txn) (string, error)
 	DeleteRewardSeedFailure(uint64, string, types.Txn) error
 	SaveRewardSnapshot(*models.RewardSnapshot, types.Txn) error
 	DeleteProvisionalRewardSnapshot(uint64, string, types.Txn) error
@@ -530,7 +529,7 @@ func seedImportedRewardInputs(
 		}
 
 		var params map[string]*ParsedPool
-		if resolveParams != nil {
+		if resolveParams != nil && !repairAuthoritative {
 			resolved, err := resolveParams(c.epoch)
 			switch {
 			case err == nil:
@@ -568,26 +567,16 @@ func seedImportedRewardInputs(
 				)
 			}
 		}
-		bundle := deriveRewardInputs(
-			c.snap,
-			effectiveRewardPoolParams(c.snap, params),
-			c.epoch,
-			capturedSlot,
-			0,
-		)
+		effectiveParams := effectiveRewardPoolParams(c.snap, params)
+		basisCapturedSlot, basisBoundarySlot := capturedSlot, uint64(0)
 		if repairAuthoritative {
-			params, err := authoritativeRewardInputPoolParams(store, txn, c.snap, existing)
+			effectiveParams, err = authoritativeRewardInputPoolParams(store, txn, c.snap, existing)
 			if err != nil {
 				return err
 			}
-			bundle = deriveRewardInputs(
-				c.snap,
-				params,
-				c.epoch,
-				existing.CapturedSlot,
-				existing.BoundarySlot,
-			)
+			basisCapturedSlot, basisBoundarySlot = existing.CapturedSlot, existing.BoundarySlot
 		}
+		bundle := deriveRewardInputs(c.snap, effectiveParams, c.epoch, basisCapturedSlot, basisBoundarySlot)
 		// A snapshot with no delegated stake derives an empty basis that
 		// reconciles, and is seeded like any other: its round still moves the
 		// treasury and reserves. An empty basis that does not reconcile had
@@ -890,49 +879,59 @@ func effectiveRewardPoolParams(
 	return effective
 }
 
-func importedAuthoritativeRewardBasisComplete(
-	store rewardInputStore,
-	txn types.Txn,
-	snapshot *models.RewardSnapshot,
-) (bool, error) {
+type importedRewardStakeInputsPendingEntry struct {
+	Epoch        uint64 `json:"epoch"`
+	BoundarySlot uint64 `json:"boundary_slot"`
+}
+
+type importedRewardStakeInputsPending struct {
+	Entries []importedRewardStakeInputsPendingEntry `json:"entries"`
+}
+
+func loadImportedRewardStakeInputsPending(store interface {
+	GetSyncState(string, types.Txn) (string, error)
+}, txn types.Txn,
+) (*importedRewardStakeInputsPending, error) {
+	raw, err := store.GetSyncState(models.StakeRewardSourcePrefix+"stake-inputs-pending", txn)
+	if err != nil {
+		return nil, err
+	}
+	pending := &importedRewardStakeInputsPending{}
+	if raw == "" {
+		return pending, nil
+	}
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &envelope); err != nil {
+		return nil, fmt.Errorf("reading pending reward inputs: %w", err)
+	}
+	entries, present := envelope["entries"]
+	if !present || len(envelope) != 1 {
+		return nil, errors.New("reading pending reward inputs: unknown state format")
+	}
+	decoder := json.NewDecoder(strings.NewReader(string(entries)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&pending.Entries); err != nil {
+		return nil, fmt.Errorf("reading pending reward inputs: %w", err)
+	}
+	for _, entry := range pending.Entries {
+		if entry.BoundarySlot == 0 {
+			return nil, errors.New("reading pending reward inputs: invalid boundary slot")
+		}
+	}
+	return pending, nil
+}
+
+func importedAuthoritativeRewardBasisComplete(store rewardInputStore, txn types.Txn, snapshot *models.RewardSnapshot) (bool, error) {
 	if snapshot == nil || !snapshot.Authoritative {
 		return false, nil
 	}
-	raw, err := store.GetSyncState(
-		models.StakeRewardSourcePrefix+"stake-inputs-pending",
-		txn,
-	)
+	pending, err := loadImportedRewardStakeInputsPending(store, txn)
 	if err != nil {
 		return false, err
 	}
-	if raw != "" {
-		var envelope map[string]json.RawMessage
-		if err := json.Unmarshal([]byte(raw), &envelope); err != nil {
-			return false, fmt.Errorf("reading pending reward inputs: %w", err)
-		}
-		entries, present := envelope["entries"]
-		if !present || len(envelope) != 1 {
-			return false, errors.New("reading pending reward inputs: unknown state format")
-		}
-		var pending struct {
-			Entries []struct {
-				Epoch        uint64 `json:"epoch"`
-				BoundarySlot uint64 `json:"boundary_slot"`
-			} `json:"entries"`
-		}
-		decoder := json.NewDecoder(strings.NewReader(string(entries)))
-		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(&pending.Entries); err != nil {
-			return false, fmt.Errorf("reading pending reward inputs: %w", err)
-		}
-		for _, entry := range pending.Entries {
-			if entry.BoundarySlot == 0 {
-				return false, errors.New("reading pending reward inputs: invalid boundary slot")
-			}
-			if entry.Epoch == snapshot.Epoch &&
-				entry.BoundarySlot == snapshot.BoundarySlot {
-				return false, nil
-			}
+	for _, entry := range pending.Entries {
+		if entry.Epoch == snapshot.Epoch && entry.BoundarySlot == snapshot.BoundarySlot {
+			return false, nil
 		}
 	}
 	rows, err := store.GetRewardStakeInputs(snapshot.Epoch, txn)

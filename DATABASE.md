@@ -18,25 +18,6 @@ Limit violations wrap `lifecycle.ErrManifestTooLarge`. Bark snapshot verify
 and restore report this as `ResourceExhausted` for local and cloud manifests,
 distinct from missing snapshots, checksum corruption, or cloud transport errors.
 
-## Imported authoritative reward inputs
-
-An authoritative reward snapshot records when the basis was captured; its stake
-rows may still be pending in the deferred writer. Import preserves an existing
-authoritative basis only when its expected stake-row count is present and its
-matching pending marker is absent. An incomplete basis is completed from the
-imported mark, set, or go distribution only after its aggregate totals and every
-retained pool stake, owner stake, and delegator count reconcile. Repair
-preserves the authoritative snapshot and pool rows, upserts missing or changed
-stake rows, and invalidates only that uncredited epoch's precomputed outputs and
-cursor in the same transaction. An already credited epoch cannot be repaired.
-
-`cmd/reward-input-repair` exposes the same derivation for offline SQLite core
-databases. The operator supplies a previously verified ledger snapshot and an
-epoch within its mark/set/go window. It holds the Badger lock, opens metadata
-read-only by default, and reports the canonical comparison without changing
-state. `--apply` commits only a fully reconciled single-epoch repair. It does
-not import UTxOs, migrate schema, replace account balances, or move the tip.
-
 ## Mithril MemPack datum hashes
 
 The UTxO-HD MemPack tag-3 output stores its `DataHash32` as four
@@ -2434,6 +2415,25 @@ validation treats anchor provenance as equivalent to the certified boundary
 provenance. Startup-reconstructed historical rows retain their post-boundary
 capture slot so they remain distinguishable and are not used for hard
 leader-threshold rejection.
+
+#### Imported authoritative reward inputs
+
+An authoritative reward snapshot records when the basis was captured; its stake
+rows may still be pending in the deferred writer. Import preserves an existing
+authoritative basis only when its expected stake-row count is present and its
+matching pending marker is absent. An incomplete basis is completed from the
+imported mark, set, or go distribution only after its aggregate totals and every
+retained pool stake, owner stake, and delegator count reconcile. Repair
+preserves the authoritative snapshot and pool rows, upserts missing or changed
+stake rows, and invalidates only that uncredited epoch's precomputed outputs and
+cursor in the same transaction. An already credited epoch cannot be repaired.
+
+`cmd/reward-input-repair` exposes the same derivation for offline SQLite core
+databases. The operator supplies a previously verified ledger snapshot and an
+epoch within its mark/set/go window. It holds the Badger lock, opens metadata
+read-only by default, and reports the canonical comparison without changing
+state. `--apply` commits only a fully reconciled single-epoch repair. It does
+not import UTxOs, migrate schema, replace account balances, or move the tip.
 
 #### RewardStakeCalculationVersion and the Startup Provenance Gate
 
