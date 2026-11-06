@@ -46,6 +46,8 @@ cancels a run only after the GitHub API confirms that its queue ref is absent.
 Existing queue refs keep their runs. The cleanup uses the default-branch
 workflow without checking out merge-group code; test jobs retain read-only
 permissions.
+Normal cancellation gives runner cleanup 30 seconds to finish before forcing
+any obsolete runs that remain active to stop.
 
 ## Conformance profiles
 
