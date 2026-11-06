@@ -47,6 +47,10 @@ var (
 	rowProbeTokens   atomic.Int64
 )
 
+func init() {
+	registerRowProbe()
+}
+
 func registerRowProbe() {
 	rowProbeOnce.Do(func() {
 		sqlite.MustRegisterScalarFunction(

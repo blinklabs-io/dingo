@@ -26,7 +26,6 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
-	"modernc.org/sqlite"
 )
 
 // newFilePlannerStatsStore mirrors production's file-backed topology: a
@@ -329,8 +328,6 @@ func TestOptimizePlannerStatsRepreparesHotStatements(t *testing.T) {
 	)
 }
 
-var plannerProbeSequence atomic.Int64
-
 // SQLite re-plans a statement that was prepared before sqlite_stat1 existed
 // once the connection that prepared it runs the analysis, so the reprepare
 // hook is a defence for plans on other connections rather than a requirement
@@ -339,17 +336,15 @@ var plannerProbeSequence atomic.Int64
 func TestPreparedStatementReplansAfterOptimizeOnSameConnection(t *testing.T) {
 	skipPlanTestUnderRace(t)
 	t.Parallel()
-	// A uniquely named function keeps the process-wide registration from
-	// colliding with other tests.
-	name := fmt.Sprintf("planner_probe_%d", plannerProbeSequence.Add(1))
-	var visited atomic.Int64
-	sqlite.MustRegisterScalarFunction(
-		name, 0,
-		func(*sqlite.FunctionContext, []driver.Value) (driver.Value, error) {
-			visited.Add(1)
-			return int64(1), nil
-		},
-	)
+	// The probe function is registered once at init: the SQLite driver's
+	// function registry is not safe to mutate while other tests open
+	// connections.
+	token := rowProbeTokens.Add(1)
+	var visitedCounter atomic.Int64
+	rowProbeCounters.Store(token, &visitedCounter)
+	t.Cleanup(func() { rowProbeCounters.Delete(token) })
+	name := fmt.Sprintf("%s(%d)", rowProbeName, token)
+	visited := &visitedCounter
 	store := newFilePlannerStatsStore(t, nil)
 	seedStakeRefLookupUtxos(t, store, 3_000, 256)
 	ctx := context.Background()
@@ -357,7 +352,7 @@ func TestPreparedStatementReplansAfterOptimizeOnSameConnection(t *testing.T) {
 		ctx,
 		"SELECT COUNT(*) FROM utxo WHERE deleted_slot = 0 AND "+
 			"spent_at_tx_id IS NULL AND (tx_id, output_idx) IN "+
-			"((?, ?), (?, ?)) AND "+name+"() = 1",
+			"((?, ?), (?, ?)) AND "+name+" = 1",
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = stmt.Close() })
