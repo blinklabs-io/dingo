@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -1153,4 +1154,35 @@ func TestStaleConsensusStakeSnapshotsExistFailsClosed(t *testing.T) {
 			require.Equal(t, []uint64{23}, epochs)
 		},
 	)
+}
+
+func (fakePrepareOnlyQueryer) ExecContext(
+	context.Context,
+	string,
+	...any,
+) (sql.Result, error) {
+	return nil, errors.New("fakePrepareOnlyQueryer: ExecContext not implemented")
+}
+
+func (fakePrepareOnlyQueryer) QueryContext(
+	context.Context,
+	string,
+	...any,
+) (*sql.Rows, error) {
+	return nil, errors.New("fakePrepareOnlyQueryer: QueryContext not implemented")
+}
+
+func (fakePrepareOnlyQueryer) QueryRowContext(
+	context.Context,
+	string,
+	...any,
+) *sql.Row {
+	return nil
+}
+
+func (f fakePrepareOnlyQueryer) PrepareContext(
+	context.Context,
+	string,
+) (*sql.Stmt, error) {
+	return nil, f.prepareErr
 }

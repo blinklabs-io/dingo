@@ -17,6 +17,7 @@ package sqlstore
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"math/big"
 	"testing"
@@ -1060,5 +1061,42 @@ func TestTransactionBatchAccumulatorLen(t *testing.T) {
 		t,
 		2*rowBatchRowOverheadBytes+5*rowBatchValueOverheadBytes+2,
 		acc.EstimatedSizeBytes(),
+	)
+}
+
+// fakePrepareOnlyQueryer implements queryer with a PrepareContext that
+// always fails, so insertTransaction returns before touching the *sql.Stmt
+// it would otherwise store -- this test only needs to observe the dialect
+// flag insertTransaction sets before calling PrepareContext, not to execute
+// a real statement.
+type fakePrepareOnlyQueryer struct {
+	prepareErr error
+}
+
+// TestInsertTransactionDetectsMySQLThroughCountingQueryer is the regression
+// test for the type assertion insertTransaction uses to detect a MySQL
+// dialect: db.(dialectQueryer) alone misses a dialectQueryer wrapped in
+// countingQueryer, which is exactly what every real caller passes once
+// Config.PromRegistry is set (see Store.instrumentedQueryer). Without
+// unwrapDialectQueryer, a.mysql stays false on a metrics-enabled MySQL
+// store, and insertTransaction takes the RETURNING-id QueryRowContext path
+// MySQL cannot serve instead of the ExecContext/LastInsertId path this test
+// proves gets selected.
+func TestInsertTransactionDetectsMySQLThroughCountingQueryer(t *testing.T) {
+	t.Parallel()
+	prepareErr := errors.New("prepare not needed for this assertion")
+	inner := dialectQueryer{
+		queryer: fakePrepareOnlyQueryer{prepareErr: prepareErr},
+		dialect: "mysql",
+	}
+	wrapped := countingQueryer{queryer: inner, counter: nil}
+
+	acc := &transactionBatchAccumulator{}
+	_, _, err := acc.insertTransaction(context.Background(), wrapped)
+	require.ErrorIs(t, err, prepareErr)
+	require.True(
+		t,
+		acc.mysql,
+		"expected insertTransaction to detect the mysql dialect through countingQueryer",
 	)
 }
