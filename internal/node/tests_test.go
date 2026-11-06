@@ -92,6 +92,8 @@ func seedClearedMarkerWithMissingCriticalIndex(
 func TestRepairDeferredIndexesRestoresCriticalIndexWithoutMarker(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := newFileTestDB(t)
 	raw := seedClearedMarkerWithMissingCriticalIndex(t, db)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -114,6 +116,8 @@ func TestRepairDeferredIndexesRestoresCriticalIndexWithoutMarker(
 func TestRepairCriticalDeferredIndexesRestoresCriticalIndexWithoutMarker(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := newFileTestDB(t)
 	raw := seedClearedMarkerWithMissingCriticalIndex(t, db)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -130,6 +134,8 @@ func TestRepairCriticalDeferredIndexesRestoresCriticalIndexWithoutMarker(
 }
 
 func TestCoreStartupDeferredIndexRepairHonoursCancellation(t *testing.T) {
+	t.Parallel()
+
 	db := newFileTestDB(t)
 	manager, ok := db.Metadata().(metadata.DeferredIndexManager)
 	require.True(t, ok)
@@ -150,6 +156,8 @@ func TestCoreStartupDeferredIndexRepairHonoursCancellation(t *testing.T) {
 func TestCriticalStartupDeferredIndexRepairHonoursCancellation(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := newFileTestDB(t)
 	manager, ok := db.Metadata().(metadata.DeferredIndexManager)
 	require.True(t, ok)
@@ -171,6 +179,8 @@ func TestCriticalStartupDeferredIndexRepairHonoursCancellation(
 func TestDeferredIndexRebuilderCriticalBuildHonoursCancellation(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := newFileTestDB(t)
 	ctx, cancel := context.WithCancel(t.Context())
 	rebuilder := WithDeferredIndexes(
@@ -190,6 +200,8 @@ func TestDeferredIndexRebuilderCriticalBuildHonoursCancellation(
 }
 
 func TestWithDeferredIndexesHonoursCancellationBeforeDrop(t *testing.T) {
+	t.Parallel()
+
 	db := newFileTestDB(t)
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
@@ -209,6 +221,8 @@ func TestWithDeferredIndexesHonoursCancellationBeforeDrop(t *testing.T) {
 // TestRepairDeferredIndexesRestoresLazyIndexWithoutMarker covers a restored
 // database whose complete migration history hides a missing lazy index.
 func TestRepairDeferredIndexesRestoresLazyIndexWithoutMarker(t *testing.T) {
+	t.Parallel()
+
 	db := newFileTestDB(t)
 	raw, err := dbtest.RawSQLiteMetadata(t, db)
 	require.NoError(t, err)
@@ -236,6 +250,8 @@ func TestRepairDeferredIndexesRestoresLazyIndexWithoutMarker(t *testing.T) {
 func TestRepairCriticalDeferredIndexesRestoresLazyIndexWithoutMarker(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := newFileTestDB(t)
 	raw, err := dbtest.RawSQLiteMetadata(t, db)
 	require.NoError(t, err)
@@ -279,6 +295,8 @@ func requireNoPendingMarker(t *testing.T, raw *sql.DB) {
 // meaning intact: when a cycle really was interrupted, the core-mode repair
 // still rebuilds the whole manifest and clears it.
 func TestRepairDeferredIndexesFinishesPendingCycle(t *testing.T) {
+	t.Parallel()
+
 	db := newFileTestDB(t)
 	raw, err := dbtest.RawSQLiteMetadata(t, db)
 	require.NoError(t, err)
@@ -349,6 +367,8 @@ func (m *namedMissingManager) MissingCriticalDeferredIndexes() (
 func TestDeferredIndexRebuilderBuildCriticalNamesMissingBeforeBuilding(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, nil))
 	manager := &namedMissingManager{
@@ -390,6 +410,8 @@ func TestDeferredIndexRebuilderBuildCriticalNamesMissingBeforeBuilding(
 // path silent: a complete manifest is one catalog lookup per entry and must
 // not add a startup log line.
 func TestEnsureCriticalDeferredIndexesQuietWhenManifestComplete(t *testing.T) {
+	t.Parallel()
+
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, nil))
 	manager := &namedMissingManager{log: &buf}
@@ -405,6 +427,8 @@ func TestEnsureCriticalDeferredIndexesQuietWhenManifestComplete(t *testing.T) {
 // path against the SQLite store, so the listing is exercised through
 // MissingCriticalDeferredIndexes and the real catalog rather than a fake.
 func TestRepairDeferredIndexesNamesMissingIndexAgainstRealStore(t *testing.T) {
+	t.Parallel()
+
 	db := newFileTestDB(t)
 	raw := seedClearedMarkerWithMissingCriticalIndex(t, db)
 	var buf bytes.Buffer
@@ -459,6 +483,8 @@ func (m *namedMissingAllManager) MissingDeferredIndexes() ([]string, error) {
 // as silent while it runs as the critical subset's, with more entries to get
 // through. The names must reach the log before the build is entered.
 func TestEnsureAllDeferredIndexesNamesMissingBeforeBuilding(t *testing.T) {
+	t.Parallel()
+
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, nil))
 	manager := &namedMissingAllManager{
@@ -487,6 +513,8 @@ func TestEnsureAllDeferredIndexesNamesMissingBeforeBuilding(t *testing.T) {
 // TestEnsureAllDeferredIndexesQuietWhenManifestComplete keeps the healthy
 // path silent, matching the critical-subset check.
 func TestEnsureAllDeferredIndexesQuietWhenManifestComplete(t *testing.T) {
+	t.Parallel()
+
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, nil))
 	manager := &namedMissingAllManager{log: &buf}
@@ -500,6 +528,8 @@ func TestEnsureAllDeferredIndexesQuietWhenManifestComplete(t *testing.T) {
 // the startup repair path and requires the lazy entry it rebuilds to be named
 // in the log, not rebuilt silently.
 func TestRepairDeferredIndexesAnnouncesLazyRebuild(t *testing.T) {
+	t.Parallel()
+
 	db := newFileTestDB(t)
 	raw, err := dbtest.RawSQLiteMetadata(t, db)
 	require.NoError(t, err)
@@ -825,6 +855,8 @@ func TestBuildDingoConfigWiresPlannerStatsRefresh(t *testing.T) {
 // droppable and lazy entries are missing behind the marker, and the repair
 // that runs before the node starts rebuilds both and clears it.
 func TestRepairDeferredIndexesRestoresCatchUpIndexes(t *testing.T) {
+	t.Parallel()
+
 	db := newFileTestDB(t)
 	manager, ok := db.Metadata().(metadata.CatchUpIndexManager)
 	require.True(t, ok)
