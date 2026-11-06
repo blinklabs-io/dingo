@@ -40,37 +40,33 @@ provides pluggable storage and client interfaces.
   [architecture](ARCHITECTURE.md), [database design](DATABASE.md), and [plugin
   development](database/plugin/PLUGIN_DEVELOPMENT.md).
 
-## Approximate network sync times and resource use
+## Approximate sync times and runtime resource use
 
-These baselines are from Dingo v0.90.5, captured November 4–5, 2026. Times
-measure launch through Mithril bootstrap completion; API times include historical
-metadata backfill and finalization. Mithril times use a snapshot and are not
-from-genesis sync times. Hardware, snapshot size, and network conditions affect
-results, so treat these as planning estimates rather than guarantees.
+Completed Mithril timings are from Dingo v0.90.5. They measure launch through
+bootstrap completion; API timings include historical metadata backfill and
+finalization. Mithril snapshot bootstrap and full sync from genesis are separate
+operations. A completed full-genesis duration is not available for the networks
+below.
 
-| Network | Core mode | API mode |
-| --- | --- | --- |
-| Preview | ~13 minutes (Mithril) | ~4 hours 41 minutes (Mithril) |
-| Preprod | ~16 minutes (Mithril) | ~3 hours 43 minutes (Mithril) |
-| Mainnet | ~6 hours 2 minutes (Mithril) | No completed measurement |
-| Musashi | No full duration; full sync is from genesis | Not measured |
-| Dijkstra | Not measured | Not measured |
+| Network | Core, Mithril | Core, from genesis | API, Mithril | API, from genesis |
+| --- | --- | --- | --- | --- |
+| Preview | ~13 minutes | No completed timing | ~4 hours 41 minutes | No completed timing |
+| Preprod | ~16 minutes | No completed timing | ~3 hours 43 minutes | No completed timing |
+| Mainnet | ~6 hours 2 minutes | No completed timing | No completed timing | No completed timing |
+| Musashi | No snapshot available | No completed timing | No snapshot available | No completed timing |
+| Dijkstra | Not measured | Not measured | Not measured | Not measured |
 
-Resource observations are approximate. CPU and RSS are sampled process values;
-Preview and Preprod Core were sampled about once per minute on an 8-vCPU, 32-GiB
-host. The Mithril cache was retained during these captures and is temporary.
+Runtime resource figures below are sampled process highs after bootstrap while
+serving, not during sync. The serving samples lasted about 20 minutes, so they
+are short-window observations rather than long-term maxima.
 
-| Network and mode | Approximate resource observations |
-| --- | --- |
-| Preview Core | Sampled peak ~16 GiB RSS and ~2.1 CPU cores; near completion, the Dingo database was ~21 GiB and the retained Mithril cache was ~16 GiB. |
-| Preprod Core | Sampled peak ~17 GiB RSS and ~1.9 CPU cores; near completion, the Dingo database was ~23 GiB and the retained Mithril cache was ~20 GiB. |
-| Mainnet Core | The input Mithril snapshot was ~221 GiB. The capture did not include process RSS or final Dingo database size. |
-| Preview and Preprod API | No process RSS or storage time series was captured. |
-| Musashi Core | A separate v0.89.0 from-genesis interval advanced 981 blocks in 302 seconds (~3.25 blocks/second). A 30-second CPU profile averaged ~1.9 cores; a nearby RSS sample was ~4.8 GiB. This is not a full-sync measurement. |
-| Dijkstra and Musashi API | No comparable resource capture was available. |
-
-The Musashi measurements are from v0.89.0; all other completed sync times above
-are from v0.90.5. These figures do not represent v0.91.0 measurements.
+| Network and mode | Runtime RSS | Runtime CPU | Database size |
+| --- | ---: | ---: | ---: |
+| Preview Core | ~2.0 GiB | ~1.2 cores | ~17.8 GiB |
+| Preprod Core | ~2.7 GiB | ~1.1 cores | ~22.8 GiB |
+| Preview and Preprod API | Not captured | Not captured | Not captured |
+| Mainnet Core and API | Not captured | Not captured | Not captured |
+| Musashi and Dijkstra | Not captured | Not captured | Not captured |
 
 ## Codebase
 
