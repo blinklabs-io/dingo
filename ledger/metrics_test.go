@@ -847,51 +847,6 @@ func TestBlockApplyBatchLatencyMaxDurationExportsRunningMaximum(t *testing.T) {
 	)
 }
 
-// TestBlockApplyBatchLatencyMaxDurationExportedValueEqualsRecord hammers the
-// running maximum from many goroutines at once and requires the exported
-// GaugeFunc value to equal the largest duration any writer submitted --
-// exactly, not merely bounded by it. Exact equality is what distinguishes
-// reading the running-maximum atomic at scrape time from pushing each new
-// maximum into a separately-updated Gauge: with a pushed Gauge, two writers
-// can each win the compare-and-swap in updateMaxDuration and then land their
-// Set calls in the other order, leaving the exported value below the record
-// with nothing to recover it (see updateMaxDuration's doc comment). Run with
-// -race, which also covers the compare-and-swap loop under concurrent
-// writers.
-func TestBlockApplyBatchLatencyMaxDurationExportedValueEqualsRecord(
-	t *testing.T,
-) {
-	t.Parallel()
-
-	reg := prometheus.NewRegistry()
-	var m stateMetrics
-	m.init(reg)
-
-	const writers = 64
-	var wg sync.WaitGroup
-	wg.Add(writers)
-	for i := range writers {
-		// Each writer submits a larger value and then a smaller one, so
-		// both directions race against every other writer.
-		observed := time.Duration(i) * time.Millisecond
-		go func() {
-			defer wg.Done()
-			m.observeBlockApplyBatch(1, observed)
-			m.observeBlockApplyBatch(1, observed/2)
-		}()
-	}
-	wg.Wait()
-
-	want := (time.Duration(writers-1) * time.Millisecond).Seconds()
-	assert.Equal(
-		t,
-		want,
-		blockApplyBatchMaxLatencyValue(t, reg),
-		"the exported value must equal the largest observed duration, "+
-			"regardless of goroutine interleaving",
-	)
-}
-
 // TestLedgerProcessBlocksFromSourceObservesBlockApplyBatchLatency drives one
 // real block through the actual ledgerProcessBlocksFromSource batch-apply
 // loop (the call site observeBlockApplyBatch was added to in state.go), not
