@@ -12331,8 +12331,12 @@ only channel between them is the `leios.eb_quorum` event.
   observed) by the single `stageFor` function. The per-phase window lengths live
   in one provisional `PipelineTiming` struct (off-chain, overridable via
   `WithLeiosPipelineTiming`) because CIP-0164 has not finalized them; they are
-  not protocol parameters. Window decisions are slot-driven via
-  `SlotProvider.CurrentOrTipSlot` (the `SlotClock` is private to `LedgerState`).
+  not protocol parameters. Node composition converts the one-second reference
+  defaults to the Shelley genesis slot duration, rounding up to whole slots;
+  explicit timing overrides keep their supplied slot counts. The vote manager
+  and endorser-transaction tail fetch use that same converted timing. Window
+  decisions are slot-driven via `SlotProvider.CurrentOrTipSlot` (the `SlotClock`
+  is private to `LedgerState`).
   These pipeline stages and `CertifyByDeadlineSlots` continue to bound relayed
   vote acceptance; local vote emission separately uses the on-chain wall-clock
   voting periods required by CIP-164. Each EB's current stage is surfaced via
