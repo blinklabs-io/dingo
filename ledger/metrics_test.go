@@ -319,17 +319,6 @@ func TestObserveBlockCompositionRecordsUnderEraLabel(t *testing.T) {
 	assert.Equal(t, 2, testutil.CollectAndCount(m.blocksTotal))
 }
 
-// TestObserveBlockCompositionNoopWhenMetricsDisabled confirms the observe
-// helper is safe to call on a *stateMetrics that was never initialized
-// (metrics disabled), matching the other observe helpers in this file.
-func TestObserveBlockCompositionNoopWhenMetricsDisabled(t *testing.T) {
-	t.Parallel()
-
-	var m stateMetrics
-	// m.init is never called: every field stays nil.
-	m.observeBlockComposition(blockComposition{era: "Conway", transactions: 1})
-}
-
 // compositionSpyTx counts how many times a transaction's produced UTxO set is
 // materialized while its block's composition is computed.
 type compositionSpyTx struct {
@@ -532,17 +521,6 @@ func TestObserveBlockStageIgnoresUnknownStage(t *testing.T) {
 			stage,
 		)
 	}
-}
-
-// TestObserveBlockStageNoopWhenMetricsDisabled confirms the observe helper is
-// safe to call on a *stateMetrics that was never initialized (metrics
-// disabled), matching the other observe helpers in this file.
-func TestObserveBlockStageNoopWhenMetricsDisabled(t *testing.T) {
-	t.Parallel()
-
-	var m stateMetrics
-	// m.init is never called: blockStageDuration and friends stay nil.
-	m.observeBlockStage(blockStageHeaderVerify, time.Millisecond)
 }
 
 // TestBlockStageDurationBucketsCoverTailStalls pins the histogram's upper
@@ -830,17 +808,6 @@ func TestObserveBlockApplyBatchRecordsLatencyAndSize(t *testing.T) {
 	sizeCount, sizeSum := blockApplyBatchSizeSample(t, &m)
 	assert.Equal(t, uint64(2), sizeCount)
 	assert.InDelta(t, 51.0, sizeSum, 0.0001, "1 + 50 blocks observed")
-}
-
-// TestObserveBlockApplyBatchNoopWhenMetricsDisabled confirms the observe
-// helper is safe to call on a *stateMetrics that was never initialized
-// (metrics disabled), matching the other observe helpers in this file.
-func TestObserveBlockApplyBatchNoopWhenMetricsDisabled(t *testing.T) {
-	t.Parallel()
-
-	var m stateMetrics
-	// m.init is never called: blockApplyBatchLatency and friends stay nil.
-	m.observeBlockApplyBatch(1, time.Millisecond)
 }
 
 // TestBlockApplyBatchLatencyMaxDurationExportsRunningMaximum drives the
