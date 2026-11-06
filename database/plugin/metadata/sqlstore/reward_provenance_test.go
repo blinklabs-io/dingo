@@ -60,4 +60,3 @@ LIMIT ? OFFSET ?`,
 	require.Contains(t, plan, "guarded=?")
 	require.NotContains(t, strings.ToUpper(plan), "SCAN REWARD_ACCOUNT_OUTPUT")
 }
-

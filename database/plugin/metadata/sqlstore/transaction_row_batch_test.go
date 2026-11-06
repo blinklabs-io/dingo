@@ -1075,7 +1075,8 @@ func TestRowBatchFlushSplitsAtParameterLimit(t *testing.T) {
 		ctx, `SELECT id FROM "transaction"`,
 	).Scan(&transactionID))
 
-	parameterLimit := store.dialect.ParameterLimit()
+	// A small injected limit splits after a few rows instead of thousands.
+	const parameterLimit = 40
 	rowsPerStatement := parameterLimit / len(vkeyWitnessShape.columns)
 	require.Positive(t, rowsPerStatement)
 	rowCount := rowsPerStatement + 1

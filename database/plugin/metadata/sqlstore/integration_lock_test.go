@@ -40,4 +40,3 @@ func integrationMigrationLockKey(namespace string) int64 {
 	digest := sha256.Sum256([]byte(namespace))
 	return int64(binary.BigEndian.Uint64(digest[:8]))
 }
-

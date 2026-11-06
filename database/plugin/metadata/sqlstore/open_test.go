@@ -85,4 +85,3 @@ func BenchmarkOpenDBQueryLoop_TracingDisabled(b *testing.B) {
 func BenchmarkOpenDBQueryLoop_TracingEnabled(b *testing.B) {
 	benchmarkOpenDBQueryLoop(b, true)
 }
-

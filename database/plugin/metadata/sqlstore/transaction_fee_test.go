@@ -58,4 +58,3 @@ func (t *feelessTransaction) ProtocolParameterUpdates() (uint64, map[lcommon.Bla
 func (t *feelessTransaction) Witnesses() lcommon.TransactionWitnessSet {
 	return nil
 }
-
