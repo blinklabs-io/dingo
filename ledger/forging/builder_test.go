@@ -2814,10 +2814,12 @@ func TestBuildBlockPropagatesEpochForSlotError(t *testing.T) {
 }
 
 func TestBuildBlockUsesDingoProtocolMinor(t *testing.T) {
+	t.Parallel()
 	creds := setupTestCredentials(t)
 
 	tests := []struct {
 		name         string
+		enabled      bool
 		major        uint
 		pparamMinor  uint
 		expectedSlot uint64
@@ -2834,6 +2836,7 @@ func TestBuildBlockUsesDingoProtocolMinor(t *testing.T) {
 			pparamMinor:  5,
 			expectedSlot: 1002,
 		},
+		{name: "version payload", enabled: true, major: 9, expectedSlot: 1003},
 	}
 
 	for _, tt := range tests {
@@ -2868,8 +2871,14 @@ func TestBuildBlockUsesDingoProtocolMinor(t *testing.T) {
 					epoch: 1,
 					nonce: make([]byte, 32),
 				},
-				Credentials: creds,
+				Credentials:    creds,
+				CIP0203Enabled: tt.enabled,
 			})
+			wantMinor, versionErr := dingoversion.HeaderProtocolMinor(tt.enabled)
+			if versionErr != nil {
+				require.ErrorContains(t, err, "CIP-0203")
+				return
+			}
 			require.NoError(t, err)
 
 			_, blockCbor, err := builder.BuildBlock(
@@ -2886,7 +2895,7 @@ func TestBuildBlockUsesDingoProtocolMinor(t *testing.T) {
 			assert.Equal(t, uint64(tt.major), protoVersion.Major)
 			assert.Equal(
 				t,
-				dingoversion.BlockHeaderProtocolMinor,
+				wantMinor,
 				protoVersion.Minor,
 			)
 		})

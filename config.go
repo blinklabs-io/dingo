@@ -302,6 +302,7 @@ type Config struct {
 	ledgerApplyRowBatchingEnabled                                                       bool
 	blockfetchLowWatermarkEnabled                                                       bool
 	minPoolMargin                                                                       uint
+	cip0203Enabled                                                                      bool
 	pledgeLeverageEnabled                                                               bool
 	pledgeLeverage                                                                      uint
 	fullPotRewardsEnabled, unsafeFullPotRewardsOnStandardNetworks                       bool
@@ -588,6 +589,9 @@ func (c *Config) leiosRuntimeEnabled() bool {
 }
 
 func (n *Node) configValidate() error {
+	if _, err := version.HeaderProtocolMinor(n.config.cfg.CIP0203Enabled); err != nil {
+		return err
+	}
 	// Default storageMode to "core" when unset, and validate.
 	storageMode := StorageMode(n.config.cfg.StorageMode)
 	if storageMode == "" {
@@ -1010,6 +1014,7 @@ func (c *Config) syncCompatFields() {
 	c.ledgerValidateAheadEnabled = c.cfg.LedgerValidateAheadEnabled
 	c.ledgerApplyRowBatchingEnabled = c.cfg.LedgerApplyRowBatchingEnabled
 	c.blockfetchLowWatermarkEnabled = c.cfg.BlockfetchLowWatermarkEnabled
+	c.cip0203Enabled = c.cfg.CIP0203Enabled
 	c.minPoolMargin, c.pledgeLeverageEnabled, c.pledgeLeverage = c.cfg.MinPoolMargin, c.cfg.PledgeLeverageEnabled, c.cfg.PledgeLeverage
 	c.fullPotRewardsEnabled, c.unsafeFullPotRewardsOnStandardNetworks = c.cfg.FullPotRewardsEnabled, c.cfg.UnsafeFullPotRewardsOnStandardNetworks
 	c.delegatorInactivityEnabled, c.delegatorInactivity = c.cfg.DelegatorInactivityEnabled, c.cfg.DelegatorInactivity
@@ -1117,6 +1122,17 @@ func WithGenesisLimitOnPatience(
 		c.cfg.GenesisBootstrap.LimitOnPatienceEnabled = enabled
 		c.cfg.GenesisBootstrap.LimitOnPatienceCapacity = capacity
 		c.cfg.GenesisBootstrap.LimitOnPatienceRate = rate
+	}
+}
+
+// WithCIP0203 enables build-version signalling in forged block headers.
+func WithCIP0203(enabled bool) ConfigOptionFunc {
+	return func(c *Config) {
+		if c.cfg == nil {
+			*c = NewConfig()
+		}
+		c.cfg.CIP0203Enabled = enabled
+		c.cip0203Enabled = enabled
 	}
 }
 

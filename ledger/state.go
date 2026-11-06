@@ -1112,7 +1112,9 @@ type LedgerStateConfig struct {
 	// DelegatorInactivityEnabled is true.
 	DelegatorInactivity uint64
 	ValidateHistorical  bool
-	EnableDijkstra      bool
+	// CIP0203Enabled includes the build version in dev-mode forged headers.
+	CIP0203Enabled bool
+	EnableDijkstra bool
 	// WarmGenesisStake makes the first reward rounds of a network that
 	// declares Shelley at epoch 0 pay from genesis staking, as the Leios
 	// prototype networks do. A standard cardano-node leaves those rounds
@@ -16888,6 +16890,11 @@ func (ls *LedgerState) forgeBlock() {
 		return
 	}
 
+	minor, err := dingoversion.HeaderProtocolMinor(ls.config.CIP0203Enabled)
+	if err != nil {
+		ls.config.Logger.Error("cannot encode forged block version", "error", err)
+		return
+	}
 	// Create Babbage block header body
 	headerBody := babbage.BabbageBlockHeaderBody{
 		BlockNumber: nextBlockNumber,
@@ -16910,7 +16917,7 @@ func (ls *LedgerState) forgeBlock() {
 		// metadata encoding, and header assembly.
 		ProtoVersion: babbage.BabbageProtoVersion{
 			Major: uint64(conwayPParams.ProtocolVersion.Major),
-			Minor: dingoversion.BlockHeaderProtocolMinor,
+			Minor: minor,
 		},
 	}
 

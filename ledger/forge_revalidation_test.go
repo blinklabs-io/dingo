@@ -28,6 +28,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
+	dingoversion "github.com/blinklabs-io/dingo/internal/version"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
@@ -309,4 +310,25 @@ func TestForgeBlockRevalidatesMempoolTransactions(t *testing.T) {
 			f.forge(t, parent, child),
 		)
 	})
+}
+
+func TestForgeBlockCIP0203(t *testing.T) {
+	t.Parallel()
+	for _, enabled := range []bool{false, true} {
+		f := newForgeRevalidationFixture(t)
+		f.ls.config.CIP0203Enabled = enabled
+		want, versionErr := dingoversion.HeaderProtocolMinor(enabled)
+		f.ls.forgeBlock()
+		tip := f.ls.chain.Tip()
+		if versionErr != nil {
+			require.Equal(t, uint64(0), tip.BlockNumber)
+			continue
+		}
+		require.Equal(t, uint64(1), tip.BlockNumber)
+		stored, err := f.ls.chain.BlockByPoint(context.Background(), tip.Point, nil)
+		require.NoError(t, err)
+		block, err := conway.NewConwayBlockFromCbor(stored.Cbor)
+		require.NoError(t, err)
+		require.Equal(t, want, block.BlockHeader.Body.ProtoVersion.Minor)
+	}
 }
