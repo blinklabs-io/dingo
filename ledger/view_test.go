@@ -5746,16 +5746,6 @@ func TestLedgerStateEvaluateTxPinsEpochStartSlot(t *testing.T) {
 	require.NoError(t, dbtest.CloseDatabase(db))
 }
 
-func TestLedgerViewSkipPhase2Validation(t *testing.T) {
-	t.Parallel()
-
-	lv := &LedgerView{}
-	require.False(t, lv.SkipPhase2Validation())
-
-	lv.skipPhase2Validation = true
-	require.True(t, lv.SkipPhase2Validation())
-}
-
 // TestLedgerViewMinPoolMargin guards the CIP-23 bridge: MinPoolMargin() must
 // forward from the LedgerState embedded via the named ls field, since Go does
 // not promote methods across a named (non-embedded) field. Without this

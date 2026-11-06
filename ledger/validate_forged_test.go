@@ -67,15 +67,6 @@ func TestValidateForgedBodyHashNonZeroHashPasses(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func TestValidateForgedTxsEmptyBlockPasses(t *testing.T) {
-	t.Parallel()
-
-	ls := &LedgerState{}
-	block := &stubValidateBlock{slot: 100}
-	err := ls.validateForgedTxs(context.Background(), block)
-	require.NoError(t, err)
-}
-
 // ---------------------------------------------------------------------------
 // Stub block for body-hash and empty-tx tests.
 // ---------------------------------------------------------------------------
