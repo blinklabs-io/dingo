@@ -1137,18 +1137,26 @@ func TestAtTipRecoveryRetainsImmutableBlocksAcrossRetries(t *testing.T) {
 	for _, tc := range []struct {
 		name           string
 		ledgerTipIndex int
+		growAfterFirst bool
 	}{
 		{name: "single over-K target", ledgerTipIndex: 12},
 		{name: "cumulative retry depth", ledgerTipIndex: 18},
+		{name: "advancing K boundary", ledgerTipIndex: 18, growAfterFirst: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			testAtTipRecoveryRetainsImmutableBlocks(t, tc.ledgerTipIndex)
+			testAtTipRecoveryRetainsImmutableBlocks(
+				t, tc.ledgerTipIndex, tc.growAfterFirst,
+			)
 		})
 	}
 }
 
-func testAtTipRecoveryRetainsImmutableBlocks(t *testing.T, ledgerTipIndex int) {
+func testAtTipRecoveryRetainsImmutableBlocks(
+	t *testing.T,
+	ledgerTipIndex int,
+	growAfterFirst bool,
+) {
 	const securityParam = 3
 	db := newTestDB(t)
 	cm, err := chain.NewManager(context.Background(), db, nil)
@@ -1173,9 +1181,9 @@ func testAtTipRecoveryRetainsImmutableBlocks(t *testing.T, ledgerTipIndex int) {
 		Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	require.NoError(t, err)
+	ls.currentEra = eras.ShelleyEraDesc
 	require.NoError(t, cm.SetLedger(ls))
 	ls.metrics.init(prometheus.NewRegistry())
-	ls.currentEra = eras.ShelleyEraDesc
 	ledgerBlock := raw[ledgerTipIndex]
 	ledgerTip := ochainsync.Tip{
 		Point:       ocommon.NewPoint(ledgerBlock.Slot, ledgerBlock.Hash),
@@ -1193,7 +1201,13 @@ func testAtTipRecoveryRetainsImmutableBlocks(t *testing.T, ledgerTipIndex int) {
 		Cause:      errors.New("transaction validation failure"),
 	}
 	immutable := raw[len(raw)-1-securityParam]
+	var advancedFloor chain.RawBlock
 	for attempt := 1; attempt <= maxAtTipRecoveryAttempts; attempt++ {
+		if attempt > 1 {
+			ls.currentEra = eras.ShelleyEraDesc
+			require.NoError(t, cm.SetLedger(ls))
+			assert.Equal(t, securityParam, cm.SecurityParam())
+		}
 		recovered, recoverErr := ls.recoverAtTipFromTxValidationError(validationErr)
 		require.NoError(t, recoverErr)
 		require.True(t, recovered)
@@ -1203,6 +1217,21 @@ func testAtTipRecoveryRetainsImmutableBlocks(t *testing.T, ledgerTipIndex int) {
 		}
 		if attempt == 1 && ledgerTipIndex == len(raw)-2 {
 			assert.Equal(t, ledgerTip.Point, ls.chain.Tip().Point)
+			if growAfterFirst {
+				grown := make([]chain.RawBlock, 4)
+				prev = ledgerBlock.Hash
+				for i := range grown {
+					grown[i] = testRawBlock(
+						fmt.Sprintf("at-tip-k-grown-%d", i),
+						failingBlock.Slot+uint64(i*5000),   //nolint:gosec
+						failingBlock.BlockNumber+uint64(i), //nolint:gosec
+						prev,
+					)
+					prev = grown[i].Hash
+				}
+				require.NoError(t, ls.chain.AddRawBlocks(context.Background(), grown))
+				advancedFloor = grown[0]
+			}
 			continue
 		}
 		assert.GreaterOrEqual(
@@ -1213,8 +1242,14 @@ func testAtTipRecoveryRetainsImmutableBlocks(t *testing.T, ledgerTipIndex int) {
 			ocommon.NewPoint(immutable.Slot, immutable.Hash))
 		require.NoError(t, lookupErr,
 			"attempt %d must retain the first failure's immutable block", attempt)
+		if growAfterFirst && attempt > 1 {
+			_, lookupErr = database.BlockByPoint(context.Background(), db,
+				ocommon.NewPoint(advancedFloor.Slot, advancedFloor.Hash))
+			require.NoError(t, lookupErr,
+				"attempt %d must retain the advanced K boundary", attempt)
+		}
 	}
-	if ledgerTipIndex == len(raw)-2 {
+	if ledgerTipIndex == len(raw)-2 && !growAfterFirst {
 		belowFloor := raw[len(raw)-2-securityParam]
 		_, err = ls.chain.RollbackDeferred(context.Background(),
 			ocommon.NewPoint(belowFloor.Slot, belowFloor.Hash))
@@ -1272,6 +1307,103 @@ func TestAtTipRecoveryShortChainCanReachOrigin(t *testing.T) {
 		require.True(t, recovered)
 		assert.Equal(t, ocommon.Point{}, ls.chain.Tip().Point)
 	}
+}
+
+func TestAtTipRollbackPreflightExcludesCompetingBlockAdd(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	cm, err := chain.NewManager(context.Background(), db, nil)
+	require.NoError(t, err)
+	blocks := loadTestBlocksWithTxs(t, 3)
+	raw := make([]chain.RawBlock, len(blocks))
+	for i, block := range blocks {
+		raw[i] = chain.RawBlock{
+			Slot: block.Slot, Hash: block.Hash,
+			BlockNumber: block.Number, Type: block.Type, Cbor: block.Cbor,
+		}
+		if i > 0 {
+			raw[i].PrevHash = raw[i-1].Hash
+		}
+	}
+	require.NoError(t, cm.PrimaryChain().AddRawBlocks(context.Background(), raw))
+	bus := newTestEventBus(t, nil)
+	t.Cleanup(bus.Stop)
+	subID, txCh := bus.SubscribeWithBuffer(TransactionEventType, 64)
+	require.NotZero(t, subID)
+	t.Cleanup(func() { bus.Unsubscribe(TransactionEventType, subID) })
+	ls, err := newReplayRecoveryLedgerState(t, LedgerStateConfig{
+		Database: db, ChainManager: cm, EventBus: bus,
+		CardanoNodeConfig: newTestShelleyGenesisCfgWithK(t, 2),
+		Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	ls.currentEra = eras.ShelleyEraDesc
+	require.NoError(t, cm.SetLedger(ls))
+	tip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(raw[2].Slot, raw[2].Hash),
+		BlockNumber: raw[2].BlockNumber,
+	}
+	require.NoError(t, db.SetTip(tip, nil))
+	ls.currentTip = tip
+	target := ocommon.NewPoint(raw[0].Slot, raw[0].Hash)
+	preflightErr := errors.New("rollback preflight rejected")
+	_, err = ls.chain.RollbackDeferredWithPreflight(
+		context.Background(), target, func() error { return preflightErr },
+	)
+	require.ErrorIs(t, err, preflightErr)
+	assert.Equal(t, tip.Point, ls.chain.Tip().Point)
+	next := testRawBlock("at-tip-competing-add", raw[2].Slot+1,
+		raw[2].BlockNumber+1, raw[2].Hash)
+	addReached := make(chan struct{})
+	releaseAdd := make(chan struct{})
+	addDone := make(chan error, 1)
+	ls.chain.SetBeforeRawBlockMutationBarrierForTesting(func() {
+		close(addReached)
+		<-releaseAdd
+	})
+	t.Cleanup(func() {
+		ls.chain.SetBeforeRawBlockMutationBarrierForTesting(nil)
+	})
+	_, err = ls.chain.RollbackDeferredWithPreflight(
+		context.Background(), target, func() error {
+			if err := ls.validateAndEmitRollbackUndo(
+				context.Background(), target,
+			); err != nil {
+				return err
+			}
+			go func() {
+				addDone <- ls.chain.AddRawBlocks(context.Background(),
+					[]chain.RawBlock{next})
+			}()
+			<-addReached
+			held := ls.chain.RawBlockMutationBarrierExcludesAddsForTesting()
+			close(releaseAdd)
+			if !held {
+				return errors.New("Undo and rollback do not share the mutation barrier")
+			}
+			return nil
+		},
+	)
+	require.NoError(t, err)
+	require.Error(t, <-addDone, "add based on discarded tip must be rejected")
+	assert.Equal(t, target, ls.chain.Tip().Point)
+	undoEvent := testutil.RequireReceive(t, txCh, 2*time.Second,
+		"expected Undo before primary chain truncation")
+	undo, ok := undoEvent.Data.(TransactionEvent)
+	require.True(t, ok)
+	assert.True(t, undo.Rollback)
+	_, _, pending, err := loadRollbackIntent(db)
+	require.NoError(t, err)
+	require.True(t, pending)
+	ls.currentTip = ochainsync.Tip{}
+	committed, err := ls.rollbackPrimaryChainWithinSecurityParam(target)
+	require.NoError(t, err)
+	assert.False(t, committed)
+	_, _, pending, err = loadRollbackIntent(db)
+	require.NoError(t, err)
+	assert.False(t, pending)
 }
 
 // newAtTipDescentLedger builds a LedgerState sitting at a fixed tip with

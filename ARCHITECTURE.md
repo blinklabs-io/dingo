@@ -907,8 +907,8 @@ cannot remove that block or an older one. The current K boundary can move
 forward as the chain grows, and the later of the two boundaries limits the
 rewind. This recovery makes one bounded primary-chain rollback; it does not
 use replay recovery's multi-step descent, which can cross K in aggregate.
-If the pinned block is no longer on the primary chain, recovery stops instead
-of continuing below the boundary.
+If the pinned block is no longer on the primary chain, the ledger pipeline
+halts instead of continuing below the boundary.
 
 `rollbackWithOptions` reloads `epochCache`, `currentEra`, `currentPParams` and
 the synthetic-PlutusV2-cost-model marker from the database *after* the

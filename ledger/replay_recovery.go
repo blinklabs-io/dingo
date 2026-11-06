@@ -1244,14 +1244,25 @@ func (ls *LedgerState) rollbackPrimaryChainWithinSecurityParam(
 	defer ls.chainsyncBlockfetchMutex.Unlock()
 	ls.transactionEventMutex.Lock()
 	defer ls.transactionEventMutex.Unlock()
-	if err := ls.validateAndEmitRollbackUndo(
-		ls.lifecycleContext(), point,
-	); err != nil {
-		return false, fmt.Errorf("validate at-tip recovery rollback: %w", err)
+	if err := ls.recoverRollbackIntentLocked(ls.lifecycleContext()); err != nil {
+		return false, fmt.Errorf("complete prior rollback intent: %w", err)
 	}
-	tipBefore := ls.chain.Tip().Point
-	if _, err := ls.chain.RollbackDeferred(
+	_, _, pendingIntent, err := loadRollbackIntent(ls.db)
+	if err != nil {
+		return false, fmt.Errorf("check prior rollback intent: %w", err)
+	}
+	if pendingIntent {
+		return false, errors.New("prior rollback intent is still pending")
+	}
+	// Block additions and competing rollbacks cannot move the chain between
+	// the Undo enqueue and the truncation while the mutation barrier is held.
+	var tipBefore ocommon.Point
+	if _, err := ls.chain.RollbackDeferredWithPreflight(
 		context.Background(), point,
+		func() error {
+			tipBefore = ls.chain.Tip().Point
+			return ls.validateAndEmitRollbackUndo(ls.lifecycleContext(), point)
+		},
 	); err != nil {
 		return false, fmt.Errorf("rollback primary chain within K: %w", err)
 	}
@@ -1613,7 +1624,7 @@ func (ls *LedgerState) resetAtTipRecoveryDescent(newTipSlot uint64) {
 func (ls *LedgerState) clampAtTipRecoveryToImmutableFloor(
 	point ocommon.Point,
 ) (ocommon.Point, error) {
-	securityParam := ls.SecurityParam()
+	securityParam := ls.config.ChainManager.SecurityParam()
 	if securityParam <= 0 {
 		return ocommon.Point{}, chain.ErrSecurityParamNotConfigured
 	}
@@ -1699,6 +1710,7 @@ func (ls *LedgerState) clampAtTipRecoveryToImmutableFloor(
 		floor = &atTipRecoveryFloor{
 			Point: currentFloor, BlockIndex: currentFloorIndex,
 		}
+		ls.atTipRecoveryFloor = floor
 	}
 	if tipBlockIndex == 0 {
 		return ocommon.Point{}, nil
@@ -1874,7 +1886,7 @@ func (ls *LedgerState) recoverAtTipFromTxValidationError(
 			"at-tip recovery target crosses immutable K-block boundary",
 			"requested_slot", rewindPoint.Slot,
 			"bounded_slot", boundedPoint.Slot,
-			"security_param", ls.SecurityParam(),
+			"security_param", ls.config.ChainManager.SecurityParam(),
 		)
 	}
 	rewindPoint = boundedPoint
