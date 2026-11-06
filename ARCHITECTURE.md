@@ -16380,7 +16380,10 @@ doesn't implement `SnapshotLister`, this degrades to exactly
 `resolveSnapshotDir`, which rejects anything but a bare directory name (no
 `/`, no `..`) before joining it under `SnapshotDir` — a path-traversal guard
 that also covers `Restore`, which takes the same untrusted `snapshot_id`
-input over the network. `VerifySnapshot` reuses `lifecycle.Restore` itself,
+input over the network. `DeleteSnapshot` additionally refuses ids starting with
+`.dingo-` (the catalog database and work directories) and removes a local
+copy only when it is a directory holding a `manifest.json` entry; the manifest
+is not parsed, so a corrupted snapshot stays deletable. `VerifySnapshot` reuses `lifecycle.Restore` itself,
 restoring into a throwaway directory under `SnapshotDir` (never the system
 temp directory, since the restore is as large as the snapshot) and deleting
 it afterward, rather
