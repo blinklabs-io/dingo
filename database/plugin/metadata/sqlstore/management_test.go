@@ -301,6 +301,7 @@ func newManagementTestStore(t *testing.T) *Store {
 		),
 	)
 	require.NoError(t, err)
+	seedMigratedSQLite(t, db)
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
 	store, err := New(Config{

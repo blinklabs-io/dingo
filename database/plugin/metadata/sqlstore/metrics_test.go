@@ -153,6 +153,7 @@ func newMigratedSQLiteStoreWithRegistry(
 	// connection instead of deadlocking, and this test would pass either way.
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
+	seedMigratedSQLite(tb, db)
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(tb, err)
 	store, err := New(Config{

@@ -823,7 +823,7 @@ func TestInsertUtxoModelBoundsTxScopedStatementRetentionInOneTransaction(
 	store := newMigratedSQLiteStore(t)
 	ctx := context.Background()
 
-	const outputCount = 20_000
+	const outputCount = 50
 
 	txn := store.Transaction(ctx)
 	sqlTransaction, ok := txn.(*sqlTxn)

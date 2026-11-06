@@ -108,11 +108,13 @@ func (c *recordingConn) BeginTx(
 func newRecordingSQLiteStore(t *testing.T) (*Store, *statementRecorder) {
 	t.Helper()
 	recorder := &statementRecorder{}
+	dsn := fmt.Sprintf(
+		"file:sqlstore_%d?mode=memory&cache=shared",
+		testStoreSequence.Add(1),
+	)
+	seedMigratedSQLiteDSN(t, dsn)
 	db := sql.OpenDB(recordingConnector{
-		dsn: fmt.Sprintf(
-			"file:sqlstore_%d?mode=memory&cache=shared",
-			testStoreSequence.Add(1),
-		),
+		dsn:      dsn,
 		recorder: recorder,
 	})
 	registry, err := migrations.SQLiteRegistry()

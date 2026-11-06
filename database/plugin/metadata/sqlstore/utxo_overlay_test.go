@@ -239,6 +239,7 @@ func newForeignKeySQLiteStore(tb testing.TB) *Store {
 	require.NoError(tb, err)
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
+	seedMigratedSQLite(tb, db)
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(tb, err)
 	store, err := New(Config{

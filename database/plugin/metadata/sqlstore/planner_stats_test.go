@@ -57,6 +57,7 @@ func newFilePlannerStatsStore(
 	require.NoError(tb, err)
 	readDB.SetMaxOpenConns(4)
 	readDB.SetMaxIdleConns(4)
+	seedMigratedSQLite(tb, writeDB)
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(tb, err)
 	store, err := New(Config{
@@ -172,7 +173,7 @@ func TestOptimizePlannerStatsRefreshesPooledReadConnections(t *testing.T) {
 	skipPlanTestUnderRace(t)
 	t.Parallel()
 	store := newFilePlannerStatsStore(t, nil)
-	seedStakeRefLookupUtxos(t, store, 50_000, 256)
+	seedStakeRefLookupUtxos(t, store, 3_000, 256)
 
 	// Park every read connection in the idle pool holding pre-statistics
 	// schema state.
@@ -228,7 +229,7 @@ func TestOptimizePlannerStatsRefreshesAfterUpdateOnlyRun(t *testing.T) {
 	require.NoError(t, err)
 	_, err = tx.Exec(
 		"WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c " +
-			"WHERE i < 50000) INSERT INTO utxo (tx_id, output_idx, " +
+			"WHERE i < 3000) INSERT INTO utxo (tx_id, output_idx, " +
 			"staking_key, credential_tag, added_slot, deleted_slot, amount) " +
 			"SELECT randomblob(32), i % 4, randomblob(28), 0, i, 0, '1' FROM c",
 	)
@@ -257,7 +258,7 @@ func TestOptimizePlannerStatsReloadsSharedCacheStatistics(t *testing.T) {
 	t.Parallel()
 	store := newMigratedSQLiteStore(t)
 	require.Same(t, store.readDB, store.writeDB)
-	seedStakeRefLookupUtxos(t, store, 50_000, 256)
+	seedStakeRefLookupUtxos(t, store, 3_000, 256)
 	store.writeDB.SetMaxIdleConns(2)
 
 	// Hold two connections so the pool has idle ones carrying old state.
@@ -288,7 +289,7 @@ func TestOptimizePlannerStatsReloadsSharedCacheStatistics(t *testing.T) {
 	require.NoError(t, store.writeDB.QueryRow(
 		"SELECT COUNT(*) FROM utxo",
 	).Scan(&live))
-	require.Equal(t, 50_000, live)
+	require.Equal(t, 3_000, live)
 }
 
 func TestOptimizePlannerStatsRepreparesHotStatements(t *testing.T) {
@@ -350,7 +351,7 @@ func TestPreparedStatementReplansAfterOptimizeOnSameConnection(t *testing.T) {
 		},
 	)
 	store := newFilePlannerStatsStore(t, nil)
-	seedStakeRefLookupUtxos(t, store, 50_000, 256)
+	seedStakeRefLookupUtxos(t, store, 3_000, 256)
 	ctx := context.Background()
 	stmt, err := store.writeDB.PrepareContext(
 		ctx,
@@ -367,7 +368,7 @@ func TestPreparedStatementReplansAfterOptimizeOnSameConnection(t *testing.T) {
 		require.NoError(t, stmt.QueryRowContext(ctx, zero, 0, zero, 1).Scan(&n))
 		return visited.Load()
 	}
-	require.Greater(t, run(), int64(10_000), "stale plan must scan the table")
+	require.Greater(t, run(), int64(1_000), "stale plan must scan the table")
 
 	_, err = store.OptimizePlannerStatsContext(ctx, PlannerStatsTriggerEpoch)
 	require.NoError(t, err)

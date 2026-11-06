@@ -36,6 +36,7 @@ func TestRewardLiveStakeRefreshesTransactionPlannerStats(t *testing.T) {
 	t.Parallel()
 	db, err := OpenDB("sqlite", filepath.Join(t.TempDir(), "metadata.sqlite"), "sqlite", false)
 	require.NoError(t, err)
+	seedMigratedSQLite(t, db)
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
 	store, err := New(Config{

@@ -40,6 +40,7 @@ func newManagementTestStoreWithRawDB(t *testing.T) (*Store, *sql.DB) {
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	seedMigratedSQLite(t, db)
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
 	store, err := New(Config{

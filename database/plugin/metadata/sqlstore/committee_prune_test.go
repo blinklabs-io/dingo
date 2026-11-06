@@ -163,6 +163,7 @@ func newCommitteeMaintenanceTestStore(t *testing.T) *Store {
 	readDB, err := sql.Open("sqlite", dsn)
 	require.NoError(t, err)
 	readDB.SetMaxOpenConns(1)
+	seedMigratedSQLite(t, writeDB)
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
 	store, err := New(Config{

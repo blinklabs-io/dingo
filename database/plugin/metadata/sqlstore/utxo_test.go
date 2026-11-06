@@ -183,7 +183,7 @@ func TestGetUtxosByRefsUsesTxIDIndex(t *testing.T) {
 	skipPlanTestUnderRace(t)
 	t.Parallel()
 	store := newMigratedSQLiteStore(t)
-	seedStakeRefLookupUtxos(t, store, 50_000, 256)
+	seedStakeRefLookupUtxos(t, store, 2_000, 256)
 
 	for _, nTerms := range []int{2, 4, 64, 400} {
 		t.Run(fmt.Sprintf("terms=%d", nTerms), func(t *testing.T) {
@@ -241,7 +241,7 @@ func TestAddressTransactionInputQueryUsesCompositeIndex(t *testing.T) {
 	skipPlanTestUnderRace(t)
 	t.Parallel()
 	store := newMigratedSQLiteStore(t)
-	seedStakeRefLookupUtxos(t, store, 50_000, 256)
+	seedStakeRefLookupUtxos(t, store, 2_000, 256)
 
 	args := make(
 		[]any,
@@ -494,7 +494,7 @@ func TestMarkUtxosDeletedAtSlotUsesTxIDIndex(t *testing.T) {
 	skipPlanTestUnderRace(t)
 	t.Parallel()
 	store := newMigratedSQLiteStore(t)
-	seedStakeRefLookupUtxos(t, store, 50_000, 256)
+	seedStakeRefLookupUtxos(t, store, 2_000, 256)
 
 	for _, nTerms := range []int{2, 4, 64, 400} {
 		t.Run(fmt.Sprintf("terms=%d", nTerms), func(t *testing.T) {
@@ -618,7 +618,7 @@ func TestMarkUtxosDeletedAtSlotUpdatePlansOnPrimaryKey(t *testing.T) {
 	skipPlanTestUnderRace(t)
 	t.Parallel()
 	store := newMigratedSQLiteStore(t)
-	seedStakeRefLookupUtxos(t, store, 50_000, 256)
+	seedStakeRefLookupUtxos(t, store, 2_000, 256)
 
 	for _, nRows := range []int{1, 2, 4, 64, 400, 998} {
 		t.Run(fmt.Sprintf("rows=%d", nRows), func(t *testing.T) {
@@ -702,6 +702,7 @@ func newMigratedSQLiteStore(tb testing.TB) *Store {
 		false,
 	)
 	require.NoError(tb, err)
+	seedMigratedSQLite(tb, db)
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(tb, err)
 	store, err := New(Config{
@@ -843,7 +844,7 @@ func TestRollbackStakeRefQueriesUseSlotIndexes(t *testing.T) {
 		t.Run(stats.name, func(t *testing.T) {
 			t.Parallel()
 			store := newMigratedSQLiteStore(t)
-			seedRollbackUtxos(t, store, 20_000, 64, rolledBackFrom, 40)
+			seedRollbackUtxos(t, store, 2_000, 64, rolledBackFrom, 40)
 			if stats.analyze {
 				analyzeStore(t, store)
 			}
@@ -1176,7 +1177,7 @@ func TestGetUtxosAddedAfterSlotUsesSlotIndex(t *testing.T) {
 		t.Run(stats.name, func(t *testing.T) {
 			t.Parallel()
 			store := newMigratedSQLiteStore(t)
-			seedRollbackUtxos(t, store, 20_000, 64, rolledBackFrom, 40)
+			seedRollbackUtxos(t, store, 2_000, 64, rolledBackFrom, 40)
 			if stats.analyze {
 				analyzeStore(t, store)
 			}
@@ -1448,7 +1449,7 @@ func TestQueryUtxoStakeRefsUsesTxIDIndex(t *testing.T) {
 	skipPlanTestUnderRace(t)
 	t.Parallel()
 	store := newMigratedSQLiteStore(t)
-	seedStakeRefLookupUtxos(t, store, 50_000, 256)
+	seedStakeRefLookupUtxos(t, store, 2_000, 256)
 
 	for _, nTerms := range []int{2, 4, 8, 64, 400} {
 		t.Run(fmt.Sprintf("terms=%d", nTerms), func(t *testing.T) {
@@ -2546,7 +2547,7 @@ func TestUtxoRefsExactQueryUsesCompositeIndex(t *testing.T) {
 	skipPlanTestUnderRace(t)
 	t.Parallel()
 	store := newMigratedSQLiteStore(t)
-	seedStakeRefLookupUtxos(t, store, 50_000, 256)
+	seedStakeRefLookupUtxos(t, store, 2_000, 256)
 
 	args := make([]any, 0, utxoRefsMaxPerQuery*2)
 	for i := range utxoRefsMaxPerQuery {

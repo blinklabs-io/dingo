@@ -190,6 +190,7 @@ func TestResetInvalidatesPreparedStatementCache(t *testing.T) {
 		),
 	)
 	require.NoError(t, err)
+	seedMigratedSQLite(t, db)
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
 	var resetCalls int

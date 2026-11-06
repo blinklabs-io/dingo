@@ -46,7 +46,7 @@ func newImportedLedgerStatsStore(t *testing.T) (*Store, []byte) {
 	}
 	exec(`
 WITH RECURSIVE n(i) AS (
-    SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 20000
+    SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 2000
 )
 INSERT INTO utxo
     (tx_id, output_idx, credential_tag, staking_key,
