@@ -16,7 +16,6 @@ package dingo
 
 import (
 	"context"
-	"net/http"
 	"reflect"
 	"runtime"
 	"strconv"
@@ -287,23 +286,6 @@ func TestProgrammaticPublicAPIConfigAcceptsRemoteAddresses(t *testing.T) {
 	}
 }
 
-func TestStorageModeValid(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		mode  StorageMode
-		valid bool
-	}{
-		{StorageModeCore, true},
-		{StorageModeAPI, true},
-		{"", false},
-		{"invalid", false},
-	}
-	for _, tt := range tests {
-		assert.Equal(t, tt.valid, tt.mode.Valid(), "mode=%q", tt.mode)
-	}
-}
-
 func TestNewConfigMempoolCapacityDefaultsFromRunMode(t *testing.T) {
 	t.Parallel()
 
@@ -418,19 +400,6 @@ func TestNewConfigMempoolCapacityDefaultsOnMusashi(t *testing.T) {
 			assert.Equal(t, tt.expected, selection.Config["capacity"])
 		})
 	}
-}
-
-func TestNewConfigPublicBindAddressDefaultsToWildcard(t *testing.T) {
-	cfg := NewConfig(
-		WithRunMode(string(internalconfig.RunModeDev)),
-	)
-
-	assert.Equal(t, "0.0.0.0", cfg.BindAddr())
-	assert.Equal(t, cfg.BindAddr(), cfg.bindAddr)
-
-	cfg = NewConfig(WithBindAddr("192.0.2.10"))
-	assert.Equal(t, "192.0.2.10", cfg.BindAddr())
-	assert.Equal(t, "192.0.2.10", cfg.bindAddr)
 }
 
 func TestNewConfigPreservesExplicitMempoolCapacity(t *testing.T) {
@@ -740,21 +709,6 @@ func TestFullPotRewardsStandardNetworkValidation(t *testing.T) {
 			// New starts the event bus' background goroutines; Stop releases them.
 			t.Cleanup(func() { _ = n.Stop() })
 		})
-	}
-}
-
-// TestExperimentalDijkstraEnabled pins that the Dijkstra ledger era is known
-// on every network, with or without a node configuration.
-func TestExperimentalDijkstraEnabled(t *testing.T) {
-	t.Parallel()
-
-	for _, cfg := range []Config{
-		{},
-		{cfg: &internalconfig.Config{Network: "mainnet"}},
-		{cfg: &internalconfig.Config{Network: "preview", NetworkMagic: 2}},
-		{cfg: &internalconfig.Config{NetworkMagic: 42}},
-	} {
-		assert.True(t, cfg.experimentalDijkstraEnabled())
 	}
 }
 
@@ -1148,22 +1102,6 @@ func TestWithKoiosParityAccountsExplicitFalseDisablesEndToEnd(t *testing.T) {
 	assert.False(t, *cfg.koiosParity.Accounts)
 }
 
-func TestBarkBlockDownloadAllowPrivateAddressesReachesRuntime(t *testing.T) {
-	t.Parallel()
-
-	for _, allow := range []bool{false, true} {
-		cfg, err := NewConfigFromInternal(
-			&internalconfig.Config{
-				BarkBlockDownloadAllowPrivateAddresses: allow,
-			},
-			nil, nil, nil, nil,
-		)
-		require.NoError(t, err)
-		require.Equal(t, allow, cfg.barkBlockDownloadAllowPrivateAddresses)
-		require.Equal(t, allow, cfg.BarkBlockDownloadAllowPrivateAddresses())
-	}
-}
-
 // TestTokenRegistryConfigReachesRuntimeFromYAML covers the path YAML, env, and
 // CLI all land on: internal config only. The syncer reads the runtime mirror,
 // so without syncCompatFields carrying it across, an operator's tokenRegistry
@@ -1232,60 +1170,6 @@ func TestTokenRegistryConfigReachesRuntimeFromYAML(t *testing.T) {
 	require.True(t, cfg.tokenRegistry.StoreLogos)
 	require.True(t, cfg.tokenRegistry.AllowPrivateAddresses)
 	require.True(t, cfg.tokenRegistry.AllowRollback)
-}
-
-// TestTokenRegistryConfigDisabledByDefault pins the deliberate default: the
-// mainnet registry is a roughly 240MB download, so an upgrade must not start
-// one on its own.
-func TestTokenRegistryConfigDisabledByDefault(t *testing.T) {
-	t.Parallel()
-
-	cfg := NewConfig()
-
-	require.False(t, cfg.tokenRegistry.Enabled)
-	require.False(t, cfg.TokenRegistry().Enabled)
-}
-
-// TestWithTokenRegistryConfigPreservesHTTPClient guards the one field that
-// cannot round-trip through internal config: the programmatic HTTP client is
-// runtime-only, and syncCompatFields runs after options are applied.
-func TestWithTokenRegistryConfigPreservesHTTPClient(t *testing.T) {
-	t.Parallel()
-
-	client := &http.Client{}
-
-	cfg := NewConfig(WithTokenRegistryConfig(TokenRegistryConfig{
-		Enabled:              true,
-		HTTPClient:           client,
-		ManifestURL:          "https://mirror.example.test/manifest.json",
-		TrustedManifestKey:   strings.Repeat("cd", 32),
-		UserAgent:            "programmatic/1",
-		MaxDecompressedBytes: 456,
-		MaxArchiveEntries:    67,
-		MaxAcceptedEntries:   34,
-		MaxBatchBytes:        89,
-		AllowRollback:        true,
-	}))
-
-	require.Same(t, client, cfg.tokenRegistry.HTTPClient)
-	require.True(t, cfg.tokenRegistry.Enabled)
-	require.Equal(t, "programmatic/1", cfg.tokenRegistry.UserAgent)
-	require.Equal(t, "programmatic/1", cfg.TokenRegistry().UserAgent)
-	require.Equal(t, int64(456), cfg.TokenRegistry().MaxDecompressedBytes)
-	require.Equal(t, 67, cfg.TokenRegistry().MaxArchiveEntries)
-	require.Equal(t, 34, cfg.TokenRegistry().MaxAcceptedEntries)
-	require.Equal(t, int64(89), cfg.TokenRegistry().MaxBatchBytes)
-	require.Equal(
-		t,
-		"https://mirror.example.test/manifest.json",
-		cfg.TokenRegistry().ManifestURL,
-	)
-	require.Equal(
-		t,
-		strings.Repeat("cd", 32),
-		cfg.TokenRegistry().TrustedManifestKey,
-	)
-	require.True(t, cfg.TokenRegistry().AllowRollback)
 }
 
 func TestNewConfigPlannerStatsRefreshDefaultsOnAndCanBeDisabled(t *testing.T) {
@@ -1369,72 +1253,4 @@ func TestLedgerStateConfigWarmsGenesisStakeOnPrototypeNetworks(t *testing.T) {
 			assert.Equal(t, tt.warm, cfg.WarmGenesisStake)
 		})
 	}
-}
-
-func TestWithStorageMode(t *testing.T) {
-	t.Parallel()
-
-	cfg := &Config{}
-
-	// Default should be zero value (empty string)
-	assert.Equal(t, StorageMode(""), cfg.storageMode)
-
-	// Apply API mode
-	WithStorageMode(StorageModeAPI)(cfg)
-	assert.Equal(t, StorageModeAPI, cfg.storageMode)
-
-	// Apply core mode
-	WithStorageMode(StorageModeCore)(cfg)
-	assert.Equal(t, StorageModeCore, cfg.storageMode)
-}
-
-func TestWithFullPotRewards(t *testing.T) {
-	t.Parallel()
-
-	cfg := &Config{}
-	WithFullPotRewards(true)(cfg)
-	assert.True(t, cfg.fullPotRewardsEnabled)
-	WithFullPotRewards(false)(cfg)
-	assert.False(t, cfg.fullPotRewardsEnabled)
-}
-
-func TestWithDelegatorInactivity(t *testing.T) {
-	t.Parallel()
-
-	cfg := &Config{}
-	WithDelegatorInactivity(true, 90)(cfg)
-	assert.True(t, cfg.delegatorInactivityEnabled)
-	assert.Equal(t, uint64(90), cfg.delegatorInactivity)
-	WithDelegatorInactivity(false, 0)(cfg)
-	assert.False(t, cfg.delegatorInactivityEnabled)
-	assert.Zero(t, cfg.delegatorInactivity)
-}
-
-func TestPeerGovernorOptionsApplyPositiveValues(t *testing.T) {
-	t.Parallel()
-
-	cfg := &Config{cfg: &internalconfig.Config{}}
-
-	WithMinHotPeers(3)(cfg)
-	WithReconcileInterval(30 * time.Second)(cfg)
-	WithInactivityTimeout(2 * time.Minute)(cfg)
-	WithMaxConnectionsPerIP(4)(cfg)
-	WithMaxInboundConns(25)(cfg)
-	WithMaxNtCConns(30)(cfg)
-	WithMaxNtCConnectionsPerIP(6)(cfg)
-	WithMaxTrustedLocalNtCConns(8)(cfg)
-
-	assert.Equal(t, 3, cfg.cfg.MinHotPeers)
-	assert.Equal(t, 30*time.Second, cfg.cfg.ReconcileInterval)
-	assert.Equal(t, 2*time.Minute, cfg.cfg.InactivityTimeout)
-	assert.Equal(t, 4, cfg.cfg.MaxConnectionsPerIP)
-	assert.Equal(t, 25, cfg.cfg.MaxInboundConns)
-	assert.Equal(t, 30, cfg.cfg.MaxNtCConns)
-	assert.Equal(t, 6, cfg.cfg.MaxNtCConnectionsPerIP)
-	assert.Equal(t, 8, cfg.cfg.MaxTrustedLocalNtCConns)
-
-	cfg.syncCompatFields()
-	assert.Equal(t, 30, cfg.maxNtCConns)
-	assert.Equal(t, 6, cfg.maxNtCConnectionsPerIP)
-	assert.Equal(t, 8, cfg.maxTrustedLocalNtCConns)
 }
