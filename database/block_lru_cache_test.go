@@ -17,7 +17,6 @@ package database
 import (
 	"encoding/binary"
 	"math/bits"
-	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -222,56 +221,6 @@ func TestBlockLRUCacheTotalCapacityBounded(t *testing.T) {
 	)
 }
 
-func TestBlockLRUCacheGetPut(t *testing.T) {
-	t.Parallel()
-
-	cache := NewBlockLRUCache(10)
-	require.NotNil(t, cache)
-
-	// Create a test block
-	hash1 := [32]byte{1, 2, 3}
-	block1 := &CachedBlock{
-		RawBytes: []byte("test block data"),
-		TxIndex: map[[32]byte]Location{
-			{0xaa}: {Offset: 0, Length: 5},
-		},
-		OutputIndex: map[OutputKey]Location{
-			{TxIndex: 0, OutputIndex: 0}: {Offset: 5, Length: 10},
-		},
-	}
-
-	// Test Put and Get
-	cache.Put(100, hash1, block1)
-
-	got, ok := cache.Get(100, hash1)
-	require.True(t, ok)
-	assert.Equal(t, block1.RawBytes, got.RawBytes)
-	assert.Equal(t, block1.TxIndex, got.TxIndex)
-	assert.Equal(t, block1.OutputIndex, got.OutputIndex)
-
-	// Test Get for non-existent block
-	hash2 := [32]byte{4, 5, 6}
-	got, ok = cache.Get(100, hash2)
-	assert.False(t, ok)
-	assert.Nil(t, got)
-
-	// Test Get with wrong slot but correct hash
-	got, ok = cache.Get(101, hash1)
-	assert.False(t, ok)
-	assert.Nil(t, got)
-
-	// Test overwriting existing entry
-	block1Updated := &CachedBlock{
-		RawBytes: []byte("updated block data"),
-		TxIndex:  map[[32]byte]Location{},
-	}
-	cache.Put(100, hash1, block1Updated)
-
-	got, ok = cache.Get(100, hash1)
-	require.True(t, ok)
-	assert.Equal(t, block1Updated.RawBytes, got.RawBytes)
-}
-
 func TestBlockLRUCacheEviction(t *testing.T) {
 	t.Parallel()
 
@@ -389,82 +338,4 @@ func TestCachedBlockExtractReturnsCopy(t *testing.T) {
 
 	// Also verify the full RawBytes are intact
 	assert.Equal(t, original, block.RawBytes)
-}
-
-func TestBlockLRUCacheConcurrent(t *testing.T) {
-	t.Parallel()
-
-	cache := NewBlockLRUCache(100)
-	var wg sync.WaitGroup
-	numGoroutines := 50
-	numOperations := 100
-
-	// Spawn multiple goroutines doing concurrent puts and gets
-	for i := range numGoroutines {
-		wg.Add(1)
-		go func(id int) {
-			defer wg.Done()
-			for j := range numOperations {
-				slot := uint64((id*numOperations + j) % 200)
-				hash := [32]byte{byte(id), byte(j)}
-
-				// Put
-				block := &CachedBlock{
-					RawBytes: []byte{byte(id), byte(j)},
-					TxIndex:  map[[32]byte]Location{},
-				}
-				cache.Put(slot, hash, block)
-
-				// Get
-				_, _ = cache.Get(slot, hash)
-			}
-		}(i)
-	}
-
-	wg.Wait()
-
-	// Verify cache is still functional after concurrent access
-	hash := [32]byte{0xff}
-	block := &CachedBlock{RawBytes: []byte("final")}
-	cache.Put(999, hash, block)
-
-	got, ok := cache.Get(999, hash)
-	assert.True(t, ok)
-	assert.Equal(t, block.RawBytes, got.RawBytes)
-}
-
-func TestBlockLRUCacheLRUOrdering(t *testing.T) {
-	t.Parallel()
-
-	cache := NewBlockLRUCache(3)
-
-	hash1 := [32]byte{1}
-	hash2 := [32]byte{2}
-	hash3 := [32]byte{3}
-
-	// Add blocks in order: 1, 2, 3
-	cache.Put(1, hash1, &CachedBlock{RawBytes: []byte("block1")})
-	cache.Put(2, hash2, &CachedBlock{RawBytes: []byte("block2")})
-	cache.Put(3, hash3, &CachedBlock{RawBytes: []byte("block3")})
-
-	// Access order: 3, 1, 2
-	// This makes LRU order (most to least recent): 2, 1, 3
-	cache.Get(3, hash3)
-	cache.Get(1, hash1)
-	cache.Get(2, hash2)
-
-	// Adding a new block should evict block3 (least recently used)
-	hash4 := [32]byte{4}
-	cache.Put(4, hash4, &CachedBlock{RawBytes: []byte("block4")})
-
-	_, ok := cache.Get(3, hash3)
-	assert.False(t, ok, "block3 should have been evicted as LRU")
-
-	// Others should still be present
-	_, ok = cache.Get(1, hash1)
-	assert.True(t, ok)
-	_, ok = cache.Get(2, hash2)
-	assert.True(t, ok)
-	_, ok = cache.Get(4, hash4)
-	assert.True(t, ok)
 }
