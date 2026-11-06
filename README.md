@@ -40,33 +40,17 @@ provides pluggable storage and client interfaces.
   [architecture](ARCHITECTURE.md), [database design](DATABASE.md), and [plugin
   development](database/plugin/PLUGIN_DEVELOPMENT.md).
 
-## Approximate sync times and runtime resource use
+## Network sync and runtime usage
 
-Completed Mithril timings are from Dingo v0.90.5. They measure launch through
-bootstrap completion; API timings include historical metadata backfill and
-finalization. Mithril snapshot bootstrap and full sync from genesis are separate
-operations. A completed full-genesis duration is not available for the networks
-below.
+Dingo v0.90.5. Runtime CPU/RAM are sampled highs after bootstrap; disk is database size. `—` = not captured.
 
-| Network | Core, Mithril | Core, from genesis | API, Mithril | API, from genesis |
-| --- | --- | --- | --- | --- |
-| Preview | ~13 minutes | No completed timing | ~4 hours 41 minutes | No completed timing |
-| Preprod | ~16 minutes | No completed timing | ~3 hours 43 minutes | No completed timing |
-| Mainnet | ~6 hours 2 minutes | No completed timing | No completed timing | No completed timing |
-| Musashi | No snapshot available | No completed timing | No snapshot available | No completed timing |
-| Dijkstra | Not measured | Not measured | Not measured | Not measured |
-
-Runtime resource figures below are sampled process highs after bootstrap while
-serving, not during sync. The serving samples lasted about 20 minutes, so they
-are short-window observations rather than long-term maxima.
-
-| Network and mode | Runtime RSS | Runtime CPU | Database size |
-| --- | ---: | ---: | ---: |
-| Preview Core | ~2.0 GiB | ~1.2 cores | ~17.8 GiB |
-| Preprod Core | ~2.7 GiB | ~1.1 cores | ~22.8 GiB |
-| Preview and Preprod API | Not captured | Not captured | Not captured |
-| Mainnet Core and API | Not captured | Not captured | Not captured |
-| Musashi and Dijkstra | Not captured | Not captured | Not captured |
+| Network | Mode | CPU | RAM | Disk | Sync time |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Preview | Core, Mithril | ~1.2 cores | ~2.0 GiB | ~17.8 GiB | ~13 min |
+| Preprod | Core, Mithril | ~1.1 cores | ~2.7 GiB | ~22.8 GiB | ~16 min |
+| Preview | API, Mithril | — | — | — | ~4h 41m |
+| Preprod | API, Mithril | — | — | — | ~3h 43m |
+| Mainnet | Core, Mithril | — | — | — | ~6h 2m |
 
 ## Codebase
 
