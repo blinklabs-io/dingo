@@ -6500,6 +6500,29 @@ func (ls *LedgerState) prepareEraTransitionsForRollover(
 		transitionHardForkMajors, plutusV2CostModelWritten, nil
 }
 
+// applyRolloverTransitionInfo settles transitionInfo after an epoch rollover
+// has committed, for a rollover that did not also change era. A new epoch
+// makes any TransitionImpossible set for the previous epoch stale, so it resets
+// to Unknown and the tip-update logic re-evaluates for the new epoch's horizon.
+// TransitionKnown is set only when the epoch rolled over in the old era with a
+// version bump. A rollover that changed era is left alone, because
+// applyEraTransition already cleared the state. The caller holds the ledger
+// lock.
+func (ls *LedgerState) applyRolloverTransitionInfo(
+	eraTransitions int,
+	rolloverResult *EpochRolloverResult,
+) {
+	if eraTransitions != 0 || rolloverResult == nil {
+		return
+	}
+	ls.transitionInfo = hardfork.NewTransitionUnknown()
+	if rolloverResult.HardFork != nil {
+		ls.transitionInfo = hardfork.NewTransitionKnown(
+			rolloverResult.NewCurrentEpoch.EpochId,
+		)
+	}
+}
+
 // applyEraTransition applies a single era-transition result to the in-memory
 // LedgerState fields. Must be called while holding ls.Lock(), except during
 // single-threaded startup before LedgerState is visible to concurrent readers.
@@ -8952,24 +8975,8 @@ func (ls *LedgerState) processBlocksFromSource(
 				}
 				ls.checkpointWrittenForEpoch = rolloverResult.CheckpointWrittenForEpoch
 				ls.metrics.epochNum.Set(rolloverResult.NewEpochNum)
-				// New epoch: any TransitionImpossible set for the previous
-				// epoch is now stale.  Reset to Unknown so the tip-update
-				// logic re-evaluates for the new epoch's horizon.
-				// (applyEraTransition already handles the era-transition case.)
-				if len(eraTransitions) == 0 {
-					ls.transitionInfo = hardfork.NewTransitionUnknown()
-				}
 			}
-			// Set TransitionKnown only when epoch rolled over in the old era
-			// with a version bump AND no era transition already cleared it.
-			// applyEraTransition (above) handles the clear for transitions.
-			if len(eraTransitions) == 0 &&
-				rolloverResult != nil &&
-				rolloverResult.HardFork != nil {
-				ls.transitionInfo = hardfork.NewTransitionKnown(
-					rolloverResult.NewCurrentEpoch.EpochId,
-				)
-			}
+			ls.applyRolloverTransitionInfo(len(eraTransitions), rolloverResult)
 			// Re-apply any TestXHardForkAtEpoch override, and re-check the
 			// classic quorum trigger. Both matter when no
 			// eraTransitions/HardFork occurred (the rollover reset
