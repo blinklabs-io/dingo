@@ -754,6 +754,8 @@ func minimalShelleyGenesisCfg(t *testing.T) *cardano.CardanoNodeConfig {
 // TestHardForkSummary_SingleEra verifies the simple case: one era spanning
 // multiple contiguous epochs, built from epochCache alone.
 func TestHardForkSummary_SingleEra(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{
 		epochCache: []models.Epoch{
 			{
@@ -815,6 +817,8 @@ func TestHardForkSummary_SingleEra(t *testing.T) {
 // TestHardForkSummary_TwoEras verifies two contiguous eras produce a Summary
 // with the first era bounded and the second (current) era safe-zone bounded.
 func TestHardForkSummary_TwoEras(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{
 		epochCache: []models.Epoch{
 			// Byron-ish: EraId=0, 20s slots, 100 slots/epoch
@@ -894,6 +898,8 @@ func TestHardForkSummary_TwoEras(t *testing.T) {
 
 // TestHardForkSummary_EmptyCache errors.
 func TestHardForkSummary_EmptyCache(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{
 		config: LedgerStateConfig{
 			CardanoNodeConfig: minimalShelleyGenesisCfg(t),
@@ -1282,6 +1288,8 @@ func TestHardForkSummary_CarriesTransitionInfo(t *testing.T) {
 // first post-boundary epoch stays within the forecast horizon. Reproduces the
 // musashi epoch 6 to 7 wedge in miniature.
 func TestHardForkSummary_KnownTransitionExtendsHeaderHorizon(t *testing.T) {
+	t.Parallel()
+
 	const (
 		epochSize    = uint64(100)
 		startEpoch   = uint64(4)
@@ -1363,6 +1371,8 @@ func TestHardForkSummary_KnownTransitionExtendsHeaderHorizon(t *testing.T) {
 func TestHardForkSummary_KnownTransitionSuccessorBoundedBySafeZone(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const (
 		epochSize     = uint64(100)
 		safeZoneSlots = uint64(250)
@@ -1441,6 +1451,8 @@ func TestHardForkSummary_KnownTransitionSuccessorBoundedBySafeZone(
 // A shape with non-contiguous era IDs would otherwise fail the successor lookup
 // and silently reuse the current era's ID and params.
 func TestHardForkSummary_KnownTransitionSuccessorByShapeOrder(t *testing.T) {
+	t.Parallel()
+
 	const (
 		knownEpoch   = uint64(7)
 		boundarySlot = uint64(700)
@@ -1513,6 +1525,8 @@ func TestHardForkSummary_KnownTransitionSuccessorByShapeOrder(t *testing.T) {
 // at or ahead of the tip), one successor already reaches at least tip+safeZone,
 // so there is no gap; a slot beyond the deterministic window is still rejected.
 func TestHardForkSummary_KnownTransitionCoversStabilityWindow(t *testing.T) {
+	t.Parallel()
+
 	const (
 		epochSize  = uint64(100)
 		safeZone   = uint64(250) // spans 2.5 epochs
@@ -1589,6 +1603,8 @@ func TestHardForkSummary_KnownTransitionCoversStabilityWindow(t *testing.T) {
 func TestHardForkSummary_KnownTransitionRejectsPastSuccessorBound(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const (
 		epochSize  = uint64(100)
 		safeZone   = uint64(250)
@@ -1745,6 +1761,8 @@ func TestHardForkSummary_KnownTransitionSuccessorTracksLiveTip(t *testing.T) {
 }
 
 func TestHardForkSummary_RejectsSlotPastSafeZone(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{
 		epochCache: []models.Epoch{
 			{
@@ -1784,6 +1802,8 @@ func TestHardForkSummary_RejectsSlotPastSafeZone(t *testing.T) {
 // peer pool during catch-up and deadlocks at epoch boundaries. The error must
 // still carry ErrPastHorizon so the no-apply-past-horizon guard is unchanged.
 func TestHeaderVerificationEpoch_PastHorizonDeferred(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{
 		epochCache: []models.Epoch{{
 			EpochId:       500,
@@ -1821,6 +1841,8 @@ func TestHeaderVerificationEpoch_PastHorizonDeferred(t *testing.T) {
 }
 
 func TestHardForkSummary_MainnetForecastBoundary(t *testing.T) {
+	t.Parallel()
+
 	testCases := []struct {
 		name          string
 		tipSlot       uint64
@@ -1905,6 +1927,8 @@ func TestHardForkSummary_MainnetForecastBoundary(t *testing.T) {
 }
 
 func TestEpochInfoUsesMaterializedEpochPastForecast(t *testing.T) {
+	t.Parallel()
+
 	cfg := minimalShelleyGenesisCfg(t)
 	ls := &LedgerState{
 		epochCache: []models.Epoch{
@@ -1954,6 +1978,8 @@ func TestEpochInfoUsesMaterializedEpochPastForecast(t *testing.T) {
 func TestHardForkSummary_TransitionImpossibleStartsAtEraBoundary(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls := &LedgerState{
 		epochCache: []models.Epoch{
 			{
@@ -1995,6 +2021,8 @@ func TestHardForkSummary_TransitionImpossibleStartsAtEraBoundary(
 // proportional to the staleness: on Preview, 46 slots of lag cost a full epoch
 // of horizon and rejected a canonical Plutus transaction.
 func TestHardForkSummary_HorizonAnchoredAtAppliedParent(t *testing.T) {
+	t.Parallel()
+
 	ls := previewWedgeLedgerState(t)
 
 	sum, err := ls.HardForkSummary()
@@ -2033,6 +2061,8 @@ func TestHardForkSummary_HorizonAnchoredAtAppliedParent(t *testing.T) {
 }
 
 func TestWallClockSlotFromConfirmedHistory_SupportedWhenEraSpansNow(t *testing.T) {
+	t.Parallel()
+
 	// A single unbounded era whose slot length is 1s spans the real wall
 	// clock, so the method returns the true current slot. The exact slot
 	// changes every second, but it must be far larger than the warm-up
@@ -2078,6 +2108,8 @@ func TestWallClockSlotFromConfirmedHistory_SupportedWhenEraSpansNow(t *testing.T
 }
 
 func TestWallClockSlotFromConfirmedHistory_UnsupportedWhenPastHorizon(t *testing.T) {
+	t.Parallel()
+
 	// A bounded era whose forecast horizon ends far in the past (fresh
 	// mainnet has only a single bounded Byron era) cannot resolve the
 	// current wall-clock time, so the method must return false.
@@ -2126,6 +2158,8 @@ func TestWallClockSlotFromConfirmedHistory_UnsupportedWhenPastHorizon(t *testing
 }
 
 func TestWallClockSlotFromConfirmedHistory_EmptyCache(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{
 		config: LedgerStateConfig{
 			CardanoNodeConfig: newTestEraHistoryCfg(t),

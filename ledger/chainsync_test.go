@@ -2313,6 +2313,8 @@ func (f *blockfetchRollbackFixture) rollbackToAncestorAndQueueForkB(
 func TestForkRestartKeepsReplacementHeadersWhenAbandonedBatchArrives(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	f := newBlockfetchRollbackFixture(t)
 	f.queueForkAHeaderAndStartBatch(t)
 	f.deliverForkABody(t)
@@ -2354,6 +2356,8 @@ func TestForkRestartKeepsReplacementHeadersWhenAbandonedBatchArrives(
 }
 
 func TestForkRestartDropsAbandonedBodyArrivingAfterRestart(t *testing.T) {
+	t.Parallel()
+
 	f := newBlockfetchRollbackFixture(t)
 	f.queueForkAHeaderAndStartBatch(t)
 	f.rollbackToAncestorAndQueueForkB(t)
@@ -2410,6 +2414,8 @@ func TestForkRestartDropsAbandonedBodyArrivingAfterRestart(t *testing.T) {
 // The rollback target is the current chain tip, so the abandoned bodies still
 // fit the chain by parent hash; only the rollback generation check stops them.
 func TestFarFromTipLowWatermarkRollbackDiscardsInFlightBatch(t *testing.T) {
+	t.Parallel()
+
 	f := newBlockfetchRollbackFixture(t)
 	f.ls.config.BlockfetchLowWatermarkEnabled = true
 	f.holdRequestReservation = true
@@ -2554,6 +2560,8 @@ func TestFarFromTipLowWatermarkRollbackDiscardsInFlightBatch(t *testing.T) {
 // same-range failure streak a NoBlocks reply feeds, so the range is dropped
 // and a fresh intersect requested rather than being re-requested forever.
 func TestBatchDoneTreatsDiscardedBatchAsUnobtainedRange(t *testing.T) {
+	t.Parallel()
+
 	f := newBlockfetchRollbackFixture(t)
 
 	for attempt := 1; attempt <= blockfetchMaxSameRangeFailures; attempt++ {
@@ -2610,6 +2618,8 @@ func TestBatchDoneTreatsDiscardedBatchAsUnobtainedRange(t *testing.T) {
 // dropped. Accepting such a body to keep the pipeline moving would be far
 // worse than the stall.
 func TestNonFittingBodyStillRejectedWhenTipDidNotMove(t *testing.T) {
+	t.Parallel()
+
 	f := newBlockfetchRollbackFixture(t)
 	tipBefore := f.ls.chain.Tip()
 
@@ -2671,6 +2681,8 @@ func TestNonFittingBodyStillRejectedWhenTipDidNotMove(t *testing.T) {
 // to catch: every round recorded one failure and the next round's delivery
 // erased it.
 func TestDiscardedBodyDoesNotCountAsRangeProgress(t *testing.T) {
+	t.Parallel()
+
 	f := newBlockfetchRollbackFixture(t)
 	f.queueForkAHeaderAndStartBatch(t)
 	forkAPoint := ocommon.NewPoint(
@@ -2904,6 +2916,8 @@ func TestCompareIncomingHeaderToLocalTip_ByronEBBBeatsRegularTip(t *testing.T) {
 func TestBlockfetchContinuationPublishesHeaderInvalidationOnFailure(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 	cm, err := chain.NewManager(context.Background(), nil, bus)
@@ -4753,6 +4767,8 @@ type chainSwitchBarrier struct{}
 func TestCanonicalFrontierCrossingDoesNotCloseAPeerAheadOfLocalTip(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	chainManager, err := chain.NewManager(context.Background(), nil, nil)
 	require.NoError(t, err)
 	testChain := chainManager.PrimaryChain()
@@ -11507,6 +11523,8 @@ func TestProcessChainIteratorRollbackAppliesStaleRollbackWhenLedgerTipAbandoned(
 func TestProcessChainIteratorRollbackUsesCapturedBlocksAfterChainDeletion(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	removedBlock, err := database.BlockByPoint(
 		context.Background(),
@@ -20521,6 +20539,8 @@ func announcingHeader(
 func TestChainsyncHeaderAdmissionAnnouncesOnlyWhenCryptoVerified(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ebHash := lcommon.NewBlake2b256([]byte("announced-eb"))
 	header := announcingHeader(
 		577, "hdr-1", lcommon.NewBlake2b256(nil), 1, ebHash,
@@ -20600,6 +20620,8 @@ func TestChainsyncHeaderAdmissionAnnouncesOnlyWhenCryptoVerified(
 // one carries a pre-rollback crypto verdict, which is stale by the time the
 // path is queued. Both a stale and an absent verdict are asserted here.
 func TestForkResolutionInvalidatesTheIncomingHeaderVerdict(t *testing.T) {
+	t.Parallel()
+
 	for _, tc := range []struct {
 		name           string
 		cryptoVerified bool
@@ -20815,6 +20837,8 @@ func newChainsyncRollbackFixtureWithBus(
 // dead peer is exactly the case where no further event is guaranteed, so the
 // announcement would stay armed well past the ten-slot vote window.
 func TestConnectionClosedPublishesHeaderInvalidation(t *testing.T) {
+	t.Parallel()
+
 	fixture := newHeaderStreamLedger(t)
 	ebHash := lcommon.NewBlake2b256([]byte("announced-eb"))
 	header := announcingHeader(
@@ -20857,6 +20881,8 @@ func TestConnectionClosedPublishesHeaderInvalidation(t *testing.T) {
 // is the last thing that runs for a peer that stopped sending, so it has to
 // drain the sequencer rather than leave header events queued behind it.
 func TestBlockfetchTimeoutDrainsHeaderSequencer(t *testing.T) {
+	t.Parallel()
+
 	fixture := newHeaderStreamLedger(t)
 	ebHash := lcommon.NewBlake2b256([]byte("announced-eb"))
 	header := announcingHeader(
@@ -21017,6 +21043,8 @@ func TestEpochDonationWithdrawalRollback(t *testing.T) {
 // Reporting a target below the prune floor as crossable would make the detector
 // insist on applying a rollback rollbackChainAndStateDeferred refuses.
 func TestRollbackIsAppliableRejectsBelowConsumedUtxoPruneFloor(t *testing.T) {
+	t.Parallel()
+
 	f := newPrunedUtxoFixture(t, 0)
 	f.ls.cleanupConsumedUtxos(context.Background())
 
@@ -21049,6 +21077,8 @@ func TestRollbackIsAppliableRejectsBelowConsumedUtxoPruneFloor(t *testing.T) {
 // rollback point terminate the node. The handler must instead reject the peer
 // chain and ask for a fresh intersection, exactly as the Mithril boundary does.
 func TestHandleEventChainsyncRollbackRejectsBelowPruneFloor(t *testing.T) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	bus := newTestEventBus(t, nil)
 	t.Cleanup(func() { bus.Stop() })
@@ -21522,6 +21552,8 @@ func TestDeferredHeaderMarkerDoesNotPersistUnparseableSource(t *testing.T) {
 // keeps the supplying peer's address.
 // Not t.Parallel: swaps the package-level afterDeferredMarkerDeleteHook seam.
 func TestDeferredMarkerRestoreKeepsSource(t *testing.T) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{50}, 0, tamperNone)
 	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
 	connId := testRecycleConnId()

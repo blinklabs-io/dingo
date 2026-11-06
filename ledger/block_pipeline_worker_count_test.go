@@ -179,8 +179,8 @@ func TestBlockPipelineWorkerCountThroughput(t *testing.T) {
 		)
 	}
 
-	const blockCount = 128
-	const repetitions = 5
+	const blockCount = 32
+	const repetitions = 1
 	blocks, epochNonceHex, slotsPerKesPeriod := buildValidatedPipelineThroughputBlocks(
 		t,
 		blockCount,

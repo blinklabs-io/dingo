@@ -421,6 +421,8 @@ func TestBlockZeroConwayDepositsAndRefundsAreAccepted(t *testing.T) {
 }
 
 func TestConwayExplicitCertificatesRejectNegativeDepositCBOR(t *testing.T) {
+	t.Parallel()
+
 	credential := lcommon.Credential{
 		CredType:   lcommon.CredentialTypeAddrKeyHash,
 		Credential: lcommon.CredentialHash{0xd1},

@@ -27,6 +27,8 @@ import (
 // different amount is still rejected, including the zero the absence would
 // have been misread as.
 func TestDrepDeregistrationRejectsWrongRefundWhenUnrecorded(t *testing.T) {
+	t.Parallel()
+
 	lv, db := newDrepFallbackTestView(t)
 	cred := drepRefundTestCredential(0xe2)
 	seedActiveDrepWithoutRegistration(t, db, cred, 100)
@@ -49,6 +51,8 @@ func TestDrepDeregistrationRejectsWrongRefundWhenUnrecorded(t *testing.T) {
 // outcomes and the test cannot pass by accident: a recorded deposit must win,
 // and the fallback must not be reached.
 func TestDrepDeregistrationPrefersRecordedDepositOverFallback(t *testing.T) {
+	t.Parallel()
+
 	lv, db := newDrepFallbackTestView(t)
 	cred := drepRefundTestCredential(0xe3)
 	require.NotEqual(
