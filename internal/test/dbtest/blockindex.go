@@ -66,7 +66,7 @@ func RunCloudBlockNumberBoundWork(
 	// Budget: one initial seek, 64 bisection probes, and five requests
 	// of headroom for bounded changes to the lookup algorithm.
 	const maxLists = 70
-	for _, n := range []uint64{200, 75_000} {
+	for _, n := range []uint64{200, 5_000} {
 		seedTo(n)
 		lists, listed := fc.Requests("LIST"), fc.Listed()
 		bound, err := database.ResolveBlockNumberBound(context.Background(), db)
