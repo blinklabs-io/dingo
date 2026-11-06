@@ -40,6 +40,13 @@ The workflow still starts for documentation-only PRs so existing required job
 checks can report skipped instead of remaining pending. Commit-message checks
 continue to run.
 
+The `cancel-obsolete-merge-groups` workflow scans active merge-group runs when
+queue CI is requested or completed, and when a queue branch is deleted. It
+cancels a run only after the GitHub API confirms that its queue ref is absent.
+Existing queue refs keep their runs. The cleanup uses the default-branch
+workflow without checking out merge-group code; test jobs retain read-only
+permissions.
+
 ## Conformance profiles
 
 Dingo reports compatibility in separate layers; a green ledger result is not
