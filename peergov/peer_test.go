@@ -25,6 +25,8 @@ import (
 )
 
 func TestMaxPeerListSize_UsesDoubleKnownPeersWhenLarger(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(
 			slog.NewJSONHandler(io.Discard, nil),
@@ -35,6 +37,8 @@ func TestMaxPeerListSize_UsesDoubleKnownPeersWhenLarger(t *testing.T) {
 }
 
 func TestMaxPeerListSize_UsesMinCapWhenSmaller(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(
 			slog.NewJSONHandler(io.Discard, nil),
@@ -48,6 +52,8 @@ func TestMaxPeerListSize_UsesMinCapWhenSmaller(t *testing.T) {
 // ledger relay already retained from another source satisfies the target
 // without adding a duplicate peer.
 func TestAddLedgerPeer_ExistingPeerCountsTowardLedgerTarget(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		LedgerPeerTarget: 1,
