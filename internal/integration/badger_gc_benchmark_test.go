@@ -895,4 +895,3 @@ func BenchmarkBadgerGCPolicy(b *testing.B) {
 		}
 	}
 }
-
