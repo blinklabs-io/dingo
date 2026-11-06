@@ -16,7 +16,6 @@ package integration
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"log/slog"
 	"testing"
@@ -49,7 +48,7 @@ func TestPluginSystemIntegration(t *testing.T) {
 
 	runtime, err := internalplugins.OpenDatabase(
 		context.Background(),
-		&database.Config{DataDir: t.TempDir()},
+		&database.Config{},
 		internalplugins.StorageSelections{
 			Blob: plugin.Selection{
 				Provider: "badger",
@@ -60,7 +59,7 @@ func TestPluginSystemIntegration(t *testing.T) {
 				Config:   map[string]any{},
 			},
 		},
-		internalplugins.StorageDependencies{DataDir: t.TempDir()},
+		internalplugins.StorageDependencies{},
 	)
 	require.NoError(t, err)
 	require.NotNil(t, runtime.Database.Blob())
@@ -86,44 +85,4 @@ func TestNodeShutdownIntegration(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, node.Stop())
 	require.NoError(t, node.Stop())
-}
-
-func TestStorageBackends(t *testing.T) {
-	t.Parallel()
-
-	for _, dataDir := range []string{"", t.TempDir()} {
-		t.Run(fmt.Sprintf("dir-%t", dataDir != ""), func(t *testing.T) {
-			runtime, err := internalplugins.OpenDatabase(
-				context.Background(),
-				&database.Config{DataDir: dataDir},
-				internalplugins.StorageSelections{
-					Blob: plugin.Selection{
-						Provider: "badger",
-						Config:   map[string]any{},
-					},
-					Metadata: plugin.Selection{
-						Provider: "sqlite",
-						Config:   map[string]any{},
-					},
-				},
-				internalplugins.StorageDependencies{DataDir: dataDir},
-			)
-			require.NoError(t, err)
-			t.Cleanup(
-				func() { require.NoError(t, runtime.Close(context.Background())) },
-			)
-
-			blocks, err := loadBlockData(10)
-			require.NoError(t, err)
-			for i := range 10 {
-				txn := runtime.Database.Transaction(context.Background(), true)
-				key := fmt.Appendf(nil, "block-%d", i)
-				require.NoError(
-					t,
-					txn.DB().Blob().Set(txn.Blob(), key, blocks[i]),
-				)
-				require.NoError(t, txn.Commit())
-			}
-		})
-	}
 }

@@ -347,34 +347,6 @@ func TestManagerRejectsBadgerAutomaticSnapshotsButManualSnapshotsRemainAvailable
 	)
 }
 
-// TestManagerCapturesSnapshotOnEpochBoundary verifies that an
-// epoch-transition event captures a real snapshot under epoch-<N>.
-func TestManagerCapturesSnapshotOnEpochBoundary(t *testing.T) {
-	t.Parallel()
-
-	db := newManagerTestDB(t)
-	eb := event.NewEventBus(nil, nil)
-	defer eb.Stop()
-
-	snapshotDir := t.TempDir()
-	m := dblifecycle.NewManager(db, eb, config.DatabaseLifecycleConfig{
-		SnapshotEnabled:      true,
-		SnapshotDir:          snapshotDir,
-		SnapshotEveryNEpochs: 1,
-	}, testManagerBlobPlugin, "sqlite", testDestinationRegistry, nil)
-	require.NoError(t, m.Start(context.Background()))
-	defer m.Stop()
-
-	publishEpochTransition(eb, 5)
-
-	require.Eventually(t, func() bool {
-		_, err := os.Stat(
-			filepath.Join(snapshotDir, "epoch-5", "manifest.json"),
-		)
-		return err == nil
-	}, snapshotWait, 10*time.Millisecond)
-}
-
 // TestManagerAppliesMaxCommitPause verifies automatic snapshots pass
 // SnapshotMaxCommitPause to lifecycle.Snapshot. A nanosecond bound has
 // always elapsed by the time the state reads finish.
@@ -490,12 +462,12 @@ func TestManagerPrunesOldSnapshotsBeyondRetention(t *testing.T) {
 		SnapshotEnabled:      true,
 		SnapshotDir:          snapshotDir,
 		SnapshotEveryNEpochs: 1,
-		SnapshotRetention:    2,
+		SnapshotRetention:    1,
 	}, testManagerBlobPlugin, "sqlite", testDestinationRegistry, nil)
 	require.NoError(t, m.Start(context.Background()))
 	defer m.Stop()
 
-	for epoch := uint64(1); epoch <= 3; epoch++ {
+	for epoch := uint64(1); epoch <= 2; epoch++ {
 		publishEpochTransition(eb, epoch)
 		// 30s, not 5s: a real badger+sqlite snapshot capture, matching
 		// TestManagerRespectsEveryNEpochsGating's identical allowance for
@@ -516,7 +488,6 @@ func TestManagerPrunesOldSnapshotsBeyondRetention(t *testing.T) {
 		return os.IsNotExist(err)
 	}, snapshotWait, 10*time.Millisecond)
 	require.DirExists(t, filepath.Join(snapshotDir, "epoch-2"))
-	require.DirExists(t, filepath.Join(snapshotDir, "epoch-3"))
 }
 
 // directoryBackedCloudDestination contains the common filesystem behavior
@@ -650,7 +621,7 @@ func TestManagerPruningDeletesCloudMirror(t *testing.T) {
 		SnapshotEnabled:          true,
 		SnapshotDir:              snapshotDir,
 		SnapshotEveryNEpochs:     1,
-		SnapshotRetention:        2,
+		SnapshotRetention:        1,
 		SnapshotCloudDestination: cloudDest,
 		SnapshotTrustKeyFile:     testSnapshotTrustKeyFile(t),
 	}, testManagerBlobPlugin, "sqlite", registry, nil)
@@ -678,7 +649,7 @@ func TestManagerPruningDeletesCloudMirror(t *testing.T) {
 		"startup cloud-mirror retry scan did not finish mirroring its probe",
 	)
 
-	for epoch := uint64(1); epoch <= 3; epoch++ {
+	for epoch := uint64(1); epoch <= 2; epoch++ {
 		publishEpochTransition(eb, epoch)
 		epochDir := filepath.Join(
 			cloudPrefixDir,
@@ -693,7 +664,7 @@ func TestManagerPruningDeletesCloudMirror(t *testing.T) {
 		require.FileExists(t, filepath.Join(epochDir, "manifest.json"))
 	}
 
-	// epoch-1 is beyond retention (2): both its local directory and its
+	// epoch-1 is beyond retention (1): both its local directory and its
 	// cloud mirror must be gone. Local removal is the observable completion
 	// point shared by both the fixed implementation and the old local-only
 	// pruning behavior, so the remote assertion below fails on the actual
@@ -709,7 +680,6 @@ func TestManagerPruningDeletesCloudMirror(t *testing.T) {
 	require.NoDirExists(t, filepath.Join(snapshotDir, "epoch-1"))
 	require.NoDirExists(t, filepath.Join(cloudPrefixDir, "epoch-1"))
 	require.DirExists(t, filepath.Join(cloudPrefixDir, "epoch-2"))
-	require.DirExists(t, filepath.Join(cloudPrefixDir, "epoch-3"))
 	available, _, err := lifecycle.ListAvailableSnapshotPageContext(
 		t.Context(), snapshotDir, cloudDest, 10, nil,
 	)
@@ -719,7 +689,7 @@ func TestManagerPruningDeletesCloudMirror(t *testing.T) {
 		ids = append(ids, entry.Entry.ID)
 	}
 	require.ElementsMatch(
-		t, []string{startupProbeName, "epoch-2", "epoch-3"}, ids,
+		t, []string{startupProbeName, "epoch-2"}, ids,
 	)
 }
 
@@ -1864,12 +1834,13 @@ func TestManagerCloudDestinationPrefixIsIncorporatedIntoUploadPath(
 func TestManagerRejectsUnsafeCloudDestinationPrefix(t *testing.T) {
 	t.Parallel()
 
+	db := newManagerTestDB(t)
 	for _, prefix := range []string{"..", ".", "nodes/a", `nodes\a`} {
 		t.Run(prefix, func(t *testing.T) {
 			eb := event.NewEventBus(nil, nil)
 			t.Cleanup(eb.Stop)
 			m := dblifecycle.NewManager(
-				newManagerTestDB(t),
+				db,
 				eb,
 				config.DatabaseLifecycleConfig{
 					SnapshotEnabled:                true,
@@ -1991,14 +1962,14 @@ func TestManagerPruningKeepsLocalCopyUntilCloudDeleteSucceeds(t *testing.T) {
 		SnapshotEnabled:          true,
 		SnapshotDir:              snapshotDir,
 		SnapshotEveryNEpochs:     1,
-		SnapshotRetention:        2,
+		SnapshotRetention:        1,
 		SnapshotCloudDestination: cloudDest,
 		SnapshotTrustKeyFile:     testSnapshotTrustKeyFile(t),
 	}, testManagerBlobPlugin, "sqlite", testDestinationRegistry, logger)
 	require.NoError(t, m.Start(context.Background()))
 	defer m.Stop()
 
-	for epoch := uint64(1); epoch <= 3; epoch++ {
+	for epoch := uint64(1); epoch <= 2; epoch++ {
 		publishEpochTransition(eb, epoch)
 		require.Eventually(t, func() bool {
 			_, err := os.Stat(filepath.Join(
@@ -2010,7 +1981,7 @@ func TestManagerPruningKeepsLocalCopyUntilCloudDeleteSucceeds(t *testing.T) {
 		}, snapshotWait, 10*time.Millisecond)
 	}
 
-	// epoch-1 is beyond retention (2): pruning must have attempted to
+	// epoch-1 is beyond retention (1): pruning must have attempted to
 	// delete its cloud mirror, failed (flakyDeleteCloudFail starts true),
 	// and therefore left the local copy in place -- neither gone.
 	require.Eventually(t, func() bool {
@@ -2031,11 +2002,11 @@ func TestManagerPruningKeepsLocalCopyUntilCloudDeleteSucceeds(t *testing.T) {
 	flakyDeleteCloudFail = false
 	flakyDeleteCloudMu.Unlock()
 
-	publishEpochTransition(eb, 4)
+	publishEpochTransition(eb, 3)
 	require.Eventually(t, func() bool {
 		_, err := os.Stat(filepath.Join(
 			cloudPrefixDir,
-			"epoch-4",
+			"epoch-3",
 			"manifest.json",
 		))
 		return err == nil

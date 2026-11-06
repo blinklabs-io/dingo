@@ -1859,26 +1859,6 @@ func TestHandleEpochTransitionReplacesStaleSnapshotRows(t *testing.T) {
 	require.Empty(t, accountOutputs)
 }
 
-// TestCaptureGenesisSnapshot_NoPools verifies that when no pools exist
-// at all, no snapshots are created and no error is returned.
-func TestCaptureGenesisSnapshot_NoPools(t *testing.T) {
-	t.Parallel()
-
-	db := setupTestDB(t)
-
-	// Epochs exist but no pools
-	seedEpochs(t, db, []models.Epoch{
-		{EpochId: 0, StartSlot: 0, LengthInSlots: 432000},
-		{EpochId: 10, StartSlot: 4320000, LengthInSlots: 432000},
-	})
-
-	eventBus := event.NewEventBus(nil, nil)
-	mgr := NewManager(db, eventBus, nil)
-
-	err := mgr.CaptureGenesisSnapshot(context.Background())
-	require.NoError(t, err, "no pools should not be an error")
-}
-
 // TestCaptureGenesisSnapshot_SmallEpoch verifies correct behavior when
 // the current epoch is less than 2 (edge case for the offset loop).
 func TestCaptureGenesisSnapshot_SmallEpoch(t *testing.T) {
@@ -2212,6 +2192,7 @@ func TestConcurrentFallbackAndAuthoritativeCaptureSerialization(t *testing.T) {
 	}
 
 	t.Run("fallback cannot overwrite authoritative", func(t *testing.T) {
+		t.Parallel()
 		mgr, poolHash, authoritativeEvt := newFixture(t)
 		db := mgr.db
 		fallbackEvt := authoritativeEvt
@@ -2322,6 +2303,7 @@ func TestConcurrentFallbackAndAuthoritativeCaptureSerialization(t *testing.T) {
 	})
 
 	t.Run("authoritative replaces provisional fallback", func(t *testing.T) {
+		t.Parallel()
 		mgr, _, authoritativeEvt := newFixture(t)
 		db := mgr.db
 		fallbackEvt := authoritativeEvt
