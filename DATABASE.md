@@ -4133,19 +4133,23 @@ namespace. Durable cleanup state is retried before a later live restore creates
 its own record, and an incomplete recovery directory without a record is removed
 consistently during retry and startup cleanup.
 
-### Core sync and Leios value placement
+### Sync and Leios value placement
 
-Core Mithril sync uses a 1 KiB Badger value threshold by default. Larger block
-CBOR values go to the value log instead of being rewritten through LSM
-compactions during import. Core Leios uses the same 1 KiB threshold so large
-endorser transaction closures live in the value log rather than being copied
-through the inline-value read path and rewritten through LSM compactions.
-Other storage modes and run modes retain the 1 MiB default. The blob provider's
-`valueThreshold` setting overrides either default. Badger records the placement
-with each value, so changing the threshold does not require rewriting existing
-records and both placements remain readable. Badger fixes the threshold when
-the store opens, so node-managed Mithril restores and stream catch-up, which run
-inside `serve` on the store `serve` opened, keep the serve default.
+Mithril sync (run mode `sync`) uses a 1 KiB Badger value threshold by default
+in both Core and API storage modes. Larger block CBOR values go to the value
+log instead of being rewritten through LSM compactions during import. Badger
+compresses only SST blocks, so in API mode those values are stored
+uncompressed: the store is larger than with inline ZSTD values (about 26% on a
+Preview import, where the copy wrote 54% fewer bytes and finished 34% sooner).
+Core Leios uses the same 1 KiB threshold so large endorser transaction closures
+live in the value log rather than being copied through the inline-value read
+path and rewritten through LSM compactions. API Leios and the other run modes
+retain the 1 MiB default. The blob provider's `valueThreshold` setting
+overrides either default. Badger records the placement with each value, so
+changing the threshold does not require rewriting existing records and both
+placements remain readable. Badger fixes the threshold when the store opens, so
+node-managed Mithril restores and stream catch-up, which run inside `serve` on
+the store `serve` opened, keep the serve default.
 
 Core sync mode uses a 1 GiB Badger memtable by default to improve bulk-import
 throughput. Other storage modes and run modes retain the 128 MiB default. The
