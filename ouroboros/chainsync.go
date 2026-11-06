@@ -2105,6 +2105,40 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		}
 		defer func() { tracing.End(span, err) }()
 		point := ocommon.NewPoint(blockSlot, blockHash)
+		// Every peer header, ingress or observer, enters through this
+		// callback, and everything downstream (observed history, candidate
+		// chains, the chain selector, the ledger header queue) is fed from
+		// it. A checkpoint mismatch is therefore refused here, before any
+		// of that state is touched and independent of validation mode or
+		// Mithril coverage.
+		if o.chainsyncHeaderCheckpoint != nil {
+			if cpErr := o.chainsyncHeaderCheckpoint(v); cpErr != nil {
+				o.config.Logger.Warn(
+					"chainsync: recycling connection after header failed checkpoint",
+					"component", "ouroboros",
+					"slot", blockSlot,
+					"connection_id", ctx.ConnectionId.String(),
+					"error", cpErr,
+				)
+				o.eventBus.Publish(
+					ledger.ConnectionRecycleRequestedEventType,
+					event.NewEvent(
+						ledger.ConnectionRecycleRequestedEventType,
+						ledger.ConnectionRecycleRequestedEvent{
+							ConnectionId: ctx.ConnectionId,
+							Reason:       "header_verification_failure",
+						},
+					),
+				)
+				if o.chainsyncState != nil {
+					o.chainsyncState.MarkClientFailed(ctx.ConnectionId)
+				}
+				return fmt.Errorf(
+					"chainsync: header failed checkpoint validation: %w",
+					cpErr,
+				)
+			}
+		}
 		// Genesis Limit on Patience: the peer is charged up to the header's
 		// network arrival, not for this node's decoding, admission waits,
 		// verification, or ledger backpressure below. A header that clears
