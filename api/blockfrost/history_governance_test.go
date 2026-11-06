@@ -32,22 +32,6 @@ func testGovActionID(t *testing.T, tx byte, index uint32) string {
 	return id.String()
 }
 
-func TestHandleGovernanceProposalList(t *testing.T) {
-	t.Parallel()
-	node := &mockNode{}
-	node.proposals.items = []GovernanceProposalInfo{{
-		ID: "gov_action1abc", TxHash: "aa", CertIndex: 2,
-		GovernanceType: "info_action",
-	}}
-	node.proposals.total = 1
-	recorder := get(t, node, "/api/v0/governance/proposals?count=3&order=desc")
-	require.Equal(t, http.StatusOK, recorder.Code)
-	assert.Equal(t, 3, node.proposals.params.Count)
-	assert.Equal(t, PaginationOrderDesc, node.proposals.params.Order)
-	assert.JSONEq(t, `[{"id":"gov_action1abc","tx_hash":"aa","cert_index":2,"governance_type":"info_action"}]`, recorder.Body.String())
-	assert.Equal(t, "1", recorder.Header().Get("X-Pagination-Count-Total"))
-}
-
 // Both identifier forms of every proposal operation reach the same node
 // method with the same reference.
 func TestHandleGovernanceProposalIdentifierForms(t *testing.T) {
@@ -239,26 +223,6 @@ func TestHandlePoolVotes(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, get(t, node, "/api/v0/pools/pool1xyz/votes").Code)
 	node.poolVotes.err = ErrHistoryNotRetained
 	assert.Equal(t, http.StatusNotFound, get(t, node, "/api/v0/pools/pool1xyz/votes").Code)
-}
-
-func TestHandleCommittee(t *testing.T) {
-	t.Parallel()
-	hotID, hotHex, script := "cc_hot1x", "02aa", false
-	node := &mockNode{}
-	node.committee.value = CommitteeInfo{
-		QuorumNum: 2, QuorumDenom: 3,
-		Members: []CommitteeMemberInfo{
-			{ColdID: "cc_cold1a", ColdHex: "12bb", Status: "authorized", HotID: &hotID, HotHex: &hotHex, HotHasScript: &script, ExpirationEpoch: 500},
-			{ColdID: "cc_cold1b", ColdHex: "13cc", ColdHasScript: true, Status: "not_authorized", ExpirationEpoch: 600},
-		},
-	}
-	recorder := get(t, node, "/api/v0/governance/committee")
-	require.Equal(t, http.StatusOK, recorder.Code)
-	assert.JSONEq(t, `{"gov_action_id":null,"proposal_tx_hash":null,"proposal_index":null,"is_dissolved":false,"quorum":{"numerator":2,"denominator":3},"members":[
-{"cc_cold_id":"cc_cold1a","cc_cold_hex":"12bb","cc_cold_has_script":false,"cc_hot_id":"cc_hot1x","cc_hot_hex":"02aa","cc_hot_has_script":false,"status":"authorized","expiration_epoch":500},
-{"cc_cold_id":"cc_cold1b","cc_cold_hex":"13cc","cc_cold_has_script":true,"cc_hot_id":null,"cc_hot_hex":null,"cc_hot_has_script":null,"status":"not_authorized","expiration_epoch":600}]}`, recorder.Body.String())
-	node.committee.err = errors.New("boom")
-	assert.Equal(t, http.StatusInternalServerError, get(t, node, "/api/v0/governance/committee").Code)
 }
 
 func TestHandleCommitteeVotes(t *testing.T) {

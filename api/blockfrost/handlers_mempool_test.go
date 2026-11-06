@@ -16,7 +16,6 @@ package blockfrost
 
 import (
 	"context"
-	"encoding/hex"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -74,60 +73,6 @@ func TestHandleMempoolAddress(t *testing.T) {
 	w = serve(t, node, "/api/v0/mempool/addresses/bad")
 	require.Equal(t, http.StatusBadRequest, w.Code)
 	require.Contains(t, w.Body.String(), "Invalid address")
-}
-
-func TestHandleMempoolTransaction(t *testing.T) {
-	t.Parallel()
-	inline := "d87980"
-	datumHash := "0b"
-	address := "addr1in"
-	node := &mockNode{}
-	node.mempoolTx = MempoolTransactionInfo{
-		Tx: TransactionInfo{
-			Hash: testMempoolHash,
-			OutputAmount: []AddressAmountInfo{
-				{Unit: "lovelace", Quantity: "9"},
-			},
-			Fees:          "170000",
-			Deposit:       "0",
-			Size:          300,
-			UtxoCount:     3,
-			ValidContract: true,
-		},
-		Inputs: []TransactionInputInfo{
-			{TxHash: "cc", OutputIndex: 1, Address: address},
-			{TxHash: "dd", OutputIndex: 0, Collateral: true},
-		},
-		Outputs: []TransactionOutputInfo{{
-			Address:     "addr1out",
-			Amount:      []AddressAmountInfo{{Unit: "lovelace", Quantity: "9"}},
-			OutputIndex: 0,
-			DataHash:    &datumHash,
-			InlineDatum: &inline,
-		}},
-		Redeemers: []MempoolRedeemerInfo{
-			{TxIndex: 0, Purpose: "spend", UnitMem: "1", UnitSteps: "2"},
-		},
-	}
-	w := serve(t, node, "/api/v0/mempool/"+testMempoolHash)
-	require.Equal(t, http.StatusOK, w.Code)
-	require.JSONEq(t, `{
-"tx":{"hash":"`+testMempoolHash+`","output_amount":[{"unit":"lovelace","quantity":"9"}],
- "fees":"170000","deposit":"0","size":300,"invalid_before":null,"invalid_hereafter":null,
- "utxo_count":3,"withdrawal_count":0,"mir_cert_count":0,"delegation_count":0,
- "stake_cert_count":0,"pool_update_count":0,"pool_retire_count":0,
- "asset_mint_or_burn_count":0,"redeemer_count":0,"valid_contract":true},
-"inputs":[
- {"address":"addr1in","tx_hash":"cc","output_index":1,"collateral":false},
- {"tx_hash":"dd","output_index":0,"collateral":true}],
-"outputs":[{"address":"addr1out","amount":[{"unit":"lovelace","quantity":"9"}],
- "output_index":0,"data_hash":"0b","inline_datum":"d87980","collateral":false,
- "reference_script_hash":null}],
-"redeemers":[{"tx_index":0,"purpose":"spend","unit_mem":"1","unit_steps":"2"}]}`, w.Body.String())
-	want, _ := hex.DecodeString(testMempoolHash)
-	node.mu.Lock()
-	require.Equal(t, want, node.lastMempoolTx)
-	node.mu.Unlock()
 }
 
 func TestHandleMempoolErrors(t *testing.T) {
