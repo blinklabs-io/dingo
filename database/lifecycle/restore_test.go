@@ -108,7 +108,7 @@ func TestRestoreResolvesBlobStoreWithLoadRunMode(t *testing.T) {
 			}, nil
 		},
 	))
-	require.NoError(t, sqlite.RegisterProvider(host))
+	require.NoError(t, dbtest.RegisterSQLiteProvider(host))
 	t.Cleanup(func() { _ = host.Stop(context.Background()) })
 
 	targetDir := filepath.Join(t.TempDir(), "restored")
@@ -277,6 +277,9 @@ func newRemoteRestoreHostWithBlobName(
 			_ struct{},
 			deps metadata.ProviderDependencies,
 		) (metadata.MetadataStore, plugin.Instance, error) {
+			if err := seedMigratedMetadata(metadataDir); err != nil {
+				return nil, nil, err
+			}
 			store, err := sqlite.NewSQLStore(
 				sqlite.Config{DataDir: metadataDir}, deps,
 			)
@@ -346,6 +349,17 @@ func newRemoteRestoreHostWithBlobName(
 	return host
 }
 
+// seedMigratedMetadata places the process's migrated metadata template in dir
+// unless a metadata file is already there, so opening the directory skips the
+// schema migration.
+func seedMigratedMetadata(dir string) error {
+	raw, err := dbtest.MetadataTemplateBytes()
+	if err != nil {
+		return err
+	}
+	return dbtest.SeedMetadataTemplateBytes(dir, raw)
+}
+
 type remoteTestDatabase struct {
 	db       *database.Database
 	blob     *badger.BlobStoreBadger
@@ -376,6 +390,9 @@ func openRemoteTestDatabaseInNamespace(
 		badger.WithMemTableSize(testutil.TestBadgerMemTableSize),
 	)
 	require.NoError(t, err)
+	require.NoError(t, seedMigratedMetadata(
+		filepath.Join(dataRoot, "metadata"),
+	))
 	metadataStore, err := sqlite.NewSQLStore(
 		sqlite.Config{DataDir: filepath.Join(dataRoot, "metadata")},
 		metadata.ProviderDependencies{},

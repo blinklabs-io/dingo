@@ -26,9 +26,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/database/plugin/blob/badger"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/plugin"
 	"github.com/stretchr/testify/require"
@@ -156,7 +157,7 @@ func runRestoreInterruptHelper() {
 	targetDir := os.Getenv("DINGO_TEST_RESTORE_TARGET_DIR")
 	host := plugin.NewHost()
 	_ = badger.RegisterProvider(host)
-	_ = sqlite.RegisterProvider(host)
+	_ = dbtest.RegisterSQLiteProvider(host)
 	_, _ = lifecycle.Restore(
 		context.Background(),
 		host,
@@ -246,7 +247,7 @@ func TestRestoreRetryReclaimsKilledAttemptWork(t *testing.T) {
 	require.NoError(t, os.WriteFile(backupPath, backup, 0o600))
 	host := plugin.NewHost()
 	require.NoError(t, badger.RegisterProvider(host))
-	require.NoError(t, sqlite.RegisterProvider(host))
+	require.NoError(t, dbtest.RegisterSQLiteProvider(host))
 	_, err = lifecycle.Restore(
 		context.Background(),
 		host,

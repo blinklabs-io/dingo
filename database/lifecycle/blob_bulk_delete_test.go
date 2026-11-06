@@ -30,7 +30,6 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/plugin/blob/badger"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
@@ -291,7 +290,7 @@ func newCountingTestDB(t *testing.T) (*database.Database, *countingBlobStore) {
 	config := &database.Config{DataDir: t.TempDir()}
 	host := plugin.NewHost()
 	require.NoError(t, badger.RegisterProvider(host))
-	require.NoError(t, sqlite.RegisterProvider(host))
+	require.NoError(t, dbtest.RegisterSQLiteProvider(host))
 
 	realBlob, err := plugin.Resolve[blob.BlobStore](
 		context.Background(), host,
@@ -423,7 +422,7 @@ func newErroringIteratorTestDB(
 	config := &database.Config{DataDir: t.TempDir()}
 	host := plugin.NewHost()
 	require.NoError(t, badger.RegisterProvider(host))
-	require.NoError(t, sqlite.RegisterProvider(host))
+	require.NoError(t, dbtest.RegisterSQLiteProvider(host))
 
 	realBlob, err := plugin.Resolve[blob.BlobStore](
 		context.Background(), host,
@@ -550,7 +549,7 @@ func newMidWalkErrorTestDB(
 	config := &database.Config{DataDir: t.TempDir()}
 	host := plugin.NewHost()
 	require.NoError(t, badger.RegisterProvider(host))
-	require.NoError(t, sqlite.RegisterProvider(host))
+	require.NoError(t, dbtest.RegisterSQLiteProvider(host))
 
 	realBlob, err := plugin.Resolve[blob.BlobStore](
 		context.Background(), host,
@@ -840,7 +839,7 @@ func newCloudLikeTestDB(t *testing.T) *database.Database {
 	config := &database.Config{DataDir: t.TempDir()}
 	host := plugin.NewHost()
 	require.NoError(t, badger.RegisterProvider(host))
-	require.NoError(t, sqlite.RegisterProvider(host))
+	require.NoError(t, dbtest.RegisterSQLiteProvider(host))
 
 	realBlob, err := plugin.Resolve[blob.BlobStore](
 		context.Background(), host,
@@ -1020,7 +1019,7 @@ func newPartialCommitTestDB(
 	config := &database.Config{DataDir: t.TempDir()}
 	host := plugin.NewHost()
 	require.NoError(t, badger.RegisterProvider(host))
-	require.NoError(t, sqlite.RegisterProvider(host))
+	require.NoError(t, dbtest.RegisterSQLiteProvider(host))
 
 	realBlob, err := plugin.Resolve[blob.BlobStore](
 		context.Background(), host,
