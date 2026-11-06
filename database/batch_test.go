@@ -116,7 +116,7 @@ func sharedBatchCandidate(t *testing.T) batchedCrossBlockSpendCandidate {
 func openTestDB(t *testing.T) *Database {
 	t.Helper()
 	db, err := newTestDatabase(t, &Config{
-		DataDir: "",
+		DataDir: t.TempDir(),
 		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 
