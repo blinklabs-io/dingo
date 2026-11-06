@@ -31,6 +31,7 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
+	"sync/atomic"
 
 	"github.com/blinklabs-io/dingo/database/types"
 )
@@ -82,6 +83,21 @@ const (
 	DefaultRestoreBatchRecords = 1000
 	DefaultRestoreBatchBytes   = 32 << 20
 )
+
+// restoreBatchRecords is the record limit Restore and Reset apply per batch.
+// It exists so tests can cross a batch boundary without writing a full batch.
+var restoreBatchRecords atomic.Int64
+
+func init() {
+	restoreBatchRecords.Store(DefaultRestoreBatchRecords)
+}
+
+// SetRestoreBatchRecordsForTesting changes the per-batch record limit used by
+// Restore and Reset and returns a function that restores the previous value.
+func SetRestoreBatchRecordsForTesting(n int) (restore func()) {
+	prev := restoreBatchRecords.Swap(int64(n))
+	return func() { restoreBatchRecords.Store(prev) }
+}
 
 // MaxKeyLen bounds a single record's declared key length, checked before
 // allocating a buffer of that size -- blob keys are always small (a few
@@ -393,7 +409,7 @@ func Restore(
 		}
 		batchRecords++
 		batchBytes += len(key) + len(value)
-		if batchRecords >= DefaultRestoreBatchRecords ||
+		if int64(batchRecords) >= restoreBatchRecords.Load() ||
 			batchBytes >= DefaultRestoreBatchBytes {
 			if err := flush(); err != nil {
 				return fmt.Errorf(
@@ -510,8 +526,9 @@ func Reset(
 			_ = readTxn.Rollback()
 			return fmt.Errorf("%s: blob iterator: %w", errPrefix, err)
 		}
-		keys := make([][]byte, 0, DefaultRestoreBatchRecords)
-		for it.Valid() && len(keys) < DefaultRestoreBatchRecords {
+		limit := int(restoreBatchRecords.Load())
+		keys := make([][]byte, 0, limit)
+		for it.Valid() && len(keys) < limit {
 			if err := ctx.Err(); err != nil {
 				it.Close()
 				_ = readTxn.Rollback()

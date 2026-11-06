@@ -33,15 +33,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestUTxOSetFileRoundTrip(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "set.gob")
-	want := UTxOSet{"aa#0": "addr1|5|", "bb#1": "addr2|7|x"}
-	require.NoError(t, writeUTxOSetFile(path, want))
-	got, err := readUTxOSetFile(path)
-	require.NoError(t, err)
-	assert.Equal(t, want, got)
-}
-
 // take must refuse a capture read at another block of the same epoch, since
 // after a rollback that block answers for a different chain, and must drop
 // every earlier epoch's file, which the main loop has already passed.

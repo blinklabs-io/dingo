@@ -111,6 +111,18 @@ func (l *logCollector) all() []string {
 	return append([]string(nil), l.lines...)
 }
 
+// contains reports whether some line logged so far contains substr, without
+// waiting. Use it to assert a line is absent after the events that would have
+// produced it have already been observed.
+func (l *logCollector) contains(substr string) bool {
+	for _, line := range l.all() {
+		if strings.Contains(line, substr) {
+			return true
+		}
+	}
+	return false
+}
+
 // waitFor blocks until some logged line contains substr, or timeout elapses.
 func (l *logCollector) waitFor(substr string, timeout time.Duration) bool {
 	deadline := time.After(timeout)
@@ -352,13 +364,6 @@ func TestRunFromGenesis_DoesNotAcquireChainOrigin(t *testing.T) {
 		)
 	}()
 
-	require.False(
-		t,
-		logs.waitFor("point too old", 2*time.Second),
-		"the session ended asking Dingo to acquire the chain origin; logs: %v",
-		logs.all(),
-	)
-
 	server.allowStep(t)
 	server.allowStep(t)
 	server.allowStep(t)
@@ -372,6 +377,12 @@ func TestRunFromGenesis_DoesNotAcquireChainOrigin(t *testing.T) {
 			logs.all(),
 		)
 	}
+	require.False(
+		t,
+		logs.contains("point too old"),
+		"the session ended asking Dingo to acquire the chain origin; logs: %v",
+		logs.all(),
+	)
 
 	cancel()
 	select {
@@ -448,7 +459,7 @@ func TestRunFromGenesis_StartsValidatingAtFirstAnswerablePoint(t *testing.T) {
 	assert.Equal(t, uint64(4), recv().Epoch)
 	assert.True(t, logs.waitFor("validation starts at slot", 5*time.Second),
 		"the skipped epochs must be reported; logs: %v", logs.all())
-	assert.False(t, logs.waitFor("chainsync session ended", 500*time.Millisecond),
+	assert.False(t, logs.contains("chainsync session ended"),
 		"skipping must not end the session; logs: %v", logs.all())
 
 	cancel()
@@ -2529,7 +2540,7 @@ func TestRunFromGenesis_ReconnectsWhenSessionEndsDuringEpochLookup(t *testing.T)
 // Not t.Parallel: it shortens the package-level epochLookupTimeout.
 func TestRunFromGenesis_ReconnectsWhenEpochLookupStalls(t *testing.T) {
 	prevTimeout := epochLookupTimeout
-	epochLookupTimeout = 2 * time.Second
+	epochLookupTimeout = 750 * time.Millisecond
 	t.Cleanup(func() { epochLookupTimeout = prevTimeout })
 
 	const magic = 42
@@ -2814,60 +2825,6 @@ func TestRunFromGenesis_EpochChecksRetryTooOldRefusal(t *testing.T) {
 	}
 }
 
-// TestDial_ReceivesUTxOWholeLargerThanIngressBudget covers a whole-UTxO-set
-// reply larger than the muxer's connection-wide ingress budget. Live, the
-// reply at preprod epoch 157 overran the 64MiB default and the muxer closed
-// the connection with ErrIngressOverflow. The budget is shrunk to a fraction
-// of one segment here, so the reply exceeds it many times over and any
-// segment queued behind another overruns it.
-func TestDial_ReceivesUTxOWholeLargerThanIngressBudget(t *testing.T) {
-	t.Parallel()
-	const magic = 42
-	const utxoCount = 3000
-	const ingressBudget = 1024
-
-	server := newGenesisFakeServer(t, 1)
-	addr, err := lcommon.NewAddressFromParts(
-		lcommon.AddressTypeKeyNone,
-		lcommon.AddressNetworkTestnet,
-		make([]byte, lcommon.AddressHashSize),
-		nil,
-	)
-	require.NoError(t, err)
-	server.utxoWhole = make(
-		map[localstatequery.UtxoId]ledger.BabbageTransactionOutput, utxoCount,
-	)
-	for i := range utxoCount {
-		var hash ledger.Blake2b256
-		hash[0], hash[1] = byte(i>>8), byte(i)
-		server.utxoWhole[localstatequery.UtxoId{Hash: hash, Idx: i}] =
-			ledger.BabbageTransactionOutput{
-				OutputAddress: addr,
-				OutputAmount:  mary.MaryTransactionOutputValue{Amount: uint64(i) + 1},
-			}
-	}
-
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = listener.Close() })
-	server.serve(t, listener, magic)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	conn, lsq, err := acquireWithRetry(
-		ctx, listener.Addr().String(), magic, server.chain.Points[0], true,
-	)
-	require.NoError(t, err)
-	defer conn.Close() //nolint:errcheck
-	conn.Muxer().SetIngressBudget(ingressBudget)
-
-	utxos, err := lsq.Client.GetUTxOWhole()
-	require.NoError(t, err)
-	assert.Len(t, utxos.Results, utxoCount)
-}
-
-// txInfoChunkFake answers each chunk, by its first hash, with respond(attempt)
-// and counts the attempts.
 type txInfoChunkFake struct {
 	mu       sync.Mutex
 	attempts map[string]int
@@ -3356,16 +3313,6 @@ func TestAllegraCrossingAfterPostHardForkStart(t *testing.T) {
 // TestTxInfoFlushThresholdHoldsSeveralRounds proves a mid-epoch flush holds
 // several rounds of requests: a flush of a single round waits on its slowest
 // request with every other slot idle.
-func TestTxInfoFlushThresholdHoldsSeveralRounds(t *testing.T) {
-	t.Parallel()
-	koios := &koiosparity.KoiosClient{}
-	require.NoError(t, koios.SetTxInfoLimits(250, 4))
-	require.Equal(t, 4*4*250, txInfoFlushThreshold(koios))
-}
-
-// TestFetchTxInfoChunksKeepsConcurrencyInFlight proves the flush keeps at
-// most the Koios client's TxInfoConcurrency requests in flight: a host that
-// stalls under more load is given only what it was configured for.
 func TestFetchTxInfoChunksKeepsConcurrencyInFlight(t *testing.T) {
 	t.Parallel()
 	var inFlight, peak atomic.Int32

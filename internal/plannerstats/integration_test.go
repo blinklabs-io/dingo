@@ -27,6 +27,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/plannerstats"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/stretchr/testify/require"
 	_ "modernc.org/sqlite"
 )
@@ -37,6 +38,7 @@ import (
 func TestEpochTransitionCreatesStat1OnGenesisStyleDatabase(t *testing.T) {
 	t.Parallel()
 	dataDir := t.TempDir()
+	seedMigratedMetadata(t, dataDir)
 	store, err := sqlite.NewSQLStore(
 		sqlite.Config{DataDir: dataDir},
 		metadata.ProviderDependencies{},
@@ -100,6 +102,7 @@ func TestEpochTransitionCreatesStat1OnGenesisStyleDatabase(t *testing.T) {
 func TestPeriodicTickReanalyzesGrownTables(t *testing.T) {
 	t.Parallel()
 	dataDir := t.TempDir()
+	seedMigratedMetadata(t, dataDir)
 	store, err := sqlite.NewSQLStore(
 		sqlite.Config{DataDir: dataDir},
 		metadata.ProviderDependencies{},
@@ -169,4 +172,14 @@ func TestPeriodicTickReanalyzesGrownTables(t *testing.T) {
 	},
 		30*time.Second, 20*time.Millisecond,
 		"the periodic run must re-analyze the grown utxo table")
+}
+
+// seedMigratedMetadata gives dataDir a schema-migrated metadata file so the
+// store opened on it skips the migration run, which dominates these tests'
+// time. The template carries no statistics and no rows.
+func seedMigratedMetadata(t *testing.T, dataDir string) {
+	t.Helper()
+	raw, err := dbtest.MetadataTemplateBytes()
+	require.NoError(t, err)
+	require.NoError(t, dbtest.SeedMetadataTemplateBytes(dataDir, raw))
 }

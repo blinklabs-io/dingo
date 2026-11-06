@@ -2325,6 +2325,9 @@ func TestReturnRedeemUTxOsRemovesOnlyRedeemAddresses(t *testing.T) {
 // unredeemed UTxO the Allegra hard fork removes on mainnet is one of these
 // genesis entries, so this covers the whole population it can act on.
 func TestReturnRedeemUTxOsMainnetGenesis(t *testing.T) {
+	// Single-goroutine parse of the mainnet genesis; the race detector adds
+	// seconds and nothing to check.
+	testutil.SkipUnderRace(t, "single-goroutine genesis parse and set filter")
 	genesis, err := byron.NewByronGenesisFromFile(
 		filepath.Join("..", "..", "config", "cardano", "mainnet", "byron-genesis.json"),
 	)
