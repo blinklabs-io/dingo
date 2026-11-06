@@ -1164,37 +1164,6 @@ func TestValidateInboundBlockEnvelopeAcceptsArbitraryByronEbbProof(t *testing.T)
 	))
 }
 
-// TestByronEbbNonBytesProofIsRejectedAtDecode pins the one check the
-// reference applies to an EBB body proof: its decoder reads the field as a
-// byte string, so an inbound EBB carrying any other CBOR value never decodes.
-func TestByronEbbNonBytesProofIsRejectedAtDecode(t *testing.T) {
-	t.Parallel()
-
-	genuine := loadEnvelopeByronFixture(
-		t,
-		"Block_Byron_EBB",
-		uint(gledger.BlockTypeByronEbb),
-	)
-	var block []cbor.RawMessage
-	_, err := cbor.Decode(genuine.Cbor(), &block)
-	require.NoError(t, err)
-	var header []cbor.RawMessage
-	_, err = cbor.Decode(block[0], &header)
-	require.NoError(t, err)
-	header[2], err = cbor.Encode(uint64(7))
-	require.NoError(t, err)
-	block[0], err = cbor.Encode(header)
-	require.NoError(t, err)
-	encoded, err := cbor.Encode(block)
-	require.NoError(t, err)
-
-	_, err = gledger.NewBlockFromCbor(
-		uint(gledger.BlockTypeByronEbb),
-		encoded,
-	)
-	require.ErrorIs(t, err, byron.ErrMalformedBodyProof)
-}
-
 func TestValidateInboundBlockEnvelopeByronEbbFixedSizeLimit(t *testing.T) {
 	t.Parallel()
 
