@@ -326,6 +326,14 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		))
 	}
 
+	for _, pool := range c.TracingAlwaysSamplePools {
+		if _, err := ParsePoolKeyHash(pool); err != nil {
+			errs = append(errs, fmt.Errorf(
+				"invalid tracingAlwaysSamplePools: %w", err,
+			))
+		}
+	}
+
 	if !(c.TracingSampleRatio >= 0 && c.TracingSampleRatio <= 1) {
 		errs = append(errs, fmt.Errorf(
 			"invalid tracingSampleRatio: %v (must be between 0 and 1)",
@@ -760,7 +768,8 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	trustedManifestKey := strings.TrimSpace(
 		c.TokenRegistry.TrustedManifestKey,
 	)
-	if strings.TrimSpace(c.TokenRegistry.ManifestURL) != "" && trustedManifestKey == "" {
+	if strings.TrimSpace(c.TokenRegistry.ManifestURL) != "" &&
+		trustedManifestKey == "" {
 		errs = append(errs, errors.New(
 			"tokenRegistry.trustedManifestKey is required with manifestUrl",
 		))

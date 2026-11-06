@@ -656,3 +656,15 @@ func TestRefreshRewardLiveStakeAggregateCachesAccountAndUpsertStatements(t *test
 		"the two queries must not share a cache slot",
 	)
 }
+
+func TestCacheableSQLiteInsertResultQueries(t *testing.T) {
+	t.Parallel()
+	for _, dialect := range []string{"sqlite", "postgres", "mysql"} {
+		t.Run(dialect, func(t *testing.T) {
+			t.Parallel()
+			for _, query := range []string{insertUtxoResultQuery, insertUtxoResultIgnoreConflictQuery} {
+				require.Equal(t, dialect == "sqlite", cacheableForDialect(dialect, query), "SQLite insert-result queries must not be prepared on other providers")
+			}
+		})
+	}
+}

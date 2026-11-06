@@ -1111,6 +1111,7 @@ func Sync(
 	// descriptors. This runs after both import phases return, which makes
 	// clearing the fields safe against code that reads them.
 	defer bootstrapResult.CloseHandles()
+	cleanedUp := false
 	certifiedImmutable, err := openBootstrappedImmutable(bootstrapResult)
 	if err != nil {
 		return SyncResult{}, err
@@ -1787,6 +1788,14 @@ func Sync(
 		); err != nil {
 			return SyncResult{}, err
 		}
+		// Backfill reads blocks from the blob store, not the extracted
+		// immutable tree, and runs for days on mainnet; holding the tree
+		// (hundreds of GB there) until it ends can exhaust the disk. With
+		// sync_status now "backfill", serve resumes the backfill without it.
+		if cfg.CleanupAfterLoad {
+			bootstrapResult.Cleanup(logger)
+			cleanedUp = true
+		}
 	}
 
 	// Backfill historical metadata through the stable ledger anchor if storage
@@ -1872,7 +1881,7 @@ func Sync(
 	cfg.emit(SyncProgress{Phase: PhaseComplete, Active: true})
 
 	// Clean up temporary files after a successful complete load.
-	if cfg.CleanupAfterLoad {
+	if cfg.CleanupAfterLoad && !cleanedUp {
 		bootstrapResult.Cleanup(logger)
 	}
 

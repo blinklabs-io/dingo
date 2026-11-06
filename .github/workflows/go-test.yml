@@ -620,6 +620,16 @@ jobs:
     steps:
       # make build reads the version from `git describe`, which refuses to run
       # in a checkout git considers foreign-owned.
+      # One target leaves ~2.5 GB of go-build cache and ~240 MB of binaries,
+      # and the six targets share almost none of it across GOOS/GOARCH, so the
+      # build alone approaches the free space on the runner's disk. The
+      # preinstalled toolchains below are unused here and are the cheapest
+      # space to give back; the cache stays intact so it still saves.
+      - name: free-runner-disk
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
       - run: git config --global --add safe.directory "$PWD"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
         with:

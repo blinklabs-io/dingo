@@ -34,6 +34,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blinklabs-io/dingo/internal/tracing"
 	"golang.org/x/sync/semaphore"
 )
 
@@ -170,7 +171,9 @@ func selectArtifactV2(
 	ctx context.Context,
 	cfg BootstrapConfig,
 	client *Client,
-) (*CardanoDatabaseSnapshot, error) {
+) (_ *CardanoDatabaseSnapshot, retErr error) {
+	ctx, span := tracing.Start(ctx, "mithril.select_artifact")
+	defer func() { tracing.End(span, retErr) }()
 	var artifact *CardanoDatabaseSnapshot
 	var err error
 	if cfg.PinnedDigest != "" {
@@ -314,7 +317,9 @@ func bootstrapV2(
 	ctx context.Context,
 	cfg BootstrapConfig,
 	aggregatorURL string,
-) (*BootstrapResult, error) {
+) (_ *BootstrapResult, retErr error) {
+	ctx, span := tracing.Start(ctx, "mithril.bootstrap")
+	defer func() { tracing.End(span, retErr) }()
 	client := newMithrilClient(aggregatorURL, cfg.AllowInsecureHTTP)
 
 	// Step 1: Fetch the selected artifact, verify its self-hash and hold its
@@ -808,7 +813,9 @@ func verifyArtifactCertificateV2(
 	cfg BootstrapConfig,
 	client *Client,
 	artifact *CardanoDatabaseSnapshot,
-) error {
+) (retErr error) {
+	ctx, span := tracing.Start(ctx, "mithril.verify_certificate")
+	defer func() { tracing.End(span, retErr) }()
 	if artifact.CertificateHash == "" {
 		return fmt.Errorf(
 			"certificate chain verification requested "+
@@ -968,7 +975,9 @@ func fetchVerifiedDigests(
 	cfg BootstrapConfig,
 	artifact *CardanoDatabaseSnapshot,
 	downloadDir string,
-) (map[string]string, error) {
+) (_ map[string]string, retErr error) {
+	ctx, span := tracing.Start(ctx, "mithril.fetch_digests")
+	defer func() { tracing.End(span, retErr) }()
 	var entries []CardanoDatabaseDigestEntry
 	var lastErr error
 	fetched := false
@@ -1232,7 +1241,9 @@ func downloadImmutables(
 	digests map[string]string,
 	downloadDir string,
 	extractDir string,
-) error {
+) (retErr error) {
+	ctx, span := tracing.Start(ctx, "mithril.download_immutables")
+	defer func() { tracing.End(span, retErr) }()
 	// archiveDir is not created here. A create-then-close-then-hand-off-
 	// the-bare-path step would itself be a TOCTOU window: a symlink
 	// swapped in for it between this function returning and the first
@@ -1821,7 +1832,14 @@ func downloadAncillaryV2(
 	cfg BootstrapConfig,
 	artifact *CardanoDatabaseSnapshot,
 	downloadDir string,
-) (*vettedDir, map[string]string, *bootstrapFile, error) {
+) (
+	_ *vettedDir,
+	_ map[string]string,
+	_ *bootstrapFile,
+	retErr error,
+) {
+	ctx, span := tracing.Start(ctx, "mithril.download_ancillary")
+	defer func() { tracing.End(span, retErr) }()
 	if len(artifact.Ancillary.Locations) == 0 {
 		return nil, nil, nil, errors.New(
 			"no ancillary locations in Cardano database snapshot",

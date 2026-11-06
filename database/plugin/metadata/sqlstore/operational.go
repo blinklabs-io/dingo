@@ -232,6 +232,9 @@ func (s *Store) GetSyncState(key string, txn types.Txn) (string, error) {
 		return "", fmt.Errorf("get sync state: %w", err)
 	}
 	queries := s.operationalQueries(db)
+	if s.readCanUseWriteCache(txn) {
+		queries = s.operationalQueriesCached(db)
+	}
 	value, err := queries.GetSyncState(ctx, key)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
@@ -691,7 +694,13 @@ func (s *Store) SetBlockNonces(
 				return err
 			}
 			values[i] = "(?, ?, ?, ?)"
-			args = append(args, nonce.Hash, slot, nonce.Nonce, nonce.IsCheckpoint)
+			args = append(
+				args,
+				nonce.Hash,
+				slot,
+				nonce.Nonce,
+				nonce.IsCheckpoint,
+			)
 		}
 		query := `-- name: UpsertBlockNonceBatch :exec
 INSERT INTO block_nonce (hash, slot, nonce, is_checkpoint)

@@ -413,7 +413,7 @@ func (a *NodeAdapter) blockInfoFromBlock(
 			err,
 		)
 	}
-	blockTransactions, err := a.ledgerState.BlockTransactions(ctx, block)
+	transactionCount, err := a.ledgerState.BlockTransactionCount(ctx, block)
 	if err != nil {
 		return BlockInfo{}, fmt.Errorf("get transactions for block %x: %w", block.Hash, err)
 	}
@@ -469,7 +469,7 @@ func (a *NodeAdapter) blockInfoFromBlock(
 		EpochSlot: block.Slot - epoch.StartSlot,
 		Time:      slotTime.Unix(),
 		Size:      uint64(len(block.Cbor)),
-		TxCount:   len(blockTransactions),
+		TxCount:   transactionCount,
 		SlotLeader: blockIssuer(
 			decodedBlock.IssuerVkey(),
 		),

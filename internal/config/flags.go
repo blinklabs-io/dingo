@@ -173,6 +173,11 @@ var flagSpecs = []flagSpec{
 		"tracing-sample-ratio",
 		"fraction of new traces sampled, from 0 to 1",
 	),
+	stringSliceFlag(
+		"TracingAlwaysSamplePools",
+		"tracing-always-sample-pools",
+		"pool IDs (bech32 or hex) whose blocks are always traced",
+	),
 	boolFlag(
 		"TracingStdout",
 		"tracing-stdout",
@@ -712,7 +717,11 @@ var flagSpecs = []flagSpec{
 	),
 	intFlag("MaxInboundConns", "max-inbound-conns", "max inbound connections"),
 	intFlag("MaxNtCConns", "max-ntc-conns", "max node-to-client connections"),
-	intFlag("MaxTrustedLocalNtCConns", "max-trusted-local-ntc-conns", "max trusted local node-to-client connections"),
+	intFlag(
+		"MaxTrustedLocalNtCConns",
+		"max-trusted-local-ntc-conns",
+		"max trusted local node-to-client connections",
+	),
 	intFlag(
 		"MaxNtCConnectionsPerIP",
 		"max-ntc-connections-per-ip",

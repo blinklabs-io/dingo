@@ -357,6 +357,7 @@ var logPlainConfigFields = []string{
 	"Tracing",
 	"TracingServiceName",
 	"TracingSampleRatio",
+	"TracingAlwaysSamplePools",
 	"TracingStdout",
 	"UnsafeFullPotRewardsOnStandardNetworks",
 	"ValidateForgedBlock",

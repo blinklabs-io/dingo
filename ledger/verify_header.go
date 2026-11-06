@@ -31,6 +31,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/tracing"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -663,7 +664,14 @@ func (ls *LedgerState) verifyBlockHeaderCryptoWithEpochAdvance(
 	block ledger.Block,
 	allowEpochCacheAdvance bool,
 	allowStateDefer bool,
-) error {
+) (err error) {
+	ctx, span := tracing.StartHeader(
+		ctx,
+		tracing.StageHeaderValidated,
+		"block.header_validated",
+		block,
+	)
+	defer func() { tracing.End(span, err) }()
 	if ls.config.Consensus == nil {
 		return ls.ValidatePraosHeader(
 			ctx,
@@ -984,13 +992,20 @@ func (ls *LedgerState) headerVerificationEpochWithCache(
 		if err != nil {
 			return models.Epoch{}, nil, err
 		}
+		if ls.headerVerificationEpochLookupHook != nil {
+			ls.headerVerificationEpochLookupHook()
+		}
 		after := ls.loadConsensusSnapshot()
 		if before == after {
 			return epoch, after.epochCache, nil
 		}
 	}
-	return models.Epoch{}, nil, errors.New(
-		"block header verification deferred: epoch cache changed during lookup",
+	// Every attempt resolved the epoch; only the snapshot pairing failed, which
+	// says nothing about the header.
+	return models.Epoch{}, nil, fmt.Errorf(
+		"%w during epoch lookup for slot %d",
+		errHeaderVerificationContextChanged,
+		blockSlot,
 	)
 }
 

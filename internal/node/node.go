@@ -985,6 +985,7 @@ func buildDingoConfig(
 		dingo.WithTracingEndpoint(cfg.TracingEndpoint),
 		dingo.WithTracingServiceName(cfg.TracingServiceName),
 		dingo.WithTracingSampleRatio(cfg.TracingSampleRatio),
+		dingo.WithTracingAlwaysSamplePools(cfg.TracingAlwaysSamplePools),
 		dingo.WithTopologyConfig(config.GetTopologyConfig()),
 		dingo.WithDatabaseWorkerPoolConfig(ledger.DatabaseWorkerPoolConfig{
 			WorkerPoolSize: cfg.DatabaseWorkers,
