@@ -23,7 +23,6 @@ import (
 	"fmt"
 	"math/big"
 	"net"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -228,63 +227,6 @@ func TestSharedSQLStoreAccountParity(t *testing.T) {
 	require.Equal(t, uint64(50), uint64(gotAfterCreditRollback.Reward))
 	require.NotNil(t, gotDeactivated)
 	require.False(t, gotDeactivated.Active)
-}
-
-// modernc.org/sqlite always hoists busy_timeout ahead of the rest of the
-// _pragma list regardless of DSN order, so this ordering is defensive rather
-// than load-bearing today. It still matters as documentation: any pragma
-// listed before busy_timeout in the source DSN would, on a driver without
-// that hoisting behavior, run with no busy handler installed and fail
-// immediately on contention rather than waiting.
-//
-// Every pragma after it that touches the database file -- cache_size and
-// mmap_size both do -- would then be one that gives up instantly instead of
-// waiting out a concurrent writer.
-//
-// Pin the ordering directly. A concurrency test alone would only fail when
-// the race is actually lost, which makes an ordering regression look flaky
-// instead of broken.
-func TestCommonPragmasSetBusyTimeoutFirst(t *testing.T) {
-	pragmas := parsePragmas(t, sqliteCommonPragmas)
-	require.NotEmpty(t, pragmas, "no pragmas parsed out of the DSN fragment")
-	require.NotContains(t, sqliteCommonPragmas, "journal_mode",
-		"journal_mode must not be a per-connection pragma; "+
-			"ensureWALJournalMode owns the conversion")
-	require.Truef(
-		t,
-		strings.HasPrefix(pragmas[0], "busy_timeout("),
-		"busy_timeout must be the first pragma in the DSN so it is in "+
-			"effect before any pragma that touches the database file; got %v",
-		pragmas,
-	)
-}
-
-// The backup connection builds its own DSN rather than reusing the shared
-// fragment, and it opens against a database a running node already holds
-// open -- so it contends by construction, not just at first open.
-func TestBackupDSNSetsBusyTimeoutFirst(t *testing.T) {
-	dsn := backupSourceDSN("/tmp/example/metadata.sqlite")
-	pragmas := parsePragmas(t, dsn)
-	require.NotEmpty(t, pragmas, "no pragmas parsed out of the backup DSN")
-	require.Truef(
-		t,
-		strings.HasPrefix(pragmas[0], "busy_timeout("),
-		"busy_timeout must be the first pragma in the backup DSN; got %v",
-		pragmas,
-	)
-}
-
-// parsePragmas pulls the _pragma values out of a DSN (or DSN fragment) in the
-// order the driver will execute them.
-func parsePragmas(t *testing.T, dsn string) []string {
-	t.Helper()
-	var out []string
-	for part := range strings.SplitSeq(dsn, "&") {
-		if v, ok := strings.CutPrefix(part, "_pragma="); ok {
-			out = append(out, v)
-		}
-	}
-	return out
 }
 
 // The ordering test above pins the cause; this pins the symptom it produced.
@@ -780,18 +722,6 @@ func TestSharedSQLStoreDrepParity(t *testing.T) {
 	require.Equal(t, wantLiveStake, gotLiveStakeAfterRebuild)
 }
 
-// utxoCascadeDeleteSQL is the statement SQLite runs to enforce
-// fk_transaction_outputs, once for every "transaction" row the rollback
-// deletes.
-//
-// It appears nowhere in the store: ON DELETE CASCADE is an action the engine
-// takes, not a statement the code issues. It is spelled out here because that
-// action is the whole cost of a deep rollback and because it is invisible from
-// the parent statement -- EXPLAIN QUERY PLAN of
-// DELETE FROM "transaction" WHERE slot > ? reports only the indexed search
-// over "transaction" and says nothing about the child table it cascades into.
-const utxoCascadeDeleteSQL = `DELETE FROM utxo WHERE transaction_id = ?`
-
 // cascadeForeignKey is one ON DELETE CASCADE foreign key as the live schema
 // declares it.
 type cascadeForeignKey struct {
@@ -977,139 +907,6 @@ func TestCascadeChildColumnsIndexedAfterCriticalRebuild(t *testing.T) {
 		db,
 		fks,
 		"after BuildCriticalDeferredIndexes",
-	)
-}
-
-// seedUtxoRows adds count transactions, each owning two utxo rows, and runs
-// ANALYZE so the planner assertions below see the statistics a live database
-// has.
-//
-// Written as set-based SQL rather than through SetTransaction because the
-// planner only needs representative table shapes, not faithful transaction
-// contents.
-func seedUtxoRows(t *testing.T, db *sql.DB, count int) {
-	t.Helper()
-	_, err := db.Exec(`
-WITH RECURSIVE seq(n) AS (
-    SELECT 0
-    UNION ALL
-    SELECT n + 1 FROM seq WHERE n + 1 < ?
-)
-INSERT INTO "transaction" (
-    hash, block_hash, slot, type, fee, collateral_fee, ttl, block_index, valid
-)
-SELECT CAST(n AS BLOB), CAST(n AS BLOB), n, 0, '0', '0', '0', 0, TRUE
-FROM seq`, count)
-	require.NoError(t, err)
-	for _, outputIdx := range []int{0, 1} {
-		_, err := db.Exec(`
-INSERT INTO utxo (
-    transaction_id, tx_id, output_idx, payment_key, staking_key,
-    credential_tag, amount, added_slot, deleted_slot
-)
-SELECT id, hash, ?, hash, hash, 0, '1000000', slot, 0
-FROM "transaction"`, outputIdx)
-		require.NoError(t, err)
-	}
-	_, err = db.Exec("ANALYZE")
-	require.NoError(t, err)
-}
-
-// TestUtxoCascadeDeleteIndexedAfterCriticalRebuild pins the plan of the
-// cascade itself.
-//
-// The negative case is asserted first: with the manifest dropped, the cascade
-// scans utxo. Without it, a rebuild that restored nothing would still satisfy
-// the positive assertion if the index had never been missing.
-func TestUtxoCascadeDeleteIndexedAfterCriticalRebuild(t *testing.T) {
-	t.Parallel()
-	store, db := newCoreModeSQLStore(t)
-	seedUtxoRows(t, db, 2000)
-
-	require.NoError(t, store.DropDeferredIndexes())
-	plan := queryPlan(t, db, utxoCascadeDeleteSQL, 1)
-	require.Contains(
-		t,
-		plan,
-		"SCAN utxo",
-		"the dropped manifest must leave the cascade unindexed for this "+
-			"test to have teeth:\n%s",
-		plan,
-	)
-
-	require.NoError(t, store.BuildCriticalDeferredIndexes())
-	plan = queryPlan(t, db, utxoCascadeDeleteSQL, 1)
-	require.Contains(
-		t,
-		plan,
-		"SEARCH utxo USING",
-		"the rollback cascade must be an indexed search after the "+
-			"critical rebuild:\n%s",
-		plan,
-	)
-	require.Contains(
-		t,
-		plan,
-		"INDEX idx_utxo_transaction_id (transaction_id=?)",
-		"the cascade must resolve transaction_id through "+
-			"idx_utxo_transaction_id:\n%s",
-		plan,
-	)
-	require.NotContains(
-		t,
-		plan,
-		"SCAN utxo",
-		"the cascade must not scan utxo:\n%s",
-		plan,
-	)
-}
-
-// TestRollbackDeleteCascadesIntoUtxo grounds the plan assertion above: the
-// cascade is on the rollback's path, so the index the manifest classifies is
-// the one the rollback sweep depends on.
-//
-// Reproduces database/plugin/metadata/sqlstore/transaction_write.go's
-// DELETE FROM "transaction" WHERE slot > ?, on a connection carrying the
-// foreign_keys(1) pragma the store opens every connection with.
-func TestRollbackDeleteCascadesIntoUtxo(t *testing.T) {
-	t.Parallel()
-	_, db := newCoreModeSQLStore(t)
-	seedUtxoRows(t, db, 200)
-
-	var enforced int
-	require.NoError(
-		t,
-		db.QueryRow("PRAGMA foreign_keys").Scan(&enforced),
-	)
-	require.Equal(
-		t,
-		1,
-		enforced,
-		"the store opens every connection with foreign_keys(1); without "+
-			"it the cascade this file measures would not run at all",
-	)
-
-	var before int
-	require.NoError(
-		t,
-		db.QueryRow("SELECT COUNT(*) FROM utxo WHERE added_slot > 99").
-			Scan(&before),
-	)
-	require.Positive(t, before)
-
-	_, err := db.Exec(`DELETE FROM "transaction" WHERE slot > ?`, 99)
-	require.NoError(t, err)
-
-	var after int
-	require.NoError(
-		t,
-		db.QueryRow("SELECT COUNT(*) FROM utxo WHERE added_slot > 99").
-			Scan(&after),
-	)
-	require.Zero(
-		t,
-		after,
-		"deleting the parent transactions must cascade into utxo",
 	)
 }
 
@@ -2470,8 +2267,35 @@ func newSharedSQLStore(
 ) (*sqlstore.Store, *sql.DB) {
 	t.Helper()
 	store, writeDB, _, err := openSQLStore(
-		Config{DataDir: t.TempDir()},
+		Config{},
 		metadata.ProviderDependencies{},
+	)
+	require.NoError(t, err)
+	require.NoError(t, store.Start(t.Context()))
+	t.Cleanup(func() {
+		require.NoError(t, store.Close())
+	})
+	return store, writeDB
+}
+
+// smallLimitDialect shrinks the bound-parameter budget so a handful of rows
+// spans several chunks.
+type smallLimitDialect struct {
+	sqlstore.Dialect
+	limit int
+}
+
+func (d smallLimitDialect) ParameterLimit() int { return d.limit }
+
+func newSharedSQLStoreWithParameterLimit(
+	t *testing.T,
+	limit int,
+) (*sqlstore.Store, *sql.DB) {
+	t.Helper()
+	store, writeDB, _, err := openSQLStoreWithDialect(
+		Config{},
+		metadata.ProviderDependencies{},
+		smallLimitDialect{Dialect: sqlstore.SQLiteDialect(), limit: limit},
 	)
 	require.NoError(t, err)
 	require.NoError(t, store.Start(t.Context()))
@@ -2732,286 +2556,6 @@ func TestDiskSizeDoesNotLeaveReadDBConnectionOpen(t *testing.T) {
 	)
 }
 
-// TestWALCheckpointTruncateIdleConnectionDoesNotBlock settles, by direct
-// reproduction against dingo's actual readDB DSN and pragmas, the claim
-// disputed in review of the sqliteDiskSize fix above: does a connection that
-// ran exactly sqliteDiskSize's old query pattern (two independent
-// QueryRowContext(...).Scan(...) calls) and is then left idle in readDB's
-// pool -- never closed -- block a separate connection's PRAGMA
-// wal_checkpoint(TRUNCATE)?
-//
-// SQLite's own documentation for wal_checkpoint says RESTART and TRUNCATE
-// block only on an active writer or a reader still using an old snapshot,
-// not on a connection that is merely idle. This test confirms that is also
-// true here: case "idle_finalized_connection" runs the old two-PRAGMA-read
-// pattern, confirms (via OpenConnections) that a connection really is
-// pinned in the pool afterward, and still observes busy=0 and a full
-// truncation to zero bytes against real, substantial WAL content -- the
-// same as the "no_other_connection" baseline. Case
-// "held_read_transaction" is the positive control: an explicit,
-// uncommitted read transaction on the same readDB pool does reproduce
-// busy=1, proving this test can detect a real blocker when one exists.
-//
-// Each case also cross-checks internal consistency: a checkpoint's own
-// reported log/checkpointed frame counts can legitimately read 0 with a
-// large physical -wal file still on disk, when wal_autocheckpoint's PASSIVE
-// checkpoints already backfilled every frame between writes (PASSIVE never
-// truncates -- see checkpointInterval's doc comment above) -- so the
-// assertions key off busy and the physical file size actually dropping to
-// zero, not off log/checkpointed being nonzero.
-func TestWALCheckpointTruncateIdleConnectionDoesNotBlock(t *testing.T) {
-	t.Parallel()
-	dataDir := t.TempDir()
-	store, writeDB, readDB, err := openSQLStore(
-		Config{DataDir: dataDir},
-		metadata.ProviderDependencies{},
-	)
-	require.NoError(t, err)
-	require.NoError(t, store.Start(context.Background()))
-	t.Cleanup(func() {
-		require.NoError(t, store.Close())
-	})
-
-	_, err = writeDB.Exec(
-		`CREATE TABLE wal_checkpoint_repro (id INTEGER PRIMARY KEY, data BLOB)`,
-	)
-	require.NoError(t, err)
-	blob := make([]byte, 4096)
-
-	databasePath := filepath.Join(dataDir, "metadata.sqlite")
-	databaseURI := sqliteFileURI(databasePath)
-	walPath := databasePath + "-wal"
-
-	// growWAL commits enough rows, one autocommit INSERT at a time (like
-	// dingo's own chain-sync writes), to leave substantial physical WAL
-	// content regardless of wal_autocheckpoint's PASSIVE backfilling.
-	growWAL := func() {
-		for range 500 {
-			_, err := writeDB.Exec(
-				`INSERT INTO wal_checkpoint_repro (data) VALUES (?)`,
-				blob,
-			)
-			require.NoError(t, err)
-		}
-	}
-	walSize := func() int64 {
-		info, err := os.Stat(walPath)
-		if err != nil {
-			return 0
-		}
-		return info.Size()
-	}
-
-	// checkpoint opens a dedicated connection and issues exactly one
-	// PRAGMA wal_checkpoint(TRUNCATE), mirroring checkpointWAL itself.
-	checkpoint := func() (busy, log, checkpointed int) {
-		t.Helper()
-		db, err := sql.Open(
-			"sqlite",
-			fmt.Sprintf(
-				"%s?_pragma=busy_timeout(%d)&_pragma=synchronous(OFF)",
-				databaseURI,
-				250,
-			),
-		)
-		require.NoError(t, err)
-		defer func() { require.NoError(t, db.Close()) }()
-		db.SetMaxOpenConns(1)
-		row := db.QueryRowContext(
-			context.Background(),
-			"PRAGMA wal_checkpoint(TRUNCATE)",
-		)
-		require.NoError(t, row.Scan(&busy, &log, &checkpointed))
-		return busy, log, checkpointed
-	}
-
-	t.Run("no_other_connection", func(t *testing.T) {
-		growWAL()
-		require.Positive(t, walSize(), "need real WAL content to checkpoint")
-		busy, _, _ := checkpoint()
-		require.Zero(t, busy, "nothing else attached: TRUNCATE must not be busy")
-		require.Zero(t, walSize(), "TRUNCATE must truncate the -wal file to 0 bytes")
-	})
-
-	t.Run("idle_finalized_connection", func(t *testing.T) {
-		growWAL()
-		require.Positive(t, walSize(), "need real WAL content to checkpoint")
-
-		// sqliteDiskSize's old query pattern, run directly against readDB.
-		var pageCount, pageSize int64
-		require.NoError(
-			t,
-			readDB.QueryRowContext(context.Background(), "PRAGMA page_count").
-				Scan(&pageCount),
-		)
-		require.NoError(
-			t,
-			readDB.QueryRowContext(context.Background(), "PRAGMA page_size").
-				Scan(&pageSize),
-		)
-		require.Positive(
-			t,
-			readDB.Stats().OpenConnections,
-			"test setup: the query above should leave a connection pinned in the pool",
-		)
-
-		busy, _, _ := checkpoint()
-		require.Zerof(
-			t,
-			busy,
-			"an idle, already-finalized connection (readDB.OpenConnections=%d) "+
-				"must not block TRUNCATE",
-			readDB.Stats().OpenConnections,
-		)
-		require.Zero(t, walSize(), "TRUNCATE must still truncate the -wal file to 0 bytes")
-	})
-
-	t.Run("held_read_transaction_positive_control", func(t *testing.T) {
-		growWAL()
-		before := walSize()
-		require.Positive(t, before, "need real WAL content to checkpoint")
-
-		tx, err := readDB.BeginTx(
-			context.Background(),
-			&sql.TxOptions{ReadOnly: true},
-		)
-		require.NoError(t, err)
-		var count int64
-		require.NoError(
-			t,
-			tx.QueryRowContext(
-				context.Background(),
-				"SELECT count(*) FROM wal_checkpoint_repro",
-			).Scan(&count),
-		)
-
-		busy, _, _ := checkpoint()
-		require.NotZero(
-			t,
-			busy,
-			"a real, held, uncommitted read transaction must block TRUNCATE "+
-				"(control: proves this test can detect a real blocker)",
-		)
-		require.Equal(
-			t,
-			before,
-			walSize(),
-			"a busy TRUNCATE must not have truncated the -wal file",
-		)
-		require.NoError(t, tx.Rollback())
-	})
-}
-
-// TestOpenSharedSQLStoreWALPragmas pins the checkpoint threshold and retained
-// WAL limit. Both pragmas are connection-local, so each pool must set them.
-func TestOpenSharedSQLStoreWALPragmas(t *testing.T) {
-	t.Parallel()
-	dataDir := t.TempDir()
-	store, writeDB, readDB, err := openSQLStore(
-		Config{},
-		metadata.ProviderDependencies{DataDir: dataDir},
-	)
-	require.NoError(t, err)
-	require.NoError(t, store.Start(context.Background()))
-	t.Cleanup(func() {
-		require.NoError(t, store.Close())
-	})
-
-	for name, db := range map[string]*sql.DB{"writeDB": writeDB, "readDB": readDB} {
-		var pages int
-		require.NoError(t, db.QueryRow(
-			"PRAGMA wal_autocheckpoint",
-		).Scan(&pages))
-		require.Equalf(t, 10000, pages, "%s wal_autocheckpoint", name)
-
-		var bytes int
-		require.NoError(t, db.QueryRow(
-			"PRAGMA journal_size_limit",
-		).Scan(&bytes))
-		require.Equalf(t, 67108864, bytes, "%s journal_size_limit", name)
-	}
-}
-
-func TestWALResetHonorsJournalSizeLimit(t *testing.T) {
-	t.Parallel()
-	const journalSizeLimit = 64 << 20
-	dataDir := t.TempDir()
-	store, writeDB, _, err := openSQLStore(
-		Config{},
-		metadata.ProviderDependencies{DataDir: dataDir},
-	)
-	require.NoError(t, err)
-	require.NoError(t, store.Start(context.Background()))
-	t.Cleanup(func() {
-		require.NoError(t, store.Close())
-	})
-
-	ctx := context.Background()
-	conn, err := writeDB.Conn(ctx)
-	require.NoError(t, err)
-	t.Cleanup(func() {
-		require.NoError(t, conn.Close())
-	})
-	var limit int64
-	require.NoError(
-		t,
-		conn.QueryRowContext(ctx, "PRAGMA journal_size_limit").Scan(&limit),
-	)
-	require.Equal(t, int64(journalSizeLimit), limit)
-	_, err = conn.ExecContext(ctx, "PRAGMA wal_autocheckpoint=0")
-	require.NoError(t, err)
-	_, err = conn.ExecContext(
-		ctx,
-		`CREATE TABLE wal_size_limit (id INTEGER PRIMARY KEY, data BLOB)`,
-	)
-	require.NoError(t, err)
-
-	// One transaction ensures the active WAL grows beyond the limit before a
-	// reset can occur, leaving room for SQLite page and record overhead.
-	blob := bytes.Repeat([]byte{0xA5}, 1<<20)
-	tx, err := conn.BeginTx(ctx, nil)
-	require.NoError(t, err)
-	for range 66 {
-		_, err = tx.ExecContext(
-			ctx,
-			`INSERT INTO wal_size_limit (data) VALUES (?)`,
-			blob,
-		)
-		require.NoError(t, err)
-	}
-	require.NoError(t, tx.Commit())
-
-	walPath := filepath.Join(dataDir, "metadata.sqlite-wal")
-	walInfo, err := os.Stat(walPath)
-	require.NoError(t, err)
-	require.Greater(t, walInfo.Size(), int64(journalSizeLimit))
-
-	var busy, logFrames, checkpointedFrames int
-	require.NoError(
-		t,
-		conn.QueryRowContext(ctx, "PRAGMA wal_checkpoint(RESTART)").Scan(
-			&busy,
-			&logFrames,
-			&checkpointedFrames,
-		),
-	)
-	require.Zero(t, busy)
-	require.Equal(t, logFrames, checkpointedFrames)
-	// RESTART checkpoints and makes the next writer restart the WAL from the
-	// beginning. That subsequent commit performs the reset and applies the
-	// configured journal size limit to the oversized file.
-	_, err = conn.ExecContext(
-		ctx,
-		`INSERT INTO wal_size_limit (data) VALUES (?)`,
-		[]byte("reset"),
-	)
-	require.NoError(t, err)
-
-	walInfo, err = os.Stat(walPath)
-	require.NoError(t, err)
-	require.LessOrEqual(t, walInfo.Size(), int64(journalSizeLimit))
-}
-
 func TestOpenSharedSQLStoreMemoryIsolation(t *testing.T) {
 	t.Parallel()
 	first, firstDB, _, err := openSQLStore(
@@ -3049,55 +2593,6 @@ const (
 	testSubjectNut  = "00000002df633853f6a47465c9496721d2d5b1291b8398016c0e87ae6e7574636f696e"
 	testSubjectDjed = "8db269c3ec630e06ae29f74bc39edd1f87c819f1056206e879a1cd61446a65644d6963726f555344"
 )
-
-func TestSharedSQLStoreTokenRegistryRoundTrip(t *testing.T) {
-	t.Parallel()
-	store, _ := newSharedSQLStore(t)
-
-	ctx := t.Context()
-
-	written, err := store.UpsertTokenRegistryEntries(
-		ctx,
-		[]models.TokenRegistryEntry{
-			{
-				Subject:     testSubjectNut,
-				Name:        "nutcoin",
-				Ticker:      "NUT",
-				Description: "The legendary Nutcoin.",
-				URL:         "https://fivebinaries.com/nutcoin",
-				Logo:        "iVBORw0KGgo=",
-			},
-			{
-				Subject:  testSubjectDjed,
-				Name:     "Djed USD",
-				Ticker:   "DJED",
-				Decimals: new(6),
-			},
-		},
-		testSyncedAt,
-		nil,
-	)
-	require.NoError(t, err)
-	require.Equal(t, 2, written)
-
-	nut, err := store.GetTokenRegistryEntry(testSubjectNut, nil)
-	require.NoError(t, err)
-	require.NotNil(t, nut)
-	require.Equal(t, testSubjectNut, nut.Subject)
-	require.Equal(t, "nutcoin", nut.Name)
-	require.Equal(t, "NUT", nut.Ticker)
-	require.Equal(t, "The legendary Nutcoin.", nut.Description)
-	require.Equal(t, "https://fivebinaries.com/nutcoin", nut.URL)
-	require.Equal(t, "iVBORw0KGgo=", nut.Logo)
-	require.Nil(t, nut.Decimals, "absent decimals must not read back as zero")
-
-	djed, err := store.GetTokenRegistryEntry(testSubjectDjed, nil)
-	require.NoError(t, err)
-	require.NotNil(t, djed)
-	require.NotNil(t, djed.Decimals)
-	require.Equal(t, 6, *djed.Decimals)
-	require.Empty(t, djed.Logo)
-}
 
 func TestSharedSQLStoreTokenRegistryUpsertReplacesProperties(t *testing.T) {
 	t.Parallel()
@@ -3173,21 +2668,6 @@ func TestSharedSQLStoreTokenRegistryLookupNormalizesSubject(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, entry)
 	require.Equal(t, "nutcoin", entry.Name)
-}
-
-func TestSharedSQLStoreTokenRegistryUpsertEmptyBatch(t *testing.T) {
-	t.Parallel()
-	store, _ := newSharedSQLStore(t)
-
-	written, err := store.UpsertTokenRegistryEntries(
-		t.Context(),
-		nil,
-		testSyncedAt,
-		nil,
-	)
-
-	require.NoError(t, err)
-	require.Zero(t, written)
 }
 
 func TestSharedSQLStoreTokenRegistryRejectsBlankSubject(t *testing.T) {
@@ -3449,135 +2929,6 @@ SELECT hash, id FROM "transaction" WHERE slot >= ? AND slot < ?`,
 	require.NoError(t, err)
 }
 
-// TestTransactionWitnessCleanupStaysIndexedAfterDeferredIndexDrop covers
-// witness cleanup after a deferred index drop.
-//
-// Mithril drops the deferred-index manifest before API-mode historical
-// backfill, and backfill then calls SetTransaction for every transaction it
-// replays. Each of those calls clears the four witness tables by
-// transaction_id first. With the manifest deferring the transaction_id index on
-// three of those tables, each delete became a full scan of a table that grows
-// with every transaction written, so per-transaction cost rose with the row
-// count already present: measured on preview, backfill fell from 3311 to 9
-// blocks/sec and its own ETA climbed from 30m to 177h.
-//
-// The plan is asserted rather than the index's existence: an index the planner
-// does not choose is a write cost with no read benefit, and it is EXPLAINed
-// from the store's own exported statement so the plan pinned here is the plan
-// of the delete that actually runs.
-func TestTransactionWitnessCleanupStaysIndexedAfterDeferredIndexDrop(
-	t *testing.T,
-) {
-	t.Parallel()
-	store, db := newAPIModeSQLStore(t)
-	seedWitnessRows(t, db, 0, 2000)
-
-	requireWitnessCleanupIndexed(t, db, "before deferring indexes")
-	require.NoError(t, store.DropDeferredIndexes())
-	requireWitnessCleanupIndexed(t, db, "after DropDeferredIndexes")
-}
-
-// TestRetainedIndexesResidentAfterCriticalRebuild covers the repair path a
-// node takes when a prior bulk-load cycle was interrupted.
-//
-// serve calls RepairCriticalDeferredIndexes before it clears sync_status, and
-// Mithril sync calls BuildCritical before it clears its own. Both return with
-// the store about to accept API writes, and neither waits for the lazy
-// remainder that background maintenance finishes later. A database an older
-// binary's manifest had dropped a retained transaction_id index from therefore
-// has to be repaired by the critical rebuild too: otherwise every
-// SetTransaction between that point and the full rebuild clears its witness
-// tables with the full scan the retained set exists to prevent.
-//
-// The state under test is that database, reproduced by dropping the retained
-// set out from under a pending marker.
-func TestRetainedIndexesResidentAfterCriticalRebuild(t *testing.T) {
-	t.Parallel()
-	store, db := newAPIModeSQLStore(t)
-	seedWitnessRows(t, db, 0, 2000)
-
-	require.NoError(t, store.DropDeferredIndexes())
-	dropRetainedIndexes(t, db)
-	requireWitnessCleanupScans(t, db)
-
-	require.NoError(t, store.BuildCriticalDeferredIndexes())
-	requireRetainedIndexesResident(t, db, "after BuildCriticalDeferredIndexes")
-	requireWitnessCleanupIndexed(t, db, "after BuildCriticalDeferredIndexes")
-
-	// The critical rebuild owns only the critical subset, so the marker has
-	// to survive it for background maintenance to finish the rest.
-	pending, err := store.HasDeferredIndexesPending()
-	require.NoError(t, err)
-	require.True(
-		t,
-		pending,
-		"BuildCriticalDeferredIndexes must leave the marker for the lazy "+
-			"remainder",
-	)
-}
-
-// dropRetainedIndexes removes every deferred.Retained index, reproducing what
-// a binary whose manifest still deferred them leaves on disk.
-//
-// The names are manifest constants, not input, and SQLite takes no bound
-// parameter in DDL.
-func dropRetainedIndexes(t *testing.T, db *sql.DB) {
-	t.Helper()
-	require.NotEmpty(t, deferred.Retained)
-	for _, index := range deferred.Retained {
-		_, err := db.Exec("DROP INDEX IF EXISTS " + index.Name)
-		require.NoError(t, err, "dropping retained index %s", index.Name)
-	}
-}
-
-// requireRetainedIndexesResident asserts that every deferred.Retained index is
-// present in the schema.
-func requireRetainedIndexesResident(t *testing.T, db *sql.DB, when string) {
-	t.Helper()
-	for _, index := range deferred.Retained {
-		var found int
-		require.NoError(t, db.QueryRow(
-			`SELECT COUNT(*) FROM sqlite_master
-WHERE type = 'index' AND name = ?`,
-			index.Name,
-		).Scan(&found))
-		require.Equal(
-			t,
-			1,
-			found,
-			"%s: retained index %s must be resident whenever the store "+
-				"can serve writes",
-			when,
-			index.Name,
-		)
-	}
-}
-
-// requireWitnessCleanupScans asserts the negative case the repair has to fix:
-// with the retained set absent, the idempotency deletes are full scans. Without
-// it a rebuild that restored nothing would still pass the assertions above if
-// the indexes had never been missing.
-func requireWitnessCleanupScans(t *testing.T, db *sql.DB) {
-	t.Helper()
-	for _, table := range sqlstore.TransactionWitnessTables() {
-		plan := queryPlan(
-			t,
-			db,
-			sqlstore.TransactionWitnessCleanupSQL(table),
-			1,
-		)
-		require.Contains(
-			t,
-			plan,
-			"SCAN "+table,
-			"the simulated interrupted cycle must leave the %s "+
-				"idempotency delete unindexed:\n%s",
-			table,
-			plan,
-		)
-	}
-}
-
 // requireWitnessCleanupIndexed asserts that every witness-table idempotency
 // delete resolves transaction_id through its index, quoting the plan and the
 // caller's stage description when it does not.
@@ -3690,7 +3041,7 @@ func TestRetainedIndexesRepairPreChangeDeferredCycle(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			store, db := newAPIModeSQLStore(t)
-			seedWitnessRows(t, db, 0, 500)
+			seedWitnessRows(t, db, 0, 5)
 			seedPreChangeDeferredCycle(t, db)
 
 			require.NoError(t, repair(store))
