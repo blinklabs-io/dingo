@@ -72,8 +72,8 @@ nothing between epochs. Dingo applies no idle limit to trusted local
 connections unless `trustedNtCIdleTimeout` is set, so the Cardano node built
 from this tree works as is. With a limit set, Dingo closes the idle connection
 and dmq-node exits with `BearerClosed`, so `DMQ_INTEROP_CARDANO_BIN` must not
-point at a build that sets one. The Dingo under test is always built from this
-tree.
+point at a Dingo whose configuration sets `trustedNtCIdleTimeout`. The Dingo
+under test is always built from this tree.
 
 ## gouroboros version
 

@@ -491,6 +491,28 @@ func TestTrustedLocalNtCIdleTimeoutDisabledKeepsIdleClient(t *testing.T) {
 
 	connectNtCAdmissionClient(t, listener)
 	requireTrustedNtCAdmissionCount(t, manager, 1)
+	require.Eventually(t, func() bool {
+		manager.trustedNtCActivityMutex.Lock()
+		defer manager.trustedNtCActivityMutex.Unlock()
+		if len(manager.trustedNtCActivities) != 1 {
+			return false
+		}
+		for _, activity := range manager.trustedNtCActivities {
+			activity.mu.Lock()
+			conn := activity.conn
+			timeout := activity.timeout
+			activity.mu.Unlock()
+			if conn == nil {
+				return false
+			}
+			conn.mu.Lock()
+			capped := !conn.deadline.IsZero()
+			conn.mu.Unlock()
+			return timeout == 0 && !capped
+		}
+		return false
+	}, 2*time.Second, 5*time.Millisecond,
+		"trusted NtC activity registered with an idle timeout or read deadline cap")
 	require.Never(t, func() bool {
 		manager.ntcAdmissionMutex.Lock()
 		defer manager.ntcAdmissionMutex.Unlock()
