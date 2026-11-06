@@ -20898,9 +20898,15 @@ POOLREAP precedes SNAP.
    which pins a snapshot of the committed boundary before any later block
    commits. A background job decides RATIFY and EXPIRY on that snapshot and
    writes the marks, at the boundary slot, in its own transaction under
-   `rewardPrecomputeWriteMu`. The next boundary first writes a decision the
-   job has not, waiting for the job to decide but never for its write, so the
-   boundary holding the writer cannot wait on a transaction that needs it.
+   `rewardPrecomputeWriteMu`. The boundary transaction itself updates dormant
+   DRep expiries and records the dormant epoch when its new-epoch proposal set
+   is empty, before later blocks can register or update DReps. The job's
+   expiry-driven descendant removal uses the proposal set captured by its
+   pinned boundary read, so proposals submitted after the boundary cannot be
+   removed by that boundary's RATIFY result. The next boundary first writes a
+   decision the job has not, waiting for the job to decide but never for its
+   write, so the boundary holding the writer cannot wait on a transaction that
+   needs it.
    RATIFY stays in the boundary transaction when a major-version change runs
    HARDFORK after it and when no in-memory SPO state was resolved, because each
    would make the committed state differ from what RATIFY reads at its position
