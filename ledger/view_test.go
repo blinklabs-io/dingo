@@ -532,6 +532,7 @@ func TestLedgerViewCommitteeHotCredentialSelection(t *testing.T) {
 	for _, test := range tests {
 		for _, era := range eras {
 			t.Run(test.name+"/"+era.name, func(t *testing.T) {
+				t.Parallel()
 				lv, db := committeeTestView(t, era.pparams)
 				lv.pinCommitteeState(5, era.pparams)
 				lv.skipPhase2Validation = true
@@ -760,6 +761,7 @@ func TestLedgerViewCommitteeMember(t *testing.T) {
 	t.Parallel()
 
 	t.Run("seated", func(t *testing.T) {
+		t.Parallel()
 		lv, db := committeeTestView(
 			t,
 			&conway.ConwayProtocolParameters{},
@@ -786,6 +788,7 @@ func TestLedgerViewCommitteeMember(t *testing.T) {
 	})
 
 	t.Run("pending proposal", func(t *testing.T) {
+		t.Parallel()
 		lv, db := committeeTestView(
 			t,
 			&conway.ConwayProtocolParameters{},
@@ -805,6 +808,7 @@ func TestLedgerViewCommitteeMember(t *testing.T) {
 	t.Run(
 		"seated resignation takes precedence over proposal",
 		func(t *testing.T) {
+			t.Parallel()
 			lv, db := committeeTestView(
 				t,
 				&conway.ConwayProtocolParameters{},
@@ -840,6 +844,7 @@ func TestLedgerViewCommitteeMember(t *testing.T) {
 	)
 
 	t.Run("unknown", func(t *testing.T) {
+		t.Parallel()
 		lv, db := committeeTestView(
 			t,
 			&conway.ConwayProtocolParameters{},
@@ -860,6 +865,7 @@ func TestLedgerViewCommitteeMember(t *testing.T) {
 	})
 
 	t.Run("proposal storage error", func(t *testing.T) {
+		t.Parallel()
 		lv, db := committeeTestView(
 			t,
 			&conway.ConwayProtocolParameters{},
@@ -1533,6 +1539,7 @@ func TestValidateTxCommitteeCertsAffectSameTransactionVoterElection(
 	for _, era := range []string{"Conway", "Dijkstra"} {
 		for _, test := range tests {
 			t.Run(era+"/"+test.name, func(t *testing.T) {
+				t.Parallel()
 				pparams := &conway.ConwayProtocolParameters{}
 				pparams.ProtocolVersion.Major = lcommon.ProtocolVersionVanRossem
 				lv, db := committeeTestView(t, pparams)
@@ -7395,7 +7402,10 @@ func TestBoundaryPromotesRewardAfterReregistration(t *testing.T) {
 		spendable    bool
 	}
 	run := func(reregister bool) outcome {
-		f := newEpochBoundaryBenchFixture(t, epochBoundaryDumpShape(), "")
+		f := newEpochBoundaryBenchFixture(t, epochBoundaryBenchShape{
+			pools: 10, delegators: 200, dreps: 3, utxosPerDelegator: 2,
+			proposals: 2, drepVotes: 3, spoVotes: 3, ccMembers: 3,
+		}, "")
 		key := epochBoundaryBenchHash(0x30, 1)
 		raw, err := dbtest.RawSQLiteMetadata(t, f.db)
 		require.NoError(t, err)

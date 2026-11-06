@@ -1431,6 +1431,9 @@ type tipSnapshot struct {
 }
 
 type LedgerState struct {
+	// cleanupBatchSizeOverride replaces cleanupConsumedUtxoBatchSize when
+	// positive so tests can exercise the batch bound with a few rows.
+	cleanupBatchSizeOverride int
 	// A single successful-decode receipt retains only a manifest hash. Count
 	// readers still reload and hash every body before reusing that proof.
 	certifiedClosureReceipt atomic.Pointer[lcommon.Blake2b256]
@@ -4710,8 +4713,15 @@ func (ls *LedgerState) cleanupConsumedUtxos(ctx context.Context) {
 		ctx,
 		tipSlot-stabilityWindow,
 		stabilityWindow,
-		cleanupConsumedUtxoBatchSize,
+		ls.cleanupConsumedUtxoBatchLimit(),
 	)
+}
+
+func (ls *LedgerState) cleanupConsumedUtxoBatchLimit() int {
+	if ls.cleanupBatchSizeOverride > 0 {
+		return ls.cleanupBatchSizeOverride
+	}
+	return cleanupConsumedUtxoBatchSize
 }
 
 // pruneConsumedUtxosUpTo hard-deletes at most limit spent UTxO rows whose

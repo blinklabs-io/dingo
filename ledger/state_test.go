@@ -7566,10 +7566,11 @@ func TestCleanupConsumedUtxos_SkipsDeleteWhenPruneFloorPersistFails(
 func TestCleanupConsumedUtxos_ProcessesOneBoundedBatch(t *testing.T) {
 	t.Parallel()
 
+	const batchLimit = 3
 	db := newTestDBForCleanup(t, types.StorageModeCore)
 	mdTxn := db.MetadataTxn(context.Background(), true)
 	require.NoError(t, mdTxn.Do(func(txn *database.Txn) error {
-		for idx := 0; idx <= cleanupConsumedUtxoBatchSize; idx++ {
+		for idx := 0; idx <= batchLimit; idx++ {
 			txID := bytes.Repeat([]byte{0}, 32)
 			binary.BigEndian.PutUint32(txID[:4], uint32(idx+1))
 			if err := db.CreateUtxo(context.Background(), txn, &models.Utxo{
@@ -7586,11 +7587,12 @@ func TestCleanupConsumedUtxos_ProcessesOneBoundedBatch(t *testing.T) {
 	}))
 
 	ls := newLedgerStateForCleanup(db, 100_000)
+	ls.cleanupBatchSizeOverride = batchLimit
 	ls.cleanupConsumedUtxos(context.Background())
 
 	remaining, err := db.Metadata().GetUtxosDeletedBeforeSlot(
 		50_000,
-		cleanupConsumedUtxoBatchSize+1,
+		batchLimit+1,
 		nil,
 	)
 	require.NoError(t, err)
@@ -7599,7 +7601,7 @@ func TestCleanupConsumedUtxos_ProcessesOneBoundedBatch(t *testing.T) {
 	ls.cleanupConsumedUtxos(context.Background())
 	remaining, err = db.Metadata().GetUtxosDeletedBeforeSlot(
 		50_000,
-		cleanupConsumedUtxoBatchSize+1,
+		batchLimit+1,
 		nil,
 	)
 	require.NoError(t, err)
