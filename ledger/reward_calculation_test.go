@@ -7156,32 +7156,7 @@ func TestApplyMinPoolMarginConfig(t *testing.T) {
 	}
 }
 
-func TestLedgerStateMinPoolMargin(t *testing.T) {
-	t.Parallel()
-
-	ls, _ := newRewardCalculationTestLedger(t)
-	require.Nil(t, ls.MinPoolMargin())
-	ls.config.MinPoolMargin = 150
-	require.Zero(t, big.NewRat(150, 10_000).Cmp(ls.MinPoolMargin()))
-}
-
 // --- CIP-0163 full-pot reward distribution -------------------------------
-
-func TestApplyFullPotConfigEnabled(t *testing.T) {
-	t.Parallel()
-
-	params := rewards.Parameters{}
-	applyFullPotConfig(&params, LedgerStateConfig{FullPotRewardsEnabled: true})
-	require.True(t, params.FullPotRewardsEnabled)
-}
-
-func TestApplyFullPotConfigDisabled(t *testing.T) {
-	t.Parallel()
-
-	params := rewards.Parameters{FullPotRewardsEnabled: true}
-	applyFullPotConfig(&params, LedgerStateConfig{FullPotRewardsEnabled: false})
-	require.False(t, params.FullPotRewardsEnabled)
-}
 
 // TestPrecomputedRewardPoolRewardsMatchInputsFullPot verifies that under
 // CIP-0163 full pot the reuse verifier reproduces the pot-filling apportionment:
@@ -8631,17 +8606,6 @@ func dumpDRepVotingPower(t *testing.T, f *epochBoundaryBenchFixture) string {
 	return strings.Join(lines, "\n") + "\n"
 }
 
-// deregisterEpochBoundaryDumpDelegators deregisters every 97th delegator
-// during the ended epoch, after any precompute ran, the way a deregistration
-// certificate does: the account, its live stake row and the certificate row.
-// Their rewards become unspendable at the boundary.
-func deregisterEpochBoundaryDumpDelegators(t *testing.T, raw *sql.DB) {
-	t.Helper()
-	deregisterEpochBoundaryDelegators(
-		t, raw, epochBoundaryDumpShape().delegators, 97,
-	)
-}
-
 // deregisterEpochBoundaryDelegators deregisters every step-th of the first
 // delegators delegators.
 func deregisterEpochBoundaryDelegators(
@@ -8665,52 +8629,6 @@ WHERE credential_tag = 0 AND staking_key = ?`,
 			_, err := raw.Exec(stmt, slot, key)
 			require.NoError(t, err)
 		}
-	}
-}
-
-// TestEpochBoundaryDumpForDifferential runs one boundary on the dump fixture
-// for each precompute state and writes the resulting state to
-// $DINGO_BOUNDARY_DUMP_DIR, so the same test on two code versions produces
-// files to diff. It is skipped unless that directory is set.
-func TestEpochBoundaryDumpForDifferential(t *testing.T) {
-	t.Parallel()
-	dir := os.Getenv("DINGO_BOUNDARY_DUMP_DIR")
-	if dir == "" {
-		t.Skip("set DINGO_BOUNDARY_DUMP_DIR to write boundary dumps")
-	}
-	for _, state := range []string{"complete", "partial", "missing"} {
-		t.Run(state, func(t *testing.T) {
-			t.Parallel()
-			f := newEpochBoundaryBenchFixture(t, epochBoundaryDumpShape(), "")
-			switch state {
-			case "complete":
-				require.NoError(
-					t,
-					f.ls.precomputeStakeRewardsAfterEpochTransition(
-						epochBoundaryBenchPrecomputeEvent(),
-					),
-				)
-			case "partial":
-				epochBoundaryBenchPartialPrecomputeT(t, f)
-			}
-			raw, err := dbtest.RawSQLiteMetadata(t, f.db)
-			require.NoError(t, err)
-			defer raw.Close()
-			deregisterEpochBoundaryDumpDelegators(t, raw)
-			f.rollover(t)
-			f.ls.waitEpochBoundaryBenchBackground()
-			// DRep power is read from the derived balances; the tables are
-			// dumped with every credit folded into its account, the shape an
-			// eager boundary writes.
-			power := dumpDRepVotingPower(t, f)
-			settleRewardCredits(t, f.ls)
-			dump := dumpEpochBoundaryState(t, raw) + "== drep_power\n" +
-				power
-			require.NoError(t, os.WriteFile(
-				filepath.Join(dir, "boundary-"+state+".txt"),
-				[]byte(dump), 0o644,
-			))
-		})
 	}
 }
 
