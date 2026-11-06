@@ -1369,9 +1369,6 @@ live stake first materialize pending UTxOs and replay those segments, preserving
 credential zero crossings, stake row IDs and sequence advancement. Account state
 stays constant inside eligible closures; external account writes abort the batch.
 
-Closures with Dijkstra direct deposits keep immediate UTxO writes because
-reward-account credits update live stake outside the retained overlay.
-
 Transaction parents and execution contexts remain immediate. Every created
 UTxO, including outputs spent inside the closure, retains its ordinary ID,
 spend markers and address row. Exact known reads resolve from the staged
