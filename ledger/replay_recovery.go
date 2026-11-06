@@ -138,6 +138,11 @@ type atTipRecoveryAttempt struct {
 	Attempts   int
 }
 
+type atTipRecoveryFloor struct {
+	Point      ocommon.Point
+	BlockIndex uint64
+}
+
 func newAtTipRecoveryAttempt(
 	validationErr *txValidationError,
 ) *atTipRecoveryAttempt {
@@ -1227,6 +1232,32 @@ func (ls *LedgerState) rollbackPrimaryChainInSecurityParamWindows(
 	}
 }
 
+// At-tip recovery must make one bounded rollback. A series of individually
+// bounded steps can discard more than K blocks in total.
+func (ls *LedgerState) rollbackPrimaryChainWithinSecurityParam(
+	point ocommon.Point,
+) (bool, error) {
+	var pending pendingPublishes
+	defer pending.flush()
+	pending.drainChain(ls.chain)
+	ls.chainsyncBlockfetchMutex.Lock()
+	defer ls.chainsyncBlockfetchMutex.Unlock()
+	ls.transactionEventMutex.Lock()
+	defer ls.transactionEventMutex.Unlock()
+	if err := ls.validateAndEmitRollbackUndo(
+		ls.lifecycleContext(), point,
+	); err != nil {
+		return false, fmt.Errorf("validate at-tip recovery rollback: %w", err)
+	}
+	tipBefore := ls.chain.Tip().Point
+	if _, err := ls.chain.RollbackDeferred(
+		context.Background(), point,
+	); err != nil {
+		return false, fmt.Errorf("rollback primary chain within K: %w", err)
+	}
+	return !pointMatches(tipBefore, ls.chain.Tip().Point), nil
+}
+
 // errRecoveryRewindNotConverging reports a windowed rewind whose committed
 // steps stopped gaining on their target because the primary chain was being
 // extended at least as fast as the descent moved. Like an over-K refusal it
@@ -1321,6 +1352,23 @@ func (ls *LedgerState) resetRecoveryRewindRejections(newTipSlot uint64) {
 func (ls *LedgerState) rewindPrimaryChainForRecovery(
 	point ocommon.Point,
 ) error {
+	return ls.rewindPrimaryChainForRecoveryWithRollback(
+		point, ls.rollbackPrimaryChainInSecurityParamWindows,
+	)
+}
+
+func (ls *LedgerState) rewindPrimaryChainAtTipForRecovery(
+	point ocommon.Point,
+) error {
+	return ls.rewindPrimaryChainForRecoveryWithRollback(
+		point, ls.rollbackPrimaryChainWithinSecurityParam,
+	)
+}
+
+func (ls *LedgerState) rewindPrimaryChainForRecoveryWithRollback(
+	point ocommon.Point,
+	rollback func(ocommon.Point) (bool, error),
+) error {
 	// This is the funnel every recovery truncation of the primary chain
 	// passes through, and it runs outside the rollback path that arms and
 	// disarms the continuation audit. A window armed before it describes
@@ -1343,7 +1391,7 @@ func (ls *LedgerState) rewindPrimaryChainForRecovery(
 	// resolves from the published pointer afterwards.
 	prior, gen := ls.takeContinuationAuditForRewind()
 	tipBefore := ls.chain.Tip().Point
-	committed, err := ls.rollbackPrimaryChainInSecurityParamWindows(point)
+	committed, err := rollback(point)
 	ls.settleAuditAfterRewind(
 		prior,
 		gen,
@@ -1559,6 +1607,114 @@ func (ls *LedgerState) resetAtTipRecoveryDescent(newTipSlot uint64) {
 	ls.atTipRecoveryHolding = false
 	ls.atTipRecoveryCrossedEpochStart = 0
 	ls.lastAtTipRecovery = nil
+	ls.atTipRecoveryFloor = nil
+}
+
+func (ls *LedgerState) clampAtTipRecoveryToImmutableFloor(
+	point ocommon.Point,
+) (ocommon.Point, error) {
+	securityParam := ls.SecurityParam()
+	if securityParam <= 0 {
+		return ocommon.Point{}, chain.ErrSecurityParamNotConfigured
+	}
+	tip := ls.chain.Tip().Point
+	var tipBlockIndex uint64
+	if !pointMatches(tip, ocommon.Point{}) {
+		tipBlock, err := database.BlockByPoint(
+			context.Background(), ls.db, tip,
+		)
+		if err != nil {
+			return ocommon.Point{}, fmt.Errorf(
+				"read primary chain tip for at-tip recovery: %w", err,
+			)
+		}
+		tipBlockIndex = tipBlock.ID
+	}
+	k := uint64(securityParam) //nolint:gosec // positive, checked above
+	currentFloorIndex := uint64(0)
+	if tipBlockIndex > k {
+		currentFloorIndex = tipBlockIndex - k
+	}
+	if ls.atTipRecoveryFloor == nil {
+		floorPoint := ocommon.Point{}
+		if currentFloorIndex > 0 {
+			var found bool
+			var err error
+			floorPoint, found, err = ls.chain.PointAtDepthFrom(
+				context.Background(), tip, k,
+			)
+			if err != nil {
+				return ocommon.Point{}, fmt.Errorf(
+					"read immutable point for at-tip recovery: %w", err,
+				)
+			}
+			if !found {
+				return ocommon.Point{}, errors.New(
+					"primary tip changed before at-tip recovery floor was read",
+				)
+			}
+		}
+		ls.atTipRecoveryFloor = &atTipRecoveryFloor{
+			Point:      floorPoint,
+			BlockIndex: currentFloorIndex,
+		}
+	}
+	floor := ls.atTipRecoveryFloor
+	if tipBlockIndex < floor.BlockIndex {
+		return ocommon.Point{}, fmt.Errorf(
+			"%w: primary chain tip index %d is below immutable at-tip recovery floor %d",
+			errHaltLedgerPipeline, tipBlockIndex, floor.BlockIndex,
+		)
+	}
+	if floor.BlockIndex > 0 {
+		canonical, found, lookupErr := ls.chain.PointAtDepthFrom(
+			context.Background(), tip, tipBlockIndex-floor.BlockIndex,
+		)
+		if lookupErr != nil {
+			return ocommon.Point{}, fmt.Errorf(
+				"check immutable at-tip recovery floor: %w", lookupErr,
+			)
+		}
+		if !found || !pointMatches(canonical, floor.Point) {
+			return ocommon.Point{}, fmt.Errorf(
+				"%w: immutable at-tip recovery floor is no longer on the primary chain",
+				errHaltLedgerPipeline,
+			)
+		}
+	}
+	if currentFloorIndex > floor.BlockIndex {
+		currentFloor, found, lookupErr := ls.chain.PointAtDepthFrom(
+			context.Background(), tip, k,
+		)
+		if lookupErr != nil {
+			return ocommon.Point{}, fmt.Errorf(
+				"read current at-tip recovery floor: %w", lookupErr,
+			)
+		}
+		if !found {
+			return ocommon.Point{}, errors.New(
+				"current at-tip recovery floor is unavailable",
+			)
+		}
+		floor = &atTipRecoveryFloor{
+			Point: currentFloor, BlockIndex: currentFloorIndex,
+		}
+	}
+	if tipBlockIndex == 0 {
+		return ocommon.Point{}, nil
+	}
+	if point.Slot == 0 && len(point.Hash) == 0 {
+		return floor.Point, nil
+	}
+	target, err := database.BlockByPoint(context.Background(), ls.db, point)
+	if err != nil {
+		return ocommon.Point{}, fmt.Errorf("read at-tip recovery target: %w", err)
+	}
+	if target.ID < floor.BlockIndex ||
+		(target.ID == floor.BlockIndex && !pointMatches(point, floor.Point)) {
+		return floor.Point, nil
+	}
+	return point, nil
 }
 
 func (ls *LedgerState) recoverAtTipFromTxValidationError(
@@ -1574,8 +1730,8 @@ func (ls *LedgerState) recoverAtTipFromTxValidationError(
 	// rewind-to-tip didn't help: peers keep replaying the same losing
 	// fork because chainselection's intersection point is still on it.
 	// Rewind progressively deeper to expose a wider candidate set, up
-	// to the era's stability window. Only halt if even the deepest
-	// rewind has been tried.
+	// to the era's stability window, then enforce the immutable K-block
+	// floor before mutating the primary chain.
 	isSameFailure := ls.lastAtTipRecovery != nil &&
 		ls.lastAtTipRecovery.matches(validationErr)
 	attempts := 1
@@ -1628,8 +1784,8 @@ func (ls *LedgerState) recoverAtTipFromTxValidationError(
 	ledgerTip := ls.currentTip
 	ls.RUnlock()
 	chainTip := ls.chain.Tip()
-	// Compute the rewind target. Depth grows linearly with each retry,
-	// capped at the era stability window so we never undo an immutable block.
+	// Compute the rewind target. The stability window is measured in slots;
+	// the K-block floor below bounds the actual rollback depth.
 	// While holding (non-converging descent detected), deep rewinds are
 	// suppressed entirely: we rewind only to the ledger tip so the primary
 	// chain stops descending and ChainSync can re-deliver, avoiding the
@@ -1709,6 +1865,19 @@ func (ls *LedgerState) recoverAtTipFromTxValidationError(
 		)
 		rewindPoint = ledgerTip.Point
 	}
+	boundedPoint, boundErr := ls.clampAtTipRecoveryToImmutableFloor(rewindPoint)
+	if boundErr != nil {
+		return false, boundErr
+	}
+	if !pointMatches(boundedPoint, rewindPoint) {
+		ls.config.Logger.Warn(
+			"at-tip recovery target crosses immutable K-block boundary",
+			"requested_slot", rewindPoint.Slot,
+			"bounded_slot", boundedPoint.Slot,
+			"security_param", ls.SecurityParam(),
+		)
+	}
+	rewindPoint = boundedPoint
 	if ls.recoveryRollbackExceedsMithrilBoundary(rewindPoint) {
 		if err := ls.rejectAtTipRecoveryAtMithrilBoundary(
 			validationErr,
@@ -1767,7 +1936,7 @@ func (ls *LedgerState) recoverAtTipFromTxValidationError(
 			return err
 		}
 		return ls.withDestructiveDatabaseTransition(ls.closeCtx(), func() error {
-			if err := ls.rewindPrimaryChainForRecovery(
+			if err := ls.rewindPrimaryChainAtTipForRecovery(
 				rewindPoint,
 			); err != nil {
 				return fmt.Errorf(

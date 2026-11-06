@@ -1843,6 +1843,7 @@ type LedgerState struct {
 	closeErr                        error
 	inRecovery                      bool // guards against recursive recovery in SubmitAsyncDBTxn
 	lastAtTipRecovery               *atTipRecoveryAttempt
+	atTipRecoveryFloor              *atTipRecoveryFloor
 	lastHeaderValidationFailure     *headerValidationError
 	lastHeaderValidationTip         ocommon.Point
 	// At-tip recovery non-convergence tracking. A descending

@@ -1131,6 +1131,149 @@ func TestTryRecoverFromTxValidationErrorAtTipRewindsPrimaryChain(
 	)
 }
 
+func TestAtTipRecoveryRetainsImmutableBlocksAcrossRetries(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name           string
+		ledgerTipIndex int
+	}{
+		{name: "single over-K target", ledgerTipIndex: 12},
+		{name: "cumulative retry depth", ledgerTipIndex: 18},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			testAtTipRecoveryRetainsImmutableBlocks(t, tc.ledgerTipIndex)
+		})
+	}
+}
+
+func testAtTipRecoveryRetainsImmutableBlocks(t *testing.T, ledgerTipIndex int) {
+	const securityParam = 3
+	db := newTestDB(t)
+	cm, err := chain.NewManager(context.Background(), db, nil)
+	require.NoError(t, err)
+	raw := make([]chain.RawBlock, 20)
+	var prev []byte
+	for i := range raw {
+		raw[i] = testRawBlock(
+			fmt.Sprintf("at-tip-k-bound-%d", i),
+			uint64((i+1)*5000), //nolint:gosec
+			uint64(i+1),        //nolint:gosec
+			prev,
+		)
+		prev = raw[i].Hash
+	}
+	require.NoError(t, cm.PrimaryChain().AddRawBlocks(context.Background(), raw))
+
+	ls, err := newReplayRecoveryLedgerState(t, LedgerStateConfig{
+		Database:          db,
+		ChainManager:      cm,
+		CardanoNodeConfig: newTestShelleyGenesisCfgWithK(t, securityParam),
+		Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	require.NoError(t, cm.SetLedger(ls))
+	ls.metrics.init(prometheus.NewRegistry())
+	ls.currentEra = eras.ShelleyEraDesc
+	ledgerBlock := raw[ledgerTipIndex]
+	ledgerTip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(ledgerBlock.Slot, ledgerBlock.Hash),
+		BlockNumber: ledgerBlock.BlockNumber,
+	}
+	require.NoError(t, db.SetTip(ledgerTip, nil))
+	ls.currentTip = ledgerTip
+	ls.reachedTip.Store(true)
+	ls.publishSnapshotsLocked()
+
+	failingBlock := raw[len(raw)-1]
+	validationErr := &txValidationError{
+		BlockPoint: ocommon.NewPoint(failingBlock.Slot, failingBlock.Hash),
+		TxHash:     testHashBytes("at-tip-k-bound-tx"),
+		Cause:      errors.New("transaction validation failure"),
+	}
+	immutable := raw[len(raw)-1-securityParam]
+	for attempt := 1; attempt <= maxAtTipRecoveryAttempts; attempt++ {
+		recovered, recoverErr := ls.recoverAtTipFromTxValidationError(validationErr)
+		require.NoError(t, recoverErr)
+		require.True(t, recovered)
+		if attempt == 1 && ledgerTipIndex == 12 {
+			assert.Equal(t, ocommon.NewPoint(immutable.Slot, immutable.Hash),
+				ls.chain.Tip().Point)
+		}
+		if attempt == 1 && ledgerTipIndex == len(raw)-2 {
+			assert.Equal(t, ledgerTip.Point, ls.chain.Tip().Point)
+			continue
+		}
+		assert.GreaterOrEqual(
+			t, ls.chain.Tip().Point.Slot, immutable.Slot,
+			"attempt %d must retain blocks immutable at first failure", attempt,
+		)
+		_, lookupErr := database.BlockByPoint(context.Background(), db,
+			ocommon.NewPoint(immutable.Slot, immutable.Hash))
+		require.NoError(t, lookupErr,
+			"attempt %d must retain the first failure's immutable block", attempt)
+	}
+	if ledgerTipIndex == len(raw)-2 {
+		belowFloor := raw[len(raw)-2-securityParam]
+		_, err = ls.chain.RollbackDeferred(context.Background(),
+			ocommon.NewPoint(belowFloor.Slot, belowFloor.Hash))
+		require.NoError(t, err)
+		priorTip := ls.chain.Tip().Point
+		_, recoverErr := ls.recoverAtTipFromTxValidationError(validationErr)
+		require.ErrorIs(t, recoverErr, errHaltLedgerPipeline)
+		assert.Contains(t, recoverErr.Error(), "immutable at-tip recovery floor")
+		assert.Equal(t, priorTip, ls.chain.Tip().Point)
+
+		alternate := testRawBlock("at-tip-k-bound-alternate",
+			immutable.Slot, immutable.BlockNumber, belowFloor.Hash)
+		require.NoError(t, ls.chain.AddRawBlocks(context.Background(),
+			[]chain.RawBlock{alternate}))
+		priorTip = ls.chain.Tip().Point
+		_, recoverErr = ls.recoverAtTipFromTxValidationError(validationErr)
+		require.ErrorIs(t, recoverErr, errHaltLedgerPipeline)
+		assert.Contains(t, recoverErr.Error(), "immutable at-tip recovery floor")
+		assert.Equal(t, priorTip, ls.chain.Tip().Point)
+	}
+}
+
+func TestAtTipRecoveryShortChainCanReachOrigin(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	cm, err := chain.NewManager(context.Background(), db, nil)
+	require.NoError(t, err)
+	first := testRawBlock("at-tip-short-first", 5000, 1, nil)
+	second := testRawBlock("at-tip-short-second", 10000, 2, first.Hash)
+	require.NoError(t, cm.PrimaryChain().AddRawBlocks(context.Background(),
+		[]chain.RawBlock{first, second}))
+	ls, err := newReplayRecoveryLedgerState(t, LedgerStateConfig{
+		Database:          db,
+		ChainManager:      cm,
+		CardanoNodeConfig: newTestShelleyGenesisCfgWithK(t, 3),
+		Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	require.NoError(t, cm.SetLedger(ls))
+	ls.metrics.init(prometheus.NewRegistry())
+	ls.currentEra = eras.ShelleyEraDesc
+	require.NoError(t, db.SetTip(ochainsync.Tip{}, nil))
+	ls.currentTip = ochainsync.Tip{}
+	ls.reachedTip.Store(true)
+	ls.publishSnapshotsLocked()
+	validationErr := &txValidationError{
+		BlockPoint: ocommon.NewPoint(second.Slot, second.Hash),
+		TxHash:     testHashBytes("at-tip-short-tx"),
+		Cause:      errors.New("transaction validation failure"),
+	}
+	for attempt := 1; attempt <= 2; attempt++ {
+		recovered, recoverErr := ls.recoverAtTipFromTxValidationError(validationErr)
+		require.NoError(t, recoverErr)
+		require.True(t, recovered)
+		assert.Equal(t, ocommon.Point{}, ls.chain.Tip().Point)
+	}
+}
+
 // newAtTipDescentLedger builds a LedgerState sitting at a fixed tip with
 // at-tip validation enabled, for exercising the non-convergence guard in
 // recoverAtTipFromTxValidationError. The failing blocks fed in these tests are
