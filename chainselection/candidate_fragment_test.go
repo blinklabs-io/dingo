@@ -31,6 +31,8 @@ import (
 func TestCandidateFragment_AnchorAndHeadPointReturnDefensiveCopies(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fragment := CandidateFragment{points: []ocommon.Point{
 		{Slot: 100, Hash: []byte("anchor-hash")},
 		{Slot: 200, Hash: []byte("head-hash")},
@@ -59,6 +61,8 @@ func TestCandidateFragment_AnchorAndHeadPointReturnDefensiveCopies(
 }
 
 func TestCandidateFragment_IntersectFindsHighestCommonPoint(t *testing.T) {
+	t.Parallel()
+
 	shared := ocommon.Point{Slot: 200, Hash: []byte("shared")}
 	a := CandidateFragment{points: []ocommon.Point{
 		{Slot: 100, Hash: []byte("a100")},
@@ -84,6 +88,8 @@ func TestCandidateFragment_IntersectFindsHighestCommonPoint(t *testing.T) {
 func TestCandidateFragment_IntersectSameSlotDifferentHashIsNotAMatch(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	a := CandidateFragment{points: []ocommon.Point{
 		{Slot: 100, Hash: []byte("shared")},
 		{Slot: 200, Hash: []byte("a-fork")},
@@ -100,6 +106,8 @@ func TestCandidateFragment_IntersectSameSlotDifferentHashIsNotAMatch(
 }
 
 func TestCandidateFragment_IntersectNoCommonPointReturnsFalse(t *testing.T) {
+	t.Parallel()
+
 	a := CandidateFragment{points: []ocommon.Point{
 		{Slot: 100, Hash: []byte("a100")},
 	}}
@@ -114,6 +122,8 @@ func TestCandidateFragment_IntersectNoCommonPointReturnsFalse(t *testing.T) {
 // TestCandidateFragment_BoundedByGenesisWindow asserts Genesis retains one
 // full density window plus the k-block eagerness suffix, while staying bounded.
 func TestCandidateFragment_BoundedByGenesisWindow(t *testing.T) {
+	t.Parallel()
+
 	const k = 5
 	const window = 15
 	cs := NewChainSelector(ChainSelectorConfig{
@@ -144,6 +154,8 @@ func TestCandidateFragment_BoundedByGenesisWindow(t *testing.T) {
 }
 
 func TestCandidateFragment_DerivedWindowKeepsEagernessSuffix(t *testing.T) {
+	t.Parallel()
+
 	const k = 5
 	cs := NewChainSelector(ChainSelectorConfig{
 		GenesisMode:           true,
@@ -169,6 +181,8 @@ func TestCandidateFragment_DerivedWindowKeepsEagernessSuffix(t *testing.T) {
 // TestCandidateFragment_RemovedOnDisconnect covers the acceptance criterion
 // that a candidate fragment's lifetime is bound to its connection's lifetime.
 func TestCandidateFragment_RemovedOnDisconnect(t *testing.T) {
+	t.Parallel()
+
 	cs := NewChainSelector(ChainSelectorConfig{SecurityParam: 10})
 	connId := newTestConnectionId(1)
 
@@ -192,6 +206,8 @@ func TestCandidateFragment_RemovedOnDisconnect(t *testing.T) {
 // TestCandidateFragment_ReconnectStartsEmpty ensures a fragment does not leak
 // stale history across a disconnect/reconnect on a reused connection ID.
 func TestCandidateFragment_ReconnectStartsEmpty(t *testing.T) {
+	t.Parallel()
+
 	cs := NewChainSelector(ChainSelectorConfig{SecurityParam: 10})
 	connId := newTestConnectionId(1)
 
