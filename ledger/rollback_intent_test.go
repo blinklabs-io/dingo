@@ -521,29 +521,34 @@ func TestDecodeRollbackIntentRefusesRecordsBeyondWriterLimits(t *testing.T) {
 
 func TestDecodeRollbackIntentRefusesBlockBytesBeyondLimit(t *testing.T) {
 	t.Parallel()
-	if testing.Short() {
-		t.Skip("allocates the full durable payload limit")
-	}
 
-	data, err := json.Marshal(durableRollbackIntent{
-		Version: durableRollbackIntentVersion,
-		Slot:    new(uint64),
-		Hash:    new(string),
-		Blocks: []durableRollbackBlock{{
-			Cbor: make([]byte, maxRollbackIntentPayloadBytes+1),
-		}},
-	})
-	require.NoError(t, err)
+	// The payload limit is injected so the refusal is exercised on a few
+	// bytes instead of allocating the full 64 MiB limit.
+	const limit = 64
+	decode := func(size int) error {
+		data, err := json.Marshal([]durableRollbackBlock{{
+			Cbor: make([]byte, size),
+		}})
+		require.NoError(t, err)
+		_, err = decodeRollbackBlocks(
+			json.NewDecoder(strings.NewReader(string(data))), limit,
+		)
+		return err
+	}
+	require.NoError(t, decode(limit))
+	err := decode(limit + 1)
+	require.ErrorIs(t, err, errInvalidRollbackIntent)
+	require.ErrorContains(t, err, "block bytes exceed")
+
+	// A record just past the payload limit must still fit the encoded size
+	// limit, so the byte limit is the one that refuses it.
 	require.LessOrEqual(
 		t,
-		len(data),
+		(maxRollbackIntentPayloadBytes+1+2)/3*4+
+			maxRollbackIntentBlockOverhead+maxRollbackIntentEnvelope,
 		maxRollbackIntentEncodedBytes,
 		"the byte limit must be reachable under the encoded size limit",
 	)
-
-	_, err = decodeRollbackIntent(string(data))
-	require.ErrorIs(t, err, errInvalidRollbackIntent)
-	require.ErrorContains(t, err, "block bytes exceed")
 }
 
 func TestRollbackIntentAcceptsWriterMaximumBlockCount(t *testing.T) {
