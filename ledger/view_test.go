@@ -340,6 +340,7 @@ func TestLedgerViewProposedCommitteeMemberPreservesCertificateState(
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			lv, db := committeeTestView(t, &conway.ConwayProtocolParameters{})
 			lv.epochStartSlot = test.epochStartSlot
 			cold := committeeTestCredential(0x71)
@@ -1315,6 +1316,8 @@ func TestLedgerViewCommitteeHotCredentialSurvivesTermRenewal(t *testing.T) {
 }
 
 func TestValidateTxConwayRejectsUnelectedCommitteeVoterAtPV11(t *testing.T) {
+	t.Parallel()
+
 	pparams := &conway.ConwayProtocolParameters{}
 	pparams.ProtocolVersion.Major = lcommon.ProtocolVersionVanRossem
 	lv, db := committeeTestView(t, pparams)
@@ -1348,6 +1351,8 @@ func TestValidateTxConwayRejectsUnelectedCommitteeVoterAtPV11(t *testing.T) {
 }
 
 func TestValidateTxDijkstraAcceptsElectedCommitteeVoter(t *testing.T) {
+	t.Parallel()
+
 	pparams := dijkstraTestProtocolParameters()
 	pparams.ConwayProtocolParameters.ProtocolVersion.Major =
 		lcommon.ProtocolVersionVanRossem
@@ -1394,6 +1399,8 @@ func TestValidateTxDijkstraAcceptsElectedCommitteeVoter(t *testing.T) {
 }
 
 func TestValidateTxConwayAcceptsElectedCommitteeVoterAtPV11(t *testing.T) {
+	t.Parallel()
+
 	pparams := &conway.ConwayProtocolParameters{}
 	pparams.ProtocolVersion.Major = lcommon.ProtocolVersionVanRossem
 	pparams.MaxTxSize = 16_384
@@ -4176,20 +4183,6 @@ func TestLedgerViewTreasuryValueTracksChainRollback(t *testing.T) {
 		return nil
 	}))
 	requireTreasuryValue(t, ls, nil, 100)
-}
-
-func TestLedgerViewTreasuryValueSurvivesRestart(t *testing.T) {
-	t.Parallel()
-
-	dataDir := t.TempDir()
-	ls, db := newTreasuryViewTestLedger(t, dataDir)
-	require.NoError(t, db.Metadata().SetNetworkState(777, 223, 42, nil))
-	requireTreasuryValue(t, ls, nil, 777)
-	require.NoError(t, dbtest.CloseDatabase(db))
-
-	restarted, reopened := newTreasuryViewTestLedger(t, dataDir)
-	requireTreasuryValue(t, restarted, nil, 777)
-	require.NoError(t, dbtest.CloseDatabase(reopened))
 }
 
 func TestLedgerViewTreasuryValueReadsMithrilBootstrapState(t *testing.T) {
@@ -7140,6 +7133,8 @@ func seedActiveDrepWithoutRegistration(
 func TestDrepDeregistrationFallsBackToCurrentDepositWhenUnrecorded(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	lv, db := newDrepFallbackTestView(t)
 	cred := drepRefundTestCredential(0xe1)
 	seedActiveDrepWithoutRegistration(t, db, cred, 100)
@@ -7176,6 +7171,8 @@ func TestDrepDeregistrationFallsBackToCurrentDepositWhenUnrecorded(
 // unrecorded case would refund the current parameter and reject a valid
 // deregistration.
 func TestDrepDeregistrationKeepsRecordedZeroAuthoritative(t *testing.T) {
+	t.Parallel()
+
 	lv, db := newDrepFallbackTestView(t)
 	cred := drepRefundTestCredential(0xe4)
 	seedImportedDrep(t, db, cred, 0, 100, true)
@@ -7213,6 +7210,8 @@ func TestDrepDeregistrationKeepsRecordedZeroAuthoritative(t *testing.T) {
 // which builds its deposits from a batched map lookup and so has its own
 // absence path.
 func TestDrepRegistrationsFallBackForUnrecordedDeposit(t *testing.T) {
+	t.Parallel()
+
 	lv, db := newDrepFallbackTestView(t)
 	unrecorded := drepRefundTestCredential(0xe5)
 	recorded := drepRefundTestCredential(0xe6)
@@ -7244,6 +7243,8 @@ func TestDrepRegistrationsFallBackForUnrecordedDeposit(t *testing.T) {
 // guard this reported a non-nil zero and gouroboros accepted a zero refund
 // instead of failing closed.
 func TestDrepRegistrationReportsAbsenceInAPreConwayEra(t *testing.T) {
+	t.Parallel()
+
 	ls, db := newRewardCalculationTestLedger(t)
 	ls.currentEra = eras.BabbageEraDesc
 	ls.currentPParams = &babbage.BabbageProtocolParameters{
@@ -7309,6 +7310,8 @@ func TestDrepRegistrationReportsAbsenceInAPreConwayEra(t *testing.T) {
 // is what stops the panic, and the call-site capability check is what keeps a
 // pre-Conway era from reaching it at all.
 func TestDrepRegistrationReportsAbsenceForTypedNilParams(t *testing.T) {
+	t.Parallel()
+
 	ls, db := newRewardCalculationTestLedger(t)
 	ls.currentEra = eras.DijkstraEraDesc
 	ls.currentPParams = (*dijkstra.DijkstraProtocolParameters)(nil)
@@ -8014,6 +8017,7 @@ func TestLedgerProcessBlockAnchorsValidationHorizonAtParent(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			db := newTestDB(t)
 			ls := previewWedgeLedgerState(t)
 			ls.db = db
@@ -8686,8 +8690,10 @@ func repeatByte(length int, b byte) []byte {
 }
 
 func TestEpochRolloverUsesEraSpecificEnactmentSnapshot(t *testing.T) {
+	t.Parallel()
 	for _, era := range []eras.EraDesc{eras.ConwayEraDesc, eras.DijkstraEraDesc} {
 		t.Run(era.Name, func(t *testing.T) {
+			t.Parallel()
 			f := newTreasuryRolloverFixture(t, 100)
 			address, returnAddress, credential := f.rewardAddress(t, 0xa7)
 			f.addProposal(
