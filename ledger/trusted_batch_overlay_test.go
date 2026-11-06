@@ -856,10 +856,15 @@ func BenchmarkApplyTrustedBatch(b *testing.B) {
 	}
 }
 
+// BenchmarkTrustedBatchPruneRows compares prune row caps. The workload is
+// sized so more than 10k rows are eligible: securityK=1 keeps the stability
+// window to a few dozen slots, and txsPerBlock stays near the largest fan-out
+// the store accepts in one transaction, so the 10k cap needs two deletes
+// where the 20k cap needs one.
 func BenchmarkTrustedBatchPruneRows(b *testing.B) {
 	const (
-		txsPerBlock = 20
-		securityK   = 10
+		txsPerBlock = 30
+		securityK   = 1
 	)
 	setup, batch := overlayBenchBlocks(b, MaxTrustedBatchBlocks, txsPerBlock)
 	for _, rows := range []int{1_000, 5_000, 10_000, 20_000} {
