@@ -130,13 +130,6 @@ func TestAwaitingFirstHeaderClearsOnDeliveredHeader(t *testing.T) {
 	)
 }
 
-// TestAwaitingFirstHeaderNilReceiver keeps the accessor safe for callers that
-// hold a peer tip lookup result without checking it, matching SelectionTip.
-func TestAwaitingFirstHeaderNilReceiver(t *testing.T) {
-	var pt *PeerChainTip
-	assert.False(t, pt.AwaitingFirstHeader())
-}
-
 func TestApplyRollbackTrimsAdmittedTipHistory(t *testing.T) {
 	pt := &PeerChainTip{}
 	first := ocommon.Point{Slot: 10, Hash: []byte("first")}

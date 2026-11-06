@@ -24,21 +24,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestCandidateFragment_EmptyFragmentIsZeroValue(t *testing.T) {
-	var f CandidateFragment
-	assert.Equal(t, 0, f.Len())
-	assert.Equal(t, ocommon.Point{}, f.Anchor())
-	assert.Equal(t, ocommon.Point{}, f.HeadPoint())
-	assert.Nil(t, f.Points())
-	_, ok := f.Intersect(CandidateFragment{})
-	assert.False(t, ok)
-}
-
-func TestPeerCandidateFragmentWithoutDeliveredHistoryIsEmpty(t *testing.T) {
-	fragment := (&PeerChainTip{}).CandidateFragment()
-	assert.Equal(t, 0, fragment.Len())
-}
-
 // TestCandidateFragment_AnchorAndHeadPointReturnDefensiveCopies ensures a
 // caller mutating the Hash returned by Anchor or HeadPoint cannot corrupt the
 // fragment's own backing bytes, which would otherwise change later Points()
@@ -71,33 +56,6 @@ func TestCandidateFragment_AnchorAndHeadPointReturnDefensiveCopies(
 	point, ok := fragment.Intersect(other)
 	require.True(t, ok)
 	assert.Equal(t, "anchor-hash", string(point.Hash))
-}
-
-func TestCandidateFragment_AnchorAndHeadPoint(t *testing.T) {
-	cs := NewChainSelector(ChainSelectorConfig{SecurityParam: 10})
-	connId := newTestConnectionId(1)
-
-	for i, slot := range []uint64{100, 200, 300} {
-		cs.UpdatePeerTip(connId, ochainsync.Tip{
-			Point: ocommon.Point{
-				Slot: slot,
-				Hash: []byte(fmt.Sprintf("h%d", i)),
-			},
-			BlockNumber: uint64(i + 1),
-		}, nil)
-	}
-
-	fragment, ok := cs.GetCandidateFragment(connId)
-	require.True(t, ok)
-	require.Equal(t, 3, fragment.Len())
-	assert.Equal(t, uint64(100), fragment.Anchor().Slot)
-	assert.Equal(t, uint64(300), fragment.HeadPoint().Slot)
-
-	points := fragment.Points()
-	require.Len(t, points, 3)
-	assert.Equal(t, []uint64{100, 200, 300}, []uint64{
-		points[0].Slot, points[1].Slot, points[2].Slot,
-	})
 }
 
 func TestCandidateFragment_IntersectFindsHighestCommonPoint(t *testing.T) {

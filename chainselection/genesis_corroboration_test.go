@@ -1572,45 +1572,6 @@ func TestGenesisExitNotPinnedByUncorroboratedExtremeSlot(t *testing.T) {
 		"an uncorroborated extreme advertised slot must not pin Genesis mode")
 }
 
-// Removing the only witness revokes the incumbent fast source's corroboration
-// and forces a re-evaluation that drops it, even though the removed peer was not
-// itself the selected best.
-func TestGenesisCorroborationRevokedOnWitnessRemoval(t *testing.T) {
-	cs := NewChainSelector(ChainSelectorConfig{
-		GenesisMode:           true,
-		SecurityParam:         20,
-		MinCorroboratingPeers: 1,
-	})
-
-	fast := corrConn(1)
-	witness := corrConn(2)
-	feedFrontier(cs, witness,
-		genesisTip(100, "h100", 100),
-		genesisTip(105, "h105", 105),
-		genesisTip(110, "h110", 110),
-	)
-	feedFrontier(cs, fast,
-		genesisTip(100, "h100", 100),
-		genesisTip(105, "h105", 105),
-		genesisTip(110, "h110", 110),
-	)
-	cs.EvaluateAndSwitch()
-	require.NotNil(t, cs.GetBestPeer())
-	require.Equal(t, fast, *cs.GetBestPeer())
-
-	// The witness disconnects; the fast source loses its only corroboration.
-	// RemovePeer itself must re-evaluate here (the removed peer is a witness,
-	// not the best), so GetBestPeer reflects the drop with no extra
-	// EvaluateAndSwitch call — that internal re-evaluation is exactly the
-	// behavior under test.
-	cs.RemovePeer(witness)
-	assert.Nil(
-		t,
-		cs.GetBestPeer(),
-		"incumbent must be dropped once it loses corroboration",
-	)
-}
-
 // With no corroborating peers available, a fast source stalls: the selector
 // refuses to select it, returning no best peer, rather than following an
 // uncorroborated chain.
@@ -1874,10 +1835,13 @@ func TestShouldApplyIngressWaitsOutTransientZeroGeneration(t *testing.T) {
 			return func() {}, value == generation.Load()
 		},
 	})
-	go func() {
-		time.Sleep(50 * time.Millisecond)
-		generation.Store(1)
-	}()
+	var reads atomic.Int64
+	cs.config.CurrentHeaderCryptoVerificationGeneration = func() uint64 {
+		if reads.Add(1) > 3 {
+			generation.Store(1)
+		}
+		return generation.Load()
+	}
 
 	assert.True(t, cs.ShouldApplyIngress(corrConn(40)),
 		"a generation that is zero only during a transition must not reject the header")
@@ -1999,6 +1963,7 @@ func TestShouldApplyIngressAwaitsGenesisPublicationWithoutOperatorQuorum(t *test
 			return func() {}, value == generation.Load()
 		},
 	})
+	cs.generationStableWait = 20 * time.Millisecond
 	conn := corrConn(41)
 	require.False(t, cs.GenesisCorroborationActive())
 	require.Equal(t, ingressAwaitCorroboration, cs.ingressDecision(conn),

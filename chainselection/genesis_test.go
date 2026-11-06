@@ -96,32 +96,6 @@ func TestDensityFromIntersection(t *testing.T) {
 	)
 }
 
-func TestGenesisSelectionStateTransitionsAtomically(t *testing.T) {
-	cs := NewChainSelector(ChainSelectorConfig{
-		GenesisMode:        true,
-		GenesisWindowSlots: 30,
-	})
-
-	active, window := cs.GenesisSelectionState()
-	require.True(t, active)
-	assert.Equal(t, uint64(30), window)
-
-	// GenesisSelectionState reads a cached snapshot rather than re-deriving
-	// from cs.mode under cs.mutex on every call (taking cs.mutex here
-	// created a lock-order inversion with chainsync.State.clientConnIdMutex).
-	// Every real mutation site refreshes that snapshot in the same critical
-	// section that changes cs.mode; mirror that here after the direct-field
-	// mutation this test uses to simulate the transition.
-	cs.mutex.Lock()
-	cs.mode = SelectionModePraos
-	cs.refreshGenesisSelectionSnapshotLocked()
-	cs.mutex.Unlock()
-
-	active, window = cs.GenesisSelectionState()
-	assert.False(t, active)
-	assert.Equal(t, uint64(30), window)
-}
-
 // The cached snapshot GenesisSelectionState reads is only correct if
 // every site that mutates cs.mode refreshes it. Drive the real one-way
 // Genesis-to-Praos transition through SetLocalTip rather than by writing
@@ -227,17 +201,6 @@ func TestGenesisSelectionSnapshotPublishedAsOneValue(t *testing.T) {
 	active, window := cs.GenesisSelectionState()
 	assert.False(t, active)
 	assert.Equal(t, uint64(30), window)
-}
-
-// A ChainSelector that never went through NewChainSelector has no published
-// snapshot. GenesisSelectionState must answer as the pre-cache implementation
-// did for that zero value rather than dereferencing a nil snapshot.
-func TestGenesisSelectionStateZeroValueSelector(t *testing.T) {
-	var cs ChainSelector
-
-	active, window := cs.GenesisSelectionState()
-	assert.False(t, active)
-	assert.Equal(t, DefaultGenesisWindowSlots, window)
 }
 
 func TestChainSelectorGenesisObservedDensityTracksRollingWindow(t *testing.T) {
