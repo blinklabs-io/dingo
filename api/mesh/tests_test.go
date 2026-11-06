@@ -1575,10 +1575,6 @@ func recordRequest(
 	return rec
 }
 
-// newDiscardWriter returns a writer that drops everything written to
-// it, for silencing component loggers in tests.
-func newDiscardWriter() io.Writer { return io.Discard }
-
 func TestMeshAnonymousPlaintextTLSAndCORS(t *testing.T) {
 	t.Parallel()
 	const origin = "https://wallet.example"
