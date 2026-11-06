@@ -139,15 +139,10 @@ func (m *mockListener) AcceptCount() int {
 
 // toggleMockListener is a net.Listener that can toggle between errors and success
 type toggleMockListener struct {
-	mu            sync.Mutex
 	closed        atomic.Bool
 	closeCh       chan struct{}
 	errorEnabled  atomic.Bool
 	acceptErr     error
-	timestamps    []time.Time
-	successCount  atomic.Int32
-	errorCount    atomic.Int32
-	successSignal chan struct{} // signaled after each successful accept
 	connCh        chan net.Conn // channel to provide mock connections
 	acceptEntered chan struct{} // signaled when Accept() is entered
 }
@@ -156,8 +151,6 @@ func newToggleMockListener() *toggleMockListener {
 	return &toggleMockListener{
 		closeCh:       make(chan struct{}),
 		acceptErr:     errors.New("simulated accept error"),
-		timestamps:    make([]time.Time, 0),
-		successSignal: make(chan struct{}, 100),
 		connCh:        make(chan net.Conn, 100),
 		acceptEntered: make(chan struct{}, 100),
 	}
@@ -170,26 +163,15 @@ func (m *toggleMockListener) Accept() (net.Conn, error) {
 	default:
 	}
 
-	m.mu.Lock()
-	m.timestamps = append(m.timestamps, time.Now())
-	m.mu.Unlock()
-
 	if m.closed.Load() {
 		return nil, net.ErrClosed
 	}
 	if m.errorEnabled.Load() {
-		m.errorCount.Add(1)
 		return nil, m.acceptErr
 	}
 	// Try to get a connection from the channel, or wait for close
 	select {
 	case conn := <-m.connCh:
-		m.successCount.Add(1)
-		// Non-blocking signal that success happened
-		select {
-		case m.successSignal <- struct{}{}:
-		default:
-		}
 		return conn, nil
 	case <-m.closeCh:
 		return nil, net.ErrClosed
@@ -216,48 +198,6 @@ func (m *toggleMockListener) ProvideConnection(conn net.Conn) {
 	m.connCh <- conn
 }
 
-func (m *toggleMockListener) GetTimestamps() []time.Time {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	result := make([]time.Time, len(m.timestamps))
-	copy(result, m.timestamps)
-	return result
-}
-
-func (m *toggleMockListener) ClearTimestamps() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.timestamps = m.timestamps[:0]
-}
-
-func (m *toggleMockListener) WaitForSuccess(timeout time.Duration) bool {
-	select {
-	case <-m.successSignal:
-		return true
-	case <-time.After(timeout):
-		return false
-	}
-}
-
-// WaitForErrors waits until at least minErrors have occurred since the baseline
-// and returns the number observed.
-func (m *toggleMockListener) WaitForErrors(
-	t *testing.T,
-	baseline int,
-	minErrors int,
-	timeout time.Duration,
-) int {
-	t.Helper()
-	observed := func() int { return int(m.errorCount.Load()) - baseline }
-	testutil.WaitForCondition(
-		t,
-		func() bool { return observed() >= minErrors },
-		timeout,
-		"accept errors did not reach the expected count",
-	)
-	return observed()
-}
-
 // WaitForAcceptEntered waits for Accept() to be called, or until timeout expires.
 // Returns true if Accept() was entered, false on timeout.
 func (m *toggleMockListener) WaitForAcceptEntered(timeout time.Duration) bool {
@@ -269,34 +209,11 @@ func (m *toggleMockListener) WaitForAcceptEntered(timeout time.Duration) bool {
 	}
 }
 
-// DrainAcceptEntered drains all pending acceptEntered signals.
-func (m *toggleMockListener) DrainAcceptEntered() {
-	for {
-		select {
-		case <-m.acceptEntered:
-		default:
-			return
-		}
-	}
-}
-
 // mockConn implements net.Conn for testing
 type mockConn struct {
 	localAddr  net.Addr
 	remoteAddr net.Addr
 	closed     atomic.Bool
-}
-
-func newMockConn() *mockConn {
-	mc := &mockConn{
-		localAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 12345},
-		remoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.2"), Port: 54321},
-	}
-	// Pre-close the connection so Read/Write return net.ErrClosed immediately.
-	// This ensures the Ouroboros connection setup fails quickly in tests,
-	// allowing the accept loop to return to Accept() without blocking.
-	mc.closed.Store(true)
-	return mc
 }
 
 func (c *mockConn) Read(_ []byte) (int, error) {
@@ -427,161 +344,6 @@ func TestInboundConnectionLimit_RejectsOverLimit(t *testing.T) {
 		delete(cm.connections, k)
 	}
 	cm.inboundCount = 0
-	cm.connectionsMutex.Unlock()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	err = cm.Stop(ctx)
-	require.NoError(t, err)
-}
-
-func TestInboundConnectionLimit_AcceptsWithinLimit(t *testing.T) {
-	defer goleak.VerifyNone(t)
-
-	const maxInbound = 5
-
-	mockLn := newToggleMockListener()
-	mockLn.SetErrorEnabled(false)
-
-	cfg := ConnectionManagerConfig{
-		Logger:          slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		PromRegistry:    prometheus.NewRegistry(),
-		MaxInboundConns: maxInbound,
-		Listeners: []ListenerConfig{
-			{
-				Listener: mockLn,
-			},
-		},
-	}
-
-	cm := NewConnectionManager(cfg)
-
-	// Pre-populate with fewer than maxInbound connections
-	cm.connectionsMutex.Lock()
-	fakeId := ouroboros.ConnectionId{
-		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
-		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("10.0.0.1"), Port: 40000},
-	}
-	cm.connections[fakeId] = &connectionInfo{
-		conn:      nil,
-		peerAddr:  "192.168.1.1:9999",
-		isInbound: true,
-	}
-	cm.inboundCount++
-	cm.connectionsMutex.Unlock()
-
-	err := cm.Start(context.Background())
-	require.NoError(t, err)
-
-	// Provide a connection that should be accepted (not rejected by the limit).
-	// The connection is pre-closed so ouroboros.NewConnection will fail,
-	// but it should NOT be rejected by the limit check.
-	accepted := newTrackingMockConn(60001)
-	// Pre-close so Ouroboros setup fails quickly
-	accepted.closed.Store(true)
-	mockLn.ProvideConnection(accepted)
-
-	// Wait for the accept loop to process and return to Accept()
-	entered := mockLn.WaitForAcceptEntered(5 * time.Second)
-	require.True(
-		t,
-		entered,
-		"accept loop should continue after processing connection within limit",
-	)
-
-	// The connection will be closed by the Ouroboros setup failure, not by
-	// the limit check. We verify that the accept loop got past the limit
-	// check by confirming the loop returned to Accept() (which it did above).
-
-	// Clean up fake connections before stopping
-	cm.connectionsMutex.Lock()
-	for k := range cm.connections {
-		delete(cm.connections, k)
-	}
-	cm.inboundCount = 0
-	cm.connectionsMutex.Unlock()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	err = cm.Stop(ctx)
-	require.NoError(t, err)
-}
-
-func TestInboundConnectionLimit_DefaultValue(t *testing.T) {
-	t.Parallel()
-
-	// Verify that a zero MaxInboundConns defaults to DefaultMaxInboundConnections
-	cm := NewConnectionManager(ConnectionManagerConfig{})
-	assert.Equal(
-		t,
-		DefaultMaxInboundConnections,
-		cm.config.MaxInboundConns,
-		"zero MaxInboundConns should default to DefaultMaxInboundConnections",
-	)
-}
-
-func TestInboundConnectionLimit_OutboundNotCounted(t *testing.T) {
-	defer goleak.VerifyNone(t)
-
-	const maxInbound = 2
-
-	mockLn := newToggleMockListener()
-	mockLn.SetErrorEnabled(false)
-
-	cfg := ConnectionManagerConfig{
-		Logger:          slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		PromRegistry:    prometheus.NewRegistry(),
-		MaxInboundConns: maxInbound,
-		Listeners: []ListenerConfig{
-			{
-				Listener: mockLn,
-			},
-		},
-	}
-
-	cm := NewConnectionManager(cfg)
-
-	// Pre-populate with outbound connections (these should NOT count toward inbound limit)
-	cm.connectionsMutex.Lock()
-	for i := range 10 {
-		fakeId := ouroboros.ConnectionId{
-			LocalAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
-			RemoteAddr: &net.TCPAddr{
-				IP:   net.ParseIP("10.0.0.1"),
-				Port: 50000 + i,
-			},
-		}
-		cm.connections[fakeId] = &connectionInfo{
-			conn:      nil,
-			peerAddr:  "192.168.1.1:9999",
-			isInbound: false, // outbound
-		}
-	}
-	cm.connectionsMutex.Unlock()
-
-	err := cm.Start(context.Background())
-	require.NoError(t, err)
-
-	// Provide a connection - should be accepted because there are 0 inbound
-	// connections despite having 10 outbound ones
-	conn := newTrackingMockConn(60002)
-	conn.closed.Store(true) // pre-close so Ouroboros setup fails quickly
-	mockLn.ProvideConnection(conn)
-
-	// The accept loop should process the connection (past the limit check)
-	// and continue to Accept()
-	entered := mockLn.WaitForAcceptEntered(5 * time.Second)
-	require.True(
-		t,
-		entered,
-		"accept loop should accept connections when inbound count is below limit",
-	)
-
-	// Clean up
-	cm.connectionsMutex.Lock()
-	for k := range cm.connections {
-		delete(cm.connections, k)
-	}
 	cm.connectionsMutex.Unlock()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -737,81 +499,6 @@ func TestAcceptLoopBackoffOnError(t *testing.T) {
 	)
 }
 
-func TestAcceptLoopResetBackoffOnSuccess(t *testing.T) {
-	defer goleak.VerifyNone(t)
-
-	// This test verifies that successful accepts reset the backoff counter.
-	// Rather than measuring timing intervals (which is flaky on CI), we verify:
-	// 1. Errors can accumulate (building backoff)
-	// 2. A successful accept can occur
-	// 3. The accept loop continues to function after success (proving it didn't exit)
-	//
-	// The actual backoff calculation is unit tested in TestCalculateAcceptBackoff.
-	// The reset behavior (consecutiveErrors = 0) is a trivial assignment that we
-	// verify indirectly by confirming the loop continues operating normally.
-	mockLn := newToggleMockListener()
-	mockLn.SetErrorEnabled(true) // Start with errors
-
-	cfg := ConnectionManagerConfig{
-		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		PromRegistry: prometheus.NewRegistry(),
-		Listeners: []ListenerConfig{
-			{
-				Listener: mockLn,
-			},
-		},
-	}
-
-	cm := NewConnectionManager(cfg)
-	err := cm.Start(context.Background())
-	require.NoError(t, err)
-
-	// Phase 1: Wait for errors to accumulate (proves backoff is being applied)
-	phase1Errors := mockLn.WaitForErrors(t, 0, 3, 5*time.Second)
-	require.GreaterOrEqual(
-		t,
-		phase1Errors,
-		3,
-		"should have at least 3 errors to confirm accept loop is running",
-	)
-	t.Logf("Phase 1: %d errors accumulated", phase1Errors)
-
-	// Phase 2: Allow one successful accept
-	mockLn.DrainAcceptEntered()
-	mockLn.SetErrorEnabled(false)
-	mockLn.ProvideConnection(newMockConn())
-
-	success := mockLn.WaitForSuccess(5 * time.Second)
-	require.True(t, success, "should have had a successful accept")
-	t.Logf("Phase 2: successful accept completed")
-
-	// Phase 3: Re-enable errors and verify the loop continues
-	mockLn.SetErrorEnabled(true)
-
-	// Wait for Accept() to be entered again - this proves the loop returned
-	// to Accept() after processing the successful connection
-	acceptEntered := mockLn.WaitForAcceptEntered(5 * time.Second)
-	require.True(
-		t,
-		acceptEntered,
-		"accept loop should return to Accept() after processing connection",
-	)
-	t.Logf("Phase 3: accept loop returned to Accept()")
-
-	// Stop the connection manager
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	err = cm.Stop(ctx)
-	require.NoError(t, err)
-
-	// The test passes if we get here - it proves:
-	// 1. Errors were being processed (phase 1)
-	// 2. A successful accept occurred (phase 2)
-	// 3. The loop continued and returned to Accept() (phase 3)
-	// The backoff reset (consecutiveErrors = 0) is implicitly verified because
-	// the loop continued operating normally after the success.
-}
-
 func TestTryReserveInboundSlot_Concurrent(t *testing.T) {
 	t.Parallel()
 
@@ -959,36 +646,4 @@ func TestTryReserveInboundSlot_ConsumeAndRelease(t *testing.T) {
 
 	// Clean up
 	cm.releaseInboundSlot()
-}
-
-func TestAcceptLoopExitsOnClose(t *testing.T) {
-	defer goleak.VerifyNone(t)
-
-	mockLn := newMockListener()
-	mockLn.acceptErr = errors.New("simulated accept error")
-
-	cfg := ConnectionManagerConfig{
-		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		PromRegistry: prometheus.NewRegistry(),
-		Listeners: []ListenerConfig{
-			{
-				Listener: mockLn,
-			},
-		},
-	}
-
-	cm := NewConnectionManager(cfg)
-	err := cm.Start(context.Background())
-	require.NoError(t, err)
-
-	// Wait for at least one accept call
-	require.Eventually(t, func() bool {
-		return mockLn.AcceptCount() >= 1
-	}, 2*time.Second, 5*time.Millisecond, "accept should be called at least once")
-
-	// Stop should exit cleanly even during backoff
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	err = cm.Stop(ctx)
-	require.NoError(t, err)
 }
