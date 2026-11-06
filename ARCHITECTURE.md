@@ -20467,7 +20467,10 @@ runs. Its answer is therefore a prediction rather than a preview: votes freeze
 at the deadline but the SPO denominator does not, and stake moving across the
 boundary can carry an action over or under its threshold. See
 `governance.predictedBoundaryStakeEpochFor` for why estimating the boundary
-snapshot from live state instead would be the worse trade.
+snapshot from live state instead would be the worse trade. The predictor still
+uses RATIFY's action-priority order, enactment preconditions, and delaying-action
+break: an eligible higher-priority action prevents a later hard fork from being
+advertised, and a hard fork the boundary cannot enact is not advertised.
 
 The split is what makes the capture reference-ordered. cardano-ledger runs SNAP
 before POOLREAP and before governance enactment, and the live
