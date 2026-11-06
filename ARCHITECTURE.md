@@ -12355,7 +12355,8 @@ votes:
   which `VoteManager` calls once per epoch and caches in
   `epochEntry.onChainKeys`. It excludes keys with unknown age or at or beyond
   `ceil(MaxKESEvolutions * SlotsPerKESPeriod / SlotsPerEpoch) + 2` epochs old,
-  then verifies proof of possession; an invalid, missing, unknown-age, or
+  with age measured at the committee epoch the snapshot selects (snapshot epoch
+  plus one), then verifies proof of possession; an invalid, missing, unknown-age, or
   expired key leaves the seat and its stake intact but cannot sign or validate a
   certificate.
 - **Certificate admission**: before asynchronous certified endorser-block
