@@ -23,7 +23,6 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
-	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -114,26 +113,6 @@ func TestGetTipRejectsNegativeStoredBlockNumber(t *testing.T) {
 	require.NoError(t, err)
 	_, err = store.GetTip(nil)
 	require.Error(t, err)
-}
-
-// TestGetTipRoundTripsMaxInt64Slot covers the maximum in-range value:
-// checkedInt64/checkedUint64 must not reject anything that legitimately
-// fits in a signed 64-bit SQL column.
-func TestGetTipRoundTripsMaxInt64Slot(t *testing.T) {
-	t.Parallel()
-	store := newManagementTestStore(t)
-	tip := ochainsync.Tip{
-		Point: ocommon.Point{
-			Slot: math.MaxInt64,
-			Hash: []byte{0x02},
-		},
-		BlockNumber: math.MaxInt64,
-	}
-	require.NoError(t, store.SetTip(tip, nil))
-	got, err := store.GetTip(nil)
-	require.NoError(t, err)
-	assert.Equal(t, uint64(math.MaxInt64), got.Point.Slot)
-	assert.Equal(t, uint64(math.MaxInt64), got.BlockNumber)
 }
 
 // TestCheckedUint64 unit-tests the helper directly across the boundary

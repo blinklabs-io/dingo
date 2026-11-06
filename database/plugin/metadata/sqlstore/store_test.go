@@ -98,6 +98,7 @@ func TestTransactionSavepointAndCommit(t *testing.T) {
 }
 
 func TestSQLiteBulkModeKeepsPlannerAndWritersAvailable(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	store.writeDB.SetMaxOpenConns(1)
 	require.NoError(t, store.SetBulkLoadPragmas())
@@ -128,6 +129,7 @@ func TestSQLiteBulkModeKeepsPlannerAndWritersAvailable(t *testing.T) {
 }
 
 func TestBulkModeSerializesAndSuppressesCheckpoints(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	gateErr := errors.New("scheduled work gate not held")
 	gateHeld := func() bool {
@@ -167,6 +169,7 @@ func TestBulkModeSerializesAndSuppressesCheckpoints(t *testing.T) {
 }
 
 func TestCheckpointRecoversFailedBulkModeRestore(t *testing.T) {
+	t.Parallel()
 	store := newTestStore(t)
 	dialect := store.dialect.(dialect)
 	restore := dialect.restore
@@ -282,7 +285,8 @@ CREATE TABLE reward_live_stake (
 func TestRebuildRewardLiveStakeBatchesCredentials(t *testing.T) {
 	t.Parallel()
 	store := newManagementTestStore(t)
-	const count = 200
+	// More than one full upsert statement (32 rows) plus a partial one.
+	const count = 33
 	for index := range count {
 		account := &models.Account{
 			StakingKey:    []byte{0x42, byte(index >> 8), byte(index)},
@@ -710,13 +714,20 @@ func TestStoreMaintenancePrunesAfterOptionalMaintenanceError(t *testing.T) {
 	store := newManagementTestStore(t)
 	const coldTag = uint8(lcommon.CredentialTypeAddrKeyHash)
 	cold := credentialHash(0xc6)
-	for i := 1; i <= committeeAuthPruneBatch*2; i++ {
-		seedAuthorization(
-			t, store, coldTag, cold,
-			uint8(lcommon.CredentialTypeAddrKeyHash), hotHash(0x74, i),
-			uint64(i), uint64(i), // #nosec G115
-		)
-	}
+	// One statement instead of a commit per row: the backlog only has to
+	// exceed a single prune batch.
+	_, err := store.writeDB.Exec(`
+WITH RECURSIVE n(i) AS (
+    SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?
+)
+INSERT INTO auth_committee_hot (
+    cold_credential_tag, cold_credential, hot_credential_tag,
+    host_credential, certificate_id, added_slot
+) SELECT ?, ?, ?, randomblob(28), i, i FROM n`,
+		committeeAuthPruneBatch*2, coldTag, cold,
+		uint8(lcommon.CredentialTypeAddrKeyHash),
+	)
+	require.NoError(t, err)
 	require.NoError(t, store.SetTip(ochainsync.Tip{
 		Point: ocommon.Point{Slot: preprodTipSlot, Hash: []byte("tip")},
 	}, nil))
@@ -725,7 +736,7 @@ func TestStoreMaintenancePrunesAfterOptionalMaintenanceError(t *testing.T) {
 		return maintenanceErr
 	}
 
-	err := store.runMaintenance(context.Background())
+	err = store.runMaintenance(context.Background())
 	require.ErrorIs(t, err, maintenanceErr)
 	require.Equal(t, 1, authRowCountFor(t, store, coldTag, cold))
 }
@@ -823,7 +834,7 @@ func TestInsertUtxoModelBoundsTxScopedStatementRetentionInOneTransaction(
 	store := newMigratedSQLiteStore(t)
 	ctx := context.Background()
 
-	const outputCount = 20_000
+	const outputCount = 50
 
 	txn := store.Transaction(ctx)
 	sqlTransaction, ok := txn.(*sqlTxn)

@@ -173,11 +173,13 @@ func (r *rowCountRows) Next(dest []driver.Value) error {
 func newRowCountingStore(t *testing.T) (*Store, *rowCounter) {
 	t.Helper()
 	counter := &rowCounter{}
+	dsn := fmt.Sprintf(
+		"file:sqlstore_rowcount_%d?mode=memory&cache=shared",
+		rowCountStoreSequence.Add(1),
+	)
+	seedMigratedSQLiteDSN(t, dsn)
 	db := sql.OpenDB(rowCountConnector{
-		dsn: fmt.Sprintf(
-			"file:sqlstore_rowcount_%d?mode=memory&cache=shared",
-			rowCountStoreSequence.Add(1),
-		),
+		dsn:     dsn,
 		counter: counter,
 	})
 	db.SetMaxOpenConns(1)
