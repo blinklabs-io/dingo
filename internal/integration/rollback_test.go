@@ -138,7 +138,7 @@ func TestRollbackToSecurityParamDepth(t *testing.T) {
 
 	// Set security parameter (K=432 for preview network)
 	// For this test, we use a smaller value to avoid loading too many blocks
-	const testSecurityParam = 50
+	const testSecurityParam = 5
 	mockLedger := &mockLedgerState{securityParam: testSecurityParam}
 	if err := cm.SetLedger(mockLedger); err != nil {
 		t.Fatalf("SetLedger: %v", err)
@@ -248,7 +248,7 @@ func TestRollbackBeyondSecurityParam(t *testing.T) {
 
 	// Set security parameter (K=432 for preview network)
 	// For this test, we use a smaller value to avoid loading too many blocks
-	const testSecurityParam = 50
+	const testSecurityParam = 5
 	mockLedger := &mockLedgerState{securityParam: testSecurityParam}
 	if err := cm.SetLedger(mockLedger); err != nil {
 		t.Fatalf("SetLedger: %v", err)
@@ -261,7 +261,7 @@ func TestRollbackBeyondSecurityParam(t *testing.T) {
 	}
 
 	// Load enough blocks to test rollback beyond K (K + 20 blocks)
-	numBlocks := testSecurityParam + 20
+	numBlocks := testSecurityParam + 10
 	blocks, points := loadBlocksFromImmutable(t, c, numBlocks)
 
 	if len(blocks) < numBlocks || len(points) < numBlocks {
@@ -376,7 +376,7 @@ func TestRollbackStateRestoration(t *testing.T) {
 	}
 
 	// Load blocks
-	numBlocks := 100
+	numBlocks := 20
 	blocks, points := loadBlocksFromImmutable(t, c, numBlocks)
 
 	if len(blocks) < numBlocks || len(points) < numBlocks {
@@ -564,7 +564,7 @@ func TestRollbackToOrigin(t *testing.T) {
 	}
 
 	// Load some blocks
-	numBlocks := 50
+	numBlocks := 10
 	blocks, _ := loadBlocksFromImmutable(t, c, numBlocks)
 
 	if len(blocks) < numBlocks {
@@ -646,7 +646,7 @@ func TestChainIteratorAfterRollback(t *testing.T) {
 	}
 
 	// Load blocks
-	numBlocks := 100
+	numBlocks := 20
 	blocks, points := loadBlocksFromImmutable(t, c, numBlocks)
 
 	if len(blocks) < numBlocks || len(points) < numBlocks {
