@@ -104,47 +104,6 @@ func TestPlutusEvalContextCacheBuildsOncePerKeyConcurrently(t *testing.T) {
 	}
 }
 
-// TestPlutusEvalContextCacheKeyIsCollisionFree proves the cost-model
-// component of the cache key reproduces the full parameter list rather than
-// a digest or truncated form. []int64{1, 23} and []int64{12, 3} render to the
-// same digit sequence ("123") if concatenated without a delimiter, which
-// would wrongly collide two distinct cost-model lists into one cache entry.
-//
-// Not t.Parallel: swaps the package-level newEvalContextFunc seam.
-func TestPlutusEvalContextCacheKeyIsCollisionFree(t *testing.T) {
-	calls := withCountingEvalContextConstructor(t)
-	cache := NewPlutusEvalContextCache()
-	protoVersion := cek.ProtoVersion{Major: 10, Minor: 0}
-
-	ctxA, err := cache.get(
-		lang.LanguageVersionV2,
-		protoVersion,
-		[]int64{1, 23},
-		false,
-	)
-	require.NoError(t, err)
-	ctxB, err := cache.get(
-		lang.LanguageVersionV2,
-		protoVersion,
-		[]int64{12, 3},
-		false,
-	)
-	require.NoError(t, err)
-
-	assert.Equal(
-		t,
-		int64(2),
-		calls.Load(),
-		"two distinct cost-model lists must build two distinct entries",
-	)
-	assert.NotSame(
-		t,
-		ctxA,
-		ctxB,
-		"[]int64{1, 23} and []int64{12, 3} must not share a cache entry",
-	)
-}
-
 // TestPlutusEvalContextCacheKeyCoversEveryComponent proves each of the four
 // key components (language version, protocol major, cost model, synthetic-V2
 // flag) independently distinguishes cache entries: changing only one
@@ -190,6 +149,31 @@ func TestPlutusEvalContextCacheKeyCoversEveryComponent(t *testing.T) {
 	_, err = cache.get(lang.LanguageVersionV1, baseProto, baseCostModel, false)
 	require.NoError(t, err)
 	assert.Equal(t, int64(5), calls.Load())
+
+	// The cost-model component reproduces the full parameter list rather than
+	// a digest or truncated form: []int64{1, 23} and []int64{12, 3} render to
+	// the same digit sequence if concatenated without a delimiter, and a list
+	// and its zero-extended form build different contexts because plutigo
+	// costs a parameter missing from a short list at maxBound.
+	for _, pair := range [][2][]int64{
+		{{1, 23}, {12, 3}},
+		{{1, 2}, {1, 2, 0}},
+	} {
+		before := calls.Load()
+		ctxA, err := cache.get(lang.LanguageVersionV2, baseProto, pair[0], false)
+		require.NoError(t, err)
+		ctxB, err := cache.get(lang.LanguageVersionV2, baseProto, pair[1], false)
+		require.NoError(t, err)
+		assert.Equal(
+			t,
+			before+2,
+			calls.Load(),
+			"%v and %v must build two distinct entries",
+			pair[0],
+			pair[1],
+		)
+		assert.NotSame(t, ctxA, ctxB)
+	}
 }
 
 // TestPlutusEvalContextFallsBackWithoutProvider proves plutusEvalContext
@@ -603,36 +587,6 @@ func TestAlonzoBabbageEvalContextCacheReusedAcrossValidateAndEvaluate(
 			)
 		})
 	}
-}
-
-// TestPlutusEvalContextCacheKeyDistinguishesListLength proves a cost-model
-// list and its zero-extended form build separate entries: plutigo costs a
-// parameter missing from a short list at maxBound, so the two lists build
-// different contexts and must never share one.
-//
-// Not t.Parallel: swaps the package-level newEvalContextFunc seam.
-func TestPlutusEvalContextCacheKeyDistinguishesListLength(t *testing.T) {
-	calls := withCountingEvalContextConstructor(t)
-	cache := NewPlutusEvalContextCache()
-	protoVersion := cek.ProtoVersion{Major: 10, Minor: 0}
-
-	short, err := cache.get(
-		lang.LanguageVersionV2,
-		protoVersion,
-		[]int64{1, 2},
-		false,
-	)
-	require.NoError(t, err)
-	long, err := cache.get(
-		lang.LanguageVersionV2,
-		protoVersion,
-		[]int64{1, 2, 0},
-		false,
-	)
-	require.NoError(t, err)
-
-	assert.Equal(t, int64(2), calls.Load())
-	assert.NotSame(t, short, long)
 }
 
 // TestPlutusEvalContextCacheEntryAfterPanicReturnsError proves a
