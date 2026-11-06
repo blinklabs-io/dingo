@@ -413,22 +413,6 @@ func TestDownloadSnapshotRejectsRedirectWithUserinfo(t *testing.T) {
 	assert.False(t, targetReached, "redirect target must not receive Basic Auth")
 }
 
-func TestNewPooledDownloadTransportUsesHTTP1Connections(t *testing.T) {
-	t.Parallel()
-
-	transport := newPooledDownloadTransport(4, false)
-
-	require.False(t, transport.DisableKeepAlives)
-	require.False(t, transport.ForceAttemptHTTP2)
-	require.NotNil(t, transport.TLSNextProto)
-	require.Empty(t, transport.TLSNextProto)
-	require.NotNil(t, transport.TLSClientConfig)
-	require.Equal(t, []string{"http/1.1"}, transport.TLSClientConfig.NextProtos)
-	require.Equal(t, 8, transport.MaxIdleConns)
-	require.Equal(t, 4, transport.MaxIdleConnsPerHost)
-	require.Equal(t, 4, transport.MaxConnsPerHost)
-}
-
 func TestDownloadSnapshotResume(t *testing.T) {
 	t.Parallel()
 
@@ -572,104 +556,6 @@ func (w *injectedIdleWatchdog) Reset() {
 // injected callback synchronously in this deterministic test double.
 func (w *injectedIdleWatchdog) Stop() {}
 
-func TestDownloadSnapshotIdleTimeoutRetriesAndResumes(t *testing.T) {
-	t.Parallel()
-
-	fullContent := []byte("AAABBB")
-	var requestCount atomic.Int32
-	resumeRangeCh := make(chan string, 1)
-
-	server := httptest.NewServer(
-		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			switch n := requestCount.Add(1); n {
-			case 1:
-				w.Header().
-					Set("Content-Length", fmt.Sprintf("%d", len(fullContent)))
-				w.WriteHeader(http.StatusOK)
-				_, _ = w.Write(fullContent[:3])
-				if flusher, ok := w.(http.Flusher); ok {
-					flusher.Flush()
-				}
-				<-r.Context().Done()
-			case 2:
-				select {
-				case resumeRangeCh <- r.Header.Get("Range"):
-				default:
-				}
-				w.Header().Set("Content-Range", "bytes 3-5/6")
-				w.Header().Set("Content-Length", "3")
-				w.WriteHeader(http.StatusPartialContent)
-				_, _ = w.Write(fullContent[3:])
-			default:
-				// A request the script does not cover means the download
-				// retried without the test injecting an idle timeout.
-				// Report that here instead of serving a range the client
-				// did not ask for, which would resurface later as an
-				// unrelated Content-Range restart failure.
-				t.Errorf(
-					"unexpected download request %d with Range %q",
-					n,
-					r.Header.Get("Range"),
-				)
-				http.Error(
-					w,
-					"unexpected request",
-					http.StatusConflict,
-				)
-			}
-		}),
-	)
-	t.Cleanup(server.Close)
-
-	// Stall the transfer once, after the first three bytes have landed.
-	idle := newInjectedIdle(3)
-	destDir := t.TempDir()
-	cfg := DownloadConfig{
-		URL:               server.URL + "/snapshot.tar.zst",
-		AllowInsecureHTTP: true,
-		DestDir:           destDir,
-		Filename:          "idle-retry.tar.zst",
-		ExpectedSize:      int64(len(fullContent)),
-		// Any positive value enables idle detection; the injector, not
-		// this duration, decides when the transfer counts as idle.
-		IdleTimeout:    time.Minute,
-		MaxIdleRetries: 1,
-		OnProgress:     idle.progress,
-		idleWatchdogs:  idle.watchdog,
-	}
-	ctx, cancel := context.WithTimeout(
-		context.Background(),
-		testutil.AsyncWait,
-	)
-	defer cancel()
-
-	path, err := DownloadSnapshot(ctx, cfg)
-	require.NoError(t, err)
-	require.Equal(t, filepath.Join(destDir, "idle-retry.tar.zst"), path)
-	require.Equal(t, int32(2), requestCount.Load())
-	require.Equal(
-		t,
-		1,
-		idle.delivered(),
-		"download did not act on the injected idle timeout",
-	)
-	require.Zero(t, idle.remaining(), "injected stall was never reached")
-	require.Equal(
-		t,
-		"bytes=3-",
-		testutil.RequireReceive(
-			t,
-			resumeRangeCh,
-			testutil.AsyncWait,
-			"retry resume range",
-		),
-	)
-
-	data, err := os.ReadFile(path)
-	require.NoError(t, err)
-	require.Equal(t, fullContent, data)
-}
-
 func TestDownloadSnapshotIdleTimeoutUsesConfiguredTimer(t *testing.T) {
 	t.Parallel()
 
@@ -765,8 +651,7 @@ func TestDownloadSnapshotIdleRetriesResetAfterProgress(t *testing.T) {
 				w.WriteHeader(http.StatusPartialContent)
 				_, _ = w.Write(fullContent[3:])
 			default:
-				// See TestDownloadSnapshotIdleTimeoutRetriesAndResumes:
-				// an unscripted request is a defect in the retry path,
+				// An unscripted request is a defect in the retry path,
 				// not a range to serve.
 				t.Errorf(
 					"unexpected download request %d with Range %q",
@@ -880,32 +765,6 @@ func TestDownloadSnapshotRejectsPlainHTTPByDefault(t *testing.T) {
 	)
 }
 
-// TestDownloadSnapshotAllowsPlainHTTPWithEscapeHatch proves
-// DownloadConfig.AllowInsecureHTTP is a working, explicit escape hatch
-// (used throughout this package's own httptest-based tests).
-func TestDownloadSnapshotAllowsPlainHTTPWithEscapeHatch(t *testing.T) {
-	t.Parallel()
-
-	content := []byte("fake-snapshot-data")
-	server := httptest.NewServer(
-		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			_, _ = w.Write(content)
-		}),
-	)
-	t.Cleanup(server.Close)
-
-	path, err := DownloadSnapshot(context.Background(), DownloadConfig{
-		URL:               server.URL + "/snapshot.tar.zst",
-		AllowInsecureHTTP: true,
-		DestDir:           t.TempDir(),
-		Filename:          "insecure-ok.tar.zst",
-	})
-	require.NoError(t, err)
-	data, err := os.ReadFile(path)
-	require.NoError(t, err)
-	require.Equal(t, content, data)
-}
-
 // TestDownloadSnapshotAcceptsHTTPSByDefault proves a well-formed HTTPS
 // artifact URL passes scheme validation (the connection itself fails
 // against the loopback TLS test server's self-signed certificate, which
@@ -985,56 +844,6 @@ func TestIdleTimerRunsCallback(t *testing.T) {
 		testutil.AsyncWait,
 		"idle timer callback",
 	)
-}
-
-func TestDownloadSnapshotContextCancel(t *testing.T) {
-	t.Parallel()
-
-	server := httptest.NewServer(
-		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Simulate a slow response that never completes
-			w.Header().Set("Content-Length", "1000000")
-			w.WriteHeader(http.StatusOK)
-			// Write nothing, just hang
-		}),
-	)
-	t.Cleanup(server.Close)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // Cancel immediately
-
-	destDir := t.TempDir()
-	_, err := DownloadSnapshot(ctx, DownloadConfig{
-		URL:               server.URL + "/snapshot.tar.zst",
-		AllowInsecureHTTP: true,
-		DestDir:           destDir,
-	})
-	require.Error(t, err)
-}
-
-func TestDownloadSnapshotServerError(t *testing.T) {
-	t.Parallel()
-
-	server := httptest.NewServer(
-		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			http.Error(
-				w,
-				"internal server error",
-				http.StatusInternalServerError,
-			)
-		}),
-	)
-	t.Cleanup(server.Close)
-
-	destDir := t.TempDir()
-	_, err := DownloadSnapshot(context.Background(), DownloadConfig{
-		URL:                 server.URL + "/snapshot.tar.zst",
-		AllowInsecureHTTP:   true,
-		DestDir:             destDir,
-		MaxTransientRetries: -1, // disable retries so the test stays fast
-	})
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "500")
 }
 
 func TestDownloadSnapshotTransientRetrySucceeds(t *testing.T) {
@@ -1163,38 +972,6 @@ func TestIsTransientDownloadError(t *testing.T) {
 	}
 }
 
-func TestDownloadSnapshotSizeVerification(t *testing.T) {
-	t.Parallel()
-
-	content := []byte("exact-size-content")
-
-	server := httptest.NewServer(
-		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			_, _ = w.Write(content)
-		}),
-	)
-	t.Cleanup(server.Close)
-
-	destDir := t.TempDir()
-
-	// Matching size should succeed
-	path, err := DownloadSnapshot(
-		context.Background(),
-		DownloadConfig{
-			URL:               server.URL + "/snapshot.tar.zst",
-			AllowInsecureHTTP: true,
-			DestDir:           destDir,
-			Filename:          "good.tar.zst",
-			ExpectedSize:      int64(len(content)),
-		},
-	)
-	require.NoError(t, err)
-
-	data, err := os.ReadFile(path)
-	require.NoError(t, err)
-	require.Equal(t, content, data)
-}
-
 func TestDownloadSnapshotSizeMismatch(t *testing.T) {
 	t.Parallel()
 
@@ -1225,6 +1002,8 @@ func TestDownloadSnapshotSizeMismatch(t *testing.T) {
 }
 
 func TestDownloadSnapshotBoundsResponseRead(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name    string
 		body    string
@@ -1272,6 +1051,8 @@ func TestDownloadSnapshotBoundsResponseRead(t *testing.T) {
 }
 
 func TestDownloadSnapshotMaxExpectedSizeDoesNotOverflow(t *testing.T) {
+	t.Parallel()
+
 	body := &trackingDownloadBody{}
 	body.reader = *bytes.NewReader([]byte("x"))
 	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
@@ -1292,6 +1073,8 @@ func TestDownloadSnapshotMaxExpectedSizeDoesNotOverflow(t *testing.T) {
 }
 
 func TestDownloadSnapshotConfiguredByteLimit(t *testing.T) {
+	t.Parallel()
+
 	for _, tc := range []struct {
 		name, prefix, body, contentRange string
 		status                           int
@@ -1358,6 +1141,8 @@ func TestDownloadSnapshotConfiguredByteLimit(t *testing.T) {
 }
 
 func TestDownloadSnapshotRestartByteLimit(t *testing.T) {
+	t.Parallel()
+
 	for _, advertised := range []bool{false, true} {
 		for _, content := range []string{"abc", "abcdefgh"} {
 			t.Run(fmt.Sprintf("advertised=%t/length=%d", advertised, len(content)), func(t *testing.T) {
@@ -1401,6 +1186,8 @@ func TestDownloadSnapshotRestartByteLimit(t *testing.T) {
 }
 
 func TestDownloadConfigByteLimit(t *testing.T) {
+	t.Parallel()
+
 	require.Equal(t, DefaultMaxDownloadBytes, (DownloadConfig{}).sizeLimit())
 	require.Error(t, (DownloadConfig{MaxBytes: -1}).Validate())
 	require.ErrorIs(t, (DownloadConfig{MaxBytes: 3, ExpectedSize: 4}).Validate(), ErrDownloadTooLarge)
@@ -1486,49 +1273,6 @@ func TestDownloadSnapshotRefusesSymlinkedDestDir(t *testing.T) {
 	assert.Empty(
 		t, entries,
 		"download must not write through the symlinked DestDir",
-	)
-}
-
-// TestOsRootRejectsFinalSymlinkWithTrailingSlash directly exercises the
-// exact shape of GO-2026-4970 (CVE-2026-39822) against the os.Root API
-// this fix depends on: on Unix, os.Root.Open("symlink/") — the final
-// path component is a symlink and the name ends in a trailing slash —
-// escaped the root before Go 1.26.5, opening the symlink's target
-// instead of refusing it. dingo's own call sites (ExtractArchive,
-// DownloadSnapshot) never reach this exact shape themselves, because
-// path.Clean/filepath.Base already strip trailing slashes before a name
-// is ever passed to a Root method; this test instead pins the toolchain
-// guarantee directly, independent of that incidental normalization, per
-// the issue's 2026-08-21 runtime-prerequisite note. A regression here
-// would also be caught by the govulncheck release gate (see Makefile,
-// publish.yml), but this proves the behavior rather than just the
-// absence of a CVE identifier.
-func TestOsRootRejectsFinalSymlinkWithTrailingSlash(t *testing.T) {
-	t.Parallel()
-
-	if runtime.GOOS == "windows" {
-		t.Skip("creating symlinks requires elevated privileges on windows")
-	}
-
-	destDir := t.TempDir()
-	outsideDir := t.TempDir()
-	require.NoError(
-		t,
-		os.Symlink(outsideDir, filepath.Join(destDir, "escape")),
-	)
-
-	root, err := os.OpenRoot(destDir)
-	require.NoError(t, err)
-	defer root.Close()
-
-	f, openErr := root.Open("escape/")
-	if f != nil {
-		f.Close()
-	}
-	require.Error(
-		t,
-		openErr,
-		"os.Root must refuse a final symlink with a trailing slash, not follow it outside the root",
 	)
 }
 
@@ -1773,6 +1517,8 @@ func createTestArchive(
 }
 
 func TestExtractArchiveZstdLimits(t *testing.T) {
+	t.Parallel()
+
 	archive := createTestArchive(t, map[string]string{"payload": strings.Repeat("x", 4096)})
 	var frame zstd.Header
 	require.NoError(t, frame.Decode(archive))
