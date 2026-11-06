@@ -103,6 +103,9 @@ func RepairRewardStakeInputs(
 		retained.CapturedSlot,
 		retained.BoundarySlot,
 	)
+	if bundle == nil {
+		return nil, errors.New("reward input basis could not be derived")
+	}
 	if err := bundle.validate(); err != nil {
 		return nil, err
 	}
