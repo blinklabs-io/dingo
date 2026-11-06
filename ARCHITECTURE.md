@@ -2766,22 +2766,6 @@ paths, where the point is to report before the goroutine unwinds.
 
 ## Storage Architecture
 
-SQLite's retained API closure accumulator stages eligible payment UTxOs,
-including payments with multiple inputs or outputs, and one stake-delta segment
-per validated transaction. Input and output totals are bounded independently of
-the transaction count. Transaction parents stay immediate. A live-stake read
-barrier materializes pending UTxOs and replays segments in transaction order;
-window and final closure flushes use the same replay. The optional
-`LeiosClosureBatchPreparer` selects ordered plain-payment and unsupported
-windows. Before validating the next window it flushes an active payment overlay
-and its API rows inside the outer transaction. Without an active overlay, API
-rows stay queued until a later flush. Interior runs shorter than 32 transactions
-use immediate writes; existing admission limits remain in force. This preserves
-stake visibility, credential zero crossings and sequence IDs while combining SQL
-writes. Eligible windows cannot change account state, and the metadata query
-wrapper rejects external account mutations while staging is active. Failure in a
-later window rolls back earlier flushes too.
-
 Dingo uses a dual-layer storage architecture with pluggable backends:
 
 ```
@@ -2796,6 +2780,22 @@ Dingo uses a dual-layer storage architecture with pluggable backends:
     |  - Google Cloud Storage (tag-gated)|     |
     -------------------------------------------------
 ```
+
+SQLite's retained API closure accumulator stages eligible payment UTxOs,
+including payments with multiple inputs or outputs, and one stake-delta segment
+per validated transaction that produces stake deltas. Input and output totals
+are bounded independently of the transaction count. Transaction parents stay immediate. A live-stake read
+barrier materializes pending UTxOs and replays segments in transaction order;
+window and final closure flushes use the same replay. The optional
+`LeiosClosureBatchPreparer` selects ordered plain-payment and unsupported
+windows. Before validating the next window it flushes an active payment overlay
+and its API rows inside the outer transaction. Without an active overlay, API
+rows stay queued until a later flush. Interior runs shorter than 32 transactions
+use immediate writes; existing admission limits remain in force. This preserves
+stake visibility, credential zero crossings and sequence IDs while combining SQL
+writes. Eligible windows cannot change account state, and the metadata query
+wrapper rejects external account mutations while staging is active. Failure in a
+later window rolls back earlier flushes too.
 
 Badger and SQLite are always compiled into Dingo. The non-default blob plugins
 (`s3` and `gcs`) and PostgreSQL/MySQL metadata providers are compiled only when

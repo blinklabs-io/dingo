@@ -2425,8 +2425,9 @@ providers use the ordinary ordered writer.
 Transactions with Dijkstra direct deposits keep immediate UTxO writes because
 reward-account credits update live stake outside the retained overlay.
 
-Retained staking UTxOs queue one ordered stake segment per transaction. Reads of
-live stake first materialize pending UTxOs and replay those segments, preserving
+Retained staking UTxOs queue one ordered stake segment per transaction that
+produces stake deltas. Reads of live stake first materialize pending UTxOs and
+replay those segments, preserving
 credential zero crossings, stake row IDs and sequence advancement. Account state
 stays constant inside eligible windows; external account writes abort the batch.
 

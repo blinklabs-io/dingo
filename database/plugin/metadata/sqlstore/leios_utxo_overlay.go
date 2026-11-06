@@ -267,7 +267,22 @@ func (s *Store) PrepareLeiosClosureBatch(
 	}
 	plain := plainLeiosOverlayTransaction(transactions[0])
 	n := 1
+	var inputs, outputs int
+	if plain {
+		inputs = len(transactions[0].Consumed())
+		outputs = len(transactions[0].Produced())
+	}
 	for n < min(len(transactions), maxLeiosUtxoOverlayTransactions) && plainLeiosOverlayTransaction(transactions[n]) == plain {
+		if plain {
+			nextInputs := len(transactions[n].Consumed())
+			nextOutputs := len(transactions[n].Produced())
+			if nextInputs > maxLeiosUtxoOverlayReferences-inputs ||
+				nextOutputs > maxLeiosUtxoOverlayReferences-outputs {
+				break
+			}
+			inputs += nextInputs
+			outputs += nextOutputs
+		}
 		n++
 	}
 	if plain && (n >= minLeiosClosureOverlayRun || n == len(transactions)) {
@@ -325,7 +340,8 @@ func plainLeiosOverlayTransaction(tx lcommon.Transaction) bool {
 		}
 	}
 	for i, out := range produced {
-		if outputs[i] == nil || out.Output == nil || out.Id == nil || uint64(out.Id.Index()) != uint64(i) ||
+		if outputs[i] == nil || out.Output == nil || out.Id == nil ||
+			uint64(out.Id.Index()) != uint64(i) ||
 			out.Output.Datum() != nil ||
 			out.Output.DatumHash() != nil ||
 			out.Output.ScriptRef() != nil {

@@ -31,7 +31,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func retainedStakeChain(t testing.TB, n int) (lcommon.Transaction, []lcommon.Transaction) {
+func retainedStakeChain(
+	t testing.TB,
+	n int,
+) (lcommon.Transaction, []lcommon.Transaction) {
 	t.Helper()
 	output := func(i int) lcommon.TransactionOutput {
 		kind := uint8(lcommon.AddressTypeKeyKey)
@@ -95,7 +98,11 @@ func retainedStakeState(t testing.TB, db queryer) string {
 	return string(encoded)
 }
 
-func retainedStakeStore(t testing.TB, seed lcommon.Transaction, emptyBaseline bool) *Store {
+func retainedStakeStore(
+	t testing.TB,
+	seed lcommon.Transaction,
+	emptyBaseline bool,
+) *Store {
 	t.Helper()
 	s := newForeignKeySQLiteStore(t)
 	s.storageMode = types.StorageModeAPI
@@ -144,9 +151,10 @@ func writeRetainedStakeChain(
 	acc := s.NewLeiosClosureBatchAccumulator()
 	defer acc.Reset()
 	if enabled {
-		ok, err := s.EnableLeiosClosureUtxoOverlay(acc, txn, txs)
+		n, err := s.PrepareLeiosClosureBatch(acc, txn, txs)
 		require.NoError(t, err)
-		require.True(t, ok)
+		require.Len(t, txs, n)
+		require.NotNil(t, acc.(*transactionBatchAccumulator).overlay)
 	}
 	var observations []string
 	contextSlot := uint64(99)
@@ -183,7 +191,10 @@ func writeRetainedStakeChain(
 		}
 	}
 	if enabled && !barriers {
-		require.Zero(t, acc.(*transactionBatchAccumulator).overlay.stats.BarrierFlushes)
+		require.Zero(
+			t,
+			acc.(*transactionBatchAccumulator).overlay.stats.BarrierFlushes,
+		)
 	}
 	require.NoError(t, s.FlushBatch(acc, txn))
 	db, _, err := s.readDBFromTxn(txn)
@@ -201,18 +212,34 @@ func TestLeiosRetainedStakeMatchesPerTransactionState(t *testing.T) {
 	t.Parallel()
 	for _, emptyBaseline := range []bool{false, true} {
 		for _, barriers := range []bool{false, true} {
-			t.Run(fmt.Sprintf("empty=%t/barriers=%t", emptyBaseline, barriers), func(t *testing.T) {
-				seed, txs := retainedStakeChain(t, 12)
-				var states [2]string
-				var views [2][]string
-				for i, enabled := range []bool{false, true} {
-					s := retainedStakeStore(t, seed, emptyBaseline)
-					views[i] = writeRetainedStakeChain(t, s, txs, enabled, barriers, true)
-					states[i] = retainedStakeHistoryState(t, s) + retainedStakeState(t, s.writeDB)
-				}
-				require.Equal(t, views[0], views[1])
-				require.Equal(t, states[0], states[1])
-			})
+			t.Run(
+				fmt.Sprintf("empty=%t/barriers=%t", emptyBaseline, barriers),
+				func(t *testing.T) {
+					seed, txs := retainedStakeChain(t, 12)
+					var states [2]string
+					var views [2][]string
+					for i, enabled := range []bool{false, true} {
+						s := retainedStakeStore(t, seed, emptyBaseline)
+						views[i] = writeRetainedStakeChain(
+							t,
+							s,
+							txs,
+							enabled,
+							barriers,
+							true,
+						)
+						states[i] = retainedStakeHistoryState(
+							t,
+							s,
+						) + retainedStakeState(
+							t,
+							s.writeDB,
+						)
+					}
+					require.Equal(t, views[0], views[1])
+					require.Equal(t, states[0], states[1])
+				},
+			)
 		}
 	}
 }
@@ -223,7 +250,11 @@ func TestLeiosRetainedStakeRollback(t *testing.T) {
 	s := retainedStakeStore(t, seed, false)
 	before := retainedStakeHistoryState(t, s) + retainedStakeState(t, s.writeDB)
 	writeRetainedStakeChain(t, s, txs, true, true, false)
-	require.Equal(t, before, retainedStakeHistoryState(t, s)+retainedStakeState(t, s.writeDB))
+	require.Equal(
+		t,
+		before,
+		retainedStakeHistoryState(t, s)+retainedStakeState(t, s.writeDB),
+	)
 }
 
 func BenchmarkLeiosRetainedStake(b *testing.B) {
@@ -246,7 +277,10 @@ func BenchmarkLeiosRetainedStake(b *testing.B) {
 						b,
 						s.SetTransactionLeiosClosureBatched(
 							tx,
-							ocommon.Point{Slot: 100, Hash: overlayTxID(0x63, 0)},
+							ocommon.Point{
+								Slot: 100,
+								Hash: overlayTxID(0x63, 0),
+							},
 							uint32(index),
 							nil,
 							true,
@@ -316,10 +350,57 @@ func TestLeiosRetainedStakeRejectsAccountMutation(t *testing.T) {
 	db, ctx, err := s.readDBFromTxn(txn)
 	require.NoError(t, err)
 	_, err = db.ExecContext(ctx, `UPDATE account SET reward='99'`)
-	require.ErrorContains(t, err, "external mutation inside API closure UTxO overlay")
+	require.ErrorContains(
+		t,
+		err,
+		"external mutation inside API closure UTxO overlay",
+	)
+	require.ErrorContains(t, err, "statement UPDATE is forbidden")
 	require.ErrorContains(
 		t,
 		acc.(*transactionBatchAccumulator).BatchUtxoOverlayError(),
 		"external mutation",
 	)
+}
+
+func TestLeiosRetainedOverlayPreservesStorageError(t *testing.T) {
+	t.Parallel()
+	seed, txs := retainedStakeChain(t, 2)
+	s := retainedStakeStore(t, seed, false)
+	_, err := s.writeDB.Exec(
+		`CREATE TRIGGER reject_overlay_utxo BEFORE INSERT ON utxo
+BEGIN SELECT RAISE(ABORT, 'reject retained output'); END`,
+	)
+	require.NoError(t, err)
+	txn := s.Transaction(t.Context())
+	defer func() { _ = txn.Rollback() }()
+	acc := s.NewLeiosClosureBatchAccumulator()
+	defer acc.Reset()
+	n, err := s.PrepareLeiosClosureBatch(acc, txn, txs)
+	require.NoError(t, err)
+	require.Len(t, txs, n)
+	require.NoError(t, s.SetTransactionLeiosClosureBatched(
+		txs[0], ocommon.Point{Slot: 100, Hash: overlayTxID(0x63, 0)},
+		0, nil, true, nil, acc, txn, 0,
+	))
+	db, ctx, err := s.readDBFromTxn(txn)
+	require.NoError(t, err)
+	rows, first := db.QueryContext(ctx, `SELECT id FROM utxo`)
+	if rows != nil {
+		require.NoError(t, rows.Close())
+	}
+	require.ErrorContains(t, first, "reject retained output")
+	_, err = db.ExecContext(ctx, `UPDATE account SET reward='99'`)
+	require.ErrorIs(
+		t,
+		err,
+		first,
+		"the original storage error must remain sticky",
+	)
+	require.ErrorIs(
+		t,
+		acc.(*transactionBatchAccumulator).BatchUtxoOverlayError(),
+		first,
+	)
+	require.ErrorIs(t, s.FlushBatch(acc, txn), first)
 }
