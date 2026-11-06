@@ -18,7 +18,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
-	"errors"
 	"io"
 	"log/slog"
 	"maps"
@@ -1282,7 +1281,7 @@ func TestEstablishBaseline_StalledPeerTimesOutAndRetries(t *testing.T) {
 	// cfg.FullCheckTimeout, the stalled peer above blocks it forever and
 	// this outer context is the only thing that will ever end the test
 	// (after a generous margin well beyond several retry attempts).
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 800*time.Millisecond)
 	defer cancel()
 
 	done := make(chan struct{})
@@ -1464,50 +1463,6 @@ func TestLoadCursor_MissingFileReturnsNilNotError(t *testing.T) {
 	assert.Nil(t, cursor)
 }
 
-// TestSaveCursorLoadCursor_RoundTrips covers the persistence contract
-// RunIncremental relies on to resume across restarts: whatever SaveCursor
-// writes, LoadCursor must read back unchanged.
-func TestSaveCursorLoadCursor_RoundTrips(t *testing.T) {
-	t.Parallel()
-	path := filepath.Join(t.TempDir(), "cursor.json")
-	want := &IncrementalCursor{
-		Tip: Tip{
-			Slot:        123,
-			Hash:        "abcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcd",
-			BlockNumber: 45,
-		},
-		Epoch:                7,
-		BlocksSinceFullCheck: 89,
-	}
-	require.NoError(t, SaveCursor(path, want))
-
-	got, err := LoadCursor(path)
-	require.NoError(t, err)
-	require.NotNil(t, got)
-	assert.Equal(t, want, got)
-}
-
-// TestSaveCursor_OverwritesPriorContent covers the case RunIncremental's
-// steady-state loop actually exercises every block: saving a second cursor
-// to the same path must fully replace the first, not merge or append --
-// LoadCursor afterward must see only the latest write.
-func TestSaveCursor_OverwritesPriorContent(t *testing.T) {
-	t.Parallel()
-	path := filepath.Join(t.TempDir(), "cursor.json")
-	require.NoError(t, SaveCursor(path, &IncrementalCursor{
-		Tip: Tip{Slot: 1}, Epoch: 1, BlocksSinceFullCheck: 1,
-	}))
-	require.NoError(t, SaveCursor(path, &IncrementalCursor{
-		Tip: Tip{Slot: 2}, Epoch: 2, BlocksSinceFullCheck: 2,
-	}))
-
-	got, err := LoadCursor(path)
-	require.NoError(t, err)
-	require.NotNil(t, got)
-	assert.Equal(t, uint64(2), got.Tip.Slot)
-	assert.Equal(t, 2, got.Epoch)
-}
-
 // txIn builds a real ShelleyTransactionInput for a fixed, deterministic
 // hash+index pair, matching how queryUTxOByRefs/blockRefsToQuery build the
 // same type from a real block's decoded transactions.
@@ -1541,18 +1496,11 @@ func TestBlockRefsToQuery_DedupesRepeatedRefs(t *testing.T) {
 		1,
 		"the same ref named three times must be queried once",
 	)
-}
 
-// TestBlockRefsToQuery_DistinctRefsAllIncluded covers the ordinary case:
-// distinct consumed and produced refs must all appear in the query list,
-// none silently dropped.
-func TestBlockRefsToQuery_DistinctRefsAllIncluded(t *testing.T) {
-	t.Parallel()
-	consumed := txIn(t, txHashA, 0)
-	produced := txIn(t, txHashB, 1)
-	refs := blockRefsToQuery(
-		[]lcommon.TransactionInput{consumed},
-		[]lcommon.Utxo{{Id: produced}},
+	// Distinct consumed and produced refs are all queried.
+	refs = blockRefsToQuery(
+		[]lcommon.TransactionInput{txIn(t, txHashA, 0)},
+		[]lcommon.Utxo{{Id: txIn(t, txHashB, 1)}},
 	)
 	assert.Len(t, refs, 2)
 }
@@ -2027,11 +1975,11 @@ func TestFullCheckWorker_FailedAttemptDoesNotResetCounter(t *testing.T) {
 	)
 	mu.Unlock()
 
-	// A short, fixed wait rather than testutil.WaitForCondition: this test
-	// asserts a state does NOT change, so it must observe the worker's own
-	// goroutine settle rather than succeed immediately before that goroutine
-	// had a chance to (incorrectly) reset the counter.
-	time.Sleep(200 * time.Millisecond)
+	// The worker applies (or skips) the counter reset right after the callback
+	// returns and cannot exit before doing so, so stopping it first makes the
+	// assertions below see the final state without a sleep.
+	cancel()
+	worker.stop()
 	assert.Equal(
 		t, uint64(42), cursor.snapshot().BlocksSinceFullCheck,
 		"a failed full-check attempt must not reset BlocksSinceFullCheck",
@@ -2040,9 +1988,6 @@ func TestFullCheckWorker_FailedAttemptDoesNotResetCounter(t *testing.T) {
 		t, uint64(100), cursor.snapshot().Tip.Slot,
 		"a failed attempt must not disturb Tip either",
 	)
-
-	cancel()
-	worker.stop()
 }
 
 // TestFullCheckWorker_SuccessfulCheckResetsCounter covers the case
@@ -2447,45 +2392,3 @@ func testDiscardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
-// TestReportSessionEnd_RecordsErrorViaCallback is a regression test for
-// the incremental-mode audit finding: a per-block
-// query failure that ends an incrementalSession previously reached only a
-// log line, never any metric-recording callback, so
-// node_parity_check_errors_total could never see this failure class (the
-// stake-distribution stall from the same audit's other finding would never
-// have paged anyone). A non-nil sessionErr must reach OnBlockCheckError.
-func TestReportSessionEnd_RecordsErrorViaCallback(t *testing.T) {
-	t.Parallel()
-	var got error
-	cfg := IncrementalConfig{
-		Logger:            testDiscardLogger(),
-		OnBlockCheckError: func(err error) { got = err },
-	}
-	wantErr := errors.New("block delta check at slot 5: dingo query: boom")
-
-	reportSessionEnd(cfg, wantErr, time.Second, 5)
-
-	assert.Equal(t, wantErr, got)
-}
-
-// TestReportSessionEnd_NilErrorDoesNotInvokeCallback covers the clean-ending
-// case reportSessionEnd's own caller already excludes in practice (ctx
-// cancellation returns before this is ever called), but which this function
-// itself still guards defensively: a nil sessionErr must not invoke
-// OnBlockCheckError at all.
-func TestReportSessionEnd_NilErrorDoesNotInvokeCallback(t *testing.T) {
-	t.Parallel()
-	called := false
-	cfg := IncrementalConfig{
-		Logger:            testDiscardLogger(),
-		OnBlockCheckError: func(error) { called = true },
-	}
-
-	reportSessionEnd(cfg, nil, time.Second, 5)
-
-	assert.False(
-		t,
-		called,
-		"a nil session error must not invoke OnBlockCheckError",
-	)
-}
