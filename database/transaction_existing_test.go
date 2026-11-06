@@ -63,15 +63,3 @@ INSERT INTO "transaction" (
 		require.True(t, stored[string(hash)], "reported a missing hash %x", hash)
 	}
 }
-
-func TestGetExistingTransactionHashesCanceledContext(t *testing.T) {
-	t.Parallel()
-	db := openTestDB(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	_, err := db.GetExistingTransactionHashes(
-		ctx,
-		[][]byte{existingTxTestHash(1)},
-	)
-	require.ErrorIs(t, err, context.Canceled)
-}

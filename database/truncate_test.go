@@ -37,7 +37,17 @@ import (
 // per-transaction entry budget these tests are about.
 func newOnDiskTestDB(t *testing.T) *Database {
 	t.Helper()
-	db, err := newTestDatabase(t, &Config{DataDir: t.TempDir()})
+	db, err := newTestDatabaseWithBlobConfig(
+		t,
+		&Config{DataDir: t.TempDir()},
+		false,
+		"",
+		map[string]any{
+			"valueLogFileSize": testutil.TestBadgerValueLogFileSize,
+			"memTableSize":     truncateTestMemTableSize,
+			"valueThreshold":   16 * 1024,
+		},
+	)
 	require.NoError(t, err, "failed to create test database")
 	return db
 }
@@ -63,7 +73,16 @@ const (
 	overBudgetBlobDeletes = testBadgerMaxBatchCount + 4_000
 )
 
-// seedRollbackUtxos writes overBudgetBlobDeletes UTxOs above rollbackSlot,
+// truncateTestMemTableSize sizes the store the rollback tests open. The
+// per-transaction budget scales with the memtable, so a 1 MiB one is exceeded
+// by far fewer staged deletes than the shared 8 MiB test store needs.
+const (
+	truncateTestMemTableSize  = 1024 * 1024
+	truncateMaxBatchCount     = 15 * truncateTestMemTableSize / 100 / 96
+	truncateOverBudgetDeletes = truncateMaxBatchCount*2/5 + 200
+)
+
+// seedRollbackUtxos writes truncateOverBudgetDeletes UTxOs above rollbackSlot,
 // both the metadata rows TruncateAfterSlot collects and the blob objects it
 // deletes. The blobs go in through their own bounded transactions: a single
 // transaction could not hold them either.
@@ -74,8 +93,8 @@ func seedRollbackUtxos(
 ) []models.Utxo {
 	t.Helper()
 
-	utxos := make([]models.Utxo, 0, overBudgetBlobDeletes)
-	for i := range overBudgetBlobDeletes {
+	utxos := make([]models.Utxo, 0, truncateOverBudgetDeletes)
+	for i := range truncateOverBudgetDeletes {
 		txId := make([]byte, 32)
 		//nolint:gosec // loop counter, always in range
 		binary.BigEndian.PutUint32(txId[:4], uint32(i))
@@ -93,7 +112,7 @@ func seedRollbackUtxos(
 	}))
 	seedTxn.Release()
 
-	const blobBatch = 2_000
+	const blobBatch = 200
 	for start := 0; start < len(utxos); start += blobBatch {
 		end := min(start+blobBatch, len(utxos))
 		batch := utxos[start:end]
@@ -211,8 +230,8 @@ func TestDeleteTxBlobsLeavesRoomForCommit(t *testing.T) {
 
 	db := newOnDiskTestDB(t)
 
-	txHashes := make([][]byte, 0, overBudgetBlobDeletes)
-	for i := range overBudgetBlobDeletes {
+	txHashes := make([][]byte, 0, truncateOverBudgetDeletes)
+	for i := range truncateOverBudgetDeletes {
 		hash := bytes.Repeat([]byte{0x00}, 32)
 		//nolint:gosec // loop counter, always in range
 		binary.BigEndian.PutUint32(hash[:4], uint32(i))
