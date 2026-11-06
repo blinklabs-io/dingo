@@ -1225,6 +1225,8 @@ func TestDownloadSnapshotSizeMismatch(t *testing.T) {
 }
 
 func TestDownloadSnapshotBoundsResponseRead(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name    string
 		body    string
@@ -1272,6 +1274,8 @@ func TestDownloadSnapshotBoundsResponseRead(t *testing.T) {
 }
 
 func TestDownloadSnapshotMaxExpectedSizeDoesNotOverflow(t *testing.T) {
+	t.Parallel()
+
 	body := &trackingDownloadBody{}
 	body.reader = *bytes.NewReader([]byte("x"))
 	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
@@ -1292,6 +1296,8 @@ func TestDownloadSnapshotMaxExpectedSizeDoesNotOverflow(t *testing.T) {
 }
 
 func TestDownloadSnapshotConfiguredByteLimit(t *testing.T) {
+	t.Parallel()
+
 	for _, tc := range []struct {
 		name, prefix, body, contentRange string
 		status                           int
@@ -1358,6 +1364,8 @@ func TestDownloadSnapshotConfiguredByteLimit(t *testing.T) {
 }
 
 func TestDownloadSnapshotRestartByteLimit(t *testing.T) {
+	t.Parallel()
+
 	for _, advertised := range []bool{false, true} {
 		for _, content := range []string{"abc", "abcdefgh"} {
 			t.Run(fmt.Sprintf("advertised=%t/length=%d", advertised, len(content)), func(t *testing.T) {
@@ -1401,6 +1409,8 @@ func TestDownloadSnapshotRestartByteLimit(t *testing.T) {
 }
 
 func TestDownloadConfigByteLimit(t *testing.T) {
+	t.Parallel()
+
 	require.Equal(t, DefaultMaxDownloadBytes, (DownloadConfig{}).sizeLimit())
 	require.Error(t, (DownloadConfig{MaxBytes: -1}).Validate())
 	require.ErrorIs(t, (DownloadConfig{MaxBytes: 3, ExpectedSize: 4}).Validate(), ErrDownloadTooLarge)
@@ -1773,6 +1783,8 @@ func createTestArchive(
 }
 
 func TestExtractArchiveZstdLimits(t *testing.T) {
+	t.Parallel()
+
 	archive := createTestArchive(t, map[string]string{"payload": strings.Repeat("x", 4096)})
 	var frame zstd.Header
 	require.NoError(t, frame.Decode(archive))

@@ -42,6 +42,8 @@ import (
 // of an extracted snapshot. The archive is remote input, so an unbounded read
 // lets its producer choose the allocation.
 func TestReadFileInRejectsOversizedManifest(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	name := "ancillary_manifest.json"
 	if err := os.WriteFile(
@@ -67,6 +69,8 @@ func TestReadFileInRejectsOversizedManifest(t *testing.T) {
 // TestReadFileInAcceptsManifestAtBound pins that the bound is inclusive, so a
 // manifest exactly at the limit is still readable.
 func TestReadFileInAcceptsManifestAtBound(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	name := "ancillary_manifest.json"
 	want := make([]byte, maxAncillaryManifestBytes)
