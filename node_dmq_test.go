@@ -199,67 +199,6 @@ func TestDMQStakeAuthorityReadsElectingStake(t *testing.T) {
 	require.Zero(t, stake)
 }
 
-// A live truncate closes and replaces the ledger state while DMQ submissions
-// keep looking up pool stake; the lookups must never touch a ledger state
-// being swapped, and must follow the rebuilt one afterwards.
-func TestDMQStakeAuthorityAcrossLiveTruncate(t *testing.T) {
-	t.Parallel()
-	const numBlocks = 6
-	n, points := newLiveLifecycleTestNode(t, numBlocks)
-	auth := &n.dmqStake
-	auth.setLedgerState(n.ledgerState)
-	stop := make(chan struct{})
-	started := make(chan struct{})
-	var lookups atomic.Int64
-	var wg sync.WaitGroup
-	// Only the detached state may fail a lookup: any other error means a
-	// lookup reached storage that was closed or not yet reopened.
-	var lookupErr error
-	// A fixed chain slot, so lookups reach storage rather than stopping at a
-	// wall clock the test chain's era history does not cover.
-	slot := points[0].Slot
-	lookup := func() error {
-		_, err := dmqPoolStakeAt(auth, slot, ocommon.PoolKeyHash{})
-		// The test chain holds no stake snapshot, which is an answer read
-		// from storage.
-		if errors.Is(err, ledger.ErrLeaderStakeSnapshotUnavailable) {
-			return nil
-		}
-		return err
-	}
-	wg.Go(func() {
-		for {
-			err := lookup()
-			if err != nil && !errors.Is(err, errDMQLedgerDetached) {
-				lookupErr = err
-				return
-			}
-			if lookups.Add(1) == 1 {
-				close(started)
-			}
-			select {
-			case <-stop:
-				return
-			default:
-			}
-		}
-	})
-	<-started
-	targetSlot := points[numBlocks/2].Slot
-	before := lookups.Load()
-	_, err := n.Truncate(
-		context.Background(),
-		dblifecycle.TruncateTarget{Slot: &targetSlot},
-	)
-	during := lookups.Load() - before
-	close(stop)
-	wg.Wait()
-	require.NoError(t, err)
-	require.NoError(t, lookupErr)
-	require.Positive(t, during, "no stake lookup ran during the truncate")
-	require.NoError(t, lookup())
-}
-
 // Quiesce must not wait without bound on a stake lookup stalled inside the
 // ledger: a lookup that never returns may still be reading the storage about
 // to be closed, so it escalates like any other unconfirmed drain.
@@ -581,6 +520,14 @@ func TestDMQStakeAuthorityLedgerPeerSnapshot(t *testing.T) {
 	require.ErrorIs(t, err, dmq.ErrChainStateUnavailable)
 }
 
+// dmqPeerConfig reads only the logger and the stake authority, so the cases
+// use a bare node instead of constructing a full one.
+func newDMQPeerConfigTestNode() *Node {
+	return &Node{config: Config{
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}}
+}
+
 func TestDMQPeerConfig(t *testing.T) {
 	t.Parallel()
 	topo := &dmq.Topology{}
@@ -591,7 +538,7 @@ func TestDMQPeerConfig(t *testing.T) {
 
 	t.Run("both address families", func(t *testing.T) {
 		t.Parallel()
-		n := newAPIPluginRuntimeNode(t)
+		n := newDMQPeerConfigTestNode()
 		got := n.dmqPeerConfig(base, topo)
 		require.NotNil(t, got)
 		require.Equal(t, []dmq.ListenAddr{
@@ -605,7 +552,7 @@ func TestDMQPeerConfig(t *testing.T) {
 	})
 	t.Run("one address family", func(t *testing.T) {
 		t.Parallel()
-		n := newAPIPluginRuntimeNode(t)
+		n := newDMQPeerConfigTestNode()
 		cfg := base
 		cfg.ListenIPv6Address = ""
 		got := n.dmqPeerConfig(cfg, nil)
@@ -618,21 +565,21 @@ func TestDMQPeerConfig(t *testing.T) {
 	})
 	t.Run("no SRV prefix means no ledger peers", func(t *testing.T) {
 		t.Parallel()
-		n := newAPIPluginRuntimeNode(t)
+		n := newDMQPeerConfigTestNode()
 		cfg := base
 		cfg.Topic = "other"
 		require.Nil(t, n.dmqPeerConfig(cfg, nil).LedgerPeers)
 	})
 	t.Run("no peer port serves local clients only", func(t *testing.T) {
 		t.Parallel()
-		n := newAPIPluginRuntimeNode(t)
+		n := newDMQPeerConfigTestNode()
 		cfg := base
 		cfg.N2NPort = 0
 		require.Nil(t, n.dmqPeerConfig(cfg, topo))
 	})
 	t.Run("a topology without a peer port is reported", func(t *testing.T) {
 		t.Parallel()
-		n := newAPIPluginRuntimeNode(t)
+		n := newDMQPeerConfigTestNode()
 		logs := &syncLogBuffer{}
 		n.config.logger = slog.New(slog.NewTextHandler(logs, nil))
 		cfg := base
@@ -643,7 +590,7 @@ func TestDMQPeerConfig(t *testing.T) {
 	})
 	t.Run("the defaults warn of nothing", func(t *testing.T) {
 		t.Parallel()
-		n := newAPIPluginRuntimeNode(t)
+		n := newDMQPeerConfigTestNode()
 		logs := &syncLogBuffer{}
 		n.config.logger = slog.New(slog.NewTextHandler(logs, nil))
 		cfg := internalconfig.DefaultDMQConfig()
@@ -653,7 +600,7 @@ func TestDMQPeerConfig(t *testing.T) {
 	})
 	t.Run("a peer port with no room for peers is reported", func(t *testing.T) {
 		t.Parallel()
-		n := newAPIPluginRuntimeNode(t)
+		n := newDMQPeerConfigTestNode()
 		logs := &syncLogBuffer{}
 		n.config.logger = slog.New(slog.NewTextHandler(logs, nil))
 		cfg := base
@@ -663,14 +610,14 @@ func TestDMQPeerConfig(t *testing.T) {
 	})
 	t.Run("room for no peers serves local clients only", func(t *testing.T) {
 		t.Parallel()
-		n := newAPIPluginRuntimeNode(t)
+		n := newDMQPeerConfigTestNode()
 		cfg := base
 		cfg.MinPeers, cfg.MaxPeers = 0, 0
 		require.Nil(t, n.dmqPeerConfig(cfg, topo))
 	})
 	t.Run("settings too large for an int are clamped", func(t *testing.T) {
 		t.Parallel()
-		n := newAPIPluginRuntimeNode(t)
+		n := newDMQPeerConfigTestNode()
 		cfg := base
 		cfg.MinPeers, cfg.MaxPeers = 1, ^uint(0)
 		require.Equal(t, math.MaxInt32, n.dmqPeerConfig(cfg, nil).MaxPeers)
@@ -812,49 +759,79 @@ func TestNodeRunConnectsDMQPeers(t *testing.T) {
 	require.Equal(t, int32(1), probe.starts.Load())
 }
 
-// Ledger peer lookups keep running while a live truncate replaces the ledger
-// state: a lookup may only find the state detached, never one being closed.
-func TestDMQStakeAuthorityLedgerPeerSnapshotAcrossLiveTruncate(t *testing.T) {
+// A live truncate replaces the ledger state the DMQ stake authority reads.
+// Both of its lookups run continuously across one truncate and may only fail
+// as "ledger detached" while the swap is in flight.
+func TestDMQStakeAuthorityAcrossLiveTruncate(t *testing.T) {
 	t.Parallel()
 	const numBlocks = 6
 	n, points := newLiveLifecycleTestNode(t, numBlocks)
 	auth := &n.dmqStake
 	auth.setLedgerState(n.ledgerState)
-	stop := make(chan struct{})
-	started := make(chan struct{})
-	var lookups atomic.Int64
-	var wg sync.WaitGroup
-	var lookupErr error
-	wg.Go(func() {
-		for {
+	slot := points[0].Slot
+	lookups := map[string]func() error{
+		"pool stake": func() error {
+			_, err := dmqPoolStakeAt(auth, slot, ocommon.PoolKeyHash{})
+			if errors.Is(err, ledger.ErrLeaderStakeSnapshotUnavailable) {
+				return nil
+			}
+			return err
+		},
+		"ledger peer snapshot": func() error {
 			_, err := auth.LedgerPeerSnapshot(context.Background())
-			if err != nil && !errors.Is(err, errDMQLedgerDetached) {
-				lookupErr = err
-				return
+			return err
+		},
+	}
+
+	type loop struct {
+		count atomic.Int64
+		err   error
+	}
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	loops := make(map[string]*loop, len(lookups))
+	for name, lookup := range lookups {
+		l := &loop{}
+		loops[name] = l
+		started := make(chan struct{})
+		wg.Go(func() {
+			for {
+				err := lookup()
+				if err != nil && !errors.Is(err, errDMQLedgerDetached) {
+					l.err = err
+					return
+				}
+				if l.count.Add(1) == 1 {
+					close(started)
+				}
+				select {
+				case <-stop:
+					return
+				default:
+				}
 			}
-			if lookups.Add(1) == 1 {
-				close(started)
-			}
-			select {
-			case <-stop:
-				return
-			default:
-			}
-		}
-	})
-	<-started
+		})
+		<-started
+	}
+	before := map[string]int64{}
+	for name, l := range loops {
+		before[name] = l.count.Load()
+	}
 	targetSlot := points[numBlocks/2].Slot
-	before := lookups.Load()
 	_, err := n.Truncate(
 		context.Background(),
 		dblifecycle.TruncateTarget{Slot: &targetSlot},
 	)
-	during := lookups.Load() - before
+	during := map[string]int64{}
+	for name, l := range loops {
+		during[name] = l.count.Load() - before[name]
+	}
 	close(stop)
 	wg.Wait()
 	require.NoError(t, err)
-	require.NoError(t, lookupErr)
-	require.Positive(t, during, "no snapshot lookup ran during the truncate")
-	_, err = auth.LedgerPeerSnapshot(context.Background())
-	require.NoError(t, err)
+	for name, l := range loops {
+		require.NoError(t, l.err, name)
+		require.Positive(t, during[name], "no %s lookup ran during the truncate", name)
+		require.NoError(t, lookups[name](), name)
+	}
 }
