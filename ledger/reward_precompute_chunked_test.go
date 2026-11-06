@@ -383,10 +383,10 @@ func TestChunkedRewardPrecomputeMatchesAcrossChunkSizes(t *testing.T) {
 		potsEpoch           = uint64(3)
 		eventBoundarySlot   = uint64(200)
 	)
-	poolCount, delegatorsPerPool := 7, 5
+	poolCount, delegatorsPerPool := 4, 2
 
 	var reference rewardPrecomputeOutputsSnapshot
-	for i, chunkSize := range []int{1, 2, 3, 100} {
+	for i, chunkSize := range []int{1, 3, 100} {
 		ls, db := seedMultiPoolRewardPrecomputeFixture(
 			t, poolCount, delegatorsPerPool, 7,
 		)

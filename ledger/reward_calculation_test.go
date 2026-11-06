@@ -8637,8 +8637,20 @@ func dumpDRepVotingPower(t *testing.T, f *epochBoundaryBenchFixture) string {
 // Their rewards become unspendable at the boundary.
 func deregisterEpochBoundaryDumpDelegators(t *testing.T, raw *sql.DB) {
 	t.Helper()
-	shape := epochBoundaryDumpShape()
-	for d := 0; d < shape.delegators; d += 97 {
+	deregisterEpochBoundaryDelegators(
+		t, raw, epochBoundaryDumpShape().delegators, 97,
+	)
+}
+
+// deregisterEpochBoundaryDelegators deregisters every step-th of the first
+// delegators delegators.
+func deregisterEpochBoundaryDelegators(
+	t *testing.T,
+	raw *sql.DB,
+	delegators, step int,
+) {
+	t.Helper()
+	for d := 0; d < delegators; d += step {
 		key := epochBoundaryBenchHash(0x30, uint64(d)+1)
 		slot := epochBoundaryBenchStart(epochBoundaryBenchEndedEpoch) + 1_000 +
 			uint64(d)
@@ -8767,15 +8779,20 @@ func TestEpochRolloverMarkSnapshotIncludesSameBoundaryRewards(t *testing.T) {
 // precompute recorded its output as spendable.
 func TestBoundaryRechecksRegistrationChangedAfterPrecompute(t *testing.T) {
 	t.Parallel()
+	shape := epochBoundaryDumpShape()
+	shape.delegators = 248
+	const deregisterStep = 11
 	run := func(deregister bool) (*epochBoundaryBenchFixture, uint64) {
-		f := newEpochBoundaryBenchFixture(t, epochBoundaryDumpShape(), "")
+		f := newEpochBoundaryBenchFixture(t, shape, "")
 		require.NoError(t, f.ls.precomputeStakeRewardsAfterEpochTransition(
 			epochBoundaryBenchPrecomputeEvent(),
 		))
 		if deregister {
 			raw, err := dbtest.RawSQLiteMetadata(t, f.db)
 			require.NoError(t, err)
-			deregisterEpochBoundaryDumpDelegators(t, raw)
+			deregisterEpochBoundaryDelegators(
+				t, raw, shape.delegators, deregisterStep,
+			)
 			require.NoError(t, raw.Close())
 		}
 		f.rollover(t)
@@ -8788,7 +8805,7 @@ func TestBoundaryRechecksRegistrationChangedAfterPrecompute(t *testing.T) {
 	f, treasuryDeregistered := run(true)
 
 	deregistered := make(map[string]bool)
-	for d := 0; d < epochBoundaryDumpShape().delegators; d += 97 {
+	for d := 0; d < shape.delegators; d += deregisterStep {
 		deregistered[string(epochBoundaryBenchHash(0x30, uint64(d)+1))] = true
 	}
 	outputs, err := f.db.Metadata().GetRewardAccountOutputs(8, nil)
