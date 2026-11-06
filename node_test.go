@@ -2035,8 +2035,13 @@ func TestNodeRunPublicAPIsUseSharedBindAddress(t *testing.T) {
 // pool for the rest of its life. Detaching either subscriber
 // under backpressure would silently strip requests out of the stream, so both
 // stay attached until they drain.
+// shortDeliveryBound stands in for the five-second subscriber delivery bound
+// in tests that observe behavior past it.
+const shortDeliveryBound = 500 * time.Millisecond
+
 func TestConnectionRecycleSubscriptionsRemainLossless(t *testing.T) {
-	t.Parallel()
+	// Not t.Parallel: lowers the process-wide subscriber delivery bound.
+	t.Cleanup(event.SetChannelDeliveryTimeoutForTesting(shortDeliveryBound))
 
 	bus := event.NewEventBus(nil, nil)
 	defer bus.Stop()
@@ -2096,13 +2101,13 @@ func TestConnectionRecycleSubscriptionsRemainLossless(t *testing.T) {
 		}
 	}()
 
-	// The ordinary EventBus subscriber timeout is five seconds. A regression to
+	// The ordinary EventBus subscriber timeout (lowered here). A regression to
 	// the detaching policy on either hop would let this publish finish at that
 	// bound with the surplus recycle requests discarded.
 	testutil.RequireNoReceive(
 		t,
 		published,
-		event.RemoteDeliverTimeout+time.Second,
+		shortDeliveryBound+time.Second,
 		"a connection-recycle subscription detached instead of retaining the stream",
 	)
 
@@ -3923,7 +3928,8 @@ func (h *blockingNodeTestLogHandler) unblock() {
 }
 
 func TestNodeRequiredSubscriptionsKeepPublishersBlocked(t *testing.T) {
-	t.Parallel()
+	// Not t.Parallel: lowers the process-wide subscriber delivery bound.
+	t.Cleanup(event.SetChannelDeliveryTimeoutForTesting(shortDeliveryBound))
 
 	type subscriberCase struct {
 		name        string
@@ -4001,7 +4007,7 @@ func TestNodeRequiredSubscriptionsKeepPublishersBlocked(t *testing.T) {
 	select {
 	case <-allPublished:
 		t.Fatal("a required subscriber detached while its handler was stalled")
-	case <-time.After(event.RemoteDeliverTimeout + 250*time.Millisecond):
+	case <-time.After(shortDeliveryBound + 250*time.Millisecond):
 	}
 
 	for _, testCase := range cases {
@@ -4021,7 +4027,8 @@ func TestNodeRequiredSubscriptionsKeepPublishersBlocked(t *testing.T) {
 }
 
 func TestNodeRequiredChainSelectorSubscriberRecoversAfterSaturation(t *testing.T) {
-	t.Parallel()
+	// Not t.Parallel: lowers the process-wide subscriber delivery bound.
+	t.Cleanup(event.SetChannelDeliveryTimeoutForTesting(shortDeliveryBound))
 
 	loggerHandler := &blockingNodeTestLogHandler{
 		entered: make(chan struct{}),
@@ -4084,7 +4091,7 @@ func TestNodeRequiredChainSelectorSubscriberRecoversAfterSaturation(t *testing.T
 	select {
 	case <-published:
 		t.Fatal("required Node subscription stopped applying back-pressure")
-	case <-time.After(event.RemoteDeliverTimeout + time.Second):
+	case <-time.After(shortDeliveryBound + time.Second):
 	}
 	loggerHandler.unblock()
 	select {
@@ -4112,7 +4119,8 @@ func TestNodeRequiredChainSelectorSubscriberRecoversAfterSaturation(t *testing.T
 }
 
 func TestNodeChainForkDiagnosticSubscriberDetachesAfterSaturation(t *testing.T) {
-	t.Parallel()
+	// Not t.Parallel: lowers the process-wide subscriber delivery bound.
+	t.Cleanup(event.SetChannelDeliveryTimeoutForTesting(shortDeliveryBound))
 
 	loggerHandler := &blockingNodeTestLogHandler{
 		entered: make(chan struct{}),
@@ -4154,7 +4162,7 @@ func TestNodeChainForkDiagnosticSubscriberDetachesAfterSaturation(t *testing.T) 
 	}
 	select {
 	case <-published:
-	case <-time.After(event.RemoteDeliverTimeout + 2*time.Second):
+	case <-time.After(shortDeliveryBound + 2*time.Second):
 		t.Fatal("detachable fork diagnostic subscriber held publishers past its timeout")
 	}
 	loggerHandler.unblock()
