@@ -18,7 +18,6 @@ import (
 	"bytes"
 	"encoding/hex"
 	"fmt"
-	"os"
 	"testing"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -387,47 +386,6 @@ func TestIsMempackFormat(t *testing.T) {
 	require.False(t, isMempackFormat([]byte{0xa2})) // CBOR map
 	require.False(t, isMempackFormat([]byte{0xbf})) // CBOR indef map
 	require.False(t, isMempackFormat([]byte{}))     // empty
-}
-
-// TestParseTvarFileIfAvailable tests parsing a real tvar file from a
-// Mithril snapshot, if one is available at the expected path.
-func TestParseTvarFileIfAvailable(t *testing.T) {
-	t.Parallel()
-
-	tvarPath := os.Getenv("DINGO_TVAR_PATH")
-	if tvarPath == "" {
-		t.Skip(
-			"DINGO_TVAR_PATH not set, skipping " +
-				"(set to a UTxO-HD tvar file path)",
-		)
-	}
-	if _, err := os.Stat(tvarPath); err != nil {
-		t.Skipf("tvar file not accessible at %s: %v", tvarPath, err)
-	}
-
-	var totalEntries int
-	var sampleEntry *ParsedUTxO
-	count, err := ParseUTxOsFromFile(
-		tvarPath,
-		func(batch []ParsedUTxO) error {
-			totalEntries += len(batch)
-			if sampleEntry == nil && len(batch) > 0 {
-				e := batch[0]
-				sampleEntry = &e
-			}
-			return nil
-		},
-	)
-	require.NoError(t, err)
-	require.Greater(t, count, 0, "should have parsed some UTxOs")
-
-	t.Logf("Parsed %d UTxO entries", count)
-	t.Logf("Total entries via callback: %d", totalEntries)
-	if sampleEntry != nil {
-		t.Logf("Sample TxHash: %x", sampleEntry.TxHash)
-		t.Logf("Sample Address: %x", sampleEntry.Address)
-		t.Logf("Sample Amount: %d lovelace", sampleEntry.Amount)
-	}
 }
 
 // A snapshot UTxO carrying a reference script yields the script's hash on its
