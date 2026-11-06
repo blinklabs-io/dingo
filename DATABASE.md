@@ -1616,9 +1616,12 @@ returned `Manifest` is now accurate regardless). A checksum failure returns
 through `ReadManifest`'s path-prefixed error) — distinct from a manifest simply
 not existing — so a caller like bark's `resolveSnapshotSource` can report a
 snapshot that's present but corrupted as such (`CodeDataLoss`) instead of
-collapsing it into `CodeNotFound`; `DeleteSnapshot` checks the local snapshot
-directory's existence directly (`os.Stat`), not via a readable manifest, so a
-corrupted local snapshot can still be cleaned up.
+collapsing it into `CodeNotFound`; `DeleteSnapshot` treats a local snapshot as
+a directory containing a regular `manifest.json` file and does not parse it, so
+a corrupted local snapshot can still be cleaned up while the catalog database,
+work directories and other non-snapshot entries under `SnapshotDir` cannot be
+deleted; it also rejects any `snapshot_id` starting with `.dingo-`, the prefix
+of those internal entries.
 `Manifest.CheckCompatibility(blobPlugin, metadataPlugin, storageMode, network,
 gates)` bundles `CheckPluginMatch` with a `StorageMode`/`Network` comparison and
 `CheckGateMatch(configured nodesettings.Values)`, for a caller that must refuse
