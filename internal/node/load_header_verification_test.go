@@ -36,7 +36,7 @@ import (
 // headerVerificationFixtureChunks is the number of leading preview chunks the
 // header verification tests replay. Preview begins after Byron, so every block
 // carries a Shelley-family header.
-const headerVerificationFixtureChunks = 6
+const headerVerificationFixtureChunks = 2
 
 // copyImmutableFixturePrefix copies the leading chunks of the preview
 // ImmutableDB fixture into a fresh directory.

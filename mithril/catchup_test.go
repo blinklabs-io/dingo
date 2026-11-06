@@ -76,6 +76,7 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	t.Run("up-to-date core DB returns without syncing", func(t *testing.T) {
+		t.Parallel()
 		fix := newV2Fixture(t, v2FixtureOptions{immutableFileNumber: 5})
 		dataDir := t.TempDir()
 		// Marker at the artifact's immutable tip → already up to date.
@@ -97,6 +98,7 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 	})
 
 	t.Run("api mode rejects a divergent chain before mutation", func(t *testing.T) {
+		t.Parallel()
 		fixture := newV2Fixture(t, v2FixtureOptions{
 			immutableFileNumber: 0,
 			validImmutable:      true,
@@ -154,6 +156,7 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 	})
 
 	t.Run("legacy reward repair reconciles an existing database in place", func(t *testing.T) {
+		t.Parallel()
 		fixture := newV2Fixture(t, v2FixtureOptions{
 			immutableFileNumber: 0,
 			validImmutable:      true,
@@ -232,6 +235,7 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 	})
 
 	t.Run("legacy reward repair preserves a verified local tail", func(t *testing.T) {
+		t.Parallel()
 		fixture := newV2Fixture(t, v2FixtureOptions{
 			immutableFileNumber: 0,
 			validImmutable:      true,
@@ -331,6 +335,7 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 	})
 
 	t.Run("legacy reward repair refuses to rewind the stable ledger anchor", func(t *testing.T) {
+		t.Parallel()
 		fixture := newV2Fixture(t, v2FixtureOptions{
 			immutableFileNumber: 0,
 			validImmutable:      true,
@@ -400,6 +405,7 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 	})
 
 	t.Run("legacy reward repair resumes its durable artifact pin", func(t *testing.T) {
+		t.Parallel()
 		fixture := newV2Fixture(t, v2FixtureOptions{
 			immutableFileNumber: 0,
 			validImmutable:      true,
@@ -470,6 +476,7 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 	})
 
 	t.Run("legacy reward repair rebuilds api metadata in place", func(t *testing.T) {
+		t.Parallel()
 		fixture := newV2Fixture(t, v2FixtureOptions{
 			immutableFileNumber: 0,
 			validImmutable:      true,
@@ -1032,6 +1039,7 @@ func TestSyncRewardRepairRequiresItsDurableMarkers(t *testing.T) {
 	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	t.Run("complete database has no repair marker", func(t *testing.T) {
+		t.Parallel()
 		dataDir := t.TempDir()
 		seedCompleteDB(t, dataDir, "core", 0, false)
 		_, err := Sync(context.Background(), SyncConfig{
@@ -1047,6 +1055,7 @@ func TestSyncRewardRepairRequiresItsDurableMarkers(t *testing.T) {
 	})
 
 	t.Run("interrupted sync is not an active repair", func(t *testing.T) {
+		t.Parallel()
 		dataDir := t.TempDir()
 		seedCompleteDB(t, dataDir, "core", 0, false)
 		db, err := dbtest.NewDatabase(t, &database.Config{

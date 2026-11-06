@@ -567,13 +567,7 @@ func TestCborArrayHeaderLen(t *testing.T) {
 func TestCopyBlocksRaw_PreservesByronEbbLinkageAtOrigin(t *testing.T) {
 	t.Parallel()
 
-	immutableDir := filepath.Join(
-		"..",
-		"..",
-		"database",
-		"immutable",
-		"testdata",
-	)
+	immutableDir := copyImmutableChunkPrefix(t, slowFixtureChunks)
 	imm, err := immutable.New(immutableDir)
 	require.NoError(t, err)
 	iter, err := imm.BlocksFromPoint(ocommon.Point{Slot: 0, Hash: []byte{}})
@@ -641,13 +635,7 @@ func TestCopyBlocksRawWithCallback_StoresUtxoOffsets(t *testing.T) {
 	// No t.Parallel(): newTestDB shares process-wide plugin state
 	// (see database.go:164), so concurrent test runs race on
 	// instance-local provider setup and the in-memory schema migration.
-	immutableDir := filepath.Join(
-		"..",
-		"..",
-		"database",
-		"immutable",
-		"testdata",
-	)
+	immutableDir := copyImmutableChunkPrefix(t, slowFixtureChunks)
 	imm, err := immutable.New(immutableDir)
 	require.NoError(t, err)
 	iter, err := imm.BlocksFromPoint(ocommon.Point{})
@@ -782,16 +770,7 @@ func TestStoreRawBlockUtxoOffsetsPropagatesExtractError(t *testing.T) {
 func TestLoadBlobsWithDBSkipsUtxoOffsetsInCoreMode(t *testing.T) {
 	t.Parallel()
 
-	immutableDir := os.Getenv("DINGO_TEST_IMMUTABLE_DIR")
-	if immutableDir == "" {
-		immutableDir = filepath.Join(
-			"..",
-			"..",
-			"database",
-			"immutable",
-			"testdata",
-		)
-	}
+	immutableDir := copyImmutableChunkPrefix(t, slowFixtureChunks)
 	imm, err := immutable.New(immutableDir)
 	require.NoError(t, err)
 	iter, err := imm.BlocksFromPoint(ocommon.Point{})
@@ -893,13 +872,7 @@ func TestCopyBlocksRawWithCallback_BackfillsWhenChainTipPastImmutableTip(
 	// No t.Parallel(): newTestDB shares process-wide plugin state
 	// (see database.go:164), so concurrent test runs race on
 	// instance-local provider setup and the in-memory schema migration.
-	immutableDir := filepath.Join(
-		"..",
-		"..",
-		"database",
-		"immutable",
-		"testdata",
-	)
+	immutableDir := copyImmutableChunkPrefix(t, slowFixtureChunks)
 	db := newTestDB(t)
 	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
@@ -1183,13 +1156,7 @@ func TestLoadWithDBRewindsBlocksRejectedDuringReplay(t *testing.T) {
 		processTrustedBlockBatchesForLoad = oldProcess
 	})
 
-	immutableDir := filepath.Join(
-		"..",
-		"..",
-		"database",
-		"immutable",
-		"testdata",
-	)
+	immutableDir := copyImmutableChunkPrefix(t, slowFixtureChunks)
 	loadErr := make(chan error, 1)
 	go func() {
 		loadErr <- LoadWithDB(
@@ -1488,13 +1455,7 @@ func TestLoadWithDBCapturesGenesisMarkSnapshotForShelleyGenesisStaking(
 	// No t.Parallel(): newTestDB shares process-wide plugin state (see
 	// database construction, so concurrent test runs share no provider options and
 	// the in-memory schema migration.
-	immutableDir := filepath.Join(
-		"..",
-		"..",
-		"database",
-		"immutable",
-		"testdata",
-	)
+	immutableDir := copyImmutableChunkPrefix(t, slowFixtureChunks)
 	imm, err := immutable.New(immutableDir)
 	require.NoError(t, err)
 	immutableTip, err := imm.GetTip()

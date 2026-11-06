@@ -32,6 +32,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// slowFixtureChunks is how many leading preview chunks the tests that copy a
+// whole ImmutableDB use. The full fixture holds 300 chunks; the behavior under
+// test needs only a few batches of real blocks, so loading all of them only
+// multiplies the runtime.
+const slowFixtureChunks = 2
+
 // copyImmutableChunkPrefix copies chunks [0, count) of the preview testdata
 // ImmutableDB into a fresh directory, so a test can load a short chain.
 func copyImmutableChunkPrefix(t *testing.T, count int) string {
