@@ -2732,6 +2732,7 @@ func newTestDatabaseWithHostRunMode(
 	if config == nil {
 		config = DefaultConfig
 	}
+	seedMigratedMetadata(tb, config.DataDir, config.StorageMode)
 	host := plugin.NewHost()
 	if err := badger.RegisterProvider(host); err != nil {
 		return nil, err
