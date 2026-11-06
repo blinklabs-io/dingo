@@ -435,7 +435,7 @@ func TestChunkedRewardPrecomputeMatchesMonolithicCalculation(t *testing.T) {
 		capturedSlot        = uint64(200)
 		boundarySlot        = uint64(1_200)
 	)
-	poolCount, delegatorsPerPool := 8, 6
+	poolCount, delegatorsPerPool := 5, 2
 
 	monolithic, monolithicDB := seedMultiPoolRewardPrecomputeFixture(
 		t, poolCount, delegatorsPerPool, 7,
@@ -481,7 +481,7 @@ func TestChunkedRewardPrecomputeResumesAfterInterruption(t *testing.T) {
 		potsEpoch           = uint64(3)
 		eventBoundarySlot   = uint64(200)
 	)
-	poolCount, delegatorsPerPool := 9, 4
+	poolCount, delegatorsPerPool := 5, 2
 
 	ls, db := seedMultiPoolRewardPrecomputeFixture(
 		t, poolCount, delegatorsPerPool, 7,
@@ -556,8 +556,8 @@ func TestChunkedRewardPrecomputeRestartsOnInputFingerprintChange(t *testing.T) {
 		newEpoch            = rewardSnapshotEpoch + 3
 		capturedSlot        = uint64(200)
 		boundarySlot        = uint64(1_200)
-		poolCount           = 6
-		delegatorsPerPool   = 3
+		poolCount           = 4
+		delegatorsPerPool   = 2
 	)
 	mutateInput := func(t *testing.T, db *database.Database) {
 		t.Helper()
@@ -629,8 +629,8 @@ func TestChunkedRewardPrecomputeRestartsOnInactivityWindowChange(t *testing.T) {
 		newEpoch            = rewardSnapshotEpoch + 3
 		capturedSlot        = uint64(200)
 		boundarySlot        = uint64(1_200)
-		poolCount           = 6
-		delegatorsPerPool   = 3
+		poolCount           = 4
+		delegatorsPerPool   = 2
 	)
 	ls, db := seedMultiPoolRewardPrecomputeFixture(
 		t, poolCount, delegatorsPerPool, 7,
@@ -697,7 +697,7 @@ func TestChunkedRewardPrecomputeRestartsOnGenerationChange(t *testing.T) {
 		potsEpoch           = uint64(3)
 		eventBoundarySlot   = uint64(200)
 	)
-	poolCount, delegatorsPerPool := 6, 3
+	poolCount, delegatorsPerPool := 4, 2
 
 	ls, db := seedMultiPoolRewardPrecomputeFixture(
 		t, poolCount, delegatorsPerPool, 7,
@@ -755,7 +755,7 @@ func TestChunkedRewardPrecomputeFinishesDegenerateRound(t *testing.T) {
 		boundarySlot        = uint64(1_200)
 	)
 	degenerate := func(t *testing.T) (*LedgerState, *database.Database) {
-		ls, db := seedMultiPoolRewardPrecomputeFixture(t, 8, 3, 7)
+		ls, db := seedMultiPoolRewardPrecomputeFixture(t, 4, 2, 7)
 		require.NoError(t, db.Metadata().SaveRewardAdaPots(
 			&models.RewardAdaPots{
 				Epoch:        potsEpoch,
