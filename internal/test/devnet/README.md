@@ -743,12 +743,16 @@ Reference-conformance scenario
 | `TestLedgerStateConsensus` | dingo-producer's and cardano-producer's ledger state (protocol parameters, stake distribution, whole UTxO set) match at a point acquired on both nodes in epochs 1 and 2; fails with a diagnostic naming every divergence found |
 | `TestPlutusBoundedArgsConformance` | Submits PlutusV3 script spends to both producers and requires the same verdict for the protocol-version dependent evaluator limits (integer arguments beyond +/-2^262143, byte strings beyond 65536 bytes), and checks that verdict against plutigo's assumption for the running protocol version (10, 11 or 12). |
 | `TestPoolQueriesMatchReference` | dingo-producer's and cardano-producer's answers to `GetRewardProvenance` and `GetPoolState` match at a point acquired on both nodes; the reward account and relays of the genesis pools are not compared |
+| `TestChainAgreementSoak` | Follows every node's chain for `DEVNET_AGREEMENT_SOAK_DURATION` (a Go duration such as `10m`; the test is skipped when unset) and fails if dingo-producer and the cardano-node nodes ever hold chains that diverge by more than the security parameter. Logs the tips and fork depth every 5 seconds. Set `TEST_TIMEOUT` (or `-timeout` for direct runs) longer than the soak duration plus setup and the other scenarios. |
 
 `TestPlutusBoundedArgsConformance` runs at the protocol version the Shelley
 genesis starts at (10, 11 or 12). `run-tests.sh` accepts
 `DEVNET_SPEC_OVERRIDE=./testnet*.yaml` to select a spec file in this directory
 other than the stock ones, and rejects any other value.
 `testnet-accelerated-pv11.yaml` starts at protocol version 11.
+`testnet-soak-praos.yaml` uses mainnet-like density (`f=0.05`, 0.2s slots, `k=20`)
+for `TestChainAgreementSoak`; the accelerated specs use `f=0.4`, where equal pools
+forge in the same slot about every 15 seconds.
 
 `testnet-accelerated-pv12.yaml` starts at protocol version 12 with the Dijkstra
 hard fork at epoch 0. It needs `cardano-node` 11.2.0 (earlier releases do not
@@ -760,7 +764,9 @@ without forging: `cardano-node` 11.2.0 cannot decode the Dijkstra block headers
 Dingo produces (it expects 12 header body fields where Dingo writes 10), so
 Dingo-forged blocks would never reach it and Dingo would stay on its own fork.
 `run-tests.sh` sets `DEVNET_DINGO_BLOCK_PRODUCER=false` for any spec whose
-Dijkstra hard fork is at epoch 0.
+Dijkstra hard fork is at epoch 0, unless `DEVNET_FORCE_DINGO_BLOCK_PRODUCER=true`
+keeps `dingo-producer` forging (Dingo writes the 10-field Praos header body, which
+`cardano-node` 11.2.0 accepts).
 
 ```bash
 DEVNET_CARDANO_NODE_IMAGE=ghcr.io/intersectmbo/cardano-node:11.2.0 \
