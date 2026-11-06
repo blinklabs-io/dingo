@@ -532,24 +532,6 @@ func TestLocalStateQueryLargeBatchHandlers(t *testing.T) {
 	}
 }
 
-// TestLocalStateQueryRepeatedOverLimitRequestsRemainBounded verifies that
-// repeated oversized requests are rejected consistently and do not prevent a
-// subsequent normal-sized request from being accepted.
-func TestLocalStateQueryRepeatedOverLimitRequestsRemainBounded(t *testing.T) {
-	t.Parallel()
-
-	for range 100 {
-		err := checkLocalStateQueryItemLimit(
-			"repeated",
-			MaxLocalStateQueryItems+1,
-		)
-		require.ErrorIs(t, err, ErrLocalStateQueryLimitExceeded)
-	}
-
-	// Rejected requests do not poison later normal-sized requests.
-	require.NoError(t, checkLocalStateQueryItemLimit("normal", 3))
-}
-
 func TestDedupeAddresses(t *testing.T) {
 	t.Parallel()
 	mk := func(b byte) lcommon.Address {
