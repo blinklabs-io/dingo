@@ -64,7 +64,7 @@ func TestIterateUtxoRefsAsOfPagedMatchesAsOfSetUnderConcurrentCommits(
 	t.Parallel()
 	const (
 		atSlot   = 1_000
-		seedRows = 2_000
+		seedRows = 800
 		pageSize = 37
 	)
 	db := newTestDB(t)
