@@ -285,7 +285,7 @@ CREATE TABLE reward_live_stake (
 func TestRebuildRewardLiveStakeBatchesCredentials(t *testing.T) {
 	t.Parallel()
 	store := newManagementTestStore(t)
-	const count = 30
+	const count = 40
 	store.rewardLiveStakeBatchSize = 7
 	for index := range count {
 		account := &models.Account{

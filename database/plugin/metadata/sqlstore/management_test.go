@@ -1333,3 +1333,18 @@ func TestPoolLookupsOrderSameSlotRetirements(t *testing.T) {
 		})
 	}
 }
+
+func TestCommitTimestamp(t *testing.T) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+	timestamp, err := store.GetCommitTimestamp(context.Background())
+	require.NoError(t, err)
+	require.Zero(t, timestamp)
+
+	transaction := store.Transaction(t.Context())
+	require.NoError(t, store.SetCommitTimestamp(1234, transaction))
+	require.NoError(t, transaction.Commit())
+	timestamp, err = store.GetCommitTimestamp(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, int64(1234), timestamp)
+}
