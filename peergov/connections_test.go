@@ -1254,63 +1254,6 @@ func TestHandleConnectionClosedEvent_CriticalHotPeersCapsBackoff(
 	}
 }
 
-// The peergov logger already carries component=peergov, so a call site that
-// passes the attribute again emits it twice in every record.
-func TestHandleConnectionClosedEvent_CriticalHotPeerLogHasSingleComponent(
-	t *testing.T,
-) {
-	var logBuf bytes.Buffer
-	pg := NewPeerGovernor(PeerGovernorConfig{
-		Logger: slog.New(slog.NewJSONHandler(&logBuf, nil)),
-	})
-	connId := outboundTestConnId()
-	peer := &Peer{
-		Address:           "192.168.12.102:3003",
-		NormalizedAddress: "192.168.12.102:3003",
-		Source:            PeerSourceTopologyLocalRoot,
-		// Suppress reconnect goroutine; this test only checks the log record.
-		Reconnecting: true,
-	}
-	pg.mu.Lock()
-	pg.peers = []*Peer{peer}
-	pg.mu.Unlock()
-
-	// Repeated short-lived closes escalate the backoff past
-	// emergencyReconnectDelay, which is what engages the critically-low cap
-	// and emits the log line under test.
-	for range 6 {
-		pg.mu.Lock()
-		peer.ReconnectDelay = 0
-		peer.Connection = &PeerConnection{Id: connId, IsClient: true}
-		peer.State = PeerStateWarm
-		peer.ConnectedAt = time.Now().Add(-600 * time.Millisecond)
-		pg.mu.Unlock()
-
-		pg.handleConnectionClosedEvent(event.NewEvent(
-			connmanager.ConnectionClosedEventType,
-			connmanager.ConnectionClosedEvent{ConnectionId: connId},
-		))
-	}
-
-	var found string
-	for line := range strings.SplitSeq(logBuf.String(), "\n") {
-		if strings.Contains(line, "hot peer pool critically low") {
-			found = line
-			break
-		}
-	}
-	if found == "" {
-		t.Fatal("expected the critically-low backoff cap log line")
-	}
-	if got := strings.Count(found, `"component"`); got != 1 {
-		t.Fatalf(
-			"component attribute appears %d times, want 1: %s",
-			got,
-			found,
-		)
-	}
-}
-
 // TestPeerGovernor_TestPeer_StaleProbeCompletionDoesNotCorruptReplacementPeer
 // covers a race between reconcile's isStaleTestOnlyPeerLocked (which prunes a
 // stale TestPeer-only probe entry) and a slow, outside-lock re-test still

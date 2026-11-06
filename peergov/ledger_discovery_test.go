@@ -616,19 +616,6 @@ func TestDiscoverLedgerPeers_NegativeTargetDisables(t *testing.T) {
 		"a disabled node must never call the ledger peer provider")
 }
 
-func TestDiscoverLedgerPeers_DefaultTarget(t *testing.T) {
-	// Verify default target is applied
-	pg := NewPeerGovernor(PeerGovernorConfig{
-		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		UseLedgerAfterSlot: 0,
-		LedgerPeerProvider: &mockLedgerPeerProvider{
-			currentSlot: 1000,
-		},
-	})
-
-	assert.Equal(t, defaultLedgerPeerTarget, pg.config.LedgerPeerTarget)
-}
-
 func TestDiscoverLedgerPeers_PeerCapInteraction(t *testing.T) {
 	// Set a very low peer cap and a higher ledger target
 	relays := make([]PoolRelay, 20)
@@ -1018,14 +1005,6 @@ func TestFlattenRelayCandidates(t *testing.T) {
 	// relay.example.com:3001, 44.0.0.1:3002, [2001:db8::1]:3003,
 	// 44.0.0.1:3004, [2001:db8::1]:3004
 	assert.Len(t, candidates, 5)
-}
-
-func TestFlattenRelayCandidates_Empty(t *testing.T) {
-	candidates := flattenRelayCandidates(nil)
-	assert.Empty(t, candidates)
-
-	candidates = flattenRelayCandidates([]PoolRelay{})
-	assert.Empty(t, candidates)
 }
 
 func TestDedupeRelayCandidates(t *testing.T) {

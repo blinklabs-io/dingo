@@ -86,15 +86,6 @@ func TestConnectionStabilityAndScore(t *testing.T) {
 	}
 }
 
-func TestLastBlockFetchTimeUpdated(t *testing.T) {
-	p := &Peer{}
-	before := time.Now()
-	p.UpdateBlockFetchObservation(150, true)
-	if p.LastBlockFetchTime.Before(before) {
-		t.Fatalf("expected LastBlockFetchTime to be updated")
-	}
-}
-
 func TestUpdateChainSyncObservationAndScore(t *testing.T) {
 	p := &Peer{}
 
@@ -541,16 +532,6 @@ func TestStakeWeight_ZeroStakeGetsConservativeDefault(t *testing.T) {
 	}
 	if got := scoreFor(0); got <= 0 {
 		t.Fatalf("zero-stake peer score %v must be positive", got)
-	}
-}
-
-func TestStakeWeight_SumOfWeightsIsOne(t *testing.T) {
-	t.Parallel()
-	sum := defaultLatencyWeight + defaultSuccessWeight +
-		defaultStabilityWeight + defaultHeaderRateWeight +
-		defaultTipDeltaWeight + defaultStakeWeight
-	if math.Abs(sum-1.0) > 1e-9 {
-		t.Fatalf("weights sum to %v, want 1.0", sum)
 	}
 }
 

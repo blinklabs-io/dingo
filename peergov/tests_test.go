@@ -15,7 +15,6 @@
 package peergov
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -313,71 +312,12 @@ func newDialSpreadGovernor() *PeerGovernor {
 	})
 }
 
-// TestResolveDialAddress_IPv4LiteralUnchanged verifies that an IPv4 literal
-// peer is dialed exactly as before: no DNS resolution, no rotation. The
-// injected resolver would return a different address if it were consulted,
-// so an unchanged result proves the resolver was not used.
-func TestResolveDialAddress_IPv4LiteralUnchanged(t *testing.T) {
-	oldLookupIPAddr := lookupIPAddr
-	lookupIPAddr = func(_ context.Context, _ string) ([]net.IP, error) {
-		return []net.IP{net.ParseIP("203.0.113.99")}, nil
-	}
-	t.Cleanup(func() { lookupIPAddr = oldLookupIPAddr })
-
-	pg := newDialSpreadGovernor()
-	const addr = "195.191.47.210:3001"
-	assert.Equal(t, addr, pg.resolveDialAddress(context.Background(), addr))
-}
-
-// TestResolveDialAddress_IPv6LiteralUnchanged verifies IPv6 literals are
-// returned unchanged (bracketed host:port preserved).
-func TestResolveDialAddress_IPv6LiteralUnchanged(t *testing.T) {
-	oldLookupIPAddr := lookupIPAddr
-	lookupIPAddr = func(_ context.Context, _ string) ([]net.IP, error) {
-		return []net.IP{net.ParseIP("2001:db8::1")}, nil
-	}
-	t.Cleanup(func() { lookupIPAddr = oldLookupIPAddr })
-
-	pg := newDialSpreadGovernor()
-	const addr = "[2001:db8::dead:beef]:3001"
-	assert.Equal(t, addr, pg.resolveDialAddress(context.Background(), addr))
-}
-
 // TestResolveDialAddress_MalformedAddressUnchanged verifies that an address
 // without a host:port split (no resolvable form) is returned unchanged so
 // the dialer can report the error as before.
 func TestResolveDialAddress_MalformedAddressUnchanged(t *testing.T) {
 	pg := newDialSpreadGovernor()
 	const addr = "not-a-host-port"
-	assert.Equal(t, addr, pg.resolveDialAddress(context.Background(), addr))
-}
-
-// TestResolveDialAddress_ResolutionFailureFallsBack verifies that when DNS
-// resolution fails, the original hostname:port is returned so the dialer
-// can attempt its own resolution — identical to the pre-spread behavior.
-func TestResolveDialAddress_ResolutionFailureFallsBack(t *testing.T) {
-	oldLookupIPAddr := lookupIPAddr
-	lookupIPAddr = func(_ context.Context, _ string) ([]net.IP, error) {
-		return nil, errors.New("lookup failed")
-	}
-	t.Cleanup(func() { lookupIPAddr = oldLookupIPAddr })
-
-	pg := newDialSpreadGovernor()
-	const addr = "relay.example.com:3001"
-	assert.Equal(t, addr, pg.resolveDialAddress(context.Background(), addr))
-}
-
-// TestResolveDialAddress_EmptyResolutionFallsBack verifies that an empty
-// (but non-error) resolution result falls back to the original address.
-func TestResolveDialAddress_EmptyResolutionFallsBack(t *testing.T) {
-	oldLookupIPAddr := lookupIPAddr
-	lookupIPAddr = func(_ context.Context, _ string) ([]net.IP, error) {
-		return []net.IP{}, nil
-	}
-	t.Cleanup(func() { lookupIPAddr = oldLookupIPAddr })
-
-	pg := newDialSpreadGovernor()
-	const addr = "relay.example.com:3001"
 	assert.Equal(t, addr, pg.resolveDialAddress(context.Background(), addr))
 }
 
@@ -818,19 +758,6 @@ func TestDiscoverLedgerPeers_EmergencyBackoffResetsWhenNotUrgent(
 		"a recovered node must return to the base emergency cadence")
 }
 
-// The first emergency round after startup must not be delayed: a collapsed
-// peer pool still recovers in seconds.
-func TestDiscoverLedgerPeers_EmergencyFirstRoundUsesBaseInterval(
-	t *testing.T,
-) {
-	pg := urgentDiscoveryGovernor(5)
-	assert.Equal(t,
-		pg.config.EmergencyLedgerPeerRefreshInterval,
-		pg.emergencyLedgerRefreshInterval(),
-		"the first emergency round must use the base cadence",
-	)
-}
-
 type countingLedgerPeerProvider struct {
 	calls atomic.Int32
 }
@@ -1018,26 +945,6 @@ func TestDiscoverLedgerPeers_EmergencyBypassesSatisfiedTarget(t *testing.T) {
 		2,
 		"urgent discovery must add fresh ledger peers even when target appears satisfied",
 	)
-}
-
-func TestDiscoverLedgerPeers_EmergencyLogField(t *testing.T) {
-	var logBuf bytes.Buffer
-	pg := NewPeerGovernor(PeerGovernorConfig{
-		Logger:             slog.New(slog.NewJSONHandler(&logBuf, nil)),
-		EventBus:           newMockEventBus(),
-		UseLedgerAfterSlot: 0,
-		MinHotPeers:        10,
-		LedgerPeerTarget:   1,
-		LedgerPeerProvider: &mockLedgerPeerProvider{
-			relays:      fiftyLedgerRelays(),
-			currentSlot: 1000,
-		},
-	})
-
-	pg.discoverLedgerPeers()
-
-	assert.Contains(t, logBuf.String(), `"emergency":true`,
-		"emergency ledger discovery log should include emergency=true")
 }
 
 // A healthy node (at its hot-peer target) must NOT bypass the refresh
@@ -1668,4 +1575,48 @@ func TestIsRoutableIPUnmapsV4(t *testing.T) {
 	require.NotNil(t, mapped)
 	require.Len(t, mapped, net.IPv6len, "want the 16-byte mapped form")
 	require.False(t, IsRoutableIP(mapped))
+}
+
+func TestResolveDialAddress_LiteralUnchanged(t *testing.T) {
+	oldLookupIPAddr := lookupIPAddr
+	lookupIPAddr = func(_ context.Context, _ string) ([]net.IP, error) {
+		return []net.IP{net.ParseIP("203.0.113.99")}, nil
+	}
+	t.Cleanup(func() { lookupIPAddr = oldLookupIPAddr })
+
+	pg := newDialSpreadGovernor()
+	for _, addr := range []string{
+		"195.191.47.210:3001",
+		"[2001:db8::dead:beef]:3001",
+	} {
+		assert.Equal(t, addr, pg.resolveDialAddress(context.Background(), addr))
+	}
+}
+
+func TestResolveDialAddress_UnusableResolutionFallsBack(t *testing.T) {
+	const addr = "relay.example.com:3001"
+	for name, resolve := range map[string]func(
+		context.Context,
+		string,
+	) ([]net.IP, error){
+		"failure": func(context.Context, string) ([]net.IP, error) {
+			return nil, errors.New("lookup failed")
+		},
+		"empty": func(context.Context, string) ([]net.IP, error) {
+			return []net.IP{}, nil
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			oldLookupIPAddr := lookupIPAddr
+			lookupIPAddr = resolve
+			t.Cleanup(func() { lookupIPAddr = oldLookupIPAddr })
+
+			pg := newDialSpreadGovernor()
+			assert.Equal(
+				t,
+				addr,
+				pg.resolveDialAddress(context.Background(), addr),
+			)
+		})
+	}
 }

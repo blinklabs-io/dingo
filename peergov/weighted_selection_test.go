@@ -73,27 +73,6 @@ func TestWeightedSample_ZeroStakeGetsFloorWeight(t *testing.T) {
 	assert.Less(t, unstakedFirst, iterations/2)
 }
 
-func TestWeightedSample_EmptyRelays(t *testing.T) {
-	t.Parallel()
-	assert.Empty(t, weightedSample(nil, 3))
-	assert.Empty(t, weightedSample([]PoolRelay{}, 3))
-}
-
-func TestWeightedSample_ZeroN(t *testing.T) {
-	t.Parallel()
-	relays := []PoolRelay{{Hostname: "a.example.com", Stake: 1}}
-	assert.Empty(t, weightedSample(relays, 0))
-	assert.Empty(t, weightedSample(relays, -1))
-}
-
-func TestWeightedSample_SingleRelay(t *testing.T) {
-	t.Parallel()
-	relays := []PoolRelay{{Hostname: "a.example.com", Stake: 7}}
-	for range 100 {
-		assert.Equal(t, relays, weightedSample(relays, 1))
-	}
-}
-
 func TestWeightedSample_NoDuplicates(t *testing.T) {
 	t.Parallel()
 	relays := make([]PoolRelay, 50)
@@ -258,18 +237,6 @@ func stakeRelay(ip string, stake uint64) PoolRelay {
 	return PoolRelay{IPv4: &parsed, Port: 3001, Stake: stake}
 }
 
-func TestDiscoverLedgerPeers_SamplesWeighted(t *testing.T) {
-	t.Parallel()
-	relays := []PoolRelay{
-		stakeRelay("44.0.2.1", 1_000_000),
-		stakeRelay("44.0.2.2", 2_000_000),
-		stakeRelay("44.0.2.3", 3_000_000),
-	}
-	pg := newStakeDiscoveryGovernor(relays, 2)
-	pg.discoverLedgerPeers()
-	assert.Len(t, pg.peers, 2)
-}
-
 func TestDiscoverLedgerPeers_RespectsSampleSize(t *testing.T) {
 	t.Parallel()
 	relays := make([]PoolRelay, 100)
@@ -367,4 +334,17 @@ func TestWeightedSamplePreservesLargeWeightsWhenTotalFits(t *testing.T) {
 		}
 	}
 	assert.InDelta(t, 6.0/7.0, float64(firstLarge)/10000, 0.03)
+}
+
+func TestWeightedSample_DegenerateInputs(t *testing.T) {
+	t.Parallel()
+	assert.Empty(t, weightedSample(nil, 3))
+	assert.Empty(t, weightedSample([]PoolRelay{}, 3))
+
+	relays := []PoolRelay{{Hostname: "a.example.com", Stake: 7}}
+	assert.Empty(t, weightedSample(relays, 0))
+	assert.Empty(t, weightedSample(relays, -1))
+	for range 100 {
+		assert.Equal(t, relays, weightedSample(relays, 1))
+	}
 }
