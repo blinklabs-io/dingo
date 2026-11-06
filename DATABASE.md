@@ -275,8 +275,15 @@ and live-state consistency semantics.
 Certified Leios closures batch API-only output-address rows with transaction
 address history, key witnesses and metadata labels. UTxO rows, native assets,
 datums, scripts and live stake changes remain visible before the next
-transaction validates. The queued indexes flush inside the closure transaction
-before commit; rollback discards them with the transaction.
+transaction validates. SQLite can stage bounded plain-payment windows within a
+mixed closure. An interior window needs at least 32 transactions; a final plain
+suffix keeps complete-closure admission. Existing reference, output-byte,
+freshness and input-relation limits still apply. An active payment window's
+staged UTxOs, ordered stake changes and API rows flush inside the same SQL
+transaction before the next window validates. Without an active overlay, API
+rows stay queued until a later flush. Short or declined windows use immediate
+UTxO writes. The final window flushes before commit; a later failure rolls back
+all windows and their queued indexes together.
 
 Blockfrost historical and governance reads are served from existing tables
 through `HistoryStore` (`database/plugin/metadata/history_store.go`); migration
@@ -2405,25 +2412,34 @@ both errors and the database requires recovery before another load.
 
 ## Retained API closure UTxO batches
 
-SQLite can stage a certified closure of at most 8,192 plain, valid,
-single-input/single-output transactions and 8 MiB of output CBOR in one metadata
-transaction. The preflight requires fresh transaction/output keys and live
-external inputs, without staking credentials, assets, pointers, datums,
-reference scripts, collateral, certificates, withdrawals, mint, governance,
-script witnesses or nested transactions. Other closures and providers use the
-ordinary ordered writer.
+SQLite can stage bounded windows of plain, valid payments in one metadata
+transaction. Each window is bounded by 8,192 transactions, 8,192 consumed
+inputs, 8,192 produced outputs and 8 MiB of output CBOR. Payments can split or
+combine outputs; input references and output positions are checked before
+staging. The preflight requires fresh transaction/output keys and live external
+inputs. Staking credentials are supported; assets, pointers, datums, reference
+scripts, collateral, certificates, withdrawals, mint, governance, script
+witnesses and nested transactions remain excluded. Ineligible windows and other
+providers use the ordinary ordered writer.
+
+Transactions with Dijkstra direct deposits keep immediate UTxO writes because
+reward-account credits update live stake outside the retained overlay.
+
+Retained staking UTxOs queue one ordered stake segment per transaction. Reads of
+live stake first materialize pending UTxOs and replay those segments, preserving
+credential zero crossings, stake row IDs and sequence advancement. Account state
+stays constant inside eligible windows; external account writes abort the batch.
 
 Transaction parents and execution contexts remain immediate. Every created UTxO,
 including outputs spent inside the closure, retains its ordinary ID, spend
 markers and address row. Exact known reads resolve from the staged models; other
 UTxO readers first materialize pending UTxO and output-address rows. API indexes
-such as `address_transaction` retain their existing deferred visibility until
-the final closure flush. Read-only CTEs use the shared `internal/sqlreadonly`
-validator, also used by MCP. Unexpected writes to staged tables fail the batch
-rather than leave cached state stale. API detail rows keep their closure flush
-ordering. Validation still runs in transaction order, and a failure rolls back
-the outer metadata transaction; the core overlay's pruning behavior is
-unchanged.
+such as `address_transaction` stay queued until an active-window or final
+closure flush. Read-only CTEs use the shared `internal/sqlreadonly` validator,
+also used by MCP. Unexpected writes to staged tables fail the batch rather than
+leave cached state stale. Validation still runs in transaction order, and a
+failure rolls back the outer metadata transaction; the core overlay's pruning
+behavior is unchanged.
 
 ## Sync-state reads
 

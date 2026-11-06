@@ -39,7 +39,8 @@ type barrierQueryer struct {
 
 func (q barrierQueryer) barrier(ctx context.Context, query string) error {
 	if o := q.accumulator.overlay; o != nil && o.retainHistory && !o.flushing &&
-		(readsOverlayTables(query) || containsIdentifier(query, "utxo_address") || containsIdentifier(query, "asset")) {
+		(readsOverlayTables(query) || containsIdentifier(query, "utxo_address") || containsIdentifier(query, "asset") ||
+			(containsIdentifier(query, "account") && !deletesAccountRows(query))) {
 		if err := sqlreadonly.ValidateSQLite(query); err != nil {
 			o.err = errors.New(
 				"external mutation inside API closure UTxO overlay",

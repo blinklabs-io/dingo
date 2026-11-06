@@ -3551,6 +3551,21 @@ type LeiosClosureUtxoOverlay interface {
 	) (bool, error)
 }
 
+// LeiosClosureBatchPreparer optionally chooses an ordered prefix of a closure
+// for one accumulator window. Preparing the next window materializes the
+// preceding UTxO overlay before validation; providers may flush its deferred
+// API rows too. The caller flushes the complete closure at the end.
+// A nonempty request returns a count in
+// [1, len(txs)].
+// Preparation does not apply transactions or change validation order.
+type LeiosClosureBatchPreparer interface {
+	PrepareLeiosClosureBatch(
+		accumulator types.MetadataBatchAccumulator,
+		txn types.Txn,
+		txs []lcommon.Transaction,
+	) (int, error)
+}
+
 // BatchUtxoOverlay is an optional interface for metadata stores that can
 // stage a trusted block-apply batch's UTxO writes in memory. After
 // EnableBatchUtxoOverlay reports true, the accumulator's batched transaction

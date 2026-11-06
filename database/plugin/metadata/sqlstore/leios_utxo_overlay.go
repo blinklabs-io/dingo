@@ -25,10 +25,12 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 )
 
 const (
 	maxLeiosUtxoOverlayTransactions = 8192
+	maxLeiosUtxoOverlayReferences   = 8192
 	maxLeiosUtxoOverlayOutputBytes  = 8 * 1024 * 1024
 )
 
@@ -59,6 +61,7 @@ func (s *Store) EnableLeiosClosureUtxoOverlay(
 	allowed := make(map[string]struct{}, len(transactions))
 	spent := make(map[overlayKey]struct{}, len(transactions))
 	var outputBytes uint64
+	var inputCount int
 	for _, tx := range transactions {
 		if !plainLeiosOverlayTransaction(tx) {
 			return false, nil
@@ -70,42 +73,53 @@ func (s *Store) EnableLeiosClosureUtxoOverlay(
 		allowed[string(hash)] = struct{}{}
 		hashes = append(hashes, hash)
 		consumed, outputLevels := tx.Consumed(), tx.Produced()
-		if len(consumed) != 1 || len(outputLevels) != 1 || consumed[0] == nil || outputLevels[0].Id == nil || outputLevels[0].Output == nil {
+		if len(consumed) == 0 || len(outputLevels) == 0 ||
+			len(consumed) > maxLeiosUtxoOverlayReferences-inputCount ||
+			len(outputLevels) > maxLeiosUtxoOverlayReferences-len(outputs) {
 			return false, nil
 		}
-		input := consumed[0]
-		key := newOverlayKey(input.Id().Bytes(), input.Index())
-		if _, repeated := spent[key]; repeated {
-			return false, nil
+		inputCount += len(consumed)
+		for _, input := range consumed {
+			if input == nil {
+				return false, nil
+			}
+			key := newOverlayKey(input.Id().Bytes(), input.Index())
+			if _, repeated := spent[key]; repeated {
+				return false, nil
+			}
+			spent[key] = struct{}{}
+			if _, internal := produced[key]; !internal {
+				external = append(
+					external,
+					models.UtxoId{Hash: input.Id().Bytes(), Idx: input.Index()},
+				)
+			}
 		}
-		spent[key] = struct{}{}
-		if _, internal := produced[key]; !internal {
-			external = append(
-				external,
-				models.UtxoId{Hash: input.Id().Bytes(), Idx: input.Index()},
+		for _, out := range outputLevels {
+			if out.Output == nil || out.Id == nil {
+				return false, nil
+			}
+			size, err := lcommon.TransactionOutputCborSize(out.Output)
+			if err != nil {
+				return false, fmt.Errorf("size closure output: %w", err)
+			}
+			if size > maxLeiosUtxoOverlayOutputBytes-outputBytes {
+				return false, nil
+			}
+			outputBytes += size
+			if !bytes.Equal(out.Id.Id().Bytes(), hash) {
+				return false, nil
+			}
+			key := newOverlayKey(hash, out.Id.Index())
+			if _, exists := produced[key]; exists {
+				return false, nil
+			}
+			produced[key] = struct{}{}
+			outputs = append(
+				outputs,
+				models.UtxoId{Hash: hash, Idx: out.Id.Index()},
 			)
 		}
-		out := outputLevels[0]
-		size, err := lcommon.TransactionOutputCborSize(out.Output)
-		if err != nil {
-			return false, fmt.Errorf("size closure output: %w", err)
-		}
-		if size > maxLeiosUtxoOverlayOutputBytes-outputBytes {
-			return false, nil
-		}
-		outputBytes += size
-		if !bytes.Equal(out.Id.Id().Bytes(), hash) {
-			return false, nil
-		}
-		key = newOverlayKey(hash, out.Id.Index())
-		if _, exists := produced[key]; exists {
-			return false, nil
-		}
-		produced[key] = struct{}{}
-		outputs = append(
-			outputs,
-			models.UtxoId{Hash: hash, Idx: out.Id.Index()},
-		)
 	}
 	existing, err := s.GetTransactionsByHashes(hashes, txn)
 	if err != nil {
@@ -143,7 +157,10 @@ func (s *Store) EnableLeiosClosureUtxoOverlay(
 				args = append(args, input.ID)
 			}
 		}
-		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(batch)), ",")
+		placeholders := strings.TrimSuffix(
+			strings.Repeat("?,", len(batch)),
+			",",
+		)
 		query := `-- name: LeiosOverlayInputHasRelations :one
 SELECT EXISTS(SELECT 1 FROM utxo_pointer WHERE utxo_id IN (` + placeholders + `))
  OR EXISTS(SELECT 1 FROM utxo_reference_script WHERE utxo_id IN (` + placeholders + `))`
@@ -215,9 +232,64 @@ SELECT EXISTS(SELECT 1 FROM utxo_pointer WHERE utxo_id IN (` + placeholders + `)
 	return true, nil
 }
 
+// Interior payment runs need enough work to amortize admission and the
+// flush before the next unsupported transaction. A final plain suffix keeps
+// the existing complete-closure admission behavior.
+const minLeiosClosureOverlayRun = 32
+
+// PrepareLeiosClosureBatch selects an ordered window and materializes the
+// preceding retained overlay before the next transaction can be validated.
+// Windows share their caller's SQL transaction, including rollback.
+func (s *Store) PrepareLeiosClosureBatch(
+	accumulator types.MetadataBatchAccumulator,
+	txn types.Txn,
+	transactions []lcommon.Transaction,
+) (int, error) {
+	if len(transactions) == 0 {
+		return 0, nil
+	}
+	acc, ok := accumulator.(*transactionBatchAccumulator)
+	if !ok || !acc.leiosAPIRowsOnly || s.storageMode != types.StorageModeAPI ||
+		s.dialect.Name() != "sqlite" {
+		return len(transactions), nil
+	}
+	transaction, ok := txn.(*sqlTxn)
+	if !ok || transaction.owner != s {
+		return len(transactions), nil
+	}
+	if overlay := acc.overlay; overlay != nil {
+		if !overlay.retainHistory || len(overlay.apiTransactions) != 0 {
+			return 0, errors.New("previous closure window is incomplete")
+		}
+		if err := s.FlushBatch(acc, txn); err != nil {
+			return 0, err
+		}
+	}
+	plain := plainLeiosOverlayTransaction(transactions[0])
+	n := 1
+	for n < min(len(transactions), maxLeiosUtxoOverlayTransactions) && plainLeiosOverlayTransaction(transactions[n]) == plain {
+		n++
+	}
+	if plain && (n >= minLeiosClosureOverlayRun || n == len(transactions)) {
+		// Existing preflight still enforces all input/output, byte, freshness,
+		// and relation bounds. A declined window uses immediate writes once.
+		if _, err := s.EnableLeiosClosureUtxoOverlay(acc, txn, transactions[:n]); err != nil {
+			return 0, err
+		}
+	}
+	return n, nil
+}
+
 func plainLeiosOverlayTransaction(tx lcommon.Transaction) bool {
-	if tx == nil || !tx.IsValid() || len(tx.Inputs()) != 1 || len(tx.Consumed()) != 1 ||
-		len(tx.Outputs()) != 1 || len(tx.Produced()) != 1 ||
+	if tx == nil {
+		return false
+	}
+	inputs, consumed := tx.Inputs(), tx.Consumed()
+	outputs, produced := tx.Outputs(), tx.Produced()
+	if !tx.IsValid() || len(inputs) == 0 || len(inputs) != len(consumed) ||
+		len(inputs) > maxLeiosUtxoOverlayReferences ||
+		len(outputs) == 0 || len(outputs) != len(produced) ||
+		len(outputs) > maxLeiosUtxoOverlayReferences ||
 		len(tx.Collateral()) != 0 || tx.CollateralReturn() != nil ||
 		len(tx.ReferenceInputs()) != 0 || len(tx.Certificates()) != 0 ||
 		len(tx.Withdrawals()) != 0 || tx.AssetMint() != nil ||
@@ -227,27 +299,49 @@ func plainLeiosOverlayTransaction(tx lcommon.Transaction) bool {
 		len(lcommon.SubTransactionWitnessSetsFromTransaction(tx)) != 0 {
 		return false
 	}
+	// Direct deposits update reward live stake outside the retained overlay.
+	switch source := tx.(type) {
+	case interface {
+		DijkstraDirectDeposits() dijkstra.DijkstraDirectDeposits
+	}:
+		if len(source.DijkstraDirectDeposits()) != 0 {
+			return false
+		}
+	case *dijkstra.DijkstraTransaction:
+		if len(source.Body.TxDirectDeposits) != 0 {
+			return false
+		}
+	}
 	_, updates := tx.ProtocolParameterUpdates()
 	if len(updates) != 0 {
 		return false
 	}
-	input, consumed := tx.Inputs()[0], tx.Consumed()[0]
-	if input.Id() != consumed.Id() || input.Index() != consumed.Index() {
-		return false
+	for i, input := range inputs {
+		consumedInput := consumed[i]
+		if input == nil || consumedInput == nil ||
+			input.Id() != consumedInput.Id() ||
+			input.Index() != consumedInput.Index() {
+			return false
+		}
 	}
-	out := tx.Produced()[0]
-	if out.Output.Datum() != nil || out.Output.DatumHash() != nil ||
-		out.Output.ScriptRef() != nil {
-		return false
-	}
-	model, err := models.UtxoLedgerToModel(out, 0)
-	if err != nil || !plainLeiosOverlayOutput(model) {
-		return false
+	for i, out := range produced {
+		if outputs[i] == nil || out.Output == nil || out.Id == nil || uint64(out.Id.Index()) != uint64(i) ||
+			out.Output.Datum() != nil ||
+			out.Output.DatumHash() != nil ||
+			out.Output.ScriptRef() != nil {
+			return false
+		}
+		model, err := models.UtxoLedgerToModel(out, 0)
+		if err != nil || !plainLeiosOverlayOutput(model) {
+			return false
+		}
 	}
 	witnesses := tx.Witnesses()
 	if witnesses != nil {
-		if len(witnesses.NativeScripts()) != 0 || len(witnesses.PlutusData()) != 0 ||
-			len(witnesses.PlutusV1Scripts()) != 0 || len(witnesses.PlutusV2Scripts()) != 0 ||
+		if len(witnesses.NativeScripts()) != 0 ||
+			len(witnesses.PlutusData()) != 0 ||
+			len(witnesses.PlutusV1Scripts()) != 0 ||
+			len(witnesses.PlutusV2Scripts()) != 0 ||
 			len(witnesses.PlutusV3Scripts()) != 0 ||
 			len(lcommon.PlutusV4ScriptsFromWitnessSet(witnesses)) != 0 {
 			return false
@@ -262,7 +356,7 @@ func plainLeiosOverlayTransaction(tx lcommon.Transaction) bool {
 }
 
 func plainLeiosOverlayOutput(model models.Utxo) bool {
-	return len(model.StakingKey) == 0 && len(model.Assets) == 0 &&
+	return len(model.Assets) == 0 &&
 		!model.PaymentScript && model.Pointer == nil && len(model.DatumHash) == 0 &&
 		len(model.Datum) == 0 && len(model.ScriptRef) == 0 &&
 		len(model.ReferencedByTxId) == 0 && len(model.CollateralByTxId) == 0
@@ -313,6 +407,7 @@ func (o *utxoOverlay) retainedUtxo(key overlayKey) (*models.Utxo, bool) {
 	model.Assets = []models.Asset{}
 	model.TxId = bytes.Clone(model.TxId)
 	model.PaymentKey = bytes.Clone(model.PaymentKey)
+	model.StakingKey = bytes.Clone(model.StakingKey)
 	model.Address = bytes.Clone(model.Address)
 	model.Cbor = bytes.Clone(model.Cbor)
 	model.SpentAtTxId = bytes.Clone(model.SpentAtTxId)
