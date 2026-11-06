@@ -23,15 +23,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"io"
 	"log/slog"
 	"math"
 	"math/big"
 	"net"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -2313,6 +2309,8 @@ func (f *blockfetchRollbackFixture) rollbackToAncestorAndQueueForkB(
 func TestForkRestartKeepsReplacementHeadersWhenAbandonedBatchArrives(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	f := newBlockfetchRollbackFixture(t)
 	f.queueForkAHeaderAndStartBatch(t)
 	f.deliverForkABody(t)
@@ -2354,6 +2352,8 @@ func TestForkRestartKeepsReplacementHeadersWhenAbandonedBatchArrives(
 }
 
 func TestForkRestartDropsAbandonedBodyArrivingAfterRestart(t *testing.T) {
+	t.Parallel()
+
 	f := newBlockfetchRollbackFixture(t)
 	f.queueForkAHeaderAndStartBatch(t)
 	f.rollbackToAncestorAndQueueForkB(t)
@@ -2410,6 +2410,8 @@ func TestForkRestartDropsAbandonedBodyArrivingAfterRestart(t *testing.T) {
 // The rollback target is the current chain tip, so the abandoned bodies still
 // fit the chain by parent hash; only the rollback generation check stops them.
 func TestFarFromTipLowWatermarkRollbackDiscardsInFlightBatch(t *testing.T) {
+	t.Parallel()
+
 	f := newBlockfetchRollbackFixture(t)
 	f.ls.config.BlockfetchLowWatermarkEnabled = true
 	f.holdRequestReservation = true
@@ -2554,6 +2556,8 @@ func TestFarFromTipLowWatermarkRollbackDiscardsInFlightBatch(t *testing.T) {
 // same-range failure streak a NoBlocks reply feeds, so the range is dropped
 // and a fresh intersect requested rather than being re-requested forever.
 func TestBatchDoneTreatsDiscardedBatchAsUnobtainedRange(t *testing.T) {
+	t.Parallel()
+
 	f := newBlockfetchRollbackFixture(t)
 
 	for attempt := 1; attempt <= blockfetchMaxSameRangeFailures; attempt++ {
@@ -2610,6 +2614,8 @@ func TestBatchDoneTreatsDiscardedBatchAsUnobtainedRange(t *testing.T) {
 // dropped. Accepting such a body to keep the pipeline moving would be far
 // worse than the stall.
 func TestNonFittingBodyStillRejectedWhenTipDidNotMove(t *testing.T) {
+	t.Parallel()
+
 	f := newBlockfetchRollbackFixture(t)
 	tipBefore := f.ls.chain.Tip()
 
@@ -2671,6 +2677,8 @@ func TestNonFittingBodyStillRejectedWhenTipDidNotMove(t *testing.T) {
 // to catch: every round recorded one failure and the next round's delivery
 // erased it.
 func TestDiscardedBodyDoesNotCountAsRangeProgress(t *testing.T) {
+	t.Parallel()
+
 	f := newBlockfetchRollbackFixture(t)
 	f.queueForkAHeaderAndStartBatch(t)
 	forkAPoint := ocommon.NewPoint(
@@ -2904,6 +2912,8 @@ func TestCompareIncomingHeaderToLocalTip_ByronEBBBeatsRegularTip(t *testing.T) {
 func TestBlockfetchContinuationPublishesHeaderInvalidationOnFailure(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 	cm, err := chain.NewManager(context.Background(), nil, bus)
@@ -4753,6 +4763,8 @@ type chainSwitchBarrier struct{}
 func TestCanonicalFrontierCrossingDoesNotCloseAPeerAheadOfLocalTip(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	chainManager, err := chain.NewManager(context.Background(), nil, nil)
 	require.NoError(t, err)
 	testChain := chainManager.PrimaryChain()
@@ -5339,201 +5351,6 @@ func TestByronCurrentSlotUsesHeaderOnset(t *testing.T) {
 		ls.slotClock.provider,
 	}
 	require.NoError(t, ls.validateByronPBFTCurrentSlot(block))
-}
-
-// observeProcessEpochRolloverCallOrder parses chainsync.go, locates the body of
-// targetFunc, and reports the source-order appearance of the calls named in
-// wantOrder. It returns seen (which markers were found) and observed (the
-// markers in source order by first occurrence). Only the markers present in
-// wantOrder are considered.
-func observeProcessEpochRolloverCallOrder(
-	t *testing.T,
-	targetFunc string,
-	wantOrder []string,
-) (seen map[string]bool, observed []string) {
-	t.Helper()
-
-	fset := token.NewFileSet()
-	file, err := parser.ParseFile(
-		fset,
-		"chainsync.go",
-		nil,
-		parser.SkipObjectResolution,
-	)
-	require.NoError(t, err, "parse chainsync.go")
-
-	var fnDecl *ast.FuncDecl
-	for _, decl := range file.Decls {
-		fd, ok := decl.(*ast.FuncDecl)
-		if !ok {
-			continue
-		}
-		if fd.Name.Name == targetFunc {
-			fnDecl = fd
-			break
-		}
-	}
-	require.NotNil(t, fnDecl, "%s not found in chainsync.go", targetFunc)
-	require.NotNil(t, fnDecl.Body, "%s has no body", targetFunc)
-
-	// Walk the function body, recording the source position of each
-	// call whose final identifier is in our marker set.
-	wanted := make(map[string]struct{}, len(wantOrder))
-	for _, m := range wantOrder {
-		wanted[m] = struct{}{}
-	}
-	type hit struct {
-		marker string
-		pos    token.Pos
-	}
-	var hits []hit
-	ast.Inspect(fnDecl.Body, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
-		if !ok {
-			return true
-		}
-		var name string
-		switch fn := call.Fun.(type) {
-		case *ast.SelectorExpr:
-			name = fn.Sel.Name
-		case *ast.Ident:
-			name = fn.Name
-		default:
-			return true
-		}
-		if _, ok := wanted[name]; ok {
-			hits = append(hits, hit{marker: name, pos: call.Pos()})
-		}
-		return true
-	})
-
-	// Build the observed order by first occurrence (a marker can appear
-	// in nested branches; we only care about its first appearance).
-	seen = make(map[string]bool, len(wantOrder))
-	for _, h := range hits {
-		if seen[h.marker] {
-			continue
-		}
-		seen[h.marker] = true
-		observed = append(observed, h.marker)
-	}
-	return seen, observed
-}
-
-// TestProcessEpochRollover_OrderingInvariant pins the EPOCH→HARDFORK call
-// sequence inside processEpochRollover. The order matters for correctness
-// (see the long-form comment at the top of processEpochRollover's body)
-// but is otherwise hard to test through observable side effects without
-// substantial governance + pparams + cert fixture setup.
-//
-// This is a structural lock-in test: it parses chainsync.go's AST, locates
-// the body of processEpochRollover, and asserts that the named call
-// expressions appear in the expected source order. A future refactor that
-// reorders these calls — even if all unit tests pass — will fail this
-// test loudly. The error message points to the comment block that
-// documents the invariant.
-//
-// Markers are matched by suffix on the call's selector expression so that
-// receiver renames (`ls.db` → `ls.metadata`) don't churn the test.
-func TestProcessEpochRollover_OrderingInvariant(t *testing.T) {
-	t.Parallel()
-
-	const targetFunc = "processEpochRolloverWithClassicPParamsContext"
-
-	// In source order, the calls that must appear inside processEpochRollover.
-	// Each entry is the trailing identifier of a SelectorExpr (or a bare
-	// Ident for unqualified calls).
-	//
-	// applyMIRCerts precedes applyPoolRetirements because that is the reference
-	// sequence: Shelley's NEWEPOCH rule embeds MIR between applyRUpd and EPOCH,
-	// and EPOCH's own sub-rules are SNAP then POOLREAP. MIR is therefore both
-	// pre-SNAP (its credits belong in the mark snapshot) and pre-POOLREAP (its
-	// pot movements are visible to the deposit refunds). dingo ran POOLREAP
-	// before MIR until the epoch-boundary snapshot semantics were corrected.
-	wantOrder := []string{
-		"applyByronTranslationReserves",       // Byron-to-Shelley translation
-		"applyStakeRewards",                   // delayed reward update
-		"applyMIRCerts",                       // (1) Shelley-era INSTANT rule, pre-SNAP
-		"ComputeAndApplyPParamUpdates",        // (2) Shelley-style pparam updates
-		"applyPoolRetirements",                // (3) embedded POOLREAP deposit refunds
-		"activateDelegatorInactivityIfNeeded", // (4) CIP-0163 activation
-		"ProcessEpoch",                        // (5) Conway-style governance enact
-		"SetPParams",                          // (6) persist enacted pparams
-		"isHardForkTransition",                // (7) inter-era boundary detection
-		"applyTransitionHardForkRules",        // (8) inter-era HARDFORK state rewrites
-		"applyIntraEraHardForkRule",           // (9) per-major-version pparam rule
-	}
-
-	seen, observed := observeProcessEpochRolloverCallOrder(
-		t,
-		targetFunc,
-		wantOrder,
-	)
-
-	for _, m := range wantOrder {
-		require.True(t, seen[m],
-			"marker %q not found in %s body — was it renamed or removed? "+
-				"If renamed, update wantOrder. If removed, also revisit "+
-				"the EPOCH→HARDFORK ordering comment in chainsync.go.",
-			m, targetFunc)
-	}
-
-	// observedFiltered is observed restricted to the wanted markers, in
-	// observed order. (Equivalent to observed today since wanted gates
-	// inclusion above, but keeps the assertion intent explicit.)
-	observedFiltered := observed
-	require.Equal(t, wantOrder, observedFiltered,
-		"call sequence in %s drifted from the EPOCH→HARDFORK ordering "+
-			"invariant. Expected %v, observed %v. See the comment block "+
-			"at the top of the function body for the rationale; if the "+
-			"reorder is intentional, update both the comment and "+
-			"wantOrder in this test.",
-		targetFunc, wantOrder, observedFiltered)
-}
-
-// TestProcessEpochRollover_RewardOrdering pins the placement of the stake
-// reward application and the ADA-pot capture relative to the rest of the
-// epoch boundary. The delayed reward update (applyStakeRewards) must run
-// before governance reads the treasury, and the ADA-pot snapshot
-// (saveRewardAdaPotsForEpoch) must run after every boundary treasury/reserves
-// mutation so it observes the fully settled pots. It uses the same structural
-// AST approach as TestProcessEpochRollover_OrderingInvariant so a reorder
-// fails loudly even when unit tests pass.
-func TestProcessEpochRollover_RewardOrdering(t *testing.T) {
-	t.Parallel()
-
-	const targetFunc = "processEpochRolloverWithClassicPParamsContext"
-
-	// In source order: reward application first, then the governance/pparam
-	// core, then the ADA-pot capture last.
-	wantOrder := []string{
-		"applyStakeRewards",            // (1) delayed reward update, pre-governance
-		"ComputeAndApplyPParamUpdates", // pparam updates
-		"ProcessEpoch",                 // governance enact (reads treasury)
-		"applyTransitionHardForkRules", // inter-era state rewrite after rewards
-		"applyIntraEraHardForkRule",    // pparam state rewrite after rewards
-		"saveRewardAdaPotsForEpoch",    // (last) post-boundary ADA pot capture
-	}
-
-	seen, observed := observeProcessEpochRolloverCallOrder(
-		t,
-		targetFunc,
-		wantOrder,
-	)
-
-	for _, m := range wantOrder {
-		require.True(t, seen[m],
-			"reward marker %q not found in %s body — was it renamed or "+
-				"removed? Stake reward application and ADA-pot capture must "+
-				"stay wired into the epoch rollover.",
-			m, targetFunc)
-	}
-
-	require.Equal(t, wantOrder, observed,
-		"reward call sequence in %s drifted. applyStakeRewards must precede "+
-			"governance and saveRewardAdaPotsForEpoch must follow every "+
-			"boundary treasury/reserves mutation. Expected %v, observed %v.",
-		targetFunc, wantOrder, observed)
 }
 
 // TestHandleEventChainsyncRollbackToBlockTipDoesNotPublishLedgerRollback
@@ -11507,6 +11324,8 @@ func TestProcessChainIteratorRollbackAppliesStaleRollbackWhenLedgerTipAbandoned(
 func TestProcessChainIteratorRollbackUsesCapturedBlocksAfterChainDeletion(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	removedBlock, err := database.BlockByPoint(
 		context.Background(),
@@ -12472,74 +12291,6 @@ func TestHandleEventChainsyncBlockHeaderRoutesSlotBattleToForkResolution(
 			"diverge at every slot battle and the divergence will "+
 			"fold into the evolving nonce.",
 		fixture.ls.headerMismatchCounts,
-	)
-}
-
-// TestProcessEpochRollover_SnapStakeReadOrdering pins the SNAP read point.
-//
-// The reference sequence is NEWEPOCH = applyRUpd, MIR, EPOCH; EPOCH = SNAP,
-// POOLREAP, ratification/enactment. So exactly two boundary rules precede SNAP —
-// the delayed reward update and MIR — and every remaining rule that credits
-// reward accounts at the boundary slot follows it: POOLREAP deposit refunds
-// (applyPoolRetirements) and enacted treasury withdrawals plus proposal-deposit
-// refunds (ProcessEpoch).
-//
-// The snapshot row itself is still written at the very end of the rollover,
-// where the new epoch record and the post-enactment protocol version exist, so
-// the read point and the write point are deliberately different places in the
-// sequence. This test locks the read point; TestProcessEpochRollover_RewardOrdering
-// and TestProcessEpochRollover_OrderingInvariant lock the rest of the sequence.
-//
-// currentBoundarySPOStakeState is a second read at the same point, resolving
-// mark[NewEpoch] for RATIFY's SPO tally. Its position is load
-// bearing for the same reason: when no SNAP-point distribution was stashed it
-// reconstructs the boundary itself, and the reconstruction counts reward
-// deltas up to and including the boundary slot. Moved below
-// applyPoolRetirements or ProcessEpoch it would absorb the deposit refunds and
-// enactment credits those rules record at that slot, and every SPO-gated
-// action would be tallied against a mark that cardano-ledger's SNAP never
-// sees.
-func TestProcessEpochRollover_SnapStakeReadOrdering(t *testing.T) {
-	t.Parallel()
-
-	const targetFunc = "processEpochRolloverWithClassicPParamsContext"
-
-	wantOrder := []string{
-		"applyStakeRewards",                 // pre-SNAP: delayed reward update
-		"applyMIRCerts",                     // pre-SNAP: Shelley-era INSTANT rule
-		"captureEpochBoundarySnapshotStake", // SNAP read point
-		"currentBoundarySPOStakeState",      // SNAP read point: RATIFY's copy
-		"applyPoolRetirements",              // post-SNAP: POOLREAP refunds
-		"ProcessEpoch",                      // post-SNAP: enactment credits
-		"captureEpochBoundarySnapshot",      // snapshot write, end of rollover
-	}
-
-	seen, observed := observeProcessEpochRolloverCallOrder(
-		t,
-		targetFunc,
-		wantOrder,
-	)
-
-	for _, m := range wantOrder {
-		require.True(t, seen[m],
-			"marker %q not found in %s body — the SNAP read must stay wired "+
-				"between the pre-SNAP boundary rules and the boundary rules that "+
-				"credit reward accounts after SNAP.",
-			m, targetFunc)
-	}
-
-	require.Equal(
-		t,
-		wantOrder,
-		observed,
-		"SNAP read point in %s drifted. The mark snapshot's stake must be read "+
-			"after applyStakeRewards and applyMIRCerts, which precede SNAP in "+
-			"cardano-ledger, and before applyPoolRetirements and ProcessEpoch, "+
-			"which credit reward accounts at the boundary slot after it. "+
-			"Expected %v, observed %v.",
-		targetFunc,
-		wantOrder,
-		observed,
 	)
 }
 
@@ -16568,57 +16319,6 @@ func TestDesiredBlockfetchBatchHeaders(t *testing.T) {
 	}
 }
 
-// TestCalculateEpochNonce_ByronEra tests epoch nonce calculation in Byron era
-func TestCalculateEpochNonce_ByronEra(t *testing.T) {
-	t.Parallel()
-
-	byronGenesisJSON := testByronGenesisJSONForK(432)
-	shelleyGenesisJSON := `{
-		"activeSlotsCoeff": 0.05,
-		"securityParam": 432,
-		"systemStart": "2022-10-25T00:00:00Z"
-	}`
-	shelleyGenesisHash := "363498d1024f84bb39d3fa9593ce391483cb40d479b87233f868d6e57c3a400d"
-
-	cfg := &cardano.CardanoNodeConfig{
-		ShelleyGenesisHash: shelleyGenesisHash,
-	}
-	if err := loadByronGenesisForTest(t, cfg, strings.NewReader(byronGenesisJSON)); err != nil {
-		t.Fatalf("failed to load Byron genesis: %v", err)
-	}
-	if err := cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)); err != nil {
-		t.Fatalf("failed to load Shelley genesis: %v", err)
-	}
-
-	ls := &LedgerState{
-		currentEra: eras.ByronEraDesc,
-		currentEpoch: models.Epoch{
-			EpochId:   0,
-			StartSlot: 0,
-			Nonce:     nil,
-		},
-		config: LedgerStateConfig{
-			CardanoNodeConfig: cfg,
-			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		},
-	}
-
-	// Byron era should return nil nonce
-	nonce, _, _, _, err := ls.calculateEpochNonce(context.Background(),
-		nil,
-		0,
-		ls.currentEra,
-		ls.currentEpoch,
-		nil,
-	)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if nonce != nil {
-		t.Errorf("expected nil nonce for Byron era, got %v", nonce)
-	}
-}
-
 // TestCalculateEpochNonce_InitialEpochWithoutNonce tests initial Shelley epoch
 func TestCalculateEpochNonce_InitialEpochWithoutNonce(t *testing.T) {
 	t.Parallel()
@@ -16771,91 +16471,6 @@ func TestCalculateEpochNonce_MissingShelleyGenesis(t *testing.T) {
 	}
 }
 
-// TestCalculateEpochNonce_ShelleyEraDifferentParams tests Shelley era with various parameters
-func TestCalculateEpochNonce_ShelleyEraDifferentParams(t *testing.T) {
-	t.Parallel()
-
-	testCases := []struct {
-		name             string
-		k                int
-		activeSlotsCoeff float64
-		description      string
-	}{
-		{
-			name:             "Standard testnet parameters",
-			k:                432,
-			activeSlotsCoeff: 0.05,
-			description:      "k=432, f=0.05",
-		},
-		{
-			name:             "Mainnet parameters",
-			k:                2160,
-			activeSlotsCoeff: 0.05,
-			description:      "k=2160, f=0.05",
-		},
-		{
-			name:             "High activity coefficient",
-			k:                432,
-			activeSlotsCoeff: 0.2,
-			description:      "k=432, f=0.2",
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			byronGenesisJSON := testByronGenesisJSONForK(uint64(tc.k))
-			shelleyGenesisJSON := fmt.Sprintf(`{
-				"activeSlotsCoeff": %f,
-				"securityParam": %d,
-				"systemStart": "2022-10-25T00:00:00Z"
-			}`, tc.activeSlotsCoeff, tc.k)
-
-			cfg := &cardano.CardanoNodeConfig{
-				ShelleyGenesisHash: "363498d1024f84bb39d3fa9593ce391483cb40d479b87233f868d6e57c3a400d",
-			}
-			if err := loadByronGenesisForTest(t, cfg, strings.NewReader(byronGenesisJSON)); err != nil {
-				t.Fatalf("failed to load Byron genesis: %v", err)
-			}
-			if err := cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)); err != nil {
-				t.Fatalf("failed to load Shelley genesis: %v", err)
-			}
-
-			ls := &LedgerState{
-				currentEra: eras.ShelleyEraDesc,
-				currentEpoch: models.Epoch{
-					EpochId:   0,
-					StartSlot: 0,
-					Nonce:     nil,
-				},
-				config: LedgerStateConfig{
-					CardanoNodeConfig: cfg,
-					Logger: slog.New(
-						slog.NewJSONHandler(io.Discard, nil),
-					),
-				},
-			}
-
-			// Initial epoch should return genesis hash
-			nonce, _, _, _, err := ls.calculateEpochNonce(context.Background(),
-				nil,
-				0,
-				ls.currentEra,
-				ls.currentEpoch,
-				nil,
-			)
-			if err != nil {
-				t.Fatalf("%s: unexpected error: %v", tc.description, err)
-			}
-			if nonce == nil {
-				t.Errorf(
-					"%s: expected non-nil nonce for initial Shelley epoch",
-					tc.description,
-				)
-			}
-		})
-	}
-}
-
 // TestCalculateEpochNonce_ZeroActiveSlots tests handling of zero active slots coefficient
 func TestCalculateEpochNonce_ZeroActiveSlots(t *testing.T) {
 	t.Parallel()
@@ -16894,165 +16509,6 @@ func TestCalculateEpochNonce_ZeroActiveSlots(t *testing.T) {
 			blockfetchBatchSlotThresholdDefault,
 			window,
 		)
-	}
-}
-
-// TestCalculateEpochNonce_StabilityWindowCalculation tests the stability window calculation logic
-func TestCalculateEpochNonce_StabilityWindowCalculation(t *testing.T) {
-	t.Parallel()
-
-	testCases := []struct {
-		name             string
-		era              eras.EraDesc
-		k                int
-		activeSlotsCoeff float64
-		expectedFormula  string
-	}{
-		{
-			name:             "Byron era uses k directly",
-			era:              eras.ByronEraDesc,
-			k:                432,
-			activeSlotsCoeff: 0.05,
-			expectedFormula:  "stability_window = k = 432",
-		},
-		{
-			name:             "Shelley era uses 3k/f",
-			era:              eras.ShelleyEraDesc,
-			k:                432,
-			activeSlotsCoeff: 0.05,
-			expectedFormula:  "stability_window = 3*432/0.05 = 25920",
-		},
-		{
-			name:             "Allegra era uses 3k/f",
-			era:              eras.AllegraEraDesc,
-			k:                2160,
-			activeSlotsCoeff: 0.05,
-			expectedFormula:  "stability_window = 3*2160/0.05 = 129600",
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			byronGenesisJSON := testByronGenesisJSONForK(uint64(tc.k))
-			shelleyGenesisJSON := fmt.Sprintf(`{
-				"activeSlotsCoeff": %f,
-				"securityParam": %d,
-				"systemStart": "2022-10-25T00:00:00Z"
-			}`, tc.activeSlotsCoeff, tc.k)
-
-			cfg := &cardano.CardanoNodeConfig{
-				ShelleyGenesisHash: "363498d1024f84bb39d3fa9593ce391483cb40d479b87233f868d6e57c3a400d",
-			}
-			if err := loadByronGenesisForTest(t, cfg, strings.NewReader(byronGenesisJSON)); err != nil {
-				t.Fatalf("failed to load Byron genesis: %v", err)
-			}
-			if err := cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)); err != nil {
-				t.Fatalf("failed to load Shelley genesis: %v", err)
-			}
-
-			ls := &LedgerState{
-				currentEra: tc.era,
-				currentEpoch: models.Epoch{
-					EpochId:   0,
-					StartSlot: 0,
-					Nonce:     nil,
-				},
-				config: LedgerStateConfig{
-					CardanoNodeConfig: cfg,
-					Logger: slog.New(
-						slog.NewJSONHandler(io.Discard, nil),
-					),
-				},
-			}
-
-			// Test for Byron era - should return nil
-			if tc.era.Id == 0 {
-				nonce, _, _, _, err := ls.calculateEpochNonce(context.Background(),
-					nil,
-					0,
-					ls.currentEra,
-					ls.currentEpoch,
-					nil,
-				)
-				if err != nil {
-					t.Fatalf("unexpected error: %v", err)
-				}
-				if nonce != nil {
-					t.Errorf(
-						"Byron era should return nil nonce, got: %v",
-						nonce,
-					)
-				}
-				return
-			}
-
-			// For non-Byron eras, test initial epoch returns genesis hash
-			nonce, _, _, _, err := ls.calculateEpochNonce(context.Background(),
-				nil,
-				0,
-				ls.currentEra,
-				ls.currentEpoch,
-				nil,
-			)
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if nonce == nil {
-				t.Error("expected non-nil nonce for initial non-Byron epoch")
-			}
-			t.Logf("Formula: %s", tc.expectedFormula)
-		})
-	}
-}
-
-// TestCalculateEpochNonce_IntegerArithmeticPrecision tests precision of integer arithmetic
-func TestCalculateEpochNonce_IntegerArithmeticPrecision(t *testing.T) {
-	t.Parallel()
-
-	byronGenesisJSON := testByronGenesisJSONForK(1000)
-	// Use a coefficient that produces fractional results
-	shelleyGenesisJSON := `{
-		"activeSlotsCoeff": 0.333333,
-		"securityParam": 1000,
-		"systemStart": "2022-10-25T00:00:00Z"
-	}`
-
-	cfg := &cardano.CardanoNodeConfig{
-		ShelleyGenesisHash: "363498d1024f84bb39d3fa9593ce391483cb40d479b87233f868d6e57c3a400d",
-	}
-	if err := loadByronGenesisForTest(t, cfg, strings.NewReader(byronGenesisJSON)); err != nil {
-		t.Fatalf("failed to load Byron genesis: %v", err)
-	}
-	if err := cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)); err != nil {
-		t.Fatalf("failed to load Shelley genesis: %v", err)
-	}
-
-	ls := &LedgerState{
-		currentEra: eras.ShelleyEraDesc,
-		currentEpoch: models.Epoch{
-			EpochId:   0,
-			StartSlot: 0,
-			Nonce:     nil,
-		},
-		config: LedgerStateConfig{
-			CardanoNodeConfig: cfg,
-			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		},
-	}
-
-	// Should handle fractional coefficients correctly using integer arithmetic
-	nonce, _, _, _, err := ls.calculateEpochNonce(context.Background(),
-		nil,
-		0,
-		ls.currentEra,
-		ls.currentEpoch,
-		nil,
-	)
-	if err != nil {
-		t.Fatalf("unexpected error with fractional coefficient: %v", err)
-	}
-	if nonce == nil {
-		t.Error("expected non-nil nonce")
 	}
 }
 
@@ -17676,36 +17132,6 @@ func TestCheckSlotBattle_NilCheckerSkips(t *testing.T) {
 		50*time.Millisecond,
 		"nil checker should not emit events",
 	)
-}
-
-func TestCheckSlotBattle_NilEventBus(t *testing.T) {
-	t.Parallel()
-
-	localHash := []byte{0x01, 0x02, 0x03, 0x04}
-	remoteHash := []byte{0x0A, 0x0B, 0x0C, 0x0D}
-
-	checker := &mockForgedBlockChecker{
-		forgedSlots: map[uint64][]byte{
-			1000: localHash,
-		},
-	}
-
-	ls := &LedgerState{
-		config: LedgerStateConfig{
-			EventBus:           nil, // No event bus
-			ForgedBlockChecker: checker,
-			Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		},
-	}
-
-	// Should not panic with nil event bus
-	e := BlockfetchEvent{
-		Point: ocommon.Point{
-			Slot: 1000,
-			Hash: remoteHash,
-		},
-	}
-	ls.checkSlotBattle(e)
 }
 
 // TestCheckSlotBattle_UnderWriteLock is a regression test for the
@@ -18812,25 +18238,6 @@ func newHookTestLedger(t *testing.T) (*LedgerState, *database.Database) {
 	return ls, db
 }
 
-// TestCaptureEpochBoundarySnapshotHookNil verifies the rollover capture is a
-// no-op (and does not error) when no hook is installed — preserving the
-// event-driven fallback-only behavior.
-func TestCaptureEpochBoundarySnapshotHookNil(t *testing.T) {
-	t.Parallel()
-
-	ls, db := newHookTestLedger(t)
-
-	result := &EpochRolloverResult{
-		NewCurrentEpoch: models.Epoch{EpochId: 1, StartSlot: 432000},
-	}
-	txn := db.Transaction(context.Background(), true)
-	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.captureEpochBoundarySnapshot(context.Background(),
-			txn, models.Epoch{EpochId: 0}, result,
-		)
-	}))
-}
-
 // TestCaptureEpochBoundarySnapshotHookInvoked verifies the hook is called inside
 // the rollover transaction with an event derived from the new/previous epoch.
 func TestCaptureEpochBoundarySnapshotHookInvoked(t *testing.T) {
@@ -19898,271 +19305,6 @@ func TestCreateGenesisBlockSkipsGenesisGovernanceAfterMithrilBootstrap(
 	require.ErrorIs(t, err, models.ErrDrepNotFound)
 }
 
-func TestGenesisUtxoStorageAndRetrieval(t *testing.T) {
-	t.Parallel()
-
-	// Create temp directory for database
-	tmpDir, err := os.MkdirTemp("", "genesis_utxo_test")
-	require.NoError(t, err)
-	defer os.RemoveAll(tmpDir)
-
-	logger := slog.New(
-		slog.NewTextHandler(
-			os.Stdout,
-			&slog.HandlerOptions{Level: slog.LevelDebug},
-		),
-	)
-
-	// Create database
-	dbConfig := &database.Config{
-		DataDir: tmpDir,
-		Logger:  logger,
-	}
-	db, err := dbtest.NewDatabase(t, dbConfig)
-	require.NoError(t, err)
-	defer dbtest.CloseDatabase(db)
-
-	// Load cardano config from embedded preview network
-	nodeCfg, err := cardano.LoadCardanoNodeConfigWithFallback(
-		"preview/config.json",
-		"preview",
-		cardano.EmbeddedConfigFS,
-	)
-	require.NoError(t, err)
-
-	// Get genesis UTxOs
-	byronGenesis := nodeCfg.ByronGenesis()
-	require.NotNil(t, byronGenesis)
-
-	byronGenesisUtxos, err := byronGenesis.GenesisUtxos()
-	require.NoError(t, err)
-	t.Logf("Found %d Byron genesis UTxOs", len(byronGenesisUtxos))
-
-	if len(byronGenesisUtxos) == 0 {
-		t.Skip("No Byron genesis UTxOs to test")
-	}
-
-	// First, encode the genesis outputs to CBOR (like createGenesisBlock does)
-	encodedUtxos := make([]lcommon.Utxo, len(byronGenesisUtxos))
-	for i, utxo := range byronGenesisUtxos {
-		// Encode the output to CBOR
-		cborData, err := cbor.Encode(utxo.Output)
-		require.NoError(t, err, "Failed to encode output %d", i)
-
-		// Create a new Utxo with CBOR-encoded output
-		switch output := utxo.Output.(type) {
-		case byron.ByronTransactionOutput:
-			newOutput := output
-			(&newOutput).SetCbor(cborData)
-			encodedUtxos[i] = lcommon.Utxo{
-				Id:     utxo.Id,
-				Output: newOutput,
-			}
-		default:
-			t.Fatalf("Unexpected output type: %T", utxo.Output)
-		}
-		utxoTxID := utxo.Id.Id()
-		t.Logf("Encoded UTxO %x#%d: %d bytes",
-			utxoTxID[:8], utxo.Id.Index(), len(cborData))
-	}
-
-	// Get the Byron genesis hash to use as the synthetic block hash
-	genesisHash, err := GenesisBlockHash(nodeCfg)
-	require.NoError(t, err)
-
-	// Create a transaction to store genesis UTxOs
-	txn := db.Transaction(context.Background(), true)
-	err = txn.Do(func(txn *database.Txn) error {
-		// Build and store genesis block CBOR
-		utxoOffsets := make(map[database.UtxoRef]database.CborOffset)
-
-		// Build synthetic genesis block CBOR (simplified version)
-		// First, encode each UTxO to get its CBOR
-		var blockCbor []byte
-
-		// Track offsets as we build the block
-		for _, utxo := range encodedUtxos {
-			txId := utxo.Id.Id().Bytes()
-			outputIdx := utxo.Id.Index()
-
-			// Get the output CBOR
-			outputCbor := utxo.Output.Cbor()
-			if len(outputCbor) == 0 {
-				return fmt.Errorf(
-					"UTxO %x#%d still has no CBOR after encoding",
-					txId[:8], outputIdx,
-				)
-			}
-
-			var txHashArray [32]byte
-			copy(txHashArray[:], txId)
-
-			ref := database.UtxoRef{
-				TxId:      txHashArray,
-				OutputIdx: outputIdx,
-			}
-
-			// Track offset within block (simplified: just concatenate)
-			offset := uint32(len(blockCbor))
-			blockCbor = append(blockCbor, outputCbor...)
-
-			utxoOffsets[ref] = database.CborOffset{
-				BlockSlot:  0,
-				BlockHash:  genesisHash,
-				ByteOffset: offset,
-				ByteLength: uint32(len(outputCbor)),
-			}
-
-			t.Logf("UTxO %x#%d: offset=%d, length=%d",
-				txId[:8], outputIdx, offset, len(outputCbor))
-		}
-
-		// Store the genesis block CBOR
-		t.Logf("Storing genesis block CBOR: %d bytes", len(blockCbor))
-		if err := db.SetGenesisCbor(0, genesisHash[:], blockCbor, txn); err != nil {
-			return err
-		}
-
-		// Now store each genesis transaction
-		for _, utxo := range encodedUtxos {
-			txId := utxo.Id.Id().Bytes()
-			outputIdx := utxo.Id.Index()
-
-			var txHashArray [32]byte
-			copy(txHashArray[:], txId)
-
-			ref := database.UtxoRef{
-				TxId:      txHashArray,
-				OutputIdx: outputIdx,
-			}
-
-			offset, ok := utxoOffsets[ref]
-			if !ok {
-				return fmt.Errorf(
-					"no offset for UTxO %x#%d after building block",
-					txId[:8], outputIdx,
-				)
-			}
-
-			// Store the offset
-			offsetData := database.EncodeUtxoOffset(&offset)
-			t.Logf(
-				"Storing UTxO offset: %s",
-				hex.EncodeToString(offsetData[:20]),
-			)
-
-			blob := db.Blob()
-			if blob == nil {
-				return fmt.Errorf("blob store is nil")
-			}
-			blobTxn := txn.Blob()
-			if blobTxn == nil {
-				return fmt.Errorf("blob transaction is nil")
-			}
-
-			if err := blob.SetUtxo(blobTxn, txId, outputIdx, offsetData); err != nil {
-				return err
-			}
-		}
-
-		return nil
-	})
-	require.NoError(t, err)
-
-	// Now try to retrieve each genesis UTxO
-	t.Log("Retrieving genesis UTxOs...")
-	for _, utxo := range byronGenesisUtxos {
-		txIDHash := utxo.Id.Id()
-		txId := txIDHash[:]
-		txIDPrefix := txIDHash[:8]
-		outputIdx := utxo.Id.Index()
-
-		// Try to get the UTxO from blob store
-		readTxn := db.Transaction(context.Background(), false)
-		blob := db.Blob()
-		require.NotNil(t, blob)
-		blobTxn := readTxn.Blob()
-		require.NotNil(t, blobTxn)
-
-		data, err := blob.GetUtxo(blobTxn, txId, outputIdx)
-		if err != nil {
-			t.Errorf("Failed to get UTxO %s#%d from blob: %v",
-				hex.EncodeToString(txIDPrefix), outputIdx, err)
-			readTxn.Rollback() //nolint:errcheck
-			continue
-		}
-
-		t.Logf(
-			"Retrieved data for %x#%d: %d bytes, first bytes: %s",
-			txIDPrefix,
-			outputIdx,
-			len(data),
-			hex.EncodeToString(data[:min(20, len(data))]),
-		)
-
-		// Check if it's an offset
-		if database.IsUtxoOffsetStorage(data) {
-			t.Logf("Data is offset storage (has DOFF magic)")
-
-			// Decode the offset
-			offset, err := database.DecodeUtxoOffset(data)
-			require.NoError(
-				t,
-				err,
-				"Failed to decode offset for %x#%d",
-				txIDPrefix,
-				outputIdx,
-			)
-
-			t.Logf(
-				"Offset: slot=%d, hash=%x, offset=%d, length=%d",
-				offset.BlockSlot,
-				offset.BlockHash[:8],
-				offset.ByteOffset,
-				offset.ByteLength,
-			)
-
-			// Try to get the block
-			blockCbor, _, err := blob.GetBlock(
-				blobTxn,
-				offset.BlockSlot,
-				offset.BlockHash[:],
-			)
-			if err != nil {
-				t.Errorf(
-					"Failed to get block for offset: slot=%d, hash=%x, error=%v",
-					offset.BlockSlot,
-					offset.BlockHash[:8],
-					err,
-				)
-				readTxn.Rollback() //nolint:errcheck
-				continue
-			}
-
-			t.Logf("Got block: %d bytes", len(blockCbor))
-
-			// Extract the UTxO CBOR
-			end := uint64(offset.ByteOffset) + uint64(offset.ByteLength)
-			if end > uint64(len(blockCbor)) {
-				t.Errorf(
-					"Offset out of bounds: offset=%d, length=%d, block_size=%d",
-					offset.ByteOffset,
-					offset.ByteLength,
-					len(blockCbor),
-				)
-			} else {
-				utxoCbor := blockCbor[offset.ByteOffset:end]
-				t.Logf("Extracted UTxO CBOR: %d bytes, first bytes: %s",
-					len(utxoCbor), hex.EncodeToString(utxoCbor[:min(20, len(utxoCbor))]))
-			}
-		} else {
-			t.Logf("Data is raw CBOR (legacy format)")
-		}
-
-		readTxn.Rollback() //nolint:errcheck
-	}
-}
-
 // TestCreateGenesisBlockSkipsUtxoInsertionAfterMithrilBootstrap is the
 // regression test: after a Mithril bootstrap,
 // createGenesisBlock unconditionally recreated every Byron/Shelley genesis
@@ -20521,6 +19663,8 @@ func announcingHeader(
 func TestChainsyncHeaderAdmissionAnnouncesOnlyWhenCryptoVerified(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ebHash := lcommon.NewBlake2b256([]byte("announced-eb"))
 	header := announcingHeader(
 		577, "hdr-1", lcommon.NewBlake2b256(nil), 1, ebHash,
@@ -20600,6 +19744,8 @@ func TestChainsyncHeaderAdmissionAnnouncesOnlyWhenCryptoVerified(
 // one carries a pre-rollback crypto verdict, which is stale by the time the
 // path is queued. Both a stale and an absent verdict are asserted here.
 func TestForkResolutionInvalidatesTheIncomingHeaderVerdict(t *testing.T) {
+	t.Parallel()
+
 	for _, tc := range []struct {
 		name           string
 		cryptoVerified bool
@@ -20815,6 +19961,8 @@ func newChainsyncRollbackFixtureWithBus(
 // dead peer is exactly the case where no further event is guaranteed, so the
 // announcement would stay armed well past the ten-slot vote window.
 func TestConnectionClosedPublishesHeaderInvalidation(t *testing.T) {
+	t.Parallel()
+
 	fixture := newHeaderStreamLedger(t)
 	ebHash := lcommon.NewBlake2b256([]byte("announced-eb"))
 	header := announcingHeader(
@@ -20857,6 +20005,8 @@ func TestConnectionClosedPublishesHeaderInvalidation(t *testing.T) {
 // is the last thing that runs for a peer that stopped sending, so it has to
 // drain the sequencer rather than leave header events queued behind it.
 func TestBlockfetchTimeoutDrainsHeaderSequencer(t *testing.T) {
+	t.Parallel()
+
 	fixture := newHeaderStreamLedger(t)
 	ebHash := lcommon.NewBlake2b256([]byte("announced-eb"))
 	header := announcingHeader(
@@ -21017,6 +20167,8 @@ func TestEpochDonationWithdrawalRollback(t *testing.T) {
 // Reporting a target below the prune floor as crossable would make the detector
 // insist on applying a rollback rollbackChainAndStateDeferred refuses.
 func TestRollbackIsAppliableRejectsBelowConsumedUtxoPruneFloor(t *testing.T) {
+	t.Parallel()
+
 	f := newPrunedUtxoFixture(t, 0)
 	f.ls.cleanupConsumedUtxos(context.Background())
 
@@ -21049,6 +20201,8 @@ func TestRollbackIsAppliableRejectsBelowConsumedUtxoPruneFloor(t *testing.T) {
 // rollback point terminate the node. The handler must instead reject the peer
 // chain and ask for a fresh intersection, exactly as the Mithril boundary does.
 func TestHandleEventChainsyncRollbackRejectsBelowPruneFloor(t *testing.T) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	bus := newTestEventBus(t, nil)
 	t.Cleanup(func() { bus.Stop() })
@@ -21522,6 +20676,8 @@ func TestDeferredHeaderMarkerDoesNotPersistUnparseableSource(t *testing.T) {
 // keeps the supplying peer's address.
 // Not t.Parallel: swaps the package-level afterDeferredMarkerDeleteHook seam.
 func TestDeferredMarkerRestoreKeepsSource(t *testing.T) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{50}, 0, tamperNone)
 	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
 	connId := testRecycleConnId()

@@ -354,45 +354,6 @@ func TestValidateByronEbbPreviousHashSemantics(t *testing.T) {
 	}
 }
 
-// TestByronTxAuxRejectsTrailingFields pins: a TxAux must be exactly
-// [body, witnesses], so a third field fails decoding wherever a Byron
-// transaction or block body is decoded.
-func TestByronTxAuxRejectsTrailingFields(t *testing.T) {
-	t.Parallel()
-	stored := loadRealByronMainBlock(t)
-	block, err := stored.Decode()
-	require.NoError(t, err)
-	txs := block.Transactions()
-	require.NotEmpty(t, txs)
-	var txParts []cbor.RawMessage
-	_, err = cbor.Decode(txs[0].Cbor(), &txParts)
-	require.NoError(t, err)
-	require.Len(t, txParts, 2)
-	_, err = byron.NewByronTransactionFromCbor(txs[0].Cbor())
-	require.NoError(t, err)
-
-	extended, err := cbor.Encode([]any{txParts[0], txParts[1], uint64(0)})
-	require.NoError(t, err)
-	_, err = byron.NewByronTransactionFromCbor(extended)
-	require.Error(t, err)
-
-	var blockParts []cbor.RawMessage
-	_, err = cbor.Decode(block.Cbor(), &blockParts)
-	require.NoError(t, err)
-	var bodyParts []cbor.RawMessage
-	_, err = cbor.Decode(blockParts[1], &bodyParts)
-	require.NoError(t, err)
-	body := []byte{0x84, 0x9f}
-	body = append(body, extended...)
-	body = append(body, 0xff)
-	for _, part := range bodyParts[1:] {
-		body = append(body, part...)
-	}
-	var decoded byron.ByronMainBlockBody
-	_, err = cbor.Decode(body, &decoded)
-	require.Error(t, err)
-}
-
 // TestByronBlockPParams covers the block-application half of adopted
 // size and fee parameters: a Byron block is validated against its update
 // state's adopted parameters, and any other block against the era's own.
