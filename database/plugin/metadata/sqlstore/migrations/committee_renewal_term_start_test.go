@@ -140,9 +140,6 @@ func runCommitteeRenewalTermStartBackfill(
 ) {
 	t.Helper()
 	databasePath := filepath.Join(t.TempDir(), "metadata.sqlite")
-	db, err := sql.Open("sqlite", "file:"+databasePath+"?"+testDBPragmas)
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	registry, err := SQLiteRegistry()
 	require.NoError(t, err)
 	index := slices.IndexFunc(registry, func(m Migration) bool {
@@ -152,6 +149,10 @@ func runCommitteeRenewalTermStartBackfill(
 	// One credential per batch, so the cursor is resumed between every
 	// credential and a renewal chain is never split.
 	registry[index].BatchSize = 1
+	SeedMigratedPrefix(t, databasePath, index)
+	db, err := sql.Open("sqlite", "file:"+databasePath+"?"+testDBPragmas)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	locker := NewFileLocker(databasePath + ".migrate.lock")
 	runTo := func(versions []Migration) {
 		t.Helper()
@@ -163,7 +164,6 @@ func runCommitteeRenewalTermStartBackfill(
 		}
 		require.NoError(t, runner.Run(context.Background()))
 	}
-	runTo(registry[:index])
 
 	if mithrilImported {
 		_, err := db.Exec(

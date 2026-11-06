@@ -94,14 +94,25 @@ func baselineBackfillDB(
 	t *testing.T,
 ) (*sql.DB, func(versions []migrations.Migration)) {
 	t.Helper()
+	return migratedPrefixDB(t, 3)
+}
+
+// migratedPrefixDB returns a database already migrated through the first n
+// versions, with a runner for the remaining ones.
+func migratedPrefixDB(
+	t *testing.T,
+	n int,
+) (*sql.DB, func(versions []migrations.Migration)) {
+	t.Helper()
 	ctx := context.Background()
 	databasePath := filepath.Join(t.TempDir(), "metadata.sqlite")
+	migrations.SeedMigratedPrefix(t, databasePath, n)
 	db, err := sql.Open("sqlite", "file:"+databasePath+"?"+testDBPragmas)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	require.GreaterOrEqual(t, len(registry), 4)
+	require.GreaterOrEqual(t, len(registry), n)
 	runTo := func(versions []migrations.Migration) {
 		runner := migrations.Runner{
 			DB:       db,
@@ -113,7 +124,6 @@ func baselineBackfillDB(
 		}
 		require.NoError(t, runner.Run(ctx))
 	}
-	runTo(registry[:3])
 	return db, runTo
 }
 
@@ -286,10 +296,9 @@ VALUES (?, 0, 400)`,
 }
 
 func TestAddressTransactionCredentialKindBackfillCapturesTransactionIDs(t *testing.T) {
-	db, runTo := baselineBackfillDB(t)
+	db, runTo := migratedPrefixDB(t, 45)
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	runTo(registry[:45])
 	ctx := context.Background()
 	for i := 1; i <= 2; i++ {
 		result, err := db.ExecContext(ctx, `
@@ -328,28 +337,7 @@ func alonzoPParamsUnitBackfillDB(
 	t *testing.T,
 ) (*sql.DB, func([]migrations.Migration)) {
 	t.Helper()
-	ctx := context.Background()
-	databasePath := filepath.Join(t.TempDir(), "metadata.sqlite")
-	db, err := sql.Open("sqlite", "file:"+databasePath+"?"+testDBPragmas)
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, db.Close()) })
-	registry, err := migrations.SQLiteRegistry()
-	require.NoError(t, err)
-	require.Len(t, registry, 53)
-
-	runTo := func(versions []migrations.Migration) {
-		runner := migrations.Runner{
-			DB:       db,
-			Dialect:  "sqlite",
-			Registry: versions,
-			Locker: migrations.NewFileLocker(
-				databasePath + ".migrate.lock",
-			),
-		}
-		require.NoError(t, runner.Run(ctx))
-	}
-	runTo(registry[:19])
-	return db, runTo
+	return migratedPrefixDB(t, 19)
 }
 
 func alonzoPParamsUnitMarker(t *testing.T, db *sql.DB) string {
@@ -454,30 +442,9 @@ WHERE version = 20`)
 // rows the v12 backfill reads.
 func depositHeldBackfillDB(
 	t *testing.T,
-) (*sql.DB, func(versions []migrations.Migration)) {
+) (*sql.DB, func([]migrations.Migration)) {
 	t.Helper()
-	ctx := context.Background()
-	databasePath := filepath.Join(t.TempDir(), "metadata.sqlite")
-	db, err := sql.Open("sqlite", "file:"+databasePath+"?"+testDBPragmas)
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, db.Close()) })
-	registry, err := migrations.SQLiteRegistry()
-	require.NoError(t, err)
-	require.Len(t, registry, 53)
-
-	runTo := func(versions []migrations.Migration) {
-		runner := migrations.Runner{
-			DB:       db,
-			Dialect:  "sqlite",
-			Registry: versions,
-			Locker: migrations.NewFileLocker(
-				databasePath + ".migrate.lock",
-			),
-		}
-		require.NoError(t, runner.Run(ctx))
-	}
-	runTo(registry[:10])
-	return db, runTo
+	return migratedPrefixDB(t, 10)
 }
 
 func seedLegacyPoolRegistration(

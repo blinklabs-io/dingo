@@ -32,6 +32,7 @@ func restampBackfillDB(t *testing.T) (*sql.DB, func()) {
 	t.Helper()
 	ctx := context.Background()
 	databasePath := filepath.Join(t.TempDir(), "metadata.sqlite")
+	migrations.SeedMigratedPrefix(t, databasePath, 13)
 	db, err := sql.Open("sqlite", "file:"+databasePath+"?"+testDBPragmas)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
@@ -39,15 +40,6 @@ func restampBackfillDB(t *testing.T) (*sql.DB, func()) {
 	require.NoError(t, err)
 	require.Len(t, registry, 53)
 
-	runner := migrations.Runner{
-		DB:       db,
-		Dialect:  "sqlite",
-		Registry: registry[:13],
-		Locker: migrations.NewFileLocker(
-			databasePath + ".migrate.lock",
-		),
-	}
-	require.NoError(t, runner.Run(ctx))
 	runRestamp := func() {
 		full := migrations.Runner{
 			DB:       db,

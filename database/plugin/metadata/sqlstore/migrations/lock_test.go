@@ -28,6 +28,7 @@ import (
 func TestCollateralInputMigrationBackfillsLegacyMarker(t *testing.T) {
 	t.Parallel()
 	dbPath := filepath.Join(t.TempDir(), "metadata.sqlite")
+	migrations.SeedMigratedPrefix(t, dbPath, 13)
 	db, err := sql.Open("sqlite", "file:"+dbPath+"?"+testDBPragmas)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
@@ -37,8 +38,8 @@ func TestCollateralInputMigrationBackfillsLegacyMarker(t *testing.T) {
 		runner := migrations.Runner{DB: db, Dialect: "sqlite", Registry: registry, Locker: migrations.NewProcessLocker()}
 		require.NoError(t, runner.Run(context.Background()))
 	}
-	// Build a real v13 database, as an older installation would have existed.
-	run(registry[:13])
+	// The seeded file is a real v13 database, as an older installation would
+	// have existed.
 	_, err = db.Exec(`INSERT INTO utxo (tx_id, output_idx, credential_tag, amount,
 collateral_by_tx_id) VALUES (X'01', 0, 0, '1', X'02')`)
 	require.NoError(t, err)

@@ -243,16 +243,13 @@ FROM pool_registration ORDER BY id`)
 
 func TestRatificationHistoryMigrationBackfillsExistingMarker(t *testing.T) {
 	t.Parallel()
-	db := openTestDB(t)
-	registry, err := SQLiteRegistry()
+	path := filepath.Join(t.TempDir(), "metadata.sqlite")
+	SeedMigratedPrefix(t, path, 5)
+	db, err := sql.Open(
+		"sqlite", "file:"+path+"?_pragma=foreign_keys(1)&"+testDBPragmas,
+	)
 	require.NoError(t, err)
-	runner := &Runner{
-		DB:       db,
-		Dialect:  "sqlite",
-		Registry: registry[:5],
-		Locker:   NewProcessLocker(),
-	}
-	require.NoError(t, runner.Run(context.Background()))
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	_, err = db.Exec(`
 INSERT INTO governance_proposal (
     tx_hash, action_index, action_type, proposed_epoch, expires_epoch,
@@ -274,7 +271,14 @@ INSERT INTO governance_proposal (
 	)
 	require.NoError(t, err)
 
-	runner.Registry = registry
+	registry, err := SQLiteRegistry()
+	require.NoError(t, err)
+	runner := &Runner{
+		DB:       db,
+		Dialect:  "sqlite",
+		Registry: registry,
+		Locker:   NewProcessLocker(),
+	}
 	require.NoError(t, runner.Run(context.Background()))
 	var transitionSlot, ratifiedEpoch, ratifiedSlot uint64
 	require.NoError(t, db.QueryRow(`

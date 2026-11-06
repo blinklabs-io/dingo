@@ -480,7 +480,7 @@ func TestAccountDRepClearSchemaTranslatesAllDialects(t *testing.T) {
 func TestPointerStakeMigrationTranslatesForProviders(t *testing.T) {
 	t.Parallel()
 
-	postgres, err := PostgresRegistry()
+	postgres, err := cachedPostgresRegistry()
 	require.NoError(t, err)
 	postgresSQL := strings.Join(postgres[12].SQL["postgres"].Expand, "\n")
 	require.Contains(t, postgresSQL, `"utxo_id" BIGINT NOT NULL`)
@@ -492,7 +492,7 @@ func TestPointerStakeMigrationTranslatesForProviders(t *testing.T) {
 	)
 	require.NotContains(t, postgresSQL, "`")
 
-	mysql, err := MySQLRegistry()
+	mysql, err := cachedMySQLRegistry()
 	require.NoError(t, err)
 	mysqlSQL := strings.Join(mysql[12].SQL["mysql"].Expand, "\n")
 	require.Contains(t, mysqlSQL, "`utxo_id` BIGINT NOT NULL")
@@ -507,13 +507,13 @@ func TestPointerStakeMigrationTranslatesForProviders(t *testing.T) {
 func TestCommitteeCredentialMigrationTranslatesForProviders(t *testing.T) {
 	t.Parallel()
 
-	postgres, err := PostgresRegistry()
+	postgres, err := cachedPostgresRegistry()
 	require.NoError(t, err)
 	postgresSQL := strings.Join(postgres[7].SQL["postgres"].Expand, "\n")
 	require.Contains(t, postgresSQL, `"cold_credential_tag" BIGINT`)
 	require.Contains(t, postgresSQL, "DROP INDEX IF EXISTS")
 
-	mysql, err := MySQLRegistry()
+	mysql, err := cachedMySQLRegistry()
 	require.NoError(t, err)
 	mysqlSQL := strings.Join(mysql[7].SQL["mysql"].Expand, "\n")
 	require.Contains(
@@ -539,7 +539,7 @@ func TestCommitteeCredentialMigrationTranslatesForProviders(t *testing.T) {
 // backfill statement in the same migration must not be rewritten at all.
 func TestMySQLRegistryPrefixesAccountBaselinePrimaryKey(t *testing.T) {
 	t.Parallel()
-	registry, err := MySQLRegistry()
+	registry, err := cachedMySQLRegistry()
 	require.NoError(t, err)
 	expand := registry[3].SQL["mysql"].Expand
 	require.Len(t, expand, 2)
@@ -559,7 +559,7 @@ func TestMySQLRegistryPrefixesAccountBaselinePrimaryKey(t *testing.T) {
 // requoted rather than left as MySQL backticks.
 func TestPostgresRegistryTypesAccountBaseline(t *testing.T) {
 	t.Parallel()
-	registry, err := PostgresRegistry()
+	registry, err := cachedPostgresRegistry()
 	require.NoError(t, err)
 	expand := registry[3].SQL["postgres"].Expand
 	require.Len(t, expand, 2)
@@ -579,7 +579,7 @@ func TestPostgresRegistryTypesAccountBaseline(t *testing.T) {
 // breaks if v3 ever stops carrying its own table definition.
 func TestMySQLRegistryPrefixesTokenRegistrySubjectIndex(t *testing.T) {
 	t.Parallel()
-	registry, err := MySQLRegistry()
+	registry, err := cachedMySQLRegistry()
 	require.NoError(t, err)
 	require.Contains(
 		t,
@@ -591,7 +591,7 @@ func TestMySQLRegistryPrefixesTokenRegistrySubjectIndex(t *testing.T) {
 
 func TestMySQLRegistryPrefixesPoolOpCertSequenceIndex(t *testing.T) {
 	t.Parallel()
-	registry, err := MySQLRegistry()
+	registry, err := cachedMySQLRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "mysql"))
 	require.Len(t, registry, 53)
@@ -654,14 +654,14 @@ func TestUtxoAddressIdentityMigrationTranslatesForProviders(t *testing.T) {
 func TestRewardCreditRoundMigrationTranslatesForProviders(t *testing.T) {
 	t.Parallel()
 
-	postgres, err := PostgresRegistry()
+	postgres, err := cachedPostgresRegistry()
 	require.NoError(t, err)
 	postgresSQL := strings.Join(postgres[30].SQL["postgres"].Expand, "\n")
 	require.Contains(t, postgresSQL, `CREATE INDEX IF NOT EXISTS "idx_reward_account_output_pending_round"`)
 	require.Contains(t, postgresSQL, `ON "reward_account_output"("spendable", "guarded", "folded", "epoch")`)
 	require.NotContains(t, postgresSQL, "`")
 
-	mysql, err := MySQLRegistry()
+	mysql, err := cachedMySQLRegistry()
 	require.NoError(t, err)
 	mysqlSQL := strings.Join(mysql[30].SQL["mysql"].Expand, "\n")
 	require.Contains(t, mysqlSQL, "CREATE INDEX `idx_reward_account_output_pending_round`")
@@ -672,7 +672,7 @@ func TestRewardCreditRoundMigrationTranslatesForProviders(t *testing.T) {
 func TestLeiosKeyLookupIndexesTranslateForProviders(t *testing.T) {
 	t.Parallel()
 
-	postgres, err := PostgresRegistry()
+	postgres, err := cachedPostgresRegistry()
 	require.NoError(t, err)
 	postgresSQL := strings.Join(postgres[50].SQL["postgres"].Expand, "\n")
 	require.Contains(t, postgresSQL,
@@ -680,7 +680,7 @@ func TestLeiosKeyLookupIndexesTranslateForProviders(t *testing.T) {
 	require.Contains(t, postgresSQL,
 		`ON "pool_retirement"("pool_id", "added_slot")`)
 
-	mysql, err := MySQLRegistry()
+	mysql, err := cachedMySQLRegistry()
 	require.NoError(t, err)
 	mysqlSQL := strings.Join(mysql[50].SQL["mysql"].Expand, "\n")
 	require.Contains(t, mysqlSQL,
@@ -693,14 +693,14 @@ func TestLeiosKeyLookupIndexesTranslateForProviders(t *testing.T) {
 func TestRatificationHistoryMigrationTranslatesForProviders(t *testing.T) {
 	t.Parallel()
 
-	postgres, err := PostgresRegistry()
+	postgres, err := cachedPostgresRegistry()
 	require.NoError(t, err)
 	postgresSQL := strings.Join(postgres[5].SQL["postgres"].Expand, "\n")
 	require.Contains(t, postgresSQL, `"id" BIGSERIAL PRIMARY KEY`)
 	require.Contains(t, postgresSQL, `"proposal_id" BIGINT NOT NULL`)
 	require.NotContains(t, postgresSQL, "`")
 
-	mysql, err := MySQLRegistry()
+	mysql, err := cachedMySQLRegistry()
 	require.NoError(t, err)
 	mysqlSQL := strings.Join(mysql[5].SQL["mysql"].Expand, "\n")
 	require.Contains(t, mysqlSQL, "`id` BIGINT AUTO_INCREMENT PRIMARY KEY")
