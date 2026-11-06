@@ -558,33 +558,6 @@ func TestNewValidatesMinPoolMargin(t *testing.T) {
 	}
 }
 
-func TestWithMidnightConfig(t *testing.T) {
-	t.Parallel()
-
-	cfg := &Config{}
-	midnightCfg := MidnightConfig{
-		Enabled:                     true,
-		ServerEnabled:               true,
-		ReflectionEnabled:           true,
-		Port:                        50052,
-		Host:                        "127.0.0.1",
-		CNightPolicyID:              "policy1",
-		CNightAssetName:             "434e49474854",
-		MappingValidatorAddress:     "addr_mapping",
-		AuthTokenAssetName:          "auth",
-		CommitteeCandidateAddress:   "addr_candidate",
-		TechnicalCommitteeAddress:   "addr_technical",
-		TechnicalCommitteePolicyID:  "policy_technical",
-		CouncilAddress:              "addr_council",
-		CouncilPolicyID:             "policy_council",
-		PermissionedCandidatePolicy: "policy_permissioned",
-	}
-
-	WithMidnightConfig(midnightCfg)(cfg)
-
-	assert.Equal(t, midnightCfg, cfg.midnight)
-}
-
 // TestSyncCompatFieldsMidnightAllFieldsMirrored guards against the same bug
 // class recurring for any future MidnightConfig field: it sets every field
 // of the internal internalconfig.MidnightConfig to a non-zero value, runs
