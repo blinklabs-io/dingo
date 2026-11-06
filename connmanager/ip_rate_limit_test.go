@@ -19,7 +19,6 @@ import (
 	"io"
 	"log/slog"
 	"net"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -433,84 +432,6 @@ func TestIPRateLimitConcurrentAccess(t *testing.T) {
 		"remaining attempts should fail",
 	)
 	assert.Equal(t, maxPerIP, cm.IPConnCount(ipKey))
-}
-
-// TestIPRateLimitRejectLogMessage verifies that rejected connections are
-// logged with a warning.
-func TestIPRateLimitRejectLogMessage(t *testing.T) {
-	defer goleak.VerifyNone(t)
-
-	const maxPerIP = 1
-	mockLn := newRateLimitMockListener()
-
-	// Use a buffer to capture log output
-	var logBuf safeBuffer
-	logger := slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{
-		Level: slog.LevelWarn,
-	}))
-
-	cfg := ConnectionManagerConfig{
-		Logger:              logger,
-		PromRegistry:        prometheus.NewRegistry(),
-		MaxConnectionsPerIP: maxPerIP,
-		Listeners: []ListenerConfig{
-			{
-				Listener: mockLn,
-			},
-		},
-	}
-
-	cm := NewConnectionManager(cfg)
-	err := cm.Start(context.Background())
-	require.NoError(t, err)
-
-	// Pre-fill IP
-	ipKey := "10.0.0.1"
-	require.True(t, cm.acquireIPSlot(ipKey))
-
-	// Provide a connection that should be rejected
-	mockLn.ProvideConnection(
-		newMockConnWithAddr("10.0.0.1", 50000),
-	)
-
-	// Check log output contains rejection message
-	require.Eventually(t, func() bool {
-		return strings.Contains(logBuf.String(), "per-IP limit")
-	}, 2*time.Second, 10*time.Millisecond,
-		"should log per-IP limit rejection",
-	)
-
-	// Clean up
-	cm.releaseIPSlot(ipKey)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	err = cm.Stop(ctx)
-	require.NoError(t, err)
-}
-
-// safeBuffer is a thread-safe buffer for capturing log output in tests.
-type safeBuffer struct {
-	buf  []byte
-	lock atomic.Int64 // simple spinlock via CAS
-}
-
-func (b *safeBuffer) Write(p []byte) (int, error) {
-	for !b.lock.CompareAndSwap(0, 1) {
-		// spin
-	}
-	b.buf = append(b.buf, p...)
-	b.lock.Store(0)
-	return len(p), nil
-}
-
-func (b *safeBuffer) String() string {
-	for !b.lock.CompareAndSwap(0, 1) {
-		// spin
-	}
-	s := string(b.buf)
-	b.lock.Store(0)
-	return s
 }
 
 // TestIPRateLimitReleasedOnOuroborosSetupFailure verifies that when

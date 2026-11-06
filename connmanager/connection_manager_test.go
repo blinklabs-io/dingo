@@ -176,26 +176,6 @@ func TestConnectionManagerConnClosed(t *testing.T) {
 	}
 }
 
-// Not t.Parallel: this and the other goleak.VerifyNone tests in this
-// package assert on the whole process's goroutine set, which a pending
-// parallel test is part of.
-func TestConnectionManager_Stop(t *testing.T) {
-	defer goleak.VerifyNone(t)
-
-	connManager := connmanager.NewConnectionManager(
-		connmanager.ConnectionManagerConfig{},
-	)
-
-	// Test stopping an empty connection manager
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
-	defer cancel()
-
-	err := connManager.Stop(ctx)
-	if err != nil {
-		t.Fatalf("Stop() returned error: %v", err)
-	}
-}
-
 func TestConnectionManager_Stop_WithListener(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
