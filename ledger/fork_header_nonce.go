@@ -135,7 +135,18 @@ func (ls *LedgerState) peerChainSelectionEpochNonce(
 			localTip.Slot == ancestor.Slot && bytes.Equal(localTip.Hash, ancestor.Hash) {
 			return nil, models.Epoch{}, false, nil
 		}
-		return nil, models.Epoch{}, false, err
+		// After a rollback across an epoch boundary the published cache ends
+		// at the anchor's epoch. A fork header inside the forecast horizon but
+		// in the next epoch is verified against forecast epochs derived from
+		// the fork's own ancestry instead of waiting for the ledger to apply
+		// the fork, which it cannot do until the fork is selected.
+		forecast, ok := ls.forecastPeerForkEpochCache(snapshot, header, err)
+		if !ok {
+			return nil, models.Epoch{}, false, err
+		}
+		forecastSnapshot := *snapshot
+		forecastSnapshot.epochCache = forecast
+		snapshot = &forecastSnapshot
 	}
 	if snapshot == nil {
 		return nil, models.Epoch{}, false, fmt.Errorf(
@@ -352,11 +363,23 @@ func (ls *LedgerState) peerChainSelectionEpochNonceAcrossEpochs(
 			sourceEpoch.EpochId+1,
 		)
 		if !ok || len(nextEpoch.CandidateNonce) != lcommon.Blake2b256Size {
-			return nil, models.Epoch{}, false, fmt.Errorf(
-				"%w: frozen candidate nonce for epoch %d is unavailable",
-				errHeaderVerificationDeferred,
-				sourceEpoch.EpochId,
+			// The ledger has not applied the next epoch, as after a local
+			// rollback across the boundary. The candidate froze at the
+			// cutoff, which precedes the intersection, so the local chain's
+			// prefix up to it is the fork's prefix and yields the same value.
+			_, _, frozen, _, nonceErr := ls.computeEpochNonceForSlot(
+				ctx,
+				sourceEpoch.StartSlot+uint64(sourceEpoch.LengthInSlots),
+				sourceEpoch,
 			)
+			if nonceErr != nil || len(frozen) != lcommon.Blake2b256Size {
+				return nil, models.Epoch{}, false, fmt.Errorf(
+					"%w: frozen candidate nonce for epoch %d is unavailable",
+					errHeaderVerificationDeferred,
+					sourceEpoch.EpochId,
+				)
+			}
+			nextEpoch.CandidateNonce = frozen
 		}
 		initialCandidateNonce = cloneNonce(nextEpoch.CandidateNonce)
 		// The evolving nonce after the cutoff cannot change the next
@@ -1361,4 +1384,51 @@ func (ls *LedgerState) trimPeerForkPathAtAppliedTip(
 		return trimmed, nil
 	}
 	return cached, nil
+}
+
+// forecastPeerForkEpochCache extends the snapshot's epoch cache with same-era
+// forecast epochs so that a peer fork header past the cached epochs, but within
+// the forecast horizon, can be verified. The forecast epochs carry no nonces:
+// the fork's nonce is derived from its own headers. It returns false when
+// cause is not an uncovered-epoch deferral, the era boundary is near, or the
+// cache cannot reach the header's slot.
+func (ls *LedgerState) forecastPeerForkEpochCache(
+	snapshot *consensusSnapshot,
+	header gledger.BlockHeader,
+	cause error,
+) ([]models.Epoch, bool) {
+	if snapshot == nil || len(snapshot.epochCache) == 0 ||
+		errors.Is(cause, ErrHeaderBeyondForecastHorizon) ||
+		!IsHeaderVerificationDeferred(cause) {
+		return nil, false
+	}
+	slot := header.SlotNumber()
+	if _, err := epochForSlotInCache(snapshot.epochCache, slot); err == nil {
+		return nil, false
+	}
+	const maxForecastEpochs = 5
+	cache := make([]models.Epoch, len(snapshot.epochCache), len(snapshot.epochCache)+maxForecastEpochs)
+	copy(cache, snapshot.epochCache)
+	for range maxForecastEpochs {
+		last := cache[len(cache)-1]
+		if last.LengthInSlots == 0 || slot < last.StartSlot ||
+			ls.validateEpochCacheForecast(
+				last,
+				snapshot.currentEra.Id,
+				snapshot.transitionInfo,
+			) != nil {
+			return nil, false
+		}
+		cache = append(cache, models.Epoch{
+			EpochId:       last.EpochId + 1,
+			StartSlot:     last.StartSlot + uint64(last.LengthInSlots),
+			LengthInSlots: last.LengthInSlots,
+			SlotLength:    last.SlotLength,
+			EraId:         last.EraId,
+		})
+		if _, err := epochForSlotInCache(cache, slot); err == nil {
+			return cache, true
+		}
+	}
+	return nil, false
 }

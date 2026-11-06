@@ -366,6 +366,13 @@ func (ls *LedgerState) validateChainSelectionHeaderCrypto(
 			return err
 		}
 		if fork {
+			cache := snapshot.epochCache
+			if _, ok := epochByIDInCache(cache, epoch.EpochId); !ok {
+				// A forecast epoch the fork's own ancestry produced.
+				forecast := epoch
+				forecast.Nonce = cloneNonce(epochNonce)
+				cache = append(slices.Clone(cache), forecast)
+			}
 			block := headerOnlyBlock{header: header, peerRelative: true}
 			if err := ls.verifyBlockHeaderStatelessCryptoWithEpochNonce(
 				ctx,
@@ -379,7 +386,7 @@ func (ls *LedgerState) validateChainSelectionHeaderCrypto(
 				ctx,
 				block,
 				epoch.EpochId,
-				snapshot.epochCache,
+				cache,
 				epochNonce,
 			)
 		} else {
