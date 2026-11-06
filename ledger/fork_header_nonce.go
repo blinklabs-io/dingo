@@ -809,6 +809,10 @@ func (ls *LedgerState) peerHeaderForkPathContext(
 	validCached := cachedOK && headerVerdictInContext(
 		cached.generation, contextGeneration, verificationGeneration,
 	) && ls.peerForkAncestorOnChain(ctx, cachedAncestor)
+	// A cancelled membership read reports the cached anchor absent.
+	if err := ctx.Err(); err != nil {
+		return ocommon.Point{}, nil, false, err
+	}
 	if validCached {
 		var err error
 		cached, err = ls.trimPeerForkPathAtAppliedTip(
@@ -915,6 +919,9 @@ func (ls *LedgerState) peerHeaderForkPathContext(
 				}
 				if (!ok || event.HeaderCryptoVerificationGeneration != 0) &&
 					!ls.chain.HoldsPoint(ctx, parentPoint) {
+					if err := ctx.Err(); err != nil {
+						return ocommon.Point{}, nil, false, err
+					}
 					return ocommon.Point{}, nil, false, fmt.Errorf(
 						"%w: candidate parent at slot %d has no current crypto verdict",
 						errHeaderVerificationDeferred,
@@ -951,6 +958,9 @@ func (ls *LedgerState) peerHeaderForkPathContext(
 		if isOrigin {
 			origin := ocommon.Point{}
 			if !ls.peerForkAncestorOnChain(ctx, origin) {
+				if err := ctx.Err(); err != nil {
+					return ocommon.Point{}, nil, false, err
+				}
 				return ocommon.Point{}, nil, false, nil
 			}
 			slices.Reverse(pathReversed)
@@ -997,6 +1007,11 @@ func (ls *LedgerState) peerHeaderForkPathContext(
 				)
 				return point, pathReversed, true, nil
 			}
+			// A cancelled read reports the ancestor absent, which would send
+			// the walk on to the peer's older headers.
+			if err := ctx.Err(); err != nil {
+				return ocommon.Point{}, nil, false, err
+			}
 		} else if !errors.Is(err, models.ErrBlockNotFound) {
 			return ocommon.Point{}, nil, false, fmt.Errorf(
 				"%w: lookup candidate ancestor %x: %w",
@@ -1038,6 +1053,9 @@ func (ls *LedgerState) peerHeaderForkPathContext(
 			}
 			if event.HeaderCryptoVerificationGeneration != 0 &&
 				!ls.chain.HoldsPoint(ctx, event.Point) {
+				if err := ctx.Err(); err != nil {
+					return ocommon.Point{}, nil, false, err
+				}
 				return ocommon.Point{}, nil, false, fmt.Errorf(
 					"%w: candidate ancestor at slot %d has no current crypto verdict",
 					errHeaderVerificationDeferred,
@@ -1345,6 +1363,9 @@ func (ls *LedgerState) trimPeerForkPathAtAppliedTip(
 		}
 		if block.Slot != point.Slot || !bytes.Equal(block.Hash, point.Hash) ||
 			!ls.peerForkAncestorOnChain(ctx, point) {
+			if err := ctx.Err(); err != nil {
+				return cached, err
+			}
 			return cached, fmt.Errorf(
 				"%w: applied candidate anchor changed",
 				errHeaderVerificationDeferred,

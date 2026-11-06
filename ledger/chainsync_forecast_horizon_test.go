@@ -2617,3 +2617,32 @@ func TestHeaderBeyondForecastHorizonUnsettledAnchorIsNotForecastable(
 	require.False(t, ls.headerBeyondForecastHorizon(t.Context(), e),
 		"a settled read anchors the header at its forecastable parent")
 }
+
+// A context that ends during the recheck before a resync is owed reads every
+// membership as absent. The wait must return the context's error rather than
+// admit the header or schedule a resync for a cancelled admission.
+func TestAwaitChainsyncHeaderAdmissionCancelledDuringRecheck(t *testing.T) {
+	t.Parallel()
+
+	for cancelAt := 1; cancelAt <= 4; cancelAt++ {
+		t.Run(fmt.Sprintf("lookup%d", cancelAt), func(t *testing.T) {
+			t.Parallel()
+			ls, blocks, headerOn := newForecastForkFixture(t)
+			fork := headerOn(blocks[0].Hash(), "fork")
+			ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+			defer cancel()
+			var lookups atomic.Int32
+			ls.lookupBlockByHash = func(hash []byte) (models.Block, error) {
+				if int(lookups.Add(1)) == cancelAt {
+					cancel()
+				}
+				return database.BlockByHash(ctx, ls.db, hash)
+			}
+			// No fetch work is outstanding, so an unsettled header reaches
+			// the resync decision.
+			ls.chainsyncBlockfetchReadyChan = nil
+			_, err := ls.AwaitChainsyncHeaderAdmission(ctx, fork)
+			require.ErrorIs(t, err, context.Canceled)
+		})
+	}
+}

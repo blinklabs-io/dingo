@@ -6764,7 +6764,11 @@ Ordinary Praos sessions continue to use primary-chain intersection points.
   chain or a ledger tip at the anchor. A membership read that a chain mutation
   overlapped, or that a cancelled context cut short (`Chain.HoldsPointSettled`
   reports it unsettled), is repeated up to three times unless the context has
-  ended, in which case the wait returns the context's error. A walk still
+  ended, in which case the wait returns the context's error. Admission, the
+  recheck before a resync, the observer wait, the fork-path ancestry walk and
+  the trusted-batch store treat a context that ended during a membership read
+  the same way: as cancellation, never as an absent block, a header inside the
+  horizon, or a disconnected header owed a resync. A walk still
   unsettled neither holds the header nor caches an anchor: taking the overlap for an absent block would anchor the forecast at an
   older ancestor. A walk that ends at a parent that is neither recorded, queued,
   nor held by the local chain (`resolveForkAnchor` reports it disconnected)

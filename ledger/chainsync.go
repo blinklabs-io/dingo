@@ -5433,13 +5433,23 @@ func (ls *LedgerState) AwaitChainsyncHeaderAdmission(
 			return false, fmt.Errorf("wait for forecast horizon: %w", err)
 		}
 		slotTime, err = ls.slotClock.SlotToTime(headerSlot)
-	} else if err == nil && ls.headerBeyondForecastHorizon(ctx, e) {
-		// The slot is in range from the local tip, but the peer's chain
-		// leaves the local chain earlier, and is forecast from there.
-		if err := ls.awaitForecastHorizon(ctx, e); err != nil {
-			return false, fmt.Errorf("wait for forecast horizon: %w", err)
+	} else if err == nil {
+		beyond := ls.headerBeyondForecastHorizon(ctx, e)
+		// A context that ended during the anchor walk reads every membership
+		// as absent, which looks like a header inside the horizon.
+		if ctx != nil {
+			if cerr := ctx.Err(); cerr != nil {
+				return false, fmt.Errorf("wait for forecast horizon: %w", cerr)
+			}
 		}
-		slotTime, err = ls.slotClock.SlotToTime(headerSlot)
+		if beyond {
+			// The slot is in range from the local tip, but the peer's chain
+			// leaves the local chain earlier, and is forecast from there.
+			if err := ls.awaitForecastHorizon(ctx, e); err != nil {
+				return false, fmt.Errorf("wait for forecast horizon: %w", err)
+			}
+			slotTime, err = ls.slotClock.SlotToTime(headerSlot)
+		}
 	}
 	if err != nil {
 		return false, fmt.Errorf("resolve header slot onset: %w", err)
@@ -5669,7 +5679,14 @@ func (ls *LedgerState) awaitForecastHorizon(
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			if !ls.headerBeyondForecastHorizon(ctx, e) {
+			beyond := ls.headerBeyondForecastHorizon(ctx, e)
+			// A context that ended during the recheck reads every membership
+			// as absent: the header may look inside the horizon or past it,
+			// and neither admits it nor owes it a resync.
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if !beyond {
 				return nil
 			}
 			select {

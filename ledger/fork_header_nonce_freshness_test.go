@@ -461,3 +461,47 @@ func TestPeerForkOpCertCountersClassifiesContextChange(t *testing.T) {
 		key, prefix, ancestor, target, current, counters,
 	))
 }
+
+// A context that ends while the walk checks whether an ancestor is on the
+// local chain makes the chain answer "not held". That must surface as the
+// context's error, not as a header with no path to the local chain.
+func TestPeerHeaderForkPathCancelledDuringAncestorMembership(t *testing.T) {
+	t.Parallel()
+	f := newForkPathFreshnessFixture(t, 0)
+	anchor := f.ls.currentTip
+	nonce := bytes.Repeat([]byte{0x31}, lcommon.Blake2b256Size)
+	number := anchor.BlockNumber + 1
+	target := createTestBlockWithNonceAtSlotsAndBlockNumber(
+		t,
+		[32]byte{73},
+		nonce,
+		anchor.Point.Slot+1,
+		anchor.Point.Slot+100,
+		anchor.Point.Hash,
+		&number,
+		tamperNone,
+		0,
+	).block.Header()
+
+	_, _, found, err := f.ls.peerHeaderForkPathContext(
+		t.Context(), ouroboros.ConnectionId{}, target,
+	)
+	require.NoError(t, err)
+	require.True(t, found, "the uncancelled walk reaches the local chain")
+	f.ls.removePeerForkNoncePrefix(connIdKey(ouroboros.ConnectionId{}))
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	f.ls.lookupBlockByHash = func([]byte) (models.Block, error) {
+		cancel()
+		return models.Block{
+			Slot: anchor.Point.Slot,
+			Hash: anchor.Point.Hash,
+		}, nil
+	}
+	_, _, found, err = f.ls.peerHeaderForkPathContext(
+		ctx, ouroboros.ConnectionId{}, target,
+	)
+	require.ErrorIs(t, err, context.Canceled)
+	require.False(t, found)
+}
