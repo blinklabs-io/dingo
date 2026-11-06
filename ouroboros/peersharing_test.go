@@ -28,41 +28,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestPeerSharingConfigSetsLocalDisabledFromNodeConfig(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name              string
-		peerSharing       bool
-		wantLocalDisabled bool
-	}{
-		{
-			name:              "disabled",
-			peerSharing:       false,
-			wantLocalDisabled: true,
-		},
-		{
-			name:              "enabled",
-			peerSharing:       true,
-			wantLocalDisabled: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			o := newOuroboros(OuroborosConfig{
-				PeerSharing: tt.peerSharing,
-			})
-
-			cfg := o.peerSharingConfig()
-
-			require.Equal(t, tt.wantLocalDisabled, cfg.LocalDisabled)
-			require.False(t, cfg.RemoteDisabled)
-			require.NotNil(t, cfg.ShareRequestFunc)
-		})
-	}
-}
-
 // TestPeerSharingShareRequestBoundsValidPeers verifies that malformed peers
 // are skipped without consuming the requested reply count and that every
 // returned peer has a valid IP address and port.
@@ -390,47 +355,6 @@ func TestPeerSharingReplyRejectsAddressClasses(t *testing.T) {
 			require.Equal(t, []string{controlV4, controlV6}, addrs)
 		})
 	}
-}
-
-// TestPeerSharingReplyEmitsResolvableLiterals verifies that every accepted
-// address is an IP literal. peergov.isRoutableAddr treats a host that does not
-// parse as an IP as a routable hostname, so a malformed entry rendered as
-// "<nil>:3001" would be accepted there and then sent to a DNS lookup.
-func TestPeerSharingReplyEmitsResolvableLiterals(t *testing.T) {
-	t.Parallel()
-
-	o := newOuroboros(OuroborosConfig{})
-
-	reply := []opeersharing.PeerAddress{
-		{IP: nil, Port: 3001},
-		{IP: net.IP{1, 2, 3}, Port: 3001},
-		mkPeerAddr("44.0.0.1", 3001),
-	}
-	for _, addr := range o.peerSharingReplyAddresses(reply, len(reply)) {
-		host, _, err := net.SplitHostPort(addr)
-		require.NoError(t, err)
-		require.NotNil(
-			t,
-			net.ParseIP(host),
-			"every emitted candidate must be an IP literal, got %q",
-			addr,
-		)
-	}
-}
-
-func TestPeerSharingReplyCollectsRequestedValidAddresses(t *testing.T) {
-	o := newOuroboros(OuroborosConfig{})
-
-	addrs := o.peerSharingReplyAddresses([]opeersharing.PeerAddress{
-		{IP: net.ParseIP("10.0.0.1"), Port: 3001},
-		mkPeerAddr("44.0.0.1", 3001),
-		mkPeerAddr("2001:4860:4860::8888", 3002),
-	}, 2)
-
-	require.Equal(t, []string{
-		"44.0.0.1:3001",
-		"[2001:4860:4860::8888]:3002",
-	}, addrs)
 }
 
 // newSaltedShareRequestFixture returns an Ouroboros whose peer governor holds

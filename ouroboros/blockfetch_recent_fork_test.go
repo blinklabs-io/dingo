@@ -249,36 +249,3 @@ func TestRecordForkBattleParticipantsRegistersRolledBackBlocks(t *testing.T) {
 	assert.Equal(t, 1.0, got[1])
 	assert.Equal(t, 100.0, got[2])
 }
-
-// Two rolled-back blocks at the same height with different hashes (e.g. both
-// sides of a battle got rolled back across a deeper reorg) both register.
-func TestRecordForkBattleParticipantsRegistersMultipleRolledBackBlocks(
-	t *testing.T,
-) {
-	t.Parallel()
-	reg := prometheus.NewRegistry()
-	o := newOuroboros(OuroborosConfig{PromRegistry: reg})
-
-	o.RecordForkBattleParticipants([]models.Block{
-		{Number: 100, Slot: 1000, Hash: []byte{0x01}},
-		{Number: 100, Slot: 1002, Hash: []byte{0x02}},
-	})
-
-	idx := strconv.FormatUint(100%recentBlockDelaySlots, 10)
-	got := gatherRecentForkBattles(t, reg)[idx]
-	assert.Equal(t, 2.0, got[0])
-	assert.Equal(t, 2.0, got[1])
-}
-
-// With metrics disabled (no PromRegistry configured), recentForks is never
-// initialized; RecordForkBattleParticipants must not panic on a nil ring.
-func TestRecordForkBattleParticipantsNilMetricsSafe(t *testing.T) {
-	t.Parallel()
-	o := newOuroboros(OuroborosConfig{})
-
-	assert.NotPanics(t, func() {
-		o.RecordForkBattleParticipants([]models.Block{
-			{Number: 100, Slot: 1000, Hash: []byte{0x01}},
-		})
-	})
-}

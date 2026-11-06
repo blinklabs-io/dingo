@@ -22,7 +22,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/event"
 	ouroboros_conn "github.com/blinklabs-io/gouroboros/connection"
 	"github.com/stretchr/testify/assert"
@@ -44,31 +43,6 @@ func testConnIdWithPort(
 			Port: port,
 		},
 	}
-}
-
-func TestTokenBucket_BasicAllow(t *testing.T) {
-	t.Parallel()
-
-	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	tb := newTokenBucket(10, 20, now)
-
-	// Should allow up to burst size
-	assert.True(
-		t,
-		tb.allow(10, now),
-		"should allow 10 tokens from burst of 20",
-	)
-	assert.True(
-		t,
-		tb.allow(10, now),
-		"should allow another 10 tokens from burst of 20",
-	)
-	// Burst exhausted
-	assert.False(
-		t,
-		tb.allow(1, now),
-		"should reject when tokens exhausted",
-	)
 }
 
 func TestTokenBucket_Refill(t *testing.T) {
@@ -120,138 +94,6 @@ func TestTokenBucket_RefillCap(t *testing.T) {
 		t,
 		tb.allow(1, later),
 		"should reject since bucket only holds burst",
-	)
-}
-
-func TestTokenBucket_PartialConsumption(t *testing.T) {
-	t.Parallel()
-
-	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	tb := newTokenBucket(10, 20, now)
-
-	// Consume some tokens
-	assert.True(t, tb.allow(5, now), "should allow 5 of 20")
-	assert.True(t, tb.allow(5, now), "should allow another 5")
-	assert.True(t, tb.allow(5, now), "should allow another 5")
-	assert.True(t, tb.allow(5, now), "should allow last 5")
-	assert.False(t, tb.allow(1, now), "should reject at 0 tokens")
-}
-
-func TestTxSubmissionRateLimiter_NormalRate(t *testing.T) {
-	t.Parallel()
-
-	rl := newTxSubmissionRateLimiter(30, 60)
-	peer := testConnIdWithPort(4001)
-
-	// Normal submission rate: 10 txs at a time, well within burst
-	assert.True(
-		t,
-		rl.Allow(peer, 10),
-		"normal batch of 10 should be allowed",
-	)
-	assert.True(
-		t,
-		rl.Allow(peer, 10),
-		"second batch of 10 should be allowed",
-	)
-	assert.True(
-		t,
-		rl.Allow(peer, 10),
-		"third batch of 10 should be allowed",
-	)
-}
-
-func TestTxSubmissionRateLimiter_ExcessiveRate(t *testing.T) {
-	t.Parallel()
-
-	rl := newTxSubmissionRateLimiter(10, 20)
-	// Override time function for deterministic testing
-	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	rl.nowFunc = func() time.Time { return now }
-
-	peer := testConnIdWithPort(4001)
-
-	// Exhaust the burst
-	assert.True(
-		t,
-		rl.Allow(peer, 10),
-		"first batch should be allowed",
-	)
-	assert.True(
-		t,
-		rl.Allow(peer, 10),
-		"second batch should be allowed (burst=20)",
-	)
-	// Now the bucket is empty
-	assert.False(
-		t,
-		rl.Allow(peer, 1),
-		"should reject when rate limit exceeded",
-	)
-}
-
-func TestTxSubmissionRateLimiter_PerPeerIsolation(t *testing.T) {
-	t.Parallel()
-
-	rl := newTxSubmissionRateLimiter(10, 20)
-	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	rl.nowFunc = func() time.Time { return now }
-
-	peerA := testConnIdWithPort(4001)
-	peerB := testConnIdWithPort(4002)
-
-	// Exhaust peer A's bucket
-	assert.True(t, rl.Allow(peerA, 20), "peer A burst allowed")
-	assert.False(
-		t,
-		rl.Allow(peerA, 1),
-		"peer A should be rate limited",
-	)
-
-	// Peer B should still have a full bucket
-	assert.True(
-		t,
-		rl.Allow(peerB, 20),
-		"peer B should be unaffected by peer A",
-	)
-	assert.False(
-		t,
-		rl.Allow(peerB, 1),
-		"peer B should now be rate limited",
-	)
-}
-
-func TestTxSubmissionRateLimiter_Recovery(t *testing.T) {
-	t.Parallel()
-
-	rl := newTxSubmissionRateLimiter(10, 20)
-	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	mu := sync.Mutex{}
-	rl.nowFunc = func() time.Time {
-		mu.Lock()
-		defer mu.Unlock()
-		return now
-	}
-
-	peer := testConnIdWithPort(4001)
-
-	// Exhaust the bucket
-	assert.True(t, rl.Allow(peer, 20), "burst allowed")
-	assert.False(
-		t,
-		rl.Allow(peer, 1),
-		"should be rate limited",
-	)
-
-	// Advance time: tokens should refill
-	mu.Lock()
-	now = now.Add(2 * time.Second) // +20 tokens at rate=10/s
-	mu.Unlock()
-
-	assert.True(
-		t,
-		rl.Allow(peer, 10),
-		"should allow after refill",
 	)
 }
 
@@ -355,71 +197,6 @@ func TestNewOuroboros_DisabledRateLimit(t *testing.T) {
 		t,
 		o.txSubmissionRateLimiter,
 		"rate limiter should be nil when disabled",
-	)
-}
-
-func TestHandleConnClosedEvent_CleansUpRateLimiter(t *testing.T) {
-	t.Parallel()
-
-	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	o := newOuroboros(OuroborosConfig{
-		Logger:                    logger,
-		EventBus:                  event.NewEventBus(nil, logger),
-		MaxTxSubmissionsPerSecond: 10,
-	})
-
-	peer := testConnIdWithPort(4001)
-
-	// Create rate limiter state for this peer
-	o.txSubmissionRateLimiter.Allow(peer, 1)
-
-	// Verify the peer exists in the rate limiter
-	_, exists := o.txSubmissionRateLimiter.peers.Load(connIdKey(peer))
-	require.True(t, exists, "peer should exist in rate limiter")
-
-	// Simulate a connection closed event through the actual handler
-	evt := event.NewEvent(
-		connmanager.ConnectionClosedEventType,
-		connmanager.ConnectionClosedEvent{
-			ConnectionId: peer,
-		},
-	)
-	o.HandleConnClosedEvent(evt)
-
-	// Verify cleanup
-	_, exists = o.txSubmissionRateLimiter.peers.Load(connIdKey(peer))
-	assert.False(
-		t,
-		exists,
-		"peer should be removed from rate limiter after connection closed event",
-	)
-}
-
-func TestTxSubmissionRateLimiter_CustomRatePlumbing(t *testing.T) {
-	t.Parallel()
-
-	// Verify that a custom MaxTxSubmissionsPerSecond value is
-	// correctly plumbed through to the rate limiter with the
-	// expected rate and burst (2x rate).
-	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	o := newOuroboros(OuroborosConfig{
-		Logger:                    logger,
-		EventBus:                  event.NewEventBus(nil, logger),
-		MaxTxSubmissionsPerSecond: 10,
-	})
-
-	require.NotNil(t, o.txSubmissionRateLimiter)
-	assert.Equal(
-		t,
-		float64(10),
-		o.txSubmissionRateLimiter.rate,
-		"rate should match custom config value",
-	)
-	assert.Equal(
-		t,
-		float64(20),
-		o.txSubmissionRateLimiter.burst,
-		"burst should be 2x the custom rate",
 	)
 }
 

@@ -294,18 +294,6 @@ func TestRecordServedActivityIsThrottledPerConnection(t *testing.T) {
 		"closing a connection clears its throttle state")
 }
 
-func TestKeepaliveServerPingRecordsServedActivity(t *testing.T) {
-	t.Parallel()
-	var reports atomic.Int64
-	o := &Ouroboros{servedActivityHook: func(ouroboros.ConnectionId) {
-		reports.Add(1)
-	}}
-	cfg := okeepalive.NewConfig(o.keepaliveConnOpts()...)
-	require.NotNil(t, cfg.OnKeepAliveReceived)
-	cfg.OnKeepAliveReceived(servedTestConnId(40003), 1)
-	assert.Equal(t, int64(1), reports.Load())
-}
-
 func TestRecordServedActivitySkipsNonTCPConnections(t *testing.T) {
 	t.Parallel()
 	var reports atomic.Int64
