@@ -4724,6 +4724,15 @@ func (ls *LedgerState) pruneConsumedUtxosUpTo(
 	target, stabilityWindow uint64,
 	limit int,
 ) (int, uint64, error) {
+	ls.consumedUtxoPruneMutex.Lock()
+	defer ls.consumedUtxoPruneMutex.Unlock()
+	pendingFloor, protected, err := pendingRewardStakeInputHistoryFloor(ls.db.Metadata(), nil)
+	if err != nil {
+		return 0, 0, err
+	}
+	if protected {
+		target = min(target, pendingFloor)
+	}
 	// Capped at the oldest acquired LocalStateQuery point, and announced,
 	// before anything below is persisted or deleted -- see
 	// acquiredPointPins for why that order matters.
@@ -4740,8 +4749,6 @@ func (ls *LedgerState) pruneConsumedUtxosUpTo(
 	// "absent" for a ref that was actually there. Returning here just skips
 	// this run; the next periodic tick tries again from the same (or a
 	// later) floor.
-	ls.consumedUtxoPruneMutex.Lock()
-	defer ls.consumedUtxoPruneMutex.Unlock()
 	if err := ls.persistConsumedUtxoPruneFloor(floor, nil); err != nil {
 		ls.config.Logger.Error(
 			"failed to persist consumed UTxO prune floor",
