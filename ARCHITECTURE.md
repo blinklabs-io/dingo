@@ -887,6 +887,11 @@ contested slot, so the existing predicates truncate that slot whole and the
 block at the target is re-applied; when no such ancestor exists it fails with
 `ErrNoAppliedAncestorBelowContestedSlot` rather than reporting the repair.
 `enforceDurableTipFloor` is the path that produces such a target.
+The redirect uses the persisted ledger tip to distinguish an applied block
+from a queued one. Byron EBBs and main blocks have empty block nonces, so a
+nonce cannot establish that distinction. Rolling back to an EBB at the same
+slot as an applied main block removes the main block's UTxO effects before
+reapplying the EBB.
 
 At-tip transaction and deferred-header recovery may call
 `rollbackWithOptions(..., repairSameTip=true)` when a failed block left
