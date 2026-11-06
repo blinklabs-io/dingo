@@ -291,6 +291,7 @@ func RegisterSQLiteProvider(host *plugin.Host) error {
 					return nil, nil, err
 				}
 			}
+			//nolint:contextcheck // the disk-size probe runs on the store's metrics goroutine, not under the plugin start ctx
 			store, err := sqlite.NewSQLStore(cfg, deps)
 			if err != nil {
 				return nil, nil, err
