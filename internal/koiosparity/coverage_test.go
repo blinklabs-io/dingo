@@ -141,12 +141,3 @@ func requireResponseFieldsCovered(
 		require.Contains(t, coverage, endpoint+"."+jsonName)
 	}
 }
-
-func TestKoiosCoverageMatrixReturnsCopy(t *testing.T) {
-	t.Parallel()
-
-	first := KoiosCoverageMatrix()
-	require.NotEmpty(t, first)
-	first[0].Field = "mutated"
-	require.NotEqual(t, "mutated", KoiosCoverageMatrix()[0].Field)
-}

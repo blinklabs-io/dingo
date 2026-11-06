@@ -338,6 +338,10 @@ func TestCacheWritesNeverUpgradeAReadSnapshot(t *testing.T) {
 
 	cases := []struct {
 		name string
+		// iterations is sized from the pre-fix failure rates below so that a
+		// regression still shows at least ten hits on average (about 90 and 15
+		// at these counts) while the test stays a few seconds under -race.
+		iterations int
 		// write performs one call of the path under test. Pre-fix
 		// measurements are the SQLITE_BUSY_SNAPSHOT count per 3000 calls on
 		// an unloaded machine.
@@ -346,7 +350,8 @@ func TestCacheWritesNeverUpgradeAReadSnapshot(t *testing.T) {
 		{
 			// assertClaimedSource's SELECT used to run before the caller's
 			// write. Pre-fix: 891 to 1321 of 3000 on 8 of 8 runs.
-			name: "gated write via withClaimedSource",
+			name:       "gated write via withClaimedSource",
+			iterations: 300,
 			write: func(t *testing.T, c *Cache, i int) {
 				t.Helper()
 				recordSnapshotBusy(t, c.UpsertEpochParams(KoiosEpochParams{
@@ -362,7 +367,8 @@ func TestCacheWritesNeverUpgradeAReadSnapshot(t *testing.T) {
 			// decide what to discard, so its read cannot move after its
 			// writes; it claims the writer slot with a no-op UPDATE instead.
 			// Pre-fix: 30 to 55 of 3000 on 4 of 4 runs.
-			name: "RecordKoiosSource",
+			name:       "RecordKoiosSource",
+			iterations: 1000,
 			write: func(t *testing.T, c *Cache, _ int) {
 				t.Helper()
 				_, err := c.RecordKoiosSource(network, sourceURL, now)
@@ -373,7 +379,6 @@ func TestCacheWritesNeverUpgradeAReadSnapshot(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			const iterations = 3000
 			path := filepath.Join(t.TempDir(), "cache.db")
 
 			writer, err := openTestCache(path, nil)
@@ -411,7 +416,7 @@ func TestCacheWritesNeverUpgradeAReadSnapshot(t *testing.T) {
 				}
 			}()
 
-			for i := range iterations {
+			for i := range tc.iterations {
 				tc.write(t, writer, i)
 			}
 			close(stop)

@@ -32,8 +32,10 @@ import (
 )
 
 func TestObserverAutomaticallyRecoversErrorEpochWithoutNewEvent(t *testing.T) {
+	t.Parallel()
 	for _, accounts := range []bool{false, true} {
 		t.Run(map[bool]string{false: "aggregate", true: "accounts"}[accounts], func(t *testing.T) {
+			t.Parallel()
 			source, err := NewDatabaseSource(newTestDatabaseSourceDB(t))
 			require.NoError(t, err)
 			srv := newFakeKoiosServer(t, map[uint64]*fakeEpochRef{
