@@ -14147,12 +14147,21 @@ second sync:
     `n.cancelForFatal` — exactly once, on the first fatal-eligible failure,
     and stops processing the rest of the current batch. Every tool error
     (`reportError`) and every non-pass parity result is fatal-eligible,
-    from either queue (`processEpoch` and `processAccountEpoch`). A failure
-    to fetch the Koios reference (`reportReferenceError`) never is: an
-    unreachable or failing reference says nothing about whether Dingo's
-    state agrees with it, so the error is persisted and the epoch is retried
-    like any other error, but the node keeps running. The one non-pass
-    result that is not fatal-eligible is a result whose significant mismatches are all
+    from either queue (`processEpoch` and `processAccountEpoch`). A failed
+    reference fetch (`reportFetchError`) is classified by provenance, since
+    the fetch both requests Koios and reads and writes the local cache. Only
+    a Koios request that failed because Koios is unavailable
+    (`koiosUnavailable`) is not fatal-eligible: a transport error, timeout
+    or 5xx that outlasted the client's own retries, an exhausted 408 budget,
+    or daily-quota exhaustion. `get` and `post` mark every error they return
+    with `errKoiosRequest`, and the last two also with `errKoiosUnavailable`.
+    An unreachable reference says nothing about whether Dingo's state agrees
+    with it, so the error is persisted and the epoch is retried, but the node
+    keeps running. A local cache or database error during the fetch, any
+    other `ErrKoiosPermanent` failure (auth, bad request, oversized
+    response) and a response that fails to decode stay fatal-eligible. The one
+    non-pass result that is not fatal-eligible is a result whose significant
+    mismatches are all
     `reference_lag` (`referenceLagOnly`). That means Koios's own data for the
     epoch has not caught up, not that Dingo is wrong, so it is logged and
     persisted like any other non-pass result but never calls `FatalFunc` and
