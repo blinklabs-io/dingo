@@ -549,7 +549,7 @@ func TestQueryShelleyUtxoWhole_CancelsDuringDecode(t *testing.T) {
 		nil,
 	)
 	require.NoError(t, err)
-	const rowCount = 100
+	const rowCount = 2 * utxoWholeResolveWorkers
 	for i := range rowCount {
 		seedBabbageUtxo(
 			t,
@@ -610,7 +610,7 @@ func TestQueryShelleyUtxoWhole_AbortsEarlyOnFirstFailure(t *testing.T) {
 	// Not t.Parallel: swaps the package-level decodeUtxoWholeCborFunc seam.
 	db := newTestDB(t)
 
-	const rowCount = 100
+	const rowCount = 3 * utxoWholeResolveWorkers
 	addr, err := lcommon.NewAddressFromParts(
 		lcommon.AddressTypeKeyNone,
 		lcommon.AddressNetworkTestnet,
