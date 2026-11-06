@@ -74,35 +74,39 @@ func seedStakeCredentialUtxos(
 		),
 	)
 
-	for i := range numUtxos {
-		payment := make([]byte, lcommon.AddressHashSize)
-		binary.BigEndian.PutUint32(payment, uint32(i)+1)
-		txHash := make([]byte, 32)
-		binary.BigEndian.PutUint32(txHash[28:], uint32(i)+1)
-		slot := uint64(i) + 1
-		amount := (uint64(i) + 1) * 1_000_000
-		insertAdapterTransaction(t, raw, &models.Transaction{
-			Hash:       txHash,
-			Slot:       slot,
-			BlockIndex: 0,
-			Outputs: []models.Utxo{{
-				TxId:       txHash,
-				OutputIdx:  0,
-				PaymentKey: payment,
-				StakingKey: stakeKey,
-				AddedSlot:  slot,
-				Amount:     types.Uint64(amount),
-			}},
-		})
-		addr, err := lcommon.NewAddressFromParts(
-			lcommon.AddressTypeKeyKey,
-			lcommon.AddressNetworkTestnet,
-			payment,
-			stakeKey,
-		)
-		require.NoError(t, err)
-		storePointerOutputCbor(t, db, txHash, 0, addr, amount)
-	}
+	outs := make([]pointerOutput, 0, numUtxos)
+	inSQLTransaction(t, raw, func(tx *sql.Tx) {
+		for i := range numUtxos {
+			payment := make([]byte, lcommon.AddressHashSize)
+			binary.BigEndian.PutUint32(payment, uint32(i)+1)
+			txHash := make([]byte, 32)
+			binary.BigEndian.PutUint32(txHash[28:], uint32(i)+1)
+			slot := uint64(i) + 1
+			amount := (uint64(i) + 1) * 1_000_000
+			insertAdapterTransaction(t, tx, &models.Transaction{
+				Hash:       txHash,
+				Slot:       slot,
+				BlockIndex: 0,
+				Outputs: []models.Utxo{{
+					TxId:       txHash,
+					OutputIdx:  0,
+					PaymentKey: payment,
+					StakingKey: stakeKey,
+					AddedSlot:  slot,
+					Amount:     types.Uint64(amount),
+				}},
+			})
+			addr, err := lcommon.NewAddressFromParts(
+				lcommon.AddressTypeKeyKey,
+				lcommon.AddressNetworkTestnet,
+				payment,
+				stakeKey,
+			)
+			require.NoError(t, err)
+			outs = append(outs, pointerOutput{txHash, 0, addr, amount})
+		}
+	})
+	storePointerOutputsCbor(t, db, outs)
 	return stakeAddr.String(), stakeKey
 }
 
@@ -217,26 +221,30 @@ func TestNodeAdapterAddressUTXOsLargeResultSetPagination(t *testing.T) {
 	require.NoError(t, err)
 
 	const total = database.ExactAddressCandidateScanLimit + 1
-	for i := range total {
-		txHash := make([]byte, 32)
-		binary.BigEndian.PutUint32(txHash[28:], uint32(i)+1)
-		slot := uint64(i) + 1
-		amount := (uint64(i) + 1) * 1_000_000
-		insertAdapterTransaction(t, raw, &models.Transaction{
-			Hash:       txHash,
-			Slot:       slot,
-			BlockIndex: 0,
-			Outputs: []models.Utxo{{
-				TxId:       txHash,
-				OutputIdx:  0,
-				PaymentKey: payment,
-				Address:    []byte(addr.String()),
-				AddedSlot:  slot,
-				Amount:     types.Uint64(amount),
-			}},
-		})
-		storePointerOutputCbor(t, db, txHash, 0, addr, amount)
-	}
+	outs := make([]pointerOutput, 0, total)
+	inSQLTransaction(t, raw, func(tx *sql.Tx) {
+		for i := range total {
+			txHash := make([]byte, 32)
+			binary.BigEndian.PutUint32(txHash[28:], uint32(i)+1)
+			slot := uint64(i) + 1
+			amount := (uint64(i) + 1) * 1_000_000
+			insertAdapterTransaction(t, tx, &models.Transaction{
+				Hash:       txHash,
+				Slot:       slot,
+				BlockIndex: 0,
+				Outputs: []models.Utxo{{
+					TxId:       txHash,
+					OutputIdx:  0,
+					PaymentKey: payment,
+					Address:    []byte(addr.String()),
+					AddedSlot:  slot,
+					Amount:     types.Uint64(amount),
+				}},
+			})
+			outs = append(outs, pointerOutput{txHash, 0, addr, amount})
+		}
+	})
+	storePointerOutputsCbor(t, db, outs)
 
 	t.Run("ascending page stops at the requested window", func(t *testing.T) {
 		items, gotTotal, err := adapter.AddressUTXOs(
@@ -518,21 +526,23 @@ func TestNodeAdapterAssetAddressesStreamsWidelyHeldAsset(t *testing.T) {
 			}},
 		}
 	}
-	insertAdapterTransaction(t, store, &models.Transaction{
-		Hash:    txHash,
-		Slot:    1,
-		Outputs: outputs,
+	inSQLTransaction(t, store, func(tx *sql.Tx) {
+		insertAdapterTransaction(t, tx, &models.Transaction{
+			Hash:    txHash,
+			Slot:    1,
+			Outputs: outputs,
+		})
 	})
+	outs := make([]pointerOutput, len(outputs))
 	for i := range outputs {
-		storePointerOutputCbor(
-			t,
-			db,
+		outs[i] = pointerOutput{
 			txHash,
 			uint32(i), //nolint:gosec // bounded test fixture
 			addr,
 			1_000_000,
-		)
+		}
 	}
+	storePointerOutputsCbor(t, db, outs)
 
 	holders, total, err := adapter.AssetAddresses(
 		context.Background(),
@@ -865,9 +875,16 @@ func newDBBackedAdapterWithStorageMode(
 	return adapter, raw, db
 }
 
+// sqlExecer is satisfied by both *sql.DB and *sql.Tx, so a fixture that
+// inserts thousands of rows can run them in one transaction instead of one
+// autocommit per statement.
+type sqlExecer interface {
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
 func insertAdapterUtxo(
 	t *testing.T,
-	raw *sql.DB,
+	raw sqlExecer,
 	utxo *models.Utxo,
 ) {
 	t.Helper()
@@ -917,7 +934,7 @@ VALUES (?, ?, ?, ?, ?)`,
 
 func insertAdapterTransaction(
 	t *testing.T,
-	raw *sql.DB,
+	raw sqlExecer,
 	tx *models.Transaction,
 ) {
 	t.Helper()
@@ -998,6 +1015,50 @@ func storePointerOutputCbor(
 	require.NoError(t, db.BlobTxn(true).Do(func(txn *database.Txn) error {
 		return db.Blob().SetUtxo(txn.Blob(), txID, outputIdx, raw)
 	}))
+}
+
+// pointerOutput is one output whose CBOR storePointerOutputsCbor writes.
+type pointerOutput struct {
+	txID   []byte
+	idx    uint32
+	addr   lcommon.Address
+	amount uint64
+}
+
+// storePointerOutputsCbor writes the CBOR of every output in one blob
+// transaction.
+func storePointerOutputsCbor(
+	t *testing.T,
+	db *database.Database,
+	outs []pointerOutput,
+) {
+	t.Helper()
+	require.NoError(t, db.BlobTxn(true).Do(func(txn *database.Txn) error {
+		for _, out := range outs {
+			raw, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
+				OutputAddress: out.addr,
+				OutputAmount:  out.amount,
+			})
+			if err != nil {
+				return err
+			}
+			if err := db.Blob().SetUtxo(
+				txn.Blob(), out.txID, out.idx, raw,
+			); err != nil {
+				return err
+			}
+		}
+		return nil
+	}))
+}
+
+// inSQLTransaction runs seed against one transaction on raw and commits it.
+func inSQLTransaction(t *testing.T, raw *sql.DB, seed func(tx *sql.Tx)) {
+	t.Helper()
+	tx, err := raw.Begin()
+	require.NoError(t, err)
+	seed(tx)
+	require.NoError(t, tx.Commit())
 }
 
 func TestNodeAdapterAddressPointerIncludesSnapshotUtxos(t *testing.T) {

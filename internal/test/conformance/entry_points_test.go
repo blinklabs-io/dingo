@@ -334,15 +334,9 @@ func entryPointCorpusEvidence(t *testing.T) entryPointCorpusRun {
 			entryPointCorpusData = entryPointCorpusRun{err: err}
 			return
 		}
-		sm, err := NewDingoStateManager()
-		if err != nil {
-			entryPointCorpusData = entryPointCorpusRun{
-				err: fmt.Errorf("new sqlite state manager: %w", err),
-			}
-			return
-		}
-		defer sm.Close()
-		evidence, err := replayEntryPoints(sm, root, entries)
+		evidence, err := replayEntryPointsSharded(
+			root, entries, corpusReplayWorkers(),
+		)
 		entryPointCorpusData = entryPointCorpusRun{
 			err:      err,
 			entries:  entries,
