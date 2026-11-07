@@ -17,7 +17,9 @@ package chainselection
 import (
 	"slices"
 	"testing"
+	"time"
 
+	"github.com/blinklabs-io/dingo/event"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
@@ -120,6 +122,32 @@ func TestChainSyncJumpingCorroboratesDynamoWithoutJumperStreams(t *testing.T) {
 	require.True(t, jumpTo(cs, jumperB, dynamo, 14))
 	require.True(t, cs.ShouldApplyIngress(dynamo),
 		"the next jump moves the limit with the dynamo")
+}
+
+// A jumper streams nothing by design, so its jump record ages whenever no
+// round refreshes it, as while the dynamo waits at the forecast horizon. The
+// record must still vouch once it is older than the stale-tip threshold: the
+// jumper's live connection, not header traffic, shows it is still there.
+func TestChainSyncJumpingRecordOutlivesStaleTipThreshold(t *testing.T) {
+	t.Parallel()
+	dynamo := corrConn(1)
+	jumperA := corrConn(2)
+	jumperB := corrConn(3)
+	cs := newJumpingSelector(true, dynamo)
+	now := time.Unix(1_700_000_000, 0)
+	cs.nowFn = func() time.Time { return now }
+	feedLoEChainFrom(cs, dynamo, "c", 1, 12)
+	require.True(t, jumpTo(cs, jumperA, dynamo, 10))
+	require.True(t, jumpTo(cs, jumperB, dynamo, 10))
+	require.True(t, cs.ShouldApplyIngress(dynamo))
+
+	now = now.Add(cs.config.StaleTipThreshold + time.Second)
+	feedLoEChainFrom(cs, dynamo, "c", 13, 13)
+	require.True(
+		t,
+		cs.ShouldApplyIngress(dynamo),
+		"jump records past the stale-tip threshold must still vouch",
+	)
 }
 
 // Jump records keep the identity policy: connections under one identity, or
@@ -247,4 +275,109 @@ func TestChainSyncJumpingRecordRemovedWithPeer(t *testing.T) {
 	cs.RemovePeer(jumperB)
 	require.False(t, cs.ShouldApplyIngress(dynamo),
 		"a removed jumper no longer vouches")
+}
+
+// An objector's stream opens with MsgRollBackward to its last agreed point,
+// which registers a record that has delivered no header. That record proves
+// nothing about the objector's chain, so the frozen jump record keeps bounding
+// the Limit on Eagerness, and keeps counting as a witness, until the stream
+// delivers a header.
+func TestChainSyncJumpingObjectorRollbackKeepsJumpRecord(t *testing.T) {
+	t.Parallel()
+	dynamo := corrConn(1)
+	jumperA := corrConn(2)
+	jumperB := corrConn(3)
+	objector := corrConn(4)
+	cs := newJumpingSelector(true, dynamo, objector)
+	feedLoEChainFrom(cs, dynamo, "c", 1, 15)
+	require.True(t, jumpTo(cs, jumperA, dynamo, 10))
+	require.True(t, jumpTo(cs, jumperB, dynamo, 10))
+	require.True(t, jumpTo(cs, objector, dynamo, 10))
+	require.True(t, jumpTo(cs, jumperA, dynamo, 15))
+	require.True(t, jumpTo(cs, jumperB, dynamo, 15))
+	require.True(t, cs.RecordJumpRejection(objector))
+	require.Equal(t, loePoint("c", 10), cs.EagernessLimit().Point)
+
+	cs.HandlePeerRollbackEvent(event.NewEvent(PeerRollbackEventType,
+		PeerRollbackEvent{
+			ConnectionId: objector,
+			Point:        loePoint("c", 10),
+			Tip:          loeTip("c", loeBase+20),
+		}))
+	require.NotNil(t, cs.GetPeerTip(objector),
+		"the rollback registers the objector's stream")
+
+	limit := cs.EagernessLimit()
+	require.Equal(t, loePoint("c", 10), limit.Point,
+		"a stream that delivered no header must not release the objector's limit")
+	require.Equal(t, uint64(loeBase+10+loeTestK), limit.BlockNumber)
+	feedLoEChainFrom(cs, dynamo, "c", 16, 11+loeTestK)
+	require.False(t, cs.ShouldApplyIngress(dynamo),
+		"the dynamo still waits k past the objector's last agreed point")
+
+	feedLoEChainFrom(cs, objector, "c", 11, 12)
+	require.Equal(t, loePoint("c", 12), cs.EagernessLimit().Point,
+		"the first delivered header supersedes the frozen jump record")
+}
+
+// stageLoEChainFrom stages blocks loeBase+from..loeBase+to from connId as
+// ChainSync ingress does before the apply gate, without committing them.
+func stageLoEChainFrom(
+	t *testing.T,
+	cs *ChainSelector,
+	connId ouroboros.ConnectionId,
+	prefix string,
+	from, to uint64,
+) {
+	t.Helper()
+	for offset := from; offset <= to; offset++ {
+		tip := loeTip(prefix, loeBase+offset)
+		require.True(t, cs.PreparePeerTipAdmission(PeerTipUpdateEvent{
+			ConnectionId: connId,
+			AdmissionID:  offset,
+			Tip:          loeTip(prefix, loeBase+to),
+			ObservedTip:  tip,
+		}))
+	}
+}
+
+// A dynamo whose stream opened with MsgRollBackward and whose headers since
+// are held at the apply gate for want of a witness has committed nothing.
+// Its jump fragment must be its candidate fragment, staged headers included,
+// as the reference jumps to the dynamo's csCandidate: otherwise no jump can
+// be issued or recorded, no jumper ever witnesses the dynamo, and the dynamo
+// is held at corroboration for good.
+func TestChainSyncJumpingDynamoHeldAtCorroborationIsJumpedTo(t *testing.T) {
+	t.Parallel()
+	dynamo := corrConn(1)
+	jumperA := corrConn(2)
+	jumperB := corrConn(3)
+	cs := newJumpingSelector(true, dynamo)
+	cs.HandlePeerRollbackEvent(event.NewEvent(PeerRollbackEventType,
+		PeerRollbackEvent{
+			ConnectionId: dynamo,
+			Point:        loePoint("c", 0),
+			Tip:          loeTip("c", loeBase+12),
+		}))
+	require.NotNil(t, cs.GetPeerTip(dynamo),
+		"the rollback registers the dynamo")
+	stageLoEChainFrom(t, cs, dynamo, "c", 1, 12)
+	require.False(t, cs.ShouldApplyIngress(dynamo),
+		"a lone dynamo is held at corroboration")
+
+	points, head, ok := cs.JumpFragment(dynamo)
+	require.True(t, ok,
+		"a dynamo held at corroboration must still offer its candidate fragment")
+	require.Equal(t, uint64(loeBase+12), head)
+	require.Equal(t, loePoint("c", 12), points[len(points)-1])
+
+	require.True(t, jumpTo(cs, jumperA, dynamo, 10),
+		"an agreement on a staged dynamo point must be recorded")
+	require.True(t, jumpTo(cs, jumperB, dynamo, 10))
+	require.True(t, cs.ShouldApplyIngress(dynamo),
+		"two identified jumpers holding the jump point must release the dynamo")
+
+	require.False(t, cs.RecordJumpAgreement(
+		jumperA, dynamo, loePoint("x", 11), loeTip("x", loeBase+11),
+	), "a point the dynamo's candidate fragment does not hold")
 }

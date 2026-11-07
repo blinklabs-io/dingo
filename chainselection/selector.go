@@ -4023,8 +4023,10 @@ func (cs *ChainSelector) connectionPriority(
 
 func (cs *ChainSelector) isPeerTipStale(peerTip *PeerChainTip) bool {
 	// A peer held at the Limit on Eagerness sends no tips because the pause
-	// stops them, so the silence is not evidence that it is gone.
+	// stops them, and a jumper sends none because it is jumped, so the
+	// silence is not evidence that either is gone.
 	return peerTip != nil && peerTip.eagernessPaused == 0 &&
+		!peerTip.jumpRecord &&
 		peerTip.IsStale(cs.config.StaleTipThreshold)
 }
 

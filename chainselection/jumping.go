@@ -21,7 +21,7 @@ import (
 )
 
 // jumpRecord is the candidate fragment ChainSync Jumping assigns to a peer
-// that does not stream headers: the dynamo's committed fragment up to the
+// that does not stream headers: the dynamo's candidate fragment up to the
 // last point the peer agreed to. objector marks a peer that refused a later
 // jump; its record stays frozen at the last agreed point.
 type jumpRecord struct {
@@ -30,10 +30,10 @@ type jumpRecord struct {
 }
 
 // RecordJumpAgreement records that jumper answered MsgFindIntersect at point,
-// a point on dynamo's committed fragment, with IntersectFound. jumperTip is
-// the tip the jumper reported with that answer. The jumper's candidate
-// fragment becomes dynamo's fragment truncated at point, held under the
-// jumper's own connection and therefore its own corroboration identity, as
+// a point on dynamo's candidate fragment (JumpFragment), with IntersectFound.
+// jumperTip is the tip the jumper reported with that answer. The jumper's
+// candidate fragment becomes dynamo's fragment truncated at point, held under
+// the jumper's own connection and therefore its own corroboration identity, as
 // the reference's processJumpResult sets a jumper's candidate to the dynamo's
 // fragment up to an accepted jump (Ouroboros/Consensus/MiniProtocol/
 // ChainSync/Client/Jumping.hs). The server proved its chain holds point, and
@@ -46,7 +46,7 @@ type jumpRecord struct {
 //
 // It returns false, recording nothing, when ChainSync Jumping is off, the
 // selector is not in Genesis mode, jumper is dynamo, jumper streams headers
-// or is an objector, dynamo has no committed fragment holding point, or the
+// or is an objector, dynamo's candidate fragment does not hold point, or the
 // tracked peer limit is reached.
 func (cs *ChainSelector) RecordJumpAgreement(
 	jumper ouroboros.ConnectionId,
@@ -74,13 +74,9 @@ func (cs *ChainSelector) RecordJumpAgreement(
 		if existing == nil && len(cs.jumpRecords) >= cs.maxTrackedPeers {
 			return false
 		}
-		dynamoTip := cs.peerTips[dynamo]
-		if dynamoTip == nil {
+		dynamoTip, fragment, ok := cs.jumpFragmentLocked(dynamo)
+		if !ok {
 			return false
-		}
-		fragment := CandidateFragment{
-			points:    dynamoTip.observedPoints,
-			baseBlock: dynamoTip.observedPointBaseBlock,
 		}
 		block, ok := fragment.pointBlock(point)
 		if !ok {
@@ -111,6 +107,7 @@ func (cs *ChainSelector) RecordJumpAgreement(
 				observedPointBaseBlock: fragment.baseBlock,
 				LastUpdated:            cs.nowFn(),
 				nowFn:                  cs.nowFn,
+				jumpRecord:             true,
 			},
 		}
 		cs.signalIngressChange()
@@ -146,20 +143,25 @@ func (cs *ChainSelector) RecordJumpRejection(
 }
 
 // streamedRecordLocked reports whether connId has a committed or staged
-// record from headers it delivered. Must be called with cs.mutex held.
+// record from headers it delivered. A record registered from the opening
+// MsgRollBackward of a stream (awaitingFirstHeader) does not count: it holds
+// no fragment, so it proves nothing about the peer's chain, and an objector's
+// frozen jump record must keep bounding the Limit on Eagerness until the
+// objector's own headers replace it. Must be called with cs.mutex held.
 func (cs *ChainSelector) streamedRecordLocked(
 	connId ouroboros.ConnectionId,
 ) bool {
-	if _, ok := cs.peerTips[connId]; ok {
+	if frontier := cs.pendingPeerTipFrontiers[connId]; frontier != nil &&
+		!frontier.awaitingFirstHeader {
 		return true
 	}
-	_, ok := cs.pendingPeerTipFrontiers[connId]
-	return ok
+	committed := cs.peerTips[connId]
+	return committed != nil && !committed.awaitingFirstHeader
 }
 
 // jumpCandidateLocked returns connId's jump record when it stands in for the
-// connection's candidate fragment, that is when the connection has streamed
-// nothing. Must be called with cs.mutex held.
+// connection's candidate fragment, that is when the connection has delivered
+// no header (streamedRecordLocked). Must be called with cs.mutex held.
 func (cs *ChainSelector) jumpCandidateLocked(
 	connId ouroboros.ConnectionId,
 ) *PeerChainTip {
@@ -179,4 +181,45 @@ func (cs *ChainSelector) loeCandidateConnectionLocked(
 ) bool {
 	return cs.eagernessCandidateAdmittedLocked(connId) ||
 		cs.jumpCandidateLocked(connId) != nil
+}
+
+// JumpFragment returns the points of dynamo's candidate fragment, the
+// fragment ChainSync Jumping jumps jumpers to and RecordJumpAgreement
+// truncates, in ascending order, and the block number of the last one. It
+// returns false when dynamo has no fragment.
+func (cs *ChainSelector) JumpFragment(
+	dynamo ouroboros.ConnectionId,
+) ([]ocommon.Point, uint64, bool) {
+	cs.mutex.RLock()
+	defer cs.mutex.RUnlock()
+	_, fragment, ok := cs.jumpFragmentLocked(dynamo)
+	if !ok {
+		return nil, 0, false
+	}
+	head, _ := eagernessFragmentHead(fragment)
+	return fragment.Points(), head, true
+}
+
+// jumpFragmentLocked returns dynamo's candidate fragment with its staged
+// headers, as the reference jumps to the dynamo's candidate fragment rather
+// than to any adopted chain. The committed fragment would not do: during
+// Genesis the apply gate stages a header until a witness vouches for it, and
+// jump agreements are the dynamo's witnesses, so a dynamo with no other
+// witness would commit nothing and never be jumped to. This is the same
+// staged frontier the Limit on Eagerness and the apply gate already read for
+// the dynamo, and a record built from it holds only points a jumper's own
+// server proved it holds. It returns false when the fragment is empty. Must
+// be called with cs.mutex held.
+func (cs *ChainSelector) jumpFragmentLocked(
+	dynamo ouroboros.ConnectionId,
+) (*PeerChainTip, CandidateFragment, bool) {
+	dynamoTip, ok := cs.admissionPeerTipLocked(dynamo)
+	if !ok || dynamoTip == nil {
+		return nil, CandidateFragment{}, false
+	}
+	fragment := cs.eagernessFragmentLocked(dynamo, dynamoTip)
+	if fragment.Len() == 0 {
+		return nil, CandidateFragment{}, false
+	}
+	return dynamoTip, fragment, true
 }

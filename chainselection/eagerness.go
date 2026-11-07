@@ -197,10 +197,14 @@ func (cs *ChainSelector) computeEagernessLimitFromPeersLocked(
 		// there is no switch to it for the limit to protect; counting it would
 		// pin the limit at k past its fork point while it stays connected. The
 		// ConnectionEligible hook drops a chainsync observer the same way: its
-		// headers are not ingested, so its fragment can freeze.
+		// headers are not ingested, so its fragment can freeze. A connection
+		// without a corroboration identity can never witness or be selected
+		// while Genesis corroboration is active, so its fragment would only
+		// hold back the identified candidates.
 		if !cs.peerLiveEligibleNonStaleLocked(connId, peerTip) ||
 			cs.advertisedTipStaleLocked(peerTip) ||
-			!cs.loeCandidateConnectionLocked(connId) {
+			!cs.loeCandidateConnectionLocked(connId) ||
+			!cs.loeIdentifiedLocked(connId) {
 			if include == nil || *include != connId {
 				continue
 			}
@@ -360,6 +364,19 @@ func inertAgainst(
 		}
 	}
 	return true
+}
+
+// loeIdentifiedLocked reports whether connId may bound the Limit on
+// Eagerness: always outside Genesis corroboration, and otherwise only with a
+// corroboration identity. Must be called with cs.mutex held.
+func (cs *ChainSelector) loeIdentifiedLocked(
+	connId ouroboros.ConnectionId,
+) bool {
+	if !cs.genesisCorroborationActiveLocked() {
+		return true
+	}
+	_, ok := cs.corroboratorIdentity(connId)
+	return ok
 }
 
 // fragmentHeadBlock returns the block number of a non-empty fragment's head.
