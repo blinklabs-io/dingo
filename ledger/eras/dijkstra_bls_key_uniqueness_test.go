@@ -120,3 +120,28 @@ func TestDijkstraPoolRegistrationRejectsDuplicateBlsKeyInTransaction(
 	err := validateDijkstraPoolBlsKeyUniqueness(tx, state)
 	require.ErrorContains(t, err, "BLS key is already registered")
 }
+
+// ValidateTxDijkstra gives its rules a transaction-scoped state, so the BLS
+// ownership provider beneath it must still be found.
+func TestDijkstraBlsKeyUniquenessSeesThroughScopedState(t *testing.T) {
+	t.Parallel()
+
+	key := bytes.Repeat([]byte{0x31}, 96)
+	tx := dijkstraBlsKeyTx{certs: []lcommon.Certificate{
+		&lcommon.PoolRegistrationCertificate{
+			Operator: lcommon.PoolKeyHash{0x42},
+			LeiosKey: &lcommon.LeiosKey{
+				PublicKey:       key,
+				PossessionProof: bytes.Repeat([]byte{0x51}, 48),
+			},
+		},
+	}}
+	state := lcommon.NewTransactionScopedLedgerState(dijkstraBlsKeyState{
+		mockLedgerState: newMockLedgerState(),
+		key:             key,
+		owner:           lcommon.PoolKeyHash{0x41},
+	})
+
+	err := validateDijkstraPoolBlsKeyUniqueness(tx, state)
+	require.ErrorContains(t, err, "BLS key is already registered")
+}
