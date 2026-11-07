@@ -462,7 +462,11 @@ func (r *Recycler) tick(
 		st.lastPrimaryChainTipSlot = primaryChainTipSlot
 		st.lastProgressAt = now
 	}
-	if slot := live.Ledger.BlockProcessingSlot(); slot > st.lastBlockProcessingSlot {
+	// The slot never decreases within one LedgerState but restarts at zero
+	// when a live restore or truncate replaces the ledger, so any change is
+	// progress; comparing with > would ignore a new ledger until it passed the
+	// old one's mark.
+	if slot := live.Ledger.BlockProcessingSlot(); slot != st.lastBlockProcessingSlot {
 		st.lastBlockProcessingSlot = slot
 		st.lastProgressAt = now
 	}
