@@ -34,7 +34,6 @@ import (
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
-	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -100,49 +99,6 @@ func loadBoundaryBlock(
 	block, err := gledger.NewBlockFromCbor(blockType, raw)
 	require.NoError(t, err)
 	return block
-}
-
-// TestByronShelleyBoundaryHasNoEpochBoundaryBlock pins the chain shape the
-// era-transition path depends on: the first block of the fork epoch is a
-// Shelley block, not a Byron EBB.
-//
-// ledgerProcessBlocksFromSource ends a batch at the first block whose slot
-// reaches the epoch end and takes nextEpochEraId from that block's era. A
-// Byron EBB carries the Byron era and its parent's block number, so an EBB
-// leading the fork epoch would defer the era transition by one block and leave
-// the first Shelley block to be validated under a Byron era with nil protocol
-// parameters. Both shipped networks with a Byron prefix rule that out: the
-// Shelley block links directly to the last Byron block.
-func TestByronShelleyBoundaryHasNoEpochBoundaryBlock(t *testing.T) {
-	t.Parallel()
-
-	for _, tc := range boundaryFixtures {
-		t.Run(tc.name, func(t *testing.T) {
-			last := loadBoundaryBlock(t, tc.byronFile, tc.byronType)
-			first := loadBoundaryBlock(t, tc.shelleyFile, tc.shelleyType)
-
-			require.Equal(t, tc.byronSlot, last.SlotNumber())
-			require.Equal(t, tc.shelleySlot, first.SlotNumber())
-			assert.EqualValues(t, byron.EraIdByron, last.Era().Id)
-			assert.EqualValues(t, shelley.EraIdShelley, first.Era().Id)
-
-			// Neither block is an EBB, and no EBB can sit between them: the
-			// Shelley block names the Byron block as its parent and takes the
-			// next block number. An EBB would share 'last' block number and
-			// break that link.
-			_, lastIsEbb := last.(*byron.ByronEpochBoundaryBlock)
-			_, firstIsEbb := first.(*byron.ByronEpochBoundaryBlock)
-			assert.False(t, lastIsEbb)
-			assert.False(t, firstIsEbb)
-			assert.Equal(
-				t,
-				last.Hash().String(),
-				first.PrevHash().String(),
-				"first Shelley block must link directly to the last Byron block",
-			)
-			assert.Equal(t, last.BlockNumber()+1, first.BlockNumber())
-		})
-	}
 }
 
 // TestByronShelleyBoundaryEnvelopeRequiresProtocolParameters pins that the

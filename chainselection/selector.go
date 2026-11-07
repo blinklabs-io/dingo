@@ -340,6 +340,10 @@ type ChainSelector struct {
 	// nowFn is injectable for deterministic tests; defaults to time.Now.
 	nowFn func() time.Time
 
+	// generationStableWait overrides headerCryptoGenerationStableWait when
+	// positive, so tests need not wait out the production bound.
+	generationStableWait time.Duration
+
 	// switchBackCooldown is the resolved value of
 	// ChainSelectorConfig.SwitchBackCooldown (defaulted by NewChainSelector).
 	switchBackCooldown time.Duration
@@ -2048,7 +2052,11 @@ func (cs *ChainSelector) pinCurrentHeaderCryptoGeneration() (func(), bool) {
 		cs.config.PinHeaderCryptoVerificationGeneration == nil {
 		return func() {}, true
 	}
-	deadline := time.Now().Add(headerCryptoGenerationStableWait)
+	wait := headerCryptoGenerationStableWait
+	if cs.generationStableWait > 0 {
+		wait = cs.generationStableWait
+	}
+	deadline := time.Now().Add(wait)
 	for {
 		if release, ok := cs.tryPinCurrentHeaderCryptoGeneration(); ok {
 			return release, true

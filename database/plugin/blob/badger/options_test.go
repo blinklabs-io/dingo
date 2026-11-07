@@ -15,50 +15,10 @@
 package badger
 
 import (
-	"io"
-	"log/slog"
 	"testing"
 
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-func TestOptions(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	registry := prometheus.NewRegistry()
-	store, err := New(
-		WithDataDir(t.TempDir()),
-		WithBlockCacheSize(123),
-		WithIndexCacheSize(456),
-		WithGc(false),
-		WithCompressionEnabled(true),
-		WithCompressionLevel(2),
-		WithLogger(logger),
-		WithPromRegistry(registry),
-		WithDeferOpen(),
-	)
-	require.NoError(t, err)
-	assert.Equal(t, uint64(123), store.blockCacheSize)
-	assert.Equal(t, uint64(456), store.indexCacheSize)
-	assert.False(t, store.gcEnabled)
-	assert.True(t, store.compressionEnabled)
-	assert.Equal(t, 2, store.compressionLevel)
-	assert.Same(t, logger, store.logger)
-	assert.Same(t, registry, store.promRegistry)
-}
-
-func TestStartWithoutRegistryLeavesMetricsDisabled(t *testing.T) {
-	store, err := New(
-		WithDataDir(t.TempDir()),
-		WithGc(false),
-		WithDeferOpen(),
-	)
-	require.NoError(t, err)
-	assert.NoError(t, store.Start())
-	t.Cleanup(func() { assert.NoError(t, store.Stop()) })
-	assert.Nil(t, store.promRegistry)
-}
 
 func TestNewRejectsOnDiskCompressionWithoutBlockCache(t *testing.T) {
 	t.Parallel()

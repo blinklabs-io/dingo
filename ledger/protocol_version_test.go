@@ -816,104 +816,42 @@ func TestPParamVotingCountStartSlot(t *testing.T) {
 	}
 }
 
-func TestGetProtocolVersion_Shelley(t *testing.T) {
+func TestGetProtocolVersion_ByEra(t *testing.T) {
 	t.Parallel()
-
-	pp := &shelley.ShelleyProtocolParameters{
-		ProtocolMajor: 2,
-		ProtocolMinor: 0,
-	}
-	pv, err := GetProtocolVersion(pp)
-	require.NoError(t, err)
-	assert.Equal(t, uint(2), pv.Major)
-	assert.Equal(t, uint(0), pv.Minor)
-}
-
-func TestGetProtocolVersion_Allegra(t *testing.T) {
-	t.Parallel()
-
-	// allegra.AllegraProtocolParameters is a type alias for
-	// shelley.ShelleyProtocolParameters, so Allegra pparams
-	// are handled by the Shelley case in the type switch.
-	pp := &allegra.AllegraProtocolParameters{
-		ProtocolMajor: 3,
-		ProtocolMinor: 0,
-	}
-	pv, err := GetProtocolVersion(pp)
-	require.NoError(t, err)
-	assert.Equal(t, uint(3), pv.Major)
-	assert.Equal(t, uint(0), pv.Minor)
-}
-
-func TestGetProtocolVersion_Mary(t *testing.T) {
-	t.Parallel()
-
-	pp := &mary.MaryProtocolParameters{
-		ProtocolMajor: 4,
-		ProtocolMinor: 0,
-	}
-	pv, err := GetProtocolVersion(pp)
-	require.NoError(t, err)
-	assert.Equal(t, uint(4), pv.Major)
-	assert.Equal(t, uint(0), pv.Minor)
-}
-
-func TestGetProtocolVersion_Alonzo(t *testing.T) {
-	t.Parallel()
-
-	pp := &alonzo.AlonzoProtocolParameters{
-		ProtocolMajor: 6,
-		ProtocolMinor: 0,
-	}
-	pv, err := GetProtocolVersion(pp)
-	require.NoError(t, err)
-	assert.Equal(t, uint(6), pv.Major)
-	assert.Equal(t, uint(0), pv.Minor)
-}
-
-func TestGetProtocolVersion_Babbage(t *testing.T) {
-	t.Parallel()
-
-	pp := &babbage.BabbageProtocolParameters{
-		ProtocolMajor: 8,
-		ProtocolMinor: 0,
-	}
-	pv, err := GetProtocolVersion(pp)
-	require.NoError(t, err)
-	assert.Equal(t, uint(8), pv.Major)
-	assert.Equal(t, uint(0), pv.Minor)
-}
-
-func TestGetProtocolVersion_Conway(t *testing.T) {
-	t.Parallel()
-
-	pp := &conway.ConwayProtocolParameters{
-		ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
-			Major: 9,
-			Minor: 0,
-		},
-	}
-	pv, err := GetProtocolVersion(pp)
-	require.NoError(t, err)
-	assert.Equal(t, uint(9), pv.Major)
-	assert.Equal(t, uint(0), pv.Minor)
-}
-
-func TestGetProtocolVersion_Dijkstra(t *testing.T) {
-	t.Parallel()
-
-	pp := &dijkstra.DijkstraProtocolParameters{
-		ConwayProtocolParameters: conway.ConwayProtocolParameters{
+	conwayPP := func(major uint) lcommon.ProtocolParameters {
+		return &conway.ConwayProtocolParameters{
 			ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
-				Major: 12,
-				Minor: 0,
+				Major: major,
 			},
-		},
+		}
 	}
-	pv, err := GetProtocolVersion(pp)
-	require.NoError(t, err)
-	assert.Equal(t, uint(12), pv.Major)
-	assert.Equal(t, uint(0), pv.Minor)
+	for _, tc := range []struct {
+		name  string
+		pp    lcommon.ProtocolParameters
+		major uint
+	}{
+		{"Shelley", &shelley.ShelleyProtocolParameters{ProtocolMajor: 2}, 2},
+		{"Allegra", &allegra.AllegraProtocolParameters{ProtocolMajor: 3}, 3},
+		{"Mary", &mary.MaryProtocolParameters{ProtocolMajor: 4}, 4},
+		{"Alonzo", &alonzo.AlonzoProtocolParameters{ProtocolMajor: 6}, 6},
+		{"Babbage", &babbage.BabbageProtocolParameters{ProtocolMajor: 8}, 8},
+		{"Conway", conwayPP(9), 9},
+		{
+			"Dijkstra",
+			&dijkstra.DijkstraProtocolParameters{
+				ConwayProtocolParameters: *conwayPP(12).(*conway.ConwayProtocolParameters),
+			},
+			12,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			pv, err := GetProtocolVersion(tc.pp)
+			require.NoError(t, err)
+			assert.Equal(t, tc.major, pv.Major)
+			assert.Equal(t, uint(0), pv.Minor)
+		})
+	}
 }
 
 func TestGetProtocolVersion_Nil(t *testing.T) {

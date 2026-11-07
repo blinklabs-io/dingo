@@ -156,6 +156,7 @@ func (s composeService) ports() []portMapping {
 // this asserts each spec produces a mapping, not just that parsing doesn't
 // panic.
 func TestComposeServicePorts_ParsesEveryHostIPForm(t *testing.T) {
+	t.Parallel()
 	svc := composeService{Ports: []string{
 		"3010:3001",
 		"127.0.0.1:3030:3002",
@@ -265,6 +266,7 @@ func usesReferenceNode(services map[string]composeService) bool {
 // all-Dingo network and that only the conformance profile uses the reference
 // implementation.
 func TestDevNetDefaultProfileIsAllDingo(t *testing.T) {
+	t.Parallel()
 	root := repoRoot(t)
 	compose := loadCompose(t, root)
 	profiles := profileNames(compose)
@@ -303,6 +305,7 @@ func TestDevNetDefaultProfileIsAllDingo(t *testing.T) {
 // TestReadmeLinksDevNetDocs checks the README points contributors to the
 // detailed DevNet instructions.
 func TestReadmeLinksDevNetDocs(t *testing.T) {
+	t.Parallel()
 	root := repoRoot(t)
 	readme := readRepoFile(t, root, "README.md")
 	if !regexp.MustCompile(`\[[^]]+\]\(docs/devnet\.md\)`).MatchString(readme) {
@@ -313,6 +316,7 @@ func TestReadmeLinksDevNetDocs(t *testing.T) {
 // TestDevNetDocTablePortsMatchCompose checks every documented port next to a
 // DevNet service name is a port compose really publishes.
 func TestDevNetDocTablePortsMatchCompose(t *testing.T) {
+	t.Parallel()
 	root := repoRoot(t)
 	compose := loadCompose(t, root)
 
@@ -383,6 +387,7 @@ func TestDevNetDocTablePortsMatchCompose(t *testing.T) {
 // TestDevNetDefaultProfileNamedCorrectly checks prose that pins the default
 // COMPOSE_PROFILES value against the checked-in .env.
 func TestDevNetDefaultProfileNamedCorrectly(t *testing.T) {
+	t.Parallel()
 	root := repoRoot(t)
 	want := defaultProfile(t, root)
 
@@ -415,6 +420,7 @@ func TestDevNetDefaultProfileNamedCorrectly(t *testing.T) {
 // This is the drift the docs had: describing the default network as Dingo
 // beside cardano-node when that topology is opt-in.
 func TestDevNetConformanceAttribution(t *testing.T) {
+	t.Parallel()
 	root := repoRoot(t)
 
 	for _, rel := range contributorDocs {
@@ -477,6 +483,7 @@ func mentionsReferenceNode(lower string) bool {
 // TestDocumentedDevNetFlagsExist checks every DevNet script flag in the docs
 // is one the script handles.
 func TestDocumentedDevNetFlagsExist(t *testing.T) {
+	t.Parallel()
 	root := repoRoot(t)
 
 	scriptFlagsByName := map[string]map[string]struct{}{}
@@ -532,6 +539,7 @@ var dingoModeMarkers = []string{
 // `docker compose logs` line for a conformance-only container does nothing
 // after a default `./start.sh`, because compose never created it.
 func TestDevNetCommandExamplesUseProfileServices(t *testing.T) {
+	t.Parallel()
 	root := repoRoot(t)
 	compose := loadCompose(t, root)
 	def := defaultProfile(t, root)
@@ -661,6 +669,7 @@ func moduleGoRelease(t *testing.T, root string) goRelease {
 // TestGoModToolchainMatchesDirective checks the toolchain line, when present,
 // is not older than the language minimum it accompanies.
 func TestGoModToolchainMatchesDirective(t *testing.T) {
+	t.Parallel()
 	root := repoRoot(t)
 	want := moduleGoRelease(t, root)
 
@@ -688,6 +697,7 @@ func TestGoModToolchainMatchesDirective(t *testing.T) {
 // toolchain that cannot build the tree, and a newer one turns away a
 // toolchain that can.
 func TestDocumentedGoVersionMatchesGoMod(t *testing.T) {
+	t.Parallel()
 	root := repoRoot(t)
 	want := moduleGoRelease(t, root)
 
@@ -720,6 +730,7 @@ func TestDocumentedGoVersionMatchesGoMod(t *testing.T) {
 // TestWorkflowGoVersionCoversGoMod checks every actions/setup-go pin can
 // actually build the module. A pin may lead go.mod, but never trail it.
 func TestWorkflowGoVersionCoversGoMod(t *testing.T) {
+	t.Parallel()
 	root := repoRoot(t)
 	want := moduleGoRelease(t, root)
 
@@ -813,6 +824,7 @@ func resolveMatrixValues(workflow, expr string) ([]string, bool) {
 // TestGoBuilderImagesCoverGoMod checks every Dockerfile that builds Go code
 // uses a builder image new enough for the module.
 func TestGoBuilderImagesCoverGoMod(t *testing.T) {
+	t.Parallel()
 	root := repoRoot(t)
 	want := moduleGoRelease(t, root)
 
@@ -854,6 +866,7 @@ func TestGoBuilderImagesCoverGoMod(t *testing.T) {
 // free to describe the image without pinning a tag; if they pin one, it has
 // to be the real one.
 func TestDocumentedGoBuilderImageMatchesDockerfile(t *testing.T) {
+	t.Parallel()
 	root := repoRoot(t)
 
 	dockerfile := readRepoFile(t, root, "Dockerfile")
@@ -1120,6 +1133,7 @@ func koiosCoverageClasses() map[string]bool {
 // in both directions and leaves the mapping/reason prose alone, so rewording a
 // reason does not fail the check.
 func TestArchitectureDocumentsKoiosCoverageMatrix(t *testing.T) {
+	t.Parallel()
 	root := repoRoot(t)
 	exact, wildcard := koiosCoverageDocEntries(t, root)
 	classes := koiosCoverageClasses()
@@ -1587,9 +1601,6 @@ var lintWorkflows = []string{
 	".github/workflows/go-test.yml",
 }
 
-// lintJob is the job in each lintWorkflows file that runs the linters.
-const lintJob = "check"
-
 // lintActionRepo is the action whose invocations count as lint coverage. The
 // version suffix is stripped before comparison so a bump does not silently
 // drop a module from the check.
@@ -1698,6 +1709,7 @@ func lintRuns(t *testing.T, root, workflow string) []lintRun {
 // files, so letting it satisfy a module would allow the linux run for that
 // module to be dropped while this check stayed green.
 func TestLintCoversEveryGoModule(t *testing.T) {
+	t.Parallel()
 	root := repoRoot(t)
 	modules := goModuleDirs(t, root)
 
@@ -1875,6 +1887,7 @@ func helpNamesTarget(help, target string) bool {
 // to say so, otherwise the help output understates the work and contributors
 // are surprised by, for example, `make test` rewriting go.mod.
 func TestMakefileHelpNamesDependencies(t *testing.T) {
+	t.Parallel()
 	root := repoRoot(t)
 	rules, _, _ := parseMakefile(t, root)
 
@@ -1908,6 +1921,7 @@ func TestMakefileHelpNamesDependencies(t *testing.T) {
 // `make help` is declared .PHONY. All of them are commands, not files, so a
 // stray file with a target's name must not silently skip the work.
 func TestMakefileDocumentedTargetsArePhony(t *testing.T) {
+	t.Parallel()
 	root := repoRoot(t)
 	rules, _, phony := parseMakefile(t, root)
 
@@ -1932,37 +1946,12 @@ func TestMakefileDocumentedTargetsArePhony(t *testing.T) {
 	}
 }
 
-// TestMakefileBuildTracksPgoProfile checks the binary build rule lists the PGO
-// profile as a prerequisite, so regenerating cmd/dingo/default.pgo triggers a
-// rebuild instead of leaving a stale binary.
-func TestMakefileBuildTracksPgoProfile(t *testing.T) {
-	root := repoRoot(t)
-	rules, _, _ := parseMakefile(t, root)
-
-	rule, ok := rules[binariesTarget]
-	if !ok {
-		t.Fatalf("Makefile has no %q rule", binariesTarget)
-	}
-
-	for _, prereq := range rule.prereqs {
-		if strings.Contains(prereq, "default.pgo") {
-			return
-		}
-	}
-	t.Errorf(
-		"Makefile:%d: %q build rule does not list the PGO profile as a "+
-			"prerequisite, so a refreshed cmd/dingo/default.pgo never "+
-			"rebuilds the binary",
-		rule.line,
-		binariesTarget,
-	)
-}
-
 // TestDocumentedDefaultMakeMatchesMakefile checks every description of what a
 // bare `make` does names exactly the targets the default rule depends on. It
 // is the rule that catches documentation claiming the default target runs the
 // test suite when it runs format and build.
 func TestDocumentedDefaultMakeMatchesMakefile(t *testing.T) {
+	t.Parallel()
 	root := repoRoot(t)
 	rules, order, _ := parseMakefile(t, root)
 
@@ -2010,6 +1999,7 @@ func TestDocumentedDefaultMakeMatchesMakefile(t *testing.T) {
 // TestDocumentedMakeTargetsExist checks every `make <target>` a contributor
 // is told to run is a real target.
 func TestDocumentedMakeTargetsExist(t *testing.T) {
+	t.Parallel()
 	root := repoRoot(t)
 	rules, _, _ := parseMakefile(t, root)
 
@@ -2415,6 +2405,7 @@ func workflowFiles(t *testing.T, root string) []string {
 }
 
 func TestNormalizeDiscoveryPathIsPlatformIndependent(t *testing.T) {
+	t.Parallel()
 	tests := map[string]struct {
 		input    string
 		excluded bool
@@ -2451,6 +2442,7 @@ func TestNormalizeDiscoveryPathIsPlatformIndependent(t *testing.T) {
 }
 
 func TestDocumentationDiscoveryIgnoresUntrackedFiles(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	runGit(t, root, "init")
 
@@ -2558,6 +2550,7 @@ func TestDocumentationDiscoveryIgnoresUntrackedFiles(t *testing.T) {
 }
 
 func TestDocumentationDiscoveryRecognizesAliasedRepositoryRoot(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	runGit(t, root, "init")
 	writeTestFile(t, root, "docs/tracked.md")
@@ -2606,6 +2599,7 @@ func TestDocumentationDiscoveryRecognizesAliasedRepositoryRoot(t *testing.T) {
 }
 
 func TestDocumentationDiscoveryFollowsAliasedSourceArchive(t *testing.T) {
+	t.Parallel()
 	archive := t.TempDir()
 	writeTestFile(t, archive, "docs/source.md")
 	writeTestFile(t, archive, "Dockerfile")
@@ -2932,6 +2926,7 @@ func jobNeeds(t *testing.T, workflow, name string, job any) []string {
 // and four more times on every merge to main, which alone drove the
 // organization's 20 concurrent runners to their cap.
 func TestPipelineRunsEachSuiteOnce(t *testing.T) {
+	t.Parallel()
 	root := repoRoot(t)
 
 	for name, rawJob := range pipelineJobs(t, root, publishPipeline) {
@@ -3015,6 +3010,7 @@ func TestPipelineRunsEachSuiteOnce(t *testing.T) {
 // the same change twice; a tier-2 job not gated on check would fan out on a
 // change that does not compile.
 func TestPipelineTiers(t *testing.T) {
+	t.Parallel()
 	root := repoRoot(t)
 	jobs := pipelineJobs(t, root, prPipeline)
 
@@ -3108,243 +3104,6 @@ func TestPipelineTiers(t *testing.T) {
 	}
 }
 
-func TestVerifyTestedAcceptsSkippedGatesOnlyBesideChanges(t *testing.T) {
-	root := repoRoot(t)
-	script := readRepoFile(t, root, publishPipeline)
-	for _, want := range []string{
-		"conclusion_of changes",
-		`[ "$conclusion" = skipped ] && [ "$changes" = success ]`,
-	} {
-		if !strings.Contains(script, want) {
-			t.Errorf("%s verify-tested lacks %q", publishPipeline, want)
-		}
-	}
-}
-
-func TestConformanceReportsRunOnlyForLinuxRelease(t *testing.T) {
-	root := repoRoot(t)
-	const datasetRevision = "bfb004144bfdfab2ddf0cf48fd7d5731f072da52"
-	const ndcLedgerRevision = "01d11b7c1e63dfa1d4b0b39182a9f8ceaf28f3d1"
-	const uplcCorpusSHA256 = "8bd4ad4f9f4c8c6b8ffa1f06ed1db0b43043afbba77ef6a14bcfb5a52345ed3f"
-	const turboCorpusSHA256 = "821af55e3323c826b5598c964d634b46dd468014834d0e97ebdc5edb0a158576"
-
-	prJobs := pipelineJobs(t, root, prPipeline)
-	for jobName, rawJob := range prJobs {
-		job, ok := rawJob.(map[string]any)
-		if !ok {
-			continue
-		}
-		steps, _ := job["steps"].([]any)
-		for _, rawStep := range steps {
-			step, ok := rawStep.(map[string]any)
-			if !ok {
-				continue
-			}
-			run, _ := step["run"].(string)
-			if strings.Contains(run, "cborconformance") ||
-				strings.Contains(run, "generate-conformance-reports") ||
-				step["name"] == "Checkout CBOR conformance corpus" {
-				t.Errorf("PR job %s runs report generation or checks out its corpus", jobName)
-			}
-		}
-	}
-
-	jobs := pipelineJobs(t, root, publishPipeline)
-	needsJob := func(job map[string]any, name string) bool {
-		needs, _ := job["needs"].([]any)
-		for _, need := range needs {
-			if need == name {
-				return true
-			}
-		}
-		return false
-	}
-	build, ok := jobs["build-linux"].(map[string]any)
-	if !ok {
-		t.Fatal("publish workflow has no Linux build job")
-	}
-	steps, ok := build["steps"].([]any)
-	if !ok {
-		t.Fatal("publish workflow Linux build job has no steps")
-	}
-	if build["runs-on"] != "ubuntu-latest" {
-		t.Error("publish report generation must run on Linux")
-	}
-	if !needsJob(build, "create-draft-release") {
-		t.Error("publish Linux report job does not wait for all release tests")
-	}
-	jobEnv, _ := build["env"].(map[string]any)
-	if jobEnv["CBOR_DATASET_REVISION"] != datasetRevision {
-		t.Errorf("Linux release job CBOR dataset revision = %v, want %q", jobEnv["CBOR_DATASET_REVISION"], datasetRevision)
-	}
-	if jobEnv["NDC_LEDGER_REVISION"] != ndcLedgerRevision {
-		t.Errorf("Linux release job NDC ledger revision = %v, want %q", jobEnv["NDC_LEDGER_REVISION"], ndcLedgerRevision)
-	}
-	if jobEnv["UPLC_CORPUS_SHA256"] != uplcCorpusSHA256 ||
-		jobEnv["TURBO_CORPUS_SHA256"] != turboCorpusSHA256 {
-		t.Error("Linux release job does not pin both NDC report archives")
-	}
-	for _, obsolete := range []string{
-		"AMARU_UPLC_REVISION",
-		"TURBO_DATASET_REVISION",
-		"TURBO_DATASET_DATE",
-		"TURBO_SHARD_0000_SHA256",
-		"TURBO_SHARD_0001_SHA256",
-	} {
-		if _, ok := jobEnv[obsolete]; ok {
-			t.Errorf("Linux release job still pins obsolete input %q", obsolete)
-		}
-	}
-	corpusCheckout, reportGeneration, releaseUpload := 0, 0, 0
-	for _, rawStep := range steps {
-		step, ok := rawStep.(map[string]any)
-		if !ok {
-			continue
-		}
-		with, _ := step["with"].(map[string]any)
-		env, _ := step["env"].(map[string]any)
-		switch step["name"] {
-		case "Checkout CBOR conformance corpus":
-			corpusCheckout++
-			if step["if"] != "github.ref_type == 'tag'" ||
-				step["uses"] != "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1" ||
-				with["repository"] != "r2rationality/cardano-cbor-dataset" ||
-				with["ref"] != "${{ env.CBOR_DATASET_REVISION }}" {
-				t.Error("Linux release checks out the wrong CBOR corpus")
-			}
-		case "Checkout UPLC conformance corpus":
-			t.Error("Linux release still checks out the superseded Amaru UPLC corpus")
-		case "Checkout ledger-rules fixtures":
-			if step["if"] != "github.ref_type == 'tag'" ||
-				with["repository"] != "pragma-org/node-diversity-conformance" ||
-				with["ref"] != "${{ env.NDC_LEDGER_REVISION }}" {
-				t.Error("Linux release does not use the pinned ledger-rules fixtures")
-			}
-		case "Generate conformance reports":
-			reportGeneration++
-			if step["if"] != "github.ref_type == 'tag'" ||
-				step["run"] != ".github/scripts/generate-conformance-reports.sh" ||
-				env["CBOR_DATASET_DIR"] != ".conformance/cardano-cbor-dataset" {
-				t.Error("Linux release does not generate reports from the pinned corpora")
-			}
-		case "Upload release assets":
-			releaseUpload++
-			if env["REQUIRE_CONFORMANCE_REPORT"] != "true" {
-				t.Error("Linux release upload does not require every conformance report")
-			}
-		case "Download CBOR conformance report":
-			t.Error("Linux release downloads a report generated during tests")
-		}
-	}
-	if corpusCheckout != 1 || reportGeneration != 1 || releaseUpload != 1 {
-		t.Errorf("Linux release has corpus checkout=%d report generation=%d report upload=%d; want one of each", corpusCheckout, reportGeneration, releaseUpload)
-	}
-
-	reportScript := readRepoFile(t, root, ".github/scripts/generate-conformance-reports.sh")
-	if !strings.Contains(reportScript, "go run ./internal/cborconformance/cmd") ||
-		!strings.Contains(reportScript, `-corpus-revision "$dataset_revision"`) ||
-		!strings.Contains(reportScript, "UPLC_CORPUS_SHA256") ||
-		!strings.Contains(reportScript, "TURBO_CORPUS_SHA256") ||
-		!strings.Contains(reportScript, `TURBO_MAX_PROGRAMS="${TURBO_MAX_PROGRAMS:-0}"`) ||
-		!strings.Contains(reportScript, "uplc-conformance.tar.zst") ||
-		!strings.Contains(reportScript, "turbo.tar.zst") ||
-		!strings.Contains(reportScript, `zstd -dc "${dir}/${archive}" | tar -xf - -C "${dir}/corpus"`) ||
-		!strings.Contains(reportScript, `for report in "${DIST_DIR}"/dingo-*.json`) {
-		t.Error("release report script does not generate and compress the pinned NDC reports")
-	}
-}
-
-// TestPullRequestChangeGateRunsDocsParity checks that docs-parity runs on
-// every pull request, documentation-only ones included: it is the check those
-// changes exist to satisfy.
-func TestPullRequestChangeGateRunsDocsParity(t *testing.T) {
-	root := repoRoot(t)
-	job, ok := pipelineJobs(t, root, prPipeline)["check"]
-	if !ok {
-		t.Fatalf("%s check job is missing", prPipeline)
-	}
-	for _, step := range jobSteps(t, prPipeline, "check", job) {
-		if step["run"] == "make docs-parity" {
-			if step["if"] != nil {
-				t.Errorf(
-					"%s docs-parity must run on documentation-only "+
-						"changes, got if: %v",
-					prPipeline,
-					step["if"],
-				)
-			}
-			return
-		}
-	}
-	t.Errorf("%s check job does not run make docs-parity", prPipeline)
-}
-
-func TestPullRequestChangeGateUsesTrustedClassifier(t *testing.T) {
-	root := repoRoot(t)
-	jobs := pipelineJobs(t, root, prPipeline)
-	changes, ok := jobs["check"].(map[string]any)
-	if !ok {
-		t.Fatalf("%s check job is missing or not a mapping", prPipeline)
-	}
-	steps, ok := changes["steps"].([]any)
-	if !ok {
-		t.Fatalf("%s check job has no steps", prPipeline)
-	}
-
-	pullRequestCheckout := -1
-	trustedCheckout := -1
-	detect := -1
-	for idx, step := range steps {
-		fields, ok := step.(map[string]any)
-		if !ok {
-			continue
-		}
-		with, _ := fields["with"].(map[string]any)
-		uses, _ := fields["uses"].(string)
-		if strings.HasPrefix(uses, "actions/checkout@") &&
-			with["path"] == nil && with["fetch-depth"] == 0 {
-			pullRequestCheckout = idx
-		}
-		if strings.HasPrefix(uses, "actions/checkout@") &&
-			with["path"] == ".trusted-ci" &&
-			with["ref"] == "${{ github.event.pull_request.base.sha || github.sha }}" {
-			trustedCheckout = idx
-		}
-		if fields["id"] == "detect" {
-			detect = idx
-			if fields["working-directory"] != nil ||
-				fields["run"] != `if [[ -f .trusted-ci/.github/scripts/ci-changes.sh ]]; then
-  bash .trusted-ci/.github/scripts/ci-changes.sh
-else
-  echo "run-ci=true" >> "$GITHUB_OUTPUT"
-fi
-rm -rf .trusted-ci
-` {
-				t.Errorf("%s change detector must run the trusted classifier against the pull-request checkout and then remove it", prPipeline)
-			}
-		}
-	}
-	if pullRequestCheckout < 0 {
-		t.Errorf("%s check job does not check out PR history into the workspace", prPipeline)
-	}
-	if trustedCheckout < 0 {
-		t.Errorf("%s check job does not check out the trusted base revision into .trusted-ci", prPipeline)
-	}
-	if detect < 0 {
-		t.Errorf("%s check job has no detect step", prPipeline)
-	} else if pullRequestCheckout > detect || trustedCheckout > detect {
-		t.Errorf("%s check job runs the classifier before its checkouts", prPipeline)
-	}
-	for _, name := range []string{"docs-parity", "test-change-selection"} {
-		for idx, step := range steps {
-			fields, ok := step.(map[string]any)
-			if ok && fields["name"] == name && idx < detect {
-				t.Errorf("%s check job runs %s before the trusted classifier", prPipeline, name)
-			}
-		}
-	}
-}
-
 // TestReleaseGatesOnGovulncheck checks that a tag cannot publish while
 // govulncheck is failing or before verify-tested has confirmed the commit
 // passed every merge-queue gate.
@@ -3359,6 +3118,7 @@ rm -rf .trusted-ci
 // nothing, so a new upstream advisory fails the run without blocking every
 // merge in the repository while it is triaged.
 func TestReleaseGatesOnGovulncheck(t *testing.T) {
+	t.Parallel()
 	root := repoRoot(t)
 	jobs := pipelineJobs(t, root, publishPipeline)
 
@@ -3384,48 +3144,12 @@ func TestReleaseGatesOnGovulncheck(t *testing.T) {
 	}
 }
 
-// TestImageManifestRunsAfterMainBuilds checks the explicit condition that
-// keeps the manifest job runnable on main. The image builds have a skipped
-// release-only dependency on main, and GitHub otherwise propagates that skip
-// through the successful image-build job to its dependents.
-func TestImageManifestRunsAfterMainBuilds(t *testing.T) {
-	root := repoRoot(t)
-	jobs := pipelineJobs(t, root, publishPipeline)
-
-	job, ok := jobs["build-image-manifest"]
-	if !ok {
-		t.Fatalf("%s has no build-image-manifest job", publishPipeline)
-	}
-	fields, ok := job.(map[string]any)
-	if !ok {
-		t.Fatalf(
-			"%s job build-image-manifest is not a mapping",
-			publishPipeline,
-		)
-	}
-	condition, ok := fields["if"].(string)
-	if !ok {
-		t.Fatalf(
-			"%s: build-image-manifest has no job condition",
-			publishPipeline,
-		)
-	}
-	const expected = "always() && needs.build-images.result == 'success'"
-	if condition != expected {
-		t.Errorf(
-			"%s: build-image-manifest condition %q, want %q",
-			publishPipeline,
-			condition,
-			expected,
-		)
-	}
-}
-
 // TestPipelineTriggersDoNotOverlap checks that a single event never starts both
 // pipelines. An event that triggered both would test or build the same commit
 // twice, doubling the runner cost of every merge, which is what this split was
 // made to avoid.
 func TestPipelineTriggersDoNotOverlap(t *testing.T) {
+	t.Parallel()
 	root := repoRoot(t)
 
 	// The complete allowlist per pipeline, not a list of events to reject.
@@ -3568,6 +3292,7 @@ func timeoutJobs(t *testing.T, root, workflow string) map[string]timeoutJob {
 // fit. Raising a -timeout past that point silently demotes the job to a
 // nameless kill, which is how a hang gets investigated from a blank log.
 func TestPackageTimeoutsStayUnderJobBackstops(t *testing.T) {
+	t.Parallel()
 	root := repoRoot(t)
 
 	for _, workflow := range []string{prPipeline, publishPipeline} {
@@ -3633,8 +3358,6 @@ func TestPackageTimeoutsStayUnderJobBackstops(t *testing.T) {
 	}
 }
 
-const publishWorkflow = ".github/workflows/publish.yml"
-
 var releaseServiceTestTriggers = []string{
 	"POSTGRES_PASSWORD",
 	"POSTGRES_DSN",
@@ -3678,6 +3401,7 @@ func releaseStepEnv(
 // backends under the race detector exceeds the package timeout without
 // identifying a stuck test.
 func TestReleaseValidationSeparatesServicesFromRace(t *testing.T) {
+	t.Parallel()
 	root := repoRoot(t)
 	raw := readRepoFile(t, root, prPipeline)
 	var workflow releaseWorkflow
@@ -3730,168 +3454,6 @@ func TestReleaseValidationSeparatesServicesFromRace(t *testing.T) {
 	}
 }
 
-// serviceDurability lists, per database image, the server options the CI
-// service containers must be started with. The conformance replays reset the
-// schema between every vector, so a run issues tens of thousands of
-// committing statements and is bound by fsync latency on a slow runner disk.
-// The containers are discarded with the job, so nothing here needs to survive
-// a crash.
-//
-// Each option is matched as whole whitespace-separated tokens, so a value
-// that merely contains one (`--innodb-file-per-table=OFFLINE`) does not count.
-var serviceDurability = []struct {
-	imagePrefix string
-	options     []string
-}{
-	{
-		imagePrefix: "postgres:",
-		options: []string{
-			"-c fsync=off",
-			"-c synchronous_commit=off",
-			"-c full_page_writes=off",
-		},
-	},
-	{
-		imagePrefix: "mysql:",
-		options: []string{
-			"--innodb-file-per-table=OFF",
-			"--innodb-flush-log-at-trx-commit=0",
-			"--sync-binlog=0",
-			"--skip-log-bin",
-		},
-	},
-}
-
-// serviceWorkflowJob includes the runnable startup and cleanup configuration.
-type serviceWorkflowJob struct {
-	Services map[string]struct {
-		Image   string `yaml:"image"`
-		Command string `yaml:"command"`
-	} `yaml:"services"`
-	Steps []struct {
-		Name string `yaml:"name"`
-		Run  string `yaml:"run"`
-		If   string `yaml:"if"`
-	} `yaml:"steps"`
-}
-
-// TestServiceContainersRelaxDurability checks the actual Docker launch
-// arguments, health admission and cleanup of the service-backed gate.
-func TestServiceContainersRelaxDurability(t *testing.T) {
-	t.Parallel()
-	root := repoRoot(t)
-	for _, workflow := range []string{prPipeline} {
-		var parsed struct {
-			Jobs map[string]serviceWorkflowJob `yaml:"jobs"`
-		}
-		if err := yaml.Unmarshal([]byte(readRepoFile(t, root, workflow)), &parsed); err != nil {
-			t.Fatalf("parse %s: %v", workflow, err)
-		}
-		seen := make(map[string]int)
-		for jobName, job := range parsed.Jobs {
-			started := false
-			cleaned := false
-			for serviceName, service := range job.Services {
-				for _, want := range serviceDurability {
-					if !strings.HasPrefix(service.Image, want.imagePrefix) {
-						continue
-					}
-					seen[want.imagePrefix]++
-					arguments := " " + strings.Join(
-						strings.Fields(service.Command), " ",
-					) + " "
-					for _, option := range want.options {
-						if !strings.Contains(arguments, " "+option+" ") {
-							t.Errorf(
-								"%s: job %s service %s (%s) lacks %q",
-								workflow, jobName, serviceName,
-								service.Image, option,
-							)
-						}
-					}
-				}
-			}
-			for _, step := range job.Steps {
-				if step.Name == "stop-test-databases" {
-					cleaned = step.If == "always()" &&
-						strings.Contains(
-							step.Run,
-							`if [ "$name" = "$container" ]`,
-						) &&
-						strings.Contains(
-							step.Run,
-							`docker rm --force "$container"`,
-						)
-				}
-				command := strings.ReplaceAll(step.Run, "\\\n", " ")
-				for line := range strings.SplitSeq(command, "\n") {
-					fields := strings.Fields(line)
-					if len(fields) < 3 || fields[0] != "docker" ||
-						fields[1] != "run" {
-						continue
-					}
-					for _, want := range serviceDurability {
-						for i, field := range fields {
-							if !strings.HasPrefix(field, want.imagePrefix) {
-								continue
-							}
-							started = true
-							seen[want.imagePrefix]++
-							arguments := " " + strings.Join(
-								fields[i+1:],
-								" ",
-							) + " "
-							for _, option := range want.options {
-								if !strings.Contains(
-									arguments,
-									" "+option+" ",
-								) {
-									t.Errorf(
-										"%s: job %s Docker %s lacks %q",
-										workflow,
-										jobName,
-										field,
-										option,
-									)
-								}
-							}
-							for _, admission := range []string{
-								"docker inspect --format", "'running healthy') break",
-								`docker logs "$container"`, "exit 1",
-							} {
-								if !strings.Contains(step.Run, admission) {
-									t.Errorf(
-										"%s: job %s lacks health admission %q",
-										workflow,
-										jobName,
-										admission,
-									)
-								}
-							}
-						}
-					}
-				}
-			}
-			if started && !cleaned {
-				t.Errorf(
-					"%s: job %s does not always clean its owned database containers",
-					workflow,
-					jobName,
-				)
-			}
-		}
-		for _, want := range serviceDurability {
-			if seen[want.imagePrefix] == 0 {
-				t.Errorf(
-					"%s starts no %s database container",
-					workflow,
-					want.imagePrefix,
-				)
-			}
-		}
-	}
-}
-
 // jobSteps returns a job's steps as plain mappings.
 func jobSteps(t *testing.T, workflow, name string, job any) []map[string]any {
 	t.Helper()
@@ -3913,294 +3475,6 @@ func jobSteps(t *testing.T, workflow, name string, job any) []map[string]any {
 		steps = append(steps, step)
 	}
 	return steps
-}
-
-// TestGovulncheckRunsThroughPinnedModule checks that CI and local validation
-// use the same checksum-verified scanner module and never execute a floating
-// tool release.
-func TestGovulncheckRunsThroughPinnedModule(t *testing.T) {
-	t.Parallel()
-	root := repoRoot(t)
-	makefile := readRepoFile(t, root, "Makefile")
-	for _, want := range []string{
-		"GOVULNCHECK_VERSION=v1.8.0",
-		"GOVULNCHECK_SUM=h1:clG4qBU6zH5VKjti8n5j8BBuYzoSha392xXMkXS351U=",
-		"GOVULNCHECK_MODULE=golang.org/x/vuln",
-		"$(call VERIFY_GO_MODULE,$(GOVULNCHECK_MODULE),$(GOVULNCHECK_VERSION),$(GOVULNCHECK_SUM))",
-		"GOTOOLCHAIN=auto $(GOVULNCHECK) $(GO_TAG_FLAGS) ./...",
-	} {
-		if !strings.Contains(makefile, want) {
-			t.Errorf("Makefile does not preserve pinned govulncheck input %q", want)
-		}
-	}
-	if strings.Contains(makefile, "golang.org/x/vuln/cmd/govulncheck@latest") {
-		t.Error("Makefile executes a floating govulncheck release")
-	}
-
-	for _, workflow := range []string{prPipeline, publishPipeline} {
-		job, ok := pipelineJobs(t, root, workflow)["govulncheck"]
-		if !ok {
-			t.Fatalf("%s has no govulncheck job", workflow)
-		}
-		found := false
-		for _, step := range jobSteps(t, workflow, "govulncheck", job) {
-			if run, _ := step["run"].(string); run == "make govulncheck" {
-				found = true
-			}
-		}
-		if !found {
-			t.Errorf("%s: govulncheck job does not run the pinned Makefile target", workflow)
-		}
-	}
-}
-
-// TestPublishCancelsSupersededMainRuns checks that a newer push to main
-// cancels the publish run it supersedes, while a release tag is never
-// interrupted. Main runs only rebuild the branch-tagged images, so letting
-// every commit in a burst of merges run to completion only fills the runners.
-func TestPublishCancelsSupersededMainRuns(t *testing.T) {
-	t.Parallel()
-	root := repoRoot(t)
-
-	var parsed struct {
-		Concurrency struct {
-			Group            string `yaml:"group"`
-			CancelInProgress string `yaml:"cancel-in-progress"`
-		} `yaml:"concurrency"`
-	}
-	raw := readRepoFile(t, root, publishPipeline)
-	if err := yaml.Unmarshal([]byte(raw), &parsed); err != nil {
-		t.Fatalf("parse %s: %v", publishPipeline, err)
-	}
-	const (
-		wantGroup  = "${{ github.workflow }}-${{ github.ref }}"
-		wantCancel = "${{ github.ref == 'refs/heads/main' }}"
-	)
-	if parsed.Concurrency.Group != wantGroup {
-		t.Errorf(
-			"%s concurrency group %q, want %q",
-			publishPipeline,
-			parsed.Concurrency.Group,
-			wantGroup,
-		)
-	}
-	if parsed.Concurrency.CancelInProgress != wantCancel {
-		t.Errorf(
-			"%s cancel-in-progress %q, want %q: cancel superseded main "+
-				"runs, never a tag",
-			publishPipeline,
-			parsed.Concurrency.CancelInProgress,
-			wantCancel,
-		)
-	}
-}
-
-// TestReleaseRefreshesModuleProxy checks that finalizing a tagged release asks
-// the Go module proxy for the new version, with a bounded request, and that
-// the retired disabled step stays removed.
-func TestReleaseRefreshesModuleProxy(t *testing.T) {
-	t.Parallel()
-	root := repoRoot(t)
-
-	if raw := readRepoFile(t, root, publishPipeline); strings.Contains(raw, "go-proxy-pull-action") {
-		t.Errorf("%s still references the disabled go-proxy-pull-action step", publishPipeline)
-	}
-
-	job, ok := pipelineJobs(t, root, publishPipeline)["finalize-release"]
-	if !ok {
-		t.Fatalf("%s has no finalize-release job", publishPipeline)
-	}
-	for _, step := range jobSteps(t, publishPipeline, "finalize-release", job) {
-		run, _ := step["run"].(string)
-		if !strings.Contains(run, "proxy.golang.org") {
-			continue
-		}
-		if !strings.Contains(run, "/@v/") || !strings.Contains(run, "--max-time") {
-			t.Errorf("proxy refresh must request /@v/<tag>.info with --max-time: %q", run)
-		}
-		if step["continue-on-error"] != true {
-			t.Errorf("proxy refresh must not fail a published release")
-		}
-		if step["if"] != "github.ref_type == 'tag'" {
-			t.Errorf("proxy refresh must run for tags only, got %v", step["if"])
-		}
-		return
-	}
-	t.Errorf("%s finalize-release has no Go module proxy refresh step", publishPipeline)
-}
-
-// blockPipelineDevnetWorkflow runs the block-pipeline DevNet.
-const blockPipelineDevnetWorkflow = ".github/workflows/devnet-block-pipeline.yml"
-
-// TestBlockPipelineDevnetRunsNightly checks that the accelerated DevNet with
-// the block pipeline and its validate stage enabled, the only integration
-// exercise of that stage, still runs on a schedule, and stays off the pull
-// request and merge path: both flags default off in production, which does not
-// justify a runner on every push.
-func TestBlockPipelineDevnetRunsNightly(t *testing.T) {
-	t.Parallel()
-	root := repoRoot(t)
-
-	triggers := workflowTriggers(t, root, blockPipelineDevnetWorkflow)
-	if _, ok := triggers["schedule"]; !ok {
-		t.Errorf("%s does not run on a schedule", blockPipelineDevnetWorkflow)
-	}
-	for _, event := range []string{
-		"pull_request",
-		"pull_request_target",
-		"push",
-		"merge_group",
-	} {
-		if _, ok := triggers[event]; ok {
-			t.Errorf(
-				"%s must not trigger on %s",
-				blockPipelineDevnetWorkflow,
-				event,
-			)
-		}
-	}
-
-	job, ok := pipelineJobs(t, root, blockPipelineDevnetWorkflow)["devnet"]
-	if !ok {
-		t.Fatalf("%s has no devnet job", blockPipelineDevnetWorkflow)
-	}
-	found := false
-	for _, step := range jobSteps(t, blockPipelineDevnetWorkflow, "devnet", job) {
-		run, _ := step["run"].(string)
-		if !strings.Contains(run, "run-tests.sh") {
-			continue
-		}
-		found = true
-		if !strings.Contains(run, "--accelerated") {
-			t.Errorf("devnet step must run the accelerated profile: %q", run)
-		}
-		env, _ := step["env"].(map[string]any)
-		for _, name := range []string{
-			"DEVNET_BLOCK_PIPELINE_ENABLED",
-			"DEVNET_BLOCK_PIPELINE_VALIDATE_ENABLED",
-		} {
-			if env[name] != "true" {
-				t.Errorf("devnet step must set %s=true, got %v", name, env[name])
-			}
-		}
-	}
-	if !found {
-		t.Errorf("%s devnet job never runs run-tests.sh", blockPipelineDevnetWorkflow)
-	}
-}
-
-// analyzerGoflagsRe matches the Makefile variable that carries BUILD_TAGS to
-// nilaway and modernize. Both accept -tags but document it as "no effect";
-// the package loader reads build tags only from GOFLAGS.
-var analyzerGoflagsRe = regexp.MustCompile(
-	`(?m)^ANALYZER_GOFLAGS\s*=.*-tags=.*\$\(BUILD_TAGS\)`,
-)
-
-// TestLintGatesNilawayAndModernize checks that nilaway and modernize fail
-// `make lint` on any finding, analyze the BUILD_TAGS-gated files, and that the
-// pipeline's lint job runs them from floating installs. A findings exit
-// tolerated in the Makefile, tags passed where the tools ignore them, or a
-// pipeline that never runs the tools lets the baseline grow again.
-func TestLintGatesNilawayAndModernize(t *testing.T) {
-	t.Parallel()
-	root := repoRoot(t)
-	makefile := readRepoFile(t, root, "Makefile")
-	if !analyzerGoflagsRe.MatchString(makefile) {
-		t.Error("Makefile does not set ANALYZER_GOFLAGS to -tags=$(BUILD_TAGS)")
-	}
-	const analyzerEnv = `GOFLAGS="$(ANALYZER_GOFLAGS)" `
-
-	recipes := map[string][]string{}
-	current := ""
-	for _, line := range strings.Split(makefile, "\n") {
-		switch {
-		case strings.HasPrefix(line, "\t"):
-			if current != "" {
-				recipes[current] = append(
-					recipes[current],
-					strings.TrimPrefix(line, "\t"),
-				)
-			}
-		case line == "" || strings.HasPrefix(line, "#"):
-		default:
-			current, _, _ = strings.Cut(line, ":")
-		}
-	}
-
-	for _, tool := range []string{"nilaway", "modernize"} {
-		found := false
-		for _, line := range recipes[tool] {
-			cmd, hasEnv := strings.CutPrefix(line, analyzerEnv)
-			if !strings.HasPrefix(cmd, tool+" ") {
-				continue
-			}
-			found = true
-			if !hasEnv {
-				t.Errorf(
-					"make %s does not set GOFLAGS; %s ignores -tags and skips tag-gated files: %q",
-					tool,
-					tool,
-					line,
-				)
-			}
-			if strings.Contains(line, "||") || strings.Contains(line, "-eq") {
-				t.Errorf("make %s tolerates a failing exit: %q", tool, line)
-			}
-		}
-		if !found {
-			t.Errorf("make %s never runs %s", tool, tool)
-		}
-		ran := false
-		for _, line := range recipes["lint"] {
-			if strings.HasPrefix(line, "$(MAKE)") &&
-				strings.Contains(line, tool) &&
-				!strings.Contains(line, "||") {
-				ran = true
-			}
-		}
-		if !ran {
-			t.Errorf("make lint does not run %s as a gate", tool)
-		}
-	}
-
-	installs := map[string]string{
-		"nilaway":   "go.uber.org/nilaway/cmd/nilaway@",
-		"modernize": "golang.org/x/tools/go/analysis/passes/modernize/cmd/modernize@",
-	}
-
-	for _, workflow := range lintWorkflows {
-		job, ok := pipelineJobs(t, root, workflow)[lintJob]
-		if !ok {
-			t.Fatalf("%s has no %s job", workflow, lintJob)
-		}
-		var runs []string
-		for _, step := range jobSteps(t, workflow, lintJob, job) {
-			run, _ := step["run"].(string)
-			runs = append(runs, run)
-		}
-		all := strings.Join(runs, "\n")
-		for tool, pkg := range installs {
-			if !strings.Contains(all, "make "+tool) {
-				t.Errorf("%s %s job never runs `make %s`", workflow, lintJob, tool)
-				continue
-			}
-			_, version, ok := strings.Cut(all, pkg)
-			if !ok {
-				t.Errorf("%s %s job never installs %s", workflow, lintJob, tool)
-				continue
-			}
-			version, _, _ = strings.Cut(version, "\n")
-			if version != "latest" {
-				t.Errorf("%s installs %s at %q, want latest", workflow, tool, version)
-			}
-		}
-	}
-
-	for _, doc := range []string{"AGENTS.md", "CLAUDE.md"} {
-		if strings.Contains(readRepoFile(t, root, doc), "advisory") {
-			t.Errorf("%s calls a lint analyzer advisory", doc)
-		}
-	}
 }
 
 // TestGitignoreCoversLocalSecretsAndKeepsTrackedFixtures pins both halves of

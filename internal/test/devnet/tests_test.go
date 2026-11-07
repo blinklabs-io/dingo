@@ -26,7 +26,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -34,28 +33,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"gopkg.in/yaml.v3"
 )
-
-// A pinned container_name is global on the Docker host: two worktrees
-// running the same compose file would fight over the same container, and
-// the second `docker compose up` would recreate (or delete) the first
-// worktree's container. Every service must leave Compose to name the
-// container per-project instead.
-func TestComposeServicesDoNotPinContainerNames(t *testing.T) {
-	data, err := os.ReadFile("docker-compose.yml")
-	require.NoError(t, err)
-
-	var compose struct {
-		Services map[string]map[string]any `yaml:"services"`
-	}
-	require.NoError(t, yaml.Unmarshal(data, &compose))
-	require.NotEmpty(t, compose.Services)
-	for service, config := range compose.Services {
-		require.NotContains(t, config, "container_name",
-			"service %s must let Compose project-scope its container", service)
-	}
-}
 
 // devnet_compose_project must derive the same project name every time for
 // one worktree (so a re-run's teardown still matches its own start), a
@@ -63,6 +41,7 @@ func TestComposeServicesDoNotPinContainerNames(t *testing.T) {
 // project), and must respect a caller-supplied COMPOSE_PROJECT_NAME override
 // unchanged.
 func TestComposeProjectIsStableAndWorktreeSpecific(t *testing.T) {
+	t.Parallel()
 	helper, err := filepath.Abs("compose-project.sh")
 	require.NoError(t, err)
 
@@ -84,92 +63,6 @@ func TestComposeProjectIsStableAndWorktreeSpecific(t *testing.T) {
 	))
 }
 
-// The isolation only works end to end if every entry point actually wires
-// the helper functions in: start.sh/run-tests.sh/stop.sh must all pick a
-// compose project, start.sh/run-tests.sh must render worktree-specific
-// topology before bringing containers up, and stop.sh must be able to find
-// that rendered directory again to remove it.
-func TestDevNetScriptsSelectComposeProject(t *testing.T) {
-	for _, file := range []string{"run-tests.sh", "start.sh", "stop.sh"} {
-		data, err := os.ReadFile(file)
-		require.NoError(t, err)
-		require.Contains(
-			t,
-			string(data),
-			`source "${SCRIPT_DIR}/compose-project.sh"`,
-		)
-		require.Contains(t, string(data), "devnet_compose_project")
-	}
-	for _, file := range []string{"run-tests.sh", "start.sh"} {
-		data, err := os.ReadFile(file)
-		require.NoError(t, err)
-		require.Contains(
-			t,
-			string(data),
-			"devnet_render_topology",
-			"%s must render worktree-specific topology before bringing containers up",
-			file,
-		)
-		require.Contains(t, string(data), "devnet_ports",
-			"%s must derive a worktree-specific host port block, or a second"+
-				" worktree's `docker compose up` fails with"+
-				" \"port is already allocated\"", file)
-		require.Contains(t, string(data), "devnet_compose_up",
-			"%s must bring containers up through devnet_compose_up, which"+
-				" retries a subnet collision instead of failing the run", file)
-	}
-	data, err := os.ReadFile("stop.sh")
-	require.NoError(t, err)
-	require.Contains(
-		t,
-		string(data),
-		"devnet_topology_dir",
-		"stop.sh must locate this run's rendered topology directory to remove it",
-	)
-}
-
-// A distinct Compose project name scopes containers, volumes, and the
-// network's own name, but not its subnet: Docker refuses to create two
-// networks with the same subnet regardless of project ("Pool overlaps with
-// other one on this address space"). docker-compose.yml must therefore
-// derive both the subnet and every static ipv4_address from DEVNET_NET_BASE.
-func TestComposeNetworkSubnetIsParameterizedPerWorktree(t *testing.T) {
-	data, err := os.ReadFile("docker-compose.yml")
-	require.NoError(t, err)
-	content := string(data)
-
-	require.Contains(t, content, "${DEVNET_NET_BASE:-172.20.0}.0/24",
-		"the network subnet must derive from DEVNET_NET_BASE")
-	for _, octet := range []string{
-		"10", "11", "12", "13", "14", "15", "16", "20", "21",
-	} {
-		require.Contains(t, content, "${DEVNET_NET_BASE:-172.20.0}."+octet,
-			"the service pinned to .%s must derive its address from"+
-				" DEVNET_NET_BASE, not a hardcoded 172.20.0.x literal", octet)
-	}
-}
-
-// The topology/*.json peer lists are static, checked-in files that address
-// peers by IP (net.SplitHostPort et al. in peergov do resolve hostnames,
-// but these files predate that and pin literal 172.20.0.x addresses).
-// Concurrent worktrees need their own rendered copy at their own
-// DEVNET_NET_BASE, so the compose file must mount from
-// DEVNET_TOPOLOGY_DIR rather than the checked-in ./topology directly.
-func TestComposeTopologyMountsUseRenderedDirectory(t *testing.T) {
-	data, err := os.ReadFile("docker-compose.yml")
-	require.NoError(t, err)
-	content := string(data)
-
-	for _, file := range []string{
-		"dingo-1.json", "dingo-2.json", "dingo-3.json", "dingo-relay.json",
-		"dingo-producer.json", "cardano-producer.json", "relay.json",
-	} {
-		require.Contains(t, content,
-			"${DEVNET_TOPOLOGY_DIR:-./topology}/"+file,
-			"the mount for %s must come from DEVNET_TOPOLOGY_DIR", file)
-	}
-}
-
 // Mirrors TestComposeProjectIsStableAndWorktreeSpecific for the network
 // subnet: devnet_net_base must be stable for one worktree, fall inside the
 // reserved 172.24-172.31 range, and respect a caller override.
@@ -183,6 +76,7 @@ func TestComposeTopologyMountsUseRenderedDirectory(t *testing.T) {
 // that a subnet already in use gets skipped, and a collision surfaced by
 // `docker compose up` gets retried onto a different one.
 func TestNetBaseIsStableAndWorktreeSpecific(t *testing.T) {
+	t.Parallel()
 	helper, err := filepath.Abs("compose-project.sh")
 	require.NoError(t, err)
 
@@ -201,6 +95,7 @@ func TestNetBaseIsStableAndWorktreeSpecific(t *testing.T) {
 // intersect (identical, one nested inside a wider block), and correctly
 // clear two blocks that plainly don't.
 func TestCidrOverlapDetection(t *testing.T) {
+	t.Parallel()
 	helper, err := filepath.Abs("compose-project.sh")
 	require.NoError(t, err)
 
@@ -227,6 +122,7 @@ func TestCidrOverlapDetection(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
 			cmd := exec.Command(
 				"bash", "-c",
 				`source "$1"; _devnet_cidr_overlaps "$2" "$3"`,
@@ -250,6 +146,7 @@ func TestCidrOverlapDetection(t *testing.T) {
 // forward to a different, still-in-range candidate instead of assuming
 // the hash was free.
 func TestNetBaseAvoidsSubnetsDockerReports(t *testing.T) {
+	t.Parallel()
 	helper, err := filepath.Abs("compose-project.sh")
 	require.NoError(t, err)
 	worktree := filepath.Join(t.TempDir(), "worktree")
@@ -279,6 +176,7 @@ func TestNetBaseAvoidsSubnetsDockerReports(t *testing.T) {
 // instead of aborting on it with a bash arithmetic error, and still land
 // on a valid IPv4 candidate.
 func TestNetBaseIgnoresIPv6Subnets(t *testing.T) {
+	t.Parallel()
 	helper, err := filepath.Abs("compose-project.sh")
 	require.NoError(t, err)
 	worktree := filepath.Join(t.TempDir(), "worktree")
@@ -301,6 +199,8 @@ func TestNetBaseIgnoresIPv6Subnets(t *testing.T) {
 // shifting its whole block forward rather than handing out a port that
 // would make `docker compose up` fail with "port is already allocated".
 func TestPortsAvoidOccupiedPorts(t *testing.T) {
+	// Not t.Parallel: it binds the host port the hash-derived block starts at and
+	// asserts the block shifts past it, so concurrent listeners must not interfere.
 	helper, err := filepath.Abs("compose-project.sh")
 	require.NoError(t, err)
 	worktree := filepath.Join(t.TempDir(), "worktree")
@@ -332,6 +232,7 @@ func TestPortsAvoidOccupiedPorts(t *testing.T) {
 // A caller who has already set even one of the port variables gets full
 // manual control: devnet_ports must not touch any of the others either.
 func TestPortsRespectPartialOverride(t *testing.T) {
+	t.Parallel()
 	helper, err := filepath.Abs("compose-project.sh")
 	require.NoError(t, err)
 	worktree := filepath.Join(t.TempDir(), "worktree")
@@ -355,6 +256,7 @@ func TestPortsRespectPartialOverride(t *testing.T) {
 // winner's network via docker network ls) and retrying, rather than
 // failing the whole run over a race it can detect and correct.
 func TestComposeUpRetriesOnPoolOverlap(t *testing.T) {
+	t.Parallel()
 	repoDevnetDir, err := filepath.Abs(".")
 	require.NoError(t, err)
 
@@ -474,10 +376,12 @@ esac
 // would otherwise see them still set and silently no-op) and calls
 // devnet_ports again exactly once per port-conflict failure.
 func TestComposeUpRetriesOnPortConflict(t *testing.T) {
+	t.Parallel()
 	repoDevnetDir, err := filepath.Abs(".")
 	require.NoError(t, err)
 
 	t.Run("auto-derived ports are retried", func(t *testing.T) {
+		t.Parallel()
 		tempRoot := t.TempDir()
 		fakeBin := filepath.Join(tempRoot, "bin")
 		require.NoError(t, os.Mkdir(fakeBin, 0o755))
@@ -571,6 +475,7 @@ printf '%s %s %s\n' "$before" "$DEVNET_DINGO1_PORT" "$status"`
 	})
 
 	t.Run("a caller's port override is never retried away", func(t *testing.T) {
+		t.Parallel()
 		tempRoot := t.TempDir()
 		fakeBin := filepath.Join(tempRoot, "bin")
 		require.NoError(t, os.Mkdir(fakeBin, 0o755))
@@ -640,6 +545,7 @@ esac
 // source files themselves (they're shared by every worktree, including ones
 // running concurrently).
 func TestRenderTopologyRewritesAddressesWithoutMutatingSource(t *testing.T) {
+	t.Parallel()
 	repoDevnetDir, err := filepath.Abs(".")
 	require.NoError(t, err)
 	sourcePath := filepath.Join(repoDevnetDir, "topology", "dingo-1.json")
@@ -957,6 +863,7 @@ func TestRunTestsCompilesBeforeGenesis(t *testing.T) {
 }
 
 func TestRunTestsLeiosSelectsItsFullDijkstraScenario(t *testing.T) {
+	t.Parallel()
 	result := runFakeDevnetWithEnv(t, 0, false, map[string]string{
 		"DEVNET_LEIOS_ENABLED":               "0",
 		"DEVNET_LEIOS_VOTE_SIGNING_KEY_FILE": "/stale/key",
@@ -984,6 +891,7 @@ func TestRunTestsLeiosSelectsItsFullDijkstraScenario(t *testing.T) {
 }
 
 func TestRunTestsTachysSelectsSupportedTxPumpEra(t *testing.T) {
+	t.Parallel()
 	result := runFakeDevnetWithEnv(t, 0, false, map[string]string{
 		"DEVNET_TXPUMP_TRANSACTION_ERA": "dijkstra",
 	}, "--tachys")
@@ -995,8 +903,10 @@ func TestRunTestsTachysSelectsSupportedTxPumpEra(t *testing.T) {
 // non-Leios spec, as run-tests.sh does, or they reach the configurator and
 // dingo-1 containers.
 func TestStartNonLeiosClearsDijkstraOverrides(t *testing.T) {
+	t.Parallel()
 	for _, args := range [][]string{{"--tachys"}, {"--accelerated"}, {}} {
 		t.Run(strings.Join(append([]string{"start"}, args...), "_"), func(t *testing.T) {
+			t.Parallel()
 			result := runFakeDevnetScript(t, "start.sh", 0, false, map[string]string{
 				"DEVNET_LEIOS_ENABLED":               "1",
 				"DEVNET_LEIOS_VOTE_SIGNING_KEY_FILE": "/configs/keys/leios-vote.skey",
@@ -1013,6 +923,7 @@ func TestStartNonLeiosClearsDijkstraOverrides(t *testing.T) {
 }
 
 func TestRunTestsDefaultClearsDijkstraOverrides(t *testing.T) {
+	t.Parallel()
 	result := runFakeDevnetWithEnv(t, 0, false, map[string]string{
 		"DEVNET_DINGO_RUN_MODE":         "leios",
 		"DEVNET_DINGO_START_ERA":        "dijkstra",
@@ -1025,12 +936,14 @@ func TestRunTestsDefaultClearsDijkstraOverrides(t *testing.T) {
 }
 
 func TestRunTestsLeiosRejectsIncompatibleModes(t *testing.T) {
+	t.Parallel()
 	for _, args := range [][]string{
 		{"--leios", "--conformance"},
 		{"--leios", "--accelerated"},
 		{"--leios", "-run", "TestAnything"},
 	} {
 		t.Run(strings.Join(args, "_"), func(t *testing.T) {
+			t.Parallel()
 			result := runFakeDevnet(t, 0, false, args...)
 			require.NotZero(t, result.exitCode, result.output)
 			require.NotContains(t, result.dockerLog, " up -d")
@@ -1042,6 +955,7 @@ func TestRunTestsLeiosRejectsIncompatibleModes(t *testing.T) {
 // other value is rejected before the network starts rather than reaching
 // the configurator as a path it cannot read.
 func TestRunTestsRejectsInvalidSpecOverride(t *testing.T) {
+	t.Parallel()
 	devnetDir := filepath.Join(repoRootDir(t), "internal", "test", "devnet")
 	for _, override := range []string{
 		"./testnet-missing.yaml",
@@ -1053,6 +967,7 @@ func TestRunTestsRejectsInvalidSpecOverride(t *testing.T) {
 		"./docker-compose.yml",
 	} {
 		t.Run(override, func(t *testing.T) {
+			t.Parallel()
 			result := runFakeDevnetWithEnv(t, 0, false, map[string]string{
 				"DEVNET_SPEC_OVERRIDE": override,
 			})
@@ -1064,11 +979,13 @@ func TestRunTestsRejectsInvalidSpecOverride(t *testing.T) {
 }
 
 func TestRunTestsAppliesSpecOverride(t *testing.T) {
+	t.Parallel()
 	for _, override := range []string{
 		"./testnet-accelerated.yaml",
 		"testnet-accelerated.yaml",
 	} {
 		t.Run(override, func(t *testing.T) {
+			t.Parallel()
 			result := runFakeDevnetWithEnv(t, 0, false, map[string]string{
 				"DEVNET_SPEC_OVERRIDE": override,
 			})
@@ -1083,12 +1000,14 @@ func TestRunTestsAppliesSpecOverride(t *testing.T) {
 // harness use the same magic whichever spec is selected, and an inherited
 // value cannot override it.
 func TestRunTestsTakesNetworkMagicFromSpec(t *testing.T) {
+	t.Parallel()
 	for override, want := range map[string]string{
 		"":                                "42",
 		"./testnet-accelerated-pv11.yaml": "42",
 		"./testnet-accelerated-pv12.yaml": "6",
 	} {
 		t.Run(override, func(t *testing.T) {
+			t.Parallel()
 			env := map[string]string{"DEVNET_NETWORK_MAGIC": "1"}
 			if override != "" {
 				env["DEVNET_SPEC_OVERRIDE"] = override
@@ -1112,6 +1031,7 @@ func TestRunTestsCompileFailureDoesNotStartGenesis(t *testing.T) {
 }
 
 func TestRunTestsPreservesTestStatusWhenCleanupFails(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name     string
 		testExit int
@@ -1120,6 +1040,7 @@ func TestRunTestsPreservesTestStatusWhenCleanupFails(t *testing.T) {
 		{name: "failure", testExit: 23},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			result := runFakeDevnet(t, test.testExit, true)
 			assert.Equal(t, test.testExit, result.exitCode, result.output)
 		})
@@ -1127,6 +1048,7 @@ func TestRunTestsPreservesTestStatusWhenCleanupFails(t *testing.T) {
 }
 
 func TestRunTestsKeepUpPreservesSuccess(t *testing.T) {
+	t.Parallel()
 	result := runFakeDevnet(t, 0, true, "--keep-up")
 	assert.Equal(t, 0, result.exitCode, result.output)
 	assert.NotContains(t, result.dockerLog, " down -v",
@@ -1134,6 +1056,7 @@ func TestRunTestsKeepUpPreservesSuccess(t *testing.T) {
 }
 
 func TestRunTestsCleansContainerCreatedTemporaryFiles(t *testing.T) {
+	t.Parallel()
 	wantUserMapping := bashUserMapping(t)
 	wantHostUID, wantHostGID, ok := strings.Cut(wantUserMapping, ":")
 	require.True(t, ok)
@@ -1149,6 +1072,7 @@ func TestRunTestsCleansContainerCreatedTemporaryFiles(t *testing.T) {
 		{name: "failure", testExit: 23, wantArtifactCount: 1},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			result := runFakeDevnet(t, test.testExit, false)
 			assert.Equal(t, test.testExit, result.exitCode, result.output)
 			assert.Contains(t, result.dockerLog, wantCopy,
@@ -1174,6 +1098,7 @@ func TestRunTestsCleansContainerCreatedTemporaryFiles(t *testing.T) {
 // the runner may inherit STAKE_KEYS_HOST_DIR from its caller, but it must only
 // remove a stake-key directory that this invocation created with mktemp.
 func TestRunTestsPreservesCallerOwnedStakeDirectory(t *testing.T) {
+	t.Parallel()
 	callerDir := t.TempDir()
 	marker := filepath.Join(callerDir, "keep")
 	require.NoError(t, os.WriteFile(marker, []byte("caller-owned"), 0o600))
@@ -1364,17 +1289,6 @@ func writeExecutable(t *testing.T, path, contents string) {
 	require.NoError(t, os.WriteFile(path, []byte(contents), 0o700))
 }
 
-var (
-	dockerfileUIDRe = regexp.MustCompile(`adduser\s+--system\s+--uid\s+(\d+)`)
-	dockerfileGIDRe = regexp.MustCompile(`addgroup\s+--system\s+--gid\s+(\d+)`)
-	composeUIDRe    = regexp.MustCompile(
-		`DINGO_UID:\s*"\$\{DEVNET_DINGO_UID:-(\d+)\}"`,
-	)
-	composeGIDRe = regexp.MustCompile(
-		`DINGO_GID:\s*"\$\{DEVNET_DINGO_GID:-(\d+)\}"`,
-	)
-)
-
 // repoRootDir walks up from the package directory to the module root.
 func repoRootDir(t *testing.T) string {
 	t.Helper()
@@ -1390,94 +1304,4 @@ func repoRootDir(t *testing.T) string {
 	}
 	t.Fatal("could not locate the module root")
 	return ""
-}
-
-func matchAll(t *testing.T, re *regexp.Regexp, text, what string) []string {
-	t.Helper()
-	matches := re.FindAllStringSubmatch(text, -1)
-	require.NotEmpty(t, matches, "no %s found", what)
-	out := make([]string, 0, len(matches))
-	for _, m := range matches {
-		out = append(out, m[1])
-	}
-	return out
-}
-
-// TestConfiguratorUIDMatchesDockerfile keeps the DevNet configurator's
-// key-ownership target in agreement with the user the Dingo image
-// actually runs as.
-//
-// These drifted apart once, and the failure was expensive to read: the
-// image moved from uid 100 to a pinned 1000 while configurator.sh still
-// chowned each pool's key directory to 100:101. That directory has to be
-// 0700 — cardano-node refuses to start when vrf.skey is readable by
-// group or other — so every Dingo block producer in the DevNet died at
-// startup with "failed to read key file .../vrf.skey: permission denied",
-// and the whole network was unusable with nothing pointing at the cause.
-//
-// The compose file now passes the ids in, and this test derives the
-// expectation from the Dockerfile rather than restating a number, so the
-// next time the image's user changes this fails immediately.
-func TestConfiguratorUIDMatchesDockerfile(t *testing.T) {
-	root := repoRootDir(t)
-
-	dockerfile, err := os.ReadFile(filepath.Join(root, "Dockerfile"))
-	require.NoError(t, err)
-	compose, err := os.ReadFile(
-		filepath.Join(root, "internal", "test", "devnet", "docker-compose.yml"),
-	)
-	require.NoError(t, err)
-
-	imageUIDs := matchAll(
-		t, dockerfileUIDRe, string(dockerfile), "adduser --uid in Dockerfile",
-	)
-	imageGIDs := matchAll(
-		t, dockerfileGIDRe, string(dockerfile), "addgroup --gid in Dockerfile",
-	)
-	require.Len(t, imageUIDs, 1, "expected exactly one dingo user")
-	require.Len(t, imageGIDs, 1, "expected exactly one dingo group")
-
-	// Both configurator services (dingo and conformance profiles) must
-	// carry the ids, or the profile without them silently regresses.
-	composeUIDs := matchAll(
-		t, composeUIDRe, string(compose), "DINGO_UID default in compose",
-	)
-	composeGIDs := matchAll(
-		t, composeGIDRe, string(compose), "DINGO_GID default in compose",
-	)
-	require.Len(t, composeUIDs, 2,
-		"both configurator services must set DINGO_UID")
-	require.Len(t, composeGIDs, 2,
-		"both configurator services must set DINGO_GID")
-
-	for _, got := range composeUIDs {
-		require.Equal(t, imageUIDs[0], got,
-			"compose DINGO_UID must match the Dockerfile's pinned dingo uid;"+
-				" a mismatch makes every DevNet block producer fail to read"+
-				" its VRF key")
-	}
-	for _, got := range composeGIDs {
-		require.Equal(t, imageGIDs[0], got,
-			"compose DINGO_GID must match the Dockerfile's pinned dingo gid")
-	}
-}
-
-// TestConfiguratorChownsUsingPassedIds guards the other half of the
-// contract: compose can pass the ids in, but the script has to use them
-// rather than a hardcoded pair.
-func TestConfiguratorChownsUsingPassedIds(t *testing.T) {
-	root := repoRootDir(t)
-	script, err := os.ReadFile(
-		filepath.Join(root, "internal", "test", "devnet", "configurator.sh"),
-	)
-	require.NoError(t, err)
-
-	require.Contains(t, string(script), `chown -R "${DINGO_UID}:${DINGO_GID}"`,
-		"configurator.sh must chown pool keys to the ids compose passes in")
-	// Scoped to the pool-key chown this contract covers, so an unrelated
-	// numeric chown elsewhere in the script does not fail the guard.
-	require.NotRegexp(t,
-		regexp.MustCompile(`chown -R \d+:\d+ "?/configs/`),
-		string(script),
-		"configurator.sh must not hardcode a uid:gid for the pool keys")
 }

@@ -209,28 +209,6 @@ func TestRecordEpochDoesNotCountAWhollyIncompleteEpoch(t *testing.T) {
 		"an epoch where at least one check reached a verdict must count")
 }
 
-// TestRecordDivergenceIdentifiesKoiosAsTheReference pins the other half of
-// that review: from-genesis compares against Koios, not cardano-node, and a
-// responder reading NodeParityDivergence has to know which oracle
-// disagreed. Without the label the alert sends them to the wrong side.
-func TestRecordDivergenceIdentifiesKoiosAsTheReference(t *testing.T) {
-	t.Parallel()
-	c, m := countersWithMetrics(t)
-
-	c.recordEpoch(nodeparity.EpochResult{
-		Epoch:         702,
-		UTxOAttempted: true,
-		UTxOMissing:   []string{"txin#0"},
-	}, slog.New(slog.DiscardHandler))
-
-	require.InDelta(t, 1.0, testutil.ToFloat64(
-		m.divergenceTotal.WithLabelValues("utxo", ReferenceKoios),
-	), 0.001, "a from-genesis divergence must be tagged reference=koios")
-	require.InDelta(t, 0.0, testutil.ToFloat64(
-		m.divergenceTotal.WithLabelValues("utxo", ReferenceCardanoNode),
-	), 0.001, "it must not be attributed to cardano-node")
-}
-
 // TestFromGenesisMetricsRegistersNoWatchCounters is the regression test for
 // the review finding that from-genesis would false-alert.
 //

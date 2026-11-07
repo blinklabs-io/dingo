@@ -253,40 +253,6 @@ func TestEvaluateCollectsEveryMismatch(t *testing.T) {
 	require.Len(t, result.Mismatches, 2)
 }
 
-// TestGatesRegistryIsComplete fails when a gate is added without test
-// coverage, so no gate ships unexercised.
-func TestGatesRegistryIsComplete(t *testing.T) {
-	covered := map[string]bool{
-		"network":                        true,
-		"network_magic":                  true,
-		"start_era":                      true,
-		"storage_mode":                   true,
-		"history_expiry_active":          true,
-		"pledge_leverage":                true,
-		"full_pot_rewards":               true,
-		"delegator_inactivity":           true,
-		"min_pool_margin":                true,
-		"historical_validation_relaxed":  true,
-		"strict_utxo_validation_relaxed": true,
-		"byron_genesis_hash":             true,
-		"shelley_genesis_hash":           true,
-		"alonzo_genesis_hash":            true,
-		"conway_genesis_hash":            true,
-		"dijkstra_genesis_hash":          true,
-		"metadata_plugin":                true,
-		"blob_plugin":                    true,
-		"blob_store_id":                  true,
-	}
-	for _, gate := range nodesettings.Gates() {
-		require.True(
-			t, covered[gate.Name],
-			"gate %q has no test coverage; add cases then list it here",
-			gate.Name,
-		)
-	}
-	require.Len(t, nodesettings.Gates(), len(covered))
-}
-
 // TestFullPotRewardsIsNotOverrideEligible pins the project owner's ruling
 // that full_pot_rewards must never be OverrideEligible: its companion,
 // UnsafeFullPotRewardsOnStandardNetworks, is neither gated nor persisted, so

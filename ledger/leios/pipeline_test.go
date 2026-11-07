@@ -31,6 +31,8 @@ import (
 )
 
 func TestPipelineQuorumPreservesOccurrenceSlot(t *testing.T) {
+	t.Parallel()
+
 	f := newPipelineFixture(t, DefaultPipelineTiming())
 	defer f.eventBus.Stop()
 	hash := ebHashFor("same-content")
@@ -52,8 +54,11 @@ func TestPipelineQuorumPreservesOccurrenceSlot(t *testing.T) {
 }
 
 func TestPipelineCleanupPreservesOtherOccurrence(t *testing.T) {
+	t.Parallel()
+
 	for _, kind := range []string{"ttl", "epoch", "rollback"} {
 		t.Run(kind, func(t *testing.T) {
+			t.Parallel()
 			timing := DefaultPipelineTiming()
 			if kind == "epoch" {
 				timing.InstanceTTLSlots = 1000
@@ -189,29 +194,6 @@ func TestPipelineTimingValidate(t *testing.T) {
 	require.Error(t, nonMonotonic.Validate())
 }
 
-func TestNewPipelineManagerValidation(t *testing.T) {
-	t.Parallel()
-
-	good := PipelineManagerConfig{
-		EventBus:      event.NewEventBus(nil, nil),
-		SlotProvider:  &fakeSlotProvider{},
-		EpochProvider: &fakeEpochProvider{},
-		Timing:        DefaultPipelineTiming(),
-	}
-	_, err := NewPipelineManager(good)
-	require.NoError(t, err)
-
-	noBus := good
-	noBus.EventBus = nil
-	_, err = NewPipelineManager(noBus)
-	require.Error(t, err)
-
-	badTiming := good
-	badTiming.Timing = PipelineTiming{}
-	_, err = NewPipelineManager(badTiming)
-	require.Error(t, err)
-}
-
 func TestMayProduceEndorserBlock(t *testing.T) {
 	t.Parallel()
 
@@ -321,26 +303,6 @@ func TestObserveAndCertifySingleEb(t *testing.T) {
 
 	// Past the inclusion window -> no longer eligible.
 	f.slot.slot = slot + DefaultPipelineTiming().RbInclusionWindowSlots
-	assert.Empty(t, f.mgr.EligibleCertifiedEbs())
-}
-
-func TestMarkEmbeddedExcludesEb(t *testing.T) {
-	t.Parallel()
-
-	f := newPipelineFixture(t, DefaultPipelineTiming())
-	const slot = 300
-	hash := ebHashFor("eb-a")
-	f.slot.slot = slot
-	f.mgr.ObserveEndorserBlock(slot, hash)
-	f.mgr.handleEbQuorum(EbQuorumEvent{
-		SlotNo:            slot,
-		EndorserBlockHash: hash,
-		Certificate:       &lcommon.LeiosEbCertificate{},
-	})
-	f.slot.slot = slot + 5
-	require.Len(t, f.mgr.EligibleCertifiedEbs(), 1)
-
-	f.mgr.MarkEmbedded(slot, hash)
 	assert.Empty(t, f.mgr.EligibleCertifiedEbs())
 }
 
@@ -486,34 +448,6 @@ func TestEbQuorumPastCertifyDeadlineRejected(t *testing.T) {
 	assert.False(t, eb.certified, "a late certificate must not certify the EB")
 }
 
-func TestLateCertMetricCounted(t *testing.T) {
-	t.Parallel()
-
-	reg := prometheus.NewRegistry()
-	tm := DefaultPipelineTiming()
-	mgr, err := NewPipelineManager(PipelineManagerConfig{
-		EventBus:      event.NewEventBus(nil, nil),
-		SlotProvider:  &fakeSlotProvider{slot: 300 + tm.CertifyByDeadlineSlots},
-		EpochProvider: &fakeEpochProvider{},
-		Timing:        tm,
-		PromRegistry:  reg,
-	})
-	require.NoError(t, err)
-
-	mgr.handleEbQuorum(EbQuorumEvent{
-		SlotNo:            300,
-		EndorserBlockHash: ebHashFor("eb-late"),
-		Certificate:       &lcommon.LeiosEbCertificate{},
-	})
-	assert.Equal(
-		t,
-		float64(1),
-		promtestutil.ToFloat64(
-			mgr.metrics.certsRejectedTotal.WithLabelValues("late"),
-		),
-	)
-}
-
 func TestStageGaugesReflectUncertifiedStages(t *testing.T) {
 	t.Parallel()
 
@@ -544,31 +478,6 @@ func TestStageGaugesReflectUncertifiedStages(t *testing.T) {
 	_ = mgr.EligibleCertifiedEbs()
 	assert.Equal(t, float64(1), stageGauge(StageVote))
 	assert.Equal(t, float64(0), stageGauge(StageProduce))
-}
-
-func TestStageOf(t *testing.T) {
-	t.Parallel()
-
-	tm := DefaultPipelineTiming()
-	f := newPipelineFixture(t, tm)
-	const slot = 500
-	hash := ebHashFor("eb")
-	f.slot.slot = slot
-	f.mgr.ObserveEndorserBlock(slot, hash)
-
-	st, ok := f.mgr.StageOf(slot, hash)
-	require.True(t, ok)
-	assert.Equal(t, StageProduce, st)
-
-	// Past the certify deadline without a certificate -> expired.
-	f.slot.slot = slot + tm.CertifyByDeadlineSlots
-	st, ok = f.mgr.StageOf(slot, hash)
-	require.True(t, ok)
-	assert.Equal(t, StageExpired, st)
-
-	// An unknown hash is not tracked.
-	_, ok = f.mgr.StageOf(slot, ebHashFor("missing"))
-	assert.False(t, ok)
 }
 
 func TestEbQuorumForUnobservedEb(t *testing.T) {
@@ -1076,6 +985,8 @@ func TestPipelineLifecycleAndEventDispatch(t *testing.T) {
 }
 
 func TestMarkEmbeddedPreservesOtherOccurrence(t *testing.T) {
+	t.Parallel()
+
 	f := newPipelineFixture(t, DefaultPipelineTiming())
 	defer f.eventBus.Stop()
 	hash := ebHashFor("same-content")

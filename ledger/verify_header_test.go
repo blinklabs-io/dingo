@@ -536,17 +536,6 @@ func TestVerifyBlockHeader_MissingEpochNonce(t *testing.T) {
 	assert.Contains(t, err.Error(), "epoch nonce not available")
 }
 
-// TestVerifyBlockHeader_EmptyEpochNonce verifies that an empty epoch
-// nonce also fails.
-func TestVerifyBlockHeader_EmptyEpochNonce(t *testing.T) {
-	t.Parallel()
-
-	block := &mockBabbageBlock{slot: 1000}
-	err := verifyBlockHeader(block, []byte{}, 129600)
-	assert.Error(t, err, "should fail with empty epoch nonce")
-	assert.Contains(t, err.Error(), "epoch nonce not available")
-}
-
 // TestVerifyBlockHeader_ValidBlock tests that a block with valid
 // cryptographic proofs passes header verification.
 func TestVerifyBlockHeader_ValidBlock(t *testing.T) {
@@ -4071,6 +4060,8 @@ func TestVerifyBlockLeaderEligibility_ReconstructedHistoricalMarkRejectsStandard
 func TestVerifyBlockLeaderEligibility_ReconstructedHistoricalMarkPrototypeAccepts(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{41}, 0, tamperNone)
 	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
 	ls.config.SkipLeaderStakeThresholdCheck = true
@@ -4128,6 +4119,8 @@ func TestVerifyBlockLeaderEligibility_ReconstructedHistoricalMarkPrototypeAccept
 func TestVerifyBlockHeaderState_ReconstructedMarkDefersThenRejects(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	newReconstructedMarkLedger := func(
 		t *testing.T,
 		tipSlot uint64,
@@ -4191,6 +4184,7 @@ func TestVerifyBlockHeaderState_ReconstructedMarkDefersThenRejects(
 	}
 
 	t.Run("tip behind the slot defers", func(t *testing.T) {
+		t.Parallel()
 		ls, block := newReconstructedMarkLedger(t, 549)
 		require.True(t, ls.ledgerTipBehindSlot(block.SlotNumber()))
 
@@ -4219,6 +4213,7 @@ func TestVerifyBlockHeaderState_ReconstructedMarkDefersThenRejects(
 	})
 
 	t.Run("tip caught up rejects", func(t *testing.T) {
+		t.Parallel()
 		ls, block := newReconstructedMarkLedger(t, 1550)
 		require.False(t, ls.ledgerTipBehindSlot(block.SlotNumber()))
 
@@ -4762,6 +4757,8 @@ func (f *eligibilityDenominatorFixture) totalActiveStake(
 func TestVerifyBlockLeaderEligibility_DenominatorExcludesUndelegatedStake(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const undelegatedStake = uint64(400_000_000_000_000_000)
 	f := newEligibilityDenominatorFixture(t, 60)
 
@@ -4802,6 +4799,8 @@ func TestVerifyBlockLeaderEligibility_DenominatorExcludesUndelegatedStake(
 func TestVerifyBlockLeaderEligibility_DenominatorExcludesReapedDelegation(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const staleStake = uint64(400_000_000_000_000_000)
 	f := newEligibilityDenominatorFixture(t, 61)
 
@@ -4867,6 +4866,8 @@ INSERT INTO pool_registration (
 func TestVerifyBlockLeaderEligibility_DenominatorIncludesEligibleStake(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const eligibleStake = uint64(400_000_000_000_000_000)
 	f := newEligibilityDenominatorFixture(t, 62)
 

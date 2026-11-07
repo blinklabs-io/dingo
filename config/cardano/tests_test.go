@@ -377,8 +377,7 @@ func computedEmbeddedHashes(c *CardanoNodeConfig) map[string]string {
 //
 // Nothing else does this. loadGenesisConfigsFromEmbed compares the computed
 // hash against the one in the same directory's config.json, so the two move
-// together; TestEmbedFS_AllNetworks and
-// TestEmbeddedConfigsPassGenesisConsistency load the configs but assert
+// together; TestEmbedFS_AllNetworks loads the configs but asserts
 // nothing about the hashes. A change to the embedded bytes accompanied by a
 // matching config.json edit therefore changed the chain constant with the
 // whole suite green.

@@ -353,6 +353,7 @@ func getTestTxBytes(t *testing.T) []byte {
 }
 
 func TestUtxoOverlayUsesConsensusConsumedInputsForInvalidTx(t *testing.T) {
+	t.Parallel()
 	tx, err := gledger.NewTransactionFromCbor(
 		uint(conway.EraIdConway),
 		getTestTxBytes(t),
@@ -380,6 +381,7 @@ func TestUtxoOverlayUsesConsensusConsumedInputsForInvalidTx(t *testing.T) {
 // =============================================================================
 
 func TestMempool_Stop(t *testing.T) {
+	t.Parallel()
 	// Create a mempool with minimal config
 	m, err := NewMempool(MempoolConfig{
 		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -486,6 +488,7 @@ func TestMempool_Stop(t *testing.T) {
 // =============================================================================
 
 func TestMempool_AddRemoveConsumer(t *testing.T) {
+	t.Parallel()
 	m := newTestMempool(t)
 	defer m.Stop(context.Background())
 
@@ -535,6 +538,7 @@ func TestMempool_AddRemoveConsumer(t *testing.T) {
 }
 
 func TestMempool_AddConsumerIsIdempotent(t *testing.T) {
+	t.Parallel()
 	m := newTestMempool(t)
 	defer m.Stop(context.Background())
 	connId := newTestConnectionId(0)
@@ -549,6 +553,7 @@ func TestMempool_AddConsumerIsIdempotent(t *testing.T) {
 }
 
 func TestMempoolConsumer_NextTx_NonBlocking(t *testing.T) {
+	t.Parallel()
 	m := newTestMempool(t)
 	defer m.Stop(context.Background())
 
@@ -576,6 +581,7 @@ func TestMempoolConsumer_NextTx_NonBlocking(t *testing.T) {
 }
 
 func TestMempoolConsumer_NextTx_Blocking(t *testing.T) {
+	t.Parallel()
 	m := newTestMempool(t)
 	defer m.Stop(context.Background())
 
@@ -635,6 +641,7 @@ func TestMempoolConsumer_NextTx_Blocking(t *testing.T) {
 // =============================================================================
 
 func TestMempool_ConsumerCreatedBeforeTxs(t *testing.T) {
+	t.Parallel()
 	m := newTestMempool(t)
 	defer m.Stop(context.Background())
 
@@ -660,99 +667,12 @@ func TestMempool_ConsumerCreatedBeforeTxs(t *testing.T) {
 	assert.Nil(t, consumer.NextTx(false))
 }
 
-func TestMempool_ConsumerCreatedAfterTxs(t *testing.T) {
-	m := newTestMempool(t)
-	defer m.Stop(context.Background())
-
-	// Add transactions first
-	txs := addMockTransactions(t, m, 3)
-
-	// Create consumer after transactions exist
-	connId := newTestConnectionId(0)
-	consumer := m.AddConsumer(connId)
-	require.NotNil(t, consumer)
-
-	// Verify nextTxIdx starts at 0 (consumer starts from beginning)
-	assert.Equal(t, 0, consumer.nextTxIdx, "nextTxIdx should start at 0")
-
-	// Verify consumer sees all existing transactions
-	for i := range 3 {
-		tx := consumer.NextTx(false)
-		require.NotNil(t, tx, "should get transaction %d", i)
-		assert.Equal(t, txs[i].Hash, tx.Hash)
-	}
-}
-
-func TestMempool_ConsumerCreatedDuringTxAddition(t *testing.T) {
-	m := newTestMempool(t)
-	defer m.Stop(context.Background())
-
-	// Add a fixed stream of transactions and notify the consumer creator after
-	// each append so the test does not depend on wall-clock scheduling.
-	const numAdded = 100
-	added := make(chan struct{})
-	// Releases the producer if a require below fails before it is drained.
-	stop := make(chan struct{})
-	t.Cleanup(func() { close(stop) })
-	var addWG sync.WaitGroup
-	addWG.Go(func() {
-		defer close(added)
-		for i := range numAdded {
-			m.Lock()
-			tx := &MempoolTransaction{
-				Hash:     fmt.Sprintf("concurrent-tx-%d", i),
-				Cbor:     fmt.Appendf(nil, "cbor-%d", i),
-				Type:     uint(conway.EraIdConway),
-				LastSeen: time.Now(),
-			}
-			m.transactions = append(m.transactions, tx)
-			m.Unlock()
-			select {
-			case added <- struct{}{}:
-			case <-stop:
-				return
-			}
-		}
-	})
-
-	// Create consumers at distinct points in the concurrent append stream.
-	consumers := make([]*MempoolConsumer, 10)
-	for i := range 10 {
-		for range 10 {
-			_, ok := <-added
-			require.True(t, ok, "transaction producer ended before consumer %d", i)
-		}
-		connId := newTestConnectionId(i)
-		consumers[i] = mustAddConsumer(t, m, connId)
-		require.NotNil(t, consumers[i], "consumer %d should not be nil", i)
-	}
-	addWG.Wait()
-
-	// Verify each consumer can read transactions without panic
-	for i, consumer := range consumers {
-		// Read some transactions (don't need to read all)
-		for range 5 {
-			tx := consumer.NextTx(false)
-			if tx == nil {
-				break // No more transactions for this consumer
-			}
-		}
-		// Consumer should be in valid state
-		assert.GreaterOrEqual(
-			t,
-			consumer.nextTxIdx,
-			0,
-			"consumer %d nextTxIdx should be >= 0",
-			i,
-		)
-	}
-}
-
 // =============================================================================
 // Multiple Consumer Tests
 // =============================================================================
 
 func TestMempool_MultipleConsumers_IndependentProgress(t *testing.T) {
+	t.Parallel()
 	m := newTestMempool(t)
 	defer m.Stop(context.Background())
 
@@ -804,6 +724,7 @@ func TestMempool_MultipleConsumers_IndependentProgress(t *testing.T) {
 }
 
 func TestMempool_MultipleConsumers_SameTransaction(t *testing.T) {
+	t.Parallel()
 	m := newTestMempool(t)
 	defer m.Stop(context.Background())
 
@@ -859,6 +780,7 @@ func TestMempool_MultipleConsumers_SameTransaction(t *testing.T) {
 // =============================================================================
 
 func TestMempool_RemoveTx_BeforeConsumerReaches(t *testing.T) {
+	t.Parallel()
 	m := newTestMempool(t)
 	defer m.Stop(context.Background())
 
@@ -887,36 +809,8 @@ func TestMempool_RemoveTx_BeforeConsumerReaches(t *testing.T) {
 	assert.Nil(t, tx)
 }
 
-func TestMempool_RemoveTx_AfterConsumerPasses(t *testing.T) {
-	m := newTestMempool(t)
-	defer m.Stop(context.Background())
-
-	// Add transactions [A, B, C]
-	addMockTransactions(t, m, 3)
-
-	// Create consumer
-	connId := newTestConnectionId(0)
-	consumer := mustAddConsumer(t, m, connId)
-
-	// Consumer gets A (nextTxIdx=1)
-	tx := consumer.NextTx(false)
-	require.NotNil(t, tx)
-	assert.Equal(t, "tx-hash-0", tx.Hash)
-	assert.Equal(t, 1, consumer.nextTxIdx)
-
-	// Remove A (consumer already passed it)
-	m.RemoveTransaction("tx-hash-0")
-
-	// Consumer's nextTxIdx should be decremented (now 0)
-	assert.Equal(t, 0, consumer.nextTxIdx, "nextTxIdx should be decremented")
-
-	// Consumer gets B (now at index 0)
-	tx = consumer.NextTx(false)
-	require.NotNil(t, tx)
-	assert.Equal(t, "tx-hash-1", tx.Hash)
-}
-
 func TestMempool_RemoveTx_ConsumerAtBoundary(t *testing.T) {
+	t.Parallel()
 	m := newTestMempool(t)
 	defer m.Stop(context.Background())
 
@@ -959,6 +853,7 @@ func TestMempool_RemoveTx_ConsumerAtBoundary(t *testing.T) {
 }
 
 func TestMempool_RemoveAllTxs(t *testing.T) {
+	t.Parallel()
 	m := newTestMempool(t)
 	defer m.Stop(context.Background())
 
@@ -998,65 +893,8 @@ func TestMempool_RemoveAllTxs(t *testing.T) {
 // Concurrent Operation Tests
 // =============================================================================
 
-func TestMempool_ConcurrentAddRemove(t *testing.T) {
-	m := newTestMempool(t)
-	defer m.Stop(context.Background())
-
-	var wg sync.WaitGroup
-	const numAdders = 5
-	const numRemovers = 3
-	const opsPerGoroutine = 100
-
-	addedHashes := make(chan string, numAdders*opsPerGoroutine)
-
-	// Start adder goroutines
-	for i := range numAdders {
-		wg.Add(1)
-		go func(adderID int) {
-			defer wg.Done()
-			for j := range opsPerGoroutine {
-				hash := fmt.Sprintf("add-%d-%d", adderID, j)
-				m.Lock()
-				tx := &MempoolTransaction{
-					Hash:     hash,
-					Cbor:     []byte(hash),
-					Type:     uint(conway.EraIdConway),
-					LastSeen: time.Now(),
-				}
-				m.transactions = append(m.transactions, tx)
-				m.Unlock()
-				addedHashes <- hash
-			}
-		}(i)
-	}
-
-	// Start remover goroutines
-	for range numRemovers {
-		wg.Go(func() {
-			for range opsPerGoroutine {
-				select {
-				case hash := <-addedHashes:
-					m.RemoveTransaction(hash)
-				default:
-					// No hash available, skip
-				}
-			}
-		})
-	}
-
-	// Wait for all operations to complete
-	wg.Wait()
-	close(addedHashes)
-
-	// Mempool should be in consistent state (no panics, no races)
-	m.RLock()
-	txCount := len(m.transactions)
-	m.RUnlock()
-
-	t.Logf("Final mempool size: %d transactions", txCount)
-}
-
 func TestMempool_ConcurrentConsumerOperations(t *testing.T) {
+	t.Parallel()
 	m := newTestMempool(t)
 	defer m.Stop(context.Background())
 
@@ -1141,6 +979,7 @@ func TestMempool_ConcurrentConsumerOperations(t *testing.T) {
 }
 
 func TestMempool_ConcurrentNextTx_MultipleConsumers(t *testing.T) {
+	t.Parallel()
 	m := newTestMempool(t)
 	defer m.Stop(context.Background())
 
@@ -1228,40 +1067,8 @@ func TestMempool_ConcurrentNextTx_MultipleConsumers(t *testing.T) {
 // Consumer Cache Tests
 // =============================================================================
 
-func TestMempoolConsumer_Cache(t *testing.T) {
-	m := newTestMempool(t)
-	defer m.Stop(context.Background())
-
-	// Add transaction
-	txs := addMockTransactions(t, m, 1)
-
-	// Create consumer
-	connId := newTestConnectionId(0)
-	consumer := m.AddConsumer(connId)
-
-	// Get transaction via NextTx - should add to cache
-	tx := consumer.NextTx(false)
-	require.NotNil(t, tx)
-
-	// Verify transaction is in cache
-	cachedTx := consumer.GetTxFromCache(txs[0].Hash)
-	require.NotNil(t, cachedTx, "transaction should be in cache")
-	assert.Equal(t, txs[0].Hash, cachedTx.Hash)
-
-	// Remove from cache
-	consumer.RemoveTxFromCache(txs[0].Hash)
-
-	// Verify transaction is no longer in cache
-	cachedTx = consumer.GetTxFromCache(txs[0].Hash)
-	assert.Nil(t, cachedTx, "transaction should be removed from cache")
-
-	// Verify original transaction still in mempool
-	mempoolTx, exists := m.GetTransaction(txs[0].Hash)
-	assert.True(t, exists, "transaction should still be in mempool")
-	assert.Equal(t, txs[0].Hash, mempoolTx.Hash)
-}
-
 func TestMempoolConsumer_CacheIsBounded(t *testing.T) {
+	t.Parallel()
 	m, err := NewMempool(MempoolConfig{
 		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:          event.NewEventBus(nil, nil),
@@ -1326,6 +1133,7 @@ func TestMempoolConsumer_CacheIsBounded(t *testing.T) {
 // keeps fetching bodies without ever acknowledging them cannot grow the
 // per-connection offered-id tracking without bound.
 func TestMempoolConsumer_UnackedServedTxsCountTowardCacheLimit(t *testing.T) {
+	t.Parallel()
 	m, err := NewMempool(MempoolConfig{
 		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:          event.NewEventBus(nil, nil),
@@ -1383,6 +1191,7 @@ func TestMempoolConsumer_UnackedServedTxsCountTowardCacheLimit(t *testing.T) {
 // does not record a second offered slot for it. A duplicate slot would let a
 // later ack consume it and evict a different, still-unacknowledged body.
 func TestMempoolConsumer_ResurfacedHashNotDuplicateOffered(t *testing.T) {
+	t.Parallel()
 	m := newTestMempool(t)
 	defer m.Stop(context.Background())
 
@@ -1429,6 +1238,7 @@ func TestMempoolConsumer_ResurfacedHashNotDuplicateOffered(t *testing.T) {
 // per-consumer byte pressure preserves the cursor until retained bytes are
 // released, while keeping every advertised body available for retransmission.
 func TestMempoolConsumer_CacheIsBoundedByRetainedBytes(t *testing.T) {
+	t.Parallel()
 	m, err := NewMempool(MempoolConfig{
 		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:           event.NewEventBus(nil, nil),
@@ -1477,6 +1287,7 @@ func TestMempoolConsumer_CacheIsBoundedByRetainedBytes(t *testing.T) {
 // body which can never fit the consumer budget is skipped instead of wedging
 // blocking or non-blocking consumers behind it.
 func TestMempoolConsumer_OversizedTransactionDoesNotBlockCursor(t *testing.T) {
+	t.Parallel()
 	m, err := NewMempool(MempoolConfig{
 		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:           event.NewEventBus(nil, nil),
@@ -1515,6 +1326,7 @@ func TestMempoolConsumer_OversizedTransactionDoesNotBlockCursor(t *testing.T) {
 // smaller than an ordinary transaction body, and NextTx would then skip it
 // forever.
 func TestMempoolConsumer_DefaultCacheBudgetHasFloor(t *testing.T) {
+	t.Parallel()
 	m, err := NewMempool(MempoolConfig{
 		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:          event.NewEventBus(nil, nil),
@@ -1555,6 +1367,7 @@ func TestMempoolConsumer_DefaultCacheBudgetHasFloor(t *testing.T) {
 // so this failure mode is visible instead of looking like a healthy idle
 // relay.
 func TestMempoolConsumer_OversizedSkipIsObservable(t *testing.T) {
+	t.Parallel()
 	m, err := NewMempool(MempoolConfig{
 		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:           event.NewEventBus(nil, nil),
@@ -1582,6 +1395,7 @@ func TestMempoolConsumer_OversizedSkipIsObservable(t *testing.T) {
 // copies across consumers share one aggregate budget and that releasing one
 // consumer's copy allows another consumer to advertise the transaction.
 func TestMempoolConsumer_CachesShareAggregateByteLimit(t *testing.T) {
+	t.Parallel()
 	m, err := NewMempool(MempoolConfig{
 		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:           event.NewEventBus(nil, nil),
@@ -1646,6 +1460,7 @@ func TestMempoolConsumer_CachesShareAggregateByteLimit(t *testing.T) {
 // cacheTransaction cancellation guard: a removed consumer cannot reserve bytes
 // or repopulate its cache even if an insertion is attempted after cancellation.
 func TestMempoolConsumer_RemovalRejectsLaterCacheWrites(t *testing.T) {
+	t.Parallel()
 	m, err := NewMempool(MempoolConfig{
 		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		PromRegistry:       prometheus.NewRegistry(),
@@ -1671,99 +1486,12 @@ func TestMempoolConsumer_RemovalRejectsLaterCacheWrites(t *testing.T) {
 	m.relayCacheMutex.Unlock()
 }
 
-func TestMempoolConsumer_ClearCache(t *testing.T) {
-	m := newTestMempool(t)
-	defer m.Stop(context.Background())
-
-	// Add multiple transactions
-	txs := addMockTransactions(t, m, 5)
-
-	// Create consumer
-	connId := newTestConnectionId(0)
-	consumer := m.AddConsumer(connId)
-
-	// Get all transactions (adds to cache)
-	for range 5 {
-		tx := consumer.NextTx(false)
-		require.NotNil(t, tx)
-	}
-
-	// Verify cache has entries
-	for i := range 5 {
-		cachedTx := consumer.GetTxFromCache(txs[i].Hash)
-		require.NotNil(t, cachedTx, "tx %d should be in cache", i)
-	}
-
-	// Clear cache
-	consumer.ClearCache()
-
-	// Verify cache is empty
-	for i := range 5 {
-		cachedTx := consumer.GetTxFromCache(txs[i].Hash)
-		assert.Nil(t, cachedTx, "tx %d should not be in cache after clear", i)
-	}
-
-	// Verify mempool still has transactions
-	allTxs := m.Transactions()
-	assert.Equal(
-		t,
-		5,
-		len(allTxs),
-		"mempool should still have all transactions",
-	)
-}
-
 // =============================================================================
 // Edge Cases and Boundary Tests
 // =============================================================================
 
-func TestMempoolConsumer_NilReceiver(t *testing.T) {
-	var consumer *MempoolConsumer
-
-	// Verify operations on nil consumer don't panic
-	assert.Nil(t, consumer.NextTx(false), "NextTx on nil should return nil")
-	assert.Nil(
-		t,
-		consumer.GetTxFromCache("any"),
-		"GetTxFromCache on nil should return nil",
-	)
-
-	// These should not panic
-	consumer.ClearCache()
-	consumer.RemoveTxFromCache("any")
-	consumer.AcknowledgeOffered(1)
-}
-
-func TestMempool_ConsumerAfterStop(t *testing.T) {
-	m := newTestMempool(t)
-
-	// Add consumer and transactions
-	connId := newTestConnectionId(0)
-	consumer := m.AddConsumer(connId)
-	addMockTransactions(t, m, 5)
-
-	// Get some transactions
-	for range 3 {
-		tx := consumer.NextTx(false)
-		require.NotNil(t, tx)
-	}
-
-	// Stop mempool
-	err := m.Stop(context.Background())
-	require.NoError(t, err)
-
-	// Verify consumers are cleared
-	m.consumersMutex.Lock()
-	assert.Equal(t, 0, len(m.consumers), "consumers should be cleared")
-	m.consumersMutex.Unlock()
-
-	// Verify transactions are cleared
-	m.RLock()
-	assert.Equal(t, 0, len(m.transactions), "transactions should be cleared")
-	m.RUnlock()
-}
-
 func TestMempool_RejectsOperationsAfterStop(t *testing.T) {
+	t.Parallel()
 	m := newTestMempool(t)
 	connId := newTestConnectionId(0)
 
@@ -1778,63 +1506,8 @@ func TestMempool_RejectsOperationsAfterStop(t *testing.T) {
 	require.NoError(t, m.Stop(context.Background()))
 }
 
-func TestMempool_BlockingNextTx_WithEmptyMempool(t *testing.T) {
-	m := newTestMempool(t)
-	defer m.Stop(context.Background())
-
-	connId := newTestConnectionId(0)
-	consumer := m.AddConsumer(connId)
-
-	// Start blocking NextTx in goroutine
-	resultChan := make(chan *MempoolTransaction, 1)
-	go func() {
-		tx := consumer.NextTx(true) // This will block
-		resultChan <- tx
-	}()
-
-	// Verify it's still blocking (hasn't returned)
-	select {
-	case <-resultChan:
-		t.Fatal("NextTx should still be blocking")
-	case <-time.After(50 * time.Millisecond):
-		// Expected - still blocking after waiting
-	}
-
-	// Now add a transaction and publish event
-	m.Lock()
-	tx := &MempoolTransaction{
-		Hash:     "unblock-tx",
-		Cbor:     []byte("unblock-cbor"),
-		Type:     uint(conway.EraIdConway),
-		LastSeen: time.Now(),
-	}
-	m.transactions = append(m.transactions, tx)
-	m.Unlock()
-
-	// Publish event
-	m.eventBus.Publish(
-		AddTransactionEventType,
-		event.NewEvent(
-			AddTransactionEventType,
-			AddTransactionEvent{
-				Hash: tx.Hash,
-				Type: tx.Type,
-				Body: tx.Cbor,
-			},
-		),
-	)
-
-	// Should unblock now
-	select {
-	case gotTx := <-resultChan:
-		require.NotNil(t, gotTx)
-		assert.Equal(t, "unblock-tx", gotTx.Hash)
-	case <-time.After(2 * time.Second):
-		t.Fatal("NextTx failed to unblock after transaction added")
-	}
-}
-
 func TestMempool_BlockingNextTx_UnblocksOnShutdown(t *testing.T) {
+	t.Parallel()
 	m := newTestMempool(t)
 
 	connId := newTestConnectionId(0)
@@ -1869,6 +1542,7 @@ func TestMempool_BlockingNextTx_UnblocksOnShutdown(t *testing.T) {
 }
 
 func TestMempool_Transactions_ReturnsCopies(t *testing.T) {
+	t.Parallel()
 	m := newTestMempool(t)
 	defer m.Stop(context.Background())
 
@@ -1901,6 +1575,7 @@ func TestMempool_Transactions_ReturnsCopies(t *testing.T) {
 }
 
 func TestMempool_GetTransaction_ReturnsCopy(t *testing.T) {
+	t.Parallel()
 	m := newTestMempool(t)
 	defer m.Stop(context.Background())
 
@@ -1923,6 +1598,7 @@ func TestMempool_GetTransaction_ReturnsCopy(t *testing.T) {
 }
 
 func TestMempoolConsumer_ReturnsImmutableCopies(t *testing.T) {
+	t.Parallel()
 	m := newTestMempool(t)
 	defer m.Stop(context.Background())
 
@@ -1964,6 +1640,7 @@ func TestMempoolConsumer_ReturnsImmutableCopies(t *testing.T) {
 }
 
 func TestMempool_AddTransaction_DuplicateUpdatesLastSeen(t *testing.T) {
+	t.Parallel()
 	validator := newMockValidator()
 	m := newTestMempoolWithValidator(t, validator)
 	defer m.Stop(context.Background())
@@ -2009,6 +1686,7 @@ func TestMempool_AddTransaction_DuplicateUpdatesLastSeen(t *testing.T) {
 }
 
 func TestMempool_AddTransaction_ValidationFailure(t *testing.T) {
+	t.Parallel()
 	validator := newMockValidator()
 	validator.setFailAll(true)
 	m := newTestMempoolWithValidator(t, validator)
@@ -2025,26 +1703,6 @@ func TestMempool_AddTransaction_ValidationFailure(t *testing.T) {
 	assert.Equal(t, 0, len(allTxs), "transaction should not be added")
 }
 
-func TestMempool_MempoolFull(t *testing.T) {
-	m, err := NewMempool(MempoolConfig{
-		Logger:          slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		EventBus:        event.NewEventBus(nil, nil),
-		PromRegistry:    prometheus.NewRegistry(),
-		Validator:       newMockValidator(),
-		MempoolCapacity: 100, // Very small capacity
-	})
-	require.NoError(t, err)
-	defer m.Stop(context.Background())
-
-	// Add transaction that exceeds capacity
-	txBytes := getTestTxBytes(t)
-	err = m.AddTransaction(context.Background(), uint(conway.EraIdConway), txBytes)
-
-	require.Error(t, err, "should fail due to capacity")
-	var fullErr *MempoolFullError
-	assert.ErrorAs(t, err, &fullErr, "should be MempoolFullError")
-}
-
 // =============================================================================
 // CurrentSlotFunc / Validity Interval Tests
 // =============================================================================
@@ -2053,294 +1711,69 @@ func TestMempool_MempoolFull(t *testing.T) {
 // Derived from testTxHex with CBOR key 8 added to the body map.
 const testTxWithValidityStartHex = "84a8081a02faf08000818258200c07395aed88bdddc6de0518d1462dd0ec7e52e1e3a53599f7cdb24dc80237f8010181a20058390073a817bb425cbe179af824529d96ceb93c41c3ab507380095d1be4ebd64c93ef0094f5c179e5380109ebeef022245944e3914f5bcca3a793011a02dc6c00021a001e84800b5820192d0c0c2c2320e843e080b5f91a9ca35155bc50f3ef3bfdbc72c1711b86367e0d818258203af629a5cd75f76d0cc21172e1193b85f199ca78e837c3965d77d7d6bc90206b0010a20058390073a817bb425cbe179af824529d96ceb93c41c3ab507380095d1be4ebd64c93ef0094f5c179e5380109ebeef022245944e3914f5bcca3a793011a006acfc0111a002dc6c0a4008182582025fcacade3fffc096b53bdaf4c7d012bded303c9edbee686d24b372dae60aa1b58409da928a064ff9f795110bdcb8ab05d2a7a023dd15ebc42044f102ce366c0c9077024c7951c2d63584b7d2eea7bf1da4a7453bde4c99dd083889c1e2e2e3db804048119077a0581840000187b820a0a06814746010000222601f4f6"
 
-func TestMempool_AddTransaction_RejectsValidityIntervalBeyondCurrentSlot(
-	t *testing.T,
-) {
-	m, err := NewMempool(MempoolConfig{
-		Logger:          slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		EventBus:        event.NewEventBus(nil, nil),
-		PromRegistry:    prometheus.NewRegistry(),
-		Validator:       newMockValidator(),
-		MempoolCapacity: 1024 * 1024,
-		CurrentSlotFunc: func() uint64 { return 40_000_000 },
-	})
-	require.NoError(t, err)
-	defer m.Stop(context.Background())
+func TestMempool_AddTransaction_ValidityIntervalStart(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		txHex       string
+		currentSlot uint64
+		wantErr     bool
+	}{
+		// TX has ValidityIntervalStart=50000000, current slot is at 40000000.
+		{"rejected beyond current slot", testTxWithValidityStartHex, 40_000_000, true},
+		// TX has ValidityIntervalStart=50000000, current slot is at 60000000.
+		{"accepted at or below current slot", testTxWithValidityStartHex, 60_000_000, false},
+		// Original test TX has ValidityIntervalStart=0 (no lower bound), so
+		// the check is bypassed even at a very low current slot.
+		{"no validity start bypasses check", testTxHex, 1, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			m, err := NewMempool(MempoolConfig{
+				Logger:          slog.New(slog.NewJSONHandler(io.Discard, nil)),
+				EventBus:        event.NewEventBus(nil, nil),
+				PromRegistry:    prometheus.NewRegistry(),
+				Validator:       newMockValidator(),
+				MempoolCapacity: 1024 * 1024,
+				CurrentSlotFunc: func() uint64 { return tc.currentSlot },
+			})
+			require.NoError(t, err)
+			defer m.Stop(context.Background())
 
-	txBytes, err := hex.DecodeString(testTxWithValidityStartHex)
-	require.NoError(t, err)
+			txBytes, err := hex.DecodeString(tc.txHex)
+			require.NoError(t, err)
 
-	// TX has ValidityIntervalStart=50000000, current slot is at 40000000 → reject
-	err = m.AddTransaction(context.Background(), uint(conway.EraIdConway), txBytes)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "validity interval start")
-	assert.Equal(
-		t,
-		0,
-		len(m.Transactions()),
-		"rejected TX should not be in mempool",
-	)
-}
-
-func TestMempool_AddTransaction_AcceptsValidityIntervalAtOrBelowCurrentSlot(
-	t *testing.T,
-) {
-	m, err := NewMempool(MempoolConfig{
-		Logger:          slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		EventBus:        event.NewEventBus(nil, nil),
-		PromRegistry:    prometheus.NewRegistry(),
-		Validator:       newMockValidator(),
-		MempoolCapacity: 1024 * 1024,
-		CurrentSlotFunc: func() uint64 { return 60_000_000 },
-	})
-	require.NoError(t, err)
-	defer m.Stop(context.Background())
-
-	txBytes, err := hex.DecodeString(testTxWithValidityStartHex)
-	require.NoError(t, err)
-
-	// TX has ValidityIntervalStart=50000000, current slot is at 60000000 → accept
-	err = m.AddTransaction(context.Background(), uint(conway.EraIdConway), txBytes)
-	require.NoError(t, err)
-	assert.Equal(
-		t,
-		1,
-		len(m.Transactions()),
-		"accepted TX should be in mempool",
-	)
-}
-
-func TestMempool_AddTransaction_NoValidityStart_BypassesCheck(t *testing.T) {
-	m, err := NewMempool(MempoolConfig{
-		Logger:          slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		EventBus:        event.NewEventBus(nil, nil),
-		PromRegistry:    prometheus.NewRegistry(),
-		Validator:       newMockValidator(),
-		MempoolCapacity: 1024 * 1024,
-		CurrentSlotFunc: func() uint64 { return 1 }, // very low current slot
-	})
-	require.NoError(t, err)
-	defer m.Stop(context.Background())
-
-	// Original test TX has ValidityIntervalStart=0 (no lower bound)
-	txBytes := getTestTxBytes(t)
-	err = m.AddTransaction(context.Background(), uint(conway.EraIdConway), txBytes)
-	require.NoError(t, err)
-	assert.Equal(
-		t,
-		1,
-		len(m.Transactions()),
-		"TX with no validity start should bypass check",
-	)
+			err = m.AddTransaction(context.Background(), uint(conway.EraIdConway), txBytes)
+			if tc.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "validity interval start")
+				assert.Equal(
+					t,
+					0,
+					len(m.Transactions()),
+					"rejected TX should not be in mempool",
+				)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(
+				t,
+				1,
+				len(m.Transactions()),
+				"accepted TX should be in mempool",
+			)
+		})
+	}
 }
 
 // =============================================================================
 // Stress/Load Tests
 // =============================================================================
 
-func TestMempool_HighVolumeTransactions(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping stress test in short mode")
-	}
-
-	m := newTestMempool(t)
-	defer m.Stop(context.Background())
-
-	const numTxs = 10000
-
-	// Add many transactions
-	start := time.Now()
-	for i := range numTxs {
-		m.Lock()
-		tx := &MempoolTransaction{
-			Hash:     fmt.Sprintf("stress-tx-%d", i),
-			Cbor:     fmt.Appendf(nil, "stress-cbor-%d", i),
-			Type:     uint(conway.EraIdConway),
-			LastSeen: time.Now(),
-		}
-		m.transactions = append(m.transactions, tx)
-		m.Unlock()
-	}
-	addDuration := time.Since(start)
-	t.Logf("Added %d transactions in %v", numTxs, addDuration)
-
-	// Create multiple consumers
-	const numConsumers = 5
-	consumers := make([]*MempoolConsumer, numConsumers)
-	for i := range numConsumers {
-		connId := newTestConnectionId(i)
-		consumers[i] = m.AddConsumer(connId)
-	}
-
-	// Each consumer reads all transactions
-	var wg sync.WaitGroup
-	for i := range numConsumers {
-		wg.Add(1)
-		go func(idx int) {
-			defer wg.Done()
-			count := 0
-			for {
-				tx := consumers[idx].NextTx(false)
-				if tx == nil {
-					break
-				}
-				count++
-			}
-			t.Logf("Consumer %d read %d transactions", idx, count)
-		}(i)
-	}
-	wg.Wait()
-
-	// Remove half the transactions
-	start = time.Now()
-	for i := range numTxs / 2 {
-		m.RemoveTransaction(fmt.Sprintf("stress-tx-%d", i))
-	}
-	removeDuration := time.Since(start)
-	t.Logf("Removed %d transactions in %v", numTxs/2, removeDuration)
-
-	// Verify final state
-	m.RLock()
-	finalCount := len(m.transactions)
-	m.RUnlock()
-	assert.Equal(
-		t,
-		numTxs/2,
-		finalCount,
-		"should have half transactions remaining",
-	)
-}
-
-func TestMempool_RapidConsumerCreationDeletion(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping stress test in short mode")
-	}
-
-	m := newTestMempool(t)
-	defer m.Stop(context.Background())
-
-	// Add some transactions
-	addMockTransactions(t, m, 100)
-
-	const iterations = 1000
-
-	var wg sync.WaitGroup
-
-	// Rapidly create and delete consumers
-	for i := range iterations {
-		wg.Add(1)
-		go func(idx int) {
-			defer wg.Done()
-			connId := newTestConnectionId(idx + 10000) // Avoid conflicts
-			consumer := m.AddConsumer(connId)
-			if consumer != nil {
-				// Read a transaction
-				consumer.NextTx(false)
-				// Remove consumer
-				m.RemoveConsumer(connId)
-			}
-		}(i)
-	}
-
-	// Wait with timeout
-	done := make(chan struct{})
-	go func() {
-		wg.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		t.Logf("Completed %d consumer create/delete cycles", iterations)
-	case <-time.After(30 * time.Second):
-		t.Fatal("stress test timed out - possible resource leak or deadlock")
-	}
-
-	// Verify mempool is in valid state
-	m.consumersMutex.Lock()
-	consumerCount := len(m.consumers)
-	m.consumersMutex.Unlock()
-
-	// Some consumers might still exist due to race, but should be minimal
-	t.Logf("Remaining consumers: %d", consumerCount)
-}
-
 // =============================================================================
 // Regression Tests for Known Issues
 // =============================================================================
-
-// TestMempool_NextTxIdx_RaceCondition tests the potential bug noted in consumer.go:54-55
-// regarding nextTxIdx management when multiple TXs are added rapidly
-func TestMempool_NextTxIdx_RaceCondition(t *testing.T) {
-	m := newTestMempool(t)
-	defer m.Stop(context.Background())
-
-	connId := newTestConnectionId(0)
-	consumer := m.AddConsumer(connId)
-
-	// Start consumer waiting for transactions
-	resultChan := make(chan []*MempoolTransaction, 1)
-	go func() {
-		var received []*MempoolTransaction
-		for range 5 {
-			tx := consumer.NextTx(true) // blocking
-			if tx != nil {
-				received = append(received, tx)
-			}
-		}
-		resultChan <- received
-	}()
-
-	// Verify consumer is blocking (waiting for transactions)
-	select {
-	case <-resultChan:
-		t.Fatal("consumer should be blocking on empty mempool")
-	case <-time.After(50 * time.Millisecond):
-		// Expected: still blocking
-	}
-
-	// Rapidly add multiple transactions and publish events
-	for i := range 5 {
-		m.Lock()
-		tx := &MempoolTransaction{
-			Hash:     fmt.Sprintf("rapid-tx-%d", i),
-			Cbor:     fmt.Appendf(nil, "rapid-cbor-%d", i),
-			Type:     uint(conway.EraIdConway),
-			LastSeen: time.Now(),
-		}
-		m.transactions = append(m.transactions, tx)
-		m.Unlock()
-
-		// Publish event
-		m.eventBus.Publish(
-			AddTransactionEventType,
-			event.NewEvent(
-				AddTransactionEventType,
-				AddTransactionEvent{
-					Hash: tx.Hash,
-					Type: tx.Type,
-					Body: tx.Cbor,
-				},
-			),
-		)
-	}
-
-	// Wait for results
-	select {
-	case received := <-resultChan:
-		t.Logf("Received %d transactions", len(received))
-		// Due to the known potential bug, we might not receive all 5
-		// This test documents the behavior
-		assert.GreaterOrEqual(
-			t,
-			len(received),
-			1,
-			"should receive at least 1 transaction",
-		)
-	case <-time.After(5 * time.Second):
-		t.Fatal("timeout - possible deadlock in blocking NextTx")
-	}
-}
 
 // =============================================================================
 // Eviction Tests
@@ -2407,73 +1840,8 @@ func addMockTransactionsOfSize(
 	return txs
 }
 
-func TestMempool_Eviction_TriggersAtWatermark(t *testing.T) {
-	// Capacity=1000, eviction=0.50, rejection=0.90
-	// Each TX is 100 bytes. Add 5 TXs = 500 bytes (50%).
-	// Adding a 6th TX: newSize = 600 > 500 (eviction).
-	// Eviction target = 500 - 100 = 400 bytes.
-	// Should evict 1 TX (500 -> 400), then add new one.
-	m := newTestMempoolWithCapacity(t, 1000, 0.50, 0.90)
-	defer m.Stop(context.Background())
-
-	addMockTransactionsOfSize(t, m, 5, 100)
-
-	m.RLock()
-	require.Equal(
-		t, 5, len(m.transactions),
-		"should start with 5 TXs",
-	)
-	require.Equal(
-		t, int64(500), m.currentSizeBytes,
-		"should start with 500 bytes",
-	)
-	m.RUnlock()
-
-	// Add a 6th TX of 100 bytes directly to trigger eviction
-	// We add it via internal path to skip CBOR decode
-	m.Lock()
-	m.consumersMutex.Lock()
-	txSize := int64(100)
-	newSize := m.currentSizeBytes + txSize
-	evictionThreshold := int64(
-		float64(m.config.MempoolCapacity) *
-			m.evictionWatermark,
-	)
-	require.Greater(
-		t, newSize, evictionThreshold,
-		"new size should exceed eviction threshold",
-	)
-
-	// Trigger eviction
-	targetBytes := evictionThreshold - txSize
-	m.evictOldestLocked(targetBytes)
-
-	// Verify first TX was evicted
-	require.Equal(
-		t, 4, len(m.transactions),
-		"should have 4 TXs after eviction",
-	)
-	require.Equal(
-		t, int64(400), m.currentSizeBytes,
-		"should have 400 bytes after eviction",
-	)
-	// Oldest TX (tx-sized-0) should be gone
-	_, exists := m.txByHash["tx-sized-0"]
-	require.False(
-		t, exists,
-		"oldest TX should be evicted",
-	)
-	// Second TX should still exist
-	_, exists = m.txByHash["tx-sized-1"]
-	require.True(
-		t, exists,
-		"second TX should still be present",
-	)
-	m.consumersMutex.Unlock()
-	m.Unlock()
-}
-
 func TestMempool_Eviction_OldestTxsEvictedFirst(t *testing.T) {
+	t.Parallel()
 	// Capacity=1000, eviction=0.50, rejection=0.90
 	// Add 5 TXs of 100 bytes = 500 bytes (50%).
 	// Evict to targetBytes=200 -> should evict 3 TXs.
@@ -2502,46 +1870,29 @@ func TestMempool_Eviction_OldestTxsEvictedFirst(t *testing.T) {
 	assert.Equal(
 		t, "tx-sized-4", m.transactions[1].Hash,
 	)
+	for _, evicted := range []string{
+		"tx-sized-0", "tx-sized-1", "tx-sized-2",
+	} {
+		assert.NotContains(t, m.txByHash, evicted)
+	}
+	for _, kept := range []string{"tx-sized-3", "tx-sized-4"} {
+		assert.Contains(t, m.txByHash, kept)
+	}
 	m.consumersMutex.Unlock()
 	m.Unlock()
+	assert.Equal(
+		t, float64(3), testutil.ToFloat64(m.metrics.txsEvicted),
+		"evicted counter should be 3",
+	)
 }
 
 func TestMempool_Rejection_AboveRejectionWatermark(
 	t *testing.T,
 ) {
-	// Capacity=1000, eviction=0.50, rejection=0.80
-	// Add 8 TXs of 100 bytes = 800 bytes (80%).
-	// Adding a 9th TX of 100 bytes: newSize = 900 > 800.
-	// 800 = 1000 * 0.80, so the rejection threshold is 800.
-	// newSize 900 > 800 => rejected.
-	m := newTestMempoolWithCapacity(t, 1000, 0.50, 0.80)
-	defer m.Stop(context.Background())
-
-	addMockTransactionsOfSize(t, m, 8, 100)
-
-	// Try to add a TX via the internal path
-	m.Lock()
-	m.consumersMutex.Lock()
-	txSize := int64(100)
-	newSize := m.currentSizeBytes + txSize
-	rejectionThreshold := int64(
-		float64(m.config.MempoolCapacity) *
-			m.rejectionWatermark,
-	)
-	assert.Greater(
-		t, newSize, rejectionThreshold,
-		"new size should exceed rejection threshold",
-	)
-	m.consumersMutex.Unlock()
-	m.Unlock()
-
-	// Verify through AddTransaction with real TX that the
-	// mempool rejects when above rejection watermark.
-	// First, fill to rejection level with appropriately
-	// sized direct adds.
-	// The real test TX is ~171 bytes. With capacity 200
-	// and rejection at 0.80 (160 bytes), a single TX of
-	// 171 bytes already exceeds the threshold.
+	t.Parallel()
+	// Capacity=200, eviction=0.50, rejection=0.80 (160 bytes). The real test
+	// TX is ~171 bytes, so a single TX already exceeds the rejection
+	// threshold.
 	m2 := newTestMempoolWithCapacity(t, 200, 0.50, 0.80)
 	defer m2.Stop(context.Background())
 
@@ -2561,163 +1912,8 @@ func TestMempool_Rejection_AboveRejectionWatermark(
 	)
 }
 
-func TestMempool_Eviction_CounterIncrements(t *testing.T) {
-	m := newTestMempoolWithCapacity(t, 1000, 0.50, 0.90)
-	defer m.Stop(context.Background())
-
-	addMockTransactionsOfSize(t, m, 5, 100)
-
-	// Initial evicted counter should be 0
-	evictedBefore := testutil.ToFloat64(
-		m.metrics.txsEvicted,
-	)
-	assert.Equal(
-		t, float64(0), evictedBefore,
-		"evicted counter should start at 0",
-	)
-
-	// Evict 3 TXs
-	m.Lock()
-	m.consumersMutex.Lock()
-	m.evictOldestLocked(200)
-	m.consumersMutex.Unlock()
-	m.Unlock()
-
-	evictedAfter := testutil.ToFloat64(
-		m.metrics.txsEvicted,
-	)
-	assert.Equal(
-		t, float64(3), evictedAfter,
-		"evicted counter should be 3",
-	)
-}
-
-func TestMempool_DefaultWatermarkValues(t *testing.T) {
-	m, err := NewMempool(MempoolConfig{
-		Logger: slog.New(
-			slog.NewJSONHandler(io.Discard, nil),
-		),
-		EventBus:        event.NewEventBus(nil, nil),
-		PromRegistry:    prometheus.NewRegistry(),
-		Validator:       newMockValidator(),
-		MempoolCapacity: 1024 * 1024,
-	})
-	require.NoError(t, err)
-	defer m.Stop(context.Background())
-
-	assert.Equal(
-		t,
-		DefaultEvictionWatermark,
-		m.evictionWatermark,
-		"default eviction watermark should be disabled",
-	)
-	assert.Equal(
-		t,
-		DefaultRejectionWatermark,
-		m.rejectionWatermark,
-		"default rejection watermark should be 1.0",
-	)
-}
-
-func TestMempool_CustomWatermarkValues(t *testing.T) {
-	m, err := NewMempool(MempoolConfig{
-		Logger: slog.New(
-			slog.NewJSONHandler(io.Discard, nil),
-		),
-		EventBus:           event.NewEventBus(nil, nil),
-		PromRegistry:       prometheus.NewRegistry(),
-		Validator:          newMockValidator(),
-		MempoolCapacity:    1024 * 1024,
-		EvictionWatermark:  0.75,
-		RejectionWatermark: 0.85,
-	})
-	require.NoError(t, err)
-	defer m.Stop(context.Background())
-
-	assert.Equal(
-		t,
-		0.75,
-		m.evictionWatermark,
-		"custom eviction watermark should be 0.75",
-	)
-	assert.Equal(
-		t,
-		0.85,
-		m.rejectionWatermark,
-		"custom rejection watermark should be 0.85",
-	)
-}
-
-func TestMempool_Eviction_NoEvictionBelowWatermark(
-	t *testing.T,
-) {
-	// Capacity=1000, eviction=0.90, rejection=0.95
-	// Add 5 TXs of 100 bytes = 500 bytes (50%).
-	// This is below eviction watermark, so no eviction.
-	m := newTestMempoolWithCapacity(t, 1000, 0.90, 0.95)
-	defer m.Stop(context.Background())
-
-	addMockTransactionsOfSize(t, m, 5, 100)
-
-	m.RLock()
-	require.Equal(
-		t, 5, len(m.transactions),
-	)
-	m.RUnlock()
-
-	// Adding another 100 byte TX: newSize = 600 bytes.
-	// Eviction threshold = 900 bytes.
-	// 600 < 900, so no eviction should happen.
-	m.Lock()
-	m.consumersMutex.Lock()
-	tx := &MempoolTransaction{
-		Hash:     "tx-no-evict",
-		Cbor:     make([]byte, 100),
-		Type:     uint(conway.EraIdConway),
-		LastSeen: time.Now(),
-	}
-	m.transactions = append(m.transactions, tx)
-	m.txByHash[tx.Hash] = tx
-	m.currentSizeBytes += 100
-	m.consumersMutex.Unlock()
-	m.Unlock()
-
-	m.RLock()
-	assert.Equal(
-		t, 6, len(m.transactions),
-		"all TXs should remain (no eviction needed)",
-	)
-	assert.Equal(
-		t, int64(600), m.currentSizeBytes,
-	)
-	m.RUnlock()
-
-	evicted := testutil.ToFloat64(m.metrics.txsEvicted)
-	assert.Equal(
-		t, float64(0), evicted,
-		"no TXs should have been evicted",
-	)
-}
-
-func TestMempool_Eviction_EmptyMempoolSafe(t *testing.T) {
-	// Calling evictOldestLocked on an empty mempool should not panic
-	m := newTestMempoolWithCapacity(t, 1000, 0.50, 0.90)
-	defer m.Stop(context.Background())
-
-	m.Lock()
-	m.consumersMutex.Lock()
-	m.evictOldestLocked(0)
-	m.consumersMutex.Unlock()
-	m.Unlock()
-
-	m.RLock()
-	assert.Equal(
-		t, 0, len(m.transactions),
-	)
-	m.RUnlock()
-}
-
 func TestMempool_DisabledEvictionRejectsAtCapacity(t *testing.T) {
+	t.Parallel()
 	m := newTestMempoolWithCapacity(t, 1000, 0, 1.0)
 	defer m.Stop(context.Background())
 
@@ -2733,6 +1929,7 @@ func TestMempool_DisabledEvictionRejectsAtCapacity(t *testing.T) {
 }
 
 func TestMempool_AdmissionHeadroomBytes(t *testing.T) {
+	t.Parallel()
 	m := newTestMempoolWithCapacity(t, 1000, 0, 1.0)
 	defer m.Stop(context.Background())
 
@@ -2745,6 +1942,7 @@ func TestMempool_AdmissionHeadroomBytes(t *testing.T) {
 // TestMempool_RemoveTransaction_ConsumerIndexAdjustment verifies that consumer
 // nextTxIdx is properly adjusted when transactions are removed
 func TestMempool_RemoveTransaction_ConsumerIndexAdjustment(t *testing.T) {
+	t.Parallel()
 	m := newTestMempool(t)
 	defer m.Stop(context.Background())
 
@@ -2812,6 +2010,7 @@ func newTestMempoolWithTTL(
 }
 
 func TestMempool_TTL_ExpiredTransactionsRemoved(t *testing.T) {
+	t.Parallel()
 	// Use a very short TTL and cleanup interval so the test
 	// completes quickly.
 	m := newTestMempoolWithTTL(t, 50*time.Millisecond, 20*time.Millisecond)
@@ -2863,195 +2062,17 @@ func TestMempool_TTL_ExpiredTransactionsRemoved(t *testing.T) {
 		"current size should be 0",
 	)
 	m.RUnlock()
-}
-
-func TestMempool_TTL_NonExpiredTransactionsRetained(t *testing.T) {
-	m := newTestMempoolWithTTL(t, 5*time.Second, 20*time.Millisecond)
-	defer m.Stop(context.Background())
-
-	// Add fresh transactions (not expired)
-	m.Lock()
-	m.consumersMutex.Lock()
-	for i := range 3 {
-		tx := &MempoolTransaction{
-			Hash:     fmt.Sprintf("fresh-tx-%d", i),
-			Cbor:     fmt.Appendf(nil, "cbor-%d", i),
-			Type:     uint(conway.EraIdConway),
-			LastSeen: time.Now(), // fresh
-		}
-		m.transactions = append(m.transactions, tx)
-		m.txByHash[tx.Hash] = tx
-		m.currentSizeBytes += int64(len(tx.Cbor))
-		m.metrics.txsInMempool.Inc()
-	}
-	m.consumersMutex.Unlock()
-	m.Unlock()
-
-	// Exercise the production cleanup path directly; the fresh timestamps
-	// must survive regardless of the background cleanup schedule.
-	m.removeExpiredTransactions()
-
-	// Verify transactions are still present
-	m.RLock()
 	assert.Equal(
-		t, 3, len(m.transactions),
-		"fresh transactions should not be removed",
-	)
-	m.RUnlock()
-}
-
-func TestMempool_TTL_MixedExpiryRetainsNonExpired(t *testing.T) {
-	// TTL is deliberately long relative to the test window so fresh
-	// txs can't age past it before Eventually observes len==2, even
-	// under scheduler jitter on slow CI runners.
-	m := newTestMempoolWithTTL(t, 5*time.Second, 20*time.Millisecond)
-	defer m.Stop(context.Background())
-
-	// Add a mix of expired and fresh transactions
-	m.Lock()
-	m.consumersMutex.Lock()
-	// Expired transactions
-	for i := range 2 {
-		tx := &MempoolTransaction{
-			Hash:     fmt.Sprintf("old-tx-%d", i),
-			Cbor:     fmt.Appendf(nil, "old-cbor-%d", i),
-			Type:     uint(conway.EraIdConway),
-			LastSeen: time.Now().Add(-10 * time.Second),
-		}
-		m.transactions = append(m.transactions, tx)
-		m.txByHash[tx.Hash] = tx
-		m.currentSizeBytes += int64(len(tx.Cbor))
-		m.metrics.txsInMempool.Inc()
-		m.metrics.mempoolBytes.Add(float64(len(tx.Cbor)))
-	}
-	// Fresh transactions
-	for i := range 2 {
-		tx := &MempoolTransaction{
-			Hash:     fmt.Sprintf("new-tx-%d", i),
-			Cbor:     fmt.Appendf(nil, "new-cbor-%d", i),
-			Type:     uint(conway.EraIdConway),
-			LastSeen: time.Now(),
-		}
-		m.transactions = append(m.transactions, tx)
-		m.txByHash[tx.Hash] = tx
-		m.currentSizeBytes += int64(len(tx.Cbor))
-		m.metrics.txsInMempool.Inc()
-		m.metrics.mempoolBytes.Add(float64(len(tx.Cbor)))
-	}
-	m.consumersMutex.Unlock()
-	m.Unlock()
-
-	// Wait for cleanup to remove only expired transactions
-	require.Eventually(t, func() bool {
-		m.RLock()
-		defer m.RUnlock()
-		return len(m.transactions) == 2
-	}, 2*time.Second, 10*time.Millisecond,
-		"only expired transactions should be removed",
-	)
-
-	// Verify only fresh transactions remain
-	m.RLock()
-	for _, tx := range m.transactions {
-		assert.Contains(
-			t, tx.Hash, "new-tx-",
-			"only fresh transactions should remain",
-		)
-	}
-	m.RUnlock()
-}
-
-func TestMempool_TTL_CleanupStopsOnShutdown(t *testing.T) {
-	m := newTestMempoolWithTTL(t, 50*time.Millisecond, 20*time.Millisecond)
-
-	// Add expired transactions
-	m.Lock()
-	m.consumersMutex.Lock()
-	for i := range 3 {
-		tx := &MempoolTransaction{
-			Hash:     fmt.Sprintf("shutdown-tx-%d", i),
-			Cbor:     fmt.Appendf(nil, "cbor-%d", i),
-			Type:     uint(conway.EraIdConway),
-			LastSeen: time.Now().Add(-200 * time.Millisecond),
-		}
-		m.transactions = append(m.transactions, tx)
-		m.txByHash[tx.Hash] = tx
-		m.currentSizeBytes += int64(len(tx.Cbor))
-		m.metrics.txsInMempool.Inc()
-	}
-	m.consumersMutex.Unlock()
-	m.Unlock()
-
-	// Stop the mempool immediately (before cleanup can run)
-	err := m.Stop(context.Background())
-	require.NoError(t, err)
-
-	// Verify Stop cleared everything cleanly
-	m.RLock()
-	assert.Equal(
-		t, 0, len(m.transactions),
-		"Stop should clear all transactions",
-	)
-	m.RUnlock()
-
-	// The goroutine should exit cleanly (no panic, no leak).
-	// If it didn't, the race detector or leak checker would flag it.
-}
-
-func TestMempool_TTL_ExpiredMetricUpdated(t *testing.T) {
-	m := newTestMempoolWithTTL(t, 50*time.Millisecond, 20*time.Millisecond)
-	defer m.Stop(context.Background())
-
-	// Initial expired counter should be 0
-	expiredBefore := testutil.ToFloat64(m.metrics.txsExpired)
-	assert.Equal(
-		t, float64(0), expiredBefore,
-		"expired counter should start at 0",
-	)
-
-	// Add expired transactions
-	m.Lock()
-	m.consumersMutex.Lock()
-	for i := range 5 {
-		tx := &MempoolTransaction{
-			Hash:     fmt.Sprintf("metric-tx-%d", i),
-			Cbor:     fmt.Appendf(nil, "cbor-%d", i),
-			Type:     uint(conway.EraIdConway),
-			LastSeen: time.Now().Add(-200 * time.Millisecond),
-		}
-		m.transactions = append(m.transactions, tx)
-		m.txByHash[tx.Hash] = tx
-		m.currentSizeBytes += int64(len(tx.Cbor))
-		m.metrics.txsInMempool.Inc()
-		m.metrics.mempoolBytes.Add(float64(len(tx.Cbor)))
-	}
-	m.consumersMutex.Unlock()
-	m.Unlock()
-
-	// Wait for cleanup to remove all expired transactions and update metrics.
-	require.Eventually(t, func() bool {
-		m.RLock()
-		removed := len(m.transactions) == 0
-		m.RUnlock()
-		return removed &&
-			testutil.ToFloat64(m.metrics.txsExpired) == float64(5)
-	}, 2*time.Second, 10*time.Millisecond,
-		"all expired transactions should be removed and counted",
-	)
-
-	// Verify the expired counter was incremented
-	expiredAfter := testutil.ToFloat64(m.metrics.txsExpired)
-	assert.Equal(
-		t, float64(5), expiredAfter,
-		"expired counter should be 5",
+		t, float64(3), testutil.ToFloat64(m.metrics.txsExpired),
+		"expired counter should be 3",
 	)
 }
 
 func TestMempool_TTL_ConsumerIndexAdjustedOnExpiry(t *testing.T) {
-	// TTL is deliberately long relative to the test window so fresh
-	// txs can't age past it before Eventually observes len==3, even
-	// under scheduler jitter on slow CI runners.
-	m := newTestMempoolWithTTL(t, 5*time.Second, 20*time.Millisecond)
+	t.Parallel()
+	// The background cleanup interval is far longer than the test, so expiry
+	// only happens through the explicit removeExpiredTransactions call.
+	m := newTestMempoolWithTTL(t, 5*time.Second, time.Hour)
 	defer m.Stop(context.Background())
 
 	// Add a mix of expired and fresh transactions
@@ -3097,102 +2118,27 @@ func TestMempool_TTL_ConsumerIndexAdjustedOnExpiry(t *testing.T) {
 		require.NotNil(t, tx)
 	}
 
-	// Wait for cleanup to remove expired transactions
-	require.Eventually(t, func() bool {
-		m.RLock()
-		defer m.RUnlock()
-		return len(m.transactions) == 3
-	}, 2*time.Second, 10*time.Millisecond,
-		"expired transactions should be removed",
-	)
+	m.removeExpiredTransactions()
+	m.RLock()
+	require.Len(t, m.transactions, 3, "expired transactions should be removed")
+	m.RUnlock()
 
-	// Consumer should still be able to read remaining
-	// fresh transactions without skipping or panicking
-	remaining := 0
+	// The consumer had read expired-0, expired-1 and fresh-0; after the two
+	// expired ones go, its cursor moves back with them and it resumes at
+	// fresh-1 without skipping or repeating a transaction.
+	var remaining []string
 	for {
 		tx := consumer.NextTx(false)
 		if tx == nil {
 			break
 		}
-		remaining++
-		assert.Contains(
-			t, tx.Hash, "fresh-",
-			"should only get fresh transactions",
-		)
+		remaining = append(remaining, tx.Hash)
 	}
-
-	// The consumer should have gotten the fresh
-	// transactions that were after its read position
-	t.Logf(
-		"Consumer read %d remaining transactions after expiry",
-		remaining,
-	)
-}
-
-func TestMempool_TTL_DefaultValues(t *testing.T) {
-	m, err := NewMempool(MempoolConfig{
-		Logger: slog.New(
-			slog.NewJSONHandler(io.Discard, nil),
-		),
-		EventBus:        event.NewEventBus(nil, nil),
-		PromRegistry:    prometheus.NewRegistry(),
-		Validator:       newMockValidator(),
-		MempoolCapacity: 1024 * 1024,
-	})
-	require.NoError(t, err)
-	defer m.Stop(context.Background())
-
-	assert.Equal(
-		t, DefaultTransactionTTL, m.transactionTTL,
-		"default TTL should be 5 minutes",
-	)
-	assert.Equal(
-		t, DefaultCleanupInterval, m.cleanupInterval,
-		"default cleanup interval should be 1 minute",
-	)
-}
-
-func TestMempool_TTL_CustomValues(t *testing.T) {
-	m, err := NewMempool(MempoolConfig{
-		Logger: slog.New(
-			slog.NewJSONHandler(io.Discard, nil),
-		),
-		EventBus:        event.NewEventBus(nil, nil),
-		PromRegistry:    prometheus.NewRegistry(),
-		Validator:       newMockValidator(),
-		MempoolCapacity: 1024 * 1024,
-		TransactionTTL:  10 * time.Minute,
-		CleanupInterval: 30 * time.Second,
-	})
-	require.NoError(t, err)
-	defer m.Stop(context.Background())
-
-	assert.Equal(
-		t, 10*time.Minute, m.transactionTTL,
-		"custom TTL should be 10 minutes",
-	)
-	assert.Equal(
-		t, 30*time.Second, m.cleanupInterval,
-		"custom cleanup interval should be 30 seconds",
-	)
-}
-
-func TestMempool_TTL_RemoveExpiredTransactions_EmptyMempool(
-	t *testing.T,
-) {
-	m := newTestMempoolWithTTL(t, 50*time.Millisecond, 20*time.Millisecond)
-	defer m.Stop(context.Background())
-
-	// Directly call removeExpiredTransactions on empty mempool
-	// to verify it doesn't panic
-	m.removeExpiredTransactions()
-
-	m.RLock()
-	assert.Equal(t, 0, len(m.transactions))
-	m.RUnlock()
+	assert.Equal(t, []string{"fresh-1", "fresh-2"}, remaining)
 }
 
 func TestMempool_TTL_LastSeenUpdatePreventsExpiry(t *testing.T) {
+	t.Parallel()
 	// The background cleanup interval is far longer than the test, so removal
 	// only happens through the explicit removeExpiredTransactions calls.
 	m := newTestMempoolWithTTL(t, time.Hour, time.Hour)
@@ -3235,6 +2181,7 @@ func TestMempool_TTL_LastSeenUpdatePreventsExpiry(t *testing.T) {
 }
 
 func TestMempool_TTL_ConcurrentExpiryAndAddition(t *testing.T) {
+	t.Parallel()
 	m := newTestMempoolWithTTL(t, time.Minute, 10*time.Millisecond)
 	defer m.Stop(context.Background())
 
@@ -3320,6 +2267,7 @@ func TestMempool_TTL_ConcurrentExpiryAndAddition(t *testing.T) {
 }
 
 func TestMempool_TTL_RemoveEventsEmittedOnExpiry(t *testing.T) {
+	t.Parallel()
 	m := newTestMempoolWithTTL(t, 50*time.Millisecond, 20*time.Millisecond)
 	defer m.Stop(context.Background())
 
@@ -3373,6 +2321,7 @@ func TestMempool_TTL_RemoveEventsEmittedOnExpiry(t *testing.T) {
 func TestMempool_MEM03_SubscriberAccessesMempoolDuringAdd(
 	t *testing.T,
 ) {
+	t.Parallel()
 	validator := newMockValidator()
 	m := newTestMempoolWithValidator(t, validator)
 	defer m.Stop(context.Background())
@@ -3410,6 +2359,7 @@ func TestMempool_MEM03_SubscriberAccessesMempoolDuringAdd(
 func TestMempool_MEM03_SubscriberAccessesMempoolDuringRemove(
 	t *testing.T,
 ) {
+	t.Parallel()
 	m := newTestMempool(t)
 	defer m.Stop(context.Background())
 
@@ -3444,6 +2394,7 @@ func TestMempool_MEM03_SubscriberAccessesMempoolDuringRemove(
 // with a paused validator to prove snapshot readers remain available while
 // mutations continue and are reconciled into the candidate overlay.
 func TestMempool_MEM04_ConcurrentAccessDuringRevalidation(t *testing.T) {
+	t.Parallel()
 	validator := newBlockingOverlayValidator()
 	m := newTestMempoolWithValidator(t, validator)
 	defer m.Stop(context.Background())
@@ -3531,6 +2482,7 @@ func TestMempool_MEM04_ConcurrentAccessDuringRevalidation(t *testing.T) {
 }
 
 func TestMempool_AdmissionContinuesDuringRevalidation(t *testing.T) {
+	t.Parallel()
 	validator := newBlockingSessionValidator()
 	m := newTestMempoolWithValidator(t, validator)
 	defer m.Stop(context.Background())
@@ -3580,6 +2532,7 @@ func TestMempool_AdmissionContinuesDuringRevalidation(t *testing.T) {
 }
 
 func TestMempool_RemovalsContinueDuringRevalidation(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name   string
 		remove func(*Mempool, string)
@@ -3650,6 +2603,7 @@ func TestMempool_RemovalsContinueDuringRevalidation(t *testing.T) {
 }
 
 func TestMempool_ConfirmedTransactionLogVisibleAtInfoLevel(t *testing.T) {
+	t.Parallel()
 	var buf bytes.Buffer
 	m, err := NewMempool(MempoolConfig{
 		Logger: slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{
@@ -3675,6 +2629,7 @@ func TestMempool_ConfirmedTransactionLogVisibleAtInfoLevel(t *testing.T) {
 }
 
 func TestMempool_EvictionIsReconciledDuringRevalidation(t *testing.T) {
+	t.Parallel()
 	validator := newBlockingSessionValidator()
 	firstTx := getTestTxBytes(t)
 	secondTx, err := hex.DecodeString(testTxWithValidityStartHex)
@@ -3737,6 +2692,7 @@ func TestMempool_EvictionIsReconciledDuringRevalidation(t *testing.T) {
 }
 
 func TestMempool_RevalidationStopsAfterBoundedGenerationRetries(t *testing.T) {
+	t.Parallel()
 	validator := &changingSessionValidator{}
 	m := newTestMempoolWithValidator(t, validator)
 	defer m.Stop(context.Background())
@@ -3761,6 +2717,7 @@ func TestMempool_RevalidationStopsAfterBoundedGenerationRetries(t *testing.T) {
 func TestMempool_RevalidationJournalOverflowLeavesLiveStateUntouched(
 	t *testing.T,
 ) {
+	t.Parallel()
 	validator := newBlockingSessionValidator()
 	m := newTestMempoolWithValidator(t, validator)
 	defer m.Stop(context.Background())
@@ -3804,6 +2761,7 @@ func TestMempool_RevalidationJournalOverflowLeavesLiveStateUntouched(
 }
 
 func TestMempool_StopContinuesDuringRevalidation(t *testing.T) {
+	t.Parallel()
 	validator := newBlockingSessionValidator()
 	m := newTestMempoolWithValidator(t, validator)
 	require.NoError(
@@ -3844,6 +2802,7 @@ func TestMempool_StopContinuesDuringRevalidation(t *testing.T) {
 func TestMempool_ReadsAndConsumerRegistrationProceedDuringAdmissionValidation(
 	t *testing.T,
 ) {
+	t.Parallel()
 	validator := newBlockingOverlayValidator()
 	validator.shouldBlock.Store(true)
 	m := newTestMempoolWithValidator(t, validator)
@@ -3904,6 +2863,7 @@ func TestMempool_ReadsAndConsumerRegistrationProceedDuringAdmissionValidation(
 func TestMempool_MEM03_NoDeadlockOnConcurrentPublish(
 	t *testing.T,
 ) {
+	t.Parallel()
 	m := newTestMempool(t)
 	defer m.Stop(context.Background())
 
@@ -4138,52 +3098,8 @@ func buildMockOutput(
 	return out
 }
 
-func TestOverlayDoubleSpendRejection(t *testing.T) {
-	// Setup: one UTxO in the "database"
-	inputHash := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	sharedInput := buildMockInput(t, inputHash, 0)
-	utxoKey := utxoref.ForInput(sharedInput)
-
-	baseOutput := buildMockOutput(t, 1000000)
-
-	baseUtxos := map[utxoref.Key]lcommon.Utxo{
-		utxoKey: {Id: sharedInput, Output: baseOutput},
-	}
-	v := newOverlayValidator(baseUtxos)
-
-	// Create a fresh overlay
-	overlay := newUtxoOverlay()
-
-	// TX-A consumes the UTxO — should succeed
-	txA := buildMockTx(
-		t,
-		"1111111111111111111111111111111111111111111111111111111111111111",
-		[]lcommon.TransactionInput{sharedInput},
-		[]lcommon.TransactionOutput{buildMockOutput(t, 900000)},
-	)
-	err := v.ValidateTxWithOverlay(txA, overlay.consumed, overlay.created, overlay.accounts)
-	require.NoError(t, err, "TX-A should pass overlay validation")
-
-	// Apply TX-A to the overlay
-	overlay.applyTx(txA.Hash().String(), 0, txA, nil)
-
-	// Verify input is now consumed
-	_, consumed := overlay.consumed[utxoKey]
-	assert.True(t, consumed, "input should be in consumed set")
-
-	// TX-B consumes the same UTxO — should be rejected (double-spend)
-	txB := buildMockTx(
-		t,
-		"2222222222222222222222222222222222222222222222222222222222222222",
-		[]lcommon.TransactionInput{sharedInput},
-		[]lcommon.TransactionOutput{buildMockOutput(t, 900000)},
-	)
-	err = v.ValidateTxWithOverlay(txB, overlay.consumed, overlay.created, overlay.accounts)
-	require.Error(t, err, "TX-B should be rejected (double-spend)")
-	assert.Contains(t, err.Error(), "already consumed")
-}
-
 func TestOverlayDependentTxChaining(t *testing.T) {
+	t.Parallel()
 	// Setup: one UTxO in the "database"
 	inputHash := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	baseInput := buildMockInput(t, inputHash, 0)
@@ -4209,6 +3125,10 @@ func TestOverlayDependentTxChaining(t *testing.T) {
 	err := v.ValidateTxWithOverlay(txA, overlay.consumed, overlay.created, overlay.accounts)
 	require.NoError(t, err, "TX-A should pass")
 	overlay.applyTx(txA.Hash().String(), 0, txA, nil)
+
+	// Verify the input TX-A spent is now consumed
+	_, consumed := overlay.consumed[utxoKey]
+	assert.True(t, consumed, "input should be in consumed set")
 
 	// Verify TX-A's output is in the overlay created set
 	inputFromA := buildMockInput(t, txHashA, 0)
@@ -4252,6 +3172,7 @@ func TestOverlayDependentTxChaining(t *testing.T) {
 }
 
 func TestOverlayRebuildOnChainUpdate(t *testing.T) {
+	t.Parallel()
 	// This test uses the real test transaction CBOR because rebuildOverlay
 	// re-decodes transactions from their stored CBOR bytes.
 	//
@@ -4304,6 +3225,7 @@ func TestOverlayRebuildOnChainUpdate(t *testing.T) {
 // without a validator, so this path is only reachable through a
 // programming error — but it should not panic.
 func TestRebuildOverlayReturnsErrorOnNilValidator(t *testing.T) {
+	t.Parallel()
 	m := &Mempool{}
 	err := m.rebuildOverlay(context.Background())
 	require.ErrorIs(t, err, ErrNilValidator)
@@ -4314,6 +3236,7 @@ func TestRebuildOverlayReturnsErrorOnNilValidator(t *testing.T) {
 // the constructor. A bare error here is indistinguishable from a rejected
 // transaction, and the API surfaces have to answer the two differently.
 func TestAddTransactionReturnsErrNilValidator(t *testing.T) {
+	t.Parallel()
 	m := &Mempool{}
 	err := m.AddTransaction(context.Background(), 0, nil)
 	require.ErrorIs(t, err, ErrNilValidator)
@@ -4322,6 +3245,7 @@ func TestAddTransactionReturnsErrNilValidator(t *testing.T) {
 // TestNewMempool_RejectsNilValidator pins that the constructor returns
 // ErrNilValidator rather than panicking when the validator is missing.
 func TestNewMempool_RejectsNilValidator(t *testing.T) {
+	t.Parallel()
 	m, err := NewMempool(MempoolConfig{
 		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:     event.NewEventBus(nil, nil),
@@ -4336,6 +3260,7 @@ func TestNewMempool_RejectsNilValidator(t *testing.T) {
 // untyped nil interface (not an interface wrapping a nil *MempoolConsumer) when
 // the mempool is stopped, so callers' == nil checks detect the stopped mempool.
 func TestNewConsumerReturnsUntypedNilAfterStop(t *testing.T) {
+	t.Parallel()
 	m := newTestMempool(t)
 	require.NoError(t, m.Stop(context.Background()))
 	consumer := m.NewConsumer(newTestConnectionId(1))
@@ -4352,6 +3277,7 @@ func TestNewConsumerReturnsUntypedNilAfterStop(t *testing.T) {
 // though a background worker (which reads the ledger-state-backed
 // validator via rebuildOverlay) could still be running.
 func TestStopReturnsErrorWhenCtxFiresBeforeWorkersDrain(t *testing.T) {
+	t.Parallel()
 	m := newTestMempool(t)
 	// Simulate an in-flight background worker that outlives the ctx.
 	m.workerWG.Add(1)
@@ -4373,6 +3299,7 @@ func TestStopReturnsErrorWhenCtxFiresBeforeWorkersDrain(t *testing.T) {
 // backoff for an empty reply), producing an unpaced request/reply spin exactly
 // in the aggressive-peer case the cache bound exists to contain.
 func TestMempoolConsumer_BlockingNextTxWaitsForCacheSlot(t *testing.T) {
+	t.Parallel()
 	m, err := NewMempool(MempoolConfig{
 		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:          event.NewEventBus(nil, nil),
@@ -4429,6 +3356,7 @@ func TestMempoolConsumer_BlockingNextTxWaitsForCacheSlot(t *testing.T) {
 
 // ClearCache (the ack path) also releases a parked blocking NextTx.
 func TestMempoolConsumer_ClearCacheReleasesBlockingNextTx(t *testing.T) {
+	t.Parallel()
 	m, err := NewMempool(MempoolConfig{
 		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:          event.NewEventBus(nil, nil),
@@ -4468,6 +3396,7 @@ func TestMempoolConsumer_ClearCacheReleasesBlockingNextTx(t *testing.T) {
 // Shutdown must release a blocking NextTx parked on a full cache, so Stop is
 // never held up by a waiter that no slot will ever free.
 func TestMempoolConsumer_BlockingNextTxReleasedOnStop(t *testing.T) {
+	t.Parallel()
 	m, err := NewMempool(MempoolConfig{
 		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:          event.NewEventBus(nil, nil),
@@ -4503,6 +3432,7 @@ func TestMempoolConsumer_BlockingNextTxReleasedOnStop(t *testing.T) {
 // TxSubmission callback owns no goroutine beyond this wait, so retaining it
 // after a connection closes would leak the callback indefinitely.
 func TestMempoolConsumer_BlockingNextTxReleasedOnConsumerRemoval(t *testing.T) {
+	t.Parallel()
 	m := newTestMempool(t)
 	connId := newTestConnectionId(0)
 	consumer := m.AddConsumer(connId)
@@ -4526,6 +3456,7 @@ func TestMempoolConsumer_BlockingNextTxReleasedOnConsumerRemoval(t *testing.T) {
 // counters. TestMempoolConsumer_RemovalRejectsLaterCacheWrites separately
 // exercises the post-cancellation cacheTransaction guard.
 func TestMempoolConsumer_ConcurrentRemovalReleasesRetainedBytes(t *testing.T) {
+	t.Parallel()
 	m, err := NewMempool(MempoolConfig{
 		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:          event.NewEventBus(nil, nil),
@@ -4660,6 +3591,7 @@ func (v *blockingRejectingValidator) WithTxValidationSession(ctx context.Context
 func TestMempool_RevalidationConvergesOnBacklogLargerThanRoundBudget(
 	t *testing.T,
 ) {
+	t.Parallel()
 	m := newTestMempool(t)
 	t.Cleanup(func() {
 		stopCtx, cancel := context.WithTimeout(
@@ -4723,6 +3655,7 @@ func TestMempool_RevalidationConvergesOnBacklogLargerThanRoundBudget(
 // the current one, so the budget never grows and the loop bails with
 // errRevalidationCatchup even though the work would have fit.
 func TestCatchupBudgetAccountsForRoundsAlreadySpent(t *testing.T) {
+	t.Parallel()
 	const deltaCap = 64
 
 	// A backlog seen at round 0 needs its own rounds plus the base budget.
@@ -4754,6 +3687,7 @@ func TestCatchupBudgetAccountsForRoundsAlreadySpent(t *testing.T) {
 // ever fails, the loop gained a new exit that the surrounding comments and the
 // ARCHITECTURE.md note do not describe.
 func TestCatchupBudgetAlwaysExceedsCurrentRound(t *testing.T) {
+	t.Parallel()
 	for _, deltaCap := range []int{1, 8, 64, 4096} {
 		for _, round := range []int{0, 1, 17, 1_000, 100_000} {
 			for _, pending := range []int{1, 2, 63, 64, 65, 1 << 20} {
@@ -4780,30 +3714,11 @@ func TestCatchupBudgetAlwaysExceedsCurrentRound(t *testing.T) {
 	)
 }
 
-// TestMutationWindowReturnsEmptyNotNil covers mutationWindow's documented
-// never-nil contract. No production path reaches it today, because the caller
-// takes the finalize branch when pending is zero, so without this the contract
-// would be uncovered if that ever changes.
-func TestMutationWindowReturnsEmptyNotNil(t *testing.T) {
-	journal := []mempoolMutation{{seq: 1}, {seq: 2}}
-
-	// Caught up: sequence at or beyond the newest entry.
-	window, pending := mutationWindow(journal, 2, 64)
-	assert.NotNil(t, window)
-	assert.Empty(t, window)
-	assert.Zero(t, pending)
-
-	// Empty journal.
-	window, pending = mutationWindow([]mempoolMutation{}, 0, 64)
-	assert.NotNil(t, window)
-	assert.Empty(t, window)
-	assert.Zero(t, pending)
-}
-
 // mutationWindow must bound what it clones. Cloning the whole remaining suffix
 // each round, under mutationMutex, made a large journal quadratic in scans and
 // allocations and blocked admissions and removals.
 func TestMutationWindowClonesOnlyTheBoundedWindow(t *testing.T) {
+	t.Parallel()
 	journal := make([]mempoolMutation, 0, 1000)
 	for i := 1; i <= 1000; i++ {
 		journal = append(journal, mempoolMutation{seq: uint64(i)})

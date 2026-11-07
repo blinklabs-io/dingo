@@ -93,6 +93,7 @@ func denominatorParameters() Parameters {
 // Rejecting it forced the caller to shrink the denominator to match the pool
 // set, which is what under-credits every surviving pool.
 func TestCalculateAcceptsActiveStakeAboveThePoolSet(t *testing.T) {
+	t.Parallel()
 	result, err := Calculate(
 		Pots{Reserves: 100_000_000},
 		denominatorSnapshot(1_250),
@@ -121,6 +122,7 @@ func TestCalculateAcceptsActiveStakeAboveThePoolSet(t *testing.T) {
 // its 46424 lovelace — a shortfall in proportion to the excluded pool's share
 // of active stake, repeated every epoch the exclusion holds.
 func TestShrunkActiveStakeUnderCreditsEveryReward(t *testing.T) {
+	t.Parallel()
 	params := denominatorParameters()
 
 	shrunk, err := Calculate(
@@ -164,6 +166,7 @@ func TestShrunkActiveStakeUnderCreditsEveryReward(t *testing.T) {
 // instead: Pools must sum to precisely TotalActiveStake minus the tracked
 // exclusion.
 func TestValidateSnapshotTrackedExcludedActiveStake(t *testing.T) {
+	t.Parallel()
 	// 1000 (Pools) + 250 (tracked excluded) == 1250 (declared total): exact
 	// match passes, matching the legitimately-excluded-pool case.
 	exact := denominatorSnapshot(1_250)
@@ -370,6 +373,7 @@ func TestPrimeMainnetEpoch53CanonicalRewards(t *testing.T) {
 }
 
 func TestHaskellReferenceApparentPerformanceBranches(t *testing.T) {
+	t.Parallel()
 	require.Zero(
 		t,
 		apparentPerformance(big.NewRat(0, 1), 0, 100, 2, 20).Sign(),
@@ -387,6 +391,7 @@ func TestHaskellReferenceApparentPerformanceBranches(t *testing.T) {
 }
 
 func TestHaskellReferenceOperatorRewardBranches(t *testing.T) {
+	t.Parallel()
 	t.Run(
 		"pool reward at or below cost pays all to operator",
 		func(t *testing.T) {
@@ -423,6 +428,7 @@ func TestHaskellReferenceOperatorRewardBranches(t *testing.T) {
 }
 
 func TestHaskellReferenceMemberRewardBranches(t *testing.T) {
+	t.Parallel()
 	require.Equal(
 		t,
 		uint64(0),
@@ -436,6 +442,7 @@ func TestHaskellReferenceMemberRewardBranches(t *testing.T) {
 }
 
 func TestShelleySpecOptimalPoolRewardVectors(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name      string
 		poolStake uint64
@@ -486,6 +493,7 @@ func TestShelleySpecOptimalPoolRewardVectors(t *testing.T) {
 }
 
 func TestCFCalculatorPoolRewardFormulaVectors(t *testing.T) {
+	t.Parallel()
 	require.Equal(
 		t,
 		uint64(66_800),
@@ -572,6 +580,7 @@ func TestCFCalculatorPoolRewardFormulaVectors(t *testing.T) {
 }
 
 func TestAmaruReferenceRewardVector(t *testing.T) {
+	t.Parallel()
 	vector := loadAmaruRewardVector(t)
 
 	result, err := Calculate(
@@ -1009,6 +1018,7 @@ func shortfallPercent(base, perturbed *Result) []float64 {
 // reward by less than 0.001%, and slightly upwards, because only R's fee
 // component fails to cancel.
 func TestTotalBlocksUndercountDoesNotUnderCreditRewards(t *testing.T) {
+	t.Parallel()
 	pots := Pots{
 		Reserves: shortfallReserves,
 		Treasury: shortfallTreasury,
@@ -1035,6 +1045,7 @@ func TestTotalBlocksUndercountDoesNotUnderCreditRewards(t *testing.T) {
 // alone, so a shortfall there under-credits every pool by the same percentage
 // regardless of pool size or saturation.
 func TestActiveStakeUndercountUnderCreditsUniformly(t *testing.T) {
+	t.Parallel()
 	pots := Pots{
 		Reserves: shortfallReserves,
 		Treasury: shortfallTreasury,

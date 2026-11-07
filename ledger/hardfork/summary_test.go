@@ -75,6 +75,7 @@ func twoEraSummary() hardfork.Summary {
 // ------------------------------------------------------------------ SlotToTime
 
 func TestSummary_SlotToTime_Genesis(t *testing.T) {
+	t.Parallel()
 	s := twoEraSummary()
 	got, err := s.SlotToTime(0)
 	require.NoError(t, err)
@@ -82,6 +83,7 @@ func TestSummary_SlotToTime_Genesis(t *testing.T) {
 }
 
 func TestSummary_SlotToTime_InFirstEra(t *testing.T) {
+	t.Parallel()
 	s := twoEraSummary()
 	// Byron slot 50 → 50 * 20s = 1000s past system start.
 	got, err := s.SlotToTime(50)
@@ -91,6 +93,7 @@ func TestSummary_SlotToTime_InFirstEra(t *testing.T) {
 }
 
 func TestSummary_SlotToTime_AtEraBoundary(t *testing.T) {
+	t.Parallel()
 	s := twoEraSummary()
 	// Slot 100 is the start of the Shelley era.
 	got, err := s.SlotToTime(100)
@@ -100,6 +103,7 @@ func TestSummary_SlotToTime_AtEraBoundary(t *testing.T) {
 }
 
 func TestSummary_SlotToTime_InSecondEra(t *testing.T) {
+	t.Parallel()
 	s := twoEraSummary()
 	// Slot 150 = 100 (era start) + 50 Shelley slots * 1s each.
 	got, err := s.SlotToTime(150)
@@ -109,6 +113,7 @@ func TestSummary_SlotToTime_InSecondEra(t *testing.T) {
 }
 
 func TestSummary_SlotToTime_PastHorizon_BoundedLastEra(t *testing.T) {
+	t.Parallel()
 	// Summary whose only era has a closed End at slot 100.
 	end := boundedAt(100*20*time.Second, 100, 5)
 	s := hardfork.Summary{
@@ -130,6 +135,7 @@ func TestSummary_SlotToTime_PastHorizon_BoundedLastEra(t *testing.T) {
 // slots is the largest value that does not overflow time.Duration, one more
 // slot does.
 func TestSummary_SlotToTime_MultiplyOverflow(t *testing.T) {
+	t.Parallel()
 	summary := func(slot uint64) hardfork.Summary {
 		return hardfork.Summary{
 			SystemStart: testSysStart,
@@ -161,6 +167,7 @@ func TestSummary_SlotToTime_MultiplyOverflow(t *testing.T) {
 // TestSummary_SlotToTime_AdditionOverflow checks the era.Start.RelativeTime +
 // elapsed guard at the exact int64 nanosecond boundary.
 func TestSummary_SlotToTime_AdditionOverflow(t *testing.T) {
+	t.Parallel()
 	const elapsed = 3 * 2 * time.Second // slot 3 into era, 2s slots
 	maxDur := time.Duration(math.MaxInt64)
 
@@ -201,6 +208,7 @@ func TestSummary_SlotToTime_AdditionOverflow(t *testing.T) {
 // multiply-overflow check against a zero or negative SlotLength, which
 // Summary.Validate rejects but SlotToTime does not otherwise assume.
 func TestSummary_SlotToTime_NonPositiveSlotLength(t *testing.T) {
+	t.Parallel()
 	s := hardfork.Summary{
 		SystemStart: testSysStart,
 		Eras: []hardfork.EraSummary{{
@@ -219,6 +227,7 @@ func TestSummary_SlotToTime_NonPositiveSlotLength(t *testing.T) {
 // ------------------------------------------------------------------ TimeToSlot
 
 func TestSummary_TimeToSlot_Genesis(t *testing.T) {
+	t.Parallel()
 	s := twoEraSummary()
 	got, err := s.TimeToSlot(testSysStart)
 	require.NoError(t, err)
@@ -226,12 +235,14 @@ func TestSummary_TimeToSlot_Genesis(t *testing.T) {
 }
 
 func TestSummary_TimeToSlot_BeforeGenesis(t *testing.T) {
+	t.Parallel()
 	s := twoEraSummary()
 	_, err := s.TimeToSlot(testSysStart.Add(-time.Second))
 	assert.True(t, errors.Is(err, hardfork.ErrBeforeGenesis))
 }
 
 func TestSummary_TimeToSlot_InFirstEra(t *testing.T) {
+	t.Parallel()
 	s := twoEraSummary()
 	got, err := s.TimeToSlot(testSysStart.Add(1000 * time.Second))
 	require.NoError(t, err)
@@ -239,6 +250,7 @@ func TestSummary_TimeToSlot_InFirstEra(t *testing.T) {
 }
 
 func TestSummary_TimeToSlot_InSecondEra(t *testing.T) {
+	t.Parallel()
 	s := twoEraSummary()
 	// Shelley starts at 2000s; 2000s + 50s → slot 150.
 	got, err := s.TimeToSlot(testSysStart.Add(2050 * time.Second))
@@ -247,6 +259,7 @@ func TestSummary_TimeToSlot_InSecondEra(t *testing.T) {
 }
 
 func TestSummary_TimeToSlot_AtEraBoundary(t *testing.T) {
+	t.Parallel()
 	s := twoEraSummary()
 	// Exactly at boundary → belongs to second era at slot 100.
 	got, err := s.TimeToSlot(testSysStart.Add(2000 * time.Second))
@@ -257,6 +270,7 @@ func TestSummary_TimeToSlot_AtEraBoundary(t *testing.T) {
 // ------------------------------------------------------------------ SlotToEpoch
 
 func TestSummary_SlotToEpoch_InFirstEra(t *testing.T) {
+	t.Parallel()
 	// Byron era starts at epoch 0 slot 0. Epoch size 21_600.
 	end := boundedAt(100_000*20*time.Second, 100_000, 20)
 	s := hardfork.Summary{
@@ -278,6 +292,7 @@ func TestSummary_SlotToEpoch_InFirstEra(t *testing.T) {
 }
 
 func TestSummary_SlotToEpoch_InSecondEra(t *testing.T) {
+	t.Parallel()
 	s := twoEraSummary()
 	// Slot 100 is Shelley epoch 5 (carried over from Byron's end).
 	got, err := s.SlotToEpoch(100)
@@ -290,6 +305,7 @@ func TestSummary_SlotToEpoch_InSecondEra(t *testing.T) {
 }
 
 func TestSummary_EpochInfo_ByronPrefix(t *testing.T) {
+	t.Parallel()
 	byronEnd := hardfork.Bound{Slot: 86_400, Epoch: 4}
 	s := hardfork.Summary{
 		Eras: []hardfork.EraSummary{
@@ -317,6 +333,7 @@ func TestSummary_EpochInfo_ByronPrefix(t *testing.T) {
 }
 
 func TestSummary_EpochInfo_StartSlotOverflow(t *testing.T) {
+	t.Parallel()
 	maxUint64 := ^uint64(0)
 	tests := []struct {
 		name    string
@@ -361,6 +378,7 @@ func TestSummary_EpochInfo_StartSlotOverflow(t *testing.T) {
 }
 
 func TestSummary_SlotToEpoch_PastHorizon(t *testing.T) {
+	t.Parallel()
 	end := boundedAt(100*20*time.Second, 100, 5)
 	s := hardfork.Summary{
 		SystemStart: testSysStart,
@@ -378,6 +396,7 @@ func TestSummary_SlotToEpoch_PastHorizon(t *testing.T) {
 // ------------------------------------------------------------------ misc
 
 func TestSummary_CurrentEra(t *testing.T) {
+	t.Parallel()
 	s := twoEraSummary()
 	cur := s.CurrentEra()
 	require.NotNil(t, cur)
@@ -386,16 +405,19 @@ func TestSummary_CurrentEra(t *testing.T) {
 }
 
 func TestSummary_Validate_Empty(t *testing.T) {
+	t.Parallel()
 	s := hardfork.Summary{SystemStart: testSysStart}
 	assert.Error(t, s.Validate())
 }
 
 func TestSummary_Validate_BoundsLineUp(t *testing.T) {
+	t.Parallel()
 	s := twoEraSummary()
 	assert.NoError(t, s.Validate())
 }
 
 func TestSummary_Validate_BoundsMismatch(t *testing.T) {
+	t.Parallel()
 	// Byron.End.Slot = 100; Shelley.Start.Slot = 101 — mismatch.
 	end := boundedAt(100*20*time.Second, 100, 5)
 	badStart := boundedAt(100*20*time.Second, 101, 5)

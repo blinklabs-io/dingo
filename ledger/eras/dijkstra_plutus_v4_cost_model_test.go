@@ -248,22 +248,11 @@ func TestValidateTxDijkstraPlutusV4CostModel(t *testing.T) {
 			var failed conway.PlutusScriptFailedError
 			require.ErrorAs(t, err, &failed,
 				"the same budget must be exhausted under a raised V4 model")
+			if level.level == v4TopLevel {
+				require.ErrorContains(t, err, "budget")
+			}
 		})
 	}
-}
-
-func TestValidateTxDijkstraPlutusV4BudgetExhaustionNamesBudget(t *testing.T) {
-	// Not t.Parallel: withoutDijkstraPhase1 replaces a package-level rule list.
-	withoutDijkstraPhase1(t)
-	baseModel := defaultMachineCostModel(t, lang.LanguageVersionV4)
-	plain := lcommon.PlutusV4Script(plutusProgramBytes(t, v4PlainProgram))
-	tx := newDijkstraPlutusLevelTx(t, v4TopLevel, plain, v4TestBudget)
-
-	err := ValidateTxDijkstra(
-		tx, 0, newMockLedgerState(),
-		dijkstraV4TestParams(t, scaledCostModel(baseModel, 1_000_000)),
-	)
-	require.ErrorContains(t, err, "budget")
 }
 
 func TestValidateTxDijkstraPlutusV4RequiresCostModelKey3(t *testing.T) {

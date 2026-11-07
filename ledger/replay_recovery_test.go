@@ -79,6 +79,7 @@ func newReplayRecoveryLedgerState(
 // in the opposite order, so this test fails against the unfixed code instead
 // of merely checking that both mutexes appear somewhere in the function.
 func TestReplayRecoveryRollbackLockOrder(t *testing.T) {
+	t.Parallel()
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(
 		fset,
@@ -2818,6 +2819,7 @@ func TestReplayRecoveryKeepsPrimaryRewindForDeeperKnownProducer(
 }
 
 func TestReplayRecoveryRefusesBelowPruneFloorBeforeChainRewind(t *testing.T) {
+	t.Parallel()
 	ls := newReplayRecoveryAuditLedger(t, true)
 	const pruneFloorSyncKey = database.ConsumedUtxoPruneFloorSyncKey
 	require.NoError(t, ls.db.SetSyncState(pruneFloorSyncKey, "120", nil))

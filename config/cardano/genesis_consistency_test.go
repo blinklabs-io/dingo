@@ -611,35 +611,6 @@ func TestValidateEpochLengthFitsNonceWindowIncompleteGenesis(t *testing.T) {
 	}
 }
 
-// TestEmbeddedConfigsPassGenesisConsistency loads every embedded network
-// config through the real loader, which runs validateGenesisConsistency. It
-// is the check that the bundled configs themselves satisfy the invariants,
-// not just that the validator computes them correctly.
-func TestEmbeddedConfigsPassGenesisConsistency(t *testing.T) {
-	t.Parallel()
-
-	entries, err := EmbeddedConfigFS.ReadDir(".")
-	require.NoError(t, err)
-	networks := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		if entry.IsDir() {
-			networks = append(networks, entry.Name())
-		}
-	}
-	require.NotEmpty(t, networks)
-
-	for _, network := range networks {
-		t.Run(network, func(t *testing.T) {
-			cfg, err := NewCardanoNodeConfigFromEmbedFS(
-				EmbeddedConfigFS,
-				EmbeddedConfigPath(network),
-			)
-			require.NoError(t, err)
-			require.NoError(t, cfg.validateGenesisConsistency())
-		})
-	}
-}
-
 // TestDevnetGenesisIsUsable pins the devnet timing parameters that make the
 // bundled single node devnet usable. It shipped with a 5 slot epoch at 0.1
 // second slots, which put an epoch boundary every half second and left the

@@ -21,6 +21,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/require"
@@ -41,6 +42,17 @@ func byronWord16Tx(
 	inputAmount uint64,
 ) (*byron.ByronTransaction, *mockLedgerState) {
 	t.Helper()
+	tx := byronWord16TxBody(t, count, tailAmount, tailAddr)
+	return tx, byronWord16Ledger(t, tx, inputAmount)
+}
+
+func byronWord16TxBody(
+	t *testing.T,
+	count int,
+	tailAmount uint64,
+	tailAddr lcommon.Address,
+) *byron.ByronTransaction {
+	t.Helper()
 	input, err := byron.NewByronTransactionInput(
 		strings.Repeat("ab", lcommon.Blake2b256Size),
 		0,
@@ -60,24 +72,39 @@ func byronWord16Tx(
 			OutputAmount:  tailAmount,
 		}
 	}
-	tx := &byron.ByronTransaction{
+	return &byron.ByronTransaction{
 		Body: byron.ByronTransactionBody{
 			TxInputs:  []byron.ByronTransactionInput{input},
 			TxOutputs: outputs,
 		},
 	}
+}
+
+// byronWord16Ledger resolves the transaction's single input to inputAmount.
+func byronWord16Ledger(
+	t *testing.T,
+	tx *byron.ByronTransaction,
+	inputAmount uint64,
+) *mockLedgerState {
+	t.Helper()
+	input := tx.Body.TxInputs[0]
+	addr := newByronAddressForNetwork(t, nil, 0x01)
 	ls := newNetworkTestLedgerState(byron.MainnetProtocolMagic)
 	// A 1000-lovelace fee floor (the mock's policy is scaled by 10^9), so the
 	// minimum-fee rule binds rather than accepting any balance.
 	ls.byronFeeSummand = 1_000 * 1_000_000_000
 	ls.addUtxo(input, newTestOutputWithAddress(inputAmount, addr))
-	return tx, ls
+	return ls
 }
 
 // TestByronBalancesUseWord16OutputView pins that the fee and value checks
 // balance only outputs 0 through 65535, the outputs the transaction stores,
 // as the reference's balance (txOutputUTxO tx) does.
 func TestByronBalancesUseWord16OutputView(t *testing.T) {
+	testutil.SkipUnderRace(
+		t,
+		"single-goroutine arithmetic over 65,536 outputs; no concurrency",
+	)
 	t.Parallel()
 	addr := newByronAddressForNetwork(t, nil, 0x02)
 	for _, count := range []int{
@@ -118,17 +145,11 @@ func TestByronBalancesUseWord16OutputView(t *testing.T) {
 		require.Equal(t, min(count, byronProducedLimit), len(tx.Produced()))
 
 		// With only 500 lovelace left over for the fee, the rule binds.
-		short, shortLs := byronWord16Tx(
-			t,
-			count,
-			1_000_000_000_000,
-			addr,
-			byronProducedLimit+500,
-		)
+		shortLs := byronWord16Ledger(t, tx, byronProducedLimit+500)
 		var feeErr FeeTooLowByronError
 		require.True(
 			t,
-			errors.As(byronValidateMinFee(short, 0, shortLs, nil), &feeErr),
+			errors.As(byronValidateMinFee(tx, 0, shortLs, nil), &feeErr),
 			"outputs=%d",
 			count,
 		)
@@ -152,18 +173,4 @@ func TestByronOutputNetworkStillChecksOutputsPastWord16(t *testing.T) {
 	var mismatch NetworkMagicMismatchByronError
 	require.True(t, errors.As(err, &mismatch), "got %v", err)
 	require.Equal(t, byronProducedLimit, mismatch.OutputIndex)
-}
-
-// TestByronTestTxProducedMatchesWord16Bound keeps the test double honest: a
-// rule that sums Produced must see the same bound on testByronTx as on a real
-// ByronTransaction.
-func TestByronTestTxProducedMatchesWord16Bound(t *testing.T) {
-	t.Parallel()
-	outputs := make([]lcommon.TransactionOutput, byronProducedLimit+1)
-	for i := range outputs {
-		outputs[i] = newTestOutput(1)
-	}
-	tx := &testByronTx{outputs: outputs}
-	require.Equal(t, byronProducedLimit, len(tx.Produced()))
-	require.Equal(t, big.NewInt(byronProducedLimit), byronOutputBalance(tx))
 }
