@@ -72,6 +72,9 @@ func dijkstra(data []byte) (uint64, bool) {
 	}
 	switch len(components) {
 	case 3:
+		if isBool(components[2]) {
+			return 0, false
+		}
 		return canonicalSize(components...), true
 	case 4:
 		thirdIsBool := isBool(components[2])

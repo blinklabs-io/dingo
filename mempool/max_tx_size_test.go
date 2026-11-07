@@ -387,28 +387,53 @@ func TestAddTransactionDoesNotUndercountMalformedDijkstraEnvelope(
 	require.NoError(t, err)
 	require.Equal(t, len(mempool), bytesRead)
 	require.Len(t, components, 3)
-	malformed := joinCBOR(
-		[]byte{0x84}, components[0], components[1], components[2],
-		[]byte{0x00},
-	)
+	for _, testCase := range []struct {
+		name string
+		cbor []byte
+	}{
+		{
+			name: "fourth non-boolean",
+			cbor: joinCBOR(
+				[]byte{0x84}, components[0], components[1], components[2],
+				[]byte{0x00},
+			),
+		},
+		{
+			name: "wide three-element boolean",
+			cbor: joinCBOR(
+				[]byte{0x98, 0x03}, components[0], components[1], []byte{0xf5},
+			),
+		},
+		{
+			name: "indefinite three-element boolean",
+			cbor: joinCBOR(
+				[]byte{0x9f}, components[0], components[1], []byte{0xf4, 0xff},
+			),
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			v := &sizeLimitValidator{
+				maxSize: uint(len(testCase.cbor) - 1),
+				known:   true,
+			}
+			m := newTestMempoolWithValidator(t, v)
+			defer m.Stop(context.Background())
 
-	v := &sizeLimitValidator{maxSize: uint(len(malformed) - 1), known: true}
-	m := newTestMempoolWithValidator(t, v)
-	defer m.Stop(context.Background())
-
-	err = m.AddTransaction(
-		context.Background(), uint(gledger.TxTypeDijkstra), malformed,
-	)
-	var sizeErr shelley.MaxTxSizeUtxoError
-	if !errors.As(err, &sizeErr) {
-		t.Fatalf(
-			"malformed Dijkstra envelope must be rejected at its full raw size: %v",
-			err,
-		)
+			err := m.AddTransaction(
+				context.Background(), uint(gledger.TxTypeDijkstra), testCase.cbor,
+			)
+			var sizeErr shelley.MaxTxSizeUtxoError
+			if !errors.As(err, &sizeErr) {
+				t.Fatalf(
+					"malformed Dijkstra envelope must be rejected at its full raw size: %v",
+					err,
+				)
+			}
+			require.Equal(t, uint(len(testCase.cbor)), sizeErr.TxSize)
+			require.Zero(t, v.validated.Load())
+			require.Empty(t, m.Transactions())
+		})
 	}
-	require.Equal(t, uint(len(malformed)), sizeErr.TxSize)
-	require.Zero(t, v.validated.Load())
-	require.Empty(t, m.Transactions())
 }
 
 // The limit is the one for the submitted era, not a single current limit.

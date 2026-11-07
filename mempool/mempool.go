@@ -199,9 +199,9 @@ type TxValidationSessionProvider interface {
 
 // TxSizeLimitProvider optionally reports the MaxTxSize ledger validation
 // applies to a transaction of a given era, so admission can refuse an
-// oversized submission before decoding it, taking the mutation gate, or
-// running ledger rules. LedgerState implements it; validators that do not
-// simply skip the early check and rely on the ledger's own rule.
+// oversized submission before constructing the ledger transaction, taking the
+// mutation gate, or running ledger rules. LedgerState implements it; validators
+// that do not simply skip the early check and rely on the ledger's own rule.
 type TxSizeLimitProvider interface {
 	// MaxTxSize returns the MaxTxSize the ledger would apply to a transaction
 	// of era txType, and whether it is known. It must report false rather
@@ -2204,9 +2204,10 @@ func (m *Mempool) apiSubmissionSlotRelease() func() {
 }
 
 // rejectOversizedTx applies the ledger's MaxTxSize rule to the raw submission
-// before any decode, lock, or rule work. The size is common.TxSize's measure,
-// so an early rejection implies the ledger rule would reject it too; the
-// ledger rule stays authoritative for everything this lets through.
+// before the ledger transaction is constructed or any lock or rule work. The
+// size is common.TxSize's measure, so an early rejection implies the ledger
+// rule would reject it too; the ledger rule stays authoritative for everything
+// this lets through.
 func (m *Mempool) rejectOversizedTx(txType uint, txBytes []byte) error {
 	provider, ok := m.validator.(TxSizeLimitProvider)
 	if !ok {

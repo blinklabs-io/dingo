@@ -2140,18 +2140,18 @@ already queued restores. Revalidation therefore sees transactions in ledger
 order.
 
 `Mempool.AddTransaction` refuses a submission larger than the `MaxTxSize`
-ledger validation would apply to it before decoding it, taking
-`mutationMutex`, or running ledger rules. A limit is reported only for the
+ledger validation would apply to it before constructing the ledger transaction,
+taking `mutationMutex`, or running ledger rules. A limit is reported only for the
 current era; a wrong-era transaction reaches ledger validation so its typed
 era-mismatch error takes precedence over a size error. No limit is reported
 for an era whose validation is skipped or parameters that are not the type its
 validation requires. From Alonzo through Conway, the ledger's fee and maximum
 size rules measure a canonical three-element transaction envelope while
-preserving the exact received body, witness-set and auxiliary-data bytes; a
-fourth exact CBOR boolean is the IsValid field and is omitted. Dijkstra keeps
-the same canonical three-component measure for its current mempool envelope,
-its legacy mempool envelope with a `true` validity flag before auxiliary data,
-and its block envelope with the validity flag last. An unrecognized or
+preserving the exact received body, witness-set and auxiliary-data bytes; the
+third element of a four-element envelope is the IsValid field and is omitted.
+Dijkstra keeps the same canonical three-component measure for its current
+mempool envelope, its legacy mempool envelope with a `true` validity flag before
+auxiliary data, and its block envelope with the validity flag last. An unrecognized or
 ambiguous envelope keeps its full received size. The raw admission guard and
 decoded ledger rules use the same sizing primitive. The limit comes from the
 optional `mempool.TxSizeLimitProvider` implemented by `LedgerState`, and the
