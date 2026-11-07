@@ -285,6 +285,13 @@ func AppendUtxoAddressOrBranchMode(
 	return nil
 }
 
+// UtxoSpendState records whether a stored output has been consumed, without
+// loading its value, address, or assets.
+type UtxoSpendState struct {
+	DeletedSlot uint64
+	SpentAtTxId types.NullableHash
+}
+
 // Utxo represents an unspent transaction output
 type Utxo struct {
 	TransactionID           *uint

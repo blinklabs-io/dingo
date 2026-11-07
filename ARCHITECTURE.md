@@ -4215,6 +4215,13 @@ immutable replay can omit consumed-input blob recovery because the complete
 history supplies each producer output earlier in slot order; transaction
 conflict checks still run.
 
+Consumed-input recovery can use the optional `metadata.UtxoSpendStateReader`
+capability to read only deletion and spender state, with the same transaction
+and pending-overlay visibility as a full UTxO lookup. Providers without it keep
+the full lookup. Recovery reads the Mithril boundary only when a producer is
+absent from both stored and in-flight outputs; its conflict and strict producer
+checks remain unchanged. See DATABASE.md for the SQL projection.
+
 Ledger apply collects block-nonce rows for its database batch and persists them
 through the optional `metadata.BlockNonceBatchStore` capability in the same
 transaction. SQLStore uses bounded multi-row SQLite upserts; other metadata
