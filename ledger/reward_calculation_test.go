@@ -538,6 +538,7 @@ func seedRetentionReconstructionFixture(
 		"the legitimate capture must have produced real per-credential rows",
 	)
 	require.NoError(t, meta.DeleteRewardStakeInputBeforeEpoch(
+		context.Background(),
 		retentionRewardSnapshotEpoch+1, nil,
 	))
 	prunedStakeInputs, err := meta.GetRewardStakeInputs(
