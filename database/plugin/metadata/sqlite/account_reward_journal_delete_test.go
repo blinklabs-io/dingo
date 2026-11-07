@@ -25,21 +25,21 @@ import (
 // TestDeleteAccountRewardJournalForCredentialsAfterSlotScope checks that the
 // scoped journal delete removes exactly the named credentials' rows above the
 // slot from both account_reward_delta and account_withdrawal_witness, across
-// more credentials than one SQLite parameter chunk holds, and leaves rows at
+// more credentials than one parameter chunk holds, and leaves rows at
 // or below the slot (including rows at exactly the slot), rows of unnamed
 // credentials, and rows sharing a named staking key under the other
 // credential tag untouched.
 func TestDeleteAccountRewardJournalForCredentialsAfterSlotScope(t *testing.T) {
 	t.Parallel()
-	store, raw := newSharedSQLStore(t)
+	store, raw := newSharedSQLStoreWithParameterLimit(t, 5)
 
 	const (
 		slot      = uint64(100)
 		belowSlot = int64(50)
 		aboveSlot = int64(150)
-		// More than SQLite's 999-parameter limit minus the two reserved
-		// parameters, so the key-hash credentials span several chunks.
-		coveredKeyHashes = 2_100
+		// More than the parameter limit minus the two reserved parameters,
+		// so the key-hash credentials span several chunks.
+		coveredKeyHashes = 8
 		coveredScripts   = 5
 		uncovered        = 7
 	)
