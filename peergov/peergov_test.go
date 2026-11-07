@@ -348,7 +348,7 @@ func TestPeerGovernor_AddPeer(t *testing.T) {
 		PromRegistry: reg,
 	})
 
-	// Test adding a gossip peer (should be sharable)
+	// Test adding a gossip peer (not sharable until connected)
 	// Use a routable IP — gossip peers with non-routable IPs are rejected.
 	pg.AddPeer("44.0.0.1:3001", PeerSourceP2PGossip)
 
@@ -357,10 +357,10 @@ func TestPeerGovernor_AddPeer(t *testing.T) {
 	assert.Equal(t, "44.0.0.1:3001", peers[0].Address)
 	assert.EqualValues(t, PeerSourceP2PGossip, peers[0].Source)
 	assert.Equal(t, PeerStateCold, peers[0].State)
-	assert.True(
+	assert.False(
 		t,
 		peers[0].Sharable,
-		"gossip-discovered peers should be sharable",
+		"gossip-discovered peers are not sharable before an outbound connection",
 	)
 
 	// Test adding duplicate peer (should not add)
@@ -2341,10 +2341,10 @@ func TestPeerGovernor_DiscoverLedgerPeers_Success(t *testing.T) {
 	// Should have added 3 peers
 	assert.Len(t, pg.peers, 3)
 
-	// Verify peer sources and shareability
+	// Verify peer sources and that none is sharable before a connection
 	for _, peer := range pg.peers {
 		assert.Equal(t, PeerSource(PeerSourceP2PLedger), peer.Source)
-		assert.True(t, peer.Sharable)
+		assert.False(t, peer.Sharable)
 		assert.Equal(t, PeerState(PeerStateCold), peer.State)
 	}
 }

@@ -678,6 +678,15 @@ func (s *intraBatchSpends) removeFromTxn(
 	if !s.enabled || len(applied) == 0 {
 		return nil
 	}
+	_, protected, err := pendingRewardStakeInputHistoryFloor(db.Metadata(), txn.Metadata())
+	if err != nil {
+		return err
+	}
+	// Intra-batch deletion advances the global history floor to the batch tip.
+	// Even deleting only newer outputs would invalidate the pending basis.
+	if protected {
+		return nil
+	}
 	var spent []models.UtxoId
 	for _, blk := range applied {
 		for _, tx := range blk.Transactions() {

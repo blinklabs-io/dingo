@@ -173,10 +173,10 @@ func TestPeerHeaderForkPathRevalidatesUnstampedAncestryAndItsCachedChild(
 	require.Len(t, path, 4)
 }
 
-// TestPeerHeaderForkPathDefersVerdictAfterConsensusChange keeps the security
-// half of the freshness rule: a verdict made before the epoch nonce, era or
-// stake-bearing epoch state changed is not reused.
-func TestPeerHeaderForkPathDefersVerdictAfterConsensusChange(t *testing.T) {
+// TestPeerHeaderForkPathRetainsAncestryAfterConsensusChange keeps the header
+// bytes available after a context change. Callers recheck old verdicts before
+// using this path for chain selection.
+func TestPeerHeaderForkPathRetainsAncestryAfterConsensusChange(t *testing.T) {
 	t.Parallel()
 	cases := map[string]func(ls *LedgerState){
 		"epoch nonce": func(ls *LedgerState) {
@@ -204,12 +204,13 @@ func TestPeerHeaderForkPathDefersVerdictAfterConsensusChange(t *testing.T) {
 			change(f.ls)
 			f.ls.publishSnapshotsLocked()
 
-			_, _, found, err := f.ls.peerHeaderForkPath(
+			_, path, found, err := f.ls.peerHeaderForkPath(
 				ouroboros.ConnectionId{},
 				f.headers[1],
 			)
-			require.False(t, found)
-			require.ErrorIs(t, err, errHeaderVerificationDeferred)
+			require.NoError(t, err)
+			require.True(t, found)
+			require.Len(t, path, 2)
 		})
 	}
 }

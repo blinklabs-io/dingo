@@ -272,6 +272,14 @@ Existing nonpaged callers retain their pagination and matching semantics. See
 the [MCP guide](docs/mcp/README.md#metadata-and-query-semantics) for page bounds
 and live-state consistency semantics.
 
+Validated API-mode blocks batch output-address rows, transaction address history,
+key witnesses and metadata labels until block completion. UTxOs, assets, datums,
+scripts and live stake remain visible after each transaction. The block-local
+accumulator flushes before returning from block application; a flush failure
+aborts the enclosing transaction. Providers without the optional validated-block
+batch capability keep immediate index writes. Trusted replay retains its
+chunk-owned accumulator and flush boundary.
+
 Certified Leios closures batch API-only output-address rows with transaction
 address history, key witnesses and metadata labels. UTxO rows, native assets,
 datums, scripts and live stake changes remain visible before the next
@@ -1608,9 +1616,12 @@ returned `Manifest` is now accurate regardless). A checksum failure returns
 through `ReadManifest`'s path-prefixed error) — distinct from a manifest simply
 not existing — so a caller like bark's `resolveSnapshotSource` can report a
 snapshot that's present but corrupted as such (`CodeDataLoss`) instead of
-collapsing it into `CodeNotFound`; `DeleteSnapshot` checks the local snapshot
-directory's existence directly (`os.Stat`), not via a readable manifest, so a
-corrupted local snapshot can still be cleaned up.
+collapsing it into `CodeNotFound`; `DeleteSnapshot` treats a local snapshot as
+a directory containing a regular `manifest.json` file and does not parse it, so
+a corrupted local snapshot can still be cleaned up while the catalog database,
+work directories and other non-snapshot entries under `SnapshotDir` cannot be
+deleted; it also rejects any `snapshot_id` starting with `.dingo-`, the prefix
+of those internal entries.
 `Manifest.CheckCompatibility(blobPlugin, metadataPlugin, storageMode, network,
 gates)` bundles `CheckPluginMatch` with a `StorageMode`/`Network` comparison and
 `CheckGateMatch(configured nodesettings.Values)`, for a caller that must refuse
@@ -3382,6 +3393,20 @@ prefers the newest row for an epoch, so a derived row would replace it. A row
 for an older epoch can only be one backfill derived, possibly before the
 proposals it depends on were stored, and is derived again.
 
+##### Imported reward credit completion
+
+A certified account balance already includes applied reward rounds at or before
+the snapshot anchor, including rewards subsequently withdrawn. Account import
+marks those rounds' spendable, unguarded outputs folded in the same transaction
+as each balance replacement. It preserves applied-round markers, journals,
+already folded outputs, and later rounds.
+
+Before checkpointing cert state, import drains remaining covered outputs without
+adding credits, including credentials absent from the certified account set.
+The drain commits bounded batches and repeats after interruption. A resumed
+cert-state checkpoint from an older importer also drains covered outputs; a
+completed tip checkpoint leaves subsequent ledger activity unchanged.
+
 ### Pools
 
 | Table | Columns | Keys / indexes | Relationships and notes |
@@ -3581,6 +3606,25 @@ validation treats anchor provenance as equivalent to the certified boundary
 provenance. Startup-reconstructed historical rows retain their post-boundary
 capture slot so they remain distinguishable and are not used for hard
 leader-threshold rejection.
+
+#### Imported authoritative reward inputs
+
+An authoritative reward snapshot records when the basis was captured; its stake
+rows may still be pending in the deferred writer. Import preserves an existing
+authoritative basis only when its expected stake-row count is present and its
+matching pending marker is absent. An incomplete basis is completed from the
+imported mark, set, or go distribution only after its aggregate totals and every
+retained pool stake, owner stake, and delegator count reconcile. Repair
+preserves the authoritative snapshot and pool rows, upserts missing or changed
+stake rows, and invalidates only that uncredited epoch's precomputed outputs and
+cursor in the same transaction. An already credited epoch cannot be repaired.
+
+`cmd/reward-input-repair` exposes the same derivation for offline SQLite core
+databases. The operator supplies a previously verified ledger snapshot and an
+epoch within its mark/set/go window. It holds the Badger lock, opens metadata
+read-only by default, and reports the canonical comparison without changing
+state. `--apply` commits only a fully reconciled single-epoch repair. It does
+not import UTxOs, migrate schema, replace account balances, or move the tip.
 
 #### RewardStakeCalculationVersion and the Startup Provenance Gate
 
@@ -3991,6 +4035,26 @@ replaces that epoch's rows and `SaveEpochSummary` upserts the summary.
 `DeleteEpochSummariesAfterEpoch` and `DeletePoolStakeSnapshotsAfterEpoch` exist
 on `metadata.MetadataStore` for that case but currently have no callers.
 
+##### Pending reward input history
+
+A deferred reward stake-input writer leaves a durable pending entry until every
+chunk commits. Consumed-UTxO sweeps cap their floor at the oldest matching pending
+snapshot's captured slot before announcing or persisting that floor. Invalid or
+unreadable pending state stops cleanup; entries for rolled-back snapshots do not
+pin history. Once the pending basis is completed, normal cleanup resumes. A deferred SNAP
+also retains its boundary slot minus one while the pending ratification record
+owns the snapshot. Both durable markers are read through one metadata snapshot
+so their atomic handoff cannot hide the retention obligation.
+
+Trusted batch UTxO deletion and its overlay remain disabled while a matching
+pending snapshot exists. Those paths advance the global prune floor to the
+batch tip, so deleting even outputs created after the snapshot would make its
+historical reconstruction unavailable. Regular sweeps can still remove outputs
+spent at or before the protected captured slot. Historical reward credits and
+withdrawals remain in account_reward_delta, and certificate/registration history
+is retained independently; reward_account_output retention is not an input to
+this reconstruction.
+
 #### Committee Hot-Key Authorization Retention
 
 `auth_committee_hot` records one row per `AuthCommitteeHot` certificate and
@@ -4119,19 +4183,23 @@ namespace. Durable cleanup state is retried before a later live restore creates
 its own record, and an incomplete recovery directory without a record is removed
 consistently during retry and startup cleanup.
 
-### Core sync and Leios value placement
+### Sync and Leios value placement
 
-Core Mithril sync uses a 1 KiB Badger value threshold by default. Larger block
-CBOR values go to the value log instead of being rewritten through LSM
-compactions during import. Core Leios uses the same 1 KiB threshold so large
-endorser transaction closures live in the value log rather than being copied
-through the inline-value read path and rewritten through LSM compactions.
-Other storage modes and run modes retain the 1 MiB default. The blob provider's
-`valueThreshold` setting overrides either default. Badger records the placement
-with each value, so changing the threshold does not require rewriting existing
-records and both placements remain readable. Badger fixes the threshold when
-the store opens, so node-managed Mithril restores and stream catch-up, which run
-inside `serve` on the store `serve` opened, keep the serve default.
+Mithril sync (run mode `sync`) uses a 1 KiB Badger value threshold by default
+in both Core and API storage modes. Larger block CBOR values go to the value
+log instead of being rewritten through LSM compactions during import. Badger
+compresses only SST blocks, so in API mode those values are stored
+uncompressed: the store is larger than with inline ZSTD values (about 26% on a
+Preview import, where the copy wrote 54% fewer bytes and finished 34% sooner).
+Core Leios uses the same 1 KiB threshold so large endorser transaction closures
+live in the value log rather than being copied through the inline-value read
+path and rewritten through LSM compactions. API Leios and the other run modes
+retain the 1 MiB default. The blob provider's `valueThreshold` setting
+overrides either default. Badger records the placement with each value, so
+changing the threshold does not require rewriting existing records and both
+placements remain readable. Badger fixes the threshold when the store opens, so
+node-managed Mithril restores and stream catch-up, which run inside `serve` on
+the store `serve` opened, keep the serve default.
 
 Core sync mode uses a 1 GiB Badger memtable by default to improve bulk-import
 throughput. Other storage modes and run modes retain the 128 MiB default. The
@@ -7675,7 +7743,7 @@ cleanup (`UtxosDeleteConsumed`, persisting the floor first) up to the
 committed tip, which lies at or below the certified immutable tip, after the
 first batch it commits in a process and then once every
 `trustedBatchPruneEvery` (16) committed batches, in deletes of
-`trustedBatchPruneRows` (20,000) rows until none is left or 30 seconds have
+`trustedBatchPruneRows` (10,000) rows until none is left or 30 seconds have
 passed. A spent row costs less to delete the more rows its transaction
 deletes with it, so draining several batches' spends in a few large
 transactions costs less than draining each batch's in one or two small ones.

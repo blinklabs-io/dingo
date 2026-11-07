@@ -468,6 +468,11 @@ func ProcessEpoch(
 		return nil, fmt.Errorf("remove orphaned proposals: %w", err)
 	}
 	out.OrphanedCount = orphanCount
+	if err := BumpDormantDRepExpiryAtEpochBoundary(
+		ctx, in.DB, in.NewEpoch, in.BoundarySlot, in.Txn,
+	); err != nil {
+		return nil, fmt.Errorf("extend dormant DRep expiries: %w", err)
+	}
 
 	// Conway seeds RATIFY from the treasury the whole EPOCH rule leaves
 	// (setFreshDRepPulsingState: `ensTreasuryL .~ epochState ^. treasuryL`).
@@ -585,6 +590,7 @@ type RatificationDecision struct {
 	Ratified            []*models.GovernanceProposal
 	Expired             []*models.GovernanceProposal
 	ActiveProposalCount int
+	activeProposals     []models.GovernanceProposal
 }
 
 // decideRatification computes the RATIFY and EXPIRY verdicts for the boundary
@@ -609,6 +615,15 @@ func decideRatification(
 		return nil, fmt.Errorf("get active proposals: %w", err)
 	}
 	verdicts.ActiveProposalCount = len(stillActive)
+	// Apply mutates proposal lifecycle fields, including on a retry after a
+	// rolled-back write, so retain the boundary set as independent values.
+	verdicts.activeProposals = make(
+		[]models.GovernanceProposal,
+		len(stillActive),
+	)
+	for i, proposal := range stillActive {
+		verdicts.activeProposals[i] = *proposal
+	}
 	// --- RATIFICATION -------------------------------------------------
 	//
 	// The inputs assembled below (TallyContext, activeDRepCount,
@@ -1105,29 +1120,41 @@ func applyRatification(
 			len(replayedExpired)+len(decision.Expired)), replayedExpired...),
 		decision.Expired...,
 	)
-	expiredOrphanCount, err := removeOrphanedProposals(
+	expiredNow := make(map[string]struct{}, len(decision.Expired))
+	for _, proposal := range decision.Expired {
+		expiredNow[proposalIdentityKey(proposal)] = struct{}{}
+	}
+	boundaryActive := make(
+		[]*models.GovernanceProposal,
+		0,
+		len(decision.activeProposals),
+	)
+	for _, proposal := range decision.activeProposals {
+		if _, expired := expiredNow[proposalIdentityKey(&proposal)]; expired {
+			continue
+		}
+		if proposal.ExpiresEpoch >= in.NewEpoch && proposal.EnactedEpoch == nil &&
+			proposal.ExpiredEpoch == nil &&
+			proposal.DeletedSlot == nil {
+			// The sweep writes lifecycle fields; keep the decision reusable.
+			candidate := proposal
+			boundaryActive = append(boundaryActive, &candidate)
+		}
+	}
+	expiredOrphanCount, err := removeOrphanedProposalsFromSet(
 		ctx,
 		in.DB,
 		in.Txn,
 		nil,
 		expiredSeeds,
 		nil,
-		in.NewEpoch,
+		boundaryActive,
 		in.NewEpoch,
 		in.BoundarySlot,
 		in.Logger,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("remove expired proposal descendants: %w", err)
-	}
-	if err := BumpDormantDRepExpiryAtEpochBoundary(
-		ctx,
-		in.DB,
-		in.NewEpoch,
-		in.BoundarySlot,
-		in.Txn,
-	); err != nil {
-		return 0, fmt.Errorf("extend dormant DRep expiries: %w", err)
 	}
 	return expiredOrphanCount, nil
 }
@@ -1585,6 +1612,23 @@ func removeOrphanedProposals(
 	if err != nil {
 		return 0, fmt.Errorf("get active governance proposals: %w", err)
 	}
+	return removeOrphanedProposalsFromSet(
+		ctx, db, txn, enacted, expired, dropped, active, epoch, slot, logger,
+	)
+}
+
+func removeOrphanedProposalsFromSet(
+	ctx context.Context,
+	db *database.Database,
+	txn *database.Txn,
+	enacted []*models.GovernanceProposal,
+	expired []*models.GovernanceProposal,
+	dropped []*models.GovernanceProposal,
+	active []*models.GovernanceProposal,
+	epoch uint64,
+	slot uint64,
+	logger *slog.Logger,
+) (int, error) {
 	children := make(map[string][]*models.GovernanceProposal)
 	for _, proposal := range active {
 		children[proposalParentKey(proposal)] = append(
@@ -1608,13 +1652,13 @@ func removeOrphanedProposals(
 			}
 		}
 	}
-	expirySeeds := make([]*models.GovernanceProposal, 0)
+	expirySeeds := make([]*models.GovernanceProposal, 0, len(expired))
 	for _, proposal := range expired {
 		expirySeeds = append(
 			expirySeeds, children[proposalIdentityKey(proposal)]...,
 		)
 	}
-	dropSeeds := make([]*models.GovernanceProposal, 0)
+	dropSeeds := make([]*models.GovernanceProposal, 0, len(dropped))
 	for _, proposal := range dropped {
 		dropSeeds = append(
 			dropSeeds, children[proposalIdentityKey(proposal)]...,

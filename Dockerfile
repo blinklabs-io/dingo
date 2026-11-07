@@ -63,49 +63,20 @@ FROM debian:bookworm-slim@sha256:99c0b25c46d0214d5a2091092e7908907dcaecd6a962cde
 # FROM a v17+ server (pg_dump's own version-mismatch guard); bump this pin
 # (and re-verify pg_restore against every currently-supported server
 # version, not just the newest) if that becomes a real requirement.
-RUN sed -i \
-    -e 's|http://deb.debian.org/debian-security|http://snapshot.debian.org/archive/debian-security/20261027T000000Z|g' \
-    -e 's|http://deb.debian.org/debian|http://snapshot.debian.org/archive/debian/20261027T000000Z|g' \
-    /etc/apt/sources.list.d/debian.sources && \
-  apt-get -o Acquire::Check-Valid-Until=false update -y && \
-  apt-get install -y --no-install-recommends \
-    ca-certificates=20250419~deb12u2 \
-    wget=1.21.3-1+deb12u1 && \
-  arch="$(dpkg --print-architecture)" && \
-  case "$arch" in \
-    amd64) \
-      postgresql_sha=e4c00577ff40b59ccdf115a585a9a4e766539669473d272885325b674731dc53; \
-      libpq_sha=9dc15f3f41090e632e0449693323f18c96bfd25794c439d8bcde06af6c5012f6 ;; \
-    arm64) \
-      postgresql_sha=42a82b0a547c94e8b172a482961efa1d64069a9d97efbc80a6dc0bd70337e656; \
-      libpq_sha=1e2b364b93ff16293d6f4a409e49b0d8c0521b9f7ae3423007f443c31c0f6766 ;; \
-    *) exit 1 ;; \
-  esac && \
-  postgresql_deb="postgresql-client-16_16.15-1.pgdg12+2_${arch}.deb" && \
-  libpq_deb="libpq5_18.6-1.pgdg12+2_${arch}.deb" && \
-  common_deb=postgresql-client-common_293.pgdg12+1_all.deb && \
-  pgdg=https://apt-archive.postgresql.org/pub/repos/apt/pool/main && \
-  wget -qO "/tmp/${postgresql_deb}" \
-    "${pgdg}/p/postgresql-16/${postgresql_deb}" && \
-  wget -qO "/tmp/${libpq_deb}" \
-    "${pgdg}/p/postgresql-18/${libpq_deb}" && \
-  wget -qO "/tmp/${common_deb}" \
-    "${pgdg}/p/postgresql-common/${common_deb}" && \
-  printf '%s  %s\n' \
-    "$postgresql_sha" "/tmp/${postgresql_deb}" \
-    "$libpq_sha" "/tmp/${libpq_deb}" \
-    a4e2461975abffae23688fc95c4fdc97fea4c4c9cc096c2c4a7a4e334dfc3353 "/tmp/${common_deb}" \
-    | sha256sum --check --strict - && \
+RUN apt-get update -y && \
+  apt-get install -y --no-install-recommends ca-certificates gnupg wget && \
+  wget -qO /usr/share/keyrings/postgresql.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc && \
+  test "$(gpg --show-keys --with-colons /usr/share/keyrings/postgresql.asc | awk -F: '$1 == "fpr" { print $10; exit }')" = "B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8" && \
+  echo "deb [signed-by=/usr/share/keyrings/postgresql.asc] https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" \
+    > /etc/apt/sources.list.d/pgdg.list && \
+  apt-get update -y && \
   apt-get install -y \
-    ca-certificates=20250419~deb12u2 \
-    default-mysql-client=1.1.0 \
-    liblmdb0=0.9.24-1 \
-    libssl3=3.0.22-1~deb12u2 \
-    sqlite3=3.40.1-2+deb12u2 \
-    "/tmp/${libpq_deb}" \
-    "/tmp/${common_deb}" \
-    "/tmp/${postgresql_deb}" && \
-  rm -f "/tmp/${libpq_deb}" "/tmp/${common_deb}" "/tmp/${postgresql_deb}" && \
+    ca-certificates \
+    default-mysql-client \
+    liblmdb0 \
+    libssl3 \
+    sqlite3 \
+    postgresql-client-16 && \
   rm -rf /var/lib/apt/lists/*
 ENV LD_LIBRARY_PATH="/usr/local/lib"
 ENV PKG_CONFIG_PATH="/usr/local/lib/pkgconfig"
@@ -169,12 +140,12 @@ CMD ["serve"]
 
 FROM dingo AS antithesis
 USER root
-RUN apt-get -o Acquire::Check-Valid-Until=false update -y && \
+RUN apt-get update -y && \
   apt-get install -y \
-    curl=7.88.1-10+deb12u15 \
-    lsof=4.95.0-1 \
-    netcat-openbsd=1.219-1 \
-    socat=1.7.4.4-2
+    curl \
+    lsof \
+    netcat-openbsd \
+    socat
 COPY --from=antithesis-build /antithesis/customer/dingo /bin/
 COPY --from=antithesis-build /antithesis/symbols/*.sym.tsv /symbols/
 
