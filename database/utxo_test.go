@@ -665,6 +665,41 @@ VALUES (?, 1, 0, '1', 0, FALSE)`, txID)
 	}}, got.Assets)
 }
 
+func TestHistoricalAddressBalanceEnforcesAssetRowLimit(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDBWithStorageMode(t, types.StorageModeAPI)
+	raw := rawSQLiteMetadataFixture(t, db)
+	address := []byte("addr_test1_asset_budget")
+	result, err := raw.Exec(`
+INSERT INTO utxo (tx_id, added_slot, deleted_slot, amount, output_idx, payment_script)
+VALUES (?, 1, 0, '1', 0, FALSE)`, bytes.Repeat([]byte{0x49}, 32))
+	require.NoError(t, err)
+	utxoID, err := result.LastInsertId()
+	require.NoError(t, err)
+	_, err = raw.Exec(
+		`INSERT INTO utxo_address (utxo_id, address) VALUES (?, ?)`,
+		utxoID,
+		address,
+	)
+	require.NoError(t, err)
+	for assetName := range 3 {
+		_, err = raw.Exec(`
+INSERT INTO asset (name, policy_id, utxo_id, amount)
+VALUES (?, ?, ?, '1')`,
+			[]byte{byte(assetName)},
+			bytes.Repeat([]byte{0x4a}, 28),
+			utxoID,
+		)
+		require.NoError(t, err)
+	}
+
+	_, err = db.utxoStore().GetUtxoBalanceByAddressAtSlot(
+		address, 1, 2, nil,
+	)
+	require.ErrorIs(t, err, models.ErrTooManyUtxoResults)
+}
+
 func TestUtxoAddressQueriesPreserveExactIdentityAndPagination(t *testing.T) {
 	t.Parallel()
 
@@ -2818,4 +2853,47 @@ func TestFilterUtxosByAddressPatternsExactSetMatchesLinear(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Empty(t, got)
+}
+
+func TestTransactionsByAddressHonorSlotRange(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	raw := rawSQLiteMetadataFixture(t, db)
+
+	payment := bytes.Repeat([]byte{0xab}, lcommon.AddressHashSize)
+	enterprise, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		payment,
+		nil,
+	)
+	require.NoError(t, err)
+	for slot := uint64(1); slot <= 6; slot++ {
+		seedExactAddressUtxo(t, db, raw, enterprise, slot, byte(slot))
+	}
+
+	from := &models.AddressTransactionPosition{Slot: 3}
+	to := &models.AddressTransactionPosition{Slot: 5, TxIndex: 0}
+	txs, err := db.GetTransactionsByAddressWithOrder(
+		context.Background(), enterprise, 10, 0, "asc", from, to, nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, txs, 3)
+	assert.Equal(t, []byte{0x03, 0x04, 0x05}, []byte{
+		txs[0].Hash[0], txs[1].Hash[0], txs[2].Hash[0],
+	})
+	count, err := db.CountTransactionsByAddress(
+		context.Background(), enterprise, from, to, nil,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 3, count)
+
+	// Bounds apply before the page window.
+	page, err := db.GetTransactionsByAddressWithOrder(
+		context.Background(), enterprise, 1, 1, "desc", from, to, nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, page, 1)
+	assert.Equal(t, byte(0x04), page[0].Hash[0])
 }
