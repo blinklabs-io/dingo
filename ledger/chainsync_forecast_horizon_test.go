@@ -2384,7 +2384,7 @@ func TestAwaitObserverHeaderHorizonHoldsUnresolvedAncestry(t *testing.T) {
 func TestAwaitObserverHeaderHorizonReleasesExhaustedAncestry(t *testing.T) {
 	t.Parallel()
 
-	ls, _, _, _, _ := newObserverForkTestLedger(t)
+	ls, primary, _, _, _ := newObserverForkTestLedger(t)
 	chainHash := func(i int) lcommon.Blake2b256 {
 		return lcommon.Blake2b256Hash([]byte(fmt.Sprintf("read-ahead %d", i)))
 	}
@@ -2414,7 +2414,7 @@ func TestAwaitObserverHeaderHorizonReleasesExhaustedAncestry(t *testing.T) {
 	header := mockHeader{
 		hash:        lcommon.Blake2b256Hash([]byte("read-ahead tip")),
 		prevHash:    chainHash(0),
-		blockNumber: 1001,
+		blockNumber: primary.HeaderTip().BlockNumber + 1,
 		slot:        320_000,
 	}
 	e := ChainsyncEvent{
@@ -2645,4 +2645,50 @@ func TestAwaitChainsyncHeaderAdmissionCancelledDuringRecheck(t *testing.T) {
 			require.ErrorIs(t, err, context.Canceled)
 		})
 	}
+}
+
+// An observer header the ledger can forecast is still held while it lies more
+// than k blocks above the header tip.
+func TestAwaitObserverHeaderHorizonHoldsReadAheadPastHeaderTip(t *testing.T) {
+	t.Parallel()
+	ls, primary, blocks, _, _ := newObserverForkTestLedger(t)
+	k := ls.shelleySecurityParam()
+	require.NotZero(t, k)
+	headerTip := primary.HeaderTip().BlockNumber
+	event := func(blockNumber uint64) ChainsyncEvent {
+		header := mockHeader{
+			hash: lcommon.Blake2b256Hash(
+				fmt.Appendf(nil, "observer %d", blockNumber),
+			),
+			prevHash:    blocks[1].Hash(),
+			blockNumber: blockNumber,
+			slot:        302_500,
+		}
+		return ChainsyncEvent{
+			BlockHeader: header,
+			Point:       ocommon.NewPoint(header.slot, header.Hash().Bytes()),
+		}
+	}
+	require.NoError(t, ls.AwaitObserverHeaderHorizon(
+		t.Context(), event(headerTip+k),
+	), "a header k blocks above the header tip is not held")
+
+	ctx, cancel := context.WithCancel(t.Context())
+	results := make(chan error, 1)
+	go func() {
+		results <- ls.AwaitObserverHeaderHorizon(ctx, event(headerTip+k+1))
+	}()
+	testutil.RequireNoReceive(
+		t, results, 100*time.Millisecond,
+		"a header more than k blocks above the header tip must wait",
+	)
+	ls.notifySnapshotPublished()
+	testutil.RequireNoReceive(
+		t, results, 100*time.Millisecond,
+		"a publication that leaves the header tip behind must keep it waiting",
+	)
+	cancel()
+	require.ErrorIs(t, testutil.RequireReceive(
+		t, results, testutil.AsyncWait, "cancellation must end the wait",
+	), context.Canceled)
 }

@@ -5516,13 +5516,17 @@ func (ls *LedgerState) AwaitObserverHeaderHorizon(
 		// A header whose ancestry reaches no local block is held as well: its
 		// peer's chain leaves the local chain at an unknown point, so the
 		// ledger tip's horizon does not show it forecastable.
+		ahead := ls.observerAheadOfHeaderTip(e)
 		if beyond, _ := ls.headerBeyondForecastHorizonFrom(
 			ctx, e, &anchor,
-		); !beyond && !anchor.disconnected {
+		); !beyond && !anchor.disconnected && !ahead {
 			return ctx.Err()
 		}
 		if !parked {
 			parked = true
+			if ahead {
+				ls.metrics.incObserverReadAheadPark()
+			}
 			ls.metrics.observerHorizonParkStart(
 				ls.observerHorizonOvershoot(e, &anchor),
 			)
@@ -5863,6 +5867,27 @@ func (ls *LedgerState) holdsPointSettled(
 		}
 	}
 	return false, false
+}
+
+// observerAheadOfHeaderTip reports whether e's header is more than the
+// security parameter's blocks above the header tip. An observer is read only
+// to corroborate the ingress candidate, which extends the header tip, and a
+// witness within k blocks of it supports its suffix. Reading on to the
+// forecast horizon fetches about 3k headers per observer that the observed
+// header history cannot retain once several observers share its budget, so
+// they are evicted unused, and every re-intersection or promotion from the
+// local tip fetches them again.
+func (ls *LedgerState) observerAheadOfHeaderTip(e ChainsyncEvent) bool {
+	if ls.chain == nil || e.BlockHeader == nil {
+		return false
+	}
+	k := ls.shelleySecurityParam()
+	if k == 0 {
+		return false
+	}
+	blockNumber := e.BlockHeader.BlockNumber()
+	headerTip := ls.chain.HeaderTip().BlockNumber
+	return blockNumber > headerTip && blockNumber-headerTip > k
 }
 
 // observerHorizonOvershoot returns how many slots e's header lies past the

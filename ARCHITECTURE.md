@@ -1192,6 +1192,8 @@ these series carries a connection or peer label.
   chainsync callbacks currently parked in `AwaitObserverHeaderHorizon`.
   `dingo_ledger_observer_horizon_overshoot_slots` observes, once per parked
   header, how many slots it lies past the end of the forecast it is held on,
+  `dingo_ledger_observer_readahead_parks_total` counts headers parked for
+  lying more than `k` blocks above the header tip,
   and `dingo_ledger_fork_anchor_membership_retries_total` counts fork-anchor
   membership reads repeated because a block mutation overlapped them. None
   carries a connection or peer label.
@@ -7961,6 +7963,14 @@ Ordinary Praos sessions continue to use primary-chain intersection points.
   retention, bounded by `catchUpBandWaitTimeout`, so an observer does not read
   ahead of what the ledger can forecast; the wait fetches nothing and requests
   no re-sync, and a header it releases is handled as any observer header. The
+  same wait also parks an observer header more than `k` blocks above the header
+  tip (`observerAheadOfHeaderTip`): an observer is read to corroborate the
+  ingress candidate, which extends the header tip, and a witness within `k`
+  blocks of it supports its suffix. Reading on to the forecast horizon, about
+  `3k` blocks past the ledger tip, fetches headers that the observed header
+  history cannot retain once several observers share its budget, so they are
+  evicted unused and every re-intersection or promotion from the local tip
+  fetches them again. The
   wait resolves the header's fork anchor once and reuses it until a withdrawal
   from the local chain or a ledger tip at the anchor. A membership read that a
   chain mutation overlapped, or that a cancelled context cut short
