@@ -819,6 +819,13 @@ func (b *LedgerDeltaBatch) enableTrustedUtxoOverlay(
 	if !e.trusted.Load() || e.overlayOff.Load() || ls.trustedBatchOverlayOff {
 		return false, nil
 	}
+	_, protected, err := pendingRewardStakeInputHistoryFloor(ls.db.Metadata(), txn.Metadata())
+	if err != nil {
+		return false, err
+	}
+	if protected {
+		return false, nil
+	}
 	produced := make(map[utxoref.Key]struct{})
 	var inputs []models.UtxoId
 	for _, delta := range b.deltas {

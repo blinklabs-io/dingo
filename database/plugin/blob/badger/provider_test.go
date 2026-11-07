@@ -250,13 +250,13 @@ func TestProviderValueThresholdDefaults(t *testing.T) {
 			name:        "core sync",
 			storageMode: "core",
 			runMode:     "sync",
-			want:        DefaultCoreSyncValueThreshold,
+			want:        DefaultSyncValueThreshold,
 		},
 		{
 			name:        "api sync",
 			storageMode: "api",
 			runMode:     "sync",
-			want:        DefaultValueThreshold,
+			want:        DefaultSyncValueThreshold,
 		},
 		{
 			name:        "core leios",
@@ -340,6 +340,16 @@ func TestProviderExplicitZeroValueThresholdOverridesSyncDefault(t *testing.T) {
 		RunMode:     "sync",
 	})
 	require.Zero(t, store.valueThreshold)
+}
+
+func TestProviderExplicitValueThresholdOverridesAPISyncDefault(t *testing.T) {
+	store := resolveBadgerProvider(t, map[string]any{
+		"valueThreshold": uint64(DefaultValueThreshold),
+	}, blob.ProviderDependencies{
+		StorageMode: "api",
+		RunMode:     "sync",
+	})
+	require.Equal(t, int64(DefaultValueThreshold), store.valueThreshold)
 }
 
 func TestProviderExplicitValueThresholdOverridesLeiosDefault(t *testing.T) {

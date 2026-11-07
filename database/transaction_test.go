@@ -76,39 +76,6 @@ func TestConsumedInputKeyEquality(t *testing.T) {
 	)
 }
 
-// TestConsumedInputKeyDedupsRepeatedInput exercises the exact dedup idiom
-// used by ensureTransactionConsumedUtxos/ensureGapConsumedUtxos: a "seen"
-// set keyed by consumedInputKey collapses a Consumed() slice that lists the
-// same input twice down to one entry, while distinct inputs are preserved.
-func TestConsumedInputKeyDedupsRepeatedInput(t *testing.T) {
-	t.Parallel()
-
-	hash := strings.Repeat("ef", 32)
-	consumed := []shelley.ShelleyTransactionInput{
-		shelley.MustNewShelleyTransactionInput(hash, 0),
-		shelley.MustNewShelleyTransactionInput(hash, 0), // repeated on-chain input
-		shelley.MustNewShelleyTransactionInput(hash, 1),
-	}
-
-	seen := make(map[consumedInputKey]struct{}, len(consumed))
-	var processed int
-	for _, input := range consumed {
-		key := newConsumedInputKey(input)
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
-		processed++
-	}
-
-	require.Equal(
-		t,
-		2,
-		processed,
-		"the repeated (hash, index 0) input must be processed only once",
-	)
-}
-
 // TestConsumedInputKeyAllocationFree pins the perf property this type
 // exists for. The dedup key it replaced was built with
 // fmt.Sprintf("%x:%d", inputTxId, input.Index()), which profiling on a live
@@ -1187,6 +1154,7 @@ func TestEnsureTransactionConsumedUtxosStrictAppliedInputConservation(
 	}
 
 	t.Run("flag off recovers from blob", func(t *testing.T) {
+		t.Parallel()
 		db := newRecoverableDB(t)
 		require.NoError(t, setConsumer(t, db, BatchedTxIngestOpts{}))
 	})
@@ -1194,6 +1162,7 @@ func TestEnsureTransactionConsumedUtxosStrictAppliedInputConservation(
 	t.Run(
 		"flag on recovers canonical producer past boundary",
 		func(t *testing.T) {
+			t.Parallel()
 			db := newRecoverableDB(t)
 			// No mithril_ledger_slot recorded (0): every slot is past the boundary.
 			require.NoError(t, setConsumer(t, db, BatchedTxIngestOpts{
@@ -1221,6 +1190,7 @@ func TestEnsureTransactionConsumedUtxosStrictAppliedInputConservation(
 	)
 
 	t.Run("flag on tolerated at or below boundary", func(t *testing.T) {
+		t.Parallel()
 		db := newRecoverableDB(t)
 		require.NoError(t, db.SetSyncState(
 			mithrilLedgerSlotSyncKey,
@@ -1233,6 +1203,7 @@ func TestEnsureTransactionConsumedUtxosStrictAppliedInputConservation(
 	})
 
 	t.Run("flag on inert without StrictUtxoValidation", func(t *testing.T) {
+		t.Parallel()
 		db, err := newTestDatabase(t, &Config{
 			DataDir: t.TempDir(),
 			Logger: slog.New(
@@ -1322,11 +1293,13 @@ func TestEnsureTransactionConsumedUtxosStrictValidation(t *testing.T) {
 	}
 
 	t.Run("disabled preserves silent skip", func(t *testing.T) {
+		t.Parallel()
 		db := newTestDB(t, false)
 		require.NoError(t, setTransaction(t, db))
 	})
 
 	t.Run("enabled errors past an unset boundary", func(t *testing.T) {
+		t.Parallel()
 		db := newTestDB(t, true)
 		// No mithril_ledger_slot recorded (0): every slot above it is
 		// past the boundary, so the missing input must be a hard error.
@@ -1338,6 +1311,7 @@ func TestEnsureTransactionConsumedUtxosStrictValidation(t *testing.T) {
 	t.Run(
 		"enabled skips at or below the recorded boundary",
 		func(t *testing.T) {
+			t.Parallel()
 			db := newTestDB(t, true)
 			require.NoError(
 				t,

@@ -1616,9 +1616,12 @@ returned `Manifest` is now accurate regardless). A checksum failure returns
 through `ReadManifest`'s path-prefixed error) — distinct from a manifest simply
 not existing — so a caller like bark's `resolveSnapshotSource` can report a
 snapshot that's present but corrupted as such (`CodeDataLoss`) instead of
-collapsing it into `CodeNotFound`; `DeleteSnapshot` checks the local snapshot
-directory's existence directly (`os.Stat`), not via a readable manifest, so a
-corrupted local snapshot can still be cleaned up.
+collapsing it into `CodeNotFound`; `DeleteSnapshot` treats a local snapshot as
+a directory containing a regular `manifest.json` file and does not parse it, so
+a corrupted local snapshot can still be cleaned up while the catalog database,
+work directories and other non-snapshot entries under `SnapshotDir` cannot be
+deleted; it also rejects any `snapshot_id` starting with `.dingo-`, the prefix
+of those internal entries.
 `Manifest.CheckCompatibility(blobPlugin, metadataPlugin, storageMode, network,
 gates)` bundles `CheckPluginMatch` with a `StorageMode`/`Network` comparison and
 `CheckGateMatch(configured nodesettings.Values)`, for a caller that must refuse
@@ -4032,6 +4035,26 @@ replaces that epoch's rows and `SaveEpochSummary` upserts the summary.
 `DeleteEpochSummariesAfterEpoch` and `DeletePoolStakeSnapshotsAfterEpoch` exist
 on `metadata.MetadataStore` for that case but currently have no callers.
 
+##### Pending reward input history
+
+A deferred reward stake-input writer leaves a durable pending entry until every
+chunk commits. Consumed-UTxO sweeps cap their floor at the oldest matching pending
+snapshot's captured slot before announcing or persisting that floor. Invalid or
+unreadable pending state stops cleanup; entries for rolled-back snapshots do not
+pin history. Once the pending basis is completed, normal cleanup resumes. A deferred SNAP
+also retains its boundary slot minus one while the pending ratification record
+owns the snapshot. Both durable markers are read through one metadata snapshot
+so their atomic handoff cannot hide the retention obligation.
+
+Trusted batch UTxO deletion and its overlay remain disabled while a matching
+pending snapshot exists. Those paths advance the global prune floor to the
+batch tip, so deleting even outputs created after the snapshot would make its
+historical reconstruction unavailable. Regular sweeps can still remove outputs
+spent at or before the protected captured slot. Historical reward credits and
+withdrawals remain in account_reward_delta, and certificate/registration history
+is retained independently; reward_account_output retention is not an input to
+this reconstruction.
+
 #### Committee Hot-Key Authorization Retention
 
 `auth_committee_hot` records one row per `AuthCommitteeHot` certificate and
@@ -4160,19 +4183,23 @@ namespace. Durable cleanup state is retried before a later live restore creates
 its own record, and an incomplete recovery directory without a record is removed
 consistently during retry and startup cleanup.
 
-### Core sync and Leios value placement
+### Sync and Leios value placement
 
-Core Mithril sync uses a 1 KiB Badger value threshold by default. Larger block
-CBOR values go to the value log instead of being rewritten through LSM
-compactions during import. Core Leios uses the same 1 KiB threshold so large
-endorser transaction closures live in the value log rather than being copied
-through the inline-value read path and rewritten through LSM compactions.
-Other storage modes and run modes retain the 1 MiB default. The blob provider's
-`valueThreshold` setting overrides either default. Badger records the placement
-with each value, so changing the threshold does not require rewriting existing
-records and both placements remain readable. Badger fixes the threshold when
-the store opens, so node-managed Mithril restores and stream catch-up, which run
-inside `serve` on the store `serve` opened, keep the serve default.
+Mithril sync (run mode `sync`) uses a 1 KiB Badger value threshold by default
+in both Core and API storage modes. Larger block CBOR values go to the value
+log instead of being rewritten through LSM compactions during import. Badger
+compresses only SST blocks, so in API mode those values are stored
+uncompressed: the store is larger than with inline ZSTD values (about 26% on a
+Preview import, where the copy wrote 54% fewer bytes and finished 34% sooner).
+Core Leios uses the same 1 KiB threshold so large endorser transaction closures
+live in the value log rather than being copied through the inline-value read
+path and rewritten through LSM compactions. API Leios and the other run modes
+retain the 1 MiB default. The blob provider's `valueThreshold` setting
+overrides either default. Badger records the placement with each value, so
+changing the threshold does not require rewriting existing records and both
+placements remain readable. Badger fixes the threshold when the store opens, so
+node-managed Mithril restores and stream catch-up, which run inside `serve` on
+the store `serve` opened, keep the serve default.
 
 Core sync mode uses a 1 GiB Badger memtable by default to improve bulk-import
 throughput. Other storage modes and run modes retain the 128 MiB default. The
@@ -7716,7 +7743,7 @@ cleanup (`UtxosDeleteConsumed`, persisting the floor first) up to the
 committed tip, which lies at or below the certified immutable tip, after the
 first batch it commits in a process and then once every
 `trustedBatchPruneEvery` (16) committed batches, in deletes of
-`trustedBatchPruneRows` (20,000) rows until none is left or 30 seconds have
+`trustedBatchPruneRows` (10,000) rows until none is left or 30 seconds have
 passed. A spent row costs less to delete the more rows its transaction
 deletes with it, so draining several batches' spends in a few large
 transactions costs less than draining each batch's in one or two small ones.

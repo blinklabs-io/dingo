@@ -855,14 +855,23 @@ func (o *Observer) processAccountEpoch(ctx context.Context, epoch uint64) {
 		return
 	}
 	if result.CoversScope(ScopeAccount) {
-		var accountMismatches []CheckMismatch
+		var accountMismatches, aggregateMismatches []CheckMismatch
 		for _, mismatch := range result.Mismatches {
 			if mismatch.Scope == ScopeAccount {
 				accountMismatches = append(accountMismatches, mismatch)
+			} else {
+				aggregateMismatches = append(aggregateMismatches, mismatch)
 			}
 		}
 		// The merged verdict can hide an account ERROR under an aggregate FAIL.
 		o.scheduleErrorRetry(epoch, true, DetermineStatus(accountMismatches))
+		// This check also rewrites the aggregate row. An aggregate ERROR it
+		// computed from state older than the aggregate queue's own pass would
+		// otherwise stay stored with no queue left to retry it, so hand it
+		// back to the aggregate queue.
+		if DetermineStatus(aggregateMismatches) == StatusError {
+			o.scheduleErrorRetry(epoch, false, StatusError)
+		}
 	}
 	o.emitResult(result)
 	if err := o.cache.PruneAccountCoverage(o.cfg.Network, epoch); err != nil {

@@ -98,8 +98,8 @@ func RegisterProvider(host *hostplugin.Host) error {
 				compression = *cfg.Compression
 			}
 			valueThreshold := uint64(DefaultValueThreshold)
-			if deps.StorageMode == "core" && deps.RunMode == "sync" {
-				valueThreshold = DefaultCoreSyncValueThreshold
+			if deps.RunMode == "sync" {
+				valueThreshold = DefaultSyncValueThreshold
 			}
 			if deps.StorageMode == "core" && deps.RunMode == "leios" {
 				valueThreshold = DefaultCoreLeiosValueThreshold

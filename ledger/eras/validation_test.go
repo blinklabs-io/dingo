@@ -2983,7 +2983,9 @@ func TestValidateTxConwayReusesResolvedPlutusContext(t *testing.T) {
 		&conway.ConwayProtocolParameters{},
 	)
 	require.NoError(t, err)
-	assert.Equal(t, 2, ls.utxoLookups)
+	// The fee check and the Plutus context share the transaction-scoped
+	// state, so the input is resolved from the ledger once.
+	assert.Equal(t, 1, ls.utxoLookups)
 }
 
 func TestValidateTxConwayRejectsExpiredCommitteeAdditions(t *testing.T) {

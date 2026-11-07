@@ -62,7 +62,17 @@ type ImmutableDb struct {
 	maxChunk string
 }
 
-const maxSinglePassVerifiedEntrySize = 16 << 20
+// maxSinglePassVerifiedEntrySize bounds what readVerifiedEntry buffers before
+// an entry's digest has been compared, so it is also the most a planted file
+// can make a verified open allocate. An entry this size or smaller is read and
+// hashed once; a larger one is streamed for its digest first and only then
+// buffered.
+//
+// Sized to cover every real mainnet chunk: a chunk spans 21600 slots, which at
+// the 0.05 active slot coefficient and the 90112 byte block body limit is
+// about 94 MiB of full blocks, and sampled certified chunks peak near 56 MiB.
+// A chunk above the bound is still read, just twice.
+const maxSinglePassVerifiedEntrySize = 128 << 20
 
 var ErrPointBeyondLastChunk = errors.New(
 	"immutable DB: point is beyond the last chunk",
@@ -260,10 +270,17 @@ func (i *ImmutableDb) openEntry(name string) (entryReader, error) {
 	return i.readVerifiedEntry(f, name)
 }
 
+// verifiedSource is what readVerifiedEntry needs of an opened entry. An
+// *os.File in production.
+type verifiedSource interface {
+	io.ReadSeeker
+	Stat() (fs.FileInfo, error)
+}
+
 // readVerifiedEntry returns only bytes whose digest is certified. The parser
 // receives a buffer, never a descriptor another writer can mutate.
 func (i *ImmutableDb) readVerifiedEntry(
-	f *os.File,
+	f verifiedSource,
 	name string,
 ) (entryReader, error) {
 	expected, ok := i.digests[name]
@@ -274,13 +291,14 @@ func (i *ImmutableDb) readVerifiedEntry(
 	}
 	if info, err := f.Stat(); err == nil &&
 		info.Size() >= 0 && info.Size() <= maxSinglePassVerifiedEntrySize {
-		data, err := io.ReadAll(io.LimitReader(
-			f, maxSinglePassVerifiedEntrySize+1,
-		))
-		if err != nil {
-			return nil, fmt.Errorf("reading %s: %w", i.entryPath(name), err)
-		}
-		if int64(len(data)) <= maxSinglePassVerifiedEntrySize {
+		// Sized from Stat, which the file's writer controls, so the bound
+		// above is what limits it. One byte over, so a file holding more than
+		// Stat reported is noticed instead of being read as a prefix.
+		data := make([]byte, info.Size()+1)
+		n, err := io.ReadFull(f, data)
+		switch {
+		case errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF):
+			data = data[:n]
 			sum := sha256.Sum256(data)
 			if got := hex.EncodeToString(sum[:]); got != expected {
 				return nil, fmt.Errorf(
@@ -289,7 +307,11 @@ func (i *ImmutableDb) readVerifiedEntry(
 				)
 			}
 			return newBytesEntry(data), nil
+		case err != nil:
+			return nil, fmt.Errorf("reading %s: %w", i.entryPath(name), err)
 		}
+		// Longer than Stat said: growing, or not what it claims. The
+		// streaming pass below sizes nothing from the file.
 	}
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		return nil, fmt.Errorf("rewinding %s: %w", i.entryPath(name), err)
@@ -327,7 +349,7 @@ func (i *ImmutableDb) readVerifiedEntry(
 // allocates. So the two answers come from one pass and neither is usable
 // without the other.
 func (i *ImmutableDb) measureVerifiedEntry(
-	f *os.File,
+	f io.Reader,
 	name string,
 	expected string,
 ) (int64, error) {
