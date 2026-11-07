@@ -16,6 +16,7 @@ package mithril
 
 import (
 	"bytes"
+	"encoding"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -676,6 +677,12 @@ func verifySTMConcatenationProof(
 	nrIndices := 0
 
 	for _, sigReg := range sig.Signatures {
+		if len(sigReg.Sig.Indexes) == 0 {
+			return fmt.Errorf(
+				"signature claims no lottery indices for signer index %d",
+				sigReg.Sig.SignerIndex,
+			)
+		}
 		vk, err := decodeSTMVerificationKey(sigReg.RegParty.VerificationKey)
 		if err != nil {
 			return fmt.Errorf("decoding signer verification key: %w", err)
@@ -745,15 +752,6 @@ func stmVerifyBLSSignatureAggregate(
 			len(sigs),
 		)
 	}
-	msgHash, err := bls12381.HashToG1(msg, stmBLSDomainSeparationTag)
-	if err != nil {
-		return fmt.Errorf("hash-to-g1: %w", err)
-	}
-	var negMsgHash bls12381.G1Affine
-	negMsgHash.Neg(&msgHash)
-	_, _, _, g2 := bls12381.Generators()
-	g1Points := make([]bls12381.G1Affine, 0, 2*len(sigs))
-	g2Points := make([]bls12381.G2Affine, 0, 2*len(sigs))
 	for idx := range sigs {
 		if sigs[idx].IsInfinity() {
 			return fmt.Errorf("signature %d is infinity", idx)
@@ -761,10 +759,22 @@ func stmVerifyBLSSignatureAggregate(
 		if vks[idx].IsInfinity() {
 			return fmt.Errorf("verification key %d is infinity", idx)
 		}
-		g1Points = append(g1Points, sigs[idx], negMsgHash)
-		g2Points = append(g2Points, g2, vks[idx])
 	}
-	ok, err := bls12381.PairingCheck(g1Points, g2Points)
+	aggregateVK, aggregateSig, err := stmAggregateBLSInputs(vks, sigs)
+	if err != nil {
+		return err
+	}
+	msgHash, err := bls12381.HashToG1(msg, stmBLSDomainSeparationTag)
+	if err != nil {
+		return fmt.Errorf("hash-to-g1: %w", err)
+	}
+	var negMsgHash bls12381.G1Affine
+	negMsgHash.Neg(&msgHash)
+	_, _, _, g2 := bls12381.Generators()
+	ok, err := bls12381.PairingCheck(
+		[]bls12381.G1Affine{aggregateSig, negMsgHash},
+		[]bls12381.G2Affine{g2, aggregateVK},
+	)
 	if err != nil {
 		return fmt.Errorf("batch pairing check: %w", err)
 	}
@@ -772,6 +782,66 @@ func stmVerifyBLSSignatureAggregate(
 		return errors.New("aggregate BLS signature verification failed")
 	}
 	return nil
+}
+
+func stmAggregateBLSInputs(
+	vks []bls12381.G2Affine,
+	sigs []bls12381.G1Affine,
+) (bls12381.G2Affine, bls12381.G1Affine, error) {
+	if len(sigs) == 1 {
+		return vks[0], sigs[0], nil
+	}
+	hasher, err := blake2b.New(16, nil)
+	if err != nil {
+		return bls12381.G2Affine{}, bls12381.G1Affine{},
+			fmt.Errorf("creating aggregate coefficient hash: %w", err)
+	}
+	for idx := range sigs {
+		encoded := sigs[idx].Bytes()
+		if _, err := hasher.Write(encoded[:]); err != nil {
+			return bls12381.G2Affine{}, bls12381.G1Affine{},
+				fmt.Errorf("hashing aggregate signatures: %w", err)
+		}
+	}
+	state, err := hasher.(encoding.BinaryMarshaler).MarshalBinary()
+	if err != nil {
+		return bls12381.G2Affine{}, bls12381.G1Affine{},
+			fmt.Errorf("saving aggregate coefficient hash: %w", err)
+	}
+
+	var aggregateVK bls12381.G2Affine
+	var aggregateSig bls12381.G1Affine
+	for idx := range sigs {
+		coefficientHash, err := blake2b.New(16, nil)
+		if err != nil {
+			return bls12381.G2Affine{}, bls12381.G1Affine{},
+				fmt.Errorf("creating aggregate coefficient hash: %w", err)
+		}
+		if err := coefficientHash.(encoding.BinaryUnmarshaler).
+			UnmarshalBinary(state); err != nil {
+			return bls12381.G2Affine{}, bls12381.G1Affine{},
+				fmt.Errorf("restoring aggregate coefficient hash: %w", err)
+		}
+		var indexBytes [8]byte
+		binary.BigEndian.PutUint64(indexBytes[:], uint64(idx))
+		if _, err := coefficientHash.Write(indexBytes[:]); err != nil {
+			return bls12381.G2Affine{}, bls12381.G1Affine{},
+				fmt.Errorf("hashing aggregate signature index: %w", err)
+		}
+		coefficient := new(big.Int).SetBytes(coefficientHash.Sum(nil))
+		var weightedVK bls12381.G2Affine
+		weightedVK.ScalarMultiplication(&vks[idx], coefficient)
+		var weightedSig bls12381.G1Affine
+		weightedSig.ScalarMultiplication(&sigs[idx], coefficient)
+		if idx == 0 {
+			aggregateVK = weightedVK
+			aggregateSig = weightedSig
+			continue
+		}
+		aggregateVK.Add(&aggregateVK, &weightedVK)
+		aggregateSig.Add(&aggregateSig, &weightedSig)
+	}
+	return aggregateVK, aggregateSig, nil
 }
 
 func decodeSTMSignature(raw []byte) (bls12381.G1Affine, error) {

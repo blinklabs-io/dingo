@@ -104,6 +104,50 @@ func (s *testSTMSigner) singleSignature(
 	return out, len(out.Indexes) > 0
 }
 
+type testSTMRegistration struct {
+	signers []*testSTMSigner
+	entries []stmClosedRegistrationEntry
+	total   uint64
+	tree    *stmMerkleTree
+	avk     *stmAggregateVerificationKey
+}
+
+func closeTestSTMRegistration(
+	t *testing.T,
+	signers []*testSTMSigner,
+) testSTMRegistration {
+	t.Helper()
+	regs := make([]stmRegistration, len(signers))
+	for i, signer := range signers {
+		regs[i] = signer.registration()
+	}
+	ordered, entries, total := closeSTMRegistration(regs)
+	orderedSigners := make([]*testSTMSigner, len(ordered))
+	for i, reg := range ordered {
+		for _, signer := range signers {
+			if signer.partyID == reg.PartyID {
+				orderedSigners[i] = signer
+				break
+			}
+		}
+		require.NotNil(t, orderedSigners[i])
+	}
+	tree := newSTMMerkleTree(entries)
+	avk := &stmAggregateVerificationKey{
+		MTCommitment: stmMerkleTreeBatchCommitment{
+			Root: tree.root(), NrLeaves: len(entries),
+		},
+		TotalStake: total,
+	}
+	return testSTMRegistration{
+		signers: orderedSigners,
+		entries: entries,
+		total:   total,
+		tree:    tree,
+		avk:     avk,
+	}
+}
+
 func TestVerifySTMProofOfPossession(t *testing.T) {
 	t.Parallel()
 	a, b := newTestSTMSigner(1, 10), newTestSTMSigner(2, 10)
@@ -186,27 +230,13 @@ func aggregateForTest(
 	msg []byte,
 ) (string, string, error) {
 	t.Helper()
-	regs := make([]stmRegistration, len(signers))
-	for i, s := range signers {
-		regs[i] = s.registration()
-	}
-	ordered, entries, total := closeSTMRegistration(regs)
-	tree := newSTMMerkleTree(entries)
-	avk := &stmAggregateVerificationKey{
-		MTCommitment: stmMerkleTreeBatchCommitment{
-			Root: tree.root(), NrLeaves: len(entries),
-		},
-		TotalStake: total,
-	}
+	reg := closeTestSTMRegistration(t, signers)
 	var singles []stmSingleSignature
-	for idx, reg := range ordered {
-		for _, s := range signers {
-			if s.partyID != reg.PartyID {
-				continue
-			}
-			if sig, ok := s.singleSignature(msg, avk, params, uint64(idx)); ok {
-				singles = append(singles, sig)
-			}
+	for idx, signer := range reg.signers {
+		if sig, ok := signer.singleSignature(
+			msg, reg.avk, params, uint64(idx),
+		); ok {
+			singles = append(singles, sig)
 		}
 	}
 	selected, err := selectSTMSignatures(singles, params.K)
@@ -218,13 +248,15 @@ func aggregateForTest(
 	for _, sig := range selected {
 		withParty = append(withParty, stmSingleSignatureWithRegisteredParty{
 			Sig:      sig,
-			RegParty: entries[sig.SignerIndex],
+			RegParty: reg.entries[sig.SignerIndex],
 		})
 		indices = append(indices, int(sig.SignerIndex))
 	}
-	proof, err := tree.batchPath(indices)
+	proof, err := reg.tree.batchPath(indices)
 	require.NoError(t, err)
-	return encodeSTMAggregateVerificationKey(tree.root(), len(entries), total),
+	return encodeSTMAggregateVerificationKey(
+			reg.tree.root(), len(reg.entries), reg.total,
+		),
 		hex.EncodeToString(encodeSTMAggregateSignature(withParty, proof)),
 		nil
 }
@@ -264,9 +296,106 @@ func TestAggregatedSTMSignatureVerifies(t *testing.T) {
 		higher.K = 1000
 		require.Error(
 			t,
-			verifySTMSignature(msg, avk, sig, higher, newCertificateChainBudget()),
+			verifySTMSignature(
+				msg,
+				avk,
+				sig,
+				higher,
+				newCertificateChainBudget(),
+			),
 		)
 	})
+}
+
+func TestAggregatedSTMSignatureRejectsRedistributedSignatures(t *testing.T) {
+	t.Parallel()
+	signers := []*testSTMSigner{
+		newTestSTMSigner(1, 10),
+		newTestSTMSigner(2, 10),
+	}
+	reg := closeTestSTMRegistration(t, signers)
+	msg := []byte("signed message")
+	msgp := stmConcatenateWithMessage(reg.avk, msg)
+
+	first := reg.signers[0].sign(msgp)
+	second := reg.signers[1].sign(msgp)
+	var delta bls12381.G1Affine
+	delta.ScalarMultiplicationBase(big.NewInt(13))
+	var negDelta bls12381.G1Affine
+	negDelta.Neg(&delta)
+	first.Add(&first, &delta)
+	second.Add(&second, &negDelta)
+	firstBytes, secondBytes := first.Bytes(), second.Bytes()
+	sigs := []stmSingleSignatureWithRegisteredParty{
+		{
+			Sig: stmSingleSignature{
+				Sigma: firstBytes[:], Indexes: []uint64{0}, SignerIndex: 0,
+			},
+			RegParty: reg.entries[0],
+		},
+		{
+			Sig: stmSingleSignature{
+				Sigma: secondBytes[:], Indexes: []uint64{1}, SignerIndex: 1,
+			},
+			RegParty: reg.entries[1],
+		},
+	}
+	proof, err := reg.tree.batchPath([]int{0, 1})
+	require.NoError(t, err)
+	encodedAVK := encodeSTMAggregateVerificationKey(
+		reg.tree.root(), len(reg.entries), reg.total,
+	)
+	encodedSig := hex.EncodeToString(encodeSTMAggregateSignature(sigs, proof))
+
+	require.ErrorContains(
+		t,
+		verifySTMSignature(
+			msg,
+			encodedAVK,
+			encodedSig,
+			ProtocolParameters{K: 2, M: 2, PhiF: 1},
+			newCertificateChainBudget(),
+		),
+		"aggregate signature verification failed",
+	)
+}
+
+func TestAggregatedSTMSignatureRejectsSignerWithoutLotteryIndex(t *testing.T) {
+	t.Parallel()
+	signers := []*testSTMSigner{
+		newTestSTMSigner(1, 10),
+		newTestSTMSigner(2, 10),
+	}
+	reg := closeTestSTMRegistration(t, signers)
+	msg := []byte("signed message")
+	msgp := stmConcatenateWithMessage(reg.avk, msg)
+	sigs := make([]stmSingleSignatureWithRegisteredParty, len(reg.signers))
+	for i, signer := range reg.signers {
+		sigma := signer.sign(msgp)
+		sigmaBytes := sigma.Bytes()
+		sigs[i] = stmSingleSignatureWithRegisteredParty{
+			Sig: stmSingleSignature{
+				Sigma: sigmaBytes[:], SignerIndex: uint64(i),
+			},
+			RegParty: reg.entries[i],
+		}
+		if i == 0 {
+			sigs[i].Sig.Indexes = []uint64{0}
+		}
+	}
+	proof, err := reg.tree.batchPath([]int{0, 1})
+	require.NoError(t, err)
+
+	err = verifySTMSignature(
+		msg,
+		encodeSTMAggregateVerificationKey(
+			reg.tree.root(), len(reg.entries), reg.total,
+		),
+		hex.EncodeToString(encodeSTMAggregateSignature(sigs, proof)),
+		ProtocolParameters{K: 1, M: 1, PhiF: 1},
+		newCertificateChainBudget(),
+	)
+	require.ErrorContains(t, err, "signature claims no lottery indices")
 }
 
 func TestAggregateSTMNeedsKIndices(t *testing.T) {
