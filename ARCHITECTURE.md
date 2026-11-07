@@ -1411,6 +1411,13 @@ occupancy. An error without a supported era-specific representation terminates
 the connection through the protocol error path instead of fabricating a ledger
 failure. Clients must reconnect after that termination.
 
+Transaction admission and standalone evaluation accept only the ledger's
+current era. A transaction tagged with any other era is rejected with the
+hard-fork combinator's typed era-mismatch error before era-specific validation.
+Block application is different: a historical block from the era immediately
+before the ledger's current era remains valid across a hard-fork boundary and
+is checked with that block era's validator and protocol parameters.
+
 LocalTxSubmission validation runs under a context that is cancelled when the
 bearer closes. The listener starts an NtC connection's protocols before it
 registers the connection, so the handler watches the mini-protocol's stop
@@ -2128,18 +2135,22 @@ order.
 
 `Mempool.AddTransaction` refuses a submission larger than the `MaxTxSize`
 ledger validation would apply to it before decoding it, taking
-`mutationMutex`, or running ledger rules. That limit follows the submitted era
-as transaction validation does: the current era's parameters, or the previous
-era's for a previous-era transaction. No limit is reported, and the ledger
-decides alone, for an era it refuses, an era whose validation is skipped, or
-parameters that are not the type that era's validation requires. The size is
-measured as `common.TxSize` does (the raw CBOR length, one byte less for a
-four-element transaction from Alonzo on), so the early rejection never refuses
-a transaction the ledger rule would accept; the rule still decides everything
-that passes. The limit comes from the optional `mempool.TxSizeLimitProvider`
-implemented by `LedgerState`, and the rejection is the ledger's own
-`shelley.MaxTxSizeUtxoError`, so every submit path reports it as an ordinary
-transaction rejection.
+`mutationMutex`, or running ledger rules. A limit is reported only for the
+current era; a wrong-era transaction reaches ledger validation so its typed
+era-mismatch error takes precedence over a size error. No limit is reported
+for an era whose validation is skipped or parameters that are not the type its
+validation requires. From Alonzo through Conway, the ledger's fee and maximum
+size rules measure a canonical three-element transaction envelope while
+preserving the exact received body, witness-set and auxiliary-data bytes; a
+fourth exact CBOR boolean is the IsValid field and is omitted. Dijkstra keeps
+the same canonical three-component measure for its current mempool envelope,
+its legacy mempool envelope with a `true` validity flag before auxiliary data,
+and its block envelope with the validity flag last. An unrecognized or
+ambiguous envelope keeps its full received size. The raw admission guard and
+decoded ledger rules use the same sizing primitive. The limit comes from the
+optional `mempool.TxSizeLimitProvider` implemented by `LedgerState`, and the
+rejection is the ledger's own `shelley.MaxTxSizeUtxoError`, so every submit path
+reports it as an ordinary transaction rejection.
 
 Mempool admission, revalidation, block-candidate selection and forged-block
 validation each validate a transaction against the UTxO overlay and a state
@@ -22720,11 +22731,11 @@ that operation is actually evaluating against. Every `ValidateTxFunc`/
 `EvaluateTxFunc` call site pins this alongside `pp` itself, sourced from
 `ledger.LedgerState.syntheticV2CostModel` (or its snapshot mirror). Since
 that tracked flag describes the *current* era's own `pparams` specifically,
-a call site validating an era-1 transaction against `prevEraPParams` instead
-re-derives the answer directly from `prevEraPParams`'s own value
-(`syntheticV2CostModelForValidation`, the same bootstrap heuristic
-`resolveSyntheticV2CostModel`'s empty-marker branch uses) rather than
-reusing the current era's flag for a different pparams object.
+a block-application call site validating an era-1 transaction against
+`prevEraPParams` instead re-derives the answer directly from
+`prevEraPParams`'s own value (`syntheticV2CostModelForValidation`, the same
+bootstrap heuristic `resolveSyntheticV2CostModel`'s empty-marker branch uses)
+rather than reusing the current era's flag for a different pparams object.
 
 The block-application call site (`ledgerProcessBlock`) cannot source this
 from a snapshot mirror the way mempool/standalone validation do, since it

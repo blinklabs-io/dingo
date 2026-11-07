@@ -33,6 +33,7 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/safedecode"
 	"github.com/blinklabs-io/dingo/internal/tracing"
+	"github.com/blinklabs-io/dingo/internal/txsize"
 	"github.com/blinklabs-io/dingo/plugin"
 	"github.com/blinklabs-io/dingo/utxoref"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -1542,7 +1543,9 @@ func (m *Mempool) rebuildOverlayLocked(ctx context.Context) error {
 	return errValidationSnapshotChanged
 }
 
-func (m *Mempool) rebuildOverlayAttempt(ctx context.Context) ([]event.Event, error) {
+func (m *Mempool) rebuildOverlayAttempt(
+	ctx context.Context,
+) ([]event.Event, error) {
 	m.mutationMutex.Lock()
 	m.RLock()
 	if m.stopped {
@@ -1662,7 +1665,9 @@ func (m *Mempool) rebuildOverlayAttempt(ctx context.Context) ([]event.Event, err
 						m.dag.rebuild(candidate.overlay.applied)
 					}
 					m.notifyHeadroomChangedLocked()
-					m.metrics.txsInMempool.Set(float64(len(candidate.transactions)))
+					m.metrics.txsInMempool.Set(
+						float64(len(candidate.transactions)),
+					)
 					m.metrics.mempoolBytes.Set(float64(candidate.sizeBytes))
 					m.consumersMutex.Unlock()
 					m.Unlock()
@@ -2221,25 +2226,11 @@ func (m *Mempool) rejectOversizedTx(txType uint, txBytes []byte) error {
 	)
 }
 
-// rawTxSize is common.TxSize computed from the submitted bytes: from Alonzo
-// on, a transaction whose array has four elements is measured one byte short,
-// and any other shape, including the three-element Dijkstra mempool form, at
-// its full length. Discounting by era alone would admit a transaction one
-// byte over the limit into the ledger rules.
+// rawTxSize is the ledger transaction-size measure computed directly from the
+// submitted bytes.
 func rawTxSize(txType uint, txBytes []byte) uint {
-	size := uint(len(txBytes))
-	if txType < uint(gledger.TxTypeAlonzo) || size == 0 {
-		return size
-	}
-	dec, err := cbor.NewStreamDecoder(txBytes)
-	if err != nil {
-		return size
-	}
-	arrayLen, _, _, err := dec.DecodeArrayHeader()
-	if err == nil && arrayLen == 4 {
-		size--
-	}
-	return size
+	size := txsize.FromCBOR(txType, txBytes)
+	return uint(size) // #nosec G115 -- size is bounded by len(txBytes)
 }
 
 // addTransactionAttempt validates and admits one transaction. On

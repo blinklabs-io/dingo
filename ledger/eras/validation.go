@@ -21,6 +21,7 @@ import (
 	"math"
 	"math/big"
 
+	"github.com/blinklabs-io/dingo/internal/txsize"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/allegra"
@@ -839,32 +840,25 @@ func SafeAddExUnits(
 	}, nil
 }
 
-// txTypeAlonzo is the first era whose on-wire CBOR
-// includes the 1-byte IsValid boolean field.
-const txTypeAlonzo = 4
-
-// TxSizeForFee computes the transaction size used in the
-// Cardano fee formula. Per the Haskell ledger's
-// toCBORForSizeComputation, this is the 3-element CBOR
-// encoding [body, witnesses, auxiliary_data] — the
-// IsValid boolean is excluded for backward compatibility
-// with Mary-era transaction sizes. Since both 0x83 and
-// 0x84 are 1-byte CBOR headers, the difference from the
-// on-wire 4-element format is exactly the 1-byte IsValid
-// field. Pre-Alonzo transactions (Byron through Mary) do
-// not contain an IsValid byte, so their full CBOR length
-// is the fee-relevant size — except when the transaction
-// was rebuilt from block components, which
-// preAlonzoRebuiltWireSize handles.
+// TxSizeForFee computes the transaction size used in the Cardano fee formula.
+// For Alonzo through Conway, toCBORForSizeComputation uses a canonical
+// three-element array [body, witnesses, auxiliary_data]. The retained
+// components keep their exact bytes while non-canonical outer framing and an
+// optional IsValid component do not contribute. Pre-Alonzo transactions use
+// their full CBOR length except when preAlonzoRebuiltWireSize reconstructs a
+// transaction assembled from block components. Dijkstra retains its own
+// three-component envelope behavior.
 func TxSizeForFee(tx lcommon.Transaction) uint64 {
 	if size, ok := preAlonzoRebuiltWireSize(tx); ok {
 		return size
 	}
-	fullSize := uint64(len(tx.Cbor()))
-	if fullSize > 0 && tx.Type() >= txTypeAlonzo {
-		return fullSize - 1
+	if tx.Type() < 0 {
+		return uint64(len(tx.Cbor()))
 	}
-	return fullSize
+	return txsize.FromCBOR(
+		uint(tx.Type()), // #nosec G115 -- transaction era IDs are non-negative
+		tx.Cbor(),
+	)
 }
 
 // preAlonzoRebuiltWireSize returns the wire size of a Shelley or Allegra

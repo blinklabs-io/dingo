@@ -191,7 +191,16 @@ func (ls *LedgerState) applyEndorserBlock(
 	rawTxs []cbor.RawMessage,
 ) (int, uint64, error) {
 	ls.publishUntickedClosureAfterCommit(ctx, txn, rbPoint)
-	return ls.applyEndorserBlockInContext(ctx, txn, rbPoint, rbBlockNumber, ebSlot, ebHashBytes, rawTxs, nil)
+	return ls.applyEndorserBlockInContext(
+		ctx,
+		txn,
+		rbPoint,
+		rbBlockNumber,
+		ebSlot,
+		ebHashBytes,
+		rawTxs,
+		nil,
+	)
 }
 
 func (ls *LedgerState) applyEndorserBlockInContext(
@@ -379,7 +388,7 @@ func (ls *LedgerState) validateAndApplyEndorserBlockTransactions(
 				err,
 			)
 		}
-		validationEra, err := resolveValidationEra(
+		validationEra, err := resolveBlockValidationEra(
 			tx,
 			snapshot.currentEra,
 			snapshot.eraList,
@@ -397,7 +406,10 @@ func (ls *LedgerState) validateAndApplyEndorserBlockTransactions(
 				for i, idx := range indexes {
 					selected[i] = txs[idx]
 				}
-				signatures = preverifyTransactionSignatures(selected, ls.sigResults)
+				signatures = preverifyTransactionSignatures(
+					selected,
+					ls.sigResults,
+				)
 				if err := ctx.Err(); err != nil {
 					return 0, 0, err
 				}
@@ -449,11 +461,13 @@ func (ls *LedgerState) validateAndApplyEndorserBlockTransactions(
 			}
 			if err != nil {
 				if isSemanticTxValidationError(err) {
-					return 0, 0, &leiosEndorserBlockValidationError{err: fmt.Errorf(
-						"endorser tx %d failed validation: %w",
-						idx,
-						err,
-					)}
+					return 0, 0, &leiosEndorserBlockValidationError{
+						err: fmt.Errorf(
+							"endorser tx %d failed validation: %w",
+							idx,
+							err,
+						),
+					}
 				}
 				return 0, 0, fmt.Errorf(
 					"validate endorser tx %d: %w",
@@ -479,7 +493,12 @@ func (ls *LedgerState) validateAndApplyEndorserBlockTransactions(
 		delta.addTransaction(tx, idx)
 		applyStart := time.Now()
 		if acc != nil {
-			err = delta.applyWithoutRecordingDonationsWithAccumulator(ctx, ls, txn, acc)
+			err = delta.applyWithoutRecordingDonationsWithAccumulator(
+				ctx,
+				ls,
+				txn,
+				acc,
+			)
 		} else {
 			err = delta.applyWithoutRecordingDonations(ctx, ls, txn)
 		}
@@ -510,7 +529,9 @@ func (ls *LedgerState) validateAndApplyEndorserBlockTransactions(
 		err := ls.db.FlushBatch(acc, txn)
 		ls.metrics.observeBlockStage(blockStageApply, time.Since(flushStart))
 		if err != nil {
-			return 0, 0, &leiosEndorserBlockStorageError{err: fmt.Errorf("flush endorser API details: %w", err)}
+			return 0, 0, &leiosEndorserBlockStorageError{
+				err: fmt.Errorf("flush endorser API details: %w", err),
+			}
 		}
 	}
 	if len(applyEvents) > 0 {
@@ -643,7 +664,10 @@ func buildEndorserBlockBlob(
 	ebHash [lcommon.Blake2b256Size]byte,
 ) ([]byte, *database.BlockIngestionResult, error) {
 	if err := validateTransactionOutputIndexes(txs); err != nil {
-		return nil, nil, fmt.Errorf("validate endorser block output indexes: %w", err)
+		return nil, nil, fmt.Errorf(
+			"validate endorser block output indexes: %w",
+			err,
+		)
 	}
 	var buf bytes.Buffer
 	result := &database.BlockIngestionResult{
@@ -1162,7 +1186,9 @@ func (ls *LedgerState) validateDijkstraLeiosCertificate(
 		if certificate != nil {
 			return ls.rejectLeiosCertifyingBlock(
 				block,
-				errors.New("certificate body is present without a certified header flag"),
+				errors.New(
+					"certificate body is present without a certified header flag",
+				),
 			)
 		}
 		return nil
@@ -1338,11 +1364,13 @@ func leiosAnnouncementFromBlockCbor(
 	if err != nil || len(top) == 0 {
 		return lcommon.Blake2b256{}, false
 	}
-	header, err := safedecode.Guard(func() (dijkstra.DijkstraBlockHeader, error) {
-		var header dijkstra.DijkstraBlockHeader
-		_, err := cbor.Decode(top[0], &header)
-		return header, err
-	})
+	header, err := safedecode.Guard(
+		func() (dijkstra.DijkstraBlockHeader, error) {
+			var header dijkstra.DijkstraBlockHeader
+			_, err := cbor.Decode(top[0], &header)
+			return header, err
+		},
+	)
 	if err != nil {
 		return lcommon.Blake2b256{}, false
 	}
@@ -1910,7 +1938,10 @@ func (ls *LedgerState) applyUntickedBoundaryClosure(
 		return err
 	}
 	if !bytes.Equal(block.PrevHash().Bytes(), parentPoint.Hash) {
-		return fmt.Errorf("%w: boundary closure does not extend the ledger tip", errStaleChainIterator)
+		return fmt.Errorf(
+			"%w: boundary closure does not extend the ledger tip",
+			errStaleChainIterator,
+		)
 	}
 	if err := ls.validateDijkstraLeiosCertificate(ctx, block, nil); err != nil {
 		return err
@@ -1930,7 +1961,16 @@ func (ls *LedgerState) applyUntickedBoundaryClosure(
 		return errCertifiedEndorserBlockUnavailable
 	}
 	point := ocommon.Point{Slot: block.SlotNumber(), Hash: block.Hash().Bytes()}
-	_, donation, err := ls.applyEndorserBlockInContext(ctx, txn, point, block.BlockNumber(), slot, hash.Bytes(), txs, &parentPoint.Slot)
+	_, donation, err := ls.applyEndorserBlockInContext(
+		ctx,
+		txn,
+		point,
+		block.BlockNumber(),
+		slot,
+		hash.Bytes(),
+		txs,
+		&parentPoint.Slot,
+	)
 	if err != nil {
 		if validationErr, ok := errors.AsType[*leiosEndorserBlockValidationError](err); ok {
 			return ls.rejectLeiosCertifyingBlock(block, validationErr)
@@ -1955,7 +1995,11 @@ type pendingLeiosClosure struct {
 
 // publishUntickedClosureAfterCommit keeps transaction Apply notifications with
 // the certifying RB's commit, including when a failed body is retried.
-func (ls *LedgerState) publishUntickedClosureAfterCommit(ctx context.Context, txn *database.Txn, point ocommon.Point) {
+func (ls *LedgerState) publishUntickedClosureAfterCommit(
+	ctx context.Context,
+	txn *database.Txn,
+	point ocommon.Point,
+) {
 	ls.RLock()
 	pending := ls.untickedClosure
 	ls.RUnlock()
