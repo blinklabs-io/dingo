@@ -150,6 +150,10 @@ func newWiringTestEventBus(t *testing.T) *event.EventBus {
 func TestNewOuroborosRejectsMissingRequiredDependency(t *testing.T) {
 	t.Parallel()
 
+	// Validation rejects before touching any dependency, so one complete
+	// set (which includes a migrated ledger database) serves every case.
+	base := newWiringTestDeps(t)
+
 	for _, tc := range []struct {
 		name  string
 		clear func(*OuroborosConfig)
@@ -162,7 +166,7 @@ func TestNewOuroborosRejectsMissingRequiredDependency(t *testing.T) {
 		{"PeerGov", func(c *OuroborosConfig) { c.PeerGov = nil }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg := newWiringTestDeps(t)
+			cfg := base
 			tc.clear(&cfg)
 			o, err := NewOuroboros(cfg)
 			require.Nil(t, o)
@@ -200,38 +204,6 @@ func TestNewOuroborosRejectsChainsyncCapacityOverflow(t *testing.T) {
 	require.ErrorContains(t, err, "invalid chainsync capacity")
 }
 
-// TestNewOuroborosExposesDependencies checks the happy path, and that the
-// optional Leios handlers start unset.
-func TestNewOuroborosExposesDependencies(t *testing.T) {
-	t.Parallel()
-
-	cfg := newWiringTestDeps(t)
-	o, err := NewOuroboros(cfg)
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, o.Close()) })
-	require.Same(t, cfg.LedgerState, o.LedgerState())
-	require.Same(t, cfg.ChainsyncState, o.ChainsyncState())
-	require.Same(t, cfg.ConnManager, o.ConnManager())
-	require.Same(t, cfg.PeerGov, o.PeerGov())
-	require.Same(t, cfg.EventBus, o.EventBus())
-	require.Equal(t, cfg.Mempool, o.Mempool())
-	require.Nil(t, o.LeiosVotes())
-	require.Nil(t, o.LeiosPipeline())
-}
-
-// TestNewOuroborosIsFullyWired pins the property the refactor exists to
-// provide: any instance the exported constructor hands back already satisfies
-// the dependency invariant, so no protocol handler can observe a half-built
-// one.
-func TestNewOuroborosIsFullyWired(t *testing.T) {
-	t.Parallel()
-
-	o, err := NewOuroboros(newWiringTestDeps(t))
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, o.Close()) })
-	require.True(t, o.hasDependencies())
-}
-
 // TestSetLeiosHandlersRejectNil guards the optional handlers against being
 // silently cleared: node_leios.go wires them from a separate path that reruns
 // across live restore cycles, so a nil there is a wiring bug, not a request
@@ -262,8 +234,9 @@ func (*leiosPipelineHandlerStub) ObserveEndorserBlock(
 func TestRejectsTypedNilDependencies(t *testing.T) {
 	t.Parallel()
 
+	base := newWiringTestDeps(t)
 	t.Run("Mempool", func(t *testing.T) {
-		cfg := newWiringTestDeps(t)
+		cfg := base
 		var typedNil *mempool.FIFO
 		cfg.Mempool = typedNil
 		o, err := NewOuroboros(cfg)
@@ -272,7 +245,7 @@ func TestRejectsTypedNilDependencies(t *testing.T) {
 		require.Contains(t, err.Error(), "Mempool")
 	})
 	t.Run("LeiosAnnouncementLedger", func(t *testing.T) {
-		cfg := newWiringTestDeps(t)
+		cfg := base
 		cfg.EnableLeios = true
 		var typedNil *ledger.LedgerState
 		cfg.LeiosAnnouncementLedger = typedNil

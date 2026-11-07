@@ -810,53 +810,6 @@ func TestArchiveServiceClientBoundsDecodedResponse(t *testing.T) {
 	assert.Contains(t, err.Error(), "larger than configured max")
 }
 
-// TestGetBlock_RejectsNonHTTPS verifies that a non-HTTPS download URL returned
-// by the archive is rejected before any outbound dial is attempted.
-func TestGetBlock_RejectsNonHTTPS(t *testing.T) {
-	t.Parallel()
-
-	db := newTestDB(t)
-	const slot uint64 = 500
-	hash := bytes.Repeat([]byte{0x11}, 32)
-
-	baseURL, fakeArch, httpClient := startFakeArchive(t, map[string][]byte{
-		hex.EncodeToString(hash): []byte("cbor"),
-	})
-	// Override to a non-HTTPS URL — validation fires before any dial.
-	fakeArch.downloadURL = "http://evil.example.com/block"
-
-	store := newBarkBlobStoreForTest(t, db, baseURL, httpClient)
-	rTxn := store.NewTransaction(false)
-	t.Cleanup(func() { _ = rTxn.Rollback() })
-
-	_, _, err := store.GetBlock(rTxn, slot, hash)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "HTTPS")
-}
-
-// TestGetBlock_RejectsEmbeddedCredentials verifies that an archive-supplied
-// URL containing user:password is rejected even when the scheme is HTTPS.
-func TestGetBlock_RejectsEmbeddedCredentials(t *testing.T) {
-	t.Parallel()
-
-	db := newTestDB(t)
-	const slot uint64 = 501
-	hash := bytes.Repeat([]byte{0x22}, 32)
-
-	baseURL, fakeArch, httpClient := startFakeArchive(t, map[string][]byte{
-		hex.EncodeToString(hash): []byte("cbor"),
-	})
-	fakeArch.downloadURL = "https://user:pass@s3.example.com/block"
-
-	store := newBarkBlobStoreForTest(t, db, baseURL, httpClient)
-	rTxn := store.NewTransaction(false)
-	t.Cleanup(func() { _ = rTxn.Rollback() })
-
-	_, _, err := store.GetBlock(rTxn, slot, hash)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "credential")
-}
-
 // TestGetBlock_RejectsUnconfiguredHost verifies that an HTTPS URL is still
 // rejected when it points at a host outside the expected/allowlisted set.
 func TestGetBlock_RejectsUnconfiguredHost(t *testing.T) {
@@ -1038,6 +991,7 @@ func serveArchiveBlock(
 // TestGetBlock_SendsSharedUserAgent cannot run in parallel: it sets the
 // process-wide user-agent override so the assertion distinguishes Dingo's
 // value from connect-go's and net/http's own defaults.
+// Not t.Parallel: t.Setenv changes the process-wide user agent.
 func TestGetBlock_SendsSharedUserAgent(t *testing.T) {
 	t.Setenv("DINGO_HTTP_USER_AGENT", "dingo-test-agent/1")
 

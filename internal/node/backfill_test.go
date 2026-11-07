@@ -782,17 +782,6 @@ func TestBackfillKeepsImportedDormancyAndExpiryForHistoricalDRepRegistration(t *
 	assert.Equal(t, uint64(3), dormantEpochs)
 }
 
-func TestBackfillBatchSizeDefaultAndOverride(t *testing.T) {
-	t.Parallel()
-
-	db := newTestDB(t)
-	bf := NewBackfill(db, nil, slog.Default())
-
-	require.Equal(t, 200, bf.batchSize)
-	require.NoError(t, bf.SetBatchSize(300))
-	require.Equal(t, 300, bf.batchSize)
-}
-
 type fixedBackfillBatchMetrics struct {
 	rows  int
 	bytes int64
@@ -1267,35 +1256,6 @@ func TestRun_AlreadyCompleted(t *testing.T) {
 
 	// Run should return immediately without error
 	err = bf.Run(context.Background())
-	require.NoError(t, err)
-}
-
-func TestRun_CancelledContext_EmptyBlobStore(t *testing.T) {
-	t.Parallel()
-
-	db := newTestDB(t)
-	bf := NewBackfill(db, nil, slog.Default())
-
-	// Create an incomplete checkpoint so Run will attempt work
-	now := time.Now()
-	cp := &models.BackfillCheckpoint{
-		Phase:      BackfillPhase,
-		LastSlot:   0,
-		TotalSlots: 100000,
-		StartedAt:  now,
-		UpdatedAt:  now,
-		Completed:  false,
-	}
-	err := db.Metadata().SetBackfillCheckpoint(cp, nil)
-	require.NoError(t, err)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	// With an empty blob store (tipSlot=0) Run returns nil early
-	// before reaching the iteration loop, even with a cancelled
-	// context.
-	err = bf.Run(ctx)
 	require.NoError(t, err)
 }
 

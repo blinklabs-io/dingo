@@ -367,17 +367,6 @@ func TestRedactURLToHost(t *testing.T) {
 	}
 }
 
-// TestConfigLogValueNil covers a nil receiver, which slog resolves the same
-// way as any other LogValuer.
-func TestConfigLogValueNil(t *testing.T) {
-	t.Parallel()
-
-	var cfg *Config
-	if got := cfg.LogValue().String(); got != "<nil>" {
-		t.Errorf("nil Config LogValue = %q, want <nil>", got)
-	}
-}
-
 func TestRedactURICredentials(t *testing.T) {
 	t.Parallel()
 

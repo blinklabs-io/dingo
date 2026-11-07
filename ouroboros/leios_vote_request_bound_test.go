@@ -26,8 +26,10 @@ import (
 )
 
 func TestLeiosFetchVoteRequestBound(t *testing.T) {
+	t.Parallel()
 	for _, count := range []int{0, 1, 1000, 1001} {
 		t.Run(fmt.Sprint(count), func(t *testing.T) {
+			t.Parallel()
 			o := newOuroboros(OuroborosConfig{EnableLeios: true})
 			handler := &fakeLeiosVoteHandler{
 				rawVotes: []cbor.RawMessage{mustCbor(t, "vote")},
@@ -56,6 +58,7 @@ func TestLeiosFetchVoteRequestBound(t *testing.T) {
 }
 
 func TestLeiosFetchVoteRequestBoundOnWire(t *testing.T) {
+	t.Parallel()
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	handler := &fakeLeiosVoteHandler{
 		rawVotes: []cbor.RawMessage{mustCbor(t, "vote")},
@@ -101,6 +104,7 @@ func TestLeiosFetchVoteRequestBoundOnWire(t *testing.T) {
 }
 
 func TestLeiosFetchLargeVoteRequestWithoutManager(t *testing.T) {
+	t.Parallel()
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	peer := newLeiosFetchServerPeer(t, o)
 	peer.send(

@@ -492,6 +492,9 @@ func TestProtocolParameterExecutionAndGovernanceValues(t *testing.T) {
 
 func TestToolRequestTypes(t *testing.T) {
 	t.Parallel()
+	// One governance database serves every case: the inputs are rejected before
+	// any query runs, so the data only has to make an accepted call succeed.
+	db, _ := newGovernanceProposalDB(t)
 	for _, tc := range []struct{ name, tool, args string }{
 		{"string limit", "sqlite_query", `{"query":"SELECT 1","limit":"1"}`},
 		{"fractional limit", "sqlite_query", `{"query":"SELECT 1","limit":1.5}`},
@@ -519,7 +522,6 @@ func TestToolRequestTypes(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			db, _ := newGovernanceProposalDB(t)
 			cs := newToolSession(t, db, 100)
 			result, err := cs.CallTool(
 				t.Context(),
