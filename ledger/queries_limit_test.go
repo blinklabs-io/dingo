@@ -362,6 +362,21 @@ func TestLocalStateQueryEmptyDRepStateMatchesPerDRepDelegators(t *testing.T) {
 	}
 }
 
+// TestAllDRepDelegatorsRejectsNonPositiveBatchSize verifies that a zero or
+// negative batch size is refused rather than looping forever or slicing out of
+// range.
+func TestAllDRepDelegatorsRejectsNonPositiveBatchSize(t *testing.T) {
+	t.Parallel()
+
+	for _, batchSize := range []int{0, -1} {
+		ls := &LedgerState{}
+		_, err := ls.allDRepDelegatorsBatched(
+			context.Background(), nil, batchSize,
+		)
+		require.ErrorContains(t, err, "batch size must be positive")
+	}
+}
+
 // TestAllDRepDelegatorsCrossesBatchBoundary verifies that allDRepDelegators
 // folds results correctly when the active-account count spans more than one
 // allDRepDelegatorsBatchSize hydration batch, so the batch loop can't

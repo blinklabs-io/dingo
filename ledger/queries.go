@@ -2447,6 +2447,12 @@ func (ls *LedgerState) allDRepDelegatorsBatched(
 	map[string][]olocalstatequery.StakeCredential,
 	error,
 ) {
+	if batchSize <= 0 {
+		return nil, fmt.Errorf(
+			"allDRepDelegators: batch size must be positive, got %d",
+			batchSize,
+		)
+	}
 	txn, release := ls.readTxn(ctx, txn)
 	defer release()
 	refs, err := ls.db.Metadata().GetActiveAccountCredentials(txn.Metadata())
