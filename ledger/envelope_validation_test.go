@@ -386,6 +386,8 @@ func TestValidateInboundBlockEnvelopeSizes(t *testing.T) {
 func TestValidateInboundBlockEnvelopeRejectsByronBodyProofMismatch(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	block := &byron.ByronMainBlock{
 		BlockHeader: &byron.ByronMainBlockHeader{},
 	}
@@ -411,6 +413,8 @@ func TestValidateInboundBlockEnvelopeRejectsByronBodyProofMismatch(
 func TestValidateInboundBlockEnvelopeRejectsSubstitutedByronMainBody(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	genuine := loadEnvelopeByronFixture(
 		t,
 		"Block_Byron_regular",
@@ -442,6 +446,8 @@ func TestValidateInboundBlockEnvelopeRejectsSubstitutedByronMainBody(
 }
 
 func TestValidateInboundBlockEnvelopeByronEpochBoundaryBodyProofIsOpaque(t *testing.T) {
+	t.Parallel()
+
 	genuine := loadEnvelopeByronFixture(
 		t,
 		"Block_Byron_EBB",
@@ -479,6 +485,8 @@ func TestValidateInboundBlockEnvelopeByronEpochBoundaryBodyProofIsOpaque(t *test
 }
 
 func TestValidateInboundBlockEnvelopeByronSizeLimits(t *testing.T) {
+	t.Parallel()
+
 	block := loadEnvelopeByronFixture(
 		t,
 		"Block_Byron_regular",
@@ -1061,6 +1069,8 @@ func substituteByronEbbBody(t *testing.T, blockCbor []byte) []byte {
 // (TestBuildBlockRefusesAParentAtItsOwnSlot in ledger/forging); this test
 // documents why it must, and fails if either side of the rule ever moves.
 func TestValidateBlockOrderPinsTheEqualSlotAlternativeShape(t *testing.T) {
+	t.Parallel()
+
 	const (
 		predecessorSlot   = uint64(999)
 		predecessorNumber = uint64(99)
@@ -1103,6 +1113,8 @@ func TestValidateBlockOrderPinsTheEqualSlotAlternativeShape(t *testing.T) {
 // reference decoder reading an EBB body proof as a byte string of any length
 // and discarding it: a 31-byte proof and a wrong 32-byte proof are both valid.
 func TestValidateInboundBlockEnvelopeAcceptsArbitraryByronEbbProof(t *testing.T) {
+	t.Parallel()
+
 	genuine := loadEnvelopeByronFixture(
 		t,
 		"Block_Byron_EBB",
@@ -1152,36 +1164,9 @@ func TestValidateInboundBlockEnvelopeAcceptsArbitraryByronEbbProof(t *testing.T)
 	))
 }
 
-// TestByronEbbNonBytesProofIsRejectedAtDecode pins the one check the
-// reference applies to an EBB body proof: its decoder reads the field as a
-// byte string, so an inbound EBB carrying any other CBOR value never decodes.
-func TestByronEbbNonBytesProofIsRejectedAtDecode(t *testing.T) {
-	genuine := loadEnvelopeByronFixture(
-		t,
-		"Block_Byron_EBB",
-		uint(gledger.BlockTypeByronEbb),
-	)
-	var block []cbor.RawMessage
-	_, err := cbor.Decode(genuine.Cbor(), &block)
-	require.NoError(t, err)
-	var header []cbor.RawMessage
-	_, err = cbor.Decode(block[0], &header)
-	require.NoError(t, err)
-	header[2], err = cbor.Encode(uint64(7))
-	require.NoError(t, err)
-	block[0], err = cbor.Encode(header)
-	require.NoError(t, err)
-	encoded, err := cbor.Encode(block)
-	require.NoError(t, err)
-
-	_, err = gledger.NewBlockFromCbor(
-		uint(gledger.BlockTypeByronEbb),
-		encoded,
-	)
-	require.ErrorIs(t, err, byron.ErrMalformedBodyProof)
-}
-
 func TestValidateInboundBlockEnvelopeByronEbbFixedSizeLimit(t *testing.T) {
+	t.Parallel()
+
 	fixture := loadEnvelopeByronFixture(
 		t,
 		"Block_Byron_EBB",

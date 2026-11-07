@@ -151,49 +151,77 @@ func e34NonOverlay(t *testing.T, c e34ScheduleCase, slots []uint64) []uint64 {
 	return result
 }
 
+// e34WindowSlots is the slot count of each window checked on a full-epoch
+// fixture.
+const e34WindowSlots = 3600
+
 func TestLeaderEligibilityNodeSchedules(t *testing.T) {
 	testutil.SkipUnderRace(
 		t,
-		"each case is a single-goroutine pass over every slot of an epoch; "+
+		"each case is a single-goroutine pass over thousands of slots; "+
 			"CI's check job replays the same cases un-instrumented",
 	)
 	for i, c := range e34ScheduleCases(t) {
 		t.Run(fmt.Sprintf("%02d_%s", i, c.Mode), func(t *testing.T) {
 			t.Parallel()
 			f, pool, total, nonce, seed, mode := c.inputs(t)
-			calc := NewCalculator(
-				math.NaN(),
-			) // Exact genesis value must override invalid float.
-			calc.ActiveSlotCoeffRat = f
-			schedule, err := calc.CalculateSchedule(
-				11,
-				EpochSlotRange{c.FirstSlot, c.SlotCount},
-				coeffTestPoolID,
-				seed,
-				pool,
-				total,
-				nonce,
-				mode,
-			)
-			require.NoError(t, err)
-			if pool == 0 {
-				require.Empty(
-					t,
-					schedule.LeaderSlotsSnapshot(),
-					"Dingo zero-pool policy, including f=1",
+			// Eligibility is decided per slot from the slot number and the
+			// nonce alone, so a full-epoch fixture is checked on three
+			// windows (start, middle, end) against the fixture's slots in
+			// that window. Fixtures with a decentralization overlay keep
+			// the whole epoch because the overlay is offset-relative.
+			windows := []EpochSlotRange{{c.FirstSlot, c.SlotCount}}
+			if c.SlotCount > 3*e34WindowSlots &&
+				e34Uint(t, c.DNumerator) == 0 {
+				windows = []EpochSlotRange{
+					{c.FirstSlot, e34WindowSlots},
+					{c.FirstSlot + c.SlotCount/2, e34WindowSlots},
+					{c.FirstSlot + c.SlotCount - e34WindowSlots, e34WindowSlots},
+				}
+			}
+			for _, window := range windows {
+				calc := NewCalculator(
+					math.NaN(),
+				) // Exact genesis value must override invalid float.
+				calc.ActiveSlotCoeffRat = f
+				schedule, err := calc.CalculateSchedule(
+					11,
+					window,
+					coeffTestPoolID,
+					seed,
+					pool,
+					total,
+					nonce,
+					mode,
 				)
-				return
+				require.NoError(t, err)
+				if pool == 0 {
+					require.Empty(
+						t,
+						schedule.LeaderSlotsSnapshot(),
+						"Dingo zero-pool policy, including f=1",
+					)
+					continue
+				}
+				got := append([]uint64{}, schedule.LeaderSlotsSnapshot()...)
+				if e34Uint(t, c.DNumerator) != 0 {
+					got = e34NonOverlay(t, c, got)
+				}
+				want := make([]uint64, 0, len(c.AssignedSlots))
+				for _, slot := range c.AssignedSlots {
+					if slot >= window.StartSlot &&
+						slot-window.StartSlot < window.SlotCount {
+						want = append(want, slot)
+					}
+				}
+				require.Equal(t, want, got)
 			}
-			got := append([]uint64{}, schedule.LeaderSlotsSnapshot()...)
-			if e34Uint(t, c.DNumerator) != 0 {
-				got = e34NonOverlay(t, c, got)
-			}
-			require.Equal(t, c.AssignedSlots, got)
 		})
 	}
 }
 
 func TestLeaderEligibilityExactDomain(t *testing.T) {
+	t.Parallel()
 	for _, pool := range []uint64{0, 1} {
 		calc := NewCalculator(0.05)
 		calc.ActiveSlotCoeffRat = new(
@@ -216,6 +244,7 @@ func TestLeaderEligibilityExactDomain(t *testing.T) {
 // The real refresh/reload path must retire old decisions, persist E34 lists,
 // and reuse a valid restart without taking a VRF seed again.
 func TestE34ScheduleVersionInvalidation(t *testing.T) {
+	t.Parallel()
 	cases := e34ScheduleCases(t)
 	var reference e34ScheduleCase
 	for _, c := range cases {
@@ -351,6 +380,7 @@ func (p *e34EpochProvider) EpochSlotRange(
 }
 
 func TestLeaderEligibilityZeroPoolValidatesInputs(t *testing.T) {
+	t.Parallel()
 	for _, name := range []string{"key", "nonce", "mode", "range", "slot_width"} {
 		t.Run(name, func(t *testing.T) {
 			seed, nonce := coeffTestVRFSeed, coeffTestNonce

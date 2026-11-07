@@ -64,7 +64,7 @@ func TestStopCancelsBlockedWorkerValidation(t *testing.T) {
 
 func TestChainUpdateWorkerRateLimitsFailedRebuilds(t *testing.T) {
 	t.Parallel()
-	const revalidationInterval = 100 * time.Millisecond
+	const revalidationInterval = 30 * time.Millisecond
 	type rebuildAttempt struct {
 		number int
 		at     time.Time

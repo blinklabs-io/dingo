@@ -180,6 +180,7 @@ func TestBytesEntryRangeAtCapsCapacity(t *testing.T) {
 // a tip read would need a hundred thousand real chunk files to reach the width
 // where the two orderings differ.
 func TestChunkNamesSortNumericallyPastFiveDigits(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	for _, name := range []string{"99999", "100000", "100001"} {
 		if err := os.WriteFile(
@@ -217,6 +218,7 @@ func TestChunkNamesSortNumericallyPastFiveDigits(t *testing.T) {
 // refuses anything absent from the digest map in any case. Including it is the
 // only option that lets a planted file decide the tip.
 func TestChunkNamesDropsNonCanonicalNames(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	for _, name := range []string{
 		"00000", "00001",

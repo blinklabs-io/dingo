@@ -169,6 +169,8 @@ func additionalReferenceAdmission(
 }
 
 func TestDijkstraBlockReferenceScriptCustomLimitAdmission(t *testing.T) {
+	t.Parallel()
+
 	for _, tc := range []struct {
 		name     string
 		lastSize int
@@ -177,6 +179,7 @@ func TestDijkstraBlockReferenceScriptCustomLimitAdmission(t *testing.T) {
 		{"below", 59, false}, {"exact", 60, false}, {"above", 61, false}, {"phase_invalid_exact", 60, true}, {"phase_invalid_above", 61, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			db := newTestDB(t)
 			block := &dijkstra.DijkstraBlock{
 				BlockHeader: &dijkstra.DijkstraBlockHeader{},
@@ -244,6 +247,8 @@ func TestDijkstraBlockReferenceScriptCustomLimitAdmission(t *testing.T) {
 }
 
 func TestBlockReferenceScriptProducedOutputAdmission(t *testing.T) {
+	t.Parallel()
+
 	for _, tc := range []struct {
 		name                           string
 		proto                          uint
@@ -254,6 +259,7 @@ func TestBlockReferenceScriptProducedOutputAdmission(t *testing.T) {
 		{name: "missing_reference", proto: 11, missing: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			db := newTestDB(t)
 			size := int(conway.MaxRefScriptSizePerBlock / 6)
 			if tc.over {

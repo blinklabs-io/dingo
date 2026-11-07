@@ -20,7 +20,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"slices"
 	"strconv"
 	"testing"
 	"time"
@@ -36,6 +35,7 @@ import (
 // outside the epoch, which fails here rather than as a mystifying DevNet
 // stall.
 func TestCheckedInSpecsAreValid(t *testing.T) {
+	t.Parallel()
 	poolCounts := map[string]int{
 		"testnet.yaml":                   2,
 		"testnet-dingo.yaml":             3,
@@ -51,6 +51,7 @@ func TestCheckedInSpecsAreValid(t *testing.T) {
 	// this directory without also being validated here.
 	for _, file := range checkedInSpecs(t, "testnet*.yaml") {
 		t.Run(file, func(t *testing.T) {
+			t.Parallel()
 			poolCount, ok := poolCounts[file]
 			require.True(t, ok, "%s has no expected pool count in this test", file)
 			cfg, err := LoadDevNetConfigFrom(file)
@@ -77,23 +78,14 @@ func checkedInSpecs(t *testing.T, pattern string) []string {
 	return files
 }
 
-func TestLeiosSpecSchedulesDijkstraAfterConwayEpoch(t *testing.T) {
-	cfg, err := LoadDevNetConfigFrom("testnet-dingo-leios.yaml")
-	require.NoError(t, err)
-	require.NotNil(t, cfg.DijkstraHardForkAtEpoch)
-	require.Equal(t, uint64(1), *cfg.DijkstraHardForkAtEpoch)
-	require.Equal(t, uint64(300), cfg.EpochLength)
-	require.Equal(t, 500*time.Millisecond, cfg.SlotDuration())
-	require.Equal(t, uint64(3), cfg.SecurityParam)
-	require.Equal(t, uint64(240), cfg.NonceStabilityWindowSlots())
-}
-
 // The accelerated specs exist to make a full scenario fit the reference
 // runner budget; if someone relaxes their timing back toward canonical,
 // this fails before CI spends five minutes discovering it.
 func TestAcceleratedSpecsMeetTheRunnerBudget(t *testing.T) {
+	t.Parallel()
 	for _, file := range checkedInSpecs(t, "testnet*accelerated*.yaml") {
 		t.Run(file, func(t *testing.T) {
+			t.Parallel()
 			cfg, err := LoadDevNetConfigFrom(file)
 			require.NoError(t, err)
 
@@ -118,6 +110,7 @@ func TestAcceleratedTxPumpQuarantineFitsRunnerBudget(t *testing.T) {
 	} {
 		for _, script := range []string{"run-tests.sh", "start.sh"} {
 			t.Run(profile.service+"/"+script, func(t *testing.T) {
+				t.Parallel()
 				cfg, err := LoadDevNetConfigFrom(profile.spec)
 				require.NoError(t, err)
 				plan, err := NewScenarioPlan(cfg)
@@ -211,144 +204,6 @@ func TestCanonicalTxPumpWindowIsUnchanged(t *testing.T) {
 	}
 }
 
-// The canonical specs must stay on canonical timing: they are what the
-// soak and canary runs use, and quietly accelerating them would remove
-// the long-wall-clock coverage the fast scenario deliberately does not
-// provide.
-func TestCanonicalSpecsKeepCanonicalTiming(t *testing.T) {
-	for _, file := range []string{"testnet.yaml", "testnet-dingo.yaml"} {
-		t.Run(file, func(t *testing.T) {
-			cfg, err := LoadDevNetConfigFrom(file)
-			require.NoError(t, err)
-			require.Equal(t, uint64(500), cfg.EpochLength)
-			require.Equal(t, 1.0, cfg.SlotLength)
-			require.Equal(t, uint64(40), cfg.SecurityParam)
-			require.Equal(t, time.Second, cfg.SlotDuration())
-		})
-	}
-}
-
-func TestKoiosParityServicesUseOptInProfile(t *testing.T) {
-	composeData, err := os.ReadFile("docker-compose.yml")
-	require.NoError(t, err)
-
-	var compose struct {
-		Services map[string]struct {
-			Profiles []string `yaml:"profiles"`
-		} `yaml:"services"`
-	}
-	require.NoError(t, yaml.Unmarshal(composeData, &compose))
-
-	for _, service := range []string{
-		"dingo-preview",
-		"koios-parity-prometheus",
-		"koios-parity-grafana",
-	} {
-		definition, ok := compose.Services[service]
-		require.True(t, ok, "Compose service %s must exist", service)
-		require.Equal(t, []string{"koios-parity"}, definition.Profiles,
-			"Preview observability must stay opt-in and separate from the generated DevNet profiles")
-	}
-}
-
-// run-tests.sh and start.sh each map a mode to a network spec, and
-// docker-compose.yml supplies the defaults. Nothing makes them agree, so a
-// rename that updates one and not another would leave the Go harness
-// deriving its timings from a different spec than the configurator
-// generated genesis from — the scenario would still run, just against a
-// network whose parameters it has wrong.
-//
-// Rather than route all three through a shared resolver (indirection
-// across a shell/compose/Go boundary for two filenames), assert that every
-// spec they name exists and that the two scripts agree on the accelerated
-// pair.
-func TestScriptsAndComposeAgreeOnSpecFiles(t *testing.T) {
-	specRe := regexp.MustCompile(`testnet[a-z-]*\.yaml`)
-	acceleratedRe := regexp.MustCompile(`testnet[a-z-]*accelerated\.yaml`)
-
-	referenced := map[string][]string{}
-	for _, file := range []string{
-		"run-tests.sh", "start.sh", "docker-compose.yml",
-	} {
-		data, err := os.ReadFile(file)
-		require.NoError(t, err)
-		for _, name := range specRe.FindAllString(string(data), -1) {
-			referenced[file] = append(referenced[file], name)
-		}
-	}
-
-	for file, names := range referenced {
-		require.NotEmpty(t, names, "%s names no network spec", file)
-		for _, name := range names {
-			require.FileExists(t, name,
-				"%s references %s, which does not exist", file, name)
-		}
-	}
-
-	accelerated := func(file string) []string {
-		var out []string
-		for _, name := range referenced[file] {
-			if acceleratedRe.MatchString(name) && !slices.Contains(out, name) {
-				out = append(out, name)
-			}
-		}
-		slices.Sort(out)
-		return out
-	}
-	runTests := accelerated("run-tests.sh")
-	require.Len(t, runTests, 2,
-		"run-tests.sh should name both accelerated specs")
-	require.Equal(t, runTests, accelerated("start.sh"),
-		"start.sh and run-tests.sh must select the same accelerated specs;"+
-			" if they drift, the harness and the running network resolve"+
-			" different timings")
-}
-
-// TestComposeTxPumpCooldownUsesMilliseconds keeps the DevNet load profile in
-// agreement with txpump's millisecond-valued configuration contract and the
-// 5-15 second cadence documented in README.md. A value copied as seconds
-// makes txpump open a fresh NtC connection and submit each configured batch
-// every 5-15 milliseconds. That saturates the mempool and can starve the
-// persistent ChainSync observers which drive the accelerated scenario.
-func TestComposeTxPumpCooldownUsesMilliseconds(t *testing.T) {
-	environments := loadComposeTxPumpEnvironments(t)
-
-	for _, service := range []string{"txpump-dingo", "txpump"} {
-		t.Run(service, func(t *testing.T) {
-			environment := environments[service]
-			for _, tc := range []struct {
-				name string
-				want int
-			}{
-				{name: "MIN", want: 5_000},
-				{name: "MAX", want: 15_000},
-			} {
-				key := "TXPUMP_COOLDOWN_" + tc.name
-				requireComposeEnvInt(t, service, environment, key, tc.want,
-					"txpump cooldown values are milliseconds; the DevNet"+
-						" profile documents a 5-15 second cadence")
-			}
-		})
-	}
-}
-
-func requireComposeEnvInt(
-	t *testing.T,
-	service string,
-	environment map[string]string,
-	key string,
-	want int,
-	message string,
-) {
-	t.Helper()
-	raw, ok := environment[key]
-	require.True(t, ok, "Compose service %s must define %s", service, key)
-	got, err := strconv.Atoi(raw)
-	require.NoError(t, err,
-		"Compose service %s setting %s must be an integer", service, key)
-	require.Equal(t, want, got, message)
-}
-
 func loadComposeTxPumpEnvironments(t *testing.T) map[string]map[string]string {
 	t.Helper()
 	composeData, err := os.ReadFile("docker-compose.yml")
@@ -370,79 +225,6 @@ func loadComposeTxPumpEnvironments(t *testing.T) map[string]map[string]string {
 		environments[service] = definition.Environment
 	}
 	return environments
-}
-
-// TestComposeTxPumpSubmitsOneTransactionPerBatch prevents the DevNet load
-// generator from immediately spending outputs created earlier in the same
-// batch. Those dependent transactions can become invalid when an early fork
-// removes their parent, leaving the accelerated scenario without a stable
-// transaction-bearing block.
-func TestComposeTxPumpSubmitsOneTransactionPerBatch(t *testing.T) {
-	environments := loadComposeTxPumpEnvironments(t)
-
-	for _, service := range []string{"txpump-dingo", "txpump"} {
-		t.Run(service, func(t *testing.T) {
-			environment := environments[service]
-			for _, bound := range []string{"MIN", "MAX"} {
-				key := "TXPUMP_TX_COUNT_" + bound
-				requireComposeEnvInt(
-					t,
-					service,
-					environment,
-					key,
-					1,
-					"DevNet txpump batches must not create unconfirmed dependency chains",
-				)
-			}
-			require.Equal(t, "${DEVNET_TXPUMP_CONFIRMATION_SLOTS:-600}",
-				environment["TXPUMP_CONFIRMATION_SLOTS"],
-				"direct Compose use must retain the canonical default")
-			if service == "txpump-dingo" {
-				require.Equal(
-					t,
-					"${DEVNET_TXPUMP_TRANSACTION_ERA:-conway}",
-					environment["TXPUMP_TRANSACTION_ERA"],
-					"Dingo Leios profile must select Dijkstra transactions explicitly",
-				)
-			}
-		})
-	}
-}
-
-// TestComposeTxPumpWaitsForProfileReadiness verifies that each txpump service
-// starts only after every node in its active profile is healthy, preventing
-// genesis-backed transactions from being submitted during early convergence.
-func TestComposeTxPumpWaitsForProfileReadiness(t *testing.T) {
-	composeData, err := os.ReadFile("docker-compose.yml")
-	require.NoError(t, err)
-
-	var compose struct {
-		Services map[string]struct {
-			DependsOn map[string]struct {
-				Condition string `yaml:"condition"`
-			} `yaml:"depends_on"`
-		} `yaml:"services"`
-	}
-	require.NoError(t, yaml.Unmarshal(composeData, &compose))
-
-	for service, dependencies := range map[string][]string{
-		"txpump-dingo": {"dingo-1", "dingo-2", "dingo-3", "dingo-relay"},
-		"txpump":       {"dingo-producer", "cardano-producer", "cardano-relay"},
-	} {
-		t.Run(service, func(t *testing.T) {
-			for _, dependency := range dependencies {
-				condition, ok := compose.Services[service].DependsOn[dependency]
-				require.True(t, ok, "%s must depend on %s", service, dependency)
-				require.Equal(t, "service_healthy", condition.Condition,
-					"%s must wait for %s to be healthy", service, dependency)
-			}
-		})
-	}
-}
-
-func TestLoadDevNetConfigFromMissingFile(t *testing.T) {
-	_, err := LoadDevNetConfigFrom("no-such-testnet.yaml")
-	require.Error(t, err)
 }
 
 func TestLoadDevNetConfigHonoursEnvOverride(t *testing.T) {

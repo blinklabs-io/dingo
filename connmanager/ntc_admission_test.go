@@ -32,6 +32,8 @@ import (
 )
 
 func TestNtCAdmissionSlotReleasedBeforeCloseCallback(t *testing.T) {
+	t.Parallel()
+
 	closeErr := errors.New("closed")
 	callbackEntered := make(chan struct{})
 	releaseCallback := make(chan struct{})
@@ -317,6 +319,8 @@ func TestTrustedLocalFlagIsSetBeforeConnectionRegistration(t *testing.T) {
 }
 
 func TestNtCAdmissionPendingAndEstablished(t *testing.T) {
+	t.Parallel()
+
 	for _, testCase := range []struct {
 		name  string
 		total int
@@ -391,6 +395,8 @@ func TestNtCAdmissionPendingAndEstablished(t *testing.T) {
 }
 
 func TestNtCAdmissionUnix(t *testing.T) {
+	t.Parallel()
+
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix-domain sockets are not the Windows NtC transport")
 	}
@@ -417,6 +423,8 @@ func TestNtCAdmissionUnix(t *testing.T) {
 }
 
 func TestNtCAdmissionConcurrentReservations(t *testing.T) {
+	t.Parallel()
+
 	for _, testCase := range []struct {
 		name        string
 		total       int
@@ -427,6 +435,7 @@ func TestNtCAdmissionConcurrentReservations(t *testing.T) {
 		{name: "per_ip_limit", total: 3, perIP: 2, addressByte: 15},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
 			manager := NewConnectionManager(ConnectionManagerConfig{
 				MaxNtCConns: testCase.total, MaxNtCConnectionsPerIP: testCase.perIP,
 			})
