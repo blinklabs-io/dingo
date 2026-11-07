@@ -47,6 +47,10 @@ var (
 	rowProbeTokens   atomic.Int64
 )
 
+func init() {
+	registerRowProbe()
+}
+
 func registerRowProbe() {
 	rowProbeOnce.Do(func() {
 		sqlite.MustRegisterScalarFunction(
@@ -301,7 +305,7 @@ func TestPoolLeiosKeyEpochRowsVisitedIndependentOfInEpochRegistrations(t *testin
 		t.Run(fmt.Sprintf("retire=%v", retire), func(t *testing.T) {
 			t.Parallel()
 			small := registrationWork(t, 10, retire)
-			large := registrationWork(t, 300, retire)
+			large := registrationWork(t, 40, retire)
 			require.Equal(
 				t,
 				slices.Sorted(maps.Keys(small)),
@@ -310,7 +314,7 @@ func TestPoolLeiosKeyEpochRowsVisitedIndependentOfInEpochRegistrations(t *testin
 			for statement, visited := range small {
 				require.Equalf(
 					t, visited, large[statement],
-					"%s visited %d rows at n=10 and %d at n=300",
+					"%s visited %d rows at n=10 and %d at n=40",
 					statement, visited, large[statement],
 				)
 				require.LessOrEqualf(

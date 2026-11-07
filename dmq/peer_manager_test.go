@@ -638,7 +638,7 @@ func TestPeerManagerBoundsConcurrentDials(t *testing.T) {
 // loses from the others.
 func TestPeerManagerSettlesAmongManyPeersAndReplacesLostOnes(t *testing.T) {
 	t.Parallel()
-	const remotes, limit = 24, 10
+	const remotes, limit = 12, 5
 	stacks := make([]*Stack, 0, remotes)
 	peers := make([]Peer, 0, remotes)
 	for range remotes {

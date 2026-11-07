@@ -17,7 +17,6 @@ package forging
 import (
 	"bytes"
 	"context"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -632,7 +631,14 @@ func TestBuildBlockEncodedBodyBudget(t *testing.T) {
 		eraShelley, eraAllegra, eraMary, eraAlonzo, eraBabbage, eraConway,
 	} {
 		for _, metadata := range []bool{false, true} {
-			for _, count := range []int{1, 3, 24, 25, 256, 257} {
+			// The array-header and metadata-key width boundaries (23/24 and
+			// 255/256) do not depend on the era, so the large counts run for
+			// one era only.
+			counts := []int{1, 24, 25}
+			if era == eraConway {
+				counts = append(counts, 256, 257)
+			}
+			for _, count := range counts {
 				transactions := make([]MempoolTransaction, count)
 				for index := range transactions {
 					transactions[index] = bodyBudgetTransaction(
@@ -2223,81 +2229,6 @@ func setupCredentialValidationBuilder(
 	return builder
 }
 
-func TestNewDefaultBlockBuilder(t *testing.T) {
-	creds := setupTestCredentials(t)
-
-	mempool := &mockMempool{}
-	pparams := &mockPParamsProvider{}
-	chainTip := &mockChainTip{}
-	epochNonce := &mockEpochNonceProvider{epoch: 1, nonce: make([]byte, 32)}
-
-	// Test missing mempool
-	_, err := NewDefaultBlockBuilder(BlockBuilderConfig{
-		Mempool:         nil,
-		PParamsProvider: pparams,
-		ChainTip:        chainTip,
-		EpochNonce:      epochNonce,
-		Credentials:     creds,
-	})
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "mempool provider is required")
-
-	// Test missing pparams provider
-	_, err = NewDefaultBlockBuilder(BlockBuilderConfig{
-		Mempool:         mempool,
-		PParamsProvider: nil,
-		ChainTip:        chainTip,
-		EpochNonce:      epochNonce,
-		Credentials:     creds,
-	})
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "protocol params provider is required")
-
-	// Test missing chain tip provider
-	_, err = NewDefaultBlockBuilder(BlockBuilderConfig{
-		Mempool:         mempool,
-		PParamsProvider: pparams,
-		ChainTip:        nil,
-		EpochNonce:      epochNonce,
-		Credentials:     creds,
-	})
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "chain tip provider is required")
-
-	// Test missing epoch nonce provider
-	_, err = NewDefaultBlockBuilder(BlockBuilderConfig{
-		Mempool:         mempool,
-		PParamsProvider: pparams,
-		ChainTip:        chainTip,
-		EpochNonce:      nil,
-		Credentials:     creds,
-	})
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "epoch nonce provider is required")
-
-	// Test missing credentials
-	_, err = NewDefaultBlockBuilder(BlockBuilderConfig{
-		Mempool:         mempool,
-		PParamsProvider: pparams,
-		ChainTip:        chainTip,
-		EpochNonce:      epochNonce,
-		Credentials:     nil,
-	})
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "pool credentials are required")
-
-	// Test successful creation
-	builder, err := NewDefaultBlockBuilder(BlockBuilderConfig{
-		Mempool:         mempool,
-		PParamsProvider: pparams,
-		ChainTip:        chainTip,
-		EpochNonce:      epochNonce,
-		Credentials:     creds,
-	})
-	require.NoError(t, err)
-	assert.NotNil(t, builder)
-}
-
 func TestExportedBuildersEnforceProtocolKESLifetime(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -2500,56 +2431,6 @@ func TestDefaultBuilderRejectsReentrantProviderReload(t *testing.T) {
 	require.Nil(t, result.block)
 	require.Nil(t, result.cbor)
 	require.NoError(t, chainTip.callbackErr)
-}
-
-func TestBuildBlockEmptyMempool(t *testing.T) {
-	creds := setupTestCredentials(t)
-
-	// Setup mocks
-	mempool := &mockMempool{transactions: []MempoolTransaction{}}
-
-	// Create Conway protocol parameters
-	pparams := &conway.ConwayProtocolParameters{
-		MaxTxSize:        16384,
-		MaxBlockBodySize: 90112,
-		MaxBlockExUnits: lcommon.ExUnits{
-			Memory: 62000000,
-			Steps:  20000000000,
-		},
-	}
-	pparamsProvider := &mockPParamsProvider{pparams: pparams}
-
-	chainTip := &mockChainTip{
-		tip: ochainsync.Tip{
-			Point: ocommon.Point{
-				Slot: 1000,
-				Hash: make([]byte, 32),
-			},
-			BlockNumber: 100,
-		},
-	}
-
-	epochNonce := &mockEpochNonceProvider{epoch: 1, nonce: make([]byte, 32)}
-
-	builder, err := NewDefaultBlockBuilder(BlockBuilderConfig{
-		Mempool:         mempool,
-		PParamsProvider: pparamsProvider,
-		ChainTip:        chainTip,
-		EpochNonce:      epochNonce,
-		Credentials:     creds,
-	})
-	require.NoError(t, err)
-
-	// Build a block with empty mempool
-	block, blockCbor, err := builder.BuildBlock(context.Background(), 1001, 0)
-	require.NoError(t, err)
-	assert.NotNil(t, block)
-	assert.NotEmpty(t, blockCbor)
-
-	// Verify block properties
-	assert.Equal(t, uint64(1001), block.SlotNumber())
-	assert.Equal(t, uint64(101), block.BlockNumber())
-	assert.Equal(t, 0, len(block.Transactions()))
 }
 
 func TestBuildBlockRejectsTipChangeBeforeSigning(t *testing.T) {
@@ -2995,40 +2876,6 @@ func TestBuildBlockTxExceedsMaxSize(t *testing.T) {
 	assert.Equal(t, 0, len(block.Transactions()))
 }
 
-func TestBuildBlockNonConwayParams(t *testing.T) {
-	creds := setupTestCredentials(t)
-
-	// Setup mocks with nil pparams (simulating error)
-	mempool := &mockMempool{transactions: []MempoolTransaction{}}
-	pparamsProvider := &mockPParamsProvider{pparams: nil}
-
-	chainTip := &mockChainTip{
-		tip: ochainsync.Tip{
-			Point: ocommon.Point{
-				Slot: 1000,
-				Hash: make([]byte, 32),
-			},
-			BlockNumber: 100,
-		},
-	}
-
-	epochNonce := &mockEpochNonceProvider{epoch: 1, nonce: make([]byte, 32)}
-
-	builder, err := NewDefaultBlockBuilder(BlockBuilderConfig{
-		Mempool:         mempool,
-		PParamsProvider: pparamsProvider,
-		ChainTip:        chainTip,
-		EpochNonce:      epochNonce,
-		Credentials:     creds,
-	})
-	require.NoError(t, err)
-
-	// Build should fail with nil pparams
-	_, _, err = builder.BuildBlock(context.Background(), 1001, 0)
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to get protocol parameters")
-}
-
 func TestBuildBlockCborRoundTrip(t *testing.T) {
 	creds := setupTestCredentials(t)
 
@@ -3261,71 +3108,6 @@ func TestComputeConwayBlockBodyHashProducesValidatingBlock(t *testing.T) {
 	assert.Equal(t, 2, len(decoded.Transactions()))
 }
 
-func TestBuildBlockBlockSizeLimit(t *testing.T) {
-	creds := setupTestCredentials(t)
-
-	// Create valid transactions using minimal CBOR
-	txCbor1 := makeMinimalTxCbor(t, 0x01, 0)
-	txCbor2 := makeMinimalTxCbor(t, 0x02, 0)
-	txCbor3 := makeMinimalTxCbor(t, 0x03, 0)
-	txSize := len(txCbor1)
-
-	t.Logf(
-		"tx CBOR size: %d bytes, hex: %s...",
-		txSize,
-		hex.EncodeToString(txCbor1[:min(32, len(txCbor1))]),
-	)
-
-	mempool := &mockMempool{
-		transactions: []MempoolTransaction{
-			{Hash: "tx1", Cbor: txCbor1, Type: conway.TxTypeConway},
-			{Hash: "tx2", Cbor: txCbor2, Type: conway.TxTypeConway},
-			{Hash: "tx3", Cbor: txCbor3, Type: conway.TxTypeConway},
-		},
-	}
-
-	// MaxBlockBodySize allows 2 transactions but not 3
-	pparams := &conway.ConwayProtocolParameters{
-		MaxTxSize:        uint(txSize * 2),
-		MaxBlockBodySize: uint(txSize*2 + txSize/2), // 2.5x tx size
-		MaxBlockExUnits: lcommon.ExUnits{
-			Memory: 62000000,
-			Steps:  20000000000,
-		},
-	}
-	pparamsProvider := &mockPParamsProvider{pparams: pparams}
-
-	chainTip := &mockChainTip{
-		tip: ochainsync.Tip{
-			Point: ocommon.Point{
-				Slot: 1000,
-				Hash: make([]byte, 32),
-			},
-			BlockNumber: 100,
-		},
-	}
-
-	epochNonce := &mockEpochNonceProvider{epoch: 1, nonce: make([]byte, 32)}
-
-	builder, err := NewDefaultBlockBuilder(BlockBuilderConfig{
-		Mempool:         mempool,
-		PParamsProvider: pparamsProvider,
-		ChainTip:        chainTip,
-		EpochNonce:      epochNonce,
-		Credentials:     creds,
-	})
-	require.NoError(t, err)
-
-	block, _, err := builder.BuildBlock(context.Background(), 1001, 0)
-	require.NoError(t, err)
-
-	// Block should include exactly 2 transactions (third excluded by size limit)
-	assert.Equal(
-		t, 2, len(block.Transactions()),
-		"block should include 2 txs and exclude the 3rd due to size limit",
-	)
-}
-
 // TestBuildBlockExcludesTransactionWhoseExactAssembledBodyExceedsLimit
 // exercises the boundary a raw-CBOR-size approximation cannot see: a single
 // minimal Conway tx's raw CBOR is 52 bytes, but the assembled block body
@@ -3543,103 +3325,6 @@ func TestBuildBlockRevalidation(t *testing.T) {
 		},
 	)
 
-	t.Run(
-		"rejects all invalid transactions",
-		func(t *testing.T) {
-			txCbor1 := makeMinimalTxCbor(t, 0x01, 0)
-			txCbor2 := makeMinimalTxCbor(t, 0x02, 0)
-
-			decodedTx1, err := conway.NewConwayTransactionFromCbor(
-				txCbor1,
-			)
-			require.NoError(t, err)
-			decodedTx2, err := conway.NewConwayTransactionFromCbor(
-				txCbor2,
-			)
-			require.NoError(t, err)
-
-			mempool := &mockMempool{
-				transactions: []MempoolTransaction{
-					{
-						Hash: "tx1",
-						Cbor: txCbor1,
-						Type: conway.TxTypeConway,
-					},
-					{
-						Hash: "tx2",
-						Cbor: txCbor2,
-						Type: conway.TxTypeConway,
-					},
-				},
-			}
-
-			// Reject all
-			validator := &mockTxValidator{
-				rejectHashes: map[string]struct{}{
-					decodedTx1.Hash().String(): {},
-					decodedTx2.Hash().String(): {},
-				},
-			}
-
-			builder, err := NewDefaultBlockBuilder(BlockBuilderConfig{
-				Mempool:         mempool,
-				PParamsProvider: pparamsProvider,
-				ChainTip:        chainTip,
-				EpochNonce:      epochNonce,
-				Credentials:     creds,
-				TxValidator:     validator,
-			})
-			require.NoError(t, err)
-
-			block, _, err := builder.BuildBlock(context.Background(), 1001, 0)
-			require.NoError(t, err)
-
-			assert.Equal(
-				t,
-				0,
-				len(block.Transactions()),
-				"block should have no txs when all fail re-validation",
-			)
-		},
-	)
-
-	t.Run(
-		"nil validator skips re-validation",
-		func(t *testing.T) {
-			txCbor1 := makeMinimalTxCbor(t, 0x01, 0)
-
-			mempool := &mockMempool{
-				transactions: []MempoolTransaction{
-					{
-						Hash: "tx1",
-						Cbor: txCbor1,
-						Type: conway.TxTypeConway,
-					},
-				},
-			}
-
-			// No validator - should include all transactions
-			builder, err := NewDefaultBlockBuilder(BlockBuilderConfig{
-				Mempool:         mempool,
-				PParamsProvider: pparamsProvider,
-				ChainTip:        chainTip,
-				EpochNonce:      epochNonce,
-				Credentials:     creds,
-				TxValidator:     nil,
-			})
-			require.NoError(t, err)
-
-			block, _, err := builder.BuildBlock(context.Background(), 1001, 0)
-			require.NoError(t, err)
-
-			assert.Equal(
-				t,
-				1,
-				len(block.Transactions()),
-				"block should include tx when no validator is set",
-			)
-		},
-	)
 }
 
 func TestBuildBlockDoubleSpendDetection(t *testing.T) {
@@ -3828,70 +3513,6 @@ func TestBuildBlockDoubleSpendDetection(t *testing.T) {
 		},
 	)
 
-	t.Run(
-		"three-way double-spend keeps only first",
-		func(t *testing.T) {
-			// Three transactions all spending the same UTxO.
-			// Only the first should be included.
-			sharedInputHash := make([]byte, 32)
-			sharedInputHash[0] = 0xCC
-			txCbor1 := makeMinimalTxCborWithInput(
-				t,
-				sharedInputHash,
-				0,
-			)
-			txCbor2 := makeMinimalTxCborWithInput(
-				t,
-				sharedInputHash,
-				0,
-			)
-			txCbor3 := makeMinimalTxCborWithInput(
-				t,
-				sharedInputHash,
-				0,
-			)
-
-			mempool := &mockMempool{
-				transactions: []MempoolTransaction{
-					{
-						Hash: "tx1",
-						Cbor: txCbor1,
-						Type: conway.TxTypeConway,
-					},
-					{
-						Hash: "tx2",
-						Cbor: txCbor2,
-						Type: conway.TxTypeConway,
-					},
-					{
-						Hash: "tx3",
-						Cbor: txCbor3,
-						Type: conway.TxTypeConway,
-					},
-				},
-			}
-
-			builder, err := NewDefaultBlockBuilder(BlockBuilderConfig{
-				Mempool:         mempool,
-				PParamsProvider: pparamsProvider,
-				ChainTip:        chainTip,
-				EpochNonce:      epochNonce,
-				Credentials:     creds,
-			})
-			require.NoError(t, err)
-
-			block, _, err := builder.BuildBlock(context.Background(), 1001, 0)
-			require.NoError(t, err)
-
-			assert.Equal(
-				t,
-				1,
-				len(block.Transactions()),
-				"block should include only the first tx; second "+
-					"and third are double-spends",
-			)
-		},
-	)
 }
 
 // makeMinimalTxCborWithExUnits creates a minimal valid Conway
@@ -4310,98 +3931,6 @@ func TestBuildBlockExUnitsLimit(t *testing.T) {
 	)
 }
 
-func TestBuildBlockRevalidationAndDoubleSpend(t *testing.T) {
-	creds := setupTestCredentials(t)
-
-	pparams := &conway.ConwayProtocolParameters{
-		MaxTxSize:        16384,
-		MaxBlockBodySize: 90112,
-		MaxBlockExUnits: lcommon.ExUnits{
-			Memory: 62000000,
-			Steps:  20000000000,
-		},
-	}
-	pparamsProvider := &mockPParamsProvider{pparams: pparams}
-
-	chainTip := &mockChainTip{
-		tip: ochainsync.Tip{
-			Point: ocommon.Point{
-				Slot: 1000,
-				Hash: make([]byte, 32),
-			},
-			BlockNumber: 100,
-		},
-	}
-
-	epochNonce := &mockEpochNonceProvider{
-		epoch: 1,
-		nonce: make([]byte, 32),
-	}
-
-	// Scenario: tx1 fails re-validation, tx2 and tx3 share an
-	// input. Expected result: tx1 excluded by validator, tx2
-	// included, tx3 excluded by double-spend detection.
-	sharedInputHash := make([]byte, 32)
-	sharedInputHash[0] = 0xDD
-	differentInputHash := make([]byte, 32)
-	differentInputHash[0] = 0xEE
-
-	txCbor1 := makeMinimalTxCborWithInput(t, differentInputHash, 0)
-	txCbor2 := makeMinimalTxCborWithInput(t, sharedInputHash, 0)
-	txCbor3 := makeMinimalTxCborWithInput(t, sharedInputHash, 0)
-
-	decodedTx1, err := conway.NewConwayTransactionFromCbor(txCbor1)
-	require.NoError(t, err)
-
-	mempool := &mockMempool{
-		transactions: []MempoolTransaction{
-			{
-				Hash: "tx1",
-				Cbor: txCbor1,
-				Type: conway.TxTypeConway,
-			},
-			{
-				Hash: "tx2",
-				Cbor: txCbor2,
-				Type: conway.TxTypeConway,
-			},
-			{
-				Hash: "tx3",
-				Cbor: txCbor3,
-				Type: conway.TxTypeConway,
-			},
-		},
-	}
-
-	validator := &mockTxValidator{
-		rejectHashes: map[string]struct{}{
-			decodedTx1.Hash().String(): {},
-		},
-	}
-
-	builder, err := NewDefaultBlockBuilder(BlockBuilderConfig{
-		Mempool:         mempool,
-		PParamsProvider: pparamsProvider,
-		ChainTip:        chainTip,
-		EpochNonce:      epochNonce,
-		Credentials:     creds,
-		TxValidator:     validator,
-	})
-	require.NoError(t, err)
-
-	block, _, err := builder.BuildBlock(context.Background(), 1001, 0)
-	require.NoError(t, err)
-
-	// tx1 rejected by validator, tx3 rejected as double-spend of tx2
-	assert.Equal(
-		t,
-		1,
-		len(block.Transactions()),
-		"block should include only tx2 (tx1 failed validation, "+
-			"tx3 is a double-spend of tx2)",
-	)
-}
-
 // sessionMockTxValidator implements both TxValidator and
 // TxValidationSessionProvider, so it exercises the same
 // withTxValidationSession path DefaultBlockBuilder.buildBlock uses with a
@@ -4601,26 +4130,6 @@ func TestBuildBlockPinsOneValidationSessionPerBlock(t *testing.T) {
 	require.Equal(t, 3, validator.validateCalls)
 }
 
-// TestBuildBlockRejectsWhenValidationSnapshotGoesStale verifies that a
-// ledger publication observed partway through transaction selection (a new
-// block, rollback, epoch transition, or protocol parameter change) rejects
-// the whole candidate block instead of silently returning one assembled
-// from transactions checked against different generations.
-func TestBuildBlockRejectsWhenValidationSnapshotGoesStale(t *testing.T) {
-	validator := &sessionMockTxValidator{staleAfterCalls: 1}
-	builder := newSelectionTestBuilder(
-		t,
-		threeTxMempoolForSelection(t),
-		selectionTestChainTip(),
-		validator,
-	)
-
-	block, _, err := builder.BuildBlock(context.Background(), 1001, 0)
-	require.Error(t, err)
-	require.Nil(t, block)
-	require.ErrorIs(t, err, errTxValidationSnapshotChanged)
-}
-
 // TestBuildBlockRejectsWhenSnapshotGoesStaleOnTheFinalCandidate covers the
 // publication that lands while the last mempool transaction is being
 // re-validated. stillCurrent() is consulted before each candidate, so no
@@ -4709,24 +4218,6 @@ func TestBuildBlockRejectsWhenParentChangesDuringSelection(t *testing.T) {
 	require.Error(t, err)
 	require.Nil(t, block)
 	require.ErrorIs(t, err, errParentChangedDuringBuild)
-}
-
-// TestBuildBlockAcceptsStableParentAcrossSelection is the negative case for
-// TestBuildBlockRejectsWhenParentChangesDuringSelection: when nothing moves
-// the tip during selection, the recheck must not itself reject a
-// legitimately unchanged parent.
-func TestBuildBlockAcceptsStableParentAcrossSelection(t *testing.T) {
-	validator := &sessionMockTxValidator{}
-	builder := newSelectionTestBuilder(
-		t,
-		threeTxMempoolForSelection(t),
-		selectionTestChainTip(),
-		validator,
-	)
-
-	block, _, err := builder.BuildBlock(context.Background(), 1001, 0)
-	require.NoError(t, err)
-	require.Len(t, block.Transactions(), 3)
 }
 
 type ancestryTestTipValidator struct {

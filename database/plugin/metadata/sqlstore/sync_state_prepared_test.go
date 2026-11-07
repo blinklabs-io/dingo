@@ -39,6 +39,7 @@ func TestSyncStatePreparedReadKeepsSeparateReadPool(t *testing.T) {
 		"file:"+path+"?mode=ro&_pragma=synchronous(OFF)",
 	)
 	require.NoError(t, err)
+	seedMigratedSQLite(t, writeDB)
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
 	store, err := New(

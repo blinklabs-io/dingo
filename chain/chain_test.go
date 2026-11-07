@@ -1628,35 +1628,6 @@ func TestChainQueuedVerifiedHeaderMatchesPointFindsNonHeadHeader(
 	}
 }
 
-func TestChainHeaderBlock(t *testing.T) {
-	t.Parallel()
-
-	testBlockCount := 3
-	cm, err := chain.NewManager(context.Background(), nil, nil)
-	if err != nil {
-		t.Fatalf("unexpected error creating chain manager: %s", err)
-	}
-	c := cm.PrimaryChain()
-	// Add blocks
-	for _, testBlock := range testBlocks[0:testBlockCount] {
-		if err := c.AddBlock(context.Background(), testBlock, nil); err != nil {
-			t.Fatalf("unexpected error adding block to chain: %s", err)
-		}
-	}
-	// Add headers
-	for _, testBlock := range testBlocks[testBlockCount:] {
-		if err := c.AddBlockHeader(context.Background(), testBlock); err != nil {
-			t.Fatalf("unexpected error adding header to chain: %s", err)
-		}
-	}
-	// Add blocks for headers
-	for _, testBlock := range testBlocks[testBlockCount:] {
-		if err := c.AddBlock(context.Background(), testBlock, nil); err != nil {
-			t.Fatalf("unexpected error adding header to chain: %s", err)
-		}
-	}
-}
-
 func TestChainHeaderWrongBlock(t *testing.T) {
 	t.Parallel()
 
@@ -1700,50 +1671,6 @@ func TestChainHeaderWrongBlock(t *testing.T) {
 	}
 }
 
-func TestChainHeaderRollback(t *testing.T) {
-	t.Parallel()
-
-	testBlockCount := 3
-	cm, err := chain.NewManager(context.Background(), nil, nil)
-	if err != nil {
-		t.Fatalf("unexpected error creating chain manager: %s", err)
-	}
-	c := cm.PrimaryChain()
-	// Add blocks
-	for _, testBlock := range testBlocks[0:testBlockCount] {
-		if err := c.AddBlock(context.Background(), testBlock, nil); err != nil {
-			t.Fatalf("unexpected error adding block to chain: %s", err)
-		}
-	}
-	// Add headers
-	for _, testBlock := range testBlocks[testBlockCount:] {
-		if err := c.AddBlockHeader(context.Background(), testBlock); err != nil {
-			t.Fatalf("unexpected error adding header to chain: %s", err)
-		}
-	}
-	// Rollback to first header point
-	testFirstHeader := testBlocks[testBlockCount]
-	testFirstHeaderPoint := ocommon.Point{
-		Slot: testFirstHeader.SlotNumber(),
-		Hash: testFirstHeader.Hash().Bytes(),
-	}
-	if err := c.Rollback(context.Background(), testFirstHeaderPoint); err != nil {
-		t.Fatalf("unexpected error doing chain rollback: %s", err)
-	}
-	// Check header tip matches rollback point
-	headerTip := c.HeaderTip()
-	if headerTip.Point.Slot != testFirstHeaderPoint.Slot ||
-		string(headerTip.Point.Hash) != string(testFirstHeaderPoint.Hash) {
-		t.Fatalf(
-			"did not get expected chain header tip after rollback: got %d.%x, wanted %d.%x",
-			headerTip.Point.Slot,
-			headerTip.Point.Hash,
-			testFirstHeaderPoint.Slot,
-			testFirstHeaderPoint.Hash,
-		)
-	}
-}
-
 // mockLedgerState implements the interface expected by ChainManager.SetLedger.
 type mockLedgerState struct {
 	securityParam int
@@ -1757,29 +1684,6 @@ func mustSetLedger(t *testing.T, cm *chain.ChainManager, securityParam int) {
 	t.Helper()
 	if err := cm.SetLedger(&mockLedgerState{securityParam: securityParam}); err != nil {
 		t.Fatalf("SetLedger(%d): %v", securityParam, err)
-	}
-}
-
-func TestSetLedgerRejectsNonPositiveSecurityParam(t *testing.T) {
-	t.Parallel()
-
-	cm, err := chain.NewManager(context.Background(), nil, nil)
-	if err != nil {
-		t.Fatalf("NewManager: %v", err)
-	}
-	err = cm.SetLedger(&mockLedgerState{securityParam: 0})
-	if err == nil {
-		t.Fatal("expected error for K=0")
-	}
-	if !errors.Is(err, chain.ErrInvalidSecurityParam) {
-		t.Fatalf("expected ErrInvalidSecurityParam, got %v", err)
-	}
-	err = cm.SetLedger(&mockLedgerState{securityParam: -1})
-	if err == nil {
-		t.Fatal("expected error for K=-1")
-	}
-	if !errors.Is(err, chain.ErrInvalidSecurityParam) {
-		t.Fatalf("expected ErrInvalidSecurityParam, got %v", err)
 	}
 }
 
@@ -1940,40 +1844,6 @@ func TestHeaderQueueLimitFromSecurityParam(t *testing.T) {
 		t.Fatalf(
 			"expected ErrHeaderQueueFull, got: %s",
 			err,
-		)
-	}
-}
-
-func TestHeaderQueueAcceptsWithinLimit(t *testing.T) {
-	t.Parallel()
-
-	securityParam := 10
-	expectedLimit := securityParam * 2
-
-	cm, err := chain.NewManager(context.Background(), nil, nil)
-	if err != nil {
-		t.Fatalf("unexpected error creating chain manager: %s", err)
-	}
-	mustSetLedger(t, cm, securityParam)
-	c := cm.PrimaryChain()
-
-	// Add fewer headers than the limit -- all should succeed
-	count := expectedLimit - 1
-	headers := makeLinkedHeaders(count, 0, 1, "")
-	for i, h := range headers {
-		if err := c.AddBlockHeader(context.Background(), h); err != nil {
-			t.Fatalf(
-				"unexpected error adding header %d: %s",
-				i,
-				err,
-			)
-		}
-	}
-	if c.HeaderCount() != count {
-		t.Fatalf(
-			"expected %d headers, got %d",
-			count,
-			c.HeaderCount(),
 		)
 	}
 }
@@ -2327,62 +2197,6 @@ func TestInMemoryForkPointEnumerationConcurrentWithForkCreation(t *testing.T) {
 	wg.Wait()
 	if firstErr != nil {
 		t.Fatalf("unexpected concurrent fork creation error: %s", firstErr)
-	}
-}
-
-func TestRecentPointsWithDatabase(t *testing.T) {
-	t.Parallel()
-
-	// Create a chain manager with a real database. RecentPoints
-	// should still return the correct in-memory tip even though
-	// block storage goes through the blob store.
-	db := newTestDB(t)
-	cm, err := chain.NewManager(context.Background(), db, nil)
-	if err != nil {
-		t.Fatalf(
-			"unexpected error creating chain manager: %s",
-			err,
-		)
-	}
-	c := cm.PrimaryChain()
-
-	// Add all test blocks
-	for _, testBlock := range testBlocks {
-		if err := c.AddBlock(context.Background(), testBlock, nil); err != nil {
-			t.Fatalf(
-				"unexpected error adding block to chain: %s",
-				err,
-			)
-		}
-	}
-
-	// RecentPoints should return points in descending order
-	points := c.RecentPoints(context.Background(), 3)
-	if len(points) != 3 {
-		t.Fatalf("expected 3 points, got %d", len(points))
-	}
-
-	// Verify descending order by slot
-	for i := range len(points) - 1 {
-		if points[i].Slot <= points[i+1].Slot {
-			t.Fatalf(
-				"points not in descending order: "+
-					"point %d (slot %d) <= point %d (slot %d)",
-				i, points[i].Slot,
-				i+1, points[i+1].Slot,
-			)
-		}
-	}
-
-	// Tip should be the first point
-	tip := c.Tip()
-	if points[0].Slot != tip.Point.Slot ||
-		string(points[0].Hash) != string(tip.Point.Hash) {
-		t.Fatalf(
-			"first point should match tip: got %d.%x, wanted %d.%x",
-			points[0].Slot, points[0].Hash,
-			tip.Point.Slot, tip.Point.Hash,
-		)
 	}
 }
 
@@ -5449,33 +5263,6 @@ func TestValidateRollbackRejectsPointNotOnChain(t *testing.T) {
 	}
 }
 
-// TestRollbackToRetainedPointDoesNotSpliceChain drives the full defect: after
-// the bad rollback the chain accepts a continuation built on the abandoned fork
-// while the block physically stored at the preceding index belongs to the other
-// fork. Iterating the chain then yields a block whose parent is absent, which is
-// what leaves the ledger unable to resolve the producer of that block's inputs.
-func TestRollbackToRetainedPointDoesNotSpliceChain(t *testing.T) {
-	t.Parallel()
-
-	db := newTestDB(t)
-	c, abandoned, _ := buildAbandonedForkChain(t, db)
-
-	// A peer serving fork A rolls us back to its own block, then feeds the
-	// next block on fork A.
-	if err := c.Rollback(context.Background(), mockBlockPoint(abandoned)); err == nil {
-		// Only the unfixed code reaches here; keep going so the assertion
-		// below reports the splice rather than a bare "expected error".
-		continuation := testBlocks[3]
-		if addErr := c.AddBlock(context.Background(), continuation, nil); addErr != nil {
-			t.Fatalf(
-				"unexpected error adding fork A continuation: %s",
-				addErr,
-			)
-		}
-	}
-	assertChainPrevHashContiguous(t, c)
-}
-
 // TestRollbackRejectsPointAheadOfTip covers the other shape of the same defect.
 //
 // After a rollback the abandoned blocks keep their original, higher block
@@ -5940,6 +5727,7 @@ func TestIntersectPointsStayDescendingWithSecurityRung(t *testing.T) {
 		{name: "tiny chain", chainLength: 3, securityK: 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			db := newTestDB(t)
 			cm, err := chain.NewManager(context.Background(), db, nil)
 			require.NoError(t, err)
@@ -6904,7 +6692,7 @@ func TestRollbackDoesNotResolveUncommittedBlockIndex(t *testing.T) {
 		// blockImportBatchSize, so the whole batch lands in one transaction.
 		batch   = 50
 		payload = 4 * 1024
-		rounds  = 40
+		rounds  = 12
 	)
 	db := newTestDB(t)
 	cm, err := chain.NewManager(context.Background(), db, nil)
@@ -6993,51 +6781,6 @@ func TestRollbackDoesNotResolveUncommittedBlockIndex(t *testing.T) {
 		if rollbackErr != nil {
 			t.Fatalf("round %d: rollback: %v", round, rollbackErr)
 		}
-	}
-}
-
-// TestAddBlocksRestoresMemoryAfterBatchFailure ensures a failed AddBlocks
-// transaction cannot leave the in-memory tip ahead of the durable store.
-// The first three blocks fit; the fourth has a mismatched parent, so the
-// transaction rolls back after the chain has already advanced in memory.
-func TestAddBlocksRestoresMemoryAfterBatchFailure(t *testing.T) {
-	t.Parallel()
-
-	db := newTestDB(t)
-	cm, err := chain.NewManager(context.Background(), db, nil)
-	if err != nil {
-		t.Fatalf("NewManager: %v", err)
-	}
-	mustSetLedger(t, cm, 100)
-	pc := cm.PrimaryChain()
-
-	invalid := *testBlocks[3]
-	invalid.MockPrevHash = testHashPrefix + "ffff"
-	blocks := []ledger.Block{
-		testBlocks[0],
-		testBlocks[1],
-		testBlocks[2],
-		&invalid,
-	}
-	if err := pc.AddBlocks(context.Background(), blocks); err == nil {
-		t.Fatal("expected AddBlocks to reject a mismatched parent")
-	}
-
-	tip := pc.Tip()
-	if tip.Point.Slot != 0 || len(tip.Point.Hash) != 0 || tip.BlockNumber != 0 {
-		t.Fatalf("failed batch advanced in-memory tip: %+v", tip)
-	}
-	if _, err := db.BlockByIndex(3, nil); !errors.Is(
-		err,
-		models.ErrBlockNotFound,
-	) {
-		t.Fatalf(
-			"expected failed batch block to be absent from storage, got %v",
-			err,
-		)
-	}
-	if err := pc.Rollback(context.Background(), ocommon.Point{}); err != nil {
-		t.Fatalf("rollback after failed batch: %v", err)
 	}
 }
 

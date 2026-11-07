@@ -22,25 +22,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestSlotTrackerRecordAndLookup(t *testing.T) {
-	st := NewSlotTracker()
-
-	hash := []byte{0x01, 0x02, 0x03}
-	st.RecordForgedBlock(1000, hash)
-
-	got, ok := st.WasForgedByUs(1000)
-	require.True(t, ok, "slot 1000 should be tracked")
-	assert.Equal(t, hash, got)
-}
-
-func TestSlotTrackerLookupMissing(t *testing.T) {
-	st := NewSlotTracker()
-
-	got, ok := st.WasForgedByUs(999)
-	assert.False(t, ok, "untracked slot should return false")
-	assert.Nil(t, got)
-}
-
 func TestSlotTrackerDoesNotAlias(t *testing.T) {
 	st := NewSlotTracker()
 

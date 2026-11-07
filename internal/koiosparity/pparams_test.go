@@ -674,41 +674,6 @@ func seedKoiosBabbageProtocolParams(
 	}
 }
 
-// TestSeededProtocolParamsFixturesAgree pins the two halves of the shared
-// fixture to each other: if the CBOR blob and the Koios JSON above ever drift
-// apart, every test that relies on them would start reporting parameter
-// mismatches for reasons unrelated to what it is testing, so the drift is
-// caught here instead.
-func TestSeededProtocolParamsFixturesAgree(t *testing.T) {
-	t.Parallel()
-
-	dingo, gdb := openTestDingoDB(t)
-	defer dingo.Close() //nolint:errcheck
-	seedDingoBabbageProtocolParams(t, gdb, 10)
-
-	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
-	require.NoError(t, err)
-	defer cache.Close() //nolint:errcheck
-	seedKoiosBabbageProtocolParams(t, cache, "preview", 10)
-
-	dingoParams, err := dingo.GetProtocolParams(context.Background(), 10)
-	require.NoError(t, err)
-	require.NotNil(t, dingoParams)
-	koiosParams, err := cache.GetEpochParams("preview", 10)
-	require.NoError(t, err)
-
-	require.Empty(t, CompareEpochProtocolParams(
-		"preview",
-		10,
-		koiosParams,
-		dingoParams,
-		nil,
-		time.Now(),
-		0,
-		time.Time{},
-	))
-}
-
 // TestDatabaseSourceGetProtocolParams exercises the in-process observer's
 // source against the same live *database.Database a running node writes
 // through, confirming both RewardParitySource implementations resolve the

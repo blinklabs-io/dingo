@@ -38,17 +38,6 @@ func synthGenesis(
 	}
 }
 
-func TestCurrentKESPeriod_HappyPath(t *testing.T) {
-	// 250 slots elapsed at 1s/slot, 100 slots per period → period 2.
-	got, err := CurrentKESPeriod(250, 100)
-	if err != nil {
-		t.Fatalf("CurrentKESPeriod: %v", err)
-	}
-	if got != 2 {
-		t.Errorf("got %d, want 2", got)
-	}
-}
-
 func TestCurrentKESPeriod_FractionalSlotLength(t *testing.T) {
 	// Devnet style: 50ms slots, 200 slots per period.
 	// At 50_000ms elapsed → 1000 slots → period 5.

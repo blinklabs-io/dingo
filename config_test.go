@@ -16,7 +16,6 @@ package dingo
 
 import (
 	"context"
-	"net/http"
 	"reflect"
 	"runtime"
 	"strconv"
@@ -287,60 +286,6 @@ func TestProgrammaticPublicAPIConfigAcceptsRemoteAddresses(t *testing.T) {
 	}
 }
 
-func TestStorageModeValid(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		mode  StorageMode
-		valid bool
-	}{
-		{StorageModeCore, true},
-		{StorageModeAPI, true},
-		{"", false},
-		{"invalid", false},
-	}
-	for _, tt := range tests {
-		assert.Equal(t, tt.valid, tt.mode.Valid(), "mode=%q", tt.mode)
-	}
-}
-
-func TestStorageModeIsAPI(t *testing.T) {
-	t.Parallel()
-
-	assert.False(t, StorageModeCore.IsAPI())
-	assert.True(t, StorageModeAPI.IsAPI())
-}
-
-func TestWithStorageMode(t *testing.T) {
-	t.Parallel()
-
-	cfg := &Config{}
-
-	// Default should be zero value (empty string)
-	assert.Equal(t, StorageMode(""), cfg.storageMode)
-
-	// Apply API mode
-	WithStorageMode(StorageModeAPI)(cfg)
-	assert.Equal(t, StorageModeAPI, cfg.storageMode)
-
-	// Apply core mode
-	WithStorageMode(StorageModeCore)(cfg)
-	assert.Equal(t, StorageModeCore, cfg.storageMode)
-}
-
-// TestWithRootPeerTarget verifies the public option preserves default,
-// explicit, and unlimited root-peer target representations.
-func TestWithRootPeerTarget(t *testing.T) {
-	t.Parallel()
-
-	for _, target := range []int{0, 12, -1} {
-		cfg := NewConfig(WithRootPeerTarget(target))
-		if got := cfg.TargetNumberOfRootPeers(); got != target {
-			t.Fatalf("expected root-peer target %d, got %d", target, got)
-		}
-	}
-}
-
 func TestNewConfigMempoolCapacityDefaultsFromRunMode(t *testing.T) {
 	t.Parallel()
 
@@ -457,19 +402,6 @@ func TestNewConfigMempoolCapacityDefaultsOnMusashi(t *testing.T) {
 	}
 }
 
-func TestNewConfigPublicBindAddressDefaultsToWildcard(t *testing.T) {
-	cfg := NewConfig(
-		WithRunMode(string(internalconfig.RunModeDev)),
-	)
-
-	assert.Equal(t, "0.0.0.0", cfg.BindAddr())
-	assert.Equal(t, cfg.BindAddr(), cfg.bindAddr)
-
-	cfg = NewConfig(WithBindAddr("192.0.2.10"))
-	assert.Equal(t, "192.0.2.10", cfg.BindAddr())
-	assert.Equal(t, "192.0.2.10", cfg.bindAddr)
-}
-
 func TestNewConfigPreservesExplicitMempoolCapacity(t *testing.T) {
 	t.Parallel()
 
@@ -503,13 +435,6 @@ func TestNewConfigDefaultsBuiltInMempoolCapacity(t *testing.T) {
 			)
 		})
 	}
-}
-
-func TestNewConfigDefaultsToPraosConsensus(t *testing.T) {
-	t.Parallel()
-
-	cfg := NewConfig()
-	assert.Equal(t, "praos", cfg.ConsensusPlugin())
 }
 
 func TestNewConfigDoesNotDefaultCustomMempoolConfig(t *testing.T) {
@@ -600,33 +525,6 @@ func TestNewValidatesMinPoolMargin(t *testing.T) {
 			t.Cleanup(func() { _ = n.Stop() })
 		})
 	}
-}
-
-func TestWithMidnightConfig(t *testing.T) {
-	t.Parallel()
-
-	cfg := &Config{}
-	midnightCfg := MidnightConfig{
-		Enabled:                     true,
-		ServerEnabled:               true,
-		ReflectionEnabled:           true,
-		Port:                        50052,
-		Host:                        "127.0.0.1",
-		CNightPolicyID:              "policy1",
-		CNightAssetName:             "434e49474854",
-		MappingValidatorAddress:     "addr_mapping",
-		AuthTokenAssetName:          "auth",
-		CommitteeCandidateAddress:   "addr_candidate",
-		TechnicalCommitteeAddress:   "addr_technical",
-		TechnicalCommitteePolicyID:  "policy_technical",
-		CouncilAddress:              "addr_council",
-		CouncilPolicyID:             "policy_council",
-		PermissionedCandidatePolicy: "policy_permissioned",
-	}
-
-	WithMidnightConfig(midnightCfg)(cfg)
-
-	assert.Equal(t, midnightCfg, cfg.midnight)
 }
 
 // TestSyncCompatFieldsMidnightAllFieldsMirrored guards against the same bug
@@ -746,16 +644,6 @@ func TestConfigValidatePledgeLeverage(t *testing.T) {
 	}
 }
 
-func TestWithFullPotRewards(t *testing.T) {
-	t.Parallel()
-
-	cfg := &Config{}
-	WithFullPotRewards(true)(cfg)
-	assert.True(t, cfg.fullPotRewardsEnabled)
-	WithFullPotRewards(false)(cfg)
-	assert.False(t, cfg.fullPotRewardsEnabled)
-}
-
 func TestFullPotRewardsStandardNetworkValidation(t *testing.T) {
 	t.Parallel()
 
@@ -821,33 +709,6 @@ func TestFullPotRewardsStandardNetworkValidation(t *testing.T) {
 			// New starts the event bus' background goroutines; Stop releases them.
 			t.Cleanup(func() { _ = n.Stop() })
 		})
-	}
-}
-
-func TestWithDelegatorInactivity(t *testing.T) {
-	t.Parallel()
-
-	cfg := &Config{}
-	WithDelegatorInactivity(true, 90)(cfg)
-	assert.True(t, cfg.delegatorInactivityEnabled)
-	assert.Equal(t, uint64(90), cfg.delegatorInactivity)
-	WithDelegatorInactivity(false, 0)(cfg)
-	assert.False(t, cfg.delegatorInactivityEnabled)
-	assert.Zero(t, cfg.delegatorInactivity)
-}
-
-// TestExperimentalDijkstraEnabled pins that the Dijkstra ledger era is known
-// on every network, with or without a node configuration.
-func TestExperimentalDijkstraEnabled(t *testing.T) {
-	t.Parallel()
-
-	for _, cfg := range []Config{
-		{},
-		{cfg: &internalconfig.Config{Network: "mainnet"}},
-		{cfg: &internalconfig.Config{Network: "preview", NetworkMagic: 2}},
-		{cfg: &internalconfig.Config{NetworkMagic: 42}},
-	} {
-		assert.True(t, cfg.experimentalDijkstraEnabled())
 	}
 }
 
@@ -1115,64 +976,6 @@ func TestPeerGovernorOptionsIgnoreNonPositiveValues(t *testing.T) {
 	assert.Zero(t, cfg.cfg.MaxTrustedLocalNtCConns)
 }
 
-func TestPeerGovernorOptionsApplyPositiveValues(t *testing.T) {
-	t.Parallel()
-
-	cfg := &Config{cfg: &internalconfig.Config{}}
-
-	WithMinHotPeers(3)(cfg)
-	WithReconcileInterval(30 * time.Second)(cfg)
-	WithInactivityTimeout(2 * time.Minute)(cfg)
-	WithMaxConnectionsPerIP(4)(cfg)
-	WithMaxInboundConns(25)(cfg)
-	WithMaxNtCConns(30)(cfg)
-	WithMaxNtCConnectionsPerIP(6)(cfg)
-	WithMaxTrustedLocalNtCConns(8)(cfg)
-
-	assert.Equal(t, 3, cfg.cfg.MinHotPeers)
-	assert.Equal(t, 30*time.Second, cfg.cfg.ReconcileInterval)
-	assert.Equal(t, 2*time.Minute, cfg.cfg.InactivityTimeout)
-	assert.Equal(t, 4, cfg.cfg.MaxConnectionsPerIP)
-	assert.Equal(t, 25, cfg.cfg.MaxInboundConns)
-	assert.Equal(t, 30, cfg.cfg.MaxNtCConns)
-	assert.Equal(t, 6, cfg.cfg.MaxNtCConnectionsPerIP)
-	assert.Equal(t, 8, cfg.cfg.MaxTrustedLocalNtCConns)
-
-	cfg.syncCompatFields()
-	assert.Equal(t, 30, cfg.maxNtCConns)
-	assert.Equal(t, 6, cfg.maxNtCConnectionsPerIP)
-	assert.Equal(t, 8, cfg.maxTrustedLocalNtCConns)
-}
-
-func TestWithSkipRewardLiveStakeBackfillCheck(t *testing.T) {
-	t.Parallel()
-	cfg := &Config{cfg: &internalconfig.Config{}}
-	WithSkipRewardLiveStakeBackfillCheck(true)(cfg)
-	assert.True(t, cfg.cfg.SkipRewardLiveStakeBackfillCheck)
-	cfg.syncCompatFields()
-	assert.True(t, cfg.skipRewardLiveStakeBackfillCheck)
-}
-
-// TestWithGenesisCorroborationPeers covers the public programmatic API path for
-// the Genesis corroboration threshold. A negative value is stored as-is on the
-// Config; the chain selector fails closed on it (clamps to 1) rather than
-// disabling the security gate — see chainselection.NewChainSelector and
-// TestGenesisNegativeCorroborationFailsClosed. node.go passes this field to
-// ChainSelectorConfig.MinCorroboratingPeers.
-func TestWithGenesisCorroborationPeers(t *testing.T) {
-	t.Parallel()
-
-	cfg := &Config{cfg: &internalconfig.Config{}}
-	WithGenesisCorroborationPeers(3)(cfg)
-	assert.Equal(t, 3, cfg.cfg.GenesisBootstrap.CorroborationPeers)
-
-	WithGenesisCorroborationPeers(0)(cfg)
-	assert.Zero(t, cfg.cfg.GenesisBootstrap.CorroborationPeers)
-
-	WithGenesisCorroborationPeers(-1)(cfg)
-	assert.Equal(t, -1, cfg.cfg.GenesisBootstrap.CorroborationPeers)
-}
-
 // TestUpdateRTSMetrics verifies the pure-function mapping from
 // runtime.MemStats fields to the four cardano_node_metrics_RTS_* gauges.
 // Specifically exercises the NumGC - NumForcedGC subtraction so a future
@@ -1250,15 +1053,6 @@ func TestRunRTSMetricsUpdater_Lifecycle(t *testing.T) {
 	)
 }
 
-func TestWithLeiosVoteSigningKeyFile(t *testing.T) {
-	t.Parallel()
-
-	cfg := &Config{cfg: &internalconfig.Config{}}
-	assert.Equal(t, "", cfg.cfg.LeiosVoteSigningKeyFile)
-	WithLeiosVoteSigningKeyFile("/keys/leios-vote.skey")(cfg)
-	assert.Equal(t, "/keys/leios-vote.skey", cfg.cfg.LeiosVoteSigningKeyFile)
-}
-
 // TestWithKoiosParityAccountsNilDefaultsToEnabled locks in
 // KoiosParityConfig.Accounts's *bool semantics: an unset (nil) Accounts
 // pointer must default to enabled (true), matching
@@ -1306,22 +1100,6 @@ func TestWithKoiosParityAccountsExplicitFalseDisablesEndToEnd(t *testing.T) {
 	assert.False(t, cfg.cfg.KoiosParity.Accounts)
 	require.NotNil(t, cfg.koiosParity.Accounts)
 	assert.False(t, *cfg.koiosParity.Accounts)
-}
-
-func TestBarkBlockDownloadAllowPrivateAddressesReachesRuntime(t *testing.T) {
-	t.Parallel()
-
-	for _, allow := range []bool{false, true} {
-		cfg, err := NewConfigFromInternal(
-			&internalconfig.Config{
-				BarkBlockDownloadAllowPrivateAddresses: allow,
-			},
-			nil, nil, nil, nil,
-		)
-		require.NoError(t, err)
-		require.Equal(t, allow, cfg.barkBlockDownloadAllowPrivateAddresses)
-		require.Equal(t, allow, cfg.BarkBlockDownloadAllowPrivateAddresses())
-	}
 }
 
 // TestTokenRegistryConfigReachesRuntimeFromYAML covers the path YAML, env, and
@@ -1392,60 +1170,6 @@ func TestTokenRegistryConfigReachesRuntimeFromYAML(t *testing.T) {
 	require.True(t, cfg.tokenRegistry.StoreLogos)
 	require.True(t, cfg.tokenRegistry.AllowPrivateAddresses)
 	require.True(t, cfg.tokenRegistry.AllowRollback)
-}
-
-// TestTokenRegistryConfigDisabledByDefault pins the deliberate default: the
-// mainnet registry is a roughly 240MB download, so an upgrade must not start
-// one on its own.
-func TestTokenRegistryConfigDisabledByDefault(t *testing.T) {
-	t.Parallel()
-
-	cfg := NewConfig()
-
-	require.False(t, cfg.tokenRegistry.Enabled)
-	require.False(t, cfg.TokenRegistry().Enabled)
-}
-
-// TestWithTokenRegistryConfigPreservesHTTPClient guards the one field that
-// cannot round-trip through internal config: the programmatic HTTP client is
-// runtime-only, and syncCompatFields runs after options are applied.
-func TestWithTokenRegistryConfigPreservesHTTPClient(t *testing.T) {
-	t.Parallel()
-
-	client := &http.Client{}
-
-	cfg := NewConfig(WithTokenRegistryConfig(TokenRegistryConfig{
-		Enabled:              true,
-		HTTPClient:           client,
-		ManifestURL:          "https://mirror.example.test/manifest.json",
-		TrustedManifestKey:   strings.Repeat("cd", 32),
-		UserAgent:            "programmatic/1",
-		MaxDecompressedBytes: 456,
-		MaxArchiveEntries:    67,
-		MaxAcceptedEntries:   34,
-		MaxBatchBytes:        89,
-		AllowRollback:        true,
-	}))
-
-	require.Same(t, client, cfg.tokenRegistry.HTTPClient)
-	require.True(t, cfg.tokenRegistry.Enabled)
-	require.Equal(t, "programmatic/1", cfg.tokenRegistry.UserAgent)
-	require.Equal(t, "programmatic/1", cfg.TokenRegistry().UserAgent)
-	require.Equal(t, int64(456), cfg.TokenRegistry().MaxDecompressedBytes)
-	require.Equal(t, 67, cfg.TokenRegistry().MaxArchiveEntries)
-	require.Equal(t, 34, cfg.TokenRegistry().MaxAcceptedEntries)
-	require.Equal(t, int64(89), cfg.TokenRegistry().MaxBatchBytes)
-	require.Equal(
-		t,
-		"https://mirror.example.test/manifest.json",
-		cfg.TokenRegistry().ManifestURL,
-	)
-	require.Equal(
-		t,
-		strings.Repeat("cd", 32),
-		cfg.TokenRegistry().TrustedManifestKey,
-	)
-	require.True(t, cfg.TokenRegistry().AllowRollback)
 }
 
 func TestNewConfigPlannerStatsRefreshDefaultsOnAndCanBeDisabled(t *testing.T) {

@@ -33,6 +33,7 @@ func TestGovernanceProposalOrderBackfillUsesStoredBlockPosition(
 	t *testing.T,
 ) {
 	databasePath := filepath.Join(t.TempDir(), "metadata.sqlite")
+	migrations.SeedMigratedPrefix(t, databasePath, 32)
 	db, err := sql.Open("sqlite", "file:"+databasePath+"?"+testDBPragmas)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
@@ -52,7 +53,6 @@ func TestGovernanceProposalOrderBackfillUsesStoredBlockPosition(
 		require.NoError(t, runner.Run(context.Background()))
 	}
 
-	runTo(registry[:32])
 	storedHash := []byte{0x02, 0x02}
 	importedHash := []byte{0x01, 0x01}
 	_, err = db.Exec(
