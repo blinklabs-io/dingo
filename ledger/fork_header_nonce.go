@@ -17,10 +17,12 @@ package ledger
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"slices"
 
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -292,6 +294,56 @@ func (ls *LedgerState) verifyPeerForkTargetEpochAncestors(
 	return nil
 }
 
+// frozenCandidateNonceFromAncestor needs only the state before the freeze
+// cutoff. A later fetched block may have no applied nonce yet; reconstructing
+// the full epoch in that case decodes transaction bodies that cannot change
+// the candidate. Follow the intersection's own chain so a retained sibling
+// cannot supply the prefix nonce.
+func (ls *LedgerState) frozenCandidateNonceFromAncestor(
+	ctx context.Context,
+	sourceEpoch models.Epoch,
+	ancestor ocommon.Point,
+) ([]byte, error) {
+	cfg := ls.config.CardanoNodeConfig
+	if cfg == nil || cfg.ShelleyGenesisHash == "" {
+		return ls.frozenCandidateNonce(ctx, sourceEpoch)
+	}
+	if _, err := hex.DecodeString(cfg.ShelleyGenesisHash); err != nil {
+		return ls.frozenCandidateNonce(ctx, sourceEpoch)
+	}
+	cutoff, ready := ls.nextEpochNonceReadyCutoffSlot(sourceEpoch)
+	if ready && len(sourceEpoch.Nonce) == lcommon.Blake2b256Size &&
+		ancestor.Slot >= cutoff && len(ancestor.Hash) != 0 {
+		if cutoff <= sourceEpoch.StartSlot &&
+			len(sourceEpoch.CandidateNonce) == lcommon.Blake2b256Size {
+			return cloneNonce(sourceEpoch.CandidateNonce), nil
+		}
+		var candidate []byte
+		txn := ls.db.Transaction(ctx, false)
+		err := txn.Do(func(txn *database.Txn) error {
+			block, err := ancestorBeforeSlot(ctx, txn, ancestor, cutoff)
+			if err != nil {
+				return err
+			}
+			if block.Slot < sourceEpoch.StartSlot {
+				candidate = cloneNonce(sourceEpoch.CandidateNonce)
+				return nil
+			}
+			candidate, err = ls.db.GetBlockNonce(
+				ocommon.Point{Slot: block.Slot, Hash: block.Hash}, txn,
+			)
+			return err
+		})
+		txn.Release()
+		if err == nil && len(candidate) == lcommon.Blake2b256Size {
+			return cloneNonce(candidate), nil
+		}
+	}
+	// Imported or older stores may lack the retained ancestry or nonce row.
+	// Keep the existing reconstruction for those cases.
+	return ls.frozenCandidateNonce(ctx, sourceEpoch)
+}
+
 // frozenCandidateNonce recomputes the candidate nonce that froze at the end of
 // sourceEpoch from the local chain. computeEpochNonceForSlot seeds an epoch
 // that has no nonce with the genesis nonce, which is correct only for the
@@ -398,7 +450,11 @@ func (ls *LedgerState) peerChainSelectionEpochNonceAcrossEpochs(
 			// rollback across the boundary. The candidate froze at the
 			// cutoff, which precedes the intersection, so the local chain's
 			// prefix up to it is the fork's prefix and yields the same value.
-			frozen, frozenErr := ls.frozenCandidateNonce(ctx, sourceEpoch)
+			frozen, frozenErr := ls.frozenCandidateNonceFromAncestor(
+				ctx,
+				sourceEpoch,
+				ancestor,
+			)
 			if frozenErr != nil {
 				return nil, models.Epoch{}, false, frozenErr
 			}
@@ -1470,7 +1526,11 @@ func (ls *LedgerState) forecastEpochCacheThrough(
 		return nil, false
 	}
 	const maxForecastEpochs = 5
-	cache := make([]models.Epoch, len(snapshot.epochCache), len(snapshot.epochCache)+maxForecastEpochs)
+	cache := make(
+		[]models.Epoch,
+		len(snapshot.epochCache),
+		len(snapshot.epochCache)+maxForecastEpochs,
+	)
 	copy(cache, snapshot.epochCache)
 	for range maxForecastEpochs {
 		last := cache[len(cache)-1]
