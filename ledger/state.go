@@ -2320,6 +2320,12 @@ type LedgerState struct {
 	forkHeaderNonceCacheMutex sync.Mutex
 	forkHeaderNonceCache      map[string]map[uint64]peerForkNoncePrefix
 	forkHeaderPathCache       map[string]peerForkPathPrefix
+	// statelessHeaderVerdicts shares successful stateless header crypto
+	// verdicts across peer connections.
+	statelessHeaderVerdicts statelessHeaderVerdictCache
+	// Test hook called each time stateless header crypto actually runs
+	// instead of being answered from statelessHeaderVerdicts.
+	statelessHeaderCryptoRunHook func()
 	// onPeerForkAncestorStateCheck, when set by a test, observes each
 	// ledger-state verification of a peer fork ancestor.
 	onPeerForkAncestorStateCheck func(slot uint64)
