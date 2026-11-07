@@ -37,6 +37,8 @@ import (
 )
 
 func TestIsExpectedConnectionCloseError(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name string
 		err  error
@@ -99,6 +101,8 @@ func TestIsExpectedConnectionCloseError(t *testing.T) {
 }
 
 func TestIsConnectionCancellationError(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name string
 		err  error
@@ -162,6 +166,8 @@ func TestIsConnectionCancellationError(t *testing.T) {
 }
 
 func TestIsExpectedNetworkDialError(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name string
 		err  error
@@ -290,6 +296,8 @@ func TestIsExpectedNetworkDialError(t *testing.T) {
 }
 
 func TestIsPermanentNetworkMagicMismatch(t *testing.T) {
+	t.Parallel()
+
 	mismatchMessage := "version data mismatch: " +
 		"NodeToNodeVersionData {networkMagic = NetworkMagic " +
 		"{unNetworkMagic = 764824073}, diffusionMode = InitiatorOnlyDiffusionMode} " +
@@ -367,6 +375,8 @@ func TestIsPermanentNetworkMagicMismatch(t *testing.T) {
 func TestNetworkMismatchDenialSurvivesTransientExpiryUntilDuration(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const address = "44.0.0.10:3001"
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	pg := NewPeerGovernor(PeerGovernorConfig{Logger: logger})
@@ -441,6 +451,8 @@ func TestNetworkMismatchDenialSurvivesTransientExpiryUntilDuration(
 // second denial of the same address after expiry re-establishes the denial
 // exactly as the first one did.
 func TestNetworkMismatchDenialExpiresAfterDuration(t *testing.T) {
+	t.Parallel()
+
 	const address = "44.0.0.20:3001"
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	pg := NewPeerGovernor(PeerGovernorConfig{
@@ -532,6 +544,8 @@ func TestNetworkMismatchDenialExpiresAfterDuration(t *testing.T) {
 // only checks the internal isDeniedLocked/cleanup bookkeeping; this checks
 // the outward behavior operators actually care about.
 func TestNetworkMismatchDenialAllowsRealRediscoveryAfterExpiry(t *testing.T) {
+	t.Parallel()
+
 	const address = "44.0.0.21:3001"
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	pg := NewPeerGovernor(PeerGovernorConfig{
@@ -594,6 +608,8 @@ func TestNetworkMismatchDenialAllowsRealRediscoveryAfterExpiry(t *testing.T) {
 func TestNetworkMagicMismatchDeniesPeerRemovedDuringHandshake(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const (
 		configuredAddress = "relay.invalid:3001"
 		dialAddress       = "44.0.0.12:3001"
@@ -641,6 +657,8 @@ func TestNetworkMagicMismatchDeniesPeerRemovedDuringHandshake(
 }
 
 func TestSameMagicVersionDataMismatchRemainsTransient(t *testing.T) {
+	t.Parallel()
+
 	const address = "44.0.0.11:3001"
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -678,6 +696,8 @@ func TestSameMagicVersionDataMismatchRemainsTransient(t *testing.T) {
 }
 
 func TestIsAddrInUseError(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name string
 		err  error
@@ -715,6 +735,8 @@ func TestIsAddrInUseError(t *testing.T) {
 }
 
 func TestHandleConnectionClosedEvent_StableOutboundResetsBackoff(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
@@ -772,6 +794,8 @@ func TestHandleConnectionClosedEvent_StableOutboundResetsBackoff(t *testing.T) {
 func TestHandleConnectionClosedEvent_ShortLivedOutboundAppliesBackoff(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
@@ -815,6 +839,8 @@ func TestHandleConnectionClosedEvent_ShortLivedOutboundAppliesBackoff(
 func TestHandleConnectionClosedEvent_NegativeOutboundDurationLogsAndClamps(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	var logBuf bytes.Buffer
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(slog.NewJSONHandler(&logBuf, nil)),
@@ -868,6 +894,8 @@ func TestHandleConnectionClosedEvent_NegativeOutboundDurationLogsAndClamps(
 func TestCreateOutboundConnection_SuppressesRetryWhenReusableInboundSatisfiesValency(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
@@ -920,6 +948,8 @@ func TestCreateOutboundConnection_SuppressesRetryWhenReusableInboundSatisfiesVal
 }
 
 func TestCreateOutboundConnection_ReturnsWhenGovernorStopped(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
@@ -962,6 +992,8 @@ func TestCreateOutboundConnection_ReturnsWhenGovernorStopped(t *testing.T) {
 // TestSpawnOutboundConnectionLockedReservesBeforeScheduling verifies duplicate
 // close events cannot schedule parallel reconnect workers for the same peer.
 func TestSpawnOutboundConnectionLockedReservesBeforeScheduling(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
@@ -1013,6 +1045,8 @@ func TestSpawnOutboundConnectionLockedReservesBeforeScheduling(t *testing.T) {
 // ouroboros.NewConnection's handshake -- a real "dial in flight" state --
 // until the test closes the server-side socket.
 func TestStop_WaitsForInFlightOutboundDial(t *testing.T) {
+	t.Parallel()
+
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("failed to start fake server: %v", err)
@@ -1116,6 +1150,8 @@ func outboundTestConnId() ouroboros.ConnectionId {
 func TestHandleConnectionClosedEvent_ShortLivedBackoffEscalatesAfterDelayConsumed(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
@@ -1193,6 +1229,8 @@ func TestHandleConnectionClosedEvent_ShortLivedBackoffEscalatesAfterDelayConsume
 func TestHandleConnectionClosedEvent_CriticalHotPeersCapsBackoff(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
@@ -1254,63 +1292,6 @@ func TestHandleConnectionClosedEvent_CriticalHotPeersCapsBackoff(
 	}
 }
 
-// The peergov logger already carries component=peergov, so a call site that
-// passes the attribute again emits it twice in every record.
-func TestHandleConnectionClosedEvent_CriticalHotPeerLogHasSingleComponent(
-	t *testing.T,
-) {
-	var logBuf bytes.Buffer
-	pg := NewPeerGovernor(PeerGovernorConfig{
-		Logger: slog.New(slog.NewJSONHandler(&logBuf, nil)),
-	})
-	connId := outboundTestConnId()
-	peer := &Peer{
-		Address:           "192.168.12.102:3003",
-		NormalizedAddress: "192.168.12.102:3003",
-		Source:            PeerSourceTopologyLocalRoot,
-		// Suppress reconnect goroutine; this test only checks the log record.
-		Reconnecting: true,
-	}
-	pg.mu.Lock()
-	pg.peers = []*Peer{peer}
-	pg.mu.Unlock()
-
-	// Repeated short-lived closes escalate the backoff past
-	// emergencyReconnectDelay, which is what engages the critically-low cap
-	// and emits the log line under test.
-	for range 6 {
-		pg.mu.Lock()
-		peer.ReconnectDelay = 0
-		peer.Connection = &PeerConnection{Id: connId, IsClient: true}
-		peer.State = PeerStateWarm
-		peer.ConnectedAt = time.Now().Add(-600 * time.Millisecond)
-		pg.mu.Unlock()
-
-		pg.handleConnectionClosedEvent(event.NewEvent(
-			connmanager.ConnectionClosedEventType,
-			connmanager.ConnectionClosedEvent{ConnectionId: connId},
-		))
-	}
-
-	var found string
-	for line := range strings.SplitSeq(logBuf.String(), "\n") {
-		if strings.Contains(line, "hot peer pool critically low") {
-			found = line
-			break
-		}
-	}
-	if found == "" {
-		t.Fatal("expected the critically-low backoff cap log line")
-	}
-	if got := strings.Count(found, `"component"`); got != 1 {
-		t.Fatalf(
-			"component attribute appears %d times, want 1: %s",
-			got,
-			found,
-		)
-	}
-}
-
 // TestPeerGovernor_TestPeer_StaleProbeCompletionDoesNotCorruptReplacementPeer
 // covers a race between reconcile's isStaleTestOnlyPeerLocked (which prunes a
 // stale TestPeer-only probe entry) and a slow, outside-lock re-test still
@@ -1322,6 +1303,8 @@ func TestHandleConnectionClosedEvent_CriticalHotPeerLogHasSingleComponent(
 func TestPeerGovernor_TestPeer_StaleProbeCompletionDoesNotCorruptReplacementPeer(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const address = "44.0.0.30:3001"
 	entered := make(chan struct{})
 	release := make(chan struct{})

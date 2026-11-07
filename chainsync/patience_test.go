@@ -172,9 +172,11 @@ func TestPatienceKeepsPeerDeliveringAtAcceptableRate(t *testing.T) {
 	conn := newTestConnId(1)
 	require.True(t, h.state.AddClientConnId(conn))
 
-	// Ten headers per second against a five-token leak, for one simulated
-	// hour, with a check every simulated 30 seconds like the recycler's.
-	for block := uint64(1); block <= 36_000; block++ {
+	// Ten headers per second against a five-token leak, for four simulated
+	// minutes (longer than the 200s the full bucket would last at the leak
+	// rate alone), with a check every simulated 30 seconds like the
+	// recycler's.
+	for block := uint64(1); block <= 2_400; block++ {
 		h.advance(100 * time.Millisecond)
 		h.deliver(conn, block, farTip(), 0)
 		if block%300 == 0 {

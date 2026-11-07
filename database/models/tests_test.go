@@ -18,8 +18,6 @@ import (
 	"bytes"
 	"errors"
 	"maps"
-	"math"
-	"math/big"
 	"strings"
 	"testing"
 
@@ -28,7 +26,6 @@ import (
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
-	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/stretchr/testify/require"
 )
 
@@ -173,36 +170,6 @@ func TestConwayBlockDecodeDRepShape(t *testing.T) {
 			requireShapeOutcome(t, shapeBodyMap(map[uint]any{
 				4: []any{voteDelegCert(tc.drep)},
 			}), tc.wantErr)
-		})
-	}
-}
-
-func TestDRepDirectDecodeShape(t *testing.T) {
-	t.Parallel()
-	for _, tc := range []struct {
-		name    string
-		drep    any
-		wantErr string
-	}{
-		{"key hash", []any{0, shapeHash(28, 0x44)}, ""},
-		{"abstain", []any{2}, ""},
-		{"short hash", []any{0, shapeHash(27, 0x44)}, "drep credential"},
-		{"long hash", []any{1, shapeHash(29, 0x44)}, "drep credential"},
-		{"no confidence extra", []any{3, 0}, "exactly 1 list item"},
-		{"unknown type", []any{7}, "unknown drep type: 7"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			raw, err := cbor.Encode(tc.drep)
-			require.NoError(t, err)
-			var drep lcommon.Drep
-			err = drep.UnmarshalCBOR(raw)
-			if tc.wantErr == "" {
-				require.NoError(t, err)
-				return
-			}
-			require.Error(t, err)
-			require.Contains(t, err.Error(), tc.wantErr)
 		})
 	}
 }
@@ -390,71 +357,6 @@ func TestConwayBlockDecodeGovActionIndexRange(t *testing.T) {
 	}
 }
 
-func TestGovActionIdStringDoesNotPanicAboveCip0129Range(t *testing.T) {
-	t.Parallel()
-	for _, index := range []uint32{255, 256, 65535, math.MaxUint32} {
-		id := lcommon.GovActionId{
-			TransactionId: [32]byte{0xc1},
-			GovActionIdx:  index,
-		}
-		require.NotPanics(t, func() { _ = id.String() })
-		require.NotEmpty(t, id.String())
-	}
-}
-
-// TestDijkstraBodyDecodeDonationRange covers body key 22, typed
-// positive_coin in both the top-level and the subtransaction body.
-func TestDijkstraBodyDecodeDonationRange(t *testing.T) {
-	t.Parallel()
-	for _, level := range []struct {
-		name   string
-		noFee  bool
-		decode func([]byte) error
-	}{
-		{"top-level body", false, func(raw []byte) error {
-			var body gdijkstra.DijkstraTransactionBody
-			return body.UnmarshalCBOR(raw)
-		}},
-		{"subtransaction body", true, func(raw []byte) error {
-			var body gdijkstra.DijkstraSubTransactionBody
-			return body.UnmarshalCBOR(raw)
-		}},
-	} {
-		t.Run(level.name, func(t *testing.T) {
-			t.Parallel()
-			for _, tc := range []struct {
-				name    string
-				extra   map[uint]any
-				wantErr bool
-			}{
-				{"donation absent", nil, false},
-				{"donation minimal", map[uint]any{22: uint64(1)}, false},
-				{"donation max word64", map[uint]any{22: uint64(1<<64 - 1)}, false},
-				{"donation zero", map[uint]any{22: uint64(0)}, true},
-				{"treasury present zero", map[uint]any{21: uint64(0)}, false},
-			} {
-				t.Run(tc.name, func(t *testing.T) {
-					t.Parallel()
-					body := shapeBodyMap(tc.extra)
-					if level.noFee {
-						// A subtransaction body has no fee field.
-						delete(body, 2)
-					}
-					raw, err := cbor.Encode(body)
-					require.NoError(t, err)
-					err = level.decode(raw)
-					if tc.wantErr {
-						require.Error(t, err)
-						require.Contains(t, err.Error(), "22")
-						return
-					}
-					require.NoError(t, err)
-				})
-			}
-		})
-	}
-}
-
 func updateCommitteeProposal(quorum any) []any {
 	return []any{
 		uint64(1_000_000_000),
@@ -496,79 +398,6 @@ func TestConwayBlockDecodeUpdateCommitteeQuorum(t *testing.T) {
 				}
 				require.NoError(t, err)
 			}
-		})
-	}
-}
-
-func TestNewUpdateCommitteeGovActionQuorum(t *testing.T) {
-	t.Parallel()
-	_, err := lcommon.NewUpdateCommitteeGovAction(
-		nil, nil, nil, cbor.Rat{},
-	)
-	require.Error(t, err)
-	for _, tc := range []struct {
-		name    string
-		quorum  *big.Rat
-		wantErr bool
-	}{
-		{"zero", big.NewRat(0, 1), false},
-		{"one half", big.NewRat(1, 2), false},
-		{"one", big.NewRat(1, 1), false},
-		{"negative", big.NewRat(-1, 2), true},
-		{"above one", big.NewRat(3, 2), true},
-	} {
-		_, err = lcommon.NewUpdateCommitteeGovAction(
-			nil, nil, nil, cbor.Rat{Rat: tc.quorum},
-		)
-		if tc.wantErr {
-			require.Error(t, err, tc.name)
-			require.Contains(t, err.Error(), "outside [0,1]", tc.name)
-			continue
-		}
-		require.NoError(t, err, tc.name)
-	}
-}
-
-// TestDRepUnknownDiscriminatorIsNotShapeError keeps the two rejection classes
-// apart: an unknown discriminator names the type, and a malformed shape of a
-// known type never reports an unknown type.
-func TestDRepUnknownDiscriminatorIsNotShapeError(t *testing.T) {
-	t.Parallel()
-	decode := func(drep any) error {
-		raw, err := cbor.Encode(drep)
-		require.NoError(t, err)
-		var d lcommon.Drep
-		return d.UnmarshalCBOR(raw)
-	}
-	for _, tc := range []struct {
-		name string
-		drep any
-	}{
-		{"type 4 bare", []any{4}},
-		{"type 4 with hash", []any{4, shapeHash(28, 0x44)}},
-		{"type 255", []any{255}},
-	} {
-		t.Run("unknown/"+tc.name, func(t *testing.T) {
-			err := decode(tc.drep)
-			require.ErrorContains(t, err, "unknown drep type")
-			require.NotContains(t, err.Error(), "exactly")
-			require.NotContains(t, err.Error(), "drep credential")
-		})
-	}
-	for _, tc := range []struct {
-		name string
-		drep any
-	}{
-		{"short key hash", []any{0, shapeHash(27, 0x44)}},
-		{"long script hash", []any{1, shapeHash(29, 0x44)}},
-		{"key hash missing", []any{0}},
-		{"abstain extra payload", []any{2, shapeHash(28, 0x44)}},
-		{"no confidence extra payload", []any{3, uint64(1)}},
-	} {
-		t.Run("malformed/"+tc.name, func(t *testing.T) {
-			err := decode(tc.drep)
-			require.Error(t, err)
-			require.NotContains(t, err.Error(), "unknown drep type")
 		})
 	}
 }

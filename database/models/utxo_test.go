@@ -32,6 +32,7 @@ import (
 // TestUtxoLedgerToModelPaymentScript verifies that PaymentScript is set
 // only when the output's payment credential is a script hash.
 func TestUtxoLedgerToModelPaymentScript(t *testing.T) {
+	t.Parallel()
 	payHash := bytes.Repeat([]byte{0xAB}, lcommon.AddressHashSize)
 
 	tests := []struct {
@@ -106,6 +107,7 @@ func TestUtxoLedgerToModelPaymentScript(t *testing.T) {
 // confirms UtxoLedgerToModel itself surfaces the error and returns a
 // zero-value Utxo instead of a model with a wrapped asset amount.
 func TestUtxoLedgerToModelPropagatesAssetOverflowError(t *testing.T) {
+	t.Parallel()
 	payHash := bytes.Repeat([]byte{0xAB}, lcommon.AddressHashSize)
 	addr, err := lcommon.NewAddressFromParts(
 		lcommon.AddressTypeKeyNone,
@@ -146,6 +148,7 @@ func TestUtxoLedgerToModelPropagatesAssetOverflowError(t *testing.T) {
 }
 
 func TestMatchesUtxoAddressPatternsRejectsEmptyPattern(t *testing.T) {
+	t.Parallel()
 	payment := bytes.Repeat([]byte{0xab}, lcommon.AddressHashSize)
 	addr, err := lcommon.NewAddressFromParts(
 		lcommon.AddressTypeKeyNone,

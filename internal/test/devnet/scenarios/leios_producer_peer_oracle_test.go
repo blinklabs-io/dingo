@@ -52,6 +52,7 @@ func TestAwaitLeiosProducerOfferRequiresMatchingStreams(t *testing.T) {
 	}
 	for name, sequence := range tests {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			matcher := leiosProducerOfferMatcher{}
 			manifests := make(chan pcommon.Point)
 			transactions := make(chan pcommon.Point)
@@ -349,6 +350,7 @@ func TestLeiosReferencingHeader(t *testing.T) {
 	}
 	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			snapshots := []devnet.ChainSnapshot{
 				{
 					Node:    "relay",

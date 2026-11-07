@@ -80,7 +80,7 @@ func newLeiosApplyDenseLedger(
 		Config: &database.Config{DataDir: t.TempDir()},
 		Blob: dbtest.StorageProvider{
 			Config: map[string]any{
-				"memTableSize":   uint64(1 << 20),
+				"memTableSize":   uint64(1 << 18),
 				"valueThreshold": uint64(1024),
 			},
 		},

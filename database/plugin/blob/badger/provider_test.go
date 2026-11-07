@@ -30,6 +30,7 @@ import (
 )
 
 func TestProviderDataDirPrecedence(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		override bool
@@ -145,6 +146,7 @@ func resolveBadgerProvider(
 // leaves them unset. This derivation lives in RegisterProvider and is otherwise
 // unexercised by tests.
 func TestProviderStorageModeRunModeDefaults(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name             string
 		storageMode      string
@@ -237,6 +239,7 @@ func TestProviderStorageModeRunModeDefaults(t *testing.T) {
 }
 
 func TestProviderValueThresholdDefaults(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name        string
 		storageMode string
@@ -305,6 +308,7 @@ func TestProviderValueThresholdDefaults(t *testing.T) {
 // defaults. GC is the exception: Badger's Load must be the only operation on
 // the store, so the load run mode keeps GC off even when config sets gc: true.
 func TestProviderExplicitConfigOverridesDefaults(t *testing.T) {
+	t.Parallel()
 	store := resolveBadgerProvider(t, map[string]any{
 		"blockCacheSize":   uint64(4096),
 		"indexCacheSize":   uint64(8192),
@@ -328,6 +332,7 @@ func TestProviderExplicitConfigOverridesDefaults(t *testing.T) {
 // explicit 0 is honoured rather than read as unset and replaced by the Core
 // sync default.
 func TestProviderExplicitZeroValueThresholdOverridesSyncDefault(t *testing.T) {
+	t.Parallel()
 	store := resolveBadgerProvider(t, map[string]any{
 		"valueThreshold": uint64(0),
 	}, blob.ProviderDependencies{
@@ -348,6 +353,7 @@ func TestProviderExplicitValueThresholdOverridesAPISyncDefault(t *testing.T) {
 }
 
 func TestProviderExplicitValueThresholdOverridesLeiosDefault(t *testing.T) {
+	t.Parallel()
 	for _, threshold := range []uint64{0, 2048, DefaultValueThreshold} {
 		t.Run(strconv.FormatUint(threshold, 10), func(t *testing.T) {
 			store := resolveBadgerProvider(t, map[string]any{
@@ -365,6 +371,7 @@ func TestProviderExplicitValueThresholdOverridesLeiosDefault(t *testing.T) {
 }
 
 func TestProviderStopDeadlineDuringValueLogGC(t *testing.T) {
+	t.Parallel()
 	host := plugin.NewHost()
 	require.NoError(t, RegisterProvider(host))
 	store, err := plugin.Resolve[*BlobStoreBadger](

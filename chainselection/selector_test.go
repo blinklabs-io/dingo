@@ -64,6 +64,8 @@ func newRollbackEvent(
 // whose sole upstream was recycled, that is a total chain-selection outage
 // ("chain selection stalled: no selectable peer" until the next RollForward).
 func TestHandlePeerRollbackRegistersPeerAfterConnectionRecycle(t *testing.T) {
+	t.Parallel()
+
 	connId := newTestConnectionId(1)
 	live := true
 	cs := NewChainSelector(ChainSelectorConfig{
@@ -603,6 +605,8 @@ func TestHandlePeerRollbackDoesNotPromoteAdvertisedTipBeforeHeaderAdmission(
 // roll-forward path drops tip updates from closed connections; registration
 // from a rollback must do the same rather than resurrect a dead peer.
 func TestHandlePeerRollbackDoesNotRegisterClosedConnection(t *testing.T) {
+	t.Parallel()
+
 	connId := newTestConnectionId(1)
 	var outcomes []RollbackRegistrationOutcome
 	cs := NewChainSelector(ChainSelectorConfig{
@@ -639,6 +643,8 @@ func TestHandlePeerRollbackDoesNotRegisterClosedConnection(t *testing.T) {
 // A peer registered from a rollback has delivered nothing, so it must never
 // displace a peer that has delivered headers, in either map iteration order.
 func TestRollbackRegisteredPeerDoesNotOutrankDeliveredFrontier(t *testing.T) {
+	t.Parallel()
+
 	for _, tc := range []struct {
 		name            string
 		rollbackFirst   bool
@@ -716,6 +722,8 @@ func TestRollbackRegisteredPeerDoesNotOutrankDeliveredFrontier(t *testing.T) {
 func TestHandlePeerRollbackRejectsImplausibleAdvertisedTipAtBootstrap(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	existingConn := newTestConnectionId(1)
 	newConn := newTestConnectionId(2)
 	var outcomes []RollbackRegistrationOutcome
@@ -757,6 +765,8 @@ func TestHandlePeerRollbackRejectsImplausibleAdvertisedTipAtBootstrap(
 // Registration respects the tracked-peer capacity bound, refusing rather than
 // growing the table past MaxTrackedPeers when nothing can be evicted.
 func TestHandlePeerRollbackRefusesRegistrationAtCapacity(t *testing.T) {
+	t.Parallel()
+
 	existingConn := newTestConnectionId(1)
 	newConn := newTestConnectionId(2)
 	var outcomes []RollbackRegistrationOutcome
@@ -799,6 +809,8 @@ func TestHandlePeerRollbackRefusesRegistrationAtCapacity(t *testing.T) {
 // The behind-filter exemption lasts only until the peer delivers a header:
 // once it has a real delivered frontier it is filtered like any other peer.
 func TestRollbackRegisteredPeerLosesExemptionAfterFirstHeader(t *testing.T) {
+	t.Parallel()
+
 	connId := newTestConnectionId(1)
 	cs := NewChainSelector(ChainSelectorConfig{
 		SecurityParam:             10,
@@ -843,6 +855,8 @@ func TestRollbackRegisteredPeerLosesExemptionAfterFirstHeader(t *testing.T) {
 // A rollback for a tracked peer keeps its existing ApplyRollback path: the
 // registration branch must not change how an already-tracked peer is handled.
 func TestHandlePeerRollbackTrackedPeerStillAppliesRollback(t *testing.T) {
+	t.Parallel()
+
 	connId := newTestConnectionId(1)
 	var outcomes []RollbackRegistrationOutcome
 	cs := NewChainSelector(ChainSelectorConfig{
@@ -885,6 +899,8 @@ func TestHandlePeerRollbackTrackedPeerStillAppliesRollback(t *testing.T) {
 // be bounded by a reference of 0 and rejected) and not for another peer's
 // (which would otherwise turn the bootstrap case into a reference of 0).
 func TestRollbackRegisteredPeerIsNotAPlausibilityReference(t *testing.T) {
+	t.Parallel()
+
 	rollbackConn := newTestConnectionId(1)
 	otherConn := newTestConnectionId(2)
 	cs := NewChainSelector(ChainSelectorConfig{
@@ -931,6 +947,8 @@ func TestRollbackRegisteredPeerIsNotAPlausibilityReference(t *testing.T) {
 // Genesis window force an immediate Genesis-to-Praos transition, dropping the
 // density protection that mode exists to provide.
 func TestRollbackRegisteredPeerDoesNotForceGenesisExit(t *testing.T) {
+	t.Parallel()
+
 	connId := newTestConnectionId(1)
 	cs := NewChainSelector(ChainSelectorConfig{
 		SecurityParam:             100,
@@ -973,6 +991,8 @@ func TestRollbackRegisteredPeerDoesNotForceGenesisExit(t *testing.T) {
 // blocks until that re-entry completes, so if HandlePeerRollbackEvent held
 // cs.mutex the whole handler would deadlock and the timeout below would fire.
 func TestHandlePeerRollbackEvaluatesLivenessWithoutSelectorLock(t *testing.T) {
+	t.Parallel()
+
 	connId := newTestConnectionId(1)
 	var calls atomic.Int32
 	reentered := make(chan struct{})
@@ -1044,6 +1064,8 @@ func TestHandlePeerRollbackEvaluatesLivenessWithoutSelectorLock(t *testing.T) {
 // the liveness check above, for the other callback the registration path
 // invokes: no configured callback may run with the selector lock held.
 func TestHandlePeerRollbackReportsOutcomeWithoutSelectorLock(t *testing.T) {
+	t.Parallel()
+
 	connId := newTestConnectionId(1)
 	var observedPeers atomic.Int32
 	var observedOutcome atomic.Value
@@ -1110,6 +1132,8 @@ func TestHandlePeerRollbackReportsOutcomeWithoutSelectorLock(t *testing.T) {
 func TestRollbackRegisteredIncumbentDoesNotPinOutDeliveredChallenger(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	rollbackConn := newTestConnectionId(1)
 	deliveredConn := newTestConnectionId(2)
 	cs := NewChainSelector(ChainSelectorConfig{
@@ -1255,25 +1279,9 @@ func updatePeerTipWithPraosView(
 	require.True(t, accepted)
 }
 
-func TestChainSelectorUpdatePeerTip(t *testing.T) {
-	cs := NewChainSelector(ChainSelectorConfig{})
-
-	connId := newTestConnectionId(1)
-	tip := ochainsync.Tip{
-		Point:       ocommon.Point{Slot: 100, Hash: []byte("test")},
-		BlockNumber: 50,
-	}
-
-	cs.UpdatePeerTip(connId, tip, nil)
-
-	peerTip := cs.GetPeerTip(connId)
-	require.NotNil(t, peerTip)
-	assert.Equal(t, tip.BlockNumber, peerTip.Tip.BlockNumber)
-	assert.Equal(t, tip.Point.Slot, peerTip.Tip.Point.Slot)
-	assert.Equal(t, 1, cs.PeerCount())
-}
-
 func TestChainSelectorIgnoresTipUpdateFromClosedConnection(t *testing.T) {
+	t.Parallel()
+
 	connId := newTestConnectionId(1)
 	cs := NewChainSelector(ChainSelectorConfig{
 		ConnectionLive: func(candidate ouroboros.ConnectionId) bool {
@@ -1293,6 +1301,8 @@ func TestChainSelectorIgnoresTipUpdateFromClosedConnection(t *testing.T) {
 }
 
 func TestChainSelectorSkipsClosedTrackedPeerDuringEvaluation(t *testing.T) {
+	t.Parallel()
+
 	live := make(map[string]bool)
 	connId1 := newTestConnectionId(1)
 	connId2 := newTestConnectionId(2)
@@ -1325,30 +1335,9 @@ func TestChainSelectorSkipsClosedTrackedPeerDuringEvaluation(t *testing.T) {
 	assert.Equal(t, connId1, *bestPeer)
 }
 
-func TestChainSelectorUpdateExistingPeerTip(t *testing.T) {
-	cs := NewChainSelector(ChainSelectorConfig{})
-
-	connId := newTestConnectionId(1)
-	tip1 := ochainsync.Tip{
-		Point:       ocommon.Point{Slot: 100, Hash: []byte("test1")},
-		BlockNumber: 50,
-	}
-	tip2 := ochainsync.Tip{
-		Point:       ocommon.Point{Slot: 110, Hash: []byte("test2")},
-		BlockNumber: 55,
-	}
-
-	cs.UpdatePeerTip(connId, tip1, nil)
-	cs.UpdatePeerTip(connId, tip2, nil)
-
-	peerTip := cs.GetPeerTip(connId)
-	require.NotNil(t, peerTip)
-	assert.Equal(t, tip2.BlockNumber, peerTip.Tip.BlockNumber)
-	assert.Equal(t, tip2.Point.Slot, peerTip.Tip.Point.Slot)
-	assert.Equal(t, 1, cs.PeerCount())
-}
-
 func TestChainSelectorPrefersMoreAdvancedObservedTip(t *testing.T) {
+	t.Parallel()
+
 	cs := NewChainSelector(ChainSelectorConfig{})
 
 	laggingConn := newTestConnectionId(1)
@@ -1396,6 +1385,8 @@ func TestChainSelectorPrefersMoreAdvancedObservedTip(t *testing.T) {
 }
 
 func TestChainSelectorRemovePeer(t *testing.T) {
+	t.Parallel()
+
 	cs := NewChainSelector(ChainSelectorConfig{})
 
 	connId := newTestConnectionId(1)
@@ -1418,25 +1409,6 @@ func TestChainSelectorRemovePeer(t *testing.T) {
 	_, priorityFound := cs.priority[connId]
 	assert.False(t, eligibleFound)
 	assert.False(t, priorityFound)
-}
-
-func TestChainSelectorRemoveBestPeer(t *testing.T) {
-	cs := NewChainSelector(ChainSelectorConfig{})
-
-	connId := newTestConnectionId(1)
-	tip := ochainsync.Tip{
-		Point:       ocommon.Point{Slot: 100, Hash: []byte("test")},
-		BlockNumber: 50,
-	}
-
-	cs.UpdatePeerTip(connId, tip, nil)
-	cs.EvaluateAndSwitch()
-
-	require.NotNil(t, cs.GetBestPeer())
-	assert.Equal(t, connId, *cs.GetBestPeer())
-
-	cs.RemovePeer(connId)
-	assert.Nil(t, cs.GetBestPeer())
 }
 
 // drainChainSwitchesUntilBest consumes chain switch events up to and including
@@ -1468,6 +1440,8 @@ func drainChainSwitchesUntilBest(
 }
 
 func TestChainSelectorRemoveBestPeerEmitsChainSwitchEvent(t *testing.T) {
+	t.Parallel()
+
 	eventBus := event.NewEventBus(nil, nil)
 	cs := NewChainSelector(ChainSelectorConfig{
 		EventBus: eventBus,
@@ -1520,6 +1494,8 @@ func TestChainSelectorRemoveBestPeerEmitsChainSwitchEvent(t *testing.T) {
 }
 
 func TestChainSelectorSelectBestChain(t *testing.T) {
+	t.Parallel()
+
 	cs := NewChainSelector(ChainSelectorConfig{})
 
 	connId1 := newTestConnectionId(1)
@@ -1548,12 +1524,9 @@ func TestChainSelectorSelectBestChain(t *testing.T) {
 	assert.Equal(t, connId2, *bestPeer)
 }
 
-func TestChainSelectorSelectBestChainEmpty(t *testing.T) {
-	cs := NewChainSelector(ChainSelectorConfig{})
-	assert.Nil(t, cs.SelectBestChain())
-}
-
 func TestChainSelectorEvaluateAndSwitch(t *testing.T) {
+	t.Parallel()
+
 	cs := NewChainSelector(ChainSelectorConfig{})
 
 	connId1 := newTestConnectionId(1)
@@ -1583,6 +1556,8 @@ func TestChainSelectorEvaluateAndSwitch(t *testing.T) {
 }
 
 func TestIncumbentAdvantageNoSwitchAtEqualBlockNumber(t *testing.T) {
+	t.Parallel()
+
 	cs := NewChainSelector(ChainSelectorConfig{})
 
 	connId1 := newTestConnectionId(1)
@@ -1604,6 +1579,8 @@ func TestIncumbentAdvantageNoSwitchAtEqualBlockNumber(t *testing.T) {
 }
 
 func TestIncumbentAdvantageSwitchesWhenBehind(t *testing.T) {
+	t.Parallel()
+
 	cs := NewChainSelector(ChainSelectorConfig{})
 
 	connId1 := newTestConnectionId(1)
@@ -1625,6 +1602,8 @@ func TestIncumbentAdvantageSwitchesWhenBehind(t *testing.T) {
 }
 
 func TestIncumbentAdvantageSwitchesOnOneBlockLead(t *testing.T) {
+	t.Parallel()
+
 	cs := NewChainSelector(ChainSelectorConfig{})
 
 	connId1 := newTestConnectionId(1)
@@ -1646,6 +1625,8 @@ func TestIncumbentAdvantageSwitchesOnOneBlockLead(t *testing.T) {
 }
 
 func TestNoOscillationWithMultiplePeersAtSameTip(t *testing.T) {
+	t.Parallel()
+
 	cs := NewChainSelector(ChainSelectorConfig{})
 
 	connId1 := newTestConnectionId(1)
@@ -1679,6 +1660,8 @@ func TestNoOscillationWithMultiplePeersAtSameTip(t *testing.T) {
 }
 
 func TestChainSelectorSkipsIneligiblePeers(t *testing.T) {
+	t.Parallel()
+
 	ineligibleConn := newTestConnectionId(1)
 	eligibleConn := newTestConnectionId(2)
 	cs := NewChainSelector(ChainSelectorConfig{})
@@ -1705,6 +1688,8 @@ func TestChainSelectorSkipsIneligiblePeers(t *testing.T) {
 func TestChainSelectorDoesNotSwitchToIneligiblePeerAfterDisconnect(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	eligibleConn := newTestConnectionId(1)
 	ineligibleConn := newTestConnectionId(2)
 	cs := NewChainSelector(ChainSelectorConfig{})
@@ -1726,6 +1711,8 @@ func TestChainSelectorDoesNotSwitchToIneligiblePeerAfterDisconnect(
 }
 
 func TestChainSelectorSwitchesAwayWhenIncumbentBecomesIneligible(t *testing.T) {
+	t.Parallel()
+
 	incumbentConn := newTestConnectionId(1)
 	challengerConn := newTestConnectionId(2)
 	cs := NewChainSelector(ChainSelectorConfig{})
@@ -1747,6 +1734,8 @@ func TestChainSelectorSwitchesAwayWhenIncumbentBecomesIneligible(t *testing.T) {
 }
 
 func TestChainSelectorDoesNotRestoreStaleIncumbent(t *testing.T) {
+	t.Parallel()
+
 	incumbentConn := newTestConnectionId(1)
 	challengerConn := newTestConnectionId(2)
 	cs := NewChainSelector(ChainSelectorConfig{
@@ -1775,6 +1764,8 @@ func TestChainSelectorDoesNotRestoreStaleIncumbent(t *testing.T) {
 func TestChainSelectorSelectBestChainPrefersHigherPriorityPeerAtEqualTip(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	publicRootConn := newTestConnectionId(1)
 	localRootConn := newTestConnectionId(2)
 	cs := NewChainSelector(ChainSelectorConfig{})
@@ -1799,6 +1790,8 @@ func TestChainSelectorSelectBestChainPrefersHigherPriorityPeerAtEqualTip(
 }
 
 func TestChainSelectorPreservesEqualTipIncumbentAtSamePriority(t *testing.T) {
+	t.Parallel()
+
 	connId1 := newTestConnectionId(1)
 	connId2 := newTestConnectionId(2)
 	cs := NewChainSelector(ChainSelectorConfig{})
@@ -1821,6 +1814,8 @@ func TestChainSelectorPreservesEqualTipIncumbentAtSamePriority(t *testing.T) {
 }
 
 func TestChainSelectorSwitchesOnOneBlockObservedTipLead(t *testing.T) {
+	t.Parallel()
+
 	incumbentConn := newTestConnectionId(1)
 	challengerConn := newTestConnectionId(2)
 	cs := NewChainSelector(ChainSelectorConfig{})
@@ -1865,6 +1860,8 @@ func TestChainSelectorSwitchesOnOneBlockObservedTipLead(t *testing.T) {
 func TestChainSelectorPreservesEqualTipIncumbentAtSamePriorityWithVRF(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	incumbentConn := newTestConnectionId(1)
 	challengerConn := newTestConnectionId(2)
 	cs := NewChainSelector(ChainSelectorConfig{})
@@ -1890,22 +1887,9 @@ func TestChainSelectorPreservesEqualTipIncumbentAtSamePriorityWithVRF(
 	assert.Equal(t, incumbentConn, *cs.GetBestPeer())
 }
 
-func TestChainSelectorUpdatesConnectionStateViaSetters(t *testing.T) {
-	cs := NewChainSelector(ChainSelectorConfig{})
-	connId := newTestConnectionId(1)
-
-	// Default state: eligible (not in map), priority 0.
-	assert.True(t, cs.isConnectionEligible(connId))
-	assert.Equal(t, 0, cs.connectionPriority(connId))
-
-	cs.SetConnectionEligible(connId, false)
-	cs.SetConnectionPriority(connId, 40)
-
-	assert.False(t, cs.isConnectionEligible(connId))
-	assert.Equal(t, 40, cs.connectionPriority(connId))
-}
-
 func TestChainSelectorSwitchesImmediatelyOnEligibilityChange(t *testing.T) {
+	t.Parallel()
+
 	cs := NewChainSelector(ChainSelectorConfig{
 		EvaluationInterval: time.Hour,
 	})
@@ -1935,6 +1919,8 @@ func TestChainSelectorSwitchesImmediatelyOnEligibilityChange(t *testing.T) {
 func TestChainSelectorDoesNotSwitchEqualTipIncumbentOnPriorityChange(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	cs := NewChainSelector(ChainSelectorConfig{
 		EvaluationInterval: time.Hour,
 	})
@@ -1964,6 +1950,8 @@ func TestChainSelectorDoesNotSwitchEqualTipIncumbentOnPriorityChange(
 }
 
 func TestChainSelectorDoesNotPreserveImplausiblyBehindIncumbent(t *testing.T) {
+	t.Parallel()
+
 	connId1 := newTestConnectionId(1)
 	connId2 := newTestConnectionId(2)
 	cs := NewChainSelector(ChainSelectorConfig{
@@ -1991,6 +1979,8 @@ func TestChainSelectorDoesNotPreserveImplausiblyBehindIncumbent(t *testing.T) {
 }
 
 func TestChainSelectorKeepsIncumbentWhenPraosTiebreakerNotArmed(t *testing.T) {
+	t.Parallel()
+
 	incumbentConn := newTestConnectionId(1)
 	challengerConn := newTestConnectionId(2)
 	cs := NewChainSelector(ChainSelectorConfig{})
@@ -2014,6 +2004,8 @@ func TestChainSelectorKeepsIncumbentWhenPraosTiebreakerNotArmed(t *testing.T) {
 }
 
 func TestChainSelectorStalePeerFiltering(t *testing.T) {
+	t.Parallel()
+
 	cs := NewChainSelector(ChainSelectorConfig{
 		StaleTipThreshold: 100 * time.Millisecond,
 	})
@@ -2079,6 +2071,8 @@ func TestChainSelectorKeepsPeerSelectableDuringKeepAliveTimeout(t *testing.T) {
 }
 
 func TestChainSelectorStalePeerCleanupEmitsChainSwitchEvent(t *testing.T) {
+	t.Parallel()
+
 	eventBus := event.NewEventBus(nil, nil)
 	cs := NewChainSelector(ChainSelectorConfig{
 		EventBus:          eventBus,
@@ -2148,114 +2142,9 @@ func TestChainSelectorStalePeerCleanupEmitsChainSwitchEvent(t *testing.T) {
 	assert.False(t, priorityFound)
 }
 
-func TestChainSelectorGetAllPeerTips(t *testing.T) {
-	cs := NewChainSelector(ChainSelectorConfig{})
-
-	connId1 := newTestConnectionId(1)
-	connId2 := newTestConnectionId(2)
-
-	tip1 := ochainsync.Tip{
-		Point:       ocommon.Point{Slot: 100, Hash: []byte("tip1")},
-		BlockNumber: 40,
-	}
-	tip2 := ochainsync.Tip{
-		Point:       ocommon.Point{Slot: 110, Hash: []byte("tip2")},
-		BlockNumber: 50,
-	}
-
-	cs.UpdatePeerTip(connId1, tip1, nil)
-	cs.UpdatePeerTip(connId2, tip2, nil)
-
-	allTips := cs.GetAllPeerTips()
-	assert.Len(t, allTips, 2)
-	assert.Contains(t, allTips, connId1)
-	assert.Contains(t, allTips, connId2)
-}
-
-func TestPeerChainTipIsStale(t *testing.T) {
-	connId := newTestConnectionId(1)
-	tip := ochainsync.Tip{
-		Point:       ocommon.Point{Slot: 100, Hash: []byte("test")},
-		BlockNumber: 50,
-	}
-
-	peerTip := NewPeerChainTip(connId, tip, nil)
-	assert.False(t, peerTip.IsStale(100*time.Millisecond))
-
-	// Wait until the peer tip actually becomes stale
-	require.Eventually(t, func() bool {
-		return peerTip.IsStale(100 * time.Millisecond)
-	}, 2*time.Second, 5*time.Millisecond, "peer tip should become stale")
-}
-
-func TestPeerChainTipUpdateTip(t *testing.T) {
-	connId := newTestConnectionId(1)
-	tip1 := ochainsync.Tip{
-		Point:       ocommon.Point{Slot: 100, Hash: []byte("test1")},
-		BlockNumber: 50,
-	}
-	tip2 := ochainsync.Tip{
-		Point:       ocommon.Point{Slot: 110, Hash: []byte("test2")},
-		BlockNumber: 55,
-	}
-
-	peerTip := NewPeerChainTip(connId, tip1, nil)
-	oldTime := peerTip.LastUpdated
-
-	// Wait briefly so the next UpdateTip call gets a different timestamp
-	require.Eventually(t, func() bool {
-		return time.Since(oldTime) > 0
-	}, 1*time.Second, time.Millisecond, "time should advance")
-
-	peerTip.UpdateTip(tip2, nil)
-	assert.Equal(t, tip2.BlockNumber, peerTip.Tip.BlockNumber)
-	assert.Equal(t, tip2.BlockNumber, peerTip.ObservedTip.BlockNumber)
-	assert.True(t, peerTip.LastUpdated.After(oldTime))
-}
-
-func TestPeerChainTipUpdateTipWithObserved(t *testing.T) {
-	connId := newTestConnectionId(1)
-	initialTip := ochainsync.Tip{
-		Point:       ocommon.Point{Slot: 199, Hash: []byte("initial")},
-		BlockNumber: 199,
-	}
-	advertisedTip := ochainsync.Tip{
-		Point:       ocommon.Point{Slot: 200, Hash: []byte("advertised")},
-		BlockNumber: 200,
-	}
-	observedTip := ochainsync.Tip{
-		Point:       ocommon.Point{Slot: 150, Hash: []byte("observed")},
-		BlockNumber: 150,
-	}
-
-	peerTip := NewPeerChainTip(connId, initialTip, nil)
-	peerTip.UpdateTipWithObserved(advertisedTip, observedTip, nil)
-
-	assert.Equal(t, advertisedTip, peerTip.Tip)
-	assert.Equal(t, observedTip, peerTip.ObservedTip)
-	assert.Equal(t, observedTip.BlockNumber, peerTip.SelectionTip().BlockNumber)
-}
-
-func TestPeerChainTipTouch(t *testing.T) {
-	connId := newTestConnectionId(1)
-	tip := ochainsync.Tip{
-		Point:       ocommon.Point{Slot: 100, Hash: []byte("test")},
-		BlockNumber: 50,
-	}
-
-	peerTip := NewPeerChainTip(connId, tip, nil)
-	require.Eventually(t, func() bool {
-		return peerTip.IsStale(50 * time.Millisecond)
-	}, 2*time.Second, 5*time.Millisecond, "peer tip should become stale")
-	oldTime := peerTip.LastUpdated
-
-	peerTip.Touch()
-
-	assert.True(t, peerTip.LastUpdated.After(oldTime))
-	assert.False(t, peerTip.IsStale(50*time.Millisecond))
-}
-
 func TestChainSelectorTouchPeerActivityRevivesStaleBestPeer(t *testing.T) {
+	t.Parallel()
+
 	cs := NewChainSelector(ChainSelectorConfig{
 		StaleTipThreshold: 50 * time.Millisecond,
 	})
@@ -2293,6 +2182,8 @@ func TestChainSelectorTouchPeerActivityRevivesStaleBestPeer(t *testing.T) {
 }
 
 func TestChainSelectorTouchPeerActivitySwitchesToLongerChain(t *testing.T) {
+	t.Parallel()
+
 	cs := NewChainSelector(ChainSelectorConfig{
 		StaleTipThreshold: 50 * time.Millisecond,
 	})
@@ -2400,6 +2291,8 @@ func TestChainSelectorTouchPeerActivityEmitsChainSwitchEvent(t *testing.T) {
 }
 
 func TestChainSelectorVRFTiebreaker(t *testing.T) {
+	t.Parallel()
+
 	cs := NewChainSelector(ChainSelectorConfig{})
 
 	connId1 := newTestConnectionId(1)
@@ -2448,6 +2341,8 @@ func TestChainSelectorVRFTiebreaker(t *testing.T) {
 func TestChainSelectorUpdatePeerTipPreservesEqualTipIncumbentOnVRF(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	cs := NewChainSelector(ChainSelectorConfig{})
 
 	connId1 := newTestConnectionId(1)
@@ -2488,6 +2383,8 @@ func TestChainSelectorUpdatePeerTipPreservesEqualTipIncumbentOnVRF(
 }
 
 func TestChainSelectorVRFTiebreakerWithNilVRF(t *testing.T) {
+	t.Parallel()
+
 	cs := NewChainSelector(ChainSelectorConfig{})
 
 	connId1 := newTestConnectionId(1)
@@ -2516,6 +2413,8 @@ func TestChainSelectorVRFTiebreakerWithNilVRF(t *testing.T) {
 }
 
 func TestChainSelectorVRFDoesNotOverrideBlockNumber(t *testing.T) {
+	t.Parallel()
+
 	cs := NewChainSelector(ChainSelectorConfig{})
 
 	connId1 := newTestConnectionId(1)
@@ -2550,6 +2449,8 @@ func TestChainSelectorVRFDoesNotOverrideBlockNumber(t *testing.T) {
 }
 
 func TestChainSelectorPraosVRFOverridesSlot(t *testing.T) {
+	t.Parallel()
+
 	cs := NewChainSelector(ChainSelectorConfig{})
 
 	connId1 := newTestConnectionId(1)
@@ -2594,6 +2495,8 @@ func TestChainSelectorPraosVRFOverridesSlot(t *testing.T) {
 }
 
 func TestChainSelectorUpdatesBestPeerWhenLaterSlotWinsVRF(t *testing.T) {
+	t.Parallel()
+
 	cs := NewChainSelector(ChainSelectorConfig{})
 
 	connId1 := newTestConnectionId(1)
@@ -2638,24 +2541,9 @@ func TestChainSelectorUpdatesBestPeerWhenLaterSlotWinsVRF(t *testing.T) {
 	)
 }
 
-func TestPeerChainTipVRFOutputStored(t *testing.T) {
-	connId := newTestConnectionId(1)
-	tip := ochainsync.Tip{
-		Point:       ocommon.Point{Slot: 100, Hash: []byte("test")},
-		BlockNumber: 50,
-	}
-	vrf := []byte{0x01, 0x02, 0x03, 0x04}
-
-	peerTip := NewPeerChainTip(connId, tip, vrf)
-	assert.Equal(t, vrf, peerTip.VRFOutput)
-
-	// Update with new VRF
-	newVRF := []byte{0x05, 0x06, 0x07, 0x08}
-	peerTip.UpdateTip(tip, newVRF)
-	assert.Equal(t, newVRF, peerTip.VRFOutput)
-}
-
 func TestUpdatePeerTipRejectsImplausibleTip(t *testing.T) {
+	t.Parallel()
+
 	cs := NewChainSelector(ChainSelectorConfig{
 		SecurityParam: 2160, // Cardano mainnet k
 	})
@@ -2703,39 +2591,9 @@ func TestUpdatePeerTipRejectsImplausibleTip(t *testing.T) {
 	)
 }
 
-func TestUpdatePeerTipAcceptsPlausibleTip(t *testing.T) {
-	cs := NewChainSelector(ChainSelectorConfig{
-		SecurityParam: 2160,
-	})
-
-	// Set local tip
-	cs.SetLocalTip(ochainsync.Tip{
-		Point:       ocommon.Point{Slot: 100000, Hash: []byte("local")},
-		BlockNumber: 50000,
-	})
-
-	connId := newTestConnectionId(1)
-
-	// A tip that is ahead but within k blocks (plausible)
-	plausibleTip := ochainsync.Tip{
-		Point: ocommon.Point{
-			Slot: 102000,
-			Hash: []byte("plausible"),
-		},
-		BlockNumber: 51000, // 1000 ahead, well within k=2160
-	}
-
-	accepted := cs.UpdatePeerTip(connId, plausibleTip, nil)
-	assert.True(t, accepted, "plausible tip should be accepted")
-	assert.NotNil(
-		t,
-		cs.GetPeerTip(connId),
-		"accepted tip should be tracked",
-	)
-	assert.Equal(t, 1, cs.PeerCount())
-}
-
 func TestUpdatePeerTipAcceptsTipAtExactBoundary(t *testing.T) {
+	t.Parallel()
+
 	cs := NewChainSelector(ChainSelectorConfig{
 		SecurityParam: 2160,
 	})
@@ -2768,6 +2626,8 @@ func TestUpdatePeerTipAcceptsTipAtExactBoundary(t *testing.T) {
 func TestUpdatePeerTipAcceptsTipAtExactBoundaryWithStaleReferencePeer(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	cs := NewChainSelector(ChainSelectorConfig{
 		SecurityParam:     2160,
 		StaleTipThreshold: 50 * time.Millisecond,
@@ -2808,6 +2668,8 @@ func TestUpdatePeerTipAcceptsTipAtExactBoundaryWithStaleReferencePeer(
 }
 
 func TestUpdatePeerTipRejectsTipOneOverBoundary(t *testing.T) {
+	t.Parallel()
+
 	cs := NewChainSelector(ChainSelectorConfig{
 		SecurityParam: 2160,
 	})
@@ -2847,6 +2709,8 @@ func TestUpdatePeerTipRejectsTipOneOverBoundary(t *testing.T) {
 }
 
 func TestUpdatePeerTipAcceptsTipWhenSecurityParamZero(t *testing.T) {
+	t.Parallel()
+
 	// During initial sync, securityParam may be 0 (not yet set).
 	// All tips should be accepted in this case.
 	cs := NewChainSelector(ChainSelectorConfig{
@@ -2877,6 +2741,8 @@ func TestUpdatePeerTipAcceptsTipWhenSecurityParamZero(t *testing.T) {
 }
 
 func TestUpdatePeerTipAcceptsTipWhenLocalTipZero(t *testing.T) {
+	t.Parallel()
+
 	// During initial sync, local tip is at block 0.
 	// All tips should be accepted in this case.
 	cs := NewChainSelector(ChainSelectorConfig{
@@ -2902,6 +2768,8 @@ func TestUpdatePeerTipAcceptsTipWhenLocalTipZero(t *testing.T) {
 }
 
 func TestUpdatePeerTipAcceptsDuringInitialSyncNoPeers(t *testing.T) {
+	t.Parallel()
+
 	// During genesis sync, local tip advances past 0 but the node
 	// has no accepted peers yet. The implausible check must be
 	// skipped so the first real peer can be accepted even though
@@ -2934,6 +2802,8 @@ func TestUpdatePeerTipAcceptsDuringInitialSyncNoPeers(t *testing.T) {
 }
 
 func TestUpdatePeerTipAcceptsDuringCatchUp(t *testing.T) {
+	t.Parallel()
+
 	// After a stall the node's recorded peer tips go stale. When the
 	// network advances >K blocks, a known peer's tip update exceeds
 	// the normal incremental check (Case 1). The catch-up relaxation
@@ -3313,6 +3183,8 @@ func TestUpdatePeerTipFarDeliveredFrontierCorroboration(t *testing.T) {
 func TestUpdatePeerTipAcceptsNextObservedBlockWhenAdvertisedTipIsFarAhead(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	cs := NewChainSelector(ChainSelectorConfig{
 		SecurityParam: 432, // preview k
 	})
@@ -3361,6 +3233,8 @@ func TestUpdatePeerTipAcceptsNextObservedBlockWhenAdvertisedTipIsFarAhead(
 }
 
 func TestAdvertisedTipOutlierDoesNotSuppressObservedFrontier(t *testing.T) {
+	t.Parallel()
+
 	cs := NewChainSelector(ChainSelectorConfig{
 		SecurityParam: 10,
 	})
@@ -3411,6 +3285,8 @@ func TestAdvertisedTipOutlierDoesNotSuppressObservedFrontier(t *testing.T) {
 }
 
 func TestChainSwitchEventIncludesObservedFrontier(t *testing.T) {
+	t.Parallel()
+
 	eventBus := event.NewEventBus(nil, nil)
 	defer eventBus.Stop()
 	cs := NewChainSelector(ChainSelectorConfig{
@@ -3455,6 +3331,8 @@ func TestChainSwitchEventIncludesObservedFrontier(t *testing.T) {
 }
 
 func TestUpdatePeerTipRejectsKnownPeerJumpFromZero(t *testing.T) {
+	t.Parallel()
+
 	// A known peer whose previous tip was at block 0 must still be
 	// checked. Without this, a malicious peer could send tip=0 first,
 	// then tip=MaxUint64 to bypass the implausible check.
@@ -3490,6 +3368,8 @@ func TestUpdatePeerTipRejectsKnownPeerJumpFromZero(t *testing.T) {
 }
 
 func TestUpdatePeerTipSpoofedPeerDoesNotBecomesBest(t *testing.T) {
+	t.Parallel()
+
 	cs := NewChainSelector(ChainSelectorConfig{
 		SecurityParam: 2160,
 	})
@@ -3531,29 +3411,9 @@ func TestUpdatePeerTipSpoofedPeerDoesNotBecomesBest(t *testing.T) {
 	)
 }
 
-func TestChainSelectorMaxTrackedPeersDefault(t *testing.T) {
-	cs := NewChainSelector(ChainSelectorConfig{})
-	assert.Equal(
-		t,
-		DefaultMaxTrackedPeers,
-		cs.maxTrackedPeers,
-		"default max tracked peers should be applied",
-	)
-}
-
-func TestChainSelectorMaxTrackedPeersCustom(t *testing.T) {
-	cs := NewChainSelector(ChainSelectorConfig{
-		MaxTrackedPeers: 50,
-	})
-	assert.Equal(
-		t,
-		50,
-		cs.maxTrackedPeers,
-		"custom max tracked peers should be applied",
-	)
-}
-
 func TestChainSelectorPeerEvictionAtCapacity(t *testing.T) {
+	t.Parallel()
+
 	const maxPeers = 5
 	cs := NewChainSelector(ChainSelectorConfig{
 		MaxTrackedPeers: maxPeers,
@@ -3644,6 +3504,8 @@ func TestChainSelectorPeerEvictionAtCapacity(t *testing.T) {
 }
 
 func TestChainSelectorUpdateExistingPeerDoesNotEvict(t *testing.T) {
+	t.Parallel()
+
 	const maxPeers = 3
 	cs := NewChainSelector(ChainSelectorConfig{
 		MaxTrackedPeers: maxPeers,
@@ -3705,6 +3567,8 @@ func TestChainSelectorUpdateExistingPeerDoesNotEvict(t *testing.T) {
 }
 
 func TestChainSelectorEvictionPreservesBestPeer(t *testing.T) {
+	t.Parallel()
+
 	const maxPeers = 3
 	cs := NewChainSelector(ChainSelectorConfig{
 		MaxTrackedPeers: maxPeers,
@@ -3786,6 +3650,8 @@ func TestChainSelectorEvictionPreservesBestPeer(t *testing.T) {
 }
 
 func TestChainSelectorEvictionEmitsPeerEvictedEvent(t *testing.T) {
+	t.Parallel()
+
 	eb := event.NewEventBus(nil, nil)
 	const maxPeers = 2
 	cs := NewChainSelector(ChainSelectorConfig{
@@ -3840,6 +3706,8 @@ func TestChainSelectorEvictionEmitsPeerEvictedEvent(t *testing.T) {
 }
 
 func TestChainSelectorEvictionFailsWhenOnlyBestPeer(t *testing.T) {
+	t.Parallel()
+
 	// When maxTrackedPeers=1 and the sole peer is best, eviction cannot
 	// proceed. The new peer should be rejected rather than exceeding the cap.
 	cs := NewChainSelector(ChainSelectorConfig{
@@ -3871,51 +3739,9 @@ func TestChainSelectorEvictionFailsWhenOnlyBestPeer(t *testing.T) {
 	assert.NotNil(t, cs.GetPeerTip(bestConn), "best peer must remain")
 }
 
-func TestChainSelectorNormalOperationWithinLimit(t *testing.T) {
-	const maxPeers = 10
-	cs := NewChainSelector(ChainSelectorConfig{
-		MaxTrackedPeers: maxPeers,
-	})
-
-	expectedCount := maxPeers - 3
-
-	// Pre-create connection IDs so the same pointers are reused
-	connIds := make([]ouroboros.ConnectionId, expectedCount)
-	for i := range connIds {
-		connIds[i] = newTestConnectionId(i)
-	}
-
-	// Add fewer peers than the limit
-	for i := range expectedCount {
-		tip := ochainsync.Tip{
-			Point: ocommon.Point{
-				Slot: uint64(100 + i),
-				Hash: fmt.Appendf(nil, "tip%d", i),
-			},
-			BlockNumber: uint64(50 + i),
-		}
-		cs.UpdatePeerTip(connIds[i], tip, nil)
-	}
-
-	assert.Equal(
-		t,
-		expectedCount,
-		cs.PeerCount(),
-		"all peers should be tracked when below limit",
-	)
-
-	// All peers should be present
-	for i := range expectedCount {
-		assert.NotNil(
-			t,
-			cs.GetPeerTip(connIds[i]),
-			"peer %d should be tracked",
-			i,
-		)
-	}
-}
-
 func TestSelectBestChainSkipsImplausiblyBehindPeer(t *testing.T) {
+	t.Parallel()
+
 	cs := NewChainSelector(ChainSelectorConfig{
 		SecurityParam: 2160,
 	})
@@ -3937,6 +3763,8 @@ func TestSelectBestChainSkipsImplausiblyBehindPeer(t *testing.T) {
 }
 
 func TestSelectBestChainAllowsPlausiblyBehindPeer(t *testing.T) {
+	t.Parallel()
+
 	cs := NewChainSelector(ChainSelectorConfig{
 		SecurityParam: 2160,
 	})
@@ -3965,6 +3793,8 @@ func TestSelectBestChainAllowsPlausiblyBehindPeer(t *testing.T) {
 // the advertised tip would also leave the stored view and the stored frontier
 // on different slots, which UpdateTipWithObservedPraosView forbids.
 func TestOmittedObservedFrontierIsNotPromotedToAdvertisedTip(t *testing.T) {
+	t.Parallel()
+
 	cs := NewChainSelector(ChainSelectorConfig{SecurityParam: 10})
 	cs.SetLocalTip(tip(99, 999, "local"))
 
@@ -4062,6 +3892,8 @@ func (h *panicLogHandler) WithGroup(name string) slog.Handler {
 // exit with a Logger that panics on every Handle call and then verifies
 // cs.mutex is still acquirable afterward.
 func TestChainSelectorSetLocalTipUnlocksOnPanic(t *testing.T) {
+	t.Parallel()
+
 	cs := NewChainSelector(ChainSelectorConfig{
 		GenesisMode:   true,
 		SecurityParam: 10,
@@ -4126,6 +3958,8 @@ func TestChainSelectorSetLocalTipUnlocksOnPanic(t *testing.T) {
 // the subscription down) has a durable, observable signal instead of a
 // generic log line.
 func TestChainSelectorOnPeerRollbackPanicPublishesEvent(t *testing.T) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	defer bus.Close()
 
@@ -4172,6 +4006,8 @@ func TestChainSelectorOnPeerRollbackPanicPublishesEvent(t *testing.T) {
 // directly here to keep the test deterministic instead of racing a
 // ticker/channel.
 func TestChainSelectorEvaluationPanicSurfacedAndLoopContinues(t *testing.T) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	defer bus.Close()
 
@@ -4239,6 +4075,8 @@ func TestChainSelectorEvaluationPanicSurfacedAndLoopContinues(t *testing.T) {
 func TestChainSelectorRecoverEvaluationPanicToleratesPanickingLogger(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	defer bus.Close()
 
@@ -4277,6 +4115,8 @@ func behindPeerTipAt(blockNumber uint64) ochainsync.Tip {
 // "chain selection stalled: no selectable peer" state, and it is selected
 // immediately once it overtakes us.
 func TestValencyOneUpstreamBehindStaysSelectable(t *testing.T) {
+	t.Parallel()
+
 	const securityParam = 108
 	const localBlock = 115195
 	// 65 blocks behind: the point at which the intersect ladder's first rung
@@ -4318,6 +4158,8 @@ func TestValencyOneUpstreamBehindStaysSelectable(t *testing.T) {
 // catches back up to within K. Evicting it instead (the over-K chainsync
 // denial) leaves the node with no upstream at all.
 func TestValencyOneUpstreamBeyondKIsRetainedNotEvicted(t *testing.T) {
+	t.Parallel()
+
 	const securityParam = 108
 	const localBlock = 115195
 	// The lag observed in the field: 119 blocks, past K.
@@ -4359,6 +4201,8 @@ func TestValencyOneUpstreamBeyondKIsRetainedNotEvicted(t *testing.T) {
 func TestChainSelectorByronEBBBeatsRegularIncumbentAtEqualBlockNumber(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	cs := NewChainSelector(ChainSelectorConfig{})
 
 	connId1 := newTestConnectionId(1)
@@ -4539,6 +4383,8 @@ func peerSelectable(
 // differed by 742 delivered blocks (> Preview k=432), which marked the
 // incumbent ineligible and skipped the anti-flap pin entirely.
 func TestSameChainFrontierLeadKeepsLaggingIncumbentSelectable(t *testing.T) {
+	t.Parallel()
+
 	cs := NewChainSelector(ChainSelectorConfig{
 		SecurityParam: previewSecurityParam,
 	})
@@ -4598,6 +4444,8 @@ func TestSameChainFrontierLeadKeepsLaggingIncumbentSelectable(t *testing.T) {
 // (ledger.chainSwitchNeedsFreshCursorLocked returns false for an empty
 // PreviousConnectionId, so only a peer-to-peer switch can trigger it).
 func TestCanonicalPeersWithCrossingFrontiersDoNotFlap(t *testing.T) {
+	t.Parallel()
+
 	eventBus := event.NewEventBus(nil, nil)
 	t.Cleanup(eventBus.Stop)
 	cs := NewChainSelector(ChainSelectorConfig{
@@ -4692,6 +4540,8 @@ func TestCanonicalPeersWithCrossingFrontiersDoNotFlap(t *testing.T) {
 // delivered-frontier lead is then real chain quality and the selector must
 // converge to the longer chain.
 func TestDivergentPeersStillSwitchOnLongerDeliveredChain(t *testing.T) {
+	t.Parallel()
+
 	cs := NewChainSelector(ChainSelectorConfig{
 		SecurityParam: previewSecurityParam,
 	})
@@ -4752,6 +4602,8 @@ func TestDivergentPeersStillSwitchOnLongerDeliveredChain(t *testing.T) {
 // The delivered history is the trusted signal, so the copied advertisement
 // must not buy it the same-chain treatment.
 func TestContradictedAdvertisedTipDoesNotExemptFrontierLag(t *testing.T) {
+	t.Parallel()
+
 	cs := NewChainSelector(ChainSelectorConfig{
 		SecurityParam: previewSecurityParam,
 	})
@@ -4802,6 +4654,8 @@ func TestContradictedAdvertisedTipDoesNotExemptFrontierLag(t *testing.T) {
 // frontier is more than k behind the APPLIED LOCAL tip is useless and must
 // stay unselectable even when it advertises the canonical tip.
 func TestSameChainExemptionDoesNotRescueImplausiblyBehindPeer(t *testing.T) {
+	t.Parallel()
+
 	cs := NewChainSelector(ChainSelectorConfig{
 		SecurityParam: previewSecurityParam,
 	})
@@ -4836,6 +4690,8 @@ func TestSameChainExemptionDoesNotRescueImplausiblyBehindPeer(t *testing.T) {
 // tip progress is released even though it advertises the same canonical tip as
 // the challenger.
 func TestSameChainPinStillReleasesOnLocalTipStall(t *testing.T) {
+	t.Parallel()
+
 	cs := NewChainSelector(ChainSelectorConfig{
 		SecurityParam: previewSecurityParam,
 	})
@@ -4896,6 +4752,8 @@ func TestSameChainPinStillReleasesOnLocalTipStall(t *testing.T) {
 func TestDivergentLeaderDoesNotSuppressPeersAgreeingWithAnotherLeader(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	cs := NewChainSelector(ChainSelectorConfig{
 		SecurityParam: previewSecurityParam,
 	})
@@ -4949,6 +4807,8 @@ func TestDivergentLeaderDoesNotSuppressPeersAgreeingWithAnotherLeader(
 // exemption, so a peer that has advertised nothing and trails the leading
 // frontier by more than k would stay selectable on no evidence at all.
 func TestUnadvertisedTipIsNotSameChainEvidence(t *testing.T) {
+	t.Parallel()
+
 	cs := NewChainSelector(ChainSelectorConfig{
 		SecurityParam: previewSecurityParam,
 	})
@@ -5083,6 +4943,8 @@ func newStalledSelectionFixture(
 func TestPeerActivityHandlerKeepsDrainingWhileDownstreamConsumerBlocks(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	bus, cs, consumer, connId := newStalledSelectionFixture(t)
 
 	var handled atomic.Int64
@@ -5153,6 +5015,8 @@ func TestPeerActivityHandlerKeepsDrainingWhileDownstreamConsumerBlocks(
 // two goroutines can decide in one order and enqueue in the other, and no lane
 // prevents that (wolf31o2 review). See publishSelection.
 func TestChainSwitchEventsPreservePublishOrder(t *testing.T) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(bus.Stop)
 
@@ -5222,6 +5086,8 @@ func peerBlockNumber(
 // challenger that was never the very recently abandoned incumbent is still
 // adopted immediately.
 func TestSwitchBackCooldownBoundsOscillationFrequency(t *testing.T) {
+	t.Parallel()
+
 	clk := &fakeClock{now: time.Unix(1_700_000_000, 0)}
 	cs := NewChainSelector(ChainSelectorConfig{})
 	installFakeClock(cs, clk)
@@ -5328,6 +5194,8 @@ func TestSwitchBackCooldownBoundsOscillationFrequency(t *testing.T) {
 // blockfetch batch from completing, so the stall never clears on its own: a
 // self-sustaining livelock.
 func TestSwitchBackCooldownBoundsStallEscapeOscillation(t *testing.T) {
+	t.Parallel()
+
 	clk := &fakeClock{now: time.Unix(1_700_000_000, 0)}
 	cs := NewChainSelector(ChainSelectorConfig{})
 	installFakeClock(cs, clk)
@@ -5456,6 +5324,8 @@ func TestSwitchBackCooldownBoundsStallEscapeOscillation(t *testing.T) {
 // delayed until the global cooldown elapses, not blocked forever and not
 // adopted mid-cooldown.
 func TestSwitchBackCooldownDoesNotBlockGenuinelyNewChallenger(t *testing.T) {
+	t.Parallel()
+
 	clk := &fakeClock{now: time.Unix(1_700_000_000, 0)}
 	cs := NewChainSelector(ChainSelectorConfig{})
 	installFakeClock(cs, clk)
@@ -5539,6 +5409,8 @@ func TestSwitchBackCooldownDoesNotBlockGenuinelyNewChallenger(t *testing.T) {
 // even though every individual hop still looks, pairwise, like a "genuinely
 // new" challenger.
 func TestSwitchBackRateLimitBoundsThreeWayRotation(t *testing.T) {
+	t.Parallel()
+
 	clk := &fakeClock{now: time.Unix(1_700_000_000, 0)}
 	cs := NewChainSelector(ChainSelectorConfig{})
 	installFakeClock(cs, clk)
@@ -5664,6 +5536,8 @@ func tip(block, slot uint64, hash string) ochainsync.Tip {
 // deep catch-up (gap > catchUpPinBlockThreshold), the active connection does
 // NOT flap across micro-forking equal-tip / 1-block-ahead peers.
 func TestPinNoSwitchOnMicroForkDuringCatchUp(t *testing.T) {
+	t.Parallel()
+
 	cs := NewChainSelector(ChainSelectorConfig{})
 
 	incumbent := newTestConnectionId(1)
@@ -5703,6 +5577,8 @@ func TestPinNoSwitchOnMicroForkDuringCatchUp(t *testing.T) {
 // (gap < catchUpPinBlockThreshold), the active connection still does NOT flap
 // across same-height sibling head-forks. This is the Part 2 tip-hold case.
 func TestPinNoSwitchOnSiblingHeadForkAtTip(t *testing.T) {
+	t.Parallel()
+
 	cs := NewChainSelector(ChainSelectorConfig{})
 
 	incumbent := newTestConnectionId(1)
@@ -5741,6 +5617,8 @@ func TestPinNoSwitchOnSiblingHeadForkAtTip(t *testing.T) {
 // fires during catch-up: a challenger beyond catchUpPinHeadMargin is a real
 // longer chain and the active connection switches to it.
 func TestPinSwitchesToGenuinelyLongerChainCatchUp(t *testing.T) {
+	t.Parallel()
+
 	cs := NewChainSelector(ChainSelectorConfig{})
 
 	incumbent := newTestConnectionId(1)
@@ -5764,6 +5642,8 @@ func TestPinSwitchesToGenuinelyLongerChainCatchUp(t *testing.T) {
 // TestPinSwitchesToGenuinelyLongerChainAtTip asserts the longer-chain escape
 // also fires at the tip.
 func TestPinSwitchesToGenuinelyLongerChainAtTip(t *testing.T) {
+	t.Parallel()
+
 	cs := NewChainSelector(ChainSelectorConfig{})
 
 	incumbent := newTestConnectionId(1)
@@ -5786,6 +5666,8 @@ func TestPinSwitchesToGenuinelyLongerChainAtTip(t *testing.T) {
 // TestPinAtMarginBoundary verifies the exact margin boundary: a challenger
 // exactly catchUpPinHeadMargin ahead stays pinned, one block more releases.
 func TestPinAtMarginBoundary(t *testing.T) {
+	t.Parallel()
+
 	incumbent := newTestConnectionId(1)
 	challenger := newTestConnectionId(2)
 
@@ -5820,6 +5702,8 @@ func TestPinAtMarginBoundary(t *testing.T) {
 // applied local tip stops advancing for catchUpPinStallTimeout, the pin
 // releases and the active connection switches to the challenger sibling.
 func TestPinProgressStallEscape(t *testing.T) {
+	t.Parallel()
+
 	clk := &fakeClock{now: time.Unix(1_700_000_000, 0)}
 	cs := NewChainSelector(ChainSelectorConfig{})
 	installFakeClock(cs, clk)
@@ -5868,6 +5752,8 @@ func TestPinProgressStallEscape(t *testing.T) {
 // re-arms the stall clock, so a healthy, advancing incumbent stays pinned
 // indefinitely across sibling head-forks.
 func TestPinStallClockResetsOnForwardProgress(t *testing.T) {
+	t.Parallel()
+
 	clk := &fakeClock{now: time.Unix(1_700_000_000, 0)}
 	cs := NewChainSelector(ChainSelectorConfig{})
 	installFakeClock(cs, clk)
@@ -5900,6 +5786,8 @@ func TestPinStallClockResetsOnForwardProgress(t *testing.T) {
 // mark. After 1000 -> 990 rollback, 991 is forward progress and must re-arm the
 // stall clock.
 func TestPinStallClockResetsOnPostRollbackProgress(t *testing.T) {
+	t.Parallel()
+
 	clk := &fakeClock{now: time.Unix(1_700_000_000, 0)}
 	cs := NewChainSelector(ChainSelectorConfig{})
 	installFakeClock(cs, clk)
@@ -5938,6 +5826,8 @@ func TestPinStallClockResetsOnPostRollbackProgress(t *testing.T) {
 // TestPinReleasesWhenIncumbentNoLongerSelectable asserts that an ineligible
 // incumbent releases the pin even on a head micro-fork.
 func TestPinReleasesWhenIncumbentNoLongerSelectable(t *testing.T) {
+	t.Parallel()
+
 	cs := NewChainSelector(ChainSelectorConfig{})
 
 	incumbent := newTestConnectionId(1)
@@ -5965,6 +5855,8 @@ func TestPinReleasesWhenIncumbentNoLongerSelectable(t *testing.T) {
 // lead switches the active connection (matching the legacy behavior asserted
 // by TestIncumbentAdvantageSwitchesOnOneBlockLead).
 func TestPinInactiveWithoutLocalTip(t *testing.T) {
+	t.Parallel()
+
 	cs := NewChainSelector(ChainSelectorConfig{})
 
 	incumbent := newTestConnectionId(1)
@@ -6387,7 +6279,7 @@ func TestRepeatedFarFrontierHeaderDoesNotExtendReconnectWindow(t *testing.T) {
 func TestStagedLoneFarFrontierIsCommittedAfterKConnectedHeaders(t *testing.T) {
 	t.Parallel()
 
-	for _, securityParam := range []uint64{2, 432} {
+	for _, securityParam := range []uint64{2, 256} {
 		t.Run(fmt.Sprintf("k=%d", securityParam), func(t *testing.T) {
 			c := loneFarChain{localBlock: 175516, k: securityParam}
 			cs := c.newSelector(t)

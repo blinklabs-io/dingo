@@ -176,68 +176,6 @@ func TestWriteParityReportBuildFailure(t *testing.T) {
 	require.ErrorContains(t, err, "build report")
 }
 
-// TestWriteParityReportWriteFailure is a regression test that a
-// WriteJSONReport failure was only logged, not returned.
-func TestWriteParityReportWriteFailure(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "report.json")
-	fake := &fakeReportWriteCloser{writeErr: errors.New("write boom")}
-
-	err := writeParityReport(
-		slog.New(slog.DiscardHandler),
-		dir,
-		path,
-		func(p string) (io.WriteCloser, error) { return fake, nil },
-		func() (*koiosparity.JSONReport, error) { return &koiosparity.JSONReport{Network: "preview"}, nil },
-	)
-	require.Error(t, err)
-	require.ErrorContains(t, err, "write report")
-}
-
-// TestWriteParityReportCloseFailureAfterSuccessfulWrite is a regression test
-// for any file close error: a Close failure after a
-// perfectly successful build+write must still surface as a non-nil error,
-// since a report that failed to flush/close cleanly cannot be trusted as
-// complete on disk.
-func TestWriteParityReportCloseFailureAfterSuccessfulWrite(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "report.json")
-	fake := &fakeReportWriteCloser{closeErr: errors.New("close boom")}
-
-	err := writeParityReport(
-		slog.New(slog.DiscardHandler),
-		dir,
-		path,
-		func(p string) (io.WriteCloser, error) { return fake, nil },
-		func() (*koiosparity.JSONReport, error) { return &koiosparity.JSONReport{Network: "preview"}, nil },
-	)
-	require.Error(t, err)
-	require.ErrorContains(t, err, "close report file")
-}
-
-// TestWriteParityReportJoinsWriteAndCloseErrors confirms a simultaneous
-// write failure and close failure are combined (via errors.Join) rather than
-// one silently discarding the other.
-func TestWriteParityReportJoinsWriteAndCloseErrors(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "report.json")
-	fake := &fakeReportWriteCloser{
-		writeErr: errors.New("write boom"),
-		closeErr: errors.New("close boom"),
-	}
-
-	err := writeParityReport(
-		slog.New(slog.DiscardHandler),
-		dir,
-		path,
-		func(p string) (io.WriteCloser, error) { return fake, nil },
-		func() (*koiosparity.JSONReport, error) { return &koiosparity.JSONReport{Network: "preview"}, nil },
-	)
-	require.Error(t, err)
-	require.ErrorContains(t, err, "write report")
-	require.ErrorContains(t, err, "close report file")
-}
-
 // TestRunCommandReportOnlyReadsNoSecretFiles: with both phases skipped,
 // nothing uses the API key or the DSN, so their files must not be read.
 func TestRunCommandReportOnlyReadsNoSecretFiles(t *testing.T) {
@@ -249,4 +187,48 @@ func TestRunCommandReportOnlyReadsNoSecretFiles(t *testing.T) {
 	require.NoError(t, cmd.Flags().Set("metadata-dsn-file", missing))
 
 	require.NoError(t, runCommand(cmd, nil))
+}
+
+// TestWriteParityReportWriteAndCloseFailures covers a WriteJSONReport failure,
+// a Close failure after a successful write (a report that failed to flush
+// cannot be trusted), and both at once, which must be combined rather than one
+// discarding the other.
+func TestWriteParityReportWriteAndCloseFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		writeErr error
+		closeErr error
+		want     []string
+	}{
+		{"write", errors.New("write boom"), nil, []string{"write report"}},
+		{"close", nil, errors.New("close boom"), []string{"close report file"}},
+		{
+			"both",
+			errors.New("write boom"),
+			errors.New("close boom"),
+			[]string{"write report", "close report file"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "report.json")
+			fake := &fakeReportWriteCloser{
+				writeErr: tc.writeErr,
+				closeErr: tc.closeErr,
+			}
+			err := writeParityReport(
+				slog.New(slog.DiscardHandler),
+				dir,
+				path,
+				func(p string) (io.WriteCloser, error) { return fake, nil },
+				func() (*koiosparity.JSONReport, error) {
+					return &koiosparity.JSONReport{Network: "preview"}, nil
+				},
+			)
+			require.Error(t, err)
+			for _, want := range tc.want {
+				require.ErrorContains(t, err, want)
+			}
+		})
+	}
 }

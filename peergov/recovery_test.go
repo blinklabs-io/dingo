@@ -33,6 +33,8 @@ import (
 // node that lost its last upstream connection could never get it back.
 
 func TestPeerGovernor_GossipChurn_SkipsLastEligibleUpstream(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:           newMockEventBus(),
@@ -72,6 +74,8 @@ func TestPeerGovernor_GossipChurn_SkipsLastEligibleUpstream(t *testing.T) {
 func TestPeerGovernor_GossipChurn_LastEligibleUpstreamSkipLogThrottled(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	var logBuf bytes.Buffer
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:             slog.New(slog.NewJSONHandler(&logBuf, nil)),
@@ -108,6 +112,8 @@ func TestPeerGovernor_GossipChurn_LastEligibleUpstreamSkipLogThrottled(
 func TestPeerGovernor_GossipChurn_KeepsOneUpstreamWhenChurningAll(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:           newMockEventBus(),
@@ -158,6 +164,8 @@ func TestPeerGovernor_GossipChurn_KeepsOneUpstreamWhenChurningAll(
 func TestPeerGovernor_GossipChurn_ChurnsGossipWhenTopologyUpstreamExists(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:           newMockEventBus(),
@@ -207,6 +215,8 @@ func TestPeerGovernor_GossipChurn_ChurnsGossipWhenTopologyUpstreamExists(
 func TestPeerGovernor_RedialCandidates_TopologyPeersWithoutConnection(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:   slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus: newMockEventBus(),
@@ -252,6 +262,8 @@ func TestPeerGovernor_RedialCandidates_TopologyPeersWithoutConnection(
 func TestPeerGovernor_RedialCandidates_SkipsDeniedAndReconnecting(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:   slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus: newMockEventBus(),
@@ -287,6 +299,8 @@ func TestPeerGovernor_RedialCandidates_SkipsDeniedAndReconnecting(
 func TestPeerGovernor_RedialCandidates_BootstrapGatedOnBootstrapExit(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:   slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus: newMockEventBus(),
@@ -324,6 +338,8 @@ func TestPeerGovernor_RedialCandidates_BootstrapGatedOnBootstrapExit(
 func TestPeerGovernor_RedialCandidates_EmergencyOnlyWhenNoEligibleUpstream(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:   slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus: newMockEventBus(),
@@ -400,6 +416,8 @@ func TestPeerGovernor_RedialCandidates_EmergencyOnlyWhenNoEligibleUpstream(
 }
 
 func TestPeerGovernor_RedialCandidates_EmergencyCapped(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:   slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus: newMockEventBus(),
@@ -434,6 +452,8 @@ func TestPeerGovernor_RedialCandidates_EmergencyCapped(t *testing.T) {
 func TestPeerGovernor_RedialCandidates_SkipsValencySatisfiedTopologyPeer(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:   slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus: newMockEventBus(),
@@ -473,6 +493,8 @@ func TestPeerGovernor_RedialCandidates_SkipsValencySatisfiedTopologyPeer(
 }
 
 func TestPeerGovernor_Reconcile_RedialsDisconnectedTopologyPeer(t *testing.T) {
+	t.Parallel()
+
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	connManager := connmanager.NewConnectionManager(
 		connmanager.ConnectionManagerConfig{Logger: logger},
@@ -514,6 +536,8 @@ func TestPeerGovernor_Reconcile_RedialsDisconnectedTopologyPeer(t *testing.T) {
 }
 
 func TestPeerGovernor_Reconcile_RedialsGossipPeerWhenNoUpstream(t *testing.T) {
+	t.Parallel()
+
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	connManager := connmanager.NewConnectionManager(
 		connmanager.ConnectionManagerConfig{Logger: logger},

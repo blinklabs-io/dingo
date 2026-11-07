@@ -650,6 +650,8 @@ func TestLeaderEligibilityStakeSkipDecisionUsesTheSuppliedEpochCache(
 // fix recognizes capturedSlot <= mithrilLedgerSlot as diagnostic of that
 // bootstrap gap and falls back to the pool's live registration instead.
 func TestElectingVrfKeyHashResolvesBelowMithrilBootstrapAnchor(t *testing.T) {
+	t.Parallel()
+
 	nonce := bytes.Repeat([]byte{0x07}, 32)
 	tb := createTestBlock(t, [32]byte{56}, 56, tamperNone)
 	ls, db := newEligibilityTestLedger(t, nonce)
@@ -784,6 +786,8 @@ func TestElectingVrfKeyHashDefersImportedRotationInDijkstra(t *testing.T) {
 func TestElectingVrfKeyHashStillRejectsAPoolWithNoRegistrationAtAll(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	nonce := bytes.Repeat([]byte{0x07}, 32)
 	tb := createTestBlock(t, [32]byte{57}, 57, tamperNone)
 	ls, db := newEligibilityTestLedger(t, nonce)
@@ -819,6 +823,8 @@ func TestElectingVrfKeyHashStillRejectsAPoolWithNoRegistrationAtAll(
 func TestElectingVrfKeyHashDoesNotFallBackWithoutAMithrilBoundary(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	nonce := bytes.Repeat([]byte{0x07}, 32)
 	tb := createTestBlock(t, [32]byte{58}, 58, tamperNone)
 	ls, db := newEligibilityTestLedger(t, nonce)

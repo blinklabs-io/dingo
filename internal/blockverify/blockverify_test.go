@@ -48,6 +48,7 @@ func realBlock(t *testing.T) gledger.Block {
 // TestHashAcceptsMatchingContent proves the happy path: the true block CBOR
 // against its own hash and slot decodes and verifies.
 func TestHashAcceptsMatchingContent(t *testing.T) {
+	t.Parallel()
 	block := realBlock(t)
 	hash := block.Hash()
 
@@ -68,6 +69,7 @@ func TestHashAcceptsMatchingContent(t *testing.T) {
 // rest of the storage stack already does via models.Block.Decode /
 // DecodeConwayBlock, rather than rejecting it as undecodable.
 func TestHashAcceptsLeiosExtendedConwayHeader(t *testing.T) {
+	t.Parallel()
 	standardRaw := testutil.BuildDecodableConwayBlockBytes(t, testSlot, 7)
 	extendedRaw := testutil.ExtendConwayHeaderWithLeios(t, standardRaw)
 
@@ -171,6 +173,7 @@ func tamperByronSscCertificates(t *testing.T, blockCbor []byte) []byte {
 // and slot alone would accept the tampered block below, since Byron's
 // block hash covers only the header, which this tamper leaves untouched.
 func TestHashRejectsTamperedByronSscProof(t *testing.T) {
+	t.Parallel()
 	raw, blockType := byronMainFixture(t)
 	decoded, err := gledger.NewBlockFromCbor(blockType, raw)
 	require.NoError(t, err)
@@ -195,6 +198,7 @@ func TestHashRejectsTamperedByronSscProof(t *testing.T) {
 // ssc_proof authentication above isn't merely rejecting every Byron main
 // block outright.
 func TestHashAcceptsMatchingByronBlock(t *testing.T) {
+	t.Parallel()
 	raw, blockType := byronMainFixture(t)
 	decoded, err := gledger.NewBlockFromCbor(blockType, raw)
 	require.NoError(t, err)
@@ -210,6 +214,7 @@ func TestHashAcceptsMatchingByronBlock(t *testing.T) {
 // caught: the bytes decode cleanly, but the recomputed hash disagrees with
 // the hash the caller asked for.
 func TestHashRejectsContentMismatch(t *testing.T) {
+	t.Parallel()
 	blocks, err := fixtures.GenerateConwayChain(
 		1,
 		lcommon.Blake2b256{},
@@ -236,6 +241,7 @@ func TestHashRejectsContentMismatch(t *testing.T) {
 // block of a given type are rejected as undecodable rather than panicking
 // or being treated as a hash mismatch.
 func TestHashRejectsUndecodableContent(t *testing.T) {
+	t.Parallel()
 	garbage := bytes.Repeat([]byte{0xff}, 16)
 	_, err := Hash(gledger.BlockTypeConway, testSlot, garbage, make([]byte, 32))
 	require.ErrorIs(t, err, ErrUndecodable)
@@ -247,6 +253,7 @@ func TestHashRejectsUndecodableContent(t *testing.T) {
 // does not pin the point, so the decoded block's own slot must also match
 // what was requested.
 func TestHashRejectsSlotMismatch(t *testing.T) {
+	t.Parallel()
 	block := realBlock(t)
 	hash := block.Hash()
 
@@ -273,6 +280,7 @@ func TestHashRejectsSlotMismatch(t *testing.T) {
 // recorded BlockMetadata.Type could name an adjacent, layout-compatible
 // era instead of the block's genuine one.
 func TestHashAcceptsAdjacentEraMisclassification(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name        string
 		generate    func(uint64, lcommon.Blake2b256, uint64, uint64, int) ([]gledger.Block, error)
@@ -294,6 +302,7 @@ func TestHashAcceptsAdjacentEraMisclassification(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			blocks, err := tc.generate(1, lcommon.Blake2b256{}, testSlot, 1, 1)
 			require.NoError(t, err)
 			require.Len(t, blocks, 1)

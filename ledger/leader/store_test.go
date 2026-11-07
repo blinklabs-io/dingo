@@ -61,6 +61,7 @@ func (m *mockSyncStateStore) SetSyncState(
 }
 
 func TestSyncStateScheduleStoreRoundTrip(t *testing.T) {
+	t.Parallel()
 	poolId := lcommon.PoolKeyHash{}
 	copy(poolId[:], []byte("testpool1234567890123"))
 
@@ -107,6 +108,7 @@ func TestSyncStateScheduleStoreRoundTrip(t *testing.T) {
 func TestSyncStateScheduleStoreLoadsZeroFormatVersionFromOldRecord(
 	t *testing.T,
 ) {
+	t.Parallel()
 	poolId := lcommon.PoolKeyHash{}
 	copy(poolId[:], []byte("testpool1234567890123"))
 
@@ -130,6 +132,7 @@ func TestSyncStateScheduleStoreLoadsZeroFormatVersionFromOldRecord(
 func TestSyncStateScheduleStoreKeepsMissingIdentityOnCurrentFormat(
 	t *testing.T,
 ) {
+	t.Parallel()
 	poolId := lcommon.PoolKeyHash{}
 	copy(poolId[:], []byte("testpool1234567890123"))
 
@@ -157,6 +160,7 @@ func TestSyncStateScheduleStoreKeepsMissingIdentityOnCurrentFormat(
 // IsLeaderForSlot's binary search stays correct even against a tampered or
 // legacy record.
 func TestSyncStateScheduleStoreSortsUnsortedRecord(t *testing.T) {
+	t.Parallel()
 	poolId := lcommon.PoolKeyHash{}
 	copy(poolId[:], []byte("testpool1234567890123"))
 

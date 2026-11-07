@@ -415,6 +415,7 @@ func newLifecycleRecycler(
 }
 
 func TestStartRejectsIncompleteConfig(t *testing.T) {
+	t.Parallel()
 	components := newFakeComponents(LiveComponents{})
 	pub := newFakePublisher()
 
@@ -454,6 +455,7 @@ func TestStartRejectsIncompleteConfig(t *testing.T) {
 }
 
 func TestStartStopExitsCleanly(t *testing.T) {
+	t.Parallel()
 	ledger := &fakeLedger{tip: testTip(100, 50), atTip: true}
 	state := &fakeChainsyncState{}
 	components := newFakeComponents(LiveComponents{
@@ -490,6 +492,7 @@ func TestStartStopExitsCleanly(t *testing.T) {
 }
 
 func TestStopIsSafeWithoutStartAndIsIdempotent(t *testing.T) {
+	t.Parallel()
 	r := newLifecycleRecycler(t, newFakeComponents(LiveComponents{}))
 	r.Stop()
 	r.Stop()
@@ -505,6 +508,7 @@ func TestStopIsSafeWithoutStartAndIsIdempotent(t *testing.T) {
 }
 
 func TestStartIsRejectedTwice(t *testing.T) {
+	t.Parallel()
 	ledger := &fakeLedger{tip: testTip(1, 1), atTip: true}
 	r := newLifecycleRecycler(t, newFakeComponents(LiveComponents{
 		Ledger:         ledger,
@@ -516,6 +520,7 @@ func TestStartIsRejectedTwice(t *testing.T) {
 }
 
 func TestStopExitsWhenParentContextCancelled(t *testing.T) {
+	t.Parallel()
 	ledger := &fakeLedger{tip: testTip(1, 1), atTip: true}
 	components := newFakeComponents(LiveComponents{
 		Ledger:         ledger,
@@ -547,6 +552,7 @@ func TestStopExitsWhenParentContextCancelled(t *testing.T) {
 }
 
 func TestTicksAreSkippedWhileComponentsUnavailable(t *testing.T) {
+	t.Parallel()
 	ledger := &fakeLedger{tip: testTip(100, 50), atTip: true}
 	state := &fakeChainsyncState{}
 	components := newFakeComponents(LiveComponents{
@@ -621,6 +627,7 @@ func (p *panickyLedger) Tip() ochainsync.Tip {
 }
 
 func TestTickPanicIsRecoveredAndTicksContinue(t *testing.T) {
+	t.Parallel()
 	// Skip one call so the panic lands inside a tick rather than in the
 	// startup baseline read.
 	ledger := newPanickyLedger(1, 1)
@@ -696,6 +703,7 @@ func (p *panickyComponents) WithLiveComponents(fn func(LiveComponents)) bool {
 }
 
 func TestLoopPanicIsRecoveredAndLoopRestarts(t *testing.T) {
+	t.Parallel()
 	ledger := &fakeLedger{tip: testTip(100, 50), atTip: true}
 	state := &fakeChainsyncState{}
 	components := &panickyComponents{}
@@ -721,6 +729,7 @@ func TestLoopPanicIsRecoveredAndLoopRestarts(t *testing.T) {
 }
 
 func TestLoopStopsAfterPanicWhenCancelled(t *testing.T) {
+	t.Parallel()
 	ledger := &fakeLedger{tip: testTip(100, 50), atTip: true}
 	components := &panickyComponents{}
 	components.live = LiveComponents{
@@ -756,6 +765,7 @@ func TestLoopStopsAfterPanicWhenCancelled(t *testing.T) {
 }
 
 func TestStartupBaselineSkippedWhenComponentsUnavailable(t *testing.T) {
+	t.Parallel()
 	ledger := &fakeLedger{
 		tip:                 testTip(5_000, 100),
 		primaryChainTipSlot: 6_000,

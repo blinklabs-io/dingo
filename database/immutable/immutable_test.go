@@ -33,6 +33,7 @@ const (
 )
 
 func TestGetTip(t *testing.T) {
+	t.Parallel()
 	// These expected values correspond to the last block in our test data
 	var expectedSlot uint64 = 1295990
 	expectedHash := "acff9c292f679ca2bd321fadd20f89af16d8f36d1b74794f0e97a6fa29fed359"
@@ -64,6 +65,7 @@ func TestGetTip(t *testing.T) {
 }
 
 func TestLastSlotInChunk(t *testing.T) {
+	t.Parallel()
 	imm, err := immutable.New(testDataDir)
 	if err != nil {
 		t.Fatalf("unexpected error: %s", err)
@@ -102,6 +104,7 @@ func TestLastSlotInChunk(t *testing.T) {
 }
 
 func TestBlocksFromPointBeyondLastChunkError(t *testing.T) {
+	t.Parallel()
 	imm, err := immutable.New(testDataDir)
 	if err != nil {
 		t.Fatalf("unexpected error: %s", err)
@@ -118,6 +121,7 @@ func TestBlocksFromPointBeyondLastChunkError(t *testing.T) {
 }
 
 func TestGetSpecificBlock(t *testing.T) {
+	t.Parallel()
 	imm, err := immutable.New(testDataDir)
 	if err != nil {
 		t.Fatalf("unexpected error: %s", err)
@@ -166,6 +170,7 @@ func TestGetSpecificBlock(t *testing.T) {
 }
 
 func TestBlocksRangeMultipleChunks(t *testing.T) {
+	t.Parallel()
 	imm, err := immutable.New(testDataDir)
 	if err != nil {
 		t.Fatalf("unexpected error: %s", err)
@@ -216,6 +221,7 @@ func TestBlocksRangeMultipleChunks(t *testing.T) {
 // gets read. Mithril bootstrap extracts into a download area where that is a
 // real possibility, so the handle is what it passes.
 func TestNewFromRootReadsThroughTheHandle(t *testing.T) {
+	t.Parallel()
 	base := t.TempDir()
 	ours := filepath.Join(base, "immutable")
 	copyChunkTrio(t, "00000", ours)
@@ -283,6 +289,7 @@ func TestNewFromRootReadsThroughTheHandle(t *testing.T) {
 // TestNewFromRootRejectsNilHandle keeps the nil case an error rather than a
 // silent fall back to a pathname the caller did not supply.
 func TestNewFromRootRejectsNilHandle(t *testing.T) {
+	t.Parallel()
 	if _, err := immutable.NewFromRoot(nil); err == nil {
 		t.Fatal("expected an error for a nil directory handle")
 	}
@@ -333,6 +340,7 @@ func trioDigests(t *testing.T, dir string) map[string]string {
 // below are only meaningful against: a tree whose files match their certified
 // digests reads exactly as an unverified open of the same tree does.
 func TestNewFromRootVerifiedReadsTheVerifiedTree(t *testing.T) {
+	t.Parallel()
 	dir := filepath.Join(t.TempDir(), "immutable")
 	copyChunkTrio(t, "00000", dir)
 
@@ -388,6 +396,7 @@ func TestNewFromRootVerifiedReadsTheVerifiedTree(t *testing.T) {
 func TestNewFromRootVerifiedRefusesAFileSubstitutedAfterTheDigestCheck(
 	t *testing.T,
 ) {
+	t.Parallel()
 	base := t.TempDir()
 	dir := filepath.Join(base, "immutable")
 	copyChunkTrio(t, "00000", dir)
@@ -514,6 +523,7 @@ func overwriteInPlace(t *testing.T, path string, offset int64) {
 // Next calls, so a reader that went back to the file for each block would pick
 // the mutation up here and nowhere earlier.
 func TestNewFromRootVerifiedIsUnaffectedByAnInPlaceWrite(t *testing.T) {
+	t.Parallel()
 	dir := filepath.Join(t.TempDir(), "immutable")
 	copyChunkTrio(t, "00000", dir)
 	digests := trioDigests(t, dir)
@@ -607,6 +617,7 @@ func TestNewFromRootVerifiedIsUnaffectedByAnInPlaceWrite(t *testing.T) {
 //
 // Sparse, so the fixture costs a size rather than the disk to back it.
 func TestNewFromRootVerifiedDoesNotAllocateForAPlantedFile(t *testing.T) {
+	// Not t.Parallel: asserts a delta of the process-wide runtime.MemStats.TotalAlloc.
 	dir := filepath.Join(t.TempDir(), "immutable")
 	copyChunkTrio(t, "00000", dir)
 	digests := trioDigests(t, dir)
@@ -676,6 +687,7 @@ func TestNewFromRootVerifiedDoesNotAllocateForAPlantedFile(t *testing.T) {
 // attacker adds, and reading it because the map is silent about it would make
 // the map's coverage the attacker's choice.
 func TestNewFromRootVerifiedRefusesAFileTheDigestsDoNotCover(t *testing.T) {
+	t.Parallel()
 	dir := filepath.Join(t.TempDir(), "immutable")
 	copyChunkTrio(t, "00000", dir)
 	digests := trioDigests(t, dir)
@@ -706,6 +718,7 @@ func TestNewFromRootVerifiedRefusesAFileTheDigestsDoNotCover(t *testing.T) {
 // written; the bound keeps the reader inside the prefix whose digests have
 // been checked instead of failing on one that is merely unfinished.
 func TestNewFromRootVerifiedStopsAtTheChunkLimit(t *testing.T) {
+	t.Parallel()
 	dir := filepath.Join(t.TempDir(), "immutable")
 	copyChunkTrio(t, "00000", dir)
 	copyChunkTrio(t, "00001", dir)
@@ -765,6 +778,7 @@ func TestNewFromRootVerifiedStopsAtTheChunkLimit(t *testing.T) {
 // for — silently, and further off the higher the marker — so the copy would be
 // bounded by the wrong slot.
 func TestLastSlotInChunkIsByNumberNotPosition(t *testing.T) {
+	t.Parallel()
 	dir := filepath.Join(t.TempDir(), "immutable")
 	copyChunkTrio(t, "00001", dir)
 	copyChunkTrio(t, "00002", dir)
@@ -810,6 +824,7 @@ func TestLastSlotInChunkIsByNumberNotPosition(t *testing.T) {
 // No fixture is needed on disk for this: the names alone decide it, and a
 // real tree at those numbers is a hundred thousand files.
 func TestNewFromRootVerifiedBoundHoldsPastFiveDigits(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name  string
 		bound string
@@ -848,6 +863,7 @@ func TestNewFromRootVerifiedBoundHoldsPastFiveDigits(t *testing.T) {
 }
 
 func TestBlocksInChunkReadsOnlyThatChunk(t *testing.T) {
+	t.Parallel()
 	imm, err := immutable.New(testDataDir)
 	if err != nil {
 		t.Fatalf("unexpected error: %s", err)
@@ -887,6 +903,7 @@ func TestBlocksInChunkReadsOnlyThatChunk(t *testing.T) {
 }
 
 func TestBlocksInChunkMissingChunkErrors(t *testing.T) {
+	t.Parallel()
 	imm, err := immutable.New(t.TempDir())
 	if err != nil {
 		t.Fatalf("unexpected error: %s", err)
