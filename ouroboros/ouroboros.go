@@ -303,6 +303,10 @@ type Ouroboros struct {
 		gledger.BlockHeader,
 	) (uint64, error)
 	chainsyncScheduleAt chainsyncScheduleAtFunc
+	// chainsyncHeaderCheckpoint rejects a peer header at a checkpointed
+	// height whose hash differs from the configured checkpoint. It is nil
+	// when no ledger state is attached.
+	chainsyncHeaderCheckpoint func(gledger.BlockHeader) error
 	// corroborationHoldTimeout bounds how long a roll-forward callback holds
 	// a header for Genesis corroboration.
 	corroborationHoldTimeout time.Duration
@@ -430,8 +434,14 @@ type Ouroboros struct {
 	// LeiosNotify ranking-block announcements observed on this node. The map
 	// is keyed by announcing ranking-block hash and prevents an inconsistent
 	// second description of the same ranking block from being relayed.
-	leiosAnnouncementsMu       sync.Mutex
-	leiosAnnouncements         map[string]leiosAnnouncement
+	leiosAnnouncementsMu sync.Mutex
+	leiosAnnouncements   map[string]leiosAnnouncement
+	// leiosPendingForgedOffers holds this node's forged endorser blocks
+	// whose announcing ranking-block header has not been sent yet. A peer may
+	// offer only an endorser block it has announced, so their LeiosNotify
+	// offers are queued only after that header. Guarded by
+	// leiosAnnouncementsMu.
+	leiosPendingForgedOffers   map[string]leiosPendingForgedOffer
 	leiosAnnouncementInFlight  map[string]struct{}
 	leiosInvalidAnnouncements  *ratewindow.FixedWindow
 	leiosInvalidAnnouncementMu sync.Mutex
@@ -969,6 +979,7 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 			k := max(o.ledgerState.SecurityParam(), 0)
 			return o.ledgerState.Tip().BlockNumber, uint64(k)
 		}
+		o.chainsyncHeaderCheckpoint = o.ledgerState.ValidateHeaderCheckpoint
 		o.chainSelectionShouldVerifyHeaderCrypto = o.ledgerState.ShouldVerifyChainSelectionHeaderCrypto
 		o.chainSelectionVerifyHeaderCrypto = o.ledgerState.ValidatePeerChainSelectionHeaderCryptoWithGeneration
 		o.chainsyncLocalChainTips = func() ([]byte, []byte) {

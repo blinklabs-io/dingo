@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -72,7 +73,17 @@ func loadRewardStakeInputsPending(
 	if raw == "" {
 		return pending, nil
 	}
-	if err := json.Unmarshal([]byte(raw), pending); err != nil {
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &envelope); err != nil {
+		return nil, fmt.Errorf("decode pending reward stake inputs: %w", err)
+	}
+	entries, ok := envelope["entries"]
+	if !ok || len(envelope) != 1 {
+		return nil, errors.New("decode pending reward stake inputs: unknown state format")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(entries))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&pending.Entries); err != nil {
 		return nil, fmt.Errorf("decode pending reward stake inputs: %w", err)
 	}
 	return pending, nil

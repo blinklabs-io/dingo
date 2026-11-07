@@ -69,9 +69,12 @@ func protocolParametersForBlockEra(
 	eraList []eras.EraDesc,
 	pparams, prevEraPParams lcommon.ProtocolParameters,
 ) lcommon.ProtocolParameters {
-	if blockEraId != currentEra.Id && prevEraPParams != nil &&
-		eras.IsCompatibleEraIn(eraList, blockEraId, currentEra.Id) {
-		return prevEraPParams
+	if eras.IsCompatibleEraIn(eraList, blockEraId, currentEra.Id) {
+		if prev := previousEraPParams(
+			blockEraId, currentEra.Id, pparams, prevEraPParams,
+		); prev != nil {
+			return prev
+		}
 	}
 	return pparams
 }

@@ -409,6 +409,29 @@ func (g *ChainGroup) Await(
 	}
 }
 
+// AwaitAgreementAbove waits until every node is connected and has observed
+// a matching new header above minSlot. At least two nodes are required: an
+// old common ancestor cannot prove recovery after the nodes extend forks.
+func (g *ChainGroup) AwaitAgreementAbove(
+	ctx context.Context, desc string, minSlot uint64,
+) (ObservedHeader, error) {
+	var agreed ObservedHeader
+	err := g.Await(ctx, desc, func(snaps []ChainSnapshot) bool {
+		if len(snaps) < 2 {
+			return false
+		}
+		for _, snap := range snaps {
+			if !snap.Connected || snap.Tip.SlotNumber <= minSlot {
+				return false
+			}
+		}
+		var ok bool
+		agreed, ok = AgreedHeaderAbove(snaps, minSlot)
+		return ok
+	})
+	return agreed, err
+}
+
 // AgreementResult reports whether a set of nodes agree on the chain at
 // the deepest slot they have all observed.
 type AgreementResult struct {

@@ -214,6 +214,10 @@ func ValidateTxConway(
 		)
 	}
 	tx = normalizedTx
+	// The rules below share one transaction-scoped state: UTxO lookups and
+	// the transaction's script view are computed once instead of once per
+	// rule. Dingo's capability lookups unwrap it (stateCapability).
+	ls = lcommon.NewTransactionScopedLedgerState(ls)
 	// Validate TX through ledger validation rules (Phase-1).
 	// These must run even for isValid=false transactions, which still
 	// require valid structure, fees, and UTxO references for collateral.

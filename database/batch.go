@@ -49,6 +49,16 @@ func (d *Database) NewLeiosClosureBatchAccumulator() BatchAccumulator {
 	return store.NewLeiosClosureBatchAccumulator()
 }
 
+// NewValidatedBlockBatchAccumulator creates an API-detail accumulator whose
+// consensus state remains immediate. Unsupported providers return nil.
+func (d *Database) NewValidatedBlockBatchAccumulator() BatchAccumulator {
+	store, ok := d.transactionStore().(metadata.ValidatedBlockBatcher)
+	if !ok {
+		return nil
+	}
+	return store.NewValidatedBlockBatchAccumulator()
+}
+
 // FlushBatch writes accumulated metadata rows for the active metadata plugin.
 func (d *Database) FlushBatch(
 	acc BatchAccumulator,

@@ -326,21 +326,26 @@ func runOutage(
 			return false
 		}))
 
-	requireAgreement(t, ctx, group, label+": after recovery")
-
-	// Agreement alone only says the nodes converged; it does not say the
-	// network resumed producing. Without this the next phase can stack a
-	// second outage onto a network that has converged but stalled, and
-	// then blame the second outage for the stall. Requiring forward
-	// progress first means each disruption starts from a healthy
-	// baseline.
-	resumed := devnet.MaxBlockNumber(group.Snapshots())
-	require.NoError(t, group.Await(ctx,
-		fmt.Sprintf("%s: block production resumed after recovery"+
-			" (past block %d)", label, resumed),
-		func(snaps []devnet.ChainSnapshot) bool {
-			return devnet.MaxBlockNumber(snaps) > resumed
-		}))
+	// An old common header can survive two forks that use disjoint newer
+	// slots. Require a shared block forged after the recovered server tips,
+	// rather than allowing one fork alone to advance before the next outage.
+	watermark := devnet.MaxServerTipSlot(group.Snapshots())
+	agreed, err := group.AwaitAgreementAbove(
+		ctx,
+		fmt.Sprintf(
+			"%s: all nodes observe the same new block above slot %d",
+			label,
+			watermark,
+		),
+		watermark,
+	)
+	require.NoError(t, err)
+	t.Logf(
+		"%s: recovered agreement at slot %d block %d",
+		label,
+		agreed.Slot,
+		agreed.BlockNumber,
+	)
 
 	after := chain.Snapshot()
 	t.Logf(

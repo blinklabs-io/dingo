@@ -122,30 +122,19 @@ func (o *Ouroboros) instrumentPeersharingShareRequest(
 	}
 }
 
-func (o *Ouroboros) peersharingShareRequest(
-	ctx opeersharing.CallbackContext,
-	amount int,
-) ([]opeersharing.PeerAddress, error) {
-	// If PeerGov isn't wired yet, don't share any peers rather than panic
-	if o.peerGov == nil {
-		return []opeersharing.PeerAddress{}, nil
-	}
-	if amount <= 0 {
-		return []opeersharing.PeerAddress{}, nil
-	}
+type shareCandidate struct {
+	key  string
+	rank uint64
+	addr opeersharing.PeerAddress
+}
 
-	// Collect every valid sharable candidate, order by a salted hash, and
-	// then cap. Taking the first peers in list order would answer every
-	// request identically and let a requester whose only source is this
-	// node never learn the rest.
-	type candidate struct {
-		key  string
-		rank uint64
-		addr opeersharing.PeerAddress
-	}
-	salt := o.peerShareSalt.current()
-	knownPeers := o.peerGov.GetPeers()
-	candidates := make([]candidate, 0, len(knownPeers))
+// shareCandidates returns the sharable peers with a serializable, globally
+// routable address and a usable port.
+func (o *Ouroboros) shareCandidates(
+	knownPeers []peergov.Peer,
+	salt [16]byte,
+) []shareCandidate {
+	candidates := make([]shareCandidate, 0, len(knownPeers))
 	for _, peer := range knownPeers {
 		if !peer.Sharable {
 			continue
@@ -194,7 +183,7 @@ func (o *Ouroboros) peersharingShareRequest(
 			)
 			continue
 		}
-		candidates = append(candidates, candidate{
+		candidates = append(candidates, shareCandidate{
 			key:  address,
 			rank: saltedRank(salt, address),
 			addr: opeersharing.PeerAddress{
@@ -203,6 +192,29 @@ func (o *Ouroboros) peersharingShareRequest(
 			},
 		})
 	}
+	return candidates
+}
+
+func (o *Ouroboros) peersharingShareRequest(
+	ctx opeersharing.CallbackContext,
+	amount int,
+) ([]opeersharing.PeerAddress, error) {
+	// If PeerGov isn't wired yet, don't share any peers rather than panic
+	if o.peerGov == nil {
+		return []opeersharing.PeerAddress{}, nil
+	}
+	if amount <= 0 {
+		return []opeersharing.PeerAddress{}, nil
+	}
+
+	// Collect every valid sharable candidate, order by a salted hash, and
+	// then cap. Taking the first peers in list order would answer every
+	// request identically and let a requester whose only source is this
+	// node never learn the rest.
+	candidates := o.shareCandidates(
+		o.peerGov.GetPeers(),
+		o.peerShareSalt.current(),
+	)
 	sort.Slice(candidates, func(i, j int) bool {
 		if candidates[i].rank != candidates[j].rank {
 			return candidates[i].rank < candidates[j].rank

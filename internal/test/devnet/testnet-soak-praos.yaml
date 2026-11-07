@@ -1,0 +1,55 @@
+# DevNet configurator spec: two pools with mainnet-like block density
+# (activeSlotsCoeff 0.05) at 0.2s slots and k=20, for TestChainAgreementSoak.
+#
+# The accelerated specs use f=0.4, where two equal pools forge in the same
+# slot about every 15 seconds. This one makes slot battles rare, so it shows
+# whether dingo and cardano-node agree outside that regime.
+#
+# Timing invariants (enforced by DevNetConfig.Validate):
+#   nonceStabilityWindow      = 4k/f = 4*20/0.05 = 1600 < 2000 = epochLength
+#   blockfetchStabilityWindow = 3k/f = 3*20/0.05 = 1200 < 2000 = epochLength
+#
+--- # Required Testnet Parameters
+poolCount: 2
+poolCost: 0
+poolMargin: 0.0
+poolPledge: 0
+delegatedSupply: 2000000000000
+systemStart: 'now'
+systemStartDelay: 5
+networkMagic: 42
+testnetDomain: devnet
+
+--- # Byron Genesis Override
+protocolConsts:
+  k: 20
+
+--- # Shelley Genesis Override
+epochLength: 2000
+slotLength: 0.2
+activeSlotsCoeff: 0.05
+securityParam: 20
+maxLovelaceSupply: 6000000000000
+protocolParams:
+  decentralisationParam: 0
+  protocolVersion:
+    major: 10
+    minor: 0
+
+--- # Alonzo Genesis Override
+
+--- # Conway Genesis Override
+
+--- # Node Config Override
+TestShelleyHardForkAtEpoch: 0
+TestAllegraHardForkAtEpoch: 0
+TestMaryHardForkAtEpoch: 0
+TestAlonzoHardForkAtEpoch: 0
+TestBabbageHardForkAtEpoch: 0
+TestConwayHardForkAtEpoch: 0
+ExperimentalHardForksEnabled: true
+ExperimentalProtocolsEnabled: true
+TraceForge: true
+TraceChainDb: true
+TraceMempool: true
+TurnOnLogging: true

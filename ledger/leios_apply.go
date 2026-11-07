@@ -404,9 +404,11 @@ func (ls *LedgerState) validateAndApplyEndorserBlockTransactions(
 			}
 			pp := snapshot.currentPParams
 			isCurrentEraPParams := true
-			if validationEra.Id != snapshot.currentEra.Id &&
-				snapshot.prevEraPParams != nil {
-				pp = snapshot.prevEraPParams
+			if prev := previousEraPParams(
+				validationEra.Id, snapshot.currentEra.Id,
+				snapshot.currentPParams, snapshot.prevEraPParams,
+			); prev != nil {
+				pp = prev
 				isCurrentEraPParams = false
 			}
 			synthetic := syntheticV2CostModelForValidation(
