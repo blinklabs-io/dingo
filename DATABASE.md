@@ -2558,7 +2558,9 @@ unaffected: it never prunes spent rows, so no cap or announced floor applies.
 
 Consumed-input recovery uses `metadata.UtxoSpendStateReader` when available to
 read only the deletion slot and spender hash, including unflushed retained
-closure outputs. The SQL store reuses its prepared `GetUtxoSpendState` query.
+closure outputs. The SQL store reuses its `GetUtxoSpendState` SQL and prepared
+statements on the write pool. Queries on a separate read pool execute the same
+SQL directly.
 Providers without this performance capability keep `GetUtxoIncludingSpent`;
 the required metadata provider contract is unchanged. Missing-input recovery,
 same-slot spender repair, and strict conflict detection retain their existing
