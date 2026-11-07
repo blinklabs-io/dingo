@@ -163,3 +163,50 @@ func TestTickRecognizesFirstSlotZeroBlockOnlyOnce(t *testing.T) {
 	r.tick(now.Add(4*time.Minute+time.Nanosecond), st, live, 0)
 	require.Len(t, pub.byType(event.ChainsyncResyncEventType), 1)
 }
+
+func TestTickTreatsLedgerReplacementAsProcessingProgress(t *testing.T) {
+	t.Parallel()
+	conn := testConnId(4)
+	active := conn
+	ledger := &fakeLedger{
+		tip: testTip(100, 50), primaryChainTipSlot: 500,
+	}
+	state := &fakeChainsyncState{
+		tracked: []chainsync.TrackedClient{
+			activeClient(conn, 100),
+		}, activeConn: &active,
+	}
+	selector := plateauSelector(conn, 1_700_000)
+	pub := newFakePublisher()
+	r, _ := newTestRecycler(t, ledger, state, selector, pub, Config{})
+	now := time.Unix(1_700_000_000, 0)
+	st := newTestTickState(100, now)
+	st.lastPrimaryChainTipSlot = 500
+	// The previous ledger had processed up to slot 900.
+	st.lastBlockProcessingSlot = 900
+	st.blockProcessingSeen = true
+	live := LiveComponents{
+		Ledger:         ledger,
+		ChainsyncState: state,
+		ChainSelector:  selector,
+	}
+
+	// A replacement ledger restarts the slot below the old mark.
+	ledger.blockProcessingSlot = 10
+	now = now.Add(90 * time.Second)
+	r.tick(now, st, live, 100)
+	require.Equal(t, now, st.lastProgressAt)
+	require.Equal(t, uint64(10), st.lastBlockProcessingSlot)
+
+	// The same slot again is not progress.
+	renewed := now
+	now = now.Add(90 * time.Second)
+	r.tick(now, st, live, 100)
+	require.Equal(t, renewed, st.lastProgressAt)
+
+	// Processing past it is.
+	ledger.blockProcessingSlot = 11
+	now = now.Add(90 * time.Second)
+	r.tick(now, st, live, 100)
+	require.Equal(t, now, st.lastProgressAt)
+}
