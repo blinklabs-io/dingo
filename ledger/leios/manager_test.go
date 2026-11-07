@@ -48,7 +48,7 @@ import (
 // inside the provider for the whole window, so no other caller can find a
 // populated memo to hit instead -- so this window only has to be long enough
 // for a would-be second caller to be scheduled.
-const committeeCoalesceWindow = 100 * time.Millisecond
+const committeeCoalesceWindow = 500 * time.Millisecond
 
 // gatedParamsProvider holds committee computation open inside
 // LeiosCommitteeParameters, the first provider call
@@ -824,7 +824,7 @@ func TestVoteManagerVotesFromHeaderArrivalBeforeRankingBlockApplies(
 	testutil.RequireNoReceive(
 		t,
 		emittedCh,
-		100*time.Millisecond,
+		300*time.Millisecond,
 		"the post-apply backstop must not emit a second vote",
 	)
 	assert.Len(
@@ -865,7 +865,7 @@ func TestVoteManagerVotesOnlyForValidatedAnnouncement(t *testing.T) {
 	testutil.RequireNoReceive(
 		t,
 		emittedCh,
-		100*time.Millisecond,
+		300*time.Millisecond,
 		"vote for an announcement that was not semantically validated",
 	)
 
@@ -1210,7 +1210,7 @@ func TestVoteManagerHeaderAndApplyArmingDoNotDoubleVote(t *testing.T) {
 	testutil.RequireNoReceive(
 		t,
 		emittedCh,
-		100*time.Millisecond,
+		500*time.Millisecond,
 		"no duplicate vote for an announcement already voted on",
 	)
 	assert.Len(
@@ -1271,7 +1271,7 @@ func TestVoteManagerRolledBackHeaderAnnouncementDoesNotVote(t *testing.T) {
 	testutil.RequireNoReceive(
 		t,
 		emittedCh,
-		100*time.Millisecond,
+		500*time.Millisecond,
 		"no vote for an announcement rolled off our chain",
 	)
 	assert.Empty(
@@ -1474,7 +1474,7 @@ func TestVoteManagerInvalidatedHeaderAnnouncementDoesNotVote(t *testing.T) {
 	testutil.RequireNoReceive(
 		t,
 		emittedCh,
-		100*time.Millisecond,
+		500*time.Millisecond,
 		"no vote for an announcement the chain invalidated",
 	)
 	assert.Empty(t, fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{{
@@ -1553,7 +1553,7 @@ func TestVoteManagerUnsequencedRollbackStillPrunes(t *testing.T) {
 	testutil.RequireNoReceive(
 		t,
 		emittedCh,
-		100*time.Millisecond,
+		500*time.Millisecond,
 		"an unsequenced rollback still prunes announcements",
 	)
 }
@@ -1958,7 +1958,7 @@ func TestVoteManagerRollbackDeliveredBeforeHeaderStreamIsSafe(t *testing.T) {
 	testutil.RequireNoReceive(
 		t,
 		emittedCh,
-		100*time.Millisecond,
+		500*time.Millisecond,
 		"no vote for a header the rollback removed, whatever order the two streams arrived in",
 	)
 	fixture.mgr.mu.Lock()
@@ -2130,7 +2130,7 @@ func TestVoteManagerSameSlotLocalForgeStillVotes(t *testing.T) {
 	testutil.RequireNoReceive(
 		t,
 		emittedCh,
-		100*time.Millisecond,
+		300*time.Millisecond,
 		"the vote id is still held by the peer vote",
 	)
 
@@ -2161,7 +2161,7 @@ func TestVoteManagerSameSlotLocalForgeStillVotes(t *testing.T) {
 	testutil.RequireNoReceive(
 		t,
 		emittedCh,
-		100*time.Millisecond,
+		300*time.Millisecond,
 		"exactly one vote for the slot",
 	)
 	raws := fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{voteId})
@@ -3193,7 +3193,7 @@ func TestVoteManagerDoesNotEchoToOrigin(t *testing.T) {
 	testutil.RequireNoReceive(
 		t,
 		resultCh,
-		100*time.Millisecond,
+		300*time.Millisecond,
 		"own vote must not be echoed back",
 	)
 	close(done)
@@ -3234,7 +3234,7 @@ func TestVoteManagerNextVotesCursorAdvances(t *testing.T) {
 	testutil.RequireNoReceive(
 		t,
 		secondCh,
-		100*time.Millisecond,
+		300*time.Millisecond,
 		"vote must be served at most once per connection",
 	)
 	close(done)
@@ -3335,7 +3335,7 @@ func TestVoteManagerNextVotesAccumulatesAcrossInserts(t *testing.T) {
 	testutil.RequireNoReceive(
 		t,
 		resultCh,
-		100*time.Millisecond,
+		300*time.Millisecond,
 		"NextVotes must wait for the full count",
 	)
 	require.NoError(
@@ -3401,7 +3401,7 @@ func TestVoteManagerDedupIgnoresResubmission(t *testing.T) {
 	testutil.RequireNoReceive(
 		t,
 		secondCh,
-		100*time.Millisecond,
+		300*time.Millisecond,
 		"duplicate vote must not be stored twice",
 	)
 	close(done)
@@ -3519,7 +3519,7 @@ func TestVoteManagerLenientUnknownPubkey(t *testing.T) {
 	testutil.RequireNoReceive(
 		t,
 		quorumCh,
-		100*time.Millisecond,
+		300*time.Millisecond,
 		"unverified votes alone must not certify",
 	)
 }
@@ -3580,7 +3580,7 @@ func TestVoteManagerQuorumBuildsCertificate(t *testing.T) {
 	testutil.RequireNoReceive(
 		t,
 		quorumCh,
-		100*time.Millisecond,
+		300*time.Millisecond,
 		"certificate is built once per endorser block",
 	)
 }
@@ -3624,7 +3624,7 @@ func TestVoteManagerQuorumRequiresVerifiedStake(t *testing.T) {
 	testutil.RequireNoReceive(
 		t,
 		quorumCh,
-		100*time.Millisecond,
+		300*time.Millisecond,
 		"observed-but-unverified stake must not certify",
 	)
 
@@ -3677,7 +3677,7 @@ func TestVoteManagerOwnVoteEmission(t *testing.T) {
 	testutil.RequireNoReceive(
 		t,
 		emittedCh,
-		100*time.Millisecond,
+		300*time.Millisecond,
 		"acquiring an EB before its ranking block is adopted must not emit a vote",
 	)
 	fixture.mgr.ObserveAnnouncement(577, rbHash, ebHash)
@@ -3727,7 +3727,7 @@ func TestVoteManagerOwnVoteEmission(t *testing.T) {
 	testutil.RequireNoReceive(
 		t,
 		resultCh,
-		100*time.Millisecond,
+		300*time.Millisecond,
 		"local prototype vote must stay off the legacy protocol",
 	)
 	close(done)
@@ -3752,7 +3752,7 @@ func TestVoteManagerNextVotesExcludesReceivedPrototypeVotes(t *testing.T) {
 	testutil.RequireNoReceive(
 		t,
 		resultCh,
-		100*time.Millisecond,
+		300*time.Millisecond,
 		"received prototype vote must stay off the legacy protocol",
 	)
 
@@ -3973,7 +3973,7 @@ func TestVoteManagerQueuedPeerPrototypeVoteRequeuedForRelayAfterAnnouncement(
 	testutil.RequireNoReceive(
 		t,
 		receivedCh,
-		100*time.Millisecond,
+		300*time.Millisecond,
 		"a vote pending its announcing ranking block must not be relayed yet",
 	)
 
@@ -4017,7 +4017,7 @@ func TestVoteManagerDuplicatePeerPrototypeVoteNotRequeuedForRelay(
 	testutil.RequireNoReceive(
 		t,
 		receivedCh,
-		100*time.Millisecond,
+		300*time.Millisecond,
 		"a resubmitted vote already on record must not be requeued again",
 	)
 }
@@ -4170,7 +4170,7 @@ func TestVoteManagerPrototypeTalliesAreSeparatedByAnnouncingBlock(
 		}
 	}
 	testutil.RequireNoReceive(
-		t, quorumCh, 100*time.Millisecond,
+		t, quorumCh, 300*time.Millisecond,
 		"different prototype signing contexts must not share a tally",
 	)
 }
@@ -6304,7 +6304,7 @@ func TestVoteManagerNextVotesAbortDoesNotSkipVotes(t *testing.T) {
 	testutil.RequireNoReceive(
 		t,
 		resultCh,
-		100*time.Millisecond,
+		300*time.Millisecond,
 		"NextVotes waits for the full count",
 	)
 	close(done)
@@ -6372,7 +6372,7 @@ func TestVoteManagerEvictedVoteDoesNotRecount(t *testing.T) {
 	testutil.RequireNoReceive(
 		t,
 		quorumCh,
-		100*time.Millisecond,
+		300*time.Millisecond,
 		"re-delivered vote must not count toward quorum",
 	)
 
@@ -6464,7 +6464,7 @@ func TestVoteManagerEvictedVoteEquivocationStillDetected(t *testing.T) {
 	testutil.RequireNoReceive(
 		t,
 		quorumCh,
-		100*time.Millisecond,
+		300*time.Millisecond,
 		"equivocating vote must not count after serving eviction",
 	)
 }
@@ -6913,7 +6913,7 @@ func TestVoteManagerRollbackRejectsInFlightLocalPrototypeVote(t *testing.T) {
 	testutil.RequireReceive(t, done, testutil.AsyncWait, "in-flight emission exit")
 
 	testutil.RequireNoReceive(
-		t, emittedCh, 100*time.Millisecond,
+		t, emittedCh, 300*time.Millisecond,
 		"rolled-back announcement must not publish a local vote",
 	)
 	assert.Empty(t, fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{{

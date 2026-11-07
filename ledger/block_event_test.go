@@ -483,7 +483,7 @@ func TestRollbackAndForwardTxEventsStayOrderedAcrossRepeatedCycles(
 ) {
 	t.Parallel()
 
-	const cycles = 20
+	const cycles = 100
 	blocks := loadTestBlocksWithTxs(t, 1)
 	blk, err := blocks[0].Decode()
 	require.NoError(t, err)

@@ -363,7 +363,7 @@ func TestLedgerStateQueryWaitsForBoundaryJob(t *testing.T) {
 		answered <- err
 	}()
 	require.Never(t, func() bool { return len(answered) > 0 },
-		100*time.Millisecond, 10*time.Millisecond,
+		300*time.Millisecond, 10*time.Millisecond,
 		"a ledger-state query answered before the boundary job wrote")
 	rows, err := s.db.GetPoolStakeSnapshotsByEpoch(742, "mark", nil)
 	require.NoError(t, err)

@@ -2611,7 +2611,7 @@ func TestReplayRecoveryRejectsDeterministicDuplicateInput(t *testing.T) {
 	testutil.RequireNoReceive(
 		t,
 		resyncCh,
-		50*time.Millisecond,
+		250*time.Millisecond,
 		"canonical deterministic rejection must not request another fresh intersection",
 	)
 }
@@ -2801,7 +2801,7 @@ func TestReplayRecoveryRejectsRepeatedIncorrectWithdrawalAmount(t *testing.T) {
 		testutil.RequireNoReceive(
 			t,
 			resyncCh,
-			50*time.Millisecond,
+			250*time.Millisecond,
 			"a repeat rejection must not request another fresh intersection",
 		)
 	}
@@ -3107,7 +3107,7 @@ func TestReplayRecoveryDeterministicDuplicateAtTipSkipsDescentSchedule(
 	testutil.RequireNoReceive(
 		t,
 		resyncCh,
-		50*time.Millisecond,
+		250*time.Millisecond,
 		"a repeat at-tip rejection must not rotate peers again",
 	)
 }
@@ -3830,7 +3830,7 @@ func requireMissingRedeemerRecovery(
 	testutil.RequireNoReceive(
 		t,
 		resyncCh,
-		50*time.Millisecond,
+		250*time.Millisecond,
 		"a state-dependent missing-redeemer rejection must not request a "+
 			"fresh ChainSync intersection",
 	)
@@ -3878,7 +3878,7 @@ func TestReplayRecoveryKeepsBadInputsOnTheRewindPath(t *testing.T) {
 	testutil.RequireNoReceive(
 		t,
 		resyncCh,
-		50*time.Millisecond,
+		250*time.Millisecond,
 		"a state-dependent rejection must not use the deterministic "+
 			"fresh-intersection path",
 	)
