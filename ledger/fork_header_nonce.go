@@ -296,6 +296,37 @@ func (ls *LedgerState) verifyPeerForkTargetEpochAncestors(
 	return nil
 }
 
+// frozenCandidateNonce recomputes the candidate nonce that froze at the end of
+// sourceEpoch from the local chain. computeEpochNonceForSlot seeds an epoch
+// that has no nonce with the genesis nonce, which is correct only for the
+// initial epoch; for any later epoch the genesis hash would be a wrong
+// candidate that rejects a valid fork header, so that case defers.
+func (ls *LedgerState) frozenCandidateNonce(
+	ctx context.Context,
+	sourceEpoch models.Epoch,
+) ([]byte, error) {
+	if len(sourceEpoch.Nonce) == 0 && sourceEpoch.EpochId != 0 {
+		return nil, fmt.Errorf(
+			"%w: epoch %d has no published nonce",
+			errHeaderVerificationDeferred,
+			sourceEpoch.EpochId,
+		)
+	}
+	_, _, frozen, _, err := ls.computeEpochNonceForSlot(
+		ctx,
+		sourceEpoch.StartSlot+uint64(sourceEpoch.LengthInSlots),
+		sourceEpoch,
+	)
+	if err != nil || len(frozen) != lcommon.Blake2b256Size {
+		return nil, fmt.Errorf(
+			"%w: frozen candidate nonce for epoch %d is unavailable",
+			errHeaderVerificationDeferred,
+			sourceEpoch.EpochId,
+		)
+	}
+	return frozen, nil
+}
+
 func (ls *LedgerState) peerChainSelectionEpochNonceAcrossEpochs(
 	ctx context.Context,
 	connId ouroboros.ConnectionId,
@@ -371,17 +402,9 @@ func (ls *LedgerState) peerChainSelectionEpochNonceAcrossEpochs(
 			// rollback across the boundary. The candidate froze at the
 			// cutoff, which precedes the intersection, so the local chain's
 			// prefix up to it is the fork's prefix and yields the same value.
-			_, _, frozen, _, nonceErr := ls.computeEpochNonceForSlot(
-				ctx,
-				sourceEpoch.StartSlot+uint64(sourceEpoch.LengthInSlots),
-				sourceEpoch,
-			)
-			if nonceErr != nil || len(frozen) != lcommon.Blake2b256Size {
-				return nil, models.Epoch{}, false, fmt.Errorf(
-					"%w: frozen candidate nonce for epoch %d is unavailable",
-					errHeaderVerificationDeferred,
-					sourceEpoch.EpochId,
-				)
+			frozen, frozenErr := ls.frozenCandidateNonce(ctx, sourceEpoch)
+			if frozenErr != nil {
+				return nil, models.Epoch{}, false, frozenErr
 			}
 			nextEpoch.CandidateNonce = frozen
 		}
