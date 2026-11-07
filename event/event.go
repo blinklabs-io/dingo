@@ -67,6 +67,18 @@ var ErrEventSubscriberStalled = errors.New("event subscriber stalled")
 // delivery.
 var channelDeliveryTimeout = RemoteDeliverTimeout
 
+// SetChannelDeliveryTimeoutForTesting shortens the in-memory subscriber
+// delivery bound for tests in other packages that must observe behavior past
+// it without waiting RemoteDeliverTimeout. It returns a function restoring the
+// previous value. The variable is read without synchronization by delivery
+// goroutines, so callers must not run in parallel with other tests that publish
+// events and must restore the value before such tests resume.
+func SetChannelDeliveryTimeoutForTesting(d time.Duration) (restore func()) {
+	previous := channelDeliveryTimeout
+	channelDeliveryTimeout = d
+	return func() { channelDeliveryTimeout = previous }
+}
+
 // deliveryStallWarnInterval is how long a single delivery may wait for
 // subscriber capacity before the subscriber is reported as stalled, and how
 // often that report repeats while the wait continues. Backpressure is normal

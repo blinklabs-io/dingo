@@ -18,8 +18,9 @@ import (
 	"context"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+
 	"github.com/blinklabs-io/dingo/database/plugin/blob/badger"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/plugin"
 	"github.com/stretchr/testify/require"
 )
@@ -34,7 +35,7 @@ func newTestStorageHost(t *testing.T) *plugin.Host {
 	t.Helper()
 	host := plugin.NewHost()
 	require.NoError(t, badger.RegisterProvider(host))
-	require.NoError(t, sqlite.RegisterProvider(host))
+	require.NoError(t, dbtest.RegisterSQLiteProvider(host))
 	t.Cleanup(func() { _ = host.Stop(context.Background()) })
 	return host
 }

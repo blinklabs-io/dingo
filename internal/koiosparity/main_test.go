@@ -12,27 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package dmq
+package koiosparity
 
 import (
+	"os"
 	"testing"
-
-	"github.com/stretchr/testify/require"
+	"time"
 )
 
-func TestTopicNetworkMagic(t *testing.T) {
-	t.Parallel()
-	for network, want := range map[string]uint32{
-		"mainnet": 2912307721,
-		"preprod": 2147483649,
-		"preview": 2147483650,
-	} {
-		got, ok := TopicNetworkMagic("mithril", network)
-		require.True(t, ok, network)
-		require.Equal(t, want, got, network)
-	}
-	_, ok := TopicNetworkMagic("mithril", "devnet")
-	require.False(t, ok)
-	_, ok = TopicNetworkMagic("unknown", "mainnet")
-	require.False(t, ok)
+// TestMain shortens the 5xx retry backoff for every test in the package. It is
+// set before any test starts, so no test races a write; tests assert on how
+// many attempts a failing server sees, never on the delay between them.
+func TestMain(m *testing.M) {
+	koiosRetryBackoff5xx = time.Millisecond
+	os.Exit(m.Run())
 }

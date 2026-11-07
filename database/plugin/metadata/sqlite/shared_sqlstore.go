@@ -526,6 +526,16 @@ func NewSQLStore(
 	return store, err
 }
 
+// BeforeOpenDataDir, when non-nil, is called with the resolved data directory
+// of every file-backed store immediately before the database file is opened.
+// It exists so a test binary can place an already-migrated database in the
+// directory and skip the schema migration, which dominates the cost of opening
+// a store under the race detector. Production code never sets it. It is a plain
+// package variable, so it must be assigned only from a test package's init
+// function, which completes before any goroutine that opens a store starts;
+// that ordering is what excludes a data race with the readers.
+var BeforeOpenDataDir func(dataDir string) error
+
 func openSQLStore(
 	config Config,
 	dependencies metadata.ProviderDependencies,
@@ -593,6 +603,14 @@ func openSQLStore(
 				"create SQLite metadata directory: %w",
 				err,
 			)
+		}
+		if BeforeOpenDataDir != nil {
+			if err := BeforeOpenDataDir(dataDir); err != nil {
+				return nil, nil, nil, fmt.Errorf(
+					"prepare SQLite metadata directory: %w",
+					err,
+				)
+			}
 		}
 		databasePath = filepath.Join(dataDir, "metadata.sqlite")
 		// Build a proper file URI so ?, #, %, and other URI-reserved

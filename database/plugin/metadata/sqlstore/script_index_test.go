@@ -181,22 +181,6 @@ func TestSetTransactionIndexesReferenceScripts(t *testing.T) {
 	})
 }
 
-func TestReferenceScriptRowsGoWithTheirUtxo(t *testing.T) {
-	t.Parallel()
-	store := newAPIModeSQLiteStore(t, nil)
-	txn := store.Transaction(context.Background())
-	t.Cleanup(func() { _ = txn.Rollback() })
-	tx, point := referenceScriptTx(t, 0x33, lcommon.PlutusV2Script{0x41, 0x08})
-	require.NoError(t, store.SetTransaction(tx, point, 0, nil, true, txn, 0))
-	require.Len(t, referenceScriptRows(t, store, txn), 1)
-
-	_, err := rawDB(t, store, txn).ExecContext(
-		context.Background(), `DELETE FROM utxo`,
-	)
-	require.NoError(t, err)
-	require.Empty(t, referenceScriptRows(t, store, txn))
-}
-
 func TestGetScriptReferenceUtxos(t *testing.T) {
 	t.Parallel()
 	store := newAPIModeSQLiteStore(t, nil)

@@ -66,6 +66,16 @@ func metadataBlockAtOrAfterSlot(
 // LedgerState and coordinated database calls.
 type NodeAdapter struct {
 	ledgerState *ledger.LedgerState
+	// pageSizeOverride replaces matchPageSize when positive, so tests can
+	// cross page boundaries without seeding hundreds of rows.
+	pageSizeOverride int
+}
+
+func (a *NodeAdapter) matchPageLimit() int {
+	if a.pageSizeOverride > 0 {
+		return a.pageSizeOverride
+	}
+	return matchPageSize
 }
 
 // NewNodeAdapter builds a Kupo node adapter.
@@ -239,7 +249,8 @@ func (i *nodeMatchIterator) loadPage() error {
 		i.txn = txn
 	}
 	defer i.releaseSnapshot()
-	i.storage.Limit = matchPageSize
+	pageSize := i.adapter.matchPageLimit()
+	i.storage.Limit = pageSize
 	page, err := i.adapter.ledgerState.Database().UtxosWithHistory(
 		i.storage,
 		i.txn,
@@ -247,7 +258,7 @@ func (i *nodeMatchIterator) loadPage() error {
 	if err != nil {
 		return fmt.Errorf("query historical UTxOs: %w", err)
 	}
-	i.exhausted = len(page) < matchPageSize
+	i.exhausted = len(page) < pageSize
 	if len(page) > 0 {
 		last := page[len(page)-1]
 		i.storage.After = &models.UtxoOrderingCursor{

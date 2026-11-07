@@ -16,7 +16,12 @@ package dingo
 
 import (
 	"context"
+	"io"
+	"log/slog"
 	"testing"
+
+	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 
 	"github.com/stretchr/testify/require"
 )
@@ -27,11 +32,18 @@ import (
 func TestBackfillRewardLiveStakeHonorsCancelledContext(t *testing.T) {
 	t.Parallel()
 
-	n, _ := newLiveLifecycleTestNode(t, 3)
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	n := &Node{
+		db: db,
+		config: Config{
+			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	err := n.backfillRewardLiveStake(ctx)
+	err = n.backfillRewardLiveStake(ctx)
 
 	require.ErrorIs(t, err, context.Canceled)
 	require.ErrorContains(t, err, "failed to probe reward live stake state")

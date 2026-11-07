@@ -34,9 +34,14 @@ import (
 )
 
 // historyFixtureSlots seeds two transactions per slot with two outputs each,
-// so the stored ordering has ties on slot and on transaction index and spans
-// more than two match pages.
-const historyFixtureSlots = 275
+// so the stored ordering has ties on slot and on transaction index. Paired with
+// historyFixturePageSize the stored result spans more than two pages, and a
+// page boundary falls between the outputs of one transaction.
+const historyFixtureSlots = 6
+
+// historyFixturePageSize is the page size the fixture adapter runs with: 24
+// rows split into pages of 7.
+const historyFixturePageSize = 7
 
 var historyFixturePayment = bytes.Repeat([]byte{0x5a}, lcommon.AddressHashSize)
 
@@ -153,6 +158,7 @@ INSERT INTO utxo (
 	require.NoError(t, err)
 	adapter, err := NewNodeAdapter(ls)
 	require.NoError(t, err)
+	adapter.pageSizeOverride = historyFixturePageSize
 
 	keys := make([]string, len(refs))
 	for i, r := range refs {

@@ -78,14 +78,7 @@ func requireOnlyTarget(t *testing.T, target string) {
 // system temp directory, and removes the copies once done.
 func TestRestoreLocalPayloadCopiesStayBesideTarget(t *testing.T) {
 	// Not t.Parallel: t.Setenv.
-	db := newTestDB(t)
-	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
-	snapshotDir := snapshotTestDir(t, "snap")
-	_, err := lifecycle.Snapshot(
-		context.Background(), db, snapshotDir,
-		lifecycle.TriggerManual, "test", "badger", "sqlite",
-	)
-	require.NoError(t, err)
+	snapshotDir := copyOneBlockSnapshot(t)
 	workParent := t.TempDir()
 	target := filepath.Join(workParent, "restored")
 	for _, name := range []string{
@@ -100,7 +93,7 @@ func TestRestoreLocalPayloadCopiesStayBesideTarget(t *testing.T) {
 	}
 	unusableSystemTempDir(t)
 
-	_, err = lifecycle.Restore(
+	_, err := lifecycle.Restore(
 		context.Background(), newTestStorageHost(t), nil, snapshotDir, target,
 		lifecycle.RestoreStorageConfig{Blob: testutil.BadgerBlobConfig()},
 	)

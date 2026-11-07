@@ -624,6 +624,7 @@ func TestDrepActivityRenewalsRestoreAtRollbackPoint(t *testing.T) {
 		{name: "after second renewal", rollbackSlot: 250, wantActivity: 26, wantExpiry: 31},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			store := newMigratedSQLiteStore(t)
 			credential := bytes.Repeat([]byte{byte(tc.rollbackSlot)}, 28)
 			require.NoError(t, store.CreateDrep(nil, &models.Drep{
