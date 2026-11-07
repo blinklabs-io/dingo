@@ -230,6 +230,87 @@ pointer_resolution AS (
 )`, []any{slotValue}, nil
 }
 
+// pointerStakeInputsSQL builds the query behind GetPointerStakeInputsForPools:
+// every live pointer output at slot, resolved to its credential and that
+// credential's active delegation, for every pool. The caller selects the
+// pools it wants.
+//
+// The credential scope handed to activeDelegationScopedSQL is every
+// credential a live pointer output can resolve to: the registration its
+// position names, whether or not a later de-registration removed the Ptr.
+// pointer_resolution decides that from the scoped registration_events, which
+// carries the full history of each scoped credential, so the removePtr check
+// is unchanged. Starting from utxo_pointer rather than the pool list keeps the
+// cost proportional to the pointer outputs (a handful on mainnet) instead of
+// to every credential that ever delegated.
+func pointerStakeInputsSQL(
+	slot uint64,
+	expiryEpoch uint64,
+) (string, []any, error) {
+	slotValue, err := checkedInt64(slot)
+	if err != nil {
+		return "", nil, err
+	}
+	query, args := activeDelegationScopedSQL(slot, slot, `
+ SELECT DISTINCT stake_registration.credential_tag,
+        stake_registration.staking_key
+ FROM utxo_pointer
+ JOIN utxo
+   ON utxo.id = utxo_pointer.utxo_id
+  AND utxo.added_slot <= ?
+  AND (utxo.deleted_slot = 0 OR utxo.deleted_slot > ?)
+ JOIN certs
+   ON certs.slot = utxo_pointer.ptr_slot
+  AND certs.cert_index = utxo_pointer.ptr_cert_index
+  AND certs.slot <= ?
+ JOIN "transaction"
+   ON "transaction".id = certs.transaction_id
+  AND "transaction".block_index = utxo_pointer.ptr_tx_index
+ JOIN stake_registration
+   ON stake_registration.certificate_id = certs.id`,
+		[]any{slotValue, slotValue, slotValue},
+	)
+	resolution, resolutionArgs, err := pointerResolutionSQL(slot)
+	if err != nil {
+		return "", nil, err
+	}
+	query += resolution
+	args = append(args, resolutionArgs...)
+	expiryJoin := ""
+	expiryPredicate := ""
+	if expiryEpoch > 0 {
+		// Same account.expiration_epoch gate GetLiveStakeInputsForPools
+		// applies to the base-address side, so a pointer-attributed
+		// credential is subject to the identical CIP-0163 rule as one
+		// discovered by GetLiveStakeInputsForPools's live join, not the
+		// historical fallback's witness-history reconstruction.
+		expiryJoin = `
+LEFT JOIN account acct
+  ON acct.credential_tag = active_delegation.credential_tag
+ AND acct.staking_key = active_delegation.staking_key`
+		expiryPredicate = `
+WHERE acct.expiration_epoch = 0
+ OR acct.expiration_epoch >= ? OR acct.expiration_epoch IS NULL`
+	}
+	query += `
+SELECT active_delegation.pool_key_hash, active_delegation.credential_tag,
+       active_delegation.staking_key, utxo.amount AS utxo_amount
+FROM active_delegation
+JOIN pointer_resolution
+  ON pointer_resolution.credential_tag = active_delegation.credential_tag
+ AND pointer_resolution.staking_key = active_delegation.staking_key
+JOIN utxo
+  ON utxo.id = pointer_resolution.utxo_id
+ AND utxo.added_slot <= ?
+ AND (utxo.deleted_slot = 0 OR utxo.deleted_slot > ?)
+` + expiryJoin + expiryPredicate
+	args = append(args, slotValue, slotValue)
+	if expiryEpoch > 0 {
+		args = append(args, expiryEpoch)
+	}
+	return query, args, nil
+}
+
 // GetPointerStakeInputsForPools returns the additional per-credential stake
 // held at a pointer address, for pools in poolKeyHashes and credentials
 // resolved and delegated as of slot.
@@ -277,112 +358,77 @@ func (s *Store) GetPointerStakeInputsForPools(
 	if !counted {
 		return nil, nil
 	}
-	poolKeyHashes = dedupeByteSlices(poolKeyHashes)
-	ret := make([]*models.RewardStakeInput, 0)
-	for start := 0; start < len(poolKeyHashes); start += 400 {
-		end := min(start+400, len(poolKeyHashes))
-		query, args := activeDelegationSQL(slot, slot)
-		resolution, resolutionArgs, err := pointerResolutionSQL(slot)
-		if err != nil {
+	wantedPools := make(map[string]struct{}, len(poolKeyHashes))
+	for _, pool := range poolKeyHashes {
+		wantedPools[string(pool)] = struct{}{}
+	}
+	query, args, err := pointerStakeInputsSQL(slot, expiryEpoch)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query pointer stake inputs: %w", err)
+	}
+	type pointerKey struct {
+		pool string
+		tag  uint8
+		key  string
+	}
+	amounts := make(map[pointerKey]uint64)
+	for rows.Next() {
+		var pool, key []byte
+		var tag uint8
+		var rawAmount sql.NullString
+		if err := rows.Scan(&pool, &tag, &key, &rawAmount); err != nil {
+			rows.Close()
 			return nil, err
 		}
-		query += resolution
-		args = append(args, resolutionArgs...)
-		expiryJoin := ""
-		expiryPredicate := ""
-		if expiryEpoch > 0 {
-			// Same account.expiration_epoch gate GetLiveStakeInputsForPools
-			// applies to the base-address side, so a pointer-attributed
-			// credential is subject to the identical CIP-0163 rule as one
-			// discovered by GetLiveStakeInputsForPools's live join, not the
-			// historical fallback's witness-history reconstruction.
-			expiryJoin = `
-LEFT JOIN account acct
-  ON acct.credential_tag = active_delegation.credential_tag
- AND acct.staking_key = active_delegation.staking_key`
-			expiryPredicate = `(acct.expiration_epoch = 0
- OR acct.expiration_epoch >= ? OR acct.expiration_epoch IS NULL) AND `
+		if _, ok := wantedPools[string(pool)]; !ok {
+			continue
 		}
-		query += `
-SELECT active_delegation.pool_key_hash, active_delegation.credential_tag,
-       active_delegation.staking_key, utxo.amount AS utxo_amount
-FROM active_delegation
-JOIN pointer_resolution
-  ON pointer_resolution.credential_tag = active_delegation.credential_tag
- AND pointer_resolution.staking_key = active_delegation.staking_key
-JOIN utxo
-  ON utxo.id = pointer_resolution.utxo_id
- AND utxo.added_slot <= ?
- AND (utxo.deleted_slot = 0 OR utxo.deleted_slot > ?)
-` + expiryJoin + `
-WHERE ` + expiryPredicate + `active_delegation.pool_key_hash IN (` +
-			bindPlaceholders(end-start) + `)`
-		args = append(args, slot, slot)
-		if expiryEpoch > 0 {
-			args = append(args, expiryEpoch)
+		ref := pointerKey{pool: string(pool), tag: tag, key: string(key)}
+		if _, ok := amounts[ref]; !ok {
+			amounts[ref] = 0
 		}
-		args = append(args, byteSliceArgs(poolKeyHashes[start:end])...)
-
-		rows, err := db.QueryContext(ctx, query, args...)
-		if err != nil {
-			return nil, fmt.Errorf("query pointer stake inputs: %w", err)
-		}
-		type pointerKey struct {
-			pool string
-			tag  uint8
-			key  string
-		}
-		amounts := make(map[pointerKey]uint64)
-		for rows.Next() {
-			var pool, key []byte
-			var tag uint8
-			var rawAmount sql.NullString
-			if err := rows.Scan(&pool, &tag, &key, &rawAmount); err != nil {
+		if rawAmount.Valid && rawAmount.String != "" {
+			value, err := parseUint64(
+				"pointer stake overlay UTxO amount",
+				rawAmount.String,
+			)
+			if err != nil {
 				rows.Close()
 				return nil, err
 			}
-			ref := pointerKey{pool: string(pool), tag: tag, key: string(key)}
-			if _, ok := amounts[ref]; !ok {
-				amounts[ref] = 0
-			}
-			if rawAmount.Valid && rawAmount.String != "" {
-				value, err := parseUint64(
-					"pointer stake overlay UTxO amount",
-					rawAmount.String,
+			if ^uint64(0)-amounts[ref] < value {
+				rows.Close()
+				return nil, fmt.Errorf(
+					"pointer stake overlay overflow for credential %d:%x",
+					tag,
+					key,
 				)
-				if err != nil {
-					rows.Close()
-					return nil, err
-				}
-				if ^uint64(0)-amounts[ref] < value {
-					rows.Close()
-					return nil, fmt.Errorf(
-						"pointer stake overlay overflow for credential %d:%x",
-						tag,
-						key,
-					)
-				}
-				amounts[ref] += value
 			}
+			amounts[ref] += value
 		}
-		if err := rows.Close(); err != nil {
-			return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	ret := make([]*models.RewardStakeInput, 0, len(amounts))
+	for ref, amount := range amounts {
+		if amount == 0 {
+			continue
 		}
-		if err := rows.Err(); err != nil {
-			return nil, err
-		}
-		for ref, amount := range amounts {
-			if amount == 0 {
-				continue
-			}
-			ret = append(ret, &models.RewardStakeInput{
-				PoolKeyHash:   []byte(ref.pool),
-				CredentialTag: ref.tag,
-				StakingKey:    []byte(ref.key),
-				Stake:         types.Uint64(amount),
-				Registered:    true,
-			})
-		}
+		ret = append(ret, &models.RewardStakeInput{
+			PoolKeyHash:   []byte(ref.pool),
+			CredentialTag: ref.tag,
+			StakingKey:    []byte(ref.key),
+			Stake:         types.Uint64(amount),
+			Registered:    true,
+		})
 	}
 	return ret, nil
 }

@@ -902,11 +902,12 @@ func (a *transactionBatchAccumulator) apiRowsOnly() bool {
 	return a.leiosAPIRowsOnly || a.validatedAPIRowsOnly
 }
 
-// LeiosClosureRowsOnly reports whether this accumulator defers only API detail rows.
+// LeiosClosureRowsOnly identifies the ordered API-detail accumulator.
+// Retained UTxO staging is a separate optional capability.
 func (a *transactionBatchAccumulator) LeiosClosureRowsOnly() bool { return a.leiosAPIRowsOnly }
 
-// SetTransactionLeiosClosureBatched preserves the ordinary closure write order
-// and conflict tolerance while deferring only API detail rows until FlushBatch.
+// SetTransactionLeiosClosureBatched preserves ordered closure effects and
+// conflict tolerance, with optional retained UTxO staging until FlushBatch.
 func (s *Store) SetTransactionLeiosClosureBatched(
 	transaction lcommon.Transaction, point ocommon.Point, index uint32,
 	certDeposits map[int]uint64, skipWithdrawalWitness bool,
@@ -914,7 +915,8 @@ func (s *Store) SetTransactionLeiosClosureBatched(
 	txn types.Txn, protocolMajor uint64,
 ) error {
 	acc, ok := accumulator.(*transactionBatchAccumulator)
-	if !ok || !acc.leiosAPIRowsOnly || acc.overlay != nil {
+	if !ok || !acc.leiosAPIRowsOnly ||
+		(acc.overlay != nil && !acc.overlay.retainHistory) {
 		return errors.New("closure batching requires an API-only accumulator")
 	}
 	if txn == nil {
@@ -1058,6 +1060,23 @@ func (s *Store) setTransactionWithAccumulator(
 	if batchedAccumulator != nil {
 		overlay = batchedAccumulator.overlay
 	}
+	if overlay != nil && overlay.retainHistory {
+		if !batchedAccumulator.leiosAPIRowsOnly ||
+			!tolerateConsumedInputConflict ||
+			historicalBackfill ||
+			!plainLeiosOverlayTransaction(transaction) {
+			return errors.New(
+				"unsupported transaction in API closure UTxO overlay",
+			)
+		}
+		if _, ok := overlay.apiTransactions[string(hash)]; !ok {
+			return errors.New(
+				"transaction was not preflighted for API closure UTxO overlay",
+			)
+		}
+		delete(overlay.apiTransactions, string(hash))
+		overlay.mutations++
+	}
 	// Detail rows are staged here and reach the accumulator only once the
 	// write succeeds, so a failed write cannot leave rows queued for a
 	// transaction that was rolled back, nor drop the rows an earlier
@@ -1107,7 +1126,7 @@ func (s *Store) setTransactionWithAccumulator(
 			if err != nil {
 				return err
 			}
-			if overlay != nil {
+			if overlay != nil && !overlay.retainHistory {
 				transactionID, err = overlay.stageTransaction(
 					hash,
 					point.Hash,
@@ -1252,6 +1271,24 @@ func (s *Store) setTransactionWithAccumulator(
 					skipped,
 					produced,
 				)
+				if overlay.retainHistory {
+					for i := range producedModels {
+						output := overlay.created[newOverlayKey(producedModels[i].TxId, producedModels[i].OutputIdx)]
+						producedModels[i].ID = uint(output.id)
+					}
+					if err := s.applyTransactionAPIDetails(ctx, db, transactionID, transaction, point.Slot, index, producedModels, &staged, transactionIsNew); err != nil {
+						return err
+					}
+					if err := staged.flushExceptClosureAPIRows(ctx, db, s.dialect.ParameterLimit()); err != nil {
+						return err
+					}
+					return s.refreshRewardLiveStakeDeltas(
+						ctx,
+						db,
+						batchedStakeDeltas,
+						point.Slot,
+					)
+				}
 				return nil
 			}
 			producedModelPtrs := make([]*models.Utxo, len(producedModels))

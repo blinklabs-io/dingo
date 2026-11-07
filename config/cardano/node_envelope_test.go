@@ -238,7 +238,8 @@ func TestCardanoNodeConfigEnvelopeTxSubmissionLogic(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, TxSubmissionLogicV1, cfg.TxSubmissionLogicVersion)
 
-	_, err = NewCardanoNodeConfigFromReader(strings.NewReader(`{"Version": 2,
+	cfg, err = NewCardanoNodeConfigFromReader(strings.NewReader(`{"Version": 2,
   "Configuration": {"Network": {"TxSubmissionLogicVersion": "TxSubmissionLogicV2"}}}`))
-	require.ErrorContains(t, err, "TxSubmissionLogicV2")
+	require.NoError(t, err)
+	assert.Equal(t, TxSubmissionLogicV2, cfg.TxSubmissionLogicVersion)
 }

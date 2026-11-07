@@ -20,6 +20,8 @@ import (
 	"errors"
 	"regexp"
 	"strings"
+
+	"github.com/blinklabs-io/dingo/internal/sqlreadonly"
 )
 
 // barrierQueryer is the handle dbFromTxn returns for a transaction with an
@@ -36,6 +38,15 @@ type barrierQueryer struct {
 }
 
 func (q barrierQueryer) barrier(ctx context.Context, query string) error {
+	if o := q.accumulator.overlay; o != nil && o.retainHistory && !o.flushing &&
+		(readsOverlayTables(query) || containsIdentifier(query, "utxo_address") || containsIdentifier(query, "asset")) {
+		if err := sqlreadonly.ValidateSQLite(query); err != nil {
+			o.err = errors.New(
+				"external mutation inside API closure UTxO overlay",
+			)
+			return o.err
+		}
+	}
 	if deletesAccountRows(query) {
 		// The live-stake replay reads an account's existence at each
 		// block's end from created_slot, which only holds while no account
@@ -51,7 +62,10 @@ func (q barrierQueryer) barrier(ctx context.Context, query string) error {
 	); err != nil {
 		return err
 	}
-	if !readsOverlayTables(query) {
+	retainedRead := q.accumulator.overlay != nil &&
+		q.accumulator.overlay.retainHistory &&
+		(containsIdentifier(query, "utxo_address") || containsIdentifier(query, "asset"))
+	if !readsOverlayTables(query) && !retainedRead {
 		return nil
 	}
 	return q.store.overlayBarrier(ctx, q.queryer, q.accumulator)
