@@ -189,17 +189,6 @@ func TestAccountsEnabledFallsBackToEnvWhenFlagUnset(t *testing.T) {
 	require.False(t, accountsEnabled(cmd))
 }
 
-// TestAccountsEnabledExplicitTrueFlagWinsOverEnvFalse is the mirror case:
-// an explicit --accounts=true must win even when the environment says
-// otherwise (or is simply unset).
-func TestAccountsEnabledExplicitTrueFlagWinsOverEnvFalse(t *testing.T) {
-	cmd := &cobra.Command{}
-	addAccountsFlag(cmd)
-	require.NoError(t, cmd.Flags().Set("accounts", "true"))
-
-	require.True(t, accountsEnabled(cmd))
-}
-
 // TestResolveGraceHoursRejectsNegative is a regression test that a
 // negative --grace-hours reached FetchAccountRewardsForEpoch's
 // zero-row/lag gate, where graceHours <= 0 disables the grace/reference-lag

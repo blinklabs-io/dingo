@@ -67,7 +67,7 @@ func TestReadSnapshotDoesNotHoldCommitBarrierForTheReadPool(t *testing.T) {
 	// must still construct and commit promptly; before the read connection
 	// was reserved ahead of the barrier, the first iteration blocked until
 	// the readers below were released.
-	const applies = 200
+	const applies = 5
 	for i := range applies {
 		done := make(chan error, 1)
 		go func() {

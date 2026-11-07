@@ -136,7 +136,22 @@ func (ls *LedgerState) peerChainSelectionEpochNonce(
 			localTip.Slot == ancestor.Slot && bytes.Equal(localTip.Hash, ancestor.Hash) {
 			return nil, models.Epoch{}, false, nil
 		}
-		return nil, models.Epoch{}, false, err
+		// After a rollback across an epoch boundary the published cache ends
+		// at the anchor's epoch. A fork header inside the forecast horizon but
+		// in the next epoch is verified against forecast epochs derived from
+		// the fork's own ancestry instead of waiting for the ledger to apply
+		// the fork, which it cannot do until the fork is selected.
+		forecast, ok := ls.forecastPeerForkEpochCache(
+			snapshot,
+			header.SlotNumber(),
+			err,
+		)
+		if !ok {
+			return nil, models.Epoch{}, false, err
+		}
+		forecastSnapshot := *snapshot
+		forecastSnapshot.epochCache = forecast
+		snapshot = &forecastSnapshot
 	}
 	if snapshot == nil {
 		return nil, models.Epoch{}, false, fmt.Errorf(
@@ -277,6 +292,37 @@ func (ls *LedgerState) verifyPeerForkTargetEpochAncestors(
 	return nil
 }
 
+// frozenCandidateNonce recomputes the candidate nonce that froze at the end of
+// sourceEpoch from the local chain. computeEpochNonceForSlot seeds an epoch
+// that has no nonce with the genesis nonce, which is correct only for the
+// initial epoch; for any later epoch the genesis hash would be a wrong
+// candidate that rejects a valid fork header, so that case defers.
+func (ls *LedgerState) frozenCandidateNonce(
+	ctx context.Context,
+	sourceEpoch models.Epoch,
+) ([]byte, error) {
+	if len(sourceEpoch.Nonce) == 0 && sourceEpoch.EpochId != 0 {
+		return nil, fmt.Errorf(
+			"%w: epoch %d has no published nonce",
+			errHeaderVerificationDeferred,
+			sourceEpoch.EpochId,
+		)
+	}
+	_, _, frozen, _, err := ls.computeEpochNonceForSlot(
+		ctx,
+		sourceEpoch.StartSlot+uint64(sourceEpoch.LengthInSlots),
+		sourceEpoch,
+	)
+	if err != nil || len(frozen) != lcommon.Blake2b256Size {
+		return nil, fmt.Errorf(
+			"%w: frozen candidate nonce for epoch %d is unavailable",
+			errHeaderVerificationDeferred,
+			sourceEpoch.EpochId,
+		)
+	}
+	return frozen, nil
+}
+
 func (ls *LedgerState) peerChainSelectionEpochNonceAcrossEpochs(
 	ctx context.Context,
 	connId ouroboros.ConnectionId,
@@ -348,11 +394,15 @@ func (ls *LedgerState) peerChainSelectionEpochNonceAcrossEpochs(
 			sourceEpoch.EpochId+1,
 		)
 		if !ok || len(nextEpoch.CandidateNonce) != lcommon.Blake2b256Size {
-			return nil, models.Epoch{}, false, fmt.Errorf(
-				"%w: frozen candidate nonce for epoch %d is unavailable",
-				errHeaderVerificationDeferred,
-				sourceEpoch.EpochId,
-			)
+			// The ledger has not applied the next epoch, as after a local
+			// rollback across the boundary. The candidate froze at the
+			// cutoff, which precedes the intersection, so the local chain's
+			// prefix up to it is the fork's prefix and yields the same value.
+			frozen, frozenErr := ls.frozenCandidateNonce(ctx, sourceEpoch)
+			if frozenErr != nil {
+				return nil, models.Epoch{}, false, frozenErr
+			}
+			nextEpoch.CandidateNonce = frozen
 		}
 		initialCandidateNonce = cloneNonce(nextEpoch.CandidateNonce)
 		// The evolving nonce after the cutoff cannot change the next
@@ -1374,4 +1424,78 @@ func (ls *LedgerState) trimPeerForkPathAtAppliedTip(
 		return trimmed, nil
 	}
 	return cached, nil
+}
+
+// forecastPeerForkEpochCache extends the snapshot's epoch cache with same-era
+// forecast epochs so that a peer fork header past the cached epochs, but within
+// the forecast horizon, can be verified. The forecast epochs carry no nonces:
+// the fork's nonce is derived from its own headers. It returns false when
+// cause is not an uncovered-epoch deferral, the slot is past the forecast
+// horizon, the cache tail's era is not the published current era, the era
+// boundary is near, or the cache cannot reach the header's slot.
+func (ls *LedgerState) forecastPeerForkEpochCache(
+	snapshot *consensusSnapshot,
+	slot uint64,
+	cause error,
+) ([]models.Epoch, bool) {
+	if snapshot == nil || len(snapshot.epochCache) == 0 ||
+		errors.Is(cause, ErrHeaderBeyondForecastHorizon) ||
+		!IsHeaderVerificationDeferred(cause) {
+		return nil, false
+	}
+	return ls.forecastEpochCacheThrough(snapshot, slot)
+}
+
+// forecastEpochCacheThrough returns the snapshot's epoch cache extended with
+// same-era forecast epochs, intermediate ones included, up to the epoch that
+// holds slot. The electing snapshot of a forecast epoch is the one before it,
+// so state verification needs every epoch on the way, not only the last.
+func (ls *LedgerState) forecastEpochCacheThrough(
+	snapshot *consensusSnapshot,
+	slot uint64,
+) ([]models.Epoch, bool) {
+	if snapshot == nil || len(snapshot.epochCache) == 0 {
+		return nil, false
+	}
+	if _, err := epochForSlotInCache(snapshot.epochCache, slot); err == nil {
+		return nil, false
+	}
+	// A deferral's cause may carry no horizon information, such as a summary
+	// that could not be built, so the horizon is checked here.
+	summary, err := ls.HardForkSummary()
+	if err != nil {
+		return nil, false
+	}
+	if _, err := summary.SlotToEpoch(slot); err != nil {
+		return nil, false
+	}
+	const maxForecastEpochs = 5
+	cache := make([]models.Epoch, len(snapshot.epochCache), len(snapshot.epochCache)+maxForecastEpochs)
+	copy(cache, snapshot.epochCache)
+	for range maxForecastEpochs {
+		last := cache[len(cache)-1]
+		// The era check uses the cache tail's own era: a published current
+		// era that disagrees with it cannot vouch that the tail's era
+		// boundary is still ahead.
+		if last.LengthInSlots == 0 || slot < last.StartSlot ||
+			last.EraId != snapshot.currentEra.Id ||
+			ls.validateEpochCacheForecast(
+				last,
+				snapshot.currentEra.Id,
+				snapshot.transitionInfo,
+			) != nil {
+			return nil, false
+		}
+		cache = append(cache, models.Epoch{
+			EpochId:       last.EpochId + 1,
+			StartSlot:     last.StartSlot + uint64(last.LengthInSlots),
+			LengthInSlots: last.LengthInSlots,
+			SlotLength:    last.SlotLength,
+			EraId:         last.EraId,
+		})
+		if _, err := epochForSlotInCache(cache, slot); err == nil {
+			return cache, true
+		}
+	}
+	return nil, false
 }

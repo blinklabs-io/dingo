@@ -2458,6 +2458,23 @@ func (ls *LedgerState) allDRepDelegators(ctx context.Context, txn *database.Txn)
 	map[string][]olocalstatequery.StakeCredential,
 	error,
 ) {
+	return ls.allDRepDelegatorsBatched(ctx, txn, allDRepDelegatorsBatchSize)
+}
+
+func (ls *LedgerState) allDRepDelegatorsBatched(
+	ctx context.Context,
+	txn *database.Txn,
+	batchSize int,
+) (
+	map[string][]olocalstatequery.StakeCredential,
+	error,
+) {
+	if batchSize <= 0 {
+		return nil, fmt.Errorf(
+			"allDRepDelegators: batch size must be positive, got %d",
+			batchSize,
+		)
+	}
 	txn, release := ls.readTxn(ctx, txn)
 	defer release()
 	refs, err := ls.db.Metadata().GetActiveAccountCredentials(txn.Metadata())
@@ -2465,8 +2482,8 @@ func (ls *LedgerState) allDRepDelegators(ctx context.Context, txn *database.Txn)
 		return nil, err
 	}
 	ret := make(map[string][]olocalstatequery.StakeCredential)
-	for start := 0; start < len(refs); start += allDRepDelegatorsBatchSize {
-		end := min(start+allDRepDelegatorsBatchSize, len(refs))
+	for start := 0; start < len(refs); start += batchSize {
+		end := min(start+batchSize, len(refs))
 		batch := refs[start:end]
 		accounts, err := ls.db.GetAccountsByCredential(ctx, batch, false, txn)
 		if err != nil {

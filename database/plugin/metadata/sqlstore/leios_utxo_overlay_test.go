@@ -215,6 +215,7 @@ func TestLeiosRetainedUtxoOverlayRollsBack(t *testing.T) {
 	)
 	before := overlayStoreState(t, store)
 	txn := store.Transaction(context.Background())
+	defer func() { _ = txn.Rollback() }()
 	acc := store.NewLeiosClosureBatchAccumulator()
 	defer acc.Reset()
 	got, err := store.EnableLeiosClosureUtxoOverlay(acc, txn, transactions)

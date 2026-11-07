@@ -110,6 +110,7 @@ func rollbackEvent(
 // the plateau comparison sees no peer ahead), and red if the fix is reverted
 // (the replacement is not tracked at all, so GetBestPeer is nil).
 func TestTickResyncsOnPlateauAfterRecycleWithRealChainSelector(t *testing.T) {
+	t.Parallel()
 	const (
 		securityParam  = 2160
 		stalledSlot    = 2810012
@@ -238,6 +239,7 @@ func TestTickResyncsOnPlateauAfterRecycleWithRealChainSelector(t *testing.T) {
 // Red if AwaitingFirstHeader is forced true, which is the mutation that widens
 // the fallback past its own precondition.
 func TestTickDoesNotResyncOnceTheReplacementHasDeliveredAHeader(t *testing.T) {
+	t.Parallel()
 	const (
 		securityParam  = 2160
 		stalledSlot    = 2810012
@@ -340,6 +342,7 @@ func TestTickDoesNotResyncOnceTheReplacementHasDeliveredAHeader(t *testing.T) {
 func TestTickDoesNotResyncAfterADeliveredPeerRollsBackOutsideItsHistory(
 	t *testing.T,
 ) {
+	t.Parallel()
 	const (
 		securityParam  = 2160
 		stalledSlot    = 2810012
@@ -445,12 +448,14 @@ func TestTickDoesNotResyncAfterADeliveredPeerRollsBackOutsideItsHistory(
 }
 
 func TestPlateauThreshold(t *testing.T) {
+	t.Parallel()
 	assert.Equal(t, 4*time.Minute, plateauThreshold(time.Minute))
 	assert.Equal(t, 4*time.Minute, plateauThreshold(2*time.Minute))
 	assert.Equal(t, 6*time.Minute, plateauThreshold(3*time.Minute))
 }
 
 func TestShouldRecycleLocalTipPlateau(t *testing.T) {
+	t.Parallel()
 	now := time.Now()
 	recent := now.Add(-time.Second)
 
@@ -496,6 +501,7 @@ func TestShouldRecycleLocalTipPlateau(t *testing.T) {
 }
 
 func TestIsLedgerApplicationBacklog(t *testing.T) {
+	t.Parallel()
 	// Header chain caught up to the peer, huge apply backlog behind it.
 	assert.True(t, isLedgerApplicationBacklog(1_488_398, 3_082_751, 3_082_751))
 	// Header chain nearly caught up; backlog dominates the residual gap.
@@ -568,6 +574,7 @@ func runTickWith(
 }
 
 func TestTickRecyclesStalledActiveConnection(t *testing.T) {
+	t.Parallel()
 	connId := testConnId(1)
 	connId2 := testConnId(2)
 	active := connId
@@ -672,6 +679,7 @@ func TestTickDoesNotRecycleStalledClientHeldAtEagernessLimit(t *testing.T) {
 }
 
 func TestTickRemovesStalledNonPrimaryConnection(t *testing.T) {
+	t.Parallel()
 	connId := testConnId(1)
 	other := testConnId(2)
 	active := other
@@ -711,6 +719,7 @@ func TestTickRemovesStalledNonPrimaryConnection(t *testing.T) {
 }
 
 func TestTickRecyclesStalledClientWithNoActiveSelection(t *testing.T) {
+	t.Parallel()
 	connId := testConnId(1)
 	connId2 := testConnId(2)
 	ledger := &fakeLedger{tip: testTip(100, 50), atTip: true}
@@ -744,6 +753,7 @@ func TestTickRecyclesStalledClientWithNoActiveSelection(t *testing.T) {
 }
 
 func TestTickSkipsRecyclingOnlyEligiblePeer(t *testing.T) {
+	t.Parallel()
 	connId := testConnId(1)
 	active := connId
 	ledger := &fakeLedger{tip: testTip(100, 50), atTip: true}
@@ -825,6 +835,7 @@ func TestTickDisconnectsPatienceExhaustedPeer(t *testing.T) {
 }
 
 func TestTickSchedulesGuardedRecycleForNewlyStalledClient(t *testing.T) {
+	t.Parallel()
 	connId := testConnId(1)
 	ledger := &fakeLedger{tip: testTip(100, 50), atTip: true}
 	state := &fakeChainsyncState{
@@ -850,6 +861,7 @@ func TestTickSchedulesGuardedRecycleForNewlyStalledClient(t *testing.T) {
 }
 
 func TestTickCatchUpExtendsGracePeriod(t *testing.T) {
+	t.Parallel()
 	connId := testConnId(1)
 	ledger := &fakeLedger{tip: testTip(100, 50), atTip: false}
 	state := &fakeChainsyncState{
@@ -879,6 +891,7 @@ func TestTickCatchUpExtendsGracePeriod(t *testing.T) {
 }
 
 func TestTickCatchUpDoesNotExtendPlateauThreshold(t *testing.T) {
+	t.Parallel()
 	connId := testConnId(3)
 	active := connId
 	ledger := &fakeLedger{
@@ -919,6 +932,7 @@ func TestTickCatchUpDoesNotExtendPlateauThreshold(t *testing.T) {
 func TestTickCatchUpDefersPlateauResyncWhilePrimaryChainAdvances(
 	t *testing.T,
 ) {
+	t.Parallel()
 	connId := testConnId(3)
 	active := connId
 	ledger := &fakeLedger{
@@ -958,6 +972,7 @@ func TestTickCatchUpDefersPlateauResyncWhilePrimaryChainAdvances(
 }
 
 func TestTickCatchUpTracksPrimaryChainChangesAfterRollback(t *testing.T) {
+	t.Parallel()
 	connId := testConnId(3)
 	active := connId
 	ledger := &fakeLedger{
@@ -1005,6 +1020,7 @@ func TestTickCatchUpTracksPrimaryChainChangesAfterRollback(t *testing.T) {
 }
 
 func TestTickClearsScheduleWhenClientRecovers(t *testing.T) {
+	t.Parallel()
 	connId := testConnId(1)
 	ledger := &fakeLedger{tip: testTip(100, 50), atTip: true}
 	state := &fakeChainsyncState{
@@ -1027,6 +1043,7 @@ func TestTickClearsScheduleWhenClientRecovers(t *testing.T) {
 }
 
 func TestTickAdvancesProgressBaseline(t *testing.T) {
+	t.Parallel()
 	ledger := &fakeLedger{tip: testTip(200, 90), atTip: true}
 	state := &fakeChainsyncState{}
 	pub := newFakePublisher()
@@ -1048,6 +1065,7 @@ func TestTickAdvancesProgressBaseline(t *testing.T) {
 }
 
 func TestTickPrunesExpiredCooldownEntries(t *testing.T) {
+	t.Parallel()
 	ledger := &fakeLedger{tip: testTip(100, 50), atTip: true}
 	state := &fakeChainsyncState{}
 	pub := newFakePublisher()
@@ -1070,6 +1088,7 @@ func TestTickPrunesExpiredCooldownEntries(t *testing.T) {
 }
 
 func TestTickPushesRecycleOutWhileInCooldown(t *testing.T) {
+	t.Parallel()
 	connId := testConnId(1)
 	connId2 := testConnId(2)
 	active := connId
@@ -1120,6 +1139,7 @@ func plateauSelector(
 }
 
 func TestTickResyncsOnLocalTipPlateau(t *testing.T) {
+	t.Parallel()
 	connId := testConnId(3)
 	active := connId
 	ledger := &fakeLedger{tip: testTip(100, 50), atTip: true}
@@ -1225,6 +1245,7 @@ func rollbackRegisteredPeer(
 // The peer's advertised tip is ahead and correct throughout, so the plateau
 // must still fire.
 func TestTickResyncsOnPlateauWhenBestPeerAwaitsFirstHeader(t *testing.T) {
+	t.Parallel()
 	const (
 		stalledSlot    = 2810012
 		advertisedSlot = 2810823
@@ -1296,6 +1317,7 @@ func TestTickResyncsOnPlateauWhenBestPeerAwaitsFirstHeader(t *testing.T) {
 // beyond where we already are gives the watchdog no reason to act, so the
 // untrusted advertised tip cannot manufacture a plateau on its own.
 func TestTickDoesNotResyncWhenAwaitingPeerAdvertisesNoProgress(t *testing.T) {
+	t.Parallel()
 	const stalledSlot = 2810012
 	connId := testConnId(4)
 	active := connId
@@ -1347,6 +1369,7 @@ func TestTickDoesNotResyncWhenAwaitingPeerAdvertisesNoProgress(t *testing.T) {
 func TestTickIgnoresAdvertisedTipOnceBestPeerHasDeliveredAHeader(
 	t *testing.T,
 ) {
+	t.Parallel()
 	const stalledSlot = 2810012
 	connId := testConnId(5)
 	active := connId
@@ -1408,6 +1431,7 @@ func TestTickIgnoresAdvertisedTipOnceBestPeerHasDeliveredAHeader(
 // fires on main. The substitution therefore only ever raises the comparison
 // value.
 func TestTickPlateauFallbackNeverLowersTheBestPeerTip(t *testing.T) {
+	t.Parallel()
 	const (
 		localSlot      = 100
 		rollbackSlot   = 200
@@ -1470,6 +1494,7 @@ func TestTickPlateauFallbackNeverLowersTheBestPeerTip(t *testing.T) {
 // plateau would actually recycle: an awaiting peer can only ever spend its
 // advertised tip on itself.
 func TestTickPlateauIgnoresAdvertisedTipOfAThirdPartyPeer(t *testing.T) {
+	t.Parallel()
 	const (
 		stalledSlot    = 2810012
 		fabricatedSlot = 9999999
@@ -1528,6 +1553,7 @@ func TestTickPlateauIgnoresAdvertisedTipOfAThirdPartyPeer(t *testing.T) {
 // state a node reaches when the previous resync left it with no promoted
 // client at all.
 func TestTickPlateauUsesAdvertisedTipWithNoActiveClient(t *testing.T) {
+	t.Parallel()
 	const (
 		stalledSlot    = 2810012
 		advertisedSlot = 2810823
@@ -1589,6 +1615,7 @@ func TestTickPlateauUsesAdvertisedTipWithNoActiveClient(t *testing.T) {
 // connection. The cooldown map keys on the rendering on purpose; an
 // authorization must not.
 func TestTickPlateauIgnoresAdvertisedTipOfAReplacedConnection(t *testing.T) {
+	t.Parallel()
 	const (
 		stalledSlot    = 2810012
 		fabricatedSlot = 9999999
@@ -1667,6 +1694,7 @@ const plateauBacklogLogMsg = "local tip plateau is a ledger-application backlog;
 // real but the header stream is healthy and the ledger pipeline is simply
 // draining. It must be logged, not recycled.
 func TestTickPlateauFallbackFeedsTheBacklogClassifier(t *testing.T) {
+	t.Parallel()
 	const (
 		appliedSlot      = 100
 		primaryChainSlot = 900
@@ -1748,6 +1776,7 @@ func TestTickPlateauFallbackFeedsTheBacklogClassifier(t *testing.T) {
 // carry the plateau all the way to a resync rather than being absorbed by the
 // backlog heuristic.
 func TestTickPlateauFallbackResyncsWhenHeaderGapDominates(t *testing.T) {
+	t.Parallel()
 	const (
 		appliedSlot      = 100
 		primaryChainSlot = 200
@@ -1807,6 +1836,7 @@ func TestTickPlateauFallbackResyncsWhenHeaderGapDominates(t *testing.T) {
 }
 
 func TestTickPlateauRespectsCooldown(t *testing.T) {
+	t.Parallel()
 	connId := testConnId(3)
 	active := connId
 	ledger := &fakeLedger{tip: testTip(100, 50), atTip: true}
@@ -1835,6 +1865,7 @@ func TestTickPlateauRespectsCooldown(t *testing.T) {
 }
 
 func TestTickReconcileResolvesPlateauWithoutResync(t *testing.T) {
+	t.Parallel()
 	connId := testConnId(8)
 	active := connId
 	ledger := &fakeLedger{
@@ -1870,6 +1901,7 @@ func TestTickReconcileResolvesPlateauWithoutResync(t *testing.T) {
 }
 
 func TestTickSuppressesResyncOnLedgerApplicationBacklog(t *testing.T) {
+	t.Parallel()
 	connId := testConnId(8)
 	active := connId
 	ledger := &fakeLedger{
@@ -1916,6 +1948,7 @@ func TestTickSuppressesResyncOnLedgerApplicationBacklog(t *testing.T) {
 }
 
 func TestTickResyncsWhenReconcileFailsDespiteBacklog(t *testing.T) {
+	t.Parallel()
 	connId := testConnId(8)
 	active := connId
 	ledger := &fakeLedger{
@@ -1946,6 +1979,7 @@ func TestTickResyncsWhenReconcileFailsDespiteBacklog(t *testing.T) {
 }
 
 func TestTickRealignsOtherPeersOnPlateau(t *testing.T) {
+	t.Parallel()
 	connId := testConnId(3)
 	aheadPeer := testConnId(4)
 	behindPeer := testConnId(5)
@@ -1993,6 +2027,7 @@ func TestTickRealignsOtherPeersOnPlateau(t *testing.T) {
 }
 
 func TestTickSkipsRealignWithSingleEligiblePeer(t *testing.T) {
+	t.Parallel()
 	connId := testConnId(3)
 	active := connId
 	ledger := &fakeLedger{tip: testTip(100, 50), atTip: true}
@@ -2023,6 +2058,7 @@ func TestTickSkipsRealignWithSingleEligiblePeer(t *testing.T) {
 }
 
 func TestTickUpdatesChainSelectorLocalTipAndSecurityParam(t *testing.T) {
+	t.Parallel()
 	ledger := &fakeLedger{
 		tip:           testTip(100, 50),
 		atTip:         true,
@@ -2054,6 +2090,7 @@ func TestTickUpdatesChainSelectorLocalTipAndSecurityParam(t *testing.T) {
 }
 
 func TestTickSkipsSecurityParamWhenUnset(t *testing.T) {
+	t.Parallel()
 	ledger := &fakeLedger{tip: testTip(100, 50), atTip: true, securityParam: 0}
 	state := &fakeChainsyncState{}
 	selector := &fakeChainSelector{}

@@ -59,24 +59,30 @@ var errChannelSubscriberClosed = errors.New("channel subscriber closed")
 // in-memory subscriber stays full past the delivery bound and is detached.
 var ErrEventSubscriberStalled = errors.New("event subscriber stalled")
 
-// channelDeliveryTimeout bounds how long an in-memory subscriber may keep a
-// publisher parked after its buffer fills. The ordinary policy detaches a
+// channelDeliveryTimeoutNanos bounds how long an in-memory subscriber may keep
+// a publisher parked after its buffer fills. The ordinary policy detaches a
 // subscriber that cannot drain in this interval, so it cannot indefinitely
-// stall the remaining subscribers of that event type. Tests shorten it through
-// this package-local variable; production uses the same bound as remote
-// delivery.
-var channelDeliveryTimeout = RemoteDeliverTimeout
+// stall the remaining subscribers of that event type. Production uses the same
+// bound as remote delivery. It is atomic because delivery goroutines read it
+// while a test may be changing it.
+var channelDeliveryTimeoutNanos atomic.Int64
+
+func init() {
+	channelDeliveryTimeoutNanos.Store(int64(RemoteDeliverTimeout))
+}
+
+func channelDeliveryTimeout() time.Duration {
+	return time.Duration(channelDeliveryTimeoutNanos.Load())
+}
 
 // SetChannelDeliveryTimeoutForTesting shortens the in-memory subscriber
-// delivery bound for tests in other packages that must observe behavior past
-// it without waiting RemoteDeliverTimeout. It returns a function restoring the
-// previous value. The variable is read without synchronization by delivery
-// goroutines, so callers must not run in parallel with other tests that publish
-// events and must restore the value before such tests resume.
+// delivery bound for tests that must observe behavior past it without waiting
+// RemoteDeliverTimeout. It returns a function restoring the previous value.
+// The bound is process-wide, so a test that calls it must not run in parallel
+// with tests whose delivery timing it would change.
 func SetChannelDeliveryTimeoutForTesting(d time.Duration) (restore func()) {
-	previous := channelDeliveryTimeout
-	channelDeliveryTimeout = d
-	return func() { channelDeliveryTimeout = previous }
+	previous := channelDeliveryTimeoutNanos.Swap(int64(d))
+	return func() { channelDeliveryTimeoutNanos.Store(previous) }
 }
 
 // deliveryStallWarnInterval is how long a single delivery may wait for
@@ -508,7 +514,7 @@ func (c *channelSubscriber) deliverWait(evt Event) (err error) {
 	var deliveryTimeout <-chan time.Time
 	var stopDeliveryTimeout func()
 	if c.backpressurePolicy == SubscriberBackpressureDetach {
-		timeout := time.NewTimer(channelDeliveryTimeout)
+		timeout := time.NewTimer(channelDeliveryTimeout())
 		deliveryTimeout = timeout.C
 		stopDeliveryTimeout = func() { timeout.Stop() }
 	}
@@ -557,7 +563,7 @@ func (c *channelSubscriber) reportStalled(eventType EventType) {
 		"event subscriber detached after delivery timeout",
 		"type", eventType,
 		"buffer", cap(c.ch),
-		"timeout", channelDeliveryTimeout,
+		"timeout", channelDeliveryTimeout(),
 		"blocked_publishers", c.stallWaiters.Load(),
 	)
 }

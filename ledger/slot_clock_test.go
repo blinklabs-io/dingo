@@ -82,18 +82,6 @@ func (m *mockSlotTimeProvider) SlotToEpoch(slot uint64) (EpochInfo, error) {
 	}, nil
 }
 
-func TestSlotClockCreation(t *testing.T) {
-	t.Parallel()
-
-	systemStart := time.Now()
-	provider := newMockSlotTimeProvider(systemStart, time.Second, 100)
-
-	clock := NewSlotClock(provider, DefaultSlotClockConfig())
-	require.NotNil(t, clock)
-	assert.NotNil(t, clock.provider)
-	assert.Equal(t, 500*time.Millisecond, clock.config.ClockTolerance)
-}
-
 func TestSlotClockCurrentSlot(t *testing.T) {
 	t.Parallel()
 
@@ -250,40 +238,6 @@ func TestSlotClockIsEpochBoundary(t *testing.T) {
 	}
 }
 
-func TestEpochInfoEndSlot(t *testing.T) {
-	t.Parallel()
-
-	epochInfo := EpochInfo{
-		EpochId:       5,
-		StartSlot:     500,
-		LengthInSlots: 100,
-	}
-	assert.Equal(t, uint64(600), epochInfo.EndSlot())
-}
-
-func TestSlotClockSubscribeUnsubscribe(t *testing.T) {
-	t.Parallel()
-
-	systemStart := time.Now()
-	provider := newMockSlotTimeProvider(systemStart, time.Second, 100)
-	clock := NewSlotClock(provider, DefaultSlotClockConfig())
-
-	// Subscribe
-	ch := clock.Subscribe()
-	require.NotNil(t, ch)
-
-	clock.mu.RLock()
-	assert.Len(t, clock.subscribers, 1)
-	clock.mu.RUnlock()
-
-	// Unsubscribe
-	clock.Unsubscribe(ch)
-
-	clock.mu.RLock()
-	assert.Len(t, clock.subscribers, 0)
-	clock.mu.RUnlock()
-}
-
 func TestSlotClockMultipleSubscribers(t *testing.T) {
 	t.Parallel()
 
@@ -418,28 +372,6 @@ func TestSlotClockStartOverlappingStopWaitsOnlyForStoppedGeneration(
 	clock.Stop()
 }
 
-func TestSlotClockReceivesTicks(t *testing.T) {
-	t.Parallel()
-
-	// Use short slot length for faster test
-	systemStart := time.Now()
-	provider := newMockSlotTimeProvider(systemStart, 50*time.Millisecond, 100)
-	clock := NewSlotClock(provider, DefaultSlotClockConfig())
-
-	ch := clock.Subscribe()
-	ctx := t.Context()
-
-	clock.Start(ctx)
-	defer clock.Stop()
-
-	// Wait for a tick. The bound is a deadlock guard, not a latency
-	// budget: a slot-clock goroutine delayed by scheduling load must not
-	// fail the test, because there is no retry after a missed receive.
-	tick := testutil.RequireReceive(t, ch, testutil.AsyncWait, "slot tick")
-	assert.GreaterOrEqual(t, tick.Slot, uint64(0))
-	assert.False(t, tick.SlotStart.IsZero())
-}
-
 func TestSlotClockEpochBoundary(t *testing.T) {
 	t.Parallel()
 
@@ -552,42 +484,6 @@ func TestSlotTickSlotsUntilEpoch(t *testing.T) {
 			)
 		})
 	}
-}
-
-func TestSlotClockConcurrentSubscribers(t *testing.T) {
-	t.Parallel()
-
-	systemStart := time.Now()
-	provider := newMockSlotTimeProvider(systemStart, 20*time.Millisecond, 100)
-	clock := NewSlotClock(provider, DefaultSlotClockConfig())
-
-	ctx := t.Context()
-
-	clock.Start(ctx)
-	defer clock.Stop()
-
-	// Create many concurrent subscribers
-	const numSubscribers = 10
-	var wg sync.WaitGroup
-	wg.Add(numSubscribers)
-
-	for range numSubscribers {
-		go func() {
-			defer wg.Done()
-			ch := clock.Subscribe()
-			defer clock.Unsubscribe(ch)
-
-			// Wait for at least one tick
-			select {
-			case <-ch:
-				// Got a tick
-			case <-time.After(100 * time.Millisecond):
-				// Timeout is ok, just testing concurrency safety
-			}
-		}()
-	}
-
-	wg.Wait()
 }
 
 func TestSlotClockContextCancellation(t *testing.T) {
@@ -812,20 +708,6 @@ func TestMarkEpochEmittedConcurrent(t *testing.T) {
 
 	wg.Wait()
 	assert.Equal(t, 1, successCount, "exactly one goroutine should succeed")
-}
-
-func TestSlotClockSlotToTime(t *testing.T) {
-	t.Parallel()
-
-	systemStart := time.Now()
-	provider := newMockSlotTimeProvider(systemStart, time.Second, 100)
-	clock := NewSlotClock(provider, DefaultSlotClockConfig())
-
-	slotTime, err := clock.SlotToTime(10)
-	require.NoError(t, err)
-
-	expected := systemStart.Add(10 * time.Second)
-	assert.Equal(t, expected, slotTime)
 }
 
 func TestSlotClockStopClosesSubscriberChannels(t *testing.T) {

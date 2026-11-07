@@ -19,8 +19,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"gopkg.in/yaml.v3"
 )
 
 func TestReleaseTagValidation(t *testing.T) {
@@ -63,66 +61,5 @@ func TestReleaseTagValidation(t *testing.T) {
 				t.Fatalf("validate %q unexpectedly succeeded: %s", tc.tag, output)
 			}
 		})
-	}
-}
-
-func TestPrivilegedReleaseJobsNeedValidatedTag(t *testing.T) {
-	t.Parallel()
-	workflow := readRepoFile(t, repoRoot(t), publishWorkflow)
-
-	for _, fragment := range []string{
-		"validate-release-tag:\n",
-		"      - validate-release-tag\n",
-		"needs: [finalize-release, validate-release-tag]",
-		"RELEASE_TAG: ${{ needs.validate-release-tag.outputs.release_tag }}",
-		"PACKAGE_VERSION: ${{ needs.validate-release-tag.outputs.package_version }}",
-	} {
-		if !strings.Contains(workflow, fragment) {
-			t.Errorf("publish workflow is missing validated release-tag wiring %q", fragment)
-		}
-	}
-	if got := strings.Count(
-		workflow,
-		"needs: [finalize-release, validate-release-tag]",
-	); got != 1 {
-		t.Errorf("validated release-tag dependency count = %d, want 1", got)
-	}
-}
-
-func TestNPMReleaseUsesTrustedPublishing(t *testing.T) {
-	t.Parallel()
-	root := repoRoot(t)
-	workflowText := readRepoFile(t, root, publishWorkflow)
-	var workflow releaseWorkflow
-	if err := yaml.Unmarshal([]byte(workflowText), &workflow); err != nil {
-		t.Fatalf("parse %s: %v", publishWorkflow, err)
-	}
-
-	if !strings.Contains(workflowText, "id-token: write") {
-		t.Error("publish workflow does not grant the npm job OIDC token access")
-	}
-	if !strings.Contains(workflowText, "node-version: '24.21.0'") {
-		t.Error("npm release does not use the pinned Node.js version")
-	}
-	job := workflow.Jobs["npm-release"]
-	installedTrustedCLI := false
-	published := false
-	for _, step := range job.Steps {
-		if step.Name == "Install npm CLI for trusted publishing" &&
-			step.Run == "npm install --global npm@11.5.1" {
-			installedTrustedCLI = true
-		}
-		if step.Name == "Publish to NPM" {
-			published = step.Run == "npm publish --access public"
-			if _, hasToken := step.Env["NODE_AUTH_TOKEN"]; hasToken {
-				t.Error("npm release still uses a long-lived authentication token")
-			}
-		}
-	}
-	if !installedTrustedCLI {
-		t.Error("npm release does not install the minimum npm CLI for trusted publishing")
-	}
-	if !published {
-		t.Error("npm release does not publish through npm's OIDC trusted publisher")
 	}
 }

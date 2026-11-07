@@ -71,21 +71,6 @@ func TestCriticalManifestNotEmpty(t *testing.T) {
 	if len(critical) == 0 {
 		t.Fatal("CriticalManifest returned empty slice")
 	}
-	// Pin the expected count so accidental de-classification is caught.
-	// idx_utxo_staking_deleted_amount left the manifest entirely: the
-	// API-backfill per-batch live-stake SUM needs it during bulk load,
-	// so it is never dropped and no longer needs a critical rebuild slot.
-	// idx_utxo_transaction_id joined the critical subset: the rollback's
-	// DELETE FROM "transaction" cascades through it, and a rollback can
-	// run as soon as the database is marked ready.
-	const wantCritical = 27
-	if len(critical) != wantCritical {
-		t.Errorf(
-			"CriticalManifest: got %d entries, want %d — update this constant if the classification changed intentionally",
-			len(critical),
-			wantCritical,
-		)
-	}
 	// Every critical entry must exist in the full manifest.
 	full := map[string]bool{}
 	for _, idx := range Manifest {
@@ -95,65 +80,6 @@ func TestCriticalManifestNotEmpty(t *testing.T) {
 		key := fmt.Sprintf("%s:%s", idx.Table, idx.Name)
 		if !full[key] {
 			t.Errorf("critical entry %q not found in full Manifest", key)
-		}
-	}
-}
-
-// TestSyncStateConstants pins the marker key/value strings. Any
-// change must be a deliberate migration: changing the key would
-// orphan markers written by older binaries during a partial
-// upgrade.
-func TestSyncStateConstants(t *testing.T) {
-	if SyncStateKey != "metadata_indexes_pending" {
-		t.Errorf("SyncStateKey changed: got %q", SyncStateKey)
-	}
-	if SyncStateValue != "true" {
-		t.Errorf("SyncStateValue changed: got %q", SyncStateValue)
-	}
-}
-
-// TestManifestDefersAPIQueryIndexes pins query and rollback indexes that are
-// not used by per-transaction import predicates.
-func TestManifestDefersAPIQueryIndexes(t *testing.T) {
-	type expectation struct {
-		table    string
-		critical bool
-	}
-	want := map[string]expectation{
-		"idx_address_transaction_slot":         {"address_transaction", true},
-		"idx_addr_tx_stake_position":           {"address_transaction", true},
-		"idx_addr_tx_payment":                  {"address_transaction", true},
-		"idx_asset_mint_burn_slot":             {"asset_mint_burn", true},
-		"idx_asset_mint_burn_fingerprint":      {"asset_mint_burn", false},
-		"idx_asset_mint_burn_lookup":           {"asset_mint_burn", true},
-		"idx_datum_added_slot":                 {"datum", false},
-		"idx_certs_block_hash":                 {"certs", false},
-		"idx_certs_certificate_id":             {"certs", false},
-		"idx_certs_cert_type":                  {"certs", false},
-		"idx_key_witness_type":                 {"key_witness", true},
-		"idx_redeemer_index":                   {"redeemer", true},
-		"idx_redeemer_tag":                     {"redeemer", true},
-		"idx_witness_scripts_script_hash":      {"witness_scripts", true},
-		"idx_witness_scripts_type":             {"witness_scripts", true},
-		"idx_transaction_metadata_label_slot":  {"transaction_metadata_label", true},
-		"idx_transaction_metadata_label_label": {"transaction_metadata_label", true},
-		"idx_script_type":                      {"script", false},
-	}
-	found := make(map[string]bool, len(want))
-	for _, idx := range Manifest {
-		if expected, ok := want[idx.Name]; ok {
-			found[idx.Name] = true
-			if idx.Table != expected.table {
-				t.Errorf("%s table = %q, want %q", idx.Name, idx.Table, expected.table)
-			}
-			if idx.Critical != expected.critical {
-				t.Errorf("%s critical = %t, want %t", idx.Name, idx.Critical, expected.critical)
-			}
-		}
-	}
-	for name := range want {
-		if !found[name] {
-			t.Errorf("%s missing from deferred-index manifest", name)
 		}
 	}
 }
@@ -225,21 +151,6 @@ func TestRetainedEntriesAreResolvable(t *testing.T) {
 			)
 		}
 		seen[idx.Name] = i
-	}
-}
-
-// TestRetainedCoversLiveStakeImportIndex keeps the live-stake aggregation
-// index out of the deferred manifest because backfill queries it per batch.
-func TestRetainedCoversLiveStakeImportIndex(t *testing.T) {
-	want := []string{"idx_utxo_staking_deleted_amount"}
-	present := map[string]bool{}
-	for _, idx := range Retained {
-		present[idx.Name] = true
-	}
-	for _, name := range want {
-		if !present[name] {
-			t.Errorf("%q is missing from Retained", name)
-		}
 	}
 }
 

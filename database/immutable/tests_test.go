@@ -200,6 +200,7 @@ func requireGetBlockErrorIs(
 }
 
 func TestImmutableIndexAcceptsValidSingleAndMultipleBlockChunks(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name           string
 		primaryOffsets []uint32
@@ -253,6 +254,7 @@ func TestImmutableIndexAcceptsValidSingleAndMultipleBlockChunks(t *testing.T) {
 }
 
 func TestImmutableIndexRejectsUnsupportedPrimaryVersion(t *testing.T) {
+	t.Parallel()
 	fixture := writeImmutableIndexFixture(
 		t, 2, []uint32{0, secondaryIndexEntrySize}, []uint64{0},
 	)
@@ -260,6 +262,7 @@ func TestImmutableIndexRejectsUnsupportedPrimaryVersion(t *testing.T) {
 }
 
 func TestImmutableIndexRejectsMisalignedSecondaryOffset(t *testing.T) {
+	t.Parallel()
 	fixture := writeImmutableIndexFixture(
 		t, 1, []uint32{1, secondaryIndexEntrySize}, []uint64{0},
 	)
@@ -267,6 +270,7 @@ func TestImmutableIndexRejectsMisalignedSecondaryOffset(t *testing.T) {
 }
 
 func TestImmutableIndexRejectsNonMonotonicSecondaryOffsets(t *testing.T) {
+	t.Parallel()
 	fixture := writeImmutableIndexFixture(
 		t,
 		1,
@@ -277,6 +281,7 @@ func TestImmutableIndexRejectsNonMonotonicSecondaryOffsets(t *testing.T) {
 }
 
 func TestImmutableIndexRejectsLastBlockOffsetBeyondChunk(t *testing.T) {
+	t.Parallel()
 	fixture := writeImmutableIndexFixture(
 		t, 1, []uint32{0, secondaryIndexEntrySize}, []uint64{1000},
 	)
@@ -286,6 +291,7 @@ func TestImmutableIndexRejectsLastBlockOffsetBeyondChunk(t *testing.T) {
 }
 
 func TestImmutableIndexRejectsDescendingBlockOffsets(t *testing.T) {
+	t.Parallel()
 	fixture := writeImmutableIndexFixture(
 		t,
 		1,
@@ -301,6 +307,7 @@ func TestImmutableIndexRejectsDescendingBlockOffsets(t *testing.T) {
 }
 
 func TestImmutableIndexRejectsOversizedBlockSpan(t *testing.T) {
+	t.Parallel()
 	fixture := writeImmutableIndexFixture(
 		t, 1, []uint32{0, secondaryIndexEntrySize}, []uint64{0},
 	)
@@ -328,6 +335,7 @@ func TestImmutableIndexRejectsOversizedBlockSpan(t *testing.T) {
 }
 
 func TestImmutableIndexRejectsBlockOffsetOverflow(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name         string
 		blockOffsets []uint64
@@ -362,6 +370,7 @@ func TestImmutableIndexRejectsBlockOffsetOverflow(t *testing.T) {
 }
 
 func TestImmutableIndexRejectsMisalignedSecondaryFile(t *testing.T) {
+	t.Parallel()
 	fixture := writeImmutableIndexFixture(
 		t, 1, []uint32{0, secondaryIndexEntrySize}, []uint64{0},
 	)
@@ -437,6 +446,7 @@ func writePointLookupFixture(t *testing.T) (string, []ocommon.Point) {
 }
 
 func TestGetChunkNamesFromPointReturnsContainingChunk(t *testing.T) {
+	t.Parallel()
 	dir, points := writePointLookupFixture(t)
 	imm, err := New(dir)
 	if err != nil {
@@ -482,6 +492,7 @@ func TestGetChunkNamesFromPointReturnsContainingChunk(t *testing.T) {
 }
 
 func TestGetBlockChecksHashAfterLocatingContainingChunk(t *testing.T) {
+	t.Parallel()
 	dir, points := writePointLookupFixture(t)
 	imm, err := New(dir)
 	if err != nil {
@@ -579,6 +590,7 @@ func TestSingleEntryChunkLookupsAtZeroAndNonzeroSlot(t *testing.T) {
 }
 
 func TestGetChunkNamesFromPointSkipsEmptyChunks(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	writePointLookupChunk(t, dir, "00000", nil)
 	first := pointLookupPoint(200, 0x20)
@@ -676,6 +688,7 @@ func requireChunkTrioState(
 }
 
 func TestTruncateChunksFromPointKeepsChunksBeforeExactBoundary(t *testing.T) {
+	t.Parallel()
 	dir, points := writePointLookupFixture(t)
 	imm, err := New(dir)
 	if err != nil {
@@ -690,6 +703,7 @@ func TestTruncateChunksFromPointKeepsChunksBeforeExactBoundary(t *testing.T) {
 }
 
 func TestTruncateChunksFromPointRefusesMissingExactPoint(t *testing.T) {
+	t.Parallel()
 	dir, points := writePointLookupFixture(t)
 	imm, err := New(dir)
 	if err != nil {
@@ -709,6 +723,7 @@ func TestTruncateChunksFromPointRefusesMissingExactPoint(t *testing.T) {
 }
 
 func TestTruncateChunksFromPointReportsPartialDeletion(t *testing.T) {
+	t.Parallel()
 	dir, points := writePointLookupFixture(t)
 	failingPath := filepath.Join(dir, "00004"+secondaryFileExtension)
 	if err := os.Remove(failingPath); err != nil {

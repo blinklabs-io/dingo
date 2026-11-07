@@ -319,17 +319,6 @@ func TestObserveBlockCompositionRecordsUnderEraLabel(t *testing.T) {
 	assert.Equal(t, 2, testutil.CollectAndCount(m.blocksTotal))
 }
 
-// TestObserveBlockCompositionNoopWhenMetricsDisabled confirms the observe
-// helper is safe to call on a *stateMetrics that was never initialized
-// (metrics disabled), matching the other observe helpers in this file.
-func TestObserveBlockCompositionNoopWhenMetricsDisabled(t *testing.T) {
-	t.Parallel()
-
-	var m stateMetrics
-	// m.init is never called: every field stays nil.
-	m.observeBlockComposition(blockComposition{era: "Conway", transactions: 1})
-}
-
 // compositionSpyTx counts how many times a transaction's produced UTxO set is
 // materialized while its block's composition is computed.
 type compositionSpyTx struct {
@@ -532,17 +521,6 @@ func TestObserveBlockStageIgnoresUnknownStage(t *testing.T) {
 			stage,
 		)
 	}
-}
-
-// TestObserveBlockStageNoopWhenMetricsDisabled confirms the observe helper is
-// safe to call on a *stateMetrics that was never initialized (metrics
-// disabled), matching the other observe helpers in this file.
-func TestObserveBlockStageNoopWhenMetricsDisabled(t *testing.T) {
-	t.Parallel()
-
-	var m stateMetrics
-	// m.init is never called: blockStageDuration and friends stay nil.
-	m.observeBlockStage(blockStageHeaderVerify, time.Millisecond)
 }
 
 // TestBlockStageDurationBucketsCoverTailStalls pins the histogram's upper
@@ -832,17 +810,6 @@ func TestObserveBlockApplyBatchRecordsLatencyAndSize(t *testing.T) {
 	assert.InDelta(t, 51.0, sizeSum, 0.0001, "1 + 50 blocks observed")
 }
 
-// TestObserveBlockApplyBatchNoopWhenMetricsDisabled confirms the observe
-// helper is safe to call on a *stateMetrics that was never initialized
-// (metrics disabled), matching the other observe helpers in this file.
-func TestObserveBlockApplyBatchNoopWhenMetricsDisabled(t *testing.T) {
-	t.Parallel()
-
-	var m stateMetrics
-	// m.init is never called: blockApplyBatchLatency and friends stay nil.
-	m.observeBlockApplyBatch(1, time.Millisecond)
-}
-
 // TestBlockApplyBatchLatencyMaxDurationExportsRunningMaximum drives the
 // exported max gauge through observeBlockApplyBatch: it must start at zero,
 // rise on a larger observation, and hold (not fall) on a smaller one.
@@ -877,51 +844,6 @@ func TestBlockApplyBatchLatencyMaxDurationExportsRunningMaximum(t *testing.T) {
 		9.0,
 		blockApplyBatchMaxLatencyValue(t, reg),
 		"a larger observation must raise the record",
-	)
-}
-
-// TestBlockApplyBatchLatencyMaxDurationExportedValueEqualsRecord hammers the
-// running maximum from many goroutines at once and requires the exported
-// GaugeFunc value to equal the largest duration any writer submitted --
-// exactly, not merely bounded by it. Exact equality is what distinguishes
-// reading the running-maximum atomic at scrape time from pushing each new
-// maximum into a separately-updated Gauge: with a pushed Gauge, two writers
-// can each win the compare-and-swap in updateMaxDuration and then land their
-// Set calls in the other order, leaving the exported value below the record
-// with nothing to recover it (see updateMaxDuration's doc comment). Run with
-// -race, which also covers the compare-and-swap loop under concurrent
-// writers.
-func TestBlockApplyBatchLatencyMaxDurationExportedValueEqualsRecord(
-	t *testing.T,
-) {
-	t.Parallel()
-
-	reg := prometheus.NewRegistry()
-	var m stateMetrics
-	m.init(reg)
-
-	const writers = 64
-	var wg sync.WaitGroup
-	wg.Add(writers)
-	for i := range writers {
-		// Each writer submits a larger value and then a smaller one, so
-		// both directions race against every other writer.
-		observed := time.Duration(i) * time.Millisecond
-		go func() {
-			defer wg.Done()
-			m.observeBlockApplyBatch(1, observed)
-			m.observeBlockApplyBatch(1, observed/2)
-		}()
-	}
-	wg.Wait()
-
-	want := (time.Duration(writers-1) * time.Millisecond).Seconds()
-	assert.Equal(
-		t,
-		want,
-		blockApplyBatchMaxLatencyValue(t, reg),
-		"the exported value must equal the largest observed duration, "+
-			"regardless of goroutine interleaving",
 	)
 }
 

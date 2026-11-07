@@ -1256,6 +1256,13 @@
 # minPoolMargin: 0        # basis points, 0..10000 (150 = 1.5%); 0 disables
 
 # ---
+# Include the compiled release version in forged block headers (default off).
+# See docs/cip-0203.md for the payload encoding and build requirements.
+# CLI: --cip-0203-enabled
+# Env: DINGO_CIP0203_ENABLED
+# cip0203Enabled: false
+
+# ---
 # Experimental pre-Dijkstra CIP-50 override (consensus-affecting)
 #
 # Adds the leverage cap to the staking-reward formula: a pool's

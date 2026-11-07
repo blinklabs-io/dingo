@@ -347,14 +347,20 @@ func (ls *LedgerState) validateAndApplyEndorserBlockTransactions(
 	if acc != nil {
 		defer acc.Reset()
 	}
-	if acc != nil {
-		selected := make([]lcommon.Transaction, len(indexes))
-		for i, index := range indexes {
-			selected[i] = txs[index]
+	selected := make([]lcommon.Transaction, len(indexes))
+	for i, index := range indexes {
+		selected[i] = txs[index]
+	}
+	flush := func() error {
+		flushStart := time.Now()
+		err := ls.db.FlushBatch(acc, txn)
+		ls.metrics.observeBlockStage(blockStageApply, time.Since(flushStart))
+		if err != nil {
+			return &leiosEndorserBlockStorageError{
+				err: fmt.Errorf("flush endorser API details: %w", err),
+			}
 		}
-		if _, err := ls.db.EnableLeiosClosureUtxoOverlay(acc, txn, selected); err != nil {
-			return 0, 0, fmt.Errorf("prepare endorser UTxO batch: %w", err)
-		}
+		return nil
 	}
 	var signatures preverifiedSignatureSet
 	created := make(map[utxoref.Key]lcommon.Utxo, len(indexes)*2)
@@ -364,7 +370,21 @@ func (ls *LedgerState) validateAndApplyEndorserBlockTransactions(
 		donation            uint64
 		expandedIndexOffset uint64
 	)
-	for _, idx := range indexes {
+	windowEnd := 0
+	for position, idx := range indexes {
+		if acc != nil && position == windowEnd {
+			n, err := ls.db.PrepareLeiosClosureBatch(
+				acc,
+				txn,
+				selected[position:],
+			)
+			if err != nil {
+				return 0, 0, &leiosEndorserBlockStorageError{
+					err: fmt.Errorf("prepare endorser UTxO batch: %w", err),
+				}
+			}
+			windowEnd = position + n
+		}
 		tx := txs[idx]
 		if err := ls.loadLeiosSpentInputs(
 			ctx,
@@ -393,11 +413,10 @@ func (ls *LedgerState) validateAndApplyEndorserBlockTransactions(
 		if validationEra.ValidateTxFunc != nil {
 			validateStart := time.Now()
 			if signatures == nil {
-				selected := make([]lcommon.Transaction, len(indexes))
-				for i, idx := range indexes {
-					selected[i] = txs[idx]
-				}
-				signatures = preverifyTransactionSignatures(selected, ls.sigResults)
+				signatures = preverifyTransactionSignatures(
+					selected,
+					ls.sigResults,
+				)
 				if err := ctx.Err(); err != nil {
 					return 0, 0, err
 				}
@@ -449,11 +468,13 @@ func (ls *LedgerState) validateAndApplyEndorserBlockTransactions(
 			}
 			if err != nil {
 				if isSemanticTxValidationError(err) {
-					return 0, 0, &leiosEndorserBlockValidationError{err: fmt.Errorf(
-						"endorser tx %d failed validation: %w",
-						idx,
-						err,
-					)}
+					return 0, 0, &leiosEndorserBlockValidationError{
+						err: fmt.Errorf(
+							"endorser tx %d failed validation: %w",
+							idx,
+							err,
+						),
+					}
 				}
 				return 0, 0, fmt.Errorf(
 					"validate endorser tx %d: %w",
@@ -479,7 +500,12 @@ func (ls *LedgerState) validateAndApplyEndorserBlockTransactions(
 		delta.addTransaction(tx, idx)
 		applyStart := time.Now()
 		if acc != nil {
-			err = delta.applyWithoutRecordingDonationsWithAccumulator(ctx, ls, txn, acc)
+			err = delta.applyWithoutRecordingDonationsWithAccumulator(
+				ctx,
+				ls,
+				txn,
+				acc,
+			)
 		} else {
 			err = delta.applyWithoutRecordingDonations(ctx, ls, txn)
 		}
@@ -506,11 +532,8 @@ func (ls *LedgerState) validateAndApplyEndorserBlockTransactions(
 		}
 	}
 	if acc != nil {
-		flushStart := time.Now()
-		err := ls.db.FlushBatch(acc, txn)
-		ls.metrics.observeBlockStage(blockStageApply, time.Since(flushStart))
-		if err != nil {
-			return 0, 0, &leiosEndorserBlockStorageError{err: fmt.Errorf("flush endorser API details: %w", err)}
+		if err := flush(); err != nil {
+			return 0, 0, err
 		}
 	}
 	if len(applyEvents) > 0 {

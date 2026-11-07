@@ -32,6 +32,7 @@ import (
 )
 
 func TestMeasureTurboCaseEvaluatesClosureWithoutMaterializingResult(t *testing.T) {
+	t.Parallel()
 	body := "(lam y y)"
 	for range 22 {
 		body = "[(lam x (lam y [x x])) " + body + "]"
@@ -217,6 +218,7 @@ func assertTurboJSONFields(
 }
 
 func TestMakeTurboBenchmarkSeparatesEvaluationAndFlatTimes(t *testing.T) {
+	t.Parallel()
 	budget := cek.ExBudget{Cpu: 100, Mem: 20}
 	benchmark, err := makeTurboBenchmark(
 		turboCase{name: "example-v1.flat", group: "V1", protocolMajor: 8},

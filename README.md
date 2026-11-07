@@ -42,14 +42,14 @@ provides pluggable storage and client interfaces.
 
 ## Network sync and runtime usage
 
-Dingo v0.90.5. Runtime CPU/RAM are sampled highs after bootstrap; disk is database size. `—` = not captured.
+Dingo Core v0.90.5; API v0.91.0. Runtime CPU/RAM are sampled highs after bootstrap; disk is database size. `—` = not captured.
 
 | Network | Mode | CPU | RAM | Disk | Sync time |
 | --- | --- | ---: | ---: | ---: | ---: |
 | Preview | Core, Mithril | ~1.2 cores | ~2.0 GiB | ~17.8 GiB | ~13 min |
 | Preprod | Core, Mithril | ~1.1 cores | ~2.7 GiB | ~22.8 GiB | ~16 min |
-| Preview | API, Mithril | — | — | — | ~4h 41m |
-| Preprod | API, Mithril | — | — | — | ~3h 43m |
+| Preview | API, Mithril | ~3.4 cores | ~3.5 GiB | ~55 GiB | ~4h 45m |
+| Preprod | API, Mithril | ~1.7 cores | ~3.8 GiB | ~61 GiB | ~3h 20m |
 | Mainnet | Core, Mithril | — | — | — | ~6h 2m |
 
 ## Codebase

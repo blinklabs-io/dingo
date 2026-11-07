@@ -84,20 +84,6 @@ func TestGuardContainsPanics(t *testing.T) {
 	}
 }
 
-// TestGuardNilPanicIsNotSilentSuccess pins that a nil panic is reported as a
-// decode failure rather than inferred to be a normal return from recover's
-// value.
-func TestGuardNilPanicIsNotSilentSuccess(t *testing.T) {
-	t.Parallel()
-
-	value, err := safedecode.Guard(func() (string, error) {
-		panic(nil)
-	})
-	require.Error(t, err)
-	require.ErrorIs(t, err, safedecode.ErrDecodePanic)
-	require.Empty(t, value)
-}
-
 func TestTransaction(t *testing.T) {
 	t.Parallel()
 

@@ -580,6 +580,8 @@ func TestResolveLedgerDiscoveryAddressHonorsCancellation(t *testing.T) {
 }
 
 func TestIsResolvableHost(t *testing.T) {
+	t.Parallel()
+
 	longLabel := strings.Repeat("a", 64)
 	okLabel := strings.Repeat("a", 63)
 	longName := strings.Repeat("a.", 127) + "bcd" // 257 bytes
@@ -624,6 +626,8 @@ func TestIsResolvableHost(t *testing.T) {
 // the reported behaviour: the malformed hostname must not become a candidate
 // address, while the relay's usable IP addresses still do.
 func TestPoolRelayAddressesDropsUnresolvableHostname(t *testing.T) {
+	t.Parallel()
+
 	ipv4 := net.ParseIP("192.0.2.10")
 	relay := PoolRelay{
 		Hostname: "--pool-relay-port",
@@ -642,6 +646,8 @@ func TestPoolRelayAddressesDropsUnresolvableHostname(t *testing.T) {
 }
 
 func TestPoolRelayAddressesKeepsValidHostname(t *testing.T) {
+	t.Parallel()
+
 	relay := PoolRelay{Hostname: "relay.example.com", Port: 4200}
 	got := relay.Addresses()
 	if len(got) != 1 || got[0] != "relay.example.com:4200" {
@@ -652,6 +658,8 @@ func TestPoolRelayAddressesKeepsValidHostname(t *testing.T) {
 // TestFlattenRelayCandidatesDropsUnresolvableHostname covers the discovery
 // path itself, which is where the address reached addLedgerPeer.
 func TestFlattenRelayCandidatesDropsUnresolvableHostname(t *testing.T) {
+	t.Parallel()
+
 	ipv4 := net.ParseIP("198.51.100.7")
 	candidates := flattenRelayCandidates([]PoolRelay{
 		{Hostname: "--pool-relay-port", Port: 3001},

@@ -108,20 +108,15 @@ func TestStabilityWindowForEra_Byron(t *testing.T) {
 	assert.Equal(t, uint64(864), w)
 }
 
-// Shelley: window = ceil(3k/f) = ceil(3*432/0.05) = 25_920.
+// Shelley: window = ceil(3k/f) = ceil(3*432/0.05) = 25_920. Post-Shelley eras
+// use the same computation.
 func TestStabilityWindowForEra_Shelley(t *testing.T) {
 	cfg := newTestCfg(t)
-	w, err := eras.StabilityWindowForEra(cfg, eras.ShelleyEraDesc.Id)
-	require.NoError(t, err)
-	assert.Equal(t, uint64(25_920), w)
-}
-
-// Post-Shelley eras use the same computation.
-func TestStabilityWindowForEra_Conway(t *testing.T) {
-	cfg := newTestCfg(t)
-	w, err := eras.StabilityWindowForEra(cfg, eras.ConwayEraDesc.Id)
-	require.NoError(t, err)
-	assert.Equal(t, uint64(25_920), w)
+	for _, era := range []eras.EraDesc{eras.ShelleyEraDesc, eras.ConwayEraDesc} {
+		w, err := eras.StabilityWindowForEra(cfg, era.Id)
+		require.NoError(t, err, era.Name)
+		assert.Equal(t, uint64(25_920), w, era.Name)
+	}
 }
 
 // Byron era but no Byron genesis in config — error.

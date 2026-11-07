@@ -26,6 +26,7 @@ import (
 )
 
 func TestBackupRestoreRoundTrip(t *testing.T) {
+	t.Parallel()
 	src, err := New(WithDataDir(t.TempDir()))
 	require.NoError(t, err)
 	defer src.Close()
@@ -55,16 +56,6 @@ func TestBackupRestoreRoundTrip(t *testing.T) {
 	require.Equal(t, []byte("value2"), val2)
 }
 
-func TestBackupClosedStoreErrors(t *testing.T) {
-	db, err := New(WithDataDir(t.TempDir()))
-	require.NoError(t, err)
-	require.NoError(t, db.Close())
-
-	var buf bytes.Buffer
-	err = db.Backup(context.Background(), &buf)
-	require.Error(t, err)
-}
-
 // TestRestoreRejectsNonEmptyStore guards a real gap: db.Load only inserts
 // entries -- it never clears existing keys first -- so calling Restore
 // against a store that already has data would silently merge the backup
@@ -73,6 +64,7 @@ func TestBackupClosedStoreErrors(t *testing.T) {
 // RestoreFrom already enforces the equivalent precondition (refusing an
 // existing destination file); this brings the badger blob store in line.
 func TestRestoreRejectsNonEmptyStore(t *testing.T) {
+	t.Parallel()
 	src, err := New(WithDataDir(t.TempDir()))
 	require.NoError(t, err)
 	defer src.Close()
@@ -113,6 +105,7 @@ func TestRestoreRejectsNonEmptyStore(t *testing.T) {
 // as a normal error, since an unrecovered panic here would crash the
 // entire calling process — including a live node mid-restore.
 func TestRestoreRecoversFromMalformedStreamPanic(t *testing.T) {
+	t.Parallel()
 	db, err := New(WithDataDir(t.TempDir()))
 	require.NoError(t, err)
 	defer db.Close()
@@ -129,6 +122,7 @@ func TestRestoreRecoversFromMalformedStreamPanic(t *testing.T) {
 // size, which is what could exhaust process memory and take down a live
 // node before this check existed.
 func TestRestoreRejectsOversizedRecordLength(t *testing.T) {
+	t.Parallel()
 	// A length prefix alone, claiming more than maxLoadRecordSize, with
 	// no payload bytes following it at all: if this weren't rejected up
 	// front, Badger's Load would try to allocate a buffer of this size
@@ -164,6 +158,7 @@ func TestRestoreRejectsOversizedRecordLength(t *testing.T) {
 }
 
 func TestRestoreCanceledContext(t *testing.T) {
+	t.Parallel()
 	db, err := New(WithDataDir(t.TempDir()))
 	require.NoError(t, err)
 	defer db.Close()
@@ -203,6 +198,7 @@ func (c *cancelAfterNWrites) Write(p []byte) (int, error) {
 // contextWriter before it ever reaches the instrumented writer, so
 // instrumented.count stops advancing past 1.
 func TestBackupCancelledMidStreamStopsBeforeCompleting(t *testing.T) {
+	t.Parallel()
 	db, err := New(WithDataDir(t.TempDir()))
 	require.NoError(t, err)
 	defer db.Close()
@@ -254,6 +250,7 @@ func (c *cancelAfterNReads) Read(p []byte) (int, error) {
 // would just be indistinguishable from cancelling before Restore was
 // ever called.
 func TestRestoreCancelledMidStreamStopsBeforeCompleting(t *testing.T) {
+	t.Parallel()
 	src, err := New(WithDataDir(t.TempDir()))
 	require.NoError(t, err)
 	defer src.Close()

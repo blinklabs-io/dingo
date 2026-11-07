@@ -197,14 +197,14 @@ This document explains how **Dingo** (a pure-Go Cardano node implementation by B
 When Dingo is configured as an active Block Producer (` + "`--block-producer`" + `), every block it forges contains a distinct protocol version fingerprint in its header:
 
 - **Protocol Major Version**: Matches the active ledger era (e.g., ` + "`9`" + ` or ` + "`10`" + ` in Conway). This guarantees ledger consensus and hard fork compatibility with the entire network.
-- **Protocol Minor Version**: Explicitly set to **` + "`69`" + `** (` + "`BlockHeaderProtocolMinor = 69`" + ` in ` + "`internal/version/version.go`" + `).
+- **Protocol Minor Version**: Defaults to **` + "`69`" + `** (` + "`BlockHeaderProtocolMinor = 69`" + ` in ` + "`internal/version/version.go`" + `).
 
 ### Why Minor Version 69?
 Cardano's ledger rules use ` + "`ProtocolMajorVersion`" + ` to govern era transitions and hard forks. The ` + "`ProtocolMinorVersion`" + ` in the block header is an informational field that block-producing implementations use to signal software identity without altering consensus rules or causing network forks.
 
 Whenever a block is inspected on-chain:
 - Header: ` + "`{ \"proto_major\": 9, \"proto_minor\": 69 }`" + `
-- Any block with ` + "`proto_minor == 69`" + ` was forged by a **Dingo** node.
+- A scheme-0 block with ` + "`(proto_minor & 255) == 69`" + ` self-reports **Dingo**. With CIP-0203 enabled, the upper payload bits encode the compiled release version; see docs/cip-0203.md.
 
 ---
 
@@ -251,7 +251,7 @@ const docsFAQContent = `# Dingo Frequently Asked Questions (FAQ)
 **Dingo** is an independent, pure-Go modular implementation of the Cardano blockchain node developed by Blink Labs. It provides high performance, memory efficiency, and native queryability without requiring Haskell dependencies.
 
 ### Q2: How does Dingo identify blocks it forged on Cardano?
-Dingo sets the block header **Protocol Minor Version to ` + "`69`" + `** (` + "`BlockHeaderProtocolMinor = 69`" + `). While the major version indicates the protocol era (e.g. Conway 9 or 10), the minor version 69 identifies Dingo block producers on-chain.
+By default, Dingo sets the block header **Protocol Minor Version to ` + "`69`" + `** (` + "`BlockHeaderProtocolMinor = 69`" + `). While the major version indicates the protocol era (e.g. Conway 9 or 10), the minor version 69 identifies Dingo block producers on-chain. With CIP-0203 enabled, scheme 0 and the low byte (` + "`(proto_minor & 255) == 69`" + `) still identify Dingo, while the upper bits carry the release version.
 
 ### Q3: How does Dingo prevent slot double-signing?
 Dingo records a durable **Forge Fence** in SQLite (` + "`sync_state`" + ` table under ` + "`forge_fence:<pool_id>`" + `). It records the highest slot signed and fences against double-signing even across process restarts.
@@ -300,7 +300,7 @@ Dingo is a modular, high-performance Cardano node written in Go.
 3. **Block Forging & Leader Election**:
    - VRF-based slot lottery evaluation under Praos rules.
    - Key Evolving Signatures (KES) and Operational Certificates (OpCert).
-   - Stamps Block Header Protocol Minor Version 69 on forged blocks.
+   - Stamps identifier 69 on forged blocks, optionally including the CIP-0203 release-version payload.
    - Durable Forge Fence in SQLite to prevent double-signing.
 
 4. **Storage Subsystem**:

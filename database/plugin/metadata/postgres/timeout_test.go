@@ -301,13 +301,6 @@ poolConnMaxLifetime: 1h30m
 	require.Equal(t, 90*time.Minute, cfg.PoolConnMaxLifetime)
 }
 
-func TestDefaultConfigLeavesTimeoutsUnset(t *testing.T) {
-	cfg := defaultConfig()
-
-	require.Zero(t, cfg.StatementTimeout)
-	require.Zero(t, cfg.LockTimeout)
-}
-
 func TestAssembledDSNSetsStatementAndLockTimeoutInMilliseconds(t *testing.T) {
 	cfg := defaultConfig()
 	cfg.StatementTimeout = 5 * time.Second

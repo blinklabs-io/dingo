@@ -1122,7 +1122,9 @@ type LedgerStateConfig struct {
 	// DelegatorInactivityEnabled is true.
 	DelegatorInactivity uint64
 	ValidateHistorical  bool
-	EnableDijkstra      bool
+	// CIP0203Enabled includes the build version in dev-mode forged headers.
+	CIP0203Enabled bool
+	EnableDijkstra bool
 	// WarmGenesisStake makes the first reward rounds of a network that
 	// declares Shelley at epoch 0 pay from genesis staking, as the Leios
 	// prototype networks do. A standard cardano-node leaves those rounds
@@ -1441,6 +1443,9 @@ type tipSnapshot struct {
 }
 
 type LedgerState struct {
+	// cleanupBatchSizeOverride replaces cleanupConsumedUtxoBatchSize when
+	// positive so tests can exercise the batch bound with a few rows.
+	cleanupBatchSizeOverride int
 	// A single successful-decode receipt retains only a manifest hash. Count
 	// readers still reload and hash every body before reusing that proof.
 	certifiedClosureReceipt atomic.Pointer[lcommon.Blake2b256]
@@ -1456,6 +1461,8 @@ type LedgerState struct {
 	metrics                stateMetrics
 	consensus              atomic.Pointer[consensusSnapshot]
 	tip                    atomic.Pointer[tipSnapshot]
+	processedBlockSlot     atomic.Uint64
+	processedBlockSeen     atomic.Bool
 	// tachysMu serializes construction of the full public leader selector.
 	// The cache is bounded to the same three-epoch window as pool snapshots
 	// and keyed by the published consensus context so rollback or state
@@ -4721,8 +4728,15 @@ func (ls *LedgerState) cleanupConsumedUtxos(ctx context.Context) {
 		ctx,
 		tipSlot-stabilityWindow,
 		stabilityWindow,
-		cleanupConsumedUtxoBatchSize,
+		ls.cleanupConsumedUtxoBatchLimit(),
 	)
+}
+
+func (ls *LedgerState) cleanupConsumedUtxoBatchLimit() int {
+	if ls.cleanupBatchSizeOverride > 0 {
+		return ls.cleanupBatchSizeOverride
+	}
+	return cleanupConsumedUtxoBatchSize
 }
 
 // pruneConsumedUtxosUpTo hard-deletes at most limit spent UTxO rows whose
@@ -6512,6 +6526,29 @@ func (ls *LedgerState) prepareEraTransitionsForRollover(
 	}
 	return workingPParams, workingEraID, results,
 		transitionHardForkMajors, plutusV2CostModelWritten, nil
+}
+
+// applyRolloverTransitionInfo settles transitionInfo after an epoch rollover
+// has committed, for a rollover that did not also change era. A new epoch
+// makes any TransitionImpossible set for the previous epoch stale, so it resets
+// to Unknown and the tip-update logic re-evaluates for the new epoch's horizon.
+// TransitionKnown is set only when the epoch rolled over in the old era with a
+// version bump. A rollover that changed era is left alone, because
+// applyEraTransition already cleared the state. The caller holds the ledger
+// lock.
+func (ls *LedgerState) applyRolloverTransitionInfo(
+	eraTransitions int,
+	rolloverResult *EpochRolloverResult,
+) {
+	if eraTransitions != 0 || rolloverResult == nil {
+		return
+	}
+	ls.transitionInfo = hardfork.NewTransitionUnknown()
+	if rolloverResult.HardFork != nil {
+		ls.transitionInfo = hardfork.NewTransitionKnown(
+			rolloverResult.NewCurrentEpoch.EpochId,
+		)
+	}
 }
 
 // applyEraTransition applies a single era-transition result to the in-memory
@@ -8966,24 +9003,8 @@ func (ls *LedgerState) processBlocksFromSource(
 				}
 				ls.checkpointWrittenForEpoch = rolloverResult.CheckpointWrittenForEpoch
 				ls.metrics.epochNum.Set(rolloverResult.NewEpochNum)
-				// New epoch: any TransitionImpossible set for the previous
-				// epoch is now stale.  Reset to Unknown so the tip-update
-				// logic re-evaluates for the new epoch's horizon.
-				// (applyEraTransition already handles the era-transition case.)
-				if len(eraTransitions) == 0 {
-					ls.transitionInfo = hardfork.NewTransitionUnknown()
-				}
 			}
-			// Set TransitionKnown only when epoch rolled over in the old era
-			// with a version bump AND no era transition already cleared it.
-			// applyEraTransition (above) handles the clear for transitions.
-			if len(eraTransitions) == 0 &&
-				rolloverResult != nil &&
-				rolloverResult.HardFork != nil {
-				ls.transitionInfo = hardfork.NewTransitionKnown(
-					rolloverResult.NewCurrentEpoch.EpochId,
-				)
-			}
+			ls.applyRolloverTransitionInfo(len(eraTransitions), rolloverResult)
 			// Re-apply any TestXHardForkAtEpoch override, and re-check the
 			// classic quorum trigger. Both matter when no
 			// eraTransitions/HardFork occurred (the rollover reset
@@ -9968,6 +9989,7 @@ func (ls *LedgerState) processBlocksFromSource(
 								IsCheckpoint: isCheckpoint,
 							},
 						)
+						ls.recordProcessedBlockSlot(tmpPoint.Slot)
 						if len(blockNonce) > 0 {
 							// Track pending nonce (will be committed after txn succeeds)
 							pendingNonce = blockNonce
@@ -16911,6 +16933,11 @@ func (ls *LedgerState) forgeBlock() {
 		return
 	}
 
+	minor, err := dingoversion.HeaderProtocolMinor(ls.config.CIP0203Enabled)
+	if err != nil {
+		ls.config.Logger.Error("cannot encode forged block version", "error", err)
+		return
+	}
 	// Create Babbage block header body
 	headerBody := babbage.BabbageBlockHeaderBody{
 		BlockNumber: nextBlockNumber,
@@ -16933,7 +16960,7 @@ func (ls *LedgerState) forgeBlock() {
 		// metadata encoding, and header assembly.
 		ProtoVersion: babbage.BabbageProtoVersion{
 			Major: uint64(conwayPParams.ProtocolVersion.Major),
-			Minor: dingoversion.BlockHeaderProtocolMinor,
+			Minor: minor,
 		},
 	}
 

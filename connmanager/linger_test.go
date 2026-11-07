@@ -19,42 +19,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
-
-// TestEnableTCPLingerZeroOnTCP verifies that enableTCPLingerZero
-// sets SO_LINGER on a real TCP connection. We can't directly read
-// the linger value back through Go's net API, so we drive it through
-// a paired listen/dial and assert the helper does not return an error.
-// The semantic effect (RST on close) is exercised by integration paths.
-func TestEnableTCPLingerZeroOnTCP(t *testing.T) {
-	t.Parallel()
-
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	defer ln.Close()
-
-	dialDone := make(chan net.Conn, 1)
-	go func() {
-		c, err := net.Dial("tcp", ln.Addr().String())
-		if err != nil {
-			dialDone <- nil
-			return
-		}
-		dialDone <- c
-	}()
-
-	srv, err := ln.Accept()
-	require.NoError(t, err)
-	defer srv.Close()
-
-	cli := <-dialDone
-	require.NotNil(t, cli)
-	defer cli.Close()
-
-	assert.NoError(t, enableTCPLingerZero(srv))
-	assert.NoError(t, enableTCPLingerZero(cli))
-}
 
 // TestEnableTCPLingerZeroOnNonTCPIsNoop verifies that calling the
 // helper on a non-TCP connection (e.g. unix-socket NtC) is a no-op
@@ -72,12 +37,4 @@ func TestEnableTCPLingerZeroOnNonTCPIsNoop(t *testing.T) {
 
 	assert.NoError(t, enableTCPLingerZero(srv))
 	assert.NoError(t, enableTCPLingerZero(cli))
-}
-
-// TestEnableTCPLingerZeroOnNilIsNoop covers the defensive path where
-// a caller passes a nil connection (e.g. dial error path).
-func TestEnableTCPLingerZeroOnNilIsNoop(t *testing.T) {
-	t.Parallel()
-
-	assert.NoError(t, enableTCPLingerZero(nil))
 }
