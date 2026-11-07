@@ -1051,7 +1051,7 @@ func TestUtxosWithHistoryExactAddressHasNoTotalCandidateCap(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	const siblingCount = 3*128 + 1
+	const siblingCount = ExactAddressCandidateScanLimit + 1
 	const targetSlot = siblingCount + 1
 	require.NoError(t, db.BlobTxn(true).Do(func(txn *Txn) error {
 		metadataTxn, err := raw.Begin()
