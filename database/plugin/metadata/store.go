@@ -3546,6 +3546,19 @@ type BulkLoadOptimizer interface {
 	RestoreNormalPragmas() error
 }
 
+// LeiosClosureUtxoOverlay optionally batches plain certified-closure UTxO
+// writes in API mode while retaining spent rows and their address history.
+// Eligibility is established without mutations in the caller's transaction;
+// false leaves the ordinary closure writer selected. True requires that only
+// the preflighted transactions use the accumulator until FlushBatch.
+type LeiosClosureUtxoOverlay interface {
+	EnableLeiosClosureUtxoOverlay(
+		accumulator types.MetadataBatchAccumulator,
+		txn types.Txn,
+		transactions []lcommon.Transaction,
+	) (bool, error)
+}
+
 // BatchUtxoOverlay is an optional interface for metadata stores that can
 // stage a trusted block-apply batch's UTxO writes in memory. After
 // EnableBatchUtxoOverlay reports true, the accumulator's batched transaction

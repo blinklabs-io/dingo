@@ -184,7 +184,10 @@ func utxoReferencePredicate(inputCount int, alias string) string {
 	return strings.Join(predicates, " OR ")
 }
 
-func utxoReferenceInsertBatchSQL(associationTable string, inputCount int) string {
+func utxoReferenceInsertBatchSQL(
+	associationTable string,
+	inputCount int,
+) string {
 	return `-- name: InsertUtxoReferenceBatch :execrows
 INSERT INTO ` + associationTable + ` (utxo_id, transaction_hash)
 SELECT u.id, ? FROM utxo AS u
@@ -330,7 +333,12 @@ func (s *Store) indexTransactionAddresses(
 		}] = struct{}{}
 	}
 	for _, output := range produced {
-		add(output.PaymentKey, output.PaymentScript, output.CredentialTag, output.StakingKey)
+		add(
+			output.PaymentKey,
+			output.PaymentScript,
+			output.CredentialTag,
+			output.StakingKey,
+		)
 	}
 	allInputs := make(
 		[]lcommon.TransactionInput,
@@ -350,6 +358,22 @@ func (s *Store) indexTransactionAddresses(
 		})
 	}
 	inputRefs := dedupeUtxoIDs(refs)
+	if overlay := retainedOverlayFromQueryer(db); overlay != nil {
+		unresolved := make([]models.UtxoId, 0, len(inputRefs))
+		for _, ref := range inputRefs {
+			if model, ok := overlay.retainedUtxo(newOverlayKey(ref.Hash, ref.Idx)); ok {
+				add(
+					model.PaymentKey,
+					model.PaymentScript,
+					model.CredentialTag,
+					model.StakingKey,
+				)
+			} else {
+				unresolved = append(unresolved, ref)
+			}
+		}
+		inputRefs = unresolved
+	}
 	inputBatchSize := 1
 	maxInputBatchSize := min(
 		maxCachedAddressInputQuerySize,

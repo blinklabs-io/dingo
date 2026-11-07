@@ -22089,11 +22089,21 @@ withdrawal or reward credit that re-sums a credential's live stake from the
 the flush counts the queued change once (`DATABASE.md`, "Incremental live-UTxO
 stake maintenance"). Validated blocks apply each transaction as it is validated
 and keep the per-transaction path for the donation-only delta they return. Leios
-endorser-block applies and closure-context batches also apply state immediately,
-but in API mode their accumulator groups output-address, transaction-address,
-key witness and metadata-label rows across the closure before flushing inside
-the same transaction. Those indexes are not validation inputs; assets and datums
-remain immediately readable by the next transaction. Regression tests:
+certified closures retain ordered validation and use the provider's optional
+API-detail accumulator; in API mode it groups output-address,
+transaction-address, key witness and metadata-label rows across the closure
+before flushing inside the same transaction. Those indexes are not validation
+inputs; assets and datums remain immediately readable by the next transaction.
+SQLite can additionally stage UTxO changes for a bounded plain closure through
+`metadata.LeiosClosureUtxoOverlay`: preflight changes no rows, parents and
+contexts remain immediate, and every output, spent marker and address row
+survives the final flush. Known exact reads use staged metadata; other UTxO
+readers materialize it before querying. API-detail indexes remain queued until
+the final closure flush. The shared `internal/sqlreadonly` parser classifies
+SQLite reads for both MCP and the retained overlay. Ineligible closures and
+other providers retain immediate UTxO writes. The outer metadata transaction
+owns rollback of every effect, including failures after staging begins.
+Regression tests:
 `TestApplyRowBatchingSerialEquivalence`,
 `TestApplyRowBatchingSameChunkDependencies` and
 `TestApplyRowBatchingSkipsValidatedDeltas`
