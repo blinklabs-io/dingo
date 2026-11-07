@@ -8865,7 +8865,10 @@ The `chainsync.State` tracks multiple concurrent chainsync clients:
   fetch or commit still expires after the unchanged plateau interval when no
   other progress occurs. Rollback does not lower this lifetime high-water
   slot; recovery below it relies on the existing primary-chain and committed
-  tip signals until new processing surpasses it.
+  tip signals until new processing surpasses it. An explicit initialized bit
+  distinguishes a completed slot-zero block from no completed work. A lower
+  processing high-water slot, or a return to uninitialized, resets the
+  recycler's baseline for a ledger rebuilt by live restore or truncate.
   If none of these signals advances while peers are ahead, the recycler first
   asks ledger to reconcile any live primary-chain/ledger divergence
   (`ReconcileLivePrimaryChainLedgerDivergence`). Primary-chain movement,

@@ -27,7 +27,9 @@ func TestBlockProcessingProgressBeforeCommitAndAfterRetry(t *testing.T) {
 	t.Parallel()
 	ls, _, block := newByronShelleyBoundaryLedger(t)
 	committed := ls.Tip()
-	require.Zero(t, ls.BlockProcessingSlot())
+	slot, processed := ls.BlockProcessingSlot()
+	require.Zero(t, slot)
+	require.False(t, processed)
 	rejected := errors.New("reject batch before commit")
 	calls := 0
 	for attempt := range 3 {
@@ -46,7 +48,7 @@ func TestBlockProcessingProgressBeforeCommitAndAfterRetry(t *testing.T) {
 					require.Equal(
 						t,
 						block.SlotNumber(),
-						ls.BlockProcessingSlot(),
+						requireProcessedSlot(t, ls),
 						"completed block work must be visible before durable commit",
 					)
 					require.Equal(
@@ -70,19 +72,31 @@ func TestBlockProcessingProgressBeforeCommitAndAfterRetry(t *testing.T) {
 			require.Equal(t, block.SlotNumber(), ls.Tip().Point.Slot)
 		}
 		require.Equal(t, attempt+1, calls)
-		require.Equal(t, block.SlotNumber(), ls.BlockProcessingSlot(),
+		require.Equal(t, block.SlotNumber(), requireProcessedSlot(t, ls),
 			"retrying an already processed slot must not create new progress")
 	}
 }
 
 func TestBlockProcessingSlotNeverRegresses(t *testing.T) {
 	t.Parallel()
-	var ls LedgerState
+	ls := new(LedgerState)
 	for _, step := range []struct{ slot, want uint64 }{
-		{100, 100}, {90, 100}, {100, 100}, {101, 101},
+		{0, 0}, {0, 0}, {100, 100}, {90, 100}, {100, 100}, {101, 101},
+		{^uint64(0), ^uint64(0)}, {0, ^uint64(0)},
 	} {
 		ls.recordProcessedBlockSlot(step.slot)
-		require.Equal(t, step.want, ls.BlockProcessingSlot(),
+		require.Equal(t, step.want, requireProcessedSlot(t, ls),
 			"replaying earlier slots must not renew the progress signal")
 	}
+}
+
+func requireProcessedSlot(t *testing.T, ls *LedgerState) uint64 {
+	t.Helper()
+	slot, processed := ls.BlockProcessingSlot()
+	require.True(
+		t,
+		processed,
+		"a successful slot-zero block must be distinguishable from no completed work",
+	)
+	return slot
 }

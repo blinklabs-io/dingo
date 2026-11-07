@@ -1447,6 +1447,7 @@ type LedgerState struct {
 	consensus              atomic.Pointer[consensusSnapshot]
 	tip                    atomic.Pointer[tipSnapshot]
 	processedBlockSlot     atomic.Uint64
+	processedBlockSeen     atomic.Bool
 	// tachysMu serializes construction of the full public leader selector.
 	// The cache is bounded to the same three-epoch window as pool snapshots
 	// and keyed by the published consensus context so rollback or state

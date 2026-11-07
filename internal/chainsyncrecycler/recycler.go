@@ -53,7 +53,7 @@ type LedgerSource interface {
 	IsAtTip() bool
 	SecurityParam() int
 	PrimaryChainTipSlot() uint64
-	BlockProcessingSlot() uint64
+	BlockProcessingSlot() (uint64, bool)
 	ReconcileLivePrimaryChainLedgerDivergence(
 		reason string,
 		connId ouroboros.ConnectionId,
@@ -284,7 +284,7 @@ func (r *Recycler) initProgressBaseline(st *tickState) {
 	r.config.Components.WithLiveComponents(func(live LiveComponents) {
 		st.lastProgressSlot = live.Ledger.Tip().Point.Slot
 		st.lastPrimaryChainTipSlot = live.Ledger.PrimaryChainTipSlot()
-		st.lastBlockProcessingSlot = live.Ledger.BlockProcessingSlot()
+		st.lastBlockProcessingSlot, st.blockProcessingSeen = live.Ledger.BlockProcessingSlot()
 	})
 	st.lastProgressAt = time.Now()
 }
@@ -347,6 +347,7 @@ type tickState struct {
 	lastProgressSlot        uint64
 	lastPrimaryChainTipSlot uint64
 	lastBlockProcessingSlot uint64
+	blockProcessingSeen     bool
 	lastProgressAt          time.Time
 }
 
@@ -462,8 +463,13 @@ func (r *Recycler) tick(
 		st.lastPrimaryChainTipSlot = primaryChainTipSlot
 		st.lastProgressAt = now
 	}
-	if slot := live.Ledger.BlockProcessingSlot(); slot > st.lastBlockProcessingSlot {
+	slot, processed := live.Ledger.BlockProcessingSlot()
+	// The signal cannot regress within one ledger. A lower slot or return to
+	// uninitialized belongs to a rebuilt ledger after live restore/truncate.
+	if processed != st.blockProcessingSeen ||
+		(processed && slot != st.lastBlockProcessingSlot) {
 		st.lastBlockProcessingSlot = slot
+		st.blockProcessingSeen = processed
 		st.lastProgressAt = now
 	}
 	// While held the local tip moves only with external batches and every
