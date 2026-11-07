@@ -869,6 +869,7 @@ func LoadWithDB(
 			Logger:            logger,
 			CardanoNodeConfig: nodeCfg,
 			Network:           cfg.Network,
+			CIP0203Enabled:    cfg.CIP0203Enabled,
 			DijkstraBlsProofDomain: cardano.DijkstraPoolBlsProofDomain(
 				nodeCfg,
 				cfg.Network,
