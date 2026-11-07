@@ -249,3 +249,21 @@ func TestRecordForkBattleParticipantsRegistersRolledBackBlocks(t *testing.T) {
 	assert.Equal(t, 1.0, got[1])
 	assert.Equal(t, 100.0, got[2])
 }
+
+func TestRecordForkBattleParticipantsRegistersMultipleRolledBackBlocks(
+	t *testing.T,
+) {
+	t.Parallel()
+	reg := prometheus.NewRegistry()
+	o := newOuroboros(OuroborosConfig{PromRegistry: reg})
+
+	o.RecordForkBattleParticipants([]models.Block{
+		{Number: 100, Slot: 1000, Hash: []byte{0x01}},
+		{Number: 100, Slot: 1002, Hash: []byte{0x02}},
+	})
+
+	idx := strconv.FormatUint(100%recentBlockDelaySlots, 10)
+	got := gatherRecentForkBattles(t, reg)[idx]
+	assert.Equal(t, 2.0, got[0])
+	assert.Equal(t, 2.0, got[1])
+}

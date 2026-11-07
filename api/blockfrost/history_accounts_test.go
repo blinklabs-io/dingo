@@ -441,3 +441,49 @@ func TestNodeAdapterAccountAggregateStopsOnCancelledContext(t *testing.T) {
 	)
 	require.Error(t, err)
 }
+
+func TestHandleAccountStakeHistory(t *testing.T) {
+	t.Parallel()
+	node := &mockNode{}
+	node.accountStakeHistory.items = []AccountStakeHistoryInfo{
+		{ActiveEpoch: 12, Amount: "700", PoolID: "pool1abc"},
+	}
+	node.accountStakeHistory.total = 1
+	recorder := get(t, node, "/api/v0/accounts/stake1abc/history?count=5&order=desc")
+	require.Equal(t, http.StatusOK, recorder.Code)
+	assert.Equal(t, "stake1abc", node.accountStakeHistory.key)
+	assert.Equal(t, 5, node.accountStakeHistory.params.Count)
+	assert.Equal(t, PaginationOrderDesc, node.accountStakeHistory.params.Order)
+	assert.JSONEq(t, `[{"active_epoch":12,"amount":"700","pool_id":"pool1abc"}]`, recorder.Body.String())
+	assert.Equal(t, "1", recorder.Header().Get("X-Pagination-Count-Total"))
+}
+
+func TestHandleAccountMIRsAndAssets(t *testing.T) {
+	t.Parallel()
+	node := &mockNode{}
+	node.accountMIRs.items = []AccountMIRInfo{{TxHash: "aa", Amount: "5"}}
+	node.accountMIRs.total = 1
+	recorder := get(t, node, "/api/v0/accounts/stake1abc/mirs")
+	require.Equal(t, http.StatusOK, recorder.Code)
+	assert.JSONEq(t, `[{"tx_hash":"aa","amount":"5"}]`, recorder.Body.String())
+
+	node.accountAssets.items = []AddressAmountInfo{{Unit: "bb01", Quantity: "9"}}
+	node.accountAssets.total = 1
+	recorder = get(t, node, "/api/v0/accounts/stake1abc/addresses/assets")
+	require.Equal(t, http.StatusOK, recorder.Code)
+	assert.JSONEq(t, `[{"unit":"bb01","quantity":"9"}]`, recorder.Body.String())
+}
+
+func TestHandleAccountAddressTotal(t *testing.T) {
+	t.Parallel()
+	node := &mockNode{}
+	node.accountTotal.value = AccountAddressTotalInfo{
+		StakeAddress: "stake1abc",
+		ReceivedSum:  []AddressAmountInfo{{Unit: "lovelace", Quantity: "10"}},
+		SentSum:      []AddressAmountInfo{{Unit: "lovelace", Quantity: "0"}},
+		TxCount:      3,
+	}
+	recorder := get(t, node, "/api/v0/accounts/stake1abc/addresses/total")
+	require.Equal(t, http.StatusOK, recorder.Code)
+	assert.JSONEq(t, `{"stake_address":"stake1abc","received_sum":[{"unit":"lovelace","quantity":"10"}],"sent_sum":[{"unit":"lovelace","quantity":"0"}],"tx_count":3}`, recorder.Body.String())
+}
