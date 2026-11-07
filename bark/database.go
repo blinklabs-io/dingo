@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -1287,6 +1288,38 @@ func (h *databaseServiceHandler) resolveCloudAfterLocalIntegrityFailure(
 	)
 }
 
+// internalSnapshotEntryPrefix starts the name of every non-snapshot entry
+// dingo keeps in the snapshot directory: the catalog database, restore and
+// verification work directories, and upload staging.
+const internalSnapshotEntryPrefix = ".dingo-"
+
+// localSnapshotExists reports whether dir is a directory that holds a
+// manifest file, without parsing it. The manifest must be a regular file: a
+// directory, symlink or special file named manifest.json does not make dir a
+// snapshot.
+func localSnapshotExists(dir string) (bool, error) {
+	info, err := os.Lstat(dir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	if !info.IsDir() {
+		return false, nil
+	}
+	manifestInfo, err := os.Lstat(
+		filepath.Join(dir, lifecycle.ManifestFileName),
+	)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	return manifestInfo.Mode().IsRegular(), nil
+}
+
 // DeleteSnapshot removes snapshotID's local copy, its cloud copy, or both
 // — whichever actually exist. A snapshot present in both places (the
 // common case, since "store at both" is the default) has both removed; a
@@ -1302,6 +1335,14 @@ func (h *databaseServiceHandler) DeleteSnapshot(
 	if err != nil {
 		return nil, err
 	}
+	// The snapshot directory also holds the catalog database and work
+	// directories, all named with this prefix. A snapshot id is never one.
+	if strings.HasPrefix(snapshotID, internalSnapshotEntryPrefix) {
+		return nil, connect.NewError(
+			connect.CodeInvalidArgument,
+			fmt.Errorf("invalid snapshot_id %q", snapshotID),
+		)
+	}
 
 	// Claims the same busy flag CreateSnapshot/Restore/Truncate/
 	// VerifySnapshot use, so this can't run concurrently with (and
@@ -1312,19 +1353,17 @@ func (h *databaseServiceHandler) DeleteSnapshot(
 	}
 	defer h.finishOperation()
 
-	// Check the directory's existence directly rather than gating on a
-	// readable manifest: a corrupted/hand-edited manifest must still be
-	// deletable, or an operator would have no way to clean up a snapshot
-	// that resolveSnapshotSource/VerifySnapshot already report as unusable.
-	localExists := true
-	if _, statErr := os.Stat(localDir); statErr != nil {
-		if !errors.Is(statErr, os.ErrNotExist) {
-			return nil, connect.NewError(
-				connect.CodeInternal,
-				fmt.Errorf("check local snapshot %q: %w", snapshotID, statErr),
-			)
-		}
-		localExists = false
+	// A local snapshot is a directory that holds a manifest file. The
+	// manifest is only checked for presence, not validity: a corrupted or
+	// hand-edited manifest must still be deletable, or an operator would
+	// have no way to clean up a snapshot that resolveSnapshotSource and
+	// VerifySnapshot already report as unusable.
+	localExists, err := localSnapshotExists(localDir)
+	if err != nil {
+		return nil, connect.NewError(
+			connect.CodeInternal,
+			fmt.Errorf("check local snapshot %q: %w", snapshotID, err),
+		)
 	}
 
 	cloudURI, cloudExists, cloudErr := h.cloudSnapshotExists(ctx, snapshotID)

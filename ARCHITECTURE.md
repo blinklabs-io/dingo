@@ -4446,12 +4446,15 @@ source take that role at runtime, without the construction-time
   writes the pending rows and the ended blocks' stake before any statement reads
   `utxo`, `utxo_pointer` or `reward_live_stake`, and the staged transaction rows
   before any statement naming `transaction` or a table with a foreign key to it.
-  Dijkstra and later eras keep the per-row path. Stored state, row ids included,
-  is the per-row path's; see `DATABASE.md`, "Trusted batch UTxO overlay". When
-  the overlay's write hits a `UNIQUE` or foreign-key conflict
-  (`types.ErrBatchUtxoOverlayConflict`) -- including one a read barrier recorded
-  but could not return, which `applyBatched` joins to its error through
-  `database.WithBatchUtxoOverlayError` -- the call logs a Warn line, counts
+  Dijkstra and later eras keep the per-row path, and so does a batch committed
+  while a pending reward stake input snapshot exists, because the overlay's
+  intra-batch deletion would advance the history floor that snapshot still
+  needs. Stored state, row ids included, is the per-row path's; see
+  `DATABASE.md`, "Trusted batch UTxO overlay". When the overlay's write hits a
+  `UNIQUE` or foreign-key conflict (`types.ErrBatchUtxoOverlayConflict`) --
+  including one a read barrier recorded but could not return, which
+  `applyBatched` joins to its error through `database.WithBatchUtxoOverlayError`
+  -- the call logs a Warn line, counts
   `dingo_ledger_trusted_batch_overlay_fallbacks_total`, and applies the blocks
   that did not commit again on the per-row path. Regression tests are in
   `ledger/trusted_batch_overlay_test.go` and
@@ -4461,7 +4464,7 @@ source take that role at runtime, without the construction-time
   loop has moved the ledger tip) rather than the stability window behind it,
   after the first batch a process commits and then once every
   `trustedBatchPruneEvery` (16) committed batches. It deletes
-  `trustedBatchPruneRows` (20,000) rows at a time until nothing prunable is left
+  `trustedBatchPruneRows` (10,000) rows at a time until nothing prunable is left
   or `trustedBatchPruneBudget` (30 s) has passed: a spent row costs less to
   delete the more rows its transaction deletes with it, so a few large deletes
   every sixteen batches cost less than one or two small ones after each. A
@@ -5535,6 +5538,19 @@ duplicate is excluded, so the final fallback receives the remaining deadline.
 Transient vote and ranking-block announcements evict the oldest transient entry
 at the 64-entry limit without displacing retained endorser-block offers.
 
+A peer may offer only an endorser block it has announced: the reference node
+disconnects a peer whose block or closure offer names an endorser block that
+peer never announced to it (`ExnLeiosBlockOfferWithoutAnnouncement`,
+`ExnLeiosClosureOfferWithoutAnnouncement`). The forger stores its endorser
+block (`BroadcastEndorserBlock`) before the announcing ranking block is built,
+self-validated and adopted, so the block and closure offers are held in
+`leiosPendingForgedOffers` and queued on leios-notify only after the
+announcing header (`EnqueueLeiosBlockAnnouncement`, from the forged-block
+observer), immediately behind it. A forged endorser block whose ranking block
+is never announced is never offered; at most eight pending ones are kept.
+Relayed endorser blocks already follow the same order, because
+`enqueueLeiosRelayOffers` waits for the announcement to verify the slot.
+
 
 Idle LeiosNotify requests observe the owning connection's shutdown channel. This
 also releases requests started before manager registration; protocol completion
@@ -5790,6 +5806,11 @@ assembling the context for the Plutus scripts a transaction actually needs
 transaction that does carry redeemers still translates its validity interval per
 redeemer language and still fails past the horizon, matching cardano-ledger's
 `TimeTranslationPastHorizon`.
+
+Dijkstra's phase-2 success cache admits only transactions with redeemers at
+some witness level. Script-free transactions still run the structural phase-2
+rule, but do not hash their resolved inputs and cost models for a cache key or
+evict cached script evaluations.
 
 `EvaluateTxDijkstra` evaluates every Plutus redeemer of a Dijkstra transaction
 through `gdijkstra.EvaluatePlutusScripts`: top-level and sub-transaction
@@ -6632,8 +6653,16 @@ pools, stake pool parameters (`GetStakePoolParams`, the parameters in effect in
 the epoch of the acquired point from the registrations added at or before it, so
 a re-registration made during that epoch is not reported until the next one),
 which returns genesis relay addresses in ledger wire order and includes an
-optional BLS key when protocol version 12 or later applies), stake pool state
-(`GetStakePoolState`, answered only on the Leios prototype network because
+optional BLS key when protocol version 12 or later applies), Leios committee
+(`GetLeiosCommittee`, gated the same way through
+`LedgerStateConfig.LeiosCommittee`, which the node sets only from the strict
+Musashi identity and backs with the vote manager's
+`CommitteeSeatsForEpoch`: seats in voter id order, each weighted by its stake
+over the total active stake and carrying the member's BLS key when one
+resolves, and none otherwise; the epoch at the acquired point is required,
+and the next epoch's committee is left out of the reply only when its stake
+snapshot has no pools yet, while any other failure fails the query), stake pool
+state (`GetStakePoolState`, answered only on the Leios prototype network because
 released nodes do not support it: `LedgerStateConfig.StakePoolStateQuery` is set
 only from the strict Musashi identity (`musashiPrototypeIdentity`), and every
 other network fails the query as unsupported. It reads the same registration
@@ -18480,8 +18509,11 @@ mirror still exists. If no cloud destination is configured, or its scheme's
 `snapshot_id` through `resolveSnapshotDir`, which rejects anything but a bare
 directory name (no `/`, no `..`) before joining it under `SnapshotDir` — a
 path-traversal guard that also covers `Restore`, which takes the same untrusted
-`snapshot_id` input over the network. `VerifySnapshot` reuses
-`lifecycle.Restore` itself, restoring into a throwaway directory under
+`snapshot_id` input over the network. `DeleteSnapshot` additionally refuses ids
+starting with `.dingo-` (the catalog database and work directories) and removes
+a local copy only when it is a directory holding a regular `manifest.json` file;
+the manifest is not parsed, so a corrupted snapshot stays deletable.
+`VerifySnapshot` reuses `lifecycle.Restore` itself, restoring into a throwaway directory under
 `SnapshotDir` (never the system temp directory, since the restore is as large as
 the snapshot) and deleting it afterward, rather than duplicating the
 manifest-checksum/consistency validation `Restore` already does. It
