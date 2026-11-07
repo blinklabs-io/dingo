@@ -21256,7 +21256,10 @@ under CIP-0163 full-pot rewards, apportioned) reward from `reward_pool_input`
 rows alone; Pass 2 splits a pool's member reward across its own delegators and
 depends on no other pool. Pass 1 runs once per precompute attempt, in a
 read-only transaction. Pass 2 runs a bounded batch of pools at a time
-(`rewardPrecomputeChunkPools`, default 100), each batch in its own write
+(`rewardPrecomputeChunkPools`, default 100), cut short at the pool that brings
+the batch to `rewardPrecomputeChunkDelegators` (5000) delegators and never
+fewer than one pool, so a run of large pools cannot hold the single write
+connection for tens of seconds. Each batch runs in its own write
 transaction that re-reads the owning `RewardSnapshot` and proceeds only if it
 still matches, no rollback generation changed since Pass 1 ran, and no epoch
 boundary has claimed the round (`rewardPrecomputeFence`, bumped under

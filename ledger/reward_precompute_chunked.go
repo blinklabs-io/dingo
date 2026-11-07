@@ -41,6 +41,34 @@ import (
 // applied to the live-stake aggregate rebuild.
 const rewardPrecomputeChunkPools = 100
 
+// rewardPrecomputeChunkDelegators bounds the delegators processed per chunk
+// transaction. The transaction holds the only write connection while it
+// writes one reward_account_output row per delegator into a table with
+// several random-keyed indexes, so a 100-pool chunk of large mainnet pools
+// held block application off for 30-45 seconds at a time.
+const rewardPrecomputeChunkDelegators = 5000
+
+// rewardPrecomputeChunkEnd returns the end of the chunk of pools starting at
+// start: at most maxPools pools, ending at the first pool that brings the
+// chunk's delegator count to maxDelegators. A chunk always takes at least one
+// pool, however many delegators it has.
+func rewardPrecomputeChunkEnd(
+	pools []*models.RewardPoolInput,
+	start int,
+	maxPools int,
+	maxDelegators uint64,
+) int {
+	end := min(start+max(1, maxPools), len(pools))
+	var delegators uint64
+	for i := start; i < end; i++ {
+		delegators += pools[i].DelegatorCount
+		if delegators >= maxDelegators {
+			return i + 1
+		}
+	}
+	return end
+}
+
 // rewardPrecomputeChunkSize returns the configured chunk size, or the
 // default. Tests set rewardPrecomputeChunkPoolsOverride to force many small
 // chunks over a small fixture pool set.
@@ -723,9 +751,11 @@ func (ls *LedgerState) stakeRewardPrecomputeChunk(ctx context.Context,
 	meta := ls.db.Metadata()
 	metaTxn := txn.Metadata()
 	var err error
-	endIndex := min(
-		startIndex+ls.rewardPrecomputeChunkSize(),
-		len(round.poolInputs),
+	endIndex := rewardPrecomputeChunkEnd(
+		round.poolInputs,
+		startIndex,
+		ls.rewardPrecomputeChunkSize(),
+		rewardPrecomputeChunkDelegators,
 	)
 	chunkPools := round.poolInputs[startIndex:endIndex]
 
