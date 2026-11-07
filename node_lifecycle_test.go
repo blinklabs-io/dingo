@@ -577,16 +577,17 @@ func TestLiveTruncateRebuildsStorageAndKeepsNodeUsable(t *testing.T) {
 	}
 }
 
-// TestLiveTruncateReinitializationPreservesDelegatorInactivityConfig
-// guards against the reconstructed ledger.LedgerStateConfig in
-// node_lifecycle.go silently dropping operator-configured fields it
-// doesn't explicitly copy from n.config -- the same class of bug
-// previously found for MinPoolMargin/PledgeLeverageEnabled/
-// PledgeLeverage/FullPotRewardsEnabled (see the comment at that
-// construction site). A node configured for CIP-0163 delegator-
-// inactivity expiry must keep that gate enabled, with its exact
-// configured window, after a live truncate rebuilds its LedgerState --
-// not silently disabled until a full process restart.
+// TestLiveTruncateReinitializationPreservesConfig guards against the
+// reconstructed ledger.LedgerStateConfig in node_lifecycle.go silently
+// dropping operator-configured fields it doesn't explicitly copy from
+// n.config -- the same class of bug previously found for
+// MinPoolMargin/PledgeLeverageEnabled/PledgeLeverage/FullPotRewardsEnabled
+// (see the comment at that construction site). A node configured for
+// CIP-0163 delegator-inactivity expiry must keep that gate enabled, with its
+// exact configured window, after a live truncate rebuilds its LedgerState
+// and snapshot manager. The Limit on Patience settings must reach the rebuilt
+// chainsync state, and the rebuilt planner statistics manager must already
+// have optimized the replacement database handle.
 func TestLiveTruncateReinitializationPreservesConfig(
 	t *testing.T,
 ) {

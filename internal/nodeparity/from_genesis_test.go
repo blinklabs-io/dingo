@@ -771,7 +771,7 @@ func TestRunProtocolParamsAndStake_ExhaustedRetriesReportsOwnErrorsSeparately(t 
 	require.NoError(t, err)
 
 	// Bounded well under this test's own timeout: protocolParamsAndStakeRetries
-	// attempts at protocolParamsAndStakeRetryDelay apart.
+	// attempts at acquireRetryDelay apart.
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	point := pcommon.NewPointOrigin()

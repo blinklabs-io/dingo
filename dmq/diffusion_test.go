@@ -178,7 +178,7 @@ func TestMempoolStaysBoundedAtMainnetSignerScale(t *testing.T) {
 	// smallest body, expiring as it goes: the pool plateaus at one TTL's
 	// worth of traffic rather than growing with time.
 	var peak int
-	for round := range 40 {
+	for round := range 60 {
 		admitted, full := publish(minBody, round)
 		require.Equal(t, signers, admitted)
 		require.Zero(t, full)
@@ -195,8 +195,9 @@ func TestMempoolStaysBoundedAtMainnetSignerScale(t *testing.T) {
 	require.Zero(t, pool.Len())
 	require.Zero(t, pool.SizeBytes())
 
-	// At the largest body the plateau is about 9.3 MB, which fits in the
-	// 12.8 MiB capacity with room to spare, so nothing is refused.
+	// At the largest body the plateau is about 12.2 MB of CBOR-encoded
+	// messages (the body plus its envelope), which fits in the 12.8 MiB
+	// capacity with a small margin, so nothing is refused.
 	var refused int
 	for round := range 30 {
 		_, full := publish(maxBody, round)

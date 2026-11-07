@@ -1232,10 +1232,10 @@ func TestEstablishBaseline_DivergentBaselineLogsDisputed(t *testing.T) {
 // expires, letting establishBaseline's retry loop observe an error and
 // try again rather than waiting on a reply that will never come.
 //
-// This test's own outer ctx (2s) is deliberately longer than
+// This test's own outer ctx (800ms) is deliberately longer than
 // cfg.FullCheckTimeout (100ms) so the two are distinguishable: with the
 // fix, each attempt is bounded by the short per-attempt timeout, so
-// several retries fit inside the 2s window. Without it (verified via a
+// several retries fit inside the 800ms window. Without it (verified via a
 // stash/apply round-trip against the pre-fix code), Check's single
 // attempt is bounded only by whichever ctx happens to reach it -- here,
 // coincidentally, this test's own outer ctx, which then also makes

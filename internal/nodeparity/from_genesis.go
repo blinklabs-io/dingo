@@ -301,12 +301,12 @@ var sessionRetryDelay = 1 * time.Second
 // attempts; no production code changes it.
 var acquireRetryDelay = 200 * time.Millisecond
 
-// protocolParamsAndStakeRetries/protocolParamsAndStakeRetryDelay bound how
-// many times runProtocolParamsAndStake redials and retries the whole
+// protocolParamsAndStakeRetries bounds how many times
+// runProtocolParamsAndStake redials and retries the whole
 // {Acquire, CheckProtocolParams, CheckStakeDistribution} sequence when the
 // shared connection dies during or between the two checks -- see that
-// function's own doc comment. Matches acquireRetries/acquireRetryDelay's
-// existing budget (2s worst case) rather than inventing a second one.
+// function's own doc comment. It reuses acquireRetries, and the same
+// acquireRetryDelay between attempts, rather than inventing a second budget.
 const protocolParamsAndStakeRetries = acquireRetries
 
 // isRetryableDingoConnErr reports whether err looks like the shared
