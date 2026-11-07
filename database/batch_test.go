@@ -99,17 +99,23 @@ func stageTxSentinel(t *testing.T, db *Database, txHash []byte) []byte {
 }
 
 var (
-	batchCandidateOnce sync.Once
-	batchCandidate     batchedCrossBlockSpendCandidate
+	batchCandidateMu    sync.Mutex
+	batchCandidateReady bool
+	batchCandidate      batchedCrossBlockSpendCandidate
 )
 
 // sharedBatchCandidate scans the immutable fixture once; the candidate is only
-// read by the tests.
+// read by the tests. The result is cached only after the scan returns: the scan
+// asserts with require, and a failed scan must not leave later tests an empty
+// candidate that cascades into unrelated failures.
 func sharedBatchCandidate(t *testing.T) batchedCrossBlockSpendCandidate {
 	t.Helper()
-	batchCandidateOnce.Do(func() {
+	batchCandidateMu.Lock()
+	defer batchCandidateMu.Unlock()
+	if !batchCandidateReady {
 		batchCandidate = findBatchedCrossBlockSpendCandidate(t)
-	})
+		batchCandidateReady = true
+	}
 	return batchCandidate
 }
 

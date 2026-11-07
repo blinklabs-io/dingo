@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"flag"
 	"os"
 	"os/exec"
 	"strings"
@@ -49,10 +50,18 @@ func isolateBlockByHashMetrics(t *testing.T) bool {
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
 	defer cancel()
+	// Keep any subtest selection the parent was run with, so a filtered run
+	// does not execute every isolated case.
+	pattern := "^" + t.Name() + "$"
+	if f := flag.Lookup("test.run"); f != nil {
+		if _, subtests, ok := strings.Cut(f.Value.String(), "/"); ok {
+			pattern += "/" + subtests
+		}
+	}
 	cmd := exec.CommandContext(
 		ctx,
 		os.Args[0],
-		"-test.run=^"+t.Name()+"$",
+		"-test.run="+pattern,
 		"-test.v",
 	)
 	cmd.Env = append(os.Environ(), marker+"="+t.Name())
