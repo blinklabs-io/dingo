@@ -486,9 +486,7 @@ func (p *PeerGovernor) createOutboundConnection(
 			}
 			oldSource := currentPeer.Source
 			oldConn := clonePeerConnection(currentPeer.Connection)
-			currentPeer.ConnectedAt = time.Now()
-			currentPeer.EverConnected = true
-			currentPeer.setConnection(conn, true)
+			currentPeer.recordOutboundConnected(conn, time.Now())
 			p.recordPeerStateChange(currentPeer.State, PeerStateWarm)
 			currentPeer.State = PeerStateWarm
 			selectionEvents := p.appendChainSelectionEventsLocked(
@@ -909,7 +907,6 @@ func (p *PeerGovernor) handleInboundConnectionEvent(evt event.Event) {
 				tmpPeer.setConnection(conn, false)
 				p.withholdDeniedUpstreamLocked(tmpPeer)
 				if tmpPeer.Connection != nil {
-					tmpPeer.Sharable = tmpPeer.Connection.VersionData.PeerSharing()
 					p.recordPeerStateChange(tmpPeer.State, PeerStateWarm)
 					tmpPeer.State = PeerStateWarm
 					p.recordInboundLifecycle("warmed")

@@ -24,7 +24,7 @@ const (
 	DefaultMemTableSize            = 134217728
 	DefaultCoreSyncMemTableSize    = 1024 * 1024 * 1024
 	DefaultValueThreshold          = 1048576
-	DefaultCoreSyncValueThreshold  = 1024
+	DefaultSyncValueThreshold      = 1024
 	DefaultCoreLeiosValueThreshold = 1024
 	DefaultCoreBlockCacheSize      = 0
 	DefaultCoreIndexCacheSize      = 0

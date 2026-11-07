@@ -36,39 +36,19 @@ func TestPeerSharingShareRequestBoundsValidPeers(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	peerGov := peergov.NewPeerGovernor(peergov.PeerGovernorConfig{
-		Logger:          logger,
-		DisableOutbound: true,
+		Logger: logger,
 	})
 	// Unsharable peers must not appear in the response.
-	require.NoError(
+	loadShareTopology(
 		t,
-		peerGov.AddPeer("10.0.0.1:3001", peergov.PeerSourceTopologyLocalRoot),
-	)
-	// Exercise validation failures in the sharing adapter: an address without
-	// host:port structure and a port outside the uint16 wire range. Keep these
-	// inputs deterministic; AddPeer resolves non-IP hosts before storing them.
-	require.NoError(
-		t,
-		peerGov.AddPeer("malformed", peergov.PeerSourceP2PGossip),
-	)
-	require.NoError(
-		t,
-		peerGov.AddPeer("44.0.0.9:70000", peergov.PeerSourceP2PGossip),
-	)
-	require.NoError(
-		t,
-		peerGov.AddPeer("44.0.0.1:3001", peergov.PeerSourceP2PGossip),
-	)
-	require.NoError(
-		t,
-		peerGov.AddPeer(
+		peerGov,
+		[]string{
+			"44.0.0.1:3001",
+			"44.0.0.9:70000", // port outside the uint16 wire range
 			"[2001:4860:4860::8888]:3002",
-			peergov.PeerSourceP2PGossip,
-		),
-	)
-	require.NoError(
-		t,
-		peerGov.AddPeer("44.0.0.2:3003", peergov.PeerSourceP2PGossip),
+			"44.0.0.2:3003",
+		},
+		[]string{"10.0.0.1:3001"},
 	)
 
 	o := newOuroboros(OuroborosConfig{Logger: logger})
@@ -164,13 +144,9 @@ func TestPeerSharingConfigRegistersShareRequestFuncOnce(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	peerGov := peergov.NewPeerGovernor(peergov.PeerGovernorConfig{
-		Logger:          logger,
-		DisableOutbound: true,
+		Logger: logger,
 	})
-	require.NoError(
-		t,
-		peerGov.AddPeer("44.0.0.1:3001", peergov.PeerSourceP2PGossip),
-	)
+	loadShareTopology(t, peerGov, []string{"44.0.0.1:3001"}, nil)
 
 	o := newOuroboros(OuroborosConfig{Logger: logger, PeerSharing: true})
 	o.peerGov = peerGov
@@ -357,8 +333,45 @@ func TestPeerSharingReplyRejectsAddressClasses(t *testing.T) {
 	}
 }
 
+// loadShareTopology installs local-root peers, advertised or not. Gossip
+// peers are not sharable until an outbound handshake succeeds, so topology
+// entries are the way to populate a sharable set without a connection.
+func loadShareTopology(
+	t *testing.T,
+	pg *peergov.PeerGovernor,
+	advertised []string,
+	hidden []string,
+) {
+	t.Helper()
+	group := func(addrs []string, advertise bool) topology.TopologyConfigP2PLocalRoot {
+		root := topology.TopologyConfigP2PLocalRoot{Advertise: advertise}
+		for _, addr := range addrs {
+			host, port, err := net.SplitHostPort(addr)
+			require.NoError(t, err)
+			portNum, err := strconv.ParseUint(port, 10, 32)
+			require.NoError(t, err)
+			root.AccessPoints = append(
+				root.AccessPoints,
+				topology.TopologyConfigP2PAccessPoint{
+					Address: host,
+					Port:    uint(portNum),
+				},
+			)
+		}
+		return root
+	}
+	cfg := &topology.TopologyConfig{}
+	if len(advertised) > 0 {
+		cfg.LocalRoots = append(cfg.LocalRoots, group(advertised, true))
+	}
+	if len(hidden) > 0 {
+		cfg.LocalRoots = append(cfg.LocalRoots, group(hidden, false))
+	}
+	pg.LoadTopologyConfig(cfg)
+}
+
 // newSaltedShareRequestFixture returns an Ouroboros whose peer governor holds
-// the given sharable gossip peers plus one unsharable local root, with an
+// the given sharable local roots plus one unsharable local root, with an
 // injected clock and salt source so rotation is deterministic.
 func newSaltedShareRequestFixture(
 	t *testing.T,
@@ -369,19 +382,9 @@ func newSaltedShareRequestFixture(
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	peerGov := peergov.NewPeerGovernor(peergov.PeerGovernorConfig{
-		Logger:          logger,
-		DisableOutbound: true,
+		Logger: logger,
 	})
-	require.NoError(
-		t,
-		peerGov.AddPeer("10.0.0.1:3001", peergov.PeerSourceTopologyLocalRoot),
-	)
-	for _, addr := range sharable {
-		require.NoError(
-			t,
-			peerGov.AddPeer(addr, peergov.PeerSourceP2PGossip),
-		)
-	}
+	loadShareTopology(t, peerGov, sharable, []string{"10.0.0.1:3001"})
 	o := newOuroboros(OuroborosConfig{Logger: logger})
 	o.peerGov = peerGov
 	o.peerShareSalt.now = func() time.Time { return *clock }
@@ -503,4 +506,47 @@ func TestPeerSharingShareRequestOnlySharablePeers(t *testing.T) {
 		}
 		clock = clock.Add(peerShareStickyTime)
 	}
+}
+
+func TestPeerSharingShareRequestSkipsUnverifiedGossipPeers(t *testing.T) {
+	t.Parallel()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	peerGov := peergov.NewPeerGovernor(peergov.PeerGovernorConfig{
+		Logger:          logger,
+		DisableOutbound: true,
+	})
+	require.NoError(
+		t,
+		peerGov.AddPeer("44.0.0.1:3001", peergov.PeerSourceP2PGossip),
+	)
+	o := newOuroboros(OuroborosConfig{Logger: logger})
+	o.peerGov = peerGov
+
+	peers, err := o.peersharingShareRequest(opeersharing.CallbackContext{}, 10)
+	require.NoError(t, err)
+	require.Empty(
+		t,
+		peers,
+		"a gossip-learned peer with no outbound connection must not be shared",
+	)
+}
+
+func TestShareCandidatesSkipsInvalidAddresses(t *testing.T) {
+	t.Parallel()
+	o := newOuroboros(OuroborosConfig{
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	got := o.shareCandidates(
+		[]peergov.Peer{
+			{Address: "malformed", NormalizedAddress: "malformed", Sharable: true},
+			{Address: "44.0.0.9:70000", Sharable: true},
+			{Address: "44.0.0.9:0", Sharable: true},
+			{Address: "10.0.0.1:3001", Sharable: true},
+			{Address: "44.0.0.3:3001", Sharable: false},
+			{Address: "44.0.0.4:3001", Sharable: true},
+		},
+		[16]byte{1},
+	)
+	require.Len(t, got, 1)
+	require.Equal(t, "44.0.0.4:3001", got[0].key)
 }

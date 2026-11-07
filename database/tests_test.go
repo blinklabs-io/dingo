@@ -2228,6 +2228,8 @@ func TestPhase1ConcurrentFirstOpenOneWinnerOneMismatch(t *testing.T) {
 	t.Parallel()
 
 	for i := range 5 {
+		// Not t.Parallel: each iteration races two openers, and running the
+		// iterations together starves them into mutual failures under load.
 		t.Run(fmt.Sprintf("iteration_%d", i), func(t *testing.T) {
 			metaDir := t.TempDir()
 			blobDirA := t.TempDir()
@@ -3199,6 +3201,7 @@ func TestSetTransactionZeroProducedOutputsLogging(t *testing.T) {
 	}
 
 	t.Run("zero-output transaction does not warn", func(t *testing.T) {
+		t.Parallel()
 		var logs bytes.Buffer
 		db := newStagedDB(t, &logs)
 		out := setTx(
@@ -3209,6 +3212,7 @@ func TestSetTransactionZeroProducedOutputsLogging(t *testing.T) {
 	})
 
 	t.Run("transaction with outputs does not warn", func(t *testing.T) {
+		t.Parallel()
 		var logs bytes.Buffer
 		db := newStagedDB(t, &logs)
 		out := setTx(t, db, &logs, candidate.consumerTx)
@@ -3216,6 +3220,7 @@ func TestSetTransactionZeroProducedOutputsLogging(t *testing.T) {
 	})
 
 	t.Run("dropped outputs warn", func(t *testing.T) {
+		t.Parallel()
 		var logs bytes.Buffer
 		db := newStagedDB(t, &logs)
 		out := setTx(
@@ -3239,6 +3244,7 @@ func TestSetTransactionZeroProducedOutputsLogging(t *testing.T) {
 	t.Run(
 		"invalid transaction without collateral return does not warn",
 		func(t *testing.T) {
+			t.Parallel()
 			var logs bytes.Buffer
 			db := newStagedDB(t, &logs)
 			out := setTx(
@@ -3250,6 +3256,7 @@ func TestSetTransactionZeroProducedOutputsLogging(t *testing.T) {
 	)
 
 	t.Run("dropped collateral return warns", func(t *testing.T) {
+		t.Parallel()
 		const collateralLovelace = 1_000_000
 		collateralReturn, err := mockledger.NewTransactionOutputBuilder().
 			WithAddress(collateralReturnAddress).
@@ -3284,6 +3291,7 @@ func TestSetTransactionZeroProducedOutputsLogging(t *testing.T) {
 	t.Run(
 		"invalid transaction keeping its collateral return does not warn",
 		func(t *testing.T) {
+			t.Parallel()
 			collateralReturn, err := mockledger.NewTransactionOutputBuilder().
 				WithAddress(collateralReturnAddress).
 				WithLovelace(1_000_000).
