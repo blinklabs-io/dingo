@@ -977,21 +977,21 @@ func (b *Backfill) Run(ctx context.Context) error {
 			return err
 		}
 		txn := b.db.BlobTxn(false)
+		index := *cp.LastIndexID
 		var point ocommon.Point
-		var index uint64
 		if err := txn.Do(func(txn *database.Txn) error {
 			var identityErr error
-			point, index, identityErr = database.CanonicalBlockIdentityAtSlotTxn(
-				ctx, txn, cp.LastSlot,
+			point, identityErr = database.CanonicalBlockIdentityAtIndexTxn(
+				ctx, txn, index,
 			)
 			return identityErr
 		}); err != nil {
 			return fmt.Errorf(
-				"resolving backfill checkpoint identity at slot %d: %w",
-				cp.LastSlot, err,
+				"resolving backfill checkpoint identity at index %d: %w",
+				index, err,
 			)
 		}
-		if index != *cp.LastIndexID ||
+		if point.Slot != cp.LastSlot ||
 			!bytes.Equal(point.Hash, cp.LastBlockHash) {
 			return fmt.Errorf(
 				"backfill checkpoint identity at slot %d does not match canonical block",

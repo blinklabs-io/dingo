@@ -4757,19 +4757,20 @@ Pruning content preserves membership when the exact metadata/index pair stays
 canonical. Ephemeral and in-memory chains retain their own index checks.
 
 Historical API metadata backfill also traverses the active `bi` index rather
-than discovering blocks from the `bp` body-key namespace. Empty slots require
-no special handling, and sparse imported index IDs are valid. The canonical
-index is treated as quiescent for one backfill run. Every indexed point in the
-replay range must resolve to a block body whose metadata ID matches the index
-key. A missing body, an expired-history tombstone, or a mismatched index stops
-backfill before later blocks are applied; the current transaction is rolled
-back and the checkpoint remains at the last committed block. Index keys are
-listed in bounded batches, while their fixed-size values are read one at a time
-with the block-key size as the read cap. A cancelled or oversized remote read
-therefore cannot be amplified across a whole batch. On resume, the persisted
-slot, index ID, and block hash must name one exact self-consistent canonical
-point. A legacy incomplete checkpoint without that identity restarts from the
-first index entry.
+than discovering blocks from the `bp` body-key namespace. Empty slots require no
+special handling, and sparse imported index IDs are valid. The canonical index
+is treated as quiescent for one backfill run. Every indexed point in the replay
+range must resolve to a block body whose metadata ID matches the index key. A
+missing body, an expired-history tombstone, or a mismatched index stops backfill
+before later blocks are applied; the current transaction is rolled back and the
+checkpoint remains at the last committed block. Index keys are listed in bounded
+batches, while their fixed-size values are read one at a time with the block-key
+size as the read cap. A cancelled or oversized remote read therefore cannot be
+amplified across a whole batch. On resume, the checkpoint is resolved by its
+persisted index ID, because a slot can hold both a Byron epoch boundary block
+and the block after it; the block that index maps to must carry the same index
+ID in its metadata and match the persisted slot and block hash. A legacy
+incomplete checkpoint without that identity restarts from the first index entry.
 
 Canonical index slots must increase strictly through index EOF, with one
 exception: a Byron epoch boundary block shares its slot with the block after it,
