@@ -735,3 +735,102 @@ func TestLedgerCertificateCallbackReadsVoteManagerSafely(t *testing.T) {
 	assert.NotContains(t, fmt.Sprint(err), "vote manager is unavailable",
 		"the callback must see the installed vote manager")
 }
+
+func TestLeiosDefaultTimingAcceptsSubsecondCertificate(t *testing.T) {
+	t.Parallel()
+	cfg := newNodeTestCardanoNodeCfg(t)
+	cfg.ShelleyGenesis().SlotLength = lcommon.NewGenesisRat(1, 2)
+	n := &Node{config: NewConfig(WithCardanoNodeConfig(cfg))}
+	bus := event.NewEventBus(nil, nil)
+	defer bus.Stop()
+	mgr, err := leios.NewPipelineManager(leios.PipelineManagerConfig{
+		EventBus: bus, SlotProvider: occurrencePipelineClock{},
+		EpochProvider: startupLeiosEpochProvider{}, Timing: n.leiosPipelineTiming(),
+	})
+	require.NoError(t, err)
+	require.NoError(t, mgr.Start(t.Context()))
+	defer func() { require.NoError(t, mgr.Stop()) }()
+	// The clock is at slot 101: this certificate arrives after 15 seconds,
+	// within the default 20-second certification deadline.
+	const announcingSlot uint64 = 71
+	hash := lcommon.NewBlake2b256([]byte("subsecond-certificate"))
+	mgr.ObserveEndorserBlock(announcingSlot, hash)
+	bus.Publish(leios.EbQuorumEventType, event.NewEvent(
+		leios.EbQuorumEventType,
+		leios.EbQuorumEvent{
+			SlotNo: announcingSlot, Epoch: 5, EndorserBlockHash: hash,
+			Certificate: &lcommon.LeiosEbCertificate{},
+		},
+	))
+	adapter := &leiosPipelineAdapter{mgr: mgr}
+	testutil.WaitForCondition(t, func() bool {
+		eligible := adapter.EligibleCertifiedEndorserBlocks()
+		return len(eligible) == 1 && eligible[0].SlotNo == announcingSlot
+	}, 2*time.Second, "certificate expired within its default wall-clock window")
+}
+
+func TestLeiosDefaultTimingPreservesWallClockWindows(t *testing.T) {
+	t.Parallel()
+	for _, slot := range []struct{ numerator, denominator int64 }{{1, 1}, {1, 2}, {1, 5}, {3, 2}} {
+		t.Run(
+			fmt.Sprintf("%d/%d", slot.numerator, slot.denominator),
+			func(t *testing.T) {
+				cfg := newNodeTestCardanoNodeCfg(t)
+				cfg.ShelleyGenesis().SlotLength = lcommon.NewGenesisRat(
+					slot.numerator,
+					slot.denominator,
+				)
+				n := &Node{config: NewConfig(WithCardanoNodeConfig(cfg))}
+				timing, defaults := n.leiosPipelineTiming(), leios.DefaultPipelineTiming()
+				require.NoError(t, timing.Validate())
+				for _, windows := range [][2]uint64{
+					{timing.ProduceWindowSlots, defaults.ProduceWindowSlots},
+					{timing.DiffuseWindowSlots, defaults.DiffuseWindowSlots},
+					{timing.VoteWindowSlots, defaults.VoteWindowSlots},
+					{timing.CertifyByDeadlineSlots, defaults.CertifyByDeadlineSlots},
+					{timing.RbInclusionWindowSlots, defaults.RbInclusionWindowSlots},
+					{timing.InstanceTTLSlots, defaults.InstanceTTLSlots},
+				} {
+					actual := new(
+						big.Rat,
+					).Mul(new(big.Rat).SetUint64(windows[0]), cfg.ShelleyGenesis().SlotLength.Rat)
+					minimum := new(big.Rat).SetUint64(windows[1])
+					require.GreaterOrEqual(
+						t,
+						actual.Cmp(minimum),
+						0,
+						"default window must not expire early",
+					)
+					prior := new(
+						big.Rat,
+					).Sub(actual, cfg.ShelleyGenesis().SlotLength.Rat)
+					require.Less(
+						t,
+						prior.Cmp(minimum),
+						0,
+						"round up by at most one slot",
+					)
+				}
+			},
+		)
+	}
+}
+
+func TestLeiosTimingOverrideRetainsSlotCounts(t *testing.T) {
+	t.Parallel()
+	cfg := newNodeTestCardanoNodeCfg(t)
+	cfg.ShelleyGenesis().SlotLength = lcommon.NewGenesisRat(1, 2)
+	explicit := leios.DefaultPipelineTiming()
+	n := &Node{
+		config: NewConfig(
+			WithCardanoNodeConfig(cfg),
+			WithLeiosPipelineTiming(explicit),
+		),
+	}
+	require.Equal(t, explicit, n.leiosPipelineTiming())
+	missing := &Node{config: NewConfig()}
+	require.Equal(t, explicit, missing.leiosPipelineTiming())
+	cfg.ShelleyGenesis().SlotLength = lcommon.GenesisRat{}
+	n = &Node{config: NewConfig(WithCardanoNodeConfig(cfg))}
+	require.Equal(t, explicit, n.leiosPipelineTiming())
+}

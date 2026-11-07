@@ -152,3 +152,54 @@ func TestValidateCheckpointMismatch(t *testing.T) {
 	require.Equal(t, "aabbcc", cpErr.Expected)
 	require.Equal(t, "ddeeff", cpErr.Actual)
 }
+
+func TestValidateHeaderCheckpointRealHeaderMatch(t *testing.T) {
+	t.Parallel()
+
+	header := loadFirstImmutableBlock(t).Header()
+	ls := &LedgerState{
+		checkpoints: map[uint64]string{
+			header.BlockNumber(): header.Hash().String(),
+		},
+	}
+	require.NoError(t, ls.ValidateHeaderCheckpoint(header))
+}
+
+func TestValidateHeaderCheckpointRealHeaderMismatch(t *testing.T) {
+	t.Parallel()
+
+	header := loadFirstImmutableBlock(t).Header()
+	const wrong = "0000000000000000000000000000000000000000000000000000000000000000"
+	ls := &LedgerState{
+		checkpoints: map[uint64]string{header.BlockNumber(): wrong},
+	}
+	err := ls.ValidateHeaderCheckpoint(header)
+	var cpErr *CheckpointMismatchError
+	require.ErrorAs(t, err, &cpErr)
+	require.Equal(t, header.BlockNumber(), cpErr.BlockNo)
+	require.Equal(t, wrong, cpErr.Expected)
+	require.Equal(t, header.Hash().String(), cpErr.Actual)
+}
+
+func TestValidateHeaderCheckpointUncheckpointedHeightAccepted(t *testing.T) {
+	t.Parallel()
+
+	header := loadFirstImmutableBlock(t).Header()
+	ls := &LedgerState{
+		checkpoints: map[uint64]string{header.BlockNumber() + 1: "deadbeef"},
+	}
+	require.NoError(t, ls.ValidateHeaderCheckpoint(header))
+	require.NoError(t, (&LedgerState{}).ValidateHeaderCheckpoint(header))
+}
+
+func TestValidateHeaderCheckpointSkipsByronEbbHeader(t *testing.T) {
+	t.Parallel()
+
+	// The EBB skip precedes any header method call, so a zero-value header
+	// suffices.
+	ls := &LedgerState{checkpoints: map[uint64]string{0: "deadbeef"}}
+	require.NoError(
+		t,
+		ls.ValidateHeaderCheckpoint(&byron.ByronEpochBoundaryBlockHeader{}),
+	)
+}

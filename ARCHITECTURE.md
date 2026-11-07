@@ -590,6 +590,7 @@ sequenceDiagram
 
     Note over Peer,DB: Stage 1 — Header Discovery (ChainSync)
     Peer->>OB: RollForward(header, tip)
+    OB->>OB: reject a header whose hash differs from a configured checkpoint, and recycle the connection
     OB->>OB: strictly verify header crypto against current ledger generation
     Note over OB: If verification is deferred, forward a header extending the local chain, unverified; for any other, wait for the next ledger publication and verify again, bounded, and if still deferred withhold it from peer selection and ledger state
     OB->>LS: await bounded header capacity
@@ -4430,12 +4431,15 @@ source take that role at runtime, without the construction-time
   writes the pending rows and the ended blocks' stake before any statement reads
   `utxo`, `utxo_pointer` or `reward_live_stake`, and the staged transaction rows
   before any statement naming `transaction` or a table with a foreign key to it.
-  Dijkstra and later eras keep the per-row path. Stored state, row ids included,
-  is the per-row path's; see `DATABASE.md`, "Trusted batch UTxO overlay". When
-  the overlay's write hits a `UNIQUE` or foreign-key conflict
-  (`types.ErrBatchUtxoOverlayConflict`) -- including one a read barrier recorded
-  but could not return, which `applyBatched` joins to its error through
-  `database.WithBatchUtxoOverlayError` -- the call logs a Warn line, counts
+  Dijkstra and later eras keep the per-row path, and so does a batch committed
+  while a pending reward stake input snapshot exists, because the overlay's
+  intra-batch deletion would advance the history floor that snapshot still
+  needs. Stored state, row ids included, is the per-row path's; see
+  `DATABASE.md`, "Trusted batch UTxO overlay". When the overlay's write hits a
+  `UNIQUE` or foreign-key conflict (`types.ErrBatchUtxoOverlayConflict`) --
+  including one a read barrier recorded but could not return, which
+  `applyBatched` joins to its error through `database.WithBatchUtxoOverlayError`
+  -- the call logs a Warn line, counts
   `dingo_ledger_trusted_batch_overlay_fallbacks_total`, and applies the blocks
   that did not commit again on the per-row path. Regression tests are in
   `ledger/trusted_batch_overlay_test.go` and
@@ -4445,7 +4449,7 @@ source take that role at runtime, without the construction-time
   loop has moved the ledger tip) rather than the stability window behind it,
   after the first batch a process commits and then once every
   `trustedBatchPruneEvery` (16) committed batches. It deletes
-  `trustedBatchPruneRows` (20,000) rows at a time until nothing prunable is left
+  `trustedBatchPruneRows` (10,000) rows at a time until nothing prunable is left
   or `trustedBatchPruneBudget` (30 s) has passed: a spent row costs less to
   delete the more rows its transaction deletes with it, so a few large deletes
   every sixteen batches cost less than one or two small ones after each. A
@@ -5519,6 +5523,19 @@ duplicate is excluded, so the final fallback receives the remaining deadline.
 Transient vote and ranking-block announcements evict the oldest transient entry
 at the 64-entry limit without displacing retained endorser-block offers.
 
+A peer may offer only an endorser block it has announced: the reference node
+disconnects a peer whose block or closure offer names an endorser block that
+peer never announced to it (`ExnLeiosBlockOfferWithoutAnnouncement`,
+`ExnLeiosClosureOfferWithoutAnnouncement`). The forger stores its endorser
+block (`BroadcastEndorserBlock`) before the announcing ranking block is built,
+self-validated and adopted, so the block and closure offers are held in
+`leiosPendingForgedOffers` and queued on leios-notify only after the
+announcing header (`EnqueueLeiosBlockAnnouncement`, from the forged-block
+observer), immediately behind it. A forged endorser block whose ranking block
+is never announced is never offered; at most eight pending ones are kept.
+Relayed endorser blocks already follow the same order, because
+`enqueueLeiosRelayOffers` waits for the announcement to verify the slot.
+
 
 Idle LeiosNotify requests observe the owning connection's shutdown channel. This
 also releases requests started before manager registration; protocol completion
@@ -5774,6 +5791,11 @@ assembling the context for the Plutus scripts a transaction actually needs
 transaction that does carry redeemers still translates its validity interval per
 redeemer language and still fails past the horizon, matching cardano-ledger's
 `TimeTranslationPastHorizon`.
+
+Dijkstra's phase-2 success cache admits only transactions with redeemers at
+some witness level. Script-free transactions still run the structural phase-2
+rule, but do not hash their resolved inputs and cost models for a cache key or
+evict cached script evaluations.
 
 `EvaluateTxDijkstra` evaluates every Plutus redeemer of a Dijkstra transaction
 through `gdijkstra.EvaluatePlutusScripts`: top-level and sub-transaction
@@ -6616,8 +6638,16 @@ pools, stake pool parameters (`GetStakePoolParams`, the parameters in effect in
 the epoch of the acquired point from the registrations added at or before it, so
 a re-registration made during that epoch is not reported until the next one),
 which returns genesis relay addresses in ledger wire order and includes an
-optional BLS key when protocol version 12 or later applies), stake pool state
-(`GetStakePoolState`, answered only on the Leios prototype network because
+optional BLS key when protocol version 12 or later applies), Leios committee
+(`GetLeiosCommittee`, gated the same way through
+`LedgerStateConfig.LeiosCommittee`, which the node sets only from the strict
+Musashi identity and backs with the vote manager's
+`CommitteeSeatsForEpoch`: seats in voter id order, each weighted by its stake
+over the total active stake and carrying the member's BLS key when one
+resolves, and none otherwise; the epoch at the acquired point is required,
+and the next epoch's committee is left out of the reply only when its stake
+snapshot has no pools yet, while any other failure fails the query), stake pool
+state (`GetStakePoolState`, answered only on the Leios prototype network because
 released nodes do not support it: `LedgerStateConfig.StakePoolStateQuery` is set
 only from the strict Musashi identity (`musashiPrototypeIdentity`), and every
 other network fails the query as unsupported. It reads the same registration
@@ -9045,6 +9075,22 @@ corroborates that peer's advertised tip; they see no target while no client is
 active or while corroboration is incomplete.
 
 #### Header Verification Handoff
+
+Every peer header, ingress or observer, enters through the chainsync roll-forward
+callback, and that callback first applies the configured chain checkpoints
+(`LedgerState.ValidateHeaderCheckpoint`). A header at a checkpointed block
+number whose hash differs is refused with `*ledger.CheckpointMismatchError`
+before it is recorded as observed history, reaches the chain selector, or
+enters the ledger header queue; the delivering connection is recycled the same
+way as a header-crypto failure. Candidate chains, the selector, and the
+rollback gate only see headers that passed this callback, so they carry no
+separate checkpoint check, and block apply still enforces the same rule on the
+fetched block. The check does not depend on validation mode or Mithril coverage.
+Byron epoch boundary headers share the preceding block's number and are
+skipped; the hash is computed only at a checkpointed height. A peer's
+advertised tip is not a header and is not checked until its header arrives.
+Networks whose configuration ships no `CheckpointsFile` (preprod, devnet, as in
+upstream `cardano-node`) enforce nothing here.
 
 When full-block header verification needs an epoch nonce that is not cached yet,
 blockfetch first flushes already-received predecessor blocks from the pending
@@ -12157,8 +12203,12 @@ votes:
   captured key whose proof fails `VerifyLeiosKeyProofOfPossession`. A post-SNAP
   registration or rotation therefore cannot change an already-selected
   committee. A member without a captured usable key is a keyless committee seat:
-  membership and stake still count, but its vote can never be verified or
-  aggregated into a certificate. There is no more derivation fallback — that
+  membership and stake still count, but a peer vote for that seat cannot be
+  verified, so it is dropped (`no_key` rejection) rather than stored, tallied or
+  relayed, and is not counted toward the per-connection invalid-vote limit. The
+  dropped `(slot, voter)` id is remembered for the vote TTL (bounded by the
+  record cap) so repeated copies are discarded before spending the shared
+  verification budget. There is no more derivation fallback — that
   insecure shortcut (deriving a key from the pool's cold-key hash) was removed
   upstream in `prototype-2026w32` and here in the same change.
 - Full votes and resolved prototype votes use the shared bounded one-minute
@@ -12176,15 +12226,17 @@ votes:
   limit. Repeated vote ids coalesce while their first check is in flight, before
   committee lookup and signature verification can be repeated.
 - **Stake quorum and certificates**: per endorser block and signing context, the
-  manager tracks observed stake (all membership-valid votes) and verified stake
-  (signature-verified votes). When verified stake reaches
+  manager tracks observed stake (all admitted votes) and verified stake
+  (signature-verified votes); a peer vote is admitted only after its signature
+  verifies, so the two match for peer votes. When verified stake reaches
   `LeiosQuorumStakeThreshold` (tau) of *total active stake* (exact rational
   arithmetic, never a head count), it builds a `LeiosEbCertificate` — signers
   bitfield over the committee plus one aggregated BLS12-381 MinSig signature —
   from verified votes only, and publishes `leios.eb_quorum` with the announcing
   ranking-block hash that every prototype vote signed. Certificate validation
-  reports `sigChecked bool`; false means quorum passed but one or more signer
-  keys were unavailable, so production callers must reject that result. The
+  (`ValidateEbCertificate`, `ValidatePrototypeEbCertificate`) fails with
+  `ErrUnknownSignerKey` when any signer's key is unavailable, so a stake quorum
+  alone never validates. The
   pipeline preserves signing context, and the forge loop only adapts the
   certificate to the prototype's in-body `DijkstraLeiosCertificate` shape when
   its announcing RB is the actual parent CertRB.
@@ -12370,8 +12422,12 @@ only channel between them is the `leios.eb_quorum` event.
   observed) by the single `stageFor` function. The per-phase window lengths live
   in one provisional `PipelineTiming` struct (off-chain, overridable via
   `WithLeiosPipelineTiming`) because CIP-0164 has not finalized them; they are
-  not protocol parameters. Window decisions are slot-driven via
-  `SlotProvider.CurrentOrTipSlot` (the `SlotClock` is private to `LedgerState`).
+  not protocol parameters. Node composition converts the one-second reference
+  defaults to the Shelley genesis slot duration, rounding up to whole slots;
+  explicit timing overrides keep their supplied slot counts. The vote manager
+  and endorser-transaction tail fetch use that same converted timing. Window
+  decisions are slot-driven via `SlotProvider.CurrentOrTipSlot` (the `SlotClock`
+  is private to `LedgerState`).
   These pipeline stages and `CertifyByDeadlineSlots` continue to bound relayed
   vote acceptance; local vote emission separately uses the on-chain wall-clock
   voting periods required by CIP-164. Each EB's current stage is surfaced via
@@ -13010,7 +13066,7 @@ a boundary that has already been crossed.
 
 That is a statement about who can attempt the write, not about whether it would
 be read, and the two are worth keeping apart: the layers above do not rely on
-it. An immutable entry up to 16 MiB is read once into a buffer; later in-place
+it. An immutable entry up to 128 MiB is read once into a buffer; later in-place
 writes cannot change the bytes its parsers walk.
 
 That is the shape of the gap on both sides. `checkImmutableTrio` hashes each
@@ -13025,7 +13081,7 @@ reader keeps:
 
 | tree | what travels | where it is re-checked |
 |---|---|---|
-| immutable (v2) | `BootstrapResult.ImmutableDigests`, the certified digest list the certificate's merkle root covers | `immutable.NewFromRootVerified` reads entries up to 16 MiB once, hashes the buffer, and gives that buffer to the chunk and index parsers; larger entries use a streaming verification pass, then are read and hashed into a buffer sized to the certified length |
+| immutable (v2) | `BootstrapResult.ImmutableDigests`, the certified digest list the certificate's merkle root covers | `immutable.NewFromRootVerified` reads entries up to 128 MiB once, hashes the buffer, and gives that buffer to the chunk and index parsers; larger entries use a streaming verification pass, then are read and hashed into a buffer sized to the certified length |
 | ancillary state (v2, verified) | `BootstrapResult.AncillaryDigests`, the signed manifest's map | the state is read once into a buffer; `verifySignedState` hashes that buffer and `ParseSnapshotBytes` parses the same one |
 | ancillary table (v2, verified) | the manifest's entry for it, carried down as `ImportConfig.State.UTxOTableDigest` | the table is gigabytes and is mapped rather than read, so the digest is checked against the mapped bytes the decoder then walks |
 
@@ -13038,7 +13094,7 @@ otherwise rest on a check nothing downstream can repeat.
 
 Note what none of these rows do: hash a descriptor and hand the parser that same
 descriptor. Rewinding does not detach it from its inode, so a writer can change
-the bytes the parser reads after the hash. Immutable entries up to 16 MiB use
+the bytes the parser reads after the hash. Immutable entries up to 128 MiB use
 one bounded read for both hash and parse. Larger entries retain the streaming
 size and digest check before reading the certified length into a buffer; that
 buffer is hashed before parsing. The ancillary state uses one buffer, and the
@@ -13047,16 +13103,23 @@ UTxO-HD table is verified and parsed through the same mapping.
 For the ImmutableDB that means the reader takes bytes rather than a file:
 `entryReader` (`database/immutable/entry.go`) is what the chunk and index
 parsers read through, and a verified open supplies a `bytesEntry` over the
-buffer it hashed. Entries up to 16 MiB use one read for verification and
+buffer it hashed. Entries up to 128 MiB use one read for verification and
 parsing. Larger entries keep the streaming verification pass before buffering;
 an ordinary local open still supplies a `fileEntry` over the descriptor, so a
 node reading its own ImmutableDB streams chunks from disk.
 
-The single-pass path holds at most 16 MiB for one entry. The larger-entry
-fallback keeps the certified-size allocation bound used by the previous
-verified reader.
+The single-pass path holds at most 128 MiB for one entry, and that bound is what
+a planted file can cost: the buffer is sized from the file's own reported
+length, capped at the bound, before the digest is known. 128 MiB covers every
+real mainnet chunk (21600 slots of full blocks at the 0.05 active slot
+coefficient is about 94 MiB; the largest certified mainnet chunk is about 91
+MiB), so the verified copy reads and hashes each chunk once instead of streaming
+it for its digest and then reading it again. A file that holds more than its
+reported length is not cut to a prefix; it falls through to the larger-entry
+path. That fallback keeps the certified-size allocation bound used by the
+previous verified reader.
 
-For entries above 16 MiB, the first pass is why the next allocation is safe.
+For entries above 128 MiB, the first pass is why the next allocation is safe.
 How large a file is, is whoever wrote it's choice; how large the *certified*
 file is, is not, because SHA-256 preimage resistance stands between the two.
 The streaming pass holds nothing and returns a size only for an entry whose
@@ -18476,8 +18539,11 @@ mirror still exists. If no cloud destination is configured, or its scheme's
 `snapshot_id` through `resolveSnapshotDir`, which rejects anything but a bare
 directory name (no `/`, no `..`) before joining it under `SnapshotDir` — a
 path-traversal guard that also covers `Restore`, which takes the same untrusted
-`snapshot_id` input over the network. `VerifySnapshot` reuses
-`lifecycle.Restore` itself, restoring into a throwaway directory under
+`snapshot_id` input over the network. `DeleteSnapshot` additionally refuses ids
+starting with `.dingo-` (the catalog database and work directories) and removes
+a local copy only when it is a directory holding a regular `manifest.json` file;
+the manifest is not parsed, so a corrupted snapshot stays deletable.
+`VerifySnapshot` reuses `lifecycle.Restore` itself, restoring into a throwaway directory under
 `SnapshotDir` (never the system temp directory, since the restore is as large as
 the snapshot) and deleting it afterward, rather than duplicating the
 manifest-checksum/consistency validation `Restore` already does. It
