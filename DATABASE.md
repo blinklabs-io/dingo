@@ -6916,6 +6916,8 @@ arbitrary-precision `dingo_bigint_sum` aggregate the SQLite provider registers
 integer-overflow error and `TOTAL` is a float). The result is read back as a
 decimal string. The sums run on the caller's transaction, so cancelling its
 context cancels the statements.
+The SQLite callbacks consume transient driver arguments before returning and
+retain only parsed numeric limbs, avoiding per-row text and blob copies.
 
 ```sql
 -- withdrawals_sum
