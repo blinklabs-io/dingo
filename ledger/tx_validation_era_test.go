@@ -61,3 +61,34 @@ func TestValidateTxRejectsPreviousEra(t *testing.T) {
 	require.Equal(t, "Babbage", mismatch.OtherEra.Name)
 	require.Equal(t, "Conway", mismatch.LedgerEra.Name)
 }
+
+func TestEvaluateTxRejectsPreviousEra(t *testing.T) {
+	t.Parallel()
+
+	previous := eraDesc(t, eras.Eras, babbage.EraIdBabbage)
+	current := eraDesc(t, eras.Eras, conway.EraIdConway)
+	previous.EvaluateTxFunc = nil
+	current.EvaluateTxFunc = nil
+	ls := &LedgerState{
+		activeEras: []eras.EraDesc{previous, current},
+		currentEra: current,
+		slotClock: NewSlotClock(
+			newMockSlotTimeProvider(time.Now(), time.Second, 100),
+			DefaultSlotClockConfig(),
+		),
+	}
+	ls.publishSnapshotsLocked()
+
+	currentTx := mockledger.NewTransactionBuilder().
+		WithType(int(conway.EraIdConway))
+	_, _, _, err := ls.EvaluateTx(currentTx)
+	require.NoError(t, err, "current-era transaction")
+
+	previousTx := mockledger.NewTransactionBuilder().
+		WithType(int(babbage.EraIdBabbage))
+	_, _, _, err = ls.EvaluateTx(previousTx)
+	var mismatch *gledger.EraMismatch
+	require.ErrorAs(t, err, &mismatch)
+	require.Equal(t, "Babbage", mismatch.OtherEra.Name)
+	require.Equal(t, "Conway", mismatch.LedgerEra.Name)
+}
