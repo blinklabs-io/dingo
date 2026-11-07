@@ -202,8 +202,9 @@ type protocolParametersDoc struct {
 	MaxExecutionUnitsPerTransaction exUnitsDoc `json:"max_execution_units_per_transaction"`
 	MaxExecutionUnitsPerBlock       exUnitsDoc `json:"max_execution_units_per_block"`
 	MaxValueSize                    uint       `json:"max_value_size"`
-	// Conway fixes the per-transaction reference-script limit, so Dingo parses
-	// but does not apply this value.
+	// Conway fixes the production per-transaction reference-script limit. The
+	// conformance adapter applies this fixture override without changing Dingo's
+	// production protocol parameters.
 	MaxReferenceScriptsSize   *uint64 `json:"max_reference_scripts_size"`
 	CollateralPercentage      uint    `json:"collateral_percentage"`
 	MaxCollateralInputs       uint    `json:"max_collateral_inputs"`
@@ -467,12 +468,18 @@ func runFixture(
 		provider,
 		pp,
 	)
-	validationErr = applyFixtureReferenceScriptLimit(
+	validationErr, err = applyFixtureReferenceScriptLimit(
 		tx,
 		provider,
 		protocolParameters.MaxReferenceScriptsSize,
 		validationErr,
 	)
+	if err != nil {
+		return CaseOutcome{}, nil, fmt.Errorf(
+			"apply fixture reference-script limit: %w",
+			err,
+		)
+	}
 	if predicate := unregisteredDelegationPredicate(tx, provider, validationErr); validationErr != nil &&
 		predicate != "" {
 		outcome := CaseOutcome{ID: id, Result: predicate}
@@ -510,21 +517,21 @@ func applyFixtureReferenceScriptLimit(
 	state common.LedgerState,
 	limit *uint64,
 	validationErr error,
-) error {
+) (error, error) {
 	if validationErr != nil || limit == nil || !tx.IsValid() {
-		return validationErr
+		return validationErr, nil
 	}
 	size, err := common.ConsumedReferenceScriptSize(tx, state)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if size > *limit {
 		return common.RefScriptSizePerTxTooLargeError{
 			TxSize:  size,
 			MaxSize: *limit,
-		}
+		}, nil
 	}
-	return nil
+	return nil, nil
 }
 
 // The ledger uses one error type for pool and vote delegation by an

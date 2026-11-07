@@ -339,6 +339,40 @@ func TestValidateTxDijkstraScopesSemanticRulesToDeclaredValidity(t *testing.T) {
 	}
 }
 
+func TestValidateTxDijkstraChecksReferenceScriptSizeWhenDeclaredInvalid(
+	t *testing.T,
+) {
+	t.Parallel()
+	tx, state, params := newDijkstraScopingTx(
+		t,
+		false,
+		func(*gdijkstra.DijkstraTransactionBody) {},
+	)
+	referenceInput := shelley.MustNewShelleyTransactionInput(
+		"f228b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee88",
+		0,
+	)
+	scopingState := state.(*dijkstraScopingState)
+	scopingState.mockLedgerState.addUtxo(
+		referenceInput,
+		testAddressScriptOutput{
+			testOutput: newTestOutput(1_000_000),
+			addr:       newTestKeyAddress(t),
+			scriptRef:  lcommon.PlutusV3Script{0x01, 0x02},
+		},
+	)
+	tx.Body.TxReferenceInputs = cbor.NewSetType(
+		[]shelley.ShelleyTransactionInput{referenceInput},
+		false,
+	)
+	params.MaxRefScriptSizePerTx = 1
+	refreshDijkstraTransactionBodyAndSignature(t, tx)
+
+	err := ValidateTxDijkstra(tx, 0, state, params)
+	var limitErr lcommon.RefScriptSizePerTxTooLargeError
+	require.ErrorAs(t, err, &limitErr)
+}
+
 // TestValidateTxDijkstraInvalidTransactionStillFailsAlwaysRunRules proves the
 // always-run rules are not skipped for a declared-invalid transaction: the same
 // fixture that passes untouched is rejected once its collateral, redeemer or

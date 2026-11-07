@@ -366,7 +366,9 @@ func TestProcessEpochRolloverAppliesUpdateToOwnedCopy(t *testing.T) {
 	}
 	require.NoError(
 		t,
-		completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
+		completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(
+			strings.NewReader(shelleyGenesisJSON),
+		),
 	)
 
 	db, err := dbtest.NewDatabase(t, &database.Config{

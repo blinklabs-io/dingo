@@ -45,6 +45,7 @@ func TestApplyFixtureReferenceScriptLimit(t *testing.T) {
 		limit      *uint64
 		priorError error
 		wantLimit  bool
+		wantHarness bool
 	}{
 		{
 			name: "single spent input over limit",
@@ -75,6 +76,20 @@ func TestApplyFixtureReferenceScriptLimit(t *testing.T) {
 			limit: nil,
 		},
 		{
+			name: "missing reference input is a harness error",
+			tx: fixtureReferenceScriptTx(
+				nil,
+				[]shelley.ShelleyTransactionInput{
+					shelley.MustNewShelleyTransactionInput(
+						strings.Repeat("04", 32),
+						0,
+					),
+				},
+			),
+			limit:       &limit,
+			wantHarness: true,
+		},
+		{
 			name: "prior ledger error wins",
 			tx: fixtureReferenceScriptTx(
 				nil,
@@ -86,18 +101,36 @@ func TestApplyFixtureReferenceScriptLimit(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			err := applyFixtureReferenceScriptLimit(
+			validationErr, harnessErr := applyFixtureReferenceScriptLimit(
 				tc.tx,
 				state,
 				tc.limit,
 				tc.priorError,
 			)
 			var limitErr common.RefScriptSizePerTxTooLargeError
-			if errors.As(err, &limitErr) != tc.wantLimit {
-				t.Fatalf("limit error = %v, want %t: %v", errors.As(err, &limitErr), tc.wantLimit, err)
+			gotLimit := errors.As(validationErr, &limitErr)
+			if gotLimit != tc.wantLimit ||
+				(!tc.wantLimit && tc.priorError == nil && validationErr != nil) {
+				t.Fatalf(
+					"limit error = %t, want %t: %v",
+					gotLimit,
+					tc.wantLimit,
+					validationErr,
+				)
 			}
-			if tc.priorError != nil && !errors.Is(err, tc.priorError) {
-				t.Fatalf("error = %v, want prior error %v", err, tc.priorError)
+			if tc.wantHarness {
+				if harnessErr == nil {
+					t.Fatal("harness error = nil, want reference-input lookup failure")
+				}
+			} else if harnessErr != nil {
+				t.Fatalf("harness error = %v, want nil", harnessErr)
+			}
+			if tc.priorError != nil && !errors.Is(validationErr, tc.priorError) {
+				t.Fatalf(
+					"error = %v, want prior error %v",
+					validationErr,
+					tc.priorError,
+				)
 			}
 		})
 	}

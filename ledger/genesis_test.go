@@ -14,66 +14,8 @@
 
 package ledger
 
-import (
-	"bytes"
-	"encoding/json"
-	"fmt"
-	"io"
-	"maps"
+import "github.com/blinklabs-io/dingo/internal/test/testutil"
 
-	"github.com/blinklabs-io/dingo/config/cardano"
-)
+var completeTestShelleyGenesis = testutil.CompleteShelleyGenesis
 
-type completeTestShelleyGenesisLoader struct {
-	cfg *cardano.CardanoNodeConfig
-}
-
-func completeTestShelleyGenesis(
-	cfg *cardano.CardanoNodeConfig,
-) completeTestShelleyGenesisLoader {
-	return completeTestShelleyGenesisLoader{cfg: cfg}
-}
-
-func (l completeTestShelleyGenesisLoader) LoadShelleyGenesisFromReader(
-	r io.Reader,
-) error {
-	base, err := cardano.EmbeddedConfigFS.ReadFile("preview/shelley-genesis.json")
-	if err != nil {
-		return fmt.Errorf("read complete Shelley genesis fixture: %w", err)
-	}
-	overrides, err := io.ReadAll(r)
-	if err != nil {
-		return fmt.Errorf("read Shelley genesis overrides: %w", err)
-	}
-	var genesis map[string]json.RawMessage
-	if err := json.Unmarshal(base, &genesis); err != nil {
-		return fmt.Errorf("decode complete Shelley genesis fixture: %w", err)
-	}
-	genesis["genDelegs"] = json.RawMessage(`{}`)
-	genesis["updateQuorum"] = json.RawMessage(`0`)
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(overrides, &fields); err != nil {
-		return fmt.Errorf("decode Shelley genesis overrides: %w", err)
-	}
-	if protocolOverrides, ok := fields["protocolParams"]; ok {
-		var protocolParams map[string]json.RawMessage
-		if err := json.Unmarshal(genesis["protocolParams"], &protocolParams); err != nil {
-			return fmt.Errorf("decode complete protocol parameters: %w", err)
-		}
-		var protocolFields map[string]json.RawMessage
-		if err := json.Unmarshal(protocolOverrides, &protocolFields); err != nil {
-			return fmt.Errorf("decode protocol parameter overrides: %w", err)
-		}
-		maps.Copy(protocolParams, protocolFields)
-		fields["protocolParams"], err = json.Marshal(protocolParams)
-		if err != nil {
-			return fmt.Errorf("encode complete protocol parameters: %w", err)
-		}
-	}
-	maps.Copy(genesis, fields)
-	merged, err := json.Marshal(genesis)
-	if err != nil {
-		return fmt.Errorf("encode complete Shelley genesis fixture: %w", err)
-	}
-	return l.cfg.LoadShelleyGenesisFromReader(bytes.NewReader(merged))
-}
+var completeTestShelleyGenesisJSON = testutil.CompleteShelleyGenesisJSON

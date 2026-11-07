@@ -843,8 +843,8 @@ func TestBlockfetchServerRequestRange_SparseNetworkRangeServedOverWire(
 	)
 }
 
-// smallSecurityParamCardanoConfig builds a minimal Byron+Shelley genesis
-// config whose security parameter K is k, so
+// smallSecurityParamCardanoConfig loads the complete mainnet configuration and
+// overrides its Byron and Shelley security parameter K with k, so
 // LedgerState.SecurityParam() -- and so maxBlockFetchBlocksForSecurityParam
 // -- is small and test-controlled instead of falling back to
 // blockfetchBatchSlotThresholdDefault (50000, far too large to build a

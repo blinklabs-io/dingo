@@ -2714,7 +2714,7 @@ func benchmarkVerifyBlockHeader(b *testing.B) {
 				testBlocks[i%len(testBlocks)].block,
 				epochNonceHex,
 				testBlocks[0].slotsPerKesPeriod,
-				62,
+				testMaxKESEvolutions,
 			); err != nil {
 				b.Fatal(err)
 			}
