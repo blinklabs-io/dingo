@@ -1987,6 +1987,7 @@ func TestByronValidateBadInputs(t *testing.T) {
 func TestByronValidateValueConserved(t *testing.T) {
 	input1 := newTestInput(0x01, 0)
 	input2 := newTestInput(0x02, 0)
+	input1SameTxIdx := newTestInput(0x01, 1)
 	tests := []struct {
 		name    string
 		utxos   map[lcommon.TransactionInput]uint64
@@ -2020,6 +2021,17 @@ func TestByronValidateValueConserved(t *testing.T) {
 			},
 			inputs:  []lcommon.TransactionInput{input1, input2},
 			outputs: []uint64{4_000_000, 3_500_000},
+		},
+		{
+			// Inputs sharing a transaction hash but with different output
+			// indices are distinct and each contributes its value.
+			name: "same transaction different indices",
+			utxos: map[lcommon.TransactionInput]uint64{
+				input1:          1_000_000,
+				input1SameTxIdx: 1_000_000,
+			},
+			inputs:  []lcommon.TransactionInput{input1, input1SameTxIdx},
+			outputs: []uint64{1_800_000},
 		},
 		{
 			// An input absent from the UTxO set is skipped in the value
