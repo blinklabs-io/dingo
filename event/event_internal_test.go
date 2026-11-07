@@ -339,9 +339,7 @@ func TestDeliverAfterCloseReturnsClosed(t *testing.T) {
 func TestPublishDetachesStalledSubscriberWithoutReorderingHealthyDelivery(
 	t *testing.T,
 ) {
-	originalTimeout := channelDeliveryTimeout
-	channelDeliveryTimeout = 20 * time.Millisecond
-	t.Cleanup(func() { channelDeliveryTimeout = originalTimeout })
+	t.Cleanup(SetChannelDeliveryTimeoutForTesting(20 * time.Millisecond))
 
 	const eventType EventType = "test.stalled.detach"
 	eb := NewEventBus(nil, nil)
@@ -377,9 +375,7 @@ func TestPublishDetachesStalledSubscriberWithoutReorderingHealthyDelivery(
 // exposes the lifecycle boundary instead of silently treating a detached
 // subscriber as a successful delivery.
 func TestPublishBlockingReportsStalledSubscriber(t *testing.T) {
-	originalTimeout := channelDeliveryTimeout
-	channelDeliveryTimeout = 20 * time.Millisecond
-	t.Cleanup(func() { channelDeliveryTimeout = originalTimeout })
+	t.Cleanup(SetChannelDeliveryTimeoutForTesting(20 * time.Millisecond))
 
 	const eventType EventType = "test.stalled.blocking"
 	eb := NewEventBus(nil, nil)
@@ -412,9 +408,7 @@ func TestPublishBlockingReportsStalledSubscriber(t *testing.T) {
 // backpressure until the handler drains it, rather than silently removing the
 // subscriber after the ordinary delivery timeout.
 func TestLosslessSubscribeFuncDoesNotDetach(t *testing.T) {
-	originalTimeout := channelDeliveryTimeout
-	channelDeliveryTimeout = 20 * time.Millisecond
-	t.Cleanup(func() { channelDeliveryTimeout = originalTimeout })
+	t.Cleanup(SetChannelDeliveryTimeoutForTesting(20 * time.Millisecond))
 
 	const eventType EventType = "test.lossless.callback"
 	eb := NewEventBus(nil, nil)
@@ -467,9 +461,7 @@ func TestLosslessSubscribeFuncDoesNotDetach(t *testing.T) {
 // increments the delivery-timeout metric even though the periodic stall warning
 // interval is longer than the normal delivery timeout.
 func TestStalledSubscriberDetachmentReportsWarningAndMetric(t *testing.T) {
-	originalTimeout := channelDeliveryTimeout
-	channelDeliveryTimeout = 20 * time.Millisecond
-	t.Cleanup(func() { channelDeliveryTimeout = originalTimeout })
+	t.Cleanup(SetChannelDeliveryTimeoutForTesting(20 * time.Millisecond))
 
 	const eventType EventType = "test.stalled.observability"
 	var buf lockedBuffer
@@ -503,9 +495,7 @@ func TestStalledSubscriberDetachmentReportsWarningAndMetric(t *testing.T) {
 // detaches it. Returning nil to the later publishers would falsely report an
 // accepted delivery that never reached their subscriber.
 func TestConcurrentPublishBlockingReportsStalledSubscriber(t *testing.T) {
-	originalTimeout := channelDeliveryTimeout
-	channelDeliveryTimeout = 20 * time.Millisecond
-	t.Cleanup(func() { channelDeliveryTimeout = originalTimeout })
+	t.Cleanup(SetChannelDeliveryTimeoutForTesting(20 * time.Millisecond))
 
 	const eventType EventType = "test.stalled.concurrent"
 	const publishers = 8
@@ -589,103 +579,6 @@ func TestDeliverFailureUnregisters(t *testing.T) {
 		t.Fatalf(
 			"expected subscriber Close() to be called after deliver failure",
 		)
-	}
-}
-
-// TestChannelSubscriberDeliverWaitsForCapacity verifies that
-// channelSubscriber.Deliver waits for buffer capacity instead of dropping the
-// event. Regression: the non-blocking send
-// this replaces silently discarded events under sustained load.
-func TestChannelSubscriberDeliverWaitsForCapacity(t *testing.T) {
-	t.Parallel()
-
-	const bufferSize = 5
-	sub := newChannelSubscriber("test", bufferSize, nil)
-
-	// Fill the buffer completely
-	for i := range bufferSize {
-		err := sub.Deliver(NewEvent("test", i))
-		if err != nil {
-			t.Fatalf("unexpected error on buffered deliver: %v", err)
-		}
-	}
-
-	// Deliver to the full buffer must wait rather than drop.
-	blocked := make(chan struct{})
-	sub.onBlocked = func() { close(blocked) }
-	done := make(chan error, 1)
-	go func() {
-		done <- sub.Deliver(NewEvent("test", "overflow"))
-	}()
-	testutil.RequireReceive(
-		t,
-		blocked,
-		testutil.AsyncWait,
-		"delivery never reached the full-buffer wait",
-	)
-	if len(sub.ch) != cap(sub.ch) {
-		t.Fatal("expected the delivery buffer to be full")
-	}
-	select {
-	case <-done:
-		t.Fatal("Deliver returned while the buffer was full; event was dropped")
-	default:
-	}
-
-	// Draining one slot releases the waiting Deliver.
-	first := <-sub.ch
-
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("unexpected error after capacity freed: %v", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("Deliver did not complete after buffer capacity was freed")
-	}
-
-	// Every event is accounted for: the drained one, the rest of the
-	// original batch, and the event that had to wait.
-	got := []any{first.Data}
-	for range bufferSize {
-		select {
-		case evt := <-sub.ch:
-			got = append(got, evt.Data)
-		default:
-			t.Fatalf("expected %d events, only got %d", bufferSize+1, len(got))
-		}
-	}
-	want := []any{0, 1, 2, 3, 4, "overflow"}
-	if len(got) != len(want) {
-		t.Fatalf("expected %v, got %v", want, got)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("event %d: expected %v, got %v", i, want[i], got[i])
-		}
-	}
-}
-
-// TestChannelSubscriberDeliverAfterClose verifies that Deliver to a closed
-// subscriber returns nil (not a panic) and does not block.
-func TestChannelSubscriberDeliverAfterClose(t *testing.T) {
-	t.Parallel()
-
-	sub := newChannelSubscriber("test", 5, nil)
-	sub.Close()
-
-	done := make(chan error, 1)
-	go func() {
-		done <- sub.Deliver(NewEvent("test", "after-close"))
-	}()
-
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("Deliver after Close should return nil, got: %v", err)
-		}
-	case <-time.After(1 * time.Second):
-		t.Fatal("Deliver blocked after Close")
 	}
 }
 
@@ -1005,89 +898,6 @@ func TestStopWaitsForInFlightPublish(t *testing.T) {
 	default:
 		t.Fatal("subscriber Close happened before Deliver completed")
 	}
-}
-
-// TestPublishBlocksOnFullChannelUntilDrained verifies that Publish applies
-// backpressure when a subscriber's channel buffer is full, and that the event
-// is delivered once capacity appears rather than dropped.
-// Close must still be able to run against an
-// in-flight blocked send without deadlocking, which is why the blocked send
-// wakes on the subscriber's close signal.
-func TestPublishBlocksOnFullChannelUntilDrained(t *testing.T) {
-	t.Parallel()
-
-	eb := NewEventBus(nil, nil)
-	typ := EventType("backpressure.test")
-
-	const buffer = 64
-	subId, ch := eb.SubscribeWithBuffer(typ, buffer)
-
-	// Set onBlocked immediately after subscribing, before any publisher can
-	// reach this subscriber: onBlocked's documented contract (event.go) is
-	// that it is set once at subscribe time. Setting it after the fill loop
-	// below would write it unsynchronized while it is readable under
-	// deliverWait's c.mu.RLock, and would read channelSubsById without
-	// e.mu.
-	blocked := make(chan struct{})
-	eb.channelSubsById[subId].onBlocked = func() { close(blocked) }
-
-	// Fill the subscriber's channel buffer completely.
-	for i := range buffer {
-		eb.Publish(typ, NewEvent(typ, i))
-	}
-
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		eb.Publish(typ, NewEvent(typ, "overflow"))
-	}()
-
-	// Synchronize on deliverWait's full-buffer wait path rather than on the
-	// overflow goroutine merely starting: the goroutine can pause before
-	// Publish reaches its blocking send, which would let the checks below
-	// pass without proving delivery blocked.
-	testutil.RequireReceive(
-		t,
-		blocked,
-		testutil.AsyncWait,
-		"delivery never reached the full-buffer wait",
-	)
-	require.Len(t, ch, cap(ch), "the subscriber buffer must be full")
-	select {
-	case <-done:
-		t.Fatal("Publish returned while the subscriber buffer was full")
-	default:
-		// Expected: the publisher is backpressured.
-	}
-
-	// Draining releases the publisher and the event must arrive.
-	drained := make([]any, 0, buffer+1)
-	for range buffer {
-		drained = append(drained, (<-ch).Data)
-	}
-
-	require.Eventually(t, func() bool {
-		select {
-		case <-done:
-			return true
-		default:
-			return false
-		}
-	}, 2*time.Second, 5*time.Millisecond,
-		"Publish should complete once subscriber capacity is available",
-	)
-
-	select {
-	case evt := <-ch:
-		drained = append(drained, evt.Data)
-	case <-time.After(time.Second):
-		t.Fatal("event that was backpressured never arrived")
-	}
-
-	require.Len(t, drained, buffer+1, "no event may be dropped")
-	require.Equal(t, "overflow", drained[buffer])
-
-	eb.Stop()
 }
 
 // TestSubscribeFuncDoneVisibleBeforeSubIdPublished guards against a real

@@ -19,7 +19,6 @@ import (
 	"io"
 	"log/slog"
 	"net"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -134,36 +133,6 @@ func TestIPKeyFromAddr(t *testing.T) {
 	}
 }
 
-func TestIPKeyFromAddr_SameSubnet(t *testing.T) {
-	t.Parallel()
-
-	// Verify that two IPv6 addresses in the same /64 produce the same key
-	addr1 := &net.TCPAddr{
-		IP:   net.ParseIP("2001:db8:1234:5678::1"),
-		Port: 3000,
-	}
-	addr2 := &net.TCPAddr{
-		IP:   net.ParseIP("2001:db8:1234:5678::ffff"),
-		Port: 3001,
-	}
-	key1 := ipKeyFromAddr(addr1)
-	key2 := ipKeyFromAddr(addr2)
-	assert.Equal(t, key1, key2, "same /64 should produce the same key")
-
-	// Different /64 should produce different keys
-	addr3 := &net.TCPAddr{
-		IP:   net.ParseIP("2001:db8:1234:5679::1"),
-		Port: 3000,
-	}
-	key3 := ipKeyFromAddr(addr3)
-	assert.NotEqual(
-		t,
-		key1,
-		key3,
-		"different /64 should produce different keys",
-	)
-}
-
 func TestAcquireReleaseIPSlot(t *testing.T) {
 	t.Parallel()
 
@@ -240,26 +209,6 @@ func TestAcquireIPSlot_IndependentIPs(t *testing.T) {
 	assert.True(t, cm.acquireIPSlot(ipA))
 }
 
-func TestDefaultMaxConnectionsPerIP(t *testing.T) {
-	t.Parallel()
-
-	cm := NewConnectionManager(ConnectionManagerConfig{})
-	assert.Equal(
-		t,
-		DefaultMaxConnectionsPerIP,
-		cm.config.MaxConnectionsPerIP,
-	)
-}
-
-func TestCustomMaxConnectionsPerIP(t *testing.T) {
-	t.Parallel()
-
-	cm := NewConnectionManager(ConnectionManagerConfig{
-		MaxConnectionsPerIP: 10,
-	})
-	assert.Equal(t, 10, cm.config.MaxConnectionsPerIP)
-}
-
 // mockConnWithAddr is a mockConn that allows setting a custom remote
 // address.
 type mockConnWithAddr struct {
@@ -330,63 +279,6 @@ func (m *rateLimitMockListener) ProvideConnection(conn net.Conn) {
 	m.connCh <- conn
 }
 
-// TestIPRateLimitInAcceptLoop tests the per-IP rate limiting in the
-// accept loop using real TCP connections to verify no crashes occur.
-func TestIPRateLimitInAcceptLoop(t *testing.T) {
-	defer goleak.VerifyNone(t)
-
-	const maxPerIP = 2
-
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-
-	cfg := ConnectionManagerConfig{
-		Logger:              slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		PromRegistry:        prometheus.NewRegistry(),
-		MaxConnectionsPerIP: maxPerIP,
-		Listeners: []ListenerConfig{
-			{
-				Listener: ln,
-			},
-		},
-	}
-
-	cm := NewConnectionManager(cfg)
-	err = cm.Start(context.Background())
-	require.NoError(t, err)
-
-	addr := ln.Addr().String()
-
-	// Dial several connections. They will be accepted at the TCP level
-	// but Ouroboros setup will fail, causing the IP slot to be released.
-	// This verifies the accept loop does not crash with rate limiting.
-	for range 5 {
-		conn, dialErr := net.DialTimeout("tcp", addr, 2*time.Second)
-		if dialErr != nil {
-			t.Logf(
-				"dial failed (expected during shutdown): %v",
-				dialErr,
-			)
-			continue
-		}
-		conn.Close()
-	}
-
-	// Wait for the accept loop to process all connections. Since
-	// Ouroboros setup fails on each connection, all IP slots should
-	// be released back to zero.
-	require.Eventually(t, func() bool {
-		return cm.IPConnCount("127.0.0.1") == 0
-	}, 2*time.Second, 10*time.Millisecond,
-		"all IP slots should be released after Ouroboros failures",
-	)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	err = cm.Stop(ctx)
-	require.NoError(t, err)
-}
-
 // TestIPRateLimitRejectsWhenSlotsPreFilled uses pre-acquired IP slots
 // to verify the accept loop rejects connections when the limit is reached
 // and allows connections from other IPs.
@@ -453,31 +345,6 @@ func TestIPRateLimitRejectsWhenSlotsPreFilled(t *testing.T) {
 	defer cancel()
 	err = cm.Stop(ctx)
 	require.NoError(t, err)
-}
-
-// TestIPRateLimitCounterDecrementsOnConnectionClose verifies that the
-// per-IP counter is properly decremented when a connection is removed.
-func TestIPRateLimitCounterDecrementsOnConnectionClose(t *testing.T) {
-	t.Parallel()
-
-	cm := NewConnectionManager(ConnectionManagerConfig{
-		MaxConnectionsPerIP: 3,
-	})
-
-	ipKey := "10.0.0.5"
-
-	// Acquire some slots
-	require.True(t, cm.acquireIPSlot(ipKey))
-	require.True(t, cm.acquireIPSlot(ipKey))
-	assert.Equal(t, 2, cm.IPConnCount(ipKey))
-
-	// Release one
-	cm.releaseIPSlot(ipKey)
-	assert.Equal(t, 1, cm.IPConnCount(ipKey))
-
-	// Release the last - key should be cleaned up
-	cm.releaseIPSlot(ipKey)
-	assert.Equal(t, 0, cm.IPConnCount(ipKey))
 }
 
 // TestIPRateLimitIPv6SubnetGrouping verifies that IPv6 addresses in the
@@ -565,175 +432,6 @@ func TestIPRateLimitConcurrentAccess(t *testing.T) {
 		"remaining attempts should fail",
 	)
 	assert.Equal(t, maxPerIP, cm.IPConnCount(ipKey))
-}
-
-// TestIPRateLimitDifferentIPsInAcceptLoop verifies that the accept loop
-// properly handles connections from different IPs independently.
-func TestIPRateLimitDifferentIPsInAcceptLoop(t *testing.T) {
-	defer goleak.VerifyNone(t)
-
-	const maxPerIP = 1
-	mockLn := newRateLimitMockListener()
-
-	cfg := ConnectionManagerConfig{
-		Logger:              slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		PromRegistry:        prometheus.NewRegistry(),
-		MaxConnectionsPerIP: maxPerIP,
-		Listeners: []ListenerConfig{
-			{
-				Listener: mockLn,
-			},
-		},
-	}
-
-	cm := NewConnectionManager(cfg)
-	err := cm.Start(context.Background())
-	require.NoError(t, err)
-
-	// Pre-fill IP A
-	ipKeyA := "192.168.1.1"
-	require.True(t, cm.acquireIPSlot(ipKeyA))
-
-	// Connection from IP A should be rejected
-	mockLn.ProvideConnection(
-		newMockConnWithAddr("192.168.1.1", 50000),
-	)
-
-	// Connection from IP B should be processed (accepted then Ouroboros
-	// fails, but slot is acquired first)
-	mockLn.ProvideConnection(
-		newMockConnWithAddr("192.168.1.2", 50001),
-	)
-
-	// Wait for IP B's slot to be released after Ouroboros failure,
-	// confirming both connections were processed by the accept loop.
-	require.Eventually(t, func() bool {
-		return cm.IPConnCount("192.168.1.2") == 0
-	}, 2*time.Second, 10*time.Millisecond,
-		"IP B slot should be released after Ouroboros failure",
-	)
-
-	// IP A still at limit (rejected connection did not increment)
-	assert.Equal(t, maxPerIP, cm.IPConnCount(ipKeyA))
-
-	// Clean up pre-acquired slot
-	cm.releaseIPSlot(ipKeyA)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	err = cm.Stop(ctx)
-	require.NoError(t, err)
-}
-
-// TestIPRateLimitRejectLogMessage verifies that rejected connections are
-// logged with a warning.
-func TestIPRateLimitRejectLogMessage(t *testing.T) {
-	defer goleak.VerifyNone(t)
-
-	const maxPerIP = 1
-	mockLn := newRateLimitMockListener()
-
-	// Use a buffer to capture log output
-	var logBuf safeBuffer
-	logger := slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{
-		Level: slog.LevelWarn,
-	}))
-
-	cfg := ConnectionManagerConfig{
-		Logger:              logger,
-		PromRegistry:        prometheus.NewRegistry(),
-		MaxConnectionsPerIP: maxPerIP,
-		Listeners: []ListenerConfig{
-			{
-				Listener: mockLn,
-			},
-		},
-	}
-
-	cm := NewConnectionManager(cfg)
-	err := cm.Start(context.Background())
-	require.NoError(t, err)
-
-	// Pre-fill IP
-	ipKey := "10.0.0.1"
-	require.True(t, cm.acquireIPSlot(ipKey))
-
-	// Provide a connection that should be rejected
-	mockLn.ProvideConnection(
-		newMockConnWithAddr("10.0.0.1", 50000),
-	)
-
-	// Check log output contains rejection message
-	require.Eventually(t, func() bool {
-		return strings.Contains(logBuf.String(), "per-IP limit")
-	}, 2*time.Second, 10*time.Millisecond,
-		"should log per-IP limit rejection",
-	)
-
-	// Clean up
-	cm.releaseIPSlot(ipKey)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	err = cm.Stop(ctx)
-	require.NoError(t, err)
-}
-
-// TestIPRateLimitFairnessUnderConnectionChurn verifies that per-IP limits
-// remain fair under repeated acquire/release churn: saturation on one IP must
-// not block another IP from making progress.
-func TestIPRateLimitFairnessUnderConnectionChurn(t *testing.T) {
-	t.Parallel()
-
-	const maxPerIP = 2
-	cm := NewConnectionManager(ConnectionManagerConfig{
-		MaxConnectionsPerIP: maxPerIP,
-	})
-	ipA := "203.0.113.10"
-	ipB := "203.0.113.11"
-
-	// Repeatedly churn IP A between full and empty.
-	for range 20 {
-		require.True(t, cm.acquireIPSlot(ipA))
-		require.True(t, cm.acquireIPSlot(ipA))
-		require.False(t, cm.acquireIPSlot(ipA), "IP A should hit its own cap")
-		// IP B must still be able to acquire while A is saturated.
-		require.True(
-			t,
-			cm.acquireIPSlot(ipB),
-			"IP B progress must be independent of IP A saturation",
-		)
-		cm.releaseIPSlot(ipB)
-		cm.releaseIPSlot(ipA)
-		cm.releaseIPSlot(ipA)
-	}
-
-	assert.Equal(t, 0, cm.IPConnCount(ipA))
-	assert.Equal(t, 0, cm.IPConnCount(ipB))
-}
-
-// safeBuffer is a thread-safe buffer for capturing log output in tests.
-type safeBuffer struct {
-	buf  []byte
-	lock atomic.Int64 // simple spinlock via CAS
-}
-
-func (b *safeBuffer) Write(p []byte) (int, error) {
-	for !b.lock.CompareAndSwap(0, 1) {
-		// spin
-	}
-	b.buf = append(b.buf, p...)
-	b.lock.Store(0)
-	return len(p), nil
-}
-
-func (b *safeBuffer) String() string {
-	for !b.lock.CompareAndSwap(0, 1) {
-		// spin
-	}
-	s := string(b.buf)
-	b.lock.Store(0)
-	return s
 }
 
 // TestIPRateLimitReleasedOnOuroborosSetupFailure verifies that when

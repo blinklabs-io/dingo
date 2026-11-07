@@ -35,6 +35,8 @@ func testPeerConnId(localPort, remotePort int) ouroboros.ConnectionId {
 }
 
 func TestPeerIndexByConnIdMatchesEquivalentEndpoint(t *testing.T) {
+	t.Parallel()
+
 	storedConnId := testPeerConnId(6000, 3001)
 	closedConnId := testPeerConnId(6000, 3001)
 	if storedConnId == closedConnId {
@@ -59,6 +61,8 @@ func TestPeerIndexByConnIdMatchesEquivalentEndpoint(t *testing.T) {
 }
 
 func TestSameConnectionIdHandlesZeroValues(t *testing.T) {
+	t.Parallel()
+
 	zeroConnId := ouroboros.ConnectionId{}
 	realConnId := testPeerConnId(6000, 3001)
 
@@ -74,6 +78,8 @@ func TestSameConnectionIdHandlesZeroValues(t *testing.T) {
 }
 
 func TestSameConnectionIdHandlesPartialNilAddrs(t *testing.T) {
+	t.Parallel()
+
 	remoteAddr := &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 3001}
 	remoteOnly := ouroboros.ConnectionId{RemoteAddr: remoteAddr}
 	remoteOnlySame := ouroboros.ConnectionId{
@@ -121,6 +127,8 @@ func TestSameConnectionIdHandlesPartialNilAddrs(t *testing.T) {
 // downstream peers polluting chain selection while still allowing topology
 // and P2P-discovered peers who happen to dial us first to drive chain sync.
 func TestChainSelectionEligible_FiltersRandomInboundSource(t *testing.T) {
+	t.Parallel()
+
 	duplexClient := &PeerConnection{IsClient: true}
 	responderOnly := &PeerConnection{IsClient: false}
 

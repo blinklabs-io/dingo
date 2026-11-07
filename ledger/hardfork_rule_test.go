@@ -609,12 +609,26 @@ func TestApplyIntraEraHardForkRule_Pv3_RejectsOverflow(t *testing.T) {
 		// A Byron output cannot exceed byronMaxLovelace, so the AVVM total
 		// only overflows uint64 across many outputs.
 		const outputs = math.MaxUint64/byronMaxLovelace + 2
-		var txIDs [][]byte
+		// One transaction for all outputs: committing each separately
+		// dominates the test's runtime.
+		outputCbor, err := cbor.Encode(byron.ByronTransactionOutput{
+			OutputAddress: redeemAddr,
+			OutputAmount:  byronMaxLovelace,
+		})
+		require.NoError(t, err)
+		txID := bytes.Repeat([]byte{0xAA}, 32)
+		seedTxn := db.Transaction(context.Background(), true)
 		for i := range uint32(outputs) {
-			txIDs = append(txIDs, seedByronUtxoAt(
-				t, db, 0xAA, i, redeemAddr, byronMaxLovelace,
+			require.NoError(t, db.CreateUtxo(
+				context.Background(), seedTxn, &models.Utxo{
+					TxId: txID, OutputIdx: i, AddedSlot: 100,
+				},
+			))
+			require.NoError(t, db.Blob().SetUtxo(
+				seedTxn.Blob(), txID, i, outputCbor,
 			))
 		}
+		require.NoError(t, seedTxn.Commit())
 		require.NoError(
 			t,
 			db.Metadata().SetNetworkState(7_000, 5_000, 100, nil),
@@ -623,9 +637,9 @@ func TestApplyIntraEraHardForkRule_Pv3_RejectsOverflow(t *testing.T) {
 		ls := newTestLSForHardForkRule(t, db)
 		err = ls.applyIntraEraHardForkRule(context.Background(), nil, 3, 200, 1)
 		require.ErrorContains(t, err, "AVVM lovelace total overflows uint64")
-		for i, txID := range txIDs {
+		for i := range uint32(outputs) {
 			_, lookupErr := db.UtxoByRef(
-				context.Background(), txID, uint32(i), nil,
+				context.Background(), txID, i, nil,
 			)
 			require.NoError(t, lookupErr)
 		}

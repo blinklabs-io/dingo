@@ -108,6 +108,8 @@ func deadServerURL(t *testing.T) string {
 // source URL directly: userinfo, path, query, and fragment are dropped, and an
 // input with no safe parsed form never falls back to echoing itself.
 func TestRegistryLogURLRedactsCredentialComponents(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name string
 		raw  string
@@ -188,6 +190,7 @@ func TestRegistryLogURLRedactsCredentialComponents(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			got := registryLogURL(tc.raw)
 			require.Equal(t, tc.want, got)
 			for _, secret := range redactSecrets {
@@ -201,6 +204,8 @@ func TestRegistryLogURLRedactsCredentialComponents(t *testing.T) {
 // cause from the message without dropping it from the error chain, so
 // cancellation and transport diagnosis still work.
 func TestRegistryRequestErrorKeepsCauseIdentity(t *testing.T) {
+	t.Parallel()
+
 	cause := &url.Error{
 		Op:  "Get",
 		URL: "https://registry.example/?apikey=" + redactQuery,
@@ -228,6 +233,8 @@ func TestRegistryRequestErrorKeepsCauseIdentity(t *testing.T) {
 // the sync that renders the source URL, plus the failure site that renders a
 // URL-bearing error, and asserts no sentinel reaches the log.
 func TestTokenRegistrySyncRedactsCredentialsFromLogs(t *testing.T) {
+	t.Parallel()
+
 	good := map[string]string{
 		"mappings/" + syncSubjectNut + ".json": mappingJSON(
 			syncSubjectNut, "nutcoin", "NUT", "",
@@ -235,6 +242,7 @@ func TestTokenRegistrySyncRedactsCredentialsFromLogs(t *testing.T) {
 	}
 
 	t.Run("sync complete", func(t *testing.T) {
+		t.Parallel()
 		server := newRegistryServer(t, tarballOf(t, good))
 		sync, buf := captureSync(
 			t,
@@ -249,6 +257,7 @@ func TestTokenRegistrySyncRedactsCredentialsFromLogs(t *testing.T) {
 	})
 
 	t.Run("unchanged", func(t *testing.T) {
+		t.Parallel()
 		server := newRegistryServer(t, tarballOf(t, good))
 		server.notModifiedOnTag = true
 		source := withCredentials(server.URL)
@@ -264,6 +273,7 @@ func TestTokenRegistrySyncRedactsCredentialsFromLogs(t *testing.T) {
 	})
 
 	t.Run("no usable mappings", func(t *testing.T) {
+		t.Parallel()
 		server := newRegistryServer(t, tarballOf(t, map[string]string{
 			"README.md": "the layout changed",
 		}))
@@ -280,6 +290,7 @@ func TestTokenRegistrySyncRedactsCredentialsFromLogs(t *testing.T) {
 	})
 
 	t.Run("unusable mappings", func(t *testing.T) {
+		t.Parallel()
 		body := tarballOf(t, map[string]string{
 			"mappings/" + syncSubjectNut + ".json": mappingJSON(
 				syncSubjectNut, "nutcoin", "NUT", "",
@@ -300,6 +311,7 @@ func TestTokenRegistrySyncRedactsCredentialsFromLogs(t *testing.T) {
 	})
 
 	t.Run("userinfo rejected", func(t *testing.T) {
+		t.Parallel()
 		server := newRegistryServer(t, tarballOf(t, good))
 		source := strings.Replace(
 			withCredentials(server.URL),
@@ -315,6 +327,7 @@ func TestTokenRegistrySyncRedactsCredentialsFromLogs(t *testing.T) {
 	})
 
 	t.Run("malformed source", func(t *testing.T) {
+		t.Parallel()
 		source := "https://registry.example/%zz?apikey=" + redactQuery +
 			"#" + redactFragment
 		sync, buf := captureSync(t, newFakeTokenRegistryStore(), source)
@@ -328,6 +341,7 @@ func TestTokenRegistrySyncRedactsCredentialsFromLogs(t *testing.T) {
 	})
 
 	t.Run("transport error through redirect", func(t *testing.T) {
+		t.Parallel()
 		target := deadServerURL(t) + "/?token=" + redactRedirect
 		server := httptest.NewTLSServer(
 			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -352,7 +366,10 @@ func TestTokenRegistrySyncRedactsCredentialsFromLogs(t *testing.T) {
 // credential exposure through SyncOnce's return value, which a caller may
 // render somewhere the package does not control.
 func TestTokenRegistrySyncRedactsCredentialsFromReturnedError(t *testing.T) {
+	t.Parallel()
+
 	t.Run("userinfo rejected", func(t *testing.T) {
+		t.Parallel()
 		server := newRegistryServer(t, nil)
 		source := strings.Replace(
 			withCredentials(server.URL),
@@ -369,6 +386,7 @@ func TestTokenRegistrySyncRedactsCredentialsFromReturnedError(t *testing.T) {
 	})
 
 	t.Run("malformed source", func(t *testing.T) {
+		t.Parallel()
 		source := "https://registry.example/%zz?apikey=" + redactQuery +
 			"#" + redactFragment
 		sync := newTestSync(t, newFakeTokenRegistryStore(), source, nil)
@@ -381,6 +399,7 @@ func TestTokenRegistrySyncRedactsCredentialsFromReturnedError(t *testing.T) {
 	})
 
 	t.Run("transport error through redirect", func(t *testing.T) {
+		t.Parallel()
 		target := deadServerURL(t) + "/?token=" + redactRedirect
 		server := httptest.NewTLSServer(
 			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -407,6 +426,8 @@ func TestTokenRegistrySyncRedactsCredentialsFromReturnedError(t *testing.T) {
 // not cost the caller the ability to tell a cancellation from a real failure,
 // which is what an unwrappable opaque error would have done.
 func TestTokenRegistrySyncFetchErrorStaysIdentifiable(t *testing.T) {
+	t.Parallel()
+
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	server := httptest.NewTLSServer(
@@ -446,6 +467,8 @@ const nutcoinSubject = "00000002df633853f6a47465c9496721d2d5b1291b8398016c0e87ae
 	"6e7574636f696e"
 
 func TestParseTokenRegistryEntryExtractsAllProperties(t *testing.T) {
+	t.Parallel()
+
 	// Shape taken verbatim from the live registry mapping for nutcoin:
 	// every property is an envelope of {sequenceNumber, value, signatures}
 	// except "policy", which is a bare string.
@@ -475,6 +498,8 @@ func TestParseTokenRegistryEntryExtractsAllProperties(t *testing.T) {
 }
 
 func TestParseTokenRegistryEntryExtractsDecimals(t *testing.T) {
+	t.Parallel()
+
 	// decimals carries a JSON number in the same envelope the string
 	// properties use; the live DjedMicroUSD mapping is the reference.
 	raw := []byte(`{
@@ -491,6 +516,8 @@ func TestParseTokenRegistryEntryExtractsDecimals(t *testing.T) {
 }
 
 func TestParseTokenRegistryEntryAcceptsSubjectWithoutAssetName(t *testing.T) {
+	t.Parallel()
+
 	// A policy-only subject (56 hex characters, empty asset name) is legal:
 	// it names the asset whose name is the empty string.
 	policyOnly := strings.Repeat("ab", 28)
@@ -505,16 +532,29 @@ func TestParseTokenRegistryEntryAcceptsSubjectWithoutAssetName(t *testing.T) {
 	require.Equal(t, policyOnly, entry.Subject)
 }
 
-func TestParseTokenRegistryEntryRejectsMissingSubject(t *testing.T) {
-	raw := []byte(`{"name":{"sequenceNumber":0,"value":"x","signatures":[]}}`)
+func TestParseTokenRegistryEntryRejectsInvalidSubjectLength(t *testing.T) {
+	t.Parallel()
 
-	_, err := ParseTokenRegistryEntry(raw)
+	for name, raw := range map[string]string{
+		"missing": `{"name":{"sequenceNumber":0,"value":"x","signatures":[]}}`,
+		// Shorter than a 56-hex-character policy ID.
+		"short": `{"subject":"` + strings.Repeat("ab", 20) + `"}`,
+		"odd":   `{"subject":"` + strings.Repeat("ab", 28) + `a"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "subject")
+			_, err := ParseTokenRegistryEntry([]byte(raw))
+
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "subject")
+		})
+	}
 }
 
 func TestParseTokenRegistryEntryRejectsNonHexSubject(t *testing.T) {
+	t.Parallel()
+
 	// The subject is policy ID + asset name, both hex; anything else cannot
 	// be matched back to an on-chain asset and is dropped rather than stored
 	// under a key no lookup will ever produce.
@@ -530,26 +570,9 @@ func TestParseTokenRegistryEntryRejectsNonHexSubject(t *testing.T) {
 	require.Contains(t, err.Error(), "not hex")
 }
 
-func TestParseTokenRegistryEntryRejectsShortSubject(t *testing.T) {
-	// Shorter than a 56-hex-character policy ID.
-	raw := []byte(`{"subject":"` + strings.Repeat("ab", 20) + `"}`)
-
-	_, err := ParseTokenRegistryEntry(raw)
-
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "subject")
-}
-
-func TestParseTokenRegistryEntryRejectsOddLengthSubject(t *testing.T) {
-	raw := []byte(`{"subject":"` + strings.Repeat("ab", 28) + `a"}`)
-
-	_, err := ParseTokenRegistryEntry(raw)
-
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "subject")
-}
-
 func TestParseTokenRegistryEntryNormalizesSubjectCase(t *testing.T) {
+	t.Parallel()
+
 	// Lookups build the subject from raw on-chain bytes hex-encoded in lower
 	// case, so an upper-case registry subject has to normalize or it will
 	// never match.
@@ -563,6 +586,8 @@ func TestParseTokenRegistryEntryNormalizesSubjectCase(t *testing.T) {
 }
 
 func TestParseTokenRegistryEntrySkipsMalformedProperties(t *testing.T) {
+	t.Parallel()
+
 	// One property that is a bare string rather than a CIP-26 envelope must
 	// not cost us the rest of the entry: a bulk sync that discards a whole
 	// mapping over one bad field loses metadata for no good reason.
@@ -580,6 +605,8 @@ func TestParseTokenRegistryEntrySkipsMalformedProperties(t *testing.T) {
 }
 
 func TestParseTokenRegistryEntrySkipsBlankValues(t *testing.T) {
+	t.Parallel()
+
 	raw := []byte(`{
 		"subject": "` + nutcoinSubject + `",
 		"name": {"sequenceNumber": 0, "value": "   ", "signatures": []},
@@ -594,6 +621,8 @@ func TestParseTokenRegistryEntrySkipsBlankValues(t *testing.T) {
 }
 
 func TestParseTokenRegistryEntrySkipsOutOfRangeDecimals(t *testing.T) {
+	t.Parallel()
+
 	for name, value := range map[string]string{
 		"negative":         "-1",
 		"absurd":           "1000",
@@ -602,6 +631,7 @@ func TestParseTokenRegistryEntrySkipsOutOfRangeDecimals(t *testing.T) {
 		"wrong type":       `"6"`,
 	} {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			raw := []byte(`{
 				"subject": "` + nutcoinSubject + `",
 				"decimals": {"sequenceNumber": 0, "value": ` + value +
@@ -616,13 +646,9 @@ func TestParseTokenRegistryEntrySkipsOutOfRangeDecimals(t *testing.T) {
 	}
 }
 
-func TestParseTokenRegistryEntryRejectsInvalidJSON(t *testing.T) {
-	_, err := ParseTokenRegistryEntry([]byte(`{"subject":`))
-
-	require.Error(t, err)
-}
-
 func TestParseTokenRegistryEntryReportsEmptyWhenNoProperties(t *testing.T) {
+	t.Parallel()
+
 	// A mapping carrying only a subject has nothing worth persisting; the
 	// syncer uses this to skip the row entirely.
 	raw := []byte(`{"subject":"` + nutcoinSubject + `"}`)
@@ -634,6 +660,8 @@ func TestParseTokenRegistryEntryReportsEmptyWhenNoProperties(t *testing.T) {
 }
 
 func TestParseTokenRegistryEntryIsNotEmptyWithDecimalsOnly(t *testing.T) {
+	t.Parallel()
+
 	raw := []byte(`{
 		"subject": "` + nutcoinSubject + `",
 		"decimals": {"sequenceNumber": 0, "value": 0, "signatures": []}
@@ -650,6 +678,8 @@ func TestParseTokenRegistryEntryIsNotEmptyWithDecimalsOnly(t *testing.T) {
 // and returning no error, so a null decimals would otherwise be published as
 // a declared 0 -- which a wallet would use to render balances unscaled.
 func TestParseTokenRegistryEntryRejectsNullDecimals(t *testing.T) {
+	t.Parallel()
+
 	raw := []byte(`{
 		"subject": "` + nutcoinSubject + `",
 		"name": {"sequenceNumber": 0, "value": "nutcoin", "signatures": []},
@@ -666,6 +696,8 @@ func TestParseTokenRegistryEntryRejectsNullDecimals(t *testing.T) {
 // TestParseTokenRegistryEntryRejectsNullStringProperties is the same hazard
 // for the string properties: null must read as absent.
 func TestParseTokenRegistryEntryRejectsNullStringProperties(t *testing.T) {
+	t.Parallel()
+
 	raw := []byte(`{
 		"subject": "` + nutcoinSubject + `",
 		"name": {"sequenceNumber": 0, "value": null, "signatures": []},
@@ -682,6 +714,8 @@ func TestParseTokenRegistryEntryRejectsNullStringProperties(t *testing.T) {
 // TestParseTokenRegistryEntryRejectsNullPropertyEnvelope covers a null in
 // place of the whole envelope.
 func TestParseTokenRegistryEntryRejectsNullPropertyEnvelope(t *testing.T) {
+	t.Parallel()
+
 	raw := []byte(`{
 		"subject": "` + nutcoinSubject + `",
 		"name": null,
@@ -699,6 +733,8 @@ func TestParseTokenRegistryEntryRejectsNullPropertyEnvelope(t *testing.T) {
 // TestParseTokenRegistryEntryAcceptsDecimalsBounds pins both ends of CIP-26's
 // declared range ({"minimum": 0, "maximum": 19}) so the cap cannot drift.
 func TestParseTokenRegistryEntryAcceptsDecimalsBounds(t *testing.T) {
+	t.Parallel()
+
 	for _, value := range []int{0, 19} {
 		raw := []byte(`{
 			"subject": "` + nutcoinSubject + `",

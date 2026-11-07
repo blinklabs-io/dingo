@@ -81,109 +81,6 @@ func TestNewParityMetricsIn_LabelsWithNetwork(t *testing.T) {
 	}
 }
 
-// TestParityMetrics_RecordCheck_MatchIncrementsOnlyChecksTotal covers a
-// clean match: recordCheck must increment checksTotal, and an empty Diff
-// must not increment any divergence field -- a match must never show up
-// as a divergence in any field's counter.
-func TestParityMetrics_RecordCheck_MatchIncrementsOnlyChecksTotal(
-	t *testing.T,
-) {
-	metrics, _ := newTestParityMetrics(t)
-	metrics.recordCheck(nodeparity.Diff{})
-
-	assert.Equal(t, float64(1), promtestutil.ToFloat64(metrics.checksTotal))
-	assert.Equal(
-		t,
-		float64(0),
-		promtestutil.ToFloat64(
-			metrics.divergenceTotal.WithLabelValues("protocol_params", ReferenceCardanoNode),
-		),
-	)
-	assert.Equal(
-		t,
-		float64(0),
-		promtestutil.ToFloat64(
-			metrics.divergenceTotal.WithLabelValues("stake_distribution", ReferenceCardanoNode),
-		),
-	)
-	assert.Equal(
-		t, float64(0),
-		promtestutil.ToFloat64(metrics.divergenceTotal.WithLabelValues("utxo", ReferenceCardanoNode)),
-	)
-}
-
-// TestParityMetrics_RecordCheck_DivergenceIncrementsOnlyAffectedFields
-// covers a diff that touches only some fields: recordCheck must increment
-// checksTotal (a divergence is still a completed check, not a skip) and
-// the divergence counter for exactly the fields that actually differed --
-// here protocol params and UTxO, but not stake distribution -- so an
-// operator reading node_parity_divergence_total{field=...} can tell which
-// field regressed without reading logs.
-func TestParityMetrics_RecordCheck_DivergenceIncrementsOnlyAffectedFields(
-	t *testing.T,
-) {
-	metrics, _ := newTestParityMetrics(t)
-	metrics.recordCheck(nodeparity.Diff{
-		ProtocolParamsDiff: "protocol parameters differ",
-		UTxO:               []string{"utxo abc#0 differs"},
-	})
-
-	assert.Equal(t, float64(1), promtestutil.ToFloat64(metrics.checksTotal))
-	assert.Equal(
-		t,
-		float64(1),
-		promtestutil.ToFloat64(
-			metrics.divergenceTotal.WithLabelValues("protocol_params", ReferenceCardanoNode),
-		),
-	)
-	assert.Equal(
-		t,
-		float64(0),
-		promtestutil.ToFloat64(
-			metrics.divergenceTotal.WithLabelValues("stake_distribution", ReferenceCardanoNode),
-		),
-	)
-	assert.Equal(
-		t, float64(1),
-		promtestutil.ToFloat64(metrics.divergenceTotal.WithLabelValues("utxo", ReferenceCardanoNode)),
-	)
-}
-
-// TestParityMetrics_RecordCheck_StakeDistributionDivergenceIncrements
-// covers the one divergence field the other recordCheck tests never
-// exercise on the positive path (both only assert it stays 0): a
-// stake-distribution-only diff must increment
-// node_parity_divergence_total{field="stake_distribution"} without
-// touching the other two fields.
-func TestParityMetrics_RecordCheck_StakeDistributionDivergenceIncrements(
-	t *testing.T,
-) {
-	metrics, _ := newTestParityMetrics(t)
-	metrics.recordCheck(nodeparity.Diff{
-		StakeDistribution: []string{"pool abc fraction differs"},
-	})
-
-	assert.Equal(t, float64(1), promtestutil.ToFloat64(metrics.checksTotal))
-	assert.Equal(
-		t,
-		float64(1),
-		promtestutil.ToFloat64(
-			metrics.divergenceTotal.WithLabelValues("stake_distribution", ReferenceCardanoNode),
-		),
-	)
-	assert.Equal(
-		t,
-		float64(0),
-		promtestutil.ToFloat64(
-			metrics.divergenceTotal.WithLabelValues("protocol_params", ReferenceCardanoNode),
-		),
-	)
-	assert.Equal(
-		t, float64(0),
-		promtestutil.ToFloat64(metrics.divergenceTotal.WithLabelValues("utxo", ReferenceCardanoNode)),
-	)
-}
-
 // TestNewParityMetricsIn_PreMaterializesZeroSeries covers the fix for
 // NodeParityNotChecking's original blind spot: a CounterVec exposes no
 // series at all for a label value until something touches it (increments
@@ -309,23 +206,6 @@ func TestServeMetrics_SucceedsAndServesMetrics(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 }
 
-// TestParityMetrics_RecordCheckError_Increments covers the dedicated
-// check-error counter (see NodeParityCheckErrors in
-// docs/dashboards/alerts.yaml): recordCheckError must increment
-// checkErrorsTotal without touching checksTotal or checksSkippedTotal, so
-// a run of persistent check errors (e.g. a misconfigured address) is
-// distinguishable both from a completed cycle and from a skipped one.
-func TestParityMetrics_RecordCheckError_Increments(t *testing.T) {
-	metrics, _ := newTestParityMetrics(t)
-	metrics.recordCheckError()
-	metrics.recordCheckError()
-
-	assert.Equal(
-		t, float64(2), promtestutil.ToFloat64(metrics.checkErrorsTotal),
-	)
-	assert.Equal(t, float64(0), promtestutil.ToFloat64(metrics.checksTotal))
-}
-
 // TestParityMetrics_RecordSkip_IncrementsByReason covers that skipped
 // cycles are tracked separately per reason code, and that recording one
 // reason does not also bump another -- an operator diagnosing "why do
@@ -362,4 +242,50 @@ func TestParityMetrics_RecordSkip_IncrementsByReason(t *testing.T) {
 		promtestutil.ToFloat64(metrics.checksTotal),
 		"a skipped cycle must never count as a completed one",
 	)
+}
+
+// TestParityMetrics_RecordCheck covers recordCheck: every completed check
+// increments checksTotal (a divergence is still a completed check, not a
+// skip), and the divergence counter moves for exactly the fields that
+// differed, so node_parity_divergence_total{field=...} says which field
+// regressed without reading logs. A clean match moves no divergence counter.
+func TestParityMetrics_RecordCheck(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		diff nodeparity.Diff
+		want map[string]float64
+	}{
+		{"match", nodeparity.Diff{}, map[string]float64{}},
+		{
+			"protocol params and utxo",
+			nodeparity.Diff{
+				ProtocolParamsDiff: "protocol parameters differ",
+				UTxO:               []string{"utxo abc#0 differs"},
+			},
+			map[string]float64{"protocol_params": 1, "utxo": 1},
+		},
+		{
+			"stake distribution only",
+			nodeparity.Diff{
+				StakeDistribution: []string{"pool abc fraction differs"},
+			},
+			map[string]float64{"stake_distribution": 1},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			metrics, _ := newTestParityMetrics(t)
+			metrics.recordCheck(tc.diff)
+			assert.Equal(t, float64(1), promtestutil.ToFloat64(metrics.checksTotal))
+			for _, field := range []string{"protocol_params", "stake_distribution", "utxo"} {
+				assert.Equal(
+					t,
+					tc.want[field],
+					promtestutil.ToFloat64(
+						metrics.divergenceTotal.WithLabelValues(field, ReferenceCardanoNode),
+					),
+					field,
+				)
+			}
+		})
+	}
 }

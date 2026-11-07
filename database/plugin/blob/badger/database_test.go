@@ -26,6 +26,7 @@ import (
 )
 
 func TestUnmarshalBlockMetadataLegacyCbor(t *testing.T) {
+	t.Parallel()
 	expected := types.BlockMetadata{
 		ID:       11,
 		Type:     3,
@@ -64,6 +65,7 @@ func TestUnmarshalBlockMetadataLegacyCbor(t *testing.T) {
 // is later used to create an iterator. Badger panics with "DB Closed" in
 // that case; the blob store should return an error iterator instead.
 func TestBlobStoreBadger_NewIteratorAfterCloseDoesNotPanic(t *testing.T) {
+	t.Parallel()
 	// Create a Badger blob store.
 	store, err := New()
 	require.NoError(t, err)

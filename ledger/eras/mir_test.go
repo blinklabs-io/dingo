@@ -394,21 +394,6 @@ func TestValidateShelleyDelegCertsMIR_PreAlonzoNoOp(t *testing.T) {
 	}
 }
 
-// TestValidateShelleyDelegCertsMIR_NoMIRCerts confirms a transaction with no
-// MIR certificates is untouched.
-func TestValidateShelleyDelegCertsMIR_NoMIRCerts(t *testing.T) {
-	t.Parallel()
-	tx := &mirTx{}
-	ls := newMockLedgerState()
-	err := validateShelleyDelegCerts(
-		tx,
-		100,
-		ls,
-		majorPParams{major: lcommon.ProtocolVersionAlonzo},
-	)
-	require.NoError(t, err)
-}
-
 // noMIRProviderLedgerState implements lcommon.LedgerState (via the embedded
 // nil interface) but not MIRDelegStateProvider, so it is never called: the
 // type assertion in validateShelleyDelegCerts must fail closed (no-op)

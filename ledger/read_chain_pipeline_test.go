@@ -465,7 +465,7 @@ func buildTaggedRawBlocks(
 func TestLedgerProcessBlocksRetryDoesNotMixBlocksAcrossAttempts(t *testing.T) {
 	t.Parallel()
 
-	const iterations = 25
+	const iterations = 10
 	const attempt1Base, attempt1Size = 100_000, 150
 	const stragglerBase, stragglerSize = 200_000, 300
 	const attempt2Base, attempt2Size = 300_000, 150

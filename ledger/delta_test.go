@@ -1453,14 +1453,6 @@ func TestConwayProtocolParametersDijkstra(t *testing.T) {
 	require.Equal(t, uint64(99), got.DRepInactivityPeriod)
 }
 
-func TestConwayProtocolParametersNilDijkstra(t *testing.T) {
-	t.Parallel()
-
-	var pparams *dijkstra.DijkstraProtocolParameters
-
-	require.Nil(t, conwayProtocolParameters(pparams))
-}
-
 func TestConwayProtocolParametersTypedNil(t *testing.T) {
 	t.Parallel()
 

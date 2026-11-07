@@ -39,7 +39,11 @@ func newTestEventBus(t testing.TB, logger *slog.Logger) *event.EventBus {
 func TestBlockfetchSubscriptionRemainsLosslessPastDeliveryTimeout(
 	t *testing.T,
 ) {
-	t.Parallel()
+	// Not parallel: the delivery bound is a process-wide variable that other
+	// tests' event delivery reads, so it is shortened only while every
+	// parallel test is still paused.
+	const deliveryTimeout = 50 * time.Millisecond
+	t.Cleanup(event.SetChannelDeliveryTimeoutForTesting(deliveryTimeout))
 
 	bus := newTestEventBus(t, nil)
 	defer bus.Stop()
@@ -89,7 +93,7 @@ func TestBlockfetchSubscriptionRemainsLosslessPastDeliveryTimeout(
 	testutil.RequireNoReceive(
 		t,
 		published,
-		event.RemoteDeliverTimeout+time.Second,
+		10*deliveryTimeout,
 		"blockfetch subscription detached instead of preserving the stream",
 	)
 

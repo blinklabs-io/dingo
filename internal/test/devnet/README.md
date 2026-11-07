@@ -725,7 +725,6 @@ conformance mode:
 | Test | What it verifies |
 |------|-------------------|
 | `TestBasicBlockForging` | Dingo forges at least one block and all nodes converge within `securityParam` |
-| `TestDingoChainAdvances` | Dingo's tip slot advances over a short observation window |
 | `TestChainGrowthRate` | Block production rate is within the expected range derived from `activeSlotsCoeff` and `slotLength` |
 | `TestRelayPropagation` | Blocks reach the non-forging relay |
 | `TestSustainedConsensus` | All nodes stay in agreement across multiple sampling intervals |
