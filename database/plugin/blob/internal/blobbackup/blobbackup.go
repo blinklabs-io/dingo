@@ -94,7 +94,9 @@ func init() {
 
 // SetRestoreBatchRecordsForTesting changes the per-batch record limit used by
 // Restore and Reset and returns a function that restores the previous value.
+// A limit below one would stall Restore and Reset, so it is raised to one.
 func SetRestoreBatchRecordsForTesting(n int) (restore func()) {
+	n = max(n, 1)
 	prev := restoreBatchRecords.Swap(int64(n))
 	return func() { restoreBatchRecords.Store(prev) }
 }
