@@ -100,6 +100,9 @@ func seedAuthorizationRange(
 	t.Helper()
 	tx, err := store.writeDB.Begin()
 	require.NoError(t, err)
+	// A failed assertion below must not leave the write connection held; the
+	// rollback is a no-op once Commit has run.
+	defer func() { _ = tx.Rollback() }()
 	stmt, err := tx.Prepare(`
 INSERT INTO auth_committee_hot (
     cold_credential_tag, cold_credential, hot_credential_tag,
