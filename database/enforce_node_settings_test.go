@@ -24,69 +24,39 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestEnforceNodeSettingsPersistsGenesisHashesOnFirstStart(t *testing.T) {
+func TestEnforceNodeSettingsGenesisHashes(t *testing.T) {
 	t.Parallel()
-
-	dir := t.TempDir()
 	db, err := newTestDatabase(t, &Config{
-		DataDir: dir, StorageMode: "core", Network: "preprod",
+		DataDir: t.TempDir(), StorageMode: "core", Network: "preprod",
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
 	require.NoError(t, err)
-	require.NoError(t, db.EnforceNodeSettings(context.Background(), nodesettings.Values{
+	enforce := func(values nodesettings.Values) error {
+		return db.EnforceNodeSettings(context.Background(), values)
+	}
+	require.NoError(t, enforce(nodesettings.Values{
 		"shelley_genesis_hash": "aaaa",
 		"conway_genesis_hash":  "bbbb",
 	}))
 	gates, err := db.Metadata().GetNodeSettingsGates(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, "aaaa", gates["shelley_genesis_hash"])
-	require.NoError(t, db.Close())
-}
 
-func TestEnforceNodeSettingsRejectsGenesisHashChange(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	db, err := newTestDatabase(t, &Config{
-		DataDir: dir, StorageMode: "core", Network: "preprod",
-		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
-	})
-	require.NoError(t, err)
-	require.NoError(t, db.EnforceNodeSettings(context.Background(), nodesettings.Values{
-		"shelley_genesis_hash": "aaaa",
-	}))
-	enforceErr := db.EnforceNodeSettings(context.Background(), nodesettings.Values{
-		"shelley_genesis_hash": "cccc",
-	})
 	var settingsErr NodeSettingsError
+	enforceErr := enforce(nodesettings.Values{"shelley_genesis_hash": "cccc"})
 	require.ErrorAs(t, enforceErr, &settingsErr)
 	require.Contains(t, settingsErr.Error(), "Shelley genesis hash")
-	require.NoError(t, db.Close())
-}
-
-func TestEnforceNodeSettingsFillsHashLearnedLater(t *testing.T) {
-	t.Parallel()
 
 	// An earlier dingo did not know the dijkstra hash; a later one does.
-	dir := t.TempDir()
-	db, err := newTestDatabase(t, &Config{
-		DataDir: dir, StorageMode: "core", Network: "preprod",
-		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
-	})
-	require.NoError(t, err)
-	require.NoError(t, db.EnforceNodeSettings(context.Background(), nodesettings.Values{
-		"dijkstra_genesis_hash": "",
-	}))
-	require.NoError(t, db.EnforceNodeSettings(context.Background(), nodesettings.Values{
-		"dijkstra_genesis_hash": "dddd",
-	}))
-	gates, err := db.Metadata().GetNodeSettingsGates(context.Background())
+	require.NoError(t, enforce(nodesettings.Values{"dijkstra_genesis_hash": ""}))
+	require.NoError(t, enforce(nodesettings.Values{"dijkstra_genesis_hash": "dddd"}))
+	gates, err = db.Metadata().GetNodeSettingsGates(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, "dddd", gates["dijkstra_genesis_hash"])
 	require.NoError(t, db.Close())
 }
 
-func TestEnforceNodeSettingsLedgerGateActivationRecordsEpoch(t *testing.T) {
+func TestEnforceNodeSettingsLedgerGateActivationRecordsEpochAndCannotBeDisabled(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -106,6 +76,18 @@ func TestEnforceNodeSettingsLedgerGateActivationRecordsEpoch(t *testing.T) {
 	gates, err := db.Metadata().GetNodeSettingsGates(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, on, gates["pledge_leverage"])
+
+	// A latched-on ledger gate cannot be turned back off.
+	var settingsErr NodeSettingsError
+	require.ErrorAs(t, db.EnforceNodeSettings(context.Background(), nodesettings.Values{
+		"pledge_leverage": off,
+	}), &settingsErr)
+	require.NoError(t, db.EnforceNodeSettings(context.Background(), nodesettings.Values{
+		"full_pot_rewards": nodesettings.EncodeLatchBool(true, ""),
+	}))
+	require.ErrorAs(t, db.EnforceNodeSettings(context.Background(), nodesettings.Values{
+		"full_pot_rewards": nodesettings.EncodeLatchBool(false, ""),
+	}), &settingsErr)
 	require.NoError(t, db.Close())
 }
 
@@ -176,26 +158,6 @@ func TestEnforceNodeSettingsKeepsTaintWhenValidationTightens(t *testing.T) {
 		nodesettings.LatchOn,
 		gates["historical_validation_relaxed"],
 	)
-	require.NoError(t, db.Close())
-}
-
-func TestEnforceNodeSettingsRejectsDisablingLedgerGate(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	db, err := newTestDatabase(t, &Config{
-		DataDir: dir, StorageMode: "core", Network: "preprod",
-		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
-	})
-	require.NoError(t, err)
-	require.NoError(t, db.EnforceNodeSettings(context.Background(), nodesettings.Values{
-		"full_pot_rewards": nodesettings.EncodeLatchBool(true, ""),
-	}))
-	enforceErr := db.EnforceNodeSettings(context.Background(), nodesettings.Values{
-		"full_pot_rewards": nodesettings.EncodeLatchBool(false, ""),
-	})
-	var settingsErr NodeSettingsError
-	require.ErrorAs(t, enforceErr, &settingsErr)
 	require.NoError(t, db.Close())
 }
 

@@ -97,3 +97,38 @@ func (ls *LedgerState) validateBlockCheckpoint(block ledger.Block) error {
 	}
 	return ValidateCheckpoint(ls.checkpoints, blockNo, block.Hash().String())
 }
+
+// ValidateHeaderCheckpoint applies configured checkpoints to a peer
+// header, so a header on a chain that diverges at a checkpointed height is
+// refused before it can join a candidate chain. Header validity does not
+// depend on the validation mode or on Mithril coverage, matching the
+// block-apply rule.
+//
+// Byron epoch boundary block headers share the preceding block's number and
+// are skipped, as in validateBlockCheckpoint. The header hash is computed
+// only when a checkpoint exists at the header's height.
+func ValidateHeaderCheckpoint(
+	checkpoints map[uint64]string,
+	header ledger.BlockHeader,
+) error {
+	if len(checkpoints) == 0 {
+		return nil
+	}
+	if _, isEbb := header.(*byron.ByronEpochBoundaryBlockHeader); isEbb {
+		return nil
+	}
+	blockNo := header.BlockNumber()
+	if _, ok := checkpoints[blockNo]; !ok {
+		return nil
+	}
+	return ValidateCheckpoint(checkpoints, blockNo, header.Hash().String())
+}
+
+// ValidateHeaderCheckpoint applies the ledger's configured checkpoints to
+// a peer header. It is safe for concurrent use: the checkpoint map is set
+// at construction and never mutated.
+func (ls *LedgerState) ValidateHeaderCheckpoint(
+	header ledger.BlockHeader,
+) error {
+	return ValidateHeaderCheckpoint(ls.checkpoints, header)
+}

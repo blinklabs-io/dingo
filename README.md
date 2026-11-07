@@ -40,6 +40,18 @@ provides pluggable storage and client interfaces.
   [architecture](ARCHITECTURE.md), [database design](DATABASE.md), and [plugin
   development](database/plugin/PLUGIN_DEVELOPMENT.md).
 
+## Network sync and runtime usage
+
+Dingo v0.90.5. Runtime CPU/RAM are sampled highs after bootstrap; disk is database size. `—` = not captured.
+
+| Network | Mode | CPU | RAM | Disk | Sync time |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Preview | Core, Mithril | ~1.2 cores | ~2.0 GiB | ~17.8 GiB | ~13 min |
+| Preprod | Core, Mithril | ~1.1 cores | ~2.7 GiB | ~22.8 GiB | ~16 min |
+| Preview | API, Mithril | — | — | — | ~4h 41m |
+| Preprod | API, Mithril | — | — | — | ~3h 43m |
+| Mainnet | Core, Mithril | — | — | — | ~6h 2m |
+
 ## Codebase
 
 | Area | Location |

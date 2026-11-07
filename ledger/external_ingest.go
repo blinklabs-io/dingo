@@ -606,6 +606,10 @@ func (ls *LedgerState) storeTrustedBatchBlocks(
 	if held == len(blocks) {
 		return nil
 	}
+	// A cancelled membership read reports the block absent.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	anchor := expected
 	if held > 0 {
 		prev := blocks[held-1]

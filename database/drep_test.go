@@ -27,6 +27,8 @@ import (
 )
 
 func TestUpdateDRepActivityExpiryBounds(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
 	for i, tc := range []struct {

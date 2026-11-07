@@ -590,6 +590,7 @@ sequenceDiagram
 
     Note over Peer,DB: Stage 1 — Header Discovery (ChainSync)
     Peer->>OB: RollForward(header, tip)
+    OB->>OB: reject a header whose hash differs from a configured checkpoint, and recycle the connection
     OB->>OB: strictly verify header crypto against current ledger generation
     Note over OB: If verification is deferred, forward a header extending the local chain, unverified; for any other, wait for the next ledger publication and verify again, bounded, and if still deferred withhold it from peer selection and ledger state
     OB->>LS: await bounded header capacity
@@ -1151,10 +1152,13 @@ The inbound TxSubmission server applies a per-peer token bucket to the
 transaction IDs a peer offers before requesting any bodies. `Node` sets it
 through `defaultMaxTxSubmissionsPerSecond` in `newOuroborosConfig`; the
 `ouroboros` package itself leaves the limiter off when the setting is zero.
-The `TxSubmissionLogicVersion` compatibility setting defaults to
-`TxSubmissionLogicV1`. Dingo implements that per-peer inbound strategy and
-rejects `TxSubmissionLogicV2`, whose shared multi-peer coordination is not
-implemented.
+The `TxSubmissionLogicVersion` compatibility setting records the reference
+node's inbound scheduling strategy and defaults to `TxSubmissionLogicV1`.
+Both `TxSubmissionLogicV1` and `TxSubmissionLogicV2` are accepted; unknown
+values are rejected. These reference strategies share the TxSubmission wire
+protocol. Dingo's bounded per-peer inbound policy is independent of the
+reference implementation selector, including when loading the published
+Musashi configuration.
 
 On the client path, BlockFetch events carry fully decoded blocks. The ledger
 subscriber therefore buffers one eight-block chain-store commit batch; when it
@@ -7942,10 +7946,16 @@ Ordinary Praos sessions continue to use primary-chain intersection points.
   no re-sync, and a header it releases is handled as any observer header. The
   wait resolves the header's fork anchor once and reuses it until a withdrawal
   from the local chain or a ledger tip at the anchor. A membership read that a
-  chain mutation overlapped (`Chain.HoldsPointSettled` reports it unsettled) is
-  repeated up to three times, and a walk still unsettled neither holds the
-  header nor caches an anchor: taking the overlap for an absent block would
-  anchor the forecast at an older ancestor. A walk that ends at a parent that is
+  chain mutation overlapped, or that a cancelled context cut short
+  (`Chain.HoldsPointSettled` reports it unsettled), is repeated up to three
+  times unless the context has ended, in which case the wait returns the
+  context's error. Admission, the recheck before a resync, the observer wait,
+  the fork-path ancestry walk and the trusted-batch store treat a context that
+  ended during a membership read the same way: as cancellation, never as an
+  absent block, a header inside the horizon, or a disconnected header owed a
+  resync. A walk still unsettled neither holds the header nor caches an anchor:
+  taking the overlap for an absent block would anchor the forecast at an older
+  ancestor. A walk that ends at a parent that is
   neither recorded, queued, nor held by the local chain (`resolveForkAnchor`
   reports it disconnected) holds the header too, even inside the ledger tip's
   horizon, because the peer's chain leaves the local chain at an unknown point;
@@ -8549,7 +8559,9 @@ exempt from those comparisons, only from the recycler. The Limit on Patience
 is separate: a held header's wait is not charged to it, as above.
 
 The limit is exported as the `dingo_chainselection_loe_block_number` and
-`dingo_chainselection_loe_intersection_slot` gauges (0 while inactive). The
+`dingo_chainselection_loe_intersection_slot` gauges (0 while inactive). A
+scrape never waits for a ledger state transition: while a block batch holds
+one, the gauges report the last value computed outside a transition. The
 slot gauge reports the point the limit is measured from: the common point, or
 the last one the candidates shared once they stop overlapping, and 0 while the
 limit is measured from the local tip.
@@ -9078,6 +9090,22 @@ corroborates that peer's advertised tip; they see no target while no client is
 active or while corroboration is incomplete.
 
 #### Header Verification Handoff
+
+Every peer header, ingress or observer, enters through the chainsync roll-forward
+callback, and that callback first applies the configured chain checkpoints
+(`LedgerState.ValidateHeaderCheckpoint`). A header at a checkpointed block
+number whose hash differs is refused with `*ledger.CheckpointMismatchError`
+before it is recorded as observed history, reaches the chain selector, or
+enters the ledger header queue; the delivering connection is recycled the same
+way as a header-crypto failure. Candidate chains, the selector, and the
+rollback gate only see headers that passed this callback, so they carry no
+separate checkpoint check, and block apply still enforces the same rule on the
+fetched block. The check does not depend on validation mode or Mithril coverage.
+Byron epoch boundary headers share the preceding block's number and are
+skipped; the hash is computed only at a checkpointed height. A peer's
+advertised tip is not a header and is not checked until its header arrives.
+Networks whose configuration ships no `CheckpointsFile` (preprod, devnet, as in
+upstream `cardano-node`) enforce nothing here.
 
 When full-block header verification needs an epoch nonce that is not cached yet,
 blockfetch first flushes already-received predecessor blocks from the pending
@@ -12190,8 +12218,12 @@ votes:
   captured key whose proof fails `VerifyLeiosKeyProofOfPossession`. A post-SNAP
   registration or rotation therefore cannot change an already-selected
   committee. A member without a captured usable key is a keyless committee seat:
-  membership and stake still count, but its vote can never be verified or
-  aggregated into a certificate. There is no more derivation fallback — that
+  membership and stake still count, but a peer vote for that seat cannot be
+  verified, so it is dropped (`no_key` rejection) rather than stored, tallied or
+  relayed, and is not counted toward the per-connection invalid-vote limit. The
+  dropped `(slot, voter)` id is remembered for the vote TTL (bounded by the
+  record cap) so repeated copies are discarded before spending the shared
+  verification budget. There is no more derivation fallback — that
   insecure shortcut (deriving a key from the pool's cold-key hash) was removed
   upstream in `prototype-2026w32` and here in the same change.
 - Full votes and resolved prototype votes use the shared bounded one-minute
@@ -12209,15 +12241,17 @@ votes:
   limit. Repeated vote ids coalesce while their first check is in flight, before
   committee lookup and signature verification can be repeated.
 - **Stake quorum and certificates**: per endorser block and signing context, the
-  manager tracks observed stake (all membership-valid votes) and verified stake
-  (signature-verified votes). When verified stake reaches
+  manager tracks observed stake (all admitted votes) and verified stake
+  (signature-verified votes); a peer vote is admitted only after its signature
+  verifies, so the two match for peer votes. When verified stake reaches
   `LeiosQuorumStakeThreshold` (tau) of *total active stake* (exact rational
   arithmetic, never a head count), it builds a `LeiosEbCertificate` — signers
   bitfield over the committee plus one aggregated BLS12-381 MinSig signature —
   from verified votes only, and publishes `leios.eb_quorum` with the announcing
   ranking-block hash that every prototype vote signed. Certificate validation
-  reports `sigChecked bool`; false means quorum passed but one or more signer
-  keys were unavailable, so production callers must reject that result. The
+  (`ValidateEbCertificate`, `ValidatePrototypeEbCertificate`) fails with
+  `ErrUnknownSignerKey` when any signer's key is unavailable, so a stake quorum
+  alone never validates. The
   pipeline preserves signing context, and the forge loop only adapts the
   certificate to the prototype's in-body `DijkstraLeiosCertificate` shape when
   its announcing RB is the actual parent CertRB.
@@ -12348,7 +12382,8 @@ votes:
   which `VoteManager` calls once per epoch and caches in
   `epochEntry.onChainKeys`. It excludes keys with unknown age or at or beyond
   `ceil(MaxKESEvolutions * SlotsPerKESPeriod / SlotsPerEpoch) + 2` epochs old,
-  then verifies proof of possession; an invalid, missing, unknown-age, or
+  with age measured at the committee epoch the snapshot selects (snapshot epoch
+  plus one), then verifies proof of possession; an invalid, missing, unknown-age, or
   expired key leaves the seat and its stake intact but cannot sign or validate a
   certificate.
 - **Certificate admission**: before asynchronous certified endorser-block
@@ -12403,8 +12438,12 @@ only channel between them is the `leios.eb_quorum` event.
   observed) by the single `stageFor` function. The per-phase window lengths live
   in one provisional `PipelineTiming` struct (off-chain, overridable via
   `WithLeiosPipelineTiming`) because CIP-0164 has not finalized them; they are
-  not protocol parameters. Window decisions are slot-driven via
-  `SlotProvider.CurrentOrTipSlot` (the `SlotClock` is private to `LedgerState`).
+  not protocol parameters. Node composition converts the one-second reference
+  defaults to the Shelley genesis slot duration, rounding up to whole slots;
+  explicit timing overrides keep their supplied slot counts. The vote manager
+  and endorser-transaction tail fetch use that same converted timing. Window
+  decisions are slot-driven via `SlotProvider.CurrentOrTipSlot` (the `SlotClock`
+  is private to `LedgerState`).
   These pipeline stages and `CertifyByDeadlineSlots` continue to bound relayed
   vote acceptance; local vote emission separately uses the on-chain wall-clock
   voting periods required by CIP-164. Each EB's current stage is surfaced via
@@ -13043,7 +13082,7 @@ a boundary that has already been crossed.
 
 That is a statement about who can attempt the write, not about whether it would
 be read, and the two are worth keeping apart: the layers above do not rely on
-it. An immutable entry up to 16 MiB is read once into a buffer; later in-place
+it. An immutable entry up to 128 MiB is read once into a buffer; later in-place
 writes cannot change the bytes its parsers walk.
 
 That is the shape of the gap on both sides. `checkImmutableTrio` hashes each
@@ -13058,7 +13097,7 @@ reader keeps:
 
 | tree | what travels | where it is re-checked |
 |---|---|---|
-| immutable (v2) | `BootstrapResult.ImmutableDigests`, the certified digest list the certificate's merkle root covers | `immutable.NewFromRootVerified` reads entries up to 16 MiB once, hashes the buffer, and gives that buffer to the chunk and index parsers; larger entries use a streaming verification pass, then are read and hashed into a buffer sized to the certified length |
+| immutable (v2) | `BootstrapResult.ImmutableDigests`, the certified digest list the certificate's merkle root covers | `immutable.NewFromRootVerified` reads entries up to 128 MiB once, hashes the buffer, and gives that buffer to the chunk and index parsers; larger entries use a streaming verification pass, then are read and hashed into a buffer sized to the certified length |
 | ancillary state (v2, verified) | `BootstrapResult.AncillaryDigests`, the signed manifest's map | the state is read once into a buffer; `verifySignedState` hashes that buffer and `ParseSnapshotBytes` parses the same one |
 | ancillary table (v2, verified) | the manifest's entry for it, carried down as `ImportConfig.State.UTxOTableDigest` | the table is gigabytes and is mapped rather than read, so the digest is checked against the mapped bytes the decoder then walks |
 
@@ -13071,7 +13110,7 @@ otherwise rest on a check nothing downstream can repeat.
 
 Note what none of these rows do: hash a descriptor and hand the parser that same
 descriptor. Rewinding does not detach it from its inode, so a writer can change
-the bytes the parser reads after the hash. Immutable entries up to 16 MiB use
+the bytes the parser reads after the hash. Immutable entries up to 128 MiB use
 one bounded read for both hash and parse. Larger entries retain the streaming
 size and digest check before reading the certified length into a buffer; that
 buffer is hashed before parsing. The ancillary state uses one buffer, and the
@@ -13080,16 +13119,23 @@ UTxO-HD table is verified and parsed through the same mapping.
 For the ImmutableDB that means the reader takes bytes rather than a file:
 `entryReader` (`database/immutable/entry.go`) is what the chunk and index
 parsers read through, and a verified open supplies a `bytesEntry` over the
-buffer it hashed. Entries up to 16 MiB use one read for verification and
+buffer it hashed. Entries up to 128 MiB use one read for verification and
 parsing. Larger entries keep the streaming verification pass before buffering;
 an ordinary local open still supplies a `fileEntry` over the descriptor, so a
 node reading its own ImmutableDB streams chunks from disk.
 
-The single-pass path holds at most 16 MiB for one entry. The larger-entry
-fallback keeps the certified-size allocation bound used by the previous
-verified reader.
+The single-pass path holds at most 128 MiB for one entry, and that bound is what
+a planted file can cost: the buffer is sized from the file's own reported
+length, capped at the bound, before the digest is known. 128 MiB covers every
+real mainnet chunk (21600 slots of full blocks at the 0.05 active slot
+coefficient is about 94 MiB; the largest certified mainnet chunk is about 91
+MiB), so the verified copy reads and hashes each chunk once instead of streaming
+it for its digest and then reading it again. A file that holds more than its
+reported length is not cut to a prefix; it falls through to the larger-entry
+path. That fallback keeps the certified-size allocation bound used by the
+previous verified reader.
 
-For entries above 16 MiB, the first pass is why the next allocation is safe.
+For entries above 128 MiB, the first pass is why the next allocation is safe.
 How large a file is, is whoever wrote it's choice; how large the *certified*
 file is, is not, because SHA-256 preimage resistance stands between the two.
 The streaming pass holds nothing and returns a size only for an entry whose

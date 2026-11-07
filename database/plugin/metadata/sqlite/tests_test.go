@@ -2054,6 +2054,43 @@ func TestGetPointerStakeInputsForPoolsStopsAtDeregistration(t *testing.T) {
 	)
 }
 
+// TestGetPointerStakeInputsForPoolsSelectsRequestedPools pins the pool
+// selection the overlay performs after resolving every live pointer output
+// once, rather than per chunk of the requested pools: a pool requested among
+// more pools than one chunk held still receives its pointer stake, and a pool
+// that was not requested never does.
+func TestGetPointerStakeInputsForPoolsSelectsRequestedPools(t *testing.T) {
+	t.Parallel()
+	f := newPointerStakeFixture(t)
+	f.setEra(t, babbage.EraIdBabbage)
+	paymentKey := bytes.Repeat([]byte{0x22}, lcommon.AddressHashSize)
+
+	f.apply(t, 100, 0, []lcommon.Certificate{f.register(), f.delegate()})
+	f.apply(t, 150, 0, nil,
+		f.output(600, newPointerAddress(t, paymentKey, 100, 0, 0)))
+
+	unrelated := make([][]byte, 0, 1_000)
+	for i := range 1_000 {
+		pool := make([]byte, 28)
+		binary.BigEndian.PutUint32(pool, uint32(i+1)) //nolint:gosec // bounded fixture index
+		unrelated = append(unrelated, pool)
+	}
+
+	inputs, err := f.store.GetPointerStakeInputsForPools(
+		unrelated, 175, 0, 0, nil,
+	)
+	require.NoError(t, err)
+	require.Empty(t, inputs, "stake is reported only for requested pools")
+
+	inputs, err = f.store.GetPointerStakeInputsForPools(
+		append(append([][]byte{}, unrelated...), f.pool), 175, 0, 0, nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, inputs, 1)
+	require.Equal(t, f.pool, inputs[0].PoolKeyHash)
+	require.Equal(t, uint64(600), uint64(inputs[0].Stake))
+}
+
 // TestPointerAddressStakeResolvesTheWedgeAddress runs the real bech32 address
 // from the Preview wedge, so the fixture is the on-chain encoding rather than
 // this test's own pointer writer.

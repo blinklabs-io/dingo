@@ -3321,14 +3321,14 @@ type MetadataStore interface {
 	// retained snapshot window. This is the CORE storage-mode pruning path:
 	// it deletes both reward_stake_input and reward_account_output. See
 	// rewardstate.DeleteStateBeforeEpoch for the full rationale.
-	DeleteRewardStateBeforeEpoch(uint64, types.Txn) error
+	DeleteRewardStateBeforeEpoch(context.Context, uint64, types.Txn) error
 
 	// DeleteRewardStakeInputBeforeEpoch deletes only reward_stake_input rows
 	// older than the retained snapshot window, leaving reward_account_output
 	// intact. This is the Koios-parity pruning path, used so the observer
 	// can read reward_account_output behind the tip. API storage mode prunes
 	// neither table. See rewardstate.DeleteStakeInputBeforeEpoch.
-	DeleteRewardStakeInputBeforeEpoch(uint64, types.Txn) error
+	DeleteRewardStakeInputBeforeEpoch(context.Context, uint64, types.Txn) error
 
 	// Network state methods
 

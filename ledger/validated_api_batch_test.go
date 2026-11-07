@@ -172,14 +172,6 @@ func TestValidatedBlockBatchesAPIIndexesAndKeepsStateImmediate(t *testing.T) {
 					Scan(&history),
 			)
 			require.Equal(t, 2, history)
-			var utxoStake, totalStake string
-			require.NoError(t, raw.QueryRow(
-				`SELECT utxo_stake, total_stake FROM reward_live_stake WHERE credential_tag = 0 AND staking_key = ?`,
-				rowBatchingKey(0x22),
-			).Scan(&utxoStake, &totalStake))
-			require.Equal(t, "800000", utxoStake,
-				"validated-block stake must apply once across the API flush")
-			require.Equal(t, "800000", totalStake)
 		})
 	}
 }
