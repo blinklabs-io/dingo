@@ -34,9 +34,6 @@ func TestLoadWithDBSelectsDijkstraBlsProofDomain(t *testing.T) {
 	t.Cleanup(func() { newLedgerStateForLoad = prior })
 	var captured ledger.LedgerStateConfig
 	newLedgerStateForLoad = func(c ledger.LedgerStateConfig) (*ledger.LedgerState, error) { captured = c; return nil, stop }
-	// LoadWithDB stops at the captured config before writing anything, so one
-	// database serves every network.
-	db := newTestDB(t)
 	for _, tc := range []struct {
 		network string
 		want    lcommon.DijkstraBlsProofDomain
@@ -44,6 +41,9 @@ func TestLoadWithDBSelectsDijkstraBlsProofDomain(t *testing.T) {
 		{"dijkstra", lcommon.DijkstraBlsProofDomainLegacySig}, {"musashi", lcommon.DijkstraBlsProofDomainPop}, {"preview", lcommon.DijkstraBlsProofDomainPop},
 	} {
 		t.Run(tc.network, func(t *testing.T) {
+			// LoadWithDB drops deferred indexes before it reaches the seam, so
+			// each network gets its own database.
+			db := newTestDB(t)
 			err := LoadWithDB(
 				context.Background(),
 				&config.Config{Network: tc.network},

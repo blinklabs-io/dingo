@@ -42,7 +42,12 @@ const slowFixtureChunks = 2
 // ImmutableDB into a fresh directory, so a test can load a short chain.
 func copyImmutableChunkPrefix(t *testing.T, count int) string {
 	t.Helper()
-	src := filepath.Join("..", "..", "database", "immutable", "testdata")
+	// DINGO_TEST_IMMUTABLE_DIR points the tests at a different immutable
+	// fixture, as it did before the tests copied only a leading prefix.
+	src := os.Getenv("DINGO_TEST_IMMUTABLE_DIR")
+	if src == "" {
+		src = filepath.Join("..", "..", "database", "immutable", "testdata")
+	}
 	dst := t.TempDir()
 	for i := range count {
 		for _, ext := range []string{"chunk", "primary", "secondary"} {

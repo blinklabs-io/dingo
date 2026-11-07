@@ -260,7 +260,7 @@ func TestRollbackBeyondSecurityParam(t *testing.T) {
 		t.Fatal("primary chain is nil")
 	}
 
-	// Load enough blocks to test rollback beyond K (K + 20 blocks)
+	// Load enough blocks to test rollback beyond K (K + 10 blocks)
 	numBlocks := testSecurityParam + 10
 	blocks, points := loadBlocksFromImmutable(t, c, numBlocks)
 

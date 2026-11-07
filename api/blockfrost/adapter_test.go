@@ -1057,6 +1057,10 @@ func inSQLTransaction(t *testing.T, raw *sql.DB, seed func(tx *sql.Tx)) {
 	t.Helper()
 	tx, err := raw.Begin()
 	require.NoError(t, err)
+	// A failed require inside seed ends the test before Commit; roll back so
+	// the connection is not left holding the transaction. After a successful
+	// Commit the rollback is a no-op.
+	t.Cleanup(func() { _ = tx.Rollback() })
 	seed(tx)
 	require.NoError(t, tx.Commit())
 }

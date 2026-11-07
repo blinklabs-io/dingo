@@ -37,8 +37,9 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// setupTestStore creates an in-memory SQLite metadata store. Startup runs the
-// same explicit schema migrations used by production.
+// setupTestStore creates a SQLite metadata store in a temporary directory,
+// seeded from the already-migrated schema template so each test skips the
+// full migration.
 func setupTestStore(t *testing.T) *sqlstore.Store {
 	t.Helper()
 	// Seed the already-migrated metadata template: running the full schema

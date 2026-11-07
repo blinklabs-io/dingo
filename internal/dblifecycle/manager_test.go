@@ -449,7 +449,7 @@ func TestManagerRedeliveredEventIsNotFatal(t *testing.T) {
 }
 
 // TestManagerPrunesOldSnapshotsBeyondRetention verifies that with
-// SnapshotRetention=2, capturing a 3rd snapshot deletes the oldest one.
+// SnapshotRetention=1, capturing a 2nd snapshot deletes the oldest one.
 func TestManagerPrunesOldSnapshotsBeyondRetention(t *testing.T) {
 	t.Parallel()
 
@@ -471,7 +471,7 @@ func TestManagerPrunesOldSnapshotsBeyondRetention(t *testing.T) {
 		publishEpochTransition(eb, epoch)
 		// 30s, not 5s: a real badger+sqlite snapshot capture, matching
 		// TestManagerRespectsEveryNEpochsGating's identical allowance for
-		// slower Linux and Windows CI runners -- this test captures three
+		// slower Linux and Windows CI runners -- this test captures two
 		// in a row, so it needs the same per-capture headroom.
 		require.Eventually(t, func() bool {
 			_, err := os.Stat(filepath.Join(

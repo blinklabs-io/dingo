@@ -17,6 +17,7 @@ package conformance
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/blinklabs-io/ouroboros-mock/conformance"
@@ -41,7 +42,16 @@ func TestCorpusShardsPartitionTheCorpus(t *testing.T) {
 	for shard := range workers {
 		dst := filepath.Join(scratch, "shard")
 		dst = filepath.Join(dst, string(rune('a'+shard)))
-		require.NoError(t, shardCorpusRoot(root, dst, vectorShard, shard))
+		if err := shardCorpusRoot(
+			root, dst, vectorShard, shard,
+		); err != nil {
+			// Linking can be refused on Windows without the symlink
+			// privilege; replayCorpusSharded falls back to one replay there.
+			if runtime.GOOS == "windows" {
+				t.Skipf("corpus links unavailable: %v", err)
+			}
+			require.NoError(t, err)
+		}
 		found := make([]string, 0)
 		for _, sub := range []string{"eras", "synthetic"} {
 			paths, err := conformance.CollectVectorFiles(
