@@ -13,6 +13,7 @@ current branch.
 
 | Question | Source |
 | --- | --- |
+| How do I decode or enable block producer version signalling? | [CIP-0203 payload](cip-0203.md) |
 | How do I build, configure, or run Dingo? | The repository [README](../README.md) and [`dingo.yaml.example`](../dingo.yaml.example) |
 | How are components wired and what owns a behavior? | [Architecture](../ARCHITECTURE.md) |
 | How are storage, schemas, and persisted formats designed? | [Database reference](../DATABASE.md) |

@@ -1000,9 +1000,9 @@ DELETE FROM utxo WHERE id IN (` +
 
 // queueOverlayRelations queues out's asset rows. Asset ids are the ones
 // reserved at creation, so an elided output's assets leave the same gap in
-// the id sequence that inserting and deleting them would. It queues no
-// utxo_address row: the overlay runs only in core storage mode, which does
-// not index UTxO addresses.
+// the id sequence that inserting and deleting them would. Retained API
+// overlays write address rows in writeOverlay; core overlays do not index
+// UTxO addresses.
 func queueOverlayRelations(
 	rows *rowBatch,
 	out *overlayOutput,
@@ -1371,7 +1371,12 @@ func (s *Store) replayStakeSegments(
 			if err != nil {
 				return err
 			}
-			if utxo == 0 && !st.account.existedAt(pending.slot) {
+			exists := st.account.existedAt(pending.slot)
+			if o.retainHistory {
+				// Retained closures cannot create or delete accounts.
+				exists = st.account.exists
+			}
+			if utxo == 0 && !exists {
 				st.id = 0
 				st.hasTotal = false
 				st.utxo = 0

@@ -73,7 +73,8 @@ func (n *Node) chainsyncSyncTarget(
 func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 	healthGeneration := n.health.currentGeneration()
 	return ledger.LedgerStateConfig{
-		Consensus: n.selectedConsensusProvider(),
+		Consensus:      n.selectedConsensusProvider(),
+		CIP0203Enabled: n.config.cip0203Enabled,
 		ConsensusStateRestoredFunc: func() {
 			if ref := n.leaderSchedulerRef.Load(); ref != nil &&
 				ref.scheduler != nil {

@@ -16,8 +16,8 @@ package ledger
 
 import (
 	"testing"
-	"time"
 
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
@@ -47,9 +47,9 @@ func TestStreamModeDerivesAccountExpiration(t *testing.T) {
 	enableDelegatorInactivity(live, window)
 	live.startLiveLoop(t)
 	require.NoError(t, live.cm.PrimaryChain().AddBlocks(t.Context(), blocks))
-	require.Eventually(t, func() bool {
+	testutil.WaitForCondition(t, func() bool {
 		return pointMatches(live.ls.Tip().Point, last)
-	}, 5*time.Second, 10*time.Millisecond)
+	}, testutil.AsyncWait, "live fixture reaches its committed tip")
 
 	stream := newExternalIngestHarness(t, false)
 	enableDelegatorInactivity(stream, window)

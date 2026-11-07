@@ -47,6 +47,9 @@ func testLeiosRetainedUtxoFallback(t *testing.T, store *Store) {
 	enabled, err := store.EnableLeiosClosureUtxoOverlay(acc, txn, transactions)
 	require.NoError(t, err)
 	require.False(t, enabled)
+	count, err := store.PrepareLeiosClosureBatch(acc, txn, transactions)
+	require.NoError(t, err)
+	require.Equal(t, len(transactions), count)
 	for i, tx := range transactions {
 		require.NoError(t, store.SetTransactionLeiosClosureBatched(tx, ocommon.Point{Slot: 100, Hash: overlayTxID(0x53, 0)}, uint32(i), nil, true, nil, acc, txn, 0))
 	}

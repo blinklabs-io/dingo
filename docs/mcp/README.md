@@ -959,7 +959,7 @@ MCP Resources allow LLMs to passively read context without invoking functions:
 
 | Resource URI | Description |
 | --- | --- |
-| `dingo://docs/identity` | Complete guide to Dingo's on-chain block fingerprint (`BlockHeaderProtocolMinor = 69`), OpCert sequence tracking, and peer handshakes. |
+| `dingo://docs/identity` | Complete guide to Dingo's on-chain block fingerprint (identifier 69, with an optional CIP-0203 release-version payload), OpCert sequence tracking, and peer handshakes. |
 | `dingo://docs/faq` | Frequently asked questions covering Dingo architecture, storage modes (`core` vs `api`), Mithril fast-sync, and tool usage. |
 | `dingo://docs/architecture` | Detailed breakdown of Ouroboros Praos consensus, Plutus interpreter, block forging, and Badger/SQLite storage subsystems. |
 | `dingo://node/status` | Current tip, sync status, critical index readiness, background index maintenance, and post-backfill statistics status. |
