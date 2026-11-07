@@ -11666,7 +11666,7 @@ In the deferred state startup still loads the credential material, checks the
 opcert's cold-key signature, and arms the same protocol lifetime — it skips
 only the slot-dependent plausibility check. Enforcement is then entirely the
 per-slot runtime gate described below, which re-derives the period at each
-candidate slot and rejects the certificate before leader selection whenever
+wall-clock slot and rejects the certificate before leader selection whenever
 that period falls outside the admitted half-open interval stated below. The
 skew from extrapolating through the newest confirmed era is not itself the
 safety argument: it moves the computed period downward, which places a
@@ -11675,11 +11675,16 @@ mild downward skew can move an already-expired period back inside
 `[opcertStart, opcertStart + MaxKESEvolutions)`. What fails closed is the
 interval test itself, applied to every candidate slot. When confirmed
 history does span the wall clock, the strict startup check runs unchanged
-and rejects such a certificate outright. Before leader selection at each
-candidate slot, the runtime gate admits exactly the half-open interval
+and rejects such a certificate outright. At the start of each production slot,
+before chain-state gates or leader selection can return early, the runtime gate
+advances the KES key to the wall-clock period and admits exactly the half-open interval
 `[opcertStart, opcertStart + MaxKESEvolutions)`: periods
 before the start and at or after the exclusive end both log/count a
 could-not-forge disposition before Praos, Leios, or ranking-block work.
+Reaching the exclusive end zeroizes and removes the active local signing key,
+or drops the node's handle to a remote signer, so later slots cannot retain an
+expired hot-key capability. A credential rotation that lands later in the same
+slot is advanced again before leader selection.
 The start, expiry, current-period, and remaining-period gauges use that same
 protocol lifetime; the KES key's `2^depth` cryptographic capacity remains a
 separate upper bound rather than an operational lifetime.
@@ -11769,7 +11774,8 @@ custom builders, which cannot consume the package-private snapshot. The
 `DefaultBlockBuilder` receives the exact snapshot and performs the same check
 before returning, so provider-triggered reloads cannot publish a block assembled
 from shared mutable credentials. KES evolution advances the still-current owner
-and its private snapshot before provider callbacks; VRF proof, opcert fields,
+at every production slot and advances its private snapshot before provider
+callbacks; VRF proof, opcert fields,
 and KES signature are then derived only from that snapshot. A concurrent reload
 that linearizes after a generation check may coexist with the old snapshot, but
 cannot mutate it or mix its cryptographic inputs. The pool ID and VRF
@@ -11903,7 +11909,9 @@ stays reserved for a block self-validation found invalid.
 
 VRF signing keys, KES signing keys, and operational certificates are loaded from
 files at startup. The `keystore` package handles platform-specific file
-permission checks (Unix file modes, Windows ACLs) and KES key evolution.
+permission checks (Unix file modes, Windows ACLs). The production forger
+advances `PoolCredentials` on every wall-clock slot and retires the signing
+handle at operational-certificate expiry.
 
 VRF and KES secret-key loads check permissions on the open file handle and
 reject group/other access on Unix or insecure DACL grants on Windows before

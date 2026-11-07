@@ -1171,6 +1171,64 @@ func (f *BlockForger) checkAndForgeProduction(ctx context.Context) error {
 		return fmt.Errorf("failed to get current slot: %w", err)
 	}
 
+	// Advance the KES state on every wall-clock slot, before any chain gate or
+	// leader selection can return early. This is the forward-security
+	// boundary: a slot that this pool does not lead still retires the previous
+	// signing period, and the first period outside the operational
+	// certificate's half-open lifetime erases the active signing handle.
+	slotsPerKESPeriod := f.slotClock.SlotsPerKESPeriod()
+	if slotsPerKESPeriod == 0 {
+		return errors.New("slots per KES period is zero")
+	}
+	kesPeriod, err := CurrentKESPeriod(currentSlot, slotsPerKESPeriod)
+	if err != nil {
+		return err
+	}
+	opCertStart, maxEvolutions, opCertExpiry, stateErr := f.creds.updateKESForSlot(
+		kesPeriod,
+	)
+	metricsGeneration := f.creds.acquireCredentialGeneration()
+	f.updateKESMetrics(kesPeriod, metricsGeneration)
+	metricsGeneration.release()
+	if stateErr != nil && (maxEvolutions == 0 || opCertExpiry == 0) {
+		f.incCouldNotForge()
+		f.logger.Error(
+			"forge skip: KES protocol lifetime is not validated",
+			"slot", currentSlot,
+			"current_kes_period", kesPeriod,
+			"error", stateErr,
+		)
+		return nil
+	}
+	if kesPeriod < opCertStart {
+		f.incCouldNotForge()
+		f.logger.Error(
+			"forge skip: operational certificate is not yet valid",
+			"slot", currentSlot,
+			"current_kes_period", kesPeriod,
+			"opcert_start_period", opCertStart,
+			"opcert_expiry_period", opCertExpiry,
+			"max_kes_evolutions", maxEvolutions,
+		)
+		return nil
+	}
+	if kesPeriod >= opCertExpiry {
+		f.incCouldNotForge()
+		f.logger.Error(
+			"forge skip: operational certificate expired; rotate the operational certificate",
+			"slot", currentSlot,
+			"current_kes_period", kesPeriod,
+			"opcert_start_period", opCertStart,
+			"opcert_expiry_period", opCertExpiry,
+			"max_kes_evolutions", maxEvolutions,
+		)
+		return nil
+	}
+	if stateErr != nil {
+		f.incCouldNotForge()
+		return fmt.Errorf("failed to update KES period: %w", stateErr)
+	}
+
 	// One reading of the evidence the tip gates decide this slot from, and
 	// one verdict computed from it. evaluateTipGates is the single function
 	// that decides a slot against the applied, selected-block, and admitted
@@ -1258,7 +1316,7 @@ func (f *BlockForger) checkAndForgeProduction(ctx context.Context) error {
 	// was established to lead. Two kinds of refusal increment it before the
 	// leader check -- the slot battle lost under the forge fence, where the
 	// fence itself establishes that this node led the slot, and the three
-	// forging-key validity gates below (KES protocol lifetime, operational
+	// forging-key validity gates above (KES protocol lifetime, operational
 	// certificate not yet valid, operational certificate expired), which have
 	// to run before Praos leader selection so nothing is signed with a key
 	// that cannot sign. Because checkAndForgeProduction runs once per slot,
@@ -1507,43 +1565,6 @@ func (f *BlockForger) checkAndForgeProduction(ctx context.Context) error {
 		return nil
 	}
 
-	// Compute and enforce the protocol KES lifetime before Praos leader
-	// selection, Leios work, or ranking-block construction. The expiry was
-	// checked for overflow when the production forger was created, so these
-	// comparisons cannot wrap.
-	//
-	// The three refusals below are the exception to the rule stated at the
-	// tipAheadOfSlot gate above: they increment could_not_forge without a
-	// leader check behind them, and because checkAndForgeProduction runs once
-	// per slot they increment on EVERY slot that reaches them while the keys
-	// are invalid, not once per leader slot. The counter is therefore a
-	// lost-block count only while the forging keys are valid; an expired or
-	// not-yet-valid operational certificate drives it to one per slot, about
-	// 1/(sigma*f) times the blocks actually lost. The KES gauges updated just
-	// above (currentKESPeriod against the opcert start/expiry periods, and
-	// remainingKESPeriods) and the Error lines here are the unambiguous
-	// signal for that failure.
-	//
-	// The cardano-node comparison differs per gate rather than across the set.
-	// Not-yet-valid is PraosCannotForgeKeyNotUsableYet, which reaches the same
-	// Forge.could-not-forge counter but only from the leader branch of
-	// checkShouldForge, so it differs from this code in frequency alone and
-	// parity means fixing the frequency, not moving the series. Expired is
-	// caught before the leader check by HotKey.evolveKey poisoning the key,
-	// and is reported on Forge.StateUpdateError with the KES gauges instead,
-	// at the same per-slot frequency -- so parity there means the opposite,
-	// leaving the frequency and taking it off this counter. The
-	// lifetime-validation failure has no analogue on either series.
-	// ARCHITECTURE.md carries the full rule with the file references on both
-	// sides.
-	slotsPerKESPeriod := f.slotClock.SlotsPerKESPeriod()
-	if slotsPerKESPeriod == 0 {
-		return errors.New("slots per KES period is zero")
-	}
-	kesPeriod, err := CurrentKESPeriod(currentSlot, slotsPerKESPeriod)
-	if err != nil {
-		return err
-	}
 	generation := f.creds.acquireCredentialGeneration()
 	generationReleased := false
 	defer func() {
@@ -1551,47 +1572,22 @@ func (f *BlockForger) checkAndForgeProduction(ctx context.Context) error {
 			generation.release()
 		}
 	}()
-	f.updateKESMetrics(kesPeriod, generation)
-	opCertStart, maxEvolutions, opCertExpiry, policyErr := generation.validatedKESProtocolLifetime()
-	if policyErr != nil {
+	if err := generation.validateKESPeriod(kesPeriod); err != nil {
 		f.incCouldNotForge()
 		f.logger.Error(
-			"forge skip: KES protocol lifetime is not validated",
+			"forge skip: credential generation became invalid before leader selection",
 			"slot", currentSlot,
-			"current_kes_period", kesPeriod,
 			"credential_generation", generation.id,
-			"error", policyErr,
+			"error", err,
 		)
 		return nil
 	}
-	if kesPeriod < opCertStart {
+	// A credential rotation can land after this slot's unconditional KES
+	// update. Advance the newly selected generation before leader selection as
+	// well, so the replacement cannot reintroduce an older signing period.
+	if err := generation.updateKESPeriod(kesPeriod); err != nil {
 		f.incCouldNotForge()
-		f.logger.Error(
-			"forge skip: operational certificate is not yet valid",
-			"slot", currentSlot,
-			"current_kes_period", kesPeriod,
-			"opcert_start_period", opCertStart,
-			"opcert_expiry_period", opCertExpiry,
-			"max_kes_evolutions", maxEvolutions,
-		)
-		return nil
-	}
-	if kesPeriod >= opCertExpiry {
-		f.incCouldNotForge()
-		f.logger.Error(
-			"forge skip: operational certificate expired; rotate the operational certificate",
-			"slot",
-			currentSlot,
-			"current_kes_period",
-			kesPeriod,
-			"opcert_start_period",
-			opCertStart,
-			"opcert_expiry_period",
-			opCertExpiry,
-			"max_kes_evolutions",
-			maxEvolutions,
-		)
-		return nil
+		return fmt.Errorf("failed to update KES period: %w", err)
 	}
 
 	// Check if we're the leader for this slot only after the KES gate.
@@ -1978,12 +1974,6 @@ func (f *BlockForger) checkAndForgeProduction(ctx context.Context) error {
 			"tx_count", forgeTxCount,
 		)
 	}()
-
-	// Ensure KES key is at correct period
-	if err := generation.updateKESPeriod(kesPeriod); err != nil {
-		f.incCouldNotForge()
-		return fmt.Errorf("failed to update KES period: %w", err)
-	}
 
 	// Build the block. A ledger publication landing during transaction
 	// selection invalidates the candidate; buildBlockForSlot re-selects
