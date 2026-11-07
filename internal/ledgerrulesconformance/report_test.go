@@ -17,14 +17,140 @@ package ledgerrulesconformance
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	"github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 )
+
+func TestApplyFixtureReferenceScriptLimit(t *testing.T) {
+	t.Parallel()
+	inputA, utxoA := fixtureReferenceScriptInput(t, 0x01, 30)
+	inputB, utxoB := fixtureReferenceScriptInput(t, 0x02, 30)
+	inputC, utxoC := fixtureReferenceScriptInput(t, 0x03, 60)
+	state := fixtureReferenceScriptState(utxoA, utxoB, utxoC)
+	limit := uint64(50)
+
+	for _, tc := range []struct {
+		name       string
+		tx         *conway.ConwayTransaction
+		limit      *uint64
+		priorError error
+		wantLimit  bool
+	}{
+		{
+			name: "single spent input over limit",
+			tx: fixtureReferenceScriptTx(
+				[]shelley.ShelleyTransactionInput{inputC},
+				nil,
+			),
+			limit:     &limit,
+			wantLimit: true,
+		},
+		{
+			name: "summed reference inputs over limit",
+			tx: fixtureReferenceScriptTx(
+				nil,
+				[]shelley.ShelleyTransactionInput{inputA, inputB},
+			),
+			limit:     &limit,
+			wantLimit: true,
+		},
+		{
+			name:  "exactly at limit",
+			tx:    fixtureReferenceScriptTx(nil, []shelley.ShelleyTransactionInput{inputA}),
+			limit: new(uint64(30)),
+		},
+		{
+			name:  "fixture limit absent",
+			tx:    fixtureReferenceScriptTx(nil, []shelley.ShelleyTransactionInput{inputA, inputB}),
+			limit: nil,
+		},
+		{
+			name: "prior ledger error wins",
+			tx: fixtureReferenceScriptTx(
+				nil,
+				[]shelley.ShelleyTransactionInput{inputA, inputB},
+			),
+			limit:      &limit,
+			priorError: errors.New("earlier ledger rule"),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := applyFixtureReferenceScriptLimit(
+				tc.tx,
+				state,
+				tc.limit,
+				tc.priorError,
+			)
+			var limitErr common.RefScriptSizePerTxTooLargeError
+			if errors.As(err, &limitErr) != tc.wantLimit {
+				t.Fatalf("limit error = %v, want %t: %v", errors.As(err, &limitErr), tc.wantLimit, err)
+			}
+			if tc.priorError != nil && !errors.Is(err, tc.priorError) {
+				t.Fatalf("error = %v, want prior error %v", err, tc.priorError)
+			}
+		})
+	}
+}
+
+func fixtureReferenceScriptInput(
+	t *testing.T,
+	hashByte byte,
+	scriptSize int,
+) (shelley.ShelleyTransactionInput, common.Utxo) {
+	t.Helper()
+	input := shelley.MustNewShelleyTransactionInput(
+		strings.Repeat(fmt.Sprintf("%02x", hashByte), 32),
+		0,
+	)
+	return input, common.Utxo{
+		Id: input,
+		Output: &babbage.BabbageTransactionOutput{
+			TxOutScriptRef: &common.ScriptRef{
+				Script: make(common.PlutusV3Script, scriptSize),
+			},
+		},
+	}
+}
+
+func fixtureReferenceScriptState(utxos ...common.Utxo) common.LedgerState {
+	byInput := make(map[string]common.Utxo, len(utxos))
+	for _, utxo := range utxos {
+		byInput[utxo.Id.String()] = utxo
+	}
+	return mockledger.NewLedgerStateBuilder().
+		WithUtxoById(func(input common.TransactionInput) (common.Utxo, error) {
+			utxo, ok := byInput[input.String()]
+			if !ok {
+				return common.Utxo{}, fmt.Errorf("utxo not found: %s", input)
+			}
+			return utxo, nil
+		}).
+		Build()
+}
+
+func fixtureReferenceScriptTx(
+	inputs []shelley.ShelleyTransactionInput,
+	referenceInputs []shelley.ShelleyTransactionInput,
+) *conway.ConwayTransaction {
+	return &conway.ConwayTransaction{
+		Body: conway.ConwayTransactionBody{
+			TxInputs:          conway.NewConwayTransactionInputSet(inputs),
+			TxReferenceInputs: cbor.NewSetType(referenceInputs, false),
+		},
+		TxIsValid: true,
+	}
+}
 
 func TestOutsideForecastMatchesExpectedMessage(t *testing.T) {
 	t.Parallel()

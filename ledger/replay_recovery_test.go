@@ -2242,7 +2242,7 @@ func TestTryRecoverFromTxValidationErrorRecoversDependencyClosure(
 	// This recovery test uses a synthetic Shelley-only cache. Keep the config
 	// Shelley-only so the forecast shape does not alter recovery semantics.
 	recoveryCfg := &nodeconfig.CardanoNodeConfig{}
-	err = recoveryCfg.LoadShelleyGenesisFromReader(
+	err = completeTestShelleyGenesis(recoveryCfg).LoadShelleyGenesisFromReader(
 		strings.NewReader(
 			`{"activeSlotsCoeff":0.05,"securityParam":432,"slotsPerKESPeriod":129600,"systemStart":"2022-10-25T00:00:00Z"}`,
 		),
@@ -4708,7 +4708,7 @@ func newTestShelleyGenesisCfgWithK(
 	cfg := &configcardano.CardanoNodeConfig{}
 	require.NoError(
 		t,
-		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
+		completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
 	)
 	return cfg
 }

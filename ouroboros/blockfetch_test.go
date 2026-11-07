@@ -19,7 +19,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -855,20 +854,13 @@ func smallSecurityParamCardanoConfig(
 	k int,
 ) *cardano.CardanoNodeConfig {
 	t.Helper()
-	shelleyGenesisJSON := fmt.Sprintf(
-		`{"activeSlotsCoeff": 0.05, "securityParam": %d, "systemStart": "2022-10-25T00:00:00Z"}`,
-		k,
-	)
 	cfg, err := cardano.NewCardanoNodeConfigFromEmbedFS(
 		cardano.EmbeddedConfigFS,
 		"mainnet/config.json",
 	)
 	require.NoError(t, err)
 	cfg.ByronGenesis().ProtocolConsts.K = k
-	require.NoError(
-		t,
-		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
-	)
+	cfg.ShelleyGenesis().SecurityParam = k
 	return cfg
 }
 

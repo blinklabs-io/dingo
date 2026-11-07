@@ -3123,8 +3123,8 @@ func TestVerifyTestedAcceptsSkippedGatesOnlyBesideChanges(t *testing.T) {
 
 func TestConformanceReportsRunOnlyForLinuxRelease(t *testing.T) {
 	root := repoRoot(t)
-	const datasetRevision = "95e9e7c296ca1b641c8d99af2ab7c286a90caebf"
-	const ndcLedgerRevision = "e02a9e1c7dc15cc6d618c7ffdbd41167a38de2a4"
+	const datasetRevision = "bfb004144bfdfab2ddf0cf48fd7d5731f072da52"
+	const ndcLedgerRevision = "01d11b7c1e63dfa1d4b0b39182a9f8ceaf28f3d1"
 	const uplcCorpusSHA256 = "8bd4ad4f9f4c8c6b8ffa1f06ed1db0b43043afbba77ef6a14bcfb5a52345ed3f"
 	const turboCorpusSHA256 = "821af55e3323c826b5598c964d634b46dd468014834d0e97ebdc5edb0a158576"
 

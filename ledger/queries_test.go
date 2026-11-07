@@ -1716,17 +1716,17 @@ func newTestEraHistoryCfg(t testing.TB) *cardano.CardanoNodeConfig {
 		"blockVersionData": { "slotDuration": "20000" },
 		"protocolConsts": { "k": 432 }
 	}`
-	shelleyGenesisJSON := `{
+	shelleyGenesisJSON := completeTestShelleyGenesisJSON(t, map[string]any{
 		"activeSlotsCoeff": 0.05,
-		"securityParam": 432,
-		"slotLength": 1,
-		"epochLength": 432000,
-		"systemStart": "2022-10-25T00:00:00Z"
-	}`
+		"securityParam":    432,
+		"slotLength":       1,
+		"epochLength":      432000,
+		"systemStart":      "2022-10-25T00:00:00Z",
+	}, nil)
 	cfg := &cardano.CardanoNodeConfig{}
 	err := loadByronGenesisForTest(t, cfg, strings.NewReader(byronGenesisJSON))
 	require.NoError(t, err)
-	err = cfg.LoadShelleyGenesisFromReader(
+	err = completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(
 		strings.NewReader(shelleyGenesisJSON),
 	)
 	require.NoError(t, err)
@@ -4219,7 +4219,7 @@ func TestQueryShelleyCurrentProtocolParams_IncludesRealV2CostModel(
 func cardanoNodeConfigWithMaxLovelaceSupply(t *testing.T, maxLovelaceSupply uint64) *cardano.CardanoNodeConfig {
 	t.Helper()
 	cfg := &cardano.CardanoNodeConfig{}
-	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(
+	require.NoError(t, completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(
 		fmt.Sprintf(`{"maxLovelaceSupply": %d}`, maxLovelaceSupply),
 	)))
 	return cfg

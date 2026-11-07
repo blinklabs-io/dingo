@@ -21,6 +21,7 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -77,6 +78,7 @@ func verifyBlockHeader(
 		block,
 		hex.EncodeToString(epochNonce),
 		slotsPerKesPeriod,
+		62,
 	)
 }
 
@@ -1062,15 +1064,15 @@ func newTestShelleyGenesisCfgWithSecurityParam(
 	k int,
 ) *cardano.CardanoNodeConfig {
 	t.Helper()
-	shelleyGenesisJSON := fmt.Sprintf(`{
-		"activeSlotsCoeff": 0.05,
-		"securityParam": %d,
-		"slotLength": 1,
-		"epochLength": 432000,
+	shelleyGenesisJSON := completeTestShelleyGenesisJSON(t, map[string]any{
+		"activeSlotsCoeff":  0.05,
+		"securityParam":     k,
+		"slotLength":        1,
+		"epochLength":       432000,
 		"slotsPerKESPeriod": 129600,
-		"maxKESEvolutions": 62,
-		"systemStart": "2022-10-25T00:00:00Z"
-	}`, k)
+		"maxKESEvolutions":  62,
+		"systemStart":       "2022-10-25T00:00:00Z",
+	}, nil)
 	cfg := &cardano.CardanoNodeConfig{}
 	byronGenesisJSON := fmt.Sprintf(`{
 		"blockVersionData": { "slotDuration": "20000" },
@@ -1080,11 +1082,44 @@ func newTestShelleyGenesisCfgWithSecurityParam(
 		strings.NewReader(byronGenesisJSON),
 	)
 	require.NoError(t, err)
-	err = cfg.LoadShelleyGenesisFromReader(
+	err = completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(
 		strings.NewReader(shelleyGenesisJSON),
 	)
 	require.NoError(t, err)
 	return cfg
+}
+
+func completeTestShelleyGenesisJSON(
+	t testing.TB,
+	overrides map[string]any,
+	protocolParamOverrides map[string]any,
+) string {
+	t.Helper()
+	raw, err := cardano.EmbeddedConfigFS.ReadFile("preview/shelley-genesis.json")
+	require.NoError(t, err)
+	var genesis map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(raw, &genesis))
+	genesis["genDelegs"] = json.RawMessage(`{}`)
+	genesis["updateQuorum"] = json.RawMessage(`0`)
+	for key, value := range overrides {
+		encoded, err := json.Marshal(value)
+		require.NoError(t, err)
+		genesis[key] = encoded
+	}
+	if len(protocolParamOverrides) > 0 {
+		var protocolParams map[string]json.RawMessage
+		require.NoError(t, json.Unmarshal(genesis["protocolParams"], &protocolParams))
+		for key, value := range protocolParamOverrides {
+			encoded, err := json.Marshal(value)
+			require.NoError(t, err)
+			protocolParams[key] = encoded
+		}
+		genesis["protocolParams"], err = json.Marshal(protocolParams)
+		require.NoError(t, err)
+	}
+	raw, err = json.Marshal(genesis)
+	require.NoError(t, err)
+	return string(raw)
 }
 
 // TestVerifyBlockHeaderCrypto_ByronValidated verifies that the
@@ -1981,20 +2016,20 @@ func TestVerifyBlockHeaderCrypto_WrongNonceFails(t *testing.T) {
 // so that VRF outputs found eligible there are also eligible here.
 func newHighFreqShelleyGenesisCfg(t testing.TB) *cardano.CardanoNodeConfig {
 	t.Helper()
-	shelleyGenesisJSON := `{
-		"activeSlotsCoeff": 0.99,
-		"securityParam": 432,
-		"slotLength": 1,
-		"epochLength": 432000,
+	shelleyGenesisJSON := completeTestShelleyGenesisJSON(t, map[string]any{
+		"activeSlotsCoeff":  0.99,
+		"securityParam":     432,
+		"slotLength":        1,
+		"epochLength":       432000,
 		"slotsPerKESPeriod": 129600,
-		"maxKESEvolutions": 62,
-		"systemStart": "2022-10-25T00:00:00Z"
-	}`
+		"maxKESEvolutions":  62,
+		"systemStart":       "2022-10-25T00:00:00Z",
+	}, nil)
 	cfg := &cardano.CardanoNodeConfig{}
 	byronGenesisJSON := `{"blockVersionData":{"slotDuration":"20000"},"protocolConsts":{"k":432}}`
 	err := loadByronGenesisForTest(t, cfg, strings.NewReader(byronGenesisJSON))
 	require.NoError(t, err)
-	err = cfg.LoadShelleyGenesisFromReader(
+	err = completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(
 		strings.NewReader(shelleyGenesisJSON),
 	)
 	require.NoError(t, err)
@@ -2022,29 +2057,26 @@ func newGenesisDelegateShelleyGenesisCfgWithActiveSlots(
 	activeSlotsCoeff string,
 ) *cardano.CardanoNodeConfig {
 	t.Helper()
-	shelleyGenesisJSON := `{
-		"activeSlotsCoeff": ` + activeSlotsCoeff + `,
-		"securityParam": 432,
-		"slotLength": 1,
-		"epochLength": 432000,
+	shelleyGenesisJSON := completeTestShelleyGenesisJSON(t, map[string]any{
+		"activeSlotsCoeff":  json.RawMessage(activeSlotsCoeff),
+		"securityParam":     432,
+		"slotLength":        1,
+		"epochLength":       432000,
 		"slotsPerKESPeriod": 129600,
-		"maxKESEvolutions": 62,
-		"systemStart": "2022-10-25T00:00:00Z",
-		"protocolParams": {
-			"decentralisationParam": 1
+		"maxKESEvolutions":  62,
+		"systemStart":       "2022-10-25T00:00:00Z",
+		"genDelegs": map[string]any{
+			strings.Repeat("11", 28): map[string]string{
+				"delegate": delegateHashHex,
+				"vrf":      vrfHashHex,
+			},
 		},
-		"genDelegs": {
-			"` + strings.Repeat("11", 28) + `": {
-				"delegate": "` + delegateHashHex + `",
-				"vrf": "` + vrfHashHex + `"
-			}
-		}
-	}`
+	}, map[string]any{"decentralisationParam": 1})
 	cfg := &cardano.CardanoNodeConfig{}
 	byronGenesisJSON := `{"blockVersionData":{"slotDuration":"20000"},"protocolConsts":{"k":432}}`
 	err := loadByronGenesisForTest(t, cfg, strings.NewReader(byronGenesisJSON))
 	require.NoError(t, err)
-	err = cfg.LoadShelleyGenesisFromReader(
+	err = completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(
 		strings.NewReader(shelleyGenesisJSON),
 	)
 	require.NoError(t, err)
@@ -4338,18 +4370,19 @@ func newCoeffGuardLedger(
 // output is ever below the threshold.
 func newZeroCoeffGenesisCfg(t testing.TB) *cardano.CardanoNodeConfig {
 	t.Helper()
-	zeroCoeffJSON := `{
-		"activeSlotsCoeff": 0,
-		"securityParam": 432,
+	zeroCoeffJSON := completeTestShelleyGenesisJSON(t, map[string]any{
+		"activeSlotsCoeff":  0.05,
+		"securityParam":     432,
 		"slotsPerKESPeriod": 129600,
-		"maxKESEvolutions": 62,
-		"systemStart": "2022-10-25T00:00:00Z"
-	}`
+		"maxKESEvolutions":  62,
+		"systemStart":       "2022-10-25T00:00:00Z",
+	}, nil)
 	cfg := &cardano.CardanoNodeConfig{}
 	require.NoError(
 		t,
-		cfg.LoadShelleyGenesisFromReader(strings.NewReader(zeroCoeffJSON)),
+		completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(zeroCoeffJSON)),
 	)
+	cfg.ShelleyGenesis().ActiveSlotsCoeff = cbor.Rat{Rat: big.NewRat(0, 1)}
 	return cfg
 }
 

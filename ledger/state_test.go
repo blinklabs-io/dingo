@@ -366,7 +366,7 @@ func TestProcessEpochRolloverAppliesUpdateToOwnedCopy(t *testing.T) {
 	}
 	require.NoError(
 		t,
-		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
+		completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
 	)
 
 	db, err := dbtest.NewDatabase(t, &database.Config{
@@ -625,7 +625,7 @@ func dijkstraRetentionNodeConfigWithCommitteeParameters(
 	cfg := &cardano.CardanoNodeConfig{
 		ShelleyGenesisHash: "363498d1024f84bb39d3fa9593ce391483cb40d479b87233f868d6e57c3a400d",
 	}
-	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(`{
+	require.NoError(t, completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(`{
 		"activeSlotsCoeff": 0.05,
 		"securityParam": 432,
 		"epochLength": 432000,
@@ -1196,7 +1196,7 @@ func TestSecurityParamConcurrentCurrentEraAccess(t *testing.T) {
 	cfg := &cardano.CardanoNodeConfig{}
 	require.NoError(
 		t,
-		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
+		completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
 	)
 
 	ls := &LedgerState{
@@ -1293,7 +1293,7 @@ func TestCalculateStabilityWindow_ByronEra(t *testing.T) {
 			if err := loadByronGenesisForTest(t, cfg, strings.NewReader(byronGenesisJSON)); err != nil {
 				t.Fatalf("failed to load Byron genesis: %v", err)
 			}
-			if err := cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)); err != nil {
+			if err := completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)); err != nil {
 				t.Fatalf("failed to load Shelley genesis: %v", err)
 			}
 
@@ -1391,7 +1391,7 @@ func TestCalculateStabilityWindow_ShelleyEra(t *testing.T) {
 			if err := loadByronGenesisForTest(t, cfg, strings.NewReader(byronGenesisJSON)); err != nil {
 				t.Fatalf("failed to load Byron genesis: %v", err)
 			}
-			if err := cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)); err != nil {
+			if err := completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)); err != nil {
 				t.Fatalf("failed to load Shelley genesis: %v", err)
 			}
 
@@ -1429,7 +1429,7 @@ func TestCalculateStabilityWindow_EdgeCases(t *testing.T) {
 			"securityParam": 432,
 			"systemStart": "2022-10-25T00:00:00Z"
 		}`
-		if err := cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)); err != nil {
+		if err := completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)); err != nil {
 			t.Fatalf("failed to load Shelley genesis: %v", err)
 		}
 
@@ -1501,7 +1501,7 @@ func TestCalculateStabilityWindow_EdgeCases(t *testing.T) {
 		)
 		require.NoError(
 			t,
-			cfg.LoadShelleyGenesisFromReader(
+			completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(
 				strings.NewReader(shelleyGenesisJSON),
 			),
 		)
@@ -1536,7 +1536,7 @@ func TestCalculateStabilityWindow_EdgeCases(t *testing.T) {
 		}`
 		shelleyGenesisJSON := `{
 			"activeSlotsCoeff": 0.05,
-			"securityParam": 0,
+			"securityParam": 432,
 			"systemStart": "2022-10-25T00:00:00Z"
 		}`
 
@@ -1546,10 +1546,11 @@ func TestCalculateStabilityWindow_EdgeCases(t *testing.T) {
 		)
 		require.NoError(
 			t,
-			cfg.LoadShelleyGenesisFromReader(
+			completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(
 				strings.NewReader(shelleyGenesisJSON),
 			),
 		)
+		cfg.ShelleyGenesis().SecurityParam = 0
 
 		ls := &LedgerState{
 			currentEra: eras.ShelleyEraDesc,
@@ -1595,7 +1596,7 @@ func TestCalculateStabilityWindow_ActiveSlotsCoefficientEdgeCases(
 		if err := loadByronGenesisForTest(t, cfg, strings.NewReader(byronGenesisJSON)); err != nil {
 			t.Fatalf("failed to load Byron genesis: %v", err)
 		}
-		if err := cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)); err != nil {
+		if err := completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)); err != nil {
 			t.Fatalf("failed to load Shelley genesis: %v", err)
 		}
 
@@ -1638,7 +1639,7 @@ func TestCalculateStabilityWindow_ActiveSlotsCoefficientEdgeCases(
 		if err := loadByronGenesisForTest(t, cfg, strings.NewReader(byronGenesisJSON)); err != nil {
 			t.Fatalf("failed to load Byron genesis: %v", err)
 		}
-		if err := cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)); err != nil {
+		if err := completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)); err != nil {
 			t.Fatalf("failed to load Shelley genesis: %v", err)
 		}
 
@@ -1676,7 +1677,7 @@ func TestCalculateStabilityWindow_ActiveSlotsCoefficientEdgeCases(
 		if err := loadByronGenesisForTest(t, cfg, strings.NewReader(byronGenesisJSON)); err != nil {
 			t.Fatalf("failed to load Byron genesis: %v", err)
 		}
-		if err := cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)); err != nil {
+		if err := completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)); err != nil {
 			t.Fatalf("failed to load Shelley genesis: %v", err)
 		}
 
@@ -1721,7 +1722,7 @@ func TestCalculateStabilityWindow_AllEras(t *testing.T) {
 	if err := loadByronGenesisForTest(t, cfg, strings.NewReader(byronGenesisJSON)); err != nil {
 		t.Fatalf("failed to load Byron genesis: %v", err)
 	}
-	if err := cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)); err != nil {
+	if err := completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)); err != nil {
 		t.Fatalf("failed to load Shelley genesis: %v", err)
 	}
 
@@ -1813,7 +1814,7 @@ func TestCalculateStabilityWindow_Integration(t *testing.T) {
 		if err := loadByronGenesisForTest(t, cfg, strings.NewReader(byronGenesisJSON)); err != nil {
 			t.Fatalf("failed to load Byron genesis: %v", err)
 		}
-		if err := cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)); err != nil {
+		if err := completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)); err != nil {
 			t.Fatalf("failed to load Shelley genesis: %v", err)
 		}
 
@@ -1874,7 +1875,7 @@ func TestCalculateStabilityWindow_Integration(t *testing.T) {
 		if err := loadByronGenesisForTest(t, cfg, strings.NewReader(byronGenesisJSON)); err != nil {
 			t.Fatalf("failed to load Byron genesis: %v", err)
 		}
-		if err := cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)); err != nil {
+		if err := completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)); err != nil {
 			t.Fatalf("failed to load Shelley genesis: %v", err)
 		}
 
@@ -1919,7 +1920,7 @@ func TestCalculateStabilityWindow_LargeValues(t *testing.T) {
 	if err := loadByronGenesisForTest(t, cfg, strings.NewReader(byronGenesisJSON)); err != nil {
 		t.Fatalf("failed to load Byron genesis: %v", err)
 	}
-	if err := cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)); err != nil {
+	if err := completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)); err != nil {
 		t.Fatalf("failed to load Shelley genesis: %v", err)
 	}
 
@@ -1963,7 +1964,7 @@ func newNonceReadyTestConfig(t *testing.T) *cardano.CardanoNodeConfig {
 	)
 	require.NoError(
 		t,
-		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
+		completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
 	)
 	return cfg
 }
@@ -2169,7 +2170,7 @@ func TestNextEpochNonceReadyCutoffSlot(t *testing.T) {
 	)
 	require.NoError(
 		t,
-		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
+		completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
 	)
 
 	ls := &LedgerState{
@@ -2217,7 +2218,7 @@ func TestNextEpochNonceReadyEpoch(t *testing.T) {
 	)
 	require.NoError(
 		t,
-		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
+		completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
 	)
 
 	currentSlot := uint64(1095)
@@ -2336,7 +2337,7 @@ func TestNextEpochNonceReadyEpochNotReadyBeforeCutoff(t *testing.T) {
 	)
 	require.NoError(
 		t,
-		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
+		completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
 	)
 
 	currentSlot := uint64(1085)
@@ -2461,7 +2462,7 @@ func TestNextEpochNonceReadyCutoffSlotShortEpoch(t *testing.T) {
 	)
 	require.NoError(
 		t,
-		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
+		completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
 	)
 
 	ls := &LedgerState{
@@ -3184,7 +3185,7 @@ func TestTransitionToEra_ReturnsResultWithoutMutating(t *testing.T) {
 	)
 	require.NoError(
 		t,
-		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
+		completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
 	)
 
 	// Create in-memory database
@@ -3290,7 +3291,7 @@ func TestTransitionToEra_ChainedTransitions(t *testing.T) {
 	)
 	require.NoError(
 		t,
-		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
+		completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
 	)
 
 	db, err := dbtest.NewDatabase(t, &database.Config{
@@ -3506,7 +3507,7 @@ func TestEpochRolloverResult_FieldsPopulated(t *testing.T) {
 	)
 	require.NoError(
 		t,
-		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
+		completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
 	)
 
 	db, err := dbtest.NewDatabase(t, &database.Config{
@@ -3606,7 +3607,7 @@ func TestEpochRollover_NoDeadlockDuringTransaction(t *testing.T) {
 	)
 	require.NoError(
 		t,
-		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
+		completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
 	)
 
 	db, err := dbtest.NewDatabase(t, &database.Config{
@@ -3736,7 +3737,7 @@ func TestEpochRollover_ConcurrentReaders(t *testing.T) {
 	)
 	require.NoError(
 		t,
-		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
+		completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
 	)
 
 	db, err := dbtest.NewDatabase(t, &database.Config{
@@ -4742,7 +4743,7 @@ func TestChainDensityUsesCardanoNodeFragment(t *testing.T) {
 	cfg := &cardano.CardanoNodeConfig{}
 	require.NoError(
 		t,
-		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
+		completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
 	)
 
 	db, err := dbtest.NewDatabase(t, &database.Config{
@@ -4800,7 +4801,7 @@ func TestLoadTipSeedsChainDensityFromPersistedFragment(t *testing.T) {
 	cfg := &cardano.CardanoNodeConfig{}
 	require.NoError(
 		t,
-		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
+		completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
 	)
 
 	db, err := dbtest.NewDatabase(t, &database.Config{
@@ -5008,7 +5009,7 @@ func TestPrepareEpochCacheForStartupPreservesByronPrefix(t *testing.T) {
 		require.NoError(t, loadByronGenesisForTest(t, cfg,
 			strings.NewReader(byronGenesisJSON),
 		))
-		require.NoError(t, cfg.LoadShelleyGenesisFromReader(
+		require.NoError(t, completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(
 			strings.NewReader(shelleyGenesisJSON),
 		))
 		if explicitShelleyHardFork {
@@ -6693,7 +6694,7 @@ func newActiveSlotCoeffLedgerState(
 ) *LedgerState {
 	t.Helper()
 	cfg := &cardano.CardanoNodeConfig{}
-	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(`{
+	require.NoError(t, completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(`{
 		"activeSlotsCoeff": `+coeffJSON+`,
 		"securityParam": 432,
 		"systemStart": "2022-10-25T00:00:00Z"
@@ -8116,7 +8117,7 @@ func newBoundaryRolloverLedger(
 	}
 	require.NoError(
 		t,
-		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
+		completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
 	)
 
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
@@ -8478,7 +8479,7 @@ func shelleyOnlyGenesisCfg(t testing.TB) *cardano.CardanoNodeConfig {
 		"systemStart": "2022-10-25T00:00:00Z"
 	}`
 	cfg := &cardano.CardanoNodeConfig{}
-	require.NoError(t, cfg.LoadShelleyGenesisFromReader(
+	require.NoError(t, completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(
 		strings.NewReader(shelleyGenesisJSON),
 	))
 	require.Nil(t, cfg.ByronGenesis())
@@ -10607,7 +10608,7 @@ func newMultiEraForecastCfg(
 		"blockVersionData": { "slotDuration": "20000" },
 		"protocolConsts": { "k": 1 }
 	}`)))
-	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(`{
+	require.NoError(t, completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(`{
 		"activeSlotsCoeff": 0.4,
 		"securityParam": 1,
 		"slotLength": 1,
@@ -10752,7 +10753,7 @@ func newShelleyUpdateQuorum1Cfg(t *testing.T) *cardano.CardanoNodeConfig {
 			"protocolMagic": 42
 		}
 	}`)))
-	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(`{
+	require.NoError(t, completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(`{
 		"systemStart": "2026-01-01T00:00:00Z",
 		"securityParam": 6,
 		"activeSlotsCoeff": 0.05,
@@ -10779,7 +10780,7 @@ func newAllegraAtEpoch1Cfg(t *testing.T) *cardano.CardanoNodeConfig {
 			"protocolMagic": 42
 		}
 	}`)))
-	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(`{
+	require.NoError(t, completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(`{
 		"systemStart": "2026-01-01T00:00:00Z",
 		"securityParam": 6,
 		"activeSlotsCoeff": 0.4,
@@ -10862,7 +10863,7 @@ func newAlonzoBabbageAtEpoch1Cfg(t *testing.T) *cardano.CardanoNodeConfig {
 			"protocolMagic": 42
 		}
 	}`)))
-	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(`{
+	require.NoError(t, completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(`{
 		"systemStart": "2026-01-01T00:00:00Z",
 		"securityParam": 6,
 		"activeSlotsCoeff": 0.4,

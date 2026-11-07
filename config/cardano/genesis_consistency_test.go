@@ -15,7 +15,7 @@
 package cardano
 
 import (
-	"fmt"
+	"encoding/json"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -28,6 +28,25 @@ import (
 	"github.com/blinklabs-io/plutigo/lang"
 	"github.com/stretchr/testify/require"
 )
+
+func shelleyGenesisForConsistencyTest(
+	t *testing.T,
+	overrides map[string]any,
+) []byte {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(testDataDir, "shelley-genesis.json"))
+	require.NoError(t, err)
+	var doc map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(raw, &doc))
+	for key, value := range overrides {
+		encoded, err := json.Marshal(value)
+		require.NoError(t, err)
+		doc[key] = encoded
+	}
+	out, err := json.Marshal(doc)
+	require.NoError(t, err)
+	return out
+}
 
 // Byron/Shelley security-parameter values that pass
 // validateSecurityParameters, so tests targeting an unrelated invariant in
@@ -338,15 +357,13 @@ func TestNewCardanoNodeConfigFromFileRejectsInvalidSecurityParam(t *testing.T) {
 	t.Parallel()
 
 	tmpDir := t.TempDir()
-	shelleyGenesisJSON := `{
-		"activeSlotsCoeff": 0.05,
-		"securityParam": 0,
-		"maxKESEvolutions": 62,
-		"systemStart": "2022-10-25T00:00:00Z"
-	}`
+	shelleyGenesisJSON := shelleyGenesisForConsistencyTest(
+		t,
+		map[string]any{"securityParam": 0},
+	)
 	require.NoError(t, os.WriteFile(
 		filepath.Join(tmpDir, "shelley-genesis.json"),
-		[]byte(shelleyGenesisJSON),
+		shelleyGenesisJSON,
 		0o600,
 	))
 	configJSON := `{"ShelleyGenesisFile": "shelley-genesis.json"}`
@@ -355,7 +372,7 @@ func TestNewCardanoNodeConfigFromFileRejectsInvalidSecurityParam(t *testing.T) {
 
 	_, err := NewCardanoNodeConfigFromFile(configPath)
 	require.Error(t, err)
-	require.ErrorContains(t, err, "security parameter")
+	require.ErrorContains(t, err, "securityParam")
 }
 
 func TestNewCardanoNodeConfigFromFileValidatesShelleyNonceWindow(
@@ -388,16 +405,18 @@ func TestNewCardanoNodeConfigFromFileValidatesShelleyNonceWindow(
 			t.Parallel()
 
 			tmpDir := t.TempDir()
-			shelleyGenesisJSON := fmt.Sprintf(`{
-				"activeSlotsCoeff": 1.0,
-				"securityParam": 2160,
-				"epochLength": %d,
-				"maxKESEvolutions": 62,
-				"systemStart": "2022-10-25T00:00:00Z"
-			}`, testCase.epochLength)
+			shelleyGenesisJSON := shelleyGenesisForConsistencyTest(
+				t,
+				map[string]any{
+					"activeSlotsCoeff": 1.0,
+					"securityParam":    2160,
+					"epochLength":      testCase.epochLength,
+					"maxKESEvolutions": 62,
+				},
+			)
 			require.NoError(t, os.WriteFile(
 				filepath.Join(tmpDir, "shelley-genesis.json"),
-				[]byte(shelleyGenesisJSON),
+				shelleyGenesisJSON,
 				0o600,
 			))
 			configPath := filepath.Join(tmpDir, "config.json")

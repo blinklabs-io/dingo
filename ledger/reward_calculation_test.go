@@ -6829,14 +6829,16 @@ func newRewardCalculationTestNodeConfig(
 	cfg := &cardano.CardanoNodeConfig{
 		ShelleyGenesisHash: strings.Repeat("11", 32),
 	}
-	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(`{
-		"activeSlotsCoeff": 0.1,
-		"epochLength": 100,
-		"maxLovelaceSupply": 100010000,
-		"securityParam": 10,
-		"slotLength": 1,
-		"systemStart": "2022-10-25T00:00:00Z"
-	}`)))
+	require.NoError(t, completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(
+		completeTestShelleyGenesisJSON(t, map[string]any{
+			"activeSlotsCoeff":  0.1,
+			"epochLength":       100,
+			"maxLovelaceSupply": 100010000,
+			"securityParam":     10,
+			"slotLength":        1,
+			"systemStart":       "2022-10-25T00:00:00Z",
+		}, nil),
+	)))
 	return cfg
 }
 
@@ -7737,7 +7739,7 @@ func epochBoundaryBenchNodeConfig(tb testing.TB) *cardano.CardanoNodeConfig {
 	cfg := &cardano.CardanoNodeConfig{
 		ShelleyGenesisHash: strings.Repeat("5a", 32),
 	}
-	require.NoError(tb, cfg.LoadShelleyGenesisFromReader(strings.NewReader(`{
+	require.NoError(tb, completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(`{
 		"activeSlotsCoeff": 0.05,
 		"epochLength": 432000,
 		"maxLovelaceSupply": 45000000000000000,
@@ -9464,7 +9466,7 @@ func newPrototypeGenesisRewardLedger(
 	zero := uint64(0)
 	ls.config.CardanoNodeConfig.TestShelleyHardForkAtEpoch = &zero
 	ls.currentEra = eras.ConwayEraDesc
-	require.NoError(t, ls.config.CardanoNodeConfig.
+	require.NoError(t, completeTestShelleyGenesis(ls.config.CardanoNodeConfig).
 		LoadShelleyGenesisFromReader(strings.NewReader(`{
 		"activeSlotsCoeff": 0.4,
 		"epochLength": 500,
@@ -10452,7 +10454,7 @@ func newPreviewRewardPotsTestLedger(
 	cfg := &cardano.CardanoNodeConfig{
 		ShelleyGenesisHash: strings.Repeat("11", 32),
 	}
-	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(`{
+	require.NoError(t, completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(`{
 		"activeSlotsCoeff": 0.05,
 		"epochLength": 86400,
 		"maxLovelaceSupply": 45000000000000000,
@@ -10850,7 +10852,7 @@ func TestApplyStakeRewardsConwayGenesisPerformance(t *testing.T) {
 	t.Parallel()
 	ls, db := newRewardCalculationTestLedger(t)
 	ls.currentEra = eras.ConwayEraDesc
-	require.NoError(t, ls.config.CardanoNodeConfig.
+	require.NoError(t, completeTestShelleyGenesis(ls.config.CardanoNodeConfig).
 		LoadShelleyGenesisFromReader(strings.NewReader(`{
 		"activeSlotsCoeff": 0.4,
 		"epochLength": 500,

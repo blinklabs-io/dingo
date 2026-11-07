@@ -2864,7 +2864,7 @@ func mirQuorumTestView(
 			`{"blockVersionData":{"slotDuration":"20000"},"protocolConsts":{"k":432}}`,
 		),
 	))
-	require.NoError(t, cfg.LoadShelleyGenesisFromReader(
+	require.NoError(t, completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(
 		strings.NewReader(shelleyGenesisJSON),
 	))
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
