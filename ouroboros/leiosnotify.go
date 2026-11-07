@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net"
 	"slices"
 	"sort"
 	"sync"
@@ -136,31 +137,53 @@ var errLeiosAnnouncementClockSkew = errors.New(
 )
 
 const (
-	// leiosOfferWindow and leiosOfferMaxPerPeer bound offers per connection.
-	// An honest relay offers each endorser block twice (manifest, then
-	// transactions) per slot, far below this. There is deliberately no
-	// process-wide limit and no cap on tracked connections, so neither one
-	// peer nor connection churn can lock out the others; the counters reset
-	// every window and the connection manager bounds the keys.
+	// leiosOfferWindow and leiosOfferMaxPerPeer bound offers per remote
+	// host. An honest relay offers each endorser block twice (manifest,
+	// then transactions) per slot, far below this. The budget is keyed by
+	// remote host, not connection, so reconnecting does not refresh it.
+	// At most leiosOfferMaxHosts hosts are tracked per window; further
+	// hosts share one overflow budget, so the map stays bounded and
+	// untracked hosts cannot starve the tracked ones.
 	leiosOfferWindow     = time.Minute
 	leiosOfferMaxPerPeer = 128
+	leiosOfferMaxHosts   = 4096
+	leiosOfferOverflow   = "<overflow>"
 )
 
-// admitLeiosOffer charges one offer to the connection's per-window budget.
+// leiosOfferBudgetKey returns the identity an offer budget is charged to:
+// the remote host, or the full connection string when there is none.
+func leiosOfferBudgetKey(connId ouroboros.ConnectionId) string {
+	if connId.RemoteAddr != nil {
+		if host, _, err := net.SplitHostPort(
+			connId.RemoteAddr.String(),
+		); err == nil && host != "" {
+			return host
+		}
+	}
+	return leiosConnectionIdString(connId)
+}
+
+// admitLeiosOffer charges one offer to the host's per-window budget.
 // It takes only its own small mutex, never the cache or source locks.
-func (o *Ouroboros) admitLeiosOffer(connectionID string) bool {
+func (o *Ouroboros) admitLeiosOffer(budgetKey string) bool {
 	o.leiosOfferBudgetMu.Lock()
 	defer o.leiosOfferBudgetMu.Unlock()
 	if o.leiosOfferBudget == nil {
+		// One extra slot is reserved for the overflow key, which is only
+		// inserted once leiosOfferMaxHosts keys are already tracked.
 		o.leiosOfferBudget = ratewindow.NewFixedWindow(
 			leiosOfferWindow,
 			leiosOfferMaxPerPeer,
 			0,
-			0,
+			leiosOfferMaxHosts+1,
 		)
 	}
-	return o.leiosOfferBudget.Admit(connectionID, time.Now()) ==
-		ratewindow.Admitted
+	now := time.Now()
+	decision := o.leiosOfferBudget.Admit(budgetKey, now)
+	if decision == ratewindow.PeerTrackingCapacityExceeded {
+		decision = o.leiosOfferBudget.Admit(leiosOfferOverflow, now)
+	}
+	return decision == ratewindow.Admitted
 }
 
 func (o *Ouroboros) recordInvalidLeiosAnnouncement(
@@ -1324,7 +1347,7 @@ func (o *Ouroboros) handleInvalidLeiosAnnouncement(
 // point may be recorded. It needs no shared lock: the hash must be a
 // Blake2b-256 digest and, when the ledger can convert slots to time, the
 // slot must fall inside the window an announcement for it would be accepted
-// in (not in the future, not older than the cache TTL), and the connection
+// in (not in the future, not older than the cache TTL), and the remote host
 // must be within its per-window offer budget. Offers outside it
 // are dropped without touching the endorser-block cache or the backfill
 // source table, so a peer cannot churn those structures, or evict sources
@@ -1332,12 +1355,12 @@ func (o *Ouroboros) handleInvalidLeiosAnnouncement(
 // penalized: clock skew makes edge-of-window offers legitimate.
 func (o *Ouroboros) leiosOfferedPointPlausible(
 	point ocommon.Point,
-	connId string,
+	budgetKey string,
 ) bool {
 	reason := ""
 	switch {
-	case !o.admitLeiosOffer(connId):
-		reason = "connection offer budget exceeded"
+	case !o.admitLeiosOffer(budgetKey):
+		reason = "host offer budget exceeded"
 	case len(point.Hash) != lcommon.Blake2b256Size:
 		reason = "invalid hash length"
 	case !isNilInterface(o.leiosAnnouncementLedger):
@@ -1358,7 +1381,7 @@ func (o *Ouroboros) leiosOfferedPointPlausible(
 		"dropping leios offer for implausible point",
 		"component", "network",
 		"protocol", "leios-notify",
-		"connection_id", connId,
+		"budget_key", budgetKey,
 		"slot", point.Slot,
 		"reason", reason,
 	)
@@ -1386,7 +1409,10 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 	case *oleiosnotify.MsgBlockOffer:
 		// Validate the peer-supplied point before it can touch the shared
 		// cache or its lock.
-		if !o.leiosOfferedPointPlausible(m.Point, connId) {
+		if !o.leiosOfferedPointPlausible(
+			m.Point,
+			leiosOfferBudgetKey(ctx.ConnectionId),
+		) {
 			return nil
 		}
 		o.markLeiosEndorserBlockRelayOfferFrom(m.Point, connId)
@@ -1524,7 +1550,10 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 	case *oleiosnotify.MsgBlockTxsOffer:
 		// Validate the peer-supplied point before it can touch the shared
 		// cache, the backfill-source table, or their locks.
-		if !o.leiosOfferedPointPlausible(m.Point, connId) {
+		if !o.leiosOfferedPointPlausible(
+			m.Point,
+			leiosOfferBudgetKey(ctx.ConnectionId),
+		) {
 			return nil
 		}
 		o.markLeiosEndorserBlockRelayOfferFrom(m.Point, connId)

@@ -17,9 +17,11 @@ package ouroboros
 import (
 	"bytes"
 	"fmt"
+	"net"
 	"testing"
 	"time"
 
+	ouroboros "github.com/blinklabs-io/gouroboros"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	oleiosnotify "github.com/blinklabs-io/gouroboros/protocol/leiosnotify"
 	"github.com/stretchr/testify/require"
@@ -328,9 +330,9 @@ func TestLeiosIntentOnlyReofferDoesNotTransferOwnership(t *testing.T) {
 	require.Equal(t, "other", data.relayOfferSource)
 }
 
-// TestLeiosOfferBudgetIsPerConnection proves a connection past its offer
+// TestLeiosOfferBudgetIsPerHost proves a host past its offer
 // budget is dropped before touching shared state while others still work.
-func TestLeiosOfferBudgetIsPerConnection(t *testing.T) {
+func TestLeiosOfferBudgetIsPerHost(t *testing.T) {
 	t.Parallel()
 	o := newOuroboros(OuroborosConfig{})
 	point := ocommon.Point{Slot: 1, Hash: bytes.Repeat([]byte{0x01}, 32)}
@@ -339,4 +341,51 @@ func TestLeiosOfferBudgetIsPerConnection(t *testing.T) {
 	}
 	require.False(t, o.leiosOfferedPointPlausible(point, "noisy"))
 	require.True(t, o.leiosOfferedPointPlausible(point, "honest"))
+}
+
+// TestLeiosOfferBudgetSurvivesReconnect proves connections from one remote
+// host share a budget, so reconnecting does not refresh it.
+func TestLeiosOfferBudgetSurvivesReconnect(t *testing.T) {
+	t.Parallel()
+	local := &net.TCPAddr{IP: net.ParseIP("10.0.0.1"), Port: 3001}
+	connA := ouroboros.ConnectionId{
+		LocalAddr:  local,
+		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("192.0.2.7"), Port: 40001},
+	}
+	connB := ouroboros.ConnectionId{
+		LocalAddr:  local,
+		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("192.0.2.7"), Port: 40002},
+	}
+	other := ouroboros.ConnectionId{
+		LocalAddr:  local,
+		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("192.0.2.8"), Port: 40001},
+	}
+	require.Equal(t, leiosOfferBudgetKey(connA), leiosOfferBudgetKey(connB))
+	require.NotEqual(t, leiosOfferBudgetKey(connA), leiosOfferBudgetKey(other))
+	o := newOuroboros(OuroborosConfig{})
+	point := ocommon.Point{Slot: 1, Hash: bytes.Repeat([]byte{0x01}, 32)}
+	for range leiosOfferMaxPerPeer {
+		require.True(t, o.leiosOfferedPointPlausible(point, leiosOfferBudgetKey(connA)))
+	}
+	require.False(t, o.leiosOfferedPointPlausible(point, leiosOfferBudgetKey(connB)))
+	require.True(t, o.leiosOfferedPointPlausible(point, leiosOfferBudgetKey(other)))
+}
+
+// TestLeiosOfferBudgetTrackingIsBounded proves hosts beyond the tracking cap
+// share one overflow budget instead of growing the map, and tracked hosts
+// are unaffected.
+func TestLeiosOfferBudgetTrackingIsBounded(t *testing.T) {
+	t.Parallel()
+	o := newOuroboros(OuroborosConfig{})
+	point := ocommon.Point{Slot: 1, Hash: bytes.Repeat([]byte{0x01}, 32)}
+	for i := range leiosOfferMaxHosts {
+		require.True(t, o.leiosOfferedPointPlausible(point, fmt.Sprintf("host-%d", i)))
+	}
+	for range leiosOfferMaxPerPeer {
+		require.True(t, o.leiosOfferedPointPlausible(point, "new-host-a"))
+	}
+	require.False(t, o.leiosOfferedPointPlausible(point, "new-host-b"),
+		"untracked hosts must share the overflow budget")
+	require.True(t, o.leiosOfferedPointPlausible(point, "host-0"),
+		"tracked hosts keep their own budget")
 }

@@ -5278,8 +5278,10 @@ with `is_valid` true, and the apply path decodes it so a transaction with
 transactions offers are screened before they touch the endorser-block cache or the
 backfill-source table: the hash must be 32 bytes, the slot must lie between the
 announcement clock-skew bound and the cache TTL when a ledger is wired, and each
-connection has a per-minute offer budget (no process-wide limit, so one peer
-cannot starve others). Each connection may also hold only a bounded number of
+remote host has a per-minute offer budget shared by all its connections, so
+reconnecting does not refresh it. At most 4096 hosts are tracked per window;
+further hosts share one overflow budget, which keeps the map bounded without a
+process-wide limit on tracked hosts. Each connection may also hold only a bounded number of
 intent-only cache entries and backfill-source points, replacing its own oldest
 past the cap, so one connection cannot churn others' entries; the shared global
 cache and table bounds still apply. An intent entry's owner is the connection
