@@ -2813,8 +2813,9 @@ func TestBuildBlockPropagatesEpochForSlotError(t *testing.T) {
 		"EpochNonce must not be queried when EpochForSlot fails")
 }
 
+// Not t.Parallel: sets the process-wide dingoversion.Version, which the
+// linker populates in release builds and is empty in a test binary.
 func TestBuildBlockUsesDingoProtocolMinor(t *testing.T) {
-	t.Parallel()
 	creds := setupTestCredentials(t)
 
 	tests := []struct {
@@ -2841,6 +2842,9 @@ func TestBuildBlockUsesDingoProtocolMinor(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			prior := dingoversion.Version
+			t.Cleanup(func() { dingoversion.Version = prior })
+			dingoversion.Version = "v1.2.3"
 			pparams := &conway.ConwayProtocolParameters{
 				ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
 					Major: tt.major,
@@ -2875,10 +2879,7 @@ func TestBuildBlockUsesDingoProtocolMinor(t *testing.T) {
 				CIP0203Enabled: tt.enabled,
 			})
 			wantMinor, versionErr := dingoversion.HeaderProtocolMinor(tt.enabled)
-			if versionErr != nil {
-				require.ErrorContains(t, err, "CIP-0203")
-				return
-			}
+			require.NoError(t, versionErr)
 			require.NoError(t, err)
 
 			_, blockCbor, err := builder.BuildBlock(
