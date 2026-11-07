@@ -38,6 +38,40 @@ func apiCapabilities() []plugin.Capability {
 	return ret
 }
 
+// TestWithPluginSelectionAppliesNonAPICapabilities pins that
+// WithPluginSelection's switch and syncCompatFields carry the storage and
+// consensus selections. A missing case makes the option a silent no-op, so an
+// operator's configured provider is ignored at startup. The API capabilities
+// are covered by the resolution tests below.
+func TestWithPluginSelectionAppliesNonAPICapabilities(t *testing.T) {
+	t.Parallel()
+
+	for _, capability := range []plugin.Capability{
+		plugin.CapabilityStorageBlob,
+		plugin.CapabilityStorageMetadata,
+		plugin.CapabilityConsensus,
+	} {
+		t.Run(string(capability), func(t *testing.T) {
+			t.Parallel()
+
+			cfg := NewConfig(
+				WithPluginSelection(capability, plugin.Selection{
+					Provider: "test-provider",
+					Config:   map[string]any{"port": 4242},
+				}),
+			)
+			selection, ok := cfg.pluginSelections[capability]
+			require.Truef(
+				t,
+				ok,
+				"pluginSelections has no entry for %s", capability,
+			)
+			assert.Equal(t, "test-provider", selection.Provider)
+			assert.Equal(t, map[string]any{"port": 4242}, selection.Config)
+		})
+	}
+}
+
 // TestAPIPluginSelectionResolvesEveryAPICapability covers the consumer side:
 // Node.Run and reinitializeAPIServers call apiPluginSelection for each API
 // capability before the port gate that makes it optional, so an unwired
