@@ -2218,7 +2218,9 @@ func TestSharedSQLStoreRewardStateParity(t *testing.T) {
 	gotAccountOutputs, err := store.GetRewardAccountOutputs(5, nil)
 	require.NoError(t, err)
 
-	require.NoError(t, store.DeleteRewardStateBeforeEpoch(5, nil))
+	require.NoError(t, store.DeleteRewardStateBeforeEpoch(
+		context.Background(), 5, nil,
+	))
 	_, err = store.GetRewardStakeInputs(1, nil)
 	require.NoError(t, err)
 	_, err = store.GetRewardStakeInputs(5, nil)

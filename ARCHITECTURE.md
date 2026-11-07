@@ -1152,10 +1152,13 @@ The inbound TxSubmission server applies a per-peer token bucket to the
 transaction IDs a peer offers before requesting any bodies. `Node` sets it
 through `defaultMaxTxSubmissionsPerSecond` in `newOuroborosConfig`; the
 `ouroboros` package itself leaves the limiter off when the setting is zero.
-The `TxSubmissionLogicVersion` compatibility setting defaults to
-`TxSubmissionLogicV1`. Dingo implements that per-peer inbound strategy and
-rejects `TxSubmissionLogicV2`, whose shared multi-peer coordination is not
-implemented.
+The `TxSubmissionLogicVersion` compatibility setting records the reference
+node's inbound scheduling strategy and defaults to `TxSubmissionLogicV1`.
+Both `TxSubmissionLogicV1` and `TxSubmissionLogicV2` are accepted; unknown
+values are rejected. These reference strategies share the TxSubmission wire
+protocol. Dingo's bounded per-peer inbound policy is independent of the
+reference implementation selector, including when loading the published
+Musashi configuration.
 
 On the client path, BlockFetch events carry fully decoded blocks. The ledger
 subscriber therefore buffers one eight-block chain-store commit batch; when it
@@ -7927,10 +7930,16 @@ Ordinary Praos sessions continue to use primary-chain intersection points.
   no re-sync, and a header it releases is handled as any observer header. The
   wait resolves the header's fork anchor once and reuses it until a withdrawal
   from the local chain or a ledger tip at the anchor. A membership read that a
-  chain mutation overlapped (`Chain.HoldsPointSettled` reports it unsettled) is
-  repeated up to three times, and a walk still unsettled neither holds the
-  header nor caches an anchor: taking the overlap for an absent block would
-  anchor the forecast at an older ancestor. A walk that ends at a parent that is
+  chain mutation overlapped, or that a cancelled context cut short
+  (`Chain.HoldsPointSettled` reports it unsettled), is repeated up to three
+  times unless the context has ended, in which case the wait returns the
+  context's error. Admission, the recheck before a resync, the observer wait,
+  the fork-path ancestry walk and the trusted-batch store treat a context that
+  ended during a membership read the same way: as cancellation, never as an
+  absent block, a header inside the horizon, or a disconnected header owed a
+  resync. A walk still unsettled neither holds the header nor caches an anchor:
+  taking the overlap for an absent block would anchor the forecast at an older
+  ancestor. A walk that ends at a parent that is
   neither recorded, queued, nor held by the local chain (`resolveForkAnchor`
   reports it disconnected) holds the header too, even inside the ledger tip's
   horizon, because the peer's chain leaves the local chain at an unknown point;
@@ -8534,7 +8543,9 @@ exempt from those comparisons, only from the recycler. The Limit on Patience
 is separate: a held header's wait is not charged to it, as above.
 
 The limit is exported as the `dingo_chainselection_loe_block_number` and
-`dingo_chainselection_loe_intersection_slot` gauges (0 while inactive). The
+`dingo_chainselection_loe_intersection_slot` gauges (0 while inactive). A
+scrape never waits for a ledger state transition: while a block batch holds
+one, the gauges report the last value computed outside a transition. The
 slot gauge reports the point the limit is measured from: the common point, or
 the last one the candidates shared once they stop overlapping, and 0 while the
 limit is measured from the local tip.
@@ -22078,11 +22089,21 @@ withdrawal or reward credit that re-sums a credential's live stake from the
 the flush counts the queued change once (`DATABASE.md`, "Incremental live-UTxO
 stake maintenance"). Validated blocks apply each transaction as it is validated
 and keep the per-transaction path for the donation-only delta they return. Leios
-endorser-block applies and closure-context batches also apply state immediately,
-but in API mode their accumulator groups output-address, transaction-address,
-key witness and metadata-label rows across the closure before flushing inside
-the same transaction. Those indexes are not validation inputs; assets and datums
-remain immediately readable by the next transaction. Regression tests:
+certified closures retain ordered validation and use the provider's optional
+API-detail accumulator; in API mode it groups output-address,
+transaction-address, key witness and metadata-label rows across the closure
+before flushing inside the same transaction. Those indexes are not validation
+inputs; assets and datums remain immediately readable by the next transaction.
+SQLite can additionally stage UTxO changes for a bounded plain closure through
+`metadata.LeiosClosureUtxoOverlay`: preflight changes no rows, parents and
+contexts remain immediate, and every output, spent marker and address row
+survives the final flush. Known exact reads use staged metadata; other UTxO
+readers materialize it before querying. API-detail indexes remain queued until
+the final closure flush. The shared `internal/sqlreadonly` parser classifies
+SQLite reads for both MCP and the retained overlay. Ineligible closures and
+other providers retain immediate UTxO writes. The outer metadata transaction
+owns rollback of every effect, including failures after staging begins.
+Regression tests:
 `TestApplyRowBatchingSerialEquivalence`,
 `TestApplyRowBatchingSameChunkDependencies` and
 `TestApplyRowBatchingSkipsValidatedDeltas`

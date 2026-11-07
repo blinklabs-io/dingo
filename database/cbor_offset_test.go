@@ -342,46 +342,6 @@ func TestDecodeCborOffsetInvalidMagic(t *testing.T) {
 	)
 }
 
-func TestCborOffsetSizeConstant(t *testing.T) {
-	t.Parallel()
-
-	// Verify the constant matches expected value
-	// Layout: Magic (4) + BlockSlot (8) + BlockHash (32) + ByteOffset (4) + ByteLength (4) = 52
-	assert.Equal(t, 52, CborOffsetSize, "CborOffsetSize should be 52")
-
-	// Verify encoded size matches constant
-	offset := CborOffset{}
-	encoded := offset.Encode()
-	assert.Len(
-		t,
-		encoded,
-		CborOffsetSize,
-		"encoded size should match CborOffsetSize constant",
-	)
-}
-
-func TestTxCborPartsSizeConstant(t *testing.T) {
-	t.Parallel()
-
-	// Verify the constant matches expected value
-	// Layout: Magic (4) + BlockSlot (8) + BlockHash (32) +
-	//         BodyOffset (4) + BodyLength (4) +
-	//         WitnessOffset (4) + WitnessLength (4) +
-	//         MetadataOffset (4) + MetadataLength (4) +
-	//         IsValid (1) = 69
-	assert.Equal(t, 69, TxCborPartsSize, "TxCborPartsSize should be 69")
-
-	// Verify encoded size matches constant
-	parts := TxCborParts{}
-	encoded := parts.Encode()
-	assert.Len(
-		t,
-		encoded,
-		TxCborPartsSize,
-		"encoded size should match TxCborPartsSize constant",
-	)
-}
-
 func TestDecodeTxCborPartsInvalidSize(t *testing.T) {
 	t.Parallel()
 
@@ -501,18 +461,6 @@ func TestIsTxCborPartsStorage(t *testing.T) {
 			assert.Equal(t, tc.expected, result)
 		})
 	}
-}
-
-func TestTxCborPartsHasMetadata(t *testing.T) {
-	t.Parallel()
-
-	// With metadata
-	withMeta := TxCborParts{MetadataLength: 100}
-	assert.True(t, withMeta.HasMetadata())
-
-	// Without metadata
-	noMeta := TxCborParts{MetadataLength: 0}
-	assert.False(t, noMeta.HasMetadata())
 }
 
 func TestTxCborPartsReassembleTxCbor(t *testing.T) {

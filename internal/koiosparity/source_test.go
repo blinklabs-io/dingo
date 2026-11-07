@@ -325,7 +325,11 @@ func TestDatabaseSourceCoreModePruningTiming(t *testing.T) {
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(
 		t,
-		db.Metadata().DeleteRewardStateBeforeEpoch(epoch+1, txn.Metadata()),
+		db.Metadata().DeleteRewardStateBeforeEpoch(
+			context.Background(),
+			epoch+1,
+			txn.Metadata(),
+		),
 	)
 	require.NoError(t, txn.Commit())
 

@@ -109,9 +109,9 @@ func TestTxSubmissionLogicVersion(t *testing.T) {
 			want:   TxSubmissionLogicV1,
 		},
 		{
-			name:      "V2 is not implemented",
-			config:    `{"TxSubmissionLogicVersion":"TxSubmissionLogicV2"}`,
-			wantError: `TxSubmissionLogicV2" is not supported by Dingo`,
+			name:   "V2 reference strategy",
+			config: `{"TxSubmissionLogicVersion":"TxSubmissionLogicV2"}`,
+			want:   TxSubmissionLogicV2,
 		},
 		{
 			name:      "unknown",

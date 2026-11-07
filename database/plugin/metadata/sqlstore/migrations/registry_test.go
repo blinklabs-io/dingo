@@ -43,7 +43,7 @@ func TestBackfillCheckpointIdentityMigrationTranslation(t *testing.T) {
 			t.Parallel()
 			registry, err := cachedRegistryForDialect(testCase.dialect)
 			require.NoError(t, err)
-			require.Len(t, registry, 53)
+			require.Len(t, registry, 54)
 			migration := registry[51]
 			require.Equal(t, backfillCheckpointIdentitySchemaRelease, migration.Name)
 			require.Contains(t, migration.SQL[testCase.dialect].Expand,
@@ -73,7 +73,7 @@ func TestDrepDormancySeedUsesPortableIdempotentInsert(t *testing.T) {
 			registry, err := tc.registry()
 			require.NoError(t, err)
 			require.NoError(t, validateRegistry(registry, tc.dialect))
-			require.Len(t, registry, 53)
+			require.Len(t, registry, 54)
 			migration := registry[39]
 			require.Equal(t, drepDormancyStateSchemaRelease, migration.Name)
 			seed := strings.Join(migration.SQL[tc.dialect].Expand, "\n")
@@ -302,7 +302,7 @@ func TestMySQLRegistryPrefixesPoolOpCertSequenceIndex(t *testing.T) {
 	registry, err := cachedMySQLRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "mysql"))
-	require.Len(t, registry, 53)
+	require.Len(t, registry, 54)
 
 	require.Contains(
 		t,
@@ -396,6 +396,31 @@ func TestLeiosKeyLookupIndexesTranslateForProviders(t *testing.T) {
 	require.Contains(t, mysqlSQL,
 		"ON `pool_retirement`(`pool_id`, `added_slot`)")
 	require.NotContains(t, mysqlSQL, "CREATE INDEX IF NOT EXISTS")
+}
+
+// TestRewardOutputCredentialPendingIndexSkipsMySQL pins the covering index to
+// the providers that can cover with it. MySQL indexes the blob staking_key and
+// text amount by prefix, and a prefix index never covers a column, so the
+// index would cost every reward output write and save no table fetch.
+func TestRewardOutputCredentialPendingIndexSkipsMySQL(t *testing.T) {
+	t.Parallel()
+
+	postgres, err := PostgresRegistry()
+	require.NoError(t, err)
+	require.Equal(t, rewardOutputCredentialPendingIndexSchemaRelease,
+		postgres[53].Name)
+	require.Contains(t,
+		strings.Join(postgres[53].SQL["postgres"].Expand, "\n"),
+		`ON "reward_account_output"`+"\n"+
+			`       ("credential_tag", "staking_key", "spendable", "guarded", "folded",`)
+
+	mysql, err := MySQLRegistry()
+	require.NoError(t, err)
+	require.NoError(t, validateRegistry(mysql, "mysql"))
+	require.Equal(t, rewardOutputCredentialPendingIndexSchemaRelease,
+		mysql[53].Name)
+	require.Empty(t, mysql[53].SQL["mysql"].Expand)
+	require.Empty(t, mysql[53].SQL["mysql"].Contract)
 }
 
 func TestRatificationHistoryMigrationTranslatesForProviders(t *testing.T) {

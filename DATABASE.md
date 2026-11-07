@@ -2414,6 +2414,28 @@ command returns, so a rejected batch cannot become the next run's canonical
 starting point. If the storage backend refuses that rewind, the command returns
 both errors and the database requires recovery before another load.
 
+## Retained API closure UTxO batches
+
+SQLite can stage a certified closure of at most 8,192 plain, valid,
+single-input/single-output transactions and 8 MiB of output CBOR in one metadata
+transaction. The preflight requires fresh transaction/output keys and live
+external inputs, without staking credentials, assets, pointers, datums,
+reference scripts, collateral, certificates, withdrawals, mint, governance,
+script witnesses or nested transactions. Other closures and providers use the
+ordinary ordered writer.
+
+Transaction parents and execution contexts remain immediate. Every created UTxO,
+including outputs spent inside the closure, retains its ordinary ID, spend
+markers and address row. Exact known reads resolve from the staged models; other
+UTxO readers first materialize pending UTxO and output-address rows. API indexes
+such as `address_transaction` retain their existing deferred visibility until
+the final closure flush. Read-only CTEs use the shared `internal/sqlreadonly`
+validator, also used by MCP. Unexpected writes to staged tables fail the batch
+rather than leave cached state stale. API detail rows keep their closure flush
+ordering. Validation still runs in transaction order, and a failure rolls back
+the outer metadata transaction; the core overlay's pruning behavior is
+unchanged.
+
 ## Sync-state reads
 
 SQLite, PostgreSQL and MySQL reuse the prepared statement cache for sync-state
@@ -3593,7 +3615,7 @@ process the same pointer unless the claim expires before a result is recorded.
 | `reward_pool_input` | `id`, `epoch`, `pool_key_hash`, `reward_account`, `reward_account_credential_tag`, `pledge`, `delegated_stake`, `owner_stake`, `cost`, `margin`, `delegator_count`, `blocks_produced`, `total_blocks_in_epoch`, `captured_slot`, `boundary_slot` | PK `id`; unique `(epoch, pool_key_hash)`; indexes `captured_slot`, `boundary_slot` | Per-pool metadata captured by epoch rotation. Stake totals are aggregated from the captured `reward_stake_input` credentials, independently of leader-election Mark totals; pool parameters are selected as effective during the ended epoch. Owner stake counts captured key credentials named by the effective pool registration. Block counts are stored on the row at capture time. Pools with missing or invalid registration data are excluded from reward inputs without changing `pool_stake_snapshot` or `epoch_summary`. Retained for the life of the database (see the retention note below), so it is the durable per-pool reward basis for any closed epoch. Logical join to `pool.pool_key_hash`. |
 | `reward_stake_input` | `id`, `epoch`, `pool_key_hash`, `credential_tag`, `staking_key`, `stake`, `owner`, `registered`, `captured_slot`, `boundary_slot` | PK `id`; unique `(epoch, pool_key_hash, credential_tag, staking_key)`; indexes `captured_slot`, `boundary_slot`, `(credential_tag, staking_key, epoch)` (migration v47, for per-account stake history) | Per-credential positive stake frozen by either authoritative or fallback reward snapshot capture. Authoritative capture copies from `reward_live_stake` for both gate states, applying the live account-expiration filter inside the exact SNAP-point transaction. A fallback that runs after the transaction tip has passed the snapshot slot reconstructs historical stake as needed. Check the matching `reward_snapshot.authoritative` value to distinguish the source snapshot. `owner` records whether the effective pool registration names the key credential as an owner. Capture defensively deduplicates by `(credential_tag, staking_key)` before deriving `reward_pool_input.delegated_stake` and `delegator_count`, so a corrupted credential cannot contribute to multiple pools and the persisted pool totals remain equal to the sum of their stake-input rows. |
 | `reward_pool_output` | `id`, `epoch`, `pool_key_hash`, `apparent_performance`, `optimal_reward`, `total_reward`, `leader_reward`, `member_reward_total`, `owner_stake`, `undistributed`, `unspendable`, `captured_slot`, `boundary_slot` | PK `id`; unique `(epoch, pool_key_hash)`; indexes `captured_slot`, `boundary_slot` | Persisted per-pool reward-calculation results. Replacing a provisional reward snapshot invalidates rows for the same epoch. Retained for the life of the database (see the retention note below), so it is the durable per-pool reward result for any closed epoch. |
-| `reward_account_output` | `id`, `epoch`, `credential_tag`, `staking_key`, `pool_key_hash`, `reward_type`, `amount`, `spendable`, `guarded`, `captured_slot`, `boundary_slot`, `folded` | PK `id`; unique `(epoch, credential_tag, staking_key, pool_key_hash, reward_type)`; credential indexes `(credential_tag, staking_key, spendable, epoch, pool_key_hash, reward_type)` and `(credential_tag, staking_key, spendable, guarded, epoch, pool_key_hash, reward_type)`; pending index `(spendable, guarded, folded, epoch)`; indexes `captured_slot`, `boundary_slot` | Persisted per-account reward-calculation results, invalidated together with pool outputs when snapshot inputs are replaced. `spendable = false` records deregistration; `guarded = true` records a CIP-0163 expiry guard. `folded = true` records that a credited round's row has been written to `account.reward` (see "Credited reward rounds"). Credential reward-history reads require `spendable = true AND guarded = false`, and the guarded-aware index keeps that lookup bounded. |
+| `reward_account_output` | `id`, `epoch`, `credential_tag`, `staking_key`, `pool_key_hash`, `reward_type`, `amount`, `spendable`, `guarded`, `captured_slot`, `boundary_slot`, `folded` | PK `id`; unique `(epoch, credential_tag, staking_key, pool_key_hash, reward_type)`; credential indexes `(credential_tag, staking_key, spendable, epoch, pool_key_hash, reward_type)` and `(credential_tag, staking_key, spendable, guarded, epoch, pool_key_hash, reward_type)`; pending index `(spendable, guarded, folded, epoch)`; pending-credit covering index `idx_reward_account_output_credential_pending` `(credential_tag, staking_key, spendable, guarded, folded, epoch, amount)` on SQLite and PostgreSQL (migration 54; MySQL skips it because its prefix indexes on `staking_key` and `amount` cannot cover); indexes `captured_slot`, `boundary_slot` | Persisted per-account reward-calculation results, invalidated together with pool outputs when snapshot inputs are replaced. `spendable = false` records deregistration; `guarded = true` records a CIP-0163 expiry guard. `folded = true` records that a credited round's row has been written to `account.reward` (see "Credited reward rounds"). Credential reward-history reads require `spendable = true AND guarded = false`, and the guarded-aware index keeps that lookup bounded. |
 | `reward_credit_round` | `snapshot_epoch`, `boundary_slot` | PK `snapshot_epoch`; index `boundary_slot` | One row for a reward round applied at an epoch boundary while its per-account credits remain in `reward_account_output`. Bounded relational membership lets balance readers include all pending rounds without generating a growing SQL parameter list. Rollback removes rows by `boundary_slot`; migration 31 imports the previous `sync_state` JSON list. `Database.DeleteRewardStateAfterSlot` removes rows the same way (unfolding any already-folded `reward_account_output` row for the removed round first), and `ledgerstate.ImportLedgerState`'s post-anchor sweep (see the `epoch` row above) calls it at the anchor before any import phase runs, so a round a prior local rollover already registered above the anchor does not block `saveStakeRewardOutputs` from recomputing it after import. |
 
 For Mithril imports, the certified `NewEpochState.SnapShots` Mark/Set/Go
@@ -3867,6 +3889,16 @@ Pruned at `epoch < current-3`:
 | `pool_stake_snapshot` | pools per epoch | `DeletePoolStakeSnapshotsBeforeEpoch` (CORE mode only) |
 | `reward_stake_input` | delegators per epoch | `DeleteRewardStateBeforeEpoch` (CORE mode) / `DeleteRewardStakeInputBeforeEpoch` (Koios parity observer); never in API mode |
 | `reward_account_output` | delegators per epoch | `DeleteRewardStateBeforeEpoch` (CORE mode, observer disabled only) |
+
+`cleanupOldSnapshots` calls both reward prunes with no transaction, so the
+store deletes by primary key in batches, each in its own write transaction,
+walking the table forward from the last key removed. A batch is sized from how
+long the previous full batch held the write connection, aiming at 750ms, and
+each table's settled size carries to the next prune. Block application can take
+the connection between batches. Cancelling the caller's context stops the prune
+before its next batch; the predicate is monotone in epoch and every batch is
+idempotent, so an interrupted prune is completed at the next boundary. Inside a
+caller-supplied transaction the prune is a single statement.
 
 Retained for the life of the database: `epoch`, `epoch_summary`,
 `reward_ada_pots`, `reward_snapshot`, `reward_seed_failure`,
@@ -6232,7 +6264,17 @@ pre-enactment snapshot rules.
 `GetLiveStakeInputsForPools` reads every registered credential for the requested
 pools from `reward_live_stake`, retaining zero-stake rows so an exact delegator
 count and positive reward-input set can be derived in one pass. A nonzero
-`expiryEpoch` applies the current `account.expiration_epoch` filter. The
+`expiryEpoch` applies the current `account.expiration_epoch` filter. Each row's
+stake is `total_stake` plus the credential's unfolded credits in credited
+rounds. A read of 64 or more pools totals those credits once per call, in one
+grouped read of every credential's unfolded outputs
+(`pendingRewardCreditTotals`) served by
+`idx_reward_account_output_credential_pending` alone, and adds the totals in
+Go; a smaller read, such as the retiring-pool capture, keeps a per-row
+subquery that visits only its own delegators' outputs. With no caller
+transaction the call opens a read transaction, so the totals and the pool reads
+share one snapshot and a fold committing between them cannot count a credit
+twice. The
 authoritative epoch-rollover capture uses this API only at the exact SNAP point,
 where its open transaction still has a tip at or before the snapshot slot and
 the live aggregate is therefore slot-exact.

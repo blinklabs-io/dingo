@@ -93,6 +93,7 @@ const (
 	leiosKeyLookupIndexSchemaRelease                    = "leios-key-lookup-indexes"
 	backfillCheckpointIdentitySchemaRelease             = "backfill-checkpoint-identity"
 	utxoStakingPartialIndexSchemaRelease                = "utxo-staking-partial-indexes"
+	rewardOutputCredentialPendingIndexSchemaRelease     = "reward-account-output-credential-pending-index"
 )
 
 const mithrilRewardRepairPendingKey = "mithril_reward_repair_pending"
@@ -262,6 +263,11 @@ var schemaVersions = []struct {
 	{Version: 51, Name: leiosKeyLookupIndexSchemaRelease, Dir: "v51"},
 	{Version: 52, Name: backfillCheckpointIdentitySchemaRelease, Dir: "v52"},
 	{Version: 53, Name: utxoStakingPartialIndexSchemaRelease, Dir: "v53"},
+	{
+		Version: 54,
+		Name:    rewardOutputCredentialPendingIndexSchemaRelease,
+		Dir:     "v54",
+	},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
@@ -361,6 +367,13 @@ func registryForDialect(dialect string) ([]Migration, error) {
 		if version.Name == addressTransactionCredentialKindSchemaRelease {
 			migration.BackfillRevision = "1"
 			migration.Backfill = addressTransactionCredentialKindBackfill
+		}
+		// MySQL indexes blob and text columns by prefix, and a prefix index
+		// never covers its column, so the pending-credit covering index would
+		// cost every reward output write there and save no table fetch.
+		if version.Name == rewardOutputCredentialPendingIndexSchemaRelease &&
+			dialect == "mysql" {
+			migration.SQL[dialect] = SQL{}
 		}
 		// MySQL has no partial indexes and keeps the full indexes its
 		// foreign keys require.

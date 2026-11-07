@@ -32,7 +32,7 @@ func TestValidatedBlockBatchesAPIIndexesAndKeepsStateImmediate(t *testing.T) {
 	for _, failFlush := range []bool{false, true} {
 		t.Run(fmt.Sprint(failFlush), func(t *testing.T) {
 			t.Parallel()
-			ls, db, raw := newLeiosAPIApplyTestLedger(t)
+			ls, db, raw, _ := newLeiosAPIApplyTestLedger(t)
 			address := rowBatchingBaseAddress(t, 0x21, 0x22)
 			first := newRowBatchingTx(
 				t,
