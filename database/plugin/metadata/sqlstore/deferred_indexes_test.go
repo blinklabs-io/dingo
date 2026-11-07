@@ -258,6 +258,16 @@ func TestDeferredRebuildKeepsUtxoIndexesPartial(t *testing.T) {
 	t.Parallel()
 	store := newMigratedSQLiteStore(t)
 	require.NoError(t, store.DropDeferredIndexes())
+
+	// The retained live-stake index is not part of the drop manifest, so it
+	// must still exist, partial, before any rebuild could repair it.
+	var retained string
+	require.NoError(t, store.readDB.QueryRow(
+		"SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?",
+		"idx_utxo_staking_deleted_amount",
+	).Scan(&retained))
+	require.Contains(t, retained, "WHERE staking_key IS NOT NULL")
+
 	require.NoError(t, store.BuildDeferredIndexes())
 
 	for _, column := range []string{
