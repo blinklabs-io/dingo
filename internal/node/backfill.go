@@ -1020,9 +1020,9 @@ func (b *Backfill) Run(ctx context.Context) error {
 	}
 
 	var (
-		startSlot    uint64
-		startIndex   = database.BlockInitialIndex
-		previousSlot *uint64
+		startSlot     uint64
+		startIndex    = database.BlockInitialIndex
+		previousBlock *ocommon.Point
 	)
 	now := time.Now()
 	// Mithril pre-seeds a zero-slot checkpoint before importing a fresh
@@ -1078,7 +1078,7 @@ func (b *Backfill) Run(ctx context.Context) error {
 		} else {
 			startSlot = resumePoint.Slot + 1
 			startIndex = resumeIndex + 1
-			previousSlot = &resumePoint.Slot
+			previousBlock = resumePoint
 			b.logger.Info(
 				"resuming metadata backfill",
 				"component", "backfill",
@@ -1108,7 +1108,7 @@ func (b *Backfill) Run(ctx context.Context) error {
 		iteratorEndSlot = &endSlot
 	}
 	it, err := b.db.CanonicalBlocksFromIndex(
-		ctx, startIndex, previousSlot, iteratorEndSlot,
+		ctx, startIndex, previousBlock, iteratorEndSlot,
 	)
 	if err != nil {
 		return fmt.Errorf("opening canonical block iterator: %w", err)

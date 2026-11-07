@@ -4771,14 +4771,18 @@ slot, index ID, and block hash must name one exact self-consistent canonical
 point. A legacy incomplete checkpoint without that identity restarts from the
 first index entry.
 
-Canonical index slots must increase strictly through index EOF. An explicit
-historical end slot bounds block-body replay, while entries above it still have
-their small index values read and checked for malformed or non-increasing
-mappings. Backfill marks the checkpoint complete only after that full audit.
-An unbounded mapping that jumps beyond the index-derived chain tip is also an
-error. Bounded completion therefore validates every raw mapping value and its
-order through EOF, while block bodies and metadata above the replay bound are
-intentionally not fetched.
+Canonical index slots must increase strictly through index EOF, with one
+exception: a Byron epoch boundary block shares its slot with the block after it,
+so a different, non-boundary block may repeat a boundary block's slot. That case
+is confirmed from the two blocks' metadata values; every other repeated or
+decreasing slot is an error, including on resume, where the checkpoint's point
+seeds the comparison. An explicit historical end slot bounds block-body replay,
+while entries above it still have their small index values read and checked for
+malformed or non-increasing mappings. Backfill marks the checkpoint complete
+only after that full audit. An unbounded mapping that jumps beyond the
+index-derived chain tip is also an error. Bounded completion therefore validates
+every raw mapping value and its order through EOF, while block bodies above the
+replay bound are intentionally not fetched.
 
 `Database.CountBlocksAndOldestSlot` (`database/block_inventory.go`) reads the
 retained block count and oldest retained slot from the checksummed
