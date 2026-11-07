@@ -17,6 +17,7 @@ package database
 import (
 	"encoding/binary"
 	"math/bits"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -338,4 +339,38 @@ func TestCachedBlockExtractReturnsCopy(t *testing.T) {
 
 	// Also verify the full RawBytes are intact
 	assert.Equal(t, original, block.RawBytes)
+}
+
+// TestBlockLRUCacheConcurrent drives simultaneous Put and Get calls so the
+// race detector exercises each shard's mutex-guarded map and LRU list.
+func TestBlockLRUCacheConcurrent(t *testing.T) {
+	t.Parallel()
+
+	cache := NewBlockLRUCache(100)
+	const (
+		numGoroutines = 8
+		numOperations = 50
+	)
+	var wg sync.WaitGroup
+	for id := range numGoroutines {
+		wg.Go(func() {
+			for j := range numOperations {
+				slot := uint64((id*numOperations + j) % 200)
+				hash := [32]byte{byte(id), byte(j)}
+				cache.Put(slot, hash, &CachedBlock{
+					RawBytes: []byte{byte(id), byte(j)},
+					TxIndex:  map[[32]byte]Location{},
+				})
+				_, _ = cache.Get(slot, hash)
+			}
+		})
+	}
+	wg.Wait()
+
+	hash := [32]byte{0xff}
+	block := &CachedBlock{RawBytes: []byte("final")}
+	cache.Put(999, hash, block)
+	got, ok := cache.Get(999, hash)
+	require.True(t, ok)
+	assert.Equal(t, block.RawBytes, got.RawBytes)
 }
