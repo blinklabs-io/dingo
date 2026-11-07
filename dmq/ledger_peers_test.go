@@ -214,6 +214,22 @@ func TestResolveLedgerPeersSkipsFailedDomains(t *testing.T) {
 	assert.Equal(t, []Peer{{Host: "good.example.com", Port: 3141}}, peers)
 }
 
+func TestResolveLedgerPeersRequiresResolverAndPrefix(t *testing.T) {
+	t.Parallel()
+	_, err := ResolveLedgerPeers(
+		context.Background(),
+		LedgerPeerLookup{Prefix: testPrefix},
+		[]string{"a.example.com"},
+	)
+	require.ErrorContains(t, err, "requires a resolver")
+	_, err = ResolveLedgerPeers(
+		context.Background(),
+		LedgerPeerLookup{Resolver: &fakeSRV{}},
+		[]string{"a.example.com"},
+	)
+	require.ErrorContains(t, err, "requires an SRV prefix")
+}
+
 // A lookup that never answers is cut off by the per-lookup timeout, so one
 // slow domain does not stall the rest.
 func TestResolveLedgerPeersBoundsEachLookup(t *testing.T) {
