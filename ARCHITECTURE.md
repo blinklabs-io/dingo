@@ -2810,6 +2810,22 @@ Dingo uses a dual-layer storage architecture with pluggable backends:
     -------------------------------------------------
 ```
 
+SQLite's retained API closure accumulator stages eligible payment UTxOs,
+including payments with multiple inputs or outputs, and one stake-delta segment
+per validated transaction that produces stake deltas. Input and output totals
+are bounded independently of the transaction count. Transaction parents stay immediate. A live-stake read
+barrier materializes pending UTxOs and replays segments in transaction order;
+window and final closure flushes use the same replay. The optional
+`LeiosClosureBatchPreparer` selects ordered plain-payment and unsupported
+windows. Before validating the next window it flushes an active payment overlay
+and its API rows inside the outer transaction. Without an active overlay, API
+rows stay queued until a later flush. Interior runs shorter than 32 transactions
+use immediate writes; existing admission limits remain in force. This preserves
+stake visibility, credential zero crossings and sequence IDs while combining SQL
+writes. Eligible windows cannot change account state, and the metadata query
+wrapper rejects external account mutations while staging is active. Failure in a
+later window rolls back earlier flushes too.
+
 Badger and SQLite are always compiled into Dingo. The non-default blob plugins
 (`s3` and `gcs`) and PostgreSQL/MySQL metadata providers are compiled only when
 the `dingo_extra_plugins` build tag is enabled; project builds and CI still
@@ -22108,22 +22124,27 @@ validated block runs, so stored state is identical to the per-row path. A reward
 withdrawal or reward credit that re-sums a credential's live stake from the
 `utxo` table while its delta is still queued stores the sum less that delta, so
 the flush counts the queued change once (`DATABASE.md`, "Incremental live-UTxO
-stake maintenance"). Validated blocks apply each transaction as it is validated
-and keep the per-transaction path for the donation-only delta they return. Leios
-certified closures retain ordered validation and use the provider's optional
-API-detail accumulator; in API mode it groups output-address,
-transaction-address, key witness and metadata-label rows across the closure
-before flushing inside the same transaction. Those indexes are not validation
-inputs; assets and datums remain immediately readable by the next transaction.
-SQLite can additionally stage UTxO changes for a bounded plain closure through
+stake maintenance").
+Validated blocks apply each transaction as it is validated and keep the
+per-transaction path for the donation-only delta they return. Leios certified
+closures retain ordered validation and use the provider's optional API-detail
+accumulator; in API mode it groups output-address, transaction-address, key
+witness and metadata-label rows across the closure before flushing inside the
+same transaction. Those indexes are not validation inputs; assets and datums
+remain immediately readable by the next transaction. SQLite can additionally
+stage UTxO changes for bounded plain-payment windows through
 `metadata.LeiosClosureUtxoOverlay`: preflight changes no rows, parents and
 contexts remain immediate, and every output, spent marker and address row
-survives the final flush. Known exact reads use staged metadata; other UTxO
-readers materialize it before querying. API-detail indexes remain queued until
-the final closure flush. The shared `internal/sqlreadonly` parser classifies
-SQLite reads for both MCP and the retained overlay. Ineligible closures and
-other providers retain immediate UTxO writes. The outer metadata transaction
-owns rollback of every effect, including failures after staging begins.
+survives the flush. Known exact reads use staged metadata; other UTxO readers
+materialize it before querying. Before the next window validates,
+`metadata.LeiosClosureBatchPreparer` flushes an active payment overlay and its
+API-detail indexes inside the outer transaction. The final window
+flushes before closure events are published. The shared `internal/sqlreadonly`
+parser classifies SQLite reads for both MCP and the retained overlay. Ineligible
+windows and other providers retain immediate UTxO writes. The outer metadata
+transaction owns rollback of every effect, including failures after staging
+begins.
+
 Regression tests:
 `TestApplyRowBatchingSerialEquivalence`,
 `TestApplyRowBatchingSameChunkDependencies` and

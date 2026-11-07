@@ -16,14 +16,17 @@ package ledger
 
 import (
 	"database/sql"
+	"fmt"
 	"io"
 	"log/slog"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/safedecode"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 )
@@ -273,4 +276,166 @@ func TestLeiosAPIBatchRetainsSameClosureAndRankingConflictChecks(t *testing.T) {
 	)
 	require.ErrorIs(t, err, types.ErrUtxoConflict)
 	requireLeiosApplyTestTxCount(t, rawDB, 3)
+}
+
+func TestLeiosAPIBatchStagesPaymentRunsAroundUnsupportedTransaction(
+	t *testing.T,
+) {
+	t.Parallel()
+	for _, name := range []string{"commit", "prefix-flush-failure", "suffix-failure"} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			failPrefix := name == "prefix-flush-failure"
+			failSuffix := name == "suffix-failure"
+			ls, db, raw, reg := newLeiosAPIApplyTestLedger(t)
+			enableLeiosApplyInputValidation(ls)
+			input := leiosApplyTestSeedKeyUtxo(t, db, 0xa1, 50_000_000)
+			previous, amount := input, uint64(50_000_000)
+			payloads := make([]cbor.RawMessage, 0, 65)
+			var barrier, prefixLast, last lcommon.Transaction
+			for i := range 65 {
+				rawTx, tx := leiosApplyTestSignedSpendingTx(
+					t,
+					byte(i+1),
+					previous,
+					0,
+					amount,
+				)
+				if i == 31 {
+					prefixLast = tx
+				}
+				if i == 32 {
+					var envelope []cbor.RawMessage
+					_, err := cbor.Decode(rawTx, &envelope)
+					require.NoError(t, err)
+					var witnesses map[uint]cbor.RawMessage
+					_, err = cbor.Decode(envelope[1], &witnesses)
+					require.NoError(t, err)
+					witnesses[1], err = cbor.Encode(
+						cbor.Tag{
+							Number:  258,
+							Content: []any{[]any{uint(0), pathSignerHash()}},
+						},
+					)
+					require.NoError(t, err)
+					envelope[1], err = cbor.Encode(witnesses)
+					require.NoError(t, err)
+					rawTx, err = cbor.Encode(envelope)
+					require.NoError(t, err)
+					tx, err = safedecode.DijkstraBlockTransaction(rawTx)
+					require.NoError(t, err)
+					require.Len(t, tx.Witnesses().NativeScripts(), 1)
+					barrier = tx
+				}
+				payloads = append(payloads, rawTx)
+				previous, amount, last = tx.Hash().
+					Bytes(),
+					amount-200_000-uint64(
+						i+1,
+					), tx
+			}
+			overlaySpends := func() uint64 {
+				families, err := reg.Gather()
+				require.NoError(t, err)
+				var count uint64
+				for _, family := range families {
+					if family.GetName() != "dingo_database_sql_query_duration_seconds" {
+						continue
+					}
+					for _, metric := range family.Metric {
+						for _, label := range metric.Label {
+							if label.GetName() == "query" &&
+								label.GetValue() == "BatchOverlayMarkSpent" {
+								count += metric.GetHistogram().GetSampleCount()
+							}
+						}
+					}
+				}
+				return count
+			}
+			validate := ls.currentEra.ValidateTxFunc
+			barrierValidated := false
+			ls.currentEra.ValidateTxFunc = func(tx lcommon.Transaction, slot uint64, state lcommon.LedgerState, pp lcommon.ProtocolParameters) error {
+				if tx.Hash() == barrier.Hash() {
+					barrierValidated = true
+					if overlaySpends() == 0 {
+						return fmt.Errorf(
+							"payment prefix was not materialized before unsupported transaction validation",
+						)
+					}
+				}
+				return validate(tx, slot, state, pp)
+			}
+			ls.activeEras[0].ValidateTxFunc = ls.currentEra.ValidateTxFunc
+			ls.publishSnapshotsLocked()
+			injectedFailure := "injected late-window failure"
+			if failPrefix || failSuffix {
+				failureHash := last.Hash().Bytes()
+				if failPrefix {
+					failureHash = prefixLast.Hash().Bytes()
+					injectedFailure = "injected prefix-window failure"
+				}
+				_, err := raw.Exec(
+					fmt.Sprintf(
+						`CREATE TRIGGER fail_window BEFORE INSERT ON address_transaction WHEN (SELECT hash FROM "transaction" WHERE id=NEW.transaction_id)=X'%x' BEGIN SELECT RAISE(ABORT, '%s'); END`,
+						failureHash,
+						injectedFailure,
+					),
+				)
+				require.NoError(t, err)
+			}
+			applied, err := leiosApplyTestApplyEndorserBlock(
+				t,
+				ls,
+				db,
+				leiosApplyTestRankingPoint(0xa2),
+				1,
+				1000,
+				leiosApplyTestEbHash(0xa3),
+				payloads...)
+			require.Equal(
+				t,
+				!failPrefix,
+				barrierValidated,
+				"prefix flush must succeed before unsupported validation",
+			)
+			if failPrefix || failSuffix {
+				require.ErrorContains(t, err, injectedFailure)
+				var storageErr *leiosEndorserBlockStorageError
+				require.ErrorAs(t, err, &storageErr)
+				requireLeiosApplyTestTxCount(t, raw, 0)
+				var count int
+				require.NoError(
+					t,
+					raw.QueryRow(`SELECT COUNT(*) FROM utxo`).Scan(&count),
+				)
+				require.Equal(
+					t,
+					1,
+					count,
+					"already-materialized windows must roll back",
+				)
+				spender, deleted := leiosApplyTestUtxoState(t, raw, input, 0)
+				require.Empty(t, spender)
+				require.Zero(t, deleted)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, 65, applied)
+			requireLeiosApplyTestTxCount(t, raw, 65)
+			require.GreaterOrEqual(
+				t,
+				overlaySpends(),
+				uint64(2),
+				"both payment runs must use retained staging",
+			)
+			var live int
+			require.NoError(
+				t,
+				raw.QueryRow(`SELECT COUNT(*) FROM utxo WHERE deleted_slot=0`).
+					Scan(&live),
+			)
+			require.Equal(t, 1, live)
+		})
+	}
 }
