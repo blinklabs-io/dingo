@@ -214,11 +214,14 @@ type Config struct {
 	listeners         []ListenerConfig
 
 	// Programmatic API-only fields (not in YAML/env):
-	tracing             bool
-	tracingStdout       bool
-	tracingEndpoint     string
-	tracingServiceName  string
-	tracingSampleRatio  float64
+	tracing            bool
+	tracingStdout      bool
+	tracingEndpoint    string
+	tracingServiceName string
+	tracingSampleRatio float64
+
+	tracingAlwaysSamplePools []string
+
 	ledgerPeerTarget    int
 	leiosPipelineTiming *leios.PipelineTiming
 	// Runtime-only, programmatic offchain metadata config (preserves HTTPClient)
@@ -299,6 +302,7 @@ type Config struct {
 	ledgerApplyRowBatchingEnabled                                                       bool
 	blockfetchLowWatermarkEnabled                                                       bool
 	minPoolMargin                                                                       uint
+	cip0203Enabled                                                                      bool
 	pledgeLeverageEnabled                                                               bool
 	pledgeLeverage                                                                      uint
 	fullPotRewardsEnabled, unsafeFullPotRewardsOnStandardNetworks                       bool
@@ -339,6 +343,9 @@ func (n *Node) configPopulateNetworkMagic() error {
 func (n *Node) configWrapPromRegistry() {
 	if n.config.promRegistry == nil {
 		return
+	}
+	if g, ok := n.config.promRegistry.(prometheus.Gatherer); ok {
+		n.promGatherer = g
 	}
 	// Determine the network name: prefer the configured name, fall back to
 	// reverse-lookup by network magic.
@@ -544,12 +551,35 @@ func (c *Config) experimentalLeiosNetworkingEnabled() bool {
 		c.cfg.StartEra.IsDijkstra()
 }
 
+// leiosForgingEnabled reports whether the forger emits the ouroboros-leios
+// prototype header extension (the 12-field Dijkstra header body) on every
+// ranking block and produces endorser blocks. Only a network that runs the
+// Leios prototype expects that header: Musashi, or an explicit leios run
+// mode. A Dijkstra start era is not a Leios opt-in here, because it is also
+// how a plain Dijkstra devnet starts, and cardano-node peers on such a chain
+// decode only the 10-field Praos header body.
+func (c *Config) leiosForgingEnabled() bool {
+	if c.cfg == nil {
+		return false
+	}
+	return c.isMusashiNetwork() ||
+		c.cfg.RunMode == internalconfig.RunModeLeios
+}
+
 // experimentalDijkstraEnabled reports whether the Dijkstra ledger era is
-// active. Beyond the explicit opt-ins, the Musashi and Dijkstra testnets
-// hard-fork into Dijkstra, so syncing either requires the Dijkstra era table.
-// DijkstraNet keeps the base Ouroboros protocols unless Leios is explicitly
-// enabled.
-func (c *Config) experimentalDijkstraEnabled() bool {
+// active. It is active on every network: a node that serves a chain carrying
+// Dijkstra's hard fork, or a private network that schedules it, must know the
+// era, and without a Dijkstra block or an enacted hard fork the era is never
+// entered. Leios runtime components stay gated by leiosRuntimeEnabled.
+func (*Config) experimentalDijkstraEnabled() bool {
+	return true
+}
+
+// leiosRuntimeEnabled reports whether the Leios vote and pipeline managers
+// run. Beyond the explicit opt-ins, the Musashi and Dijkstra testnets
+// hard-fork into Dijkstra and run them. DijkstraNet keeps the base Ouroboros
+// protocols unless Leios is explicitly enabled.
+func (c *Config) leiosRuntimeEnabled() bool {
 	if c.cfg == nil {
 		return false
 	}
@@ -559,6 +589,9 @@ func (c *Config) experimentalDijkstraEnabled() bool {
 }
 
 func (n *Node) configValidate() error {
+	if _, err := version.HeaderProtocolMinor(n.config.cfg.CIP0203Enabled); err != nil {
+		return err
+	}
 	// Default storageMode to "core" when unset, and validate.
 	storageMode := StorageMode(n.config.cfg.StorageMode)
 	if storageMode == "" {
@@ -824,7 +857,6 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 		// Default logger will throw away logs
 		// We do this so we don't have to add guards around every log operation
 		logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		tracingServiceName: "dingo",
 		tracingSampleRatio: 1,
 	}
 	// Apply options
@@ -982,6 +1014,7 @@ func (c *Config) syncCompatFields() {
 	c.ledgerValidateAheadEnabled = c.cfg.LedgerValidateAheadEnabled
 	c.ledgerApplyRowBatchingEnabled = c.cfg.LedgerApplyRowBatchingEnabled
 	c.blockfetchLowWatermarkEnabled = c.cfg.BlockfetchLowWatermarkEnabled
+	c.cip0203Enabled = c.cfg.CIP0203Enabled
 	c.minPoolMargin, c.pledgeLeverageEnabled, c.pledgeLeverage = c.cfg.MinPoolMargin, c.cfg.PledgeLeverageEnabled, c.cfg.PledgeLeverage
 	c.fullPotRewardsEnabled, c.unsafeFullPotRewardsOnStandardNetworks = c.cfg.FullPotRewardsEnabled, c.cfg.UnsafeFullPotRewardsOnStandardNetworks
 	c.delegatorInactivityEnabled, c.delegatorInactivity = c.cfg.DelegatorInactivityEnabled, c.cfg.DelegatorInactivity
@@ -1062,12 +1095,18 @@ func clonePluginConfig(in map[string]any) map[string]any {
 	return out
 }
 
-// WithGenesisControlGroups replaces network relay control defaults. An empty
-// non-nil slice disables defaults; nil selects the network defaults.
-func WithGenesisControlGroups(groups []topology.PeerControlGroup) ConfigOptionFunc {
+// WithGenesisControlGroups sets the trusted relay operator groups that form the
+// exclusive Genesis witness set. Dingo supplies no network defaults, so nil and
+// an empty slice both leave witness identities to the ledger, a peer snapshot,
+// or the connection address. The option copies its input.
+func WithGenesisControlGroups(
+	groups []topology.PeerControlGroup,
+) ConfigOptionFunc {
 	owned := topology.ClonePeerControlGroups(groups)
 	return func(c *Config) {
-		c.cfg.GenesisBootstrap.ControlGroups = topology.ClonePeerControlGroups(owned)
+		c.cfg.GenesisBootstrap.ControlGroups = topology.ClonePeerControlGroups(
+			owned,
+		)
 	}
 }
 
@@ -1087,6 +1126,17 @@ func WithGenesisLimitOnPatience(
 		c.cfg.GenesisBootstrap.LimitOnPatienceEnabled = enabled
 		c.cfg.GenesisBootstrap.LimitOnPatienceCapacity = capacity
 		c.cfg.GenesisBootstrap.LimitOnPatienceRate = rate
+	}
+}
+
+// WithCIP0203 enables build-version signalling in forged block headers.
+func WithCIP0203(enabled bool) ConfigOptionFunc {
+	return func(c *Config) {
+		if c.cfg == nil {
+			*c = NewConfig()
+		}
+		c.cfg.CIP0203Enabled = enabled
+		c.cip0203Enabled = enabled
 	}
 }
 
@@ -1176,6 +1226,9 @@ func NewConfigFromInternal(
 		tracingEndpoint:       cfg.TracingEndpoint,
 		tracingServiceName:    cfg.TracingServiceName,
 		tracingSampleRatio:    cfg.TracingSampleRatio,
+
+		tracingAlwaysSamplePools: cfg.TracingAlwaysSamplePools,
+
 		// The loaded config already resolved the capacity default from its
 		// run mode and network.
 		mempoolCapacitySet: true,
@@ -1354,6 +1407,14 @@ func WithTracingServiceName(name string) ConfigOptionFunc {
 func WithTracingSampleRatio(ratio float64) ConfigOptionFunc {
 	return func(c *Config) {
 		c.tracingSampleRatio = ratio
+	}
+}
+
+// WithTracingAlwaysSamplePools sets the stake pool IDs, bech32 or hex key
+// hash, whose blocks are traced regardless of the sample ratio.
+func WithTracingAlwaysSamplePools(pools []string) ConfigOptionFunc {
+	return func(c *Config) {
+		c.tracingAlwaysSamplePools = pools
 	}
 }
 
@@ -1736,8 +1797,9 @@ func WithLeiosPersistenceRetentionSlots(slots uint64) ConfigOptionFunc {
 // WithLeiosPipelineTiming overrides the provisional Leios pipeline stage
 // timing windows. CIP-0164 has not finalized these parameters, so they are
 // kept off-chain and overridable here rather than as protocol parameters.
-// When unset, leios.DefaultPipelineTiming applies. Experimental, leios
-// runMode only.
+// When unset, the one-second reference defaults are converted to the Shelley
+// slot duration, rounding up to whole slots. Explicit overrides remain slot
+// counts. Experimental, leios runMode only.
 func WithLeiosPipelineTiming(timing leios.PipelineTiming) ConfigOptionFunc {
 	return func(c *Config) {
 		t := timing

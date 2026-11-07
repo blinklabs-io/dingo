@@ -913,7 +913,10 @@ func (n *Node) initBlockForger(
 		ChainTip:        n.chainManager.PrimaryChain(),
 		EpochNonce:      epochNonceAdapter,
 		Credentials:     creds,
+		CIP0203Enabled:  n.config.cip0203Enabled,
 		TxValidator:     n.ledgerState,
+		// The 12-field prototype header body belongs to Leios networks only.
+		LeiosHeaderExtension: n.config.leiosForgingEnabled(),
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create block builder: %w", err)
@@ -998,14 +1001,18 @@ func (n *Node) initBlockForger(
 	slotClock := &slotClockAdapter{ledgerState: n.ledgerState}
 
 	// Wire Leios EB forging when the pipeline manager is available
-	// (i.e. Dijkstra era is enabled). Relay nodes and pre-Dijkstra
-	// block producers leave these nil and skip EB production.
+	// (i.e. Dijkstra era is enabled) and the network speaks Leios. Relay
+	// nodes, pre-Dijkstra block producers and plain Dijkstra networks such
+	// as DijkstraNet (cardano-node, no Leios) leave these nil and skip EB
+	// production: an announced endorser block puts the 12-field Leios
+	// header body on the ranking block, which cardano-node cannot decode.
 	var leiosChecker forging.LeiosProduceChecker
 	var leiosCerts forging.LeiosCertificateProvider
 	var leiosParent forging.LeiosParentAnnouncementProvider
 	var leiosEBCaster forging.EndorserBlockBroadcaster
 	var leiosMempool forging.MempoolProvider
-	if n.leiosPipelineManager != nil && n.ouroboros() != nil {
+	if n.config.leiosForgingEnabled() &&
+		n.leiosPipelineManager != nil && n.ouroboros() != nil {
 		adapter := &leiosPipelineAdapter{
 			mgr:              n.leiosPipelineManager,
 			chain:            n.chainManager.PrimaryChain(),

@@ -272,10 +272,9 @@ func TestLoadConwayGenesisFromReaderStopsAfterValue(t *testing.T) {
 //
 // Provenance. The preview, preprod, and mainnet values are the ones published
 // upstream at book.play.dev.cardano.org/environments/<network>/config.json,
-// checked field by field against the values below. musashi is a Blink Labs
-// network with no upstream publication, so its values are anchored only to the
-// bytes committed here; they are still worth pinning, because that is enough
-// to make an unintended edit to those bytes fail loudly.
+// checked field by field against the values below. Musashi is published at
+// book.play.dev.cardano.org/environments-pre/leios/config.json. Its genesis
+// hashes are anchored here independently of the embedded configuration too.
 //
 // The checkpoints files are Blink Labs artifacts and have no upstream
 // equivalent either. Their hashes guard the same property: the checkpoint set

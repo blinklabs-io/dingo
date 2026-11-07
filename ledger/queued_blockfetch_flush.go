@@ -20,16 +20,38 @@ import (
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
-const queuedBlockfetchMaxWait = time.Second
+// queuedBlockfetchMaxWait bounds how long an admitted queue below the batch
+// threshold may accumulate. queuedBlockfetchIdleWait ends accumulation earlier
+// once no header has joined the queue for that long: a queue that has stopped
+// growing gains nothing from the rest of the maximum, while a steady stream
+// keeps re-proving it is still growing and accumulates up to the maximum. It
+// sits above the chainsync pipeline's round trip so that ordinary inter-header
+// gaps in a flowing stream do not cut a batch short.
+const (
+	queuedBlockfetchMaxWait  = time.Second
+	queuedBlockfetchIdleWait = 250 * time.Millisecond
+)
 
 type queuedBlockfetchFlush struct {
-	head   ocommon.Point
-	cancel func()
+	head ocommon.Point
+	// deadline is the first arming's maximum; lastHeader is when a header
+	// last joined the queue. Both are guarded by queuedBlockfetchFlushMu.
+	deadline   time.Time
+	lastHeader time.Time
+	cancel     func()
+}
+
+func (ls *LedgerState) queuedBlockfetchClock() time.Time {
+	if ls.queuedBlockfetchNow != nil {
+		return ls.queuedBlockfetchNow()
+	}
+	return time.Now()
 }
 
 // armQueuedBlockfetchFlush bounds accumulation of an already admitted queue.
 // Further headers keep the first deadline: resetting it on every arrival would
-// let a slow stream postpone body fetching indefinitely.
+// let a slow stream postpone body fetching indefinitely. They only postpone
+// the idle cutoff, which never moves past that deadline.
 func (ls *LedgerState) armQueuedBlockfetchFlush() {
 	if ls.closed.Load() || ls.ctx == nil || ls.ctx.Err() != nil {
 		return
@@ -38,6 +60,7 @@ func (ls *LedgerState) armQueuedBlockfetchFlush() {
 	if count == 0 {
 		return
 	}
+	now := ls.queuedBlockfetchClock()
 	ls.queuedBlockfetchFlushMu.Lock()
 	defer ls.queuedBlockfetchFlushMu.Unlock()
 	if ls.closed.Load() {
@@ -45,12 +68,24 @@ func (ls *LedgerState) armQueuedBlockfetchFlush() {
 	}
 	if current := ls.queuedBlockfetchFlush; current != nil {
 		if pointMatches(current.head, head) {
+			current.lastHeader = now
 			return
 		}
 		current.cancel()
 	}
-	flush := &queuedBlockfetchFlush{head: head}
+	flush := &queuedBlockfetchFlush{
+		head:       head,
+		deadline:   now.Add(queuedBlockfetchMaxWait),
+		lastHeader: now,
+	}
 	ls.queuedBlockfetchFlush = flush
+	ls.scheduleQueuedBlockfetchFlushLocked(flush, queuedBlockfetchIdleWait)
+}
+
+func (ls *LedgerState) scheduleQueuedBlockfetchFlushLocked(
+	flush *queuedBlockfetchFlush,
+	delay time.Duration,
+) {
 	schedule := ls.queuedBlockfetchSchedule
 	if schedule == nil {
 		schedule = func(delay time.Duration, callback func()) func() {
@@ -58,9 +93,32 @@ func (ls *LedgerState) armQueuedBlockfetchFlush() {
 			return func() { timer.Stop() }
 		}
 	}
-	flush.cancel = schedule(queuedBlockfetchMaxWait, func() {
-		ls.flushQueuedBlockfetchAfterWait(flush)
+	flush.cancel = schedule(delay, func() {
+		ls.queuedBlockfetchFlushDue(flush)
 	})
+}
+
+// queuedBlockfetchFlushDue flushes once the queue has been idle for
+// queuedBlockfetchIdleWait or the first deadline has passed, and otherwise
+// re-arms for whichever of the two comes first.
+func (ls *LedgerState) queuedBlockfetchFlushDue(flush *queuedBlockfetchFlush) {
+	now := ls.queuedBlockfetchClock()
+	ls.queuedBlockfetchFlushMu.Lock()
+	if ls.queuedBlockfetchFlush != flush || ls.closed.Load() {
+		ls.queuedBlockfetchFlushMu.Unlock()
+		return
+	}
+	due := flush.lastHeader.Add(queuedBlockfetchIdleWait)
+	if flush.deadline.Before(due) {
+		due = flush.deadline
+	}
+	if now.Before(due) {
+		ls.scheduleQueuedBlockfetchFlushLocked(flush, due.Sub(now))
+		ls.queuedBlockfetchFlushMu.Unlock()
+		return
+	}
+	ls.queuedBlockfetchFlushMu.Unlock()
+	ls.flushQueuedBlockfetchAfterWait(flush)
 }
 
 func (ls *LedgerState) stopQueuedBlockfetchFlush() {

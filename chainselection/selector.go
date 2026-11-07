@@ -203,7 +203,14 @@ type ChainSelectorConfig struct {
 	// "" has no trustworthy independence evidence and
 	// fails closed in corroboration: it is not corroborated as a candidate
 	// and does not count as a witness. A nil hook groups by remote host.
-	PeerIdentity       func(ouroboros.ConnectionId) string
+	PeerIdentity func(ouroboros.ConnectionId) string
+	// ConnectionEligible reports whether the connection may be a Limit on
+	// Eagerness candidate, in addition to the SetConnectionEligible state. It
+	// does not gate selection or corroboration witnesses. It is called under
+	// the selector lock, so it must not call back into the selector. The node
+	// backs it with chainsync ingress admission: a peer demoted to
+	// observability-only has its headers dropped, so its fragment can freeze
+	// and it must not hold the limit. A nil hook admits every connection.
 	ConnectionEligible func(ouroboros.ConnectionId) bool
 	ConnectionPriority func(ouroboros.ConnectionId) int
 	MaxTrackedPeers    int // 0 means use DefaultMaxTrackedPeers
@@ -261,8 +268,9 @@ type ChainSelector struct {
 	peerTips        map[ouroboros.ConnectionId]*PeerChainTip
 	// deliveredPeerTips survives admission-frontier rebuilds so delivered,
 	// verified headers remain available as corroboration evidence.
-	deliveredPeerTips map[ouroboros.ConnectionId]*PeerChainTip
-	pendingPeerTips   map[ouroboros.ConnectionId][]peerTipAdmissionCandidate
+	deliveredPeerTips   map[ouroboros.ConnectionId]*PeerChainTip
+	eagernessDeliveries map[ouroboros.ConnectionId]eagernessDelivery
+	pendingPeerTips     map[ouroboros.ConnectionId][]peerTipAdmissionCandidate
 	// One rolling snapshot per peer; candidate events retain only the bounded
 	// admission updates needed to promote or rebuild that snapshot.
 	pendingPeerTipFrontiers map[ouroboros.ConnectionId]*PeerChainTip
@@ -642,15 +650,28 @@ func NewChainSelector(cfg ChainSelectorConfig) *ChainSelector {
 		cfg.MinCorroboratingPeers = 1
 	}
 	cs := &ChainSelector{
-		config:                    cfg,
-		securityParam:             cfg.SecurityParam,
-		maxTrackedPeers:           maxPeers,
-		mode:                      SelectionModePraos,
-		peerTips:                  make(map[ouroboros.ConnectionId]*PeerChainTip),
-		deliveredPeerTips:         make(map[ouroboros.ConnectionId]*PeerChainTip),
-		pendingPeerTips:           make(map[ouroboros.ConnectionId][]peerTipAdmissionCandidate),
-		pendingPeerTipFrontiers:   make(map[ouroboros.ConnectionId]*PeerChainTip),
-		forecastHorizonWitnesses:  make(map[ouroboros.ConnectionId]forecastHorizonWitness),
+		config:          cfg,
+		securityParam:   cfg.SecurityParam,
+		maxTrackedPeers: maxPeers,
+		mode:            SelectionModePraos,
+		peerTips: make(
+			map[ouroboros.ConnectionId]*PeerChainTip,
+		),
+		deliveredPeerTips: make(
+			map[ouroboros.ConnectionId]*PeerChainTip,
+		),
+		eagernessDeliveries: make(
+			map[ouroboros.ConnectionId]eagernessDelivery,
+		),
+		pendingPeerTips: make(
+			map[ouroboros.ConnectionId][]peerTipAdmissionCandidate,
+		),
+		pendingPeerTipFrontiers: make(
+			map[ouroboros.ConnectionId]*PeerChainTip,
+		),
+		forecastHorizonWitnesses: make(
+			map[ouroboros.ConnectionId]forecastHorizonWitness,
+		),
 		farTipClaims:              make(map[ouroboros.ConnectionId]farTipClaim),
 		pendingFarTipClaims:       make(map[ouroboros.ConnectionId]farTipClaim),
 		farTipRunsByIdentity:      make(map[string]farTipRunContinuity),
@@ -891,6 +912,7 @@ func (cs *ChainSelector) advanceSelectionModeWithBestKnownBlockLocked(
 		peerTip.observedPointBaseBlock = 0
 	}
 	clear(cs.deliveredPeerTips)
+	clear(cs.eagernessDeliveries)
 	cs.lastCorroborationFailedConn = nil
 	cs.config.Logger.Info(
 		"exiting Genesis selection mode",
@@ -1174,11 +1196,14 @@ func (cs *ChainSelector) updatePeerTipObservedLinkedDisposition(
 func (cs *ChainSelector) PreparePeerTipAdmission(
 	update PeerTipUpdateEvent,
 ) bool {
-	return cs.PreparePeerTipAdmissionDisposition(update) != PeerTipUpdateRejected
+	disposition := cs.PreparePeerTipAdmissionDisposition(update)
+	return disposition == PeerTipUpdateAccepted ||
+		disposition == PeerTipUpdatePending
 }
 
 // PreparePeerTipAdmissionDisposition stages a candidate and distinguishes
-// plausible headers from far-tip claims that must remain withheld.
+// plausible headers, withheld far-tip claims, and expired local verdicts
+// that require reverification before staging.
 func (cs *ChainSelector) PreparePeerTipAdmissionDisposition(
 	update PeerTipUpdateEvent,
 ) PeerTipUpdateDisposition {
@@ -1186,7 +1211,7 @@ func (cs *ChainSelector) PreparePeerTipAdmissionDisposition(
 		return PeerTipUpdateRejected
 	}
 	if !cs.peerTipAdmissionGenerationCurrent(update) {
-		return PeerTipUpdateRejected
+		return PeerTipUpdateDeferred
 	}
 	if cs.config.ConnectionLive != nil &&
 		!cs.config.ConnectionLive(update.ConnectionId) {
@@ -1205,6 +1230,7 @@ func (cs *ChainSelector) PreparePeerTipAdmissionDisposition(
 			cs.rebuildPendingAdmissionStateLocked()
 		}
 		if !cs.peerTipAdmissionGenerationCurrent(update) {
+			disposition = PeerTipUpdateDeferred
 			return
 		}
 		if update.AdmissionID <= cs.committedPeerTips[update.ConnectionId] {
@@ -1306,6 +1332,9 @@ func (cs *ChainSelector) PreparePeerTipAdmissionDisposition(
 		cs.commitPeerTipAdmission(update, true, &update, false)
 	}
 	if !accepted {
+		if disposition == PeerTipUpdateDeferred {
+			return disposition
+		}
 		return PeerTipUpdateRejected
 	}
 	cs.signalIngressChange()
@@ -1614,7 +1643,7 @@ func (cs *ChainSelector) RejectPeerTipAdmission(
 			cs.clearFarTipRunContinuityForConnLocked(update.ConnectionId)
 			cs.rebuildPendingAdmissionStateLocked()
 			cs.signalIngressChange()
-			shouldEvaluate = cs.genesisCorroborationActiveLocked()
+			shouldEvaluate = cs.mode == SelectionModeGenesis
 		}
 	}()
 	if shouldEvaluate {
@@ -1905,7 +1934,7 @@ func (cs *ChainSelector) commitPeerTipAdmission(
 			)
 			cs.peerTips[update.ConnectionId] = peerTip
 			modeChanged := cs.advanceSelectionModeLocked()
-			trackHashes := cs.genesisCorroborationActiveLocked()
+			trackHashes := cs.mode == SelectionModeGenesis
 			switch {
 			case modeChanged, trackHashes, cs.bestPeerConn == nil:
 				shouldEvaluate = true
@@ -2021,20 +2050,34 @@ func (cs *ChainSelector) pinCurrentHeaderCryptoGeneration() (func(), bool) {
 	}
 	deadline := time.Now().Add(headerCryptoGenerationStableWait)
 	for {
-		generation := cs.config.CurrentHeaderCryptoVerificationGeneration()
-		if generation != 0 {
-			release, current := cs.config.PinHeaderCryptoVerificationGeneration(
-				generation,
-			)
-			if current && release != nil {
-				return release, true
-			}
+		if release, ok := cs.tryPinCurrentHeaderCryptoGeneration(); ok {
+			return release, true
 		}
 		if !time.Now().Before(deadline) {
 			return func() {}, false
 		}
 		time.Sleep(headerCryptoGenerationPollInterval)
 	}
+}
+
+// tryPinCurrentHeaderCryptoGeneration makes a single attempt at the pin that
+// pinCurrentHeaderCryptoGeneration waits for.
+func (cs *ChainSelector) tryPinCurrentHeaderCryptoGeneration() (func(), bool) {
+	if cs.config.CurrentHeaderCryptoVerificationGeneration == nil ||
+		cs.config.PinHeaderCryptoVerificationGeneration == nil {
+		return func() {}, true
+	}
+	generation := cs.config.CurrentHeaderCryptoVerificationGeneration()
+	if generation == 0 {
+		return nil, false
+	}
+	release, current := cs.config.PinHeaderCryptoVerificationGeneration(
+		generation,
+	)
+	if !current || release == nil {
+		return nil, false
+	}
+	return release, true
 }
 
 // ResolvePeerTipAdmission promotes an accepted header or removes a rejected
@@ -3179,6 +3222,7 @@ func (cs *ChainSelector) evictLeastRecentPeerLocked() *ouroboros.ConnectionId {
 func (cs *ChainSelector) deletePeerLocked(connId ouroboros.ConnectionId) {
 	delete(cs.peerTips, connId)
 	delete(cs.deliveredPeerTips, connId)
+	delete(cs.eagernessDeliveries, connId)
 	delete(cs.pendingPeerTips, connId)
 	delete(cs.pendingPeerTipFrontiers, connId)
 	delete(cs.forecastHorizonWitnesses, connId)
@@ -3211,10 +3255,9 @@ func (cs *ChainSelector) removePeer(
 		removedTip := cs.peerTips[connId]
 		cs.deletePeerLocked(connId)
 
-		// Removing a witness can revoke the incumbent's corroboration even
-		// when the removed peer was not itself the best; force a re-evaluation
-		// so an incumbent that just lost corroboration is dropped.
-		reevaluate = cs.genesisCorroborationActiveLocked() &&
+		// Removing a competitor can move the eagerness intersection or revoke
+		// an optional quorum even when the removed peer was not the best.
+		reevaluate = cs.mode == SelectionModeGenesis &&
 			(cs.bestPeerConn == nil || *cs.bestPeerConn != connId)
 
 		if cs.bestPeerConn != nil && *cs.bestPeerConn == connId {
@@ -3945,6 +3988,16 @@ func (cs *ChainSelector) isConnectionEligible(
 		return true
 	}
 	return eligible
+}
+
+// eagernessCandidateAdmittedLocked reports whether the ConnectionEligible hook
+// admits connId as a Limit on Eagerness candidate. It is consulted only by the
+// candidate set, after the peer-governance check, so it can only exclude.
+func (cs *ChainSelector) eagernessCandidateAdmittedLocked(
+	connId ouroboros.ConnectionId,
+) bool {
+	return cs.config.ConnectionEligible == nil ||
+		cs.config.ConnectionEligible(connId)
 }
 
 func (cs *ChainSelector) connectionPriority(
@@ -4855,6 +4908,7 @@ func (cs *ChainSelector) HandlePeerRollbackEvent(evt event.Event) {
 		defer cs.mutex.Unlock()
 		delete(cs.pendingPeerTips, e.ConnectionId)
 		delete(cs.pendingPeerTipFrontiers, e.ConnectionId)
+		cs.rollbackEagernessDeliveryLocked(e.ConnectionId, e.Point)
 		if deliveredTip := cs.deliveredPeerTips[e.ConnectionId]; deliveredTip != nil {
 			deliveredTip.ApplyRollback(e.Point, e.Tip)
 		}
@@ -4905,6 +4959,7 @@ func (cs *ChainSelector) applyRollbackToTrackedPeer(e PeerRollbackEvent) bool {
 	delete(cs.pendingPeerTipFrontiers, e.ConnectionId)
 	cs.prunePeerTipRejectionReportsLocked()
 	peerTip.ApplyRollback(e.Point, e.Tip)
+	cs.rollbackEagernessDeliveryLocked(e.ConnectionId, e.Point)
 	if deliveredTip := cs.deliveredPeerTips[e.ConnectionId]; deliveredTip != nil {
 		deliveredTip.ApplyRollback(e.Point, e.Tip)
 	}
@@ -5148,6 +5203,7 @@ func (cs *ChainSelector) sweepDeadDeliveredPeerTips() {
 	for _, connId := range dead {
 		if _, tracked := cs.peerTips[connId]; !tracked {
 			delete(cs.deliveredPeerTips, connId)
+			delete(cs.eagernessDeliveries, connId)
 		}
 	}
 }

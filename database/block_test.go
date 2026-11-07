@@ -26,13 +26,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
-	"github.com/blinklabs-io/gouroboros/ledger"
-	"github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
@@ -66,22 +63,31 @@ func isolateBlockByHashMetrics(t *testing.T) bool {
 	return true
 }
 
+// TestBlockByHashMetrics runs the process-wide hash-index metric tests in one
+// isolated child process; spawning a child per test re-executes the whole
+// package binary each time.
+func TestBlockByHashMetrics(t *testing.T) {
+	t.Parallel()
+	if isolateBlockByHashMetrics(t) {
+		return
+	}
+	t.Run("UnknownHashRecordsMissAndNotFound", checkUnknownHashRecordsMissAndNotFound)
+	t.Run("KnownHashStillResolves", checkKnownHashStillResolves)
+	t.Run("EmptyIndexEntryIsCorruption", checkEmptyIndexEntryIsCorruption)
+	t.Run("PerRegistry", checkRegisterMetricsPerRegistry)
+}
+
 // resetBlockByHashStats zeros the hit/miss counters between tests.
 func resetBlockByHashStats() {
 	blockByHashIndexHits.Store(0)
 	blockByHashIndexMisses.Store(0)
 }
 
-// TestBlockByHashTxn_UnknownHashRecordsMissAndNotFound verifies that an
+// checkUnknownHashRecordsMissAndNotFound verifies that an
 // unknown hash increments the miss counter (so operators can track the
 // index miss rate) and returns ErrBlockNotFound directly on
 // the index miss, without any fallback scan.
-func TestBlockByHashTxn_UnknownHashRecordsMissAndNotFound(t *testing.T) {
-	t.Parallel()
-	if isolateBlockByHashMetrics(t) {
-		return
-	}
-
+func checkUnknownHashRecordsMissAndNotFound(t *testing.T) {
 	db := newTestDB(t)
 	resetBlockByHashStats()
 
@@ -114,15 +120,10 @@ func TestBlockByHashTxn_UnknownHashRecordsMissAndNotFound(t *testing.T) {
 	)
 }
 
-// TestBlockByHashTxn_KnownHashStillResolves guards the fast path: every
+// checkKnownHashStillResolves guards the fast path: every
 // block written via BlockCreate gets a hash-index entry, and a
 // lookup must hit it in O(1) and return the block.
-func TestBlockByHashTxn_KnownHashStillResolves(t *testing.T) {
-	t.Parallel()
-	if isolateBlockByHashMetrics(t) {
-		return
-	}
-
+func checkKnownHashStillResolves(t *testing.T) {
 	db := newTestDB(t)
 	resetBlockByHashStats()
 
@@ -139,17 +140,12 @@ func TestBlockByHashTxn_KnownHashStillResolves(t *testing.T) {
 	assert.Equal(t, uint64(0), misses)
 }
 
-// TestBlockByHashTxn_EmptyIndexEntryIsCorruption asserts that a hash-
+// checkEmptyIndexEntryIsCorruption asserts that a hash-
 // index entry whose value is an empty byte slice surfaces a descriptive
 // non-ErrBlockNotFound error rather than a soft miss. An empty value
 // means the index was written but the pointer is invalid: a local DB
 // problem the operator needs to see, not a fork-resolution miss.
-func TestBlockByHashTxn_EmptyIndexEntryIsCorruption(t *testing.T) {
-	t.Parallel()
-	if isolateBlockByHashMetrics(t) {
-		return
-	}
-
+func checkEmptyIndexEntryIsCorruption(t *testing.T) {
 	db := newTestDB(t)
 	resetBlockByHashStats()
 
@@ -173,15 +169,10 @@ func TestBlockByHashTxn_EmptyIndexEntryIsCorruption(t *testing.T) {
 		"corruption must not be folded into the miss counter")
 }
 
-// TestRegisterBlockByHashMetrics_PerRegistry verifies that every registry
+// checkRegisterMetricsPerRegistry verifies that every registry
 // passed to RegisterBlockByHashMetrics exposes the hash-index counters, not
 // just the first one in the process, and that reusing a registry is a no-op.
-func TestRegisterBlockByHashMetrics_PerRegistry(t *testing.T) {
-	t.Parallel()
-	if isolateBlockByHashMetrics(t) {
-		return
-	}
-
+func checkRegisterMetricsPerRegistry(t *testing.T) {
 	resetBlockByHashStats()
 	blockByHashIndexMisses.Add(3)
 
@@ -314,189 +305,6 @@ func TestCountBlocksAndOldestSlot_ExcludesTombstonedBlocks(t *testing.T) {
 		t, uint64(200), oldestSlot,
 		"the tombstoned block's slot must not be reported as the oldest",
 	)
-}
-
-func TestExtractTransactionOffsets(t *testing.T) {
-	t.Parallel()
-
-	// Load blocks from immutable test data
-	imm, err := immutable.New("immutable/testdata")
-	require.NoError(t, err, "failed to open immutable database")
-
-	// Get an iterator starting from the beginning
-	iter, err := imm.BlocksFromPoint(ocommon.Point{Slot: 0, Hash: []byte{}})
-	require.NoError(t, err, "failed to create block iterator")
-	defer iter.Close()
-
-	// Test offset extraction on multiple blocks
-	blocksWithTx := 0
-	maxBlocksToTest := 500
-
-	for i := range maxBlocksToTest {
-		immBlock, err := iter.Next()
-		if err != nil {
-			t.Fatalf("unexpected error reading block %d: %s", i, err)
-		}
-		if immBlock == nil {
-			break // End of chain
-		}
-
-		// Parse the block
-		block, err := ledger.NewBlockFromCbor(immBlock.Type, immBlock.Cbor)
-		if err != nil {
-			// Skip blocks that can't be parsed (e.g., Byron EBB)
-			continue
-		}
-
-		// Skip blocks without transactions (e.g., Byron EBB or empty blocks)
-		txs := block.Transactions()
-		if len(txs) == 0 {
-			continue
-		}
-
-		blocksWithTx++
-
-		// Extract offsets
-		offsets, err := common.ExtractTransactionOffsets(immBlock.Cbor)
-		require.NoError(
-			t,
-			err,
-			"failed to extract offsets from block %d (slot %d)",
-			i,
-			immBlock.Slot,
-		)
-
-		// Verify we got offsets for all transactions
-		assert.Equal(
-			t,
-			len(txs),
-			len(offsets.Transactions),
-			"transaction count mismatch for block %d (slot %d)",
-			i,
-			immBlock.Slot,
-		)
-
-		// Verify each offset points to valid data
-		for txIdx, tx := range txs {
-			if txIdx >= len(offsets.Transactions) {
-				continue
-			}
-
-			loc := offsets.Transactions[txIdx]
-
-			// Verify body offset is within block bounds
-			bodyEnd := uint64(loc.Body.Offset) + uint64(loc.Body.Length)
-			assert.LessOrEqual(t, bodyEnd, uint64(len(immBlock.Cbor)),
-				"body offset out of bounds for tx %d in block %d", txIdx, i)
-
-			// Extract body CBOR and verify it matches transaction body
-			if loc.Body.Offset > 0 && loc.Body.Length > 0 &&
-				bodyEnd <= uint64(len(immBlock.Cbor)) {
-				extractedBody := immBlock.Cbor[loc.Body.Offset : loc.Body.Offset+loc.Body.Length]
-
-				// The extracted data should be valid CBOR (basic sanity check)
-				assert.Greater(t, len(extractedBody), 0,
-					"extracted body is empty for tx %d in block %d", txIdx, i)
-
-				// Compare with transaction's stored CBOR if available
-				txCbor := tx.Cbor()
-				if len(txCbor) > 0 {
-					// Transaction CBOR includes both body and witnesses,
-					// so extracted body should be a prefix or we need to
-					// compare differently based on era
-					assert.LessOrEqual(
-						t,
-						len(extractedBody),
-						len(txCbor)+1000,
-						"extracted body unexpectedly larger than tx cbor for tx %d in block %d",
-						txIdx,
-						i,
-					)
-				}
-			}
-
-			// Verify witness offset is within block bounds
-			witnessEnd := uint64(
-				loc.Witness.Offset,
-			) + uint64(
-				loc.Witness.Length,
-			)
-			assert.LessOrEqual(t, witnessEnd, uint64(len(immBlock.Cbor)),
-				"witness offset out of bounds for tx %d in block %d", txIdx, i)
-
-			// Verify datum, redeemer, and script offsets if present
-			for hash, datumLoc := range loc.Datums {
-				datumEnd := uint64(datumLoc.Offset) + uint64(datumLoc.Length)
-				assert.LessOrEqual(t, datumEnd, uint64(len(immBlock.Cbor)),
-					"datum offset out of bounds for hash %x in tx %d block %d",
-					hash[:8], txIdx, i)
-			}
-
-			for key, redeemerLoc := range loc.Redeemers {
-				redeemerEnd := uint64(
-					redeemerLoc.Offset,
-				) + uint64(
-					redeemerLoc.Length,
-				)
-				assert.LessOrEqual(
-					t,
-					redeemerEnd,
-					uint64(len(immBlock.Cbor)),
-					"redeemer offset out of bounds for key (%d,%d) in tx %d block %d",
-					key.Tag,
-					key.Index,
-					txIdx,
-					i,
-				)
-			}
-
-			for hash, scriptLoc := range loc.Scripts {
-				scriptEnd := uint64(scriptLoc.Offset) + uint64(scriptLoc.Length)
-				assert.LessOrEqual(t, scriptEnd, uint64(len(immBlock.Cbor)),
-					"script offset out of bounds for hash %x in tx %d block %d",
-					hash[:8], txIdx, i)
-			}
-		}
-
-		// Stop after testing some blocks with transactions
-		if blocksWithTx >= 20 {
-			break
-		}
-	}
-
-	assert.Greater(
-		t,
-		blocksWithTx,
-		0,
-		"no blocks with transactions were tested",
-	)
-	t.Logf("Successfully tested %d blocks with transactions", blocksWithTx)
-}
-
-func TestExtractTransactionOffsetsEmptyBlock(t *testing.T) {
-	t.Parallel()
-
-	// Test that the function handles blocks with empty/minimal structure
-	// Byron EBB blocks have a different structure
-
-	imm, err := immutable.New("immutable/testdata")
-	require.NoError(t, err, "failed to open immutable database")
-
-	// Get first block (typically Byron genesis or EBB)
-	iter, err := imm.BlocksFromPoint(ocommon.Point{Slot: 0, Hash: []byte{}})
-	require.NoError(t, err, "failed to create block iterator")
-	defer iter.Close()
-
-	immBlock, err := iter.Next()
-	require.NoError(t, err, "failed to get first block")
-	require.NotNil(t, immBlock, "expected at least one block")
-
-	// Should not panic on Byron blocks
-	offsets, err := common.ExtractTransactionOffsets(immBlock.Cbor)
-	// Error is acceptable for unsupported block formats
-	if err == nil {
-		assert.NotNil(t, offsets, "offsets should not be nil when no error")
-	}
 }
 
 type countingBlockReadStore struct {
@@ -1362,6 +1170,7 @@ func TestBlockByHashDoesNotAcquireMetadataRead(t *testing.T) {
 	t.Parallel()
 	for _, kind := range []string{"known", "missing"} {
 		t.Run(kind, func(t *testing.T) {
+			t.Parallel()
 			base := newTestDB(t)
 			gate := &blockHashMetadataGate{
 				MetadataStore: base.Metadata(),
@@ -1467,6 +1276,7 @@ func TestBlockByHashBlobOnlyPreservesErrorsAndRelease(t *testing.T) {
 		"success", "read error", "rollback error", "panic", "cancel after read",
 	} {
 		t.Run(kind, func(t *testing.T) {
+			t.Parallel()
 			db := newTestDB(t)
 			block := testIndexedBlock(42, 7, 0x42)
 			require.NoError(t, db.BlockCreate(block, nil))

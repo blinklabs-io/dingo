@@ -271,7 +271,7 @@ mithril:
 			Enabled:                     false,
 			WindowSlots:                 4321,
 			PromotionMinDiversityGroups: 4,
-			CorroborationPeers:          1,
+			CorroborationPeers:          0,
 			// Unset in the file, so the defaults survive.
 			LimitOnPatienceEnabled: true,
 		},
@@ -530,7 +530,7 @@ func TestLoad_GenesisBootstrapEnvVars(t *testing.T) {
 	}
 }
 
-func TestLoad_GenesisCorroborationDefaultsSecurely(t *testing.T) {
+func TestLoad_GenesisCorroborationIsOptional(t *testing.T) {
 	// Not t.Parallel: LoadConfig and resetGlobalConfig replace process-global
 	// configuration state.
 	unsetEnv(t, "DINGO_GENESIS_BOOTSTRAP_CORROBORATION_PEERS")
@@ -541,17 +541,17 @@ func TestLoad_GenesisCorroborationDefaultsSecurely(t *testing.T) {
 	resetGlobalConfig()
 	cfg, err := LoadConfig(emptyConfig)
 	require.NoError(t, err)
-	require.Equal(t, 1, cfg.GenesisBootstrap.CorroborationPeers)
+	require.Zero(t, cfg.GenesisBootstrap.CorroborationPeers)
 
-	explicitDisable := filepath.Join(t.TempDir(), "disable.yaml")
-	require.NoError(t, os.WriteFile(explicitDisable, []byte(`
+	explicitPolicy := filepath.Join(t.TempDir(), "policy.yaml")
+	require.NoError(t, os.WriteFile(explicitPolicy, []byte(`
 genesisBootstrap:
-  corroborationPeers: 0
+  corroborationPeers: 2
 `), 0o600))
 	resetGlobalConfig()
-	cfg, err = LoadConfig(explicitDisable)
+	cfg, err = LoadConfig(explicitPolicy)
 	require.NoError(t, err)
-	require.Zero(t, cfg.GenesisBootstrap.CorroborationPeers)
+	require.Equal(t, 2, cfg.GenesisBootstrap.CorroborationPeers)
 }
 
 func TestLoad_HistoryExpiryConfig(t *testing.T) {
@@ -2099,6 +2099,13 @@ func TestGetConfigSnapshotDoesNotShareNestedPluginConfig(t *testing.T) {
 		globalConfig.Plugins.Mempool.Config["nested"].(map[string]any)["inner"],
 		"mutating a snapshot must not reach globalConfig",
 	)
+}
+
+func TestCloneConfigDoesNotShareTracingPools(t *testing.T) {
+	cfg := &Config{TracingAlwaysSamplePools: []string{"a", "b"}}
+	clone := cloneConfig(cfg)
+	clone.TracingAlwaysSamplePools[0] = "mutated"
+	assert.Equal(t, "a", cfg.TracingAlwaysSamplePools[0])
 }
 
 // exampleConfigPath returns the path to the repo's bundled

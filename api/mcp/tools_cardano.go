@@ -190,7 +190,7 @@ func registerCardanoTools(
 			text = fmt.Sprintf("# Dingo Node Information\n\n"+
 				"- **Software**: Dingo (pure-Go Cardano node implementation by Blink Labs)\n"+
 				"- **Configured Network**: `%s`\n"+
-				"- **Block Header Protocol Minor Version**: `69` (identifies Dingo-forged blocks on-chain without altering ledger protocol major version)\n"+
+				"- **Block Header Protocol Minor Identifier**: `69` in the low byte of the protocol minor field (identifies Dingo-forged blocks on-chain without altering ledger protocol major version; with CIP-0203 enabled the upper bits carry an optional release-version payload)\n"+
 				"- **Block Production**: Enabled via `--block-producer` with VRF, KES, and OpCert; tracks slots in SQLite `sync_state` (`forge_fence:<pool_id>`) and `pool_opcert_sequence`\n"+
 				"- **Storage Modes**: `core` (Badger block blob store + SQLite WAL metadata) and `api` (PostgreSQL / indexed store)\n"+
 				"- **Mithril Bootstrap**: Supported for rapid certified state synchronisation\n\n"+

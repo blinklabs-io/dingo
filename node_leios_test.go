@@ -212,6 +212,45 @@ func TestLeiosCommitteeParamsFromPParamsUsesDijkstraFields(t *testing.T) {
 	assert.Equal(t, 0, tau.Cmp(big.NewRat(3, 4)))
 }
 
+func TestLeiosVotingPeriodsFromPParamsUsesMilliseconds(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		announcementMs, voteMs uint32
+		header, vote           time.Duration
+	}{
+		{1250, 4750, 1250 * time.Millisecond, 4750 * time.Millisecond},
+		{1000, 4000, time.Second, 4 * time.Second},
+		{2500, 6000, 2500 * time.Millisecond, 6 * time.Second},
+	} {
+		header, vote, err := leiosVotingPeriodsFromPParams(
+			42,
+			&gdijkstra.DijkstraProtocolParameters{
+				LeiosAnnouncementPeriodLength: tc.announcementMs,
+				LeiosVotePeriodLength:         tc.voteMs,
+			},
+		)
+		require.NoError(t, err)
+		assert.Equal(t, tc.header, header)
+		assert.Equal(t, tc.vote, vote)
+	}
+}
+
+func TestLeiosVotingPeriodsFromPParamsRejectsMissingPeriods(t *testing.T) {
+	t.Parallel()
+
+	_, _, err := leiosVotingPeriodsFromPParams(42, nil)
+	require.ErrorContains(t, err, "unavailable")
+	for name, pp := range map[string]*gdijkstra.DijkstraProtocolParameters{
+		"both zero":         {},
+		"zero announcement": {LeiosVotePeriodLength: 4000},
+		"zero vote":         {LeiosAnnouncementPeriodLength: 1000},
+	} {
+		_, _, err := leiosVotingPeriodsFromPParams(42, pp)
+		require.ErrorContains(t, err, "invalid Leios voting periods", name)
+	}
+}
+
 func TestLeiosDijkstraPParamsFallbackUsesFirstEraRow(t *testing.T) {
 	t.Parallel()
 
@@ -267,11 +306,11 @@ func TestLeiosDijkstraPParamsFallbackUsesFirstEraRow(t *testing.T) {
 	txn := db.MetadataTxn(context.Background(), false)
 	defer txn.Rollback()
 
-	pp, err := leiosDijkstraPParamsForSnapshot(db, 9, txn)
+	pp, err := leiosDijkstraPParamsForEpoch(db, 9, txn)
 	require.NoError(t, err)
 	assert.Equal(t, uint16(17), pp.LeiosCommitteeSize)
 
-	pp, err = leiosDijkstraPParamsForSnapshot(db, 23, txn)
+	pp, err = leiosDijkstraPParamsForEpoch(db, 23, txn)
 	require.NoError(t, err)
 	assert.Equal(t, uint16(23), pp.LeiosCommitteeSize)
 }
@@ -697,34 +736,101 @@ func TestLedgerCertificateCallbackReadsVoteManagerSafely(t *testing.T) {
 		"the callback must see the installed vote manager")
 }
 
-func TestLeiosVoteTimingFromPParams(t *testing.T) {
+func TestLeiosDefaultTimingAcceptsSubsecondCertificate(t *testing.T) {
 	t.Parallel()
-	opens, window, err := leiosVoteTimingFromPParams(
-		&gdijkstra.DijkstraProtocolParameters{
-			LeiosAnnouncementPeriodLength: 1000,
-			LeiosVotePeriodLength:         4000,
-		},
-	)
+	cfg := newNodeTestCardanoNodeCfg(t)
+	cfg.ShelleyGenesis().SlotLength = lcommon.NewGenesisRat(1, 2)
+	n := &Node{config: NewConfig(WithCardanoNodeConfig(cfg))}
+	bus := event.NewEventBus(nil, nil)
+	defer bus.Stop()
+	mgr, err := leios.NewPipelineManager(leios.PipelineManagerConfig{
+		EventBus: bus, SlotProvider: occurrencePipelineClock{},
+		EpochProvider: startupLeiosEpochProvider{}, Timing: n.leiosPipelineTiming(),
+	})
 	require.NoError(t, err)
-	assert.Equal(t, 3*time.Second, opens)
-	assert.Equal(t, 4*time.Second, window)
-
-	opens, window, err = leiosVoteTimingFromPParams(
-		&gdijkstra.DijkstraProtocolParameters{
-			LeiosAnnouncementPeriodLength: 2500,
-			LeiosVotePeriodLength:         6000,
+	require.NoError(t, mgr.Start(t.Context()))
+	defer func() { require.NoError(t, mgr.Stop()) }()
+	// The clock is at slot 101: this certificate arrives after 15 seconds,
+	// within the default 20-second certification deadline.
+	const announcingSlot uint64 = 71
+	hash := lcommon.NewBlake2b256([]byte("subsecond-certificate"))
+	mgr.ObserveEndorserBlock(announcingSlot, hash)
+	bus.Publish(leios.EbQuorumEventType, event.NewEvent(
+		leios.EbQuorumEventType,
+		leios.EbQuorumEvent{
+			SlotNo: announcingSlot, Epoch: 5, EndorserBlockHash: hash,
+			Certificate: &lcommon.LeiosEbCertificate{},
 		},
-	)
-	require.NoError(t, err)
-	assert.Equal(t, 7500*time.Millisecond, opens)
-	assert.Equal(t, 6*time.Second, window)
+	))
+	adapter := &leiosPipelineAdapter{mgr: mgr}
+	testutil.WaitForCondition(t, func() bool {
+		eligible := adapter.EligibleCertifiedEndorserBlocks()
+		return len(eligible) == 1 && eligible[0].SlotNo == announcingSlot
+	}, 2*time.Second, "certificate expired within its default wall-clock window")
+}
 
-	for name, pp := range map[string]*gdijkstra.DijkstraProtocolParameters{
-		"nil":               nil,
-		"zero announcement": {LeiosVotePeriodLength: 4000},
-		"zero vote":         {LeiosAnnouncementPeriodLength: 1000},
-	} {
-		_, _, err := leiosVoteTimingFromPParams(pp)
-		require.Error(t, err, name)
+func TestLeiosDefaultTimingPreservesWallClockWindows(t *testing.T) {
+	t.Parallel()
+	for _, slot := range []struct{ numerator, denominator int64 }{{1, 1}, {1, 2}, {1, 5}, {3, 2}} {
+		t.Run(
+			fmt.Sprintf("%d/%d", slot.numerator, slot.denominator),
+			func(t *testing.T) {
+				cfg := newNodeTestCardanoNodeCfg(t)
+				cfg.ShelleyGenesis().SlotLength = lcommon.NewGenesisRat(
+					slot.numerator,
+					slot.denominator,
+				)
+				n := &Node{config: NewConfig(WithCardanoNodeConfig(cfg))}
+				timing, defaults := n.leiosPipelineTiming(), leios.DefaultPipelineTiming()
+				require.NoError(t, timing.Validate())
+				for _, windows := range [][2]uint64{
+					{timing.ProduceWindowSlots, defaults.ProduceWindowSlots},
+					{timing.DiffuseWindowSlots, defaults.DiffuseWindowSlots},
+					{timing.VoteWindowSlots, defaults.VoteWindowSlots},
+					{timing.CertifyByDeadlineSlots, defaults.CertifyByDeadlineSlots},
+					{timing.RbInclusionWindowSlots, defaults.RbInclusionWindowSlots},
+					{timing.InstanceTTLSlots, defaults.InstanceTTLSlots},
+				} {
+					actual := new(
+						big.Rat,
+					).Mul(new(big.Rat).SetUint64(windows[0]), cfg.ShelleyGenesis().SlotLength.Rat)
+					minimum := new(big.Rat).SetUint64(windows[1])
+					require.GreaterOrEqual(
+						t,
+						actual.Cmp(minimum),
+						0,
+						"default window must not expire early",
+					)
+					prior := new(
+						big.Rat,
+					).Sub(actual, cfg.ShelleyGenesis().SlotLength.Rat)
+					require.Less(
+						t,
+						prior.Cmp(minimum),
+						0,
+						"round up by at most one slot",
+					)
+				}
+			},
+		)
 	}
+}
+
+func TestLeiosTimingOverrideRetainsSlotCounts(t *testing.T) {
+	t.Parallel()
+	cfg := newNodeTestCardanoNodeCfg(t)
+	cfg.ShelleyGenesis().SlotLength = lcommon.NewGenesisRat(1, 2)
+	explicit := leios.DefaultPipelineTiming()
+	n := &Node{
+		config: NewConfig(
+			WithCardanoNodeConfig(cfg),
+			WithLeiosPipelineTiming(explicit),
+		),
+	}
+	require.Equal(t, explicit, n.leiosPipelineTiming())
+	missing := &Node{config: NewConfig()}
+	require.Equal(t, explicit, missing.leiosPipelineTiming())
+	cfg.ShelleyGenesis().SlotLength = lcommon.GenesisRat{}
+	n = &Node{config: NewConfig(WithCardanoNodeConfig(cfg))}
+	require.Equal(t, explicit, n.leiosPipelineTiming())
 }

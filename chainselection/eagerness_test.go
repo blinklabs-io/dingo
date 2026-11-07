@@ -763,3 +763,119 @@ func TestLimitOnEagernessForcedSenderDoesNotAdmitOldPeer(t *testing.T) {
 		assert.Equal(t, loeTip("sender", 40).Point, limit.Point)
 	}
 }
+
+// A candidate on the local chain whose fragment stopped at the immutable tip
+// shares no point with the candidates that kept delivering. It remembers the
+// last shared point, so the limit sits k past that point until the applied tip
+// reaches it. At that moment the stalled head equals the immutable tip, which
+// bounds nothing: it is a prefix of the local chain, and a competing chain
+// that ends there forks more than k back. Counting it pinned the limit at the
+// applied tip, where nothing can ever raise it.
+func TestLimitOnEagernessFrozenFragmentAtImmutableTipReleasesLimit(
+	t *testing.T,
+) {
+	t.Parallel()
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:   true,
+		SecurityParam: loeTestK,
+	})
+	frozen := newTestConnectionId(1)
+	live1 := newTestConnectionId(2)
+	live2 := newTestConnectionId(3)
+	feedLoEChain(cs, frozen, "c", 1, 10)
+	require.Equal(t, uint64(10+loeTestK), cs.EagernessLimit().BlockNumber)
+	// The others deliver the same chain, starting past the frozen head.
+	feedLoEChain(cs, live1, "c", 11, 40)
+	feedLoEChain(cs, live2, "c", 20, 45)
+
+	// Control: while the frozen head is above the immutable tip it holds the
+	// limit at k past itself.
+	applied := func(block uint64) func() ochainsync.Tip {
+		return func() ochainsync.Tip { return loeTip("c", block) }
+	}
+	assert.True(t, cs.withinEagernessLimit(live1, 10+loeTestK, applied(14)))
+	assert.False(t, cs.withinEagernessLimit(live1, 10+loeTestK+1, applied(14)))
+
+	// Applied at the limit: the frozen head is now the immutable tip.
+	atLimit := applied(10 + loeTestK)
+	assert.True(t, cs.withinEagernessLimit(live1, 10+loeTestK+1, atLimit),
+		"a fragment ending at the immutable tip pinned the limit")
+	assert.True(t, cs.withinEagernessLimit(live1, 20+loeTestK, atLimit))
+	assert.False(t, cs.withinEagernessLimit(live1, 41+loeTestK, atLimit),
+		"the live candidates' own intersection must still bound the limit")
+}
+
+// A fragment ending at the immutable tip that is a strict prefix of another
+// candidate's fragment bounds nothing, so it must not pin the limit at the
+// applied tip. A fork that shares a point with the other candidate without
+// being its prefix still does (see
+// TestLimitOnEagernessIntersectionNeverFallsBelowImmutableTip).
+func TestLimitOnEagernessPrefixFragmentAtImmutableTipReleasesLimit(
+	t *testing.T,
+) {
+	t.Parallel()
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:   true,
+		SecurityParam: loeTestK,
+	})
+	stalled := newTestConnectionId(1)
+	live := newTestConnectionId(2)
+	feedLoEChain(cs, stalled, "c", 1, 10)
+	feedLoEChain(cs, live, "c", 1, 40)
+	appliedTip := func() ochainsync.Tip { return loeTip("c", 10+loeTestK) }
+
+	assert.True(t, cs.withinEagernessLimit(live, 40+loeTestK, appliedTip),
+		"a prefix of the live candidate pinned the limit at the applied tip")
+	assert.False(t, cs.withinEagernessLimit(live, 41+loeTestK, appliedTip))
+}
+
+// Two candidates stalled at the same immutable-tip head share that point
+// with each other but with no live candidate. Neither bounds a selection, so
+// their agreement must not pin the limit at the applied tip.
+func TestLimitOnEagernessTwoFrozenFragmentsAtImmutableTipReleaseLimit(
+	t *testing.T,
+) {
+	t.Parallel()
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:   true,
+		SecurityParam: loeTestK,
+	})
+	frozen1 := newTestConnectionId(1)
+	frozen2 := newTestConnectionId(2)
+	live1 := newTestConnectionId(3)
+	live2 := newTestConnectionId(4)
+	feedLoEChain(cs, frozen1, "c", 1, 10)
+	feedLoEChain(cs, frozen2, "c", 1, 10)
+	require.Equal(t, uint64(10+loeTestK), cs.EagernessLimit().BlockNumber)
+	feedLoEChain(cs, live1, "c", 11, 40)
+	feedLoEChain(cs, live2, "c", 20, 45)
+	appliedTip := func() ochainsync.Tip { return loeTip("c", 10+loeTestK) }
+
+	assert.True(t, cs.withinEagernessLimit(live1, 10+loeTestK+1, appliedTip),
+		"frozen fragments agreeing at the immutable tip pinned the limit")
+	assert.False(t, cs.withinEagernessLimit(live1, 41+loeTestK, appliedTip))
+}
+
+// A fork that diverged before the immutable tip and stopped exactly at it
+// shares no retained point with the live candidates. Switching to it needs a
+// rollback past k, so it must not pin the limit at the applied tip.
+func TestLimitOnEagernessDisjointForkAtImmutableTipReleasesLimit(
+	t *testing.T,
+) {
+	t.Parallel()
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:   true,
+		SecurityParam: loeTestK,
+	})
+	fork := newTestConnectionId(1)
+	live1 := newTestConnectionId(2)
+	live2 := newTestConnectionId(3)
+	feedLoEChain(cs, fork, "f", 1, 10)
+	feedLoEChain(cs, live1, "c", 11, 40)
+	feedLoEChain(cs, live2, "c", 20, 45)
+	appliedTip := func() ochainsync.Tip { return loeTip("c", 10+loeTestK) }
+
+	assert.True(t, cs.withinEagernessLimit(live1, 10+loeTestK+1, appliedTip),
+		"a fork deeper than k pinned the limit at the applied tip")
+	assert.False(t, cs.withinEagernessLimit(live1, 41+loeTestK, appliedTip))
+}

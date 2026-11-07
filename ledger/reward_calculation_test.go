@@ -538,6 +538,7 @@ func seedRetentionReconstructionFixture(
 		"the legitimate capture must have produced real per-credential rows",
 	)
 	require.NoError(t, meta.DeleteRewardStakeInputBeforeEpoch(
+		context.Background(),
 		retentionRewardSnapshotEpoch+1, nil,
 	))
 	prunedStakeInputs, err := meta.GetRewardStakeInputs(
@@ -9449,14 +9450,17 @@ func TestBootstrapStakeRewardsRejectStalePrecompute(t *testing.T) {
 	require.Nil(t, app)
 }
 
-// The first RUPD reads an empty nesBprev, not epoch 0's nesBcur.
-// With d=0 this gives eta=0; the same 180 blocks enter the next update,
-// giving eta=180/(500*0.4)=0.9. Fees collected in epoch 0 enter that update
-// too. These are the reference devnet inputs and pots.
-func TestApplyStakeRewardsPrototypeGenesisPerformance(t *testing.T) {
-	t.Parallel()
+// newPrototypeGenesisRewardLedger seeds the reference devnet inputs: Shelley
+// at epoch 0 over Conway parameters, two pools with genesis staking and one
+// block's worth of fees. warm selects genesis stake warming.
+func newPrototypeGenesisRewardLedger(
+	t *testing.T,
+	warm bool,
+) (*LedgerState, *database.Database) {
+	t.Helper()
 	ls, db := newRewardCalculationTestLedger(t)
 	ls.config.EnableDijkstra = true
+	ls.config.WarmGenesisStake = warm
 	zero := uint64(0)
 	ls.config.CardanoNodeConfig.TestShelleyHardForkAtEpoch = &zero
 	ls.currentEra = eras.ConwayEraDesc
@@ -9527,6 +9531,50 @@ INSERT INTO "transaction" (
 ) VALUES (1, ?, ?, 60, 7, '400000', '0', '0', 0, TRUE)`,
 		[]byte("genesis-performance-tx"), []byte("genesis-performance-block"))
 	require.NoError(t, err)
+	return ls, db
+}
+
+// TestStakeRewardsGenesisWarmingNeedsPrototypeNetwork pins that knowing the
+// Dijkstra era does not warm genesis staking: the same inputs that pay
+// genesis stake on a prototype network leave the bootstrap rounds empty, as a
+// standard cardano-node does.
+func TestStakeRewardsGenesisWarmingNeedsPrototypeNetwork(t *testing.T) {
+	t.Parallel()
+
+	ls, db := newPrototypeGenesisRewardLedger(t, false)
+	require.True(t, ls.config.EnableDijkstra)
+	meta := db.Metadata()
+
+	ended, err := meta.GetEpoch(0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, ended)
+	txn := db.Transaction(context.Background(), true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		if err := ls.applyStakeRewards(context.Background(), txn, 1, 500); err != nil {
+			return err
+		}
+		return ls.saveRewardAdaPotsForEpoch(txn, 1, *ended, 500)
+	}))
+
+	readTxn := db.Transaction(t.Context(), false)
+	app, ok, err := ls.calculateStakeRewardApplication(
+		readTxn, 2, 1000, 1000, true,
+	)
+	require.NoError(t, readTxn.Rollback())
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Empty(t, app.accountOutputs,
+		"bootstrap rounds pay no stake rewards without genesis warming")
+}
+
+// The first RUPD reads an empty nesBprev, not epoch 0's nesBcur.
+// With d=0 this gives eta=0; the same 180 blocks enter the next update,
+// giving eta=180/(500*0.4)=0.9. Fees collected in epoch 0 enter that update
+// too. These are the reference devnet inputs and pots.
+func TestApplyStakeRewardsPrototypeGenesisPerformance(t *testing.T) {
+	t.Parallel()
+	ls, db := newPrototypeGenesisRewardLedger(t, true)
+	meta := db.Metadata()
 
 	for _, tc := range []struct {
 		epoch    uint64

@@ -443,7 +443,9 @@ func TestChainsyncHeaderPastForecastHorizonIsNotQueued(t *testing.T) {
 				"a withheld header must re-intersect its connection",
 			)
 			require.Equal(t, connId, got.ConnectionId)
-			require.Equal(t, "header past forecast horizon", got.Reason)
+			require.Equal(t, event.ChainsyncResyncReasonHeaderPastForecastHorizon, got.Reason)
+			require.True(t, event.IsLocalChainsyncResyncReason(got.Reason),
+				"local forecast recovery must not accumulate peer-instability backoff")
 		})
 	}
 }
@@ -664,14 +666,16 @@ func TestForecastSummaryFromIntersectionBeforeNonceCutoff(t *testing.T) {
 	)
 }
 
-// Admission measures a header's forecast from where the peer's chain leaves
-// the local chain. A fork that left before the epoch's nonce cutoff is held at
-// a slot the tip's own forecast covers; the same slot extending the local
-// chain is admitted.
-func TestAwaitChainsyncHeaderAdmissionForecastsForkFromIntersection(
+// newForecastForkFixture builds a local chain of two Conway blocks whose tip is the
+// second, with headerOn building a header that extends a chosen parent.
+func newForecastForkFixture(
 	t *testing.T,
+) (
+	*LedgerState,
+	[]lcommon.Block,
+	func(lcommon.Blake2b256, string) ChainsyncEvent,
 ) {
-	t.Parallel()
+	t.Helper()
 
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
@@ -746,7 +750,19 @@ func TestAwaitChainsyncHeaderAdmissionForecastsForkFromIntersection(
 			Point:       ocommon.NewPoint(headerSlot, header.Hash().Bytes()),
 		}
 	}
+	return ls, blocks, headerOn
+}
 
+// Admission measures a header's forecast from where the peer's chain leaves
+// the local chain. A fork that left before the epoch's nonce cutoff is held at
+// a slot the tip's own forecast covers; the same slot extending the local
+// chain is admitted.
+func TestAwaitChainsyncHeaderAdmissionForecastsForkFromIntersection(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ls, blocks, headerOn := newForecastForkFixture(t)
 	extending := headerOn(blocks[1].Hash(), "extending")
 	require.False(t, ls.headerBeyondForecastHorizon(t.Context(), extending))
 	accepted, err := ls.AwaitChainsyncHeaderAdmission(t.Context(), extending)
@@ -771,6 +787,34 @@ func TestAwaitChainsyncHeaderAdmissionForecastsForkFromIntersection(
 		"admission did not return after its context ended",
 	)
 	require.ErrorIs(t, got.err, context.Canceled)
+}
+
+// A context that ends while the fork anchor is being resolved makes the chain
+// answer "not held" for the intersection block. That must surface as the
+// context's error, not as a header whose ancestry leaves the chain nowhere and
+// so is admitted past its forecast horizon.
+func TestAwaitChainsyncHeaderAdmissionCancelledDuringAnchorLookup(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ls, blocks, headerOn := newForecastForkFixture(t)
+	fork := headerOn(blocks[0].Hash(), "fork")
+	require.True(t, ls.headerBeyondForecastHorizon(t.Context(), fork))
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	ls.lookupBlockByHash = func([]byte) (models.Block, error) {
+		cancel()
+		return models.Block{
+			Slot: blocks[0].SlotNumber(),
+			Hash: blocks[0].Hash().Bytes(),
+		}, nil
+	}
+
+	accepted, err := ls.AwaitChainsyncHeaderAdmission(ctx, fork)
+	require.ErrorIs(t, err, context.Canceled)
+	require.False(t, accepted)
 }
 
 // Headers queued behind a far-from-tip batch are what advance the ledger, and
@@ -1992,7 +2036,9 @@ func TestFarFromTipBlockfetchLowWatermarkAfterHorizonRelease(t *testing.T) {
 				testutil.AsyncWait,
 				"a header past the horizon must re-intersect its connection",
 			)
-			require.Equal(t, "header past forecast horizon", got.Reason)
+			require.Equal(t, event.ChainsyncResyncReasonHeaderPastForecastHorizon, got.Reason)
+			require.True(t, event.IsLocalChainsyncResyncReason(got.Reason),
+				"local forecast recovery must not accumulate peer-instability backoff")
 			testutil.RequireNoReceive(
 				t,
 				requests,
@@ -2570,4 +2616,33 @@ func TestHeaderBeyondForecastHorizonUnsettledAnchorIsNotForecastable(
 		"every membership read must have overlapped a chain mutation")
 	require.False(t, ls.headerBeyondForecastHorizon(t.Context(), e),
 		"a settled read anchors the header at its forecastable parent")
+}
+
+// A context that ends during the recheck before a resync is owed reads every
+// membership as absent. The wait must return the context's error rather than
+// admit the header or schedule a resync for a cancelled admission.
+func TestAwaitChainsyncHeaderAdmissionCancelledDuringRecheck(t *testing.T) {
+	t.Parallel()
+
+	for cancelAt := 1; cancelAt <= 4; cancelAt++ {
+		t.Run(fmt.Sprintf("lookup%d", cancelAt), func(t *testing.T) {
+			t.Parallel()
+			ls, blocks, headerOn := newForecastForkFixture(t)
+			fork := headerOn(blocks[0].Hash(), "fork")
+			ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+			defer cancel()
+			var lookups atomic.Int32
+			ls.lookupBlockByHash = func(hash []byte) (models.Block, error) {
+				if int(lookups.Add(1)) == cancelAt {
+					cancel()
+				}
+				return database.BlockByHash(ctx, ls.db, hash)
+			}
+			// No fetch work is outstanding, so an unsettled header reaches
+			// the resync decision.
+			ls.chainsyncBlockfetchReadyChan = nil
+			_, err := ls.AwaitChainsyncHeaderAdmission(ctx, fork)
+			require.ErrorIs(t, err, context.Canceled)
+		})
+	}
 }

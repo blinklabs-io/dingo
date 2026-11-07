@@ -194,6 +194,7 @@ var Manifest = []Index{
 	{
 		Name: "idx_utxo_staking_key", Table: "utxo",
 		Columns: []string{"staking_key"},
+		Where:   "staking_key IS NOT NULL",
 		Notes:   "API stake lookup", Critical: true,
 		CatchUpDroppable: true,
 	},
@@ -433,6 +434,7 @@ var Retained = []Index{
 			"deleted_slot",
 			"amount",
 		},
+		Where: "staking_key IS NOT NULL",
 		Notes: "Per-batch live-stake SUM during API-mode backfill",
 	},
 	// SetTransaction clears these tables by transaction_id on each write, so

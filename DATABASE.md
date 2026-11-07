@@ -68,11 +68,11 @@ itself distinguish which of the two classes above produced it.
 ## Storage provider ownership
 
 The `consensus_provider_identity` sync-state key binds a database to the
-versioned consensus semantics that created it. A database with no stored tip
-and no key adopts the selected provider and writes its marker. A nonempty
-database without the key predates provider selection, is treated as
-`praos/v1`, and may only be opened with Praos. The sync-state cleanup that ends
-a Mithril import keeps the key. Startup rejects a different selected identity before ledger
+versioned consensus semantics that created it. A database with no stored tip and
+no key adopts the selected provider and writes its marker. A nonempty database
+without the key predates provider selection, is treated as `praos/v1`, and may
+only be opened with Praos. The sync-state cleanup that ends a Mithril import
+keeps the key. Startup rejects a different selected identity before ledger
 processing. Leader schedule records separately carry the same identity and a
 format version, so cached production schedules are reused only by the provider
 that computed them. Tachys uses the `tachys/cip177/<revision>` namespace;
@@ -93,11 +93,11 @@ repair and before startup clears the import state. The optional
 `metadata.ContextPlannerStatsUpdater` capability makes this refresh cancellable;
 providers exposing only `PlannerStatsUpdater` retain their existing interface.
 The `metadata_planner_stats_backfill` sync-state key records the completed
-checkpoint identity only after successful analysis. Missing or mismatched markers
-trigger a retry, including databases imported by older binaries. Mithril ready-state
-cleanup preserves this marker alongside the deferred-index marker. This avoids
-repeating a full analysis on every restart while replacing statistics captured
-before historical transaction rows were loaded.
+checkpoint identity only after successful analysis. Missing or mismatched
+markers trigger a retry, including databases imported by older binaries. Mithril
+ready-state cleanup preserves this marker alongside the deferred-index marker.
+This avoids repeating a full analysis on every restart while replacing
+statistics captured before historical transaction rows were loaded.
 
 SQLite reward live stake rebuilds from running totals analyze the transaction
 table before joining delegation certificates to transactions. Batched rebuilds
@@ -105,31 +105,36 @@ reload the statistics on each batch's transaction connection before preparing
 the join, so pooled connections with independent planner caches use the updated
 estimates.
 
-SQLite keeps planner statistics current while the node runs. A node synced
-from genesis never ran `ANALYZE`, and without `sqlite_stat1` the planner picks
+Single-output SQLite inserts return their generated ID from the driver result
+after checking the affected-row count. An ignored conflict preserves its
+existing output ID and provenance-repair behavior. Other metadata backends
+retain their native returning or upsert paths.
+
+SQLite keeps planner statistics current while the node runs. A node synced from
+genesis never ran `ANALYZE`, and without `sqlite_stat1` the planner picks
 indexes by shape alone: the batched spend `UPDATE` in `consumeUtxosBatchQuery`
-plans as a scan of `idx_utxo_deleted_payment_script (deleted_slot=?)` instead
-of a seek on `tx_id_output_idx`. `Store.OptimizePlannerStatsContext` runs
-`PRAGMA optimize(0x10002)` (every table, exact rather than sampled statistics)
-on the write connection, outside any transaction, at startup before block
-processing begins, after each epoch rollover commits, and once a minute in
-between: statistics recorded at startup can understate tables that block
-application then fills (a node bootstrapped from Mithril records `transaction`
-and `certs` at almost no rows), and every query that reaches `transaction`
-through `certs` then plans a full scan per lookup until the next run. Tables without
-statistics are always analyzed; tables with them only after roughly 25-fold
-growth, so a repeat run is near-free, while the first run on a large database
-analyzes every table and takes minutes. The write pool has one connection, so
-writers wait for the run. The run is skipped during a bulk load. A
-node-managed Mithril stream catch-up defers the epoch and periodic runs for
-its duration (`plannerstats.Manager.Defer`): on a database it is filling,
-nearly every table passes the growth threshold at each epoch, so each run
-costs more than the last, and one run after the catch-up replaces them. A fresh
-Mithril bootstrap restores normal pragmas after rebuilding critical indexes,
-then uses this optimizer; if the backend does not support it or skips it, the
-full planner-statistics update runs instead. Resumed Mithril imports and other
-completed backfills retain the full update path. PostgreSQL and MySQL report
-the operation unsupported and use that fallback.
+plans as a scan of `idx_utxo_deleted_payment_script (deleted_slot=?)` instead of
+a seek on `tx_id_output_idx`. `Store.OptimizePlannerStatsContext` runs `PRAGMA
+optimize(0x10002)` (every table, exact rather than sampled statistics) on the
+write connection, outside any transaction, at startup before block processing
+begins, after each epoch rollover commits, and once a minute in between:
+statistics recorded at startup can understate tables that block application then
+fills (a node bootstrapped from Mithril records `transaction` and `certs` at
+almost no rows), and every query that reaches `transaction` through `certs` then
+plans a full scan per lookup until the next run. Tables without statistics are
+always analyzed; tables with them only after roughly 25-fold growth, so a repeat
+run is near-free, while the first run on a large database analyzes every table
+and takes minutes. The write pool has one connection, so writers wait for the
+run. The run is skipped during a bulk load. A node-managed Mithril stream
+catch-up defers the epoch and periodic runs for its duration
+(`plannerstats.Manager.Defer`): on a database it is filling, nearly every table
+passes the growth threshold at each epoch, so each run costs more than the last,
+and one run after the catch-up replaces them. A fresh Mithril bootstrap restores
+normal pragmas after rebuilding critical indexes, then uses this optimizer; if
+the backend does not support it or skips it, the full planner-statistics update
+runs instead. Resumed Mithril imports and other completed backfills retain the
+full update path. PostgreSQL and MySQL report the operation unsupported and use
+that fallback.
 
 The growth rule never corrects `utxo` statistics taken over an imported
 ledger state. Every imported UTxO is unspent and shares one `added_slot`, so
@@ -186,11 +191,20 @@ them partial; the version-50 migration only drops them while that rebuild is
 pending. MySQL has no partial indexes and keeps the full indexes its foreign
 keys require.
 
+The stake-key lookup indexes `idx_utxo_staking_key` and
+`idx_utxo_staking_deleted_amount` include only outputs with a non-NULL
+`staking_key` on SQLite and PostgreSQL (schema version 53). Enterprise
+outputs cannot contribute to credential stake totals and need no entries in
+these indexes. The deleted-slot-leading indexes remain complete for rollback
+and supply queries. Upgrade builds the retained live-stake index immediately;
+the simple stake-key index waits if a deferred rebuild is pending. A deferred
+rebuild preserves both partial predicates. MySQL keeps full indexes.
+
 `dingo_database_sql_planner_stats_runs_total{trigger,result}`,
 `dingo_database_sql_planner_stats_duration_seconds{trigger}` and
-`dingo_database_sql_planner_stats_errors_total` report runs
-(`trigger` is `startup`, `epoch` or `periodic`; `result` is `changed`, `unchanged`,
-`skipped` or `error`). `plannerStatsRefreshEnabled` (environment
+`dingo_database_sql_planner_stats_errors_total` report runs (`trigger` is
+`startup`, `epoch` or `periodic`; `result` is `changed`, `unchanged`, `skipped`
+or `error`). `plannerStatsRefreshEnabled` (environment
 `DINGO_PLANNER_STATS_REFRESH_ENABLED`, default true) disables the whole
 mechanism and exists only as an escape hatch.
 
@@ -210,54 +224,67 @@ the API stops; it never borrows or closes the provider's pools. At most four
 calls to the SQL tools, `get_asset_info`, `get_utxos_by_asset`, and
 raw-credential `get_utxos` execute concurrently; excess calls fail immediately.
 `sqlite_query` and `sqlite_explain`, which run caller-supplied SQL, may hold at
-most two of those slots.
-While the metadata `-wal` file exceeds 128 MiB, twice the `journal_size_limit`,
-every MCP tool call and resource read is refused: at that size the WAL has been
-neither reset nor truncated since it grew past the limit, and an open reader
-prevents both. The in-flight reads finish within the query timeout, which gives
-the periodic TRUNCATE checkpoint a reader-free interval from MCP; requests are
-admitted again once the file is back under the limit. The probe is a `stat` of
-the `-wal` file next to `SQLitePath()`: a missing file reads as empty, and
-any other stat error counts as pressure and is logged at most once a minute.
-Callers that inject their own SQLite
-pool without a metadata store get no WAL check. SQL row
-limits are enforced during iteration, including PRAGMA results. Arbitrary
-queries and EXPLAIN use a dedicated borrowed connection with `query_only` and
-SQLite limits: 64 KiB per value or encoded row, 64 KiB SQL, and 32 result
-columns. `sqlite_query` also rejects a response after 1 MiB of decoded cell data.
-Settings are restored before returning injected connections to their pool. The
-SQL byte limit is also checked before tokenization. Schema inspection binds table names through SQLite
-table-valued PRAGMAs, including reserved identifiers such as `transaction`. Query, asset, and
+most two of those slots. While the metadata `-wal` file exceeds 128 MiB, twice
+the `journal_size_limit`, every MCP tool call and resource read is refused: at
+that size the WAL has been neither reset nor truncated since it grew past the
+limit, and an open reader prevents both. The in-flight reads finish within the
+query timeout, which gives the periodic TRUNCATE checkpoint a reader-free
+interval from MCP; requests are admitted again once the file is back under the
+limit. The probe is a `stat` of the `-wal` file next to `SQLitePath()`: a
+missing file reads as empty, and any other stat error counts as pressure and is
+logged at most once a minute. Callers that inject their own SQLite pool without
+a metadata store get no WAL check. SQL row limits are enforced during iteration,
+including PRAGMA results. Arbitrary queries and EXPLAIN use a dedicated borrowed
+connection with `query_only` and SQLite limits: 64 KiB per value or encoded row,
+64 KiB SQL, and 32 result columns. `sqlite_query` also rejects a response after
+1 MiB of decoded cell data. Settings are restored before returning injected
+connections to their pool. The SQL byte limit is also checked before
+tokenization. Schema inspection binds table names through SQLite table-valued
+PRAGMAs, including reserved identifiers such as `transaction`. Query, asset, and
 raw-credential UTxO offsets are capped at 10,000; a full page whose next offset
-would exceed the cap says the result is truncated. UTxO and asset queries use `deleted_slot = 0`; native-asset supply is
-summed from decimal quantities with arbitrary precision. Asset pages order by
-UTxO ID and asset ID so policy-only queries have a stable order even when one
-UTxO holds multiple matching assets. Asset-name filters match one decoded byte
-sequence: hexadecimal input takes precedence over literal UTF-8, whitespace is
-significant, and names are limited to 32 bytes. Asset registry, mint-history,
-and CIP-25 query failures are reported as errors rather than absent metadata. Governance detail
-queries honor the same lifecycle filter as listings. The MCP table catalog
-reads column names and declared types from the connected SQLite schema on each
-request; its db-sync cheatsheet examples target the production metadata schema.
-Datum/script resolution reads the API indexes: core mode does not populate them,
-while API mode indexes inline and witness datums subject to retained/backfilled
-history. MCP distinguishes database query failures from missing indexed hashes;
-neither missing rows nor empty core-mode indexes prove absence on-chain.
-MCP governance proposal lookups, listings, and vote tallies exclude rows with
-`deleted_slot` set. Query and scan failures return tool errors, not empty
-proposal lists or zero vote counts. These reads do not alter the schema or
-stored governance state.
-MCP exact-address UTxO queries use `Database.UtxosByAddressPage`: a context-bound
-coordinated read transaction scans bounded candidate batches and compares output
-CBOR before returning matches. The continuation cursor records the last fully
-examined candidate, including nonmatches; deadlines can return partial progress.
-Candidate scans skip native-asset loading. SQLite exact-payment lookups exclude
-the low-selectivity `deleted_slot` predicate from index selection so snapshot
-statistics do not select that low-selectivity index solely for the liveness
-filter. The integer liveness filter still applies. Existing nonpaged callers
-retain their pagination and matching semantics. See the
-[MCP guide](docs/mcp/README.md#metadata-and-query-semantics) for page bounds and
-live-state consistency semantics.
+would exceed the cap says the result is truncated. UTxO and asset queries use
+`deleted_slot = 0`; native-asset supply is summed from decimal quantities with
+arbitrary precision. Asset pages order by UTxO ID and asset ID so policy-only
+queries have a stable order even when one UTxO holds multiple matching assets.
+Asset-name filters match one decoded byte sequence: hexadecimal input takes
+precedence over literal UTF-8, whitespace is significant, and names are limited
+to 32 bytes. Asset registry, mint-history, and CIP-25 query failures are
+reported as errors rather than absent metadata. Governance detail queries honor
+the same lifecycle filter as listings. The MCP table catalog reads column names
+and declared types from the connected SQLite schema on each request; its db-sync
+cheatsheet examples target the production metadata schema. Datum/script
+resolution reads the API indexes: core mode does not populate them, while API
+mode indexes inline and witness datums subject to retained/backfilled history.
+MCP distinguishes database query failures from missing indexed hashes; neither
+missing rows nor empty core-mode indexes prove absence on-chain. MCP governance
+proposal lookups, listings, and vote tallies exclude rows with `deleted_slot`
+set. Query and scan failures return tool errors, not empty proposal lists or
+zero vote counts. These reads do not alter the schema or stored governance
+state. MCP exact-address UTxO queries use `Database.UtxosByAddressPage`: a
+context-bound coordinated read transaction scans bounded candidate batches and
+compares output CBOR before returning matches. The continuation cursor records
+the last fully examined candidate, including nonmatches; deadlines can return
+partial progress. Candidate scans skip native-asset loading. SQLite
+exact-payment lookups exclude the low-selectivity `deleted_slot` predicate from
+index selection so snapshot statistics do not select that low-selectivity index
+solely for the liveness filter. The integer liveness filter still applies.
+Existing nonpaged callers retain their pagination and matching semantics. See
+the [MCP guide](docs/mcp/README.md#metadata-and-query-semantics) for page bounds
+and live-state consistency semantics.
+
+Validated API-mode blocks batch output-address rows, transaction address history,
+key witnesses and metadata labels until block completion. UTxOs, assets, datums,
+scripts and live stake remain visible after each transaction. The block-local
+accumulator flushes before returning from block application; a flush failure
+aborts the enclosing transaction. Providers without the optional validated-block
+batch capability keep immediate index writes. Trusted replay retains its
+chunk-owned accumulator and flush boundary.
+
+Certified Leios closures batch API-only output-address rows with transaction
+address history, key witnesses and metadata labels. UTxO rows, native assets,
+datums, scripts and live stake changes remain visible before the next
+transaction validates. The queued indexes flush inside the closure transaction
+before commit; rollback discards them with the transaction.
 
 Blockfrost historical and governance reads are served from existing tables
 through `HistoryStore` (`database/plugin/metadata/history_store.go`); migration
@@ -266,63 +293,66 @@ index. Epoch totals sum `utxo` outputs and transaction fees over the epoch's
 slot range. Output totals use exact database-side arbitrary-precision
 aggregation and return a non-nil `*big.Int` from
 `SumTransactionOutputsInSlotRange`; repeated transfers can exceed both signed
-and unsigned 64-bit totals without exceeding the supply in any one output.
-The Blockfrost response preserves the total as a decimal string. Totals count
-a Leios closure transaction at its
-`leios_transaction_context` slot, and epoch and pool block lists read
-`block_nonce` joined to `pool_opcert_sequence`. API storage mode keeps every
-non-checkpoint `block_nonce` row for those lists (one row per block); core mode
-prunes them outside the three-epoch nonce window, keeping each epoch's
-checkpoint rows. The historical metadata backfill writes a `block_nonce` row
-for every block it replays below the Mithril anchor, but not for the anchor
-block itself, whose row the import seeded from the ledger state; Byron blocks
-have no nonce function and get no row, so after a backfill a range starting
-before the first indexed epoch is also refused, except for a single pool's block
-list (`database.PoolBlockHistoryRetained`), since no pool produced a Byron block. `database.BlockHistoryRetained`
-refuses a
-list whose range reaches a bootstrap anchor until a completed backfill has left
-rows at or below it, or lies before the epoch of the earliest
-non-checkpoint row (`GetEarliestNonCheckpointBlockSlot`), so a database pruned
-before this rule applied answers "not retained" rather than a short list. Pool
-history adds a bootstrap snapshot's imported block counts for epochs at or
-below the Mithril anchor, as the pool detail endpoint does. Account address totals sum lovelace
+and unsigned 64-bit totals without exceeding the supply in any one output. The
+Blockfrost response preserves the total as a decimal string. Totals count a
+Leios closure transaction at its `leios_transaction_context` slot. Output
+aggregation selects normal transactions by their slot index and closure
+transactions by their execution-slot index in disjoint branches before reading
+outputs by transaction ID; it does not scan retained transaction history for a
+single epoch. The exact arbitrary-precision sum includes valid outputs and
+phase-2-invalid collateral returns, including spent outputs while retained.
+Complete historical totals require API storage mode; core mode prunes spent
+outputs. Epoch and pool block lists read `block_nonce` joined to
+`pool_opcert_sequence`. API storage mode keeps every non-checkpoint
+`block_nonce` row for those lists (one row per block); core mode prunes them
+outside the three-epoch nonce window, keeping each epoch's checkpoint rows. The
+historical metadata backfill writes a `block_nonce` row for every block it
+replays below the Mithril anchor, but not for the anchor block itself, whose row
+the import seeded from the ledger state; Byron blocks have no nonce function and
+get no row, so after a backfill a range starting before the first indexed epoch
+is also refused, except for a single pool's block list
+(`database.PoolBlockHistoryRetained`), since no pool produced a Byron block.
+`database.BlockHistoryRetained` refuses a list whose range reaches a bootstrap
+anchor until a completed backfill has left rows at or below it, or lies before
+the epoch of the earliest non-checkpoint row
+(`GetEarliestNonCheckpointBlockSlot`), so a database pruned before this rule
+applied answers "not retained" rather than a short list. Pool history adds a
+bootstrap snapshot's imported block counts for epochs at or below the Mithril
+anchor, as the pool detail endpoint does. Account address totals sum lovelace
 without a width bound. Epoch stakes, pool history and delegators, and account
 stake history read the reward snapshot tables; the snapshot labelled E is the
 distribution active in epoch E+1. Account MIRs, asset balances and address
-totals read `move_instantaneous_rewards_reward`, `asset` and `utxo`.
-The single-DRep detail read uses one context-bound read transaction after its
+totals read `move_instantaneous_rewards_reward`, `asset` and `utxo`. The
+single-DRep detail read uses one context-bound read transaction after its
 epoch-boundary wait, so cancellation covers every metadata query and all fields
-come from one database view.
-The vote endpoints list every cast, not only each voter's current vote: one
-row per `governance_vote_history` entry, so a revote keeps its earlier casts.
-A cast counts toward the tally (`counted`) only when it is the voter's latest
-on the proposal and its DRep has not deregistered. Since v48,
-`SetGovernanceVote` records each cast's transaction hash and `cert_index` in
-the history, including a revote that repeats the value; a cast's `cert_index`
+come from one database view. The vote endpoints list every cast, not only each
+voter's current vote: one row per `governance_vote_history` entry, so a revote
+keeps its earlier casts. A cast counts toward the tally (`counted`) only when it
+is the voter's latest on the proposal and its DRep has not deregistered. Since
+v48, `SetGovernanceVote` records each cast's transaction hash and `cert_index`
+in the history, including a revote that repeats the value; a cast's `cert_index`
 is its position among that voter's procedures in the transaction, ordered by
 governance action id and counted from 0 for each voter, as db-sync's
-`voting_procedure.index` is. A history entry written before v48 carries
-neither, so the endpoint decodes the block at the entry's slot
-(`database.BlockBySlot`) and matches it to the voter's valid casts on the
-proposal there. Those older entries record a cast only when it changed the
-value or anchor, so the casts fall into runs of one value, of which only each
-run's first cast was recorded, and the first run goes unrecorded when it
-repeats the value from before the block: the vote's entries at a slot are the
-first casts of its last runs, in recording order, and each must carry the
-value its cast did. A vote's earliest entries have no earlier value, so they
-record every run. The exception is the entry migration v22 seeded for a vote
-that predated it, which copied the vote's state after its last cast: it is the
-vote's earliest entry and the only one at its slot, it lands on its block's
-final cast, and that block's earlier casts are not listed. A seed is told
-apart from transition history when its block holds more than one run of
-value, or when its slot is after the vote's `added_slot`; a single run of
-repeated casts in the vote's first block fits both and answers `404` "not
-retained". A revote that repeated the value before v48 is not
-listed. When the block is not held, or no valid
-transaction in it carries the vote, the endpoint answers `404` "not retained
-by this node" instead of omitting the vote or inventing a transaction. Within
-one slot, casts list in insertion order, which is the order the ledger
-applied them.
+`voting_procedure.index` is. A history entry written before v48 carries neither,
+so the endpoint decodes the block at the entry's slot (`database.BlockBySlot`)
+and matches it to the voter's valid casts on the proposal there. Those older
+entries record a cast only when it changed the value or anchor, so the casts
+fall into runs of one value, of which only each run's first cast was recorded,
+and the first run goes unrecorded when it repeats the value from before the
+block: the vote's entries at a slot are the first casts of its last runs, in
+recording order, and each must carry the value its cast did. A vote's earliest
+entries have no earlier value, so they record every run. The exception is the
+entry migration v22 seeded for a vote that predated it, which copied the vote's
+state after its last cast: it is the vote's earliest entry and the only one at
+its slot, it lands on its block's final cast, and that block's earlier casts are
+not listed. A seed is told apart from transition history when its block holds
+more than one run of value, or when its slot is after the vote's `added_slot`; a
+single run of repeated casts in the vote's first block fits both and answers
+`404` "not retained". A revote that repeated the value before v48 is not listed.
+When the block is not held, or no valid transaction in it carries the vote, the
+endpoint answers `404` "not retained by this node" instead of omitting the vote
+or inventing a transaction. Within one slot, casts list in insertion order,
+which is the order the ledger applied them.
 
 Migration `v48` (`governance-vote-cast`) adds the nullable `tx_hash` and
 `cert_index` columns to `governance_vote_history`; it backfills nothing, so
@@ -416,21 +446,21 @@ storage providers. `plugins.storage.blob.config.dataDir` and
 `plugins.storage.metadata.config.dataDir` may override the paths independently;
 when either is unset, that provider inherits `databasePath`.
 
-File-backed SQLite supports an optional `plugins.storage.metadata.config.vacuumIntervalSeconds`
-setting. It defaults to `0`, which disables space reclaim. A full `VACUUM`
-rewrites the file under SQLite's database-wide write lock, and no connection
-choice avoids that lock: a writer on any other connection fails with
-`SQLITE_BUSY` once its busy timeout elapses, and ledger code does not retry it.
-The reclaim job therefore runs on the single-connection write pool, where
-ledger writes queue in Go rather than fail, and it keeps each hold short. The
-first run on a database whose `auto_vacuum` mode is not `INCREMENTAL` sets that
-mode and performs one full `VACUUM`, which holds the pool for the whole rewrite
-(minutes on a large database). Every later run releases free pages with
-`PRAGMA incremental_vacuum` in steps of 1000 pages and returns the connection
-to the pool between steps, so queued writes run between steps. If a step does
-not reduce `freelist_count`, the run stops with an error instead of continuing
-without progress. Incremental vacuum returns free pages to the filesystem; it
-does not defragment the file.
+File-backed SQLite supports an optional
+`plugins.storage.metadata.config.vacuumIntervalSeconds` setting. It defaults to
+`0`, which disables space reclaim. A full `VACUUM` rewrites the file under
+SQLite's database-wide write lock, and no connection choice avoids that lock: a
+writer on any other connection fails with `SQLITE_BUSY` once its busy timeout
+elapses, and ledger code does not retry it. The reclaim job therefore runs on
+the single-connection write pool, where ledger writes queue in Go rather than
+fail, and it keeps each hold short. The first run on a database whose
+`auto_vacuum` mode is not `INCREMENTAL` sets that mode and performs one full
+`VACUUM`, which holds the pool for the whole rewrite (minutes on a large
+database). Every later run releases free pages with `PRAGMA incremental_vacuum`
+in steps of 1000 pages and returns the connection to the pool between steps, so
+queued writes run between steps. If a step does not reduce `freelist_count`, the
+run stops with an error instead of continuing without progress. Incremental
+vacuum returns free pages to the filesystem; it does not defragment the file.
 The job runs on its own ticker and does not change the separate daily committee
 authorization cleanup schedule.
 
@@ -451,7 +481,9 @@ Dingo stores chain state in two sibling stores:
   MySQL providers using the same shared store, direct drivers, v1alpha1 schema,
   and dialect-specific migration locks. All providers retain
   `poolMaxOpenConns`, `poolMaxIdleConns`, and `poolConnMaxLifetime`.
-- The blob store is a key/value object store managed by the blob plugins in `database/plugin/blob/`. The always-built plugin is `badger`; `gcs` and `s3` are optional and are built only with the `dingo_extra_plugins` build tag.
+- The blob store is a key/value object store managed by the blob plugins in
+  `database/plugin/blob/`. The always-built plugin is `badger`; `gcs` and `s3`
+  are optional and are built only with the `dingo_extra_plugins` build tag.
 
 The PostgreSQL metadata provider defaults `sslMode` to `require`, so new
 connections negotiate TLS unless an operator explicitly selects another mode
@@ -508,13 +540,13 @@ The initial database schema release is `v1alpha1`, stored as integer version 1
 for migration ordering. A fresh database creates it from embedded DDL. Existing
 unversioned metadata databases are intentionally rejected: the database/sql
 cutover is a clean break, so users must remove the data directory (metadata and
-blob stores) and resync from genesis. This keeps startup deterministic and avoids carrying a large,
-fragile compatibility layer for obsolete schemas. Reference inputs are stored
-in the v1alpha1 `utxo_reference_input` association table so multiple
-transactions can reference one output; the legacy single-column marker is not
-used by the new store. `v1alpha1` also creates the `node_settings_gate` table
-described below: the schema is unreleased, so a new table belongs in the
-initial version rather than in a version of its own.
+blob stores) and resync from genesis. This keeps startup deterministic and
+avoids carrying a large, fragile compatibility layer for obsolete schemas.
+Reference inputs are stored in the v1alpha1 `utxo_reference_input` association
+table so multiple transactions can reference one output; the legacy
+single-column marker is not used by the new store. `v1alpha1` also creates the
+`node_settings_gate` table described below: the schema is unreleased, so a new
+table belongs in the initial version rather than in a version of its own.
 
 Collateral inputs are stored in the `utxo_collateral_input` association table,
 keyed by `(utxo_id, transaction_hash)`. This is the authoritative many-to-many
@@ -756,9 +788,12 @@ Migration `v36` (`committee-hot-authorization-prune-order`, integer version
 `certificate_id`. Batched pruning can select superseded rows in order without
 sorting the full authorization history for that credential.
 
-Migration `v37` (`drep-expiry-history`, integer version 37) records DRep expiry changes by slot so LocalStateQuery can answer DRep state at an acquired point.
+Migration `v37` (`drep-expiry-history`, integer version 37) records DRep expiry
+changes by slot so LocalStateQuery can answer DRep state at an acquired point.
 
-Migration `v38` (`pool-relay-type`, integer version 38) records the relay constructor on each pool registration, preserving the distinction between single-host and multi-host name relays when returning pool parameters.
+Migration `v38` (`pool-relay-type`, integer version 38) records the relay
+constructor on each pool registration, preserving the distinction between
+single-host and multi-host name relays when returning pool parameters.
 
 Migration `v39` (`midnight-rollback-journal`, integer version 39) adds the
 `midnight_candidate_removals` and `midnight_epoch_transitions` rollback
@@ -823,30 +858,46 @@ counter's sign bit at its SQL boundary, so signed `INTEGER`/`BIGINT` ordering
 matches the ledger's complete `uint64` domain while public values remain
 unchanged.
 
-The upgrade runner owns a `schema_migrations` row per contiguous integer version with
-`version`, stable `name`, SHA-256 `checksum`, `phase`, opaque `cursor`, `dirty`,
-Unix-millisecond `started_at`/`updated_at`, and nullable `completed_at`.
-Phases are `expand`, `backfill`, `contract`, and `complete`. The runner marks a
-phase dirty before work, executes idempotent DDL, and commits each data batch and
-cursor checkpoint in the same transaction. SQLite also commits each expand DDL
-set and its phase advance in one transaction. The runner only marks a version
-complete after contract/index DDL succeeds. Completed checksum drift, registry gaps,
-unknown phases, inconsistent completion state, and a database newer than the
-binary are hard startup errors. File-backed SQLite uses a cross-process lock
-file and in-memory SQLite uses a process lock. Store readiness remains false
-until the locked, offline run succeeds. PostgreSQL/MySQL advisory locks are
-connection-owned for the complete migration run. Bulk-load session settings are held on a dedicated
-connection for the duration of a bulk window and restored before that
-connection returns to the pool. Optional SQLite VACUUM receives the provider
-stop context. The SQLite driver requests `sqlite3_interrupt` when an
-`ExecContext` or `QueryContext` context is canceled. A progress callback retains
-cancellation observed before execution, so cancellation during parameter binding
-is not lost when SQLite starts its first active statement. SQLite exits when
-execution reaches an interruptible point; this does not bound blocking I/O or
-user-defined callbacks. Shutdown can still reach its deadline before an active
-VACUUM callback exits; a later close call can wait for that callback to drain.
+The upgrade runner owns a `schema_migrations` row per contiguous integer version
+with `version`, stable `name`, SHA-256 `checksum`, `phase`, opaque `cursor`,
+`dirty`, Unix-millisecond `started_at`/`updated_at`, and nullable
+`completed_at`. Phases are `expand`, `backfill`, `contract`, and `complete`. The
+runner marks a phase dirty before work, executes idempotent DDL, and commits
+each data batch and cursor checkpoint in the same transaction. SQLite also
+commits each expand DDL set and its phase advance in one transaction. The runner
+only marks a version complete after contract/index DDL succeeds. Completed
+checksum drift, registry gaps, unknown phases, inconsistent completion state,
+and a database newer than the binary are hard startup errors. File-backed SQLite
+uses a cross-process lock file and in-memory SQLite uses a process lock. Store
+readiness remains false until the locked, offline run succeeds. PostgreSQL/MySQL
+advisory locks are connection-owned for the complete migration run. Bulk-load
+session settings are held on a dedicated connection for the duration of a bulk
+window and restored before that connection returns to the pool. Optional SQLite
+VACUUM receives the provider stop context. The SQLite driver requests
+`sqlite3_interrupt` when an `ExecContext` or `QueryContext` context is canceled.
+A progress callback retains cancellation observed before execution, so
+cancellation during parameter binding is not lost when SQLite starts its first
+active statement. SQLite exits when execution reaches an interruptible point;
+this does not bound blocking I/O or user-defined callbacks. Shutdown can still
+reach its deadline before an active VACUUM callback exits; a later close call
+can wait for that callback to drain.
 
-The Go model `models.Block` has `TableName() == "block"`, but it is not migrated into the metadata database. Blocks are stored in the blob store. SQL rows refer to blocks with `slot`, `block_hash`, and other hash columns. `Block.Decode` is Leios-aware for Conway-tagged blocks (`ledger.BlockTypeConway`): it calls `DecodeConwayBlock` (`database/models/leios_block.go`), which tries gouroboros' strict Conway decoder first and only falls back to reconstructing a Leios-extended block when strict decode fails. This is detection-based, so the Musashi prototype's Conway-tagged blocks (block type 7 carrying a 12-field Leios-extended header body) decode from stored CBOR while real Conway networks (mainnet/preprod/preview) are unaffected. Dijkstra decoding also accepts the earlier four-component block body retained in Musashi history: it maps the body's invalid-transaction index set onto the current per-transaction validity flags for typed access while retaining the original block and body CBOR. Both compatibility decoders preserve the original wire bytes, so `Block.Cbor()` returns the verbatim block and any `DOFF` byte offsets recorded against the stored block CBOR stay valid.
+The Go model `models.Block` has `TableName() == "block"`, but it is not migrated
+into the metadata database. Blocks are stored in the blob store. SQL rows refer
+to blocks with `slot`, `block_hash`, and other hash columns. `Block.Decode` is
+Leios-aware for Conway-tagged blocks (`ledger.BlockTypeConway`): it calls
+`DecodeConwayBlock` (`database/models/leios_block.go`), which tries gouroboros'
+strict Conway decoder first and only falls back to reconstructing a
+Leios-extended block when strict decode fails. This is detection-based, so the
+Musashi prototype's Conway-tagged blocks (block type 7 carrying a 12-field
+Leios-extended header body) decode from stored CBOR while real Conway networks
+(mainnet/preprod/preview) are unaffected. Dijkstra decoding also accepts the
+earlier four-component block body retained in Musashi history: it maps the
+body's invalid-transaction index set onto the current per-transaction validity
+flags for typed access while retaining the original block and body CBOR. Both
+compatibility decoders preserve the original wire bytes, so `Block.Cbor()`
+returns the verbatim block and any `DOFF` byte offsets recorded against the
+stored block CBOR stay valid.
 
 ## API Surface
 
@@ -860,11 +911,53 @@ Block-range backfill rejects invalid iterator items instead of skipping data.
 
 Use the Go APIs when code runs inside Dingo:
 
-- `database.Database` in `database/database.go` owns both stores and exposes `Blob()`, `PinBlob()`, `SetBlobStore()`, `Metadata()`, `Transaction()`, `BlobTxn()`, `MetadataTxn()`, `StorageMode()`, and `Close()`. `Blob()`, `PinBlob()`, and `SetBlobStore()` are the only readers and writer of the installed blob store; see "Storage provider ownership" for the pin/drain rules that make replacement safe.
-- `database.CborCache()` returns the `TieredCborCache`. Its cold-path entry points `ResolveUtxoCbor(txId, outputIdx, txn ...*Txn)` and `ResolveTxCbor(txn *Txn, txHash)` take the database transaction, not a bare `types.Txn` handle: an optional transaction makes uncommitted writes visible, and the cold read has to run against the store that transaction was opened on rather than whichever store is installed when the resolve happens. A resolve through a read-write transaction populates the shared hot UTxO cache only when a fresh read snapshot holds the identical stored value, so a UTxO row staged by the open transaction (and therefore subject to rollback) never reaches the shared cache while rows committed before the transaction began are still cached. `Database.ResolveUtxoCborWithRecovery(txId, outputIdx, txn)` wraps `ResolveUtxoCbor` for a caller that only has a bare ref (not a `*models.Utxo` already loaded via `GetUtxo`) and must not silently treat a recoverable missing blob as absent: on `types.ErrBlobKeyNotFound` it falls back to the same producing-block reconstruction `loadCbor` performs for `UtxoByRef`/`IterateLiveUtxos`, returning `ErrUtxoCborUnavailable` only once that recovery itself confirms the CBOR cannot be rebuilt. `ledger.queryShelleyUtxoWhole` (answering `GetUTxOWhole`) uses this rather than the bare cache call for exactly that reason.
-- `database.UtxosByAddressBoundedPage` uses ascending keyset batches to cap candidate rows and retained output CBOR while preserving a resumption cursor. It skips native-asset hydration because callers decode the original output CBOR, and it checks cancellation between SQL, blob, and decode steps. `UtxosByAddressPage` shares the same scan without a byte cap for internal callers that impose their own output bound. `database.ScanUtxosByAddress` runs the same bounded pages to exhaustion inside one read transaction, calling a visitor per page and returning the tip read in that transaction, so every page and the tip share one snapshot (SQLite WAL read snapshot, REPEATABLE READ on PostgreSQL and MySQL, a Badger read transaction for blob CBOR) and a block applied mid-scan neither duplicates nor drops an output. The transaction stays open while the visitor runs; on SQLite a long scan delays WAL checkpointing until it ends.
-- `database.IterateLiveUtxoRefs` and `IterateUtxoRefsAsOf` bind each SQL scan to the call context even when the caller supplies a longer-lived transaction. This preserves the transaction snapshot while allowing a per-query deadline to interrupt enumeration.
-- `database.Txn` in `database/txn.go` coordinates sibling metadata/blob transactions. Write commits update commit timestamps in both stores, commit the blob transaction first, then commit metadata. `Txn.BlobStore()` returns the blob store the transaction was opened on — the store its `Blob()` handle belongs to, and the one every blob call inside the transaction must use.
+- `database.Database` in `database/database.go` owns both stores and exposes
+  `Blob()`, `PinBlob()`, `SetBlobStore()`, `Metadata()`, `Transaction()`,
+  `BlobTxn()`, `MetadataTxn()`, `StorageMode()`, and `Close()`. `Blob()`,
+  `PinBlob()`, and `SetBlobStore()` are the only readers and writer of the
+  installed blob store; see "Storage provider ownership" for the pin/drain rules
+  that make replacement safe.
+- `database.CborCache()` returns the `TieredCborCache`. Its cold-path entry
+  points `ResolveUtxoCbor(txId, outputIdx, txn ...*Txn)` and `ResolveTxCbor(txn
+  *Txn, txHash)` take the database transaction, not a bare `types.Txn` handle:
+  an optional transaction makes uncommitted writes visible, and the cold read
+  has to run against the store that transaction was opened on rather than
+  whichever store is installed when the resolve happens. A resolve through a
+  read-write transaction populates the shared hot UTxO cache only when a fresh
+  read snapshot holds the identical stored value, so a UTxO row staged by the
+  open transaction (and therefore subject to rollback) never reaches the shared
+  cache while rows committed before the transaction began are still cached.
+  `Database.ResolveUtxoCborWithRecovery(txId, outputIdx, txn)` wraps
+  `ResolveUtxoCbor` for a caller that only has a bare ref (not a `*models.Utxo`
+  already loaded via `GetUtxo`) and must not silently treat a recoverable
+  missing blob as absent: on `types.ErrBlobKeyNotFound` it falls back to the
+  same producing-block reconstruction `loadCbor` performs for
+  `UtxoByRef`/`IterateLiveUtxos`, returning `ErrUtxoCborUnavailable` only once
+  that recovery itself confirms the CBOR cannot be rebuilt.
+  `ledger.queryShelleyUtxoWhole` (answering `GetUTxOWhole`) uses this rather
+  than the bare cache call for exactly that reason.
+- `database.UtxosByAddressBoundedPage` uses ascending keyset batches to cap
+  candidate rows and retained output CBOR while preserving a resumption cursor.
+  It skips native-asset hydration because callers decode the original output
+  CBOR, and it checks cancellation between SQL, blob, and decode steps.
+  `UtxosByAddressPage` shares the same scan without a byte cap for internal
+  callers that impose their own output bound. `database.ScanUtxosByAddress` runs
+  the same bounded pages to exhaustion inside one read transaction, calling a
+  visitor per page and returning the tip read in that transaction, so every page
+  and the tip share one snapshot (SQLite WAL read snapshot, REPEATABLE READ on
+  PostgreSQL and MySQL, a Badger read transaction for blob CBOR) and a block
+  applied mid-scan neither duplicates nor drops an output. The transaction stays
+  open while the visitor runs; on SQLite a long scan delays WAL checkpointing
+  until it ends.
+- `database.IterateLiveUtxoRefs` and `IterateUtxoRefsAsOf` bind each SQL scan to
+  the call context even when the caller supplies a longer-lived transaction.
+  This preserves the transaction snapshot while allowing a per-query deadline to
+  interrupt enumeration.
+- `database.Txn` in `database/txn.go` coordinates sibling metadata/blob
+  transactions. Write commits update commit timestamps in both stores, commit
+  the blob transaction first, then commit metadata. `Txn.BlobStore()` returns
+  the blob store the transaction was opened on — the store its `Blob()` handle
+  belongs to, and the one every blob call inside the transaction must use.
 - `metadata.MetadataStore` in `database/plugin/metadata/store.go` is the
   compatibility composition of the SQL-facing capabilities. New components
   should accept the narrowest one they use rather than the composition.
@@ -895,10 +988,15 @@ that context through to SQL, including conditional gate insertion transactions.
   datums and scripts, assets, treasury/reserves and donations, Midnight
   indexer state, sync state, and backfill checkpoints remain composed while
   their SQL ports are completed.
-- `blob.BlobStore` in `database/plugin/blob/store.go` is the blob-facing interface. It provides raw `Get`/`Set`/`Delete`/iteration plus block, UTxO, transaction, signed-URL, tombstone, and commit-timestamp methods.
-- `types.Txn`, `types.BlobIterator`, `types.BlockMetadata`, and blob key helpers live in `database/types/`.
+- `blob.BlobStore` in `database/plugin/blob/store.go` is the blob-facing
+  interface. It provides raw `Get`/`Set`/`Delete`/iteration plus block, UTxO,
+  transaction, signed-URL, tombstone, and commit-timestamp methods.
+- `types.Txn`, `types.BlobIterator`, `types.BlockMetadata`, and blob key helpers
+  live in `database/types/`.
 
-Direct SQL users should treat this document as a map of the metadata store. The blob store remains the source of block CBOR, UTxO CBOR, and transaction CBOR/offset bytes.
+Direct SQL users should treat this document as a map of the metadata store. The
+blob store remains the source of block CBOR, UTxO CBOR, and transaction
+CBOR/offset bytes.
 
 ### Testing storage plugins
 
@@ -931,17 +1029,255 @@ post-backfill planner-statistics marker untouched. It does not snapshot and
 restore fence values: a concurrent fence advance on PostgreSQL or MySQL must
 survive cleanup rather than be replaced by an older value read by the import.
 
-`database/lifecycle/` (package `lifecycle`) implements point-in-time database snapshots, restore from a snapshot, and truncation to an earlier chain point, shared by the offline `dingo database` CLI commands and, for truncate, the live ledger rollback path. It is a pure library over `*database.Database` — no CLI, config, or node-composition knowledge — with node-facing orchestration in `internal/dblifecycle` (`Service` for the CLI, `Manager` for automatic epoch-boundary snapshots).
+`database/lifecycle/` (package `lifecycle`) implements point-in-time database
+snapshots, restore from a snapshot, and truncation to an earlier chain point,
+shared by the offline `dingo database` CLI commands and, for truncate, the live
+ledger rollback path. It is a pure library over `*database.Database` — no CLI,
+config, or node-composition knowledge — with node-facing orchestration in
+`internal/dblifecycle` (`Service` for the CLI, `Manager` for automatic
+epoch-boundary snapshots).
 
-**Backup-capable plugin interfaces.** Two new optional interfaces, checked via type assertion the same way `plugin.LoggerSetter` is (`database/plugin/log.go`):
+**Backup-capable plugin interfaces.** Two new optional interfaces, checked via
+type assertion the same way `plugin.LoggerSetter` is (`database/plugin/log.go`):
 
-- `blob.Backuper` / `blob.Restorer` (`database/plugin/blob/backup.go`): stream-based (`io.Writer`/`io.Reader`), implemented by the badger plugin (`database/plugin/blob/badger/backup.go`) as a thin wrapper over Badger's native `DB.Backup`/`DB.Load`. Badger's backup is MVCC-consistent as of whenever it runs and does not itself block concurrent readers or writers. Some malformed/corrupted backup streams make Badger's `Load` return a clean error, but others make it panic outright (e.g. a corrupted length header producing a negative/oversized slice length); `BlobStoreBadger.Restore` recovers any such panic and returns it as a normal error instead, so a corrupted or adversarial backup stream can never crash the calling process. Before handing the stream to `Load`, `Restore` also makes a cheap, allocation-bounded pass over the same length-prefixed record framing (`validateLoadRecordSizes`, spooling a non-seekable reader to a temp file first so both passes can read from the start) and rejects any declared record length over `maxLoadRecordSize` (512MiB) with a normal error — `Load`'s own length prefix is an unvalidated raw `uint64` it trusts unconditionally before allocating a buffer of that size, and an allocation large enough to fail can produce a fatal, unrecoverable runtime OOM that no `recover()` can catch, unlike the panic case above. Badger's own docs require `Load` to be the only thing operating on the store — no concurrent reads, writes, or GC — so `restoreBlobStore` (`database/lifecycle/restore.go`) resolves the blob plugin with `blob.ProviderDependencies.RunMode` set to `"load"`; the badger provider (`database/plugin/blob/badger/provider.go`) treats `RunMode="load"` as an absolute GC disable, even when the provider config sets `gc: true`, so a long-running `Restore` cannot have the periodic `RunValueLogGC` ticker fire concurrently with `Load`.
+- `blob.Backuper` / `blob.Restorer` (`database/plugin/blob/backup.go`):
+  stream-based (`io.Writer`/`io.Reader`), implemented by the badger plugin
+  (`database/plugin/blob/badger/backup.go`) as a thin wrapper over Badger's
+  native `DB.Backup`/`DB.Load`. Badger's backup is MVCC-consistent as of
+  whenever it runs and does not itself block concurrent readers or writers. Some
+  malformed/corrupted backup streams make Badger's `Load` return a clean error,
+  but others make it panic outright (e.g. a corrupted length header producing a
+  negative/oversized slice length); `BlobStoreBadger.Restore` recovers any such
+  panic and returns it as a normal error instead, so a corrupted or adversarial
+  backup stream can never crash the calling process. Before handing the stream
+  to `Load`, `Restore` also makes a cheap, allocation-bounded pass over the same
+  length-prefixed record framing (`validateLoadRecordSizes`, spooling a
+  non-seekable reader to a temp file first so both passes can read from the
+  start) and rejects any declared record length over `maxLoadRecordSize`
+  (512MiB) with a normal error — `Load`'s own length prefix is an unvalidated
+  raw `uint64` it trusts unconditionally before allocating a buffer of that
+  size, and an allocation large enough to fail can produce a fatal,
+  unrecoverable runtime OOM that no `recover()` can catch, unlike the panic case
+  above. Badger's own docs require `Load` to be the only thing operating on the
+  store — no concurrent reads, writes, or GC — so `restoreBlobStore`
+  (`database/lifecycle/restore.go`) resolves the blob plugin with
+  `blob.ProviderDependencies.RunMode` set to `"load"`; the badger provider
+  (`database/plugin/blob/badger/provider.go`) treats `RunMode="load"` as an
+  absolute GC disable, even when the provider config sets `gc: true`, so a
+  long-running `Restore` cannot have the periodic `RunValueLogGC` ticker fire
+  concurrently with `Load`.
 
-  `s3`/`gcs` (`database/plugin/blob/aws/backup.go`, `database/plugin/blob/gcs/backup.go`, both behind `dingo_extra_plugins`) implement the same interface with a generic key-iteration dump instead: neither backend has a point-in-time snapshot primitive the way Badger's `Backup`/`Load` does. Both are thin wrappers around one shared implementation, `database/plugin/blob/internal/blobbackup` — the two plugins are otherwise near-identical siblings (see their `database.go` files), so this is one framing/consistency/batching implementation instead of two copies that could silently drift apart on a format or version change; each plugin's `Backup`/`Restore` method just calls `blobbackup.Backup`/`blobbackup.Restore` with its own `maxBlobReadBytes` bound and an error-message prefix ("s3 backup"/"gcs backup" etc). `blobbackup.Backup` opens a read-only transaction, walks every key with the store's own forward `NewIterator` (empty prefix), and writes each key/value as a `[4-byte key length][key][8-byte value length][value]` record behind a small magic/version header — a package-private framing, unrelated to Badger's. The last thing `Backup` writes, once the walk is confirmed complete, is a terminator: `terminatorMarker` (an out-of-band declared key length no real record could ever have), followed by a 12-byte footer (an 8-byte record count and a 4-byte CRC32 checksum, both computed over every record actually written). Without any terminator at all, a backup file truncated exactly at a record boundary reads back identically to a complete one (`io.ReadFull` reports a clean `io.EOF` either way), so `Restore` would have no way to tell "every key was captured" from "the stream stopped early but happened to stop cleanly" — a silent partial restore that looks successful. The marker's 4 bytes alone aren't sufficient proof of that, though: `0xFFFFFFFF` ("all bits set") is a realistic corruption pattern for some storage/flash failure modes, not just an arbitrary value, so a truncated or corrupted stream that happens to place those exact bytes at a key-length read position would otherwise be silently accepted as complete — the same bug, just moved. `blobbackup.ReadRecord` therefore returns a typed `*blobbackup.ErrTerminator` (wrapping `io.EOF`, so `errors.Is(_, io.EOF)` still recognizes it) carrying the footer's declared count/checksum, and `Restore` uses `errors.As` to compare them against a running count/checksum it accumulates over every record it actually read (via the same `WriteRecord` framing, fed into a `crc32.NewIEEE()` hasher) — only a match is accepted as a genuine end; any mismatch is reported as a corrupted-or-truncated stream. A real end-of-file before ever reaching a terminator at all is a separate, simpler "missing terminator" error, deliberately not wrapping the underlying `io.EOF` so `errors.Is(_, io.EOF)` can't mistake it for a clean end either. `blobbackup.Restore` requires an empty store (one iterator check via `blobbackup.IsEmpty`, mirroring `isEmptyBadgerStore` — `IsEmpty` checks the iterator's error both before and after `Rewind`, since a transient listing failure on the very first page reports identically to "no keys" otherwise) and replays records in batches (1000 records or 32MiB, whichever comes first) each in its own write transaction, rather than one transaction for the whole stream: both cloud plugins' write transactions buffer every staged change in memory until `Commit`, so an unbounded single transaction would hold an entire large store's contents in memory before issuing its first PUT. `blobbackup.WriteRecord` bounds both key and value length against the same limits `blobbackup.ReadRecord` enforces on the way back in (`MaxKeyLen`, the caller's own `maxBlobReadBytes`), so an oversized value fails loudly at `Backup` time instead of producing a file that is silently guaranteed to fail every future `Restore`. A batch that fails partway through `Restore` can leave earlier, already-committed batches in the store — both plugins' transactions apply and durably commit each batch independently, so a later batch's failure cannot retroactively undo one that already succeeded — and a failed `Restore` must not be retried against the same store; `IsEmpty`'s precondition check will (correctly) refuse it as no longer empty, so the caller needs a fresh store to try again. `Restore` tracks how many batches it has already committed and, once that count is nonzero, appends an explicit warning to every subsequent error it returns (`partialDataWarning`) — an operator reading a failed restore's error text doesn't have to already know this internal batching detail to realize the store holds partial data and must be discarded, not retried. That counter alone isn't sufficient, though: a cloud store's transaction `Commit` can report failure while having already durably written some of that same batch's keys, if its own internal compensating undo also failed (`types.ErrPartialCommit`, from `s3Txn.Commit`/`gcsTxn.Commit`) — `partialDataWarning` also checks for that sentinel directly, so a first-ever batch's commit failing this way still warns correctly even though the batch counter never got to increment. `Restore` also verifies there is nothing after a validated terminator — one extra byte read must return `io.EOF` — so a second backup stream concatenated after the first (or trailing garbage) is rejected as a malformed backup instead of silently restoring only the first one; a non-`io.EOF` failure on that same read (context cancellation, a real I/O error) is reported as itself, not misreported as trailing data. `Backup`'s per-key loop also rechecks `ctx.Err()` before each `ValueCopy`/iterator advance — the iterator itself manages its own internal call context rather than accepting the caller's, so an in-flight network call can't be preempted mid-call, but this bounds how long a cancellation takes to actually stop the walk to at most one more per-key operation instead of running to completion regardless of `ctx`. Because there is no snapshot primitive, `lifecycle.Snapshot`'s existing `PauseCommitsContext` window (below) covers the whole key-iteration walk for these two plugins, not just a brief pause — for a very large S3/GCS-backed store this means new writes are blocked for as long as the full bucket walk takes, an inherent tradeoff of this backend family, not a defect.
+  `s3`/`gcs` (`database/plugin/blob/aws/backup.go`,
+  `database/plugin/blob/gcs/backup.go`, both behind `dingo_extra_plugins`)
+  implement the same interface with a generic key-iteration dump instead:
+  neither backend has a point-in-time snapshot primitive the way Badger's
+  `Backup`/`Load` does. Both are thin wrappers around one shared implementation,
+  `database/plugin/blob/internal/blobbackup` — the two plugins are otherwise
+  near-identical siblings (see their `database.go` files), so this is one
+  framing/consistency/batching implementation instead of two copies that could
+  silently drift apart on a format or version change; each plugin's
+  `Backup`/`Restore` method just calls `blobbackup.Backup`/`blobbackup.Restore`
+  with its own `maxBlobReadBytes` bound and an error-message prefix ("s3
+  backup"/"gcs backup" etc). `blobbackup.Backup` opens a read-only transaction,
+  walks every key with the store's own forward `NewIterator` (empty prefix), and
+  writes each key/value as a `[4-byte key length][key][8-byte value
+  length][value]` record behind a small magic/version header — a package-private
+  framing, unrelated to Badger's. The last thing `Backup` writes, once the walk
+  is confirmed complete, is a terminator: `terminatorMarker` (an out-of-band
+  declared key length no real record could ever have), followed by a 12-byte
+  footer (an 8-byte record count and a 4-byte CRC32 checksum, both computed over
+  every record actually written). Without any terminator at all, a backup file
+  truncated exactly at a record boundary reads back identically to a complete
+  one (`io.ReadFull` reports a clean `io.EOF` either way), so `Restore` would
+  have no way to tell "every key was captured" from "the stream stopped early
+  but happened to stop cleanly" — a silent partial restore that looks
+  successful. The marker's 4 bytes alone aren't sufficient proof of that,
+  though: `0xFFFFFFFF` ("all bits set") is a realistic corruption pattern for
+  some storage/flash failure modes, not just an arbitrary value, so a truncated
+  or corrupted stream that happens to place those exact bytes at a key-length
+  read position would otherwise be silently accepted as complete — the same bug,
+  just moved. `blobbackup.ReadRecord` therefore returns a typed
+  `*blobbackup.ErrTerminator` (wrapping `io.EOF`, so `errors.Is(_, io.EOF)`
+  still recognizes it) carrying the footer's declared count/checksum, and
+  `Restore` uses `errors.As` to compare them against a running count/checksum it
+  accumulates over every record it actually read (via the same `WriteRecord`
+  framing, fed into a `crc32.NewIEEE()` hasher) — only a match is accepted as a
+  genuine end; any mismatch is reported as a corrupted-or-truncated stream. A
+  real end-of-file before ever reaching a terminator at all is a separate,
+  simpler "missing terminator" error, deliberately not wrapping the underlying
+  `io.EOF` so `errors.Is(_, io.EOF)` can't mistake it for a clean end either.
+  `blobbackup.Restore` requires an empty store (one iterator check via
+  `blobbackup.IsEmpty`, mirroring `isEmptyBadgerStore` — `IsEmpty` checks the
+  iterator's error both before and after `Rewind`, since a transient listing
+  failure on the very first page reports identically to "no keys" otherwise) and
+  replays records in batches (1000 records or 32MiB, whichever comes first) each
+  in its own write transaction, rather than one transaction for the whole
+  stream: both cloud plugins' write transactions buffer every staged change in
+  memory until `Commit`, so an unbounded single transaction would hold an entire
+  large store's contents in memory before issuing its first PUT.
+  `blobbackup.WriteRecord` bounds both key and value length against the same
+  limits `blobbackup.ReadRecord` enforces on the way back in (`MaxKeyLen`, the
+  caller's own `maxBlobReadBytes`), so an oversized value fails loudly at
+  `Backup` time instead of producing a file that is silently guaranteed to fail
+  every future `Restore`. A batch that fails partway through `Restore` can leave
+  earlier, already-committed batches in the store — both plugins' transactions
+  apply and durably commit each batch independently, so a later batch's failure
+  cannot retroactively undo one that already succeeded — and a failed `Restore`
+  must not be retried against the same store; `IsEmpty`'s precondition check
+  will (correctly) refuse it as no longer empty, so the caller needs a fresh
+  store to try again. `Restore` tracks how many batches it has already committed
+  and, once that count is nonzero, appends an explicit warning to every
+  subsequent error it returns (`partialDataWarning`) — an operator reading a
+  failed restore's error text doesn't have to already know this internal
+  batching detail to realize the store holds partial data and must be discarded,
+  not retried. That counter alone isn't sufficient, though: a cloud store's
+  transaction `Commit` can report failure while having already durably written
+  some of that same batch's keys, if its own internal compensating undo also
+  failed (`types.ErrPartialCommit`, from `s3Txn.Commit`/`gcsTxn.Commit`) —
+  `partialDataWarning` also checks for that sentinel directly, so a first-ever
+  batch's commit failing this way still warns correctly even though the batch
+  counter never got to increment. `Restore` also verifies there is nothing after
+  a validated terminator — one extra byte read must return `io.EOF` — so a
+  second backup stream concatenated after the first (or trailing garbage) is
+  rejected as a malformed backup instead of silently restoring only the first
+  one; a non-`io.EOF` failure on that same read (context cancellation, a real
+  I/O error) is reported as itself, not misreported as trailing data. `Backup`'s
+  per-key loop also rechecks `ctx.Err()` before each `ValueCopy`/iterator
+  advance — the iterator itself manages its own internal call context rather
+  than accepting the caller's, so an in-flight network call can't be preempted
+  mid-call, but this bounds how long a cancellation takes to actually stop the
+  walk to at most one more per-key operation instead of running to completion
+  regardless of `ctx`. Because there is no snapshot primitive,
+  `lifecycle.Snapshot`'s existing `PauseCommitsContext` window (below) covers
+  the whole key-iteration walk for these two plugins, not just a brief pause —
+  for a very large S3/GCS-backed store this means new writes are blocked for as
+  long as the full bucket walk takes, an inherent tradeoff of this backend
+  family, not a defect.
 
-- `metadata.Backuper` / `metadata.Restorer` (`database/plugin/metadata/backup.go`): path-based (`BackupTo(ctx, dstPath)` / `RestoreFrom(ctx, srcPath)`), implemented by the sqlite plugin (`database/plugin/metadata/sqlite/backup.go`) via the SQL `VACUUM INTO` statement (a brief read lock under WAL) for backup, and a plain file copy for restore. SQLite stages the completed vacuum in a private directory and publishes it with a same-filesystem hard link, so a destination created concurrently after the initial existence check is never replaced (`sqlstore.PublishBackupFile`, shared with the postgres/mysql implementations below). `PublishBackupFile` also fsyncs the staged file itself before linking it into place, not just the destination directory afterward — `VACUUM INTO` fsyncs its own output as part of closing the file, but `pg_dump`/`mysqldump` do not, so relying on each write callback to handle that itself would have left a durable directory entry pointing at a file whose contents were never actually flushed to disk for those two backends. Once `os.Link` has published `dstPath`, every remaining step (the directory syncs, removing the staging directory) is only making that publish more durable, not deciding whether it happened — so a failure in any of them still durably leaves `dstPath` behind while reporting the whole call as failed. `PublishBackupFile` best-effort removes it in that case (guarded by `os.SameFile` against ever deleting something a concurrent creator populated at the same path instead, then syncing `dstDir` again afterward so that removal is itself durable, not just the earlier publish), so a retry isn't permanently blocked by the "destination already exists" check the next call makes, forcing an operator to notice and delete it by hand. This guard is itself not atomic — `os.SameFile` and `os.Remove` are two separate syscalls with no portable equivalent of "delete this path only if it's still this inode" — so it remains a best-effort check backed by the documented invariant that nothing else writes `dstPath` directly under this package's own contract, not a hard guarantee; closing that window for real would need locking infrastructure this code doesn't have. The verification `lstat` right after `os.Link` (`lstatFile`, a package-level var so a test can inject its failure deterministically) is itself treated as a publish failure if it errors, not merely consulted to decide whether cleanup should run — otherwise `dstPath` disappearing (or becoming unreadable) in the instant after a successful `Link` could let this function reach its happy path and return `nil` with no durable backup file actually in place. That failure path still attempts the same cleanup every other late failure does, just registered before it returns rather than after: with no `publishedInfo` to compare against (the lstat that would have produced it is what failed), it falls back to comparing `dstPath` against the still-staged file's identity instead, since `stagedPath` is only removed by the (separately registered, earlier, so later-running) staging-directory cleanup. Path-based rather than stream-based because `VACUUM INTO` is itself path-oriented; a cloud snapshot destination would be layered on as an upload/download step around the local path, not a plugin-interface change. `RestoreFrom` must run before the store has ever been started, or after `Close()` — but `plugin.Resolve` always constructs and starts a provider together, with no construct-only step. `database/lifecycle`'s `restoreMetadataStore`/`restoreBlobStore` (`database/lifecycle/restore.go`) resolve the manifest-recorded provider against a `*plugin.Host` supplied as an explicit parameter to `Restore`/`RestoreValidated` — this package never constructs or registers into a plugin host itself; composition code (`node.go`, `cmd/dingo`, `internal/dblifecycle`, `bark`) builds a fresh, single-use one (typically via `internal/plugins.NewHost`) just for the call and stops it once done, the same way `internal/plugins.OpenDatabase` already builds its own scratch host for a temporary open elsewhere. Provider `dataDir` overrides must be absent, nil, or an empty string; non-string values are rejected rather than relying on provider decoding to coerce them and bypass the staging directory. `restoreMetadataStore` resolves the metadata provider on the injected host just long enough to construct it, calls `Reset` on it if the provider implements `metadata.Resettable` (see below), immediately `StopCapability`s it, then resets `targetDataDir` back to empty before calling `RestoreFrom` — undoing whatever the brief resolve-and-start wrote, so the actual restore lands on what is, from `RestoreFrom`'s perspective, a never-started store.
+- `metadata.Backuper` / `metadata.Restorer`
+  (`database/plugin/metadata/backup.go`): path-based (`BackupTo(ctx, dstPath)` /
+  `RestoreFrom(ctx, srcPath)`), implemented by the sqlite plugin
+  (`database/plugin/metadata/sqlite/backup.go`) via the SQL `VACUUM INTO`
+  statement (a brief read lock under WAL) for backup, and a plain file copy for
+  restore. SQLite stages the completed vacuum in a private directory and
+  publishes it with a same-filesystem hard link, so a destination created
+  concurrently after the initial existence check is never replaced
+  (`sqlstore.PublishBackupFile`, shared with the postgres/mysql implementations
+  below). `PublishBackupFile` also fsyncs the staged file itself before linking
+  it into place, not just the destination directory afterward — `VACUUM INTO`
+  fsyncs its own output as part of closing the file, but `pg_dump`/`mysqldump`
+  do not, so relying on each write callback to handle that itself would have
+  left a durable directory entry pointing at a file whose contents were never
+  actually flushed to disk for those two backends. Once `os.Link` has published
+  `dstPath`, every remaining step (the directory syncs, removing the staging
+  directory) is only making that publish more durable, not deciding whether it
+  happened — so a failure in any of them still durably leaves `dstPath` behind
+  while reporting the whole call as failed. `PublishBackupFile` best-effort
+  removes it in that case (guarded by `os.SameFile` against ever deleting
+  something a concurrent creator populated at the same path instead, then
+  syncing `dstDir` again afterward so that removal is itself durable, not just
+  the earlier publish), so a retry isn't permanently blocked by the "destination
+  already exists" check the next call makes, forcing an operator to notice and
+  delete it by hand. This guard is itself not atomic — `os.SameFile` and
+  `os.Remove` are two separate syscalls with no portable equivalent of "delete
+  this path only if it's still this inode" — so it remains a best-effort check
+  backed by the documented invariant that nothing else writes `dstPath` directly
+  under this package's own contract, not a hard guarantee; closing that window
+  for real would need locking infrastructure this code doesn't have. The
+  verification `lstat` right after `os.Link` (`lstatFile`, a package-level var
+  so a test can inject its failure deterministically) is itself treated as a
+  publish failure if it errors, not merely consulted to decide whether cleanup
+  should run — otherwise `dstPath` disappearing (or becoming unreadable) in the
+  instant after a successful `Link` could let this function reach its happy path
+  and return `nil` with no durable backup file actually in place. That failure
+  path still attempts the same cleanup every other late failure does, just
+  registered before it returns rather than after: with no `publishedInfo` to
+  compare against (the lstat that would have produced it is what failed), it
+  falls back to comparing `dstPath` against the still-staged file's identity
+  instead, since `stagedPath` is only removed by the (separately registered,
+  earlier, so later-running) staging-directory cleanup. Path-based rather than
+  stream-based because `VACUUM INTO` is itself path-oriented; a cloud snapshot
+  destination would be layered on as an upload/download step around the local
+  path, not a plugin-interface change. `RestoreFrom` must run before the store
+  has ever been started, or after `Close()` — but `plugin.Resolve` always
+  constructs and starts a provider together, with no construct-only step.
+  `database/lifecycle`'s `restoreMetadataStore`/`restoreBlobStore`
+  (`database/lifecycle/restore.go`) resolve the manifest-recorded provider
+  against a `*plugin.Host` supplied as an explicit parameter to
+  `Restore`/`RestoreValidated` — this package never constructs or registers into
+  a plugin host itself; composition code (`node.go`, `cmd/dingo`,
+  `internal/dblifecycle`, `bark`) builds a fresh, single-use one (typically via
+  `internal/plugins.NewHost`) just for the call and stops it once done, the same
+  way `internal/plugins.OpenDatabase` already builds its own scratch host for a
+  temporary open elsewhere. Provider `dataDir` overrides must be absent, nil, or
+  an empty string; non-string values are rejected rather than relying on
+  provider decoding to coerce them and bypass the staging directory.
+  `restoreMetadataStore` resolves the metadata provider on the injected host
+  just long enough to construct it, calls `Reset` on it if the provider
+  implements `metadata.Resettable` (see below), immediately `StopCapability`s
+  it, then resets `targetDataDir` back to empty before calling `RestoreFrom` —
+  undoing whatever the brief resolve-and-start wrote, so the actual restore
+  lands on what is, from `RestoreFrom`'s perspective, a never-started store.
 
-- `metadata.Resettable` (`database/plugin/metadata/backup.go`): an optional `Reset(ctx) error` a metadata provider implements when a directory wipe alone can't undo `restoreMetadataStore`'s brief resolve-and-start. For sqlite (the only file-based metadata provider; badger is a blob backend), deleting `targetDataDir` is the whole story — that directory is the entirety of what the brief start touched. For postgres/mysql, that brief start instead ran real migrations against the actual configured remote database (found via a live end-to-end restore attempt against a real Postgres server, which failed because the migrated-but-otherwise-empty database no longer looked "empty" to `RestoreFrom`'s own precondition check) — a directory wipe does nothing to a remote server. Both providers' `Reset` (`resetDatabase` in each package's `backup.go`) drops every table it can see through the same query `databaseIsEmpty` already uses to define "empty" — all tables in all non-system schemas for postgres (CASCADE handles FK ordering), all tables in the configured database for mysql (with `FOREIGN_KEY_CHECKS` disabled for the same reason, on a single dedicated `*sql.Conn` pinned for the whole operation since that setting is session-scoped and `*sql.DB` is a pool that could otherwise run the drops on a different, still-FK-enforcing connection) — deliberately not dropping schemas/databases themselves, since an operator's search_path/database naming is left untouched. Both the emptiness check and the reset restrict to `table_type = 'BASE TABLE'`, since neither can be told to clear a view (postgres rejects `DROP TABLE` on one outright; MySQL just emits a note and silently leaves it in place) — without that restriction a view sitting alongside dingo's own tables would either abort the reset or make an otherwise-empty database wrongly report "not empty" with no way to fix it. Before dropping anything, `resetDatabase` also calls `refuseIfTargetHasData`, which checks every table besides the migrations bookkeeping table (`schema_migrations`) for an actual row and refuses with a clear error if any has one: dingo's own migrations never insert into a domain table, so a database `restoreMetadataStore`'s brief resolve-and-start just finished migrating has zero rows in everything else, and a nonzero count anywhere means this target isn't that — most plausibly a live node's own database, reused or pointed at by a misconfigured DSN, whose real accumulated data `Reset`'s unconditional `DROP TABLE` would otherwise destroy with no way back. For postgres specifically, that exemption is scoped to `(schema, name)`, not name alone: `resetDatabase` scans every non-system schema, and `migrations/runner.go`'s own `hasUserTables` query creates `schema_migrations` in `current_schema()` (typically `public`, but operator-configurable) — a same-named table an operator's own tooling created in some other schema is not dingo's bookkeeping table, and a name-only exemption would let a populated one of those slip past the check and then get dropped anyway. Postgres's `resetDatabase` also calls `refuseIfDependentViewsExist` before dropping anything: `DROP TABLE ... CASCADE` (used for FK-safe ordering among the tables being dropped) cascades to any *view* that depends on one of those tables too, not just other tables — confirmed live against a real Postgres server ("NOTICE: drop cascades to view") — which would otherwise silently destroy an operator-owned view the moment it depends on one of dingo's tables, exactly the collateral damage `table_type = 'BASE TABLE'` filtering elsewhere in this file exists to prevent. There is no way to recreate such a view correctly after the fact either, since `RestoreFrom` (which runs after `Reset`, not before) is what recreates the tables the view would depend on — so `resetDatabase` fails loudly instead, querying `pg_depend`/`pg_rewrite`/`pg_class` directly (`relkind IN ('v', 'm')`) rather than `information_schema.view_table_usage`: confirmed live, that SQL-standard information_schema view only ever covers plain views and returns zero rows for a *materialized* view's dependency, even though `DROP TABLE ... CASCADE` cascades to a dependent materialized view exactly the same way. `Reset` must run before `StopCapability`, not after: it needs the still-open connection pool, which `StopCapability` closes.
+- `metadata.Resettable` (`database/plugin/metadata/backup.go`): an optional
+  `Reset(ctx) error` a metadata provider implements when a directory wipe alone
+  can't undo `restoreMetadataStore`'s brief resolve-and-start. For sqlite (the
+  only file-based metadata provider; badger is a blob backend), deleting
+  `targetDataDir` is the whole story — that directory is the entirety of what
+  the brief start touched. For postgres/mysql, that brief start instead ran real
+  migrations against the actual configured remote database (found via a live
+  end-to-end restore attempt against a real Postgres server, which failed
+  because the migrated-but-otherwise-empty database no longer looked "empty" to
+  `RestoreFrom`'s own precondition check) — a directory wipe does nothing to a
+  remote server. Both providers' `Reset` (`resetDatabase` in each package's
+  `backup.go`) drops every table it can see through the same query
+  `databaseIsEmpty` already uses to define "empty" — all tables in all
+  non-system schemas for postgres (CASCADE handles FK ordering), all tables in
+  the configured database for mysql (with `FOREIGN_KEY_CHECKS` disabled for the
+  same reason, on a single dedicated `*sql.Conn` pinned for the whole operation
+  since that setting is session-scoped and `*sql.DB` is a pool that could
+  otherwise run the drops on a different, still-FK-enforcing connection) —
+  deliberately not dropping schemas/databases themselves, since an operator's
+  search_path/database naming is left untouched. Both the emptiness check and
+  the reset restrict to `table_type = 'BASE TABLE'`, since neither can be told
+  to clear a view (postgres rejects `DROP TABLE` on one outright; MySQL just
+  emits a note and silently leaves it in place) — without that restriction a
+  view sitting alongside dingo's own tables would either abort the reset or make
+  an otherwise-empty database wrongly report "not empty" with no way to fix it.
+  Before dropping anything, `resetDatabase` also calls `refuseIfTargetHasData`,
+  which checks every table besides the migrations bookkeeping table
+  (`schema_migrations`) for an actual row and refuses with a clear error if any
+  has one: dingo's own migrations never insert into a domain table, so a
+  database `restoreMetadataStore`'s brief resolve-and-start just finished
+  migrating has zero rows in everything else, and a nonzero count anywhere means
+  this target isn't that — most plausibly a live node's own database, reused or
+  pointed at by a misconfigured DSN, whose real accumulated data `Reset`'s
+  unconditional `DROP TABLE` would otherwise destroy with no way back. For
+  postgres specifically, that exemption is scoped to `(schema, name)`, not name
+  alone: `resetDatabase` scans every non-system schema, and
+  `migrations/runner.go`'s own `hasUserTables` query creates `schema_migrations`
+  in `current_schema()` (typically `public`, but operator-configurable) — a
+  same-named table an operator's own tooling created in some other schema is not
+  dingo's bookkeeping table, and a name-only exemption would let a populated one
+  of those slip past the check and then get dropped anyway. Postgres's
+  `resetDatabase` also calls `refuseIfDependentViewsExist` before dropping
+  anything: `DROP TABLE ... CASCADE` (used for FK-safe ordering among the tables
+  being dropped) cascades to any *view* that depends on one of those tables too,
+  not just other tables — confirmed live against a real Postgres server
+  ("NOTICE: drop cascades to view") — which would otherwise silently destroy an
+  operator-owned view the moment it depends on one of dingo's tables, exactly
+  the collateral damage `table_type = 'BASE TABLE'` filtering elsewhere in this
+  file exists to prevent. There is no way to recreate such a view correctly
+  after the fact either, since `RestoreFrom` (which runs after `Reset`, not
+  before) is what recreates the tables the view would depend on — so
+  `resetDatabase` fails loudly instead, querying
+  `pg_depend`/`pg_rewrite`/`pg_class` directly (`relkind IN ('v', 'm')`) rather
+  than `information_schema.view_table_usage`: confirmed live, that SQL-standard
+  information_schema view only ever covers plain views and returns zero rows for
+  a *materialized* view's dependency, even though `DROP TABLE ... CASCADE`
+  cascades to a dependent materialized view exactly the same way. `Reset` must
+  run before `StopCapability`, not after: it needs the still-open connection
+  pool, which `StopCapability` closes.
 
   Before calling `Reset`, `prepareRestore` confirms both backup files exist,
   runs the metadata provider's structural check, and reads the complete
@@ -970,56 +1306,185 @@ survive cleanup rather than be replaced by an older value read by the import.
   held with an exclusive `flock` on its own descriptor from creation until
   removal or activation. The kernel drops that lock when the process exits,
   including on SIGKILL, so the next restore into the same parent removes a
-  populated directory no process holds before it starts, and never removes
-  one that is still held, whatever its age. Activation moves an existing empty target and the completed staging
-  tree through random quarantine names with no-replace renames and checks their
-  identities after each move. Failed rollback retains the last confirmed
-  quarantine name for stale-work recovery. A writer that replaces one of the
-  saved names can therefore make the restore fail, but cannot redirect
-  recursive cleanup into the replacement or publish the replacement as
-  validated data. Activation fails closed when the running operating system or
-  kernel cannot provide an atomic no-replace directory rename.
+  populated directory no process holds before it starts, and never removes one
+  that is still held, whatever its age. Activation moves an existing empty
+  target and the completed staging tree through random quarantine names with
+  no-replace renames and checks their identities after each move. Failed
+  rollback retains the last confirmed quarantine name for stale-work recovery. A
+  writer that replaces one of the saved names can therefore make the restore
+  fail, but cannot redirect recursive cleanup into the replacement or publish
+  the replacement as validated data. Activation fails closed when the running
+  operating system or kernel cannot provide an atomic no-replace directory
+  rename.
 
   PostgreSQL/MySQL metadata changes before that rename, so live restore also
-  fsyncs a recovery record beside the staging directory before mutation.
-  Startup uses that record and the live/backup directory state to compensate an
+  fsyncs a recovery record beside the staging directory before mutation. Startup
+  uses that record and the live/backup directory state to compensate an
   incomplete swap or finish cleanup after an activated swap. Any metadata reset
-  or restore failure, final consistency failure,
-  or cancellation after mutation restores the original metadata backup under
-  `context.WithoutCancel`. Rollback errors are joined
-  with the original restore error as `ErrRestoreRollbackPending`, while a
-  retryable `RestoreRecovery` handle and the backup directory named in the
-  error remain available. Offline restore removes the rollback copy only after
-  both replacement stores pass `validateRestoredDatabase`; live node restore uses
-  `RestoreRecoverable` to retain it through the local directory swap and node
-  reinitialization as well. Commit reclaims a superseded namespaced cloud
-  generation. The first migration from the marker-free layout retains its
-  legacy keys because the legacy prefix contains the newly active namespace.
+  or restore failure, final consistency failure, or cancellation after mutation
+  restores the original metadata backup under `context.WithoutCancel`. Rollback
+  errors are joined with the original restore error as
+  `ErrRestoreRollbackPending`, while a retryable `RestoreRecovery` handle and
+  the backup directory named in the error remain available. Offline restore
+  removes the rollback copy only after both replacement stores pass
+  `validateRestoredDatabase`; live node restore uses `RestoreRecoverable` to
+  retain it through the local directory swap and node reinitialization as well.
+  Commit reclaims a superseded namespaced cloud generation. The first migration
+  from the marker-free layout retains its legacy keys because the legacy prefix
+  contains the newly active namespace.
 
-  `Reset` still destroys a live client/server metadata target's tables directly, but
-  live restore now brackets that mutation with the rollback operation above.
+  `Reset` still destroys a live client/server metadata target's tables directly,
+  but live restore now brackets that mutation with the rollback operation above.
   It is wired through `sqlstore.Config.Reset` (mirroring
   `BackupTo`/`RestoreFrom`); every backend built on the shared `sqlstore.Store`
   (sqlite included) therefore satisfies the `Resettable` interface, but sqlite
-  leaves `Config.Reset` unset, so its `Store.Reset` is a documented no-op
-  rather than evidence it needs more than a directory wipe. `Store.Reset`
-  holds the same `startMu` mutex `Start`/`CloseContext` already use, so a
-  concurrent close can't pull the connection pool out from under an in-progress
-  reset.
+  leaves `Config.Reset` unset, so its `Store.Reset` is a documented no-op rather
+  than evidence it needs more than a directory wipe. `Store.Reset` holds the
+  same `startMu` mutex `Start`/`CloseContext` already use, so a concurrent close
+  can't pull the connection pool out from under an in-progress reset.
 
-  `postgres`/`mysql` (`database/plugin/metadata/postgres/backup.go`, `database/plugin/metadata/mysql/backup.go`, both behind `dingo_extra_plugins`) shell out to each backend's native dump tool — `pg_dump --format=custom`/`pg_restore` for postgres, `mysqldump`/`mysql` for mysql — since neither has a `VACUUM INTO` equivalent. Connection credentials are passed via environment (`PGPASSWORD`/`MYSQL_PWD`), never as a subprocess argument, so they never appear in `ps`/`/proc/*/cmdline` output. `mysqldump` also runs with `--single-transaction`, giving it one consistent InnoDB snapshot for the whole dump without blocking concurrent writers — without it, a node actively writing metadata during the dump could leave a backup mixing rows from different points in time. Both backends refuse to restore into a target that already has tables (`information_schema.tables` is non-empty) — there is no fresh, never-created data directory to enforce this the way badger/sqlite's file-based contracts do, so it's checked explicitly instead of silently merging into a populated schema/database. `BackupTo` for both is published through the same `sqlstore.PublishBackupFile` helper sqlite uses.
+  `postgres`/`mysql` (`database/plugin/metadata/postgres/backup.go`,
+  `database/plugin/metadata/mysql/backup.go`, both behind `dingo_extra_plugins`)
+  shell out to each backend's native dump tool — `pg_dump
+  --format=custom`/`pg_restore` for postgres, `mysqldump`/`mysql` for mysql —
+  since neither has a `VACUUM INTO` equivalent. Connection credentials are
+  passed via environment (`PGPASSWORD`/`MYSQL_PWD`), never as a subprocess
+  argument, so they never appear in `ps`/`/proc/*/cmdline` output. `mysqldump`
+  also runs with `--single-transaction`, giving it one consistent InnoDB
+  snapshot for the whole dump without blocking concurrent writers — without it,
+  a node actively writing metadata during the dump could leave a backup mixing
+  rows from different points in time. Both backends refuse to restore into a
+  target that already has tables (`information_schema.tables` is non-empty) —
+  there is no fresh, never-created data directory to enforce this the way
+  badger/sqlite's file-based contracts do, so it's checked explicitly instead of
+  silently merging into a populated schema/database. `BackupTo` for both is
+  published through the same `sqlstore.PublishBackupFile` helper sqlite uses.
 
-  Postgres connection parameters are derived from the configured DSN with `pgconn.ParseConfig` (accepts either URI or keyword=value style); any DSN query parameter that isn't one of the handful of real libpq connection keywords (e.g. an operator-set `timezone`, or the `options=-c...` fragment `database/plugin/metadata/sqlstore/dialect_integration_test.go`'s search-path-isolated tests rely on) is folded into `PGOPTIONS` instead of forwarded as a raw `PG<NAME>` variable, since real `pg_dump`/`pg_restore` (linked against actual libpq, unlike pgx's own lenient Go DSN parser) reject an unrecognized top-level connection keyword outright — each folded value is backslash-escaped (`escapePGOption`) so an embedded space or backslash survives the server's own whitespace-splitting parse of that startup parameter instead of being read as a token separator or a broken escape sequence. `PGSSLMODE` is recovered from `pgconn.Config`'s already-resolved `*tls.Config` (`postgresSSLMode`) by inspecting the specific field combination each mode leaves behind — `ServerName` set only for `verify-full`, a custom `VerifyPeerCertificate` only for `verify-ca`, neither for a bare `require` — rather than collapsing every non-nil `TLSConfig` to `require`, which would silently downgrade an operator's `verify-ca`/`verify-full` configuration to "encrypted but unverified." A custom root CA or client certificate configured for `verify-ca`/`verify-full` can't be forwarded, though: `pgconn` parses `sslrootcert`/`sslcert`/`sslkey` into in-memory certificate material and discards the original file paths, and `pg_dump`/`pg_restore` need real files — rather than silently falling back to weaker verification in that case, `connEnv` fails loudly instead (this also means a legitimate `sslrootcert=system` configuration is rejected too, since a system-trust pool and a custom-file pool are indistinguishable once resolved — an accepted false-positive in favor of never misclassifying a custom CA as safe to skip).
+  Postgres connection parameters are derived from the configured DSN with
+  `pgconn.ParseConfig` (accepts either URI or keyword=value style); any DSN
+  query parameter that isn't one of the handful of real libpq connection
+  keywords (e.g. an operator-set `timezone`, or the `options=-c...` fragment
+  `database/plugin/metadata/sqlstore/dialect_integration_test.go`'s
+  search-path-isolated tests rely on) is folded into `PGOPTIONS` instead of
+  forwarded as a raw `PG<NAME>` variable, since real `pg_dump`/`pg_restore`
+  (linked against actual libpq, unlike pgx's own lenient Go DSN parser) reject
+  an unrecognized top-level connection keyword outright — each folded value is
+  backslash-escaped (`escapePGOption`) so an embedded space or backslash
+  survives the server's own whitespace-splitting parse of that startup parameter
+  instead of being read as a token separator or a broken escape sequence.
+  `PGSSLMODE` is recovered from `pgconn.Config`'s already-resolved `*tls.Config`
+  (`postgresSSLMode`) by inspecting the specific field combination each mode
+  leaves behind — `ServerName` set only for `verify-full`, a custom
+  `VerifyPeerCertificate` only for `verify-ca`, neither for a bare `require` —
+  rather than collapsing every non-nil `TLSConfig` to `require`, which would
+  silently downgrade an operator's `verify-ca`/`verify-full` configuration to
+  "encrypted but unverified." A custom root CA or client certificate configured
+  for `verify-ca`/`verify-full` can't be forwarded, though: `pgconn` parses
+  `sslrootcert`/`sslcert`/`sslkey` into in-memory certificate material and
+  discards the original file paths, and `pg_dump`/`pg_restore` need real files —
+  rather than silently falling back to weaker verification in that case,
+  `connEnv` fails loudly instead (this also means a legitimate
+  `sslrootcert=system` configuration is rejected too, since a system-trust pool
+  and a custom-file pool are indistinguishable once resolved — an accepted
+  false-positive in favor of never misclassifying a custom CA as safe to skip).
 
-  MySQL connection parameters come from `mysqldriver.ParseDSN`. The DSN's `tls` setting is mapped to CLI flags (`mysqlSSLArgs`) for the client tools actually shipped in the Docker image — Debian's `default-mysql-client`, confirmed live to be MariaDB's client (`mariadb-client`), not real MySQL: MariaDB's `mysql`/`mysqldump` reject MySQL 5.7+'s `--ssl-mode` flag outright ("unknown variable"), so this speaks MariaDB's older `--ssl`/`--skip-ssl`/`--ssl-verify-server-cert` flags instead. That older flag set cannot require unverified TLS, so `skip-verify` is rejected for snapshot and restore rather than weakened to an opportunistic connection. `preferred` remains opportunistic in both clients. `true` (verify CA and hostname, the driver's strictest mode) maps to `--ssl --ssl-verify-server-cert`. A custom registered TLS config name (`mysql.RegisterTLSConfig`, referencing an arbitrary `*tls.Config` the driver resolves internally) cannot be mapped to fixed flags and is rejected rather than guessed.
+  MySQL connection parameters come from `mysqldriver.ParseDSN`. The DSN's `tls`
+  setting is mapped to CLI flags (`mysqlSSLArgs`) for the client tools actually
+  shipped in the Docker image — Debian's `default-mysql-client`, confirmed live
+  to be MariaDB's client (`mariadb-client`), not real MySQL: MariaDB's
+  `mysql`/`mysqldump` reject MySQL 5.7+'s `--ssl-mode` flag outright ("unknown
+  variable"), so this speaks MariaDB's older
+  `--ssl`/`--skip-ssl`/`--ssl-verify-server-cert` flags instead. That older flag
+  set cannot require unverified TLS, so `skip-verify` is rejected for snapshot
+  and restore rather than weakened to an opportunistic connection. `preferred`
+  remains opportunistic in both clients. `true` (verify CA and hostname, the
+  driver's strictest mode) maps to `--ssl --ssl-verify-server-cert`. A custom
+  registered TLS config name (`mysql.RegisterTLSConfig`, referencing an
+  arbitrary `*tls.Config` the driver resolves internally) cannot be mapped to
+  fixed flags and is rejected rather than guessed.
 
-A plugin that implements neither interface simply cannot be snapshotted/restored — `lifecycle.Snapshot`/`Restore` return a clear error (e.g. `blob plugin "s3" does not support snapshotting`) rather than silently no-op'ing, and the failure happens before any file is written, since both interfaces are type-asserted up front.
+A plugin that implements neither interface simply cannot be snapshotted/restored
+— `lifecycle.Snapshot`/`Restore` return a clear error (e.g. `blob plugin "s3"
+does not support snapshotting`) rather than silently no-op'ing, and the failure
+happens before any file is written, since both interfaces are type-asserted up
+front.
 
-Each backup call is independently consistent, but `lifecycle.Snapshot` runs the two concurrently (in separate goroutines, collecting results through a tagged result channel), not sequentially — neither Badger's `Backup` nor SQLite's `VACUUM INTO` exposes a way to separate "capture a consistent point" from "stream/copy it", so the full duration of whichever call runs longer must still be covered by the same pause, bounded by the slower of the two rather than their sum on success. If a backup fails or the caller cancels, Snapshot cancels its peer and releases the barrier before waiting for provider cleanup; it removes partial output after both calls stop. Without that pause, a commit landing during either call's own window would write its commit timestamp to one store's backup and not the other's, and the restored copy fails `Database.checkCommitTimestamp`'s cross-store validation on open. `database.Database.PauseCommitsContext` closes that window (its non-cancellable sibling `PauseCommits` is what pre-dates `Snapshot` accepting a `ctx`; `Snapshot` itself calls the cancellable variant, so a caller can give up on a snapshot stuck waiting behind a long-running write transaction): every read-write `Txn` that opens a metadata write transaction holds the shared (`RLock`) side of the barrier from construction through `Commit`/`Rollback`/`Release`, and `lifecycle.Snapshot` takes the exclusive side around both concurrent backup calls together, so no such transaction — committed or still open — can straddle them. The barrier is held from construction, not just around `Commit`, because the metadata plugin's write connection pool is sized to exactly one connection: an already-opened-but-uncommitted transaction holds that connection regardless of whether `Commit` has been called, and if the barrier only guarded `Commit`, `PauseCommitsContext` could acquire its lock while such a transaction sat open — deadlocking `Snapshot`'s metadata backup (`VACUUM INTO`, which needs that same connection) against a writer that can now never reach `Commit`'s release. A blob-only `Txn` (`NewBlobOnlyTxn`) deliberately does *not* participate in the barrier: unlike SQLite, Badger natively supports concurrent read-write transactions, so a blob-only `Txn` never holds the single metadata connection the barrier protects, and its commit never writes the commit timestamp this barrier keeps consistent (only a paired blob+metadata `Txn.Commit` does). Several callers (`deleteUtxoBlobs`, `deleteTxBlobs`) open batched blob-only `Txn`s while an outer read-write `Txn` from the same call is already open on the same goroutine — if blob-only `Txn`s took the barrier too, that nested acquire could deadlock against a concurrent `PauseCommitsContext` caller, since the barrier's write side isn't reentrant. This pauses new read-write transactions only — not reads, and not a quiesce (nothing is torn down or disconnected) — so a snapshot against a live, actively-syncing node stays safe.
+Each backup call is independently consistent, but `lifecycle.Snapshot` runs the
+two concurrently (in separate goroutines, collecting results through a tagged
+result channel), not sequentially — neither Badger's `Backup` nor SQLite's
+`VACUUM INTO` exposes a way to separate "capture a consistent point" from
+"stream/copy it", so the full duration of whichever call runs longer must still
+be covered by the same pause, bounded by the slower of the two rather than their
+sum on success. If a backup fails or the caller cancels, Snapshot cancels its
+peer and releases the barrier before waiting for provider cleanup; it removes
+partial output after both calls stop. Without that pause, a commit landing
+during either call's own window would write its commit timestamp to one store's
+backup and not the other's, and the restored copy fails
+`Database.checkCommitTimestamp`'s cross-store validation on open.
+`database.Database.PauseCommitsContext` closes that window (its non-cancellable
+sibling `PauseCommits` is what pre-dates `Snapshot` accepting a `ctx`;
+`Snapshot` itself calls the cancellable variant, so a caller can give up on a
+snapshot stuck waiting behind a long-running write transaction): every
+read-write `Txn` that opens a metadata write transaction holds the shared
+(`RLock`) side of the barrier from construction through
+`Commit`/`Rollback`/`Release`, and `lifecycle.Snapshot` takes the exclusive side
+around both concurrent backup calls together, so no such transaction — committed
+or still open — can straddle them. The barrier is held from construction, not
+just around `Commit`, because the metadata plugin's write connection pool is
+sized to exactly one connection: an already-opened-but-uncommitted transaction
+holds that connection regardless of whether `Commit` has been called, and if the
+barrier only guarded `Commit`, `PauseCommitsContext` could acquire its lock
+while such a transaction sat open — deadlocking `Snapshot`'s metadata backup
+(`VACUUM INTO`, which needs that same connection) against a writer that can now
+never reach `Commit`'s release. A blob-only `Txn` (`NewBlobOnlyTxn`)
+deliberately does *not* participate in the barrier: unlike SQLite, Badger
+natively supports concurrent read-write transactions, so a blob-only `Txn` never
+holds the single metadata connection the barrier protects, and its commit never
+writes the commit timestamp this barrier keeps consistent (only a paired
+blob+metadata `Txn.Commit` does). Several callers (`deleteUtxoBlobs`,
+`deleteTxBlobs`) open batched blob-only `Txn`s while an outer read-write `Txn`
+from the same call is already open on the same goroutine — if blob-only `Txn`s
+took the barrier too, that nested acquire could deadlock against a concurrent
+`PauseCommitsContext` caller, since the barrier's write side isn't reentrant.
+This pauses new read-write transactions only — not reads, and not a quiesce
+(nothing is torn down or disconnected) — so a snapshot against a live,
+actively-syncing node stays safe.
 
-**Commit-pause bound and metrics.** The time `lifecycle.Snapshot` holds the commit barrier is recorded in the `dingo_snapshot_commit_pause_seconds` histogram (label `result`: `ok`, `failed`, or `exceeded`) on the database's `PromRegistry`, and the bytes each backup wrote to disk in `dingo_snapshot_bytes_written_total` (label `store`: `blob` or `metadata`); the latter is also the temporary disk a snapshot needs. `lifecycle.WithMaxCommitPause(d)` (a `ManifestOption`, so it flows through `SnapshotToCloud` unchanged) bounds the hold: the clock starts once the barrier is acquired and covers the tip, commit-timestamp and gate reads as well as both backups, and when that work is still running at `d` they are cancelled, the barrier is released, the partial snapshot directory is removed, and `Snapshot` returns an error wrapping `lifecycle.ErrCommitPauseExceeded`. On timeout or caller cancellation, both backups are cancelled and the barrier is released before waiting for provider cleanup; partial output is removed after both calls return. The snapshot call can take longer than `d` without extending the commit pause. A failed backup cancels its peer and releases the barrier before that cleanup wait. Time spent waiting to acquire the barrier is bounded by the caller's context, not by `d`. A backup that returns success after `d` is still rejected with `ErrCommitPauseExceeded`, since the deadline is measured rather than inferred from the provider's error. Caller cancellation and a failure of either backup follow the same release-and-cleanup path and are not reported as `ErrCommitPauseExceeded`. `databaseLifecycle.snapshotMaxCommitPause` (`--db-snapshot-max-commit-pause`, `DINGO_DB_LIFECYCLE_SNAPSHOT_MAX_COMMIT_PAUSE`) sets `d` for every snapshot the node takes: the `dingo database snapshot` CLI, Bark's `CreateSnapshot`, and automatic epoch-boundary snapshots. The default, zero, is no bound.
+**Commit-pause bound and metrics.** The time `lifecycle.Snapshot` holds the
+commit barrier is recorded in the `dingo_snapshot_commit_pause_seconds`
+histogram (label `result`: `ok`, `failed`, or `exceeded`) on the database's
+`PromRegistry`, and the bytes each backup wrote to disk in
+`dingo_snapshot_bytes_written_total` (label `store`: `blob` or `metadata`); the
+latter is also the temporary disk a snapshot needs.
+`lifecycle.WithMaxCommitPause(d)` (a `ManifestOption`, so it flows through
+`SnapshotToCloud` unchanged) bounds the hold: the clock starts once the barrier
+is acquired and covers the tip, commit-timestamp and gate reads as well as both
+backups, and when that work is still running at `d` they are cancelled, the
+barrier is released, the partial snapshot directory is removed, and `Snapshot`
+returns an error wrapping `lifecycle.ErrCommitPauseExceeded`. On timeout or
+caller cancellation, both backups are cancelled and the barrier is released
+before waiting for provider cleanup; partial output is removed after both calls
+return. The snapshot call can take longer than `d` without extending the commit
+pause. A failed backup cancels its peer and releases the barrier before that
+cleanup wait. Time spent waiting to acquire the barrier is bounded by the
+caller's context, not by `d`. A backup that returns success after `d` is still
+rejected with `ErrCommitPauseExceeded`, since the deadline is measured rather
+than inferred from the provider's error. Caller cancellation and a failure of
+either backup follow the same release-and-cleanup path and are not reported as
+`ErrCommitPauseExceeded`. `databaseLifecycle.snapshotMaxCommitPause`
+(`--db-snapshot-max-commit-pause`,
+`DINGO_DB_LIFECYCLE_SNAPSHOT_MAX_COMMIT_PAUSE`) sets `d` for every snapshot the
+node takes: the `dingo database snapshot` CLI, Bark's `CreateSnapshot`, and
+automatic epoch-boundary snapshots. The default, zero, is no bound.
 
-**Storage scale benchmarks.** `make bench-storage-scale` runs `BenchmarkStorageScaleUtxo`, `BenchmarkStorageScaleBlobBlocks` and `BenchmarkStorageScaleSnapshotPause` in `internal/integration` against file-backed Badger and SQLite stores. UTxO and block benchmarks use 100 timed samples per scale so their latency percentiles are meaningful; the snapshot benchmark uses one iteration because it copies the seeded stores. When `DINGO_BENCH_SCALE` is set, Badger uses production value-log and memtable sizes; plain `go test -bench=.` keeps the bounded test sizes. Environment knobs:
+**Storage scale benchmarks.** `make bench-storage-scale` runs
+`BenchmarkStorageScaleUtxo`, `BenchmarkStorageScaleBlobBlocks` and
+`BenchmarkStorageScaleSnapshotPause` in `internal/integration` against
+file-backed Badger and SQLite stores. UTxO and block benchmarks use 100 timed
+samples per scale so their latency percentiles are meaningful; the snapshot
+benchmark uses one iteration because it copies the seeded stores. When
+`DINGO_BENCH_SCALE` is set, Badger uses production value-log and memtable sizes;
+plain `go test -bench=.` keeps the bounded test sizes. Environment knobs:
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -1029,9 +1494,38 @@ Each backup call is independently consistent, but `lifecycle.Snapshot` runs the 
 | `DINGO_BENCH_LATENCY_SAMPLES` | `20000` | Latency samples kept per series; later samples are dropped. |
 | `DINGO_BENCH_DATADIR` | temporary directory | Volume the stores and snapshots are written to. Point it at the disk being measured. |
 
-Reported metrics: `lookup-*` and `write-batch-*` (p50, p95, p99, max nanoseconds per UTxO lookup and per 1000-row insert transaction), `read-*` (per block read), `seed-rows/s` and `write-blocks/s`, `block-volume-bytes` (blocks times payload bytes written), `data-dir-allocated-bytes`, `blob-dir-allocated-bytes` and `blob-dir-allocated-bytes-after-flatten` (allocated filesystem blocks for the data and blob directories; omitted when the filesystem does not expose allocated-block counts), `sst-tables` and `flatten-s` (Badger table count, and size and duration of a forced compaction), `rss-bytes` (process resident set, Linux only), and for the snapshot benchmark `commit-pause-s` (the mean `dingo_snapshot_commit_pause_seconds` observation) with `snapshot-blob-bytes` and `snapshot-metadata-bytes`. RSS is process-wide and includes earlier sub-benchmarks, so compare it across separate runs of one scale rather than within one.
+Reported metrics: `lookup-*` and `write-batch-*` (p50, p95, p99, max nanoseconds
+per UTxO lookup and per 1000-row insert transaction), `read-*` (per block read),
+`seed-rows/s` and `write-blocks/s`, `block-volume-bytes` (blocks times payload
+bytes written), `data-dir-allocated-bytes`, `blob-dir-allocated-bytes` and
+`blob-dir-allocated-bytes-after-flatten` (allocated filesystem blocks for the
+data and blob directories; omitted when the filesystem does not expose
+allocated-block counts), `sst-tables` and `flatten-s` (Badger table count, and
+size and duration of a forced compaction), `rss-bytes` (process resident set,
+Linux only), and for the snapshot benchmark `commit-pause-s` (the mean
+`dingo_snapshot_commit_pause_seconds` observation) with `snapshot-blob-bytes`
+and `snapshot-metadata-bytes`. RSS is process-wide and includes earlier
+sub-benchmarks, so compare it across separate runs of one scale rather than
+within one.
 
-Mainnet run: record the live Mainnet UTxO count, block count and blob-store bytes at the start of the run, then set `DINGO_BENCH_SCALE` to that UTxO count, `DINGO_BENCH_BLOCKS` to the block count, and `DINGO_BENCH_BLOCK_BYTES` to the blob-store bytes divided by the block count, for example `DINGO_BENCH_SCALE=11m DINGO_BENCH_BLOCKS=12m DINGO_BENCH_BLOCK_BYTES=20000 DINGO_BENCH_DATADIR=/path/on/target/volume make bench-storage-scale`. `block-volume-bytes` reports the synthetic volume written, so the approximation to the measured volume can be stated with the results. Blocks take `DINGO_BENCH_BLOCKS` times `DINGO_BENCH_BLOCK_BYTES` on disk, and the snapshot benchmark needs further free space of the same order for the snapshot copy. A UTxO count above the captured Mainnet cardinality is a synthetic stress point and is reported as such, not as a Mainnet forecast. To run one benchmark, call `go test -run='^$' -bench=<name> -benchtime=100x ./internal/integration` for UTxO or block benchmarks, or use `-benchtime=1x` for snapshots. Scale values are positive counts with optional `k`, `m`, or `b` suffixes; block payloads must be at least eight bytes. Seeding dominates wall-clock time and is outside the timed region. Results are specific to the host and filesystem; record the hardware alongside them.
+Mainnet run: record the live Mainnet UTxO count, block count and blob-store
+bytes at the start of the run, then set `DINGO_BENCH_SCALE` to that UTxO count,
+`DINGO_BENCH_BLOCKS` to the block count, and `DINGO_BENCH_BLOCK_BYTES` to the
+blob-store bytes divided by the block count, for example `DINGO_BENCH_SCALE=11m
+DINGO_BENCH_BLOCKS=12m DINGO_BENCH_BLOCK_BYTES=20000
+DINGO_BENCH_DATADIR=/path/on/target/volume make bench-storage-scale`.
+`block-volume-bytes` reports the synthetic volume written, so the approximation
+to the measured volume can be stated with the results. Blocks take
+`DINGO_BENCH_BLOCKS` times `DINGO_BENCH_BLOCK_BYTES` on disk, and the snapshot
+benchmark needs further free space of the same order for the snapshot copy. A
+UTxO count above the captured Mainnet cardinality is a synthetic stress point
+and is reported as such, not as a Mainnet forecast. To run one benchmark, call
+`go test -run='^$' -bench=<name> -benchtime=100x ./internal/integration` for
+UTxO or block benchmarks, or use `-benchtime=1x` for snapshots. Scale values are
+positive counts with optional `k`, `m`, or `b` suffixes; block payloads must be
+at least eight bytes. Seeding dominates wall-clock time and is outside the timed
+region. Results are specific to the host and filesystem; record the hardware
+alongside them.
 
 **Snapshot directory layout**, written by `lifecycle.Snapshot`:
 
@@ -1049,33 +1543,338 @@ directory is restricted before backup bytes are written; Unix uses `0700`
 directories and `0600` files, while Windows applies a protected owner-only DACL
 to each directory handle so its files inherit the same boundary.
 
-`Snapshot` creates `<snapshot-dir>` itself via a plain, non-recursive `os.Mkdir` (parents created separately via `os.MkdirAll`), not `os.MkdirAll` on the leaf directory — `MkdirAll` doesn't error when the directory already exists, so it can't tell "I just created this" apart from "another concurrent `Snapshot` call to the same path already exists," and a failure-cleanup path that then `os.RemoveAll`s the directory on any later error would delete the other, still-in-flight (or already-succeeded) call's backup files. Only the call whose `Mkdir` actually wins may safely remove the directory on failure; a losing call gets `fs.ErrExist` immediately and never touches the directory at all.
+`Snapshot` creates `<snapshot-dir>` itself via a plain, non-recursive `os.Mkdir`
+(parents created separately via `os.MkdirAll`), not `os.MkdirAll` on the leaf
+directory — `MkdirAll` doesn't error when the directory already exists, so it
+can't tell "I just created this" apart from "another concurrent `Snapshot` call
+to the same path already exists," and a failure-cleanup path that then
+`os.RemoveAll`s the directory on any later error would delete the other,
+still-in-flight (or already-succeeded) call's backup files. Only the call whose
+`Mkdir` actually wins may safely remove the directory on failure; a losing call
+gets `fs.ErrExist` immediately and never touches the directory at all.
 
-`.cloud-mirrored` (`lifecycle.CloudMirrorMarkerPath`/`lifecycle.IsCloudMirrored`, written/checked by `lifecycle.MirrorToCloud`) exists only when a cloud destination is configured and the upload plus catalog update or repair have succeeded. Its content is a versioned cryptographic digest of the exact destination URI, so credentials and provider parameters are never persisted in the marker. Its presence lets a caller distinguish "this snapshot is fully mirrored and indexed" from "the local copy exists but the cloud operation never completed". `lifecycle.IsCloudMirroredTo(dir, cloudDest)` compares the marker digest with the current destination, so a marker left by an older configuration cannot suppress a required upload. S3 and GCS never upload or download the reserved marker name and remove any legacy remote marker after each successful upload. `internal/dblifecycle.Manager` retries just the cloud upload (via `MirrorToCloud` directly, not a full re-`Snapshot`) for any local snapshot directory `IsCloudMirroredTo` says isn't mirrored to the current destination — both for the specific epoch a redelivered transition event names, and via `Manager.retryUnmirroredSnapshots`, which scans all of `SnapshotDir` for stranded local-only snapshots from `Start` (on restart) and at the top of every subsequent epoch transition (so advancing past a failed epoch, not just redelivering its event, also heals it) — see ARCHITECTURE.md's "Automatic Snapshot Cloud-Mirror Idempotency".
+`.cloud-mirrored`
+(`lifecycle.CloudMirrorMarkerPath`/`lifecycle.IsCloudMirrored`, written/checked
+by `lifecycle.MirrorToCloud`) exists only when a cloud destination is configured
+and the upload plus catalog update or repair have succeeded. Its content is a
+versioned cryptographic digest of the exact destination URI, so credentials and
+provider parameters are never persisted in the marker. Its presence lets a
+caller distinguish "this snapshot is fully mirrored and indexed" from "the local
+copy exists but the cloud operation never completed".
+`lifecycle.IsCloudMirroredTo(dir, cloudDest)` compares the marker digest with
+the current destination, so a marker left by an older configuration cannot
+suppress a required upload. S3 and GCS never upload or download the reserved
+marker name and remove any legacy remote marker after each successful upload.
+`internal/dblifecycle.Manager` retries just the cloud upload (via
+`MirrorToCloud` directly, not a full re-`Snapshot`) for any local snapshot
+directory `IsCloudMirroredTo` says isn't mirrored to the current destination —
+both for the specific epoch a redelivered transition event names, and via
+`Manager.retryUnmirroredSnapshots`, which scans all of `SnapshotDir` for
+stranded local-only snapshots from `Start` (on restart) and at the top of every
+subsequent epoch transition (so advancing past a failed epoch, not just
+redelivering its event, also heals it) — see ARCHITECTURE.md's "Automatic
+Snapshot Cloud-Mirror Idempotency".
 
 `Snapshot` synchronizes and closes both backup files after releasing the commit
-barrier, then synchronizes the snapshot directory and its immediate parent before
-publishing `manifest.json`. Publication therefore follows durable backup contents
-and directory entries; file or directory synchronization errors fail the snapshot
-and trigger cleanup. A process interrupted before publication may leave a partial
-directory, which catalog discovery skips and restore rejects because it has no
-manifest. This uses the platform guarantees of `internal/fsyncdir` (directory
-flushes are best-effort on Windows when a writable directory handle is unavailable).
-Missing destination ancestors are recorded before directory creation, and each
-new ancestor entry is synchronized before publishing the manifest as well.
+barrier, then synchronizes the snapshot directory and its immediate parent
+before publishing `manifest.json`. Publication therefore follows durable backup
+contents and directory entries; file or directory synchronization errors fail
+the snapshot and trigger cleanup. A process interrupted before publication may
+leave a partial directory, which catalog discovery skips and restore rejects
+because it has no manifest. This uses the platform guarantees of
+`internal/fsyncdir` (directory flushes are best-effort on Windows when a
+writable directory handle is unavailable). Missing destination ancestors are
+recorded before directory creation, and each new ancestor entry is synchronized
+before publishing the manifest as well.
 
-**Manifest** (`lifecycle.Manifest`, `database/lifecycle/manifest.go`): JSON, not CBOR, since it is operator/tooling-facing metadata rather than chain data. Records `StorageMode`/`Network`/`BlobPlugin`/`MetadataPlugin` (restore refuses a plugin mismatch), `CommitTimestamp`, `TipSlot`/`TipHash`/`TipBlockNumber`, `DingoVersion`, byte sizes, an optional `Name`/`Description` label, `Gates` (a `nodesettings.Values` snapshot of the source database's persisted node settings gates — `network_magic`, `start_era`, genesis hashes, ledger-semantics gates, etc. — read via `GetNodeSettingsGates` at backup time; `gates,omitempty` in JSON; adding it did not bump `FormatVersion`, but it is not actually backward compatible the way that omission implies: `checksum()` covers the whole struct, so a build that predates `Gates` ignores the unknown `gates` key on unmarshal and then recomputes the checksum without a field it never saw, rejecting an otherwise-valid manifest as `ErrManifestCorrupted` — acceptable only because this manifest format is unreleased, so no such build is deployed anywhere to hit it), and a `Checksum` (SHA-256 over the manifest's own JSON with `Checksum` blanked, catching a corrupted or hand-edited file — not a security mechanism). `WriteManifest`/`ReadManifest` handle checksum computation/validation and reject a manifest whose `FormatVersion` is newer than the running build understands (`WriteManifest` takes its `Manifest` by value and computes the checksum/format version onto that local copy before writing, so `Snapshot`/`SnapshotToCloud` re-read the manifest they just wrote via `ReadManifest` rather than returning their own pre-write copy, which would otherwise have an empty `Checksum` and stale `FormatVersion` — nothing reads those fields off the immediate in-memory return value today, since every real caller re-reads from disk/cloud, but the returned `Manifest` is now accurate regardless). A checksum failure returns `lifecycle.ErrManifestCorrupted` specifically (wrapped, so `errors.Is` sees through `ReadManifest`'s path-prefixed error) — distinct from a manifest simply not existing — so a caller like bark's `resolveSnapshotSource` can report a snapshot that's present but corrupted as such (`CodeDataLoss`) instead of collapsing it into `CodeNotFound`; `DeleteSnapshot` checks the local snapshot directory's existence directly (`os.Stat`), not via a readable manifest, so a corrupted local snapshot can still be cleaned up. `Manifest.CheckCompatibility(blobPlugin, metadataPlugin, storageMode, network, gates)` bundles `CheckPluginMatch` with a `StorageMode`/`Network` comparison and `CheckGateMatch(configured nodesettings.Values)`, for a caller that must refuse an incompatible target *before* touching it — `internal/dblifecycle.Service.Restore` (the offline path) checks it against the target's actual configured plugins/network/storage mode/gates via `lifecycle.RestoreValidated`'s `validate` callback, run immediately after the manifest is resolved and before `targetDataDir` is touched in any way; this is also what lets a cloud snapshot's manifest be checked without downloading it twice — one cloud download serves both the compatibility check and the restore itself, unlike calling `PeekManifest` and then `Restore` as two separate calls would. `CheckGateMatch` runs `nodesettings.Evaluate` against `m.Gates` (as persisted) and `configured` (as explicit), so it rejects a mismatch by the same per-class policy `evaluateAndPersistGates` enforces at startup rather than by raw equality — a `LatchBool` gate the manifest recorded `off` restores cleanly onto a target configured `on` (the same one-way upgrade a live resume permits), while the reverse direction, or a `Frozen`/`FrozenFillOnce` disagreement, still fails. It compares only gates present in both `m.Gates` and `configured`, so a gate either side cannot supply (an older snapshot missing a newer gate, or a caller with no cardano config loaded to supply the genesis hashes) is not an error; it never compares `blob_store_id` (the restored blob store is always the snapshot's, so its identity legitimately differs from the target's) and excludes `metadata_plugin`/`blob_plugin` since `CheckPluginMatch` already reports those — all three are filtered out of `configured` before `Evaluate` ever sees them. `internal/dblifecycle.Service`'s `intendedGateValues` builds the configured side from `internal/config.Config` — covering `network_magic`, `start_era`, and the ledger-semantics gates, but not the genesis hashes, which only a running node's parsed cardano config can supply. `PeekManifest` (resolve and read a snapshot's manifest, local or cloud, without restoring anything) is the standalone equivalent for a caller that only wants the manifest, not a restore — for a cloud `snapshotDir`, it fetches just the one `manifest.json` object via `CloudManifestFetcher` when the destination type supports it (S3/GCS both do), rather than downloading the full snapshot just to read its manifest; it falls back to downloading only the manifest for a destination type that doesn't implement `CloudManifestFetcher`. The live path (`(n *Node).Restore`) already had the equivalent compatibility check via `validateRestoredAgainstNodeConfig`, since it opens the staged restore with the node's own real `database.Config` and lets `database.New`'s own `CheckNodeSettings` catch a mismatch. Without `CheckCompatibility`, the offline path's own `validateRestoredDatabase` only opens the restored copy using the *manifest's own* recorded plugins — a self-consistency check, not a check against what the caller actually intends to run it with. `Name`/`Description` are empty for a snapshot `Snapshot` produced directly (it has no such parameters); `LabelSnapshot(dir, name, description)` sets them after the fact and rewrites the manifest — bark's `CreateSnapshot` RPC is the current caller, since its request carries a human-readable name/description that `Snapshot` itself has nowhere to put.
+**Manifest** (`lifecycle.Manifest`, `database/lifecycle/manifest.go`): JSON, not
+CBOR, since it is operator/tooling-facing metadata rather than chain data.
+Records `StorageMode`/`Network`/`BlobPlugin`/`MetadataPlugin` (restore refuses a
+plugin mismatch), `CommitTimestamp`, `TipSlot`/`TipHash`/`TipBlockNumber`,
+`DingoVersion`, byte sizes, an optional `Name`/`Description` label, `Gates` (a
+`nodesettings.Values` snapshot of the source database's persisted node settings
+gates — `network_magic`, `start_era`, genesis hashes, ledger-semantics gates,
+etc. — read via `GetNodeSettingsGates` at backup time; `gates,omitempty` in
+JSON; adding it did not bump `FormatVersion`, but it is not actually backward
+compatible the way that omission implies: `checksum()` covers the whole struct,
+so a build that predates `Gates` ignores the unknown `gates` key on unmarshal
+and then recomputes the checksum without a field it never saw, rejecting an
+otherwise-valid manifest as `ErrManifestCorrupted` — acceptable only because
+this manifest format is unreleased, so no such build is deployed anywhere to hit
+it), and a `Checksum` (SHA-256 over the manifest's own JSON with `Checksum`
+blanked, catching a corrupted or hand-edited file — not a security mechanism).
+`WriteManifest`/`ReadManifest` handle checksum computation/validation and reject
+a manifest whose `FormatVersion` is newer than the running build understands
+(`WriteManifest` takes its `Manifest` by value and computes the checksum/format
+version onto that local copy before writing, so `Snapshot`/`SnapshotToCloud`
+re-read the manifest they just wrote via `ReadManifest` rather than returning
+their own pre-write copy, which would otherwise have an empty `Checksum` and
+stale `FormatVersion` — nothing reads those fields off the immediate in-memory
+return value today, since every real caller re-reads from disk/cloud, but the
+returned `Manifest` is now accurate regardless). A checksum failure returns
+`lifecycle.ErrManifestCorrupted` specifically (wrapped, so `errors.Is` sees
+through `ReadManifest`'s path-prefixed error) — distinct from a manifest simply
+not existing — so a caller like bark's `resolveSnapshotSource` can report a
+snapshot that's present but corrupted as such (`CodeDataLoss`) instead of
+collapsing it into `CodeNotFound`; `DeleteSnapshot` treats a local snapshot as
+a directory containing a regular `manifest.json` file and does not parse it, so
+a corrupted local snapshot can still be cleaned up while the catalog database,
+work directories and other non-snapshot entries under `SnapshotDir` cannot be
+deleted; it also rejects any `snapshot_id` starting with `.dingo-`, the prefix
+of those internal entries.
+`Manifest.CheckCompatibility(blobPlugin, metadataPlugin, storageMode, network,
+gates)` bundles `CheckPluginMatch` with a `StorageMode`/`Network` comparison and
+`CheckGateMatch(configured nodesettings.Values)`, for a caller that must refuse
+an incompatible target *before* touching it —
+`internal/dblifecycle.Service.Restore` (the offline path) checks it against the
+target's actual configured plugins/network/storage mode/gates via
+`lifecycle.RestoreValidated`'s `validate` callback, run immediately after the
+manifest is resolved and before `targetDataDir` is touched in any way; this is
+also what lets a cloud snapshot's manifest be checked without downloading it
+twice — one cloud download serves both the compatibility check and the restore
+itself, unlike calling `PeekManifest` and then `Restore` as two separate calls
+would. `CheckGateMatch` runs `nodesettings.Evaluate` against `m.Gates` (as
+persisted) and `configured` (as explicit), so it rejects a mismatch by the same
+per-class policy `evaluateAndPersistGates` enforces at startup rather than by
+raw equality — a `LatchBool` gate the manifest recorded `off` restores cleanly
+onto a target configured `on` (the same one-way upgrade a live resume permits),
+while the reverse direction, or a `Frozen`/`FrozenFillOnce` disagreement, still
+fails. It compares only gates present in both `m.Gates` and `configured`, so a
+gate either side cannot supply (an older snapshot missing a newer gate, or a
+caller with no cardano config loaded to supply the genesis hashes) is not an
+error; it never compares `blob_store_id` (the restored blob store is always the
+snapshot's, so its identity legitimately differs from the target's) and excludes
+`metadata_plugin`/`blob_plugin` since `CheckPluginMatch` already reports those —
+all three are filtered out of `configured` before `Evaluate` ever sees them.
+`internal/dblifecycle.Service`'s `intendedGateValues` builds the configured side
+from `internal/config.Config` — covering `network_magic`, `start_era`, and the
+ledger-semantics gates, but not the genesis hashes, which only a running node's
+parsed cardano config can supply. `PeekManifest` (resolve and read a snapshot's
+manifest, local or cloud, without restoring anything) is the standalone
+equivalent for a caller that only wants the manifest, not a restore — for a
+cloud `snapshotDir`, it fetches just the one `manifest.json` object via
+`CloudManifestFetcher` when the destination type supports it (S3/GCS both do),
+rather than downloading the full snapshot just to read its manifest; it falls
+back to downloading only the manifest for a destination type that doesn't
+implement `CloudManifestFetcher`. The live path (`(n *Node).Restore`) already
+had the equivalent compatibility check via `validateRestoredAgainstNodeConfig`,
+since it opens the staged restore with the node's own real `database.Config` and
+lets `database.New`'s own `CheckNodeSettings` catch a mismatch. Without
+`CheckCompatibility`, the offline path's own `validateRestoredDatabase` only
+opens the restored copy using the *manifest's own* recorded plugins — a
+self-consistency check, not a check against what the caller actually intends to
+run it with. `Name`/`Description` are empty for a snapshot `Snapshot` produced
+directly (it has no such parameters); `LabelSnapshot(dir, name, description)`
+sets them after the fact and rewrites the manifest — bark's `CreateSnapshot` RPC
+is the current caller, since its request carries a human-readable
+name/description that `Snapshot` itself has nowhere to put.
 
-**Snapshot catalog** (`database/lifecycle/catalog.go` and `catalog_index.go`): `ListSnapshots` scans a base directory's immediate subdirectories for a valid `manifest.json`, returning one `SnapshotEntry{ID, Manifest}` per readable snapshot (directory name as ID), newest first. Those durable directories and the configured cloud destination are authoritative; `.dingo-snapshot-catalog-v1.sqlite` is a disposable index that Bark rebuilds from local directories and a compatibility scan of the cloud provider before accepting requests. Cloud rows store only a manifest authenticated by the configured trust key, keyed by snapshot ID; both full reconciliation and incremental mirror updates authenticate each entry before publishing it. Their returned `SnapshotInfo.location` is a credential-free display URI derived from the active configuration at read time. It is not an authenticated provider URI and cannot be used for restore, verify, or delete; those RPCs accept the snapshot ID and resolve the configured destination on the server. Catalog metadata binds the cloud set to a versioned SHA-256 digest of the exact parsed destination passed to the provider factory, including user information, query, and fragment without storing those raw values in the catalog. Pages include cloud rows only when that digest matches the reconciled current configuration. Provider reconciliation uses `SnapshotCatalogLister` with fixed positive limits for page requests, listed prefixes and objects, manifest fetches, retained entries, and reported problems. GCS catalog discovery uses one explicit JSON list request per charged page while snapshot data operations retain the gRPC client. Cancellation, a provider error, or `ErrSnapshotCatalogScanLimit` makes the scan incomplete: Bark does not replace or publish its entries, and local-only pages remain usable. An explicitly empty destination clears the old cloud set. After an incomplete startup scan, listing requests retry cloud reconciliation with exponential backoff (30 seconds initially, capped at 5 minutes); concurrent listing requests serialize reconciliation attempts and share the resulting retry state. Provider scans run outside the catalog gate and publish only if the catalog generation is unchanged. A materialized `available_snapshots` table keeps exactly one effective row per ID; a local row takes precedence over its cloud duplicate. Its `(created_sec DESC, created_ns DESC, id DESC)` index lets both first and continuation pages stop after `pageSize+1` index entries without a union scan or temporary sort. Provider construction finishes before acquiring the catalog gate. Catalog publication shares the gate with incremental mirror and delete updates. The generation check prevents a mirror completed during startup reconciliation from being erased by an earlier scan result. Successful mirrors and cloud deletes update the source and effective rows in one transaction, while local pruning switches the effective row to its cloud source, so a cloud-only snapshot remains listed. A malformed catalog or invalid metadata schema/value is replaced during that rebuild. Recovery assigns a fresh random positive 63-bit generation rather than restarting at generation 1, making a collision with a token retained from before corruption negligible. SQLite `CORRUPT` and `NOTADB` result codes authorize recovery, as do the fixed metadata query's missing table or column errors; operational failures such as cancellation, lock contention, permissions, read-only storage, inability to open the file, and filesystem I/O remain errors. The catalog uses WAL mode, a five-second SQLite busy timeout, context-aware operations, and one in-process gate whose acquisition also observes cancellation. Atomic replacement removes stale target WAL and shared-memory sidecars after closing the rebuilt database and before renaming it into place. Page reads open an existing database in read/write mode and therefore cannot create an empty file when initialization has not run. The index orders by manifest `CreatedAt` descending with the snapshot ID descending as a stable tie-breaker, and keyset page tokens include the catalog generation and last ordering tuple. A create, label change, repair, mirror, or delete updates the index transactionally; a changed generation invalidates an older page token instead of returning a page from two catalog states. Once cloud reconciliation is current, each request reads at most one more index row than its capped page size, reads manifests only for that page, and performs no provider listing or cloud manifest fetch. Invalid cloud IDs and manifests make reconciliation incomplete rather than publishing a partial replacement. Partial local or cloud reconciliation retains ErrSnapshotCatalogIncomplete even when joined with another error, and a configured provider without bounded snapshot-listing support is incomplete rather than successful. A local rebuild carries forward readable, validated cloud rows. `SnapshotToCloud` supplies manifest publication with a provider-aware repair callback, so even total catalog corruption is rebuilt from both authoritative sources rather than returning success with cloud-only rows missing. If a durable mirror or cloud deletion cannot update the disposable catalog, the catalog is rebuilt immediately from local directories and the cloud provider; the operation succeeds only when that repair reconciles the authoritative sources. If manifest publication succeeds but neither its catalog update nor repair succeeds, the complete snapshot remains available for a later rebuild and the caller receives `ErrSnapshotCatalogUpdate`; cleanup is limited to failures before durable manifest publication. A snapshot directory or cloud object written while Bark is stopped is imported by the next startup rebuild. Automatic snapshots and all local callers of `WriteManifest` update the live local index directly. `MirrorToCloud` updates or repairs the cloud catalog before writing its digest-only completion marker, so a failed catalog repair remains retryable. The node derives one effective destination by appending `SnapshotCloudDestinationPrefix` to the configured base and passes that same value to manual snapshots, automatic mirror and retention operations, and Bark reconciliation. A subdirectory that exists but lacks a valid manifest (still being written, or failed partway through) is silently skipped by discovery.
+**Snapshot catalog** (`database/lifecycle/catalog.go` and `catalog_index.go`):
+`ListSnapshots` scans a base directory's immediate subdirectories for a valid
+`manifest.json`, returning one `SnapshotEntry{ID, Manifest}` per readable
+snapshot (directory name as ID), newest first. Those durable directories and the
+configured cloud destination are authoritative;
+`.dingo-snapshot-catalog-v1.sqlite` is a disposable index that Bark rebuilds
+from local directories and a compatibility scan of the cloud provider before
+accepting requests. Cloud rows store only a manifest authenticated by the
+configured trust key, keyed by snapshot ID; both full reconciliation and
+incremental mirror updates authenticate each entry before publishing it. Their
+returned `SnapshotInfo.location` is a credential-free display URI derived from
+the active configuration at read time. It is not an authenticated provider URI
+and cannot be used for restore, verify, or delete; those RPCs accept the
+snapshot ID and resolve the configured destination on the server. Catalog
+metadata binds the cloud set to a versioned SHA-256 digest of the exact parsed
+destination passed to the provider factory, including user information, query,
+and fragment without storing those raw values in the catalog. Pages include
+cloud rows only when that digest matches the reconciled current configuration.
+Provider reconciliation uses `SnapshotCatalogLister` with fixed positive limits
+for page requests, listed prefixes and objects, manifest fetches, retained
+entries, and reported problems. GCS catalog discovery uses one explicit JSON
+list request per charged page while snapshot data operations retain the gRPC
+client. Cancellation, a provider error, or `ErrSnapshotCatalogScanLimit` makes
+the scan incomplete: Bark does not replace or publish its entries, and
+local-only pages remain usable. An explicitly empty destination clears the old
+cloud set. After an incomplete startup scan, listing requests retry cloud
+reconciliation with exponential backoff (30 seconds initially, capped at 5
+minutes); concurrent listing requests serialize reconciliation attempts and
+share the resulting retry state. Provider scans run outside the catalog gate and
+publish only if the catalog generation is unchanged. A materialized
+`available_snapshots` table keeps exactly one effective row per ID; a local row
+takes precedence over its cloud duplicate. Its `(created_sec DESC, created_ns
+DESC, id DESC)` index lets both first and continuation pages stop after
+`pageSize+1` index entries without a union scan or temporary sort. Provider
+construction finishes before acquiring the catalog gate. Catalog publication
+shares the gate with incremental mirror and delete updates. The generation check
+prevents a mirror completed during startup reconciliation from being erased by
+an earlier scan result. Successful mirrors and cloud deletes update the source
+and effective rows in one transaction, while local pruning switches the
+effective row to its cloud source, so a cloud-only snapshot remains listed. A
+malformed catalog or invalid metadata schema/value is replaced during that
+rebuild. Recovery assigns a fresh random positive 63-bit generation rather than
+restarting at generation 1, making a collision with a token retained from before
+corruption negligible. SQLite `CORRUPT` and `NOTADB` result codes authorize
+recovery, as do the fixed metadata query's missing table or column errors;
+operational failures such as cancellation, lock contention, permissions,
+read-only storage, inability to open the file, and filesystem I/O remain errors.
+The catalog uses WAL mode, a five-second SQLite busy timeout, context-aware
+operations, and one in-process gate whose acquisition also observes
+cancellation. Atomic replacement removes stale target WAL and shared-memory
+sidecars after closing the rebuilt database and before renaming it into place.
+Page reads open an existing database in read/write mode and therefore cannot
+create an empty file when initialization has not run. The index orders by
+manifest `CreatedAt` descending with the snapshot ID descending as a stable
+tie-breaker, and keyset page tokens include the catalog generation and last
+ordering tuple. A create, label change, repair, mirror, or delete updates the
+index transactionally; a changed generation invalidates an older page token
+instead of returning a page from two catalog states. Once cloud reconciliation
+is current, each request reads at most one more index row than its capped page
+size, reads manifests only for that page, and performs no provider listing or
+cloud manifest fetch. Invalid cloud IDs and manifests make reconciliation
+incomplete rather than publishing a partial replacement. Partial local or cloud
+reconciliation retains ErrSnapshotCatalogIncomplete even when joined with
+another error, and a configured provider without bounded snapshot-listing
+support is incomplete rather than successful. A local rebuild carries forward
+readable, validated cloud rows. `SnapshotToCloud` supplies manifest publication
+with a provider-aware repair callback, so even total catalog corruption is
+rebuilt from both authoritative sources rather than returning success with
+cloud-only rows missing. If a durable mirror or cloud deletion cannot update the
+disposable catalog, the catalog is rebuilt immediately from local directories
+and the cloud provider; the operation succeeds only when that repair reconciles
+the authoritative sources. If manifest publication succeeds but neither its
+catalog update nor repair succeeds, the complete snapshot remains available for
+a later rebuild and the caller receives `ErrSnapshotCatalogUpdate`; cleanup is
+limited to failures before durable manifest publication. A snapshot directory or
+cloud object written while Bark is stopped is imported by the next startup
+rebuild. Automatic snapshots and all local callers of `WriteManifest` update the
+live local index directly. `MirrorToCloud` updates or repairs the cloud catalog
+before writing its digest-only completion marker, so a failed catalog repair
+remains retryable. The node derives one effective destination by appending
+`SnapshotCloudDestinationPrefix` to the configured base and passes that same
+value to manual snapshots, automatic mirror and retention operations, and Bark
+reconciliation. A subdirectory that exists but lacks a valid manifest (still
+being written, or failed partway through) is silently skipped by discovery.
 
-**Snapshot manifest and payload integrity.** `manifest.json` declares the only two payload files a snapshot holds, `blob.bak` and `metadata.sqlite` (the metadata file keeps that name for every metadata backend), by size (`blobBytes`, `metadataBytes`) and SHA-256 (`blobSha256`, `metadataSha256`). When `databaseLifecycle.snapshotTrustKeyFile` names a regular, non-symlink file holding a shared secret (at least 16 bytes and at most 1 KiB), `Snapshot` also writes `authentication`, an HMAC-SHA256 under that secret over the manifest with `checksum` and `authentication` blanked; the unkeyed `checksum` stays a corruption check only. The node reads the key from one validated file handle and enforces platform-specific ownership and access-control rules: Unix requires the current user to own the file with no group or other access; Windows accepts ownership by the current user or by `BUILTIN\Administrators` when the process belongs to that group, and allows only the owner, Administrators, SYSTEM, Creator Owner, and Owner Rights DACL trustees (plus the restricted local Administrator ACE when Administrators owns the file). Cloud snapshot creation, manifest inspection, and restore require this trust key so a writer to the bucket cannot replace both the payloads and their declared sizes or digests. Local snapshot creation rejects a group- or other-writable parent without the sticky bit and keeps the newly created directory open while it writes, hashes, and publishes the backup. The metadata backup is staged in a private directory beside the snapshot, never in the system temp directory, and moved into the open directory by handle. This prevents a directory replacement from redirecting later writes; `Snapshot` then returns `ErrSnapshotDirectoryReplaced`, empties only the directory it opened, and leaves the replacement untouched. An unkeyed local restore is accepted on Unix only when the snapshot directory and its fixed files are owned by the current user or root, are not group- or other-writable, and every lexical and symlink-resolved directory ancestor, and every symlink in the path, is owned by the current user or root, with the sticky bit required on any ancestor writable by group or other. Windows local restores require the trust key. A restore reads the manifest first and, under a trust key, refuses one whose tag is missing or wrong (`ErrManifestUnauthenticated`) or that declares no digests. `FormatVersion` 2 adds `id`, the snapshot ID (the snapshot directory name or cloud prefix segment), inside the authenticated bytes. Under a trust key, `ReadManifest`, `PeekManifest`, `FetchCloudManifest`, restore, verify, and catalog listing and reconciliation require the signed `id` to equal the directory name or object-prefix segment the snapshot was requested by, so a complete older snapshot copied under a newer name fails with `ErrManifestIDMismatch` (wrapping `ErrManifestUnauthenticated`). A symlinked snapshot directory is addressed by the link's name. `WithManifestID` supplies the expected ID where the manifest is read from a location whose name is not the ID, such as a temporary download directory. A format 1 manifest carries no signed ID, so a keyed verification refuses it with `ErrManifestLegacyFormat` (also wrapping `ErrManifestUnauthenticated`): the snapshot predates signed IDs and must be re-created. Without a trust key nothing is authenticated, so neither the ID nor the format version is checked, as before. The expected cloud ID is the last segment of the cleaned URI path the destination reads, and a keyed read of a URI with no path segment, such as the bucket root, is refused with `ErrManifestIDMismatch`, since snapshots are always written one segment below the destination. `MirrorToCloud` applies the same checks to a signed local manifest before uploading it. Only after that does it fetch payloads: a cloud snapshot downloads `manifest.json`, then exactly the two declared files through `CloudDestination.DownloadFiles`, each stopped at its authenticated declared size, never listing the prefix, so an extra or oversized object under it is never read. Before any target or external store is touched, each payload is checked against its declared size and digest (`ErrSnapshotPayloadMismatch`), for local snapshot directories too. A manifest written before these fields existed has no digests and is checked by size only, which is refused when a trust key is configured. Bark's `Restore` and `VerifySnapshot` probe a local snapshot's manifest with the same trust key (unkeyed only when none is configured). Under a trust key, a local manifest that fails authentication, its checksum, or its size bound is logged with the snapshot ID and is not used, since a writer to the snapshot directory can cause any of the three; the cloud mirror of the same ID is selected, with a log line, only if its own manifest authenticates, and otherwise the RPC returns the local failure's code (`CodeDataLoss`, or `CodeResourceExhausted` for the size bound) naming both outcomes. Without a key a corrupted or oversized local manifest is reported without consulting the cloud copy. Any other local manifest that exists but cannot be read is logged before the cloud destination is checked. Every node that restores another node's snapshots needs the same secret file.
+**Snapshot manifest and payload integrity.** `manifest.json` declares the only
+two payload files a snapshot holds, `blob.bak` and `metadata.sqlite` (the
+metadata file keeps that name for every metadata backend), by size (`blobBytes`,
+`metadataBytes`) and SHA-256 (`blobSha256`, `metadataSha256`). When
+`databaseLifecycle.snapshotTrustKeyFile` names a regular, non-symlink file
+holding a shared secret (at least 16 bytes and at most 1 KiB), `Snapshot` also
+writes `authentication`, an HMAC-SHA256 under that secret over the manifest with
+`checksum` and `authentication` blanked; the unkeyed `checksum` stays a
+corruption check only. The node reads the key from one validated file handle and
+enforces platform-specific ownership and access-control rules: Unix requires the
+current user to own the file with no group or other access; Windows accepts
+ownership by the current user or by `BUILTIN\Administrators` when the process
+belongs to that group, and allows only the owner, Administrators, SYSTEM,
+Creator Owner, and Owner Rights DACL trustees (plus the restricted local
+Administrator ACE when Administrators owns the file). Cloud snapshot creation,
+manifest inspection, and restore require this trust key so a writer to the
+bucket cannot replace both the payloads and their declared sizes or digests.
+Local snapshot creation rejects a group- or other-writable parent without the
+sticky bit and keeps the newly created directory open while it writes, hashes,
+and publishes the backup. The metadata backup is staged in a private directory
+beside the snapshot, never in the system temp directory, and moved into the open
+directory by handle. This prevents a directory replacement from redirecting
+later writes; `Snapshot` then returns `ErrSnapshotDirectoryReplaced`, empties
+only the directory it opened, and leaves the replacement untouched. An unkeyed
+local restore is accepted on Unix only when the snapshot directory and its fixed
+files are owned by the current user or root, are not group- or other-writable,
+and every lexical and symlink-resolved directory ancestor, and every symlink in
+the path, is owned by the current user or root, with the sticky bit required on
+any ancestor writable by group or other. Windows local restores require the
+trust key. A restore reads the manifest first and, under a trust key, refuses
+one whose tag is missing or wrong (`ErrManifestUnauthenticated`) or that
+declares no digests. `FormatVersion` 2 adds `id`, the snapshot ID (the snapshot
+directory name or cloud prefix segment), inside the authenticated bytes. Under a
+trust key, `ReadManifest`, `PeekManifest`, `FetchCloudManifest`, restore,
+verify, and catalog listing and reconciliation require the signed `id` to equal
+the directory name or object-prefix segment the snapshot was requested by, so a
+complete older snapshot copied under a newer name fails with
+`ErrManifestIDMismatch` (wrapping `ErrManifestUnauthenticated`). A symlinked
+snapshot directory is addressed by the link's name. `WithManifestID` supplies
+the expected ID where the manifest is read from a location whose name is not the
+ID, such as a temporary download directory. A format 1 manifest carries no
+signed ID, so a keyed verification refuses it with `ErrManifestLegacyFormat`
+(also wrapping `ErrManifestUnauthenticated`): the snapshot predates signed IDs
+and must be re-created. Without a trust key nothing is authenticated, so neither
+the ID nor the format version is checked, as before. The expected cloud ID is
+the last segment of the cleaned URI path the destination reads, and a keyed read
+of a URI with no path segment, such as the bucket root, is refused with
+`ErrManifestIDMismatch`, since snapshots are always written one segment below
+the destination. `MirrorToCloud` applies the same checks to a signed local
+manifest before uploading it. Only after that does it fetch payloads: a cloud
+snapshot downloads `manifest.json`, then exactly the two declared files through
+`CloudDestination.DownloadFiles`, each stopped at its authenticated declared
+size, never listing the prefix, so an extra or oversized object under it is
+never read. Before any target or external store is touched, each payload is
+checked against its declared size and digest (`ErrSnapshotPayloadMismatch`), for
+local snapshot directories too. A manifest written before these fields existed
+has no digests and is checked by size only, which is refused when a trust key is
+configured. Bark's `Restore` and `VerifySnapshot` probe a local snapshot's
+manifest with the same trust key (unkeyed only when none is configured). Under a
+trust key, a local manifest that fails authentication, its checksum, or its size
+bound is logged with the snapshot ID and is not used, since a writer to the
+snapshot directory can cause any of the three; the cloud mirror of the same ID
+is selected, with a log line, only if its own manifest authenticates, and
+otherwise the RPC returns the local failure's code (`CodeDataLoss`, or
+`CodeResourceExhausted` for the size bound) naming both outcomes. Without a key
+a corrupted or oversized local manifest is reported without consulting the cloud
+copy. Any other local manifest that exists but cannot be read is logged before
+the cloud destination is checked. Every node that restores another node's
+snapshots needs the same secret file.
 
-`lifecycle.Restore` restores both stores into a target data directory (which must not already exist, or must be empty), then opens the result with `database.New` so its own startup consistency checks (`CheckNodeSettings`, `checkCommitTimestamp`) validate the restore for free, and additionally compares the restored tip against the manifest's recorded tip before returning success.
+`lifecycle.Restore` restores both stores into a target data directory (which
+must not already exist, or must be empty), then opens the result with
+`database.New` so its own startup consistency checks (`CheckNodeSettings`,
+`checkCommitTimestamp`) validate the restore for free, and additionally compares
+the restored tip against the manifest's recorded tip before returning success.
 
-**Cloud snapshot destinations.** `lifecycle.SnapshotToCloud` wraps `lifecycle.Snapshot` unchanged, then — if a destination URI is configured — additionally uploads the snapshot directory's files to object storage under `<cloudDest>/<snapshotID>` (`snapshotID` = the local snapshot directory's base name), mirroring the local `SnapshotDir/<snapshotID>` layout; the local copy is always kept, so cloud is a mirror, not a replacement (a failed upload still returns an error, since the operator asked for both copies). Nesting under the snapshot's own ID — rather than uploading flat directly under `cloudDest` — is what lets more than one snapshot exist at the same configured cloud destination at once: a flat upload would silently overwrite every previous snapshot's objects with the newest one's. `database/lifecycle/destination.go` defines the `CloudDestination` interface (`UploadDir`, non-recursive over a snapshot directory's flat file list, and `DownloadFiles`, which fetches exactly the named objects with a per-object byte bound), an optional `SnapshotLister` interface for cataloging what's already stored at a destination, and `DestinationRegistry`, an instance-owned registry of scheme -> factory (`s3`, `gcs`) — every function that resolves a cloud destination (`SnapshotToCloud`, `MirrorToCloud`, `Restore`, `RestoreValidated`, `PeekManifest`, `ListCloudSnapshots`, `FetchCloudManifest`, `DeleteCloudSnapshot`) takes a `*DestinationRegistry` explicitly (a nil registry behaves as an empty one) rather than resolving against a process-global registry, so this package never itself imports a cloud SDK and never depends on which schemes some other part of the binary happened to link in. Implementations live in build-tag-gated files, mirroring `database/plugin`'s existing optional-plugin convention, each exposing a `RegisterS3`/`RegisterGCS(*DestinationRegistry)` function instead of registering itself via `init()`:
+**Cloud snapshot destinations.** `lifecycle.SnapshotToCloud` wraps
+`lifecycle.Snapshot` unchanged, then — if a destination URI is configured —
+additionally uploads the snapshot directory's files to object storage under
+`<cloudDest>/<snapshotID>` (`snapshotID` = the local snapshot directory's base
+name), mirroring the local `SnapshotDir/<snapshotID>` layout; the local copy is
+always kept, so cloud is a mirror, not a replacement (a failed upload still
+returns an error, since the operator asked for both copies). Nesting under the
+snapshot's own ID — rather than uploading flat directly under `cloudDest` — is
+what lets more than one snapshot exist at the same configured cloud destination
+at once: a flat upload would silently overwrite every previous snapshot's
+objects with the newest one's. `database/lifecycle/destination.go` defines the
+`CloudDestination` interface (`UploadDir`, non-recursive over a snapshot
+directory's flat file list, and `DownloadFiles`, which fetches exactly the named
+objects with a per-object byte bound), an optional `SnapshotLister` interface
+for cataloging what's already stored at a destination, and
+`DestinationRegistry`, an instance-owned registry of scheme -> factory (`s3`,
+`gcs`) — every function that resolves a cloud destination (`SnapshotToCloud`,
+`MirrorToCloud`, `Restore`, `RestoreValidated`, `PeekManifest`,
+`ListCloudSnapshots`, `FetchCloudManifest`, `DeleteCloudSnapshot`) takes a
+`*DestinationRegistry` explicitly (a nil registry behaves as an empty one)
+rather than resolving against a process-global registry, so this package never
+itself imports a cloud SDK and never depends on which schemes some other part of
+the binary happened to link in. Implementations live in build-tag-gated files,
+mirroring `database/plugin`'s existing optional-plugin convention, each exposing
+a `RegisterS3`/`RegisterGCS(*DestinationRegistry)` function instead of
+registering itself via `init()`:
 
-- `destination_s3.go` (`dingo_extra_plugins`) — scheme `s3://bucket/prefix`, using `s3.NewFromConfig` + `manager.Uploader`/`manager.Downloader` for streaming transfer, and `ListObjectsV2`'s delimiter-based listing (`CommonPrefixes`) for `SnapshotLister`. Auth is entirely the AWS SDK default credential chain (`config.LoadDefaultConfig`) — no explicit access-key/secret config, matching `database/plugin/blob/aws`'s convention. An `AWS_ENDPOINT` env var (checked directly, since it isn't a standard AWS SDK variable `LoadDefaultConfig` would pick up on its own) redirects to a self-hosted S3-compatible store — typically MinIO — via `BaseEndpoint` + `UsePathStyle`, mirroring `database/plugin/blob/aws`'s `WithEndpoint` option; without this, a `snapshotCloudDestination` pointed at anything other than genuine AWS S3 would silently try to authenticate against real AWS regardless of intent.
-- `destination_gcs.go` (`dingo_extra_plugins`) — scheme `gcs://bucket/prefix` (matching `database/plugin/blob/gcs`'s own dataDir scheme, not `gs://`, for consistency), using GCS's own `Query.Delimiter`-based listing (`ObjectAttrs.Prefix` entries) for `SnapshotLister`. Auth is Application Default Credentials via `storage.NewGRPCClient`, matching `database/plugin/blob/gcs`'s convention — no explicit service-account config.
+- `destination_s3.go` (`dingo_extra_plugins`) — scheme `s3://bucket/prefix`,
+  using `s3.NewFromConfig` + `manager.Uploader`/`manager.Downloader` for
+  streaming transfer, and `ListObjectsV2`'s delimiter-based listing
+  (`CommonPrefixes`) for `SnapshotLister`. Auth is entirely the AWS SDK default
+  credential chain (`config.LoadDefaultConfig`) — no explicit access-key/secret
+  config, matching `database/plugin/blob/aws`'s convention. An `AWS_ENDPOINT`
+  env var (checked directly, since it isn't a standard AWS SDK variable
+  `LoadDefaultConfig` would pick up on its own) redirects to a self-hosted
+  S3-compatible store — typically MinIO — via `BaseEndpoint` + `UsePathStyle`,
+  mirroring `database/plugin/blob/aws`'s `WithEndpoint` option; without this, a
+  `snapshotCloudDestination` pointed at anything other than genuine AWS S3 would
+  silently try to authenticate against real AWS regardless of intent.
+- `destination_gcs.go` (`dingo_extra_plugins`) — scheme `gcs://bucket/prefix`
+  (matching `database/plugin/blob/gcs`'s own dataDir scheme, not `gs://`, for
+  consistency), using GCS's own `Query.Delimiter`-based listing
+  (`ObjectAttrs.Prefix` entries) for `SnapshotLister`. Auth is Application
+  Default Credentials via `storage.NewGRPCClient`, matching
+  `database/plugin/blob/gcs`'s convention — no explicit service-account config.
 
 **Authenticated snapshot upload.** `MirrorToCloud` requires the trust key and
 refuses a local manifest that does not authenticate, including a format 1 or
@@ -1093,11 +1892,48 @@ directory beside the snapshot, authenticates that copy, uploads it, and removes
 it; replacing a file in the snapshot directory after verification cannot change
 the uploaded bytes.
 
-`RegisterBuiltinDestinations(*DestinationRegistry)` registers every scheme compiled into this build (both under `dingo_extra_plugins`, none otherwise — a `!dingo_extra_plugins`-tagged file provides a no-op version so callers don't need their own build tag) — composition code (`node.go`'s `New`, and `cmd/dingo/database.go`'s CLI commands) calls `NewDestinationRegistry` followed by `RegisterBuiltinDestinations` once at startup and threads the resulting registry down through `internal/dblifecycle.Manager`/`Service`, `bark.BarkConfig.DestinationRegistry`, and `dingo.Node`'s own `destinationRegistry` field — nothing in this call chain re-resolves schemes against a package-level registry.
+`RegisterBuiltinDestinations(*DestinationRegistry)` registers every scheme
+compiled into this build (both under `dingo_extra_plugins`, none otherwise — a
+`!dingo_extra_plugins`-tagged file provides a no-op version so callers don't
+need their own build tag) — composition code (`node.go`'s `New`, and
+`cmd/dingo/database.go`'s CLI commands) calls `NewDestinationRegistry` followed
+by `RegisterBuiltinDestinations` once at startup and threads the resulting
+registry down through `internal/dblifecycle.Manager`/`Service`,
+`bark.BarkConfig.DestinationRegistry`, and `dingo.Node`'s own
+`destinationRegistry` field — nothing in this call chain re-resolves schemes
+against a package-level registry.
 
-Configuration validation is build-aware: a non-empty `databaseLifecycle.snapshotCloudDestination` requires `snapshotTrustKeyFile`, must be a well-formed `s3://` or `gcs://` URI, and those schemes are accepted only in a binary built with `dingo_extra_plugins`. A missing trust root, typoed URI, or unavailable scheme therefore fails startup rather than waiting until an epoch-boundary upload to surface as a logged background error.
+Configuration validation is build-aware: a non-empty
+`databaseLifecycle.snapshotCloudDestination` requires `snapshotTrustKeyFile`,
+must be a well-formed `s3://` or `gcs://` URI, and those schemes are accepted
+only in a binary built with `dingo_extra_plugins`. A missing trust root, typoed
+URI, or unavailable scheme therefore fails startup rather than waiting until an
+epoch-boundary upload to surface as a logged background error.
 
-**Interrupted truncate marker.** Before `lifecycle.Truncate` begins its batched blob deletion, it records `database_lifecycle_truncate_pending` in `sync_state`, including the target ID/slot/hash, original blob-tip ID/slot/hash, Mithril floor, and a checksum covering the complete marker. The checksum prevents a damaged deletion bound from being resumed; the original blob tip cannot simply be required to remain present because an interrupted attempt may already have deleted it, and it may legitimately be ahead of the applied metadata tip. Recovery therefore accepts a current blob tip below the recorded tip as partial delete progress, requires an equal tip to match the recorded slot/hash, and fails closed if the current blob tip is newer than the authenticated upper bound. Tip identity is read directly from the highest `bi` index entry rather than by resolving its referenced block object: an irreversible cloud delete can fail after removing the block object but before removing that index, and the remaining authenticated index must be allowed to drive idempotent cleanup on retry. This prevents a stale-but-valid marker from deleting only its old blob range while metadata truncation removes state through a subsequently advanced tip. The marker remains durable if cancellation or a storage error lands after one or more blob batches commit, making the intermediate state detectable rather than leaving metadata silently referencing already-deleted block blobs. A subsequent truncate validates the marker, resumes the recorded operation (missing blobs are idempotently skipped), performs metadata truncation, and clears the marker in the same metadata transaction. Normal node startup refuses to serve while this marker exists and directs the operator to rerun truncate; the offline lifecycle service can open the database and complete that recovery.
+**Interrupted truncate marker.** Before `lifecycle.Truncate` begins its batched
+blob deletion, it records `database_lifecycle_truncate_pending` in `sync_state`,
+including the target ID/slot/hash, original blob-tip ID/slot/hash, Mithril
+floor, and a checksum covering the complete marker. The checksum prevents a
+damaged deletion bound from being resumed; the original blob tip cannot simply
+be required to remain present because an interrupted attempt may already have
+deleted it, and it may legitimately be ahead of the applied metadata tip.
+Recovery therefore accepts a current blob tip below the recorded tip as partial
+delete progress, requires an equal tip to match the recorded slot/hash, and
+fails closed if the current blob tip is newer than the authenticated upper
+bound. Tip identity is read directly from the highest `bi` index entry rather
+than by resolving its referenced block object: an irreversible cloud delete can
+fail after removing the block object but before removing that index, and the
+remaining authenticated index must be allowed to drive idempotent cleanup on
+retry. This prevents a stale-but-valid marker from deleting only its old blob
+range while metadata truncation removes state through a subsequently advanced
+tip. The marker remains durable if cancellation or a storage error lands after
+one or more blob batches commit, making the intermediate state detectable rather
+than leaving metadata silently referencing already-deleted block blobs. A
+subsequent truncate validates the marker, resumes the recorded operation
+(missing blobs are idempotently skipped), performs metadata truncation, and
+clears the marker in the same metadata transaction. Normal node startup refuses
+to serve while this marker exists and directs the operator to rerun truncate;
+the offline lifecycle service can open the database and complete that recovery.
 
 **Leader schedules.** Keys `leader_schedule:<pool-id-hex>:<epoch>` in
 `sync_state` hold JSON fields `format_version`, `epoch`, `pool_id`,
@@ -1144,17 +1980,17 @@ refused without allocating the remainder. A record with a field the writer
 never emits is refused for the same reason. Any such record is treated as
 unreadable and removed.
 
-**Pending ratification.** Key `dingo:governance:ratify-pending` in
-`sync_state` holds a JSON record (`epoch`, `boundary_slot`, `id`, and
-`snapshot` when the boundary left that epoch's `pool_stake_snapshot`,
-`epoch_summary` and reward-input rows to the same job) naming the latest
-boundary whose RATIFY decision or mark snapshot has not been written yet. `GetPostSnapshotRewardCredits(slot)` returns
-each stake credential's total of the `account_reward_delta` credits at `slot`
-with `post_snapshot` set, which the deferred mark snapshot subtracts from the
-live stake read to recover the SNAP point. `GetPostSnapshotRewardCreditEvents(slot)`
-returns the same credits one row each with their `tx_hash` source hash, which
-the Koios parity check pairs with proposals to find the deposit refunds a
-boundary credited. The boundary
+**Pending ratification.** Key `dingo:governance:ratify-pending` in `sync_state`
+holds a JSON record (`epoch`, `boundary_slot`, `id`, and `snapshot` when the
+boundary left that epoch's `pool_stake_snapshot`, `epoch_summary` and
+reward-input rows to the same job) naming the latest boundary whose RATIFY
+decision or mark snapshot has not been written yet.
+`GetPostSnapshotRewardCredits(slot)` returns each stake credential's total of
+the `account_reward_delta` credits at `slot` with `post_snapshot` set, which the
+deferred mark snapshot subtracts from the live stake read to recover the SNAP
+point. `GetPostSnapshotRewardCreditEvents(slot)` returns the same credits one
+row each with their `tx_hash` source hash, which the Koios parity check pairs
+with proposals to find the deposit refunds a boundary credited. The boundary
 transaction writes it; the transaction that writes the decision's ratified and
 expired marks -- the background ratification job's, or the next boundary's --
 deletes it. A rollback below `boundary_slot` deletes it in the rollback
@@ -1214,8 +2050,8 @@ the rollback slot and clears `folded` on its surviving outputs.
 **Reward eligibility recheck.** Key `dingo:reward-credit:eligibility-recheck`
 (`models.RewardEligibilityRecheckKey`) holds the JSON list of credentials whose
 account state `RestoreAccountStateAtSlot` restored in a rollback.
-`TakeRewardEligibilityRecheck` returns and clears it; the epoch boundary re-reads
-those credentials' registration, together with every credential
+`TakeRewardEligibilityRecheck` returns and clears it; the epoch boundary
+re-reads those credentials' registration, together with every credential
 `GetStakeCredentialsWithRegistrationEvents` returns for the slots between the
 round's pots capture and the boundary.
 
@@ -1226,9 +2062,39 @@ them commits. The boundary transaction adds the entry and the last write batch
 removes it; while it is listed the epoch's `reward_stake_input` rows are
 incomplete.
 
-The truncate deletion range ends at the newest block in the indexed blob chain, not at the metadata ledger tip. During live synchronization, BlockFetch can have persisted a speculative blob tail that the ledger has not applied yet. If the requested target equals the metadata tip, that tail must still be deleted; treating the operation as a no-op would leave non-contiguous block indexes visible after the live node rebuild and prevent ChainSync from making forward progress.
+The truncate deletion range ends at the newest block in the indexed blob chain,
+not at the metadata ledger tip. During live synchronization, BlockFetch can have
+persisted a speculative blob tail that the ledger has not applied yet. If the
+requested target equals the metadata tip, that tail must still be deleted;
+treating the operation as a no-op would leave non-contiguous block indexes
+visible after the live node rebuild and prevent ChainSync from making forward
+progress.
 
-`lifecycle.Restore` accepts either a local directory or a cloud destination URI for `snapshotDir` — a cloud URI first fetches the manifest, then downloads only its two declared payloads into a temporary local directory (`downloadCloudFiles`), before proceeding with restore. A local snapshot's payloads are copied the same way before verification, so a file replaced after its digest check is never read. Both the downloads and the copies are created beside the restore target, on the volume sized for the restored data, never in the system temp directory, and are removed when the restore returns. Restore and snapshot verification remove matching sibling work directories older than seven days before starting, unless a running restore still holds them; newer directories may belong to another active operation. On Unix, a populated staging, payload-copy, or cloud-download directory left by a restore that exited without cleaning up is removed at once, since no process holds its lock. Windows directory handles take no such lock, so there only the seven-day cutoff applies. Bark snapshot verification authenticates and inspects the manifest before resolving storage providers and supports only Badger plus SQLite, whose complete restore fits inside the temporary local target. It rejects PostgreSQL/MySQL metadata and S3/GCS blobs before starting a provider because they need separately configured disposable resources; reusing the live provider configuration would mutate the active database or leave a new object namespace behind. Restoring from the cloud requires the full per-snapshot URI (`<cloudDest>/<snapshotID>`, the same one `SnapshotToCloud` uploaded to), not the bare base destination, which is a catalog of potentially many snapshots. This is also how a snapshot captured on one node can be restored onto another, since the two never need to share a filesystem.
+`lifecycle.Restore` accepts either a local directory or a cloud destination URI
+for `snapshotDir` — a cloud URI first fetches the manifest, then downloads only
+its two declared payloads into a temporary local directory
+(`downloadCloudFiles`), before proceeding with restore. A local snapshot's
+payloads are copied the same way before verification, so a file replaced after
+its digest check is never read. Both the downloads and the copies are created
+beside the restore target, on the volume sized for the restored data, never in
+the system temp directory, and are removed when the restore returns. Restore and
+snapshot verification remove matching sibling work directories older than seven
+days before starting, unless a running restore still holds them; newer
+directories may belong to another active operation. On Unix, a populated
+staging, payload-copy, or cloud-download directory left by a restore that exited
+without cleaning up is removed at once, since no process holds its lock. Windows
+directory handles take no such lock, so there only the seven-day cutoff applies.
+Bark snapshot verification authenticates and inspects the manifest before
+resolving storage providers and supports only Badger plus SQLite, whose complete
+restore fits inside the temporary local target. It rejects PostgreSQL/MySQL
+metadata and S3/GCS blobs before starting a provider because they need
+separately configured disposable resources; reusing the live provider
+configuration would mutate the active database or leave a new object namespace
+behind. Restoring from the cloud requires the full per-snapshot URI
+(`<cloudDest>/<snapshotID>`, the same one `SnapshotToCloud` uploaded to), not
+the bare base destination, which is a catalog of potentially many snapshots.
+This is also how a snapshot captured on one node can be restored onto another,
+since the two never need to share a filesystem.
 
 Local restore copies the two manifest-declared payloads into a private temporary
 directory, bounded by their declared sizes, and verifies and consumes those
@@ -1240,17 +2106,239 @@ since replay stores blocks only above it; a cursor already at or below the point
 is left alone, so a routine rollback does not restart the scan at slot 0. An
 expiry failure ends the current round before any later block is processed.
 
-`database/lifecycle/cloud_destination_credentials_test.go` (`dingo_extra_plugins`) exercises both real implementations end to end — upload, list, fetch-manifest, download+restore, delete — against a real bucket, skipping outright when no credentials are configured (`DINGO_TEST_S3_BUCKET`/`DINGO_TEST_GCS_BUCKET`, the same convention `internal/integration/storage_migration_test.go` already uses for the blob-store plugins); CI's MinIO service exercises the S3 half for real via `AWS_ENDPOINT`. Before this, only the generic orchestration logic (`SnapshotToCloud`/`ListCloudSnapshots`/etc.) had test coverage, against a fake `CloudDestination` — the real S3/GCS client code itself had none.
+`database/lifecycle/cloud_destination_credentials_test.go`
+(`dingo_extra_plugins`) exercises both real implementations end to end — upload,
+list, fetch-manifest, download+restore, delete — against a real bucket, skipping
+outright when no credentials are configured
+(`DINGO_TEST_S3_BUCKET`/`DINGO_TEST_GCS_BUCKET`, the same convention
+`internal/integration/storage_migration_test.go` already uses for the blob-store
+plugins); CI's MinIO service exercises the S3 half for real via `AWS_ENDPOINT`.
+Before this, only the generic orchestration logic
+(`SnapshotToCloud`/`ListCloudSnapshots`/etc.) had test coverage, against a fake
+`CloudDestination` — the real S3/GCS client code itself had none.
 
-`lifecycle.ListCloudSnapshots(ctx, cloudDest, manifestOpts...)` lists every authenticated snapshot stored at a base cloud destination: it parses `cloudDest` into a `CloudDestination` and, if that implementation satisfies `SnapshotLister`, calls it — each S3/GCS implementation enumerates the sub-paths one level under the configured prefix (its own delimiter-based listing) and fetches just each one's `manifest.json` (via the new `ParseManifest([]byte)`, factored out of `ReadManifest` so a manifest fetched as in-memory bytes validates the same way one read from a local file does), never downloading the full blob/metadata backups just to build a catalog. `ok=false` (not an error) means cloud listing isn't available — an empty `cloudDest`, or a destination type that doesn't implement `SnapshotLister` — so callers can degrade to local-only rather than failing.
+`lifecycle.ListCloudSnapshots(ctx, cloudDest, manifestOpts...)` lists every
+authenticated snapshot stored at a base cloud destination: it parses `cloudDest`
+into a `CloudDestination` and, if that implementation satisfies
+`SnapshotLister`, calls it — each S3/GCS implementation enumerates the sub-paths
+one level under the configured prefix (its own delimiter-based listing) and
+fetches just each one's `manifest.json` (via the new `ParseManifest([]byte)`,
+factored out of `ReadManifest` so a manifest fetched as in-memory bytes
+validates the same way one read from a local file does), never downloading the
+full blob/metadata backups just to build a catalog. `ok=false` (not an error)
+means cloud listing isn't available — an empty `cloudDest`, or a destination
+type that doesn't implement `SnapshotLister` — so callers can degrade to
+local-only rather than failing.
 
-Two further optional `CloudDestination` capabilities, meaningful on a destination parsed from a *specific snapshot's own* URI (`JoinCloudURI(base, snapshotID)`), not a base destination: `CloudManifestFetcher.FetchManifest(ctx)` fetches just that one snapshot's manifest (used to cheaply check "does this snapshot exist here" without a full download), and `CloudDeleter.Delete(ctx)` removes everything at that location (both refuse outright on an empty prefix, to avoid a misuse that would otherwise list/delete an entire bucket). `lifecycle.FetchCloudManifest`/`lifecycle.DeleteCloudSnapshot` are the corresponding package-level helpers, each with an `ok bool` return distinguishing "destination type doesn't support this" from a real failure. When `ok=true`, a non-nil `err` from `FetchCloudManifest` means an actual fetch was attempted: `errors.Is(err, lifecycle.ErrCloudSnapshotNotFound)` distinguishes a confirmed-absent manifest (both S3's `NoSuchKey`/`NotFound` and GCS's `storage.ErrObjectNotExist` are wrapped in this sentinel by their respective `FetchManifest` implementations) from a real communication failure (auth, network, timeout) that happens to occur while checking — bark's `cloudSnapshotExists` uses exactly this distinction so a snapshot whose cloud probe merely *failed* is reported as `CodeUnavailable`, not folded into the same `CodeNotFound` a genuinely-absent snapshot gets (which would otherwise be indistinguishable from real data loss to an operator). Together these are what let bark's `Restore`/`VerifySnapshot`/`DeleteSnapshot` handlers act on a snapshot whose local copy is gone (deleted, or never synced to this node) but whose cloud mirror still exists — see `ARCHITECTURE.md`'s Bark section.
+Two further optional `CloudDestination` capabilities, meaningful on a
+destination parsed from a *specific snapshot's own* URI (`JoinCloudURI(base,
+snapshotID)`), not a base destination: `CloudManifestFetcher.FetchManifest(ctx)`
+fetches just that one snapshot's manifest (used to cheaply check "does this
+snapshot exist here" without a full download), and `CloudDeleter.Delete(ctx)`
+removes everything at that location (both refuse outright on an empty prefix, to
+avoid a misuse that would otherwise list/delete an entire bucket).
+`lifecycle.FetchCloudManifest`/`lifecycle.DeleteCloudSnapshot` are the
+corresponding package-level helpers, each with an `ok bool` return
+distinguishing "destination type doesn't support this" from a real failure. When
+`ok=true`, a non-nil `err` from `FetchCloudManifest` means an actual fetch was
+attempted: `errors.Is(err, lifecycle.ErrCloudSnapshotNotFound)` distinguishes a
+confirmed-absent manifest (both S3's `NoSuchKey`/`NotFound` and GCS's
+`storage.ErrObjectNotExist` are wrapped in this sentinel by their respective
+`FetchManifest` implementations) from a real communication failure (auth,
+network, timeout) that happens to occur while checking — bark's
+`cloudSnapshotExists` uses exactly this distinction so a snapshot whose cloud
+probe merely *failed* is reported as `CodeUnavailable`, not folded into the same
+`CodeNotFound` a genuinely-absent snapshot gets (which would otherwise be
+indistinguishable from real data loss to an operator). Together these are what
+let bark's `Restore`/`VerifySnapshot`/`DeleteSnapshot` handlers act on a
+snapshot whose local copy is gone (deleted, or never synced to this node) but
+whose cloud mirror still exists — see `ARCHITECTURE.md`'s Bark section.
 
-**Truncate.** `database.TruncateAfterSlot` (`database/truncate.go`) is the shared metadata+blob-referenced-UTxO/tx sweep — deleting certificates, account/pool/DRep state, protocol parameters, governance, epochs, reward state, block nonces, network state, and UTxOs/transactions added after a slot, restoring UTxOs spent after that slot — factored out of `ledger.LedgerState.rollback` so both the bounded, security-parameter-respecting live rollback path and `lifecycle.Truncate`'s unbounded disaster-recovery path share one implementation. The UTxO and transaction portions of the sweep are keyed on slot alone (`added_slot > slot`, `deleted_slot > slot`), unlike `DeleteBlockNoncesAfterPoint`, which is point-aware (`slot > ? OR (slot = ? AND hash <> ?)`) so same-slot competitors cannot survive. Because those UTxO/tx predicates cannot express a same-slot competitor, a rollback target at the applied tip's slot with a different hash would restore and delete nothing at that slot; `ledger.LedgerState.rollback` is what prevents that, redirecting below the contested slot rather than the sweep handling it. `RestorePoolStateAtSlot` runs *before* `DeleteCertificatesAfterSlot` in this sweep, not after: it detects which pools need their denormalized `pledge`/`cost`/`margin`/VRF/reward-account fields reverted by querying `PoolRegistration` rows with `added_slot > slot` — the very rows `DeleteCertificatesAfterSlot` removes, so restoring first (while those rows still exist) is what lets it find the surviving prior registration to revert to, rather than silently leaving every re-registered pool's discarded values in place. The denormalized-field `UPDATE` and the companion `latest_op_cert_sequence` `UPDATE` immediately after it are both scoped to only the pools a given rollback actually affects — a CTE restricts the first to pools with a `PoolRegistration` row above `slot`, and the second is restricted to the `pool_key_hash` values `RestorePoolStateAtSlot`'s own leading `DELETE FROM pool_opcert_sequence WHERE slot > slot` actually removed (captured before that delete runs, since the rows it needs are gone afterward) — rather than rewriting every pool row on every rollback. The unscoped shape this replaced computed each pool's correct latest value regardless (so it never produced a wrong result), but its cost was `O(pool_count²)` per rollback and completely flat against rollback depth: at mainnet scale (2823 pools) the denormalized-field statement alone cost ~1.5s of every ~2s `TruncateAfterSlot` sweep, held for the ledger write lock's whole duration on every fork (`fork_depth=1` rollbacks are the common case). The scoped statement is built through `sqlstore.Dialect.UpdateFromJoinSQL`, since MySQL has no `UPDATE ... FROM` syntax and needs `UPDATE ... JOIN ... ON ... SET ...` instead. The MySQL form qualifies every assignment target with the target table (`pool.pledge = ...`), because the joined "latest known value" source projects columns with the same names as `pool`'s own; the SQLite and PostgreSQL `UPDATE ... SET ... FROM ...` form keeps assignment targets unqualified, since both engines reject a table-qualified target there. `database.MithrilTrustBoundarySlot` reads the persisted Mithril trust-boundary sync-state key so an offline truncate can enforce the same floor the live ledger does, without needing a running `*LedgerState`; it treats a failed read the same as "no boundary recorded" (returns 0, logging the failure), which is the right fail-open behavior for its other caller (a consumed-UTxO recovery heuristic) but wrong for a safety check — `MithrilTrustBoundarySlotStrict` is the fail-closed variant `lifecycle.Truncate` actually uses for its boundary check, propagating a read error instead of silently treating it as "no boundary" and letting an unverifiable truncate through. It propagates an unparseable value the same way, and an empty one too: `GetSyncState` reports an absent key as the empty string, so before concluding that no boundary was recorded the strict variant asks the `sync_state` keyspace (`ListSyncStateKeysByPrefix`) whether the row exists at all — a row that exists and holds nothing is a malformed boundary, not the absence of one. That extra query runs only on the empty-value path, and `MithrilTrustBoundarySlot` skips it entirely: it discards every failure as 0 anyway and runs once per transaction that consumes inputs. After the sweep, `TruncateAfterSlot` loads the new tip's evolving nonce with a single exact-point `GetBlockNonce(point)` lookup. `GetBlockNonce` reports a missing row as `(nil, nil)`, not an error, so silently continuing used to seed the resumed evolving-nonce fold (`LedgerState.loadTip` → `ledgerProcessBlocks`'s `runningNonce`) from empty bytes — corrupting every block nonce computed for the rest of that epoch and, through it, the following epoch's nonce, which fails VRF verification for every header in that epoch regardless of which honest peer serves it (observed live on 4 independently-synced Preview-testnet nodes). In core storage mode `block_nonce` retains only the last 3 epochs plus each epoch's single checkpoint row (`ledger/chainsync.go`'s `cleanupBlockNoncesBefore`; API storage mode keeps every row for the Blockfrost epoch and pool block lists), so an unbounded disaster-recovery truncate — or, for Ouroboros Genesis chain selection, an ordinary rollback deeper than the Praos security parameter, since Genesis has no k-bound — can land on a slot whose own row was already pruned by that routine retention. For a non-Byron target with an empty lookup, `TruncateAfterSlot` now consults `hasBlockNonceCheckpointAtOrBeforeSlot`: if a checkpoint row (`is_checkpoint`, retained forever regardless of the 3-epoch window) survives at or before the target's slot, the truncate proceeds with a nil nonce instead of being rejected, deferring reconstruction to the ledger layer — this package deliberately has no era/VRF knowledge to fold a nonce itself. `ledger.LedgerState.healTruncateGapBlockNonces` (`ledger/heal_truncate_gap_nonce.go`) performs that reconstruction: it runs at every `LedgerState` startup (after `healMithrilGapBlockNonces`, mirroring its fold-forward technique and sharing its per-block VRF fold, `foldBlockEtaV`) and again after `ledger.LedgerState.rollback` in-process, folding the evolving nonce forward from the nearest surviving checkpoint through the still-present block CBOR up to the tip — `lifecycle.DeleteBlocksAfter` only removes blocks strictly *after* its target, so that history is guaranteed present even though the computed `block_nonce` cache for it was pruned. `hasBlockNonceCheckpointAtOrBeforeSlot` is deliberately coarse — it verifies a checkpoint row exists, not that it sits on the primary chain, since `database` has no chain-topology knowledge to check that itself — so `healTruncateGapBlockNonces` performs the authoritative check with full primary-chain awareness and hard-fails startup (rather than silently leaving the tip nonce empty) if the checkpoint the database layer found turns out to belong to a since-abandoned fork, or if no checkpoint exists at or before the target at all. The latter should be unreachable for a normal chain (every epoch writes one, and `healMithrilGapBlockNonces` guarantees one at the Mithril trust boundary), so in practice it is a fallback for a chain whose `block_nonce` history itself is missing, corrupted, or fork-only. Byron-era targets are exempt from the whole check since PBFT blocks have no Praos nonce at all.
+**Truncate.** `database.TruncateAfterSlot` (`database/truncate.go`) is the
+shared metadata+blob-referenced-UTxO/tx sweep — deleting certificates,
+account/pool/DRep state, protocol parameters, governance, epochs, reward state,
+block nonces, network state, and UTxOs/transactions added after a slot,
+restoring UTxOs spent after that slot — factored out of
+`ledger.LedgerState.rollback` so both the bounded, security-parameter-respecting
+live rollback path and `lifecycle.Truncate`'s unbounded disaster-recovery path
+share one implementation. The UTxO and transaction portions of the sweep are
+keyed on slot alone (`added_slot > slot`, `deleted_slot > slot`), unlike
+`DeleteBlockNoncesAfterPoint`, which is point-aware (`slot > ? OR (slot = ? AND
+hash <> ?)`) so same-slot competitors cannot survive. Because those UTxO/tx
+predicates cannot express a same-slot competitor, a rollback target at the
+applied tip's slot with a different hash would restore and delete nothing at
+that slot; `ledger.LedgerState.rollback` is what prevents that, redirecting
+below the contested slot rather than the sweep handling it.
+`RestorePoolStateAtSlot` runs *before* `DeleteCertificatesAfterSlot` in this
+sweep, not after: it detects which pools need their denormalized
+`pledge`/`cost`/`margin`/VRF/reward-account fields reverted by querying
+`PoolRegistration` rows with `added_slot > slot` — the very rows
+`DeleteCertificatesAfterSlot` removes, so restoring first (while those rows
+still exist) is what lets it find the surviving prior registration to revert to,
+rather than silently leaving every re-registered pool's discarded values in
+place. The denormalized-field `UPDATE` and the companion
+`latest_op_cert_sequence` `UPDATE` immediately after it are both scoped to only
+the pools a given rollback actually affects — a CTE restricts the first to pools
+with a `PoolRegistration` row above `slot`, and the second is restricted to the
+`pool_key_hash` values `RestorePoolStateAtSlot`'s own leading `DELETE FROM
+pool_opcert_sequence WHERE slot > slot` actually removed (captured before that
+delete runs, since the rows it needs are gone afterward) — rather than rewriting
+every pool row on every rollback. The unscoped shape this replaced computed each
+pool's correct latest value regardless (so it never produced a wrong result),
+but its cost was `O(pool_count²)` per rollback and completely flat against
+rollback depth: at mainnet scale (2823 pools) the denormalized-field statement
+alone cost ~1.5s of every ~2s `TruncateAfterSlot` sweep, held for the ledger
+write lock's whole duration on every fork (`fork_depth=1` rollbacks are the
+common case). The scoped statement is built through
+`sqlstore.Dialect.UpdateFromJoinSQL`, since MySQL has no `UPDATE ... FROM`
+syntax and needs `UPDATE ... JOIN ... ON ... SET ...` instead. The MySQL form
+qualifies every assignment target with the target table (`pool.pledge = ...`),
+because the joined "latest known value" source projects columns with the same
+names as `pool`'s own; the SQLite and PostgreSQL `UPDATE ... SET ... FROM ...`
+form keeps assignment targets unqualified, since both engines reject a
+table-qualified target there. `database.MithrilTrustBoundarySlot` reads the
+persisted Mithril trust-boundary sync-state key so an offline truncate can
+enforce the same floor the live ledger does, without needing a running
+`*LedgerState`; it treats a failed read the same as "no boundary recorded"
+(returns 0, logging the failure), which is the right fail-open behavior for its
+other caller (a consumed-UTxO recovery heuristic) but wrong for a safety check —
+`MithrilTrustBoundarySlotStrict` is the fail-closed variant `lifecycle.Truncate`
+actually uses for its boundary check, propagating a read error instead of
+silently treating it as "no boundary" and letting an unverifiable truncate
+through. It propagates an unparseable value the same way, and an empty one too:
+`GetSyncState` reports an absent key as the empty string, so before concluding
+that no boundary was recorded the strict variant asks the `sync_state` keyspace
+(`ListSyncStateKeysByPrefix`) whether the row exists at all — a row that exists
+and holds nothing is a malformed boundary, not the absence of one. That extra
+query runs only on the empty-value path, and `MithrilTrustBoundarySlot` skips it
+entirely: it discards every failure as 0 anyway and runs once per transaction
+that consumes inputs. After the sweep, `TruncateAfterSlot` loads the new tip's
+evolving nonce with a single exact-point `GetBlockNonce(point)` lookup.
+`GetBlockNonce` reports a missing row as `(nil, nil)`, not an error, so silently
+continuing used to seed the resumed evolving-nonce fold (`LedgerState.loadTip` →
+`ledgerProcessBlocks`'s `runningNonce`) from empty bytes — corrupting every
+block nonce computed for the rest of that epoch and, through it, the following
+epoch's nonce, which fails VRF verification for every header in that epoch
+regardless of which honest peer serves it (observed live on 4
+independently-synced Preview-testnet nodes). In core storage mode `block_nonce`
+retains only the last 3 epochs plus each epoch's single checkpoint row
+(`ledger/chainsync.go`'s `cleanupBlockNoncesBefore`; API storage mode keeps
+every row for the Blockfrost epoch and pool block lists), so an unbounded
+disaster-recovery truncate — or, for Ouroboros Genesis chain selection, an
+ordinary rollback deeper than the Praos security parameter, since Genesis has no
+k-bound — can land on a slot whose own row was already pruned by that routine
+retention. For a non-Byron target with an empty lookup, `TruncateAfterSlot` now
+consults `hasBlockNonceCheckpointAtOrBeforeSlot`: if a checkpoint row
+(`is_checkpoint`, retained forever regardless of the 3-epoch window) survives at
+or before the target's slot, the truncate proceeds with a nil nonce instead of
+being rejected, deferring reconstruction to the ledger layer — this package
+deliberately has no era/VRF knowledge to fold a nonce itself.
+`ledger.LedgerState.healTruncateGapBlockNonces`
+(`ledger/heal_truncate_gap_nonce.go`) performs that reconstruction: it runs at
+every `LedgerState` startup (after `healMithrilGapBlockNonces`, mirroring its
+fold-forward technique and sharing its per-block VRF fold, `foldBlockEtaV`) and
+again after `ledger.LedgerState.rollback` in-process, folding the evolving nonce
+forward from the nearest surviving checkpoint through the still-present block
+CBOR up to the tip — `lifecycle.DeleteBlocksAfter` only removes blocks strictly
+*after* its target, so that history is guaranteed present even though the
+computed `block_nonce` cache for it was pruned.
+`hasBlockNonceCheckpointAtOrBeforeSlot` is deliberately coarse — it verifies a
+checkpoint row exists, not that it sits on the primary chain, since `database`
+has no chain-topology knowledge to check that itself — so
+`healTruncateGapBlockNonces` performs the authoritative check with full
+primary-chain awareness and hard-fails startup (rather than silently leaving the
+tip nonce empty) if the checkpoint the database layer found turns out to belong
+to a since-abandoned fork, or if no checkpoint exists at or before the target at
+all. The latter should be unreachable for a normal chain (every epoch writes
+one, and `healMithrilGapBlockNonces` guarantees one at the Mithril trust
+boundary), so in practice it is a fallback for a chain whose `block_nonce`
+history itself is missing, corrupted, or fork-only. Byron-era targets are exempt
+from the whole check since PBFT blocks have no Praos nonce at all.
 
-`lifecycle.Truncate` additionally removes blob-store blocks above the target via `lifecycle.DeleteBlocksAfter`, which batches deletes across many blob transactions (`DefaultBlockDeleteBatchSize`, 10,000 blocks per transaction) rather than the one-transaction-per-block pattern `Chain.Rollback`/`ChainManager.removeBlockByIndex` use — adequate for a normal bounded rollback, too slow for a truncate spanning a large fraction of the chain. Iterator errors are checked both before and after each batch walk so an S3/GCS listing failure cannot be mistaken for a genuinely empty range and followed by metadata truncation. Failed-batch counts follow backend transaction semantics: Badger rolls the batch back and reports only earlier committed batches, while the GCS/S3 transaction handles implement `types.IrreversibleTxn`, making already-issued object deletions explicit and countable even when the batch later fails. Target resolution (`lifecycle.ResolveTargetByHash`/`ResolveTargetBySlot`/`ResolveTargetByNumber`) accepts a block hash, a slot (resolved to the highest existing block at or before it, since most slots have no block of their own), or a block number (binary-searched over the blob store's internal block ID space, since block number/height is not itself an indexed blob key). That ID space is not guaranteed contiguous: a chain bootstrapped or drain-imported from a Mithril snapshot can leave gaps of never-imported IDs, so `ResolveTargetBySlot`/`ResolveTargetByNumber`'s binary search probes via `database.BlockAtOrAfterIndex` (seeks forward to the next actually-indexed block on a gap) rather than `BlockByIndex` (fails outright on any missing ID) — the same recovery `chain.go`'s forward iterator already uses for the same kind of gap. `ResolveTargetBySlot`/`ResolveTargetByNumber` are structurally guaranteed to return a block on the current genesis-to-tip lineage, since they binary-search that same ID space; `ResolveTargetByHash` resolves purely through the hash index and has no such guarantee. `Truncate` itself cross-checks this regardless of which resolver was used — reading `target.ID`'s block back via `BlockByIndex` and requiring both its slot and hash match `target.Slot`/`target.Hash` — because `DeleteBlocksAfter` deletes blob-store blocks by ID range while `TruncateAfterSlot` deletes metadata using `target.Slot` directly as the cutoff (not `target.ID`), and the two only describe the same rollback when `target`'s ID, slot, and hash all genuinely match the same block on the current chain; checking hash alone would still let a target with a valid ID/hash pair but a forged or otherwise-wrong slot cut blob and metadata history at two different points. A mismatch on either field fails closed (`ErrTruncateNotStarted`) before any deletion, rather than letting blob and metadata history diverge. Unlike `Chain.Rollback`, truncate does not reject a target beyond the configured security parameter: that guard protects *automatic* rollback during normal sync, while an operator explicitly invoking truncate (the CIP-0135 disaster-recovery case — a network partition longer than Ouroboros Praos's rollback limit) is the informed-consent replacement for it. `lifecycle.Truncate` returns the number of blocks `DeleteBlocksAfter` actually reports having deleted, not `tipBlock.ID - target.ID`: with a sparse ID space, that difference is only an upper bound on how many blocks exist in the range, not a count of how many actually do. This is what surfaces as `blocks_removed` in the `dingo database truncate` CLI output and bark's `GetTruncateStatus` RPC.
+`lifecycle.Truncate` additionally removes blob-store blocks above the target via
+`lifecycle.DeleteBlocksAfter`, which batches deletes across many blob
+transactions (`DefaultBlockDeleteBatchSize`, 10,000 blocks per transaction)
+rather than the one-transaction-per-block pattern
+`Chain.Rollback`/`ChainManager.removeBlockByIndex` use — adequate for a normal
+bounded rollback, too slow for a truncate spanning a large fraction of the
+chain. Iterator errors are checked both before and after each batch walk so an
+S3/GCS listing failure cannot be mistaken for a genuinely empty range and
+followed by metadata truncation. Failed-batch counts follow backend transaction
+semantics: Badger rolls the batch back and reports only earlier committed
+batches, while the GCS/S3 transaction handles implement `types.IrreversibleTxn`,
+making already-issued object deletions explicit and countable even when the
+batch later fails. Target resolution
+(`lifecycle.ResolveTargetByHash`/`ResolveTargetBySlot`/`ResolveTargetByNumber`)
+accepts a block hash, a slot (resolved to the highest existing block at or
+before it, since most slots have no block of their own), or a block number
+(binary-searched over the blob store's internal block ID space, since block
+number/height is not itself an indexed blob key). That ID space is not
+guaranteed contiguous: a chain bootstrapped or drain-imported from a Mithril
+snapshot can leave gaps of never-imported IDs, so
+`ResolveTargetBySlot`/`ResolveTargetByNumber`'s binary search probes via
+`database.BlockAtOrAfterIndex` (seeks forward to the next actually-indexed block
+on a gap) rather than `BlockByIndex` (fails outright on any missing ID) — the
+same recovery `chain.go`'s forward iterator already uses for the same kind of
+gap. `ResolveTargetBySlot`/`ResolveTargetByNumber` are structurally guaranteed
+to return a block on the current genesis-to-tip lineage, since they
+binary-search that same ID space; `ResolveTargetByHash` resolves purely through
+the hash index and has no such guarantee. `Truncate` itself cross-checks this
+regardless of which resolver was used — reading `target.ID`'s block back via
+`BlockByIndex` and requiring both its slot and hash match
+`target.Slot`/`target.Hash` — because `DeleteBlocksAfter` deletes blob-store
+blocks by ID range while `TruncateAfterSlot` deletes metadata using
+`target.Slot` directly as the cutoff (not `target.ID`), and the two only
+describe the same rollback when `target`'s ID, slot, and hash all genuinely
+match the same block on the current chain; checking hash alone would still let a
+target with a valid ID/hash pair but a forged or otherwise-wrong slot cut blob
+and metadata history at two different points. A mismatch on either field fails
+closed (`ErrTruncateNotStarted`) before any deletion, rather than letting blob
+and metadata history diverge. Unlike `Chain.Rollback`, truncate does not reject
+a target beyond the configured security parameter: that guard protects
+*automatic* rollback during normal sync, while an operator explicitly invoking
+truncate (the CIP-0135 disaster-recovery case — a network partition longer than
+Ouroboros Praos's rollback limit) is the informed-consent replacement for it.
+`lifecycle.Truncate` returns the number of blocks `DeleteBlocksAfter` actually
+reports having deleted, not `tipBlock.ID - target.ID`: with a sparse ID space,
+that difference is only an upper bound on how many blocks exist in the range,
+not a count of how many actually do. This is what surfaces as `blocks_removed`
+in the `dingo database truncate` CLI output and bark's `GetTruncateStatus` RPC.
 
-**Automatic snapshots and the CLI.** `internal/dblifecycle.Manager` subscribes to `event.EpochTransitionEventType` on the EventBus — the same async, decoupled pattern `ledger/snapshot.Manager` uses for stake/reward snapshots, not the synchronous in-transaction hook, since a multi-gigabyte backup must never run inside the ledger's write transaction — and captures a snapshot into a deterministically named `epoch-<N>` directory when `databaseLifecycle.snapshotEnabled` is set, gated by `snapshotEveryNEpochs` and pruned to `snapshotRetention`; if `databaseLifecycle.snapshotCloudDestination` is also set, every automatic snapshot is additionally mirrored to that destination via `lifecycle.SnapshotToCloud` (see "Cloud snapshot destinations" above). Automatic snapshots are rejected when the primary blob provider is `s3` or `gcs`: those providers have no version-capture primitive, so their backup is an unbounded remote-object iteration that would hold `PauseCommitsContext` for its full duration. They are also rejected for the `badger` primary provider: Badger's native backup API combines MVCC-view selection with streaming every retained version and does not expose a separate, cheap capture step, so the commit barrier would otherwise span the full production-scale local backup. This restriction is limited to the automatic manager; the `dingo database snapshot` CLI and Bark's `DatabaseService` manual `CreateSnapshot` operation remain available for an operator who deliberately accepts that duration. The deterministic naming makes a redelivered epoch-transition event (e.g. after a restart) a harmless no-op: `Snapshot` already refuses to overwrite an existing directory. `internal/dblifecycle.Service` is the single entry point both the `dingo database snapshot|restore|truncate` CLI commands (`cmd/dingo/database.go`) and bark's `DatabaseService` handler (`bark/database.go`) call. By default it opens its own `*database.Database` against the configured data directory the same way `load`/`mithril` do (offline mode — must not run against a data directory a `dingo serve` process currently has open); `Service.SetLiveNode` optionally binds it to an already-running `*dingo.Node` instead, so Snapshot/Restore/Truncate all operate on that node's live storage in-process rather than requiring a stopped node (Restore/Truncate quiesce and rebuild it; Snapshot reads it directly, never quiescing). `node.go`'s `Run()` does exactly this when bark is enabled with a snapshot directory configured. See `ARCHITECTURE.md`'s "Database Lifecycle" and "Bark" sections for how the live path and the gRPC surface work.
+**Automatic snapshots and the CLI.** `internal/dblifecycle.Manager` subscribes
+to `event.EpochTransitionEventType` on the EventBus — the same async, decoupled
+pattern `ledger/snapshot.Manager` uses for stake/reward snapshots, not the
+synchronous in-transaction hook, since a multi-gigabyte backup must never run
+inside the ledger's write transaction — and captures a snapshot into a
+deterministically named `epoch-<N>` directory when
+`databaseLifecycle.snapshotEnabled` is set, gated by `snapshotEveryNEpochs` and
+pruned to `snapshotRetention`; if `databaseLifecycle.snapshotCloudDestination`
+is also set, every automatic snapshot is additionally mirrored to that
+destination via `lifecycle.SnapshotToCloud` (see "Cloud snapshot destinations"
+above). Automatic snapshots are rejected when the primary blob provider is `s3`
+or `gcs`: those providers have no version-capture primitive, so their backup is
+an unbounded remote-object iteration that would hold `PauseCommitsContext` for
+its full duration. They are also rejected for the `badger` primary provider:
+Badger's native backup API combines MVCC-view selection with streaming every
+retained version and does not expose a separate, cheap capture step, so the
+commit barrier would otherwise span the full production-scale local backup. This
+restriction is limited to the automatic manager; the `dingo database snapshot`
+CLI and Bark's `DatabaseService` manual `CreateSnapshot` operation remain
+available for an operator who deliberately accepts that duration. The
+deterministic naming makes a redelivered epoch-transition event (e.g. after a
+restart) a harmless no-op: `Snapshot` already refuses to overwrite an existing
+directory. `internal/dblifecycle.Service` is the single entry point both the
+`dingo database snapshot|restore|truncate` CLI commands
+(`cmd/dingo/database.go`) and bark's `DatabaseService` handler
+(`bark/database.go`) call. By default it opens its own `*database.Database`
+against the configured data directory the same way `load`/`mithril` do (offline
+mode — must not run against a data directory a `dingo serve` process currently
+has open); `Service.SetLiveNode` optionally binds it to an already-running
+`*dingo.Node` instead, so Snapshot/Restore/Truncate all operate on that node's
+live storage in-process rather than requiring a stopped node (Restore/Truncate
+quiesce and rebuild it; Snapshot reads it directly, never quiescing).
+`node.go`'s `Run()` does exactly this when bark is enabled with a snapshot
+directory configured. See `ARCHITECTURE.md`'s "Database Lifecycle" and "Bark"
+sections for how the live path and the gRPC surface work.
 
 ## Mithril Snapshot Store
 
@@ -1326,14 +2414,63 @@ command returns, so a rejected batch cannot become the next run's canonical
 starting point. If the storage backend refuses that rewind, the command returns
 both errors and the database requires recovery before another load.
 
+## Retained API closure UTxO batches
+
+SQLite can stage a certified closure of at most 8,192 plain, valid,
+single-input/single-output transactions and 8 MiB of output CBOR in one metadata
+transaction. The preflight requires fresh transaction/output keys and live
+external inputs, without staking credentials, assets, pointers, datums,
+reference scripts, collateral, certificates, withdrawals, mint, governance,
+script witnesses or nested transactions. Other closures and providers use the
+ordinary ordered writer.
+
+Transaction parents and execution contexts remain immediate. Every created UTxO,
+including outputs spent inside the closure, retains its ordinary ID, spend
+markers and address row. Exact known reads resolve from the staged models; other
+UTxO readers first materialize pending UTxO and output-address rows. API indexes
+such as `address_transaction` retain their existing deferred visibility until
+the final closure flush. Read-only CTEs use the shared `internal/sqlreadonly`
+validator, also used by MCP. Unexpected writes to staged tables fail the batch
+rather than leave cached state stale. API detail rows keep their closure flush
+ordering. Validation still runs in transaction order, and a failure rolls back
+the outer metadata transaction; the core overlay's pruning behavior is
+unchanged.
+
+## Sync-state reads
+
+SQLite, PostgreSQL and MySQL reuse the prepared statement cache for sync-state
+reads on a write transaction, including absent trust-boundary lookups during
+genesis sync. Reads using a separate read pool keep their ordinary query path,
+so a reader never waits for the single write connection it may already hold.
+Values are read from the database each time, including changes made in the
+same transaction.
+
 ## SQL Conventions
 
 - Table and column names are the snake_case names declared by versioned SQL DDL.
-- Byte columns store raw bytes, not hex strings. In Postgres use `encode(col, 'hex')` and `decode($1, 'hex')`. In MySQL use `HEX(col)` and `UNHEX(?)`.
-- `types.Uint64` values such as `amount`, `reward`, `pledge`, `cost`, treasury/reserves, and stake totals are persisted as unsigned decimal values through the Go SQL driver. Use numeric casts if your SQL client reports them as text in a specific backend.
-- Every statement, sqlc-generated or hand-written, must carry a leading `-- name: <PascalCaseName> :<verb>` comment in the constant text that is prepared and executed. `classifySQLStatement` reads it as the `query` label of `dingo_database_sql_query_duration_seconds`, so a statement without one is recorded as `unknown`. Statements on the block-apply path carry one; hand-written rollback, maintenance and API read statements that predate this rule do not yet, and are recorded as `unknown`. Hand-written names follow sqlc's PascalCase style (`InsertUtxoBatch`, `UpsertAccount`) and must not reuse a sqlc query name. A statement assembled at runtime (multi-row inserts, `IN` lists sized to the batch, per-table cleanups) uses one fixed name per builder and shape, never a name derived from data, table names from user input, or SQL text.
-- Quote the `transaction` table in SQL examples because it is a keyword-adjacent identifier: `"transaction"` in Postgres, `` `transaction` `` in MySQL.
-- `id` is the normal auto-increment primary key. Tables with ledger identifiers also have unique indexes such as `hash`, `(credential_tag, staking_key)`, `(tx_id, output_idx)`, or `(epoch, snapshot_type, pool_key_hash)`.
+- Byte columns store raw bytes, not hex strings. In Postgres use `encode(col,
+  'hex')` and `decode($1, 'hex')`. In MySQL use `HEX(col)` and `UNHEX(?)`.
+- `types.Uint64` values such as `amount`, `reward`, `pledge`, `cost`,
+  treasury/reserves, and stake totals are persisted as unsigned decimal values
+  through the Go SQL driver. Use numeric casts if your SQL client reports them
+  as text in a specific backend.
+- Every statement, sqlc-generated or hand-written, must carry a leading `--
+  name: <PascalCaseName> :<verb>` comment in the constant text that is prepared
+  and executed. `classifySQLStatement` reads it as the `query` label of
+  `dingo_database_sql_query_duration_seconds`, so a statement without one is
+  recorded as `unknown`. Statements on the block-apply path carry one;
+  hand-written rollback, maintenance and API read statements that predate this
+  rule do not yet, and are recorded as `unknown`. Hand-written names follow
+  sqlc's PascalCase style (`InsertUtxoBatch`, `UpsertAccount`) and must not
+  reuse a sqlc query name. A statement assembled at runtime (multi-row inserts,
+  `IN` lists sized to the batch, per-table cleanups) uses one fixed name per
+  builder and shape, never a name derived from data, table names from user
+  input, or SQL text.
+- Quote the `transaction` table in SQL examples because it is a keyword-adjacent
+  identifier: `"transaction"` in Postgres, `` `transaction` `` in MySQL.
+- `id` is the normal auto-increment primary key. Tables with ledger identifiers
+  also have unique indexes such as `hash`, `(credential_tag, staking_key)`,
+  `(tx_id, output_idx)`, or `(epoch, snapshot_type, pool_key_hash)`.
 - Relationships declared by the versioned schema are enforced as SQLite
   foreign keys; startup enables `foreign_keys(1)`. Hash-based joins and
   polymorphic relationships remain logical joins rather than explicit foreign
@@ -1341,22 +2478,30 @@ both errors and the database requires recovery before another load.
   certificate table has `certificate_id -> certs.id`, and
   `certs.certificate_id` is the polymorphic back-pointer to that specialized
   row chosen by `certs.cert_type`.
-- Live UTxOs have `utxo.deleted_slot = 0`. Governance/committee/constitution soft deletes use nullable `deleted_slot`; `NULL` means active.
-- Certificate history ordering must use `added_slot DESC`, the producing transaction's `block_index DESC`, and `cert_index DESC`. `cert_index` resets per transaction.
-- Storage mode is persisted in `node_settings_gate` (the `storage_mode` gate; `node_settings.storage_mode` is a read-only compatibility fallback, see below). `core` mode stores consensus and ledger state. `api` mode additionally populates address, witness, datum, redeemer, script, metadata-label indexes, and the best-effort `offchain_metadata` and `token_registry_entry` caches. API-only tables are still migrated in `core` mode but may be empty.
+- Live UTxOs have `utxo.deleted_slot = 0`. Governance/committee/constitution
+  soft deletes use nullable `deleted_slot`; `NULL` means active.
+- Certificate history ordering must use `added_slot DESC`, the producing
+  transaction's `block_index DESC`, and `cert_index DESC`. `cert_index` resets
+  per transaction.
+- Storage mode is persisted in `node_settings_gate` (the `storage_mode` gate;
+  `node_settings.storage_mode` is a read-only compatibility fallback, see
+  below). `core` mode stores consensus and ledger state. `api` mode additionally
+  populates address, witness, datum, redeemer, script, metadata-label indexes,
+  and the best-effort `offchain_metadata` and `token_registry_entry` caches.
+  API-only tables are still migrated in `core` mode but may be empty.
 
-In core mode, consumed UTxO rows are hard-deleted only by the background
-ledger cleanup after they are outside the current era's stability window.
-That cleanup is deferred while the local tip is materially behind the active
-peer's corroborated upstream target and is single-flight across its timer and
+In core mode, consumed UTxO rows are hard-deleted only by the background ledger
+cleanup after they are outside the current era's stability window. That cleanup
+is deferred while the local tip is materially behind the active peer's
+corroborated upstream target and is single-flight across its timer and
 epoch-boundary triggers. Header admission retains a separate monotonic frontier
 for bookkeeping, but cleanup does not use it as a remote target. While a client
 is active but its target is still unknown, cleanup waits; while the node is
-peerless, it falls back to the local tip. Each eligible run deletes at most one bounded batch, so the
-potentially large `utxo`/stake-reference scan cannot hold SQLite's single write
-connection indefinitely; later timer or epoch-boundary runs reclaim the
-remaining rows once the node is near the upstream tip.
-API mode retains spent UTxO metadata for historical transaction queries.
+peerless, it falls back to the local tip. Each eligible run deletes at most one
+bounded batch, so the potentially large `utxo`/stake-reference scan cannot hold
+SQLite's single write connection indefinitely; later timer or epoch-boundary
+runs reclaim the remaining rows once the node is near the upstream tip. API mode
+retains spent UTxO metadata for historical transaction queries.
 
 **Acquired-point pins.** Consumed-UTxO cleanup also defers to LocalStateQuery
 points that clients currently hold. A node-to-client Acquire of a specific
@@ -1392,6 +2537,13 @@ unaffected: it never prunes spent rows, so no cap or announced floor applies.
 ## ER Diagrams
 
 ### Transactions and UTxO
+
+Normal and batched SQLite transaction inserts use the captured
+`ExecContext` result instead of `RETURNING id`. `RowsAffected` distinguishes a
+fresh row from an ignored hash conflict before `LastInsertId` is read; SQLite retains the preceding insert ID
+when a conflict inserts nothing. Replays still update the existing row and
+look up its ID by hash. Batch accumulators retain the storage dialect across
+reset, and non-SQLite providers do not prepare the SQLite result statement.
 
 ```mermaid
 erDiagram
@@ -1519,7 +2671,64 @@ erDiagram
 | `backfill_checkpoint` | `id`, `phase`, `last_slot`, `last_index_id`, `last_block_hash`, `total_slots`, `started_at`, `updated_at`, `completed` | PK `id`; unique `phase` | Durable application-level backfill progress keyed by `phase`; `metadata` binds its last committed slot to the exact canonical index ID and block hash so resume cannot derive a different position from a damaged index. Legacy incomplete metadata checkpoints without both identity fields restart from the beginning. `midnight` tracks the last slot the Midnight indexer committed (written by both its startup backfill and its live block-event path, and used as the resume point for the next startup sweep). Schema/data upgrade checkpoints belong to `schema_migrations` instead. |
 | `import_checkpoint` | `id`, `import_key`, `phase` | PK `id`; unique `import_key` | Mithril snapshot import resume state. `import_key` is usually `{digest}:{slot}`. During the reward live-stake rebuild, `phase` is `reward_live_stake:<hex cursor>`; the empty cursor records initialization, each later cursor names the last committed `(credential_tag, staking_key)` range, and the exact `reward_live_stake` phase records completion. A range update and its cursor commit in the same metadata transaction, so restart repeats only an uncommitted range. The source account, UTxO, and delegation rows remain fixed until completion. Catch-up imports leave `import_key` empty to force a full pass. |
 
-**`dbinfo` sidecar** (`database/dbinfo`, not a SQL table): a small JSON file, `dingo.dbinfo`, written directly in the data directory alongside the metadata and blob stores rather than inside either of them. Its entire content is `{"formatVersion":1,"metadataPlugin":"..."}` — no credentials, DSN, or hostname, since a data directory may be backed up or inspected without any expectation that this file holds anything sensitive. `node_settings_gate`'s own `metadata_plugin` gate remains authoritative for which plugin produced a database; this sidecar exists only so `internal/settingsresolve.Apply` can identify the right plugin to open *before* it has opened anything — resolving a metadata provider runs its own migrations as a side effect of merely starting it, so opening the wrong one first would silently create a fresh, empty database beside the real one instead of ever reaching the gate table that would have caught the mismatch. `dbinfo.Read` returns a zero `Info` and a nil error when the file is absent (advisory: a database predating this file must still open) and errors on an unrecognised `FormatVersion`; `dbinfo.Write` uses a temp-file-then-rename plus `internal/fsyncdir.Sync`, the same durability pattern `database/lifecycle/manifest.go`'s `WriteManifest` uses for `manifest.json`, and rejects an empty `dataDir` up front rather than letting `os.CreateTemp` silently fall back to the system temp directory while `Path("")` resolves to the bare relative name `dingo.dbinfo`. `Read` returns `dbinfo.ErrIncompleteSidecar` (wrapped with the path), not a zero `Info` and nil error, when `FormatVersion` is recognised but `MetadataPlugin` is missing, JSON `null`, or empty — that distinction matters because a zero `Info`/nil error is exactly what a simply-absent sidecar returns too, and `internal/settingsresolve.checkMetadataPluginSidecar` treats absence as "nothing to check, proceed": before this, an incomplete sidecar (interrupted `Write`, hand edit) was indistinguishable from no sidecar at all, so a bare `dingo` run against a directory whose sidecar never got its plugin name written would fall through, resolve the configured plugin, and run its migrations — creating a fresh, empty database beside the real one. `checkMetadataPluginSidecar` now checks `errors.Is` against `ErrIncompleteSidecar` specifically and fails startup on it, while every other `Read` error (a permission error, or an unrecognised newer `FormatVersion`, a deliberate forward-compatibility choice) keeps the original warn-and-proceed behavior. `database/commit_timestamp.go`'s `writeDBInfoSidecar` writes the sidecar under two guards: never with an empty plugin name (the partial `Config`s `mithril/sync.go` and `database/lifecycle/restore.go` reopen with omit `MetadataPlugin` entirely, and writing an empty name would poison every later, complete start's pre-open check) and never overwriting a sidecar that already exists (a present sidecar naming a different plugin means the pre-open check either already failed or was never reached on that path, and silently overwriting it would erase that signal). `evaluateAndPersistGates` (the shared body behind `CheckNodeSettings`/`EnforceNodeSettings`) calls it on *every* open, not only one that writes a gate: it runs from `writeGateValues` when there are gates to write, and directly, on the early return, when there are none — a steady-state start on an otherwise up-to-date database has nothing to write to `node_settings_gate` but must still get the sidecar back if an operator deleted it, or the pre-open check stays silently disabled for every start after the one that lost the file. A write failure is logged at warn and does not fail the database open for an already-established database (`node_settings_gate`'s own `metadata_plugin` gate is already the real enforcement for it by then, so this file is purely a convenience there) — except for the single write `writeGateValues` makes for a brand-new database (`legacy == nil`, its own "am I new" signal, read right before this call): that database has no `metadata_plugin` gate row yet for `settingsresolve` to compare against until this same call creates it, so this sidecar is the only thing that will catch a mistyped provider on the very next start, and losing it here fails the open instead of warning and continuing.
+**`dbinfo` sidecar** (`database/dbinfo`, not a SQL table): a small JSON file,
+`dingo.dbinfo`, written directly in the data directory alongside the metadata
+and blob stores rather than inside either of them. Its entire content is
+`{"formatVersion":1,"metadataPlugin":"..."}` — no credentials, DSN, or hostname,
+since a data directory may be backed up or inspected without any expectation
+that this file holds anything sensitive. `node_settings_gate`'s own
+`metadata_plugin` gate remains authoritative for which plugin produced a
+database; this sidecar exists only so `internal/settingsresolve.Apply` can
+identify the right plugin to open *before* it has opened anything — resolving a
+metadata provider runs its own migrations as a side effect of merely starting
+it, so opening the wrong one first would silently create a fresh, empty database
+beside the real one instead of ever reaching the gate table that would have
+caught the mismatch. `dbinfo.Read` returns a zero `Info` and a nil error when
+the file is absent (advisory: a database predating this file must still open)
+and errors on an unrecognised `FormatVersion`; `dbinfo.Write` uses a
+temp-file-then-rename plus `internal/fsyncdir.Sync`, the same durability pattern
+`database/lifecycle/manifest.go`'s `WriteManifest` uses for `manifest.json`, and
+rejects an empty `dataDir` up front rather than letting `os.CreateTemp` silently
+fall back to the system temp directory while `Path("")` resolves to the bare
+relative name `dingo.dbinfo`. `Read` returns `dbinfo.ErrIncompleteSidecar`
+(wrapped with the path), not a zero `Info` and nil error, when `FormatVersion`
+is recognised but `MetadataPlugin` is missing, JSON `null`, or empty — that
+distinction matters because a zero `Info`/nil error is exactly what a
+simply-absent sidecar returns too, and
+`internal/settingsresolve.checkMetadataPluginSidecar` treats absence as "nothing
+to check, proceed": before this, an incomplete sidecar (interrupted `Write`,
+hand edit) was indistinguishable from no sidecar at all, so a bare `dingo` run
+against a directory whose sidecar never got its plugin name written would fall
+through, resolve the configured plugin, and run its migrations — creating a
+fresh, empty database beside the real one. `checkMetadataPluginSidecar` now
+checks `errors.Is` against `ErrIncompleteSidecar` specifically and fails startup
+on it, while every other `Read` error (a permission error, or an unrecognised
+newer `FormatVersion`, a deliberate forward-compatibility choice) keeps the
+original warn-and-proceed behavior. `database/commit_timestamp.go`'s
+`writeDBInfoSidecar` writes the sidecar under two guards: never with an empty
+plugin name (the partial `Config`s `mithril/sync.go` and
+`database/lifecycle/restore.go` reopen with omit `MetadataPlugin` entirely, and
+writing an empty name would poison every later, complete start's pre-open check)
+and never overwriting a sidecar that already exists (a present sidecar naming a
+different plugin means the pre-open check either already failed or was never
+reached on that path, and silently overwriting it would erase that signal).
+`evaluateAndPersistGates` (the shared body behind
+`CheckNodeSettings`/`EnforceNodeSettings`) calls it on *every* open, not only
+one that writes a gate: it runs from `writeGateValues` when there are gates to
+write, and directly, on the early return, when there are none — a steady-state
+start on an otherwise up-to-date database has nothing to write to
+`node_settings_gate` but must still get the sidecar back if an operator deleted
+it, or the pre-open check stays silently disabled for every start after the one
+that lost the file. A write failure is logged at warn and does not fail the
+database open for an already-established database (`node_settings_gate`'s own
+`metadata_plugin` gate is already the real enforcement for it by then, so this
+file is purely a convenience there) — except for the single write
+`writeGateValues` makes for a brand-new database (`legacy == nil`, its own "am I
+new" signal, read right before this call): that database has no
+`metadata_plugin` gate row yet for `settingsresolve` to compare against until
+this same call creates it, so this sidecar is the only thing that will catch a
+mistyped provider on the very next start, and losing it here fails the open
+instead of warning and continuing.
 
 The sidecar failure policy is keyed by the persisted `metadata_plugin` gate,
 not by whether the legacy `node_settings` row exists: startup establishes the
@@ -1533,18 +2742,17 @@ complete ledger state at its tip, so any live row absent from it is marked
 inactive rather than deleted — live UTxOs get a `deleted_slot` tombstone,
 `account` and `drep` rows go `active = false`, and a `pool_retirement` row is
 added for retired pools. `DeactivateAccounts` clears the credential's
-`account_import_baseline` row alongside the `account` row, because absence
-from the newer snapshot's live set is a statement about the baseline rather
-than about any certificate; leaving the baseline registered would let a
-later rollback restore the account this reconcile just tombstoned. Both
-updates, and every chunk of them, run in one write transaction — the method
-opens its own when the caller passes no transaction — so the tombstone and the
-baseline it contradicts cannot be committed apart. `ImportAccount` does the
-same for the account row and its baseline. This uses
-the `metadata.MetadataStore` methods
+`account_import_baseline` row alongside the `account` row, because absence from
+the newer snapshot's live set is a statement about the baseline rather than
+about any certificate; leaving the baseline registered would let a later
+rollback restore the account this reconcile just tombstoned. Both updates, and
+every chunk of them, run in one write transaction — the method opens its own
+when the caller passes no transaction — so the tombstone and the baseline it
+contradicts cannot be committed apart. `ImportAccount` does the same for the
+account row and its baseline. This uses the `metadata.MetadataStore` methods
 `GetActiveAccountCredentials`, `DeactivateAccounts`, `DeactivateDreps`, and
-`RetirePools` plus the existing
-`IterateLiveUtxos` / `MarkUtxosDeletedAtSlot`. Live-state rows are never deleted.
+`RetirePools` plus the existing `IterateLiveUtxos` / `MarkUtxosDeletedAtSlot`.
+Live-state rows are never deleted.
 
 A reward credit or withdrawal applied locally after a snapshot's anchor
 leaves a row in `account_reward_delta`/`account_withdrawal_witness` with
@@ -1586,30 +2794,31 @@ unlike `TruncateAfterSlot`), and `resolveStakeRewardPrecomputeRoundInTxn`
 (`ledger/reward_precompute_chunked.go`) skips crediting a round already marked
 credited.
 
-The UTxO import itself (`ImportUtxos`/`ImportUtxosDeferredRewardLiveStakeRefresh`,
-used by every ledger-state import including this reconcile pass and the legacy
-reward-state repair) inserts with `ON CONFLICT (tx_id, output_idx) DO NOTHING`,
-since a catch-up or repair import routinely re-declares an output the local
-database already has a row for. On conflict, `hydrateImportedUtxo` also clears
+The UTxO import itself
+(`ImportUtxos`/`ImportUtxosDeferredRewardLiveStakeRefresh`, used by every
+ledger-state import including this reconcile pass and the legacy reward-state
+repair) inserts with `ON CONFLICT (tx_id, output_idx) DO NOTHING`, since a
+catch-up or repair import routinely re-declares an output the local database
+already has a row for. On conflict, `hydrateImportedUtxo` also clears
 `deleted_slot`/`spent_at_tx_id` for that exact `(tx_id, output_idx)` reference
 whenever the incoming row itself declares the output live (`DeletedSlot == 0`).
 This is scoped to the conflicting row only, never a table-wide unspend: an
-output the snapshot declares live could only have been spent locally *after*
-its anchor, because a row genuinely spent at or before the anchor would not
-appear in the snapshot's live set to conflict with in the first place. A
-conflicting snapshot-live row is therefore made live, so a replayed post-anchor
-spend of that output applies instead of failing with "utxo not found."
-This is independent of, and narrower than, the reconcile pass above:
-reconcile only tombstones rows *absent* from a newer snapshot's live
-set and never touches a conflicting row's `deleted_slot`, so it does not
-correct this case on its own. `ImportUtxos`/`ImportUtxosDeferredRewardLiveStakeRefresh`
-are also reached outside any ledger-state import, by `database/transaction.go`'s
-consumed-input producer recovery (`ensureTransactionConsumedUtxos`) and Mithril
-gap-closure (`ensureGapConsumedUtxos`) paths; neither can trigger this clause
-today; see the comment on `hydrateImportedUtxo`. The added `UPDATE` runs once
-per conflicting live row and is uncached, adding roughly one extra uncached
-statement's cost per row on the UTxO import phase only -- not on
-`insertUtxoModelChecked`, the per-block ingest hot path.
+output the snapshot declares live could only have been spent locally *after* its
+anchor, because a row genuinely spent at or before the anchor would not appear
+in the snapshot's live set to conflict with in the first place. A conflicting
+snapshot-live row is therefore made live, so a replayed post-anchor spend of
+that output applies instead of failing with "utxo not found." This is
+independent of, and narrower than, the reconcile pass above: reconcile only
+tombstones rows *absent* from a newer snapshot's live set and never touches a
+conflicting row's `deleted_slot`, so it does not correct this case on its own.
+`ImportUtxos`/`ImportUtxosDeferredRewardLiveStakeRefresh` are also reached
+outside any ledger-state import, by `database/transaction.go`'s consumed-input
+producer recovery (`ensureTransactionConsumedUtxos`) and Mithril gap-closure
+(`ensureGapConsumedUtxos`) paths; neither can trigger this clause today; see the
+comment on `hydrateImportedUtxo`. The added `UPDATE` runs once per conflicting
+live row and is uncached, adding roughly one extra uncached statement's cost per
+row on the UTxO import phase only -- not on `insertUtxoModelChecked`, the
+per-block ingest hot path.
 
 A UTxO both *created and spent* entirely after the anchor is a wider gap
 neither `hydrateImportedUtxo`'s conflict clear nor the reconcile pass above
@@ -1796,30 +3005,30 @@ completed indexes in place for the next run to skip; the marker is cleared only
 after a final transaction confirms the requested set is present. PostgreSQL and
 MySQL retain the single-transaction rebuild path.
 
-A node-managed Mithril stream catch-up across at least 100 immutable files,
-on a SQLite metadata store only, drops the non-critical entries
-(`deferred.LazyManifest`), because the node keeps serving chainsync and the
-API while it runs. On a core-mode database, when the gap is also at least
-half the blocks the ledger already holds (or the ledger is empty), it also
-drops the entries marked `CatchUpDroppable` (`deferred.CatchUpDroppableManifest`, both sets through
-`DropCatchUpIndexesContext`): `idx_utxo_payment_key`, `idx_utxo_staking_key`,
-`idx_utxo_spent_at_tx_id`, `idx_utxo_referenced_by_tx_id`,
-`idx_utxo_collateral_by_tx_id`, `idx_utxo_added_slot`,
-`idx_utxo_transaction_id`, `idx_transaction_block_hash` and
-`idx_asset_policy_id`. They are critical, but only rollback
+A node-managed Mithril stream catch-up across at least 100 immutable files, on a
+SQLite metadata store only, drops the non-critical entries
+(`deferred.LazyManifest`), because the node keeps serving chainsync and the API
+while it runs. On a core-mode database, when the gap is also at least half the
+blocks the ledger already holds (or the ledger is empty), it also drops the
+entries marked `CatchUpDroppable` (`deferred.CatchUpDroppableManifest`, both
+sets through `DropCatchUpIndexesContext`): `idx_utxo_payment_key`,
+`idx_utxo_staking_key`, `idx_utxo_spent_at_tx_id`,
+`idx_utxo_referenced_by_tx_id`, `idx_utxo_collateral_by_tx_id`,
+`idx_utxo_added_slot`, `idx_utxo_transaction_id`, `idx_transaction_block_hash`
+and `idx_asset_policy_id`. They are critical, but only rollback
 (`DeleteUtxosAfterSlot`, `DeleteTransactionsAfterSlot` and its cascade into
-`utxo`), the API and LocalStateQuery read them, and none of those writes
-while the run holds network and chain ingest. Address, stake-key-only,
-block-transaction and policy queries become full scans of their table for
-the run, and long SQLite reads there hold back the WAL checkpoint. The run keeps
-every index its own statements read: the `(tx_id, output_idx)` key, the
-retained `idx_utxo_staking_deleted_amount`, the deleted_slot-leading
+`utxo`), the API and LocalStateQuery read them, and none of those writes while
+the run holds network and chain ingest. Address, stake-key-only,
+block-transaction and policy queries become full scans of their table for the
+run, and long SQLite reads there hold back the WAL checkpoint. The run keeps
+every index its own statements read: the `(tx_id, output_idx)` key, the retained
+`idx_utxo_staking_deleted_amount`, the deleted_slot-leading
 `idx_utxo_deleted_staking_amount` and `idx_utxo_deleted_payment_script` the
-consumed-UTxO prune filters on, `idx_transaction_slot` for the epoch fee
-total (`SumTransactionFeesInSlotRange`), the opcert lookup index, and the
-`asset` `utxo_id` index the prune's cascade uses. `BuildCatchUpIndexesContext`
-rebuilds the droppable set before the run releases the ledger and leaves the
-marker set, since the lazy entries are still missing.
+consumed-UTxO prune filters on, `idx_transaction_slot` for the epoch fee total
+(`SumTransactionFeesInSlotRange`), the opcert lookup index, and the `asset`
+`utxo_id` index the prune's cascade uses. `BuildCatchUpIndexesContext` rebuilds
+the droppable set before the run releases the ledger and leaves the marker set,
+since the lazy entries are still missing.
 
 The drop records the same `metadata_indexes_pending` marker first, so an
 interrupted run is repaired at the next start: `dingo serve` rebuilds the
@@ -1849,23 +3058,23 @@ resident because every API backfill batch uses it to refresh live stake;
 without it those refreshes scan the growing UTxO table.
 
 On the batched path (`SetTransactionBatched` and
-`SetTransactionBatchedHistorical`, used by API backfill), replay cleanup
-deletes run at once while fresh transaction IDs skip them. The API-mode detail rows -- `key_witness`,
-`witness_scripts`, `redeemer`, `plutus_data`, `address_transaction`,
-`transaction_metadata_label`, and `datum` -- wait in the batch accumulator.
-`FlushBatch` writes them as multi-row INSERTs, each bounded by the dialect's
-bind-parameter limit, inside the caller's transaction. Until then a re-applied
-transaction's flushed rows are cleared but its replacement rows are not yet
-visible; nothing reads these tables inside a batch window, and the window
-commits only after the flush. A write that fails queues nothing, and
-re-applying a transaction inside a window replaces its queued rows. Caller-owned transaction rollback automatically restores the accumulator
-queue to its pre-transaction checkpoint; rollback to a savepoint restores
-that savepoint's queue. Rows queued by earlier committed transactions remain
-available. A failed SQL commit also restores the initial queue. `SetTransaction`
-builds the same rows and writes them before it returns. UTxO spends and
-certificate rows stay per statement: a later transaction in the same window
-reads them for double-spend detection, live-stake deltas, and certificate
-state.
+`SetTransactionBatchedHistorical`, used by API backfill), replay cleanup deletes
+run at once while fresh transaction IDs skip them. The API-mode detail rows --
+`key_witness`, `witness_scripts`, `redeemer`, `plutus_data`,
+`address_transaction`, `transaction_metadata_label`, and `datum` -- wait in the
+batch accumulator. `FlushBatch` writes them as multi-row INSERTs, each bounded
+by the dialect's bind-parameter limit, inside the caller's transaction. Until
+then a re-applied transaction's flushed rows are cleared but its replacement
+rows are not yet visible; nothing reads these tables inside a batch window, and
+the window commits only after the flush. A write that fails queues nothing, and
+re-applying a transaction inside a window replaces its queued rows. Caller-owned
+transaction rollback automatically restores the accumulator queue to its
+pre-transaction checkpoint; rollback to a savepoint restores that savepoint's
+queue. Rows queued by earlier committed transactions remain available. A failed
+SQL commit also restores the initial queue. `SetTransaction` builds the same
+rows and writes them before it returns. UTxO spends and certificate rows stay
+per statement: a later transaction in the same window reads them for
+double-spend detection, live-stake deltas, and certificate state.
 
 Indexes used by per-transaction cleanup remain resident during import.
 Critical API-query and rollback indexes are rebuilt before the node serves
@@ -1954,7 +3163,8 @@ is preserved.
 
 #### Midnight MetadataStore API
 
-`metadata.MetadataStore` exposes the following methods for the midnight_* tables:
+`metadata.MetadataStore` exposes the following methods for the midnight_*
+tables:
 
 | Method | Description |
 |---|---|
@@ -2093,10 +3303,11 @@ PostgreSQL/MySQL repeatable-read read-only transactions.
 `ledger.LedgerView` implements gouroboros' `GenesisDelegationState` and
 `ClassicProtocolParameterUpdateWindowState` for Shelley through Babbage
 validation. Active genesis delegates come from Shelley genesis configuration
-overlaid by the latest `genesis_delegation` certificate whose stability
-window has elapsed by the transaction slot; when validation holds a metadata transaction, that same transaction is
-used for the certificate lookup. The MIR quorum comes from Shelley genesis'
-`updateQuorum`, so it is configuration state rather than a metadata row.
+overlaid by the latest `genesis_delegation` certificate whose stability window
+has elapsed by the transaction slot; when validation holds a metadata
+transaction, that same transaction is used for the certificate lookup. The MIR
+quorum comes from Shelley genesis' `updateQuorum`, so it is configuration state
+rather than a metadata row.
 
 The PPUP voting window maps the transaction slot through the `epoch` table to
 its current epoch, start slot, and length, then derives the slot of no return
@@ -2204,6 +3415,20 @@ prefers the newest row for an epoch, so a derived row would replace it. A row
 for an older epoch can only be one backfill derived, possibly before the
 proposals it depends on were stored, and is derived again.
 
+##### Imported reward credit completion
+
+A certified account balance already includes applied reward rounds at or before
+the snapshot anchor, including rewards subsequently withdrawn. Account import
+marks those rounds' spendable, unguarded outputs folded in the same transaction
+as each balance replacement. It preserves applied-round markers, journals,
+already folded outputs, and later rounds.
+
+Before checkpointing cert state, import drains remaining covered outputs without
+adding credits, including credentials absent from the certified account set.
+The drain commits bounded batches and repeats after interruption. A resumed
+cert-state checkpoint from an older importer also drains covered outputs; a
+completed tip checkpoint leaves subsequent ledger activity unchanged.
+
 ### Pools
 
 | Table | Columns | Keys / indexes | Relationships and notes |
@@ -2306,12 +3531,14 @@ The schema-table entries above have these additional catch-up import effects:
 | `token_registry_entry` | `id`, `subject`, `name`, `ticker`, `description`, `url`, `logo`, `decimals`, `created_at`, `updated_at` | PK `id`; unique `subject`; index `updated_at` | Best-effort cache of the CIP-26 off-chain token registry, populated only in `api` storage mode with `tokenRegistry.enabled`. `subject` is the lower-case hex policy ID followed by the hex-encoded asset name, matching how registry mappings are keyed; the API builds the same string from on-chain bytes to look a row up. Backs the `metadata` field of `GET /assets/{asset}`, which is distinct from `onchain_metadata` (CIP-25/CIP-68 mint metadata read from the chain). Every property column is overwritten on each sync, so a property the upstream registry drops stops being served. `logo` is NULL unless `tokenRegistry.storeLogos` is set: base64 logos are roughly 90% of registry bytes. `decimals` is NULL when the registry declares none — 0 is a meaningful declared value and is stored as 0. `updated_at` doubles as the snapshot reconciliation stamp: it holds the timestamp of the last snapshot that carried the subject, not the last time its properties changed, and the index on it serves the post-snapshot prune. The stamp is truncated to a whole second so it round-trips identically through MySQL's fractionless `datetime`; an unrounded stamp would be stored rounded and the prune would then delete the snapshot that had just written it. Never consulted by consensus or ledger validation. |
 
 Token registry sync stores the archive ETag, source/configuration identity, and
-snapshot timestamp in `sync_state` atomically with the registry rows. The default
-public-registry path does not require a signed manifest. Optional signed mirrors
-also persist their manifest sequence and archive digest.
+snapshot timestamp in `sync_state` atomically with the registry rows. The
+default public-registry path does not require a signed manifest. Optional signed
+mirrors also persist their manifest sequence and archive digest.
 
 
-`source_type` values are `pool`, `drep`, `drep_registration`, `drep_update`, `gov_proposal`, `gov_vote`, `constitution`, and `committee_resign`. `status` values are `pending`, `fetched`, and `failed`.
+`source_type` values are `pool`, `drep`, `drep_registration`, `drep_update`,
+`gov_proposal`, `gov_vote`, `constitution`, and `committee_resign`. `status`
+values are `pending`, `fetched`, and `failed`.
 
 `token_registry_entry` is reached through three `MetadataStore` methods.
 `UpsertTokenRegistryEntries` writes a batch, stamping every row with the
@@ -2336,9 +3563,37 @@ for an unknown subject rather than an error, so the endpoint serves a null
 that publishes an upper-case subject still matches a lookup built from
 on-chain bytes.
 
-The API-mode off-chain metadata fetcher discovers pointers from `pool_registration.metadata_url`, DRep anchor rows, governance proposal/vote anchors, constitutions, and committee resignations. Each discovery pass reads each source table by its increasing `id` through two `sync_state` cursors, at most 64 rows per cursor, so repeated passes and restarts resume without loading the complete pointer history. `offchain-metadata-discovery-high-water:<source type>` holds the last ID read and only moves forward, so appended rows are read on the next pass once any backlog is drained. `offchain-metadata-discovery:<source type>` rescans rows at or below that ID and wraps to zero at the end, so rows whose anchor was updated in place (same `id`) are re-read within about `ceil(source_rows / 64)` passes; pointer inserts are idempotent. The cache is not consensus state: rollbacks may leave old cache rows behind, and APIs should join/cache-hit by the current on-chain `(source_type, url, hash)` pointer.
+The API-mode off-chain metadata fetcher discovers pointers from
+`pool_registration.metadata_url`, DRep anchor rows, governance proposal/vote
+anchors, constitutions, and committee resignations. Each discovery pass reads
+each source table by its increasing `id` through two `sync_state` cursors, at
+most 64 rows per cursor, so repeated passes and restarts resume without loading
+the complete pointer history. `offchain-metadata-discovery-high-water:<source
+type>` holds the last ID read and only moves forward, so appended rows are read
+on the next pass once any backlog is drained.
+`offchain-metadata-discovery:<source type>` rescans rows at or below that ID and
+wraps to zero at the end, so rows whose anchor was updated in place (same `id`)
+are re-read within about `ceil(source_rows / 64)` passes; pointer inserts are
+idempotent. The cache is not consensus state: rollbacks may leave old cache rows
+behind, and APIs should join/cache-hit by the current on-chain `(source_type,
+url, hash)` pointer.
 
-`source_type = 'pool'` rows carry stake-pool-specific content rules that no other source type has: the fetcher caps the read at 512 bytes (independent of the generic `maxBytes` configuration) and, once the hash matches, validates the body against the Cardano stake-pool metadata schema (`internal/offchainmetadata.ValidatePoolMetadata`: required `name` <=50 characters, `description` <=255 characters, `ticker` 3-5 characters, `homepage`). A hash-valid pool document that is oversized or fails schema validation is persisted with `status = 'failed'` rather than `'fetched'`, with `last_error` prefixed `response body exceeds` or `metadata decode error` respectively, so `content` never holds oversized or schema-invalid pool documents. Rows fetched before this validation existed and left as `status = 'fetched'` are not retroactively rewritten in place; `api/blockfrost.NodeAdapter.PoolMetadata` re-validates `content` for `source_type = 'pool'` fetched rows on read as a defensive fallback so already-cached invalid documents stop being served as valid, but does not mutate the row.
+`source_type = 'pool'` rows carry stake-pool-specific content rules that no
+other source type has: the fetcher caps the read at 512 bytes (independent of
+the generic `maxBytes` configuration) and, once the hash matches, validates the
+body against the Cardano stake-pool metadata schema
+(`internal/offchainmetadata.ValidatePoolMetadata`: required `name` <=50
+characters, `description` <=255 characters, `ticker` 3-5 characters,
+`homepage`). A hash-valid pool document that is oversized or fails schema
+validation is persisted with `status = 'failed'` rather than `'fetched'`, with
+`last_error` prefixed `response body exceeds` or `metadata decode error`
+respectively, so `content` never holds oversized or schema-invalid pool
+documents. Rows fetched before this validation existed and left as `status =
+'fetched'` are not retroactively rewritten in place;
+`api/blockfrost.NodeAdapter.PoolMetadata` re-validates `content` for
+`source_type = 'pool'` fetched rows on read as a defensive fallback so
+already-cached invalid documents stop being served as valid, but does not mutate
+the row.
 
 `metadata.MetadataStore` off-chain fetch methods accept a `context.Context`.
 `GetOffchainMetadataFetchBatch` claims due rows before returning them by moving
@@ -2360,7 +3615,7 @@ process the same pointer unless the claim expires before a result is recorded.
 | `reward_pool_input` | `id`, `epoch`, `pool_key_hash`, `reward_account`, `reward_account_credential_tag`, `pledge`, `delegated_stake`, `owner_stake`, `cost`, `margin`, `delegator_count`, `blocks_produced`, `total_blocks_in_epoch`, `captured_slot`, `boundary_slot` | PK `id`; unique `(epoch, pool_key_hash)`; indexes `captured_slot`, `boundary_slot` | Per-pool metadata captured by epoch rotation. Stake totals are aggregated from the captured `reward_stake_input` credentials, independently of leader-election Mark totals; pool parameters are selected as effective during the ended epoch. Owner stake counts captured key credentials named by the effective pool registration. Block counts are stored on the row at capture time. Pools with missing or invalid registration data are excluded from reward inputs without changing `pool_stake_snapshot` or `epoch_summary`. Retained for the life of the database (see the retention note below), so it is the durable per-pool reward basis for any closed epoch. Logical join to `pool.pool_key_hash`. |
 | `reward_stake_input` | `id`, `epoch`, `pool_key_hash`, `credential_tag`, `staking_key`, `stake`, `owner`, `registered`, `captured_slot`, `boundary_slot` | PK `id`; unique `(epoch, pool_key_hash, credential_tag, staking_key)`; indexes `captured_slot`, `boundary_slot`, `(credential_tag, staking_key, epoch)` (migration v47, for per-account stake history) | Per-credential positive stake frozen by either authoritative or fallback reward snapshot capture. Authoritative capture copies from `reward_live_stake` for both gate states, applying the live account-expiration filter inside the exact SNAP-point transaction. A fallback that runs after the transaction tip has passed the snapshot slot reconstructs historical stake as needed. Check the matching `reward_snapshot.authoritative` value to distinguish the source snapshot. `owner` records whether the effective pool registration names the key credential as an owner. Capture defensively deduplicates by `(credential_tag, staking_key)` before deriving `reward_pool_input.delegated_stake` and `delegator_count`, so a corrupted credential cannot contribute to multiple pools and the persisted pool totals remain equal to the sum of their stake-input rows. |
 | `reward_pool_output` | `id`, `epoch`, `pool_key_hash`, `apparent_performance`, `optimal_reward`, `total_reward`, `leader_reward`, `member_reward_total`, `owner_stake`, `undistributed`, `unspendable`, `captured_slot`, `boundary_slot` | PK `id`; unique `(epoch, pool_key_hash)`; indexes `captured_slot`, `boundary_slot` | Persisted per-pool reward-calculation results. Replacing a provisional reward snapshot invalidates rows for the same epoch. Retained for the life of the database (see the retention note below), so it is the durable per-pool reward result for any closed epoch. |
-| `reward_account_output` | `id`, `epoch`, `credential_tag`, `staking_key`, `pool_key_hash`, `reward_type`, `amount`, `spendable`, `guarded`, `captured_slot`, `boundary_slot`, `folded` | PK `id`; unique `(epoch, credential_tag, staking_key, pool_key_hash, reward_type)`; credential indexes `(credential_tag, staking_key, spendable, epoch, pool_key_hash, reward_type)` and `(credential_tag, staking_key, spendable, guarded, epoch, pool_key_hash, reward_type)`; pending index `(spendable, guarded, folded, epoch)`; indexes `captured_slot`, `boundary_slot` | Persisted per-account reward-calculation results, invalidated together with pool outputs when snapshot inputs are replaced. `spendable = false` records deregistration; `guarded = true` records a CIP-0163 expiry guard. `folded = true` records that a credited round's row has been written to `account.reward` (see "Credited reward rounds"). Credential reward-history reads require `spendable = true AND guarded = false`, and the guarded-aware index keeps that lookup bounded. |
+| `reward_account_output` | `id`, `epoch`, `credential_tag`, `staking_key`, `pool_key_hash`, `reward_type`, `amount`, `spendable`, `guarded`, `captured_slot`, `boundary_slot`, `folded` | PK `id`; unique `(epoch, credential_tag, staking_key, pool_key_hash, reward_type)`; credential indexes `(credential_tag, staking_key, spendable, epoch, pool_key_hash, reward_type)` and `(credential_tag, staking_key, spendable, guarded, epoch, pool_key_hash, reward_type)`; pending index `(spendable, guarded, folded, epoch)`; pending-credit covering index `idx_reward_account_output_credential_pending` `(credential_tag, staking_key, spendable, guarded, folded, epoch, amount)` on SQLite and PostgreSQL (migration 54; MySQL skips it because its prefix indexes on `staking_key` and `amount` cannot cover); indexes `captured_slot`, `boundary_slot` | Persisted per-account reward-calculation results, invalidated together with pool outputs when snapshot inputs are replaced. `spendable = false` records deregistration; `guarded = true` records a CIP-0163 expiry guard. `folded = true` records that a credited round's row has been written to `account.reward` (see "Credited reward rounds"). Credential reward-history reads require `spendable = true AND guarded = false`, and the guarded-aware index keeps that lookup bounded. |
 | `reward_credit_round` | `snapshot_epoch`, `boundary_slot` | PK `snapshot_epoch`; index `boundary_slot` | One row for a reward round applied at an epoch boundary while its per-account credits remain in `reward_account_output`. Bounded relational membership lets balance readers include all pending rounds without generating a growing SQL parameter list. Rollback removes rows by `boundary_slot`; migration 31 imports the previous `sync_state` JSON list. `Database.DeleteRewardStateAfterSlot` removes rows the same way (unfolding any already-folded `reward_account_output` row for the removed round first), and `ledgerstate.ImportLedgerState`'s post-anchor sweep (see the `epoch` row above) calls it at the anchor before any import phase runs, so a round a prior local rollover already registered above the anchor does not block `saveStakeRewardOutputs` from recomputing it after import. |
 
 For Mithril imports, the certified `NewEpochState.SnapShots` Mark/Set/Go
@@ -2373,6 +3628,25 @@ validation treats anchor provenance as equivalent to the certified boundary
 provenance. Startup-reconstructed historical rows retain their post-boundary
 capture slot so they remain distinguishable and are not used for hard
 leader-threshold rejection.
+
+#### Imported authoritative reward inputs
+
+An authoritative reward snapshot records when the basis was captured; its stake
+rows may still be pending in the deferred writer. Import preserves an existing
+authoritative basis only when its expected stake-row count is present and its
+matching pending marker is absent. An incomplete basis is completed from the
+imported mark, set, or go distribution only after its aggregate totals and every
+retained pool stake, owner stake, and delegator count reconcile. Repair
+preserves the authoritative snapshot and pool rows, upserts missing or changed
+stake rows, and invalidates only that uncredited epoch's precomputed outputs and
+cursor in the same transaction. An already credited epoch cannot be repaired.
+
+`cmd/reward-input-repair` exposes the same derivation for offline SQLite core
+databases. The operator supplies a previously verified ledger snapshot and an
+epoch within its mark/set/go window. It holds the Badger lock, opens metadata
+read-only by default, and reports the canonical comparison without changing
+state. `--apply` commits only a fully reconciled single-epoch repair. It does
+not import UTxOs, migrate schema, replace account balances, or move the tip.
 
 #### RewardStakeCalculationVersion and the Startup Provenance Gate
 
@@ -2395,13 +3669,12 @@ cannot be reconstructed from a pruned database without replay or a trusted
 ledger-state import.
 
 Migration `v15` (`reward-stake-calculation-version-restamp`) upgrades stale
-pre-v2 pool snapshots unconditionally, and Mark reward snapshots only when
-their sigma-denominator inputs can be verified. The startup preflight refuses
-pre-v2 snapshots before a pending v15 migration can run; v15 alone cannot
-certify version 3. Dijkstra moves SNAP after POOLREAP and
-governance enactment, and nonempty genesis staking changes the initial reward
-inputs. Snapshots outside the verified unchanged case require replay or a trusted
-ledger-state import.
+pre-v2 pool snapshots unconditionally, and Mark reward snapshots only when their
+sigma-denominator inputs can be verified. The startup preflight refuses pre-v2
+snapshots before a pending v15 migration can run; v15 alone cannot certify
+version 3. Dijkstra moves SNAP after POOLREAP and governance enactment, and
+nonempty genesis staking changes the initial reward inputs. Snapshots outside
+the verified unchanged case require replay or a trusted ledger-state import.
 
 #### Incremental live-UTxO stake maintenance
 
@@ -2467,16 +3740,16 @@ one:
    `utxo_stake` from scratch for whatever credentials it touches, healing any
    drift the incremental path may have introduced for those credentials as a
    side effect of running at all.
-3. **Startup reconciliation is the explicit backstop.** `RewardLiveStakeNeedsBackfill`
-   (above) already compares every credential's stored `utxo_stake` against a
-   fresh authoritative scan on every startup, before block application
-   resumes (`Node.backfillRewardLiveStake`, called ahead of
-   `LedgerState.Start`), and `RebuildRewardLiveStake` corrects the whole table
-   on any mismatch. This pre-existing mechanism is not new, but it is now
-   load-bearing for the incremental path too: any bug that silently corrupts
-   the running total (a missed or double-applied delta) is limited to
-   persisting until the next node startup, not forever. It is exercised
-   directly by `TestRewardLiveStakeNeedsBackfillHealsCorruptedRunningTotal`.
+3. **Startup reconciliation is the explicit backstop.**
+   `RewardLiveStakeNeedsBackfill` (above) already compares every credential's
+   stored `utxo_stake` against a fresh authoritative scan on every startup,
+   before block application resumes (`Node.backfillRewardLiveStake`, called
+   ahead of `LedgerState.Start`), and `RebuildRewardLiveStake` corrects the
+   whole table on any mismatch. This pre-existing mechanism is not new, but it
+   is now load-bearing for the incremental path too: any bug that silently
+   corrupts the running total (a missed or double-applied delta) is limited to
+   persisting until the next node startup, not forever. It is exercised directly
+   by `TestRewardLiveStakeNeedsBackfillHealsCorruptedRunningTotal`.
 
    The one configuration that removes this layer is
    `skipRewardLiveStakeBackfillCheck`, which suppresses the comparison (not
@@ -2520,7 +3793,8 @@ added off the apply loop needs an atomic read-and-write, not a reuse of
 `refreshRewardLiveStakeAggregateDelta`. Counting either one drifts the
 credential permanently, and an over-large loss additionally fails
 `applyUtxoStakeDelta`'s underflow guard, which aborts block application rather
-than merely reporting wrong stake. `TestSetTransactionReapplyAppliesNoSecondDelta`,
+than merely reporting wrong stake.
+`TestSetTransactionReapplyAppliesNoSecondDelta`,
 `TestSetTransactionLeiosClosureSkippedInputAppliesNoDelta`, and
 `TestSetGapBlockTransactionReapplyAppliesNoSecondDelta` cover the three cases.
 
@@ -2616,18 +3890,27 @@ Pruned at `epoch < current-3`:
 | `reward_stake_input` | delegators per epoch | `DeleteRewardStateBeforeEpoch` (CORE mode) / `DeleteRewardStakeInputBeforeEpoch` (Koios parity observer); never in API mode |
 | `reward_account_output` | delegators per epoch | `DeleteRewardStateBeforeEpoch` (CORE mode, observer disabled only) |
 
+`cleanupOldSnapshots` calls both reward prunes with no transaction, so the
+store deletes by primary key in batches, each in its own write transaction,
+walking the table forward from the last key removed. A batch is sized from how
+long the previous full batch held the write connection, aiming at 750ms, and
+each table's settled size carries to the next prune. Block application can take
+the connection between batches. Cancelling the caller's context stops the prune
+before its next batch; the predicate is monotone in epoch and every batch is
+idempotent, so an interrupted prune is completed at the next boundary. Inside a
+caller-supplied transaction the prune is a single statement.
+
 Retained for the life of the database: `epoch`, `epoch_summary`,
 `reward_ada_pots`, `reward_snapshot`, `reward_seed_failure`,
-`imported_pool_block_count`, `imported_epoch_block_total`,
-`reward_pool_input`, and `reward_pool_output`. `epoch`, `epoch_summary`, and `reward_ada_pots` have one row
-per epoch; `reward_snapshot` and `reward_seed_failure` can have one row per
-snapshot type per epoch; and the last two are roughly one
-row per pool per epoch, so full history is on the order of a few
-hundred thousand rows on a test network and a few million on mainnet. Only the
-two per-credential tables scale with delegator count — about 5k rows per epoch on
-preview and 1.3M on mainnet — which is why they alone stay windowed. No
-before-epoch delete method exists for any retained table on
-`metadata.MetadataStore`.
+`imported_pool_block_count`, `imported_epoch_block_total`, `reward_pool_input`,
+and `reward_pool_output`. `epoch`, `epoch_summary`, and `reward_ada_pots` have
+one row per epoch; `reward_snapshot` and `reward_seed_failure` can have one row
+per snapshot type per epoch; and the last two are roughly one row per pool per
+epoch, so full history is on the order of a few hundred thousand rows on a test
+network and a few million on mainnet. Only the two per-credential tables scale
+with delegator count — about 5k rows per epoch on preview and 1.3M on mainnet —
+which is why they alone stay windowed. No before-epoch delete method exists for
+any retained table on `metadata.MetadataStore`.
 
 **Deferred-header retention pin.** `pool_stake_snapshot` has one
 extra retention rule the two windowed reward tables do not: it is the
@@ -2671,25 +3954,27 @@ The eviction and the floor read happen under one lock hold, so the boundary
 handed to `prune` is a coherent read of the deferred set — never a mix of pre-
 and post-eviction state. The lock is then **released before `prune` runs**, and
 this is a correctness requirement, not just an optimization: `prune` opens the
-single SQLite write connection (`SetMaxOpenConns(1)`) via `Transaction(ctx, true)`,
-and block apply holds that connection *before* taking `deferredHeaderValidationMu`
-(`ledgerProcessBlock` → `verifyDeferredBlockHeaderState` →
-`consumeDeferredHeaderValidation`, all inside its write txn). Holding the mutex
-across `prune` would invert the lock order — `mutex → write-conn` in the guard
-vs. `write-conn → mutex` on apply — and **deadlock the node on the single write
-connection**. The same applies to the evicted-marker cleanup
-(`deletePersistedDeferredMarkers`), which takes the lock only to test membership
-per key and releases it before each delete (a legacy `sync_state` row delete is
-a write-connection op). Because that membership test cannot be atomic with the delete, the delete
-is made conditional *after the fact*: `deleteDeferredMarkerUnlessReadmitted`
-re-tests membership once the delete returns and re-writes the marker
-(`SetDeferredHeaderMarker`, idempotent) for a key that was re-deferred in the window.
-Without that restore, a point re-admitted between the test and the delete keeps
-its in-memory entry but loses its durable marker, so after a restart
-`repopulateDeferredHeaderValidation` misses it and the apply-time stateful check
-is skipped for a header that is still outstanding. The earlier claim that this lock "does no I/O, so it cannot deadlock" was
-wrong: the hazard is never the mutex holder's own I/O, it is the *caller on the
-other path* holding the single write connection while it waits for this mutex.
+single SQLite write connection (`SetMaxOpenConns(1)`) via `Transaction(ctx,
+true)`, and block apply holds that connection *before* taking
+`deferredHeaderValidationMu` (`ledgerProcessBlock` →
+`verifyDeferredBlockHeaderState` → `consumeDeferredHeaderValidation`, all inside
+its write txn). Holding the mutex across `prune` would invert the lock order —
+`mutex → write-conn` in the guard vs. `write-conn → mutex` on apply — and
+**deadlock the node on the single write connection**. The same applies to the
+evicted-marker cleanup (`deletePersistedDeferredMarkers`), which takes the lock
+only to test membership per key and releases it before each delete (a legacy
+`sync_state` row delete is a write-connection op). Because that membership test
+cannot be atomic with the delete, the delete is made conditional *after the
+fact*: `deleteDeferredMarkerUnlessReadmitted` re-tests membership once the
+delete returns and re-writes the marker (`SetDeferredHeaderMarker`, idempotent)
+for a key that was re-deferred in the window. Without that restore, a point
+re-admitted between the test and the delete keeps its in-memory entry but loses
+its durable marker, so after a restart `repopulateDeferredHeaderValidation`
+misses it and the apply-time stateful check is skipped for a header that is
+still outstanding. The earlier claim that this lock "does no I/O, so it cannot
+deadlock" was wrong: the hazard is never the mutex holder's own I/O, it is the
+*caller on the other path* holding the single write connection while it waits
+for this mutex.
 
 **Acquired-point retention pin.** `pool_stake_snapshot` is also held for
 LocalStateQuery points that clients currently hold, since a pinned
@@ -2720,12 +4005,12 @@ not pinned by the pass in flight. This is safe because the retention floor is a
 *lower-watermark recomputed every cleanup pass*: such a header needs a
 below-`current-3` snapshot only if it is deeply lagged, and the next pass pins
 the lower floor and the header resolves then. The pin never prunes more than the
-default window, releases as headers resolve (the set shrinks) or are evicted, and
-with no guard set is byte-identical to the original behavior. Across a restart the
-in-memory set is rebuilt from the persisted markers
-(`repopulateDeferredHeaderValidation`, via `ListSyncStateKeysByPrefix`) before the
-first cleanup, so the pin covers headers still awaiting apply from before the
-restart.
+default window, releases as headers resolve (the set shrinks) or are evicted,
+and with no guard set is byte-identical to the original behavior. Across a
+restart the in-memory set is rebuilt from the persisted markers
+(`repopulateDeferredHeaderValidation`, via `ListSyncStateKeysByPrefix`) before
+the first cleanup, so the pin covers headers still awaiting apply from before
+the restart.
 
 The pin is what makes a deferred header *resolve* (its snapshot is retained
 until the cursor reaches it). The classification in `verifyBlockHeaderState` is
@@ -2781,6 +4066,26 @@ therefore re-crossed on the selected chain, where `SavePoolStakeSnapshots`
 replaces that epoch's rows and `SaveEpochSummary` upserts the summary.
 `DeleteEpochSummariesAfterEpoch` and `DeletePoolStakeSnapshotsAfterEpoch` exist
 on `metadata.MetadataStore` for that case but currently have no callers.
+
+##### Pending reward input history
+
+A deferred reward stake-input writer leaves a durable pending entry until every
+chunk commits. Consumed-UTxO sweeps cap their floor at the oldest matching pending
+snapshot's captured slot before announcing or persisting that floor. Invalid or
+unreadable pending state stops cleanup; entries for rolled-back snapshots do not
+pin history. Once the pending basis is completed, normal cleanup resumes. A deferred SNAP
+also retains its boundary slot minus one while the pending ratification record
+owns the snapshot. Both durable markers are read through one metadata snapshot
+so their atomic handoff cannot hide the retention obligation.
+
+Trusted batch UTxO deletion and its overlay remain disabled while a matching
+pending snapshot exists. Those paths advance the global prune floor to the
+batch tip, so deleting even outputs created after the snapshot would make its
+historical reconstruction unavailable. Regular sweeps can still remove outputs
+spent at or before the protected captured slot. Historical reward credits and
+withdrawals remain in account_reward_delta, and certificate/registration history
+is retained independently; reward_account_output retention is not an input to
+this reconstruction.
 
 #### Committee Hot-Key Authorization Retention
 
@@ -2894,21 +4199,39 @@ a different analysis.
 
 ## Blob Store Reference
 
-All blob plugins expose the same logical keys. Badger stores these binary keys directly. GCS and S3 hex-encode the logical key bytes into object names; S3 may prepend the configured object prefix. After an isolated cloud restore, both cloud providers insert `.dingo-namespaces/<id>/` between that configured prefix and the encoded logical key. The selected ID is stored in `.dingo-blob-namespace` beside the local metadata store, so the data-directory activation also selects the matching blob generation. A missing marker preserves the original object-key layout for existing databases; legacy S3/GCS iteration excludes nested namespace objects so backup and reset continue to see only legacy keys. A later successful restore reclaims the superseded namespaced generation. The first restore from the marker-free layout retains its legacy objects because deleting their prefix would also delete the nested active namespace. Durable cleanup state is retried before a later live restore creates its own record, and an incomplete recovery directory without a record is removed consistently during retry and startup cleanup.
+All blob plugins expose the same logical keys. Badger stores these binary keys
+directly. GCS and S3 hex-encode the logical key bytes into object names; S3 may
+prepend the configured object prefix. After an isolated cloud restore, both
+cloud providers insert `.dingo-namespaces/<id>/` between that configured prefix
+and the encoded logical key. The selected ID is stored in
+`.dingo-blob-namespace` beside the local metadata store, so the data-directory
+activation also selects the matching blob generation. A missing marker preserves
+the original object-key layout for existing databases; legacy S3/GCS iteration
+excludes nested namespace objects so backup and reset continue to see only
+legacy keys. A later successful restore reclaims the superseded namespaced
+generation. The first restore from the marker-free layout retains its legacy
+objects because deleting their prefix would also delete the nested active
+namespace. Durable cleanup state is retried before a later live restore creates
+its own record, and an incomplete recovery directory without a record is removed
+consistently during retry and startup cleanup.
 
-### Core sync and Leios value placement
+### Sync and Leios value placement
 
-Core Mithril sync uses a 1 KiB Badger value threshold by default. Larger block
-CBOR values go to the value log instead of being rewritten through LSM
-compactions during import. Core Leios uses the same 1 KiB threshold so large
-endorser transaction closures live in the value log rather than being copied
-through the inline-value read path and rewritten through LSM compactions.
-Other storage modes and run modes retain the 1 MiB default. The blob provider's
-`valueThreshold` setting overrides either default. Badger records the placement
-with each value, so changing the threshold does not require rewriting existing
-records and both placements remain readable. Badger fixes the threshold when
-the store opens, so node-managed Mithril restores and stream catch-up, which run
-inside `serve` on the store `serve` opened, keep the serve default.
+Mithril sync (run mode `sync`) uses a 1 KiB Badger value threshold by default
+in both Core and API storage modes. Larger block CBOR values go to the value
+log instead of being rewritten through LSM compactions during import. Badger
+compresses only SST blocks, so in API mode those values are stored
+uncompressed: the store is larger than with inline ZSTD values (about 26% on a
+Preview import, where the copy wrote 54% fewer bytes and finished 34% sooner).
+Core Leios uses the same 1 KiB threshold so large endorser transaction closures
+live in the value log rather than being copied through the inline-value read
+path and rewritten through LSM compactions. API Leios and the other run modes
+retain the 1 MiB default. The blob provider's `valueThreshold` setting
+overrides either default. Badger records the placement with each value, so
+changing the threshold does not require rewriting existing records and both
+placements remain readable. Badger fixes the threshold when the store opens, so
+node-managed Mithril restores and stream catch-up, which run inside `serve` on
+the store `serve` opened, keep the serve default.
 
 Core sync mode uses a 1 GiB Badger memtable by default to improve bulk-import
 throughput. Other storage modes and run modes retain the 128 MiB default. The
@@ -2936,9 +4259,9 @@ durable stores, so their commit order and their *durability* order both matter.
 `database.Txn.Commit` commits the blob transaction first, then calls
 `BlobStore.Sync`, then commits the metadata transaction. Only transactions that
 span both stores pay the sync; blob-only bulk paths (for example
-`chain.addRawBlocks`, which batches 50 blocks per blob transaction) sync at their
-own barriers, and `Sync` is a store-wide flush, so the next combined commit also
-makes those earlier batches durable.
+`chain.addRawBlocks`, which batches 50 blocks per blob transaction) sync at
+their own barriers, and `Sync` is a store-wide flush, so the next combined
+commit also makes those earlier batches durable.
 
 Metadata operations follow the caller's context until a write transaction
 begins committing. A caller already canceled at that boundary causes rollback
@@ -2952,27 +4275,28 @@ The ordering exists because the two stores fail asymmetrically. SQLite runs
 `journal_mode=WAL` with `synchronous=NORMAL` (WAL is set once at open by
 `ensureWALJournalMode` rather than as a per-connection `_pragma`: SQLite takes
 the rollback-to-WAL transition's exclusive lock without consulting the busy
-handler, so running it on every connection makes a concurrent open fail
-outright with `SQLITE_BUSY` instead of waiting, and journal mode is persistent
-in the database header so once is enough; `busy_timeout` leads the remaining
-pragma list, because the driver applies `_pragma` directives in DSN order and
-anything ahead of it would run with no busy handler installed), so committed metadata reaches disk
-at WAL checkpoints (every 10000 pages, ~40MB at the default 4096-byte page
-size, via `sqliteCommonPragmas`'s `wal_autocheckpoint`; raised from SQLite's
-1000-page compiled-in default because a checkpoint firing on nearly every
-block-apply commit was rewriting the same hot B-tree pages to
+handler, so running it on every connection makes a concurrent open fail outright
+with `SQLITE_BUSY` instead of waiting, and journal mode is persistent in the
+database header so once is enough; `busy_timeout` leads the remaining pragma
+list, because the driver applies `_pragma` directives in DSN order and anything
+ahead of it would run with no busy handler installed), so committed metadata
+reaches disk at WAL checkpoints (every 10000 pages, ~40MB at the default
+4096-byte page size, via `sqliteCommonPragmas`'s `wal_autocheckpoint`; raised
+from SQLite's 1000-page compiled-in default because a checkpoint firing on
+nearly every block-apply commit was rewriting the same hot B-tree pages to
 `metadata.sqlite` on almost every commit instead of letting several commits'
-worth of touches to a page coalesce into one checkpoint write). Badger is opened with its
-default `SyncWrites=false` and a 128MiB memtable, so committed blob writes can
-sit unflushed far longer — at chain tip dingo writes only a few MiB of blocks per
-hour, so the memtable may not rotate for hours. Without the sync barrier an
-unclean host shutdown leaves a durable metadata tip pointing at blocks the blob
-store discarded, which is the inverse of the invariant the rest of the system is
-built on: startup reconciliation can trim a blob store that is *ahead* of the
-metadata tip (`cleanupOrphanedBlobs`) but cannot rebuild blocks missing *beneath*
-it, so it rolls the ledger back to the blob tip instead. That rollback can be
-arbitrarily deep and, on a Mithril-bootstrapped node, can reach the
-`mithril_ledger_slot` trust boundary, past which no rollback is possible at all.
+worth of touches to a page coalesce into one checkpoint write). Badger is opened
+with its default `SyncWrites=false` and a 128MiB memtable, so committed blob
+writes can sit unflushed far longer — at chain tip dingo writes only a few MiB
+of blocks per hour, so the memtable may not rotate for hours. Without the sync
+barrier an unclean host shutdown leaves a durable metadata tip pointing at
+blocks the blob store discarded, which is the inverse of the invariant the rest
+of the system is built on: startup reconciliation can trim a blob store that is
+*ahead* of the metadata tip (`cleanupOrphanedBlobs`) but cannot rebuild blocks
+missing *beneath* it, so it rolls the ledger back to the blob tip instead. That
+rollback can be arbitrarily deep and, on a Mithril-bootstrapped node, can reach
+the `mithril_ledger_slot` trust boundary, past which no rollback is possible at
+all.
 
 Each SQLite connection in the read and write pools also sets
 `journal_size_limit=67108864` (64 MiB).
@@ -3060,100 +4384,98 @@ TRUNCATE, not the safer-sounding RESTART, is deliberate: as shown above,
 RESTART does not shrink the file, so it cannot make the gauge move.
 
 **SQL-side metrics.** Badger's own write/read/cache/GC counters
-(`database_blob_*`, `database/plugin/blob/badger/metrics.go`) have existed for
-a while but were never on a dashboard; the metadata store had no equivalent
+(`database_blob_*`, `database/plugin/blob/badger/metrics.go`) have existed for a
+while but were never on a dashboard; the metadata store had no equivalent
 instrumentation at all until the write-amplification investigation above added
 it. `dingo_database_sql_operations_total{op}` (counter,
 `database/plugin/metadata/sqlstore/metrics.go`) is incremented once per SQL
-statement at Store's single query chokepoint (`instrumentedQueryer`),
-classified by leading keyword (insert/update/delete/select/other) parsed past
-each query's sqlc-generated `-- name: X :verb` comment; it is a no-op unless
+statement at Store's single query chokepoint (`instrumentedQueryer`), classified
+by leading keyword (insert/update/delete/select/other) parsed past each query's
+sqlc-generated `-- name: X :verb` comment; it is a no-op unless
 `Config.PromRegistry` is set. `dingo_database_sql_query_duration_seconds{op,
 query}` (histogram, same file and chokepoint, added alongside this section)
-observes each statement's wall-clock duration at the same point, labeled by
-that op classification plus the statement's query name itself
+observes each statement's wall-clock duration at the same point, labeled by that
+op classification plus the statement's query name itself
 (`classifySQLStatement`, read from the leading `-- name: X :verb` comment;
 `"unknown"` for a statement with no such comment, such as a PRAGMA or an unnamed
-rollback, maintenance or API read statement). The
-query name is safe as a label because it is a literal in the source, not user
-input or raw SQL text; a runtime-built statement carries one fixed name per
-builder and shape. Both the
-counter and the histogram cover every call site through `instrumentedQueryer`
-— domain queries, committee pruning, deferred-index maintenance — including
-the hot-statement cache's cached calls and
+rollback, maintenance or API read statement). The query name is safe as a label
+because it is a literal in the source, not user input or raw SQL text; a
+runtime-built statement carries one fixed name per builder and shape. Both the
+counter and the histogram cover every call site through `instrumentedQueryer` —
+domain queries, committee pruning, deferred-index maintenance — including the
+hot-statement cache's cached calls and
 `transactionBatchAccumulator.insertTransaction`'s prepared batch-insert path
-(`transaction_write.go`), both of which bypass `instrumentedQueryer`'s
-wrapper entirely by calling their cached `*sql.Stmt` directly and are
-counted/timed explicitly instead in `queryRowCached`/`execCached`
-(`prepared_stmt.go`) or their own call site. For a multi-row SELECT
-issued through `QueryContext`, the histogram observation is dispatch latency
-only: `database/sql` returns `*sql.Rows` before the driver produces any rows,
-so the observation is recorded before the caller's own `Next()`/`Scan()` loop
-— where a `:many` query's real cost lives — does any work. `ExecContext`,
-`QueryRowContext`, and the cached-statement path all block until the
-statement completes, so their observations do reflect completion; see
-`countingQueryer.QueryContext`'s doc comment (`metrics.go`) for the measured
-gap and why timing through `Close()` instead is not available given the
-`*sql.Rows`-typed `queryer`/sqlc `DBTX` interfaces this wraps.
-`dingo_database_sql_wal_bytes`
-and `dingo_database_sql_disk_bytes` (`database/plugin/metadata/sqlite/metrics.go`)
+(`transaction_write.go`), both of which bypass `instrumentedQueryer`'s wrapper
+entirely by calling their cached `*sql.Stmt` directly and are counted/timed
+explicitly instead in `queryRowCached`/`execCached` (`prepared_stmt.go`) or
+their own call site. For a multi-row SELECT issued through `QueryContext`, the
+histogram observation is dispatch latency only: `database/sql` returns
+`*sql.Rows` before the driver produces any rows, so the observation is recorded
+before the caller's own `Next()`/`Scan()` loop — where a `:many` query's real
+cost lives — does any work. `ExecContext`, `QueryRowContext`, and the
+cached-statement path all block until the statement completes, so their
+observations do reflect completion; see `countingQueryer.QueryContext`'s doc
+comment (`metrics.go`) for the measured gap and why timing through `Close()`
+instead is not available given the `*sql.Rows`-typed `queryer`/sqlc `DBTX`
+interfaces this wraps. `dingo_database_sql_wal_bytes` and
+`dingo_database_sql_disk_bytes` (`database/plugin/metadata/sqlite/metrics.go`)
 are pull-based gauges sampled at scrape time — a plain `os.Stat` of
 `metadata.sqlite-wal` and `Store.DiskSize()` respectively — the same pattern
 Badger's own cache gauges already use rather than a background ticker.
-`Store.DiskSize()`'s two `PRAGMA page_count`/`page_size` reads (`sqliteDiskSize`,
-`shared_sqlstore.go`) run on a connection opened fresh for the call and closed
-immediately after, mirroring `checkpointWAL` above rather than using `writeDB`
-or `readDB`. An earlier version queried through `readDB` directly, and one
-gauge read left a connection idled back into that pool indefinitely (neither
-pool sets `SetConnMaxIdleTime`/`SetConnMaxLifetime`); from that point on,
-`checkpointWAL`'s `PRAGMA wal_checkpoint(TRUNCATE)` logged "a reader is still
-holding an old snapshot" on essentially every tick, rather than only
-occasionally, for the rest of the process's life. Reproduced against a live
+`Store.DiskSize()`'s two `PRAGMA page_count`/`page_size` reads
+(`sqliteDiskSize`, `shared_sqlstore.go`) run on a connection opened fresh for
+the call and closed immediately after, mirroring `checkpointWAL` above rather
+than using `writeDB` or `readDB`. An earlier version queried through `readDB`
+directly, and one gauge read left a connection idled back into that pool
+indefinitely (neither pool sets `SetConnMaxIdleTime`/`SetConnMaxLifetime`); from
+that point on, `checkpointWAL`'s `PRAGMA wal_checkpoint(TRUNCATE)` logged "a
+reader is still holding an old snapshot" on essentially every tick, rather than
+only occasionally, for the rest of the process's life. Reproduced against a live
 affected instance: an external, independently-opened `sqlite3 metadata.sqlite
 "PRAGMA wal_checkpoint(TRUNCATE)"` returned the same `busy=1` result the
 process's own `checkpointWAL` was logging, and moving this gauge to its own
 dedicated connection (this change) made the warnings stop and the `-wal` file
 shrink (observed ~130MB down to ~55MB on the affected instance) -- so the
-correlation and the fix are real. What the mechanism is *not*, however, is
-"any connection merely attached to the pool blocks TRUNCATE": SQLite's own
-documentation for `wal_checkpoint` states that RESTART/TRUNCATE block only on
-an active writer or a reader still reading an old snapshot, not on a
-connection that is idle, and a direct reproduction confirms this for this
-exact driver and DSN --
-`TestWALCheckpointTruncateIdleConnectionDoesNotBlock` (`shared_sqlstore_test.go`)
-runs `sqliteDiskSize`'s exact pre-fix query pattern (two
-`QueryRowContext(...).Scan(...)` calls against `readDB`, connection left
+correlation and the fix are real. What the mechanism is *not*, however, is "any
+connection merely attached to the pool blocks TRUNCATE": SQLite's own
+documentation for `wal_checkpoint` states that RESTART/TRUNCATE block only on an
+active writer or a reader still reading an old snapshot, not on a connection
+that is idle, and a direct reproduction confirms this for this exact driver and
+DSN -- `TestWALCheckpointTruncateIdleConnectionDoesNotBlock`
+(`shared_sqlstore_test.go`) runs `sqliteDiskSize`'s exact pre-fix query pattern
+(two `QueryRowContext(...).Scan(...)` calls against `readDB`, connection left
 open in the pool afterward) immediately before a `PRAGMA
 wal_checkpoint(TRUNCATE)` attempt against real, substantial WAL content and
 observes `busy=0`, a full truncation to zero bytes, and `readDB`'s own
 `OpenConnections` staying at 1 throughout -- while an actual held, uncommitted
-read transaction (the same test's positive control) does reproduce `busy=1`.
-So the specific, isolatable cause of the production symptom is not "the idle
+read transaction (the same test's positive control) does reproduce `busy=1`. So
+the specific, isolatable cause of the production symptom is not "the idle
 connection's mere presence in the pool"; it is left open here rather than
-asserted, and the dedicated-connection fix stands on the production
-before/after evidence and on matching `checkpointWAL`'s already-established
-pattern, independent of a fully isolated microscopic explanation.
+asserted, and the dedicated-connection fix stands on the production before/after
+evidence and on matching `checkpointWAL`'s already-established pattern,
+independent of a fully isolated microscopic explanation.
 `dingo_database_sql_wal_bytes` is not a checkpoint-health signal on its own:
 SQLite's PASSIVE/FULL/RESTART checkpoints backfill WAL frames into
 `metadata.sqlite` but never `ftruncate` the `-wal` file, so between
-`checkpointWAL`'s TRUNCATE attempts (see above) the gauge only grows. It is
-not strictly monotonic, though: a successful periodic TRUNCATE attempt can
-drop it back toward zero, while a persistently held reader snapshot can
-leave it at its ~40MB-and-rising floor (the raised `wal_autocheckpoint`
-threshold above) until a later attempt succeeds.
+`checkpointWAL`'s TRUNCATE attempts (see above) the gauge only grows. It is not
+strictly monotonic, though: a successful periodic TRUNCATE attempt can drop it
+back toward zero, while a persistently held reader snapshot can leave it at its
+~40MB-and-rising floor (the raised `wal_autocheckpoint` threshold above) until a
+later attempt succeeds.
 
 **Write/read connection-pool metrics.** A live goroutine-dump/`pprof`
 investigation found `writeDB` — capped at `SetMaxOpenConns(1)` because SQLite
-allows only one writer regardless of connection count — measurably
-contended: `persistDeferredHeaderValidation`'s per-block durability write
-competes with block-apply's own writes for that single connection, and there
-was no metric showing connection-pool wait time directly, only ad hoc
-pprof/goroutine-dump forensics. `sql.DBStats` — already surfaced by
+allows only one writer regardless of connection count — measurably contended:
+`persistDeferredHeaderValidation`'s per-block durability write competes with
+block-apply's own writes for that single connection, and there was no metric
+showing connection-pool wait time directly, only ad hoc pprof/goroutine-dump
+forensics. `sql.DBStats` — already surfaced by
 `Store.WritePoolStats`/`ReadPoolStats`, but previously read only from tests —
 already carries the missing signal, so `newSQLPoolMetrics`
 (`database/plugin/metadata/sqlstore/metrics.go`, wired from `sqlstore.New`)
-registers it directly, for both pools: `dingo_database_sql_pool_wait_count_total`
-and `dingo_database_sql_pool_wait_duration_seconds_total` (counters, from
+registers it directly, for both pools:
+`dingo_database_sql_pool_wait_count_total` and
+`dingo_database_sql_pool_wait_duration_seconds_total` (counters, from
 `sql.DBStats`' cumulative `WaitCount`/`WaitDuration`), and
 `dingo_database_sql_pool_open_connections`, `..._in_use_connections`,
 `..._idle_connections`, and `..._max_open_connections` (gauges, from the
@@ -3166,14 +4488,14 @@ background ticker. `pool="write"` is the one this exists for
 `rate()` of its `wait_duration_seconds_total` over a window is the average
 number of callers waiting concurrently, not a value capped at `1.0` — a
 sustained value near `1.0` already means a caller is waiting essentially
-continuously, and concurrent waiters each accrue wait time independently,
-so real contention can push it well above `1.0`. `pool="read"` is
-registered identically for consistency and as a future comparison point.
+continuously, and concurrent waiters each accrue wait time independently, so
+real contention can push it well above `1.0`. `pool="read"` is registered
+identically for consistency and as a future comparison point.
 
 A failed `Sync` is reported as `PartialCommitError`, because at that point the
-blob transaction is committed and carries the new commit timestamp while metadata
-does not — the same inconsistency a failed metadata commit leaves, and the same
-recovery (trim the blob store back to the metadata tip) applies.
+blob transaction is committed and carries the new commit timestamp while
+metadata does not — the same inconsistency a failed metadata commit leaves, and
+the same recovery (trim the blob store back to the metadata tip) applies.
 
 Every terminal path out of `Txn.Commit` — including that failed-`Sync` partial
 commit — releases the commit barrier hold exactly once, via `Txn.finishLocked`.
@@ -3200,19 +4522,20 @@ the write connection an open read-write `Txn` holds.
 callback that runs exactly once when the transaction reaches its terminal state
 on any path -- a successful commit, a failed commit, an explicit `Rollback`, a
 `Release`, and the rollback `Commit` performs for a read-only transaction --
-dispatched by the terminal paths after the transaction lock is released, so a callback
-may take locks of its own. It is deliberately weaker than `AfterCommit`:
-`AfterCommit` carries a durability claim and so does not fire on rollback, which
-makes it the wrong hook for anything acquired for the transaction's *lifetime* --
-a lock, a lease, a barrier hold -- because releasing such a hold from
-`AfterCommit` strands it for good on every rollback. Registration against an
-already-finished transaction runs the callback immediately rather than dropping
-it, so an acquire-then-register sequence cannot lose its release to a
-transaction that concluded in between. That includes nested registration from
-an `OnFinish` callback: the nested callback runs immediately and can precede
-callbacks queued before the transaction finished. A panicking callback is recovered and
-logged so one caller's bug cannot strand another caller's hold. `Chain.pendingAdds`
-is the in-tree consumer; see `ARCHITECTURE.md`.
+dispatched by the terminal paths after the transaction lock is released, so a
+callback may take locks of its own. It is deliberately weaker than
+`AfterCommit`: `AfterCommit` carries a durability claim and so does not fire on
+rollback, which makes it the wrong hook for anything acquired for the
+transaction's *lifetime* -- a lock, a lease, a barrier hold -- because releasing
+such a hold from `AfterCommit` strands it for good on every rollback.
+Registration against an already-finished transaction runs the callback
+immediately rather than dropping it, so an acquire-then-register sequence cannot
+lose its release to a transaction that concluded in between. That includes
+nested registration from an `OnFinish` callback: the nested callback runs
+immediately and can precede callbacks queued before the transaction finished. A
+panicking callback is recovered and logged so one caller's bug cannot strand
+another caller's hold. `Chain.pendingAdds` is the in-tree consumer; see
+`ARCHITECTURE.md`.
 
 Plugins whose writes are already durable on commit implement `Sync` as a no-op:
 an S3 object is durable once `PutObject` is acknowledged, and a GCS object once
@@ -3223,20 +4546,21 @@ GCS and S3 blob transactions stage object mutations in memory until `Commit`;
 transactions are reversible and report `RollbackIsNoop() == false` — they
 reported true when `Set`/`Delete` wrote through immediately. Callers must not
 infer "the bucket was mutated" from a failed transaction; only a commit that
-wraps `types.ErrPartialCommit` left it partially applied. Staged changes are visible to
-reads within the same transaction: `Get` and every typed getter (`GetBlock`,
-`GetUtxo`, `GetTx`) resolve through the staging map first, so a read-after-write
-matches badger instead of returning pre-transaction state, and a staged delete
-reads as `ErrBlobKeyNotFound`. `GetBlockURL` is the exception — a signed URL
-names a bucket object, so a block staged but not yet committed is reported as
-not found rather than signed into a URL that would 404. Cloud iterators enumerate
-bucket keys and skip keys the transaction has staged for deletion; keys staged
-for writing are not listed until commit. Enumeration is not a point-in-time
-snapshot in either direction: forward iterators page the listing lazily, so a
-later page reflects the bucket when that page is fetched, while reverse iterators
-spool their key records up front and so do reflect iterator-creation time. Item
-values still resolve through the transaction, so a value read after the listing
-observes staged changes regardless of when the key was enumerated.
+wraps `types.ErrPartialCommit` left it partially applied. Staged changes are
+visible to reads within the same transaction: `Get` and every typed getter
+(`GetBlock`, `GetUtxo`, `GetTx`) resolve through the staging map first, so a
+read-after-write matches badger instead of returning pre-transaction state, and
+a staged delete reads as `ErrBlobKeyNotFound`. `GetBlockURL` is the exception —
+a signed URL names a bucket object, so a block staged but not yet committed is
+reported as not found rather than signed into a URL that would 404. Cloud
+iterators enumerate bucket keys and skip keys the transaction has staged for
+deletion; keys staged for writing are not listed until commit. Enumeration is
+not a point-in-time snapshot in either direction: forward iterators page the
+listing lazily, so a later page reflects the bucket when that page is fetched,
+while reverse iterators spool their key records up front and so do reflect
+iterator-creation time. Item values still resolve through the transaction, so a
+value read after the listing observes staged changes regardless of when the key
+was enumerated.
 
 Both cloud reverse iterators use `database/plugin/blob/internal/reversekey`
 for their temporary key spools. Each key has a big-endian 32-bit length
@@ -3247,39 +4571,38 @@ payload. Rewinding resets the cursor; closing removes the temporary spool.
 A staged zero-length write is a value, not a deletion: `Set` with an empty slice
 reads back as an empty blob inside the transaction. This matters most for a key
 that already exists in the bucket: staging it to an empty value must not make an
-iterator's staged-delete filtering mistake it for a deletion and skip it, the way
-collapsing "staged empty value" and "staged delete" onto the same nil-value
-sentinel would. It does not override the "not listed until commit" rule above for
-a key with no committed existence at all — enumerating a brand-new key the bucket
-does not have yet would require the iterator to merge the transaction's staged
-writes into the bucket listing, which it does not do.
+iterator's staged-delete filtering mistake it for a deletion and skip it, the
+way collapsing "staged empty value" and "staged delete" onto the same nil-value
+sentinel would. It does not override the "not listed until commit" rule above
+for a key with no committed existence at all — enumerating a brand-new key the
+bucket does not have yet would require the iterator to merge the transaction's
+staged writes into the bucket listing, which it does not do.
 
-Commit applies changes in a stable key order, with one exception: a block
-expiry marker (`TombstoneBlock`'s `DBT1` value at a `bp` key) is applied last.
-`Database.PruneBlock` stages the UTxO rewrites and the marker in one transaction,
-and the sequential applies are visible to readers and snapshot iterators one
-request at a time, so applying the marker last means a reader never finds an
-expired block while a UTxO still holds an offset into it, whether the commit
-finishes, fails, or fails with compensation. Before applying anything it builds
-a compensation log recording each key's prior state, probing existence with
-`HeadObject`/`Attrs` and downloading a prior value only for the keys the commit
-overwrites or deletes. Retained prior values are streamed straight to a temporary
-file, and streamed back out of it when compensation restores them, so neither
-capturing nor restoring a prior value holds an object payload in memory. That
-streaming path deliberately bypasses the 256 MiB read cap — the cap bounds memory
-for ordinary reads, and applying it to compensation would make an object larger
-than the cap impossible to overwrite or delete inside a transaction. Spool disk
-use is therefore bounded by the total size of the objects a single commit
-replaces. If a cloud
-operation fails partway, the already-applied changes are reversed on a fresh
-context. The failed operation is reversed with them: an object-store request can
-take effect and still report an error, so its outcome is unknown and restoring
-that key is part of the compensation, including when it was the first or only
-operation (reusing the commit context would make every restore fail instantly when
-the commit failed because that context expired). Every entry is attempted even
-after an individual failure. When compensation itself fails the bucket is left
-partially applied and `Commit` returns an error wrapping
-`types.ErrPartialCommit`, so callers do not treat it as a clean abort.
+Commit applies changes in a stable key order, with one exception: a block expiry
+marker (`TombstoneBlock`'s `DBT1` value at a `bp` key) is applied last.
+`Database.PruneBlock` stages the UTxO rewrites and the marker in one
+transaction, and the sequential applies are visible to readers and snapshot
+iterators one request at a time, so applying the marker last means a reader
+never finds an expired block while a UTxO still holds an offset into it, whether
+the commit finishes, fails, or fails with compensation. Before applying anything
+it builds a compensation log recording each key's prior state, probing existence
+with `HeadObject`/`Attrs` and downloading a prior value only for the keys the
+commit overwrites or deletes. Retained prior values are streamed straight to a
+temporary file, and streamed back out of it when compensation restores them, so
+neither capturing nor restoring a prior value holds an object payload in memory.
+That streaming path deliberately bypasses the 256 MiB read cap — the cap bounds
+memory for ordinary reads, and applying it to compensation would make an object
+larger than the cap impossible to overwrite or delete inside a transaction.
+Spool disk use is therefore bounded by the total size of the objects a single
+commit replaces. If a cloud operation fails partway, the already-applied changes
+are reversed on a fresh context. The failed operation is reversed with them: an
+object-store request can take effect and still report an error, so its outcome
+is unknown and restoring that key is part of the compensation, including when it
+was the first or only operation (reusing the commit context would make every
+restore fail instantly when the commit failed because that context expired).
+Every entry is attempted even after an individual failure. When compensation
+itself fails the bucket is left partially applied and `Commit` returns an error
+wrapping `types.ErrPartialCommit`, so callers do not treat it as a clean abort.
 
 Cloud object reads are capped at 256 MiB. Existence checks use object metadata
 rather than a bounded read, and commit compensation streams prior values to disk
@@ -3291,7 +4614,14 @@ usage. Reverse readers validate that each record fits the remaining spool and
 that its prefix and trailer lengths agree before allocating the key. Malformed
 spool records terminate iteration with an error instead of yielding a key.
 
-S3 has two prefix input forms with deliberately different compatibility contracts. `New` normalizes a non-empty prefix parsed from `s3://<bucket>/<prefix>` to end in `/`, so `s3://bucket/foo` produces object names such as `foo/<hex-key>`. `WithPrefix`, used by the `plugins.storage` config `prefix` field, preserves the configured value verbatim: `foo` produces `foo<hex-key>`, while `foo/` produces `foo/<hex-key>`. An empty prefix in either form adds nothing. Keeping the option form literal preserves the object-key layout of existing deployments.
+S3 has two prefix input forms with deliberately different compatibility
+contracts. `New` normalizes a non-empty prefix parsed from
+`s3://<bucket>/<prefix>` to end in `/`, so `s3://bucket/foo` produces object
+names such as `foo/<hex-key>`. `WithPrefix`, used by the `plugins.storage`
+config `prefix` field, preserves the configured value verbatim: `foo` produces
+`foo<hex-key>`, while `foo/` produces `foo/<hex-key>`. An empty prefix in either
+form adds nothing. Keeping the option form literal preserves the object-key
+layout of existing deployments.
 
 ```mermaid
 flowchart LR
@@ -3350,8 +4680,8 @@ legacy occurrence checks are unchanged.
 | `nodesettings/storeid` | Opaque `uuid.NewString()` bytes, minted on first use and never overwritten thereafter | This blob store's identity for the `blob_store_id` node settings gate (`Database.blobStoreID`), compared only for equality against the value latched in `node_settings_gate` |
 
 Positive retention values must cover at least the network stability window,
-`ceil(3k/f)` slots, where `k` and the exact active slot coefficient `f` come from
-the ledger's genesis parameters. Startup rejects a smaller value or unknown
+`ceil(3k/f)` slots, where `k` and the exact active slot coefficient `f` come
+from the ledger's genesis parameters. Startup rejects a smaller value or unknown
 parameters before constructing the persistence workers.
 
 Leios historical-serving persistence is kept indefinitely by default. A positive
@@ -3433,7 +4763,20 @@ error. Bounded completion therefore validates every raw mapping value and its
 order through EOF, while block bodies and metadata above the replay bound are
 intentionally not fetched.
 
-`Database.CountBlocksAndOldestSlot` (`database/block_inventory.go`) reads the retained block count and oldest retained slot from the checksummed `dingo:block-inventory:v1` blob record. `database.New` creates the record and an ordered retained-block membership index before the database becomes available, scanning legacy block content once only when the record is absent. Block insert, delete, history-expiry tombstone, rollback, truncate, and orphan cleanup paths update both in the same blob transaction as the block mutation. Stores without optimistic write-conflict detection serialize block-inventory mutations before opening backend transactions; conflict-detecting stores rely on backend write conflicts to prevent lost updates. Deleting or tombstoning the current oldest block seeks the first membership key to resolve its successor, including another retained block at the same slot, without walking block content. Bark's `GetDatabaseInfo` reads this record and never walks the block keyspace in request handling.
+`Database.CountBlocksAndOldestSlot` (`database/block_inventory.go`) reads the
+retained block count and oldest retained slot from the checksummed
+`dingo:block-inventory:v1` blob record. `database.New` creates the record and an
+ordered retained-block membership index before the database becomes available,
+scanning legacy block content once only when the record is absent. Block insert,
+delete, history-expiry tombstone, rollback, truncate, and orphan cleanup paths
+update both in the same blob transaction as the block mutation. Stores without
+optimistic write-conflict detection serialize block-inventory mutations before
+opening backend transactions; conflict-detecting stores rely on backend write
+conflicts to prevent lost updates. Deleting or tombstoning the current oldest
+block seeks the first membership key to resolve its successor, including another
+retained block at the same slot, without walking block content. Bark's
+`GetDatabaseInfo` reads this record and never walks the block keyspace in
+request handling.
 
 `DOFF` references are 52 bytes:
 
@@ -3512,30 +4855,28 @@ decoder to `safedecode.ErrDecodePanic`, so malformed remote objects fail as
 undecodable instead of terminating the process.
 
 `blockverify.Hash`, like bark's `GetBlock` (`bark/blob.go`), does not
-independently re-derive the type recorded in `bp..._metadata` from the
-decoded header. An earlier version did: for Shelley and later eras the block hash covers only the header, and adjacent eras share that
-header's layout, so the same bytes can decode -- with an identical hash
-and slot -- under more than one era, which hash and slot alone cannot
-catch. That check used `gledger.DetermineBlockType` to classify era from
-the header's announced protocol-major version -- but that field is a block
-producer's hard-fork-readiness signal, not a record of which era the bytes
-are actually encoded in: a producer starts announcing the next era's
-protocol major before that era's own hard fork has triggered, so a
-genuine, correctly-encoded block in the current era can carry a protocol
-major outside the range `DetermineBlockType` expects for it. This surfaced
-concretely in this repository's own immutable-chain testdata, where
-genuine Alonzo blocks (Shelley-shaped headers) carry protocol major 7
-(Babbage's own floor) and were rejected as an era mismatch -- a functional
-regression on the primary production `GetBlock` path, recurring at every
-past and future hard-fork boundary, and worse than the narrow mislabeling
-gap the check closed. It was dropped rather than reworked: hash and slot
-together already prove the returned bytes are the genuine, uncorrupted
-content for the requested key; what dropping it leaves open is
-`bp..._metadata`'s `Type` naming an adjacent era that happens to share the
-same header layout, which a caller that decodes strictly under the
-recorded `Type` (rather than re-deriving it) is not misled by. See
-`blockverify.Hash`'s own doc comment in `blockverify.go` for the full
-account.
+independently re-derive the type recorded in `bp..._metadata` from the decoded
+header. An earlier version did: for Shelley and later eras the block hash covers
+only the header, and adjacent eras share that header's layout, so the same bytes
+can decode -- with an identical hash and slot -- under more than one era, which
+hash and slot alone cannot catch. That check used `gledger.DetermineBlockType`
+to classify era from the header's announced protocol-major version -- but that
+field is a block producer's hard-fork-readiness signal, not a record of which
+era the bytes are actually encoded in: a producer starts announcing the next
+era's protocol major before that era's own hard fork has triggered, so a
+genuine, correctly-encoded block in the current era can carry a protocol major
+outside the range `DetermineBlockType` expects for it. This surfaced concretely
+in this repository's own immutable-chain testdata, where genuine Alonzo blocks
+(Shelley-shaped headers) carry protocol major 7 (Babbage's own floor) and were
+rejected as an era mismatch -- a functional regression on the primary production
+`GetBlock` path, recurring at every past and future hard-fork boundary, and
+worse than the narrow mislabeling gap the check closed. It was dropped rather
+than reworked: hash and slot together already prove the returned bytes are the
+genuine, uncorrupted content for the requested key; what dropping it leaves open
+is `bp..._metadata`'s `Type` naming an adjacent era that happens to share the
+same header layout, which a caller that decodes strictly under the recorded
+`Type` (rather than re-deriving it) is not misled by. See `blockverify.Hash`'s
+own doc comment in `blockverify.go` for the full account.
 
 Separately, for a Byron main block specifically: gouroboros's default
 decode checks the transaction and delegation/update proofs but only the
@@ -3616,28 +4957,27 @@ Reading a key that was committed after the shared transaction began through
 that handle would also add it to the transaction's conflict read set and fail
 its commit.
 
-Transaction effects are stored under the certifying ranking block's
-point, so rolling back that ranking block removes the effects. A blob left
-behind by a crash or rollback is harmless and is overwritten on reprocessing.
-Epoch nonce code derives `last_epoch_block_nonce` from the previous epoch's last
-ranking block's `PrevHash` through `canonicalBlockBeforeSlot`: when a chain
-index is attached it uses `chain.BlockBeforeSlot`; startup helpers, tests, and
-tooling that construct a ledger without a chain fall back to
+Transaction effects are stored under the certifying ranking block's point, so
+rolling back that ranking block removes the effects. A blob left behind by a
+crash or rollback is harmless and is overwritten on reprocessing. Epoch nonce
+code derives `last_epoch_block_nonce` from the previous epoch's last ranking
+block's `PrevHash` through `canonicalBlockBeforeSlot`: when a chain index is
+attached it uses `chain.BlockBeforeSlot`; startup helpers, tests, and tooling
+that construct a ledger without a chain fall back to
 `BlockBeforeSlotTxn`/`BlockBeforeSlot`. That fallback still excludes synthetic
 `ID=0` blobs, but it is not a canonical fork filter in databases that retain
 same-slot fork blobs, so production ledger paths attach the chain index before
 using this lookup. Older blob-scan lab lookup could also save an empty lab here,
-collapsing the epoch's nonce to the NeutralNonce
-identity and failing leader-VRF checks. A related hazard is the candidate/evolving
-nonce input: older Mithril imports persisted the evolving nonce at one ledger
-state slot but advanced the trust boundary across separately ingested "gap
-blocks" without folding their VRF output into `block_nonce`.
-`healMithrilGapBlockNonces` repairs that legacy shape by re-folding the evolving
-nonce over canonical-chain blocks. New imports select a ledger state at or
-below the certified immutable tip, keep both the metadata tip and trust boundary
-at that point, and let ordinary ledger replay fold every later block. The legacy
-heal remains idempotent and uses the primary chain index so retained fork blobs
-and synthetic endorser blobs are never folded.
+collapsing the epoch's nonce to the NeutralNonce identity and failing leader-VRF
+checks. A related hazard is the candidate/evolving nonce input: older Mithril
+imports persisted the evolving nonce at one ledger state slot but advanced the
+trust boundary across separately ingested "gap blocks" without folding their VRF
+output into `block_nonce`. `healMithrilGapBlockNonces` repairs that legacy shape
+by re-folding the evolving nonce over canonical-chain blocks. New imports select
+a ledger state at or below the certified immutable tip, keep both the metadata
+tip and trust boundary at that point, and let ordinary ledger replay fold every
+later block. The legacy heal remains idempotent and uses the primary chain index
+so retained fork blobs and synthetic endorser blobs are never folded.
 
 `GetLatestBlockNonce` returns the single highest-slot `block_nonce` row
 (`ORDER BY slot DESC, id DESC LIMIT 1`). The `id` tie-break preserves the order
@@ -3722,18 +5062,18 @@ wait for the certifying block's commit, survive a failed body retry, and are
 discarded when rollback removes the unpublished closure. Even a rollback to the
 unchanged parent tip must remove those pending effects. The migration does not
 reconstruct contexts or reward rounds previously computed with the old ordering;
-affected historical state requires replay from before its first affected boundary.
-Once the blob or transaction rows start writing, a failure aborts the
+affected historical state requires replay from before its first affected
+boundary. Once the blob or transaction rows start writing, a failure aborts the
 enclosing block transaction rather than committing a partial endorser-block
-application. For a certifying ranking block, the certified parent EB and all
-of these writes are mandatory. The block-processing transaction is not
-opened until the complete EB closure is available, and resolution, decode, or
-apply failure prevents the CertRB and its metadata tip from committing.
-Historical backfill retries instead of recording a prefix that lacks certified
-pool, delegation, UTxO, or governance effects. This guarantee applies to newly
-replayed state; a database produced by an older version that already skipped a
-certified closure must be replayed from before the affected CertRB (normally by
-performing a clean metadata resync).
+application. For a certifying ranking block, the certified parent EB and all of
+these writes are mandatory. The block-processing transaction is not opened until
+the complete EB closure is available, and resolution, decode, or apply failure
+prevents the CertRB and its metadata tip from committing. Historical backfill
+retries instead of recording a prefix that lacks certified pool, delegation,
+UTxO, or governance effects. This guarantee applies to newly replayed state; a
+database produced by an older version that already skipped a certified closure
+must be replayed from before the affected CertRB (normally by performing a clean
+metadata resync).
 
 `BatchedTxIngestOpts.StrictAppliedInputConservation` marks the same steady-state
 path. When set with `StrictUtxoValidation` enabled, a missing consumed-input row
@@ -3808,13 +5148,13 @@ expected during a large rollback: the metadata is still removed, so the store
 stays correct, and the cost is disk rather than an unstartable node.
 
 The two causes are not distinguished by severity. A skip adds its count to the
-same `deleteErrors` total as a failure, so both reach `recordBlobOrphansOnCommit`,
-both return `ErrBlobDeleteIncomplete`, both produce the same warn-level summary
-carrying `failed` and `total`, and both make the caller log its own error-level
-line about unreachable objects. The only discriminator is an additional
-warn-level line emitted at the moment of the skip, carrying `skipped`, `staged`
-and `total`; its absence means every counted object was a genuine delete
-failure.
+same `deleteErrors` total as a failure, so both reach
+`recordBlobOrphansOnCommit`, both return `ErrBlobDeleteIncomplete`, both produce
+the same warn-level summary carrying `failed` and `total`, and both make the
+caller log its own error-level line about unreachable objects. The only
+discriminator is an additional warn-level line emitted at the moment of the
+skip, carrying `skipped`, `staged` and `total`; its absence means every counted
+object was a genuine delete failure.
 
 The budget comes from the optional `blob.TxnBudget` extension
 (`RemainingTxnEntries`). Badger implements it, mirroring the accounting behind
@@ -3838,46 +5178,44 @@ older than the ledger stability window:
   nodes. The local Badger plugin does not implement `GetBlockURL`, so it is not
   suitable as the backing store for a Bark archive node.
 - History-expiry nodes keep their normal local blob plugin and run
-  `internal/historyexpiry.Pruner` when `historyExpiry.enabled` is configured. The pruner
-  calls `Database.PruneBlock` for blocks below
-  `current_slot - ledger.StabilityWindow()`. `PruneBlock` first materializes
-  UTxO CBOR entries that still point into the block by `DOFF` offset, then
-  replaces the block's `bp...` value with marker `DBT1` in the same blob
-  transaction.
+  `internal/historyexpiry.Pruner` when `historyExpiry.enabled` is configured.
+  The pruner calls `Database.PruneBlock` for blocks below `current_slot -
+  ledger.StabilityWindow()`. `PruneBlock` first materializes UTxO CBOR entries
+  that still point into the block by `DOFF` offset, then replaces the block's
+  `bp...` value with marker `DBT1` in the same blob transaction.
 - The pruner resumes from a durable cursor, the `sync_state` key
   `history_expiry_cursor`: the slot every earlier block has already been expired
-  through. Each round scans from that slot instead of slot 0, so its cost follows
-  the newly eligible blocks rather than every tombstone earlier rounds left. The
-  cursor stops at the first block whose expiry fails so that block is retried.
-  A rollback or `lifecycle.Truncate` lowers it to the target slot when it lies
-  above it, because replay stores new blocks only above the target.
-- Expired blocks keep their `bi...`, `bh...`, and `bp..._metadata` entries.
-  SQL metadata rows also remain. Blob readers return `types.ErrHistoryExpired`
-  with the slot/hash. Without an archive wrapper this is the final read error;
-  with `barkBaseUrl` configured, Bark fetches the CBOR from the archive while
+  through. Each round scans from that slot instead of slot 0, so its cost
+  follows the newly eligible blocks rather than every tombstone earlier rounds
+  left. The cursor stops at the first block whose expiry fails so that block is
+  retried. A rollback or `lifecycle.Truncate` lowers it to the target slot when
+  it lies above it, because replay stores new blocks only above the target.
+- Expired blocks keep their `bi...`, `bh...`, and `bp..._metadata` entries. SQL
+  metadata rows also remain. Blob readers return `types.ErrHistoryExpired` with
+  the slot/hash. Without an archive wrapper this is the final read error; with
+  `barkBaseUrl` configured, Bark fetches the CBOR from the archive while
   preserving local block indexes and iteration semantics. Bark validates archive
   download URLs before fetching: they must be HTTPS, must not contain embedded
   credentials, and must match the effective HTTPS hostname and port of
-  `barkBaseUrl` or a configured `barkBlockDownloadHosts` entry. An HTTP Bark
-  RPC base anchors the corresponding HTTPS download origin. The same check
-  applies after each redirect. Every resolved address must be public before
-  dialing unless `barkBlockDownloadAllowPrivateAddresses` is enabled, and the
-  download transport ignores ambient proxy settings either way. The
-  Bark RPC client uses the same default-deny resolved-address check as block
-  downloads, restricted to the configured RPC origin and without ambient proxy
-  settings. Setting `barkBlockDownloadAllowPrivateAddresses` opts both Bark RPC
-  and block downloads into private or special-use addresses; it does not relax
-  origin, redirect, or proxy restrictions. Downloads are also size-limited
-  to the largest block the chain admits for any era (`LedgerState.MaxBlockSize`:
-  the live header and body limits, or the Byron genesis block size when larger;
-  a 128 KiB default when neither is known). Downloaded bytes are then verified locally
-  before any caller sees them: the block is decoded (with body-hash validation
-  enabled) and
-  its computed hash and slot must match the requested point. The returned
-  `types.BlockMetadata` type, height, and previous hash come from the decoded
-  block, and archive-reported height or previous hash that contradicts it is an
-  error rather than an override. The archive is therefore trusted to store block
-  bytes, not to identify them.
+  `barkBaseUrl` or a configured `barkBlockDownloadHosts` entry. An HTTP Bark RPC
+  base anchors the corresponding HTTPS download origin. The same check applies
+  after each redirect. Every resolved address must be public before dialing
+  unless `barkBlockDownloadAllowPrivateAddresses` is enabled, and the download
+  transport ignores ambient proxy settings either way. The Bark RPC client uses
+  the same default-deny resolved-address check as block downloads, restricted to
+  the configured RPC origin and without ambient proxy settings. Setting
+  `barkBlockDownloadAllowPrivateAddresses` opts both Bark RPC and block
+  downloads into private or special-use addresses; it does not relax origin,
+  redirect, or proxy restrictions. Downloads are also size-limited to the
+  largest block the chain admits for any era (`LedgerState.MaxBlockSize`: the
+  live header and body limits, or the Byron genesis block size when larger; a
+  128 KiB default when neither is known). Downloaded bytes are then verified
+  locally before any caller sees them: the block is decoded (with body-hash
+  validation enabled) and its computed hash and slot must match the requested
+  point. The returned `types.BlockMetadata` type, height, and previous hash come
+  from the decoded block, and archive-reported height or previous hash that
+  contradicts it is an error rather than an override. The archive is therefore
+  trusted to store block bytes, not to identify them.
 
 ### Block Hash Index Contract
 
@@ -3953,11 +5291,18 @@ a read should serve any block the blob store actually holds.
 
 ## SQL Examples Mirroring the Go API
 
-The examples below mirror common `metadata.MetadataStore` methods. Postgres examples use `decode($1, 'hex')`; MySQL equivalents use `UNHEX(?)`, `HEX(col)`, and `` `transaction` `` instead of `"transaction"`.
+The examples below mirror common `metadata.MetadataStore` methods. Postgres
+examples use `decode($1, 'hex')`; MySQL equivalents use `UNHEX(?)`, `HEX(col)`,
+and `` `transaction` `` instead of `"transaction"`.
 
 ### `GetTransactionByHash`
 
-Dingo loads the base transaction, then its direct associations: UTxOs, assets, certificates, witnesses, scripts, redeemers, and Plutus data. The `transaction.metadata` column contains the raw transaction metadata bytes when API mode populated them, but per-label rows in `transaction_metadata_label` are a separate index and are not loaded by `GetTransactionByHash`; fetch them through the metadata-label query path below when needed.
+Dingo loads the base transaction, then its direct associations: UTxOs, assets,
+certificates, witnesses, scripts, redeemers, and Plutus data. The
+`transaction.metadata` column contains the raw transaction metadata bytes when
+API mode populated them, but per-label rows in `transaction_metadata_label` are
+a separate index and are not loaded by `GetTransactionByHash`; fetch them
+through the metadata-label query path below when needed.
 
 ```sql
 -- Postgres: base transaction
@@ -4015,7 +5360,8 @@ FROM redeemer r, tx
 WHERE r.transaction_id = tx.id;
 ```
 
-For a lightweight equivalent of `GetTransactionSlotByHash` or `GetTransactionIDByHash`:
+For a lightweight equivalent of `GetTransactionSlotByHash` or
+`GetTransactionIDByHash`:
 
 ```sql
 SELECT id, slot
@@ -4048,6 +5394,20 @@ WHERE block_hash = decode($1, 'hex')
 ORDER BY block_index ASC;
 ```
 
+### `GetBlockTransactionTotals`
+
+`Database.GetBlockTransactionTotals` uses the optional
+`metadata.BlockTransactionTotalsStore` projection when supported. The shared
+SQL store reads only recorded transaction fees and effective output amounts
+in one statement, without transaction witnesses, scripts, assets, certificates
+or input associations. It includes spent outputs and uses an invalid
+transaction's collateral return instead of its regular outputs when present.
+The recorded body fee retains the existing block API meaning. Decimal totals
+are accumulated in Go so neither SQL integer aggregation nor `uint64` limits
+can truncate them. Empty blocks return zeroes, and the caller's context and
+read transaction govern the query. Providers without the optional capability
+use the existing hydrated transaction read. No schema or retention changes.
+
 ### `GetUtxo` and `GetUtxoIncludingSpent`
 
 ```sql
@@ -4071,20 +5431,20 @@ WHERE u.tx_id = decode($1, 'hex')
 
 ### `GetUtxosByRefs`
 
-Batched live-UTxO lookup by a list of (tx hash, output index) references —
-used by the `GetUTxOByTxIn` n2c query and the `utxorpc` `ReadUtxos` RPC to
-resolve multiple TxIns/keys in one round trip instead of one query per input.
-Validated block application (`ledger.LedgerState.prefetchBlockUtxos`)
-also calls it once per block for the spend, collateral and reference inputs no
-transaction in that block produces; a failed batch falls back to per-input
-`GetUtxo` reads. Refs with no matching live UTxO are simply absent from the result;
-callers must not treat a partial result as an error. It de-duplicates the
-requested references and resolves exactly those (tx hash, output index) pairs
-in batches of up to 200, then keeps the live rows in Go. Each pair is its own
-equality lookup, so SQLite stays on `tx_id_output_idx` for every reference and
-reads neither the other outputs of the same transactions nor their assets;
-combining a large OR-chain of exact pairs with `deleted_slot = 0` can otherwise
-make the planner scan a deleted-slot index instead.
+Batched live-UTxO lookup by a list of (tx hash, output index) references — used
+by the `GetUTxOByTxIn` n2c query and the `utxorpc` `ReadUtxos` RPC to resolve
+multiple TxIns/keys in one round trip instead of one query per input. Validated
+block application (`ledger.LedgerState.prefetchBlockUtxos`) also calls it once
+per block for the spend, collateral and reference inputs no transaction in that
+block produces; a failed batch falls back to per-input `GetUtxo` reads. Refs
+with no matching live UTxO are simply absent from the result; callers must not
+treat a partial result as an error. It de-duplicates the requested references
+and resolves exactly those (tx hash, output index) pairs in batches of up to
+200, then keeps the live rows in Go. Each pair is its own equality lookup, so
+SQLite stays on `tx_id_output_idx` for every reference and reads neither the
+other outputs of the same transactions nor their assets; combining a large
+OR-chain of exact pairs with `deleted_slot = 0` can otherwise make the planner
+scan a deleted-slot index instead.
 
 ```sql
 SELECT u.*
@@ -4127,14 +5487,14 @@ node, and both only correct rows to what the slot's state already was.
 
 ### `GetUtxosByRefsAsOf`
 
-`GetUtxosByRefs`'s point-pinned sibling, used
-by the point-pinned `GetUTxOByTxIn` n2c query
-(`ledger.LedgerState.queryShelleyUtxoByTxIn`) when the LocalStateQuery
-session has an acquired point. It uses the same exact-reference lookup as
-`GetUtxosByRefs`, then filters in Go to the as-of-slot bounds: a row matches when it was created at-or-before the pinned
-slot and is either still live or was spent strictly after it —
-`added_slot`/`deleted_slot` already carry exactly that per-row history, so this
-is a real historical reconstruction rather than an approximation:
+`GetUtxosByRefs`'s point-pinned sibling, used by the point-pinned
+`GetUTxOByTxIn` n2c query (`ledger.LedgerState.queryShelleyUtxoByTxIn`) when the
+LocalStateQuery session has an acquired point. It uses the same exact-reference
+lookup as `GetUtxosByRefs`, then filters in Go to the as-of-slot bounds: a row
+matches when it was created at-or-before the pinned slot and is either still
+live or was spent strictly after it — `added_slot`/`deleted_slot` already carry
+exactly that per-row history, so this is a real historical reconstruction rather
+than an approximation:
 
 ```sql
 SELECT u.*
@@ -4306,7 +5666,8 @@ The optional inclusive range (`from`/`to` as `(slot, tx_index)`) filters
 `address_transaction` rows before selecting distinct transaction IDs. This
 prunes the exact-address candidate scan before counting or paging.
 
-Payment-only Byron-style or enterprise-style lookups use the same condition Dingo uses:
+Payment-only Byron-style or enterprise-style lookups use the same condition
+Dingo uses:
 
 ```sql
 WHERE atx.payment_key = decode($1, 'hex')
@@ -4431,13 +5792,17 @@ with the same overflow-free engine-side aggregate as
 so no UTxO row is streamed to the caller. It runs on the caller's transaction
 context.
 
+The SQLite aggregate reuses a private scratch integer for each group and uses
+64-bit parsing when a value fits; wider decimal values still use exact
+arbitrary-precision parsing. Step and inverse operations share those rules.
+
 `GetUtxosByAddress` accepts multiple address patterns and OR-joins their coarse
-SQL branches into a single query, mirroring `GetUtxosByAddressWithOrdering`.
-The coordinated `Database.UtxosByAddress` builds one exact-address pattern per
-input address and applies the same exact-address CBOR filtering as the
-single-address case. This backs the Ouroboros local-state-query `GetUTxOByAddress`
-handler (`ledger.queryShelleyUtxoByAddress`), whose wire request already
-carries a set of addresses.
+SQL branches into a single query, mirroring `GetUtxosByAddressWithOrdering`. The
+coordinated `Database.UtxosByAddress` builds one exact-address pattern per input
+address and applies the same exact-address CBOR filtering as the single-address
+case. This backs the Ouroboros local-state-query `GetUTxOByAddress` handler
+(`ledger.queryShelleyUtxoByAddress`), whose wire request already carries a set
+of addresses.
 
 `GetUtxosByAddress` (and `Database.UtxosByAddress`) require an explicit,
 positive `maxResults` bound: a broad pattern set, or a single address with an
@@ -4623,23 +5988,22 @@ columns alone. API-mode startup backfills missing address rows before exposing
 the API; core-mode nodes do not maintain this API-only index. See the
 historical Mesh balance notes above for its separate bounded row scan.
 
-The asset listing endpoints read the mint/burn history rather than live holdings.
-`ListMintedAssets` lists distinct assets with
-`GROUP BY policy_id, name ORDER BY MIN(id)`: ids follow application order, so
-that is each asset's first recorded event, oldest first, and a policy filter
-adds `WHERE policy_id = ?` on `idx_asset_mint_burn_lookup`. `CountMintedAssets`
-counts the same groups. The aggregate visits every event row of the requested
-policy (or of the table) per request, which is the price of Blockfrost's
-chronological asset order. The quantity of each listed asset is its live
-holdings, as in `/assets/{asset}`. `GetAssetMintBurnHistory` orders one asset's
-rows by `(slot, tx_index, id)`; a negative `quantity` is a burn.
-`GetAssetTransactions` lists the transactions that mint or burn an asset
-(`asset_mint_burn.tx_hash`), produce an output holding it (`utxo.transaction_id`
-or `collateral_return_for_tx_id` through `asset.utxo_id`), or spend one
-(`utxo.spent_at_tx_id`). The branches are UNIONed so each starts from an indexed
-asset or mint/burn lookup and a transaction matching several appears once;
-the inclusive `from`/`to` range filters on the transaction's
-`(slot, block_index)`. The `/assets/{asset}/utxos` listing reuses
+The asset listing endpoints read the mint/burn history rather than live
+holdings. `ListMintedAssets` lists distinct assets with `GROUP BY policy_id,
+name ORDER BY MIN(id)`: ids follow application order, so that is each asset's
+first recorded event, oldest first, and a policy filter adds `WHERE policy_id =
+?` on `idx_asset_mint_burn_lookup`. `CountMintedAssets` counts the same groups.
+The aggregate visits every event row of the requested policy (or of the table)
+per request, which is the price of Blockfrost's chronological asset order. The
+quantity of each listed asset is its live holdings, as in `/assets/{asset}`.
+`GetAssetMintBurnHistory` orders one asset's rows by `(slot, tx_index, id)`; a
+negative `quantity` is a burn. `GetAssetTransactions` lists the transactions
+that mint or burn an asset (`asset_mint_burn.tx_hash`), produce an output
+holding it (`utxo.transaction_id` or `collateral_return_for_tx_id` through
+`asset.utxo_id`), or spend one (`utxo.spent_at_tx_id`). The branches are UNIONed
+so each starts from an indexed asset or mint/burn lookup and a transaction
+matching several appears once; the inclusive `from`/`to` range filters on the
+transaction's `(slot, block_index)`. The `/assets/{asset}/utxos` listing reuses
 `GetUtxosByAddressWithOrdering` with `MatchAllAddresses` and the asset filter,
 cutting the page in SQL; a block range sets `CreatedFrom`/`CreatedTo`, so the
 ranged count and page are cut in SQL as well.
@@ -4651,10 +6015,10 @@ and `CountScriptRedeemers` counts the same rows; the adapter resolves each
 reference through the transaction's stored redeemers for the execution units,
 fee and datum hash. `GetScriptReferenceUtxos` selects live `utxo` rows whose
 `id` is in `utxo_reference_script` for the hash, ordered by `utxo.id`, and
-`CountScriptReferenceUtxos` counts them. Datum and script JSON/CBOR come from `datum.raw_datum` and
-`script.content`: a Plutus script's `cbor` is the stored content and its
-`serialised_size` is that content's length, and a datum's JSON is the detailed
-Plutus data schema of `raw_datum`.
+`CountScriptReferenceUtxos` counts them. Datum and script JSON/CBOR come from
+`datum.raw_datum` and `script.content`: a Plutus script's `cbor` is the stored
+content and its `serialised_size` is that content's length, and a datum's JSON
+is the detailed Plutus data schema of `raw_datum`.
 
 `GET /api/v0/addresses/{address}/total` sums every output ever paid to the
 address, spent or not, as `received_sum`, and the spent ones as `sent_sum`,
@@ -4684,35 +6048,36 @@ UTxO address queries carry an explicit `UtxoAddressPattern`. A complete
 `ExactAddress` is distinct from credential-scoped `PaymentPart` and
 `DelegationPart` fields; fields in one pattern are ANDed and multiple patterns
 are ORed. `PaymentScript`, when set with `PaymentPart`, also matches
-`utxo.payment_script`, because key and script hashes share one namespace. SQLite, MySQL, and Postgres use the stored credential columns only to
-narrow candidates. The coordinated database layer resolves output CBOR and
-compares the complete address bytes for exact patterns, which distinguishes
-enterprise addresses, pointer payloads, network IDs, and other address forms
-that share credentials. Ordered exact queries continue scanning coarse SQL
-pages until the requested number of exact matches is collected, so limits and
-UTxO-RPC continuation tokens do not skip matches hidden behind nonmatching
-credential siblings.
+`utxo.payment_script`, because key and script hashes share one namespace.
+SQLite, MySQL, and Postgres use the stored credential columns only to narrow
+candidates. The coordinated database layer resolves output CBOR and compares the
+complete address bytes for exact patterns, which distinguishes enterprise
+addresses, pointer payloads, network IDs, and other address forms that share
+credentials. Ordered exact queries continue scanning coarse SQL pages until the
+requested number of exact matches is collected, so limits and UTxO-RPC
+continuation tokens do not skip matches hidden behind nonmatching credential
+siblings.
 
 The `address_transaction` table likewise remains a credential-based candidate
 index. Full-address transaction reads resolve participating UTxO CBOR, compare
 complete address bytes, and scan candidate pages before applying the requested
 offset and limit.
 
-`UtxoWithOrderingQuery.Offset` and `.Descending` give `GetUtxosByAddressWithOrdering`
-page-number pagination (SQL `OFFSET` and a reversed `ORDER BY`) as an
-alternative to keyset (`After`) pagination. `Offset` is rejected whenever the
-address patterns require CBOR-based exact-address filtering
-(`RequiresExactAddressFilter`): the coarse SQL predicate over-matches address
-forms sharing a credential (pointer addresses), so `OFFSET` would skip a
+`UtxoWithOrderingQuery.Offset` and `.Descending` give
+`GetUtxosByAddressWithOrdering` page-number pagination (SQL `OFFSET` and a
+reversed `ORDER BY`) as an alternative to keyset (`After`) pagination. `Offset`
+is rejected whenever the address patterns require CBOR-based exact-address
+filtering (`RequiresExactAddressFilter`): the coarse SQL predicate over-matches
+address forms sharing a credential (pointer addresses), so `OFFSET` would skip a
 different set of rows than skipping exact matches would. `Descending` and
 `Offset` are each rejected combined with `After`: `Descending` because the
 cursor's comparison operators assume ascending order, and `Offset` because
-applying both would filter to rows after the cursor and then additionally
-skip `Offset` rows within that filtered set, silently returning a page
-shifted by both controls instead of the one either alone describes.
-`SkipAssets` omits a row's native assets from the result, for a candidate
-scan whose rows are discarded or only used to confirm a match and never
-returned to a caller reading `Utxo.Assets`.
+applying both would filter to rows after the cursor and then additionally skip
+`Offset` rows within that filtered set, silently returning a page shifted by
+both controls instead of the one either alone describes. `SkipAssets` omits a
+row's native assets from the result, for a candidate scan whose rows are
+discarded or only used to confirm a match and never returned to a caller reading
+`Utxo.Assets`.
 
 `CountUtxosByAddressWithOrdering` returns a plain `COUNT(*)` over the coarse
 predicate and is rejected for exact-address patterns, since the coarse
@@ -4775,7 +6140,9 @@ LIMIT 100;
 ### Transaction metadata JSON representation
 
 API-mode ingestion stores each unique metadata label with its raw CBOR value.
-If distinct ledger map keys cannot be represented uniquely as JSON object keys,
+If a ledger map uses a container-valued key, distinct ledger map keys cannot be
+represented uniquely as JSON object keys, the JSON representation exceeds the
+metadata JSON nesting bound, or JSON encoding fails,
 the label remains indexed and `json_value` is NULL; this does not reject an
 otherwise valid transaction. The label-transaction JSON endpoint emits
 `json_metadata: null`, while CBOR endpoints continue to serve the raw value.
@@ -4897,7 +6264,17 @@ pre-enactment snapshot rules.
 `GetLiveStakeInputsForPools` reads every registered credential for the requested
 pools from `reward_live_stake`, retaining zero-stake rows so an exact delegator
 count and positive reward-input set can be derived in one pass. A nonzero
-`expiryEpoch` applies the current `account.expiration_epoch` filter. The
+`expiryEpoch` applies the current `account.expiration_epoch` filter. Each row's
+stake is `total_stake` plus the credential's unfolded credits in credited
+rounds. A read of 64 or more pools totals those credits once per call, in one
+grouped read of every credential's unfolded outputs
+(`pendingRewardCreditTotals`) served by
+`idx_reward_account_output_credential_pending` alone, and adds the totals in
+Go; a smaller read, such as the retiring-pool capture, keeps a per-row
+subquery that visits only its own delegators' outputs. With no caller
+transaction the call opens a read transaction, so the totals and the pool reads
+share one snapshot and a fold committing between them cannot count a credit
+twice. The
 authoritative epoch-rollover capture uses this API only at the exact SNAP point,
 where its open transaction still has a tip at or before the snapshot slot and
 the live aggregate is therefore slot-exact.
@@ -4910,15 +6287,15 @@ capture (`ledger/snapshot.Manager.ComputeEpochBoundarySnapshot`, which calls
 fallback (which reconstructs historically and did resolve pointer stake) for a
 pool holding pointer stake -- two nodes on the same chain, or one node across a
 restart that lost the SNAP-point read, could persist different Mark stake for
-that pool. `GetPointerStakeInputsForPools` closes that
-gap by recomputing the same `active_delegation`/`pointer_resolution` join
-`GetStakeByPoolsAtSlot` uses, restricted to slot and boundarySlot, and its
-result is added to what `GetLiveStakeInputsForPools` returned rather than
-replacing it. Every other live consumer of `reward_live_stake` -- `GetStakeByPools`,
-DRep voting power, and a plain live `GetRewardStakeInputsForPools` query with the
-CIP-0163 gate off -- is unchanged: those still attribute only base-address
-stake, which matches Conway (where pointer addresses confer no stake) once the
-live tip has crossed the fork, and understates pre-Conway.
+that pool. `GetPointerStakeInputsForPools` closes that gap by recomputing the
+same `active_delegation`/`pointer_resolution` join `GetStakeByPoolsAtSlot` uses,
+restricted to slot and boundarySlot, and its result is added to what
+`GetLiveStakeInputsForPools` returned rather than replacing it. Every other live
+consumer of `reward_live_stake` -- `GetStakeByPools`, DRep voting power, and a
+plain live `GetRewardStakeInputsForPools` query with the CIP-0163 gate off -- is
+unchanged: those still attribute only base-address stake, which matches Conway
+(where pointer addresses confer no stake) once the live tip has crossed the
+fork, and understates pre-Conway.
 
 The era gate for pointer-address stake (`pointerStakeCounted`) resolves the era
 from the *later* of `slot` and `boundarySlot` (0 when the caller has no
@@ -4954,9 +6331,9 @@ on mainnet it runs long enough to stall header verification at the last block
 of the outgoing era.
 
 `GetRewardStakeInputsForPools` takes the same `slot`, `expiryEpoch`, and
-`inactivityPeriod` arguments. With the gate off (`expiryEpoch == 0`) it reads the
-live reward aggregate (`reward_live_stake`), byte-identical to the pre-CIP query
-(`slot`/`inactivityPeriod` ignored). With the gate on it selects the
+`inactivityPeriod` arguments. With the gate off (`expiryEpoch == 0`) it reads
+the live reward aggregate (`reward_live_stake`), byte-identical to the pre-CIP
+query (`slot`/`inactivityPeriod` ignored). With the gate on it selects the
 per-credential rows of the same `active_delegator_stake` CTE that
 `GetStakeByPoolsAtSlot` aggregates for pool totals — identical credential
 membership, slot-accurate stake values, and the identical historical expiry
@@ -5358,7 +6735,12 @@ GROUP BY a.drep, a.drep_type;
 
 ### `GetDRepDelegators`
 
-Stake credentials currently delegating their voting power to a DRep — the `delegators` member of the `GetDRepState` local-state-query result. `drep_type` distinguishes key (0) from script (1) DRep credentials that share the same 28-byte hash. Results are ordered by `(credential_tag, staking_key)` so the resulting CBOR set (tag 258) is canonical; cardano clients reject an unsorted set with a canonicity violation.
+Stake credentials currently delegating their voting power to a DRep — the
+`delegators` member of the `GetDRepState` local-state-query result. `drep_type`
+distinguishes key (0) from script (1) DRep credentials that share the same
+28-byte hash. Results are ordered by `(credential_tag, staking_key)` so the
+resulting CBOR set (tag 258) is canonical; cardano clients reject an unsorted
+set with a canonicity violation.
 
 ```sql
 -- Postgres
@@ -5372,7 +6754,11 @@ ORDER BY a.credential_tag, a.staking_key;
 
 ### `GetAccountDelegationHistory`
 
-Dingo unions all certificate tables that can carry pool delegation and orders with slot, transaction index, and certificate index. Each row also selects `tx.slot` (`tx_slot`) and `tx.block_hash` (`block_hash`); the Blockfrost adapter resolves `block_height` from the block store by hash (block numbers are not in the metadata SQL schema) and derives `block_time` from the slot.
+Dingo unions all certificate tables that can carry pool delegation and orders
+with slot, transaction index, and certificate index. Each row also selects
+`tx.slot` (`tx_slot`) and `tx.block_hash` (`block_hash`); the Blockfrost adapter
+resolves `block_height` from the block store by hash (block numbers are not in
+the metadata SQL schema) and derives `block_time` from the slot.
 
 ```sql
 SELECT *
@@ -5403,24 +6789,23 @@ deposit column at all), `tx.slot` (`tx_slot`), and `tx.block_hash`
 (`block_hash`, resolved to `block_height` by the adapter as above).
 
 The deposit column is selected raw, without `COALESCE`, so a NULL survives to
-the caller as a nil `AccountRegistrationHistoryRow.Deposit` meaning the
-recorded deposit is *unknown* — distinct from a recorded zero. A registration
-records NULL when its deposit could not be computed at ingest: the certificate
-index is absent from the `certDeposits` map that
-`MetadataStore.SetTransaction` receives, which is how
-`ledger.calculateCertificateDeposit` and `internal/node.Backfill`'s
+the caller as a nil `AccountRegistrationHistoryRow.Deposit` meaning the recorded
+deposit is *unknown* — distinct from a recorded zero. A registration records
+NULL when its deposit could not be computed at ingest: the certificate index is
+absent from the `certDeposits` map that `MetadataStore.SetTransaction` receives,
+which is how `ledger.calculateCertificateDeposit` and `internal/node.Backfill`'s
 `calculateCertDeposits` report an era with no `CertDepositFunc` or an
-`ErrIncompatibleProtocolParams` mismatch. This distinction is consensus-relevant:
-`LedgerView.StakeCredentialDeposit` returns the nil unchanged, and gouroboros'
-`UtxoValidateValueNotConservedUtxo` refunds a legacy stake deregistration at
-the current `KeyDeposit` only when the state reports absence, treating any
-non-nil value — including zero — as authoritative. Recording zero for an
-unknown deposit therefore refunds zero and fails value conservation on an
-otherwise valid transaction. A genuinely recorded zero stays a
-non-nil zero, which is the normal case on the devnet, whose
+`ErrIncompatibleProtocolParams` mismatch. This distinction is
+consensus-relevant: `LedgerView.StakeCredentialDeposit` returns the nil
+unchanged, and gouroboros' `UtxoValidateValueNotConservedUtxo` refunds a legacy
+stake deregistration at the current `KeyDeposit` only when the state reports
+absence, treating any non-nil value — including zero — as authoritative.
+Recording zero for an unknown deposit therefore refunds zero and fails value
+conservation on an otherwise valid transaction. A genuinely recorded zero stays
+a non-nil zero, which is the normal case on the devnet, whose
 `config/cardano/devnet/shelley-genesis.json` sets `"keyDeposit": 0`. The same
-rule as `account_import_baseline.deposit_amount`: substituting today's
-protocol parameter for a value the ingest never knew would invent history.
+rule as `account_import_baseline.deposit_amount`: substituting today's protocol
+parameter for a value the ingest never knew would invent history.
 
 Surfaces with no representation for an unknown deposit render it as `0` and are
 unchanged: the Blockfrost account registration-history response and the
@@ -5429,14 +6814,14 @@ unchanged: the Blockfrost account registration-history response and the
 `GetLatestAccountRegistrationAtOrBefore(credentialTag, stakingKey, slot, txn)`
 returns the single newest row of that same union whose `added_slot` is at or
 before `slot`, in the same `added_slot`, `block_index`, `cert_index` order, or
-nil when there is none. It wraps the union in a subquery filtered by
-`added_slot <= ?` with `LIMIT 1`, so the lookup is one round trip however many
-events follow the slot. A `slot` above `math.MaxInt64` is rejected. Like the
-history it reads, it does not consult `account_import_baseline`; the
-`StakeDelegDeposits` local-state query (`ledger.LedgerState.stakeRegistrationAsOf`)
-applies the baseline the way `LedgerView.StakeCredentialDeposit` does, as the
-latest registration when it is at least as new as the newest certificate at
-or before the queried point.
+nil when there is none. It wraps the union in a subquery filtered by `added_slot
+<= ?` with `LIMIT 1`, so the lookup is one round trip however many events follow
+the slot. A `slot` above `math.MaxInt64` is rejected. Like the history it reads,
+it does not consult `account_import_baseline`; the `StakeDelegDeposits`
+local-state query (`ledger.LedgerState.stakeRegistrationAsOf`) applies the
+baseline the way `LedgerView.StakeCredentialDeposit` does, as the latest
+registration when it is at least as new as the newest certificate at or before
+the queried point.
 
 ### `GetAccountsByCredentialAtSlot`
 
@@ -5446,17 +6831,16 @@ or before the queried point.
 included, and keeps the row's `active`, `pool`, `drep` and `drep_type` when its
 `added_slot` is at or before `slot`. Every write to those columns stamps
 `added_slot`, including the two no certificate records:
-`ClearDelegationsToRetiredPool` (POOLREAP), `ClearDanglingDRepDelegations`
-(the PV10 HARDFORK rule), and DRep deregistration. A row written after `slot`
-is derived instead by
-`deriveAccountStateAtSlot`, the read-only derivation
+`ClearDelegationsToRetiredPool` (POOLREAP), `ClearDanglingDRepDelegations` (the
+PV10 HARDFORK rule), and DRep deregistration. A row written after `slot` is
+derived instead by `deriveAccountStateAtSlot`, the read-only derivation
 `RestoreAccountStateAtSlot` writes back on rollback: certificates at or before
 `slot`, the authoritative `account_import_baseline` full-state event, the reap
-check, and `account_drep_clear` boundary history. An account that derivation finds absent at
-`slot` (created after it with no registration at or before it), or inactive
-there, is omitted. `reward` is the balance at `slot` from `historicalRewards`,
-the reconstruction historical stake uses: the live balance less later
-`account_reward_delta` credits, or the first later withdrawal's
+check, and `account_drep_clear` boundary history. An account that derivation
+finds absent at `slot` (created after it with no registration at or before it),
+or inactive there, is omitted. `reward` is the balance at `slot` from
+`historicalRewards`, the reconstruction historical stake uses: the live balance
+less later `account_reward_delta` credits, or the first later withdrawal's
 `previous_reward` less the credits between, plus the unfolded credits of a
 pending round whose `boundary_slot` is at or before `slot`. The same event
 ordering is used by rollback: import baselines win equal-slot ties, while a
@@ -5465,28 +6849,27 @@ same-slot certificate follows and therefore wins a PV10 clear.
 ### DRep and governance state at a slot
 
 `GetDrepsAtSlot(refs, slot, txn)` returns the given DReps, or every DRep when
-`refs` is empty, that were registered at `slot`. A `drep` row whose
-`added_slot` is at or before `slot` and that has no `drep_expiry_history` row
-after it is exact there and returned as is; any other is derived by
-`deriveDrepStateAtSlot`, the read-only derivation `RestoreDrepStateAtSlot`
-writes back on rollback: the latest registration, deregistration and update
-certificates at or before `slot` for registration and anchor, and the latest
-`drep_expiry_history` row at or before it for `last_activity_epoch` and
-`expiry_epoch`. Every write to `drep.active` and the anchor stamps `added_slot`
-except the catch-up reconcile's `DeactivateDreps`, which falls below the
-Mithril trust boundary that Acquire refuses. With no expiry history row at or
-before `slot`, the same fallback as rollback applies.
-`GetDrepRegistrationDepositsAtSlot(refs, slot, txn)` returns, for each of
-`refs` (every DRep when empty), the deposit of its latest registration at or
-before `slot`, keyed by `models.DrepDepositKey`, in one query per ref (one in
-all for the unrestricted form). `GetDRepDelegatorsAtSlot(dreps, slot, txn)` returns the stake
-credentials delegating to each of `dreps` (every DRep when empty) at `slot`,
-keyed by the DRep's `StakeCredentialRef.MapKey()` in `(credential_tag,
-staking_key)` order: active accounts with `added_slot` at or before `slot`
-read from their row, and every account written after it derived by
+`refs` is empty, that were registered at `slot`. A `drep` row whose `added_slot`
+is at or before `slot` and that has no `drep_expiry_history` row after it is
+exact there and returned as is; any other is derived by `deriveDrepStateAtSlot`,
+the read-only derivation `RestoreDrepStateAtSlot` writes back on rollback: the
+latest registration, deregistration and update certificates at or before `slot`
+for registration and anchor, and the latest `drep_expiry_history` row at or
+before it for `last_activity_epoch` and `expiry_epoch`. Every write to
+`drep.active` and the anchor stamps `added_slot` except the catch-up reconcile's
+`DeactivateDreps`, which falls below the Mithril trust boundary that Acquire
+refuses. With no expiry history row at or before `slot`, the same fallback as
+rollback applies. `GetDrepRegistrationDepositsAtSlot(refs, slot, txn)` returns,
+for each of `refs` (every DRep when empty), the deposit of its latest
+registration at or before `slot`, keyed by `models.DrepDepositKey`, in one query
+per ref (one in all for the unrestricted form). `GetDRepDelegatorsAtSlot(dreps,
+slot, txn)` returns the stake credentials delegating to each of `dreps` (every
+DRep when empty) at `slot`, keyed by the DRep's `StakeCredentialRef.MapKey()` in
+`(credential_tag, staking_key)` order: active accounts with `added_slot` at or
+before `slot` read from their row, and every account written after it derived by
 `deriveAccountStateAtSlot` (see `GetAccountsByCredentialAtSlot`). For named
-DReps (deduplicated) only the accounts written after `slot` that could
-delegate to one of them are derived: those whose row, import baseline, or a
+DReps (deduplicated) only the accounts written after `slot` that could delegate
+to one of them are derived: those whose row, import baseline, or a
 vote-delegation certificate at or before `slot` names it, the only sources the
 derivation takes a DRep from.
 
@@ -5693,11 +7076,11 @@ When the snapshot's PState carries a re-registration staged in
 `futurePoolParams` (made in the anchor epoch, not yet promoted), the import
 writes two registrations for that pool at the import slot. Stable registration
 indexes order the current parameters first and staged parameters second. The
-staged row is the pool's latest registration, so the next epoch boundary and a pool
-retirement refund read it, and the `pool` row holds its parameters, as after a
-live re-registration. The deposit is the same on both rows. Lookups at the
-import slot can resolve current and staged parameters by their index; earlier
-cutoffs still have the history gap.
+staged row is the pool's latest registration, so the next epoch boundary and a
+pool retirement refund read it, and the `pool` row holds its parameters, as
+after a live re-registration. The deposit is the same on both rows. Lookups at
+the import slot can resolve current and staged parameters by their index;
+earlier cutoffs still have the history gap.
 
 `electingVrfKeyHashFromSnapshotWithContext` resolves a snapshot captured at
 or below the Mithril anchor against the registration effective in the import
@@ -5781,22 +7164,21 @@ checking retirement on only whichever candidate a single `ORDER BY ... LIMIT 1`
 happened to pick
 (`TestGetPoolByVrfKeyHashSkipsRetiredCandidateForActiveOwner`).
 
-Retirement is resolved against `epochStartSlot`'s own epoch (`epoch_bound`),
-not the live database tip, via a `pool_active` CTE applied to *both* tiers --
-not only tier 1, since restricting it to tier 1 alone still let a retired
-pool's same-epoch registration leak through tier 2 unfiltered. `pool_active`
-mirrors `GetActivePoolKeyHashesAtSlot`'s precedence rule (a later registration
-cancels an earlier retirement; a retirement whose target epoch is still ahead
-of `epoch_bound` has not taken effect), compared against each candidate's own
-`effective_reg` row rather than a fresh `<=`-bounded lookup. This exists
-because a pool that retires and later submits a fresh registration for a
-*different* key un-retires via that new registration -- cardano-ledger treats
-it as a first registration, not a deferred re-registration, since the pool had
-left `psStakePools` -- and checking retirement against "now" (the earlier
+Retirement is resolved against `epochStartSlot`'s own epoch (`epoch_bound`), not
+the live database tip, via a `pool_active` CTE applied to *both* tiers -- not
+only tier 1, since restricting it to tier 1 alone still let a retired pool's
+same-epoch registration leak through tier 2 unfiltered. `pool_active` mirrors
+`GetActivePoolKeyHashesAtSlot`'s precedence rule (a later registration cancels
+an earlier retirement; a retirement whose target epoch is still ahead of
+`epoch_bound` has not taken effect), compared against each candidate's own
+`effective_reg` row rather than a fresh `<=`-bounded lookup. This exists because
+a pool that retires and later submits a fresh registration for a *different* key
+un-retires via that new registration -- cardano-ledger treats it as a first
+registration, not a deferred re-registration, since the pool had left
+`psStakePools` -- and checking retirement against "now" (the earlier
 `activePoolOrNil` call this replaced) let that pool's stale, pre-retirement
-registration for its *old* key still resolve as active, reporting the old key
-in use when the pool no longer held it: this method's own bug class,
-reintroduced
+registration for its *old* key still resolve as active, reporting the old key in
+use when the pool no longer held it: this method's own bug class, reintroduced
 (`TestGetPoolByVrfKeyHashFreesKeyAfterRetirementThenDifferentKeyReRegistration`).
 `epoch_bound` resolves to `NULL`, not an error, when no epoch row covers
 `epochStartSlot`; a retirement is then never treated as confirmed-effective,
@@ -5988,7 +7370,24 @@ row from `dingo_db_missing` to the informational `pool_departed`.
 
 ### `GetMIRCertsInSlotRange`
 
-MIR certificates for the epoch range `[startSlot, endSlot)`, applied at the epoch boundary as the Shelley INSTANT rule. Distribution certs (`other_pot = 0`) credit registered reward accounts and debit the source pot in `network_state`; pot-to-pot transfer certs (`other_pot > 0`) move that amount between treasury and reserves. Every cert in the range is aggregated before any is applied: distribution totals count only credentials with a registered, active account, transfers are folded into the available pot balances, and the boundary writes a single `network_state` row. If either pot cannot cover its total the boundary is a no-op rather than an error, so an over-budget cert cannot fail the epoch rollover on every retry. MIR has no transaction hash to serve as the `account_reward_delta` discriminator, so the source pot is hashed into a synthetic one instead: this keeps a reserves credit and a treasury credit to the same account at one boundary as distinct journal rows, while multiple MIR certs crediting the same account from the same pot in one boundary fold into a single row. The fold itself is protocol-era-conditional, matching cardano-ledger's `InstantaneousRewards` accumulation for each era: additive for protocol major 5 (Alonzo) onward, and replaced by the latest certificate's amount for majors 2-4 (Shelley, Allegra, Mary).
+MIR certificates for the epoch range `[startSlot, endSlot)`, applied at the
+epoch boundary as the Shelley INSTANT rule. Distribution certs (`other_pot = 0`)
+credit registered reward accounts and debit the source pot in `network_state`;
+pot-to-pot transfer certs (`other_pot > 0`) move that amount between treasury
+and reserves. Every cert in the range is aggregated before any is applied:
+distribution totals count only credentials with a registered, active account,
+transfers are folded into the available pot balances, and the boundary writes a
+single `network_state` row. If either pot cannot cover its total the boundary is
+a no-op rather than an error, so an over-budget cert cannot fail the epoch
+rollover on every retry. MIR has no transaction hash to serve as the
+`account_reward_delta` discriminator, so the source pot is hashed into a
+synthetic one instead: this keeps a reserves credit and a treasury credit to the
+same account at one boundary as distinct journal rows, while multiple MIR certs
+crediting the same account from the same pot in one boundary fold into a single
+row. The fold itself is protocol-era-conditional, matching cardano-ledger's
+`InstantaneousRewards` accumulation for each era: additive for protocol major 5
+(Alonzo) onward, and replaced by the latest certificate's amount for majors 2-4
+(Shelley, Allegra, Mary).
 
 ```sql
 SELECT mir.id, mir.pot, mir.other_pot, mir.added_slot,
@@ -6206,7 +7605,11 @@ ORDER BY gp.proposed_epoch ASC, gp.added_slot ASC,
 
 ### `GetGovernanceProposalsRefundedAt`
 
-Returns the proposals whose deposit was returned when an epoch began: enacted at the epoch (with a ratified epoch) or dropped at it, excluding soft-deleted rows. Unlike the boundary replay lookups it reads by epoch alone, for the Koios parity check, which has no boundary slot to name; each row carries its own `enacted_slot` or `dropped_slot`.
+Returns the proposals whose deposit was returned when an epoch began: enacted at
+the epoch (with a ratified epoch) or dropped at it, excluding soft-deleted rows.
+Unlike the boundary replay lookups it reads by epoch alone, for the Koios parity
+check, which has no boundary slot to name; each row carries its own
+`enacted_slot` or `dropped_slot`.
 
 ```sql
 SELECT gp.*, gpd.dropped_epoch, gpd.dropped_slot, gpo.tx_index
@@ -6223,7 +7626,11 @@ ORDER BY gp.proposed_epoch ASC, gp.added_slot ASC,
 
 ### `GetChildGovernanceProposals`
 
-Used during the Conway epoch boundary orphan sweep (`removeOrphanedProposals`). Returns all active proposals that reference a given enacted or expired proposal as their parent. The composite index `idx_gov_proposal_parent` on `(parent_tx_hash, parent_action_idx)` makes this lookup O(children) rather than O(table).
+Used during the Conway epoch boundary orphan sweep (`removeOrphanedProposals`).
+Returns all active proposals that reference a given enacted or expired proposal
+as their parent. The composite index `idx_gov_proposal_parent` on
+`(parent_tx_hash, parent_action_idx)` makes this lookup O(children) rather than
+O(table).
 
 ```sql
 SELECT *
@@ -6239,14 +7646,29 @@ ORDER BY proposed_epoch ASC, added_slot ASC,
   tx_hash ASC, action_index ASC;
 ```
 
-The sweep is transitive (BFS): each orphaned proposal is itself used as a seed to find its own children, continuing until the graph is exhausted. Orphaned proposals are marked with `expired_epoch`/`expired_slot` at the boundary slot so the existing slot-based rollback path in `DeleteGovernanceProposalsAfterSlot` reverts them cleanly.
+The sweep is transitive (BFS): each orphaned proposal is itself used as a seed
+to find its own children, continuing until the graph is exhausted. Orphaned
+proposals are marked with `expired_epoch`/`expired_slot` at the boundary slot so
+the existing slot-based rollback path in `DeleteGovernanceProposalsAfterSlot`
+reverts them cleanly.
 
-Which tick returns an orphan's deposit depends on why it was removed, because cardano-ledger unions the enacted action with the siblings its enactment removed and returns all of those deposits in one tick, while an expired action is removed a tick after it was flagged:
+Which tick returns an orphan's deposit depends on why it was removed, because
+cardano-ledger unions the enacted action with the siblings its enactment removed
+and returns all of those deposits in one tick, while an expired action is
+removed a tick after it was flagged:
 
-- Removed because a competing sibling enacted: refunded in the enacting tick, alongside the winner's own deposit, and stamped into `governance_proposal_drop` at that boundary so the drop step does not return it again.
-- Removed as the descendant subtree of a naturally expired action: marked expired only, and refunded one epoch later alongside its expired ancestor. The drop step sweeps the dropped action's remaining subtree again with an immediate refund, because children proposed while the action was expired but still a member leave the proposals set with it.
+- Removed because a competing sibling enacted: refunded in the enacting tick,
+  alongside the winner's own deposit, and stamped into
+  `governance_proposal_drop` at that boundary so the drop step does not return
+  it again.
+- Removed as the descendant subtree of a naturally expired action: marked
+  expired only, and refunded one epoch later alongside its expired ancestor. The
+  drop step sweeps the dropped action's remaining subtree again with an
+  immediate refund, because children proposed while the action was expired but
+  still a member leave the proposals set with it.
 
-A proposal reachable both ways takes the enactment tick, which is when cardano-ledger would have removed it.
+A proposal reachable both ways takes the enactment tick, which is when
+cardano-ledger would have removed it.
 
 ### `GetPParams`, `GetPParamUpdates`, and `GetTip`
 
@@ -6363,7 +7785,7 @@ cleanup (`UtxosDeleteConsumed`, persisting the floor first) up to the
 committed tip, which lies at or below the certified immutable tip, after the
 first batch it commits in a process and then once every
 `trustedBatchPruneEvery` (16) committed batches, in deletes of
-`trustedBatchPruneRows` (20,000) rows until none is left or 30 seconds have
+`trustedBatchPruneRows` (10,000) rows until none is left or 30 seconds have
 passed. A spent row costs less to delete the more rows its transaction
 deletes with it, so draining several batches' spends in a few large
 transactions costs less than draining each batch's in one or two small ones.
@@ -6533,15 +7955,16 @@ upsert retains the stored account count and recomputes the merged count.
 
 Opening an older cache adds and backfills these columns in one transaction from
 stored `check_mismatches` categories and scopes. Total counts and mismatch rows
-are preserved. Reopening an upgraded cache does not rerun the backfill. Observer retry selection uses the ERROR status of its own phase even when
-Koios reference timestamps have not changed, allowing a later check to observe
-newly committed Dingo state. CLI freshness selection is unchanged.
-Fetch/check errors update only the failed queue's persisted status. The other
-queue's verdict, check timestamp, comparison counts, pool metadata,
-mismatch evidence, and Koios reference rows remain intact. This makes retries
-survive reopening the cache even when a previous PASS reference is still fresh.
-An error before any comparison creates an unchecked row, keeping the initial
-aggregate comparison eligible for freshness-based startup selection.
+are preserved. Reopening an upgraded cache does not rerun the backfill. Observer
+retry selection uses the ERROR status of its own phase even when Koios reference
+timestamps have not changed, allowing a later check to observe newly committed
+Dingo state. CLI freshness selection is unchanged. Fetch/check errors update
+only the failed queue's persisted status. The other queue's verdict, check
+timestamp, comparison counts, pool metadata, mismatch evidence, and Koios
+reference rows remain intact. This makes retries survive reopening the cache
+even when a previous PASS reference is still fresh. An error before any
+comparison creates an unchecked row, keeping the initial aggregate comparison
+eligible for freshness-based startup selection.
 
 Flattened Conway certificate snapshots classify nonempty stake-account and
 DRep maps by their value encodings. Empty DState maps do not claim a DRep

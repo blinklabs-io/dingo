@@ -7485,7 +7485,7 @@ func TestValidatePeerChainSelectionHeaderCryptoUsesForkNonce(
 	ls.config.PeerHeaderLookupFunc = peerLookup(forkHeader)
 
 	peerNonce, peerEpoch, fork, nonceErr :=
-		ls.peerChainSelectionEpochNonce(
+		ls.peerChainSelectionEpochNonce(t.Context(),
 			ouroboros.ConnectionId{},
 			target.block.Header(),
 			ls.loadConsensusSnapshot(),
@@ -7504,6 +7504,79 @@ func TestValidatePeerChainSelectionHeaderCryptoUsesForkNonce(
 		target.block.Header(),
 	)
 	require.NoError(t, peerErr)
+	// A fork header retained by the peer can have a verdict from before an
+	// epoch-state publication. Its bytes remain useful as ancestry, but the
+	// old verdict cannot authenticate the candidate in the new context.
+	staleGeneration, staleContext := ls.currentHeaderVerificationContext()
+	currentLookup := peerLookup(forkHeader)
+	ls.config.PeerHeaderLookupFunc = func(
+		connID ouroboros.ConnectionId,
+		hash []byte,
+	) (ChainsyncEvent, []byte, bool) {
+		event, previous, found := currentLookup(connID, hash)
+		event.HeaderCryptoVerificationGeneration = staleGeneration
+		return event, previous, found
+	}
+	originalEpochs := cloneEpochs(ls.epochCache)
+	ls.epochCache = cloneEpochs(originalEpochs)
+	ls.epochCache[1].CandidateNonce = bytes.Repeat(
+		[]byte{0xc7}, lcommon.Blake2b256Size,
+	)
+	ls.publishSnapshotsLocked()
+	_, changedContext := ls.currentHeaderVerificationContext()
+	require.NotEqual(t, staleContext, changedContext)
+	require.NoError(t, ls.ValidatePeerChainSelectionHeaderCrypto(
+		ouroboros.ConnectionId{}, target.block.Header(),
+	), "a valid competing fork must be reverified after the context changes")
+
+	// A second context change can leave the source nonce and folded header
+	// hashes intact while invalidating the ancestor's stake state. The old
+	// nonce prefix must not skip that ancestor's current-context check.
+	require.NoError(t, db.Metadata().DeletePoolStakeSnapshotsForEpoch(
+		4,
+		models.PoolStakeSnapshotTypeMark,
+		nil,
+	))
+	ls.epochCache = cloneEpochs(originalEpochs)
+	ls.epochCache[1].CandidateNonce = bytes.Repeat(
+		[]byte{0xc8}, lcommon.Blake2b256Size,
+	)
+	ls.publishSnapshotsLocked()
+	staleAncestorErr := ls.ValidatePeerChainSelectionHeaderCrypto(
+		ouroboros.ConnectionId{}, target.block.Header(),
+	)
+	require.Error(t, staleAncestorErr)
+	require.ErrorContains(t, staleAncestorErr, "pool")
+	ls.forkHeaderNonceCacheMutex.Lock()
+	opCertLastHash := bytes.Clone(
+		ls.forkHeaderPathCache[connIdKey(ouroboros.ConnectionId{})].opCertLastHash,
+	)
+	ls.forkHeaderNonceCacheMutex.Unlock()
+	require.Empty(t, opCertLastHash,
+		"opcert counters must not advance over an unverified ancestor")
+	seedPoolStakeSnapshot(t, db, 4, forkPool[:], 1_000_000_000)
+	require.NoError(t, ls.ValidatePeerChainSelectionHeaderCrypto(
+		ouroboros.ConnectionId{}, target.block.Header(),
+	))
+
+	ls.epochCache = cloneEpochs(originalEpochs)
+	ls.epochCache[0].Nonce = bytes.Repeat(
+		[]byte{0xd8}, lcommon.Blake2b256Size,
+	)
+	ls.publishSnapshotsLocked()
+	err = ls.ValidatePeerChainSelectionHeaderCrypto(
+		ouroboros.ConnectionId{}, target.block.Header(),
+	)
+	require.Error(t, err)
+	require.False(t, IsHeaderVerificationDeferred(err),
+		"a parent invalid under the new nonce must be rejected, not deferred")
+	require.ErrorContains(t, err, "block header verification failed at slot 300")
+	ls.epochCache = originalEpochs
+	ls.publishSnapshotsLocked()
+	ls.config.PeerHeaderLookupFunc = currentLookup
+	require.NoError(t, ls.ValidatePeerChainSelectionHeaderCrypto(
+		ouroboros.ConnectionId{}, target.block.Header(),
+	))
 	require.NoError(t, db.Metadata().DeletePoolStakeSnapshotsForEpoch(
 		4,
 		models.PoolStakeSnapshotTypeMark,
@@ -7582,7 +7655,7 @@ func TestValidatePeerChainSelectionHeaderCryptoUsesForkNonce(
 	ls.epochCache = ls.epochCache[:1]
 	ls.publishSnapshotsLocked()
 	_, _, lateTargetIsFork, lateTargetNonceErr :=
-		ls.peerChainSelectionEpochNonce(
+		ls.peerChainSelectionEpochNonce(t.Context(),
 			ouroboros.ConnectionId{},
 			lateTarget.block.Header(),
 			ls.loadConsensusSnapshot(),
@@ -7894,7 +7967,7 @@ func TestValidatePeerChainSelectionHeaderCryptoUsesForkNonce(
 		}, lateAnchor.block.Hash().Bytes(), true
 	}
 	derivedMultiEpochNonce, _, isMultiEpochFork, deriveMultiEpochErr :=
-		ls.peerChainSelectionEpochNonce(
+		ls.peerChainSelectionEpochNonce(t.Context(),
 			ouroboros.ConnectionId{},
 			multiEpochForkTarget.block.Header(),
 			ls.loadConsensusSnapshot(),
@@ -8024,7 +8097,7 @@ func TestValidatePeerChainSelectionHeaderCryptoUsesForkNonce(
 		}, peerHeader.block.Header().PrevHash().Bytes(), true
 	}
 	derivedEpoch8Nonce, _, isEpoch8Fork, deriveEpoch8Err :=
-		ls.peerChainSelectionEpochNonce(
+		ls.peerChainSelectionEpochNonce(t.Context(),
 			ouroboros.ConnectionId{},
 			epoch8Target.block.Header(),
 			ls.loadConsensusSnapshot(),
@@ -8391,7 +8464,7 @@ func TestPeerChainSelectionEpochNonceUsesSeededShelleyBoundaryNonce(
 	require.NoError(t, err)
 	require.Empty(t, byronNonce)
 
-	nonce, epoch, candidate, err := ls.peerChainSelectionEpochNonce(
+	nonce, epoch, candidate, err := ls.peerChainSelectionEpochNonce(t.Context(),
 		ouroboros.ConnectionId{},
 		shelleyBlock.Header(),
 		ls.loadConsensusSnapshot(),

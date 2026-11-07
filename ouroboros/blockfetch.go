@@ -17,7 +17,6 @@ package ouroboros
 import (
 	"bytes"
 	"context"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -34,6 +33,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/protocol/blockfetch"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // blockfetchMetricsCdfUpdateInterval controls how often CDF metrics are
@@ -251,7 +251,16 @@ func (o *Ouroboros) decodeBlockfetchBlock(
 		return models.DecodeConwayPeerBlock(raw)
 	}
 	if blockType == gledger.BlockTypeDijkstra {
-		return models.DecodeDijkstraPeerBlock(raw)
+		block, err = models.DecodeDijkstraPeerBlock(raw)
+		if err != nil {
+			return nil, err
+		}
+		if o.requiresLeiosDijkstraHeader() {
+			if err := requireLeiosHeaderExtension(block.Header()); err != nil {
+				return nil, err
+			}
+		}
+		return block, nil
 	}
 	return gledger.NewBlockFromCbor(blockType, raw)
 }
@@ -271,14 +280,9 @@ func (o *Ouroboros) blockfetchClientBlockRaw(
 	blockType uint,
 	blockData []byte,
 ) (err error) {
-	// The span covers the decode, so a delivery that fails to decode is still
-	// traced; the block's own attributes are added once it has decoded.
-	_, span := tracing.Start(
-		context.Background(),
-		"blockfetch.block",
-		attribute.String("connection.id", ctx.ConnectionId.String()),
-	)
-	defer func() { tracing.End(span, err) }()
+	// The block's trace is only known once it has decoded, so the span is
+	// started afterwards and backdated to cover the decode.
+	received := time.Now()
 	key := hashDecodeInput(blockType, blockData)
 	cacheBytes := decodeCacheChargeForRaw(len(blockData))
 	if !hasCborArrayEnvelope(blockData) {
@@ -319,7 +323,24 @@ func (o *Ouroboros) blockfetchClientBlockRaw(
 			blockType,
 		)
 	}
-	span.SetAttributes(blockSpanAttributes(block)...)
+	_, span := tracing.StartHeader(
+		context.Background(),
+		tracing.StageBodyReceived,
+		"block.body_received",
+		block,
+		trace.WithTimestamp(received),
+	)
+	if span.IsRecording() {
+		span.SetAttributes(
+			attribute.String(
+				"peer.connection_id",
+				ctx.ConnectionId.String(),
+			),
+			tracing.Uint64("block.slot", block.SlotNumber()),
+			attribute.Int("block.size", len(blockData)),
+		)
+	}
+	defer func() { tracing.End(span, err) }()
 	return o.blockfetchClientBlock(ctx, blockType, block)
 }
 
@@ -944,19 +965,8 @@ func (o *Ouroboros) BlockfetchClientRequestRange(
 	return requestId, nil
 }
 
-// blockSpanAttributes describes a decoded block on its blockfetch span.
-func blockSpanAttributes(block gledger.Block) []attribute.KeyValue {
-	return []attribute.KeyValue{
-		tracing.Uint64("block.slot", block.SlotNumber()),
-		attribute.String(
-			"block.hash",
-			hex.EncodeToString(block.Hash().Bytes()),
-		),
-	}
-}
-
 // blockfetchClientBlock updates metrics and peer scoring for a decoded block
-// and forwards it to the shared block handler. The caller owns the span.
+// and forwards it to the shared block handler.
 func (o *Ouroboros) blockfetchClientBlock(
 	ctx blockfetch.CallbackContext,
 	blockType uint,

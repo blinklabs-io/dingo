@@ -894,6 +894,36 @@ func TestBuildBlockSupportsAllEras(t *testing.T) {
 // block/header layout, so the forged block round-trips through the
 // Dijkstra block constructor.
 func TestBuildBlockSupportsDijkstraEra(t *testing.T) {
+	// cardano-node 11.2.0 forges and requires the 10-field Praos header body
+	// on a Dijkstra chain; the 12-field Leios prototype body is rejected
+	// ("Size mismatch when decoding Record HeaderBody"). The extension is
+	// emitted only on a Leios network.
+	for _, tc := range []struct {
+		name            string
+		leiosExtension  bool
+		wantBodyFields  int
+		wantExtensionOK bool
+	}{
+		{"praos header body", false, 10, false},
+		{"leios header extension", true, 12, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			testBuildBlockSupportsDijkstraEra(
+				t,
+				tc.leiosExtension,
+				tc.wantBodyFields,
+				tc.wantExtensionOK,
+			)
+		})
+	}
+}
+
+func testBuildBlockSupportsDijkstraEra(
+	t *testing.T,
+	leiosExtension bool,
+	wantBodyFields int,
+	wantExtension bool,
+) {
 	creds := setupTestCredentials(t)
 
 	// DijkstraProtocolParameters embeds ConwayProtocolParameters, so the
@@ -929,6 +959,8 @@ func TestBuildBlockSupportsDijkstraEra(t *testing.T) {
 			nonce: make([]byte, 32),
 		},
 		Credentials: creds,
+
+		LeiosHeaderExtension: leiosExtension,
 	})
 	require.NoError(t, err)
 
@@ -965,11 +997,18 @@ func TestBuildBlockSupportsDijkstraEra(t *testing.T) {
 	// mismatch means the network would reject the block.
 	dblock := block.(*dijkstra.DijkstraBlock)
 	certified, present := dblock.BlockHeader.LeiosCertified()
-	require.True(
+	assert.Equal(
 		t,
+		wantExtension,
 		present,
-		"Dijkstra forge must emit the Leios header extension",
+		"Leios header extension presence",
 	)
+	var headerItems, headerBody []cbor.RawMessage
+	_, err = cbor.Decode(blockItems[0], &headerItems)
+	require.NoError(t, err)
+	_, err = cbor.Decode(headerItems[0], &headerBody)
+	require.NoError(t, err)
+	assert.Len(t, headerBody, wantBodyFields, "header body field count")
 	assert.False(t, certified)
 	_, _, announced := dblock.BlockHeader.LeiosAnnouncement()
 	assert.False(t, announced)
@@ -2774,11 +2813,14 @@ func TestBuildBlockPropagatesEpochForSlotError(t *testing.T) {
 		"EpochNonce must not be queried when EpochForSlot fails")
 }
 
+// Not t.Parallel: sets the process-wide dingoversion.Version, which the
+// linker populates in release builds and is empty in a test binary.
 func TestBuildBlockUsesDingoProtocolMinor(t *testing.T) {
 	creds := setupTestCredentials(t)
 
 	tests := []struct {
 		name         string
+		enabled      bool
 		major        uint
 		pparamMinor  uint
 		expectedSlot uint64
@@ -2795,10 +2837,14 @@ func TestBuildBlockUsesDingoProtocolMinor(t *testing.T) {
 			pparamMinor:  5,
 			expectedSlot: 1002,
 		},
+		{name: "version payload", enabled: true, major: 9, expectedSlot: 1003},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			prior := dingoversion.Version
+			t.Cleanup(func() { dingoversion.Version = prior })
+			dingoversion.Version = "v1.2.3"
 			pparams := &conway.ConwayProtocolParameters{
 				ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
 					Major: tt.major,
@@ -2829,8 +2875,11 @@ func TestBuildBlockUsesDingoProtocolMinor(t *testing.T) {
 					epoch: 1,
 					nonce: make([]byte, 32),
 				},
-				Credentials: creds,
+				Credentials:    creds,
+				CIP0203Enabled: tt.enabled,
 			})
+			wantMinor, versionErr := dingoversion.HeaderProtocolMinor(tt.enabled)
+			require.NoError(t, versionErr)
 			require.NoError(t, err)
 
 			_, blockCbor, err := builder.BuildBlock(
@@ -2847,7 +2896,7 @@ func TestBuildBlockUsesDingoProtocolMinor(t *testing.T) {
 			assert.Equal(t, uint64(tt.major), protoVersion.Major)
 			assert.Equal(
 				t,
-				dingoversion.BlockHeaderProtocolMinor,
+				wantMinor,
 				protoVersion.Minor,
 			)
 		})

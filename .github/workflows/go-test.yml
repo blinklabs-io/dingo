@@ -66,6 +66,13 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.event.merge_group.head_ref || github.run_id }}
   cancel-in-progress: true
 
+env:
+  # A comma after a proxy falls back to the next entry only on a 404 or 410,
+  # so a dropped proxy connection fails the download outright. A pipe falls
+  # back on any error; go.sum and the checksum database still verify what a
+  # direct fetch returns.
+  GOPROXY: 'https://proxy.golang.org|direct'
+
 jobs:
   # Tier 1. One runner for the whole developer loop, cheapest steps first, so
   # a change that does not compile fails in minutes without a second job ever
@@ -194,6 +201,9 @@ jobs:
       - name: npm-test
         if: steps.detect.outputs.run-ci == 'true'
         run: npm test
+      - name: test-merge-group-cancellation
+        if: steps.detect.outputs.run-ci == 'true'
+        run: node --test .github/scripts/test-cancel-obsolete-merge-groups.cjs
       - name: go-test
         # No services and no -race: the Postgres and MySQL variants in
         # internal/test/conformance gate on POSTGRES_PASSWORD / MYSQL_DSN and
@@ -620,6 +630,16 @@ jobs:
     steps:
       # make build reads the version from `git describe`, which refuses to run
       # in a checkout git considers foreign-owned.
+      # One target leaves ~2.5 GB of go-build cache and ~240 MB of binaries,
+      # and the six targets share almost none of it across GOOS/GOARCH, so the
+      # build alone approaches the free space on the runner's disk. The
+      # preinstalled toolchains below are unused here and are the cheapest
+      # space to give back; the cache stays intact so it still saves.
+      - name: free-runner-disk
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
       - run: git config --global --add safe.directory "$PWD"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
         with:

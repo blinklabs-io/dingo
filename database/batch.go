@@ -49,6 +49,16 @@ func (d *Database) NewLeiosClosureBatchAccumulator() BatchAccumulator {
 	return store.NewLeiosClosureBatchAccumulator()
 }
 
+// NewValidatedBlockBatchAccumulator creates an API-detail accumulator whose
+// consensus state remains immediate. Unsupported providers return nil.
+func (d *Database) NewValidatedBlockBatchAccumulator() BatchAccumulator {
+	store, ok := d.transactionStore().(metadata.ValidatedBlockBatcher)
+	if !ok {
+		return nil
+	}
+	return store.NewValidatedBlockBatchAccumulator()
+}
+
 // FlushBatch writes accumulated metadata rows for the active metadata plugin.
 func (d *Database) FlushBatch(
 	acc BatchAccumulator,
@@ -91,6 +101,26 @@ func (d *Database) EnableBatchUtxoOverlay(
 	return overlay.EnableBatchUtxoOverlay(
 		acc, metadataTxn, inputs, deleteOnSpend,
 	)
+}
+
+// EnableLeiosClosureUtxoOverlay enables retained UTxO staging when the
+// provider supports the complete closure. Unsupported providers or closures
+// continue through the ordinary ordered API writer.
+func (d *Database) EnableLeiosClosureUtxoOverlay(
+	acc BatchAccumulator, txn *Txn, transactions []lcommon.Transaction,
+) (bool, error) {
+	if acc == nil || txn == nil {
+		return false, nil
+	}
+	overlay, ok := d.transactionStore().(metadata.LeiosClosureUtxoOverlay)
+	if !ok {
+		return false, nil
+	}
+	metadataTxn := txn.Metadata()
+	if metadataTxn == nil {
+		return false, types.ErrNilTxn
+	}
+	return overlay.EnableLeiosClosureUtxoOverlay(acc, metadataTxn, transactions)
 }
 
 // WithBatchUtxoOverlayError joins err with the error acc's batch UTxO overlay

@@ -16,6 +16,7 @@ package bigintsum
 
 import (
 	"database/sql"
+	"database/sql/driver"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -77,4 +78,89 @@ func TestBigintSum(t *testing.T) {
 		`SELECT ` + Name + `(amount) FROM amounts WHERE grp = 4`,
 	).Scan(&got)
 	require.ErrorContains(t, err, "invalid decimal")
+}
+
+func TestBigintSumSlidingMixedInputs(t *testing.T) {
+	t.Parallel()
+	db, err := sql.Open("sqlite", "file::memory:")
+	require.NoError(t, err)
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	_, err = db.Exec(`CREATE TABLE amounts(seq INTEGER PRIMARY KEY, amount)`)
+	require.NoError(t, err)
+	values := []any{
+		nil,
+		int64(7),
+		"18446744073709551616",
+		"-9223372036854775808",
+		[]byte("+0007"),
+		"-36893488147419103232",
+		int64(0),
+	}
+	for i, value := range values {
+		_, err = db.Exec(`INSERT INTO amounts VALUES(?,?)`, i, value)
+		require.NoError(t, err)
+	}
+	rows, err := db.Query(
+		`SELECT ` + Name + `(amount) OVER(ORDER BY seq ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) FROM amounts ORDER BY seq`,
+	)
+	require.NoError(t, err)
+	defer rows.Close()
+	var got []string
+	for rows.Next() {
+		var value string
+		require.NoError(t, rows.Scan(&value))
+		got = append(got, value)
+	}
+	require.NoError(t, rows.Err())
+	require.Equal(
+		t,
+		[]string{
+			"0",
+			"7",
+			"18446744073709551623",
+			"9223372036854775815",
+			"9223372036854775815",
+			"-46116860184273879033",
+			"-36893488147419103225",
+		},
+		got,
+	)
+}
+
+func TestBigintSumRejectsMalformedInputs(t *testing.T) {
+	t.Parallel()
+	db, err := sql.Open("sqlite", "file::memory:")
+	require.NoError(t, err)
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	for _, value := range []any{"", " ", "12x", "1_000", 1.5} {
+		var total string
+		err = db.QueryRow(`SELECT `+Name+`(?)`, value).Scan(&total)
+		require.Error(t, err, "input %v", value)
+	}
+}
+
+func BenchmarkBigintSumStep(b *testing.B) {
+	for _, tc := range []struct {
+		name  string
+		value driver.Value
+	}{
+		{"integer", int64(1000000)},
+		{"decimal", "39169836000000"},
+		{"wide", "184467440737095516160000"},
+		{"negative", "-9223372036854775808"},
+		{"blob", []byte("39169836000000")},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			var sum bigintSum
+			args := []driver.Value{tc.value}
+			b.ReportAllocs()
+			for b.Loop() {
+				if err := sum.Step(nil, args); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
 }

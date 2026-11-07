@@ -20,9 +20,8 @@ import (
 )
 
 // ReferencedEndorserBlock returns the Leios endorser block named by a Dijkstra
-// ranking-block header through its leios_announcement field. The decoder
-// admits only the twelve-field header body, so the announcement is the only
-// form a decoded header can carry.
+// ranking-block header through its leios_announcement field. A ten-field
+// DijkstraNet header has no Leios announcement.
 func ReferencedEndorserBlock(
 	header lcommon.BlockHeader,
 ) (lcommon.Blake2b256, uint64, bool) {

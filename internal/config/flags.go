@@ -173,6 +173,11 @@ var flagSpecs = []flagSpec{
 		"tracing-sample-ratio",
 		"fraction of new traces sampled, from 0 to 1",
 	),
+	stringSliceFlag(
+		"TracingAlwaysSamplePools",
+		"tracing-always-sample-pools",
+		"pool IDs (bech32 or hex) whose blocks are always traced",
+	),
 	boolFlag(
 		"TracingStdout",
 		"tracing-stdout",
@@ -712,7 +717,11 @@ var flagSpecs = []flagSpec{
 	),
 	intFlag("MaxInboundConns", "max-inbound-conns", "max inbound connections"),
 	intFlag("MaxNtCConns", "max-ntc-conns", "max node-to-client connections"),
-	intFlag("MaxTrustedLocalNtCConns", "max-trusted-local-ntc-conns", "max trusted local node-to-client connections"),
+	intFlag(
+		"MaxTrustedLocalNtCConns",
+		"max-trusted-local-ntc-conns",
+		"max trusted local node-to-client connections",
+	),
 	intFlag(
 		"MaxNtCConnectionsPerIP",
 		"max-ntc-connections-per-ip",
@@ -789,7 +798,7 @@ var flagSpecs = []flagSpec{
 	intFlag(
 		"GenesisBootstrap.CorroborationPeers",
 		"genesis-bootstrap-corroboration-peers",
-		"independent peers that must corroborate a fast source before it drives Genesis selection (default 1; 0 explicitly disables)",
+		"independent peers that must corroborate a fast source before it drives Genesis selection (default 0, which disables the gate)",
 	),
 	boolFlag(
 		"GenesisBootstrap.LimitOnPatienceEnabled",
@@ -969,6 +978,8 @@ var flagSpecs = []flagSpec{
 		"planner-stats-refresh-enabled",
 		"keep SQLite planner statistics current with PRAGMA optimize at startup and after each epoch rollover",
 	),
+
+	boolFlag("CIP0203Enabled", "cip-0203-enabled", "include the build version in forged block headers (CIP-0203)"),
 
 	// CIP-23 minimum pool margin / minimum variable fee (consensus-affecting; default 0 = off)
 	uintFlag(

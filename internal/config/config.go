@@ -321,8 +321,10 @@ type ChainsyncConfig struct {
 // GenesisBootstrapConfig holds configuration for Genesis-mode chain
 // selection and bootstrap-time peer promotion.
 type GenesisBootstrapConfig struct {
-	// ControlGroups overrides network relay control metadata. Nil selects network
-	// defaults; an explicit empty list disables those defaults.
+	// ControlGroups declares trusted relay operators, which form the exclusive
+	// Genesis witness set. There are no network defaults: nil or an empty list
+	// leaves witness identities to the ledger, a peer snapshot, or the
+	// connection address.
 	ControlGroups []topology.PeerControlGroup `yaml:"controlGroups" ignored:"true"`
 
 	// Enabled controls whether Genesis bootstrap mode is used when the node
@@ -339,8 +341,8 @@ type GenesisBootstrapConfig struct {
 	// Genesis-mode chain selection. This is the Ouroboros Genesis trust control
 	// for biased fast-sync sources: an uncorroborated or divergent fast source
 	// is denied selection and stalls rather than steering the local chain.
-	// The default is one independent peer. An explicitly configured zero
-	// disables the selection gate (density-only Genesis selection); a peer's
+	// The default is zero, which leaves the gate off (density-only Genesis
+	// selection), so a node with a single upstream peer syncs. A peer's
 	// frontier still needs one independent witness before it can exclude other
 	// candidates as behind.
 	CorroborationPeers int `yaml:"corroborationPeers"          envconfig:"DINGO_GENESIS_BOOTSTRAP_CORROBORATION_PEERS"`
@@ -550,7 +552,7 @@ func DefaultChainsyncConfig() ChainsyncConfig {
 func DefaultGenesisBootstrapConfig() GenesisBootstrapConfig {
 	return GenesisBootstrapConfig{
 		Enabled:                true,
-		CorroborationPeers:     1,
+		CorroborationPeers:     0,
 		LimitOnPatienceEnabled: true,
 	}
 }
@@ -872,6 +874,11 @@ type Config struct {
 	TracingServiceName string `yaml:"tracingServiceName"                  envconfig:"DINGO_TRACING_SERVICE_NAME"`
 	// TracingSampleRatio is the fraction of new traces sampled, from 0 to 1.
 	TracingSampleRatio float64 `yaml:"tracingSampleRatio"                  envconfig:"DINGO_TRACING_SAMPLE_RATIO"`
+
+	// TracingAlwaysSamplePools lists stake pool IDs (bech32 or hex key hash)
+	// whose blocks are traced regardless of TracingSampleRatio.
+	TracingAlwaysSamplePools []string `yaml:"tracingAlwaysSamplePools" envconfig:"DINGO_TRACING_ALWAYS_SAMPLE_POOLS"`
+
 	// TracingStdout redirects spans to stdout instead of OTLP. Requires
 	// Tracing to also be enabled. Mostly useful for local debugging.
 	TracingStdout   bool     `yaml:"tracingStdout"                       envconfig:"DINGO_TRACING_STDOUT"`
@@ -1059,6 +1066,9 @@ type Config struct {
 	// adoption and diffusion. Defaults to true (fail closed); set to false
 	// only to explicitly opt out.
 	ValidateForgedBlock bool `yaml:"validateForgedBlock"              envconfig:"DINGO_VALIDATE_FORGED_BLOCK"`
+
+	// CIP0203Enabled adds the build version to forged block identifiers.
+	CIP0203Enabled bool `yaml:"cip0203Enabled" envconfig:"DINGO_CIP0203_ENABLED"`
 
 	// MinPoolMargin is the CIP-23 minimum pool margin (minimum variable fee) in
 	// basis points, [0, 10000] (150 = 1.5%); 0 disables it. Consensus-affecting
@@ -1594,7 +1604,6 @@ func newDefaultConfig() *Config {
 		StrictUtxoValidation:                true,
 		Tracing:                             false,
 		TracingStdout:                       false,
-		TracingServiceName:                  "dingo",
 		TracingSampleRatio:                  1,
 		Network:                             "preview",
 		NetworkMagic:                        0,
@@ -1787,6 +1796,10 @@ func cloneConfig(cfg *Config) *Config {
 		cfg.BarkLifecycleOperatorCertificateFingerprints...,
 	)
 	clone.CORSAllowedOrigins = append([]string(nil), cfg.CORSAllowedOrigins...)
+	clone.TracingAlwaysSamplePools = append(
+		[]string(nil),
+		cfg.TracingAlwaysSamplePools...,
+	)
 	if cfg.PeerSharing != nil {
 		peerSharing := *cfg.PeerSharing
 		clone.PeerSharing = &peerSharing

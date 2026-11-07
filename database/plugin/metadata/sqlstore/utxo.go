@@ -625,10 +625,14 @@ func (s *Store) GetUtxoBalanceByAddressAtSlot(
 	txn types.Txn,
 ) (models.AddressBalance, error) {
 	if len(address) == 0 {
-		return models.AddressBalance{}, errors.New("UTxO address must not be empty")
+		return models.AddressBalance{}, errors.New(
+			"UTxO address must not be empty",
+		)
 	}
 	if maxResults <= 0 || maxResults == math.MaxInt {
-		return models.AddressBalance{}, errors.New("UTxO balance result limit must be positive")
+		return models.AddressBalance{}, errors.New(
+			"UTxO balance result limit must be positive",
+		)
 	}
 	return s.getUtxoBalanceByPredicate(
 		"utxo_address.address = ? AND utxo.added_slot <= ? AND "+
@@ -732,7 +736,10 @@ WHERE ` + predicate
 		if err != nil {
 			return ret, err
 		}
-		key := assetKey{policy: string(asset.PolicyId), name: string(asset.Name)}
+		key := assetKey{
+			policy: string(asset.PolicyId),
+			name:   string(asset.Name),
+		}
 		idx, ok := assetIndexes[key]
 		if !ok {
 			asset.Amount = amount
@@ -1718,6 +1725,21 @@ func (s *Store) getUtxo(
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if overlay := retainedOverlayFromQueryer(db); overlay != nil {
+		if overlay.err != nil {
+			return nil, overlay.err
+		}
+		if model, ok := overlay.retainedUtxo(newOverlayKey(txID, index)); ok {
+			if !includeSpent &&
+				(model.DeletedSlot != 0 || len(model.SpentAtTxId) != 0) {
+				return nil, nil
+			}
+			return model, nil
+		}
 	}
 	query := getLiveUtxoByRefQuery
 	if includeSpent {

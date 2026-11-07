@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -38,6 +39,7 @@ func TestStatelessHeaderCryptoVerdictSharedAcrossCalls(t *testing.T) {
 		require.NoError(
 			t,
 			ls.verifyBlockHeaderStatelessCryptoWithEpochNonce(
+				t.Context(),
 				block,
 				epoch,
 				tb.epochNonce,
@@ -64,6 +66,7 @@ func TestStatelessHeaderCryptoVerdictKeyedByNonceAndHeader(t *testing.T) {
 	epoch := models.Epoch{EpochId: 5}
 	verify := func(b *realBabbageBlock, nonce []byte) error {
 		return ls.verifyBlockHeaderStatelessCryptoWithEpochNonce(
+			t.Context(),
 			headerOnlyBlock{header: b.Header(), peerRelative: true},
 			epoch,
 			nonce,
@@ -118,6 +121,7 @@ func TestStatelessHeaderCryptoVerdictNotSharedWithoutHeaderCbor(t *testing.T) {
 	require.NoError(
 		t,
 		ls.verifyBlockHeaderStatelessCryptoWithEpochNonce(
+			t.Context(),
 			goodBlock,
 			epoch,
 			good.epochNonce,
@@ -126,6 +130,7 @@ func TestStatelessHeaderCryptoVerdictNotSharedWithoutHeaderCbor(t *testing.T) {
 	require.Error(
 		t,
 		ls.verifyBlockHeaderStatelessCryptoWithEpochNonce(
+			t.Context(),
 			badBlock,
 			epoch,
 			good.epochNonce,
@@ -174,6 +179,7 @@ func BenchmarkStatelessHeaderCryptoVerdict(b *testing.B) {
 	epoch := models.Epoch{EpochId: 5}
 	verify := func(b *testing.B) {
 		if err := ls.verifyBlockHeaderStatelessCryptoWithEpochNonce(
+			context.Background(),
 			block,
 			epoch,
 			tb.epochNonce,
@@ -242,6 +248,7 @@ func TestStatelessHeaderCryptoVerdictBoundToDecodedInputs(t *testing.T) {
 			require.NoError(
 				t,
 				ls.verifyBlockHeaderStatelessCryptoWithEpochNonce(
+					t.Context(),
 					block,
 					epoch,
 					tb.epochNonce,
@@ -253,6 +260,7 @@ func TestStatelessHeaderCryptoVerdictBoundToDecodedInputs(t *testing.T) {
 			require.Error(
 				t,
 				ls.verifyBlockHeaderStatelessCryptoWithEpochNonce(
+					t.Context(),
 					block,
 					epoch,
 					tb.epochNonce,

@@ -141,43 +141,87 @@ type leiosCommitteeParamsAdapter struct {
 
 func (a *leiosCommitteeParamsAdapter) LeiosCommitteeParameters(
 	snapshotEpoch uint64,
-) (_ uint16, _ *big.Rat, err error) {
+) (uint16, *big.Rat, error) {
+	pparams, err := a.dijkstraPParams(snapshotEpoch)
+	if err != nil {
+		return 0, nil, err
+	}
+	return leiosCommitteeParamsFromPParams(pparams)
+}
+
+func (a *leiosCommitteeParamsAdapter) LeiosVotingParameters(
+	epoch uint64,
+) (time.Duration, time.Duration, error) {
+	pparams, err := a.dijkstraPParams(epoch)
+	if err != nil {
+		return 0, 0, err
+	}
+	return leiosVotingPeriodsFromPParams(epoch, pparams)
+}
+
+func (a *leiosCommitteeParamsAdapter) dijkstraPParams(
+	epoch uint64,
+) (_ *gdijkstra.DijkstraProtocolParameters, err error) {
 	if a.ledgerState == nil {
-		return 0, nil, errors.New("ledger state unavailable")
+		return nil, errors.New("ledger state unavailable")
 	}
 	db := a.ledgerState.Database()
 	if db == nil {
-		return 0, nil, errors.New("database unavailable")
+		return nil, errors.New("database unavailable")
 	}
 	txn := db.MetadataTxn(context.Background(), false)
 	if txn == nil {
-		return 0, nil, errors.New("metadata transaction unavailable")
+		return nil, errors.New("metadata transaction unavailable")
 	}
 	defer func() {
 		if rollbackErr := txn.Rollback(); rollbackErr != nil {
 			err = errors.Join(
 				err,
 				fmt.Errorf(
-					"release leios committee parameter transaction: %w",
+					"release leios parameter transaction: %w",
 					rollbackErr,
 				),
 			)
 		}
 	}()
-	dijkstraPParams, err := leiosDijkstraPParamsForSnapshot(
-		db,
-		snapshotEpoch,
-		txn,
-	)
-	if err != nil {
-		return 0, nil, err
-	}
-	return leiosCommitteeParamsFromPParams(dijkstraPParams)
+	return leiosDijkstraPParamsForEpoch(db, epoch, txn)
 }
 
-func leiosDijkstraPParamsForSnapshot(
+// leiosVotingPeriodsFromPParams returns the CIP-164 header and vote periods,
+// L_hdr and L_vote, from the announcement and vote period lengths, both in
+// milliseconds. Local voting opens three header periods after the announcing
+// slot begins, the wait that lets a competing header for the slot appear, and
+// closes one vote period later.
+func leiosVotingPeriodsFromPParams(
+	epoch uint64,
+	pparams *gdijkstra.DijkstraProtocolParameters,
+) (time.Duration, time.Duration, error) {
+	if pparams == nil {
+		return 0, 0, fmt.Errorf(
+			"leios voting parameters for epoch %d are unavailable",
+			epoch,
+		)
+	}
+	headerPeriod := time.Duration(
+		pparams.LeiosAnnouncementPeriodLength,
+	) * time.Millisecond
+	votePeriod := time.Duration(
+		pparams.LeiosVotePeriodLength,
+	) * time.Millisecond
+	if headerPeriod <= 0 || votePeriod <= 0 {
+		return 0, 0, fmt.Errorf(
+			"invalid Leios voting periods for epoch %d: header %s, vote %s",
+			epoch,
+			headerPeriod,
+			votePeriod,
+		)
+	}
+	return headerPeriod, votePeriod, nil
+}
+
+func leiosDijkstraPParamsForEpoch(
 	db *database.Database,
-	snapshotEpoch uint64,
+	epoch uint64,
 	txn *database.Txn,
 ) (*gdijkstra.DijkstraProtocolParameters, error) {
 	decode := func(raw []byte) (lcommon.ProtocolParameters, error) {
@@ -188,44 +232,43 @@ func leiosDijkstraPParamsForSnapshot(
 		return &decoded, nil
 	}
 	pparams, err := db.GetPParams(
-		snapshotEpoch,
+		epoch,
 		uint(gdijkstra.EraIdDijkstra),
 		decode,
 		txn,
 	)
 	if err != nil {
 		return nil, fmt.Errorf(
-			"load Dijkstra parameters for Leios snapshot epoch %d: %w",
-			snapshotEpoch,
+			"load Dijkstra parameters for Leios epoch %d: %w",
+			epoch,
 			err,
 		)
 	}
 	if pparams == nil {
-		// Leios committees use Dijkstra parameters with the preceding Mark
-		// stake snapshot. At the transition that snapshot can predate the first
-		// Dijkstra row, so use the era's initial parameter set.
+		// At the Dijkstra transition, a preceding Mark snapshot can predate
+		// the first Dijkstra row. Use the era's initial parameter set.
 		rows, listErr := db.Metadata().ListPParamsForEra(
 			uint(gdijkstra.EraIdDijkstra),
 			txn.Metadata(),
 		)
 		if listErr != nil {
 			return nil, fmt.Errorf(
-				"list Dijkstra parameters for Leios snapshot epoch %d: %w",
-				snapshotEpoch,
+				"list Dijkstra parameters for Leios epoch %d: %w",
+				epoch,
 				listErr,
 			)
 		}
 		if len(rows) == 0 {
 			return nil, fmt.Errorf(
-				"leios snapshot epoch %d has no Dijkstra parameter rows",
-				snapshotEpoch,
+				"leios epoch %d has no Dijkstra parameter rows",
+				epoch,
 			)
 		}
 		decoded, decodeErr := decode(rows[0].Cbor)
 		if decodeErr != nil {
 			return nil, fmt.Errorf(
-				"decode initial Dijkstra parameters for Leios snapshot epoch %d: %w",
-				snapshotEpoch,
+				"decode initial Dijkstra parameters for Leios epoch %d: %w",
+				epoch,
 				decodeErr,
 			)
 		}
@@ -234,59 +277,11 @@ func leiosDijkstraPParamsForSnapshot(
 	dijkstraPParams, ok := pparams.(*gdijkstra.DijkstraProtocolParameters)
 	if !ok || dijkstraPParams == nil {
 		return nil, fmt.Errorf(
-			"leios snapshot epoch %d has no Dijkstra protocol parameters",
-			snapshotEpoch,
+			"leios epoch %d has no Dijkstra protocol parameters",
+			epoch,
 		)
 	}
 	return dijkstraPParams, nil
-}
-
-// leiosVoteTimingAdapter adapts ledger.LedgerState to leios.VoteTimingProvider
-// from the current Dijkstra protocol parameters.
-type leiosVoteTimingAdapter struct {
-	ledgerState *ledger.LedgerState
-}
-
-func (a *leiosVoteTimingAdapter) LeiosVoteTiming() (
-	time.Duration,
-	time.Duration,
-	error,
-) {
-	if a.ledgerState == nil {
-		return 0, 0, errors.New("ledger state unavailable")
-	}
-	pparams := a.ledgerState.GetCurrentPParams()
-	dijkstraPParams, ok := pparams.(*gdijkstra.DijkstraProtocolParameters)
-	if !ok {
-		return 0, 0, fmt.Errorf(
-			"leios vote timing requires the dijkstra era, current pparams are %T",
-			pparams,
-		)
-	}
-	return leiosVoteTimingFromPParams(dijkstraPParams)
-}
-
-// leiosVoteTimingFromPParams derives the vote window from the announcement and
-// vote period lengths, both in milliseconds. Voting opens three announcement
-// periods after the announcing slot begins, the wait that lets a competing
-// header for the slot appear before a vote is cast.
-func leiosVoteTimingFromPParams(
-	dijkstraPParams *gdijkstra.DijkstraProtocolParameters,
-) (time.Duration, time.Duration, error) {
-	if dijkstraPParams == nil {
-		return 0, 0, errors.New("nil Dijkstra protocol parameters")
-	}
-	if dijkstraPParams.LeiosAnnouncementPeriodLength == 0 ||
-		dijkstraPParams.LeiosVotePeriodLength == 0 {
-		return 0, 0, errors.New("leios announcement or vote period is zero")
-	}
-	opens := 3 * time.Duration(
-		dijkstraPParams.LeiosAnnouncementPeriodLength,
-	) * time.Millisecond
-	window := time.Duration(
-		dijkstraPParams.LeiosVotePeriodLength,
-	) * time.Millisecond
-	return opens, window, nil
 }
 
 // leiosCommitteeParamsFromPParams extracts the Dijkstra committee size and
@@ -322,6 +317,9 @@ func (n *Node) initLeiosVoteManager(ctx context.Context) error {
 			ledgerState: n.ledgerState,
 		},
 	}
+	paramsAdapter := &leiosCommitteeParamsAdapter{
+		ledgerState: n.ledgerState,
+	}
 	mgr, err := leios.NewVoteManager(leios.VoteManagerConfig{
 		Logger:        n.config.logger,
 		EventBus:      n.eventBus,
@@ -332,23 +330,15 @@ func (n *Node) initLeiosVoteManager(ctx context.Context) error {
 		EpochProvider: &epochInfoAdapter{
 			ledgerState: n.ledgerState,
 		},
-		ParamsProvider: &leiosCommitteeParamsAdapter{
-			ledgerState: n.ledgerState,
-		},
+		ParamsProvider:       paramsAdapter,
+		VotingParamsProvider: paramsAdapter,
 		// LedgerState satisfies leios.SlotProvider directly; the slot
 		// window keeps fabricated far-past/future votes away from
 		// committee computation and the stake snapshot queries behind
 		// it.
 		SlotProvider: n.ledgerState,
-		// Votes follow the protocol parameters' wall-clock window.
-		VoteTimingProvider: &leiosVoteTimingAdapter{
-			ledgerState: n.ledgerState,
-		},
-		SlotOnsetProvider: n.ledgerState,
-		// Source local vote production and relayed vote acceptance from the
-		// pipeline's corresponding boundaries. Relayed votes remain useful
-		// until the certification deadline even after local voting closes.
-		VoteWindowSlots:        n.leiosPipelineTiming().VoteWindowSlots,
+		// Relayed votes remain useful until the pipeline certification
+		// deadline. Local voting uses the Dijkstra wall-clock periods above.
 		CertifyByDeadlineSlots: n.leiosPipelineTiming().CertifyByDeadlineSlots,
 		PromRegistry:           n.config.promRegistry,
 	})
@@ -410,13 +400,45 @@ func (n *Node) initLeiosVoteManager(ctx context.Context) error {
 	return nil
 }
 
-// leiosPipelineTiming returns the configured pipeline timing, falling back
-// to the provisional defaults when no override is set.
+// leiosPipelineTiming keeps explicit overrides in slots and converts the
+// one-second reference defaults to the configured Shelley slot duration.
 func (n *Node) leiosPipelineTiming() leios.PipelineTiming {
 	if n.config.leiosPipelineTiming != nil {
 		return *n.config.leiosPipelineTiming
 	}
-	return leios.DefaultPipelineTiming()
+	defaults := leios.DefaultPipelineTiming()
+	if n.config.cardanoNodeConfig == nil {
+		return defaults
+	}
+	genesis := n.config.cardanoNodeConfig.ShelleyGenesis()
+	if genesis == nil || genesis.SlotLength.Rat == nil ||
+		genesis.SlotLength.Sign() <= 0 {
+		return defaults
+	}
+	timing := defaults
+	for _, window := range []*uint64{
+		&timing.ProduceWindowSlots,
+		&timing.DiffuseWindowSlots,
+		&timing.VoteWindowSlots,
+		&timing.CertifyByDeadlineSlots,
+		&timing.RbInclusionWindowSlots,
+		&timing.InstanceTTLSlots,
+	} {
+		slots := new(big.Rat).Quo(
+			new(big.Rat).SetUint64(*window),
+			genesis.SlotLength.Rat,
+		)
+		var rounded, remainder big.Int
+		rounded.QuoRem(slots.Num(), slots.Denom(), &remainder)
+		if remainder.Sign() != 0 {
+			rounded.Add(&rounded, big.NewInt(1))
+		}
+		if !rounded.IsUint64() {
+			return defaults
+		}
+		*window = rounded.Uint64()
+	}
+	return timing
 }
 
 // initLeiosPipelineManager builds and starts the Leios pipeline manager and

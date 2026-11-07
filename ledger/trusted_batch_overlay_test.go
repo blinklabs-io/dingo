@@ -128,6 +128,21 @@ func newOverlayRun(t testing.TB, overlay bool) *overlayRun {
 	return &overlayRun{h: h, overlays: &n}
 }
 
+func newOverlayRunWithSecurityParam(
+	t testing.TB,
+	overlay bool,
+	securityParam int,
+) *overlayRun {
+	t.Helper()
+	h := newExternalIngestHarnessWith(
+		t, false, t.TempDir(), types.StorageModeCore, securityParam,
+	)
+	h.ls.trustedBatchOverlayOff = !overlay
+	var n atomic.Int64
+	h.ls.afterTrustedBatchOverlay = func() { n.Add(1) }
+	return &overlayRun{h: h, overlays: &n}
+}
+
 // applyBatches applies each batch in turn from the current ledger tip,
 // running between after the batch at index i when between is not nil.
 func (r *overlayRun) applyBatches(
@@ -830,6 +845,50 @@ func BenchmarkApplyTrustedBatch(b *testing.B) {
 				if overlay {
 					require.Positive(b, run.overlays.Load())
 				}
+				run.h.shutdown(b)
+				b.StartTimer()
+			}
+			b.ReportMetric(
+				float64(applied.Nanoseconds())/float64(b.N*len(batch)),
+				"ns/block",
+			)
+		})
+	}
+}
+
+// BenchmarkTrustedBatchPruneRows compares prune row caps. The workload is
+// sized so more than 10k rows are eligible: securityK=1 keeps the stability
+// window to a few dozen slots, and txsPerBlock stays near the largest fan-out
+// the store accepts in one transaction, so the 10k cap needs two deletes
+// where the 20k cap needs one.
+func BenchmarkTrustedBatchPruneRows(b *testing.B) {
+	const (
+		txsPerBlock = 30
+		securityK   = 1
+	)
+	setup, batch := overlayBenchBlocks(b, MaxTrustedBatchBlocks, txsPerBlock)
+	for _, rows := range []int{1_000, 5_000, 10_000, 20_000} {
+		b.Run(fmt.Sprintf("rows_%d", rows), func(b *testing.B) {
+			var applied time.Duration
+			for range b.N {
+				b.StopTimer()
+				run := newOverlayRunWithSecurityParam(b, true, securityK)
+				require.NoError(b, run.applyBatches(
+					b, [][]gledger.Block{{setup}}, nil,
+				))
+				run.h.ls.externalIngest.unpruned = trustedBatchPruneEvery - 1
+				run.h.ls.externalIngest.prunedOnce = true
+				run.h.ls.trustedPruneRows = rows
+				start := time.Now()
+				b.StartTimer()
+				_, err := run.h.applyPaused(
+					b, run.h.ls.Tip().Point, batch,
+				)
+				b.StopTimer()
+				applied += time.Since(start)
+				require.NoError(b, err)
+				require.Zero(b, run.h.ls.externalIngest.unpruned,
+					"trusted pruning did not drain the spent rows")
 				run.h.shutdown(b)
 				b.StartTimer()
 			}

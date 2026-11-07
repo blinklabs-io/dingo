@@ -15,68 +15,39 @@
 package dingo
 
 import (
-	"reflect"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/chainselection"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/topology"
 	"github.com/stretchr/testify/require"
 )
 
-func TestGenesisControlGroupsCanonicalDefaults(t *testing.T) {
+func TestGenesisControlGroupsUsePublishedTopologyByDefault(t *testing.T) {
 	t.Parallel()
-	for _, network := range []string{"dijkstra", "musashi", "preview"} {
+	for _, network := range []string{
+		"dijkstra", "musashi", "preview", "preprod", "mainnet",
+	} {
 		t.Run(network, func(t *testing.T) {
 			t.Parallel()
-			cfg, err := cardano.NewCardanoNodeConfigFromEmbedFS(
-				cardano.EmbeddedConfigFS,
-				cardano.EmbeddedConfigPath(network),
+			cardanoCfg, err := cardano.NewCardanoNodeConfigFromEmbedFS(
+				cardano.EmbeddedConfigFS, cardano.EmbeddedConfigPath(network),
 			)
 			require.NoError(t, err)
-			n := &Node{
-				config: Config{cardanoNodeConfig: cfg, genesisBootstrap: true},
-			}
-			n.config.networkMagic = cfg.ShelleyGenesis().NetworkMagic
-			groups := n.genesisControlGroups()
-			if network != "dijkstra" {
-				require.Empty(t, groups)
-				return
-			}
-			require.Len(t, groups, 2)
-			require.Len(t, groups[0].AccessPoints, 1)
-			require.Len(t, groups[1].AccessPoints, 2)
-			for _, g := range groups {
-				require.NoError(t, g.Validate())
-			}
-			groups[0].Identity = "mutated"
-			require.Equal(t, "iog", n.genesisControlGroups()[0].Identity)
-			for _, name := range []string{"ShelleyGenesisHash", "ByronGenesisHash", "AlonzoGenesisHash", "ConwayGenesisHash", "DijkstraGenesisHash"} {
-				field := reflect.ValueOf(cfg).Elem().FieldByName(name)
-				original := field.String()
-				field.SetString("private genesis")
+			cfg := NewConfig()
+			cfg.cardanoNodeConfig = cardanoCfg
+			cfg.networkMagic = cardanoCfg.ShelleyGenesis().NetworkMagic
+			n := &Node{config: cfg}
+			require.Zero(t, cfg.cfg.GenesisBootstrap.CorroborationPeers)
+			for range 2 {
+				pg := n.newPeerGovernor()
+				pg.LoadTopologyConfig(&topology.TopologyConfig{})
 				require.Empty(
 					t,
-					n.genesisControlGroups(),
-					"private %s cannot inherit public trust",
-					name,
+					pg.GetPeers(),
+					"only the supplied topology may add roots",
 				)
-				field.SetString(original)
 			}
-			n.config.cfg = NewConfig().cfg
-			WithGenesisControlGroups([]topology.PeerControlGroup{})(&n.config)
-			require.Empty(
-				t,
-				n.genesisControlGroups(),
-				"explicit empty list overrides canonical defaults",
-			)
-			WithGenesisControlGroups(nil)(&n.config)
-			require.Len(t, n.genesisControlGroups(), 2, "nil restores defaults")
-			n.config.genesisBootstrap = false
-			require.Empty(
-				t,
-				n.genesisControlGroups(),
-				"Praos does not add default roots",
-			)
 		})
 	}
 }
@@ -141,4 +112,21 @@ func TestGenesisControlGroupsReachReplacementGovernors(t *testing.T) {
 			"configured roots do not invent stake",
 		)
 	}
+}
+
+func TestChainsyncGenesisIntersectionDoesNotRequireOperatorQuorum(
+	t *testing.T,
+) {
+	t.Parallel()
+	for _, genesis := range []bool{false, true} {
+		cs := chainselection.NewChainSelector(
+			chainselection.ChainSelectorConfig{
+				GenesisMode: genesis, SecurityParam: 20,
+			},
+		)
+		n := &Node{chainSelector: cs}
+		require.False(t, cs.GenesisCorroborationActive())
+		require.Equal(t, genesis, n.chainsyncIntersectAtLedgerTip())
+	}
+	require.False(t, (&Node{}).chainsyncIntersectAtLedgerTip())
 }

@@ -31,6 +31,7 @@ import (
 	"database/sql/driver"
 	"fmt"
 	"math/big"
+	"strconv"
 
 	driversqlite "modernc.org/sqlite"
 )
@@ -40,25 +41,32 @@ const Name = "dingo_bigint_sum"
 
 type bigintSum struct {
 	total big.Int
+	item  big.Int
 }
 
-func bigintSumArg(arg driver.Value) (*big.Int, error) {
+func (s *bigintSum) argument(arg driver.Value) (*big.Int, error) {
 	switch value := arg.(type) {
 	case nil:
 		return nil, nil
 	case int64:
-		return big.NewInt(value), nil
+		return s.item.SetInt64(value), nil
 	case string:
-		return parseDecimal(value)
+		return s.parseDecimal(value)
 	case []byte:
-		return parseDecimal(string(value))
+		return s.parseDecimal(string(value))
 	default:
 		return nil, fmt.Errorf("%s: unsupported amount type %T", Name, arg)
 	}
 }
 
-func parseDecimal(value string) (*big.Int, error) {
-	ret, ok := new(big.Int).SetString(value, 10)
+func (s *bigintSum) parseDecimal(value string) (*big.Int, error) {
+	// Avoid a failed fixed-width parse for clearly wide decimal inputs.
+	if len(value) <= 20 {
+		if n, err := strconv.ParseInt(value, 10, 64); err == nil {
+			return s.item.SetInt64(n), nil
+		}
+	}
+	ret, ok := s.item.SetString(value, 10)
 	if !ok {
 		return nil, fmt.Errorf("%s: invalid decimal %q", Name, value)
 	}
@@ -69,7 +77,7 @@ func (s *bigintSum) Step(
 	_ *driversqlite.FunctionContext,
 	args []driver.Value,
 ) error {
-	item, err := bigintSumArg(args[0])
+	item, err := s.argument(args[0])
 	if err != nil || item == nil {
 		return err
 	}
@@ -81,7 +89,7 @@ func (s *bigintSum) WindowInverse(
 	_ *driversqlite.FunctionContext,
 	args []driver.Value,
 ) error {
-	item, err := bigintSumArg(args[0])
+	item, err := s.argument(args[0])
 	if err != nil || item == nil {
 		return err
 	}

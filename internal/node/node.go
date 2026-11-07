@@ -985,6 +985,7 @@ func buildDingoConfig(
 		dingo.WithTracingEndpoint(cfg.TracingEndpoint),
 		dingo.WithTracingServiceName(cfg.TracingServiceName),
 		dingo.WithTracingSampleRatio(cfg.TracingSampleRatio),
+		dingo.WithTracingAlwaysSamplePools(cfg.TracingAlwaysSamplePools),
 		dingo.WithTopologyConfig(config.GetTopologyConfig()),
 		dingo.WithDatabaseWorkerPoolConfig(ledger.DatabaseWorkerPoolConfig{
 			WorkerPoolSize: cfg.DatabaseWorkers,
@@ -1054,6 +1055,7 @@ func buildDingoConfig(
 		dingo.WithStorageMode(storageMode),
 		// CIP-23 minimum pool margin (consensus-affecting)
 		dingo.WithMinPoolMargin(cfg.MinPoolMargin),
+		dingo.WithCIP0203(cfg.CIP0203Enabled),
 		// CIP-50 pledge-leverage staking rewards (consensus-affecting)
 		dingo.WithPledgeLeverage(
 			cfg.PledgeLeverageEnabled,

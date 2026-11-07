@@ -190,8 +190,42 @@ else
   unset DEVNET_ACCELERATED
   export DEVNET_TXPUMP_CONFIRMATION_SLOTS=600
 fi
+# DEVNET_SPEC_OVERRIDE selects another spec file in this directory, for
+# scenarios that need a network the stock specs do not describe (for
+# example a different starting protocol version).
+if [[ -n "${DEVNET_SPEC_OVERRIDE:-}" ]]; then
+  # The spec is mounted from this directory by a ./-relative name, so a
+  # path elsewhere would reach the configurator as a file it cannot read.
+  # Every network spec here is named testnet*.yaml; any other file in the
+  # directory would reach the spec loader as a document it cannot parse.
+  spec_name="${DEVNET_SPEC_OVERRIDE#./}"
+  if [[ -z "${spec_name}" || "${spec_name}" == */* || "${spec_name}" != testnet*.yaml ||
+    ! -f "${SCRIPT_DIR}/${spec_name}" ]]; then
+    echo "[run-tests] ERROR: DEVNET_SPEC_OVERRIDE=${DEVNET_SPEC_OVERRIDE} is not a spec file in ${SCRIPT_DIR}" >&2
+    exit 1
+  fi
+  ACTIVE_SPEC="./${spec_name}"
+fi
+# A spec that starts in Dijkstra (fork at epoch 0) runs dingo as a follower by
+# default, and sends transactions in the Dijkstra era. Set
+# DEVNET_FORCE_DINGO_BLOCK_PRODUCER=true to make dingo forge as well.
+if [[ "${MODE}" == "conformance" ]] &&
+  grep -qE '^TestDijkstraHardForkAtEpoch:[[:space:]]*0([[:space:]]|$)' "${SCRIPT_DIR}/${ACTIVE_SPEC#./}"; then
+  export DEVNET_DINGO_BLOCK_PRODUCER="${DEVNET_FORCE_DINGO_BLOCK_PRODUCER:-false}"
+  export DEVNET_TXPUMP_TRANSACTION_ERA=dijkstra
+else
+  unset DEVNET_DINGO_BLOCK_PRODUCER
+fi
 export "${SPEC_VAR}=${ACTIVE_SPEC}"
 export DEVNET_TESTNET_YAML="${SCRIPT_DIR}/${ACTIVE_SPEC#./}"
+# The spec is the single source of the network magic: the configurator and
+# the Go harness read it there, and txpump receives it from here.
+DEVNET_NETWORK_MAGIC="$(sed -n 's/^networkMagic:[[:space:]]*\([0-9][0-9]*\)[[:space:]]*$/\1/p' "${DEVNET_TESTNET_YAML}")"
+if [[ -z "${DEVNET_NETWORK_MAGIC}" ]]; then
+  echo "[run-tests] ERROR: ${DEVNET_TESTNET_YAML} sets no numeric networkMagic" >&2
+  exit 1
+fi
+export DEVNET_NETWORK_MAGIC
 # The scenario stops and starts containers, and captures compose logs and
 # status on failure.
 export DEVNET_COMPOSE_FILE="${COMPOSE_FILE}"

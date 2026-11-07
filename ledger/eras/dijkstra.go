@@ -145,9 +145,6 @@ func HardForkDijkstra(
 	if err := validateDijkstraProtocolParameterDomains(&ret, dijkstraGenesis); err != nil {
 		return nil, fmt.Errorf("validate Dijkstra genesis parameters: %w", err)
 	}
-	if ret.ProtocolVersion.Major < gdijkstra.MinProtocolVersionDijkstra {
-		ret.ProtocolVersion.Major = gdijkstra.MinProtocolVersionDijkstra
-	}
 	return &ret, nil
 }
 
@@ -443,6 +440,11 @@ func ValidateTxDijkstra(
 		)
 	}
 	tx = normalizedTx
+	// The rules below share one transaction-scoped state, as in
+	// ValidateTxConway. Its memo is keyed by transaction object, so the
+	// phase-2 copy and each sub-transaction get their own entries.
+	// Capability lookups, including blsstate.ProviderFor, unwrap it.
+	ls = lcommon.NewTransactionScopedLedgerState(ls)
 	errs := []error{}
 	// Phase-1 rules apply to every transaction regardless of its declared
 	// phase-2 result. A declared-invalid transaction still has to prove its
@@ -517,14 +519,57 @@ func ValidateTxDijkstra(
 	if err := validateDijkstraPlutusV4ReferenceInputOverlap(phase2Tx, ls); err != nil {
 		return semanticRuleValidationErrorFor(err)
 	}
-	phase2Err := gdijkstra.UtxoValidatePlutusScripts(
+	// A transaction declared invalid must fail phase-2; only the success of
+	// a valid one is cached.
+	resultCache := phase2ResultCacheFor(ls)
+	var (
+		resultKey   phase2ResultKey
+		resultKeyOK bool
+	)
+	if resultCache != nil && tx.IsValid() &&
+		dijkstraTransactionHasRedeemers(tx) {
+		resultKey, resultKeyOK = dijkstraPhase2ResultKey(
+			tx,
+			ls,
+			&tmpPparams.ConwayProtocolParameters,
+		)
+		if resultKeyOK && resultCache.contains(resultKey) {
+			return nil
+		}
+	}
+	phase2Err := validateDijkstraPhase2(
 		phase2Tx,
 		slot,
 		ls,
 		tmpPparams,
 	)
+	if phase2Err == nil && resultKeyOK {
+		resultCache.add(resultKey)
+	}
 	return semanticRuleValidationErrorFor(validatePlutusOutcome(tx, phase2Err))
 }
+
+func transactionWitnessSetHasRedeemers(witness lcommon.TransactionWitnessSet) bool {
+	if witness != nil && witness.Redeemers() != nil {
+		for range witness.Redeemers().Iter() {
+			return true
+		}
+	}
+	return false
+}
+
+func dijkstraTransactionHasRedeemers(tx lcommon.Transaction) bool {
+	return transactionWitnessSetHasRedeemers(tx.Witnesses()) ||
+		slices.ContainsFunc(
+			lcommon.SubTransactionWitnessSetsFromTransaction(tx),
+			transactionWitnessSetHasRedeemers,
+		)
+}
+
+// validateDijkstraPhase2 is a test seam: production always resolves to
+// gdijkstra.UtxoValidatePlutusScripts. Tests substitute a counting wrapper
+// to prove the phase-2 result cache skips repeated evaluations.
+var validateDijkstraPhase2 = gdijkstra.UtxoValidatePlutusScripts
 
 func validateDijkstraPoolBlsKeyUniqueness(
 	tx lcommon.Transaction,
@@ -851,15 +896,9 @@ func validateDijkstraPlutusV4ReferenceInputOverlap(
 }
 
 func dijkstraLevelsHaveRedeemers(levels []dijkstraPlutusScriptLevel) bool {
-	for _, level := range levels {
-		if level.witnesses == nil || level.witnesses.Redeemers() == nil {
-			continue
-		}
-		for range level.witnesses.Redeemers().Iter() {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(levels, func(level dijkstraPlutusScriptLevel) bool {
+		return transactionWitnessSetHasRedeemers(level.witnesses)
+	})
 }
 
 func resolveDijkstraScriptLevelInputs(

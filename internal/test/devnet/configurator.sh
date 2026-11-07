@@ -274,6 +274,9 @@ for pool in $pools; do
   configure_byron_delegation "$pool"
   config_config_json "$pool"
   configure_leios_dijkstra "$pool"
+  if [ "${DEVNET_NODE_DIJKSTRA_GENESIS:-0}" = "1" ]; then
+    cp /dijkstra-genesis-node.json "${pool}/configs/dijkstra-genesis.json"
+  fi
 done
 
 # Expose the Shelley genesis (updated system start) to txpump so it can

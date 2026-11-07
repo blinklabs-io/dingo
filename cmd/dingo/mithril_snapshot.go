@@ -59,7 +59,7 @@ When mithril.server.keepSnapshots is set, older snapshots are then removed.`,
 			if cfg == nil {
 				return errors.New("no config found in context")
 			}
-			logger, err := commonRun(cfg)
+			logger, err := commonRun(cmd.Context(), cfg)
 			if err != nil {
 				return err
 			}
@@ -181,7 +181,7 @@ stored snapshots.`,
 			if cfg == nil {
 				return errors.New("no config found in context")
 			}
-			logger, err := commonRun(cfg)
+			logger, err := commonRun(cmd.Context(), cfg)
 			if err != nil {
 				return err
 			}

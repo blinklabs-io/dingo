@@ -347,6 +347,15 @@ func (ls *LedgerState) validateAndApplyEndorserBlockTransactions(
 	if acc != nil {
 		defer acc.Reset()
 	}
+	if acc != nil {
+		selected := make([]lcommon.Transaction, len(indexes))
+		for i, index := range indexes {
+			selected[i] = txs[index]
+		}
+		if _, err := ls.db.EnableLeiosClosureUtxoOverlay(acc, txn, selected); err != nil {
+			return 0, 0, fmt.Errorf("prepare endorser UTxO batch: %w", err)
+		}
+	}
 	var signatures preverifiedSignatureSet
 	created := make(map[utxoref.Key]lcommon.Utxo, len(indexes)*2)
 	consumed := make(map[utxoref.Key]struct{}, len(indexes)*2)
@@ -388,16 +397,18 @@ func (ls *LedgerState) validateAndApplyEndorserBlockTransactions(
 				for i, idx := range indexes {
 					selected[i] = txs[idx]
 				}
-				signatures = preverifyTransactionSignatures(selected)
+				signatures = preverifyTransactionSignatures(selected, ls.sigResults)
 				if err := ctx.Err(); err != nil {
 					return 0, 0, err
 				}
 			}
 			pp := snapshot.currentPParams
 			isCurrentEraPParams := true
-			if validationEra.Id != snapshot.currentEra.Id &&
-				snapshot.prevEraPParams != nil {
-				pp = snapshot.prevEraPParams
+			if prev := previousEraPParams(
+				validationEra.Id, snapshot.currentEra.Id,
+				snapshot.currentPParams, snapshot.prevEraPParams,
+			); prev != nil {
+				pp = prev
 				isCurrentEraPParams = false
 			}
 			synthetic := syntheticV2CostModelForValidation(

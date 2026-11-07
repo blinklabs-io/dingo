@@ -52,6 +52,14 @@ type localRuleValidationError struct {
 func (e *localRuleValidationError) Error() string { return e.err.Error() }
 func (e *localRuleValidationError) Unwrap() error { return e.err }
 
+type validationErrorWithCause struct {
+	message string
+	cause   error
+}
+
+func (e validationErrorWithCause) Error() string { return e.message }
+func (e validationErrorWithCause) Unwrap() error { return e.cause }
+
 // IsSemanticRuleValidationError reports whether an error came from a
 // deterministic era validation rule. Callers use the rule boundary rather
 // than concrete error types so new ledger verdicts inherit the right
@@ -215,8 +223,18 @@ func reusePreverifiedSignatures(
 		ls lcommon.LedgerState,
 		pp lcommon.ProtocolParameters,
 	) error {
-		provider, ok := stateCapability[preverifiedSignaturesProvider](ls)
-		if !ok || provider.PreverifiedSignatures() == nil {
+		var signatures *lcommon.PreverifiedSignatures
+		if provider, ok := stateCapability[preverifiedSignaturesProvider](ls); ok {
+			signatures = provider.PreverifiedSignatures()
+		}
+		// Without a result computed ahead for this validation, reuse the
+		// outcome of an earlier validation of the same transaction.
+		if signatures == nil {
+			if cache := signatureResultCacheFor(ls); cache != nil {
+				signatures = cache.Verify(tx)
+			}
+		}
+		if signatures == nil {
 			return validationFunc(tx, slot, ls, pp)
 		}
 		err := lcommon.VerifyTransactionWithSignatures(
@@ -225,7 +243,7 @@ func reusePreverifiedSignatures(
 			ls,
 			pp,
 			[]lcommon.UtxoValidationRuleFunc{validationFunc},
-			provider.PreverifiedSignatures(),
+			signatures,
 		)
 		if err == nil {
 			return nil
@@ -619,9 +637,10 @@ func validatePlutusOutcome(tx lcommon.Transaction, phase2Err error) error {
 		return phase2Err
 	}
 	if phase2Err == nil {
-		return errors.New(
-			"transaction declared invalid but Plutus scripts succeeded",
-		)
+		return validationErrorWithCause{
+			message: "transaction declared invalid but Plutus scripts succeeded",
+			cause:   lcommon.UnexpectedPlutusScriptSuccessError{},
+		}
 	}
 	if _, ok := errors.AsType[conway.PlutusScriptFailedError](phase2Err); ok {
 		return nil

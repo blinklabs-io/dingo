@@ -24,18 +24,17 @@ import (
 	"slices"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
-	"github.com/blinklabs-io/dingo/internal/tracing"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
-	"go.opentelemetry.io/otel/attribute"
 )
 
 const (
@@ -73,14 +72,19 @@ type Chain struct {
 	// c.mutex.
 	mutationGeneration       uint64
 	headerMutationGeneration uint64
-	// withdrawalGeneration advances after every operation that removes a
+	// withdrawalGeneration advances before and after each operation that removes a
 	// block from the chain or discards queued headers without adding the
 	// block they announced: rollbacks, the restores that undo a failed add,
 	// and header-queue clears. Unlike mutationGeneration it is never
-	// restored, and it is bumped after the change, so a reader that loads it
-	// before consulting chain membership and finds it unchanged later knows
-	// nothing it saw held has been withdrawn since.
+	// restored. Invalidating before mutation also fences readers that retain
+	// authenticated ancestry while a withdrawal is still in progress. A reader
+	// captures it before taking a chain read lock, then checks it again after
+	// its unlocked storage reads; a token observed mid-withdrawal cannot survive
+	// the completion bump performed before releasing the chain lock.
 	withdrawalGeneration atomic.Uint64
+	// onWithdrawalStarted is a test hook after evidence invalidation and
+	// before the first withdrawal mutation, with the chain mutex held.
+	onWithdrawalStarted  func()
 	lastCommonBlockIndex uint64
 	id                   ChainId
 	mutex                sync.RWMutex
@@ -217,7 +221,7 @@ func (c *Chain) setHeadersLocked(headers []queuedHeader) {
 	}
 }
 
-// WithdrawalGeneration returns a counter that advances after every operation
+// WithdrawalGeneration returns a counter that advances before and after each operation
 // that removes a block from the chain or discards queued headers without
 // adding their blocks. A caller that reads it before consulting HoldsPoint or
 // HoldsQueuedHeader may reuse a positive answer while it is unchanged; blocks
@@ -227,6 +231,14 @@ func (c *Chain) WithdrawalGeneration() uint64 {
 		return 0
 	}
 	return c.withdrawalGeneration.Load()
+}
+
+func (c *Chain) beginWithdrawalLocked() func() {
+	c.withdrawalGeneration.Add(1)
+	if c.onWithdrawalStarted != nil {
+		c.onWithdrawalStarted()
+	}
+	return func() { c.withdrawalGeneration.Add(1) }
 }
 
 func (c *Chain) Tip() ochainsync.Tip {
@@ -769,13 +781,14 @@ func (c *Chain) addBlockHeader(
 	//
 	// No votable announcement is lost by the gate. The other two unverified
 	// admissions are the validation-disabled and Mithril-covered paths, both
-	// of which are far enough behind the tip that VoteManager.slotWindowCheck
-	// declines anyway, and every unverified header that does turn out to be
-	// real is still announced from ChainUpdateEventType once its block is
-	// fetched, validated and applied (VoteManager.handleChainBlock), which is
-	// where all arming happened before the header stream existed.
+	// of which are far enough behind the tip that the VoteManager's L_hdr
+	// header-arrival rule declines anyway, and every unverified header that
+	// does turn out to be real is still announced from ChainUpdateEventType
+	// once its block is fetched, validated and applied
+	// (VoteManager.handleChainBlock), which is where all arming happened
+	// before the header stream existed.
 	if cryptoVerified {
-		if evt, ok := leiosAnnouncementEvent(
+		if evt, ok := leiosHeaderEvent(
 			header,
 			headerHash,
 			c.nextHeaderSeqLocked(),
@@ -786,12 +799,12 @@ func (c *Chain) addBlockHeader(
 	return nil
 }
 
-// leiosAnnouncementEvent builds the header-arrival event for a ranking-block
-// header that announces a Leios endorser block. Headers from eras without
-// announcements, and announcement-capable headers that announce nothing,
-// return false, so a chain carrying no Leios traffic pays one type assertion
-// per header and enqueues nothing.
-func leiosAnnouncementEvent(
+// leiosHeaderEvent builds the header-arrival event for a Leios-era
+// ranking-block header: ChainHeaderAnnouncementEvent when it announces an
+// endorser block, ChainHeaderObservedEvent otherwise. Headers from eras
+// without announcements return false, so a chain carrying no Leios traffic
+// pays one type assertion per header and enqueues nothing.
+func leiosHeaderEvent(
 	header ledger.BlockHeader,
 	headerHash lcommon.Blake2b256,
 	seq uint64,
@@ -805,22 +818,34 @@ func leiosAnnouncementEvent(
 	if !ok {
 		return event.Event{}, false
 	}
-	ebHash, _, ok := announcer.LeiosAnnouncement()
-	if !ok {
-		return event.Event{}, false
+	rbHash := lcommon.NewBlake2b256(headerHash.Bytes())
+	issuer := lcommon.PoolKeyHash(header.IssuerVkey().Hash())
+	ebHash, _, announces := announcer.LeiosAnnouncement()
+	if !announces {
+		return event.NewEvent(
+			ChainHeaderEventType,
+			ChainHeaderObservedEvent{
+				Slot:   header.SlotNumber(),
+				RbHash: rbHash,
+				Issuer: issuer,
+				Seq:    seq,
+			},
+		), true
 	}
 	return event.NewEvent(
 		ChainHeaderEventType,
 		ChainHeaderAnnouncementEvent{
-			Slot:   header.SlotNumber(),
-			RbHash: lcommon.NewBlake2b256(headerHash.Bytes()),
-			EbHash: ebHash,
-			Seq:    seq,
+			Slot:      header.SlotNumber(),
+			RbHash:    rbHash,
+			EbHash:    ebHash,
+			Issuer:    issuer,
+			Seq:       seq,
+			ArrivedAt: time.Now(),
 		},
 	), true
 }
 
-// headerInvalidationEvent builds the counterpart to leiosAnnouncementEvent:
+// headerInvalidationEvent builds the counterpart to leiosHeaderEvent:
 // every announcement above point describes a ranking block that is no longer
 // on our chain.
 func headerInvalidationEvent(
@@ -861,13 +886,10 @@ func (c *Chain) queuedHeaderHashes() []lcommon.Blake2b256 {
 // must hold c.mutex, so the number orders this chain's mutations exactly as
 // the sequencer orders the events they produce.
 //
-// The counter belongs to the ChainManager rather than to the Chain because
-// ChainHeaderEventType is one topic on the one event bus the manager hands to
-// every chain it builds, and a consumer compares the sequence numbers it
-// receives as a single total order. A per-chain counter would restart at 1 on
-// any second publishing chain, so that consumer would protect or prune state
-// belonging to the wrong mutation. It starts at 1: zero means "unsequenced" to
-// consumers.
+// The counter belongs to the ChainManager rather than to the Chain so that a
+// number is never reused by two chains the manager owns, although only the
+// primary chain publishes it: fork chains are built without the event bus.
+// It starts at 1: zero means "unsequenced" to consumers.
 //
 // A Chain constructed without a manager -- only this package's tests do that,
 // by building the struct literal directly -- falls back to a chain-local
@@ -1334,10 +1356,11 @@ func (c *Chain) addBlockLocked(
 		c.setHeadersLocked(slices.Delete(c.headers, 0, 1))
 	} else if !matchPendingHeader {
 		discardedHeaders = c.queuedHeaderHashes()
-		c.setHeadersLocked(c.headers[:0])
 		if len(discardedHeaders) > 0 {
-			defer c.withdrawalGeneration.Add(1)
+			finishWithdrawal := c.beginWithdrawalLocked()
+			defer finishWithdrawal()
 		}
+		c.setHeadersLocked(c.headers[:0])
 	}
 	// Update tip
 	c.currentTip = ochainsync.Tip{
@@ -1371,14 +1394,19 @@ func (c *Chain) addBlockLocked(
 	// a duplicate, and the invalidation above then frees the id with nothing
 	// left to retry. Announcing it here, sequenced immediately behind that
 	// invalidation, means the id is always free before the consumer arms it.
-	// The apply-driven path stays as an idempotent backstop.
+	// The apply-driven path stays as an idempotent backstop. A block that
+	// announces nothing has no vote id to race for, so it publishes nothing
+	// here; the consumer learns of it from ChainUpdateEventType.
 	if !matchPendingHeader {
-		if evt, ok := leiosAnnouncementEvent(
+		if evt, ok := leiosHeaderEvent(
 			block.Header(),
 			lcommon.NewBlake2b256(blockHashBytes),
 			c.nextHeaderSeqLocked(),
 		); ok {
-			c.queueDeferredTxnEventLocked(evt, txn)
+			_, announces := evt.Data.(ChainHeaderAnnouncementEvent)
+			if announces {
+				c.queueDeferredTxnEventLocked(evt, txn)
+			}
 		}
 	}
 	if notifyWaiters {
@@ -1402,12 +1430,6 @@ func (c *Chain) AddBlocks(
 	ctx context.Context,
 	blocks []ledger.Block,
 ) (err error) {
-	_, span := tracing.Start(
-		ctx,
-		"chain.add_blocks",
-		attribute.Int("blocks.count", len(blocks)),
-	)
-	defer func() { tracing.End(span, err) }()
 	if c == nil {
 		return errors.New("chain is nil")
 	}
@@ -1870,6 +1892,34 @@ func (c *Chain) RollbackDeferred(
 	return c.rollbackLocked(ctx, point, false)
 }
 
+// RollbackDeferredWithPreflight runs before and the rollback under one chain
+// mutation barrier. The callback must validate the point and complete any
+// external effects that have to precede truncation. A callback error leaves
+// the chain unchanged; callers must settle any prior rollback intent before
+// entering the barrier, because its recovery may itself rewind the chain.
+func (c *Chain) RollbackDeferredWithPreflight(
+	ctx context.Context,
+	point ocommon.Point,
+	before func() error,
+) ([]event.Event, error) {
+	if c == nil {
+		return nil, errors.New("chain is nil")
+	}
+	c.batchCommitMutex.Lock()
+	defer c.batchCommitMutex.Unlock()
+	if err := c.awaitPendingCallerAdds(); err != nil {
+		return nil, fmt.Errorf(
+			"wait for pending caller adds before preflight: %w", err,
+		)
+	}
+	if before != nil {
+		if err := before(); err != nil {
+			return nil, err
+		}
+	}
+	return c.rollbackWithMutationBarrierHeld(ctx, point, false)
+}
+
 // RollbackDeferredThen rewinds the chain like RollbackDeferred and runs after
 // the rewind before admitting another persistent-chain mutation. Event
 // publication stays deferred until the caller has released its own outer locks.
@@ -2241,6 +2291,7 @@ func (c *Chain) rollbackWithMutationBarrierHeld(
 			// to void it.
 			discarded := c.queuedHeaderHashes()[idx+1:]
 			dropped := len(discarded)
+			finishWithdrawal := c.beginWithdrawalLocked()
 			c.setHeadersLocked(slices.Delete(c.headers, idx+1, len(c.headers)))
 			if dropped > 0 {
 				c.headerMutationGeneration++
@@ -2251,6 +2302,7 @@ func (c *Chain) rollbackWithMutationBarrierHeld(
 					discarded,
 				))
 			}
+			finishWithdrawal()
 			c.mutex.Unlock()
 			return nil, nil
 		}
@@ -2287,6 +2339,8 @@ func (c *Chain) rollbackWithMutationBarrierHeld(
 			// after it and leave the matched header itself queued.
 			discarded := c.queuedHeaderHashes()[idx+1:]
 			dropped := len(discarded)
+			finishWithdrawal := c.beginWithdrawalLocked()
+			defer finishWithdrawal()
 			c.setHeadersLocked(slices.Delete(c.headers, idx+1, len(c.headers)))
 			// Those headers never become blocks, so any announcement
 			// they carried is void. This path returns no chain.update
@@ -2365,6 +2419,8 @@ func (c *Chain) rollbackWithMutationBarrierHeld(
 		}
 	}
 	// Delete only after every fallible ephemeral lookup has succeeded.
+	finishWithdrawal := c.beginWithdrawalLocked()
+	defer finishWithdrawal()
 	for i := c.tipBlockIndex; i > rollbackBlockIndex; i-- {
 		if c.persistent {
 			// Remove block from persistent store, returns the removed block
@@ -2542,10 +2598,11 @@ func (c *Chain) ClearHeaders() {
 	defer c.mutex.Unlock()
 	discarded := c.queuedHeaderHashes()
 	hadHeaders := len(discarded) > 0
-	c.setHeadersLocked(c.headers[:0])
 	if hadHeaders {
-		defer c.withdrawalGeneration.Add(1)
+		finishWithdrawal := c.beginWithdrawalLocked()
+		defer finishWithdrawal()
 	}
+	c.setHeadersLocked(c.headers[:0])
 	// Discarded headers never become blocks, so any announcement they
 	// carried is void, and no rollback is published for them because no
 	// block was ever added. Everything at or below the block tip survives;
@@ -3168,9 +3225,9 @@ func (c *Chain) HoldsPoint(ctx context.Context, point ocommon.Point) bool {
 
 // HoldsPointSettled is HoldsPoint that also reports whether the answer is
 // settled. A block mutation that overlaps the unlocked read of a persistent
-// chain leaves the membership unknown: held is then false and settled is
-// false, and the caller must not treat the point as absent. Every other false
-// answer is settled.
+// chain leaves the membership unknown, as does a cancelled context: held is
+// then false and settled is false, and the caller must not treat the point as
+// absent. Every other false answer is settled.
 //
 //nolint:contextcheck // A nil caller has no context to inherit.
 func (c *Chain) HoldsPointSettled(
@@ -3184,18 +3241,24 @@ func (c *Chain) HoldsPointSettled(
 		ctx = context.Background()
 	}
 	if ctx.Err() != nil {
-		return false, true
+		// A cancelled read learned nothing about the point.
+		return false, false
 	}
 	if c.persistent {
 		return c.holdsPersistentPoint(ctx, point)
 	}
 	blk, err := c.BlockByPoint(ctx, point, nil)
 	if err != nil {
-		return false, true
+		return false, ctx.Err() == nil
 	}
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
-	return c.holdsBlockAtIndex(ctx, blk.ID, point.Hash), true
+	held = c.holdsBlockAtIndex(ctx, blk.ID, point.Hash)
+	if ctx.Err() != nil {
+		// A membership read that overlapped cancellation proves nothing.
+		return false, false
+	}
+	return held, true
 }
 
 // holdsPersistentPoint needs only the retained metadata and active index.
@@ -3223,14 +3286,14 @@ func (c *Chain) holdsPersistentPoint(
 	defer txn.Rollback() //nolint:errcheck
 	index, err := database.BlockIDByPointMetadataTxn(txn, point)
 	if ctx.Err() != nil {
-		return false, true
+		return false, false
 	}
 	if err != nil {
 		return false, !c.blockMutatedSince(generation)
 	}
 	indexed, err := db.BlockPointByIndex(index, txn)
 	if ctx.Err() != nil {
-		return false, true
+		return false, false
 	}
 	if err != nil || indexed.Slot != point.Slot ||
 		!bytes.Equal(indexed.Hash, point.Hash) {

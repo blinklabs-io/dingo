@@ -15,6 +15,7 @@
 package chainselection
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"net"
@@ -1985,4 +1986,30 @@ func TestRecordDeliveredPeerRollbackTrimsWithoutRegistering(t *testing.T) {
 	assert.NotContains(t, cs.deliveredPeerTips, other)
 	assert.NotContains(t, cs.peerTips, other,
 		"a delivered-history rollback must not register a peer")
+}
+
+func TestShouldApplyIngressAwaitsGenesisPublicationWithoutOperatorQuorum(t *testing.T) {
+	t.Parallel()
+	var generation atomic.Uint64
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:   true,
+		SecurityParam: 20,
+		CurrentHeaderCryptoVerificationGeneration: generation.Load,
+		PinHeaderCryptoVerificationGeneration: func(value uint64) (func(), bool) {
+			return func() {}, value == generation.Load()
+		},
+	})
+	conn := corrConn(41)
+	require.False(t, cs.GenesisCorroborationActive())
+	require.Equal(t, ingressAwaitCorroboration, cs.ingressDecision(conn),
+		"local publication must defer the header even without an operator quorum")
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	applied, err := cs.AwaitIngressCorroboration(ctx, conn)
+	require.ErrorIs(t, err, context.Canceled)
+	require.False(t, applied)
+	generation.Store(1)
+	applied, err = cs.AwaitIngressCorroboration(t.Context(), conn)
+	require.NoError(t, err)
+	require.True(t, applied, "publication must release the same held ingress")
 }

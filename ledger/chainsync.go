@@ -2320,7 +2320,7 @@ func (ls *LedgerState) bufferHeaderEvent(
 		ls.bufferedHeaderMutex.Unlock()
 		ls.requestChainsyncResync(
 			e.ConnectionId,
-			"buffered header limit exceeded",
+			event.ChainsyncResyncReasonBufferedHeaderLimitExceeded,
 			pending,
 		)
 		return
@@ -4958,7 +4958,7 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 		)
 		ls.requestChainsyncResync(
 			e.ConnectionId,
-			"header past forecast horizon",
+			event.ChainsyncResyncReasonHeaderPastForecastHorizon,
 			pending,
 		)
 		return nil
@@ -5011,8 +5011,8 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 			// The queue mutation is complete. Release before later ledger reads so
 			// a snapshot publisher holding the ledger write lock cannot form a
 			// lock cycle with this generation pin. The deferred selector callback
-			// reacquires the same generation and rejects admission if publication
-			// occurred in the gap.
+			// waits out a local transition and can recover an expired verdict only
+			// when the exact header has already been applied.
 			releaseVerificationGeneration()
 			releaseVerificationGeneration = nil
 			if e.PeerTipAdmission != nil {
@@ -5022,10 +5022,11 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 						admit(false)
 						return
 					}
-					release, current := ls.
-						PinHeaderCryptoVerificationGeneration(
-							headerCryptoVerificationGeneration,
-						)
+					release, current := ls.pinSettledHeaderAdmission(
+						ls.lifecycleContext(),
+						&e,
+						headerCryptoVerificationGeneration,
+					)
 					if !current {
 						cleanup := ls.invalidateChainsyncHeaderAdmission(e)
 						admit(false)
@@ -5432,13 +5433,23 @@ func (ls *LedgerState) AwaitChainsyncHeaderAdmission(
 			return false, fmt.Errorf("wait for forecast horizon: %w", err)
 		}
 		slotTime, err = ls.slotClock.SlotToTime(headerSlot)
-	} else if err == nil && ls.headerBeyondForecastHorizon(ctx, e) {
-		// The slot is in range from the local tip, but the peer's chain
-		// leaves the local chain earlier, and is forecast from there.
-		if err := ls.awaitForecastHorizon(ctx, e); err != nil {
-			return false, fmt.Errorf("wait for forecast horizon: %w", err)
+	} else if err == nil {
+		beyond := ls.headerBeyondForecastHorizon(ctx, e)
+		// A context that ended during the anchor walk reads every membership
+		// as absent, which looks like a header inside the horizon.
+		if ctx != nil {
+			if cerr := ctx.Err(); cerr != nil {
+				return false, fmt.Errorf("wait for forecast horizon: %w", cerr)
+			}
 		}
-		slotTime, err = ls.slotClock.SlotToTime(headerSlot)
+		if beyond {
+			// The slot is in range from the local tip, but the peer's chain
+			// leaves the local chain earlier, and is forecast from there.
+			if err := ls.awaitForecastHorizon(ctx, e); err != nil {
+				return false, fmt.Errorf("wait for forecast horizon: %w", err)
+			}
+			slotTime, err = ls.slotClock.SlotToTime(headerSlot)
+		}
 	}
 	if err != nil {
 		return false, fmt.Errorf("resolve header slot onset: %w", err)
@@ -5508,7 +5519,7 @@ func (ls *LedgerState) AwaitObserverHeaderHorizon(
 		if beyond, _ := ls.headerBeyondForecastHorizonFrom(
 			ctx, e, &anchor,
 		); !beyond && !anchor.disconnected {
-			return nil
+			return ctx.Err()
 		}
 		if !parked {
 			parked = true
@@ -5628,9 +5639,17 @@ func (ls *LedgerState) awaitForecastHorizon(
 		capacityChanged := ls.chainsyncCapacityChanged
 		ls.chainsyncBlockfetchMutex.Unlock()
 		if !ls.headerBeyondForecastHorizon(ctx, e) {
-			return nil
+			// A context that ended during the anchor walk reads every
+			// membership as absent, which looks like a header that is not
+			// past the horizon.
+			return ctx.Err()
 		}
 		if ls.chainsyncHeaderDisconnected(ctx, e) {
+			// Cancellation during the ancestry walk reads every block as
+			// absent, which is indistinguishable from a real disconnect.
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			if !ls.flushQueuedHeadersForHorizonWait(e.ConnectionId) &&
 				!ls.chainAheadOfAppliedTip() {
 				return ErrChainsyncHeaderDisconnected
@@ -5660,7 +5679,14 @@ func (ls *LedgerState) awaitForecastHorizon(
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			if !ls.headerBeyondForecastHorizon(ctx, e) {
+			beyond := ls.headerBeyondForecastHorizon(ctx, e)
+			// A context that ended during the recheck reads every membership
+			// as absent: the header may look inside the horizon or past it,
+			// and neither admits it nor owes it a resync.
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if !beyond {
 				return nil
 			}
 			select {
@@ -5831,6 +5857,9 @@ func (ls *LedgerState) holdsPointSettled(
 		held, settled = ls.chain.HoldsPointSettled(ctx, point)
 		if settled {
 			return held, true
+		}
+		if ctx.Err() != nil {
+			return false, false
 		}
 	}
 	return false, false
@@ -9468,7 +9497,11 @@ func (ls *LedgerState) processEpochRolloverWithClassicPParamsContext(
 	plutusV2CostModelWritten bool,
 	transitionHardForkMajors []uint,
 ) (result *EpochRolloverResult, err error) {
-	_, span := tracing.Start(ctx, "ledger.epoch_transition", tracing.Uint64("epoch", currentEpoch.EpochId))
+	_, span := tracing.Start(
+		ls.catchupContext(ctx),
+		"ledger.epoch_transition",
+		tracing.Uint64("epoch", currentEpoch.EpochId),
+	)
 	defer func() { tracing.End(span, err) }()
 	// Fail closed at the top of the production rollover path rather than
 	// letting a nil config reach one of the several unchecked

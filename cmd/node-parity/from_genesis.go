@@ -38,6 +38,9 @@ var koiosFlags struct {
 	allowPrivateAddresses bool
 	verbose               bool
 	skipUTxO              bool
+	captureDir            string
+	txInfoBatchSize       int
+	txInfoConcurrency     int
 	// cachePath, when set, points this run's CheckProtocolParams,
 	// CheckStakeDistribution and /tx_info lookups at a koiosparity.Cache
 	// (koios_check.go's doc comments on those functions) instead of calling
@@ -53,6 +56,10 @@ var koiosFlags struct {
 	// --koios-base-url.
 	cachePath string
 }
+
+// utxoRefSample bounds the refs a UTxO mismatch logs at Warn, enough to
+// identify a class of divergence without logging a whole set.
+const utxoRefSample = 20
 
 // splitStakeMismatches partitions mismatches into real Dingo/Koios
 // divergences and KoiosFault entries (an unparseable koios active_stake
@@ -253,7 +260,9 @@ func (c *fromGenesisCounters) recordEpoch(
 		logger.Warn("utxo set mismatch",
 			"epoch", r.Epoch, "missing", len(r.UTxOMissing),
 			"extra", len(r.UTxOExtra), "differs", len(r.UTxODiffers),
-			"dingo_ref_count", r.UTxORefCount)
+			"dingo_ref_count", r.UTxORefCount,
+			"missing_sample", r.UTxOMissing[:min(len(r.UTxOMissing), utxoRefSample)],
+			"extra_sample", r.UTxOExtra[:min(len(r.UTxOExtra), utxoRefSample)])
 		for _, d := range r.UTxODiffers {
 			logger.Debug("utxo content differs", "epoch", r.Epoch, "detail", d)
 		}
@@ -359,6 +368,20 @@ of re-deriving them from scratch.`,
 		&koiosFlags.skipUTxO, "skip-utxo", false,
 		"skip the UTxO-set comparison: no baseline is captured and no /tx_info is fetched; protocol parameters and stake are still compared",
 	)
+	cmd.Flags().IntVar(
+		&koiosFlags.txInfoBatchSize, "koios-tx-info-batch-size",
+		koiosparity.KoiosTxInfoBatchSize,
+		"transaction hashes per /tx_info request, 1 to 999; the public host refuses request bodies over 5120 bytes, so raise it only for a host that accepts more",
+	)
+	cmd.Flags().IntVar(
+		&koiosFlags.txInfoConcurrency, "koios-tx-info-concurrency",
+		koiosparity.KoiosTxInfoConcurrency,
+		fmt.Sprintf("/tx_info requests kept in flight at once, 1 to %d", koiosparity.KoiosTxInfoMaxConcurrency),
+	)
+	cmd.Flags().StringVar(
+		&koiosFlags.captureDir, "boundary-capture-dir", "",
+		"directory for Dingo's whole UTxO set at each epoch boundary, read as Dingo crosses it, so the UTxO comparison still runs when the reconstruction reaches the boundary after Dingo has moved past its rollback window (optional; each file is removed once compared; default: query Dingo live at the boundary)",
+	)
 	cmd.Flags().StringVar(
 		&koiosFlags.cachePath, "koios-cache-path", "",
 		"path to a koios-parity cache.db for protocol-params, stake-distribution and /tx_info reference data (optional; safe to share a dingo instance's own --koios-parity-cache-path, but its recorded Koios API root must match --koios-base-url); default: fetch fresh from Koios with no caching",
@@ -435,10 +458,19 @@ func newFromGenesisKoiosClient(
 	if err != nil {
 		return nil, err
 	}
-	return nodeparity.NewKoiosClient(
+	koios, err := nodeparity.NewKoiosClient(
 		network, apiKey, koiosFlags.baseURL, koiosFlags.allowInsecureHTTP,
 		koiosFlags.allowPrivateAddresses,
 	)
+	if err != nil {
+		return nil, err
+	}
+	if err := koios.SetTxInfoLimits(
+		koiosFlags.txInfoBatchSize, koiosFlags.txInfoConcurrency,
+	); err != nil {
+		return nil, err
+	}
+	return koios, nil
 }
 
 func fromGenesisRun(cmd *cobra.Command, _ []string) error {
@@ -513,6 +545,7 @@ func fromGenesisRun(cmd *cobra.Command, _ []string) error {
 	err = nodeparity.RunFromGenesis(
 		cmd.Context(), globalFlags.dingoAddr, network, magic, koios, cache, report, logf,
 		resumeFrom, koiosFlags.skipUTxO,
+		nodeparity.WithBoundaryCaptureDir(koiosFlags.captureDir),
 	)
 
 	logger.Info("run summary",

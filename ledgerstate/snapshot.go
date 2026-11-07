@@ -311,18 +311,20 @@ func isLedgerStateFile(name string) bool {
 // Note: The entire file is read into memory because the CBOR parsing
 // pipeline (decodeRawArray, cbor.Decode) requires a contiguous byte
 // slice and does not support io.Reader streaming. For legacy-format
-// mainnet snapshots the embedded UTxO map can be hundreds of MB.
+// mainnet snapshots the embedded UTxO map can be hundreds of MB. Files
+// larger than MaxLedgerStateSnapshotBytes are rejected before allocation.
 // A future optimization could use mmap (syscall.Mmap) to avoid
 // copying the file contents into Go heap memory, which would keep
 // the OS page cache as the backing store rather than allocating a
 // separate heap buffer.
 func ParseSnapshot(path string) (*RawLedgerState, error) {
-	data, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("reading snapshot file: %w", err)
 	}
+	defer f.Close()
 
-	return parseSnapshotData(data)
+	return ParseSnapshotFile(f)
 }
 
 // parseSnapshotData decodes the snapshot CBOR data. It handles both

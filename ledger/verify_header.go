@@ -31,6 +31,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/tracing"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -153,6 +154,15 @@ var ErrHeaderBeyondForecastHorizon = errors.New(
 	"header beyond the ledger forecast horizon",
 )
 
+// ErrHeaderAncestryUnavailable means a peer header's retained predecessors
+// cannot be reconstructed. It is deferred, not evidence of an invalid header.
+// With no local block to apply, recovery requires re-delivery of that history
+// rather than waiting for a ledger snapshot publication.
+var ErrHeaderAncestryUnavailable = fmt.Errorf(
+	"%w: retained header ancestry unavailable",
+	errHeaderVerificationDeferred,
+)
+
 // headerStateLookupErr marks err, a failure reading local state, with
 // errHeaderStateLookupFailed. models.ErrPoolNotFound is an answer rather than a
 // failure and is returned unchanged.
@@ -164,8 +174,9 @@ func headerStateLookupErr(err error) error {
 }
 
 // IsHeaderVerificationDeferred reports whether header-only verification could
-// not proceed because required ledger state, epoch data, or stake snapshot
-// data is not available yet. errEpochNonceUnavailable is included: a cached
+// not proceed because required ledger state, retained peer ancestry, epoch
+// data, or stake snapshot data is not available yet. errEpochNonceUnavailable
+// is included: a cached
 // epoch entry with no published nonce yet (Byron always, or a post-Byron
 // epoch transiently) is the same "not ready, not proof of invalidity"
 // condition as a slot outside the published cache entirely -- treating it as
@@ -295,6 +306,7 @@ func (ls *LedgerState) ValidateChainSelectionHeaderCrypto(
 	header ledger.BlockHeader,
 ) error {
 	return ls.validateChainSelectionHeaderCrypto(
+		context.Background(),
 		ouroboros.ConnectionId{},
 		header,
 		false,
@@ -310,14 +322,23 @@ func (ls *LedgerState) ValidatePeerChainSelectionHeaderCrypto(
 	connId ouroboros.ConnectionId,
 	header ledger.BlockHeader,
 ) error {
-	return ls.validateChainSelectionHeaderCrypto(connId, header, true)
+	return ls.validateChainSelectionHeaderCrypto(
+		context.Background(),
+		connId,
+		header,
+		true,
+	)
 }
 
 func (ls *LedgerState) validateChainSelectionHeaderCrypto(
+	ctx context.Context,
 	connId ouroboros.ConnectionId,
 	header ledger.BlockHeader,
 	peerRelative bool,
 ) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if header == nil {
 		return errors.New("nil block header")
 	}
@@ -327,7 +348,7 @@ func (ls *LedgerState) validateChainSelectionHeaderCrypto(
 	// header hash, so a match is the same header. Holding the point alone is
 	// not enough: a block can join the chain with its state checks deferred
 	// until the ledger reaches it, so the ledger tip must also cover the slot.
-	if ls.headerApplied(header) {
+	if ls.headerApplied(ctx, header) {
 		return nil
 	}
 	if peerRelative {
@@ -336,6 +357,7 @@ func (ls *LedgerState) validateChainSelectionHeaderCrypto(
 			return errHeaderVerificationContextUnavailable
 		}
 		epochNonce, epoch, fork, err := ls.peerChainSelectionEpochNonce(
+			ctx,
 			connId,
 			header,
 			snapshot,
@@ -344,8 +366,31 @@ func (ls *LedgerState) validateChainSelectionHeaderCrypto(
 			return err
 		}
 		if fork {
+			cache := snapshot.epochCache
+			if _, ok := epochByIDInCache(cache, epoch.EpochId); !ok {
+				// The epoch is a forecast one that the fork's own ancestry
+				// produced; its nonce is the fork's, not the ledger's.
+				forecast, ok := ls.forecastEpochCacheThrough(
+					snapshot,
+					header.SlotNumber(),
+				)
+				if !ok {
+					return fmt.Errorf(
+						"%w: forecast epoch %d is unavailable",
+						errHeaderVerificationDeferred,
+						epoch.EpochId,
+					)
+				}
+				for i := range forecast {
+					if forecast[i].EpochId == epoch.EpochId {
+						forecast[i].Nonce = cloneNonce(epochNonce)
+					}
+				}
+				cache = forecast
+			}
 			block := headerOnlyBlock{header: header, peerRelative: true}
 			if err := ls.verifyBlockHeaderStatelessCryptoWithEpochNonce(
+				ctx,
 				block,
 				epoch,
 				epochNonce,
@@ -353,15 +398,15 @@ func (ls *LedgerState) validateChainSelectionHeaderCrypto(
 				return err
 			}
 			err = ls.verifySelectedBlockHeaderStateWithCache(
-				context.Background(),
+				ctx,
 				block,
 				epoch.EpochId,
-				snapshot.epochCache,
+				cache,
 				epochNonce,
 			)
 		} else {
 			err = ls.verifyBlockHeaderCryptoWithEpochAdvance(
-				context.Background(),
+				ctx,
 				headerOnlyBlock{header: header, peerRelative: true},
 				false,
 				true,
@@ -371,13 +416,13 @@ func (ls *LedgerState) validateChainSelectionHeaderCrypto(
 			return err
 		}
 		return ls.validatePeerForkOpCertCounters(
-			context.Background(),
+			ctx,
 			connId,
 			header,
 		)
 	}
 	err := ls.verifyBlockHeaderCryptoWithEpochAdvance(
-		context.Background(),
+		ctx,
 		headerOnlyBlock{header: header, peerRelative: true},
 		false,
 		true,
@@ -393,12 +438,16 @@ func chainSelectionHeaderStateError(err error) error {
 }
 
 func (ls *LedgerState) verifyBlockHeaderStatelessCryptoWithEpochNonce(
+	ctx context.Context,
 	block ledger.Block,
 	epoch models.Epoch,
 	epochNonce []byte,
 ) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if block.Era().Id == byron.EraIdByron {
-		return ls.validateByronPBFTHeaderCrypto(context.Background(), block)
+		return ls.validateByronPBFTHeaderCrypto(ctx, block)
 	}
 	if len(epochNonce) != lcommon.Blake2b256Size {
 		return fmt.Errorf(
@@ -436,6 +485,9 @@ func (ls *LedgerState) verifyBlockHeaderStatelessCryptoWithEpochNonce(
 		hex.EncodeToString(epochNonce),
 		slotsPerKesPeriod,
 	); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if err := verifyOpCertHeaderCrypto(
@@ -509,15 +561,26 @@ func (ls *LedgerState) withStableHeaderVerificationContext(
 // headerApplied reports whether the ledger has applied header: its point is on
 // the chain and the published ledger tip has reached its slot. An unpublished
 // tip counts as not applied, so the header is verified.
-func (ls *LedgerState) headerApplied(header ledger.BlockHeader) bool {
+func (ls *LedgerState) headerApplied(
+	ctx context.Context,
+	header ledger.BlockHeader,
+) bool {
+	held, _ := ls.headerAppliedSettled(ctx, header)
+	return held
+}
+
+func (ls *LedgerState) headerAppliedSettled(
+	ctx context.Context,
+	header ledger.BlockHeader,
+) (bool, bool) {
 	if ls.chain == nil {
-		return false
+		return false, true
 	}
 	tip := ls.loadTipSnapshot()
 	if tip == nil || tip.currentTip.Point.Slot < header.SlotNumber() {
-		return false
+		return false, true
 	}
-	return ls.chain.HoldsPoint(context.Background(), ocommon.NewPoint(
+	return ls.chain.HoldsPointSettled(ctx, ocommon.NewPoint(
 		header.SlotNumber(),
 		header.Hash().Bytes(),
 	))
@@ -583,14 +646,11 @@ func verifyBlockHeaderHex(
 			err,
 		)
 	}
-	if err := verifyTPraosNonceVrfHex(header, epochNonceHex); err != nil {
-		return fmt.Errorf(
-			"block header verification failed at slot %d: %w",
-			block.SlotNumber(),
-			err,
-		)
-	}
-
+	// VerifyBlock checks the leader VRF and, for Shelley-through-Alonzo
+	// headers, the separate nonce VRF certificate against the same epoch
+	// nonce (gouroboros verifyNonceVrf). TestVerifyBlockHeaderTPraosNonceVRF
+	// pins that it rejects a nonce certificate from another key or with an
+	// altered proof.
 	isValid, _, _, _, err := ledger.VerifyBlock(
 		headerOnlyBlock{header: header},
 		epochNonceHex,
@@ -643,7 +703,14 @@ func (ls *LedgerState) verifyBlockHeaderCryptoWithEpochAdvance(
 	block ledger.Block,
 	allowEpochCacheAdvance bool,
 	allowStateDefer bool,
-) error {
+) (err error) {
+	ctx, span := tracing.StartHeader(
+		ctx,
+		tracing.StageHeaderValidated,
+		"block.header_validated",
+		block,
+	)
+	defer func() { tracing.End(span, err) }()
 	if ls.config.Consensus == nil {
 		return ls.ValidatePraosHeader(
 			ctx,
@@ -964,13 +1031,20 @@ func (ls *LedgerState) headerVerificationEpochWithCache(
 		if err != nil {
 			return models.Epoch{}, nil, err
 		}
+		if ls.headerVerificationEpochLookupHook != nil {
+			ls.headerVerificationEpochLookupHook()
+		}
 		after := ls.loadConsensusSnapshot()
 		if before == after {
 			return epoch, after.epochCache, nil
 		}
 	}
-	return models.Epoch{}, nil, errors.New(
-		"block header verification deferred: epoch cache changed during lookup",
+	// Every attempt resolved the epoch; only the snapshot pairing failed, which
+	// says nothing about the header.
+	return models.Epoch{}, nil, fmt.Errorf(
+		"%w during epoch lookup for slot %d",
+		errHeaderVerificationContextChanged,
+		blockSlot,
 	)
 }
 
@@ -2863,6 +2937,21 @@ func (ls *LedgerState) electingVrfKeyHashFromSnapshotWithTxn(
 	if ok {
 		var vrfKeyHash []byte
 		var found bool
+		memoKey := electingVrfMemoKey{
+			pool:         poolKeyHash,
+			cutoffSlot:   cutoffSlot,
+			capturedSlot: capturedSlot,
+		}
+		// Captured before electingVrfMemoStable reads the tip; see
+		// electingVrfMemo for the ordering this relies on.
+		memoGeneration := ls.electingVrfMemo.currentGeneration()
+		memoizable := ls.mithrilLedgerSlot == 0 &&
+			ls.electingVrfMemoStable(cutoffSlot, capturedSlot)
+		if memoizable {
+			if hash, hit := ls.electingVrfMemo.get(memoKey); hit {
+				return hash, true, nil
+			}
+		}
 		if ls.mithrilLedgerSlot != 0 && cutoffSlot == ls.mithrilLedgerSlot &&
 			capturedSlot == ls.mithrilLedgerSlot {
 			// Imported active distributions precede promotion even in Dijkstra;
@@ -2912,6 +3001,9 @@ func (ls *LedgerState) electingVrfKeyHashFromSnapshotWithTxn(
 					err,
 				))
 			}
+			if memoizable {
+				ls.electingVrfMemo.put(memoGeneration, memoKey, hash)
+			}
 			return hash, true, nil
 		}
 		// No registration in force at the cutoff. That is not a gap in
@@ -2942,6 +3034,9 @@ func (ls *LedgerState) electingVrfKeyHashFromSnapshotWithTxn(
 					poolKeyHash[:],
 					err,
 				))
+			}
+			if memoizable {
+				ls.electingVrfMemo.put(memoGeneration, memoKey, hash)
 			}
 			return hash, true, nil
 		}

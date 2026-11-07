@@ -22,6 +22,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/chainselection"
 	"github.com/blinklabs-io/dingo/chainsync"
+	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/leios"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -29,6 +30,7 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 )
 
 // errOuroborosNotStarted is returned by ledger callbacks that run before the
@@ -71,22 +73,29 @@ func (n *Node) chainsyncSyncTarget(
 func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 	healthGeneration := n.health.currentGeneration()
 	return ledger.LedgerStateConfig{
-		Consensus: n.selectedConsensusProvider(),
+		Consensus:      n.selectedConsensusProvider(),
+		CIP0203Enabled: n.config.cip0203Enabled,
 		ConsensusStateRestoredFunc: func() {
 			if ref := n.leaderSchedulerRef.Load(); ref != nil &&
 				ref.scheduler != nil {
 				ref.scheduler.ConsensusStateRestored()
 			}
 		},
-		ChainManager:       n.chainManager,
-		Database:           n.db,
-		EventBus:           n.eventBus,
-		Logger:             n.config.logger,
-		CardanoNodeConfig:  n.config.cardanoNodeConfig,
-		Network:            n.config.network,
+		ChainManager:      n.chainManager,
+		Database:          n.db,
+		EventBus:          n.eventBus,
+		Logger:            n.config.logger,
+		CardanoNodeConfig: n.config.cardanoNodeConfig,
+		Network:           n.config.network,
+		DijkstraBlsProofDomain: cardano.DijkstraPoolBlsProofDomain(
+			n.config.cardanoNodeConfig,
+			n.config.network,
+			n.config.networkMagic,
+		),
 		PromRegistry:       n.config.promRegistry,
 		ValidateHistorical: n.config.validateHistorical,
 		EnableDijkstra:     n.config.experimentalDijkstraEnabled(),
+		WarmGenesisStake:   n.config.leiosRuntimeEnabled(),
 		StartInDijkstra:    n.config.startEra.IsDijkstra(),
 		// Parallel block-decode pipeline for the chainsync replay loop
 		// (phase 1 of the pipeline). Not consensus-affecting; off by default.
@@ -229,6 +238,10 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 		// is answered only on the Leios prototype network, identified
 		// strictly.
 		StakePoolStateQuery: n.config.musashiPrototypeIdentity(),
+		// GetLeiosCommittee is likewise a prototype extension, answered
+		// only on the Leios prototype network and only while a vote manager
+		// is running.
+		LeiosCommittee: n.leiosCommitteeQuery(),
 		// The Leios prototype's Dijkstra era runs Praos2, whose chain-dependent
 		// state has a ninth field. Gated on the strict prototype identity,
 		// never on the era or a run mode alone: a released node runs Dijkstra
@@ -434,5 +447,47 @@ func (n *Node) networkIngestHold() *chainsync.IngestHold {
 // restore rebuilds it.
 func (n *Node) publishChainsyncState(state *chainsync.State) {
 	n.chainsyncState = state
+	n.selectorChainsyncState.Store(state)
 	n.networkIngestHold().Attach(state)
+}
+
+// leiosCommitteeQueryError marks a committee that cannot be built because its
+// stake snapshot has no pools as ledger.ErrLeiosCommitteeNotYetAvailable, the
+// one failure the query answers by leaving the next committee out. Any other
+// error is returned unchanged and fails the query.
+func leiosCommitteeQueryError(err error) error {
+	if errors.Is(err, leios.ErrEmptyStakeDistribution) ||
+		errors.Is(err, leios.ErrZeroTotalActiveStake) {
+		return fmt.Errorf("%w: %w", ledger.ErrLeiosCommitteeNotYetAvailable, err)
+	}
+	return err
+}
+
+// leiosCommitteeQuery returns the LedgerStateConfig.LeiosCommittee callback,
+// or nil off the Leios prototype network, where the query is unsupported.
+func (n *Node) leiosCommitteeQuery() func(
+	uint64,
+) ([]olocalstatequery.LeiosCommitteeSeat, error) {
+	if !n.config.musashiPrototypeIdentity() {
+		return nil
+	}
+	return func(epoch uint64) ([]olocalstatequery.LeiosCommitteeSeat, error) {
+		voteManager := n.leiosCertificateVerifier.Load()
+		if voteManager == nil {
+			return nil, errors.New("leios vote manager is unavailable")
+		}
+		seats, err := voteManager.CommitteeSeatsForEpoch(epoch)
+		if err != nil {
+			return nil, leiosCommitteeQueryError(err)
+		}
+		// Never nil, so a committee with no seats is not read as absent.
+		out := make([]olocalstatequery.LeiosCommitteeSeat, 0, len(seats))
+		for _, seat := range seats {
+			out = append(out, olocalstatequery.LeiosCommitteeSeat{
+				Weight: seat.Weight,
+				VKey:   seat.PublicKey,
+			})
+		}
+		return out, nil
+	}
 }

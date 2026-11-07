@@ -43,6 +43,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/internal/node"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledgerstate"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -809,6 +810,7 @@ func newV2Fixture(t *testing.T, opts v2FixtureOptions) *v2Fixture {
 	genesis.ProtocolMessage.
 		MessageParts["next_aggregate_verification_key"] =
 		leaf.AggregateVerificationKey
+	genesis.AggregateVerificationKey = leaf.AggregateVerificationKey
 	signTestGenesisCertificate(t, &genesis, genesisPrivateKey)
 	leaf.PreviousHash = genesis.Hash
 	finalizeTestCertificate(t, &leaf)
@@ -2398,4 +2400,106 @@ func (f *v2Fixture) requestedImmutables() []uint64 {
 	f.immutableMu.Lock()
 	defer f.immutableMu.Unlock()
 	return slices.Clone(f.immutableRequests)
+}
+
+func TestSyncV2APIModeRemovesImmutableTreeBeforeBackfill(t *testing.T) {
+	_, certifiedHash := validImmutableFiles(t, 1000)
+	fixture := newV2Fixture(t, v2FixtureOptions{
+		validImmutable:       true,
+		ancillaryLedgerState: minimalLedgerState(t, 1000, certifiedHash),
+		ancillaryLedgerSlot:  1000,
+	})
+	dataDir := t.TempDir()
+	var backfillStarted atomic.Bool
+	var treesAtBackfill atomic.Int64
+	treesAtBackfill.Store(-1)
+	countTrees := func() int64 {
+		matches, err := filepath.Glob(
+			filepath.Join(dataDir, ".mithril-cache", "immutable-*"),
+		)
+		require.NoError(t, err)
+		var trees int64
+		for _, match := range matches {
+			if hasChunkFiles(filepath.Join(match, "immutable")) {
+				trees++
+			}
+		}
+		return trees
+	}
+
+	_, err := Sync(context.Background(), SyncConfig{
+		Network:     "preprod",
+		DataDir:     dataDir,
+		StorageMode: "api",
+		CardanoNodeConfig: testNodeConfigWithMithrilKeys(
+			t, fixture.genesisVKey, fixture.ancillaryVKey,
+		),
+		Backend:           BackendV2,
+		AggregatorURL:     fixture.server.URL,
+		AllowInsecureHTTP: true,
+		VerifyCertChain:   true,
+		CleanupAfterLoad:  true,
+		StoragePlugins:    testStoragePlugins(),
+		DatabaseWorkers:   1,
+		BackfillBatchSize: node.DefaultBackfillBatchSize,
+		Logger:            slog.New(slog.DiscardHandler),
+		OnProgress: func(progress SyncProgress) {
+			if progress.Phase == PhaseBackfill && progress.Active &&
+				backfillStarted.CompareAndSwap(false, true) {
+				treesAtBackfill.Store(countTrees())
+			}
+		},
+	})
+	require.NoError(t, err)
+	require.True(t, backfillStarted.Load(), "API sync must reach backfill")
+	require.Zero(
+		t,
+		treesAtBackfill.Load(),
+		"the extracted immutable tree must be removed before backfill starts",
+	)
+}
+
+func TestSyncV2APIModeResumesBackfillAfterImmutableTreeRemoved(t *testing.T) {
+	_, certifiedHash := validImmutableFiles(t, 1000)
+	fixture := newV2Fixture(t, v2FixtureOptions{
+		validImmutable:       true,
+		ancillaryLedgerState: minimalLedgerState(t, 1000, certifiedHash),
+		ancillaryLedgerSlot:  1000,
+	})
+	dataDir := t.TempDir()
+	baseConfig := SyncConfig{
+		Network:     "preprod",
+		DataDir:     dataDir,
+		StorageMode: "api",
+		CardanoNodeConfig: testNodeConfigWithMithrilKeys(
+			t, fixture.genesisVKey, fixture.ancillaryVKey,
+		),
+		Backend:           BackendV2,
+		AggregatorURL:     fixture.server.URL,
+		AllowInsecureHTTP: true,
+		VerifyCertChain:   true,
+		CleanupAfterLoad:  true,
+		StoragePlugins:    testStoragePlugins(),
+		DatabaseWorkers:   1,
+		BackfillBatchSize: node.DefaultBackfillBatchSize,
+		Logger:            slog.New(slog.DiscardHandler),
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var cancelled atomic.Bool
+	interrupted := baseConfig
+	interrupted.OnProgress = func(progress SyncProgress) {
+		if progress.Phase == PhaseBackfill && progress.Active &&
+			cancelled.CompareAndSwap(false, true) {
+			cancel()
+		}
+	}
+	_, err := Sync(ctx, interrupted)
+	require.ErrorIs(t, err, context.Canceled)
+	require.True(t, cancelled.Load(), "sync must reach backfill")
+
+	result, err := Sync(context.Background(), baseConfig)
+	require.NoError(t, err)
+	require.Equal(t, uint64(1000), result.LedgerSlot)
 }

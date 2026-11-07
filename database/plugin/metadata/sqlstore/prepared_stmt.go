@@ -38,6 +38,8 @@ var hotStatements = func() []string {
 		rewardLiveStakeUtxoStakeQuery,
 		insertUtxoQuery,
 		insertUtxoQueryIgnoreConflict,
+		insertUtxoResultQuery,
+		insertUtxoResultIgnoreConflictQuery,
 		repairConflictedUtxoQuery,
 		importAssetQuery,
 		getAssetIDQuery,
@@ -45,6 +47,7 @@ var hotStatements = func() []string {
 		getUtxoIncludingSpentByRefQuery,
 		transactionInsertSQL,
 		transactionBatchInsertSQL,
+		transactionBatchInsertResultSQL,
 		transactionBatchConflictUpdateSQL,
 		transactionBatchConflictIDSQL,
 		committeeHotAuthorizationDeleteIDQuery,
@@ -80,6 +83,7 @@ var hotStatements = func() []string {
 		insertWithdrawalRewardDeltaSQL,
 		sqlitequery.GetAccountByCredentialQuery,
 		sqlitequery.GetActiveAccountByCredentialQuery,
+		sqlitequery.GetSyncStateQuery,
 		sqlitequery.SetTipQuery,
 		sqlitequery.SetBlockNonceQuery,
 		utxoStakeConsumedDeltaQuery(1),
@@ -140,10 +144,12 @@ var hotStatements = func() []string {
 // *sql.Stmt would sit unused by that path regardless of whether one exists,
 // so prepareHotStatements skips creating it. PostgreSQL supports RETURNING
 // natively (dialectQueryer.QueryRowContext takes its ordinary path there,
-// like SQLite). The multi-row mutation shapes are SQLite-specific and are
-// also excluded from other dialects.
+// like SQLite). Multi-row mutation and insert-result shapes are SQLite-only
+// and are excluded from other dialects.
 func cacheableForDialect(dialect, query string) bool {
-	if dialect != "sqlite" && isSQLiteBatchQuery(query) {
+	if dialect != "sqlite" && (isSQLiteBatchQuery(query) ||
+		query == transactionBatchInsertResultSQL ||
+		query == insertUtxoResultQuery || query == insertUtxoResultIgnoreConflictQuery) {
 		return false
 	}
 	return dialect != "mysql" || !hasReturningID(query)

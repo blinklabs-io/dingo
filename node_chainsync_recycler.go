@@ -175,11 +175,14 @@ func (n *Node) chainsyncAwaitCorroboration(
 }
 
 // chainsyncIntersectAtLedgerTip reports whether new chainsync sessions must
-// intersect at the applied ledger tip. It holds while Genesis corroboration is
-// active, which needs every peer's frontier to begin at that tip.
+// intersect at the applied ledger tip, providing a common anchor for Genesis
+// candidate histories even when no operator quorum is configured.
 func (n *Node) chainsyncIntersectAtLedgerTip() bool {
-	return n.chainSelector != nil &&
-		n.chainSelector.GenesisCorroborationActive()
+	if n.chainSelector == nil {
+		return false
+	}
+	genesis, _ := n.chainSelector.GenesisSelectionState()
+	return genesis
 }
 
 // chainsyncAwaitEagerness pauses a peer's header stream while its next header
@@ -236,6 +239,25 @@ func (n *Node) isChainsyncIngressEligible(
 		return false
 	}
 	return eligible
+}
+
+// chainsyncIngressAdmitted reports whether a peer may be a Limit on Eagerness
+// candidate. A tracked client demoted to observability-only has its headers
+// dropped from ingress, so its candidate fragment can freeze at a point the
+// live peers never share with it and hold the limit there. A connection
+// chainsync does not track has no such state and stays admitted: the
+// selector's liveness check covers a connection that is gone.
+func (n *Node) chainsyncIngressAdmitted(
+	connId ouroboros.ConnectionId,
+) bool {
+	// The selector keeps calling this hook while a live Restore republishes
+	// the chainsync state, so read it through the atomic mirror.
+	state := n.selectorChainsyncState.Load()
+	if state == nil {
+		return true
+	}
+	observabilityOnly, tracked := state.ClientObservabilityOnly(connId)
+	return !tracked || !observabilityOnly
 }
 
 func (n *Node) peerChainSelectionEligible(

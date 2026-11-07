@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"cmp"
 	"context"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -32,6 +33,7 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/common/script"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/blinklabs-io/plutigo/cek"
 	"github.com/blinklabs-io/plutigo/data"
 	"github.com/blinklabs-io/plutigo/lang"
@@ -212,6 +214,10 @@ func ValidateTxConway(
 		)
 	}
 	tx = normalizedTx
+	// The rules below share one transaction-scoped state: UTxO lookups and
+	// the transaction's script view are computed once instead of once per
+	// rule. Dingo's capability lookups unwrap it (stateCapability).
+	ls = lcommon.NewTransactionScopedLedgerState(ls)
 	// Validate TX through ledger validation rules (Phase-1).
 	// These must run even for isValid=false transactions, which still
 	// require valid structure, fees, and UTxO references for collateral.
@@ -269,13 +275,35 @@ func ValidateTxConway(
 	if shouldSkipPhase2Validation(ls) {
 		return nil
 	}
-	phase2Err := validateTxPlutusConwayWithContext(
+	// A transaction declared invalid must fail phase-2; only the success of
+	// a valid one is cached.
+	resultCache := phase2ResultCacheFor(ls)
+	var (
+		resultKey   phase2ResultKey
+		resultKeyOK bool
+	)
+	if resultCache != nil && tx.IsValid() && txHasRedeemers(tx) {
+		resultKey, resultKeyOK = conwayPhase2ResultKey(
+			tx,
+			ls,
+			tmpPparams,
+			plutusCtx.scriptInputs.resolvedAllInputs,
+			syntheticV2CostModelInEffect(ls),
+		)
+		if resultKeyOK && resultCache.contains(resultKey) {
+			return nil
+		}
+	}
+	phase2Err := validateConwayPhase2(
 		tx,
 		ls,
 		tmpPparams,
 		plutusCtx,
 		false,
 	)
+	if phase2Err == nil && resultKeyOK {
+		resultCache.add(resultKey)
+	}
 	if phase2Err != nil {
 		phase2Err = fmt.Errorf("conway plutus validation: %w", phase2Err)
 	}
@@ -565,6 +593,11 @@ func validateTxPlutusConway(
 	)
 	return validatePlutusOutcome(tx, phase2Err)
 }
+
+// validateConwayPhase2 is a test seam: production always resolves to
+// validateTxPlutusConwayWithContext. Tests substitute a counting wrapper to
+// prove the phase-2 result cache skips repeated evaluations.
+var validateConwayPhase2 = validateTxPlutusConwayWithContext
 
 func validateTxPlutusConwayWithContext(
 	tx lcommon.Transaction,
@@ -1112,6 +1145,12 @@ type txInfoCache struct {
 	txInfoV1Built  bool
 	txInfoV2Built  bool
 	txInfoV3Built  bool
+	// contextV1, contextV2 and contextV3 wrap the TxInfo of each version
+	// so that its PlutusData conversion, which the script context of every
+	// redeemer embeds unchanged, runs once per transaction.
+	contextV1 *script.CachedTxInfo
+	contextV2 *script.CachedTxInfo
+	contextV3 *script.CachedTxInfo
 }
 
 // newTxInfoCache builds the per-tx PlutusV1/V2/V3 TxInfo cache, shared by
@@ -1229,6 +1268,43 @@ func (c *txInfoCache) v3() (script.TxInfoV3, error) {
 	return c.txInfoV3, nil
 }
 
+// v1Context returns the PlutusV1 TxInfo for building script contexts,
+// converted to PlutusData at most once per transaction.
+func (c *txInfoCache) v1Context() (*script.CachedTxInfo, error) {
+	if c.contextV1 == nil {
+		txInfo, err := c.v1()
+		if err != nil {
+			return nil, err
+		}
+		c.contextV1 = script.NewCachedTxInfo(txInfo)
+	}
+	return c.contextV1, nil
+}
+
+// v2Context is v1Context for PlutusV2.
+func (c *txInfoCache) v2Context() (*script.CachedTxInfo, error) {
+	if c.contextV2 == nil {
+		txInfo, err := c.v2()
+		if err != nil {
+			return nil, err
+		}
+		c.contextV2 = script.NewCachedTxInfo(txInfo)
+	}
+	return c.contextV2, nil
+}
+
+// v3Context is v1Context for PlutusV3.
+func (c *txInfoCache) v3Context() (*script.CachedTxInfo, error) {
+	if c.contextV3 == nil {
+		txInfo, err := c.v3()
+		if err != nil {
+			return nil, err
+		}
+		c.contextV3 = script.NewCachedTxInfo(txInfo)
+	}
+	return c.contextV3, nil
+}
+
 func evaluateConwayPlutusScript(
 	plutusScript lcommon.Script,
 	purpose script.ScriptPurpose,
@@ -1268,7 +1344,7 @@ func evaluateConwayPlutusScript(
 				Err: err,
 			}
 		}
-		txInfoV3, err := txInfos.v3()
+		txInfoV3, err := txInfos.v3Context()
 		if err != nil {
 			return lcommon.ExUnits{}, nil, err
 		}
@@ -1299,12 +1375,26 @@ func evaluateConwayPlutusScript(
 			evalContext,
 		)
 		if err != nil {
-			return lcommon.ExUnits{}, err, nil
+			return lcommon.ExUnits{}, newPlutusExecutionFailure(
+				err,
+				protocolMajorVersion(pp),
+				[]byte(s),
+				data.Normalize(ctx.ToPlutusData()),
+				pp.MaxTxExUnits,
+				costModel,
+			), nil
 		}
 		if restrictive && (usedBudget.Steps > budget.Steps || usedBudget.Memory > budget.Memory) {
-			return usedBudget, fmt.Errorf(
-				"script exceeded declared budget: used (%d cpu, %d mem), declared (%d cpu, %d mem)",
-				usedBudget.Steps, usedBudget.Memory, budget.Steps, budget.Memory,
+			return usedBudget, newPlutusExecutionFailure(
+				fmt.Errorf(
+					"script exceeded declared budget: used (%d cpu, %d mem), declared (%d cpu, %d mem)",
+					usedBudget.Steps, usedBudget.Memory, budget.Steps, budget.Memory,
+				),
+				protocolMajorVersion(pp),
+				[]byte(s),
+				data.Normalize(ctx.ToPlutusData()),
+				pp.MaxTxExUnits,
+				costModel,
 			), nil
 		}
 		return usedBudget, nil, nil
@@ -1319,7 +1409,7 @@ func evaluateConwayPlutusScript(
 				ErrNoCostModelForPlutusV2,
 			)
 		}
-		txInfoV2, err := txInfos.v2()
+		txInfoV2, err := txInfos.v2Context()
 		if err != nil {
 			return lcommon.ExUnits{}, nil, err
 		}
@@ -1352,17 +1442,31 @@ func evaluateConwayPlutusScript(
 			evalContext,
 		)
 		if err != nil {
-			return lcommon.ExUnits{}, err, nil
+			return lcommon.ExUnits{}, newPlutusExecutionFailure(
+				err,
+				protocolMajorVersion(pp),
+				[]byte(s),
+				legacyPlutusArguments(datum, redeemer.Data, ctx.ToPlutusData()),
+				pp.MaxTxExUnits,
+				costModel,
+			), nil
 		}
 		if restrictive && (usedBudget.Steps > budget.Steps || usedBudget.Memory > budget.Memory) {
-			return usedBudget, fmt.Errorf(
-				"script exceeded declared budget: used (%d cpu, %d mem), declared (%d cpu, %d mem)",
-				usedBudget.Steps, usedBudget.Memory, budget.Steps, budget.Memory,
+			return usedBudget, newPlutusExecutionFailure(
+				fmt.Errorf(
+					"script exceeded declared budget: used (%d cpu, %d mem), declared (%d cpu, %d mem)",
+					usedBudget.Steps, usedBudget.Memory, budget.Steps, budget.Memory,
+				),
+				protocolMajorVersion(pp),
+				[]byte(s),
+				legacyPlutusArguments(datum, redeemer.Data, ctx.ToPlutusData()),
+				pp.MaxTxExUnits,
+				costModel,
 			), nil
 		}
 		return usedBudget, nil, nil
 	case lcommon.PlutusV1Script:
-		txInfoV1, err := txInfos.v1()
+		txInfoV1, err := txInfos.v1Context()
 		if err != nil {
 			return lcommon.ExUnits{}, nil, err
 		}
@@ -1395,12 +1499,26 @@ func evaluateConwayPlutusScript(
 			evalContext,
 		)
 		if err != nil {
-			return lcommon.ExUnits{}, err, nil
+			return lcommon.ExUnits{}, newPlutusExecutionFailure(
+				err,
+				protocolMajorVersion(pp),
+				[]byte(s),
+				legacyPlutusArguments(datum, redeemer.Data, ctx.ToPlutusData()),
+				pp.MaxTxExUnits,
+				costModel,
+			), nil
 		}
 		if restrictive && (usedBudget.Steps > budget.Steps || usedBudget.Memory > budget.Memory) {
-			return usedBudget, fmt.Errorf(
-				"script exceeded declared budget: used (%d cpu, %d mem), declared (%d cpu, %d mem)",
-				usedBudget.Steps, usedBudget.Memory, budget.Steps, budget.Memory,
+			return usedBudget, newPlutusExecutionFailure(
+				fmt.Errorf(
+					"script exceeded declared budget: used (%d cpu, %d mem), declared (%d cpu, %d mem)",
+					usedBudget.Steps, usedBudget.Memory, budget.Steps, budget.Memory,
+				),
+				protocolMajorVersion(pp),
+				[]byte(s),
+				legacyPlutusArguments(datum, redeemer.Data, ctx.ToPlutusData()),
+				pp.MaxTxExUnits,
+				costModel,
 			), nil
 		}
 		return usedBudget, nil, nil
@@ -1410,6 +1528,84 @@ func evaluateConwayPlutusScript(
 			plutusScript,
 		)
 	}
+}
+
+type plutusExecutionFailure struct {
+	err               error
+	reconstruction    []byte
+	reconstructionErr error
+}
+
+func (e plutusExecutionFailure) Error() string {
+	return e.err.Error()
+}
+
+func (e plutusExecutionFailure) Unwrap() error {
+	return e.err
+}
+
+func (e plutusExecutionFailure) PlutusFailureReconstruction() ([]byte, error) {
+	return e.reconstruction, e.reconstructionErr
+}
+
+func newPlutusExecutionFailure(
+	err error,
+	protocolMajor uint,
+	plutusScript []byte,
+	args any,
+	budget lcommon.ExUnits,
+	costModel []int64,
+) plutusExecutionFailure {
+	reconstruction, reconstructionErr := plutusFailureReconstruction(
+		protocolMajor,
+		plutusScript,
+		args,
+		budget,
+		costModel,
+	)
+	return plutusExecutionFailure{
+		err:               err,
+		reconstruction:    reconstruction,
+		reconstructionErr: reconstructionErr,
+	}
+}
+
+func legacyPlutusArguments(
+	datum data.PlutusData,
+	redeemer data.PlutusData,
+	ctx data.PlutusData,
+) []data.PlutusData {
+	args := make([]data.PlutusData, 0, 3)
+	if datum != nil {
+		args = append(args, data.Normalize(datum))
+	}
+	return append(
+		args,
+		data.Normalize(redeemer),
+		data.Normalize(ctx),
+	)
+}
+
+func plutusFailureReconstruction(
+	protocolMajor uint,
+	plutusScript []byte,
+	args any,
+	budget lcommon.ExUnits,
+	costModel []int64,
+) ([]byte, error) {
+	wire, err := cbor.Encode([]any{
+		protocolMajor,
+		plutusScript,
+		args,
+		[]any{budget.Memory, budget.Steps},
+		costModel,
+	})
+	if err != nil {
+		return nil, err
+	}
+	encoded := make([]byte, base64.StdEncoding.EncodedLen(len(wire)))
+	base64.StdEncoding.Encode(encoded, wire)
+	return encoded, nil
 }
 
 func buildConwayScriptPurpose(
@@ -1494,12 +1690,17 @@ func ValidateTxFeeConway(
 	if txFee.Cmp(minFeeBig) >= 0 {
 		return nil
 	}
-	return fmt.Errorf(
-		"transaction fee %d is less than the calculated "+
-			"minimum fee %d",
-		txFee,
-		minFeeBig,
-	)
+	return validationErrorWithCause{
+		message: fmt.Sprintf(
+			"transaction fee %d is less than the calculated minimum fee %d",
+			txFee,
+			minFeeBig,
+		),
+		cause: shelley.FeeTooSmallUtxoError{
+			Provided: txFee,
+			Min:      minFeeBig,
+		},
+	}
 }
 
 func EvaluateTxConway(

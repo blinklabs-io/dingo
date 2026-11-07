@@ -26,9 +26,40 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/plutigo/cek"
+	"github.com/blinklabs-io/plutigo/lang"
 	"github.com/blinklabs-io/plutigo/syn"
 	"github.com/fxamacker/cbor/v2"
 )
+
+func TestMeasureTurboCaseEvaluatesClosureWithoutMaterializingResult(t *testing.T) {
+	body := "(lam y y)"
+	for range 22 {
+		body = "[(lam x (lam y [x x])) " + body + "]"
+	}
+	named, err := syn.Parse("(program 1.0.0 " + body + ")")
+	if err != nil {
+		t.Fatal(err)
+	}
+	program, err := syn.NameToDeBruijn(named)
+	if err != nil {
+		t.Fatal(err)
+	}
+	flat, err := syn.Encode(program)
+	if err != nil {
+		t.Fatal(err)
+	}
+	samples, err := measureTurboCase(turboCase{
+		version:       lang.LanguageVersionV2,
+		protocolMajor: 8,
+	}, flat, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(samples) != 2 || samples[0].budget != samples[1].budget ||
+		samples[0].budget.Cpu <= 0 {
+		t.Fatalf("expected identical positive evaluation budgets: %+v", samples)
+	}
+}
 
 func TestGenerateTurboReportMeasuresFlatPrograms(t *testing.T) {
 	t.Parallel()
@@ -192,14 +223,12 @@ func TestMakeTurboBenchmarkSeparatesEvaluationAndFlatTimes(t *testing.T) {
 		42,
 		[]turboSample{
 			{
-				duration:           3 * time.Millisecond,
 				evaluationDuration: 2 * time.Millisecond,
 				flatDuration:       time.Millisecond,
 				memBytes:           100,
 				budget:             budget,
 			},
 			{
-				duration:           7 * time.Millisecond,
 				evaluationDuration: 6 * time.Millisecond,
 				flatDuration:       time.Millisecond,
 				memBytes:           200,
@@ -281,9 +310,8 @@ func TestMakeTurboBenchmarkUsesBestThirtySamples(t *testing.T) {
 	for i := range samples {
 		duration := time.Duration(i+1) * time.Millisecond
 		samples[i] = turboSample{
-			duration:           duration,
 			evaluationDuration: duration,
-			flatDuration:       0,
+			flatDuration:       time.Second - 2*duration,
 			budget:             budget,
 		}
 	}
