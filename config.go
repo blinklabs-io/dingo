@@ -1094,10 +1094,14 @@ func clonePluginConfig(in map[string]any) map[string]any {
 // exclusive Genesis witness set. Dingo supplies no network defaults, so nil and
 // an empty slice both leave witness identities to the ledger, a peer snapshot,
 // or the connection address. The option copies its input.
-func WithGenesisControlGroups(groups []topology.PeerControlGroup) ConfigOptionFunc {
+func WithGenesisControlGroups(
+	groups []topology.PeerControlGroup,
+) ConfigOptionFunc {
 	owned := topology.ClonePeerControlGroups(groups)
 	return func(c *Config) {
-		c.cfg.GenesisBootstrap.ControlGroups = topology.ClonePeerControlGroups(owned)
+		c.cfg.GenesisBootstrap.ControlGroups = topology.ClonePeerControlGroups(
+			owned,
+		)
 	}
 }
 
@@ -1777,8 +1781,9 @@ func WithLeiosPersistenceRetentionSlots(slots uint64) ConfigOptionFunc {
 // WithLeiosPipelineTiming overrides the provisional Leios pipeline stage
 // timing windows. CIP-0164 has not finalized these parameters, so they are
 // kept off-chain and overridable here rather than as protocol parameters.
-// When unset, leios.DefaultPipelineTiming applies. Experimental, leios
-// runMode only.
+// When unset, the one-second reference defaults are converted to the Shelley
+// slot duration, rounding up to whole slots. Explicit overrides remain slot
+// counts. Experimental, leios runMode only.
 func WithLeiosPipelineTiming(timing leios.PipelineTiming) ConfigOptionFunc {
 	return func(c *Config) {
 		t := timing

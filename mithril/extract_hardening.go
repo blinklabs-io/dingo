@@ -15,6 +15,7 @@
 package mithril
 
 import (
+	"archive/tar"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -58,6 +59,25 @@ var ErrExtractLimitExceeded = errors.New(
 var ErrExtractUnexpectedMember = errors.New(
 	"mithril: unexpected archive member",
 )
+
+// ErrExtractSparseMember reports a sparse tar member. Sparse holes are
+// synthesized by archive/tar above the compressed-stream accounting, so no
+// Mithril archive accepts them.
+var ErrExtractSparseMember = errors.New(
+	"mithril: sparse archive member is not supported",
+)
+
+func rejectSparseMember(header *tar.Header) error {
+	if header.Typeflag == tar.TypeGNUSparse {
+		return fmt.Errorf("%w: %s", ErrExtractSparseMember, header.Name)
+	}
+	for key := range header.PAXRecords {
+		if strings.HasPrefix(key, "GNU.sparse.") {
+			return fmt.Errorf("%w: %s", ErrExtractSparseMember, header.Name)
+		}
+	}
+	return nil
+}
 
 const (
 	// maxArchiveEntries bounds the tar entries of one archive. Directories and

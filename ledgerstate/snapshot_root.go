@@ -71,6 +71,26 @@ var errAbsent = errors.New("no such entry")
 // moving on from that would let planted content pick which tree gets imported.
 var ErrNoUsableLedgerState = errors.New("no usable ledger state")
 
+// MaxLedgerStateSnapshotBytes is the largest encoded ledger-state file Dingo
+// reads into memory. Legacy mainnet states embed their UTxO set and can be
+// hundreds of MiB; UTxO-HD tables are separate files and are not subject to
+// this limit.
+const MaxLedgerStateSnapshotBytes int64 = 1 << 30
+
+// ledgerStateSnapshotByteLimit is a test seam for exercising the public read
+// paths without allocating a production-sized buffer.
+var ledgerStateSnapshotByteLimit = MaxLedgerStateSnapshotBytes
+
+// ErrLedgerStateSnapshotTooLarge reports an encoded ledger-state file that
+// exceeds MaxLedgerStateSnapshotBytes.
+var ErrLedgerStateSnapshotTooLarge = errors.New(
+	"ledger state snapshot exceeds size limit",
+)
+
+var errLedgerStateSnapshotChanged = errors.New(
+	"ledger state snapshot changed while reading",
+)
+
 // openVerifiedChild opens a directory directly beneath parent and confirms the
 // handle refers to the entry that name refers to.
 //
@@ -549,13 +569,67 @@ func openUTxOHDSnapshot(
 	return files, nil
 }
 
+// ReadSnapshotFile reads an already-open ledger-state file from its beginning
+// into one bounded buffer. The caller closes f.
+func ReadSnapshotFile(f *os.File) ([]byte, error) {
+	return readSnapshotFile(f, ledgerStateSnapshotByteLimit)
+}
+
+func readSnapshotFile(f *os.File, maxBytes int64) ([]byte, error) {
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return nil, fmt.Errorf("seeking snapshot file: %w", err)
+	}
+	info, err := f.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("stating snapshot file: %w", err)
+	}
+	if err := validateSnapshotSize(info.Size(), maxBytes); err != nil {
+		return nil, err
+	}
+	return readSnapshotFileAtSize(f, info.Size())
+}
+
+func readSnapshotFileAtSize(f *os.File, size int64) ([]byte, error) {
+	if size < 0 || uint64(size) > uint64(^uint(0)>>1) {
+		return nil, fmt.Errorf(
+			"%w: %d bytes cannot fit in a memory buffer",
+			ErrLedgerStateSnapshotTooLarge,
+			size,
+		)
+	}
+	data := make([]byte, int(size))
+	if _, err := io.ReadFull(f, data); err != nil {
+		return nil, fmt.Errorf("reading snapshot file: %w", err)
+	}
+	var extra [1]byte
+	if n, err := f.Read(extra[:]); n != 0 || (err != nil && !errors.Is(err, io.EOF)) {
+		if err != nil && !errors.Is(err, io.EOF) {
+			return nil, fmt.Errorf("checking snapshot file length: %w", err)
+		}
+		return nil, errLedgerStateSnapshotChanged
+	}
+	return data, nil
+}
+
+func validateSnapshotSize(size, maxBytes int64) error {
+	if size > maxBytes {
+		return fmt.Errorf(
+			"%w: %d bytes exceeds %d",
+			ErrLedgerStateSnapshotTooLarge,
+			size,
+			maxBytes,
+		)
+	}
+	return nil
+}
+
 // ParseSnapshotFile parses a ledger state snapshot from an already-open file,
 // so the bytes come from the file the caller opened rather than from a name
 // re-resolved here. The caller closes f.
 func ParseSnapshotFile(f *os.File) (*RawLedgerState, error) {
-	data, err := io.ReadAll(f)
+	data, err := ReadSnapshotFile(f)
 	if err != nil {
-		return nil, fmt.Errorf("reading snapshot file: %w", err)
+		return nil, err
 	}
 	return ParseSnapshotBytes(data)
 }
@@ -569,5 +643,12 @@ func ParseSnapshotFile(f *os.File) (*RawLedgerState, error) {
 // through the file in between is visible to the second read. Reading once and
 // giving both the buffer leaves nothing to change.
 func ParseSnapshotBytes(data []byte) (*RawLedgerState, error) {
+	return parseSnapshotBytes(data, ledgerStateSnapshotByteLimit)
+}
+
+func parseSnapshotBytes(data []byte, maxBytes int64) (*RawLedgerState, error) {
+	if err := validateSnapshotSize(int64(len(data)), maxBytes); err != nil {
+		return nil, err
+	}
 	return parseSnapshotData(data)
 }

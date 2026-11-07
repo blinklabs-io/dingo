@@ -658,23 +658,33 @@ func TestPeerManagerSettlesAmongManyPeersAndReplacesLostOnes(t *testing.T) {
 	}
 	require.Equal(t, limit, m.PeerCount(), "the limit is never passed")
 
-	// Lose two of the peers it holds.
-	lost := 0
-	for _, r := range stacks {
-		if lost == 2 {
+	// Lose three of the peers it holds.
+	var lost []string
+	for i, r := range stacks {
+		if len(lost) == 3 {
 			break
 		}
 		if r.PeerCount() == 1 {
 			require.NoError(t, r.Stop(t.Context()))
-			lost++
+			lost = append(lost, peers[i].key())
 		}
 	}
-	require.Equal(t, 2, lost)
-	// The count can still read the limit before the manager has noticed the
-	// loss, so wait for the replacement dials as well.
+	require.Len(t, lost, 3)
+	// The count still reads the limit until the manager notices each loss, so
+	// wait for it to drop the lost connections before waiting for the refill.
+	waitFor(t, "the manager notices the lost peers", func() bool {
+		mgr := m.peerNet.manager
+		mgr.mu.Lock()
+		defer mgr.mu.Unlock()
+		for _, key := range lost {
+			if e := mgr.entries[key]; e != nil && e.conn != nil {
+				return false
+			}
+		}
+		return true
+	})
 	waitFor(t, "the lost peers are replaced", func() bool {
-		plain, _ := log.totals()
-		return plain > limit && m.PeerCount() == limit &&
+		return m.PeerCount() == limit &&
 			connectedCount(m.peerNet.manager) == limit
 	})
 	for range 5 {

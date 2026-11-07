@@ -4797,6 +4797,33 @@ func TestRollbackDeferredThenExcludesPersistentAdds(t *testing.T) {
 	}
 }
 
+func TestRollbackDeferredPreflightWaitsForCallerAdd(t *testing.T) {
+	t.Parallel()
+
+	db, c := callerTxnChain(t)
+	txn := addOnCallerTxn(t, db, c)
+	preflightReached := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.RollbackDeferredWithPreflight(
+			context.Background(), rollbackPoint(), func() error {
+				close(preflightReached)
+				return nil
+			},
+		)
+		done <- err
+	}()
+	waitUntilGoroutineIn(t, "chain.(*pendingAddBarrier).awaitDrained")
+	testutil.RequireNoReceive(t, preflightReached, 50*time.Millisecond,
+		"preflight ran before a caller transaction committed")
+	require.NoError(t, txn.Commit())
+	testutil.RequireReceive(t, preflightReached, 5*time.Second,
+		"preflight did not resume after caller transaction committed")
+	require.NoError(t, testutil.RequireReceive(t, done, 5*time.Second,
+		"rollback did not finish after caller transaction committed"))
+	require.Equal(t, rollbackPoint(), c.Tip().Point)
+}
+
 // headerRestoreChain builds a persistent primary chain holding the first three
 // test blocks and queues headers for the remaining three on top of that tip.
 func headerRestoreChain(t *testing.T) (*database.Database, *chain.Chain) {

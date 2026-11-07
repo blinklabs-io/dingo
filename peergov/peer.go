@@ -210,6 +210,23 @@ func (p *Peer) setConnection(conn *ouroboros.Connection, outbound bool) {
 	}
 }
 
+// recordOutboundConnected records a completed outbound handshake. A gossip or
+// ledger peer becomes sharable only here: a successful dial is what proves
+// the address is a listening one, matching the reference governor, which
+// answers a share request only with peers it has connected to. The remote's
+// own handshake PeerSharing flag does not gate this, as it does not there.
+// Inbound arrivals never set Sharable: their remote address is a listening
+// address only if the dialer reused its listening port, and the handshake
+// does not prove that, since Dingo itself negotiates duplex mode without it.
+func (p *Peer) recordOutboundConnected(conn *ouroboros.Connection, now time.Time) {
+	p.ConnectedAt = now
+	p.EverConnected = true
+	p.setConnection(conn, true)
+	if p.Source == PeerSourceP2PGossip || p.Source == PeerSourceP2PLedger {
+		p.Sharable = true
+	}
+}
+
 func (p *Peer) hasClientConnection() bool {
 	return p != nil && p.Connection != nil && p.Connection.IsClient
 }
