@@ -3225,9 +3225,9 @@ func (c *Chain) HoldsPoint(ctx context.Context, point ocommon.Point) bool {
 
 // HoldsPointSettled is HoldsPoint that also reports whether the answer is
 // settled. A block mutation that overlaps the unlocked read of a persistent
-// chain leaves the membership unknown: held is then false and settled is
-// false, and the caller must not treat the point as absent. Every other false
-// answer is settled.
+// chain leaves the membership unknown, as does a cancelled context: held is
+// then false and settled is false, and the caller must not treat the point as
+// absent. Every other false answer is settled.
 //
 //nolint:contextcheck // A nil caller has no context to inherit.
 func (c *Chain) HoldsPointSettled(
@@ -3241,18 +3241,24 @@ func (c *Chain) HoldsPointSettled(
 		ctx = context.Background()
 	}
 	if ctx.Err() != nil {
-		return false, true
+		// A cancelled read learned nothing about the point.
+		return false, false
 	}
 	if c.persistent {
 		return c.holdsPersistentPoint(ctx, point)
 	}
 	blk, err := c.BlockByPoint(ctx, point, nil)
 	if err != nil {
-		return false, true
+		return false, ctx.Err() == nil
 	}
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
-	return c.holdsBlockAtIndex(ctx, blk.ID, point.Hash), true
+	held = c.holdsBlockAtIndex(ctx, blk.ID, point.Hash)
+	if ctx.Err() != nil {
+		// A membership read that overlapped cancellation proves nothing.
+		return false, false
+	}
+	return held, true
 }
 
 // holdsPersistentPoint needs only the retained metadata and active index.
@@ -3280,14 +3286,14 @@ func (c *Chain) holdsPersistentPoint(
 	defer txn.Rollback() //nolint:errcheck
 	index, err := database.BlockIDByPointMetadataTxn(txn, point)
 	if ctx.Err() != nil {
-		return false, true
+		return false, false
 	}
 	if err != nil {
 		return false, !c.blockMutatedSince(generation)
 	}
 	indexed, err := db.BlockPointByIndex(index, txn)
 	if ctx.Err() != nil {
-		return false, true
+		return false, false
 	}
 	if err != nil || indexed.Slot != point.Slot ||
 		!bytes.Equal(indexed.Hash, point.Hash) {
