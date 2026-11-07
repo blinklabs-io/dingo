@@ -590,10 +590,12 @@
   # Can be overridden with DINGO_KOIOS_PARITY_ALLOW_PRIVATE_ADDRESSES
   # CLI: --koios-parity-allow-private-addresses
   # allowPrivateAddresses: false
-  # Stop/cancel the node on the first Koios/tool error or non-pass parity
-  # result instead of logging it and continuing normal operation. An epoch
-  # whose only significant mismatches are reference_lag (Koios has not caught
-  # up yet) is logged and recorded but never stops the node.
+  # Stop/cancel the node on the first tool error, local cache error or
+  # non-pass parity result instead of logging it and continuing normal
+  # operation. An epoch whose only significant mismatches are reference_lag
+  # (Koios has not caught up yet), and a Koios request that failed because
+  # Koios is unavailable, are logged, recorded and retried but never stop
+  # the node.
   # Can be overridden with DINGO_KOIOS_PARITY_STRICT
   # CLI: --koios-parity-strict
   # strict: true

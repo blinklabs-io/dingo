@@ -75,10 +75,12 @@ type ObserverConfig struct {
 	// live, in-process *database.Database.
 	Source RewardParitySource
 	// Strict stops the observer (and, via FatalFunc, the node driving it)
-	// on the first Koios/tool error or non-pass parity result, except an
-	// epoch whose only significant mismatches are reference_lag: Koios's
-	// own data had not caught up, so that result is logged and recorded
-	// but never triggers FatalFunc (see Observer.fail). When
+	// on the first tool error, local cache error or non-pass parity result,
+	// except an epoch whose only significant mismatches are reference_lag:
+	// Koios's own data had not caught up, so that result is logged and
+	// recorded but never triggers FatalFunc (see Observer.fail). A Koios
+	// request that fails because Koios is unavailable is likewise retried
+	// rather than fatal (see Observer.reportFetchError). When
 	// Strict is false, every failure is logged and recorded in the cache,
 	// and the observer keeps validating subsequent epochs — an explicit,
 	// non-default choice for advisory/observability-only use, since the
@@ -733,7 +735,7 @@ func (o *Observer) processEpoch(ctx context.Context, epoch uint64) {
 			)
 			return
 		}
-		o.reportError(epoch, false, fmt.Errorf("fetch koios reference: %w", err))
+		o.reportFetchError(epoch, false, err)
 		return
 	}
 
@@ -808,7 +810,7 @@ func (o *Observer) processAccountEpoch(ctx context.Context, epoch uint64) {
 			)
 			return
 		}
-		o.reportError(epoch, true, fmt.Errorf("fetch koios reference: %w", err))
+		o.reportFetchError(epoch, true, err)
 		return
 	}
 	if err := o.fetchAccountsIfNeeded(ctx, epoch); err != nil {
@@ -824,7 +826,7 @@ func (o *Observer) processAccountEpoch(ctx context.Context, epoch uint64) {
 			)
 			return
 		}
-		o.reportError(epoch, true, fmt.Errorf("fetch koios reference: %w", err))
+		o.reportFetchError(epoch, true, err)
 		return
 	}
 
@@ -915,8 +917,9 @@ func cancelled(ctx context.Context, err error) bool {
 		errors.Is(err, context.DeadlineExceeded)
 }
 
-// reportError records a genuine (non-shutdown) per-epoch fetch/check
-// failure: it logs and, in strict mode, fires FatalFunc via fail, and
+// reportError records a genuine (non-shutdown) per-epoch check failure
+// (fetch failures go through reportFetchError, which shares this path but
+// classifies fatality by provenance): it logs and, in strict mode, fires FatalFunc via fail, and
 // additionally invokes OnResult (when set) with a synthesized ERROR-status
 // result carrying err's text as a synthetic mismatch — otherwise these two
 // error branches in processEpoch would be invisible to OnResult callers,
@@ -933,6 +936,48 @@ func (o *Observer) reportError(
 	accountsChecked bool,
 	err error,
 ) {
+	o.reportErrorFatal(epoch, accountsChecked, err, true)
+}
+
+// reportFetchError reports a failure to fetch an epoch's Koios reference. The
+// fetch both requests Koios and reads and writes the local cache, so the error
+// is classified by where it came from. A Koios request that failed in a way a
+// later attempt can fix (koiosUnavailable) is never fatal: an unreachable
+// reference says nothing about whether Dingo's state agrees with it, and the
+// epoch is retried. Every other failure, including any local cache or database
+// error and a permanent Koios error, stays fatal in strict mode.
+func (o *Observer) reportFetchError(
+	epoch uint64,
+	accountsChecked bool,
+	err error,
+) {
+	o.reportErrorFatal(
+		epoch,
+		accountsChecked,
+		fmt.Errorf("fetch koios reference: %w", err),
+		!koiosUnavailable(err),
+	)
+}
+
+// koiosUnavailable reports whether err is a failed Koios request that a later
+// fetch can succeed at: a transport error, timeout or 5xx that outlasted the
+// client's own retries, an exhausted 408 budget, or daily-quota exhaustion.
+// Any other ErrKoiosPermanent failure (auth, bad request, oversized response)
+// is excluded because retrying it cannot succeed.
+func koiosUnavailable(err error) bool {
+	if !errors.Is(err, errKoiosRequest) {
+		return false
+	}
+	return !errors.Is(err, ErrKoiosPermanent) ||
+		errors.Is(err, errKoiosUnavailable)
+}
+
+func (o *Observer) reportErrorFatal(
+	epoch uint64,
+	accountsChecked bool,
+	err error,
+	fatal bool,
+) {
 	if persistErr := o.cache.RecordObserverError(o.cfg.Network, epoch, accountsChecked); persistErr != nil {
 		err = errors.Join(
 			err,
@@ -940,7 +985,7 @@ func (o *Observer) reportError(
 		)
 	}
 	o.scheduleErrorRetry(epoch, accountsChecked, StatusError)
-	o.fail(epoch, err, true)
+	o.fail(epoch, err, fatal)
 	now := time.Now()
 	o.emitResult(&EpochCompareResult{
 		Network:       o.cfg.Network,
@@ -960,7 +1005,8 @@ func (o *Observer) reportError(
 
 // emitResult is the single choke point every completed check result passes
 // through: processEpoch's success path, processAccountEpoch's success path,
-// and reportError's synthesized ERROR path (see their call sites) all call
+// and the synthesized ERROR path of reportError and reportFetchError (see
+// their call sites) all call
 // this rather than o.cfg.OnResult directly. Recording metrics here, once,
 // rather than at each call site individually, is what covers all three
 // without scattering dingo_koiosparity_* updates across observer.go.
@@ -1316,9 +1362,10 @@ func (o *Observer) fetchAccountsIfNeeded(
 // so the comparison could not be trusted yet. Such a call is
 // still logged, and processEpoch/processAccountEpoch have already persisted
 // the result, but it never reaches FatalFunc and never sets fatalFired, so
-// run/runAccounts keep processing later epochs. Every other non-pass result,
-// including dingo_db_missing and dingo_db_error, and every reportError call
-// stays fatal in strict mode.
+// run/runAccounts keep processing later epochs. reportFetchError also passes
+// false for a Koios request that failed transiently (see koiosUnavailable).
+// Every other non-pass result, including dingo_db_missing and dingo_db_error,
+// and every reportError call stays fatal in strict mode.
 //
 // run and runAccounts's goroutines can both call this concurrently (given
 // the queue split), so the exactly-once guarantee is enforced with an

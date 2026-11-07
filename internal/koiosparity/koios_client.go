@@ -98,9 +98,10 @@ const (
 	// error FetchRetryAttempts times (5 by default) and return a permanent
 	// one immediately, so a non-permanent 408 exhaustion would multiply
 	// this 60-minute budget into a five-hour stall. ErrKoiosPermanent caps
-	// the total wait at one budget. It does not change the eventual
-	// outcome: Observer.fail fires FatalFunc in strict mode for either
-	// error class once the observer stops retrying.
+	// the total wait at one budget. The exhausted 408 error also carries
+	// errKoiosUnavailable, so in strict mode Observer.reportFetchError treats
+	// it like an exhausted 5xx budget: the epoch is retried later and
+	// FatalFunc is not fired.
 	//
 	// Exposed as KoiosClient fields (koios408MaxRetries/
 	// koios408InitialBackoff/koios408MaxBackoff) defaulted from these
@@ -367,6 +368,39 @@ type KoiosTotalsResp struct {
 // remain unwrapped/transient). Callers use errors.Is(err, ErrKoiosPermanent)
 // to decide whether to keep scheduling further work or abort immediately.
 var ErrKoiosPermanent = errors.New("koios: permanent error")
+
+// errKoiosRequest marks an error returned by a Koios HTTP request: a
+// transport failure, a non-success status, or an exhausted retry budget. It is
+// never set on a decode error or on any local cache or database error, so
+// errors.Is(err, errKoiosRequest) tells a failure of the reference service
+// apart from a failure of the node's own storage.
+var errKoiosRequest = errors.New("koios request failed")
+
+// errKoiosUnavailable marks the two ErrKoiosPermanent failures that mean Koios
+// cannot serve right now rather than that the request is wrong: daily-quota
+// exhaustion and an exhausted 408 budget. Both are permanent only so the
+// caller stops retrying within this fetch; a later fetch can succeed.
+var errKoiosUnavailable = errors.New("koios unavailable")
+
+// koiosMarkedError adds mark to err's errors.Is matches without changing its
+// text or its other matches.
+type koiosMarkedError struct {
+	err  error
+	mark error
+}
+
+func (e *koiosMarkedError) Error() string { return e.err.Error() }
+
+func (e *koiosMarkedError) Unwrap() error { return e.err }
+
+func (e *koiosMarkedError) Is(target error) bool { return target == e.mark }
+
+func markKoiosError(err, mark error) error {
+	if err == nil {
+		return nil
+	}
+	return &koiosMarkedError{err: err, mark: mark}
+}
 
 // ErrTxInfoMissing marks a GetTxInfos failure caused only by Koios returning
 // no result for a requested hash. Koios indexes a block after a node serves
@@ -949,6 +983,15 @@ func (k *KoiosClient) get(
 	path string,
 	rangeStart, rangeEnd int,
 ) (*koiosResponse, error) {
+	resp, err := k.getAttempts(ctx, path, rangeStart, rangeEnd)
+	return resp, markKoiosError(err, errKoiosRequest)
+}
+
+func (k *KoiosClient) getAttempts(
+	ctx context.Context,
+	path string,
+	rangeStart, rangeEnd int,
+) (*koiosResponse, error) {
 	url := k.baseURL + path
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -1039,12 +1082,15 @@ func (k *KoiosClient) get(
 				if k.apiKey != "" {
 					hint = "your API-keyed tier's daily quota is exhausted; wait for Koios's daily reset or move to a higher tier"
 				}
-				return nil, fmt.Errorf(
-					"%w: koios daily tier quota exceeded on %s: %s (%s)",
-					ErrKoiosPermanent,
-					path,
-					bodyStr,
-					hint,
+				return nil, markKoiosError(
+					fmt.Errorf(
+						"%w: koios daily tier quota exceeded on %s: %s (%s)",
+						ErrKoiosPermanent,
+						path,
+						bodyStr,
+						hint,
+					),
+					errKoiosUnavailable,
 				)
 			}
 			// Burst 429: OpenAPI documents a ~60s sleep for the IP; honour
@@ -1106,12 +1152,15 @@ func (k *KoiosClient) get(
 				timeoutAttempt++
 				continue
 			}
-			return nil, fmt.Errorf(
-				"%w: koios GET %s: status 408 request timeout after %d retries: body: %s",
-				ErrKoiosPermanent,
-				path,
-				k.koios408MaxRetries,
-				bodyStr,
+			return nil, markKoiosError(
+				fmt.Errorf(
+					"%w: koios GET %s: status 408 request timeout after %d retries: body: %s",
+					ErrKoiosPermanent,
+					path,
+					k.koios408MaxRetries,
+					bodyStr,
+				),
+				errKoiosUnavailable,
 			)
 		}
 
@@ -1152,6 +1201,15 @@ func (k *KoiosClient) get(
 // every attempt (a bytes.Reader, once drained by http.Client.Do, cannot be
 // replayed the way get()'s bodyless request can via req.Clone).
 func (k *KoiosClient) post(
+	ctx context.Context,
+	path string,
+	payload any,
+) (*koiosResponse, error) {
+	resp, err := k.postAttempts(ctx, path, payload)
+	return resp, markKoiosError(err, errKoiosRequest)
+}
+
+func (k *KoiosClient) postAttempts(
 	ctx context.Context,
 	path string,
 	payload any,
@@ -1246,12 +1304,15 @@ func (k *KoiosClient) post(
 				if k.apiKey != "" {
 					hint = "your API-keyed tier's daily quota is exhausted; wait for Koios's daily reset or move to a higher tier"
 				}
-				return nil, fmt.Errorf(
-					"%w: koios daily tier quota exceeded on %s: %s (%s)",
-					ErrKoiosPermanent,
-					path,
-					bodyStr,
-					hint,
+				return nil, markKoiosError(
+					fmt.Errorf(
+						"%w: koios daily tier quota exceeded on %s: %s (%s)",
+						ErrKoiosPermanent,
+						path,
+						bodyStr,
+						hint,
+					),
+					errKoiosUnavailable,
 				)
 			}
 			if err := retryOrFail(otherAttempt, retryAfterDelay(resp),
@@ -1298,12 +1359,15 @@ func (k *KoiosClient) post(
 				timeoutAttempt++
 				continue
 			}
-			return nil, fmt.Errorf(
-				"%w: koios POST %s: status 408 request timeout after %d retries: body: %s",
-				ErrKoiosPermanent,
-				path,
-				k.koios408MaxRetries,
-				bodyStr,
+			return nil, markKoiosError(
+				fmt.Errorf(
+					"%w: koios POST %s: status 408 request timeout after %d retries: body: %s",
+					ErrKoiosPermanent,
+					path,
+					k.koios408MaxRetries,
+					bodyStr,
+				),
+				errKoiosUnavailable,
 			)
 		}
 

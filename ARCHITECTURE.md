@@ -16402,10 +16402,23 @@ second sync:
   - **Strict mode** (`ObserverConfig.Strict`, the default via
     `KoiosParityConfig`) calls `FatalFunc` — wired by `node.go` to
     `n.cancelForFatal` — exactly once, on the first fatal-eligible failure,
-    and stops processing the rest of the current batch. Every Koios/tool
-    error (`reportError`) and every non-pass parity result is fatal-eligible,
-    from either queue (`processEpoch` and `processAccountEpoch`), with one
-    exception: a result whose significant mismatches are all
+    and stops processing the rest of the current batch. Every tool error
+    (`reportError`) and every non-pass parity result is fatal-eligible,
+    from either queue (`processEpoch` and `processAccountEpoch`). A failed
+    reference fetch (`reportFetchError`) is classified by provenance, since
+    the fetch both requests Koios and reads and writes the local cache. Only
+    a Koios request that failed because Koios is unavailable
+    (`koiosUnavailable`) is not fatal-eligible: a transport error, timeout
+    or 5xx that outlasted the client's own retries, an exhausted 408 budget,
+    or daily-quota exhaustion. `get` and `post` mark every error they return
+    with `errKoiosRequest`, and the last two also with `errKoiosUnavailable`.
+    An unreachable reference says nothing about whether Dingo's state agrees
+    with it, so the error is persisted and the epoch is retried, but the node
+    keeps running. A local cache or database error during the fetch, any
+    other `ErrKoiosPermanent` failure (auth, bad request, oversized
+    response) and a response that fails to decode stay fatal-eligible. The one
+    non-pass result that is not fatal-eligible is a result whose significant
+    mismatches are all
     `reference_lag` (`referenceLagOnly`). That means Koios's own data for the
     epoch has not caught up, not that Dingo is wrong, so it is logged and
     persisted like any other non-pass result but never calls `FatalFunc` and
@@ -16453,7 +16466,9 @@ second sync:
     per pool, so it is spaced per epoch by
     `ObserverConfig.PoolHistoryRefetchDelay` (one hour by default). The spacing
     is held in memory, so a restart allows one immediate refetch. A refetch
-    failure goes through `reportError` like any other fetch failure.
+    failure goes through `reportFetchError` like any other fetch failure, so
+    it is classified by provenance: an unavailable Koios is retried without
+    firing `FatalFunc`, and a local cache error stays fatal in strict mode.
   - **Decoupled aggregate/account queues.** Two independent background
     goroutines, each with their own pending set and wake channel, drain
     `Observer.pending`/`wake` (`run`, always started) and
@@ -16526,14 +16541,14 @@ second sync:
     names the phases its `Status` is a verdict on, so an aggregate-only `PASS`
     — returned for the same epoch the account queue may still be checking, or
     may already have failed — cannot be read as the epoch's own answer. The
-    observer's `epoch validated` log line and `reportError`'s synthesized
-    `ERROR` carry that set too.
+    observer's `epoch validated` log line and the `ERROR` that `reportError`
+    and `reportFetchError` synthesize carry that set too.
   - **Prometheus metrics** (`internal/koiosparity/metrics.go`). Before this, a
     FAIL/ERROR result was visible only by grepping the node's log or querying
     `check_epoch_status`/`check_mismatches` directly. `Observer .emitResult` —
     the single choke point every `OnResult` call already goes through
-    (`processEpoch`'s and `processAccountEpoch`'s success paths, and
-    `reportError`'s synthesized `ERROR` path) — also calls
+    (`processEpoch`'s and `processAccountEpoch`'s success paths, and the
+    `ERROR` path `reportError` and `reportFetchError` synthesize) — also calls
     `metrics.recordResult`, so all three are covered from one call site:
     `dingo_koiosparity_epoch_result_total` (by queue/status),
     `dingo_koiosparity_mismatch_total` (by queue/category/severity, mirroring

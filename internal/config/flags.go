@@ -609,7 +609,7 @@ var flagSpecs = []flagSpec{
 	boolFlag(
 		"KoiosParity.Strict",
 		"koios-parity-strict",
-		"stop/cancel the node on the first Koios/tool error or non-pass parity result (a reference_lag-only result never stops the node)",
+		"stop/cancel the node on the first tool error, local cache error or non-pass parity result (a reference_lag-only result or an unavailable Koios never stops the node)",
 	),
 	intFlag(
 		"KoiosParity.GraceHours",
