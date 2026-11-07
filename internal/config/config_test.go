@@ -274,6 +274,7 @@ mithril:
 			CorroborationPeers:          0,
 			// Unset in the file, so the defaults survive.
 			LimitOnPatienceEnabled: true,
+			ChainSyncJumping:       true,
 		},
 		HistoryExpiry: DefaultHistoryExpiryConfig(),
 		KoiosParity:   DefaultKoiosParityConfig(),
@@ -528,6 +529,24 @@ func TestLoad_GenesisBootstrapEnvVars(t *testing.T) {
 			cfg.GenesisBootstrap.CorroborationPeers,
 		)
 	}
+}
+
+func TestLoad_GenesisChainSyncJumpingEnv(t *testing.T) {
+	// Not t.Parallel: LoadConfig and resetGlobalConfig replace process-global
+	// configuration state.
+	unsetEnv(t, "DINGO_GENESIS_CSJ")
+	resetGlobalConfig()
+	globalConfig.RunMode = RunModeDev
+	cfg, err := LoadConfig("")
+	require.NoError(t, err)
+	require.True(t, cfg.GenesisBootstrap.ChainSyncJumping, "on by default")
+
+	t.Setenv("DINGO_GENESIS_CSJ", "false")
+	resetGlobalConfig()
+	globalConfig.RunMode = RunModeDev
+	cfg, err = LoadConfig("")
+	require.NoError(t, err)
+	require.False(t, cfg.GenesisBootstrap.ChainSyncJumping)
 }
 
 func TestLoad_GenesisCorroborationIsOptional(t *testing.T) {

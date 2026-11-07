@@ -72,6 +72,10 @@ genesisBootstrap:
   limitOnPatienceEnabled: true
   limitOnPatienceCapacity: 0
   limitOnPatienceRate: 0
+  # ChainSync Jumping: one identified hot peer streams headers; the other hot
+  # peers vouch for its chain by MsgFindIntersect every k/2 blocks instead of
+  # streaming it. On by default.
+  chainSyncJumping: true
 ```
 
 Equivalent CLI flags / environment variables:
@@ -86,6 +90,7 @@ Equivalent CLI flags / environment variables:
   `DINGO_GENESIS_BOOTSTRAP_LIMIT_ON_PATIENCE_CAPACITY`
 - `--genesis-bootstrap-limit-on-patience-rate` /
   `DINGO_GENESIS_BOOTSTRAP_LIMIT_ON_PATIENCE_RATE`
+- `--genesis-csj` / `DINGO_GENESIS_CSJ`
 
 ## Optional topology: fast source + corroborating snapshot
 
@@ -218,8 +223,9 @@ Dingo implements intersection-anchored density for authoritative local fork
 choice, but not every optimization in the reference implementation.
 Specifically **not** implemented:
 
-- **ChainSync Jumping** and **Devoted BlockFetch** (a
-  performance/robustness optimization for downloading across many peers).
+- **Devoted BlockFetch** (a performance/robustness optimization for
+  downloading across many peers), and ChainSync Jumping's objector bisection
+  and its limit of one objector at a time: every objector streams.
 - **Independent testimony beyond every witness frontier.** The corroboration
   gate confirms a witness's chain within their overlap, but cannot testify about
   a not-yet-witnessed suffix. A fast source that forks only after every honest

@@ -801,6 +801,11 @@ var flagSpecs = []flagSpec{
 		"independent peers that must corroborate a fast source before it drives Genesis selection (default 0, which disables the gate)",
 	),
 	boolFlag(
+		"GenesisBootstrap.ChainSyncJumping",
+		"genesis-csj",
+		"use ChainSync Jumping while Genesis selection is active: one identified hot peer streams headers and the others vouch for it by MsgFindIntersect",
+	),
+	boolFlag(
 		"GenesisBootstrap.LimitOnPatienceEnabled",
 		"genesis-bootstrap-limit-on-patience-enabled",
 		"disconnect ChainSync peers that deliver advertised progress too slowly during Genesis sync",

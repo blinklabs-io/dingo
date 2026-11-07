@@ -285,6 +285,7 @@ type Config struct {
 	genesisBootstrap                                                                    bool
 	genesisWindowSlots                                                                  uint64
 	genesisCorroborationPeers                                                           int
+	genesisChainSyncJumping                                                             bool
 	blockProducer                                                                       bool
 	shelleyVRFKey, shelleyKESKey, shelleyOperationalCertificate                         string
 	shelleyKESAgentSocket, shelleyKESAgentMode                                          string
@@ -1001,6 +1002,7 @@ func (c *Config) syncCompatFields() {
 	c.maxNtCConns, c.maxNtCConnectionsPerIP = c.cfg.MaxNtCConns, c.cfg.MaxNtCConnectionsPerIP
 	c.maxTrustedLocalNtCConns = c.cfg.MaxTrustedLocalNtCConns
 	c.genesisBootstrap, c.genesisWindowSlots, c.genesisCorroborationPeers = c.cfg.GenesisBootstrap.Enabled, c.cfg.GenesisBootstrap.WindowSlots, c.cfg.GenesisBootstrap.CorroborationPeers
+	c.genesisChainSyncJumping = c.cfg.GenesisBootstrap.ChainSyncJumping
 	c.blockProducer, c.shelleyVRFKey, c.shelleyKESKey, c.shelleyOperationalCertificate = c.cfg.BlockProducer, c.cfg.ShelleyVRFKey, c.cfg.ShelleyKESKey, c.cfg.ShelleyOperationalCertificate
 	c.shelleyKESAgentSocket, c.shelleyKESAgentMode, c.shelleyKESAgentSignTimeout = c.cfg.ShelleyKESAgentSocket, c.cfg.ShelleyKESAgentMode, c.cfg.ShelleyKESAgentSignTimeout
 	c.forgeSyncToleranceSlots, c.forgeStaleGapThresholdSlots, c.validateForgedBlock = c.cfg.ForgeSyncToleranceSlots, c.cfg.ForgeStaleGapThresholdSlots, c.cfg.ValidateForgedBlock
@@ -1112,6 +1114,12 @@ func WithGenesisControlGroups(
 
 func WithGenesisCorroborationPeers(peers int) ConfigOptionFunc {
 	return func(c *Config) { c.cfg.GenesisBootstrap.CorroborationPeers = peers }
+}
+
+// WithGenesisChainSyncJumping turns ChainSync Jumping on or off for Genesis
+// selection.
+func WithGenesisChainSyncJumping(enabled bool) ConfigOptionFunc {
+	return func(c *Config) { c.cfg.GenesisBootstrap.ChainSyncJumping = enabled }
 }
 
 // WithGenesisLimitOnPatience configures the Genesis Limit on Patience for

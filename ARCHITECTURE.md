@@ -7903,7 +7903,18 @@ Ordinary Praos sessions continue to use primary-chain intersection points.
   **not** by itself stop it feeding the ledger. The real stall is enforced by
   `ChainSelector.ShouldApplyIngress`, wired to
   `OuroborosConfig.ChainsyncApplyEligible` (`ouroboros/chainsync.go`): while
-  Genesis corroboration is active, only corroborated peers are *apply-eligible*.
+  Genesis corroboration is active, only peers that are corroborated, or whose
+  header the Limit on Eagerness vouches for, are *apply-eligible*. The limit
+  vouches for a header at or below it when the limit's intersection point is
+  retained by at least `MinCorroboratingPeers` identities other than the
+  sender's (`eagernessVouchesLocked`), the reference node's LoE rule
+  (`Ouroboros/Consensus/Genesis/Governor.hs` `sharedCandidatePrefix`):
+  selection cannot pass the limit, so such a header extends the witnessed
+  prefix by at most `k` blocks. Genesis selection accepts the same two routes
+  (`selectionCorroboratedLocked`), without requiring the frontier to be within
+  the limit, since selection is truncated there. The roll-forward evaluates the
+  gate after the Limit on Eagerness wait, so a header past the limit waits and
+  the gate then sees it within the limit.
   An uncorroborated peer is still **observed** — its `PeerTipUpdateEvent` tips
   feed corroboration — but its `ledger.ChainsyncEvent` (and therefore
   blockfetch) is held, so it cannot steer the ledger. The roll-forward callback
@@ -8270,10 +8281,12 @@ once caught up). A change to any tracked peer's frontier re-runs selection while
 corroboration is active, so corroboration granted or revoked takes effect
 immediately rather than on the next periodic tick.
 
-**Deferred / not implemented**: Dingo does not yet implement **ChainSync
-Jumping** or **Devoted BlockFetch**. The corroboration gate stalls a fast source
-until independent witnesses deliver its current point; it does not buffer and
-apply only the confirmed prefix of a source that runs ahead. Wiring
+**Deferred / not implemented**: Dingo does not implement **Devoted
+BlockFetch**, or ChainSync Jumping's objector bisection (see ChainSync Jumping
+driver). The corroboration gate stalls a fast source until independent
+witnesses deliver its current point or the Limit on Eagerness vouches for it;
+it does not buffer and apply only the confirmed prefix of a source that runs
+ahead. Wiring
 peer-governance demotion to the corroboration-failure event is likewise
 deferred. Density-at-intersection can compare an unseen suffix with the local
 candidate, but does not independently corroborate that suffix.
@@ -8574,33 +8587,127 @@ limit is measured from the local tip.
 
 #### ChainSync Jumping records
 
-`ChainSelectorConfig.ChainSyncJumping` (off by default) enables the selector
-half of ChainSync Jumping, the reference node's
+`ChainSelectorConfig.ChainSyncJumping` enables the selector half of ChainSync
+Jumping, the reference node's
 `Ouroboros/Consensus/MiniProtocol/ChainSync/Client/Jumping.hs`: one peer (the
 dynamo) streams headers, and other peers (jumpers) are asked at intervals
 whether they hold a point on the dynamo's fragment with `MsgFindIntersect`
 instead of streaming. `ChainSelector.RecordJumpAgreement` records an
 `IntersectFound` answer: the jumper's candidate fragment becomes the dynamo's
-committed fragment truncated at the agreed point, held under the jumper's own
-connection and therefore its own corroboration identity. The server proved
-that its chain holds the point, and header hashes chain, so it holds every
-point of the fragment below it. Such a record is a Limit on Eagerness
-candidate and witness and nothing else: it enters only the candidate and
-witness set of the limit (`peerTipsIncludingCandidatesLocked`), counts there
-although the connection holds no ingress slot, and is never selectable,
-compared by the density disconnector, or ranked. Witnesses are still counted
-by distinct identity with the candidate's own excluded, and the limit is still
-`k` past the common point, so a dynamo is apply-eligible up to `k` past the
-last point `MinCorroboratingPeers` other identities agreed to. A record is
-refused while the selector is outside Genesis mode, for a point the dynamo's
-committed fragment does not retain, and for a connection that has delivered
-headers itself. `ChainSelector.RecordJumpRejection` records an
-`IntersectNotFound` answer: the jumper becomes an objector and its record
-stays at the last point it agreed to, so the limit cannot pass `k` beyond
-that point until the objector's own stream supersedes the record; its fork is
-then bounded like any other candidate's. Records are removed with the
-connection. Nothing in the node issues jumps yet; the chainsync driver that
-elects the dynamo and sends the jumps is separate work.
+candidate fragment (`ChainSelector.JumpFragment`) truncated at the agreed
+point, held under the jumper's own connection and therefore its own
+corroboration identity. The server proved that its chain holds the point, and
+header hashes chain, so it holds every point of the fragment below it. The
+dynamo's candidate fragment is its admission frontier with its staged headers,
+extended by its delivery continuity fragment (`eagernessFragmentLocked`), as
+the reference jumps to the dynamo's `csCandidate`, not to a selected chain:
+jump agreements are the dynamo's witnesses, so a fragment of committed headers
+alone would leave a dynamo with no other witness held at corroboration with no
+jump ever sent. Such a record is a Limit on Eagerness candidate and witness and
+nothing else: it enters only the candidate and witness set of the limit
+(`peerTipsIncludingCandidatesLocked`), counts there although the connection is
+not ingress-eligible, and is never selectable, compared by the density
+disconnector, or ranked. A jumper sends no headers by design, so its record is
+exempt from the stale-tip rule (`isPeerTipStale`); the driver's refresh keeps
+the record current while the connection is live. Witnesses are still counted by
+distinct identity with the candidate's own excluded, and the limit is still `k`
+past the common point, so a dynamo is apply-eligible up to `k` past the last
+point `MinCorroboratingPeers` other identities agreed to. A record is refused
+while the selector is outside Genesis mode, for a point the dynamo's candidate
+fragment does not retain, and for a connection that has delivered headers
+itself. `ChainSelector.RecordJumpRejection` records an `IntersectNotFound`
+answer: the jumper becomes an objector and its record stays at the last point it
+agreed to, so the limit cannot pass `k` beyond that point until the objector's
+own stream supersedes the record; its fork is then bounded like any other
+candidate's. The stream supersedes it only once it delivers a header: the record
+its opening `MsgRollBackward` registers holds no fragment and proves nothing, so
+the frozen record keeps bounding the limit and counting as a witness until then.
+Records are removed with the connection.
+
+While Genesis corroboration is active, a connection without a corroboration
+identity does not bound the Limit on Eagerness (`loeIdentifiedLocked`): it can
+never witness or be selected, so its fragment would only hold back the
+identified candidates.
+
+#### ChainSync Jumping driver
+
+`genesisBootstrap.chainSyncJumping` (`DINGO_GENESIS_CSJ`, `--genesis-csj`, on
+by default) enables the selector records above and the driver in
+`ouroboros/chainsync_jumping.go`, which assigns roles to outbound connections
+as the outbound connection handler starts their ChainSync clients
+(`startOutboundChainsync`, `ouroboros/chainsync_outbound.go`). While Genesis
+selection is active, the first ingress-eligible connection with a corroboration
+identity becomes the dynamo and streams as any client does. It needs an ingress
+slot because jumps name points of its candidate fragment, which only ingress
+deliveries extend, so a dynamo that registers as an observer because every slot
+is taken is replaced. Every later connection becomes a jumper: its client is
+started but never synced, it is tracked as an observer because it needs no
+ingress slot (the ingress reconcile refuses to promote it), and it sends only
+`Client.Jump`, one `MsgFindIntersect` from `StIdle`, never `MsgRequestNext`.
+A connection without a corroboration identity is jumped too, because streaming
+its headers would only download them: its record cannot vouch for the dynamo,
+it is never elected dynamo, and when no identified peer can take that role the
+unidentified jumpers stream again. Each refresh restarts an unidentified
+connection that streams outside the role table as a jumper while a dynamo
+exists (`csjAdoptUnidentified`): its client is drained with
+`Client.StopAfterDrain` and started again under the connection's start/stop
+lock.
+
+A jumper jumps once on admission and then once per jump round. A round starts
+when a header the dynamo delivered is `k/2` blocks past the head of the last
+jump, and jumps to the head of the dynamo's candidate fragment (the fragment
+`RecordJumpAgreement` truncates), offering earlier points at doubling distances
+and the jumper's last agreed point after it. The interval stays below `k`
+because `AwaitEagernessLimit` holds the dynamo's header stream `k` past the
+common point, which the jumpers' last agreements bound. Jumps run in their own
+goroutines under the connection's start/stop lock, never from a ChainSync
+callback, and `Close` cancels and waits for them. Only an answer at the head is
+an agreement. Any other answer is a rejection, as in the reference's
+`processJumpResult`, whether the jumper forks from the dynamo after the point it
+returned or is merely behind the head: an earlier point is still recorded as an
+agreement at that point, and the jumper, like one that answers
+`IntersectNotFound`, becomes an objector. `RecordJumpRejection` freezes its
+record and it streams from its last agreed point, where the Limit on Patience
+and the density disconnector apply to it; left a jumper, it would hold the Limit
+on Eagerness `k` past its last agreement while escaping both.
+
+Rounds also run once per refresh interval (`RefreshInterval`, 30 seconds by
+default: a quarter of the selector's default stale-tip threshold), whether or
+not the dynamo progressed, and then jump every jumper to the dynamo's candidate
+head even when it has not moved. A dynamo that is quiet, or parked by the Limit
+on Eagerness, delivers nothing that could start a round, and a round a delivery
+started does nothing while the candidate fragment still lags the delivered
+header. Without the refresh the jumpers would sit silent in `StIdle` towards
+the server's idle timeout (about an hour). A refresh also elects a dynamo when
+there is none.
+
+The dynamo is the only identified peer streaming, so a header of its that the
+corroboration hold expires on is held again rather than withheld, up to
+`defaultDynamoCorroborationHoldBudget` (60 seconds) in all: withholding it would
+move the dynamo's cursor past a header no other peer streams. When the budget
+runs out the header is not withheld either; the connection is resynced from the
+local chain (`ChainsyncResyncReasonGenesisCorroborationHoldExpired`).
+
+When the dynamo's connection closes, the driver elects the selector's best peer
+if it is an identified streaming peer, else another identified streaming peer,
+else a jumper: the best peer first, then those that agreed to a jump, which
+stream from their last agreed point. A jumper holds no ingress slot, so only an
+ingress-eligible one is elected, and it claims a slot as it is elected, before
+anything else can take the one its predecessor freed; the closed connection's
+client is removed first so that its slot is free. When no jumper can be
+elected, no dynamo is elected until a refresh or an admission retries. When
+Genesis selection ends, the next delivered header or refresh disengages CSJ and
+every jumper streams from its last agreed point. The reference's objector
+bisection and its limit of one objector at a time are not implemented: every
+objector streams.
+
+Metrics: `dingo_chainsync_csj_jumps_sent_total` (every jump sent, answered or
+not), `dingo_chainsync_csj_jumps_agreed_total` (answers at the jump point the
+selector recorded), `dingo_chainsync_csj_jumps_rejected_total` (every other
+answer; an answer is counted as agreed or rejected, never both), and
+`dingo_chainsync_csj_peers` by `role` (`dynamo`, `jumper`, `objector`). A jump
+whose connection stopped being a jumper while it waited for the connection's
+lock is not sent.
 
 #### Anti-flap incumbent pin
 

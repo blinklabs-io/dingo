@@ -2729,19 +2729,41 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			o.config.ChainsyncAwaitCorroboration != nil &&
 			!o.headerAtOrBelowLocalTip(v) {
 			admissionCtx, cancelAdmission := chainsyncAdmissionContext(ctx)
-			holdCtx, cancelHold := context.WithTimeout(
-				admissionCtx,
-				o.corroborationHoldTimeout,
-			)
-			eligible, err := o.config.ChainsyncAwaitCorroboration(
-				holdCtx,
-				ctx.ConnectionId,
-			)
-			holdExpired := errors.Is(err, context.DeadlineExceeded) &&
-				admissionCtx.Err() == nil
-			cancelHold()
+			holdStart := time.Now()
+			var eligible, holdExpired bool
+			var err error
+			for {
+				holdCtx, cancelHold := context.WithTimeout(
+					admissionCtx,
+					o.corroborationHoldTimeout,
+				)
+				eligible, err = o.config.ChainsyncAwaitCorroboration(
+					holdCtx,
+					ctx.ConnectionId,
+				)
+				holdExpired = errors.Is(err, context.DeadlineExceeded) &&
+					admissionCtx.Err() == nil
+				cancelHold()
+				// The dynamo is the only identified peer streaming, so its
+				// header is held again rather than withheld; a connection
+				// rotated away from the role falls back to the single hold.
+				if !holdExpired || !o.csjIsDynamo(ctx.ConnectionId) ||
+					time.Since(holdStart) >= o.dynamoCorroborationHoldBudget {
+					break
+				}
+			}
 			cancelAdmission()
 			switch {
+			case holdExpired && o.csjIsDynamo(ctx.ConnectionId):
+				// Re-intersect in place from the local chain rather than move
+				// the dynamo's cursor past a header the ledger never receives.
+				tipAccepted = false
+				o.scheduleHeaderResync(
+					ctx.ConnectionId,
+					time.Now(),
+					event.ChainsyncResyncReasonGenesisCorroborationHoldExpired,
+				)
+				return nil
 			case holdExpired:
 				// Keep the chainsync cursor. Re-intersecting immediately from
 				// the applied tip discards this peer's candidate history and
@@ -3424,6 +3446,11 @@ func (o *Ouroboros) reconcileChainsyncIngressAdmission(
 	)
 	if !exists {
 		return false
+	}
+	// A jumper streams nothing, so an ingress slot would only expose it to
+	// the stall recycler.
+	if desiredEligible && o.csjIsJumper(connId) {
+		desiredEligible = false
 	}
 	if desiredEligible {
 		if observabilityOnly {

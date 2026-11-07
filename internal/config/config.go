@@ -359,6 +359,12 @@ type GenesisBootstrapConfig struct {
 	// LimitOnPatienceRate is the bucket leak rate in tokens per second. 0
 	// selects the default of 5.
 	LimitOnPatienceRate uint64 `yaml:"limitOnPatienceRate"         envconfig:"DINGO_GENESIS_BOOTSTRAP_LIMIT_ON_PATIENCE_RATE"`
+	// ChainSyncJumping turns on ChainSync Jumping while Genesis selection is
+	// active: one identified hot peer streams headers and every other hot
+	// peer answers a periodic MsgFindIntersect for the streamed chain instead
+	// of streaming it, vouching for it in the Limit on Eagerness. On by
+	// default.
+	ChainSyncJumping bool `yaml:"chainSyncJumping"            envconfig:"DINGO_GENESIS_CSJ"`
 }
 
 // HistoryExpiryConfig controls local expiry of immutable block history.
@@ -554,6 +560,7 @@ func DefaultGenesisBootstrapConfig() GenesisBootstrapConfig {
 		Enabled:                true,
 		CorroborationPeers:     0,
 		LimitOnPatienceEnabled: true,
+		ChainSyncJumping:       true,
 	}
 }
 
