@@ -65,7 +65,7 @@ func TestNewClientResolvesAtSocketPathByPlatform(t *testing.T) {
 	const configured = "@kes-agent"
 	client, err := NewClient(Config{SocketPath: configured, Mode: ModeServeKey})
 	require.NoError(t, err)
-	if runtime.GOOS == "linux" {
+	if hasAbstractSocketNamespace(runtime.GOOS) {
 		require.Equal(t, configured, client.cfg.SocketPath)
 		return
 	}
@@ -106,6 +106,12 @@ func TestNewClientRejectsOverLongSocketPath(t *testing.T) {
 func TestNewClientAcceptsPathAtTheLimit(t *testing.T) {
 	t.Parallel()
 
+	if runtime.GOOS == "windows" {
+		t.Skip(
+			"the sun_path limit applies to Unix-style paths; Windows resolves the path with a drive letter",
+		)
+	}
+
 	sunPath := sunPathLenOther
 	if runtime.GOOS == "darwin" {
 		sunPath = sunPathLenDarwin
@@ -126,14 +132,78 @@ func TestSocketPathLimitIsPlatformCorrect(t *testing.T) {
 
 	named := socketPathLimit("/run/kes-agent.sock")
 	atPrefix := socketPathLimit("@kes-agent")
+	if abstractNameFillsSunPath(runtime.GOOS) {
+		require.Equal(t, named+1, atPrefix, "abstract addresses carry no NUL")
+	} else {
+		require.Equal(t, named, atPrefix, "@ is not abstract on this platform, so it costs a NUL too")
+	}
 
 	if runtime.GOOS == "darwin" {
 		require.Equal(t, sunPathLenDarwin-1, named)
-		require.Equal(t, named, atPrefix, "@ is an ordinary filename character")
 	} else {
 		require.Equal(t, sunPathLenOther-1, named)
-		require.Equal(t, named+1, atPrefix, "Linux abstract addresses carry no NUL")
 	}
+}
+
+// TestAtPrefixIsAbstractWhereGoRewritesIt pins the platform set. Go's syscall
+// package rewrites a leading "@" to the abstract form on Linux (and Android,
+// which builds the same file), Solaris and illumos, and Windows. Elsewhere
+// "@name" is an ordinary relative filename.
+func TestAtPrefixIsAbstractWhereGoRewritesIt(t *testing.T) {
+	t.Parallel()
+
+	for _, goos := range []string{"linux", "android", "illumos", "solaris", "windows"} {
+		require.True(t, isAbstractSocketPathFor(goos, "@kes-agent"), goos)
+	}
+	for _, goos := range []string{"darwin", "freebsd", "openbsd", "netbsd", "dragonfly"} {
+		require.False(t, isAbstractSocketPathFor(goos, "@kes-agent"), goos)
+	}
+	require.False(t, isAbstractSocketPathFor("linux", "/run/kes-agent.sock"))
+}
+
+// TestAbstractSocketPathLimitMatchesGoSyscall pins the length budget of an
+// abstract address to what Go's syscall package accepts on each platform.
+// Linux, Android and Windows accept a name that fills sun_path. Solaris and
+// illumos return EINVAL for one, so allowing it there would pass the startup
+// check and fail on connect with a bare "invalid argument".
+func TestAbstractSocketPathLimitMatchesGoSyscall(t *testing.T) {
+	t.Parallel()
+
+	const abstract = "@kes-agent"
+	for _, goos := range []string{"linux", "android", "windows"} {
+		limit := socketPathLimitFor(goos, abstract)
+		require.Equal(t, sunPathLenOther, limit, goos)
+	}
+	for _, goos := range []string{"solaris", "illumos"} {
+		limit := socketPathLimitFor(goos, abstract)
+		require.Equal(t, sunPathLenOther-1, limit, goos)
+	}
+	require.Equal(t, sunPathLenDarwin-1, socketPathLimitFor("darwin", abstract))
+	named := socketPathLimitFor("linux", "/run/kes-agent.sock")
+	require.Equal(t, sunPathLenOther-1, named)
+}
+
+// TestAtPrefixIsRelativeWhereGoDoesNotRewriteIt pins the other half of the rule.
+// Where Go rewrites "@" the address is abstract and stays as written. Elsewhere
+// it is a relative filename, so it must be resolved like any other path and
+// must keep the NUL byte in the length budget.
+func TestAtPrefixIsRelativeWhereGoDoesNotRewriteIt(t *testing.T) {
+	t.Parallel()
+	if hasAbstractSocketNamespace(runtime.GOOS) {
+		t.Skip("@ is an abstract address on this platform")
+	}
+
+	resolved, err := resolveSocketPath("@kesprobe")
+	require.NoError(t, err)
+	want, err := filepath.Abs("@kesprobe")
+	require.NoError(t, err)
+	require.Equal(t, want, resolved)
+
+	wantLimit := sunPathLenOther - 1
+	if runtime.GOOS == "darwin" {
+		wantLimit = sunPathLenDarwin - 1
+	}
+	require.Equal(t, wantLimit, socketPathLimit("@kesprobe"))
 }
 
 // TestCheckSocketPathLenAtDarwinLimit exercises the macOS budget from any

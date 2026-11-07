@@ -12101,8 +12101,12 @@ developer's Mac. `kesagent.NewClient` resolves a relative filesystem path to
 one absolute path before the first connection, then reuses that path for every
 reconnect; changing the process working directory cannot redirect later
 connections to another local agent. Absolute filesystem paths are cleaned,
-and Linux abstract socket addresses use Go's `@name` form and are kept as
-configured; because they lack an owner and mode, they are accepted only from
+and abstract socket addresses use Go's `@name` form and are kept as configured
+on Linux, Android, Solaris, illumos, and Windows, the platforms whose syscall
+package reads that form. Elsewhere `@name` is resolved as a relative filename.
+An abstract name may fill `sun_path` on Linux, Android, and Windows; Solaris
+and illumos reject a name that long, so it keeps the one-byte reserve there.
+Because abstract addresses lack an owner and mode, they are accepted only from
 the node's own effective UID. Literal NUL-prefixed addresses are rejected as
 nonportable. The
 client rejects an over-long resolved path at block-producer startup with an
