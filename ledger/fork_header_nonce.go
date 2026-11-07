@@ -140,7 +140,11 @@ func (ls *LedgerState) peerChainSelectionEpochNonce(
 		// in the next epoch is verified against forecast epochs derived from
 		// the fork's own ancestry instead of waiting for the ledger to apply
 		// the fork, which it cannot do until the fork is selected.
-		forecast, ok := ls.forecastPeerForkEpochCache(snapshot, header, err)
+		forecast, ok := ls.forecastPeerForkEpochCache(
+			snapshot,
+			header.SlotNumber(),
+			err,
+		)
 		if !ok {
 			return nil, models.Epoch{}, false, err
 		}
@@ -1390,11 +1394,12 @@ func (ls *LedgerState) trimPeerForkPathAtAppliedTip(
 // forecast epochs so that a peer fork header past the cached epochs, but within
 // the forecast horizon, can be verified. The forecast epochs carry no nonces:
 // the fork's nonce is derived from its own headers. It returns false when
-// cause is not an uncovered-epoch deferral, the era boundary is near, or the
-// cache cannot reach the header's slot.
+// cause is not an uncovered-epoch deferral, the slot is past the forecast
+// horizon, the cache tail's era is not the published current era, the era
+// boundary is near, or the cache cannot reach the header's slot.
 func (ls *LedgerState) forecastPeerForkEpochCache(
 	snapshot *consensusSnapshot,
-	header gledger.BlockHeader,
+	slot uint64,
 	cause error,
 ) ([]models.Epoch, bool) {
 	if snapshot == nil || len(snapshot.epochCache) == 0 ||
@@ -1402,8 +1407,30 @@ func (ls *LedgerState) forecastPeerForkEpochCache(
 		!IsHeaderVerificationDeferred(cause) {
 		return nil, false
 	}
-	slot := header.SlotNumber()
+	return ls.forecastEpochCacheThrough(snapshot, slot)
+}
+
+// forecastEpochCacheThrough returns the snapshot's epoch cache extended with
+// same-era forecast epochs, intermediate ones included, up to the epoch that
+// holds slot. The electing snapshot of a forecast epoch is the one before it,
+// so state verification needs every epoch on the way, not only the last.
+func (ls *LedgerState) forecastEpochCacheThrough(
+	snapshot *consensusSnapshot,
+	slot uint64,
+) ([]models.Epoch, bool) {
+	if snapshot == nil || len(snapshot.epochCache) == 0 {
+		return nil, false
+	}
 	if _, err := epochForSlotInCache(snapshot.epochCache, slot); err == nil {
+		return nil, false
+	}
+	// A deferral's cause may carry no horizon information, such as a summary
+	// that could not be built, so the horizon is checked here.
+	summary, err := ls.HardForkSummary()
+	if err != nil {
+		return nil, false
+	}
+	if _, err := summary.SlotToEpoch(slot); err != nil {
 		return nil, false
 	}
 	const maxForecastEpochs = 5
@@ -1411,7 +1438,11 @@ func (ls *LedgerState) forecastPeerForkEpochCache(
 	copy(cache, snapshot.epochCache)
 	for range maxForecastEpochs {
 		last := cache[len(cache)-1]
+		// The era check uses the cache tail's own era: a published current
+		// era that disagrees with it cannot vouch that the tail's era
+		// boundary is still ahead.
 		if last.LengthInSlots == 0 || slot < last.StartSlot ||
+			last.EraId != snapshot.currentEra.Id ||
 			ls.validateEpochCacheForecast(
 				last,
 				snapshot.currentEra.Id,

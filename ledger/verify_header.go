@@ -368,10 +368,25 @@ func (ls *LedgerState) validateChainSelectionHeaderCrypto(
 		if fork {
 			cache := snapshot.epochCache
 			if _, ok := epochByIDInCache(cache, epoch.EpochId); !ok {
-				// A forecast epoch the fork's own ancestry produced.
-				forecast := epoch
-				forecast.Nonce = cloneNonce(epochNonce)
-				cache = append(slices.Clone(cache), forecast)
+				// The epoch is a forecast one that the fork's own ancestry
+				// produced; its nonce is the fork's, not the ledger's.
+				forecast, ok := ls.forecastEpochCacheThrough(
+					snapshot,
+					header.SlotNumber(),
+				)
+				if !ok {
+					return fmt.Errorf(
+						"%w: forecast epoch %d is unavailable",
+						errHeaderVerificationDeferred,
+						epoch.EpochId,
+					)
+				}
+				for i := range forecast {
+					if forecast[i].EpochId == epoch.EpochId {
+						forecast[i].Nonce = cloneNonce(epochNonce)
+					}
+				}
+				cache = forecast
 			}
 			block := headerOnlyBlock{header: header, peerRelative: true}
 			if err := ls.verifyBlockHeaderStatelessCryptoWithEpochNonce(

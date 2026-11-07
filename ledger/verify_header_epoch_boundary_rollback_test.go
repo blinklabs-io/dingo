@@ -18,6 +18,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"testing"
@@ -27,6 +29,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledger/eras"
+	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -157,3 +160,89 @@ func TestValidatePeerChainSelectionHeaderCryptoAfterRollbackAcrossEpochBoundary(
 }
 
 func ptrHash(h lcommon.Blake2b224) []byte { return h[:] }
+
+func newForecastTestLedger(
+	t *testing.T,
+	cacheEra, currentEra eras.EraDesc,
+	transition hardfork.TransitionInfo,
+	tipSlot uint64,
+) *LedgerState {
+	t.Helper()
+	cfg := newHighFreqShelleyGenesisCfg(t)
+	epoch5 := models.Epoch{
+		EpochId:       5,
+		StartSlot:     0,
+		SlotLength:    1_000,
+		LengthInSlots: 1_000,
+		EraId:         cacheEra.Id,
+		Nonce:         bytes.Repeat([]byte{0x21}, lcommon.Blake2b256Size),
+	}
+	ls := &LedgerState{
+		epochCache:     []models.Epoch{epoch5},
+		currentEra:     currentEra,
+		currentEpoch:   epoch5,
+		transitionInfo: transition,
+		currentTip: ochainsync.Tip{
+			Point: ocommon.NewPoint(tipSlot, bytes.Repeat([]byte{1}, 32)),
+		},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	ls.publishSnapshotsLocked()
+	return ls
+}
+
+// A deferred cause that is not an uncovered-epoch condition, such as a summary
+// that could not be built, says nothing about the forecast horizon. The
+// forecast must verify the horizon itself rather than guess same-era epochs
+// past it.
+func TestForecastPeerForkEpochCacheRejectsSlotBeyondHorizon(t *testing.T) {
+	t.Parallel()
+	ls := newForecastTestLedger(
+		t, eras.BabbageEraDesc, eras.BabbageEraDesc,
+		hardfork.NewTransitionUnknown(), 100,
+	)
+	snapshot := ls.loadConsensusSnapshot()
+	cause := errors.New("build forecast failed")
+	cause = fmt.Errorf("%w: %w", errHeaderVerificationDeferred, cause)
+
+	_, ok := ls.forecastPeerForkEpochCache(snapshot, 1_500, cause)
+	require.True(t, ok, "slot inside the horizon is forecast")
+	_, ok = ls.forecastPeerForkEpochCache(snapshot, 4_500, cause)
+	require.False(t, ok, "slot beyond the horizon must not be forecast")
+}
+
+// The forecast must not cross a confirmed hard-fork boundary because the
+// published era and the cache tail's era disagree.
+func TestForecastPeerForkEpochCacheRejectsIncoherentEra(t *testing.T) {
+	t.Parallel()
+	ls := newForecastTestLedger(
+		t, eras.BabbageEraDesc, eras.ConwayEraDesc,
+		hardfork.NewTransitionKnown(6), 100,
+	)
+	snapshot := ls.loadConsensusSnapshot()
+	cause := fmt.Errorf("%w: no cached epoch", errHeaderVerificationDeferred)
+
+	_, ok := ls.forecastPeerForkEpochCache(snapshot, 1_500, cause)
+	require.False(t, ok)
+}
+
+// Verifying a header two epochs past the cache needs the epoch between: the
+// electing snapshot of epoch 7 is epoch 6's, and a cache holding only the
+// target would report it unplaceable.
+func TestForecastEpochCacheThroughIncludesIntermediateEpochs(t *testing.T) {
+	t.Parallel()
+	ls := newForecastTestLedger(
+		t, eras.BabbageEraDesc, eras.BabbageEraDesc,
+		hardfork.NewTransitionUnknown(), 900,
+	)
+	snapshot := ls.loadConsensusSnapshot()
+
+	cache, ok := ls.forecastEpochCacheThrough(snapshot, 2_500)
+	require.True(t, ok)
+	require.Len(t, cache, 3)
+	require.Equal(t, uint64(6), cache[1].EpochId)
+	require.Equal(t, uint64(7), cache[2].EpochId)
+}
