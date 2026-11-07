@@ -532,9 +532,9 @@ func TestHotCachePutNeverPermanentlyExceedsMaxSizeUnderGetContention(
 	t.Parallel()
 
 	const maxSize = 10
-	const rounds = 10
-	const numReaders = 20
-	const readsPerReader = 50
+	const rounds = 50
+	const numReaders = 50
+	const readsPerReader = 200
 
 	for round := range rounds {
 		cache := NewHotCache(maxSize, 0)
