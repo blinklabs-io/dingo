@@ -4260,7 +4260,15 @@ func (f *BlockForger) checkAndForgeLeiosEB(
 		}
 		return nil, nil
 	}
-	limits := leiosSelectionLimits{now: f.now, deadline: selectionDeadline}
+	// The capacity in force at the slot bounds selection as well as the
+	// manifest, so selection stops once the endorser block is full instead
+	// of validating candidates the manifest would drop.
+	caps := f.leiosEBCapsForSlot(slot)
+	limits := leiosSelectionLimits{
+		now:      f.now,
+		deadline: selectionDeadline,
+		caps:     caps,
+	}
 	candidateCount := len(txs)
 	selectStart := f.now()
 	validatedTxs, truncated, err := selectValidLeiosTransactions(ctx,
@@ -4315,10 +4323,7 @@ func (f *BlockForger) checkAndForgeLeiosEB(
 	}
 
 	buildStart := f.now()
-	ebCbor, ebHash, bodies, err := buildLeiosEB(txs, leiosEBCaps{
-		maxRefs:  f.forgeEBMaxTxRefs,
-		maxBytes: f.forgeEBMaxBytes,
-	})
+	ebCbor, ebHash, bodies, err := buildLeiosEB(txs, caps)
 	buildDuration := f.now().Sub(buildStart)
 	if err != nil {
 		if errors.Is(err, errNoValidTxRefs) {
@@ -4399,6 +4404,7 @@ func selectValidLeiosTransactions(ctx context.Context,
 	}
 	truncated := false
 	selected := make([]MempoolTransaction, 0, len(txs))
+	capacity := leiosEBCapacity{caps: limits.caps}
 	err := withLeiosSelectionSession(ctx,
 		validator,
 		basis.parentHash,
@@ -4440,9 +4446,25 @@ func selectValidLeiosTransactions(ctx context.Context,
 				if basis.closure.applies(mempoolTx.Hash) {
 					continue
 				}
+				// The manifest references the block_transaction bytes,
+				// so those are what the capacity is measured in, and a
+				// transaction that cannot take that form is never
+				// referenced.
+				blockTx, err := leiosBlockTransactionCbor(mempoolTx.Cbor)
+				if err != nil || !validLeiosTransactionSize(len(blockTx)) {
+					continue
+				}
 				tx, err := decodeMempoolTx(mempoolTx)
 				if err != nil || validate(tx, consumed, created, accounts) != nil {
 					continue
+				}
+				if !capacity.admit(uint64(len(blockTx))) {
+					// The endorser block is full. Stop rather than look
+					// for a smaller transaction further on, as manifest
+					// construction does: the selected prefix is a valid
+					// closure, and a protocol-sized endorser block is
+					// all one slot can announce.
+					break
 				}
 				selected = append(selected, mempoolTx)
 				for _, input := range tx.Consumed() {
@@ -4533,6 +4555,21 @@ func (c *leiosCertifiedClosure) consumedOverlay() map[utxoref.Key]struct{} {
 	return overlay
 }
 
+// leiosEBCapsForSlot returns the endorser-block caps for slot: the operator
+// caps bounded by the capacity the protocol parameters in force at the slot
+// allow (effectiveLeiosEBCaps). Without parameters only the operator caps
+// apply.
+func (f *BlockForger) leiosEBCapsForSlot(slot uint64) leiosEBCaps {
+	caps := leiosEBCaps{
+		maxRefs:  f.forgeEBMaxTxRefs,
+		maxBytes: f.forgeEBMaxBytes,
+	}
+	if f.eraParams == nil || isNilProtocolParamsProvider(f.eraParams) {
+		return caps
+	}
+	return effectiveLeiosEBCaps(caps, f.eraParams.ProtocolParamsForSlot(slot))
+}
+
 // certifiedClosureForRebase resolves the certified closure a ranking block
 // embedding ebHash's certificate applies.
 func (f *BlockForger) certifiedClosureForRebase(
@@ -4555,6 +4592,9 @@ type leiosSelectionLimits struct {
 	// deadline, when non-zero, stops selection at the given instant and
 	// builds the endorser block from what has already passed.
 	deadline time.Time
+	// caps stops selection once the next valid transaction would not fit
+	// the endorser block. The zero value imposes no cap.
+	caps leiosEBCaps
 }
 
 // expired reports whether the selection budget is gone.
@@ -4579,6 +4619,10 @@ type leiosEBCaps struct {
 	maxRefs uint64
 	// maxBytes caps the total size of the referenced transactions.
 	maxBytes uint64
+	// maxManifestBytes caps the encoded manifest, the size a ranking-block
+	// header announces. Only the protocol parameters set it; see
+	// effectiveLeiosEBCaps.
+	maxManifestBytes uint64
 }
 
 // buildLeiosEB assembles a LeiosEndorserBlock from mempool transactions.
@@ -4595,7 +4639,7 @@ func buildLeiosEB(
 	bodies [][]byte,
 	err error,
 ) {
-	var totalBytes uint64
+	capacity := leiosEBCapacity{caps: caps}
 	// Preallocate for what the caps actually admit, not for the mempool:
 	// the backstop has to bound construction memory too, or a deep
 	// mempool still dictates the allocation for a manifest capped at a
@@ -4640,14 +4684,9 @@ func buildLeiosEB(
 		// its outputs), and skipping a transaction to fit a smaller one
 		// after it would leave a descendant referenced without its
 		// parent.
-		if caps.maxRefs > 0 && uint64(len(refs)) >= caps.maxRefs {
+		if !capacity.admit(uint64(len(blockTx))) {
 			break
 		}
-		txBytes := uint64(len(blockTx))
-		if caps.maxBytes > 0 && totalBytes+txBytes > caps.maxBytes {
-			break
-		}
-		totalBytes += txBytes
 		// Bounded above by the MaxUint32 check on len(blockTx) above. Kept
 		// on one line so the directive stays attached to the conversion.
 		size := uint32(len(blockTx)) // #nosec G115
