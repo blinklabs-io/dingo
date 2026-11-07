@@ -5190,6 +5190,13 @@ older than the ledger stability window:
   left. The cursor stops at the first block whose expiry fails so that block is
   retried. A rollback or `lifecycle.Truncate` lowers it to the target slot when
   it lies above it, because replay stores new blocks only above the target.
+- The cursor is also read by `Database.OldestRetainedSlot`, which the UTxO RPC
+  API uses to name the start of retained history in history-expired errors
+  (`oldest retained slot=N`). The cursor is only a lower bound (the pruner
+  leaves it on the last block it expired, and a rollback lowers it below
+  already-expired blocks), so the lookup walks forward from it past tombstones,
+  at most 4096 of them, to the first block whose body still reads back. It
+  reports unknown when no cursor exists or no retained block is found.
 - Expired blocks keep their `bi...`, `bh...`, and `bp..._metadata` entries. SQL
   metadata rows also remain. Blob readers return `types.ErrHistoryExpired` with
   the slot/hash. Without an archive wrapper this is the final read error; with

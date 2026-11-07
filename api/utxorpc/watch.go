@@ -175,7 +175,7 @@ func (s *watchServiceServer) watchTxFetchRollbackUndoFromBlocks(
 					err,
 				)
 			}
-			return nil, err
+			return nil, s.utxorpc.historyExpiredError(ctx, err)
 		}
 		if pointsEqual(
 			ocommon.NewPoint(block.Slot, block.Hash),
@@ -193,7 +193,7 @@ func (s *watchServiceServer) watchTxFetchRollbackUndoFromBlocks(
 		}
 		transactions, err := s.utxorpc.config.LedgerState.BlockTransactions(ctx, block)
 		if err != nil {
-			return nil, err
+			return nil, s.utxorpc.historyExpiredError(ctx, err)
 		}
 		appliedTxs, _, err := watchTxBuildForwardMessagesForTransactions(
 			transactions, block.Slot, block.Number, block.Hash, shouldSendTx,
@@ -283,7 +283,7 @@ func (s *watchServiceServer) WatchTx(
 			"failed to get points",
 			"error", err,
 		)
-		return err
+		return s.utxorpc.historyExpiredError(ctx, err)
 	}
 	if point == nil {
 		s.utxorpc.config.Logger.Error(
@@ -292,7 +292,7 @@ func (s *watchServiceServer) WatchTx(
 		return errors.New("nil point returned")
 	}
 	if err := s.utxorpc.checkReplayDistance(*point); err != nil {
-		return err
+		return s.utxorpc.historyExpiredError(ctx, err)
 	}
 
 	// Create our chain iterator
@@ -306,7 +306,7 @@ func (s *watchServiceServer) WatchTx(
 			"failed to get chain iterator",
 			"error", err,
 		)
-		return err
+		return s.utxorpc.historyExpiredError(ctx, err)
 	}
 
 	defer chainIter.Cancel()
@@ -349,7 +349,7 @@ func (s *watchServiceServer) WatchTx(
 				"failed to iterate chain",
 				"error", err,
 			)
-			return err
+			return s.utxorpc.historyExpiredError(ctx, err)
 		}
 		if next == nil {
 			continue
@@ -417,7 +417,7 @@ func (s *watchServiceServer) WatchTx(
 			transactions, err := s.utxorpc.config.LedgerState.BlockTransactions(ctx, next.Block)
 			if err != nil {
 				s.utxorpc.config.Logger.Error("failed to get block transactions", "error", err)
-				return err
+				return s.utxorpc.historyExpiredError(ctx, err)
 			}
 			appliedTxs, forwardMsgs, err := watchTxBuildForwardMessagesForTransactions(
 				transactions, next.Block.Slot, next.Block.Number, next.Block.Hash, shouldSend,
