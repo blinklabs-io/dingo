@@ -22,6 +22,7 @@ import (
 	"math/big"
 	"net"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -597,4 +598,42 @@ func TestLimitOnEagernessGauges(t *testing.T) {
 	assert.Equal(t, 15.0, chainSelectionGaugeValue(t, registry, blockGauge))
 	assert.Zero(t, chainSelectionGaugeValue(t, registry, slotGauge),
 		"no candidate has delivered a header, so there is no intersection")
+}
+
+// A scrape taken while the ledger is mid-transition must not wait out the
+// generation pin; it reports the last limit read while the ledger was stable.
+func TestLimitOnEagernessGaugesDoNotWaitOnLedgerTransition(t *testing.T) {
+	t.Parallel()
+	n, registry := newMetricsTestNode(t)
+	const blockGauge = "dingo_chainselection_loe_block_number"
+
+	var generation atomic.Uint64
+	generation.Store(1)
+	selector := chainselection.NewChainSelector(
+		chainselection.ChainSelectorConfig{
+			GenesisMode:   true,
+			SecurityParam: 5,
+			CurrentHeaderCryptoVerificationGeneration: generation.Load,
+			PinHeaderCryptoVerificationGeneration: func(
+				g uint64,
+			) (func(), bool) {
+				if g == 0 || g != generation.Load() {
+					return nil, false
+				}
+				return func() {}, true
+			},
+		},
+	)
+	selector.SetLocalTip(ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 1000, Hash: []byte("local")},
+		BlockNumber: 10,
+	})
+	n.chainSelectorForGauges.Store(selector)
+	require.Equal(t, 15.0, chainSelectionGaugeValue(t, registry, blockGauge))
+
+	// Zero is what the ledger reports while a block batch is applying.
+	generation.Store(0)
+	start := time.Now()
+	assert.Equal(t, 15.0, chainSelectionGaugeValue(t, registry, blockGauge))
+	assert.Less(t, time.Since(start), 500*time.Millisecond)
 }
