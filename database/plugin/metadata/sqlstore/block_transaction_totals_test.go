@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"math/big"
+	"strings"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -63,6 +64,35 @@ func TestBlockTransactionTotalsSumsOutputsAndFees(t *testing.T) {
 	require.Equal(t, models.BlockTransactionTotals{
 		Output: "10000", Fees: "35",
 	}, totals)
+}
+
+// TestBlockTransactionTotalsQueryIsIndexBacked guards the projection's stated
+// contract: reads stay rooted at the block's transactions and reach outputs
+// and collateral returns through their indexes, never by scanning all output
+// history.
+func TestBlockTransactionTotalsQueryIsIndexBacked(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	hash := seedBlockAmountRows(t, store, 5)
+	rows, err := store.writeDB.QueryContext(t.Context(),
+		"EXPLAIN QUERY PLAN "+blockTransactionAmountRows, hash, hash, hash)
+	require.NoError(t, err)
+	defer rows.Close()
+	var plan strings.Builder
+	for rows.Next() {
+		var id, parent, unused int
+		var detail string
+		require.NoError(t, rows.Scan(&id, &parent, &unused, &detail))
+		plan.WriteString(detail + "\n")
+	}
+	require.NoError(t, rows.Err())
+	require.Contains(t, plan.String(), "idx_transaction_block_hash")
+	require.Contains(t, plan.String(), "idx_utxo_transaction_id")
+	require.Contains(t, plan.String(), "idx_utxo_collateral_return_for_tx_id")
+	require.NotContains(t, plan.String(), "SCAN utxo")
+	require.NotContains(t, plan.String(), "SCAN u\n")
+	require.NotContains(t, plan.String(), "SCAN cr\n")
+	require.NotContains(t, plan.String(), "AUTOMATIC")
 }
 
 func BenchmarkBlockTransactionTotals(b *testing.B) {
