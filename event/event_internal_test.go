@@ -339,9 +339,7 @@ func TestDeliverAfterCloseReturnsClosed(t *testing.T) {
 func TestPublishDetachesStalledSubscriberWithoutReorderingHealthyDelivery(
 	t *testing.T,
 ) {
-	originalTimeout := channelDeliveryTimeout
-	channelDeliveryTimeout = 20 * time.Millisecond
-	t.Cleanup(func() { channelDeliveryTimeout = originalTimeout })
+	t.Cleanup(SetChannelDeliveryTimeoutForTesting(20 * time.Millisecond))
 
 	const eventType EventType = "test.stalled.detach"
 	eb := NewEventBus(nil, nil)
@@ -377,9 +375,7 @@ func TestPublishDetachesStalledSubscriberWithoutReorderingHealthyDelivery(
 // exposes the lifecycle boundary instead of silently treating a detached
 // subscriber as a successful delivery.
 func TestPublishBlockingReportsStalledSubscriber(t *testing.T) {
-	originalTimeout := channelDeliveryTimeout
-	channelDeliveryTimeout = 20 * time.Millisecond
-	t.Cleanup(func() { channelDeliveryTimeout = originalTimeout })
+	t.Cleanup(SetChannelDeliveryTimeoutForTesting(20 * time.Millisecond))
 
 	const eventType EventType = "test.stalled.blocking"
 	eb := NewEventBus(nil, nil)
@@ -412,9 +408,7 @@ func TestPublishBlockingReportsStalledSubscriber(t *testing.T) {
 // backpressure until the handler drains it, rather than silently removing the
 // subscriber after the ordinary delivery timeout.
 func TestLosslessSubscribeFuncDoesNotDetach(t *testing.T) {
-	originalTimeout := channelDeliveryTimeout
-	channelDeliveryTimeout = 20 * time.Millisecond
-	t.Cleanup(func() { channelDeliveryTimeout = originalTimeout })
+	t.Cleanup(SetChannelDeliveryTimeoutForTesting(20 * time.Millisecond))
 
 	const eventType EventType = "test.lossless.callback"
 	eb := NewEventBus(nil, nil)
@@ -467,9 +461,7 @@ func TestLosslessSubscribeFuncDoesNotDetach(t *testing.T) {
 // increments the delivery-timeout metric even though the periodic stall warning
 // interval is longer than the normal delivery timeout.
 func TestStalledSubscriberDetachmentReportsWarningAndMetric(t *testing.T) {
-	originalTimeout := channelDeliveryTimeout
-	channelDeliveryTimeout = 20 * time.Millisecond
-	t.Cleanup(func() { channelDeliveryTimeout = originalTimeout })
+	t.Cleanup(SetChannelDeliveryTimeoutForTesting(20 * time.Millisecond))
 
 	const eventType EventType = "test.stalled.observability"
 	var buf lockedBuffer
@@ -503,9 +495,7 @@ func TestStalledSubscriberDetachmentReportsWarningAndMetric(t *testing.T) {
 // detaches it. Returning nil to the later publishers would falsely report an
 // accepted delivery that never reached their subscriber.
 func TestConcurrentPublishBlockingReportsStalledSubscriber(t *testing.T) {
-	originalTimeout := channelDeliveryTimeout
-	channelDeliveryTimeout = 20 * time.Millisecond
-	t.Cleanup(func() { channelDeliveryTimeout = originalTimeout })
+	t.Cleanup(SetChannelDeliveryTimeoutForTesting(20 * time.Millisecond))
 
 	const eventType EventType = "test.stalled.concurrent"
 	const publishers = 8
