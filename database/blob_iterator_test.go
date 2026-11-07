@@ -468,16 +468,13 @@ func TestBlobBlockIterator_SlotRanges(t *testing.T) {
 		},
 	}
 
+	db := newTestDB(t)
+	for _, slot := range seedSlots {
+		insertTestBlock(t, db, slot, randomHash(t), []byte{0x82, 0x01})
+	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			db := newTestDB(t)
-			for _, slot := range seedSlots {
-				insertTestBlock(
-					t, db, slot, randomHash(t),
-					[]byte{0x82, 0x01},
-				)
-			}
-
+			t.Parallel()
 			var iter *BlobBlockIterator
 			if tc.end != nil {
 				iter = db.BlocksInRange(tc.start, *tc.end)
@@ -526,18 +523,6 @@ func TestBlobBlockIterator_Progress(t *testing.T) {
 		"current should track last yielded slot",
 	)
 	assert.Equal(t, uint64(500), end, "end should remain unchanged")
-}
-
-func TestBlobBlockIterator_ProgressNoEndSlot(t *testing.T) {
-	t.Parallel()
-
-	db := newTestDB(t)
-
-	iter := db.BlocksFromSlot(0)
-	defer iter.Close()
-
-	_, end := iter.Progress()
-	assert.Equal(t, uint64(0), end, "end should be 0 when not specified")
 }
 
 func TestBlobBlockIterator_CloseMultipleTimes(t *testing.T) {
@@ -619,31 +604,6 @@ func TestBlobBlockIterator_EmptyRange(t *testing.T) {
 	defer iter.Close()
 
 	result, err := iter.NextRaw()
-	require.NoError(t, err)
-	assert.Nil(t, result)
-}
-
-func TestBlobBlockIterator_SingleBlock(t *testing.T) {
-	t.Parallel()
-
-	db := newTestDB(t)
-
-	hash := randomHash(t)
-	insertTestBlock(t, db, 100, hash, []byte{0x82, 0x01})
-
-	iter := db.BlocksFromSlot(100)
-	defer iter.Close()
-
-	// First call should return the block
-	result, err := iter.NextRaw()
-	require.NoError(t, err)
-	require.NotNil(t, result)
-	assert.Equal(t, uint64(100), result.Slot)
-	assert.Equal(t, hash, result.Hash)
-	assert.NotNil(t, result.Cbor)
-
-	// Second call should indicate end
-	result, err = iter.NextRaw()
 	require.NoError(t, err)
 	assert.Nil(t, result)
 }

@@ -68,6 +68,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/pipeline"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 	"github.com/prometheus/client_golang/prometheus"
 	"go.opentelemetry.io/otel/attribute"
 )
@@ -1067,6 +1068,15 @@ type LedgerStateConfig struct {
 	// configuration. The zero value leaves the query unsupported, exactly as
 	// for any other query dingo does not answer.
 	StakePoolStateQuery bool
+	// LeiosCommittee answers the GetLeiosCommittee local state query
+	// (Shelley sub-query 41) with the seats of the Leios voting committee of
+	// an epoch. Released Haskell nodes do not support that query, so it is a
+	// Leios prototype extension: node_ledger_config.go sets it only from
+	// Config.musashiPrototypeIdentity. A nil value leaves the query
+	// unsupported, exactly as for any other query dingo does not answer.
+	LeiosCommittee func(
+		epoch uint64,
+	) ([]olocalstatequery.LeiosCommitteeSeat, error)
 	// SkipDijkstraTxValidation, when true, skips the Dijkstra per-transaction
 	// validation rule set entirely. It applies to Dijkstra-era transactions
 	// only. Network profiles never enable this flag; it exists for explicit test
@@ -1844,6 +1854,7 @@ type LedgerState struct {
 	closeErr                        error
 	inRecovery                      bool // guards against recursive recovery in SubmitAsyncDBTxn
 	lastAtTipRecovery               *atTipRecoveryAttempt
+	atTipRecoveryFloor              *atTipRecoveryFloor
 	lastHeaderValidationFailure     *headerValidationError
 	lastHeaderValidationTip         ocommon.Point
 	// At-tip recovery non-convergence tracking. A descending
@@ -4725,6 +4736,21 @@ func (ls *LedgerState) pruneConsumedUtxosUpTo(
 	target, stabilityWindow uint64,
 	limit int,
 ) (int, uint64, error) {
+	ls.consumedUtxoPruneMutex.Lock()
+	defer ls.consumedUtxoPruneMutex.Unlock()
+	guardTxn := ls.db.Metadata().ReadTransaction(ctx)
+	pendingFloor, protected, err := pendingRewardStakeInputHistoryFloor(ls.db.Metadata(), guardTxn)
+	releaseErr := guardTxn.Rollback()
+	if releaseErr != nil {
+		err = errors.Join(err, releaseErr)
+	}
+	if err != nil {
+		ls.config.Logger.Error("failed to inspect pending reward history; skipping consumed UTxO prune", "component", "ledger", "error", err)
+		return 0, 0, err
+	}
+	if protected {
+		target = min(target, pendingFloor)
+	}
 	// Capped at the oldest acquired LocalStateQuery point, and announced,
 	// before anything below is persisted or deleted -- see
 	// acquiredPointPins for why that order matters.
@@ -4741,8 +4767,6 @@ func (ls *LedgerState) pruneConsumedUtxosUpTo(
 	// "absent" for a ref that was actually there. Returning here just skips
 	// this run; the next periodic tick tries again from the same (or a
 	// later) floor.
-	ls.consumedUtxoPruneMutex.Lock()
-	defer ls.consumedUtxoPruneMutex.Unlock()
 	if err := ls.persistConsumedUtxoPruneFloor(floor, nil); err != nil {
 		ls.config.Logger.Error(
 			"failed to persist consumed UTxO prune floor",
@@ -4793,7 +4817,7 @@ func (ls *LedgerState) pruneConsumedUtxosUpTo(
 // batch's in a small one.
 const (
 	trustedBatchPruneEvery = 16
-	trustedBatchPruneRows  = 20_000
+	trustedBatchPruneRows  = 10_000
 )
 
 // trustedBatchPruneBudget bounds how long one run of the trusted-batch
@@ -4983,15 +5007,15 @@ func (ls *LedgerState) resolveRollbackTarget(
 	sameSlotCompetitor := point.Slot == currentTip.Point.Slot &&
 		!bytes.Equal(point.Hash, currentTip.Point.Hash)
 	if sameSlotCompetitor {
-		tipNonce, nonceErr := ls.db.GetBlockNonce(currentTip.Point, nil)
-		if nonceErr != nil {
+		durableTip, tipErr := ls.db.GetTip(nil)
+		if tipErr != nil {
 			return ocommon.Point{}, fmt.Errorf(
-				"read applied nonce for contested tip at slot %d: %w",
+				"read durable tip for contested slot %d: %w",
 				currentTip.Point.Slot,
-				nonceErr,
+				tipErr,
 			)
 		}
-		sameSlotCompetitor = len(tipNonce) > 0
+		sameSlotCompetitor = pointMatches(durableTip.Point, currentTip.Point)
 	}
 	if sameSlotCompetitor {
 		// latestLedgerPrimaryChainAncestor searches block nonces over the
@@ -5198,11 +5222,11 @@ func (ls *LedgerState) rollbackWithBlocksAndIntent(
 	// point is then re-applied by the pipeline, which is what makes recovery
 	// converge instead of rewinding to the same non-repairing target forever.
 	//
-	// This applies only when the competing tip was genuinely applied, which a
-	// recorded block nonce witnesses. A tip that carries no nonce was never
-	// applied -- enforceDurableTipFloor also repairs an in-memory tip that
-	// leads the durable state -- so there is nothing at the contested slot to
-	// undo and the slot-only predicates are already correct for it.
+	// This applies only when the competing tip was genuinely applied, which
+	// the durable tip witnesses. Byron blocks have no nonce, so a nonempty
+	// block nonce is not evidence of whether a tip was applied. An in-memory
+	// tip that leads the durable state has no effects at the contested slot to
+	// undo; enforceDurableTipFloor also repairs it.
 	resolved, resolveErr := ls.resolveRollbackTarget(ctx, point, currentTip)
 	if resolveErr != nil {
 		return resolveErr
@@ -11869,7 +11893,7 @@ func (ls *LedgerState) evaluateHardForkInitiationStability(
 	decodeFailures := ls.metrics.governanceProposalDecodeFailures
 	onDecodeFailure := func(proposal *models.GovernanceProposal, err error) {
 		logger.Warn(
-			"skipping ratifiable HardForkInitiation: decode failed",
+			"skipping governance action during hardfork stability check: decode failed",
 			"proposal_id", proposal.ID,
 			"error", err,
 		)

@@ -891,6 +891,11 @@ contested slot, so the existing predicates truncate that slot whole and the
 block at the target is re-applied; when no such ancestor exists it fails with
 `ErrNoAppliedAncestorBelowContestedSlot` rather than reporting the repair.
 `enforceDurableTipFloor` is the path that produces such a target.
+The redirect uses the persisted ledger tip to distinguish an applied block
+from a queued one. Byron EBBs and main blocks have empty block nonces, so a
+nonce cannot establish that distinction. Rolling back to an EBB at the same
+slot as an applied main block removes the main block's UTxO effects before
+reapplying the EBB.
 
 At-tip transaction and deferred-header recovery may call
 `rollbackWithOptions(..., repairSameTip=true)` when a failed block left
@@ -904,6 +909,15 @@ unchanged tip, reuses the repaired same-tip state, while deeper scheduled
 rewinds perform the normal full rollback. Replay-holding, deterministic
 transaction, and header-validation recovery use the same option so the repair
 rule stays consistent across all recovery entry points.
+
+At-tip transaction recovery pins the block at depth K from the primary tip at
+the first failure. Later retries may choose a deeper slot target, but they
+cannot remove that block or an older one. The current K boundary can move
+forward as the chain grows, and the later of the two boundaries limits the
+rewind. This recovery makes one bounded primary-chain rollback; it does not
+use replay recovery's multi-step descent, which can cross K in aggregate.
+If the pinned block is no longer on the primary chain, the ledger pipeline
+halts instead of continuing below the boundary.
 
 `rollbackWithOptions` reloads `epochCache`, `currentEra`, `currentPParams` and
 the synthetic-PlutusV2-cost-model marker from the database *after* the
@@ -4419,12 +4433,15 @@ source take that role at runtime, without the construction-time
   writes the pending rows and the ended blocks' stake before any statement reads
   `utxo`, `utxo_pointer` or `reward_live_stake`, and the staged transaction rows
   before any statement naming `transaction` or a table with a foreign key to it.
-  Dijkstra and later eras keep the per-row path. Stored state, row ids included,
-  is the per-row path's; see `DATABASE.md`, "Trusted batch UTxO overlay". When
-  the overlay's write hits a `UNIQUE` or foreign-key conflict
-  (`types.ErrBatchUtxoOverlayConflict`) -- including one a read barrier recorded
-  but could not return, which `applyBatched` joins to its error through
-  `database.WithBatchUtxoOverlayError` -- the call logs a Warn line, counts
+  Dijkstra and later eras keep the per-row path, and so does a batch committed
+  while a pending reward stake input snapshot exists, because the overlay's
+  intra-batch deletion would advance the history floor that snapshot still
+  needs. Stored state, row ids included, is the per-row path's; see
+  `DATABASE.md`, "Trusted batch UTxO overlay". When the overlay's write hits a
+  `UNIQUE` or foreign-key conflict (`types.ErrBatchUtxoOverlayConflict`) --
+  including one a read barrier recorded but could not return, which
+  `applyBatched` joins to its error through `database.WithBatchUtxoOverlayError`
+  -- the call logs a Warn line, counts
   `dingo_ledger_trusted_batch_overlay_fallbacks_total`, and applies the blocks
   that did not commit again on the per-row path. Regression tests are in
   `ledger/trusted_batch_overlay_test.go` and
@@ -4434,7 +4451,7 @@ source take that role at runtime, without the construction-time
   loop has moved the ledger tip) rather than the stability window behind it,
   after the first batch a process commits and then once every
   `trustedBatchPruneEvery` (16) committed batches. It deletes
-  `trustedBatchPruneRows` (20,000) rows at a time until nothing prunable is left
+  `trustedBatchPruneRows` (10,000) rows at a time until nothing prunable is left
   or `trustedBatchPruneBudget` (30 s) has passed: a spent row costs less to
   delete the more rows its transaction deletes with it, so a few large deletes
   every sixteen batches cost less than one or two small ones after each. A
@@ -5508,6 +5525,19 @@ duplicate is excluded, so the final fallback receives the remaining deadline.
 Transient vote and ranking-block announcements evict the oldest transient entry
 at the 64-entry limit without displacing retained endorser-block offers.
 
+A peer may offer only an endorser block it has announced: the reference node
+disconnects a peer whose block or closure offer names an endorser block that
+peer never announced to it (`ExnLeiosBlockOfferWithoutAnnouncement`,
+`ExnLeiosClosureOfferWithoutAnnouncement`). The forger stores its endorser
+block (`BroadcastEndorserBlock`) before the announcing ranking block is built,
+self-validated and adopted, so the block and closure offers are held in
+`leiosPendingForgedOffers` and queued on leios-notify only after the
+announcing header (`EnqueueLeiosBlockAnnouncement`, from the forged-block
+observer), immediately behind it. A forged endorser block whose ranking block
+is never announced is never offered; at most eight pending ones are kept.
+Relayed endorser blocks already follow the same order, because
+`enqueueLeiosRelayOffers` waits for the announcement to verify the slot.
+
 
 Idle LeiosNotify requests observe the owning connection's shutdown channel. This
 also releases requests started before manager registration; protocol completion
@@ -5763,6 +5793,11 @@ assembling the context for the Plutus scripts a transaction actually needs
 transaction that does carry redeemers still translates its validity interval per
 redeemer language and still fails past the horizon, matching cardano-ledger's
 `TimeTranslationPastHorizon`.
+
+Dijkstra's phase-2 success cache admits only transactions with redeemers at
+some witness level. Script-free transactions still run the structural phase-2
+rule, but do not hash their resolved inputs and cost models for a cache key or
+evict cached script evaluations.
 
 `EvaluateTxDijkstra` evaluates every Plutus redeemer of a Dijkstra transaction
 through `gdijkstra.EvaluatePlutusScripts`: top-level and sub-transaction
@@ -6605,8 +6640,16 @@ pools, stake pool parameters (`GetStakePoolParams`, the parameters in effect in
 the epoch of the acquired point from the registrations added at or before it, so
 a re-registration made during that epoch is not reported until the next one),
 which returns genesis relay addresses in ledger wire order and includes an
-optional BLS key when protocol version 12 or later applies), stake pool state
-(`GetStakePoolState`, answered only on the Leios prototype network because
+optional BLS key when protocol version 12 or later applies), Leios committee
+(`GetLeiosCommittee`, gated the same way through
+`LedgerStateConfig.LeiosCommittee`, which the node sets only from the strict
+Musashi identity and backs with the vote manager's
+`CommitteeSeatsForEpoch`: seats in voter id order, each weighted by its stake
+over the total active stake and carrying the member's BLS key when one
+resolves, and none otherwise; the epoch at the acquired point is required,
+and the next epoch's committee is left out of the reply only when its stake
+snapshot has no pools yet, while any other failure fails the query), stake pool
+state (`GetStakePoolState`, answered only on the Leios prototype network because
 released nodes do not support it: `LedgerStateConfig.StakePoolStateQuery` is set
 only from the strict Musashi identity (`musashiPrototypeIdentity`), and every
 other network fails the query as unsupported. It reads the same registration
@@ -8121,15 +8164,17 @@ Ordinary Praos sessions continue to use primary-chain intersection points.
   re-intersection; the connection retains its header for later ancestry lookups
   but does not re-deliver it. Bounded-history exhaustion defers verification
   instead, so the peer is re-intersected after the applied tip advances and the
-  header can be checked again. Retained ancestry with a missing
-  crypto-verification generation, or one stamped before the current consensus
-  context began, also defers the candidate and re-intersects; a point that
-  became applied during lookup is trusted as part of the primary chain. A direct
-  child of the applied tip can use the local verifier's immutable next-epoch
-  forecast when the shared epoch cache has not yet reached its slot. Multi-epoch
-  peer forks derive each intermediate epoch nonce from the retained, verified
-  candidate path. When the applied tip advances during ancestry lookup and
-  becomes the candidate's parent, verification switches to the local-chain
+  header can be checked again. Retained ancestry with a missing or stale
+  crypto-verification generation is reconstructed from its header bytes and
+  checked against the current consensus context before the candidate enters
+  selection. The old verdict is never reused. If the ancestry or state needed
+  for that check is unavailable, the candidate defers and re-intersects; a point
+  that became applied during lookup is trusted as part of the primary chain. A
+  direct child of the applied tip can use the local verifier's immutable
+  next-epoch forecast when the shared epoch cache has not yet reached its slot.
+  Multi-epoch peer forks derive each intermediate epoch nonce from the retained,
+  verified candidate path. When the applied tip advances during ancestry lookup
+  and becomes the candidate's parent, verification switches to the local-chain
   verifier against the newly published ledger state. A header whose point (slot
   and hash) is on the chain (`Chain.HoldsPoint`) at or below the ledger tip
   returns success without re-verification: it was fully verified when applied,
@@ -9436,8 +9481,14 @@ eligible upstream so its last leads back onto the network are never discarded.
 Peer sharing is an address-validation boundary in both directions. The server
 callback exports only sharable, nonzero-port IP literals accepted by the shared
 peer-governor routability policy; operator-configured private peers remain
-usable locally but are not advertised. Valid candidates are ordered by a salted
-hash of the address and the reply is capped at 10 addresses and at the
+usable locally but are not advertised. A local-root or public-root peer is
+sharable when its group sets `advertise`, and a bootstrap peer never is. A
+gossip or ledger peer becomes sharable only after an outbound connection to it
+succeeds, as the reference node shares only peers it has connected to. An
+inbound connection never makes its remote address sharable: a duplex handshake
+does not prove the source port is a listening port, since Dingo negotiates
+duplex mode whether or not it dials from its listening port. Valid candidates
+are ordered by a salted hash of the address and the reply is capped at 10 addresses and at the
 requested count, as in the reference node. The salt is regenerated every 823
 seconds, so a requester sees a stable answer within a window and a different
 subset after it. A received reply is capped to the
@@ -12437,7 +12488,10 @@ future network blocks.
 Archive extraction counts decompressed bytes beneath Go's tar reader against a
 bootstrap-wide budget; ancillary preflight has a per-archive stream limit. Both
 readers check cancellation on each read, so metadata and skipped member bodies
-count toward these limits.
+count toward these limits. Both readers reject GNU and PAX sparse members as
+soon as the tar header is decoded: Go's tar reader synthesizes sparse holes
+above the compressed-stream accounting, so accepting them would make the
+reported expanded-byte and cancellation boundaries incomplete.
 
 The post-download ImmutableDB copy completes before ledger-state import starts.
 The copy persists block and transaction metadata as well as block blobs, so it
@@ -12653,7 +12707,11 @@ first pass decompresses without writing, finds the manifest, validates its
 Ed25519 signature, and rejects unsupported paths or malformed digests. The
 second pass admits only the manifest, its signed files, and their parent
 directories; it checks every digest while writing. The ordinary post-extraction
-verification still binds the resulting directory handle to the importer.
+verification still binds the resulting directory handle to the importer. The
+encoded ledger-state file is limited to 1 GiB before it is read into memory and
+again before parsing. UTxO-HD table files are not subject to that bound: they
+remain separate, signed files and are mapped and decoded separately rather than
+copied into the ledger-state buffer.
 
 All v2 extractions share a one-million-entry and 1 TiB expanded-byte ceiling,
 further reduced to the filesystem's available space minus the larger of 1 GiB
@@ -18438,8 +18496,11 @@ mirror still exists. If no cloud destination is configured, or its scheme's
 `snapshot_id` through `resolveSnapshotDir`, which rejects anything but a bare
 directory name (no `/`, no `..`) before joining it under `SnapshotDir` — a
 path-traversal guard that also covers `Restore`, which takes the same untrusted
-`snapshot_id` input over the network. `VerifySnapshot` reuses
-`lifecycle.Restore` itself, restoring into a throwaway directory under
+`snapshot_id` input over the network. `DeleteSnapshot` additionally refuses ids
+starting with `.dingo-` (the catalog database and work directories) and removes
+a local copy only when it is a directory holding a regular `manifest.json` file;
+the manifest is not parsed, so a corrupted snapshot stays deletable.
+`VerifySnapshot` reuses `lifecycle.Restore` itself, restoring into a throwaway directory under
 `SnapshotDir` (never the system temp directory, since the restore is as large as
 the snapshot) and deleting it afterward, rather than duplicating the
 manifest-checksum/consistency validation `Restore` already does. It
@@ -20449,7 +20510,10 @@ runs. Its answer is therefore a prediction rather than a preview: votes freeze
 at the deadline but the SPO denominator does not, and stake moving across the
 boundary can carry an action over or under its threshold. See
 `governance.predictedBoundaryStakeEpochFor` for why estimating the boundary
-snapshot from live state instead would be the worse trade.
+snapshot from live state instead would be the worse trade. The predictor still
+uses RATIFY's action-priority order, enactment preconditions, and delaying-action
+break: an eligible higher-priority action prevents a later hard fork from being
+advertised, and a hard fork the boundary cannot enact is not advertised.
 
 The split is what makes the capture reference-ordered. cardano-ledger runs SNAP
 before POOLREAP and before governance enactment, and the live
@@ -22700,19 +22764,22 @@ any implementation — including most unit-test stand-ins — that doesn't
 provide one.
 
 The cached context is also what lets evaluation reuse CEK machines.
-gouroboros's `Plutus*Script.Evaluate` keeps a `sync.Pool` of `cek.Machine`
+gouroboros's `Plutus*Script.Evaluate` keeps a shared idle LIFO of `cek.Machine`
 instances per `(language version, *cek.EvalContext)` pair and takes a machine
 from it for each redeemer, so every redeemer that resolves the same cached
-context shares one pool. A context built per call, as in the uncached
-fallback, gets a new pool each time, so its redeemers never reuse a machine.
-The pool holds its context only weakly, and its entry is removed once the
-context becomes unreachable. Evicting a cache entry therefore frees that
-entry's machines after the last evaluation holding the context returns, so
-the cache bound also bounds the retained machines. Dijkstra phase-2
-validation runs inside gouroboros's own rule and uses gouroboros's
-process-wide `common.PooledEvalContext`, not this cache. That function keys
-on language version, protocol major version and cost model only, with no
-synthetic-V2 flag, so the Alonzo, Babbage and Conway paths keep this cache.
+context shares one pool. The idle list retains at most the current
+`GOMAXPROCS` machines. Each machine also retains at most 32 MiB of aggregate
+value-arena storage; oversized backing arrays are compacted before the machine
+returns to the pool. A context built per call, as in the uncached fallback,
+gets a new pool each time, so its redeemers never reuse a machine. The pool
+holds its context only weakly, and its entry is removed once the context
+becomes unreachable. Evicting a cache entry therefore frees that entry's
+machines after the last evaluation holding the context returns, so the cache
+bound also bounds the retained machines. Dijkstra phase-2 validation runs
+inside gouroboros's own rule and uses gouroboros's process-wide
+`common.PooledEvalContext`, not this cache. That function keys on language
+version, protocol major version and cost model only, with no synthetic-V2
+flag, so the Alonzo, Babbage and Conway paths keep this cache.
 
 ### Live Restore/Truncate LedgerStateConfig Parity
 

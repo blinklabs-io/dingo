@@ -191,3 +191,23 @@ func TestDijkstraPhase2ResultKeyCoversEveryLevel(t *testing.T) {
 	_, ok = dijkstraPhase2ResultKey(tx, storedCborState{missing}, pp)
 	require.False(t, ok, "an unresolved child input must not produce a key")
 }
+
+func TestPhase2ResultCacheDoesNotRetainScriptFreeDijkstraTransactions(
+	t *testing.T,
+) {
+	// Not t.Parallel: countDijkstraPhase2 replaces a package-level validator.
+	calls := countDijkstraPhase2(t)
+	spec := v4ContextSpec{}
+	fixture := newV4ContextFixture(t, spec)
+	tx := fixture.wire(t, spec)
+	state := phase2CachingState{
+		storedCborState: storedCborState{fixture.state},
+		cache:           NewPhase2ResultCache(),
+	}
+	for range 3 {
+		require.NoError(t, ValidateTxDijkstra(tx, 0, state, fixture.params))
+	}
+	require.Equal(t, 3, *calls, "structural phase-2 checks must still run")
+	require.Empty(t, state.cache.current)
+	require.Empty(t, state.cache.previous)
+}

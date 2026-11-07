@@ -8848,11 +8848,8 @@ INSERT INTO auth_committee_hot (
 		ActionType:    uint8(lcommon.GovActionTypeHardForkInitiation),
 		ProposedEpoch: 737,
 		ExpiresEpoch:  767,
-		// Deposit 0 keeps ratificationEnactmentPrecondition's return-address
-		// decode (which real proposals need) out of scope here -- this test
-		// is about the SPO stake epoch selection, not deposit handling.
-		Deposit:       0,
-		ReturnAddress: repeatByte(29, 0),
+		Deposit:       1_000,
+		ReturnAddress: append([]byte{0xe1}, repeatByte(28, 0)...),
 		AnchorURL:     "https://example.invalid/plomin",
 		AnchorHash:    repeatByte(32, 0x4a),
 		GovActionCbor: actionCbor,
@@ -12602,6 +12599,127 @@ func TestRollbackSameSlotCompetitorRestoresConsumedUtxo(t *testing.T) {
 	)
 }
 
+func TestRollbackToByronEbbRestoresSameSlotUtxos(t *testing.T) {
+	t.Parallel()
+
+	const (
+		ancestorSlot = 21_599
+		ebbSlot      = 21_600
+	)
+	db := newTestDB(t)
+	cm, err := chain.NewManager(context.Background(), db, nil)
+	require.NoError(t, err)
+	require.NoError(t, cm.SetLedger(testSecurityParamLedger{securityParam: 2}))
+	ancestorHash := testHashBytes("byron-ebb-ancestor")
+	ebbHash := testHashBytes("byron-ebb")
+	mainHash := testHashBytes("byron-main-after-ebb")
+	require.NoError(
+		t,
+		cm.PrimaryChain().AddRawBlocks(context.Background(), []chain.RawBlock{
+			{
+				Slot: ancestorSlot, Hash: ancestorHash, BlockNumber: 1,
+				Type: 1, Cbor: []byte{0x80},
+			},
+			{
+				Slot: ebbSlot, Hash: ebbHash, BlockNumber: 1,
+				Type: 0, PrevHash: ancestorHash, Cbor: []byte{0x80},
+			},
+			{
+				Slot: ebbSlot, Hash: mainHash, BlockNumber: 2,
+				Type: 1, PrevHash: ebbHash, Cbor: []byte{0x80},
+			},
+		}),
+	)
+	ebbPoint := ocommon.NewPoint(ebbSlot, ebbHash)
+	_, err = cm.PrimaryChain().RollbackDeferred(context.Background(), ebbPoint)
+	require.NoError(t, err)
+	ls, err := NewLedgerState(LedgerStateConfig{
+		Database: db, ChainManager: cm,
+		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
+		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	ls.metrics.init(prometheus.NewRegistry())
+	for _, block := range []struct {
+		hash []byte
+		slot uint64
+	}{
+		{ancestorHash, ancestorSlot}, {ebbHash, ebbSlot}, {mainHash, ebbSlot},
+	} {
+		require.NoError(
+			t,
+			db.SetBlockNonce(block.hash, block.slot, nil, false, nil),
+		)
+	}
+	mainTip := ochainsync.Tip{
+		Point: ocommon.NewPoint(ebbSlot, mainHash), BlockNumber: 2,
+	}
+	require.NoError(t, db.SetTip(mainTip, nil))
+	ls.currentTip = mainTip
+	ls.chainsyncState = SyncingChainsyncState
+	ls.publishSnapshotsLocked()
+
+	inputTx := testHashBytes("byron-ebb-input")
+	outputTx := testHashBytes("byron-ebb-output")
+	require.NoError(
+		t,
+		db.MetadataTxn(context.Background(), true).
+			Do(func(txn *database.Txn) error {
+				if err := db.CreateUtxo(context.Background(), txn, &models.Utxo{
+					TxId: inputTx, OutputIdx: 0, AddedSlot: ancestorSlot,
+					DeletedSlot: ebbSlot, Amount: types.Uint64(1_000_000),
+				}); err != nil {
+					return err
+				}
+				return db.CreateUtxo(context.Background(), txn, &models.Utxo{
+					TxId: outputTx, OutputIdx: 0, AddedSlot: ebbSlot,
+					Amount: types.Uint64(1_000_000),
+				})
+			}),
+	)
+	fixture := &sameSlotCompetitorFixture{db: db, spentTxId: inputTx}
+	require.False(t, fixture.inputInLiveSet(t))
+
+	require.NoError(t, ls.rollback(context.Background(), ebbPoint))
+	require.True(t, fixture.inputInLiveSet(t),
+		"the main block's spent input must be live after rollback")
+	_, err = db.UtxoByRef(context.Background(), outputTx, 0, nil)
+	require.ErrorIs(t, err, database.ErrUtxoNotFound,
+		"the main block's same-slot output must be removed")
+	require.Equal(
+		t,
+		ocommon.NewPoint(ancestorSlot, ancestorHash),
+		ls.currentTip.Point,
+		"the EBB must be reapplied from the prior block",
+	)
+	require.Equal(t, ebbPoint, cm.PrimaryChain().Tip().Point,
+		"the EBB remains the selected rollback target")
+}
+
+func TestResolveRollbackTargetKeepsQueuedSameSlotTip(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	ebbPoint := ocommon.NewPoint(21_600, testHashBytes("queued-ebb"))
+	mainTip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(21_600, testHashBytes("queued-main")),
+		BlockNumber: 2,
+	}
+	require.NoError(
+		t,
+		db.SetTip(ochainsync.Tip{Point: ebbPoint, BlockNumber: 1}, nil),
+	)
+	ls := &LedgerState{db: db}
+	resolved, err := ls.resolveRollbackTarget(
+		context.Background(),
+		ebbPoint,
+		mainTip,
+	)
+	require.NoError(t, err)
+	require.Equal(t, ebbPoint, resolved,
+		"a queued main block has no UTxO effects to undo at the EBB slot")
+}
+
 // TestRollbackSameSlotCompetitorWithoutAncestorFailsLoudly covers the other
 // half of acceptance criteria: when the contested slot cannot be
 // truncated because no applied ancestor below it can be found, the rollback
@@ -13121,7 +13239,7 @@ func seedRatifiableBootstrapHardForkInitiation(
 		ActionType:    uint8(lcommon.GovActionTypeHardForkInitiation),
 		ProposedEpoch: currentEpoch - 1,
 		ExpiresEpoch:  currentEpoch + 10,
-		Deposit:       1_000,
+		Deposit:       0,
 		ReturnAddress: repeatByte(29, 0),
 		AnchorURL:     "https://example.invalid/anchor",
 		AnchorHash:    repeatByte(32, 0xEE),

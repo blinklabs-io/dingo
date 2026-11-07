@@ -1892,6 +1892,34 @@ func (c *Chain) RollbackDeferred(
 	return c.rollbackLocked(ctx, point, false)
 }
 
+// RollbackDeferredWithPreflight runs before and the rollback under one chain
+// mutation barrier. The callback must validate the point and complete any
+// external effects that have to precede truncation. A callback error leaves
+// the chain unchanged; callers must settle any prior rollback intent before
+// entering the barrier, because its recovery may itself rewind the chain.
+func (c *Chain) RollbackDeferredWithPreflight(
+	ctx context.Context,
+	point ocommon.Point,
+	before func() error,
+) ([]event.Event, error) {
+	if c == nil {
+		return nil, errors.New("chain is nil")
+	}
+	c.batchCommitMutex.Lock()
+	defer c.batchCommitMutex.Unlock()
+	if err := c.awaitPendingCallerAdds(); err != nil {
+		return nil, fmt.Errorf(
+			"wait for pending caller adds before preflight: %w", err,
+		)
+	}
+	if before != nil {
+		if err := before(); err != nil {
+			return nil, err
+		}
+	}
+	return c.rollbackWithMutationBarrierHeld(ctx, point, false)
+}
+
 // RollbackDeferredThen rewinds the chain like RollbackDeferred and runs after
 // the rewind before admitting another persistent-chain mutation. Event
 // publication stays deferred until the caller has released its own outer locks.
