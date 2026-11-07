@@ -405,7 +405,7 @@ func TestValidateTxParameterChangeDijkstraDomains(t *testing.T) {
 		{
 			"tag9-negative",
 			map[uint]any{9: ppuRat(-1, 1)},
-			"tag 9: rational numerator must be in Word64",
+			"tag 9: rational numerator must be a Word64",
 			true,
 		},
 		{
@@ -423,7 +423,7 @@ func TestValidateTxParameterChangeDijkstraDomains(t *testing.T) {
 		{
 			"tag19-negative",
 			map[uint]any{19: []any{ppuRat(-1, 1), ppuRat(1, 1)}},
-			"tag 19: rational at array index 0: rational numerator must be in Word64",
+			"tag 19: rational at array index 0: rational numerator must be a Word64",
 			true,
 		},
 		{
@@ -474,7 +474,7 @@ func TestValidateTxParameterChangeDijkstraDomains(t *testing.T) {
 		{
 			"tag33-negative",
 			map[uint]any{33: ppuRat(-1, 1)},
-			"tag 33: rational numerator must be in Word64",
+			"tag 33: rational numerator must be a Word64",
 			true,
 		},
 		{

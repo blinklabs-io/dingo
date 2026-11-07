@@ -467,6 +467,12 @@ func runFixture(
 		provider,
 		pp,
 	)
+	validationErr = applyFixtureReferenceScriptLimit(
+		tx,
+		provider,
+		protocolParameters.MaxReferenceScriptsSize,
+		validationErr,
+	)
 	if predicate := unregisteredDelegationPredicate(tx, provider, validationErr); validationErr != nil &&
 		predicate != "" {
 		outcome := CaseOutcome{ID: id, Result: predicate}
@@ -493,6 +499,32 @@ func runFixture(
 		return CaseOutcome{ID: id, Result: expected.Predicate}, nil, nil
 	}
 	return mismatch(id, expected, "rejected: "+validationErr.Error())
+}
+
+// applyFixtureReferenceScriptLimit applies the configurable limit carried by
+// NDC's test protocol-parameter document. Conway fixes this value at 200 KiB
+// in the reference ledger, so this override belongs only to the conformance
+// adapter and must not alter production protocol parameters or validation.
+func applyFixtureReferenceScriptLimit(
+	tx common.Transaction,
+	state common.LedgerState,
+	limit *uint64,
+	validationErr error,
+) error {
+	if validationErr != nil || limit == nil || !tx.IsValid() {
+		return validationErr
+	}
+	size, err := common.ConsumedReferenceScriptSize(tx, state)
+	if err != nil {
+		return err
+	}
+	if size > *limit {
+		return common.RefScriptSizePerTxTooLargeError{
+			TxSize:  size,
+			MaxSize: *limit,
+		}
+	}
+	return nil
 }
 
 // The ledger uses one error type for pool and vote delegation by an

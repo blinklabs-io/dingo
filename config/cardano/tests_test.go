@@ -148,7 +148,7 @@ func TestConwayGenesisAcceptsLegacyCommitteeQuorum(t *testing.T) {
 	require.NotNil(t, c.ConwayGenesis())
 }
 
-func TestConwayGenesisStillRejectsUnknownFields(t *testing.T) {
+func TestConwayGenesisAcceptsUnknownFields(t *testing.T) {
 	t.Parallel()
 	raw, err := os.ReadFile(filepath.Join(testDataDir, "conway-genesis.json"))
 	require.NoError(t, err)
@@ -158,7 +158,7 @@ func TestConwayGenesisStillRejectsUnknownFields(t *testing.T) {
 	out, err := json.Marshal(doc)
 	require.NoError(t, err)
 	var c CardanoNodeConfig
-	require.Error(t, c.LoadConwayGenesisFromReader(bytes.NewReader(out)))
+	require.NoError(t, c.LoadConwayGenesisFromReader(bytes.NewReader(out)))
 
 	doc["committee"] = json.RawMessage(
 		`{"members":{},"threshold":0,"notACommitteeField":1}`,
@@ -166,7 +166,7 @@ func TestConwayGenesisStillRejectsUnknownFields(t *testing.T) {
 	delete(doc, "notAConwayField")
 	out, err = json.Marshal(doc)
 	require.NoError(t, err)
-	require.Error(t, c.LoadConwayGenesisFromReader(bytes.NewReader(out)))
+	require.NoError(t, c.LoadConwayGenesisFromReader(bytes.NewReader(out)))
 }
 
 // TestConwayGenesisRejectsQuorumWithoutThreshold pins that the legacy quorum

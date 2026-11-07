@@ -59,6 +59,10 @@ func TestConwayCorpusShapeConstraints(t *testing.T) {
 		rule string
 		raw  []byte
 	}{
+		{name: "wide positive bignum tag", rule: "big_int", raw: []byte{0xd8, 2, 0x41, 1}},
+		{name: "wide negative bignum tag", rule: "big_int", raw: []byte{0xd8, 3, 0x41, 0}},
+		{name: "widest positive bignum tag", rule: "big_int", raw: []byte{0xdb, 0, 0, 0, 0, 0, 0, 0, 2, 0x41, 1}},
+		{name: "widest negative bignum tag", rule: "big_int", raw: []byte{0xdb, 0, 0, 0, 0, 0, 0, 0, 3, 0x41, 0}},
 		{name: "empty certificates", rule: "certificates", raw: []byte{0x80}},
 		{name: "empty tagged certificates", rule: "certificates", raw: []byte{0xd9, 0x01, 0x02, 0x80}},
 		{name: "empty proposals", rule: "proposal_procedures", raw: []byte{0x80}},
@@ -83,6 +87,31 @@ func TestConwayCorpusShapeConstraints(t *testing.T) {
 				t.Fatalf("accepted invalid %s CBOR", test.rule)
 			}
 		})
+	}
+}
+
+func TestBoundedBytesLimitAppliesToEachChunk(t *testing.T) {
+	t.Parallel()
+	chunk := append([]byte{0x58, 64}, bytes.Repeat([]byte{7}, 64)...)
+	wire := append(append(append([]byte{0x5f}, chunk...), chunk...), 0xff)
+	encoded, err := reencode("bounded_bytes", wire)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded []byte
+	if _, err := cbor.DecodeExact(encoded, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(decoded, bytes.Repeat([]byte{7}, 128)) {
+		t.Fatal("chunk contents changed")
+	}
+	for _, invalid := range [][]byte{
+		append([]byte{0x58, 128}, bytes.Repeat([]byte{7}, 128)...),
+		append(append([]byte{0x5f, 0x58, 65}, bytes.Repeat([]byte{7}, 65)...), 0xff),
+	} {
+		if _, err := reencode("bounded_bytes", invalid); err == nil {
+			t.Fatal("accepted a byte string chunk longer than 64 bytes")
+		}
 	}
 }
 

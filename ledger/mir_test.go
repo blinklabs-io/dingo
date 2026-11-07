@@ -1894,7 +1894,7 @@ func TestApplyMIRCerts_NetBeyondUint64DiscardsBoundary(t *testing.T) {
 func withMIRCutoffEpoch(t *testing.T, ls *LedgerState, epoch models.Epoch) {
 	t.Helper()
 	cfg := &cardano.CardanoNodeConfig{}
-	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(`{
+	require.NoError(t, completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(`{
 		"activeSlotsCoeff": 0.05,
 		"securityParam": 2160,
 		"systemStart": "2017-09-23T21:44:51Z"

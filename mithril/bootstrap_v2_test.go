@@ -79,13 +79,35 @@ func testNodeConfigWithMithrilKeys(
 		t,
 		cfg.LoadByronGenesisFromReader(bytes.NewReader(byronGenesis)),
 	)
-	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(`{
-		"epochLength": 2000,
-		"slotLength": 1,
-		"activeSlotsCoeff": 0.05,
-		"securityParam": 2160
-	}`)))
+	require.NoError(t, cfg.LoadShelleyGenesisFromReader(bytes.NewReader(
+		testShelleyGenesisJSON(t, map[string]any{
+			"epochLength":      2000,
+			"slotLength":       1,
+			"activeSlotsCoeff": 0.05,
+			"securityParam":    2160,
+		}),
+	)))
 	return cfg
+}
+
+func testShelleyGenesisJSON(
+	t testing.TB,
+	overrides map[string]any,
+) []byte {
+	t.Helper()
+	raw, err := cardano.EmbeddedConfigFS.ReadFile("devnet/shelley-genesis.json")
+	require.NoError(t, err)
+	var genesis map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(raw, &genesis))
+	genesis["genDelegs"] = json.RawMessage(`{}`)
+	genesis["updateQuorum"] = json.RawMessage(`0`)
+	for key, value := range overrides {
+		genesis[key], err = json.Marshal(value)
+		require.NoError(t, err)
+	}
+	raw, err = json.Marshal(genesis)
+	require.NoError(t, err)
+	return raw
 }
 
 // buildTarZst builds a zstd-compressed tar archive from the given
