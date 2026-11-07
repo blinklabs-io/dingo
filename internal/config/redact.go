@@ -229,6 +229,7 @@ var logPlainConfigFields = []string{
 	"MaxInboundConns",
 	"MaxNtCConns",
 	"MaxTrustedLocalNtCConns",
+	"TrustedNtCIdleTimeout",
 	"MaxNtCConnectionsPerIP",
 	"MaxKESEvolutions",
 	"MetricsBindAddr",

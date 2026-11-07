@@ -29,11 +29,6 @@ const socketIdleTimeout = 2 * time.Minute
 // listener must not wait for a peer that never completes the handshake.
 const handshakeTimeout = 10 * time.Second
 
-// trustedNtCIdleTimeout bounds idle time and stalled mux segment transfers on
-// trusted local NtC connections. Active protocol callbacks clear this deadline
-// so supported long-running requests remain unbounded.
-const trustedNtCIdleTimeout = 2 * time.Minute
-
 // deadlineConn bounds how long a single socket write may block. Nothing below
 // the Ouroboros muxer sets a write deadline, so a peer that stops reading can
 // wedge a protocol goroutine in Write forever. Each Write refreshes the
