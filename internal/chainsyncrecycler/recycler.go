@@ -53,6 +53,7 @@ type LedgerSource interface {
 	IsAtTip() bool
 	SecurityParam() int
 	PrimaryChainTipSlot() uint64
+	BlockProcessingSlot() uint64
 	ReconcileLivePrimaryChainLedgerDivergence(
 		reason string,
 		connId ouroboros.ConnectionId,
@@ -283,6 +284,7 @@ func (r *Recycler) initProgressBaseline(st *tickState) {
 	r.config.Components.WithLiveComponents(func(live LiveComponents) {
 		st.lastProgressSlot = live.Ledger.Tip().Point.Slot
 		st.lastPrimaryChainTipSlot = live.Ledger.PrimaryChainTipSlot()
+		st.lastBlockProcessingSlot = live.Ledger.BlockProcessingSlot()
 	})
 	st.lastProgressAt = time.Now()
 }
@@ -339,10 +341,12 @@ type tickState struct {
 	// lastRecycled is the recycle cooldown clock per connection.
 	lastRecycled map[string]time.Time
 	// lastProgressSlot and lastPrimaryChainTipSlot track forward progress in
-	// the applied ledger and downloaded primary chain. lastProgressAt is the
-	// most recent advance of either tip.
+	// the applied ledger and downloaded primary chain. lastBlockProcessingSlot
+	// also observes completed work before an apply transaction commits.
+	// lastProgressAt is the most recent advance of any of these signals.
 	lastProgressSlot        uint64
 	lastPrimaryChainTipSlot uint64
+	lastBlockProcessingSlot uint64
 	lastProgressAt          time.Time
 }
 
@@ -458,6 +462,10 @@ func (r *Recycler) tick(
 		st.lastPrimaryChainTipSlot = primaryChainTipSlot
 		st.lastProgressAt = now
 	}
+	if slot := live.Ledger.BlockProcessingSlot(); slot > st.lastBlockProcessingSlot {
+		st.lastBlockProcessingSlot = slot
+		st.lastProgressAt = now
+	}
 	// While held the local tip moves only with external batches and every
 	// peer's headers are dropped on purpose, so stalls, impatience and a
 	// plateau say nothing about a connection. The plateau clock restarts so
@@ -470,9 +478,10 @@ func (r *Recycler) tick(
 	}
 	// During catch-up, extend stalled-client grace and recycle cooldowns to
 	// avoid churning connections while the node is making progress. The
-	// plateau clock above resets when either the applied tip advances or the
-	// downloaded primary chain changes, so catch-up alone is not evidence that
-	// a stall is healthy and does not extend the plateau threshold.
+	// plateau clock above resets when the applied tip advances, the downloaded
+	// primary chain changes, or local block processing advances. Catch-up alone
+	// is not evidence that a stall is healthy and does not extend the plateau
+	// threshold.
 	multiplier := 1
 	if !live.Ledger.IsAtTip() {
 		multiplier = catchUpMultiplier
@@ -935,7 +944,8 @@ func (r *Recycler) disconnectImpatientClients(live LiveComponents) {
 		connKey := connId.String()
 		r.logger.Warn(
 			"chainsync client exhausted the Genesis Limit on Patience, disconnecting",
-			"connection_id", connKey,
+			"connection_id",
+			connKey,
 		)
 		r.publishConnectionRecycle(connId, connKey, ReasonPatienceExhausted)
 	}

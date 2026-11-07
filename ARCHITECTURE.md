@@ -8856,8 +8856,17 @@ The `chainsync.State` tracks multiple concurrent chainsync clients:
   record so a reconnect can begin a new resync episode. While network ingest is
   held (see "Network ingest hold") the handler ignores every request except the
   release's `network ingest released`, which closes every tracked client.
-- Plateau detection: if the applied tip does not advance and the downloaded
-  primary-chain tip does not change while peers are ahead, the recycler first
+- Plateau detection: the recycler observes the committed ledger tip, downloaded
+  primary-chain tip, and ledger block-processing high-water slot. The latter
+  advances after successful per-block work inside an apply transaction, before
+  durable commit publishes the tip, so a long healthy batch does not look like
+  idle peers. It is neither a committed tip nor a readiness signal. Reprocessing
+  the same slots after a failed transaction does not advance it; a blocked
+  fetch or commit still expires after the unchanged plateau interval when no
+  other progress occurs. Rollback does not lower this lifetime high-water
+  slot; recovery below it relies on the existing primary-chain and committed
+  tip signals until new processing surpasses it.
+  If none of these signals advances while peers are ahead, the recycler first
   asks ledger to reconcile any live primary-chain/ledger divergence
   (`ReconcileLivePrimaryChainLedgerDivergence`). Primary-chain movement,
   including rollback, resets the plateau clock even when ledger application is

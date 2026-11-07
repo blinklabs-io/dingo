@@ -110,6 +110,7 @@ type fakeLedger struct {
 	atTip               bool
 	securityParam       int
 	primaryChainTipSlot uint64
+	blockProcessingSlot uint64
 	reconciled          bool
 	reconcileErr        error
 	reconcileReasons    []string
@@ -145,6 +146,12 @@ func (f *fakeLedger) PrimaryChainTipSlot() uint64 {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.primaryChainTipSlot
+}
+
+func (f *fakeLedger) BlockProcessingSlot() uint64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.blockProcessingSlot
 }
 
 func (f *fakeLedger) setPrimaryChainTipSlot(slot uint64) {
