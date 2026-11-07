@@ -681,18 +681,6 @@ func txHasRedeemers(tx lcommon.Transaction) bool {
 	return false
 }
 
-func buildIndexedUtxoValidationRules(
-	descriptors []lcommon.UtxoValidationRuleDescriptor,
-	rules []lcommon.UtxoValidationRuleFunc,
-	skipRuleId lcommon.UtxoValidationRuleId,
-) []indexedUtxoValidationRule {
-	return buildIndexedUtxoValidationRulesWithSkips(
-		descriptors,
-		rules,
-		[]lcommon.UtxoValidationRuleId{skipRuleId},
-	)
-}
-
 func buildIndexedUtxoValidationRulesWithSkips(
 	descriptors []lcommon.UtxoValidationRuleDescriptor,
 	rules []lcommon.UtxoValidationRuleFunc,

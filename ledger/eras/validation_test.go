@@ -1920,10 +1920,12 @@ func TestBuildIndexedUtxoValidationRulesResolvesByRuleId(t *testing.T) {
 	require.Zero(t, resolveUtxoValidationSkipIndex(
 		descriptors, rules, lcommon.UtxoValidationRulePlutusScripts,
 	))
-	indexed := buildIndexedUtxoValidationRules(
+	indexed := buildIndexedUtxoValidationRulesWithSkips(
 		descriptors,
 		rules,
-		lcommon.UtxoValidationRulePlutusScripts,
+		[]lcommon.UtxoValidationRuleId{
+			lcommon.UtxoValidationRulePlutusScripts,
+		},
 	)
 	require.Len(t, indexed, len(rules)-1)
 	requireIndexedRulesDropRuleIndex(
