@@ -2088,9 +2088,13 @@ When `Node.Run()` is called, components are initialized in this order:
     clock's duplicate, is ignored; Byron rollovers carry no nonce and still
     trigger a run). Its worker also runs the pass every
     `plannerstats.DefaultRefreshInterval` (one minute), so tables filled by
-    block application after the startup pass are re-analyzed once they have
-    grown roughly 25-fold, not only at the next rollover; the tick shares the
-    worker with the epoch trigger, so runs never overlap.
+    block application after the startup pass can be re-analyzed before the
+    next rollover. The optimizer considers every table while retaining SQLite's
+    temporary sampling limit. An explicit optimizer mask must retain that bit;
+    omitting it permits unrestricted index analysis. The single write connection
+    is held during maintenance, so unrestricted analysis here would stop block
+    application for the duration of each scan. The tick shares the worker with
+    the epoch trigger, so runs never overlap.
     A one-slot pending signal coalesces transitions arriving during a run into
     at most one follow-up, and the run executes on its own worker after the
     rollover transaction has committed, never inside it. `Stop` cancels a run in

@@ -625,8 +625,10 @@ func TestBatchUtxoOverlayTransactionIDsAfterRollback(t *testing.T) {
 		store := newForeignKeySQLiteStore(t)
 		chain := buildOverlayChain(t, 4)
 		seedOverlayChain(t, store, chain)
-		_, err := store.writeDB.ExecContext(context.Background(),
-			`INSERT INTO "transaction" (hash, slot, valid) VALUES (X'AA', 900, 1)`)
+		_, err := store.writeDB.ExecContext(
+			context.Background(),
+			`INSERT INTO "transaction" (hash, slot, valid) VALUES (X'AA', 900, 1)`,
+		)
 		require.NoError(t, err)
 		require.NoError(t, store.DeleteTransactionsAfterSlot(899, nil))
 		applyOverlayChain(t, store, chain, overlay)
@@ -809,6 +811,11 @@ func TestBatchUtxoOverlayStatementPlans(t *testing.T) {
 		setup func()
 	}{
 		{"no_stats", func() {}},
+		{"bounded_optimize", func() {
+			supported, err := store.dialect.OptimizePlannerStats(ctx, conn)
+			require.NoError(t, err)
+			require.True(t, supported)
+		}},
 		{"analyzed", func() {
 			_, err := conn.ExecContext(ctx, "ANALYZE")
 			require.NoError(t, err)
@@ -819,6 +826,23 @@ func TestBatchUtxoOverlayStatementPlans(t *testing.T) {
 	}
 	for _, stage := range stages {
 		stage.setup()
+		for _, returnStake := range []bool{false, true} {
+			args := append([]any{int64(1), make([]byte, 32)}, prefetchArgs...)
+			spend := connQueryPlan(
+				t, conn, consumeUtxosBatchQuery(keys, returnStake), args...,
+			)
+			require.NotContains(
+				t,
+				spend,
+				"idx_utxo_deleted",
+				stage.name+": "+spend,
+			)
+			require.NotContains(t, spend, "SCAN utxo", stage.name+": "+spend)
+			require.Equal(t, keys, strings.Count(
+				spend,
+				"USING INDEX tx_id_output_idx (tx_id=? AND output_idx=?)",
+			), stage.name+": "+spend)
+		}
 		prefetch := connQueryPlan(
 			t, conn, overlayPrefetchQuery(keys), prefetchArgs...,
 		)
