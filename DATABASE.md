@@ -262,6 +262,29 @@ conflict; the producer then hydrates the imported row. PostgreSQL and MySQL
 keep the full unique index and run the statements as written; migration 57 is
 empty for them.
 
+`"transaction".id` is `AUTOINCREMENT` on SQLite (an identity sequence on
+PostgreSQL and MySQL) and that is load-bearing: `utxo.spent_by_tx_id`, the
+edge tables' `transaction_id` and `utxo.producer_tx_id` name a transaction by
+id, so a deleted transaction's id must never be handed to another row. A
+rollback deletes the rows of the rolled-back transactions, clearing the
+spender columns and edges first; a transaction applied again takes a new id.
+Without `AUTOINCREMENT`, SQLite reuses the largest id after the deleting
+rollback and any reference that survived would silently name the new
+transaction.
+
+An insert of an output that is already stored, under either identity, returns
+`types.ErrUtxoConflict` on every dialect: SQLite from its probe or its unique
+violation, PostgreSQL and MySQL from the unique `(tx_id, output_idx)`
+violation. Migration 57 stops before its contract phase, naming up to five
+`(producer_tx_id, output_idx)` pairs, when two outputs share a producer and
+output index, since the unique index cannot be built. Migrations 55 and 56
+log, per batch, the spender hashes and edge hashes that have no `transaction`
+row: such an output keeps `deleted_slot` but has no spender, readers return it
+as spent with an empty spender hash, and Kupo's match iterator omits it.
+Migration 57 logs the count of outputs whose `tx_id` differs from their
+producer's `hash`; the producer index does not read `tx_id`, so such a row
+upgrades but is no longer found by hash.
+
 The stake-key lookup indexes `idx_utxo_staking_key` and
 `idx_utxo_staking_deleted_amount` include only outputs with a non-NULL
 `staking_key` on SQLite and PostgreSQL (schema version 53). Enterprise

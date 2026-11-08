@@ -16,6 +16,7 @@ package sqlstore
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"strings"
 	"testing"
@@ -271,4 +272,39 @@ VALUES (?, 0, 0, ?, ?, 1, 10, '1')`,
 		store.sumCredentialUtxoStakeCalls.Load(),
 		"two distinct credentials must be refreshed once each",
 	)
+}
+
+// "transaction".id is AUTOINCREMENT so that spent_by_tx_id, the edge tables
+// and producer_tx_id, which name a transaction by id, cannot come to name a
+// different transaction after a rollback deletes its row. A rolled-back
+// transaction applied again takes a new id, and the output it spent is
+// unspent rather than silently re-bound to the new row.
+func TestRollbackAndReapplyNeverReusesTransactionID(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	hash := []byte(fmt.Sprintf("%032d", 1))
+	insert := func() int64 {
+		t.Helper()
+		var id int64
+		require.NoError(t, store.writeDB.QueryRow(
+			transactionInsertSQL,
+			hash, nil, nil, 10, 0, "0", "0", 0, 0, true,
+		).Scan(&id))
+		return id
+	}
+	first := insert()
+	_, err := store.writeDB.Exec(
+		`INSERT INTO utxo (tx_id, output_idx, spent_by_tx_id, added_slot, deleted_slot, amount)
+VALUES (?, 0, ?, 1, 10, '1')`, bytes32(0x44), first,
+	)
+	require.NoError(t, err)
+
+	require.NoError(t, store.DeleteTransactionsAfterSlot(5, nil))
+	second := insert()
+	require.Greater(t, second, first, "a deleted transaction id must not be reused")
+
+	var spentBy sql.NullInt64
+	require.NoError(t, store.writeDB.QueryRow(
+		"SELECT spent_by_tx_id FROM utxo").Scan(&spentBy))
+	require.False(t, spentBy.Valid, "rollback must unspend the output")
 }
