@@ -16,7 +16,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.114.6
 	github.com/aws/smithy-go v1.28.7
 	github.com/blinklabs-io/bark v0.2.0
-	github.com/blinklabs-io/bursa v0.22.1-0.20261108213705-817b528093ce
+	github.com/blinklabs-io/bursa v0.22.1-0.20261108214242-177092cc7ed6
 	github.com/blinklabs-io/gouroboros v0.218.2-0.20261107081725-c2ba65c899a1
 	github.com/blinklabs-io/ouroboros-mock v0.21.1
 	github.com/blinklabs-io/plutigo v0.11.6
