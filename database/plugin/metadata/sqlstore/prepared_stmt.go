@@ -33,6 +33,9 @@ import (
 var hotStatements = func() []string {
 	queries := []string{
 		sumCredentialUtxoStakeQuery,
+		scriptSupplyLatestQuery,
+		scriptSupplyInsertQuery,
+		scriptSupplySetQuery,
 		rewardLiveStakeAccountQuery,
 		rewardLiveStakeUpsertQuery,
 		rewardLiveStakeUtxoStakeQuery,

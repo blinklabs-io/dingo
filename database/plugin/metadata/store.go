@@ -874,8 +874,19 @@ type UtxoStore interface {
 
 	// GetScriptLockedSupply returns the sum of lovelace held in live
 	// UTxOs whose payment credential is a script. This is the network's
-	// script-locked supply (blockfrost /network supply.locked).
+	// script-locked supply (blockfrost /network supply.locked). It reads
+	// the running aggregate maintained by the UTxO write primitives.
 	GetScriptLockedSupply(types.Txn) (uint64, error)
+
+	// RebuildScriptLockedSupply replaces the running script-locked supply
+	// aggregate with one row at the given slot computed by a full scan of
+	// live UTxOs. Call it after a bulk load that inserts live outputs
+	// without the maintained write primitives.
+	RebuildScriptLockedSupply(uint64, types.Txn) error
+
+	// PruneScriptLockedSupplyBefore drops aggregate rows older than the
+	// newest row at or below the given slot, which is kept as the base.
+	PruneScriptLockedSupplyBefore(uint64, types.Txn) error
 
 	// GetUtxoBalanceByAddress returns the live-UTxO lovelace balance,
 	// per-asset balances (ordered by policy id then name), and live UTxO

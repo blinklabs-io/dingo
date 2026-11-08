@@ -1048,11 +1048,6 @@ SELECT amount
 FROM utxo
 WHERE credential_tag = ? AND staking_key = ? AND deleted_slot = 0;
 
--- name: GetScriptLockedSupply :many
-SELECT amount
-FROM utxo
-WHERE payment_script = TRUE AND deleted_slot = 0;
-
 -- name: GetLiveUtxosByAssetPolicy :many
 SELECT u.transaction_id, u.collateral_return_for_tx_id, u.tx_id,
        u.payment_key, u.staking_key, u.credential_tag, u.datum_hash,

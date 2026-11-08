@@ -1091,6 +1091,16 @@ func ImportLedgerState(
 		)
 	}
 
+	// The import inserts live UTxOs outside the per-write supply
+	// maintenance, so seed the running script-locked total from them. The
+	// rebuild replaces the aggregate, which makes a re-run after a restart
+	// harmless.
+	if err := cfg.Database.RebuildScriptLockedSupply(
+		ctx, slot, nil,
+	); err != nil {
+		return fmt.Errorf("seeding script-locked supply: %w", err)
+	}
+
 	// Set the chain tip
 	if !models.IsPhaseCompleted(
 		completedPhase,

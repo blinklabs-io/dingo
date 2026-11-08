@@ -81,11 +81,12 @@ func TestUtxoStakingIndexesUpgrade(t *testing.T) {
 						"WHERE staking_key IS NOT NULL",
 					)
 				}
-				for _, name := range []string{"idx_utxo_deleted_staking_amount", "idx_utxo_deleted_payment_script"} {
-					definition, ok := indexSQL(t, db, name)
-					require.True(t, ok)
-					require.NotContains(t, definition, "WHERE")
-				}
+				definition, ok := indexSQL(t, db, "idx_utxo_deleted_staking_amount")
+				require.True(t, ok)
+				require.NotContains(t, definition, "WHERE")
+				// The running script-locked aggregate replaced this index.
+				_, ok = indexSQL(t, db, "idx_utxo_deleted_payment_script")
+				require.False(t, ok)
 				run(registry)
 			},
 		)

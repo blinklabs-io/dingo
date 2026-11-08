@@ -247,7 +247,8 @@ UPDATE utxo
 SET deleted_slot = ?, spent_at_tx_id = ?
 WHERE tx_id = ? AND output_idx = ?
   AND deleted_slot = 0 AND spent_at_tx_id IS NULL
-RETURNING tx_id, output_idx, credential_tag, staking_key, amount`
+RETURNING tx_id, output_idx, credential_tag, staking_key, amount,
+          payment_script`
 
 func insertUtxoBatchQuery(rowCount int) string {
 	row := "(" + strings.TrimSuffix(strings.Repeat("?,", 15), ",") + ")"
@@ -296,7 +297,7 @@ func consumeUtxosBatchQuery(rowCount int, returnStake bool) string {
 	returning := "tx_id, output_idx"
 	name := "ConsumeUtxosBatch"
 	if returnStake {
-		returning += ", credential_tag, staking_key, amount"
+		returning += ", credential_tag, staking_key, amount, payment_script"
 		name = "ConsumeUtxosBatchReturningStake"
 	}
 	return `-- name: ` + name + ` :many
@@ -309,9 +310,10 @@ RETURNING ` + returning
 func scanConsumedUtxoRows(
 	rows *sql.Rows,
 	returnStake bool,
-) (map[string]struct{}, []stakeCredentialDelta, error) {
+) (map[string]struct{}, []stakeCredentialDelta, int64, error) {
 	updated := make(map[string]struct{})
 	var deltas []stakeCredentialDelta
+	var scriptLocked int64
 	for rows.Next() {
 		var (
 			txID      []byte
@@ -319,37 +321,44 @@ func scanConsumedUtxoRows(
 			tag       int64
 			key       []byte
 			amount    sql.NullString
+			script    sql.NullBool
 		)
 		if returnStake {
 			if err := rows.Scan(
-				&txID, &outputIdx, &tag, &key, &amount,
+				&txID, &outputIdx, &tag, &key, &amount, &script,
 			); err != nil {
 				_ = rows.Close()
-				return nil, nil, err
+				return nil, nil, 0, err
 			}
+			locked, err := scriptLockedContribution(script, amount)
+			if err != nil {
+				_ = rows.Close()
+				return nil, nil, 0, err
+			}
+			scriptLocked += locked
 			delta, ok, err := consumedUtxoStakeDelta(tag, key, amount)
 			if err != nil {
 				_ = rows.Close()
-				return nil, nil, err
+				return nil, nil, 0, err
 			}
 			if ok {
 				deltas = append(deltas, delta)
 			}
 		} else if err := rows.Scan(&txID, &outputIdx); err != nil {
 			_ = rows.Close()
-			return nil, nil, err
+			return nil, nil, 0, err
 		}
 		updated[utxoIdentityKey(txID, outputIdx)] = struct{}{}
 	}
 	rowsErr := rows.Err()
 	closeErr := rows.Close()
 	if rowsErr != nil {
-		return nil, nil, rowsErr
+		return nil, nil, 0, rowsErr
 	}
 	if closeErr != nil {
-		return nil, nil, closeErr
+		return nil, nil, 0, closeErr
 	}
-	return updated, deltas, nil
+	return updated, deltas, scriptLocked, nil
 }
 
 func utxoIdentityKey(txID []byte, outputIdx uint32) string {
@@ -383,6 +392,7 @@ func (s *Store) insertUtxoModelsChecked(
 		return inserted, nil
 	}
 
+	scriptDeltas := make(map[uint64]int64, 1)
 	for start := 0; start < len(utxos); start += utxoInsertBatchSize {
 		end := min(start+utxoInsertBatchSize, len(utxos))
 		batch := utxos[start:end]
@@ -454,7 +464,11 @@ func (s *Store) insertUtxoModelsChecked(
 			}
 			utxo.ID = id
 			inserted[start+i] = true
-			var err error
+			delta, err := modelScriptLockedContribution(utxo)
+			if err != nil {
+				return nil, err
+			}
+			scriptDeltas[utxo.AddedSlot] += delta
 			if deferredRows != nil {
 				err = s.persistUtxoRelationsWithDeferredAssets(
 					ctx, db, utxo, id, deferredRows,
@@ -478,6 +492,11 @@ func (s *Store) insertUtxoModelsChecked(
 			if err := s.repairConflictedUtxo(ctx, db, utxo, deferredRows); err != nil {
 				return nil, err
 			}
+		}
+	}
+	for slot, delta := range scriptDeltas {
+		if err := s.addScriptLockedSupply(ctx, db, slot, delta); err != nil {
+			return nil, err
 		}
 	}
 	return inserted, nil
@@ -1489,6 +1508,7 @@ func (s *Store) setTransactionWithAccumulator(
 			consumedStakeDeltas := make(
 				[]stakeCredentialDelta, 0, len(transaction.Consumed()),
 			)
+			var consumedScriptLocked int64
 			uniqueConsumed := uniqueConsumedInputs(transaction)
 			for start := 0; start < len(uniqueConsumed); start += utxoSpendBatchSize {
 				end := min(start+utxoSpendBatchSize, len(uniqueConsumed))
@@ -1505,7 +1525,7 @@ func (s *Store) setTransactionWithAccumulator(
 					if err != nil {
 						return err
 					}
-					updatedRows, deltas, scanErr := scanConsumedUtxoRows(
+					updatedRows, deltas, locked, scanErr := scanConsumedUtxoRows(
 						rows,
 						true,
 					)
@@ -1513,6 +1533,7 @@ func (s *Store) setTransactionWithAccumulator(
 						return scanErr
 					}
 					updated = updatedRows
+					consumedScriptLocked += locked
 					consumedStakeDeltas = append(consumedStakeDeltas, deltas...)
 				} else if s.dialect.Name() == "sqlite" {
 					rows, err := s.queryRowsCached(
@@ -1522,13 +1543,14 @@ func (s *Store) setTransactionWithAccumulator(
 					if err != nil {
 						return err
 					}
-					updatedRows, deltas, scanErr := scanConsumedUtxoRows(
+					updatedRows, deltas, locked, scanErr := scanConsumedUtxoRows(
 						rows, true,
 					)
 					if scanErr != nil {
 						return scanErr
 					}
 					updated = updatedRows
+					consumedScriptLocked += locked
 					consumedStakeDeltas = append(consumedStakeDeltas, deltas...)
 				} else {
 					for _, ref := range batch {
@@ -1597,17 +1619,25 @@ func (s *Store) setTransactionWithAccumulator(
 					)
 				}
 			}
-			if historicalBackfill {
-				if s.dialect.Name() != "sqlite" {
-					consumedStakeDeltas, err = s.queryUtxoStakeConsumedDeltas(
-						ctx,
-						db,
-						spentRefs,
-					)
-					if err != nil {
-						return err
-					}
+			if s.dialect.Name() != "sqlite" {
+				consumedStakeDeltas, consumedScriptLocked, err = s.queryUtxoStakeConsumedDeltas(
+					ctx,
+					db,
+					spentRefs,
+				)
+				if err != nil {
+					return err
 				}
+			}
+			// Same transaction as the spends above; every spend path of
+			// this function funnels its live-to-spent rows into this one
+			// write, whichever dialect statement moved them.
+			if err := s.addScriptLockedSupply(
+				ctx, db, point.Slot, -consumedScriptLocked,
+			); err != nil {
+				return err
+			}
+			if historicalBackfill {
 				// Historical replay defers account-derived fields to the final
 				// rebuild, but it still changes the live UTxO set. Keep its
 				// running stake totals aligned with the outputs it inserts and
@@ -1622,16 +1652,6 @@ func (s *Store) setTransactionWithAccumulator(
 				return s.refreshRewardLiveStakeDeltas(
 					ctx, db, batchedStakeDeltas, point.Slot,
 				)
-			}
-			if s.dialect.Name() != "sqlite" {
-				consumedStakeDeltas, err = s.queryUtxoStakeConsumedDeltas(
-					ctx,
-					db,
-					spentRefs,
-				)
-				if err != nil {
-					return err
-				}
 			}
 			// An input this write did not actually spend still names a
 			// credential the full-scan path would have refreshed, so keep it
@@ -2231,6 +2251,17 @@ WHERE id = ?`,
 	}
 	if relationErr != nil {
 		return false, relationErr
+	}
+	if inserted {
+		delta, err := modelScriptLockedContribution(utxo)
+		if err != nil {
+			return false, err
+		}
+		if err := s.addScriptLockedSupply(
+			ctx, db, utxo.AddedSlot, delta,
+		); err != nil {
+			return false, err
+		}
 	}
 	return inserted, nil
 }

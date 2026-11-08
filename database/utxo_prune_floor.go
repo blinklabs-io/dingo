@@ -51,9 +51,14 @@ func (d *Database) ConsumedUtxoPruneFloor(txn *Txn) (uint64, error) {
 // write. Callers must not lower the floor -- rows an earlier, higher sweep
 // removed do not become restorable because a later sweep ran at a lower slot.
 func (d *Database) writeConsumedUtxoPruneFloor(slot uint64, txn *Txn) error {
-	return d.SetSyncState(
+	if err := d.SetSyncState(
 		ConsumedUtxoPruneFloorSyncKey,
 		strconv.FormatUint(slot, 10),
 		txn,
-	)
+	); err != nil {
+		return err
+	}
+	// A rollback cannot go below the floor, so script-locked supply rows
+	// older than the base row at the floor are unreachable.
+	return d.utxoStore().PruneScriptLockedSupplyBefore(slot, txn.Metadata())
 }

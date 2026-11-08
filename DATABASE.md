@@ -113,8 +113,8 @@ retain their native returning or upsert paths.
 SQLite keeps planner statistics current while the node runs. A node synced from
 genesis never ran `ANALYZE`, and without `sqlite_stat1` the planner picks
 indexes by shape alone: the batched spend `UPDATE` in `consumeUtxosBatchQuery`
-plans as a scan of `idx_utxo_deleted_payment_script (deleted_slot=?)` instead of
-a seek on `tx_id_output_idx`. `Store.OptimizePlannerStatsContext` runs `PRAGMA
+plans as a scan of a `deleted_slot`-leading index (`idx_utxo_deleted_staking_amount`)
+instead of a seek on `tx_id_output_idx`. `Store.OptimizePlannerStatsContext` runs `PRAGMA
 optimize(0x10012)` on the write connection, outside any transaction, at startup
 before block processing
 begins, after each epoch rollover commits, and once a minute in between:
@@ -3010,7 +3010,8 @@ the stored blocks as they age past the window, as it does on any node.
 |---|---|---|---|
 | `transaction` | `id`, `hash`, `block_hash`, `slot`, `block_index`, `type`, `fee`, `collateral_fee`, `ttl`, `valid`, `metadata` | PK `id`; unique `hash`; indexes `block_hash`, `slot` | One row per applied transaction body. A Dijkstra batch therefore has one row for each sub-transaction body followed by one for the enclosing body; each row uses that body's hash and a consecutive block index in ledger application order. Produced child UTxOs are keyed by the child body's hash. `block_hash` and `slot` point to the blob block. `fee` is the declared body fee; `collateral_fee` is the collateral consumed into the fee pot by a phase-2-invalid transaction (collateral inputs minus collateral return) and zero for valid transactions. The epoch fee pot sums `fee` for valid rows plus `collateral_fee` for invalid rows. `metadata` is populated only in API mode. Mithril gap-closure writes the same body-level transaction row shape while deliberately skipping input consumption. |
 | `leios_transaction_context` | `transaction_id`, `slot` | PK and FK `transaction_id -> transaction.id` `ON DELETE CASCADE`; index `idx_leios_transaction_context_slot` on `slot` | Records the parent-ledger execution slot for Musashi closure transactions whose physical transaction slot remains the certifying ranking block's slot. The cascade removes context during rollback with its transaction. |
-| `utxo` | `id`, `transaction_id`, `collateral_return_for_tx_id`, `tx_id`, `output_idx`, `payment_key`, `credential_tag`, `staking_key`, `datum_hash`, `spent_at_tx_id`, `referenced_by_tx_id`, `collateral_by_tx_id`, `added_slot`, `deleted_slot`, `amount`, `payment_script` | PK `id`; unique `(tx_id, output_idx)`; unique `collateral_return_for_tx_id`; indexes `transaction_id`, `payment_key`, `staking_key`, spend/reference/collateral tx hashes (partial, non-NULL rows only, except on MySQL), and `added_slot`; composites `idx_utxo_deleted_staking_amount` (`deleted_slot`, `credential_tag`, `staking_key`, `amount`), `idx_utxo_staking_deleted_amount` (`credential_tag`, `staking_key`, `deleted_slot`, `amount`), and `idx_utxo_deleted_payment_script` (`deleted_slot`, `payment_script`, `amount`) | Produced outputs use `transaction_id -> transaction.id`. Collateral returns use `collateral_return_for_tx_id -> transaction.id`. Inputs/reference/collateral joins are logical: `spent_at_tx_id`, `referenced_by_tx_id`, and `collateral_by_tx_id` store transaction hashes. `credential_tag`: 0 key hash, 1 script hash for stake-bearing outputs. `deleted_slot = 0` is the live-output sentinel; a nonzero value and `spent_at_tx_id` identify a spent output and back Kupo's spent-output history. The `(credential_tag, staking_key, deleted_slot, amount)` composite backs stake-credential live UTxO sums such as DRep voting-power tallying. `payment_script` is a bool set at index time from the output address type (true when the payment credential is a script hash); the `(deleted_slot, payment_script, amount)` composite backs the network script-locked supply sum (blockfrost `/network` `supply.locked`). It is derived only at write time, so a database synced before this column existed reports script-locked supply only for UTxOs created after the upgrade until it is rebuilt from chain data. |
+| `utxo` | `id`, `transaction_id`, `collateral_return_for_tx_id`, `tx_id`, `output_idx`, `payment_key`, `credential_tag`, `staking_key`, `datum_hash`, `spent_at_tx_id`, `referenced_by_tx_id`, `collateral_by_tx_id`, `added_slot`, `deleted_slot`, `amount`, `payment_script` | PK `id`; unique `(tx_id, output_idx)`; unique `collateral_return_for_tx_id`; indexes `transaction_id`, `payment_key`, `staking_key`, spend/reference/collateral tx hashes (partial, non-NULL rows only, except on MySQL), and `added_slot`; composites `idx_utxo_deleted_staking_amount` (`deleted_slot`, `credential_tag`, `staking_key`, `amount`) and `idx_utxo_staking_deleted_amount` (`credential_tag`, `staking_key`, `deleted_slot`, `amount`)) | Produced outputs use `transaction_id -> transaction.id`. Collateral returns use `collateral_return_for_tx_id -> transaction.id`. Inputs/reference/collateral joins are logical: `spent_at_tx_id`, `referenced_by_tx_id`, and `collateral_by_tx_id` store transaction hashes. `credential_tag`: 0 key hash, 1 script hash for stake-bearing outputs. `deleted_slot = 0` is the live-output sentinel; a nonzero value and `spent_at_tx_id` identify a spent output and back Kupo's spent-output history. The `(credential_tag, staking_key, deleted_slot, amount)` composite backs stake-credential live UTxO sums such as DRep voting-power tallying. `payment_script` is a bool set at index time from the output address type (true when the payment credential is a script hash); the network script-locked supply (blockfrost `/network` `supply.locked`) is the running aggregate `script_locked_supply`, not a scan of this column. A NULL `payment_script` reads as key-locked. It is derived only at write time, so a database synced before this column existed reports script-locked supply only for UTxOs created after the upgrade until it is rebuilt from chain data. |
+| `script_locked_supply` | `slot`, `amount` | PK `slot` | Running total of live script-locked lovelace: one row per slot whose commit changed the total, holding the total after that slot (`amount` is a signed 64-bit integer; an update that would leave the range `[0, 2^63-1]` fails the write instead of wrapping). No FK to `utxo`. Written in the transaction that changes the `utxo` rows by the insert and spend primitives (block apply on every path including the batch UTxO overlay, gap blocks, genesis, `CreateUtxo`, `SetUtxoDeletedAtSlot`, `MarkUtxosDeletedAtSlot`, and `DeleteUtxos` of a live row), crediting an output only when its insert created the row and debiting a spend only when its update moved a live row, using the row's stored `payment_script`. A write at a slot below the newest row also shifts every later row. Rollback keeps rows at or below the rollback slot, so created outputs removed by `ON DELETE CASCADE` need no accounting; when that leaves no row (the only row was a seed at a later slot) the base is rebuilt by a scan of the restored `utxo` rows. Raising the consumed-UTxO prune floor deletes rows older than the newest row at or below the floor. Migration 55 seeds one row at the tip slot from a full scan and drops `idx_utxo_deleted_payment_script`; ledger-state import (and so Mithril bootstrap) replaces the table with a scan at the snapshot slot once its outputs are in place. A fresh sync from genesis starts empty, which reads as zero. |
 | `utxo_collateral_input` | `utxo_id`, `transaction_hash` | PK `(utxo_id, transaction_hash)`; index `transaction_hash` | Authoritative many-to-many collateral relationship. Migration `v14` backfills one edge from each non-NULL legacy `utxo.collateral_by_tx_id`; apply and rollback maintain edges independently. |
 | `utxo_pointer` | `utxo_id`, `ptr_slot`, `ptr_tx_index`, `ptr_cert_index` | PK `utxo_id`; FK `utxo_id -> utxo.id` `ON DELETE CASCADE`; index `idx_utxo_pointer_target` (`ptr_slot`, `ptr_tx_index`, `ptr_cert_index`) | One row per output at a pointer address (address types 4 and 5). Such an address names the position of a stake registration certificate -- `(slot, transaction index in block, certificate index in transaction)` -- instead of carrying a stake credential, so the `utxo` row has no `staking_key` and the position is recorded here. The credential is resolved when stake is computed, not at write time, because it is a function of the certificate history at the slot being evaluated: a pointer may name a position no certificate occupies yet, de-registration removes the reference permanently, and Conway stops counting pointer stake altogether. The cascade is how rollback reaches these rows. Nothing validates an address's pointer payload, so a component above `int64` is dropped rather than stored or raised: no certificate can occupy such a position, and failing the write would stall ingestion of a block the network accepted. |
 | `utxo_reference_script` | `utxo_id`, `script_hash` | PK `utxo_id`; FK `utxo_id -> utxo.id` `ON DELETE CASCADE`; index `idx_utxo_reference_script_hash` (`script_hash`) | API-mode index of the script an output carries as a reference script, written when the output is created from its decoded `script_ref`, and when it is imported from a ledger-state snapshot, recovered as a consumed input, or created through `CreateUtxo`. The script is a property of the output, so re-applying it overwrites the row. Spent outputs keep their row; listings join `utxo` and keep `deleted_slot = 0`. The cascade is how rollback reaches these rows. Outputs created before migration `v45` have no row. |
@@ -3058,7 +3059,7 @@ block-transaction and policy queries become full scans of their table for the
 run, and long SQLite reads there hold back the WAL checkpoint. The run keeps
 every index its own statements read: the `(tx_id, output_idx)` key, the retained
 `idx_utxo_staking_deleted_amount`, the deleted_slot-leading
-`idx_utxo_deleted_staking_amount` and `idx_utxo_deleted_payment_script` the
+`idx_utxo_deleted_staking_amount` the
 consumed-UTxO prune filters on, `idx_transaction_slot` for the epoch fee total
 (`SumTransactionFeesInSlotRange`), the opcert lookup index, and the `asset`
 `utxo_id` index the prune's cascade uses. `BuildCatchUpIndexesContext` rebuilds
@@ -5629,7 +5630,7 @@ commits; PostgreSQL and MySQL include `deleted_slot = 0` on the primary-key
 update so a concurrent spend cannot be overwritten.
 
 The update itself carries no `deleted_slot = 0` predicate. With one, SQLite
-plans it as a search of `idx_utxo_deleted_payment_script` on `deleted_slot`
+plans it as a search of a `deleted_slot`-leading index on `deleted_slot`
 from two row IDs upwards whenever `sqlite_stat1` is absent, evaluating
 `id IN (...)` against every live row — the same whole-table pass the lookup
 change removes. Liveness is established by the lookup and checked again on
@@ -5981,15 +5982,25 @@ WHERE credential_tag = $1
 
 ### `GetScriptLockedSupply`
 
-Network script-locked supply (sum of lovelace in live UTxOs whose payment
-credential is a script), backing blockfrost `/network` `supply.locked`:
+Network script-locked supply (lovelace in live UTxOs whose payment credential
+is a script), backing blockfrost `/network` `supply.locked`. It reads the
+newest row of the `script_locked_supply` running aggregate and is zero when the
+table is empty; no `utxo` row is scanned:
 
 ```sql
-SELECT COALESCE(SUM(amount), 0) AS locked_supply
-FROM utxo
-WHERE payment_script = true
-  AND deleted_slot = 0;
+SELECT slot, amount FROM script_locked_supply ORDER BY slot DESC LIMIT 1;
 ```
+
+The value equals the sum the removed query computed, and the property test
+asserts that after every block and rollback:
+
+```sql
+SELECT amount FROM utxo WHERE payment_script = TRUE AND deleted_slot = 0;
+```
+
+`RebuildScriptLockedSupply(slot)` replaces the table with one row from that
+scan; `PruneScriptLockedSupplyBefore(slot)` drops rows older than the newest row
+at or below `slot`.
 
 ### `GetLiveUtxoLovelace`
 
@@ -5998,7 +6009,7 @@ Total lovelace of every live UTxO, with the same engine-side aggregate as
 `dingo_bigint_sum`), so no row is streamed to the caller. The ledger reads it
 once, at the Byron-to-Shelley boundary, to set the Shelley reserves to the
 maximum lovelace supply minus the translated UTxO. SQLite plans it as a scan
-of the covering index `idx_utxo_deleted_payment_script` on `deleted_slot`:
+of the `idx_utxo_deleted_staking_amount` index on `deleted_slot`:
 
 ```sql
 -- SQLite

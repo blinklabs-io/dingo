@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"math"
 	"regexp"
 	"strconv"
 	"strings"
@@ -95,6 +96,7 @@ const (
 	utxoStakingPartialIndexSchemaRelease                = "utxo-staking-partial-indexes"
 	rewardOutputCredentialPendingIndexSchemaRelease     = "reward-account-output-credential-pending-index"
 	poolSnapshotVrfKeySchemaRelease                     = "pool-snapshot-vrf-key"
+	scriptLockedSupplySchemaRelease                     = "script-locked-supply-aggregate"
 )
 
 const mithrilRewardRepairPendingKey = "mithril_reward_repair_pending"
@@ -270,6 +272,7 @@ var schemaVersions = []struct {
 		Dir:     "v54",
 	},
 	{Version: 55, Name: poolSnapshotVrfKeySchemaRelease, Dir: "v55"},
+	{Version: 56, Name: scriptLockedSupplySchemaRelease, Dir: "v56"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
@@ -388,6 +391,10 @@ func registryForDialect(dialect string) ([]Migration, error) {
 			dialect != "mysql" {
 			migration.BackfillRevision = "1"
 			migration.Backfill = utxoStakingPartialIndexBackfill
+		}
+		if version.Name == scriptLockedSupplySchemaRelease {
+			migration.BackfillRevision = "1"
+			migration.Backfill = scriptLockedSupplyBackfill
 		}
 		if version.Name == poolDepositHeldSchemaRelease {
 			migration.BackfillRevision = "1"
@@ -1980,6 +1987,11 @@ func translateSchemaSQLInSchema(
 			)
 			value = strings.ReplaceAll(
 				value,
+				"DROP INDEX IF EXISTS `idx_utxo_deleted_payment_script`",
+				"DROP INDEX `idx_utxo_deleted_payment_script` ON `utxo`",
+			)
+			value = strings.ReplaceAll(
+				value,
 				"DROP INDEX IF EXISTS `idx_asset_name_hex`",
 				"DROP INDEX `idx_asset_name_hex` ON `asset`",
 			)
@@ -2290,4 +2302,74 @@ SELECT 1 FROM sync_state WHERE sync_key = ?`), deferred.SyncStateKey).Scan(&pend
 		}
 	}
 	return BatchResult{Cursor: batch.Cursor, Done: true}, nil
+}
+
+// scriptLockedSupplyBackfill seeds script_locked_supply with the sum the
+// dropped index used to serve, at the current tip slot. It runs before the
+// contract statement drops that index, so the scan is index-assisted when the
+// index exists. A database with no live script-locked lovelace gets no row,
+// which reads as zero.
+func scriptLockedSupplyBackfill(
+	ctx context.Context,
+	batch Batch,
+) (BatchResult, error) {
+	var total uint64
+	rows, err := batch.Tx.QueryContext(ctx, batch.Rebind(
+		"SELECT amount FROM utxo WHERE payment_script = TRUE AND deleted_slot = 0",
+	))
+	if err != nil {
+		return BatchResult{}, fmt.Errorf("scan script-locked supply: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var raw sql.NullString
+		if err := rows.Scan(&raw); err != nil {
+			return BatchResult{}, err
+		}
+		if !raw.Valid || raw.String == "" {
+			continue
+		}
+		amount, err := strconv.ParseUint(raw.String, 10, 64)
+		if err != nil {
+			return BatchResult{}, fmt.Errorf(
+				"parse utxo amount %q: %w",
+				raw.String,
+				err,
+			)
+		}
+		if amount > math.MaxInt64-total {
+			return BatchResult{}, errors.New(
+				"script-locked supply exceeds int64",
+			)
+		}
+		total += amount
+	}
+	if err := rows.Err(); err != nil {
+		return BatchResult{}, err
+	}
+	if err := rows.Close(); err != nil {
+		return BatchResult{}, err
+	}
+	if total == 0 {
+		return BatchResult{Cursor: batch.Cursor, Done: true}, nil
+	}
+	var slot sql.NullInt64
+	err = batch.Tx.QueryRowContext(ctx, "SELECT slot FROM tip WHERE id = 1").
+		Scan(&slot)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return BatchResult{}, fmt.Errorf("read tip slot: %w", err)
+	}
+	// Replace rather than upsert: MySQL has no ON CONFLICT, and a resumed
+	// run must not duplicate the seed row.
+	if _, err := batch.Tx.ExecContext(
+		ctx, "DELETE FROM script_locked_supply",
+	); err != nil {
+		return BatchResult{}, fmt.Errorf("clear script-locked supply: %w", err)
+	}
+	if _, err := batch.Tx.ExecContext(ctx, batch.Rebind(
+		"INSERT INTO script_locked_supply (slot, amount) VALUES (?, ?)",
+	), slot.Int64, int64(total)); err != nil {
+		return BatchResult{}, fmt.Errorf("seed script-locked supply: %w", err)
+	}
+	return BatchResult{Cursor: batch.Cursor, Rows: 1, Done: true}, nil
 }

@@ -2251,7 +2251,7 @@ func TestQueryUtxoStakeConsumedDeltasNegatesAmounts(t *testing.T) {
 		{Hash: utxoTxIDForGroup(0, 1), Idx: 0},
 		{Hash: utxoTxIDForGroup(1, 0), Idx: 0},
 	}
-	deltas, err := store.queryUtxoStakeConsumedDeltas(ctx, store.writeDB, ids)
+	deltas, _, err := store.queryUtxoStakeConsumedDeltas(ctx, store.writeDB, ids)
 	require.NoError(t, err)
 
 	byKey := make(map[string]int64, len(deltas))

@@ -262,11 +262,6 @@ var Manifest = []Index{
 	// missing index (single full scan), but the per-batch incremental
 	// refresh cannot.
 	{
-		Name: "idx_utxo_deleted_payment_script", Table: "utxo",
-		Columns: []string{"deleted_slot", "payment_script", "amount"},
-		Notes:   "Script-locked supply", Critical: true,
-	},
-	{
 		Name: "idx_transaction_block_hash", Table: "transaction",
 		Columns: []string{"block_hash"},
 		Notes:   "Block transaction grouping", Critical: true,

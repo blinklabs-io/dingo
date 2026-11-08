@@ -3510,35 +3510,6 @@ func (q *Queries) GetScript(ctx context.Context, hash []byte) (Script, error) {
 	return i, err
 }
 
-const getScriptLockedSupply = `-- name: GetScriptLockedSupply :many
-SELECT amount
-FROM utxo
-WHERE payment_script = TRUE AND deleted_slot = 0
-`
-
-func (q *Queries) GetScriptLockedSupply(ctx context.Context) ([]sql.NullString, error) {
-	rows, err := q.db.QueryContext(ctx, getScriptLockedSupply)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []sql.NullString{}
-	for rows.Next() {
-		var amount sql.NullString
-		if err := rows.Scan(&amount); err != nil {
-			return nil, err
-		}
-		items = append(items, amount)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
 const getSyncState = `-- name: GetSyncState :one
 SELECT value
 FROM sync_state

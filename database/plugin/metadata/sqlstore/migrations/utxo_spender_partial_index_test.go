@@ -45,7 +45,7 @@ func spenderIndexDB(t *testing.T) (*sql.DB, func()) {
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	require.Len(t, registry, 55)
+	require.Len(t, registry, 56)
 	runTo := func(registry []migrations.Migration) {
 		runner := migrations.Runner{
 			DB:       db,
