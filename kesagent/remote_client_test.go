@@ -29,6 +29,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/bursa"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/kes"
 	"github.com/stretchr/testify/require"
 )
@@ -428,4 +431,89 @@ func TestRemoteClientSignDialsThroughTheBackoff(t *testing.T) {
 	_, err = c.Sign(0, []byte("header"))
 	require.NoError(t, err)
 	require.NoError(t, c.CheckReady())
+}
+
+// opCertVariant re-encodes the test certificate with another issue number,
+// KES period or cold key. The cold signature is left as it was: the client
+// only recognises a candidate here, and the node validates it fully.
+func opCertVariant(
+	t *testing.T,
+	opCert []byte,
+	issue, period uint64,
+	coldVKey []byte,
+) []byte {
+	t.Helper()
+	dec, err := bursa.DecodeOpCert(opCert)
+	require.NoError(t, err)
+	if coldVKey == nil {
+		coldVKey = dec.ColdVKey
+	}
+	out, err := cbor.Encode([]any{
+		[]any{dec.KESVKey, issue, period, dec.ColdSig},
+		coldVKey,
+	})
+	require.NoError(t, err)
+	return out
+}
+
+func TestRemoteClientOffersANewerOpCertForTheSamePool(t *testing.T) {
+	t.Parallel()
+	skeyData, vkey, opCert := testKESMaterial(t)
+	local, err := bursa.DecodeOpCert(opCert)
+	require.NoError(t, err)
+	otherCold := make([]byte, 32)
+	otherCold[0] = 1
+	newer := opCertVariant(t, opCert, local.IssueNumber+1, local.KESPeriod, nil)
+	for _, tc := range []struct {
+		name    string
+		agent   []byte
+		offered bool
+	}{
+		{"higher counter, same pool", newer, true},
+		{
+			"same counter, other bytes",
+			opCertVariant(t, opCert, local.IssueNumber, local.KESPeriod+1, nil),
+			false,
+		},
+		{
+			"higher counter, other pool",
+			opCertVariant(
+				t, opCert, local.IssueNumber+1, local.KESPeriod, otherCold,
+			),
+			false,
+		},
+		{"not a certificate", []byte{0x01, 0x02}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			client := newTestCert(t, "node")
+			a := startFakeRemoteAgent(t, client, skeyData, vkey, opCert)
+			a.admitFix = func(r *attestationResponse) { r.OpCert = tc.agent }
+			certFile, keyFile := client.writePEM(t)
+			offers := make(chan []byte, 1)
+			c, err := NewRemoteClient(RemoteConfig{
+				Address:          a.addr,
+				ClientCertFile:   certFile,
+				ClientKeyFile:    keyFile,
+				ServerSPKISHA256: a.server.spki,
+				KESVKey:          vkey,
+				OpCert:           opCert,
+				OnNewerOpCert:    func(b []byte) { offers <- b },
+			})
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = c.Close() })
+
+			// The session is refused either way: signatures are verified
+			// against the local certificate until the node reloads.
+			require.ErrorIs(t, c.Prepare(), ErrRemoteAdmission)
+			if tc.offered {
+				require.Equal(t, tc.agent, testutil.RequireReceive(
+					t, offers, time.Second, "newer certificate offered",
+				))
+				return
+			}
+			testutil.RequireNoReceive(t, offers, 20*time.Millisecond,
+				"a mismatch that cannot be a rotation is not offered")
+		})
+	}
 }

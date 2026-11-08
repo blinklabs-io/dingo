@@ -30,6 +30,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/blinklabs-io/bursa"
 )
 
 const (
@@ -87,6 +89,14 @@ type RemoteConfig struct {
 	// report this exact certificate at admission; the node has already
 	// validated its cold-key signature.
 	OpCert []byte
+	// OnNewerOpCert, when set, is called with the agent's operational
+	// certificate when admission finds one for the same cold key with a
+	// higher issue counter than OpCert: the agent's key was rotated and this
+	// node's copy of the certificate is behind. Admission still fails, since
+	// every signature is verified against OpCert; the caller decides whether
+	// to validate the newer certificate and reload with it. It runs on the
+	// admitting goroutine and must not block.
+	OnNewerOpCert func(opCert []byte)
 	// HelloTimeout bounds the dial, TLS handshake and admission. Zero uses
 	// DefaultHelloTimeout.
 	HelloTimeout time.Duration
@@ -121,6 +131,9 @@ type RemoteClient struct {
 	// its own deadline. mu guards the fields below and is held only briefly,
 	// never across network I/O.
 	turn chan struct{}
+	// localOpCert is cfg.OpCert decoded, to recognise a newer certificate
+	// for the same pool at admission; nil when it does not decode.
+	localOpCert *bursa.DecodedOpCert
 
 	mu       sync.Mutex
 	conn     net.Conn
@@ -204,6 +217,9 @@ func NewRemoteClient(cfg RemoteConfig) (*RemoteClient, error) {
 		logger: cfg.Logger,
 		pin:    pin,
 		turn:   make(chan struct{}, 1),
+	}
+	if dec, err := bursa.DecodeOpCert(cfg.OpCert); err == nil {
+		c.localOpCert = dec
 	}
 	c.tlsConfig = &tls.Config{
 		MinVersion:   tls.VersionTLS13,
@@ -479,6 +495,7 @@ func (c *RemoteClient) checkAdmission(
 		return fmt.Errorf("%w: unexpected evidence for provider %q",
 			ErrRemoteAdmission, c.cfg.Provider)
 	case !bytes.Equal(resp.OpCert, c.cfg.OpCert):
+		c.offerNewerOpCert(resp.OpCert)
 		return fmt.Errorf(
 			"%w: agent's operational certificate is not the local one",
 			ErrRemoteAdmission,
@@ -495,6 +512,25 @@ func (c *RemoteClient) checkAdmission(
 		)
 	}
 	return nil
+}
+
+// offerNewerOpCert passes the agent's certificate to OnNewerOpCert when it is
+// for the same cold key as the local one and carries a higher issue counter.
+// Anything else -- another pool's certificate, an older or equal counter, or
+// bytes that do not decode -- is only an admission failure. The caller
+// validates the certificate fully before using it; this filter only keeps a
+// mismatch that cannot be a rotation from reaching it.
+func (c *RemoteClient) offerNewerOpCert(agentOpCert []byte) {
+	if c.cfg.OnNewerOpCert == nil || c.localOpCert == nil {
+		return
+	}
+	dec, err := bursa.DecodeOpCert(agentOpCert)
+	if err != nil ||
+		!bytes.Equal(dec.ColdVKey, c.localOpCert.ColdVKey) ||
+		dec.IssueNumber <= c.localOpCert.IssueNumber {
+		return
+	}
+	c.cfg.OnNewerOpCert(append([]byte(nil), agentOpCert...))
 }
 
 // Sign implements ledger/forging.RemoteKESSigner over the remote session. It
