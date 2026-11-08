@@ -116,14 +116,28 @@ type RemoteClient struct {
 	tlsConfig *tls.Config
 	pin       []byte
 
+	// turn is held by the one caller using the connection: a sign, or a
+	// dial and admission. It is a channel so a sign can wait for it within
+	// its own deadline. mu guards the fields below and is held only briefly,
+	// never across network I/O.
+	turn chan struct{}
+
 	mu       sync.Mutex
 	conn     net.Conn
 	lastUsed time.Time
 	closed   bool
+	// lastErr is the result of the last dial and admission, which
+	// CheckReady reports; lastCheckDial is when CheckReady last started one.
+	lastErr       error
+	lastCheckDial time.Time
 
 	backoff       time.Duration
 	nextDialAfter time.Time
 }
+
+// checkReadyDialInterval bounds how often CheckReady, which a readiness probe
+// and a metrics scrape call, starts a background dial.
+const checkReadyDialInterval = 30 * time.Second
 
 // NewRemoteClient validates cfg and loads the client certificate. It does not
 // dial: the first Prepare, CheckReady or Sign does.
@@ -189,6 +203,7 @@ func NewRemoteClient(cfg RemoteConfig) (*RemoteClient, error) {
 		cfg:    cfg,
 		logger: cfg.Logger,
 		pin:    pin,
+		turn:   make(chan struct{}, 1),
 	}
 	c.tlsConfig = &tls.Config{
 		MinVersion:   tls.VersionTLS13,
@@ -243,60 +258,107 @@ func (c *RemoteClient) verifyServerPin(cs tls.ConnectionState) error {
 // Prepare opens and admits a session ahead of a leader slot, unless a fresh
 // one is already open, so that Sign does not pay for the dial, handshake and
 // admission inside its timeout. A failure here is reported early, before the
-// slot; Sign retries the connection itself.
+// slot; Sign retries the connection itself. Prepare honours the reconnect
+// backoff; Sign does not.
 func (c *RemoteClient) Prepare() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	ctx, cancel := context.WithTimeout(
 		context.Background(),
 		c.cfg.HelloTimeout,
 	)
 	defer cancel()
-	return c.freshSessionLocked(ctx)
+	if err := c.acquire(ctx); err != nil {
+		return err
+	}
+	defer c.release()
+	return c.ensureSession(ctx, true)
 }
 
-// CheckReady verifies that the agent is reachable and admits this node. It
-// keeps the admitted session for a following Sign and never requests a
-// signature.
+// CheckReady reports whether the agent was reachable and admitted this node
+// on the last attempt, without waiting on the network: a readiness probe and
+// a metrics scrape call it. When no fresh session is open it starts a
+// background Prepare, at most once per checkReadyDialInterval, so the answer
+// stays current between leader slots. It never requests a signature.
 func (c *RemoteClient) CheckReady() error {
-	return c.Prepare()
-}
-
-// freshSessionLocked leaves an admitted session open that was last used
-// within SessionFreshFor, dropping and redialling an older one. Caller holds
-// c.mu.
-func (c *RemoteClient) freshSessionLocked(ctx context.Context) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.closed {
 		return ErrClosed
 	}
-	if c.conn != nil && time.Since(c.lastUsed) >= c.cfg.SessionFreshFor {
-		c.dropLocked()
-	}
-	return c.connectLocked(ctx)
-}
-
-// connectLocked dials, completes the pinned TLS 1.3 handshake and the
-// admission exchange when no session is open. Caller holds c.mu.
-func (c *RemoteClient) connectLocked(ctx context.Context) error {
-	if c.closed {
-		return ErrClosed
-	}
-	if c.conn != nil {
+	if c.freshLocked() {
 		return nil
 	}
-	if !c.nextDialAfter.IsZero() && time.Now().Before(c.nextDialAfter) {
+	if time.Since(c.lastCheckDial) >= checkReadyDialInterval {
+		c.lastCheckDial = time.Now()
+		go func() { _ = c.Prepare() }()
+	}
+	return c.lastErr
+}
+
+func (c *RemoteClient) acquire(ctx context.Context) error {
+	select {
+	case c.turn <- struct{}{}:
+		return nil
+	case <-ctx.Done():
 		return fmt.Errorf(
-			"kesagent: remote agent reconnect backoff active until %s",
-			c.nextDialAfter.Format(time.RFC3339),
+			"kesagent: remote agent connection busy: %w",
+			ctx.Err(),
 		)
 	}
+}
+
+func (c *RemoteClient) release() { <-c.turn }
+
+// freshLocked reports whether an admitted session is open and was last used
+// within SessionFreshFor. Caller holds c.mu.
+func (c *RemoteClient) freshLocked() bool {
+	return c.conn != nil && time.Since(c.lastUsed) < c.cfg.SessionFreshFor
+}
+
+// ensureSession leaves a fresh admitted session open, dropping an older one
+// and dialling a new one. The caller holds the turn; the dial runs without
+// c.mu, so Close and CheckReady never wait on the network. respectBackoff
+// skips the dial while the reconnect backoff is active.
+func (c *RemoteClient) ensureSession(
+	ctx context.Context,
+	respectBackoff bool,
+) error {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return ErrClosed
+	}
+	if c.freshLocked() {
+		c.mu.Unlock()
+		return nil
+	}
+	c.dropLocked()
+	if respectBackoff && !c.nextDialAfter.IsZero() &&
+		time.Now().Before(c.nextDialAfter) {
+		until := c.nextDialAfter
+		c.mu.Unlock()
+		return fmt.Errorf(
+			"kesagent: remote agent reconnect backoff active until %s",
+			until.Format(time.RFC3339),
+		)
+	}
+	c.mu.Unlock()
+
 	conn, err := c.admit(ctx)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if err != nil {
 		c.recordDialFailureLocked()
+		c.lastErr = err
 		return err
+	}
+	if c.closed {
+		_ = conn.Close()
+		return ErrClosed
 	}
 	c.conn = conn
 	c.lastUsed = time.Now()
+	c.lastErr = nil
 	c.backoff = 0
 	c.nextDialAfter = time.Time{}
 	return nil
@@ -450,38 +512,53 @@ func (c *RemoteClient) Sign(
 			len(message),
 		)
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	defer func() {
 		if err != nil {
 			c.cfg.Metrics.incSignFailure()
 		}
 	}()
+	// The deadline covers the wait for the connection too: a sign at a
+	// leader slot must not outlast SignTimeout behind a slow Prepare.
 	ctx, cancel := context.WithTimeout(
 		context.Background(),
 		c.cfg.SignTimeout,
 	)
 	defer cancel()
 	start := time.Now()
-	if err := c.freshSessionLocked(ctx); err != nil {
+	if err := c.acquire(ctx); err != nil {
 		return nil, err
 	}
+	defer c.release()
+	// A sign ignores the reconnect backoff: a leader slot is worth a dial.
+	if err := c.ensureSession(ctx, false); err != nil {
+		return nil, err
+	}
+	c.mu.Lock()
+	conn := c.conn
+	c.mu.Unlock()
+	if conn == nil {
+		return nil, ErrClosed
+	}
 	deadline, _ := ctx.Deadline()
-	if err := c.conn.SetDeadline(deadline); err != nil {
-		c.dropLocked()
+	if err := conn.SetDeadline(deadline); err != nil {
+		c.dropConn(conn)
 		return nil, fmt.Errorf("kesagent: set sign deadline: %w", err)
 	}
 	req := SignRequest{Type: "sign_request", Period: period, Message: message}
-	if err := writeFrame(c.conn, MaxSignFrameLen, req); err != nil {
-		c.dropLocked()
+	if err := writeFrame(conn, MaxSignFrameLen, req); err != nil {
+		c.dropConn(conn)
 		return nil, fmt.Errorf("kesagent: send sign request: %w", err)
 	}
 	var resp SignResponse
-	if err := readFrame(c.conn, MaxSignFrameLen, &resp); err != nil {
-		c.dropLocked()
+	if err := readFrame(conn, MaxSignFrameLen, &resp); err != nil {
+		c.dropConn(conn)
 		return nil, fmt.Errorf("kesagent: read sign response: %w", err)
 	}
-	c.lastUsed = time.Now()
+	c.mu.Lock()
+	if c.conn == conn {
+		c.lastUsed = time.Now()
+	}
+	c.mu.Unlock()
 	if err := validateSignResponse(
 		c.cfg.KESVKey,
 		c.cfg.OpCertStartPeriod,
@@ -492,7 +569,7 @@ func (c *RemoteClient) Sign(
 		// A refusal (resp.Error) leaves the session usable; anything else
 		// means the agent cannot be trusted on this session.
 		if resp.Error == "" {
-			c.dropLocked()
+			c.dropConn(conn)
 		}
 		return nil, err
 	}
@@ -508,6 +585,15 @@ func (c *RemoteClient) Close() error {
 	c.closed = true
 	c.dropLocked()
 	return nil
+}
+
+// dropConn closes conn if it is still the open session.
+func (c *RemoteClient) dropConn(conn net.Conn) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.conn == conn {
+		c.dropLocked()
+	}
 }
 
 func (c *RemoteClient) dropLocked() {
