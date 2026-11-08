@@ -7689,7 +7689,10 @@ Each tracked peer keeps a bounded recent frontier of `(slot, hash)` points
 (`PeerChainTip.observedPoints`, in lockstep with the `observedSlots` used for
 density), trimmed to the window and on rollback. That rolling frontier ranks
 peers before a fork is available locally; it is not the authoritative
-fork-choice measurement. When an incoming header conflicts with the primary
+fork-choice measurement. Both views live in append-only windows
+(`frontierWindow`) whose written prefix is never modified, so a staged
+admission frontier shares the committed peer's history and costs O(1) per
+header; the Limit on Eagerness delivery entries keep private copies. When an incoming header conflicts with the primary
 chain, the handler discards it through the in-memory duplicate and stale-header
 checks first, then asks whether the header point is still on the authoritative
 primary chain (`headerAlreadyOnPrimaryChain`). A historical replay can be behind
