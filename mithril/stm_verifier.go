@@ -1057,7 +1057,7 @@ func stmIsLotteryWon(
 	}
 	q := new(big.Rat).SetFrac(new(big.Int).Set(evMax), denominator)
 	c := new(big.Rat)
-	c.SetFloat64(math.Log1p(-phiF))
+	c.SetFloat64(math.Log(1 - phiF))
 	w := new(big.Rat).SetFrac(
 		new(big.Int).SetUint64(stake),
 		new(big.Int).SetUint64(totalStake),
