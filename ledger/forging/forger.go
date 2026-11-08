@@ -236,6 +236,7 @@ type BlockForger struct {
 	// Production mode components
 	creds            *PoolCredentials
 	leaderChecker    LeaderChecker
+	slotArbiter      SlotArbiter
 	blockBuilder     BlockBuilder
 	blockBroadcaster BlockBroadcaster
 	confirmedTxs     ConfirmedTxRemover
@@ -642,8 +643,13 @@ type ForgerConfig struct {
 
 	// Production mode configuration. Credentials must have passed
 	// ValidateKESPeriod so the forger can enforce the genesis KES lifetime.
-	Credentials      *PoolCredentials
-	LeaderChecker    LeaderChecker
+	Credentials   *PoolCredentials
+	LeaderChecker LeaderChecker
+	// SlotArbiter, when set, decides a slot this pool leads together with
+	// another pool the same node forges for. Only one block per slot can stay
+	// on chain, so the node forges for one of them. Nil forges every leader
+	// slot.
+	SlotArbiter      SlotArbiter
 	BlockBuilder     BlockBuilder
 	BlockBroadcaster BlockBroadcaster
 	ConfirmedTxs     ConfirmedTxRemover
@@ -840,6 +846,7 @@ func NewBlockForger(cfg ForgerConfig) (*BlockForger, error) {
 		slotDuration:               cfg.SlotDuration,
 		creds:                      cfg.Credentials,
 		leaderChecker:              cfg.LeaderChecker,
+		slotArbiter:                cfg.SlotArbiter,
 		blockBuilder:               cfg.BlockBuilder,
 		blockBroadcaster:           cfg.BlockBroadcaster,
 		confirmedTxs:               cfg.ConfirmedTxs,
@@ -1621,6 +1628,21 @@ func (f *BlockForger) checkAndForgeProduction(ctx context.Context) error {
 		)
 		if f.metrics != nil {
 			f.metrics.forgeNotLeader.Inc()
+		}
+		return nil
+	}
+
+	// Another pool this node forges for may lead the same slot. Yielding to
+	// it is not a lost slot: the node's block for the slot is the other
+	// pool's, so it is counted apart from missed leader slots.
+	if yield, winner := f.yieldSlotSafe(currentSlot); yield {
+		f.logger.Info(
+			"forge skip: another pool of this node leads the slot with a better tiebreaker",
+			"slot", currentSlot,
+			"winning_pool", winner,
+		)
+		if f.metrics != nil {
+			f.metrics.forgeYieldedToOwnPool.Inc()
 		}
 		return nil
 	}
@@ -3889,6 +3911,32 @@ func (f *BlockForger) checkLeaderSafe(slot uint64) (isLeader bool) {
 		}
 	}()
 	return f.leaderChecker.ShouldProduceBlock(slot)
+}
+
+// SlotArbiter chooses which of a node's pools forges a slot that several of
+// them lead.
+type SlotArbiter interface {
+	// YieldSlot reports whether the pool asking should not forge slot,
+	// because another pool of the same node leads it and wins the tiebreak,
+	// and which pool that is.
+	YieldSlot(slot uint64) (yield bool, winner string)
+}
+
+// yieldSlotSafe calls the pluggable SlotArbiter, recovering a panic. A
+// recovered panic forges: the arbiter only prevents a second block of this
+// node's own, so failing open costs at most one extra block in a slot both
+// pools lead, while failing closed would lose the slot.
+func (f *BlockForger) yieldSlotSafe(slot uint64) (yield bool, winner string) {
+	if f.slotArbiter == nil {
+		return false, ""
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			yield, winner = false, ""
+			f.reportForgeCallbackPanic("slot_arbiter", r)
+		}
+	}()
+	return f.slotArbiter.YieldSlot(slot)
 }
 
 // validateForgedBlockSafe calls the pluggable BlockValidator,
