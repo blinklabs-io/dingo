@@ -24,12 +24,14 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/governance"
 	"github.com/blinklabs-io/dingo/ledger/snapshot"
@@ -159,6 +161,8 @@ type boundaryEraCase struct {
 	headerMajor uint
 	// babbageBody encodes the boundary block as Babbage instead of Conway.
 	babbageBody bool
+	// blockSlot overrides the default first slot of epoch 1.
+	blockSlot uint64
 	// conwaySource starts the ledger in Conway with Conway parameters whose
 	// major is pparamsMajor, with Dijkstra enabled. The boundary block is
 	// Dijkstra when dijkstraBody is set and Conway otherwise. It needs
@@ -277,9 +281,13 @@ func newBoundaryEraLedger(
 		prevHash = tipBlock.Hash()
 		fallthrough
 	default:
+		blockSlot := uint64(boundaryEraTestEpochLength + 1)
+		if tc.blockSlot != 0 {
+			blockSlot = tc.blockSlot
+		}
 		block = boundaryEraBlock(
 			t, tc.babbageBody, headerMajor,
-			tc.votingBlocks+1, boundaryEraTestEpochLength+1, prevHash,
+			tc.votingBlocks+1, blockSlot, prevHash,
 		)
 	}
 
@@ -586,6 +594,31 @@ func TestTrustedReplayBoundaryEraFollowsBlock(t *testing.T) {
 		assert.Equal(t, eras.BabbageEraDesc.Id, ls.currentEra.Id)
 		assert.Equal(t, uint64(1), ls.currentEpoch.EpochId)
 	})
+}
+
+func TestSparseBoundaryDoesNotPublishEpochTransition(t *testing.T) {
+	t.Parallel()
+
+	ls, block := newBoundaryEraLedger(t, boundaryEraCase{
+		pparamsMajor: 8,
+		babbageBody:  true,
+		blockSlot:    3*boundaryEraTestEpochLength + 1,
+	})
+	bus := newTestEventBus(t, nil)
+	ls.config.EventBus = bus
+	_, events := bus.Subscribe(event.EpochTransitionEventType)
+
+	results := make(chan readChainResult, 1)
+	results <- readChainResult{blocks: []gledger.Block{block}}
+	close(results)
+	require.NoError(t, ls.ledgerProcessBlocksFromSource(t.Context(), results))
+	require.Equal(t, uint64(3), ls.currentEpoch.EpochId)
+	testutil.RequireNoReceive(
+		t,
+		events,
+		50*time.Millisecond,
+		"a sparse rollover must not publish a normal epoch transition",
+	)
 }
 
 // TestRefusedBoundaryReleasesValidationTransition pins that refusing a

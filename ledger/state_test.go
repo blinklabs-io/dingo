@@ -7871,6 +7871,8 @@ func TestEpochRolloverJumpSkipsNewEpochEffects(t *testing.T) {
 	require.NotNil(t, result)
 	require.Equal(t, targetEpoch.EpochId, result.NewCurrentEpoch.EpochId)
 	require.Equal(t, targetEpoch.StartSlot, result.NewCurrentEpoch.StartSlot)
+	require.True(t, result.epochEffectsSkipped,
+		"a non-successor signal must suppress boundary-event consumers")
 	require.Empty(t, captures,
 		"a non-successor NEWEPOCH signal must not run SNAP or other EPOCH effects")
 	require.Len(t, result.NewEpochCache, len(beforeEpochs)+1)
@@ -7912,6 +7914,7 @@ func TestEpochRolloverJumpSkipsNewEpochEffects(t *testing.T) {
 		return rolloverErr
 	}))
 	require.Equal(t, nextTarget.EpochId, nextResult.NewCurrentEpoch.EpochId)
+	require.True(t, nextResult.epochEffectsSkipped)
 	require.Empty(t, captures,
 		"a later epoch must not resume effects after the ledger label was skipped")
 	require.Equal(t, ls.currentEpoch.EpochId,

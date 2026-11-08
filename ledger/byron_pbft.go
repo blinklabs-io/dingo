@@ -983,23 +983,23 @@ func (ls *LedgerState) validateByronShelleyTransition(
 	ctx context.Context,
 	newEpoch uint64,
 	blockEraID uint,
-) (uint64, error) {
+) (uint64, bool, error) {
 	entry, ok := ls.eraShape().EraForID(ledgerbyron.EraIdByron)
 	if !ok || entry.NextEraTrigger.Kind != hardfork.TriggerAtVersion {
-		return newEpoch, nil
+		return newEpoch, false, nil
 	}
 	state, err := ls.byronPBFTStateAtTip(ctx, ls.Tip())
 	if err != nil {
-		return 0, fmt.Errorf("check Byron transition: %w", err)
+		return 0, false, fmt.Errorf("check Byron transition: %w", err)
 	}
 	// A state rebuilt from a trusted start after genesis cannot see the
 	// candidate that start inherited, so it has no basis to refuse.
 	if !state.update.Initialized() || !state.update.Complete() {
-		return newEpoch, nil
+		return newEpoch, false, nil
 	}
 	config, err := ls.byronPBFTConfig()
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	//nolint:gosec // a Byron protocol major version is a Word16
 	major := uint16(entry.NextEraTrigger.Version)
@@ -1014,16 +1014,16 @@ func (ls *LedgerState) validateByronShelleyTransition(
 		newEpoch,
 		blockEraID != ledgerbyron.EraIdByron,
 	); err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	transitionEpoch, known := state.update.ShelleyTransitionEpoch(
 		updateConfig,
 		major,
 	)
 	if !known {
-		return newEpoch, nil
+		return newEpoch, false, nil
 	}
-	return transitionEpoch, nil
+	return transitionEpoch, true, nil
 }
 
 // byronBlockPParams returns the protocol parameters a block validates

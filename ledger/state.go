@@ -2482,7 +2482,10 @@ type EpochRolloverResult struct {
 	// approach, which would then never clear
 	// LedgerState.syntheticV2CostModel on a real network.
 	RealV2CostModelObserved bool
-	newLedgerEpoch          uint64
+	// epochEffectsSkipped is true when a non-successor signal advances the
+	// consensus epoch without running NEWEPOCH boundary effects.
+	epochEffectsSkipped bool
+	newLedgerEpoch      uint64
 }
 
 func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
@@ -8829,6 +8832,44 @@ func epochAtID(current models.Epoch, targetEpochID uint64) (models.Epoch, error)
 	)
 }
 
+// byronTransitionEpochs projects a version-triggered Byron-to-Shelley
+// boundary using Byron geometry up to the adoption slot and Shelley geometry
+// afterwards. The transition is learned from Byron update state, so it may not
+// be present in the captured hard-fork summary yet.
+func (ls *LedgerState) byronTransitionEpochs(
+	current models.Epoch,
+	transitionEpochID uint64,
+	targetSlot uint64,
+) (models.Epoch, models.Epoch, error) {
+	transitionEpoch, err := epochAtID(current, transitionEpochID)
+	if err != nil {
+		return models.Epoch{}, models.Epoch{}, err
+	}
+	successor, ok := ls.eraById(current.EraId + 1)
+	if !ok || successor == nil {
+		return models.Epoch{}, models.Epoch{}, fmt.Errorf(
+			"missing successor era for Byron transition epoch %d",
+			transitionEpochID,
+		)
+	}
+	slotLength, epochLength, err := successor.EpochLengthFunc(
+		ls.config.CardanoNodeConfig,
+	)
+	if err != nil {
+		return models.Epoch{}, models.Epoch{}, fmt.Errorf(
+			"resolve successor epoch geometry: %w", err,
+		)
+	}
+	transitionEpoch.EraId = successor.Id
+	transitionEpoch.SlotLength = slotLength
+	transitionEpoch.LengthInSlots = epochLength
+	targetEpoch, err := epochAtSlot(transitionEpoch, targetSlot)
+	if err != nil {
+		return models.Epoch{}, models.Epoch{}, err
+	}
+	return transitionEpoch, targetEpoch, nil
+}
+
 // rolloverSummaryFrom builds the hard-fork summary a rollover resolves its
 // epochs against from the snapshot pair it captured with the rollover's other
 // inputs, so a rollback or publication racing the rollover cannot mix epoch
@@ -9067,7 +9108,7 @@ func (ls *LedgerState) processBlocksFromSource(
 			}
 
 			if snapshotEra.Id == byron.EraIdByron && boundaryShouldValidate {
-				byronTransitionEpoch, transitionErr := ls.validateByronShelleyTransition(
+				byronTransitionEpoch, transitionKnown, transitionErr := ls.validateByronShelleyTransition(
 					ctx,
 					transitionEpoch.EpochId,
 					nextEpochEraId,
@@ -9075,14 +9116,35 @@ func (ls *LedgerState) processBlocksFromSource(
 				if transitionErr != nil {
 					return rejectBoundaryBlock(transitionErr, "byron transition")
 				}
-				if byronTransitionEpoch != transitionEpoch.EpochId {
-					transitionEpoch, err = epochAtID(
+				if transitionKnown {
+					if len(cachedNextBatch) == 0 {
+						completeReadResult()
+						return errors.New(
+							"byron transition has no boundary block",
+						)
+					}
+					transitionEpoch, targetEpoch, err = ls.byronTransitionEpochs(
 						snapshotEpoch,
 						byronTransitionEpoch,
+						cachedNextBatch[0].SlotNumber(),
 					)
 					if err != nil {
 						return err
 					}
+					// The corrected epoch can change whether the boundary is
+					// allowed to enter a second scheduled era.
+					boundary := cachedNextBatch[0]
+					boundaryBodyEraId = uint(boundary.Era().Id)
+					headerMajor, headerMajorKnown := HeaderProtocolMajor(
+						boundary.Header(),
+					)
+					nextEpochEraId, boundaryAllowsTwoEraTransition = ls.boundaryEraForBlock(
+						snapshotEra.Id,
+						boundaryBodyEraId,
+						headerMajor,
+						headerMajorKnown,
+						targetEpoch.EpochId,
+					)
 				}
 			}
 
@@ -9343,7 +9405,9 @@ func (ls *LedgerState) processBlocksFromSource(
 			}
 
 			// Emit epoch transition event (coordinated with slot clock)
-			if rolloverResult != nil && ls.config.EventBus != nil {
+			if rolloverResult != nil &&
+				!rolloverResult.epochEffectsSkipped &&
+				ls.config.EventBus != nil {
 				newEpochId := rolloverResult.NewCurrentEpoch.EpochId
 
 				// Always emit block-based epoch transitions. Even if the

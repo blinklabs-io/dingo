@@ -345,6 +345,28 @@ func newUnseededByronShelleyBoundaryLedgerFrom(
 	byronEpochLength uint,
 ) (*LedgerState, gledger.Block, gledger.Block) {
 	t.Helper()
+	return newUnseededByronShelleyBoundaryLedgerFromBlocks(
+		t,
+		cfg,
+		[]gledger.Block{lastByron},
+		firstShelley,
+		byronEpoch,
+		byronEpochStart,
+		byronEpochLength,
+	)
+}
+
+func newUnseededByronShelleyBoundaryLedgerFromBlocks(
+	t *testing.T,
+	cfg *cardano.CardanoNodeConfig,
+	byronBlocks []gledger.Block,
+	firstShelley gledger.Block,
+	byronEpoch, byronEpochStart uint64,
+	byronEpochLength uint,
+) (*LedgerState, gledger.Block, gledger.Block) {
+	t.Helper()
+	require.NotEmpty(t, byronBlocks)
+	lastByron := byronBlocks[len(byronBlocks)-1]
 
 	db := newTestDB(t)
 	cm, err := chain.NewManager(context.Background(), db, nil)
@@ -352,18 +374,26 @@ func newUnseededByronShelleyBoundaryLedgerFrom(
 	require.NoError(t, cm.SetLedger(testSecurityParamLedger{
 		securityParam: 2,
 	}))
-	rawBlocks := []chain.RawBlock{{
-		Slot:        lastByron.SlotNumber(),
-		Hash:        lastByron.Hash().Bytes(),
-		BlockNumber: lastByron.BlockNumber(),
-		Type:        1,
-		Cbor:        lastByron.Cbor(),
-	}}
+	rawBlocks := make([]chain.RawBlock, 0, len(byronBlocks)+1)
+	for _, block := range byronBlocks {
+		var prevHash []byte
+		if len(byronBlocks) > 1 {
+			prevHash = block.PrevHash().Bytes()
+		}
+		rawBlocks = append(rawBlocks, chain.RawBlock{
+			Slot:        block.SlotNumber(),
+			Hash:        block.Hash().Bytes(),
+			BlockNumber: block.BlockNumber(),
+			Type:        uint(block.Type()),
+			PrevHash:    prevHash,
+			Cbor:        block.Cbor(),
+		})
+	}
 	rawBlocks = append(rawBlocks, chain.RawBlock{
 		Slot:        firstShelley.SlotNumber(),
 		Hash:        firstShelley.Hash().Bytes(),
 		BlockNumber: firstShelley.BlockNumber(),
-		Type:        2,
+		Type:        uint(firstShelley.Type()),
 		PrevHash:    firstShelley.PrevHash().Bytes(),
 		Cbor:        firstShelley.Cbor(),
 	})
@@ -458,6 +488,53 @@ func TestByronShelleyBoundaryProcessesFirstShelleyBlockWithPParams(
 	assert.Equal(t, firstShelley.SlotNumber(), ls.currentTip.Point.Slot)
 }
 
+func TestDelayedByronShelleyBoundaryDoesNotEnterScheduledAllegra(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	const (
+		shelleyTransitionSlot = uint64(86_400)
+		shelleyEpochLength    = uint64(432_000)
+	)
+	block := loadBoundaryBlock(t, "preprod-shelley-first-86400.cbor", 2)
+	shelleyBlock, ok := block.(*shelley.ShelleyBlock)
+	require.True(t, ok)
+	shelleyBlock.BlockHeader.Body.Slot = shelleyTransitionSlot +
+		shelleyEpochLength + 5
+	shelleyBlock.BlockHeader.Body.ProtoMajorVersion = uint64(
+		eras.AllegraEraDesc.MinMajorVersion,
+	)
+	headerCbor, err := cbor.EncodeGeneric(shelleyBlock.BlockHeader)
+	require.NoError(t, err)
+	shelleyBlock.BlockHeader.SetCbor(headerCbor)
+	blockCbor, err := cbor.EncodeGeneric(shelleyBlock)
+	require.NoError(t, err)
+	shelleyBlock.SetCbor(blockCbor)
+
+	cfg := loadPreprodNodeConfig(t)
+	allegraEpoch := uint64(6)
+	cfg.TestAllegraHardForkAtEpoch = &allegraEpoch
+	ls, _, delayedShelley := newUnseededByronShelleyBoundaryLedgerFromBlocks(
+		t,
+		cfg,
+		loadPreprodByronChain(t),
+		shelleyBlock,
+		3,
+		64_800,
+		21_600,
+	)
+	seedBoundaryFixtureLiveUtxo(t, ls)
+
+	results := make(chan readChainResult, 1)
+	results <- readChainResult{blocks: []gledger.Block{delayedShelley}}
+	close(results)
+	require.NoError(t, ls.ledgerProcessBlocksFromSource(t.Context(), results))
+	require.Equal(t, uint64(5), ls.currentEpoch.EpochId)
+	require.Equal(t, eras.ShelleyEraDesc.Id, ls.currentEpoch.EraId)
+	require.Equal(t, eras.ShelleyEraDesc.Id, ls.currentEra.Id)
+}
+
 func TestEpochAtSlotForRolloverUsesKnownSuccessorGeometry(t *testing.T) {
 	t.Parallel()
 
@@ -493,6 +570,39 @@ func TestEpochAtSlotForRolloverUsesKnownSuccessorGeometry(t *testing.T) {
 	require.Equal(t, uint64(209), target.EpochId)
 	require.Equal(t, transitionSlot+shelleyEpochSize, target.StartSlot)
 	require.Equal(t, uint(shelleyEpochSize), target.LengthInSlots)
+	require.Equal(t, eras.ShelleyEraDesc.Id, target.EraId)
+}
+
+func TestByronTransitionEpochsUsesSuccessorGeometryWhenUnknown(t *testing.T) {
+	t.Parallel()
+
+	ls, _, _ := newByronShelleyBoundaryLedger(t)
+	const (
+		transitionEpoch  uint64 = 208
+		transitionSlot   uint64 = 4_492_800
+		shelleyEpochSize uint64 = 432_000
+	)
+	current := models.Epoch{
+		EpochId:       206,
+		StartSlot:     4_449_600,
+		SlotLength:    20_000,
+		LengthInSlots: 21_600,
+		EraId:         eras.ByronEraDesc.Id,
+	}
+	ls.transitionInfo = hardfork.NewTransitionUnknown()
+
+	transition, target, err := ls.byronTransitionEpochs(
+		current,
+		transitionEpoch,
+		transitionSlot+shelleyEpochSize+5,
+	)
+	require.NoError(t, err)
+	require.Equal(t, transitionEpoch, transition.EpochId)
+	require.Equal(t, transitionSlot, transition.StartSlot)
+	require.Equal(t, eras.ShelleyEraDesc.Id, transition.EraId)
+	require.Equal(t, uint(shelleyEpochSize), transition.LengthInSlots)
+	require.Equal(t, uint64(209), target.EpochId)
+	require.Equal(t, transitionSlot+shelleyEpochSize, target.StartSlot)
 	require.Equal(t, eras.ShelleyEraDesc.Id, target.EraId)
 }
 
