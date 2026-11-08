@@ -3121,3 +3121,54 @@ func TestRun_WritesBlockNoncesBelowEndSlot(t *testing.T) {
 		})
 	}
 }
+
+// A checkpoint on the first block of a Byron epoch shares its slot with the
+// epoch boundary block before it, so the checkpoint must be resolved by its
+// index rather than by slot.
+func TestRun_ResumesFromCheckpointSharingEbbSlot(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	blocks, err := testfixtures.GenerateConwayChainAt(1, 1, 2)
+	require.NoError(t, err)
+	ebbHash := bytes.Repeat([]byte{0xeb}, 32)
+	require.NoError(t, db.BlockCreate(models.Block{
+		ID:   database.BlockInitialIndex,
+		Slot: blocks[0].SlotNumber(),
+		Hash: ebbHash,
+		Cbor: []byte{0x80},
+		Type: 0,
+	}, nil))
+	for i, block := range blocks {
+		require.NoError(t, db.BlockCreate(models.Block{
+			ID:     database.BlockInitialIndex + 1 + uint64(i),
+			Slot:   block.SlotNumber(),
+			Hash:   block.Hash().Bytes(),
+			Number: block.BlockNumber(),
+			Cbor:   block.Cbor(),
+			Type:   uint(block.Type()),
+		}, nil))
+	}
+
+	now := time.Now()
+	lastIndex := database.BlockInitialIndex + 1
+	cp := &models.BackfillCheckpoint{
+		Phase:         BackfillPhase,
+		LastSlot:      blocks[0].SlotNumber(),
+		LastIndexID:   &lastIndex,
+		LastBlockHash: blocks[0].Hash().Bytes(),
+		TotalSlots:    blocks[1].SlotNumber(),
+		StartedAt:     now,
+		UpdatedAt:     now,
+	}
+	require.NoError(t, db.Metadata().SetBackfillCheckpoint(cp, nil))
+
+	bf := NewBackfill(db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	require.NoError(t, bf.Run(context.Background()))
+
+	stored, err := db.Metadata().GetBackfillCheckpoint(BackfillPhase, nil)
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	require.True(t, stored.Completed)
+	require.Equal(t, blocks[1].SlotNumber(), stored.LastSlot)
+}
