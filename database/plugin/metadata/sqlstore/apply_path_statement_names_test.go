@@ -101,7 +101,7 @@ INSERT INTO governance_proposal (
 			return removeDrepDelegator(ctx, db, 0, drep, 0, stake, 11)
 		})},
 		{"removeAllDrepDelegators", inWrite(func(ctx context.Context, db queryer) error {
-			return removeAllDrepDelegators(ctx, db, 0, drep, 12)
+			return removeAllDrepDelegators(ctx, db, 0, drep, 12, 10)
 		})},
 		{"recordDrepExpiry", inWrite(func(ctx context.Context, db queryer) error {
 			return recordDrepExpiry(ctx, db, 0, drep, 10, 1, 21)
