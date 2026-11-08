@@ -112,10 +112,26 @@ func fetchWithCheckpointedPrefixFailure(
 			"failed fetch must exit before cache cleanup",
 		)
 	}()
+	checkpointResult := make(chan error, 1)
 	testutil.WaitForCondition(t, func() bool {
+		select {
+		case err := <-result:
+			checkpointResult <- fmt.Errorf("fetch exited before two durable chunk checkpoints: %v", err)
+			return true
+		default:
+		}
 		done, err := cache.GetDoneAccountChunkHashes("preview", epoch)
-		return err == nil && len(done) == 2
+		if err != nil {
+			checkpointResult <- fmt.Errorf("read durable chunk checkpoints: %w", err)
+			return true
+		}
+		if len(done) != 2 {
+			return false
+		}
+		checkpointResult <- nil
+		return true
 	}, testutil.AsyncWait, "successful chunks must checkpoint before the other chunk fails")
+	require.NoError(t, <-checkpointResult)
 	allowFailure()
 	return testutil.RequireReceive(
 		t,
