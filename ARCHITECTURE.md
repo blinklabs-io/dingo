@@ -8958,39 +8958,21 @@ The `chainsync.State` tracks multiple concurrent chainsync clients:
   plateau is a ledger-application backlog, not a chainsync stall, so the healthy
   connection is left running and the condition is logged at INFO instead of
   recycling (recycling cannot advance the applied tip and only churns the
-  connection). The "peers are ahead" comparison reads a peer's DELIVERED
-  frontier. A peer that has delivered no header has that frontier pinned at the
-  point its session intersected at, which immediately after a plateau resync is
-  the stalled local tip itself, so comparing against it would disarm this
-  watchdog exactly when it has just acted. While such a peer is still awaiting
-  its first header (`PeerChainTip.AwaitingFirstHeader`,
-  `chainselection/peer_tip.go`) the recycler therefore falls back to that peer's
-  ADVERTISED tip, but only when the advertised tip is higher and only when the
-  advertising peer IS the connection this plateau would recycle
-  (`advertisesForOwnConnection`, compared by `ConnectionId` rather than by
-  rendered address, so a replacement connection reusing a listen port does not
-  inherit a stale peer's claim). An untrusted advertised tip can therefore only
-  ever be spent on its own connection, and the substituted value also flows into
-  `isLedgerApplicationBacklog` as the best-peer tip, so it sets the
-  backlog-versus-stall classification too. "Awaiting its first header" means the
-  `awaitingFirstHeader` flag chain selection sets only when it registers a peer
-  from a rollback and clears on that peer's first delivered header, not a
-  delivered block number of 0: a tracked peer that has delivered headers and
-  then rolls back to a point outside its retained delivered-header history is
-  also left with a block number of 0 (`ApplyRollback` keeps the point and cannot
-  recover one), but it has delivered headers on this connection, so it is judged
-  on its delivered frontier and its advertised tip is never substituted. That
-  fallback is reachable only because chain selection tracks such a peer in the
-  first place: a plateau resync closes the connection
-  (`SubscribeChainsyncResync`, `ouroboros/chainsync.go`, closes it for every
-  resync reason), the `ConnectionClosedEvent` subscription in `node.go` calls
-  `ChainSelector.RemovePeer`, and the replacement's only chainsync traffic until
-  the next block is its post-`FindIntersect` `MsgRollBackward` — registered as a
-  peer by `registerPeerFromRollbackLocked` and made selectable with a delivered
-  block number of 0 by the `awaitingFirstHeader` exemption in
-  `isPeerSelectableLocked` (`chainselection/selector.go`). Without that
-  registration `GetBestPeer()` is nil through the whole window and the plateau
-  check returns before the fallback, so the two belong together
+  connection). The "peers are ahead" comparison reads the delivered frontier.
+  If that frontier is no longer above the applied tip, the selected connection's
+  own higher advertised tip can arm bounded recovery of that connection, even
+  when it delivered earlier headers. Otherwise a stream that stops delivering
+  after reaching the applied frontier would indefinitely disarm the watchdog.
+  The same fallback covers a rollback-registered peer awaiting its first header.
+  It requires exact `ConnectionId` identity (`advertisesForOwnConnection`),
+  rather than rendered-address equality, so a replacement connection cannot
+  inherit another connection's claim. The advertisement also supplies the
+  existing backlog classifier's peer horizon; local reconciliation, progress
+  clocks, cooldown and Limit-on-Eagerness protection still apply. This
+  advertisement-only evidence never authorizes post-plateau realignment of
+  other peers. It cannot admit a header or change the authenticated chain
+  selector's frontier. Delivered-ahead evidence retains the existing bounded
+  cross-peer realignment behavior.
 - Plateau decisions are counted in
   `dingo_chainsync_plateau_decisions_total{outcome}`: `reconciled` (the local
   reconcile repaired the plateau), `backlog_not_recycled` (ledger-application
