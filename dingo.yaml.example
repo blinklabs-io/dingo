@@ -629,6 +629,16 @@
 #   # shelleyKesAgentClientCertFile: "/keys/kes-client.crt"
 #   # shelleyKesAgentClientKeyFile: "/keys/kes-client.key"
 #   # shelleyKesAgentServerSpkiSha256: "<64 hex characters>"
+#   # Or forge for several pools, each with its own keys and KES source
+#   # (replaces the shelley* settings above; YAML only, not with Leios):
+#   # blockProducerPools:
+#   #   - shelleyVrfKey: "/keys/pool-a/vrf.skey"
+#   #     shelleyOperationalCertificate: "/keys/pool-a/opcert.cert"
+#   #     shelleyKesAgentSocket: "/run/kes-agent/service.sock"
+#   #     shelleyKesAgentMode: "sign"
+#   #   - shelleyVrfKey: "/keys/pool-b/vrf.skey"
+#   #     shelleyKesKey: "/keys/pool-b/kes.skey"
+#   #     shelleyOperationalCertificate: "/keys/pool-b/opcert.cert"
 #   # With storageMode: "core", Badger blob defaults switch to mmap-only:
 #   #   blockCacheSize: 0
 #   #   indexCacheSize: 0
