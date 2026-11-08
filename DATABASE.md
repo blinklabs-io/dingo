@@ -7814,6 +7814,13 @@ floor. `TruncateAfterSlot` restores spent UTxOs with an update. The
 Before a rollback marks retained spent UTxOs live again, it fills any missing
 `utxo_address` identity from their retained output CBOR.
 The address restoration and unspend update share the rollback transaction.
+Unary-plus row-ID expressions prevent SQLite from choosing a row-ID-ordered
+history walk to satisfy the batch limit, while preserving ascending-ID
+pagination. An available deleted-slot index can bound the lookup to the
+rollback range. Without those optional indexes, the query remains correct but
+scans the retained table. The query does not name an index, so a deferred index
+rebuild does not cause a missing-index error. Other SQL dialects keep their
+existing query shape.
 
 # Trusted batch commit ordering
 
