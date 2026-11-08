@@ -899,10 +899,9 @@ func canonicalizeByronGenesisJSON(genesisBytes []byte) ([]byte, error) {
 }
 
 // loadConwayGenesisFromBytes parses a Conway genesis, tolerating members that
-// cardano-node's lenient JSON parser ignores but gouroboros's strict decoder
-// rejects: the top-level genDelegs and the legacy committee.quorum, both
-// present in Vector Testnet's genesis. Dingo consumes neither. quorum is
-// stripped only beside threshold. Any other unknown member is still rejected.
+// cardano-node's JSON parser ignores: the top-level genDelegs and the legacy
+// committee.quorum, both present in Vector Testnet's genesis. Dingo consumes
+// neither. quorum is stripped only beside threshold.
 func loadConwayGenesisFromBytes(
 	genesisBytes []byte,
 ) (conway.ConwayGenesis, error) {

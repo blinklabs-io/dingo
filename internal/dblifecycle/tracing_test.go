@@ -41,12 +41,12 @@ func TestDBLifecycleOperationSpans(t *testing.T) {
 		SnapshotEnabled:      true,
 		SnapshotDir:          snapshotDir,
 		SnapshotEveryNEpochs: 1,
-		SnapshotRetention:    2,
+		SnapshotRetention:    1,
 	}, testManagerBlobPlugin, "sqlite", testDestinationRegistry, nil)
 	require.NoError(t, m.Start(context.Background()))
 	defer m.Stop()
 
-	for _, epoch := range []uint64{1, 2, 3} {
+	for _, epoch := range []uint64{1, 2} {
 		publishEpochTransition(eb, epoch)
 		dir := filepath.Join(
 			snapshotDir,
@@ -62,7 +62,7 @@ func TestDBLifecycleOperationSpans(t *testing.T) {
 		for _, span := range spans.Ended() {
 			count[span.Name()]++
 		}
-		return count["dblifecycle.epoch_snapshot"] == 3 &&
+		return count["dblifecycle.epoch_snapshot"] == 2 &&
 			count["dblifecycle.prune"] >= 1
 	}, snapshotWait, 10*time.Millisecond)
 

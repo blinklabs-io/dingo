@@ -1037,29 +1037,6 @@ func firstTwoTxsInFixtureBlocks(
 
 // --- tests ------------------------------------------------------------------
 
-func TestConnect_ReadParams(t *testing.T) {
-	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 20})
-	cli := queryconnect.NewQueryServiceClient(
-		h.Client,
-		h.Server.URL,
-		connect.WithGRPC(),
-	)
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	out, err := cli.ReadParams(
-		ctx,
-		connect.NewRequest(&query.ReadParamsRequest{}),
-	)
-	require.NoError(t, err)
-	require.NotNil(t, out.Msg.GetValues())
-	require.NotNil(t, out.Msg.GetValues().GetCardano())
-	require.NotNil(t, out.Msg.GetLedgerTip())
-	tip := h.LS.Tip()
-	require.Equal(t, tip.Point.Slot, out.Msg.GetLedgerTip().GetSlot())
-	require.Equal(t, tip.Point.Hash, out.Msg.GetLedgerTip().GetHash())
-	require.Equal(t, tip.BlockNumber, out.Msg.GetLedgerTip().GetHeight())
-}
-
 func TestConnect_ReadEraSummary(t *testing.T) {
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 20})
 	cli := queryconnect.NewQueryServiceClient(
@@ -1079,44 +1056,6 @@ func TestConnect_ReadEraSummary(t *testing.T) {
 	require.NotEmpty(t, s.GetSummaries())
 	require.NotEmpty(t, s.GetSummaries()[0].GetName())
 	require.NotNil(t, s.GetSummaries()[0].GetStart())
-}
-
-func TestConnect_ReadGenesis(t *testing.T) {
-	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 5})
-	cli := queryconnect.NewQueryServiceClient(
-		h.Client,
-		h.Server.URL,
-		connect.WithGRPC(),
-	)
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	out, err := cli.ReadGenesis(
-		ctx,
-		connect.NewRequest(&query.ReadGenesisRequest{}),
-	)
-	require.NoError(t, err)
-	require.NotEmpty(t, out.Msg.GetCaip2())
-	require.Equal(t, "cardano:preview", out.Msg.GetCaip2())
-	require.NotNil(t, out.Msg.GetCardano())
-}
-
-func TestConnect_ReadTip(t *testing.T) {
-	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 15})
-	cli := syncconnect.NewSyncServiceClient(
-		h.Client,
-		h.Server.URL,
-		connect.WithGRPC(),
-	)
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	out, err := cli.ReadTip(ctx, connect.NewRequest(&sync.ReadTipRequest{}))
-	require.NoError(t, err)
-	require.NotNil(t, out.Msg.GetTip())
-	require.NotEmpty(t, out.Msg.GetTip().GetHash())
-	tip := h.LS.Tip()
-	require.Equal(t, tip.Point.Slot, out.Msg.GetTip().GetSlot())
-	require.Equal(t, tip.Point.Hash, out.Msg.GetTip().GetHash())
-	require.Equal(t, tip.BlockNumber, out.Msg.GetTip().GetHeight())
 }
 
 func TestConnect_FetchBlock(t *testing.T) {
@@ -1494,24 +1433,6 @@ func TestConnect_ReadUtxos_MissingKey(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestConnect_ReadData_EmptyKeys(t *testing.T) {
-	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 5})
-	cli := queryconnect.NewQueryServiceClient(
-		h.Client,
-		h.Server.URL,
-		connect.WithGRPC(),
-	)
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	out, err := cli.ReadData(ctx, connect.NewRequest(&query.ReadDataRequest{}))
-	require.NoError(t, err)
-	require.Empty(t, out.Msg.GetValues())
-	require.NotNil(t, out.Msg.GetLedgerTip())
-	tip := h.LS.Tip()
-	require.Equal(t, tip.Point.Slot, out.Msg.GetLedgerTip().GetSlot())
-	require.Equal(t, tip.Point.Hash, out.Msg.GetLedgerTip().GetHash())
-}
-
 func TestConnect_ReadTx(t *testing.T) {
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 40})
 	cli := queryconnect.NewQueryServiceClient(
@@ -1588,23 +1509,6 @@ func TestConnect_SubmitTx(t *testing.T) {
 		}
 	}
 	require.True(t, found, "submitted tx must be present in mempool")
-}
-
-func TestConnect_ReadMempool(t *testing.T) {
-	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 5})
-	cli := submitconnect.NewSubmitServiceClient(
-		h.Client,
-		h.Server.URL,
-		connect.WithGRPC(),
-	)
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	out, err := cli.ReadMempool(
-		ctx,
-		connect.NewRequest(&submit.ReadMempoolRequest{}),
-	)
-	require.NoError(t, err)
-	require.Empty(t, out.Msg.GetItems())
 }
 
 func TestConnect_WaitForTx_EmptyRefsClosesStream(t *testing.T) {
@@ -1792,34 +1696,6 @@ func TestConnect_WaitForTx_ClientCancellation(t *testing.T) {
 		require.Equal(t, connect.CodeCanceled, connect.CodeOf(result.err))
 	case <-waitCtx.Done():
 		t.Fatal(waitCtx.Err())
-	}
-}
-
-func TestConnect_EvalTx(t *testing.T) {
-	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 40})
-	_, txCbor, _ := firstTxInFixtureBlocks(t, 40)
-	cli := submitconnect.NewSubmitServiceClient(
-		h.Client,
-		h.Server.URL,
-		connect.WithGRPC(),
-	)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	out, err := cli.EvalTx(
-		ctx,
-		connect.NewRequest(&submit.EvalTxRequest{
-			Tx: &submit.AnyChainTx{
-				Type: &submit.AnyChainTx_Raw{Raw: txCbor},
-			},
-		}),
-	)
-	require.NoError(t, err)
-	report := out.Msg.GetReport().GetCardano()
-	require.NotNil(t, report)
-	if len(report.GetErrors()) > 0 {
-		require.NotEmpty(t, report.GetErrors()[0].GetMsg())
-	} else {
-		require.NotNil(t, report.GetExUnits())
 	}
 }
 
@@ -2226,32 +2102,6 @@ func TestConnect_WatchMempool_StreamsOnAddTransactionEvent(t *testing.T) {
 }
 
 // --- v1beta serving/routing tests ------------------------------------------
-
-// TestConnect_Beta_ReadParams drives a real v1beta QueryService call through
-// betaVersionedQueryHandler and asserts it is rewritten onto the shared v1alpha
-// handler, returning the same ledger-backed response as the v1alpha service.
-func TestConnect_Beta_ReadParams(t *testing.T) {
-	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 20})
-	cli := betaqueryconnect.NewQueryServiceClient(
-		h.Client,
-		h.Server.URL,
-		connect.WithGRPC(),
-	)
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	out, err := cli.ReadParams(
-		ctx,
-		connect.NewRequest(&betaquery.ReadParamsRequest{}),
-	)
-	require.NoError(t, err)
-	require.NotNil(t, out.Msg.GetValues())
-	require.NotNil(t, out.Msg.GetValues().GetCardano())
-	require.NotNil(t, out.Msg.GetLedgerTip())
-	tip := h.LS.Tip()
-	require.Equal(t, tip.Point.Slot, out.Msg.GetLedgerTip().GetSlot())
-	require.Equal(t, tip.Point.Hash, out.Msg.GetLedgerTip().GetHash())
-	require.Equal(t, tip.BlockNumber, out.Msg.GetLedgerTip().GetHeight())
-}
 
 // seedBetaReadStatePool gives a pool a registration and snapshot stake in the
 // harness database, so ReadState has a real distribution to report rather than

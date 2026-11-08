@@ -75,6 +75,7 @@ func TestCheckSyncStateRepairsLegacyAlonzoPParamsUnit(t *testing.T) {
 	// Seed a database in the shape a pre-gouroboros-v0.205.7 release left
 	// behind: one Alonzo row holding the lossy quotient, and the
 	// conservative marker migration v20 writes for it.
+	seedMigratedMetadata(t, cfg)
 	runtime, err := openConfiguredDatabase(context.Background(), cfg, logger, 1)
 	require.NoError(t, err)
 	params := alonzo.AlonzoProtocolParameters{AdaPerUtxoByte: word / 8}
@@ -216,6 +217,7 @@ func TestCheckSyncStateAllowsInterruptedRewardRepairToResume(t *testing.T) {
 		DatabasePath: t.TempDir(),
 		Plugins:      testStoragePlugins(),
 	}
+	seedMigratedMetadata(t, cfg)
 	runtime, err := openConfiguredDatabase(context.Background(), cfg, logger, 1)
 	require.NoError(t, err)
 	require.NoError(t, runtime.Database.SetSyncState(
@@ -244,6 +246,7 @@ func TestCheckSyncStateDoesNotIgnoreOtherInterruptedSyncForRewardRepair(t *testi
 		DatabasePath: t.TempDir(),
 		Plugins:      testStoragePlugins(),
 	}
+	seedMigratedMetadata(t, cfg)
 	runtime, err := openConfiguredDatabase(context.Background(), cfg, logger, 1)
 	require.NoError(t, err)
 	require.NoError(t, runtime.Database.SetSyncState(
@@ -392,6 +395,7 @@ func TestCheckSyncStateDevModeAgreesWithLaterAPIModeOpen(t *testing.T) {
 	}
 
 	// Preflight open, exactly as serveRun performs it before node.Run runs.
+	seedMigratedMetadata(t, cfg)
 	require.NoError(t, checkSyncState(cfg, logger))
 
 	// Stand-in for node.Run's own database open, once it has upgraded to
@@ -426,6 +430,7 @@ func TestResumeBackfillFinalizesStatsBeforeClearingSync(t *testing.T) {
 		DatabaseWorkers:   1,
 	}
 	logger := slog.New(slog.DiscardHandler)
+	seedMigratedMetadata(t, cfg)
 	runtime, err := openConfiguredDatabase(t.Context(), cfg, logger, 1)
 	require.NoError(t, err)
 	require.NoError(
@@ -488,6 +493,7 @@ func TestServeAcceptsInNodeModeFreshDB(t *testing.T) {
 		Plugins:      testStoragePlugins(),
 	}
 	cfg.Mithril.Enabled = true
+	seedMigratedMetadata(t, cfg)
 	require.NoError(t, checkSyncState(cfg, logger),
 		"an empty database must pass with node-managed Mithril")
 
@@ -518,6 +524,7 @@ func TestServeAcceptsInterruptedSnapshotRestore(t *testing.T) {
 	cfg.Mithril.Enabled = true
 	cfg.HistoryExpiry.Enabled = true
 
+	seedMigratedMetadata(t, cfg)
 	runtime, err := openConfiguredDatabase(context.Background(), cfg, logger, 1)
 	require.NoError(t, err)
 	require.NoError(t, runtime.Database.SetSyncState(
@@ -565,6 +572,7 @@ func TestResumeBackfillWritesBlockNonces(t *testing.T) {
 		DatabaseWorkers:   1,
 	}
 	logger := slog.New(slog.DiscardHandler)
+	seedMigratedMetadata(t, cfg)
 	runtime, err := openConfiguredDatabase(t.Context(), cfg, logger, 1)
 	require.NoError(t, err)
 	db := runtime.Database

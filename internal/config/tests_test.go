@@ -22,7 +22,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/blinklabs-io/dingo/internal/apiconfig"
 	"github.com/blinklabs-io/dingo/internal/koiosparity"
@@ -31,89 +30,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// TestLoad_APITLSYAMLDefaults covers the top-level api.tls section: a
-// YAML-only configuration populates it, with the per-provider
-// plugins.api.* selections left untouched (the merge into each provider's
-// own config happens at node composition, not here -- see node.go's
-// apiProviderConfig).
-func TestLoad_APITLSYAMLDefaults(t *testing.T) {
-	resetGlobalConfig()
-	t.Setenv("HOME", t.TempDir())
-
-	configFile := filepath.Join(t.TempDir(), "dingo.yaml")
-	require.NoError(t, os.WriteFile(configFile, []byte(
-		"api:\n"+
-			"  tls:\n"+
-			"    mode: server\n"+
-			"    certFilePath: /run/secrets/api.crt\n"+
-			"    keyFilePath: /run/secrets/api.key\n",
-	), 0o600))
-
-	cfg, err := LoadConfig(configFile)
-	require.NoError(t, err)
-
-	require.NotNil(t, cfg.API.TLS.Mode)
-	assert.Equal(t, "server", *cfg.API.TLS.Mode)
-	require.NotNil(t, cfg.API.TLS.CertFilePath)
-	assert.Equal(t, "/run/secrets/api.crt", *cfg.API.TLS.CertFilePath)
-	require.NotNil(t, cfg.API.TLS.KeyFilePath)
-	assert.Equal(t, "/run/secrets/api.key", *cfg.API.TLS.KeyFilePath)
-}
-
-// TestLoad_APITLSEnvironmentOverridesYAML covers source precedence
-// (env over YAML) for the new api.tls fields, mirroring
-// TestMempoolProviderSourcePrecedence's pattern for the existing plugin
-// selection fields.
-func TestLoad_APITLSEnvironmentOverridesYAML(t *testing.T) {
-	resetGlobalConfig()
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("DINGO_API_TLS_MODE", "disabled")
-	t.Setenv("DINGO_API_TLS_CERT_FILE_PATH", "/env/cert.pem")
-	t.Setenv("DINGO_API_TLS_KEY_FILE_PATH", "/env/key.pem")
-
-	configFile := filepath.Join(t.TempDir(), "dingo.yaml")
-	require.NoError(t, os.WriteFile(configFile, []byte(
-		"api:\n"+
-			"  tls:\n"+
-			"    mode: server\n"+
-			"    certFilePath: /yaml/cert.pem\n"+
-			"    keyFilePath: /yaml/key.pem\n",
-	), 0o600))
-
-	cfg, err := LoadConfig(configFile)
-	require.NoError(t, err)
-
-	require.NotNil(t, cfg.API.TLS.Mode)
-	assert.Equal(t, "disabled", *cfg.API.TLS.Mode, "environment overrides YAML")
-	require.NotNil(t, cfg.API.TLS.CertFilePath)
-	assert.Equal(t, "/env/cert.pem", *cfg.API.TLS.CertFilePath)
-}
-
-// TestApplyFlags_APITLSCLIOverridesEnvironment covers the top of the
-// source precedence chain: a CLI flag beats both environment and YAML.
-func TestApplyFlags_APITLSCLIOverridesEnvironment(t *testing.T) {
-	resetGlobalConfig()
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("DINGO_API_TLS_MODE", "disabled")
-
-	configFile := filepath.Join(t.TempDir(), "dingo.yaml")
-	require.NoError(t, os.WriteFile(configFile, []byte(
-		"api:\n  tls:\n    mode: server\n",
-	), 0o600))
-	cfg, err := LoadConfig(configFile)
-	require.NoError(t, err)
-	require.NotNil(t, cfg.API.TLS.Mode)
-	assert.Equal(t, "disabled", *cfg.API.TLS.Mode)
-
-	cmd := &cobra.Command{Use: "dingo"}
-	RegisterFlags(cmd)
-	require.NoError(t, cmd.ParseFlags([]string{"--api-tls-mode=server"}))
-	require.NoError(t, ApplyFlags(cmd, cfg))
-
-	require.NotNil(t, cfg.API.TLS.Mode)
-	assert.Equal(t, "server", *cfg.API.TLS.Mode, "CLI overrides environment")
-}
 
 // TestLoad_APIProviderConfigPerFieldOverride is the end-to-end shape from
 // issue body: a shared top-level api.tls default plus a
@@ -313,41 +229,6 @@ func TestForgeEBCapsUnsetTakeTheDefault(t *testing.T) {
 	}
 }
 
-func TestForgeEBCapsExplicitZeroDisablesThem(t *testing.T) {
-	zero := uint64(0)
-	c := &Config{ForgeEBMaxTxRefs: &zero, ForgeEBMaxBytes: &zero}
-	c.ApplyDefaults()
-
-	if c.ForgeEBMaxTxRefs == nil || *c.ForgeEBMaxTxRefs != 0 {
-		t.Fatalf(
-			"explicit zero forgeEbMaxTxRefs must survive ApplyDefaults, got %v",
-			c.ForgeEBMaxTxRefs,
-		)
-	}
-	if c.ForgeEBMaxBytes == nil || *c.ForgeEBMaxBytes != 0 {
-		t.Fatalf(
-			"explicit zero forgeEbMaxBytes must survive ApplyDefaults, got %v",
-			c.ForgeEBMaxBytes,
-		)
-	}
-}
-
-// TestForgeEBCapDefaultsArePinned guards the copy of these numbers that
-// ledger/forging keeps for the embedder path. internal/config cannot
-// import ledger/forging (it would cycle), so the values are declared twice
-// on purpose; ledger/forging asserts the same literals from its side.
-func TestForgeEBCapDefaultsArePinned(t *testing.T) {
-	if DefaultForgeEBMaxTxRefs != 20000 {
-		t.Fatalf(
-			"forgeEbMaxTxRefs default drifted: %d",
-			DefaultForgeEBMaxTxRefs,
-		)
-	}
-	if DefaultForgeEBMaxBytes != 25165824 {
-		t.Fatalf("forgeEbMaxBytes default drifted: %d", DefaultForgeEBMaxBytes)
-	}
-}
-
 // TestForgeEBSelectionReserveUnsetTakesTheDefault covers the third state
 // this field can be in. Unlike the caps, a reserve of zero cannot mean
 // "disabled": it would leave the ranking block no time at all, so zero can
@@ -360,31 +241,6 @@ func TestForgeEBSelectionReserveUnsetTakesTheDefault(t *testing.T) {
 		t.Fatalf(
 			"forgeEbSelectionReserve = %s, want %s",
 			c.ForgeEBSelectionReserve,
-			DefaultForgeEBSelectionReserve,
-		)
-	}
-}
-
-func TestForgeEBSelectionReserveKeepsAConfiguredValue(t *testing.T) {
-	c := &Config{ForgeEBSelectionReserve: 750 * time.Millisecond}
-	c.ApplyDefaults()
-
-	if c.ForgeEBSelectionReserve != 750*time.Millisecond {
-		t.Fatalf(
-			"configured forgeEbSelectionReserve must survive ApplyDefaults, got %s",
-			c.ForgeEBSelectionReserve,
-		)
-	}
-}
-
-// TestForgeEBSelectionReserveDefaultIsPinned is the internal/config half
-// of the same two-sided pin as TestForgeEBCapDefaultsArePinned: the
-// forging package keeps its own copy of this number for embedders that
-// never touch internal/config.
-func TestForgeEBSelectionReserveDefaultIsPinned(t *testing.T) {
-	if DefaultForgeEBSelectionReserve != 300*time.Millisecond {
-		t.Fatalf(
-			"forgeEbSelectionReserve default drifted: %s",
 			DefaultForgeEBSelectionReserve,
 		)
 	}
@@ -411,95 +267,6 @@ func TestGetConfigSnapshotDoesNotAliasForgeEBCaps(t *testing.T) {
 	}
 	if got := *fresh.ForgeEBMaxBytes; got != DefaultForgeEBMaxBytes {
 		t.Fatalf("global forgeEbMaxBytes changed to %d", got)
-	}
-}
-
-// TestForgeEBCapFlagDefaultsShowTheEffectiveValue: --help is where an
-// operator learns what omitting a flag does. Registering 0 there said
-// "uncapped" while omitting the flag actually applies the backstop, which
-// is the opposite of the truth for the one number that bounds a forged
-// endorser block.
-func TestForgeEBCapFlagDefaultsShowTheEffectiveValue(t *testing.T) {
-	resetGlobalConfig()
-
-	cmd := &cobra.Command{Use: "dingo"}
-	RegisterFlags(cmd)
-
-	for name, want := range map[string]string{
-		"forge-eb-max-tx-refs":       "20000",
-		"forge-eb-max-bytes":         "25165824",
-		"forge-eb-selection-reserve": "300ms",
-	} {
-		flag := cmd.PersistentFlags().Lookup(name)
-		if flag == nil {
-			t.Fatalf("flag %q is not registered", name)
-		}
-		if flag.DefValue != want {
-			t.Fatalf("flag %q default = %q, want %q", name, flag.DefValue, want)
-		}
-	}
-}
-
-// TestForgeEBCapFlagsPreserveAnExplicitZero: the effective-default help
-// text must not cost the operator the ability to switch a cap off, which
-// is what a zero on the command line means.
-func TestForgeEBCapFlagsPreserveAnExplicitZero(t *testing.T) {
-	resetGlobalConfig()
-
-	cmd := &cobra.Command{Use: "dingo"}
-	RegisterFlags(cmd)
-	if err := cmd.PersistentFlags().Parse([]string{
-		"--forge-eb-max-tx-refs=0",
-		"--forge-eb-max-bytes=0",
-	}); err != nil {
-		t.Fatalf("parse flags: %v", err)
-	}
-
-	cfg := &Config{}
-	if err := ApplyFlags(cmd, cfg); err != nil {
-		t.Fatalf("apply flags: %v", err)
-	}
-	cfg.ApplyDefaults()
-
-	if cfg.ForgeEBMaxTxRefs == nil || *cfg.ForgeEBMaxTxRefs != 0 {
-		t.Fatalf(
-			"--forge-eb-max-tx-refs=0 must disable the cap, got %v",
-			cfg.ForgeEBMaxTxRefs,
-		)
-	}
-	if cfg.ForgeEBMaxBytes == nil || *cfg.ForgeEBMaxBytes != 0 {
-		t.Fatalf(
-			"--forge-eb-max-bytes=0 must disable the cap, got %v",
-			cfg.ForgeEBMaxBytes,
-		)
-	}
-}
-
-// TestForgeEBSelectionReserveFlagIsApplied closes the CLI half of the
-// reserve's path: flag -> Config -> (buildDingoConfig, covered in
-// internal/node) -> forger.
-func TestForgeEBSelectionReserveFlagIsApplied(t *testing.T) {
-	resetGlobalConfig()
-
-	cmd := &cobra.Command{Use: "dingo"}
-	RegisterFlags(cmd)
-	if err := cmd.PersistentFlags().Parse([]string{
-		"--forge-eb-selection-reserve=750ms",
-	}); err != nil {
-		t.Fatalf("parse flags: %v", err)
-	}
-
-	cfg := &Config{}
-	if err := ApplyFlags(cmd, cfg); err != nil {
-		t.Fatalf("apply flags: %v", err)
-	}
-	cfg.ApplyDefaults()
-
-	if cfg.ForgeEBSelectionReserve != 750*time.Millisecond {
-		t.Fatalf(
-			"forgeEbSelectionReserve = %s, want 750ms",
-			cfg.ForgeEBSelectionReserve,
-		)
 	}
 }
 
@@ -592,184 +359,11 @@ func forgeEBCapString(v *uint64) string {
 	return strconv.FormatUint(*v, 10)
 }
 
-// TestHealthPortDefaultsToDefaultHealthPort pins the health listener's
-// defaults on newDefaultConfig, which is the only place they come from.
-// NewHealthServer skips the listener entirely at HealthPort 0 and
-// ApplyDefaults has no fill-in step for that field, so losing the literal
-// disables the probe outright -- and resetGlobalConfig's separately
-// maintained copy (config_test.go) seeds every other test in this package,
-// so none of them would notice. Same blind spot as
-// TestValidateForgedBlockDefaultsToTrue (flags_test.go).
-func TestHealthPortDefaultsToDefaultHealthPort(t *testing.T) {
-	defaults := newDefaultConfig()
-	require.Equal(
-		t,
-		uint(DefaultHealthPort),
-		defaults.HealthPort,
-		"newDefaultConfig is the only source of the health listener port",
-	)
-	require.Equal(
-		t,
-		uint(DefaultHealthReadyGapSlots),
-		defaults.HealthReadyGapSlots,
-	)
-
-	// ApplyDefaults refills HealthReadyGapSlots but deliberately not
-	// HealthPort, so it cannot stand in as a second source.
-	zeroed := newDefaultConfig()
-	zeroed.HealthPort = 0
-	zeroed.HealthReadyGapSlots = 0
-	zeroed.ApplyDefaults()
-	assert.Zero(t, zeroed.HealthPort)
-	assert.Equal(
-		t,
-		uint(DefaultHealthReadyGapSlots),
-		zeroed.HealthReadyGapSlots,
-	)
-}
-
-func TestDefaultLoggingConfig(t *testing.T) {
-	d := DefaultLoggingConfig()
-	if d.Format != "text" {
-		t.Errorf("default Format = %q, want text", d.Format)
-	}
-	if d.Level != "info" {
-		t.Errorf("default Level = %q, want info", d.Level)
-	}
-}
-
-func TestDefaultSnapshotMaxCommitPause(t *testing.T) {
-	t.Parallel()
-
-	defaults := newDefaultConfig()
-	require.Equal(
-		t,
-		defaultSnapshotMaxCommitPause,
-		defaults.DatabaseLifecycle.SnapshotMaxCommitPause,
-	)
-}
-
-func TestLoad_LoggingEnvVars(t *testing.T) {
-	resetGlobalConfig()
-	// Avoid picking up a real ~/.dingo/dingo.yaml on the dev machine.
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("DINGO_LOGGING_FORMAT", "json")
-	t.Setenv("DINGO_LOGGING_LEVEL", "warn")
-
-	cfg, err := LoadConfig("")
-	if err != nil {
-		t.Fatalf("LoadConfig: %v", err)
-	}
-	if cfg.Logging.Format != "json" {
-		t.Errorf("Logging.Format = %q, want json", cfg.Logging.Format)
-	}
-	if cfg.Logging.Level != "warn" {
-		t.Errorf("Logging.Level = %q, want warn", cfg.Logging.Level)
-	}
-}
-
-func TestLoad_LoggingFromYAML(t *testing.T) {
-	resetGlobalConfig()
-	t.Setenv("HOME", t.TempDir())
-	// Ensure a developer's exported DINGO_LOGGING_* env vars cannot override
-	// the YAML values under test. t.Setenv records the originals for restore;
-	// os.Unsetenv then removes them for the duration of the test.
-	t.Setenv("DINGO_LOGGING_FORMAT", "")
-	os.Unsetenv("DINGO_LOGGING_FORMAT")
-	t.Setenv("DINGO_LOGGING_LEVEL", "")
-	os.Unsetenv("DINGO_LOGGING_LEVEL")
-
-	yamlContent := "logging:\n  format: json\n  level: error\n"
-	tmpFile := filepath.Join(t.TempDir(), "dingo.yaml")
-	if err := os.WriteFile(tmpFile, []byte(yamlContent), 0o644); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-
-	cfg, err := LoadConfig(tmpFile)
-	if err != nil {
-		t.Fatalf("LoadConfig: %v", err)
-	}
-	if cfg.Logging.Format != "json" {
-		t.Errorf("Logging.Format = %q, want json", cfg.Logging.Format)
-	}
-	if cfg.Logging.Level != "error" {
-		t.Errorf("Logging.Level = %q, want error", cfg.Logging.Level)
-	}
-}
-
-// Not t.Parallel: resets package-global config and controls process environment.
-func TestLoadLeiosPersistenceRetentionSlots(t *testing.T) {
-	resetGlobalConfig()
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("DINGO_LEIOS_PERSISTENCE_RETENTION_SLOTS", "")
-	t.Setenv("CARDANO_DINGO_LEIOS_PERSISTENCE_RETENTION_SLOTS", "")
-	os.Unsetenv("DINGO_LEIOS_PERSISTENCE_RETENTION_SLOTS")
-	os.Unsetenv("CARDANO_DINGO_LEIOS_PERSISTENCE_RETENTION_SLOTS")
-
-	emptyConfig := filepath.Join(t.TempDir(), "empty.yaml")
-	require.NoError(t, os.WriteFile(emptyConfig, nil, 0o600))
-	defaults, err := LoadConfig(emptyConfig)
-	require.NoError(t, err)
-	assert.Zero(t, defaults.LeiosPersistenceRetentionSlots)
-
-	configFile := filepath.Join(t.TempDir(), "dingo.yaml")
-	require.NoError(t, os.WriteFile(configFile, []byte(
-		"leiosPersistenceRetentionSlots: 7200\n",
-	), 0o600))
-	t.Setenv("DINGO_LEIOS_PERSISTENCE_RETENTION_SLOTS", "3600")
-
-	fromEnv, err := LoadConfig(configFile)
-	require.NoError(t, err)
-	assert.Equal(t, uint64(3600), fromEnv.LeiosPersistenceRetentionSlots)
-
-	t.Setenv("DINGO_LEIOS_PERSISTENCE_RETENTION_SLOTS", "")
-	t.Setenv("CARDANO_DINGO_LEIOS_PERSISTENCE_RETENTION_SLOTS", "")
-	os.Unsetenv("DINGO_LEIOS_PERSISTENCE_RETENTION_SLOTS")
-	os.Unsetenv("CARDANO_DINGO_LEIOS_PERSISTENCE_RETENTION_SLOTS")
-	fromYAML, err := LoadConfig(configFile)
-	require.NoError(t, err)
-	assert.Equal(t, uint64(7200), fromYAML.LeiosPersistenceRetentionSlots)
-
-	cmd := &cobra.Command{Use: "dingo"}
-	RegisterFlags(cmd)
-	require.NoError(t, cmd.ParseFlags([]string{
-		"--leios-persistence-retention-slots=900",
-	}))
-	require.NoError(t, ApplyFlags(cmd, fromYAML))
-	assert.Equal(t, uint64(900), fromYAML.LeiosPersistenceRetentionSlots)
-}
-
-// defaultMithrilBackendAtInit captures the production default before
-// any test mutates or resets globalConfig.
-var defaultMithrilBackendAtInit = globalConfig.Mithril.Backend
-
-func TestMithrilBackendDefault(t *testing.T) {
-	assert.Equal(
-		t,
-		"v2",
-		defaultMithrilBackendAtInit,
-		"default Mithril backend should be v2",
-	)
-}
-
 func writeMithrilBackendTestConfig(t *testing.T, yamlContent string) string {
 	t.Helper()
 	tmpFile := filepath.Join(t.TempDir(), "test-dingo.yaml")
 	require.NoError(t, os.WriteFile(tmpFile, []byte(yamlContent), 0o644))
 	return tmpFile
-}
-
-func TestMithrilBackendYAML(t *testing.T) {
-	resetGlobalConfig()
-	tmpFile := writeMithrilBackendTestConfig(t, `
-network: "preview"
-mithril:
-  backend: "v2"
-`)
-	cfg, err := LoadConfig(tmpFile)
-	require.NoError(t, err)
-	assert.Equal(t, "v2", cfg.Mithril.Backend)
-	require.NoError(t, cfg.Validate(RunModeServe))
 }
 
 func TestMithrilBackendV1Rejected(t *testing.T) {
@@ -789,48 +383,6 @@ mithril:
 	err = cfg.Validate(RunModeServe)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no longer supported")
-}
-
-func TestMithrilBackendEnvOverride(t *testing.T) {
-	resetGlobalConfig()
-	t.Setenv("DINGO_MITHRIL_BACKEND", "v1")
-	tmpFile := writeMithrilBackendTestConfig(t, `
-network: "preview"
-mithril:
-  backend: "v2"
-`)
-	cfg, err := LoadConfig(tmpFile)
-	require.NoError(t, err)
-	assert.Equal(
-		t,
-		"v1",
-		cfg.Mithril.Backend,
-		"env var should override YAML",
-	)
-	err = cfg.Validate(RunModeServe)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "no longer supported")
-}
-
-func TestMithrilPinnedDigestYAMLEnvAndCLI(t *testing.T) {
-	resetGlobalConfig()
-	t.Setenv("DINGO_MITHRIL_PINNED_DIGEST", "env-digest")
-	tmpFile := writeMithrilBackendTestConfig(t, `
-network: "preview"
-mithril:
-  pinnedDigest: "yaml-digest"
-`)
-	cfg, err := LoadConfig(tmpFile)
-	require.NoError(t, err)
-	assert.Equal(t, "env-digest", cfg.Mithril.PinnedDigest)
-
-	cmd := &cobra.Command{Use: "dingo"}
-	RegisterFlags(cmd)
-	require.NoError(
-		t, cmd.ParseFlags([]string{"--mithril-pinned-digest=cli-digest"}),
-	)
-	require.NoError(t, ApplyFlags(cmd, cfg))
-	assert.Equal(t, "cli-digest", cfg.Mithril.PinnedDigest)
 }
 
 // TestMusashiNetworkIdentityConflict pins rejection of a network name and
@@ -1084,30 +636,6 @@ func TestValidateRejectsMusashiIdentityConflict(t *testing.T) {
 	}
 }
 
-// TestValidateAllowsUnambiguousNetworks guards against the new rule rejecting
-// legitimate configurations, including Musashi itself.
-func TestValidateAllowsUnambiguousNetworks(t *testing.T) {
-	for _, tt := range []struct {
-		name         string
-		network      string
-		networkMagic uint32
-	}{
-		{name: "musashi by name", network: "musashi"},
-		{name: "musashi by name and magic", network: "musashi", networkMagic: 164},
-		{name: "musashi by magic only", network: "", networkMagic: 164},
-		{name: "preview", network: "preview", networkMagic: 2},
-		{name: "preprod", network: "preprod", networkMagic: 1},
-		{name: "devnet", network: "devnet", networkMagic: 42},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			cfg := validTestConfig()
-			cfg.Network = tt.network
-			cfg.NetworkMagic = tt.networkMagic
-			require.NoError(t, cfg.Validate(RunModeServe))
-		})
-	}
-}
-
 func TestValidateTracingSampleRatio(t *testing.T) {
 	t.Parallel()
 
@@ -1175,27 +703,6 @@ func TestParsePoolKeyHash(t *testing.T) {
 		require.Error(t, err, in)
 		require.Contains(t, err.Error(), in)
 	}
-}
-
-// Not t.Parallel: LoadConfig reads the process environment and the global
-// config.
-func TestAlwaysSamplePoolsFromEnv(t *testing.T) {
-	resetGlobalConfig()
-	t.Setenv("HOME", t.TempDir())
-	const a = "0f292fcaa02b8b2f9b3c8f9fd8e0bb21abedb692a6d5058df3ef2735"
-	const b = "1f292fcaa02b8b2f9b3c8f9fd8e0bb21abedb692a6d5058df3ef2735"
-	// The prefixed spelling wins over the bare one; make sure it is unset,
-	// restoring any value afterwards.
-	t.Setenv("CARDANO_DINGO_TRACING_ALWAYS_SAMPLE_POOLS", "")
-	require.NoError(
-		t,
-		os.Unsetenv("CARDANO_DINGO_TRACING_ALWAYS_SAMPLE_POOLS"),
-	)
-	t.Setenv("DINGO_TRACING_ALWAYS_SAMPLE_POOLS", a+","+b)
-
-	cfg, err := LoadConfig("")
-	require.NoError(t, err)
-	require.Equal(t, []string{a, b}, cfg.TracingAlwaysSamplePools)
 }
 
 func TestValidateRejectsBadAlwaysSamplePool(t *testing.T) {

@@ -114,7 +114,7 @@ func registerSQLiteTools(
 		}
 		effectiveLimit = min(effectiveLimit, maxRows, 200)
 		offset := max(input.Offset, 0)
-		if offset > maxToolOffset {
+		if offset > limits.maxOffset {
 			return nil, nil, errOffsetTooLarge
 		}
 		q := strings.TrimRight(strings.TrimSpace(input.Query), ";")
@@ -222,7 +222,7 @@ func registerSQLiteTools(
 			formatUntrustedInline(q),
 		)
 		if note := offsetLimitNote(
-			requestedOffset, effectiveLimit, count,
+			requestedOffset, effectiveLimit, count, limits.maxOffset,
 		); note != "" {
 			summary += "\n" + note
 		}

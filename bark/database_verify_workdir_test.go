@@ -23,23 +23,17 @@ import (
 
 	"connectrpc.com/connect"
 	databasev1alpha1 "github.com/blinklabs-io/bark/proto/v1alpha1/database"
-	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/stretchr/testify/require"
 )
 
 // A verification restore is made under the snapshot directory, never in the
 // system temp directory, and leaves nothing behind there.
+// Not t.Parallel: t.Setenv redirects the process-wide temporary directory.
 func TestVerifySnapshotRestoresUnderSnapshotDir(t *testing.T) {
 	// Not t.Parallel: t.Setenv.
-	dataDir := t.TempDir()
-	db := newDiskTestDB(t, dataDir)
-	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
-	dbtest.CloseDatabase(db) //nolint:errcheck
-
-	h := newTestDatabaseServiceHandler(t, nil, dataDir)
-	created := createAndAwaitSnapshot(
-		t, h, &databasev1alpha1.CreateSnapshotRequest{},
-	)
+	h := newTestDatabaseServiceHandler(t, nil, t.TempDir())
+	snapshotID := "workdir-snapshot"
+	installTemplateSnapshot(t, h.bark.config.SnapshotDir, snapshotID)
 	stale := filepath.Join(
 		h.bark.config.SnapshotDir, ".dingo-verify-snapshot-stale",
 	)
@@ -54,7 +48,7 @@ func TestVerifySnapshotRestoresUnderSnapshotDir(t *testing.T) {
 	verifyResp, err := h.VerifySnapshot(
 		context.Background(),
 		connect.NewRequest(&databasev1alpha1.VerifySnapshotRequest{
-			SnapshotId: created.GetSnapshotId(),
+			SnapshotId: snapshotID,
 		}),
 	)
 	require.NoError(t, err)
@@ -95,7 +89,7 @@ func TestVerifySnapshotRestoresUnderSnapshotDir(t *testing.T) {
 	}
 	require.ElementsMatch(t, []string{
 		".dingo-snapshot-catalog-v1.sqlite",
-		created.GetSnapshotId(),
+		snapshotID,
 	}, names)
 	_, err = os.Stat(stale)
 	require.ErrorIs(t, err, os.ErrNotExist)

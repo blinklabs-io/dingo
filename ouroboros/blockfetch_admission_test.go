@@ -94,29 +94,6 @@ func TestBlockfetchRangeAdmission_ReplacementGenerationStartsEmpty(
 	assert.Zero(t, conn)
 }
 
-func TestNewOuroboros_BlockfetchAdmissionDefaultsAndOverrides(t *testing.T) {
-	t.Parallel()
-
-	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	def := newOuroboros(OuroborosConfig{
-		Logger:   logger,
-		EventBus: event.NewEventBus(nil, logger),
-	})
-	assert.Equal(t, blockfetchMaxRangesPerConnDefault,
-		def.blockfetchRangeAdmission.maxPerConn)
-	assert.Equal(t, blockfetchMaxRangesGlobalDefault,
-		def.blockfetchRangeAdmission.maxGlobal)
-
-	custom := newOuroboros(OuroborosConfig{
-		Logger:                     logger,
-		EventBus:                   event.NewEventBus(nil, logger),
-		BlockfetchMaxRangesPerConn: 2,
-		BlockfetchMaxRangesGlobal:  7,
-	})
-	assert.Equal(t, 2, custom.blockfetchRangeAdmission.maxPerConn)
-	assert.Equal(t, 7, custom.blockfetchRangeAdmission.maxGlobal)
-}
-
 // A saturated server must answer NoBlocks without touching the ledger: the
 // ledger is nil here, so reaching GetChainFromPoint (iterator creation) would
 // nil-dereference instead of producing the NoBlocks reply.

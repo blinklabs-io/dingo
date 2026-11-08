@@ -117,7 +117,7 @@ func TestNodeMatchesHoldNoSnapshotWhileTheCallerConsumesAPage(t *testing.T) {
 			break
 		}
 		got++
-		if got == 1 || got == matchPageSize+1 {
+		if got == 1 || got == historyFixturePageSize+1 {
 			ctx, cancel := context.WithTimeout(
 				context.Background(),
 				2*time.Second,

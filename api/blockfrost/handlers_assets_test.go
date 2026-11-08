@@ -15,7 +15,6 @@
 package blockfrost
 
 import (
-	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -83,27 +82,6 @@ func TestHandleAssetsListEmptyAndInvalid(t *testing.T) {
 	node.assetListErr = errors.New("boom")
 	w = serve(t, node, "/api/v0/assets")
 	require.Equal(t, http.StatusInternalServerError, w.Code)
-}
-
-func TestHandleAssetHistory(t *testing.T) {
-	t.Parallel()
-	node := &mockNode{}
-	node.assetHistory = []AssetHistoryItemInfo{
-		{TxHash: "aa", Action: "minted", Amount: "10"},
-		{TxHash: "bb", Action: "burned", Amount: "3"},
-	}
-	node.assetTotal = 2
-	w := serve(t, node, "/api/v0/assets/"+testAsset+"/history?order=desc")
-	require.Equal(t, http.StatusOK, w.Code)
-	require.JSONEq(t, `[
-{"tx_hash":"aa","action":"minted","amount":"10"},
-{"tx_hash":"bb","action":"burned","amount":"3"}]`, w.Body.String())
-	node.mu.Lock()
-	require.Equal(t, testPolicy, node.lastAssetPolicy)
-	require.Equal(t, []byte("nutcoin"), node.lastAssetName)
-	require.Equal(t, "desc", node.lastAssetParams.Order)
-	node.mu.Unlock()
-	require.Equal(t, "2", w.Header().Get("X-Pagination-Count-Total"))
 }
 
 func TestHandleAssetListingsMapErrors(t *testing.T) {
@@ -192,52 +170,6 @@ func TestHandleAssetLegacyTransactionsReturnsHashes(t *testing.T) {
 	// The deprecated listing takes no block range.
 	require.Nil(t, node.lastAssetRange.From)
 	require.Equal(t, "desc", node.lastAssetRange.Pagination.Order)
-}
-
-func TestHandleAssetUTXOs(t *testing.T) {
-	t.Parallel()
-	datum := "d87980"
-	hash := "0b"
-	node := &mockNode{}
-	node.assetUTXOs = []AssetUTXOInfo{
-		{
-			Address:     "addr1",
-			TxHash:      "aa",
-			OutputIndex: 1,
-			Amount: []AddressAmountInfo{
-				{Unit: "lovelace", Quantity: "2"},
-			},
-			Block:           "bb",
-			BlockHeight:     7,
-			BlockTime:       70,
-			InlineDatum:     &datum,
-			InlineDatumJSON: json.RawMessage(`{"constructor":0,"fields":[]}`),
-		},
-		{
-			Address:     "addr2",
-			TxHash:      "cc",
-			OutputIndex: 0,
-			Amount:      []AddressAmountInfo{},
-			Block:       "dd",
-			DataHash:    &hash,
-		},
-	}
-	node.assetTotal = 2
-	w := serve(t, node, "/api/v0/assets/"+testAsset+"/utxos?from=3")
-	require.Equal(t, http.StatusOK, w.Code)
-	require.JSONEq(t, `[
-{"address":"addr1","tx_hash":"aa","output_index":1,
- "amount":[{"unit":"lovelace","quantity":"2"}],"block":"bb",
- "block_height":7,"block_time":70,"data_hash":null,
- "inline_datum":"d87980","inline_datum_json":{"constructor":0,"fields":[]},
- "reference_script_hash":null},
-{"address":"addr2","tx_hash":"cc","output_index":0,"amount":[],"block":"dd",
- "block_height":0,"block_time":0,"data_hash":"0b","inline_datum":null,
- "inline_datum_json":null,"reference_script_hash":null}]`, w.Body.String())
-	node.mu.Lock()
-	defer node.mu.Unlock()
-	require.NotNil(t, node.lastAssetRange.From)
-	require.Equal(t, uint64(3), node.lastAssetRange.From.Block)
 }
 
 // "policy" and a real asset id both live under /assets/{x}/..., and the

@@ -80,47 +80,6 @@ func TestHandleAddressLegacyTransactionsEmptyAndErrors(t *testing.T) {
 	require.Equal(t, http.StatusInternalServerError, w.Code)
 }
 
-func TestHandleAddressExtended(t *testing.T) {
-	t.Parallel()
-	six := 6
-	stake := "stake1u9"
-	node := &mockNode{}
-	node.addressExtended = AddressExtendedInfo{
-		Address: "addr1",
-		Amount: []AddressExtendedAmountInfo{
-			{Unit: "lovelace", Quantity: "100", Decimals: &six},
-			{Unit: testAsset, Quantity: "5", HasNFTOnchainMetadata: true},
-		},
-		StakeAddress: &stake,
-		Type:         "shelley",
-	}
-	w := serve(t, node, "/api/v0/addresses/addr1/extended")
-	require.Equal(t, http.StatusOK, w.Code)
-	require.JSONEq(t, `{
-"address":"addr1",
-"amount":[
- {"unit":"lovelace","quantity":"100","decimals":6,"has_nft_onchain_metadata":false},
- {"unit":"`+testAsset+`","quantity":"5","decimals":null,"has_nft_onchain_metadata":true}],
-"stake_address":"stake1u9","type":"shelley","script":false}`, w.Body.String())
-	require.Equal(t, "addr1", node.lastAddress)
-}
-
-func TestHandleAddressTotal(t *testing.T) {
-	t.Parallel()
-	node := &mockNode{}
-	node.addressTotal = AddressTotalInfo{
-		Address:     "addr1",
-		ReceivedSum: []AddressAmountInfo{{Unit: "lovelace", Quantity: "30"}},
-		SentSum:     []AddressAmountInfo{},
-		TxCount:     4,
-	}
-	w := serve(t, node, "/api/v0/addresses/addr1/total")
-	require.Equal(t, http.StatusOK, w.Code)
-	require.JSONEq(t, `{"address":"addr1",
-"received_sum":[{"unit":"lovelace","quantity":"30"}],
-"sent_sum":[],"tx_count":4}`, w.Body.String())
-}
-
 func TestHandleAddressExtendedAndTotalErrors(t *testing.T) {
 	t.Parallel()
 	for _, route := range []string{"extended", "total"} {

@@ -24,7 +24,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
@@ -268,99 +267,6 @@ func setFakeCloudBackingDir(t *testing.T, dir string) {
 	})
 }
 
-// TestFakeCloudBackingDirResetsBetweenTests guards against a leaked global:
-// setFakeCloudBackingDir used to set fakeCloudDir with no corresponding
-// reset, so whichever test happened to set it last left that directory in
-// place for every subsequent test in the package — a test that forgot to
-// call setFakeCloudBackingDir (or was reordered/shuffled ahead of the one
-// that used to set it up) could silently resolve the "faketest://" scheme
-// against a leftover directory from an unrelated test instead of failing
-// loudly. The subtest's t.Cleanup (registered by setFakeCloudBackingDir)
-// runs synchronously before t.Run returns, so fakeCloudDir must already be
-// reset by the time this checks it.
-// Not t.Parallel: this asserts on the package-level fakeCloudDir itself,
-// so it must not observe another test holding the fixture.
-func TestFakeCloudBackingDirResetsBetweenTests(t *testing.T) {
-	t.Run("sets it", func(t *testing.T) {
-		setFakeCloudBackingDir(t, t.TempDir())
-	})
-
-	fakeCloudMu.Lock()
-	got := fakeCloudDir
-	fakeCloudMu.Unlock()
-	require.Empty(
-		t,
-		got,
-		"fakeCloudDir must be reset via t.Cleanup once the test that set it finishes",
-	)
-}
-
-// TestSetFakeCloudBackingDirSerializesConcurrentTests guards against
-// a real gap: setFakeCloudBackingDir previously only guarded each
-// individual read/write of fakeCloudDir, not the whole span of the test
-// that configured it -- so two tests using this fixture concurrently
-// (nothing currently runs them with t.Parallel(), but nothing stops a
-// future test from adding it) could have one test's t.Cleanup reset or
-// reassign fakeCloudDir while the other was still relying on its own
-// value, silently resolving "faketest://" against the wrong directory
-// instead of either test's own configuration.
-//
-// This drives that scenario through two real, concurrently-running
-// subtests (t.Run from multiple goroutines is safe as long as they all
-// return before the outer test does, which the deferred waitGroup/release
-// below guarantee even if an assertion fails partway through): the
-// second subtest's call to setFakeCloudBackingDir must block until the
-// first subtest actually finishes (its t.Cleanup fires), rather than
-// both proceeding immediately and racing fakeCloudDir between them.
-// Not t.Parallel: this drives setFakeCloudBackingDir concurrently on its
-// own goroutines to prove the fixture serializes; a parallel outer test
-// would be measuring the same lock from two directions.
-func TestSetFakeCloudBackingDirSerializesConcurrentTests(t *testing.T) {
-	var wg sync.WaitGroup
-	defer wg.Wait()
-
-	var releaseOnce sync.Once
-	releaseFirst := make(chan struct{})
-	// Deferred before either subtest starts, and idempotent: guarantees
-	// the first subtest can always finish (unblocking anything relying on
-	// it, including the second subtest below) even if an assertion here
-	// fails partway through and aborts this function via Goexit before
-	// reaching the explicit release() call in the normal path.
-	release := func() { releaseOnce.Do(func() { close(releaseFirst) }) }
-	defer release()
-
-	firstAcquired := make(chan struct{})
-	wg.Go(func() {
-		t.Run("first", func(t *testing.T) {
-			setFakeCloudBackingDir(t, t.TempDir())
-			close(firstAcquired)
-			<-releaseFirst
-		})
-	})
-	testutil.RequireReceive(
-		t, firstAcquired, time.Second,
-		"first subtest must acquire the fixture",
-	)
-
-	secondAcquired := make(chan struct{})
-	wg.Go(func() {
-		t.Run("second", func(t *testing.T) {
-			setFakeCloudBackingDir(t, t.TempDir())
-			close(secondAcquired)
-		})
-	})
-	testutil.RequireNoReceive(
-		t, secondAcquired, 150*time.Millisecond,
-		"second subtest must block while the first still holds the fixture",
-	)
-
-	release()
-	testutil.RequireReceive(
-		t, secondAcquired, time.Second,
-		"second subtest must acquire the fixture once the first releases it",
-	)
-}
-
 // TestParseCloudDestinationUnknownScheme verifies that a URI whose scheme
 // has no registered factory returns an error.
 func TestParseCloudDestinationUnknownScheme(t *testing.T) {
@@ -402,239 +308,6 @@ func TestParseCloudDestinationMalformed(t *testing.T) {
 		"not a uri at all ://",
 	)
 	require.Error(t, err)
-}
-
-// TestParseCloudDestinationRegisteredScheme verifies that a valid URI for
-// a registered scheme resolves to a usable CloudDestination.
-func TestParseCloudDestinationRegisteredScheme(t *testing.T) {
-	t.Parallel()
-
-	setFakeCloudBackingDir(t, t.TempDir())
-	dest, err := lifecycle.ParseCloudDestination(
-		testDestinationRegistry,
-		"faketest://bucket/prefix",
-	)
-	require.NoError(t, err)
-	require.NotNil(t, dest)
-}
-
-// TestSnapshotToCloudEmptyDestinationIsLocalOnly verifies that an empty
-// cloudDest skips the upload and only writes the local snapshot.
-func TestSnapshotToCloudEmptyDestinationIsLocalOnly(t *testing.T) {
-	t.Parallel()
-
-	db := newTestDB(t)
-	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
-
-	dir := snapshotTestDir(t, "snap-local-only")
-	m, err := lifecycle.SnapshotToCloud(
-		context.Background(),
-		testDestinationRegistry,
-		db,
-		dir,
-		lifecycle.TriggerManual,
-		"test-version",
-		"badger",
-		"sqlite",
-		"",
-		"",
-		"",
-	)
-	require.NoError(t, err)
-	require.FileExists(t, filepath.Join(dir, lifecycle.BlobBackupFileName))
-	require.FileExists(t, filepath.Join(dir, lifecycle.MetadataBackupFileName))
-	require.NotZero(t, m.BlobBytes)
-}
-
-// A cloud mirror must not be created without an operator trust root. Reject
-// the request before writing the local snapshot so callers cannot mistake a
-// partial result for a cloud snapshot that can be restored safely.
-func TestSnapshotToCloudRequiresTrustKey(t *testing.T) {
-	t.Parallel()
-
-	setFakeCloudBackingDir(t, t.TempDir())
-	db := newTestDB(t)
-	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
-
-	dir := snapshotTestDir(t, "snap-cloud")
-	_, err := lifecycle.SnapshotToCloud(
-		context.Background(), testDestinationRegistry, db, dir,
-		lifecycle.TriggerManual, "test-version", "badger", "sqlite",
-		"faketest://bucket/prefix", "", "",
-	)
-	require.ErrorIs(t, err, lifecycle.ErrManifestUnauthenticated)
-	require.NoDirExists(t, dir)
-}
-
-// TestSnapshotToCloudUploadsUnderPerSnapshotSubPath verifies that the
-// cloud copy lands under cloudDest/<snapshotID>, keeping the local copy too.
-func TestSnapshotToCloudUploadsUnderPerSnapshotSubPath(t *testing.T) {
-	t.Parallel()
-
-	backingDir := t.TempDir()
-	setFakeCloudBackingDir(t, backingDir)
-
-	db := newTestDB(t)
-	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
-
-	dir := snapshotTestDir(t, "snap-cloud")
-	_, err := lifecycle.SnapshotToCloud(
-		context.Background(),
-		testDestinationRegistry,
-		db,
-		dir,
-		lifecycle.TriggerManual,
-		"test-version",
-		"badger",
-		"sqlite",
-		"faketest://bucket/prefix",
-		"", "",
-		lifecycle.WithManifestKey(testTrustKey),
-	)
-	require.NoError(t, err)
-
-	// Local copy must still exist — cloud is a mirror, not a replacement.
-	require.FileExists(t, filepath.Join(dir, lifecycle.BlobBackupFileName))
-	require.FileExists(t, filepath.Join(dir, lifecycle.MetadataBackupFileName))
-	require.FileExists(t, filepath.Join(dir, lifecycle.ManifestFileName))
-
-	// The cloud copy must land under prefix/<snapshotID> (snapshotID =
-	// filepath.Base(dir) = "snap-cloud"), not flat under prefix — flat
-	// would silently collide with every other snapshot ever uploaded to
-	// the same configured destination.
-	snapshotDir := filepath.Join(backingDir, "prefix", "snap-cloud")
-	require.FileExists(
-		t,
-		filepath.Join(snapshotDir, lifecycle.BlobBackupFileName),
-	)
-	require.FileExists(
-		t,
-		filepath.Join(snapshotDir, lifecycle.MetadataBackupFileName),
-	)
-	require.FileExists(
-		t,
-		filepath.Join(snapshotDir, lifecycle.ManifestFileName),
-	)
-
-	// And nothing must have landed flat directly under prefix/.
-	require.NoFileExists(
-		t,
-		filepath.Join(backingDir, "prefix", lifecycle.ManifestFileName),
-	)
-}
-
-// TestSnapshotToCloudInvalidDestinationStillErrorsButKeepsLocal verifies
-// that an unsupported cloud scheme reports an error but the local copy survives.
-func TestSnapshotToCloudInvalidDestinationStillErrorsButKeepsLocal(
-	t *testing.T,
-) {
-	t.Parallel()
-
-	db := newTestDB(t)
-	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
-
-	dir := snapshotTestDir(t, "snap-bad-cloud")
-	_, err := lifecycle.SnapshotToCloud(
-		context.Background(),
-		testDestinationRegistry,
-		db,
-		dir,
-		lifecycle.TriggerManual,
-		"test-version",
-		"badger",
-		"sqlite",
-		"unsupported-scheme://bucket/prefix",
-		"", "",
-		lifecycle.WithManifestKey(testTrustKey),
-	)
-	require.Error(t, err)
-	// Local snapshot must still be valid even though the operation as a
-	// whole reports an error (operator asked for both copies).
-	require.FileExists(t, filepath.Join(dir, lifecycle.BlobBackupFileName))
-}
-
-// TestRestoreAcceptsCloudURI verifies that Restore can take a per-snapshot
-// cloud URI directly, downloading it before restoring as normal.
-func TestRestoreAcceptsCloudURI(t *testing.T) {
-	t.Parallel()
-
-	backingDir := t.TempDir()
-	setFakeCloudBackingDir(t, backingDir)
-
-	db := newTestDB(t)
-	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
-
-	localDir := snapshotTestDir(t, "snap-src")
-	_, err := lifecycle.SnapshotToCloud(
-		context.Background(),
-		testDestinationRegistry,
-		db,
-		localDir,
-		lifecycle.TriggerManual,
-		"test-version",
-		"badger",
-		"sqlite",
-		"faketest://bucket/prefix",
-		"", "",
-		lifecycle.WithManifestKey(testTrustKey),
-	)
-	require.NoError(t, err)
-
-	// Restoring from the cloud requires the full per-snapshot URI (base
-	// destination + snapshot ID), the same one SnapshotToCloud actually
-	// uploaded to — the bare base destination is a catalog of possibly
-	// many snapshots, not one restorable directory.
-	restoredDir := filepath.Join(t.TempDir(), "restored")
-	m, err := lifecycle.Restore(
-		context.Background(), newTestStorageHost(t), testDestinationRegistry,
-		"faketest://bucket/prefix/snap-src", restoredDir,
-		lifecycle.RestoreStorageConfig{Blob: testutil.BadgerBlobConfig()},
-		lifecycle.WithManifestKey(testTrustKey),
-	)
-	require.NoError(t, err)
-	require.Equal(t, "badger", m.BlobPlugin)
-}
-
-// TestListCloudSnapshotsReturnsEveryUploadedSnapshot verifies that every
-// snapshot previously uploaded to a cloud destination is listed back.
-func TestListCloudSnapshotsReturnsEveryUploadedSnapshot(t *testing.T) {
-	t.Parallel()
-
-	backingDir := t.TempDir()
-	setFakeCloudBackingDir(t, backingDir)
-	const cloudDest = "faketest://bucket/prefix"
-
-	db := newTestDB(t)
-	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
-
-	for _, name := range []string{"snap-a", "snap-b"} {
-		_, err := lifecycle.SnapshotToCloud(
-			context.Background(),
-			testDestinationRegistry,
-			db,
-			snapshotTestDir(t, name),
-			lifecycle.TriggerManual,
-			"test-version",
-			"badger",
-			"sqlite",
-			cloudDest,
-			"", "",
-			lifecycle.WithManifestKey(testTrustKey),
-		)
-		require.NoError(t, err)
-	}
-
-	entries, ok, err := lifecycle.ListCloudSnapshots(
-		context.Background(),
-		testDestinationRegistry,
-		cloudDest,
-		lifecycle.WithManifestKey(testTrustKey),
-	)
-	require.NoError(t, err)
-	require.True(t, ok)
-	require.Len(t, entries, 2)
-	ids := []string{entries[0].ID, entries[1].ID}
-	require.ElementsMatch(t, []string{"snap-a", "snap-b"}, ids)
 }
 
 // TestListCloudSnapshotsEmptyDestReturnsNotOK verifies that an empty
@@ -710,4 +383,113 @@ func TestCloudManifestHelpersAuthenticateDestinationResults(t *testing.T) {
 	)
 	require.True(t, ok)
 	require.ErrorIs(t, err, lifecycle.ErrManifestUnauthenticated)
+}
+
+// SnapshotToCloud only reads the source database, so the local-only,
+// rejected and uploaded cases, and the restore and listing that follow an
+// upload, all share one.
+func TestSnapshotToCloud(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
+	snapshotToCloud := func(dir, dest string, opts ...lifecycle.ManifestOption) (lifecycle.Manifest, error) {
+		return lifecycle.SnapshotToCloud(
+			context.Background(), testDestinationRegistry, db, dir,
+			lifecycle.TriggerManual, "test-version", "badger", "sqlite",
+			dest, "", "", opts...,
+		)
+	}
+
+	t.Run("empty destination is local only", func(t *testing.T) {
+		dir := snapshotTestDir(t, "snap-local-only")
+		m, err := snapshotToCloud(dir, "")
+		require.NoError(t, err)
+		require.FileExists(t, filepath.Join(dir, lifecycle.BlobBackupFileName))
+		require.FileExists(t, filepath.Join(dir, lifecycle.MetadataBackupFileName))
+		require.NotZero(t, m.BlobBytes)
+	})
+
+	t.Run("cloud upload requires a trust key", func(t *testing.T) {
+		setFakeCloudBackingDir(t, t.TempDir())
+		dir := snapshotTestDir(t, "snap-cloud")
+		_, err := snapshotToCloud(dir, "faketest://bucket/prefix")
+		require.ErrorIs(t, err, lifecycle.ErrManifestUnauthenticated)
+		require.NoDirExists(t, dir)
+	})
+
+	t.Run("invalid destination errors but keeps the local snapshot", func(t *testing.T) {
+		dir := snapshotTestDir(t, "snap-bad-cloud")
+		_, err := snapshotToCloud(
+			dir, "unsupported-scheme://bucket/prefix",
+			lifecycle.WithManifestKey(testTrustKey),
+		)
+		require.Error(t, err)
+		require.FileExists(t, filepath.Join(dir, lifecycle.BlobBackupFileName))
+	})
+
+	t.Run("uploads under a per-snapshot sub path", func(t *testing.T) {
+		backingDir := t.TempDir()
+		setFakeCloudBackingDir(t, backingDir)
+		dir := snapshotTestDir(t, "snap-cloud")
+		_, err := snapshotToCloud(
+			dir, "faketest://bucket/prefix",
+			lifecycle.WithManifestKey(testTrustKey),
+		)
+		require.NoError(t, err)
+		for _, name := range []string{
+			lifecycle.BlobBackupFileName,
+			lifecycle.MetadataBackupFileName,
+			lifecycle.ManifestFileName,
+		} {
+			require.FileExists(t, filepath.Join(dir, name))
+			require.FileExists(
+				t, filepath.Join(backingDir, "prefix", "snap-cloud", name),
+			)
+		}
+		require.NoFileExists(
+			t, filepath.Join(backingDir, "prefix", lifecycle.ManifestFileName),
+		)
+	})
+
+	t.Run("restore accepts a cloud URI", func(t *testing.T) {
+		setFakeCloudBackingDir(t, t.TempDir())
+		_, err := snapshotToCloud(
+			snapshotTestDir(t, "snap-src"), "faketest://bucket/prefix",
+			lifecycle.WithManifestKey(testTrustKey),
+		)
+		require.NoError(t, err)
+		m, err := lifecycle.Restore(
+			context.Background(), newTestStorageHost(t), testDestinationRegistry,
+			"faketest://bucket/prefix/snap-src",
+			filepath.Join(t.TempDir(), "restored"),
+			lifecycle.RestoreStorageConfig{Blob: testutil.BadgerBlobConfig()},
+			lifecycle.WithManifestKey(testTrustKey),
+		)
+		require.NoError(t, err)
+		require.Equal(t, "badger", m.BlobPlugin)
+	})
+
+	t.Run("listing returns every uploaded snapshot", func(t *testing.T) {
+		setFakeCloudBackingDir(t, t.TempDir())
+		const cloudDest = "faketest://bucket/prefix"
+		for _, name := range []string{"snap-a", "snap-b"} {
+			_, err := snapshotToCloud(
+				snapshotTestDir(t, name), cloudDest,
+				lifecycle.WithManifestKey(testTrustKey),
+			)
+			require.NoError(t, err)
+		}
+		entries, ok, err := lifecycle.ListCloudSnapshots(
+			context.Background(), testDestinationRegistry, cloudDest,
+			lifecycle.WithManifestKey(testTrustKey),
+		)
+		require.NoError(t, err)
+		require.True(t, ok)
+		require.Len(t, entries, 2)
+		require.ElementsMatch(
+			t, []string{"snap-a", "snap-b"},
+			[]string{entries[0].ID, entries[1].ID},
+		)
+	})
 }

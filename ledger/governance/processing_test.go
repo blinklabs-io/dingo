@@ -238,6 +238,11 @@ func TestGovernanceEffectsRejectOverwideCostModelLanguageIDs(t *testing.T) {
 	for _, era := range []string{"Conway", "Dijkstra"} {
 		for _, languageID := range []uint{255, 256} {
 			for path, apply := range paths {
+				// 255 is only the boundary control; the rejection of 256
+				// is what each path must prove.
+				if languageID == 255 && path != "persistence core" {
+					continue
+				}
 				name := fmt.Sprintf("%s/language-%d/%s", era, languageID, path)
 				t.Run(name, func(t *testing.T) {
 					t.Parallel()

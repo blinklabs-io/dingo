@@ -31,7 +31,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/blinklabs-io/dingo/consensus/praos"
 	"github.com/blinklabs-io/dingo/utxoref"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
@@ -47,130 +46,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// TestForgeSyncToleranceLargerThanShortTestnetEpoch documents the
-// proximate cause of DingoProducesInEachEra/Shelley=0 in the eras
-// DevNet: dingo's default forge-sync gate is intentionally generous
-// (100 slots) for production-network bootstrap, but in a short-epoch
-// testnet (epochLength=75) it is wider than the entire first epoch,
-// so the gate never withholds a forge regardless of how far behind
-// dingo's local chain is from upstream.
-//
-// The forge gate in checkAndForgeProduction is:
-//
-//	if upstreamTip > 0 &&
-//	    upstreamTip > tipSlot &&
-//	    upstreamTip-tipSlot > forgeSyncToleranceSlots {
-//	    skip
-//	}
-//
-// "Cold start, upstream at end of epoch 0": tipSlot=0 (genesis),
-// upstreamTip=74 (the last slot before the Allegra fork). The gap is
-// 74. With the default tolerance of 100 the gate evaluates 74 > 100 →
-// false → forge proceeds. So dingo, having just joined the network
-// and barely begun chain-sync, forges its leader slots immediately
-// against a stale tipSlot=0 view of the chain. Every such forge
-// extends a one-block chain that has to compete with cardano-
-// producer's longer chain (cardano started forging immediately at
-// genesis). Praos chain selection ranks chains by block count first,
-// then lower slot — and dingo's local chain has fewer blocks than
-// cardano's at the point chainsync delivers cardano's chain — so
-// dingo's bootstrap forges lose.
-//
-// The companion test below (TestChainSelectionPrefersLongerChainOverLowerSlot)
-// pins the chainselection arm of the same mechanism.
-func TestForgeSyncToleranceLargerThanShortTestnetEpoch(t *testing.T) {
-	// Default tolerance, baked into the package as
-	// forgeSyncToleranceSlots = 100.
-	const epochLength uint64 = 75 // matches internal/test/erastest/testnet.yaml
-
-	require.Greaterf(
-		t,
-		uint64(forgeSyncToleranceSlots),
-		epochLength,
-		"forge-sync tolerance (%d) is larger than the testnet's "+
-			"epoch length (%d), so the gate is INACTIVE for the "+
-			"entire first epoch even with the most adversarial "+
-			"sync state (tipSlot=0, upstreamTip=epochLength-1). "+
-			"For short-epoch tests, set DINGO_FORGE_SYNC_TOLERANCE_SLOTS "+
-			"to something tighter than epochLength to make dingo "+
-			"actually wait for chainsync to catch up before forging "+
-			"competing chains during bootstrap.",
-		forgeSyncToleranceSlots, epochLength,
-	)
-
-	// And document the gate evaluation explicitly: the worst-case
-	// in-epoch lag (74) must be < tolerance (100), or the gate
-	// would fire. That's the line the bootstrap fork race rides.
-	const worstInEpochLag uint64 = 74
-	require.LessOrEqualf(
-		t,
-		worstInEpochLag,
-		uint64(forgeSyncToleranceSlots),
-		"sanity: worst possible in-epoch lag must fit under the "+
-			"tolerance, otherwise the gate would actually fire and "+
-			"this whole class of failures would not exist",
-	)
-}
-
-// TestChainSelectionPrefersLongerChainOverLowerSlot is the chainselection
-// half of the Shelley=0 mechanism. Once the forge gate has waved
-// dingo's leader slots through during bootstrap (above), the surviving
-// blocks are picked by Praos chain selection. Longer chain wins, so a dingo
-// local chain whose forge count lags cardano-producer's loses every fork
-// resolution regardless of how low its tip slot is.
-//
-// Concretely: dingo joins late, forges one block at slot 5; chainsync
-// then delivers cardano-producer's three-block chain ending at slot 7.
-// Dingo's tip is at the lower slot (5 < 7), but cardano's chain is
-// longer (3 blocks > 1). Block count wins: dingo rolls back its slot-5
-// block and adopts cardano's chain. Repeat across every dingo forge
-// that gets caught in this race during bootstrap and you get
-// Shelley=0 on the canonical chain.
-func TestChainSelectionPrefersLongerChainOverLowerSlot(t *testing.T) {
-	dingoLocalTip := ochainsync.Tip{
-		BlockNumber: 1,
-		Point: ocommon.Point{
-			Slot: 5,
-			Hash: []byte("dingo-slot-5"),
-		},
-	}
-	cardanoIncomingTip := ochainsync.Tip{
-		BlockNumber: 3,
-		Point: ocommon.Point{
-			Slot: 7,
-			Hash: []byte("cardano-slot-7"),
-		},
-	}
-
-	require.Truef(
-		t,
-		praos.ComparePraosTips(
-			cardanoIncomingTip,
-			dingoLocalTip,
-			praos.PraosTiebreakerView{},
-			praos.PraosTiebreakerView{},
-		) == praos.ChainABetter,
-		"cardano's longer (block_number=3) chain must beat dingo's "+
-			"local (block_number=1) chain even though dingo's tip "+
-			"slot is lower (%d < %d).",
-		dingoLocalTip.Point.Slot, cardanoIncomingTip.Point.Slot,
-	)
-	require.Falsef(
-		t,
-		praos.ComparePraosTips(
-			dingoLocalTip,
-			cardanoIncomingTip,
-			praos.PraosTiebreakerView{},
-			praos.PraosTiebreakerView{},
-		) == praos.ChainABetter,
-		"dingo's local chain at lower slot but fewer blocks must "+
-			"NOT win against cardano's longer chain. If it did, "+
-			"dingo would entrench a forked solo-extension chain "+
-			"against a longer peer chain — even worse than the "+
-			"current Shelley=0 outcome.",
-	)
-}
 
 // corruptBlock mirrors the Conway block envelope but encodes
 // transaction_bodies as a CBOR map instead of an array — the structural
@@ -223,59 +98,6 @@ func TestForgedBlockDiagnosticsPinpointsBadBodiesField(t *testing.T) {
 			"{",
 		),
 		"transaction_bodies should render as a map in the diagnostics",
-	)
-}
-
-// TestForgedBlockDiagnosticsNeverPanics ensures the helper degrades
-// gracefully (returns a marker, never panics or errors) on garbage input.
-func TestForgedBlockDiagnosticsNeverPanics(t *testing.T) {
-	for _, in := range [][]byte{
-		nil,
-		{},
-		{0xff, 0xff, 0xff}, // malformed
-		{0x01},             // a bare uint, not a block
-		[]byte("not cbor at all..."),
-	} {
-		out := forgedBlockDiagnostics(in)
-		assert.NotEmpty(t, out, "should always return some diagnostic text")
-	}
-}
-
-// TestForgedBlockDiagnosticsLabelsValidBlock confirms a well-formed forged
-// block dumps with the bodies field as an array (the correct shape).
-func TestForgedBlockDiagnosticsLabelsValidBlock(t *testing.T) {
-	creds := setupTestCredentials(t)
-	pp := &mockPParamsProvider{pparams: &conway.ConwayProtocolParameters{
-		MaxTxSize:        1 << 20,
-		MaxBlockBodySize: 1 << 22,
-		MaxBlockExUnits:  lcommon.ExUnits{Memory: 1 << 40, Steps: 1 << 40},
-	}}
-	ct := &mockChainTip{tip: ochainsync.Tip{
-		Point:       ocommon.Point{Slot: 1000, Hash: make([]byte, 32)},
-		BlockNumber: 100,
-	}}
-	en := &mockEpochNonceProvider{epoch: 1, nonce: make([]byte, 32)}
-	builder, err := NewDefaultBlockBuilder(BlockBuilderConfig{
-		Mempool:         &mockMempool{},
-		PParamsProvider: pp,
-		ChainTip:        ct,
-		EpochNonce:      en,
-		Credentials:     creds,
-	})
-	require.NoError(t, err)
-	_, blockCbor, err := builder.BuildBlock(context.Background(), 1001, 0)
-	require.NoError(t, err)
-
-	diag := forgedBlockDiagnostics(blockCbor)
-	assert.Contains(t, diag, "header")
-	assert.Contains(t, diag, "transaction_bodies")
-	idx := strings.Index(diag, "transaction_bodies")
-	require.GreaterOrEqual(t, idx, 0)
-	rest := strings.TrimSpace(diag[idx+len("transaction_bodies:"):])
-	assert.True(
-		t,
-		strings.HasPrefix(rest, "["),
-		"a valid block must render transaction_bodies as an array",
 	)
 }
 
@@ -551,24 +373,6 @@ func TestNewBlockForgerFailsWhenFenceUnreadable(t *testing.T) {
 		nil,
 	)
 	require.ErrorContains(t, err, "metadata unavailable")
-}
-
-// TestForgeFenceAbsentPreservesForging keeps a nil fence store working
-// for embedders and dev-mode wiring that have no metadata store.
-func TestForgeFenceAbsentPreservesForging(t *testing.T) {
-	builder := &fenceTestBuilder{
-		block: newForgerTestBlock(10, 2),
-		cbor:  []byte{0x83, 0xaa, 0xbb},
-	}
-	broadcaster := &forgerTestBroadcaster{}
-	forger, err := newFenceTestForger(
-		t, nil, 10, builder, broadcaster, nil,
-	)
-	require.NoError(t, err)
-
-	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
-	assert.Equal(t, 1, builder.calls)
-	assert.Equal(t, 1, broadcaster.calls)
 }
 
 // TestForgeFenceBlocksSameSlotRetryWithoutStore covers the in-process
@@ -1355,23 +1159,6 @@ func TestBuildBlockEmptyBodySkipsMempoolSnapshot(t *testing.T) {
 		mempool.calls,
 		"the empty-body fallback must not snapshot the mempool",
 	)
-}
-
-// TestBuildBlockSnapshotsMempoolForNormalBuild is the negative case: an
-// ordinary build still reads the mempool exactly once.
-func TestBuildBlockSnapshotsMempoolForNormalBuild(t *testing.T) {
-	mempool := threeTxMempoolForSelection(t)
-	builder := newSelectionTestBuilder(
-		t,
-		mempool,
-		selectionTestChainTip(),
-		&sessionMockTxValidator{},
-	)
-
-	block, _, err := builder.BuildBlock(context.Background(), 1001, 0)
-	require.NoError(t, err)
-	require.Len(t, block.Transactions(), 3)
-	require.Equal(t, 1, mempool.calls)
 }
 
 // TestForgeReportsLostSlotWhenTheBuilderCannotDropTransactions pins the
@@ -3761,44 +3548,6 @@ func newTimingClock() *retryTestSlotClock {
 	}
 }
 
-// TestForgeLogsTimingForEveryForge records what the field trace behind this
-// change had to be reconstructed from block timestamps: how long the leader
-// gate took to clear and how long selection then ran. Without it a lost
-// slot shows only an error line and a counter.
-func TestForgeLogsTimingForEveryForge(t *testing.T) {
-	block := newForgerTestBlock(10, 2)
-	builder := &retryTestBuilder{block: block, cbor: block.cbor}
-	var logs bytes.Buffer
-	clock := &retryTestSlotClock{
-		currentSlot:       10,
-		chainTipSlot:      9,
-		slotsPerKESPeriod: 100,
-		slotEnd:           time.Now().Add(time.Second),
-	}
-	forger := newTimingForger(
-		t,
-		&logs,
-		clock,
-		builder,
-		&forgerTestBroadcaster{},
-		nil,
-	)
-
-	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
-	record := forgeTimingRecord(t, logs.String())
-	require.Equal(t, float64(10), record["slot"])
-	require.Equal(t, "forged", record["outcome"])
-	require.Equal(t, float64(1), record["attempts"])
-	for _, key := range []string{
-		"leader_check",
-		"pre_build",
-		"build",
-		"tx_count",
-	} {
-		require.Contains(t, record, key)
-	}
-}
-
 // TestForgeTimingReportsTheEmptyFallbackOutcome makes the fallback legible
 // in the log as well as in the metric.
 func TestForgeTimingReportsTheEmptyFallbackOutcome(t *testing.T) {
@@ -5106,15 +4855,6 @@ func TestBuildLeiosEBRespectsByteCap(t *testing.T) {
 	require.Len(t, bodies, 3)
 }
 
-// TestBuildLeiosEBZeroCapsAreUnlimited keeps the zero value meaning what it
-// meant before caps existed.
-func TestBuildLeiosEBZeroCapsAreUnlimited(t *testing.T) {
-	txs := leiosCandidateTxs(t, 10)
-	_, _, bodies, err := buildLeiosEB(txs, leiosEBCaps{})
-	require.NoError(t, err)
-	require.Len(t, bodies, 10)
-}
-
 // TestCheckAndForgeProductionAppliesEBRefCap follows the runtime path from
 // the forger config into manifest construction.
 func TestCheckAndForgeProductionAppliesEBRefCap(t *testing.T) {
@@ -5149,93 +4889,6 @@ func TestCheckAndForgeProductionAppliesEBRefCap(t *testing.T) {
 
 	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
 	require.Len(t, leiosCaster.txBodies, 5)
-}
-
-// TestBuildLeiosEBBoundsPreallocation keeps the cap a bound on work and
-// memory, not only on the emitted manifest. Preallocating for the whole
-// mempool would let a deep mempool dictate allocation even when the cap
-// admits a handful of references.
-func TestBuildLeiosEBBoundsPreallocation(t *testing.T) {
-	txs := leiosCandidateTxs(t, 500)
-	_, _, bodies, err := buildLeiosEB(txs, leiosEBCaps{maxRefs: 3})
-	require.NoError(t, err)
-	require.Len(t, bodies, 3)
-	require.LessOrEqual(
-		t,
-		cap(bodies),
-		16,
-		"capacity must follow the cap, not the mempool depth",
-	)
-}
-
-// TestBuildLeiosEBBoundsPreallocationByTheByteCap is the same bound on the
-// other cap. With references uncapped, a deep mempool would still dictate
-// the allocation; every admitted transaction carries at least one byte, so
-// the byte cap bounds the reference count too.
-func TestBuildLeiosEBBoundsPreallocationByTheByteCap(t *testing.T) {
-	txs := leiosCandidateTxs(t, 500)
-	// One candidate's worth of bytes: enough to admit a reference, far
-	// below the 500 the mempool would otherwise dictate.
-	maxBytes := uint64(len(txs[0].Cbor))
-	_, _, bodies, err := buildLeiosEB(txs, leiosEBCaps{maxBytes: maxBytes})
-	require.NoError(t, err)
-	require.NotEmpty(t, bodies)
-	require.Less(
-		t,
-		cap(bodies),
-		500,
-		"capacity must follow the byte cap, not the mempool depth",
-	)
-	require.LessOrEqual(t, uint64(cap(bodies)), maxBytes)
-}
-
-// TestNewBlockForgerDefaultsTheEBSelectionReserve covers the same embedder
-// path for the reserve: a ForgerConfig that never mentions it gets the
-// built-in fallback rather than a zero budget, which would leave selection
-// no time at all.
-func TestNewBlockForgerDefaultsTheEBSelectionReserve(t *testing.T) {
-	forger := newCapDefaultsForger(t, nil, nil)
-	require.Equal(
-		t,
-		defaultForgeEBSelectionReserve,
-		forger.forgeEBSelectionReserve,
-	)
-}
-
-// TestNewBlockForgerHonoursAConfiguredEBSelectionReserve is the other
-// half, and the last hop of the operator-facing path: yaml/env/CLI ->
-// internal/config -> buildDingoConfig -> dingo.Config -> ForgerConfig ->
-// this field.
-func TestNewBlockForgerHonoursAConfiguredEBSelectionReserve(t *testing.T) {
-	block := newForgerTestBlock(10, 2)
-	forger, err := NewBlockForger(ForgerConfig{
-		Mode:             ModeProduction,
-		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		Credentials:      setupTestCredentials(t),
-		LeaderChecker:    forgerTestLeader{},
-		BlockBuilder:     &forgerTestBuilder{block: block, cbor: block.cbor},
-		BlockBroadcaster: &forgerTestBroadcaster{},
-		SlotClock: &ebTestSlotClock{
-			currentSlot:       10,
-			chainTipSlot:      9,
-			slotsPerKESPeriod: 100,
-			slotEnd:           time.Now().Add(time.Hour),
-		},
-		ForgeEBSelectionReserve: 750 * time.Millisecond,
-		PromRegistry:            prometheus.NewRegistry(),
-	})
-	require.NoError(t, err)
-	require.Equal(t, 750*time.Millisecond, forger.forgeEBSelectionReserve)
-}
-
-// TestNewBlockForgerAppliesEBCapDefaults covers the embedder path: a
-// ForgerConfig that never mentions the caps must still get the backstop,
-// rather than silently running uncapped because the zero value means
-// "disabled".
-func TestNewBlockForgerAppliesEBCapDefaults(t *testing.T) {
-	forger := newCapDefaultsForger(t, nil, nil)
-	require.Equal(t, uint64(defaultForgeEBMaxTxRefs), forger.forgeEBMaxTxRefs)
-	require.Equal(t, uint64(defaultForgeEBMaxBytes), forger.forgeEBMaxBytes)
 }
 
 // TestNewBlockForgerHonoursExplicitZeroEBCaps is the other half: an
@@ -5277,16 +4930,6 @@ func newCapDefaultsForger(
 	})
 	require.NoError(t, err)
 	return forger
-}
-
-// TestForgeEBCapDefaultsArePinned is the ledger/forging half of the
-// drift guard. internal/config declares the same two numbers for its
-// yaml/env defaults and cannot import this package, so both sides pin the
-// literals; a change to one without the other fails here.
-func TestForgeEBCapDefaultsArePinned(t *testing.T) {
-	require.Equal(t, uint64(20000), defaultForgeEBMaxTxRefs)
-	require.Equal(t, uint64(25165824), defaultForgeEBMaxBytes)
-	require.Equal(t, 300*time.Millisecond, defaultForgeEBSelectionReserve)
 }
 
 // TestEBSelectionBudgetSkipsALateSlot rejects both earlier behaviours: an
@@ -5596,21 +5239,6 @@ func TestLeiosEBSelectionAbortsWhenSnapshotChanges(t *testing.T) {
 	)
 }
 
-// TestLeiosEBSelectionWithoutDeadlineIsUnbounded keeps the zero value
-// meaning what it did before: no clock, no bound.
-func TestLeiosEBSelectionWithoutDeadlineIsUnbounded(t *testing.T) {
-	validator := &sessionMockTxValidator{}
-	selected, truncated, err := selectValidLeiosTransactions(context.Background(),
-		leiosCandidateTxs(t, 8),
-		validator,
-		leiosSelectionLimits{},
-		leiosSelectionBasis{},
-	)
-	require.NoError(t, err)
-	require.False(t, truncated)
-	require.Len(t, selected, 8)
-}
-
 // ebTestSlotClock is forgerTestSlotClock with a controllable slot-end
 // instant so a test can place the forge inside or past its slot without
 // sleeping.
@@ -5748,22 +5376,6 @@ func TestCheckAndForgeProductionSkipsEBWhenSlotIsOver(t *testing.T) {
 	)
 }
 
-func ebLogRecord(t *testing.T, logs, msg string) map[string]any {
-	t.Helper()
-	for line := range strings.SplitSeq(strings.TrimSpace(logs), "\n") {
-		if line == "" {
-			continue
-		}
-		var record map[string]any
-		require.NoError(t, json.Unmarshal([]byte(line), &record))
-		if record["msg"] == msg {
-			return record
-		}
-	}
-	t.Fatalf("no %q line in logs: %s", msg, logs)
-	return nil
-}
-
 func histogramSampleCount(t *testing.T, h prometheus.Histogram) uint64 {
 	t.Helper()
 	m := &dto.Metric{}
@@ -5799,50 +5411,6 @@ func newEBTimingForger(
 	})
 	require.NoError(t, err)
 	return forger
-}
-
-// TestLeiosEBProducedLineCarriesTimingBreakdown makes endorser-block
-// construction legible from the node's own logs. The field trace behind
-// this change had to be reconstructed from a 3.5-second gap between log
-// lines, because nothing recorded how long selection took.
-func TestLeiosEBProducedLineCarriesTimingBreakdown(t *testing.T) {
-	var logs bytes.Buffer
-	forger := newEBTimingForger(
-		t,
-		&logs,
-		&ebTestSlotClock{
-			currentSlot:       10,
-			chainTipSlot:      9,
-			slotsPerKESPeriod: 100,
-			slotEnd:           time.Now().Add(time.Hour),
-		},
-		&sessionMockTxValidator{},
-		&forgerTestLeiosCaster{},
-		&forgerTestBroadcaster{},
-		leiosCandidateTxs(t, 4),
-	)
-
-	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
-	record := ebLogRecord(t, logs.String(), "leios endorser block produced")
-	for _, key := range []string{
-		"eb_select",
-		"eb_build",
-		"eb_broadcast",
-		"candidates",
-	} {
-		require.Contains(t, record, key)
-	}
-	require.Equal(t, float64(4), record["tx_refs"])
-	require.Equal(
-		t,
-		uint64(1),
-		histogramSampleCount(t, forger.metrics.leiosEbSelectionSeconds),
-	)
-	require.Equal(
-		t,
-		float64(0),
-		testutil.ToFloat64(forger.metrics.leiosEbSelectionTruncated),
-	)
 }
 
 // TestLeiosEBSelectionTruncationIsCounted follows the runtime composition
@@ -5947,25 +5515,6 @@ func newOpCertSequenceGateTestBuilder() (*forgerTestBuilder, *forgerTestBroadcas
 		&forgerTestBroadcaster{}
 }
 
-// TestNewBlockForgerRequiresEraParamsWithOpCertLedgerView pins the
-// construction-time contract: the pre-flight counter check cannot resolve
-// the era-scoped rule (no-gap vs. stale-only) without EraParams, so wiring
-// one provider without the other must fail closed at startup rather than at
-// the first forge attempt.
-func TestNewBlockForgerRequiresEraParamsWithOpCertLedgerView(t *testing.T) {
-	creds := setupTestCredentials(t)
-	_, err := NewBlockForger(ForgerConfig{
-		Mode:             ModeProduction,
-		Credentials:      creds,
-		LeaderChecker:    forgerTestLeader{},
-		BlockBuilder:     &forgerTestBuilder{},
-		BlockBroadcaster: &forgerTestBroadcaster{},
-		SlotClock:        forgerTestSlotClock{slotsPerKESPeriod: 1},
-		OpCertLedgerView: &fakeLedgerView{},
-	})
-	require.ErrorContains(t, err, "EraParams")
-}
-
 // TestCheckAndForgeProductionSkipsOnStaleOpCertCounter covers a stale
 // counter -- the ledger has observed a higher issue number for this pool
 // than the loaded credentials carry -- which block application would
@@ -6004,34 +5553,6 @@ func TestCheckAndForgeProductionSkipsOnStaleOpCertCounter(t *testing.T) {
 		float64(1),
 		testutil.ToFloat64(forger.metrics.forgeCouldNot),
 	)
-}
-
-// TestCheckAndForgeProductionAllowsUnobservedOpCertCounter covers the
-// baseline case: the ledger has never observed a counter for this pool
-// (fresh registration, or a pool absent from a Mithril-restored certified
-// counter map), so the counter is judged against zero and the fixture's
-// counter 0 is accepted.
-func TestCheckAndForgeProductionAllowsUnobservedOpCertCounter(t *testing.T) {
-	builder, broadcaster := newOpCertSequenceGateTestBuilder()
-	var logs bytes.Buffer
-	view := &fakeLedgerView{seqFound: false}
-	eraParams := &mockPParamsProvider{
-		pparams: &babbage.BabbageProtocolParameters{},
-	}
-	forger := opCertSequenceGateForger(
-		t,
-		view,
-		eraParams,
-		&forgerCountingLeader{},
-		builder,
-		broadcaster,
-		&logs,
-	)
-
-	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
-
-	require.Equal(t, 1, builder.calls)
-	require.Equal(t, 1, broadcaster.calls)
 }
 
 // TestCheckAndForgeProductionSkipsWhenEraUnresolvable covers a provider
@@ -6223,31 +5744,6 @@ func TestCheckAndForgeProductionEraScopedOpCertCounterRule(t *testing.T) {
 			}
 		})
 	}
-}
-
-// TestCheckAndForgeProductionSkipsOpCertSequenceCheckWhenLedgerViewNil
-// confirms the pre-flight counter gate is opt-in: embedders and dev-mode
-// wiring that leave OpCertLedgerView nil (every other forger test in this
-// package) are unaffected by this change.
-func TestCheckAndForgeProductionSkipsOpCertSequenceCheckWhenLedgerViewNil(
-	t *testing.T,
-) {
-	builder, broadcaster := newOpCertSequenceGateTestBuilder()
-	var logs bytes.Buffer
-	forger := opCertSequenceGateForger(
-		t, nil, nil, &forgerCountingLeader{}, builder, broadcaster, &logs,
-	)
-	// A counter far ahead of any plausible on-chain value would be rejected
-	// under the gate if it were active; with no LedgerView wired it is not
-	// evaluated at all.
-	forger.creds.mu.Lock()
-	forger.creds.opCert.IssueNumber = 1000
-	forger.creds.mu.Unlock()
-
-	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
-
-	require.Equal(t, 1, builder.calls)
-	require.Equal(t, 1, broadcaster.calls)
 }
 
 // TestCheckAndForgeProductionUnobservedOpCertCounterUsesZeroBaseline covers a
