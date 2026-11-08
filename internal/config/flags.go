@@ -71,6 +71,12 @@ var flagSpecs = []flagSpec{
 	),
 	stringFlag("BindAddr", "bind-addr", "", "public bind address"),
 	stringFlag("SocketPath", "socket-path", "", "path to UNIX socket file"),
+	stringFlag(
+		"SocketMode",
+		"socket-mode",
+		"",
+		"octal permissions for the UNIX socket file",
+	),
 	transformStringFlag(
 		"RunMode",
 		"run-mode",
@@ -459,6 +465,12 @@ var flagSpecs = []flagSpec{
 		"dmq-socket-path",
 		"",
 		"Unix socket for local DMQ message submission and notification",
+	),
+	stringFlag(
+		"DMQ.SocketMode",
+		"dmq-socket-mode",
+		"",
+		"octal permissions for the local DMQ Unix socket",
 	),
 	uintFlag(
 		"DMQ.MessageTTL",

@@ -669,6 +669,8 @@ type DMQConfig struct {
 	// SocketPath is the Unix socket serving local message submission and
 	// notification. It must differ from the Cardano SocketPath.
 	SocketPath string `yaml:"socketPath"   envconfig:"DINGO_DMQ_SOCKET_PATH"`
+	// SocketMode is the octal permission mode for SocketPath.
+	SocketMode string `yaml:"socketMode"   envconfig:"DINGO_DMQ_SOCKET_MODE"`
 	// MessageTTL is the longest expiry, in seconds, a submitted message may
 	// claim.
 	MessageTTL uint `yaml:"messageTtl"   envconfig:"DINGO_DMQ_MESSAGE_TTL"`
@@ -715,6 +717,7 @@ func DefaultDMQConfig() DMQConfig {
 	return DMQConfig{
 		Topic:             "mithril",
 		SocketPath:        "dingo-dmq.socket",
+		SocketMode:        DefaultUnixSocketMode,
 		MessageTTL:        1800,
 		MaxMempoolSize:    128,
 		ListenAddress:     "0.0.0.0",
@@ -734,6 +737,7 @@ type Config struct {
 	CardanoConfig          string    `yaml:"cardanoConfig"                       envconfig:"config"`
 	DatabasePath           string    `yaml:"databasePath"                                                                                 split_words:"true"`
 	SocketPath             string    `yaml:"socketPath"                                                                                   split_words:"true"`
+	SocketMode             string    `yaml:"socketMode"                                                                                   split_words:"true"`
 	TlsCertFilePath        string    `yaml:"tlsCertFilePath"                     envconfig:"TLS_CERT_FILE_PATH"`
 	BindAddr               string    `yaml:"bindAddr"                                                                                     split_words:"true"`
 	PrivateBindAddr        string    `yaml:"privateBindAddr"                                                                              split_words:"true"`
@@ -1599,6 +1603,7 @@ func newDefaultConfig() *Config {
 		CardanoConfig:                       "", // Will be set dynamically based on network
 		DatabasePath:                        ".dingo",
 		SocketPath:                          "dingo.socket",
+		SocketMode:                          DefaultUnixSocketMode,
 		IntersectTip:                        false,
 		ValidateHistorical:                  true,
 		StrictUtxoValidation:                true,

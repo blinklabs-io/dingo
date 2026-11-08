@@ -237,11 +237,16 @@ func (n *Node) startDMQ() error {
 	if err != nil {
 		return fmt.Errorf("creating dmq authenticator: %w", err)
 	}
+	socketMode, err := internalconfig.ParseUnixSocketMode(cfg.SocketMode)
+	if err != nil {
+		return fmt.Errorf("invalid dmq socket mode: %w", err)
+	}
 	stack, err := dmq.NewStack(dmq.StackConfig{
 		Logger:       n.config.logger,
 		PromRegistry: n.retainedComponentPromRegistry(),
 		NetworkMagic: cfg.NetworkMagic,
 		SocketPath:   cfg.SocketPath,
+		SocketMode:   socketMode,
 		// #nosec G115 -- validation bounds both to fit int64 once scaled
 		MessageTTL: time.Duration(cfg.MessageTTL) * time.Second,
 		// #nosec G115 -- validation bounds both to fit int64 once scaled

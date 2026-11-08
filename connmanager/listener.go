@@ -37,9 +37,12 @@ const (
 )
 
 type ListenerConfig struct {
-	Listener       net.Listener
-	ListenNetwork  string
-	ListenAddress  string
+	Listener      net.Listener
+	ListenNetwork string
+	ListenAddress string
+	// UnixSocketMode is applied to pathname Unix sockets created by the
+	// connection manager. Zero preserves the caller's ambient creation policy.
+	UnixSocketMode os.FileMode
 	ConnectionOpts []ouroboros.ConnectionOptionFunc
 	UseNtC         bool
 	TrustedLocal   bool
@@ -56,7 +59,31 @@ func (c *ConnectionManager) startListeners(ctx context.Context) error {
 }
 
 func prepareUnixSocketPath(path string) error {
-	fi, err := os.Lstat(path)
+	return prepareUnixSocketPathWith(
+		path,
+		func() (os.FileInfo, error) { return os.Lstat(path) },
+		func() error { return os.Remove(path) },
+	)
+}
+
+func prepareUnixSocketPathInRoot(
+	root *os.Root,
+	name string,
+	path string,
+) error {
+	return prepareUnixSocketPathWith(
+		path,
+		func() (os.FileInfo, error) { return root.Lstat(name) },
+		func() error { return root.Remove(name) },
+	)
+}
+
+func prepareUnixSocketPathWith(
+	path string,
+	lstat func() (os.FileInfo, error),
+	remove func() error,
+) error {
+	fi, err := lstat()
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil
@@ -94,7 +121,7 @@ func prepareUnixSocketPath(path string) error {
 	// Re-read non-following metadata after the failed connection attempt. A
 	// replacement at the path must never inherit the stale verdict from the
 	// socket that was probed.
-	currentFi, err := os.Lstat(path)
+	currentFi, err := lstat()
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil
@@ -107,7 +134,7 @@ func prepareUnixSocketPath(path string) error {
 			path,
 		)
 	}
-	if err := os.Remove(path); err != nil {
+	if err := remove(); err != nil {
 		return fmt.Errorf(
 			"failed to remove existing socket file %s: %w",
 			path,
@@ -142,22 +169,26 @@ func (c *ConnectionManager) startListener(
 			}
 			l.Listener = listener
 		} else {
-			// For Unix domain sockets, remove only a confirmed stale socket file
-			// before binding.
-			if l.ListenNetwork == "unix" {
-				if err := prepareUnixSocketPath(l.ListenAddress); err != nil {
-					return err
-				}
-			}
 			listenConfig := net.ListenConfig{}
 			if l.ReuseAddress {
 				listenConfig.Control = socketControl
 			}
-			listener, err := listenConfig.Listen(
-				ctx,
-				l.ListenNetwork,
-				l.ListenAddress,
-			)
+			var listener net.Listener
+			var err error
+			if l.ListenNetwork == "unix" {
+				listener, err = createUnixSocketListener(
+					ctx,
+					listenConfig,
+					l.ListenAddress,
+					l.UnixSocketMode,
+				)
+			} else {
+				listener, err = listenConfig.Listen(
+					ctx,
+					l.ListenNetwork,
+					l.ListenAddress,
+				)
+			}
 			if err != nil {
 				return fmt.Errorf("failed to open listening socket: %w", err)
 			}

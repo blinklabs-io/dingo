@@ -17,13 +17,24 @@
 package connmanager
 
 import (
+	"context"
 	"errors"
 	"net"
+	"os"
 	"strings"
 	"syscall"
 
 	"github.com/Microsoft/go-winio"
 )
+
+func createUnixSocketListener(
+	_ context.Context,
+	_ net.ListenConfig,
+	_ string,
+	_ os.FileMode,
+) (net.Listener, error) {
+	return nil, errors.New("unix socket listener is not supported on Windows")
+}
 
 // socketControl is a no-op on Windows
 func socketControl(_network, _address string, _c syscall.RawConn) error {
