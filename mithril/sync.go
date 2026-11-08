@@ -834,7 +834,7 @@ func Sync(
 		}
 		if status == syncStatusBackfill {
 			syncResult, syncErr = resumeMithrilBackfill(
-				ctx, cfg, db, nodeCfg, pinnedDigest, logger,
+				ctx, cfg, db, nodeCfg, pinnedDigest, network, logger,
 			)
 			if syncErr != nil {
 				logger.Error(

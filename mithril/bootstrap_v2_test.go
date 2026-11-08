@@ -2598,6 +2598,71 @@ func TestSyncV2APIModeResumesBackfillWithoutAggregator(t *testing.T) {
 	)
 }
 
+// The backfill resume path must apply the same pin checks as the other resume
+// paths: a pin recorded for another network cannot be finished against this
+// run's configuration.
+func TestSyncV2APIModeBackfillResumeRejectsPinForOtherNetwork(t *testing.T) {
+	t.Parallel()
+
+	_, certifiedHash := validImmutableFiles(t, 1000)
+	fixture := newV2Fixture(t, v2FixtureOptions{
+		validImmutable:       true,
+		ancillaryLedgerState: minimalLedgerState(t, 1000, certifiedHash),
+		ancillaryLedgerSlot:  1000,
+	})
+	dataDir := t.TempDir()
+	baseConfig := SyncConfig{
+		Network:     "preprod",
+		DataDir:     dataDir,
+		StorageMode: "api",
+		CardanoNodeConfig: testNodeConfigWithMithrilKeys(
+			t, fixture.genesisVKey, fixture.ancillaryVKey,
+		),
+		Backend:           BackendV2,
+		AggregatorURL:     fixture.server.URL,
+		AllowInsecureHTTP: true,
+		VerifyCertChain:   true,
+		CleanupAfterLoad:  true,
+		StoragePlugins:    testStoragePlugins(),
+		DatabaseWorkers:   1,
+		BackfillBatchSize: node.DefaultBackfillBatchSize,
+		Logger:            slog.New(slog.DiscardHandler),
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var cancelled atomic.Bool
+	interrupted := baseConfig
+	interrupted.OnProgress = func(progress SyncProgress) {
+		if progress.Phase == PhaseBackfill && progress.Active &&
+			cancelled.CompareAndSwap(false, true) {
+			cancel()
+		}
+	}
+	_, err := Sync(ctx, interrupted)
+	require.ErrorIs(t, err, context.Canceled)
+	require.True(t, cancelled.Load(), "sync must reach backfill")
+
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir:     dataDir,
+		Logger:      slog.New(slog.DiscardHandler),
+		StorageMode: "api",
+	})
+	require.NoError(t, err)
+	pin, hasPin, err := getPinnedArtifact(db)
+	require.NoError(t, err)
+	require.True(t, hasPin)
+	pin.Network = "mainnet"
+	require.NoError(t, setPinnedArtifact(db, pin))
+	require.NoError(t, dbtest.CloseDatabase(db))
+
+	resumed := baseConfig
+	resumed.AggregatorURL = "http://127.0.0.1:1"
+	_, err = Sync(context.Background(), resumed)
+	require.ErrorContains(t, err, "pinned artifact")
+	require.ErrorContains(t, err, "network mainnet")
+}
+
 func listCacheEntries(t *testing.T, dataDir string) []string {
 	t.Helper()
 	var names []string

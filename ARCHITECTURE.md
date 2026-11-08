@@ -13786,9 +13786,11 @@ exactly as before: no coordinator starts and no aggregator is contacted.
 the database state alone, so the operator never needs to know it:
 
 - empty database -> full bootstrap
-- `sync_status` `backfill` in API mode -> resume the metadata backfill from
-  its checkpoint and finish the import; every block is already in the blob
-  store, so nothing is downloaded (`resumeMithrilBackfill`)
+- `sync_status` `backfill` in API mode, as an ordinary backfill with no
+  pending repair or catch-up -> resume the metadata backfill from its
+  checkpoint and finish the import; every block is already in the blob store,
+  so nothing is downloaded (`resumeMithrilBackfill`). The recorded artifact pin
+  is still checked against the run's backend and network first
 - any other non-empty `sync_status` (`in_progress`, or an unknown future value)
   -> resume the existing path against the pinned artifact (below), except an
   interrupted v2 core catch-up

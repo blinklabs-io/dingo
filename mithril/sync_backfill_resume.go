@@ -38,6 +38,7 @@ func resumeMithrilBackfill(
 	db *database.Database,
 	nodeCfg *cardano.CardanoNodeConfig,
 	explicitPin string,
+	network string,
 	logger *slog.Logger,
 ) (SyncResult, error) {
 	pin, hasPin, err := getPinnedArtifact(db)
@@ -46,6 +47,11 @@ func resumeMithrilBackfill(
 	}
 	if err := validateExplicitArtifactPin(explicitPin, pin, hasPin); err != nil {
 		return SyncResult{}, err
+	}
+	if hasPin {
+		if err := pin.validateForRun(cfg.Backend, network); err != nil {
+			return SyncResult{}, err
+		}
 	}
 	ledgerStateSlot, ledgerStateHash, err := mithrilLedgerAnchor(db)
 	if err != nil {
@@ -113,12 +119,12 @@ func resumeMithrilBackfill(
 		return SyncResult{}, err
 	}
 	cfg.emit(SyncProgress{Phase: PhaseIndexRebuild, Active: false})
-	pragmasRestored = true
 	if err := cleanupBulkLoadPragmas(); err != nil {
 		return SyncResult{}, fmt.Errorf(
 			"restoring normal metadata settings: %w", err,
 		)
 	}
+	pragmasRestored = true
 	if err := node.FinalizeMithrilBackfillPlannerStats(
 		ctx, db, logger, false,
 	); err != nil {
