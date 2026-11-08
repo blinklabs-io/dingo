@@ -9811,12 +9811,15 @@ node in this state cannot self-recover and needs operator intervention
 (e.g. re-bootstrapping from a Mithril snapshot). Local-tip progress discards
 the point's accumulated failures for every rollback reason, so a canonical
 node continuing to advance does not emit a false divergence diagnosis for a
-peer's fork. Without progress, protocol-constrained failures (exceeding K, the
-Mithril boundary, or the UTxO prune floor) escalate at the recurrence
-threshold. Peer-fork failures use the bounded local primary-chain membership
-check also used for historical headers: an absent point can advance the
-diagnosis immediately, while an on-chain point waits for the full tracking
-window. Unavailable chain state or a lookup error cannot produce a diagnosis.
+peer's fork. Without progress, every reason, including the protocol-constrained
+ones (exceeding K, the Mithril boundary, or the UTxO prune floor), uses the bounded
+local primary-chain membership check also used for historical headers: an
+absent point escalates at the recurrence threshold, while an on-chain point
+waits for the full tracking window, since a refused rollback to our own chain
+means the peer is behind or forked. Origin is on every chain and never
+escalates. A prune-floor rejection whose target is on the local chain is
+logged at WARN rather than ERROR. Unavailable chain state or a lookup error
+cannot produce a diagnosis.
 The membership result is cached for the unchanged local tip, avoiding repeated
 storage reads on the rollback-failure path.
 When the per-connection loop

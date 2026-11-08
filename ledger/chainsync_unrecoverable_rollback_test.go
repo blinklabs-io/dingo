@@ -413,40 +413,70 @@ func TestReportUnrecoverableRollbackDoesNotGuessOnLookupError(t *testing.T) {
 	)
 }
 
-func TestReportProtocolConstrainedRollbackEscalatesImmediately(t *testing.T) {
+var protocolConstrainedRollbackReasons = []string{
+	event.ChainsyncResyncReasonRollbackExceedsK,
+	event.ChainsyncResyncReasonRollbackExceedsMithril,
+	event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
+}
+
+// A protocol-constrained refusal of a point that is off our primary chain is
+// the genuine divergence signal and escalates at the recurrence threshold.
+func TestReportProtocolConstrainedRollbackOffChainEscalates(t *testing.T) {
 	t.Parallel()
-	for _, reason := range []string{
-		event.ChainsyncResyncReasonRollbackExceedsK,
-		event.ChainsyncResyncReasonRollbackExceedsMithril,
-		event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
-	} {
+	for _, reason := range protocolConstrainedRollbackReasons {
 		t.Run(reason, func(t *testing.T) {
 			t.Parallel()
 			fixture := newChainsyncRollbackFixture(t)
+			point := ocommon.NewPoint(
+				fixture.ancestorTip.Point.Slot,
+				testHashBytes("off-chain-rollback-point"),
+			)
 			for range unrecoverableRollbackThreshold {
-				fixture.ls.reportUnrecoverableRollbackIfStuck(fixture.ancestorTip.Point, reason, fixture.connId)
+				fixture.ls.reportUnrecoverableRollbackIfStuck(
+					point, reason, fixture.connId,
+				)
 			}
 			require.Equal(t, float64(1), promtestutil.ToFloat64(fixture.ls.metrics.unrecoverableRollbacks))
 		})
 	}
 }
 
-func TestReportProtocolConstrainedRollbackAtOrigin(t *testing.T) {
+// A refused rollback to a point on our own primary chain says the peer is
+// behind or forked, not that the local chain diverged.
+func TestReportProtocolConstrainedRollbackOnPrimaryChainDoesNotAlarm(t *testing.T) {
 	t.Parallel()
-	for _, reason := range []string{
-		event.ChainsyncResyncReasonRollbackExceedsK,
-		event.ChainsyncResyncReasonRollbackExceedsMithril,
-		event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
-	} {
+	for _, reason := range protocolConstrainedRollbackReasons {
 		t.Run(reason, func(t *testing.T) {
 			t.Parallel()
 			fixture := newChainsyncRollbackFixture(t)
-			for range unrecoverableRollbackThreshold {
+			for cycle := range unrecoverableRollbackThreshold * 3 {
 				fixture.ls.reportUnrecoverableRollbackIfStuck(
-					ocommon.Point{}, reason, fixture.connId,
+					fixture.ancestorTip.Point,
+					reason,
+					freshUnrecoverableConnId(5000+cycle),
 				)
 			}
-			require.Equal(t, float64(1), promtestutil.ToFloat64(fixture.ls.metrics.unrecoverableRollbacks))
+			require.Zero(t, promtestutil.ToFloat64(fixture.ls.metrics.unrecoverableRollbacks))
+		})
+	}
+}
+
+// Origin is on every chain, so a peer whose only intersection with us is
+// origin must never produce the divergence alarm.
+func TestReportProtocolConstrainedRollbackAtOriginDoesNotAlarm(t *testing.T) {
+	t.Parallel()
+	for _, reason := range protocolConstrainedRollbackReasons {
+		t.Run(reason, func(t *testing.T) {
+			t.Parallel()
+			fixture := newChainsyncRollbackFixture(t)
+			for cycle := range unrecoverableRollbackThreshold * 3 {
+				fixture.ls.reportUnrecoverableRollbackIfStuck(
+					ocommon.Point{},
+					reason,
+					freshUnrecoverableConnId(5000+cycle),
+				)
+			}
+			require.Zero(t, promtestutil.ToFloat64(fixture.ls.metrics.unrecoverableRollbacks))
 		})
 	}
 }

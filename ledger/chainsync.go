@@ -2741,6 +2741,25 @@ func (ls *LedgerState) headerAlreadyOnPrimaryChain(
 	return contains
 }
 
+// rollbackTargetOnLocalChain reports whether a peer-requested rollback target
+// is origin or a block on the local primary chain. A lookup error reports
+// false so the caller keeps the more severe classification.
+func (ls *LedgerState) rollbackTargetOnLocalChain(
+	point ocommon.Point,
+) bool {
+	if len(point.Hash) == 0 {
+		return point.Slot == 0
+	}
+	if ls.chain == nil {
+		return false
+	}
+	onPrimary, err := ls.historicalPointOnPrimaryChain(
+		point,
+		ls.chain.HeaderTip(),
+	)
+	return err == nil && onPrimary
+}
+
 // historicalPointOnPrimaryChain performs the bounded local membership check
 // shared by historical-header filtering and rollback diagnosis. It never
 // treats append-only blob presence as primary-chain membership and never
@@ -3988,7 +4007,13 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 			// boundary does. Returning the error instead would reach
 			// handleEventChainsync's fatal path and terminate the node on a
 			// rollback a peer chose.
-			ls.config.Logger.Error(
+			// A target on our own chain (origin included) means the peer is
+			// behind or forked, so it is not a local fault worth ERROR.
+			logRejection := ls.config.Logger.Error
+			if ls.rollbackTargetOnLocalChain(e.Point) {
+				logRejection = ls.config.Logger.Warn
+			}
+			logRejection(
 				"chainsync rollback is below the consumed UTxO prune floor, rejecting peer chain",
 				"component",
 				"ledger",
