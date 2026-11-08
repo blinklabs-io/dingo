@@ -148,3 +148,62 @@ VALUES (?, 0, 500, 3, '7')`, hash,
 	require.NoError(t, err)
 	require.Nil(t, live, "a spent output is not live")
 }
+
+// ImportUtxos probes for the other identity once per chunk of rows. Outputs
+// already stored as produced outputs, in every chunk, and an output the same
+// call repeats as the other kind, must not be inserted a second time.
+func TestImportUtxosSkipsOutputsStoredUnderTheOtherIdentity(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	const total = 3*maxImportedProbeHashes + 5
+	var producer int64
+	require.NoError(t, store.writeDB.QueryRow(
+		`INSERT INTO "transaction" (hash, slot) VALUES (?, 5) RETURNING id`,
+		bytes32(0xd0),
+	).Scan(&producer))
+	id := uint(producer)
+	hash := func(i int) []byte {
+		h := bytes32(0xd1)
+		h[0], h[1] = byte(i), byte(i>>8)
+		return h
+	}
+	var items []models.Utxo
+	produced := map[int]bool{}
+	for i := range total {
+		if i%maxImportedProbeHashes == 7 {
+			produced[i] = true
+			var own int64
+			require.NoError(t, store.writeDB.QueryRow(
+				`INSERT INTO "transaction" (hash, slot) VALUES (?, 5) RETURNING id`,
+				hash(i),
+			).Scan(&own))
+			ownID := uint(own)
+			require.NoError(t, store.CreateUtxo(nil, &models.Utxo{
+				TxId: hash(i), OutputIdx: uint32(i), TransactionID: &ownID,
+				Amount: types.Uint64(1),
+			}))
+		}
+		items = append(items, models.Utxo{
+			TxId: hash(i), OutputIdx: uint32(i), Amount: types.Uint64(1),
+		})
+	}
+	// The same call names one more output twice, as imported then produced.
+	items = append(items,
+		models.Utxo{TxId: hash(1000), OutputIdx: 9, Amount: types.Uint64(1)},
+		models.Utxo{
+			TxId: hash(1000), OutputIdx: 9, TransactionID: &id,
+			Amount: types.Uint64(1),
+		},
+	)
+	require.NoError(t, store.ImportUtxos(items, nil))
+
+	var rows int
+	require.NoError(t, store.writeDB.QueryRow(
+		"SELECT COUNT(*) FROM utxo").Scan(&rows))
+	require.Equal(t, total+1, rows, "one row per distinct output")
+	var imported int
+	require.NoError(t, store.writeDB.QueryRow(`SELECT COUNT(*) FROM utxo
+WHERE transaction_id IS NULL AND collateral_return_for_tx_id IS NULL`).Scan(&imported))
+	// The repeated output is imported first, then hydrated by its produced twin.
+	require.Equal(t, total-len(produced), imported)
+}

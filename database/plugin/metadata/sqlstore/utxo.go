@@ -825,6 +825,11 @@ func (s *Store) importUtxos(
 			u := s.utxoSQL()
 			refs := make(map[string]models.StakeCredentialRef)
 			slots := make(map[string]uint64)
+			// The other-identity probe runs once per chunk of rows. Rows
+			// inserted by this call after the probe are tracked by kind, so
+			// a later row of the other kind still counts as a conflict.
+			var existing map[string]struct{}
+			insertedKind := make(map[string]bool, len(utxos))
 			for i := range utxos {
 				item := utxos[i]
 				params, err := s.createUtxoParamsChecked(ctx, db, &item)
@@ -832,15 +837,28 @@ func (s *Store) importUtxos(
 					return err
 				}
 				var id int64
-				existing, err := s.existingUtxoRefs(
-					ctx, db, []*models.Utxo{&item},
-				)
-				if err != nil {
-					return err
+				if i%maxImportedProbeHashes == 0 {
+					chunk := make(
+						[]*models.Utxo, 0, maxImportedProbeHashes,
+					)
+					for j := i; j < min(i+maxImportedProbeHashes, len(utxos)); j++ {
+						chunk = append(chunk, &utxos[j])
+					}
+					existing, err = s.existingUtxoRefs(ctx, db, chunk)
+					if err != nil {
+						return err
+					}
 				}
-				if _, duplicate := existing[utxoIdentityKey(
-					item.TxId, item.OutputIdx,
-				)]; duplicate {
+				key := utxoIdentityKey(item.TxId, item.OutputIdx)
+				_, duplicate := existing[key]
+				if produced, seen := insertedKind[key]; seen &&
+					produced != utxoProducedKind(&item) {
+					duplicate = true
+				}
+				if _, seen := insertedKind[key]; !seen {
+					insertedKind[key] = utxoProducedKind(&item)
+				}
+				if duplicate {
 					err = sql.ErrNoRows
 				} else {
 					err = s.queryRowCached(ctx, db, u.insertIgnore,
