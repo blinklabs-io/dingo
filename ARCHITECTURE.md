@@ -8129,8 +8129,14 @@ Ordinary Praos sessions continue to use primary-chain intersection points.
   candidate nonce with the carried last-epoch-block nonce and, in TPraos eras,
   the protocol-parameter extraEntropy. The evolving nonce folds every header
   through the epoch end; the candidate nonce follows it only before that epoch's
-  stability cutoff, then stays frozen while the evolving nonce continues. Each
-  next epoch nonce is assembled from that epoch's candidate nonce and the
+  stability cutoff, then stays frozen while the evolving nonce continues. When
+  an intersection is past that cutoff and the next epoch's candidate is not
+  cached, the verifier walks the intersection's parent links to the last block
+  strictly before the cutoff and reads its stored evolving nonce. A retained
+  sibling cannot supply that prefix. This needs no transaction-body decoding
+  even if later fetched blocks have no applied nonce. Missing ancestry or nonce
+  rows use the full reconstruction path; an epoch with no pre-cutoff block
+  carries its previous candidate. Each next epoch nonce is assembled from that epoch's candidate nonce and the
   carried last-epoch-block nonce. A per-connection, per-epoch nonce-prefix cache
   resumes folding at the first newly added header, keyed by the last folded
   hash, source epoch and nonce, cutoff, and both initial nonce states; entries
