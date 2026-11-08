@@ -30,12 +30,14 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/blinklabs-io/bursa/kesagent/wire"
 )
 
 const (
 	// AttestedProtocolID is the protocol a bursa KES agent's remote sign
 	// listener reports in its Hello.
-	AttestedProtocolID = "bursa-attested-kes/1"
+	AttestedProtocolID = wire.AttestedProtocolID
 	// ProviderMTLS is the attestation provider of an agent authenticated by
 	// mutual TLS alone: its attestation_response carries no evidence, and the
 	// client authenticates the agent by its pinned server key.
@@ -430,25 +432,12 @@ func (c *RemoteClient) admit(ctx context.Context) (net.Conn, error) {
 	return conn, nil
 }
 
-// attestationRequest and attestationResponse mirror the attested listener's
-// admission frames in blinklabs-io/bursa internal/kesagent.
-type attestationRequest struct {
-	Type     string `json:"type"`
-	Protocol string `json:"protocol"`
-	Nonce    []byte `json:"nonce"`
-}
-
-type attestationResponse struct {
-	Type        string `json:"type"`
-	Protocol    string `json:"protocol"`
-	Nonce       []byte `json:"nonce"`
-	Provider    string `json:"provider"`
-	KESVKey     []byte `json:"kes_vkey,omitempty"`
-	OpCert      []byte `json:"opcert,omitempty"`
-	Period      uint64 `json:"period,omitempty"`
-	Attestation []byte `json:"attestation,omitempty"`
-	Error       string `json:"error,omitempty"`
-}
+// attestationRequest and attestationResponse are the attested listener's
+// admission frames, from bursa's kesagent/wire.
+type (
+	attestationRequest  = wire.AttestationRequest
+	attestationResponse = wire.AttestationResponse
+)
 
 // checkAdmission accepts an mtls attestation_response for this node's KES
 // key: the echoed nonce, protocol and provider match, the evidence is absent

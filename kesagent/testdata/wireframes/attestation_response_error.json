@@ -1,0 +1,7 @@
+{
+  "type": "attestation_response",
+  "protocol": "bursa-attested-kes/1",
+  "nonce": "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=",
+  "provider": "none",
+  "error": "kesagent: attestation failed"
+}

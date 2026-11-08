@@ -1,0 +1,6 @@
+{
+  "type": "sign_response",
+  "period": 812,
+  "signature": null,
+  "error": "kesagent: no active KES key installed"
+}

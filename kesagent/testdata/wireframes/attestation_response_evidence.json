@@ -1,0 +1,10 @@
+{
+  "type": "attestation_response",
+  "protocol": "bursa-attested-kes/1",
+  "nonce": "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=",
+  "provider": "nitro",
+  "kes_vkey": "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=",
+  "opcert": "QEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaW1xdXl9gYWJjZGVmZw==",
+  "period": 812,
+  "attestation": "gIGCg4SFhoeIiYqLjI2Oj5CRkpOUlZaX"
+}
