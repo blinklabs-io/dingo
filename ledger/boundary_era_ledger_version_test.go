@@ -621,6 +621,43 @@ func TestSparseBoundaryDoesNotPublishEpochTransition(t *testing.T) {
 	)
 }
 
+func TestSparseScheduledHardForkEventUsesTransitionEpoch(t *testing.T) {
+	t.Parallel()
+
+	conwayEpoch := uint64(2)
+	targetEpoch := uint64(3)
+	ls, block := newBoundaryEraLedger(t, boundaryEraCase{
+		pparamsMajor: 8,
+		blockSlot:    targetEpoch*boundaryEraTestEpochLength + 1,
+		configure: func(cfg *cardano.CardanoNodeConfig) {
+			cfg.TestConwayHardForkAtEpoch = &conwayEpoch
+		},
+	})
+	bus := newTestEventBus(t, nil)
+	ls.config.EventBus = bus
+	_, events := bus.Subscribe(event.HardForkEventType)
+
+	results := make(chan readChainResult, 1)
+	results <- readChainResult{blocks: []gledger.Block{block}}
+	close(results)
+	require.NoError(t, ls.ledgerProcessBlocksFromSource(t.Context(), results))
+
+	received := testutil.RequireReceive(
+		t,
+		events,
+		testutil.AsyncWait,
+		"the scheduled sparse transition did not publish a hard-fork event",
+	)
+	hardFork, ok := received.Data.(event.HardForkEvent)
+	require.True(t, ok)
+	require.Equal(t, targetEpoch, hardFork.EpochNo)
+	require.Equal(
+		t,
+		targetEpoch*boundaryEraTestEpochLength,
+		hardFork.Slot,
+	)
+}
+
 // TestRefusedBoundaryReleasesValidationTransition pins that refusing a
 // boundary block ends the validation transition the rollover opened. A
 // transition left open makes every later transaction validation session

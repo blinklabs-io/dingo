@@ -9566,11 +9566,8 @@ func (ls *LedgerState) processBlocksFromSource(
 					}
 					if oldErr == nil && newErr == nil {
 						hfEvent := event.HardForkEvent{
-							Slot: snapshotEpoch.StartSlot +
-								uint64(
-									snapshotEpoch.LengthInSlots,
-								),
-							EpochNo:         snapshotEpoch.EpochId + 1,
+							Slot:            transitionEpoch.StartSlot,
+							EpochNo:         transitionEpoch.EpochId,
 							FromEra:         prevEraId,
 							ToEra:           eraResult.NewEra.Id,
 							OldMajorVersion: oldVer.Major,
