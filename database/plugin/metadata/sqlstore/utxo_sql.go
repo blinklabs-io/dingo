@@ -468,7 +468,8 @@ func newSQLiteRefStatements() *sqliteRefStatements {
 	for n := 1; n <= maxImportedProbeHashes; n *= 2 {
 		st.producedProbe[n] = "-- name: GetProducedUtxoKeys :many\n" +
 			`SELECT t.hash, u.output_idx FROM "transaction" AS t ` +
-			"JOIN utxo AS u ON u.producer_tx_id = t.id " +
+			"CROSS JOIN utxo AS u INDEXED BY idx_utxo_producer_output " +
+			"ON u.producer_tx_id = t.id " +
 			"WHERE t.hash IN (" + bindPlaceholders(n) + ")"
 	}
 	return st

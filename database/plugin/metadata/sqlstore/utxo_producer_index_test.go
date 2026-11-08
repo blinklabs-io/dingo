@@ -297,3 +297,32 @@ func TestDirectInsertsRefuseTheOtherIdentity(t *testing.T) {
 	).Scan(&count))
 	require.Equal(t, 2, count)
 }
+
+// TestProducedProbePlanUnderImportedStatistics pins the plan of the probe that
+// finds the produced outputs of given hashes after statistics were gathered
+// over an imported set, before any output had a producer. The probe must walk
+// from the transaction hash to the producer index, never scan utxo.
+func TestProducedProbePlanUnderImportedStatistics(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	seedRollbackUtxos(t, store, 20_000, 64, 2_656_808, 40)
+	analyzeStore(t, store)
+	_, err := store.writeDB.Exec(`
+WITH RECURSIVE n(i) AS (
+    SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 3000
+)
+INSERT INTO "transaction" (hash, slot, block_index)
+SELECT randomblob(32), i, 0 FROM n`)
+	require.NoError(t, err)
+	_, err = store.writeDB.Exec(`
+INSERT INTO utxo (transaction_id, tx_id, output_idx, deleted_slot, amount)
+SELECT t.id, t.hash, o.i, 0, '1' FROM "transaction" AS t
+JOIN (SELECT 0 AS i UNION ALL SELECT 1 UNION ALL SELECT 2) AS o`)
+	require.NoError(t, err)
+
+	hash := make([]byte, 32)
+	plan := explainQueryPlan(t, store, producedProbeQuery(2), hash, hash)
+	require.NotContains(t, plan, "SCAN", plan)
+	require.Contains(t, plan, "idx_utxo_producer_output", plan)
+	require.Contains(t, plan, "idx_transaction_hash", plan)
+}

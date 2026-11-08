@@ -79,8 +79,8 @@ func (s *Store) existingUtxoRefs(
 		for len(hashes) < size {
 			hashes = append(hashes, nil)
 		}
-		rows, err := db.QueryContext(
-			ctx, producedProbeQuery(size), hashes...,
+		rows, err := s.queryRowsCached(
+			ctx, db, producedProbeQuery(size), hashes...,
 		)
 		if err != nil {
 			return nil, err
