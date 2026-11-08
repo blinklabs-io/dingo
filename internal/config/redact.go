@@ -321,7 +321,11 @@ var logPlainConfigFields = []string{
 	// key and certificate paths below it: the path is not the secret, the
 	// material behind it is, and an operator diagnosing a misconfigured
 	// socket needs to see which path failed.
+	"ShelleyKESAgentAddress",
+	"ShelleyKESAgentClientCertFile",
+	"ShelleyKESAgentClientKeyFile",
 	"ShelleyKESAgentMode",
+	"ShelleyKESAgentServerSPKISHA256",
 	"ShelleyKESAgentSignTimeout",
 	"ShelleyKESAgentSocket",
 	"ShelleyKESKey",

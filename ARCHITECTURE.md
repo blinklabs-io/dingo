@@ -12140,6 +12140,42 @@ set):
   may already have reached the agent. Serve-key subscriptions continue to
   reuse their connection so later key pushes arrive on the same stream.
 
+**Remote sign agent** (`kesagent.RemoteClient`). `--shelley-kes-agent-address`
+(`host:port`) signs through a bursa agent's remote sign listener
+(`bursa-attested-kes/1`) instead of a local socket, so the KES key never has
+to be on the producer's host and several producers can share one agent. It
+implies sign mode and is exclusive with `--shelley-kes-agent-socket` and
+`--shelley-kes-key`. The connection is TLS 1.3 with this node's client
+certificate and key (`--shelley-kes-agent-client-cert-file`,
+`--shelley-kes-agent-client-key-file`). The agent is authenticated by a pin,
+not by a certificate authority: `--shelley-kes-agent-server-spki-sha256` is
+the hex SHA-256 of the agent's server SubjectPublicKeyInfo, compared in
+constant time during the handshake, and the client refuses to start without
+one. After the agent's `Hello` the client sends an `attestation_request`
+carrying a fresh 32-byte nonce, and admits the session only if the response
+echoes the nonce and protocol, names the `mtls` provider with no evidence,
+and reports exactly the local operational certificate's CBOR, its KES
+verification key, and a period no earlier than the certificate's start. No
+sign request is sent on a session that was not admitted.
+
+The admitted session is kept for the next sign, unlike the local socket's
+connection per request, because a remote handshake costs a network round trip
+inside a slot. The agent closes a session idle for its 10s frame bound, so the
+client treats a session idle for `SessionFreshFor` (8s) as stale and redials
+before signing on it. The forger opens the session ahead of time: on each slot
+it asks the leader schedule (`LeaderChecker.NextLeaderSlot`) for the next
+leader slot, and when that slot is within `remoteSignerPrepareLead` (3s) it
+calls `PoolCredentials.PrepareRemoteSigner` once for that slot, on its own
+goroutine, which reaches the client's `Prepare` through the optional
+`forging.RemoteKESPreparer` interface. A failed prepare only logs a warning a
+few seconds before the slot; the sign at the slot dials again if it must. The
+send-once rule is the same as the local sign mode: a transport or
+verification failure drops the session and is returned, never resent on a new
+connection; an agent refusal (`error` in the response) keeps the session. A
+failed dial or admission backs off before the next attempt. Each signature is
+verified against the local operational certificate's KES key by the same
+`validateSignResponse` the local client uses.
+
 **The non-negotiable invariant**: whichever source supplies the key, KES
 signing goes through the same `credentialGeneration.kesSign`, and that method
 itself re-validates the operational-certificate lifetime
@@ -12229,9 +12265,12 @@ error that states the length and the limit.
 
 `internal/config.ValidateKESKeySources` rejects a block producer that sets
 both `shelleyKesKey` and `shelleyKesAgentSocket`, so an operator's explicit
-choice of key source is never silently overridden. `Config.Validate` no
-longer requires a local `shelleyKesKey` when a KES agent socket is
-configured — an agent-only configuration must be able to start.
+choice of key source is never silently overridden; `shelleyKesAgentAddress`
+is likewise exclusive with both, accepts only sign mode, and requires the
+client certificate and key files and a 64-hex-character server pin.
+`Config.Validate` no longer requires a local `shelleyKesKey` when a KES agent
+socket or address is configured — an agent-only configuration must be able to
+start.
 
 Pushed KES signing key material is zeroed as soon as each holder is done with
 it: the frame buffer it was decoded from (sized exactly once from the

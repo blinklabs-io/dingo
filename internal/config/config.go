@@ -1027,9 +1027,24 @@ type Config struct {
 	// synchronously on the slot-aligned loop, so a longer timeout parks
 	// forging for several slots when the agent stops answering. Zero uses
 	// the client default (500ms).
-	ShelleyKESAgentSignTimeout  time.Duration `yaml:"shelleyKesAgentSignTimeout"       envconfig:"SHELLEY_KES_AGENT_SIGN_TIMEOUT"`
-	ForgeSyncToleranceSlots     uint64        `yaml:"forgeSyncToleranceSlots"          envconfig:"DINGO_FORGE_SYNC_TOLERANCE_SLOTS"`
-	ForgeStaleGapThresholdSlots uint64        `yaml:"forgeStaleGapThresholdSlots"      envconfig:"DINGO_FORGE_STALE_GAP_THRESHOLD_SLOTS"`
+	ShelleyKESAgentSignTimeout time.Duration `yaml:"shelleyKesAgentSignTimeout"       envconfig:"SHELLEY_KES_AGENT_SIGN_TIMEOUT"`
+	// ShelleyKESAgentAddress, when set, signs block headers through a bursa
+	// KES agent's remote sign listener (host:port) over mutually
+	// authenticated TLS 1.3, instead of a local socket. It implies sign mode
+	// and requires the client certificate, its key and the agent's server
+	// key pin below.
+	ShelleyKESAgentAddress string `yaml:"shelleyKesAgentAddress"          envconfig:"SHELLEY_KES_AGENT_ADDRESS"`
+	// ShelleyKESAgentClientCertFile and ShelleyKESAgentClientKeyFile are
+	// this node's PEM TLS client certificate and key for the remote agent.
+	ShelleyKESAgentClientCertFile string `yaml:"shelleyKesAgentClientCertFile"       envconfig:"SHELLEY_KES_AGENT_CLIENT_CERT_FILE"`
+	ShelleyKESAgentClientKeyFile  string `yaml:"shelleyKesAgentClientKeyFile"        envconfig:"SHELLEY_KES_AGENT_CLIENT_KEY_FILE"`
+	// ShelleyKESAgentServerSPKISHA256 pins the remote agent's TLS server key:
+	// the hex SHA-256 of its certificate's SubjectPublicKeyInfo, which the
+	// agent logs at startup as server_spki_sha256. The agent is authenticated
+	// by this pin alone, not by a certificate authority.
+	ShelleyKESAgentServerSPKISHA256 string `yaml:"shelleyKesAgentServerSpkiSha256" envconfig:"SHELLEY_KES_AGENT_SERVER_SPKI_SHA256"`
+	ForgeSyncToleranceSlots         uint64 `yaml:"forgeSyncToleranceSlots"          envconfig:"DINGO_FORGE_SYNC_TOLERANCE_SLOTS"`
+	ForgeStaleGapThresholdSlots     uint64 `yaml:"forgeStaleGapThresholdSlots"      envconfig:"DINGO_FORGE_STALE_GAP_THRESHOLD_SLOTS"`
 	// ForgeUpstreamStalenessSlots bounds how far the newest block this node
 	// holds may trail the corroborated upstream sync target before forging is
 	// skipped. 0 (the default) disables it.
@@ -2071,6 +2086,9 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.ShelleyKESAgentSocket != "" && c.ShelleyKESAgentMode == "" {
 		c.ShelleyKESAgentMode = "serve-key"
+	}
+	if c.ShelleyKESAgentAddress != "" && c.ShelleyKESAgentMode == "" {
+		c.ShelleyKESAgentMode = "sign"
 	}
 	// Match the Midnight server's default for explicitly empty YAML or
 	// environment values.

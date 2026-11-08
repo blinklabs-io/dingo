@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net"
 	"net/netip"
 	"net/url"
 	"os"
@@ -55,6 +56,55 @@ func ValidateKESKeySources(kesKeyPath, kesAgentSocket string) error {
 		)
 	}
 	return nil
+}
+
+// validateRemoteKESAgent checks a remote KES agent configuration: one KES
+// source only, sign mode, and the client certificate, key and server pin it
+// cannot authenticate without.
+func (c *Config) validateRemoteKESAgent() []error {
+	if c.ShelleyKESAgentAddress == "" {
+		return nil
+	}
+	var errs []error
+	if c.ShelleyKESKey != "" || c.ShelleyKESAgentSocket != "" {
+		errs = append(errs, errors.New(
+			"blockProducer cannot set shelleyKesAgentAddress together with "+
+				"shelleyKesKey or shelleyKesAgentSocket",
+		))
+	}
+	if _, _, err := net.SplitHostPort(c.ShelleyKESAgentAddress); err != nil {
+		errs = append(errs, fmt.Errorf(
+			"shelleyKesAgentAddress %q must be host:port: %w",
+			c.ShelleyKESAgentAddress,
+			err,
+		))
+	}
+	if c.ShelleyKESAgentMode != "" && c.ShelleyKESAgentMode != "sign" {
+		errs = append(errs, fmt.Errorf(
+			"shelleyKesAgentAddress supports only shelleyKesAgentMode \"sign\", got %q",
+			c.ShelleyKESAgentMode,
+		))
+	}
+	if c.ShelleyKESAgentClientCertFile == "" ||
+		c.ShelleyKESAgentClientKeyFile == "" {
+		errs = append(errs, errors.New(
+			"shelleyKesAgentAddress requires shelleyKesAgentClientCertFile and "+
+				"shelleyKesAgentClientKeyFile",
+		))
+	}
+	if c.ShelleyKESAgentServerSPKISHA256 == "" {
+		errs = append(errs, errors.New(
+			"shelleyKesAgentAddress requires shelleyKesAgentServerSpkiSha256",
+		))
+	} else if pin, err := hex.DecodeString(
+		strings.TrimSpace(c.ShelleyKESAgentServerSPKISHA256),
+	); err != nil || len(pin) != sha256.Size {
+		errs = append(errs, fmt.Errorf(
+			"shelleyKesAgentServerSpkiSha256 must be %d hex characters",
+			2*sha256.Size,
+		))
+	}
+	return errs
 }
 
 func validateCertificateFingerprints(field string, values []string) []error {
@@ -798,7 +848,8 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		// agent socket configured, the key lives with the agent instead --
 		// that is the whole point of the flag -- so requiring both made an
 		// agent-only configuration impossible to start.
-		if c.ShelleyKESKey == "" && c.ShelleyKESAgentSocket == "" {
+		if c.ShelleyKESKey == "" && c.ShelleyKESAgentSocket == "" &&
+			c.ShelleyKESAgentAddress == "" {
 			missing = append(missing, "shelleyKesKey")
 		}
 		if err := ValidateKESKeySources(
@@ -807,6 +858,7 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		); err != nil {
 			errs = append(errs, err)
 		}
+		errs = append(errs, c.validateRemoteKESAgent()...)
 		if c.ShelleyOperationalCertificate == "" {
 			missing = append(missing, "shelleyOperationalCertificate")
 		}

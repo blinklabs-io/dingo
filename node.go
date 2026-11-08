@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"math"
 	"math/big"
@@ -146,12 +147,14 @@ type Node struct {
 	// path stops. An atomic pointer because the reload trigger runs on its
 	// own goroutine, concurrently with a live lifecycle teardown.
 	blockProducerCreds atomic.Pointer[forging.PoolCredentials]
-	// kesAgentClient is set when shelleyKESAgentSocket is configured, in
-	// either serve-key or sign mode. validateBlockProducerStartup owns
-	// dialing/closing it (closing the prior one before replacing it, so a
-	// live-lifecycle rebuild via reinitializeBlockProducer cannot leak a
-	// connection); node_shutdown.go closes it during graceful shutdown.
-	kesAgentClient  *kesagent.Client
+	// kesAgentClient is set when a KES agent is configured: a local socket
+	// client (shelleyKESAgentSocket) in either serve-key or sign mode, or a
+	// remote sign client (shelleyKESAgentAddress).
+	// validateBlockProducerStartup owns dialing/closing it (closing the prior
+	// one before replacing it, so a live-lifecycle rebuild via
+	// reinitializeBlockProducer cannot leak a connection); node_shutdown.go
+	// closes it during graceful shutdown.
+	kesAgentClient  io.Closer
 	kesAgentCancel  context.CancelFunc
 	kesAgentMetrics *kesagent.Metrics
 	leaderElection  nodeconsensus.LeaderScheduler

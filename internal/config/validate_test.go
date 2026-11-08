@@ -680,6 +680,60 @@ func TestValidate(t *testing.T) {
 			wantErr: "cannot set both shelleyKesKey and shelleyKesAgentSocket",
 		},
 		{
+			name: "block producer with remote KES agent",
+			modify: func(c *Config) {
+				setRemoteKESAgent(c)
+			},
+		},
+		{
+			name: "remote KES agent in serve-key mode",
+			modify: func(c *Config) {
+				setRemoteKESAgent(c)
+				c.ShelleyKESAgentMode = "serve-key"
+			},
+			wantErr: "supports only shelleyKesAgentMode",
+		},
+		{
+			name: "remote KES agent with a local socket",
+			modify: func(c *Config) {
+				setRemoteKESAgent(c)
+				c.ShelleyKESAgentSocket = "/run/kes-agent.sock"
+			},
+			wantErr: "cannot set shelleyKesAgentAddress together with",
+		},
+		{
+			name: "remote KES agent without a port",
+			modify: func(c *Config) {
+				setRemoteKESAgent(c)
+				c.ShelleyKESAgentAddress = "kes-agent.example"
+			},
+			wantErr: "must be host:port",
+		},
+		{
+			name: "remote KES agent without a client certificate",
+			modify: func(c *Config) {
+				setRemoteKESAgent(c)
+				c.ShelleyKESAgentClientCertFile = ""
+			},
+			wantErr: "requires shelleyKesAgentClientCertFile",
+		},
+		{
+			name: "remote KES agent without a server pin",
+			modify: func(c *Config) {
+				setRemoteKESAgent(c)
+				c.ShelleyKESAgentServerSPKISHA256 = ""
+			},
+			wantErr: "requires shelleyKesAgentServerSpkiSha256",
+		},
+		{
+			name: "remote KES agent with a short server pin",
+			modify: func(c *Config) {
+				setRemoteKESAgent(c)
+				c.ShelleyKESAgentServerSPKISHA256 = "abcd"
+			},
+			wantErr: "shelleyKesAgentServerSpkiSha256 must be 64 hex characters",
+		},
+		{
 			name:    "invalid KES agent mode",
 			modify:  func(c *Config) { c.ShelleyKESAgentMode = "signing" },
 			wantErr: "invalid shelleyKesAgentMode",
@@ -2340,4 +2394,16 @@ func TestValidateRejectsNegativeBarkArchiveLookupRates(t *testing.T) {
 
 	cfg = validTestConfig()
 	require.NoError(t, cfg.validate(RunModeServe, minUnprivilegedPort))
+}
+
+// setRemoteKESAgent configures a block producer that signs through a remote
+// KES agent.
+func setRemoteKESAgent(c *Config) {
+	c.BlockProducer = true
+	c.ShelleyVRFKey = "/keys/vrf.skey"
+	c.ShelleyOperationalCertificate = "/keys/node.cert"
+	c.ShelleyKESAgentAddress = "kes-agent.example:3443"
+	c.ShelleyKESAgentClientCertFile = "/keys/kes-client.crt"
+	c.ShelleyKESAgentClientKeyFile = "/keys/kes-client.key"
+	c.ShelleyKESAgentServerSPKISHA256 = strings.Repeat("ab", 32)
 }
