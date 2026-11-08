@@ -95,6 +95,7 @@ const (
 	utxoStakingPartialIndexSchemaRelease                = "utxo-staking-partial-indexes"
 	rewardOutputCredentialPendingIndexSchemaRelease     = "reward-account-output-credential-pending-index"
 	poolSnapshotVrfKeySchemaRelease                     = "pool-snapshot-vrf-key"
+	stakeBookkeepingIndexDropSchemaRelease              = "stake-bookkeeping-index-drop"
 )
 
 const mithrilRewardRepairPendingKey = "mithril_reward_repair_pending"
@@ -270,6 +271,7 @@ var schemaVersions = []struct {
 		Dir:     "v54",
 	},
 	{Version: 55, Name: poolSnapshotVrfKeySchemaRelease, Dir: "v55"},
+	{Version: 56, Name: stakeBookkeepingIndexDropSchemaRelease, Dir: "v56"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
@@ -1993,6 +1995,19 @@ func translateSchemaSQLInSchema(
 				"DROP INDEX IF EXISTS `idx_asset_fingerprint`",
 				"DROP INDEX `idx_asset_fingerprint` ON `asset`",
 			)
+			for index, table := range map[string]string{
+				"idx_reward_live_stake_updated_slot":             "reward_live_stake",
+				"idx_account_reward_delta_tx_hash":               "account_reward_delta",
+				"idx_account_reward_delta_withdrawal":            "account_reward_delta",
+				"idx_account_drep":                               "account",
+				"idx_reward_account_output_credential_spendable": "reward_account_output",
+			} {
+				value = strings.ReplaceAll(
+					value,
+					"DROP INDEX IF EXISTS `"+index+"`",
+					"DROP INDEX `"+index+"` ON `"+table+"`",
+				)
+			}
 			if strings.HasPrefix(strings.ToUpper(statement), "CREATE TABLE") {
 				for column := range mysqlForeignKeyColumns[schemaTableName(statement)] {
 					value = replaceMySQLBlobType(value, column)

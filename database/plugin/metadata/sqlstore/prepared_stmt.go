@@ -35,6 +35,7 @@ var hotStatements = func() []string {
 		sumCredentialUtxoStakeQuery,
 		rewardLiveStakeAccountQuery,
 		rewardLiveStakeUpsertQuery,
+		rewardLiveStakeUpsertKeepPoolQuery,
 		rewardLiveStakeUtxoStakeQuery,
 		insertUtxoQuery,
 		insertUtxoQueryIgnoreConflict,
