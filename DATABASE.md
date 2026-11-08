@@ -7935,7 +7935,7 @@ PostgreSQL and MySQL keep the per-row writes described above.
   as the per-row path leaves them. `FlushBatch` raises a sequence that ends on
   an unwritten id.
 - **Writes.** `FlushBatch` inserts surviving outputs with explicit ids in
-  multi-row `BatchOverlayInsertUtxos` statements (62 rows each) and their
+  multi-row `BatchOverlayInsertUtxos` statements and their
   pointer rows, marks pre-batch spends with `UPDATE ... FROM (VALUES ...)`
   keyed by `utxo.id` (333 rows each), deletes by id the rows the per-row path
   deletes before commit, and queues asset rows for the surviving outputs into
@@ -7945,6 +7945,17 @@ PostgreSQL and MySQL keep the per-row writes described above.
   `types.ErrBatchUtxoOverlayConflict`, and `ApplyTrustedBatch` applies the
   uncommitted blocks once more on the per-row path, which repairs rows a
   snapshot import created ahead of their producer.
+  The stock SQLite provider permits up to 2047 outputs per INSERT. Each
+  invocation checks the active transaction's main and TEMP schemas for UTxO
+  triggers or a shadowing TEMP table/view, then eagerly prepares a numbered
+  parameter to check that connection's current variable limit. It closes the
+  probe before writing. A trigger, unknown queryer, unsupported probe or ordinary
+  guard failure retains the original 62-row statements; cancellation propagates.
+  Trigger absence is never cached between flushes. Other statements keep the
+  dialect's 999-parameter bound, and custom providers retain it unless they
+  explicitly certify eager preparation through `SQLiteOverlayInsertRows`.
+  Row order, explicit IDs, constraints, sequences and rollback paths are
+  preserved; a failed actual INSERT follows the existing error path.
 - **Deletes.** An output created and spent in the same block-apply
   transaction is not written. An output an earlier transaction of the same
   call committed (before an epoch boundary) is deleted by id when spent, as
