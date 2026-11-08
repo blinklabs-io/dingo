@@ -998,23 +998,30 @@ func TestStartupVrfKeyUsesElectingSnapshot(t *testing.T) {
 				anchor,
 				1,
 			)
-			seedPoolStakeSnapshotOfTypeAtSlot(
+			seedPoolStakeSnapshotWithVrfKeyAtSlot(
 				t,
 				db,
 				31,
 				models.PoolStakeSnapshotTypeActive,
 				pool[:],
+				currentKey,
 				1,
 				1,
 				anchor,
 			)
 			for _, epoch := range []uint64{31, 32, 33} {
-				seedPoolStakeSnapshotOfTypeAtSlot(
+				snapshotKey := currentKey
+				if (era == conway.EraIdConway && epoch >= 33) ||
+					(era == dijkstra.EraIdDijkstra && epoch >= 32) {
+					snapshotKey = futureKey
+				}
+				seedPoolStakeSnapshotWithVrfKeyAtSlot(
 					t,
 					db,
 					epoch,
 					models.PoolStakeSnapshotTypeMark,
 					pool[:],
+					snapshotKey,
 					1,
 					1,
 					epoch*musashiEpochLength-1,
