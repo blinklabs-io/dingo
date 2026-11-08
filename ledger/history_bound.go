@@ -14,13 +14,9 @@
 
 package ledger
 
-import "context"
-
 // OldestRetainedSlot returns the slot of the oldest block whose body is still
-// stored locally. ok is false when history expiry has not run or the bound
-// cannot be determined.
-func (ls *LedgerState) OldestRetainedSlot(
-	ctx context.Context,
-) (slot uint64, ok bool, err error) {
-	return ls.db.OldestRetainedSlot(ctx)
+// stored locally, as last computed by the history-expiry pruner. ok is false
+// when that is not known. It reads only memory.
+func (ls *LedgerState) OldestRetainedSlot() (slot uint64, ok bool) {
+	return ls.db.OldestRetainedSlot()
 }

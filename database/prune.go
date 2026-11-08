@@ -34,28 +34,20 @@ import (
 const HistoryExpiryCursorSyncKey = "history_expiry_cursor"
 
 // oldestRetainedScanLimit bounds how many consecutive expired blocks
-// OldestRetainedSlot walks past the history-expiry cursor before giving up.
+// RefreshOldestRetainedSlot walks past the history-expiry cursor before giving
+// up.
 const oldestRetainedScanLimit = 4096
 
-// OldestRetainedSlot returns the slot of the oldest block whose body is still
-// stored, for naming the start of retained history in errors. It reports
-// ok=false when history expiry has never run (no cursor) or when no retained
-// block is found within oldestRetainedScanLimit expired blocks past the
-// cursor.
+// oldestRetainedSlot scans for the slot of the oldest block whose body is
+// still stored. It reports ok=false when history expiry has never run (no
+// cursor) or when no retained block is found within limit expired blocks past
+// the cursor.
 //
 // The cursor alone is not the answer: it is the slot below which every block
 // is expired, and the pruner leaves it on the last block it expired, so that
 // slot itself is usually expired too. A rollback also lowers it below blocks
 // that were already expired. The cursor is therefore a lower bound, and this
 // walks forward from it past tombstones to the first block that reads back.
-func (d *Database) OldestRetainedSlot(
-	ctx context.Context,
-) (slot uint64, ok bool, err error) {
-	return d.oldestRetainedSlot(ctx, oldestRetainedScanLimit)
-}
-
-// oldestRetainedSlot is OldestRetainedSlot with the tombstone limit as a
-// parameter.
 func (d *Database) oldestRetainedSlot(
 	ctx context.Context,
 	limit int,
@@ -219,6 +211,7 @@ func (d *Database) PruneBlock(
 				err,
 			)
 		}
+		d.retainedBlockRemoved(txn, slot)
 		return nil
 	}); err != nil {
 		return 0, err

@@ -17,7 +17,6 @@ package utxorpc
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"sync/atomic"
 	"testing"
@@ -42,16 +41,13 @@ import (
 type expiredHistoryLedger struct {
 	UtxorpcLedgerState
 	expired error
-	// oldest, oldestKnown and oldestErr drive OldestRetainedSlot.
+	// oldest and oldestKnown drive OldestRetainedSlot.
 	oldest      uint64
 	oldestKnown bool
-	oldestErr   error
 }
 
-func (l *expiredHistoryLedger) OldestRetainedSlot(
-	context.Context,
-) (uint64, bool, error) {
-	return l.oldest, l.oldestKnown, l.oldestErr
+func (l *expiredHistoryLedger) OldestRetainedSlot() (uint64, bool) {
+	return l.oldest, l.oldestKnown
 }
 
 func newExpiredHistoryLedger(slot uint64) *expiredHistoryLedger {
@@ -339,15 +335,6 @@ func TestHistoryExpired_OldestRetainedSlotLookup(t *testing.T) {
 			ledger:     func() *expiredHistoryLedger { return newExpiredHistoryLedger(10) },
 			wantAbsent: "oldest retained",
 		},
-		{
-			name: "lookup error keeps FailedPrecondition",
-			ledger: func() *expiredHistoryLedger {
-				l := newExpiredHistoryLedger(10)
-				l.oldestErr = errors.New("sync state unavailable")
-				return l
-			},
-			wantAbsent: "oldest retained",
-		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -365,7 +352,6 @@ func TestHistoryExpired_OldestRetainedSlotLookup(t *testing.T) {
 			}
 			if tc.wantAbsent != "" {
 				require.NotContains(t, err.Error(), tc.wantAbsent)
-				require.NotContains(t, err.Error(), "sync state unavailable")
 			}
 		})
 	}

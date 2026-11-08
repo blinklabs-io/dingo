@@ -15,24 +15,19 @@
 package utxorpc
 
 import (
-	"context"
 	"errors"
 	"fmt"
-	"time"
 
 	"connectrpc.com/connect"
 	"github.com/blinklabs-io/dingo/database/types"
 )
 
-// historyBoundTimeout bounds the oldest-retained-slot lookup made while
-// building a history-expired error.
-const historyBoundTimeout = 2 * time.Second
-
 // historyExpiredError is mapHistoryExpiredAt plus the start of retained
-// history when the ledger knows it. The lookup runs only for a history-expiry
-// error, and a failed or unknown lookup leaves the message without the bound;
-// it never replaces the FailedPrecondition.
-func (u *Utxorpc) historyExpiredError(ctx context.Context, err error) error {
+// history when the ledger knows it. The bound is read from memory, kept up to
+// date by the history-expiry pruner, so an expired-history request does no
+// extra I/O. An unknown bound leaves the message without it; it never
+// replaces the FailedPrecondition.
+func (u *Utxorpc) historyExpiredError(err error) error {
 	if err == nil || !errors.Is(err, types.ErrHistoryExpired) {
 		return err
 	}
@@ -44,17 +39,7 @@ func (u *Utxorpc) historyExpiredError(ctx context.Context, err error) error {
 		known  bool
 	)
 	if u.config.LedgerState != nil {
-		ctx, cancel := context.WithTimeout(ctx, historyBoundTimeout)
-		defer cancel()
-		slot, ok, lookupErr := u.config.LedgerState.OldestRetainedSlot(ctx)
-		if lookupErr != nil {
-			u.config.Logger.Warn(
-				"failed to look up oldest retained slot",
-				"error", lookupErr,
-			)
-		} else {
-			oldest, known = slot, ok
-		}
+		oldest, known = u.config.LedgerState.OldestRetainedSlot()
 	}
 	return mapHistoryExpiredAt(err, oldest, known)
 }

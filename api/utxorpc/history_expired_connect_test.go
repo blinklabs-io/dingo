@@ -223,18 +223,70 @@ func TestConnect_FetchBlock_NamesOldestRetainedSlot(t *testing.T) {
 		h.Server.URL,
 		connect.WithGRPC(),
 	)
-	_, err := cli.FetchBlock(
-		expiredHistoryContext(t),
-		connect.NewRequest(&sync.FetchBlockRequest{
-			Ref: []*sync.BlockRef{
-				{Slot: blocks[0].Slot, Hash: blocks[0].Hash},
-			},
-		}),
-	)
+	fetch := func() error {
+		_, err := cli.FetchBlock(
+			expiredHistoryContext(t),
+			connect.NewRequest(&sync.FetchBlockRequest{
+				Ref: []*sync.BlockRef{
+					{Slot: blocks[0].Slot, Hash: blocks[0].Hash},
+				},
+			}),
+		)
+		return err
+	}
+	// Until the pruner has computed the bound, the error omits it.
+	err := fetch()
+	requireHistoryExpiredAt(t, err, blocks[0].Slot)
+	require.NotContains(t, err.Error(), "oldest retained")
+
+	require.NoError(t, h.DB.RefreshOldestRetainedSlot(t.Context()))
+	err = fetch()
 	requireHistoryExpiredAt(t, err, blocks[0].Slot)
 	require.ErrorContains(
 		t,
 		err,
 		fmt.Sprintf("oldest retained slot=%d", blocks[3].Slot),
 	)
+}
+
+// The request path reads the bound the pruner computed and never scans for
+// it: with the cursor made unreadable after the refresh, a scan would fail
+// and drop the bound, but the error still names it.
+func TestConnect_FetchBlock_BoundNotScannedPerRequest(t *testing.T) {
+	t.Parallel()
+	h, blocks := newPrunedHistoryHarness(t, 2)
+	pruneHarnessBlock(t, h, blocks[0].Slot, blocks[0].Hash)
+	pruneHarnessBlock(t, h, blocks[1].Slot, blocks[1].Hash)
+	require.NoError(t, h.DB.SetSyncState(
+		database.HistoryExpiryCursorSyncKey,
+		strconv.FormatUint(blocks[2].Slot, 10),
+		nil,
+	))
+	require.NoError(t, h.DB.RefreshOldestRetainedSlot(t.Context()))
+	require.NoError(t, h.DB.SetSyncState(
+		database.HistoryExpiryCursorSyncKey,
+		"not a slot",
+		nil,
+	))
+	cli := syncconnect.NewSyncServiceClient(
+		h.Client,
+		h.Server.URL,
+		connect.WithGRPC(),
+	)
+	for range 3 {
+		_, err := cli.FetchBlock(
+			expiredHistoryContext(t),
+			connect.NewRequest(&sync.FetchBlockRequest{
+				Ref: []*sync.BlockRef{
+					{Slot: blocks[0].Slot, Hash: blocks[0].Hash},
+				},
+			}),
+		)
+		requireHistoryExpiredAt(t, err, blocks[0].Slot)
+		require.ErrorContains(
+			t,
+			err,
+			fmt.Sprintf("oldest retained slot=%d", blocks[3].Slot),
+		)
+	}
 }

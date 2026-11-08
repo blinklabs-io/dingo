@@ -497,8 +497,11 @@ func TestOldestRetainedSlot(t *testing.T) {
 					HistoryExpiryCursorSyncKey, tc.cursor, nil,
 				))
 			}
-			got, ok, err := db.OldestRetainedSlot(context.Background())
-			require.NoError(t, err)
+			// Nothing is known before the first refresh.
+			_, ok := db.OldestRetainedSlot()
+			require.False(t, ok)
+			require.NoError(t, db.RefreshOldestRetainedSlot(t.Context()))
+			got, ok := db.OldestRetainedSlot()
 			require.Equal(t, tc.wantOK, ok)
 			require.Equal(t, tc.want, got)
 		})
@@ -541,7 +544,135 @@ func TestOldestRetainedSlot_MalformedCursorIsError(t *testing.T) {
 	require.NoError(t, db.SetSyncState(
 		HistoryExpiryCursorSyncKey, "not-a-slot", nil,
 	))
-	_, ok, err := db.OldestRetainedSlot(context.Background())
-	require.Error(t, err)
+	require.Error(t, db.RefreshOldestRetainedSlot(t.Context()))
+	_, ok := db.OldestRetainedSlot()
+	require.False(t, ok)
+}
+
+// seedRetainedBoundBlocks stores blocks at slots 100, 200 and 300, expires
+// the first, and refreshes the bound to 200.
+func seedRetainedBoundBlocks(t *testing.T, db *Database) []models.Block {
+	t.Helper()
+	blocks := make([]models.Block, 3)
+	for i := range blocks {
+		blocks[i] = models.Block{
+			ID:   uint64(i + 1),
+			Slot: uint64(i+1) * 100,
+			Hash: randomHash(t),
+			Cbor: []byte{0x80},
+			Type: 1,
+		}
+		require.NoError(t, db.BlockCreate(blocks[i], nil))
+	}
+	_, err := db.PruneBlock(t.Context(), blocks[0].Slot, blocks[0].Hash)
+	require.NoError(t, err)
+	require.NoError(t, db.SetSyncState(HistoryExpiryCursorSyncKey, "100", nil))
+	require.NoError(t, db.RefreshOldestRetainedSlot(t.Context()))
+	got, ok := db.OldestRetainedSlot()
+	require.True(t, ok)
+	require.Equal(t, uint64(200), got)
+	return blocks
+}
+
+func deleteBlock(t *testing.T, db *Database, block models.Block) {
+	t.Helper()
+	txn := db.BlockBlobTxn()
+	t.Cleanup(txn.Release)
+	require.NoError(t, BlockDeleteTxn(txn, block))
+	require.NoError(t, txn.Commit())
+}
+
+// Expiring or deleting the block the bound names makes it unknown until the
+// next refresh; removing a later block leaves it.
+func TestOldestRetainedSlot_RemovedBlockClearsBound(t *testing.T) {
+	t.Parallel()
+	t.Run("expired", func(t *testing.T) {
+		t.Parallel()
+		db := newTestDB(t)
+		blocks := seedRetainedBoundBlocks(t, db)
+		_, err := db.PruneBlock(t.Context(), blocks[1].Slot, blocks[1].Hash)
+		require.NoError(t, err)
+		_, ok := db.OldestRetainedSlot()
+		require.False(t, ok)
+		require.NoError(t, db.RefreshOldestRetainedSlot(t.Context()))
+		got, ok := db.OldestRetainedSlot()
+		require.True(t, ok)
+		require.Equal(t, uint64(300), got)
+	})
+	t.Run("deleted", func(t *testing.T) {
+		t.Parallel()
+		db := newTestDB(t)
+		blocks := seedRetainedBoundBlocks(t, db)
+		deleteBlock(t, db, blocks[1])
+		_, ok := db.OldestRetainedSlot()
+		require.False(t, ok)
+	})
+	t.Run("later block deleted", func(t *testing.T) {
+		t.Parallel()
+		db := newTestDB(t)
+		blocks := seedRetainedBoundBlocks(t, db)
+		deleteBlock(t, db, blocks[2])
+		got, ok := db.OldestRetainedSlot()
+		require.True(t, ok)
+		require.Equal(t, uint64(200), got)
+	})
+	t.Run("blob store replaced", func(t *testing.T) {
+		t.Parallel()
+		db := newTestDB(t)
+		seedRetainedBoundBlocks(t, db)
+		db.SetBlobStore(db.Blob())
+		_, ok := db.OldestRetainedSlot()
+		require.False(t, ok)
+	})
+}
+
+// A block removed while a refresh scans, at or below the slot the scan finds,
+// may be that block, so the refresh leaves the bound unknown. One removed
+// above it does not matter.
+func TestRefreshOldestRetainedSlot_RemovalDuringScan(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		removed uint64
+		wantOK  bool
+	}{
+		{removed: 200},
+		{removed: 150},
+		{removed: 300, wantOK: true},
+	} {
+		t.Run(strconv.FormatUint(tc.removed, 10), func(t *testing.T) {
+			t.Parallel()
+			db := newTestDB(t)
+			require.NoError(t, db.refreshOldestRetainedSlot(
+				t.Context(),
+				func(context.Context) (uint64, bool, error) {
+					db.retainedBlockRemoved(nil, tc.removed)
+					return 200, true, nil
+				},
+			))
+			got, ok := db.OldestRetainedSlot()
+			require.Equal(t, tc.wantOK, ok)
+			if tc.wantOK {
+				require.Equal(t, uint64(200), got)
+			}
+		})
+	}
+}
+
+// A removal registered in a transaction that commits after a refresh read the
+// block still clears the bound that refresh stored.
+func TestOldestRetainedSlot_RemovalClearsAgainOnCommit(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	blocks := seedRetainedBoundBlocks(t, db)
+	txn := db.BlockBlobTxn()
+	t.Cleanup(txn.Release)
+	require.NoError(t, BlockDeleteTxn(txn, blocks[1]))
+	// A refresh outside txn still sees the block.
+	require.NoError(t, db.RefreshOldestRetainedSlot(t.Context()))
+	got, ok := db.OldestRetainedSlot()
+	require.True(t, ok)
+	require.Equal(t, uint64(200), got)
+	require.NoError(t, txn.Commit())
+	_, ok = db.OldestRetainedSlot()
 	require.False(t, ok)
 }
