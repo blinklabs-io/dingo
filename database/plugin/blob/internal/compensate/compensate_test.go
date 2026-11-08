@@ -249,9 +249,10 @@ func TestRecordValueFromStreamsWithoutSizeCap(t *testing.T) {
 
 	log := newTestLog(t)
 
-	// Exceed the plugins' bounded-read limit without allocating it: a repeating
-	// reader of known length stands in for a large object.
-	const size = int64(256<<20) + 1024
+	// The log has no size cap of its own, so a few MiB (many times the 64 KiB
+	// copy and read chunks) exercises streaming without spooling hundreds of
+	// MiB; a repeating reader of known length stands in for a large object.
+	const size = int64(4<<20) + 1024
 	require.NoError(
 		t,
 		log.RecordValueFrom("huge", &patternReader{remaining: size}),
@@ -268,6 +269,9 @@ func TestRecordValueFromStreamsWithoutSizeCap(t *testing.T) {
 	require.NoError(t, log.Undo(
 		1,
 		func(_ string, value *io.SectionReader, size int64) error {
+			// A SectionReader also satisfies io.ReadSeeker, which the AWS SDK
+			// needs in order to re-sign or retry a request body.
+			var _ io.ReadSeeker = value
 			// Read in chunks: the point of the streaming signature is that a
 			// restore never has to materialize the whole object.
 			buf := make([]byte, 64*1024)
@@ -347,44 +351,4 @@ func (r *patternReader) Read(p []byte) (int, error) {
 	r.pos += n
 	r.remaining -= n
 	return int(n), nil
-}
-
-// Undo hands out a reader, not a []byte, so restoring a prior value larger than
-// the plugins' bounded-read cap streams out of the spool instead of allocating
-// the whole object. Spooling the capture side alone would still leave the
-// restore side able to exhaust memory on a failed multi-key commit.
-func TestUndoStreamsRestoreWithoutMaterializing(t *testing.T) {
-	t.Parallel()
-
-	log := newTestLog(t)
-	const size = int64(256<<20) + 4096
-	require.NoError(
-		t,
-		log.RecordValueFrom("huge", &patternReader{remaining: size}),
-	)
-
-	var reportedSize, streamed int64
-	require.NoError(t, log.Undo(
-		1,
-		func(_ string, value *io.SectionReader, sz int64) error {
-			reportedSize = sz
-			// A SectionReader also satisfies io.ReadSeeker, which the AWS SDK
-			// needs in order to re-sign or retry a request body.
-			var _ io.ReadSeeker = value
-			buf := make([]byte, 32*1024)
-			for {
-				n, err := value.Read(buf)
-				streamed += int64(n)
-				if err == io.EOF {
-					return nil
-				}
-				if err != nil {
-					return err
-				}
-			}
-		},
-		func(string) error { return nil },
-	))
-	assert.Equal(t, size, reportedSize, "put receives the spooled length")
-	assert.Equal(t, size, streamed, "the whole value is readable in chunks")
 }

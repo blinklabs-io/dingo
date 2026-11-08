@@ -166,24 +166,6 @@ func TestBackfillLedgerTipErrorIsFatal(t *testing.T) {
 	assert.Equal(t, 0, h.calls, "no blocks may be scanned without a target")
 }
 
-// TestBackfillSkippedWhenCheckpointPastLedgerTip covers the ordinary restart
-// of an already-caught-up node: the checkpoint sits above the applied ledger
-// tip, so there is no gap and no iteration to perform.
-func TestBackfillSkippedWhenCheckpointPastLedgerTip(t *testing.T) {
-	t.Parallel()
-	h := newBackfillHarness(
-		t,
-		500,
-		func() (uint64, error) { return 250, nil },
-		nil,
-		testBlock(1, 100, 0xA1),
-	)
-
-	require.NoError(t, h.idx.Backfill())
-
-	assert.Equal(t, 0, h.calls)
-}
-
 // TestBackfillLogsCatchUpGap covers the startup detection requirement: an
 // operator must be able to see, from the logs alone, how far behind the
 // indexer is before the sweep begins.

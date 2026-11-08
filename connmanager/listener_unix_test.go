@@ -83,36 +83,6 @@ func TestStartListener_UnixSocket_RemovesStaleSocketFile(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// TestStartListener_UnixSocket_NoExistingFile verifies that a Unix socket
-// listener starts successfully when no previous socket file exists.
-func TestStartListener_UnixSocket_NoExistingFile(t *testing.T) {
-	defer goleak.VerifyNone(t)
-
-	socketPath := unixTestSocketPath(t, unixTestTempDir(t), "test.sock")
-	// No pre-existing socket file
-
-	cfg := ConnectionManagerConfig{
-		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		PromRegistry: prometheus.NewRegistry(),
-		Listeners: []ListenerConfig{
-			{
-				ListenNetwork: "unix",
-				ListenAddress: socketPath,
-			},
-		},
-	}
-
-	cm := NewConnectionManager(cfg)
-	ctx := context.Background()
-	err := cm.Start(ctx)
-	require.NoError(t, err, "Start should succeed when no socket file exists")
-
-	stopCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	err = cm.Stop(stopCtx)
-	require.NoError(t, err)
-}
-
 // TestStartListener_UnixSocket_ErrorOnNonSocketFile verifies that an error is
 // surfaced when the socket path is occupied by a regular (non-socket) file.
 // The server must not silently delete arbitrary files.

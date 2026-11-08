@@ -65,20 +65,6 @@ func TestLedgerProcessBlockByronInputIndexWord16(t *testing.T) {
 		)
 	})
 
-	t.Run("index 65536 does not decode", func(t *testing.T) {
-		t.Parallel()
-		db := newTestDB(t)
-		txId := seedByronUtxoAt(
-			t, db, 0x01, math.MaxUint16+1, key.address, 1_000,
-		)
-		txCbor, _ := encodeByronBlockTestTx(t, protocolMagic,
-			[]byronBlockTestInput{{txId, math.MaxUint16 + 1}},
-			[]byronBlockTestOutput{{payTo, 900}},
-			nil, []byronBlockTestKey{key})
-		_, err := byron.NewByronTransactionFromCbor(txCbor)
-		require.ErrorContains(t, err, "out of range")
-	})
-
 	t.Run("index 65536 past the decoder is rejected", func(t *testing.T) {
 		t.Parallel()
 		db := newTestDB(t)

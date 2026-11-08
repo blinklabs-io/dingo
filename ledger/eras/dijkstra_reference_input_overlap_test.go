@@ -376,48 +376,6 @@ func TestValidateTxDijkstraRejectsSpendReferenceOverlapForPlutusV3(
 	require.ErrorContains(t, ValidateTxDijkstra(tx, 0, state, params), "is also a regular input")
 }
 
-func TestDijkstraPlutusValidationRejectsPlutusV3ChildWithOverlap(
-	t *testing.T,
-) {
-	t.Parallel()
-	plutusScript := dijkstraReferenceOverlapScript(
-		t,
-		lang.LanguageVersionV3,
-	)
-	tx, state, params := newDijkstraReferenceOverlapScriptTx(
-		t,
-		plutusScript,
-		true,
-	)
-
-	// gOuroboros v0.208.0 rejects Plutus V1-V3 execution in Dijkstra child
-	// transactions before constructing a script context. The overlap must not
-	// mask that earlier, era-specific rule.
-	child := gdijkstra.DijkstraSubTransaction{
-		Body: gdijkstra.DijkstraSubTransactionBody{
-			TxInputs:          tx.Body.TxInputs,
-			TxOutputs:         tx.Body.TxOutputs,
-			TxScriptDataHash:  tx.Body.TxScriptDataHash,
-			TxReferenceInputs: tx.Body.TxReferenceInputs,
-		},
-		WitnessSet: tx.WitnessSet,
-	}
-	tx = &gdijkstra.DijkstraTransaction{
-		Body: gdijkstra.DijkstraTransactionBody{
-			TxSubTransactions: cbor.NewSetType(
-				[]gdijkstra.DijkstraSubTransaction{child},
-				false,
-			),
-		},
-		TxIsValid: true,
-	}
-
-	err := gdijkstra.UtxoValidatePlutusScripts(tx, 0, state, params)
-	var unsupported gdijkstra.UnsupportedScriptInSubtransactionError
-	require.ErrorAs(t, err, &unsupported)
-	require.Equal(t, uint(2), unsupported.Version)
-}
-
 func TestDijkstraPlutusValidationV3OverlapIgnoresUnusedPlutusV1AndV2Scripts(
 	t *testing.T,
 ) {

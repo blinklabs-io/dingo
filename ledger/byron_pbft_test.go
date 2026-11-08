@@ -741,6 +741,8 @@ func TestAdvanceByronPBFTStateEnforcesIssuerWindow(t *testing.T) {
 }
 
 func TestByronPBFTStateUsesCardanoNodeThreshold(t *testing.T) {
+	t.Parallel()
+
 	stored := loadRealByronMainBlock(t)
 	block, err := stored.Decode()
 	require.NoError(t, err)

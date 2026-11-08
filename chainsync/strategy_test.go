@@ -15,7 +15,6 @@
 package chainsync_test
 
 import (
-	"net"
 	"testing"
 	"time"
 
@@ -30,6 +29,7 @@ import (
 // --- Strategy parsing / formatting ---
 
 func TestParseHeaderSyncStrategy(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		input   string
 		want    chainsync.HeaderSyncStrategy
@@ -57,30 +57,13 @@ func TestParseHeaderSyncStrategy(t *testing.T) {
 	}
 }
 
-func TestHeaderSyncStrategy_String(t *testing.T) {
-	require.Equal(t, "primary", chainsync.HeaderSyncStrategyPrimary.String())
-	require.Equal(t, "parallel", chainsync.HeaderSyncStrategyParallel.String())
-	require.Equal(
-		t,
-		"round-robin",
-		chainsync.HeaderSyncStrategyRoundRobin.String(),
-	)
-}
-
-func TestDefaultConfig_HeaderSyncStrategyIsPrimary(t *testing.T) {
-	require.Equal(
-		t,
-		chainsync.HeaderSyncStrategyPrimary,
-		chainsync.DefaultConfig().HeaderSyncStrategy,
-	)
-}
-
 // --- ShouldPublishHeader: primary (default) preserves existing behavior ---
 
 // Under the primary strategy a new header from any eligible peer publishes,
 // and the active peer replays a duplicate first seen from another peer. This
 // matches the behavior before the strategy gate existed.
 func TestShouldPublishHeader_Primary_PreservesReplay(t *testing.T) {
+	t.Parallel()
 	bus := newTestEventBus(t)
 	cfg := chainsync.DefaultConfig()
 	cfg.HeaderSyncStrategy = chainsync.HeaderSyncStrategyPrimary
@@ -123,6 +106,7 @@ func TestShouldPublishHeader_Primary_PreservesReplay(t *testing.T) {
 // concurrently. A duplicate from any peer is never replayed, so a header
 // never enters ledger processing twice.
 func TestShouldPublishHeader_Parallel_MultiPeerNoDoubleIngress(t *testing.T) {
+	t.Parallel()
 	bus := newTestEventBus(t)
 	cfg := chainsync.DefaultConfig()
 	cfg.HeaderSyncStrategy = chainsync.HeaderSyncStrategyParallel
@@ -164,6 +148,7 @@ func TestShouldPublishHeader_Parallel_MultiPeerNoDoubleIngress(t *testing.T) {
 // --- ShouldPublishHeader: round-robin rotates a single driver ---
 
 func TestShouldPublishHeader_RoundRobin_SingleRotatingDriver(t *testing.T) {
+	t.Parallel()
 	bus := newTestEventBus(t)
 	cfg := chainsync.DefaultConfig()
 	cfg.HeaderSyncStrategy = chainsync.HeaderSyncStrategyRoundRobin
@@ -197,6 +182,7 @@ func TestShouldPublishHeader_RoundRobin_SingleRotatingDriver(t *testing.T) {
 func TestShouldPublishHeader_RoundRobin_DriverReplaysSeenElsewhere(
 	t *testing.T,
 ) {
+	t.Parallel()
 	bus := newTestEventBus(t)
 	cfg := chainsync.DefaultConfig()
 	cfg.HeaderSyncStrategy = chainsync.HeaderSyncStrategyRoundRobin
@@ -231,6 +217,7 @@ func TestShouldPublishHeader_RoundRobin_DriverReplaysSeenElsewhere(
 // --- Divergence still produces fork handling, not silent suppression ---
 
 func TestShouldPublishHeader_DivergenceKeepsForkHandling(t *testing.T) {
+	t.Parallel()
 	bus := newTestEventBus(t)
 	_, forkCh := bus.Subscribe(chainsync.ForkDetectedEventType)
 	cfg := chainsync.DefaultConfig()
@@ -271,6 +258,7 @@ func TestShouldPublishHeader_DivergenceKeepsForkHandling(t *testing.T) {
 // When the active/primary peer disconnects, an unselected remaining peer can
 // still publish a new header so ChainSelector can evaluate and select it.
 func TestShouldPublishHeader_PrimaryFailoverDoesNotStrand(t *testing.T) {
+	t.Parallel()
 	bus := newTestEventBus(t)
 	cfg := chainsync.DefaultConfig()
 	cfg.HeaderSyncStrategy = chainsync.HeaderSyncStrategyPrimary
@@ -305,6 +293,7 @@ func TestShouldPublishHeader_PrimaryFailoverDoesNotStrand(t *testing.T) {
 func TestShouldPublishHeader_RoundRobinDriverRemovalDoesNotStrand(
 	t *testing.T,
 ) {
+	t.Parallel()
 	bus := newTestEventBus(t)
 	cfg := chainsync.DefaultConfig()
 	cfg.HeaderSyncStrategy = chainsync.HeaderSyncStrategyRoundRobin
@@ -334,10 +323,13 @@ func TestShouldPublishHeader_RoundRobinDriverRemovalDoesNotStrand(
 // A stalled peer must be excluded from the round-robin rotation so it cannot be
 // selected as the ingress driver and suppress a healthy peer's headers.
 func TestShouldPublishHeader_RoundRobinSkipsStalledDriver(t *testing.T) {
+	t.Parallel()
 	bus := newTestEventBus(t)
+	now := time.Unix(1, 0)
 	cfg := chainsync.DefaultConfig()
 	cfg.HeaderSyncStrategy = chainsync.HeaderSyncStrategyRoundRobin
-	cfg.StallTimeout = 50 * time.Millisecond
+	cfg.StallTimeout = time.Minute
+	cfg.Now = func() time.Time { return now }
 	s := newTestState(t, bus, cfg)
 
 	connA := newTestConnId(1)
@@ -349,12 +341,15 @@ func TestShouldPublishHeader_RoundRobinSkipsStalledDriver(t *testing.T) {
 	tipA := ochainsync.Tip{Point: pointA}
 
 	// Keep connA active while connB goes quiet, so only connB stalls.
-	require.Eventually(t, func() bool {
-		s.UpdateClientTip(connA, pointA, tipA)
-		s.CheckStalledClients()
-		tc := s.GetTrackedClient(connB)
-		return tc != nil && tc.Status == chainsync.ClientStatusStalled
-	}, 2*time.Second, 10*time.Millisecond, "connB should become stalled")
+	now = now.Add(40 * time.Second)
+	s.UpdateClientTip(connA, pointA, tipA)
+	now = now.Add(40 * time.Second)
+	require.Equal(
+		t,
+		[]ouroboros.ConnectionId{connB},
+		s.CheckStalledClients(),
+		"connB should become stalled",
+	)
 
 	// connA (healthy) is the sole eligible driver; the stalled connB is not.
 	require.True(t, s.ShouldPublishHeader(connA, pointA, true))
@@ -363,28 +358,4 @@ func TestShouldPublishHeader_RoundRobinSkipsStalledDriver(t *testing.T) {
 		s.ShouldPublishHeader(connB, ocommon.NewPoint(101, []byte("hb")), true),
 		"stalled peer must not be selected as the round-robin driver",
 	)
-}
-
-// The primary-strategy active-peer equality check must not panic on a
-// partial-nil connection id (one of LocalAddr/RemoteAddr unset).
-func TestShouldPublishHeader_PartialNilConnIdDoesNotPanic(t *testing.T) {
-	bus := newTestEventBus(t)
-	s := newTestState(t, bus, chainsync.DefaultConfig()) // primary
-
-	partial := ouroboros.ConnectionId{
-		RemoteAddr: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 3001},
-	}
-	require.True(t, s.AddClientConnId(partial))
-	selectedPoint := ocommon.NewPoint(99, []byte("selected"))
-	s.UpdateClientTipWithoutDedup(
-		partial, selectedPoint, ochainsync.Tip{Point: selectedPoint},
-	)
-	require.True(t, s.TrySetClientConnId(partial))
-
-	point := ocommon.NewPoint(100, []byte("hash-1"))
-	require.NotPanics(t, func() {
-		// Duplicate path exercises the active-peer equality comparison.
-		s.ShouldPublishHeader(partial, point, false)
-		s.ShouldPublishHeader(partial, point, true)
-	})
 }

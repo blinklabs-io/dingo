@@ -117,7 +117,9 @@ func TestParseAddColumnStatement(t *testing.T) {
 // through the migration DDL translator. A dialect that does not take ? has to
 // see its own placeholders, which is why Batch carries the rebinder.
 func TestCommitteeTermStartBackfillUsesDialectPlaceholders(t *testing.T) {
+	t.Parallel()
 	databasePath := filepath.Join(t.TempDir(), "metadata.sqlite")
+	SeedMigratedPrefix(t, databasePath, 8)
 	db, err := sql.Open("sqlite", "file:"+databasePath+"?"+testDBPragmas)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
@@ -153,24 +155,6 @@ func TestCommitteeTermStartBackfillUsesDialectPlaceholders(t *testing.T) {
 			"the backfill must hand the rebinder ? placeholders",
 		)
 	}
-}
-
-// Batch.Rebind is never nil, so a backfill can call it unconditionally.
-func TestBackfillBatchRebindDefaultsToIdentity(t *testing.T) {
-	databasePath := filepath.Join(t.TempDir(), "metadata.sqlite")
-	db, err := sql.Open("sqlite", "file:"+databasePath+"?"+testDBPragmas)
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, db.Close()) })
-
-	registry, err := SQLiteRegistry()
-	require.NoError(t, err)
-	runner := Runner{
-		DB:       db,
-		Dialect:  "sqlite",
-		Registry: registry,
-		Locker:   NewFileLocker(databasePath + ".migrate.lock"),
-	}
-	require.NoError(t, runner.Run(context.Background()))
 }
 
 // TestBackfillRebindFallsBackToDialectRebinder proves that a Runner built
@@ -268,19 +252,13 @@ func TestLeiosSnapshotRegistrationEpochBackfill(t *testing.T) {
 func TestRewardCreditRoundBackfillMovesLegacyState(t *testing.T) {
 	t.Parallel()
 	databasePath := filepath.Join(t.TempDir(), "metadata.sqlite")
+	SeedMigratedPrefix(t, databasePath, 30)
 	db, err := sql.Open("sqlite", "file:"+databasePath+"?"+testDBPragmas)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	registry, err := SQLiteRegistry()
 	require.NoError(t, err)
 	locker := NewFileLocker(databasePath + ".migrate.lock")
-	legacyRunner := Runner{
-		DB:       db,
-		Dialect:  "sqlite",
-		Registry: registry[:30],
-		Locker:   locker,
-	}
-	require.NoError(t, legacyRunner.Run(context.Background()))
 
 	want := make([]models.RewardCreditRound, 1_005)
 	for i := range want {

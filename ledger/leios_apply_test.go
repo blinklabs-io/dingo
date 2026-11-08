@@ -27,6 +27,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -1965,43 +1966,48 @@ func TestEnsureReferencedEndorserBlocksWaitsForCertifiedClosureArrivingLate(
 func TestEnsureReferencedEndorserBlocksSharesOneWindowAcrossMissingBlocks(
 	t *testing.T,
 ) {
-	const missing = 3
-	cfg := LedgerStateConfig{
-		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		EndorserBlockProvider: func([]byte, uint64) ([]cbor.RawMessage, bool) {
-			return nil, false
-		},
-		EndorserBlockWaitSlots: leiosWaitTestWaitSlots,
-	}
-	ls := &LedgerState{config: cfg}
-	blocks := make([]gledger.Block, 0, 2*missing)
-	for i := range missing {
-		parent, certifier, _ := leiosTestCertifiedBlockPairAt(
-			t,
-			byte(0xB0+i),
-			uint64(100+20*i),
-		)
-		leiosTestEnableCertifiedBlock(t, ls, certifier)
-		blocks = append(blocks, parent, certifier)
-	}
-	withLeiosWaitTestSlotLength(t, ls)
+	// Virtual time: the diffusion window elapses instantly, so the assertions
+	// on its length stay exact without waiting it out.
+	synctest.Test(t, func(t *testing.T) {
+		const missing = 3
+		cfg := LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			EndorserBlockProvider: func([]byte, uint64) ([]cbor.RawMessage, bool) {
+				return nil, false
+			},
+			EndorserBlockWaitSlots: leiosWaitTestWaitSlots,
+		}
+		ls := &LedgerState{config: cfg}
+		blocks := make([]gledger.Block, 0, 2*missing)
+		for i := range missing {
+			parent, certifier, _ := leiosTestCertifiedBlockPairAt(
+				t,
+				byte(0xB0+i),
+				uint64(100+20*i),
+			)
+			leiosTestEnableCertifiedBlock(t, ls, certifier)
+			blocks = append(blocks, parent, certifier)
+		}
+		withLeiosWaitTestSlotLength(t, ls)
 
-	start := time.Now()
-	err := ls.ensureReferencedEndorserBlocks(t.Context(), blocks)
-	elapsed := time.Since(start)
-	require.ErrorIs(t, err, errCertifiedEndorserBlockUnavailable)
-	require.GreaterOrEqual(
-		t,
-		elapsed,
-		leiosWaitTestWindow,
-		"the window must still be honoured for references application reads",
-	)
-	require.Less(
-		t,
-		elapsed,
-		2*leiosWaitTestWindow,
-		"per-endorser-block waits stacked serially instead of sharing a window",
-	)
+		start := time.Now()
+		err := ls.ensureReferencedEndorserBlocks(t.Context(), blocks)
+		elapsed := time.Since(start)
+		require.ErrorIs(t, err, errCertifiedEndorserBlockUnavailable)
+		require.GreaterOrEqual(
+			t,
+			elapsed,
+			leiosWaitTestWindow,
+			"the window must still be honoured for references application reads",
+		)
+		require.Less(
+			t,
+			elapsed,
+			2*leiosWaitTestWindow,
+			"per-endorser-block waits stacked serially instead of sharing a window",
+		)
+
+	})
 }
 
 // TestSplitTipWaitByApplyDependency pins the apply-path contract itself,
@@ -2137,69 +2143,72 @@ func leiosWaitTestHistogram(
 // monitoring. Both outcomes are recorded, and both label values exist before
 // any wait happens so a dashboard is not looking at an absent series.
 func TestLeiosEbWaitMetricsRecordOutcomeAndDuration(t *testing.T) {
-	reg := prometheus.NewRegistry()
-	var available atomic.Bool
-	ls := &LedgerState{
-		config: LedgerStateConfig{
-			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
-			EndorserBlockProvider: func(
-				[]byte,
-				uint64,
-			) ([]cbor.RawMessage, bool) {
-				return nil, available.Load()
+	// Virtual time: the diffusion-window expiry elapses instantly.
+	synctest.Test(t, func(t *testing.T) {
+		reg := prometheus.NewRegistry()
+		var available atomic.Bool
+		ls := &LedgerState{
+			config: LedgerStateConfig{
+				Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+				EndorserBlockProvider: func(
+					[]byte,
+					uint64,
+				) ([]cbor.RawMessage, bool) {
+					return nil, available.Load()
+				},
 			},
-		},
-	}
-	ls.metrics.init(reg)
+		}
+		ls.metrics.init(reg)
 
-	// Every outcome series is pre-materialized at init, before any wait.
-	require.Equal(
-		t,
-		3,
-		promtestutil.CollectAndCount(ls.metrics.leiosEbWaitSeconds),
-	)
-	require.Zero(t, leiosWaitTestHistogram(t, reg, "arrived"))
-	require.Zero(t, leiosWaitTestHistogram(t, reg, "timeout"))
-	require.Zero(t, leiosWaitTestHistogram(t, reg, "cancelled"))
-	require.Zero(t, promtestutil.ToFloat64(ls.metrics.leiosEbWaitTimeouts))
+		// Every outcome series is pre-materialized at init, before any wait.
+		require.Equal(
+			t,
+			3,
+			promtestutil.CollectAndCount(ls.metrics.leiosEbWaitSeconds),
+		)
+		require.Zero(t, leiosWaitTestHistogram(t, reg, "arrived"))
+		require.Zero(t, leiosWaitTestHistogram(t, reg, "timeout"))
+		require.Zero(t, leiosWaitTestHistogram(t, reg, "cancelled"))
+		require.Zero(t, promtestutil.ToFloat64(ls.metrics.leiosEbWaitTimeouts))
 
-	ebHash := lcommon.NewBlake2b256(leiosTestHash(0xE7))
+		ebHash := lcommon.NewBlake2b256(leiosTestHash(0xE7))
 
-	// Expiry: recorded as a timeout, on both the histogram and the counter.
-	ls.waitForEndorserBlock(
-		t.Context(),
-		100,
-		ebHash,
-		leiosWaitTestWindow,
-		time.Millisecond,
-	)
-	require.Equal(t, uint64(1), leiosWaitTestHistogram(t, reg, "timeout"))
-	require.Equal(
-		t,
-		float64(1),
-		promtestutil.ToFloat64(ls.metrics.leiosEbWaitTimeouts),
-	)
-	require.Zero(t, leiosWaitTestHistogram(t, reg, "arrived"))
+		// Expiry: recorded as a timeout, on both the histogram and the counter.
+		ls.waitForEndorserBlock(
+			t.Context(),
+			100,
+			ebHash,
+			leiosWaitTestWindow,
+			time.Millisecond,
+		)
+		require.Equal(t, uint64(1), leiosWaitTestHistogram(t, reg, "timeout"))
+		require.Equal(
+			t,
+			float64(1),
+			promtestutil.ToFloat64(ls.metrics.leiosEbWaitTimeouts),
+		)
+		require.Zero(t, leiosWaitTestHistogram(t, reg, "arrived"))
 
-	// Arrival: recorded as arrived, and does not increment the timeout
-	// counter. The endorser block is made available by the provider's own
-	// second call rather than by a timer racing the deadline, and the window
-	// is long enough that the deadline cannot fire first regardless of load.
-	available.Store(true)
-	ls.waitForEndorserBlock(
-		t.Context(),
-		100,
-		ebHash,
-		leiosWaitTestLongWindow,
-		time.Millisecond,
-	)
-	require.Equal(t, uint64(1), leiosWaitTestHistogram(t, reg, "arrived"))
-	require.Equal(t, uint64(1), leiosWaitTestHistogram(t, reg, "timeout"))
-	require.Equal(
-		t,
-		float64(1),
-		promtestutil.ToFloat64(ls.metrics.leiosEbWaitTimeouts),
-	)
+		// Arrival: recorded as arrived, and does not increment the timeout
+		// counter. The endorser block is made available by the provider's own
+		// second call rather than by a timer racing the deadline, and the window
+		// is long enough that the deadline cannot fire first regardless of load.
+		available.Store(true)
+		ls.waitForEndorserBlock(
+			t.Context(),
+			100,
+			ebHash,
+			leiosWaitTestLongWindow,
+			time.Millisecond,
+		)
+		require.Equal(t, uint64(1), leiosWaitTestHistogram(t, reg, "arrived"))
+		require.Equal(t, uint64(1), leiosWaitTestHistogram(t, reg, "timeout"))
+		require.Equal(
+			t,
+			float64(1),
+			promtestutil.ToFloat64(ls.metrics.leiosEbWaitTimeouts),
+		)
+	})
 }
 
 // TestLeiosEbWaitCancellationIsNotCountedAsTimeout covers the review finding:

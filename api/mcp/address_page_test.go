@@ -38,6 +38,14 @@ import (
 
 func TestExactAddressCursorBudgetAndResume(t *testing.T) {
 	t.Parallel()
+	// The lookup below swaps the production candidate budget for a small one so
+	// the budget-exhausted page needs a few rows rather than thousands; the
+	// wrapper asserts the production budget is what exactAddressPage passes.
+	const (
+		testBudget  = 20
+		matchedRows = 8
+		pageLimit   = 5
+	)
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
 	payment := bytes.Repeat([]byte{0x45}, 28)
@@ -56,10 +64,10 @@ func TestExactAddressCursorBudgetAndResume(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.NoError(t, db.Transaction(t.Context(), true).Do(func(txn *database.Txn) error {
-		for i := range addressCandidateBudget + 103 {
+		for i := range testBudget + matchedRows {
 			address := base
 			stake := payment
-			if i >= addressCandidateBudget {
+			if i >= testBudget {
 				address = enterprise
 				stake = nil
 			}
@@ -83,7 +91,17 @@ func TestExactAddressCursorBudgetAndResume(t *testing.T) {
 		}
 		return nil
 	}))
-	cs := newToolSessionWithTimeout(t, nil, 100, time.Minute, db)
+	cs := newToolSessionWithLookup(
+		t, nil, 100, time.Minute,
+		func(
+			ctx context.Context,
+			q *models.UtxoWithOrderingQuery,
+			budget int,
+		) (models.UtxoAddressPage, error) {
+			require.Equal(t, addressCandidateBudget, budget)
+			return db.UtxosByAddressPage(ctx, q, testBudget)
+		},
+	)
 	type pageResult struct {
 		Utxos []struct {
 			TxID string `json:"tx_id"`
@@ -109,20 +127,20 @@ func TestExactAddressCursorBudgetAndResume(t *testing.T) {
 	}
 	first := read("", 1)
 	require.Empty(t, first.Utxos)
-	require.Equal(t, addressCandidateBudget, first.Scanned)
+	require.Equal(t, testBudget, first.Scanned)
 	require.NotEmpty(t, first.Next)
 	require.False(t, first.Complete)
 	second := read(first.Next, 1)
 	require.Len(t, second.Utxos, 1)
 	require.Equal(t, 1, second.Scanned)
 	require.NotEmpty(t, second.Next)
-	third := read(second.Next, 100)
-	require.Len(t, third.Utxos, 100)
-	require.Equal(t, 100, third.Scanned)
+	third := read(second.Next, pageLimit)
+	require.Len(t, third.Utxos, pageLimit)
+	require.Equal(t, pageLimit, third.Scanned)
 	require.False(t, third.Complete)
 	require.NotEmpty(t, third.Next)
 	fourth := read(third.Next, 100)
-	require.Len(t, fourth.Utxos, 2)
+	require.Len(t, fourth.Utxos, matchedRows-1-pageLimit)
 	require.True(t, fourth.Complete)
 	require.Empty(t, fourth.Next)
 	seen := map[string]bool{}
@@ -132,7 +150,7 @@ func TestExactAddressCursorBudgetAndResume(t *testing.T) {
 			seen[u.TxID] = true
 		}
 	}
-	require.Len(t, seen, 103)
+	require.Len(t, seen, matchedRows)
 	require.NotEqual(t, second.Utxos[0].TxID, third.Utxos[0].TxID)
 	require.NotEqual(t, third.Utxos[0].TxID, third.Utxos[1].TxID)
 	callTool(t, cs, "get_utxos", map[string]any{
@@ -150,7 +168,7 @@ func TestExactAddressCursorBudgetAndResume(t *testing.T) {
 	cancel()
 	canceled, err := db.UtxosByAddressPage(ctx, &models.UtxoWithOrderingQuery{
 		AddressPatterns: []models.UtxoAddressPattern{pattern}, Limit: 100,
-	}, addressCandidateBudget)
+	}, testBudget)
 	require.ErrorIs(t, err, context.Canceled)
 	require.Zero(t, canceled.Scanned)
 }

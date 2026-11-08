@@ -78,7 +78,7 @@ func TestGenesisConfigMatchesConsensusGoldenAtV21To23(t *testing.T) {
 	cfg := &cardano.CardanoNodeConfig{}
 	require.NoError(
 		t,
-		cfg.LoadShelleyGenesisFromReader(
+		completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(
 			strings.NewReader(consensusGenesisJSON),
 		),
 	)

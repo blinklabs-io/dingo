@@ -48,6 +48,7 @@ func newTestMultiAsset(
 // CheckedUint64FromBigInt must not reject anything that legitimately fits
 // in a uint64.
 func TestConvertMultiAssetToModelsMaxUint64(t *testing.T) {
+	t.Parallel()
 	var policyId lcommon.Blake2b224
 	policyId[0] = 0xaa
 	amount := new(big.Int).SetUint64(math.MaxUint64)
@@ -64,6 +65,7 @@ func TestConvertMultiAssetToModelsMaxUint64(t *testing.T) {
 // silently keep only the low 64 bits (wrapping to 0) instead of reporting
 // this.
 func TestConvertMultiAssetToModelsRejectsOverflow(t *testing.T) {
+	t.Parallel()
 	var policyId lcommon.Blake2b224
 	policyId[0] = 0xbb
 	amount := new(big.Int).SetUint64(math.MaxUint64)
@@ -78,6 +80,7 @@ func TestConvertMultiAssetToModelsRejectsOverflow(t *testing.T) {
 // amount, which big.Int.Uint64 would otherwise reinterpret as a huge
 // positive value instead of reporting.
 func TestConvertMultiAssetToModelsRejectsNegative(t *testing.T) {
+	t.Parallel()
 	var policyId lcommon.Blake2b224
 	policyId[0] = 0xcc
 	amount := big.NewInt(-1)
@@ -90,6 +93,7 @@ func TestConvertMultiAssetToModelsRejectsNegative(t *testing.T) {
 // TestConvertMultiAssetToModelsNilMultiAsset covers the pre-existing nil
 // shortcut: it must keep returning an empty, non-nil slice with no error.
 func TestConvertMultiAssetToModelsNilMultiAsset(t *testing.T) {
+	t.Parallel()
 	assets, err := ConvertMultiAssetToModels(nil)
 	require.NoError(t, err)
 	assert.Empty(t, assets)
@@ -99,6 +103,7 @@ func TestConvertMultiAssetToModelsNilMultiAsset(t *testing.T) {
 // a caller passing a nil *big.Int fails loudly instead of panicking inside
 // IsUint64/Uint64.
 func TestCheckedUint64FromBigIntRejectsNil(t *testing.T) {
+	t.Parallel()
 	_, err := CheckedUint64FromBigInt(nil)
 	assert.Error(t, err)
 }

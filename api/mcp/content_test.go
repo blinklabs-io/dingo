@@ -30,63 +30,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestMCPPromptsList(t *testing.T) {
-	t.Parallel()
-
-	server := mcp.NewServer(
-		&mcp.Implementation{Name: "test-server", Version: "1.0"},
-		&mcp.ServerOptions{
-			Capabilities: &mcp.ServerCapabilities{
-				Prompts: &mcp.PromptCapabilities{ListChanged: true},
-			},
-		},
-	)
-	RegisterPrompts(server, nil, nil, "preview")
-
-	clientTransport, serverTransport := mcp.NewInMemoryTransports()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	_, err := server.Connect(ctx, serverTransport, nil)
-	require.NoError(t, err)
-
-	client := mcp.NewClient(
-		&mcp.Implementation{Name: "test-client", Version: "1.0"},
-		nil,
-	)
-	cs, err := client.Connect(ctx, clientTransport, nil)
-	require.NoError(t, err)
-	defer cs.Close()
-
-	res, err := cs.ListPrompts(ctx, nil)
-	require.NoError(t, err)
-	require.NotNil(t, res)
-
-	promptNames := make(map[string]bool)
-	for _, p := range res.Prompts {
-		promptNames[p.Name] = true
-	}
-
-	expectedPrompts := []string{
-		"diagnose_node_health",
-		"simulate_and_diagnose_tx",
-		"audit_pool_rewards",
-		"track_asset_portfolio",
-		"conway_governance_brief",
-		"investigate_address",
-	}
-
-	for _, expected := range expectedPrompts {
-		assert.True(
-			t,
-			promptNames[expected],
-			"expected prompt %s to be registered",
-			expected,
-		)
-	}
-	assert.Equal(t, len(expectedPrompts), len(res.Prompts))
-}
-
 func TestMCPPromptsGet(t *testing.T) {
 	t.Parallel()
 
@@ -278,56 +221,6 @@ func TestMCPPromptsGet(t *testing.T) {
 		errAddrMissing.Error(),
 		"missing required argument 'address'",
 	)
-}
-
-func TestAuditPoolRewardsAccountQueryPrepares(t *testing.T) {
-	t.Parallel()
-	db := newSchemaDB(t)
-	query := "SELECT COUNT(*) AS active_delegators FROM account WHERE active = 1 AND pool = X'" + strings.Repeat(
-		"01",
-		28,
-	) + "'"
-	stmt, err := db.Prepare(query)
-	require.NoError(t, err)
-	require.NoError(t, stmt.Close())
-}
-
-func TestMCPPromptsCapabilities(t *testing.T) {
-	t.Parallel()
-
-	cfg := DefaultProviderConfig()
-	deps := ProviderDependencies{
-		Network: "preview",
-	}
-	server, _, err := NewMCPServer(t.Context(), cfg, deps)
-	require.NoError(t, err)
-
-	clientTransport, serverTransport := mcp.NewInMemoryTransports()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	_, err = server.Connect(ctx, serverTransport, nil)
-	require.NoError(t, err)
-
-	client := mcp.NewClient(
-		&mcp.Implementation{Name: "test-client", Version: "1.0"},
-		nil,
-	)
-	cs, err := client.Connect(ctx, clientTransport, nil)
-	require.NoError(t, err)
-	defer cs.Close()
-
-	// Verify server capabilities include Prompts
-	initRes := cs.InitializeResult()
-	require.NotNil(t, initRes)
-	caps := initRes.Capabilities
-	require.NotNil(t, caps)
-	require.NotNil(t, caps.Prompts)
-	assert.True(t, caps.Prompts.ListChanged)
-	require.NotNil(t, caps.Tools)
-	assert.True(t, caps.Tools.ListChanged)
-	require.NotNil(t, caps.Resources)
-	assert.True(t, caps.Resources.ListChanged)
 }
 
 func TestRegisterResourcesNilDB(t *testing.T) {

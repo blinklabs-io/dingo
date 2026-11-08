@@ -289,7 +289,8 @@ func TestImportCoveredCreditDrainResumesBeforeCertCheckpoint(t *testing.T) {
 						nil,
 					),
 				)
-				outputs := make([]*models.RewardAccountOutput, 2001)
+				const foldBatchSize = 2
+				outputs := make([]*models.RewardAccountOutput, 2*foldBatchSize+1)
 				for i := range outputs {
 					key := hash28(0xa1)
 					binary.BigEndian.PutUint64(key[:8], uint64(i))
@@ -312,6 +313,7 @@ func TestImportCoveredCreditDrainResumesBeforeCertCheckpoint(t *testing.T) {
 					75,
 					"covered-credit-resume",
 				)
+				cfg.rewardCreditFoldBatchSize = foldBatchSize
 				raw, err := dbtest.RawSQLiteMetadata(t, db)
 				require.NoError(t, err)
 				defer raw.Close()
@@ -335,7 +337,7 @@ func TestImportCoveredCreditDrainResumesBeforeCertCheckpoint(t *testing.T) {
 					require.False(t, models.IsPhaseCompleted(checkpoint.Phase, models.ImportPhaseCertState))
 					var folded int
 					require.NoError(t, raw.QueryRow(`SELECT count(*) FROM reward_account_output WHERE epoch=98 AND folded`).Scan(&folded))
-					require.Equal(t, 2000, folded)
+					require.Equal(t, 2*foldBatchSize, folded)
 					_, err = raw.Exec(`DROP TRIGGER reject_last_covered_credit`)
 					require.NoError(t, err)
 				}

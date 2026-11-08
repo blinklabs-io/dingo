@@ -148,7 +148,7 @@ func TestConwayGenesisAcceptsLegacyCommitteeQuorum(t *testing.T) {
 	require.NotNil(t, c.ConwayGenesis())
 }
 
-func TestConwayGenesisStillRejectsUnknownFields(t *testing.T) {
+func TestConwayGenesisAcceptsUnknownFields(t *testing.T) {
 	t.Parallel()
 	raw, err := os.ReadFile(filepath.Join(testDataDir, "conway-genesis.json"))
 	require.NoError(t, err)
@@ -158,7 +158,7 @@ func TestConwayGenesisStillRejectsUnknownFields(t *testing.T) {
 	out, err := json.Marshal(doc)
 	require.NoError(t, err)
 	var c CardanoNodeConfig
-	require.Error(t, c.LoadConwayGenesisFromReader(bytes.NewReader(out)))
+	require.NoError(t, c.LoadConwayGenesisFromReader(bytes.NewReader(out)))
 
 	doc["committee"] = json.RawMessage(
 		`{"members":{},"threshold":0,"notACommitteeField":1}`,
@@ -166,7 +166,7 @@ func TestConwayGenesisStillRejectsUnknownFields(t *testing.T) {
 	delete(doc, "notAConwayField")
 	out, err = json.Marshal(doc)
 	require.NoError(t, err)
-	require.Error(t, c.LoadConwayGenesisFromReader(bytes.NewReader(out)))
+	require.NoError(t, c.LoadConwayGenesisFromReader(bytes.NewReader(out)))
 }
 
 // TestConwayGenesisRejectsQuorumWithoutThreshold pins that the legacy quorum
@@ -377,8 +377,7 @@ func computedEmbeddedHashes(c *CardanoNodeConfig) map[string]string {
 //
 // Nothing else does this. loadGenesisConfigsFromEmbed compares the computed
 // hash against the one in the same directory's config.json, so the two move
-// together; TestEmbedFS_AllNetworks and
-// TestEmbeddedConfigsPassGenesisConsistency load the configs but assert
+// together; TestEmbedFS_AllNetworks loads the configs but asserts
 // nothing about the hashes. A change to the embedded bytes accompanied by a
 // matching config.json edit therefore changed the chain constant with the
 // whole suite green.

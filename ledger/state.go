@@ -1443,6 +1443,9 @@ type tipSnapshot struct {
 }
 
 type LedgerState struct {
+	// cleanupBatchSizeOverride replaces cleanupConsumedUtxoBatchSize when
+	// positive so tests can exercise the batch bound with a few rows.
+	cleanupBatchSizeOverride int
 	// A single successful-decode receipt retains only a manifest hash. Count
 	// readers still reload and hash every body before reusing that proof.
 	certifiedClosureReceipt atomic.Pointer[lcommon.Blake2b256]
@@ -3227,16 +3230,50 @@ func (ls *LedgerState) RecoverCommitTimestampConflict(
 	if err != nil {
 		return fmt.Errorf("failed to get tip: %w", err)
 	}
-	// Check if we can lookup tip block in chain
-	_, err = ls.chain.BlockByPoint(ctx, tmpTip.Point, nil)
+	containsTip, err := ls.primaryChainContainsPoint(ctx, tmpTip.Point)
 	if err != nil {
-		// Rollback to raw chain tip on error.
+		return fmt.Errorf("check ledger tip on primary chain: %w", err)
+	}
+	if !containsTip {
+		ancestor, found, ancestorErr := ls.latestLedgerPrimaryChainAncestor(
+			ctx,
+			tmpTip.Point,
+			containsTip,
+			true,
+		)
+		if ancestorErr != nil {
+			return fmt.Errorf(
+				"find common primary-chain ancestor for ledger tip: %w",
+				ancestorErr,
+			)
+		}
+		if !found {
+			return fmt.Errorf(
+				"ledger tip %d/%s is not on primary chain and no common ancestor was found",
+				tmpTip.Point.Slot,
+				hex.EncodeToString(tmpTip.Point.Hash),
+			)
+		}
+		// Roll back metadata to the newest applied block that is still on the
+		// selected chain. The raw chain tip may already belong to another fork.
 		// Note: We do NOT hold ls.Lock() here because rollback() calls
 		// SubmitAsyncDBTxn() which may trigger PartialCommitError recovery
 		// that re-acquires ls.Lock(), causing a deadlock. The rollback
 		// method handles its own locking for in-memory state updates.
-		chainTip := ls.chain.Tip()
-		if err = ls.rollback(ctx, chainTip.Point); err != nil {
+		ls.RLock()
+		publishedAtAncestor := pointMatches(ls.currentTip.Point, ancestor)
+		ls.RUnlock()
+		if publishedAtAncestor {
+			// Recovery may start before the durable tip has been published in
+			// memory. Force the metadata repair when the selected ancestor is
+			// already the in-memory tip (notably origin).
+			err = ls.withConsumedUtxoPruneBoundary(func() error {
+				return ls.rollbackWithBlocks(ctx, ancestor, nil, true)
+			})
+		} else {
+			err = ls.rollback(ctx, ancestor)
+		}
+		if err != nil {
 			wrappedErr := fmt.Errorf(
 				"failed to rollback ledger: %w",
 				err,
@@ -4725,8 +4762,15 @@ func (ls *LedgerState) cleanupConsumedUtxos(ctx context.Context) {
 		ctx,
 		tipSlot-stabilityWindow,
 		stabilityWindow,
-		cleanupConsumedUtxoBatchSize,
+		ls.cleanupConsumedUtxoBatchLimit(),
 	)
+}
+
+func (ls *LedgerState) cleanupConsumedUtxoBatchLimit() int {
+	if ls.cleanupBatchSizeOverride > 0 {
+		return ls.cleanupBatchSizeOverride
+	}
+	return cleanupConsumedUtxoBatchSize
 }
 
 // pruneConsumedUtxosUpTo hard-deletes at most limit spent UTxO rows whose
@@ -5029,6 +5073,7 @@ func (ls *LedgerState) resolveRollbackTarget(
 		ancestor, ok, ancestorErr := ls.latestLedgerPrimaryChainAncestor(
 			ctx,
 			point,
+			false,
 			false,
 		)
 		if ancestorErr != nil {
@@ -6516,6 +6561,29 @@ func (ls *LedgerState) prepareEraTransitionsForRollover(
 	}
 	return workingPParams, workingEraID, results,
 		transitionHardForkMajors, plutusV2CostModelWritten, nil
+}
+
+// applyRolloverTransitionInfo settles transitionInfo after an epoch rollover
+// has committed, for a rollover that did not also change era. A new epoch
+// makes any TransitionImpossible set for the previous epoch stale, so it resets
+// to Unknown and the tip-update logic re-evaluates for the new epoch's horizon.
+// TransitionKnown is set only when the epoch rolled over in the old era with a
+// version bump. A rollover that changed era is left alone, because
+// applyEraTransition already cleared the state. The caller holds the ledger
+// lock.
+func (ls *LedgerState) applyRolloverTransitionInfo(
+	eraTransitions int,
+	rolloverResult *EpochRolloverResult,
+) {
+	if eraTransitions != 0 || rolloverResult == nil {
+		return
+	}
+	ls.transitionInfo = hardfork.NewTransitionUnknown()
+	if rolloverResult.HardFork != nil {
+		ls.transitionInfo = hardfork.NewTransitionKnown(
+			rolloverResult.NewCurrentEpoch.EpochId,
+		)
+	}
 }
 
 // applyEraTransition applies a single era-transition result to the in-memory
@@ -8970,24 +9038,8 @@ func (ls *LedgerState) processBlocksFromSource(
 				}
 				ls.checkpointWrittenForEpoch = rolloverResult.CheckpointWrittenForEpoch
 				ls.metrics.epochNum.Set(rolloverResult.NewEpochNum)
-				// New epoch: any TransitionImpossible set for the previous
-				// epoch is now stale.  Reset to Unknown so the tip-update
-				// logic re-evaluates for the new epoch's horizon.
-				// (applyEraTransition already handles the era-transition case.)
-				if len(eraTransitions) == 0 {
-					ls.transitionInfo = hardfork.NewTransitionUnknown()
-				}
 			}
-			// Set TransitionKnown only when epoch rolled over in the old era
-			// with a version bump AND no era transition already cleared it.
-			// applyEraTransition (above) handles the clear for transitions.
-			if len(eraTransitions) == 0 &&
-				rolloverResult != nil &&
-				rolloverResult.HardFork != nil {
-				ls.transitionInfo = hardfork.NewTransitionKnown(
-					rolloverResult.NewCurrentEpoch.EpochId,
-				)
-			}
+			ls.applyRolloverTransitionInfo(len(eraTransitions), rolloverResult)
 			// Re-apply any TestXHardForkAtEpoch override, and re-check the
 			// classic quorum trigger. Both matter when no
 			// eraTransitions/HardFork occurred (the rollover reset
@@ -12824,7 +12876,31 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTipLocked(
 		bytes.Equal(chainTip.Point.Hash, ledgerTip.Point.Hash) {
 		return nil
 	}
-	if chainTip.Point.Slot < ledgerTip.Point.Slot {
+	containsLedgerTip, err := ls.primaryChainContainsPoint(ctx, ledgerTip.Point)
+	if err != nil {
+		return fmt.Errorf("check ledger tip on primary chain: %w", err)
+	}
+	ancestor, found, err := ls.latestLedgerPrimaryChainAncestor(
+		ctx,
+		ledgerTip.Point,
+		containsLedgerTip,
+		true,
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"find common primary-chain ancestor for ledger tip: %w",
+			err,
+		)
+	}
+	if !found {
+		return fmt.Errorf(
+			"ledger tip %d/%s is not on primary chain and no common ancestor was found",
+			ledgerTip.Point.Slot,
+			hex.EncodeToString(ledgerTip.Point.Hash),
+		)
+	}
+	if chainTip.Point.Slot < ledgerTip.Point.Slot &&
+		pointMatches(chainTip.Point, ancestor) {
 		ls.config.Logger.Warn(
 			"ledger tip ahead of primary chain tip, rolling back metadata to chain tip",
 			"component",
@@ -12909,10 +12985,6 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTipLocked(
 		ls.publishLocalLedgerRollback(chainTip.Point)
 		return nil
 	}
-	containsLedgerTip, err := ls.primaryChainContainsPoint(ctx, ledgerTip.Point)
-	if err != nil {
-		return fmt.Errorf("check ledger tip on primary chain: %w", err)
-	}
 	if containsLedgerTip {
 		// The ledger tip is a valid ancestor on the primary chain, so the
 		// primary chain is simply a forward extension of the ledger. This is
@@ -12941,24 +13013,6 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTipLocked(
 			gap,
 		)
 		return nil
-	}
-	ancestor, found, err := ls.latestLedgerPrimaryChainAncestor(
-		ctx,
-		ledgerTip.Point,
-		containsLedgerTip,
-	)
-	if err != nil {
-		return fmt.Errorf(
-			"find common primary-chain ancestor for ledger tip: %w",
-			err,
-		)
-	}
-	if !found {
-		return fmt.Errorf(
-			"ledger tip %d/%s is not on primary chain and no common ancestor was found",
-			ledgerTip.Point.Slot,
-			hex.EncodeToString(ledgerTip.Point.Hash),
-		)
 	}
 	ls.config.Logger.Warn(
 		"ledger tip not on primary chain at startup, rolling back metadata to common ancestor",
@@ -13444,6 +13498,7 @@ func (ls *LedgerState) latestLedgerPrimaryChainAncestor(
 	ctx context.Context,
 	point ocommon.Point,
 	containsPoint bool,
+	allowOrigin bool,
 ) (ocommon.Point, bool, error) {
 	if containsPoint {
 		return point, true, nil
@@ -13476,6 +13531,12 @@ func (ls *LedgerState) latestLedgerPrimaryChainAncestor(
 			break
 		}
 		end = start
+	}
+	if allowOrigin {
+		// Origin is the common ancestor when no applied block nonce remains on
+		// the selected chain. It has no block_nonce row, but recovery and
+		// reconciliation both support it.
+		return ocommon.Point{}, true, nil
 	}
 	return ocommon.Point{}, false, nil
 }

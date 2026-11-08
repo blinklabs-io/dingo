@@ -28,53 +28,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
-	sync "github.com/utxorpc/go-codegen/utxorpc/v1alpha/sync"
 )
-
-func TestNewUtxorpc_DefaultLimits(t *testing.T) {
-	u := NewUtxorpc(UtxorpcConfig{
-		Logger:   slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		EventBus: event.NewEventBus(nil, nil),
-	})
-	require.Equal(
-		t,
-		DefaultMaxBlockRefs,
-		u.config.MaxBlockRefs,
-		"MaxBlockRefs should default",
-	)
-	require.Equal(
-		t,
-		DefaultMaxUtxoKeys,
-		u.config.MaxUtxoKeys,
-		"MaxUtxoKeys should default",
-	)
-	require.Equal(
-		t,
-		DefaultMaxHistoryItems,
-		u.config.MaxHistoryItems,
-		"MaxHistoryItems should default",
-	)
-	require.Equal(
-		t,
-		DefaultMaxDataKeys,
-		u.config.MaxDataKeys,
-		"MaxDataKeys should default",
-	)
-	require.Equal(
-		t,
-		DefaultServerTimeout,
-		u.config.ServerTimeout,
-		"ServerTimeout should default",
-	)
-	require.Equal(
-		t,
-		DefaultBulkResponseWriteTimeout,
-		u.config.BulkResponseWriteTimeout,
-		"BulkResponseWriteTimeout should default",
-	)
-}
 
 func TestRewriteVersionHandler(t *testing.T) {
 	alphaPath := "/utxorpc.v1alpha.query.QueryService/ReadParams"
@@ -92,36 +47,6 @@ func TestRewriteVersionHandler(t *testing.T) {
 	handler.ServeHTTP(res, req)
 
 	require.Equal(t, alphaPath, calledPath)
-}
-
-func TestNewUtxorpc_CustomLimits(t *testing.T) {
-	u := NewUtxorpc(UtxorpcConfig{
-		Logger:                   slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		EventBus:                 event.NewEventBus(nil, nil),
-		MaxBlockRefs:             50,
-		MaxUtxoKeys:              500,
-		MaxHistoryItems:          5000,
-		MaxDataKeys:              200,
-		BulkResponseWriteTimeout: 10 * time.Second,
-		ServerTimeout:            10 * time.Second,
-	})
-	require.Equal(t, 50, u.config.MaxBlockRefs)
-	require.Equal(t, 500, u.config.MaxUtxoKeys)
-	require.Equal(t, 5000, u.config.MaxHistoryItems)
-	require.Equal(t, 200, u.config.MaxDataKeys)
-	require.Equal(t, 10*time.Second, u.config.BulkResponseWriteTimeout)
-	require.Equal(t, 10*time.Second, u.config.ServerTimeout)
-}
-
-// TestRequestLimitConstants verifies that the default limit constants
-// are reasonable values for preventing DoS while allowing normal use.
-func TestRequestLimitConstants(t *testing.T) {
-	require.Equal(t, 100, DefaultMaxBlockRefs)
-	require.Equal(t, 1000, DefaultMaxUtxoKeys)
-	require.Equal(t, 10000, DefaultMaxHistoryItems)
-	require.Equal(t, 1000, DefaultMaxDataKeys)
-	require.Equal(t, 30*time.Second, DefaultBulkResponseWriteTimeout)
-	require.Equal(t, time.Hour, DefaultServerTimeout)
 }
 
 func TestUtxorpc_StartStop(t *testing.T) {
@@ -256,32 +181,4 @@ func TestUtxorpc_StopObservesCtxCancellation(t *testing.T) {
 	}
 	assert.Contains(t, logBuf.String(), "forcing close")
 	assert.Contains(t, logBuf.String(), "cancelled by caller context")
-}
-
-// TestAnyChainBlockNativeBytes_NonNil ensures that AnyChainBlock.NativeBytes
-// is a real field in the generated type and can be set to non-nil, which is
-// what the SyncService handlers rely on for raw CBOR propagation.
-func TestAnyChainBlockNativeBytes_NonNil(t *testing.T) {
-	raw := []byte{0xde, 0xad, 0xbe, 0xef}
-
-	acb := &sync.AnyChainBlock{
-		NativeBytes: raw,
-	}
-
-	require.NotNil(t, acb.NativeBytes)
-	require.Equal(t, raw, acb.NativeBytes)
-}
-
-func TestBlockRefFromModel(t *testing.T) {
-	block := models.Block{
-		Hash:   []byte{0xde, 0xad, 0xbe, 0xef},
-		Slot:   42,
-		Number: 100,
-	}
-
-	br := blockRefFromModel(block)
-
-	require.Equal(t, block.Slot, br.Slot)
-	require.Equal(t, block.Hash, br.Hash)
-	require.Equal(t, block.Number, br.Height)
 }

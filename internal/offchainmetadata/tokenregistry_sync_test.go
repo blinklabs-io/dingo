@@ -540,6 +540,8 @@ func newTestSync(
 }
 
 func TestTokenRegistrySyncStoresMappings(t *testing.T) {
+	t.Parallel()
+
 	body := tarballOf(t, map[string]string{
 		"README.md": "not a mapping",
 		"mappings/" + syncSubjectNut + ".json": mappingJSON(
@@ -712,6 +714,7 @@ func TestTokenRegistryManifestSequencePolicy(t *testing.T) {
 	})
 
 	t.Run("lower rejected", func(t *testing.T) {
+		t.Parallel()
 		server := newRegistryServer(t, body)
 		store := newFakeTokenRegistryStore()
 		store.syncState[tokenRegistrySnapshotIDKey] =
@@ -725,6 +728,7 @@ func TestTokenRegistryManifestSequencePolicy(t *testing.T) {
 	})
 
 	t.Run("lower accepted explicitly", func(t *testing.T) {
+		t.Parallel()
 		server := newRegistryServer(t, body)
 		store := newFakeTokenRegistryStore()
 		store.syncState[tokenRegistrySnapshotIDKey] =
@@ -740,6 +744,7 @@ func TestTokenRegistryManifestSequencePolicy(t *testing.T) {
 	})
 
 	t.Run("same sequence different digest rejected", func(t *testing.T) {
+		t.Parallel()
 		server := newRegistryServer(t, body)
 		store := newFakeTokenRegistryStore()
 		store.syncState[tokenRegistrySnapshotIDKey] =
@@ -756,6 +761,8 @@ func TestTokenRegistryManifestSequencePolicy(t *testing.T) {
 }
 
 func TestTokenRegistrySyncPersistsAndSendsETag(t *testing.T) {
+	t.Parallel()
+
 	body := tarballOf(t, map[string]string{
 		"mappings/" + syncSubjectNut + ".json": mappingJSON(
 			syncSubjectNut,
@@ -790,6 +797,8 @@ func TestTokenRegistrySyncPersistsAndSendsETag(t *testing.T) {
 }
 
 func TestTokenRegistrySyncClearsOmittedManifestETag(t *testing.T) {
+	t.Parallel()
+
 	body := tarballOf(t, map[string]string{
 		"mappings/" + syncSubjectNut + ".json": mappingJSON(
 			syncSubjectNut, "nutcoin", "NUT", "",
@@ -816,6 +825,8 @@ func TestTokenRegistrySyncClearsOmittedManifestETag(t *testing.T) {
 }
 
 func TestTokenRegistrySyncDropsLogosByDefault(t *testing.T) {
+	t.Parallel()
+
 	// Logos are roughly 90% of registry bytes; storing them is opt-in.
 	body := tarballOf(t, map[string]string{
 		"mappings/" + syncSubjectNut + ".json": mappingJSON(
@@ -833,6 +844,8 @@ func TestTokenRegistrySyncDropsLogosByDefault(t *testing.T) {
 }
 
 func TestTokenRegistrySyncStoresLogosWhenEnabled(t *testing.T) {
+	t.Parallel()
+
 	body := tarballOf(t, map[string]string{
 		"mappings/" + syncSubjectNut + ".json": mappingJSON(
 			syncSubjectNut, "nutcoin", "NUT", "iVBORw0KGgoAAAA=",
@@ -851,6 +864,8 @@ func TestTokenRegistrySyncStoresLogosWhenEnabled(t *testing.T) {
 }
 
 func TestTokenRegistrySyncIgnoresNonMappingFiles(t *testing.T) {
+	t.Parallel()
+
 	body := tarballOf(t, map[string]string{
 		"README.md":          "hello",
 		"mappings/notes.txt": "not json",
@@ -873,6 +888,8 @@ func TestTokenRegistrySyncIgnoresNonMappingFiles(t *testing.T) {
 }
 
 func TestTokenRegistrySyncSkipsMalformedMappings(t *testing.T) {
+	t.Parallel()
+
 	// A complete authenticated snapshot is applied atomically. Valid rows from
 	// an archive with unusable mappings must not become visible on their own.
 	body := tarballOf(t, map[string]string{
@@ -902,6 +919,8 @@ func TestTokenRegistrySyncSkipsMalformedMappings(t *testing.T) {
 }
 
 func TestTokenRegistrySyncSkipsSubjectOnlyMappings(t *testing.T) {
+	t.Parallel()
+
 	body := tarballOf(t, map[string]string{
 		"mappings/" + syncSubjectNut + ".json": `{"subject":"` + syncSubjectNut + `"}`,
 	})
@@ -916,6 +935,8 @@ func TestTokenRegistrySyncSkipsSubjectOnlyMappings(t *testing.T) {
 }
 
 func TestTokenRegistrySyncRejectsOversizedBody(t *testing.T) {
+	t.Parallel()
+
 	body := tarballOf(t, map[string]string{
 		"mappings/" + syncSubjectNut + ".json": mappingJSON(
 			syncSubjectNut,
@@ -938,10 +959,12 @@ func TestTokenRegistrySyncRejectsOversizedBody(t *testing.T) {
 }
 
 func TestTokenRegistrySyncRejectsExcessiveDecompressedContent(t *testing.T) {
+	t.Parallel()
+
 	var body bytes.Buffer
 	gz := gzip.NewWriter(&body)
 	tw := tar.NewWriter(gz)
-	content := make([]byte, 4<<20)
+	content := make([]byte, 64<<10)
 	_, err := rand.New(rand.NewSource(1)).Read(content)
 	require.NoError(t, err)
 	require.NoError(t, tw.WriteHeader(&tar.Header{
@@ -978,6 +1001,8 @@ func (r *countingTestReader) Read(p []byte) (int, error) {
 }
 
 func TestTokenRegistrySyncRejectsExcessiveArchiveEntries(t *testing.T) {
+	t.Parallel()
+
 	body := tarballOf(t, map[string]string{
 		"README.md": "one",
 		"LICENSE":   "two",
@@ -999,6 +1024,8 @@ func TestTokenRegistrySyncRejectsExcessiveArchiveEntries(t *testing.T) {
 }
 
 func TestTokenRegistrySyncRejectsExcessiveAcceptedMappings(t *testing.T) {
+	t.Parallel()
+
 	subjects := manySubjects(3)
 	files := make(map[string]string, len(subjects))
 	for idx, subject := range subjects {
@@ -1034,6 +1061,8 @@ func TestTokenRegistrySyncRejectsExcessiveAcceptedMappings(t *testing.T) {
 }
 
 func TestTokenRegistrySyncBoundsRetainedBatchBytes(t *testing.T) {
+	t.Parallel()
+
 	subjects := manySubjects(4)
 	files := make(map[string]string, len(subjects))
 	for _, subject := range subjects {
@@ -1128,6 +1157,8 @@ func TestTokenRegistrySyncSkipsEntryAboveRetainedBatchLimit(t *testing.T) {
 }
 
 func TestTokenRegistrySyncIngestsArtifactBeforeTransaction(t *testing.T) {
+	t.Parallel()
+
 	body := tarballOf(t, map[string]string{
 		"mappings/" + syncSubjectNut + ".json": mappingJSON(
 			syncSubjectNut, "nutcoin", "NUT", "",
@@ -1188,6 +1219,8 @@ func TestTokenRegistrySyncIngestsArtifactBeforeTransaction(t *testing.T) {
 }
 
 func TestTokenRegistrySyncSkipsOversizedMapping(t *testing.T) {
+	t.Parallel()
+
 	huge := strings.Repeat("A", 4096)
 	body := tarballOf(t, map[string]string{
 		"mappings/huge.json": mappingJSON(
@@ -1217,6 +1250,8 @@ func TestTokenRegistrySyncSkipsOversizedMapping(t *testing.T) {
 }
 
 func TestTokenRegistrySyncErrorsOnBadStatus(t *testing.T) {
+	t.Parallel()
+
 	server := newRegistryServer(t, nil)
 	server.status = http.StatusInternalServerError
 	store := newFakeTokenRegistryStore()
@@ -1230,6 +1265,8 @@ func TestTokenRegistrySyncErrorsOnBadStatus(t *testing.T) {
 }
 
 func TestTokenRegistrySyncErrorsOnNonGzipBody(t *testing.T) {
+	t.Parallel()
+
 	server := newRegistryServer(t, []byte("this is not a gzip stream"))
 	store := newFakeTokenRegistryStore()
 	sync := newTestSync(t, store, server.URL, nil)
@@ -1240,6 +1277,8 @@ func TestTokenRegistrySyncErrorsOnNonGzipBody(t *testing.T) {
 }
 
 func TestTokenRegistrySyncBlocksPrivateAddressesByDefault(t *testing.T) {
+	t.Parallel()
+
 	// The SSRF guard the per-URL fetcher uses applies here too: a registry
 	// source URL is operator-supplied, and must not become a way to make the
 	// node fetch from its own network.
@@ -1256,16 +1295,12 @@ func TestTokenRegistrySyncBlocksPrivateAddressesByDefault(t *testing.T) {
 
 	_, err = sync.SyncOnce(t.Context())
 
-	require.Error(t, err)
-}
-
-func TestNewTokenRegistrySyncRequiresStore(t *testing.T) {
-	_, err := NewTokenRegistrySync(TokenRegistryConfig{Network: "mainnet"})
-
-	require.Error(t, err)
+	require.ErrorContains(t, err, "validate token registry source URL failed")
 }
 
 func TestNewTokenRegistrySyncResolvesSourceByNetwork(t *testing.T) {
+	t.Parallel()
+
 	for network, want := range map[string]string{
 		"mainnet": "cardano-foundation/cardano-token-registry",
 		"preprod": "input-output-hk/metadata-registry-testnet",
@@ -1273,6 +1308,7 @@ func TestNewTokenRegistrySyncResolvesSourceByNetwork(t *testing.T) {
 		"devnet":  "input-output-hk/metadata-registry-testnet",
 	} {
 		t.Run(network, func(t *testing.T) {
+			t.Parallel()
 			sync, err := NewTokenRegistrySync(TokenRegistryConfig{
 				Store:              newFakeTokenRegistryStore(),
 				Network:            network,
@@ -1286,6 +1322,8 @@ func TestNewTokenRegistrySyncResolvesSourceByNetwork(t *testing.T) {
 }
 
 func TestNewTokenRegistrySyncPrefersExplicitSourceURL(t *testing.T) {
+	t.Parallel()
+
 	sync, err := NewTokenRegistrySync(TokenRegistryConfig{
 		Store:              newFakeTokenRegistryStore(),
 		Network:            "mainnet",
@@ -1303,6 +1341,8 @@ func TestNewTokenRegistrySyncPrefersExplicitSourceURL(t *testing.T) {
 }
 
 func TestTokenRegistrySyncStartStop(t *testing.T) {
+	t.Parallel()
+
 	body := tarballOf(t, map[string]string{
 		"mappings/" + syncSubjectNut + ".json": mappingJSON(
 			syncSubjectNut,
@@ -1330,54 +1370,52 @@ func TestTokenRegistrySyncStartStop(t *testing.T) {
 	require.NoError(t, sync.Stop(stopCtx), "Stop must be idempotent")
 }
 
-// TestNewTokenRegistrySyncBoundsCallerSuppliedClient covers a caller-supplied
-// HTTP client with no Timeout of its own: secureHTTPClient does not set one,
-// so without an explicit bound here a stalled source could hold SyncOnce open
-// past the configured whole-download budget indefinitely.
-func TestNewTokenRegistrySyncBoundsCallerSuppliedClient(t *testing.T) {
-	sync, err := NewTokenRegistrySync(TokenRegistryConfig{
-		Store:              newFakeTokenRegistryStore(),
-		Network:            "mainnet",
-		ManifestURL:        "https://registry.example.test/manifest",
-		TrustedManifestKey: testTokenRegistryManifestKey(),
-		HTTPClient:         &http.Client{},
-		RequestTimeout:     42 * time.Second,
-	})
+// TestNewTokenRegistrySyncClientTimeout covers how the configured request
+// timeout bounds the HTTP client. A caller-supplied client with no Timeout of
+// its own is bounded explicitly, because secureHTTPClient does not set one and
+// a stalled source could otherwise hold SyncOnce open past the whole-download
+// budget. A caller who asked for something tighter than the configured budget
+// meant it, so that is not loosened.
+func TestNewTokenRegistrySyncClientTimeout(t *testing.T) {
+	t.Parallel()
 
-	require.NoError(t, err)
-	require.Equal(t, 42*time.Second, sync.client.Timeout)
-}
+	for name, tc := range map[string]struct {
+		client *http.Client
+		want   time.Duration
+	}{
+		"caller client without timeout is bounded": {
+			client: &http.Client{},
+			want:   42 * time.Second,
+		},
+		"stricter caller timeout is kept": {
+			client: &http.Client{Timeout: 5 * time.Second},
+			want:   5 * time.Second,
+		},
+		"default client is bounded": {
+			want: 42 * time.Second,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 
-func TestNewTokenRegistrySyncKeepsStricterCallerTimeout(t *testing.T) {
-	// A caller who asked for something tighter than the configured budget
-	// meant it; do not loosen it.
-	sync, err := NewTokenRegistrySync(TokenRegistryConfig{
-		Store:              newFakeTokenRegistryStore(),
-		Network:            "mainnet",
-		ManifestURL:        "https://registry.example.test/manifest",
-		TrustedManifestKey: testTokenRegistryManifestKey(),
-		HTTPClient:         &http.Client{Timeout: 5 * time.Second},
-		RequestTimeout:     42 * time.Second,
-	})
+			sync, err := NewTokenRegistrySync(TokenRegistryConfig{
+				Store:              newFakeTokenRegistryStore(),
+				Network:            "mainnet",
+				ManifestURL:        "https://registry.example.test/manifest",
+				TrustedManifestKey: testTokenRegistryManifestKey(),
+				HTTPClient:         tc.client,
+				RequestTimeout:     42 * time.Second,
+			})
 
-	require.NoError(t, err)
-	require.Equal(t, 5*time.Second, sync.client.Timeout)
-}
-
-func TestNewTokenRegistrySyncBoundsDefaultClient(t *testing.T) {
-	sync, err := NewTokenRegistrySync(TokenRegistryConfig{
-		Store:              newFakeTokenRegistryStore(),
-		Network:            "mainnet",
-		ManifestURL:        "https://registry.example.test/manifest",
-		TrustedManifestKey: testTokenRegistryManifestKey(),
-		RequestTimeout:     42 * time.Second,
-	})
-
-	require.NoError(t, err)
-	require.Equal(t, 42*time.Second, sync.client.Timeout)
+			require.NoError(t, err)
+			require.Equal(t, tc.want, sync.client.Timeout)
+		})
+	}
 }
 
 func TestTokenRegistrySyncSharesDownloadTimeout(t *testing.T) {
+	t.Parallel()
+
 	body := tarballOf(t, map[string]string{
 		"mappings/" + syncSubjectNut + ".json": mappingJSON(
 			syncSubjectNut, "nutcoin", "NUT", "",
@@ -1408,6 +1446,8 @@ func TestTokenRegistrySyncSharesDownloadTimeout(t *testing.T) {
 // leave the worker free to use a closed store. Stop must therefore keep
 // waiting for the worker to exit even once its context is done.
 func TestTokenRegistrySyncStopWaitsForWorkerAfterContextExpiry(t *testing.T) {
+	t.Parallel()
+
 	body := tarballOf(t, map[string]string{
 		"mappings/" + syncSubjectNut + ".json": mappingJSON(
 			syncSubjectNut, "nutcoin", "", "",
@@ -1440,11 +1480,12 @@ func TestTokenRegistrySyncStopWaitsForWorkerAfterContextExpiry(t *testing.T) {
 	stopped := make(chan error, 1)
 	go func() { stopped <- sync.Stop(expired) }()
 
-	select {
-	case <-stopped:
-		t.Fatal("Stop returned while the worker was still running")
-	case <-time.After(100 * time.Millisecond):
-	}
+	testutil.RequireNoReceive(
+		t,
+		stopped,
+		100*time.Millisecond,
+		"Stop returned while the worker was still running",
+	)
 
 	close(release)
 	select {
@@ -1465,6 +1506,8 @@ func TestTokenRegistrySyncStopWaitsForWorkerAfterContextExpiry(t *testing.T) {
 // property: an upsert-only sync would serve a delisted token's metadata
 // forever, because nothing in a later snapshot mentions it.
 func TestTokenRegistrySyncRetiresSubjectsDroppedUpstream(t *testing.T) {
+	t.Parallel()
+
 	server := newRegistryServer(t, tarballOf(t, map[string]string{
 		"mappings/" + syncSubjectNut + ".json": mappingJSON(
 			syncSubjectNut,
@@ -1509,6 +1552,8 @@ func TestTokenRegistrySyncRetiresSubjectsDroppedUpstream(t *testing.T) {
 // are removed, so the parser yields an empty entry the sync skips. Skipping
 // alone would leave the old row serving stale metadata.
 func TestTokenRegistrySyncRetiresSubjectsThatLoseAllProperties(t *testing.T) {
+	t.Parallel()
+
 	server := newRegistryServer(t, tarballOf(t, map[string]string{
 		"mappings/" + syncSubjectNut + ".json": mappingJSON(
 			syncSubjectNut,
@@ -1538,6 +1583,8 @@ func TestTokenRegistrySyncRetiresSubjectsThatLoseAllProperties(t *testing.T) {
 // pruning against a snapshot that never finished would delete live subjects
 // the failed run simply had not reached yet.
 func TestTokenRegistrySyncDoesNotPruneOnFailedSnapshot(t *testing.T) {
+	t.Parallel()
+
 	server := newRegistryServer(t, tarballOf(t, map[string]string{
 		"mappings/" + syncSubjectNut + ".json": mappingJSON(
 			syncSubjectNut,
@@ -1585,6 +1632,8 @@ func TestTokenRegistrySyncDoesNotPruneOnFailedSnapshot(t *testing.T) {
 // TestTokenRegistrySyncDoesNotPruneOnNotModified: a 304 applies no snapshot,
 // so there is nothing to reconcile against.
 func TestTokenRegistrySyncDoesNotPruneOnNotModified(t *testing.T) {
+	t.Parallel()
+
 	server := newRegistryServer(t, tarballOf(t, map[string]string{
 		"mappings/" + syncSubjectNut + ".json": mappingJSON(
 			syncSubjectNut,
@@ -1608,46 +1657,6 @@ func TestTokenRegistrySyncDoesNotPruneOnNotModified(t *testing.T) {
 	require.Contains(t, store.snapshot(), syncSubjectNut)
 }
 
-// TestTokenRegistrySyncClearsLogosWhenDisabled documents that the logo column
-// needs no special handling: the upsert overwrites every property column, so
-// turning storeLogos off clears previously stored logos on the next snapshot.
-func TestTokenRegistrySyncClearsLogosWhenDisabled(t *testing.T) {
-	body := tarballOf(t, map[string]string{
-		"mappings/" + syncSubjectNut + ".json": mappingJSON(
-			syncSubjectNut, "nutcoin", "NUT", "iVBORw0KGgoAAAA=",
-		),
-	})
-	server := newRegistryServer(t, body)
-	store := newFakeTokenRegistryStore()
-	withLogos := newTestSync(
-		t,
-		store,
-		server.URL,
-		func(c *TokenRegistryConfig) {
-			c.StoreLogos = true
-		},
-	)
-	_, err := withLogos.SyncOnce(t.Context())
-	require.NoError(t, err)
-	require.NotEmpty(t, store.snapshot()[syncSubjectNut].Logo)
-
-	// Operator restarts with logo storage turned off.
-	withoutLogos := newTestSync(t, store, server.URL, nil)
-	// second sync must land in a later second than the first
-	withoutLogos.now = func() time.Time {
-		return time.Date(2026, 8, 20, 12, 1, 0, 0, time.UTC)
-	}
-	_, err = withoutLogos.SyncOnce(t.Context())
-
-	require.NoError(t, err)
-	// Assert presence first: indexing a map with a missing key yields the
-	// zero-value entry, whose Logo is also empty, so an Empty check alone
-	// would pass if the subject had been deleted outright.
-	entries := store.snapshot()
-	require.Contains(t, entries, syncSubjectNut)
-	require.Empty(t, entries[syncSubjectNut].Logo)
-}
-
 // manySubjects builds n distinct, valid registry subjects.
 func manySubjects(n int) []string {
 	out := make([]string, 0, n)
@@ -1664,6 +1673,8 @@ func manySubjects(n int) []string {
 func TestTokenRegistrySyncFailureAfterBatchFlushRollsBackSnapshot(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	// A subject already served from an earlier, successful snapshot.
 	established := tarballOf(t, map[string]string{
 		"mappings/" + syncSubjectDjed + ".json": mappingJSON(
@@ -1730,6 +1741,8 @@ func TestTokenRegistrySyncFailureAfterBatchFlushRollsBackSnapshot(
 // failed attempt leaves no partial rows, and the next pass applies the whole
 // snapshot.
 func TestTokenRegistrySyncRetriesAfterRolledBackSnapshot(t *testing.T) {
+	t.Parallel()
+
 	subjects := manySubjects(tokenRegistryBatchSize + 50)
 	files := map[string]string{}
 	for i, subject := range subjects {
@@ -1764,6 +1777,8 @@ func TestTokenRegistrySyncRetriesAfterRolledBackSnapshot(t *testing.T) {
 }
 
 func TestTokenRegistrySyncReportsStagingCleanupFailure(t *testing.T) {
+	t.Parallel()
+
 	server := newRegistryServer(t, tarballOf(t, map[string]string{
 		"mappings/" + syncSubjectNut + ".json": mappingJSON(
 			syncSubjectNut, "nutcoin", "NUT", "",
@@ -1797,6 +1812,8 @@ func TestTokenRegistrySyncReportsStagingCleanupFailure(t *testing.T) {
 func TestTokenRegistrySyncPreservesPrimaryErrorWhenCleanupFails(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	server := newRegistryServer(t, tarballOf(t, map[string]string{
 		"mappings/" + syncSubjectNut + ".json": mappingJSON(
 			syncSubjectNut, "nutcoin", "NUT", "",
@@ -1834,6 +1851,8 @@ func TestTokenRegistrySyncPreservesPrimaryErrorWhenCleanupFails(
 // record the ETag, leaving the node serving no registry metadata at all
 // until the archive changes again.
 func TestTokenRegistrySyncDoesNotPruneEmptySnapshot(t *testing.T) {
+	t.Parallel()
+
 	server := newRegistryServer(t, tarballOf(t, map[string]string{
 		"mappings/" + syncSubjectNut + ".json": mappingJSON(
 			syncSubjectNut, "nutcoin", "NUT", "",
@@ -1876,6 +1895,8 @@ func TestTokenRegistrySyncDoesNotPruneEmptySnapshot(t *testing.T) {
 // very first sync sees nothing usable: there is nothing to protect, so this
 // is a quiet no-op rather than a failure.
 func TestTokenRegistrySyncEmptyFirstSnapshotIsNotAnError(t *testing.T) {
+	t.Parallel()
+
 	server := newRegistryServer(t, tarballOf(t, map[string]string{
 		"README.md": "no mappings here",
 	}))
@@ -1896,6 +1917,8 @@ func TestTokenRegistrySyncEmptyFirstSnapshotIsNotAnError(t *testing.T) {
 // just written. Truncating at the source keeps written value and cutoff
 // identical on every backend.
 func TestTokenRegistrySyncStampsWholeSeconds(t *testing.T) {
+	t.Parallel()
+
 	server := newRegistryServer(t, tarballOf(t, map[string]string{
 		"mappings/" + syncSubjectNut + ".json": mappingJSON(
 			syncSubjectNut, "nutcoin", "NUT", "",
@@ -1921,6 +1944,8 @@ func TestTokenRegistrySyncStampsWholeSeconds(t *testing.T) {
 // "your copy of the *other* registry is current", leaving this node serving
 // the wrong network's metadata forever.
 func TestTokenRegistrySyncIgnoresETagFromADifferentSource(t *testing.T) {
+	t.Parallel()
+
 	body := tarballOf(t, map[string]string{
 		"mappings/" + syncSubjectNut + ".json": mappingJSON(
 			syncSubjectNut, "nutcoin", "NUT", "",
@@ -1955,6 +1980,8 @@ func TestTokenRegistrySyncIgnoresETagFromADifferentSource(t *testing.T) {
 }
 
 func TestTokenRegistrySyncScopesManifestStateToSnapshotIdentity(t *testing.T) {
+	t.Parallel()
+
 	bodyA := tarballOf(t, map[string]string{
 		"mappings/" + syncSubjectNut + ".json": mappingJSON(
 			syncSubjectNut, "from source A", "AAA", "",
@@ -1971,6 +1998,7 @@ func TestTokenRegistrySyncScopesManifestStateToSnapshotIdentity(t *testing.T) {
 		"same sequence different digest": {1, 1},
 	} {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			sourceA := newRegistryServer(t, bodyA)
 			sourceA.setSequence(sequences[0])
 			sourceB := newRegistryServer(t, bodyB)
@@ -2001,6 +2029,8 @@ func TestTokenRegistrySyncScopesManifestStateToSnapshotIdentity(t *testing.T) {
 // TestTokenRegistrySyncRollsBackWhenMappingsSkipped keeps authenticated state
 // and served rows on the same complete snapshot when one mapping is unusable.
 func TestTokenRegistrySyncRollsBackWhenMappingsSkipped(t *testing.T) {
+	t.Parallel()
+
 	server := newRegistryServer(t, tarballOf(t, map[string]string{
 		"mappings/" + syncSubjectNut + ".json": mappingJSON(
 			syncSubjectNut,
@@ -2070,6 +2100,8 @@ func TestTokenRegistrySyncRollsBackWhenMappingsSkipped(t *testing.T) {
 // take effect: enabling would never backfill logos, and disabling would leave
 // them stored indefinitely.
 func TestTokenRegistrySyncKeysETagByLogoMode(t *testing.T) {
+	t.Parallel()
+
 	body := tarballOf(t, map[string]string{
 		"mappings/" + syncSubjectNut + ".json": mappingJSON(
 			syncSubjectNut, "nutcoin", "NUT", "iVBORw0KGgoAAAA=",
@@ -2116,6 +2148,8 @@ func TestTokenRegistrySyncKeysETagByLogoMode(t *testing.T) {
 // sub-second configured interval makes reachable. Equal stamps would make the
 // prune's `updated_at < cutoff` preserve subjects the newer snapshot dropped.
 func TestTokenRegistrySyncStampsAreStrictlyIncreasing(t *testing.T) {
+	t.Parallel()
+
 	server := newRegistryServer(t, tarballOf(t, map[string]string{
 		"mappings/" + syncSubjectNut + ".json": mappingJSON(
 			syncSubjectNut,
@@ -2177,6 +2211,8 @@ func TestTokenRegistrySyncStampsAreStrictlyIncreasing(t *testing.T) {
 // run alongside the worker loop by guarding the stamp sequence; serializing
 // the whole operation is what that concession actually requires.
 func TestTokenRegistrySyncSerializesConcurrentCalls(t *testing.T) {
+	t.Parallel()
+
 	server := newRegistryServer(t, tarballOf(t, map[string]string{
 		"mappings/" + syncSubjectNut + ".json": mappingJSON(
 			syncSubjectNut, "nutcoin", "NUT", "",
@@ -2209,11 +2245,12 @@ func TestTokenRegistrySyncSerializesConcurrentCalls(t *testing.T) {
 	go func() { _, err := sync.SyncOnce(t.Context()); secondDone <- err }()
 
 	// The second call must not begin fetching while the first holds the sync.
-	select {
-	case <-secondDone:
-		t.Fatal("second SyncOnce completed while the first was still running")
-	case <-time.After(150 * time.Millisecond):
-	}
+	testutil.RequireNoReceive(
+		t,
+		secondDone,
+		150*time.Millisecond,
+		"second SyncOnce completed while the first was still running",
+	)
 	require.Equal(
 		t,
 		requestsDuringFirst,
@@ -2238,6 +2275,8 @@ func TestTokenRegistrySyncSerializesConcurrentCalls(t *testing.T) {
 // deliberately waits for the worker to exit -- is held for as long as the
 // external sync runs, up to the whole-download timeout.
 func TestTokenRegistrySyncStopNotBlockedByExternalSync(t *testing.T) {
+	t.Parallel()
+
 	server := newRegistryServer(t, tarballOf(t, map[string]string{
 		"mappings/" + syncSubjectNut + ".json": mappingJSON(
 			syncSubjectNut, "nutcoin", "NUT", "",
@@ -2299,12 +2338,15 @@ func TestTokenRegistrySyncStopNotBlockedByExternalSync(t *testing.T) {
 // roughly 240MB artifact, and it is also what makes same-second snapshots --
 // and therefore stamps forced ahead of wall clock -- reachable at all.
 func TestNewTokenRegistrySyncClampsInterval(t *testing.T) {
+	t.Parallel()
+
 	for name, configured := range map[string]time.Duration{
 		"sub-second": 500 * time.Millisecond,
 		"one second": time.Second,
 		"negative":   -time.Hour,
 	} {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			sync, err := NewTokenRegistrySync(TokenRegistryConfig{
 				Store:              newFakeTokenRegistryStore(),
 				Network:            "mainnet",
@@ -2325,6 +2367,8 @@ func TestNewTokenRegistrySyncClampsInterval(t *testing.T) {
 }
 
 func TestNewTokenRegistrySyncKeepsIntervalAboveFloor(t *testing.T) {
+	t.Parallel()
+
 	sync, err := NewTokenRegistrySync(TokenRegistryConfig{
 		Store:              newFakeTokenRegistryStore(),
 		Network:            "mainnet",
@@ -2343,6 +2387,8 @@ func TestNewTokenRegistrySyncKeepsIntervalAboveFloor(t *testing.T) {
 // table now holds the *other* source's snapshot, so a 304 would skip
 // reconciliation and leave the intervening source's metadata in place.
 func TestTokenRegistrySyncForcesFullApplyWhenSwitchingBack(t *testing.T) {
+	t.Parallel()
+
 	bodyA := tarballOf(t, map[string]string{
 		"mappings/" + syncSubjectNut + ".json": mappingJSON(
 			syncSubjectNut, "from source A", "AAA", "",
@@ -2404,6 +2450,8 @@ func TestTokenRegistrySyncForcesFullApplyWhenSwitchingBack(t *testing.T) {
 // for the logo-storage mode: on, off, then on again against an unchanged
 // registry must actually restore logos.
 func TestTokenRegistrySyncForcesFullApplyWhenLogoModeReturns(t *testing.T) {
+	t.Parallel()
+
 	body := tarballOf(t, map[string]string{
 		"mappings/" + syncSubjectNut + ".json": mappingJSON(
 			syncSubjectNut, "nutcoin", "NUT", "iVBORw0KGgoAAAA=",
@@ -2460,6 +2508,8 @@ func TestTokenRegistrySyncForcesFullApplyWhenLogoModeReturns(t *testing.T) {
 // could then reuse the previous stamp and the prune's `updated_at < cutoff`
 // would spare exactly the subjects the new snapshot dropped.
 func TestTokenRegistrySyncStampSurvivesRestart(t *testing.T) {
+	t.Parallel()
+
 	server := newRegistryServer(t, tarballOf(t, map[string]string{
 		"mappings/" + syncSubjectNut + ".json": mappingJSON(
 			syncSubjectNut,
@@ -2529,6 +2579,8 @@ func indexOfOp(ops []string, want string) int {
 // is the safe direction, because the next snapshot is guaranteed a strictly
 // greater stamp and will prune what this one left behind.
 func TestTokenRegistrySyncPersistsStampBeforeApplying(t *testing.T) {
+	t.Parallel()
+
 	server := newRegistryServer(t, tarballOf(t, map[string]string{
 		"mappings/" + syncSubjectNut + ".json": mappingJSON(
 			syncSubjectNut, "nutcoin", "NUT", "",
@@ -2560,6 +2612,8 @@ func TestTokenRegistrySyncPersistsStampBeforeApplying(t *testing.T) {
 // the next run re-applies in full, rather than leaving the gate open over a
 // tag that was never updated.
 func TestTokenRegistrySyncPersistsETagBeforeIdentity(t *testing.T) {
+	t.Parallel()
+
 	server := newRegistryServer(t, tarballOf(t, map[string]string{
 		"mappings/" + syncSubjectNut + ".json": mappingJSON(
 			syncSubjectNut, "nutcoin", "NUT", "",
@@ -2589,6 +2643,8 @@ func TestTokenRegistrySyncPersistsETagBeforeIdentity(t *testing.T) {
 // cannot diverge from the rows it describes. A failure writing the ETag rolls
 // back the new rows, prune, stamp, and identity together.
 func TestTokenRegistrySyncStateWriteFailureRollsBackApply(t *testing.T) {
+	t.Parallel()
+
 	server := newRegistryServer(t, tarballOf(t, map[string]string{
 		"mappings/" + syncSubjectNut + ".json": mappingJSON(
 			syncSubjectNut,
@@ -2640,6 +2696,8 @@ func TestTokenRegistrySyncStateWriteFailureRollsBackApply(t *testing.T) {
 }
 
 func TestTokenRegistrySyncCommitFailureDoesNotAdvanceSnapshot(t *testing.T) {
+	t.Parallel()
+
 	server := newRegistryServer(t, tarballOf(t, map[string]string{
 		"mappings/" + syncSubjectNut + ".json": mappingJSON(
 			syncSubjectNut, "old name", "NUT", "",

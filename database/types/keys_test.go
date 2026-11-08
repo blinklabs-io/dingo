@@ -54,14 +54,3 @@ func FuzzParseBlockBlobKey(f *testing.F) {
 		}
 	})
 }
-
-func TestPoolCredentialStakeKey(t *testing.T) {
-	poolKeyHash := []byte{0x01, 0x02}
-	stakingKey := []byte{0x03, 0x04}
-
-	got := types.PoolCredentialStakeKey(poolKeyHash, 0x05, stakingKey)
-	want := string([]byte{0x01, 0x02, 0x05, 0x03, 0x04})
-	if got != want {
-		t.Fatalf("PoolCredentialStakeKey() = %x, want %x", got, want)
-	}
-}

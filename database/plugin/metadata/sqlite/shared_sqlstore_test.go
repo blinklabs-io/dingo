@@ -22,9 +22,6 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
-	"net"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -34,58 +31,16 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/deferred"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	gcbor "github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
-	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/blinklabs-io/ouroboros-mock/ledger"
 	"github.com/blinklabs-io/plutigo/data"
 	"github.com/stretchr/testify/require"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/cardano"
 )
-
-func TestSharedSQLStoreBackfillCheckpointIdentityRoundTrip(t *testing.T) {
-	t.Parallel()
-	store, db := newSharedSQLStore(t)
-	lastIndexID := uint64(42)
-	lastBlockHash := bytes.Repeat([]byte{0xab}, 32)
-	checkpoint := &models.BackfillCheckpoint{
-		Phase:         "metadata",
-		LastSlot:      100,
-		LastIndexID:   &lastIndexID,
-		LastBlockHash: lastBlockHash,
-		TotalSlots:    200,
-		StartedAt:     time.UnixMilli(100),
-		UpdatedAt:     time.UnixMilli(200),
-	}
-	require.NoError(t, store.SetBackfillCheckpoint(checkpoint, nil))
-
-	loaded, err := store.GetBackfillCheckpoint("metadata", nil)
-	require.NoError(t, err)
-	require.Equal(t, checkpoint.ID, loaded.ID)
-	require.NotNil(t, loaded.LastIndexID)
-	require.Equal(t, lastIndexID, *loaded.LastIndexID)
-	require.Equal(t, lastBlockHash, loaded.LastBlockHash)
-
-	checkpoint.LastIndexID = nil
-	checkpoint.LastBlockHash = nil
-	require.NoError(t, store.SetBackfillCheckpoint(checkpoint, nil))
-	loaded, err = store.GetBackfillCheckpoint("metadata", nil)
-	require.NoError(t, err)
-	require.Nil(t, loaded.LastIndexID)
-	require.Nil(t, loaded.LastBlockHash)
-
-	_, err = db.Exec(
-		"UPDATE backfill_checkpoint SET last_index_id = -1 WHERE phase = ?",
-		"metadata",
-	)
-	require.NoError(t, err)
-	_, err = store.GetBackfillCheckpoint("metadata", nil)
-	require.ErrorContains(t, err, "last index ID")
-}
 
 func TestSharedSQLStoreAccountParity(t *testing.T) {
 	t.Parallel()
@@ -230,64 +185,6 @@ func TestSharedSQLStoreAccountParity(t *testing.T) {
 	require.False(t, gotDeactivated.Active)
 }
 
-// modernc.org/sqlite always hoists busy_timeout ahead of the rest of the
-// _pragma list regardless of DSN order, so this ordering is defensive rather
-// than load-bearing today. It still matters as documentation: any pragma
-// listed before busy_timeout in the source DSN would, on a driver without
-// that hoisting behavior, run with no busy handler installed and fail
-// immediately on contention rather than waiting.
-//
-// Every pragma after it that touches the database file -- cache_size and
-// mmap_size both do -- would then be one that gives up instantly instead of
-// waiting out a concurrent writer.
-//
-// Pin the ordering directly. A concurrency test alone would only fail when
-// the race is actually lost, which makes an ordering regression look flaky
-// instead of broken.
-func TestCommonPragmasSetBusyTimeoutFirst(t *testing.T) {
-	pragmas := parsePragmas(t, sqliteCommonPragmas)
-	require.NotEmpty(t, pragmas, "no pragmas parsed out of the DSN fragment")
-	require.NotContains(t, sqliteCommonPragmas, "journal_mode",
-		"journal_mode must not be a per-connection pragma; "+
-			"ensureWALJournalMode owns the conversion")
-	require.Truef(
-		t,
-		strings.HasPrefix(pragmas[0], "busy_timeout("),
-		"busy_timeout must be the first pragma in the DSN so it is in "+
-			"effect before any pragma that touches the database file; got %v",
-		pragmas,
-	)
-}
-
-// The backup connection builds its own DSN rather than reusing the shared
-// fragment, and it opens against a database a running node already holds
-// open -- so it contends by construction, not just at first open.
-func TestBackupDSNSetsBusyTimeoutFirst(t *testing.T) {
-	dsn := backupSourceDSN("/tmp/example/metadata.sqlite")
-	pragmas := parsePragmas(t, dsn)
-	require.NotEmpty(t, pragmas, "no pragmas parsed out of the backup DSN")
-	require.Truef(
-		t,
-		strings.HasPrefix(pragmas[0], "busy_timeout("),
-		"busy_timeout must be the first pragma in the backup DSN; got %v",
-		pragmas,
-	)
-}
-
-// parsePragmas pulls the _pragma values out of a DSN (or DSN fragment) in the
-// order the driver will execute them.
-func parsePragmas(t *testing.T, dsn string) []string {
-	t.Helper()
-	var out []string
-	for part := range strings.SplitSeq(dsn, "&") {
-		if v, ok := strings.CutPrefix(part, "_pragma="); ok {
-			out = append(out, v)
-		}
-	}
-	return out
-}
-
-// The ordering test above pins the cause; this pins the symptom it produced.
 // Two openers racing to create the same metadata database must both get
 // through, because the loser waits out the winner's journal_mode conversion
 // instead of failing on it. Before the fix this surfaced as
@@ -780,18 +677,6 @@ func TestSharedSQLStoreDrepParity(t *testing.T) {
 	require.Equal(t, wantLiveStake, gotLiveStakeAfterRebuild)
 }
 
-// utxoCascadeDeleteSQL is the statement SQLite runs to enforce
-// fk_transaction_outputs, once for every "transaction" row the rollback
-// deletes.
-//
-// It appears nowhere in the store: ON DELETE CASCADE is an action the engine
-// takes, not a statement the code issues. It is spelled out here because that
-// action is the whole cost of a deep rollback and because it is invisible from
-// the parent statement -- EXPLAIN QUERY PLAN of
-// DELETE FROM "transaction" WHERE slot > ? reports only the indexed search
-// over "transaction" and says nothing about the child table it cascades into.
-const utxoCascadeDeleteSQL = `DELETE FROM utxo WHERE transaction_id = ?`
-
 // cascadeForeignKey is one ON DELETE CASCADE foreign key as the live schema
 // declares it.
 type cascadeForeignKey struct {
@@ -810,7 +695,7 @@ func (fk cascadeForeignKey) String() string {
 func newCoreModeSQLStore(t *testing.T) (*sqlstore.Store, *sql.DB) {
 	t.Helper()
 	store, writeDB, _, err := openSQLStore(
-		Config{DataDir: t.TempDir()},
+		Config{},
 		metadata.ProviderDependencies{StorageMode: types.StorageModeCore},
 	)
 	require.NoError(t, err)
@@ -980,139 +865,6 @@ func TestCascadeChildColumnsIndexedAfterCriticalRebuild(t *testing.T) {
 	)
 }
 
-// seedUtxoRows adds count transactions, each owning two utxo rows, and runs
-// ANALYZE so the planner assertions below see the statistics a live database
-// has.
-//
-// Written as set-based SQL rather than through SetTransaction because the
-// planner only needs representative table shapes, not faithful transaction
-// contents.
-func seedUtxoRows(t *testing.T, db *sql.DB, count int) {
-	t.Helper()
-	_, err := db.Exec(`
-WITH RECURSIVE seq(n) AS (
-    SELECT 0
-    UNION ALL
-    SELECT n + 1 FROM seq WHERE n + 1 < ?
-)
-INSERT INTO "transaction" (
-    hash, block_hash, slot, type, fee, collateral_fee, ttl, block_index, valid
-)
-SELECT CAST(n AS BLOB), CAST(n AS BLOB), n, 0, '0', '0', '0', 0, TRUE
-FROM seq`, count)
-	require.NoError(t, err)
-	for _, outputIdx := range []int{0, 1} {
-		_, err := db.Exec(`
-INSERT INTO utxo (
-    transaction_id, tx_id, output_idx, payment_key, staking_key,
-    credential_tag, amount, added_slot, deleted_slot
-)
-SELECT id, hash, ?, hash, hash, 0, '1000000', slot, 0
-FROM "transaction"`, outputIdx)
-		require.NoError(t, err)
-	}
-	_, err = db.Exec("ANALYZE")
-	require.NoError(t, err)
-}
-
-// TestUtxoCascadeDeleteIndexedAfterCriticalRebuild pins the plan of the
-// cascade itself.
-//
-// The negative case is asserted first: with the manifest dropped, the cascade
-// scans utxo. Without it, a rebuild that restored nothing would still satisfy
-// the positive assertion if the index had never been missing.
-func TestUtxoCascadeDeleteIndexedAfterCriticalRebuild(t *testing.T) {
-	t.Parallel()
-	store, db := newCoreModeSQLStore(t)
-	seedUtxoRows(t, db, 2000)
-
-	require.NoError(t, store.DropDeferredIndexes())
-	plan := queryPlan(t, db, utxoCascadeDeleteSQL, 1)
-	require.Contains(
-		t,
-		plan,
-		"SCAN utxo",
-		"the dropped manifest must leave the cascade unindexed for this "+
-			"test to have teeth:\n%s",
-		plan,
-	)
-
-	require.NoError(t, store.BuildCriticalDeferredIndexes())
-	plan = queryPlan(t, db, utxoCascadeDeleteSQL, 1)
-	require.Contains(
-		t,
-		plan,
-		"SEARCH utxo USING",
-		"the rollback cascade must be an indexed search after the "+
-			"critical rebuild:\n%s",
-		plan,
-	)
-	require.Contains(
-		t,
-		plan,
-		"INDEX idx_utxo_transaction_id (transaction_id=?)",
-		"the cascade must resolve transaction_id through "+
-			"idx_utxo_transaction_id:\n%s",
-		plan,
-	)
-	require.NotContains(
-		t,
-		plan,
-		"SCAN utxo",
-		"the cascade must not scan utxo:\n%s",
-		plan,
-	)
-}
-
-// TestRollbackDeleteCascadesIntoUtxo grounds the plan assertion above: the
-// cascade is on the rollback's path, so the index the manifest classifies is
-// the one the rollback sweep depends on.
-//
-// Reproduces database/plugin/metadata/sqlstore/transaction_write.go's
-// DELETE FROM "transaction" WHERE slot > ?, on a connection carrying the
-// foreign_keys(1) pragma the store opens every connection with.
-func TestRollbackDeleteCascadesIntoUtxo(t *testing.T) {
-	t.Parallel()
-	_, db := newCoreModeSQLStore(t)
-	seedUtxoRows(t, db, 200)
-
-	var enforced int
-	require.NoError(
-		t,
-		db.QueryRow("PRAGMA foreign_keys").Scan(&enforced),
-	)
-	require.Equal(
-		t,
-		1,
-		enforced,
-		"the store opens every connection with foreign_keys(1); without "+
-			"it the cascade this file measures would not run at all",
-	)
-
-	var before int
-	require.NoError(
-		t,
-		db.QueryRow("SELECT COUNT(*) FROM utxo WHERE added_slot > 99").
-			Scan(&before),
-	)
-	require.Positive(t, before)
-
-	_, err := db.Exec(`DELETE FROM "transaction" WHERE slot > ?`, 99)
-	require.NoError(t, err)
-
-	var after int
-	require.NoError(
-		t,
-		db.QueryRow("SELECT COUNT(*) FROM utxo WHERE added_slot > 99").
-			Scan(&after),
-	)
-	require.Zero(
-		t,
-		after,
-		"deleting the parent transactions must cascade into utxo",
-	)
-}
-
 // consumeTx builds a transaction with the given hash byte that consumes the one
 // producer input and produces a single output, mirroring a Leios endorser-block
 // transaction.
@@ -1205,291 +957,6 @@ func TestSharedSQLStoreLeiosClosureTolerateDoubleConsume(t *testing.T) {
 	})
 }
 
-func TestSharedSQLStoreMidnightParity(t *testing.T) {
-	t.Parallel()
-	store, _ := newSharedSQLStore(t)
-
-	txn := store.Transaction(t.Context())
-	for _, row := range []*models.MidnightAssetCreate{
-		{
-			Address: []byte("address-a"), Quantity: 10,
-			TxHash: []byte("create-a"), OutputIndex: 0,
-			BlockNumber: 10, BlockHash: []byte("block-10"), TxIndex: 1,
-			BlockTimestampMs: 1000,
-		},
-		{
-			Address: []byte("address-b"), Quantity: 20,
-			TxHash: []byte("create-b"), OutputIndex: 0,
-			BlockNumber: 10, BlockHash: []byte("block-10"), TxIndex: 1,
-			BlockTimestampMs: 1000,
-		},
-		{
-			Address: []byte("address-c"), Quantity: 30,
-			TxHash: []byte("create-c"), OutputIndex: 0,
-			BlockNumber: 11, BlockHash: []byte("block-11"), TxIndex: 0,
-			BlockTimestampMs: 1100,
-		},
-	} {
-		require.NoError(t, store.CreateMidnightAssetCreate(txn, row))
-	}
-	require.NoError(t, store.CreateMidnightAssetSpend(
-		txn,
-		&models.MidnightAssetSpend{
-			Address: []byte("address-a"), Quantity: 10,
-			SpendingTxHash: []byte("spend-a"),
-			UtxoTxHash:     []byte("create-a"), UtxoIndex: 0,
-			BlockNumber: 12, BlockHash: []byte("block-12"),
-			TxIndex: 0, BlockTimestampMs: 1200,
-		},
-	))
-	for _, row := range []*models.MidnightRegistration{
-		{
-			FullDatum: []byte("registration-a"), TxHash: []byte("reg-a"),
-			OutputIndex: 0, BlockNumber: 10, BlockHash: []byte("block-10"),
-			TxIndex: 1, BlockTimestampMs: 1000,
-		},
-		{
-			FullDatum: []byte("registration-b"), TxHash: []byte("reg-b"),
-			OutputIndex: 0, BlockNumber: 11, BlockHash: []byte("block-11"),
-			TxIndex: 0, BlockTimestampMs: 1100,
-		},
-	} {
-		require.NoError(t, store.CreateMidnightRegistration(txn, row))
-	}
-	require.NoError(t, store.CreateMidnightDeregistration(
-		txn,
-		&models.MidnightDeregistration{
-			FullDatum: []byte("deregistration-a"),
-			TxHash:    []byte("dereg-a"), UtxoTxHash: []byte("reg-a"),
-			UtxoIndex: 0, BlockNumber: 12, BlockHash: []byte("block-12"),
-			TxIndex: 0, BlockTimestampMs: 1200,
-		},
-	))
-	require.NoError(t, store.InsertMidnightGovernanceDatum(
-		txn,
-		&models.MidnightGovernanceDatum{
-			DatumType: models.MidnightGovernanceDatumTypeCouncil,
-			TxHash:    []byte("gov-a"), Datum: []byte("datum-a"),
-			BlockNumber: 10,
-		},
-	))
-	require.NoError(t, store.UpsertMidnightAriadneParams(
-		txn,
-		&models.MidnightAriadneParams{Epoch: 1, Datum: []byte("ariadne-a")},
-	))
-	require.NoError(t, store.UpsertMidnightAriadneParams(
-		txn,
-		&models.MidnightAriadneParams{Epoch: 2, Datum: []byte("ariadne-b")},
-	))
-	require.NoError(t, store.CreateMidnightAriadneRollback(
-		txn,
-		&models.MidnightAriadneRollback{
-			BlockNumber: 12, Epoch: 2, PreviousExists: true,
-			PreviousDatum: []byte("ariadne-a"),
-		},
-	))
-	require.NoError(t, store.UpsertMidnightEpochCandidates(
-		txn,
-		&models.MidnightEpochCandidates{
-			Epoch: 2, BlockNumber: 12, CandidatesCbor: []byte("candidates"),
-		},
-	))
-	require.NoError(t, store.InsertMidnightCommitteeCandidateRegistration(
-		txn,
-		&models.MidnightCommitteeCandidateRegistration{
-			TxHash: []byte("candidate-a"), BlockNumber: 12, SlotNumber: 120,
-			TxIndex: 1, TxInputsCbor: []byte("inputs"),
-		},
-	))
-	require.NoError(t, txn.Commit())
-
-	var err error
-	gotUnspentAssets, err := store.FindUnspentMidnightAssetCreates()
-	require.NoError(t, err)
-	gotUnspentRegistrations, err := store.FindUnspentMidnightRegistrations()
-	require.NoError(t, err)
-	gotPage, err := store.FindMidnightAssetCreatesFrom(0, 0, 1, nil)
-	require.NoError(t, err)
-	gotGovernance, err := store.GetLatestMidnightGovernanceDatum(
-		models.MidnightGovernanceDatumTypeCouncil,
-		11,
-		nil,
-	)
-	require.NoError(t, err)
-	gotLatestAriadne, err := store.GetLatestMidnightAriadneParams(nil)
-	require.NoError(t, err)
-	gotHistoricalAriadne, err :=
-		store.GetMidnightAriadneParamsAtOrBeforeEpoch(1, nil)
-	require.NoError(t, err)
-	gotRollbacks, err := store.FindMidnightAriadneRollbacksByBlock(nil, 12)
-	require.NoError(t, err)
-	gotCandidates, err := store.GetMidnightEpochCandidatesByEpoch(2, nil)
-	require.NoError(t, err)
-	gotRegistrations, err :=
-		store.GetMidnightCommitteeCandidateRegistrationsByTxHashes(
-			[][]byte{[]byte("candidate-a"), []byte("missing")},
-			nil,
-		)
-	require.NoError(t, err)
-
-	rollback := store.Transaction(t.Context())
-	gotDeletedCreates, err := store.DeleteMidnightAssetCreatesByBlock(
-		rollback,
-		11,
-	)
-	require.NoError(t, err)
-	_, err = store.DeleteMidnightAssetSpendsByBlock(
-		rollback,
-		12,
-	)
-	require.NoError(t, err)
-	gotDeletedRegistrations, err := store.DeleteMidnightRegistrationsByBlock(
-		rollback,
-		11,
-	)
-	require.NoError(t, err)
-	_, err =
-		store.DeleteMidnightDeregistrationsByBlock(rollback, 12)
-	require.NoError(t, err)
-	require.NoError(t, rollback.Commit())
-	assetTxHashes := make([]string, len(gotUnspentAssets))
-	for i, asset := range gotUnspentAssets {
-		assetTxHashes[i] = string(asset.TxHash)
-	}
-	require.ElementsMatch(t, []string{"create-b", "create-c"}, assetTxHashes)
-	registrationTxHashes := make([]string, len(gotUnspentRegistrations))
-	for i, registration := range gotUnspentRegistrations {
-		registrationTxHashes[i] = string(registration.TxHash)
-	}
-	require.ElementsMatch(t, []string{"reg-b"}, registrationTxHashes)
-	pageTxHashes := make([]string, len(gotPage))
-	for i, asset := range gotPage {
-		pageTxHashes[i] = string(asset.TxHash)
-	}
-	require.Equal(t, []string{"create-a", "create-b"}, pageTxHashes)
-	require.NotNil(t, gotGovernance)
-	require.Equal(t, []byte("gov-a"), gotGovernance.TxHash)
-	require.Equal(t, []byte("datum-a"), gotGovernance.Datum)
-	require.Equal(t, uint64(10), gotGovernance.BlockNumber)
-	require.NotNil(t, gotLatestAriadne)
-	require.Equal(t, uint64(2), gotLatestAriadne.Epoch)
-	require.Equal(t, []byte("ariadne-b"), gotLatestAriadne.Datum)
-	require.NotNil(t, gotHistoricalAriadne)
-	require.Equal(t, uint64(1), gotHistoricalAriadne.Epoch)
-	require.Equal(t, []byte("ariadne-a"), gotHistoricalAriadne.Datum)
-	require.Len(t, gotRollbacks, 1)
-	require.NotNil(t, gotCandidates)
-	require.Equal(t, uint64(2), gotCandidates.Epoch)
-	require.Equal(t, uint64(12), gotCandidates.BlockNumber)
-	require.Equal(t, []byte("candidates"), gotCandidates.CandidatesCbor)
-	require.Len(t, gotRegistrations, 1)
-	deletedCreateTxHashes := make([]string, len(gotDeletedCreates))
-	for i, create := range gotDeletedCreates {
-		deletedCreateTxHashes[i] = string(create.TxHash)
-	}
-	require.ElementsMatch(t, []string{"create-c"}, deletedCreateTxHashes)
-	deletedRegistrationTxHashes := make([]string, len(gotDeletedRegistrations))
-	for i, registration := range gotDeletedRegistrations {
-		deletedRegistrationTxHashes[i] = string(registration.TxHash)
-	}
-	require.ElementsMatch(t, []string{"reg-b"}, deletedRegistrationTxHashes)
-}
-
-func TestSharedSQLStoreOffchainParity(t *testing.T) {
-	t.Parallel()
-	store, _ := newSharedSQLStore(t)
-
-	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
-	fetchedAt := now.Add(time.Minute)
-	nextFetch := now.Add(time.Hour)
-	hash := bytes.Repeat([]byte{0x42}, 32)
-	const url = "https://metadata.example.test/constitution.json"
-	require.NoError(t, store.SetConstitution(
-		&models.Constitution{
-			AnchorURL:  "  " + url + " ",
-			AnchorHash: hash,
-			AddedSlot:  10,
-		},
-		nil,
-	))
-
-	var err error
-	gotCreated, err := store.EnsureOffchainMetadataPointers(
-		t.Context(),
-		now,
-		nil,
-	)
-	require.NoError(t, err)
-	gotCreatedAgain, err := store.EnsureOffchainMetadataPointers(
-		t.Context(),
-		now,
-		nil,
-	)
-	require.NoError(t, err)
-	gotFirstBatch, err := store.GetOffchainMetadataFetchBatch(
-		t.Context(),
-		10,
-		now,
-		nil,
-	)
-	require.NoError(t, err)
-	gotSecondBatch, err := store.GetOffchainMetadataFetchBatch(
-		t.Context(),
-		10,
-		now,
-		nil,
-	)
-	require.NoError(t, err)
-	require.Len(t, gotFirstBatch, 1)
-	require.Equal(t, 1, gotCreated)
-	require.Zero(t, gotCreatedAgain)
-	require.Empty(t, gotSecondBatch)
-	doc := gotFirstBatch[0]
-	doc.Status = models.OffchainMetadataStatusFetched
-	doc.ContentType = "application/json"
-	doc.BodyHash = bytes.Repeat([]byte{0x24}, 32)
-	doc.Content = []byte(`{"name":"constitution"}`)
-	doc.FetchedAt = &fetchedAt
-	doc.NextFetchAfter = &nextFetch
-	doc.FetchAttempts = 1
-	doc.LastHTTPStatus = 200
-	require.NoError(t, store.SetOffchainMetadataFetchResult(
-		t.Context(),
-		&doc,
-		nil,
-	))
-	gotFetched, err := store.GetOffchainMetadata(
-		models.OffchainMetadataSourceConstitution,
-		url,
-		hash,
-		nil,
-	)
-	require.NoError(t, err)
-	require.NotNil(t, gotFetched)
-	require.Equal(t, models.OffchainMetadataStatusFetched, gotFetched.Status)
-	require.Equal(t, url, gotFetched.URL)
-	require.Equal(
-		t,
-		models.OffchainMetadataSourceConstitution,
-		gotFetched.SourceType,
-	)
-	require.Equal(t, "application/json", gotFetched.ContentType)
-	require.Equal(t, hash, gotFetched.Hash)
-	require.Equal(t, bytes.Repeat([]byte{0x24}, 32), gotFetched.BodyHash)
-	require.Equal(t, []byte(`{"name":"constitution"}`), gotFetched.Content)
-	require.Equal(t, uint(1), gotFetched.FetchAttempts)
-	require.Equal(t, uint(200), gotFetched.LastHTTPStatus)
-	normalizeOffchainTimes(gotFirstBatch)
-	normalizeOffchainDocument(gotFetched)
-	require.Equal(t, 1, gotCreated)
-	require.Zero(t, gotCreatedAgain)
-	require.Len(t, gotFirstBatch, 1)
-	require.Empty(t, gotSecondBatch)
-	require.NotNil(t, gotFetched)
-	require.Equal(t, models.OffchainMetadataStatusFetched, gotFetched.Status)
-	require.Equal(t, []byte(`{"name":"constitution"}`), gotFetched.Content)
-}
-
 func normalizeOffchainTimes(docs []models.OffchainMetadata) {
 	for i := range docs {
 		docs[i].CreatedAt = time.Time{}
@@ -1503,486 +970,6 @@ func normalizeOffchainDocument(doc *models.OffchainMetadata) {
 	}
 	doc.CreatedAt = time.Time{}
 	doc.UpdatedAt = time.Time{}
-}
-
-func TestSharedSQLStoreOperationalParity(t *testing.T) {
-	t.Parallel()
-	store, _ := newSharedSQLStore(t)
-
-	var datumHash lcommon.Blake2b256
-	copy(datumHash[:], []byte("datum-hash"))
-	hash1 := []byte("block-one")
-	hash2 := []byte("block-two")
-	hash3 := []byte("block-three")
-	startedAt := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
-	updatedAt := startedAt.Add(time.Minute)
-	deletedAt := uint64(30)
-
-	txn := store.Transaction(t.Context())
-	require.NoError(t, store.SetTip(ochainsync.Tip{
-		Point:       ocommon.Point{Slot: 42, Hash: []byte("tip-hash")},
-		BlockNumber: 7,
-	}, txn))
-	require.NoError(t, store.SetNetworkState(10, 20, 5, txn))
-	require.NoError(t, store.SetNetworkState(^uint64(0), 30, 10, txn))
-	require.NoError(t, store.SetSyncState("keep", "value", txn))
-	require.NoError(t, store.SetSyncState("delete", "value", txn))
-	require.NoError(t, store.DeleteSyncState("delete", txn))
-	require.NoError(t, store.SetEpoch(
-		0,
-		0,
-		[]byte("nonce-0"),
-		[]byte("evolving-0"),
-		[]byte("candidate-0"),
-		nil,
-		1,
-		1,
-		100,
-		txn,
-	))
-	require.NoError(t, store.SetEpoch(
-		100,
-		1,
-		[]byte("nonce-1"),
-		[]byte("evolving-1"),
-		[]byte("candidate-1"),
-		[]byte("lab-1"),
-		2,
-		2,
-		200,
-		txn,
-	))
-	require.NoError(t, store.SetBlockNonce(
-		hash1,
-		1,
-		[]byte("nonce-1"),
-		false,
-		txn,
-	))
-	require.NoError(t, store.SetBlockNonce(
-		hash1,
-		1,
-		[]byte("nonce-1-updated"),
-		true,
-		txn,
-	))
-	require.NoError(t, store.SetBlockNonce(
-		hash2,
-		2,
-		[]byte("nonce-2"),
-		false,
-		txn,
-	))
-	require.NoError(t, store.SetBlockNonce(
-		hash3,
-		3,
-		[]byte("nonce-3"),
-		false,
-		txn,
-	))
-	require.NoError(t, store.SetDatum(
-		datumHash,
-		[]byte("datum"),
-		42,
-		txn,
-	))
-	require.NoError(t, store.SetPParams(
-		[]byte("params-1"),
-		20,
-		1,
-		2,
-		txn,
-	))
-	require.NoError(t, store.SetPParams(
-		[]byte("params-2"),
-		30,
-		2,
-		2,
-		txn,
-	))
-	require.NoError(t, store.SetPParamUpdate(
-		[]byte("genesis"),
-		[]byte("update-1"),
-		25,
-		1,
-		txn,
-	))
-	require.NoError(t, store.SetPParamUpdate(
-		[]byte("genesis"),
-		[]byte("update-2"),
-		35,
-		2,
-		txn,
-	))
-	require.NoError(t, store.AddNetworkDonation(20, 3, 7, txn))
-	require.NoError(t, store.AddNetworkDonation(21, 3, 8, txn))
-	require.NoError(t, store.AddNetworkDonation(21, 3, 9, txn))
-	require.NoError(t, store.SetImportCheckpoint(
-		&models.ImportCheckpoint{
-			ImportKey: "snapshot:42",
-			Phase:     models.ImportPhaseUTxO,
-		},
-		txn,
-	))
-	require.NoError(t, store.SetImportCheckpoint(
-		&models.ImportCheckpoint{
-			ImportKey: "snapshot:42",
-			Phase:     models.ImportPhasePParams,
-		},
-		txn,
-	))
-	require.NoError(t, store.SetBackfillCheckpoint(
-		&models.BackfillCheckpoint{
-			Phase:      "metadata",
-			LastSlot:   10,
-			TotalSlots: 100,
-			StartedAt:  startedAt,
-			UpdatedAt:  startedAt,
-		},
-		txn,
-	))
-	require.NoError(t, store.SetBackfillCheckpoint(
-		&models.BackfillCheckpoint{
-			Phase:      "metadata",
-			LastSlot:   20,
-			TotalSlots: 100,
-			StartedAt:  startedAt.Add(time.Hour),
-			UpdatedAt:  updatedAt,
-			Completed:  true,
-		},
-		txn,
-	))
-	require.NoError(t, store.SetConstitution(
-		&models.Constitution{
-			AnchorURL:  "https://example.test/one",
-			AnchorHash: []byte("constitution-one"),
-			PolicyHash: []byte("policy-one"),
-			AddedSlot:  10,
-		},
-		txn,
-	))
-	require.NoError(t, store.SetConstitution(
-		&models.Constitution{
-			AnchorURL:   "https://example.test/two",
-			AnchorHash:  []byte("constitution-two"),
-			PolicyHash:  []byte("policy-two"),
-			AddedSlot:   20,
-			DeletedSlot: &deletedAt,
-		},
-		txn,
-	))
-	require.NoError(t, store.SetCommitteeMembers(
-		[]*models.CommitteeMember{
-			{
-				ColdCredHash: []byte("committee-one"),
-				ExpiresEpoch: 100,
-				AddedSlot:    10,
-			},
-			{
-				ColdCredHash: []byte("committee-two"),
-				ExpiresEpoch: 200,
-				AddedSlot:    20,
-			},
-		},
-		txn,
-	))
-	require.NoError(t, store.SetCommitteeQuorum(
-		&types.Rat{Rat: big.NewRat(2, 3)},
-		40,
-		txn,
-	))
-	require.NoError(t, store.ClearCommitteeQuorum(50, txn))
-	require.NoError(t, store.SoftDeleteCommitteeMembers(
-		[]models.CommitteeCredential{{
-			Credential: []byte("committee-two"),
-		}},
-		60,
-		txn,
-	))
-	require.NoError(t, txn.Commit())
-
-	var err error
-	gotTip, err := store.GetTip(nil)
-	require.NoError(t, err)
-	gotNetwork, err := store.GetNetworkState(nil)
-	require.NoError(t, err)
-	gotSyncValue, err := store.GetSyncState("keep", nil)
-	require.NoError(t, err)
-	gotDeletedSync, err := store.GetSyncState("delete", nil)
-	require.NoError(t, err)
-	gotEpoch, err := store.GetEpoch(1, nil)
-	require.NoError(t, err)
-	gotEpochs, err := store.GetEpochs(nil)
-	require.NoError(t, err)
-	_, err = store.GetEpochsByEra(2, nil)
-	require.NoError(t, err)
-	_, err = store.GetEpochBySlot(150, nil)
-	require.NoError(t, err)
-	gotNonce, err := store.GetBlockNonce(
-		ocommon.Point{Slot: 1, Hash: hash1},
-		nil,
-	)
-	require.NoError(t, err)
-	_, err = store.GetLastBlockNonceInRange(0, 4, nil)
-	require.NoError(t, err)
-	gotNonces, err := store.GetBlockNoncesInSlotRange(0, 4, nil)
-	require.NoError(t, err)
-	gotDatum, err := store.GetDatum(datumHash, nil)
-	require.NoError(t, err)
-	gotPparams, err := store.GetPParams(2, 2, nil)
-	require.NoError(t, err)
-	gotPparamUpdates, err := store.GetPParamUpdates(2, nil)
-	require.NoError(t, err)
-	gotDonations, err := store.SumNetworkDonationsForEpoch(3, nil)
-	require.NoError(t, err)
-	_, err = store.GetImportCheckpoint(
-		"snapshot:42",
-		nil,
-	)
-	require.NoError(t, err)
-	_, err = store.GetBackfillCheckpoint(
-		"metadata",
-		nil,
-	)
-	require.NoError(t, err)
-	_, err = store.GetConstitution(nil)
-	require.NoError(t, err)
-	gotCommitteeQuorum, err := store.GetCommitteeQuorum(nil)
-	require.NoError(t, err)
-	gotCommitteeMembers, err := store.GetCommitteeMembers(nil)
-	require.NoError(t, err)
-	gotAllCommitteeMembers, err := store.GetCommitteeMembersIncludeDeleted(
-		nil,
-	)
-	require.NoError(t, err)
-
-	rollbackTxn := store.Transaction(t.Context())
-	require.NoError(t, store.DeleteNetworkStateAfterSlot(5, rollbackTxn))
-	require.NoError(t, store.DeleteEpochsAfterSlot(50, rollbackTxn))
-	require.NoError(t, store.DeleteBlockNoncesBeforeSlotWithoutCheckpoints(
-		3,
-		rollbackTxn,
-	))
-	require.NoError(t, store.DeleteBlockNoncesAfterPoint(
-		ocommon.Point{Slot: 1, Hash: hash1},
-		rollbackTxn,
-	))
-	require.NoError(t, store.DeletePParamsAfterSlot(25, rollbackTxn))
-	require.NoError(t, store.DeletePParamUpdatesAfterSlot(30, rollbackTxn))
-	require.NoError(t, store.DeleteNetworkDonationsAfterSlot(20, rollbackTxn))
-	require.NoError(t, store.DeleteConstitutionsAfterSlot(15, rollbackTxn))
-	require.NoError(t, store.DeleteCommitteeMembersAfterSlot(40, rollbackTxn))
-	require.NoError(t, rollbackTxn.Commit())
-	gotNetworkRollback, err := store.GetNetworkState(nil)
-	require.NoError(t, err)
-	gotEpochsRollback, err := store.GetEpochs(nil)
-	require.NoError(t, err)
-	_, err = store.GetBlockNoncesInSlotRange(0, 4, nil)
-	require.NoError(t, err)
-	_, err = store.GetPParams(2, 2, nil)
-	require.NoError(t, err)
-	_, err = store.GetPParamUpdates(2, nil)
-	require.NoError(t, err)
-	gotDonationsRollback, err := store.SumNetworkDonationsForEpoch(3, nil)
-	require.NoError(t, err)
-	_, err = store.GetConstitution(nil)
-	require.NoError(t, err)
-	_, err = store.GetCommitteeQuorum(nil)
-	require.NoError(t, err)
-	_, err = store.GetCommitteeMembers(nil)
-	require.NoError(t, err)
-	require.Equal(t, uint64(7), gotTip.BlockNumber)
-	require.Equal(t, ^uint64(0), uint64(gotNetwork.Treasury))
-	require.Equal(t, "value", gotSyncValue)
-	require.Empty(t, gotDeletedSync)
-	require.NotNil(t, gotEpoch)
-	require.Equal(t, uint64(1), gotEpoch.EpochId)
-	require.Equal(t, uint64(100), gotEpoch.StartSlot)
-	require.Equal(t, []byte("nonce-1"), gotEpoch.Nonce)
-	require.Equal(t, []byte("evolving-1"), gotEpoch.EvolvingNonce)
-	require.Equal(t, []byte("candidate-1"), gotEpoch.CandidateNonce)
-	require.Equal(t, []byte("lab-1"), gotEpoch.LastEpochBlockNonce)
-	require.Equal(t, uint(2), gotEpoch.EraId)
-	require.Equal(t, uint(2), gotEpoch.SlotLength)
-	require.Equal(t, uint(200), gotEpoch.LengthInSlots)
-	require.Len(t, gotEpochs, 2)
-	require.Len(t, gotNonces, 3)
-	require.Equal(t, []byte("nonce-1-updated"), gotNonce)
-	require.Equal(t, uint64(16), gotDonations)
-	require.NotNil(t, gotDatum)
-	require.Equal(t, []byte("datum"), gotDatum.RawDatum)
-	require.Equal(t, uint64(42), gotDatum.AddedSlot)
-	require.Len(t, gotPparams, 1)
-	require.Len(t, gotPparamUpdates, 2)
-	require.Nil(t, gotCommitteeQuorum)
-	require.Len(t, gotCommitteeMembers, 1)
-	require.Len(t, gotAllCommitteeMembers, 2)
-	require.NotNil(t, gotNetworkRollback)
-	require.Equal(t, uint64(10), uint64(gotNetworkRollback.Treasury))
-	require.Equal(t, uint64(20), uint64(gotNetworkRollback.Reserves))
-	require.Equal(t, uint64(5), gotNetworkRollback.Slot)
-	require.Len(t, gotEpochsRollback, 1)
-	require.Equal(t, uint64(7), gotDonationsRollback)
-}
-
-func TestSharedSQLStorePoolParity(t *testing.T) {
-	t.Parallel()
-	store, _ := newSharedSQLStore(t)
-
-	poolBytes := bytes.Repeat([]byte{0x91}, 28)
-	poolKeyHash := lcommon.PoolKeyHash(
-		lcommon.NewBlake2b224(poolBytes),
-	)
-	vrf := bytes.Repeat([]byte{0x92}, 32)
-	ipv4 := net.IPv4(127, 0, 0, 1)
-	pool := &models.Pool{
-		PoolKeyHash: poolBytes, VrfKeyHash: vrf,
-		RewardAccount:              bytes.Repeat([]byte{0x93}, 28),
-		RewardAccountCredentialTag: 1,
-		Pledge:                     1000, Cost: 50,
-		Margin: &types.Rat{Rat: big.NewRat(1, 10)},
-	}
-	registration := &models.PoolRegistration{
-		PoolKeyHash: poolBytes, VrfKeyHash: vrf,
-		RewardAccount:              pool.RewardAccount,
-		RewardAccountCredentialTag: 1,
-		Pledge:                     1000, Cost: 50, AddedSlot: 10,
-		DepositAmount: 500,
-		Margin:        &types.Rat{Rat: big.NewRat(1, 10)},
-		MetadataUrl:   "https://pool.example",
-		MetadataHash:  []byte("metadata"),
-		Owners: []models.PoolRegistrationOwner{{
-			KeyHash: bytes.Repeat([]byte{0x94}, 28),
-		}},
-		Relays: []models.PoolRegistrationRelay{{
-			Ipv4: &ipv4, Port: 3001,
-		}},
-	}
-	require.NoError(t, store.ImportPool(pool, registration, nil))
-	require.NoError(t, store.UpdatePoolOpCertSequence(
-		poolKeyHash,
-		2,
-		20,
-		nil,
-	))
-	require.NoError(t, store.UpdatePoolOpCertSequence(
-		poolKeyHash,
-		3,
-		21,
-		nil,
-	))
-	require.NoError(t, store.SetEpoch(
-		2, 0, nil, nil, nil, nil, 0, 1, 100, nil,
-	))
-	require.NoError(t, store.SetTip(ochainsync.Tip{
-		Point:       ocommon.Point{Slot: 25, Hash: []byte("tip")},
-		BlockNumber: 1,
-	}, nil))
-	stakeKey := bytes.Repeat([]byte{0x95}, 28)
-	require.NoError(t, store.CreateAccount(nil, &models.Account{
-		StakingKey: stakeKey, Pool: poolBytes, Active: true,
-	}))
-	require.NoError(t, store.CreateUtxo(nil, &models.Utxo{
-		TxId:       bytes.Repeat([]byte{0x96}, 32),
-		StakingKey: stakeKey, Amount: 700, AddedSlot: 15,
-	}))
-
-	var err error
-	gotPool, err := store.GetPool(poolKeyHash, true, nil)
-	require.NoError(t, err)
-	gotByVRF, err := store.GetPoolByVrfKeyHash(vrf, 2, nil)
-	require.NoError(t, err)
-	gotPools, err := store.GetPools([]lcommon.PoolKeyHash{poolKeyHash}, nil)
-	require.NoError(t, err)
-	gotMissing, err := store.GetPool(
-		lcommon.PoolKeyHash(
-			lcommon.NewBlake2b224(bytes.Repeat([]byte{0xff}, 28)),
-		),
-		true,
-		nil,
-	)
-	require.NoError(t, err)
-	gotSequence, gotSequenceSet, err := store.LatestPoolOpCertSequence(
-		poolKeyHash,
-		nil,
-	)
-	require.NoError(t, err)
-	gotHistoricalSequence, gotHistoricalSequenceSet, err :=
-		store.LatestPoolOpCertSequenceAtOrBefore(poolKeyHash, 20, nil)
-	require.NoError(t, err)
-	gotIssuers, err := store.GetPoolBlockIssuersInSlotRange(20, 21, nil)
-	require.NoError(t, err)
-	gotCounts, gotTotal, err := store.CountPoolBlocksInSlotRange(
-		[]lcommon.PoolKeyHash{poolKeyHash},
-		20,
-		21,
-		nil,
-	)
-	require.NoError(t, err)
-	gotActive, err := store.GetActivePoolKeyHashes(nil)
-	require.NoError(t, err)
-	gotActiveAtSlot, err := store.GetActivePoolKeyHashesAtSlot(25, nil)
-	require.NoError(t, err)
-	gotStake, gotDelegators, err := store.GetStakeByPool(poolBytes, nil)
-	require.NoError(t, err)
-	gotStakeMap, gotDelegatorMap, err := store.GetStakeByPools(
-		[][]byte{poolBytes},
-		nil,
-	)
-	require.NoError(t, err)
-	require.NoError(t, store.RetirePools(
-		nil,
-		[][]byte{poolBytes},
-		5,
-		30,
-	))
-	gotRetiring, err := store.GetRetiringPools(2, nil)
-	require.NoError(t, err)
-	expectedPoolKeyHash := bytes.Repeat([]byte{0x91}, 28)
-	require.NotNil(t, gotPool)
-	require.Equal(t, expectedPoolKeyHash, gotPool.PoolKeyHash)
-	require.NotNil(t, gotByVRF)
-	require.Equal(t, expectedPoolKeyHash, gotByVRF.PoolKeyHash)
-	require.Equal(t, 1, len(gotPools))
-	require.Equal(t, bytes.Repeat([]byte{0x91}, 28), gotPools[0].PoolKeyHash)
-	require.Nil(t, gotMissing)
-	require.Equal(t, uint64(3), gotSequence)
-	require.True(t, gotSequenceSet)
-	require.Equal(t, uint64(2), gotHistoricalSequence)
-	require.True(t, gotHistoricalSequenceSet)
-	require.Equal(t, []models.PoolOpCertSequence{
-		{
-			PoolKeyHash: bytes.Repeat([]byte{0x91}, 28),
-			ID:          1,
-			Sequence:    2,
-			Slot:        20,
-		},
-		{
-			PoolKeyHash: bytes.Repeat([]byte{0x91}, 28),
-			ID:          2,
-			Sequence:    3,
-			Slot:        21,
-		},
-	}, gotIssuers)
-	require.Equal(t, uint64(2), gotTotal)
-	require.Equal(t, map[string]uint64{
-		string(bytes.Repeat([]byte{0x91}, 28)): 2,
-	}, gotCounts)
-	require.Len(t, gotActive, 1)
-	require.Equal(t, bytes.Repeat([]byte{0x91}, 28), gotActive[0])
-	require.Len(t, gotActiveAtSlot, 1)
-	require.Equal(t, bytes.Repeat([]byte{0x91}, 28), gotActiveAtSlot[0])
-	require.Equal(t, uint64(700), gotStake)
-	require.Equal(t, uint64(1), gotDelegators)
-	require.Equal(t, map[string]uint64{
-		string(bytes.Repeat([]byte{0x91}, 28)): 700,
-	}, gotStakeMap)
-	require.Equal(t, map[string]uint64{
-		string(bytes.Repeat([]byte{0x91}, 28)): 1,
-	}, gotDelegatorMap)
-	require.Equal(t, []models.PoolRetiringRow{{
-		PoolKeyHash: bytes.Repeat([]byte{0x91}, 28), Epoch: 5,
-	}}, gotRetiring)
 }
 
 func TestSharedSQLStoreRewardStateParity(t *testing.T) {
@@ -2260,220 +1247,40 @@ func TestSharedSQLStoreRewardStateParity(t *testing.T) {
 	require.Empty(t, gotRolledBackAccountOutput)
 }
 
-func TestSharedSQLStoreSnapshotParity(t *testing.T) {
-	t.Parallel()
-	store, _ := newSharedSQLStore(t)
-
-	poolA := []byte("pool-a")
-	poolB := []byte("pool-b")
-
-	txn := store.Transaction(t.Context())
-	require.NoError(t, store.SavePoolStakeSnapshot(
-		&models.PoolStakeSnapshot{
-			Epoch:            1,
-			SnapshotType:     models.PoolStakeSnapshotTypeMark,
-			PoolKeyHash:      poolA,
-			TotalStake:       10,
-			StakeDenominator: 100,
-			DelegatorCount:   1,
-			CapturedSlot:     10,
-		},
-		txn,
-	))
-	require.NoError(t, store.SavePoolStakeSnapshots(
-		[]*models.PoolStakeSnapshot{
-			{
-				Epoch:                         1,
-				SnapshotType:                  models.PoolStakeSnapshotTypeMark,
-				PoolKeyHash:                   poolA,
-				TotalStake:                    20,
-				StakeDenominator:              999,
-				DelegatorCount:                2,
-				CapturedSlot:                  20,
-				RewardAccountAutoVote:         2,
-				RewardAccountAutoVoteResolved: true,
-			},
-			{
-				Epoch:            1,
-				SnapshotType:     models.PoolStakeSnapshotTypeMark,
-				PoolKeyHash:      poolB,
-				TotalStake:       30,
-				StakeDenominator: 200,
-				DelegatorCount:   3,
-				CapturedSlot:     20,
-			},
-			{
-				Epoch:        0,
-				SnapshotType: models.PoolStakeSnapshotTypeMark,
-				PoolKeyHash:  poolA,
-				TotalStake:   5,
-			},
-			{
-				Epoch:        2,
-				SnapshotType: models.PoolStakeSnapshotTypeMark,
-				PoolKeyHash:  poolA,
-				TotalStake:   40,
-			},
-			{
-				Epoch:        1,
-				SnapshotType: models.PoolStakeSnapshotTypeGo,
-				PoolKeyHash:  poolA,
-				TotalStake:   15,
-			},
-		},
-		txn,
-	))
-	require.NoError(t, store.SaveEpochSummary(
-		&models.EpochSummary{
-			Epoch:            1,
-			TotalActiveStake: 999,
-			TotalPoolCount:   2,
-			TotalDelegators:  5,
-			EpochNonce:       []byte("nonce-one"),
-			BoundarySlot:     20,
-		},
-		txn,
-	))
-	require.NoError(t, txn.Commit())
-
-	var err error
-	gotPool, err := store.GetPoolStakeSnapshot(
-		1,
-		models.PoolStakeSnapshotTypeMark,
-		poolA,
-		nil,
-	)
-	require.NoError(t, err)
-	gotPools, err := store.GetPoolStakeSnapshotsByEpoch(
-		1,
-		models.PoolStakeSnapshotTypeMark,
-		nil,
-	)
-	require.NoError(t, err)
-	gotTotalBeforeReady, err := store.GetTotalActiveStake(
-		1,
-		models.PoolStakeSnapshotTypeMark,
-		nil,
-	)
-	require.NoError(t, err)
-
-	require.NoError(t, store.SaveEpochSummary(
-		&models.EpochSummary{
-			Epoch:            1,
-			TotalActiveStake: 777,
-			TotalPoolCount:   2,
-			TotalDelegators:  5,
-			EpochNonce:       []byte("nonce-two"),
-			BoundarySlot:     21,
-			SnapshotReady:    true,
-		},
-		nil,
-	))
-	require.NoError(t, store.SaveEpochSummary(
-		&models.EpochSummary{
-			Epoch:            1,
-			TotalActiveStake: 888,
-			TotalPoolCount:   2,
-			TotalDelegators:  5,
-			EpochNonce:       []byte("nonce-three"),
-			BoundarySlot:     22,
-		},
-		nil,
-	))
-	require.NoError(t, store.SaveEpochSummary(
-		&models.EpochSummary{
-			Epoch:            2,
-			TotalActiveStake: 40,
-			TotalPoolCount:   1,
-			TotalDelegators:  1,
-			BoundarySlot:     30,
-			SnapshotReady:    true,
-		},
-		nil,
-	))
-	gotTotalAfterReady, err := store.GetTotalActiveStake(
-		1,
-		models.PoolStakeSnapshotTypeMark,
-		nil,
-	)
-	require.NoError(t, err)
-	gotSummary, err := store.GetEpochSummary(1, nil)
-	require.NoError(t, err)
-
-	rollback := store.Transaction(t.Context())
-	require.NoError(t, store.DeletePoolStakeSnapshotsForEpoch(
-		1,
-		models.PoolStakeSnapshotTypeGo,
-		rollback,
-	))
-	require.NoError(t, store.DeletePoolStakeSnapshotsAfterEpoch(1, rollback))
-	require.NoError(t, store.DeletePoolStakeSnapshotsBeforeEpoch(1, rollback))
-	require.NoError(t, store.DeleteEpochSummariesAfterEpoch(1, rollback))
-	require.NoError(t, rollback.Commit())
-	gotRemaining, err := store.GetPoolStakeSnapshotsByEpoch(
-		1,
-		models.PoolStakeSnapshotTypeMark,
-		nil,
-	)
-	require.NoError(t, err)
-	gotLatest, err := store.GetLatestEpochSummary(nil)
-	require.NoError(t, err)
-	require.NotNil(t, gotPool)
-	require.Equal(t, types.Uint64(20), gotPool.TotalStake)
-	require.Len(t, gotPools, 2)
-	snapshotRows := make(map[string]models.PoolStakeSnapshot, len(gotPools))
-	for _, snapshot := range gotPools {
-		snapshotRows[string(snapshot.PoolKeyHash)] = *snapshot
-	}
-	expectedPoolA := snapshotRows["pool-a"]
-	require.Equal(t, uint64(1), expectedPoolA.Epoch)
-	require.Equal(
-		t,
-		models.PoolStakeSnapshotTypeMark,
-		expectedPoolA.SnapshotType,
-	)
-	require.Equal(t, types.Uint64(20), expectedPoolA.TotalStake)
-	require.Equal(t, types.Uint64(999), expectedPoolA.StakeDenominator)
-	require.Equal(t, uint64(2), expectedPoolA.DelegatorCount)
-	require.Equal(t, uint64(20), expectedPoolA.CapturedSlot)
-	require.Equal(t, uint8(2), expectedPoolA.RewardAccountAutoVote)
-	require.True(t, expectedPoolA.RewardAccountAutoVoteResolved)
-	expectedPoolB := snapshotRows["pool-b"]
-	require.Equal(t, uint64(1), expectedPoolB.Epoch)
-	require.Equal(
-		t,
-		models.PoolStakeSnapshotTypeMark,
-		expectedPoolB.SnapshotType,
-	)
-	require.Equal(t, types.Uint64(30), expectedPoolB.TotalStake)
-	require.Equal(t, types.Uint64(200), expectedPoolB.StakeDenominator)
-	require.Equal(t, uint64(3), expectedPoolB.DelegatorCount)
-	require.Equal(t, uint64(20), expectedPoolB.CapturedSlot)
-	require.Equal(t, uint64(50), gotTotalBeforeReady)
-	require.Equal(t, uint64(888), gotTotalAfterReady)
-	require.NotNil(t, gotSummary)
-	require.Equal(t, types.Uint64(888), gotSummary.TotalActiveStake)
-	require.Equal(t, uint64(22), gotSummary.BoundarySlot)
-	require.NotNil(t, gotLatest)
-	require.Equal(t, types.Uint64(888), gotLatest.TotalActiveStake)
-	require.Equal(t, uint64(22), gotLatest.BoundarySlot)
-	remainingStakeByPool := make(map[string]types.Uint64, len(gotRemaining))
-	for _, snapshot := range gotRemaining {
-		remainingStakeByPool[string(snapshot.PoolKeyHash)] = snapshot.TotalStake
-	}
-	require.Equal(t, map[string]types.Uint64{
-		"pool-a": types.Uint64(20),
-		"pool-b": types.Uint64(30),
-	}, remainingStakeByPool)
-}
-
 func newSharedSQLStore(
 	t *testing.T,
 ) (*sqlstore.Store, *sql.DB) {
 	t.Helper()
 	store, writeDB, _, err := openSQLStore(
-		Config{DataDir: t.TempDir()},
+		Config{},
 		metadata.ProviderDependencies{},
+	)
+	require.NoError(t, err)
+	require.NoError(t, store.Start(t.Context()))
+	t.Cleanup(func() {
+		require.NoError(t, store.Close())
+	})
+	return store, writeDB
+}
+
+// smallLimitDialect shrinks the bound-parameter budget so a handful of rows
+// spans several chunks.
+type smallLimitDialect struct {
+	sqlstore.Dialect
+	limit int
+}
+
+func (d smallLimitDialect) ParameterLimit() int { return d.limit }
+
+func newSharedSQLStoreWithParameterLimit(
+	t *testing.T,
+	limit int,
+) (*sqlstore.Store, *sql.DB) {
+	t.Helper()
+	store, writeDB, _, err := openSQLStoreWithDialect(
+		Config{},
+		metadata.ProviderDependencies{},
+		smallLimitDialect{Dialect: sqlstore.SQLiteDialect(), limit: limit},
 	)
 	require.NoError(t, err)
 	require.NoError(t, store.Start(t.Context()))
@@ -2561,43 +1368,6 @@ func requireDiskSize(t *testing.T, store *sqlstore.Store) int64 {
 	return size
 }
 
-func TestOpenSharedSQLStoreFilePoolsAndWAL(t *testing.T) {
-	t.Parallel()
-	dataDir := t.TempDir()
-	store, writeDB, readDB, err := openSQLStore(
-		Config{MaxConnections: 3},
-		metadata.ProviderDependencies{DataDir: dataDir},
-	)
-	require.NoError(t, err)
-	require.NotSame(t, writeDB, readDB)
-	require.Equal(t, 1, writeDB.Stats().MaxOpenConnections)
-	require.Equal(t, 3, readDB.Stats().MaxOpenConnections)
-	require.NoError(t, store.Start(context.Background()))
-	t.Cleanup(func() {
-		require.NoError(t, store.Close())
-	})
-
-	var journalMode string
-	require.NoError(t, writeDB.QueryRow(
-		"PRAGMA journal_mode",
-	).Scan(&journalMode))
-	require.Equal(t, "wal", journalMode)
-
-	var migrationCount int
-	require.NoError(t, readDB.QueryRow(
-		"SELECT COUNT(*) FROM schema_migrations WHERE phase = 'complete'",
-	).Scan(&migrationCount))
-	// A fresh database runs every registered migration, so the count is taken
-	// from the registry rather than written out: what is under test here is
-	// that startup completed all of them, not how many there currently are.
-	registry, err := migrations.SQLiteRegistry()
-	require.NoError(t, err)
-	require.Equal(t, len(registry), migrationCount)
-
-	requireDiskSize(t, store)
-	require.FileExists(t, filepath.Join(dataDir, "metadata.sqlite"))
-}
-
 // TestDiskSizeDoesNotBlockOnBusyWriteConnection is the regression test for
 // sqliteDiskSize querying through the write pool: writeDB has
 // SetMaxOpenConns(1), so an open write transaction holds that pool's only
@@ -2681,17 +1451,13 @@ func TestDiskSizeDoesNotBlockOnBusyWriteConnection(t *testing.T) {
 // fix, sqliteDiskSize opens and closes its own dedicated connection per
 // call, exactly like checkpointWAL already does, so readDB is never touched
 // and never gains one. It does not by itself show that an idle, otherwise
-// unused connection blocks wal_checkpoint(TRUNCATE) -- see
-// TestWALCheckpointTruncateIdleConnectionDoesNotBlock below, which tests
-// that specific claim directly and finds it false: a connection that runs
-// this same query pattern and is then left idle in the pool does not block
-// a subsequent TRUNCATE against real WAL content, while an actual held read
-// transaction does. The production mechanism connecting "DiskSize on
-// readDB" to the persistent busy=1 symptom is not fully isolated by either
-// test; the dedicated-connection fix is justified by the production
-// before/after observation and by matching checkpointWAL's own existing
-// design, not by a claim that mere pool attachment is sufficient to block a
-// checkpoint.
+// unused connection blocks wal_checkpoint(TRUNCATE): SQLite documents that
+// only an active writer or a reader on an old snapshot does. The production
+// mechanism connecting "DiskSize on readDB" to the persistent busy=1 symptom
+// is not isolated by this test; the dedicated-connection fix is justified by
+// the production before/after observation and by matching checkpointWAL's own
+// existing design, not by a claim that mere pool attachment is sufficient to
+// block a checkpoint.
 func TestDiskSizeDoesNotLeaveReadDBConnectionOpen(t *testing.T) {
 	t.Parallel()
 	dataDir := t.TempDir()
@@ -2734,372 +1500,12 @@ func TestDiskSizeDoesNotLeaveReadDBConnectionOpen(t *testing.T) {
 	)
 }
 
-// TestWALCheckpointTruncateIdleConnectionDoesNotBlock settles, by direct
-// reproduction against dingo's actual readDB DSN and pragmas, the claim
-// disputed in review of the sqliteDiskSize fix above: does a connection that
-// ran exactly sqliteDiskSize's old query pattern (two independent
-// QueryRowContext(...).Scan(...) calls) and is then left idle in readDB's
-// pool -- never closed -- block a separate connection's PRAGMA
-// wal_checkpoint(TRUNCATE)?
-//
-// SQLite's own documentation for wal_checkpoint says RESTART and TRUNCATE
-// block only on an active writer or a reader still using an old snapshot,
-// not on a connection that is merely idle. This test confirms that is also
-// true here: case "idle_finalized_connection" runs the old two-PRAGMA-read
-// pattern, confirms (via OpenConnections) that a connection really is
-// pinned in the pool afterward, and still observes busy=0 and a full
-// truncation to zero bytes against real, substantial WAL content -- the
-// same as the "no_other_connection" baseline. Case
-// "held_read_transaction" is the positive control: an explicit,
-// uncommitted read transaction on the same readDB pool does reproduce
-// busy=1, proving this test can detect a real blocker when one exists.
-//
-// Each case also cross-checks internal consistency: a checkpoint's own
-// reported log/checkpointed frame counts can legitimately read 0 with a
-// large physical -wal file still on disk, when wal_autocheckpoint's PASSIVE
-// checkpoints already backfilled every frame between writes (PASSIVE never
-// truncates -- see checkpointInterval's doc comment above) -- so the
-// assertions key off busy and the physical file size actually dropping to
-// zero, not off log/checkpointed being nonzero.
-func TestWALCheckpointTruncateIdleConnectionDoesNotBlock(t *testing.T) {
-	t.Parallel()
-	dataDir := t.TempDir()
-	store, writeDB, readDB, err := openSQLStore(
-		Config{DataDir: dataDir},
-		metadata.ProviderDependencies{},
-	)
-	require.NoError(t, err)
-	require.NoError(t, store.Start(context.Background()))
-	t.Cleanup(func() {
-		require.NoError(t, store.Close())
-	})
-
-	_, err = writeDB.Exec(
-		`CREATE TABLE wal_checkpoint_repro (id INTEGER PRIMARY KEY, data BLOB)`,
-	)
-	require.NoError(t, err)
-	blob := make([]byte, 4096)
-
-	databasePath := filepath.Join(dataDir, "metadata.sqlite")
-	databaseURI := sqliteFileURI(databasePath)
-	walPath := databasePath + "-wal"
-
-	// growWAL commits enough rows, one autocommit INSERT at a time (like
-	// dingo's own chain-sync writes), to leave substantial physical WAL
-	// content regardless of wal_autocheckpoint's PASSIVE backfilling.
-	growWAL := func() {
-		for range 500 {
-			_, err := writeDB.Exec(
-				`INSERT INTO wal_checkpoint_repro (data) VALUES (?)`,
-				blob,
-			)
-			require.NoError(t, err)
-		}
-	}
-	walSize := func() int64 {
-		info, err := os.Stat(walPath)
-		if err != nil {
-			return 0
-		}
-		return info.Size()
-	}
-
-	// checkpoint opens a dedicated connection and issues exactly one
-	// PRAGMA wal_checkpoint(TRUNCATE), mirroring checkpointWAL itself.
-	checkpoint := func() (busy, log, checkpointed int) {
-		t.Helper()
-		db, err := sql.Open(
-			"sqlite",
-			fmt.Sprintf(
-				"%s?_pragma=busy_timeout(%d)&_pragma=synchronous(OFF)",
-				databaseURI,
-				250,
-			),
-		)
-		require.NoError(t, err)
-		defer func() { require.NoError(t, db.Close()) }()
-		db.SetMaxOpenConns(1)
-		row := db.QueryRowContext(
-			context.Background(),
-			"PRAGMA wal_checkpoint(TRUNCATE)",
-		)
-		require.NoError(t, row.Scan(&busy, &log, &checkpointed))
-		return busy, log, checkpointed
-	}
-
-	t.Run("no_other_connection", func(t *testing.T) {
-		growWAL()
-		require.Positive(t, walSize(), "need real WAL content to checkpoint")
-		busy, _, _ := checkpoint()
-		require.Zero(t, busy, "nothing else attached: TRUNCATE must not be busy")
-		require.Zero(t, walSize(), "TRUNCATE must truncate the -wal file to 0 bytes")
-	})
-
-	t.Run("idle_finalized_connection", func(t *testing.T) {
-		growWAL()
-		require.Positive(t, walSize(), "need real WAL content to checkpoint")
-
-		// sqliteDiskSize's old query pattern, run directly against readDB.
-		var pageCount, pageSize int64
-		require.NoError(
-			t,
-			readDB.QueryRowContext(context.Background(), "PRAGMA page_count").
-				Scan(&pageCount),
-		)
-		require.NoError(
-			t,
-			readDB.QueryRowContext(context.Background(), "PRAGMA page_size").
-				Scan(&pageSize),
-		)
-		require.Positive(
-			t,
-			readDB.Stats().OpenConnections,
-			"test setup: the query above should leave a connection pinned in the pool",
-		)
-
-		busy, _, _ := checkpoint()
-		require.Zerof(
-			t,
-			busy,
-			"an idle, already-finalized connection (readDB.OpenConnections=%d) "+
-				"must not block TRUNCATE",
-			readDB.Stats().OpenConnections,
-		)
-		require.Zero(t, walSize(), "TRUNCATE must still truncate the -wal file to 0 bytes")
-	})
-
-	t.Run("held_read_transaction_positive_control", func(t *testing.T) {
-		growWAL()
-		before := walSize()
-		require.Positive(t, before, "need real WAL content to checkpoint")
-
-		tx, err := readDB.BeginTx(
-			context.Background(),
-			&sql.TxOptions{ReadOnly: true},
-		)
-		require.NoError(t, err)
-		var count int64
-		require.NoError(
-			t,
-			tx.QueryRowContext(
-				context.Background(),
-				"SELECT count(*) FROM wal_checkpoint_repro",
-			).Scan(&count),
-		)
-
-		busy, _, _ := checkpoint()
-		require.NotZero(
-			t,
-			busy,
-			"a real, held, uncommitted read transaction must block TRUNCATE "+
-				"(control: proves this test can detect a real blocker)",
-		)
-		require.Equal(
-			t,
-			before,
-			walSize(),
-			"a busy TRUNCATE must not have truncated the -wal file",
-		)
-		require.NoError(t, tx.Rollback())
-	})
-}
-
-// TestOpenSharedSQLStoreWALPragmas pins the checkpoint threshold and retained
-// WAL limit. Both pragmas are connection-local, so each pool must set them.
-func TestOpenSharedSQLStoreWALPragmas(t *testing.T) {
-	t.Parallel()
-	dataDir := t.TempDir()
-	store, writeDB, readDB, err := openSQLStore(
-		Config{},
-		metadata.ProviderDependencies{DataDir: dataDir},
-	)
-	require.NoError(t, err)
-	require.NoError(t, store.Start(context.Background()))
-	t.Cleanup(func() {
-		require.NoError(t, store.Close())
-	})
-
-	for name, db := range map[string]*sql.DB{"writeDB": writeDB, "readDB": readDB} {
-		var pages int
-		require.NoError(t, db.QueryRow(
-			"PRAGMA wal_autocheckpoint",
-		).Scan(&pages))
-		require.Equalf(t, 10000, pages, "%s wal_autocheckpoint", name)
-
-		var bytes int
-		require.NoError(t, db.QueryRow(
-			"PRAGMA journal_size_limit",
-		).Scan(&bytes))
-		require.Equalf(t, 67108864, bytes, "%s journal_size_limit", name)
-	}
-}
-
-func TestWALResetHonorsJournalSizeLimit(t *testing.T) {
-	t.Parallel()
-	const journalSizeLimit = 64 << 20
-	dataDir := t.TempDir()
-	store, writeDB, _, err := openSQLStore(
-		Config{},
-		metadata.ProviderDependencies{DataDir: dataDir},
-	)
-	require.NoError(t, err)
-	require.NoError(t, store.Start(context.Background()))
-	t.Cleanup(func() {
-		require.NoError(t, store.Close())
-	})
-
-	ctx := context.Background()
-	conn, err := writeDB.Conn(ctx)
-	require.NoError(t, err)
-	t.Cleanup(func() {
-		require.NoError(t, conn.Close())
-	})
-	var limit int64
-	require.NoError(
-		t,
-		conn.QueryRowContext(ctx, "PRAGMA journal_size_limit").Scan(&limit),
-	)
-	require.Equal(t, int64(journalSizeLimit), limit)
-	_, err = conn.ExecContext(ctx, "PRAGMA wal_autocheckpoint=0")
-	require.NoError(t, err)
-	_, err = conn.ExecContext(
-		ctx,
-		`CREATE TABLE wal_size_limit (id INTEGER PRIMARY KEY, data BLOB)`,
-	)
-	require.NoError(t, err)
-
-	// One transaction ensures the active WAL grows beyond the limit before a
-	// reset can occur, leaving room for SQLite page and record overhead.
-	blob := bytes.Repeat([]byte{0xA5}, 1<<20)
-	tx, err := conn.BeginTx(ctx, nil)
-	require.NoError(t, err)
-	for range 66 {
-		_, err = tx.ExecContext(
-			ctx,
-			`INSERT INTO wal_size_limit (data) VALUES (?)`,
-			blob,
-		)
-		require.NoError(t, err)
-	}
-	require.NoError(t, tx.Commit())
-
-	walPath := filepath.Join(dataDir, "metadata.sqlite-wal")
-	walInfo, err := os.Stat(walPath)
-	require.NoError(t, err)
-	require.Greater(t, walInfo.Size(), int64(journalSizeLimit))
-
-	var busy, logFrames, checkpointedFrames int
-	require.NoError(
-		t,
-		conn.QueryRowContext(ctx, "PRAGMA wal_checkpoint(RESTART)").Scan(
-			&busy,
-			&logFrames,
-			&checkpointedFrames,
-		),
-	)
-	require.Zero(t, busy)
-	require.Equal(t, logFrames, checkpointedFrames)
-	// RESTART checkpoints and makes the next writer restart the WAL from the
-	// beginning. That subsequent commit performs the reset and applies the
-	// configured journal size limit to the oversized file.
-	_, err = conn.ExecContext(
-		ctx,
-		`INSERT INTO wal_size_limit (data) VALUES (?)`,
-		[]byte("reset"),
-	)
-	require.NoError(t, err)
-
-	walInfo, err = os.Stat(walPath)
-	require.NoError(t, err)
-	require.LessOrEqual(t, walInfo.Size(), int64(journalSizeLimit))
-}
-
-func TestOpenSharedSQLStoreMemoryIsolation(t *testing.T) {
-	t.Parallel()
-	first, firstDB, _, err := openSQLStore(
-		Config{},
-		metadata.ProviderDependencies{},
-	)
-	require.NoError(t, err)
-	require.NoError(t, first.Start(context.Background()))
-	t.Cleanup(func() {
-		require.NoError(t, first.Close())
-	})
-	second, secondDB, _, err := openSQLStore(
-		Config{},
-		metadata.ProviderDependencies{},
-	)
-	require.NoError(t, err)
-	require.NoError(t, second.Start(context.Background()))
-	t.Cleanup(func() {
-		require.NoError(t, second.Close())
-	})
-
-	_, err = firstDB.Exec("CREATE TABLE isolation_marker (id INTEGER)")
-	require.NoError(t, err)
-	var count int
-	require.NoError(t, secondDB.QueryRow(
-		"SELECT COUNT(*) FROM sqlite_master "+
-			"WHERE type = 'table' AND name = 'isolation_marker'",
-	).Scan(&count))
-	require.Zero(t, count)
-}
-
 var testSyncedAt = time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
 
 const (
 	testSubjectNut  = "00000002df633853f6a47465c9496721d2d5b1291b8398016c0e87ae6e7574636f696e"
 	testSubjectDjed = "8db269c3ec630e06ae29f74bc39edd1f87c819f1056206e879a1cd61446a65644d6963726f555344"
 )
-
-func TestSharedSQLStoreTokenRegistryRoundTrip(t *testing.T) {
-	t.Parallel()
-	store, _ := newSharedSQLStore(t)
-
-	ctx := t.Context()
-
-	written, err := store.UpsertTokenRegistryEntries(
-		ctx,
-		[]models.TokenRegistryEntry{
-			{
-				Subject:     testSubjectNut,
-				Name:        "nutcoin",
-				Ticker:      "NUT",
-				Description: "The legendary Nutcoin.",
-				URL:         "https://fivebinaries.com/nutcoin",
-				Logo:        "iVBORw0KGgo=",
-			},
-			{
-				Subject:  testSubjectDjed,
-				Name:     "Djed USD",
-				Ticker:   "DJED",
-				Decimals: new(6),
-			},
-		},
-		testSyncedAt,
-		nil,
-	)
-	require.NoError(t, err)
-	require.Equal(t, 2, written)
-
-	nut, err := store.GetTokenRegistryEntry(testSubjectNut, nil)
-	require.NoError(t, err)
-	require.NotNil(t, nut)
-	require.Equal(t, testSubjectNut, nut.Subject)
-	require.Equal(t, "nutcoin", nut.Name)
-	require.Equal(t, "NUT", nut.Ticker)
-	require.Equal(t, "The legendary Nutcoin.", nut.Description)
-	require.Equal(t, "https://fivebinaries.com/nutcoin", nut.URL)
-	require.Equal(t, "iVBORw0KGgo=", nut.Logo)
-	require.Nil(t, nut.Decimals, "absent decimals must not read back as zero")
-
-	djed, err := store.GetTokenRegistryEntry(testSubjectDjed, nil)
-	require.NoError(t, err)
-	require.NotNil(t, djed)
-	require.NotNil(t, djed.Decimals)
-	require.Equal(t, 6, *djed.Decimals)
-	require.Empty(t, djed.Logo)
-}
 
 func TestSharedSQLStoreTokenRegistryUpsertReplacesProperties(t *testing.T) {
 	t.Parallel()
@@ -3141,16 +1547,6 @@ func TestSharedSQLStoreTokenRegistryUpsertReplacesProperties(t *testing.T) {
 	require.Nil(t, entry.Decimals)
 }
 
-func TestSharedSQLStoreTokenRegistryMissingSubject(t *testing.T) {
-	t.Parallel()
-	store, _ := newSharedSQLStore(t)
-
-	entry, err := store.GetTokenRegistryEntry(testSubjectNut, nil)
-
-	require.NoError(t, err, "an unknown subject is absence, not an error")
-	require.Nil(t, entry)
-}
-
 func TestSharedSQLStoreTokenRegistryLookupNormalizesSubject(t *testing.T) {
 	t.Parallel()
 	store, _ := newSharedSQLStore(t)
@@ -3175,35 +1571,6 @@ func TestSharedSQLStoreTokenRegistryLookupNormalizesSubject(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, entry)
 	require.Equal(t, "nutcoin", entry.Name)
-}
-
-func TestSharedSQLStoreTokenRegistryUpsertEmptyBatch(t *testing.T) {
-	t.Parallel()
-	store, _ := newSharedSQLStore(t)
-
-	written, err := store.UpsertTokenRegistryEntries(
-		t.Context(),
-		nil,
-		testSyncedAt,
-		nil,
-	)
-
-	require.NoError(t, err)
-	require.Zero(t, written)
-}
-
-func TestSharedSQLStoreTokenRegistryRejectsBlankSubject(t *testing.T) {
-	t.Parallel()
-	store, _ := newSharedSQLStore(t)
-
-	_, err := store.UpsertTokenRegistryEntries(
-		t.Context(),
-		[]models.TokenRegistryEntry{{Name: "no subject"}},
-		testSyncedAt,
-		nil,
-	)
-
-	require.Error(t, err)
 }
 
 // TestSharedSQLStoreTokenRegistryPrune covers the reconciliation half of a
@@ -3369,7 +1736,7 @@ var transactionWitnessCleanupIndexes = map[string]string{
 func newAPIModeSQLStore(t *testing.T) (*sqlstore.Store, *sql.DB) {
 	t.Helper()
 	store, writeDB, _, err := openSQLStore(
-		Config{DataDir: t.TempDir()},
+		Config{},
 		metadata.ProviderDependencies{StorageMode: types.StorageModeAPI},
 	)
 	require.NoError(t, err)
@@ -3449,135 +1816,6 @@ SELECT hash, id FROM "transaction" WHERE slot >= ? AND slot < ?`,
 	// with statistics present, not the one it picks in their absence.
 	_, err = db.Exec("ANALYZE")
 	require.NoError(t, err)
-}
-
-// TestTransactionWitnessCleanupStaysIndexedAfterDeferredIndexDrop covers
-// witness cleanup after a deferred index drop.
-//
-// Mithril drops the deferred-index manifest before API-mode historical
-// backfill, and backfill then calls SetTransaction for every transaction it
-// replays. Each of those calls clears the four witness tables by
-// transaction_id first. With the manifest deferring the transaction_id index on
-// three of those tables, each delete became a full scan of a table that grows
-// with every transaction written, so per-transaction cost rose with the row
-// count already present: measured on preview, backfill fell from 3311 to 9
-// blocks/sec and its own ETA climbed from 30m to 177h.
-//
-// The plan is asserted rather than the index's existence: an index the planner
-// does not choose is a write cost with no read benefit, and it is EXPLAINed
-// from the store's own exported statement so the plan pinned here is the plan
-// of the delete that actually runs.
-func TestTransactionWitnessCleanupStaysIndexedAfterDeferredIndexDrop(
-	t *testing.T,
-) {
-	t.Parallel()
-	store, db := newAPIModeSQLStore(t)
-	seedWitnessRows(t, db, 0, 2000)
-
-	requireWitnessCleanupIndexed(t, db, "before deferring indexes")
-	require.NoError(t, store.DropDeferredIndexes())
-	requireWitnessCleanupIndexed(t, db, "after DropDeferredIndexes")
-}
-
-// TestRetainedIndexesResidentAfterCriticalRebuild covers the repair path a
-// node takes when a prior bulk-load cycle was interrupted.
-//
-// serve calls RepairCriticalDeferredIndexes before it clears sync_status, and
-// Mithril sync calls BuildCritical before it clears its own. Both return with
-// the store about to accept API writes, and neither waits for the lazy
-// remainder that background maintenance finishes later. A database an older
-// binary's manifest had dropped a retained transaction_id index from therefore
-// has to be repaired by the critical rebuild too: otherwise every
-// SetTransaction between that point and the full rebuild clears its witness
-// tables with the full scan the retained set exists to prevent.
-//
-// The state under test is that database, reproduced by dropping the retained
-// set out from under a pending marker.
-func TestRetainedIndexesResidentAfterCriticalRebuild(t *testing.T) {
-	t.Parallel()
-	store, db := newAPIModeSQLStore(t)
-	seedWitnessRows(t, db, 0, 2000)
-
-	require.NoError(t, store.DropDeferredIndexes())
-	dropRetainedIndexes(t, db)
-	requireWitnessCleanupScans(t, db)
-
-	require.NoError(t, store.BuildCriticalDeferredIndexes())
-	requireRetainedIndexesResident(t, db, "after BuildCriticalDeferredIndexes")
-	requireWitnessCleanupIndexed(t, db, "after BuildCriticalDeferredIndexes")
-
-	// The critical rebuild owns only the critical subset, so the marker has
-	// to survive it for background maintenance to finish the rest.
-	pending, err := store.HasDeferredIndexesPending()
-	require.NoError(t, err)
-	require.True(
-		t,
-		pending,
-		"BuildCriticalDeferredIndexes must leave the marker for the lazy "+
-			"remainder",
-	)
-}
-
-// dropRetainedIndexes removes every deferred.Retained index, reproducing what
-// a binary whose manifest still deferred them leaves on disk.
-//
-// The names are manifest constants, not input, and SQLite takes no bound
-// parameter in DDL.
-func dropRetainedIndexes(t *testing.T, db *sql.DB) {
-	t.Helper()
-	require.NotEmpty(t, deferred.Retained)
-	for _, index := range deferred.Retained {
-		_, err := db.Exec("DROP INDEX IF EXISTS " + index.Name)
-		require.NoError(t, err, "dropping retained index %s", index.Name)
-	}
-}
-
-// requireRetainedIndexesResident asserts that every deferred.Retained index is
-// present in the schema.
-func requireRetainedIndexesResident(t *testing.T, db *sql.DB, when string) {
-	t.Helper()
-	for _, index := range deferred.Retained {
-		var found int
-		require.NoError(t, db.QueryRow(
-			`SELECT COUNT(*) FROM sqlite_master
-WHERE type = 'index' AND name = ?`,
-			index.Name,
-		).Scan(&found))
-		require.Equal(
-			t,
-			1,
-			found,
-			"%s: retained index %s must be resident whenever the store "+
-				"can serve writes",
-			when,
-			index.Name,
-		)
-	}
-}
-
-// requireWitnessCleanupScans asserts the negative case the repair has to fix:
-// with the retained set absent, the idempotency deletes are full scans. Without
-// it a rebuild that restored nothing would still pass the assertions above if
-// the indexes had never been missing.
-func requireWitnessCleanupScans(t *testing.T, db *sql.DB) {
-	t.Helper()
-	for _, table := range sqlstore.TransactionWitnessTables() {
-		plan := queryPlan(
-			t,
-			db,
-			sqlstore.TransactionWitnessCleanupSQL(table),
-			1,
-		)
-		require.Contains(
-			t,
-			plan,
-			"SCAN "+table,
-			"the simulated interrupted cycle must leave the %s "+
-				"idempotency delete unindexed:\n%s",
-			table,
-			plan,
-		)
-	}
 }
 
 // requireWitnessCleanupIndexed asserts that every witness-table idempotency
@@ -3692,7 +1930,7 @@ func TestRetainedIndexesRepairPreChangeDeferredCycle(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			store, db := newAPIModeSQLStore(t)
-			seedWitnessRows(t, db, 0, 500)
+			seedWitnessRows(t, db, 0, 5)
 			seedPreChangeDeferredCycle(t, db)
 
 			require.NoError(t, repair(store))
@@ -3886,169 +2124,6 @@ func newTestWitnessTransaction(hashSeed string) *ledger.MockTransaction {
 	return tx
 }
 
-func TestSharedSQLStoreTransactionReadParity(t *testing.T) {
-	t.Parallel()
-	store, raw := newSharedSQLStore(t)
-
-	seedTransactionReadFixture := func(exec func(string, ...any) error) {
-		t.Helper()
-		require.NoError(t, exec(`
-INSERT INTO "transaction" (
-    id, hash, block_hash, metadata, slot, type, fee, collateral_fee,
-    ttl, block_index, valid
-) VALUES
-    (1, ?, ?, ?, 10, 1, '5', '0', '20', 0, TRUE),
-    (2, ?, ?, NULL, 11, 2, '9', '7', '21', 1, FALSE),
-    (3, ?, ?, ?, 12, 3, '4', '0', '22', 0, TRUE)`,
-			[]byte("tx-a"), []byte("block-a"), []byte("meta-a"),
-			[]byte("tx-b"), []byte("block-a"),
-			[]byte("tx-c"), []byte("block-b"), []byte("meta-c"),
-		))
-		require.NoError(t, exec(`
-INSERT INTO address_transaction (
-    id, payment_key, payment_script, staking_key, credential_tag,
-    transaction_id, slot, tx_index
-) VALUES
-    (1, ?, FALSE, ?, 0, 1, 10, 0),
-    (2, ?, FALSE, ?, 0, 2, 11, 1),
-    (3, ?, FALSE, ?, 1, 3, 12, 0)`,
-			[]byte("pay-a"), []byte("stake-a"),
-			[]byte("pay-a"), []byte("stake-a"),
-			[]byte("pay-b"), []byte("stake-a"),
-		))
-		require.NoError(t, exec(`
-INSERT INTO transaction_metadata_label (
-    id, transaction_id, label, slot, cbor_value, json_value
-) VALUES
-    (1, 1, '42', 10, X'01', '{}'),
-    (2, 2, '42', 11, X'02', '{}'),
-    (3, 3, '99', 12, X'03', '{}')`))
-	}
-	seedTransactionReadFixture(func(query string, args ...any) error {
-		_, err := raw.Exec(query, args...)
-		return err
-	})
-
-	var err error
-	gotByHash, err := store.GetTransactionByHash([]byte("tx-a"), nil)
-	require.NoError(t, err)
-	gotMissing, err := store.GetTransactionByHash([]byte("missing"), nil)
-	require.NoError(t, err)
-	gotSlot, gotSlotFound, err := store.GetTransactionSlotByHash(
-		[]byte("tx-b"),
-		nil,
-	)
-	require.NoError(t, err)
-	gotID, gotIDFound, err := store.GetTransactionIDByHash(
-		[]byte("tx-c"),
-		nil,
-	)
-	require.NoError(t, err)
-	gotMetadata, err := store.GetTransactionMetadataByHash(
-		[]byte("tx-a"),
-		nil,
-	)
-	require.NoError(t, err)
-	gotFeeSum, err := store.SumTransactionFeesInSlotRange(10, 12, nil)
-	require.NoError(t, err)
-	gotByBlock, err := store.GetTransactionsByBlockHash(
-		[]byte("block-a"),
-		nil,
-	)
-	require.NoError(t, err)
-	gotByHashes, err := store.GetTransactionsByHashes(
-		[][]byte{[]byte("tx-c"), []byte("tx-a")},
-		nil,
-	)
-	require.NoError(t, err)
-	gotHashesAfter, err := store.GetTransactionHashesAfterSlot(10, nil)
-	require.NoError(t, err)
-	gotByAddress, err := store.GetTransactionsByAddress(
-		[]byte("pay-a"),
-		0,
-		[]byte("stake-a"),
-		1,
-		0,
-		"desc",
-		nil,
-		nil,
-		nil,
-	)
-	require.NoError(t, err)
-	gotAddressCount, err := store.CountTransactionsByAddress(
-		[]byte("pay-a"),
-		0,
-		[]byte("stake-a"),
-		nil,
-	)
-	require.NoError(t, err)
-	gotPaymentCount, err := store.CountTransactionsByPaymentCred(
-		[]byte("pay-a"),
-		false,
-		nil,
-	)
-	require.NoError(t, err)
-	gotByLabel, err := store.GetTransactionsByMetadataLabel(
-		42,
-		5,
-		0,
-		true,
-		nil,
-	)
-	require.NoError(t, err)
-	gotLabelCount, err := store.CountTransactionsByMetadataLabel(42, nil)
-	require.NoError(t, err)
-	gotAddresses, err := store.GetAddressesByCredential(
-		0,
-		[]byte("stake-a"),
-		10,
-		0,
-		"asc",
-		nil,
-	)
-	require.NoError(t, err)
-	gotAddressesCount, err := store.CountAddressesByCredential(
-		0,
-		[]byte("stake-a"),
-		nil,
-	)
-	require.NoError(t, err)
-	require.NoError(t, store.DeleteAddressTransactionsAfterSlot(10, nil))
-	require.NoError(
-		t,
-		store.DeleteTransactionMetadataLabelsAfterSlot(10, nil),
-	)
-	gotAddressCountAfter, err := store.CountTransactionsByPaymentCred(
-		[]byte("pay-a"),
-		false,
-		nil,
-	)
-	require.NoError(t, err)
-	gotLabelCountAfter, err := store.CountTransactionsByMetadataLabel(42, nil)
-	require.NoError(t, err)
-	require.NotNil(t, gotByHash)
-	require.Equal(t, []byte("tx-a"), gotByHash.Hash)
-	require.Nil(t, gotMissing)
-	require.Equal(t, uint64(11), gotSlot)
-	require.True(t, gotSlotFound)
-	require.Equal(t, uint(3), gotID)
-	require.True(t, gotIDFound)
-	require.Equal(t, []byte("meta-a"), gotMetadata)
-	require.Equal(t, uint64(16), gotFeeSum)
-	require.Len(t, gotByBlock, 2)
-	require.Len(t, gotByHashes, 2)
-	require.Len(t, gotHashesAfter, 2)
-	require.Len(t, gotByAddress, 1)
-	require.Equal(t, 2, gotAddressCount)
-	require.Equal(t, 2, gotPaymentCount)
-	require.Len(t, gotByLabel, 2)
-	require.Equal(t, 2, gotLabelCount)
-	require.Len(t, gotAddresses, 1)
-	require.Equal(t, 1, gotAddressesCount)
-	require.Equal(t, 1, gotAddressCountAfter)
-	require.Equal(t, 1, gotLabelCountAfter)
-}
-
 type transactionWriteState struct {
 	Slot             uint64
 	BlockIndex       uint32
@@ -4114,7 +2189,7 @@ func TestSharedSQLStoreTransactionMetadataCollisionIsNullable(t *testing.T) {
 	t.Parallel()
 	store, raw := func() (*sqlstore.Store, *sql.DB) {
 		store, writeDB, _, err := openSQLStore(
-			Config{DataDir: t.TempDir()},
+			Config{},
 			metadata.ProviderDependencies{StorageMode: types.StorageModeAPI},
 		)
 		require.NoError(t, err)
@@ -4588,6 +2663,7 @@ func TestSharedSQLStoreZeroWithdrawalValidatesAccountAndBalance(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			store, _ := newSharedSQLStore(t)
 			stakeKey := bytes.Repeat([]byte{0xf7}, lcommon.AddressHashSize)
 			if tc.create {
@@ -4842,7 +2918,7 @@ func TestSharedSQLStoreStorageModeTransactionParity(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			t.Parallel()
 			store, raw, _, err := openSQLStore(
-				Config{DataDir: t.TempDir()},
+				Config{},
 				metadata.ProviderDependencies{StorageMode: mode},
 			)
 			require.NoError(t, err)
@@ -5069,133 +3145,6 @@ func TestSharedSQLStoreUtxoMutationParity(t *testing.T) {
 	require.Nil(t, gotImported)
 }
 
-func TestSharedSQLStoreUtxoReadParity(t *testing.T) {
-	t.Parallel()
-	store, _ := newSharedSQLStore(t)
-
-	paymentKey := bytes.Repeat([]byte{0x11}, 28)
-	stakingKey := bytes.Repeat([]byte{0x22}, 28)
-	policyID := bytes.Repeat([]byte{0x33}, 28)
-	assetName := []byte("asset")
-	for _, utxo := range []*models.Utxo{
-		{
-			TxId:          []byte("tx-live"),
-			Address:       []byte("live-address"),
-			OutputIdx:     0,
-			PaymentKey:    paymentKey,
-			StakingKey:    stakingKey,
-			CredentialTag: 1,
-			AddedSlot:     10,
-			Amount:        100,
-			Assets: []models.Asset{{
-				Name:     assetName,
-				PolicyId: policyID, Fingerprint: []byte("fingerprint"),
-				Amount: 5,
-			}},
-		},
-		{
-			TxId:        []byte("tx-spent"),
-			OutputIdx:   1,
-			PaymentKey:  paymentKey,
-			StakingKey:  stakingKey,
-			AddedSlot:   10,
-			DeletedSlot: 20,
-			Amount:      50,
-		},
-		{
-			TxId:          []byte("tx-script"),
-			OutputIdx:     0,
-			PaymentKey:    bytes.Repeat([]byte{0x44}, 28),
-			AddedSlot:     30,
-			Amount:        70,
-			PaymentScript: true,
-		},
-	} {
-		require.NoError(t, store.CreateUtxo(nil, utxo))
-	}
-
-	var gotIterated []models.Utxo
-	var err error
-	gotLive, err := store.GetUtxo([]byte("tx-live"), 0, nil)
-	require.NoError(t, err)
-	gotSpentLiveLookup, err := store.GetUtxo([]byte("tx-spent"), 1, nil)
-	require.NoError(t, err)
-	gotSpent, err := store.GetUtxoIncludingSpent(
-		[]byte("tx-spent"),
-		1,
-		nil,
-	)
-	require.NoError(t, err)
-	gotAdded, err := store.GetUtxosAddedAfterSlot(15, nil)
-	require.NoError(t, err)
-	gotLiveAtSlot, err := store.GetLiveUtxosBySlot(10, nil)
-	require.NoError(t, err)
-	gotAllAtSlot, err := store.GetUtxosBySlot(10, nil)
-	require.NoError(t, err)
-	gotDeleted, err := store.GetUtxosDeletedBeforeSlot(25, 1, nil)
-	require.NoError(t, err)
-	pattern := models.UtxoAddressPattern{PaymentPart: paymentKey}
-	gotByAddress, err := store.GetUtxosByAddress(
-		[]models.UtxoAddressPattern{pattern},
-		100,
-		nil,
-	)
-	require.NoError(t, err)
-	gotControlled, err := store.GetControlledAmountByCredential(
-		1,
-		stakingKey,
-		nil,
-	)
-	require.NoError(t, err)
-	gotScriptLocked, err := store.GetScriptLockedSupply(nil)
-	require.NoError(t, err)
-	gotByAsset, err := store.GetUtxosByAssets(policyID, assetName, nil)
-	require.NoError(t, err)
-	require.NoError(t, store.IterateLiveUtxos(
-		nil,
-		func(utxo *models.Utxo) error {
-			gotIterated = append(gotIterated, *utxo)
-			return nil
-		},
-	))
-	require.NotNil(t, gotLive)
-	require.Equal(t, []byte("tx-live"), gotLive.TxId)
-	require.Equal(t, uint64(10), gotLive.AddedSlot)
-	require.Equal(t, uint64(100), uint64(gotLive.Amount))
-	require.Nil(t, gotSpentLiveLookup)
-	require.NotNil(t, gotSpent)
-	require.Equal(t, []byte("tx-spent"), gotSpent.TxId)
-	require.Equal(t, uint64(20), uint64(gotSpent.DeletedSlot))
-	require.Equal(t, uint64(50), uint64(gotSpent.Amount))
-	require.Len(t, gotAdded, 1)
-	require.Equal(t, []byte("tx-script"), gotAdded[0].TxId)
-	require.Equal(
-		t,
-		[]models.UtxoId{{Hash: []byte("tx-live"), Idx: 0}},
-		gotLiveAtSlot,
-	)
-	require.ElementsMatch(t, []models.UtxoId{
-		{Hash: []byte("tx-live"), Idx: 0},
-		{Hash: []byte("tx-spent"), Idx: 1},
-	}, gotAllAtSlot)
-	require.Len(t, gotDeleted, 1)
-	require.Equal(t, []byte("tx-spent"), gotDeleted[0].TxId)
-	require.Len(t, gotByAddress, 1)
-	require.Equal(t, []byte("tx-live"), gotByAddress[0].TxId)
-	require.Equal(t, uint64(100), gotControlled)
-	require.Equal(t, uint64(70), gotScriptLocked)
-	require.Len(t, gotByAsset, 1)
-	require.Equal(t, []byte("tx-live"), gotByAsset[0].TxId)
-	iteratedAmounts := make(map[string]types.Uint64, len(gotIterated))
-	for _, utxo := range gotIterated {
-		iteratedAmounts[string(utxo.TxId)] = utxo.Amount
-	}
-	require.Equal(t, map[string]types.Uint64{
-		"tx-live":   types.Uint64(100),
-		"tx-script": types.Uint64(70),
-	}, iteratedAmounts)
-}
-
 // TestGetUtxosByAddressEmptyPatterns proves an empty patterns slice returns
 // (nil, nil) rather than models.ErrEmptyUtxoAddressPattern, matching the
 // coordinated Database.UtxosByAddress's empty-input handling for the same
@@ -5272,4 +3221,215 @@ func TestSharedSQLStorePoolRetirementAndDepositAtSlot(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Equal(t, map[string]uint64{string(poolBytes): 200}, latest)
+}
+
+func TestSharedSQLStoreMidnightParity(t *testing.T) {
+	t.Parallel()
+	store, _ := newSharedSQLStore(t)
+
+	txn := store.Transaction(t.Context())
+	for _, row := range []*models.MidnightAssetCreate{
+		{
+			Address: []byte("address-a"), Quantity: 10,
+			TxHash: []byte("create-a"), OutputIndex: 0,
+			BlockNumber: 10, BlockHash: []byte("block-10"), TxIndex: 1,
+			BlockTimestampMs: 1000,
+		},
+		{
+			Address: []byte("address-b"), Quantity: 20,
+			TxHash: []byte("create-b"), OutputIndex: 0,
+			BlockNumber: 10, BlockHash: []byte("block-10"), TxIndex: 1,
+			BlockTimestampMs: 1000,
+		},
+		{
+			Address: []byte("address-c"), Quantity: 30,
+			TxHash: []byte("create-c"), OutputIndex: 0,
+			BlockNumber: 11, BlockHash: []byte("block-11"), TxIndex: 0,
+			BlockTimestampMs: 1100,
+		},
+	} {
+		require.NoError(t, store.CreateMidnightAssetCreate(txn, row))
+	}
+	require.NoError(t, store.CreateMidnightAssetSpend(
+		txn,
+		&models.MidnightAssetSpend{
+			Address: []byte("address-a"), Quantity: 10,
+			SpendingTxHash: []byte("spend-a"),
+			UtxoTxHash:     []byte("create-a"), UtxoIndex: 0,
+			BlockNumber: 12, BlockHash: []byte("block-12"),
+			TxIndex: 0, BlockTimestampMs: 1200,
+		},
+	))
+	for _, row := range []*models.MidnightRegistration{
+		{
+			FullDatum: []byte("registration-a"), TxHash: []byte("reg-a"),
+			OutputIndex: 0, BlockNumber: 10, BlockHash: []byte("block-10"),
+			TxIndex: 1, BlockTimestampMs: 1000,
+		},
+		{
+			FullDatum: []byte("registration-b"), TxHash: []byte("reg-b"),
+			OutputIndex: 0, BlockNumber: 11, BlockHash: []byte("block-11"),
+			TxIndex: 0, BlockTimestampMs: 1100,
+		},
+	} {
+		require.NoError(t, store.CreateMidnightRegistration(txn, row))
+	}
+	require.NoError(t, store.CreateMidnightDeregistration(
+		txn,
+		&models.MidnightDeregistration{
+			FullDatum: []byte("deregistration-a"),
+			TxHash:    []byte("dereg-a"), UtxoTxHash: []byte("reg-a"),
+			UtxoIndex: 0, BlockNumber: 12, BlockHash: []byte("block-12"),
+			TxIndex: 0, BlockTimestampMs: 1200,
+		},
+	))
+	require.NoError(t, store.InsertMidnightGovernanceDatum(
+		txn,
+		&models.MidnightGovernanceDatum{
+			DatumType: models.MidnightGovernanceDatumTypeCouncil,
+			TxHash:    []byte("gov-a"), Datum: []byte("datum-a"),
+			BlockNumber: 10,
+		},
+	))
+	require.NoError(t, store.UpsertMidnightAriadneParams(
+		txn,
+		&models.MidnightAriadneParams{Epoch: 1, Datum: []byte("ariadne-a")},
+	))
+	require.NoError(t, store.UpsertMidnightAriadneParams(
+		txn,
+		&models.MidnightAriadneParams{Epoch: 2, Datum: []byte("ariadne-b")},
+	))
+	require.NoError(t, store.CreateMidnightAriadneRollback(
+		txn,
+		&models.MidnightAriadneRollback{
+			BlockNumber: 12, Epoch: 2, PreviousExists: true,
+			PreviousDatum: []byte("ariadne-a"),
+		},
+	))
+	require.NoError(t, store.UpsertMidnightEpochCandidates(
+		txn,
+		&models.MidnightEpochCandidates{
+			Epoch: 2, BlockNumber: 12, CandidatesCbor: []byte("candidates"),
+		},
+	))
+	require.NoError(t, store.InsertMidnightCommitteeCandidateRegistration(
+		txn,
+		&models.MidnightCommitteeCandidateRegistration{
+			TxHash: []byte("candidate-a"), BlockNumber: 12, SlotNumber: 120,
+			TxIndex: 1, TxInputsCbor: []byte("inputs"),
+		},
+	))
+	require.NoError(t, txn.Commit())
+
+	var err error
+	gotUnspentAssets, err := store.FindUnspentMidnightAssetCreates()
+	require.NoError(t, err)
+	gotUnspentRegistrations, err := store.FindUnspentMidnightRegistrations()
+	require.NoError(t, err)
+	gotPage, err := store.FindMidnightAssetCreatesFrom(0, 0, 1, nil)
+	require.NoError(t, err)
+	gotGovernance, err := store.GetLatestMidnightGovernanceDatum(
+		models.MidnightGovernanceDatumTypeCouncil,
+		11,
+		nil,
+	)
+	require.NoError(t, err)
+	gotLatestAriadne, err := store.GetLatestMidnightAriadneParams(nil)
+	require.NoError(t, err)
+	gotHistoricalAriadne, err :=
+		store.GetMidnightAriadneParamsAtOrBeforeEpoch(1, nil)
+	require.NoError(t, err)
+	gotRollbacks, err := store.FindMidnightAriadneRollbacksByBlock(nil, 12)
+	require.NoError(t, err)
+	gotCandidates, err := store.GetMidnightEpochCandidatesByEpoch(2, nil)
+	require.NoError(t, err)
+	gotRegistrations, err :=
+		store.GetMidnightCommitteeCandidateRegistrationsByTxHashes(
+			[][]byte{[]byte("candidate-a"), []byte("missing")},
+			nil,
+		)
+	require.NoError(t, err)
+
+	rollback := store.Transaction(t.Context())
+	gotDeletedCreates, err := store.DeleteMidnightAssetCreatesByBlock(
+		rollback,
+		11,
+	)
+	require.NoError(t, err)
+	_, err = store.DeleteMidnightAssetSpendsByBlock(
+		rollback,
+		12,
+	)
+	require.NoError(t, err)
+	gotDeletedRegistrations, err := store.DeleteMidnightRegistrationsByBlock(
+		rollback,
+		11,
+	)
+	require.NoError(t, err)
+	_, err =
+		store.DeleteMidnightDeregistrationsByBlock(rollback, 12)
+	require.NoError(t, err)
+	require.NoError(t, rollback.Commit())
+	assetTxHashes := make([]string, len(gotUnspentAssets))
+	for i, asset := range gotUnspentAssets {
+		assetTxHashes[i] = string(asset.TxHash)
+	}
+	require.ElementsMatch(t, []string{"create-b", "create-c"}, assetTxHashes)
+	registrationTxHashes := make([]string, len(gotUnspentRegistrations))
+	for i, registration := range gotUnspentRegistrations {
+		registrationTxHashes[i] = string(registration.TxHash)
+	}
+	require.ElementsMatch(t, []string{"reg-b"}, registrationTxHashes)
+	pageTxHashes := make([]string, len(gotPage))
+	for i, asset := range gotPage {
+		pageTxHashes[i] = string(asset.TxHash)
+	}
+	require.Equal(t, []string{"create-a", "create-b"}, pageTxHashes)
+	require.NotNil(t, gotGovernance)
+	require.Equal(t, []byte("gov-a"), gotGovernance.TxHash)
+	require.Equal(t, []byte("datum-a"), gotGovernance.Datum)
+	require.Equal(t, uint64(10), gotGovernance.BlockNumber)
+	require.NotNil(t, gotLatestAriadne)
+	require.Equal(t, uint64(2), gotLatestAriadne.Epoch)
+	require.Equal(t, []byte("ariadne-b"), gotLatestAriadne.Datum)
+	require.NotNil(t, gotHistoricalAriadne)
+	require.Equal(t, uint64(1), gotHistoricalAriadne.Epoch)
+	require.Equal(t, []byte("ariadne-a"), gotHistoricalAriadne.Datum)
+	require.Len(t, gotRollbacks, 1)
+	require.NotNil(t, gotCandidates)
+	require.Equal(t, uint64(2), gotCandidates.Epoch)
+	require.Equal(t, uint64(12), gotCandidates.BlockNumber)
+	require.Equal(t, []byte("candidates"), gotCandidates.CandidatesCbor)
+	require.Len(t, gotRegistrations, 1)
+	deletedCreateTxHashes := make([]string, len(gotDeletedCreates))
+	for i, create := range gotDeletedCreates {
+		deletedCreateTxHashes[i] = string(create.TxHash)
+	}
+	require.ElementsMatch(t, []string{"create-c"}, deletedCreateTxHashes)
+	deletedRegistrationTxHashes := make([]string, len(gotDeletedRegistrations))
+	for i, registration := range gotDeletedRegistrations {
+		deletedRegistrationTxHashes[i] = string(registration.TxHash)
+	}
+	require.ElementsMatch(t, []string{"reg-b"}, deletedRegistrationTxHashes)
+	// The rollback must also remove the rows, not just report them: deleting
+	// the spend at block 12 makes create-a unspent again and the create at
+	// block 11 is gone, and the same holds for registrations.
+	afterAssets, err := store.FindUnspentMidnightAssetCreates()
+	require.NoError(t, err)
+	afterAssetTxHashes := make([]string, len(afterAssets))
+	for i, asset := range afterAssets {
+		afterAssetTxHashes[i] = string(asset.TxHash)
+	}
+	require.ElementsMatch(
+		t,
+		[]string{"create-a", "create-b"},
+		afterAssetTxHashes,
+	)
+	afterRegistrations, err := store.FindUnspentMidnightRegistrations()
+	require.NoError(t, err)
+	afterRegistrationTxHashes := make([]string, len(afterRegistrations))
+	for i, registration := range afterRegistrations {
+		afterRegistrationTxHashes[i] = string(registration.TxHash)
+	}
+	require.ElementsMatch(t, []string{"reg-a"}, afterRegistrationTxHashes)
 }

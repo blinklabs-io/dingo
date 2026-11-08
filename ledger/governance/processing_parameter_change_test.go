@@ -144,16 +144,17 @@ func TestProcessProposalsEnforcesParameterChangeWellFormedness(
 			ppu:      map[uint]any{testutil.PParamUpdateKeyGovActionDeposit: 1},
 		},
 	}
+	// Every case uses its own transaction hash, so one shared store is
+	// isolated; the cases run sequentially against it.
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	defer dbtest.CloseDatabase(db)
+
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-			db, err := dbtest.NewDatabase(t, &database.Config{
-				DataDir: t.TempDir(),
-				Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
-			})
-			require.NoError(t, err)
-			defer dbtest.CloseDatabase(db)
-
 			tx := decodeParameterChangeTx(
 				t,
 				test.dijkstra,

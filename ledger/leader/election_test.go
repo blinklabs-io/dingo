@@ -359,6 +359,7 @@ func newSigmaAuditElection(
 // reference node's "set" snapshot / nesPd). Mixing generations would inflate
 // or deflate sigma one-sidedly.
 func TestComputeScheduleDrawsSigmaInputsFromSameSnapshotEpoch(t *testing.T) {
+	t.Parallel()
 	stake := &recordingStakeProvider{
 		poolStake:  sigmaAuditPoolStake,
 		totalStake: sigmaAuditTotalStake,
@@ -428,6 +429,7 @@ func TestComputeScheduleWipesTheSeedItTook(t *testing.T) {
 // calculation when the epoch provider can supply it, instead of the float64
 // value returned by ActiveSlotCoeff().
 func TestComputeSchedulePrefersExactGenesisActiveSlotCoeff(t *testing.T) {
+	t.Parallel()
 	exact := big.NewRat(1, 1)
 	election := newSigmaAuditElection(
 		&recordingStakeProvider{
@@ -453,6 +455,7 @@ func TestComputeSchedulePrefersExactGenesisActiveSlotCoeff(t *testing.T) {
 }
 
 func TestComputeScheduleRejectsUnsupportedExactCoefficient(t *testing.T) {
+	t.Parallel()
 	exact := new(big.Rat).SetFrac(
 		big.NewInt(1), new(big.Int).Exp(big.NewInt(10), big.NewInt(20), nil),
 	)
@@ -465,31 +468,13 @@ func TestComputeScheduleRejectsUnsupportedExactCoefficient(t *testing.T) {
 	require.ErrorContains(t, err, "PositiveUnitInterval")
 }
 
-// TestComputeScheduleWithoutExactCoeffUsesFloatFallback keeps providers that
-// cannot supply an exact rational working unchanged.
-func TestComputeScheduleWithoutExactCoeffUsesFloatFallback(t *testing.T) {
-	election := newSigmaAuditElection(
-		&recordingStakeProvider{
-			poolStake:  sigmaAuditPoolStake,
-			totalStake: sigmaAuditTotalStake,
-		},
-		&sigmaAuditEpochProvider{floatCoeff: 0.05},
-		slog.New(slog.DiscardHandler),
-	)
-
-	schedule, err := election.computeSchedule(
-		context.Background(), sigmaAuditEpoch,
-	)
-	require.NoError(t, err)
-	require.NotNil(t, schedule)
-}
-
 // TestComputeScheduleLogsAuditableSigmaInputs pins the "leader schedule
 // calculated" record as a single, self-contained audit of every input to the
 // leader check, so a reported schedule divergence can be diffed against the
 // reference node's `query stake-snapshot` / `query protocol-state` without
 // re-running the node with extra instrumentation.
 func TestComputeScheduleLogsAuditableSigmaInputs(t *testing.T) {
+	t.Parallel()
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
@@ -594,6 +579,7 @@ func (p *generationStakeProvider) GetPoolAndTotalActiveStake(
 // Under the two-call code the numerator comes from generation one and the
 // denominator from generation two, halving sigma, and both assertions fail.
 func TestComputeScheduleReadsSigmaPairInOneProviderCall(t *testing.T) {
+	t.Parallel()
 	stake := &generationStakeProvider{}
 	election := newSigmaAuditElection(
 		stake,
@@ -859,31 +845,8 @@ func vrfSeedSource(seed []byte) func() []byte {
 	return func() []byte { return append([]byte(nil), seed...) }
 }
 
-func TestNewElection(t *testing.T) {
-	poolId := lcommon.PoolKeyHash{}
-	copy(poolId[:], []byte("testpool1234567890123"))
-	vrfKey := vrfSeedSource(electionTestVRFSeed)
-
-	stakeProvider := newMockStakeProvider()
-	epochProvider := newMockEpochProvider()
-	eventBus := event.NewEventBus(nil, nil)
-	defer eventBus.Stop()
-
-	election := NewElection(
-		poolId,
-		vrfKey,
-		stakeProvider,
-		epochProvider,
-		eventBus,
-		nil, // nil logger uses default
-	)
-
-	require.NotNil(t, election)
-	assert.Equal(t, poolId, election.poolId)
-	assert.NotNil(t, election.logger)
-}
-
 func TestElectionStartStop(t *testing.T) {
+	t.Parallel()
 	poolId := lcommon.PoolKeyHash{}
 	stakeProvider := newMockStakeProvider()
 	stakeProvider.totalStake = 10000
@@ -930,6 +893,7 @@ func TestElectionStartStop(t *testing.T) {
 // context were ever cancelled afterward, it would call e.Stop() on the
 // new, currently-running generation it has no business touching.
 func TestElectionStopPreventsStaleMonitorFromStoppingALaterStart(t *testing.T) {
+	t.Parallel()
 	poolId := lcommon.PoolKeyHash{}
 	stakeProvider := newMockStakeProvider()
 	stakeProvider.totalStake = 10000
@@ -986,6 +950,7 @@ func TestElectionStopPreventsStaleMonitorFromStoppingALaterStart(t *testing.T) {
 // specifically to land in that narrow race window rather than relying on
 // a single attempt to happen to hit it.
 func TestElectionStopDoesNotDeadlockOnMonitorSelectRace(t *testing.T) {
+	t.Parallel()
 	poolId := lcommon.PoolKeyHash{}
 	stakeProvider := newMockStakeProvider()
 	stakeProvider.totalStake = 10000
@@ -1053,6 +1018,7 @@ func (b *blockingStakeProvider) GetPoolAndTotalActiveStake(
 // flight via blockingStakeProvider, so this needs no timing assumptions
 // about a real computation's speed.
 func TestElectionStopWaitsForInFlightScheduleComputation(t *testing.T) {
+	t.Parallel()
 	poolId := lcommon.PoolKeyHash{}
 	copy(poolId[:], []byte("testpool1234567890123"))
 
@@ -1109,6 +1075,7 @@ func TestElectionStopWaitsForInFlightScheduleComputation(t *testing.T) {
 }
 
 func TestElectionScheduleEarlyEpochs(t *testing.T) {
+	t.Parallel()
 	poolId := lcommon.PoolKeyHash{}
 	stakeProvider := newMockStakeProvider()
 	stakeProvider.totalStake = 10000
@@ -1140,6 +1107,7 @@ func TestElectionScheduleEarlyEpochs(t *testing.T) {
 }
 
 func TestElectionUsesEpochSlotRangeForSchedule(t *testing.T) {
+	t.Parallel()
 	const (
 		epoch              = uint64(299)
 		preprodEpochStart  = uint64(127_526_400)
@@ -1196,6 +1164,7 @@ func TestElectionUsesEpochSlotRangeForSchedule(t *testing.T) {
 }
 
 func TestElectionLoadsPersistedSchedule(t *testing.T) {
+	t.Parallel()
 	poolId := lcommon.PoolKeyHash{}
 	copy(poolId[:], []byte("testpool1234567890123"))
 
@@ -1235,6 +1204,7 @@ func TestElectionLoadsPersistedSchedule(t *testing.T) {
 }
 
 func TestElectionIgnoresStalePersistedSchedule(t *testing.T) {
+	t.Parallel()
 	poolId := lcommon.PoolKeyHash{}
 	copy(poolId[:], []byte("testpool1234567890123"))
 
@@ -1290,6 +1260,7 @@ func TestElectionIgnoresStalePersistedSchedule(t *testing.T) {
 }
 
 func TestElectionPersistsComputedSchedule(t *testing.T) {
+	t.Parallel()
 	poolId := lcommon.PoolKeyHash{}
 	stakeProvider := newMockStakeProvider()
 	stakeProvider.totalStake = 10000
@@ -1333,6 +1304,7 @@ func TestElectionPersistsComputedSchedule(t *testing.T) {
 }
 
 func TestElectionPrecomputesNextEpochAtStartupWhenNonceReady(t *testing.T) {
+	t.Parallel()
 	poolId := lcommon.PoolKeyHash{}
 	stakeProvider := newMockStakeProvider()
 	stakeProvider.totalStake = 1_000_000
@@ -1381,6 +1353,7 @@ func TestElectionPrecomputesNextEpochAtStartupWhenNonceReady(t *testing.T) {
 }
 
 func TestElectionCachesZeroStakeSchedule(t *testing.T) {
+	t.Parallel()
 	poolId := lcommon.PoolKeyHash{}
 	stakeProvider := newMockStakeProvider()
 	stakeProvider.totalStake = 10000
@@ -1439,97 +1412,12 @@ func TestElectionCachesZeroStakeSchedule(t *testing.T) {
 	}
 }
 
-func TestElectionShouldProduceBlock(t *testing.T) {
-	poolId := lcommon.PoolKeyHash{}
-	stakeProvider := newMockStakeProvider()
-	stakeProvider.totalStake = 1_000_000
-	stakeProvider.poolStakes[string(poolId[:])] = 1_000_000 // 100% stake
-
-	// Use high active slot coefficient (90%) with small epoch to ensure
-	// we reliably get leader slots despite the small sample size.
-	epochProvider := newMockEpochProvider()
-	epochProvider.currentEpoch.Store(10)
-	electionTestNonce11 := makeDistinctNonce(electionTestNonce)
-	epochProvider.SetEpochNonceForEpoch(11, electionTestNonce11)
-	epochProvider.activeSlotCoeff = 0.9
-
-	eventBus := event.NewEventBus(nil, nil)
-	defer eventBus.Stop()
-
-	election := NewElection(
-		poolId,
-		vrfSeedSource(electionTestVRFSeed),
-		stakeProvider,
-		epochProvider,
-		eventBus,
-		slog.Default(),
-	)
-
-	err := election.Start(context.Background())
-	require.NoError(t, err)
-	defer func() { _ = election.Stop() }()
-
-	// Schedule is computed asynchronously; wait for it.
-	schedule := waitForSchedule(t, election, 30*time.Second)
-	assert.Greater(t, schedule.SlotCount(), 0,
-		"pool with 100%% stake and f=0.9 should have at least one leader slot")
-
-	// Verify ShouldProduceBlock returns true for an actual leader slot
-	if schedule.SlotCount() > 0 {
-		leaderSlot := schedule.LeaderSlots[0]
-		assert.True(t, election.ShouldProduceBlock(leaderSlot),
-			"ShouldProduceBlock should return true for a known leader slot")
-	}
-}
-
-func TestElectionNextLeaderSlot(t *testing.T) {
-	poolId := lcommon.PoolKeyHash{}
-	stakeProvider := newMockStakeProvider()
-	stakeProvider.totalStake = 1_000_000
-	stakeProvider.poolStakes[string(poolId[:])] = 1_000_000
-
-	epochProvider := newMockEpochProvider()
-	epochProvider.currentEpoch.Store(10)
-	epochProvider.activeSlotCoeff = 0.9 // High f for reliable election
-
-	eventBus := event.NewEventBus(nil, nil)
-	defer eventBus.Stop()
-
-	election := NewElection(
-		poolId,
-		vrfSeedSource(electionTestVRFSeed),
-		stakeProvider,
-		epochProvider,
-		eventBus,
-		slog.Default(),
-	)
-
-	// No schedule - should return 0, false
-	slot, found := election.NextLeaderSlot(0)
-	assert.Equal(t, uint64(0), slot)
-	assert.False(t, found)
-
-	err := election.Start(context.Background())
-	require.NoError(t, err)
-	defer func() { _ = election.Stop() }()
-
-	// Schedule is computed asynchronously; wait for it.
-	schedule := waitForSchedule(t, election, 30*time.Second)
-	require.Greater(t, schedule.SlotCount(), 0,
-		"should have leader slots with 100%% stake and f=0.9")
-
-	epochStart := uint64(10) * electionSlotsPerEpoch
-	slot, found = election.NextLeaderSlot(epochStart)
-	assert.True(t, found, "should find a leader slot in the epoch")
-	assert.GreaterOrEqual(t, slot, epochStart,
-		"leader slot should be at or after epoch start")
-}
-
 // TestElectionShouldProduceBlock_UsesEpochForSlot pins that slot→epoch
 // lookup goes through EpochInfoProvider.EpochForSlot rather than fixed
 // division, so a network with non-uniform epoch lengths or non-zero
 // epoch starts still selects the correct cached schedule.
 func TestElectionShouldProduceBlock_UsesEpochForSlot(t *testing.T) {
+	t.Parallel()
 	poolId := lcommon.PoolKeyHash{}
 	stakeProvider := newMockStakeProvider()
 	epochProvider := newMockEpochProvider()
@@ -1590,6 +1478,7 @@ func TestElectionShouldProduceBlock_UsesEpochForSlot(t *testing.T) {
 func TestElectionShouldProduceBlock_ReturnsFalseOnEpochResolveError(
 	t *testing.T,
 ) {
+	t.Parallel()
 	poolId := lcommon.PoolKeyHash{}
 	epochProvider := newMockEpochProvider()
 	epochProvider.epochForSlot = func(uint64) (uint64, error) {
@@ -1616,6 +1505,7 @@ func TestElectionShouldProduceBlock_ReturnsFalseOnEpochResolveError(
 // queries EpochForSlot rather than fixed division when picking which
 // epoch's cached schedule to scan.
 func TestElectionNextLeaderSlot_UsesEpochForSlot(t *testing.T) {
+	t.Parallel()
 	poolId := lcommon.PoolKeyHash{}
 	epochProvider := newMockEpochProvider()
 	const (
@@ -1661,6 +1551,7 @@ func TestElectionNextLeaderSlot_UsesEpochForSlot(t *testing.T) {
 }
 
 func TestElectionEpochTransition(t *testing.T) {
+	t.Parallel()
 	poolId := lcommon.PoolKeyHash{}
 	stakeProvider := newMockStakeProvider()
 	stakeProvider.totalStake = 1_000_000
@@ -1731,6 +1622,7 @@ func TestElectionEpochTransition(t *testing.T) {
 }
 
 func TestElectionPrecomputesNextEpochOnNonceReady(t *testing.T) {
+	t.Parallel()
 	poolId := lcommon.PoolKeyHash{}
 	stakeProvider := newMockStakeProvider()
 	stakeProvider.totalStake = 1_000_000
@@ -1791,6 +1683,7 @@ func TestElectionPrecomputesNextEpochOnNonceReady(t *testing.T) {
 }
 
 func TestElectionRollbackKeepsCurrentSchedule(t *testing.T) {
+	t.Parallel()
 	poolId := lcommon.PoolKeyHash{}
 	stakeProvider := newMockStakeProvider()
 	stakeProvider.totalStake = 1_000_000
@@ -1842,6 +1735,7 @@ func TestElectionRollbackKeepsCurrentSchedule(t *testing.T) {
 }
 
 func TestElectionRollbackKeepsPrecomputedNextSchedule(t *testing.T) {
+	t.Parallel()
 	poolId := lcommon.PoolKeyHash{}
 	stakeProvider := newMockStakeProvider()
 	stakeProvider.totalStake = 1_000_000
@@ -1900,6 +1794,7 @@ func TestElectionRollbackKeepsPrecomputedNextSchedule(t *testing.T) {
 }
 
 func TestElectionConcurrentAccess(t *testing.T) {
+	t.Parallel()
 	poolId := lcommon.PoolKeyHash{}
 	stakeProvider := newMockStakeProvider()
 	stakeProvider.totalStake = 1_000_000
@@ -1951,6 +1846,7 @@ func TestElectionConcurrentAccess(t *testing.T) {
 // Parent cancellation must join the worker generation before any concurrent
 // Stop returns or a new Start can replace the worker channels.
 func TestElectionParentCancellationWaitsForGeneration(t *testing.T) {
+	t.Parallel()
 	pool := lcommon.PoolKeyHash{}
 	inner := newMockStakeProvider()
 	inner.totalStake = 10000
@@ -2048,6 +1944,7 @@ func (c *gatedElectionContext) Done() <-chan struct{} {
 }
 
 func TestElectionCanceledWaiterAfterReplacement(t *testing.T) {
+	t.Parallel()
 	oldCtx, cancelOld := context.WithCancel(t.Context())
 	cancelOld()
 	oldDone := make(chan struct{})

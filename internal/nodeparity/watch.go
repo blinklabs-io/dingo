@@ -28,8 +28,9 @@ import (
 
 // watcherMinBackoff and watcherMaxBackoff bound the reconnect delay when a
 // watcher's ChainSync session drops, matching
-// internal/test/devnet/observer.go's own reconnect pattern.
-const (
+// internal/test/devnet/observer.go's own reconnect pattern. They are variables
+// only so tests can shrink the delays; no production code changes them.
+var (
 	watcherMinBackoff = 250 * time.Millisecond
 	watcherMaxBackoff = 5 * time.Second
 )

@@ -39,6 +39,7 @@ func spenderIndexDB(t *testing.T) (*sql.DB, func()) {
 	t.Helper()
 	ctx := context.Background()
 	databasePath := filepath.Join(t.TempDir(), "metadata.sqlite")
+	migrations.SeedMigratedPrefix(t, databasePath, 49)
 	db, err := sql.Open("sqlite", "file:"+databasePath+"?"+testDBPragmas)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
@@ -56,7 +57,6 @@ func spenderIndexDB(t *testing.T) (*sql.DB, func()) {
 		}
 		require.NoError(t, runner.Run(ctx))
 	}
-	runTo(registry[:49])
 	return db, func() { runTo(registry) }
 }
 

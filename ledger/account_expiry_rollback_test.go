@@ -36,6 +36,10 @@ import (
 // 50550, epoch 505), with headroom for new cases.
 const expiryRollbackTestEpochCount = 600
 
+// expiryRollbackSmallEpochCount covers the tests that seed slots below
+// epoch 4.
+const expiryRollbackSmallEpochCount = 8
+
 // newExpiryRollbackTestLedger builds a DB-backed LedgerState with the CIP-0163
 // delegator-inactivity gate configured and a fixed epoch schedule so
 // SlotToEpoch resolves the seeded witness slots. Epochs are 100 slots
@@ -55,12 +59,26 @@ func newExpiryRollbackTestLedger(
 	inactivity uint64,
 ) (*LedgerState, *database.Database) {
 	t.Helper()
+	return newExpiryRollbackTestLedgerWithEpochs(
+		t, enabled, inactivity, expiryRollbackTestEpochCount,
+	)
+}
+
+// newExpiryRollbackTestLedgerWithEpochs persists only as many epochs as
+// the caller's slots reach; each epoch is a separate database write.
+func newExpiryRollbackTestLedgerWithEpochs(
+	t *testing.T,
+	enabled bool,
+	inactivity uint64,
+	epochs int,
+) (*LedgerState, *database.Database) {
+	t.Helper()
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: "",
 	})
 	require.NoError(t, err)
 
-	epochCache := make([]models.Epoch, expiryRollbackTestEpochCount)
+	epochCache := make([]models.Epoch, epochs)
 	for i := range epochCache {
 		epochCache[i] = models.Epoch{
 			EpochId:       uint64(i),
@@ -197,7 +215,9 @@ func TestRecomputeAccountExpirationsAfterRollbackDropsOrphanedRenewal(
 	t.Parallel()
 
 	const inactivity = uint64(90)
-	ls, db := newExpiryRollbackTestLedger(t, true, inactivity)
+	ls, db := newExpiryRollbackTestLedgerWithEpochs(
+		t, true, inactivity, expiryRollbackSmallEpochCount,
+	)
 
 	cred := renewTestCred(0x01)
 	// Account currently reflects the E2 witness: expiration = 2 + 90 = 92.
@@ -238,7 +258,9 @@ func TestRecomputeAccountExpirationsAfterRollbackGateOff(t *testing.T) {
 	t.Parallel()
 
 	const inactivity = uint64(90)
-	ls, db := newExpiryRollbackTestLedger(t, false, inactivity)
+	ls, db := newExpiryRollbackTestLedgerWithEpochs(
+		t, false, inactivity, expiryRollbackSmallEpochCount,
+	)
 
 	cred := renewTestCred(0x02)
 	require.NoError(
@@ -363,7 +385,9 @@ func TestRecomputeAccountExpirationsAfterRollbackResetsOrphanOnly(
 	t.Parallel()
 
 	const inactivity = uint64(90)
-	ls, db := newExpiryRollbackTestLedger(t, true, inactivity)
+	ls, db := newExpiryRollbackTestLedgerWithEpochs(
+		t, true, inactivity, expiryRollbackSmallEpochCount,
+	)
 
 	cred := renewTestCred(0x03)
 	require.NoError(
@@ -408,7 +432,9 @@ func TestRecomputeAccountExpirationsAfterRollbackActivationMembership(
 		inactivity      = uint64(90)
 		activationEpoch = uint64(2)
 	)
-	ls, db := newExpiryRollbackTestLedger(t, true, inactivity)
+	ls, db := newExpiryRollbackTestLedgerWithEpochs(
+		t, true, inactivity, expiryRollbackSmallEpochCount,
+	)
 
 	// Activation-stamped account: expiration = A+W = 92, created before
 	// activation, no witness rows.
@@ -492,7 +518,9 @@ func TestRecomputeAccountExpirationsAfterRollbackRestoresPreActivationWitness(
 		inactivity      = uint64(90)
 		activationEpoch = uint64(2)
 	)
-	ls, db := newExpiryRollbackTestLedger(t, true, inactivity)
+	ls, db := newExpiryRollbackTestLedgerWithEpochs(
+		t, true, inactivity, expiryRollbackSmallEpochCount,
+	)
 	cred := renewTestCred(0x53)
 	require.NoError(
 		t,
@@ -548,7 +576,9 @@ func TestRecomputeAccountExpirationsAfterRollbackDoesNotFloorAccountInactiveAtAc
 		inactivity      = uint64(90)
 		activationEpoch = uint64(2)
 	)
-	ls, db := newExpiryRollbackTestLedger(t, true, inactivity)
+	ls, db := newExpiryRollbackTestLedgerWithEpochs(
+		t, true, inactivity, expiryRollbackSmallEpochCount,
+	)
 	cred := renewTestCred(0x54)
 	require.NoError(
 		t,
@@ -602,7 +632,9 @@ func TestRecomputeAccountExpirationsAfterRollbackBeforeActivation(
 	t.Parallel()
 
 	const inactivity = uint64(90)
-	ls, db := newExpiryRollbackTestLedger(t, true, inactivity)
+	ls, db := newExpiryRollbackTestLedgerWithEpochs(
+		t, true, inactivity, expiryRollbackSmallEpochCount,
+	)
 	cred := renewTestCred(0x44)
 	require.NoError(
 		t,

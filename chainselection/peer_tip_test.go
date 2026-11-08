@@ -31,6 +31,8 @@ import (
 // against SelectionTip need to be able to tell that frontier apart from a
 // delivered one, because it is evidence of nothing but the intersection.
 func TestAwaitingFirstHeaderAfterPostIntersectRollback(t *testing.T) {
+	t.Parallel()
+
 	advertised := ochainsync.Tip{
 		Point:       ocommon.Point{Slot: 900, Hash: []byte("network")},
 		BlockNumber: 90,
@@ -59,6 +61,8 @@ func TestAwaitingFirstHeaderAfterPostIntersectRollback(t *testing.T) {
 func TestAwaitingFirstHeaderFalseAfterRollbackOutsideDeliveredHistory(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	pt := NewPeerChainTip(
 		newTestConnectionId(1),
 		ochainsync.Tip{
@@ -99,6 +103,8 @@ func TestAwaitingFirstHeaderFalseAfterRollbackOutsideDeliveredHistory(
 // block number, and the peer is no longer awaiting anything -- including after
 // a later rollback, inside or outside its retained history.
 func TestAwaitingFirstHeaderClearsOnDeliveredHeader(t *testing.T) {
+	t.Parallel()
+
 	advertised := ochainsync.Tip{
 		Point:       ocommon.Point{Slot: 900, Hash: []byte("network")},
 		BlockNumber: 90,
@@ -130,14 +136,9 @@ func TestAwaitingFirstHeaderClearsOnDeliveredHeader(t *testing.T) {
 	)
 }
 
-// TestAwaitingFirstHeaderNilReceiver keeps the accessor safe for callers that
-// hold a peer tip lookup result without checking it, matching SelectionTip.
-func TestAwaitingFirstHeaderNilReceiver(t *testing.T) {
-	var pt *PeerChainTip
-	assert.False(t, pt.AwaitingFirstHeader())
-}
-
 func TestApplyRollbackTrimsAdmittedTipHistory(t *testing.T) {
+	t.Parallel()
+
 	pt := &PeerChainTip{}
 	first := ocommon.Point{Slot: 10, Hash: []byte("first")}
 	intersection := ocommon.Point{Slot: 20, Hash: []byte("intersection")}

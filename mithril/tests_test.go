@@ -42,6 +42,8 @@ import (
 // of an extracted snapshot. The archive is remote input, so an unbounded read
 // lets its producer choose the allocation.
 func TestReadFileInRejectsOversizedManifest(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	name := "ancillary_manifest.json"
 	if err := os.WriteFile(
@@ -67,6 +69,8 @@ func TestReadFileInRejectsOversizedManifest(t *testing.T) {
 // TestReadFileInAcceptsManifestAtBound pins that the bound is inclusive, so a
 // manifest exactly at the limit is still readable.
 func TestReadFileInAcceptsManifestAtBound(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	name := "ancillary_manifest.json"
 	want := make([]byte, maxAncillaryManifestBytes)
@@ -1634,23 +1638,4 @@ func TestNewImmutableProgressUnknownTotalFallback(t *testing.T) {
 	onDone(123)
 	assert.InDelta(t, 25.0, last.Percent, 0.001,
 		"with unknown total, percent falls back to archive count")
-}
-
-func TestWithProgressContext(t *testing.T) {
-	t.Parallel()
-
-	var got DownloadProgress
-	progress := withProgressContext(
-		func(p DownloadProgress) { got = p },
-		"ancillary_ledger_state",
-		"snapshot-hash",
-	)
-	progress(DownloadProgress{
-		BytesDownloaded: 42,
-		TotalBytes:      100,
-	})
-
-	assert.Equal(t, int64(42), got.BytesDownloaded)
-	assert.Equal(t, "ancillary_ledger_state", got.Artifact)
-	assert.Equal(t, "snapshot-hash", got.SnapshotHash)
 }

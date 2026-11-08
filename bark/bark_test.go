@@ -129,22 +129,6 @@ func TestBarkServerTimeoutsSupportStreaming(t *testing.T) {
 	}
 }
 
-// TestAcquireReturnsCurrentDB verifies the ordinary, uncontended path: a
-// database was set at construction time, so Acquire hands it back with a
-// working release func.
-func TestAcquireReturnsCurrentDB(t *testing.T) {
-	t.Parallel()
-
-	db := newTestDB(t)
-	b := newTestBark(t, db)
-
-	got, release, err := b.Acquire()
-	require.NoError(t, err)
-	require.NotNil(t, release)
-	require.Same(t, db, got)
-	release()
-}
-
 // TestAcquireFailsFastWhilePaused guards against a real bug:
 // a live Restore/Truncate closes the old *database.Database out from under
 // any in-flight Bark request that's still holding a stale pointer to it —

@@ -87,6 +87,8 @@ func warmBootstrapPeer() *Peer {
 }
 
 func TestReconcileReadsBootstrapProgressOutsidePeerGovernorLock(t *testing.T) {
+	t.Parallel()
+
 	pr := newProgressProbe(warmBootstrapPeer())
 
 	pr.pg.reconcile(context.Background())
@@ -97,6 +99,8 @@ func TestReconcileReadsBootstrapProgressOutsidePeerGovernorLock(t *testing.T) {
 }
 
 func TestReconcileSkipsBootstrapProgressWithoutBootstrapPeers(t *testing.T) {
+	t.Parallel()
+
 	pr := newProgressProbe()
 
 	pr.pg.reconcile(context.Background())
@@ -105,6 +109,8 @@ func TestReconcileSkipsBootstrapProgressWithoutBootstrapPeers(t *testing.T) {
 }
 
 func TestReconcileSkipsBootstrapProgressAfterBootstrapExit(t *testing.T) {
+	t.Parallel()
+
 	pr := newProgressProbe(warmBootstrapPeer())
 	pr.pg.mu.Lock()
 	pr.pg.bootstrapExited = true

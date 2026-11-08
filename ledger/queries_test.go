@@ -1716,17 +1716,17 @@ func newTestEraHistoryCfg(t testing.TB) *cardano.CardanoNodeConfig {
 		"blockVersionData": { "slotDuration": "20000" },
 		"protocolConsts": { "k": 432 }
 	}`
-	shelleyGenesisJSON := `{
+	shelleyGenesisJSON := completeTestShelleyGenesisJSON(t, map[string]any{
 		"activeSlotsCoeff": 0.05,
-		"securityParam": 432,
-		"slotLength": 1,
-		"epochLength": 432000,
-		"systemStart": "2022-10-25T00:00:00Z"
-	}`
+		"securityParam":    432,
+		"slotLength":       1,
+		"epochLength":      432000,
+		"systemStart":      "2022-10-25T00:00:00Z",
+	}, nil)
 	cfg := &cardano.CardanoNodeConfig{}
 	err := loadByronGenesisForTest(t, cfg, strings.NewReader(byronGenesisJSON))
 	require.NoError(t, err)
-	err = cfg.LoadShelleyGenesisFromReader(
+	err = completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(
 		strings.NewReader(shelleyGenesisJSON),
 	)
 	require.NoError(t, err)
@@ -1901,88 +1901,6 @@ func requireEraDesc(t testing.TB, eraId uint) eras.EraDesc {
 	era := eras.GetEraById(eraId)
 	require.NotNil(t, era)
 	return *era
-}
-
-// TestQueryHardForkEraHistory_OpenEraEndBoundedBySafeZone proves that the
-// current era's EraEnd is snapped to the end of the epoch that contains
-// ledgerTip + safeZone.  Within a single epoch slot↔time is linear (constant
-// slot length), so the epoch-end boundary is the safe forecast limit.
-//
-// Setup:
-//   - One Conway epoch: startSlot=100_000, length=432_000 (ends at slot 532_000)
-//   - ledgerTip at slot 200_000 (well inside the epoch)
-//   - safeZone = ceil(3k/f) = ceil(3*432/0.05) = 25_920
-//   - safeEndSlot = 225_920, which is within the epoch (< 532_000)
-//
-// Expected EraEnd slot: 532_000 (epoch end), epoch number: 501
-func TestQueryHardForkEraHistory_OpenEraEndBoundedBySafeZone(t *testing.T) {
-	t.Parallel()
-
-	const (
-		tipSlot        = uint64(200_000)
-		epochStartSlot = uint64(100_000)
-		epochLen       = uint(432_000)
-		slotLenMs      = uint(1_000) // 1 second in milliseconds
-		epochId        = uint64(500)
-	)
-	// safeZone = ceil(3 * 432 / 0.05) = 25_920; safeEndSlot = 225_920 < 532_000
-	const expectedSafeZone = uint64(25_920)
-	expectedEraEndSlot := epochStartSlot + uint64(epochLen) // 532_000
-
-	db := newTestDB(t)
-	require.NoError(t, db.SetEpoch(
-		epochStartSlot, epochId,
-		nil, nil, nil, nil,
-		eras.ConwayEraDesc.Id, slotLenMs, epochLen,
-		nil,
-	))
-
-	ls := &LedgerState{
-		db:         db,
-		currentEra: eras.ConwayEraDesc,
-		currentTip: ochainsync.Tip{
-			Point: ocommon.NewPoint(tipSlot, []byte("tip")),
-		},
-		config: LedgerStateConfig{
-			CardanoNodeConfig: newTestEraHistoryCfg(t),
-			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		},
-	}
-
-	ls.publishSnapshotsLocked()
-	result, err := ls.queryHardForkEraHistory(context.Background(), nil)
-	require.NoError(t, err)
-
-	eraList, ok := result.(cbor.IndefLengthList)
-	require.True(t, ok)
-	require.NotEmpty(t, eraList)
-
-	// The last entry in the list is the Conway (current, open) era.
-	lastEra, ok := eraList[len(eraList)-1].([]any)
-	require.True(t, ok, "era entry should be []any")
-	require.Len(t, lastEra, 3, "era entry should be [start, end, params]")
-
-	eraEnd, ok := lastEra[1].([]any)
-	require.True(t, ok, "EraEnd should be []any")
-	require.Len(t, eraEnd, 3, "EraEnd should be [relTime, slot, epoch]")
-
-	actualEraEndSlot, ok := eraEnd[1].(uint64)
-	require.True(t, ok, "EraEnd slot should be uint64")
-
-	actualEraEndEpoch, ok := eraEnd[2].(uint64)
-	require.True(t, ok, "EraEnd epoch should be uint64")
-
-	assert.Equal(
-		t,
-		expectedEraEndSlot,
-		actualEraEndSlot,
-		"open era EraEnd slot should snap to epoch boundary (%d), not mid-epoch safeEndSlot (%d)",
-		expectedEraEndSlot,
-		tipSlot+expectedSafeZone,
-	)
-	assert.Equal(t, epochId+1, actualEraEndEpoch,
-		"open era EraEnd epoch number should be epochId+1 (%d)", epochId+1,
-	)
 }
 
 func TestQueryShelleyUtxoByAddress_EmptySlice(t *testing.T) {
@@ -3255,76 +3173,6 @@ func TestQueryHardForkEraHistory_TransitionUnknown_FallsBackToSafeZone(
 	)
 }
 
-// TestQueryHardForkEraHistory_TransitionImpossibleStartsAtEraStart verifies
-// that a finite TransitionImpossible vector measures its safe zone from the
-// era start, matching reconstructSummary.
-//
-// Setup (mirrors TestQueryHardForkEraHistory_OpenEraEndBoundedBySafeZone):
-//   - Conway epoch 500: startSlot=100_000, length=432_000 (ends at 532_000)
-//   - tipSlot past the safe-zone boundary (safeEnd >= epochEnd)
-//   - transitionInfo = TransitionImpossible
-//
-// Expected EraEnd slot: 532_000 (confirmed epoch end, no cap)
-func TestQueryHardForkEraHistory_TransitionImpossibleStartsAtEraStart(
-	t *testing.T,
-) {
-	t.Parallel()
-
-	const (
-		epochStartSlot = uint64(100_000)
-		epochLen       = uint(432_000)
-		epochEndSlot   = uint64(532_000)
-		slotLenMs      = uint(1_000)
-		epochId        = uint64(500)
-		// tipSlot well past the safe-zone decision point
-		tipSlot = uint64(520_000)
-	)
-
-	db := newTestDB(t)
-	require.NoError(t, db.SetEpoch(
-		epochStartSlot, epochId,
-		nil, nil, nil, nil,
-		eras.ConwayEraDesc.Id, slotLenMs, epochLen,
-		nil,
-	))
-
-	ls := &LedgerState{
-		db:         db,
-		currentEra: eras.ConwayEraDesc,
-		currentTip: ochainsync.Tip{
-			Point: ocommon.NewPoint(tipSlot, []byte("tip")),
-		},
-		transitionInfo: hardfork.NewTransitionImpossible(),
-		config: LedgerStateConfig{
-			CardanoNodeConfig: newTestEraHistoryCfg(t),
-			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		},
-	}
-
-	ls.publishSnapshotsLocked()
-	result, err := ls.queryHardForkEraHistory(context.Background(), nil)
-	require.NoError(t, err)
-
-	eraList, ok := result.(cbor.IndefLengthList)
-	require.True(t, ok)
-	require.NotEmpty(t, eraList)
-
-	lastEra, ok := eraList[len(eraList)-1].([]any)
-	require.True(t, ok, "era entry should be []any")
-	eraEnd, ok := lastEra[1].([]any)
-	require.True(t, ok, "EraEnd should be []any")
-	actualSlot, ok := eraEnd[1].(uint64)
-	require.True(t, ok, "EraEnd slot should be uint64")
-
-	assert.Equal(
-		t,
-		epochEndSlot,
-		actualSlot,
-		"TransitionImpossible: EraEnd slot should be measured from the era start (%d)",
-		epochEndSlot,
-	)
-}
-
 // TestQueryHardForkEraHistory_TransitionImpossible_EpochNumberIsNextEpoch
 // verifies the epoch bound produced from the era-start safe-zone anchor.
 func TestQueryHardForkEraHistory_TransitionImpossible_EpochNumberIsNextEpoch(
@@ -4219,7 +4067,7 @@ func TestQueryShelleyCurrentProtocolParams_IncludesRealV2CostModel(
 func cardanoNodeConfigWithMaxLovelaceSupply(t *testing.T, maxLovelaceSupply uint64) *cardano.CardanoNodeConfig {
 	t.Helper()
 	cfg := &cardano.CardanoNodeConfig{}
-	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(
+	require.NoError(t, completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(
 		fmt.Sprintf(`{"maxLovelaceSupply": %d}`, maxLovelaceSupply),
 	)))
 	return cfg

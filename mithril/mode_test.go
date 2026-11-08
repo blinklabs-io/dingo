@@ -17,6 +17,7 @@ package mithril
 import "testing"
 
 func TestSelectMode(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name          string
 		enabled       bool
@@ -30,6 +31,7 @@ func TestSelectMode(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			if got := SelectMode(tt.enabled, tt.historyExpiry); got != tt.want {
 				t.Fatalf("SelectMode(%v, %v) = %v, want %v",
 					tt.enabled, tt.historyExpiry, got, tt.want)

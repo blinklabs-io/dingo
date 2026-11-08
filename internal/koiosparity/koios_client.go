@@ -64,8 +64,6 @@ const (
 	koiosBurstLimitSafe = 80
 	koiosBurstCooldown  = 60 * time.Second
 
-	koiosRetryBackoff5xx = 2 * time.Second
-
 	// koios408MaxRetriesDefault/koios408InitialBackoffDefault/
 	// koios408MaxBackoffDefault give HTTP 408 ("Request Time-out") its own,
 	// much longer retry budget than koiosMaxRetries/koiosRetryBackoff5xx.
@@ -197,6 +195,18 @@ const (
 	// on how long a legitimately slow bulk operation may run in total.
 	koiosRequestTimeout = 20 * time.Second
 )
+
+// koiosRetryBackoff5xx is the step of the linear backoff between retries of a
+// request that failed with a transport error, a 5xx status or an unreadable
+// body. It is a variable only so test binaries can shorten it before any
+// client runs; see SetRetryBackoff5xxForTesting.
+var koiosRetryBackoff5xx = 2 * time.Second
+
+// SetRetryBackoff5xxForTesting changes the retry backoff step. It is not safe
+// for concurrent use with running clients, so call it only from TestMain.
+func SetRetryBackoff5xxForTesting(d time.Duration) {
+	koiosRetryBackoff5xx = d
+}
 
 // koiosBaseURLs maps network name to Koios v1 base URL.
 var koiosBaseURLs = map[string]string{

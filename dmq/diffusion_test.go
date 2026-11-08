@@ -128,15 +128,17 @@ func TestDiffusionOfABurstAcrossThreeNodes(t *testing.T) {
 	}
 }
 
-// Traffic from 1,550 signers, each publishing once a minute under a 30 minute
-// TTL, plateaus at one TTL's worth of messages, stays inside the 128 MiB
-// capacity even at the largest body size, and empties once the TTL passes.
+// Traffic from signers each publishing once a minute under a 30 minute TTL
+// plateaus at one TTL's worth of messages, stays inside the capacity even at
+// the largest body size, and empties once the TTL passes. The signer count and
+// capacity are one tenth of mainnet's 1,550 signers and 128 MiB, which keeps
+// the same capacity-to-traffic ratio and the same plateau shape.
 func TestMempoolStaysBoundedAtMainnetSignerScale(t *testing.T) {
 	t.Parallel()
 	const (
-		signers  = 1550
+		signers  = 155
 		ttl      = 30 * time.Minute
-		capacity = int64(128) << 20
+		capacity = int64(128) << 20 / 10
 		minBody  = 90
 		maxBody  = 2000
 	)
@@ -193,8 +195,9 @@ func TestMempoolStaysBoundedAtMainnetSignerScale(t *testing.T) {
 	require.Zero(t, pool.Len())
 	require.Zero(t, pool.SizeBytes())
 
-	// At the largest body the plateau is about 122 MB, which fits in 128 MiB
-	// with room to spare, so nothing is refused.
+	// At the largest body the plateau is about 12.2 MB of CBOR-encoded
+	// messages (the body plus its envelope), which fits in the 12.8 MiB
+	// capacity with a small margin, so nothing is refused.
 	var refused int
 	for round := range 30 {
 		_, full := publish(maxBody, round)

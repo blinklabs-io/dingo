@@ -38,6 +38,7 @@ func localStorageSelections() StorageSelections {
 }
 
 func TestOpenDatabaseReturnsRecoveryErrorOnRuntime(t *testing.T) {
+	t.Parallel()
 	dataDir := t.TempDir()
 	deps := StorageDependencies{DataDir: dataDir}
 	runtime, err := OpenDatabase(
@@ -80,6 +81,7 @@ func TestOpenDatabaseReturnsRecoveryErrorOnRuntime(t *testing.T) {
 }
 
 func TestOpenDatabaseErrorDoesNotReturnLiveRuntime(t *testing.T) {
+	t.Parallel()
 	selections := localStorageSelections()
 	selections.Metadata.Provider = "missing"
 	runtime, err := OpenDatabase(
