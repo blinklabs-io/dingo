@@ -296,8 +296,8 @@ func (s State) Advance(slot, blockNo uint64) State {
 // protocol major version shelleyMajor, if a candidate for it is known and
 // stable (byronTransition in ouroboros-consensus). A candidate is stable when
 // the tip is at least 2k slots past it, or at least k blocks past the block
-// that made it a candidate. It takes effect in the epoch after the one
-// containing its slot plus 4k.
+// that made it a candidate. It takes effect in the first epoch starting at or
+// after its slot plus 4k, the same epoch Tick adopts it in.
 func (s State) ShelleyTransitionEpoch(
 	config Config,
 	shelleyMajor uint16,
@@ -310,7 +310,7 @@ func (s State) ShelleyTransitionEpoch(
 		if candidate.Version.Major != shelleyMajor {
 			continue
 		}
-		adoptedIn := (candidate.Slot+4*config.K)/epochSlots + 1
+		adoptedIn := (candidate.Slot + 4*config.K + epochSlots - 1) / epochSlots
 		if s.lastSlot >= candidate.Slot &&
 			s.lastSlot-candidate.Slot >= 2*config.K {
 			return adoptedIn, true

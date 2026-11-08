@@ -482,16 +482,66 @@ func TestEpochAtSlotForRolloverUsesKnownSuccessorGeometry(t *testing.T) {
 	ls.publishSnapshotsLocked()
 	ls.Unlock()
 
+	consensus, tip := ls.loadStateSnapshots()
 	target, err := ls.epochAtSlotForRollover(
 		ls.currentEpoch,
 		transitionSlot+shelleyEpochSize+5,
-		ls.transitionInfo,
+		consensus,
+		tip,
 	)
 	require.NoError(t, err)
 	require.Equal(t, uint64(209), target.EpochId)
 	require.Equal(t, transitionSlot+shelleyEpochSize, target.StartSlot)
 	require.Equal(t, uint(shelleyEpochSize), target.LengthInSlots)
 	require.Equal(t, eras.ShelleyEraDesc.Id, target.EraId)
+}
+
+// TestEpochAtSlotForRolloverUsesCapturedSnapshot pins that the rollover resolves
+// its target epoch from the snapshot it captured rather than from whatever is
+// published when the summary is built.
+func TestEpochAtSlotForRolloverUsesCapturedSnapshot(t *testing.T) {
+	t.Parallel()
+
+	ls, _, _ := newByronShelleyBoundaryLedger(t)
+	const (
+		transitionEpoch  uint64 = 208
+		transitionSlot   uint64 = 4_492_800
+		shelleyEpochSize uint64 = 432_000
+	)
+	ls.Lock()
+	ls.currentEpoch = models.Epoch{
+		EpochId:       206,
+		StartSlot:     4_449_600,
+		SlotLength:    20_000,
+		LengthInSlots: 21_600,
+		EraId:         eras.ByronEraDesc.Id,
+	}
+	ls.epochCache = []models.Epoch{ls.currentEpoch}
+	ls.transitionInfo = hardfork.NewTransitionKnown(transitionEpoch)
+	ls.publishSnapshotsLocked()
+	ls.Unlock()
+	captured, capturedTip := ls.loadStateSnapshots()
+
+	// A later publication moves the transition to another epoch.
+	ls.Lock()
+	ls.transitionInfo = hardfork.NewTransitionKnown(transitionEpoch + 5)
+	ls.publishSnapshotsLocked()
+	ls.Unlock()
+
+	target, err := ls.epochAtSlotForRollover(
+		captured.currentEpoch,
+		transitionSlot+shelleyEpochSize+5,
+		captured,
+		capturedTip,
+	)
+	require.NoError(t, err)
+	require.Equal(t, uint64(209), target.EpochId)
+	require.Equal(t, eras.ShelleyEraDesc.Id, target.EraId)
+
+	got, err := ls.transitionEpochForRollover(target, captured, capturedTip)
+	require.NoError(t, err)
+	require.Equal(t, transitionEpoch, got.EpochId)
+	require.Equal(t, transitionSlot, got.StartSlot)
 }
 
 // TestByronShelleyBoundaryDefersReadResultDoneUntilCachedBatchApplied is a

@@ -14527,3 +14527,34 @@ func TestCleanupBlockNoncesRetainsHistoryInAPIMode(t *testing.T) {
 		})
 	}
 }
+
+// prepareEraTransitionsForRollover runs the era-transition preparation for the
+// epoch that follows snapshotEpoch, as the rollover does once it has resolved
+// its target epoch.
+func (ls *LedgerState) prepareEraTransitionsForRollover(
+	ctx context.Context,
+	txn *database.Txn,
+	snapshotEpoch models.Epoch,
+	snapshotEra eras.EraDesc,
+	currentPParams lcommon.ProtocolParameters,
+	transitionPath []uint,
+) (
+	lcommon.ProtocolParameters,
+	uint,
+	[]*EraTransitionResult,
+	[]uint,
+	bool,
+	error,
+) {
+	targetEpoch, err := epochAtSlot(
+		snapshotEpoch,
+		snapshotEpoch.StartSlot+uint64(snapshotEpoch.LengthInSlots),
+	)
+	if err != nil {
+		return nil, 0, nil, nil, false, err
+	}
+	return ls.prepareEraTransitionsForEpoch(
+		ctx, txn, targetEpoch, snapshotEra,
+		currentPParams, transitionPath, true,
+	)
+}

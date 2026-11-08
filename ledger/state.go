@@ -6553,34 +6553,6 @@ func (ls *LedgerState) transitionToEraFrom(
 	return result, nil
 }
 
-func (ls *LedgerState) prepareEraTransitionsForRollover(
-	ctx context.Context,
-	txn *database.Txn,
-	snapshotEpoch models.Epoch,
-	snapshotEra eras.EraDesc,
-	currentPParams lcommon.ProtocolParameters,
-	transitionPath []uint,
-) (
-	lcommon.ProtocolParameters,
-	uint,
-	[]*EraTransitionResult,
-	[]uint,
-	bool,
-	error,
-) {
-	targetEpoch, err := epochAtSlot(
-		snapshotEpoch,
-		snapshotEpoch.StartSlot+uint64(snapshotEpoch.LengthInSlots),
-	)
-	if err != nil {
-		return nil, 0, nil, nil, false, err
-	}
-	return ls.prepareEraTransitionsForEpoch(
-		ctx, txn, targetEpoch, snapshotEra,
-		currentPParams, transitionPath, true,
-	)
-}
-
 func (ls *LedgerState) prepareEraTransitionsForEpoch(
 	ctx context.Context,
 	txn *database.Txn,
@@ -8857,17 +8829,31 @@ func epochAtID(current models.Epoch, targetEpochID uint64) (models.Epoch, error)
 	)
 }
 
+// rolloverSummaryFrom builds the hard-fork summary a rollover resolves its
+// epochs against from the snapshot pair it captured with the rollover's other
+// inputs, so a rollback or publication racing the rollover cannot mix epoch
+// geometry from two states.
+func (ls *LedgerState) rolloverSummaryFrom(
+	consensus *consensusSnapshot,
+	tip *tipSnapshot,
+	anchorSlot uint64,
+) (*hardfork.Summary, error) {
+	return ls.buildHardForkSummary(consensus, tip, anchorSlot)
+}
+
 func (ls *LedgerState) epochAtSlotForRollover(
 	current models.Epoch,
 	slot uint64,
-	transition hardfork.TransitionInfo,
+	consensus *consensusSnapshot,
+	tip *tipSnapshot,
 ) (models.Epoch, error) {
+	transition := consensus.transitionInfo
 	target, err := epochAtSlot(current, slot)
 	if err != nil || transition.State != hardfork.TransitionKnown ||
 		target.EpochId < transition.KnownEpoch {
 		return target, err
 	}
-	summary, err := ls.hardForkSummaryAnchoredAt(slot)
+	summary, err := ls.rolloverSummaryFrom(consensus, tip, slot)
 	if err != nil {
 		return models.Epoch{}, fmt.Errorf(
 			"build hard-fork summary for slot %d: %w", slot, err,
@@ -8890,13 +8876,15 @@ func (ls *LedgerState) epochAtSlotForRollover(
 
 func (ls *LedgerState) transitionEpochForRollover(
 	target models.Epoch,
-	transition hardfork.TransitionInfo,
+	consensus *consensusSnapshot,
+	tip *tipSnapshot,
 ) (models.Epoch, error) {
+	transition := consensus.transitionInfo
 	if transition.State != hardfork.TransitionKnown ||
 		transition.KnownEpoch > target.EpochId {
 		return target, nil
 	}
-	summary, err := ls.hardForkSummaryAnchoredAt(target.StartSlot)
+	summary, err := ls.rolloverSummaryFrom(consensus, tip, target.StartSlot)
 	if err != nil {
 		return models.Epoch{}, err
 	}
@@ -9012,7 +9000,7 @@ func (ls *LedgerState) processBlocksFromSource(
 				}
 			}
 			snapshotPParams := ls.currentPParams
-			snapshotTransitionInfo := ls.transitionInfo
+			snapshotConsensus, snapshotTipState := ls.loadStateSnapshots()
 			snapshotTip := cloneTip(ls.currentTip)
 			ls.RUnlock()
 
@@ -9061,7 +9049,8 @@ func (ls *LedgerState) processBlocksFromSource(
 				targetEpoch, err = ls.epochAtSlotForRollover(
 					snapshotEpoch,
 					cachedNextBatch[0].SlotNumber(),
-					snapshotTransitionInfo,
+					snapshotConsensus,
+					snapshotTipState,
 				)
 				if err != nil {
 					return err
@@ -9070,7 +9059,8 @@ func (ls *LedgerState) processBlocksFromSource(
 
 			transitionEpoch, err := ls.transitionEpochForRollover(
 				targetEpoch,
-				snapshotTransitionInfo,
+				snapshotConsensus,
+				snapshotTipState,
 			)
 			if err != nil {
 				return err
@@ -10010,10 +10000,12 @@ func (ls *LedgerState) processBlocksFromSource(
 						if tmpPoint.Slot >= (snapshotEpoch.StartSlot+uint64(snapshotEpoch.LengthInSlots)) ||
 							snapshotEpoch.SlotLength == 0 {
 							needsEpochRollover = true
+							batchConsensus, batchTip := ls.loadStateSnapshots()
 							targetEpoch, err = ls.epochAtSlotForRollover(
 								snapshotEpoch,
 								next.SlotNumber(),
-								ls.loadConsensusSnapshot().transitionInfo,
+								batchConsensus,
+								batchTip,
 							)
 							if err != nil {
 								return err

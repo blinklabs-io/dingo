@@ -6406,6 +6406,75 @@ func TestEnsureEpochForSlotJumpsEmptyEpochsOnce(t *testing.T) {
 		"an empty-epoch jump ticks consensus once at the target")
 }
 
+// TestComputeEpochNonceAfterSparseJumpKeepsPublishedExtraEntropy covers the
+// epoch directly after a jump target. Its predecessor row is adjacent, but the
+// ledger epoch label still trails it because NEWEPOCH was skipped, so no
+// pending update was enacted and the forecast must not replace the published
+// extraEntropy.
+func TestComputeEpochNonceAfterSparseJumpKeepsPublishedExtraEntropy(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
+
+	const (
+		epochLength uint64 = 75
+		firstEpoch  uint64 = 100
+		jumpEpoch   uint64 = 108
+	)
+	entropy := mustDecodeHex(t, mainnetEpoch259ExtraEntropy)
+	published, _ := maryPParamsWithExtraEntropy(t, entropy)
+	_, neutralCbor := maryPParamsWithExtraEntropy(t, nil)
+	require.NoError(t, db.SetPParams(
+		neutralCbor, 1, firstEpoch, eras.MaryEraDesc.Id, nil,
+	))
+
+	candidate := bytes.Repeat([]byte{0xbb}, lcommon.Blake2b256Size)
+	evolving := bytes.Repeat([]byte{0xaa}, lcommon.Blake2b256Size)
+	lab := bytes.Repeat([]byte{0xfa}, lcommon.Blake2b256Size)
+	nonce := bytes.Repeat([]byte{0xee}, lcommon.Blake2b256Size)
+	row := func(id uint64) models.Epoch {
+		return models.Epoch{
+			EpochId:             id,
+			StartSlot:           id * epochLength,
+			LengthInSlots:       uint(epochLength),
+			SlotLength:          1_000,
+			EraId:               eras.MaryEraDesc.Id,
+			Nonce:               nonce,
+			EvolvingNonce:       evolving,
+			CandidateNonce:      candidate,
+			LastEpochBlockNonce: lab,
+		}
+	}
+	cache := []models.Epoch{row(firstEpoch), row(jumpEpoch)}
+	ls := &LedgerState{
+		db:             db,
+		currentEpoch:   cache[1],
+		currentEra:     eras.MaryEraDesc,
+		currentPParams: published,
+		epochCache:     cache,
+		transitionInfo: hardfork.NewTransitionUnknown(),
+		config: LedgerStateConfig{
+			CardanoNodeConfig: newConwayBootstrapStabilityCfg(t),
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	ls.publishSnapshotsLocked()
+
+	got, _, _, _, err := ls.computeEpochNonceForSlot(
+		t.Context(),
+		(jumpEpoch+1)*epochLength,
+		cache[1],
+	)
+	require.NoError(t, err)
+	want, err := assembleEpochNonce(candidate, lab, entropy)
+	require.NoError(t, err)
+	require.Equal(t, want, got)
+}
+
 func TestHeaderVerificationEpochDefersAtHardForkBoundary(t *testing.T) {
 	t.Parallel()
 

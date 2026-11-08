@@ -4078,11 +4078,15 @@ func (ls *LedgerState) computeEpochNonceForSlot(
 	// epoch (259); everywhere else this resolves to NeutralNonce and leaves
 	// the result unchanged.
 	var extraEntropy []byte
-	if epochStartSlot > prevEpochEndSlot {
+	consensusState := ls.loadConsensusSnapshot()
+	if epochStartSlot > prevEpochEndSlot ||
+		ledgerEpochLagsCacheRow(consensusState, prevEpoch.EpochId) {
 		// A jump over an empty epoch does not run NEWEPOCH, so no pending
-		// parameter update is enacted. TICKN sees the currently published
-		// ledger view rather than a chain of per-epoch forecasts.
-		consensusState := ls.loadConsensusSnapshot()
+		// parameter update is enacted. The row written at the jump target
+		// leaves the ledger epoch label behind, so the epochs after it are
+		// still non-successor signals and keep skipping NEWEPOCH. TICKN sees
+		// the currently published ledger view rather than a chain of
+		// per-epoch forecasts.
 		if consensusState != nil {
 			extraEntropy = extraEntropyFromPParams(
 				consensusState.currentPParams,
@@ -4142,4 +4146,26 @@ func (ls *LedgerState) computeEpochNonceForSlot(
 	)
 
 	return result, evolvingNonce, candidateNonce, labNonceToSave, nil
+}
+
+// ledgerEpochLagsCacheRow reports whether the epoch row epochID is a sparse
+// jump target: the ledger epoch label reconstructed from the cache up to that
+// row is older than the row, so NEWEPOCH did not run for it. A row absent from
+// the cache reports false.
+func ledgerEpochLagsCacheRow(
+	consensusState *consensusSnapshot,
+	epochID uint64,
+) bool {
+	if consensusState == nil {
+		return false
+	}
+	cache := consensusState.epochCache
+	idx := slices.IndexFunc(cache, func(e models.Epoch) bool {
+		return e.EpochId == epochID
+	})
+	if idx < 0 {
+		return false
+	}
+	end := idx + 1
+	return ledgerEpochFromCache(cache[:end]) != epochID
 }

@@ -382,6 +382,30 @@ func TestShelleyTransitionEpoch(t *testing.T) {
 	assert.False(t, known)
 }
 
+// TestShelleyTransitionEpochMatchesTickAtExactBoundary pins the exact-boundary
+// case: a candidate whose slot plus 4k lands on an epoch's first slot is
+// adopted by Tick at that epoch, so the reported transition epoch must be that
+// epoch rather than the next one.
+func TestShelleyTransitionEpochMatchesTickAtExactBoundary(t *testing.T) {
+	t.Parallel()
+	delegates := newDelegates(t, 7)
+	env := testEnv(delegates)
+	state, _ := newCandidateState(t, delegates, env)
+	const major = 1
+	epochSlots := testConfig.epochSlots()
+	boundary := epochSlots
+	state.candidates[0].Slot = boundary - 4*testConfig.K
+	state.lastSlot = state.candidates[0].Slot + 2*testConfig.K
+
+	epoch, known := state.ShelleyTransitionEpoch(testConfig, major)
+	require.True(t, known)
+	assert.Equal(t, uint64(1), epoch)
+
+	ticked := state.Tick(testConfig, boundary)
+	assert.Equal(t, state.candidates[0].Version, ticked.adoptedVersion,
+		"Tick adopts the candidate at the exact boundary epoch")
+}
+
 func TestComplete(t *testing.T) {
 	t.Parallel()
 	fromGenesis := NewState(testGenesisParams()).Advance(0, 0)
