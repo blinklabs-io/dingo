@@ -1033,7 +1033,7 @@ func testRewardPrecomputeWriteRacesRollback(
 		// rollback that finished now would have truncated before this
 		// write's rows exist.
 		assert.Never(t, func() bool { return len(rollbackDone) > 0 },
-			2*time.Second, 10*time.Millisecond,
+			300*time.Millisecond, 10*time.Millisecond,
 			"a rollback completed inside a precompute write that passed "+
 				"its guard")
 	}

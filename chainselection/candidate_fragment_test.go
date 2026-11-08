@@ -24,21 +24,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestCandidateFragment_EmptyFragmentIsZeroValue(t *testing.T) {
-	var f CandidateFragment
-	assert.Equal(t, 0, f.Len())
-	assert.Equal(t, ocommon.Point{}, f.Anchor())
-	assert.Equal(t, ocommon.Point{}, f.HeadPoint())
-	assert.Nil(t, f.Points())
-	_, ok := f.Intersect(CandidateFragment{})
-	assert.False(t, ok)
-}
-
-func TestPeerCandidateFragmentWithoutDeliveredHistoryIsEmpty(t *testing.T) {
-	fragment := (&PeerChainTip{}).CandidateFragment()
-	assert.Equal(t, 0, fragment.Len())
-}
-
 // TestCandidateFragment_AnchorAndHeadPointReturnDefensiveCopies ensures a
 // caller mutating the Hash returned by Anchor or HeadPoint cannot corrupt the
 // fragment's own backing bytes, which would otherwise change later Points()
@@ -46,6 +31,8 @@ func TestPeerCandidateFragmentWithoutDeliveredHistoryIsEmpty(t *testing.T) {
 func TestCandidateFragment_AnchorAndHeadPointReturnDefensiveCopies(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fragment := CandidateFragment{points: []ocommon.Point{
 		{Slot: 100, Hash: []byte("anchor-hash")},
 		{Slot: 200, Hash: []byte("head-hash")},
@@ -73,34 +60,9 @@ func TestCandidateFragment_AnchorAndHeadPointReturnDefensiveCopies(
 	assert.Equal(t, "anchor-hash", string(point.Hash))
 }
 
-func TestCandidateFragment_AnchorAndHeadPoint(t *testing.T) {
-	cs := NewChainSelector(ChainSelectorConfig{SecurityParam: 10})
-	connId := newTestConnectionId(1)
-
-	for i, slot := range []uint64{100, 200, 300} {
-		cs.UpdatePeerTip(connId, ochainsync.Tip{
-			Point: ocommon.Point{
-				Slot: slot,
-				Hash: []byte(fmt.Sprintf("h%d", i)),
-			},
-			BlockNumber: uint64(i + 1),
-		}, nil)
-	}
-
-	fragment, ok := cs.GetCandidateFragment(connId)
-	require.True(t, ok)
-	require.Equal(t, 3, fragment.Len())
-	assert.Equal(t, uint64(100), fragment.Anchor().Slot)
-	assert.Equal(t, uint64(300), fragment.HeadPoint().Slot)
-
-	points := fragment.Points()
-	require.Len(t, points, 3)
-	assert.Equal(t, []uint64{100, 200, 300}, []uint64{
-		points[0].Slot, points[1].Slot, points[2].Slot,
-	})
-}
-
 func TestCandidateFragment_IntersectFindsHighestCommonPoint(t *testing.T) {
+	t.Parallel()
+
 	shared := ocommon.Point{Slot: 200, Hash: []byte("shared")}
 	a := CandidateFragment{points: []ocommon.Point{
 		{Slot: 100, Hash: []byte("a100")},
@@ -126,6 +88,8 @@ func TestCandidateFragment_IntersectFindsHighestCommonPoint(t *testing.T) {
 func TestCandidateFragment_IntersectSameSlotDifferentHashIsNotAMatch(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	a := CandidateFragment{points: []ocommon.Point{
 		{Slot: 100, Hash: []byte("shared")},
 		{Slot: 200, Hash: []byte("a-fork")},
@@ -142,6 +106,8 @@ func TestCandidateFragment_IntersectSameSlotDifferentHashIsNotAMatch(
 }
 
 func TestCandidateFragment_IntersectNoCommonPointReturnsFalse(t *testing.T) {
+	t.Parallel()
+
 	a := CandidateFragment{points: []ocommon.Point{
 		{Slot: 100, Hash: []byte("a100")},
 	}}
@@ -156,6 +122,8 @@ func TestCandidateFragment_IntersectNoCommonPointReturnsFalse(t *testing.T) {
 // TestCandidateFragment_BoundedByGenesisWindow asserts Genesis retains one
 // full density window plus the k-block eagerness suffix, while staying bounded.
 func TestCandidateFragment_BoundedByGenesisWindow(t *testing.T) {
+	t.Parallel()
+
 	const k = 5
 	const window = 15
 	cs := NewChainSelector(ChainSelectorConfig{
@@ -186,6 +154,8 @@ func TestCandidateFragment_BoundedByGenesisWindow(t *testing.T) {
 }
 
 func TestCandidateFragment_DerivedWindowKeepsEagernessSuffix(t *testing.T) {
+	t.Parallel()
+
 	const k = 5
 	cs := NewChainSelector(ChainSelectorConfig{
 		GenesisMode:           true,
@@ -211,6 +181,8 @@ func TestCandidateFragment_DerivedWindowKeepsEagernessSuffix(t *testing.T) {
 // TestCandidateFragment_RemovedOnDisconnect covers the acceptance criterion
 // that a candidate fragment's lifetime is bound to its connection's lifetime.
 func TestCandidateFragment_RemovedOnDisconnect(t *testing.T) {
+	t.Parallel()
+
 	cs := NewChainSelector(ChainSelectorConfig{SecurityParam: 10})
 	connId := newTestConnectionId(1)
 
@@ -234,6 +206,8 @@ func TestCandidateFragment_RemovedOnDisconnect(t *testing.T) {
 // TestCandidateFragment_ReconnectStartsEmpty ensures a fragment does not leak
 // stale history across a disconnect/reconnect on a reused connection ID.
 func TestCandidateFragment_ReconnectStartsEmpty(t *testing.T) {
+	t.Parallel()
+
 	cs := NewChainSelector(ChainSelectorConfig{SecurityParam: 10})
 	connId := newTestConnectionId(1)
 

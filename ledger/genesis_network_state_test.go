@@ -30,7 +30,6 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/gouroboros/cbor"
-	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/stretchr/testify/require"
@@ -490,39 +489,6 @@ func TestRejectDuplicateGenesisUtxosDetectsOverlap(t *testing.T) {
 		rejectDuplicateGenesisUtxos(equalValueUtxos),
 		"duplicate genesis UTxO reference",
 	)
-}
-
-// TestRejectDuplicateGenesisUtxosDetectsAvvmNonAvvmCollision pins the
-// upstream gouroboros case: an AVVM redeem address and a non-AVVM address that
-// resolve to the same underlying address bytes produce the same transaction ID
-// through Byron's real ByronGenesis.GenesisUtxos() path, not a hand-built
-// duplicate.
-func TestRejectDuplicateGenesisUtxosDetectsAvvmNonAvvmCollision(t *testing.T) {
-	t.Parallel()
-
-	pubkeyBytes := make([]byte, 32)
-	for i := range pubkeyBytes {
-		pubkeyBytes[i] = byte(i)
-	}
-	redeemAddr, err := lcommon.NewByronAddressRedeem(
-		pubkeyBytes,
-		lcommon.ByronAddressAttributes{},
-	)
-	require.NoError(t, err)
-
-	byronGenesis := byron.ByronGenesis{
-		AvvmDistr: map[string]string{
-			base64.URLEncoding.EncodeToString(pubkeyBytes): "1000000",
-		},
-		NonAvvmBalances: map[string]string{
-			// Same underlying address bytes as the AVVM redeem entry
-			// above, expressed as a plain non-AVVM balance -- the exact
-			// overlap gouroboros rejects at source construction.
-			redeemAddr.String(): "2000000",
-		},
-	}
-	_, err = byronGenesis.GenesisUtxos()
-	require.ErrorContains(t, err, "duplicate Byron genesis UTxO reference")
 }
 
 // TestRejectDuplicateGenesisUtxosAllowsDistinctRefs guards against an

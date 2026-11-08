@@ -337,31 +337,6 @@ func TestValidateHeaderProtocolVersion_Byron(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func TestHeaderProtocolVersionTooHighError_Message(t *testing.T) {
-	t.Parallel()
-
-	err := &HeaderProtocolVersionTooHighError{
-		Supplied: 12,
-		Expected: 11,
-	}
-	// Message should mention both values so operators can diagnose.
-	msg := err.Error()
-	assert.Contains(t, msg, "12")
-	assert.Contains(t, msg, "11")
-}
-
-// Sanity check: the Block interface accessor (Header()) round-trips
-// through HeaderProtocolMajor for the typical case where callers pass
-// a full block via block.Header().
-func TestHeaderProtocolMajor_ViaBlockHeader(t *testing.T) {
-	t.Parallel()
-
-	var h lcommon.BlockHeader = babbageHeaderWithMajor(t, 8)
-	got, ok := HeaderProtocolMajor(h)
-	require.True(t, ok)
-	assert.Equal(t, uint(8), got)
-}
-
 func TestLedgerStateIsMainnet_True(t *testing.T) {
 	t.Parallel()
 

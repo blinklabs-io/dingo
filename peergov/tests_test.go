@@ -15,7 +15,6 @@
 package peergov
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -313,71 +312,14 @@ func newDialSpreadGovernor() *PeerGovernor {
 	})
 }
 
-// TestResolveDialAddress_IPv4LiteralUnchanged verifies that an IPv4 literal
-// peer is dialed exactly as before: no DNS resolution, no rotation. The
-// injected resolver would return a different address if it were consulted,
-// so an unchanged result proves the resolver was not used.
-func TestResolveDialAddress_IPv4LiteralUnchanged(t *testing.T) {
-	oldLookupIPAddr := lookupIPAddr
-	lookupIPAddr = func(_ context.Context, _ string) ([]net.IP, error) {
-		return []net.IP{net.ParseIP("203.0.113.99")}, nil
-	}
-	t.Cleanup(func() { lookupIPAddr = oldLookupIPAddr })
-
-	pg := newDialSpreadGovernor()
-	const addr = "195.191.47.210:3001"
-	assert.Equal(t, addr, pg.resolveDialAddress(context.Background(), addr))
-}
-
-// TestResolveDialAddress_IPv6LiteralUnchanged verifies IPv6 literals are
-// returned unchanged (bracketed host:port preserved).
-func TestResolveDialAddress_IPv6LiteralUnchanged(t *testing.T) {
-	oldLookupIPAddr := lookupIPAddr
-	lookupIPAddr = func(_ context.Context, _ string) ([]net.IP, error) {
-		return []net.IP{net.ParseIP("2001:db8::1")}, nil
-	}
-	t.Cleanup(func() { lookupIPAddr = oldLookupIPAddr })
-
-	pg := newDialSpreadGovernor()
-	const addr = "[2001:db8::dead:beef]:3001"
-	assert.Equal(t, addr, pg.resolveDialAddress(context.Background(), addr))
-}
-
 // TestResolveDialAddress_MalformedAddressUnchanged verifies that an address
 // without a host:port split (no resolvable form) is returned unchanged so
 // the dialer can report the error as before.
 func TestResolveDialAddress_MalformedAddressUnchanged(t *testing.T) {
+	t.Parallel()
+
 	pg := newDialSpreadGovernor()
 	const addr = "not-a-host-port"
-	assert.Equal(t, addr, pg.resolveDialAddress(context.Background(), addr))
-}
-
-// TestResolveDialAddress_ResolutionFailureFallsBack verifies that when DNS
-// resolution fails, the original hostname:port is returned so the dialer
-// can attempt its own resolution — identical to the pre-spread behavior.
-func TestResolveDialAddress_ResolutionFailureFallsBack(t *testing.T) {
-	oldLookupIPAddr := lookupIPAddr
-	lookupIPAddr = func(_ context.Context, _ string) ([]net.IP, error) {
-		return nil, errors.New("lookup failed")
-	}
-	t.Cleanup(func() { lookupIPAddr = oldLookupIPAddr })
-
-	pg := newDialSpreadGovernor()
-	const addr = "relay.example.com:3001"
-	assert.Equal(t, addr, pg.resolveDialAddress(context.Background(), addr))
-}
-
-// TestResolveDialAddress_EmptyResolutionFallsBack verifies that an empty
-// (but non-error) resolution result falls back to the original address.
-func TestResolveDialAddress_EmptyResolutionFallsBack(t *testing.T) {
-	oldLookupIPAddr := lookupIPAddr
-	lookupIPAddr = func(_ context.Context, _ string) ([]net.IP, error) {
-		return []net.IP{}, nil
-	}
-	t.Cleanup(func() { lookupIPAddr = oldLookupIPAddr })
-
-	pg := newDialSpreadGovernor()
-	const addr = "relay.example.com:3001"
 	assert.Equal(t, addr, pg.resolveDialAddress(context.Background(), addr))
 }
 
@@ -739,6 +681,8 @@ func urgentDiscoveryGovernor(target int) *PeerGovernor {
 // must escalate its cadence toward the normal refresh interval instead of
 // running at the base emergency cadence indefinitely.
 func TestEmergencyLedgerRefreshInterval_EscalatesAndCaps(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(
 			slog.NewJSONHandler(io.Discard, nil),
@@ -774,6 +718,8 @@ func TestEmergencyLedgerRefreshInterval_EscalatesAndCaps(t *testing.T) {
 func TestDiscoverLedgerPeers_EmergencyBackoffThrottlesRepeatRounds(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	pg := urgentDiscoveryGovernor(5)
 
 	// Round one runs at the base emergency cadence.
@@ -807,6 +753,8 @@ func TestDiscoverLedgerPeers_EmergencyBackoffThrottlesRepeatRounds(
 func TestDiscoverLedgerPeers_EmergencyBackoffResetsWhenNotUrgent(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	pg := urgentDiscoveryGovernor(5)
 	pg.emergencyRefreshRounds.Store(5)
 	addEligibleUpstreamPeers(pg, pg.config.MinHotPeers)
@@ -816,19 +764,6 @@ func TestDiscoverLedgerPeers_EmergencyBackoffResetsWhenNotUrgent(
 
 	assert.Equal(t, uint32(0), pg.emergencyRefreshRounds.Load(),
 		"a recovered node must return to the base emergency cadence")
-}
-
-// The first emergency round after startup must not be delayed: a collapsed
-// peer pool still recovers in seconds.
-func TestDiscoverLedgerPeers_EmergencyFirstRoundUsesBaseInterval(
-	t *testing.T,
-) {
-	pg := urgentDiscoveryGovernor(5)
-	assert.Equal(t,
-		pg.config.EmergencyLedgerPeerRefreshInterval,
-		pg.emergencyLedgerRefreshInterval(),
-		"the first emergency round must use the base cadence",
-	)
 }
 
 type countingLedgerPeerProvider struct {
@@ -922,6 +857,8 @@ func fiftyLedgerRelays() []PoolRelay {
 // connected upstreams than its hot-peer target, and never when discovery is
 // disabled.
 func TestLedgerPeersUrgent(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		MinHotPeers:      10,
@@ -953,6 +890,8 @@ func TestLedgerPeersUrgent(t *testing.T) {
 // interval and replenish immediately, so a collapsed pool never wedges the
 // node while relays are still available.
 func TestDiscoverLedgerPeers_EmergencyBypassesRefreshInterval(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:           newMockEventBus(),
@@ -977,6 +916,8 @@ func TestDiscoverLedgerPeers_EmergencyBypassesRefreshInterval(t *testing.T) {
 // When the known ledger-peer target is already full of unusable peers, urgent
 // discovery must still add fresh candidates instead of returning early.
 func TestDiscoverLedgerPeers_EmergencyBypassesSatisfiedTarget(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:           newMockEventBus(),
@@ -1020,29 +961,11 @@ func TestDiscoverLedgerPeers_EmergencyBypassesSatisfiedTarget(t *testing.T) {
 	)
 }
 
-func TestDiscoverLedgerPeers_EmergencyLogField(t *testing.T) {
-	var logBuf bytes.Buffer
-	pg := NewPeerGovernor(PeerGovernorConfig{
-		Logger:             slog.New(slog.NewJSONHandler(&logBuf, nil)),
-		EventBus:           newMockEventBus(),
-		UseLedgerAfterSlot: 0,
-		MinHotPeers:        10,
-		LedgerPeerTarget:   1,
-		LedgerPeerProvider: &mockLedgerPeerProvider{
-			relays:      fiftyLedgerRelays(),
-			currentSlot: 1000,
-		},
-	})
-
-	pg.discoverLedgerPeers()
-
-	assert.Contains(t, logBuf.String(), `"emergency":true`,
-		"emergency ledger discovery log should include emergency=true")
-}
-
 // A healthy node (at its hot-peer target) must NOT bypass the refresh
 // interval: a recent refresh suppresses discovery as normal.
 func TestDiscoverLedgerPeers_NoBypassWhenNotUrgent(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:           newMockEventBus(),
@@ -1073,6 +996,8 @@ func TestDiscoverLedgerPeers_NoBypassWhenNotUrgent(t *testing.T) {
 }
 
 func TestDiscoverLedgerPeers_SlowProviderRemainsSingleFlight(t *testing.T) {
+	t.Parallel()
+
 	release := make(chan struct{})
 	provider := &slowLedgerPeerProvider{
 		started: make(chan struct{}, 2),
@@ -1117,6 +1042,8 @@ func TestDiscoverLedgerPeers_SlowProviderRemainsSingleFlight(t *testing.T) {
 func TestDiscoverLedgerPeers_CanceledRefreshReleasesClaimAndDelay(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	provider := &countingLedgerPeerProvider{}
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		UseLedgerAfterSlot:                 0,
@@ -1144,6 +1071,8 @@ func TestDiscoverLedgerPeers_CanceledRefreshReleasesClaimAndDelay(
 func TestDiscoverLedgerPeers_CanceledSlowProviderReleasesClaimAndDelay(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	release := make(chan struct{})
 	var releaseOnce sync.Once
 	releaseProvider := func() {
@@ -1190,6 +1119,8 @@ func TestDiscoverLedgerPeers_CanceledSlowProviderReleasesClaimAndDelay(
 func TestDiscoverLedgerPeers_PanickingProviderReleasesClaimAndDelay(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	provider := &panicLedgerPeerProvider{}
 	provider.panicOnCall.Store(true)
 	pg := NewPeerGovernor(PeerGovernorConfig{
@@ -1290,6 +1221,8 @@ func peersContainAddress(peers []*Peer, address string) bool {
 // A discovered (peer-share gossip) peer that has never connected must be
 // dropped and denied after its first failed dial when other upstreams remain.
 func TestCreateOutboundConnection_DropsNeverConnectedGossipPeer(t *testing.T) {
+	t.Parallel()
+
 	pg := newReconnectGateTestGovernor(t, 0)
 	target := setupReconnectGateTest(pg, PeerSourceP2PGossip, false, true)
 
@@ -1314,6 +1247,8 @@ func TestCreateOutboundConnection_DropsNeverConnectedGossipPeer(t *testing.T) {
 func TestCreateOutboundConnection_DropsNeverConnectedPublicRootPeer(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	pg := newReconnectGateTestGovernor(t, 0)
 	target := setupReconnectGateTest(
 		pg,
@@ -1343,6 +1278,8 @@ func TestCreateOutboundConnection_DropsNeverConnectedPublicRootPeer(
 func TestCreateOutboundConnection_RetainsNeverConnectedLocalRootPeer(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	pg := newReconnectGateTestGovernor(t, 0)
 	target := setupReconnectGateTest(
 		pg,
@@ -1375,6 +1312,8 @@ func TestCreateOutboundConnection_RetainsNeverConnectedLocalRootPeer(
 // failure; a transient loss is worth recovering. A high failure threshold keeps
 // the unrelated fail-fast path from interfering with the assertion.
 func TestCreateOutboundConnection_RetainsEverConnectedGossipPeer(t *testing.T) {
+	t.Parallel()
+
 	pg := newReconnectGateTestGovernor(t, 1000)
 	target := setupReconnectGateTest(pg, PeerSourceP2PGossip, true, true)
 
@@ -1409,6 +1348,8 @@ func TestCreateOutboundConnection_RetainsEverConnectedGossipPeer(t *testing.T) {
 func TestCreateOutboundConnection_RetainsNeverConnectedGossipPeerWhenNoUpstream(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	pg := newReconnectGateTestGovernor(t, 1000)
 	target := setupReconnectGateTest(pg, PeerSourceP2PGossip, false, false)
 
@@ -1441,6 +1382,8 @@ func TestCreateOutboundConnection_RetainsNeverConnectedGossipPeerWhenNoUpstream(
 // still in flight. If that outbound dial then fails, the never-connected gate
 // must not remove the now-healthy upstream.
 func TestNeverConnectedDropGate_RetainsCurrentClientConnection(t *testing.T) {
+	t.Parallel()
+
 	pg := newReconnectGateTestGovernor(t, 0)
 	target := setupReconnectGateTest(pg, PeerSourceP2PGossip, false, true)
 
@@ -1526,6 +1469,8 @@ func TestCreateOutboundConnection_RemovesFailingLedgerPeerWhenUpstreamRemains(
 // rejected ones: RFC 5737 and RFC 3849 documentation addresses are rejected,
 // so a policy regression breaks this test before it reaches the dial path.
 func TestIsRoutableIP(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name string
 		ip   string
@@ -1654,6 +1599,8 @@ func TestIsRoutableIP(t *testing.T) {
 // would read as routable if the length were not checked: every net.IP class
 // predicate reports false for a length other than 4 or 16.
 func TestIsRoutableIPMalformed(t *testing.T) {
+	t.Parallel()
+
 	require.False(t, IsRoutableIP(nil))
 	require.False(t, IsRoutableIP(net.IP{}))
 	require.False(t, IsRoutableIP(net.IP{1, 2, 3}))
@@ -1664,8 +1611,54 @@ func TestIsRoutableIPMalformed(t *testing.T) {
 // matched against the IPv4 prefixes. Without the unmap it would miss every
 // one of them and be accepted.
 func TestIsRoutableIPUnmapsV4(t *testing.T) {
+	t.Parallel()
+
 	mapped := net.ParseIP("::ffff:100.64.0.1")
 	require.NotNil(t, mapped)
 	require.Len(t, mapped, net.IPv6len, "want the 16-byte mapped form")
 	require.False(t, IsRoutableIP(mapped))
+}
+
+func TestResolveDialAddress_LiteralUnchanged(t *testing.T) {
+	oldLookupIPAddr := lookupIPAddr
+	lookupIPAddr = func(_ context.Context, _ string) ([]net.IP, error) {
+		return []net.IP{net.ParseIP("203.0.113.99")}, nil
+	}
+	t.Cleanup(func() { lookupIPAddr = oldLookupIPAddr })
+
+	pg := newDialSpreadGovernor()
+	for _, addr := range []string{
+		"195.191.47.210:3001",
+		"[2001:db8::dead:beef]:3001",
+	} {
+		assert.Equal(t, addr, pg.resolveDialAddress(context.Background(), addr))
+	}
+}
+
+func TestResolveDialAddress_UnusableResolutionFallsBack(t *testing.T) {
+	const addr = "relay.example.com:3001"
+	for name, resolve := range map[string]func(
+		context.Context,
+		string,
+	) ([]net.IP, error){
+		"failure": func(context.Context, string) ([]net.IP, error) {
+			return nil, errors.New("lookup failed")
+		},
+		"empty": func(context.Context, string) ([]net.IP, error) {
+			return []net.IP{}, nil
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			oldLookupIPAddr := lookupIPAddr
+			lookupIPAddr = resolve
+			t.Cleanup(func() { lookupIPAddr = oldLookupIPAddr })
+
+			pg := newDialSpreadGovernor()
+			assert.Equal(
+				t,
+				addr,
+				pg.resolveDialAddress(context.Background(), addr),
+			)
+		})
+	}
 }

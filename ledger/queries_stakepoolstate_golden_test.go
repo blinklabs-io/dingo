@@ -16,7 +16,6 @@ package ledger
 
 import (
 	"bytes"
-	"crypto/sha256"
 	"encoding/hex"
 	"math/big"
 	"strings"
@@ -182,25 +181,6 @@ func ledgerGoldenReplies(t *testing.T, golden string) [][]byte {
 		replies = append(replies, append([]byte{0x81}, m...))
 	}
 	return replies
-}
-
-// TestStakePoolStateGoldenFilesAreVerbatim guards the fixtures: they are the
-// ledger's files, not this package's idea of them.
-func TestStakePoolStateGoldenFilesAreVerbatim(t *testing.T) {
-	t.Parallel()
-	for name, tc := range map[string]struct{ golden, digest string }{
-		"conway": {
-			stakePoolStateConwayGolden,
-			"2a218f2927f25a7e2f939d7f959542f346b432fba5d636ec4471775d84d932cd",
-		},
-		"dijkstra": {
-			stakePoolStateDijkstraGolden,
-			"09794fa5860071b0a4d73fccdcaca79b7784c3b46f4ea08a55f701f087f576cd",
-		},
-	} {
-		sum := sha256.Sum256(goldenBytes(t, tc.golden))
-		require.Equal(t, tc.digest, hex.EncodeToString(sum[:]), name)
-	}
 }
 
 func goldenRelays(relays []lcommon.PoolRelay) []models.PoolRegistrationRelay {

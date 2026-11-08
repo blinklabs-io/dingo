@@ -1416,7 +1416,8 @@ func (ls *LedgerState) verifyPeerForkAncestorMemo(
 		prefix.epoch != epoch ||
 		!bytes.Equal(prefix.nonce, nonce) ||
 		index > prefix.lastIndex {
-		*selector(&entry) = peerForkAncestorPrefix{
+		target := selector(&entry)
+		*target = peerForkAncestorPrefix{
 			contextGeneration: contextGeneration,
 			epoch:             epoch,
 			nonce:             cloneNonce(nonce),

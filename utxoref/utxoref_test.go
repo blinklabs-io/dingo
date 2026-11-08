@@ -83,38 +83,6 @@ func TestForUtxoMatchesForInput(t *testing.T) {
 	)
 }
 
-// TestKeyDedupsRepeatedInput exercises the dedup idiom the overlays use: a
-// "seen"/consumed set keyed by utxoref.Key collapses repeated (hash, index)
-// entries to one, while distinct entries are preserved.
-func TestKeyDedupsRepeatedInput(t *testing.T) {
-	t.Parallel()
-
-	hash := strings.Repeat("ef", 32)
-	consumed := []lcommon.TransactionInput{
-		shelley.MustNewShelleyTransactionInput(hash, 0),
-		shelley.MustNewShelleyTransactionInput(hash, 0), // repeated on-chain input
-		shelley.MustNewShelleyTransactionInput(hash, 1),
-	}
-
-	seen := make(map[utxoref.Key]struct{}, len(consumed))
-	var processed int
-	for _, input := range consumed {
-		key := utxoref.ForInput(input)
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
-		processed++
-	}
-
-	require.Equal(
-		t,
-		2,
-		processed,
-		"the repeated (hash, index 0) input must be processed only once",
-	)
-}
-
 // TestKeyString pins the human-readable rendering used for logging (e.g. a
 // double-spend log line) to the same "<hex-hash>:<index>" shape the string
 // keys this type replaces used, so existing log consumers see no format

@@ -433,6 +433,8 @@ func TestDelegatorInactivityEndToEnd(t *testing.T) {
 // through register -> included -> expire -> excluded+not-credited ->
 // witness -> renewed+included with the CIP-0163 gate on.
 func testDelegatorInactivityEndToEndGateOn(t *testing.T) {
+	t.Parallel()
+
 	res := runDelegatorInactivityLifecycleScenario(t, true)
 
 	require.Equal(t,
@@ -467,6 +469,8 @@ func testDelegatorInactivityEndToEndGateOn(t *testing.T) {
 // CIP-0163 gate off: the expiration is never set and the credential's stake
 // stays included and credited throughout, matching pre-CIP behavior.
 func testDelegatorInactivityEndToEndGateOff(t *testing.T) {
+	t.Parallel()
+
 	res := runDelegatorInactivityLifecycleScenario(t, false)
 
 	require.Equal(t, uint64(0), res.expirationAfterRegister,
