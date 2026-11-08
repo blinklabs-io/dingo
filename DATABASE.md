@@ -6911,6 +6911,18 @@ predates the v22 journal: it is returned with its row's values when they took
 effect at or before `slot`, and left out otherwise, since a vote replaced
 before the journal after `slot` has no record of its value there.
 
+`DeleteGovernanceVotesAfterSlot` discards future history before deleting votes
+created after the target or lacking any surviving history. Orphan detection uses
+a non-correlated set of non-null history vote IDs, so it does not rescan the
+history table per vote when its lookup index is absent. On SQLite, restoration writes only
+votes whose value, anchor URL, anchor hash, or update slot differs from the
+latest surviving history entry, with null-safe tuple comparison. Numeric values
+in the affinity-free anchor hash BLOB column always restore, preserving their
+storage classes and floating-point bits even when SQL considers them equal. This also
+normalizes older replayed casts and legacy null timestamps while leaving
+unaffected votes untouched. Other SQL providers retain full restoration.
+Deletion-slot restoration remains independent.
+
 ### `GetAccountSumsByCredential`
 
 Backs the Blockfrost account `withdrawals_sum`, `reserves_sum`, and
