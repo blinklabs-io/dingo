@@ -977,6 +977,10 @@ func (ls *LedgerState) peerHeaderForkPathContext(
 				header.BlockNumber() > 0 &&
 				ls.chain.Tip().BlockNumber+walkSpan <
 					header.BlockNumber()-1 {
+				if contextChanged() {
+					return ocommon.Point{}, nil, false,
+						errHeaderVerificationContextChanged
+				}
 				return ocommon.Point{}, nil, false,
 					errHeaderVerificationDeferred
 			}
@@ -999,6 +1003,10 @@ func (ls *LedgerState) peerHeaderForkPathContext(
 					parentDepth,
 					header,
 				)
+				if contextChanged() {
+					return ocommon.Point{}, nil, false,
+						errHeaderVerificationContextChanged
+				}
 				return ocommon.Point{}, nil, false,
 					errHeaderVerificationDeferred
 			}
