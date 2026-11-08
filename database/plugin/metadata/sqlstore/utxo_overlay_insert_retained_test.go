@@ -54,11 +54,25 @@ func TestSQLiteOverlayInsertRetainsClosureHistoryThroughBarriers(t *testing.T) {
 						ocommon.Point{Slot: 100, Hash: overlayTxID(0x53, 0)},
 						uint32(index), nil, true, &slot, acc, txn, 0))
 				}
+				overlay := acc.(*transactionBatchAccumulator).overlay
 				if barrier {
 					last := transactions[len(transactions)-1]
+					stored, err := store.GetTransactionByHash(
+						last.Hash().Bytes(),
+						txn,
+					)
+					require.NoError(t, err)
+					require.NotNil(t, stored)
 					output, err := store.GetUtxo(last.Hash().Bytes(), 0, txn)
 					require.NoError(t, err)
 					require.NotNil(t, output)
+					require.Positive(
+						t,
+						overlay.stats.BarrierFlushes,
+						"transaction read must flush retained output rows before the UTxO assertion",
+					)
+				} else {
+					require.Zero(t, overlay.stats.BarrierFlushes)
 				}
 				require.NoError(t, store.FlushBatch(acc, txn))
 				require.NoError(t, txn.Commit())
