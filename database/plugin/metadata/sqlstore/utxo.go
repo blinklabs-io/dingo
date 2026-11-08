@@ -317,11 +317,7 @@ func (s *Store) GetSpentUtxosMissingAddressAfterSlot(
 		return nil, err
 	}
 	rows, err := db.QueryContext(ctx, s.dialect.Rebind(
-		`SELECT `+qualifiedSQLiteUtxoColumns+` FROM utxo
-WHERE utxo.deleted_slot > ?
-  AND utxo.id > ?
-  AND NOT EXISTS (SELECT 1 FROM utxo_address WHERE utxo_address.utxo_id = utxo.id)
-ORDER BY utxo.id LIMIT ?`,
+		spentUtxosMissingAddressAfterSlotSQL(s.dialect.Name()),
 	), slotValue, afterID, limit)
 	if err != nil {
 		return nil, err
@@ -340,6 +336,22 @@ ORDER BY utxo.id LIMIT ?`,
 		ret = append(ret, *utxo)
 	}
 	return ret, rows.Err()
+}
+
+func spentUtxosMissingAddressAfterSlotSQL(dialect string) string {
+	id := "utxo.id"
+	if dialect == "sqlite" {
+		// A rowid-ordered LIMIT makes SQLite scan retained history before it
+		// finds the few recent spends. Disqualify that access path so the
+		// deleted-slot range bounds the work, without naming a deferred index.
+		id = "+utxo.id"
+	}
+	return `-- name: GetSpentUtxosMissingAddressAfterSlot
+SELECT ` + qualifiedSQLiteUtxoColumns + ` FROM utxo
+WHERE utxo.deleted_slot > ?
+  AND ` + id + ` > ?
+  AND NOT EXISTS (SELECT 1 FROM utxo_address WHERE utxo_address.utxo_id = utxo.id)
+ORDER BY ` + id + ` LIMIT ?`
 }
 
 func (s *Store) SetUtxosNotDeletedAfterSlot(
