@@ -104,7 +104,8 @@ func TestLedgerProcessBlockExpandsIndexesAcrossValidatedTransactions(
 	nodeConfig := newTestShelleyGenesisCfg(t)
 	nodeConfig.ShelleyGenesis().NetworkId = "Testnet"
 	ls := &LedgerState{
-		db: db,
+		db:         db,
+		activeEras: eras.ErasWithDijkstra,
 		config: LedgerStateConfig{
 			CardanoNodeConfig:        nodeConfig,
 			Logger:                   slog.New(slog.NewTextHandler(io.Discard, nil)),
