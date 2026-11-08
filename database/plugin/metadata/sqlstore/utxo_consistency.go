@@ -113,16 +113,26 @@ func (s *Store) CheckUtxoConsistency(
 		count *int64
 		seen  *int64
 	}{
-		{"producer hash", statements.producerHash,
-			&report.ProducerHashMismatches, &report.ProducerHashMismatchSeen},
-		{"orphan producer", statements.orphanProducer,
-			&report.OrphanProducers, &report.OrphanProducerSeen},
-		{"orphan spender", statements.orphanSpender,
-			&report.OrphanSpenders, &report.OrphanSpenderSeen},
-		{"reference edge", statements.referenceEdge,
-			&report.OrphanReferenceEdges, &report.OrphanReferenceEdgeSeen},
-		{"collateral edge", statements.collateralEdge,
-			&report.OrphanCollateralEdges, &report.OrphanCollateralSeen},
+		{
+			"producer hash", statements.producerHash,
+			&report.ProducerHashMismatches, &report.ProducerHashMismatchSeen,
+		},
+		{
+			"orphan producer", statements.orphanProducer,
+			&report.OrphanProducers, &report.OrphanProducerSeen,
+		},
+		{
+			"orphan spender", statements.orphanSpender,
+			&report.OrphanSpenders, &report.OrphanSpenderSeen,
+		},
+		{
+			"reference edge", statements.referenceEdge,
+			&report.OrphanReferenceEdges, &report.OrphanReferenceEdgeSeen,
+		},
+		{
+			"collateral edge", statements.collateralEdge,
+			&report.OrphanCollateralEdges, &report.OrphanCollateralSeen,
+		},
 	} {
 		if err := db.QueryRowContext(ctx, check.query).Scan(
 			check.count, check.seen,

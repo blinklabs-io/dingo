@@ -2606,6 +2606,38 @@ ALTER TABLE utxo ADD COLUMN producer_tx_id INTEGER
 	return BatchResult{Cursor: batch.Cursor, Done: true}, nil
 }
 
+// sampleUtxoProducerDuplicates returns up to five (producer, output index)
+// pairs held by more than one utxo row.
+func sampleUtxoProducerDuplicates(
+	ctx context.Context,
+	tx *sql.Tx,
+) ([]string, error) {
+	rows, err := tx.QueryContext(ctx, `
+SELECT producer_tx_id, output_idx, COUNT(*) FROM utxo
+WHERE producer_tx_id IS NOT NULL
+GROUP BY producer_tx_id, output_idx
+HAVING COUNT(*) > 1
+LIMIT 5`)
+	if err != nil {
+		return nil, fmt.Errorf("check utxo producer duplicates: %w", err)
+	}
+	defer rows.Close()
+	var samples []string
+	for rows.Next() {
+		var producer, idx, count int64
+		if err := rows.Scan(&producer, &idx, &count); err != nil {
+			return nil, fmt.Errorf("scan utxo producer duplicate: %w", err)
+		}
+		samples = append(samples, fmt.Sprintf(
+			"producer_tx_id=%d output_idx=%d rows=%d", producer, idx, count,
+		))
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("check utxo producer duplicates: %w", err)
+	}
+	return samples, nil
+}
+
 // checkUtxoProducerContract runs before the contract phase builds the unique
 // producer index. Two outputs of one producer at one output index make that
 // index impossible, so they are reported by name here rather than as a bare
@@ -2613,31 +2645,8 @@ ALTER TABLE utxo ADD COLUMN producer_tx_id INTEGER
 // whose tx_id is not its producer's hash does not block the index but is no
 // longer found by hash, so it is counted and sampled in the log.
 func checkUtxoProducerContract(ctx context.Context, batch Batch) error {
-	rows, err := batch.Tx.QueryContext(ctx, `
-SELECT producer_tx_id, output_idx, COUNT(*) FROM utxo
-WHERE producer_tx_id IS NOT NULL
-GROUP BY producer_tx_id, output_idx
-HAVING COUNT(*) > 1
-LIMIT 5`)
+	samples, err := sampleUtxoProducerDuplicates(ctx, batch.Tx)
 	if err != nil {
-		return fmt.Errorf("check utxo producer duplicates: %w", err)
-	}
-	var samples []string
-	for rows.Next() {
-		var producer, idx, count int64
-		if err := rows.Scan(&producer, &idx, &count); err != nil {
-			_ = rows.Close()
-			return fmt.Errorf("scan utxo producer duplicate: %w", err)
-		}
-		samples = append(samples, fmt.Sprintf(
-			"producer_tx_id=%d output_idx=%d rows=%d", producer, idx, count,
-		))
-	}
-	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		return fmt.Errorf("check utxo producer duplicates: %w", err)
-	}
-	if err := rows.Close(); err != nil {
 		return err
 	}
 	if len(samples) > 0 {
