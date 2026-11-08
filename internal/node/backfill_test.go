@@ -1765,11 +1765,26 @@ func TestRun_ConsumedInputRecoveryBoundedAfterRestart(t *testing.T) {
 		name         string
 		window       int
 		legacySlot   uint64
+		legacy       bool
+		resumeBlock  int
+		bindIdentity bool
 		wantSkipping bool
 	}{
-		{name: "restart past window skips recovery", window: 1, wantSkipping: true},
-		{name: "restart inside window recovers", window: 100},
-		{name: "legacy progress recovers whole chain", window: 1, legacySlot: 2},
+		{
+			name:         "restart past window skips recovery",
+			window:       1,
+			bindIdentity: true,
+			wantSkipping: true,
+		},
+		{name: "restart inside window recovers", window: 100, bindIdentity: true},
+		{
+			name:         "window is measured from the resume point",
+			window:       1,
+			bindIdentity: true,
+			resumeBlock:  1,
+		},
+		{name: "legacy progress recovers whole chain", window: 1, legacySlot: 2, legacy: true},
+		{name: "zero-slot legacy checkpoint recovers whole chain", window: 1, legacy: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -1787,14 +1802,19 @@ func TestRun_ConsumedInputRecoveryBoundedAfterRestart(t *testing.T) {
 				}, nil))
 			}
 			now := time.Now()
-			require.NoError(t, db.Metadata().SetBackfillCheckpoint(
-				&models.BackfillCheckpoint{
-					Phase:     BackfillPhase,
-					LastSlot:  tc.legacySlot,
-					StartedAt: now,
-					UpdatedAt: now,
-				}, nil,
-			))
+			cp := &models.BackfillCheckpoint{
+				Phase:     BackfillPhase,
+				LastSlot:  tc.legacySlot,
+				StartedAt: now,
+				UpdatedAt: now,
+			}
+			if tc.bindIdentity {
+				cp.LastSlot = blocks[tc.resumeBlock].SlotNumber()
+				bindBackfillCheckpointIdentity(t, db, cp)
+			}
+			if tc.legacy || tc.bindIdentity {
+				require.NoError(t, db.Metadata().SetBackfillCheckpoint(cp, nil))
+			}
 
 			var progress []BackfillProgress
 			bf := NewBackfill(
@@ -3263,5 +3283,5 @@ func TestRun_PeriodicCheckpointFailureStopsBackfill(t *testing.T) {
 	}
 	err = bf.Run(context.Background())
 	require.ErrorIs(t, err, writeErr)
-	require.Positive(t, writes)
+	require.Equal(t, 1, writes)
 }

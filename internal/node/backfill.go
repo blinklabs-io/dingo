@@ -892,8 +892,10 @@ func (b *Backfill) Run(ctx context.Context) error {
 				len(cp.LastBlockHash),
 			)
 		}
-		if !hasIndex && cp.LastSlot > 0 && !cp.Completed {
+		if !hasIndex && !cp.Completed {
 			legacyProgress = true
+		}
+		if !hasIndex && cp.LastSlot > 0 && !cp.Completed {
 			cp.LastSlot = 0
 			cp.TotalSlots = 0
 			cp.LastIndexID = nil
