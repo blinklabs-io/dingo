@@ -200,10 +200,10 @@ func TestPeerHeaderForkPathSaturatedCacheSkipsAncestryWalk(t *testing.T) {
 func TestPeerHeaderForkPathCachesUnresolvedAncestryWalk(t *testing.T) {
 	t.Parallel()
 
-	s := newSaturatedForkPathScenario(t, 4)
+	s := newSaturatedForkPathScenario(t, 5)
 	limit := s.fixture.ls.peerHeaderHistoryLimit()
 	targetIndex := limit + 2
-	s.exposeThrough(targetIndex + 1)
+	s.exposeThrough(targetIndex + 2)
 
 	_, _, found, err := s.fixture.ls.peerHeaderForkPath(
 		s.fixture.connId,
@@ -237,6 +237,24 @@ func TestPeerHeaderForkPathCachesUnresolvedAncestryWalk(t *testing.T) {
 	require.ErrorIs(t, err, errHeaderVerificationDeferred)
 	require.False(t, found)
 	require.Zero(t, s.reads(), "a descendant must extend the deferral")
+
+	s.resetReads()
+	_, _, found, err = s.fixture.ls.peerHeaderForkPath(
+		s.fixture.connId,
+		s.headers[targetIndex+2],
+	)
+	require.ErrorIs(t, err, errHeaderVerificationDeferred)
+	require.False(t, found)
+	require.Zero(t, s.reads(), "a second descendant must extend the deferral")
+
+	s.resetReads()
+	_, _, found, err = s.fixture.ls.peerHeaderForkPath(
+		s.fixture.connId,
+		s.headers[targetIndex+2],
+	)
+	require.ErrorIs(t, err, errHeaderVerificationDeferred)
+	require.False(t, found)
+	require.Zero(t, s.reads(), "the repeated descendant must reuse the deferral")
 
 	s.adopt(t, s.headers[:2])
 	s.resetReads()

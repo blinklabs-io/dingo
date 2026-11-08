@@ -973,7 +973,8 @@ func (ls *LedgerState) peerHeaderForkPathContext(
 			//nolint:gosec // G115: the history limit is never negative
 			walkSpan := uint64(limit)
 			if cached.unresolved &&
-				bytes.Equal(lastHeader.Hash().Bytes(), header.Hash().Bytes()) &&
+				(bytes.Equal(lastHeader.Hash().Bytes(), header.Hash().Bytes()) ||
+					bytes.Equal(cached.overflowTail, header.Hash().Bytes())) &&
 				header.BlockNumber() > 0 &&
 				ls.chain.Tip().BlockNumber+walkSpan <
 					header.BlockNumber()-1 {
