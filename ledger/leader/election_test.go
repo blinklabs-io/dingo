@@ -1735,7 +1735,7 @@ func TestElectionConsensusRestoreRecomputesNextPraosSchedule(t *testing.T) {
 	stakeProvider.poolStakes[string(poolId[:])] = 1_000_000
 
 	epochProvider := newMockEpochProvider()
-	epochProvider.activeSlotCoeff = 1.0
+	epochProvider.activeSlotCoeff = 0.5
 	epochProvider.nextEpochReady.Store(11)
 	nextEpochNonce := makeDistinctNonce(electionTestNonce)
 	epochProvider.SetEpochNonceForEpoch(11, nextEpochNonce)
@@ -1764,13 +1764,33 @@ func TestElectionConsensusRestoreRecomputesNextPraosSchedule(t *testing.T) {
 	}, testutil.AsyncWait, 100*time.Millisecond)
 	require.NotNil(t, nextBefore)
 	restoredNonce := makeDistinctNonce(nextEpochNonce)
+	epochRange, err := epochProvider.EpochSlotRange(11)
+	require.NoError(t, err)
+	expected, err := NewCalculator(epochProvider.activeSlotCoeff).CalculateSchedule(
+		11,
+		epochRange,
+		poolId,
+		electionTestVRFSeed,
+		stakeProvider.poolStakes[string(poolId[:])],
+		stakeProvider.totalStake,
+		restoredNonce,
+		consensus.ConsensusModeTPraos,
+	)
+	require.NoError(t, err)
+	expectedLeaderSlots := expected.LeaderSlotsSnapshot()
+	require.NotEqual(t, nextBefore.LeaderSlotsSnapshot(), expectedLeaderSlots,
+		"fixture nonces must produce different leader schedules")
 	epochProvider.SetEpochNonceForEpoch(11, restoredNonce)
 	election.ConsensusStateRestored()
 
 	require.Eventually(t, func() bool {
 		schedule := election.ScheduleForEpoch(11)
 		return schedule != nil &&
-			bytes.Equal(restoredNonce, schedule.EpochNonce)
+			bytes.Equal(restoredNonce, schedule.EpochNonce) &&
+			assert.ObjectsAreEqual(
+				expectedLeaderSlots,
+				schedule.LeaderSlotsSnapshot(),
+			)
 	}, testutil.AsyncWait, 20*time.Millisecond,
 		"rollback should recompute a precomputed next-epoch schedule")
 }
