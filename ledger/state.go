@@ -799,7 +799,17 @@ func (ls *LedgerState) submitBlockApplyDBTxn(
 			}
 			return fmt.Errorf("check block-apply candidate tip: %w", err)
 		}
-		return ls.submitDBTxnOperation(ctx, opFunc, true)
+		return ls.submitDBTxnOperation(ctx, func(txn *database.Txn) error {
+			durableTip, err := ls.db.GetTip(txn)
+			if err != nil {
+				return fmt.Errorf("check durable block-apply tip: %w", err)
+			}
+			if durableTip.BlockNumber != expectedTip.BlockNumber ||
+				!pointMatches(durableTip.Point, expectedTip.Point) {
+				return errStaleChainIterator
+			}
+			return opFunc(txn)
+		}, true)
 	}()
 	// Partial-commit recovery can itself rewind the primary chain, so it must
 	// run after releasing transactionEventMutex rather than recursively trying
