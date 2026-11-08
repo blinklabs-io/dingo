@@ -11139,6 +11139,9 @@ consensus-context generation. Rollback or state replacement changes that
 generation, while the leader manager clears its in-memory Tachys schedules on
 every rollback synchronously after the replacement consensus snapshot is
 published, and refuses an in-flight result from the older schedule generation.
+A Praos rollback retains the current epoch's immutable schedule, discards every
+future schedule, and refuses in-flight results from the older generation before
+recomputing any next-epoch schedule whose nonce remains ready.
 A distribution read that observes a consensus-context change defers header
 verification instead of reporting the stake snapshot unavailable. Next-epoch
 nonce readiness drops only the ready epoch's schedule; the current epoch's
