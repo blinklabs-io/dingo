@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"sync/atomic"
@@ -225,6 +226,34 @@ func TestLeiosApplyPrefixContinuesWhileLaterClosureFetches(t *testing.T) {
 		ready,
 		"a fully cached chunk must keep the existing transaction grouping",
 	)
+}
+
+func TestLeiosApplyPrefixRejectsCanceledReadyPrefix(t *testing.T) {
+	t.Parallel()
+	for _, duringAvailability := range []bool{false, true} {
+		t.Run(fmt.Sprint(duringAvailability), func(t *testing.T) {
+			t.Parallel()
+			f := newLeiosPrefixFixture(t)
+			if duringAvailability {
+				provider := f.ls.config.EndorserBlockProvider
+				f.ls.config.EndorserBlockProvider = func(hash []byte, slot uint64) ([]cbor.RawMessage, bool) {
+					if slot == 100 {
+						f.cancel()
+					}
+					return provider(hash, slot)
+				}
+			} else {
+				f.cancel()
+			}
+			_, ready, err := f.ls.prepareBlockApplyPrefixSnapshot(
+				f.ctx, f.blocks, f.epoch, false, true,
+			)
+			require.ErrorIs(t, err, context.Canceled,
+				"a canceled apply must not return a successful ready prefix")
+			require.ErrorIs(t, err, errCertifiedEndorserBlockUnavailable)
+			require.Zero(t, ready)
+		})
+	}
 }
 
 func TestLeiosApplyPrefixPreservesFullGate(t *testing.T) {

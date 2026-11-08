@@ -1016,6 +1016,13 @@ func (ls *LedgerState) ensureReadyEndorserPrefix(
 	// at all when every connection was unusable.
 	ready := fetchMissingRequired(poll)
 	if ready < len(blocks) {
+		if err := ctx.Err(); err != nil {
+			return 0, fmt.Errorf(
+				"%w: prepare ready prefix: %w",
+				errCertifiedEndorserBlockUnavailable,
+				err,
+			)
+		}
 		return ready, nil
 	}
 	return len(blocks), ensureRequiredAvailable()
