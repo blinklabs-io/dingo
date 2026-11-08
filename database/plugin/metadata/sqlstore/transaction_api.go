@@ -175,14 +175,6 @@ func (s *Store) applyTransactionAPIDetails(
 	return nil
 }
 
-func utxoReferencePredicate(inputCount int, alias string) string {
-	predicates := make([]string, inputCount)
-	for i := range predicates {
-		predicates[i] = "(" + alias + "tx_id = ? AND " + alias + "output_idx = ?)"
-	}
-	return strings.Join(predicates, " OR ")
-}
-
 // Edge tables hold one row per (output, transaction) pair for the outputs a
 // transaction names as collateral or reference inputs. One output can be named
 // by many transactions, so the relation lives here and not on the utxo row.
@@ -191,30 +183,37 @@ const (
 	utxoReferenceEdgeTable  = "utxo_reference_edge"
 )
 
-func utxoReferenceInsertBatchSQL(
+// utxoReferenceInsertBatchSharedSQL is the PostgreSQL and MySQL edge insert
+// for a batch of inputCount references; utxoSQL.edgeInsertQuery selects the
+// form of the store's dialect.
+func utxoReferenceInsertBatchSharedSQL(
 	edgeTable string,
 	inputCount int,
 ) string {
+	predicates := make([]string, inputCount)
+	for i := range predicates {
+		predicates[i] = "(" + sharedRefEqAlias + ")"
+	}
 	return `-- name: InsertUtxoReferenceBatch :execrows
 INSERT INTO ` + edgeTable + ` (utxo_id, transaction_id)
 SELECT u.id, ? FROM utxo AS u
-WHERE (` + utxoReferencePredicate(inputCount, "u.") + `)
+WHERE (` + strings.Join(predicates, " OR ") + `)
   AND NOT EXISTS (
       SELECT 1 FROM ` + edgeTable + ` AS r
       WHERE r.utxo_id = u.id AND r.transaction_id = ?
   )`
 }
 
-func appendUtxoReferenceArgs(
+func (u *utxoSQL) appendReferenceArgs(
 	args []any,
 	inputs []lcommon.TransactionInput,
 	querySize int,
 ) []any {
 	for _, input := range inputs {
-		args = append(args, input.Id().Bytes(), input.Index())
+		args = u.bindRef(args, input.Id().Bytes(), input.Index())
 	}
 	for padding := len(inputs); padding < querySize; padding++ {
-		args = append(args, nil, uint32(0))
+		args = u.bindRef(args, nil, uint32(0))
 	}
 	return args
 }
@@ -230,8 +229,9 @@ func (s *Store) markTransactionUtxoReferences(
 		edgeTable != utxoReferenceEdgeTable {
 		return fmt.Errorf("unsupported UTxO edge table %q", edgeTable)
 	}
+	u := s.utxoSQL()
 	batchSize := min(
-		max(1, (s.dialect.ParameterLimit()-2)/2),
+		max(1, (s.dialect.ParameterLimit()-2)/u.refParams()),
 		maxCachedAddressInputQuerySize,
 	)
 	for start := 0; start < len(inputs); start += batchSize {
@@ -241,14 +241,12 @@ func (s *Store) markTransactionUtxoReferences(
 		for querySize < len(batch) {
 			querySize *= 2
 		}
-		args := make([]any, 0, querySize*2+2)
+		args := make([]any, 0, querySize*u.refParams()+2)
 		args = append(args, transactionID)
-		args = appendUtxoReferenceArgs(args, batch, querySize)
+		args = u.appendReferenceArgs(args, batch, querySize)
 		args = append(args, transactionID)
 		if _, err := s.execCached(
-			ctx, db,
-			utxoReferenceInsertBatchSQL(edgeTable, querySize),
-			args...,
+			ctx, db, u.edgeInsertQuery(edgeTable, querySize), args...,
 		); err != nil {
 			return err
 		}
@@ -270,10 +268,11 @@ const (
 
 var cachedAddressInputQuerySizes = [...]int{1, 2, 4, 8, 16, 32}
 
-const addressTransactionInputQueryParamsPerRef = 2
-
-// Separate lookups keep SQLite on tx_id_output_idx for every input.
-func addressTransactionInputQuery(size int) string {
+// addressTransactionInputSharedQuery is the PostgreSQL and MySQL input-address
+// lookup for size references; utxoSQL.addressInputsQuery selects the form of
+// the store's dialect. Separate lookups keep the planner on the unique index
+// for every input.
+func addressTransactionInputSharedQuery(size int) string {
 	var query strings.Builder
 	query.WriteString("-- name: GetAddressTransactionInputs :many")
 	for i := range size {
@@ -282,7 +281,7 @@ func addressTransactionInputQuery(size int) string {
 		}
 		query.WriteString(`
 SELECT payment_key, payment_script, credential_tag, staking_key
-FROM utxo WHERE tx_id = ? AND output_idx = ?`)
+FROM utxo WHERE ` + sharedRefEq)
 	}
 	return query.String()
 }
@@ -363,7 +362,7 @@ func (s *Store) indexTransactionAddresses(
 	inputBatchSize := 1
 	maxInputBatchSize := min(
 		maxCachedAddressInputQuerySize,
-		parameterLimit/addressTransactionInputQueryParamsPerRef,
+		parameterLimit/s.utxoSQL().refParams(),
 	)
 	for inputBatchSize*2 <= maxInputBatchSize {
 		inputBatchSize *= 2
@@ -375,16 +374,16 @@ func (s *Store) indexTransactionAddresses(
 		for querySize < len(batch) {
 			querySize *= 2
 		}
-		args := make(
-			[]any,
-			querySize*addressTransactionInputQueryParamsPerRef,
-		)
-		for i, ref := range batch {
-			args[i*addressTransactionInputQueryParamsPerRef] = ref.Hash
-			args[i*addressTransactionInputQueryParamsPerRef+1] = ref.Idx
+		u := s.utxoSQL()
+		args := make([]any, 0, querySize*u.refParams())
+		for _, ref := range batch {
+			args = u.bindRef(args, ref.Hash, ref.Idx)
+		}
+		for padding := len(batch); padding < querySize; padding++ {
+			args = u.bindRef(args, nil, nil)
 		}
 		inputRows, err := s.queryRowsCached(
-			ctx, db, addressTransactionInputQuery(querySize), args...,
+			ctx, db, u.addressInputsQuery(querySize), args...,
 		)
 		if err != nil {
 			return fmt.Errorf(

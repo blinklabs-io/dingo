@@ -1094,9 +1094,6 @@ INSERT INTO asset (
 ) VALUES (?, ?, ?, ?, ?)
 ON CONFLICT (name, policy_id, utxo_id) DO NOTHING;
 
--- name: GetUtxoIDByRef :one
-SELECT id FROM utxo WHERE tx_id = ? AND output_idx = ?;
-
 -- name: ImportDrep :one
 INSERT INTO drep (
     anchor_url, credential, anchor_hash, added_slot, credential_tag,

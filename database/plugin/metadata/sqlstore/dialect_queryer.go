@@ -65,17 +65,7 @@ func (q dialectQueryer) ExecContext(
 	query string,
 	args ...any,
 ) (sql.Result, error) {
-	query, args = q.expand(query, args)
 	return q.queryer.ExecContext(ctx, q.translate(query), args...)
-}
-
-// expand applies the SQLite reference-predicate rewrite (utxo_ref.go); the
-// other dialects run statements as written.
-func (q dialectQueryer) expand(query string, args []any) (string, []any) {
-	if q.dialect != "sqlite" {
-		return query, args
-	}
-	return expandUtxoRefs(query, args)
 }
 
 func (q dialectQueryer) QueryContext(
@@ -83,7 +73,6 @@ func (q dialectQueryer) QueryContext(
 	query string,
 	args ...any,
 ) (*sql.Rows, error) {
-	query, args = q.expand(query, args)
 	return q.queryer.QueryContext(ctx, q.translate(query), args...)
 }
 
@@ -92,7 +81,6 @@ func (q dialectQueryer) QueryRowContext(
 	query string,
 	args ...any,
 ) *sql.Row {
-	query, args = q.expand(query, args)
 	if q.dialect != "mysql" || !hasReturningID(query) {
 		return q.queryer.QueryRowContext(ctx, q.translate(query), args...)
 	}
@@ -145,7 +133,6 @@ func (q dialectQueryer) PrepareContext(
 	ctx context.Context,
 	query string,
 ) (*sql.Stmt, error) {
-	query, _ = q.expand(query, nil)
 	return q.queryer.PrepareContext(ctx, q.translate(query))
 }
 

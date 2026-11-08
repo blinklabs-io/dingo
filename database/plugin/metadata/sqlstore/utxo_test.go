@@ -129,8 +129,10 @@ func getUtxoGeneratedOneShot(
 	}
 	row, err := scanUtxoRow(db.QueryRowContext(
 		ctx,
-		store.dialect.Rebind(getLiveUtxoByRefQuery),
-		txID, sql.NullInt64{Int64: int64(index), Valid: true},
+		store.dialect.Rebind(store.utxoSQL().getLiveByRef),
+		store.utxoSQL().refArgs(
+			txID, sql.NullInt64{Int64: int64(index), Valid: true},
+		)...,
 	))
 	if err != nil {
 		return nil, err
@@ -149,7 +151,7 @@ func getUtxoGeneratedOneShot(
 // of (tx_id = ? AND output_idx = ?) equalities gated by "deleted_slot = 0",
 // the same shape described by queryUtxoStakeRefs.
 func legacyGetUtxosByRefsQuery(refs []models.UtxoId) (string, []any) {
-	predicate, args := utxoIDPredicate(refs)
+	predicate, args := sqliteOrOfRefs(refs)
 	return "deleted_slot = 0 AND (" + predicate + ")", args
 }
 
@@ -159,7 +161,7 @@ func legacyGetUtxosByRefsAsOfQuery(
 	refs []models.UtxoId,
 	sqlSlot int64,
 ) (string, []any) {
-	predicate, idArgs := utxoIDPredicate(refs)
+	predicate, idArgs := sqliteOrOfRefs(refs)
 	args := append([]any{sqlSlot, sqlSlot}, idArgs...)
 	return "added_slot <= ? AND (deleted_slot = 0 OR deleted_slot > ?) AND (" +
 		predicate + ")", args
@@ -194,21 +196,8 @@ func TestGetUtxosByRefsUsesTxIDIndex(t *testing.T) {
 			t.Logf("legacy GetUtxosByRefs plan (n=%d): %s", nTerms, legacyPlan)
 
 			txIDs, _ := distinctUtxoTxIDs(refs)
-			newArgs := make([]any, len(txIDs))
-			for i, id := range txIDs {
-				newArgs[i] = id
-			}
-			placeholders := ""
-			for range txIDs {
-				placeholders += "?,"
-			}
-			placeholders = placeholders[:len(placeholders)-1]
-			newPlan := queryPlan(
-				t,
-				store.writeDB,
-				"SELECT id FROM utxo WHERE tx_id IN ("+placeholders+")",
-				newArgs...,
-			)
+			newQuery, newArgs := sqliteUtxoSQL.deletionRows(txIDs, false)
+			newPlan := queryPlan(t, store.writeDB, newQuery, newArgs...)
 			t.Logf("tx_id-IN GetUtxosByRefs plan (n=%d): %s", nTerms, newPlan)
 
 			require.Contains(t, newPlan, "idx_utxo_producer_output")
@@ -235,20 +224,15 @@ func TestAddressTransactionInputQueryUsesCompositeIndex(t *testing.T) {
 	store := newMigratedSQLiteStore(t)
 	seedStakeRefLookupUtxos(t, store, 2_000, 256)
 
-	args := make(
-		[]any,
-		maxCachedAddressInputQuerySize*addressTransactionInputQueryParamsPerRef,
-	)
-	for i := range maxCachedAddressInputQuerySize {
-		ref := utxoIDAt(i * 7)
-		args[i*addressTransactionInputQueryParamsPerRef] = ref.Hash
-		args[i*addressTransactionInputQueryParamsPerRef+1] = ref.Idx
+	refs := make([]models.UtxoId, maxCachedAddressInputQuerySize)
+	for i := range refs {
+		refs[i] = utxoIDAt(i * 7)
 	}
 	plan := queryPlan(
 		t,
 		store.writeDB,
-		addressTransactionInputQuery(maxCachedAddressInputQuerySize),
-		args...,
+		sqliteUtxoSQL.addressInputsQuery(maxCachedAddressInputQuerySize),
+		sqliteOrRefArgs(refs)...,
 	)
 	require.Contains(t, plan, "idx_utxo_producer_output")
 	require.NotContains(t, plan, "SCAN utxo")
@@ -471,7 +455,7 @@ func legacyMarkUtxosDeletedAtSlotQuery(
 	ids []models.UtxoId,
 	slot int64,
 ) (string, []any) {
-	predicate, idArgs := utxoIDPredicate(ids)
+	predicate, idArgs := sqliteOrOfRefs(ids)
 	args := append([]any{slot}, idArgs...)
 	return "UPDATE utxo SET deleted_slot = ? WHERE deleted_slot = 0 AND (" +
 		predicate + ")", args
@@ -508,7 +492,7 @@ func TestMarkUtxosDeletedAtSlotUsesTxIDIndex(t *testing.T) {
 			t.Logf("legacy MarkUtxosDeletedAtSlot plan (n=%d): %s", nTerms, legacyPlan)
 
 			txIDs, _ := distinctUtxoTxIDs(ids)
-			query, args := utxoDeletionRowsByTxIDQuery(txIDs, false)
+			query, args := sqliteUtxoSQL.deletionRows(txIDs, false)
 			newPlan := queryPlan(t, store.writeDB, query, args...)
 			t.Logf("tx_id-IN mark lookup plan (n=%d): %s", nTerms, newPlan)
 
@@ -533,9 +517,11 @@ func TestUtxoDeletionRowsByTxIDQueryLocksNonSQLiteRows(t *testing.T) {
 	t.Parallel()
 
 	txIDs := [][]byte{[]byte("tx-a"), []byte("tx-b")}
-	query, _ := utxoDeletionRowsByTxIDQuery(txIDs, true)
+	query, _ := sharedUtxoSQL.deletionRows(txIDs, true)
 	require.Contains(t, query, "ORDER BY id FOR UPDATE")
-	query, _ = utxoDeletionRowsByTxIDQuery(txIDs, false)
+	query, _ = sharedUtxoSQL.deletionRows(txIDs, false)
+	require.NotContains(t, query, "FOR UPDATE")
+	query, _ = sqliteUtxoSQL.deletionRows(txIDs, false)
 	require.NotContains(t, query, "FOR UPDATE")
 }
 
@@ -785,7 +771,6 @@ func analyzeStore(tb testing.TB, store *Store) {
 // queryPlan returns the flattened EXPLAIN QUERY PLAN output for query.
 func queryPlan(tb testing.TB, db *sql.DB, query string, args ...any) string {
 	tb.Helper()
-	query, args = expandUtxoRefs(query, args)
 	rows, err := db.Query("EXPLAIN QUERY PLAN "+query, args...)
 	require.NoError(tb, err)
 	defer func() { require.NoError(tb, rows.Close()) }()
@@ -1322,7 +1307,7 @@ func legacyUtxoStakeRefsQuery(
 	ids []models.UtxoId,
 	liveOnly bool,
 ) (string, []any) {
-	predicate, args := utxoIDPredicate(ids)
+	predicate, args := sqliteOrOfRefs(ids)
 	query := "SELECT DISTINCT credential_tag, staking_key FROM utxo WHERE (" +
 		predicate + ")"
 	if liveOnly {
@@ -1440,11 +1425,7 @@ func TestQueryUtxoStakeRefsUsesTxIDIndex(t *testing.T) {
 			t.Logf("legacy OR-predicate plan (n=%d): %s", nTerms, legacyPlan)
 
 			txIDs, _ := distinctUtxoTxIDs(ids)
-			newArgs := make([]any, len(txIDs))
-			for i, id := range txIDs {
-				newArgs[i] = id
-			}
-			newQuery := utxoStakeRefsByTxIDQuery(len(txIDs))
+			newQuery, newArgs := sqliteUtxoSQL.stakeRefsByTxIDs(txIDs)
 			newPlan := queryPlan(t, store.writeDB, newQuery, newArgs...)
 			t.Logf("tx_id-IN plan (n=%d):         %s", nTerms, newPlan)
 
@@ -1517,7 +1498,7 @@ func TestQueryUtxoStakeRefsReturnsSameRows(t *testing.T) {
 			)
 			require.NoError(t, err)
 
-			got, err := queryUtxoStakeRefs(ctx, store.writeDB, ids, liveOnly)
+			got, err := queryUtxoStakeRefs(ctx, store.writeDB, store.utxoSQL(), ids, liveOnly)
 			require.NoError(t, err)
 
 			require.NotEmpty(t, legacyRows, "fixture must exercise real rows")
@@ -1565,6 +1546,7 @@ func BenchmarkQueryUtxoStakeRefs(b *testing.B) {
 						if _, err := queryUtxoStakeRefs(
 							ctx,
 							store.writeDB,
+							store.utxoSQL(),
 							ids,
 							true,
 						); err != nil {
@@ -1956,7 +1938,7 @@ func TestImportUtxosReusesCachedStatementAcrossTransactions(t *testing.T) {
 	require.NotNil(t, gotFirst)
 
 	store.stmtMu.Lock()
-	cachedBefore := store.stmts[insertUtxoQueryIgnoreConflict]
+	cachedBefore := store.stmts[sqliteUtxoSQL.insertIgnore]
 	store.stmtMu.Unlock()
 	require.NotNil(
 		t,
@@ -1972,7 +1954,7 @@ func TestImportUtxosReusesCachedStatementAcrossTransactions(t *testing.T) {
 	require.NotEqual(t, gotFirst.ID, gotSecond.ID)
 
 	store.stmtMu.Lock()
-	cachedAfter := store.stmts[insertUtxoQueryIgnoreConflict]
+	cachedAfter := store.stmts[sqliteUtxoSQL.insertIgnore]
 	store.stmtMu.Unlock()
 	require.Same(
 		t,
@@ -2450,15 +2432,15 @@ func TestUtxoRefsExactQueryUsesCompositeIndex(t *testing.T) {
 	store := newMigratedSQLiteStore(t)
 	seedStakeRefLookupUtxos(t, store, 2_000, 256)
 
-	args := make([]any, 0, utxoRefsMaxPerQuery*2)
-	for i := range utxoRefsMaxPerQuery {
-		ref := utxoIDAt(i * 7)
-		args = append(args, ref.Hash, ref.Idx)
+	refs := make([]models.UtxoId, utxoRefsMaxPerQuery)
+	for i := range refs {
+		refs[i] = utxoIDAt(i * 7)
 	}
+	predicate, args := sqliteUtxoSQL.exactRefs(refs)
 	plan := queryPlan(
 		t,
 		store.writeDB,
-		"SELECT id FROM utxo WHERE "+utxoRefsExactQuery(utxoRefsMaxPerQuery),
+		"SELECT id FROM utxo WHERE "+predicate,
 		args...,
 	)
 	require.Contains(t, plan, "idx_utxo_producer_output")

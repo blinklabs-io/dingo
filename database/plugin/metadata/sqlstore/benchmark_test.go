@@ -46,7 +46,7 @@ func legacyInsertUtxo(
 		return 0, err
 	}
 	var id int64
-	err = db.QueryRowContext(ctx, insertUtxoQueryIgnoreConflict,
+	err = db.QueryRowContext(ctx, sqliteUtxoSQL.insertIgnore,
 		params.TransactionID,
 		params.CollateralReturnForTxID,
 		params.TxID,
@@ -123,7 +123,7 @@ func legacyImportUtxoStatement(
 	}
 	var id int64
 	err = db.QueryRowContext(
-		ctx, insertUtxoQueryIgnoreConflict, params.args()...,
+		ctx, sqliteUtxoSQL.insertIgnore, params.args()...,
 	).Scan(&id)
 	return id, err
 }
@@ -139,7 +139,7 @@ func cachedImportUtxoStatement(
 		return 0, err
 	}
 	var id int64
-	err = store.queryRowCached(ctx, db, insertUtxoQueryIgnoreConflict,
+	err = store.queryRowCached(ctx, db, sqliteUtxoSQL.insertIgnore,
 		params.TransactionID,
 		params.CollateralReturnForTxID,
 		params.TxID,

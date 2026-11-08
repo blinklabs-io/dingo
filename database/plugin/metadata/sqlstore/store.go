@@ -259,6 +259,11 @@ type Store struct {
 	stmts       map[string]*sql.Stmt
 	stmtBorrows map[*sql.Stmt]int
 	stmtRetired map[*sql.Stmt]struct{}
+	// stmtHits counts, per query text, the borrows of a cached statement.
+	// It exists for test and benchmark observability: it shows that a
+	// statement was served from the cache rather than merely absent from the
+	// driver's record of uncached calls.
+	stmtHits map[string]uint64
 
 	// sumCredentialUtxoStakeCalls counts invocations of
 	// sumCredentialUtxoStake, the per-credential full live-UTxO aggregate

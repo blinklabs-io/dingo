@@ -88,8 +88,6 @@ func connQueryPlan(
 	args ...any,
 ) string {
 	tb.Helper()
-	// Production runs the expanded form (utxo_ref.go).
-	query, args = expandUtxoRefs(query, args)
 	rows, err := conn.QueryContext(
 		context.Background(), "EXPLAIN QUERY PLAN "+query, args...,
 	)
@@ -164,7 +162,15 @@ func TestConsumeUtxosBatchQueryMatchesLegacy(t *testing.T) {
 			{skewedUtxoTxID(19), 3}, {skewedUtxoTxID(999_998), 0},
 		},
 	}
-	run := func(query string, returnStake bool, in []input) (
+	legacyBind := func(args []any, hash, idx any) []any {
+		return append(args, hash, idx)
+	}
+	run := func(
+		query string,
+		returnStake bool,
+		bind func([]any, any, any) []any,
+		in []input,
+	) (
 		[]consumedRow, []string,
 	) {
 		t.Helper()
@@ -173,7 +179,7 @@ func TestConsumeUtxosBatchQueryMatchesLegacy(t *testing.T) {
 		defer func() { require.NoError(t, tx.Rollback()) }()
 		args := []any{int64(77), int64(5_000_000)}
 		for _, in := range in {
-			args = append(args, in.txID, in.idx)
+			args = bind(args, in.txID, in.idx)
 		}
 		rows, err := tx.QueryContext(ctx, query, args...)
 		require.NoError(t, err)
@@ -231,11 +237,11 @@ func TestConsumeUtxosBatchQueryMatchesLegacy(t *testing.T) {
 				func(t *testing.T) {
 					wantRows, wantState := run(
 						legacyConsumeUtxosBatchQuery(len(in), returnStake),
-						returnStake, in,
+						returnStake, legacyBind, in,
 					)
 					gotRows, gotState := run(
 						consumeUtxosBatchQuery(len(in), returnStake),
-						returnStake, in,
+						returnStake, sqliteUtxoSQL.bindRef, in,
 					)
 					require.Equal(t, wantRows, gotRows)
 					require.Equal(t, wantState, gotState)
@@ -247,7 +253,8 @@ func TestConsumeUtxosBatchQueryMatchesLegacy(t *testing.T) {
 	// Guard against a vacuous comparison: of the eight mixed inputs only the
 	// four live ones are spent.
 	rows, _ := run(
-		consumeUtxosBatchQuery(len(cases["mixed"]), true), true, cases["mixed"],
+		consumeUtxosBatchQuery(len(cases["mixed"]), true), true,
+		sqliteUtxoSQL.bindRef, cases["mixed"],
 	)
 	require.Len(t, rows, 4)
 }

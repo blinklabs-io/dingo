@@ -3499,22 +3499,6 @@ func (q *Queries) GetTransactionsByBlockHash(ctx context.Context, blockHash []by
 	return items, nil
 }
 
-const getUtxoIDByRef = `-- name: GetUtxoIDByRef :one
-SELECT id FROM utxo WHERE tx_id = ? AND output_idx = ?
-`
-
-type GetUtxoIDByRefParams struct {
-	TxID      []byte
-	OutputIdx sql.NullInt64
-}
-
-func (q *Queries) GetUtxoIDByRef(ctx context.Context, arg GetUtxoIDByRefParams) (int64, error) {
-	row := q.db.QueryRowContext(ctx, getUtxoIDByRef, arg.TxID, arg.OutputIdx)
-	var id int64
-	err := row.Scan(&id)
-	return id, err
-}
-
 const getUtxoRefsBySlot = `-- name: GetUtxoRefsBySlot :many
 SELECT tx_id, output_idx
 FROM utxo

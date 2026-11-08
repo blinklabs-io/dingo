@@ -189,7 +189,7 @@ func (s *Store) transactionInputAssociations(
 	result := make(map[string][]models.Utxo)
 	for start := 0; start < len(ids); start += s.dialect.ParameterLimit() {
 		end := min(start+s.dialect.ParameterLimit(), len(ids))
-		query := `SELECT ` + sqliteUtxoColumns + `, input.transaction_id
+		query := `SELECT ` + utxoRowColumns + `, input.transaction_id
 FROM utxo AS utxo
 JOIN ` + table + ` AS input ON input.utxo_id = utxo.id
 WHERE input.transaction_id IN (` + bindPlaceholders(end-start) + `) ORDER BY utxo.id`
@@ -462,7 +462,7 @@ func (s *Store) transactionUtxosBatch(
 	}
 	for start := 0; start < len(args); start += s.dialect.ParameterLimit() {
 		end := min(start+s.dialect.ParameterLimit(), len(args))
-		query := "SELECT " + sqliteUtxoColumns + " FROM utxo WHERE " + column + " IN (" + bindPlaceholders(
+		query := "SELECT " + utxoRowColumns + " FROM utxo WHERE " + column + " IN (" + bindPlaceholders(
 			end-start,
 		) + ") ORDER BY id"
 		rows, err := db.QueryContext(

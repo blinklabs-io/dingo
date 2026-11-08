@@ -514,14 +514,14 @@ func TestRetiringCacheKeepsBorrowedStatementOpen(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			store := newFilePlannerStatsStore(t, nil)
-			stmt, release, ok := store.borrowCachedStmt(getLiveUtxoByRefQuery)
+			stmt, release, ok := store.borrowCachedStmt(store.utxoSQL().getLiveByRef)
 			require.True(t, ok, "hot statement must be cached at start")
 
 			retire(store)
 			zero := make([]byte, 32)
 			rows, err := stmt.QueryContext(
 				context.Background(),
-				store.cachedArgs(getLiveUtxoByRefQuery, []any{zero, 0})...,
+				store.utxoSQL().refArgs(zero, 0)...,
 			)
 			require.NoError(t, err, "a borrowed statement must stay open")
 			require.NoError(t, rows.Close())
@@ -529,7 +529,7 @@ func TestRetiringCacheKeepsBorrowedStatementOpen(t *testing.T) {
 			release()
 			_, err = stmt.QueryContext(
 				context.Background(),
-				store.cachedArgs(getLiveUtxoByRefQuery, []any{zero, 0})...,
+				store.utxoSQL().refArgs(zero, 0)...,
 			)
 			require.True(
 				t,

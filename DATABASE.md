@@ -244,13 +244,18 @@ producing hash, the `tx_id` ordering of keyset pagination and the documented
 generated column rather than an expression index because SQLite does not
 search an expression index with a joined or subquery key.
 
-The shared statements still say `tx_id = ? AND output_idx = ?` and
-`tx_id IN (...)`. On SQLite the dialect queryer and the hot-statement cache
-rewrite them (`utxo_ref.go`) to `id = COALESCE(<produced lookup through the
-transaction hash>, <imported lookup>)` and to the equivalent id list, repeating
-the arguments, so every lookup is a primary-key fetch whatever other
-predicates the statement has. The `ON CONFLICT (tx_id, output_idx)` of the
-shared inserts becomes both conflict targets. No unique index spans a
+Statements that name an output by hash and index exist in two written-out
+forms (`utxo_sql.go`). PostgreSQL and MySQL say `tx_id = ? AND output_idx = ?`
+and `tx_id IN (...)` and bind each reference once. The SQLite statements say
+`id = COALESCE(<produced lookup through the transaction hash>, <imported
+lookup>)` and select ids for a hash list through the same two lookups, binding
+each reference or list twice, so every lookup is a primary-key fetch whatever
+other predicates the statement has; their inserts carry both conflict targets.
+No SQL is rewritten at run time. A list-shaped SQLite statement exists only in
+a fixed set of sizes (powers of two, the apply path's batch sizes, and the
+200 and 400 caps), composed once at start-up, and callers pad the arguments
+with NULL, which matches no row. Every SQLite statement of the apply path is
+prepared at start and served from the statement cache. No unique index spans a
 produced output and an imported row of the same output, so inserts, imports
 and the overlay look for the other identity first and treat a hit as the
 conflict; the producer then hydrates the imported row. PostgreSQL and MySQL

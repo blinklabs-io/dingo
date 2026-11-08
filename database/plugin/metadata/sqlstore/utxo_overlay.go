@@ -384,7 +384,7 @@ func (o *utxoOverlay) stageTransaction(
 // with a foreign key to it.
 func (o *utxoOverlay) needsTransactions(query string) bool {
 	// A reference predicate resolves the producer through "transaction".
-	if hasUtxoRef(query) || containsIdentifier(query, "transaction") {
+	if containsIdentifier(query, "transaction") {
 		return true
 	}
 	for _, table := range o.txChildren {

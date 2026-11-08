@@ -192,7 +192,7 @@ func newlyPreparedHotStatements() map[string]string {
 		"WithdrawalRewardDeltaExists":        withdrawalRewardDeltaExistsSQL,
 		"UpdateAccountReward":                updateAccountRewardSQL,
 		"InsertWithdrawalRewardDelta":        insertWithdrawalRewardDeltaSQL,
-		"GetSpendScriptHashByOutput":         spendScriptHashQuery,
+		"GetSpendScriptHashByOutput":         sqliteUtxoSQL.spendScriptHash,
 		"DeleteRedeemerScriptsByTransaction": deleteRedeemerScriptsSQL,
 		"UpsertUtxoReferenceScript":          upsertUtxoReferenceScriptQuery,
 		"GovernanceVoteCastExists":           governanceVoteCastExistsQuery,

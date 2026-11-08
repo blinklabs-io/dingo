@@ -98,7 +98,6 @@ func explainQueryPlan(
 	args ...any,
 ) string {
 	t.Helper()
-	query, args = expandUtxoRefs(query, args)
 	rows, err := store.readDB.QueryContext(
 		context.Background(), "EXPLAIN QUERY PLAN "+query, args...,
 	)

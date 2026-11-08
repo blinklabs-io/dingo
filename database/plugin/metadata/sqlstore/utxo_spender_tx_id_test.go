@@ -127,7 +127,7 @@ func TestSpenderQueriesSearchTheSpenderIndex(t *testing.T) {
 	for name, query := range map[string]string{
 		"unspend": `UPDATE utxo SET spent_by_tx_id = NULL, deleted_slot = 0
 WHERE spent_by_tx_id IN (?, ?, ?)`,
-		"spender_inputs": `SELECT ` + sqliteUtxoColumns +
+		"spender_inputs": `SELECT ` + utxoRowColumns +
 			` FROM utxo WHERE utxo.spent_by_tx_id IN (?, ?, ?)`,
 	} {
 		plan := explainQueryPlan(t, store, query, int64(1), int64(2), int64(3))
@@ -139,8 +139,8 @@ WHERE spent_by_tx_id IN (?, ?, ?)`,
 	}
 
 	plan := explainQueryPlan(
-		t, store, getUtxoIncludingSpentByRefQuery,
-		make([]byte, 32), int64(0),
+		t, store, sqliteUtxoSQL.getIncludingSpent,
+		sqliteUtxoSQL.refArgs(make([]byte, 32), int64(0))...,
 	)
 	require.Contains(t, plan, "idx_utxo_producer_output", plan)
 	require.NotContains(t, plan, "SCAN", plan)
@@ -181,7 +181,7 @@ func TestInputEdgeQueriesSearchTheEdgeIndex(t *testing.T) {
 	store := newMigratedSQLiteStore(t)
 	for _, table := range []string{utxoCollateralEdgeTable, utxoReferenceEdgeTable} {
 		for name, query := range map[string]string{
-			"read": `SELECT ` + sqliteUtxoColumns + `, input.transaction_id
+			"read": `SELECT ` + utxoRowColumns + `, input.transaction_id
 FROM utxo AS utxo JOIN ` + table + ` AS input ON input.utxo_id = utxo.id
 WHERE input.transaction_id IN (?, ?) ORDER BY utxo.id`,
 			"rollback": `DELETE FROM ` + table + ` WHERE transaction_id IN (?, ?)`,

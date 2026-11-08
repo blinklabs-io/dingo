@@ -206,15 +206,27 @@ func TestOutputLookupsDoNotScan(t *testing.T) {
 		query string
 		args  []any
 	}{
-		"input_resolution": {getLiveUtxoByRefQuery, []any{hash, int64(0)}},
-		"including_spent":  {getUtxoIncludingSpentByRefQuery, []any{hash, int64(0)}},
+		"input_resolution": {
+			sqliteUtxoSQL.getLiveByRef, []any{hash, int64(0), hash, int64(0)},
+		},
+		"including_spent": {
+			sqliteUtxoSQL.getIncludingSpent,
+			[]any{hash, int64(0), hash, int64(0)},
+		},
 		"spend_one": {consumeUtxoSQLiteReturningSQL,
-			[]any{int64(5), int64(1), hash, int64(0)}},
-		"spend_batch": {consumeUtxosBatchQuery(3, true),
-			[]any{int64(5), int64(1), hash, int64(0), hash, int64(1), hash, int64(2)}},
-		"spend_state": {getUtxoSpendStateQuery, []any{hash, int64(0)}},
+			[]any{int64(5), int64(1), hash, int64(0), hash, int64(0)}},
+		"spend_batch": {consumeUtxosBatchQuery(3, true), []any{
+			int64(5), int64(1),
+			hash, int64(0), hash, int64(0),
+			hash, int64(1), hash, int64(1),
+			hash, int64(2), hash, int64(2),
+		}},
+		"spend_state": {sqliteUtxoSQL.getSpendState, []any{hash, int64(0), hash, int64(0)}},
+		"spend_state_hash": {
+			sqliteUtxoSQL.getSpendStateHash, []any{hash, int64(0), hash, int64(0)},
+		},
 		"by_tx_hash": {
-			`SELECT id FROM utxo WHERE tx_id IN (?, ?)`, []any{hash, hash},
+			sqliteRefs.deletionRows[2], []any{hash, hash, hash, hash},
 		},
 	} {
 		plan := explainQueryPlan(t, store, tc.query, tc.args...)
@@ -236,10 +248,9 @@ func TestCrossIdentityProbeUsesTheImportedIndex(t *testing.T) {
 	seedRollbackUtxos(t, store, 20_000, 64, 2_656_808, 40)
 	analyzeStore(t, store)
 	hash := make([]byte, 32)
-	plan := explainQueryPlan(t, store, utxoRefAsWritten+
-		"SELECT tx_id, output_idx FROM utxo INDEXED BY idx_utxo_imported_ref "+
-		"WHERE transaction_id IS NULL AND collateral_return_for_tx_id IS NULL "+
-		"AND tx_id IN (?, ?)", hash, hash)
+	plan := explainQueryPlan(
+		t, store, importedProbeQuery(2), hash, hash,
+	)
 	require.Contains(t, plan, "idx_utxo_imported_ref", plan)
 	require.NotContains(t, plan, "SCAN utxo", plan)
 }
