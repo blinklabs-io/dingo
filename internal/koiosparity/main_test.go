@@ -12,26 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package conformance
+package koiosparity
 
 import (
+	"os"
 	"testing"
-
-	"github.com/blinklabs-io/gouroboros/ledger/common"
+	"time"
 )
 
-func TestCommitteeCredentialKeyMatchesProviderKey(t *testing.T) {
-	t.Parallel()
-	credential := common.Credential{
-		CredType:   common.CredentialTypeScriptHash,
-		Credential: common.CredentialHash{1, 2, 3},
-	}
-	want := string(
-		[]byte{uint8(credential.CredType)},
-	) + string(
-		credential.Credential[:],
-	)
-	if got := committeeCredentialKey(credential); got != want {
-		t.Fatalf("committee credential key = %q, want %q", got, want)
-	}
+// TestMain shortens the 5xx retry backoff for every test in the package. It is
+// set before any test starts, so no test races a write; tests assert on how
+// many attempts a failing server sees, never on the delay between them.
+func TestMain(m *testing.M) {
+	koiosRetryBackoff5xx = time.Millisecond
+	os.Exit(m.Run())
 }

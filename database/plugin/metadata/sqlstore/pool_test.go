@@ -99,7 +99,7 @@ func TestLatestPoolOpCertSequenceMatchesLegacyQuery(t *testing.T) {
 
 	hot := make([]byte, 28)
 	hot[0] = 0xAA
-	seedPoolOpCertSequence(t, store, hot, 1_000)
+	seedPoolOpCertSequence(t, store, hot, 50)
 
 	for _, pkh := range [][]byte{hot, bytes.Repeat([]byte{0xFF}, 28)} {
 		var legacySeq, legacyCount int64

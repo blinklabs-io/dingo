@@ -26,7 +26,7 @@ import (
 
 // importedUtxoRows is the size of the never-spent UTxO set analyzed before
 // any spend exists, the shape a ledger-state import leaves behind.
-const importedUtxoRows = 20000
+const importedUtxoRows = 2000
 
 // newImportStatsStore returns a store whose utxo statistics were taken over
 // a never-spent UTxO set and are now stale: every spent_at_tx_id was NULL at

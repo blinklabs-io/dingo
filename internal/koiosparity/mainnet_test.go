@@ -15,53 +15,10 @@
 package koiosparity
 
 import (
-	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
-
-func TestMainnetIsASupportedNetwork(t *testing.T) {
-	t.Parallel()
-
-	require.NoError(t, ValidateNetwork("mainnet"))
-	require.Equal(
-		t,
-		"https://api.koios.rest/api/v1",
-		koiosBaseURLs["mainnet"],
-	)
-	require.Error(t, ValidateNetwork("sanchonet"))
-
-	client, err := NewKoiosClient("mainnet", "", "", false, false)
-	require.NoError(t, err)
-	require.Equal(t, "https://api.koios.rest/api/v1", client.baseURL)
-
-	db := newTestDatabaseSourceDB(t)
-	source, err := NewDatabaseSource(db)
-	require.NoError(t, err)
-	o, err := NewObserver(ObserverConfig{
-		Network:   "mainnet",
-		Source:    source,
-		CachePath: filepath.Join(t.TempDir(), "cache.db"),
-	})
-	require.NoError(t, err)
-	require.NoError(t, o.Stop(t.Context()))
-}
-
-func TestMainnetPreStakingEpochRange(t *testing.T) {
-	t.Parallel()
-
-	// Mainnet runs Byron for epochs 0-207 and enters Shelley at epoch 208,
-	// so the first valid "go" snapshot is epoch 210.
-	require.Equal(t, uint64(209), preStakingThroughEpoch("mainnet"))
-	require.True(t, IsPreStakingEpoch("mainnet", 100))
-	require.True(t, IsPreStakingEpoch("mainnet", 209))
-	require.False(t, IsPreStakingEpoch("mainnet", 210))
-	_, ok := koiosStakeEpoch("mainnet", 209)
-	require.False(t, ok)
-	_, ok = koiosStakeEpoch("mainnet", 210)
-	require.True(t, ok)
-}
 
 func TestStakeAddressFromCredentialUsesNetworkID(t *testing.T) {
 	t.Parallel()

@@ -791,6 +791,15 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 	ctx context.Context,
 	blocks []ledger.Block,
 ) error {
+	_, err := ls.ensureReadyEndorserPrefix(ctx, blocks, false)
+	return err
+}
+
+func (ls *LedgerState) ensureReadyEndorserPrefix(
+	ctx context.Context,
+	blocks []ledger.Block,
+	allowReadyPrefix bool,
+) (int, error) {
 	// Index each block's announced endorser block by the block's own hash so a
 	// certifying ranking block can resolve the endorser block its parent
 	// announced without a store round-trip (the parent is normally in the same
@@ -812,7 +821,12 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 	// parent announcement from this batch before falling back to persisted data.
 	for _, block := range blocks {
 		if err := ls.validateDijkstraLeiosCertificate(ctx, block, annByHash); err != nil {
-			return fmt.Errorf("validate Dijkstra Leios certificate: %w", err)
+			return len(
+					blocks,
+				), fmt.Errorf(
+					"validate Dijkstra Leios certificate: %w",
+					err,
+				)
 		}
 	}
 	// Resolve CertRB parents that fall outside this batch from the block
@@ -841,13 +855,13 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 	}
 	required, err := requiredCertifiedEndorserBlocks(infos, annByHash)
 	if err != nil {
-		return err
+		return len(blocks), err
 	}
 	if ls.config.EndorserBlockProvider == nil {
 		if len(required) == 0 {
-			return nil
+			return len(blocks), nil
 		}
-		return fmt.Errorf(
+		return len(blocks), fmt.Errorf(
 			"%w: no endorser block provider configured",
 			errCertifiedEndorserBlockUnavailable,
 		)
@@ -894,9 +908,10 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 	// announcement window is configured, and returning "unavailable" without
 	// having tried to fetch it is what left the pipeline restarting on an
 	// endorser block it had not fetched from any peer.
-	fetchMissingRequired := func(poll time.Duration) {
+	prefixAllowed := false
+	fetchMissingRequired := func(poll time.Duration) int {
 		if ls.leiosBackfill == nil {
-			return
+			return len(blocks)
 		}
 		batchCtx, cancel := context.WithTimeout(ctx, leiosBackfillMaxWait)
 		defer cancel()
@@ -908,11 +923,24 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 			) {
 				continue
 			}
+			if prefixAllowed {
+				ready := leiosReadyApplyPrefix(
+					infos,
+					annByHash,
+					ls.config.EndorserBlockProvider,
+				)
+				// A half-full prefix bounds extra commits and certificate
+				// rechecks while the remaining closures fetch in the background.
+				if ready >= len(infos)-len(infos)/2 && ready < len(infos) {
+					return ready
+				}
+			}
 			if err := ls.leiosBackfill.fetchRequired(batchCtx, r, poll); err != nil {
 				fetchErrs[string(r.hash.Bytes())] = err
-				return
+				return len(blocks)
 			}
 		}
+		return len(blocks)
 	}
 
 	// A zero wait disables best-effort announcement waiting, but a certified
@@ -920,7 +948,7 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 	// would permanently omit transaction and certificate effects.
 	if ls.config.EndorserBlockWaitSlots == 0 {
 		fetchMissingRequired(leiosCertifiedFetchPoll)
-		return ensureRequiredAvailable()
+		return len(blocks), ensureRequiredAvailable()
 	}
 	slotLen := ls.shelleySlotLength()
 	if slotLen <= 0 {
@@ -928,7 +956,7 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 		// cannot be converted to wall-clock. Best-effort announcements may
 		// still be skipped, but a certified closure must not be.
 		fetchMissingRequired(leiosCertifiedFetchPoll)
-		return ensureRequiredAvailable()
+		return len(blocks), ensureRequiredAvailable()
 	}
 	//nolint:gosec // EndorserBlockWaitSlots is a small protocol window
 	timeout := time.Duration(ls.config.EndorserBlockWaitSlots) * slotLen
@@ -954,6 +982,7 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 		ls.config.EndorserBlockWaitSlots,
 		cached,
 	)
+	prefixAllowed = allowReadyPrefix && len(tipWait) == 0
 	// Historical backlog: start a by-point fetch for each certified closure.
 	// The fetches run concurrently in the background pool; the mandatory ones
 	// are completed by fetchMissingRequired below.
@@ -985,8 +1014,18 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 	// skipped as "connection busy" does within microseconds, so one attempt per
 	// restart made at most one endorser block of progress per restart, or none
 	// at all when every connection was unusable.
-	fetchMissingRequired(poll)
-	return ensureRequiredAvailable()
+	ready := fetchMissingRequired(poll)
+	if ready < len(blocks) {
+		if err := ctx.Err(); err != nil {
+			return 0, fmt.Errorf(
+				"%w: prepare ready prefix: %w",
+				errCertifiedEndorserBlockUnavailable,
+				err,
+			)
+		}
+		return ready, nil
+	}
+	return len(blocks), ensureRequiredAvailable()
 }
 
 // splitTipWaitByApplyDependency partitions the near-head references into the

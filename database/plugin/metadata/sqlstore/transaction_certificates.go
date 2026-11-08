@@ -429,6 +429,7 @@ RETURNING id`,
 			certificateID,
 			slot,
 			&amount,
+			protocolMajor,
 		)
 		return id, nil, err
 	case *lcommon.UpdateDrepCertificate:
@@ -1118,6 +1119,7 @@ func applyDrepDeregistrationCertificate(
 	certificateID uint,
 	slot uint64,
 	deposit *uint64,
+	protocolMajor uint64,
 ) (uint, error) {
 	tag, err := models.CredentialTagFromUint(
 		cert.DrepCredential.CredType,
@@ -1144,6 +1146,7 @@ func applyDrepDeregistrationCertificate(
 		tag,
 		cert.DrepCredential.Credential[:],
 		slot,
+		protocolMajor,
 	); err != nil {
 		return 0, fmt.Errorf("clear delegations for DRep deregistration: %w", err)
 	}

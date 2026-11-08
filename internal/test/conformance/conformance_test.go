@@ -79,6 +79,11 @@ func replayCorpus(sm *DingoStateManager) corpusRun {
 	if err != nil {
 		return corpusRun{err: err}
 	}
+	return replayCorpusRoot(sm, root)
+}
+
+// replayCorpusRoot is replayCorpus over an explicit corpus root.
+func replayCorpusRoot(sm *DingoStateManager, root string) corpusRun {
 	harness := conformance.NewHarness(sm, conformance.HarnessConfig{
 		TestdataRoot: root,
 	})
@@ -100,15 +105,14 @@ var (
 func sqliteCorpusResults(t *testing.T) []conformance.VectorResult {
 	t.Helper()
 	sqliteCorpusOnce.Do(func() {
-		sm, err := NewDingoStateManager()
+		root, err := corpusTestdataRoot()
 		if err != nil {
-			sqliteCorpusRun = corpusRun{
-				err: fmt.Errorf("new sqlite state manager: %w", err),
-			}
+			sqliteCorpusRun = corpusRun{err: err}
 			return
 		}
-		defer sm.Close()
-		sqliteCorpusRun = replayCorpus(sm)
+		sqliteCorpusRun = replayCorpusSharded(
+			root, corpusReplayWorkers(), NewDingoStateManager,
+		)
 	})
 	require.NoError(t, sqliteCorpusRun.err, "sqlite corpus replay")
 	return sqliteCorpusRun.results

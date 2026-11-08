@@ -121,10 +121,16 @@ func TestWALFileBytes(t *testing.T) {
 func TestNewMCPServerRefusesDatabaseReadsUnderWALPressure(t *testing.T) {
 	t.Parallel()
 
+	// The metadata store lives outside the database's data directory, so the
+	// migrated template is seeded there explicitly.
+	metadataDir := t.TempDir()
+	template, err := dbtest.MetadataTemplateBytes()
+	require.NoError(t, err)
+	require.NoError(t, dbtest.SeedMetadataTemplateBytes(metadataDir, template))
 	nodeDB, err := dbtest.NewDatabaseWithOptions(t, dbtest.Options{
 		Config: &database.Config{DataDir: t.TempDir()},
 		Metadata: dbtest.StorageProvider{
-			Config: map[string]any{"dataDir": t.TempDir()},
+			Config: map[string]any{"dataDir": metadataDir},
 		},
 	})
 	require.NoError(t, err)

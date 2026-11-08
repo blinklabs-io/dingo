@@ -588,6 +588,42 @@ func (b *Backfill) storedEpochPParams(
 	return pp, true, nil
 }
 
+func (b *Backfill) restoreImportedAccountsAtAnchor(
+	ctx context.Context,
+	anchor uint64,
+) (int, error) {
+	var protocolMajor uint
+	if b.currentEraId >= conway.EraIdConway {
+		params, ok := b.currentPParams.(lcommon.PoolRuleProtocolParameters)
+		if !ok {
+			return 0, errors.New(
+				"snapshot anchor protocol version is unavailable",
+			)
+		}
+		protocolMajor = params.ProtocolMajorVersion()
+	}
+	txn := b.db.Transaction(ctx, true)
+	defer txn.Rollback() //nolint:errcheck
+	restored, err := b.db.RestoreImportedAccountStates(ctx, anchor, txn)
+	if err != nil {
+		return 0, err
+	}
+	if protocolMajor >= lcommon.ProtocolVersionPlomin {
+		// Historical replay lacks the PV10 reverse-set rebuild. Restore both
+		// directions before a later deregistration consumes that index; the
+		// snapshot's forward state must already be authoritative.
+		if err := b.db.ReconcileImportedDRepDelegations(
+			ctx, anchor, txn,
+		); err != nil {
+			return 0, err
+		}
+	}
+	if err := txn.Commit(); err != nil {
+		return 0, err
+	}
+	return restored, nil
+}
+
 func (b *Backfill) processEpochBoundary(
 	epochId uint64, eraId uint,
 ) {
@@ -976,22 +1012,15 @@ func (b *Backfill) Run(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		txn := b.db.BlobTxn(false)
-		var point ocommon.Point
-		var index uint64
-		if err := txn.Do(func(txn *database.Txn) error {
-			var identityErr error
-			point, index, identityErr = database.CanonicalBlockIdentityAtSlotTxn(
-				ctx, txn, cp.LastSlot,
-			)
-			return identityErr
-		}); err != nil {
+		index := *cp.LastIndexID
+		point, err := b.canonicalCheckpointPoint(ctx, index)
+		if err != nil {
 			return fmt.Errorf(
-				"resolving backfill checkpoint identity at slot %d: %w",
-				cp.LastSlot, err,
+				"resolving backfill checkpoint identity at index %d: %w",
+				index, err,
 			)
 		}
-		if index != *cp.LastIndexID ||
+		if point.Slot != cp.LastSlot ||
 			!bytes.Equal(point.Hash, cp.LastBlockHash) {
 			return fmt.Errorf(
 				"backfill checkpoint identity at slot %d does not match canonical block",
@@ -1020,9 +1049,9 @@ func (b *Backfill) Run(ctx context.Context) error {
 	}
 
 	var (
-		startSlot    uint64
-		startIndex   = database.BlockInitialIndex
-		previousSlot *uint64
+		startSlot     uint64
+		startIndex    = database.BlockInitialIndex
+		previousBlock *ocommon.Point
 	)
 	now := time.Now()
 	// Mithril pre-seeds a zero-slot checkpoint before importing a fresh
@@ -1078,7 +1107,7 @@ func (b *Backfill) Run(ctx context.Context) error {
 		} else {
 			startSlot = resumePoint.Slot + 1
 			startIndex = resumeIndex + 1
-			previousSlot = &resumePoint.Slot
+			previousBlock = resumePoint
 			b.logger.Info(
 				"resuming metadata backfill",
 				"component", "backfill",
@@ -1108,7 +1137,7 @@ func (b *Backfill) Run(ctx context.Context) error {
 		iteratorEndSlot = &endSlot
 	}
 	it, err := b.db.CanonicalBlocksFromIndex(
-		ctx, startIndex, previousSlot, iteratorEndSlot,
+		ctx, startIndex, previousBlock, iteratorEndSlot,
 	)
 	if err != nil {
 		return fmt.Errorf("opening canonical block iterator: %w", err)
@@ -1406,7 +1435,7 @@ func (b *Backfill) Run(ctx context.Context) error {
 	// Replay has reached the anchor, where the snapshot is the ledger state.
 	// Restore before the rebuild, which attributes stake from account.pool.
 	if endSlotSet {
-		restored, err := b.db.RestoreImportedAccountStates(ctx, endSlot, nil)
+		restored, err := b.restoreImportedAccountsAtAnchor(ctx, endSlot)
 		if err != nil {
 			saveCommittedCheckpoint()
 			return fmt.Errorf(
@@ -1751,4 +1780,20 @@ func appendBackfillStatsAttrs(
 		"checkpoint_write_ms",
 		stats.CheckpointWrites.Milliseconds(),
 	)
+}
+
+// canonicalCheckpointPoint resolves the canonical block point stored at index.
+func (b *Backfill) canonicalCheckpointPoint(
+	ctx context.Context,
+	index uint64,
+) (ocommon.Point, error) {
+	var point ocommon.Point
+	err := b.db.BlobTxn(false).Do(func(txn *database.Txn) error {
+		var identityErr error
+		point, identityErr = database.CanonicalBlockIdentityAtIndexTxn(
+			ctx, txn, index,
+		)
+		return identityErr
+	})
+	return point, err
 }

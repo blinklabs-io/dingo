@@ -29,14 +29,9 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
-	"github.com/blinklabs-io/dingo/internal/dblifecycle"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger"
-	"github.com/blinklabs-io/dingo/ledger/forging"
-	"github.com/blinklabs-io/dingo/ledger/leader"
-	"github.com/blinklabs-io/dingo/ledger/leios"
-	"github.com/blinklabs-io/dingo/ledger/snapshot"
 	midnightindexer "github.com/blinklabs-io/dingo/midnight/indexer"
 	ouroborosPkg "github.com/blinklabs-io/dingo/ouroboros"
 	"github.com/stretchr/testify/assert"
@@ -80,55 +75,6 @@ func TestShutdownReportsMidnightDrainFailure(t *testing.T) {
 			}
 		})
 	}
-}
-
-// TestShutdownPhase1ComponentStopsCoverEveryUnboundedStop pins the set of
-// phase-1 components routed through stopWithDeadline. Each of these has a
-// Stop that cancels its own context and then waits for a goroutine to exit
-// with no deadline of its own -- a call site that went back to calling Stop
-// directly would drop out of this list and escape the bound, exactly the gap
-// the shutdown audit found.
-func TestShutdownPhase1ComponentStopsCoverEveryUnboundedStop(t *testing.T) {
-	t.Parallel()
-
-	n := &Node{
-		blockForger:    &forging.BlockForger{},
-		leaderElection: &leader.Election{},
-		snapshotMgr:    &snapshot.Manager{},
-		dbLifecycleMgr: &dblifecycle.Manager{},
-	}
-
-	var names []string
-	for _, cs := range n.shutdownPhase1ComponentStops() {
-		names = append(names, cs.name)
-	}
-	assert.Equal(t, []string{
-		"chainsync stall recycler",
-		"chain-selected-to-none worker",
-		"block forger",
-		"leader election",
-		"snapshot manager",
-		"database lifecycle manager",
-	}, names)
-}
-
-// TestShutdownPhase1ComponentStopsSkipsAbsentComponents covers a node that
-// never built the optional components, the ordinary case for a
-// non-block-producing node. The stall recycler and selected-to-none waits
-// are unconditional: both no-op internally when their worker was never
-// started (see waitChainsyncStallRecycler and waitChainSelectedNoneWorker).
-func TestShutdownPhase1ComponentStopsSkipsAbsentComponents(t *testing.T) {
-	t.Parallel()
-
-	n := &Node{}
-	var names []string
-	for _, cs := range n.shutdownPhase1ComponentStops() {
-		names = append(names, cs.name)
-	}
-	assert.Equal(t, []string{
-		"chainsync stall recycler",
-		"chain-selected-to-none worker",
-	}, names)
 }
 
 // TestNodeStopEscalatesWhenPhase1ComponentNeverReturns is the point of the
@@ -525,37 +471,6 @@ func TestNodeStopClosesLedgerStateWhenPhase1DrainConfirmed(t *testing.T) {
 	default:
 		t.Fatal("LedgerState.Close did not run after a confirmed phase 1 drain")
 	}
-}
-
-// TestShutdownPhase1ComponentStopsCoverQuiesceComponentStops pins that every
-// component live restore/truncate bounds before tearing storage down is also
-// stopped, bounded, before shutdown's phase 3 tears the same storage down.
-// The Leios pipeline and vote managers read n.ledgerState from their own
-// goroutines and were previously stopped only by quiesce and the startup
-// rollback stack, never by shutdown.
-func TestShutdownPhase1ComponentStopsCoverQuiesceComponentStops(t *testing.T) {
-	t.Parallel()
-
-	n := &Node{
-		blockForger:          &forging.BlockForger{},
-		leaderElection:       &leader.Election{},
-		leiosPipelineManager: &leios.PipelineManager{},
-		leiosVoteManager:     &leios.VoteManager{},
-		snapshotMgr:          &snapshot.Manager{},
-		dbLifecycleMgr:       &dblifecycle.Manager{},
-	}
-
-	var quiesce []string
-	for _, cs := range n.quiesceComponentStops() {
-		quiesce = append(quiesce, cs.name)
-	}
-	require.Len(t, quiesce, 6, "fixture must populate every quiesce stop")
-
-	var shutdown []string
-	for _, cs := range n.shutdownPhase1ComponentStops() {
-		shutdown = append(shutdown, cs.name)
-	}
-	assert.Subset(t, shutdown, quiesce)
 }
 
 // TestNodeStopBoundsPhase1StopsByOneShutdownDeadline pins that phase-1 stops

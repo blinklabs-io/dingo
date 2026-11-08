@@ -8,17 +8,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestQuiesceClearsLeiosCertificateVerifier(t *testing.T) {
-	t.Parallel()
-
-	n, _ := newLiveLifecycleTestNode(t, 1)
-	require.NoError(t, n.initLeiosVoteManager(context.Background()))
-	require.NotNil(t, n.leiosCertificateVerifier.Load())
-
-	require.NoError(t, n.quiesceForLiveLifecycleOp(context.Background()))
-	require.Nil(t, n.leiosCertificateVerifier.Load(), "atomic pointer should be cleared after quiesce")
-}
-
 // verifierAtStopHandler records whether the certificate verifier was
 // already cleared when the vote manager reported that it had stopped.
 type verifierAtStopHandler struct {
@@ -50,6 +39,7 @@ func TestQuiesceClearsLeiosCertificateVerifierBeforeStop(t *testing.T) {
 	h := &verifierAtStopHandler{n: n, cleared: make(chan bool, 1)}
 	n.config.logger = slog.New(h)
 	require.NoError(t, n.initLeiosVoteManager(context.Background()))
+	require.NotNil(t, n.leiosCertificateVerifier.Load())
 
 	require.NoError(t, n.quiesceForLiveLifecycleOp(context.Background()))
 	select {
@@ -62,4 +52,8 @@ func TestQuiesceClearsLeiosCertificateVerifierBeforeStop(t *testing.T) {
 	default:
 		t.Fatal("vote manager did not report stopping")
 	}
+	require.Nil(
+		t, n.leiosCertificateVerifier.Load(),
+		"the verifier must stay cleared after quiesce",
+	)
 }

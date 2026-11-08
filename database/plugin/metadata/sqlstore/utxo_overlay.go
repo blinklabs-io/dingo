@@ -56,8 +56,8 @@ import (
 const (
 	// overlayPrefetchChunk keys use two bind parameters each.
 	overlayPrefetchChunk = 499
-	// overlayUtxoInsertColumns is the explicit-id utxo insert width; 62
-	// rows stay under SQLite's 999-parameter limit.
+	// overlayUtxoInsertColumns is the explicit-id utxo insert width; the
+	// dialect's conservative SQLite bound fits 62 rows.
 	overlayUtxoInsertColumns = 16
 	overlayMarkChunk         = 333
 	overlayPointerColumns    = 4
@@ -837,7 +837,10 @@ func (s *Store) insertOverlayUtxos(
 	o *utxoOverlay,
 	outputs []*overlayOutput,
 ) error {
-	perStatement := max(1, s.dialect.ParameterLimit()/overlayUtxoInsertColumns)
+	perStatement, err := s.overlayInsertRows(ctx, db, len(outputs))
+	if err != nil {
+		return err
+	}
 	row := "(" + strings.TrimSuffix(
 		strings.Repeat("?, ", overlayUtxoInsertColumns), ", ",
 	) + ")"

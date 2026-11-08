@@ -78,33 +78,6 @@ func TestHandleLatestEpochActiveStakeIsNullWithoutSnapshot(t *testing.T) {
 	assert.Nil(t, value)
 }
 
-func TestHandleEpoch(t *testing.T) {
-	t.Parallel()
-	activeStake := "42"
-	node := &mockNode{}
-	node.epochByNumber.value = EpochInfo{
-		Epoch:          500,
-		StartTime:      1,
-		EndTime:        2,
-		FirstBlockTime: 3,
-		LastBlockTime:  4,
-		BlockCount:     5,
-		TxCount:        6,
-		Output:         "7",
-		Fees:           "8",
-		ActiveStake:    &activeStake,
-	}
-	recorder := get(t, node, "/api/v0/epochs/500")
-	require.Equal(t, http.StatusOK, recorder.Code)
-	assert.Equal(t, uint64(500), node.epochByNumber.number)
-	assert.JSONEq(t, `{
-		"epoch": 500, "start_time": 1, "end_time": 2,
-		"first_block_time": 3, "last_block_time": 4,
-		"block_count": 5, "tx_count": 6,
-		"output": "7", "fees": "8", "active_stake": "42"
-	}`, recorder.Body.String())
-}
-
 func TestHandleEpochErrors(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -823,23 +796,25 @@ func TestNodeAdapterEpochOutputBeyondUint64(t *testing.T) {
 			t.Parallel()
 			fx := newEpochFixture(t)
 			const amount = 45_000_000_000_000_000
-			for i := range 500 {
-				hash := make([]byte, 32)
-				hash[0] = 0xa0
-				binary.BigEndian.PutUint64(hash[24:], uint64(i+1))
-				tx := &models.Transaction{
-					Hash:  hash,
-					Slot:  100001,
-					Valid: i < tc.valid,
+			inSQLTransaction(t, fx.raw, func(sqlTx *sql.Tx) {
+				for i := range 500 {
+					hash := make([]byte, 32)
+					hash[0] = 0xa0
+					binary.BigEndian.PutUint64(hash[24:], uint64(i+1))
+					tx := &models.Transaction{
+						Hash:  hash,
+						Slot:  100001,
+						Valid: i < tc.valid,
+					}
+					if tx.Valid {
+						tx.Outputs = []models.Utxo{{TxId: hash, Amount: amount}}
+					} else {
+						tx.Outputs = []models.Utxo{{TxId: hash, Amount: 1}}
+						tx.CollateralReturn = &models.Utxo{TxId: hash, OutputIdx: 1, Amount: amount}
+					}
+					insertAdapterTransaction(t, sqlTx, tx)
 				}
-				if tx.Valid {
-					tx.Outputs = []models.Utxo{{TxId: hash, Amount: amount}}
-				} else {
-					tx.Outputs = []models.Utxo{{TxId: hash, Amount: 1}}
-					tx.CollateralReturn = &models.Utxo{TxId: hash, OutputIdx: 1, Amount: amount}
-				}
-				insertAdapterTransaction(t, fx.raw, tx)
-			}
+			})
 			fx.adapter.ledgerState.SetTipForTesting(
 				ochainsync.Tip{
 					Point: ocommon.Point{

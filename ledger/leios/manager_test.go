@@ -2786,14 +2786,16 @@ func TestVoteManagerValidatesDijkstraCertificateStrictly(t *testing.T) {
 		message,
 	), ErrInvalidCertificate)
 
-	highBits := append([]byte(nil), signers...)
-	highBits[len(highBits)-1] |= 1
-	require.ErrorIs(t, fixture.mgr.ValidateDijkstraCertificate(
+	// The reference reads only bit indices below the committee size, so
+	// non-zero padding does not change the signer set.
+	paddingBits := append([]byte(nil), signers...)
+	paddingBits[len(paddingBits)-1] |= 1
+	require.NoError(t, fixture.mgr.ValidateDijkstraCertificate(
 		5,
-		highBits,
+		paddingBits,
 		aggregatedSignature,
 		message,
-	), ErrInvalidCertificate)
+	))
 
 	belowQuorum := make([]byte, lcommon.LeiosSignerBitfieldSize(10))
 	belowQuorum[1] = 1 << 6 // only voter 9, with 10 of 550 active stake

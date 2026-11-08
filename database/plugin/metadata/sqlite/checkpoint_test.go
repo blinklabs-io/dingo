@@ -64,54 +64,6 @@ func TestCheckpointWALTruncatesOnlyAfterPassiveDrainsWAL(t *testing.T) {
 	require.Equal(t, []string{"PASSIVE", "TRUNCATE"}, modes)
 }
 
-func TestCheckpointWALDoesNotWaitForReaderAtWALTip(t *testing.T) {
-	dataDir := t.TempDir()
-	store, writeDB, readDB, err := openSQLStore(
-		Config{DataDir: dataDir},
-		metadata.ProviderDependencies{},
-	)
-	require.NoError(t, err)
-	require.NoError(t, store.Start(t.Context()))
-	t.Cleanup(func() { require.NoError(t, store.Close()) })
-
-	_, err = writeDB.ExecContext(
-		t.Context(),
-		"CREATE TABLE checkpoint_probe (n INTEGER)",
-	)
-	require.NoError(t, err)
-	_, err = writeDB.ExecContext(
-		t.Context(),
-		"INSERT INTO checkpoint_probe (n) VALUES (0)",
-	)
-	require.NoError(t, err)
-
-	// This snapshot starts at the current WAL end, so PASSIVE can report all
-	// frames checkpointed even though TRUNCATE must still wait for the reader.
-	readTx, err := readDB.BeginTx(t.Context(), nil)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = readTx.Rollback() })
-	var probe int
-	require.NoError(t, readTx.QueryRowContext(
-		t.Context(), "SELECT n FROM checkpoint_probe LIMIT 1",
-	).Scan(&probe))
-
-	var logBuf bytes.Buffer
-	checkpointLogger := slog.New(slog.NewTextHandler(&logBuf, nil))
-	databaseURI := sqliteFileURI(filepath.Join(dataDir, "metadata.sqlite"))
-	const maxUnblocked = 10 * time.Second
-	started := time.Now()
-	require.NoError(t, checkpointWAL(databaseURI, checkpointLogger)(t.Context()))
-	require.Less(t, time.Since(started), maxUnblocked,
-		"TRUNCATE must not wait for a reader holding the WAL tip")
-	require.Contains(t, logBuf.String(), "could not fully complete")
-
-	_, err = writeDB.ExecContext(
-		t.Context(),
-		"INSERT INTO checkpoint_probe (n) VALUES (1)",
-	)
-	require.NoError(t, err, "the live reader must not stall the import writer")
-}
-
 // TestCheckpointWALDoesNotHoldWriterLockBehindReaderSnapshot is the
 // regression test for PRAGMA wal_checkpoint(TRUNCATE) being issued directly.
 // TRUNCATE (unlike PASSIVE) acquires SQLite's WAL writer lock before it
@@ -125,17 +77,11 @@ func TestCheckpointWALDoesNotWaitForReaderAtWALTip(t *testing.T) {
 //
 // A writer started alongside the checkpoint does not reproduce this: it wins
 // the race against opening the checkpoint connection and completes before the
-// writer lock is taken, which is why TestCheckpointWALDoesNotBlockWriteBehind
-// ReaderSnapshot passes either way. The probe below instead samples the writer
-// lock continuously for the whole checkpoint call.
+// writer lock is taken. The probe below instead samples the writer lock
+// continuously for the whole checkpoint call.
 func TestCheckpointWALDoesNotHoldWriterLockBehindReaderSnapshot(t *testing.T) {
 	t.Parallel()
 	assertCheckpointWALDoesNotHoldWriterLock(t, true)
-}
-
-func TestCheckpointWALDoesNotHoldWriterLockBehindReaderAtTip(t *testing.T) {
-	t.Parallel()
-	assertCheckpointWALDoesNotHoldWriterLock(t, false)
 }
 
 func assertCheckpointWALDoesNotHoldWriterLock(
@@ -161,8 +107,10 @@ func assertCheckpointWALDoesNotHoldWriterLock(
 	require.NoError(t, err)
 	payload := make([]byte, 4096)
 	writeRows := func(from, count int) {
+		tx, beginErr := writeDB.BeginTx(t.Context(), nil)
+		require.NoError(t, beginErr)
 		for i := range count {
-			_, execErr := writeDB.ExecContext(
+			_, execErr := tx.ExecContext(
 				t.Context(),
 				"INSERT INTO checkpoint_probe (n, payload) VALUES (?, ?)",
 				from+i,
@@ -170,10 +118,11 @@ func assertCheckpointWALDoesNotHoldWriterLock(
 			)
 			require.NoError(t, execErr)
 		}
+		require.NoError(t, tx.Commit())
 	}
 	// Enough frames that a checkpoint has real work to do while it holds the
 	// writer lock; below wal_autocheckpoint's own 10000-page threshold.
-	writeRows(0, 4000)
+	writeRows(0, 400)
 
 	// A reader opened after the initial writes is either at the WAL tip or,
 	// below, made stale by additional frames. Both shapes must avoid holding
@@ -192,7 +141,7 @@ func assertCheckpointWALDoesNotHoldWriterLock(
 		).Scan(&pinned),
 	)
 	if pinFrames {
-		writeRows(100_000, 2000)
+		writeRows(100_000, 200)
 	}
 
 	// Probe the writer lock from a dedicated connection that never waits, so

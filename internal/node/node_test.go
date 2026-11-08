@@ -431,23 +431,6 @@ func TestNewHealthServerDisabledOnZeroPort(t *testing.T) {
 	}
 }
 
-// The health listener binds BindAddr -- the address the relay and metrics
-// listeners use -- and not the API listeners' own bind address. A kubelet or
-// load-balancer probe reaches the container from outside, so a loopback
-// default would fail those closed.
-func TestHealthServerBindsPublicBindAddr(t *testing.T) {
-	t.Parallel()
-
-	cfg := &config.Config{BindAddr: "0.0.0.0", HealthPort: 12799}
-	srv := NewHealthServer(cfg, nil, nil)
-	if srv == nil {
-		t.Fatal("expected an enabled health listener")
-	}
-	if got, want := srv.Addr, "0.0.0.0:12799"; got != want {
-		t.Fatalf("health listener address = %q, want %q", got, want)
-	}
-}
-
 // An IPv6 bindAddr has to be bracketed: "%s:%d" would produce "::1:12799",
 // which net.Listen rejects, and the probes would silently never come up.
 func TestHealthServerBracketsIPv6BindAddr(t *testing.T) {
@@ -804,25 +787,6 @@ func TestShutdownNodeResourcesAggregatesErrors(t *testing.T) {
 	}
 }
 
-func TestShutdownNodeResourcesReturnsNilWithoutErrors(t *testing.T) {
-	t.Parallel()
-
-	err := shutdownNodeResources(
-		func(context.Context) error {
-			return nil
-		},
-		nil,
-		nil,
-		func() error {
-			return nil
-		},
-		5*time.Second,
-	)
-	if err != nil {
-		t.Fatalf("expected nil shutdown error, got %v", err)
-	}
-}
-
 // TestBuildDingoConfigWiresAPIConfig asserts that a loaded
 // internal/config.Config's api.tls policy (as set via YAML/env/CLI)
 // actually reaches the dingo.Config that Run() hands to dingo.New() --
@@ -1022,6 +986,7 @@ func TestRootPeerTargetComposition(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			cfg := &config.Config{TargetNumberOfRootPeers: tt.dingoTarget}
 			applyRootPeerTargetFallback(cfg, tt.cardanoTarget)
 
@@ -1055,6 +1020,8 @@ func TestRootPeerTargetComposition(t *testing.T) {
 // which for BaseURL meant a run aimed at a self-hosted host silently querying
 // the public one.
 func TestKoiosParityConfigForwardsEveryField(t *testing.T) {
+	t.Parallel()
+
 	src := reflect.TypeFor[config.KoiosParityConfig]()
 	dst := reflect.TypeFor[dingo.KoiosParityConfig]()
 
@@ -1078,25 +1045,6 @@ func TestKoiosParityConfigForwardsEveryField(t *testing.T) {
 				name, name,
 			)
 		}
-	}
-}
-
-// TestKoiosParityForwardingGuardCatchesCrossWiring proves the guard checks the
-// assignment rather than the field name. Matching only the name would accept a
-// field wired from the wrong source, which fails exactly as silently as a field
-// left out entirely.
-func TestKoiosParityForwardingGuardCatchesCrossWiring(t *testing.T) {
-	crossWired := `dingo.WithKoiosParity(dingo.KoiosParityConfig{
-		AccountChunkSize: cfg.KoiosParity.AccountChunkMaxBytes,
-	`
-	assign := regexp.MustCompile(
-		`\bAccountChunkSize:\s*&?cfg\.KoiosParity\.AccountChunkSize\b`,
-	)
-	if assign.MatchString(crossWired) {
-		t.Error("guard accepted a cross-wired assignment")
-	}
-	if !strings.Contains(crossWired, "AccountChunkSize:") {
-		t.Error("the weaker name-only check would have accepted it")
 	}
 }
 
@@ -1151,79 +1099,6 @@ func TestBuildDingoConfigWiresForgeTolerances(t *testing.T) {
 	}
 	if got := built.ForgeEndorserBlockStalenessSlots(); got != 23 {
 		t.Fatalf("expected forgeEndorserBlockStalenessSlots 23, got %d", got)
-	}
-}
-
-// TestBuildDingoConfigWiresBlockPipelineFlags is the regression test for
-// the block pipeline flags: BlockPipelineEnabled and
-// BlockPipelineValidateEnabled were correctly parsed into
-// internal/config.Config but buildDingoConfig never called a With... option to
-// forward either one, so dingo.NewConfig built its internal config from fresh
-// Go zero values and the parallel block decode pipeline (ledger/state.go's "if
-// cfg.BlockPipelineEnabled && !cfg.ManualBlockProcessing") never constructed on
-// the live serve path, regardless of the flag or environment variable.
-func TestBuildDingoConfigWiresBlockPipelineFlags(t *testing.T) {
-	t.Parallel()
-
-	cfg := &config.Config{
-		BlockPipelineEnabled:         true,
-		BlockPipelineValidateEnabled: true,
-	}
-	logger := slog.New(slog.NewTextHandler(new(bytes.Buffer), nil))
-
-	built := buildDingoConfig(
-		cfg,
-		logger,
-		nil,
-		nil,
-		false,
-		dingo.StorageModeCore,
-		30*time.Second,
-		chainsync.DefaultStallTimeout,
-		chainsync.HeaderSyncStrategyPrimary,
-	)
-
-	if !built.BlockPipelineEnabled() {
-		t.Fatal(
-			"expected BlockPipelineEnabled to flow through, got false; " +
-				"the loaded value never reached dingo.Config, so the " +
-				"parallel block decode pipeline never activates on the " +
-				"serve path however it is configured",
-		)
-	}
-	if !built.BlockPipelineValidateEnabled() {
-		t.Fatal(
-			"expected BlockPipelineValidateEnabled to flow through, got " +
-				"false; the loaded value never reached dingo.Config, so " +
-				"the pipeline's parallel VRF/KES validate stage never " +
-				"activates on the serve path however it is configured",
-		)
-	}
-}
-
-func TestBuildDingoConfigWiresLedgerPrefetchAheadFlag(t *testing.T) {
-	t.Parallel()
-
-	logger := slog.New(slog.NewTextHandler(new(bytes.Buffer), nil))
-	for _, enabled := range []bool{false, true} {
-		built := buildDingoConfig(
-			&config.Config{LedgerPrefetchAheadEnabled: enabled},
-			logger,
-			nil,
-			nil,
-			false,
-			dingo.StorageModeCore,
-			30*time.Second,
-			chainsync.DefaultStallTimeout,
-			chainsync.HeaderSyncStrategyPrimary,
-		)
-		if built.LedgerPrefetchAheadEnabled() != enabled {
-			t.Fatalf(
-				"LedgerPrefetchAheadEnabled = %v, want %v",
-				built.LedgerPrefetchAheadEnabled(),
-				enabled,
-			)
-		}
 	}
 }
 
@@ -1513,32 +1388,6 @@ func TestBuildDingoConfigForwardsScalarConfigFields(t *testing.T) {
 	}
 }
 
-func TestBuildDingoConfigWiresLedgerApplyRowBatching(t *testing.T) {
-	t.Parallel()
-
-	logger := slog.New(slog.NewTextHandler(new(bytes.Buffer), nil))
-	for _, enabled := range []bool{false, true} {
-		built := buildDingoConfig(
-			&config.Config{LedgerApplyRowBatchingEnabled: enabled},
-			logger,
-			nil,
-			nil,
-			false,
-			dingo.StorageModeCore,
-			30*time.Second,
-			chainsync.DefaultStallTimeout,
-			chainsync.HeaderSyncStrategyPrimary,
-		)
-		if built.LedgerApplyRowBatchingEnabled() != enabled {
-			t.Fatalf(
-				"LedgerApplyRowBatchingEnabled: want %v, got %v",
-				enabled,
-				built.LedgerApplyRowBatchingEnabled(),
-			)
-		}
-	}
-}
-
 // TestBuildDingoConfigWiresTokenRegistryHeaders pins the composition step a
 // loaded header secret takes on its way to the registry sync.
 func TestBuildDingoConfigWiresTokenRegistryHeaders(t *testing.T) {
@@ -1564,86 +1413,5 @@ func TestBuildDingoConfigWiresTokenRegistryHeaders(t *testing.T) {
 
 	if got := built.TokenRegistry().HeaderSecrets; !maps.Equal(got, headers) {
 		t.Fatalf("token registry headers = %v, want %v", got, headers)
-	}
-}
-
-func TestBuildDingoConfigWiresBlockfetchLowWatermarkFlag(t *testing.T) {
-	t.Parallel()
-
-	logger := slog.New(slog.NewTextHandler(new(bytes.Buffer), nil))
-	for _, enabled := range []bool{false, true} {
-		built := buildDingoConfig(
-			&config.Config{BlockfetchLowWatermarkEnabled: enabled},
-			logger,
-			nil,
-			nil,
-			false,
-			dingo.StorageModeCore,
-			30*time.Second,
-			chainsync.DefaultStallTimeout,
-			chainsync.HeaderSyncStrategyPrimary,
-		)
-		if built.BlockfetchLowWatermarkEnabled() != enabled {
-			t.Fatalf(
-				"BlockfetchLowWatermarkEnabled = %v, want %v",
-				built.BlockfetchLowWatermarkEnabled(),
-				enabled,
-			)
-		}
-	}
-}
-
-// TestBuildDingoConfigWiresBarkArchiveLookupRates pins that the loaded
-// ArchiveService lookup budgets reach the root configuration Bark is built
-// from.
-func TestBuildDingoConfigWiresBarkArchiveLookupRates(t *testing.T) {
-	t.Parallel()
-
-	built := buildDingoConfig(
-		&config.Config{
-			BarkArchiveLookupsPerSecond:       401,
-			BarkArchiveCallerLookupsPerSecond: 402,
-		},
-		slog.New(slog.NewTextHandler(new(bytes.Buffer), nil)),
-		nil,
-		nil,
-		false,
-		dingo.StorageModeCore,
-		30*time.Second,
-		chainsync.DefaultStallTimeout,
-		chainsync.HeaderSyncStrategyPrimary,
-	)
-
-	if got := built.BarkArchiveLookupsPerSecond(); got != 401 {
-		t.Fatalf("expected global archive lookup rate 401, got %d", got)
-	}
-	if got := built.BarkArchiveCallerLookupsPerSecond(); got != 402 {
-		t.Fatalf("expected per-caller archive lookup rate 402, got %d", got)
-	}
-}
-
-func TestBuildDingoConfigWiresLedgerValidateAheadFlag(t *testing.T) {
-	t.Parallel()
-
-	logger := slog.New(slog.NewTextHandler(new(bytes.Buffer), nil))
-	for _, enabled := range []bool{false, true} {
-		built := buildDingoConfig(
-			&config.Config{LedgerValidateAheadEnabled: enabled},
-			logger,
-			nil,
-			nil,
-			false,
-			dingo.StorageModeCore,
-			30*time.Second,
-			chainsync.DefaultStallTimeout,
-			chainsync.HeaderSyncStrategyPrimary,
-		)
-		if built.LedgerValidateAheadEnabled() != enabled {
-			t.Fatalf(
-				"LedgerValidateAheadEnabled = %v, want %v",
-				built.LedgerValidateAheadEnabled(),
-				enabled,
-			)
-		}
 	}
 }

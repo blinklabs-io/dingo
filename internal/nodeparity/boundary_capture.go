@@ -275,6 +275,11 @@ func captureUTxOSetFile(
 	return path, nil
 }
 
+// boundaryFollowerRetryDelay is the wait before the boundary follower
+// reconnects after a session ends. It is a variable only so tests can
+// shorten it; no production code changes it.
+var boundaryFollowerRetryDelay = 5 * time.Second
+
 // runBoundaryFollower follows Dingo's chain from start on its own chainsync
 // connection, doing no per-block work, and at the first block of each epoch
 // calls capture and hands the result to captures. It runs until ctx ends,
@@ -362,7 +367,7 @@ func runBoundaryFollower(
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(5 * time.Second):
+		case <-time.After(boundaryFollowerRetryDelay):
 		}
 	}
 }

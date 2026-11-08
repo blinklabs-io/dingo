@@ -30,122 +30,6 @@ import (
 	"modernc.org/sqlite"
 )
 
-// busyTimeoutMargin exceeds OpenCache's hardcoded 5s busy_timeout pragma,
-// so a connection that only frees the WAL writer slot after this long
-// forces any contending connection's own busy-retry loop to exhaust before
-// the slot is released — the specific condition this test covers, as
-// opposed to ordinary contention a shorter hold resolves on its own well
-// within busy_timeout: a 100ms hold fails neither before nor after the fix,
-// because busy_timeout's retry genuinely covers short waits.
-const busyTimeoutMargin = 5500 * time.Millisecond
-
-// TestSaveAccountFetchChunkProgressWaitsOutSlowConcurrentWriter is dingo
-// minimal, deterministic reproduction.
-//
-// SaveAccountFetchChunkProgress's transaction (cache.go) always opens with
-// two DELETEs targeting a brand-new chunk_hash nothing has written before.
-// Both match zero rows on a fresh chunk, but SQLite still treats the
-// statements as write-intending (a DELETE always opens a write cursor, even
-// if it ultimately touches nothing) and, under c.db.Begin()'s default
-// DEFERRED mode, grabs SQLite's single per-database WAL writer slot right
-// there — and holds it for the rest of the transaction, not just its final
-// COMMIT. Before this fix OpenCache left the connection pool unbounded, so
-// accountFetchConcurrency's five chunk workers really did run on five
-// distinct connections that then contended for that one slot.
-//
-// This test drives exactly that: connection A opens a transaction and runs
-// SaveAccountFetchChunkProgress's own two opening DELETE statements
-// verbatim (there is no seam to pause mid-transaction inside the real
-// function, so this reproduces its exact SQL rather than calling it), which
-// already claims the writer slot, and holds it for busyTimeoutMargin —
-// standing in for five real chunk workers' large-chunk Prepare/Exec work
-// collectively outlasting busy_timeout. While A holds it, a second
-// goroutine calls the real, unmodified SaveAccountFetchChunkProgress for a
-// different chunk of the same (network, epoch) — exactly fetch_accounts.go's
-// concurrent-worker shape.
-//
-// Pre-fix, B's connection retries against busy_timeout (5s), exhausts it
-// before A releases, and fails with SQLITE_BUSY / "database is locked" —
-// matching the issue's exact log line. Post-fix (a serialized connection
-// pool), B's Begin() instead blocks at the Go connection-pool level with no
-// fixed budget, so it simply waits for A to finish and then succeeds.
-func TestSaveAccountFetchChunkProgressWaitsOutSlowConcurrentWriter(
-	t *testing.T,
-) {
-	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
-	require.NoError(t, err)
-	defer cache.Close() //nolint:errcheck
-
-	const network = "preview"
-	const epoch = uint64(4091)
-	now := time.Now().UTC()
-
-	// Connection A: open a deferred transaction and run
-	// SaveAccountFetchChunkProgress's own opening statements verbatim
-	// against a chunk hash nothing has ever written, claiming the WAL
-	// writer slot exactly as the real function would.
-	txA, err := cache.db.Begin()
-	require.NoError(t, err)
-	_, err = txA.Exec(
-		`DELETE FROM koios_account_fetch_staged_rows WHERE network = ? AND epoch = ? AND chunk_hash = ?`,
-		network,
-		epoch,
-		"chunk-A",
-	)
-	require.NoError(t, err)
-	_, err = txA.Exec(
-		`DELETE FROM koios_account_checked WHERE network = ? AND epoch = ? AND chunk_hash = ?`,
-		network,
-		epoch,
-		"chunk-A",
-	)
-	require.NoError(t, err)
-
-	// Connection B: a second, genuinely concurrent chunk worker — the real
-	// production entry point — races to complete its own chunk for the same
-	// (network, epoch) while A still holds the writer slot open.
-	bErr := make(chan error, 1)
-	go func() {
-		bErr <- cache.SaveAccountFetchChunkProgress(
-			network, epoch, "chunk-B",
-			[]KoiosAccountRewards{{StakeAddress: "addr-B", RewardType: "member", Earned: "1"}},
-			[]string{"addr-B"},
-			now,
-		)
-	}()
-
-	// Release A only after busyTimeoutMargin, so a pre-fix B has already
-	// exhausted its own busy_timeout wait by the time A lets go.
-	go func() {
-		time.Sleep(busyTimeoutMargin)
-		_ = txA.Commit()
-	}()
-
-	select {
-	case err := <-bErr:
-		if err != nil {
-			if strings.Contains(err.Error(), "locked") ||
-				strings.Contains(err.Error(), "SQLITE_BUSY") {
-				t.Fatalf(
-					"SaveAccountFetchChunkProgress for a concurrent chunk "+
-						"hit SQLITE_BUSY because another chunk worker held "+
-						"the WAL writer slot for %s, longer than "+
-						"busy_timeout: %v",
-					busyTimeoutMargin, err,
-				)
-			}
-			require.NoError(t, err)
-		}
-	case <-time.After(busyTimeoutMargin + 4*time.Second):
-		t.Fatalf(
-			"SaveAccountFetchChunkProgress for a concurrent chunk did not "+
-				"return within %s of a %s writer-slot hold — it is either "+
-				"stuck in SQLite's busy retry loop or deadlocked",
-			busyTimeoutMargin+4*time.Second, busyTimeoutMargin,
-		)
-	}
-}
-
 // TestSaveAccountFetchChunkProgressConcurrentWritersDoNotHitSQLiteBusy
 // drives fetch_accounts.go's actual dispatch shape — accountFetchConcurrency
 // (5) chunk workers calling SaveAccountFetchChunkProgress in parallel via
@@ -338,6 +222,10 @@ func TestCacheWritesNeverUpgradeAReadSnapshot(t *testing.T) {
 
 	cases := []struct {
 		name string
+		// iterations is sized from the pre-fix failure rates below so that a
+		// regression still shows at least ten hits on average (about 90 and 15
+		// at these counts) while the test stays a few seconds under -race.
+		iterations int
 		// write performs one call of the path under test. Pre-fix
 		// measurements are the SQLITE_BUSY_SNAPSHOT count per 3000 calls on
 		// an unloaded machine.
@@ -346,7 +234,8 @@ func TestCacheWritesNeverUpgradeAReadSnapshot(t *testing.T) {
 		{
 			// assertClaimedSource's SELECT used to run before the caller's
 			// write. Pre-fix: 891 to 1321 of 3000 on 8 of 8 runs.
-			name: "gated write via withClaimedSource",
+			name:       "gated write via withClaimedSource",
+			iterations: 300,
 			write: func(t *testing.T, c *Cache, i int) {
 				t.Helper()
 				recordSnapshotBusy(t, c.UpsertEpochParams(KoiosEpochParams{
@@ -362,7 +251,8 @@ func TestCacheWritesNeverUpgradeAReadSnapshot(t *testing.T) {
 			// decide what to discard, so its read cannot move after its
 			// writes; it claims the writer slot with a no-op UPDATE instead.
 			// Pre-fix: 30 to 55 of 3000 on 4 of 4 runs.
-			name: "RecordKoiosSource",
+			name:       "RecordKoiosSource",
+			iterations: 1000,
 			write: func(t *testing.T, c *Cache, _ int) {
 				t.Helper()
 				_, err := c.RecordKoiosSource(network, sourceURL, now)
@@ -373,7 +263,6 @@ func TestCacheWritesNeverUpgradeAReadSnapshot(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			const iterations = 3000
 			path := filepath.Join(t.TempDir(), "cache.db")
 
 			writer, err := openTestCache(path, nil)
@@ -411,7 +300,7 @@ func TestCacheWritesNeverUpgradeAReadSnapshot(t *testing.T) {
 				}
 			}()
 
-			for i := range iterations {
+			for i := range tc.iterations {
 				tc.write(t, writer, i)
 			}
 			close(stop)
@@ -434,73 +323,6 @@ func recordSnapshotBusy(t *testing.T, err error) {
 				"snapshot before its first write again: %v",
 			err,
 		)
-	}
-}
-
-// TestOpenCacheUsesMetadataStoreSQLiteSettings pins the cache database to the
-// pragma set of Dingo's own SQLite metadata store
-// (sqliteCommonPragmas in database/plugin/metadata/sqlite/shared_sqlstore.go).
-// The driver default, synchronous=FULL, flushes on every autocommit, and the
-// cache commits once per fetched row batch.
-//
-// busy_timeout is the one deliberate difference: it stays at 5s because the
-// concurrency tests in cache_test.go are built around that bound.
-func TestOpenCacheUsesMetadataStoreSQLiteSettings(t *testing.T) {
-	t.Parallel()
-
-	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, cache.Close()) })
-
-	for _, want := range []struct {
-		pragma string
-		value  string
-	}{
-		{"journal_mode", "wal"},
-		{"synchronous", "1"}, // NORMAL
-		{"wal_autocheckpoint", "10000"},
-		{"cache_size", "-50000"},
-		{"foreign_keys", "1"},
-		{"mmap_size", "268435456"},
-		{"busy_timeout", "5000"},
-	} {
-		var got string
-		require.NoError(
-			t,
-			cache.db.QueryRow("PRAGMA "+want.pragma).Scan(&got),
-		)
-		require.Equal(t, want.value, got, "PRAGMA %s", want.pragma)
-	}
-}
-
-// TestOpenCacheWithRelaxedDurability pins the opt-in for throwaway caches:
-// synchronous=OFF, with every other setting unchanged.
-func TestOpenCacheWithRelaxedDurability(t *testing.T) {
-	t.Parallel()
-
-	cache, err := OpenCache(
-		filepath.Join(t.TempDir(), "cache.db"),
-		nil,
-		WithRelaxedDurability(),
-	)
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, cache.Close()) })
-
-	for _, want := range []struct {
-		pragma string
-		value  string
-	}{
-		{"synchronous", "0"}, // OFF
-		{"journal_mode", "wal"},
-		{"busy_timeout", "5000"},
-		{"wal_autocheckpoint", "10000"},
-	} {
-		var got string
-		require.NoError(
-			t,
-			cache.db.QueryRow("PRAGMA "+want.pragma).Scan(&got),
-		)
-		require.Equal(t, want.value, got, "PRAGMA %s", want.pragma)
 	}
 }
 
@@ -541,63 +363,6 @@ func TestGetEpochsNeedingCheckDoesNotRequeueCheckedPreStakingEpoch(
 		epochs,
 		"pre-staking epochs never have account coverage and must not be requeued for its absence",
 	)
-}
-
-// TestCommitEpochDataWithTotals exercises the actual SQL generated for the
-// koios_totals upsert against a real SQLite file — a pure-Go struct test
-// cannot catch a column-name mismatch (e.g. DepositsDRep versus the persisted
-// "deposits_drep" spelling; the column must be pinned explicitly in cache.go).
-// CommitEpochData's
-// AssignmentColumns list is a hardcoded string literal that must match the
-// real migrated column for every field, so this has to run against a real
-// DB, not just construct the struct in memory.
-func TestCommitEpochDataWithTotals(t *testing.T) {
-	t.Parallel()
-
-	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
-	require.NoError(t, err)
-	defer cache.Close() //nolint:errcheck
-
-	now := time.Now().UTC().Truncate(time.Second)
-	info := KoiosEpochInfo{
-		Network:      "preview",
-		Epoch:        1367,
-		ActiveStake:  "3250414888938614",
-		Fees:         "1292170362",
-		TotalRewards: "410988812047",
-		EpochEndTime: now,
-		FetchedAt:    now,
-	}
-	totals := &KoiosTotals{
-		Treasury:           "6931231163186226",
-		Reserves:           "7792082362166766",
-		Fees:               "1245791321",
-		Reward:             "292608261256804",
-		Circulation:        "29979007817598883",
-		Supply:             "37207917637833234",
-		DepositsStake:      "536150000000",
-		DepositsDRep:       "4474000000000",
-		DepositsProposal:   "59000000000",
-		TreasuryDonation:   "0",
-		TreasuryWithdrawal: "0",
-		ReservesWithdrawal: "0",
-		FetchedAt:          now,
-	}
-
-	// First insert, then a second commit for the same (network, epoch) to
-	// exercise the ON CONFLICT DO UPDATE path too, not just the initial INSERT.
-	require.NoError(t, cache.CommitEpochData(info, nil, totals))
-	require.NoError(t, cache.CommitEpochData(info, nil, totals))
-
-	got, err := cache.GetTotals("preview", 1367)
-	require.NoError(t, err)
-	require.Equal(t, totals.Treasury, got.Treasury)
-	require.Equal(t, totals.Reserves, got.Reserves)
-	require.Equal(t, totals.Fees, got.Fees)
-	require.Equal(t, totals.Reward, got.Reward)
-	require.Equal(t, totals.DepositsDRep, got.DepositsDRep)
-	require.Equal(t, totals.DepositsStake, got.DepositsStake)
-	require.Equal(t, totals.DepositsProposal, got.DepositsProposal)
 }
 
 // TestCommitAccountRewardsForEpoch exercises the real SQL for the

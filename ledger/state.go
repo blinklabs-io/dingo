@@ -558,10 +558,11 @@ func (ls *LedgerState) waitForLeiosBeforeApply(
 	blocks []ledger.Block,
 	epoch models.Epoch,
 	validateAnnouncement bool,
-) error {
+	allowReadyPrefix bool,
+) (int, error) {
 	precheck := blocksBeforeEpochEnd(blocks, epoch)
 	if len(precheck) == 0 {
-		return nil
+		return len(blocks), nil
 	}
 	if err := ls.validateLeiosAnnouncementBeforeApply(
 		ctx,
@@ -574,7 +575,18 @@ func (ls *LedgerState) waitForLeiosBeforeApply(
 			"error", err,
 		)
 	}
-	return ls.ensureReferencedEndorserBlocks(ctx, precheck)
+	if !allowReadyPrefix {
+		err := ls.ensureReferencedEndorserBlocks(ctx, precheck)
+		return len(blocks), err
+	}
+	ready, err := ls.ensureReadyEndorserPrefix(ctx, precheck, true)
+	if err != nil {
+		return 0, err
+	}
+	if ready == len(precheck) {
+		return len(blocks), nil
+	}
+	return ready, nil
 }
 
 type blockApplyStateSnapshot struct {
@@ -598,14 +610,57 @@ func (ls *LedgerState) prepareBlockApplySnapshot(
 	selectionEpoch models.Epoch,
 	validateAnnouncement bool,
 ) (blockApplyStateSnapshot, error) {
-	if err := ls.waitForLeiosBeforeApply(
+	if _, err := ls.waitForLeiosBeforeApply(ctx, blocks, selectionEpoch, validateAnnouncement, false); err != nil {
+		return blockApplyStateSnapshot{}, err
+	}
+	return ls.capturePreparedBlockApplySnapshot(
 		ctx,
 		blocks,
 		selectionEpoch,
 		validateAnnouncement,
-	); err != nil {
-		return blockApplyStateSnapshot{}, err
+	), nil
+}
+
+func (ls *LedgerState) prepareBlockApplyPrefixSnapshot(
+	ctx context.Context,
+	blocks []ledger.Block,
+	selectionEpoch models.Epoch,
+	validateAnnouncement bool,
+	allowReadyPrefix bool,
+) (blockApplyStateSnapshot, int, error) {
+	if !allowReadyPrefix {
+		snapshot, err := ls.prepareBlockApplySnapshot(
+			ctx,
+			blocks,
+			selectionEpoch,
+			validateAnnouncement,
+		)
+		return snapshot, len(blocks), err
 	}
+	ready, err := ls.waitForLeiosBeforeApply(
+		ctx,
+		blocks,
+		selectionEpoch,
+		validateAnnouncement,
+		true,
+	)
+	if err != nil {
+		return blockApplyStateSnapshot{}, 0, err
+	}
+	return ls.capturePreparedBlockApplySnapshot(
+		ctx,
+		blocks[:ready],
+		selectionEpoch,
+		validateAnnouncement,
+	), ready, nil
+}
+
+func (ls *LedgerState) capturePreparedBlockApplySnapshot(
+	ctx context.Context,
+	blocks []ledger.Block,
+	selectionEpoch models.Epoch,
+	validateAnnouncement bool,
+) blockApplyStateSnapshot {
 	snapshot := ls.captureBlockApplyStateSnapshot()
 	if !validateAnnouncement {
 		precheck := blocksBeforeEpochEnd(blocks, selectionEpoch)
@@ -641,7 +696,7 @@ func (ls *LedgerState) prepareBlockApplySnapshot(
 		) {
 		ls.leiosApplyAnnouncer = nil
 	}
-	return snapshot, nil
+	return snapshot
 }
 
 func (ls *LedgerState) captureBlockApplyStateSnapshot() blockApplyStateSnapshot {
@@ -2328,6 +2383,12 @@ type LedgerState struct {
 	forkHeaderNonceCacheMutex sync.Mutex
 	forkHeaderNonceCache      map[string]map[uint64]peerForkNoncePrefix
 	forkHeaderPathCache       map[string]peerForkPathPrefix
+	// statelessHeaderVerdicts shares successful stateless header crypto
+	// verdicts across peer connections.
+	statelessHeaderVerdicts statelessHeaderVerdictCache
+	// Test hook called each time stateless header crypto actually runs
+	// instead of being answered from statelessHeaderVerdicts.
+	statelessHeaderCryptoRunHook func()
 	// onPeerForkAncestorStateCheck, when set by a test, observes each
 	// ledger-state verification of a peer fork ancestor.
 	onPeerForkAncestorStateCheck func(slot uint64)
@@ -3231,16 +3292,50 @@ func (ls *LedgerState) RecoverCommitTimestampConflict(
 	if err != nil {
 		return fmt.Errorf("failed to get tip: %w", err)
 	}
-	// Check if we can lookup tip block in chain
-	_, err = ls.chain.BlockByPoint(ctx, tmpTip.Point, nil)
+	containsTip, err := ls.primaryChainContainsPoint(ctx, tmpTip.Point)
 	if err != nil {
-		// Rollback to raw chain tip on error.
+		return fmt.Errorf("check ledger tip on primary chain: %w", err)
+	}
+	if !containsTip {
+		ancestor, found, ancestorErr := ls.latestLedgerPrimaryChainAncestor(
+			ctx,
+			tmpTip.Point,
+			containsTip,
+			true,
+		)
+		if ancestorErr != nil {
+			return fmt.Errorf(
+				"find common primary-chain ancestor for ledger tip: %w",
+				ancestorErr,
+			)
+		}
+		if !found {
+			return fmt.Errorf(
+				"ledger tip %d/%s is not on primary chain and no common ancestor was found",
+				tmpTip.Point.Slot,
+				hex.EncodeToString(tmpTip.Point.Hash),
+			)
+		}
+		// Roll back metadata to the newest applied block that is still on the
+		// selected chain. The raw chain tip may already belong to another fork.
 		// Note: We do NOT hold ls.Lock() here because rollback() calls
 		// SubmitAsyncDBTxn() which may trigger PartialCommitError recovery
 		// that re-acquires ls.Lock(), causing a deadlock. The rollback
 		// method handles its own locking for in-memory state updates.
-		chainTip := ls.chain.Tip()
-		if err = ls.rollback(ctx, chainTip.Point); err != nil {
+		ls.RLock()
+		publishedAtAncestor := pointMatches(ls.currentTip.Point, ancestor)
+		ls.RUnlock()
+		if publishedAtAncestor {
+			// Recovery may start before the durable tip has been published in
+			// memory. Force the metadata repair when the selected ancestor is
+			// already the in-memory tip (notably origin).
+			err = ls.withConsumedUtxoPruneBoundary(func() error {
+				return ls.rollbackWithBlocks(ctx, ancestor, nil, true)
+			})
+		} else {
+			err = ls.rollback(ctx, ancestor)
+		}
+		if err != nil {
 			wrappedErr := fmt.Errorf(
 				"failed to rollback ledger: %w",
 				err,
@@ -5052,6 +5147,7 @@ func (ls *LedgerState) resolveRollbackTarget(
 		ancestor, ok, ancestorErr := ls.latestLedgerPrimaryChainAncestor(
 			ctx,
 			point,
+			false,
 			false,
 		)
 		if ancestorErr != nil {
@@ -9429,11 +9525,12 @@ func (ls *LedgerState) processBlocksFromSource(
 			// is re-checked on the pass after the rollover publishes its epoch:
 			// checking it now would resolve a certificate against an epoch
 			// that is not in the epoch cache yet.
-			applySnapshot, err := ls.prepareBlockApplySnapshot(
+			applySnapshot, readyBlocks, err := ls.prepareBlockApplyPrefixSnapshot(
 				ctx,
 				nextBatch[i:end],
 				selectionEpoch,
 				validateLiveLeiosAnnouncement,
+				opts.gated && !validateLiveLeiosAnnouncement,
 			)
 			if err != nil {
 				completeReadResult()
@@ -9457,6 +9554,8 @@ func (ls *LedgerState) processBlocksFromSource(
 					err,
 				)
 			}
+
+			end = i + readyBlocks
 
 			snapshotEpoch := applySnapshot.epoch
 			snapshotEra := applySnapshot.era
@@ -12885,7 +12984,31 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTipLocked(
 		bytes.Equal(chainTip.Point.Hash, ledgerTip.Point.Hash) {
 		return nil
 	}
-	if chainTip.Point.Slot < ledgerTip.Point.Slot {
+	containsLedgerTip, err := ls.primaryChainContainsPoint(ctx, ledgerTip.Point)
+	if err != nil {
+		return fmt.Errorf("check ledger tip on primary chain: %w", err)
+	}
+	ancestor, found, err := ls.latestLedgerPrimaryChainAncestor(
+		ctx,
+		ledgerTip.Point,
+		containsLedgerTip,
+		true,
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"find common primary-chain ancestor for ledger tip: %w",
+			err,
+		)
+	}
+	if !found {
+		return fmt.Errorf(
+			"ledger tip %d/%s is not on primary chain and no common ancestor was found",
+			ledgerTip.Point.Slot,
+			hex.EncodeToString(ledgerTip.Point.Hash),
+		)
+	}
+	if chainTip.Point.Slot < ledgerTip.Point.Slot &&
+		pointMatches(chainTip.Point, ancestor) {
 		ls.config.Logger.Warn(
 			"ledger tip ahead of primary chain tip, rolling back metadata to chain tip",
 			"component",
@@ -12970,10 +13093,6 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTipLocked(
 		ls.publishLocalLedgerRollback(chainTip.Point)
 		return nil
 	}
-	containsLedgerTip, err := ls.primaryChainContainsPoint(ctx, ledgerTip.Point)
-	if err != nil {
-		return fmt.Errorf("check ledger tip on primary chain: %w", err)
-	}
 	if containsLedgerTip {
 		// The ledger tip is a valid ancestor on the primary chain, so the
 		// primary chain is simply a forward extension of the ledger. This is
@@ -13002,24 +13121,6 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTipLocked(
 			gap,
 		)
 		return nil
-	}
-	ancestor, found, err := ls.latestLedgerPrimaryChainAncestor(
-		ctx,
-		ledgerTip.Point,
-		containsLedgerTip,
-	)
-	if err != nil {
-		return fmt.Errorf(
-			"find common primary-chain ancestor for ledger tip: %w",
-			err,
-		)
-	}
-	if !found {
-		return fmt.Errorf(
-			"ledger tip %d/%s is not on primary chain and no common ancestor was found",
-			ledgerTip.Point.Slot,
-			hex.EncodeToString(ledgerTip.Point.Hash),
-		)
 	}
 	ls.config.Logger.Warn(
 		"ledger tip not on primary chain at startup, rolling back metadata to common ancestor",
@@ -13505,6 +13606,7 @@ func (ls *LedgerState) latestLedgerPrimaryChainAncestor(
 	ctx context.Context,
 	point ocommon.Point,
 	containsPoint bool,
+	allowOrigin bool,
 ) (ocommon.Point, bool, error) {
 	if containsPoint {
 		return point, true, nil
@@ -13537,6 +13639,12 @@ func (ls *LedgerState) latestLedgerPrimaryChainAncestor(
 			break
 		}
 		end = start
+	}
+	if allowOrigin {
+		// Origin is the common ancestor when no applied block nonce remains on
+		// the selected chain. It has no block_nonce row, but recovery and
+		// reconciliation both support it.
+		return ocommon.Point{}, true, nil
 	}
 	return ocommon.Point{}, false, nil
 }
@@ -16986,7 +17094,11 @@ func (ls *LedgerState) forgeBlock() {
 
 	minor, err := dingoversion.HeaderProtocolMinor(ls.config.CIP0203Enabled)
 	if err != nil {
-		ls.config.Logger.Error("cannot encode forged block version", "error", err)
+		ls.config.Logger.Error(
+			"cannot encode forged block version",
+			"error",
+			err,
+		)
 		return
 	}
 	// Create Babbage block header body
