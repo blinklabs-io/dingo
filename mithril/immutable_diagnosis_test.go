@@ -49,6 +49,8 @@ func (e *redactionIntermediateError) Error() string {
 func (e *redactionIntermediateError) Unwrap() error { return e.cause }
 
 func TestRedactLocationURI(t *testing.T) {
+	t.Parallel()
+
 	for _, tc := range []struct {
 		name string
 		in   string
@@ -82,6 +84,7 @@ func TestRedactLocationURI(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			got := redactLocationURI(tc.in)
 			assert.Equal(t, tc.want, got)
 			assert.NotContains(t, got, "secret")
@@ -147,6 +150,8 @@ func TestRedactLocationErrorPreservesIntermediateWrappers(t *testing.T) {
 // certificate, which is what separates a mis-published archive from a stale
 // replica.
 func TestBootstrapV2ReportsIdenticalBadBytesAcrossLocations(t *testing.T) {
+	t.Parallel()
+
 	tampered := uint64(1)
 	fixture := newV2Fixture(t, v2FixtureOptions{
 		immutableFileNumber:  2,
@@ -207,6 +212,8 @@ func TestBootstrapV2ReportsIdenticalBadBytesAcrossLocations(t *testing.T) {
 func TestBootstrapV2ReportsSingleLocationMismatchWithoutBlamingReplicas(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tampered := uint64(0)
 	fixture := newV2Fixture(t, v2FixtureOptions{
 		immutableFileNumber: 1,
@@ -233,6 +240,8 @@ func TestBootstrapV2ReportsSingleLocationMismatchWithoutBlamingReplicas(
 // published location, and the trio must be gone afterwards so no later run can
 // reuse it.
 func TestBootstrapV2AttributesACorruptCacheToTheCache(t *testing.T) {
+	t.Parallel()
+
 	tampered := uint64(1)
 	fixture := newV2Fixture(t, v2FixtureOptions{
 		immutableFileNumber: 2,

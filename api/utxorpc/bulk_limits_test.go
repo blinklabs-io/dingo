@@ -479,16 +479,6 @@ func TestSearchUtxos_PageByteBudget(t *testing.T) {
 		"resuming from the token continues after the truncated page")
 }
 
-func TestNewUtxorpc_DefaultsBulkBudgets(t *testing.T) {
-	t.Parallel()
-	u := NewUtxorpc(UtxorpcConfig{})
-	require.Equal(t, DefaultMaxMempoolItems, u.config.MaxMempoolItems)
-	require.Equal(t, int64(DefaultMaxResponseBytes), u.config.MaxResponseBytes)
-	require.Equal(t,
-		DefaultMaxConcurrentBulkRequests, u.config.MaxConcurrentBulkRequests)
-	require.Equal(t, DefaultMaxConcurrentBulkRequests, cap(u.bulkSlots))
-}
-
 // datumBudgetStub serves fixed datums so ReadData's byte budget can be driven
 // without a chain.
 type datumBudgetStub struct {

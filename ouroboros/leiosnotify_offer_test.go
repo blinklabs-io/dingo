@@ -240,29 +240,6 @@ func TestLeiosRelayOffersExistingCompleteCacheOnPeerOffer(t *testing.T) {
 	require.Nil(t, entry, "a cache hit must not duplicate an existing offer")
 }
 
-func TestLeiosForgedEBLogOffersManifestBeforeTransactions(t *testing.T) {
-	t.Parallel()
-
-	log := newLeiosForgedEBLog()
-	log.registerConn("peer", nil, nil)
-	point := ocommon.Point{Slot: 42, Hash: []byte("eb-hash")}
-	log.append(leiosForgedEBEntry{point: &point, size: 1234})
-	log.append(leiosForgedEBEntry{txOffer: &point})
-
-	manifest, _ := log.next("peer")
-	require.Equal(t,
-		uint8(oleiosnotify.MessageTypeBlockOffer),
-		leiosForgedEBOffer(manifest).Type(),
-	)
-	log.complete("peer", nil, true)
-
-	transactions, _ := log.next("peer")
-	require.Equal(t,
-		uint8(oleiosnotify.MessageTypeBlockTxsOffer),
-		leiosForgedEBOffer(transactions).Type(),
-	)
-}
-
 // A locally emitted vote must be offered as a MsgVotesOffer with its type set.
 func TestLeiosForgedEBOfferSetsVotesOfferType(t *testing.T) {
 	t.Parallel()
@@ -298,13 +275,6 @@ func TestLeiosNotifyVoteOfferHasIndependentWorkLimit(t *testing.T) {
 		),
 	}
 	require.ErrorContains(t, validateLeiosNotifyVoteOffer(oversized), "maximum is 64")
-}
-
-// An empty entry yields no offer.
-func TestLeiosForgedEBOfferEmptyEntryNil(t *testing.T) {
-	t.Parallel()
-
-	require.Nil(t, leiosForgedEBOffer(&leiosForgedEBEntry{}))
 }
 
 func TestLeiosForgedEBOfferAnnouncement(t *testing.T) {

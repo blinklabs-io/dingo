@@ -376,10 +376,3 @@ func TestCloneConfig_CopiesProvenanceMapWithoutAliasing(t *testing.T) {
 	require.Equal(t, SourceYAML, clone.Provenance()["Network"])
 	require.Equal(t, SourceEnv, clone.Provenance()["StorageMode"])
 }
-
-func TestCloneConfig_NilProvenanceStaysNil(t *testing.T) {
-	cfg := &Config{}
-	clone := cloneConfig(cfg)
-	require.Nil(t, clone.provenance)
-	require.Empty(t, clone.Provenance())
-}

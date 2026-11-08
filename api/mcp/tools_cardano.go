@@ -560,7 +560,7 @@ func registerCardanoTools(
 				"cursor pagination requires a full address",
 			)
 		}
-		if offset > maxToolOffset {
+		if offset > limits.maxOffset {
 			return nil, nil, errOffsetTooLarge
 		}
 		if err := limits.admit(); err != nil {
@@ -725,7 +725,7 @@ func registerCardanoTools(
 			addr,
 			len(utxoRows),
 			offset,
-			offsetLimitNote(offset, limit, len(utxoRows)),
+			offsetLimitNote(offset, limit, len(utxoRows), limits.maxOffset),
 		)
 
 		return &mcp.CallToolResult{
@@ -1167,7 +1167,7 @@ func registerCardanoTools(
 			limit = 200
 		}
 		offset := max(input.Offset, 0)
-		if offset > maxToolOffset {
+		if offset > limits.maxOffset {
 			return nil, nil, errOffsetTooLarge
 		}
 		if err := limits.admit(); err != nil {
@@ -1312,7 +1312,7 @@ func registerCardanoTools(
 			policyHex,
 			len(resRows),
 			offset,
-			offsetLimitNote(offset, limit, len(resRows)),
+			offsetLimitNote(offset, limit, len(resRows), limits.maxOffset),
 			FormatMarkdownTable(cols, resRows),
 		)
 		return &mcp.CallToolResult{

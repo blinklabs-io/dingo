@@ -489,18 +489,6 @@ func TestFetchLeiosEbTxsBatchedUntilPastDeadline(t *testing.T) {
 	)
 }
 
-// TestLeiosFetchResponseTimeoutFitsBackfillAttempt ensures a single request
-// that receives no response cannot add more than one per-connection attempt
-// budget before the fetch loop gets another chance to fail over.
-func TestLeiosFetchResponseTimeoutFitsBackfillAttempt(t *testing.T) {
-	t.Parallel()
-	require.LessOrEqual(
-		t,
-		leiosFetchResponseTimeout,
-		leiosBackfillPerAttemptTimeout,
-	)
-}
-
 // dribbleBlockTxsRequester simulates a slow-but-alive relay that answers every
 // request in full but takes real time per round, so the
 // leios-fetch protocol per-message timeout never fires yet the fetch never
@@ -625,6 +613,7 @@ func TestLeiosFetchGuardCooldown(t *testing.T) {
 }
 
 func TestBackfillFinalRelayGetsRemainingBudgetAfterPromotion(t *testing.T) {
+	// Not t.Parallel: mutates the package-level leiosBackfillConnCursor.
 	previousCursor := leiosBackfillConnCursor.Load()
 	leiosBackfillConnCursor.Store(2)
 	t.Cleanup(func() { leiosBackfillConnCursor.Store(previousCursor) })

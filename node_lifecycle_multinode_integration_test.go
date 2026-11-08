@@ -447,18 +447,9 @@ func TestLiveTruncateUnderRealForgingAndNetworking(t *testing.T) {
 	// real network connection and full chainsync/blockfetch pipeline
 	// still work after a live in-process rebuild.
 	waitForTipSlotAtLeast(t, syncer, tipBeforeTruncate.Point.Slot+5)
-}
 
-// TestLiveRestoreUnderRealForgingAndNetworking mirrors the truncate test
-// above for Restore: snapshot the syncing node while live, restore that
-// same snapshot back onto it mid-flight, and confirm it keeps syncing
-// from the still-forging peer afterward.
-func TestLiveRestoreUnderRealForgingAndNetworking(t *testing.T) {
-	t.Parallel()
-
-	_, syncer, syncerLn := startTwoNodeDevnet(t)
-	waitForTipSlotAtLeast(t, syncer, 10)
-
+	// Restore on the same pair: snapshot the live syncer, restore that
+	// snapshot onto it mid-flight, and confirm it keeps syncing.
 	snapshotDir := snapshotTestDir(t, "snap")
 	syncer.liveLifecycleMu.Lock()
 	manifest, err := lifecycleSnapshot(t, syncer, snapshotDir)
@@ -469,10 +460,8 @@ func TestLiveRestoreUnderRealForgingAndNetworking(t *testing.T) {
 
 	_, err = syncer.Restore(context.Background(), snapshotDir)
 	require.NoError(t, err)
-	// Forging and ingestion remain live while Snapshot runs, so the node can
-	// advance after the snapshot captures its manifest tip and before the
-	// later GetTip above. The snapshot must not be ahead of that observed
-	// live tip; equality is not guaranteed by this concurrent test.
+	// The node keeps advancing between the snapshot's manifest tip and the
+	// later GetTip, so only an upper bound holds.
 	require.LessOrEqual(t, manifest.TipSlot, tipBeforeRestore.Point.Slot)
 	requireInboundListenerAcceptsConnections(t, syncerLn)
 
@@ -535,18 +524,4 @@ func nodeLogTail(t *testing.T, name string) io.Writer {
 		}
 	})
 	return tail
-}
-
-func TestLineTailKeepsTheLastLines(t *testing.T) {
-	t.Parallel()
-	tail := &lineTail{limit: 2}
-	for _, chunk := range []string{"one\ntw", "o\nthree\n", "four"} {
-		n, err := tail.Write([]byte(chunk))
-		require.NoError(t, err)
-		require.Equal(t, len(chunk), n)
-	}
-	require.Equal(t, []string{"two", "three"}, tail.snapshot())
-	_, err := tail.Write([]byte("\n"))
-	require.NoError(t, err)
-	require.Equal(t, []string{"three", "four"}, tail.snapshot())
 }

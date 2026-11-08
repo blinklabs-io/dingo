@@ -41,12 +41,15 @@ func TestLoadWithDBSelectsDijkstraBlsProofDomain(t *testing.T) {
 		{"dijkstra", lcommon.DijkstraBlsProofDomainLegacySig}, {"musashi", lcommon.DijkstraBlsProofDomainPop}, {"preview", lcommon.DijkstraBlsProofDomainPop},
 	} {
 		t.Run(tc.network, func(t *testing.T) {
+			// LoadWithDB drops deferred indexes before it reaches the seam, so
+			// each network gets its own database.
+			db := newTestDB(t)
 			err := LoadWithDB(
 				context.Background(),
 				&config.Config{Network: tc.network},
 				slog.New(slog.NewTextHandler(io.Discard, nil)),
 				"unused",
-				newTestDB(t),
+				db,
 			)
 			require.ErrorIs(t, err, stop)
 			require.Equal(t, tc.want, captured.DijkstraBlsProofDomain)

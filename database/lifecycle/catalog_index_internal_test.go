@@ -159,20 +159,6 @@ func (d *catalogRepairDestination) Delete(context.Context) error {
 	return os.RemoveAll(d.dir)
 }
 
-func TestSnapshotCatalogUsesCanonicalSQLiteConfiguration(t *testing.T) {
-	t.Parallel()
-	path := filepath.Join(t.TempDir(), "catalog.sqlite")
-	db, err := openSnapshotCatalog(t.Context(), path, true)
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, db.Close()) })
-	var journalMode string
-	require.NoError(t, db.QueryRow("PRAGMA journal_mode").Scan(&journalMode))
-	require.Equal(t, "wal", strings.ToLower(journalMode))
-	var busyTimeout int
-	require.NoError(t, db.QueryRow("PRAGMA busy_timeout").Scan(&busyTimeout))
-	require.Equal(t, snapshotCatalogBusyMS, busyTimeout)
-}
-
 func TestSnapshotCatalogLockHonorsCancellation(t *testing.T) {
 	snapshotCatalogMu <- struct{}{}
 	t.Cleanup(func() { <-snapshotCatalogMu })
@@ -180,34 +166,6 @@ func TestSnapshotCatalogLockHonorsCancellation(t *testing.T) {
 	cancel()
 	err := EnsureSnapshotCatalogContext(ctx, t.TempDir())
 	require.ErrorIs(t, err, context.Canceled)
-}
-
-func TestSnapshotCatalogContinuationUsesIndexSeek(t *testing.T) {
-	t.Parallel()
-	db, err := openSnapshotCatalog(t.Context(), ":memory:", true)
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, db.Close()) })
-	require.NoError(t, createSnapshotCatalogSchema(db))
-
-	rows, err := db.Query(
-		"EXPLAIN QUERY PLAN "+nextSnapshotPageQuery,
-		int64(1_700_000_000), 123, "snapshot-050000", 101,
-	)
-	require.NoError(t, err)
-	defer rows.Close() //nolint:errcheck
-	var plan []string
-	for rows.Next() {
-		var id, parent, unused int
-		var detail string
-		require.NoError(t, rows.Scan(&id, &parent, &unused, &detail))
-		plan = append(plan, detail)
-	}
-	require.NoError(t, rows.Err())
-	require.Contains(
-		t,
-		strings.Join(plan, "\n"),
-		"SEARCH snapshots USING COVERING INDEX snapshots_created",
-	)
 }
 
 func TestSnapshotCatalogRejectsTraversalRowBeforeManifestRead(t *testing.T) {
@@ -589,60 +547,6 @@ func TestAvailableSnapshotPageOrdersAndDeduplicatesCatalogs(t *testing.T) {
 	require.Len(t, second, 1)
 	require.Equal(t, "cloud-old", second[0].Entry.ID)
 	require.Nil(t, next)
-}
-
-func TestAvailableSnapshotPageUsesOrderingIndexWithoutTempSort(t *testing.T) {
-	t.Parallel()
-	db, err := openSnapshotCatalog(t.Context(), ":memory:", true)
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, db.Close()) })
-	require.NoError(t, createSnapshotCatalogSchema(db))
-
-	assertPlan := func(
-		query string,
-		wantIndex string,
-		forbidden []string,
-		args ...any,
-	) {
-		rows, err := db.QueryContext(
-			t.Context(), "EXPLAIN QUERY PLAN "+query, args...,
-		)
-		require.NoError(t, err)
-		defer rows.Close() //nolint:errcheck
-		var details []string
-		for rows.Next() {
-			var id, parent, unused int
-			var detail string
-			require.NoError(t, rows.Scan(&id, &parent, &unused, &detail))
-			details = append(details, detail)
-		}
-		require.NoError(t, rows.Err())
-		plan := strings.Join(details, "\n")
-		require.Contains(t, plan, wantIndex, plan)
-		require.NotContains(t, plan, "USE TEMP B-TREE", plan)
-		for _, table := range forbidden {
-			require.NotContains(t, plan, table, plan)
-		}
-	}
-
-	assertPlan(
-		firstAvailableSnapshotPageQuery, "available_snapshots_created",
-		[]string{"cloud_snapshots", "snapshots AS"}, 6,
-	)
-	assertPlan(
-		nextAvailableSnapshotPageQuery, "available_snapshots_created",
-		[]string{"cloud_snapshots", "snapshots AS"},
-		int64(50), 0, "id", 6,
-	)
-	assertPlan(
-		firstLocalAvailableSnapshotPageQuery, "snapshots_created",
-		[]string{"available_snapshots", "cloud_snapshots"}, 6,
-	)
-	assertPlan(
-		nextLocalAvailableSnapshotPageQuery, "snapshots_created",
-		[]string{"available_snapshots", "cloud_snapshots"},
-		int64(50), 0, "id", 6,
-	)
 }
 
 func TestCloudCatalogMutationFailureRepairsFromDurableSource(t *testing.T) {

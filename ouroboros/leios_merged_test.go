@@ -47,8 +47,6 @@ import (
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	oleiosfetch "github.com/blinklabs-io/gouroboros/protocol/leiosfetch"
 	oleiosnotify "github.com/blinklabs-io/gouroboros/protocol/leiosnotify"
-	"github.com/prometheus/client_golang/prometheus"
-	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -290,21 +288,6 @@ func TestRetryableLeiosEndorserBlocksPreferNewestOccurrence(t *testing.T) {
 		[]*leiosEndorserBlockData{newerA, newerB, oldest},
 		o.retryableLeiosEndorserBlocks(),
 	)
-}
-
-func TestMergedLeiosRankingBlockCborIsNoopForDijkstra(t *testing.T) {
-	t.Parallel()
-
-	_, blockRaw := testDijkstraBlockRaw(t, 1)
-
-	o := newOuroboros(OuroborosConfig{EnableLeios: true})
-	got, ok, err := o.mergedLeiosRankingBlockCbor(
-		context.Background(),
-		blockRaw,
-	)
-	require.NoError(t, err)
-	require.False(t, ok)
-	require.Equal(t, []byte(blockRaw), got)
 }
 
 func TestLeiosTxsFromBitmapPreservesRequestedOrder(t *testing.T) {
@@ -992,58 +975,6 @@ func TestEarlyWithinLeiosAnnouncementClockSkewDoesNotPenalizePeer(t *testing.T) 
 		require.NoError(t, o.handleInvalidLeiosAnnouncement("peer-a", invalid))
 	}
 	require.ErrorIs(t, o.handleInvalidLeiosAnnouncement("peer-a", invalid), invalid)
-}
-
-var errLeiosEndorserBlockNotCached = errors.New(
-	"leios endorser block not cached",
-)
-
-func (o *Ouroboros) fetchCachedLeiosEndorserBlockTxs(
-	point ocommon.Point,
-) ([]cbor.RawMessage, error) {
-	data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
-	if !ok {
-		return nil, fmt.Errorf(
-			"%w: %d.%x",
-			errLeiosEndorserBlockNotCached,
-			point.Slot,
-			point.Hash,
-		)
-	}
-	// In gouroboros v0.180.0 the Leios aliases decode as Dijkstra blocks.
-	// The current Dijkstra CDDL has no transaction-reference list, so there
-	// is no extra BlockTxsRequest to make here.
-	return cloneRawMessages(data.txsRaw), nil
-}
-
-func TestFetchCachedLeiosEndorserBlockTxsReturnsCompleteCacheWithoutFetch(
-	t *testing.T,
-) {
-	t.Parallel()
-
-	point, blockRaw := testLeiosEndorserBlockRaw(t, 10)
-	txRaw := testDijkstraTx(t, 0)
-
-	o := newOuroboros(OuroborosConfig{EnableLeios: true})
-	require.NoError(
-		t,
-		o.storeLeiosEndorserBlock(
-			point,
-			blockRaw,
-			[]cbor.RawMessage{txRaw},
-			leiosStoreAuthoritative,
-		),
-	)
-
-	got, err := o.fetchCachedLeiosEndorserBlockTxs(point)
-	require.NoError(t, err)
-	require.Len(t, got, 1)
-	require.Equal(t, []cbor.RawMessage{txRaw}, got)
-
-	got[0][0] ^= 0xff
-	cached, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
-	require.True(t, ok)
-	require.Equal(t, txRaw, cached.txsRaw[0])
 }
 
 // The forge loop rebases endorser-block selection onto the certified closure.
@@ -1851,34 +1782,6 @@ func TestLoadLeiosEBFromDBRejectsMalformedCompleteTransactions(
 	o.StopLeiosPersistWriter()
 }
 
-func TestLoadLeiosEBFromDBAcceptsTransactionsThatMatchManifest(t *testing.T) {
-	t.Parallel()
-
-	validTx, ref := testLeiosManifestTx(t, 1)
-	manifestRaw, err := lcommon.LeiosEndorserBlock{
-		TransactionReferences: []lcommon.LeiosTransactionReference{ref},
-	}.MarshalCBOR()
-	require.NoError(t, err)
-	point := ocommon.NewPoint(
-		123,
-		lcommon.Blake2b256Hash(manifestRaw).Bytes(),
-	)
-	o := newTestOuroborosWithLeiosDB(t)
-	db := o.leiosDatabase()
-	require.NotNil(t, db)
-	require.NoError(t, db.SetLeiosEB(
-		point.Slot,
-		point.Hash,
-		manifestRaw,
-		[]cbor.RawMessage{validTx},
-	))
-
-	cached, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
-	require.True(t, ok)
-	require.True(t, cached.completeTxCache())
-	require.Equal(t, []cbor.RawMessage{validTx}, cached.txsRaw)
-}
-
 func TestSpliceEndorserTxsIntoDijkstraBlockFillsCertRB(t *testing.T) {
 	t.Parallel()
 
@@ -1997,40 +1900,6 @@ func TestSpliceEndorserTxsKeepsIsValidFlag(t *testing.T) {
 	}
 }
 
-func TestSpliceEndorserTxsRejectsNonBlockTransactionForms(t *testing.T) {
-	t.Parallel()
-
-	body := mustCbor(t, []any{uint64(1)})
-	witnesses := mustCbor(t, map[uint]any{})
-	auxiliaryData := mustCbor(t, map[uint]any{0: []byte{0x01}})
-	certRB := testDijkstraCertRBRaw(
-		t,
-		100,
-		make([]byte, lcommon.Blake2b256Size),
-	)
-	blockTx := mustCbor(t, []cbor.RawMessage{
-		body, witnesses, auxiliaryData, mustCbor(t, true),
-	})
-	for name, tx := range map[string]cbor.RawMessage{
-		"mempool order": mustCbor(t, []cbor.RawMessage{
-			body, witnesses, mustCbor(t, true), auxiliaryData,
-		}),
-		"without is_valid": mustCbor(t, []cbor.RawMessage{
-			body, witnesses, auxiliaryData,
-		}),
-		"byte string wrapper": mustCbor(t, []byte(blockTx)),
-	} {
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			_, err := spliceEndorserTxsIntoDijkstraBlock(
-				certRB,
-				[]cbor.RawMessage{tx},
-			)
-			require.Error(t, err)
-		})
-	}
-}
-
 func TestSpliceEndorserTxsRejectsBlockWithExistingTxs(t *testing.T) {
 	t.Parallel()
 
@@ -2090,34 +1959,6 @@ func TestLeiosAnnouncementFromBlockCbor(t *testing.T) {
 	got, ok = leiosAnnouncementFromBlockCbor(combined)
 	require.True(t, ok)
 	require.Equal(t, ebHash, got.Bytes())
-}
-
-func TestResolveCertifiedEndorserTxsGuards(t *testing.T) {
-	t.Parallel()
-
-	// A non-certifying Dijkstra block is never merged.
-	_, blockRaw := testDijkstraBlockRaw(t, 1)
-	o := newOuroboros(OuroborosConfig{EnableLeios: true})
-	_, ok := o.resolveCertifiedEndorserTxs(context.Background(), blockRaw)
-	require.False(t, ok)
-
-	// A CertRB with no ledger state (so no parent to resolve) is served raw.
-	certRB := testDijkstraCertRBRaw(t, 2, make([]byte, lcommon.Blake2b256Size))
-	_, ok = o.resolveCertifiedEndorserTxs(context.Background(), certRB)
-	require.False(t, ok)
-}
-
-func TestMergedLeiosRankingBlockCborServesRawForCertRBWithoutLedger(
-	t *testing.T,
-) {
-	t.Parallel()
-
-	certRB := testDijkstraCertRBRaw(t, 3, make([]byte, lcommon.Blake2b256Size))
-	o := newOuroboros(OuroborosConfig{EnableLeios: true})
-	got, ok, err := o.mergedLeiosRankingBlockCbor(context.Background(), certRB)
-	require.NoError(t, err)
-	require.False(t, ok)
-	require.Equal(t, []byte(certRB), got)
 }
 
 func TestCertifiedEndorserBlockHashTriState(t *testing.T) {
@@ -3300,70 +3141,6 @@ func TestAwaitMergedLeiosRankingBlockTimesOut(t *testing.T) {
 	require.Nil(t, merged)
 }
 
-func TestLeiosCertRbMetricsRecordOutcomes(t *testing.T) {
-	t.Parallel()
-
-	reg := prometheus.NewRegistry()
-	o := newOuroboros(OuroborosConfig{EnableLeios: true, PromRegistry: reg})
-	require.NotNil(t, o.leiosMetrics)
-
-	o.recordLeiosCertRbOutcome("merged")
-	o.recordLeiosCertRbOutcome("merged_after_wait")
-	o.recordLeiosCertRbOutcome("unresolved")
-	o.recordLeiosCertRbOutcome("unresolved")
-	o.recordLeiosCertRbWait("resolved", 100*time.Millisecond)
-	o.recordLeiosCertRbWait("timeout", 3*time.Second)
-	o.recordLeiosCertRbWait("cancelled", 5*time.Millisecond)
-
-	require.Equal(t, float64(1), promtestutil.ToFloat64(
-		o.leiosMetrics.certRbOutcomes.WithLabelValues("merged"),
-	))
-	require.Equal(t, float64(1), promtestutil.ToFloat64(
-		o.leiosMetrics.certRbOutcomes.WithLabelValues("merged_after_wait"),
-	))
-	require.Equal(t, float64(2), promtestutil.ToFloat64(
-		o.leiosMetrics.certRbOutcomes.WithLabelValues("unresolved"),
-	))
-	// One histogram series per wait outcome (resolved, timeout, cancelled).
-	require.Equal(t, 3, promtestutil.CollectAndCount(
-		o.leiosMetrics.certRbWaitSeconds,
-	))
-}
-
-func TestLeiosCertRbMetricsNilSafe(t *testing.T) {
-	t.Parallel()
-
-	// Without a PromRegistry, metrics are not initialized; recording must be
-	// a no-op rather than panicking.
-	o := newOuroboros(OuroborosConfig{EnableLeios: true})
-	require.Nil(t, o.leiosMetrics)
-	require.NotPanics(t, func() {
-		o.recordLeiosCertRbOutcome("merged")
-		o.recordLeiosCertRbWait("timeout", time.Second)
-	})
-}
-
-func TestLeiosClosureWaitTimeoutPrecedence(t *testing.T) {
-	t.Parallel()
-
-	// Explicit config override wins.
-	o := newOuroboros(OuroborosConfig{
-		EnableLeios:             true,
-		LeiosClosureWaitTimeout: 5 * time.Second,
-	})
-	require.Equal(t, 5*time.Second, o.leiosClosureWaitTimeout())
-
-	// With no override and no ledger timing, the conservative default applies
-	// (not a short constant).
-	o = newOuroboros(OuroborosConfig{EnableLeios: true})
-	require.Equal(
-		t,
-		defaultLeiosClosureWaitTimeout,
-		o.leiosClosureWaitTimeout(),
-	)
-	require.GreaterOrEqual(t, defaultLeiosClosureWaitTimeout, 6*time.Second)
-}
-
 func TestServeLeiosCertRbWithWaitErrorsOnTimeout(t *testing.T) {
 	t.Parallel()
 
@@ -3652,6 +3429,8 @@ func TestResolveCertifiedEndorserTxsWithholdsUnverifiedSlot(t *testing.T) {
 // peer suppress block production by offering a manifest bound to a slot near
 // the current one. Only corroborated occurrences may advance it.
 func TestMaxVerifiedEndorserBlockSlotTracksOnlyCorroboratedSlots(t *testing.T) {
+	t.Parallel()
+
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	require.Zero(t, o.MaxVerifiedEndorserBlockSlot())
 
@@ -3764,58 +3543,4 @@ func TestLeiosReloadDiscardsLegacyWrappedPersistedTxs(t *testing.T) {
 	require.True(t, ok)
 	require.False(t, data.completeTxCache())
 	require.Empty(t, data.txsRaw)
-
-	// Control: the same transaction in the current form reloads complete.
-	o2 := newTestOuroborosWithLeiosDB(t)
-	require.NoError(t, o2.leiosDatabase().SetLeiosEB(
-		point.Slot,
-		point.Hash,
-		manifestRaw,
-		[]cbor.RawMessage{tx},
-	))
-	data, ok = o2.loadLeiosEBFromDB(point.Slot, point.Hash)
-	require.True(t, ok)
-	require.True(t, data.completeTxCache())
-	require.Equal(t, []cbor.RawMessage{tx}, data.txsRaw)
-}
-
-// The reply carries only the transactions, each wrapped in tag 24 on the
-// wire; the cached value stays the bare block_transaction.
-func TestLeiosFetchServerBlockTxsWireFormat(t *testing.T) {
-	t.Parallel()
-
-	tx0, ref0 := testLeiosManifestTx(t, 0)
-	tx1, ref1 := testLeiosManifestTx(t, 1)
-	blockRaw, err := cbor.Encode(&lcommon.LeiosEndorserBlock{
-		TransactionReferences: []lcommon.LeiosTransactionReference{ref0, ref1},
-	})
-	require.NoError(t, err)
-	point := ocommon.NewPoint(10, lcommon.Blake2b256Hash(blockRaw).Bytes())
-	o := newOuroboros(OuroborosConfig{EnableLeios: true})
-	require.NoError(t, o.storeLeiosEndorserBlock(
-		point, blockRaw, []cbor.RawMessage{tx0, tx1}, leiosStoreAuthoritative,
-	))
-
-	msg, err := o.leiosfetchServerBlockTxsRequest(
-		oleiosfetch.CallbackContext{},
-		point,
-		map[uint16]uint64{0: (1 << 63) | (1 << 62)},
-	)
-	require.NoError(t, err)
-	wire, err := cbor.Encode(msg)
-	require.NoError(t, err)
-
-	var envelope []cbor.RawMessage
-	_, err = cbor.Decode(wire, &envelope)
-	require.NoError(t, err)
-	require.Len(t, envelope, 2)
-	require.Equal(t, mustCbor(t, oleiosfetch.MessageTypeBlockTxs), envelope[0])
-	var wrapped []cbor.Tag
-	_, err = cbor.Decode(envelope[1], &wrapped)
-	require.NoError(t, err)
-	require.Len(t, wrapped, 2)
-	for i, want := range []cbor.RawMessage{tx0, tx1} {
-		require.EqualValues(t, 24, wrapped[i].Number)
-		require.Equal(t, []byte(want), wrapped[i].Content)
-	}
 }

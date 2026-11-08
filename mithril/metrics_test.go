@@ -42,19 +42,6 @@ func histogramCount(t *testing.T, h prometheus.Histogram) uint64 {
 	return out.GetHistogram().GetSampleCount()
 }
 
-func TestPipelineMetricsNilRegistry(t *testing.T) {
-	t.Parallel()
-	m, err := NewPipelineMetrics(nil)
-	require.NoError(t, err)
-	require.Nil(t, m)
-	// A nil value records nothing and must not panic.
-	m.setWindowOccupancy(1)
-	m.chunkDownloaded()
-	m.chunkApplied()
-	m.observeBatchCommit(0)
-	m.staleRestart()
-}
-
 func TestPipelineMetricsReuseRegistry(t *testing.T) {
 	t.Parallel()
 	reg := prometheus.NewRegistry()

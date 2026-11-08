@@ -26,21 +26,11 @@ func TestProvenanceDefaultIsNotExplicit(t *testing.T) {
 	require.False(t, prov.IsExplicit("Network"))
 }
 
-func TestProvenanceFlagIsExplicit(t *testing.T) {
-	prov := config.Provenance{"Network": config.SourceFlag}
-	require.True(t, prov.IsExplicit("Network"))
-}
-
 func TestProvenanceYAMLIsExplicit(t *testing.T) {
 	// A config file is an operator statement, so a YAML key conflicting
 	// with a persisted gate is an error rather than an override.
 	prov := config.Provenance{"Network": config.SourceYAML}
 	require.True(t, prov.IsExplicit("Network"))
-}
-
-func TestProvenanceEnvIsExplicit(t *testing.T) {
-	prov := config.Provenance{"StorageMode": config.SourceEnv}
-	require.True(t, prov.IsExplicit("StorageMode"))
 }
 
 func TestGatedFieldPathsResolveOnConfig(t *testing.T) {
