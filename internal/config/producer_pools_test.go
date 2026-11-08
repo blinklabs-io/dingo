@@ -1,0 +1,161 @@
+// Copyright 2026 Blink Labs Software
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package config
+
+import (
+	"strings"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+)
+
+func remotePool(n string) BlockProducerPool {
+	return BlockProducerPool{
+		ShelleyVRFKey:                   "/keys/" + n + "/vrf.skey",
+		ShelleyOperationalCertificate:   "/keys/" + n + "/node.cert",
+		ShelleyKESAgentAddress:          "kes-agent.example:3443",
+		ShelleyKESAgentClientCertFile:   "/keys/kes-client.crt",
+		ShelleyKESAgentClientKeyFile:    "/keys/kes-client.key",
+		ShelleyKESAgentServerSPKISHA256: strings.Repeat("ab", 32),
+	}
+}
+
+func TestValidateBlockProducerPools(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		modify  func(c *Config)
+		wantErr string
+	}{
+		{
+			name: "two pools",
+			modify: func(c *Config) {
+				c.BlockProducerPools = []BlockProducerPool{
+					remotePool("a"),
+					{
+						ShelleyVRFKey:                 "/keys/b/vrf.skey",
+						ShelleyKESKey:                 "/keys/b/kes.skey",
+						ShelleyOperationalCertificate: "/keys/b/node.cert",
+					},
+				}
+			},
+		},
+		{
+			name: "pools and top-level keys",
+			modify: func(c *Config) {
+				c.ShelleyVRFKey = "/keys/vrf.skey"
+				c.BlockProducerPools = []BlockProducerPool{remotePool("a")}
+			},
+			wantErr: "blockProducerPools replaces shelleyVrfKey",
+		},
+		{
+			name: "entry missing its opcert",
+			modify: func(c *Config) {
+				b := remotePool("b")
+				b.ShelleyOperationalCertificate = ""
+				c.BlockProducerPools = []BlockProducerPool{remotePool("a"), b}
+			},
+			wantErr: "[blockProducerPools[1].shelleyOperationalCertificate]",
+		},
+		{
+			name: "entry with a bad pin",
+			modify: func(c *Config) {
+				b := remotePool("b")
+				b.ShelleyKESAgentServerSPKISHA256 = "abcd"
+				c.BlockProducerPools = []BlockProducerPool{b}
+			},
+			wantErr: "blockProducerPools[0].shelleyKesAgentServerSpkiSha256 must be 64 hex characters",
+		},
+		{
+			name: "entry with two KES sources",
+			modify: func(c *Config) {
+				b := remotePool("b")
+				b.ShelleyKESKey = "/keys/b/kes.skey"
+				c.BlockProducerPools = []BlockProducerPool{b}
+			},
+			wantErr: "blockProducerPools[0].shelleyKesAgentAddress together with",
+		},
+		{
+			name: "two entries share an opcert",
+			modify: func(c *Config) {
+				c.BlockProducerPools = []BlockProducerPool{
+					remotePool("a"),
+					remotePool("a"),
+				}
+			},
+			wantErr: "blockProducerPools[0] and blockProducerPools[1] use the same operational certificate",
+		},
+		{
+			name: "entry with an invalid mode",
+			modify: func(c *Config) {
+				b := remotePool("b")
+				b.ShelleyKESAgentAddress = ""
+				b.ShelleyKESAgentSocket = "/run/kes.sock"
+				b.ShelleyKESAgentMode = "signing"
+				c.BlockProducerPools = []BlockProducerPool{b}
+			},
+			wantErr: "invalid blockProducerPools[0].shelleyKesAgentMode",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := validTestConfig()
+			cfg.BlockProducer = true
+			tc.modify(cfg)
+			err := cfg.Validate(RunModeServe)
+			if tc.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorContains(t, err, tc.wantErr)
+		})
+	}
+}
+
+func TestProducerPoolsFallsBackToTopLevelKeys(t *testing.T) {
+	t.Parallel()
+	cfg := validTestConfig()
+	cfg.ShelleyVRFKey = "/keys/vrf.skey"
+	cfg.ShelleyKESAgentSocket = "/run/kes.sock"
+	cfg.ShelleyOperationalCertificate = "/keys/node.cert"
+	pools := cfg.ProducerPools()
+	require.Len(t, pools, 1)
+	require.Equal(t, "/keys/vrf.skey", pools[0].ShelleyVRFKey)
+	require.Equal(t, "/run/kes.sock", pools[0].ShelleyKESAgentSocket)
+}
+
+// Not t.Parallel: loadConfigThroughPipeline resets the package-level
+// globalConfig.
+func TestPipeline_BlockProducerPoolsFromYAML(t *testing.T) {
+	cfg, err := loadConfigThroughPipeline(t, `
+blockProducer: true
+blockProducerPools:
+  - shelleyVrfKey: /keys/a/vrf.skey
+    shelleyOperationalCertificate: /keys/a/node.cert
+    shelleyKesAgentAddress: kes-agent.example:3443
+    shelleyKesAgentClientCertFile: /keys/kes-client.crt
+    shelleyKesAgentClientKeyFile: /keys/kes-client.key
+    shelleyKesAgentServerSpkiSha256: `+strings.Repeat("cd", 32)+`
+  - shelleyVrfKey: /keys/b/vrf.skey
+    shelleyOperationalCertificate: /keys/b/node.cert
+    shelleyKesAgentSocket: /run/kes-b.sock
+`, nil)
+	require.NoError(t, err)
+	require.Len(t, cfg.BlockProducerPools, 2)
+	require.Equal(t, "sign", cfg.BlockProducerPools[0].ShelleyKESAgentMode)
+	require.Equal(t, "serve-key", cfg.BlockProducerPools[1].ShelleyKESAgentMode)
+	require.Equal(t, "/run/kes-b.sock", cfg.ProducerPools()[1].ShelleyKESAgentSocket)
+}

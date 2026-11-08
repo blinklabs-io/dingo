@@ -1043,8 +1043,14 @@ type Config struct {
 	// agent logs at startup as server_spki_sha256. The agent is authenticated
 	// by this pin alone, not by a certificate authority.
 	ShelleyKESAgentServerSPKISHA256 string `yaml:"shelleyKesAgentServerSpkiSha256" envconfig:"SHELLEY_KES_AGENT_SERVER_SPKI_SHA256"`
-	ForgeSyncToleranceSlots         uint64 `yaml:"forgeSyncToleranceSlots"          envconfig:"DINGO_FORGE_SYNC_TOLERANCE_SLOTS"`
-	ForgeStaleGapThresholdSlots     uint64 `yaml:"forgeStaleGapThresholdSlots"      envconfig:"DINGO_FORGE_STALE_GAP_THRESHOLD_SLOTS"`
+	// BlockProducerPools lists every pool this block producer forges for,
+	// each with its own VRF key, operational certificate and KES source. It
+	// replaces the single-pool shelleyVrfKey, shelleyKesKey,
+	// shelleyOperationalCertificate and shelleyKesAgent* settings above,
+	// which stay the way to configure one pool. YAML only.
+	BlockProducerPools          []BlockProducerPool `yaml:"blockProducerPools"              ignored:"true"`
+	ForgeSyncToleranceSlots     uint64              `yaml:"forgeSyncToleranceSlots"          envconfig:"DINGO_FORGE_SYNC_TOLERANCE_SLOTS"`
+	ForgeStaleGapThresholdSlots uint64              `yaml:"forgeStaleGapThresholdSlots"      envconfig:"DINGO_FORGE_STALE_GAP_THRESHOLD_SLOTS"`
 	// ForgeUpstreamStalenessSlots bounds how far the newest block this node
 	// holds may trail the corroborated upstream sync target before forging is
 	// skipped. 0 (the default) disables it.
@@ -2090,6 +2096,9 @@ func (c *Config) ApplyDefaults() {
 	if c.ShelleyKESAgentAddress != "" && c.ShelleyKESAgentMode == "" {
 		c.ShelleyKESAgentMode = "sign"
 	}
+	for i := range c.BlockProducerPools {
+		c.BlockProducerPools[i].applyDefaults()
+	}
 	// Match the Midnight server's default for explicitly empty YAML or
 	// environment values.
 	if c.Midnight.Host == "" {
@@ -2395,4 +2404,57 @@ func applyMCPAuthCompatibilityEnvironment(cfg *Config, environ []string) {
 		}
 		cfg.Plugins.API.Mcp.Config["authToken"] = token
 	}
+}
+
+// BlockProducerPool is one pool a block producer forges for: its VRF key,
+// its operational certificate, and one KES source -- a local key file, a
+// local KES agent socket, or a remote KES agent. The fields mean what the
+// top-level settings of the same name mean.
+type BlockProducerPool struct {
+	ShelleyVRFKey                   string `yaml:"shelleyVrfKey"`
+	ShelleyKESKey                   string `yaml:"shelleyKesKey"`
+	ShelleyOperationalCertificate   string `yaml:"shelleyOperationalCertificate"`
+	ShelleyKESAgentSocket           string `yaml:"shelleyKesAgentSocket"`
+	ShelleyKESAgentMode             string `yaml:"shelleyKesAgentMode"`
+	ShelleyKESAgentAddress          string `yaml:"shelleyKesAgentAddress"`
+	ShelleyKESAgentClientCertFile   string `yaml:"shelleyKesAgentClientCertFile"`
+	ShelleyKESAgentClientKeyFile    string `yaml:"shelleyKesAgentClientKeyFile"`
+	ShelleyKESAgentServerSPKISHA256 string `yaml:"shelleyKesAgentServerSpkiSha256"`
+}
+
+func (p *BlockProducerPool) applyDefaults() {
+	if p.ShelleyKESAgentMode != "" {
+		return
+	}
+	switch {
+	case p.ShelleyKESAgentAddress != "":
+		p.ShelleyKESAgentMode = "sign"
+	case p.ShelleyKESAgentSocket != "":
+		p.ShelleyKESAgentMode = "serve-key"
+	}
+}
+
+// singlePool is the pool the top-level key settings describe.
+func (c *Config) singlePool() BlockProducerPool {
+	return BlockProducerPool{
+		ShelleyVRFKey:                   c.ShelleyVRFKey,
+		ShelleyKESKey:                   c.ShelleyKESKey,
+		ShelleyOperationalCertificate:   c.ShelleyOperationalCertificate,
+		ShelleyKESAgentSocket:           c.ShelleyKESAgentSocket,
+		ShelleyKESAgentMode:             c.ShelleyKESAgentMode,
+		ShelleyKESAgentAddress:          c.ShelleyKESAgentAddress,
+		ShelleyKESAgentClientCertFile:   c.ShelleyKESAgentClientCertFile,
+		ShelleyKESAgentClientKeyFile:    c.ShelleyKESAgentClientKeyFile,
+		ShelleyKESAgentServerSPKISHA256: c.ShelleyKESAgentServerSPKISHA256,
+	}
+}
+
+// ProducerPools returns the pools this block producer forges for:
+// BlockProducerPools when set, otherwise the one pool the top-level key
+// settings describe.
+func (c *Config) ProducerPools() []BlockProducerPool {
+	if len(c.BlockProducerPools) > 0 {
+		return c.BlockProducerPools
+	}
+	return []BlockProducerPool{c.singlePool()}
 }
