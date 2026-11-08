@@ -388,7 +388,7 @@ func (s *Store) insertUtxoModelsChecked(
 		query := insertUtxoBatchQuery(len(batch))
 		args := make([]any, 0, len(batch)*15)
 		for _, utxo := range batch {
-			params, err := createUtxoParams(utxo)
+			params, err := s.createUtxoParamsChecked(ctx, db, utxo)
 			if err != nil {
 				return nil, err
 			}
@@ -2059,9 +2059,9 @@ DELETE FROM asset_mint_burn WHERE slot > ?`,
 // can emulate the returning ID. SQLite uses the Exec-result forms below.
 // spentByPlaceholder resolves a spender hash bound by the caller to the
 // spender's transaction row id inside the statement. A NULL hash, which every
-// freshly produced output carries, yields NULL without a lookup. A hash with
-// no transaction row also yields NULL; the apply paths store spends by id
-// directly and only import and recovery inserts pass a hash.
+// freshly produced output carries, yields NULL without a lookup. Callers that
+// bind a non-empty hash go through createUtxoParamsChecked, which fails the
+// write when the hash has no transaction row.
 const spentByPlaceholder = `(SELECT id FROM "transaction" WHERE hash = ?)`
 
 const insertUtxoQuery = `-- name: InsertUtxo :one
@@ -2152,7 +2152,7 @@ func (s *Store) insertUtxoModelCheckedWithRows(
 	deferredRows *rowBatch,
 ) (bool, error) {
 	inserted := true
-	params, err := createUtxoParams(utxo)
+	params, err := s.createUtxoParamsChecked(ctx, db, utxo)
 	if err != nil {
 		return false, err
 	}

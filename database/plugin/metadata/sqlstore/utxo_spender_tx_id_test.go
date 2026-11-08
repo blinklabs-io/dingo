@@ -145,3 +145,30 @@ WHERE spent_by_tx_id IN (?, ?, ?)`,
 	require.Contains(t, plan, "tx_id_output_idx", plan)
 	require.NotContains(t, plan, "SCAN", plan)
 }
+
+// TestInsertWithUnknownSpenderFails requires an insert that names a spender
+// hash with no transaction row to fail rather than store a spent output with
+// no spender.
+func TestInsertWithUnknownSpenderFails(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	err := store.CreateUtxo(nil, &models.Utxo{
+		TxId:        bytes32(0x61),
+		DeletedSlot: 5,
+		SpentAtTxId: bytes32(0x62),
+	})
+	require.ErrorContains(t, err, "spender transaction")
+	var count int
+	require.NoError(t, store.writeDB.QueryRow(
+		"SELECT COUNT(*) FROM utxo",
+	).Scan(&count))
+	require.Zero(t, count)
+}
+
+func bytes32(b byte) []byte {
+	out := make([]byte, 32)
+	for i := range out {
+		out[i] = b
+	}
+	return out
+}

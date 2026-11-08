@@ -65,7 +65,7 @@ func (s *Store) CreateUtxo(txn types.Txn, utxo *models.Utxo) error {
 		txn,
 		func(db queryer, ctx context.Context) error {
 			q := s.operationalQueries(db)
-			params, err := createUtxoParams(utxo)
+			params, err := s.createUtxoParamsChecked(ctx, db, utxo)
 			if err != nil {
 				return err
 			}
@@ -830,7 +830,7 @@ func (s *Store) importUtxos(
 			slots := make(map[string]uint64)
 			for i := range utxos {
 				item := utxos[i]
-				params, err := createUtxoParams(&item)
+				params, err := s.createUtxoParamsChecked(ctx, db, &item)
 				if err != nil {
 					return err
 				}
@@ -3661,6 +3661,23 @@ func (p utxoInsertParams) args() []any {
 		p.OutputIdx,
 		p.PaymentScript,
 	}
+}
+
+// createUtxoParamsChecked is createUtxoParams plus the guarantee that a
+// spender hash names an existing transaction row. The insert statements
+// resolve the hash in SQL and would store NULL for an unknown one, so the
+// check runs first and fails the write as the legacy foreign key did.
+func (s *Store) createUtxoParamsChecked(
+	ctx context.Context,
+	db queryer,
+	utxo *models.Utxo,
+) (utxoInsertParams, error) {
+	if len(utxo.SpentAtTxId) != 0 {
+		if _, err := s.spenderTxID(ctx, db, utxo.SpentAtTxId); err != nil {
+			return utxoInsertParams{}, err
+		}
+	}
+	return createUtxoParams(utxo)
 }
 
 func createUtxoParams(
