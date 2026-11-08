@@ -478,6 +478,7 @@ func (n *Node) newKESAgentSignClient(
 		ClientCertFile:    n.config.shelleyKESAgentClientCertFile,
 		ClientKeyFile:     n.config.shelleyKESAgentClientKeyFile,
 		ServerSPKISHA256:  n.config.shelleyKESAgentServerSPKISHA256,
+		Plaintext:         n.config.shelleyKESAgentPlaintext,
 		KESVKey:           opCertKey.VKey,
 		OpCertStartPeriod: opCertKey.OpCertKesPeriod,
 		OpCert:            opCertKey.RawCBOR,
