@@ -538,7 +538,10 @@ func TestBlockReferenceScriptAggregateReusesPrefetchedUtxos(t *testing.T) {
 			)
 			inputs = append(
 				inputs,
-				shelley.MustNewShelleyTransactionInput(hex.EncodeToString(id), 0),
+				shelley.MustNewShelleyTransactionInput(
+					hex.EncodeToString(id),
+					0,
+				),
 			)
 		}
 		return inputs
@@ -787,8 +790,9 @@ func TestDijkstraBlockReferenceScriptsWithConwayParameters(t *testing.T) {
 
 // TestReferenceScriptParamsFollowEraListPredecessor checks that the aggregate
 // check picks the previous era's parameters by the same rule
-// resolveValidationEra applies to the block's transactions: the block's era is
-// the one listed immediately before the ledger's era, whatever its numeric ID.
+// resolveBlockValidationEra applies to the block's transactions: the block's
+// era is the one listed immediately before the ledger's era, whatever its
+// numeric ID.
 func TestReferenceScriptParamsFollowEraListPredecessor(t *testing.T) {
 	t.Parallel()
 
