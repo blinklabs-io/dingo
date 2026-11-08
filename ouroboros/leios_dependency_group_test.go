@@ -16,14 +16,17 @@ package ouroboros
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"net"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
 
 	gouroboros "github.com/blinklabs-io/gouroboros"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/protocol"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -371,4 +374,81 @@ func TestLeiosDependencySlowLookupCannotSendAfterOwnerReplacement(
 	o.leiosEBLog.mu.Unlock()
 	o.leiosEBLog.removeConn(key)
 	o.leiosEBLog.removeConn("holder")
+}
+
+type relayTimingFailureLedger struct {
+	*fakeLeiosAnnouncementLedger
+	fail atomic.Bool
+}
+
+func (l *relayTimingFailureLedger) SlotToTime(slot uint64) (time.Time, error) {
+	if l.fail.Load() {
+		return time.Time{}, errors.New("slot timing temporarily unavailable")
+	}
+	return l.fakeLeiosAnnouncementLedger.SlotToTime(slot)
+}
+
+func TestLeiosDeferredHeaderKeepsAdmittedExpiryWhenTimingFails(t *testing.T) {
+	t.Parallel()
+	for _, expired := range []bool{false, true} {
+		t.Run(fmt.Sprintf("expired_%t", expired), func(t *testing.T) {
+			t.Parallel()
+			synctest.Test(t, func(t *testing.T) {
+				base := &fakeLeiosAnnouncementLedger{slotTime: time.Now()}
+				ledger := &relayTimingFailureLedger{
+					fakeLeiosAnnouncementLedger: base,
+				}
+				o, point, manifest, tx, header := newDeferredRelayFixture(
+					t,
+					base,
+				)
+				o.leiosAnnouncementLedger = ledger
+				o.markLeiosEndorserBlockRelayOffer(point)
+				require.NoError(
+					t,
+					recordRelayedHeader(t, o, point, len(manifest), header),
+				)
+				require.NoError(
+					t,
+					o.storeLeiosEndorserBlock(
+						point,
+						manifest,
+						nil,
+						leiosStorePeerOffered,
+					),
+				)
+				before, _ := o.leiosEBLog.next("downstream")
+				require.Nil(t, before)
+				require.Len(t, o.leiosRelayPendingAnnouncements, 1)
+				ledger.fail.Store(true)
+				if expired {
+					time.Sleep(leiosNotifyRelayAnnouncementAge + time.Second)
+				}
+				require.NoError(
+					t,
+					o.storeLeiosEndorserBlock(
+						point,
+						manifest,
+						[]cbor.RawMessage{tx},
+						leiosStorePeerOffered,
+					),
+				)
+				entry, _ := o.leiosEBLog.next("downstream")
+				if expired {
+					require.Nil(t, entry)
+				} else {
+					require.NotNil(t, entry)
+					require.Equal(t, header, entry.announcement)
+					o.leiosEBLog.complete("downstream", nil, true)
+					offer, _ := o.leiosEBLog.next("downstream")
+					require.Nil(t, offer, "new offers need a valid expiry")
+				}
+				require.Empty(
+					t,
+					o.leiosRelayPendingAnnouncements,
+					"admitted headers must not remain parked",
+				)
+			})
+		})
+	}
 }

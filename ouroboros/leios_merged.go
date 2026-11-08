@@ -812,9 +812,9 @@ func (o *Ouroboros) publishLeiosEndorserBlock(
 }
 
 // enqueueLeiosRelayOffers forwards a peer-offered endorser block after its
-// announced slot has been verified. The manifest can be forwarded before the
-// transaction fetch completes; the transaction offer waits until every body
-// has been verified against the manifest.
+// announced slot has been verified and every transaction body is available.
+// Even a header can trigger a closure request, so publishing the manifest
+// without the complete transaction cache can tear down the shared bearer.
 func (o *Ouroboros) enqueueLeiosRelayOffers(
 	point ocommon.Point,
 	data *leiosEndorserBlockData,
@@ -838,14 +838,14 @@ func (o *Ouroboros) enqueueLeiosRelayOffers(
 		o.leiosMu.Unlock()
 		return
 	}
+	// Admitted headers retain their original expiry even if slot timing is
+	// temporarily unavailable when their content becomes complete.
+	if current.hasManifest() {
+		o.publishPendingLeiosRelayAnnouncementsLocked(key)
+	}
 	if timingErr != nil && len(current.announcementWire()) > 0 {
 		o.leiosMu.Unlock()
 		return
-	}
-	// Deferred headers precede every offer of this block, including the
-	// offers of a locally forged block whose store requested no relay offer.
-	if current.hasManifest() {
-		o.publishPendingLeiosRelayAnnouncementsLocked(key)
 	}
 	if !current.relayOfferRequested {
 		o.leiosMu.Unlock()
