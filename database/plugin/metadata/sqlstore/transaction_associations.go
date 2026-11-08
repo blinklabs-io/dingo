@@ -33,10 +33,8 @@ func (s *Store) hydrateTransactionSlice(
 		return nil
 	}
 	ids := make([]any, len(transactions))
-	hashes := make([]any, len(transactions))
 	for i := range transactions {
 		ids[i] = transactions[i].ID
-		hashes[i] = transactions[i].Hash
 		transactions[i].Outputs = nil
 		transactions[i].CollateralReturn = nil
 		transactions[i].Inputs = nil
@@ -83,11 +81,11 @@ func (s *Store) hydrateTransactionSlice(
 	if err != nil {
 		return err
 	}
-	collateral, err := s.collateralInputsBatch(ctx, db, hashes)
+	collateral, err := s.collateralInputsBatch(ctx, db, ids)
 	if err != nil {
 		return err
 	}
-	references, err := s.referenceInputsBatch(ctx, db, hashes)
+	references, err := s.referenceInputsBatch(ctx, db, ids)
 	if err != nil {
 		return err
 	}
@@ -121,8 +119,8 @@ func (s *Store) hydrateTransactionSlice(
 			transactions[i].CollateralReturn = &got[0]
 		}
 		transactions[i].Inputs = inputs[string(transactions[i].Hash)]
-		transactions[i].Collateral = collateral[string(transactions[i].Hash)]
-		transactions[i].ReferenceInputs = references[string(transactions[i].Hash)]
+		transactions[i].Collateral = collateral[key]
+		transactions[i].ReferenceInputs = references[key]
 		transactions[i].Certificates = certs[key]
 		transactions[i].KeyWitnesses = witnesses[key]
 		transactions[i].WitnessScripts = scripts[key]
@@ -165,9 +163,9 @@ func (s *Store) hydrateTransactionSlice(
 func (s *Store) collateralInputsBatch(
 	ctx context.Context,
 	db queryer,
-	hashes []any,
+	ids []any,
 ) (map[string][]models.Utxo, error) {
-	return s.transactionInputAssociations(ctx, db, hashes, "utxo_collateral_input")
+	return s.transactionInputAssociations(ctx, db, ids, utxoCollateralEdgeTable)
 }
 
 // referenceInputsBatch reads the durable many-to-many reference-input edges.
@@ -176,26 +174,26 @@ func (s *Store) collateralInputsBatch(
 func (s *Store) referenceInputsBatch(
 	ctx context.Context,
 	db queryer,
-	hashes []any,
+	ids []any,
 ) (map[string][]models.Utxo, error) {
-	return s.transactionInputAssociations(ctx, db, hashes, "utxo_reference_input")
+	return s.transactionInputAssociations(ctx, db, ids, utxoReferenceEdgeTable)
 }
 
 // table is an internal association-table name, never a query input.
 func (s *Store) transactionInputAssociations(
 	ctx context.Context,
 	db queryer,
-	hashes []any,
+	ids []any,
 	table string,
 ) (map[string][]models.Utxo, error) {
 	result := make(map[string][]models.Utxo)
-	for start := 0; start < len(hashes); start += s.dialect.ParameterLimit() {
-		end := min(start+s.dialect.ParameterLimit(), len(hashes))
-		query := `SELECT ` + sqliteUtxoColumns + `, input.transaction_hash
+	for start := 0; start < len(ids); start += s.dialect.ParameterLimit() {
+		end := min(start+s.dialect.ParameterLimit(), len(ids))
+		query := `SELECT ` + sqliteUtxoColumns + `, input.transaction_id
 FROM utxo AS utxo
 JOIN ` + table + ` AS input ON input.utxo_id = utxo.id
-WHERE input.transaction_hash IN (` + bindPlaceholders(end-start) + `) ORDER BY utxo.id`
-		rows, err := db.QueryContext(ctx, s.dialect.Rebind(query), hashes[start:end]...)
+WHERE input.transaction_id IN (` + bindPlaceholders(end-start) + `) ORDER BY utxo.id`
+		rows, err := db.QueryContext(ctx, s.dialect.Rebind(query), ids[start:end]...)
 		if err != nil {
 			return nil, err
 		}
@@ -210,7 +208,8 @@ WHERE input.transaction_hash IN (` + bindPlaceholders(end-start) + `) ORDER BY u
 				rows.Close()
 				return nil, err
 			}
-			result[string(row.reference)] = append(result[string(row.reference)], *item)
+			key := strconv.FormatInt(row.transactionID, 10)
+			result[key] = append(result[key], *item)
 		}
 		if err := rows.Err(); err != nil {
 			rows.Close()
@@ -224,8 +223,8 @@ WHERE input.transaction_hash IN (` + bindPlaceholders(end-start) + `) ORDER BY u
 }
 
 type sqliteUtxoReferenceRow struct {
-	utxo      sqlitequery.Utxo
-	reference []byte
+	utxo          sqlitequery.Utxo
+	transactionID int64
 }
 
 func scanSQLiteUtxoWithReference(
@@ -249,7 +248,7 @@ func scanSQLiteUtxoWithReference(
 		&row.utxo.Amount,
 		&row.utxo.OutputIdx,
 		&row.utxo.PaymentScript,
-		&row.reference,
+		&row.transactionID,
 	); err != nil {
 		return row, err
 	}

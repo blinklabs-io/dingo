@@ -115,19 +115,11 @@ var hotStatements = func() []string {
 	for _, size := range cachedAddressInputQuerySizes {
 		queries = append(queries, addressTransactionInputQuery(size))
 		for _, table := range []string{
-			"utxo_collateral_input",
-			"utxo_reference_input",
+			utxoCollateralEdgeTable,
+			utxoReferenceEdgeTable,
 		} {
 			queries = append(queries,
 				utxoReferenceInsertBatchSQL(table, size),
-			)
-		}
-		for _, column := range []string{
-			"collateral_by_tx_id",
-			"referenced_by_tx_id",
-		} {
-			queries = append(queries,
-				utxoReferenceUpdateBatchSQL(column, size),
 			)
 		}
 	}

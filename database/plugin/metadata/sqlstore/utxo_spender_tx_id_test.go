@@ -172,3 +172,24 @@ func bytes32(b byte) []byte {
 	}
 	return out
 }
+
+// TestInputEdgeQueriesSearchTheEdgeIndex pins the plans of the edge reads and
+// the rollback delete: each must search the transaction-id index and never
+// scan an edge table or utxo.
+func TestInputEdgeQueriesSearchTheEdgeIndex(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	for _, table := range []string{utxoCollateralEdgeTable, utxoReferenceEdgeTable} {
+		for name, query := range map[string]string{
+			"read": `SELECT ` + sqliteUtxoColumns + `, input.transaction_id
+FROM utxo AS utxo JOIN ` + table + ` AS input ON input.utxo_id = utxo.id
+WHERE input.transaction_id IN (?, ?) ORDER BY utxo.id`,
+			"rollback": `DELETE FROM ` + table + ` WHERE transaction_id IN (?, ?)`,
+		} {
+			plan := explainQueryPlan(t, store, query, int64(1), int64(2))
+			require.Contains(t, plan, "USING INDEX idx_"+table+"_tx", "%s %s: %s", table, name, plan)
+			require.NotContains(t, plan, "SCAN "+table, "%s %s: %s", table, name, plan)
+			require.NotContains(t, plan, "SCAN utxo", "%s %s: %s", table, name, plan)
+		}
+	}
+}

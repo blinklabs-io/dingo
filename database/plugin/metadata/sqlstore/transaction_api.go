@@ -106,13 +106,12 @@ func (s *Store) applyTransactionAPIDetails(
 	if s.storageMode != types.StorageModeAPI {
 		return nil
 	}
-	hash := transaction.Hash().Bytes()
 	if err := s.markTransactionUtxoReferences(
 		ctx,
 		db,
 		transaction.Collateral(),
-		"collateral_by_tx_id",
-		hash,
+		utxoCollateralEdgeTable,
+		transactionID,
 	); err != nil {
 		return fmt.Errorf("mark collateral inputs: %w", err)
 	}
@@ -120,8 +119,8 @@ func (s *Store) applyTransactionAPIDetails(
 		ctx,
 		db,
 		transaction.ReferenceInputs(),
-		"referenced_by_tx_id",
-		hash,
+		utxoReferenceEdgeTable,
+		transactionID,
 	); err != nil {
 		return fmt.Errorf("mark reference inputs: %w", err)
 	}
@@ -184,24 +183,26 @@ func utxoReferencePredicate(inputCount int, alias string) string {
 	return strings.Join(predicates, " OR ")
 }
 
+// Edge tables hold one row per (output, transaction) pair for the outputs a
+// transaction names as collateral or reference inputs. One output can be named
+// by many transactions, so the relation lives here and not on the utxo row.
+const (
+	utxoCollateralEdgeTable = "utxo_collateral_edge"
+	utxoReferenceEdgeTable  = "utxo_reference_edge"
+)
+
 func utxoReferenceInsertBatchSQL(
-	associationTable string,
+	edgeTable string,
 	inputCount int,
 ) string {
 	return `-- name: InsertUtxoReferenceBatch :execrows
-INSERT INTO ` + associationTable + ` (utxo_id, transaction_hash)
+INSERT INTO ` + edgeTable + ` (utxo_id, transaction_id)
 SELECT u.id, ? FROM utxo AS u
 WHERE (` + utxoReferencePredicate(inputCount, "u.") + `)
   AND NOT EXISTS (
-      SELECT 1 FROM ` + associationTable + ` AS r
-      WHERE r.utxo_id = u.id AND r.transaction_hash = ?
+      SELECT 1 FROM ` + edgeTable + ` AS r
+      WHERE r.utxo_id = u.id AND r.transaction_id = ?
   )`
-}
-
-func utxoReferenceUpdateBatchSQL(column string, inputCount int) string {
-	return "-- name: UpdateUtxoReferenceBatch :execrows\n" +
-		"UPDATE utxo SET " + column + " = ? WHERE (" +
-		utxoReferencePredicate(inputCount, "") + ")"
 }
 
 func appendUtxoReferenceArgs(
@@ -222,16 +223,12 @@ func (s *Store) markTransactionUtxoReferences(
 	ctx context.Context,
 	db queryer,
 	inputs []lcommon.TransactionInput,
-	column string,
-	hash []byte,
+	edgeTable string,
+	transactionID int64,
 ) error {
-	if column != "collateral_by_tx_id" &&
-		column != "referenced_by_tx_id" {
-		return fmt.Errorf("unsupported UTxO reference column %q", column)
-	}
-	associationTable := "utxo_collateral_input"
-	if column == "referenced_by_tx_id" {
-		associationTable = "utxo_reference_input"
+	if edgeTable != utxoCollateralEdgeTable &&
+		edgeTable != utxoReferenceEdgeTable {
+		return fmt.Errorf("unsupported UTxO edge table %q", edgeTable)
 	}
 	batchSize := min(
 		max(1, (s.dialect.ParameterLimit()-2)/2),
@@ -245,23 +242,12 @@ func (s *Store) markTransactionUtxoReferences(
 			querySize *= 2
 		}
 		args := make([]any, 0, querySize*2+2)
-		args = append(args, hash)
+		args = append(args, transactionID)
 		args = appendUtxoReferenceArgs(args, batch, querySize)
-		args = append(args, hash)
+		args = append(args, transactionID)
 		if _, err := s.execCached(
 			ctx, db,
-			utxoReferenceInsertBatchSQL(associationTable, querySize),
-			args...,
-		); err != nil {
-			return err
-		}
-
-		args = make([]any, 0, querySize*2+1)
-		args = append(args, hash)
-		args = appendUtxoReferenceArgs(args, batch, querySize)
-		if _, err := s.execCached(
-			ctx, db,
-			utxoReferenceUpdateBatchSQL(column, querySize),
+			utxoReferenceInsertBatchSQL(edgeTable, querySize),
 			args...,
 		); err != nil {
 			return err

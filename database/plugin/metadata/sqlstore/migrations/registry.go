@@ -96,6 +96,7 @@ const (
 	rewardOutputCredentialPendingIndexSchemaRelease     = "reward-account-output-credential-pending-index"
 	poolSnapshotVrfKeySchemaRelease                     = "pool-snapshot-vrf-key"
 	utxoSpenderTxIDSchemaRelease                        = "utxo-spender-tx-ids"
+	utxoInputEdgeTxIDSchemaRelease                      = "utxo-input-edge-tx-ids"
 )
 
 const mithrilRewardRepairPendingKey = "mithril_reward_repair_pending"
@@ -272,6 +273,7 @@ var schemaVersions = []struct {
 	},
 	{Version: 55, Name: poolSnapshotVrfKeySchemaRelease, Dir: "v55"},
 	{Version: 56, Name: utxoSpenderTxIDSchemaRelease, Dir: "v56"},
+	{Version: 57, Name: utxoInputEdgeTxIDSchemaRelease, Dir: "v57"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
@@ -394,6 +396,10 @@ func registryForDialect(dialect string) ([]Migration, error) {
 		if version.Name == utxoSpenderTxIDSchemaRelease {
 			migration.BackfillRevision = "1"
 			migration.Backfill = utxoSpenderTxIDBackfill(dialect)
+		}
+		if version.Name == utxoInputEdgeTxIDSchemaRelease {
+			migration.BackfillRevision = "1"
+			migration.Backfill = utxoInputEdgeTxIDBackfill(dialect)
 		}
 		if version.Name == poolDepositHeldSchemaRelease {
 			migration.BackfillRevision = "1"
@@ -2416,4 +2422,109 @@ WHERE table_schema = DATABASE() AND table_name = 'utxo'
 		}
 	}
 	return nil
+}
+
+// utxoInputEdgeTxIDBackfill copies the hash-keyed collateral and
+// reference-input rows into the transaction-id keyed edge tables, then clears
+// the legacy single-owner utxo.collateral_by_tx_id and
+// utxo.referenced_by_tx_id values. Each phase walks its table in utxo id order
+// and the cursor is "<phase>:<last utxo id>". An edge whose hash has no
+// transaction row is dropped: no transaction can own it.
+func utxoInputEdgeTxIDBackfill(dialect string) Backfill {
+	transactionTable := `"transaction"`
+	if dialect == "mysql" {
+		transactionTable = "`transaction`"
+	}
+	type copyPhase struct{ name, from, to string }
+	copies := []copyPhase{
+		{"ref", "utxo_reference_input", "utxo_reference_edge"},
+		{"col", "utxo_collateral_input", "utxo_collateral_edge"},
+	}
+	clears := []struct{ name, column string }{
+		{"clrref", "referenced_by_tx_id"},
+		{"clrcol", "collateral_by_tx_id"},
+	}
+	order := []string{"ref", "col", "clrref", "clrcol"}
+	return func(ctx context.Context, batch Batch) (BatchResult, error) {
+		phase, last := "ref", int64(0)
+		if batch.Cursor != "" {
+			name, value, ok := strings.Cut(batch.Cursor, ":")
+			parsed, err := strconv.ParseInt(value, 10, 64)
+			if !ok || err != nil {
+				return BatchResult{}, fmt.Errorf(
+					"parse utxo edge cursor %q", batch.Cursor,
+				)
+			}
+			phase, last = name, parsed
+		}
+		next := func() BatchResult {
+			for i, name := range order {
+				if name == phase && i+1 < len(order) {
+					return BatchResult{Cursor: order[i+1] + ":0"}
+				}
+			}
+			return BatchResult{Cursor: batch.Cursor, Done: true}
+		}
+		for _, c := range copies {
+			if c.name != phase {
+				continue
+			}
+			var upper sql.NullInt64
+			if err := batch.Tx.QueryRowContext(ctx, batch.Rebind(`
+SELECT MAX(utxo_id) FROM (
+    SELECT DISTINCT utxo_id FROM `+c.from+`
+    WHERE utxo_id > ? ORDER BY utxo_id LIMIT ?
+) AS batch_ids`), last, batch.Limit).Scan(&upper); err != nil {
+				return BatchResult{}, fmt.Errorf("select %s batch: %w", c.from, err)
+			}
+			if !upper.Valid {
+				return next(), nil
+			}
+			result, err := batch.Tx.ExecContext(ctx, batch.Rebind(`
+INSERT INTO `+c.to+` (utxo_id, transaction_id)
+SELECT i.utxo_id, t.id FROM `+c.from+` AS i
+JOIN `+transactionTable+` AS t ON t.hash = i.transaction_hash
+WHERE i.utxo_id > ? AND i.utxo_id <= ?
+  AND NOT EXISTS (
+      SELECT 1 FROM `+c.to+` AS e
+      WHERE e.utxo_id = i.utxo_id AND e.transaction_id = t.id
+  )`), last, upper.Int64)
+			if err != nil {
+				return BatchResult{}, fmt.Errorf("copy %s: %w", c.from, err)
+			}
+			rows, _ := result.RowsAffected()
+			return BatchResult{
+				Cursor: phase + ":" + strconv.FormatInt(upper.Int64, 10),
+				Rows:   rows,
+			}, nil
+		}
+		for _, c := range clears {
+			if c.name != phase {
+				continue
+			}
+			var upper sql.NullInt64
+			if err := batch.Tx.QueryRowContext(ctx, batch.Rebind(`
+SELECT MAX(id) FROM (
+    SELECT id FROM utxo WHERE id > ? AND `+c.column+` IS NOT NULL
+    ORDER BY id LIMIT ?
+) AS batch_ids`), last, batch.Limit).Scan(&upper); err != nil {
+				return BatchResult{}, fmt.Errorf("select %s batch: %w", c.column, err)
+			}
+			if !upper.Valid {
+				return next(), nil
+			}
+			result, err := batch.Tx.ExecContext(ctx, batch.Rebind(`
+UPDATE utxo SET `+c.column+` = NULL
+WHERE id > ? AND id <= ? AND `+c.column+` IS NOT NULL`), last, upper.Int64)
+			if err != nil {
+				return BatchResult{}, fmt.Errorf("clear %s: %w", c.column, err)
+			}
+			rows, _ := result.RowsAffected()
+			return BatchResult{
+				Cursor: phase + ":" + strconv.FormatInt(upper.Int64, 10),
+				Rows:   rows,
+			}, nil
+		}
+		return BatchResult{}, fmt.Errorf("unknown utxo edge phase %q", phase)
+	}
 }

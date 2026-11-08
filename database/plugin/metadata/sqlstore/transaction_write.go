@@ -1930,24 +1930,19 @@ func (s *Store) DeleteTransactionsAfterSlot(
 		txn,
 		func(db queryer, ctx context.Context) error {
 			rows, err := db.QueryContext(ctx, `
-SELECT id, hash FROM "transaction" WHERE slot > ?`,
+SELECT id FROM "transaction" WHERE slot > ?`,
 				slot,
 			)
 			if err != nil {
 				return err
 			}
-			hashes := [][]byte{}
 			txIDs := []int64{}
 			for rows.Next() {
-				var (
-					id   int64
-					hash []byte
-				)
-				if err := rows.Scan(&id, &hash); err != nil {
+				var id int64
+				if err := rows.Scan(&id); err != nil {
 					rows.Close()
 					return err
 				}
-				hashes = append(hashes, hash)
 				txIDs = append(txIDs, id)
 			}
 			if err := rows.Close(); err != nil {
@@ -1957,12 +1952,8 @@ SELECT id, hash FROM "transaction" WHERE slot > ?`,
 				return fmt.Errorf("scan transactions for rollback: %w", err)
 			}
 			refs := []models.StakeCredentialRef{}
-			for start := 0; start < len(hashes); start += 400 {
-				end := min(start+400, len(hashes))
-				args := make([]any, end-start)
-				for i, hash := range hashes[start:end] {
-					args[i] = hash
-				}
+			for start := 0; start < len(txIDs); start += 400 {
+				end := min(start+400, len(txIDs))
 				idArgs := make([]any, end-start)
 				for i, id := range txIDs[start:end] {
 					idArgs[i] = id
@@ -2002,27 +1993,13 @@ WHERE spent_by_tx_id IN (`+bindPlaceholders(len(idArgs))+`)`,
 					return err
 				}
 				if _, err := db.ExecContext(ctx, `
-UPDATE utxo SET collateral_by_tx_id = NULL
-WHERE collateral_by_tx_id IN (`+bindPlaceholders(len(args))+`)`,
-					args...,
-				); err != nil {
+DELETE FROM utxo_reference_edge
+WHERE transaction_id IN (`+bindPlaceholders(len(idArgs))+`)`, idArgs...); err != nil {
 					return err
 				}
 				if _, err := db.ExecContext(ctx, `
-UPDATE utxo SET referenced_by_tx_id = NULL
-WHERE referenced_by_tx_id IN (`+bindPlaceholders(len(args))+`)`,
-					args...,
-				); err != nil {
-					return err
-				}
-				if _, err := db.ExecContext(ctx, `
-DELETE FROM utxo_reference_input
-WHERE transaction_hash IN (`+bindPlaceholders(len(args))+`)`, args...); err != nil {
-					return err
-				}
-				if _, err := db.ExecContext(ctx, `
-DELETE FROM utxo_collateral_input
-WHERE transaction_hash IN (`+bindPlaceholders(len(args))+`)`, args...); err != nil {
+DELETE FROM utxo_collateral_edge
+WHERE transaction_id IN (`+bindPlaceholders(len(idArgs))+`)`, idArgs...); err != nil {
 					return err
 				}
 			}

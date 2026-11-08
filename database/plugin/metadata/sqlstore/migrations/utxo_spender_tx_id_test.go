@@ -158,7 +158,7 @@ func spenderUpgradeDB(t *testing.T) (*sql.DB, func(batchSize int, upTo int)) {
 	return db, func(batchSize int, upTo int) {
 		t.Helper()
 		reg := append([]migrations.Migration(nil), registry[:upTo]...)
-		if batchSize > 0 && upTo == len(registry) {
+		if batchSize > 0 {
 			reg[len(reg)-1].BatchSize = batchSize
 		}
 		runner := migrations.Runner{
