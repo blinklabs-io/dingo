@@ -1387,7 +1387,11 @@ func TestNodeAdapterNextBlockHash(t *testing.T) {
 	require.NoError(t, db.BlockCreate(models.Block{
 		Hash: fill32(0x18), Slot: 80, Number: 8, ID: 8, Cbor: []byte{8},
 	}, nil))
-	next, err = adapter.nextBlockHash(context.Background(), 6, ocommon.NewPoint(80, fill32(0x18)))
+	next, err = adapter.nextBlockHash(
+		context.Background(),
+		6,
+		ocommon.NewPoint(80, fill32(0x18)),
+	)
 	require.NoError(t, err)
 	assert.Nil(t, next)
 }
@@ -1402,7 +1406,16 @@ func TestResolveBlockRangeUpperBoundInSparseChain(t *testing.T) {
 			Type: 0, Cbor: []byte{byte(block.height)},
 		}, nil))
 	}
-	require.NoError(t, db.SetTip(ochainsync.Tip{Point: ocommon.NewPoint(30, fill32(3)), BlockNumber: 3}, nil))
+	require.NoError(
+		t,
+		db.SetTip(
+			ochainsync.Tip{
+				Point:       ocommon.NewPoint(30, fill32(3)),
+				BlockNumber: 3,
+			},
+			nil,
+		),
+	)
 
 	bound, ok, err := adapter.resolveBlockRangeBound(
 		context.Background(), &BlockRangePosition{Block: 2}, false,
@@ -1474,7 +1487,11 @@ INSERT INTO address_transaction (
 		require.NoError(t, err)
 		if i == len(blocks)-1 {
 			require.NoError(t, db.SetTip(
-				ochainsync.Tip{Point: ocommon.NewPoint(block.slot, block.hash), BlockNumber: block.height}, nil,
+				ochainsync.Tip{
+					Point:       ocommon.NewPoint(block.slot, block.hash),
+					BlockNumber: block.height,
+				},
+				nil,
 			))
 		}
 	}

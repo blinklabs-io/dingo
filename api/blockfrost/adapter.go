@@ -377,7 +377,7 @@ func (a *NodeAdapter) resolveBlock(
 	}
 	if height > math.MaxUint64-database.BlockInitialIndex {
 		return models.Block{}, fmt.Errorf(
-			"block height %q overflows internal index: %w",
+			"block height %q exceeds supported range: %w",
 			id,
 			ErrInvalidBlockID,
 		)
@@ -520,7 +520,7 @@ func (a *NodeAdapter) nextBlockHash(
 	if id >= tipID {
 		return nil, nil
 	}
-	next, err := a.ledgerState.Database().BlockByIndex(id+1, txn)
+	next, err := a.ledgerState.Database().BlockPointByIndex(id+1, txn)
 	if err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
 			return nil, nil

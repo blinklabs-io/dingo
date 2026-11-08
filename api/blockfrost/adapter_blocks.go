@@ -52,6 +52,9 @@ func (a *NodeAdapter) neighborBlocks(
 		if err != nil {
 			return nil, 0, fmt.Errorf("get chain tip: %w", err)
 		}
+		if len(tip.Point.Hash) == 0 {
+			return []models.Block{}, 0, nil
+		}
 		tipID, err := database.BlockIDByPointMetadataTxn(txn, tip.Point)
 		if err != nil {
 			return nil, 0, fmt.Errorf("resolve chain tip: %w", err)

@@ -49,7 +49,7 @@ func (a *meshDatabaseAdapter) BlockByIndex(ctx context.Context,
 ) (models.Block, error) {
 	if height > math.MaxUint64-database.BlockInitialIndex {
 		return models.Block{}, fmt.Errorf(
-			"block height %d overflows internal index: %w",
+			"block height %d exceeds supported range: %w",
 			height,
 			models.ErrBlockNotFound,
 		)

@@ -151,7 +151,7 @@ func (a *databaseAdapter) BlockByHash(ctx context.Context, hash []byte) (models.
 func (a *databaseAdapter) BlockByNumber(ctx context.Context, number uint64) (models.Block, error) {
 	if number > math.MaxUint64-database.BlockInitialIndex {
 		return models.Block{}, fmt.Errorf(
-			"block number %d overflows internal index: %w",
+			"block number %d exceeds supported range: %w",
 			number,
 			models.ErrBlockNotFound,
 		)

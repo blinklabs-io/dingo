@@ -169,3 +169,21 @@ func TestMeshHeightWithBoundaryBlockStorageOffset(t *testing.T) {
 	require.Equal(t, uint64(2), block.Number)
 	require.Equal(t, testHash(3), block.Hash)
 }
+
+func TestMeshRetainsUnsupportedHeightBoundary(t *testing.T) {
+	t.Parallel()
+	db := newAdapterDatabase(t)
+	require.NoError(t, db.BlockCreate(models.Block{
+		ID: 1, Number: math.MaxUint64, Slot: 1, Hash: testHash(0xa9),
+		Cbor: []byte{0x80},
+	}, nil))
+	block, err := database.BlockByNumber(
+		context.Background(), db, math.MaxUint64,
+	)
+	require.NoError(t, err)
+	require.Equal(t, uint64(math.MaxUint64), block.Number)
+	_, err = NewMeshDatabase(db).BlockByIndex(
+		context.Background(), math.MaxUint64,
+	)
+	require.ErrorIs(t, err, models.ErrBlockNotFound)
+}

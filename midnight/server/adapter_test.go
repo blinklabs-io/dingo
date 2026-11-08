@@ -24,9 +24,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestBlockByNumber_OverflowIsRejected verifies that a block number so large
-// it would wrap the blob store's 1-based internal index back to 0 is
-// rejected up front rather than silently looking up the wrong block.
 func TestBlockByNumber_OverflowIsRejected(t *testing.T) {
 	t.Parallel()
 	db := newTestDatabase(t)

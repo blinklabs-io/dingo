@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
@@ -55,7 +56,7 @@ func TestBlockNumbersDifferFromStorageIDs(t *testing.T) {
 	defer cancel()
 	t.Run("successor hash", func(t *testing.T) {
 		next, err := adapter.nextBlockHash(
-			context.Background(),
+			ctx,
 			blocks[0].ID,
 			ocommon.NewPoint(blocks[1].Slot, blocks[1].Hash),
 		)
@@ -101,8 +102,13 @@ func TestBlockNumbersDifferFromStorageIDs(t *testing.T) {
 			slot   uint64
 			index  uint32
 		}{
-			{1, true, 10, 7}, {1, false, 20, 7}, {2, true, 30, 7}, {2, false, 30, 7},
-			{3, true, 40, 0}, {3, false, 30, math.MaxUint32}, {99, false, 40, math.MaxUint32},
+			{1, true, 10, 7},
+			{1, false, 20, 7},
+			{2, true, 30, 7},
+			{2, false, 30, 7},
+			{3, true, 40, 0},
+			{3, false, 30, math.MaxUint32},
+			{99, false, 40, math.MaxUint32},
 		} {
 			bound, ok, err := adapter.resolveBlockRangeBound(
 				ctx,
@@ -121,8 +127,25 @@ func TestNeighborBlocksStopAtAppliedTip(t *testing.T) {
 	t.Parallel()
 	adapter, _, db := newDBBackedAdapter(t)
 	chain := seedChain(t, db, 5)
-	require.NoError(t, db.SetTip(ochainsync.Tip{Point: ocommon.NewPoint(chain[2].SlotNumber(), chain[2].Hash().Bytes()), BlockNumber: 3}, nil))
-	blocks, total, err := adapter.neighborBlocks(context.Background(), chain[2].Hash().String(), PaginationParams{Count: 2, Page: 1, Order: PaginationOrderAsc}, true)
+	require.NoError(
+		t,
+		db.SetTip(
+			ochainsync.Tip{
+				Point: ocommon.NewPoint(
+					chain[2].SlotNumber(),
+					chain[2].Hash().Bytes(),
+				),
+				BlockNumber: 3,
+			},
+			nil,
+		),
+	)
+	blocks, total, err := adapter.neighborBlocks(
+		context.Background(),
+		chain[2].Hash().String(),
+		PaginationParams{Count: 2, Page: 1, Order: PaginationOrderAsc},
+		true,
+	)
 	require.NoError(t, err)
 	require.Empty(t, blocks)
 	require.Zero(t, total)
@@ -132,11 +155,36 @@ func TestRangeBoundsStopAtAppliedTipBeforePrefetchedEBB(t *testing.T) {
 	t.Parallel()
 	adapter, _, db := newDBBackedAdapter(t)
 	for i, number := range []uint64{1, 1, 2} {
-		require.NoError(t, db.BlockCreate(models.Block{ID: uint64(i) + 2, Number: number, Slot: uint64(i+1) * 10, Hash: fill32(byte(i + 1)), Cbor: []byte{0x80}}, nil))
+		require.NoError(
+			t,
+			db.BlockCreate(
+				models.Block{
+					ID:     uint64(i) + 2,
+					Number: number,
+					Slot:   uint64(i+1) * 10,
+					Hash:   fill32(byte(i + 1)),
+					Cbor:   []byte{0x80},
+				},
+				nil,
+			),
+		)
 	}
-	require.NoError(t, db.SetTip(ochainsync.Tip{Point: ocommon.NewPoint(10, fill32(1)), BlockNumber: 1}, nil))
+	require.NoError(
+		t,
+		db.SetTip(
+			ochainsync.Tip{
+				Point:       ocommon.NewPoint(10, fill32(1)),
+				BlockNumber: 1,
+			},
+			nil,
+		),
+	)
 	for _, number := range []uint64{1, 99} {
-		bound, ok, err := adapter.resolveBlockRangeBound(context.Background(), &BlockRangePosition{Block: number}, false)
+		bound, ok, err := adapter.resolveBlockRangeBound(
+			context.Background(),
+			&BlockRangePosition{Block: number},
+			false,
+		)
 		require.NoError(t, err)
 		require.True(t, ok)
 		require.Equal(t, uint64(10), bound.Slot)
@@ -146,14 +194,90 @@ func TestRangeBoundsStopAtAppliedTipBeforePrefetchedEBB(t *testing.T) {
 func TestRangeBoundsRequireAnAppliedTip(t *testing.T) {
 	t.Parallel()
 	adapter, _, db := newDBBackedAdapter(t)
-	require.NoError(t, db.BlockCreate(models.Block{ID: 1, Number: 0, Slot: 10, Hash: fill32(1), Cbor: []byte{0x80}}, nil))
+	require.NoError(
+		t,
+		db.BlockCreate(
+			models.Block{
+				ID:     1,
+				Number: 0,
+				Slot:   10,
+				Hash:   fill32(1),
+				Cbor:   []byte{0x80},
+			},
+			nil,
+		),
+	)
 	for _, lower := range []bool{false, true} {
-		bound, ok, err := adapter.resolveBlockRangeBound(context.Background(), &BlockRangePosition{Block: 0}, lower)
+		bound, ok, err := adapter.resolveBlockRangeBound(
+			context.Background(),
+			&BlockRangePosition{Block: 0},
+			lower,
+		)
 		require.NoError(t, err)
 		require.False(t, ok)
 		require.Nil(t, bound)
 	}
-	require.NoError(t, db.SetTip(ochainsync.Tip{Point: ocommon.NewPoint(20, fill32(2)), BlockNumber: 0}, nil))
-	_, _, err := adapter.resolveBlockRangeBound(context.Background(), &BlockRangePosition{Block: 0}, false)
+	require.NoError(
+		t,
+		db.SetTip(
+			ochainsync.Tip{
+				Point:       ocommon.NewPoint(20, fill32(2)),
+				BlockNumber: 0,
+			},
+			nil,
+		),
+	)
+	_, _, err := adapter.resolveBlockRangeBound(
+		context.Background(),
+		&BlockRangePosition{Block: 0},
+		false,
+	)
 	require.ErrorIs(t, err, models.ErrBlockNotFound)
+}
+
+func TestNeighborBlocksWithoutAppliedTipAreEmpty(t *testing.T) {
+	t.Parallel()
+	adapter, _, db := newDBBackedAdapter(t)
+	chain := seedChain(t, db, 2)
+	blocks, total, err := adapter.neighborBlocks(
+		context.Background(),
+		chain[0].Hash().String(),
+		PaginationParams{Count: 1, Page: 1, Order: PaginationOrderAsc},
+		true,
+	)
+	require.NoError(t, err)
+	require.Empty(t, blocks)
+	require.Zero(t, total)
+}
+
+func TestNextBlockHashDoesNotRequireSuccessorBody(t *testing.T) {
+	t.Parallel()
+	adapter, raw, db := newDBBackedAdapter(t)
+	raw.SetMaxOpenConns(1)
+	hash := fill32(0x81)
+	require.NoError(
+		t,
+		db.BlockCreate(
+			models.Block{
+				ID:     3,
+				Number: 1,
+				Slot:   20,
+				Hash:   hash,
+				Cbor:   []byte{0x80},
+			},
+			nil,
+		),
+	)
+	txn := db.BlobTxn(true)
+	require.NoError(
+		t,
+		db.Blob().Delete(txn.Blob(), types.BlockBlobKey(20, hash)),
+	)
+	require.NoError(t, txn.Commit())
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	next, err := adapter.nextBlockHash(ctx, 2, ocommon.NewPoint(20, hash))
+	require.NoError(t, err)
+	require.NotNil(t, next)
+	require.Equal(t, hex.EncodeToString(hash), *next)
 }

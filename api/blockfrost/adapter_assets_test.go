@@ -266,7 +266,16 @@ func TestNodeAdapterAssetTransactions(t *testing.T) {
 
 	seedAssetTransaction(t, raw, db, mint, 1, 10, 0)
 	seedAssetTransaction(t, raw, db, move, 3, 30, 1)
-	require.NoError(t, db.SetTip(ochainsync.Tip{Point: ocommon.NewPoint(30, fill32(0xd3)), BlockNumber: 3}, nil))
+	require.NoError(
+		t,
+		db.SetTip(
+			ochainsync.Tip{
+				Point:       ocommon.NewPoint(30, fill32(0xd3)),
+				BlockNumber: 3,
+			},
+			nil,
+		),
+	)
 	seedMintBurn(t, raw, mint, policy, "T", 10, "5")
 	addr, _, _ := testKeyAddress(t, 0xd2, 0)
 	// produce creates an output holding the asset in block 2, which move
@@ -474,7 +483,16 @@ func TestNodeAdapterAssetUTXOs(t *testing.T) {
 	require.Equal(t, hex.EncodeToString(secondTx.Hash), rows[0].TxHash)
 
 	// A block range selects on the producing transaction's position.
-	require.NoError(t, db.SetTip(ochainsync.Tip{Point: ocommon.NewPoint(30, fill32(0xd3)), BlockNumber: 3}, nil))
+	require.NoError(
+		t,
+		db.SetTip(
+			ochainsync.Tip{
+				Point:       ocommon.NewPoint(30, fill32(0xd3)),
+				BlockNumber: 3,
+			},
+			nil,
+		),
+	)
 	ranged := params
 	ranged.From = &BlockRangePosition{Block: 2}
 	rows, total, err = adapter.AssetUTXOs(ctx, policyHex, []byte("T"), ranged)
@@ -562,7 +580,16 @@ func TestNodeAdapterAssetUTXOsRangeUsesCollateralReturnPosition(t *testing.T) {
 	}
 	insertAdapterTransaction(t, raw, failed)
 	storePointerOutputCbor(t, db, failed.Hash, 1, addr, 2_000_000)
-	require.NoError(t, db.SetTip(ochainsync.Tip{Point: ocommon.NewPoint(50, fill32(0xd5)), BlockNumber: 5}, nil))
+	require.NoError(
+		t,
+		db.SetTip(
+			ochainsync.Tip{
+				Point:       ocommon.NewPoint(50, fill32(0xd5)),
+				BlockNumber: 5,
+			},
+			nil,
+		),
+	)
 
 	index := uint32(2)
 	params := TransactionRangeParams{
