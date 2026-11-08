@@ -3478,11 +3478,12 @@ for a surviving `(pool_key_hash, slot)` row.
 
 ### DReps, Governance, and Committee
 
-DRep deregistration journals and clears the current forward vote delegations at
-protocol version 10 and later. The current account target is authoritative even
-when historical API replay left a stale or missing reverse membership; the
-deregistered DRep's reverse memberships are still closed at the certificate slot.
-Protocol version 9 retains its reverse-membership-based clearing behavior.
+DRep deregistration journals and clears active accounts' current forward vote
+delegations at protocol version 10 and later. The current account target is
+authoritative even when historical API replay left a stale or missing reverse
+membership; the deregistered DRep's reverse memberships are still closed at the
+certificate slot. Protocol version 9 retains its reverse-membership-based
+clearing behavior.
 
 DRep activity updates reject epoch-plus-inactivity overflow before addition and
 reject activity or expiry values outside the signed SQL integer domain. Rejected
