@@ -10366,9 +10366,9 @@ func (ls *LedgerState) ledgerProcessBlock(
 	if err := validateTransactionOutputIndexes(block.Transactions()); err != nil {
 		return nil, fmt.Errorf("validate block transaction output indexes: %w", err)
 	}
-	// Reject blocks whose header protocol major version runs more than
-	// one ahead of current pparams. Skipped on testnets pre-Dijkstra
-	// (a cardano-ledger relaxation).
+	// Reject block headers newer than the eras enabled by this node on every
+	// network. The separate BBODY current-version-plus-one rule is relaxed on
+	// testnets before Dijkstra, as specified by cardano-ledger.
 	if shouldValidate {
 		if err := validateInboundBlockEnvelope(
 			block,

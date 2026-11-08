@@ -5700,6 +5700,11 @@ per-transaction validation never checks the block-wide sum. `TrustedReplay`
 input and blocks inside an imported Mithril snapshot's certified range are
 exempt.
 
+Header protocol versions have a separate consensus-envelope ceiling derived
+from the node's active era table. Headers above that configured maximum are
+rejected on every network; the BBODY current-version-plus-one rule remains a
+distinct check with its specified pre-Dijkstra testnet relaxation.
+
 An envelope or aggregate-budget failure is a deterministic verdict on a block
 already persisted on the primary chain, so `ledgerProcessBlock` returns it
 through `rejectInboundEnvelopeFailure` as a `headerValidationError`. The

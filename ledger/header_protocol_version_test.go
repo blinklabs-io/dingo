@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/ledger/allegra"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
@@ -251,9 +252,9 @@ func TestValidateHeaderProtocolVersion_MainnetTooHigh(t *testing.T) {
 func TestValidateHeaderProtocolVersion_TestnetTooHighPreDijkstra(t *testing.T) {
 	t.Parallel()
 
-	// On testnets, while pre-Dijkstra (current major < 12), a header
-	// with arbitrarily high pvMajor is accepted. This is the relaxation
-	// cardano-ledger made for testnets.
+	// On testnets, while pre-Dijkstra (current major < 12), the BBODY rule
+	// accepts an arbitrarily high pvMajor. The LedgerState-bound consensus
+	// envelope applies the configured node maximum separately.
 	err := ValidateHeaderProtocolVersion(
 		babbageHeaderWithMajor(t, 99),
 		10,
@@ -567,17 +568,21 @@ func TestLedgerStateValidateBlockHeaderProtocolVersion_MainnetRejects(
 	ls := newLedgerStateForNetwork(t, "Mainnet", byron.MainnetProtocolMagic)
 	pp := &conway.ConwayProtocolParameters{
 		ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
-			Major: 10,
+			Major: eras.ConwayEraDesc.MaxMajorVersion - 2,
 			Minor: 0,
 		},
 	}
 	header := &conway.ConwayBlockHeader{
-		BabbageBlockHeader: *babbageHeaderWithMajor(t, 12),
+		BabbageBlockHeader: *babbageHeaderWithMajor(
+			t,
+			uint64(eras.ConwayEraDesc.MaxMajorVersion),
+		),
 	}
 	err := ls.validateBlockHeaderProtocolVersion(header, pp)
 	require.Error(t, err)
 	var typed *HeaderProtocolVersionTooHighError
 	require.True(t, errors.As(err, &typed))
+	assert.Equal(t, eras.ConwayEraDesc.MaxMajorVersion-1, typed.Expected)
 }
 
 func TestLedgerStateValidateBlockHeaderProtocolVersion_DijkstraRejects(
@@ -590,6 +595,7 @@ func TestLedgerStateValidateBlockHeaderProtocolVersion_DijkstraRejects(
 	// ahead, exercising the GetProtocolVersion Dijkstra case, isMainnet,
 	// and the HeaderProtocolMajor Dijkstra case together.
 	ls := newLedgerStateForNetwork(t, "Mainnet", byron.MainnetProtocolMagic)
+	ls.activeEras = eras.ErasWithDijkstra
 	pp := &dijkstra.DijkstraProtocolParameters{
 		ConwayProtocolParameters: conway.ConwayProtocolParameters{
 			ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
@@ -601,24 +607,93 @@ func TestLedgerStateValidateBlockHeaderProtocolVersion_DijkstraRejects(
 	header := dijkstraHeaderWithMajor(t, 99)
 	err := ls.validateBlockHeaderProtocolVersion(header, pp)
 	require.Error(t, err)
-	var typed *HeaderProtocolVersionTooHighError
+	var typed *UnsupportedHeaderProtocolVersionError
 	require.True(t, errors.As(err, &typed))
+	assert.Equal(t, eras.DijkstraEraDesc.MaxMajorVersion, typed.Maximum)
 }
 
-func TestLedgerStateValidateBlockHeaderProtocolVersion_TestnetAllows(
+func TestLedgerStateValidateBlockHeaderProtocolVersion_ConfiguredMaximum(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name      string
+		networkId string
+		magic     uint32
+	}{
+		{
+			name:      "mainnet",
+			networkId: "Mainnet",
+			magic:     byron.MainnetProtocolMagic,
+		},
+		{
+			name:      "testnet",
+			networkId: "Testnet",
+			magic:     42,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			ls := newLedgerStateForNetwork(t, tc.networkId, tc.magic)
+			ls.activeEras = eras.Eras
+			maxMajor := eras.ConwayEraDesc.MaxMajorVersion
+			pp := &conway.ConwayProtocolParameters{
+				ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+					Major: maxMajor - 1,
+					Minor: 0,
+				},
+			}
+			supportedHeader := &conway.ConwayBlockHeader{
+				BabbageBlockHeader: *babbageHeaderWithMajor(
+					t, uint64(maxMajor),
+				),
+			}
+			require.NoError(t, ls.validateBlockHeaderProtocolVersion(
+				supportedHeader, pp,
+			))
+
+			unsupportedHeader := &conway.ConwayBlockHeader{
+				BabbageBlockHeader: *babbageHeaderWithMajor(
+					t, uint64(maxMajor+1),
+				),
+			}
+			err := ls.validateBlockHeaderProtocolVersion(unsupportedHeader, pp)
+			require.Error(t, err)
+			var typed *UnsupportedHeaderProtocolVersionError
+			require.True(t, errors.As(err, &typed))
+			assert.Equal(t, maxMajor+1, typed.Supplied)
+			assert.Equal(t, maxMajor, typed.Maximum)
+		})
+	}
+}
+
+func TestLedgerStateValidateBlockHeaderProtocolVersion_DijkstraMaximum(
 	t *testing.T,
 ) {
 	t.Parallel()
 
 	ls := newLedgerStateForNetwork(t, "Testnet", 42)
-	pp := &conway.ConwayProtocolParameters{
-		ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
-			Major: 10,
-			Minor: 0,
+	ls.activeEras = eras.ErasWithDijkstra
+	maxMajor := eras.DijkstraEraDesc.MaxMajorVersion
+	pp := &dijkstra.DijkstraProtocolParameters{
+		ConwayProtocolParameters: conway.ConwayProtocolParameters{
+			ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+				Major: eras.DijkstraEraDesc.MinMajorVersion,
+				Minor: 0,
+			},
 		},
 	}
-	header := &conway.ConwayBlockHeader{
-		BabbageBlockHeader: *babbageHeaderWithMajor(t, 99),
-	}
-	require.NoError(t, ls.validateBlockHeaderProtocolVersion(header, pp))
+	require.NoError(t, ls.validateBlockHeaderProtocolVersion(
+		dijkstraHeaderWithMajor(t, uint64(maxMajor)), pp,
+	))
+
+	err := ls.validateBlockHeaderProtocolVersion(
+		dijkstraHeaderWithMajor(t, uint64(maxMajor+1)), pp,
+	)
+	require.Error(t, err)
+	var typed *UnsupportedHeaderProtocolVersionError
+	require.True(t, errors.As(err, &typed))
+	assert.Equal(t, maxMajor, typed.Maximum)
 }
