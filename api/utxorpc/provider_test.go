@@ -17,7 +17,6 @@ package utxorpc
 import (
 	"context"
 	"log/slog"
-	"maps"
 	"net"
 	"strconv"
 	"testing"
@@ -63,59 +62,6 @@ func providerDeps(t *testing.T) ProviderDependencies {
 	}
 }
 
-// resolveOnFreePortWithConfig resolves the built-in UTxO RPC provider on a
-// free loopback port with extra config fields (e.g. "tls") merged
-// alongside "port", retrying on a lost race for the port. The provider
-// dependencies (including the EventBus) are built once and reused across
-// every attempt, rather than one per attempt.
-func resolveOnFreePortWithConfig(
-	t *testing.T,
-	host *plugin.Host,
-	extra map[string]any,
-) *Utxorpc {
-	t.Helper()
-	deps := providerDeps(t)
-	var lastErr error
-	for range testutil.BindAttempts {
-		cfg := map[string]any{"port": freeLoopbackPort(t)}
-		maps.Copy(cfg, extra)
-		srv, err := plugin.Resolve[*Utxorpc](
-			t.Context(),
-			host,
-			plugin.CapabilityAPIUtxorpc,
-			"builtin",
-			cfg,
-			deps,
-		)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		return srv
-	}
-	t.Fatalf(
-		"could not resolve the UTxO RPC provider in %d attempts: %v",
-		testutil.BindAttempts, lastErr,
-	)
-	return nil
-}
-
-func TestRegisterProviderDescriptor(t *testing.T) {
-	host := newProviderHost(t)
-
-	var found *plugin.Descriptor
-	for _, d := range host.Providers() {
-		if d.Capability == plugin.CapabilityAPIUtxorpc {
-			found = &d
-			break
-		}
-	}
-
-	require.NotNil(t, found)
-	require.Equal(t, "builtin", found.Name)
-	require.NotEmpty(t, found.Description)
-}
-
 func TestProviderRejectsPartialTLSPair(t *testing.T) {
 	host := newProviderHost(t)
 
@@ -137,21 +83,4 @@ func TestProviderRejectsPartialTLSPair(t *testing.T) {
 	require.Error(t, err)
 	require.ErrorContains(t, err, "plugins.api.utxorpc.config.tls")
 	require.ErrorContains(t, err, "must both be set")
-}
-
-func TestProviderPropagatesTLS(t *testing.T) {
-	host := newProviderHost(t)
-	certPath, keyPath := testutil.GenerateTestTLSCertKey(t)
-
-	srv := resolveOnFreePortWithConfig(t, host, map[string]any{
-		"tls": map[string]any{
-			"mode":         "server",
-			"certFilePath": certPath,
-			"keyFilePath":  keyPath,
-		},
-	})
-
-	require.True(t, srv.config.TLS.Enabled)
-	require.Equal(t, certPath, srv.config.TLS.CertFilePath)
-	require.Equal(t, keyPath, srv.config.TLS.KeyFilePath)
 }

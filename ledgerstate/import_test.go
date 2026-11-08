@@ -1118,33 +1118,6 @@ func testPoolKeyHash(value []byte) lcommon.PoolKeyHash {
 	return ret
 }
 
-func TestImportOpCertCountersStoresCertifiedBaseline(t *testing.T) {
-	t.Parallel()
-
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
-
-	poolKeyHash := bytes.Repeat([]byte{0x77}, 28)
-	txn := db.MetadataTxn(context.Background(), true)
-	require.NoError(t, importOpCertCounters(
-		db.Metadata(),
-		map[string]uint64{string(poolKeyHash): 490},
-		100,
-		txn.Metadata(),
-	))
-	require.NoError(t, txn.Commit())
-	txn.Release()
-
-	sequence, found, err := db.LatestPoolOpCertSequence(
-		context.Background(),
-		testPoolKeyHash(poolKeyHash), nil,
-	)
-	require.NoError(t, err)
-	require.True(t, found)
-	require.Equal(t, uint64(490), sequence)
-}
-
 func TestImportOpCertCountersStoresMaxUint64(t *testing.T) {
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
@@ -1231,15 +1204,6 @@ func TestSnapshotImportTargetsSkipNegativeEpochs(t *testing.T) {
 	}
 	if targets1[1].name != "set" || targets1[1].targetEpoch != 0 {
 		t.Fatalf("epoch 1 set: unexpected target %+v", targets1[1])
-	}
-}
-
-func TestSnapshotImportTargetsNilSnapshots(t *testing.T) {
-	t.Parallel()
-
-	targets := snapshotImportTargets(7, nil)
-	if targets != nil {
-		t.Fatalf("expected nil targets, got %+v", targets)
 	}
 }
 

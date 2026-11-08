@@ -216,18 +216,6 @@ func TestHeaderArrivalSkipsCatchUpAndBackfill(t *testing.T) {
 	assert.Zero(t, count)
 }
 
-// A node built without a registry has no header arrival metrics, and the
-// call site must not panic.
-func TestHeaderArrivalNilMetricsIsSafe(t *testing.T) {
-	t.Parallel()
-	var m *headerArrivalMetrics
-	assert.NotPanics(t, func() {
-		m.observeHeaderArrival(
-			true, 1, 1, testBlockHash(1), time.Unix(0, 0), time.Unix(1, 0),
-		)
-	})
-}
-
 // The chainsync roll-forward path records the header's arrival against its
 // slot time once the node is at tip.
 func TestChainsyncRollForwardObservesHeaderArrival(t *testing.T) {

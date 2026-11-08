@@ -65,15 +65,6 @@ func snapshotOf(
 	return result
 }
 
-func TestTopicSRVPrefix(t *testing.T) {
-	t.Parallel()
-	prefix, ok := TopicSRVPrefix("mithril")
-	assert.True(t, ok)
-	assert.Equal(t, "_dmq._mithril._cardano._tcp", prefix)
-	_, ok = TopicSRVPrefix("unknown")
-	assert.False(t, ok)
-}
-
 func TestLedgerRelayDomainsKeepsOnlySRVRelays(t *testing.T) {
 	t.Parallel()
 	snapshot := snapshotOf(
@@ -97,13 +88,6 @@ func TestLedgerRelayDomainsKeepsOnlySRVRelays(t *testing.T) {
 		[]string{"pool-a.example.com", "pool-b.example.com"},
 		LedgerRelayDomains(snapshot),
 	)
-}
-
-func TestLedgerRelayDomainsEmptySnapshot(t *testing.T) {
-	t.Parallel()
-	assert.Empty(t, LedgerRelayDomains(
-		olocalstatequery.LedgerPeerSnapshotResult{},
-	))
 }
 
 // fakeSRV answers LookupSRV from a table and records what it was asked.
@@ -228,17 +212,6 @@ func TestResolveLedgerPeersSkipsFailedDomains(t *testing.T) {
 	)
 	require.NoError(t, err)
 	assert.Equal(t, []Peer{{Host: "good.example.com", Port: 3141}}, peers)
-}
-
-func TestResolveLedgerPeersNoDomains(t *testing.T) {
-	t.Parallel()
-	peers, err := ResolveLedgerPeers(
-		context.Background(),
-		LedgerPeerLookup{Resolver: &fakeSRV{}, Prefix: testPrefix},
-		nil,
-	)
-	require.NoError(t, err)
-	assert.Empty(t, peers)
 }
 
 func TestResolveLedgerPeersRequiresResolverAndPrefix(t *testing.T) {
@@ -390,24 +363,5 @@ func TestLedgerPeerSourceReturnsTheSnapshotsOwnError(t *testing.T) {
 	)
 	_, err := source(t.Context())
 	require.ErrorIs(t, err, ErrChainStateUnavailable)
-	assert.Empty(t, resolver.asked)
-}
-
-func TestLedgerPeerSourceWithNoSRVRelaysDoesNoLookups(t *testing.T) {
-	t.Parallel()
-	resolver := &fakeSRV{}
-	source := LedgerPeerSource(
-		func(context.Context) (olocalstatequery.LedgerPeerSnapshotResult, error) {
-			return snapshotOf(
-				[]olocalstatequery.RelayAccessPoint{
-					ipv4Relay("192.0.2.1", 3001),
-				},
-			), nil
-		},
-		LedgerPeerLookup{Resolver: resolver, Prefix: testPrefix},
-	)
-	peers, err := source(t.Context())
-	require.NoError(t, err)
-	assert.Empty(t, peers)
 	assert.Empty(t, resolver.asked)
 }

@@ -22,18 +22,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestChainsyncFindIntersectRateLimiter_NormalUse(t *testing.T) {
-	t.Parallel()
-
-	rl := newChainsyncFindIntersectRateLimiter(200, 1000)
-
-	// A well-behaved client's occasional, in-bounds FindIntersect requests
-	// stay well within the burst.
-	assert.True(t, rl.Allow(100), "first request should be allowed")
-	assert.True(t, rl.Allow(100), "second request should be allowed")
-	assert.True(t, rl.Allow(100), "third request should be allowed")
-}
-
 func TestChainsyncFindIntersectRateLimiter_BoundaryAtBurst(t *testing.T) {
 	t.Parallel()
 

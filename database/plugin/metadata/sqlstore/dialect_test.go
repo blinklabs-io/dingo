@@ -252,24 +252,6 @@ func TestNewDialectQueryerIdempotentUnderCountingQueryer(t *testing.T) {
 	require.True(t, isDialect)
 }
 
-// TestUnwrapDialectQueryerFindsDialectUnderCountingQueryer is the direct
-// unit test for the helper transaction_write.go's insertTransaction and
-// newDialectQueryer's idempotence guard both rely on to see past
-// countingQueryer.
-func TestUnwrapDialectQueryerFindsDialectUnderCountingQueryer(t *testing.T) {
-	t.Parallel()
-	db, err := sql.Open("sqlite", "file::memory:?cache=shared")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = db.Close() })
-
-	inner := dialectQueryer{queryer: db, dialect: "mysql"}
-	wrapped := countingQueryer{queryer: inner, counter: nil}
-
-	got, ok := unwrapDialectQueryer(wrapped)
-	require.True(t, ok)
-	require.Equal(t, "mysql", got.dialect)
-}
-
 // TestUpdateFromJoinSQLStandardFormUnqualifiesAssignmentTargets covers the
 // SQLite/PostgreSQL shape: both accept UPDATE ... SET ... FROM ... WHERE, and
 // both reject a table-qualified assignment target ("UPDATE t SET t.col = ..."

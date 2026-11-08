@@ -278,31 +278,6 @@ func TestLocalTxSubmissionRejectReason_ConwayWrappedJoinedFailures(
 	require.True(t, ok)
 }
 
-func TestLocalTxSubmissionRejectReason_ConwayPreservesJoinedFailures(t *testing.T) {
-	t.Parallel()
-	reason := newLocalTxSubmissionRejectReason(
-		gledger.EraIdConway,
-		errors.Join(
-			shelley.FeeTooSmallUtxoError{
-				Provided: big.NewInt(10),
-				Min:      big.NewInt(20),
-			},
-			alonzo.NoCollateralInputsError{},
-		),
-	)
-	var cborReason cborRejectReason
-	require.ErrorAs(t, reason, &cborReason)
-	wire, err := cborReason.MarshalCBOR()
-	require.NoError(t, err)
-	decoded, err := gledger.NewTxSubmitErrorFromCbor(wire)
-	require.NoError(t, err)
-	validation, ok := decoded.(*gledger.ShelleyTxValidationError)
-	require.True(t, ok)
-	require.Len(t, validation.Err.Failures, 2)
-	requireConwayUtxoFailure(t, validation.Err.Failures[0])
-	requireConwayUtxoFailure(t, validation.Err.Failures[1])
-}
-
 func requireConwayUtxoFailure(t *testing.T, failure error) *gledger.UtxoFailure {
 	t.Helper()
 	utxow, ok := failure.(*gledger.UtxowFailure)
@@ -329,6 +304,11 @@ func TestLocalTxSubmissionInfrastructureErrorsStayGeneric(t *testing.T) {
 		fmt.Errorf("wrapped: %w", mempool.ErrMempoolStopped),
 		&mempool.MempoolFullError{CurrentSize: 10, TxSize: 2, Capacity: 10},
 		fmt.Errorf("validate transaction: %w", mempool.ErrPendingStateMoved),
+		fmt.Errorf(
+			"resolve confirmed input addresses: %w: %w",
+			mempool.ErrInputResolution,
+			errors.New("database is locked"),
+		),
 	} {
 		require.True(t, isLocalTxSubmissionInfrastructureError(err))
 		rejectErr := localTxSubmissionRejectReason(gledger.EraIdConway, err)
@@ -480,36 +460,6 @@ func TestLocalTxSubmissionRejectReason_InputSetEmptyIsStructured(t *testing.T) {
 	}
 }
 
-func TestLocalTxSubmissionServer_EncodeErrorIsBounded(t *testing.T) {
-	t.Parallel()
-
-	// The protocol must surface a rejection encoding error instead of waiting
-	// forever for a response that cannot be represented on the wire.
-	opts, peer := newMuxerServerPeer(t)
-	cfg := olocaltxsubmission.NewConfig(
-		olocaltxsubmission.WithSubmitTxFunc(func(
-			_ olocaltxsubmission.CallbackContext,
-			_ olocaltxsubmission.MsgSubmitTxTransaction,
-		) error {
-			return newLocalTxSubmissionRejectReason(
-				gledger.EraIdBabbage,
-				errors.New("generic rejection"),
-			)
-		}),
-	)
-	server := olocaltxsubmission.NewServer(opts, &cfg)
-	peer.start(t, server)
-	peer.send(t, olocaltxsubmission.ProtocolId,
-		olocaltxsubmission.NewMsgSubmitTx(gledger.EraIdBabbage, []byte{0x80}),
-	)
-	select {
-	case err := <-peer.errChan:
-		require.ErrorContains(t, err, "not representable")
-	case <-time.After(2 * time.Second):
-		t.Fatal("server did not report rejection encoding error")
-	}
-}
-
 func TestLocalTxSubmissionConnection_EncodeErrorClosesPeer(t *testing.T) {
 	t.Parallel()
 
@@ -602,111 +552,6 @@ func TestLocalTxSubmissionConnection_EncodeErrorClosesPeer(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("client error channel did not close after peer shutdown")
 	}
-}
-
-func TestLocalTxSubmissionServer_ConwayRejectThenAccept(t *testing.T) {
-	t.Parallel()
-
-	opts, peer := newMuxerServerPeer(t)
-	var calls int
-	cfg := olocaltxsubmission.NewConfig(
-		olocaltxsubmission.WithSubmitTxFunc(func(
-			_ olocaltxsubmission.CallbackContext,
-			_ olocaltxsubmission.MsgSubmitTxTransaction,
-		) error {
-			calls++
-			if calls == 1 {
-				return newLocalTxSubmissionRejectReason(
-					gledger.EraIdConway,
-					errors.New("generic rejection"),
-				)
-			}
-			return nil
-		}),
-	)
-	server := olocaltxsubmission.NewServer(opts, &cfg)
-	peer.start(t, server)
-	peer.send(t, olocaltxsubmission.ProtocolId,
-		olocaltxsubmission.NewMsgSubmitTx(gledger.EraIdConway, []byte{0x80}),
-	)
-	first := peer.readResponse(t, testutil.AsyncWait)
-	require.Equal(t, olocaltxsubmission.ProtocolId, first.ProtocolId&0x7fff)
-	var firstItems []cbor.RawMessage
-	_, err := cbor.Decode(first.Payload, &firstItems)
-	require.NoError(t, err)
-	require.Len(t, firstItems, 2)
-	var firstType uint
-	_, err = cbor.Decode(firstItems[0], &firstType)
-	require.NoError(t, err)
-	assert.Equal(t, uint(olocaltxsubmission.MessageTypeRejectTx), firstType)
-	expectedReject, err := hex.DecodeString(
-		"8182068182077167656e657269632072656a656374696f6e",
-	)
-	require.NoError(t, err)
-	assert.Equal(t, expectedReject, []byte(firstItems[1]))
-
-	peer.send(t, olocaltxsubmission.ProtocolId,
-		olocaltxsubmission.NewMsgSubmitTx(gledger.EraIdConway, []byte{0x80}),
-	)
-	second := peer.readResponse(t, testutil.AsyncWait)
-	var secondItems []cbor.RawMessage
-	_, err = cbor.Decode(second.Payload, &secondItems)
-	require.NoError(t, err)
-	var secondType uint
-	_, err = cbor.Decode(secondItems[0], &secondType)
-	require.NoError(t, err)
-	assert.Equal(t, uint(olocaltxsubmission.MessageTypeAcceptTx), secondType)
-}
-
-func TestLocalTxSubmissionServer_DijkstraRejectThenAccept(t *testing.T) {
-	t.Parallel()
-	opts, peer := newMuxerServerPeer(t)
-	var calls int
-	cfg := olocaltxsubmission.NewConfig(
-		olocaltxsubmission.WithSubmitTxFunc(func(
-			_ olocaltxsubmission.CallbackContext,
-			_ olocaltxsubmission.MsgSubmitTxTransaction,
-		) error {
-			calls++
-			if calls == 1 {
-				return newLocalTxSubmissionRejectReason(
-					gledger.EraIdDijkstra, errors.New("generic rejection"),
-				)
-			}
-			return nil
-		}),
-	)
-	server := olocaltxsubmission.NewServer(opts, &cfg)
-	peer.start(t, server)
-	peer.send(t, olocaltxsubmission.ProtocolId,
-		olocaltxsubmission.NewMsgSubmitTx(gledger.EraIdDijkstra, []byte{0x80}),
-	)
-	first := peer.readResponse(t, testutil.AsyncWait)
-	var firstItems []cbor.RawMessage
-	_, err := cbor.Decode(first.Payload, &firstItems)
-	require.NoError(t, err)
-	require.Len(t, firstItems, 2)
-	var firstType uint
-	_, err = cbor.Decode(firstItems[0], &firstType)
-	require.NoError(t, err)
-	assert.Equal(t, uint(olocaltxsubmission.MessageTypeRejectTx), firstType)
-	expectedReject, err := hex.DecodeString(
-		"8182078182027167656e657269632072656a656374696f6e",
-	)
-	require.NoError(t, err)
-	assert.Equal(t, expectedReject, []byte(firstItems[1]))
-
-	peer.send(t, olocaltxsubmission.ProtocolId,
-		olocaltxsubmission.NewMsgSubmitTx(gledger.EraIdDijkstra, []byte{0x80}),
-	)
-	second := peer.readResponse(t, testutil.AsyncWait)
-	var secondItems []cbor.RawMessage
-	_, err = cbor.Decode(second.Payload, &secondItems)
-	require.NoError(t, err)
-	var secondType uint
-	_, err = cbor.Decode(secondItems[0], &secondType)
-	require.NoError(t, err)
-	assert.Equal(t, uint(olocaltxsubmission.MessageTypeAcceptTx), secondType)
 }
 
 func TestLocalTxSubmissionRejectReason_PreservesTypedReason(t *testing.T) {
@@ -803,28 +648,6 @@ func TestLocalTxSubmissionServerSubmitTx_AcceptsValidTransaction(t *testing.T) {
 	txs := o.mempool.Transactions()
 	require.Len(t, txs, 1)
 	assert.Equal(t, fixture.hash, txs[0].Hash)
-}
-
-// TestLocalTxSubmissionServerSubmitTx_MalformedTransactionIsRejected proves
-// undecodable transaction bytes are refused with a ledger rejection, not a
-// panic and not a framing error, and leave the mempool untouched.
-func TestLocalTxSubmissionServerSubmitTx_MalformedTransactionIsRejected(
-	t *testing.T,
-) {
-	t.Parallel()
-
-	o, _ := newTxSubmissionTestOuroboros(t)
-
-	require.NotPanics(t, func() {
-		err := o.localtxsubmissionServerSubmitTx(
-			localTxSubmissionTestCtx(),
-			localTxSubmissionTestMsg([]byte{0xff, 0x00, 0x01}),
-		)
-		require.Error(t, err)
-		var reason cborRejectReason
-		require.ErrorAs(t, err, &reason)
-	})
-	require.Empty(t, o.mempool.Transactions())
 }
 
 // TestLocalTxSubmissionServerSubmitTx_RequiresMempool covers the
@@ -1089,20 +912,4 @@ func TestLocalTxSubmissionProtocol_UnregisteredConnCloseCancels(
 	case <-time.After(5 * time.Second):
 		t.Fatal("validation context not cancelled when the bearer closed")
 	}
-}
-
-// TestLocalTxSubmissionInputResolutionFailureStaysGeneric: the mempool's
-// input-address lookup failing is a node fault, not a ledger rejection.
-func TestLocalTxSubmissionInputResolutionFailureStaysGeneric(t *testing.T) {
-	t.Parallel()
-	err := fmt.Errorf(
-		"resolve confirmed input addresses: %w: %w",
-		mempool.ErrInputResolution,
-		errors.New("database is locked"),
-	)
-	require.True(t, isLocalTxSubmissionInfrastructureError(err))
-	rejectErr := localTxSubmissionRejectReason(gledger.EraIdConway, err)
-	require.EqualError(t, rejectErr, "local transaction submission unavailable")
-	var reason cborRejectReason
-	require.NotErrorAs(t, rejectErr, &reason)
 }

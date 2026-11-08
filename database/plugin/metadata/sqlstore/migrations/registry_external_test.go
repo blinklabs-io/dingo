@@ -94,14 +94,25 @@ func baselineBackfillDB(
 	t *testing.T,
 ) (*sql.DB, func(versions []migrations.Migration)) {
 	t.Helper()
+	return migratedPrefixDB(t, 3)
+}
+
+// migratedPrefixDB returns a database already migrated through the first n
+// versions, with a runner for the remaining ones.
+func migratedPrefixDB(
+	t *testing.T,
+	n int,
+) (*sql.DB, func(versions []migrations.Migration)) {
+	t.Helper()
 	ctx := context.Background()
 	databasePath := filepath.Join(t.TempDir(), "metadata.sqlite")
+	migrations.SeedMigratedPrefix(t, databasePath, n)
 	db, err := sql.Open("sqlite", "file:"+databasePath+"?"+testDBPragmas)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	require.GreaterOrEqual(t, len(registry), 4)
+	require.GreaterOrEqual(t, len(registry), n)
 	runTo := func(versions []migrations.Migration) {
 		runner := migrations.Runner{
 			DB:       db,
@@ -113,7 +124,6 @@ func baselineBackfillDB(
 		}
 		require.NoError(t, runner.Run(ctx))
 	}
-	runTo(registry[:3])
 	return db, runTo
 }
 
@@ -286,10 +296,9 @@ VALUES (?, 0, 400)`,
 }
 
 func TestAddressTransactionCredentialKindBackfillCapturesTransactionIDs(t *testing.T) {
-	db, runTo := baselineBackfillDB(t)
+	db, runTo := migratedPrefixDB(t, 45)
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	runTo(registry[:45])
 	ctx := context.Background()
 	for i := 1; i <= 2; i++ {
 		result, err := db.ExecContext(ctx, `
@@ -328,28 +337,7 @@ func alonzoPParamsUnitBackfillDB(
 	t *testing.T,
 ) (*sql.DB, func([]migrations.Migration)) {
 	t.Helper()
-	ctx := context.Background()
-	databasePath := filepath.Join(t.TempDir(), "metadata.sqlite")
-	db, err := sql.Open("sqlite", "file:"+databasePath+"?"+testDBPragmas)
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, db.Close()) })
-	registry, err := migrations.SQLiteRegistry()
-	require.NoError(t, err)
-	require.Len(t, registry, 55)
-
-	runTo := func(versions []migrations.Migration) {
-		runner := migrations.Runner{
-			DB:       db,
-			Dialect:  "sqlite",
-			Registry: versions,
-			Locker: migrations.NewFileLocker(
-				databasePath + ".migrate.lock",
-			),
-		}
-		require.NoError(t, runner.Run(ctx))
-	}
-	runTo(registry[:19])
-	return db, runTo
+	return migratedPrefixDB(t, 19)
 }
 
 func alonzoPParamsUnitMarker(t *testing.T, db *sql.DB) string {
@@ -376,7 +364,7 @@ func TestAlonzoPParamsUnitBackfillMarksFreshDatabaseWordV1(t *testing.T) {
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
 
-	runTo(registry)
+	runTo(registry[:20])
 
 	require.Equal(t, nodesettings.AlonzoPParamsUnitWordV1,
 		alonzoPParamsUnitMarker(t, db))
@@ -392,7 +380,7 @@ func TestAlonzoPParamsUnitBackfillMarksLegacyAlonzoRows(t *testing.T) {
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
 
-	runTo(registry)
+	runTo(registry[:20])
 
 	require.Equal(t, nodesettings.AlonzoPParamsUnitLegacyByteV0,
 		alonzoPParamsUnitMarker(t, db))
@@ -405,7 +393,7 @@ func TestAlonzoPParamsUnitBackfillDoesNotMisclassifyBabbageRows(t *testing.T) {
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
 
-	runTo(registry)
+	runTo(registry[:20])
 
 	require.Equal(t, nodesettings.AlonzoPParamsUnitWordV1,
 		alonzoPParamsUnitMarker(t, db))
@@ -425,7 +413,7 @@ VALUES (?, ?, 7, 9)`,
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
 
-	runTo(registry)
+	runTo(registry[:20])
 
 	require.Equal(t, nodesettings.AlonzoPParamsUnitWordV1,
 		alonzoPParamsUnitMarker(t, db))
@@ -436,14 +424,14 @@ func TestAlonzoPParamsUnitBackfillReplayIsIdempotent(t *testing.T) {
 	db, runTo := alonzoPParamsUnitBackfillDB(t)
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	runTo(registry)
+	runTo(registry[:20])
 	_, err = db.ExecContext(context.Background(), `
 UPDATE schema_migrations
 SET phase = 'backfill', cursor = '', dirty = 1, completed_at = NULL
 WHERE version = 20`)
 	require.NoError(t, err)
 
-	runTo(registry)
+	runTo(registry[:20])
 
 	require.Equal(t, nodesettings.AlonzoPParamsUnitWordV1,
 		alonzoPParamsUnitMarker(t, db))
@@ -454,30 +442,9 @@ WHERE version = 20`)
 // rows the v12 backfill reads.
 func depositHeldBackfillDB(
 	t *testing.T,
-) (*sql.DB, func(versions []migrations.Migration)) {
+) (*sql.DB, func([]migrations.Migration)) {
 	t.Helper()
-	ctx := context.Background()
-	databasePath := filepath.Join(t.TempDir(), "metadata.sqlite")
-	db, err := sql.Open("sqlite", "file:"+databasePath+"?"+testDBPragmas)
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, db.Close()) })
-	registry, err := migrations.SQLiteRegistry()
-	require.NoError(t, err)
-	require.Len(t, registry, 55)
-
-	runTo := func(versions []migrations.Migration) {
-		runner := migrations.Runner{
-			DB:       db,
-			Dialect:  "sqlite",
-			Registry: versions,
-			Locker: migrations.NewFileLocker(
-				databasePath + ".migrate.lock",
-			),
-		}
-		require.NoError(t, runner.Run(ctx))
-	}
-	runTo(registry[:10])
-	return db, runTo
+	return migratedPrefixDB(t, 10)
 }
 
 func seedLegacyPoolRegistration(
@@ -529,7 +496,7 @@ func TestDepositHeldBackfillCreditsRecordedDeposit(t *testing.T) {
 
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	runTo(registry)
+	runTo(registry[:12])
 
 	held := depositHeldValue(t, db, keyHash)
 	require.True(t, held.Valid)
@@ -547,7 +514,7 @@ func TestDepositHeldBackfillLeavesUnknownDepositUnpopulated(t *testing.T) {
 
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	runTo(registry)
+	runTo(registry[:12])
 
 	held := depositHeldValue(t, db, keyHash)
 	require.False(t, held.Valid)
@@ -573,7 +540,7 @@ VALUES (?, ?, ?, ?)`, poolID, keyHash, 200, "800000000")
 
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	runTo(registry)
+	runTo(registry[:12])
 
 	var held string
 	require.NoError(t, db.QueryRowContext(context.Background(), `
@@ -599,7 +566,7 @@ VALUES (?, ?, ?, ?)`, poolID, keyHash, 200, "800000000")
 
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	runTo(registry)
+	runTo(registry[:12])
 
 	var held, amount sql.NullString
 	require.NoError(t, db.QueryRowContext(context.Background(), `
@@ -621,7 +588,7 @@ func TestDepositHeldBackfillReplayKeepsCarriedForwardAmount(t *testing.T) {
 
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	runTo(registry)
+	runTo(registry[:12])
 
 	// Stand in for a later re-registration whose held amount was carried
 	// forward from an earlier, cheaper registration.
@@ -637,7 +604,7 @@ UPDATE schema_migrations
 SET phase = 'backfill', cursor = '', dirty = 1, completed_at = NULL
 WHERE version = 12`)
 	require.NoError(t, err)
-	runTo(registry)
+	runTo(registry[:12])
 
 	held := depositHeldValue(t, db, keyHash)
 	require.True(t, held.Valid)
@@ -657,7 +624,7 @@ func TestDepositHeldExpandPhaseReplaysAfterInterruptedUpgrade(t *testing.T) {
 
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	runTo(registry)
+	runTo(registry[:12])
 
 	ctx := context.Background()
 	// Rewind version 12 to the durable state such an interruption leaves: the
@@ -674,7 +641,7 @@ SET phase = 'expand', cursor = '', dirty = 1, completed_at = NULL
 	)
 	require.NoError(t, err)
 
-	runTo(registry)
+	runTo(registry[:12])
 
 	held := depositHeldValue(t, db, keyHash)
 	require.True(t, held.Valid)

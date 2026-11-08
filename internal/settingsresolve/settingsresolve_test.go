@@ -26,6 +26,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/config"
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
 	"github.com/blinklabs-io/dingo/internal/settingsresolve"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/plugin"
 	"github.com/stretchr/testify/require"
 )
@@ -73,6 +74,11 @@ func seedDatabase(t *testing.T, gates map[string]string) string {
 	t.Helper()
 	dir := t.TempDir()
 	ctx := context.Background()
+	// Start from an already-migrated metadata file so neither this store nor
+	// the Apply under test runs the full schema migration.
+	template, err := dbtest.MetadataTemplateBytes()
+	require.NoError(t, err)
+	require.NoError(t, dbtest.SeedMetadataTemplateBytes(dir, template))
 
 	host, err := internalplugins.NewHost()
 	require.NoError(t, err)

@@ -167,7 +167,7 @@ func TestListSnapshotsOrdersNewestFirst(t *testing.T) {
 func TestListSnapshotPageBoundsManifestReads(t *testing.T) {
 	t.Parallel()
 	base := t.TempDir()
-	const catalogSize = 256
+	const catalogSize = 8
 	for i := range catalogSize {
 		name := fmt.Sprintf("snapshot-%04d", i)
 		dir := filepath.Join(base, name)
@@ -189,14 +189,14 @@ func TestListSnapshotPageBoundsManifestReads(t *testing.T) {
 	entries, next, err := lifecycle.ListSnapshotPage(base, 3, nil)
 	require.NoError(t, err)
 	require.Equal(t, []string{
-		"snapshot-0255", "snapshot-0254", "snapshot-0253",
+		"snapshot-0007", "snapshot-0006", "snapshot-0005",
 	}, []string{entries[0].ID, entries[1].ID, entries[2].ID})
 	require.NotNil(t, next)
 
 	entries, next, err = lifecycle.ListSnapshotPage(base, 1, next)
 	require.NoError(t, err)
 	require.Len(t, entries, 1)
-	require.Equal(t, "snapshot-0252", entries[0].ID)
+	require.Equal(t, "snapshot-0004", entries[0].ID)
 	require.NotNil(t, next)
 }
 

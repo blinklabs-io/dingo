@@ -347,7 +347,7 @@ func eraUtxoValidationRuleCompositions() []eraUtxoValidationRuleComposition {
 				},
 			},
 			retained: map[lcommon.UtxoValidationRuleId]string{
-				lcommon.UtxoValidationRuleCurrentTreasuryValue: "common.UtxoValidateCurrentTreasuryValue",
+				lcommon.UtxoValidationRuleCurrentTreasuryValue: "common.UtxoValidateCurrentTreasuryValueAnyPhase",
 				lcommon.UtxoValidationRuleExUnitsTooBig:        "dijkstra.UtxoValidateExUnitsTooBigUtxo",
 				lcommon.UtxoValidationRuleCertificateDeposits:  "dijkstra.UtxoValidateCertificateDeposits",
 			},

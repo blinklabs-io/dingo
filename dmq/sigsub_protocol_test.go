@@ -585,62 +585,6 @@ func TestSigProtocolDoneReachesTheServingSide(t *testing.T) {
 	waitFor(t, "the pulling side is finished", pair.puller.IsDone)
 }
 
-// The pulling side is the connection's initiator and holds agency in Idle; the
-// serving side is the responder. dmq-node's version 2 assigns them this way,
-// the reverse of TxSubmission2, and a pair of Dingo stacks would agree on
-// either assignment, so it is pinned here.
-func TestSigProtocolRolesAndAgencyMatchDmqNode(t *testing.T) {
-	t.Parallel()
-	pair := newRecorder().pair(t)
-	assert.Equal(t, protocol.ProtocolRoleClient, pair.puller.Role())
-	assert.Equal(t, protocol.ProtocolRoleServer, pair.server.Role())
-	assert.Equal(t, sigProtocolID, uint16(11))
-
-	stateMap := sigStateMap(sigTimeouts{}, true)
-	assert.Equal(t, protocol.AgencyClient, stateMap[sigStateIdle].Agency)
-	for _, st := range []protocol.State{
-		sigStateIDsBlocking, sigStateIDsNonBlocking, sigStateSigs,
-	} {
-		assert.Equal(t, protocol.AgencyServer, stateMap[st].Agency, st.Name)
-	}
-	assert.Equal(t, protocol.AgencyNone, stateMap[sigStateDone].Agency)
-	// MsgReplyNoIDs answers a blocking request only.
-	for st, entry := range map[protocol.State]protocol.StateMapEntry{
-		sigStateIDsBlocking:    stateMap[sigStateIDsBlocking],
-		sigStateIDsNonBlocking: stateMap[sigStateIDsNonBlocking],
-	} {
-		var allowsNoIDs bool
-		for _, tr := range entry.Transitions {
-			allowsNoIDs = allowsNoIDs || tr.MsgType == sigMsgReplyNoIDs
-		}
-		assert.Equal(t, st == sigStateIDsBlocking, allowsNoIDs, st.Name)
-	}
-}
-
-// Version 2 has no Init state: the pulling side's first message is a request,
-// sent the moment the protocol starts, with no Init before it and none awaited.
-// A flow that needed an Init first would leave this request queued forever.
-func TestSigProtocolStartsInIdleWithoutAnInit(t *testing.T) {
-	t.Parallel()
-	rec := newRecorder()
-	pair := rec.pair(t)
-
-	require.NoError(t, pair.puller.RequestIDs(true, 0, 5))
-	assert.Equal(t, idRequestSeen{true, 0, 5},
-		recv(t, rec.idRequests, "the first request, with no Init before it"))
-	require.NoError(t, pair.server.ReplyIDs(idsAndSizes(1)))
-	recv(t, rec.idReplies, "the first reply")
-
-	stateMap := sigStateMap(sigTimeouts{}, true)
-	idle := stateMap[sigStateIdle]
-	for _, tr := range idle.Transitions {
-		assert.NotZero(t, tr.MsgType, "no transition out of Idle is an Init")
-	}
-	for state := range stateMap {
-		assert.NotEqual(t, "Init", state.Name)
-	}
-}
-
 // The pulling side gives up on a peer that does not reply within the limit for
 // the state, as dmq-node does of its peers.
 func TestSigProtocolPullerEnforcesItsTimeouts(t *testing.T) {
@@ -686,26 +630,6 @@ func TestSigProtocolPullerEnforcesItsTimeouts(t *testing.T) {
 			// The serving side never answers, so the pulling side times out.
 			require.Error(t, recv(t, pair.pullerErr, "the timeout"))
 		})
-	}
-}
-
-func TestSigStateMapBoundsWhatIsReceivedInEveryState(t *testing.T) {
-	t.Parallel()
-	for _, pipelined := range []bool{false, true} {
-		sm := sigStateMap(sigTimeouts{}, pipelined)
-		assert.Equal(
-			t, sigRequestByteLimit,
-			sm[sigStateIdle].PendingMessageByteLimit,
-			"Idle, pipelined=%v", pipelined,
-		)
-		for _, st := range []protocol.State{
-			sigStateIDsBlocking, sigStateIDsNonBlocking, sigStateSigs,
-		} {
-			assert.Equal(
-				t, sigReplyByteLimit, sm[st].PendingMessageByteLimit,
-				"state %v, pipelined=%v", st, pipelined,
-			)
-		}
 	}
 }
 

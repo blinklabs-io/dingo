@@ -164,3 +164,58 @@ func BenchmarkBigintSumStep(b *testing.B) {
 		})
 	}
 }
+
+func TestBigintSumOwnsParsedBlobDigits(t *testing.T) {
+	t.Parallel()
+	var sum bigintSum
+	value := []byte("184467440737095516160000")
+	require.NoError(t, sum.Step(nil, []driver.Value{value}))
+	for i := range value {
+		value[i] = 'x'
+	}
+	got, err := sum.WindowValue(nil)
+	require.NoError(t, err)
+	require.Equal(t, "184467440737095516160000", got)
+	inverse := []byte("-1")
+	require.NoError(t, sum.WindowInverse(nil, []driver.Value{inverse}))
+	for i := range inverse {
+		inverse[i] = 'x'
+	}
+	got, err = sum.WindowValue(nil)
+	require.NoError(t, err)
+	require.Equal(t, "184467440737095516160001", got)
+}
+
+func BenchmarkBigintSumSQL(b *testing.B) {
+	for _, tc := range []struct {
+		name  string
+		value any
+		want  string
+	}{
+		{"decimal", "39169836000000", "391698360000000000"},
+		{"wide", "184467440737095516160000", "1844674407370955161600000000"},
+		{"blob", []byte("39169836000000"), "391698360000000000"},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			db, err := sql.Open("sqlite", ":memory:")
+			require.NoError(b, err)
+			db.SetMaxOpenConns(1)
+			b.Cleanup(func() { require.NoError(b, db.Close()) })
+			_, err = db.Exec("CREATE TABLE amounts(amount)")
+			require.NoError(b, err)
+			_, err = db.Exec(`WITH RECURSIVE sequence(n) AS (
+    VALUES(1) UNION ALL SELECT n+1 FROM sequence WHERE n<10000
+   ) INSERT INTO amounts SELECT ? FROM sequence`, tc.value)
+			require.NoError(b, err)
+			stmt, err := db.Prepare("SELECT " + Name + "(amount) FROM amounts")
+			require.NoError(b, err)
+			b.Cleanup(func() { require.NoError(b, stmt.Close()) })
+			b.ReportAllocs()
+			for b.Loop() {
+				var got string
+				require.NoError(b, stmt.QueryRow().Scan(&got))
+				require.Equal(b, tc.want, got)
+			}
+		})
+	}
+}

@@ -66,7 +66,7 @@ func (poisonBlobStore) NewIterator(
 func TestBlockNumberBoundTxnUsesPinnedStore(t *testing.T) {
 	t.Parallel()
 
-	db, err := newTestDatabase(t, &Config{DataDir: t.TempDir()})
+	db, err := newTestDatabase(t, &Config{DataDir: ""})
 	require.NoError(t, err)
 	base := db.Blob()
 	require.NotNil(t, base)
@@ -138,7 +138,7 @@ func drainAsync(drain func()) <-chan struct{} {
 func TestSetBlobStoreConcurrentWithReaders(t *testing.T) {
 	t.Parallel()
 
-	db, err := newTestDatabase(t, &Config{DataDir: t.TempDir()})
+	db, err := newTestDatabase(t, &Config{DataDir: ""})
 	require.NoError(t, err)
 	base := db.Blob()
 	require.NotNil(t, base)
@@ -224,7 +224,7 @@ func TestSetBlobStoreConcurrentWithReaders(t *testing.T) {
 func TestSetBlobStoreDrainWaitsForOpenTransaction(t *testing.T) {
 	t.Parallel()
 
-	db, err := newTestDatabase(t, &Config{DataDir: t.TempDir()})
+	db, err := newTestDatabase(t, &Config{DataDir: ""})
 	require.NoError(t, err)
 	base := db.Blob()
 	require.NotNil(t, base)
@@ -296,7 +296,7 @@ func TestSetBlobStoreDrainWaitsForOpenTransaction(t *testing.T) {
 func TestSetBlobStoreDrainWaitsForPinBlob(t *testing.T) {
 	t.Parallel()
 
-	db, err := newTestDatabase(t, &Config{DataDir: t.TempDir()})
+	db, err := newTestDatabase(t, &Config{DataDir: ""})
 	require.NoError(t, err)
 	base := db.Blob()
 	require.NotNil(t, base)
@@ -331,7 +331,7 @@ func TestSetBlobStoreDrainWaitsForPinBlob(t *testing.T) {
 func TestSetBlobStoreDrainReturnsWhenIdle(t *testing.T) {
 	t.Parallel()
 
-	db, err := newTestDatabase(t, &Config{DataDir: t.TempDir()})
+	db, err := newTestDatabase(t, &Config{DataDir: ""})
 	require.NoError(t, err)
 	base := db.Blob()
 	require.NotNil(t, base)
@@ -355,7 +355,7 @@ func TestSetBlobStoreDrainReturnsWhenIdle(t *testing.T) {
 func TestTxnKeepsBlobStoreAcrossReplacement(t *testing.T) {
 	t.Parallel()
 
-	db, err := newTestDatabase(t, &Config{DataDir: t.TempDir()})
+	db, err := newTestDatabase(t, &Config{DataDir: ""})
 	require.NoError(t, err)
 	base := db.Blob()
 	require.NotNil(t, base)
@@ -431,7 +431,7 @@ func (s *pairingProbeBlobStore) GetUtxo(
 func TestResolveTxCborUsesTransactionStore(t *testing.T) {
 	t.Parallel()
 
-	db, err := newTestDatabase(t, &Config{DataDir: t.TempDir()})
+	db, err := newTestDatabase(t, &Config{DataDir: ""})
 	require.NoError(t, err)
 	base := db.Blob()
 	require.NotNil(t, base)
@@ -470,7 +470,7 @@ func TestResolveTxCborUsesTransactionStore(t *testing.T) {
 func TestResolveUtxoCborUsesTransactionStore(t *testing.T) {
 	t.Parallel()
 
-	db, err := newTestDatabase(t, &Config{DataDir: t.TempDir()})
+	db, err := newTestDatabase(t, &Config{DataDir: ""})
 	require.NoError(t, err)
 	base := db.Blob()
 	require.NotNil(t, base)
@@ -525,7 +525,7 @@ func (s *missingBlockBlobStore) GetBlock(
 func TestBlobIteratorKeepsBatchStoreAcrossReplacement(t *testing.T) {
 	t.Parallel()
 
-	db, err := newTestDatabase(t, &Config{DataDir: t.TempDir()})
+	db, err := newTestDatabase(t, &Config{DataDir: ""})
 	require.NoError(t, err)
 	base := db.Blob()
 	require.NotNil(t, base)

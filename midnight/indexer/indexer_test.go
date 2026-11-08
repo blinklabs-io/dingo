@@ -34,6 +34,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -96,6 +97,11 @@ type testStore struct {
 func setupTestStore(t *testing.T) *testStore {
 	t.Helper()
 	dataDir := t.TempDir()
+	// Migrating the schema per test dominates the cost under -race; start from
+	// the process-wide migrated template instead.
+	template, err := dbtest.MetadataTemplateBytes()
+	require.NoError(t, err)
+	require.NoError(t, dbtest.SeedMetadataTemplateBytes(dataDir, template))
 	store, err := sqlite.NewSQLStore(
 		sqlite.Config{DataDir: dataDir},
 		metadata.ProviderDependencies{

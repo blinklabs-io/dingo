@@ -26,6 +26,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -92,10 +93,10 @@ func (tx metadataOnlyTransaction) Produced() []lcommon.Utxo {
 // let a truncate proceed past a boundary that could not actually be
 // verified, rather than merely under-informing a heuristic.
 func (d *Database) MithrilTrustBoundarySlot(txn *Txn) uint64 {
-	// Deliberately not MithrilTrustBoundarySlotStrict: this runs once per
-	// transaction that consumes inputs, and the strict variant pays an extra
-	// sync_state enumeration on the empty-value path — which is the common
-	// path here, since a genesis-synced node has no boundary row at all.
+	// Deliberately not MithrilTrustBoundarySlotStrict: consumed-input recovery
+	// needs only a best-effort boundary when a producer is missing. The strict
+	// variant pays an extra sync_state enumeration on the empty-value path,
+	// which is common for a genesis-synced node with no boundary row.
 	// This caller discards every failure as 0 regardless, so the distinction
 	// that enumeration buys is worth nothing to it.
 	slot, err := d.mithrilTrustBoundarySlot(txn)
@@ -627,6 +628,25 @@ func (d *Database) SetGapBlockTransaction(
 	return nil
 }
 
+func (d *Database) consumedUtxoSpendState(
+	txID []byte,
+	index uint32,
+	txn *Txn,
+) (*models.UtxoSpendState, error) {
+	store := d.utxoStore()
+	if reader, ok := store.(metadata.UtxoSpendStateReader); ok {
+		return reader.GetUtxoSpendState(txID, index, txn.Metadata())
+	}
+	utxo, err := store.GetUtxoIncludingSpent(txID, index, txn.Metadata())
+	if err != nil || utxo == nil {
+		return nil, err
+	}
+	return &models.UtxoSpendState{
+		DeletedSlot: utxo.DeletedSlot,
+		SpentAtTxId: utxo.SpentAtTxId,
+	}, nil
+}
+
 func (d *Database) ensureTransactionConsumedUtxos(
 	tx lcommon.Transaction,
 	point ocommon.Point,
@@ -660,10 +680,8 @@ func (d *Database) ensureTransactionConsumedUtxos(
 	spenderTxHash := ledgerHashBytes(tx.Hash())
 	recoveredUtxos := make([]models.Utxo, 0, len(consumed))
 	seen := make(map[consumedInputKey]struct{}, len(consumed))
-	// Read the Mithril trust boundary once: below it, absent producer rows are
-	// legitimately expected (the snapshot does not carry pre-boundary history);
-	// past it the node should hold complete producer history.
-	mithrilBoundarySlot := d.MithrilTrustBoundarySlot(txn)
+	var mithrilBoundarySlot uint64
+	var boundaryRead bool
 	for _, input := range consumed {
 		inputTxId := ledgerInputIDBytes(input)
 		inputKey := newConsumedInputKey(input)
@@ -671,10 +689,8 @@ func (d *Database) ensureTransactionConsumedUtxos(
 			continue
 		}
 		seen[inputKey] = struct{}{}
-		existingUtxo, err := d.utxoStore().GetUtxoIncludingSpent(
-			inputTxId,
-			input.Index(),
-			txn.Metadata(),
+		existingUtxo, err := d.consumedUtxoSpendState(
+			inputTxId, input.Index(), txn,
 		)
 		if err != nil {
 			return fmt.Errorf(
@@ -723,6 +739,12 @@ func (d *Database) ensureTransactionConsumedUtxos(
 		if inFlight != nil &&
 			inFlight.HasInFlightProducer(inputTxId, input.Index()) {
 			continue
+		}
+		// The boundary is relevant only when a producer is actually missing.
+		// Keep it local to this transaction's recovery, never a cross-txn memo.
+		if !boundaryRead {
+			mithrilBoundarySlot = d.MithrilTrustBoundarySlot(txn)
+			boundaryRead = true
 		}
 		// For a validated block past the Mithril trust boundary, recover a
 		// missing producer only when its block is still on the applied primary
@@ -2030,9 +2052,12 @@ func deleteTxBlobs(d *Database, txHashes [][]byte, txn *Txn) error {
 			deleteErrors += skipped
 			d.logger.Warn(
 				"TX blob deletes left unstaged to keep the transaction committable",
-				"skipped", skipped,
-				"staged", staged,
-				"total", len(txHashes),
+				"skipped",
+				skipped,
+				"staged",
+				staged,
+				"total",
+				len(txHashes),
 			)
 		}
 	} else {
