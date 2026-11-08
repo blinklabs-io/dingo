@@ -976,16 +976,9 @@ func (b *Backfill) Run(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		txn := b.db.BlobTxn(false)
 		index := *cp.LastIndexID
-		var point ocommon.Point
-		if err := txn.Do(func(txn *database.Txn) error {
-			var identityErr error
-			point, identityErr = database.CanonicalBlockIdentityAtIndexTxn(
-				ctx, txn, index,
-			)
-			return identityErr
-		}); err != nil {
+		point, err := b.canonicalCheckpointPoint(ctx, index)
+		if err != nil {
 			return fmt.Errorf(
 				"resolving backfill checkpoint identity at index %d: %w",
 				index, err,
@@ -1751,4 +1744,20 @@ func appendBackfillStatsAttrs(
 		"checkpoint_write_ms",
 		stats.CheckpointWrites.Milliseconds(),
 	)
+}
+
+// canonicalCheckpointPoint resolves the canonical block point stored at index.
+func (b *Backfill) canonicalCheckpointPoint(
+	ctx context.Context,
+	index uint64,
+) (ocommon.Point, error) {
+	var point ocommon.Point
+	err := b.db.BlobTxn(false).Do(func(txn *database.Txn) error {
+		var identityErr error
+		point, identityErr = database.CanonicalBlockIdentityAtIndexTxn(
+			ctx, txn, index,
+		)
+		return identityErr
+	})
+	return point, err
 }
