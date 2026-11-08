@@ -309,6 +309,7 @@ func (r *Runner) runBackfill(
 				Cursor: cursor,
 				Limit:  limit,
 				Rebind: rebind,
+				Logger: r.Logger,
 			},
 		)
 		if err != nil {

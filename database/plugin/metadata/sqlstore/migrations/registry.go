@@ -2365,6 +2365,24 @@ SELECT MAX(id), COUNT(*) FROM (
 			if err := createUtxoSpenderIndexes(ctx, batch, dialect); err != nil {
 				return BatchResult{}, err
 			}
+			var unresolved, sampleID int64
+			if err := batch.Tx.QueryRowContext(ctx, `
+SELECT COUNT(*), COALESCE(MIN(id), 0) FROM utxo
+WHERE spent_at_tx_id IS NOT NULL AND spent_by_tx_id IS NULL`).Scan(
+				&unresolved, &sampleID,
+			); err != nil {
+				return BatchResult{}, fmt.Errorf(
+					"count unresolved utxo spenders: %w", err,
+				)
+			}
+			if unresolved > 0 {
+				batch.logger().Warn(
+					"utxo spender hash has no transaction row; the output "+
+						"keeps its legacy hash and its deleted_slot",
+					"count", unresolved,
+					"sample_utxo_id", sampleID,
+				)
+			}
 			return BatchResult{Cursor: batch.Cursor, Done: true}, nil
 		}
 		if _, err := batch.Tx.ExecContext(ctx, batch.Rebind(`
@@ -2505,6 +2523,24 @@ WHERE i.utxo_id > ? AND i.utxo_id <= ?
 				return BatchResult{}, fmt.Errorf("copy %s: %w", c.from, err)
 			}
 			rows, _ := result.RowsAffected()
+			var dropped int64
+			if err := batch.Tx.QueryRowContext(ctx, batch.Rebind(`
+SELECT COUNT(*) FROM `+c.from+` AS i
+WHERE i.utxo_id > ? AND i.utxo_id <= ?
+  AND NOT EXISTS (
+      SELECT 1 FROM `+transactionTable+` AS t
+      WHERE t.hash = i.transaction_hash
+  )`), last, upper.Int64).Scan(&dropped); err != nil {
+				return BatchResult{}, fmt.Errorf("count dropped %s: %w", c.from, err)
+			}
+			if dropped > 0 {
+				batch.logger().Warn(
+					"utxo edge names a hash with no transaction row; "+
+						"the edge is not copied",
+					"table", c.to,
+					"count", dropped,
+				)
+			}
 			return BatchResult{
 				Cursor: phase + ":" + strconv.FormatInt(upper.Int64, 10),
 				Rows:   rows,
@@ -2564,5 +2600,80 @@ ALTER TABLE utxo ADD COLUMN producer_tx_id INTEGER
 			return BatchResult{}, fmt.Errorf("add producer_tx_id: %w", err)
 		}
 	}
+	if err := checkUtxoProducerContract(ctx, batch); err != nil {
+		return BatchResult{}, err
+	}
 	return BatchResult{Cursor: batch.Cursor, Done: true}, nil
+}
+
+// checkUtxoProducerContract runs before the contract phase builds the unique
+// producer index. Two outputs of one producer at one output index make that
+// index impossible, so they are reported by name here rather than as a bare
+// constraint failure; repair or resync is the operator's decision. An output
+// whose tx_id is not its producer's hash does not block the index but is no
+// longer found by hash, so it is counted and sampled in the log.
+func checkUtxoProducerContract(ctx context.Context, batch Batch) error {
+	rows, err := batch.Tx.QueryContext(ctx, `
+SELECT producer_tx_id, output_idx, COUNT(*) FROM utxo
+WHERE producer_tx_id IS NOT NULL
+GROUP BY producer_tx_id, output_idx
+HAVING COUNT(*) > 1
+LIMIT 5`)
+	if err != nil {
+		return fmt.Errorf("check utxo producer duplicates: %w", err)
+	}
+	var samples []string
+	for rows.Next() {
+		var producer, idx, count int64
+		if err := rows.Scan(&producer, &idx, &count); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("scan utxo producer duplicate: %w", err)
+		}
+		samples = append(samples, fmt.Sprintf(
+			"producer_tx_id=%d output_idx=%d rows=%d", producer, idx, count,
+		))
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return fmt.Errorf("check utxo producer duplicates: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if len(samples) > 0 {
+		var total int64
+		if err := batch.Tx.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM (
+    SELECT 1 FROM utxo WHERE producer_tx_id IS NOT NULL
+    GROUP BY producer_tx_id, output_idx HAVING COUNT(*) > 1
+)`).Scan(&total); err != nil {
+			return fmt.Errorf("count utxo producer duplicates: %w", err)
+		}
+		return fmt.Errorf(
+			"%d duplicate outputs share a producer transaction and output "+
+				"index, so idx_utxo_producer_output cannot be created "+
+				"(first: %s); remove the duplicate utxo rows or resync",
+			total, strings.Join(samples, "; "),
+		)
+	}
+	var mismatched int64
+	var sampleID, sampleIdx int64
+	if err := batch.Tx.QueryRowContext(ctx, `
+SELECT COUNT(*), COALESCE(MIN(u.id), 0), COALESCE(MIN(u.output_idx), 0)
+FROM utxo AS u
+JOIN "transaction" AS t ON t.id = u.producer_tx_id
+WHERE u.tx_id IS NOT t.hash`).Scan(
+		&mismatched, &sampleID, &sampleIdx,
+	); err != nil {
+		return fmt.Errorf("check utxo producer hash: %w", err)
+	}
+	if mismatched > 0 {
+		batch.logger().Warn(
+			"utxo tx_id differs from its producer transaction hash",
+			"count", mismatched,
+			"sample_utxo_id", sampleID,
+			"sample_output_idx", sampleIdx,
+		)
+	}
+	return nil
 }
