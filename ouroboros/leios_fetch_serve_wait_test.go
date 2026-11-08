@@ -393,3 +393,42 @@ func TestLeiosFetchServingWaitIgnoresOtherConnectionOwnerRelease(t *testing.T) {
 	}
 	require.Zero(t, o.leiosFetchServeWaiting.Load())
 }
+
+// An owner whose attempt expired still holds the claim until it is handed to
+// the next candidate; a waiter must keep waiting through that handoff.
+func TestLeiosPendingServeWorkSpansExpiredAttemptHandoff(t *testing.T) {
+	t.Parallel()
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
+	t.Cleanup(func() { _ = o.Close() })
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	attempt, attemptCancel := context.WithCancel(ctx)
+	attemptCancel()
+	key := leiosBlockKey(7, []byte{1})
+	o.leiosTxFetchClaims = map[string]*leiosTxFetchClaim{
+		key: {owner: &leiosTxFetchCandidate{ctx: ctx, attemptCtx: attempt}},
+	}
+	_, txDone, pending := o.pendingLeiosServeWork(key)
+	require.True(t, pending)
+	require.Nil(t, txDone, "an expired attempt signal would spin the waiter")
+}
+
+func TestLeiosFetchServingWaiterLimitAdmitsBelowLimit(t *testing.T) {
+	t.Parallel()
+	o, _, ctx := newPendingLeiosServePeer(t)
+	o.leiosFetchServeTimeoutOverride = 20 * time.Millisecond
+	point, raw := testLeiosEndorserBlockRaw(t, 1)
+	admitPendingManifest(t, o, point, raw)
+	o.leiosFetchServeWaiting.Store(leiosFetchServeMaxWaiters - 1)
+	start := time.Now()
+	_, err := o.leiosfetchServerBlockRequest(ctx, point)
+	require.ErrorIs(t, err, oleiosfetch.ErrBlockNotFound)
+	require.GreaterOrEqual(t, time.Since(start), 15*time.Millisecond,
+		"a request below the limit must wait instead of being rejected at once")
+	require.Equal(
+		t,
+		int32(leiosFetchServeMaxWaiters-1),
+		o.leiosFetchServeWaiting.Load(),
+	)
+	o.leiosFetchServeWaiting.Store(0)
+}

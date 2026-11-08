@@ -2864,6 +2864,16 @@ func (o *Ouroboros) recordLeiosAnnouncementLocked(
 		}
 		return nil
 	}
+	// Timing the slot can fail; do it before any admission state changes so a
+	// failed record can be retried.
+	var deferredExpiry time.Time
+	if relay && !isNilInterface(o.leiosAnnouncementLedger) {
+		start, err := o.leiosAnnouncementLedger.SlotToTime(slot)
+		if err != nil {
+			return err
+		}
+		deferredExpiry = start.Add(leiosNotifyRelayAnnouncementAge)
+	}
 	issuer := header.IssuerVkey()
 	// An election belongs to its slot and issuer, not the relaying peer.
 	// Changing connections must not reset its distinct-announcement budget.
@@ -2897,20 +2907,12 @@ func (o *Ouroboros) recordLeiosAnnouncementLocked(
 	if relay {
 		data, available := o.lookupLeiosEndorserBlock(slot, ebHash.Bytes())
 		if !available || data == nil || !data.hasManifest() {
-			var expiresAt time.Time
-			if !isNilInterface(o.leiosAnnouncementLedger) {
-				start, err := o.leiosAnnouncementLedger.SlotToTime(slot)
-				if err != nil {
-					return err
-				}
-				expiresAt = start.Add(leiosNotifyMaxAnnouncementAge)
-			}
 			o.leiosMu.Lock()
 			if o.leiosRelayPendingAnnouncements == nil {
 				o.leiosRelayPendingAnnouncements = make(map[string][]leiosPendingRelayAnnouncement)
 			}
 			pointKey := leiosBlockKey(slot, ebHash.Bytes())
-			o.leiosRelayPendingAnnouncements[pointKey] = append(o.leiosRelayPendingAnnouncements[pointKey], leiosPendingRelayAnnouncement{key: key, raw: o.leiosAnnouncements[key].raw, expiresAt: expiresAt})
+			o.leiosRelayPendingAnnouncements[pointKey] = append(o.leiosRelayPendingAnnouncements[pointKey], leiosPendingRelayAnnouncement{key: key, raw: o.leiosAnnouncements[key].raw, expiresAt: deferredExpiry})
 			// A persistent reload can populate the cache while the lookup above
 			// misses. Recheck under the cache lock before parking the header.
 			if current := o.leiosEndorserBlocks[pointKey]; current != nil && current.hasManifest() {

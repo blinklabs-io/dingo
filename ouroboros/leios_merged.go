@@ -802,18 +802,24 @@ func (o *Ouroboros) enqueueLeiosRelayOffers(
 	point ocommon.Point,
 	data *leiosEndorserBlockData,
 ) {
-	if data == nil || !data.relayOfferRequested || !data.slotVerified {
+	if data == nil || !data.slotVerified {
 		return
 	}
 	key := leiosBlockKey(point.Slot, point.Hash)
 	o.leiosMu.Lock()
 	current := o.leiosEndorserBlocks[key]
-	if current == nil || !current.relayOfferRequested || !current.slotVerified {
+	if current == nil || !current.slotVerified {
 		o.leiosMu.Unlock()
 		return
 	}
+	// Deferred headers precede every offer of this block, including the
+	// offers of a locally forged block whose store requested no relay offer.
 	if current.hasManifest() {
 		o.publishPendingLeiosRelayAnnouncementsLocked(key)
+	}
+	if !current.relayOfferRequested {
+		o.leiosMu.Unlock()
+		return
 	}
 	updated := *current
 	// An intent-only entry has no manifest to size the offer with. Receivers

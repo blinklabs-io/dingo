@@ -2545,7 +2545,11 @@ func TestLeiosAnnouncementElectionBoundAcrossSources(t *testing.T) {
 	)
 	require.ErrorContains(t, err, "third distinct")
 	require.Len(t, o.leiosAnnouncements, 2)
-	require.Empty(t, o.leiosEBLog.items, "unavailable manifests must not be advertised")
+	require.Empty(
+		t,
+		o.leiosEBLog.items,
+		"unavailable manifests must not be advertised",
+	)
 	pendingRelayCount := 0
 	for _, announcements := range o.leiosRelayPendingAnnouncements {
 		pendingRelayCount += len(announcements)

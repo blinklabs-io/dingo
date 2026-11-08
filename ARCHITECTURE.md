@@ -5516,8 +5516,9 @@ leios-fetch server uses the same lookup path for downstream `MsgBlockRequest`
 and `MsgBlockTxsRequest`: it serves from the in-memory cache when present, and
 on cache miss or expired-entry eviction reloads the manifest and complete tx
 list from the durable `em`/`et` blob keys so historical EBs can be re-served
-after the cache TTL. Relayed ranking-block announcements remain in an
-arrival-ordered queue until their corresponding EB manifest is available;
+after the cache TTL. Relayed ranking-block announcements remain queued, in arrival
+order per endorser-block occurrence, until that occurrence's EB manifest is
+available;
 independent ChainSync propagation is unchanged. The queue shares the validated
 announcement admission and expiry bounds, and expired headers are discarded
 even if historical backfill later loads their manifests. Manifest publication

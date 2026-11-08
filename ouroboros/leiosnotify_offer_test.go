@@ -15,6 +15,7 @@
 package ouroboros
 
 import (
+	"errors"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -420,6 +421,7 @@ func TestLeiosRelayDefersAnnouncementUntilManifestStored(t *testing.T) {
 }
 
 func TestLeiosRelayDropsExpiredDeferredAnnouncement(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		txRaw := testDijkstraTx(t, 0)
 		ebRaw, err := cbor.Encode(&lcommon.LeiosEndorserBlock{
@@ -453,4 +455,110 @@ func TestLeiosRelayDropsExpiredDeferredAnnouncement(t *testing.T) {
 		require.Equal(t, point, *entry.point)
 		require.Empty(t, o.leiosRelayPendingAnnouncements)
 	})
+}
+
+func newDeferredRelayFixture(
+	t *testing.T,
+	ledger *fakeLeiosAnnouncementLedger,
+) (*Ouroboros, ocommon.Point, []byte, []byte, []byte) {
+	t.Helper()
+	txRaw := testDijkstraTx(t, 0)
+	ebRaw, err := cbor.Encode(&lcommon.LeiosEndorserBlock{
+		TransactionReferences: []lcommon.LeiosTransactionReference{{
+			TransactionHash: lcommon.Blake2b256Hash(txRaw),
+			TransactionSize: uint32(len(txRaw)), //nolint:gosec // bounded fixture
+		}},
+	})
+	require.NoError(t, err)
+	ebHash := lcommon.Blake2b256Hash(ebRaw)
+	point := ocommon.NewPoint(42, ebHash.Bytes())
+	cfg := OuroborosConfig{EnableLeios: true}
+	if ledger != nil {
+		cfg.LeiosAnnouncementLedger = ledger
+	}
+	o := newOuroboros(cfg)
+	t.Cleanup(func() { require.NoError(t, o.Close()) })
+	o.leiosEBLog.registerConn("downstream", nil, nil)
+	headerRaw := testDijkstraAnnouncementHeaderRawFor(
+		t, point.Slot, ebHash, uint64(len(ebRaw)),
+	)
+	return o, point, ebRaw, txRaw, headerRaw
+}
+
+func recordRelayedHeader(
+	t *testing.T,
+	o *Ouroboros,
+	point ocommon.Point,
+	ebSize int,
+	headerRaw []byte,
+) error {
+	t.Helper()
+	header, err := gdijkstra.NewDijkstraBlockHeaderFromCbor(headerRaw)
+	require.NoError(t, err)
+	return o.recordLeiosAnnouncement(
+		headerRaw, header.Cbor(), testEbHash(point), uint64(ebSize), header,
+		"upstream", true,
+	)
+}
+
+// A relayed header deferred for want of a manifest must reach peers before the
+// offers of a locally forged block with the same point, even though the
+// forged store itself requested no relay offer.
+func TestLeiosForgedStoreFlushesDeferredHeaderBeforeOffers(t *testing.T) {
+	t.Parallel()
+	o, point, ebRaw, txRaw, headerRaw := newDeferredRelayFixture(t, nil)
+	require.NoError(t, recordRelayedHeader(t, o, point, len(ebRaw), headerRaw))
+	entry, _ := o.leiosEBLog.next("downstream")
+	require.Nil(t, entry)
+
+	require.NoError(t, o.BroadcastEndorserBlock(
+		point.Slot, point.Hash, ebRaw, [][]byte{txRaw},
+	))
+
+	first, _ := o.leiosEBLog.next("downstream")
+	require.NotNil(t, first)
+	require.Equal(t, headerRaw, first.announcement,
+		"the announcement must precede every offer for its endorser block")
+	o.leiosEBLog.complete("downstream", nil, true)
+	second, _ := o.leiosEBLog.next("downstream")
+	require.NotNil(t, second)
+	require.NotNil(t, second.point)
+}
+
+// The relay age bound is shorter than the acceptance window, so a deferred
+// header must stop being published once the relay bound passes.
+func TestLeiosDeferredHeaderExpiresAtRelayAge(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		o, point, ebRaw, _, headerRaw := newDeferredRelayFixture(
+			t,
+			&fakeLeiosAnnouncementLedger{slotTime: time.Now()},
+		)
+		o.markLeiosEndorserBlockRelayOfferFrom(point, "upstream")
+		require.NoError(t, recordRelayedHeader(t, o, point, len(ebRaw), headerRaw))
+		time.Sleep(leiosNotifyRelayAnnouncementAge + time.Second)
+		require.NoError(t, o.storeLeiosEndorserBlock(
+			point, ebRaw, nil, leiosStorePeerOffered,
+		))
+		entry, _ := o.leiosEBLog.next("downstream")
+		require.NotNil(t, entry)
+		require.Empty(t, entry.announcement)
+	})
+}
+
+// A failure to time the slot must not leave a partly admitted announcement.
+func TestLeiosDeferredHeaderTimingFailureAdmitsNothing(t *testing.T) {
+	t.Parallel()
+	ledger := &fakeLeiosAnnouncementLedger{
+		slotTime:    time.Now(),
+		slotTimeErr: errors.New("slot time unavailable"),
+	}
+	o, point, ebRaw, _, headerRaw := newDeferredRelayFixture(t, ledger)
+	require.Error(t, recordRelayedHeader(t, o, point, len(ebRaw), headerRaw))
+	o.leiosAnnouncementsMu.Lock()
+	defer o.leiosAnnouncementsMu.Unlock()
+	require.Empty(t, o.leiosAnnouncements)
+	require.Empty(t, o.leiosAnnouncementElections)
+	require.Empty(t, o.leiosAnnouncementSizes)
+	require.Empty(t, o.leiosAnnouncementSlots)
 }

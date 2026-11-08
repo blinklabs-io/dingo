@@ -40,6 +40,7 @@ func (o *Ouroboros) finishLeiosManifestFetch(key string, claim *leiosManifestFet
 
 func (o *Ouroboros) pendingLeiosServeWork(key string) (<-chan struct{}, <-chan struct{}, bool) {
 	var manifestDone, txDone <-chan struct{}
+	txPending := false
 	if value, ok := o.leiosManifestFetchInProgress.Load(key); ok {
 		if claim, ok := value.(*leiosManifestFetchClaim); ok && claim != nil {
 			select {
@@ -52,12 +53,15 @@ func (o *Ouroboros) pendingLeiosServeWork(key string) (<-chan struct{}, <-chan s
 	o.leiosTxFetchClaimsMu.Lock()
 	if claim := o.leiosTxFetchClaims[key]; claim != nil && claim.owner != nil {
 		owner := claim.owner
+		// The claim outlives an expired attempt until it is handed to the
+		// next candidate or deleted, so it is still pending work.
+		txPending = true
 		if owner.ctx != nil && owner.ctx.Err() == nil && owner.attemptCtx != nil && owner.attemptCtx.Err() == nil {
 			txDone = owner.attemptCtx.Done()
 		}
 	}
 	o.leiosTxFetchClaimsMu.Unlock()
-	return manifestDone, txDone, manifestDone != nil || txDone != nil
+	return manifestDone, txDone, manifestDone != nil || txPending
 }
 
 // A validated announcement can reach a downstream peer before this relay's
@@ -73,6 +77,17 @@ func (o *Ouroboros) lookupLeiosFetchServingData(
 	lookup := func() (*leiosEndorserBlockData, bool) {
 		data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
 		return data, ok && (ready == nil || ready(data))
+	}
+	// Inside the wait only the in-memory cache is polled: a fetch publishes
+	// into it, and a persistent read per tick would hammer the blob store.
+	lookupCached := func() (*leiosEndorserBlockData, bool) {
+		o.leiosMu.RLock()
+		data := o.leiosEndorserBlocks[leiosBlockKey(point.Slot, point.Hash)]
+		o.leiosMu.RUnlock()
+		if data == nil || data.expired(time.Now()) || !data.hasManifest() {
+			return nil, false
+		}
+		return data, ready == nil || ready(data)
 	}
 	if data, ok := lookup(); ok {
 		return data, true
@@ -121,12 +136,14 @@ func (o *Ouroboros) lookupLeiosFetchServingData(
 			return nil, false
 		default:
 		}
-		if data, ok := lookup(); ok {
+		if data, ok := lookupCached(); ok {
 			return data, true
 		}
 		manifestDone, txDone, pending := o.pendingLeiosServeWork(key)
 		if !pending {
-			return nil, false
+			// The work may have published and released its claim between
+			// the cache read and the claim check.
+			return lookup()
 		}
 		select {
 		case <-done:

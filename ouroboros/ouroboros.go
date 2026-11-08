@@ -350,13 +350,12 @@ type Ouroboros struct {
 	acceptedHeaderTips map[ouroboros.ConnectionId][]byte
 	// Per-peer rate limiter for TxSubmission server
 	txSubmissionRateLimiter *txSubmissionRateLimiter
-	// Cached Leios EB material fetched from peers. This lets NtC
-	// ChainSync serve merged RB+EB blocks without coupling the chain
-	// package to Leios prototype protocols.
 	// Pending headers share the announcement admission/expiry bounds. leiosMu
 	// protects their ordered publication once the manifest can be served.
 	leiosRelayPendingAnnouncements map[string][]leiosPendingRelayAnnouncement
-
+	// Cached Leios EB material fetched from peers. This lets NtC
+	// ChainSync serve merged RB+EB blocks without coupling the chain
+	// package to Leios prototype protocols.
 	leiosEndorserBlocks map[string]*leiosEndorserBlockData
 	// leiosSelectedHeaders retains the exact selected announcing header while
 	// ledger apply waits for its independently fetched endorser body. It is
