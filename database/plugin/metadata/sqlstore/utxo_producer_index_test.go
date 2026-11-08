@@ -243,3 +243,46 @@ func TestCrossIdentityProbeUsesTheImportedIndex(t *testing.T) {
 	require.Contains(t, plan, "idx_utxo_imported_ref", plan)
 	require.NotContains(t, plan, "SCAN utxo", plan)
 }
+
+// TestDirectInsertsRefuseTheOtherIdentity covers the writers with no conflict
+// clause: CreateUtxo refuses a produced output over an imported row and the
+// reverse, as the unique hash index did, and AddUtxos leaves a produced output
+// alone when it is declared again as an imported-kind row.
+func TestDirectInsertsRefuseTheOtherIdentity(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	importedHash, producedHash := bytes32(0x91), bytes32(0x92)
+	require.NoError(t, store.ImportUtxos([]models.Utxo{{
+		TxId: importedHash, OutputIdx: 0, Amount: types.Uint64(1),
+	}}, nil))
+	var producer int64
+	require.NoError(t, store.writeDB.QueryRow(
+		`INSERT INTO "transaction" (hash, slot) VALUES (?, 5) RETURNING id`,
+		producedHash,
+	).Scan(&producer))
+	id := uint(producer)
+	require.NoError(t, store.CreateUtxo(nil, &models.Utxo{
+		TxId: producedHash, OutputIdx: 0, TransactionID: &id,
+		Amount: types.Uint64(1),
+	}))
+
+	err := store.CreateUtxo(nil, &models.Utxo{
+		TxId: importedHash, OutputIdx: 0, TransactionID: &id,
+		Amount: types.Uint64(1),
+	})
+	require.ErrorIs(t, err, types.ErrUtxoConflict, "produced over imported")
+	err = store.CreateUtxo(nil, &models.Utxo{
+		TxId: producedHash, OutputIdx: 0, Amount: types.Uint64(1),
+	})
+	require.ErrorIs(t, err, types.ErrUtxoConflict, "imported over produced")
+
+	require.NoError(t, store.ImportUtxos([]models.Utxo{{
+		TxId: producedHash, OutputIdx: 0, Amount: types.Uint64(1),
+	}}, nil))
+	var count int
+	require.NoError(t, store.writeDB.QueryRow(
+		"SELECT COUNT(*) FROM utxo WHERE tx_id IN (?, ?)",
+		importedHash, producedHash,
+	).Scan(&count))
+	require.Equal(t, 2, count)
+}

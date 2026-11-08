@@ -69,6 +69,21 @@ func (s *Store) CreateUtxo(txn types.Txn, utxo *models.Utxo) error {
 			if err != nil {
 				return err
 			}
+			// The insert has no conflict clause, and on SQLite no unique
+			// index spans a produced output and an imported row of the same
+			// output, so look for the other identity first.
+			existing, err := s.existingUtxoRefs(ctx, db, []*models.Utxo{utxo})
+			if err != nil {
+				return err
+			}
+			if _, dup := existing[utxoIdentityKey(
+				utxo.TxId, utxo.OutputIdx,
+			)]; dup {
+				return fmt.Errorf(
+					"%w: create UTxO %x:%d: output already stored",
+					types.ErrUtxoConflict, utxo.TxId, utxo.OutputIdx,
+				)
+			}
 			var id int64
 			if err := s.queryRowCached(
 				ctx, db, insertUtxoQuery, params.args()...,
