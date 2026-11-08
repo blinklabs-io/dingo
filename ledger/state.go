@@ -3259,7 +3259,20 @@ func (ls *LedgerState) RecoverCommitTimestampConflict(
 		// SubmitAsyncDBTxn() which may trigger PartialCommitError recovery
 		// that re-acquires ls.Lock(), causing a deadlock. The rollback
 		// method handles its own locking for in-memory state updates.
-		if err = ls.rollback(ctx, ancestor); err != nil {
+		ls.RLock()
+		publishedAtAncestor := pointMatches(ls.currentTip.Point, ancestor)
+		ls.RUnlock()
+		if publishedAtAncestor {
+			// Recovery may start before the durable tip has been published in
+			// memory. Force the metadata repair when the selected ancestor is
+			// already the in-memory tip (notably origin).
+			err = ls.withConsumedUtxoPruneBoundary(func() error {
+				return ls.rollbackWithBlocks(ctx, ancestor, nil, true)
+			})
+		} else {
+			err = ls.rollback(ctx, ancestor)
+		}
+		if err != nil {
 			wrappedErr := fmt.Errorf(
 				"failed to rollback ledger: %w",
 				err,
@@ -13515,7 +13528,10 @@ func (ls *LedgerState) latestLedgerPrimaryChainAncestor(
 		}
 		end = start
 	}
-	return ocommon.Point{}, false, nil
+	// Origin is the common ancestor when no applied block nonce remains on the
+	// selected chain. It has no block_nonce row, but it is always a valid
+	// primary-chain point and both rollback paths support it.
+	return ocommon.Point{}, true, nil
 }
 
 func (ls *LedgerState) GetBlock(point ocommon.Point) (models.Block, error) {

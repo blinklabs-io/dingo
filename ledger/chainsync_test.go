@@ -10873,9 +10873,37 @@ func TestReconcilePrimaryChainTipWithLedgerTipUsesCommonAncestorWhenForkTipIsLow
 
 	require.Equal(t, fixture.ancestorTip, fixture.ls.chain.Tip())
 	require.Equal(t, fixture.ancestorTip, fixture.ls.currentTip)
+	require.True(
+		t,
+		bytes.Equal(fixture.ancestorNonce, fixture.ls.currentTipBlockNonce),
+	)
 	dbTip, err := fixture.ls.db.GetTip(nil)
 	require.NoError(t, err)
 	require.Equal(t, fixture.ancestorTip, dbTip)
+}
+
+func TestReconcilePrimaryChainTipWithLedgerTipUsesOriginWhenForkHasNoAppliedAncestor(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	require.NoError(
+		t,
+		fixture.ls.chain.Rollback(context.Background(), ocommon.Point{}),
+	)
+
+	require.NoError(
+		t,
+		fixture.ls.reconcilePrimaryChainTipWithLedgerTip(context.Background()),
+	)
+
+	require.Equal(t, ochainsync.Tip{}, fixture.ls.chain.Tip())
+	require.Equal(t, ochainsync.Tip{}, fixture.ls.currentTip)
+	require.Empty(t, fixture.ls.currentTipBlockNonce)
+	dbTip, err := fixture.ls.db.GetTip(nil)
+	require.NoError(t, err)
+	require.Equal(t, ochainsync.Tip{}, dbTip)
 }
 
 func TestReconcilePrimaryChainTipWithLedgerTipRollsBackMissingLedgerTipToCommonAncestor(

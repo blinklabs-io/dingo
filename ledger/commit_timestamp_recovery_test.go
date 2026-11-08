@@ -215,6 +215,33 @@ func TestRecoverCommitTimestampConflictUsesCommonAncestorAcrossForks(
 	require.Equal(t, fixture.ancestorTip, dbTip)
 }
 
+func TestRecoverCommitTimestampConflictUsesOriginWithoutAppliedAncestor(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	require.NoError(
+		t,
+		fixture.ls.chain.Rollback(context.Background(), ocommon.Point{}),
+	)
+	fixture.ls.currentTip = ochainsync.Tip{}
+	fixture.ls.currentTipBlockNonce = nil
+	fixture.ls.publishSnapshotsLocked()
+
+	require.NoError(
+		t,
+		fixture.ls.RecoverCommitTimestampConflict(context.Background()),
+	)
+
+	require.Equal(t, ochainsync.Tip{}, fixture.ls.chain.Tip())
+	require.Equal(t, ochainsync.Tip{}, fixture.ls.currentTip)
+	require.Empty(t, fixture.ls.currentTipBlockNonce)
+	dbTip, err := fixture.ls.db.GetTip(nil)
+	require.NoError(t, err)
+	require.Equal(t, ochainsync.Tip{}, dbTip)
+}
+
 func TestCleanupOrphanedBlobsUsesOnePinnedStore(t *testing.T) {
 	t.Parallel()
 

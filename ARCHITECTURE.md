@@ -1001,8 +1001,9 @@ scheduled attempt may cross the boundary, once per epoch until the ledger
 applies past the failing block, so a failure that needs a different
 pre-boundary history can still be repaired.
 
-Startup reconciliation rolls the ledger back to the blob tip when metadata
-leads it, and that rollback can be arbitrarily deep, so it can now fail with
+Startup reconciliation rolls both stores back to their newest applied common
+ancestor when metadata leads the selected chain, and that rollback can be
+arbitrarily deep, so it can now fail with
 `ErrRollbackBelowUtxoPruneFloor` and refuse to start. That is the intended
 outcome rather than a regression: the rewind it was about to perform could not
 have rebuilt the live UTxO set, so the alternative is a node that starts,
@@ -11602,8 +11603,8 @@ block reasons use corroborated network evidence:
   that does not belong to that chain.
 - `primary_tip_behind_applied` is the **opposite**: the ledger is ahead of the
   primary chain. That is chain/ledger reconciliation, the state the ledger
-  resolves at startup by rolling its own tip back to the chain tip, not an
-  apply backlog.
+  resolves at startup by rolling both stores back to their newest applied
+  common ancestor, not an apply backlog.
 - `admitted_header_ahead` means the **selected block chain is behind its own
   authenticated header stream**. The queued frontier is hash-linked to the
   selected tip under one chain lock, so a rollback cannot create a mixed
