@@ -12964,9 +12964,10 @@ substituted at the archive name is preserved.
 With `CleanupAfterLoad` set, an API-mode `Sync` runs `Cleanup` as soon as
 `sync_status` becomes `backfill`, before the metadata backfill starts: the
 backfill reads blocks from the blob store, and on mainnet it runs for days
-while the extracted immutable tree holds hundreds of GB. `serve` resumes an
-interrupted backfill without the tree; re-running `dingo mithril sync` instead
-downloads the immutable archives again. Core mode cleans up at completion.
+while the extracted immutable tree holds hundreds of GB. Both `serve` and a
+re-run of `dingo mithril sync` resume an interrupted backfill from its
+checkpoint without the tree or the aggregator. Core mode cleans up at
+completion.
 
 Temporary feed, extraction, and probe directories are created privately before
 their names are exposed. On Unix, each real directory in the absolute ancestor
@@ -13889,9 +13890,14 @@ exactly as before: no coordinator starts and no aggregator is contacted.
 the database state alone, so the operator never needs to know it:
 
 - empty database -> full bootstrap
-- non-empty `sync_status` (`in_progress`, `backfill`, or an unknown future
-  value) -> resume the existing path against the pinned artifact (below),
-  except an interrupted v2 core catch-up
+- `sync_status` `backfill` in API mode, as an ordinary backfill with no
+  pending repair or catch-up -> resume the metadata backfill from its
+  checkpoint and finish the import; every block is already in the blob store,
+  so nothing is downloaded (`resumeMithrilBackfill`). The recorded artifact pin
+  is still checked against the run's backend and network first
+- any other non-empty `sync_status` (`in_progress`, or an unknown future value)
+  -> resume the existing path against the pinned artifact (below), except an
+  interrupted v2 core catch-up
   (import marker present, or the ephemeral `mithril_catchup_active` flag for a
   markerless catch-up) re-runs as a catch-up so the reconcile pass repairs the
   partial import
