@@ -281,6 +281,7 @@ func TestImportedExpiredGovStateRejectsEnactedOverlap(t *testing.T) {
 }
 
 func TestExpiredVerdictVetoesUniqueHFIFallback(t *testing.T) {
+	t.Parallel()
 	root := &ParsedGovActionId{TxHash: bytes.Repeat([]byte{0x71}, 32)}
 	hash := bytes.Repeat([]byte{0x72}, 32)
 	for _, tc := range []struct {
