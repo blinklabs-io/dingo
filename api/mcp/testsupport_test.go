@@ -63,7 +63,8 @@ func newFixtureDB(t *testing.T) *sql.DB {
 		value INTEGER NOT NULL,
 		amount TEXT,
 		transaction_id INTEGER,
-		tx_id BLOB
+		tx_id BLOB,
+		producer_tx_id INTEGER AS (transaction_id) VIRTUAL
 		);
 		CREATE TABLE account (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -108,8 +109,20 @@ func newSchemaDB(t *testing.T) *sql.DB {
 	require.NoError(t, err)
 	_, err = db.Exec(string(schema))
 	require.NoError(t, err)
+	// The generated column and its index are added by the SQLite
+	// migrations, not by the sqlc schema snapshot.
+	_, err = db.Exec(producerColumnDDL)
+	require.NoError(t, err)
 	return db
 }
+
+// producerColumnDDL mirrors the SQLite migrations that add utxo.producer_tx_id
+// and idx_utxo_producer_output.
+const producerColumnDDL = `
+ALTER TABLE utxo ADD COLUMN producer_tx_id INTEGER
+    AS (COALESCE(transaction_id, collateral_return_for_tx_id)) VIRTUAL;
+CREATE UNIQUE INDEX idx_utxo_producer_output
+    ON utxo (producer_tx_id, output_idx) WHERE producer_tx_id IS NOT NULL;`
 
 func newToolSession(
 	t *testing.T,

@@ -162,3 +162,82 @@ func TestSQLiteUtxoStatementsKeyOutputsByProducer(t *testing.T) {
 		}
 	}
 }
+
+var singleColumnHashLookup = regexp.MustCompile(
+	`(?i)\b(?:[a-z_]+\.)?tx_id\s*(?:=|IN\s*\(|IN\s*\?|ANY\b)`,
+)
+
+// utxoHashLookupAllowList names the non-test sources outside this package's
+// own pair scan that may filter utxo by the bare tx_id column.
+var utxoHashLookupAllowList = map[string]string{
+	"database/plugin/metadata/sqlstore/utxo_sql.go": "defines the " +
+		"PostgreSQL/MySQL forms and the SQLite imported-row arms",
+	"database/plugin/metadata/sqlstore/utxo_overlay.go": "the imported-row " +
+		"arm of the overlay prefetch uses idx_utxo_imported_ref",
+}
+
+// TestNoSourceFiltersUtxoByBareTxIDOnSQLite scans api, database and internal:
+// on SQLite no index leads with utxo.tx_id for produced rows, so a statement
+// filtering by it alone scans the table. Readers address a transaction's
+// outputs through producer_tx_id.
+func TestNoSourceFiltersUtxoByBareTxIDOnSQLite(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join("..", "..", "..", "..")
+	scanned := 0
+	for _, dir := range []string{"api", "database", "internal"} {
+		err := filepath.WalkDir(
+			filepath.Join(root, dir),
+			func(path string, d os.DirEntry, err error) error {
+				if err != nil {
+					return err
+				}
+				if d.IsDir() {
+					return nil
+				}
+				name := d.Name()
+				if strings.HasSuffix(name, "_test.go") ||
+					(!strings.HasSuffix(name, ".go") &&
+						!strings.HasSuffix(name, ".sql")) {
+					return nil
+				}
+				rel, err := filepath.Rel(root, path)
+				if err != nil {
+					return err
+				}
+				rel = filepath.ToSlash(rel)
+				if strings.Contains(rel, "/migrations/v") {
+					return nil
+				}
+				if _, ok := utxoHashLookupAllowList[rel]; ok {
+					return nil
+				}
+				raw, err := os.ReadFile(path)
+				if err != nil {
+					return err
+				}
+				scanned++
+				for i, line := range strings.Split(string(raw), "\n") {
+					trimmed := strings.TrimSpace(line)
+					if strings.HasPrefix(trimmed, "//") ||
+						strings.HasPrefix(trimmed, "--") {
+						continue
+					}
+					if singleColumnHashLookup.MatchString(line) {
+						t.Errorf(
+							"%s:%d: filters by bare tx_id, which no SQLite "+
+								"index serves for produced rows: %s",
+							rel, i+1, trimmed,
+						)
+					}
+				}
+				return nil
+			},
+		)
+		require.NoError(t, err)
+	}
+	require.Greater(t, scanned, 500, "the scan must cover the tree")
+	for file := range utxoHashLookupAllowList {
+		_, err := os.Stat(filepath.Join(root, file))
+		require.NoError(t, err, "stale allow-list entry %s", file)
+	}
+}

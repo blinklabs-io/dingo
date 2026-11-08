@@ -19,6 +19,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/hex"
+	"strings"
 	"testing"
 	"time"
 
@@ -283,7 +284,7 @@ func TestCardanoToolsTransactionFallback(t *testing.T) {
 		CREATE TABLE account (staking_key BLOB, credential_tag INTEGER, balance INTEGER);
  INSERT INTO account VALUES (X'99999999999999999999999999999999999999999999999999999999', 0, 12345);
 
-		CREATE TABLE utxo (tx_hash TEXT, transaction_id INTEGER, address TEXT, amount TEXT, tx_id BLOB);
+		CREATE TABLE utxo (tx_hash TEXT, transaction_id INTEGER, address TEXT, amount TEXT, tx_id BLOB, producer_tx_id INTEGER AS (transaction_id) VIRTUAL);
 		INSERT INTO utxo VALUES ('1111111111111111111111111111111111111111111111111111111111111111', 1, 'addr_test_paging', '5000000', X'1111111111111111111111111111111111111111111111111111111111111111');
 	`)
 	require.NoError(t, err)
@@ -534,4 +535,44 @@ func TestParseAddressOrCredential(t *testing.T) {
 	// Invalid format
 	_, _, err = parseAddressOrCredential("invalid_addr_format!")
 	assert.Error(t, err)
+}
+
+// get_transaction totals a transaction's outputs through producer_tx_id; no
+// index leads with utxo.tx_id for produced rows, so a predicate on it scans.
+func TestTransactionOutputTotalsSearchProducerIndex(t *testing.T) {
+	t.Parallel()
+	db := newSchemaDB(t)
+	_, err := db.Exec(
+		`INSERT INTO "transaction" (id, hash, slot, block_index) VALUES (7, X'11', 1, 0), (8, X'22', 2, 0)`,
+	)
+	require.NoError(t, err)
+	_, err = db.Exec(`
+INSERT INTO utxo (transaction_id, tx_id, output_idx, amount) VALUES (7, X'11', 0, '5'), (7, X'11', 1, '7');
+INSERT INTO utxo (collateral_return_for_tx_id, tx_id, output_idx, amount) VALUES (8, X'22', 0, '11');
+INSERT INTO utxo (tx_id, output_idx, amount) VALUES (X'33', 0, '13')`)
+	require.NoError(t, err)
+
+	for id, want := range map[int][2]uint64{7: {2, 12}, 8: {1, 11}, 9: {0, 0}} {
+		var count int
+		var total uint64
+		require.NoError(t, db.QueryRow(transactionOutputTotalsSQL, id).
+			Scan(&count, &total))
+		require.Equal(t, int(want[0]), count, "tx %d count", id)
+		require.Equal(t, want[1], total, "tx %d total", id)
+	}
+
+	rows, err := db.Query("EXPLAIN QUERY PLAN "+transactionOutputTotalsSQL, 7)
+	require.NoError(t, err)
+	defer rows.Close()
+	var plan []string
+	for rows.Next() {
+		var id, parent, unused int
+		var detail string
+		require.NoError(t, rows.Scan(&id, &parent, &unused, &detail))
+		plan = append(plan, detail)
+	}
+	require.NoError(t, rows.Err())
+	joined := strings.Join(plan, "\n")
+	require.NotContains(t, joined, "SCAN utxo", "plan:\n%s", joined)
+	require.Contains(t, joined, "idx_utxo_producer_output", "plan:\n%s", joined)
 }

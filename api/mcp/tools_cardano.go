@@ -124,6 +124,13 @@ func formatHash(val any) string {
 	}
 }
 
+// transactionOutputTotalsSQL counts the outputs a transaction row produced,
+// its collateral return included. producer_tx_id is the SQLite generated
+// column indexed by idx_utxo_producer_output; no index leads with utxo.tx_id
+// for produced rows.
+const transactionOutputTotalsSQL = `SELECT count(*), coalesce(sum(amount), 0)
+FROM utxo WHERE producer_tx_id = ?`
+
 type utxoAddressLookup func(context.Context, *models.UtxoWithOrderingQuery, int) (models.UtxoAddressPage, error)
 
 // RegisterCardanoTools registers domain-specific Cardano and db-sync aligned tools.
@@ -479,7 +486,7 @@ func registerCardanoTools(
 		// Count UTxOs created by this tx
 		var outCount int
 		var totalOut uint64
-		err = db.QueryRowContext(qCtx, "SELECT count(*), coalesce(sum(amount), 0) FROM utxo WHERE transaction_id = ? OR tx_id = ?", txID, hashBytes).
+		err = db.QueryRowContext(qCtx, transactionOutputTotalsSQL, txID).
 			Scan(&outCount, &totalOut)
 		if err != nil {
 			return nil, nil, fmt.Errorf("query transaction outputs: %w", err)
