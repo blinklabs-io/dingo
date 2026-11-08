@@ -175,12 +175,17 @@ func TestElectingVrfKeyHashUsesUnchangedSnapshotKey(t *testing.T) {
 
 func TestElectingVrfKeyHashLegacySnapshotUsesRegistration(t *testing.T) {
 	t.Parallel()
-	want := lcommon.Blake2b256{9}
-	store := &countingVrfKeyHashStore{cutoffHash: want[:]}
+	cutoff := lcommon.Blake2b256{9}
+	earliest := lcommon.Blake2b256{10}
+	store := &countingVrfKeyHashStore{
+		cutoffHash:   cutoff[:],
+		earliestHash: earliest[:],
+	}
 	ls, epochCache, snap := newElectingVrfMemoLedger(t, store, 1_000_000)
 
-	assert.Equal(t, want, lookupElectingVrf(t, ls, epochCache, snap))
+	assert.Equal(t, cutoff, lookupElectingVrf(t, ls, epochCache, snap))
 	assert.Equal(t, int64(1), store.cutoff.Load())
+	assert.Equal(t, int64(0), store.earliest.Load())
 }
 
 func TestElectingVrfKeyHashNotMemoizedWithinStabilityWindow(t *testing.T) {
