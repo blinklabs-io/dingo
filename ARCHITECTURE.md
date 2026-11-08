@@ -11863,8 +11863,12 @@ member votes for it, and a header announcing a manifest over
 `maxEndorserBlockReferencesSize` is invalid (`LeiosEbTooBig`). The limits are
 read from the protocol parameters in force at the slot, not from genesis, so an
 on-chain update raising them applies to the next endorser block; the operator
-defaults (24 MiB, 20000 references) can exceed them. A zero protocol limit, or
-parameters of an era without endorser blocks, leaves the operator caps.
+defaults (24 MiB, 20000 references) can exceed them. Missing, typed-nil or
+unrecognized slot parameters, or either Dijkstra capacity set to zero, skip
+endorser-block production before mempool validation and increment the
+`protocol_capacity_unavailable` skip counter. Ranking-block forging continues
+without a new announcement. Known earlier-era parameters retain the operator
+caps for the Conway-header Leios prototype.
 
 #### Self-Validation (`DINGO_VALIDATE_FORGED_BLOCK`)
 

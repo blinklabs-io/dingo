@@ -35,15 +35,25 @@ const leiosEBReferenceHashBytes = 2 + 32
 //     the size a ranking-block header announces; a header announcing more is
 //     invalid (LeiosEbTooBig, dijkstra.ValidateLeiosAnnouncementSize).
 //
-// A zero operator cap means unlimited, and a zero protocol limit, or
-// parameters of an era without endorser blocks, leaves the operator cap.
+// A zero operator cap means unlimited. Missing or unrecognized parameters,
+// and zero Dijkstra capacity, refuse EB production. Known earlier eras retain
+// the operator caps for the Conway-header Leios prototype.
 func effectiveLeiosEBCaps(
 	operator leiosEBCaps,
 	pparams lcommon.ProtocolParameters,
-) leiosEBCaps {
+) (leiosEBCaps, bool) {
+	if _, err := extractPParamsLimits(pparams); err != nil {
+		return leiosEBCaps{}, false
+	}
 	pp, ok := pparams.(*dijkstra.DijkstraProtocolParameters)
-	if !ok || pp == nil {
-		return operator
+	if !ok {
+		return operator, true
+	}
+	// Zero is a protocol bound, not the operator's unlimited sentinel. No
+	// nonempty EB can fit either zero limit.
+	if pp == nil || pp.MaxEndorserBlockTxsSize == 0 ||
+		pp.MaxEndorserBlockReferencesSize == 0 {
+		return leiosEBCaps{}, false
 	}
 	caps := operator
 	caps.maxBytes = minNonZeroCap(
@@ -54,7 +64,7 @@ func effectiveLeiosEBCaps(
 		caps.maxManifestBytes,
 		uint64(pp.MaxEndorserBlockReferencesSize),
 	)
-	return caps
+	return caps, true
 }
 
 // minNonZeroCap returns the smaller of two caps, where zero is unlimited.

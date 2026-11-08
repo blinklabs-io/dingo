@@ -15,6 +15,7 @@
 package forging
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -25,6 +26,8 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -78,14 +81,8 @@ func leiosClosureBytes(bodies [][]byte) uint64 {
 	return total
 }
 
-// The reference node drops an endorser block whose transactions add up to
-// more than maxEndorserBlockTxsSize (ExnLeiosClosureTooBig in
-// ouroboros-consensus LeiosDemoLogic.processLeiosBlock): it never fetches the
-// closure, so no honest committee member can validate or vote for it. Musashi
-// sets the limit to 260000 bytes while the forger's own byte cap defaults to
-// 24 MiB, so under load every endorser block this node announced exceeded it
-// and none was certified. The forger must keep the closure within the limit
-// in force at the slot.
+// The referenced transactions must fit the slot's protocol capacity, even
+// when the operator's byte cap would allow more.
 func TestCheckAndForgeLeiosEBRespectsProtocolTxsSize(t *testing.T) {
 	t.Parallel()
 	txs := leiosCapacityCandidates(t, 10, 0)
@@ -158,40 +155,40 @@ func TestEffectiveLeiosEBCaps(t *testing.T) {
 		MaxEndorserBlockTxsSize:        260000,
 		MaxEndorserBlockReferencesSize: 40000,
 	}
-	caps := effectiveLeiosEBCaps(
+	caps, ok := effectiveLeiosEBCaps(
 		leiosEBCaps{maxRefs: 20000, maxBytes: 24 << 20},
 		pparams,
 	)
+	require.True(t, ok)
 	require.Equal(t, leiosEBCaps{
 		maxRefs:          20000,
 		maxBytes:         260000,
 		maxManifestBytes: 40000,
 	}, caps)
 
-	caps = effectiveLeiosEBCaps(leiosEBCaps{maxBytes: 1000}, pparams)
+	caps, ok = effectiveLeiosEBCaps(leiosEBCaps{maxBytes: 1000}, pparams)
+	require.True(t, ok)
 	require.Equal(t, uint64(1000), caps.maxBytes)
 
 	// Zero is the unlimited operator cap, never a smaller one.
-	caps = effectiveLeiosEBCaps(leiosEBCaps{}, pparams)
+	caps, ok = effectiveLeiosEBCaps(leiosEBCaps{}, pparams)
+	require.True(t, ok)
 	require.Equal(t, uint64(260000), caps.maxBytes)
 
-	// Parameters without endorser-block limits leave the operator caps.
+	// The Conway-header prototype has no Dijkstra capacity fields.
 	operator := leiosEBCaps{maxRefs: 5, maxBytes: 6}
-	require.Equal(t, operator, effectiveLeiosEBCaps(operator, nil))
-	require.Equal(t,
+	caps, ok = effectiveLeiosEBCaps(
 		operator,
-		effectiveLeiosEBCaps(operator, &conway.ConwayProtocolParameters{}),
+		&conway.ConwayProtocolParameters{},
 	)
-	require.Equal(t,
-		operator,
-		effectiveLeiosEBCaps(operator, &dijkstra.DijkstraProtocolParameters{}),
-	)
+	require.True(t, ok)
+	require.Equal(t, operator, caps)
+
 }
 
 // Selection stops once the endorser block is full, rather than validating
-// the rest of a deep mempool that manifest construction would drop. On a
-// loaded chain that work ran until the slot deadline and delayed the
-// ranking-block header by the same amount.
+// the rest of a deep mempool that manifest construction would drop. Those
+// validations would consume the ranking block's remaining slot budget.
 func TestLeiosEBSelectionStopsWhenFull(t *testing.T) {
 	t.Parallel()
 	txs := leiosCandidateTxs(t, 10)
@@ -254,15 +251,14 @@ func TestLeiosEBCapacityMatchesManifestEncoding(t *testing.T) {
 	}
 }
 
-// The limits are read per slot from the parameters in force, not fixed at
-// genesis. Musashi raised them on chain (to a 308000-byte manifest and
-// 2000000 bytes of transactions), so a forger still holding the genesis
-// values would shrink every endorser block. After an update raising the
-// limit, the next endorser block uses the new one.
+// Parameter updates must take effect in the next slot's selection, rather
+// than retaining a capacity cached at genesis or a previous forge.
 func TestCheckAndForgeLeiosEBFollowsProtocolParameterUpdate(t *testing.T) {
 	t.Parallel()
 	txs := leiosCandidateTxs(t, 10)
-	txSize := uint32(len(blockTxFromMempool(t, txs[0].Cbor))) // #nosec G115 -- small fixture
+	txSize := uint32(
+		len(blockTxFromMempool(t, txs[0].Cbor)),
+	) // #nosec G115 -- small fixture
 	current := &dijkstra.DijkstraProtocolParameters{
 		MaxEndorserBlockTxsSize:        2 * txSize,
 		MaxEndorserBlockReferencesSize: 40000,
@@ -287,4 +283,118 @@ func TestCheckAndForgeLeiosEBFollowsProtocolParameterUpdate(t *testing.T) {
 		leiosSelectionBasis{})
 	require.NoError(t, err)
 	require.Len(t, caster.txBodies, 10)
+}
+
+func TestCheckAndForgeLeiosEBRequiresProtocolCapacity(t *testing.T) {
+	t.Parallel()
+	var nilProvider *mockPParamsProvider
+	var nilFunc funcParamsProvider
+	var nilDijkstra *dijkstra.DijkstraProtocolParameters
+	var nilConway *conway.ConwayProtocolParameters
+	for _, tc := range []struct {
+		name     string
+		provider ProtocolParamsProvider
+	}{
+		{"missing provider", nil},
+		{"typed nil provider", nilProvider},
+		{"nil function provider", nilFunc},
+		{"missing slot parameters", &mockPParamsProvider{}},
+		{"unrecognized parameters", &mockPParamsProvider{pparams: unrecognizedProtocolParameters{}}},
+		{"typed nil Dijkstra parameters", &mockPParamsProvider{pparams: nilDijkstra}},
+		{"typed nil Conway parameters", &mockPParamsProvider{pparams: nilConway}},
+		{"zero transaction capacity", &mockPParamsProvider{pparams: &dijkstra.DijkstraProtocolParameters{MaxEndorserBlockReferencesSize: 40000}}},
+		{"zero manifest capacity", &mockPParamsProvider{pparams: &dijkstra.DijkstraProtocolParameters{MaxEndorserBlockTxsSize: 260000}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			caster := &forgerTestLeiosCaster{}
+			forger := leiosCapacityForger(
+				leiosCapacityCandidates(t, 1, 0),
+				nil,
+				caster,
+			)
+			forger.eraParams = tc.provider
+			validator := &sessionMockTxValidator{}
+			forger.leiosValidator = validator
+			var logs bytes.Buffer
+			forger.logger = slog.New(
+				slog.NewTextHandler(
+					&logs,
+					&slog.HandlerOptions{Level: slog.LevelDebug},
+				),
+			)
+			forger.metrics = initForgingMetrics(prometheus.NewRegistry())
+			announcement, err := forger.checkAndForgeLeiosEB(
+				context.Background(),
+				10,
+				leiosSelectionBasis{},
+			)
+			require.NoError(t, err)
+			require.Nil(
+				t,
+				announcement,
+				"unresolved or zero capacity must not announce an EB",
+			)
+			require.Empty(
+				t,
+				caster.hash,
+				"unresolved or zero capacity must not broadcast an EB",
+			)
+			require.Zero(
+				t,
+				validator.validateCalls,
+				"capacity must be checked before transaction validation",
+			)
+			require.Contains(t, logs.String(), "protocol_capacity_unavailable")
+			require.Equal(
+				t,
+				float64(1),
+				testutil.ToFloat64(
+					forger.metrics.leiosEbSkipped.WithLabelValues(
+						"protocol_capacity_unavailable",
+					),
+				),
+			)
+		})
+	}
+}
+
+func TestCheckAndForgeLeiosEBPreservesConwayPrototype(t *testing.T) {
+	t.Parallel()
+	caster := &forgerTestLeiosCaster{}
+	forger := leiosCapacityForger(
+		leiosCapacityCandidates(t, 1, 0),
+		&conway.ConwayProtocolParameters{},
+		caster,
+	)
+	announcement, err := forger.checkAndForgeLeiosEB(
+		context.Background(),
+		10,
+		leiosSelectionBasis{},
+	)
+	require.NoError(t, err)
+	require.NotNil(t, announcement)
+	require.Len(t, caster.txBodies, 1)
+}
+
+func TestMissingEBCapacityStillForgesRankingBlock(t *testing.T) {
+	t.Parallel()
+	var logs bytes.Buffer
+	validator := &sessionMockTxValidator{}
+	caster := &forgerTestLeiosCaster{}
+	broadcaster := &forgerTestBroadcaster{}
+	forger := newEBTimingForger(t, &logs, &ebTestSlotClock{
+		currentSlot: 10, chainTipSlot: 9, slotsPerKESPeriod: 100,
+		slotEnd: time.Now().Add(time.Hour),
+	}, validator, caster, broadcaster, leiosCandidateTxs(t, 1))
+	forger.eraParams = nil
+	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+	require.Empty(t, caster.hash, "missing capacity must suppress EB diffusion")
+	require.Equal(
+		t,
+		1,
+		broadcaster.calls,
+		"missing EB capacity must not lose the ranking block",
+	)
+	require.Zero(t, validator.validateCalls)
 }
