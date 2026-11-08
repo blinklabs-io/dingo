@@ -68,8 +68,9 @@ func (f fileEntry) Size() (int64, error) {
 }
 
 // bytesEntry serves the verified buffer the parser walks. readVerifiedEntry
-// reads entries up to 16 MiB into this buffer in one pass; larger entries use
-// streaming verification before allocating to their certified size.
+// reads entries up to maxSinglePassVerifiedEntrySize into this buffer in one
+// pass; larger entries use streaming verification before allocating to their
+// certified size.
 type bytesEntry struct {
 	data   []byte
 	reader *bytes.Reader

@@ -35,22 +35,6 @@ func privateSnapshotBase(t *testing.T) string {
 	return testutil.OwnerOnlyTempDir(t)
 }
 
-func snapshotForTrustTest(
-	t *testing.T,
-	dir string,
-	opts ...ManifestOption,
-) {
-	t.Helper()
-	db := newRestoreInternalTestDB(t)
-	require.NoError(t, db.BlockCreate(newRestoreInternalTestBlock(), nil))
-	_, err := Snapshot(
-		context.Background(), db, dir,
-		TriggerManual, "test", "badger", "sqlite",
-		opts...,
-	)
-	require.NoError(t, err)
-}
-
 func restoreForTrustTest(
 	t *testing.T,
 	snapshotDir string,
@@ -218,7 +202,7 @@ func TestSnapshotStagesMetadataBesideSnapshot(t *testing.T) {
 		}
 		return original(file)
 	}
-	snapshotForTrustTest(t, dir)
+	buildTrustSnapshot(t, dir)
 	require.Len(t, staged, 1, "metadata backup was not staged beside the snapshot")
 	entries, err := os.ReadDir(base)
 	require.NoError(t, err)

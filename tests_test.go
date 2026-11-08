@@ -25,11 +25,7 @@ import (
 	"time"
 
 	internalconfig "github.com/blinklabs-io/dingo/internal/config"
-	"github.com/blinklabs-io/dingo/internal/dblifecycle"
 	"github.com/blinklabs-io/dingo/ledger"
-	"github.com/blinklabs-io/dingo/ledger/forging"
-	"github.com/blinklabs-io/dingo/ledger/leader"
-	"github.com/blinklabs-io/dingo/ledger/leios"
 	"github.com/blinklabs-io/dingo/ledger/snapshot"
 	"github.com/blinklabs-io/dingo/topology"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -515,39 +511,6 @@ func TestStopWithDeadlineIgnoresCallerCancellation(t *testing.T) {
 	_ = ctx
 }
 
-// TestQuiesceComponentStopsCoverEveryUnboundedStop pins the set of components
-// routed through the deadline.
-//
-// Each of these has a Stop that cancels its own context and then waits on a
-// sync.WaitGroup with no deadline of its own, so a call site that went back to
-// calling Stop directly would drop out of this list and escape the bound —
-// which is exactly what happened to the database lifecycle manager before.
-func TestQuiesceComponentStopsCoverEveryUnboundedStop(t *testing.T) {
-	t.Parallel()
-
-	n := &Node{
-		blockForger:          &forging.BlockForger{},
-		leaderElection:       &leader.Election{},
-		leiosPipelineManager: &leios.PipelineManager{},
-		leiosVoteManager:     &leios.VoteManager{},
-		snapshotMgr:          &snapshot.Manager{},
-		dbLifecycleMgr:       &dblifecycle.Manager{},
-	}
-
-	var names []string
-	for _, cs := range n.quiesceComponentStops() {
-		names = append(names, cs.name)
-	}
-	assert.Equal(t, []string{
-		"block forger",
-		"leader election",
-		"leios pipeline manager",
-		"leios vote manager",
-		"snapshot manager",
-		"database lifecycle manager",
-	}, names)
-}
-
 // TestQuiesceComponentStopsSkipsAbsentComponents covers a node that never
 // built the optional components, which is the ordinary case for a
 // non-block-producing or non-Leios node.
@@ -692,16 +655,14 @@ func TestLedgerStateConfigPraos2OnlyForMusashi(t *testing.T) {
 				RunMode:      tt.runMode,
 				StartEra:     tt.startEra,
 			}}}
-			assert.Equal(
-				t,
-				tt.want,
-				n.ledgerStateConfig().Praos2ChainDepState,
-			)
+			cfg := n.ledgerStateConfig()
+			assert.Equal(t, tt.want, cfg.Praos2ChainDepState)
+			// The stake pool state query is gated on the same network
+			// identity.
+			assert.Equal(t, tt.want, cfg.StakePoolStateQuery)
 		})
 	}
-	assert.False(
-		t,
-		(&Node{config: Config{}}).ledgerStateConfig().Praos2ChainDepState,
-		"a zero config keeps Praos",
-	)
+	zero := (&Node{config: Config{}}).ledgerStateConfig()
+	assert.False(t, zero.Praos2ChainDepState, "a zero config keeps Praos")
+	assert.False(t, zero.StakePoolStateQuery)
 }

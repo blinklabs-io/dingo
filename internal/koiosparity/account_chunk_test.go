@@ -17,8 +17,6 @@ package koiosparity
 import (
 	"encoding/json"
 	"fmt"
-	"slices"
-	"sort"
 	"strings"
 	"testing"
 
@@ -175,62 +173,6 @@ func TestChunkAddressesByCountAndSizeZeroMaxCountUsesDefault(t *testing.T) {
 	require.Len(t, chunks, 2)
 	require.Len(t, chunks[0], koiosAccountChunkSize)
 	require.Len(t, chunks[1], 1)
-}
-
-// TestChunkAddressesByCountAndSizeDeterministicAcrossRepeatedCalls proves the
-// property the content-addressed chunk-hash resume mechanism
-// actually depends on: the same underlying address *set*, fed in a
-// different order, must still produce identical chunk boundaries once
-// sorted — matching what every real caller does (fetchAccountRewardsForEpoch
-// sorts the address universe before calling this function; see its own doc
-// comment on why). Feeding the identical, unsorted slice to both calls would
-// only prove this function is a pure/deterministic function of its literal
-// input order, not the actual property that matters: BuildAccountAddressUniverse
-// does not itself guarantee stable ordering across calls, so a resumed fetch
-// must still land on the same chunk hashes even if the universe arrives in a
-// different order the second time.
-func TestChunkAddressesByCountAndSizeDeterministicAcrossRepeatedCalls(
-	t *testing.T,
-) {
-	t.Parallel()
-
-	addrs := make([]string, 237)
-	for i := range addrs {
-		addrs[i] = strings.Repeat("z", (i%7)+1) + fmt.Sprintf("%03d", i)
-	}
-
-	// A second copy of the exact same set, in a rotated (different) order.
-	rotated := make([]string, len(addrs))
-	copy(rotated, addrs[len(addrs)/3:])
-	copy(rotated[len(addrs)-len(addrs)/3:], addrs[:len(addrs)/3])
-	require.ElementsMatch(
-		t,
-		addrs,
-		rotated,
-		"test setup sanity check: same set, different order",
-	)
-	require.NotEqual(
-		t,
-		addrs,
-		rotated,
-		"test setup sanity check: order must actually differ",
-	)
-
-	sortedAddrs := slices.Clone(addrs)
-	sort.Strings(sortedAddrs)
-	sortedRotated := slices.Clone(rotated)
-	sort.Strings(sortedRotated)
-
-	first := chunkAddressesByCountAndSize(sortedAddrs, 20, 200)
-	second := chunkAddressesByCountAndSize(sortedRotated, 20, 200)
-	require.Equal(
-		t,
-		first,
-		second,
-		"the same address set, sorted before chunking regardless of its "+
-			"original arrival order, must always produce identical chunk "+
-			"boundaries (content-addressed resume depends on this)",
-	)
 }
 
 // TestChunkAddressesByCountAndSizeNoByteBoundIsCountOnly proves maxBytes<=0

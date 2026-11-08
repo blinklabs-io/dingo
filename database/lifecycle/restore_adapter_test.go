@@ -24,12 +24,12 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/blob/badger"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/fakecloud"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
@@ -48,21 +48,58 @@ type adapterRestoreFixture struct {
 	manifest Manifest
 }
 
+// adapterSnapshot takes one signed snapshot per test binary; every fixture
+// uploads its own copy of it to a fresh fake cloud store.
+var adapterSnapshotOnce struct {
+	sync.Once
+	dir      string
+	manifest Manifest
+	err      error
+}
+
+func init() {
+	RegisterSharedFixtureCleanup(func() {
+		if adapterSnapshotOnce.dir != "" {
+			_ = os.RemoveAll(filepath.Dir(adapterSnapshotOnce.dir))
+		}
+	})
+}
+
+func adapterSnapshot(t *testing.T) (string, Manifest) {
+	t.Helper()
+	adapterSnapshotOnce.Do(func() {
+		root, err := os.MkdirTemp("", "dingo-lifecycle-adapter-")
+		adapterSnapshotOnce.dir = root
+		if err != nil {
+			adapterSnapshotOnce.err = err
+			return
+		}
+		db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+		if err != nil {
+			adapterSnapshotOnce.err = err
+			return
+		}
+		if err := db.BlockCreate(models.Block{
+			ID: 1, Slot: 10, Number: 1, Type: 1,
+			Hash: bytes.Repeat([]byte{0x01}, 32), Cbor: []byte{0x80},
+		}, nil); err != nil {
+			adapterSnapshotOnce.err = err
+			return
+		}
+		adapterSnapshotOnce.dir = filepath.Join(root, "snap")
+		adapterSnapshotOnce.manifest, adapterSnapshotOnce.err = Snapshot(
+			t.Context(), db, adapterSnapshotOnce.dir, TriggerManual, "test",
+			"badger", "sqlite", WithManifestKey(adapterTrustKey),
+		)
+	})
+	require.NoError(t, adapterSnapshotOnce.err)
+	return adapterSnapshotOnce.dir, adapterSnapshotOnce.manifest
+}
+
 func newAdapterRestoreFixture(t *testing.T) *adapterRestoreFixture {
 	t.Helper()
 	fc, dests := downloadDestinations(t)
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
-	require.NoError(t, err)
-	require.NoError(t, db.BlockCreate(models.Block{
-		ID: 1, Slot: 10, Number: 1, Type: 1,
-		Hash: bytes.Repeat([]byte{0x01}, 32), Cbor: []byte{0x80},
-	}, nil))
-	snapshotDir := snapshotTestDir(t, "snap")
-	manifest, err := Snapshot(
-		t.Context(), db, snapshotDir, TriggerManual, "test", "badger", "sqlite",
-		WithManifestKey(adapterTrustKey),
-	)
-	require.NoError(t, err)
+	snapshotDir, manifest := adapterSnapshot(t)
 
 	fixture := &adapterRestoreFixture{
 		fc: fc, registry: NewDestinationRegistry(), manifest: manifest,
@@ -85,7 +122,7 @@ func (f *adapterRestoreFixture) restore(
 	t.Helper()
 	host := plugin.NewHost()
 	require.NoError(t, badger.RegisterProvider(host))
-	require.NoError(t, sqlite.RegisterProvider(host))
+	require.NoError(t, dbtest.RegisterSQLiteProvider(host))
 	t.Cleanup(func() { _ = host.Stop(context.Background()) })
 	var opts []ManifestOption
 	if key != nil {

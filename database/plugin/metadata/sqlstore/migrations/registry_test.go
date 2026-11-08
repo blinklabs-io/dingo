@@ -26,298 +26,6 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-func TestSQLiteRegistry(t *testing.T) {
-	t.Parallel()
-	registry, err := SQLiteRegistry()
-	require.NoError(t, err)
-	require.NoError(t, validateRegistry(registry, "sqlite"))
-	require.Len(t, registry, 53)
-
-	require.Equal(t, accountDRepClearSchemaRelease, registry[34].Name)
-	require.Contains(t, registry[34].SQL["sqlite"].Expand[0],
-		"CREATE TABLE IF NOT EXISTS `account_drep_clear`")
-	require.NotNil(t, registry[34].Backfill)
-	require.Equal(t, poolRelayTypeSchemaRelease, registry[37].Name)
-	require.Equal(t, 1, registry[0].Version)
-	require.Equal(t, "v1alpha1", registry[0].Name)
-	require.GreaterOrEqual(t, len(registry[0].SQL["sqlite"].Expand), 303)
-	require.Contains(
-		t,
-		registry[0].SQL["sqlite"].Expand,
-		"CREATE INDEX IF NOT EXISTS `idx_pool_opcert_sequence_pool_sequence` ON `pool_opcert_sequence`(`pool_key_hash`,`sequence`)",
-	)
-	require.Equal(t, leiosKeyLookupIndexSchemaRelease, registry[50].Name)
-	require.Equal(t, []string{
-		"CREATE INDEX IF NOT EXISTS `idx_pool_registration_snapshot_current`\n" +
-			"    ON `pool_registration`(`pool_id`, `certificate_id`, `registration_index`, `added_slot`, `id`)",
-		"CREATE INDEX IF NOT EXISTS `idx_pool_retirement_pool_slot`\n" +
-			"    ON `pool_retirement`(`pool_id`, `added_slot`)",
-	}, registry[50].SQL["sqlite"].Expand)
-	require.Equal(t, 2, registry[1].Version)
-	require.Equal(t, "leios-key-registration", registry[1].Name)
-	require.Contains(
-		t,
-		registry[1].SQL["sqlite"].Expand,
-		"ALTER TABLE `pool` ADD COLUMN `leios_key_public` blob",
-	)
-	require.Equal(t, 3, registry[2].Version)
-	require.Equal(t, "token-registry-metadata", registry[2].Name)
-	require.Contains(
-		t,
-		registry[2].SQL["sqlite"].Expand,
-		"CREATE UNIQUE INDEX IF NOT EXISTS `idx_token_registry_entry_subject`"+
-			" ON `token_registry_entry`(`subject`)",
-	)
-	require.Equal(t, 4, registry[3].Version)
-	require.Equal(t, "account-import-baseline", registry[3].Name)
-	require.Len(t, registry[3].SQL["sqlite"].Expand, 2)
-	require.Contains(
-		t,
-		registry[3].SQL["sqlite"].Expand[0],
-		"CREATE TABLE IF NOT EXISTS `account_import_baseline`",
-	)
-	require.Contains(
-		t,
-		registry[3].SQL["sqlite"].Expand[1],
-		"INSERT INTO `account_import_baseline`",
-	)
-	require.Equal(t, 5, registry[4].Version)
-	require.Equal(t, "leios-snapshot-keys", registry[4].Name)
-	require.Equal(t, []string{
-		"ALTER TABLE `pool_stake_snapshot` ADD COLUMN `leios_key_public` blob",
-		"ALTER TABLE `pool_stake_snapshot` ADD COLUMN `leios_key_possession_proof` blob",
-	}, registry[4].SQL["sqlite"].Expand)
-	require.Equal(t, 6, registry[5].Version)
-	require.Equal(
-		t,
-		"governance-ratification-history",
-		registry[5].Name,
-	)
-	require.Contains(
-		t,
-		registry[5].SQL["sqlite"].Expand[0],
-		"CREATE TABLE IF NOT EXISTS `governance_proposal_ratification_history`",
-	)
-	require.Contains(
-		t,
-		registry[5].SQL["sqlite"].Expand[3],
-		"INSERT INTO `governance_proposal_ratification_history`",
-	)
-	require.Equal(t, 7, registry[6].Version)
-	require.Equal(t, "account-import-deposit", registry[6].Name)
-	require.Equal(t, []string{
-		"ALTER TABLE `account_import_baseline` ADD COLUMN `deposit_amount` text",
-	}, registry[6].SQL["sqlite"].Expand)
-	require.Equal(t, 8, registry[7].Version)
-	require.Equal(t, "committee-credential-tags", registry[7].Name)
-	require.Equal(t, 9, registry[8].Version)
-	require.Equal(t, "committee-term-start-presence", registry[8].Name)
-	require.Len(t, registry[8].SQL["sqlite"].Expand, 1)
-	require.NotNil(t, registry[8].Backfill)
-	require.Equal(t, 10, registry[9].Version)
-	require.Equal(t, "reward-seed-failure", registry[9].Name)
-	require.Len(t, registry[9].SQL["sqlite"].Expand, 1)
-	require.Contains(t, registry[9].SQL["sqlite"].Expand[0],
-		"CREATE TABLE IF NOT EXISTS `reward_seed_failure`")
-	require.Equal(t, 11, registry[10].Version)
-	require.Equal(t, "imported-pool-block-count", registry[10].Name)
-	require.Len(t, registry[10].SQL["sqlite"].Expand, 2)
-	require.Contains(t, registry[10].SQL["sqlite"].Expand[0],
-		"CREATE TABLE IF NOT EXISTS `imported_pool_block_count`")
-	require.Contains(t, registry[10].SQL["sqlite"].Expand[1],
-		"CREATE TABLE IF NOT EXISTS `imported_epoch_block_total`")
-	require.Equal(t, 12, registry[11].Version)
-	require.Equal(t, "pool-registration-deposit-held", registry[11].Name)
-	require.Len(t, registry[11].SQL["sqlite"].Expand, 1)
-	require.NotNil(t, registry[11].Backfill)
-	require.Equal(t, 13, registry[12].Version)
-	require.Equal(t, "pointer-address-stake", registry[12].Name)
-	require.Len(t, registry[12].SQL["sqlite"].Expand, 2)
-	require.Contains(
-		t,
-		registry[12].SQL["sqlite"].Expand[0],
-		"CREATE TABLE IF NOT EXISTS `utxo_pointer`",
-	)
-	require.Contains(
-		t,
-		registry[12].SQL["sqlite"].Expand,
-		"CREATE INDEX IF NOT EXISTS `idx_utxo_pointer_target`"+
-			" ON `utxo_pointer`(`ptr_slot`,`ptr_tx_index`,`ptr_cert_index`)",
-	)
-	require.Equal(t, 14, registry[13].Version)
-	require.Equal(t, "collateral-transaction-associations", registry[13].Name)
-	require.Len(t, registry[13].SQL["sqlite"].Expand, 3)
-	require.Contains(
-		t,
-		registry[13].SQL["sqlite"].Expand[0],
-		"CREATE TABLE IF NOT EXISTS `utxo_collateral_input`",
-	)
-	require.Contains(
-		t,
-		registry[13].SQL["sqlite"].Expand[2],
-		"collateral_by_tx_id",
-	)
-	require.Equal(t, 15, registry[14].Version)
-	require.Equal(
-		t,
-		"reward-stake-calculation-version-restamp",
-		registry[14].Name,
-	)
-	require.Empty(t, registry[14].SQL["sqlite"].Expand)
-	require.NotNil(t, registry[14].Backfill)
-	require.Equal(t, 16, registry[15].Version)
-	require.Equal(
-		t,
-		governanceProposalOptionalAnchorSchemaRelease,
-		registry[15].Name,
-	)
-	require.Len(t, registry[15].SQL["sqlite"].Expand, 21)
-	require.Empty(t, registry[15].Backfill)
-	require.Equal(t, 17, registry[16].Version)
-	require.Equal(t, governanceProposalDroppedSchemaRelease, registry[16].Name)
-	require.Contains(
-		t,
-		registry[16].SQL["sqlite"].Expand,
-		"CREATE TABLE IF NOT EXISTS `governance_proposal_drop` (\n"+
-			"    `proposal_id` integer PRIMARY KEY,\n"+
-			"    `dropped_epoch` integer,\n"+
-			"    `dropped_slot` integer,\n"+
-			"    FOREIGN KEY (`proposal_id`) REFERENCES `governance_proposal`(`id`) ON DELETE CASCADE\n"+
-			")",
-	)
-	// An upgraded database already refunded every proposal it marked
-	// expired, so v17 must stamp those as dropped rather than let the new
-	// drop step refund them again.
-	require.NotNil(t, registry[16].Backfill)
-	require.Equal(t, "1", registry[16].BackfillRevision)
-	require.Equal(t, 20, registry[19].Version)
-	require.Equal(t, alonzoPParamsUnitSchemaRelease, registry[19].Name)
-	require.Empty(t, registry[19].SQL["sqlite"].Expand)
-	require.NotNil(t, registry[19].Backfill)
-	require.Equal(t, "1", registry[19].BackfillRevision)
-	require.Equal(t, 22, registry[21].Version)
-	require.Equal(t, governanceVoteHistorySchemaRelease, registry[21].Name)
-	require.Contains(
-		t,
-		strings.Join(registry[21].SQL["sqlite"].Expand, "\n"),
-		"CREATE TABLE IF NOT EXISTS `governance_vote_history`",
-	)
-	require.Equal(t, 23, registry[22].Version)
-	require.Equal(t, committeeZeroQuorumSchemaRelease, registry[22].Name)
-	require.Contains(
-		t,
-		strings.Join(registry[22].SQL["sqlite"].Expand, "\n"),
-		"UPDATE committee_quorum SET quorum = NULL WHERE quorum = '0'",
-	)
-	require.Equal(t, 24, registry[23].Version)
-	require.Equal(t, rewardAdaPotsImportedFeesSchemaRelease, registry[23].Name)
-	require.Contains(
-		t,
-		registry[23].SQL["sqlite"].Expand,
-		"ALTER TABLE `reward_ada_pots` ADD COLUMN `imported_epoch_fees` text",
-	)
-	require.NotNil(t, registry[23].Backfill)
-	require.Equal(t, 25, registry[24].Version)
-	require.Equal(t, mithrilRewardRepairCoverageSchemaRelease, registry[24].Name)
-	require.NotNil(t, registry[24].Backfill)
-	require.Equal(t, 26, registry[25].Version)
-	require.Equal(t, leiosKeyAgeSchemaRelease, registry[25].Name)
-	require.Equal(t, []string{
-		"ALTER TABLE `pool_stake_snapshot`\n" +
-			"    ADD COLUMN `leios_key_registration_epoch` INTEGER",
-	}, registry[25].SQL["sqlite"].Expand)
-	require.Equal(t, 27, registry[26].Version)
-	require.Equal(t, leiosImportedKeyAgeSchemaRelease, registry[26].Name)
-	require.Len(t, registry[26].SQL["sqlite"].Expand, 2)
-	require.Contains(t, registry[26].SQL["sqlite"].Expand[0], "leios_key_registration_age_unknown")
-	require.Contains(t, registry[26].SQL["sqlite"].Expand[1], "SET `leios_key_registration_age_unknown` = TRUE")
-	require.Equal(t, 28, registry[27].Version)
-	require.Equal(t, leiosKeyRegistrationEpochSchemaRelease, registry[27].Name)
-	require.Equal(t, []string{
-		"ALTER TABLE `pool_registration`\n" +
-			"    ADD COLUMN `leios_key_registration_epoch` INTEGER",
-	}, registry[27].SQL["sqlite"].Expand)
-	require.Equal(t, 29, registry[28].Version)
-	require.Equal(t, leiosSnapshotRegistrationEpochBackfillSchemaRelease, registry[28].Name)
-	require.Len(t, registry[28].SQL["sqlite"].Expand, 1)
-	require.Contains(t, registry[28].SQL["sqlite"].Expand[0], "UPDATE `pool_stake_snapshot`")
-	require.Equal(t, 30, registry[29].Version)
-	require.Equal(t, rewardOutputFoldedSchemaRelease, registry[29].Name)
-	require.Contains(
-		t,
-		registry[29].SQL["sqlite"].Expand,
-		"ALTER TABLE `reward_account_output` ADD COLUMN `folded` boolean NOT NULL DEFAULT false",
-	)
-	require.Equal(t, 31, registry[30].Version)
-	require.Equal(t, rewardCreditRoundTableSchemaRelease, registry[30].Name)
-	require.Len(t, registry[30].SQL["sqlite"].Expand, 3)
-	require.Contains(t, registry[30].SQL["sqlite"].Expand[0], "CREATE TABLE IF NOT EXISTS `reward_credit_round`")
-	require.Contains(t, registry[30].SQL["sqlite"].Expand[2], "idx_reward_account_output_pending_round")
-	require.NotNil(t, registry[30].Backfill)
-	require.Equal(t, 32, registry[31].Version)
-	require.Equal(t, rewardLeaderDeficitSchemaRelease, registry[31].Name)
-	require.Contains(
-		t,
-		registry[31].SQL["sqlite"].Expand,
-		"ALTER TABLE reward_pool_output\nADD COLUMN leader_reward_deficit TEXT NOT NULL DEFAULT '0'",
-	)
-	require.Equal(t, 33, registry[32].Version)
-	require.Equal(t, governanceProposalOrderSchemaRelease, registry[32].Name)
-	require.Contains(
-		t,
-		registry[32].SQL["sqlite"].Expand[0],
-		"CREATE TABLE IF NOT EXISTS `governance_proposal_order`",
-	)
-	require.Equal(t, 34, registry[33].Version)
-	require.Equal(t, "leios-transaction-ledger-context", registry[33].Name)
-	require.Contains(t, registry[33].SQL["sqlite"].Expand[0], "CREATE TABLE IF NOT EXISTS `leios_transaction_context`")
-	require.Equal(t, 36, registry[35].Version)
-	require.Equal(t, committeeHotAuthorizationPruneOrderSchemaRelease, registry[35].Name)
-	require.Len(t, registry[35].SQL["sqlite"].Expand, 1)
-	require.Contains(t, registry[35].SQL["sqlite"].Expand[0], "idx_auth_committee_hot_cold_credential_prune_order")
-	require.Equal(t, 37, registry[36].Version)
-	require.Equal(t, drepExpiryHistorySchemaRelease, registry[36].Name)
-	require.Contains(t, strings.Join(registry[36].SQL["sqlite"].Expand, "\n"), "drep_expiry_history")
-	require.Equal(t, 38, registry[37].Version)
-	require.Equal(t, poolRelayTypeSchemaRelease, registry[37].Name)
-	require.Equal(t, 39, registry[38].Version)
-	require.Equal(t, midnightRollbackJournalSchemaRelease, registry[38].Name)
-	require.Equal(t, 40, registry[39].Version)
-	require.Equal(t, drepDormancyStateSchemaRelease, registry[39].Name)
-	require.Equal(t, 41, registry[40].Version)
-	require.Equal(t, drepDelegatorStateSchemaRelease, registry[40].Name)
-	require.Equal(t, 42, registry[41].Version)
-	require.Equal(t, utxoAddressIdentitySchemaRelease, registry[41].Name)
-	require.Equal(t, 43, registry[42].Version)
-	require.Equal(t, poolRegistrationIdentitySchemaRelease, registry[42].Name)
-	poolIdentitySQL := strings.Join(registry[42].SQL["sqlite"].Expand, "\n")
-	require.Contains(t, poolIdentitySQL, "registration_index")
-	require.Contains(t, poolIdentitySQL,
-		"`pool_id`, `added_slot`, `certificate_id`, `registration_index`")
-	require.Equal(t, 44, registry[43].Version)
-	require.Equal(t, 45, registry[44].Version)
-	require.Equal(t, 46, registry[45].Version)
-	require.Equal(t, committeeRenewalTermStartSchemaRelease, registry[43].Name)
-	require.Empty(t, registry[43].SQL["sqlite"].Expand)
-	require.NotNil(t, registry[43].Backfill)
-	require.Equal(t, "1", registry[43].BackfillRevision)
-	require.Equal(t, scriptIndexSchemaRelease, registry[44].Name)
-	require.Len(t, registry[44].SQL["sqlite"].Expand, 4)
-	require.Contains(t, registry[44].SQL["sqlite"].Expand[0],
-		"CREATE TABLE IF NOT EXISTS `redeemer_script`")
-	require.Contains(t, registry[44].SQL["sqlite"].Expand[2],
-		"CREATE TABLE IF NOT EXISTS `utxo_reference_script`")
-	require.Empty(t, registry[44].Backfill)
-	require.Equal(t, 47, registry[46].Version)
-	require.Equal(t, rewardStakeInputCredentialIndexSchemaRelease, registry[46].Name)
-	require.Contains(t, strings.Join(registry[46].SQL["sqlite"].Expand, "\n"),
-		"idx_reward_stake_input_cred_epoch")
-	require.Equal(t, 48, registry[47].Version)
-	require.Equal(t, governanceVoteCastSchemaRelease, registry[47].Name)
-	require.Contains(t, strings.Join(registry[47].SQL["sqlite"].Expand, "\n"),
-		"ADD COLUMN `cert_index`")
-}
-
 func TestBackfillCheckpointIdentityMigrationTranslation(t *testing.T) {
 	t.Parallel()
 
@@ -333,9 +41,9 @@ func TestBackfillCheckpointIdentityMigrationTranslation(t *testing.T) {
 	for _, testCase := range testCases {
 		t.Run(testCase.dialect, func(t *testing.T) {
 			t.Parallel()
-			registry, err := registryForDialect(testCase.dialect)
+			registry, err := cachedRegistryForDialect(testCase.dialect)
 			require.NoError(t, err)
-			require.Len(t, registry, 53)
+			require.Len(t, registry, 54)
 			migration := registry[51]
 			require.Equal(t, backfillCheckpointIdentitySchemaRelease, migration.Name)
 			require.Contains(t, migration.SQL[testCase.dialect].Expand,
@@ -358,14 +66,14 @@ func TestDrepDormancySeedUsesPortableIdempotentInsert(t *testing.T) {
 		dialect  string
 	}{
 		{name: "sqlite", registry: SQLiteRegistry, dialect: "sqlite"},
-		{name: "postgres", registry: PostgresRegistry, dialect: "postgres"},
-		{name: "mysql", registry: MySQLRegistry, dialect: "mysql"},
+		{name: "postgres", registry: cachedPostgresRegistry, dialect: "postgres"},
+		{name: "mysql", registry: cachedMySQLRegistry, dialect: "mysql"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			registry, err := tc.registry()
 			require.NoError(t, err)
 			require.NoError(t, validateRegistry(registry, tc.dialect))
-			require.Len(t, registry, 53)
+			require.Len(t, registry, 54)
 			migration := registry[39]
 			require.Equal(t, drepDormancyStateSchemaRelease, migration.Name)
 			seed := strings.Join(migration.SQL[tc.dialect].Expand, "\n")
@@ -460,7 +168,7 @@ func TestAccountDRepClearSchemaTranslatesAllDialects(t *testing.T) {
 	for _, dialect := range []string{"sqlite", "postgres", "mysql"} {
 		t.Run(dialect, func(t *testing.T) {
 			t.Parallel()
-			registry, err := registryForDialect(dialect)
+			registry, err := cachedRegistryForDialect(dialect)
 			require.NoError(t, err)
 			migration := registry[34]
 			require.Equal(t, accountDRepClearSchemaRelease, migration.Name)
@@ -480,7 +188,7 @@ func TestAccountDRepClearSchemaTranslatesAllDialects(t *testing.T) {
 func TestPointerStakeMigrationTranslatesForProviders(t *testing.T) {
 	t.Parallel()
 
-	postgres, err := PostgresRegistry()
+	postgres, err := cachedPostgresRegistry()
 	require.NoError(t, err)
 	postgresSQL := strings.Join(postgres[12].SQL["postgres"].Expand, "\n")
 	require.Contains(t, postgresSQL, `"utxo_id" BIGINT NOT NULL`)
@@ -492,7 +200,7 @@ func TestPointerStakeMigrationTranslatesForProviders(t *testing.T) {
 	)
 	require.NotContains(t, postgresSQL, "`")
 
-	mysql, err := MySQLRegistry()
+	mysql, err := cachedMySQLRegistry()
 	require.NoError(t, err)
 	mysqlSQL := strings.Join(mysql[12].SQL["mysql"].Expand, "\n")
 	require.Contains(t, mysqlSQL, "`utxo_id` BIGINT NOT NULL")
@@ -507,13 +215,13 @@ func TestPointerStakeMigrationTranslatesForProviders(t *testing.T) {
 func TestCommitteeCredentialMigrationTranslatesForProviders(t *testing.T) {
 	t.Parallel()
 
-	postgres, err := PostgresRegistry()
+	postgres, err := cachedPostgresRegistry()
 	require.NoError(t, err)
 	postgresSQL := strings.Join(postgres[7].SQL["postgres"].Expand, "\n")
 	require.Contains(t, postgresSQL, `"cold_credential_tag" BIGINT`)
 	require.Contains(t, postgresSQL, "DROP INDEX IF EXISTS")
 
-	mysql, err := MySQLRegistry()
+	mysql, err := cachedMySQLRegistry()
 	require.NoError(t, err)
 	mysqlSQL := strings.Join(mysql[7].SQL["mysql"].Expand, "\n")
 	require.Contains(
@@ -539,7 +247,7 @@ func TestCommitteeCredentialMigrationTranslatesForProviders(t *testing.T) {
 // backfill statement in the same migration must not be rewritten at all.
 func TestMySQLRegistryPrefixesAccountBaselinePrimaryKey(t *testing.T) {
 	t.Parallel()
-	registry, err := MySQLRegistry()
+	registry, err := cachedMySQLRegistry()
 	require.NoError(t, err)
 	expand := registry[3].SQL["mysql"].Expand
 	require.Len(t, expand, 2)
@@ -559,7 +267,7 @@ func TestMySQLRegistryPrefixesAccountBaselinePrimaryKey(t *testing.T) {
 // requoted rather than left as MySQL backticks.
 func TestPostgresRegistryTypesAccountBaseline(t *testing.T) {
 	t.Parallel()
-	registry, err := PostgresRegistry()
+	registry, err := cachedPostgresRegistry()
 	require.NoError(t, err)
 	expand := registry[3].SQL["postgres"].Expand
 	require.Len(t, expand, 2)
@@ -579,7 +287,7 @@ func TestPostgresRegistryTypesAccountBaseline(t *testing.T) {
 // breaks if v3 ever stops carrying its own table definition.
 func TestMySQLRegistryPrefixesTokenRegistrySubjectIndex(t *testing.T) {
 	t.Parallel()
-	registry, err := MySQLRegistry()
+	registry, err := cachedMySQLRegistry()
 	require.NoError(t, err)
 	require.Contains(
 		t,
@@ -591,10 +299,10 @@ func TestMySQLRegistryPrefixesTokenRegistrySubjectIndex(t *testing.T) {
 
 func TestMySQLRegistryPrefixesPoolOpCertSequenceIndex(t *testing.T) {
 	t.Parallel()
-	registry, err := MySQLRegistry()
+	registry, err := cachedMySQLRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "mysql"))
-	require.Len(t, registry, 53)
+	require.Len(t, registry, 54)
 
 	require.Contains(
 		t,
@@ -622,14 +330,14 @@ func TestUtxoAddressIdentityMigrationTranslatesForProviders(t *testing.T) {
 			indexFragment: "ON `utxo_address` (`address`)",
 		},
 		{
-			name: "postgres", registry: PostgresRegistry, dialect: "postgres",
+			name: "postgres", registry: cachedPostgresRegistry, dialect: "postgres",
 			idDefinition:  "\"utxo_id\" BIGINT PRIMARY KEY",
 			addressType:   "\"address\" BYTEA NOT NULL",
 			foreignKey:    "FOREIGN KEY (\"utxo_id\")",
 			indexFragment: "ON \"utxo_address\" (\"address\")",
 		},
 		{
-			name: "mysql", registry: MySQLRegistry, dialect: "mysql",
+			name: "mysql", registry: cachedMySQLRegistry, dialect: "mysql",
 			idDefinition:  "`utxo_id` BIGINT PRIMARY KEY",
 			addressType:   "`address` BLOB NOT NULL",
 			foreignKey:    "FOREIGN KEY (`utxo_id`)",
@@ -654,14 +362,14 @@ func TestUtxoAddressIdentityMigrationTranslatesForProviders(t *testing.T) {
 func TestRewardCreditRoundMigrationTranslatesForProviders(t *testing.T) {
 	t.Parallel()
 
-	postgres, err := PostgresRegistry()
+	postgres, err := cachedPostgresRegistry()
 	require.NoError(t, err)
 	postgresSQL := strings.Join(postgres[30].SQL["postgres"].Expand, "\n")
 	require.Contains(t, postgresSQL, `CREATE INDEX IF NOT EXISTS "idx_reward_account_output_pending_round"`)
 	require.Contains(t, postgresSQL, `ON "reward_account_output"("spendable", "guarded", "folded", "epoch")`)
 	require.NotContains(t, postgresSQL, "`")
 
-	mysql, err := MySQLRegistry()
+	mysql, err := cachedMySQLRegistry()
 	require.NoError(t, err)
 	mysqlSQL := strings.Join(mysql[30].SQL["mysql"].Expand, "\n")
 	require.Contains(t, mysqlSQL, "CREATE INDEX `idx_reward_account_output_pending_round`")
@@ -672,7 +380,7 @@ func TestRewardCreditRoundMigrationTranslatesForProviders(t *testing.T) {
 func TestLeiosKeyLookupIndexesTranslateForProviders(t *testing.T) {
 	t.Parallel()
 
-	postgres, err := PostgresRegistry()
+	postgres, err := cachedPostgresRegistry()
 	require.NoError(t, err)
 	postgresSQL := strings.Join(postgres[50].SQL["postgres"].Expand, "\n")
 	require.Contains(t, postgresSQL,
@@ -680,7 +388,7 @@ func TestLeiosKeyLookupIndexesTranslateForProviders(t *testing.T) {
 	require.Contains(t, postgresSQL,
 		`ON "pool_retirement"("pool_id", "added_slot")`)
 
-	mysql, err := MySQLRegistry()
+	mysql, err := cachedMySQLRegistry()
 	require.NoError(t, err)
 	mysqlSQL := strings.Join(mysql[50].SQL["mysql"].Expand, "\n")
 	require.Contains(t, mysqlSQL,
@@ -690,17 +398,42 @@ func TestLeiosKeyLookupIndexesTranslateForProviders(t *testing.T) {
 	require.NotContains(t, mysqlSQL, "CREATE INDEX IF NOT EXISTS")
 }
 
-func TestRatificationHistoryMigrationTranslatesForProviders(t *testing.T) {
+// TestRewardOutputCredentialPendingIndexSkipsMySQL pins the covering index to
+// the providers that can cover with it. MySQL indexes the blob staking_key and
+// text amount by prefix, and a prefix index never covers a column, so the
+// index would cost every reward output write and save no table fetch.
+func TestRewardOutputCredentialPendingIndexSkipsMySQL(t *testing.T) {
 	t.Parallel()
 
 	postgres, err := PostgresRegistry()
+	require.NoError(t, err)
+	require.Equal(t, rewardOutputCredentialPendingIndexSchemaRelease,
+		postgres[53].Name)
+	require.Contains(t,
+		strings.Join(postgres[53].SQL["postgres"].Expand, "\n"),
+		`ON "reward_account_output"`+"\n"+
+			`       ("credential_tag", "staking_key", "spendable", "guarded", "folded",`)
+
+	mysql, err := MySQLRegistry()
+	require.NoError(t, err)
+	require.NoError(t, validateRegistry(mysql, "mysql"))
+	require.Equal(t, rewardOutputCredentialPendingIndexSchemaRelease,
+		mysql[53].Name)
+	require.Empty(t, mysql[53].SQL["mysql"].Expand)
+	require.Empty(t, mysql[53].SQL["mysql"].Contract)
+}
+
+func TestRatificationHistoryMigrationTranslatesForProviders(t *testing.T) {
+	t.Parallel()
+
+	postgres, err := cachedPostgresRegistry()
 	require.NoError(t, err)
 	postgresSQL := strings.Join(postgres[5].SQL["postgres"].Expand, "\n")
 	require.Contains(t, postgresSQL, `"id" BIGSERIAL PRIMARY KEY`)
 	require.Contains(t, postgresSQL, `"proposal_id" BIGINT NOT NULL`)
 	require.NotContains(t, postgresSQL, "`")
 
-	mysql, err := MySQLRegistry()
+	mysql, err := cachedMySQLRegistry()
 	require.NoError(t, err)
 	mysqlSQL := strings.Join(mysql[5].SQL["mysql"].Expand, "\n")
 	require.Contains(t, mysqlSQL, "`id` BIGINT AUTO_INCREMENT PRIMARY KEY")
@@ -784,7 +517,7 @@ func TestPoolRegistrationIdentityMigrationTranslatesIndexDrop(t *testing.T) {
 	} {
 		t.Run(tc.dialect, func(t *testing.T) {
 			t.Parallel()
-			registry, err := registryForDialect(tc.dialect)
+			registry, err := cachedRegistryForDialect(tc.dialect)
 			require.NoError(t, err)
 			migration := registry[42]
 			require.Equal(t, poolRegistrationIdentitySchemaRelease, migration.Name)

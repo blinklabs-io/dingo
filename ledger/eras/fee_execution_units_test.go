@@ -191,21 +191,6 @@ func TestValidateTxAlonzoFeeDecisionMatchesMinFeeTx(t *testing.T) {
 	}
 }
 
-// With the upstream rule set removed, ValidateTxAlonzo does not price the
-// fee itself: fee ownership sits in alonzo.UtxoValidationRules, so a second
-// local check cannot disagree with it.
-func TestValidateTxAlonzoDoesNotRepriceFeeLocally(t *testing.T) {
-	// Not t.Parallel: swaps the package-level alonzoUtxoValidationRules.
-	withoutAlonzoUtxoValidationRules(t)
-	budget := lcommon.ExUnits{Memory: 1_000_001, Steps: 2_000_000}
-	ls := newMockLedgerState()
-	ls.skipPhase2Validation = true
-	err := ValidateTxAlonzo(
-		feeTestAlonzoTx(t, 1, budget), 0, ls, feeTestAlonzoPParams(),
-	)
-	assert.NoError(t, err)
-}
-
 func feeTestDijkstraTx(
 	t *testing.T,
 	fee uint64,

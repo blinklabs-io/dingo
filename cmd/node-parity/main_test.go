@@ -162,25 +162,13 @@ func TestRequireAtPoint(t *testing.T) {
 // silently make every cross-network comparison meaningless), and an
 // unrecognized name must error rather than resolve to the zero value.
 func TestNetworkMagic(t *testing.T) {
-	t.Run("preview resolves", func(t *testing.T) {
-		magic, err := networkMagic("preview")
-		require.NoError(t, err)
-		assert.NotZero(
-			t,
-			magic,
-			"preview must have a real, non-zero network magic",
-		)
-	})
-	t.Run("preprod resolves", func(t *testing.T) {
-		magic, err := networkMagic("preprod")
-		require.NoError(t, err)
-		assert.NotZero(t, magic)
-	})
 	t.Run("preview and preprod differ", func(t *testing.T) {
 		preview, err := networkMagic("preview")
 		require.NoError(t, err)
 		preprod, err := networkMagic("preprod")
 		require.NoError(t, err)
+		assert.NotZero(t, preview, "preview must have a real, non-zero network magic")
+		assert.NotZero(t, preprod)
 		assert.NotEqual(t, preview, preprod)
 	})
 	t.Run("unknown network errors", func(t *testing.T) {

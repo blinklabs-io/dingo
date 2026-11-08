@@ -21,12 +21,14 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore"
 	"github.com/blinklabs-io/dingo/plugin"
 )
 
@@ -256,4 +258,62 @@ func seedMetadataFile(dir string, template func() ([]byte, error)) error {
 		return fmt.Errorf("write metadata template: %w", err)
 	}
 	return nil
+}
+
+// RegisterSQLiteProvider registers the SQLite metadata provider on host the
+// way sqlite.RegisterProvider does, except that a provider resolving into a
+// data directory with no metadata file first receives a copy of the migrated
+// template. A test that drives a restore or reopen through its own host would
+// otherwise pay a full schema migration for every directory the code under
+// test opens. A directory that already holds a metadata file is left alone, so
+// data written by an earlier open survives, and a provider resolved without a
+// data directory still builds its own in-memory store.
+func RegisterSQLiteProvider(host *plugin.Host) error {
+	return plugin.Register(
+		host,
+		plugin.Descriptor{
+			Capability:  plugin.CapabilityStorageMetadata,
+			Name:        sqlite.ProviderName,
+			Description: "SQLite relational database seeded from a migrated template",
+		},
+		func() sqlite.Config { return sqlite.Config{} },
+		func(
+			_ context.Context,
+			cfg sqlite.Config,
+			deps metadata.ProviderDependencies,
+		) (*sqlstore.Store, plugin.Instance, error) {
+			dir := deps.DataDir
+			if cfg.DataDir != "" {
+				dir = cfg.DataDir
+			}
+			if dir != "" {
+				if err := seedMetadataTemplate(dir); err != nil {
+					return nil, nil, err
+				}
+			}
+			//nolint:contextcheck // the disk-size probe runs on the store's metrics goroutine, not under the plugin start ctx
+			store, err := sqlite.NewSQLStore(cfg, deps)
+			if err != nil {
+				return nil, nil, err
+			}
+			return store, plugin.Lifecycle{
+				StartFunc: store.Start,
+				StopFunc: func(ctx context.Context) error {
+					return store.CloseContext(ctx)
+				},
+			}, nil
+		},
+	)
+}
+
+// SeedMetadataTemplateDir seeds dir with the migrated template unless dir
+// already holds a metadata file. It is meant for sqlite.BeforeOpenDataDir,
+// which fires for every store a test binary opens, including the scratch store
+// that builds the template itself; that one is skipped, since seeding it would
+// wait on the template it is producing.
+func SeedMetadataTemplateDir(dir string) error {
+	if strings.HasPrefix(filepath.Base(dir), metadataTemplateDirPrefix()) {
+		return nil
+	}
+	return seedMetadataTemplate(dir)
 }

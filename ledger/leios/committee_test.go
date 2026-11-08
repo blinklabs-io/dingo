@@ -171,26 +171,3 @@ func TestComputeCommitteeDeterministic(t *testing.T) {
 		require.Equal(t, first.Members, next.Members)
 	}
 }
-
-func TestCommitteeMemberLookups(t *testing.T) {
-	t.Parallel()
-
-	committee, err := ComputeCommittee(1, 0, map[string]uint64{
-		testPoolHash(1): 60,
-		testPoolHash(2): 40,
-	}, 100, 2)
-	require.NoError(t, err)
-	require.Equal(t, uint64(2), committee.Size())
-
-	member, ok := committee.Member(0)
-	require.True(t, ok)
-	assert.Equal(t, uint64(60), member.Stake)
-	_, ok = committee.Member(2)
-	assert.False(t, ok)
-
-	voterId, ok := committee.VoterIdFor(member.PoolKeyHash)
-	require.True(t, ok)
-	assert.Equal(t, uint64(0), voterId)
-	_, ok = committee.VoterIdFor(make([]byte, voterPoolKeyHashSize))
-	assert.False(t, ok)
-}

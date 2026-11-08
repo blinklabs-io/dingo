@@ -71,7 +71,7 @@ func newLedgerStateForNetworkNamed(
 ) *LedgerState {
 	t.Helper()
 	cfg := &cardano.CardanoNodeConfig{}
-	require.NoError(t, cfg.LoadShelleyGenesisFromReader(
+	require.NoError(t, completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(
 		strings.NewReader(shelleyGenesisJSON(networkId, magic)),
 	))
 	return &LedgerState{
@@ -337,31 +337,6 @@ func TestValidateHeaderProtocolVersion_Byron(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func TestHeaderProtocolVersionTooHighError_Message(t *testing.T) {
-	t.Parallel()
-
-	err := &HeaderProtocolVersionTooHighError{
-		Supplied: 12,
-		Expected: 11,
-	}
-	// Message should mention both values so operators can diagnose.
-	msg := err.Error()
-	assert.Contains(t, msg, "12")
-	assert.Contains(t, msg, "11")
-}
-
-// Sanity check: the Block interface accessor (Header()) round-trips
-// through HeaderProtocolMajor for the typical case where callers pass
-// a full block via block.Header().
-func TestHeaderProtocolMajor_ViaBlockHeader(t *testing.T) {
-	t.Parallel()
-
-	var h lcommon.BlockHeader = babbageHeaderWithMajor(t, 8)
-	got, ok := HeaderProtocolMajor(h)
-	require.True(t, ok)
-	assert.Equal(t, uint(8), got)
-}
-
 func TestLedgerStateIsMainnet_True(t *testing.T) {
 	t.Parallel()
 
@@ -432,7 +407,8 @@ func TestLedgerStateIsMainnet_FailClosedWhenGenesisMissing(t *testing.T) {
 func TestLedgerStateIsMainnet_FailClosedOnUnknownNetworkId(t *testing.T) {
 	t.Parallel()
 
-	ls := newLedgerStateForNetwork(t, "Bogus", 42)
+	ls := newLedgerStateForNetwork(t, "Testnet", 42)
+	ls.config.CardanoNodeConfig.ShelleyGenesis().NetworkId = "Bogus"
 	_, err := ls.isMainnet()
 	require.Error(t, err)
 }

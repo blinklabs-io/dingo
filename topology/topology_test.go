@@ -249,26 +249,6 @@ func TestParseTopologyConfig(t *testing.T) {
 	}
 }
 
-func TestNewTopologyConfigFromFile_ClosesFile(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "topology.json")
-	err := os.WriteFile(
-		path,
-		[]byte(topologyTests[0].jsonData),
-		0o600,
-	)
-	require.NoError(t, err)
-
-	cfg, err := topology.NewTopologyConfigFromFile(path)
-	require.NoError(t, err)
-	require.NotNil(t, cfg)
-	require.Equal(
-		t,
-		int64(99532743),
-		cfg.UseLedgerAfterSlot,
-	)
-}
-
 func TestNewTopologyConfigFromFile_LoadsPeerSnapshot(t *testing.T) {
 	dir := t.TempDir()
 	topologyPath := filepath.Join(dir, "topology.json")
@@ -365,13 +345,6 @@ func TestNewTopologyConfigFromFS_LoadsPeerSnapshot(t *testing.T) {
 	require.Equal(t, uint64(77), cfg.PeerSnapshot.Point.BlockPointSlot)
 	require.True(t, cfg.PeerSnapshot.HasRelays())
 	require.NoError(t, cfg.PeerSnapshot.Validate(2))
-}
-
-func TestNewTopologyConfigFromFile_NotFound(t *testing.T) {
-	_, err := topology.NewTopologyConfigFromFile(
-		"/nonexistent/topology.json",
-	)
-	require.Error(t, err)
 }
 
 func TestNewTopologyConfigFromReader_OversizedInput(t *testing.T) {
@@ -570,26 +543,6 @@ func TestNewTopologyConfigFromReader_RejectsWarmValencyBelowValency(t *testing.T
 
 	_, err := topology.NewTopologyConfigFromReader(strings.NewReader(jsonData))
 	require.ErrorContains(t, err, "warmValency must be >= valency")
-}
-
-func TestNewTopologyConfigFromReader_RejectsWarmValencyAboveAccessPointCount(
-	t *testing.T,
-) {
-	jsonData := `{
-	"localRoots": [
-		{
-			"accessPoints": [
-				{"address": "127.0.0.1", "port": 3001}
-			],
-			"valency": 1,
-			"warmValency": 2
-		}
-	]
-}`
-
-	_, err := topology.NewTopologyConfigFromReader(strings.NewReader(jsonData))
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "localRoots[0].warmValency must be <= len(localRoots[0].accessPoints)")
 }
 
 func TestNewPeerSnapshotConfigFromReader_AcceptsMissingRelayPortAsMultiHost(

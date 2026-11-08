@@ -440,6 +440,11 @@ func ValidateTxDijkstra(
 		)
 	}
 	tx = normalizedTx
+	// The rules below share one transaction-scoped state, as in
+	// ValidateTxConway. Its memo is keyed by transaction object, so the
+	// phase-2 copy and each sub-transaction get their own entries.
+	// Capability lookups, including blsstate.ProviderFor, unwrap it.
+	ls = lcommon.NewTransactionScopedLedgerState(ls)
 	errs := []error{}
 	// Phase-1 rules apply to every transaction regardless of its declared
 	// phase-2 result. A declared-invalid transaction still has to prove its
@@ -521,7 +526,8 @@ func ValidateTxDijkstra(
 		resultKey   phase2ResultKey
 		resultKeyOK bool
 	)
-	if resultCache != nil && tx.IsValid() {
+	if resultCache != nil && tx.IsValid() &&
+		dijkstraTransactionHasRedeemers(tx) {
 		resultKey, resultKeyOK = dijkstraPhase2ResultKey(
 			tx,
 			ls,
@@ -541,6 +547,23 @@ func ValidateTxDijkstra(
 		resultCache.add(resultKey)
 	}
 	return semanticRuleValidationErrorFor(validatePlutusOutcome(tx, phase2Err))
+}
+
+func transactionWitnessSetHasRedeemers(witness lcommon.TransactionWitnessSet) bool {
+	if witness != nil && witness.Redeemers() != nil {
+		for range witness.Redeemers().Iter() {
+			return true
+		}
+	}
+	return false
+}
+
+func dijkstraTransactionHasRedeemers(tx lcommon.Transaction) bool {
+	return transactionWitnessSetHasRedeemers(tx.Witnesses()) ||
+		slices.ContainsFunc(
+			lcommon.SubTransactionWitnessSetsFromTransaction(tx),
+			transactionWitnessSetHasRedeemers,
+		)
 }
 
 // validateDijkstraPhase2 is a test seam: production always resolves to
@@ -873,15 +896,9 @@ func validateDijkstraPlutusV4ReferenceInputOverlap(
 }
 
 func dijkstraLevelsHaveRedeemers(levels []dijkstraPlutusScriptLevel) bool {
-	for _, level := range levels {
-		if level.witnesses == nil || level.witnesses.Redeemers() == nil {
-			continue
-		}
-		for range level.witnesses.Redeemers().Iter() {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(levels, func(level dijkstraPlutusScriptLevel) bool {
+		return transactionWitnessSetHasRedeemers(level.witnesses)
+	})
 }
 
 func resolveDijkstraScriptLevelInputs(

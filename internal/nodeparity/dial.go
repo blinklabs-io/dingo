@@ -41,8 +41,9 @@ import (
 const maxLocalStateQueryReadBufferSize = min(2*1024*1024*1024, math.MaxInt)
 
 // dialTimeout bounds how long Dial waits for the initial connection and
-// handshake.
-const dialTimeout = 10 * time.Second
+// handshake. It is a variable only so tests can shorten the stalled-handshake
+// bound; no production code changes it.
+var dialTimeout = 10 * time.Second
 
 // Dial opens a node-to-client (NtC) Ouroboros connection to addr, which is
 // treated as a Unix socket path when it begins with "/" (real cardano-node's

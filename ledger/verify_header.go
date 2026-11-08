@@ -366,6 +366,28 @@ func (ls *LedgerState) validateChainSelectionHeaderCrypto(
 			return err
 		}
 		if fork {
+			cache := snapshot.epochCache
+			if _, ok := epochByIDInCache(cache, epoch.EpochId); !ok {
+				// The epoch is a forecast one that the fork's own ancestry
+				// produced; its nonce is the fork's, not the ledger's.
+				forecast, ok := ls.forecastEpochCacheThrough(
+					snapshot,
+					header.SlotNumber(),
+				)
+				if !ok {
+					return fmt.Errorf(
+						"%w: forecast epoch %d is unavailable",
+						errHeaderVerificationDeferred,
+						epoch.EpochId,
+					)
+				}
+				for i := range forecast {
+					if forecast[i].EpochId == epoch.EpochId {
+						forecast[i].Nonce = cloneNonce(epochNonce)
+					}
+				}
+				cache = forecast
+			}
 			block := headerOnlyBlock{header: header, peerRelative: true}
 			if err := ls.verifyBlockHeaderStatelessCryptoWithEpochNonce(
 				ctx,
@@ -379,7 +401,7 @@ func (ls *LedgerState) validateChainSelectionHeaderCrypto(
 				ctx,
 				block,
 				epoch.EpochId,
-				snapshot.epochCache,
+				cache,
 				epochNonce,
 			)
 		} else {
@@ -435,6 +457,22 @@ func (ls *LedgerState) verifyBlockHeaderStatelessCryptoWithEpochNonce(
 			len(epochNonce),
 		)
 	}
+	// Verification reads the body CBOR and decoded KES and opcert fields,
+	// which the stored header CBOR, and so the header hash, does not bind.
+	// Key the verdict by the replay identity, which covers all of them. A
+	// header without its stored CBOR is never cached.
+	var identity []byte
+	if len(block.Header().Cbor()) > 0 {
+		if id, err := replayHeaderIdentity(block); err == nil {
+			identity = id.Bytes()
+		}
+	}
+	if ls.statelessHeaderVerdicts.contains(identity, epochNonce) {
+		return nil
+	}
+	if ls.statelessHeaderCryptoRunHook != nil {
+		ls.statelessHeaderCryptoRunHook()
+	}
 	slotsPerKesPeriod := ls.SlotsPerKESPeriod()
 	if slotsPerKesPeriod == 0 {
 		return fmt.Errorf(
@@ -446,6 +484,7 @@ func (ls *LedgerState) verifyBlockHeaderStatelessCryptoWithEpochNonce(
 		block,
 		hex.EncodeToString(epochNonce),
 		slotsPerKesPeriod,
+		ls.maxKESEvolutions(),
 	); err != nil {
 		return err
 	}
@@ -464,6 +503,7 @@ func (ls *LedgerState) verifyBlockHeaderStatelessCryptoWithEpochNonce(
 			err,
 		)
 	}
+	ls.statelessHeaderVerdicts.add(identity, epochNonce)
 	return nil
 }
 
@@ -557,6 +597,7 @@ func (ls *LedgerState) headerAppliedSettled(
 //   - block: the block whose header to verify
 //   - epochNonce: the epoch nonce (eta0) for VRF verification
 //   - slotsPerKesPeriod: number of slots per KES period from Shelley genesis
+//   - maxKesEvolutions: maximum KES key evolutions from Shelley genesis
 //
 // Returns an error if verification fails, nil if the block passes
 // verification or is a Byron-era block (validated by the LedgerState wrapper).
@@ -564,6 +605,7 @@ func verifyBlockHeaderHex(
 	block ledger.Block,
 	epochNonceHex string,
 	slotsPerKesPeriod uint64,
+	maxKesEvolutions uint64,
 ) error {
 	// Skip Byron-era blocks - they use PBFT consensus, not Praos,
 	// and do not have VRF/KES/OpCert fields
@@ -596,6 +638,7 @@ func verifyBlockHeaderHex(
 		SkipTransactionValidation: true,
 		SkipStakePoolValidation:   true,
 		SkipBlockLimitsValidation: true,
+		MaxKesEvolutions:          maxKesEvolutions,
 	}
 
 	header, err := normalizeHeaderVrfFieldsFromBodyCbor(block.Header())
@@ -802,7 +845,12 @@ func verifyHeaderCryptoParameters(
 	nonce string,
 	slotsPerKesPeriod, maxEvolutions uint64,
 ) error {
-	if err := verifyBlockHeaderHex(block, nonce, slotsPerKesPeriod); err != nil {
+	if err := verifyBlockHeaderHex(
+		block,
+		nonce,
+		slotsPerKesPeriod,
+		maxEvolutions,
+	); err != nil {
 		return err
 	}
 
@@ -2898,6 +2946,21 @@ func (ls *LedgerState) electingVrfKeyHashFromSnapshotWithTxn(
 	if ok {
 		var vrfKeyHash []byte
 		var found bool
+		memoKey := electingVrfMemoKey{
+			pool:         poolKeyHash,
+			cutoffSlot:   cutoffSlot,
+			capturedSlot: capturedSlot,
+		}
+		// Captured before electingVrfMemoStable reads the tip; see
+		// electingVrfMemo for the ordering this relies on.
+		memoGeneration := ls.electingVrfMemo.currentGeneration()
+		memoizable := ls.mithrilLedgerSlot == 0 &&
+			ls.electingVrfMemoStable(cutoffSlot, capturedSlot)
+		if memoizable {
+			if hash, hit := ls.electingVrfMemo.get(memoKey); hit {
+				return hash, true, nil
+			}
+		}
 		if ls.mithrilLedgerSlot != 0 && cutoffSlot == ls.mithrilLedgerSlot &&
 			capturedSlot == ls.mithrilLedgerSlot {
 			// Imported active distributions precede promotion even in Dijkstra;
@@ -2947,6 +3010,9 @@ func (ls *LedgerState) electingVrfKeyHashFromSnapshotWithTxn(
 					err,
 				))
 			}
+			if memoizable {
+				ls.electingVrfMemo.put(memoGeneration, memoKey, hash)
+			}
 			return hash, true, nil
 		}
 		// No registration in force at the cutoff. That is not a gap in
@@ -2977,6 +3043,9 @@ func (ls *LedgerState) electingVrfKeyHashFromSnapshotWithTxn(
 					poolKeyHash[:],
 					err,
 				))
+			}
+			if memoizable {
+				ls.electingVrfMemo.put(memoGeneration, memoKey, hash)
 			}
 			return hash, true, nil
 		}

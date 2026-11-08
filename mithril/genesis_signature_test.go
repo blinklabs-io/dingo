@@ -16,9 +16,8 @@ package mithril
 
 import (
 	"crypto/ed25519"
-	"crypto/rand"
 	"encoding/hex"
-	"fmt"
+	"maps"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -26,44 +25,86 @@ import (
 
 func TestVerifyGenesisCertificateSignature(t *testing.T) {
 	t.Parallel()
-
-	pubKey, privKey, err := ed25519.GenerateKey(rand.Reader)
-	require.NoError(t, err)
-
-	message := []byte("mithril-genesis-signed-message")
-	signature := ed25519.Sign(privKey, message)
-	keyText := fmt.Sprintf(
-		`{"type":"GenesisVerificationKey_ed25519","description":"Mithril Genesis Verification Key","cborHex":"5820%s"}`,
-		hex.EncodeToString(pubKey),
-	)
-	cert := &Certificate{
-		Hash:             "genesis",
-		PreviousHash:     "genesis",
-		SignedMessage:    string(message),
-		GenesisSignature: hex.EncodeToString(signature),
-	}
-
+	cert, keyText := signedGenesisCertificateForTest(t)
 	require.NoError(t, VerifyGenesisCertificateSignature(cert, keyText))
+}
+
+func TestVerifyGenesisCertificateSignatureRejectsUnsignedFields(t *testing.T) {
+	t.Parallel()
+	cert, keyText := signedGenesisCertificateForTest(t)
+
+	t.Run("aggregate verification key", func(t *testing.T) {
+		t.Parallel()
+		tampered := *cert
+		tampered.AggregateVerificationKey = "different-key"
+		var err error
+		tampered.Hash, err = tampered.ComputeHash()
+		require.NoError(t, err)
+		require.ErrorContains(
+			t, VerifyGenesisCertificateSignature(&tampered, keyText),
+			"aggregate verification key",
+		)
+	})
+
+	t.Run("protocol parameters", func(t *testing.T) {
+		t.Parallel()
+		tampered := *cert
+		tampered.Metadata.Parameters.K++
+		var err error
+		tampered.Hash, err = tampered.ComputeHash()
+		require.NoError(t, err)
+		require.ErrorContains(
+			t, VerifyGenesisCertificateSignature(&tampered, keyText),
+			"protocol parameters",
+		)
+	})
+
+	t.Run("protocol message", func(t *testing.T) {
+		t.Parallel()
+		tampered := *cert
+		tampered.AggregateVerificationKey = "different-key"
+		tampered.ProtocolMessage.MessageParts = maps.Clone(
+			cert.ProtocolMessage.MessageParts,
+		)
+		tampered.ProtocolMessage.MessageParts["next_aggregate_verification_key"] =
+			tampered.AggregateVerificationKey
+		var err error
+		tampered.Hash, err = tampered.ComputeHash()
+		require.NoError(t, err)
+		require.ErrorContains(
+			t,
+			VerifyGenesisCertificateSignature(&tampered, keyText),
+			"signed message",
+		)
+	})
+}
+
+func signedGenesisCertificateForTest(t *testing.T) (*Certificate, string) {
+	t.Helper()
+	keyText, privateKey := testGenesisKeyPair(t)
+	metadata := standardTestMetadata()
+	avk := testBLSG2Hex(t)
+	cert := &Certificate{
+		Epoch:                    1,
+		Metadata:                 metadata,
+		AggregateVerificationKey: avk,
+		ProtocolMessage: ProtocolMessage{MessageParts: map[string]string{
+			"current_epoch":                   "1",
+			"next_aggregate_verification_key": avk,
+			"next_protocol_parameters":        metadata.Parameters.ComputeHash(),
+		}},
+	}
+	signTestGenesisCertificate(t, cert, privateKey)
+	return cert, keyText
 }
 
 func TestVerifyGenesisCertificateSignatureRejectsBadSignature(t *testing.T) {
 	t.Parallel()
 
-	pubKey, _, err := ed25519.GenerateKey(rand.Reader)
-	require.NoError(t, err)
-
-	keyText := fmt.Sprintf(
-		`{"type":"GenesisVerificationKey_ed25519","description":"Mithril Genesis Verification Key","cborHex":"5820%s"}`,
-		hex.EncodeToString(pubKey),
+	cert, keyText := signedGenesisCertificateForTest(t)
+	cert.GenesisSignature = hex.EncodeToString(
+		make([]byte, ed25519.SignatureSize),
 	)
-	cert := &Certificate{
-		Hash:          "genesis",
-		PreviousHash:  "genesis",
-		SignedMessage: "mithril-genesis-signed-message",
-		GenesisSignature: hex.EncodeToString(
-			make([]byte, ed25519.SignatureSize),
-		),
-	}
 
 	require.Error(t, VerifyGenesisCertificateSignature(cert, keyText))
 }

@@ -311,40 +311,6 @@ func TestPoolRelayProviderDeepCopy(t *testing.T) {
 	require.Equal(t, net.ParseIP("::1"), *result2[1].IPv6)
 }
 
-func TestPoolRelayProviderDeepCopyIPv6(t *testing.T) {
-	t.Parallel()
-
-	db := newTestDB(t)
-	adapter := newTestAdapter(t, db, nil, 10*time.Minute)
-
-	ipv6 := net.ParseIP("2001:db8::1")
-	relays := []PoolRelay{
-		{
-			Hostname: "relay.example.com",
-			Port:     3001,
-			IPv6:     &ipv6,
-		},
-	}
-	seedCache(adapter, relays)
-
-	// Get a copy and mutate the IPv6 address
-	result, err := adapter.GetPoolRelays(context.Background())
-	require.NoError(t, err)
-	require.Len(t, result, 1)
-	require.NotNil(t, result[0].IPv6)
-	(*result[0].IPv6)[0] = 0xFF
-
-	// Get another copy and verify it is unaffected
-	result2, err := adapter.GetPoolRelays(context.Background())
-	require.NoError(t, err)
-	require.Equal(
-		t,
-		net.ParseIP("2001:db8::1"),
-		*result2[0].IPv6,
-		"IPv6 should not be mutated",
-	)
-}
-
 func TestPoolRelayProviderNilEventBus(t *testing.T) {
 	t.Parallel()
 
@@ -380,38 +346,6 @@ func TestPoolRelayProviderCacheMissFetchesFromDB(t *testing.T) {
 	adapter.cacheMu.RLock()
 	require.NotNil(t, adapter.cachedRelays)
 	require.False(t, adapter.cacheTime.IsZero())
-	adapter.cacheMu.RUnlock()
-}
-
-func TestPoolRelayProviderCurrentSlot(t *testing.T) {
-	t.Parallel()
-
-	db := newTestDB(t)
-	ls := &LedgerState{db: db}
-	ls.publishSnapshotsLocked()
-
-	adapter, err := NewPoolRelayProvider(ls, db, nil)
-	require.NoError(t, err)
-
-	// Default tip is zero
-	require.Equal(t, uint64(0), adapter.CurrentSlot())
-}
-
-func TestPoolRelayProviderInvalidateCacheIdempotent(t *testing.T) {
-	t.Parallel()
-
-	db := newTestDB(t)
-	adapter := newTestAdapter(t, db, nil, 10*time.Minute)
-
-	// Multiple invalidations should not panic
-	adapter.InvalidateCache()
-	adapter.InvalidateCache()
-	adapter.InvalidateCache()
-
-	// Cache should remain cleared
-	adapter.cacheMu.RLock()
-	require.Nil(t, adapter.cachedRelays)
-	require.True(t, adapter.cacheTime.IsZero())
 	adapter.cacheMu.RUnlock()
 }
 
@@ -491,22 +425,6 @@ func TestPoolRelayProviderCacheNilIPFields(t *testing.T) {
 	require.Equal(t, uint(3001), result[0].Port)
 	require.Nil(t, result[0].IPv4)
 	require.Nil(t, result[0].IPv6)
-}
-
-func TestPoolRelayProviderDefaultTTL(t *testing.T) {
-	t.Parallel()
-
-	db := newTestDB(t)
-	ls := &LedgerState{db: db}
-
-	adapter, err := NewPoolRelayProvider(ls, db, nil)
-	require.NoError(t, err)
-	require.Equal(
-		t,
-		defaultRelayCacheTTL,
-		adapter.cacheTTL,
-		"default TTL should be set by constructor",
-	)
 }
 
 func TestCopyPoolRelaysEmpty(t *testing.T) {

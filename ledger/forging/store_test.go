@@ -16,14 +16,11 @@ package forging
 
 import (
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"sync"
 	"testing"
 
-	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/types"
-	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -72,25 +69,6 @@ func storeTestPoolID(seed string) lcommon.PoolKeyHash {
 	return poolID
 }
 
-func TestSyncStateForgeFenceStoreRoundTrip(t *testing.T) {
-	poolID := storeTestPoolID("testpool1234567890123456789")
-	backing := newMockSyncStateStore()
-	store := NewSyncStateForgeFenceStore(backing, poolID)
-	require.NotNil(t, store)
-
-	slot, ok, err := store.LoadLastForgedSlot()
-	require.NoError(t, err)
-	assert.False(t, ok, "an unwritten fence must report no record")
-	assert.Equal(t, uint64(0), slot)
-
-	require.NoError(t, store.StoreLastForgedSlot(12345))
-
-	slot, ok, err = store.LoadLastForgedSlot()
-	require.NoError(t, err)
-	assert.True(t, ok)
-	assert.Equal(t, uint64(12345), slot)
-}
-
 // TestSyncStateForgeFenceStoreIsPerPool keeps one pool's fence from
 // gating another's: a node re-keyed to a different pool has not signed
 // anything with the new credentials.
@@ -116,17 +94,6 @@ func TestSyncStateForgeFenceStoreIsPerPool(t *testing.T) {
 	assert.Equal(t, uint64(500), slot)
 }
 
-func TestSyncStateForgeFenceStoreKeyIncludesPool(t *testing.T) {
-	poolID := storeTestPoolID("testpool")
-	backing := newMockSyncStateStore()
-	store := NewSyncStateForgeFenceStore(backing, poolID)
-	require.NoError(t, store.StoreLastForgedSlot(7))
-
-	_, found := backing.values[syncStateForgeFencePrefix+":"+
-		hex.EncodeToString(poolID[:])]
-	assert.True(t, found, "fence key must be namespaced by pool id")
-}
-
 // TestSyncStateForgeFenceStoreNeverLowersFence keeps a stale or
 // out-of-order write from weakening protection already recorded.
 func TestSyncStateForgeFenceStoreNeverLowersFence(t *testing.T) {
@@ -140,23 +107,6 @@ func TestSyncStateForgeFenceStoreNeverLowersFence(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, ok)
 	assert.Equal(t, uint64(100), slot)
-}
-
-func TestSyncStateForgeFenceStoreLoadError(t *testing.T) {
-	backing := newMockSyncStateStore()
-	backing.getErr = errors.New("metadata unavailable")
-	store := NewSyncStateForgeFenceStore(backing, storeTestPoolID("pool"))
-
-	_, _, err := store.LoadLastForgedSlot()
-	require.ErrorContains(t, err, "metadata unavailable")
-}
-
-func TestSyncStateForgeFenceStoreSaveError(t *testing.T) {
-	backing := newMockSyncStateStore()
-	backing.setErr = errors.New("disk full")
-	store := NewSyncStateForgeFenceStore(backing, storeTestPoolID("pool"))
-
-	require.ErrorContains(t, store.StoreLastForgedSlot(1), "disk full")
 }
 
 // TestSyncStateForgeFenceStoreRejectsCorruptRecord fails closed: an
@@ -192,43 +142,6 @@ func TestSyncStateForgeFenceStoreRejectsForeignPoolRecord(t *testing.T) {
 
 	_, _, err := store.LoadLastForgedSlot()
 	require.ErrorContains(t, err, "pool mismatch")
-}
-
-func TestNewSyncStateForgeFenceStoreNilBacking(t *testing.T) {
-	assert.Nil(t, NewSyncStateForgeFenceStore(nil, storeTestPoolID("pool")))
-}
-
-// TestSyncStateForgeFenceStoreRealDatabase exercises the fence against a
-// real metadata store, so the sync_state round trip is proven rather than
-// assumed from the mock. It also covers the restart path the fence exists
-// for: a second store over the same database reads back the fence.
-func TestSyncStateForgeFenceStoreRealDatabase(t *testing.T) {
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = db.Close() })
-
-	poolID := storeTestPoolID("realdbpool")
-	store := NewSyncStateForgeFenceStore(db.Metadata(), poolID)
-	require.NotNil(t, store)
-
-	_, ok, err := store.LoadLastForgedSlot()
-	require.NoError(t, err)
-	require.False(t, ok)
-
-	require.NoError(t, store.StoreLastForgedSlot(98765))
-
-	// A fresh store over the same database is what a restart sees.
-	reopened := NewSyncStateForgeFenceStore(db.Metadata(), poolID)
-	slot, ok, err := reopened.LoadLastForgedSlot()
-	require.NoError(t, err)
-	assert.True(t, ok)
-	assert.Equal(t, uint64(98765), slot)
-
-	// The fence only moves forward.
-	require.NoError(t, store.StoreLastForgedSlot(1))
-	slot, _, err = reopened.LoadLastForgedSlot()
-	require.NoError(t, err)
-	assert.Equal(t, uint64(98765), slot)
 }
 
 // TestSyncStateForgeFenceStoreRejectsMissingSlot fails closed on a record

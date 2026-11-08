@@ -25,6 +25,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/plugin/blob/badger"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	hostplugin "github.com/blinklabs-io/dingo/plugin"
 )
@@ -104,6 +105,24 @@ func openRealDatabase(
 	if err != nil {
 		_ = host.Stop(ctx)
 		return nil, nil, fmt.Errorf("resolve badger blob store: %w", err)
+	}
+
+	if opts.metadataName == "sqlite" && opts.metadataConfig == nil {
+		// Seed the already-migrated schema rather than migrating a fresh
+		// store: the migration, not the conformance work, dominates the cost
+		// of building a state manager. A data directory that already holds a
+		// metadata file (a reopen) is left alone.
+		template, err := dbtest.MetadataTemplateBytes()
+		if err != nil {
+			_ = host.Stop(ctx)
+			return nil, nil, fmt.Errorf("build metadata template: %w", err)
+		}
+		if err := dbtest.SeedMetadataTemplateBytes(
+			opts.dataDir, template,
+		); err != nil {
+			_ = host.Stop(ctx)
+			return nil, nil, fmt.Errorf("seed metadata template: %w", err)
+		}
 	}
 
 	metadataStore, err := hostplugin.Resolve[metadata.MetadataStore](

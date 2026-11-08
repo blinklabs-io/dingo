@@ -151,6 +151,22 @@ type Store struct {
 	// boundaries without a production-sized fixture.
 	rewardLiveStakeBatchSize int
 
+	// rewardStateDeleteBatchSize fixes the prune batch at that many rows
+	// when non-zero, in place of the adaptive sizing;
+	// rewardStatePruneInitialRows replaces the 5000-row starting batch size
+	// when non-zero; rewardStatePruneNow replaces time.Now for the hold
+	// measurement; rewardStateDeleteBatchDone runs after each committed
+	// batch. Only tests set them, to drive the prune across batch
+	// boundaries, to stop it between two of them, and to feed the sizing a
+	// scripted clock. rewardStatePruneRows carries each table's learned
+	// batch size from one prune to the next, under rewardStatePruneMu.
+	rewardStateDeleteBatchSize  int
+	rewardStatePruneInitialRows int
+	rewardStatePruneNow         func() time.Time
+	rewardStateDeleteBatchDone  func(rewardStatePruneBatch) error
+	rewardStatePruneMu          sync.Mutex
+	rewardStatePruneRows        map[string]int
+
 	// committeeAuthImmutableSlot caches the live rollback-safe immutable slot
 	// (tip depth securityParam blocks back), pushed in by
 	// SetCommitteeAuthImmutableSlot from outside the package -- sqlstore cannot
@@ -175,6 +191,9 @@ type Store struct {
 	// Test hook runs after a prune has selected its horizon. Production leaves
 	// it nil.
 	committeeAuthPruneLocked func()
+	// Test hook runs after GetLiveStakeInputsForPools has totalled pending
+	// reward credits and before its pool reads. Production leaves it nil.
+	liveStakePendingTotalsRead func()
 
 	migrations          []migrations.Migration
 	genesisStakingEmpty bool

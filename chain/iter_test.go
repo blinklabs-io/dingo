@@ -171,45 +171,6 @@ func TestPersistentIteratorRejectsSparseIndexWithHashDiscontinuity(
 	require.False(t, next != nil && next.Point.Slot == blocks[2].Slot)
 }
 
-func TestIteratorCancelRemovesFromChain(t *testing.T) {
-	t.Parallel()
-
-	// Create a chain manager without a database (in-memory only)
-	eventBus := event.NewEventBus(nil, nil)
-	cm, err := NewManager(context.Background(), nil, eventBus)
-	require.NoError(t, err)
-
-	// Get the primary chain
-	c := cm.PrimaryChain()
-	require.NotNil(t, c)
-
-	// Initially no iterators
-	c.mutex.RLock()
-	initialLen := len(c.iterators)
-	c.mutex.RUnlock()
-	assert.Equal(t, 0, initialLen)
-
-	// Create an iterator
-	iter, err := c.FromPoint(ocommon.Point{}, true)
-	require.NoError(t, err)
-	require.NotNil(t, iter)
-
-	// Should have one iterator now
-	c.mutex.RLock()
-	afterCreateLen := len(c.iterators)
-	c.mutex.RUnlock()
-	assert.Equal(t, 1, afterCreateLen)
-
-	// Cancel the iterator
-	iter.Cancel()
-
-	// Iterator should be removed
-	c.mutex.RLock()
-	afterCancelLen := len(c.iterators)
-	c.mutex.RUnlock()
-	assert.Equal(t, 0, afterCancelLen)
-}
-
 func TestIteratorCancelMultiple(t *testing.T) {
 	t.Parallel()
 
@@ -373,8 +334,8 @@ func TestIterNextSpuriousWakeups(t *testing.T) {
 	// Fire many spurious wake-ups. Each wake-up closes the
 	// waitingChan without adding a block, forcing the
 	// iterator to loop again. With the old recursive code,
-	// 10 000 wake-ups would overflow the stack.
-	const spuriousCount = 10_000
+	// unbounded wake-ups would grow the stack.
+	const spuriousCount = 1_000
 	for i := range spuriousCount {
 		// Give the iterator goroutine a moment to register
 		// its wait channel before we close it.

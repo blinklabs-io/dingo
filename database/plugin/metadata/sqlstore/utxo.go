@@ -317,11 +317,7 @@ func (s *Store) GetSpentUtxosMissingAddressAfterSlot(
 		return nil, err
 	}
 	rows, err := db.QueryContext(ctx, s.dialect.Rebind(
-		`SELECT `+qualifiedSQLiteUtxoColumns+` FROM utxo
-WHERE utxo.deleted_slot > ?
-  AND utxo.id > ?
-  AND NOT EXISTS (SELECT 1 FROM utxo_address WHERE utxo_address.utxo_id = utxo.id)
-ORDER BY utxo.id LIMIT ?`,
+		spentUtxosMissingAddressAfterSlotSQL(s.dialect.Name()),
 	), slotValue, afterID, limit)
 	if err != nil {
 		return nil, err
@@ -340,6 +336,22 @@ ORDER BY utxo.id LIMIT ?`,
 		ret = append(ret, *utxo)
 	}
 	return ret, rows.Err()
+}
+
+func spentUtxosMissingAddressAfterSlotSQL(dialect string) string {
+	id := "utxo.id"
+	if dialect == "sqlite" {
+		// A rowid-ordered LIMIT makes SQLite scan retained history before it
+		// finds the few recent spends. Disqualify that access path so the
+		// deleted-slot range bounds the work, without naming a deferred index.
+		id = "+utxo.id"
+	}
+	return `-- name: GetSpentUtxosMissingAddressAfterSlot
+SELECT ` + qualifiedSQLiteUtxoColumns + ` FROM utxo
+WHERE utxo.deleted_slot > ?
+  AND ` + id + ` > ?
+  AND NOT EXISTS (SELECT 1 FROM utxo_address WHERE utxo_address.utxo_id = utxo.id)
+ORDER BY ` + id + ` LIMIT ?`
 }
 
 func (s *Store) SetUtxosNotDeletedAfterSlot(
@@ -625,10 +637,14 @@ func (s *Store) GetUtxoBalanceByAddressAtSlot(
 	txn types.Txn,
 ) (models.AddressBalance, error) {
 	if len(address) == 0 {
-		return models.AddressBalance{}, errors.New("UTxO address must not be empty")
+		return models.AddressBalance{}, errors.New(
+			"UTxO address must not be empty",
+		)
 	}
 	if maxResults <= 0 || maxResults == math.MaxInt {
-		return models.AddressBalance{}, errors.New("UTxO balance result limit must be positive")
+		return models.AddressBalance{}, errors.New(
+			"UTxO balance result limit must be positive",
+		)
 	}
 	return s.getUtxoBalanceByPredicate(
 		"utxo_address.address = ? AND utxo.added_slot <= ? AND "+
@@ -732,7 +748,10 @@ WHERE ` + predicate
 		if err != nil {
 			return ret, err
 		}
-		key := assetKey{policy: string(asset.PolicyId), name: string(asset.Name)}
+		key := assetKey{
+			policy: string(asset.PolicyId),
+			name:   string(asset.Name),
+		}
 		idx, ok := assetIndexes[key]
 		if !ok {
 			asset.Amount = amount
@@ -1709,6 +1728,56 @@ func (s *Store) GetUtxoIncludingSpent(
 	return s.getUtxo(txID, index, txn, true)
 }
 
+// GetUtxoSpendState reads only the fields consumed-input recovery needs.
+func (s *Store) GetUtxoSpendState(
+	txID []byte,
+	index uint32,
+	txn types.Txn,
+) (*models.UtxoSpendState, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if overlay := retainedOverlayFromQueryer(db); overlay != nil {
+		if overlay.err != nil {
+			return nil, overlay.err
+		}
+		if model, ok := overlay.retainedUtxo(newOverlayKey(txID, index)); ok {
+			return &models.UtxoSpendState{
+				DeletedSlot: model.DeletedSlot,
+				SpentAtTxId: bytes.Clone(model.SpentAtTxId),
+			}, nil
+		}
+	}
+	args := []any{txID, sql.NullInt64{Int64: int64(index), Valid: true}}
+	var row *sql.Row
+	if s.readCanUseWriteCache(txn) {
+		row = s.queryRowCached(ctx, db, getUtxoSpendStateQuery, args...)
+	} else {
+		row = db.QueryRowContext(ctx, getUtxoSpendStateQuery, args...)
+	}
+	var state models.UtxoSpendState
+	var deletedSlot sql.NullInt64
+	var spentBy []byte
+	if err := row.Scan(&deletedSlot, &spentBy); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf(
+			"get UTxO spend state %x#%d: %w",
+			txID,
+			index,
+			err,
+		)
+	}
+	state.DeletedSlot = uint64(deletedSlot.Int64)
+	state.SpentAtTxId = types.NullableHash(spentBy)
+	return &state, nil
+}
+
 func (s *Store) getUtxo(
 	txID []byte,
 	index uint32,
@@ -1718,6 +1787,21 @@ func (s *Store) getUtxo(
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if overlay := retainedOverlayFromQueryer(db); overlay != nil {
+		if overlay.err != nil {
+			return nil, overlay.err
+		}
+		if model, ok := overlay.retainedUtxo(newOverlayKey(txID, index)); ok {
+			if !includeSpent &&
+				(model.DeletedSlot != 0 || len(model.SpentAtTxId) != 0) {
+				return nil, nil
+			}
+			return model, nil
+		}
 	}
 	query := getLiveUtxoByRefQuery
 	if includeSpent {

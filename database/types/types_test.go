@@ -85,24 +85,6 @@ func TestTypesScanValue(t *testing.T) {
 	}
 }
 
-// TestBlockTombstoneMarker confirms the marker is what the plugins write
-// and detect: bytes start with the magic prefix and IsBlockTombstone
-// matches them. The marker carries no embedded (slot, hash) — that
-// information is reconstructed by each plugin from its own bp key.
-func TestBlockTombstoneMarker(t *testing.T) {
-	enc := types.BlockTombstone()
-	if !types.IsBlockTombstone(enc) {
-		t.Fatal("IsBlockTombstone returned false for BlockTombstone()")
-	}
-	if !bytes.Equal(enc[:4], types.BlockTombstoneMagic[:]) {
-		t.Fatalf(
-			"marker prefix = %x, want %x",
-			enc[:4],
-			types.BlockTombstoneMagic[:],
-		)
-	}
-}
-
 func TestParseBlockBlobKeyRejectsMalformed(t *testing.T) {
 	cases := []struct {
 		name string

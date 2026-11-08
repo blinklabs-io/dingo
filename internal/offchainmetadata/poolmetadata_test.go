@@ -23,6 +23,8 @@ import (
 )
 
 func TestValidatePoolMetadataAcceptsValidDocument(t *testing.T) {
+	t.Parallel()
+
 	raw := []byte(
 		`{"name":"Test Pool","description":"A pool used for testing.",` +
 			`"ticker":"TEST","homepage":"https://example.com"}`,
@@ -39,6 +41,8 @@ func TestValidatePoolMetadataAcceptsValidDocument(t *testing.T) {
 }
 
 func TestValidatePoolMetadataAcceptsBoundaryLengths(t *testing.T) {
+	t.Parallel()
+
 	// name at exactly 50 characters, description at exactly 255, ticker at
 	// exactly 5: all at the reference validator's inclusive boundary.
 	name := strings.Repeat("n", 50)
@@ -57,6 +61,8 @@ func TestValidatePoolMetadataAcceptsBoundaryLengths(t *testing.T) {
 }
 
 func TestValidatePoolMetadataCountsCodePointsNotBytes(t *testing.T) {
+	t.Parallel()
+
 	// 5 multi-byte runes: valid ticker length by Unicode code point count
 	// (matching Data.Text.length) even though it is more than 5 bytes.
 	raw := []byte(
@@ -71,6 +77,8 @@ func TestValidatePoolMetadataCountsCodePointsNotBytes(t *testing.T) {
 }
 
 func TestValidatePoolMetadataRejectsEmptyContent(t *testing.T) {
+	t.Parallel()
+
 	fields, err := ValidatePoolMetadata(nil)
 
 	require.Error(t, err)
@@ -79,6 +87,8 @@ func TestValidatePoolMetadataRejectsEmptyContent(t *testing.T) {
 }
 
 func TestValidatePoolMetadataRejectsEmptyObject(t *testing.T) {
+	t.Parallel()
+
 	fields, err := ValidatePoolMetadata([]byte(`{}`))
 
 	require.Error(t, err)
@@ -88,6 +98,8 @@ func TestValidatePoolMetadataRejectsEmptyObject(t *testing.T) {
 }
 
 func TestValidatePoolMetadataRejectsMissingRequiredField(t *testing.T) {
+	t.Parallel()
+
 	testCases := []struct {
 		name    string
 		raw     string
@@ -124,6 +136,7 @@ func TestValidatePoolMetadataRejectsMissingRequiredField(t *testing.T) {
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			fields, err := ValidatePoolMetadata([]byte(tc.raw))
 
 			require.Error(t, err)
@@ -137,6 +150,8 @@ func TestValidatePoolMetadataRejectsMissingRequiredField(t *testing.T) {
 }
 
 func TestValidatePoolMetadataRejectsFieldConstraintViolations(t *testing.T) {
+	t.Parallel()
+
 	testCases := []struct {
 		name string
 		raw  string
@@ -166,6 +181,7 @@ func TestValidatePoolMetadataRejectsFieldConstraintViolations(t *testing.T) {
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			fields, err := ValidatePoolMetadata([]byte(tc.raw))
 
 			require.Error(t, err)
@@ -178,6 +194,8 @@ func TestValidatePoolMetadataRejectsFieldConstraintViolations(t *testing.T) {
 }
 
 func TestValidatePoolMetadataRejectsMalformedJSON(t *testing.T) {
+	t.Parallel()
+
 	fields, err := ValidatePoolMetadata([]byte(`not json`))
 
 	require.Error(t, err)
@@ -186,6 +204,8 @@ func TestValidatePoolMetadataRejectsMalformedJSON(t *testing.T) {
 }
 
 func TestValidatePoolMetadataRejectsOversizedDocument(t *testing.T) {
+	t.Parallel()
+
 	// A 513-byte, otherwise-valid document: over the reference validator's
 	// 512-byte cap, checked before any JSON decoding is attempted.
 	padding := strings.Repeat("a", 500)
@@ -206,9 +226,12 @@ func TestValidatePoolMetadataRejectsOversizedDocument(t *testing.T) {
 }
 
 func TestValidatePoolMetadataRejectsNonObjectTopLevelValue(t *testing.T) {
+	t.Parallel()
+
 	testCases := []string{`[]`, `"a string"`, `123`, `true`}
 	for _, raw := range testCases {
 		t.Run(raw, func(t *testing.T) {
+			t.Parallel()
 			fields, err := ValidatePoolMetadata([]byte(raw))
 
 			require.Error(t, err)

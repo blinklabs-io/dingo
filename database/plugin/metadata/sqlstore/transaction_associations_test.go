@@ -18,8 +18,10 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"math"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -36,6 +38,7 @@ func TestCollateralProductionApplyHydrateRollback(t *testing.T) {
 	t.Parallel()
 	db, err := sql.Open("sqlite", fmt.Sprintf("file:collateral_prod_%d?mode=memory&cache=shared", testStoreSequence.Add(1)))
 	require.NoError(t, err)
+	seedMigratedSQLite(t, db)
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
 	store, err := New(Config{WriteDB: db, Dialect: SQLiteDialect(), StorageMode: types.StorageModeAPI, Migrations: registry, MigrationLocker: migrations.NewProcessLocker()})
@@ -55,6 +58,7 @@ func TestSetTransactionBatchedCommitAndRollback(t *testing.T) {
 		),
 	)
 	require.NoError(t, err)
+	seedMigratedSQLite(t, db)
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
 	store, err := New(Config{
@@ -216,11 +220,17 @@ func collateralProductionFlow(t *testing.T, store *Store, db *sql.DB) {
 func TestCollateralRollbackOrderAcrossRestart(t *testing.T) {
 	t.Parallel()
 
-	dsn := "file:" + filepath.Join(t.TempDir(), "collateral.db") +
+	path := filepath.Join(t.TempDir(), "collateral.db")
+	dsn := "file:" + path +
 		"?_pragma=synchronous(OFF)&_pragma=journal_mode(MEMORY)"
 	open := func() (*Store, *sql.DB) {
 		db, err := sql.Open("sqlite", dsn)
 		require.NoError(t, err)
+		// Only the first open starts from the template; a reopen must keep
+		// the data the previous store wrote.
+		if _, statErr := os.Stat(path); errors.Is(statErr, os.ErrNotExist) {
+			seedMigratedSQLite(t, db)
+		}
 		registry, err := migrations.SQLiteRegistry()
 		require.NoError(t, err)
 		store, err := New(Config{

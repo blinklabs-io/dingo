@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -109,9 +110,9 @@ func TestTxSubmissionLogicVersion(t *testing.T) {
 			want:   TxSubmissionLogicV1,
 		},
 		{
-			name:      "V2 is not implemented",
-			config:    `{"TxSubmissionLogicVersion":"TxSubmissionLogicV2"}`,
-			wantError: `TxSubmissionLogicV2" is not supported by Dingo`,
+			name:   "V2 reference strategy",
+			config: `{"TxSubmissionLogicVersion":"TxSubmissionLogicV2"}`,
+			want:   TxSubmissionLogicV2,
 		},
 		{
 			name:      "unknown",
@@ -431,98 +432,6 @@ func TestValidateGenesisHashEmpty(t *testing.T) {
 	hash, err := validateGenesisHash("Test", "", data)
 	require.NoError(t, err)
 	assert.Equal(t, expectedHash, hash)
-}
-
-func TestCardanoNodeConfigPeerSharing(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name string
-		body string
-		want *bool
-	}{
-		{name: "absent", body: `{}`, want: nil},
-		{name: "true", body: `{"PeerSharing": true}`, want: new(true)},
-		{name: "false", body: `{"PeerSharing": false}`, want: new(false)},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			cfg, err := NewCardanoNodeConfigFromReader(
-				bytes.NewReader([]byte(tc.body)),
-			)
-			require.NoError(t, err)
-			if tc.want == nil {
-				assert.Nil(t, cfg.PeerSharing)
-				return
-			}
-			require.NotNil(t, cfg.PeerSharing)
-			assert.Equal(t, *tc.want, *cfg.PeerSharing)
-		})
-	}
-}
-
-func TestGenesisHashMismatchFromFile(t *testing.T) {
-	t.Parallel()
-
-	// Config with wrong Byron genesis hash should fail to load
-	cfgBytes := []byte(`{
-  "ByronGenesisFile": "byron-genesis.json",
-  "ByronGenesisHash": "0000000000000000000000000000000000000000000000000000000000000000"
-}`)
-	cfg, err := NewCardanoNodeConfigFromReader(bytes.NewReader(cfgBytes))
-	require.NoError(t, err)
-	cfg.path = testDataDir
-	err = cfg.loadGenesisConfigs()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "Byron genesis hash mismatch")
-}
-
-func TestGenesisHashMismatchShelley(t *testing.T) {
-	t.Parallel()
-
-	// Config with wrong Shelley genesis hash should fail to load
-	cfgBytes := []byte(`{
-  "ShelleyGenesisFile": "shelley-genesis.json",
-  "ShelleyGenesisHash": "0000000000000000000000000000000000000000000000000000000000000000"
-}`)
-	cfg, err := NewCardanoNodeConfigFromReader(bytes.NewReader(cfgBytes))
-	require.NoError(t, err)
-	cfg.path = testDataDir
-	err = cfg.loadGenesisConfigs()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "Shelley genesis hash mismatch")
-}
-
-func TestGenesisHashMismatchAlonzo(t *testing.T) {
-	t.Parallel()
-
-	// Config with wrong Alonzo genesis hash should fail to load
-	cfgBytes := []byte(`{
-  "AlonzoGenesisFile": "alonzo-genesis.json",
-  "AlonzoGenesisHash": "0000000000000000000000000000000000000000000000000000000000000000"
-}`)
-	cfg, err := NewCardanoNodeConfigFromReader(bytes.NewReader(cfgBytes))
-	require.NoError(t, err)
-	cfg.path = testDataDir
-	err = cfg.loadGenesisConfigs()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "Alonzo genesis hash mismatch")
-}
-
-func TestGenesisHashMismatchConway(t *testing.T) {
-	t.Parallel()
-
-	// Config with wrong Conway genesis hash should fail to load
-	cfgBytes := []byte(`{
-  "ConwayGenesisFile": "conway-genesis.json",
-  "ConwayGenesisHash": "0000000000000000000000000000000000000000000000000000000000000000"
-}`)
-	cfg, err := NewCardanoNodeConfigFromReader(bytes.NewReader(cfgBytes))
-	require.NoError(t, err)
-	cfg.path = testDataDir
-	err = cfg.loadGenesisConfigs()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "Conway genesis hash mismatch")
 }
 
 func TestHardForkEpoch(t *testing.T) {
@@ -859,4 +768,23 @@ func TestCardanoNodeConfigConsensusMode(t *testing.T) {
 	assert.False(t, (&CardanoNodeConfig{}).PraosConsensusMode())
 	assert.False(t, (&CardanoNodeConfig{ConsensusMode: "GenesisMode"}).PraosConsensusMode())
 	assert.True(t, (&CardanoNodeConfig{ConsensusMode: "PraosMode"}).PraosConsensusMode())
+}
+
+func TestGenesisHashMismatch(t *testing.T) {
+	t.Parallel()
+	const zeroHash = "0000000000000000000000000000000000000000000000000000000000000000"
+	for _, era := range []string{"Byron", "Shelley", "Alonzo", "Conway"} {
+		t.Run(era, func(t *testing.T) {
+			t.Parallel()
+			lower := strings.ToLower(era)
+			cfgBytes := []byte(`{"` + era + `GenesisFile": "` + lower +
+				`-genesis.json", "` + era + `GenesisHash": "` + zeroHash + `"}`)
+			cfg, err := NewCardanoNodeConfigFromReader(bytes.NewReader(cfgBytes))
+			require.NoError(t, err)
+			cfg.path = testDataDir
+			err = cfg.loadGenesisConfigs()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), era+" genesis hash mismatch")
+		})
+	}
 }

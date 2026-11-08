@@ -438,6 +438,9 @@ type ImportConfig struct {
 	// when Reconcile is set. It is populated by the import phases and consumed
 	// by reconcileStaleLedgerState. Not caller-settable.
 	reconcileKeys *reconcileKeys
+	// rewardCreditFoldBatchSize overrides how many covered reward credits one
+	// transaction folds. Zero selects defaultRewardCreditFoldBatchSize.
+	rewardCreditFoldBatchSize int
 }
 
 type deferredRewardLiveStakeImporter interface {
@@ -830,6 +833,12 @@ func ImportLedgerState(
 				)
 			}
 		}
+		if cfg.State.CertStateData != nil {
+			if err := foldImportedRewardCredits(ctx, cfg, slot); err != nil {
+				return err
+			}
+		}
+
 		if err := setCheckpoint(
 			ctx,
 			cfg, models.ImportPhaseCertState,
@@ -858,6 +867,9 @@ func ImportLedgerState(
 			if err := rollbackResumedAccountRewardJournal(
 				ctx, cfg, slot,
 			); err != nil {
+				return err
+			}
+			if err := foldImportedRewardCredits(ctx, cfg, slot); err != nil {
 				return err
 			}
 		}
@@ -1264,7 +1276,15 @@ func validateImportedRewardBases(cfg ImportConfig) error {
 				rewardEpoch, err,
 			)
 		}
-		if existing != nil && existing.Authoritative {
+		complete, err := importedAuthoritativeRewardBasisComplete(
+			store,
+			nil,
+			existing,
+		)
+		if err != nil {
+			return err
+		}
+		if complete {
 			continue
 		}
 		if err := validateImportedRewardPParams(
@@ -1837,6 +1857,17 @@ func importAccounts(
 		}
 	}()
 
+	rounds, err := store.GetPendingRewardCreditRounds(txn.Metadata())
+	if err != nil {
+		return fmt.Errorf("reading applied reward rounds before account import: %w", err)
+	}
+	coveredRewardEpochs := make([]uint64, 0, len(rounds))
+	for _, round := range rounds {
+		if round.BoundarySlot <= slot {
+			coveredRewardEpochs = append(coveredRewardEpochs, round.SnapshotEpoch)
+		}
+	}
+
 	inBatch := 0
 	for _, acct := range accounts {
 		select {
@@ -1890,6 +1921,14 @@ func importAccounts(
 				acct.StakingKey.Hash,
 				err,
 			)
+		}
+
+		// The imported balance already includes every covered round, including
+		// credits later withdrawn. Folding them must commit with that balance.
+		if len(coveredRewardEpochs) > 0 {
+			if err := store.FoldRewardAccountOutputs(coveredRewardEpochs, credentialTag, acct.StakingKey.Hash, txn.Metadata()); err != nil {
+				return fmt.Errorf("folding imported account reward credits: %w", err)
+			}
 		}
 
 		inBatch++
@@ -4267,6 +4306,12 @@ func importGovState(
 		ratifiedIds := ratifiedGovActionIdSet(
 			govState.RatifiedGovActionIds,
 		)
+		expiredIds := make(
+			map[string]struct{}, len(govState.ExpiredGovActionIds),
+		)
+		for _, id := range govState.ExpiredGovActionIds {
+			expiredIds[govActionIdKey(id.TxHash, id.ActionIndex)] = struct{}{}
+		}
 		var ratifiedHFI *ParsedGovProposal
 		if govState.RatifiedGovActionIds == nil {
 			// Snapshot bootstrap close-the-1-epoch-lag fallback for
@@ -4322,7 +4367,18 @@ func importGovState(
 				var ratifiedSlot *uint64
 				var enactedEpoch *uint64
 				var enactedSlot *uint64
+				var expiredEpoch *uint64
+				var expiredSlot *uint64
 				propKey := govActionIdKey(prop.TxHash, prop.ActionIndex)
+				if _, expired := expiredIds[propKey]; expired {
+					// The completed pulser belongs to the anchor epoch. Its
+					// expiration verdict is consumed at the next boundary,
+					// independently of the proposal's original lifetime.
+					ee := cfg.State.Epoch
+					es := currentEpochSlot
+					expiredEpoch = &ee
+					expiredSlot = &es
+				}
 				_, ratified := ratifiedIds[propKey]
 				if !ratified && ratifiedHFI != nil &&
 					bytes.Equal(prop.TxHash, ratifiedHFI.TxHash) &&
@@ -4363,6 +4419,8 @@ func importGovState(
 						RatifiedSlot:    ratifiedSlot,
 						EnactedEpoch:    enactedEpoch,
 						EnactedSlot:     enactedSlot,
+						ExpiredEpoch:    expiredEpoch,
+						ExpiredSlot:     expiredSlot,
 						// The snapshot lists proposals in submission order,
 						// and every proposal of one epoch shares its anchor
 						// slot, so this position stands in for the block
@@ -4947,8 +5005,16 @@ func findRatifiedHFICandidate(
 		matches++
 		candidate = p
 	}
-	if matches != 1 {
+	if matches != 1 || candidate == nil {
 		return nil
+	}
+	// An authoritative expired verdict must not become a ratification
+	// merely because the legacy parent-chain heuristic has one candidate.
+	for _, expired := range govState.ExpiredGovActionIds {
+		if bytes.Equal(candidate.TxHash, expired.TxHash) &&
+			candidate.ActionIndex == expired.ActionIndex {
+			return nil
+		}
 	}
 	return candidate
 }

@@ -362,6 +362,7 @@ func TestCalculateEpochBoundaryFallbackHalvesAgree(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			db := setupTestDB(t)
 			seedEpochs(t, db, []models.Epoch{
 				{EpochId: 0, StartSlot: 0, LengthInSlots: 100},
@@ -1090,6 +1091,7 @@ func TestCaptureEpochBoundaryAgreesOnPointerStake(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			db := setupTestDB(t)
 			seedEpochs(t, db, []models.Epoch{
 				{EpochId: 0, StartSlot: 0, LengthInSlots: 432_000},
@@ -1265,6 +1267,7 @@ func TestCaptureEpochBoundaryAgreesOnPointerStakeAcrossTheEraCutover(
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			db := setupTestDB(t)
 			// Only the outgoing Babbage epoch exists when the SNAP read runs.
 			seedEpochRow(t, db, nil, 0, 0, 300, eras.BabbageEraDesc.Id)
@@ -1777,6 +1780,7 @@ func TestSaveSnapshotKeepsDegradedPoolStakeInPoolAndEpochRows(t *testing.T) {
 func TestDijkstraBoundarySnapshotIncludesEnactmentCredits(t *testing.T) {
 	for _, compute := range []bool{false, true} {
 		t.Run(strconv.FormatBool(compute), func(t *testing.T) {
+			t.Parallel()
 			db := setupTestDB(t)
 			seedEpochs(t, db, []models.Epoch{
 				{

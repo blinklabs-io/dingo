@@ -82,6 +82,7 @@ func testEndpoints() []NodeEndpoint {
 }
 
 func TestPlanFailureCaptureNamesServicesFromEndpoints(t *testing.T) {
+	t.Parallel()
 	plan, ok := PlanFailureCapture(
 		"/artifacts", "TestSustainedConsensus", testEndpoints(),
 	)
@@ -96,6 +97,7 @@ func TestPlanFailureCaptureNamesServicesFromEndpoints(t *testing.T) {
 }
 
 func TestPlanFailureCaptureDisabledWithoutArtifactDir(t *testing.T) {
+	t.Parallel()
 	_, ok := PlanFailureCapture("", "TestSustainedConsensus", testEndpoints())
 
 	require.False(t, ok,
@@ -104,6 +106,7 @@ func TestPlanFailureCaptureDisabledWithoutArtifactDir(t *testing.T) {
 }
 
 func TestPlanFailureCaptureDisabledWithoutContainers(t *testing.T) {
+	t.Parallel()
 	// The unit-style harness tests construct endpoints that describe no
 	// container. Capturing for them would dial addresses that do not
 	// exist and ask Docker for services it does not have.
@@ -118,6 +121,7 @@ func TestPlanFailureCaptureDisabledWithoutContainers(t *testing.T) {
 }
 
 func TestPlanFailureCaptureSkipsEndpointsWithoutContainers(t *testing.T) {
+	t.Parallel()
 	endpoints := append(
 		testEndpoints(),
 		NodeEndpoint{Name: "observer-only", Role: "relay"},
@@ -133,6 +137,7 @@ func TestPlanFailureCaptureSkipsEndpointsWithoutContainers(t *testing.T) {
 }
 
 func TestPlanFailureCaptureKeepsTheNameInsideTheRoot(t *testing.T) {
+	t.Parallel()
 	// t.Name() renders a subtest as parent/child. Left alone that
 	// scatters one scenario's evidence across nested directories, and a
 	// name that walked upward would escape the artifact root entirely.
@@ -147,6 +152,7 @@ func TestPlanFailureCaptureKeepsTheNameInsideTheRoot(t *testing.T) {
 }
 
 func TestWriteFailureArtifactsPreservesChainsStatusAndLogs(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	src := &fakeArtifactSource{
 		status: "NAME       STATUS\ndingo-1    Up 4 minutes\n",
@@ -200,6 +206,7 @@ func TestWriteFailureArtifactsPreservesChainsStatusAndLogs(t *testing.T) {
 }
 
 func TestWriteFailureArtifactsWithoutRootWritesNothing(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	src := &fakeArtifactSource{status: "status"}
 	plan := FailureCapturePlan{
@@ -218,6 +225,7 @@ func TestWriteFailureArtifactsWithoutRootWritesNothing(t *testing.T) {
 }
 
 func TestWriteFailureArtifactsContinuesAfterOneServiceFails(t *testing.T) {
+	t.Parallel()
 	// Capture is best-effort: it runs because the test already failed,
 	// so losing one service's logs must not cost the rest of the
 	// evidence.
@@ -257,6 +265,7 @@ func TestWriteFailureArtifactsContinuesAfterOneServiceFails(t *testing.T) {
 }
 
 func TestWriteFailureArtifactsWithoutSourceStillWritesChains(t *testing.T) {
+	t.Parallel()
 	// The observed chains are recorded in-process, so an unreachable
 	// Docker daemon must not cost the one artifact that does not depend
 	// on it.
@@ -284,6 +293,7 @@ func TestWriteFailureArtifactsWithoutSourceStillWritesChains(t *testing.T) {
 }
 
 func TestWriteFailureArtifactsBoundsCapturedLogs(t *testing.T) {
+	t.Parallel()
 	// A DevNet node at debug level emits tens of megabytes a minute, and
 	// run-tests.sh already preserves the complete compose log for the
 	// whole run. The per-scenario copy only has to carry the window
@@ -346,6 +356,7 @@ var artifactNameCorpus = []string{
 }
 
 func TestArtifactNameIsInjective(t *testing.T) {
+	t.Parallel()
 	// Replacing the separator with an ordinary character is lossy:
 	// TestX/a-b and TestX/a/b would both become TestX-a-b, and two
 	// failing subtests would mix their evidence in one directory.
@@ -364,6 +375,7 @@ func TestArtifactNameIsInjective(t *testing.T) {
 }
 
 func TestArtifactNameStaysASinglePathSegment(t *testing.T) {
+	t.Parallel()
 	for _, name := range artifactNameCorpus {
 		got := ArtifactName(name)
 		require.NotEmpty(t, got, "%q encoded to nothing", name)
@@ -371,15 +383,6 @@ func TestArtifactNameStaysASinglePathSegment(t *testing.T) {
 			"%q encoded to %q, which leaves the root", name, got,
 		)
 	}
-}
-
-func TestArtifactNameLeavesPlainScenarioNamesAlone(t *testing.T) {
-	// Every scenario in the canonical suite is a top-level test, and
-	// the directory is found by the name in the failure output, so a
-	// name that needs no rewriting must come back untouched.
-	require.Equal(t, "TestSustainedConsensus",
-		ArtifactName("TestSustainedConsensus"),
-	)
 }
 
 // TestArtifactNamesCreateDistinctDirectories checks that every name in
@@ -393,6 +396,7 @@ func TestArtifactNameLeavesPlainScenarioNamesAlone(t *testing.T) {
 // only in case, which do share a directory where the filesystem folds
 // case; TestArtifactNameKeepsCase carries that boundary.
 func TestArtifactNamesCreateDistinctDirectories(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	// Report every name rather than stopping at the first, because the
 	// two ways this breaks look nothing alike: a rejected name is a
@@ -442,6 +446,7 @@ func TestArtifactNamesCreateDistinctDirectories(t *testing.T) {
 // one directory. The explicit lexical assertion keeps that property covered
 // even though the DevNet package is not built on Windows.
 func TestArtifactNameNeverEndsInAStrippedCharacter(t *testing.T) {
+	t.Parallel()
 	for _, name := range artifactNameCorpus {
 		got := ArtifactName(name)
 		last := got[len(got)-1]
@@ -464,6 +469,7 @@ func TestArtifactNameNeverEndsInAStrippedCharacter(t *testing.T) {
 // TestSustainedConsensus as %54est%53ustained%43onsensus, and the
 // directory has to stay findable from the name in the failure output.
 func TestArtifactNameKeepsCase(t *testing.T) {
+	t.Parallel()
 	require.NotEqual(t,
 		ArtifactName("TestX/a"), ArtifactName("TestX/A"),
 		"the encoding itself must not fold case",

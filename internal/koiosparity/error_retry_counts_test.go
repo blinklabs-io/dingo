@@ -32,8 +32,10 @@ import (
 )
 
 func TestObserverAutomaticallyRecoversErrorEpochWithoutNewEvent(t *testing.T) {
+	t.Parallel()
 	for _, accounts := range []bool{false, true} {
 		t.Run(map[bool]string{false: "aggregate", true: "accounts"}[accounts], func(t *testing.T) {
+			t.Parallel()
 			source, err := NewDatabaseSource(newTestDatabaseSourceDB(t))
 			require.NoError(t, err)
 			srv := newFakeKoiosServer(t, map[uint64]*fakeEpochRef{
@@ -410,4 +412,27 @@ func TestAccountRetryUsesItsOwnCompletedPhase(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestAccountQueueHandsAggregateErrorToAggregateRetry(t *testing.T) {
+	t.Parallel()
+	source, err := NewDatabaseSource(newTestDatabaseSourceDB(t))
+	require.NoError(t, err)
+	srv := newFakeKoiosServer(t, map[uint64]*fakeEpochRef{
+		5: {activeStake: "1000000", treasury: "10", reserves: "20", fees: "30", endTimeUnix: time.Now().Add(-time.Hour).Unix()},
+	})
+	o, err := NewObserver(ObserverConfig{Network: "preview", CachePath: filepath.Join(t.TempDir(), "cache.db"), Source: source, BaseURL: srv.URL, AllowInsecureHTTP: true, AllowPrivateAddresses: true, GraceHours: 24, AccountsEnabled: true, ErrorRetryDelay: 100 * time.Millisecond})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, o.Stop(context.Background())) })
+
+	o.processAccountEpoch(context.Background(), 5)
+
+	statuses, err := o.cache.GetStatusSummary("preview")
+	require.NoError(t, err)
+	require.Len(t, statuses, 1)
+	require.Equal(t, StatusError, statuses[0].AggregateStatus)
+	o.mu.Lock()
+	_, scheduled := o.retry[5]
+	o.mu.Unlock()
+	require.True(t, scheduled, "aggregate queue must retry the aggregate ERROR the account queue wrote")
 }

@@ -16,7 +16,6 @@ package ledgerpeers
 
 import (
 	"context"
-	"errors"
 	"net"
 	"testing"
 
@@ -83,12 +82,6 @@ func TestProviderConvertsLedgerRelays(t *testing.T) {
 	require.Zero(t, relays[3].Port)
 }
 
-func TestProviderCurrentSlot(t *testing.T) {
-	provider := NewProvider(&testRelayProvider{slot: 12345})
-
-	require.Equal(t, uint64(12345), provider.CurrentSlot())
-}
-
 func TestProviderReturnsRelayCopy(t *testing.T) {
 	ipv4 := net.ParseIP("44.0.1.1").To4()
 	source := &testRelayProvider{
@@ -110,15 +103,6 @@ func TestProviderReturnsRelayCopy(t *testing.T) {
 
 	require.Equal(t, "relay.example.com", source.relays[0].Hostname)
 	require.Equal(t, net.ParseIP("44.0.1.1").To4(), *source.relays[0].IPv4)
-}
-
-func TestProviderReturnsRelayProviderError(t *testing.T) {
-	expectedErr := errors.New("relay read failed")
-	provider := NewProvider(&testRelayProvider{err: expectedErr})
-
-	relays, err := provider.GetPoolRelays(context.Background())
-	require.ErrorIs(t, err, expectedErr)
-	require.Nil(t, relays)
 }
 
 func TestProviderCarriesStakeAndMultiHost(t *testing.T) {

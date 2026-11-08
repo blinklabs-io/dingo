@@ -30,6 +30,7 @@ import (
 // by zero. Without per-era Params validation inside Validate(), a malformed
 // Summary can be "valid" and then panic at use.
 func TestSummary_Validate_RejectsZeroEpochSize(t *testing.T) {
+	t.Parallel()
 	s := hardfork.Summary{
 		SystemStart: time.Now(),
 		Eras: []hardfork.EraSummary{{
@@ -49,6 +50,7 @@ func TestSummary_Validate_RejectsZeroEpochSize(t *testing.T) {
 // TestSummary_Validate_RejectsZeroSlotLength mirrors the EpochSize check for
 // SlotLength, which TimeToSlot divides by.
 func TestSummary_Validate_RejectsZeroSlotLength(t *testing.T) {
+	t.Parallel()
 	s := hardfork.Summary{
 		SystemStart: time.Now(),
 		Eras: []hardfork.EraSummary{{
@@ -70,6 +72,7 @@ func TestSummary_Validate_RejectsZeroSlotLength(t *testing.T) {
 // rune literal (e.g., '\x05'), which is unreadable and incorrect for an
 // ordinal era ID.
 func TestSummary_Validate_ErrorMessageFormatsEraIDAsDecimal(t *testing.T) {
+	t.Parallel()
 	end := hardfork.Bound{RelativeTime: 100, Slot: 10, Epoch: 1}
 	s := hardfork.Summary{
 		SystemStart: time.Now(),
@@ -110,6 +113,7 @@ func TestSummary_Validate_ErrorMessageFormatsEraIDAsDecimal(t *testing.T) {
 // the arithmetic wraps to 0 and a subsequent era with MinMajorVersion=0 is
 // incorrectly accepted.
 func TestShape_Validate_VersionContiguityHandlesUintOverflow(t *testing.T) {
+	t.Parallel()
 	s := hardfork.Shape{
 		SystemStart: time.Now(),
 		Eras: []hardfork.ShapeEntry{

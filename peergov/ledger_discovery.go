@@ -620,7 +620,6 @@ func (p *PeerGovernor) addResolvedLedgerPeerContext(
 		NormalizedAddress:     normalized,
 		Source:                PeerSourceP2PLedger,
 		State:                 PeerStateCold,
-		Sharable:              true, // Ledger peers are public relays
 		EMAAlpha:              p.config.EMAAlpha,
 		FirstSeen:             time.Now(),
 		StakeLovelace:         stake,

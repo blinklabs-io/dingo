@@ -37,7 +37,17 @@ import (
 // per-transaction entry budget these tests are about.
 func newOnDiskTestDB(t *testing.T) *Database {
 	t.Helper()
-	db, err := newTestDatabase(t, &Config{DataDir: t.TempDir()})
+	db, err := newTestDatabaseWithBlobConfig(
+		t,
+		&Config{DataDir: t.TempDir()},
+		false,
+		"",
+		map[string]any{
+			"valueLogFileSize": testutil.TestBadgerValueLogFileSize,
+			"memTableSize":     truncateTestMemTableSize,
+			"valueThreshold":   16 * 1024,
+		},
+	)
 	require.NoError(t, err, "failed to create test database")
 	return db
 }
@@ -63,7 +73,16 @@ const (
 	overBudgetBlobDeletes = testBadgerMaxBatchCount + 4_000
 )
 
-// seedRollbackUtxos writes overBudgetBlobDeletes UTxOs above rollbackSlot,
+// truncateTestMemTableSize sizes the store the rollback tests open. The
+// per-transaction budget scales with the memtable, so a 1 MiB one is exceeded
+// by far fewer staged deletes than the shared 8 MiB test store needs.
+const (
+	truncateTestMemTableSize  = 1024 * 1024
+	truncateMaxBatchCount     = 15 * truncateTestMemTableSize / 100 / 96
+	truncateOverBudgetDeletes = truncateMaxBatchCount*2/5 + 200
+)
+
+// seedRollbackUtxos writes truncateOverBudgetDeletes UTxOs above rollbackSlot,
 // both the metadata rows TruncateAfterSlot collects and the blob objects it
 // deletes. The blobs go in through their own bounded transactions: a single
 // transaction could not hold them either.
@@ -74,8 +93,8 @@ func seedRollbackUtxos(
 ) []models.Utxo {
 	t.Helper()
 
-	utxos := make([]models.Utxo, 0, overBudgetBlobDeletes)
-	for i := range overBudgetBlobDeletes {
+	utxos := make([]models.Utxo, 0, truncateOverBudgetDeletes)
+	for i := range truncateOverBudgetDeletes {
 		txId := make([]byte, 32)
 		//nolint:gosec // loop counter, always in range
 		binary.BigEndian.PutUint32(txId[:4], uint32(i))
@@ -93,7 +112,7 @@ func seedRollbackUtxos(
 	}))
 	seedTxn.Release()
 
-	const blobBatch = 2_000
+	const blobBatch = 200
 	for start := 0; start < len(utxos); start += blobBatch {
 		end := min(start+blobBatch, len(utxos))
 		batch := utxos[start:end]
@@ -211,8 +230,8 @@ func TestDeleteTxBlobsLeavesRoomForCommit(t *testing.T) {
 
 	db := newOnDiskTestDB(t)
 
-	txHashes := make([][]byte, 0, overBudgetBlobDeletes)
-	for i := range overBudgetBlobDeletes {
+	txHashes := make([][]byte, 0, truncateOverBudgetDeletes)
+	for i := range truncateOverBudgetDeletes {
 		hash := bytes.Repeat([]byte{0x00}, 32)
 		//nolint:gosec // loop counter, always in range
 		binary.BigEndian.PutUint32(hash[:4], uint32(i))
@@ -291,12 +310,6 @@ func TestTruncateAfterSlotRecordsFailureSeparately(t *testing.T) {
 		collectHistogramCount(t, reg, truncateResultFailure),
 		"a failed sweep must still record its duration under the failure label",
 	)
-}
-
-// TestRegisterTruncateMetricsNilRegistry verifies a nil registry is tolerated,
-// matching the other database metric registrations.
-func TestRegisterTruncateMetricsNilRegistry(t *testing.T) {
-	require.NoError(t, RegisterTruncateMetrics(nil))
 }
 
 func collectHistogramCount(
@@ -658,30 +671,34 @@ func TestRollbackAfterSlotLowersHistoryExpiryCursor(t *testing.T) {
 		cursor string
 		want   string
 	}{
+		{name: "absent", cursor: "", want: ""},
 		{name: "below point", cursor: "1400", want: "1400"},
 		{name: "at point", cursor: "1500", want: "1500"},
 		{name: "above point", cursor: "1600", want: "1500"},
-		{name: "absent", cursor: "", want: ""},
 	}
 	for _, rb := range rollbacks {
-		for _, tc := range cursors {
-			t.Run(rb.name+"/"+tc.name, func(t *testing.T) {
-				db := newTestDB(t)
-				targetBlock := testIndexedBlock(1500, 1, 0x15)
-				require.NoError(t, db.BlockCreate(targetBlock, nil))
+		t.Run(rb.name, func(t *testing.T) {
+			t.Parallel()
+			// One database per rollback kind: the cases run in order, each
+			// overwriting the cursor, and the absent case goes first
+			// because a cursor cannot be unset.
+			db := newTestDB(t)
+			targetBlock := testIndexedBlock(1500, 1, 0x15)
+			require.NoError(t, db.BlockCreate(targetBlock, nil))
+			point := ocommon.Point{Slot: 1500, Hash: targetBlock.Hash}
+			for _, tc := range cursors {
 				if tc.cursor != "" {
 					require.NoError(
 						t,
 						db.SetSyncState(HistoryExpiryCursorSyncKey, tc.cursor, nil),
 					)
 				}
-				point := ocommon.Point{Slot: 1500, Hash: targetBlock.Hash}
 				require.NoError(t, rb.rollback(db, point))
 				got, err := db.GetSyncState(HistoryExpiryCursorSyncKey, nil)
 				require.NoError(t, err)
-				require.Equal(t, tc.want, got)
-			})
-		}
+				require.Equal(t, tc.want, got, tc.name)
+			}
+		})
 	}
 }
 

@@ -112,25 +112,9 @@ func TestChainSelectorWallClockFollowsLiveLedgerRebuild(t *testing.T) {
 	assert.False(t, ok,
 		"wall clock read from the ledger state a live lifecycle op closed")
 
-	require.NoError(t, n.reinitializeAndResume(ctx))
-	_, ok = cfg.WallClockSlot()
-	assert.True(t, ok, "wall clock unavailable after the ledger was rebuilt")
-}
-
-// The selector calls the hook from its own goroutine while a live rebuild runs,
-// so the rebuilt ledger must not be visible to it before Start has finished
-// initializing the slot clock the hook reads.
-func TestChainSelectorWallClockConcurrentWithLiveLedgerRebuild(t *testing.T) {
-	t.Parallel()
-	n, _ := newLiveLifecycleTestNode(t, 4)
-	cfg := n.buildChainSelectorConfig(2160, true, 0)
-
-	ctx := context.Background()
-	n.liveLifecycleMu.Lock()
-	defer n.liveLifecycleMu.Unlock()
-	require.NoError(t, n.quiesceForLiveLifecycleOp(ctx))
-	require.NoError(t, n.closeStorageForLiveLifecycleOp(ctx))
-
+	// The selector calls the hook from its own goroutine while a live rebuild
+	// runs, so the rebuilt ledger must not be visible to it before Start has
+	// finished initializing the slot clock the hook reads.
 	done := make(chan struct{})
 	polled := make(chan struct{})
 	go func() {
@@ -148,6 +132,6 @@ func TestChainSelectorWallClockConcurrentWithLiveLedgerRebuild(t *testing.T) {
 	close(done)
 	<-polled
 	require.NoError(t, err)
-	_, ok := cfg.WallClockSlot()
+	_, ok = cfg.WallClockSlot()
 	assert.True(t, ok, "wall clock unavailable after the ledger was rebuilt")
 }

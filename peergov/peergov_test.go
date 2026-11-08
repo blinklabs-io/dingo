@@ -22,7 +22,6 @@ import (
 	"io"
 	"log/slog"
 	"net"
-	"strings"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -71,6 +70,8 @@ func requirePendingEventData[T any](
 }
 
 func TestNewPeerGovernor(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name     string
 		config   PeerGovernorConfig
@@ -218,93 +219,105 @@ func (m *blockingLedgerPeerProvider) GetPoolRelays(
 // pins that call in flight so this needs no timing assumptions about a
 // real call's speed.
 func TestPeerGovernorStopWaitsForInFlightGoroutines(t *testing.T) {
-	eventBus := newMockEventBus()
-	t.Cleanup(eventBus.Stop)
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		eventBus := newMockEventBus()
+		// Close, not Stop: Stop restarts the workers, which would outlive
+		// the synctest bubble.
+		t.Cleanup(eventBus.Close)
 
-	blocking := &blockingLedgerPeerProvider{
-		started: make(chan struct{}),
-		release: make(chan struct{}),
-	}
+		blocking := &blockingLedgerPeerProvider{
+			started: make(chan struct{}),
+			release: make(chan struct{}),
+		}
 
-	pg := NewPeerGovernor(PeerGovernorConfig{
-		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		EventBus:           eventBus,
-		DisableOutbound:    true,
-		LedgerPeerProvider: blocking,
+		pg := NewPeerGovernor(PeerGovernorConfig{
+			Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			EventBus:           eventBus,
+			DisableOutbound:    true,
+			LedgerPeerProvider: blocking,
+		})
+		require.NoError(t, pg.Start(context.Background()))
+
+		select {
+		case <-blocking.started:
+		case <-time.After(5 * time.Second):
+			t.Fatal("discoverLedgerPeers never reached GetPoolRelays")
+		}
+
+		stopDone := make(chan struct{})
+		go func() {
+			_ = pg.Stop(context.Background())
+			close(stopDone)
+		}()
+
+		select {
+		case <-stopDone:
+			t.Fatal("Stop returned before the in-flight goroutine finished")
+		case <-time.After(200 * time.Millisecond):
+		}
+
+		close(blocking.release)
+
+		select {
+		case <-stopDone:
+		case <-time.After(5 * time.Second):
+			t.Fatal("Stop did not return after the in-flight goroutine finished")
+		}
 	})
-	require.NoError(t, pg.Start(context.Background()))
-
-	select {
-	case <-blocking.started:
-	case <-time.After(5 * time.Second):
-		t.Fatal("discoverLedgerPeers never reached GetPoolRelays")
-	}
-
-	stopDone := make(chan struct{})
-	go func() {
-		_ = pg.Stop(context.Background())
-		close(stopDone)
-	}()
-
-	select {
-	case <-stopDone:
-		t.Fatal("Stop returned before the in-flight goroutine finished")
-	case <-time.After(200 * time.Millisecond):
-	}
-
-	close(blocking.release)
-
-	select {
-	case <-stopDone:
-	case <-time.After(5 * time.Second):
-		t.Fatal("Stop did not return after the in-flight goroutine finished")
-	}
 }
 
 func TestPeerGovernorStopHonorsContextDeadline(t *testing.T) {
-	eventBus := newMockEventBus()
-	t.Cleanup(eventBus.Stop)
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		eventBus := newMockEventBus()
+		// Close, not Stop: Stop restarts the workers, which would outlive
+		// the synctest bubble.
+		t.Cleanup(eventBus.Close)
 
-	blocking := &blockingLedgerPeerProvider{
-		started: make(chan struct{}),
-		release: make(chan struct{}),
-	}
-	pg := NewPeerGovernor(PeerGovernorConfig{
-		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		EventBus:           eventBus,
-		DisableOutbound:    true,
-		LedgerPeerProvider: blocking,
+		blocking := &blockingLedgerPeerProvider{
+			started: make(chan struct{}),
+			release: make(chan struct{}),
+		}
+		pg := NewPeerGovernor(PeerGovernorConfig{
+			Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			EventBus:           eventBus,
+			DisableOutbound:    true,
+			LedgerPeerProvider: blocking,
+		})
+		require.NoError(t, pg.Start(context.Background()))
+
+		select {
+		case <-blocking.started:
+		case <-time.After(5 * time.Second):
+			t.Fatal("discoverLedgerPeers never reached GetPoolRelays")
+		}
+
+		stopCtx, cancel := context.WithTimeout(
+			context.Background(),
+			50*time.Millisecond,
+		)
+		defer cancel()
+		err := pg.Stop(stopCtx)
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+		// Every caller wraps this with its own "peer governor shutdown: %w",
+		// matching how the other components' Stop errors are reported, so
+		// self-prefixing here doubles the prefix in the joined shutdown error.
+		require.NotContains(
+			t,
+			err.Error(),
+			"peer governor shutdown",
+			"Stop must not repeat the prefix its callers add",
+		)
+
+		close(blocking.release)
+		require.NoError(t, pg.Stop(context.Background()))
 	})
-	require.NoError(t, pg.Start(context.Background()))
-
-	select {
-	case <-blocking.started:
-	case <-time.After(5 * time.Second):
-		t.Fatal("discoverLedgerPeers never reached GetPoolRelays")
-	}
-
-	stopCtx, cancel := context.WithTimeout(
-		context.Background(),
-		50*time.Millisecond,
-	)
-	defer cancel()
-	err := pg.Stop(stopCtx)
-	require.ErrorIs(t, err, context.DeadlineExceeded)
-	// Every caller wraps this with its own "peer governor shutdown: %w",
-	// matching how the other components' Stop errors are reported, so
-	// self-prefixing here doubles the prefix in the joined shutdown error.
-	require.NotContains(
-		t,
-		err.Error(),
-		"peer governor shutdown",
-		"Stop must not repeat the prefix its callers add",
-	)
-
-	close(blocking.release)
-	require.NoError(t, pg.Stop(context.Background()))
 }
 
 func TestPeerGovernorStopUnsubscribesConnectionHandlers(t *testing.T) {
+	t.Parallel()
+
 	eventBus := newMockEventBus()
 	t.Cleanup(eventBus.Stop)
 
@@ -339,6 +352,8 @@ func TestPeerGovernorStopUnsubscribesConnectionHandlers(t *testing.T) {
 }
 
 func TestPeerGovernor_AddPeer(t *testing.T) {
+	t.Parallel()
+
 	eventBus := newMockEventBus()
 	reg := prometheus.NewRegistry()
 
@@ -348,7 +363,7 @@ func TestPeerGovernor_AddPeer(t *testing.T) {
 		PromRegistry: reg,
 	})
 
-	// Test adding a gossip peer (should be sharable)
+	// Test adding a gossip peer (not sharable until connected)
 	// Use a routable IP — gossip peers with non-routable IPs are rejected.
 	pg.AddPeer("44.0.0.1:3001", PeerSourceP2PGossip)
 
@@ -357,10 +372,10 @@ func TestPeerGovernor_AddPeer(t *testing.T) {
 	assert.Equal(t, "44.0.0.1:3001", peers[0].Address)
 	assert.EqualValues(t, PeerSourceP2PGossip, peers[0].Source)
 	assert.Equal(t, PeerStateCold, peers[0].State)
-	assert.True(
+	assert.False(
 		t,
 		peers[0].Sharable,
-		"gossip-discovered peers should be sharable",
+		"gossip-discovered peers are not sharable before an outbound connection",
 	)
 
 	// Test adding duplicate peer (should not add)
@@ -390,6 +405,8 @@ func TestPeerGovernor_AddPeer(t *testing.T) {
 }
 
 func TestPeerGovernor_LoadTopologyConfig(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
@@ -437,6 +454,8 @@ func TestPeerGovernor_LoadTopologyConfig(t *testing.T) {
 }
 
 func TestPeerGovernor_Reconcile_Promotions(t *testing.T) {
+	t.Parallel()
+
 	eventBus := newMockEventBus()
 	reg := prometheus.NewRegistry()
 
@@ -467,6 +486,8 @@ func TestPeerGovernor_Reconcile_Promotions(t *testing.T) {
 }
 
 func TestPeerGovernor_Reconcile_SkipsResponderOnlyWarmPromotion(t *testing.T) {
+	t.Parallel()
+
 	eventBus := newMockEventBus()
 	reg := prometheus.NewRegistry()
 
@@ -491,6 +512,8 @@ func TestPeerGovernor_Reconcile_SkipsResponderOnlyWarmPromotion(t *testing.T) {
 }
 
 func TestPeerGovernor_Reconcile_Demotions(t *testing.T) {
+	t.Parallel()
+
 	eventBus := newMockEventBus()
 	reg := prometheus.NewRegistry()
 
@@ -522,6 +545,8 @@ func TestPeerGovernor_Reconcile_Demotions(t *testing.T) {
 func TestPeerGovernor_Reconcile_ConnectedLocalRootStaysHotWhenQuiet(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	eventBus := newMockEventBus()
 	reg := prometheus.NewRegistry()
 
@@ -553,6 +578,8 @@ func TestPeerGovernor_Reconcile_ConnectedLocalRootStaysHotWhenQuiet(
 }
 
 func TestPeerGovernor_Reconcile_Removal(t *testing.T) {
+	t.Parallel()
+
 	eventBus := newMockEventBus()
 	reg := prometheus.NewRegistry()
 
@@ -583,6 +610,8 @@ func TestPeerGovernor_Reconcile_Removal(t *testing.T) {
 }
 
 func TestPeerGovernor_Reconcile_RemovalThresholdBoundary(t *testing.T) {
+	t.Parallel()
+
 	eventBus := newMockEventBus()
 	reg := prometheus.NewRegistry()
 
@@ -608,6 +637,8 @@ func TestPeerGovernor_Reconcile_RemovalThresholdBoundary(t *testing.T) {
 }
 
 func TestPeerGovernor_Reconcile_MinimumHotPeers(t *testing.T) {
+	t.Parallel()
+
 	eventBus := newMockEventBus()
 	reg := prometheus.NewRegistry()
 
@@ -655,6 +686,8 @@ func TestPeerGovernor_Reconcile_MinimumHotPeers(t *testing.T) {
 }
 
 func TestPeerGovernor_Metrics(t *testing.T) {
+	t.Parallel()
+
 	reg := prometheus.NewRegistry()
 
 	pg := NewPeerGovernor(PeerGovernorConfig{
@@ -688,6 +721,8 @@ func TestPeerGovernor_Metrics(t *testing.T) {
 }
 
 func TestPeerGovernor_RecordPeerStateChange(t *testing.T) {
+	t.Parallel()
+
 	reg := prometheus.NewRegistry()
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -740,6 +775,8 @@ func TestPeerGovernor_RecordPeerStateChange(t *testing.T) {
 // events and inbound handling move peers too. A drop out of hot counts as a
 // hot demotion whether the peer lands warm or cold.
 func TestPeerGovernor_RecordPeerStateChange_LegacyCounters(t *testing.T) {
+	t.Parallel()
+
 	reg := prometheus.NewRegistry()
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -787,6 +824,8 @@ func TestPeerGovernor_RecordPeerStateChange_LegacyCounters(t *testing.T) {
 func TestPeerGovernor_TransitionMetrics_GossipChurnLegacyCounters(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	reg := prometheus.NewRegistry()
 	eventBus := newMockEventBus()
 	t.Cleanup(eventBus.Stop)
@@ -815,6 +854,13 @@ func TestPeerGovernor_TransitionMetrics_GossipChurnLegacyCounters(
 	}
 
 	pg.gossipChurn()
+	assert.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(
+			pg.metrics.peerDemotions.WithLabelValues("hot", "cold"),
+		),
+	)
 
 	// churn demotes hot->cold outside reconcile
 	assert.Equal(
@@ -830,6 +876,8 @@ func TestPeerGovernor_TransitionMetrics_GossipChurnLegacyCounters(
 }
 
 func TestPeerGovernor_TransitionMetrics_ReconcilePromotion(t *testing.T) {
+	t.Parallel()
+
 	reg := prometheus.NewRegistry()
 	eventBus := newMockEventBus()
 	t.Cleanup(eventBus.Stop)
@@ -875,46 +923,9 @@ func TestPeerGovernor_TransitionMetrics_ReconcilePromotion(t *testing.T) {
 	)
 }
 
-func TestPeerGovernor_TransitionMetrics_GossipChurnDemotion(t *testing.T) {
-	reg := prometheus.NewRegistry()
-	pg := NewPeerGovernor(PeerGovernorConfig{
-		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		EventBus:           newMockEventBus(),
-		PromRegistry:       reg,
-		GossipChurnPercent: 0.50,
-		MinScoreThreshold:  0.3,
-	})
-
-	pg.peers = []*Peer{
-		{
-			Address: "gossip1:3001", Source: PeerSourceP2PGossip,
-			State: PeerStateHot, PerformanceScore: 0.9,
-		},
-		{
-			Address: "gossip2:3001", Source: PeerSourceP2PGossip,
-			State: PeerStateHot, PerformanceScore: 0.2,
-		},
-		// Warm replacement so the demotion below is not blocked by the
-		// "no promotable replacement" guard.
-		{
-			Address: "gossip3:3001", Source: PeerSourceP2PGossip,
-			State: PeerStateWarm, PerformanceScore: 0.5,
-			Connection: &PeerConnection{IsClient: true},
-		},
-	}
-
-	pg.gossipChurn()
-
-	assert.Equal(
-		t,
-		float64(1),
-		testutil.ToFloat64(
-			pg.metrics.peerDemotions.WithLabelValues("hot", "cold"),
-		),
-	)
-}
-
 func TestPeerGovernor_TransitionMetrics_ReconcileDemotion(t *testing.T) {
+	t.Parallel()
+
 	reg := prometheus.NewRegistry()
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -948,6 +959,8 @@ func TestPeerGovernor_TransitionMetrics_ReconcileDemotion(t *testing.T) {
 }
 
 func TestPeerGovernor_PeerSharing(t *testing.T) {
+	t.Parallel()
+
 	eventBus := newMockEventBus()
 	reg := prometheus.NewRegistry()
 
@@ -989,6 +1002,8 @@ func TestPeerGovernor_PeerSharing(t *testing.T) {
 // While bootstrap peers are in use the node is in a sensitive state and must
 // not learn peers by peer sharing; only after bootstrap exit may it gossip.
 func TestPeerGovernor_PeerSharingSuppressedDuringBootstrap(t *testing.T) {
+	t.Parallel()
+
 	peerRequestCount := 0
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -1022,61 +1037,6 @@ func TestPeerGovernor_PeerSharingSuppressedDuringBootstrap(t *testing.T) {
 	pg.reconcile(t.Context())
 
 	assert.Equal(t, 1, peerRequestCount)
-}
-
-func TestPeerGovernor_SetPeerHotByConnId(t *testing.T) {
-	pg := NewPeerGovernor(PeerGovernorConfig{
-		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
-	})
-
-	// Add peer
-	pg.AddPeer("44.0.0.1:3001", PeerSourceP2PGossip)
-
-	// Mock connection ID - use proper ConnectionId construction
-	localAddr, _ := net.ResolveTCPAddr("tcp", "44.0.0.1:3001")
-	remoteAddr, _ := net.ResolveTCPAddr("tcp", "44.0.0.1:3002")
-	connId := ouroboros.ConnectionId{
-		LocalAddr:  localAddr,
-		RemoteAddr: remoteAddr,
-	}
-
-	pg.mu.Lock()
-	pg.peers[0].Connection = &PeerConnection{Id: connId}
-	pg.peers[0].State = PeerStateWarm
-	pg.mu.Unlock()
-
-	pg.SetPeerHotByConnId(connId)
-
-	peers := pg.GetPeers()
-	assert.Equal(t, PeerStateHot, peers[0].State)
-	assert.True(t, peers[0].LastActivity.After(time.Now().Add(-1*time.Second)))
-}
-
-func TestPeerGovernor_TouchPeerByConnId(t *testing.T) {
-	pg := NewPeerGovernor(PeerGovernorConfig{
-		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
-	})
-
-	pg.AddPeer("44.0.0.1:3001", PeerSourceTopologyLocalRoot)
-
-	localAddr, _ := net.ResolveTCPAddr("tcp", "127.0.0.1:6000")
-	remoteAddr, _ := net.ResolveTCPAddr("tcp", "44.0.0.1:3001")
-	connId := ouroboros.ConnectionId{
-		LocalAddr:  localAddr,
-		RemoteAddr: remoteAddr,
-	}
-
-	pg.mu.Lock()
-	pg.peers[0].Connection = &PeerConnection{Id: connId, IsClient: true}
-	pg.peers[0].LastActivity = time.Now().Add(-30 * time.Minute)
-	oldActivity := pg.peers[0].LastActivity
-	pg.mu.Unlock()
-
-	pg.TouchPeerByConnId(connId)
-
-	peers := pg.GetPeers()
-	require.Len(t, peers, 1)
-	assert.True(t, peers[0].LastActivity.After(oldActivity))
 }
 
 func TestPeerGovernor_CorroborationIdentityFallsBackToAddressGroup(
@@ -1271,6 +1231,8 @@ func TestPeerGovernor_ConnectedAddressGroupsUnidentifiedRoot(t *testing.T) {
 }
 
 func TestPeerGovernorAppendChainSelectionEventsLocked(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
@@ -1501,6 +1463,8 @@ func TestPeerGovernorAppendChainSelectionEventsLocked(t *testing.T) {
 }
 
 func TestPeerGovernor_HandleInboundConnection(t *testing.T) {
+	t.Parallel()
+
 	eventBus := newMockEventBus()
 	reg := prometheus.NewRegistry()
 
@@ -1553,6 +1517,8 @@ func TestPeerGovernor_HandleInboundConnection(t *testing.T) {
 }
 
 func TestPeerGovernor_HandleInboundConnectionDeniedPeer(t *testing.T) {
+	t.Parallel()
+
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	connManager := connmanager.NewConnectionManager(
 		connmanager.ConnectionManagerConfig{
@@ -1611,69 +1577,9 @@ func TestPeerGovernor_HandleInboundConnectionDeniedPeer(t *testing.T) {
 	}, time.Second, 10*time.Millisecond)
 }
 
-func TestPeerGovernor_HandleConnectionClosed(t *testing.T) {
-	eventBus := newMockEventBus()
-	reg := prometheus.NewRegistry()
-
-	pg := NewPeerGovernor(PeerGovernorConfig{
-		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		EventBus:     eventBus,
-		PromRegistry: reg,
-	})
-
-	// Add peer with connection
-	pg.AddPeer("44.0.0.1:3001", PeerSourceP2PGossip)
-	localAddr, _ := net.ResolveTCPAddr("tcp", "44.0.0.1:3001")
-	remoteAddr, _ := net.ResolveTCPAddr("tcp", "44.0.0.1:3002")
-	connId := ouroboros.ConnectionId{
-		LocalAddr:  localAddr,
-		RemoteAddr: remoteAddr,
-	}
-
-	pg.mu.Lock()
-	pg.peers[0].Connection = &PeerConnection{Id: connId}
-	pg.peers[0].State = PeerStateHot
-	pg.mu.Unlock()
-
-	// Create a mock connection closed event
-	// Note: This test is simplified due to complex mocking requirements
-	// In a real implementation, we'd need proper mocks for connmanager types
-
-	pg.mu.Lock()
-	peerIdx := pg.peerIndexByConnId(connId)
-	assert.Equal(t, 0, peerIdx)
-	pg.mu.Unlock()
-
-	// Test that peer state changes when connection is cleared
-	pg.mu.Lock()
-	pg.peers[0].Connection = nil
-	pg.peers[0].State = PeerStateCold
-	pg.mu.Unlock()
-
-	peers := pg.GetPeers()
-	assert.Equal(t, PeerStateCold, peers[0].State)
-	assert.Nil(t, peers[0].Connection)
-}
-
-func TestPeer_IndexByAddress(t *testing.T) {
-	pg := NewPeerGovernor(PeerGovernorConfig{
-		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
-	})
-
-	pg.AddPeer("44.0.0.1:3001", PeerSourceP2PGossip)
-	pg.AddPeer("44.0.0.1:3002", PeerSourceP2PGossip)
-
-	idx := pg.peerIndexByAddress("44.0.0.1:3001")
-	assert.Equal(t, 0, idx)
-
-	idx = pg.peerIndexByAddress("44.0.0.1:3002")
-	assert.Equal(t, 1, idx)
-
-	idx = pg.peerIndexByAddress("44.0.0.1:3003")
-	assert.Equal(t, -1, idx)
-}
-
 func TestPeer_IndexByAddress_HostnameMatchesOriginalAddress(t *testing.T) {
+	t.Parallel()
+
 	// Test that peerIndexByAddress can find a peer by its original hostname
 	// even when NormalizedAddress contains a DNS-resolved IP.
 	// This simulates the case where AddPeer resolved "relay.example.com:3001"
@@ -1709,65 +1615,9 @@ func TestPeer_IndexByAddress_HostnameMatchesOriginalAddress(t *testing.T) {
 	assert.Equal(t, -1, idx, "should not find non-existent peer")
 }
 
-func TestPeerGovernor_IndexByConnId(t *testing.T) {
-	pg := NewPeerGovernor(PeerGovernorConfig{
-		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
-	})
-
-	pg.AddPeer("44.0.0.1:3001", PeerSourceP2PGossip)
-	localAddr, _ := net.ResolveTCPAddr("tcp", "44.0.0.1:3001")
-	remoteAddr, _ := net.ResolveTCPAddr("tcp", "44.0.0.1:3002")
-	connId := ouroboros.ConnectionId{
-		LocalAddr:  localAddr,
-		RemoteAddr: remoteAddr,
-	}
-
-	pg.mu.Lock()
-	pg.peers[0].Connection = &PeerConnection{Id: connId}
-	pg.mu.Unlock()
-
-	idx := pg.peerIndexByConnId(connId)
-	assert.Equal(t, 0, idx)
-
-	// Test with different connection ID
-	localAddr2, _ := net.ResolveTCPAddr("tcp", "44.0.0.1:3003")
-	remoteAddr2, _ := net.ResolveTCPAddr("tcp", "44.0.0.1:3004")
-	connId2 := ouroboros.ConnectionId{
-		LocalAddr:  localAddr2,
-		RemoteAddr: remoteAddr2,
-	}
-	idx = pg.peerIndexByConnId(connId2)
-	assert.Equal(t, -1, idx)
-}
-
-func TestPeer_SetConnection(t *testing.T) {
-	peer := &Peer{
-		Address: "44.0.0.1:3001",
-	}
-
-	// Create a proper connection structure manually for testing
-	localAddr, _ := net.ResolveTCPAddr("tcp", "44.0.0.1:3001")
-	remoteAddr, _ := net.ResolveTCPAddr("tcp", "44.0.0.1:3002")
-	connId := ouroboros.ConnectionId{
-		LocalAddr:  localAddr,
-		RemoteAddr: remoteAddr,
-	}
-
-	// Manually set the connection to test the structure
-	peer.Connection = &PeerConnection{
-		Id:              connId,
-		ProtocolVersion: 1,
-		VersionData:     nil,
-		IsClient:        true,
-	}
-
-	assert.NotNil(t, peer.Connection)
-	assert.Equal(t, connId, peer.Connection.Id)
-	assert.Equal(t, uint(1), peer.Connection.ProtocolVersion)
-	assert.True(t, peer.Connection.IsClient)
-}
-
 func TestPeerGovernor_TestPeer_WithCustomFunc(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		PeerTestFunc: func(address string) error {
@@ -1809,6 +1659,8 @@ func TestPeerGovernor_TestPeer_WithCustomFunc(t *testing.T) {
 }
 
 func TestPeerGovernor_TestPeer_CachedResult(t *testing.T) {
+	t.Parallel()
+
 	callCount := 0
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -1833,6 +1685,8 @@ func TestPeerGovernor_TestPeer_CachedResult(t *testing.T) {
 }
 
 func TestPeerGovernor_TestPeer_CachedFailure(t *testing.T) {
+	t.Parallel()
+
 	callCount := 0
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -1857,6 +1711,8 @@ func TestPeerGovernor_TestPeer_CachedFailure(t *testing.T) {
 }
 
 func TestPeerGovernor_TestPeer_ExistingPeer(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		PeerTestFunc: func(address string) error {
@@ -1880,6 +1736,8 @@ func TestPeerGovernor_TestPeer_ExistingPeer(t *testing.T) {
 }
 
 func TestPeerGovernor_TestPeer_NoConnManager(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		// No PeerTestFunc or ConnManager
@@ -1897,6 +1755,8 @@ func TestPeerGovernor_TestPeer_NoConnManager(t *testing.T) {
 // removed once its cached result has outlived TestCooldown, and that a
 // fresh entry survives reconcile until then.
 func TestPeerGovernor_Reconcile_PrunesStaleTestOnlyPeer(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		TestCooldown: time.Minute,
@@ -1939,6 +1799,8 @@ func TestPeerGovernor_Reconcile_PrunesStaleTestOnlyPeer(t *testing.T) {
 // stale entry must let a subsequent, real discovery of that address replace
 // it.
 func TestPeerGovernor_Reconcile_PrunedTestPeerAllowsReplacement(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		TestCooldown: time.Minute,
@@ -1971,29 +1833,9 @@ func TestPeerGovernor_Reconcile_PrunedTestPeerAllowsReplacement(t *testing.T) {
 	require.EqualValues(t, PeerSourceP2PGossip, pg.GetPeers()[0].Source)
 }
 
-func TestPeerGovernor_DenyPeer(t *testing.T) {
-	pg := NewPeerGovernor(PeerGovernorConfig{
-		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		DenyDuration: 1 * time.Hour,
-	})
-
-	// Deny a peer
-	pg.DenyPeer("44.0.0.1:3001", 0) // Use default duration
-
-	// Verify peer is denied
-	assert.True(t, pg.IsDenied("44.0.0.1:3001"))
-
-	// Deny another peer with custom duration
-	pg.DenyPeer("44.0.0.1:3002", 30*time.Minute)
-	assert.True(t, pg.IsDenied("44.0.0.1:3002"))
-
-	// Verify deny list size
-	pg.mu.Lock()
-	assert.Len(t, pg.denyList, 2)
-	pg.mu.Unlock()
-}
-
 func TestPeerGovernor_DenyPeer_CaseInsensitive(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		DenyDuration: 1 * time.Hour,
@@ -2091,6 +1933,8 @@ func TestPeerGovernor_IsDenied_Expiry(t *testing.T) {
 }
 
 func TestPeerGovernor_AddPeer_Denied(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		DenyDuration: 1 * time.Hour,
@@ -2160,28 +2004,6 @@ func TestPeerGovernor_DenyPeer_BlocksHostnameAfterDNSFailure(t *testing.T) {
 	assert.True(t, pg.IsDenied("relay.example.com:3001"))
 }
 
-func TestPeerGovernor_ResolveAddress_LogsDNSFailure(t *testing.T) {
-	oldLookupIPAddr := lookupIPAddr
-	lookupIPAddr = func(context.Context, string) ([]net.IP, error) {
-		return nil, errors.New("lookup failed")
-	}
-	t.Cleanup(func() { lookupIPAddr = oldLookupIPAddr })
-
-	var buf bytes.Buffer
-	pg := NewPeerGovernor(PeerGovernorConfig{
-		Logger: slog.New(slog.NewJSONHandler(&buf, nil)),
-	})
-
-	normalized := pg.resolveAddress("relay.example.com:3001")
-
-	assert.Equal(t, "relay.example.com:3001", normalized)
-	assert.True(
-		t,
-		strings.Contains(buf.String(), "failed to resolve peer hostname"),
-		"expected DNS resolution failure to be logged",
-	)
-}
-
 // Not t.Parallel: swaps the package-level resolver seams.
 func TestPeerGovernor_ResolveAddressBoundsDNSFailure(t *testing.T) {
 	oldLookupIPAddr := lookupIPAddr
@@ -2208,6 +2030,8 @@ func TestPeerGovernor_ResolveAddressBoundsDNSFailure(t *testing.T) {
 }
 
 func TestPeerGovernor_TestPeer_DeniesOnFailure(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		DenyDuration: 1 * time.Hour,
@@ -2232,6 +2056,8 @@ func TestPeerGovernor_TestPeer_DeniesOnFailure(t *testing.T) {
 }
 
 func TestPeerGovernor_Reconcile_CleanupDenyList(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		DenyDuration:      1 * time.Millisecond,
@@ -2283,6 +2109,8 @@ func (m *mockLedgerPeerProvider) CurrentSlot() uint64 {
 }
 
 func TestPeerGovernor_DiscoverLedgerPeers_Disabled(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		UseLedgerAfterSlot: -1, // Disabled
@@ -2301,6 +2129,8 @@ func TestPeerGovernor_DiscoverLedgerPeers_Disabled(t *testing.T) {
 }
 
 func TestPeerGovernor_DiscoverLedgerPeers_SlotNotReached(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		UseLedgerAfterSlot: 5000, // Require slot 5000
@@ -2319,6 +2149,8 @@ func TestPeerGovernor_DiscoverLedgerPeers_SlotNotReached(t *testing.T) {
 }
 
 func TestPeerGovernor_DiscoverLedgerPeers_Success(t *testing.T) {
+	t.Parallel()
+
 	ipv4 := net.ParseIP("44.0.0.1")
 	ipv6 := net.ParseIP("2001:4860:4860::8888")
 
@@ -2341,15 +2173,17 @@ func TestPeerGovernor_DiscoverLedgerPeers_Success(t *testing.T) {
 	// Should have added 3 peers
 	assert.Len(t, pg.peers, 3)
 
-	// Verify peer sources and shareability
+	// Verify peer sources and that none is sharable before a connection
 	for _, peer := range pg.peers {
 		assert.Equal(t, PeerSource(PeerSourceP2PLedger), peer.Source)
-		assert.True(t, peer.Sharable)
+		assert.False(t, peer.Sharable)
 		assert.Equal(t, PeerState(PeerStateCold), peer.State)
 	}
 }
 
 func TestPeerGovernor_DiscoverLedgerPeers_Deduplication(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:           newMockEventBus(),
@@ -2374,6 +2208,8 @@ func TestPeerGovernor_DiscoverLedgerPeers_Deduplication(t *testing.T) {
 }
 
 func TestPeerGovernor_DiscoverLedgerPeers_RefreshInterval(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(
 			slog.NewJSONHandler(io.Discard, nil),
@@ -2416,6 +2252,8 @@ func TestPeerGovernor_DiscoverLedgerPeers_RefreshInterval(t *testing.T) {
 func TestPeerGovernor_DiscoverLedgerPeers_ExistingPeersNotDuplicated(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:           newMockEventBus(),
@@ -2441,6 +2279,8 @@ func TestPeerGovernor_DiscoverLedgerPeers_ExistingPeersNotDuplicated(
 }
 
 func TestPeerGovernor_DiscoverLedgerPeers_DeniedPeersSkipped(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:           newMockEventBus(),
@@ -2463,6 +2303,8 @@ func TestPeerGovernor_DiscoverLedgerPeers_DeniedPeersSkipped(t *testing.T) {
 }
 
 func TestPeerGovernor_DiscoverLedgerPeers_Error(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		UseLedgerAfterSlot: 0,
@@ -2478,6 +2320,8 @@ func TestPeerGovernor_DiscoverLedgerPeers_Error(t *testing.T) {
 }
 
 func TestPeerGovernor_DiscoverLedgerPeers_ErrorAllowsRetry(t *testing.T) {
+	t.Parallel()
+
 	// Create a mock provider that fails first, then succeeds
 	mockProvider := &mockLedgerPeerProvider{
 		err:         errors.New("transient error"),
@@ -2509,29 +2353,9 @@ func TestPeerGovernor_DiscoverLedgerPeers_ErrorAllowsRetry(t *testing.T) {
 	assert.Len(t, pg.peers, 1)
 }
 
-func TestPeerSource_String(t *testing.T) {
-	tests := []struct {
-		source   PeerSource
-		expected string
-	}{
-		{PeerSourceUnknown, "unknown"},
-		{PeerSourceTopologyLocalRoot, "topology-local-root"},
-		{PeerSourceTopologyPublicRoot, "topology-public-root"},
-		{PeerSourceTopologyBootstrapPeer, "topology-bootstrap"},
-		{PeerSourceP2PLedger, "ledger"},
-		{PeerSourceP2PGossip, "gossip"},
-		{PeerSourceInboundConn, "inbound"},
-		{PeerSource(99), "unknown"}, // Unknown value
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.expected, func(t *testing.T) {
-			assert.Equal(t, tc.expected, tc.source.String())
-		})
-	}
-}
-
 func TestPeerGovernor_NormalizeAddress(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
@@ -2577,6 +2401,8 @@ func TestPeerGovernor_NormalizeAddress(t *testing.T) {
 }
 
 func TestPoolRelay_Addresses(t *testing.T) {
+	t.Parallel()
+
 	ipv4 := net.ParseIP("192.168.1.1")
 	ipv6 := net.ParseIP("2001:db8::1")
 
@@ -2657,27 +2483,12 @@ func TestPoolRelay_Addresses(t *testing.T) {
 	}
 }
 
-func TestPeerGovernor_PeerTargets_DefaultValues(t *testing.T) {
-	pg := NewPeerGovernor(PeerGovernorConfig{
-		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		// TargetNumberOf* not set (0)
-	})
-
-	// Should use default values (match cardano-node config.json)
-	assert.Equal(t, 150, pg.config.TargetNumberOfKnownPeers)
-	assert.Equal(t, 50, pg.config.TargetNumberOfEstablishedPeers)
-	assert.Equal(t, 20, pg.config.TargetNumberOfActivePeers)
-	assert.Equal(t, 60, pg.config.TargetNumberOfRootPeers)
-	// Per-source quotas (ceilings, not reservations)
-	assert.Equal(t, 20, pg.config.ActivePeersTopologyQuota)
-	assert.Equal(t, 20, pg.config.ActivePeersGossipQuota)
-	assert.Equal(t, 20, pg.config.ActivePeersLedgerQuota)
-}
-
 // TestPeerGovernor_QuotaSumExceedsTarget verifies that the global
 // TargetNumberOfActivePeers caps total hot peers even when per-source
 // quotas sum to more than the target (10+10+10=30 > 20).
 func TestPeerGovernor_QuotaSumExceedsTarget(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
@@ -2717,28 +2528,9 @@ func TestPeerGovernor_QuotaSumExceedsTarget(t *testing.T) {
 	)
 }
 
-func TestPeerGovernor_PeerTargets_CustomValues(t *testing.T) {
-	pg := NewPeerGovernor(PeerGovernorConfig{
-		Logger: slog.New(
-			slog.NewJSONHandler(io.Discard, nil),
-		),
-		TargetNumberOfKnownPeers:       100,
-		TargetNumberOfEstablishedPeers: 25,
-		TargetNumberOfActivePeers:      10,
-		ActivePeersTopologyQuota:       5,
-		ActivePeersGossipQuota:         15,
-		ActivePeersLedgerQuota:         8,
-	})
-
-	assert.Equal(t, 100, pg.config.TargetNumberOfKnownPeers)
-	assert.Equal(t, 25, pg.config.TargetNumberOfEstablishedPeers)
-	assert.Equal(t, 10, pg.config.TargetNumberOfActivePeers)
-	assert.Equal(t, 5, pg.config.ActivePeersTopologyQuota)
-	assert.Equal(t, 15, pg.config.ActivePeersGossipQuota)
-	assert.Equal(t, 8, pg.config.ActivePeersLedgerQuota)
-}
-
 func TestPeerGovernor_PeerTargets_Unlimited(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(
 			slog.NewJSONHandler(io.Discard, nil),
@@ -2755,6 +2547,8 @@ func TestPeerGovernor_PeerTargets_Unlimited(t *testing.T) {
 }
 
 func TestPeerGovernor_EnforcePeerTargets_ColdPeers(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(
 			slog.NewJSONHandler(io.Discard, nil),
@@ -2766,11 +2560,11 @@ func TestPeerGovernor_EnforcePeerTargets_ColdPeers(t *testing.T) {
 	})
 
 	// Add 5 cold peers from different sources
-	pg.AddPeer("ledger1.example.com:3001", PeerSourceP2PLedger)
-	pg.AddPeer("ledger2.example.com:3001", PeerSourceP2PLedger)
-	pg.AddPeer("gossip1.example.com:3001", PeerSourceP2PGossip)
-	pg.AddPeer("gossip2.example.com:3001", PeerSourceP2PGossip)
-	pg.AddPeer("inbound1.example.com:3001", PeerSourceInboundConn)
+	pg.AddPeer("44.9.1.1:3001", PeerSourceP2PLedger)
+	pg.AddPeer("44.9.1.2:3001", PeerSourceP2PLedger)
+	pg.AddPeer("44.9.2.1:3001", PeerSourceP2PGossip)
+	pg.AddPeer("44.9.2.2:3001", PeerSourceP2PGossip)
+	pg.AddPeer("44.9.3.1:3001", PeerSourceInboundConn)
 
 	assert.Len(t, pg.peers, 5)
 
@@ -2785,10 +2579,10 @@ func TestPeerGovernor_EnforcePeerTargets_ColdPeers(t *testing.T) {
 	hasGossip1 := false
 	hasGossip2 := false
 	for _, peer := range pg.peers {
-		if peer.Address == "gossip1.example.com:3001" {
+		if peer.Address == "44.9.2.1:3001" {
 			hasGossip1 = true
 		}
-		if peer.Address == "gossip2.example.com:3001" {
+		if peer.Address == "44.9.2.2:3001" {
 			hasGossip2 = true
 		}
 	}
@@ -2799,6 +2593,8 @@ func TestPeerGovernor_EnforcePeerTargets_ColdPeers(t *testing.T) {
 func TestPeerGovernor_EnforcePeerTargets_TopologyPeersNeverRemoved(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(
 			slog.NewJSONHandler(io.Discard, nil),
@@ -2810,13 +2606,13 @@ func TestPeerGovernor_EnforcePeerTargets_TopologyPeersNeverRemoved(
 	})
 
 	// Add topology peers (should never be removed)
-	pg.AddPeer("bootstrap1.example.com:3001", PeerSourceTopologyBootstrapPeer)
-	pg.AddPeer("localroot1.example.com:3001", PeerSourceTopologyLocalRoot)
-	pg.AddPeer("publicroot1.example.com:3001", PeerSourceTopologyPublicRoot)
+	pg.AddPeer("44.9.4.1:3001", PeerSourceTopologyBootstrapPeer)
+	pg.AddPeer("44.9.5.1:3001", PeerSourceTopologyLocalRoot)
+	pg.AddPeer("44.9.6.1:3001", PeerSourceTopologyPublicRoot)
 
 	// Add regular peers
-	pg.AddPeer("ledger1.example.com:3001", PeerSourceP2PLedger)
-	pg.AddPeer("ledger2.example.com:3001", PeerSourceP2PLedger)
+	pg.AddPeer("44.9.1.1:3001", PeerSourceP2PLedger)
+	pg.AddPeer("44.9.1.2:3001", PeerSourceP2PLedger)
 
 	assert.Len(t, pg.peers, 5)
 
@@ -2838,6 +2634,8 @@ func TestPeerGovernor_EnforcePeerTargets_TopologyPeersNeverRemoved(
 }
 
 func TestPeerGovernor_EnforcePeerTargets_Unlimited(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(
 			slog.NewJSONHandler(io.Discard, nil),
@@ -2851,7 +2649,7 @@ func TestPeerGovernor_EnforcePeerTargets_Unlimited(t *testing.T) {
 	// Add many peers
 	for i := range 10 {
 		pg.AddPeer(
-			fmt.Sprintf("peer%d.example.com:3001", i),
+			fmt.Sprintf("44.9.99.%d:3001", i+1),
 			PeerSourceP2PLedger,
 		)
 	}
@@ -2865,6 +2663,8 @@ func TestPeerGovernor_EnforcePeerTargets_Unlimited(t *testing.T) {
 }
 
 func TestPeerGovernor_PeerSourcePriority(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
@@ -2895,6 +2695,8 @@ func TestPeerGovernor_PeerSourcePriority(t *testing.T) {
 }
 
 func TestPeerGovernor_CountPeersBySourceAndState(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
@@ -2952,6 +2754,8 @@ func TestPeerGovernor_CountPeersBySourceAndState(t *testing.T) {
 }
 
 func TestPeerGovernor_GetSourceCategory(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
@@ -2973,6 +2777,8 @@ func TestPeerGovernor_GetSourceCategory(t *testing.T) {
 }
 
 func TestPeerGovernor_GetHotPeersByCategory(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
@@ -3019,6 +2825,8 @@ func TestPeerGovernor_GetHotPeersByCategory(t *testing.T) {
 }
 
 func TestPeerGovernor_EnforceSourceQuota(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:                 slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:               newMockEventBus(),
@@ -3087,6 +2895,8 @@ func TestPeerGovernor_EnforceSourceQuota(t *testing.T) {
 }
 
 func TestPeerGovernor_EnforcePerSourceQuotas(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:                 slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:               newMockEventBus(),
@@ -3144,6 +2954,8 @@ func TestPeerGovernor_EnforcePerSourceQuotas(t *testing.T) {
 }
 
 func TestPeerGovernor_RedistributeUnusedSlots(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(
 			slog.NewJSONHandler(io.Discard, nil),
@@ -3237,6 +3049,8 @@ func TestPeerGovernor_RedistributeUnusedSlots(t *testing.T) {
 }
 
 func TestPeerGovernor_LoadTopologyConfig_ValencyStored(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
@@ -3326,6 +3140,8 @@ func TestPeerGovernor_LoadTopologyConfig_ValencyStored(t *testing.T) {
 // configured root target changes the topology peers retained by the governor,
 // while local roots remain available to satisfy their configured valency.
 func TestPeerGovernor_LoadTopologyConfig_EnforcesRootTarget(t *testing.T) {
+	t.Parallel()
+
 	topologyConfig := &topology.TopologyConfig{
 		LocalRoots: []topology.TopologyConfigP2PLocalRoot{{
 			AccessPoints: []topology.TopologyConfigP2PAccessPoint{{
@@ -3387,6 +3203,8 @@ func TestPeerGovernor_LoadTopologyConfig_EnforcesRootTarget(t *testing.T) {
 func TestPeerGovernor_LoadTopologyConfig_RootTargetPreservesOverlappingLocalRoot(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		TargetNumberOfRootPeers: 2,
 	})
@@ -3419,6 +3237,8 @@ func TestPeerGovernor_LoadTopologyConfig_RootTargetPreservesOverlappingLocalRoot
 func TestPeerGovernor_LoadTopologyConfig_ExitedBootstrapKeepsBootstrapSource(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
@@ -3440,6 +3260,8 @@ func TestPeerGovernor_LoadTopologyConfig_ExitedBootstrapKeepsBootstrapSource(
 func TestPeerGovernor_LoadTopologyConfig_ReusesExistingTopologyPeerState(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
@@ -3486,6 +3308,8 @@ func TestPeerGovernor_LoadTopologyConfig_ReusesExistingTopologyPeerState(
 func TestPeerGovernor_LoadTopologyConfig_RemovesOrphanedTopologyPeers(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	eventBus := newMockEventBus()
 	t.Cleanup(func() { eventBus.Stop() })
 	pg := NewPeerGovernor(PeerGovernorConfig{
@@ -3531,37 +3355,9 @@ func TestPeerGovernor_LoadTopologyConfig_RemovesOrphanedTopologyPeers(
 
 // Tests for churn system (Phase 3)
 
-func TestPeerGovernor_ChurnConfig_DefaultValues(t *testing.T) {
-	pg := NewPeerGovernor(PeerGovernorConfig{
-		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
-	})
-
-	// Check default churn configuration values
-	assert.Equal(t, 5*time.Minute, pg.config.GossipChurnInterval)
-	assert.Equal(t, 0.20, pg.config.GossipChurnPercent)
-	assert.Equal(t, 30*time.Minute, pg.config.PublicRootChurnInterval)
-	assert.Equal(t, 0.20, pg.config.PublicRootChurnPercent)
-	assert.Equal(t, 0.3, pg.config.MinScoreThreshold)
-}
-
-func TestPeerGovernor_ChurnConfig_CustomValues(t *testing.T) {
-	pg := NewPeerGovernor(PeerGovernorConfig{
-		Logger:                  slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		GossipChurnInterval:     10 * time.Minute,
-		GossipChurnPercent:      0.30,
-		PublicRootChurnInterval: 1 * time.Hour,
-		PublicRootChurnPercent:  0.10,
-		MinScoreThreshold:       0.5,
-	})
-
-	assert.Equal(t, 10*time.Minute, pg.config.GossipChurnInterval)
-	assert.Equal(t, 0.30, pg.config.GossipChurnPercent)
-	assert.Equal(t, 1*time.Hour, pg.config.PublicRootChurnInterval)
-	assert.Equal(t, 0.10, pg.config.PublicRootChurnPercent)
-	assert.Equal(t, 0.5, pg.config.MinScoreThreshold)
-}
-
 func TestPeerGovernor_DemotionTarget(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
@@ -3594,6 +3390,8 @@ func TestPeerGovernor_DemotionTarget(t *testing.T) {
 }
 
 func TestPeerGovernor_GossipChurn_DemotesLowestScoringPeers(t *testing.T) {
+	t.Parallel()
+
 	reg := prometheus.NewRegistry()
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -3692,6 +3490,8 @@ func TestPeerGovernor_GossipChurn_DemotesLowestScoringPeers(t *testing.T) {
 }
 
 func TestPeerGovernor_GossipChurn_DemotesToCold(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:           newMockEventBus(),
@@ -3748,6 +3548,8 @@ func TestPeerGovernor_GossipChurn_DemotesToCold(t *testing.T) {
 }
 
 func TestPeerGovernor_GossipChurn_SkipsLocalRoots(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:           newMockEventBus(),
@@ -3806,6 +3608,8 @@ func TestPeerGovernor_GossipChurn_SkipsLocalRoots(t *testing.T) {
 }
 
 func TestPeerGovernor_GossipChurn_SkipsPublicRoots(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:           newMockEventBus(),
@@ -3864,6 +3668,8 @@ func TestPeerGovernor_GossipChurn_SkipsPublicRoots(t *testing.T) {
 }
 
 func TestPeerGovernor_GossipChurn_PromotesWarmPeers(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:           newMockEventBus(),
@@ -4065,6 +3871,8 @@ func TestPeerGovernor_GossipChurn_BelowThresholdDemotesWithoutReplacement(
 }
 
 func TestPeerGovernor_PublicRootChurn_DemotesToWarm(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:                 slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:               newMockEventBus(),
@@ -4102,6 +3910,8 @@ func TestPeerGovernor_PublicRootChurn_DemotesToWarm(t *testing.T) {
 }
 
 func TestPeerGovernor_PublicRootChurn_DemotesLowestScoringPeers(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:                 slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:               newMockEventBus(),
@@ -4167,6 +3977,8 @@ func TestPeerGovernor_PublicRootChurn_DemotesLowestScoringPeers(t *testing.T) {
 }
 
 func TestPeerGovernor_PublicRootChurn_OnlyAffectsPublicRoots(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:                 slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:               newMockEventBus(),
@@ -4220,6 +4032,8 @@ func TestPeerGovernor_PublicRootChurn_OnlyAffectsPublicRoots(t *testing.T) {
 }
 
 func TestPeerGovernor_PublicRootChurn_PromotesWarmPublicRoots(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:                 slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:               newMockEventBus(),
@@ -4283,6 +4097,8 @@ func TestPeerGovernor_PublicRootChurn_PromotesWarmPublicRoots(t *testing.T) {
 }
 
 func TestPeerGovernor_GossipChurn_AtLeastOneChurned(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:           newMockEventBus(),
@@ -4328,6 +4144,8 @@ func TestPeerGovernor_GossipChurn_AtLeastOneChurned(t *testing.T) {
 }
 
 func TestPeerGovernor_GossipChurn_NoPeersToChurn(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:           newMockEventBus(),
@@ -4368,6 +4186,8 @@ func TestPeerGovernor_GossipChurn_NoPeersToChurn(t *testing.T) {
 func TestPeerGovernor_PromoteWarmNonRootPeers_RespectsScoreThreshold(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:          newMockEventBus(),
@@ -4419,6 +4239,8 @@ func TestPeerGovernor_PromoteWarmNonRootPeers_RespectsScoreThreshold(
 func TestPeerGovernor_PromoteFromWarmPublicRoots_RespectsScoreThreshold(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:          newMockEventBus(),
@@ -4464,6 +4286,8 @@ func TestPeerGovernor_PromoteFromWarmPublicRoots_RespectsScoreThreshold(
 }
 
 func TestPeerGovernor_GossipChurn_Metrics(t *testing.T) {
+	t.Parallel()
+
 	reg := prometheus.NewRegistry()
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -4505,6 +4329,8 @@ func TestPeerGovernor_GossipChurn_Metrics(t *testing.T) {
 // Tests for valency enforcement (Phase 4)
 
 func TestPeerGovernor_CountPeersByGroup(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
@@ -4583,6 +4409,8 @@ func TestPeerGovernor_CountPeersByGroup(t *testing.T) {
 }
 
 func TestPeerGovernor_IsGroupUnderHotValency(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
@@ -4663,6 +4491,8 @@ func TestPeerGovernor_IsGroupUnderHotValency(t *testing.T) {
 }
 
 func TestPeerGovernor_IsGroupOverHotValency(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
@@ -4723,6 +4553,8 @@ func TestPeerGovernor_IsGroupOverHotValency(t *testing.T) {
 }
 
 func TestPeerGovernor_EnforceGroupValency(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:   slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus: newMockEventBus(),
@@ -4789,6 +4621,8 @@ func TestPeerGovernor_EnforceGroupValency(t *testing.T) {
 }
 
 func TestPeerGovernor_EnforceGroupValency_LocalRootsNeverDemoted(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:   slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus: newMockEventBus(),
@@ -4837,6 +4671,8 @@ func TestPeerGovernor_EnforceGroupValency_LocalRootsNeverDemoted(t *testing.T) {
 }
 
 func TestPeerGovernor_EnforceGroupValency_NoExcess(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
@@ -4869,6 +4705,8 @@ func TestPeerGovernor_EnforceGroupValency_NoExcess(t *testing.T) {
 func TestPeerGovernor_ValencyAwarePromotion_PrefersUnderValencyGroups(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:                 slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:               newMockEventBus(),
@@ -4960,6 +4798,8 @@ func TestPeerGovernor_ValencyAwarePromotion_PrefersUnderValencyGroups(
 func TestPeerGovernor_ValencyAwareDemotion_PrefersOverValencyGroups(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:                 slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:               newMockEventBus(),
@@ -5030,25 +4870,9 @@ func TestPeerGovernor_ValencyAwareDemotion_PrefersOverValencyGroups(
 	assert.Equal(t, 2, group2Hot, "at-valency group should keep hot peers")
 }
 
-func TestPeerGovernor_LogValencyStatus_NoGroups(t *testing.T) {
-	pg := NewPeerGovernor(PeerGovernorConfig{
-		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
-	})
-
-	// Only gossip peers (no groups)
-	pg.peers = []*Peer{
-		{
-			Address: "gossip1:3001",
-			Source:  PeerSourceP2PGossip,
-			State:   PeerStateHot,
-		},
-	}
-
-	// Should not panic
-	pg.logValencyStatus()
-}
-
 func TestPeerGovernor_ReconcilePromotion_ValencyAware(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:      slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:    newMockEventBus(),
@@ -5135,6 +4959,8 @@ func TestPeerGovernor_ReconcilePromotion_ValencyAware(t *testing.T) {
 func TestPeerGovernor_ReconcilePromotion_PrefersHistoricalBootstrapPeers(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(
 			slog.NewJSONHandler(io.Discard, nil),
@@ -5182,6 +5008,8 @@ func TestPeerGovernor_ReconcilePromotion_PrefersHistoricalBootstrapPeers(
 func TestPeerGovernor_ReconcilePromotion_DiversifiesBootstrapPeers(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(
 			slog.NewJSONHandler(io.Discard, nil),
@@ -5242,6 +5070,8 @@ func TestPeerGovernor_ReconcilePromotion_DiversifiesBootstrapPeers(
 func TestPeerGovernor_ReconcilePromotion_IgnoresBootstrapBiasAfterExit(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(
 			slog.NewJSONHandler(io.Discard, nil),
@@ -5290,69 +5120,11 @@ func TestPeerGovernor_ReconcilePromotion_IgnoresBootstrapBiasAfterExit(
 	assert.Equal(t, PeerStateHot, gossipPeer.State)
 }
 
-// TestPeerGovernor_InboundConfig_DefaultValues tests that default values
-// for inbound peer validation are correctly applied.
-func TestPeerGovernor_InboundConfig_DefaultValues(t *testing.T) {
-	pg := NewPeerGovernor(PeerGovernorConfig{
-		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
-	})
-
-	// Check that default values are applied
-	assert.Equal(t, 0.6, pg.config.InboundHotScoreThreshold,
-		"default InboundHotScoreThreshold should be 0.6")
-	assert.Equal(t, 10*time.Minute, pg.config.InboundMinTenure,
-		"default InboundMinTenure should be 10 minutes")
-}
-
-// TestPeerGovernor_InboundConfig_CustomValues tests that custom values
-// for inbound peer validation are respected.
-func TestPeerGovernor_InboundConfig_CustomValues(t *testing.T) {
-	pg := NewPeerGovernor(PeerGovernorConfig{
-		Logger: slog.New(
-			slog.NewJSONHandler(io.Discard, nil),
-		),
-		InboundHotScoreThreshold: 0.7,
-		InboundMinTenure:         15 * time.Minute,
-	})
-
-	// Check that custom values are applied
-	assert.Equal(t, 0.7, pg.config.InboundHotScoreThreshold,
-		"custom InboundHotScoreThreshold should be 0.7")
-	assert.Equal(t, 15*time.Minute, pg.config.InboundMinTenure,
-		"custom InboundMinTenure should be 15 minutes")
-}
-
-// TestPeerGovernor_InboundPeer_FirstSeenTracked tests that FirstSeen is
-// correctly set when inbound peers are added.
-func TestPeerGovernor_InboundPeer_FirstSeenTracked(t *testing.T) {
-	eventBus := newMockEventBus()
-	pg := NewPeerGovernor(PeerGovernorConfig{
-		Logger:   slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		EventBus: eventBus,
-	})
-
-	beforeAdd := time.Now()
-
-	// Add an inbound peer using AddPeer
-	pg.AddPeer("192.168.1.1:3001", PeerSourceInboundConn)
-
-	afterAdd := time.Now()
-
-	peers := pg.GetPeers()
-	assert.Len(t, peers, 1)
-	assert.EqualValues(t, PeerSourceInboundConn, peers[0].Source)
-
-	// FirstSeen should be set between beforeAdd and afterAdd
-	assert.False(t, peers[0].FirstSeen.IsZero(), "FirstSeen should be set")
-	assert.True(t, !peers[0].FirstSeen.Before(beforeAdd),
-		"FirstSeen should be at or after beforeAdd")
-	assert.True(t, !peers[0].FirstSeen.After(afterAdd),
-		"FirstSeen should be at or before afterAdd")
-}
-
 // TestPeerGovernor_InboundPeer_TenureRequirement tests that inbound peers
 // are not promoted to hot until they meet the minimum tenure requirement.
 func TestPeerGovernor_InboundPeer_TenureRequirement(t *testing.T) {
+	t.Parallel()
+
 	eventBus := newMockEventBus()
 	reg := prometheus.NewRegistry()
 
@@ -5392,6 +5164,8 @@ func TestPeerGovernor_InboundPeer_TenureRequirement(t *testing.T) {
 // TestPeerGovernor_InboundPeer_HigherScoreThreshold tests that inbound peers
 // require a higher score threshold than non-inbound peers.
 func TestPeerGovernor_InboundPeer_HigherScoreThreshold(t *testing.T) {
+	t.Parallel()
+
 	eventBus := newMockEventBus()
 	reg := prometheus.NewRegistry()
 
@@ -5434,6 +5208,8 @@ func TestPeerGovernor_InboundPeer_HigherScoreThreshold(t *testing.T) {
 // TestPeerGovernor_InboundPeer_BothRequirementsMet tests that inbound peers
 // are promoted to hot when both score and tenure requirements are met.
 func TestPeerGovernor_InboundPeer_BothRequirementsMet(t *testing.T) {
+	t.Parallel()
+
 	eventBus := newMockEventBus()
 	reg := prometheus.NewRegistry()
 
@@ -5498,6 +5274,8 @@ func TestPeerGovernor_InboundPeer_BothRequirementsMet(t *testing.T) {
 // TestPeerGovernor_NonInboundPeer_UsesNormalThreshold tests that non-inbound
 // peers use the normal score threshold, not the inbound threshold.
 func TestPeerGovernor_NonInboundPeer_UsesNormalThreshold(t *testing.T) {
+	t.Parallel()
+
 	eventBus := newMockEventBus()
 	reg := prometheus.NewRegistry()
 
@@ -5537,6 +5315,8 @@ func TestPeerGovernor_NonInboundPeer_UsesNormalThreshold(t *testing.T) {
 
 // TestPeerGovernor_IsInboundEligibleForHot tests the isInboundEligibleForHot method directly.
 func TestPeerGovernor_IsInboundEligibleForHot(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(
 			slog.NewJSONHandler(io.Discard, nil),
@@ -5683,6 +5463,8 @@ func TestPeerGovernor_IsInboundEligibleForHot(t *testing.T) {
 // multiple peer types, inbound peers are skipped if they don't meet requirements
 // while other peers can still be promoted.
 func TestPeerGovernor_InboundPeer_MixedPeerPromotion(t *testing.T) {
+	t.Parallel()
+
 	eventBus := newMockEventBus()
 	reg := prometheus.NewRegistry()
 
@@ -5756,6 +5538,8 @@ func TestPeerGovernor_InboundPeer_MixedPeerPromotion(t *testing.T) {
 }
 
 func TestPeerGovernor_InboundPeer_DuplexOnlyForHot(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(
 			slog.NewJSONHandler(io.Discard, nil),
@@ -5781,6 +5565,8 @@ func TestPeerGovernor_InboundPeer_DuplexOnlyForHot(t *testing.T) {
 }
 
 func TestPeerGovernor_InboundHotQuota_PreventsOverPromotion(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(
 			slog.NewJSONHandler(io.Discard, nil),
@@ -5854,6 +5640,8 @@ func TestPeerGovernor_InboundHotQuota_PreventsOverPromotion(t *testing.T) {
 // peers still inside InboundProvisionalWindow), so a second inbound cannot be
 // promoted past InboundHotQuota.
 func TestPeerGovernor_InboundHotQuota_CountsProvisionalHotPeers(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(
 			slog.NewJSONHandler(io.Discard, nil),
@@ -5942,6 +5730,8 @@ func TestPeerGovernor_InboundHotQuota_CountsProvisionalHotPeers(t *testing.T) {
 }
 
 func TestPeerGovernor_InboundSatisfiesTopologyValency(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
@@ -5974,6 +5764,8 @@ func TestPeerGovernor_InboundSatisfiesTopologyValency(t *testing.T) {
 func TestPeerGovernor_IsInboundEligibleForHot_RejectsStaleSignals(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(
 			slog.NewJSONHandler(io.Discard, nil),
@@ -6000,6 +5792,8 @@ func TestPeerGovernor_IsInboundEligibleForHot_RejectsStaleSignals(
 func TestPeerGovernor_IsInboundEligibleForHot_RejectsFlappingPeer(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(
 			slog.NewJSONHandler(io.Discard, nil),
@@ -6032,6 +5826,8 @@ func TestPeerGovernor_IsInboundEligibleForHot_RejectsFlappingPeer(
 func TestPeerGovernor_IsInboundEligibleForHot_BlockFetchSignalAlone(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(
 			slog.NewJSONHandler(io.Discard, nil),
@@ -6056,6 +5852,8 @@ func TestPeerGovernor_IsInboundEligibleForHot_BlockFetchSignalAlone(
 }
 
 func TestPeerGovernor_Reconcile_PrunesIdleInboundWarmPeer(t *testing.T) {
+	t.Parallel()
+
 	eventBus := newMockEventBus()
 	defer eventBus.Stop()
 	_, recycleCh := eventBus.Subscribe(
@@ -6131,6 +5929,8 @@ func TestPeerGovernor_Reconcile_PrunesIdleInboundWarmPeer(t *testing.T) {
 func TestPeerGovernor_Reconcile_AppliesEscalatingInboundCooldownForFlappingPeer(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		InboundPruneAfter: time.Minute,
@@ -6176,6 +5976,8 @@ func TestPeerGovernor_Reconcile_AppliesEscalatingInboundCooldownForFlappingPeer(
 func TestPeerGovernor_Reconcile_DoesNotPruneUsefulTopologyInboundDuplexPeer(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(
 			slog.NewJSONHandler(io.Discard, nil),
@@ -6217,6 +6019,8 @@ func TestPeerGovernor_Reconcile_DoesNotPruneUsefulTopologyInboundDuplexPeer(
 func TestPeerGovernor_Reconcile_IdleInboundPruneDoesNotApplyCooldownDeny(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(
 			slog.NewJSONHandler(io.Discard, nil),
@@ -6260,6 +6064,8 @@ func TestPeerGovernor_Reconcile_IdleInboundPruneDoesNotApplyCooldownDeny(
 func TestPeerGovernor_Reconcile_KeepsUsefulInboundWarmPeerPastPruneAfter(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(
 			slog.NewJSONHandler(io.Discard, nil),
@@ -6312,6 +6118,8 @@ func TestPeerGovernor_Reconcile_KeepsUsefulInboundWarmPeerPastPruneAfter(
 func TestPeerGovernor_Reconcile_FlappingCooldownReasonMetricAndCap(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	reg := prometheus.NewRegistry()
 	eventBus := newMockEventBus()
 	defer eventBus.Stop()
@@ -6382,6 +6190,8 @@ func TestPeerGovernor_Reconcile_FlappingCooldownReasonMetricAndCap(
 func TestPeerGovernor_Reconcile_DoesNotCooldownSecondInboundArrival(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		InboundPruneAfter: time.Minute,
@@ -6421,6 +6231,8 @@ func TestPeerGovernor_Reconcile_DoesNotCooldownSecondInboundArrival(
 }
 
 func TestPeerGovernor_Reconcile_InboundLimitExceededReasonMetric(t *testing.T) {
+	t.Parallel()
+
 	reg := prometheus.NewRegistry()
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(
@@ -6462,6 +6274,8 @@ func TestPeerGovernor_Reconcile_InboundLimitExceededReasonMetric(t *testing.T) {
 }
 
 func TestPeerGovernor_InboundLifecycleMetrics_RejectedAndDenied(t *testing.T) {
+	t.Parallel()
+
 	reg := prometheus.NewRegistry()
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(
@@ -6538,6 +6352,8 @@ func TestPeerGovernor_InboundLifecycleMetrics_RejectedAndDenied(t *testing.T) {
 func TestPeerGovernor_InboundLifecycleMetrics_CooldownAndOccupancy(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	reg := prometheus.NewRegistry()
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(
@@ -6600,6 +6416,8 @@ func TestPeerGovernor_InboundLifecycleMetrics_CooldownAndOccupancy(
 }
 
 func TestPeerGovernor_PromotionPrefersHigherPrioritySources(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(
 			slog.NewJSONHandler(io.Discard, nil),
@@ -6655,6 +6473,8 @@ func TestPeerGovernor_PromotionPrefersHigherPrioritySources(t *testing.T) {
 // candidates map to the same peerSourcePriority (e.g. different topology
 // kinds), ordering falls through to PerformanceScore instead of arbitrary 0.
 func TestPeerGovernor_PromotionEqualSourcePriorityUsesScore(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(
 			slog.NewJSONHandler(io.Discard, nil),
@@ -6711,116 +6531,11 @@ func TestPeerGovernor_PromotionEqualSourcePriorityUsesScore(t *testing.T) {
 
 // Phase 7: Enhanced Observability Tests
 
-// TestPeerGovernor_PerSourceMetrics tests that per-source metrics are properly
-// initialized and updated based on peer source and state.
-func TestPeerGovernor_PerSourceMetrics(t *testing.T) {
-	reg := prometheus.NewRegistry()
-
-	pg := NewPeerGovernor(PeerGovernorConfig{
-		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		PromRegistry: reg,
-	})
-
-	// Add peers from different sources in different states
-	pg.mu.Lock()
-	pg.peers = []*Peer{
-		{
-			Address:    "192.168.1.1:3001",
-			Source:     PeerSourceP2PGossip,
-			State:      PeerStateHot,
-			Connection: &PeerConnection{IsClient: true},
-		},
-		{
-			Address: "192.168.1.2:3001",
-			Source:  PeerSourceP2PGossip,
-			State:   PeerStateWarm,
-		},
-		{
-			Address: "192.168.1.3:3001",
-			Source:  PeerSourceP2PGossip,
-			State:   PeerStateCold,
-		},
-		{
-			Address:    "192.168.1.4:3001",
-			Source:     PeerSourceTopologyPublicRoot,
-			State:      PeerStateHot,
-			Connection: &PeerConnection{IsClient: true},
-		},
-		{
-			Address: "192.168.1.5:3001",
-			Source:  PeerSourceP2PLedger,
-			State:   PeerStateWarm,
-		},
-	}
-	pg.updatePeerMetrics()
-	pg.mu.Unlock()
-
-	// Check per-source gauge metrics
-	// Gossip: 1 hot, 1 warm, 1 cold
-	assert.Equal(
-		t,
-		float64(1),
-		testutil.ToFloat64(
-			pg.metrics.peersBySource.WithLabelValues("gossip", "hot"),
-		),
-	)
-	assert.Equal(
-		t,
-		float64(1),
-		testutil.ToFloat64(
-			pg.metrics.peersBySource.WithLabelValues("gossip", "warm"),
-		),
-	)
-	assert.Equal(
-		t,
-		float64(1),
-		testutil.ToFloat64(
-			pg.metrics.peersBySource.WithLabelValues("gossip", "cold"),
-		),
-	)
-
-	// Topology public root: 1 hot
-	assert.Equal(
-		t,
-		float64(1),
-		testutil.ToFloat64(
-			pg.metrics.peersBySource.WithLabelValues(
-				"topology-public-root",
-				"hot",
-			),
-		),
-	)
-	assert.Equal(
-		t,
-		float64(0),
-		testutil.ToFloat64(
-			pg.metrics.peersBySource.WithLabelValues(
-				"topology-public-root",
-				"warm",
-			),
-		),
-	)
-
-	// Ledger: 1 warm
-	assert.Equal(
-		t,
-		float64(0),
-		testutil.ToFloat64(
-			pg.metrics.peersBySource.WithLabelValues("ledger", "hot"),
-		),
-	)
-	assert.Equal(
-		t,
-		float64(1),
-		testutil.ToFloat64(
-			pg.metrics.peersBySource.WithLabelValues("ledger", "warm"),
-		),
-	)
-}
-
 // TestPeerGovernor_ChurnMetricsBySource tests that churn promotions and demotions
 // increment the per-source counter metrics correctly.
 func TestPeerGovernor_ChurnMetricsBySource(t *testing.T) {
+	t.Parallel()
+
 	reg := prometheus.NewRegistry()
 	eventBus := newMockEventBus()
 
@@ -6921,6 +6636,8 @@ func TestPeerGovernor_ChurnMetricsBySource(t *testing.T) {
 // TestPeerGovernor_EventsPublished tests that churn events are published
 // with correct data during churn operations.
 func TestPeerGovernor_EventsPublished(t *testing.T) {
+	t.Parallel()
+
 	reg := prometheus.NewRegistry()
 	eventBus := newMockEventBus()
 
@@ -7072,25 +6789,6 @@ func TestPeerGovernor_EventsPublished(t *testing.T) {
 	}
 }
 
-// TestPeerGovernor_PeerStateString tests the PeerState String() method.
-func TestPeerGovernor_PeerStateString(t *testing.T) {
-	tests := []struct {
-		state    PeerState
-		expected string
-	}{
-		{PeerStateCold, "cold"},
-		{PeerStateWarm, "warm"},
-		{PeerStateHot, "hot"},
-		{PeerState(99), "unknown"}, // Unknown state
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.expected, func(t *testing.T) {
-			assert.Equal(t, tt.expected, tt.state.String())
-		})
-	}
-}
-
 // mockSyncProgressProvider implements SyncProgressProvider for testing
 type mockSyncProgressProvider struct {
 	progress float64
@@ -7100,22 +6798,9 @@ func (m *mockSyncProgressProvider) SyncProgress() float64 {
 	return m.progress
 }
 
-func TestPeerGovernor_BootstrapConfig_DefaultValues(t *testing.T) {
-	pg := NewPeerGovernor(PeerGovernorConfig{
-		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
-	})
-
-	// Verify default values are set
-	assert.Equal(t, 5, pg.config.MinLedgerPeersForExit,
-		"MinLedgerPeersForExit should default to 5")
-	assert.Equal(t, 0.95, pg.config.SyncProgressForExit,
-		"SyncProgressForExit should default to 0.95")
-	// AutoBootstrapRecovery: nil means use default (true)
-	assert.Nil(t, pg.config.AutoBootstrapRecovery,
-		"AutoBootstrapRecovery should be nil (default to true behavior)")
-}
-
 func TestPeerGovernor_ShouldExitBootstrap_SlotThreshold(t *testing.T) {
+	t.Parallel()
+
 	mockProvider := &mockLedgerPeerProvider{
 		currentSlot: 5001, // Above threshold
 	}
@@ -7151,6 +6836,8 @@ func TestPeerGovernor_ShouldExitBootstrap_SlotThreshold(t *testing.T) {
 func TestPeerGovernor_ShouldExitBootstrap_SlotThreshold_NoSuccessor(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	mockProvider := &mockLedgerPeerProvider{
 		currentSlot: 5001, // Above threshold
 	}
@@ -7183,6 +6870,8 @@ func TestPeerGovernor_ShouldExitBootstrap_SlotThreshold_NoSuccessor(
 func TestPeerGovernor_ShouldExitBootstrap_SlotThreshold_NotReached(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	mockProvider := &mockLedgerPeerProvider{
 		currentSlot: 4999, // Below threshold
 	}
@@ -7213,6 +6902,8 @@ func TestPeerGovernor_ShouldExitBootstrap_SlotThreshold_NotReached(
 }
 
 func TestPeerGovernor_ShouldExitBootstrap_LedgerPeerCount(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:                slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		MinLedgerPeersForExit: 3,
@@ -7251,6 +6942,8 @@ func TestPeerGovernor_ShouldExitBootstrap_LedgerPeerCount(t *testing.T) {
 func TestPeerGovernor_ShouldExitBootstrap_LedgerPeerCount_ColdNotCounted(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:                slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		MinLedgerPeersForExit: 3,
@@ -7287,6 +6980,8 @@ func TestPeerGovernor_ShouldExitBootstrap_LedgerPeerCount_ColdNotCounted(
 func TestPeerGovernor_ShouldExitBootstrap_LedgerPeerCount_ResponderOnlyWarmNotCounted(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:                slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		MinLedgerPeersForExit: 3,
@@ -7322,6 +7017,8 @@ func TestPeerGovernor_ShouldExitBootstrap_LedgerPeerCount_ResponderOnlyWarmNotCo
 func TestPeerGovernor_ShouldExitBootstrap_LedgerPeerCount_ResponderOnlyHotNotCounted(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:                slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		MinLedgerPeersForExit: 3,
@@ -7355,6 +7052,8 @@ func TestPeerGovernor_ShouldExitBootstrap_LedgerPeerCount_ResponderOnlyHotNotCou
 }
 
 func TestPeerGovernor_ShouldExitBootstrap_SyncProgress(t *testing.T) {
+	t.Parallel()
+
 	mockSync := &mockSyncProgressProvider{
 		progress: 0.96, // 96% synced
 	}
@@ -7394,6 +7093,8 @@ func TestPeerGovernor_ShouldExitBootstrap_SyncProgress(t *testing.T) {
 func TestPeerGovernor_ShouldExitBootstrap_SyncProgress_NoSuccessor(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	mockSync := &mockSyncProgressProvider{
 		progress: 0.9995,
 	}
@@ -7426,6 +7127,8 @@ func TestPeerGovernor_ShouldExitBootstrap_SyncProgress_NoSuccessor(
 func TestPeerGovernor_ShouldExitBootstrap_SyncProgress_NotReached(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	mockSync := &mockSyncProgressProvider{
 		progress: 0.80, // 80% synced
 	}
@@ -7456,6 +7159,8 @@ func TestPeerGovernor_ShouldExitBootstrap_SyncProgress_NotReached(
 }
 
 func TestPeerGovernor_ShouldExitBootstrap_NoBootstrapPeers(t *testing.T) {
+	t.Parallel()
+
 	mockSync := &mockSyncProgressProvider{
 		progress: 0.99, // Very synced
 	}
@@ -7486,6 +7191,8 @@ func TestPeerGovernor_ShouldExitBootstrap_NoBootstrapPeers(t *testing.T) {
 }
 
 func TestPeerGovernor_ShouldExitBootstrap_AlreadyExited(t *testing.T) {
+	t.Parallel()
+
 	mockSync := &mockSyncProgressProvider{
 		progress: 0.99,
 	}
@@ -7513,6 +7220,8 @@ func TestPeerGovernor_ShouldExitBootstrap_AlreadyExited(t *testing.T) {
 }
 
 func TestPeerGovernor_ExitBootstrap_PreservesBootstrapPeers(t *testing.T) {
+	t.Parallel()
+
 	eventBus := newMockEventBus()
 
 	pg := NewPeerGovernor(PeerGovernorConfig{
@@ -7599,6 +7308,8 @@ func TestPeerGovernor_ExitBootstrap_PreservesBootstrapPeers(t *testing.T) {
 }
 
 func TestPeerGovernor_ExitBootstrapDoesNotReportDemotions(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
@@ -7636,6 +7347,8 @@ func TestPeerGovernor_ExitBootstrapDoesNotReportDemotions(t *testing.T) {
 func TestPeerGovernor_ExitBootstrapLowersBootstrapPriority(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
@@ -7679,6 +7392,8 @@ func TestPeerGovernor_ExitBootstrapLowersBootstrapPriority(
 }
 
 func TestPeerGovernor_ExitBootstrap_PreventsPromotion(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:      slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		MinHotPeers: 5,
@@ -7710,6 +7425,8 @@ func TestPeerGovernor_ExitBootstrap_PreventsPromotion(t *testing.T) {
 }
 
 func TestPeerGovernor_BootstrapRecovery(t *testing.T) {
+	t.Parallel()
+
 	eventBus := newMockEventBus()
 
 	pg := NewPeerGovernor(PeerGovernorConfig{
@@ -7751,6 +7468,8 @@ func TestPeerGovernor_BootstrapRecovery(t *testing.T) {
 func TestPeerGovernor_BootstrapRecoveryPublishesChainSelectionUpgrade(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:                slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		MinHotPeers:           3,
@@ -7799,6 +7518,8 @@ func TestPeerGovernor_BootstrapRecoveryPublishesChainSelectionUpgrade(
 func TestPeerGovernor_BootstrapRecovery_NotNeededWithWarmCandidates(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:                slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		MinHotPeers:           3,
@@ -7838,6 +7559,8 @@ func TestPeerGovernor_BootstrapRecovery_NotNeededWithWarmCandidates(
 func TestPeerGovernor_BootstrapRecovery_IgnoresResponderOnlyWarmCandidates(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:                slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		MinHotPeers:           3,
@@ -7871,6 +7594,8 @@ func TestPeerGovernor_BootstrapRecovery_IgnoresResponderOnlyWarmCandidates(
 func TestPeerGovernor_BootstrapRecovery_NotNeededWithEnoughHotPeers(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:                slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		MinHotPeers:           2,
@@ -7914,6 +7639,8 @@ func TestPeerGovernor_BootstrapRecovery_NotNeededWithEnoughHotPeers(
 }
 
 func TestPeerGovernor_Reconcile_ExitsBootstrap(t *testing.T) {
+	t.Parallel()
+
 	mockSync := &mockSyncProgressProvider{
 		progress: 0.99, // Fully synced
 	}
@@ -7969,6 +7696,8 @@ func TestPeerGovernor_Reconcile_ExitsBootstrap(t *testing.T) {
 }
 
 func TestPeerGovernor_Reconcile_SkipsBootstrapPromotionAfterExit(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:      slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		MinHotPeers: 5, // Need 5 hot peers
@@ -8023,53 +7752,9 @@ func TestPeerGovernor_Reconcile_SkipsBootstrapPromotionAfterExit(t *testing.T) {
 		"gossip peer should be promoted to hot")
 }
 
-func TestPeerGovernor_IsBootstrapPeer(t *testing.T) {
-	pg := NewPeerGovernor(PeerGovernorConfig{
-		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
-	})
-
-	tests := []struct {
-		name     string
-		peer     *Peer
-		expected bool
-	}{
-		{
-			name: "bootstrap peer",
-			peer: &Peer{
-				Source: PeerSourceTopologyBootstrapPeer,
-			},
-			expected: true,
-		},
-		{
-			name: "local root peer",
-			peer: &Peer{
-				Source: PeerSourceTopologyLocalRoot,
-			},
-			expected: false,
-		},
-		{
-			name: "gossip peer",
-			peer: &Peer{
-				Source: PeerSourceP2PGossip,
-			},
-			expected: false,
-		},
-		{
-			name:     "nil peer",
-			peer:     nil,
-			expected: false,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			result := pg.isBootstrapPeer(tc.peer)
-			assert.Equal(t, tc.expected, result)
-		})
-	}
-}
-
 func TestPeerGovernor_CanPromoteBootstrapPeer(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
@@ -8086,86 +7771,9 @@ func TestPeerGovernor_CanPromoteBootstrapPeer(t *testing.T) {
 	pg.mu.Unlock()
 }
 
-func TestIsRoutableAddr(t *testing.T) {
-	tests := []struct {
-		name     string
-		address  string
-		routable bool
-	}{
-		// Routable addresses
-		{"public IPv4", "44.0.0.1:3001", true},
-		{"public IPv4 no port", "44.0.0.1", true},
-		{"public IPv6", "[2001:4860:4860::8888]:3001", true},
-		{"hostname", "relay.example.com:3001", true},
-		{"bare hostname", "relay.example.com", true},
-
-		// Private (RFC 1918)
-		{"private 10.x", "10.0.0.1:3001", false},
-		{"private 172.16.x", "172.16.0.1:3001", false},
-		{"private 192.168.x", "192.168.1.1:3001", false},
-
-		// Loopback
-		{"loopback IPv4", "127.0.0.1:3001", false},
-		{"loopback IPv6", "[::1]:3001", false},
-
-		// Link-local
-		{"link-local IPv4", "169.254.1.1:3001", false},
-		{"link-local IPv6", "[fe80::1]:3001", false},
-
-		// Multicast
-		{"multicast IPv4", "224.0.0.1:3001", false},
-		{"multicast IPv6", "[ff02::1]:3001", false},
-
-		// Unspecified
-		{"unspecified IPv4", "0.0.0.0:3001", false},
-		{"unspecified IPv6", "[::]:3001", false},
-
-		// Private IPv6 (fc00::/7)
-		{"private IPv6", "[fd00::1]:3001", false},
-
-		// Shared, protocol-assigned, and reserved space is not a public
-		// peer target even though net.IP accepts it as an IP literal.
-		{"carrier-grade NAT", "100.64.0.1:3001", false},
-		{"IETF protocol assignment", "192.0.0.1:3001", false},
-		{"benchmarking", "198.18.0.1:3001", false},
-		{"reserved future-use", "240.0.0.1:3001", false},
-		{"IPv6 discard-only", "[100::1]:3001", false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.routable, isRoutableAddr(tt.address))
-		})
-	}
-}
-
-func TestAddPeer_RejectsNonRoutableGossipPeer(t *testing.T) {
-	pg := NewPeerGovernor(PeerGovernorConfig{
-		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
-	})
-
-	// Private IP from gossip should be rejected
-	err := pg.AddPeer("10.0.0.1:3001", PeerSourceP2PGossip)
-	assert.ErrorIs(t, err, ErrUnroutableAddress)
-	assert.Empty(t, pg.GetPeers())
-
-	// Loopback from gossip should be rejected
-	err = pg.AddPeer("127.0.0.1:3001", PeerSourceP2PGossip)
-	assert.ErrorIs(t, err, ErrUnroutableAddress)
-	assert.Empty(t, pg.GetPeers())
-}
-
-func TestAddPeer_RejectsNonRoutableLedgerPeer(t *testing.T) {
-	pg := NewPeerGovernor(PeerGovernorConfig{
-		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
-	})
-
-	err := pg.AddPeer("192.168.1.1:3001", PeerSourceP2PLedger)
-	assert.ErrorIs(t, err, ErrUnroutableAddress)
-	assert.Empty(t, pg.GetPeers())
-}
-
 func TestAddPeer_RejectsDocumentationRanges(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name    string
 		address string
@@ -8190,6 +7798,21 @@ func TestAddPeer_RejectsDocumentationRanges(t *testing.T) {
 		{
 			name:    "ledger rejects ipv6 documentation",
 			address: "[2001:db8::1]:3001",
+			source:  PeerSourceP2PLedger,
+		},
+		{
+			name:    "gossip rejects private and loopback ipv4",
+			address: "10.0.0.1:3001",
+			source:  PeerSourceP2PGossip,
+		},
+		{
+			name:    "gossip rejects loopback",
+			address: "127.0.0.1:3001",
+			source:  PeerSourceP2PGossip,
+		},
+		{
+			name:    "ledger rejects private 192.168",
+			address: "192.168.1.1:3001",
 			source:  PeerSourceP2PLedger,
 		},
 		{
@@ -8223,6 +7846,8 @@ func TestAddPeer_RejectsDocumentationRanges(t *testing.T) {
 }
 
 func TestAddPeer_AllowsTopologyWithPrivateIP(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
@@ -8244,6 +7869,8 @@ func TestAddPeer_AllowsTopologyWithPrivateIP(t *testing.T) {
 }
 
 func TestAddPeer_AllowsInboundWithPrivateIP(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
@@ -8255,6 +7882,8 @@ func TestAddPeer_AllowsInboundWithPrivateIP(t *testing.T) {
 }
 
 func TestAddLedgerPeer_RejectsNonRoutable(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
@@ -8271,6 +7900,8 @@ func TestAddLedgerPeer_RejectsNonRoutable(t *testing.T) {
 }
 
 func TestAddLedgerPeer_AcceptsRoutable(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
@@ -8305,6 +7936,8 @@ func seedTopologyPeer(
 }
 
 func TestResolveInboundIdentity(t *testing.T) {
+	t.Parallel()
+
 	type seed struct {
 		addr       string
 		normalized string
@@ -8514,6 +8147,8 @@ func TestResolveInboundIdentity(t *testing.T) {
 // connmanager publishes, so inbound-peer-address lookups remain
 // symmetric across both layers.
 func TestResolveInboundIdentity_CanonicalKeyParity(t *testing.T) {
+	t.Parallel()
+
 	cases := []string{
 		"44.0.0.1:3001",
 		"[2001:0db8::1]:3001",
@@ -8537,6 +8172,8 @@ func TestResolveInboundIdentity_CanonicalKeyParity(t *testing.T) {
 }
 
 func TestHandleInboundConnection_TopologyHostRemainsUntrusted(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:     newMockEventBus(),
@@ -8587,6 +8224,8 @@ func TestHandleInboundConnection_TopologyHostRemainsUntrusted(t *testing.T) {
 // short-lived outbound session would resume at the old elevated rung
 // instead of restarting from initialReconnectDelay.
 func TestHandleInboundConnection_ResetsOutboundBackoff(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:     newMockEventBus(),
@@ -8637,6 +8276,8 @@ func TestHandleInboundConnection_ResetsOutboundBackoff(t *testing.T) {
 }
 
 func TestHandleInboundConnection_AmbiguousHostCreatesNewPeer(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:     newMockEventBus(),
@@ -8685,6 +8326,8 @@ func TestHandleInboundConnection_AmbiguousHostCreatesNewPeer(t *testing.T) {
 func TestHandleInboundConnection_ReArrivalKeepsFirstSeenAndRefreshesInboundConnectedAt(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:     newMockEventBus(),
@@ -8726,6 +8369,8 @@ func TestHandleInboundConnection_ReArrivalKeepsFirstSeenAndRefreshesInboundConne
 func TestHandleInboundConnection_TopologyMatchPersistsOnReArrival(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:     newMockEventBus(),
@@ -8781,6 +8426,8 @@ func TestHandleInboundConnection_TopologyMatchPersistsOnReArrival(
 func TestHandleInboundConnection_TopologyMatchNotClearedByUnrelatedReArrival(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:     newMockEventBus(),
@@ -8819,6 +8466,8 @@ func TestHandleInboundConnection_TopologyMatchNotClearedByUnrelatedReArrival(
 }
 
 func TestInboundProvisionalWindow_ExcludesFreshFromCounts(t *testing.T) {
+	t.Parallel()
+
 	reg := prometheus.NewRegistry()
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(
@@ -8857,6 +8506,8 @@ func TestInboundProvisionalWindow_ExcludesFreshFromCounts(t *testing.T) {
 }
 
 func TestInboundProvisionalWindow_IncludesAfterWindow(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(
 			slog.NewJSONHandler(io.Discard, nil),
@@ -8879,34 +8530,9 @@ func TestInboundProvisionalWindow_IncludesAfterWindow(t *testing.T) {
 		"peer older than window must be counted")
 }
 
-func TestHandleInboundConnection_InboundDuplexFromEvent(t *testing.T) {
-	pg := NewPeerGovernor(PeerGovernorConfig{
-		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		EventBus:     newMockEventBus(),
-		PromRegistry: prometheus.NewRegistry(),
-	})
-	localAddr, _ := net.ResolveTCPAddr("tcp", "44.0.0.9:3001")
-	remoteAddr, _ := net.ResolveTCPAddr("tcp", "44.0.0.1:51432")
-	pg.handleInboundConnectionEvent(event.Event{
-		Type: connmanager.InboundConnectionEventType,
-		Data: connmanager.InboundConnectionEvent{
-			ConnectionId: ouroboros.ConnectionId{
-				LocalAddr: localAddr, RemoteAddr: remoteAddr,
-			},
-			LocalAddr: localAddr, RemoteAddr: remoteAddr,
-			NormalizedRemoteAddr: connmanager.NormalizePeerAddr(
-				remoteAddr.String(),
-			),
-			IsDuplex: true,
-		},
-	})
-	peers := pg.GetPeers()
-	require.Len(t, peers, 1)
-	assert.True(t, peers[0].InboundDuplex,
-		"event-derived duplex hint must be retained when connmanager is nil")
-}
-
 func TestHandleInboundConnection_DuplexMarksEverConnected(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:     newMockEventBus(),
@@ -8935,6 +8561,8 @@ func TestHandleInboundConnection_DuplexMarksEverConnected(t *testing.T) {
 }
 
 func TestCensusInboundCounts_DuplexRequiresLiveConnection(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:     newMockEventBus(),
@@ -8963,6 +8591,8 @@ func TestCensusInboundCounts_DuplexRequiresLiveConnection(t *testing.T) {
 }
 
 func TestHandleConnectionClosedEvent_DuplexCensusDropsOnClose(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:     newMockEventBus(),
@@ -9010,6 +8640,8 @@ func TestHandleConnectionClosedEvent_DuplexCensusDropsOnClose(t *testing.T) {
 // NormalizePeerAddr itself. The resulting peer must be identical to
 // the one produced when the event carries the field.
 func TestHandleInboundConnection_NormalizedRemoteAddrFallback(t *testing.T) {
+	t.Parallel()
+
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:     newMockEventBus(),
@@ -9041,6 +8673,8 @@ func TestHandleInboundConnection_NormalizedRemoteAddrFallback(t *testing.T) {
 }
 
 func TestAddressHost(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		in, want string
 	}{

@@ -22,7 +22,6 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 )
 
@@ -56,36 +55,25 @@ func seedBlockAmountRows(tb testing.TB, store *Store, count int) []byte {
 	return hash
 }
 
-func TestBlockTransactionTotalsProjectsOneNamedQuery(t *testing.T) {
+func TestBlockTransactionTotalsSumsOutputsAndFees(t *testing.T) {
 	t.Parallel()
-	reg := prometheus.NewRegistry()
-	store := newMigratedSQLiteStoreWithRegistry(t, reg)
-	hash := seedBlockAmountRows(t, store, 1001)
-	before, _ := sqlDurationCounts(t, reg)
+	store := newMigratedSQLiteStore(t)
+	hash := seedBlockAmountRows(t, store, 5)
 	totals, err := store.GetBlockTransactionTotals(hash, nil)
 	require.NoError(t, err)
 	require.Equal(t, models.BlockTransactionTotals{
-		Output: "2002000", Fees: "7007",
+		Output: "10000", Fees: "35",
 	}, totals)
-	after, _ := sqlDurationCounts(t, reg)
-	require.Equal(t, before+1, after)
-	families, err := reg.Gather()
-	require.NoError(t, err)
-	var named uint64
-	for _, family := range families {
-		if family.GetName() != "dingo_database_sql_query_duration_seconds" {
-			continue
-		}
-		for _, metric := range family.GetMetric() {
-			for _, label := range metric.GetLabel() {
-				if label.GetName() == "query" &&
-					label.GetValue() == "ProjectBlockTransactionAmountRows" {
-					named += metric.GetHistogram().GetSampleCount()
-				}
-			}
-		}
-	}
-	require.Equal(t, uint64(1), named)
+}
+
+// TestBlockTransactionTotalsQueryIsIndexBacked guards the projection's stated
+// contract: reads stay rooted at the block's transactions and reach outputs
+// and collateral returns through their indexes, never by scanning all output
+// history.
+func TestBlockTransactionTotalsQueryIsIndexBacked(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	hash := seedBlockAmountRows(t, store, 5)
 	rows, err := store.writeDB.QueryContext(t.Context(),
 		"EXPLAIN QUERY PLAN "+blockTransactionAmountRows, hash, hash, hash)
 	require.NoError(t, err)

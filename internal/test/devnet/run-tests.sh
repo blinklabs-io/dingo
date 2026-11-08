@@ -206,11 +206,12 @@ if [[ -n "${DEVNET_SPEC_OVERRIDE:-}" ]]; then
   fi
   ACTIVE_SPEC="./${spec_name}"
 fi
-# A spec that starts in Dijkstra (fork at epoch 0) needs dingo to follow the
-# node rather than forge, and transactions in the Dijkstra era.
+# A spec that starts in Dijkstra (fork at epoch 0) runs dingo as a follower by
+# default, and sends transactions in the Dijkstra era. Set
+# DEVNET_FORCE_DINGO_BLOCK_PRODUCER=true to make dingo forge as well.
 if [[ "${MODE}" == "conformance" ]] &&
   grep -qE '^TestDijkstraHardForkAtEpoch:[[:space:]]*0([[:space:]]|$)' "${SCRIPT_DIR}/${ACTIVE_SPEC#./}"; then
-  export DEVNET_DINGO_BLOCK_PRODUCER=false
+  export DEVNET_DINGO_BLOCK_PRODUCER="${DEVNET_FORCE_DINGO_BLOCK_PRODUCER:-false}"
   export DEVNET_TXPUMP_TRANSACTION_ERA=dijkstra
 else
   unset DEVNET_DINGO_BLOCK_PRODUCER

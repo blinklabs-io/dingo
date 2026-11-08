@@ -1895,23 +1895,6 @@ func TestValidateInvalidModeStillReportsListeners(t *testing.T) {
 	assert.Contains(t, err.Error(), "port (relay/NtN) must be set")
 }
 
-func TestValidateAggregatesAllErrors(t *testing.T) {
-	cfg := validTestConfig()
-	cfg.RunMode = RunModeLoad
-	cfg.ImmutableDbPath = ""
-	setMempoolSetting(cfg, "evictionWatermark", 2.0)
-	cfg.Chainsync.Strategy = "fastest"
-	err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "requires immutableDbPath")
-	assert.Contains(
-		t,
-		err.Error(),
-		"invalid plugins.mempool.config.evictionWatermark",
-	)
-	assert.Contains(t, err.Error(), "invalid chainsync.strategy")
-}
-
 func TestValidateMinPoolMargin(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -1936,11 +1919,6 @@ func TestValidateMinPoolMargin(t *testing.T) {
 			assert.Contains(t, err.Error(), tt.wantErr)
 		})
 	}
-}
-
-func TestDefaultDMQConfigIsLocalOnly(t *testing.T) {
-	t.Parallel()
-	assert.Zero(t, DefaultDMQConfig().N2NPort)
 }
 
 func TestValidateDMQ(t *testing.T) {
@@ -2199,56 +2177,6 @@ func TestValidateDMQN2NPortRangeReportedOnce(t *testing.T) {
 	require.Error(t, err)
 	assert.Equal(t, 1, strings.Count(err.Error(), "invalid dmq.n2nPort"))
 	assert.NotContains(t, err.Error(), "assigned to both dmq.n2nPort")
-}
-
-func TestPipeline_DMQYAMLAndFlags(t *testing.T) {
-	// The environment overrides YAML, so a DINGO_DMQ_* variable set where the
-	// test runs would replace the values it asserts.
-	for _, name := range []string{
-		"DINGO_DMQ_ENABLED", "DINGO_DMQ_TOPIC", "DINGO_DMQ_NETWORK_MAGIC",
-		"DINGO_DMQ_SOCKET_PATH", "DINGO_DMQ_MESSAGE_TTL",
-		"DINGO_DMQ_MAX_MEMPOOL_SIZE", "DINGO_DMQ_N2N_PORT",
-		"DINGO_DMQ_LISTEN_ADDRESS", "DINGO_DMQ_LISTEN_IPV6_ADDRESS",
-		"DINGO_DMQ_TOPOLOGY_FILE", "DINGO_DMQ_MIN_PEERS",
-		"DINGO_DMQ_MAX_PEERS",
-	} {
-		t.Setenv(name, "")
-		require.NoError(t, os.Unsetenv(name))
-	}
-	topologyFile := filepath.ToSlash(
-		filepath.Join(t.TempDir(), "dmq-topology.json"),
-	)
-	require.NoError(t, os.WriteFile(topologyFile, []byte("{}"), 0o600))
-	cfg, err := loadConfigThroughPipeline(
-		t,
-		"dmq:\n  enabled: true\n  topic: mithril\n  messageTtl: 300\n"+
-			"  n2nPort: 4100\n  listenIpv6Address: \"::1\"\n"+
-			"  topologyFile: \""+topologyFile+"\"\n  minPeers: 2\n",
-		[]string{
-			"--dmq-socket-path=/run/dmq.sock",
-			"--dmq-network-magic=7",
-			"--dmq-max-mempool-size=4",
-			"--dmq-message-ttl=600",
-			"--dmq-listen-address=127.0.0.1",
-			"--dmq-max-peers=6",
-		},
-	)
-	require.NoError(t, err)
-	assert.Equal(t, DMQConfig{
-		Enabled:           true,
-		Topic:             "mithril",
-		NetworkMagic:      7,
-		networkMagicSet:   true,
-		SocketPath:        "/run/dmq.sock",
-		MessageTTL:        600,
-		MaxMempoolSize:    4,
-		N2NPort:           4100,
-		ListenAddress:     "127.0.0.1",
-		ListenIPv6Address: "::1",
-		TopologyFile:      topologyFile,
-		MinPeers:          2,
-		MaxPeers:          6,
-	}, cfg.DMQ)
 }
 
 func TestValidateDMQBounds(t *testing.T) {

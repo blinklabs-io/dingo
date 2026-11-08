@@ -109,9 +109,12 @@ func runClassicEnactment(
 ) *shelley.ShelleyProtocolParameters {
 	t.Helper()
 	results := make([]*shelley.ShelleyProtocolParameters, 0, 3)
+	// Every mode runs in its own transaction that is rolled back, so one
+	// database serves all three.
+	db, err := newTestDatabase(t, &Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
 	for _, mode := range []string{"compute", "forecast", "apply"} {
-		db, err := newTestDatabase(t, &Config{DataDir: ""})
-		require.NoError(t, err)
 		txn := db.Transaction(context.Background(), true)
 		for epoch, start := range map[uint64]uint64{
 			classicTestSubmissionEpoch - 1: classicTestEpochStart - 100,
@@ -158,7 +161,6 @@ func runClassicEnactment(
 		require.NoError(t, err, mode)
 		require.NoError(t, txn.Rollback())
 		txn.Release()
-		require.NoError(t, db.Close())
 		results = append(results, result.(*shelley.ShelleyProtocolParameters))
 	}
 	require.Equal(t, results[0], results[1], "forecast disagrees with rollover")

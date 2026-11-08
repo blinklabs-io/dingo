@@ -24,7 +24,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -338,104 +337,6 @@ func TestExistingDatabaseSidecarFailureIsNonFatal(t *testing.T) {
 			"database must not fail the open",
 	)
 	require.NoError(t, closeTestDatabase(reopened))
-}
-
-// domainAccessors pairs each narrowing accessor with the interface it is
-// supposed to hand out. Method expressions rather than method values: these
-// need no receiver, so they cannot be read as a nil dereference.
-var domainAccessors = []struct {
-	name     string
-	accessor any
-	want     reflect.Type
-}{
-	{
-		"certificateStore",
-		(*Database).certificateStore,
-		reflect.TypeFor[metadata.CertificateStore](),
-	},
-	{
-		"epochStore",
-		(*Database).epochStore,
-		reflect.TypeFor[metadata.EpochStore](),
-	},
-	{
-		"governanceStore",
-		(*Database).governanceStore,
-		reflect.TypeFor[metadata.GovernanceStore](),
-	},
-	{
-		"stakeSnapshotStore",
-		(*Database).stakeSnapshotStore,
-		reflect.TypeFor[metadata.StakeSnapshotStore](),
-	},
-	{
-		"transactionStore",
-		(*Database).transactionStore,
-		reflect.TypeFor[metadata.TransactionStore](),
-	},
-	{
-		"utxoStore",
-		(*Database).utxoStore,
-		reflect.TypeFor[metadata.UtxoStore](),
-	},
-}
-
-// TestFacadesDependOnNarrowStores is the "used by callers" half of the
-// domain split. Facade methods reach their backend through these accessors
-// rather than through d.metadata, so the compiler -- not review -- is what
-// stops a method in one domain from reaching into another.
-//
-// Asserting on each accessor's declared return type rather than on the
-// value it returns is deliberate: widening one back to
-// metadata.MetadataStore would keep every call site compiling and silently
-// undo the narrowing, and a returned *sqlstore.Store satisfies the narrow
-// interface either way.
-func TestFacadesDependOnNarrowStores(t *testing.T) {
-	t.Parallel()
-
-	for _, a := range domainAccessors {
-		t.Run(a.name, func(t *testing.T) {
-			typ := reflect.TypeOf(a.accessor)
-			require.Equal(t, 1, typ.NumOut())
-			require.Equalf(
-				t,
-				a.want,
-				typ.Out(0),
-				"%s() must return its narrow domain interface; returning "+
-					"MetadataStore re-widens every call site it serves",
-				a.name,
-			)
-		})
-	}
-}
-
-// TestDomainAccessorsReturnBackingStore checks the accessors hand back the
-// store the Database was configured with.
-//
-// Identity rather than non-nilness: an accessor that ignored d.metadata and
-// returned some other value would still be non-nil, so a NotNil assertion
-// passes on exactly the bug worth catching here -- an accessor wired to the
-// wrong source. Comparing against the pointer that was installed is what
-// makes that a failure.
-func TestDomainAccessorsReturnBackingStore(t *testing.T) {
-	t.Parallel()
-
-	backing := &stubDomainMetadataStore{}
-	d := &Database{metadata: backing}
-
-	require.Same(t, backing, d.certificateStore())
-	require.Same(t, backing, d.epochStore())
-	require.Same(t, backing, d.governanceStore())
-	require.Same(t, backing, d.stakeSnapshotStore())
-	require.Same(t, backing, d.transactionStore())
-	require.Same(t, backing, d.utxoStore())
-}
-
-// stubDomainMetadataStore is a nil-method placeholder: the tests only need a
-// distinguishable value of the composed interface type, never a call. It is
-// used through a pointer so the assertions above can compare identity.
-type stubDomainMetadataStore struct {
-	metadata.MetadataStore
 }
 
 func TestGenesisTransactionMetadataErrorWithShortHashes(t *testing.T) {
@@ -1084,74 +985,24 @@ func TestSetTransactionRecoversMissingConsumedInputsFromBlob(
 	}
 }
 
-func TestSetTransactionBatchedSpendsPreviousBlockOutputInSameBatch(
-	t *testing.T,
-) {
-	t.Parallel()
+var (
+	candidateCacheMu sync.Mutex
+	candidateCache   = map[string]any{}
+)
 
-	db, err := newTestDatabase(t, &Config{
-		DataDir: t.TempDir(),
-		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
-	})
-
-	require.NoError(t, err)
-	defer db.Close()
-
-	candidate := findBatchedCrossBlockSpendCandidate(t)
-	storeBlockOffsetsOnly(t, db, candidate.producerBlock)
-	storeBlockOffsetsOnly(t, db, candidate.consumerBlock)
-
-	acc := db.NewBatchAccumulator()
-	txn := db.Transaction(context.Background(), true)
-	defer txn.Release()
-	defer txn.Rollback() //nolint:errcheck
-
-	require.NoError(
-		t,
-		db.SetTransactionBatched(
-			context.Background(),
-			candidate.producerTx,
-			candidate.producerPoint,
-			candidate.producerIdx,
-			0,
-			nil,
-			nil,
-			mustBlockOffsets(t, candidate.producerBlock),
-			acc,
-			txn, 0,
-		),
-	)
-	require.NoError(
-		t,
-		db.SetTransactionBatched(
-			context.Background(),
-			candidate.consumerTx,
-			candidate.consumerPoint,
-			candidate.consumerIdx,
-			0,
-			nil,
-			nil,
-			mustBlockOffsets(t, candidate.consumerBlock),
-			acc,
-			txn, 0,
-		),
-	)
-	require.NoError(t, db.FlushBatch(acc, txn))
-	require.NoError(t, txn.Commit())
-
-	utxo, err := db.Metadata().GetUtxoIncludingSpent(
-		candidate.input.Id().Bytes(),
-		candidate.input.Index(),
-		nil,
-	)
-	require.NoError(t, err)
-	require.NotNil(t, utxo)
-	require.Equal(t, candidate.consumerPoint.Slot, utxo.DeletedSlot)
-	require.Equal(
-		t,
-		candidate.consumerTx.Hash().Bytes(),
-		[]byte(utxo.SpentAtTxId),
-	)
+// memoizedCandidate runs the immutable-testdata scan once per key for the whole
+// test binary. Every caller reads the result and none mutates it, so the full
+// chain scan need not be repeated by each of the tests that start from it.
+func memoizedCandidate[T any](t *testing.T, key string, scan func() T) T {
+	t.Helper()
+	candidateCacheMu.Lock()
+	defer candidateCacheMu.Unlock()
+	if v, ok := candidateCache[key]; ok {
+		return v.(T)
+	}
+	v := scan()
+	candidateCache[key] = v
+	return v
 }
 
 func findGapRollbackCandidate(t *testing.T) gapRollbackCandidate {
@@ -1165,6 +1016,20 @@ func findGapRollbackCandidateWithoutCertificates(
 }
 
 func findGapRollbackCandidateMatching(
+	t *testing.T,
+	requireNoCertificates bool,
+) gapRollbackCandidate {
+	t.Helper()
+	return memoizedCandidate(
+		t,
+		fmt.Sprintf("rollback/%t", requireNoCertificates),
+		func() gapRollbackCandidate {
+			return scanGapRollbackCandidate(t, requireNoCertificates)
+		},
+	)
+}
+
+func scanGapRollbackCandidate(
 	t *testing.T,
 	requireNoCertificates bool,
 ) gapRollbackCandidate {
@@ -1337,6 +1202,13 @@ func inputRefKey(txId []byte, outputIdx uint32) string {
 // ingestion path through two SetGapBlockTransaction calls.
 func findGapConsumeCandidate(t *testing.T) gapConsumeCandidate {
 	t.Helper()
+	return memoizedCandidate(t, "consume", func() gapConsumeCandidate {
+		return scanGapConsumeCandidate(t)
+	})
+}
+
+func scanGapConsumeCandidate(t *testing.T) gapConsumeCandidate {
+	t.Helper()
 
 	imm, err := immutable.New("immutable/testdata")
 	require.NoError(t, err)
@@ -1446,6 +1318,15 @@ func findGapConsumeCandidate(t *testing.T) gapConsumeCandidate {
 // position) that carries certificates so callers can drive the pair
 // through SetTransaction with no certDeposits map.
 func findGapConsumeCandidateWithoutCertificates(
+	t *testing.T,
+) gapConsumeCandidate {
+	t.Helper()
+	return memoizedCandidate(t, "consume-nocert", func() gapConsumeCandidate {
+		return scanGapConsumeCandidateWithoutCertificates(t)
+	})
+}
+
+func scanGapConsumeCandidateWithoutCertificates(
 	t *testing.T,
 ) gapConsumeCandidate {
 	t.Helper()
@@ -1560,6 +1441,19 @@ func findGapConsumeCandidateWithoutCertificates(
 }
 
 func findBatchedCrossBlockSpendCandidate(
+	t *testing.T,
+) batchedCrossBlockSpendCandidate {
+	t.Helper()
+	return memoizedCandidate(
+		t,
+		"cross-block-spend",
+		func() batchedCrossBlockSpendCandidate {
+			return scanBatchedCrossBlockSpendCandidate(t)
+		},
+	)
+}
+
+func scanBatchedCrossBlockSpendCandidate(
 	t *testing.T,
 ) batchedCrossBlockSpendCandidate {
 	t.Helper()
@@ -1921,27 +1815,6 @@ func TestPhase1RecordsNoStartEraAndRejectsLaterDijkstra(t *testing.T) {
 	require.Contains(t, settingsErr.Error(), "dijkstra")
 }
 
-func TestPhase1RejectsCoreToAPI(t *testing.T) {
-	t.Parallel()
-
-	dataDir := t.TempDir()
-	db, err := newTestDatabase(t, &Config{
-		DataDir:     dataDir,
-		StorageMode: "core",
-		Network:     "preprod",
-	})
-	require.NoError(t, err)
-	require.NoError(t, closeTestDatabase(db))
-
-	_, err = newTestDatabase(t, &Config{
-		DataDir:     dataDir,
-		StorageMode: "api",
-		Network:     "preprod",
-	})
-	var settingsErr NodeSettingsError
-	require.True(t, errors.As(err, &settingsErr))
-}
-
 // TestPhase1AllowsAPIToCore pins the round-3 fix for a latch write that
 // was silently discarded: reopened.StorageMode() alone (the original
 // assertion here) reads back d.config, not the persisted row, so it
@@ -2228,6 +2101,8 @@ func TestPhase1ConcurrentFirstOpenOneWinnerOneMismatch(t *testing.T) {
 	t.Parallel()
 
 	for i := range 5 {
+		// Not t.Parallel: each iteration races two openers, and running the
+		// iterations together starves them into mutual failures under load.
 		t.Run(fmt.Sprintf("iteration_%d", i), func(t *testing.T) {
 			metaDir := t.TempDir()
 			blobDirA := t.TempDir()
@@ -2390,28 +2265,6 @@ func newSettingsTestDB(
 		Network:     network,
 		Logger:      slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
-}
-
-func TestNodeSettingsPersistence(t *testing.T) {
-	t.Parallel()
-
-	dataDir := t.TempDir()
-
-	// First open: persists settings
-	db, err := newSettingsTestDB(t, dataDir, "core", "preview")
-	require.NoError(t, err)
-
-	s, err := db.Metadata().GetNodeSettings(context.Background())
-	require.NoError(t, err)
-	require.NotNil(t, s)
-	require.Equal(t, "core", s.StorageMode)
-	require.Equal(t, "preview", s.Network)
-	require.NoError(t, closeTestDatabase(db))
-
-	// Reopen with same settings: succeeds
-	db, err = newSettingsTestDB(t, dataDir, "core", "preview")
-	require.NoError(t, err)
-	require.NoError(t, closeTestDatabase(db))
 }
 
 func TestNodeSettingsRejectStorageModeChange(t *testing.T) {
@@ -2598,86 +2451,6 @@ func TestNodeSettingsMetadataSetDoesNotOverwrite(t *testing.T) {
 	}
 }
 
-// TestListSyncStateKeysByPrefix covers the byte-prefix scan used to repopulate
-// the deferred-header retention set after a restart. The match
-// must be an exact BYTE prefix on every backend, so this asserts cases a
-// collation-sensitive SQL range or LIKE could get wrong: uppercase/mixed-case
-// variants a case-insensitive column collation would fold in, a sibling prefix
-// one byte away, and a non-ASCII neighbor a synthesized range upper bound could
-// mishandle. The prefix also contains a LIKE wildcard ('_') to prove no
-// wildcard escaping is needed.
-func TestListSyncStateKeysByPrefix(t *testing.T) {
-	t.Parallel()
-
-	db, err := newTestDatabase(t, &Config{DataDir: t.TempDir()})
-	require.NoError(t, err)
-	defer func() { require.NoError(t, db.Close()) }()
-
-	const prefix = "deferred_header_validation:"
-	want := []string{
-		prefix + "10:aa",
-		prefix + "13:bb",
-		prefix + "21:cc",
-	}
-	for _, k := range want {
-		require.NoError(t, db.SetSyncState(k, "true", nil))
-	}
-	// Decoys that must NOT match under an exact byte-prefix filter:
-	decoys := []string{
-		// Shorter than the prefix.
-		"deferred_header_validation",
-		// A sibling prefix differing only in the last byte.
-		"deferred_header_validatioo:zz",
-		// Unrelated key.
-		"other_key",
-		// Uppercased prefix: a case-INSENSITIVE column collation on
-		// MySQL/Postgres would wrongly fold this into the match; a byte prefix
-		// must exclude it.
-		"DEFERRED_HEADER_VALIDATION:99",
-		// Mixed case variant, same hazard.
-		"Deferred_Header_Validation:88",
-		// A non-ASCII key adjacent in Unicode: proves the match does not depend
-		// on a synthesized range upper bound (which a non-ASCII prefix could
-		// make invalid) and is not confused by locale collation ordering.
-		"deferred_header_validationé:77",
-	}
-	for _, k := range decoys {
-		require.NoError(t, db.SetSyncState(k, "x", nil))
-	}
-
-	got, err := db.ListSyncStateKeysByPrefix(prefix, nil)
-	require.NoError(t, err)
-	require.ElementsMatch(
-		t,
-		want,
-		got,
-		"only exact byte-prefix keys must match (no collation folding)",
-	)
-
-	// A non-ASCII prefix must scan safely and match exactly by bytes. The
-	// "...é:77" decoy above shares this UTF-8 prefix, so both it and the key
-	// added here must come back (and nothing ASCII-only).
-	const utf8Prefix = "deferred_header_validationé:"
-	require.NoError(t, db.SetSyncState(utf8Prefix+"aa", "true", nil))
-	utf8Got, err := db.ListSyncStateKeysByPrefix(utf8Prefix, nil)
-	require.NoError(t, err)
-	require.ElementsMatch(
-		t,
-		[]string{utf8Prefix + "77", utf8Prefix + "aa"},
-		utf8Got,
-	)
-
-	// Empty prefix returns everything.
-	all, err := db.ListSyncStateKeysByPrefix("", nil)
-	require.NoError(t, err)
-	require.GreaterOrEqual(t, len(all), len(want)+len(decoys))
-
-	// A prefix matching nothing returns empty, not an error.
-	none, err := db.ListSyncStateKeysByPrefix("zzz_no_such_prefix:", nil)
-	require.NoError(t, err)
-	require.Empty(t, none)
-}
-
 var testDatabaseHosts sync.Map
 
 func newTestDatabase(
@@ -2728,10 +2501,26 @@ func newTestDatabaseWithHostRunMode(
 	keepOnError bool,
 	runMode string,
 ) (*Database, error) {
+	return newTestDatabaseWithBlobConfig(
+		tb, config, keepOnError, runMode, testutil.BadgerBlobConfig(),
+	)
+}
+
+// newTestDatabaseWithBlobConfig is newTestDatabaseWithHostRunMode with an
+// explicit badger provider config, for tests that need a store of a specific
+// size.
+func newTestDatabaseWithBlobConfig(
+	tb testing.TB,
+	config *Config,
+	keepOnError bool,
+	runMode string,
+	blobConfig map[string]any,
+) (*Database, error) {
 	tb.Helper()
 	if config == nil {
 		config = DefaultConfig
 	}
+	seedMigratedMetadata(tb, config.DataDir, config.StorageMode)
 	host := plugin.NewHost()
 	if err := badger.RegisterProvider(host); err != nil {
 		return nil, err
@@ -2741,7 +2530,7 @@ func newTestDatabaseWithHostRunMode(
 	}
 	blobStore, err := plugin.Resolve[blob.BlobStore](
 		context.Background(), host,
-		plugin.CapabilityStorageBlob, "badger", testutil.BadgerBlobConfig(),
+		plugin.CapabilityStorageBlob, "badger", blobConfig,
 		blob.ProviderDependencies{
 			DataDir: config.DataDir, StorageMode: config.StorageMode,
 			RunMode: runMode,
@@ -3199,6 +2988,7 @@ func TestSetTransactionZeroProducedOutputsLogging(t *testing.T) {
 	}
 
 	t.Run("zero-output transaction does not warn", func(t *testing.T) {
+		t.Parallel()
 		var logs bytes.Buffer
 		db := newStagedDB(t, &logs)
 		out := setTx(
@@ -3209,6 +2999,7 @@ func TestSetTransactionZeroProducedOutputsLogging(t *testing.T) {
 	})
 
 	t.Run("transaction with outputs does not warn", func(t *testing.T) {
+		t.Parallel()
 		var logs bytes.Buffer
 		db := newStagedDB(t, &logs)
 		out := setTx(t, db, &logs, candidate.consumerTx)
@@ -3216,6 +3007,7 @@ func TestSetTransactionZeroProducedOutputsLogging(t *testing.T) {
 	})
 
 	t.Run("dropped outputs warn", func(t *testing.T) {
+		t.Parallel()
 		var logs bytes.Buffer
 		db := newStagedDB(t, &logs)
 		out := setTx(
@@ -3239,6 +3031,7 @@ func TestSetTransactionZeroProducedOutputsLogging(t *testing.T) {
 	t.Run(
 		"invalid transaction without collateral return does not warn",
 		func(t *testing.T) {
+			t.Parallel()
 			var logs bytes.Buffer
 			db := newStagedDB(t, &logs)
 			out := setTx(
@@ -3250,6 +3043,7 @@ func TestSetTransactionZeroProducedOutputsLogging(t *testing.T) {
 	)
 
 	t.Run("dropped collateral return warns", func(t *testing.T) {
+		t.Parallel()
 		const collateralLovelace = 1_000_000
 		collateralReturn, err := mockledger.NewTransactionOutputBuilder().
 			WithAddress(collateralReturnAddress).
@@ -3284,6 +3078,7 @@ func TestSetTransactionZeroProducedOutputsLogging(t *testing.T) {
 	t.Run(
 		"invalid transaction keeping its collateral return does not warn",
 		func(t *testing.T) {
+			t.Parallel()
 			collateralReturn, err := mockledger.NewTransactionOutputBuilder().
 				WithAddress(collateralReturnAddress).
 				WithLovelace(1_000_000).

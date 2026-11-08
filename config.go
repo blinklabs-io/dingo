@@ -302,6 +302,7 @@ type Config struct {
 	ledgerApplyRowBatchingEnabled                                                       bool
 	blockfetchLowWatermarkEnabled                                                       bool
 	minPoolMargin                                                                       uint
+	cip0203Enabled                                                                      bool
 	pledgeLeverageEnabled                                                               bool
 	pledgeLeverage                                                                      uint
 	fullPotRewardsEnabled, unsafeFullPotRewardsOnStandardNetworks                       bool
@@ -588,6 +589,9 @@ func (c *Config) leiosRuntimeEnabled() bool {
 }
 
 func (n *Node) configValidate() error {
+	if _, err := version.HeaderProtocolMinor(n.config.cfg.CIP0203Enabled); err != nil {
+		return err
+	}
 	// Default storageMode to "core" when unset, and validate.
 	storageMode := StorageMode(n.config.cfg.StorageMode)
 	if storageMode == "" {
@@ -1010,6 +1014,7 @@ func (c *Config) syncCompatFields() {
 	c.ledgerValidateAheadEnabled = c.cfg.LedgerValidateAheadEnabled
 	c.ledgerApplyRowBatchingEnabled = c.cfg.LedgerApplyRowBatchingEnabled
 	c.blockfetchLowWatermarkEnabled = c.cfg.BlockfetchLowWatermarkEnabled
+	c.cip0203Enabled = c.cfg.CIP0203Enabled
 	c.minPoolMargin, c.pledgeLeverageEnabled, c.pledgeLeverage = c.cfg.MinPoolMargin, c.cfg.PledgeLeverageEnabled, c.cfg.PledgeLeverage
 	c.fullPotRewardsEnabled, c.unsafeFullPotRewardsOnStandardNetworks = c.cfg.FullPotRewardsEnabled, c.cfg.UnsafeFullPotRewardsOnStandardNetworks
 	c.delegatorInactivityEnabled, c.delegatorInactivity = c.cfg.DelegatorInactivityEnabled, c.cfg.DelegatorInactivity
@@ -1094,10 +1099,14 @@ func clonePluginConfig(in map[string]any) map[string]any {
 // exclusive Genesis witness set. Dingo supplies no network defaults, so nil and
 // an empty slice both leave witness identities to the ledger, a peer snapshot,
 // or the connection address. The option copies its input.
-func WithGenesisControlGroups(groups []topology.PeerControlGroup) ConfigOptionFunc {
+func WithGenesisControlGroups(
+	groups []topology.PeerControlGroup,
+) ConfigOptionFunc {
 	owned := topology.ClonePeerControlGroups(groups)
 	return func(c *Config) {
-		c.cfg.GenesisBootstrap.ControlGroups = topology.ClonePeerControlGroups(owned)
+		c.cfg.GenesisBootstrap.ControlGroups = topology.ClonePeerControlGroups(
+			owned,
+		)
 	}
 }
 
@@ -1117,6 +1126,17 @@ func WithGenesisLimitOnPatience(
 		c.cfg.GenesisBootstrap.LimitOnPatienceEnabled = enabled
 		c.cfg.GenesisBootstrap.LimitOnPatienceCapacity = capacity
 		c.cfg.GenesisBootstrap.LimitOnPatienceRate = rate
+	}
+}
+
+// WithCIP0203 enables build-version signalling in forged block headers.
+func WithCIP0203(enabled bool) ConfigOptionFunc {
+	return func(c *Config) {
+		if c.cfg == nil {
+			*c = NewConfig()
+		}
+		c.cfg.CIP0203Enabled = enabled
+		c.cip0203Enabled = enabled
 	}
 }
 
@@ -1777,8 +1797,9 @@ func WithLeiosPersistenceRetentionSlots(slots uint64) ConfigOptionFunc {
 // WithLeiosPipelineTiming overrides the provisional Leios pipeline stage
 // timing windows. CIP-0164 has not finalized these parameters, so they are
 // kept off-chain and overridable here rather than as protocol parameters.
-// When unset, leios.DefaultPipelineTiming applies. Experimental, leios
-// runMode only.
+// When unset, the one-second reference defaults are converted to the Shelley
+// slot duration, rounding up to whole slots. Explicit overrides remain slot
+// counts. Experimental, leios runMode only.
 func WithLeiosPipelineTiming(timing leios.PipelineTiming) ConfigOptionFunc {
 	return func(c *Config) {
 		t := timing
