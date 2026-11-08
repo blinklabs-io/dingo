@@ -971,6 +971,11 @@ INSERT INTO "transaction" (
 	}
 	if tx.CollateralReturn != nil {
 		tx.CollateralReturn.CollateralReturnForTxID = &tx.ID
+		// A collateral return takes the index after the declared outputs, so
+		// it never shares (transaction, index) with one of them.
+		if tx.CollateralReturn.OutputIdx == 0 {
+			tx.CollateralReturn.OutputIdx = uint32(len(tx.Outputs)) //nolint:gosec
+		}
 		insertAdapterUtxo(t, raw, tx.CollateralReturn)
 	}
 }

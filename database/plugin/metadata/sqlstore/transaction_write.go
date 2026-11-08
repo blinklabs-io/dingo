@@ -381,10 +381,35 @@ func (s *Store) insertUtxoModelsChecked(
 		}
 		return inserted, nil
 	}
+	// An output stored under the other kind of identity would insert as a
+	// duplicate, since no unique index spans both kinds, so it is treated as
+	// the conflict it is and left out of the batch insert.
+	existing, err := s.existingUtxoRefs(ctx, db, utxos)
+	if err != nil {
+		return nil, err
+	}
+	for _, utxo := range utxos {
+		if _, ok := existing[utxoIdentityKey(utxo.TxId, utxo.OutputIdx)]; ok {
+			if err := s.repairConflictedUtxo(ctx, db, utxo, deferredRows); err != nil {
+				return nil, err
+			}
+		}
+	}
 
 	for start := 0; start < len(utxos); start += utxoInsertBatchSize {
 		end := min(start+utxoInsertBatchSize, len(utxos))
-		batch := utxos[start:end]
+		batch := make([]*models.Utxo, 0, end-start)
+		batchPos := make([]int, 0, end-start)
+		for i := start; i < end; i++ {
+			if _, ok := existing[utxoIdentityKey(utxos[i].TxId, utxos[i].OutputIdx)]; ok {
+				continue
+			}
+			batch = append(batch, utxos[i])
+			batchPos = append(batchPos, i)
+		}
+		if len(batch) == 0 {
+			continue
+		}
 		query := insertUtxoBatchQuery(len(batch))
 		args := make([]any, 0, len(batch)*15)
 		for _, utxo := range batch {
@@ -452,7 +477,7 @@ func (s *Store) insertUtxoModelsChecked(
 				continue
 			}
 			utxo.ID = id
-			inserted[start+i] = true
+			inserted[batchPos[i]] = true
 			var err error
 			if deferredRows != nil {
 				err = s.persistUtxoRelationsWithDeferredAssets(
@@ -2155,7 +2180,19 @@ func (s *Store) insertUtxoModelCheckedWithRows(
 		params.PaymentScript,
 	}
 	var id int64
-	if s.dialect.Name() == "sqlite" {
+	duplicate := false
+	if ignoreConflict {
+		existing, existErr := s.existingUtxoRefs(
+			ctx, db, []*models.Utxo{utxo},
+		)
+		if existErr != nil {
+			return false, existErr
+		}
+		_, duplicate = existing[utxoIdentityKey(utxo.TxId, utxo.OutputIdx)]
+	}
+	if duplicate {
+		err = sql.ErrNoRows
+	} else if s.dialect.Name() == "sqlite" {
 		query = insertUtxoResultQuery
 		if ignoreConflict {
 			query = insertUtxoResultIgnoreConflictQuery

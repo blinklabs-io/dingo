@@ -52,7 +52,9 @@ func TestApplyPathStatementsArePreparedOnce(t *testing.T) {
 		prepared[q] = true
 	}
 	for _, h := range hot {
-		name, query := h.name, h.query
+		name := h.name
+		// Statements are prepared in their SQLite-expanded form.
+		query, _ := expandUtxoRefs(h.query, nil)
 		require.True(
 			t,
 			prepared[query],

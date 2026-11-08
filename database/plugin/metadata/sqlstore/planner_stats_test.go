@@ -99,25 +99,25 @@ func seedPlannerStatsProbeUtxos(t *testing.T, store *Store) {
 	require.NoError(t, err)
 }
 
-// statsSensitiveSpendSQL is the row-value form of the batched spend UPDATE.
-// Its plan depends on planner statistics: without them SQLite drives it from
-// a deleted_slot-leading index, with them from tx_id_output_idx. It is kept
-// here as a fixed probe so these tests keep observing the statistics refresh
-// whatever shape the production query takes.
+// statsSensitiveSpendSQL is the row-value form of the batched spend UPDATE,
+// keyed on the producer index. Its plan depends on planner statistics:
+// without them SQLite drives it from a deleted_slot-leading index, with them
+// from idx_utxo_producer_output. It is kept here as a fixed probe so these
+// tests keep observing the statistics refresh whatever shape the production
+// query takes.
 const statsSensitiveSpendSQL = `UPDATE utxo
-SET deleted_slot = ?, spent_at_tx_id = ?
-WHERE deleted_slot = 0 AND spent_at_tx_id IS NULL
-  AND (tx_id, output_idx) IN ((?,?),(?,?))
-RETURNING tx_id, output_idx`
+SET deleted_slot = ?, spent_by_tx_id = ?
+WHERE deleted_slot = 0 AND spent_by_tx_id IS NULL AND producer_tx_id IS NOT NULL
+  AND (producer_tx_id, output_idx) IN ((?,?),(?,?))
+RETURNING id`
 
 // consumeBatchPlan returns the plan statsSensitiveSpendSQL gets on conn.
 func consumeBatchPlan(tb testing.TB, conn *sql.Conn) string {
 	tb.Helper()
-	zero := make([]byte, 32)
 	rows, err := conn.QueryContext(
 		context.Background(),
 		"EXPLAIN QUERY PLAN "+statsSensitiveSpendSQL,
-		int64(1), zero, zero, 0, zero, 1,
+		int64(1), int64(1), int64(1), 0, int64(2), 1,
 	)
 	require.NoError(tb, err)
 	defer func() { require.NoError(tb, rows.Close()) }()
@@ -206,7 +206,7 @@ func TestOptimizePlannerStatsRefreshesPooledReadConnections(t *testing.T) {
 		require.Contains(
 			t,
 			plan,
-			"tx_id_output_idx",
+			"idx_utxo_producer_output",
 			"read connection %d: %s",
 			i,
 			plan,
@@ -254,7 +254,7 @@ func TestOptimizePlannerStatsRefreshesAfterUpdateOnlyRun(t *testing.T) {
 		require.Contains(
 			t,
 			plan,
-			"tx_id_output_idx",
+			"idx_utxo_producer_output",
 			"read connection %d: %s",
 			i,
 			plan,
@@ -286,7 +286,7 @@ func TestOptimizePlannerStatsReloadsSharedCacheStatistics(t *testing.T) {
 		require.Contains(
 			t,
 			plan,
-			"tx_id_output_idx",
+			"idx_utxo_producer_output",
 			"connection %d: %s",
 			i,
 			plan,
@@ -519,12 +519,18 @@ func TestRetiringCacheKeepsBorrowedStatementOpen(t *testing.T) {
 
 			retire(store)
 			zero := make([]byte, 32)
-			rows, err := stmt.QueryContext(context.Background(), zero, 0)
+			rows, err := stmt.QueryContext(
+				context.Background(),
+				store.cachedArgs(getLiveUtxoByRefQuery, []any{zero, 0})...,
+			)
 			require.NoError(t, err, "a borrowed statement must stay open")
 			require.NoError(t, rows.Close())
 
 			release()
-			_, err = stmt.QueryContext(context.Background(), zero, 0)
+			_, err = stmt.QueryContext(
+				context.Background(),
+				store.cachedArgs(getLiveUtxoByRefQuery, []any{zero, 0})...,
+			)
 			require.True(
 				t,
 				isClosedStmtErr(err),

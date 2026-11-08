@@ -142,7 +142,7 @@ WHERE spent_by_tx_id IN (?, ?, ?)`,
 		t, store, getUtxoIncludingSpentByRefQuery,
 		make([]byte, 32), int64(0),
 	)
-	require.Contains(t, plan, "tx_id_output_idx", plan)
+	require.Contains(t, plan, "idx_utxo_producer_output", plan)
 	require.NotContains(t, plan, "SCAN", plan)
 }
 

@@ -53,8 +53,9 @@ import (
 //     again on the per-row path, which repairs conflicting rows.
 
 const (
-	// overlayPrefetchChunk keys use two bind parameters each.
-	overlayPrefetchChunk = 499
+	// overlayPrefetchChunk keys use four bind parameters each: the
+	// prefetch query binds every key once per UNION ALL arm.
+	overlayPrefetchChunk = 249
 	// overlayUtxoInsertColumns is the explicit-id utxo insert width; the
 	// dialect's conservative SQLite bound fits 62 rows.
 	overlayUtxoInsertColumns = 16
@@ -382,7 +383,8 @@ func (o *utxoOverlay) stageTransaction(
 // needsTransactions reports whether query names "transaction" or a table
 // with a foreign key to it.
 func (o *utxoOverlay) needsTransactions(query string) bool {
-	if containsIdentifier(query, "transaction") {
+	// A reference predicate resolves the producer through "transaction".
+	if hasUtxoRef(query) || containsIdentifier(query, "transaction") {
 		return true
 	}
 	for _, table := range o.txChildren {
@@ -459,12 +461,20 @@ func (s *Store) overlayTransactionBarrier(
 // consumeUtxosBatchQuery). TestBatchUtxoOverlayStatementPlans pins the plan.
 func overlayPrefetchQuery(keys int) string {
 	values := strings.TrimSuffix(strings.Repeat("(?, ?), ", keys), ", ")
+	const columns = `u.id, u.tx_id, u.output_idx, u.credential_tag, ` +
+		`u.staking_key, u.amount, u.deleted_slot, u.spent_by_tx_id`
 	return `-- name: BatchOverlayPrefetchInputs :many
-SELECT u.id, u.tx_id, u.output_idx, u.credential_tag, u.staking_key,
-       u.amount, u.deleted_slot, u.spent_by_tx_id
+SELECT ` + columns + `
 FROM (VALUES ` + values + `) AS k
-CROSS JOIN utxo AS u INDEXED BY tx_id_output_idx
-  ON u.tx_id = k.column1 AND u.output_idx = k.column2`
+CROSS JOIN "transaction" AS t ON t.hash = k.column1
+CROSS JOIN utxo AS u INDEXED BY idx_utxo_producer_output
+  ON u.producer_tx_id = t.id AND u.output_idx = k.column2
+UNION ALL
+SELECT ` + columns + `
+FROM (VALUES ` + values + `) AS k
+CROSS JOIN utxo AS u INDEXED BY idx_utxo_imported_ref
+  ON u.tx_id = k.column1 AND u.output_idx = k.column2
+WHERE u.transaction_id IS NULL AND u.collateral_return_for_tx_id IS NULL`
 }
 
 func prefetchOverlayInputs(
@@ -494,7 +504,7 @@ func prefetchOverlayInputs(
 			args = append(args, key.Hash, key.Idx)
 		}
 		rows, err := db.QueryContext(
-			ctx, overlayPrefetchQuery(len(chunk)), args...,
+			ctx, overlayPrefetchQuery(len(chunk)), append(args, args...)...,
 		)
 		if err != nil {
 			return err
@@ -864,6 +874,23 @@ func (s *Store) insertOverlayUtxos(
 	) + ")"
 	for start := 0; start < len(outputs); start += perStatement {
 		end := min(start+perStatement, len(outputs))
+		produced := make([]*models.Utxo, 0, end-start)
+		for _, out := range outputs[start:end] {
+			produced = append(produced, &out.model)
+		}
+		// The inserts carry no conflict clause, and no unique index spans a
+		// produced output and an imported row of the same output, so the
+		// latter is looked up here.
+		existing, err := s.existingUtxoRefs(ctx, db, produced)
+		if err != nil {
+			return err
+		}
+		if len(existing) > 0 {
+			return fmt.Errorf(
+				"%w: a produced output is already stored by an import",
+				types.ErrBatchUtxoOverlayConflict,
+			)
+		}
 		args := make([]any, 0, (end-start)*overlayUtxoInsertColumns)
 		for _, out := range outputs[start:end] {
 			params, err := createUtxoParams(&out.model)

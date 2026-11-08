@@ -88,6 +88,8 @@ func connQueryPlan(
 	args ...any,
 ) string {
 	tb.Helper()
+	// Production runs the expanded form (utxo_ref.go).
+	query, args = expandUtxoRefs(query, args)
 	rows, err := conn.QueryContext(
 		context.Background(), "EXPLAIN QUERY PLAN "+query, args...,
 	)

@@ -706,9 +706,10 @@ func TestInsertUtxoBatchConflictAvoidsPerRowInsertAndSelect(t *testing.T) {
 	)
 	require.Equal(
 		t,
-		beforeSelects,
+		beforeSelects+2,
 		counterValue(t, reg, "select"),
-		"the UPDATE RETURNING path should not SELECT the conflicting row ID",
+		"only the two identity probes SELECT: one for the produced outputs and "+
+			"one for the imported output, never the conflicting row ID",
 	)
 	repaired, err := store.GetUtxo(conflictTxID, 0, nil)
 	require.NoError(t, err)

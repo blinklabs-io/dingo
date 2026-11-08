@@ -19,6 +19,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -844,11 +845,16 @@ func TestBatchUtxoOverlayStatementPlans(t *testing.T) {
 			), stage.name+": "+spend)
 		}
 		prefetch := connQueryPlan(
-			t, conn, overlayPrefetchQuery(keys), prefetchArgs...,
+			t, conn, overlayPrefetchQuery(keys),
+			append(slices.Clone(prefetchArgs), prefetchArgs...)...,
 		)
 		require.Contains(t, prefetch,
-			"SEARCH u USING INDEX tx_id_output_idx (tx_id=? AND output_idx=?)",
+			"SEARCH u USING INDEX idx_utxo_producer_output",
 			stage.name+": "+prefetch)
+		require.Contains(t, prefetch,
+			"SEARCH u USING INDEX idx_utxo_imported_ref (tx_id=? AND output_idx=?)",
+			stage.name+": "+prefetch)
+		require.NotContains(t, prefetch, "SCAN u", stage.name+": "+prefetch)
 		mark := connQueryPlan(t, conn, overlayMarkQuery(keys), markArgs...)
 		require.Contains(t, mark, "USING INTEGER PRIMARY KEY (rowid=?)",
 			stage.name+": "+mark)

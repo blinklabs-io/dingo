@@ -568,7 +568,7 @@ func (s *Store) queryRowCached(
 		// invokes Scan.
 		stmt := s.stmtForQueryer(ctx, db, cached) //nolint:sqlclosecheck
 		start := time.Now()
-		row := stmt.QueryRowContext(ctx, args...)
+		row := stmt.QueryRowContext(ctx, s.cachedArgs(query, args)...)
 		release()
 		if s.sqlQueryDuration != nil {
 			s.sqlQueryDuration.WithLabelValues(op, name).
@@ -602,7 +602,7 @@ func (s *Store) execCached(
 		// close.
 		stmt := s.stmtForQueryer(ctx, db, cached) //nolint:sqlclosecheck
 		start := time.Now()
-		result, err := stmt.ExecContext(ctx, args...)
+		result, err := stmt.ExecContext(ctx, s.cachedArgs(query, args)...)
 		release()
 		if s.sqlQueryDuration != nil {
 			s.sqlQueryDuration.WithLabelValues(op, name).
@@ -683,7 +683,7 @@ func (s *Store) queryRowsCached(
 		}
 		stmt := s.stmtForQueryer(ctx, db, cached) //nolint:sqlclosecheck
 		start := time.Now()
-		rows, err := stmt.QueryContext(ctx, args...)
+		rows, err := stmt.QueryContext(ctx, s.cachedArgs(query, args)...)
 		release()
 		if s.sqlQueryDuration != nil {
 			s.sqlQueryDuration.WithLabelValues(op, name).
@@ -694,4 +694,13 @@ func (s *Store) queryRowsCached(
 		}
 	}
 	return db.QueryContext(ctx, query, args...)
+}
+
+// cachedArgs expands the arguments of a statement served from the hot cache,
+// which was prepared from the expanded text (see dialectQueryer.PrepareContext).
+func (s *Store) cachedArgs(query string, args []any) []any {
+	if s.dialect.Name() != "sqlite" {
+		return args
+	}
+	return planUtxoRefs(query).expandArgs(args)
 }

@@ -97,6 +97,7 @@ const (
 	poolSnapshotVrfKeySchemaRelease                     = "pool-snapshot-vrf-key"
 	utxoSpenderTxIDSchemaRelease                        = "utxo-spender-tx-ids"
 	utxoInputEdgeTxIDSchemaRelease                      = "utxo-input-edge-tx-ids"
+	utxoProducerIndexSchemaRelease                      = "utxo-producer-output-index"
 )
 
 const mithrilRewardRepairPendingKey = "mithril_reward_repair_pending"
@@ -274,6 +275,7 @@ var schemaVersions = []struct {
 	{Version: 55, Name: poolSnapshotVrfKeySchemaRelease, Dir: "v55"},
 	{Version: 56, Name: utxoSpenderTxIDSchemaRelease, Dir: "v56"},
 	{Version: 57, Name: utxoInputEdgeTxIDSchemaRelease, Dir: "v57"},
+	{Version: 58, Name: utxoProducerIndexSchemaRelease, Dir: "v58"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
@@ -400,6 +402,16 @@ func registryForDialect(dialect string) ([]Migration, error) {
 		if version.Name == utxoInputEdgeTxIDSchemaRelease {
 			migration.BackfillRevision = "1"
 			migration.Backfill = utxoInputEdgeTxIDBackfill(dialect)
+		}
+		// The expression and partial indexes are SQLite's; PostgreSQL and
+		// MySQL keep the full (tx_id, output_idx) unique index.
+		if version.Name == utxoProducerIndexSchemaRelease {
+			if dialect != "sqlite" {
+				migration.SQL[dialect] = SQL{}
+			} else {
+				migration.BackfillRevision = "1"
+				migration.Backfill = utxoProducerColumnBackfill
+			}
 		}
 		if version.Name == poolDepositHeldSchemaRelease {
 			migration.BackfillRevision = "1"
@@ -2527,4 +2539,30 @@ WHERE id > ? AND id <= ? AND `+c.column+` IS NOT NULL`), last, upper.Int64)
 		}
 		return BatchResult{}, fmt.Errorf("unknown utxo edge phase %q", phase)
 	}
+}
+
+// utxoProducerColumnBackfill adds utxo.producer_tx_id, the producer of an
+// output as COALESCE(transaction_id, collateral_return_for_tx_id). It is a
+// virtual generated column with INTEGER affinity: SQLite does not search an
+// expression index with a joined or subquery key, but searches an indexed
+// column of declared affinity. Adding it rewrites no row.
+func utxoProducerColumnBackfill(
+	ctx context.Context,
+	batch Batch,
+) (BatchResult, error) {
+	var present int
+	if err := batch.Tx.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM pragma_table_xinfo('utxo') WHERE name = 'producer_tx_id'`,
+	).Scan(&present); err != nil {
+		return BatchResult{}, fmt.Errorf("check producer_tx_id: %w", err)
+	}
+	if present == 0 {
+		if _, err := batch.Tx.ExecContext(ctx, `
+ALTER TABLE utxo ADD COLUMN producer_tx_id INTEGER
+    AS (COALESCE(transaction_id, collateral_return_for_tx_id)) VIRTUAL`,
+		); err != nil {
+			return BatchResult{}, fmt.Errorf("add producer_tx_id: %w", err)
+		}
+	}
+	return BatchResult{Cursor: batch.Cursor, Done: true}, nil
 }

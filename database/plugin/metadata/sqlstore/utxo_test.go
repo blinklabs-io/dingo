@@ -211,7 +211,7 @@ func TestGetUtxosByRefsUsesTxIDIndex(t *testing.T) {
 			)
 			t.Logf("tx_id-IN GetUtxosByRefs plan (n=%d): %s", nTerms, newPlan)
 
-			require.Contains(t, newPlan, "tx_id_output_idx")
+			require.Contains(t, newPlan, "idx_utxo_producer_output")
 			require.NotContains(t, newPlan, "idx_utxo_deleted_payment_script")
 			require.NotContains(t, newPlan, "idx_utxo_deleted_staking_amount")
 
@@ -250,7 +250,7 @@ func TestAddressTransactionInputQueryUsesCompositeIndex(t *testing.T) {
 		addressTransactionInputQuery(maxCachedAddressInputQuerySize),
 		args...,
 	)
-	require.Contains(t, plan, "tx_id_output_idx")
+	require.Contains(t, plan, "idx_utxo_producer_output")
 	require.NotContains(t, plan, "SCAN utxo")
 }
 
@@ -512,7 +512,7 @@ func TestMarkUtxosDeletedAtSlotUsesTxIDIndex(t *testing.T) {
 			newPlan := queryPlan(t, store.writeDB, query, args...)
 			t.Logf("tx_id-IN mark lookup plan (n=%d): %s", nTerms, newPlan)
 
-			require.Contains(t, newPlan, "tx_id_output_idx")
+			require.Contains(t, newPlan, "idx_utxo_producer_output")
 			require.NotContains(t, newPlan, "idx_utxo_deleted_payment_script")
 			require.NotContains(t, newPlan, "idx_utxo_deleted_staking_amount")
 
@@ -785,6 +785,7 @@ func analyzeStore(tb testing.TB, store *Store) {
 // queryPlan returns the flattened EXPLAIN QUERY PLAN output for query.
 func queryPlan(tb testing.TB, db *sql.DB, query string, args ...any) string {
 	tb.Helper()
+	query, args = expandUtxoRefs(query, args)
 	rows, err := db.Query("EXPLAIN QUERY PLAN "+query, args...)
 	require.NoError(tb, err)
 	defer func() { require.NoError(tb, rows.Close()) }()
@@ -1450,7 +1451,7 @@ func TestQueryUtxoStakeRefsUsesTxIDIndex(t *testing.T) {
 			require.Contains(
 				t,
 				newPlan,
-				"tx_id_output_idx",
+				"idx_utxo_producer_output",
 				"tx_id-IN lookup must use the unique tx_id/output_idx "+
 					"index: %s",
 				newPlan,
@@ -2460,7 +2461,7 @@ func TestUtxoRefsExactQueryUsesCompositeIndex(t *testing.T) {
 		"SELECT id FROM utxo WHERE "+utxoRefsExactQuery(utxoRefsMaxPerQuery),
 		args...,
 	)
-	require.Contains(t, plan, "tx_id_output_idx")
+	require.Contains(t, plan, "idx_utxo_producer_output")
 	require.NotContains(t, plan, "idx_utxo_deleted_payment_script")
 	require.NotContains(t, plan, "idx_utxo_deleted_staking_amount")
 }

@@ -835,23 +835,35 @@ func (s *Store) importUtxos(
 					return err
 				}
 				var id int64
-				err = s.queryRowCached(ctx, db, insertUtxoQueryIgnoreConflict,
-					params.TransactionID,
-					params.CollateralReturnForTxID,
-					params.TxID,
-					params.PaymentKey,
-					params.StakingKey,
-					params.CredentialTag,
-					params.DatumHash,
-					nullBytes(params.SpentAtTxID),
-					nullBytes(params.ReferencedByTxID),
-					nullBytes(params.CollateralByTxID),
-					params.AddedSlot,
-					params.DeletedSlot,
-					params.Amount,
-					params.OutputIdx,
-					params.PaymentScript,
-				).Scan(&id)
+				existing, err := s.existingUtxoRefs(
+					ctx, db, []*models.Utxo{&item},
+				)
+				if err != nil {
+					return err
+				}
+				if _, duplicate := existing[utxoIdentityKey(
+					item.TxId, item.OutputIdx,
+				)]; duplicate {
+					err = sql.ErrNoRows
+				} else {
+					err = s.queryRowCached(ctx, db, insertUtxoQueryIgnoreConflict,
+						params.TransactionID,
+						params.CollateralReturnForTxID,
+						params.TxID,
+						params.PaymentKey,
+						params.StakingKey,
+						params.CredentialTag,
+						params.DatumHash,
+						nullBytes(params.SpentAtTxID),
+						nullBytes(params.ReferencedByTxID),
+						nullBytes(params.CollateralByTxID),
+						params.AddedSlot,
+						params.DeletedSlot,
+						params.Amount,
+						params.OutputIdx,
+						params.PaymentScript,
+					).Scan(&id)
+				}
 				if errors.Is(err, sql.ErrNoRows) {
 					id, err = q.GetUtxoIDByRef(
 						ctx,
@@ -2652,7 +2664,7 @@ func (s *Store) GetUtxosWithHistory(
 		predicate += ")"
 	}
 	if len(query.TransactionID) > 0 {
-		predicate += " AND utxo.tx_id = ?"
+		predicate += " AND utxo.tx_id IN (?)"
 		args = append(args, query.TransactionID)
 	}
 	if query.OutputIndex != nil {
