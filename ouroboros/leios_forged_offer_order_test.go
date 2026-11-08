@@ -129,7 +129,9 @@ func TestUnannouncedForgedEndorserBlockIsNeverOffered(t *testing.T) {
 	require.NoError(t, o.BroadcastEndorserBlock(
 		ebPoint.Slot, ebPoint.Hash, ebRaw, nil,
 	))
-	_, otherRaw := testLeiosEndorserBlockRaw(t, 2)
+	otherPoint, otherRaw := testLeiosEndorserBlockRaw(t, 2)
+	otherPoint.Slot = 1
+	require.NoError(t, o.storeLeiosEndorserBlock(otherPoint, otherRaw, nil, leiosStoreAuthoritative))
 	o.EnqueueLeiosBlockAnnouncement(testDijkstraHeaderAnnouncing(t, otherRaw))
 	entries := drainLeiosNotify(o, conn)
 	require.NotEmpty(t, entries, "the unrelated announcement must be queued")

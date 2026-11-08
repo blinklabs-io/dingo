@@ -100,6 +100,12 @@ type leiosAnnouncement struct {
 	electionKey string
 }
 
+type leiosPendingRelayAnnouncement struct {
+	key       string
+	raw       []byte
+	expiresAt time.Time
+}
+
 type leiosDeferredAnnouncement struct {
 	raw    []byte
 	source string
@@ -2701,6 +2707,22 @@ func (o *Ouroboros) pruneLeiosAnnouncements() {
 			delete(o.leiosAnnouncements, key)
 		}
 	}
+	o.leiosMu.Lock()
+	for point, pending := range o.leiosRelayPendingAnnouncements {
+		kept := pending[:0]
+		for _, announcement := range pending {
+			if _, valid := o.leiosAnnouncements[announcement.key]; valid {
+				kept = append(kept, announcement)
+			}
+		}
+		clear(pending[len(kept):])
+		if len(kept) == 0 {
+			delete(o.leiosRelayPendingAnnouncements, point)
+		} else {
+			o.leiosRelayPendingAnnouncements[point] = kept
+		}
+	}
+	o.leiosMu.Unlock()
 	o.leiosAnnouncementSizes = make(
 		map[string]uint64,
 		len(o.leiosAnnouncements),
@@ -2873,6 +2895,30 @@ func (o *Ouroboros) recordLeiosAnnouncementLocked(
 	}
 	slots[slot] = struct{}{}
 	if relay {
+		data, available := o.lookupLeiosEndorserBlock(slot, ebHash.Bytes())
+		if !available || data == nil || !data.hasManifest() {
+			var expiresAt time.Time
+			if !isNilInterface(o.leiosAnnouncementLedger) {
+				start, err := o.leiosAnnouncementLedger.SlotToTime(slot)
+				if err != nil {
+					return err
+				}
+				expiresAt = start.Add(leiosNotifyMaxAnnouncementAge)
+			}
+			o.leiosMu.Lock()
+			if o.leiosRelayPendingAnnouncements == nil {
+				o.leiosRelayPendingAnnouncements = make(map[string][]leiosPendingRelayAnnouncement)
+			}
+			pointKey := leiosBlockKey(slot, ebHash.Bytes())
+			o.leiosRelayPendingAnnouncements[pointKey] = append(o.leiosRelayPendingAnnouncements[pointKey], leiosPendingRelayAnnouncement{key: key, raw: o.leiosAnnouncements[key].raw, expiresAt: expiresAt})
+			// A persistent reload can populate the cache while the lookup above
+			// misses. Recheck under the cache lock before parking the header.
+			if current := o.leiosEndorserBlocks[pointKey]; current != nil && current.hasManifest() {
+				o.publishPendingLeiosRelayAnnouncementsLocked(pointKey)
+			}
+			o.leiosMu.Unlock()
+			return nil
+		}
 		// A forged endorser block is offered only now, behind the header
 		// that announces it, in the same log append so a peer registering
 		// concurrently cannot receive the offers without the header.
@@ -2955,6 +3001,18 @@ func (o *Ouroboros) EnqueueLeiosBlockAnnouncement(raw []byte) {
 			err,
 		)
 	}
+}
+
+// The caller holds leiosMu. This path also runs during persistent cache reload,
+// which can already hold leiosAnnouncementsMu, so it never takes that mutex.
+func (o *Ouroboros) publishPendingLeiosRelayAnnouncementsLocked(key string) {
+	for _, announcement := range o.leiosRelayPendingAnnouncements[key] {
+		if !announcement.expiresAt.IsZero() && !time.Now().Before(announcement.expiresAt) {
+			continue
+		}
+		o.leiosEBLog.append(leiosForgedEBEntry{announcement: announcement.raw})
+	}
+	delete(o.leiosRelayPendingAnnouncements, key)
 }
 
 func (o *Ouroboros) leiosnotifyServerRequestNext(

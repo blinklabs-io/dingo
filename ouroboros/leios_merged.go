@@ -812,6 +812,9 @@ func (o *Ouroboros) enqueueLeiosRelayOffers(
 		o.leiosMu.Unlock()
 		return
 	}
+	if current.hasManifest() {
+		o.publishPendingLeiosRelayAnnouncementsLocked(key)
+	}
 	updated := *current
 	// An intent-only entry has no manifest to size the offer with. Receivers
 	// reject a zero-size offer by closing the connection, so defer until the
