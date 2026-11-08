@@ -238,6 +238,27 @@ func (d *Database) ClearDanglingDRepDelegations(
 	return n, nil
 }
 
+// ReconcileImportedDRepDelegations preserves authoritative account targets
+// at the import anchor while applying the PV10 cleanup to replay-only rows.
+func (d *Database) ReconcileImportedDRepDelegations(
+	ctx context.Context,
+	atSlot uint64,
+	txn *Txn,
+) error {
+	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
+		if err := d.metadata.ReconcileImportedDRepDelegations(
+			atSlot, txn.Metadata(),
+		); err != nil {
+			return fmt.Errorf(
+				"reconcile imported DRep memberships at slot %d: %w",
+				atSlot,
+				err,
+			)
+		}
+		return nil
+	})
+}
+
 // RestoreAccountStateAtSlot reverts account delegation state to the given
 // slot. For accounts modified after the slot, this restores their Pool and
 // Drep delegations to the state they had at the given slot, or deletes them
