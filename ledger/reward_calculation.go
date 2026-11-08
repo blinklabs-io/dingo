@@ -75,6 +75,42 @@ func (ls *LedgerState) applyStakeRewards(ctx context.Context,
 	return haltErr
 }
 
+// shouldApplyStakeRewardUpdate reports whether cardano-ledger's RUPD rule
+// could have started during the epoch being closed. RUPD runs only while
+// ticking a block, and slots through start + 4k/f are too early, so NEWEPOCH
+// sees no update when the epoch has no later block.
+func (ls *LedgerState) shouldApplyStakeRewardUpdate(
+	txn *database.Txn,
+	endedEpoch models.Epoch,
+) (bool, error) {
+	if endedEpoch.EraId == eras.ByronEraDesc.Id ||
+		endedEpoch.LengthInSlots == 0 {
+		return false, nil
+	}
+	epochLength := uint64(endedEpoch.LengthInSlots)
+	if endedEpoch.StartSlot > math.MaxUint64-epochLength {
+		return false, fmt.Errorf(
+			"reward update epoch %d slot range overflows uint64",
+			endedEpoch.EpochId,
+		)
+	}
+	stabilityWindow := ls.rewardUpdateStabilityWindow()
+	if stabilityWindow >= epochLength-1 {
+		return false, nil
+	}
+	startAfterSlot := endedEpoch.StartSlot + stabilityWindow
+	tip, err := ls.db.GetTip(txn)
+	if err != nil {
+		return false, fmt.Errorf(
+			"get tip for reward update epoch %d: %w",
+			endedEpoch.EpochId,
+			err,
+		)
+	}
+	return tip.Point.Slot > startAfterSlot &&
+		tip.Point.Slot < endedEpoch.StartSlot+epochLength, nil
+}
+
 // rewardUpdateHaltError is a reward update that cannot be applied at its
 // boundary. It is an errHaltLedgerPipeline, so the pipeline does not retry it.
 type rewardUpdateHaltError struct {

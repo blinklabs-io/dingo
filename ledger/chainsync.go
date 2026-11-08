@@ -9791,6 +9791,12 @@ func (ls *LedgerState) processEpochRolloverForTargetWithClassicPParamsContext(
 
 	if err := ls.timeRolloverPhase(
 		currentEpoch.EpochId+1, "reward_apply", func() error {
+			applyUpdate, err := ls.shouldApplyStakeRewardUpdate(
+				txn, currentEpoch,
+			)
+			if err != nil || !applyUpdate {
+				return err
+			}
 			return ls.applyStakeRewards(ctx,
 				txn, currentEpoch.EpochId+1, epochStartSlot,
 			)

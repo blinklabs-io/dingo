@@ -6282,6 +6282,93 @@ func TestProcessEpochRolloverSnapshotEventUsesProtocolMajor(t *testing.T) {
 	require.Equal(t, uint(7), got.ProtocolVersion)
 }
 
+func TestProcessEpochRolloverRequiresPostRUPDBlockForRewardUpdate(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	const rupdStartAfterSlot = uint64(34_560)
+	for _, tc := range []struct {
+		name          string
+		lastBlockSlot uint64
+		wantTreasury  uint64
+		wantReserves  uint64
+	}{
+		{
+			name:          "no block after window",
+			lastBlockSlot: rupdStartAfterSlot,
+			wantTreasury:  0,
+			wantReserves:  previewGenesisReserves,
+		},
+		{
+			name:          "first valid post-window block",
+			lastBlockSlot: rupdStartAfterSlot + 1,
+			wantTreasury:  previewEpoch1Treasury,
+			wantReserves:  previewEpoch1Reserves,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ls, db := newPreviewRewardPotsTestLedger(t)
+			meta := db.Metadata()
+			require.Equal(
+				t,
+				rupdStartAfterSlot,
+				ls.rewardUpdateStabilityWindow(),
+			)
+			require.NoError(t, meta.SetNetworkState(
+				0, previewGenesisReserves, 0, nil,
+			))
+			require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+				Epoch:        0,
+				Reserves:     types.Uint64(previewGenesisReserves),
+				CapturedSlot: 0,
+			}, nil))
+
+			blockHash := bytes.Repeat([]byte{byte(tc.lastBlockSlot)}, 32)
+			require.NoError(t, db.SetTip(ochainsync.Tip{
+				Point: ocommon.NewPoint(tc.lastBlockSlot, blockHash),
+			}, nil))
+			currentEpoch, err := meta.GetEpoch(0, nil)
+			require.NoError(t, err)
+			require.NotNil(t, currentEpoch)
+			pparams := &alonzo.AlonzoProtocolParameters{
+				NOpt:             150,
+				A0:               rewardCalcRat(3, 10),
+				Rho:              rewardCalcRat(3, 1_000),
+				Tau:              rewardCalcRat(1, 5),
+				Decentralization: rewardCalcRat(1, 1),
+				ProtocolMajor:    6,
+				ProtocolMinor:    0,
+			}
+
+			txn := db.Transaction(t.Context(), true)
+			require.NoError(t, txn.Do(func(txn *database.Txn) error {
+				_, err := ls.processEpochRollover(
+					t.Context(),
+					txn,
+					*currentEpoch,
+					eras.AlonzoEraDesc,
+					pparams,
+				)
+				return err
+			}))
+
+			state, err := meta.GetNetworkState(nil)
+			require.NoError(t, err)
+			require.NotNil(t, state)
+			if got := uint64(state.Treasury); got != tc.wantTreasury {
+				t.Fatalf(
+					"reward update trigger mismatch: treasury = %d, want %d",
+					got,
+					tc.wantTreasury,
+				)
+			}
+			require.Equal(t, tc.wantReserves, uint64(state.Reserves))
+		})
+	}
+}
+
 // TestPrecomputeStakeRewardsAsyncPathMatchesSingleTransactionPath verifies
 // that splitting the async EventBus precompute path
 // (precomputeStakeRewardsAfterEpochTransition) into a read-only calculation

@@ -20846,10 +20846,13 @@ POOLREAP precedes SNAP.
    update derived from the mark snapshot three epochs back — credit spendable
    rewards through `account_reward_delta`, return undistributed rewards to
    reserves, and route unspendable rewards to the treasury before governance
-   reads it. No round runs at epoch 0 or at a boundary whose ended or
-   performance epoch is Byron. Any other boundary whose required inputs are
-   absent (ADA pots, mark snapshot, reward stake inputs, or performance-epoch
-   block counts) fails with `errRequiredStakeRewardBasisUnavailable`, which
+   reads it. RUPD starts only when a block ticks the ledger after the ended
+   epoch's `start + 4k/f` slot. When no block lands after that point, NEWEPOCH
+   sees no reward update and the boundary skips the round. No round runs at
+   epoch 0 or at a boundary whose ended or performance epoch is Byron. Any
+   triggered boundary whose required inputs are absent (ADA pots, mark
+   snapshot, reward stake inputs, or performance-epoch block counts) fails
+   with `errRequiredStakeRewardBasisUnavailable`, which
    names the new epoch and the missing input and points the operator at
    re-running Mithril sync or ledger-state import. `applyStakeRewards` wraps it
    in an `errHaltLedgerPipeline` error and calls `FatalErrorFunc`, so the
