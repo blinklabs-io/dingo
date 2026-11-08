@@ -14038,7 +14038,12 @@ Ledger-state import also persists `NewEpochState.pool-distr` as
 `pool_stake_snapshot` rows with snapshot type `"actv"` for the imported epoch.
 Those rows store the consensus stake fraction as `total_stake /
 stake_denominator` and are required for block-header leader eligibility checks
-until the node leaves the imported epoch. The regular Mark snapshot window is
+until the node leaves the imported epoch. They also retain the entry's
+`individualPoolStakeVrf` hash, and imported Mark/Set/Go rows retain the VRF
+hash from their pool parameters. Header validation reads that frozen key before
+registration history, so a rotation present in the imported current pool state
+cannot retroactively change the key that the certified snapshot elected. The
+regular Mark snapshot window is
 kept for epoch-offset consumers, but it does not substitute for `"actv"` rows in
 the imported epoch. The importer preserves the certified
 `NewEpochState.SnapShots` provenance on that window: each Dingo Mark row records

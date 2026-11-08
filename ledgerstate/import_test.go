@@ -1535,6 +1535,7 @@ func TestPersistImportedActivePoolDistribution(t *testing.T) {
 
 	poolKeyHash := make([]byte, 28)
 	poolKeyHash[0] = 0x4a
+	vrfKeyHash := bytes.Repeat([]byte{0x9b}, 32)
 	publicKey := bytes.Repeat([]byte{0x7b}, 96)
 	possessionProof := bytes.Repeat([]byte{0x8c}, 48)
 	rows := ActivePoolDistributionSnapshots(
@@ -1543,7 +1544,7 @@ func TestPersistImportedActivePoolDistribution(t *testing.T) {
 				PoolKeyHash:             poolKeyHash,
 				StakeNumerator:          3,
 				StakeDenominator:        10,
-				VrfKeyHash:              bytes.Repeat([]byte{0x9b}, 32),
+				VrfKeyHash:              vrfKeyHash,
 				LeiosKeyPublic:          publicKey,
 				LeiosKeyPossessionProof: possessionProof,
 			},
@@ -1575,6 +1576,7 @@ func TestPersistImportedActivePoolDistribution(t *testing.T) {
 	require.Equal(t, uint64(3), uint64(stored.TotalStake))
 	require.Equal(t, uint64(10), uint64(stored.StakeDenominator))
 	require.Equal(t, uint64(127178646), stored.CapturedSlot)
+	require.Equal(t, vrfKeyHash, stored.VrfKeyHash)
 	require.Equal(t, publicKey, stored.LeiosKeyPublic)
 	require.Equal(t, possessionProof, stored.LeiosKeyPossessionProof)
 }
@@ -1589,6 +1591,7 @@ func TestPersistImportedMarkSnapshotPreservesLeiosKey(t *testing.T) {
 	})
 
 	poolKeyHash := bytes.Repeat([]byte{0x4d}, 28)
+	vrfKeyHash := bytes.Repeat([]byte{0x4e}, 32)
 	publicKey := bytes.Repeat([]byte{0x5e}, 96)
 	possessionProof := bytes.Repeat([]byte{0x6f}, 48)
 	rows := []*models.PoolStakeSnapshot{{
@@ -1598,6 +1601,7 @@ func TestPersistImportedMarkSnapshotPreservesLeiosKey(t *testing.T) {
 		TotalStake:              123,
 		DelegatorCount:          1,
 		CapturedSlot:            456,
+		VrfKeyHash:              vrfKeyHash,
 		LeiosKeyPublic:          publicKey,
 		LeiosKeyPossessionProof: possessionProof,
 	}}
@@ -1620,6 +1624,7 @@ func TestPersistImportedMarkSnapshotPreservesLeiosKey(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.NotNil(t, stored)
+	require.Equal(t, vrfKeyHash, stored.VrfKeyHash)
 	require.Equal(t, publicKey, stored.LeiosKeyPublic)
 	require.Equal(t, possessionProof, stored.LeiosKeyPossessionProof)
 

@@ -2862,12 +2862,11 @@ func (ls *LedgerState) shouldUseImportedActivePoolDistributionAtSlot(
 // rejects every block the pool makes for the rest of the epoch it rotated in,
 // and the reject/rewind/refetch cycle does not converge.
 //
-// cardano-ledger avoids the question by carrying the key in the pool
-// distribution itself (IndividualPoolStake.individualPoolStakeVrf), captured
-// with the stake. pool_stake_snapshot has no such column -- it already freezes
-// the optional Leios voting key at this same boundary and for this same reason
-// -- so the key is resolved from registration history as of the snapshot's
-// parameter cutoff instead (see electingPoolParamsCutoffSlot), which is
+// cardano-ledger carries the key in the pool distribution itself
+// (IndividualPoolStake.individualPoolStakeVrf), captured with the stake.
+// pool_stake_snapshot does the same for imported snapshots. Rows without that
+// field resolve the key from registration history as of the
+// snapshot's parameter cutoff (see electingPoolParamsCutoffSlot), which is
 // equivalent for a chain whose certificate history is intact.
 //
 // Falling back to the live registration is safe only when no snapshot is
@@ -2910,6 +2909,17 @@ func (ls *LedgerState) electingVrfKeyHashFromSnapshotWithTxn(
 	snap electingSnapshot,
 	txn *database.Txn,
 ) (lcommon.Blake2b256, bool, error) {
+	if snap.row != nil && len(snap.row.VrfKeyHash) > 0 {
+		hash, err := lcommon.NewBlake2b256Checked(snap.row.VrfKeyHash)
+		if err != nil {
+			return lcommon.Blake2b256{}, false, headerStateLookupErr(fmt.Errorf(
+				"snapshot VRF key hash for pool %x: %w",
+				poolKeyHash[:],
+				err,
+			))
+		}
+		return hash, true, nil
+	}
 	cutoffSlot, capturedSlot, ok, err := ls.electingPoolParamsCutoffSlotFromSnapshot(
 		snap,
 		epochCache,
@@ -2935,39 +2945,11 @@ func (ls *LedgerState) electingVrfKeyHashFromSnapshotWithTxn(
 				return hash, true, nil
 			}
 		}
-		if ls.mithrilLedgerSlot != 0 && cutoffSlot == ls.mithrilLedgerSlot &&
-			capturedSlot == ls.mithrilLedgerSlot {
-			// Imported active distributions precede promotion even in Dijkstra;
-			// the two anchor rows describe current and deferred parameters.
-			mithrilEpoch, epochErr := epochForSlotInCache(
-				epochCache,
-				capturedSlot,
-			)
-			if epochErr != nil {
-				return lcommon.Blake2b256{}, false, headerStateLookupErr(
-					epochErr,
-				)
-			}
-			registrations, registrationErr := ls.db.Metadata().
-				GetPoolRegistrationsEffectiveForEpoch(
-					[]lcommon.PoolKeyHash{poolKeyHash},
-					mithrilEpoch.StartSlot,
-					mithrilEpoch.EpochId,
-					capturedSlot,
-					txn.Metadata(),
-				)
-			err = registrationErr
-			if len(registrations) == 1 {
-				vrfKeyHash = registrations[0].VrfKeyHash
-				found = true
-			}
-		} else {
-			vrfKeyHash, found, err = ls.db.Metadata().GetPoolVrfKeyHashAtSlot(
-				poolKeyHash[:],
-				cutoffSlot,
-				txn.Metadata(),
-			)
-		}
+		vrfKeyHash, found, err = ls.db.Metadata().GetPoolVrfKeyHashAtSlot(
+			poolKeyHash[:],
+			cutoffSlot,
+			txn.Metadata(),
+		)
 		if err != nil {
 			return lcommon.Blake2b256{}, false, headerStateLookupErr(err)
 		}
@@ -3022,65 +3004,6 @@ func (ls *LedgerState) electingVrfKeyHashFromSnapshotWithTxn(
 				ls.electingVrfMemo.put(memoGeneration, memoKey, hash)
 			}
 			return hash, true, nil
-		}
-		// Both lookups missed. That is ordinarily the unanswerable gap the
-		// error below reports, but it is also exactly what a Mithril
-		// bootstrap produces for the epoch boundary the node crosses right
-		// after import: the snapshot import writes only the pool's live
-		// registration, stamped at the import slot, and never replays the
-		// certificate history that produced it. So a pool that has in fact
-		// been continuously registered the whole time has no row at or
-		// before a cutoff/capture slot that predates the import.
-		//
-		// mithrilLedgerSlot pins that import slot for the life of the
-		// process (set once at startup, like the other reads of this field
-		// in this file), so a capture at or below it is diagnostic: the
-		// snapshot that elected this pool was captured no later than the
-		// bootstrap boundary, which only a bootstrap-created gap explains.
-		// Falling back to the registration effective at import is the same
-		// trust electingVrfKeyHashFromSnapshot already extends when ok is false --
-		// no snapshot at all -- applied to the narrower case of a snapshot
-		// whose registration history the import could not carry. It is not
-		// the general "no history found" fallback that was removed: outside
-		// this bootstrap-anchor window, a genuine gap still hard-rejects. The
-		// epoch-effective lookup also preserves imported future parameters as
-		// staged until their boundary instead of selecting the latest row.
-		if ls.mithrilLedgerSlot != 0 && capturedSlot <= ls.mithrilLedgerSlot {
-			mithrilEpoch, epochErr := epochForSlotInCache(
-				epochCache,
-				ls.mithrilLedgerSlot,
-			)
-			if epochErr != nil {
-				return lcommon.Blake2b256{}, false, headerStateLookupErr(epochErr)
-			}
-			registrations, registrationErr := ls.db.Metadata().
-				GetPoolRegistrationsEffectiveForEpoch(
-					[]lcommon.PoolKeyHash{poolKeyHash},
-					mithrilEpoch.StartSlot,
-					mithrilEpoch.EpochId,
-					ls.mithrilLedgerSlot,
-					txn.Metadata(),
-				)
-			if registrationErr != nil {
-				return lcommon.Blake2b256{}, false, headerStateLookupErr(
-					registrationErr,
-				)
-			}
-			if len(registrations) == 1 && len(registrations[0].VrfKeyHash) > 0 {
-				hash, hashErr := lcommon.NewBlake2b256Checked(
-					registrations[0].VrfKeyHash,
-				)
-				if hashErr != nil {
-					return lcommon.Blake2b256{}, false, headerStateLookupErr(
-						fmt.Errorf(
-							"imported VRF key hash for pool %x: %w",
-							poolKeyHash[:],
-							hashErr,
-						),
-					)
-				}
-				return hash, true, nil
-			}
 		}
 		return lcommon.Blake2b256{}, false, fmt.Errorf(
 			"%w at cutoff slot %d or capture slot %d for pool %x",

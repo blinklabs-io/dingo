@@ -3129,6 +3129,7 @@ func ActivePoolDistributionSnapshots(
 			TotalStake:       types.Uint64(pool.StakeNumerator),
 			StakeDenominator: types.Uint64(pool.StakeDenominator),
 			CapturedSlot:     capturedSlot,
+			VrfKeyHash:       slices.Clone(pool.VrfKeyHash),
 			LeiosKeyPublic: append(
 				[]byte(nil), pool.LeiosKeyPublic...,
 			),

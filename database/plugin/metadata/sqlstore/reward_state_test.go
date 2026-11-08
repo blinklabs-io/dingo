@@ -202,6 +202,7 @@ func TestStakeCalculationVersionRoundTrip(t *testing.T) {
 		SnapshotType:              models.PoolStakeSnapshotTypeMark,
 		PoolKeyHash:               poolKey,
 		CalculationVersion:        models.RewardStakeCalculationVersion,
+		VrfKeyHash:                bytes.Repeat([]byte{0x44}, 32),
 		LeiosKeyPublic:            []byte{1, 2, 3},
 		LeiosKeyPossessionProof:   []byte{4, 5, 6},
 		LeiosKeyRegistrationEpoch: &keyRegistrationEpoch,
@@ -220,6 +221,7 @@ func TestStakeCalculationVersionRoundTrip(t *testing.T) {
 		models.RewardStakeCalculationVersion,
 		gotPool.CalculationVersion,
 	)
+	require.Equal(t, poolSnapshot.VrfKeyHash, gotPool.VrfKeyHash)
 	require.Equal(
 		t,
 		poolSnapshot.LeiosKeyPublic,

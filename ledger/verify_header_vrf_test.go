@@ -627,11 +627,9 @@ func TestLeaderEligibilityStakeSkipDecisionUsesTheSuppliedEpochCache(
 		"not skipping means the threshold's denominator is actually read")
 }
 
-// TestElectingVrfKeyHashResolvesBelowMithrilBootstrapAnchor is the
-// Mithril-anchor regression: a Mithril-bootstrapped node wedges at its first
-// epoch boundary because the pool's only registration row is stamped at the
-// bootstrap anchor slot, which is later than the parameter cutoff and
-// stake-snapshot capture slots the electing snapshot resolves against.
+// TestElectingVrfKeyHashUsesFrozenMithrilSnapshotKey is the Mithril rotation
+// regression: the current pool registration at the import anchor can carry a
+// newer key than the certified snapshot that elected the block.
 //
 // A Mithril snapshot import writes the pool's live-at-anchor registration
 // (ImportPool) -- it never replays the certificate history that produced it
@@ -641,15 +639,9 @@ func TestLeaderEligibilityStakeSkipDecisionUsesTheSuppliedEpochCache(
 // the same anchor, the way LedgerState restores it from the persisted
 // mithril_ledger_slot sync-state key at startup.
 //
-// Before the fix, both GetPoolVrfKeyHashAtSlot(cutoff) and
-// GetPoolEarliestVrfKeyHashAtSlot(capture) miss -- the only row about this
-// pool is time-stamped after both slots -- and electingVrfKeyHash returns
-// errVrfKeyRegistrationHistoryUnavailable. That is what wedges the node: the
-// error is unconditional once the ledger tip has caught up to the checked
-// slot, which is exactly the epoch-boundary case being validated live. The
-// fix recognizes capturedSlot <= mithrilLedgerSlot as diagnostic of that
-// bootstrap gap and falls back to the pool's live registration instead.
-func TestElectingVrfKeyHashResolvesBelowMithrilBootstrapAnchor(t *testing.T) {
+// The imported snapshot is the reference implementation's PoolDistr, whose
+// IndividualPoolStake freezes the VRF key with the stake distribution.
+func TestElectingVrfKeyHashUsesFrozenMithrilSnapshotKey(t *testing.T) {
 	t.Parallel()
 
 	nonce := bytes.Repeat([]byte{0x07}, 32)
@@ -658,21 +650,23 @@ func TestElectingVrfKeyHashResolvesBelowMithrilBootstrapAnchor(t *testing.T) {
 	ls.epochCache = previewEpochs(35, 39, nonce)
 
 	pool := lcommon.PoolKeyHash(bytes.Repeat([]byte{0x11}, 28))
-	vrfKey := bytes.Repeat([]byte{0xB5}, 32)
+	electedKey := bytes.Repeat([]byte{0xA4}, 32)
+	currentKey := bytes.Repeat([]byte{0xB5}, 32)
 
 	// The bootstrap's only registration row for this pool: no history below
 	// it, matching a Mithril import that never saw the pool's real,
 	// pre-anchor registration certificate.
 	const anchorSlot = 3_200_000
-	seedPoolRegistrationAtSlot(t, db, pool[:], vrfKey, anchorSlot)
+	seedPoolRegistrationAtSlot(t, db, pool[:], currentKey, anchorSlot)
 	ls.mithrilLedgerSlot = anchorSlot
 	ls.publishSnapshotsLocked()
 
 	// mark(37) elects epoch 38. Its capture (3_196_799) and the resulting
 	// parameter cutoff (3_110_399, the last slot of epoch 36) both precede
 	// the anchor, reproducing the reported gap.
-	seedPoolStakeSnapshotOfTypeAtSlot(t, db, 37,
-		models.PoolStakeSnapshotTypeMark, pool[:], 1_000, 10_000, 3_196_799)
+	seedPoolStakeSnapshotWithVrfKeyAtSlot(t, db, 37,
+		models.PoolStakeSnapshotTypeMark, pool[:], electedKey,
+		1_000, 10_000, 3_196_799)
 
 	cutoff, captured, ok, err := ls.electingPoolParamsCutoffSlot(
 		tb.block, 38, pool,
@@ -685,17 +679,39 @@ func TestElectingVrfKeyHashResolvesBelowMithrilBootstrapAnchor(t *testing.T) {
 		"the fixture must reproduce the reported gap: capture below the anchor")
 
 	gotKey, ok, err := ls.electingVrfKeyHash(tb.block, 38, pool)
-	require.NoError(t, err,
-		"a bootstrap-only registration below the anchor must not raise "+
-			"errVrfKeyRegistrationHistoryUnavailable for a pool that has, "+
-			"in fact, always been registered")
+	require.NoError(t, err)
 	require.True(t, ok)
-	assert.Equal(t, vrfKey, gotKey.Bytes())
+	assert.Equal(t, electedKey, gotKey.Bytes())
 }
 
-// TestElectingVrfKeyHashUsesCurrentImportedParamsBeforePromotion verifies that
-// the two same-slot rows imported for current and future pool parameters retain
-// their ledger ordering during the bootstrap history fallback.
+func TestElectingVrfKeyHashDoesNotGuessForLegacyMithrilSnapshot(t *testing.T) {
+	t.Parallel()
+
+	nonce := bytes.Repeat([]byte{0x07}, 32)
+	tb := createTestBlock(t, [32]byte{61}, 61, tamperNone)
+	ls, db := newEligibilityTestLedger(t, nonce)
+	ls.epochCache = previewEpochs(35, 39, nonce)
+
+	pool := lcommon.PoolKeyHash(bytes.Repeat([]byte{0x11}, 28))
+	currentKey := bytes.Repeat([]byte{0xB5}, 32)
+	const anchorSlot = 3_200_000
+	seedPoolRegistrationAtSlot(t, db, pool[:], currentKey, anchorSlot)
+	ls.mithrilLedgerSlot = anchorSlot
+	ls.publishSnapshotsLocked()
+
+	// A row created before frozen VRF keys were persisted cannot establish
+	// whether the anchor registration rotated after this snapshot elected.
+	seedPoolStakeSnapshotOfTypeAtSlot(t, db, 37,
+		models.PoolStakeSnapshotTypeMark, pool[:], 1_000, 10_000, 3_196_799)
+
+	_, _, err := ls.electingVrfKeyHash(tb.block, 38, pool)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errVrfKeyRegistrationHistoryUnavailable)
+}
+
+// TestElectingVrfKeyHashUsesCurrentImportedParamsBeforePromotion is the
+// unchanged-key control: a snapshot frozen with the current key still resolves
+// that key when a future registration is staged at the same anchor.
 func TestElectingVrfKeyHashUsesCurrentImportedParamsBeforePromotion(
 	t *testing.T,
 ) {
@@ -719,8 +735,9 @@ func TestElectingVrfKeyHashUsesCurrentImportedParamsBeforePromotion(
 	ls.mithrilLedgerSlot = anchorSlot
 	ls.publishSnapshotsLocked()
 
-	seedPoolStakeSnapshotOfTypeAtSlot(t, db, 37,
-		models.PoolStakeSnapshotTypeMark, pool[:], 1_000, 10_000, 3_196_799)
+	seedPoolStakeSnapshotWithVrfKeyAtSlot(t, db, 37,
+		models.PoolStakeSnapshotTypeMark, pool[:], currentKey,
+		1_000, 10_000, 3_196_799)
 
 	gotKey, ok, err := ls.electingVrfKeyHash(tb.block, 38, pool)
 	require.NoError(t, err)
@@ -747,8 +764,8 @@ func TestElectingVrfKeyHashDefersImportedRotationInDijkstra(t *testing.T) {
 	seedPoolRegistrationAtSlotAndIndex(
 		t, db, pool[:], futureKey, anchorSlot, 1,
 	)
-	seedPoolStakeSnapshotOfTypeAtSlot(t, db, 31,
-		models.PoolStakeSnapshotTypeActive, pool[:], 1_000, 10_000,
+	seedPoolStakeSnapshotWithVrfKeyAtSlot(t, db, 31,
+		models.PoolStakeSnapshotTypeActive, pool[:], currentKey, 1_000, 10_000,
 		anchorSlot)
 	tb := createTestBlock(t, [32]byte{60}, 60, tamperNone)
 	tb.block.slot = anchorSlot + 1
@@ -765,8 +782,8 @@ func TestElectingVrfKeyHashDefersImportedRotationInDijkstra(t *testing.T) {
 	require.Equal(t, currentKey, gotKey.Bytes())
 
 	// A later boundary promotes the staged registration before Dijkstra SNAP.
-	seedPoolStakeSnapshotOfTypeAtSlot(t, db, 32,
-		models.PoolStakeSnapshotTypeMark, pool[:], 1_000, 10_000,
+	seedPoolStakeSnapshotWithVrfKeyAtSlot(t, db, 32,
+		models.PoolStakeSnapshotTypeMark, pool[:], futureKey, 1_000, 10_000,
 		32*musashiEpochLength-1)
 	tb.block.slot = 33*musashiEpochLength + 1
 	gotKey, ok, err = ls.electingVrfKeyHash(tb.block, 33, pool)
@@ -779,10 +796,7 @@ func TestElectingVrfKeyHashDefersImportedRotationInDijkstra(t *testing.T) {
 // boundary the Mithril-anchor fix must not erase: on a Mithril-bootstrapped
 // node, a
 // pool with no registration row at all still raises
-// errVrfKeyRegistrationHistoryUnavailable rather than silently resolving. The
-// fallback reads the pool's live registration; a pool nothing was ever imported
-// or registered for has none, so GetPool finds nothing and the fallback yields
-// ok == false, falling through to the same error as before the fix.
+// errVrfKeyRegistrationHistoryUnavailable rather than silently resolving.
 func TestElectingVrfKeyHashStillRejectsAPoolWithNoRegistrationAtAll(
 	t *testing.T,
 ) {
