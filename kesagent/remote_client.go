@@ -411,10 +411,14 @@ func (c *RemoteClient) admit(ctx context.Context) (net.Conn, error) {
 	if _, err := rand.Read(nonce); err != nil {
 		return nil, fmt.Errorf("kesagent: admission nonce: %w", err)
 	}
+	// KESVKey selects which of the agent's profiles to attest: the one whose
+	// active key is this node's operational certificate's. It is unambiguous,
+	// so no profile name is sent; an agent too old to read it ignores it.
 	if err := writeFrame(conn, MaxSignFrameLen, attestationRequest{
 		Type:     "attestation_request",
 		Protocol: AttestedProtocolID,
 		Nonce:    nonce,
+		KESVKey:  c.cfg.KESVKey,
 	}); err != nil {
 		return nil, fmt.Errorf("kesagent: send attestation request: %w", err)
 	}

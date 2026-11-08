@@ -1,0 +1,7 @@
+{
+  "type": "attestation_request",
+  "protocol": "bursa-attested-kes/1",
+  "nonce": "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=",
+  "kes_vkey": "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=",
+  "profile": "pool-a"
+}

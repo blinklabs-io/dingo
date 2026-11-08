@@ -97,6 +97,8 @@ type fakeRemoteAgent struct {
 	// dropAfterRequest closes the connection after reading a sign request
 	// without answering it.
 	dropAfterRequest atomic.Bool
+	// lastAdmission is the most recent attestation request received.
+	lastAdmission atomic.Pointer[attestationRequest]
 }
 
 func startFakeRemoteAgent(
@@ -141,6 +143,7 @@ func (a *fakeRemoteAgent) serve(conn net.Conn, skeyData, vkey, opCert []byte) {
 	if err := readFrame(conn, MaxSignFrameLen, &req); err != nil {
 		return
 	}
+	a.lastAdmission.Store(&req)
 	resp := attestationResponse{
 		Type:     "attestation_response",
 		Protocol: AttestedProtocolID,
@@ -273,6 +276,37 @@ func TestRemoteClientAdmissionChecks(t *testing.T) {
 			require.Zero(t, a.signs.Load())
 		})
 	}
+}
+
+func TestRemoteClientSelectsTheAgentProfileByKESKey(t *testing.T) {
+	t.Parallel()
+	skeyData, vkey, opCert := testKESMaterial(t)
+	client := newTestCert(t, "node")
+	a := startFakeRemoteAgent(t, client, skeyData, vkey, opCert)
+	c := newTestRemoteClient(t, a, client, vkey, opCert, a.server.spki)
+	require.NoError(t, c.Prepare())
+	req := a.lastAdmission.Load()
+	require.NotNil(t, req)
+	require.Equal(t, vkey, req.KESVKey)
+	require.Empty(t, req.Profile)
+
+	// An agent that cannot select a profile for that key says so in the
+	// response, and the node reports it as an admission failure.
+	b := startFakeRemoteAgent(t, client, skeyData, vkey, opCert)
+	b.admitFix = func(r *attestationResponse) {
+		*r = attestationResponse{
+			Type:     "attestation_response",
+			Protocol: AttestedProtocolID,
+			Nonce:    r.Nonce,
+			Provider: r.Provider,
+			Error:    "kesagent: no profile serves the requested KES key",
+		}
+	}
+	d := newTestRemoteClient(t, b, client, vkey, opCert, b.server.spki)
+	err := d.Prepare()
+	require.ErrorIs(t, err, ErrRemoteAdmission)
+	require.ErrorContains(t, err, "no profile serves the requested KES key")
+	require.Zero(t, b.signs.Load())
 }
 
 func TestRemoteClientDoesNotResendAfterADroppedRequest(t *testing.T) {

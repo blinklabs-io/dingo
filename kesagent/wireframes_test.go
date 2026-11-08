@@ -50,6 +50,11 @@ func TestWireGoldenFrames(t *testing.T) {
 			func() any { return new(attestationRequest) },
 		},
 		{
+			"attestation_request_selector",
+			MaxSignFrameLen,
+			func() any { return new(attestationRequest) },
+		},
+		{
 			"attestation_response_none",
 			maxAttestationFrameLen,
 			func() any { return new(attestationResponse) },
