@@ -5033,7 +5033,22 @@ reliably serve them. Near the head, current announcements are prefetched in the
 background for voting and later certification, and a CertRB also fetches its
 parent announcement, because one block may both certify and announce; only the
 certified closures the batch applies are waited for
-(`splitTipWaitByApplyDependency`). The prototype relays serve historical
+(`splitTipWaitByApplyDependency`).
+
+Historical application in the chain-iterator loop can commit a fully available
+prefix while later certified closures in the selected chunk continue backfilling.
+External trusted batches and immutable load retain their existing commit grouping.
+`ensureReadyEndorserPrefix` verifies all selected certificates before starting
+fetches and returns a shorter prefix only when at least half the chunk is
+ready. This limits fragmentation and repeated certificate checks. The returned
+count bounds the transaction in `processBlocksFromSource`; the reader result
+stays owned until its remaining suffix is processed. Snapshot capture follows
+the prefix wait, and network waits remain outside write transactions. Fully
+cached chunks keep their existing grouping. Live diffusion, zero-wait and
+unknown-slot-length paths retain full gating, and epoch prechecks still stop
+before blocks whose epoch has not been published.
+
+The prototype relays serve historical
 endorser blocks by point on demand when otherwise idle (`MsgLeiosBlockRequest`
 carrying the block point, then the windowed transaction fetch), so a
 from-scratch sync backfills the endorser-resident transactions for the chain
