@@ -3283,5 +3283,47 @@ func TestRun_PeriodicCheckpointFailureStopsBackfill(t *testing.T) {
 	}
 	err = bf.Run(context.Background())
 	require.ErrorIs(t, err, writeErr)
-	require.Equal(t, 1, writes)
+	require.Equal(t, 1, writes, "the run must stop at the first failed save")
+}
+
+// A resume from a checkpoint partway through the chain counts its recovery
+// window from the resume point, not from genesis.
+func TestRun_ConsumedInputRecoveryWindowFromMidChainCheckpoint(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	blocks, err := testfixtures.GenerateConwayChainWithTransactions(4)
+	require.NoError(t, err)
+	for _, block := range blocks {
+		require.NoError(t, db.BlockCreate(models.Block{
+			Slot:   block.SlotNumber(),
+			Hash:   block.Hash().Bytes(),
+			Number: block.BlockNumber(),
+			Cbor:   block.Cbor(),
+			Type:   uint(block.Type()),
+		}, nil))
+	}
+	now := time.Now()
+	cp := &models.BackfillCheckpoint{
+		Phase:      BackfillPhase,
+		LastSlot:   blocks[0].SlotNumber(),
+		TotalSlots: blocks[len(blocks)-1].SlotNumber(),
+		StartedAt:  now,
+		UpdatedAt:  now,
+	}
+	bindBackfillCheckpointIdentity(t, db, cp)
+	require.NoError(t, db.Metadata().SetBackfillCheckpoint(cp, nil))
+
+	var progress []BackfillProgress
+	bf := NewBackfill(db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	bf.recoveryWindowBlocks = 1
+	bf.SetProgressFunc(func(p BackfillProgress) {
+		progress = append(progress, p)
+	})
+	require.NoError(t, bf.Run(context.Background()))
+	require.NotEmpty(t, progress)
+	last := progress[len(progress)-1]
+	require.Equal(t, len(blocks)-1, last.ProcessedBlocks,
+		"the run must resume after the checkpoint, not from genesis")
+	assert.Greater(t, last.Stats.SkippedInputRecovery, uint64(0))
 }
