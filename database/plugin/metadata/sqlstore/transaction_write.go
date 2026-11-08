@@ -439,13 +439,11 @@ func (s *Store) insertUtxoModelsChecked(
 		}
 
 		processed := make(map[string]struct{}, len(batch))
-		var conflicted []*models.Utxo
+		var conflicted, duplicates []*models.Utxo
 		for i, utxo := range batch {
 			key := utxoIdentityKey(utxo.TxId, utxo.OutputIdx)
 			if _, duplicate := processed[key]; duplicate {
-				if err := s.repairConflictedUtxo(ctx, db, utxo, deferredRows); err != nil {
-					return nil, err
-				}
+				duplicates = append(duplicates, utxo)
 				continue
 			}
 			processed[key] = struct{}{}
@@ -472,6 +470,14 @@ func (s *Store) insertUtxoModelsChecked(
 			ctx, db, conflicted, deferredRows,
 		); err != nil {
 			return nil, err
+		}
+		// A repeat is repaired only after the first occurrence, which is
+		// deferred to the batch above, so the first occurrence's provenance
+		// fills an unlinked row and the repeat only adds missing links.
+		for _, utxo := range duplicates {
+			if err := s.repairConflictedUtxo(ctx, db, utxo, deferredRows); err != nil {
+				return nil, err
+			}
 		}
 	}
 	return inserted, nil

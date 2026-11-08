@@ -229,6 +229,45 @@ func TestInsertUtxoModelsCheckedRepairsLinkedConflictsInFull(t *testing.T) {
 	require.Equal(t, collateralTx, *got.CollateralReturnForTxID)
 }
 
+// TestInsertUtxoModelsCheckedDuplicateKeepsFirstProvenance replays two
+// occurrences of one unlinked output with different producing transactions.
+// The first occurrence must win, as it does when each output is repaired in
+// input order, whatever the distance between the two occurrences.
+func TestInsertUtxoModelsCheckedDuplicateKeepsFirstProvenance(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	store.storageMode = types.StorageModeAPI
+
+	var firstTx, secondTx uint
+	for i, dst := range []*uint{&firstTx, &secondTx} {
+		require.NoError(t, store.writeDB.QueryRow(
+			`INSERT INTO "transaction" (hash) VALUES (?) RETURNING id`,
+			bytes.Repeat([]byte{0xC0 + byte(i)}, 32),
+		).Scan(dst))
+	}
+	imported := conflictRepairUtxo(1, true)
+	other := conflictRepairUtxo(2, false)
+	require.NoError(t, store.ImportUtxos(
+		[]models.Utxo{imported, other}, nil,
+	))
+
+	first := imported
+	first.TransactionID = &firstTx
+	between := other
+	between.TransactionID = &firstTx
+	later := imported
+	later.TransactionID = &secondTx
+	inserted := replayConflicting(t, store, []models.Utxo{
+		first, between, later,
+	})
+	require.Equal(t, []bool{false, false, false}, inserted)
+
+	got, err := store.GetUtxo(imported.TxId, imported.OutputIdx, nil)
+	require.NoError(t, err)
+	require.NotNil(t, got.TransactionID)
+	require.Equal(t, firstTx, *got.TransactionID, "first occurrence wins")
+}
+
 // TestRepairUnlinkedUtxosBatchQueryPlan checks that every arm of the batched
 // repair is resolved through the unique tx_id_output_idx index, with and
 // without planner statistics, so it never drives from a deleted_slot index.
