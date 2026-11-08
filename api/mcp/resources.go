@@ -66,7 +66,7 @@ hash are different identities. The utxo.transaction_id integer refers to the
 transaction row's id; utxo.tx_id is the binary transaction hash. To relate
 outputs to a transaction, filter on utxo.producer_tx_id (the transaction row id
 of the producing or collateral-return transaction) or utxo.transaction_id.
-No index leads with utxo.tx_id for produced rows, so WHERE tx_id = ... scans
+No index leads with utxo.tx_id for produced rows, so a filter on tx_id alone scans
 the table. Outputs a ledger-state import wrote before their transaction was
 applied have a NULL producer_tx_id; only a lookup that also states
 transaction_id IS NULL AND collateral_return_for_tx_id IS NULL uses the
