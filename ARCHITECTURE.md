@@ -14026,6 +14026,16 @@ stored with `ratified_epoch`/`ratified_slot` at the snapshot epoch anchor, so
 the next epoch boundary enacts the same already-ratified actions as the
 certified ledger state instead of re-ratifying them one epoch late.
 
+The completed `RatifyState.rsExpired` set is imported as pending expiration
+verdicts, with `expired_epoch` and `expired_slot` at that same snapshot epoch
+anchor. The following boundary therefore drops those proposals and returns
+their deposits without recomputing expiration one epoch late. The recorded
+expiration epoch comes from the completed pulser, not `expires_epoch + 1`.
+Malformed or duplicate action IDs, or an ID present in both completed sets,
+reject the import rather than discarding the expiration state. A valid empty
+set remains empty. This import rule does not alter the normal one-epoch delay
+between expiration and deposit return.
+
 Ledger-state import also persists `NewEpochState.pool-distr` as
 `pool_stake_snapshot` rows with snapshot type `"actv"` for the imported epoch.
 Those rows store the consensus stake fraction as `total_stake /

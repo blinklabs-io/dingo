@@ -3522,6 +3522,14 @@ receives a deposit refund at the same boundary, `account_reward_delta` records
 separate event discriminators for the withdrawal and refund so both credits
 remain distinct and rollbackable.
 
+Snapshot governance import preserves the completed pulser's expired action IDs
+as `governance_proposal.expired_epoch` and `expired_slot` at the snapshot's epoch
+anchor. Matching proposals remain members until the next boundary writes their
+`governance_proposal_drop` row and refunds the deposit. The importer does not
+infer the verdict epoch from the proposal's `expires_epoch`, and does not defer
+an already-recorded verdict until another ratification pass. Invalid expired
+sets reject the import before any phase writes; an empty set is valid.
+
 ### Catch-up import rollback
 
 `ledgerstate.ImportLedgerState` clears metadata written by local replay after
