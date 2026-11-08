@@ -3239,6 +3239,7 @@ func (ls *LedgerState) RecoverCommitTimestampConflict(
 			ctx,
 			tmpTip.Point,
 			containsTip,
+			true,
 		)
 		if ancestorErr != nil {
 			return fmt.Errorf(
@@ -5072,6 +5073,7 @@ func (ls *LedgerState) resolveRollbackTarget(
 		ancestor, ok, ancestorErr := ls.latestLedgerPrimaryChainAncestor(
 			ctx,
 			point,
+			false,
 			false,
 		)
 		if ancestorErr != nil {
@@ -12882,6 +12884,7 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTipLocked(
 		ctx,
 		ledgerTip.Point,
 		containsLedgerTip,
+		true,
 	)
 	if err != nil {
 		return fmt.Errorf(
@@ -13495,6 +13498,7 @@ func (ls *LedgerState) latestLedgerPrimaryChainAncestor(
 	ctx context.Context,
 	point ocommon.Point,
 	containsPoint bool,
+	allowOrigin bool,
 ) (ocommon.Point, bool, error) {
 	if containsPoint {
 		return point, true, nil
@@ -13528,10 +13532,13 @@ func (ls *LedgerState) latestLedgerPrimaryChainAncestor(
 		}
 		end = start
 	}
-	// Origin is the common ancestor when no applied block nonce remains on the
-	// selected chain. It has no block_nonce row, but it is always a valid
-	// primary-chain point and both rollback paths support it.
-	return ocommon.Point{}, true, nil
+	if allowOrigin {
+		// Origin is the common ancestor when no applied block nonce remains on
+		// the selected chain. It has no block_nonce row, but recovery and
+		// reconciliation both support it.
+		return ocommon.Point{}, true, nil
+	}
+	return ocommon.Point{}, false, nil
 }
 
 func (ls *LedgerState) GetBlock(point ocommon.Point) (models.Block, error) {
