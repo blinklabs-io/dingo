@@ -323,3 +323,109 @@ func TestRemoteClientRedialsAStaleSession(t *testing.T) {
 	require.Equal(t, int32(2), a.accepts.Load(),
 		"a session past SessionFreshFor must be replaced before signing")
 }
+
+// silentAgent accepts TCP connections and never speaks TLS, so a dial hangs
+// until its deadline.
+func silentAgent(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		var conns []net.Conn
+		defer func() {
+			for _, c := range conns {
+				_ = c.Close()
+			}
+		}()
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			conns = append(conns, c)
+		}
+	}()
+	return ln.Addr().String()
+}
+
+// A Prepare stuck dialing must not hold a sign past its own SignTimeout, nor
+// block a readiness check or Close.
+func TestRemoteClientHungPrepareDoesNotStallSignOrChecks(t *testing.T) {
+	t.Parallel()
+	_, vkey, opCert := testKESMaterial(t)
+	client := newTestCert(t, "node")
+	certFile, keyFile := client.writePEM(t)
+	c, err := NewRemoteClient(RemoteConfig{
+		Address:          silentAgent(t),
+		ClientCertFile:   certFile,
+		ClientKeyFile:    keyFile,
+		ServerSPKISHA256: client.spki,
+		KESVKey:          vkey,
+		OpCert:           opCert,
+		HelloTimeout:     3 * time.Second,
+		SignTimeout:      300 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = c.Close() })
+
+	prepared := make(chan error, 1)
+	go func() { prepared <- c.Prepare() }()
+	require.Eventually(t, func() bool { return len(c.turn) == 1 },
+		2*time.Second, 5*time.Millisecond, "Prepare never started dialing")
+
+	start := time.Now()
+	_, err = c.Sign(0, []byte("header"))
+	require.Error(t, err)
+	require.Less(t, time.Since(start), time.Second,
+		"Sign must give up within its SignTimeout while Prepare dials")
+
+	start = time.Now()
+	_ = c.CheckReady()
+	require.Less(t, time.Since(start), 100*time.Millisecond,
+		"CheckReady must not wait on a dial")
+
+	start = time.Now()
+	require.NoError(t, c.Close())
+	require.Less(t, time.Since(start), 100*time.Millisecond,
+		"Close must not wait on a dial")
+	select {
+	case err := <-prepared:
+		require.Error(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Prepare did not return")
+	}
+}
+
+// After a failed dial the backoff stops Prepare, but a sign at a leader slot
+// still dials.
+func TestRemoteClientSignDialsThroughTheBackoff(t *testing.T) {
+	t.Parallel()
+	skeyData, vkey, opCert := testKESMaterial(t)
+	client := newTestCert(t, "node")
+	a := startFakeRemoteAgent(t, client, skeyData, vkey, opCert)
+	other := newTestCert(t, "impostor")
+	certFile, keyFile := client.writePEM(t)
+	c, err := NewRemoteClient(RemoteConfig{
+		Address:          a.addr,
+		ClientCertFile:   certFile,
+		ClientKeyFile:    keyFile,
+		ServerSPKISHA256: a.server.spki,
+		KESVKey:          vkey,
+		OpCert:           opCert,
+		SignTimeout:      2 * time.Second,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = c.Close() })
+
+	// Fail one dial to arm the backoff: a wrong pin, then the right one.
+	c.pin, _ = parseSPKIPin(other.spki)
+	require.ErrorIs(t, c.Prepare(), ErrServerPinMismatch)
+	c.pin, _ = parseSPKIPin(a.server.spki)
+	require.ErrorContains(t, c.Prepare(), "backoff active")
+	require.Error(t, c.CheckReady(), "CheckReady reports the last failure")
+
+	_, err = c.Sign(0, []byte("header"))
+	require.NoError(t, err)
+	require.NoError(t, c.CheckReady())
+}
