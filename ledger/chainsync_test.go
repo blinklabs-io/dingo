@@ -10832,6 +10832,80 @@ func TestReconcilePrimaryChainTipWithLedgerTipRollsBackMetadata(t *testing.T) {
 	assert.Equal(t, fixture.ancestorTip, dbTip)
 }
 
+func TestReconcilePrimaryChainTipWithLedgerTipUsesCommonAncestorWhenForkTipIsLower(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	require.NoError(
+		t,
+		fixture.ls.chain.Rollback(
+			context.Background(),
+			fixture.ancestorTip.Point,
+		),
+	)
+	forkBlock := chain.RawBlock{
+		Slot:        fixture.ancestorTip.Point.Slot + 5,
+		Hash:        testHashBytes("startup-lower-primary-chain-fork"),
+		BlockNumber: fixture.ancestorTip.BlockNumber + 1,
+		Type:        1,
+		PrevHash:    fixture.ancestorTip.Point.Hash,
+		Cbor:        []byte{0x80},
+	}
+	require.NoError(
+		t,
+		fixture.ls.chain.AddRawBlocks(
+			context.Background(),
+			[]chain.RawBlock{forkBlock},
+		),
+	)
+	require.Less(
+		t,
+		fixture.ls.chain.Tip().Point.Slot,
+		fixture.currentTip.Point.Slot,
+	)
+
+	require.NoError(
+		t,
+		fixture.ls.reconcilePrimaryChainTipWithLedgerTip(context.Background()),
+	)
+
+	require.Equal(t, fixture.ancestorTip, fixture.ls.chain.Tip())
+	require.Equal(t, fixture.ancestorTip, fixture.ls.currentTip)
+	require.True(
+		t,
+		bytes.Equal(fixture.ancestorNonce, fixture.ls.currentTipBlockNonce),
+	)
+	dbTip, err := fixture.ls.db.GetTip(nil)
+	require.NoError(t, err)
+	require.Equal(t, fixture.ancestorTip, dbTip)
+}
+
+func TestReconcilePrimaryChainTipWithLedgerTipUsesOriginWhenForkHasNoAppliedAncestor(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	require.NoError(
+		t,
+		fixture.ls.chain.Rollback(context.Background(), ocommon.Point{}),
+	)
+
+	require.NoError(
+		t,
+		fixture.ls.reconcilePrimaryChainTipWithLedgerTip(context.Background()),
+	)
+
+	require.Equal(t, ochainsync.Tip{}, fixture.ls.chain.Tip())
+	require.Equal(t, ochainsync.Tip{}, fixture.ls.currentTip)
+	require.Empty(t, fixture.ls.currentTipBlockNonce)
+	dbTip, err := fixture.ls.db.GetTip(nil)
+	require.NoError(t, err)
+	require.Equal(t, ochainsync.Tip{}, dbTip)
+}
+
 func TestReconcilePrimaryChainTipWithLedgerTipRollsBackMissingLedgerTipToCommonAncestor(
 	t *testing.T,
 ) {
