@@ -4303,6 +4303,12 @@ func importGovState(
 		ratifiedIds := ratifiedGovActionIdSet(
 			govState.RatifiedGovActionIds,
 		)
+		expiredIds := make(
+			map[string]struct{}, len(govState.ExpiredGovActionIds),
+		)
+		for _, id := range govState.ExpiredGovActionIds {
+			expiredIds[govActionIdKey(id.TxHash, id.ActionIndex)] = struct{}{}
+		}
 		var ratifiedHFI *ParsedGovProposal
 		if govState.RatifiedGovActionIds == nil {
 			// Snapshot bootstrap close-the-1-epoch-lag fallback for
@@ -4358,7 +4364,18 @@ func importGovState(
 				var ratifiedSlot *uint64
 				var enactedEpoch *uint64
 				var enactedSlot *uint64
+				var expiredEpoch *uint64
+				var expiredSlot *uint64
 				propKey := govActionIdKey(prop.TxHash, prop.ActionIndex)
+				if _, expired := expiredIds[propKey]; expired {
+					// The completed pulser belongs to the anchor epoch. Its
+					// expiration verdict is consumed at the next boundary,
+					// independently of the proposal's original lifetime.
+					ee := cfg.State.Epoch
+					es := currentEpochSlot
+					expiredEpoch = &ee
+					expiredSlot = &es
+				}
 				_, ratified := ratifiedIds[propKey]
 				if !ratified && ratifiedHFI != nil &&
 					bytes.Equal(prop.TxHash, ratifiedHFI.TxHash) &&
@@ -4399,6 +4416,8 @@ func importGovState(
 						RatifiedSlot:    ratifiedSlot,
 						EnactedEpoch:    enactedEpoch,
 						EnactedSlot:     enactedSlot,
+						ExpiredEpoch:    expiredEpoch,
+						ExpiredSlot:     expiredSlot,
 						// The snapshot lists proposals in submission order,
 						// and every proposal of one epoch shares its anchor
 						// slot, so this position stands in for the block
@@ -4983,8 +5002,16 @@ func findRatifiedHFICandidate(
 		matches++
 		candidate = p
 	}
-	if matches != 1 {
+	if matches != 1 || candidate == nil {
 		return nil
+	}
+	// An authoritative expired verdict must not become a ratification
+	// merely because the legacy parent-chain heuristic has one candidate.
+	for _, expired := range govState.ExpiredGovActionIds {
+		if bytes.Equal(candidate.TxHash, expired.TxHash) &&
+			candidate.ActionIndex == expired.ActionIndex {
+			return nil
+		}
 	}
 	return candidate
 }

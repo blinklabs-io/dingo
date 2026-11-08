@@ -2681,6 +2681,9 @@ type ParsedGovState struct {
 	ImportParseError     error
 	PrevGovActionIds     *ParsedPrevGovActionIds
 	RatifiedGovActionIds []ParsedGovActionId
+	// ExpiredGovActionIds are completed-pulser verdicts awaiting the next
+	// boundary, not a new expiration calculation from proposal lifetimes.
+	ExpiredGovActionIds []ParsedGovActionId
 	// EnactCommittee and EnactCommitteeQuorum are the committee carried
 	// by RatifyState.rsEnactState. That is not a second copy of
 	// cgsCommittee: RATIFY folds every accepted action into rsEnactState
@@ -2702,18 +2705,15 @@ type ParsedGovState struct {
 	// lower bound rather than the full answer.
 	EnactedActionTypesUnknown bool
 	// PulsingStateParseError is set when cgsDRepPulsingState could not be
-	// decoded far enough to recover rsEnactState's committee. Fatal for an
-	// import: the imported committee then has no second view to
-	// corroborate it.
+	// decoded far enough to recover the committee or expiration verdicts.
+	// Both are required to preserve the imported boundary state.
 	PulsingStateParseError error
 }
 
 // parsedPulsingState holds the parts of cgsDRepPulsingState the importer
-// consumes. Its committee error is a named field rather than a second
-// bare return value because the two error channels are not
-// interchangeable: CommitteeErr is fail-closed, while a failure to decode
-// an individual rsEnacted proposal is warning-grade and is returned as
-// the bare error alongside the struct.
+// consumes. CommitteeErr and ExpiredErr are fail-closed; a failure to
+// decode an individual rsEnacted proposal remains warning-grade and is
+// returned as the bare error alongside the struct.
 type parsedPulsingState struct {
 	EnactCommittee            []ParsedCommitteeMember
 	EnactCommitteeQuorum      *cbor.Rat
@@ -2721,6 +2721,8 @@ type parsedPulsingState struct {
 	EnactedCommitteeChange    bool
 	EnactedActionTypesUnknown bool
 	RatifiedGovActionIds      []ParsedGovActionId
+	ExpiredGovActionIds       []ParsedGovActionId
+	ExpiredErr                error
 	CommitteeErr              error
 }
 
@@ -2834,6 +2836,7 @@ func ParseGovState(
 		result.EnactedCommitteeChange = pulsing.EnactedCommitteeChange
 		result.EnactedActionTypesUnknown = pulsing.EnactedActionTypesUnknown
 		result.RatifiedGovActionIds = pulsing.RatifiedGovActionIds
+		result.ExpiredGovActionIds = pulsing.ExpiredGovActionIds
 		if pulsing.CommitteeErr != nil {
 			// Keep the dedicated field for the importer's fail-closed
 			// check and surface it through the returned error so every
@@ -2843,6 +2846,11 @@ func ParseGovState(
 				"parsing drep pulsing state: %w",
 				pulsing.CommitteeErr,
 			))
+		}
+		if pulsing.ExpiredErr != nil {
+			result.PulsingStateParseError = errors.Join(
+				result.PulsingStateParseError, pulsing.ExpiredErr,
+			)
 		}
 	}
 
@@ -3211,6 +3219,15 @@ func parseDRepPulsingState(
 	result.EnactCommitteeQuorum = quorum
 	result.EnactCommitteeSet = true
 
+	expired, err := parseExpiredGovActionIDs(ratifyState[2])
+	if err != nil {
+		result.ExpiredErr = fmt.Errorf(
+			"decoding RatifyState expired actions: %w", err,
+		)
+		return result, result.ExpiredErr
+	}
+	result.ExpiredGovActionIds = expired
+
 	enacted, err := decodeRawArray(ratifyState[1])
 	if err != nil {
 		result.EnactedActionTypesUnknown = true
@@ -3245,8 +3262,76 @@ func parseDRepPulsingState(
 		})
 	}
 	result.RatifiedGovActionIds = ratifiedIds
+	expiredIDs := make(map[string]struct{}, len(result.ExpiredGovActionIds))
+	for _, expired := range result.ExpiredGovActionIds {
+		key := fmt.Sprintf("%x#%d", expired.TxHash, expired.ActionIndex)
+		expiredIDs[key] = struct{}{}
+	}
+	for _, ratified := range ratifiedIds {
+		key := fmt.Sprintf("%x#%d", ratified.TxHash, ratified.ActionIndex)
+		if _, overlap := expiredIDs[key]; overlap {
+			result.ExpiredErr = errors.New(
+				"RatifyState action is both enacted and expired",
+			)
+			return result, errors.Join(errors.Join(idErrs...), result.ExpiredErr)
+		}
+	}
 
 	return result, errors.Join(idErrs...)
+}
+
+func parseExpiredGovActionIDs(data []byte) ([]ParsedGovActionId, error) {
+	if len(data) == 0 {
+		return nil, errors.New("empty expired action set encoding")
+	}
+	if data[0]>>5 == 6 {
+		var tag cbor.RawTag
+		if _, err := cbor.DecodeExact(data, &tag); err != nil {
+			return nil, err
+		}
+		if tag.Number != cbor.CborTagSet {
+			return nil, fmt.Errorf(
+				"expired action set has tag %d, expected 258",
+				tag.Number,
+			)
+		}
+		data = tag.Content
+	}
+	if len(data) == 0 || data[0]>>5 != 4 {
+		return nil, errors.New("expired action set is not an array")
+	}
+	var items []cbor.RawMessage
+	if _, err := cbor.DecodeExact(data, &items); err != nil {
+		return nil, err
+	}
+	ids := make([]ParsedGovActionId, 0, len(items))
+	seen := make(map[string]struct{}, len(items))
+	for _, item := range items {
+		if len(item) == 0 || item[0]>>5 != 4 {
+			return nil, errors.New("expired GovActionId is not an array")
+		}
+		fields, err := decodeRawArray(item)
+		if err != nil {
+			return nil, err
+		}
+		if len(fields) != 2 {
+			return nil, fmt.Errorf(
+				"expired GovActionId has %d fields, expected 2",
+				len(fields),
+			)
+		}
+		id, err := parseGovActionIdFromFields(fields)
+		if err != nil {
+			return nil, err
+		}
+		key := fmt.Sprintf("%x#%d", id.TxHash, id.ActionIndex)
+		if _, duplicate := seen[key]; duplicate {
+			return nil, errors.New("duplicate expired GovActionId")
+		}
+		seen[key] = struct{}{}
+		ids = append(ids, *id)
+	}
+	return ids, nil
 }
 
 // parseProposalsRoots decodes the GovRelation StrictMaybe at the
