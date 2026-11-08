@@ -243,3 +243,31 @@ func TestSnapshotDirectoryReplacedLeavesReplacementUntouched(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, movedEntries, "opened snapshot directory was not emptied")
 }
+
+func TestSnapshotAncestorFSGroupVolumeRoot(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		mode    os.FileMode
+		wantErr bool
+	}{
+		{name: "fsGroup root", mode: os.ModeSetgid | 0o770},
+		{name: "world writable", mode: os.ModeSetgid | 0o777, wantErr: true},
+		{name: "no setgid", mode: 0o770, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			volume := filepath.Join(privateSnapshotBase(t), "volume")
+			require.NoError(t, os.Mkdir(volume, 0o700))
+			require.NoError(t, os.Chmod(volume, tc.mode))
+			err := validateSnapshotAncestorChain(volume)
+			if tc.wantErr {
+				require.ErrorContains(
+					t, err, "writable by group or other without the sticky bit",
+				)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}

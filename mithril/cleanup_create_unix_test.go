@@ -41,6 +41,7 @@ type bootstrapAncestorInfo struct {
 	name string
 	mode fs.FileMode
 	uid  uint32
+	gid  uint32
 }
 
 func (i bootstrapAncestorInfo) Name() string       { return i.name }
@@ -48,7 +49,9 @@ func (i bootstrapAncestorInfo) Size() int64        { return 0 }
 func (i bootstrapAncestorInfo) Mode() fs.FileMode  { return i.mode }
 func (i bootstrapAncestorInfo) ModTime() time.Time { return time.Time{} }
 func (i bootstrapAncestorInfo) IsDir() bool        { return i.mode.IsDir() }
-func (i bootstrapAncestorInfo) Sys() any           { return &syscall.Stat_t{Uid: i.uid} }
+func (i bootstrapAncestorInfo) Sys() any {
+	return &syscall.Stat_t{Uid: i.uid, Gid: i.gid}
+}
 
 func bootstrapAncestorLookup(
 	t *testing.T,
@@ -120,4 +123,57 @@ func TestBootstrapParentAcceptsTrustedStickyAncestor(t *testing.T) {
 		}),
 	)
 	require.NoError(t, err)
+}
+
+func TestBootstrapParentFSGroupVolumeRoot(t *testing.T) {
+	t.Parallel()
+	const currentUID = 1000
+	//nolint:gosec // Unix kernel GIDs are uint32 values.
+	egid := uint32(os.Getegid())
+	setgid := os.ModeSetgid
+	for _, tc := range []struct {
+		name    string
+		mode    fs.FileMode
+		gid     uint32
+		wantErr bool
+	}{
+		{name: "fsGroup root", mode: setgid | 0o770, gid: egid},
+		{
+			name: "world writable", mode: setgid | 0o777, gid: egid,
+			wantErr: true,
+		},
+		{
+			name: "foreign group", mode: setgid | 0o770, gid: egid + 1,
+			wantErr: true,
+		},
+		{name: "no setgid", mode: 0o770, gid: egid, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := validateBootstrapAncestorChain(
+				"/data/private",
+				currentUID,
+				bootstrapAncestorLookup(t, map[string]bootstrapAncestorInfo{
+					"/": {
+						name: "/", mode: os.ModeDir | 0o755, uid: 0,
+					},
+					"/data": {
+						name: "data", mode: os.ModeDir | tc.mode,
+						uid: 0, gid: tc.gid,
+					},
+					"/data/private": {
+						name: "private", mode: os.ModeDir | 0o700,
+						uid: currentUID, gid: tc.gid,
+					},
+				}),
+			)
+			if tc.wantErr {
+				require.ErrorContains(
+					t, err, `bootstrap parent ancestor "/data" is writable`,
+				)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
 }

@@ -140,7 +140,7 @@ func validateSnapshotAncestorChain(path string) error {
 			}
 		}
 		if info.IsDir() {
-			if info.Mode().Perm()&0o022 != 0 && info.Mode()&os.ModeSticky == 0 {
+			if unsafelyWritableSnapshotAncestor(info) {
 				return fmt.Errorf(
 					"snapshot path ancestor %q is writable by group or other without the sticky bit",
 					current,
@@ -163,4 +163,23 @@ func requireTrustedSnapshotOwner(path string, info fs.FileInfo) error {
 		return fmt.Errorf("%q is owned by UID %d", path, stat.Uid)
 	}
 	return nil
+}
+
+// unsafelyWritableSnapshotAncestor reports whether a directory lets another
+// user replace its entries. A sticky directory is safe. So is the volume root
+// of a Kubernetes pod with securityContext.fsGroup: the kubelet makes it
+// group-owned by the fsGroup GID, group-writable and setgid, and that GID is
+// the process's own. Such a directory is accepted only while it is not
+// writable by other.
+func unsafelyWritableSnapshotAncestor(info fs.FileInfo) bool {
+	mode := info.Mode()
+	perm := mode.Perm()
+	if perm&0o022 == 0 || mode&os.ModeSticky != 0 {
+		return false
+	}
+	if perm&0o002 != 0 || mode&os.ModeSetgid == 0 {
+		return true
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	return !ok || int64(stat.Gid) != int64(os.Getegid())
 }
