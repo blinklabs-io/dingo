@@ -112,6 +112,9 @@ var hotStatements = func() []string {
 	for _, table := range certificateTables {
 		queries = append(queries, certificateTableCleanupSQL(table))
 	}
+	for size := 1; size <= maxImportedProbeHashes; size *= 2 {
+		queries = append(queries, importedProbeQuery(size))
+	}
 	for _, size := range cachedAddressInputQuerySizes {
 		queries = append(queries, addressTransactionInputQuery(size))
 		for _, table := range []string{
@@ -140,6 +143,7 @@ var hotStatements = func() []string {
 // and are excluded from other dialects.
 func cacheableForDialect(dialect, query string) bool {
 	if dialect != "sqlite" && (isSQLiteBatchQuery(query) ||
+		strings.Contains(query, utxoRefAsWritten) ||
 		query == transactionBatchInsertResultSQL ||
 		query == insertUtxoResultQuery || query == insertUtxoResultIgnoreConflictQuery) {
 		return false

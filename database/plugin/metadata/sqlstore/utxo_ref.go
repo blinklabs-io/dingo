@@ -233,14 +233,16 @@ func (s *Store) existingUtxoRefs(
 	}
 	found := make(map[string]struct{})
 	chunk := max(1, s.dialect.ParameterLimit()-1)
-	for start := 0; start < len(produced); start += chunk {
-		part := produced[start:min(start+chunk, len(produced))]
+	for start := 0; start < len(produced); start += maxImportedProbeHashes {
+		part := produced[start:min(start+maxImportedProbeHashes, len(produced))]
 		hashes := distinctUtxoHashes(part)
-		rows, err := db.QueryContext(ctx,
-			utxoRefAsWritten+"SELECT tx_id, output_idx FROM utxo INDEXED BY idx_utxo_imported_ref "+
-				"WHERE transaction_id IS NULL AND collateral_return_for_tx_id IS NULL "+
-				"AND tx_id IN ("+bindPlaceholders(len(hashes))+")",
-			hashes...,
+		size := importedProbeSize(len(hashes))
+		for len(hashes) < size {
+			// NULL matches no row.
+			hashes = append(hashes, nil)
+		}
+		rows, err := s.queryRowsCached(
+			ctx, db, importedProbeQuery(size), hashes...,
 		)
 		if err != nil {
 			return nil, err
@@ -266,6 +268,27 @@ func (s *Store) existingUtxoRefs(
 		}
 	}
 	return found, nil
+}
+
+// maxImportedProbeHashes bounds the hashes one probe names; probes are padded
+// to a power of two so each size is one prepared statement.
+const maxImportedProbeHashes = 64
+
+func importedProbeSize(n int) int {
+	size := 1
+	for size < n {
+		size *= 2
+	}
+	return size
+}
+
+// importedProbeQuery finds the imported rows of the given transaction hashes.
+func importedProbeQuery(size int) string {
+	return utxoRefAsWritten +
+		"-- name: GetImportedUtxoKeys :many\n" +
+		"SELECT tx_id, output_idx FROM utxo INDEXED BY idx_utxo_imported_ref " +
+		"WHERE transaction_id IS NULL AND collateral_return_for_tx_id IS NULL " +
+		"AND tx_id IN (" + bindPlaceholders(size) + ")"
 }
 
 func distinctUtxoHashes(utxos []*models.Utxo) []any {
