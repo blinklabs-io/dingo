@@ -107,6 +107,11 @@ is still busy. On PostgreSQL and MySQL this also includes read activity and a
 bulk-load session holding its dedicated connection; the detailed scheduling
 and SQLite reclaim behavior is documented in `DATABASE.md`.
 
+The SQLite provider registers decimal aggregates beside its driver, keeping
+driver imports out of the shared store. Its `coinsum` aggregate validates each
+coin and the total as `uint64`, allowing execution-slot fee queries to return
+one row while preserving rejection of invalid stored amounts.
+
 The SQLite provider is a thin factory around the pure-Go driver. It configures
 one WAL writer, a separate read pool, pragmas, disk-size accounting, migration
 locking, query tracing, optional incremental space reclaim (off by default), and

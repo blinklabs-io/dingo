@@ -5402,6 +5402,20 @@ FROM "transaction"
 WHERE hash IN (decode($1, 'hex'), decode($2, 'hex'));
 ```
 
+### `SumTransactionFeesInSlotRange`
+
+Fees use the inclusive execution-slot range: valid transactions contribute
+their declared fee and phase-2-invalid transactions their collateral fee.
+Leios context rows replace the certifying block's slot for this selection.
+SQLite sums selected amounts with the provider-registered `dingo_coin_sum`
+aggregate (`database/plugin/metadata/sqlite/coinsum`), returning one decimal
+value instead of every transaction row to Go. Each input and the running total
+must fit `uint64`; NULL and empty inputs contribute zero, while malformed,
+negative, floating-point and oversized values fail. Callback arguments are
+consumed before returning; only the numeric total and owned error text survive.
+The caller's transaction and cancellation still govern the query. PostgreSQL
+and MySQL retain per-row unsigned validation in Go. No schema change.
+
 ### `GetTransactionsByBlockHash`
 
 ```sql

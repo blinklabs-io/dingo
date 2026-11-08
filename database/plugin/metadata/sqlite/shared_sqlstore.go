@@ -33,6 +33,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	// Registers the aggregate sqlstore's account totals call on SQLite.
 	_ "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite/bigintsum"
+	_ "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite/coinsum"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
 	driversqlite "modernc.org/sqlite"
@@ -52,7 +53,8 @@ func (s *uint64Sum) Step(
 		return fmt.Errorf("uint64 sum expects text, got %T", args[0])
 	}
 	var item big.Int
-	if _, ok := item.SetString(value, 10); !ok || item.Sign() < 0 || item.BitLen() > 64 {
+	if _, ok := item.SetString(value, 10); !ok || item.Sign() < 0 ||
+		item.BitLen() > 64 {
 		return fmt.Errorf("invalid uint64 amount %q", value)
 	}
 	s.total.Add(&s.total, &item)
@@ -88,13 +90,16 @@ func (s *uint64Sum) WindowValue(
 func (*uint64Sum) Final(_ *driversqlite.FunctionContext) {}
 
 func init() {
-	driversqlite.MustRegisterFunction("dingo_uint64_sum", &driversqlite.FunctionImpl{
-		NArgs:         1,
-		Deterministic: true,
-		MakeAggregate: func(driversqlite.FunctionContext) (driversqlite.AggregateFunction, error) {
-			return &uint64Sum{}, nil
+	driversqlite.MustRegisterFunction(
+		"dingo_uint64_sum",
+		&driversqlite.FunctionImpl{
+			NArgs:         1,
+			Deterministic: true,
+			MakeAggregate: func(driversqlite.FunctionContext) (driversqlite.AggregateFunction, error) {
+				return &uint64Sum{}, nil
+			},
 		},
-	})
+	)
 }
 
 var sharedMemoryDBSequence atomic.Uint64
