@@ -2854,13 +2854,15 @@ blockfetch lock is released. A rewind refused for exceeding K skips cleanup and
 leaves the chain as a forward extension the ledger replays; any other rewind or
 cleanup error stops recovery. A continuation-audit window is retained when its
 fork point survives the rewind and discarded when that point is truncated. A
-blob store behind the metadata tip
-is missing blocks the ledger has already applied, and nothing local can rebuild
-them, so `reconcilePrimaryChainTipWithLedgerTip` rolls the ledger back to the
-blob tip — a rollback whose depth is set by however far the two stores drifted,
-and which on a Mithril-bootstrapped node can reach the `mithril_ledger_slot`
-trust boundary, past which rollback is refused outright and the database must be
-discarded.
+blob store behind the metadata tip is missing blocks the ledger has already
+applied, and nothing local can rebuild them. Reconciliation walks the durable
+applied-block nonce history back to the newest point still on the selected
+primary chain and rolls both stores back to that common ancestor. It never
+treats a lower raw chain tip as a rollback target merely because its slot is
+below the metadata tip: that tip may already belong to a competing fork. The
+rollback depth is set by however far the stores and forks drifted, and on a
+Mithril-bootstrapped node can reach the `mithril_ledger_slot` trust boundary,
+past which rollback is refused outright and the database must be discarded.
 
 ## Ledger/chain reconciliation
 
@@ -2880,9 +2882,9 @@ covered. An origin tip is never advanced to the floor by recovery. A floor from
 an abandoned fork is ignored so chain selection can recover the canonical
 branch.
 
-When the ledger tip is not on the primary chain at all (the fork-beyond-the-
-ledger shape, as opposed to the blob-behind-metadata shape above),
-reconciliation instead prunes the primary chain back to their common ancestor
+When the ledger tip is not on the primary chain at all, whether the selected
+chain tip is above or below it by slot, reconciliation prunes the primary chain
+back to their common ancestor
 with `ChainManager.RewindPrimaryChainToPoint`, once
 `ChainManager.SecurityParamConfigured()` reports K is set. That call shares its
 bound and side effects with a live `Chain.Rollback` rather than deleting blocks

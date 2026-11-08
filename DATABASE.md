@@ -4310,10 +4310,12 @@ barrier an unclean host shutdown leaves a durable metadata tip pointing at
 blocks the blob store discarded, which is the inverse of the invariant the rest
 of the system is built on: startup reconciliation can trim a blob store that is
 *ahead* of the metadata tip (`cleanupOrphanedBlobs`) but cannot rebuild blocks
-missing *beneath* it, so it rolls the ledger back to the blob tip instead. That
-rollback can be arbitrarily deep and, on a Mithril-bootstrapped node, can reach
-the `mithril_ledger_slot` trust boundary, past which no rollback is possible at
-all.
+missing *beneath* it. Recovery walks applied-block nonce history back to the
+newest point still indexed on the selected primary chain, then rolls both stores
+back to that common ancestor. A raw blob tip is not an authoritative target
+because it may belong to another fork. That rollback can be arbitrarily deep
+and, on a Mithril-bootstrapped node, can reach the `mithril_ledger_slot` trust
+boundary, past which no rollback is possible at all.
 
 Each SQLite connection in the read and write pools also sets
 `journal_size_limit=67108864` (64 MiB).

@@ -3230,16 +3230,36 @@ func (ls *LedgerState) RecoverCommitTimestampConflict(
 	if err != nil {
 		return fmt.Errorf("failed to get tip: %w", err)
 	}
-	// Check if we can lookup tip block in chain
-	_, err = ls.chain.BlockByPoint(ctx, tmpTip.Point, nil)
+	containsTip, err := ls.primaryChainContainsPoint(ctx, tmpTip.Point)
 	if err != nil {
-		// Rollback to raw chain tip on error.
+		return fmt.Errorf("check ledger tip on primary chain: %w", err)
+	}
+	if !containsTip {
+		ancestor, found, ancestorErr := ls.latestLedgerPrimaryChainAncestor(
+			ctx,
+			tmpTip.Point,
+			containsTip,
+		)
+		if ancestorErr != nil {
+			return fmt.Errorf(
+				"find common primary-chain ancestor for ledger tip: %w",
+				ancestorErr,
+			)
+		}
+		if !found {
+			return fmt.Errorf(
+				"ledger tip %d/%s is not on primary chain and no common ancestor was found",
+				tmpTip.Point.Slot,
+				hex.EncodeToString(tmpTip.Point.Hash),
+			)
+		}
+		// Roll back metadata to the newest applied block that is still on the
+		// selected chain. The raw chain tip may already belong to another fork.
 		// Note: We do NOT hold ls.Lock() here because rollback() calls
 		// SubmitAsyncDBTxn() which may trigger PartialCommitError recovery
 		// that re-acquires ls.Lock(), causing a deadlock. The rollback
 		// method handles its own locking for in-memory state updates.
-		chainTip := ls.chain.Tip()
-		if err = ls.rollback(ctx, chainTip.Point); err != nil {
+		if err = ls.rollback(ctx, ancestor); err != nil {
 			wrappedErr := fmt.Errorf(
 				"failed to rollback ledger: %w",
 				err,
@@ -12841,7 +12861,30 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTipLocked(
 		bytes.Equal(chainTip.Point.Hash, ledgerTip.Point.Hash) {
 		return nil
 	}
-	if chainTip.Point.Slot < ledgerTip.Point.Slot {
+	containsLedgerTip, err := ls.primaryChainContainsPoint(ctx, ledgerTip.Point)
+	if err != nil {
+		return fmt.Errorf("check ledger tip on primary chain: %w", err)
+	}
+	ancestor, found, err := ls.latestLedgerPrimaryChainAncestor(
+		ctx,
+		ledgerTip.Point,
+		containsLedgerTip,
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"find common primary-chain ancestor for ledger tip: %w",
+			err,
+		)
+	}
+	if !found {
+		return fmt.Errorf(
+			"ledger tip %d/%s is not on primary chain and no common ancestor was found",
+			ledgerTip.Point.Slot,
+			hex.EncodeToString(ledgerTip.Point.Hash),
+		)
+	}
+	if chainTip.Point.Slot < ledgerTip.Point.Slot &&
+		pointMatches(chainTip.Point, ancestor) {
 		ls.config.Logger.Warn(
 			"ledger tip ahead of primary chain tip, rolling back metadata to chain tip",
 			"component",
@@ -12926,10 +12969,6 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTipLocked(
 		ls.publishLocalLedgerRollback(chainTip.Point)
 		return nil
 	}
-	containsLedgerTip, err := ls.primaryChainContainsPoint(ctx, ledgerTip.Point)
-	if err != nil {
-		return fmt.Errorf("check ledger tip on primary chain: %w", err)
-	}
 	if containsLedgerTip {
 		// The ledger tip is a valid ancestor on the primary chain, so the
 		// primary chain is simply a forward extension of the ledger. This is
@@ -12958,24 +12997,6 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTipLocked(
 			gap,
 		)
 		return nil
-	}
-	ancestor, found, err := ls.latestLedgerPrimaryChainAncestor(
-		ctx,
-		ledgerTip.Point,
-		containsLedgerTip,
-	)
-	if err != nil {
-		return fmt.Errorf(
-			"find common primary-chain ancestor for ledger tip: %w",
-			err,
-		)
-	}
-	if !found {
-		return fmt.Errorf(
-			"ledger tip %d/%s is not on primary chain and no common ancestor was found",
-			ledgerTip.Point.Slot,
-			hex.EncodeToString(ledgerTip.Point.Hash),
-		)
 	}
 	ls.config.Logger.Warn(
 		"ledger tip not on primary chain at startup, rolling back metadata to common ancestor",

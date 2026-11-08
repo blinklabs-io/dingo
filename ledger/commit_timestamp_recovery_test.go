@@ -171,6 +171,50 @@ func TestRecoverCommitTimestampConflictInitializesBlockInventory(t *testing.T) {
 	require.Equal(t, raw[0].Slot, oldest)
 }
 
+func TestRecoverCommitTimestampConflictUsesCommonAncestorAcrossForks(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	require.NoError(
+		t,
+		fixture.ls.chain.Rollback(
+			context.Background(),
+			fixture.ancestorTip.Point,
+		),
+	)
+	forkBlock := chain.RawBlock{
+		Slot:        fixture.ancestorTip.Point.Slot + 5,
+		Hash:        testHashBytes("commit-recovery-lower-primary-chain-fork"),
+		BlockNumber: fixture.ancestorTip.BlockNumber + 1,
+		Type:        1,
+		PrevHash:    fixture.ancestorTip.Point.Hash,
+		Cbor:        []byte{0x80},
+	}
+	require.NoError(
+		t,
+		fixture.ls.chain.AddRawBlocks(
+			context.Background(),
+			[]chain.RawBlock{forkBlock},
+		),
+	)
+	fixture.ls.currentTip = ochainsync.Tip{}
+	fixture.ls.currentTipBlockNonce = nil
+	fixture.ls.publishSnapshotsLocked()
+
+	require.NoError(
+		t,
+		fixture.ls.RecoverCommitTimestampConflict(context.Background()),
+	)
+
+	require.Equal(t, fixture.ancestorTip, fixture.ls.chain.Tip())
+	require.Equal(t, fixture.ancestorTip, fixture.ls.currentTip)
+	dbTip, err := fixture.ls.db.GetTip(nil)
+	require.NoError(t, err)
+	require.Equal(t, fixture.ancestorTip, dbTip)
+}
+
 func TestCleanupOrphanedBlobsUsesOnePinnedStore(t *testing.T) {
 	t.Parallel()
 
