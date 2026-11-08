@@ -99,22 +99,32 @@ func removeAllDrepDelegators(
 	drepTag uint8,
 	drepCredential []byte,
 	slot uint64,
+	protocolMajor uint64,
 ) error {
 	removedSlot, err := checkedInt64(slot)
 	if err != nil {
 		return err
 	}
-	insert := `-- name: InsertAccountDrepClearForDrep :exec
-INSERT INTO account_drep_clear (credential_tag, staking_key, added_slot)
-SELECT account.credential_tag, account.staking_key, ? FROM account
-WHERE EXISTS (
+	predicate := `EXISTS (
     SELECT 1 FROM drep_delegator
     WHERE drep_credential_tag = ? AND drep_credential = ?
       AND removed_slot IS NULL
       AND account.credential_tag = drep_delegator.stake_credential_tag
       AND account.staking_key = drep_delegator.stake_credential
 )`
-	if wrapped, ok := unwrapDialectQueryer(db); ok && wrapped.dialect == "mysql" {
+	if protocolMajor >= 10 {
+		// PV10 makes the reverse set equal to current vote delegations. Read
+		// that authoritative state so stale or missing replay index entries
+		// cannot clear an unrelated delegate or miss a real one. PV9 retains
+		// its historical reverse-membership semantics.
+		predicate = `account.active = TRUE AND account.drep_type = ? AND account.drep = ?`
+	}
+	insert := `-- name: InsertAccountDrepClearForDrep :exec
+INSERT INTO account_drep_clear (credential_tag, staking_key, added_slot)
+SELECT account.credential_tag, account.staking_key, ? FROM account
+WHERE ` + predicate
+	if wrapped, ok := unwrapDialectQueryer(db); ok &&
+		wrapped.dialect == "mysql" {
 		insert = strings.Replace(insert, "INSERT INTO", "INSERT IGNORE INTO", 1)
 	} else {
 		insert += "\nON CONFLICT (credential_tag, staking_key, added_slot) DO NOTHING"
@@ -126,13 +136,7 @@ WHERE EXISTS (
 	}
 	if _, err := db.ExecContext(ctx, `-- name: ClearAccountDrepDelegationsForDrep :exec
 UPDATE account SET drep = NULL, drep_type = 0, added_slot = ?
-WHERE EXISTS (
-    SELECT 1 FROM drep_delegator
-    WHERE drep_credential_tag = ? AND drep_credential = ?
-      AND removed_slot IS NULL
-      AND account.credential_tag = drep_delegator.stake_credential_tag
-      AND account.staking_key = drep_delegator.stake_credential
-)`, removedSlot, drepTag, drepCredential); err != nil {
+WHERE `+predicate, removedSlot, drepTag, drepCredential); err != nil {
 		return fmt.Errorf("clear DRep delegator accounts: %w", err)
 	}
 	if _, err := db.ExecContext(ctx, `-- name: RemoveAllDrepDelegatorsForDrep :exec

@@ -115,17 +115,23 @@ genesis never ran `ANALYZE`, and without `sqlite_stat1` the planner picks
 indexes by shape alone: the batched spend `UPDATE` in `consumeUtxosBatchQuery`
 plans as a scan of `idx_utxo_deleted_payment_script (deleted_slot=?)` instead of
 a seek on `tx_id_output_idx`. `Store.OptimizePlannerStatsContext` runs `PRAGMA
-optimize(0x10002)` (every table, exact rather than sampled statistics) on the
-write connection, outside any transaction, at startup before block processing
+optimize(0x10012)` on the write connection, outside any transaction, at startup
+before block processing
 begins, after each epoch rollover commits, and once a minute in between:
 statistics recorded at startup can understate tables that block application then
 fills (a node bootstrapped from Mithril records `transaction` and `certs` at
 almost no rows), and every query that reaches `transaction` through `certs` then
 plans a full scan per lookup until the next run. Tables without statistics are
-always analyzed; tables with them only after roughly 25-fold growth, so a repeat
-run is near-free, while the first run on a large database analyzes every table
-and takes minutes. The write pool has one connection, so writers wait for the
-run. The run is skipped during a bulk load. A node-managed Mithril stream
+eligible for analysis; other tables are reconsidered after substantial growth
+or shrinkage. The mask retains SQLite's temporary analysis-limit bit as well
+as its all-table check. Supplying an explicit mask without the limit bit
+disables that default and permits full index scans whenever a table is selected.
+Sampling limits this index work
+without changing the connection's configured analysis limit. The write pool
+has one connection, so writers still wait for the run. Sampled analysis updates
+`sqlite_stat1` and does not compute full `sqlite_stat4` histograms; explicit
+full `ANALYZE` remains available for completed backfills. The run is skipped
+during a bulk load. A node-managed Mithril stream
 catch-up defers the epoch and periodic runs for its duration
 (`plannerstats.Manager.Defer`): on a database it is filling, nearly every table
 passes the growth threshold at each epoch, so each run costs more than the last,
@@ -3505,6 +3511,13 @@ for a surviving `(pool_key_hash, slot)` row.
 
 ### DReps, Governance, and Committee
 
+DRep deregistration journals and clears active accounts' current forward vote
+delegations at protocol version 10 and later. The current account target is
+authoritative even when historical API replay left a stale or missing reverse
+membership; the deregistered DRep's reverse memberships are still closed at the
+certificate slot. Protocol version 9 retains its reverse-membership-based
+clearing behavior.
+
 DRep activity updates reject epoch-plus-inactivity overflow before addition and
 reject activity or expiry values outside the signed SQL integer domain. Rejected
 updates preserve the previous activity and expiry epochs.
@@ -4790,28 +4803,33 @@ Pruning content preserves membership when the exact metadata/index pair stays
 canonical. Ephemeral and in-memory chains retain their own index checks.
 
 Historical API metadata backfill also traverses the active `bi` index rather
-than discovering blocks from the `bp` body-key namespace. Empty slots require
-no special handling, and sparse imported index IDs are valid. The canonical
-index is treated as quiescent for one backfill run. Every indexed point in the
-replay range must resolve to a block body whose metadata ID matches the index
-key. A missing body, an expired-history tombstone, or a mismatched index stops
-backfill before later blocks are applied; the current transaction is rolled
-back and the checkpoint remains at the last committed block. Index keys are
-listed in bounded batches, while their fixed-size values are read one at a time
-with the block-key size as the read cap. A cancelled or oversized remote read
-therefore cannot be amplified across a whole batch. On resume, the persisted
-slot, index ID, and block hash must name one exact self-consistent canonical
-point. A legacy incomplete checkpoint without that identity restarts from the
-first index entry.
+than discovering blocks from the `bp` body-key namespace. Empty slots require no
+special handling, and sparse imported index IDs are valid. The canonical index
+is treated as quiescent for one backfill run. Every indexed point in the replay
+range must resolve to a block body whose metadata ID matches the index key. A
+missing body, an expired-history tombstone, or a mismatched index stops backfill
+before later blocks are applied; the current transaction is rolled back and the
+checkpoint remains at the last committed block. Index keys are listed in bounded
+batches, while their fixed-size values are read one at a time with the block-key
+size as the read cap. A cancelled or oversized remote read therefore cannot be
+amplified across a whole batch. On resume, the checkpoint is resolved by its
+persisted index ID, because a slot can hold both a Byron epoch boundary block
+and the block after it; the block that index maps to must carry the same index
+ID in its metadata and match the persisted slot and block hash. A legacy
+incomplete checkpoint without that identity restarts from the first index entry.
 
-Canonical index slots must increase strictly through index EOF. An explicit
-historical end slot bounds block-body replay, while entries above it still have
-their small index values read and checked for malformed or non-increasing
-mappings. Backfill marks the checkpoint complete only after that full audit.
-An unbounded mapping that jumps beyond the index-derived chain tip is also an
-error. Bounded completion therefore validates every raw mapping value and its
-order through EOF, while block bodies and metadata above the replay bound are
-intentionally not fetched.
+Canonical index slots must increase strictly through index EOF, with one
+exception: a Byron epoch boundary block shares its slot with the block after it,
+so a different, non-boundary block may repeat a boundary block's slot. That case
+is confirmed from the two blocks' metadata values; every other repeated or
+decreasing slot is an error, including on resume, where the checkpoint's point
+seeds the comparison. An explicit historical end slot bounds block-body replay,
+while entries above it still have their small index values read and checked for
+malformed or non-increasing mappings. Backfill marks the checkpoint complete
+only after that full audit. An unbounded mapping that jumps beyond the
+index-derived chain tip is also an error. Bounded completion therefore validates
+every raw mapping value and its order through EOF, while block bodies above the
+replay bound are intentionally not fetched.
 
 `Database.CountBlocksAndOldestSlot` (`database/block_inventory.go`) reads the
 retained block count and oldest retained slot from the checksummed
@@ -5240,6 +5258,20 @@ older than the ledger stability window:
   left. The cursor stops at the first block whose expiry fails so that block is
   retried. A rollback or `lifecycle.Truncate` lowers it to the target slot when
   it lies above it, because replay stores new blocks only above the target.
+- The pruner also keeps the start of retained history in memory for the UTxO
+  RPC API, which names it in history-expired errors (`oldest retained
+  slot=N`). `Database.RefreshOldestRetainedSlot` computes it when the pruner
+  starts and after each round. The cursor is only a lower bound (the pruner
+  leaves it on the last block it expired, and a rollback lowers it below
+  already-expired blocks), so the refresh walks forward from it past
+  tombstones, at most 4096 of them, to the first block whose body still reads
+  back. `Database.OldestRetainedSlot` only reads the stored value, so an
+  expired-history request does no scan. The bound is unknown before the first
+  refresh, when no cursor exists or no retained block is found, and from the
+  moment a block at or below it is expired or deleted (`PruneBlock`,
+  `BlockDeleteTxn`, again when that transaction commits) or the blob store is
+  replaced, until the next refresh. A refresh that sees such a removal during
+  its scan at or below the slot it found stores unknown.
 - Expired blocks keep their `bi...`, `bh...`, and `bp..._metadata` entries. SQL
   metadata rows also remain. Blob readers return `types.ErrHistoryExpired` with
   the slot/hash. Without an archive wrapper this is the final read error; with
@@ -7903,7 +7935,7 @@ PostgreSQL and MySQL keep the per-row writes described above.
   as the per-row path leaves them. `FlushBatch` raises a sequence that ends on
   an unwritten id.
 - **Writes.** `FlushBatch` inserts surviving outputs with explicit ids in
-  multi-row `BatchOverlayInsertUtxos` statements (62 rows each) and their
+  multi-row `BatchOverlayInsertUtxos` statements and their
   pointer rows, marks pre-batch spends with `UPDATE ... FROM (VALUES ...)`
   keyed by `utxo.id` (333 rows each), deletes by id the rows the per-row path
   deletes before commit, and queues asset rows for the surviving outputs into
@@ -7913,6 +7945,17 @@ PostgreSQL and MySQL keep the per-row writes described above.
   `types.ErrBatchUtxoOverlayConflict`, and `ApplyTrustedBatch` applies the
   uncommitted blocks once more on the per-row path, which repairs rows a
   snapshot import created ahead of their producer.
+  The stock SQLite provider permits up to 2047 outputs per INSERT. Each
+  invocation checks the active transaction's main and TEMP schemas for UTxO
+  triggers or a shadowing TEMP table/view, then eagerly prepares a numbered
+  parameter to check that connection's current variable limit. It closes the
+  probe before writing. A trigger, unknown queryer, unsupported probe or ordinary
+  guard failure retains the original 62-row statements; cancellation propagates.
+  Trigger absence is never cached between flushes. Other statements keep the
+  dialect's 999-parameter bound, and custom providers retain it unless they
+  explicitly certify eager preparation through `SQLiteOverlayInsertRows`.
+  Row order, explicit IDs, constraints, sequences and rollback paths are
+  preserved; a failed actual INSERT follows the existing error path.
 - **Deletes.** An output created and spent in the same block-apply
   transaction is not written. An output an earlier transaction of the same
   call committed (before an epoch boundary) is deleted by id when spent, as

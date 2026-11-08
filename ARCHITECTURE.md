@@ -107,6 +107,13 @@ is still busy. On PostgreSQL and MySQL this also includes read activity and a
 bulk-load session holding its dedicated connection; the detailed scheduling
 and SQLite reclaim behavior is documented in `DATABASE.md`.
 
+The SQLite provider certifies eager preparation for optional wider overlay
+UTxO inserts. The shared store checks the existing transaction's runtime
+parameter limit and main/TEMP trigger state before widening that one statement.
+Unknown queryers, triggers and unsupported checks retain the dialect's bound;
+writer acquisition, global query bounds and overlay rollback ownership stay
+with their existing components.
+
 The SQLite provider is a thin factory around the pure-Go driver. It configures
 one WAL writer, a separate read pool, pragmas, disk-size accounting, migration
 locking, query tracing, optional incremental space reclaim (off by default), and
@@ -2088,9 +2095,13 @@ When `Node.Run()` is called, components are initialized in this order:
     clock's duplicate, is ignored; Byron rollovers carry no nonce and still
     trigger a run). Its worker also runs the pass every
     `plannerstats.DefaultRefreshInterval` (one minute), so tables filled by
-    block application after the startup pass are re-analyzed once they have
-    grown roughly 25-fold, not only at the next rollover; the tick shares the
-    worker with the epoch trigger, so runs never overlap.
+    block application after the startup pass can be re-analyzed before the
+    next rollover. The optimizer considers every table while retaining SQLite's
+    temporary sampling limit. An explicit optimizer mask must retain that bit;
+    omitting it permits unrestricted index analysis. The single write connection
+    is held during maintenance, so unrestricted analysis here would stop block
+    application for the duration of each scan. The tick shares the worker with
+    the epoch trigger, so runs never overlap.
     A one-slot pending signal coalesces transitions arriving during a run into
     at most one follow-up, and the run executes on its own worker after the
     rollover transaction has committed, never inside it. `Stop` cancels a run in
@@ -5043,7 +5054,22 @@ reliably serve them. Near the head, current announcements are prefetched in the
 background for voting and later certification, and a CertRB also fetches its
 parent announcement, because one block may both certify and announce; only the
 certified closures the batch applies are waited for
-(`splitTipWaitByApplyDependency`). The prototype relays serve historical
+(`splitTipWaitByApplyDependency`).
+
+Historical application in the chain-iterator loop can commit a fully available
+prefix while later certified closures in the selected chunk continue backfilling.
+External trusted batches and immutable load retain their existing commit grouping.
+`ensureReadyEndorserPrefix` verifies all selected certificates before starting
+fetches and returns a shorter prefix only when at least half the chunk is
+ready. This limits fragmentation and repeated certificate checks. The returned
+count bounds the transaction in `processBlocksFromSource`; the reader result
+stays owned until its remaining suffix is processed. Snapshot capture follows
+the prefix wait, and network waits remain outside write transactions. Fully
+cached chunks keep their existing grouping. Live diffusion, zero-wait and
+unknown-slot-length paths retain full gating, and epoch prechecks still stop
+before blocks whose epoch has not been published.
+
+The prototype relays serve historical
 endorser blocks by point on demand when otherwise idle (`MsgLeiosBlockRequest`
 carrying the block point, then the windowed transaction fetch), so a
 from-scratch sync backfills the endorser-resident transactions for the chain
@@ -8103,8 +8129,14 @@ Ordinary Praos sessions continue to use primary-chain intersection points.
   candidate nonce with the carried last-epoch-block nonce and, in TPraos eras,
   the protocol-parameter extraEntropy. The evolving nonce folds every header
   through the epoch end; the candidate nonce follows it only before that epoch's
-  stability cutoff, then stays frozen while the evolving nonce continues. Each
-  next epoch nonce is assembled from that epoch's candidate nonce and the
+  stability cutoff, then stays frozen while the evolving nonce continues. When
+  an intersection is past that cutoff and the next epoch's candidate is not
+  cached, the verifier walks the intersection's parent links to the last block
+  strictly before the cutoff and reads its stored evolving nonce. A retained
+  sibling cannot supply that prefix. This needs no transaction-body decoding
+  even if later fetched blocks have no applied nonce. Missing ancestry or nonce
+  rows use the full reconstruction path; an epoch with no pre-cutoff block
+  carries its previous candidate. Each next epoch nonce is assembled from that epoch's candidate nonce and the
   carried last-epoch-block nonce. A per-connection, per-epoch nonce-prefix cache
   resumes folding at the first newly added header, keyed by the last folded
   hash, source epoch and nonce, cutoff, and both initial nonce states; entries
@@ -15574,6 +15606,17 @@ replay slot (until the stream reaches the tip) and spends the client's rate
 and window budget, which `FollowTip` streams from the same host share.
 Rollback and tip blocks are not charged. The `MaxReplayBlocks` start-distance
 check still applies first.
+
+A read that reaches a block body removed by local history expiry
+(`types.ErrHistoryExpired`) ends the call or stream with `FailedPrecondition`
+rather than `Internal`, naming the expired slot and hash. `historyExpiredError`
+also asks the ledger for the start of retained history
+(`UtxorpcLedgerState.OldestRetainedSlot`, served by
+`Database.OldestRetainedSlot`) and appends `oldest retained slot=N` when it is
+known. The bound is kept in memory by the history-expiry pruner, which
+recomputes it from the cursor in `sync_state` after each round, so the error
+path does no I/O and repeated expired requests cannot drive disk scans. An
+unknown bound leaves the message without it and keeps the code.
 
 `FollowTip` populates `Timestamp` on a `Reset` block reference and on every
 response's `Tip` from `LedgerState.SlotToTime`. `Timestamp` is a plain proto3

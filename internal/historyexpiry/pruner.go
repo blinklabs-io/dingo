@@ -110,6 +110,18 @@ func (p *Pruner) saveCursor(cursor uint64) {
 	}
 }
 
+// refreshRetainedBound recomputes the start of retained history that
+// expired-history errors name, so request paths read it without scanning.
+func (p *Pruner) refreshRetainedBound(ctx context.Context) {
+	if err := p.db.RefreshOldestRetainedSlot(ctx); err != nil &&
+		ctx.Err() == nil {
+		p.logger.Error(
+			"history expiry: failed to refresh oldest retained slot",
+			"error", err,
+		)
+	}
+}
+
 func (p *Pruner) prune(ctx context.Context) {
 	currentSlot, err := p.ledgerState.CurrentSlot()
 	if err != nil {
@@ -190,10 +202,12 @@ func (p *Pruner) prune(ctx context.Context) {
 func (p *Pruner) run(ctx context.Context) {
 	ticker := time.NewTicker(p.config.Frequency)
 	defer ticker.Stop()
+	p.refreshRetainedBound(ctx)
 	for {
 		select {
 		case <-ticker.C:
 			p.prune(ctx)
+			p.refreshRetainedBound(ctx)
 		case <-ctx.Done():
 			return
 		}
