@@ -333,14 +333,11 @@ func SQLiteDialect() Dialect {
 			"PRAGMA wal_autocheckpoint = 10000",
 		),
 		analyze: execStatements("ANALYZE"),
-		// 0x10002 is the "run ANALYZE" bit plus "consider every table": a
-		// plain PRAGMA optimize only looks at tables the issuing connection
-		// has already queried, which a freshly opened connection has not,
-		// and it samples rows (analysis_limit) where this form measures them
-		// all. Tables without statistics are always analyzed; tables that
-		// have them are re-analyzed only after growing roughly 25-fold, so a
-		// repeat run is effectively free.
-		optimize:       execStatements("PRAGMA optimize(0x10002)"),
+		// An explicit mask replaces SQLite's defaults, so retain the
+		// temporary analysis-limit bit alongside the all-table check.
+		// Unrestricted index analysis holds the sole write connection and
+		// pauses block application for the duration of the scan.
+		optimize:       execStatements("PRAGMA optimize(0x10012)"),
 		updateFromJoin: standardUpdateFromJoinSQL,
 	}
 }

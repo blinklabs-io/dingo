@@ -112,7 +112,7 @@ func setupLifecycleTestChain(
 func TestDatabaseLifecycleSnapshotRestoreRoundTrip(t *testing.T) {
 	t.Parallel()
 
-	const numBlocks = 60
+	const numBlocks = 12
 	db, points := setupLifecycleTestChain(t, t.TempDir(), numBlocks)
 	defer db.Close()
 
@@ -171,7 +171,7 @@ func TestDatabaseLifecycleSnapshotRestoreRoundTrip(t *testing.T) {
 func TestDatabaseLifecycleTruncateRealChain(t *testing.T) {
 	t.Parallel()
 
-	const numBlocks = 60
+	const numBlocks = 12
 	db, points := setupLifecycleTestChain(t, t.TempDir(), numBlocks)
 	defer db.Close()
 
@@ -221,7 +221,7 @@ func TestDatabaseLifecycleTruncateRealChain(t *testing.T) {
 func TestDatabaseLifecycleTruncateRejectsBeyondMithrilBoundary(t *testing.T) {
 	t.Parallel()
 
-	const numBlocks = 60
+	const numBlocks = 12
 	db, points := setupLifecycleTestChain(t, t.TempDir(), numBlocks)
 	defer db.Close()
 

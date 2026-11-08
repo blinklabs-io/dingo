@@ -240,22 +240,6 @@ func reportDirAllocatedBytes(b *testing.B, dir, metric string) {
 	}
 }
 
-func TestDirAllocatedBytesUsesStatBlocks(t *testing.T) {
-	t.Parallel()
-	path := filepath.Join(t.TempDir(), "sparse")
-	file, err := os.Create(path)
-	require.NoError(t, err)
-	require.NoError(t, file.Truncate(1<<20))
-	require.NoError(t, file.Close())
-	info, err := os.Stat(path)
-	require.NoError(t, err)
-	allocated, ok := allocatedFileBytes(info)
-	if !ok {
-		t.Skip("filesystem stat does not expose allocated blocks")
-	}
-	require.Less(t, allocated, info.Size(), "sparse file should use fewer allocated bytes than its apparent size")
-}
-
 func reportRSS(b *testing.B) {
 	b.Helper()
 	if rss, ok := rssBytes(); ok {

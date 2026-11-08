@@ -74,6 +74,8 @@ func TestRunDoesNotPreRemoveSocketPath(t *testing.T) {
 
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
 			tempDir, err := os.MkdirTemp("", "dn*")
 			require.NoError(t, err)
 			t.Cleanup(func() { require.NoError(t, os.RemoveAll(tempDir)) })

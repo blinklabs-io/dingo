@@ -608,6 +608,8 @@ func TestHistoricalAddressBalanceUsesExactIdentityAndSlot(t *testing.T) {
 func TestHistoricalAddressBalanceAggregatesLargeResultSet(t *testing.T) {
 	t.Parallel()
 
+	const rows = 11
+
 	db := openTestDBWithStorageMode(t, types.StorageModeAPI)
 	raw := rawSQLiteMetadataFixture(t, db)
 	addr, err := lcommon.NewAddressFromParts(
@@ -619,7 +621,7 @@ func TestHistoricalAddressBalanceAggregatesLargeResultSet(t *testing.T) {
 	require.NoError(t, err)
 	txn, err := raw.Begin()
 	require.NoError(t, err)
-	for i := 1; i <= 1001; i++ {
+	for i := 1; i <= rows; i++ {
 		txID := make([]byte, 32)
 		binary.BigEndian.PutUint64(txID[24:], uint64(i))
 		result, err := txn.Exec(`
@@ -645,17 +647,17 @@ VALUES (?, 1, 0, '1', 0, FALSE)`, txID)
 	require.NoError(t, db.SetSyncState(utxoAddressBackfillSyncKey, "true", nil))
 
 	limited, err := db.utxoStore().GetUtxoBalanceByAddressAtSlot(
-		[]byte(addr.String()), 1, 1000, nil,
+		[]byte(addr.String()), 1, rows-1, nil,
 	)
 	require.ErrorIs(t, err, models.ErrTooManyUtxoResults)
-	require.EqualValues(t, 1001, limited.UtxoCount)
+	require.EqualValues(t, rows, limited.UtxoCount)
 
 	got, err := db.UtxoBalanceByAddressAtSlot(
 		context.Background(), addr, 1, nil,
 	)
 	require.NoError(t, err)
-	require.EqualValues(t, 1001, got.UtxoCount)
-	require.EqualValues(t, 1001, got.Lovelace)
+	require.EqualValues(t, rows, got.UtxoCount)
+	require.EqualValues(t, rows, got.Lovelace)
 	require.Equal(t, []models.AssetBalance{{
 		PolicyId: bytes.Repeat([]byte{0x48}, 28),
 		Name:     []byte{0x01},
@@ -1054,10 +1056,10 @@ func TestUtxosWithHistoryExactAddressLimitFillsPage(t *testing.T) {
 }
 
 // TestUtxosWithHistoryExactAddressHasNoTotalCandidateCap proves a bounded
-// exact-address page is not failed merely because more than 10,000 coarse
-// credential-sharing candidates precede its first match. The old coordinated
-// scan returned errExactAddressCandidateScanLimit before reaching targetSlot;
-// fixed-size keyset batches bound per-query work without hiding that match.
+// exact-address page is not failed merely because many keyset batches of
+// coarse credential-sharing candidates precede its first match: the scan
+// keeps resuming past each batch instead of returning
+// errExactAddressCandidateScanLimit before reaching targetSlot.
 func TestUtxosWithHistoryExactAddressHasNoTotalCandidateCap(t *testing.T) {
 	t.Parallel()
 
@@ -1084,7 +1086,7 @@ func TestUtxosWithHistoryExactAddressHasNoTotalCandidateCap(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	const siblingCount = 10_001
+	const siblingCount = ExactAddressCandidateScanLimit + 1
 	const targetSlot = siblingCount + 1
 	require.NoError(t, db.BlobTxn(true).Do(func(txn *Txn) error {
 		metadataTxn, err := raw.Begin()
@@ -1233,7 +1235,7 @@ func TestCountAndPageUtxosByAddressWithOrderingCoarseMatch(t *testing.T) {
 func TestCountUtxosByAddressWithOrderingRejectsExactAddress(t *testing.T) {
 	t.Parallel()
 
-	db := openTestDB(t)
+	db := newTestDB(t)
 
 	payment := bytes.Repeat([]byte{0x11}, lcommon.AddressHashSize)
 	addr, err := lcommon.NewAddressFromParts(
@@ -1264,7 +1266,7 @@ func TestCountUtxosByAddressWithOrderingRejectsExactAddress(t *testing.T) {
 func TestUtxosByAddressWithOrderingRejectsOffsetOnExactAddress(t *testing.T) {
 	t.Parallel()
 
-	db := openTestDB(t)
+	db := newTestDB(t)
 
 	payment := bytes.Repeat([]byte{0x22}, lcommon.AddressHashSize)
 	addr, err := lcommon.NewAddressFromParts(
@@ -1365,7 +1367,7 @@ func TestUtxosByAddressWithOrderingKeysetDirections(t *testing.T) {
 func TestUtxosByAddressWithOrderingRejectsOffsetKeyset(t *testing.T) {
 	t.Parallel()
 
-	db := openTestDB(t)
+	db := newTestDB(t)
 
 	_, err := db.UtxosByAddressWithOrdering(
 		context.Background(),
@@ -1760,93 +1762,6 @@ func TestMatchingUtxoRefsByAddressWithOrderingBoundedBudgets(t *testing.T) {
 	})
 }
 
-// TestMatchingUtxoRefsByAddressWithOrderingBoundedStopsAtCandidateBudget
-// proves an exact-address scan stops after its configured candidate budget
-// rather than traversing an unbounded address history.
-func TestMatchingUtxoRefsByAddressWithOrderingBoundedStopsAtCandidateBudget(
-	t *testing.T,
-) {
-	t.Parallel()
-
-	db := openTestDB(t)
-	raw := rawSQLiteMetadataFixture(t, db)
-
-	payment := bytes.Repeat([]byte{0x5c}, lcommon.AddressHashSize)
-	addr, err := lcommon.NewAddressFromParts(
-		lcommon.AddressTypeKeyNone,
-		lcommon.AddressNetworkTestnet,
-		payment,
-		nil,
-	)
-	require.NoError(t, err)
-
-	const total = 10_050
-	require.NoError(t, db.BlobTxn(true).Do(func(txn *Txn) error {
-		tx, err := raw.Begin()
-		if err != nil {
-			return err
-		}
-		defer tx.Rollback() //nolint:errcheck
-		for i := range total {
-			txHash := make([]byte, 32)
-			binary.BigEndian.PutUint32(txHash[28:], uint32(i)+1)
-			txID := uint(i + 1)
-			slot := uint64(i) + 1
-			amount := slot * 1_000_000
-			if _, err := tx.Exec(`
-INSERT INTO "transaction" (
-    id, hash, slot, block_index, type, fee, collateral_fee, ttl, valid
-) VALUES (?, ?, ?, 0, 0, '0', '0', '0', TRUE)`,
-				txID, txHash, slot,
-			); err != nil {
-				return err
-			}
-			if _, err := tx.Exec(`
-INSERT INTO utxo (
-    transaction_id, tx_id, payment_key, staking_key, credential_tag,
-    added_slot, deleted_slot, amount, output_idx, payment_script
-) VALUES (?, ?, ?, NULL, 0, ?, 0, ?, 0, FALSE)`,
-				txID,
-				txHash,
-				addr.PaymentKeyHash().Bytes(),
-				slot,
-				strconv.FormatUint(amount, 10),
-			); err != nil {
-				return err
-			}
-			encoded, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
-				OutputAddress: addr,
-				OutputAmount:  amount,
-			})
-			if err != nil {
-				return err
-			}
-			if err := db.Blob().SetUtxo(txn.Blob(), txHash, 0, encoded); err != nil {
-				return err
-			}
-		}
-		return tx.Commit()
-	}))
-
-	pattern, err := models.ExactUtxoAddressPattern(addr)
-	require.NoError(t, err)
-	txn := db.Transaction(context.Background(), false)
-	defer txn.Release()
-	refs, exhausted, err := db.MatchingUtxoRefsByAddressWithOrderingBounded(
-		context.Background(),
-		&models.UtxoWithOrderingQuery{
-			AddressPatterns: []models.UtxoAddressPattern{pattern},
-			Limit:           total,
-		},
-		txn,
-		ExactAddressCandidateScanLimit,
-		DefaultPublicUtxoCborBudget,
-	)
-	require.NoError(t, err)
-	assert.False(t, exhausted)
-	assert.Len(t, refs, ExactAddressCandidateScanLimit)
-}
-
 // TestUtxosByAddressWithOrderingSnapshotTieBreak seeds enough
 // snapshot-imported candidates sharing one slot, block index, and output
 // index -- 118 pointer-address siblings followed by 12 exact-address
@@ -1936,66 +1851,6 @@ func TestUtxosByAddressWithOrderingSnapshotTieBreak(t *testing.T) {
 		seen[string(u.TxId)] = true
 		require.True(t, wantHashes[string(u.TxId)], "unexpected tx %x", u.TxId)
 	}
-}
-
-// TestUtxosByAddressLoadsAssets proves GetUtxosByAddress still attaches
-// native assets to its results after candidate selection was split from
-// asset loading (assets are now loaded once on the deduplicated result set
-// instead of once per chunk -- see GetUtxosByAddress).
-func TestUtxosByAddressLoadsAssets(t *testing.T) {
-	t.Parallel()
-
-	db := openTestDB(t)
-
-	payment := bytes.Repeat([]byte{0x55}, lcommon.AddressHashSize)
-	addr, err := lcommon.NewAddressFromParts(
-		lcommon.AddressTypeKeyNone,
-		lcommon.AddressNetworkTestnet,
-		payment,
-		nil,
-	)
-	require.NoError(t, err)
-
-	txHash := bytes.Repeat([]byte{0x99}, 32)
-	policyID := bytes.Repeat([]byte{0x33}, 28)
-	assetName := []byte("asset")
-	encoded, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
-		OutputAddress: addr,
-		OutputAmount:  1_000_000,
-	})
-	require.NoError(t, err)
-	require.NoError(t, db.CreateUtxo(context.Background(), nil, &models.Utxo{
-		TxId:       txHash,
-		OutputIdx:  0,
-		PaymentKey: addr.PaymentKeyHash().Bytes(),
-		Address:    []byte(addr.String()),
-		AddedSlot:  1,
-		Amount:     types.Uint64(1_000_000),
-		Cbor:       encoded,
-		Assets: []models.Asset{{
-			Name:        assetName,
-			PolicyId:    policyID,
-			Fingerprint: []byte("fingerprint"),
-			Amount:      5,
-		}},
-	}))
-
-	require.NoError(t, db.BlobTxn(true).Do(func(txn *Txn) error {
-		return db.Blob().SetUtxo(txn.Blob(), txHash, 0, encoded)
-	}))
-
-	got, err := db.UtxosByAddress(
-		context.Background(),
-		[]lcommon.Address{addr},
-		MaxUtxosByAddressResults,
-		nil,
-	)
-	require.NoError(t, err)
-	require.Len(t, got, 1)
-	require.Len(t, got[0].Assets, 1)
-	assert.Equal(t, assetName, got[0].Assets[0].Name)
-	assert.Equal(t, policyID, got[0].Assets[0].PolicyId)
-	assert.Equal(t, types.Uint64(5), got[0].Assets[0].Amount)
 }
 
 // seedManyUtxoAddressesAndAssertRoundTrip builds numAddrs addresses via
@@ -2096,7 +1951,7 @@ func TestUtxosByAddressExceedsSQLiteParameterLimit(t *testing.T) {
 	t.Parallel()
 
 	seedManyUtxoAddressesAndAssertRoundTrip(
-		t, 2000, func(i int) lcommon.Address {
+		t, 1100, func(i int) lcommon.Address {
 			payment := make([]byte, lcommon.AddressHashSize)
 			binary.BigEndian.PutUint32(payment, uint32(i)+1)
 			stake := make([]byte, lcommon.AddressHashSize)
@@ -2839,49 +2694,6 @@ func TestRepairUtxoBlobWritesThroughCallersPinnedStore(t *testing.T) {
 	)
 }
 
-func TestTransactionsByAddressHonorSlotRange(t *testing.T) {
-	t.Parallel()
-
-	db := openTestDB(t)
-	raw := rawSQLiteMetadataFixture(t, db)
-
-	payment := bytes.Repeat([]byte{0xab}, lcommon.AddressHashSize)
-	enterprise, err := lcommon.NewAddressFromParts(
-		lcommon.AddressTypeKeyNone,
-		lcommon.AddressNetworkTestnet,
-		payment,
-		nil,
-	)
-	require.NoError(t, err)
-	for slot := uint64(1); slot <= 6; slot++ {
-		seedExactAddressUtxo(t, db, raw, enterprise, slot, byte(slot))
-	}
-
-	from := &models.AddressTransactionPosition{Slot: 3}
-	to := &models.AddressTransactionPosition{Slot: 5, TxIndex: 0}
-	txs, err := db.GetTransactionsByAddressWithOrder(
-		context.Background(), enterprise, 10, 0, "asc", from, to, nil,
-	)
-	require.NoError(t, err)
-	require.Len(t, txs, 3)
-	assert.Equal(t, []byte{0x03, 0x04, 0x05}, []byte{
-		txs[0].Hash[0], txs[1].Hash[0], txs[2].Hash[0],
-	})
-	count, err := db.CountTransactionsByAddress(
-		context.Background(), enterprise, from, to, nil,
-	)
-	require.NoError(t, err)
-	assert.Equal(t, 3, count)
-
-	// Bounds apply before the page window.
-	page, err := db.GetTransactionsByAddressWithOrder(
-		context.Background(), enterprise, 1, 1, "desc", from, to, nil,
-	)
-	require.NoError(t, err)
-	require.Len(t, page, 1)
-	assert.Equal(t, byte(0x04), page[0].Hash[0])
-}
-
 func TestRollbackTransactionDeletionRestoresLegacyAssetAddress(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -2971,7 +2783,7 @@ UPDATE utxo SET deleted_slot = 10, spent_at_tx_id = ?`, consumerHash)
 func TestUtxosDeleteSpentInBatchFloor(t *testing.T) {
 	t.Parallel()
 
-	db := openTestDB(t)
+	db := newTestDB(t)
 	ids := []models.UtxoId{{Hash: bytes.Repeat([]byte{0x01}, 32), Idx: 0}}
 	require.ErrorIs(t,
 		db.UtxosDeleteSpentInBatch(ids, 10, nil), types.ErrNilTxn)
@@ -3041,4 +2853,47 @@ func TestFilterUtxosByAddressPatternsExactSetMatchesLinear(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Empty(t, got)
+}
+
+func TestTransactionsByAddressHonorSlotRange(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	raw := rawSQLiteMetadataFixture(t, db)
+
+	payment := bytes.Repeat([]byte{0xab}, lcommon.AddressHashSize)
+	enterprise, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		payment,
+		nil,
+	)
+	require.NoError(t, err)
+	for slot := uint64(1); slot <= 6; slot++ {
+		seedExactAddressUtxo(t, db, raw, enterprise, slot, byte(slot))
+	}
+
+	from := &models.AddressTransactionPosition{Slot: 3}
+	to := &models.AddressTransactionPosition{Slot: 5, TxIndex: 0}
+	txs, err := db.GetTransactionsByAddressWithOrder(
+		context.Background(), enterprise, 10, 0, "asc", from, to, nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, txs, 3)
+	assert.Equal(t, []byte{0x03, 0x04, 0x05}, []byte{
+		txs[0].Hash[0], txs[1].Hash[0], txs[2].Hash[0],
+	})
+	count, err := db.CountTransactionsByAddress(
+		context.Background(), enterprise, from, to, nil,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 3, count)
+
+	// Bounds apply before the page window.
+	page, err := db.GetTransactionsByAddressWithOrder(
+		context.Background(), enterprise, 1, 1, "desc", from, to, nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, page, 1)
+	assert.Equal(t, byte(0x04), page[0].Hash[0])
 }

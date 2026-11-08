@@ -112,6 +112,13 @@ driver imports out of the shared store. Its `coinsum` aggregate validates each
 coin and the total as `uint64`, allowing execution-slot fee queries to return
 one row while preserving rejection of invalid stored amounts.
 
+The SQLite provider certifies eager preparation for optional wider overlay
+UTxO inserts. The shared store checks the existing transaction's runtime
+parameter limit and main/TEMP trigger state before widening that one statement.
+Unknown queryers, triggers and unsupported checks retain the dialect's bound;
+writer acquisition, global query bounds and overlay rollback ownership stay
+with their existing components.
+
 The SQLite provider is a thin factory around the pure-Go driver. It configures
 one WAL writer, a separate read pool, pragmas, disk-size accounting, migration
 locking, query tracing, optional incremental space reclaim (off by default), and
@@ -1006,8 +1013,9 @@ scheduled attempt may cross the boundary, once per epoch until the ledger
 applies past the failing block, so a failure that needs a different
 pre-boundary history can still be repaired.
 
-Startup reconciliation rolls the ledger back to the blob tip when metadata
-leads it, and that rollback can be arbitrarily deep, so it can now fail with
+Startup reconciliation rolls both stores back to their newest applied common
+ancestor when metadata leads the selected chain, and that rollback can be
+arbitrarily deep, so it can now fail with
 `ErrRollbackBelowUtxoPruneFloor` and refuse to start. That is the intended
 outcome rather than a regression: the rewind it was about to perform could not
 have rebuilt the live UTxO set, so the alternative is a node that starts,
@@ -2092,9 +2100,13 @@ When `Node.Run()` is called, components are initialized in this order:
     clock's duplicate, is ignored; Byron rollovers carry no nonce and still
     trigger a run). Its worker also runs the pass every
     `plannerstats.DefaultRefreshInterval` (one minute), so tables filled by
-    block application after the startup pass are re-analyzed once they have
-    grown roughly 25-fold, not only at the next rollover; the tick shares the
-    worker with the epoch trigger, so runs never overlap.
+    block application after the startup pass can be re-analyzed before the
+    next rollover. The optimizer considers every table while retaining SQLite's
+    temporary sampling limit. An explicit optimizer mask must retain that bit;
+    omitting it permits unrestricted index analysis. The single write connection
+    is held during maintenance, so unrestricted analysis here would stop block
+    application for the duration of each scan. The tick shares the worker with
+    the epoch trigger, so runs never overlap.
     A one-slot pending signal coalesces transitions arriving during a run into
     at most one follow-up, and the run executes on its own worker after the
     rollover transaction has committed, never inside it. `Stop` cancels a run in
@@ -2859,13 +2871,15 @@ blockfetch lock is released. A rewind refused for exceeding K skips cleanup and
 leaves the chain as a forward extension the ledger replays; any other rewind or
 cleanup error stops recovery. A continuation-audit window is retained when its
 fork point survives the rewind and discarded when that point is truncated. A
-blob store behind the metadata tip
-is missing blocks the ledger has already applied, and nothing local can rebuild
-them, so `reconcilePrimaryChainTipWithLedgerTip` rolls the ledger back to the
-blob tip — a rollback whose depth is set by however far the two stores drifted,
-and which on a Mithril-bootstrapped node can reach the `mithril_ledger_slot`
-trust boundary, past which rollback is refused outright and the database must be
-discarded.
+blob store behind the metadata tip is missing blocks the ledger has already
+applied, and nothing local can rebuild them. Reconciliation walks the durable
+applied-block nonce history back to the newest point still on the selected
+primary chain and rolls both stores back to that common ancestor. It never
+treats a lower raw chain tip as a rollback target merely because its slot is
+below the metadata tip: that tip may already belong to a competing fork. The
+rollback depth is set by however far the stores and forks drifted, and on a
+Mithril-bootstrapped node can reach the `mithril_ledger_slot` trust boundary,
+past which rollback is refused outright and the database must be discarded.
 
 ## Ledger/chain reconciliation
 
@@ -2885,9 +2899,9 @@ covered. An origin tip is never advanced to the floor by recovery. A floor from
 an abandoned fork is ignored so chain selection can recover the canonical
 branch.
 
-When the ledger tip is not on the primary chain at all (the fork-beyond-the-
-ledger shape, as opposed to the blob-behind-metadata shape above),
-reconciliation instead prunes the primary chain back to their common ancestor
+When the ledger tip is not on the primary chain at all, whether the selected
+chain tip is above or below it by slot, reconciliation prunes the primary chain
+back to their common ancestor
 with `ChainManager.RewindPrimaryChainToPoint`, once
 `ChainManager.SecurityParamConfigured()` reports K is set. That call shares its
 bound and side effects with a live `Chain.Rollback` rather than deleting blocks
@@ -4220,6 +4234,13 @@ immutable replay can omit consumed-input blob recovery because the complete
 history supplies each producer output earlier in slot order; transaction
 conflict checks still run.
 
+Consumed-input recovery can use the optional `metadata.UtxoSpendStateReader`
+capability to read only deletion and spender state, with the same transaction
+and pending-overlay visibility as a full UTxO lookup. Providers without it keep
+the full lookup. Recovery reads the Mithril boundary only when a producer is
+absent from both stored and in-flight outputs; its conflict and strict producer
+checks remain unchanged. See DATABASE.md for the SQL projection.
+
 Ledger apply collects block-nonce rows for its database batch and persists them
 through the optional `metadata.BlockNonceBatchStore` capability in the same
 transaction. SQLStore uses bounded multi-row SQLite upserts; other metadata
@@ -5038,7 +5059,22 @@ reliably serve them. Near the head, current announcements are prefetched in the
 background for voting and later certification, and a CertRB also fetches its
 parent announcement, because one block may both certify and announce; only the
 certified closures the batch applies are waited for
-(`splitTipWaitByApplyDependency`). The prototype relays serve historical
+(`splitTipWaitByApplyDependency`).
+
+Historical application in the chain-iterator loop can commit a fully available
+prefix while later certified closures in the selected chunk continue backfilling.
+External trusted batches and immutable load retain their existing commit grouping.
+`ensureReadyEndorserPrefix` verifies all selected certificates before starting
+fetches and returns a shorter prefix only when at least half the chunk is
+ready. This limits fragmentation and repeated certificate checks. The returned
+count bounds the transaction in `processBlocksFromSource`; the reader result
+stays owned until its remaining suffix is processed. Snapshot capture follows
+the prefix wait, and network waits remain outside write transactions. Fully
+cached chunks keep their existing grouping. Live diffusion, zero-wait and
+unknown-slot-length paths retain full gating, and epoch prechecks still stop
+before blocks whose epoch has not been published.
+
+The prototype relays serve historical
 endorser blocks by point on demand when otherwise idle (`MsgLeiosBlockRequest`
 carrying the block point, then the windowed transaction fetch), so a
 from-scratch sync backfills the endorser-resident transactions for the chain
@@ -7822,6 +7858,14 @@ chain tip lies below every ancestor such a walk would read, because the walk
 could reach no held block. Once the chain tip reaches that range the full walk
 runs again. Replacing the retained path clears the record.
 
+Successful stateless header cryptography is also remembered across peer
+connections in a bounded LRU keyed by epoch nonce and a header identity that
+hashes the stored header CBOR together with the decoded KES and opcert fields
+the verifiers read (`ledger/header_verdict_cache.go`). The verdict depends only
+on those inputs, the nonce, and Shelley genesis constants, so a header
+delivered by many peers is verified once. Failures are never stored, and Byron headers and
+headers without their stored CBOR are not cached.
+
 While Genesis corroboration is active, a new ChainSync session intersects at
 the applied ledger tip through `LedgerState.LedgerTipIntersectPoints`, retaining
 older persisted intersection points when available. Starting at primary-chain
@@ -8090,8 +8134,14 @@ Ordinary Praos sessions continue to use primary-chain intersection points.
   candidate nonce with the carried last-epoch-block nonce and, in TPraos eras,
   the protocol-parameter extraEntropy. The evolving nonce folds every header
   through the epoch end; the candidate nonce follows it only before that epoch's
-  stability cutoff, then stays frozen while the evolving nonce continues. Each
-  next epoch nonce is assembled from that epoch's candidate nonce and the
+  stability cutoff, then stays frozen while the evolving nonce continues. When
+  an intersection is past that cutoff and the next epoch's candidate is not
+  cached, the verifier walks the intersection's parent links to the last block
+  strictly before the cutoff and reads its stored evolving nonce. A retained
+  sibling cannot supply that prefix. This needs no transaction-body decoding
+  even if later fetched blocks have no applied nonce. Missing ancestry or nonce
+  rows use the full reconstruction path; an epoch with no pre-cutoff block
+  carries its previous candidate. Each next epoch nonce is assembled from that epoch's candidate nonce and the
   carried last-epoch-block nonce. A per-connection, per-epoch nonce-prefix cache
   resumes folding at the first newly added header, keyed by the last folded
   hash, source epoch and nonce, cutoff, and both initial nonce states; entries
@@ -8953,39 +9003,21 @@ The `chainsync.State` tracks multiple concurrent chainsync clients:
   plateau is a ledger-application backlog, not a chainsync stall, so the healthy
   connection is left running and the condition is logged at INFO instead of
   recycling (recycling cannot advance the applied tip and only churns the
-  connection). The "peers are ahead" comparison reads a peer's DELIVERED
-  frontier. A peer that has delivered no header has that frontier pinned at the
-  point its session intersected at, which immediately after a plateau resync is
-  the stalled local tip itself, so comparing against it would disarm this
-  watchdog exactly when it has just acted. While such a peer is still awaiting
-  its first header (`PeerChainTip.AwaitingFirstHeader`,
-  `chainselection/peer_tip.go`) the recycler therefore falls back to that peer's
-  ADVERTISED tip, but only when the advertised tip is higher and only when the
-  advertising peer IS the connection this plateau would recycle
-  (`advertisesForOwnConnection`, compared by `ConnectionId` rather than by
-  rendered address, so a replacement connection reusing a listen port does not
-  inherit a stale peer's claim). An untrusted advertised tip can therefore only
-  ever be spent on its own connection, and the substituted value also flows into
-  `isLedgerApplicationBacklog` as the best-peer tip, so it sets the
-  backlog-versus-stall classification too. "Awaiting its first header" means the
-  `awaitingFirstHeader` flag chain selection sets only when it registers a peer
-  from a rollback and clears on that peer's first delivered header, not a
-  delivered block number of 0: a tracked peer that has delivered headers and
-  then rolls back to a point outside its retained delivered-header history is
-  also left with a block number of 0 (`ApplyRollback` keeps the point and cannot
-  recover one), but it has delivered headers on this connection, so it is judged
-  on its delivered frontier and its advertised tip is never substituted. That
-  fallback is reachable only because chain selection tracks such a peer in the
-  first place: a plateau resync closes the connection
-  (`SubscribeChainsyncResync`, `ouroboros/chainsync.go`, closes it for every
-  resync reason), the `ConnectionClosedEvent` subscription in `node.go` calls
-  `ChainSelector.RemovePeer`, and the replacement's only chainsync traffic until
-  the next block is its post-`FindIntersect` `MsgRollBackward` — registered as a
-  peer by `registerPeerFromRollbackLocked` and made selectable with a delivered
-  block number of 0 by the `awaitingFirstHeader` exemption in
-  `isPeerSelectableLocked` (`chainselection/selector.go`). Without that
-  registration `GetBestPeer()` is nil through the whole window and the plateau
-  check returns before the fallback, so the two belong together
+  connection). The "peers are ahead" comparison reads the delivered frontier.
+  If that frontier is no longer above the applied tip, the selected connection's
+  own higher advertised tip can arm bounded recovery of that connection, even
+  when it delivered earlier headers. Otherwise a stream that stops delivering
+  after reaching the applied frontier would indefinitely disarm the watchdog.
+  The same fallback covers a rollback-registered peer awaiting its first header.
+  It requires exact `ConnectionId` identity (`advertisesForOwnConnection`),
+  rather than rendered-address equality, so a replacement connection cannot
+  inherit another connection's claim. The advertisement also supplies the
+  existing backlog classifier's peer horizon; local reconciliation, progress
+  clocks, cooldown and Limit-on-Eagerness protection still apply. This
+  advertisement-only evidence never authorizes post-plateau realignment of
+  other peers. It cannot admit a header or change the authenticated chain
+  selector's frontier. Delivered-ahead evidence retains the existing bounded
+  cross-peer realignment behavior.
 - Plateau decisions are counted in
   `dingo_chainsync_plateau_decisions_total{outcome}`: `reconciled` (the local
   reconcile repaired the plateau), `backlog_not_recycled` (ledger-application
@@ -11605,8 +11637,8 @@ block reasons use corroborated network evidence:
   that does not belong to that chain.
 - `primary_tip_behind_applied` is the **opposite**: the ledger is ahead of the
   primary chain. That is chain/ledger reconciliation, the state the ledger
-  resolves at startup by rolling its own tip back to the chain tip, not an
-  apply backlog.
+  resolves at startup by rolling both stores back to their newest applied
+  common ancestor, not an apply backlog.
 - `admitted_header_ahead` means the **selected block chain is behind its own
   authenticated header stream**. The queued frontier is hash-linked to the
   selected tip under one chain lock, so a rollback cannot create a mixed
@@ -12666,6 +12698,12 @@ At the chain root, the genesis signature authenticates the protocol message.
 Its signed next aggregate verification key and protocol-parameter hash must
 match the genesis certificate's own key and parameters, which same-epoch
 successors inherit.
+STM multi-signature verification rejects signer entries without a lottery
+index and follows the reference aggregation rule: a 128-bit Blake2b
+coefficient derived from the ordered signature list and each signature's
+position weights both that signature and its verification key before the
+pairing check. This binds every included signature to its registered key
+instead of accepting pairs that are valid only through an unweighted sum.
 
 The certificate-chain walk (`bootstrap.go`) runs before any certificate is
 trusted, so it is bounded on every axis the aggregator controls. Each
@@ -14039,6 +14077,16 @@ stored with `ratified_epoch`/`ratified_slot` at the snapshot epoch anchor, so
 the next epoch boundary enacts the same already-ratified actions as the
 certified ledger state instead of re-ratifying them one epoch late.
 
+The completed `RatifyState.rsExpired` set is imported as pending expiration
+verdicts, with `expired_epoch` and `expired_slot` at that same snapshot epoch
+anchor. The following boundary therefore drops those proposals and returns
+their deposits without recomputing expiration one epoch late. The recorded
+expiration epoch comes from the completed pulser, not `expires_epoch + 1`.
+Malformed or duplicate action IDs, or an ID present in both completed sets,
+reject the import rather than discarding the expiration state. A valid empty
+set remains empty. This import rule does not alter the normal one-epoch delay
+between expiration and deposit return.
+
 Ledger-state import also persists `NewEpochState.pool-distr` as
 `pool_stake_snapshot` rows with snapshot type `"actv"` for the imported epoch.
 Those rows store the consensus stake fraction as `total_stake /
@@ -14141,7 +14189,17 @@ suffix: `mithril sync` passes the anchor, and a backfill that `dingo serve`
 resumes reads the recorded `mithril_ledger_slot`. Replay reaches the anchor
 without POOLREAP or the PV10 HARDFORK rule, so the backfill then restores each
 snapshot-imported account's registration and delegation from its import
-baseline before rebuilding the live-stake aggregate. Replayed DRep activity
+baseline before rebuilding the live-stake aggregate. For protocol versions 10
+and later, this finalization reconciles the reverse DRep memberships in the
+same write transaction. It preserves existing canonical membership intervals,
+closes stale ones at the anchor and inserts missing ones, so an interrupted
+finalization can repeat without changing delegation order or growing history.
+The import-specific metadata operation rejects attempts to clear an
+authoritative baseline established at exactly that anchor and rolls back
+finalization, while allowing native PV10 cleanup of dangling replay-only
+targets. The global HARDFORK operation retains its cleared-account count and
+existing semantics. Protocol version 9 keeps its historical reverse set.
+Replayed DRep activity
 (backfill and gap blocks) records only the activity epoch and keeps the
 snapshot's DRep expiry, and a replayed governance proposal the snapshot does
 not hold is stored as already expired and dropped. Protocol parameters are
@@ -15541,6 +15599,17 @@ replay slot (until the stream reaches the tip) and spends the client's rate
 and window budget, which `FollowTip` streams from the same host share.
 Rollback and tip blocks are not charged. The `MaxReplayBlocks` start-distance
 check still applies first.
+
+A read that reaches a block body removed by local history expiry
+(`types.ErrHistoryExpired`) ends the call or stream with `FailedPrecondition`
+rather than `Internal`, naming the expired slot and hash. `historyExpiredError`
+also asks the ledger for the start of retained history
+(`UtxorpcLedgerState.OldestRetainedSlot`, served by
+`Database.OldestRetainedSlot`) and appends `oldest retained slot=N` when it is
+known. The bound is kept in memory by the history-expiry pruner, which
+recomputes it from the cursor in `sync_state` after each round, so the error
+path does no I/O and repeated expired requests cannot drive disk scans. An
+unknown bound leaves the message without it and keeps the code.
 
 `FollowTip` populates `Timestamp` on a `Reset` block reference and on every
 response's `Tip` from `LedgerState.SlotToTime`. `Timestamp` is a plain proto3

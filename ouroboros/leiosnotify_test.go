@@ -444,6 +444,7 @@ func TestLeiosNotifyIdleRequestReleasedByDisconnect(t *testing.T) {
 }
 
 func TestLeiosNotifyClosedReservationDoesNotRecreateCursor(t *testing.T) {
+	t.Parallel()
 	o := newOuroboros(OuroborosConfig{})
 	key := "peer"
 	o.leiosEBLog.registerConn(key, nil, nil)
@@ -459,6 +460,7 @@ func TestLeiosNotifyClosedReservationDoesNotRecreateCursor(t *testing.T) {
 }
 
 func TestLeiosNotifyDisconnectAfterOfferReturnReleasesCursor(t *testing.T) {
+	t.Parallel()
 	o := newOuroboros(OuroborosConfig{})
 	connID := gouroboros.ConnectionId{
 		LocalAddr:  &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 3001},
@@ -535,6 +537,7 @@ func TestLeiosNotifyOfferKeepsConnectionClosureObserver(t *testing.T) {
 }
 
 func TestLeiosNotifyCompletedProtocolReturnsWithoutCursor(t *testing.T) {
+	t.Parallel()
 	o := newOuroboros(OuroborosConfig{})
 	server := leiosnotify.NewServer(protocol.ProtocolOptions{}, nil)
 	server.Stop()
@@ -565,6 +568,7 @@ func (l *leiosForgedEBLog) removeConn(connKey string) {
 func TestLeiosNotifyUnregisteredConnectionWaitsForProtocolCompletion(
 	t *testing.T,
 ) {
+	t.Parallel()
 	o := newOuroboros(OuroborosConfig{})
 	o.connManager = connmanager.NewConnectionManager(
 		connmanager.ConnectionManagerConfig{},

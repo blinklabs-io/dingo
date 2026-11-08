@@ -594,50 +594,14 @@ func (r *Recycler) checkLocalTipPlateau(
 	}
 	bestPeerTipSlot := bestPeerTip.SelectionTip().Point.Slot
 	targetConn := live.ChainsyncState.GetClientConnId()
-	// SelectionTip is the peer's DELIVERED frontier, which a peer that has not
-	// delivered a header yet pins at the point its session intersected at.
-	// Immediately after a plateau resync that point is the local tip, so the
-	// comparison below disarms this watchdog exactly when it has just acted,
-	// and it cannot re-arm until some peer delivers a header -- which is the
-	// thing that is not happening. The peer's advertised tip is known and
-	// correct throughout that window, so use it while the peer is still
-	// awaiting its first header.
-	//
-	// "Awaiting its first header" is the flag chain selection sets when it
-	// registers a peer from a rollback, NOT a delivered block number of 0. A
-	// tracked peer that has delivered headers and then rolls back outside its
-	// retained delivered-header history is also left with block number 0, but
-	// it has delivered headers on this connection, so it is judged on its
-	// delivered frontier like any other and its advertisement is not used.
-	//
-	// This only ever runs because chain selection tracks that peer. The
-	// sequence a plateau resync sets off is: the resync closes the connection
-	// (SubscribeChainsyncResync in ouroboros/chainsync.go closes the
-	// connection for every resync reason), the ConnectionClosedEvent subscription in
-	// node.go calls ChainSelector.RemovePeer, which drops the peer tip and
-	// clears bestPeerConn, and the replacement's only chainsync traffic until
-	// the network's next block is its post-FindIntersect MsgRollBackward.
-	// Chain selection registers the peer from that rollback
-	// (registerPeerFromRollbackLocked) and exempts an entry with no delivered
-	// header from the two behind-filters in isPeerSelectableLocked, which is
-	// what makes it selectable with a delivered block number of 0. Without
-	// both of those GetBestPeer() is nil for the whole window and this
-	// function has already returned above -- the watchdog is not disarmed by
-	// the comparison, it has no peer to compare against at all. The two
-	// changes are only useful together, so keep them together.
-	//
-	// The advertised tip is untrusted, so the substitution is confined so that
-	// a peer can only ever spend it on itself: it applies only while the peer
-	// awaits its first header, only when it raises the comparison value, and
-	// only when the advertising peer is the connection this watchdog would
-	// recycle. Without that last condition a peer that fabricates a high tip
-	// and delivers nothing could drive repeated recycles of a different,
-	// honest upstream. With it, the worst it can do is have its own connection
-	// reconnected once per cooldown, while the local tip is standing still --
-	// which is what a peer that advertises a tip it never delivers warrants.
-	if bestPeerTip.AwaitingFirstHeader() &&
-		bestPeerTip.Tip.Point.Slot > bestPeerTipSlot &&
-		advertisesForOwnConnection(targetConn, *bestPeer) {
+	// A delivered frontier at the applied tip can still belong to a stalled
+	// stream whose own advertisement is ahead. That advertisement may arm
+	// bounded recovery of this exact connection, but cannot authorize
+	// recycling another peer or admitting any header.
+	advertisementOnly := bestPeerTipSlot <= localTipSlot &&
+		bestPeerTip.Tip.Point.Slot > localTipSlot &&
+		advertisesForOwnConnection(targetConn, *bestPeer)
+	if advertisementOnly {
 		bestPeerTipSlot = bestPeerTip.Tip.Point.Slot
 	}
 	if bestPeerTipSlot <= localTipSlot {
@@ -764,10 +728,9 @@ func (r *Recycler) checkLocalTipPlateau(
 		r.notePlateauDecision(PlateauOutcomeEagernessHeld)
 		return
 	}
-	// The local reconcile found nothing to repair (or failed), so the stall is
-	// in the upstream chainsync stream itself: the active peer's server-side
-	// cursor has stopped advancing (a flaky/stalled relay) while chain
-	// selection still tracks it AT a higher tip.
+	// Local reconcile found nothing to repair (or failed), so request a fresh
+	// session for this idle stream. Missing delivered headers do not establish
+	// which endpoint stopped making progress.
 	//
 	// A plateau resync is NOT a peer recycle. Recycling (the stalled path
 	// below) drops the peer and fails over to a SPARE, so it genuinely needs a
@@ -798,10 +761,9 @@ func (r *Recycler) checkLocalTipPlateau(
 			},
 		),
 	)
-	// Realign only matters when there are spare peers whose cursors raced
-	// ahead while the active peer was stuck; with a single eligible peer it is
-	// a no-op.
-	if eligibleCount > 1 {
+	// An unauthenticated advertisement cannot justify disrupting another
+	// upstream, even when its cursor is ahead of the applied tip.
+	if eligibleCount > 1 && !advertisementOnly {
 		r.realignOtherPeersAfterPlateau(
 			live.ChainSelector,
 			*targetConn,

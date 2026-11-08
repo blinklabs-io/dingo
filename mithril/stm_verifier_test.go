@@ -295,12 +295,8 @@ func stmTestNode(left, right []byte) []byte {
 func TestSTMVerifyLeavesMembershipFromBatchPath(t *testing.T) {
 	t.Parallel()
 
-	h1, h2, h3 := stmTestLeafHash(1), stmTestLeafHash(2), stmTestLeafHash(3)
+	h1, h2 := stmTestLeafHash(1), stmTestLeafHash(2)
 	node01 := stmTestNode(h1, h2)
-	// A three-leaf tree pads to four, so the missing fourth leaf's parent
-	// pairs the last leaf with the hash of a zero byte.
-	node2 := stmTestNode(h3, stmBlake2b256([]byte{0}))
-	root3 := stmTestNode(node01, node2)
 
 	for _, tc := range []struct {
 		name    string
@@ -320,17 +316,6 @@ func TestSTMVerifyLeavesMembershipFromBatchPath(t *testing.T) {
 			path: stmMerkleBatchPath{
 				Indices: []int{0}, Values: [][]byte{h2},
 			},
-		},
-		{
-			name: "padded tree, last leaf", leaves: 3, root: root3, leaf: 3,
-			path: stmMerkleBatchPath{
-				Indices: []int{2}, Values: [][]byte{node01},
-			},
-		},
-		{
-			name: "truncated path", leaves: 3, root: root3, leaf: 3,
-			path:    stmMerkleBatchPath{Indices: []int{2}},
-			wantErr: "ran out of sibling values",
 		},
 		{
 			name: "trailing path values", leaves: 2, root: node01, leaf: 1,

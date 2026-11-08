@@ -299,12 +299,16 @@ func RunCloudPruneCommitVisibility(
 // survives, and that a restore failing partway is undone exactly by resetting
 // again and restoring the retained rollback backup.
 //
-// store must be backed by fc, which must start empty.
+// store must be backed by fc, which must start empty. The optional restoreBatch
+// is the per-batch record limit the store's Restore and Reset are running with;
+// the dataset is sized to cross exactly one batch boundary. It defaults to
+// 1000, the production limit.
 func RunCloudPopulatedRestore(
 	t *testing.T,
 	fc *fakecloud.Store,
 	bucket string,
 	store blob.BlobStore,
+	restoreBatch ...int,
 ) {
 	t.Helper()
 	ctx := t.Context()
@@ -317,7 +321,12 @@ func RunCloudPopulatedRestore(
 
 	// More than one restore batch, so Reset and Restore each cross a batch
 	// boundary.
-	const records = 1050
+	records, overlapKeys, failAfter := 1050, 100, 1030
+	if len(restoreBatch) > 0 {
+		records = restoreBatch[0] + 5
+		overlapKeys = 2
+		failAfter = restoreBatch[0] + 2
+	}
 	populate := func(prefix string, overlap bool) {
 		txn := store.NewTransaction(true)
 		for i := range records {
@@ -325,7 +334,7 @@ func RunCloudPopulatedRestore(
 			require.NoError(t, store.Set(txn, []byte(key), []byte(prefix+key)))
 		}
 		if overlap {
-			for i := range 100 {
+			for i := range overlapKeys {
 				key := fmt.Sprintf("a/%05d", i)
 				require.NoError(
 					t,
@@ -381,7 +390,7 @@ func RunCloudPopulatedRestore(
 	var puts atomic.Int32
 	fc.SetHooks(fakecloud.Hooks{
 		Before: func(op fakecloud.Op) error {
-			if op.Mutates && puts.Add(1) > records-20 {
+			if op.Mutates && int(puts.Add(1)) > failAfter {
 				return fakecloud.ErrInjected
 			}
 			return nil

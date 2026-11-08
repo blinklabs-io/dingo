@@ -876,11 +876,12 @@ func TestAggregatorServesTheCertifiedStakeDistribution(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
 }
 
-// TestAggregatorCertifiedSnapshotVerifiesAndSyncs runs an aggregator, signers
-// and a syncing client against one server: the snapshot is certified by the
-// signers, a bootstrap that verifies the certificate chain and the signed
-// ancillary manifest accepts it, and Sync imports it.
-func TestAggregatorCertifiedSnapshotVerifiesAndSyncs(t *testing.T) {
+// TestAggregatorCertifiedSnapshotVerifiesAndBootstraps runs an aggregator,
+// signers and a bootstrapping client against one server: the snapshot is
+// certified by the signers and a bootstrap that verifies the certificate chain
+// and the signed ancillary manifest accepts it. Importing a served snapshot
+// is covered by TestServerSnapshotSyncsEndToEnd.
+func TestAggregatorCertifiedSnapshotVerifiesAndBootstraps(t *testing.T) {
 	t.Parallel()
 	f := newAggregatorFixture(t, lotteryParams)
 	snap := f.snapshotOf(newSyncableDB(t))
@@ -904,19 +905,6 @@ func TestAggregatorCertifiedSnapshotVerifiesAndSyncs(t *testing.T) {
 	require.Equal(t, snap.Hash, result.Snapshot.Digest)
 	require.Equal(t, certHash, result.Snapshot.CertificateHash)
 	require.True(t, result.AncillaryVerified)
-
-	synced, err := Sync(context.Background(), SyncConfig{
-		Network:           f.network,
-		DataDir:           t.TempDir(),
-		StorageMode:       "core",
-		Backend:           BackendV2,
-		AggregatorURL:     f.url,
-		AllowInsecureHTTP: true,
-		VerifyCertChain:   false,
-		Logger:            slog.New(slog.DiscardHandler),
-	})
-	require.NoError(t, err)
-	require.Equal(t, uint64(1000), synced.LedgerSlot)
 }
 
 func TestBootstrapRejectsSnapshotCertifiedByAnotherGenesisKey(t *testing.T) {

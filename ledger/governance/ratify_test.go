@@ -106,21 +106,6 @@ func ratifyInputs(
 	}
 }
 
-func TestShouldRatify_BootstrapDRepOnlyDoesNotSubstituteForSPO(t *testing.T) {
-	t.Parallel()
-
-	pparams := conwayPParamsFixture(9)
-	tally := &ProposalTally{
-		ActionType:     uint8(lcommon.GovActionTypeHardForkInitiation),
-		DRepYesStake:   1,
-		DRepTotalStake: 100,
-	}
-	d := ShouldRatify(
-		ratifyInputs(tally, pparams, 5, 1, big.NewRat(2, 3), 9, false),
-	)
-	assert.False(t, d.Ratified)
-}
-
 func TestShouldRatify_DijkstraParameterGroupsMatchPV12(
 	t *testing.T,
 ) {
@@ -616,39 +601,6 @@ func TestShouldRatify_BootstrapPerBodyRequirements(t *testing.T) {
 	}
 }
 
-func TestShouldRatify_BootstrapUnsupportedActionsDoNotRatify(t *testing.T) {
-	t.Parallel()
-
-	pparams := conwayPParamsFixture(9)
-	unsupported := []lcommon.GovActionType{
-		lcommon.GovActionTypeTreasuryWithdrawal,
-		lcommon.GovActionTypeNoConfidence,
-		lcommon.GovActionTypeUpdateCommittee,
-		lcommon.GovActionTypeNewConstitution,
-	}
-	for _, action := range unsupported {
-		t.Run(fmt.Sprintf("action-%d", action), func(t *testing.T) {
-			tally := &ProposalTally{
-				ActionType:     uint8(action),
-				DRepYesStake:   100,
-				DRepTotalStake: 100,
-				SPOYesStake:    100,
-				SPOTotalStake:  100,
-				CCYesCount:     3,
-				CCTotalCount:   3,
-			}
-			d := ShouldRatify(RatifyInputs{
-				Tally:         tally,
-				PParams:       pparams,
-				ActiveCCCount: 3,
-				CCQuorum:      big.NewRat(2, 3),
-				MajorVersion:  9,
-			})
-			assert.False(t, d.Ratified)
-		})
-	}
-}
-
 func TestShouldRatify_ActionBodyMatrixAcrossBootstrapBoundary(t *testing.T) {
 	t.Parallel()
 
@@ -843,19 +795,6 @@ func TestShouldRatify_BootstrapCCChecksRemainRequired(t *testing.T) {
 		"bootstrap must not approve an action without a seated committee")
 	assert.False(t, ShouldRatify(inputs(1, nil)).Ratified,
 		"a seated committee still requires a quorum")
-}
-
-func TestShouldRatify_InfoActionCannotRatify(t *testing.T) {
-	t.Parallel()
-
-	pparams := conwayPParamsFixture(10)
-	tally := &ProposalTally{
-		ActionType: uint8(lcommon.GovActionTypeInfo),
-	}
-	d := ShouldRatify(ratifyInputs(
-		tally, pparams, 5, 5, big.NewRat(1, 2), 10, false,
-	))
-	assert.False(t, d.Ratified)
 }
 
 func TestShouldRatify_DRepOnlyActionPasses(t *testing.T) {

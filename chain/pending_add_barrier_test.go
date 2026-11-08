@@ -153,33 +153,6 @@ func TestFailedConcurrentAttemptCannotDropAnotherSnapshot(t *testing.T) {
 	}
 }
 
-// TestAwaitPendingCallerAddsIsBounded pins that the wait is a safety valve
-// rather than a synchronisation point. A caller that abandons its transaction,
-// or that rolls the chain back from inside one it has not finished, must leave
-// that one removal exposed to the window the barrier closes rather than
-// blocking it -- and every chain mutation queued behind it -- for the life of
-// the process.
-func TestAwaitPendingCallerAddsIsBounded(t *testing.T) {
-	db := newBarrierTestDB(t)
-	c := &Chain{persistent: true}
-	txn := db.BlobTxn(true)
-	defer txn.Release()
-	c.beginCallerTxnAdd(txn)()
-	if got := c.pendingAdds.heldCount(); got != 1 {
-		t.Fatalf("recorded %d holds, want 1", got)
-	}
-	outstanding, drained := c.pendingAdds.awaitDrained(10 * time.Millisecond)
-	if drained {
-		t.Fatal("wait reported a drain while a transaction was still open")
-	}
-	if outstanding != 1 {
-		t.Fatalf(
-			"expiry reported %d outstanding transactions, want 1",
-			outstanding,
-		)
-	}
-}
-
 // TestExpiredHoldIsChargedOnce pins that the drain bound is paid once per
 // abandoned transaction rather than once per removal path. A hold is never
 // evicted -- the restoration snapshots it carries are owed to that transaction

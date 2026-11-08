@@ -531,9 +531,31 @@ func NewSQLStore(
 	return store, err
 }
 
+// BeforeOpenDataDir, when non-nil, is called with the resolved data directory
+// of every file-backed store immediately before the database file is opened.
+// It exists so a test binary can place an already-migrated database in the
+// directory and skip the schema migration, which dominates the cost of opening
+// a store under the race detector. Production code never sets it. It is a plain
+// package variable, so it must be assigned only from a test package's init
+// function, which completes before any goroutine that opens a store starts;
+// that ordering is what excludes a data race with the readers.
+var BeforeOpenDataDir func(dataDir string) error
+
 func openSQLStore(
 	config Config,
 	dependencies metadata.ProviderDependencies,
+) (*sqlstore.Store, *sql.DB, *sql.DB, error) {
+	return openSQLStoreWithDialect(
+		config, dependencies, sqlstore.SQLiteDialect(),
+	)
+}
+
+// openSQLStoreWithDialect lets a test substitute a dialect, for example one
+// with a small ParameterLimit so chunking is exercised on a few rows.
+func openSQLStoreWithDialect(
+	config Config,
+	dependencies metadata.ProviderDependencies,
+	dialect sqlstore.Dialect,
 ) (*sqlstore.Store, *sql.DB, *sql.DB, error) {
 	if config.MaxConnections < 0 {
 		return nil, nil, nil, errors.New(
@@ -598,6 +620,14 @@ func openSQLStore(
 				"create SQLite metadata directory: %w",
 				err,
 			)
+		}
+		if BeforeOpenDataDir != nil {
+			if err := BeforeOpenDataDir(dataDir); err != nil {
+				return nil, nil, nil, fmt.Errorf(
+					"prepare SQLite metadata directory: %w",
+					err,
+				)
+			}
 		}
 		databasePath = filepath.Join(dataDir, "metadata.sqlite")
 		// Build a proper file URI so ?, #, %, and other URI-reserved
@@ -665,24 +695,26 @@ func openSQLStore(
 	store, err := sqlstore.New(sqlstore.Config{
 		GenesisStakingEmpty: dependencies.GenesisStakingEmpty,
 		SQLitePath:          databasePath,
-		WriteDB:             writeDB,
-		ReadDB:              readDB,
-		Dialect:             sqlstore.SQLiteDialect(),
-		Logger:              dependencies.Logger,
-		StorageMode:         dependencies.StorageMode,
-		Migrations:          registry,
-		MigrationLocker:     locker,
-		Prepare:             prepare,
-		DiskSize:            diskSizeFunc,
-		Maintenance:         maintenance,
-		MaintenanceInterval: 24 * time.Hour,
-		Vacuum:              vacuum,
-		VacuumInterval:      vacuumInterval,
-		Checkpoint:          checkpoint,
-		CheckpointInterval:  checkpointInterval,
-		BackupTo:            backupTo,
-		RestoreFrom:         restoreFrom,
-		PromRegistry:        dependencies.PromRegistry,
+		// modernc prepares eagerly; runtime probing remains on the active Tx.
+		SQLiteOverlayInsertRows: 2047,
+		WriteDB:                 writeDB,
+		ReadDB:                  readDB,
+		Dialect:                 dialect,
+		Logger:                  dependencies.Logger,
+		StorageMode:             dependencies.StorageMode,
+		Migrations:              registry,
+		MigrationLocker:         locker,
+		Prepare:                 prepare,
+		DiskSize:                diskSizeFunc,
+		Maintenance:             maintenance,
+		MaintenanceInterval:     24 * time.Hour,
+		Vacuum:                  vacuum,
+		VacuumInterval:          vacuumInterval,
+		Checkpoint:              checkpoint,
+		CheckpointInterval:      checkpointInterval,
+		BackupTo:                backupTo,
+		RestoreFrom:             restoreFrom,
+		PromRegistry:            dependencies.PromRegistry,
 	})
 	if err != nil {
 		if readDB != writeDB {
@@ -728,16 +760,10 @@ const sqliteDiskSizeQueryTimeout = 5 * time.Second
 // That correlation is real; the exact mechanism it goes through is not
 // pinned down. SQLite's own documentation for wal_checkpoint says
 // RESTART/TRUNCATE block only on an active writer or a reader still on an
-// old snapshot, not on a connection that is merely idle in a pool, and a
-// direct reproduction against this exact DSN and driver bears that out:
-// TestWALCheckpointTruncateIdleConnectionDoesNotBlock runs this function's
-// old two-PRAGMA-read pattern against readDB, leaves the connection open in
-// the pool afterward, and still observes a clean, non-busy TRUNCATE against
-// real, substantial WAL content -- while an actual held, uncommitted read
-// transaction (the same test's positive control) does reproduce busy=1. So
-// "a merely-attached idle connection blocks TRUNCATE" is not the isolated
-// cause; production readDB traffic is far higher-concurrency than that
-// lab reproduction, and the true trigger there was not identified further.
+// old snapshot, not on a connection that is merely idle in a pool, so "a
+// merely-attached idle connection blocks TRUNCATE" is not the isolated
+// cause; production readDB traffic is far higher-concurrency than a single
+// idle connection, and the true trigger there was not identified further.
 // The dedicated-connection design stands on the production before/after
 // observation and on matching checkpointWAL's already-established pattern,
 // independent of a fully isolated microscopic explanation.

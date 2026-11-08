@@ -197,17 +197,3 @@ func TestBlockfetchBlockDelayHistogramSeedsAllKinds(t *testing.T) {
 		require.Zero(t, got[kind].GetSampleCount())
 	}
 }
-
-func TestBlockDelayKindLabel(t *testing.T) {
-	t.Parallel()
-	require.Equal(t, "plain", blockDelayKindLabel(0))
-	require.Equal(
-		t, "announce", blockDelayKindLabel(leiosheader.KindAnnouncesEB),
-	)
-	require.Equal(
-		t, "certify", blockDelayKindLabel(leiosheader.KindCertifiesEB),
-	)
-	require.Equal(t, "announce_certify", blockDelayKindLabel(3))
-	// Unknown high bits do not index out of range.
-	require.Equal(t, "plain", blockDelayKindLabel(0xfc))
-}

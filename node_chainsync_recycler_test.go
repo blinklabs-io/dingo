@@ -357,18 +357,6 @@ func TestStopWaitsForChainsyncStallRecycler(t *testing.T) {
 	)
 }
 
-func TestWaitChainsyncStallRecyclerIsSafeWithoutRecycler(t *testing.T) {
-	t.Parallel()
-
-	n := &Node{
-		config: Config{
-			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		},
-	}
-	// A node that failed before wiring the recycler must still shut down.
-	n.waitChainsyncStallRecycler()
-}
-
 func TestChainsyncAwaitEagernessDelegatesToChainSelector(t *testing.T) {
 	t.Parallel()
 

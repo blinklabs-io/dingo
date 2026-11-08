@@ -325,6 +325,9 @@ func BlockDeleteTxn(txn *Txn, block models.Block) error {
 	if err := blob.DeleteBlock(blobTxn, block.Slot, block.Hash, block.ID); err != nil {
 		return err
 	}
+	if txn.db != nil {
+		txn.db.retainedBlockRemoved(txn, block.Slot)
+	}
 	if retained {
 		return removeRetainedBlock(blob, txn, block.Slot, block.Hash)
 	}
@@ -609,6 +612,81 @@ func BlockPointBySlotTxn(txn *Txn, slot uint64) (ocommon.Point, error) {
 		return ocommon.Point{}, models.ErrBlockNotFound
 	}
 	return ret, nil
+}
+
+// CanonicalBlockIdentityAtIndexTxn returns the block point the canonical index
+// maps index to, after checking that the block's own metadata records the same
+// index ID. A slot can hold two canonical blocks (a Byron epoch boundary block
+// and the block after it), so a resume checkpoint is resolved by its index.
+func CanonicalBlockIdentityAtIndexTxn(
+	ctx context.Context,
+	txn *Txn,
+	index uint64,
+) (ocommon.Point, error) {
+	ctx = nonNilContext(ctx)
+	if err := ctx.Err(); err != nil {
+		return ocommon.Point{}, err
+	}
+	if txn == nil || txn.Blob() == nil {
+		return ocommon.Point{}, types.ErrNilTxn
+	}
+	store := txn.BlobStore()
+	if store == nil {
+		return ocommon.Point{}, types.ErrBlobStoreUnavailable
+	}
+	key, err := getBlobContext(
+		ctx,
+		store,
+		txn.Blob(),
+		types.BlockBlobIndexKey(index),
+		int64(types.BlockBlobKeySize),
+	)
+	if err != nil {
+		if errors.Is(err, types.ErrBlobKeyNotFound) {
+			return ocommon.Point{}, models.ErrBlockNotFound
+		}
+		return ocommon.Point{}, err
+	}
+	if len(key) != types.BlockBlobKeySize {
+		return ocommon.Point{}, fmt.Errorf(
+			"canonical block index %d has invalid value length %d",
+			index, len(key),
+		)
+	}
+	point, err := BlockBlobKeyToPoint(key)
+	if err != nil {
+		return ocommon.Point{}, err
+	}
+	rawMetadata, err := getBlobContext(
+		ctx,
+		store,
+		txn.Blob(),
+		types.BlockBlobMetadataKey(key),
+		int64(
+			types.BlockMetadataBinaryHeaderLen+
+				types.BlockMetadataPrevHashMaxLen,
+		),
+	)
+	if err != nil {
+		return ocommon.Point{}, fmt.Errorf(
+			"reading metadata for canonical block index %d: %w",
+			index, err,
+		)
+	}
+	metadata, err := types.UnmarshalBlockMetadata(rawMetadata)
+	if err != nil {
+		return ocommon.Point{}, fmt.Errorf(
+			"decoding metadata for canonical block index %d: %w",
+			index, err,
+		)
+	}
+	if metadata.ID != index {
+		return ocommon.Point{}, fmt.Errorf(
+			"canonical block index %d maps to a block recorded as index %d",
+			index, metadata.ID,
+		)
+	}
+	return point, nil
 }
 
 // CanonicalBlockIdentityAtSlotTxn returns the unique block point and internal

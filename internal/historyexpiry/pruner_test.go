@@ -360,3 +360,30 @@ func TestPrunerCanceledBeforeScanDoesNotPrune(t *testing.T) {
 	_, _, err := db.Blob().GetBlock(txn.Blob(), 1, hash)
 	require.NoError(t, err)
 }
+
+// The running pruner keeps the bound expired-history errors name up to date,
+// so request paths never scan for it.
+func TestPrunerRefreshesOldestRetainedSlot(t *testing.T) {
+	db := newTestDB(t)
+	insertTestBlock(t, db, 9, 0x09)
+	insertTestBlock(t, db, 10, 0x0a)
+	insertTestBlock(t, db, 11, 0x0b)
+	pruner := NewPruner(PrunerConfig{
+		LedgerState: testLedgerWindow{
+			currentSlot:     15,
+			stabilityWindow: 5,
+		},
+		DB:        db,
+		Frequency: 10 * time.Millisecond,
+	})
+	require.NoError(t, pruner.Start(context.Background()))
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		require.NoError(t, pruner.Stop(ctx))
+	})
+	require.Eventually(t, func() bool {
+		slot, ok := db.OldestRetainedSlot()
+		return ok && slot == 10
+	}, 5*time.Second, 10*time.Millisecond)
+}

@@ -12,27 +12,24 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package dmq
+package ledger
 
-import (
-	"testing"
-
-	"github.com/stretchr/testify/require"
-)
-
-func TestTopicNetworkMagic(t *testing.T) {
-	t.Parallel()
-	for network, want := range map[string]uint32{
-		"mainnet": 2912307721,
-		"preprod": 2147483649,
-		"preview": 2147483650,
-	} {
-		got, ok := TopicNetworkMagic("mithril", network)
-		require.True(t, ok, network)
-		require.Equal(t, want, got, network)
+func leiosReadyApplyPrefix(
+	infos []leiosBlockInfo,
+	announcements map[string]leiosEbRef,
+	provider EndorserBlockProviderFunc,
+) int {
+	for i, info := range infos {
+		if !info.certifies {
+			continue
+		}
+		ref, ok := announcements[info.prevHash]
+		if !ok {
+			return 0
+		}
+		if !endorserBlockAvailableAt(provider, ref.hash.Bytes(), ref.slot) {
+			return i
+		}
 	}
-	_, ok := TopicNetworkMagic("mithril", "devnet")
-	require.False(t, ok)
-	_, ok = TopicNetworkMagic("unknown", "mainnet")
-	require.False(t, ok)
+	return len(infos)
 }

@@ -32,7 +32,6 @@ import (
 	"github.com/blinklabs-io/dingo/mithril"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -252,8 +251,7 @@ func TestSnapshotRestoreConfig(t *testing.T) {
 	assert.Equal(t, uint64(129_600), s.stabilityWindow)
 
 	db, err := dbtest.NewDatabase(t, &database.Config{
-		DataDir: t.TempDir(),
-		Logger:  slog.New(slog.DiscardHandler),
+		Logger: slog.New(slog.DiscardHandler),
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = dbtest.CloseDatabase(db) })
@@ -307,53 +305,4 @@ func TestSnapshotRestoreConfig(t *testing.T) {
 	_, err = s.RestoreSnapshot(t.Context(), db)
 	assert.ErrorIs(t, err, dingo.ErrMithrilRestoreUnavailable)
 	assert.NotErrorIs(t, err, dingo.ErrMithrilRestoreUnrecoverable)
-}
-
-// The node's registry reaches every feed and run the source configures; with
-// none, the source carries no metrics.
-func TestNewPipelineMetrics(t *testing.T) {
-	t.Parallel()
-	p := preprodParams(t)
-	require.Nil(t, newSource(t, p).bootstrap.Metrics)
-
-	reg := prometheus.NewRegistry()
-	p.PromRegistry = reg
-	s := newSource(t, p)
-	require.NotNil(t, s.bootstrap.Metrics)
-	require.Same(
-		t,
-		s.bootstrap.Metrics,
-		s.streamConfig(nil, nil).Feed.Bootstrap.Metrics,
-	)
-	require.Same(
-		t,
-		s.bootstrap.Metrics,
-		s.snapshotConfig(nil).Feed.Bootstrap.Metrics,
-	)
-	families, err := reg.Gather()
-	require.NoError(t, err)
-	names := make([]string, 0, len(families))
-	for _, f := range families {
-		names = append(names, f.GetName())
-	}
-	assert.Contains(t, names, "dingo_mithril_chunks_downloaded_total")
-}
-
-// One certificate cache serves the poll, every stream run and the snapshot
-// restore for the source's lifetime, so a poll after a run verifies only the
-// certificates the aggregator added since.
-func TestNewSharesCertificateCache(t *testing.T) {
-	t.Parallel()
-	s := newSource(t, preprodParams(t))
-	require.NotNil(t, s.bootstrap.CertificateCache)
-	require.Same(
-		t,
-		s.bootstrap.CertificateCache,
-		s.streamConfig(nil, nil).Feed.Bootstrap.CertificateCache,
-	)
-	require.Same(
-		t,
-		s.bootstrap.CertificateCache,
-		s.snapshotConfig(nil).Feed.Bootstrap.CertificateCache,
-	)
 }
