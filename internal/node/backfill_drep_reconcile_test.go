@@ -159,6 +159,8 @@ func TestBackfillRestoresPV10ReverseDelegationsAtSnapshotAnchor(t *testing.T) {
 			if major >= 10 {
 				require.Equal(t, current, account.Drep)
 			} else {
+				// PV9 deliberately consumes the historical reverse set;
+				// its pre-Plomin behavior must remain unchanged.
 				require.Empty(t, account.Drep)
 			}
 			require.Equal(t, uint64(700), uint64(account.Reward))
@@ -224,6 +226,80 @@ func TestBackfillDRepReconciliationRejectsDanglingSnapshotAtomically(
 	}
 	_, err := b.restoreImportedAccountsAtAnchor(ctx, 100)
 	require.ErrorContains(t, err, "dangling DRep delegations")
+	account, err := db.GetAccountByCredential(ctx, 0, stake, true, nil)
+	require.NoError(t, err)
+	require.Equal(t, old, account.Drep)
+	require.Equal(t, uint64(50), account.AddedSlot)
+	require.Equal(t, uint64(700), uint64(account.Reward))
+	_, active, err := store.GetDRepDelegatorStakes(
+		0,
+		old,
+		nil,
+		100,
+		0,
+		"asc",
+		nil,
+	)
+	require.NoError(t, err)
+	require.Equal(t, 1, active)
+}
+
+func TestBackfillDRepReconciliationRejectsUnknownProtocolAtomically(
+	t *testing.T,
+) {
+	t.Parallel()
+	db := newTestDB(t)
+	store := db.Metadata()
+	ctx := context.Background()
+	old := bytes.Repeat([]byte{0xd1}, 28)
+	current := bytes.Repeat([]byte{0xd2}, 28)
+	stake := bytes.Repeat([]byte{0xd3}, 28)
+	require.NoError(
+		t,
+		store.CreateDrep(
+			nil,
+			&models.Drep{Credential: old, AddedSlot: 1, Active: true},
+		),
+	)
+	require.NoError(
+		t,
+		store.ImportAccount(
+			&models.Account{
+				StakingKey: stake,
+				Drep:       current,
+				AddedSlot:  100,
+				Reward:     700,
+				Active:     true,
+			},
+			nil,
+		),
+	)
+	tx := mockledger.NewTransactionBuilder().
+		WithCertificates(&common.VoteDelegationCertificate{CertType: uint(common.CertificateTypeVoteDelegation), StakeCredential: common.Credential{CredType: 0, Credential: common.NewBlake2b224(stake)}, Drep: common.Drep{Type: common.DrepTypeAddrKeyHash, Credential: old}})
+	tx.WithId(bytes.Repeat([]byte{0xd4}, 32))
+	tx.WithValid(true)
+	require.NoError(
+		t,
+		store.SetTransaction(
+			tx,
+			ocommon.Point{Slot: 50, Hash: tx.Hash().Bytes()},
+			0,
+			nil,
+			false,
+			nil,
+			9,
+		),
+	)
+	b := &Backfill{
+		db:           db,
+		currentEraId: conway.EraIdConway,
+	}
+	_, err := b.restoreImportedAccountsAtAnchor(ctx, 100)
+	require.ErrorContains(
+		t,
+		err,
+		"snapshot anchor protocol version is unavailable",
+	)
 	account, err := db.GetAccountByCredential(ctx, 0, stake, true, nil)
 	require.NoError(t, err)
 	require.Equal(t, old, account.Drep)

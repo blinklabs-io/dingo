@@ -102,3 +102,55 @@ func TestPV10ReverseReconciliationPreservesCanonicalHistoryAndIsIdempotent(
 		"rolling back the boundary restores the historical PV9 reverse set",
 	)
 }
+
+func TestReverseReconciliationSkipsLegacyMissingStakeCredentials(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	drep := bytes.Repeat([]byte{0xd1}, 28)
+	stake := bytes.Repeat([]byte{0xd2}, 28)
+	require.NoError(
+		t,
+		store.CreateDrep(
+			nil,
+			&models.Drep{Credential: drep, AddedSlot: 1, Active: true},
+		),
+	)
+	db, ctx, err := store.dbFromTxn(nil)
+	require.NoError(t, err)
+	for _, key := range []any{nil, []byte{}, stake} {
+		_, err := db.ExecContext(
+			ctx,
+			`INSERT INTO account (staking_key, credential_tag, drep, drep_type, reward, active, added_slot) VALUES (?, 0, ?, 0, 700, TRUE, 50)`,
+			key,
+			drep,
+		)
+		require.NoError(t, err)
+	}
+	for range 2 {
+		cleared, err := store.ClearDanglingDRepDelegations(100, nil)
+		require.NoError(t, err)
+		require.Zero(t, cleared)
+		var count int
+		require.NoError(
+			t,
+			db.QueryRowContext(ctx, "SELECT count(*) FROM drep_delegator").
+				Scan(&count),
+		)
+		require.Equal(t, 1, count)
+		var actual []byte
+		require.NoError(
+			t,
+			db.QueryRowContext(ctx, "SELECT stake_credential FROM drep_delegator").
+				Scan(&actual),
+		)
+		require.Equal(t, stake, actual)
+		var accounts, rewards int
+		require.NoError(
+			t,
+			db.QueryRowContext(ctx, "SELECT count(*), sum(reward) FROM account WHERE drep = ? AND added_slot = 50", drep).
+				Scan(&accounts, &rewards),
+		)
+		require.Equal(t, 3, accounts)
+		require.Equal(t, 2100, rewards)
+	}
+}

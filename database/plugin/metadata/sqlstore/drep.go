@@ -1776,6 +1776,8 @@ JOIN drep d
   ON d.credential_tag = a.drep_type
  AND d.credential = a.drep
 WHERE a.active = TRUE
+  AND a.staking_key IS NOT NULL
+  AND LENGTH(a.staking_key) > 0
   AND a.drep IS NOT NULL
   AND a.drep_type IN (0, 1)
   AND d.active = TRUE
