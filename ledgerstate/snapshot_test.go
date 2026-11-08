@@ -558,6 +558,7 @@ func TestParseW32SnapshotPoolParamsCarriesLeiosKeyIntoStakeRows(
 	require.Equal(t, uint64(7), *rows[0].LeiosKeyRegistrationEpoch)
 	require.Equal(t, publicKey, rows[0].LeiosKeyPublic)
 	require.Equal(t, possessionProof, rows[0].LeiosKeyPossessionProof)
+	require.Equal(t, vrfHash[:], rows[0].VrfKeyHash)
 
 	// The row owns its bytes independently of the decoded pool parameters.
 	pool.LeiosKeyPublic[0] ^= 0xff

@@ -149,6 +149,7 @@ CREATE TABLE pool_stake_snapshot (
     stake_denominator TEXT NOT NULL DEFAULT '0',
     delegator_count INTEGER NOT NULL,
     captured_slot INTEGER NOT NULL,
+    vrf_key_hash BLOB,
     leios_key_public BLOB,
     leios_key_possession_proof BLOB,
     leios_key_registration_epoch INTEGER,

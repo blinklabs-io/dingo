@@ -94,6 +94,7 @@ const (
 	backfillCheckpointIdentitySchemaRelease             = "backfill-checkpoint-identity"
 	utxoStakingPartialIndexSchemaRelease                = "utxo-staking-partial-indexes"
 	rewardOutputCredentialPendingIndexSchemaRelease     = "reward-account-output-credential-pending-index"
+	poolSnapshotVrfKeySchemaRelease                     = "pool-snapshot-vrf-key"
 )
 
 const mithrilRewardRepairPendingKey = "mithril_reward_repair_pending"
@@ -268,6 +269,7 @@ var schemaVersions = []struct {
 		Name:    rewardOutputCredentialPendingIndexSchemaRelease,
 		Dir:     "v54",
 	},
+	{Version: 55, Name: poolSnapshotVrfKeySchemaRelease, Dir: "v55"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
