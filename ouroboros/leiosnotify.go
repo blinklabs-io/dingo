@@ -169,19 +169,25 @@ func (o *Ouroboros) admitLeiosOffer(budgetKey string) bool {
 	o.leiosOfferBudgetMu.Lock()
 	defer o.leiosOfferBudgetMu.Unlock()
 	if o.leiosOfferBudget == nil {
-		// One extra slot is reserved for the overflow key, which is only
-		// inserted once leiosOfferMaxHosts keys are already tracked.
 		o.leiosOfferBudget = ratewindow.NewFixedWindow(
 			leiosOfferWindow,
 			leiosOfferMaxPerPeer,
 			0,
-			leiosOfferMaxHosts+1,
+			leiosOfferMaxHosts,
+		)
+		// A separate one-key window, so the overflow budget can never be
+		// refused by the host-tracking cap.
+		o.leiosOfferOverflowBudget = ratewindow.NewFixedWindow(
+			leiosOfferWindow,
+			leiosOfferMaxPerPeer,
+			0,
+			0,
 		)
 	}
 	now := time.Now()
 	decision := o.leiosOfferBudget.Admit(budgetKey, now)
 	if decision == ratewindow.PeerTrackingCapacityExceeded {
-		decision = o.leiosOfferBudget.Admit(leiosOfferOverflow, now)
+		decision = o.leiosOfferOverflowBudget.Admit(leiosOfferOverflow, now)
 	}
 	return decision == ratewindow.Admitted
 }

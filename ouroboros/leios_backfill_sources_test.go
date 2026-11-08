@@ -381,11 +381,16 @@ func TestLeiosOfferBudgetTrackingIsBounded(t *testing.T) {
 	for i := range leiosOfferMaxHosts {
 		require.True(t, o.leiosOfferedPointPlausible(point, fmt.Sprintf("host-%d", i)))
 	}
-	for range leiosOfferMaxPerPeer {
-		require.True(t, o.leiosOfferedPointPlausible(point, "new-host-a"))
+	// Alternate several post-cap hosts: together they get exactly one
+	// shared budget, and none of them is refused outright.
+	for i := range leiosOfferMaxPerPeer {
+		require.Truef(t,
+			o.leiosOfferedPointPlausible(point, fmt.Sprintf("new-host-%d", i%3)),
+			"overflow offer %d must be admitted", i)
 	}
-	require.False(t, o.leiosOfferedPointPlausible(point, "new-host-b"),
+	require.False(t, o.leiosOfferedPointPlausible(point, "new-host-0"),
 		"untracked hosts must share the overflow budget")
+	require.False(t, o.leiosOfferedPointPlausible(point, "new-host-9"))
 	require.True(t, o.leiosOfferedPointPlausible(point, "host-0"),
 		"tracked hosts keep their own budget")
 }

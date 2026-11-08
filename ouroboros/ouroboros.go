@@ -439,6 +439,7 @@ type Ouroboros struct {
 	// may send per window, so a peer cannot keep the shared cache and
 	// backfill-source locks busy with arbitrary points.
 	leiosOfferBudget           *ratewindow.FixedWindow
+	leiosOfferOverflowBudget   *ratewindow.FixedWindow
 	leiosOfferBudgetMu         sync.Mutex
 	leiosDeferredMu            sync.Mutex
 	leiosDeferredAnnouncements map[string]leiosDeferredAnnouncement
