@@ -12168,7 +12168,21 @@ leader slot, and when that slot is within `remoteSignerPrepareLead` (3s) it
 calls `PoolCredentials.PrepareRemoteSigner` once for that slot, on its own
 goroutine, which reaches the client's `Prepare` through the optional
 `forging.RemoteKESPreparer` interface. A failed prepare only logs a warning a
-few seconds before the slot; the sign at the slot dials again if it must. The
+few seconds before the slot; the sign at the slot dials again if it must.
+
+One caller at a time uses the connection: a sign, or a dial and admission.
+The client mutex is never held across network I/O, so `Close` and
+`CheckReady` never wait on a dial. A sign's `SignTimeout` covers its wait for
+the connection as well, so a prepare stuck dialing cannot hold a leader slot
+past the timeout. Prepare honours the reconnect backoff, but a sign never
+does: a leader slot is worth a dial. The readiness probe and the
+`dingo_forge_credentials_valid` scrape call `CheckReady`, which reports the
+last dial's result and, when no fresh session is open, starts a background
+prepare at most every 30s. It never dials in the caller. On a WAN link the
+pre-connect is required, not an optimisation: at about 95ms round trip, a
+dial and admission take about 400ms and a redial inside a sign about 520ms,
+beyond the 500ms default `shelleyKesAgentSignTimeout`, while a sign on an
+open session takes about one round trip. The
 send-once rule is the same as the local sign mode: a transport or
 verification failure drops the session and is returned, never resent on a new
 connection; an agent refusal (`error` in the response) keeps the session. A
