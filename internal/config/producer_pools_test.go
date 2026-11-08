@@ -125,6 +125,31 @@ func TestValidateBlockProducerPools(t *testing.T) {
 	}
 }
 
+func TestValidateBlockProducerPoolsRefusesLeiosWithSeveralPools(t *testing.T) {
+	t.Parallel()
+	const want = "more than one pool, which Leios forging and voting do not support"
+	twoPools := []BlockProducerPool{remotePool("a"), remotePool("b")}
+
+	cfg := validTestConfig()
+	cfg.BlockProducer = true
+	cfg.BlockProducerPools = twoPools
+	require.ErrorContains(t, cfg.Validate(RunModeLeios), want)
+
+	cfg = validTestConfig()
+	cfg.BlockProducer = true
+	cfg.BlockProducerPools = twoPools
+	cfg.LeiosVoteSigningKeyFile = "/keys/vote.skey"
+	require.ErrorContains(t, cfg.Validate(RunModeServe), want)
+
+	cfg = validTestConfig()
+	cfg.BlockProducer = true
+	cfg.BlockProducerPools = twoPools[:1]
+	err := cfg.Validate(RunModeLeios)
+	if err != nil {
+		require.NotContains(t, err.Error(), want)
+	}
+}
+
 func TestProducerPoolsFallsBackToTopLevelKeys(t *testing.T) {
 	t.Parallel()
 	cfg := validTestConfig()
