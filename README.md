@@ -42,20 +42,24 @@ provides pluggable storage and client interfaces.
 
 ## Network sync and runtime usage
 
-Mithril times are v0.90.5 to bootstrap complete (API includes backfill).
-Genesis times are v0.92.0 to first Ready. CPU/RAM are sampled maxima after
-Ready (Preview/Preprod current services; Preprod API window ~2h; Dijkstra/
-Musashi v0.92.0). Disk is metadata plus blob database size.
+Mithril times: Core v0.90.5, API v0.91.0 (API includes backfill). Genesis
+times use v0.92.0 to first Ready. CPU/RAM are maximum observed from Ready to
+2026-11-08 17:30 UTC; runtime version and sample duration are listed per row.
+Disk is on-disk database size, excluding the Mithril cache.
 
-| Network | Mode / sync | CPU | RAM | DB disk | Sync time |
-| --- | --- | ---: | ---: | ---: | ---: |
-| Preview | Core / Mithril | ~0.71 cores | ~1.3 GiB | ~22.6 GiB | ~12m 38s |
-| Preview | API / Mithril | ~0.83 cores | ~3.3 GiB | ~57.1 GiB | ~4h 41m |
-| Preprod | Core / Mithril | ~0.23 cores | ~1.1 GiB | ~25.4 GiB | ~15m 57s |
-| Preprod | API / Mithril | ~0.21 cores | ~1.4 GiB | ~62.4 GiB | ~3h 43m |
-| Dijkstra | Core / Genesis | ~0.08 cores | ~0.65 GiB | ~0.15 GiB | ~11m 11s |
-| Dijkstra | API / Genesis | ~0.16 cores | ~0.88 GiB | ~0.12 GiB | ~11m 05s |
-| Musashi | Core / Genesis | ~1.1 cores | ~16.4 GiB | ~75 GiB | ~17h 22m |
+| Network | Mode / sync | Runtime version · sample | CPU | RAM | DB disk | Sync time |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| Preview | Core / Mithril | v0.90.5 · ~44h | ~0.71 cores | ~1.3 GiB | ~22.6 GiB | ~12m 38s |
+| Preview | API / Mithril | v0.91.0 · ~16h | ~0.83 cores | ~3.3 GiB | ~57.1 GiB | ~4h 41m |
+| Preprod | Core / Mithril | v0.90.5 · ~29h | ~0.23 cores | ~1.1 GiB | ~25.4 GiB | ~15m 57s |
+| Preprod | API / Mithril | v0.91.0 · ~2h | ~0.21 cores | ~1.4 GiB | ~62.4 GiB | ~3h 43m |
+| Dijkstra | Core / Genesis | v0.92.0 · ~23h | ~0.08 cores | ~0.65 GiB | ~0.15 GiB | ~11m 11s |
+| Dijkstra | API / Genesis | v0.92.0 · ~19h | ~0.16 cores | ~0.88 GiB | ~0.12 GiB | ~11m 05s |
+| Musashi | Core / Genesis | v0.92.0 · ~7h | ~1.1 cores | ~16.4 GiB | ~75 GiB | ~17h 22m |
+
+At Dijkstra block 92,988, Core used 150 MiB (128 MiB blob, 22.2 MiB
+SQLite); API used 123 MiB (88 MiB blob, 34.4 MiB SQLite). The smaller API
+total comes from its smaller blob data at this early chain height.
 
 Mainnet API database (2026-11-08): metadata ~752 GiB; blob ~188 GiB; total
 ~941 GiB.
