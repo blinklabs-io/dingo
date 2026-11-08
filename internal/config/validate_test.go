@@ -85,6 +85,10 @@ func TestValidateUnixSocketModes(t *testing.T) {
 		cfg.validate(cfg.RunMode, minUnprivilegedPort),
 		"socketMode \"0666\" must not permit writes by other users",
 	)
+
+	cfg = validTestConfig()
+	cfg.SocketMode = "0000"
+	require.NoError(t, cfg.validate(cfg.RunMode, minUnprivilegedPort))
 }
 
 func TestDefaultUnixSocketModes(t *testing.T) {

@@ -45,6 +45,17 @@ func soonExpiry() uint32 {
 	return uint32(time.Now().Add(10 * time.Minute).Unix())
 }
 
+func TestNewStackRejectsNonPermissionSocketModeBits(t *testing.T) {
+	t.Parallel()
+
+	_, err := NewStack(StackConfig{
+		SocketPath:    "dmq.socket",
+		SocketMode:    os.FileMode(0o1000),
+		Authenticator: ocommon.NewNoOpAuthenticator(nil),
+	})
+	require.ErrorContains(t, err, "only Unix permission bits")
+}
+
 type noStake struct{}
 
 func (noStake) PoolActiveStake(ocommon.PoolKeyHash) (uint64, error) {

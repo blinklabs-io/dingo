@@ -242,11 +242,12 @@ func (n *Node) startDMQ() error {
 		return fmt.Errorf("invalid dmq socket mode: %w", err)
 	}
 	stack, err := dmq.NewStack(dmq.StackConfig{
-		Logger:       n.config.logger,
-		PromRegistry: n.retainedComponentPromRegistry(),
-		NetworkMagic: cfg.NetworkMagic,
-		SocketPath:   cfg.SocketPath,
-		SocketMode:   socketMode,
+		Logger:        n.config.logger,
+		PromRegistry:  n.retainedComponentPromRegistry(),
+		NetworkMagic:  cfg.NetworkMagic,
+		SocketPath:    cfg.SocketPath,
+		SocketMode:    socketMode,
+		SocketModeSet: true,
 		// #nosec G115 -- validation bounds both to fit int64 once scaled
 		MessageTTL: time.Duration(cfg.MessageTTL) * time.Second,
 		// #nosec G115 -- validation bounds both to fit int64 once scaled

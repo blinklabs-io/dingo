@@ -249,7 +249,7 @@ func ParseUnixSocketMode(value string) (os.FileMode, error) {
 		return 0, fmt.Errorf("must be an octal permission mode: %w", err)
 	}
 	mode := os.FileMode(parsed)
-	if mode&0o002 != 0 {
+	if runtime.GOOS != "windows" && mode&0o002 != 0 {
 		return 0, errors.New("must not permit writes by other users")
 	}
 	return mode, nil

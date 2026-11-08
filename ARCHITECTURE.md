@@ -8842,7 +8842,8 @@ between bind and permission enforcement can widen access. Caller-supplied
 listeners retain their creator's permission policy, and Windows named pipes
 retain their platform ACL policy. Managed socket parents must be owned by the
 process user or root and must not be writable by group or other users; a `0660`
-socket remains shareable from a group-searchable directory.
+socket remains shareable from a group-searchable directory. Linux abstract
+Unix sockets retain their kernel-namespace behavior and have no pathname mode.
 
 Accepted TCP connections and local Unix node-to-client connections bound each
 socket write to two minutes. Unix sockets receive that wrapper after their

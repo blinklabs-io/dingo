@@ -24,6 +24,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -43,7 +44,7 @@ func TestStartListener_UnixSocket_AppliesConfiguredMode(t *testing.T) {
 	oldMask := syscall.Umask(0)
 	defer syscall.Umask(oldMask)
 
-	for _, mode := range []os.FileMode{0o600, 0o660} {
+	for _, mode := range []os.FileMode{0, 0o600, 0o660} {
 		t.Run(fmt.Sprintf("%04o", mode), func(t *testing.T) {
 			socketPath := unixTestSocketPath(
 				t,
@@ -54,9 +55,10 @@ func TestStartListener_UnixSocket_AppliesConfiguredMode(t *testing.T) {
 				Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
 				PromRegistry: prometheus.NewRegistry(),
 				Listeners: []ListenerConfig{{
-					ListenNetwork:  "unix",
-					ListenAddress:  socketPath,
-					UnixSocketMode: mode,
+					ListenNetwork:     "unix",
+					ListenAddress:     socketPath,
+					UnixSocketMode:    mode,
+					UnixSocketModeSet: true,
 				}},
 			})
 			require.NoError(t, cm.Start(t.Context()))
@@ -77,6 +79,27 @@ func TestStartListener_UnixSocket_AppliesConfiguredMode(t *testing.T) {
 	}
 }
 
+func TestCreateUnixSocketListenerPreservesLinuxAbstractAddress(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("abstract Unix socket names are a Linux feature")
+	}
+	address := fmt.Sprintf("@dingo-%d-%d", os.Getpid(), time.Now().UnixNano())
+	listener, err := createUnixSocketListener(
+		t.Context(),
+		net.ListenConfig{},
+		address,
+		0o600,
+		true,
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, listener.Close()) })
+	require.Equal(t, address, listener.Addr().String())
+
+	conn, err := net.DialTimeout("unix", address, time.Second)
+	require.NoError(t, err)
+	require.NoError(t, conn.Close())
+}
+
 func TestStartListener_UnixSocket_RejectsMutableParent(t *testing.T) {
 	dir := unixTestTempDir(t)
 	require.NoError(t, os.Chmod(dir, 0o770))
@@ -86,9 +109,10 @@ func TestStartListener_UnixSocket_RejectsMutableParent(t *testing.T) {
 		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		PromRegistry: prometheus.NewRegistry(),
 		Listeners: []ListenerConfig{{
-			ListenNetwork:  "unix",
-			ListenAddress:  filepath.Join(dir, "node.sock"),
-			UnixSocketMode: 0o660,
+			ListenNetwork:     "unix",
+			ListenAddress:     filepath.Join(dir, "node.sock"),
+			UnixSocketMode:    0o660,
+			UnixSocketModeSet: true,
 		}},
 	})
 	err := cm.Start(t.Context())
@@ -116,9 +140,10 @@ func TestStartListener_UnixSocket_ReportsSecurePathBudget(t *testing.T) {
 		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		PromRegistry: prometheus.NewRegistry(),
 		Listeners: []ListenerConfig{{
-			ListenNetwork:  "unix",
-			ListenAddress:  address,
-			UnixSocketMode: 0o600,
+			ListenNetwork:     "unix",
+			ListenAddress:     address,
+			UnixSocketMode:    0o600,
+			UnixSocketModeSet: true,
 		}},
 	})
 	err := cm.Start(t.Context())
@@ -136,9 +161,10 @@ func TestStartListener_UnixSocket_ClosePreservesReplacement(t *testing.T) {
 		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		PromRegistry: prometheus.NewRegistry(),
 		Listeners: []ListenerConfig{{
-			ListenNetwork:  "unix",
-			ListenAddress:  address,
-			UnixSocketMode: 0o600,
+			ListenNetwork:     "unix",
+			ListenAddress:     address,
+			UnixSocketMode:    0o600,
+			UnixSocketModeSet: true,
 		}},
 	})
 	require.NoError(t, cm.Start(t.Context()))

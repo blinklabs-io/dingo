@@ -32,6 +32,7 @@ func createUnixSocketListener(
 	_ net.ListenConfig,
 	_ string,
 	_ os.FileMode,
+	_ bool,
 ) (net.Listener, error) {
 	return nil, errors.New("unix socket listener is not supported on Windows")
 }

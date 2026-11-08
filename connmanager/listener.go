@@ -41,12 +41,14 @@ type ListenerConfig struct {
 	ListenNetwork string
 	ListenAddress string
 	// UnixSocketMode is applied to pathname Unix sockets created by the
-	// connection manager. Zero preserves the caller's ambient creation policy.
+	// connection manager when UnixSocketModeSet is true.
 	UnixSocketMode os.FileMode
-	ConnectionOpts []ouroboros.ConnectionOptionFunc
-	UseNtC         bool
-	TrustedLocal   bool
-	ReuseAddress   bool
+	// UnixSocketModeSet applies UnixSocketMode even when the mode is zero.
+	UnixSocketModeSet bool
+	ConnectionOpts    []ouroboros.ConnectionOptionFunc
+	UseNtC            bool
+	TrustedLocal      bool
+	ReuseAddress      bool
 }
 
 func (c *ConnectionManager) startListeners(ctx context.Context) error {
@@ -181,6 +183,7 @@ func (c *ConnectionManager) startListener(
 					listenConfig,
 					l.ListenAddress,
 					l.UnixSocketMode,
+					l.UnixSocketModeSet,
 				)
 			} else {
 				listener, err = listenConfig.Listen(

@@ -23,6 +23,8 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"syscall"
 
 	"github.com/blinklabs-io/dingo/internal/securefs"
@@ -101,8 +103,12 @@ func createUnixSocketListener(
 	listenConfig net.ListenConfig,
 	address string,
 	mode os.FileMode,
+	modeSet bool,
 ) (net.Listener, error) {
-	if mode == 0 {
+	if runtime.GOOS == "linux" && strings.HasPrefix(address, "@") {
+		return listenConfig.Listen(ctx, "unix", address)
+	}
+	if !modeSet {
 		if err := prepareUnixSocketPath(address); err != nil {
 			return nil, err
 		}

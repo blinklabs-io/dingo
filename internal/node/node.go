@@ -531,10 +531,11 @@ func Run(
 		listeners = append(
 			listeners,
 			dingo.ListenerConfig{
-				ListenNetwork:  "unix",
-				ListenAddress:  cfg.SocketPath,
-				UnixSocketMode: socketMode,
-				UseNtC:         true,
+				ListenNetwork:     "unix",
+				ListenAddress:     cfg.SocketPath,
+				UnixSocketMode:    socketMode,
+				UnixSocketModeSet: true,
+				UseNtC:            true,
 			},
 		)
 	}

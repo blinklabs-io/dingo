@@ -43,12 +43,16 @@ func TestStackDefaultSocketModeIgnoresUmask(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NoError(t, s.Start(t.Context()))
+	t.Cleanup(func() {
+		stopCtx, cancel := context.WithTimeout(
+			context.Background(),
+			10*time.Second,
+		)
+		defer cancel()
+		require.NoError(t, s.Stop(stopCtx))
+	})
 
 	info, err := os.Lstat(socketPath)
 	require.NoError(t, err)
 	require.Equal(t, os.FileMode(0o600), info.Mode().Perm())
-
-	stopCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	require.NoError(t, s.Stop(stopCtx))
 }
