@@ -84,7 +84,7 @@ func TestEpochFeeSumRejectsInvalidRowsAndOverflow(t *testing.T) {
 		{"oversized", []any{"18446744073709551616"}, false},
 		{"negative cancellation", []any{"-1", "1"}, false},
 		{"malformed", []any{"1x"}, false},
-		{"float", []any{1.5}, false},
+		{"fractional decimal", []any{"1.5"}, false},
 		{"leading sign", []any{"+1"}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
