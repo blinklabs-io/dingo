@@ -431,3 +431,24 @@ func TestStartBlockProducerSkipsAPoolWhoseKESAgentIsUnreachable(t *testing.T) {
 	require.False(t, retrying, "stopping the producer stops the retry")
 	require.False(t, n.blockForger.IsRunning())
 }
+
+func TestInitMultiPoolRefusesOnePoolListedTwice(t *testing.T) {
+	t.Parallel()
+	_, _, opcert := devnetCredPaths(t)
+	copyPath := filepath.Join(t.TempDir(), "same-pool.cert")
+	data, err := os.ReadFile(opcert)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(copyPath, data, 0o644))
+	n := &Node{config: Config{
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		blockProducerPools: []BlockProducerPool{
+			{ShelleyOperationalCertificate: opcert},
+			{ShelleyOperationalCertificate: copyPath},
+		},
+	}}
+	require.ErrorContains(
+		t,
+		n.initMultiPool(),
+		"blockProducerPools[0] and blockProducerPools[1] are both pool",
+	)
+}
