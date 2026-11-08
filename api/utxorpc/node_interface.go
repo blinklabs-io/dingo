@@ -44,6 +44,9 @@ type UtxorpcLedgerState interface {
 		hash []byte,
 	) (models.Block, error)
 	CardanoNodeConfig() *cardano.CardanoNodeConfig
+	// OldestRetainedSlot returns the slot of the oldest block whose body is
+	// still stored, with ok=false when that is not known. It does no I/O.
+	OldestRetainedSlot() (slot uint64, ok bool)
 	Datums(ctx context.Context, hashes [][]byte) ([]*models.Datum, error)
 	EvaluateTxContext(
 		ctx context.Context,

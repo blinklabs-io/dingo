@@ -209,6 +209,7 @@ func (d *Database) SetBlobStore(
 	old := d.blobRef
 	d.blobRef = next
 	d.blobMu.Unlock()
+	d.resetRetainedBound()
 	if old == nil {
 		return nil, func() {}
 	}

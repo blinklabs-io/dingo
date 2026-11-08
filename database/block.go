@@ -325,6 +325,9 @@ func BlockDeleteTxn(txn *Txn, block models.Block) error {
 	if err := blob.DeleteBlock(blobTxn, block.Slot, block.Hash, block.ID); err != nil {
 		return err
 	}
+	if txn.db != nil {
+		txn.db.retainedBlockRemoved(txn, block.Slot)
+	}
 	if retained {
 		return removeRetainedBlock(blob, txn, block.Slot, block.Hash)
 	}

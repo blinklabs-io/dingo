@@ -15563,6 +15563,17 @@ and window budget, which `FollowTip` streams from the same host share.
 Rollback and tip blocks are not charged. The `MaxReplayBlocks` start-distance
 check still applies first.
 
+A read that reaches a block body removed by local history expiry
+(`types.ErrHistoryExpired`) ends the call or stream with `FailedPrecondition`
+rather than `Internal`, naming the expired slot and hash. `historyExpiredError`
+also asks the ledger for the start of retained history
+(`UtxorpcLedgerState.OldestRetainedSlot`, served by
+`Database.OldestRetainedSlot`) and appends `oldest retained slot=N` when it is
+known. The bound is kept in memory by the history-expiry pruner, which
+recomputes it from the cursor in `sync_state` after each round, so the error
+path does no I/O and repeated expired requests cannot drive disk scans. An
+unknown bound leaves the message without it and keeps the code.
+
 `FollowTip` populates `Timestamp` on a `Reset` block reference and on every
 response's `Tip` from `LedgerState.SlotToTime`. `Timestamp` is a plain proto3
 `uint64` with the same "unknown" ambiguity `height` has (see the UTxO RPC
