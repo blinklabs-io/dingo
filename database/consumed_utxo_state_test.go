@@ -21,6 +21,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	"github.com/stretchr/testify/require"
@@ -134,4 +135,39 @@ func TestConsumedInputRecoveryReadsOnlySpendState(t *testing.T) {
 			})
 		}
 	}
+}
+
+func TestConsumedInputRecoveryReadsBoundaryOncePerCall(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	db.config.StrictUtxoValidation = false
+	counter := &recoveryReadCounter{MetadataStore: db.metadata}
+	db.metadata = counter
+
+	var inputs []lcommon.TransactionInput
+	for i := range 2 {
+		input, err := mockledger.NewSimpleTransactionInput(
+			bytes.Repeat([]byte{0x81 + byte(i)}, 32), 0,
+		)
+		require.NoError(t, err)
+		inputs = append(inputs, input)
+	}
+	tx := mockledger.NewTransactionBuilder()
+	tx.WithId(bytes.Repeat([]byte{0x83}, 32))
+	tx.WithInputs(inputs...)
+	tx.WithValid(true)
+
+	txn := db.Transaction(t.Context(), true)
+	defer txn.Release()
+	require.NoError(t, txn.Do(func(txn *Txn) error {
+		return db.ensureTransactionConsumedUtxos(
+			tx,
+			ocommon.Point{Slot: 10},
+			txn,
+			nil,
+			BatchedTxIngestOpts{},
+		)
+	}))
+	require.Equal(t, 1, counter.boundaryReads)
 }
