@@ -110,12 +110,6 @@ func (n *Node) primaryKeySource() *poolKeySource {
 	}
 }
 
-func (n *Node) validateBlockProducerStartupAtSlot(
-	currentSlot uint64,
-) (*forging.PoolCredentials, error) {
-	return n.primaryKeySource().validateBlockProducerStartupAtSlot(currentSlot)
-}
-
 func (n *Node) validateBlockProducerStartupForClock(
 	slot uint64,
 	supported bool,
@@ -124,20 +118,6 @@ func (n *Node) validateBlockProducerStartupForClock(
 		slot,
 		supported,
 	)
-}
-
-func (n *Node) loadBlockProducerCredentialsFromAgent(
-	creds *forging.PoolCredentials,
-	currentSlot uint64,
-) error {
-	return n.primaryKeySource().loadBlockProducerCredentialsFromAgent(
-		creds,
-		currentSlot,
-	)
-}
-
-func (n *Node) kesAgentConfigured() bool {
-	return n.primaryKeySource().kesAgentConfigured()
 }
 
 func (n *Node) closeKESAgentClient() {
@@ -434,7 +414,7 @@ func (ks *poolKeySource) startKESAgentServeKey(
 
 	(*ks.client) = client
 	//nolint:contextcheck // background loop is bound to the node's lifecycle, not this call
-	runCtx, runCancel := context.WithCancel(ks.n.blockProducerContext())
+	runCtx, runCancel := context.WithCancel(ks.n.blockProducerContext()) //nolint:gosec // G118: kept in *ks.cancel; closeKESAgentClient calls it
 	(*ks.cancel) = runCancel
 	go func() {
 		if err := client.Run(runCtx, loopInstall); err != nil &&
