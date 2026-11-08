@@ -42,15 +42,23 @@ provides pluggable storage and client interfaces.
 
 ## Network sync and runtime usage
 
-Dingo Core v0.90.5; API v0.91.0. Runtime CPU/RAM are sampled highs after bootstrap; disk is database size. `—` = not captured.
+Mithril times are v0.90.5 to bootstrap complete (API includes backfill).
+Genesis times are v0.92.0 to first Ready. CPU/RAM are sampled maxima after
+Ready (Preview/Preprod current services; Preprod API window ~2h; Dijkstra/
+Musashi v0.92.0). Disk is metadata plus blob database size.
 
-| Network | Mode | CPU | RAM | Disk | Sync time |
+| Network | Mode / sync | CPU | RAM | DB disk | Sync time |
 | --- | --- | ---: | ---: | ---: | ---: |
-| Preview | Core, Mithril | ~1.2 cores | ~2.0 GiB | ~17.8 GiB | ~13 min |
-| Preprod | Core, Mithril | ~1.1 cores | ~2.7 GiB | ~22.8 GiB | ~16 min |
-| Preview | API, Mithril | ~3.4 cores | ~3.5 GiB | ~55 GiB | ~4h 45m |
-| Preprod | API, Mithril | ~1.7 cores | ~3.8 GiB | ~61 GiB | ~3h 20m |
-| Mainnet | Core, Mithril | — | — | — | ~6h 2m |
+| Preview | Core / Mithril | ~0.71 cores | ~1.3 GiB | ~22.6 GiB | ~12m 38s |
+| Preview | API / Mithril | ~0.83 cores | ~3.3 GiB | ~57.1 GiB | ~4h 41m |
+| Preprod | Core / Mithril | ~0.23 cores | ~1.1 GiB | ~25.4 GiB | ~15m 57s |
+| Preprod | API / Mithril | ~0.21 cores | ~1.4 GiB | ~62.4 GiB | ~3h 43m |
+| Dijkstra | Core / Genesis | ~0.08 cores | ~0.65 GiB | ~0.15 GiB | ~11m 11s |
+| Dijkstra | API / Genesis | ~0.16 cores | ~0.88 GiB | ~0.12 GiB | ~11m 05s |
+| Musashi | Core / Genesis | ~1.1 cores | ~16.4 GiB | ~75 GiB | ~17h 22m |
+
+Mainnet API database (2026-11-08): metadata ~752 GiB; blob ~188 GiB; total
+~941 GiB.
 
 ## Codebase
 
