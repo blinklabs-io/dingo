@@ -225,3 +225,21 @@ func TestOutputLookupsDoNotScan(t *testing.T) {
 		require.Contains(t, plan, "idx_transaction_hash", "%s: %s", name, plan)
 	}
 }
+
+// TestCrossIdentityProbeUsesTheImportedIndex pins the plan of the probe that
+// finds an imported row for a produced output. Without the index named, SQLite
+// searches idx_utxo_collateral_return_for_tx_id for NULL, which holds a row
+// per output.
+func TestCrossIdentityProbeUsesTheImportedIndex(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	seedRollbackUtxos(t, store, 20_000, 64, 2_656_808, 40)
+	analyzeStore(t, store)
+	hash := make([]byte, 32)
+	plan := explainQueryPlan(t, store, utxoRefAsWritten+
+		"SELECT tx_id, output_idx FROM utxo INDEXED BY idx_utxo_imported_ref "+
+		"WHERE transaction_id IS NULL AND collateral_return_for_tx_id IS NULL "+
+		"AND tx_id IN (?, ?)", hash, hash)
+	require.Contains(t, plan, "idx_utxo_imported_ref", plan)
+	require.NotContains(t, plan, "SCAN utxo", plan)
+}

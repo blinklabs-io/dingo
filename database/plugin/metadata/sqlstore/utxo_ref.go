@@ -80,6 +80,10 @@ const (
 
 // utxoRefIDsInSQL is the id lookup for a list of transaction hashes, with
 // every output of those transactions. The two lists are the same hashes.
+// utxoRefAsWritten marks a statement the rewrite must leave alone because it
+// already names the producer and imported indexes itself.
+const utxoRefAsWritten = "-- as written\n"
+
 const utxoRefIDsInSQL = `SELECT ref.id FROM utxo AS ref ` +
 	`WHERE ref.producer_tx_id IN ` +
 	`(SELECT ref_tx.id FROM "transaction" AS ref_tx WHERE ref_tx.hash IN (%s)) ` +
@@ -111,8 +115,9 @@ func planUtxoRefs(query string) *utxoRefPlan {
 	if cached, ok := utxoRefPlans.Load(query); ok {
 		return cached.(*utxoRefPlan)
 	}
-	if strings.Contains(query, "utxo AS ref") {
-		// Already expanded.
+	if strings.Contains(query, "utxo AS ref") ||
+		strings.Contains(query, utxoRefAsWritten) {
+		// Already expanded, or written against the indexes directly.
 		plan := &utxoRefPlan{query: query}
 		utxoRefPlans.Store(query, plan)
 		return plan
@@ -232,7 +237,7 @@ func (s *Store) existingUtxoRefs(
 		part := produced[start:min(start+chunk, len(produced))]
 		hashes := distinctUtxoHashes(part)
 		rows, err := db.QueryContext(ctx,
-			"SELECT tx_id, output_idx FROM utxo "+
+			utxoRefAsWritten+"SELECT tx_id, output_idx FROM utxo INDEXED BY idx_utxo_imported_ref "+
 				"WHERE transaction_id IS NULL AND collateral_return_for_tx_id IS NULL "+
 				"AND tx_id IN ("+bindPlaceholders(len(hashes))+")",
 			hashes...,
