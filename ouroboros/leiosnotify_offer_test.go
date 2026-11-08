@@ -61,14 +61,18 @@ func TestLeiosForgedEBOfferSetsTransactionOfferType(t *testing.T) {
 	require.Equal(t, point, offer.Point)
 }
 
-func TestLeiosRelayForwardsVerifiedManifestAndCompleteTransactionsOnce(t *testing.T) {
+func TestLeiosRelayForwardsVerifiedManifestAndCompleteTransactionsOnce(
+	t *testing.T,
+) {
 	t.Parallel()
 
 	txRaw := testDijkstraTx(t, 0)
 	ebRaw, err := cbor.Encode(&lcommon.LeiosEndorserBlock{
 		TransactionReferences: []lcommon.LeiosTransactionReference{{
 			TransactionHash: lcommon.Blake2b256Hash(txRaw),
-			TransactionSize: uint32(len(txRaw)), //nolint:gosec // short test transaction
+			TransactionSize: uint32(
+				len(txRaw),
+			), //nolint:gosec // short test transaction
 		}},
 	})
 	require.NoError(t, err)
@@ -86,22 +90,24 @@ func TestLeiosRelayForwardsVerifiedManifestAndCompleteTransactionsOnce(t *testin
 	require.Nil(t, entry, "unverified peer slots must not be relayed")
 
 	announceTestEndorserBlock(t, o, point.Slot, ebHash, len(ebRaw))
-	manifest, _ := o.leiosEBLog.next("downstream")
-	require.NotNil(t, manifest)
-	manifestMessage, ok := leiosForgedEBOffer(
-		manifest,
-	).(*oleiosnotify.MsgBlockOffer)
-	require.True(t, ok)
-	require.Equal(t, point, manifestMessage.Point)
-	o.leiosEBLog.complete("downstream", nil, true)
-
 	entry, _ = o.leiosEBLog.next("downstream")
-	require.Nil(t, entry, "transaction offer must wait for complete bodies")
-
+	require.Nil(
+		t,
+		entry,
+		"even the manifest offer must wait for complete bodies",
+	)
 	txsRaw := []cbor.RawMessage{cbor.RawMessage(txRaw)}
-	require.NoError(t, o.storeLeiosEndorserBlock(
-		point, ebRaw, txsRaw, leiosStorePeerOffered,
-	))
+	require.NoError(
+		t,
+		o.storeLeiosEndorserBlock(point, ebRaw, txsRaw, leiosStorePeerOffered),
+	)
+	header, _ := o.leiosEBLog.next("downstream")
+	require.NotEmpty(t, header.announcement)
+	o.leiosEBLog.complete("downstream", nil, true)
+	manifest, _ := o.leiosEBLog.next("downstream")
+	require.NotNil(t, manifest.point)
+	require.Equal(t, point, *manifest.point)
+	o.leiosEBLog.complete("downstream", nil, true)
 	transactions, _ := o.leiosEBLog.next("downstream")
 	require.NotNil(t, transactions)
 	transactionMessage, ok := leiosForgedEBOffer(
@@ -125,7 +131,9 @@ func TestLeiosRelayForwardsCompletedBackfillOnce(t *testing.T) {
 	ebRaw, err := cbor.Encode(&lcommon.LeiosEndorserBlock{
 		TransactionReferences: []lcommon.LeiosTransactionReference{{
 			TransactionHash: lcommon.Blake2b256Hash(txRaw),
-			TransactionSize: uint32(len(txRaw)), //nolint:gosec // short test transaction
+			TransactionSize: uint32(
+				len(txRaw),
+			), //nolint:gosec // short test transaction
 		}},
 	})
 	require.NoError(t, err)
@@ -208,7 +216,9 @@ func TestLeiosRelayOffersExistingCompleteCacheOnPeerOffer(t *testing.T) {
 	ebRaw, err := cbor.Encode(&lcommon.LeiosEndorserBlock{
 		TransactionReferences: []lcommon.LeiosTransactionReference{{
 			TransactionHash: lcommon.Blake2b256Hash(txRaw),
-			TransactionSize: uint32(len(txRaw)), //nolint:gosec // short test transaction
+			TransactionSize: uint32(
+				len(txRaw),
+			), //nolint:gosec // short test transaction
 		}},
 	})
 	require.NoError(t, err)
@@ -264,7 +274,10 @@ func TestLeiosNotifyVoteOfferHasIndependentWorkLimit(t *testing.T) {
 	t.Parallel()
 
 	valid := &oleiosnotify.MsgVotesOffer{
-		FullVotes: make([]lcommon.LeiosVote, leiosNotifyMaxVoteVerificationsPerOffer),
+		FullVotes: make(
+			[]lcommon.LeiosVote,
+			leiosNotifyMaxVoteVerificationsPerOffer,
+		),
 	}
 	require.NoError(t, validateLeiosNotifyVoteOffer(valid))
 
@@ -274,7 +287,11 @@ func TestLeiosNotifyVoteOfferHasIndependentWorkLimit(t *testing.T) {
 			leiosNotifyMaxVoteVerificationsPerOffer+1,
 		),
 	}
-	require.ErrorContains(t, validateLeiosNotifyVoteOffer(oversized), "maximum is 64")
+	require.ErrorContains(
+		t,
+		validateLeiosNotifyVoteOffer(oversized),
+		"maximum is 64",
+	)
 }
 
 func TestLeiosForgedEBOfferAnnouncement(t *testing.T) {
@@ -305,7 +322,9 @@ func TestLeiosRelayDefersManifestOfferUntilManifestStored(t *testing.T) {
 	ebRaw, err := cbor.Encode(&lcommon.LeiosEndorserBlock{
 		TransactionReferences: []lcommon.LeiosTransactionReference{{
 			TransactionHash: lcommon.Blake2b256Hash(txRaw),
-			TransactionSize: uint32(len(txRaw)), //nolint:gosec // short test transaction
+			TransactionSize: uint32(
+				len(txRaw),
+			), //nolint:gosec // short test transaction
 		}},
 	})
 	require.NoError(t, err)
@@ -321,11 +340,18 @@ func TestLeiosRelayDefersManifestOfferUntilManifestStored(t *testing.T) {
 	o.markLeiosEndorserBlockRelayOfferFrom(point, "peer-b")
 
 	entry, _ := o.leiosEBLog.next("downstream")
-	require.Nil(t, entry, "no offer may be relayed before the manifest is known")
+	require.Nil(
+		t,
+		entry,
+		"no offer may be relayed before the manifest is known",
+	)
 
 	require.NoError(t, o.storeLeiosEndorserBlock(
-		point, ebRaw, nil, leiosStorePeerOffered,
+		point, ebRaw, []cbor.RawMessage{txRaw}, leiosStorePeerOffered,
 	))
+	header, _ := o.leiosEBLog.next("downstream")
+	require.NotEmpty(t, header.announcement)
+	o.leiosEBLog.complete("downstream", nil, true)
 	manifest, _ := o.leiosEBLog.next("downstream")
 	require.NotNil(t, manifest)
 	manifestMessage, ok := leiosForgedEBOffer(
@@ -336,6 +362,9 @@ func TestLeiosRelayDefersManifestOfferUntilManifestStored(t *testing.T) {
 	require.Equal(t, uint64(len(ebRaw)), manifestMessage.Size)
 	o.leiosEBLog.complete("downstream", nil, true)
 
+	txs, _ := o.leiosEBLog.next("downstream")
+	require.NotNil(t, txs.txOffer)
+	o.leiosEBLog.complete("downstream", nil, true)
 	o.markLeiosEndorserBlockRelayOfferFrom(point, "peer-b")
 	entry, _ = o.leiosEBLog.next("downstream")
 	require.Nil(t, entry, "the manifest must be offered exactly once")
@@ -343,50 +372,104 @@ func TestLeiosRelayDefersManifestOfferUntilManifestStored(t *testing.T) {
 
 func TestLeiosRelayDefersAnnouncementUntilManifestStored(t *testing.T) {
 	for _, offerFirst := range []bool{false, true} {
-		t.Run(map[bool]string{false: "announcement_first", true: "offer_first"}[offerFirst], func(t *testing.T) {
-			t.Parallel()
-			txRaw := testDijkstraTx(t, 0)
-			ebRaw, err := cbor.Encode(&lcommon.LeiosEndorserBlock{
-				TransactionReferences: []lcommon.LeiosTransactionReference{{
-					TransactionHash: lcommon.Blake2b256Hash(txRaw),
-					TransactionSize: uint32(len(txRaw)), //nolint:gosec // bounded fixture
-				}},
-			})
-			require.NoError(t, err)
-			ebHash := lcommon.Blake2b256Hash(ebRaw)
-			point := ocommon.NewPoint(42, ebHash.Bytes())
-			o := newOuroboros(OuroborosConfig{EnableLeios: true})
-			t.Cleanup(func() { require.NoError(t, o.Close()) })
-			o.leiosEBLog.registerConn("downstream", nil, nil)
-			if offerFirst {
+		t.Run(
+			map[bool]string{false: "announcement_first", true: "offer_first"}[offerFirst],
+			func(t *testing.T) {
+				t.Parallel()
+				txRaw := testDijkstraTx(t, 0)
+				ebRaw, err := cbor.Encode(&lcommon.LeiosEndorserBlock{
+					TransactionReferences: []lcommon.LeiosTransactionReference{{
+						TransactionHash: lcommon.Blake2b256Hash(txRaw),
+						TransactionSize: uint32(
+							len(txRaw),
+						), //nolint:gosec // bounded fixture
+					}},
+				})
+				require.NoError(t, err)
+				ebHash := lcommon.Blake2b256Hash(ebRaw)
+				point := ocommon.NewPoint(42, ebHash.Bytes())
+				o := newOuroboros(OuroborosConfig{EnableLeios: true})
+				t.Cleanup(func() { require.NoError(t, o.Close()) })
+				o.leiosEBLog.registerConn("downstream", nil, nil)
+				if offerFirst {
+					o.markLeiosEndorserBlockRelayOfferFrom(point, "upstream")
+				}
+				headerRaw := testDijkstraAnnouncementHeaderRawFor(
+					t,
+					point.Slot,
+					ebHash,
+					uint64(len(ebRaw)),
+				)
+				header, err := gdijkstra.NewDijkstraBlockHeaderFromCbor(
+					headerRaw,
+				)
+				require.NoError(t, err)
+				record := func() error {
+					return o.recordLeiosAnnouncement(
+						headerRaw,
+						header.Cbor(),
+						ebHash,
+						uint64(len(ebRaw)),
+						header,
+						"upstream",
+						true,
+					)
+				}
+				require.NoError(t, record())
+				entry, _ := o.leiosEBLog.next("downstream")
+				require.Nil(
+					t,
+					entry,
+					"the announcement itself causes peers to fetch, even before an offer",
+				)
+				if !offerFirst {
+					o.markLeiosEndorserBlockRelayOfferFrom(point, "upstream")
+				}
+				require.NoError(
+					t,
+					o.storeLeiosEndorserBlock(
+						point,
+						ebRaw,
+						nil,
+						leiosStorePeerOffered,
+					),
+				)
+				waiting, _ := o.leiosEBLog.next("downstream")
+				require.Nil(
+					t,
+					waiting,
+					"a manifest without bodies cannot be advertised",
+				)
+				require.NoError(
+					t,
+					o.storeLeiosEndorserBlock(
+						point,
+						ebRaw,
+						[]cbor.RawMessage{txRaw},
+						leiosStorePeerOffered,
+					),
+				)
+				announcement, _ := o.leiosEBLog.next("downstream")
+				require.NotNil(t, announcement)
+				require.Equal(t, headerRaw, announcement.announcement)
+				o.leiosEBLog.complete("downstream", nil, true)
+				offer, _ := o.leiosEBLog.next("downstream")
+				require.NotNil(t, offer)
+				require.Equal(t, point, *offer.point)
+				o.leiosEBLog.complete("downstream", nil, true)
+				txs, _ := o.leiosEBLog.next("downstream")
+				require.NotNil(t, txs.txOffer)
+				o.leiosEBLog.complete("downstream", nil, true)
+				require.NoError(t, record())
 				o.markLeiosEndorserBlockRelayOfferFrom(point, "upstream")
-			}
-			headerRaw := testDijkstraAnnouncementHeaderRawFor(t, point.Slot, ebHash, uint64(len(ebRaw)))
-			header, err := gdijkstra.NewDijkstraBlockHeaderFromCbor(headerRaw)
-			require.NoError(t, err)
-			record := func() error {
-				return o.recordLeiosAnnouncement(headerRaw, header.Cbor(), ebHash, uint64(len(ebRaw)), header, "upstream", true)
-			}
-			require.NoError(t, record())
-			entry, _ := o.leiosEBLog.next("downstream")
-			require.Nil(t, entry, "the announcement itself causes peers to fetch, even before an offer")
-			if !offerFirst {
-				o.markLeiosEndorserBlockRelayOfferFrom(point, "upstream")
-			}
-			require.NoError(t, o.storeLeiosEndorserBlock(point, ebRaw, nil, leiosStorePeerOffered))
-			announcement, _ := o.leiosEBLog.next("downstream")
-			require.NotNil(t, announcement)
-			require.Equal(t, headerRaw, announcement.announcement)
-			o.leiosEBLog.complete("downstream", nil, true)
-			offer, _ := o.leiosEBLog.next("downstream")
-			require.NotNil(t, offer)
-			require.Equal(t, point, *offer.point)
-			o.leiosEBLog.complete("downstream", nil, true)
-			require.NoError(t, record())
-			o.markLeiosEndorserBlockRelayOfferFrom(point, "upstream")
-			entry, _ = o.leiosEBLog.next("downstream")
-			require.Nil(t, entry, "repeated announcements and offers must not duplicate publication")
-		})
+				entry, _ = o.leiosEBLog.next("downstream")
+				require.Nil(
+					t,
+					entry,
+					"repeated announcements and offers must not duplicate publication",
+				)
+			},
+		)
 	}
 }
 
@@ -397,32 +480,58 @@ func TestLeiosRelayDropsExpiredDeferredAnnouncement(t *testing.T) {
 		ebRaw, err := cbor.Encode(&lcommon.LeiosEndorserBlock{
 			TransactionReferences: []lcommon.LeiosTransactionReference{{
 				TransactionHash: lcommon.Blake2b256Hash(txRaw),
-				TransactionSize: uint32(len(txRaw)), //nolint:gosec // bounded fixture
+				TransactionSize: uint32(
+					len(txRaw),
+				), //nolint:gosec // bounded fixture
 			}},
 		})
 		require.NoError(t, err)
 		ebHash := lcommon.Blake2b256Hash(ebRaw)
 		point := ocommon.NewPoint(42, ebHash.Bytes())
 		o := newOuroboros(OuroborosConfig{
-			EnableLeios:             true,
-			LeiosAnnouncementLedger: &fakeLeiosAnnouncementLedger{slotTime: time.Now()},
+			EnableLeios: true,
+			LeiosAnnouncementLedger: &fakeLeiosAnnouncementLedger{
+				slotTime: time.Now(),
+			},
 		})
 		t.Cleanup(func() { require.NoError(t, o.Close()) })
 		o.leiosEBLog.registerConn("downstream", nil, nil)
 		o.markLeiosEndorserBlockRelayOfferFrom(point, "upstream")
-		headerRaw := testDijkstraAnnouncementHeaderRawFor(t, point.Slot, ebHash, uint64(len(ebRaw)))
+		headerRaw := testDijkstraAnnouncementHeaderRawFor(
+			t,
+			point.Slot,
+			ebHash,
+			uint64(len(ebRaw)),
+		)
 		header, err := gdijkstra.NewDijkstraBlockHeaderFromCbor(headerRaw)
 		require.NoError(t, err)
-		require.NoError(t, o.recordLeiosAnnouncement(headerRaw, header.Cbor(), ebHash, uint64(len(ebRaw)), header, "upstream", true))
+		require.NoError(
+			t,
+			o.recordLeiosAnnouncement(
+				headerRaw,
+				header.Cbor(),
+				ebHash,
+				uint64(len(ebRaw)),
+				header,
+				"upstream",
+				true,
+			),
+		)
 		require.Len(t, o.leiosRelayPendingAnnouncements, 1)
 		time.Sleep(leiosNotifyMaxAnnouncementAge + time.Second)
 		// Historical backfill can independently verify this old occurrence;
 		// that authority must not revive its expired notification header.
-		require.NoError(t, o.storeLeiosEndorserBlock(point, ebRaw, nil, leiosStoreBackfill))
+		require.NoError(
+			t,
+			o.storeLeiosEndorserBlock(
+				point,
+				ebRaw,
+				[]cbor.RawMessage{txRaw},
+				leiosStoreBackfill,
+			),
+		)
 		entry, _ := o.leiosEBLog.next("downstream")
-		require.NotNil(t, entry)
-		require.Empty(t, entry.announcement)
-		require.Equal(t, point, *entry.point)
+		require.Nil(t, entry, "expired dependencies must not be relayed")
 		require.Empty(t, o.leiosRelayPendingAnnouncements)
 	})
 }
@@ -436,7 +545,9 @@ func newDeferredRelayFixture(
 	ebRaw, err := cbor.Encode(&lcommon.LeiosEndorserBlock{
 		TransactionReferences: []lcommon.LeiosTransactionReference{{
 			TransactionHash: lcommon.Blake2b256Hash(txRaw),
-			TransactionSize: uint32(len(txRaw)), //nolint:gosec // bounded fixture
+			TransactionSize: uint32(
+				len(txRaw),
+			), //nolint:gosec // bounded fixture
 		}},
 	})
 	require.NoError(t, err)
@@ -500,19 +611,21 @@ func TestLeiosForgedStoreFlushesDeferredHeaderBeforeOffers(t *testing.T) {
 func TestLeiosDeferredHeaderExpiresAtRelayAge(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		o, point, ebRaw, _, headerRaw := newDeferredRelayFixture(
+		o, point, ebRaw, txRaw, headerRaw := newDeferredRelayFixture(
 			t,
 			&fakeLeiosAnnouncementLedger{slotTime: time.Now()},
 		)
 		o.markLeiosEndorserBlockRelayOfferFrom(point, "upstream")
-		require.NoError(t, recordRelayedHeader(t, o, point, len(ebRaw), headerRaw))
+		require.NoError(
+			t,
+			recordRelayedHeader(t, o, point, len(ebRaw), headerRaw),
+		)
 		time.Sleep(leiosNotifyRelayAnnouncementAge + time.Second)
 		require.NoError(t, o.storeLeiosEndorserBlock(
-			point, ebRaw, nil, leiosStorePeerOffered,
+			point, ebRaw, []cbor.RawMessage{txRaw}, leiosStorePeerOffered,
 		))
 		entry, _ := o.leiosEBLog.next("downstream")
-		require.NotNil(t, entry)
-		require.Empty(t, entry.announcement)
+		require.Nil(t, entry, "expired dependencies must not be relayed")
 	})
 }
 

@@ -1491,9 +1491,7 @@ func TestStoreLeiosEndorserBlockRejectsMalformedCompleteBodyBeforePublication(
 	require.NotNil(t, publish)
 	publish()
 	manifestOffer, _ := o.leiosEBLog.next("relay")
-	require.NotNil(t, manifestOffer)
-	require.NotNil(t, manifestOffer.point)
-	o.leiosEBLog.complete("relay", nil, true)
+	require.Nil(t, manifestOffer, "incomplete or malformed closures must not be advertised")
 
 	waitCtx, cancel := context.WithCancel(t.Context())
 	ready := make(chan bool, 1)
@@ -1774,9 +1772,7 @@ func TestLoadLeiosEBFromDBRejectsMalformedCompleteTransactions(
 		leiosStorePeerOffered,
 	))
 	manifestOffer, _ := o.leiosEBLog.next("relay")
-	require.NotNil(t, manifestOffer)
-	require.NotNil(t, manifestOffer.point)
-	o.leiosEBLog.complete("relay", nil, true)
+	require.Nil(t, manifestOffer, "incomplete or malformed closures must not be advertised")
 	relayOffer, _ := o.leiosEBLog.next("relay")
 	require.Nil(t, relayOffer, "malformed persisted transactions must not be relayed")
 	o.StopLeiosPersistWriter()

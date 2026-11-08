@@ -1175,7 +1175,9 @@ func TestPeerOfferedEndorserBlockLocalValidationFailureRemainsRetryable(
 	require.NoError(t, err)
 	point := ocommon.NewPoint(42, lcommon.Blake2b256Hash(blockRaw).Bytes())
 	ledger := &fakeLeiosAnnouncementLedger{
-		txValidationErr: errors.New("read validation snapshot: database unavailable"),
+		txValidationErr: errors.New(
+			"read validation snapshot: database unavailable",
+		),
 	}
 	o := newOuroboros(OuroborosConfig{
 		EnableLeios:             true,
@@ -2218,6 +2220,12 @@ func TestLoadLeiosEBFromDBServesOversizedEntryUncached(t *testing.T) {
 		db.SetLeiosEB(point.Slot, point.Hash, manifestRaw, txs),
 	)
 
+	header := []byte("deferred-header")
+	key := leiosBlockKey(point.Slot, point.Hash)
+	o.leiosEBLog.registerConn("downstream", nil, nil)
+	o.leiosRelayPendingAnnouncements = map[string][]leiosPendingRelayAnnouncement{
+		key: {{raw: header, expiresAt: time.Now().Add(time.Minute)}},
+	}
 	// The reload still succeeds and returns the complete set to the caller...
 	data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
 	require.True(t, ok)
@@ -2230,6 +2238,10 @@ func TestLoadLeiosEBFromDBServesOversizedEntryUncached(t *testing.T) {
 	_, cached := o.leiosEndorserBlocks[leiosBlockKey(point.Slot, point.Hash)]
 	o.leiosMu.RUnlock()
 	require.False(t, cached)
+	pending, _ := o.leiosEBLog.next("downstream")
+	require.NotNil(t, pending)
+	require.Equal(t, header, pending.announcement)
+	require.Empty(t, o.leiosRelayPendingAnnouncements)
 }
 
 // Eviction case, persisted-reload path: two persisted endorser blocks that
@@ -2469,7 +2481,12 @@ func TestLeiosAnnouncementElectionBoundAcrossSources(t *testing.T) {
 	for _, announcements := range o.leiosRelayPendingAnnouncements {
 		pendingRelayCount += len(announcements)
 	}
-	require.Equal(t, 2, pendingRelayCount, "only accepted announcements may await diffusion")
+	require.Equal(
+		t,
+		2,
+		pendingRelayCount,
+		"only accepted announcements may await diffusion",
+	)
 
 	// Both parts of election identity matter: another issuer at the same
 	// slot and the same issuer at another slot each get their own budget.
