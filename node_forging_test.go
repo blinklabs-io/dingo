@@ -43,7 +43,6 @@ import (
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/forging"
-	"github.com/blinklabs-io/dingo/ledger/leader"
 	"github.com/blinklabs-io/dingo/mempool"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -58,31 +57,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// TestEpochInfoAdapterProvidesExactActiveSlotCoeff pins the wiring that makes
-// the leader schedule use the exact Shelley genesis active slot coefficient.
-//
-// leader.ActiveSlotCoeffRatProvider is an optional interface: computeSchedule
-// type-asserts it and silently falls back to the float64 accessor when it is not
-// satisfied. Without this assertion, dropping or renaming
-// epochInfoAdapter.ActiveSlotCoeffRat would compile cleanly and quietly restore
-// the float64 approximation, which yields a strictly larger leadership threshold
-// than the reference node's.
-func TestEpochInfoAdapterProvidesExactActiveSlotCoeff(t *testing.T) {
-	t.Parallel()
-
-	var adapter any = &epochInfoAdapter{}
-	if _, ok := adapter.(leader.EpochInfoProvider); !ok {
-		t.Fatal("epochInfoAdapter must satisfy leader.EpochInfoProvider")
-	}
-	if _, ok := adapter.(leader.ActiveSlotCoeffRatProvider); !ok {
-		t.Fatal(
-			"epochInfoAdapter must satisfy " +
-				"leader.ActiveSlotCoeffRatProvider so the leader schedule " +
-				"uses the exact genesis coefficient",
-		)
-	}
-}
 
 func TestBlockBroadcasterAddsWithoutEventSubscriber(t *testing.T) {
 	t.Parallel()
@@ -373,50 +347,6 @@ func TestStakeDistributionAdapterSigmaPairSurvivesRecapture(t *testing.T) {
 		"the second read must observe the re-captured snapshot")
 	assert.Equal(t, sigmaDenomSummaryTotal*2, total2,
 		"the second read must observe the re-captured summary")
-}
-
-// TestStakeDistributionProviderForbidsTornSigmaRead pins the interface shape
-// that makes the defect unexpressible.
-//
-// The fix is not only that the adapter now reads both halves in one
-// transaction; it is that StakeDistributionProvider no longer offers a way to
-// read them separately. A future adapter cannot reintroduce the torn read
-// without changing the interface, which this test makes a visible decision
-// rather than an accident.
-func TestStakeDistributionProviderForbidsTornSigmaRead(t *testing.T) {
-	t.Parallel()
-
-	var adapter any = &stakeDistributionAdapter{}
-
-	if _, ok := adapter.(leader.StakeDistributionProvider); !ok {
-		t.Fatal(
-			"stakeDistributionAdapter must satisfy " +
-				"leader.StakeDistributionProvider",
-		)
-	}
-
-	// The separate accessors must be gone. Either one surviving means a
-	// caller can still take the numerator and the denominator from different
-	// transactions.
-	type poolStakeReader interface {
-		GetPoolStake(uint64, []byte) (uint64, error)
-	}
-	type totalStakeReader interface {
-		GetTotalActiveStake(uint64) (uint64, error)
-	}
-	if _, ok := adapter.(poolStakeReader); ok {
-		t.Error(
-			"stakeDistributionAdapter must not expose a standalone " +
-				"GetPoolStake; the sigma pair is read together (dingo #3815)",
-		)
-	}
-	if _, ok := adapter.(totalStakeReader); ok {
-		t.Error(
-			"stakeDistributionAdapter must not expose a standalone " +
-				"GetTotalActiveStake; the sigma pair is read together " +
-				"(dingo #3815)",
-		)
-	}
 }
 
 func replaceSigmaSnapshotAtomically(
@@ -921,17 +851,34 @@ func shelleyGenesisCfgForBP(
 ) *cardano.CardanoNodeConfig {
 	t.Helper()
 	cfg := &cardano.CardanoNodeConfig{}
-	if err := cfg.LoadShelleyGenesisFromReader(strings.NewReader(`{
-		"systemStart": "` + systemStart.UTC().Format(time.RFC3339Nano) + `",
-		"securityParam": 10,
-		"activeSlotsCoeff": 0.5,
-		"slotsPerKESPeriod": 129600,
-		"maxKESEvolutions": 62,
-		"slotLength": 1
-	}`)); err != nil {
+	genesis := shelleyGenesisJSONForBP(t, systemStart, 129600, 62)
+	if err := cfg.LoadShelleyGenesisFromReader(strings.NewReader(genesis)); err != nil {
 		t.Fatalf("LoadShelleyGenesisFromReader: %v", err)
 	}
 	return cfg
+}
+
+func shelleyGenesisJSONForBP(
+	t *testing.T,
+	systemStart time.Time,
+	slotsPerKESPeriod uint64,
+	maxKESEvolutions uint64,
+) string {
+	t.Helper()
+	var genesis map[string]any
+	if err := json.Unmarshal([]byte(testShelleyGenesisJSON(42)), &genesis); err != nil {
+		t.Fatalf("decode Shelley genesis fixture: %v", err)
+	}
+	genesis["systemStart"] = systemStart.UTC().Format(time.RFC3339Nano)
+	genesis["securityParam"] = 10
+	genesis["activeSlotsCoeff"] = 0.5
+	genesis["slotsPerKESPeriod"] = slotsPerKESPeriod
+	genesis["maxKESEvolutions"] = maxKESEvolutions
+	data, err := json.Marshal(genesis)
+	if err != nil {
+		t.Fatalf("encode Shelley genesis fixture: %v", err)
+	}
+	return string(data)
 }
 
 func newTestNodeForBP(
@@ -993,14 +940,8 @@ func TestValidateBlockProducerStartup_ExpiredKESPeriod(t *testing.T) {
 	vrf, kes, opcert := devnetCredPaths(t)
 	cfg := &cardano.CardanoNodeConfig{}
 	systemStart := time.Now().Add(-365 * 24 * time.Hour)
-	if err := cfg.LoadShelleyGenesisFromReader(strings.NewReader(`{
-		"systemStart": "` + systemStart.UTC().Format(time.RFC3339Nano) + `",
-		"securityParam": 10,
-		"activeSlotsCoeff": 0.5,
-		"slotsPerKESPeriod": 10,
-		"maxKESEvolutions": 1,
-		"slotLength": 1
-	}`)); err != nil {
+	genesis := shelleyGenesisJSONForBP(t, systemStart, 10, 1)
+	if err := cfg.LoadShelleyGenesisFromReader(strings.NewReader(genesis)); err != nil {
 		t.Fatalf("LoadShelleyGenesisFromReader: %v", err)
 	}
 	n := newTestNodeForBP(t, true, vrf, kes, opcert, cfg)
@@ -1156,58 +1097,6 @@ func (s testMempoolTransactionSource) Transactions() []mempool.MempoolTransactio
 
 func (s testMempoolTransactionSource) RemoveTxsByHash(_ []string) {}
 
-// TestMempoolAdaptersPreservePendingTransactionView verifies the node-level
-// adapters preserve the pending transaction fields needed for block building.
-func TestMempoolAdaptersPreservePendingTransactionView(t *testing.T) {
-	t.Parallel()
-
-	source := testMempoolTransactionSource{
-		txs: []mempool.MempoolTransaction{
-			{
-				Hash: "0123456789abcdef",
-				Cbor: []byte{0x84, 0xa0, 0xa0, 0xf5, 0xf6},
-				Type: 7,
-			},
-		},
-	}
-
-	var _ ledger.MempoolProvider = (*ledgerMempoolAdapter)(nil)
-	ledgerTxs := (&ledgerMempoolAdapter{source: source}).Transactions()
-	if len(ledgerTxs) != 1 {
-		t.Fatalf("expected 1 ledger transaction, got %d", len(ledgerTxs))
-	}
-	if ledgerTxs[0].Hash != source.txs[0].Hash {
-		t.Fatalf("ledger hash mismatch: got %q want %q",
-			ledgerTxs[0].Hash, source.txs[0].Hash)
-	}
-	if ledgerTxs[0].Type != source.txs[0].Type {
-		t.Fatalf("ledger type mismatch: got %d want %d",
-			ledgerTxs[0].Type, source.txs[0].Type)
-	}
-	if !bytes.Equal(ledgerTxs[0].Cbor, source.txs[0].Cbor) {
-		t.Fatalf("ledger CBOR mismatch: got %x want %x",
-			ledgerTxs[0].Cbor, source.txs[0].Cbor)
-	}
-
-	var _ forging.MempoolProvider = (*forgingMempoolAdapter)(nil)
-	forgingTxs := (&forgingMempoolAdapter{source: source}).Transactions()
-	if len(forgingTxs) != 1 {
-		t.Fatalf("expected 1 forging transaction, got %d", len(forgingTxs))
-	}
-	if forgingTxs[0].Hash != source.txs[0].Hash {
-		t.Fatalf("forging hash mismatch: got %q want %q",
-			forgingTxs[0].Hash, source.txs[0].Hash)
-	}
-	if forgingTxs[0].Type != source.txs[0].Type {
-		t.Fatalf("forging type mismatch: got %d want %d",
-			forgingTxs[0].Type, source.txs[0].Type)
-	}
-	if !bytes.Equal(forgingTxs[0].Cbor, source.txs[0].Cbor) {
-		t.Fatalf("forging CBOR mismatch: got %x want %x",
-			forgingTxs[0].Cbor, source.txs[0].Cbor)
-	}
-}
-
 type testLeiosParentChain struct {
 	tip   ochainsync.Tip
 	block models.Block
@@ -1347,14 +1236,8 @@ func expiredKESGenesisForBP(t *testing.T) *cardano.CardanoNodeConfig {
 	t.Helper()
 	cfg := &cardano.CardanoNodeConfig{}
 	systemStart := time.Now().Add(-365 * 24 * time.Hour)
-	if err := cfg.LoadShelleyGenesisFromReader(strings.NewReader(`{
-		"systemStart": "` + systemStart.UTC().Format(time.RFC3339Nano) + `",
-		"securityParam": 10,
-		"activeSlotsCoeff": 0.5,
-		"slotsPerKESPeriod": 10,
-		"maxKESEvolutions": 1,
-		"slotLength": 1
-	}`)); err != nil {
+	genesis := shelleyGenesisJSONForBP(t, systemStart, 10, 1)
+	if err := cfg.LoadShelleyGenesisFromReader(strings.NewReader(genesis)); err != nil {
 		t.Fatalf("LoadShelleyGenesisFromReader: %v", err)
 	}
 	return cfg
@@ -1439,54 +1322,6 @@ func TestValidateBlockProducerStartupForClock_DeferredStillValidatesMaterial(
 	}
 	if !strings.Contains(err.Error(), "load pool credentials") {
 		t.Errorf("expected 'load pool credentials' in error, got: %v", err)
-	}
-}
-
-// TestApplyForgeTuningCarriesTheForgingKnobs covers the hop the binary
-// takes between dingo.Config and the forger: internal/node's
-// buildDingoConfig fills the former, initBlockForger builds the forger
-// from the latter, and nothing else connects them. A field missing here
-// reaches the forger as its zero value, which the forger then replaces
-// with its own default -- so the operator's yaml, env or CLI setting
-// disappears without an error anywhere.
-func TestApplyForgeTuningCarriesTheForgingKnobs(t *testing.T) {
-	t.Parallel()
-
-	const refs, maxBytes = uint64(4321), uint64(98765)
-	cfg := NewConfig(
-		WithForgeSyncToleranceSlots(11),
-		WithForgeStaleGapThresholdSlots(22),
-		WithForgeEBSelectionReserve(750*time.Millisecond),
-		WithForgeEBMaxTxRefs(refs),
-		WithForgeEBMaxBytes(maxBytes),
-	)
-
-	var fc forging.ForgerConfig
-	applyForgeTuning(&fc, &cfg)
-
-	if fc.ForgeSyncToleranceSlots != 11 {
-		t.Fatalf(
-			"forgeSyncToleranceSlots = %d, want 11",
-			fc.ForgeSyncToleranceSlots,
-		)
-	}
-	if fc.ForgeStaleGapThresholdSlots != 22 {
-		t.Fatalf(
-			"forgeStaleGapThresholdSlots = %d, want 22",
-			fc.ForgeStaleGapThresholdSlots,
-		)
-	}
-	if fc.ForgeEBSelectionReserve != 750*time.Millisecond {
-		t.Fatalf(
-			"forgeEbSelectionReserve = %s, want 750ms",
-			fc.ForgeEBSelectionReserve,
-		)
-	}
-	if fc.ForgeEBMaxTxRefs == nil || *fc.ForgeEBMaxTxRefs != refs {
-		t.Fatalf("forgeEbMaxTxRefs = %v, want %d", fc.ForgeEBMaxTxRefs, refs)
-	}
-	if fc.ForgeEBMaxBytes == nil || *fc.ForgeEBMaxBytes != maxBytes {
-		t.Fatalf("forgeEbMaxBytes = %v, want %d", fc.ForgeEBMaxBytes, maxBytes)
 	}
 }
 

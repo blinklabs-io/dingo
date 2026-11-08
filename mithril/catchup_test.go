@@ -76,6 +76,7 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	t.Run("up-to-date core DB returns without syncing", func(t *testing.T) {
+		t.Parallel()
 		fix := newV2Fixture(t, v2FixtureOptions{immutableFileNumber: 5})
 		dataDir := t.TempDir()
 		// Marker at the artifact's immutable tip → already up to date.
@@ -97,6 +98,7 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 	})
 
 	t.Run("api mode rejects a divergent chain before mutation", func(t *testing.T) {
+		t.Parallel()
 		fixture := newV2Fixture(t, v2FixtureOptions{
 			immutableFileNumber: 0,
 			validImmutable:      true,
@@ -154,6 +156,7 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 	})
 
 	t.Run("legacy reward repair reconciles an existing database in place", func(t *testing.T) {
+		t.Parallel()
 		fixture := newV2Fixture(t, v2FixtureOptions{
 			immutableFileNumber: 0,
 			validImmutable:      true,
@@ -232,6 +235,7 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 	})
 
 	t.Run("legacy reward repair preserves a verified local tail", func(t *testing.T) {
+		t.Parallel()
 		fixture := newV2Fixture(t, v2FixtureOptions{
 			immutableFileNumber: 0,
 			validImmutable:      true,
@@ -331,6 +335,7 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 	})
 
 	t.Run("legacy reward repair refuses to rewind the stable ledger anchor", func(t *testing.T) {
+		t.Parallel()
 		fixture := newV2Fixture(t, v2FixtureOptions{
 			immutableFileNumber: 0,
 			validImmutable:      true,
@@ -400,6 +405,7 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 	})
 
 	t.Run("legacy reward repair resumes its durable artifact pin", func(t *testing.T) {
+		t.Parallel()
 		fixture := newV2Fixture(t, v2FixtureOptions{
 			immutableFileNumber: 0,
 			validImmutable:      true,
@@ -470,6 +476,7 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 	})
 
 	t.Run("legacy reward repair rebuilds api metadata in place", func(t *testing.T) {
+		t.Parallel()
 		fixture := newV2Fixture(t, v2FixtureOptions{
 			immutableFileNumber: 0,
 			validImmutable:      true,
@@ -1032,6 +1039,7 @@ func TestSyncRewardRepairRequiresItsDurableMarkers(t *testing.T) {
 	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	t.Run("complete database has no repair marker", func(t *testing.T) {
+		t.Parallel()
 		dataDir := t.TempDir()
 		seedCompleteDB(t, dataDir, "core", 0, false)
 		_, err := Sync(context.Background(), SyncConfig{
@@ -1047,6 +1055,7 @@ func TestSyncRewardRepairRequiresItsDurableMarkers(t *testing.T) {
 	})
 
 	t.Run("interrupted sync is not an active repair", func(t *testing.T) {
+		t.Parallel()
 		dataDir := t.TempDir()
 		seedCompleteDB(t, dataDir, "core", 0, false)
 		db, err := dbtest.NewDatabase(t, &database.Config{
@@ -1357,6 +1366,7 @@ func TestVerifyCatchupIntersection(t *testing.T) {
 	slot, hash := firstImmutableBlock(t)
 
 	t.Run("matching tip is accepted", func(t *testing.T) {
+		t.Parallel()
 		db := newSyncModeTestDB(t)
 		require.NoError(t, db.BlockCreate(models.Block{
 			Slot:     slot,
@@ -1372,6 +1382,7 @@ func TestVerifyCatchupIntersection(t *testing.T) {
 	})
 
 	t.Run("mismatched tip diverges", func(t *testing.T) {
+		t.Parallel()
 		db := newSyncModeTestDB(t)
 		wrong := bytes.Clone(hash)
 		wrong[0] ^= 0xff
@@ -1436,6 +1447,7 @@ func TestVerifyCatchupIntersectionLocalAhead(t *testing.T) {
 
 	t.Run("ahead chain with no block at or below the artifact tip diverges",
 		func(t *testing.T) {
+			t.Parallel()
 			db := newSyncModeTestDB(t)
 			require.NoError(t, db.BlockCreate(catchupTestBlock(
 				artSlot+5000,
@@ -1451,6 +1463,7 @@ func TestVerifyCatchupIntersectionLocalAhead(t *testing.T) {
 
 	t.Run("ahead chain without the artifact tip block diverges",
 		func(t *testing.T) {
+			t.Parallel()
 			db := newSyncModeTestDB(t)
 			wrong := bytes.Clone(artHash)
 			wrong[0] ^= 0xff
@@ -1466,6 +1479,7 @@ func TestVerifyCatchupIntersectionLocalAhead(t *testing.T) {
 
 	t.Run("ahead chain with artifact tip only on stale fork diverges",
 		func(t *testing.T) {
+			t.Parallel()
 			db := newSyncModeTestDB(t)
 			wrong := bytes.Clone(artHash)
 			wrong[0] ^= 0xff
@@ -1483,6 +1497,7 @@ func TestVerifyCatchupIntersectionLocalAhead(t *testing.T) {
 		})
 
 	t.Run("descendant chain is reported ahead", func(t *testing.T) {
+		t.Parallel()
 		db := newSyncModeTestDB(t)
 		require.NoError(t, db.BlockCreate(atArtifactTip(artHash), nil))
 		require.NoError(t, db.BlockCreate(catchupTestBlock(
@@ -1509,6 +1524,7 @@ func TestVerifyCatchupBeforeImport(t *testing.T) {
 	)
 
 	t.Run("ancestor tip proceeds with the import", func(t *testing.T) {
+		t.Parallel()
 		db := newSyncModeTestDB(t)
 		require.NoError(t, db.BlockCreate(artBlock, nil))
 		upToDate, err := verifyCatchupBeforeImport(
@@ -1524,6 +1540,7 @@ func TestVerifyCatchupBeforeImport(t *testing.T) {
 
 	t.Run("local-ahead marks up to date and records the marker",
 		func(t *testing.T) {
+			t.Parallel()
 			db := newSyncModeTestDB(t)
 			require.NoError(t, db.BlockCreate(artBlock, nil))
 			require.NoError(t, db.BlockCreate(catchupTestBlock(
@@ -1548,6 +1565,7 @@ func TestVerifyCatchupBeforeImport(t *testing.T) {
 	// runs. The marker must not move either — completion records it.
 	t.Run("local-ahead while resuming proceeds without moving the marker",
 		func(t *testing.T) {
+			t.Parallel()
 			db := newSyncModeTestDB(t)
 			require.NoError(t, db.BlockCreate(artBlock, nil))
 			require.NoError(t, db.BlockCreate(catchupTestBlock(
@@ -1571,6 +1589,7 @@ func TestVerifyCatchupBeforeImport(t *testing.T) {
 		})
 
 	t.Run("divergent tip aborts", func(t *testing.T) {
+		t.Parallel()
 		db := newSyncModeTestDB(t)
 		wrong := bytes.Clone(artHash)
 		wrong[0] ^= 0xff

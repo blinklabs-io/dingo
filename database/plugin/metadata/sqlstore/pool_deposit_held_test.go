@@ -57,6 +57,7 @@ func newDepositHeldStore(t *testing.T) *Store {
 		),
 	)
 	require.NoError(t, err)
+	seedMigratedSQLite(t, db)
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
 	store, err := New(Config{
@@ -619,6 +620,7 @@ func TestSQLPoolMetricsNilWhenNoRegistry(t *testing.T) {
 	require.NoError(t, err)
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
+	seedMigratedSQLite(t, db)
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
 	store, err := New(Config{

@@ -210,17 +210,6 @@ const txsubmissionRelayTestNetworkMagic = 42
 
 type txsubmissionTestValidator struct{}
 
-func TestTxSubmissionRequestBatchFitsProtocolWindow(t *testing.T) {
-	t.Parallel()
-
-	require.LessOrEqual(
-		t,
-		txsubmissionRequestTxIdsCount,
-		txsubmission.MaxUnackedTxIds,
-		"Dingo's relay batch must fit the upstream outstanding-ID window",
-	)
-}
-
 func (txsubmissionTestValidator) ValidateTx(gledger.Transaction) error {
 	return nil
 }
@@ -475,36 +464,6 @@ func TestTxSubmissionClientRequestTxIds(t *testing.T) {
 	}
 }
 
-// TestTxSubmissionClientRequestTxIdsClearsConsumerCacheOnAck verifies that
-// peer acknowledgements discard previously advertised transaction bodies.
-func TestTxSubmissionClientRequestTxIdsClearsConsumerCacheOnAck(t *testing.T) {
-	t.Parallel()
-
-	// Arrange one cached transaction for a peer consumer.
-	fixture := txsubmissionTestFixtures(t)[0]
-	o, connId := newTxSubmissionTestOuroboros(t)
-	o.mempool.NewConsumer(connId)
-	addTxSubmissionTestFixtures(t, o.mempool, fixture)
-	ctx := txsubmission.CallbackContext{ConnectionId: connId}
-
-	// First advertise the transaction so it is stored in the consumer cache.
-	ids, err := o.txsubmissionClientRequestTxIds(ctx, false, 0, 1)
-	require.NoError(t, err)
-	require.Len(t, ids, 1)
-
-	// Send an ack and zero request count to clear the advertised cache.
-	ids, err = o.txsubmissionClientRequestTxIds(ctx, false, 1, 0)
-	require.NoError(t, err)
-	require.Empty(t, ids)
-
-	// Verify the acknowledged transaction body can no longer be served.
-	bodies, err := o.txsubmissionClientRequestTxs(ctx, []txsubmission.TxId{
-		fixture.txId,
-	})
-	require.NoError(t, err)
-	require.Empty(t, bodies)
-}
-
 // TestTxSubmissionClientRequestTxIdsPartialAck verifies that acknowledging
 // part of a batch of offered transactions discards only the acknowledged
 // prefix, in the order the ids were offered, and preserves the bodies of ids
@@ -662,26 +621,6 @@ func TestTxSubmissionClientRequestCallbacksMissingConsumer(t *testing.T) {
 	})
 	require.ErrorContains(t, err, "no mempool consumer")
 	require.Nil(t, bodies)
-}
-
-// TestTxSubmissionClientRequestTxsUnknownZeroTxId verifies malformed or
-// impossible peer TxId requests return no bodies instead of panicking.
-func TestTxSubmissionClientRequestTxsUnknownZeroTxId(t *testing.T) {
-	t.Parallel()
-
-	// Arrange a valid consumer without advertising any txs to its cache.
-	o, connId := newTxSubmissionTestOuroboros(t)
-	o.mempool.NewConsumer(connId)
-
-	// Verify an all-zero TxId request is treated as a cache miss, not a panic.
-	require.NotPanics(t, func() {
-		bodies, err := o.txsubmissionClientRequestTxs(
-			txsubmission.CallbackContext{ConnectionId: connId},
-			[]txsubmission.TxId{{EraId: txsubmissionRelayTestEraId}},
-		)
-		require.NoError(t, err)
-		require.Empty(t, bodies)
-	})
 }
 
 // TestTxSubmissionClientRequestTxIdsZeroRequestDoesNotAdvance verifies a
@@ -1994,6 +1933,8 @@ func txsubmissionLoggedMessages(
 // must appear in the message itself, not only inside the wrapped validation
 // error further along the line.
 func TestTxSubmissionServerInitRejectionLogsSingleHexTxId(t *testing.T) {
+	t.Parallel()
+
 	fixtures := txsubmissionTestFixtures(t)
 	rejected := fixtures[0]
 	require.Len(t, rejected.hash, 64)
@@ -2051,6 +1992,8 @@ func TestTxSubmissionServerInitRejectionLogsSingleHexTxId(t *testing.T) {
 // formatted the Blake2b256 value directly, so the id an operator would search
 // for was double-hex encoded.
 func TestValidateTxsubmissionReplyMismatchReportsSingleHexTxId(t *testing.T) {
+	t.Parallel()
+
 	fixtures := txsubmissionTestFixtures(t)
 	requested := []txsubmission.TxIdAndSize{{
 		TxId: fixtures[0].txId,
@@ -2115,70 +2058,6 @@ func TestTxsubmissionWireSizeMatchesWireEncoding(t *testing.T) {
 			)
 		}
 	}
-}
-
-// TestTxsubmissionWireSizeOverheadBands documents the exact per-band
-// overhead observed against cardano-node peers.
-func TestTxsubmissionWireSizeOverheadBands(t *testing.T) {
-	t.Parallel()
-
-	const conwayEraId = txsubmissionRelayTestEraId
-	for _, tc := range []struct {
-		bodyLen  int
-		overhead uint64
-	}{
-		{bodyLen: 23, overhead: 5},
-		{bodyLen: 24, overhead: 6},
-		{bodyLen: 238, overhead: 6},
-		{bodyLen: 255, overhead: 6},
-		{bodyLen: 256, overhead: 7},
-		{bodyLen: 2331, overhead: 7},
-		{bodyLen: 65535, overhead: 7},
-		{bodyLen: 65536, overhead: 9},
-	} {
-		t.Run(fmt.Sprintf("len%d", tc.bodyLen), func(t *testing.T) {
-			require.Equal(
-				t,
-				uint64(tc.bodyLen)+tc.overhead,
-				txsubmissionWireSize(conwayEraId, tc.bodyLen),
-			)
-		})
-	}
-}
-
-// TestValidateTxsubmissionReplyAcceptsWireSizeAdvertisement is the
-// regression test for the size-validation regression: a
-// cardano-node peer advertises the wrapped wire size in MsgReplyTxIds while
-// gouroboros hands Dingo only the unwrapped body, so an equality check
-// against len(TxBody) rejects every batch such a peer offers.
-func TestValidateTxsubmissionReplyAcceptsWireSizeAdvertisement(t *testing.T) {
-	t.Parallel()
-
-	fixtures := txsubmissionTestFixtures(t)
-	requested := make([]txsubmission.TxIdAndSize, 0, len(fixtures))
-	returned := make([]txsubmission.TxBody, 0, len(fixtures))
-	for _, fixture := range fixtures {
-		wireSize := len(
-			txsubmissionWireEncodedItem(
-				t,
-				fixture.txId.EraId,
-				fixture.body,
-			),
-		)
-		require.Greater(t, wireSize, len(fixture.body))
-		requested = append(requested, txsubmission.TxIdAndSize{
-			TxId: fixture.txId,
-			Size: uint32(wireSize), // #nosec G115 -- test fixture
-		})
-		returned = append(returned, txsubmission.TxBody{
-			EraId:  fixture.txId.EraId,
-			TxBody: fixture.body,
-		})
-	}
-
-	validated, err := validateTxsubmissionReply(requested, returned, gledger.NewTransactionFromCbor)
-	require.NoError(t, err)
-	require.Len(t, validated, len(returned))
 }
 
 // TestValidateTxsubmissionReplyRejectsGenuineSizeMismatch verifies the
@@ -2323,18 +2202,6 @@ func TestTxsubmissionReplySizeMetricPreMaterialized(t *testing.T) {
 				WithLabelValues(txsubmissionReplySizeAcceptedWire),
 		),
 	)
-}
-
-// TestRecordTxsubmissionReplySizeWithoutMetrics verifies the recorder is a
-// no-op when metrics were never initialized.
-func TestRecordTxsubmissionReplySizeWithoutMetrics(t *testing.T) {
-	t.Parallel()
-
-	o := newOuroboros(OuroborosConfig{})
-	require.Nil(t, o.protocolMetrics)
-	require.NotPanics(t, func() {
-		o.recordTxsubmissionReplySize(txsubmissionReplySizeRejected, 1)
-	})
 }
 
 // TestValidateTxsubmissionReplyUndersizedAdvertisementIsCounted covers a

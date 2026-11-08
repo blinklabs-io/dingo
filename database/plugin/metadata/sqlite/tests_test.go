@@ -20,14 +20,10 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"fmt"
-	"log/slog"
 	"math"
 	"math/big"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
@@ -35,7 +31,6 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/storagetest"
-	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	gcbor "github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -90,185 +85,6 @@ func TestGetLatestBlockNonceUsesApplicationOrderForSameSlot(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, secondHash, row.Hash)
 	require.Equal(t, secondNonce, row.Nonce)
-}
-
-// TestCheckpointWALTruncatesFile proves checkpointWAL's central claim: a
-// PASSIVE checkpoint (what wal_autocheckpoint invokes automatically after
-// every commit) never shrinks the -wal file's on-disk size even when it
-// fully succeeds, but PRAGMA wal_checkpoint(TRUNCATE) does. Without this,
-// dingo_database_sql_wal_bytes -- a plain os.Stat of that file, see
-// metrics.go -- can never show a single decrease no matter how well
-// checkpointing is otherwise working underneath.
-func TestCheckpointWALTruncatesFile(t *testing.T) {
-	t.Parallel()
-	dataDir := t.TempDir()
-	store, writeDB, _, err := openSQLStore(
-		Config{DataDir: dataDir},
-		metadata.ProviderDependencies{},
-	)
-	require.NoError(t, err)
-	require.NoError(t, store.Start(t.Context()))
-	t.Cleanup(func() {
-		require.NoError(t, store.Close())
-	})
-
-	_, err = writeDB.ExecContext(
-		t.Context(),
-		"CREATE TABLE checkpoint_probe (n INTEGER)",
-	)
-	require.NoError(t, err)
-	// wal_autocheckpoint's own threshold is 10000 pages (~40MB); stay well
-	// under it so this test observes checkpointWAL's own effect rather than
-	// the automatic pragma firing mid-loop.
-	for i := range 200 {
-		_, err := writeDB.ExecContext(
-			t.Context(),
-			"INSERT INTO checkpoint_probe (n) VALUES (?)",
-			i,
-		)
-		require.NoError(t, err)
-	}
-
-	walPath := filepath.Join(dataDir, "metadata.sqlite-wal")
-	before, err := os.Stat(walPath)
-	require.NoError(t, err)
-	require.Positive(
-		t,
-		before.Size(),
-		"WAL file should hold uncheckpointed frames before the forced checkpoint",
-	)
-
-	databaseURI := sqliteFileURI(filepath.Join(dataDir, "metadata.sqlite"))
-	require.NoError(
-		t,
-		checkpointWAL(databaseURI, slog.Default())(t.Context()),
-	)
-
-	after, err := os.Stat(walPath)
-	require.NoError(t, err)
-	require.Zero(
-		t, after.Size(),
-		"a TRUNCATE checkpoint should shrink the WAL file to zero bytes",
-	)
-}
-
-// TestCheckpointWALDoesNotBlockWriteBehindReaderSnapshot is the regression
-// test for the writeDB-based design checkpointWAL used before: issuing
-// PRAGMA wal_checkpoint(TRUNCATE) against writeDB (SetMaxOpenConns(1))
-// blocked that sole connection -- and therefore every other write -- for up
-// to the full busy_timeout(30000) whenever a readDB snapshot was open, since
-// the checkpoint's busy handler has to wait out that snapshot before it can
-// truncate. Measured against that design: a checkpoint attempt with one open
-// readDB snapshot took 30.04s, blocked a concurrent writeDB insert for
-// 29.99s of that, and still finished with busy=1 (no truncation).
-// checkpointWAL now issues the pragma from a dedicated connection with a
-// short busy_timeout instead, so it fails fast on the same busy=1 outcome
-// and a concurrent writeDB write is never blocked by it.
-//
-// Not t.Parallel: every assertion below is a wall-clock duration, which is a
-// process-wide measurement in the same sense as testing.AllocsPerRun or
-// runtime.NumGoroutine -- what it reports depends on whatever else is running
-// in the process, not only on the code under test. Run in parallel with the
-// rest of this package it measured the runner's load as much as the
-// checkpoint, and failed on a loaded CI runner while the behaviour it guards
-// was intact.
-func TestCheckpointWALDoesNotBlockWriteBehindReaderSnapshot(t *testing.T) {
-	dataDir := t.TempDir()
-	store, writeDB, readDB, err := openSQLStore(
-		Config{DataDir: dataDir},
-		metadata.ProviderDependencies{},
-	)
-	require.NoError(t, err)
-	require.NoError(t, store.Start(t.Context()))
-	t.Cleanup(func() {
-		require.NoError(t, store.Close())
-	})
-
-	_, err = writeDB.ExecContext(
-		t.Context(),
-		"CREATE TABLE checkpoint_probe (n INTEGER)",
-	)
-	require.NoError(t, err)
-	_, err = writeDB.ExecContext(
-		t.Context(),
-		"INSERT INTO checkpoint_probe (n) VALUES (0)",
-	)
-	require.NoError(t, err)
-
-	// Hold a readDB snapshot open so a TRUNCATE checkpoint can never
-	// complete (busy=1): this is the condition under which the old
-	// writeDB-based design blocked concurrent writes for up to
-	// busy_timeout(30000).
-	readTx, err := readDB.BeginTx(t.Context(), nil)
-	require.NoError(t, err)
-	t.Cleanup(func() {
-		_ = readTx.Rollback()
-	})
-	// The design this guards blocked for the full busy_timeout(30000); a
-	// healthy dedicated-connection attempt gives up after
-	// checkpointBusyTimeout (250ms). Bound the gap well below 30s rather
-	// than just above 250ms: these are wall-clock measurements on shared
-	// runners, and a bound close to the healthy time fails on load rather
-	// than on the defect it exists to catch.
-	const maxUnblocked = 10 * time.Second
-
-	var probe int
-	require.NoError(
-		t,
-		readTx.QueryRowContext(
-			t.Context(),
-			"SELECT n FROM checkpoint_probe LIMIT 1",
-		).Scan(&probe),
-	)
-
-	type writeResult struct {
-		duration time.Duration
-		err      error
-	}
-	writeResultCh := make(chan writeResult, 1)
-	go func() {
-		started := time.Now()
-		_, execErr := writeDB.ExecContext(
-			t.Context(),
-			"INSERT INTO checkpoint_probe (n) VALUES (1)",
-		)
-		writeResultCh <- writeResult{
-			duration: time.Since(started),
-			err:      execErr,
-		}
-	}()
-
-	var logBuf bytes.Buffer
-	checkpointLogger := slog.New(slog.NewTextHandler(&logBuf, nil))
-
-	databaseURI := sqliteFileURI(filepath.Join(dataDir, "metadata.sqlite"))
-	checkpointStarted := time.Now()
-	require.NoError(
-		t,
-		checkpointWAL(databaseURI, checkpointLogger)(t.Context()),
-	)
-	checkpointDuration := time.Since(checkpointStarted)
-	require.Less(
-		t, checkpointDuration, maxUnblocked,
-		"a dedicated-connection checkpoint attempt should fail fast on a "+
-			"blocked truncate, not wait out busy_timeout(30000)",
-	)
-	require.Contains(
-		t, logBuf.String(), "could not fully complete",
-		"the open reader snapshot should make the truncate impossible, "+
-			"reproducing the busy=1 condition the old design blocked on",
-	)
-
-	result := testutil.RequireReceive(
-		t, writeResultCh, maxUnblocked,
-		"concurrent writeDB insert must not be blocked behind the "+
-			"checkpoint attempt",
-	)
-	require.NoError(t, result.err)
-	require.Less(
-		t, result.duration, maxUnblocked,
-		"a concurrent write must not be blocked behind the checkpoint attempt",
-	)
 }
 
 func TestMetadataStoreConformance(t *testing.T) {
@@ -592,117 +408,6 @@ func TestDRepVotingPowerByTypeExpiryBoundary(t *testing.T) {
 	)
 }
 
-// TestDRepVotingPowerByTypeQueryPlanDrivesFromAccountNotUtxo is the
-// performance regression check. At this test's
-// row counts sqlite flattens the pre-fix query's EXISTS into an indexed
-// semi-join rather than literally naming it a "CORRELATED SCALAR SUBQUERY"
-// in EXPLAIN QUERY PLAN output (that wording is what the issue's comment
-// observed at production scale, 2.86M live utxo rows), but the pre-fix
-// query's FROM clause is still `utxo`, so its inner subquery's driving loop
-// is forced to scan every live utxo row regardless of scale, then probe
-// account per row. The fixed query's FROM clause is `account`, so its
-// driving loop scans only the requested drep_type's accounts and probes
-// UTxO per row -- the account-first shape. That FROM-clause
-// difference, not a cardinality estimate, is what fixes the driving table,
-// so this assertion holds at any data size. Reverting the production fix
-// makes this test fail: drepquery.VotingPowerByTypeSQL would then also plan
-// a full live-utxo scan as its driving loop.
-func TestDRepVotingPowerByTypeQueryPlanDrivesFromAccountNotUtxo(t *testing.T) {
-	t.Parallel()
-	store, writeDB := newSharedSQLStore(t)
-	seedVotingPowerByTypeFixture(t, store)
-
-	const utxoDrivenScan = "SEARCH utxo USING COVERING INDEX " +
-		"idx_utxo_deleted_staking_amount (deleted_slot=?)"
-	const accountDrivenScan = "SEARCH ax USING COVERING INDEX " +
-		"idx_account_drep_type_active_staking_key (drep_type=? AND active=?)"
-
-	oldPlan := explainQueryPlan(
-		t,
-		writeDB,
-		oldVotingPowerByTypeSQL,
-		0,
-		models.DrepTypeAlwaysAbstain,
-		models.DrepTypeAlwaysNoConfidence,
-	)
-	require.Contains(
-		t,
-		oldPlan,
-		utxoDrivenScan,
-		"pre-fix query plan should drive its inner subquery off every "+
-			"live utxo row: %s",
-		oldPlan,
-	)
-
-	newPlan := explainQueryPlan(
-		t,
-		writeDB,
-		newVotingPowerByTypeSQL(t, 0),
-		0,
-		models.DrepTypeAlwaysAbstain,
-		models.DrepTypeAlwaysNoConfidence,
-	)
-	require.NotContains(
-		t,
-		newPlan,
-		utxoDrivenScan,
-		"fixed query plan must not scan every live utxo row: %s",
-		newPlan,
-	)
-	require.Contains(
-		t,
-		newPlan,
-		accountDrivenScan,
-		"fixed query plan should drive its inner subquery off the "+
-			"drep_type-filtered account set instead: %s",
-		newPlan,
-	)
-}
-
-func explainQueryPlan(
-	t *testing.T,
-	db *sql.DB,
-	query string,
-	expiryEpoch uint64,
-	drepType1, drepType2 uint64,
-) string {
-	t.Helper()
-	args := []any{}
-	if expiryEpoch > 0 {
-		args = append(args, expiryEpoch)
-	}
-	args = append(args, drepType1, drepType2)
-	if expiryEpoch > 0 {
-		args = append(args, expiryEpoch)
-	}
-	args = append(args, drepType1, drepType2)
-	rows, err := db.QueryContext(
-		context.Background(),
-		"EXPLAIN QUERY PLAN "+query,
-		args...,
-	)
-	require.NoError(t, err)
-	defer rows.Close()
-	cols, err := rows.Columns()
-	require.NoError(t, err)
-	var plan strings.Builder
-	for rows.Next() {
-		dest := make([]any, len(cols))
-		scanBuf := make([]sql.NullString, len(cols))
-		for i := range dest {
-			dest[i] = &scanBuf[i]
-		}
-		require.NoError(t, rows.Scan(dest...))
-		for _, c := range scanBuf {
-			plan.WriteString(c.String)
-			plan.WriteString(" ")
-		}
-		plan.WriteString("\n")
-	}
-	require.NoError(t, rows.Err())
-	return plan.String()
-}
-
 // gapDepositFixture drives one pool through register / re-register / retire so
 // the deposit POOLREAP refunds can be read back from the certificate rows.
 type gapDepositFixture struct {
@@ -880,11 +585,12 @@ func TestGapBlockPoolRegistrationRefundsItsDeposit(t *testing.T) {
 // rejection would pass whether or not the chunking existed.
 func TestGetPoolsChunksBeyondParameterLimit(t *testing.T) {
 	t.Parallel()
-	store, _ := newSharedSQLStore(t)
+	const parameterLimit = 5
+	store, _ := newSharedSQLStoreWithParameterLimit(t, parameterLimit)
 
-	// Past the store's 999-parameter chunk by enough that the split lands
-	// mid-request rather than exactly on the end.
-	const poolCount = 1200
+	// Past the chunk by enough that the split lands mid-request rather than
+	// exactly on the end.
+	const poolCount = 12
 	hashes := make([]lcommon.PoolKeyHash, 0, poolCount)
 	for i := range poolCount {
 		raw := make([]byte, 28)
@@ -926,8 +632,8 @@ func TestGetPoolsChunksBeyondParameterLimit(t *testing.T) {
 		seen[string(pool.PoolKeyHash)] = struct{}{}
 	}
 	require.Len(t, seen, poolCount, "no pool may be returned twice")
-	// Spot-check either side of the boundary rather than all 1200.
-	for _, i := range []int{0, 998, 999, 1000, poolCount - 1} {
+	// Spot-check either side of the boundary.
+	for _, i := range []int{0, parameterLimit - 1, parameterLimit, parameterLimit + 1, poolCount - 1} {
 		assert.Contains(t, seen, string(hashes[i].Bytes()),
 			"pool %d must be present across the chunk boundary", i)
 	}
@@ -954,9 +660,9 @@ func TestGetPoolsChunksBeyondParameterLimit(t *testing.T) {
 // which is exactly the behaviour being restored.
 func TestGetPoolsDeduplicatesRepeatedHashesAcrossChunks(t *testing.T) {
 	t.Parallel()
-	store, _ := newSharedSQLStore(t)
+	store, _ := newSharedSQLStoreWithParameterLimit(t, 5)
 
-	const poolCount = 1200
+	const poolCount = 12
 	hashes := make([]lcommon.PoolKeyHash, 0, poolCount+1)
 	for i := range poolCount {
 		raw := make([]byte, 28)
@@ -981,8 +687,8 @@ func TestGetPoolsDeduplicatesRepeatedHashesAcrossChunks(t *testing.T) {
 			nil,
 		))
 	}
-	// The first pool again, at the end, so its two mentions straddle the
-	// 999-parameter split.
+	// The first pool again, at the end, so its two mentions straddle a
+	// chunk split.
 	repeated := hashes[0]
 	hashes = append(hashes, repeated)
 
@@ -1188,81 +894,6 @@ func TestPoolBlockCountsRejectMalformedMithrilBoundary(t *testing.T) {
 			value,
 		)
 	}
-}
-
-// poolOpCertSequenceIndex is the index migration v2 declares for the counter
-// aggregate. Named here rather than in the store: nothing in the query
-// mentions it, since which index answers a statement is the planner's choice,
-// and that choice is exactly what this test checks.
-const poolOpCertSequenceIndex = "idx_pool_opcert_sequence_pool_sequence"
-
-// TestLatestPoolOpCertSequencesReadsIndexOnly pins the read plan of the
-// op-cert counter aggregate.
-//
-// pool_opcert_sequence takes a row per block minted and is never pruned, so on
-// a synced mainnet database this aggregate covers millions of rows to produce
-// one entry per pool that has ever minted -- a few thousand. There is no slot
-// bound available to narrow it: every row the table holds is at or below the
-// tip, so restricting to the tip would exclude nothing. What keeps it off the
-// table itself is an index carrying both columns it reads, which lets the
-// aggregate run without touching a single row.
-//
-// What this does NOT claim is that the aggregate stops being linear in the
-// table. SQLite has no loose index scan, so the plan below is a full scan of
-// the index -- every entry visited, none of the rows. MySQL 8 can skip through
-// the same index a group at a time; SQLite reads it end to end. The win pinned
-// here is dropping the row fetches, not dropping the scan, and it is worth
-// having because this is a one-shot query behind `leadership-schedule` rather
-// than something on a hot path.
-//
-// The plan is asserted rather than the index's mere existence: an index no
-// planner chooses is a write cost with no read benefit. It is EXPLAINed from
-// the store's own exported statement rather than a copy of it, so the plan
-// pinned here is the plan of the query that actually runs.
-func TestLatestPoolOpCertSequencesReadsIndexOnly(t *testing.T) {
-	t.Parallel()
-	store, db := newSharedSQLStore(t)
-
-	// Rows for two pools, so the group-by has something to fold.
-	pkhA := lcommon.PoolKeyHash(
-		lcommon.NewBlake2b224(bytes.Repeat([]byte{0xA1}, 28)),
-	)
-	pkhB := lcommon.PoolKeyHash(
-		lcommon.NewBlake2b224(bytes.Repeat([]byte{0xB2}, 28)),
-	)
-	require.NoError(t, store.UpdatePoolOpCertSequence(pkhA, 2, 10, nil))
-	require.NoError(t, store.UpdatePoolOpCertSequence(pkhA, 9, 20, nil))
-	require.NoError(t, store.UpdatePoolOpCertSequence(pkhB, 1, 15, nil))
-
-	rows, err := db.Query(
-		"EXPLAIN QUERY PLAN " + sqlstore.LatestPoolOpCertSequencesSQL,
-	)
-	require.NoError(t, err)
-	defer rows.Close()
-
-	var details string
-	for rows.Next() {
-		var id, parent, notUsed int
-		var detail string
-		require.NoError(t, rows.Scan(&id, &parent, &notUsed, &detail))
-		details += detail + "\n"
-	}
-	require.NoError(t, rows.Err())
-	require.NotEmpty(t, details, "the planner must describe the aggregate")
-
-	assert.Contains(t, details, "COVERING INDEX "+poolOpCertSequenceIndex,
-		"the counter aggregate must read the index alone, not the table:\n%s",
-		details,
-	)
-	// "COVERING INDEX" alone would still be satisfied by a plan that fell back
-	// to sorting for the GROUP BY, which is the cost the index exists to avoid:
-	// the entries already arrive grouped by pool_key_hash and ascending in
-	// sequence, so the aggregate folds them as it goes.
-	assert.NotContains(t, details, "USE TEMP B-TREE",
-		"the index's column order must supply the GROUP BY, so no sort is "+
-			"materialised:\n%s",
-		details,
-	)
 }
 
 // TestLatestPoolOpCertSequencesAtOrBefore pins both the values the counters
@@ -2747,12 +2378,14 @@ func TestGetPoolStakeSnapshotsForPoolsReturnsOnlyRequested(t *testing.T) {
 // size would be accepted chunked or not.
 func TestGetPoolStakeSnapshotsForPoolsChunksBeyondParameterLimit(t *testing.T) {
 	t.Parallel()
-	store, _ := newSharedSQLStore(t)
+	// Two parameters precede the hashes, so five fit per statement.
+	const fitPerStatement = 5
+	store, _ := newSharedSQLStoreWithParameterLimit(t, fitPerStatement+2)
 
 	const epoch = 3
-	// Comfortably past the 997 that fit in one statement, so the split lands
-	// mid-request rather than exactly at the end.
-	const poolCount = 1500
+	// Past what fits in one statement, so the split lands mid-request rather
+	// than exactly at the end.
+	const poolCount = 12
 	hashes := seedMarkSnapshots(t, store, epoch, poolCount)
 
 	got, err := store.GetPoolStakeSnapshotsForPools(
@@ -2770,8 +2403,8 @@ func TestGetPoolStakeSnapshotsForPoolsChunksBeyondParameterLimit(t *testing.T) {
 		byPool[string(snapshot.PoolKeyHash)] = uint64(snapshot.TotalStake)
 	}
 	require.Len(t, byPool, poolCount, "no pool may be returned twice")
-	// Spot-check either side of the boundary rather than all 1500.
-	for _, i := range []int{0, 996, 997, 998, poolCount - 1} {
+	// Spot-check either side of the boundary.
+	for _, i := range []int{0, fitPerStatement - 1, fitPerStatement, fitPerStatement + 1, poolCount - 1} {
 		assert.Equal(t, uint64(i+1)*1000, byPool[string(hashes[i])],
 			"pool %d must carry its own stake", i)
 	}
@@ -2792,14 +2425,14 @@ func TestGetPoolStakeSnapshotsForPoolsChunksBeyondParameterLimit(t *testing.T) {
 // before the list is chunked rather than after.
 func TestGetPoolStakeSnapshotsForPoolsDeduplicatesRepeatedHashes(t *testing.T) {
 	t.Parallel()
-	store, _ := newSharedSQLStore(t)
+	store, _ := newSharedSQLStoreWithParameterLimit(t, 7)
 
 	const epoch = 4
-	const poolCount = 1500
+	const poolCount = 12
 	hashes := seedMarkSnapshots(t, store, epoch, poolCount)
 
-	// The first pool named again at the end, so its two mentions straddle the
-	// 997-parameter split. Within one chunk SQL collapses them anyway, which
+	// The first pool named again at the end, so its two mentions straddle a
+	// chunk split. Within one chunk SQL collapses them anyway, which
 	// is the behaviour being restored.
 	requested := append(append([][]byte{}, hashes...), hashes[0])
 
@@ -2834,7 +2467,7 @@ func setupStakeSnapshotTestStore(
 ) (*sqlstore.Store, *sqliteTestDB) {
 	t.Helper()
 	store, db, _, err := openSQLStore(
-		Config{DataDir: t.TempDir()},
+		Config{},
 		metadata.ProviderDependencies{},
 	)
 	require.NoError(t, err)

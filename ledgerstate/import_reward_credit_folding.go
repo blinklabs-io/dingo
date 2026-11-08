@@ -19,6 +19,9 @@ import (
 	"fmt"
 )
 
+// defaultRewardCreditFoldBatchSize bounds the credits folded per transaction.
+const defaultRewardCreditFoldBatchSize = 2000
+
 // foldImportedRewardCredits covers credentials absent from the imported account
 // set as well: their old credits have already been withdrawn or forfeited. The
 // cert-state checkpoint must follow this drain so interruption retries it.
@@ -31,7 +34,10 @@ func foldImportedRewardCredits(
 	if err != nil {
 		return fmt.Errorf("reading covered reward rounds: %w", err)
 	}
-	const batchSize = 2000
+	batchSize := cfg.rewardCreditFoldBatchSize
+	if batchSize <= 0 {
+		batchSize = defaultRewardCreditFoldBatchSize
+	}
 	for _, round := range rounds {
 		if round.BoundarySlot > slot {
 			continue

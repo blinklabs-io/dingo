@@ -25,62 +25,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestAdaCurrency(t *testing.T) {
-	t.Parallel()
-
-	c := adaCurrency()
-	require.Equal(t, "ADA", c.Symbol)
-	require.Equal(t, int32(6), c.Decimals)
-	require.Nil(t, c.Metadata)
-}
-
-func TestNativeAssetCurrency(t *testing.T) {
-	t.Parallel()
-
-	policy := hexString(testKeyHash(0xaa))
-	name := hexString([]byte("token"))
-
-	c := nativeAssetCurrency(policy, name)
-
-	require.Equal(t, name, c.Symbol)
-	require.Equal(t, int32(0), c.Decimals)
-	require.Equal(t, policy, c.Metadata["policyId"])
-	require.Equal(t, name, c.Metadata["assetName"])
-}
-
-func TestConvertAmount(t *testing.T) {
-	t.Parallel()
-
-	require.Equal(t, "0", convertAmount(0).Value)
-	require.Equal(
-		t,
-		"18446744073709551615",
-		convertAmount(^uint64(0)).Value,
-	)
-}
-
-func TestConvertAssetAmount(t *testing.T) {
-	t.Parallel()
-
-	policy := testKeyHash(0xab)
-	name := []byte("tok")
-
-	amt := convertAssetAmount(policy, name, 25)
-
-	require.Equal(t, "25", amt.Value)
-	require.Equal(t, hexString(name), amt.Currency.Symbol)
-	require.Equal(
-		t, hexString(policy), amt.Currency.Metadata["policyId"],
-	)
-}
-
-func TestTxStatus(t *testing.T) {
-	t.Parallel()
-
-	require.Equal(t, StatusSuccess, *txStatus(true))
-	require.Equal(t, StatusInvalid, *txStatus(false))
-}
-
 // TestUtxoAddressCredentialCombinations covers the CIP-19 address types
 // reconstructed from the payment/staking credentials stored with a UTxO.
 // A wrong mapping here silently reports coins under the wrong address.

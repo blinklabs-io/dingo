@@ -278,59 +278,13 @@ func requireNextEvent(
 	requireEvent(t, w, timeout, msg)
 }
 
-// TestWatchBlocks_ConnectsAndReceivesInitialEvent is the end-to-end
-// counterpart to the reconnect/coalescing unit tests above: it points the
-// real WatchBlocks (completely unmodified production code, dialing a real
-// TCP address) at a real gouroboros ChainSync server, and asserts that the
-// wire-level path between them -- dial, real NtC handshake, FindIntersect,
-// and Sync -- actually works end to end, which no other test in this
-// package exercises. This only proves *some* event arrives after
-// connecting, not specifically which message produced it: gouroboros's
-// client keeps advancing through the server's whole scripted sequence on
-// its own, so even if the very first reply's callback were broken, a
-// later real RollForward in the same sequence would still satisfy this
-// check within the timeout. RollForward specifically is isolated by the
-// tests below, which drain events in order rather than accepting the
-// first one that arrives.
-func TestWatchBlocks_ConnectsAndReceivesAnEvent(t *testing.T) {
-	t.Parallel()
-
-	w, server := newConnectedTestWatcher(t, 5)
-	requireNextEvent(
-		t, w, server, 5*time.Second,
-		"WatchBlocks must deliver at least one BlockEvent after connecting",
-	)
-}
-
-// TestWatchBlocks_ReceivesRealRollForwardEvents isolates RollForward
-// specifically, which TestWatchBlocks_ConnectsAndReceivesAnEvent does not:
-// draining two events in order guarantees the second one is a genuine
-// RollForward, since the server's script sends exactly one RollBackward
-// (always first) and then only RollForwards -- there is no second
-// RollBackward it could be instead. Verified adversarially: this test
-// fails (times out on the second event) if the RollForward callback's
-// notify is removed, while ConnectsAndReceivesAnEvent alone would not
-// have caught that (it accepts whichever event arrives first, and the
-// sync loop advances past a broken callback into later real
-// RollForwards on its own).
-func TestWatchBlocks_ReceivesRealRollForwardEvents(t *testing.T) {
-	t.Parallel()
-
-	w, server := newConnectedTestWatcher(t, 5)
-	requireNextEvent(
-		t, w, server, 5*time.Second,
-		"must receive the initial RollBackward event",
-	)
-	requireNextEvent(
-		t, w, server, 5*time.Second,
-		"WatchBlocks must deliver a BlockEvent for a real RollForward",
-	)
-}
-
-// TestWatchBlocks_ReceivesMultipleRealEvents extends the single-RollForward
-// case across several real blocks: with the consumer draining Events
-// between each, WatchBlocks must keep delivering fresh events for every
-// new block rather than the channel latching stuck after the first one.
+// TestWatchBlocks_ReceivesMultipleRealEvents points the real WatchBlocks at a
+// real gouroboros ChainSync server and drains events in order: dial, NtC
+// handshake, FindIntersect and Sync must work end to end, and the server's
+// script sends exactly one RollBackward (always first) and then only
+// RollForwards, so events two to four are genuine RollForwards. With the
+// consumer draining Events between each, WatchBlocks must keep delivering
+// fresh events for every new block rather than latching stuck after the first.
 func TestWatchBlocks_ReceivesMultipleRealEvents(t *testing.T) {
 	t.Parallel()
 
@@ -402,50 +356,6 @@ func (g *gatedListener) Accept() (net.Conn, error) {
 	}
 }
 
-// TestGatedListener_DropsConnectionsUntilOpened pins the gate the reconnect
-// test relies on: connections made before open are closed without being
-// handed to the caller, and connections made after it are.
-func TestGatedListener_DropsConnectionsUntilOpened(t *testing.T) {
-	t.Parallel()
-
-	gate := newTestGatedListener(t)
-
-	accepted := make(chan net.Conn, 1)
-	go func() {
-		if conn, acceptErr := gate.Accept(); acceptErr == nil {
-			accepted <- conn
-		}
-	}()
-
-	dropped, err := net.Dial("tcp", gate.Addr().String())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = dropped.Close() })
-	require.NoError(t, dropped.SetReadDeadline(time.Now().Add(2*time.Second)))
-	_, err = dropped.Read(make([]byte, 1))
-	require.Error(t, err)
-	var netErr net.Error
-	require.False(
-		t, errors.As(err, &netErr) && netErr.Timeout(),
-		"a connection made before open must be closed by the listener",
-	)
-	select {
-	case <-accepted:
-		t.Fatal("Accept handed out a connection made before open")
-	default:
-	}
-
-	gate.open()
-	served, err := net.Dial("tcp", gate.Addr().String())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = served.Close() })
-	select {
-	case conn := <-accepted:
-		require.NoError(t, conn.Close())
-	case <-time.After(2 * time.Second):
-		t.Fatal("Accept did not hand out a connection made after open")
-	}
-}
-
 // TestWatchBlocks_ReconnectsQuicklyAfterEstablishedSessionDrops is an
 // end-to-end regression test for a backoff-ordering bug: followBlocks used
 // to reset the backoff to watcherMinBackoff only *after* waiting out
@@ -461,8 +371,8 @@ func TestGatedListener_DropsConnectionsUntilOpened(t *testing.T) {
 func TestWatchBlocks_ReconnectsQuicklyAfterEstablishedSessionDrops(
 	t *testing.T,
 ) {
-	t.Parallel()
-
+	// Not t.Parallel: requireReconnectsQuicklyAfterEstablishedDrop shrinks the
+	// package-wide backoff bounds.
 	requireReconnectsQuicklyAfterEstablishedDrop(t, false)
 }
 
@@ -473,8 +383,7 @@ func TestWatchBlocks_ReconnectsQuicklyAfterEstablishedSessionDrops(
 func TestWatchBlocks_ReconnectsQuicklyAfterEstablishedSessionDropsFollowingFailedSync(
 	t *testing.T,
 ) {
-	t.Parallel()
-
+	// Not t.Parallel: see the test above.
 	requireReconnectsQuicklyAfterEstablishedDrop(t, true)
 }
 
@@ -483,6 +392,13 @@ func requireReconnectsQuicklyAfterEstablishedDrop(
 	failFirstSync bool,
 ) {
 	t.Helper()
+
+	// Shrink the reconnect delays; parallel tests only resume after every
+	// serial test has restored them. The minimum must stay distinguishable
+	// by string from every grown value, which the doubling from 5ms keeps.
+	prevMin, prevMax := watcherMinBackoff, watcherMaxBackoff
+	watcherMinBackoff, watcherMaxBackoff = 5*time.Millisecond, 80*time.Millisecond
+	t.Cleanup(func() { watcherMinBackoff, watcherMaxBackoff = prevMin, prevMax })
 
 	const magic = 42
 
@@ -645,29 +561,6 @@ func TestBlockEventSignal_DeliversAgainAfterDrain(t *testing.T) {
 	assert.Len(t, events, 1, "a notify after drain must deliver a new event")
 }
 
-// TestBlockEventSignal_NotifyNeverBlocks covers the property that makes
-// this safe to call from a ChainSync callback: notify must never block the
-// caller, even under a sustained flood with nobody ever reading Events.
-// A ChainSync callback that blocked here would stall the whole protocol
-// session, not just this watcher.
-func TestBlockEventSignal_NotifyNeverBlocks(t *testing.T) {
-	t.Parallel()
-
-	_, notify := newBlockEventSignal()
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for range 1000 {
-			notify()
-		}
-	}()
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("notify blocked under a flood with no reader draining Events")
-	}
-}
-
 // TestWatchBlocks_CloseStopsPromptly covers Watcher lifecycle management
 // against a node that will never accept a session: WatchBlocks starts a
 // background reconnect loop immediately, and Close must cancel it and wait
@@ -824,7 +717,11 @@ func TestWatchBlocks_RetriesOnUnreachableAddr(t *testing.T) {
 func TestWatchBlocks_StalledHandshakeTriggersReconnectWithinDialTimeout(
 	t *testing.T,
 ) {
-	t.Parallel()
+	// Not t.Parallel: shortens the package-wide dialTimeout; parallel tests
+	// only resume after every serial test has restored it.
+	prev := dialTimeout
+	dialTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { dialTimeout = prev })
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)

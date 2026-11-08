@@ -71,7 +71,7 @@ func newLedgerStateForNetworkNamed(
 ) *LedgerState {
 	t.Helper()
 	cfg := &cardano.CardanoNodeConfig{}
-	require.NoError(t, cfg.LoadShelleyGenesisFromReader(
+	require.NoError(t, completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(
 		strings.NewReader(shelleyGenesisJSON(networkId, magic)),
 	))
 	return &LedgerState{
@@ -407,7 +407,8 @@ func TestLedgerStateIsMainnet_FailClosedWhenGenesisMissing(t *testing.T) {
 func TestLedgerStateIsMainnet_FailClosedOnUnknownNetworkId(t *testing.T) {
 	t.Parallel()
 
-	ls := newLedgerStateForNetwork(t, "Bogus", 42)
+	ls := newLedgerStateForNetwork(t, "Testnet", 42)
+	ls.config.CardanoNodeConfig.ShelleyGenesis().NetworkId = "Bogus"
 	_, err := ls.isMainnet()
 	require.Error(t, err)
 }

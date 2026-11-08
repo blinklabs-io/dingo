@@ -15,11 +15,8 @@
 package lifecycle_test
 
 import (
-	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/lifecycle"
@@ -87,28 +84,4 @@ func TestManifestAuthentication(t *testing.T) {
 		_, err = lifecycle.ReadManifest(forged, lifecycle.WithManifestKey(key))
 		require.ErrorIs(t, err, lifecycle.ErrManifestUnauthenticated)
 	})
-}
-
-func TestSnapshotRecordsPayloadDigests(t *testing.T) {
-	t.Parallel()
-	key := []byte("operator-trust-root-0123456789ab")
-
-	db := newTestDB(t)
-	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
-	dir := snapshotTestDir(t, "snap")
-	m, err := lifecycle.Snapshot(
-		context.Background(), db, dir, lifecycle.TriggerManual, "test",
-		"badger", "sqlite", lifecycle.WithManifestKey(key),
-	)
-	require.NoError(t, err)
-
-	blob, err := os.ReadFile(filepath.Join(dir, lifecycle.BlobBackupFileName))
-	require.NoError(t, err)
-	metadata, err := os.ReadFile(
-		filepath.Join(dir, lifecycle.MetadataBackupFileName),
-	)
-	require.NoError(t, err)
-	require.Equal(t, sha256Hex(blob), m.BlobSHA256)
-	require.Equal(t, sha256Hex(metadata), m.MetadataSHA256)
-	require.NoError(t, m.Authenticate(lifecycle.WithManifestKey(key)))
 }

@@ -29,13 +29,14 @@ import (
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/database/plugin/blob/badger"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/plugin"
 	"github.com/stretchr/testify/require"
 )
 
 // restoreInterruptHelperEnv, when set in the environment, makes
-// TestRestoreInterruptedByProcessKillLeavesTargetUntouched act as a helper
+// TestRestoreRetryReclaimsKilledAttemptWork act as a helper
 // child process instead of a normal test: it calls lifecycle.Restore for
 // real and blocks until killed, rather than running the assertions below.
 // This is the standard Go re-exec pattern for testing a real OS signal
@@ -43,109 +44,6 @@ import (
 // already-compiled test binary (os.Args[0]) filtered to just this one test
 // via -test.run, rather than needing to build a separate dingo binary.
 const restoreInterruptHelperEnv = "DINGO_LIFECYCLE_RESTORE_INTERRUPT_HELPER"
-
-// TestRestoreInterruptedByProcessKillLeavesTargetUntouched guards against
-// a real correctness gap: the offline restore path used to
-// restore directly into the final target data directory, with cleanup
-// depending on RestoreValidated's own deferred os.RemoveAll running --
-// which a killed process (SIGKILL, or any termination path the Go runtime
-// does not run deferred cleanup for, including the offline CLI's default
-// signal handling before this fix) skips entirely. A large database
-// interrupted mid-restore could therefore leave the configured data
-// directory half-restored and unusable.
-//
-// This test exercises a real OS-level SIGKILL against a real child
-// process running lifecycle.Restore, not merely an in-process context
-// cancellation (which would still run every Go defer normally and so
-// would not actually exercise the failure mode this guards against): a
-// killed process must never observe a defer, by definition, so only an
-// actual process kill proves targetDataDir survives untouched because of
-// the staging-directory-plus-atomic-rename design itself, not because
-// some cleanup happened to still run.
-//
-// The child is proven to be genuinely mid-restore (not just "started, at
-// some indeterminate point") without any sleep/size-based timing guess:
-// the snapshot's metadata backup file is replaced with a FIFO before the
-// child starts. A read-side open of a FIFO cannot proceed until this test
-// opens the write end, and the write-side open blocks until it does, so each
-// open is a real, unconditional synchronization point. The child opens the
-// file twice: first to check it against the manifest digest, which this test
-// satisfies by writing the original bytes, then in RestoreFrom's raw copy.
-// Once the second open returns, the child is provably inside RestoreFrom,
-// blocked reading the (still empty) pipe, and killing it there is
-// deterministic rather than a race against however fast a real file copy
-// happens to be on whatever machine runs this test. Skipped on Windows,
-// which has no POSIX FIFO equivalent this test can use the same way.
-func TestRestoreInterruptedByProcessKillLeavesTargetUntouched(t *testing.T) {
-	t.Parallel()
-
-	if os.Getenv(restoreInterruptHelperEnv) != "" {
-		runRestoreInterruptHelper()
-		return
-	}
-	if runtime.GOOS == "windows" {
-		t.Skip("FIFO-based synchronization is POSIX-only")
-	}
-
-	db := newTestDB(t)
-	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
-
-	snapshotDir := snapshotTestDir(t, "snap")
-	_, err := lifecycle.Snapshot(
-		context.Background(), db, snapshotDir,
-		lifecycle.TriggerManual, "test", "badger", "sqlite",
-		lifecycle.WithManifestKey(testTrustKey),
-	)
-	require.NoError(t, err)
-
-	// Replace the real metadata backup file with a FIFO: the child's
-	// read-side opens of backupPath are then the only things that can
-	// unblock this test's own write-side opens below.
-	backupPath := filepath.Join(snapshotDir, lifecycle.MetadataBackupFileName)
-	backup, err := os.ReadFile(backupPath)
-	require.NoError(t, err)
-	require.NoError(t, os.Remove(backupPath))
-	require.NoError(t, syscall.Mkfifo(backupPath, 0o600))
-
-	targetDir := filepath.Join(t.TempDir(), "restored")
-
-	require.NotEmpty(t, os.Args)
-	cmd := exec.Command( //nolint:gosec
-		os.Args[0],
-		"-test.run=^TestRestoreInterruptedByProcessKillLeavesTargetUntouched$",
-	)
-	cmd.Env = append(
-		os.Environ(),
-		restoreInterruptHelperEnv+"=1",
-		"DINGO_TEST_RESTORE_SNAPSHOT_DIR="+snapshotDir,
-		"DINGO_TEST_RESTORE_TARGET_DIR="+targetDir,
-	)
-	require.NoError(t, cmd.Start())
-	t.Cleanup(func() { _ = cmd.Process.Kill() })
-
-	var writer *os.File
-	testutil.WaitForCondition(t, func() bool {
-		var openErr error
-		writer, openErr = os.OpenFile(backupPath, os.O_WRONLY|syscall.O_NONBLOCK, 0)
-		return openErr == nil
-	}, 5*time.Second, "child never reached payload copying")
-	// Keep the stream open after supplying a prefix so the child cannot
-	// finish copying and authenticating the payload before the kill.
-	_, err = writer.Write(backup[:min(len(backup), 1024)])
-	require.NoError(t, err)
-
-	require.NoError(t, cmd.Process.Kill())
-	_ = cmd.Wait() // expected to report a kill signal; not asserted on
-	_ = writer.Close()
-
-	_, statErr := os.Stat(targetDir)
-	require.True(
-		t, os.IsNotExist(statErr),
-		"target data directory must not exist after the restore process "+
-			"was killed mid-restore, got stat error: %v",
-		statErr,
-	)
-}
 
 // runRestoreInterruptHelper is the child-process body described above. It
 // is not itself a real test: it calls lifecycle.Restore for real against
@@ -238,6 +136,12 @@ func TestRestoreRetryReclaimsKilledAttemptWork(t *testing.T) {
 	_ = cmd.Wait()
 	_ = writer.Close()
 
+	_, statErr := os.Stat(targetDir)
+	require.True(
+		t, os.IsNotExist(statErr),
+		"target data directory must not exist after the restore process "+
+			"was killed mid-restore, got stat error: %v", statErr,
+	)
 	entries, err := os.ReadDir(filepath.Dir(targetDir))
 	require.NoError(t, err)
 	require.NotEmpty(t, entries, "killed attempt left no work directory")
@@ -246,7 +150,7 @@ func TestRestoreRetryReclaimsKilledAttemptWork(t *testing.T) {
 	require.NoError(t, os.WriteFile(backupPath, backup, 0o600))
 	host := plugin.NewHost()
 	require.NoError(t, badger.RegisterProvider(host))
-	require.NoError(t, sqlite.RegisterProvider(host))
+	require.NoError(t, dbtest.RegisterSQLiteProvider(host))
 	_, err = lifecycle.Restore(
 		context.Background(),
 		host,

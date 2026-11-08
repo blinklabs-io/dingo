@@ -31,8 +31,16 @@ func TestSQLiteVersionOneSchemaIsDeterministic(t *testing.T) {
 	t.Parallel()
 	firstDB, err := migratedSQLiteV1(t)
 	require.NoError(t, err)
-	secondDB, err := migratedSQLiteV1(t)
+	// The second schema comes from the version-by-version upgrade chain every
+	// other test starts from, so this also pins that upgrading release by
+	// release ends in the same schema as migrating from scratch.
+	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
+	secondPath := filepath.Join(t.TempDir(), "metadata.sqlite")
+	migrations.SeedMigratedPrefix(t, secondPath, len(registry))
+	secondDB, err := sql.Open("sqlite", "file:"+secondPath+"?"+testDBPragmas)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, secondDB.Close()) })
 
 	first, err := normalizedSQLiteSchema(firstDB)
 	require.NoError(t, err)

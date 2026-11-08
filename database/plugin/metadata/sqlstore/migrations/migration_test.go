@@ -234,7 +234,7 @@ func TestReleasedMigrationChecksumsAreStable(t *testing.T) {
 		t.Run(dialect, func(t *testing.T) {
 			t.Parallel()
 
-			registry, err := registryForDialect(dialect)
+			registry, err := cachedRegistryForDialect(dialect)
 			require.NoError(t, err)
 			pinned := releasedMigrationChecksums[dialect]
 			require.NotEmpty(t, pinned, "no pinned checksums for %s", dialect)

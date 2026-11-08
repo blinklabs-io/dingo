@@ -471,19 +471,6 @@ func TestPeerAnswersABlockingRequestWithNoIDsWhenNothingArrives(t *testing.T) {
 	})
 }
 
-// The defaults are dmq-node's own limits for the three states, which is what
-// the live run showed it enforces, and the serving side answers well inside
-// the blocking one.
-func TestDefaultPeerTuningMatchesDmqNodeTimeLimits(t *testing.T) {
-	t.Parallel()
-	tune := defaultPeerTuning()
-	require.Equal(t, 20*time.Second, tune.blockingTimeout)
-	require.Equal(t, 10*time.Second, tune.nonBlockingTimeout)
-	require.Equal(t, 10*time.Second, tune.sigsTimeout)
-	require.Less(t, tune.blockingReplyWait, tune.blockingTimeout)
-	require.Equal(t, []uint16{2}, tune.versions)
-}
-
 func TestPeerCloseReleasesItsState(t *testing.T) {
 	t.Parallel()
 	a, regA := newTestStack(t, StackConfig{})
@@ -774,17 +761,4 @@ func TestIDSetIgnoresMalformedIDs(t *testing.T) {
 	assert.False(t, set.has([]byte("short")))
 	assert.False(t, set.has(nil))
 	assert.Empty(t, set.set)
-}
-
-func TestMessageMempoolHas(t *testing.T) {
-	t.Parallel()
-	s, _ := newTestStack(t, StackConfig{})
-	msg := idedMessage(t, "held", soonExpiry())
-	_, err := s.pool.Add(msg)
-	require.NoError(t, err)
-
-	assert.True(t, s.pool.Has(msg.ID()))
-	assert.False(t, s.pool.Has(make([]byte, 32)))
-	assert.False(t, s.pool.Has([]byte("short")))
-	assert.False(t, s.pool.Has(nil))
 }

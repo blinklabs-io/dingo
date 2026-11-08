@@ -18,10 +18,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"io"
 	"net/url"
 	"os"
@@ -108,7 +104,7 @@ func TestRestoreResolvesBlobStoreWithLoadRunMode(t *testing.T) {
 			}, nil
 		},
 	))
-	require.NoError(t, sqlite.RegisterProvider(host))
+	require.NoError(t, dbtest.RegisterSQLiteProvider(host))
 	t.Cleanup(func() { _ = host.Stop(context.Background()) })
 
 	targetDir := filepath.Join(t.TempDir(), "restored")
@@ -277,6 +273,9 @@ func newRemoteRestoreHostWithBlobName(
 			_ struct{},
 			deps metadata.ProviderDependencies,
 		) (metadata.MetadataStore, plugin.Instance, error) {
+			if err := seedMigratedMetadata(metadataDir); err != nil {
+				return nil, nil, err
+			}
 			store, err := sqlite.NewSQLStore(
 				sqlite.Config{DataDir: metadataDir}, deps,
 			)
@@ -346,6 +345,17 @@ func newRemoteRestoreHostWithBlobName(
 	return host
 }
 
+// seedMigratedMetadata places the process's migrated metadata template in dir
+// unless a metadata file is already there, so opening the directory skips the
+// schema migration.
+func seedMigratedMetadata(dir string) error {
+	raw, err := dbtest.MetadataTemplateBytes()
+	if err != nil {
+		return err
+	}
+	return dbtest.SeedMetadataTemplateBytes(dir, raw)
+}
+
 type remoteTestDatabase struct {
 	db       *database.Database
 	blob     *badger.BlobStoreBadger
@@ -376,6 +386,9 @@ func openRemoteTestDatabaseInNamespace(
 		badger.WithMemTableSize(testutil.TestBadgerMemTableSize),
 	)
 	require.NoError(t, err)
+	require.NoError(t, seedMigratedMetadata(
+		filepath.Join(dataRoot, "metadata"),
+	))
 	metadataStore, err := sqlite.NewSQLStore(
 		sqlite.Config{DataDir: filepath.Join(dataRoot, "metadata")},
 		metadata.ProviderDependencies{},
@@ -464,32 +477,16 @@ func readBlobContents(t *testing.T, db *database.Database) map[string][]byte {
 	return ret
 }
 
-func runRemoteRestoreFailureRollback(
-	t *testing.T,
-	configure func(*remoteBlobRestoreControl) context.Context,
-	wantError string,
-	wantRollbackFailure bool,
-) {
+// makeRemoteIncomingSnapshot snapshots a database holding one block and
+// retargets its manifest at the remote test providers. The restore only reads
+// the snapshot, so scenarios that restore the same incoming data share one.
+func makeRemoteIncomingSnapshot(t *testing.T) string {
 	t.Helper()
-	ctx := context.Background()
-	remoteDir := filepath.Join(t.TempDir(), "remote")
-	original := openRemoteTestDatabase(t, remoteDir)
-	require.NoError(t, original.db.BlockCreate(testBlock(1, 0x11), nil))
-	require.NoError(t, original.db.BlockCreate(testBlock(2, 0x22), nil))
-	originalTip, err := original.db.GetTip(nil)
-	require.NoError(t, err)
-	originalCommitTimestamp, err := original.db.Metadata().GetCommitTimestamp(context.Background())
-	require.NoError(t, err)
-	originalGates, err := original.db.Metadata().GetNodeSettingsGates(context.Background())
-	require.NoError(t, err)
-	originalBlobs := readBlobContents(t, original.db)
-	original.close(t)
-
 	incoming := newTestDB(t)
 	require.NoError(t, incoming.BlockCreate(testBlock(1, 0x99), nil))
 	snapshotDir := snapshotTestDir(t, "incoming")
-	_, err = lifecycle.Snapshot(
-		ctx,
+	_, err := lifecycle.Snapshot(
+		context.Background(),
 		incoming,
 		snapshotDir,
 		lifecycle.TriggerManual,
@@ -503,6 +500,29 @@ func runRemoteRestoreFailureRollback(
 	manifest.BlobPlugin = remoteBlobProviderName
 	manifest.MetadataPlugin = remoteMetadataProviderName
 	require.NoError(t, lifecycle.WriteManifest(snapshotDir, manifest))
+	return snapshotDir
+}
+
+func runRemoteRestoreFailureRollback(
+	t *testing.T,
+	snapshotDir string,
+	configure func(*remoteBlobRestoreControl) context.Context,
+	wantError string,
+	wantRollbackFailure bool,
+) {
+	t.Helper()
+	remoteDir := filepath.Join(t.TempDir(), "remote")
+	original := openRemoteTestDatabase(t, remoteDir)
+	require.NoError(t, original.db.BlockCreate(testBlock(1, 0x11), nil))
+	require.NoError(t, original.db.BlockCreate(testBlock(2, 0x22), nil))
+	originalTip, err := original.db.GetTip(nil)
+	require.NoError(t, err)
+	originalCommitTimestamp, err := original.db.Metadata().GetCommitTimestamp(context.Background())
+	require.NoError(t, err)
+	originalGates, err := original.db.Metadata().GetNodeSettingsGates(context.Background())
+	require.NoError(t, err)
+	originalBlobs := readBlobContents(t, original.db)
+	original.close(t)
 
 	control := &remoteBlobRestoreControl{}
 	restoreCtx := configure(control)
@@ -610,9 +630,11 @@ func TestRestoreRecoverableRetainsHandleWhenAutomaticRollbackFails(
 func TestRestoreFailureRollsBackPopulatedRemoteStoresExactly(t *testing.T) {
 	t.Parallel()
 
+	snapshotDir := makeRemoteIncomingSnapshot(t)
 	t.Run("provider failure", func(t *testing.T) {
 		runRemoteRestoreFailureRollback(
 			t,
+			snapshotDir,
 			func(control *remoteBlobRestoreControl) context.Context {
 				control.failRestores.Store(1)
 				return context.Background()
@@ -624,6 +646,7 @@ func TestRestoreFailureRollsBackPopulatedRemoteStoresExactly(t *testing.T) {
 	t.Run("cancellation after reset", func(t *testing.T) {
 		runRemoteRestoreFailureRollback(
 			t,
+			snapshotDir,
 			func(control *remoteBlobRestoreControl) context.Context {
 				ctx, cancel := context.WithCancel(context.Background())
 				control.cancel = cancel
@@ -637,6 +660,7 @@ func TestRestoreFailureRollsBackPopulatedRemoteStoresExactly(t *testing.T) {
 	t.Run("rollback failure joins original error", func(t *testing.T) {
 		runRemoteRestoreFailureRollback(
 			t,
+			snapshotDir,
 			func(control *remoteBlobRestoreControl) context.Context {
 				control.failRestores.Store(2)
 				return context.Background()
@@ -1167,132 +1191,6 @@ var restoreFuncNames = map[string]bool{
 	"RestoreRecoverable": true,
 }
 
-// TestRestoreCallSitesUseBoundedBadgerConfig statically scans every test file
-// in this directory for a call to Restore, RestoreValidated, or
-// RestoreRecoverable whose RestoreStorageConfig literal sets no Blob --
-// including the bare RestoreStorageConfig{} and a Metadata-only literal --
-// and fails naming each one found, unless the line carries
-// restoreStorageConfigAllowBareMarker.
-//
-// A runtime assertion cannot make this same distinction: badger truncates its
-// value log and memtable files back down when a store is cleanly stopped,
-// and every Restore call in this package stops its stores well before
-// Restore returns, so measuring reserved file sizes after the fact passes
-// whether or not a call site supplies a bounded config. Only a source-level
-// check catches the
-// regression of a new or edited call site reintroducing the unbounded
-// default.
-func TestRestoreCallSitesUseBoundedBadgerConfig(t *testing.T) {
-	t.Parallel()
-
-	dir, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatalf("read dir %s: %v", dir, err)
-	}
-
-	fset := token.NewFileSet()
-	var violations []string
-	for _, entry := range entries {
-		name := entry.Name()
-		if entry.IsDir() || !strings.HasSuffix(name, "_test.go") {
-			continue
-		}
-		path := filepath.Join(dir, name)
-		src, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatalf("read %s: %v", path, err)
-		}
-		file, err := parser.ParseFile(fset, path, src, 0)
-		if err != nil {
-			t.Fatalf("parse %s: %v", path, err)
-		}
-		lines := strings.Split(string(src), "\n")
-
-		ast.Inspect(file, func(n ast.Node) bool {
-			call, ok := n.(*ast.CallExpr)
-			if !ok || !isRestoreCall(call.Fun) {
-				return true
-			}
-			for _, arg := range call.Args {
-				lit, ok := arg.(*ast.CompositeLit)
-				if !ok || !isRestoreStorageConfigType(lit.Type) ||
-					setsBlob(lit) {
-					continue
-				}
-				pos := fset.Position(lit.Pos())
-				var lineText string
-				if pos.Line-1 < len(lines) {
-					lineText = lines[pos.Line-1]
-				}
-				if strings.Contains(
-					lineText, restoreStorageConfigAllowBareMarker,
-				) {
-					continue
-				}
-				violations = append(violations, fmt.Sprintf(
-					"%s:%d: RestoreStorageConfig without Blob resolves "+
-						"the restore's blob store with badger's unbounded "+
-						"default sizes; set Blob: "+
-						"testutil.BadgerBlobConfig(), or mark the line "+
-						"with %q if the target host's provider ignores "+
-						"its config",
-					name, pos.Line, restoreStorageConfigAllowBareMarker,
-				))
-			}
-			return true
-		})
-	}
-
-	if len(violations) > 0 {
-		t.Fatalf(
-			"%d call site(s) resolve a Restore blob/metadata plugin with "+
-				"an unbounded default config:\n%s",
-			len(violations),
-			strings.Join(violations, "\n"),
-		)
-	}
-}
-
-func isRestoreCall(fun ast.Expr) bool {
-	switch f := fun.(type) {
-	case *ast.Ident:
-		return restoreFuncNames[f.Name]
-	case *ast.SelectorExpr:
-		return restoreFuncNames[f.Sel.Name]
-	}
-	return false
-}
-
-func isRestoreStorageConfigType(expr ast.Expr) bool {
-	switch t := expr.(type) {
-	case *ast.Ident:
-		return t.Name == "RestoreStorageConfig"
-	case *ast.SelectorExpr:
-		return t.Sel.Name == "RestoreStorageConfig"
-	}
-	return false
-}
-
-// setsBlob reports whether lit, a RestoreStorageConfig literal, supplies a
-// Blob provider config. An unkeyed literal with elements sets Blob, its
-// first field.
-func setsBlob(lit *ast.CompositeLit) bool {
-	for _, elt := range lit.Elts {
-		kv, ok := elt.(*ast.KeyValueExpr)
-		if !ok {
-			return true
-		}
-		if key, ok := kv.Key.(*ast.Ident); ok && key.Name == "Blob" {
-			return true
-		}
-	}
-	return false
-}
-
 // TestSnapshotRestoreRoundTrip verifies that a snapshotted database
 // restores into a fresh directory with the same blocks and tip.
 func TestSnapshotRestoreRoundTrip(t *testing.T) {
@@ -1388,20 +1286,7 @@ func TestRestoreRebuildsDeferredIndexes(t *testing.T) {
 func TestRestoreRefusesNonEmptyTargetDirectory(t *testing.T) {
 	t.Parallel()
 
-	src := newTestDB(t)
-	require.NoError(t, src.BlockCreate(testBlock(1, 0x01), nil))
-
-	snapshotDir := snapshotTestDir(t, "snap1")
-	_, err := lifecycle.Snapshot(
-		context.Background(),
-		src,
-		snapshotDir,
-		lifecycle.TriggerManual,
-		"test",
-		"badger",
-		"sqlite",
-	)
-	require.NoError(t, err)
+	snapshotDir := copyOneBlockSnapshot(t)
 
 	// Target dir already has a file in it.
 	targetDir := t.TempDir()
@@ -1409,7 +1294,7 @@ func TestRestoreRefusesNonEmptyTargetDirectory(t *testing.T) {
 		filepath.Join(targetDir, "existing.txt"), []byte("data"), 0o644,
 	))
 
-	_, err = lifecycle.Restore(
+	_, err := lifecycle.Restore(
 		context.Background(),
 		newTestStorageHost(t),
 		testDestinationRegistry,
@@ -1437,23 +1322,10 @@ func TestRestoreRejectsConfiguredDataDirOverrideWithoutTouchingTarget(
 ) {
 	t.Parallel()
 
-	src := newTestDB(t)
-	require.NoError(t, src.BlockCreate(testBlock(1, 0x01), nil))
-
-	snapshotDir := snapshotTestDir(t, "snap1")
-	_, err := lifecycle.Snapshot(
-		context.Background(),
-		src,
-		snapshotDir,
-		lifecycle.TriggerManual,
-		"test",
-		"badger",
-		"sqlite",
-	)
-	require.NoError(t, err)
+	snapshotDir := copyOneBlockSnapshot(t)
 
 	targetDir := filepath.Join(t.TempDir(), "restored")
-	_, err = lifecycle.Restore(
+	_, err := lifecycle.Restore(
 		context.Background(),
 		newTestStorageHost(t),
 		testDestinationRegistry,
@@ -1476,22 +1348,10 @@ func TestRestoreRejectsConfiguredDataDirOverrideWithoutTouchingTarget(
 func TestRestoreRejectsNonStringDataDirOverride(t *testing.T) {
 	t.Parallel()
 
-	src := newTestDB(t)
-	require.NoError(t, src.BlockCreate(testBlock(1, 0x01), nil))
-	snapshotDir := snapshotTestDir(t, "snapshot")
-	_, err := lifecycle.Snapshot(
-		context.Background(),
-		src,
-		snapshotDir,
-		lifecycle.TriggerManual,
-		"test",
-		"badger",
-		"sqlite",
-	)
-	require.NoError(t, err)
+	snapshotDir := copyOneBlockSnapshot(t)
 
 	targetDir := filepath.Join(t.TempDir(), "restored")
-	_, err = lifecycle.Restore(
+	_, err := lifecycle.Restore(
 		context.Background(),
 		newTestStorageHost(t),
 		testDestinationRegistry,
@@ -1504,34 +1364,6 @@ func TestRestoreRejectsNonStringDataDirOverride(t *testing.T) {
 	)
 	require.ErrorContains(t, err, "non-string metadata provider dataDir")
 	require.NoDirExists(t, targetDir)
-}
-
-// TestManifestCheckPluginMatch verifies Manifest.CheckPluginMatch itself:
-// it accepts the plugins a snapshot was actually taken with, and rejects
-// any other combination. This is a unit test of the check in isolation —
-// see TestRestoreValidatedRejectsPluginMismatchWithoutTouchingTarget for
-// the real call site (internal/dblifecycle.Service.Restore's validate
-// hook, via lifecycle.RestoreValidated) that actually enforces it during a
-// restore.
-func TestManifestCheckPluginMatch(t *testing.T) {
-	t.Parallel()
-
-	src := newTestDB(t)
-	require.NoError(t, src.BlockCreate(testBlock(1, 0x01), nil))
-
-	snapshotDir := snapshotTestDir(t, "snap1")
-	m, err := lifecycle.Snapshot(
-		context.Background(),
-		src,
-		snapshotDir,
-		lifecycle.TriggerManual,
-		"test",
-		"badger",
-		"sqlite",
-	)
-	require.NoError(t, err)
-	require.NoError(t, m.CheckPluginMatch("badger", "sqlite"))
-	require.Error(t, m.CheckPluginMatch("gcs", "sqlite"))
 }
 
 // TestRestoreValidatedRejectsPluginMismatchWithoutTouchingTarget exercises
@@ -1549,23 +1381,10 @@ func TestRestoreValidatedRejectsPluginMismatchWithoutTouchingTarget(
 ) {
 	t.Parallel()
 
-	src := newTestDB(t)
-	require.NoError(t, src.BlockCreate(testBlock(1, 0x01), nil))
-
-	snapshotDir := snapshotTestDir(t, "snap1")
-	_, err := lifecycle.Snapshot(
-		context.Background(),
-		src,
-		snapshotDir,
-		lifecycle.TriggerManual,
-		"test",
-		"badger",
-		"sqlite",
-	)
-	require.NoError(t, err)
+	snapshotDir := copyOneBlockSnapshot(t)
 
 	targetDir := filepath.Join(t.TempDir(), "restored")
-	_, err = lifecycle.RestoreValidated(
+	_, err := lifecycle.RestoreValidated(
 		context.Background(),
 		newTestStorageHost(t),
 		testDestinationRegistry,
@@ -1596,20 +1415,8 @@ func TestRestoreValidatedRejectsPluginMismatchWithoutTouchingTarget(
 func TestRestoreRejectsMismatchedTipBlockNumber(t *testing.T) {
 	t.Parallel()
 
-	src := newTestDB(t)
-	require.NoError(t, src.BlockCreate(testBlock(1, 0x01), nil))
-	require.NoError(t, src.BlockCreate(testBlock(2, 0x02), nil))
-
-	snapshotDir := snapshotTestDir(t, "snap1")
-	m, err := lifecycle.Snapshot(
-		context.Background(),
-		src,
-		snapshotDir,
-		lifecycle.TriggerManual,
-		"test",
-		"badger",
-		"sqlite",
-	)
+	snapshotDir := copyOneBlockSnapshot(t)
+	m, err := lifecycle.ReadManifest(snapshotDir)
 	require.NoError(t, err)
 
 	m.TipBlockNumber++

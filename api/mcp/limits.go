@@ -84,6 +84,9 @@ type readLimits struct {
 	// runAdmitted.
 	parseSlots   chan struct{}
 	maxAssetRows int
+	// maxOffset is the largest OFFSET a paginated tool accepts. It is a field
+	// so a test can lower it instead of seeding maxToolOffset rows.
+	maxOffset int
 	// walBytes reports the metadata WAL size. Nil disables the pressure
 	// check, as when the server has no file-backed metadata store.
 	walBytes    func() int64
@@ -96,6 +99,7 @@ func newReadLimits() *readLimits {
 		callerSlots:  make(chan struct{}, maxConcurrentCallerSQLQueries),
 		parseSlots:   make(chan struct{}, maxConcurrentPayloadParses),
 		maxAssetRows: maxAssetInfoRows,
+		maxOffset:    maxToolOffset,
 		maxWALBytes:  maxSQLiteWALBytes,
 	}
 }
@@ -224,10 +228,10 @@ func (l *readLimits) acquire() bool {
 func (l *readLimits) release() { <-l.slots }
 
 // offsetLimitNote returns a notice for a full page whose next offset would
-// exceed maxToolOffset, or "" otherwise. Without it, a caller paging until a
+// exceed maxOffset, or "" otherwise. Without it, a caller paging until a
 // short page cannot tell a complete result from one cut off by the bound.
-func offsetLimitNote(offset, limit, returned int) string {
-	if returned < limit || offset+limit <= maxToolOffset {
+func offsetLimitNote(offset, limit, returned, maxOffset int) string {
+	if returned < limit || offset+limit <= maxOffset {
 		return ""
 	}
 	return fmt.Sprintf(
@@ -235,6 +239,6 @@ func offsetLimitNote(offset, limit, returned int) string {
 			"offset %d, which this tool rejects. Matching rows beyond "+
 			"this page are not retrievable here; treat the result as "+
 			"truncated.\n\n",
-		maxToolOffset,
+		maxOffset,
 	)
 }
