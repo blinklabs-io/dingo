@@ -185,6 +185,7 @@ func TestBlockfetchServerRequestRangeRejectsInvalidEnd(t *testing.T) {
 func newRegisteredBlockfetchServerPeer(
 	t *testing.T,
 	o *Ouroboros,
+	extraOptions ...gouroboros.ConnectionOptionFunc,
 ) *muxerServerPeer {
 	t.Helper()
 	serverPipe, peerPipe := net.Pipe()
@@ -202,14 +203,15 @@ func newRegisteredBlockfetchServerPeer(
 	}
 	ready := make(chan result, 1)
 	go func() {
-		conn, err := gouroboros.New(
+		options := []gouroboros.ConnectionOptionFunc{
 			gouroboros.WithConnection(serverPipe),
 			gouroboros.WithServer(true),
 			gouroboros.WithNodeToNode(true),
 			gouroboros.WithNetworkMagic(ouroboros_mock.MockNetworkMagic),
 			gouroboros.WithLogger(o.config.Logger),
 			gouroboros.WithBlockFetchConfig(cfg),
-		)
+		}
+		conn, err := gouroboros.New(append(options, extraOptions...)...)
 		ready <- result{conn: conn, err: err}
 	}()
 	peer.send(t, handshake.ProtocolId,

@@ -589,11 +589,12 @@ func TestLeiosNotifyBlockAnnouncementIsConsumedAndDeduplicated(t *testing.T) {
 	require.NoError(t, record(headerRaw))
 	require.NoError(t, record(headerRaw))
 	entry, _ = o.leiosEBLog.next("test")
-	require.NotNil(t, entry)
-	require.Equal(t, headerRaw, entry.announcement)
-	o.leiosEBLog.complete("test", nil, true)
-	entry, _ = o.leiosEBLog.next("test")
-	require.Nil(t, entry)
+	require.Nil(t, entry, "a validated announcement remains pending until its manifest is available")
+	require.Len(t, o.leiosAnnouncements, 1)
+	for _, announcement := range o.leiosAnnouncements {
+		require.Equal(t, headerRaw, announcement.raw)
+		require.NotEmpty(t, o.leiosRelayPendingAnnouncements)
+	}
 
 	// A different ranking block may not change the established size for the
 	// same endorser-block hash.
@@ -699,7 +700,8 @@ func TestLeiosNotifyAnnouncementOCINVerdictControlsDiffusion(t *testing.T) {
 				"the announcement callback must not disconnect the peer")
 			require.Equal(t, tt.wantRecord, len(o.leiosAnnouncements) == 1)
 			entry, _ := o.leiosEBLog.next("relay")
-			require.Equal(t, tt.wantRelay, entry != nil)
+			require.Nil(t, entry, "an unavailable manifest must not be advertised")
+			require.Equal(t, tt.wantRelay, len(o.leiosRelayPendingAnnouncements) > 0)
 		})
 	}
 }
@@ -1489,9 +1491,7 @@ func TestStoreLeiosEndorserBlockRejectsMalformedCompleteBodyBeforePublication(
 	require.NotNil(t, publish)
 	publish()
 	manifestOffer, _ := o.leiosEBLog.next("relay")
-	require.NotNil(t, manifestOffer)
-	require.NotNil(t, manifestOffer.point)
-	o.leiosEBLog.complete("relay", nil, true)
+	require.Nil(t, manifestOffer, "incomplete or malformed closures must not be advertised")
 
 	waitCtx, cancel := context.WithCancel(t.Context())
 	ready := make(chan bool, 1)
@@ -1772,9 +1772,7 @@ func TestLoadLeiosEBFromDBRejectsMalformedCompleteTransactions(
 		leiosStorePeerOffered,
 	))
 	manifestOffer, _ := o.leiosEBLog.next("relay")
-	require.NotNil(t, manifestOffer)
-	require.NotNil(t, manifestOffer.point)
-	o.leiosEBLog.complete("relay", nil, true)
+	require.Nil(t, manifestOffer, "incomplete or malformed closures must not be advertised")
 	relayOffer, _ := o.leiosEBLog.next("relay")
 	require.Nil(t, relayOffer, "malformed persisted transactions must not be relayed")
 	o.StopLeiosPersistWriter()

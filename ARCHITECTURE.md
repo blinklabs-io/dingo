@@ -5552,9 +5552,27 @@ leios-fetch server uses the same lookup path for downstream `MsgBlockRequest`
 and `MsgBlockTxsRequest`: it serves from the in-memory cache when present, and
 on cache miss or expired-entry eviction reloads the manifest and complete tx
 list from the durable `em`/`et` blob keys so historical EBs can be re-served
-after the cache TTL. A missing endorser block or incomplete transaction set is
-declined with the protocol's typed `ErrBlockNotFound` or `ErrBlockTxsNotFound`,
-while malformed transaction bitmaps retain their validation error.
+after the cache TTL. Relayed ranking-block announcements remain queued, in arrival
+order per endorser-block occurrence, until that occurrence's EB manifest is
+available;
+independent ChainSync propagation is unchanged. The queue shares the validated
+announcement admission and expiry bounds, and expired headers are discarded
+even if historical backfill later loads their manifests. Manifest publication
+queues the retained headers before its offers, so a peer cannot fetch solely
+from a relayed header before this node can serve the content. When an exact,
+validated announced occurrence already
+has an admitted manifest or transaction fetch in progress, serving waits up to
+five seconds for that existing work rather than failing the shared bearer just
+before the content arrives. The deadline is absolute across fetch-owner
+handoffs, and at most 64 such requests wait concurrently. Manifest completion
+signals are owner-specific; partial transaction availability is checked against
+only the requested bitmap, without waiting for unrequested transactions. Each
+wait validates its actual LeiosFetch server owner and uses the same connection's
+owner-aware teardown signal, so disconnects cannot leave a callback parked.
+No serving request initiates a new network fetch. Unknown or unclaimed points,
+failed fetches and expired waits retain the typed `ErrBlockNotFound` or
+`ErrBlockTxsNotFound` error; these errors end the bearer because LeiosFetch has
+no absence reply. Malformed transaction bitmaps retain their validation error.
 `MsgBlockRangeRequest` is not served, and is declined with an explicit error
 rather than by returning nil from the callback: gouroboros reads a nil return as
 "an async range send was started", so returning nil left dingo holding
@@ -5640,7 +5658,18 @@ released instead of offering the same entry again. A successfully sent entry is
 therefore never offered to that connection twice. Failed or aborted sends
 release the reservation into a counted retry set retained across reconnects; a
 reconnect advances through every pending retry on its stream rather than
-clearing only the first failed entry. The transitional offered-ID and four-field
+clearing only the first failed entry. Endorser-block offers retain their signed
+announcing header as a dependency. A connection that resumes at an offer after
+reconnect or transient-entry eviction receives that header first, reserving the
+same logical offer index until the header send succeeds. Per-connection header
+identities prevent repeated announcements even when offers interleave; identities
+expire at the original slot-relative relay deadline, and a full bounded history
+recycles the connection without forgetting a live identity. Connection-owner
+replacement clears this history. Relay announcements and offers wait for the
+complete transaction cache, and serving rechecks content availability before
+sending a queued header or dependent offer. Expired dependencies and unavailable
+content are not advertised. Persisted oversized content remains servable without
+entering the bounded cache and still releases pending relay announcements. The transitional offered-ID and four-field
 forms remain decode-compatible only.
 
 Apply-boundary validation checks the exact endorser block
