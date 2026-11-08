@@ -30,7 +30,7 @@ package deferred
 //
 //   - Primary keys (autoincrement IDs).
 //   - Unique indexes that back ON CONFLICT clauses used during
-//     import (e.g. utxo.tx_id_output_idx, transaction.hash,
+//     import (e.g. utxo.idx_utxo_producer_output, transaction.hash,
 //     asset.idx_asset_unique, datum.hash, script.hash,
 //     certs.uniq_tx_cert).
 //   - Indexes on resume-checkpoint tables

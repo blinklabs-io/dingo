@@ -1200,7 +1200,7 @@ func producedStakeCredentialDelta(
 // utxoStakeConsumedDeltaQuery is queryUtxoStakeConsumedDeltas' batched
 // lookup, built the same way utxoStakeRefsByTxIDQuery is: driven by distinct
 // tx_id values with the (tx_id, output_idx) pair filtered in Go, so SQLite's
-// planner stays on the unique tx_id_output_idx index instead of falling back
+// planner stays on the unique output index (idx_utxo_producer_output on SQLite) instead of falling back
 // to a full idx_utxo_staking_deleted_amount scan once the batch has more than
 // a handful of terms.
 func utxoStakeConsumedDeltaSharedQuery(n int) string {
@@ -1367,7 +1367,7 @@ func distinctUtxoTxIDs(
 //
 // Filtering by tx_id alone -- rather than an OR of per-(tx_id, output_idx)
 // equalities, see utxoIDPredicate -- keeps SQLite's planner on the leading
-// column of the unique tx_id_output_idx index no matter how many terms are
+// column of the unique output index (idx_utxo_producer_output on SQLite) no matter how many terms are
 // in the batch. The OR-of-pairs form defeats that index past a handful of
 // terms and falls back to a full scan of idx_utxo_deleted_staking_amount
 // once liveOnly's "deleted_slot = 0" looks like a cheaper driving predicate --
@@ -1557,7 +1557,7 @@ func mergeStakeCredentialRefs(
 // index-friendly lookup used by MarkUtxosDeletedAtSlot; utxoSQL.deletionRows
 // selects the form of the store's dialect. Querying distinct tx_id values
 // avoids the OR-of-pairs predicate that makes SQLite prefer a deleted_slot
-// index over tx_id_output_idx for larger batches. The result carries both
+// index over the output index for larger batches. The result carries both
 // primary keys for the update and stake references for the reward-cache
 // refresh.
 //
@@ -1622,7 +1622,7 @@ func markUtxosDeletedQuery(
 // queryUtxoDeletionRows resolves live primary keys and the stake references
 // affected by deleting exactly the requested UTxO references. It reads every
 // output for each requested transaction ID once, then applies output-index
-// and liveness matching in Go so SQLite can use tx_id_output_idx without a
+// and liveness matching in Go so SQLite can use the output index without a
 // deleted_slot predicate.
 func queryUtxoDeletionRows(
 	ctx context.Context,
@@ -1864,7 +1864,7 @@ const utxoRefsMaxPerQuery = 200
 
 // utxoRefsExactSharedQuery builds the PostgreSQL and MySQL predicate that
 // selects exactly the n (tx_id, output_idx) references bound to it. Each term
-// is its own equality lookup, so the planner stays on the unique tx_id_output_idx
+// is its own equality lookup, so the planner stays on the unique output
 // index for every reference, which a wide OR of pairs does not guarantee. Only
 // the requested outputs, and so only their assets, are read; querying by tx_id
 // alone would load every other output of each transaction as well.
@@ -1885,7 +1885,7 @@ func utxoRefsExactSharedQuery(n int) string {
 // utxosByExactRefs returns the utxo rows, spent or live, for exactly the
 // distinct (tx_id, output_idx) references in refs. A reference with no row is
 // absent; deleted_slot is left for the caller to filter in Go, so a
-// deleted_slot predicate cannot steer the planner off tx_id_output_idx.
+// deleted_slot predicate cannot steer the planner off the output index.
 func (s *Store) utxosByExactRefs(
 	txn types.Txn,
 	refs []models.UtxoId,

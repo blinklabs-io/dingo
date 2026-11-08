@@ -4774,8 +4774,8 @@ func (ls *LedgerState) cleanupConsumedUtxos(ctx context.Context) {
 
 	// In API storage mode we retain spent UTxO metadata rows past the
 	// stability window so historical transaction queries can resolve
-	// input/collateral/reference-input details via spent_by_tx_id,
-	// collateral_by_tx_id, and referenced_by_tx_id. Spent state is already
+	// input/collateral/reference-input details via spent_by_tx_id and the
+	// utxo_collateral_edge and utxo_reference_edge tables. Spent state is already
 	// encoded by deleted_slot and spent_by_tx_id; live-UTxO queries continue
 	// to filter on deleted_slot = 0.
 	if ls.db.StorageMode() == types.StorageModeAPI {
