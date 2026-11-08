@@ -501,8 +501,9 @@ func (a *NodeAdapter) blockOutputAndFees(
 	return totals.Output, totals.Fees, nil
 }
 
-// nextBlockHash returns the hash of the block that directly follows the block
-// with the given internal ID, or nil when the block is the chain tip (no successor).
+// nextBlockHash returns the hash of the next indexed block after the block with
+// the given internal ID, skipping gaps in the ID space, or nil when the block
+// is the chain tip (no successor).
 func (a *NodeAdapter) nextBlockHash(
 	ctx context.Context,
 	id uint64,
@@ -520,12 +521,18 @@ func (a *NodeAdapter) nextBlockHash(
 	if id >= tipID {
 		return nil, nil
 	}
-	next, err := a.ledgerState.Database().BlockPointByIndex(id+1, txn)
+	nextID, next, err := a.ledgerState.Database().BlockPointAtOrAfterIndex(
+		id+1,
+		txn,
+	)
 	if err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
 			return nil, nil
 		}
 		return nil, err
+	}
+	if nextID > tipID {
+		return nil, nil
 	}
 	hash := hex.EncodeToString(next.Hash)
 	return &hash, nil

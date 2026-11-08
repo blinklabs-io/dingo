@@ -1373,3 +1373,34 @@ func TestBlockNumberBoundarySparseIDsAndSharedNumbers(t *testing.T) {
 	_, err = BlockNumberBoundaryTxn(ctx, txn, 1, bound, true)
 	require.ErrorIs(t, err, context.Canceled)
 }
+
+func TestBlockPointAtIndexSkipsSparseIndexes(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	blocks := []models.Block{
+		testIndexedBlock(10, 2, 0x01),
+		testIndexedBlock(20, 1_000, 0x02),
+	}
+	for _, block := range blocks {
+		require.NoError(t, db.BlockCreate(block, nil))
+	}
+
+	id, point, err := db.BlockPointAtOrAfterIndex(3, nil)
+	require.NoError(t, err)
+	require.Equal(t, blocks[1].ID, id)
+	require.Equal(t, blocks[1].Hash, point.Hash)
+	_, _, err = db.BlockPointAtOrAfterIndex(blocks[1].ID+1, nil)
+	require.ErrorIs(t, err, models.ErrBlockNotFound)
+
+	id, point, err = db.BlockPointAtOrBeforeIndex(
+		context.Background(), 999, nil,
+	)
+	require.NoError(t, err)
+	require.Equal(t, blocks[0].ID, id)
+	require.Equal(t, blocks[0].Hash, point.Hash)
+	_, _, err = db.BlockPointAtOrBeforeIndex(
+		context.Background(), blocks[0].ID-1, nil,
+	)
+	require.ErrorIs(t, err, models.ErrBlockNotFound)
+}

@@ -31,8 +31,8 @@ import (
 // and the number of block heights on that side of it: the ones that follow it
 // up to the tip when forward is set, else the ones that precede it. Page one
 // holds the nearest blocks; within a page heights ascend, as Blockfrost lists
-// them, and a descending order reverses the page. A gap in the stored chain
-// ends the listing.
+// them, and a descending order reverses the page. Neighbors are the adjacent
+// indexed entries, so gaps in the internal ID space are skipped.
 func (a *NodeAdapter) neighborBlocks(
 	ctx context.Context,
 	id string,
@@ -46,6 +46,7 @@ func (a *NodeAdapter) neighborBlocks(
 	db := a.ledgerState.Database()
 	txn := db.Transaction(ctx, false)
 	defer txn.Rollback() //nolint:errcheck
+	var tipID uint64
 	var available uint64
 	if forward {
 		tip, err := db.GetTip(txn)
@@ -55,15 +56,15 @@ func (a *NodeAdapter) neighborBlocks(
 		if len(tip.Point.Hash) == 0 {
 			return []models.Block{}, 0, nil
 		}
-		tipID, err := database.BlockIDByPointMetadataTxn(txn, tip.Point)
+		tipID, err = database.BlockIDByPointMetadataTxn(txn, tip.Point)
 		if err != nil {
 			return nil, 0, fmt.Errorf("resolve chain tip: %w", err)
 		}
-		if tipID > origin.ID {
-			available = tipID - origin.ID
+		if tip.BlockNumber > origin.Number {
+			available = tip.BlockNumber - origin.Number
 		}
-	} else if origin.ID >= database.BlockInitialIndex {
-		available = origin.ID - database.BlockInitialIndex
+	} else {
+		available = origin.Number
 	}
 	// #nosec G115 -- clamped to MaxInt
 	total := int(min(available, uint64(math.MaxInt)))
@@ -71,32 +72,44 @@ func (a *NodeAdapter) neighborBlocks(
 	if !ok {
 		return []models.Block{}, total, nil
 	}
-	// The origin is skipped as well as the pages before the requested one.
-	// offset is a non-negative int, so the sum cannot overflow a uint64.
-	skip := uint64(offset) + 1 // #nosec G115 -- offset is non-negative
+	// Entries on the pages before the requested one are stepped over.
+	skip := uint64(offset) // #nosec G115 -- offset is non-negative
 	ret := make([]models.Block, 0, params.Count)
-	for i := range params.Count {
-		distance := skip + uint64(i) // #nosec G115 -- i is non-negative
-		var index uint64
-		if forward {
-			if distance > available || origin.ID > math.MaxUint64-distance {
-				break
-			}
-			index = origin.ID + distance
-		} else {
-			if distance > available {
-				break
-			}
-			index = origin.ID - distance
-		}
+	cursor := origin.ID
+	for i := uint64(0); i < skip+uint64(params.Count); i++ { // #nosec G115 -- Count is non-negative
 		if err := ctx.Err(); err != nil {
 			return nil, 0, err
 		}
-		block, err := db.BlockByIndex(index, txn)
+		var (
+			index uint64
+			err   error
+		)
+		if forward {
+			if cursor == math.MaxUint64 {
+				break
+			}
+			index, _, err = db.BlockPointAtOrAfterIndex(cursor+1, txn)
+			if err == nil && index > tipID {
+				break
+			}
+		} else {
+			if cursor == 0 {
+				break
+			}
+			index, _, err = db.BlockPointAtOrBeforeIndex(ctx, cursor-1, txn)
+		}
 		if err != nil {
 			if errors.Is(err, models.ErrBlockNotFound) {
 				break
 			}
+			return nil, 0, err
+		}
+		cursor = index
+		if i < skip {
+			continue
+		}
+		block, err := db.BlockByIndex(index, txn)
+		if err != nil {
 			return nil, 0, err
 		}
 		ret = append(ret, block)

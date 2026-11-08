@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -82,7 +83,8 @@ func TestBlockNumbersDifferFromStorageIDs(t *testing.T) {
 			true,
 		)
 		require.NoError(t, err)
-		require.Equal(t, 2, total)
+		// Total is the height distance to the tip (4 - 1), not an entry count.
+		require.Equal(t, 3, total)
 		require.Equal(t, blocks[2:], next)
 		prev, _, err := adapter.neighborBlocks(
 			ctx,
@@ -280,4 +282,100 @@ func TestNextBlockHashDoesNotRequireSuccessorBody(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, next)
 	require.Equal(t, hex.EncodeToString(hash), *next)
+}
+
+func seedSparseChain(
+	t *testing.T,
+	db *database.Database,
+	ids []uint64,
+) []models.Block {
+	t.Helper()
+	blocks := make([]models.Block, 0, len(ids))
+	for i, id := range ids {
+		block := models.Block{
+			ID:     id,
+			Number: uint64(i),
+			Slot:   uint64(i+1) * 10,
+			Hash:   fill32(byte(i + 1)),
+			Cbor:   []byte{0x80},
+		}
+		require.NoError(t, db.BlockCreate(block, nil))
+		blocks = append(blocks, block)
+	}
+	last := blocks[len(blocks)-1]
+	require.NoError(
+		t,
+		db.SetTip(
+			ochainsync.Tip{
+				Point:       ocommon.NewPoint(last.Slot, last.Hash),
+				BlockNumber: last.Number,
+			},
+			nil,
+		),
+	)
+	return blocks
+}
+
+func TestNextBlockHashSkipsSparseIDs(t *testing.T) {
+	t.Parallel()
+	adapter, _, db := newDBBackedAdapter(t)
+	blocks := seedSparseChain(t, db, []uint64{2, 1000, 1005})
+	tip := ocommon.NewPoint(blocks[2].Slot, blocks[2].Hash)
+	for i := range 2 {
+		next, err := adapter.nextBlockHash(
+			t.Context(), blocks[i].ID, tip,
+		)
+		require.NoError(t, err)
+		require.NotNil(t, next)
+		require.Equal(t, hex.EncodeToString(blocks[i+1].Hash), *next)
+	}
+	next, err := adapter.nextBlockHash(t.Context(), blocks[2].ID, tip)
+	require.NoError(t, err)
+	require.Nil(t, next)
+}
+
+func TestNeighborBlocksSkipSparseIDs(t *testing.T) {
+	t.Parallel()
+	adapter, _, db := newDBBackedAdapter(t)
+	blocks := seedSparseChain(t, db, []uint64{2, 1000, 1005, 2000})
+	heights := func(got []models.Block) []uint64 { return heightsOf(got) }
+	ctx := t.Context()
+
+	got, total, err := adapter.neighborBlocks(
+		ctx,
+		hex.EncodeToString(blocks[0].Hash),
+		PaginationParams{Count: 2, Page: 1},
+		true,
+	)
+	require.NoError(t, err)
+	require.Equal(t, []uint64{1, 2}, heights(got))
+	require.Equal(t, 3, total)
+
+	got, _, err = adapter.neighborBlocks(
+		ctx,
+		hex.EncodeToString(blocks[0].Hash),
+		PaginationParams{Count: 2, Page: 2},
+		true,
+	)
+	require.NoError(t, err)
+	require.Equal(t, []uint64{3}, heights(got))
+
+	got, total, err = adapter.neighborBlocks(
+		ctx,
+		hex.EncodeToString(blocks[3].Hash),
+		PaginationParams{Count: 2, Page: 1},
+		false,
+	)
+	require.NoError(t, err)
+	require.Equal(t, []uint64{1, 2}, heights(got))
+	require.Equal(t, 3, total)
+
+	got, _, err = adapter.neighborBlocks(
+		ctx,
+		hex.EncodeToString(blocks[3].Hash),
+		PaginationParams{Count: 2, Page: 2},
+		false,
+	)
+	require.NoError(t, err)
+	require.Equal(t, []uint64{0}, heights(got))
 }

@@ -1382,8 +1382,7 @@ func TestNodeAdapterNextBlockHash(t *testing.T) {
 	require.NoError(t, err)
 	assert.Nil(t, next)
 
-	// A non-tip height whose successor index is absent (gap in storage) must
-	// resolve to nil via the ErrBlockNotFound path, not surface an error.
+	// A successor after a gap in the ID space is the next indexed block.
 	require.NoError(t, db.BlockCreate(models.Block{
 		Hash: fill32(0x18), Slot: 80, Number: 8, ID: 8, Cbor: []byte{8},
 	}, nil))
@@ -1393,7 +1392,8 @@ func TestNodeAdapterNextBlockHash(t *testing.T) {
 		ocommon.NewPoint(80, fill32(0x18)),
 	)
 	require.NoError(t, err)
-	assert.Nil(t, next)
+	require.NotNil(t, next)
+	assert.Equal(t, hex.EncodeToString(fill32(0x18)), *next)
 }
 
 func TestResolveBlockRangeUpperBoundInSparseChain(t *testing.T) {

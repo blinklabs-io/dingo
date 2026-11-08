@@ -1718,6 +1718,81 @@ func (d *Database) BlockPointByIndex(
 	return point, nil
 }
 
+// BlockPointAtOrAfterIndex returns the internal index and point of the first
+// block-index entry at or after blockIndex without reading any block body, so
+// sparse imported chains cost one seek rather than one lookup per missing
+// index. It returns models.ErrBlockNotFound when no entry remains.
+func (d *Database) BlockPointAtOrAfterIndex(
+	blockIndex uint64,
+	txn *Txn,
+) (uint64, ocommon.Point, error) {
+	if txn == nil {
+		txn = d.BlobTxn(false)
+		defer txn.Rollback() //nolint:errcheck
+	}
+	entry, err := blockIndexEntryAtOrAfterTxn(txn, blockIndex)
+	if err != nil {
+		return 0, ocommon.Point{}, err
+	}
+	point, err := BlockBlobKeyToPoint(entry.blockKey)
+	if err != nil {
+		return 0, ocommon.Point{}, fmt.Errorf(
+			"parsing block index %d value: %w",
+			entry.id,
+			err,
+		)
+	}
+	return entry.id, point, nil
+}
+
+// BlockPointAtOrBeforeIndex returns the internal index and point of the last
+// block-index entry at or before blockIndex without reading any block body.
+// It binary-searches forward seeks, as BlockAtOrBeforeIndex does. It returns
+// models.ErrBlockNotFound when no entry exists at or before blockIndex.
+func (d *Database) BlockPointAtOrBeforeIndex(
+	ctx context.Context,
+	blockIndex uint64,
+	txn *Txn,
+) (uint64, ocommon.Point, error) {
+	if txn == nil {
+		txn = d.BlobTxn(false)
+		defer txn.Rollback() //nolint:errcheck
+	}
+	low := uint64(BlockInitialIndex)
+	high := blockIndex
+	var (
+		found bool
+		id    uint64
+		point ocommon.Point
+	)
+	for low <= high {
+		if err := ctx.Err(); err != nil {
+			return 0, ocommon.Point{}, err
+		}
+		mid := low + (high-low)/2
+		entryID, entryPoint, err := d.BlockPointAtOrAfterIndex(mid, txn)
+		if err != nil && !errors.Is(err, models.ErrBlockNotFound) {
+			return 0, ocommon.Point{}, err
+		}
+		if err == nil && entryID <= blockIndex {
+			id, point, found = entryID, entryPoint, true
+			if entryID == blockIndex || entryID == math.MaxUint64 {
+				break
+			}
+			low = entryID + 1
+			continue
+		}
+		if mid == 0 {
+			break
+		}
+		high = mid - 1
+	}
+	if !found {
+		return 0, ocommon.Point{}, models.ErrBlockNotFound
+	}
+	return id, point, nil
+}
+
 func (d *Database) BlockByIndex(
 	blockIndex uint64,
 	txn *Txn,
