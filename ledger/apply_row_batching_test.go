@@ -585,7 +585,7 @@ func TestApplyRowBatchingSameChunkDependencies(t *testing.T) {
 			require.Equal(t, rowBatchingKey(0x33), drep)
 
 			spentAt := rowBatchingQueryOne[[]byte](t, raw,
-				`SELECT spent_at_tx_id FROM utxo WHERE tx_id = ? AND output_idx = 0`,
+				`SELECT (SELECT hash FROM "transaction" WHERE id = utxo.spent_by_tx_id) FROM utxo WHERE tx_id = ? AND output_idx = 0`,
 				names["register"].hash)
 			require.Equal(t, names["spend"].hash, spentAt,
 				"the output produced earlier in the chunk is marked spent by its consumer")
@@ -594,7 +594,7 @@ func TestApplyRowBatchingSameChunkDependencies(t *testing.T) {
 				names["register"].hash)
 			require.Equal(t, uint64(20), deleted)
 			chained := rowBatchingQueryOne[[]byte](t, raw,
-				`SELECT spent_at_tx_id FROM utxo WHERE tx_id = ? AND output_idx = 1`,
+				`SELECT (SELECT hash FROM "transaction" WHERE id = utxo.spent_by_tx_id) FROM utxo WHERE tx_id = ? AND output_idx = 1`,
 				names["spend"].hash)
 			require.Equal(t, names["chain"].hash, chained)
 			live := rowBatchingQueryOne[int](t, raw,

@@ -34,8 +34,8 @@ func legacyConsumeUtxosBatchQuery(rowCount int, returnStake bool) string {
 		returning += ", credential_tag, staking_key, amount"
 	}
 	return `UPDATE utxo
-SET deleted_slot = ?, spent_at_tx_id = ?
-WHERE deleted_slot = 0 AND spent_at_tx_id IS NULL
+SET deleted_slot = ?, spent_by_tx_id = ?
+WHERE deleted_slot = 0 AND spent_by_tx_id IS NULL
   AND (tx_id, output_idx) IN (` + values + `)
 RETURNING ` + returning
 }
@@ -50,9 +50,9 @@ func skewedUtxoTxID(i int) []byte {
 }
 
 // seedSkewedUtxos inserts n rows of which one in ten is unspent. Every spent
-// row carries its own deleted_slot and spent_at_tx_id, so those columns have
+// row carries its own deleted_slot and spent_by_tx_id, so those columns have
 // many distinct values with few rows each while "deleted_slot = 0" and
-// "spent_at_tx_id IS NULL" match every live row. That is the distribution
+// "spent_by_tx_id IS NULL" match every live row. That is the distribution
 // that makes SQLite statistics report deleted_slot as selective.
 func seedSkewedUtxos(tb testing.TB, store *Store, n int) {
 	tb.Helper()
@@ -60,17 +60,16 @@ func seedSkewedUtxos(tb testing.TB, store *Store, n int) {
 	require.NoError(tb, err)
 	stmt, err := tx.Prepare(
 		"INSERT INTO utxo (tx_id, output_idx, staking_key, credential_tag, " +
-			"added_slot, deleted_slot, spent_at_tx_id, amount, " +
+			"added_slot, deleted_slot, spent_by_tx_id, amount, " +
 			"payment_script) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
 	)
 	require.NoError(tb, err)
 	for i := range n {
 		var deletedSlot int64
-		var spentBy []byte
+		var spentBy any
 		if i%10 != 0 {
 			deletedSlot = int64(1_000 + i)
-			spentBy = skewedUtxoTxID(i)
-			spentBy[31] = 1
+			spentBy = int64(i + 1)
 		}
 		_, err := stmt.Exec(
 			skewedUtxoTxID(i), i%4, make([]byte, 28), int64(i%2),
@@ -124,24 +123,24 @@ func TestConsumeUtxosBatchQueryMatchesLegacy(t *testing.T) {
 	ctx := context.Background()
 
 	// Rows with i%10 == 0 are live and the rest spent. Row 7 is made
-	// deleted with a NULL spent_at_tx_id, and row 9 not deleted but with a
-	// spent_at_tx_id: each satisfies only one of the two liveness predicates.
+	// deleted with a NULL spent_by_tx_id, and row 9 not deleted but with a
+	// spent_by_tx_id: each satisfies only one of the two liveness predicates.
 	// Row 19 is already spent by the spending transaction itself.
 	_, err := store.writeDB.Exec(
-		"UPDATE utxo SET spent_at_tx_id = NULL WHERE added_slot = 7",
+		"UPDATE utxo SET spent_by_tx_id = NULL WHERE added_slot = 7",
 	)
 	require.NoError(t, err)
 	_, err = store.writeDB.Exec(
-		"UPDATE utxo SET deleted_slot = 0, spent_at_tx_id = ? "+
+		"UPDATE utxo SET deleted_slot = 0, spent_by_tx_id = ? "+
 			"WHERE added_slot = 9",
-		skewedUtxoTxID(9),
+		int64(9),
 	)
 	require.NoError(t, err)
 
 	_, err = store.writeDB.Exec(
-		"UPDATE utxo SET deleted_slot = 77, spent_at_tx_id = ? "+
+		"UPDATE utxo SET deleted_slot = 77, spent_by_tx_id = ? "+
 			"WHERE added_slot = 19",
-		skewedUtxoTxID(5_000_000),
+		int64(5_000_000),
 	)
 	require.NoError(t, err)
 
@@ -170,7 +169,7 @@ func TestConsumeUtxosBatchQueryMatchesLegacy(t *testing.T) {
 		tx, err := store.writeDB.BeginTx(ctx, nil)
 		require.NoError(t, err)
 		defer func() { require.NoError(t, tx.Rollback()) }()
-		args := []any{int64(77), skewedUtxoTxID(5_000_000)}
+		args := []any{int64(77), int64(5_000_000)}
 		for _, in := range in {
 			args = append(args, in.txID, in.idx)
 		}
@@ -204,17 +203,18 @@ func TestConsumeUtxosBatchQueryMatchesLegacy(t *testing.T) {
 
 		var state []string
 		srows, err := tx.QueryContext(ctx,
-			"SELECT tx_id, output_idx, deleted_slot, spent_at_tx_id "+
+			"SELECT tx_id, output_idx, deleted_slot, spent_by_tx_id "+
 				"FROM utxo ORDER BY id",
 		)
 		require.NoError(t, err)
 		for srows.Next() {
-			var txID, spentBy []byte
+			var txID []byte
+			var spentBy sql.NullInt64
 			var idx, deleted int64
 			require.NoError(t, srows.Scan(&txID, &idx, &deleted, &spentBy))
 			state = append(
 				state,
-				fmt.Sprintf("%x:%d:%d:%x", txID, idx, deleted, spentBy),
+				fmt.Sprintf("%x:%d:%d:%v", txID, idx, deleted, spentBy),
 			)
 		}
 		require.NoError(t, srows.Err())

@@ -199,10 +199,20 @@ var Manifest = []Index{
 		CatchUpDroppable: true,
 	},
 	{
+		Name: "idx_utxo_spent_by_tx_id", Table: "utxo",
+		Columns: []string{"spent_by_tx_id"},
+		Where:   "spent_by_tx_id IS NOT NULL",
+		Notes:   "Consumer transaction lookup and rollback repair", Critical: true,
+		CatchUpDroppable: true,
+	},
+	// The legacy spender column is NULL on every row, so this index is empty.
+	// It stays because the column's foreign key to transaction(hash) scans
+	// utxo on every transaction delete without it.
+	{
 		Name: "idx_utxo_spent_at_tx_id", Table: "utxo",
 		Columns: []string{"spent_at_tx_id"},
 		Where:   "spent_at_tx_id IS NOT NULL",
-		Notes:   "Consumer transaction lookup and rollback repair", Critical: true,
+		Notes:   "Legacy spender foreign key child index", Critical: true,
 		CatchUpDroppable: true,
 	},
 	{

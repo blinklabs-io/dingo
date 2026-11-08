@@ -1254,7 +1254,7 @@ func runHistoricalBoundaryStakeIncludesUntickedClosure(t *testing.T, collateralR
 	}
 	_, err := raw.Exec(`INSERT INTO leios_transaction_context (transaction_id, slot) SELECT id, 990 FROM "transaction" WHERE hash = ?`, closureHash)
 	require.NoError(t, err)
-	_, err = raw.Exec(`UPDATE utxo SET deleted_slot = 1020, spent_at_tx_id = ? WHERE staking_key = ?`, closureHash, key)
+	_, err = raw.Exec(`UPDATE utxo SET deleted_slot = 1020, spent_by_tx_id = (SELECT id FROM "transaction" WHERE hash = ?) WHERE staking_key = ?`, closureHash, key)
 	require.NoError(t, err)
 	for i, hash := range [][]byte{closureHash, rankingHash} {
 		var id uint

@@ -95,6 +95,7 @@ const (
 	utxoStakingPartialIndexSchemaRelease                = "utxo-staking-partial-indexes"
 	rewardOutputCredentialPendingIndexSchemaRelease     = "reward-account-output-credential-pending-index"
 	poolSnapshotVrfKeySchemaRelease                     = "pool-snapshot-vrf-key"
+	utxoSpenderTxIDSchemaRelease                        = "utxo-spender-tx-ids"
 )
 
 const mithrilRewardRepairPendingKey = "mithril_reward_repair_pending"
@@ -270,6 +271,7 @@ var schemaVersions = []struct {
 		Dir:     "v54",
 	},
 	{Version: 55, Name: poolSnapshotVrfKeySchemaRelease, Dir: "v55"},
+	{Version: 56, Name: utxoSpenderTxIDSchemaRelease, Dir: "v56"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
@@ -388,6 +390,10 @@ func registryForDialect(dialect string) ([]Migration, error) {
 			dialect != "mysql" {
 			migration.BackfillRevision = "1"
 			migration.Backfill = utxoStakingPartialIndexBackfill
+		}
+		if version.Name == utxoSpenderTxIDSchemaRelease {
+			migration.BackfillRevision = "1"
+			migration.Backfill = utxoSpenderTxIDBackfill(dialect)
 		}
 		if version.Name == poolDepositHeldSchemaRelease {
 			migration.BackfillRevision = "1"
@@ -2290,4 +2296,124 @@ SELECT 1 FROM sync_state WHERE sync_key = ?`), deferred.SyncStateKey).Scan(&pend
 		}
 	}
 	return BatchResult{Cursor: batch.Cursor, Done: true}, nil
+}
+
+// utxoSpenderTxIDBackfill moves each spender hash in utxo.spent_at_tx_id onto
+// utxo.spent_by_tx_id as the spender's transaction row id, in id order, and
+// clears the legacy value once the id is stored. A hash with no transaction
+// row keeps its legacy value, so no spend is silently dropped.
+//
+// The legacy partial index is dropped before the first batch so that clearing
+// the column does not maintain it row by row. The final batch creates
+// idx_utxo_spent_by_tx_id and recreates the legacy index, now empty, because
+// the legacy foreign key needs an index on its child column; both are left
+// to the deferred rebuild while one is pending. MySQL has no partial indexes
+// and keeps the legacy index its foreign key requires.
+func utxoSpenderTxIDBackfill(dialect string) Backfill {
+	transactionTable := `"transaction"`
+	if dialect == "mysql" {
+		transactionTable = "`transaction`"
+	}
+	return func(ctx context.Context, batch Batch) (BatchResult, error) {
+		last := int64(0)
+		if batch.Cursor != "" {
+			parsed, err := strconv.ParseInt(batch.Cursor, 10, 64)
+			if err != nil {
+				return BatchResult{}, fmt.Errorf(
+					"parse utxo spender cursor %q: %w", batch.Cursor, err,
+				)
+			}
+			last = parsed
+		} else if dialect != "mysql" {
+			if _, err := batch.Tx.ExecContext(
+				ctx, "DROP INDEX IF EXISTS idx_utxo_spent_at_tx_id",
+			); err != nil {
+				return BatchResult{}, fmt.Errorf(
+					"drop idx_utxo_spent_at_tx_id: %w", err,
+				)
+			}
+		}
+		var upper sql.NullInt64
+		var rows int64
+		if err := batch.Tx.QueryRowContext(ctx, batch.Rebind(`
+SELECT MAX(id), COUNT(*) FROM (
+    SELECT id FROM utxo
+    WHERE id > ? AND spent_at_tx_id IS NOT NULL
+    ORDER BY id LIMIT ?
+) AS batch_ids`), last, batch.Limit).Scan(&upper, &rows); err != nil {
+			return BatchResult{}, fmt.Errorf("select utxo spender batch: %w", err)
+		}
+		if !upper.Valid {
+			if err := createUtxoSpenderIndexes(ctx, batch, dialect); err != nil {
+				return BatchResult{}, err
+			}
+			return BatchResult{Cursor: batch.Cursor, Done: true}, nil
+		}
+		if _, err := batch.Tx.ExecContext(ctx, batch.Rebind(`
+UPDATE utxo SET spent_by_tx_id = (
+    SELECT t.id FROM `+transactionTable+` AS t
+    WHERE t.hash = utxo.spent_at_tx_id
+)
+WHERE id > ? AND id <= ? AND spent_at_tx_id IS NOT NULL
+  AND spent_by_tx_id IS NULL`), last, upper.Int64); err != nil {
+			return BatchResult{}, fmt.Errorf("set utxo spender id: %w", err)
+		}
+		if _, err := batch.Tx.ExecContext(ctx, batch.Rebind(`
+UPDATE utxo SET spent_at_tx_id = NULL
+WHERE id > ? AND id <= ? AND spent_at_tx_id IS NOT NULL
+  AND spent_by_tx_id IS NOT NULL`), last, upper.Int64); err != nil {
+			return BatchResult{}, fmt.Errorf("clear legacy utxo spender: %w", err)
+		}
+		return BatchResult{
+			Cursor: strconv.FormatInt(upper.Int64, 10),
+			Rows:   rows,
+		}, nil
+	}
+}
+
+func createUtxoSpenderIndexes(
+	ctx context.Context,
+	batch Batch,
+	dialect string,
+) error {
+	var pending int
+	err := batch.Tx.QueryRowContext(ctx, batch.Rebind(`
+SELECT 1 FROM sync_state WHERE sync_key = ?`),
+		deferred.SyncStateKey,
+	).Scan(&pending)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("read deferred index marker: %w", err)
+	}
+	if pending != 0 {
+		return nil
+	}
+	if dialect == "mysql" {
+		var exists int
+		if err := batch.Tx.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM information_schema.statistics
+WHERE table_schema = DATABASE() AND table_name = 'utxo'
+  AND index_name = 'idx_utxo_spent_by_tx_id'`).Scan(&exists); err != nil {
+			return fmt.Errorf("check idx_utxo_spent_by_tx_id: %w", err)
+		}
+		if exists != 0 {
+			return nil
+		}
+		if _, err := batch.Tx.ExecContext(ctx,
+			"CREATE INDEX idx_utxo_spent_by_tx_id ON utxo (spent_by_tx_id)",
+		); err != nil {
+			return fmt.Errorf("create idx_utxo_spent_by_tx_id: %w", err)
+		}
+		return nil
+	}
+	for _, index := range []string{
+		"CREATE INDEX IF NOT EXISTS idx_utxo_spent_by_tx_id ON utxo " +
+			"(spent_by_tx_id) WHERE spent_by_tx_id IS NOT NULL",
+		"CREATE INDEX IF NOT EXISTS idx_utxo_spent_at_tx_id ON utxo " +
+			"(spent_at_tx_id) WHERE spent_at_tx_id IS NOT NULL",
+	} {
+		if _, err := batch.Tx.ExecContext(ctx, index); err != nil {
+			return fmt.Errorf("create utxo spender index: %w", err)
+		}
+	}
+	return nil
 }

@@ -35,20 +35,22 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
-const sqliteUtxoColumns = "transaction_id, collateral_return_for_tx_id, " +
-	"tx_id, payment_key, staking_key, credential_tag, datum_hash, " +
-	"spent_at_tx_id, referenced_by_tx_id, collateral_by_tx_id, id, " +
-	"added_slot, deleted_slot, amount, output_idx, payment_script"
+// spentAtTxHashExpr projects the spending transaction's hash for a row of
+// the utxo table named by prefix, which includes its trailing dot. The table
+// stores only the spender's row id; readers that expose a hash get it here.
+func spentAtTxHashExpr(prefix string) string {
+	return `(SELECT spender.hash FROM "transaction" AS spender ` +
+		`WHERE spender.id = ` + prefix + `spent_by_tx_id) AS spent_at_tx_id`
+}
 
-const qualifiedSQLiteUtxoColumns = "utxo.transaction_id, " +
-	"utxo.collateral_return_for_tx_id, utxo.tx_id, utxo.payment_key, " +
-	"utxo.staking_key, utxo.credential_tag, utxo.datum_hash, " +
-	"utxo.spent_at_tx_id, utxo.referenced_by_tx_id, " +
-	"utxo.collateral_by_tx_id, utxo.id, utxo.added_slot, " +
-	"utxo.deleted_slot, utxo.amount, utxo.output_idx, " +
+var sqliteUtxoColumns = "utxo.transaction_id, utxo.collateral_return_for_tx_id, " +
+	"utxo.tx_id, utxo.payment_key, utxo.staking_key, utxo.credential_tag, " +
+	"utxo.datum_hash, " + spentAtTxHashExpr("utxo.") + ", " +
+	"utxo.referenced_by_tx_id, utxo.collateral_by_tx_id, utxo.id, " +
+	"utxo.added_slot, utxo.deleted_slot, utxo.amount, utxo.output_idx, " +
 	"utxo.payment_script"
 
-const (
+var (
 	getLiveUtxoByRefQuery = "-- name: GetLiveUtxoByRef :one\nSELECT " + sqliteUtxoColumns +
 		" FROM utxo WHERE tx_id = ? AND output_idx = ? AND deleted_slot = 0"
 	getUtxoIncludingSpentByRefQuery = "-- name: GetUtxoIncludingSpentByRef :one\nSELECT " + sqliteUtxoColumns +
@@ -67,8 +69,10 @@ func (s *Store) CreateUtxo(txn types.Txn, utxo *models.Utxo) error {
 			if err != nil {
 				return err
 			}
-			id, err := q.CreateUtxo(ctx, params)
-			if err != nil {
+			var id int64
+			if err := s.queryRowCached(
+				ctx, db, insertUtxoQuery, params.args()...,
+			).Scan(&id); err != nil {
 				return err
 			}
 			utxo.ID = uint(id)
@@ -227,6 +231,32 @@ func (s *Store) DeleteUtxosAfterSlot(
 	)
 }
 
+// spenderTxID resolves a spender's hash to its transaction row id. An empty
+// hash is no spender and resolves to NULL. A hash with no transaction row is
+// an error: the spend would otherwise be recorded without its spender.
+func (s *Store) spenderTxID(
+	ctx context.Context,
+	db queryer,
+	hash []byte,
+) (sql.NullInt64, error) {
+	if len(hash) == 0 {
+		return sql.NullInt64{}, nil
+	}
+	var id int64
+	err := db.QueryRowContext(ctx, s.dialect.Rebind(
+		`SELECT id FROM "transaction" WHERE hash = ?`,
+	), hash).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return sql.NullInt64{}, fmt.Errorf(
+			"spender transaction %x not found", hash,
+		)
+	}
+	if err != nil {
+		return sql.NullInt64{}, err
+	}
+	return sql.NullInt64{Int64: id, Valid: true}, nil
+}
+
 func (s *Store) SetUtxoDeletedAtSlot(
 	input ledger.TransactionInput,
 	slot uint64,
@@ -242,14 +272,18 @@ func (s *Store) SetUtxoDeletedAtSlot(
 	return s.withWriteTransaction(
 		txn,
 		func(db queryer, ctx context.Context) error {
+			spender, err := s.spenderTxID(ctx, db, spenderTxHash)
+			if err != nil {
+				return err
+			}
 			result, err := db.ExecContext(ctx, `
 UPDATE utxo
-SET deleted_slot = ?, spent_at_tx_id = ?
+SET deleted_slot = ?, spent_by_tx_id = ?
 WHERE tx_id = ? AND output_idx = ?
-  AND spent_at_tx_id IS NULL
+  AND spent_by_tx_id IS NULL
   AND (deleted_slot = 0 OR deleted_slot = ?)`,
 				slotValue,
-				spenderTxHash,
+				spender,
 				txID,
 				outputIndex,
 				slotValue,
@@ -347,7 +381,7 @@ func spentUtxosMissingAddressAfterSlotSQL(dialect string) string {
 		id = "+utxo.id"
 	}
 	return `-- name: GetSpentUtxosMissingAddressAfterSlot
-SELECT ` + qualifiedSQLiteUtxoColumns + ` FROM utxo
+SELECT ` + sqliteUtxoColumns + ` FROM utxo
 WHERE utxo.deleted_slot > ?
   AND ` + id + ` > ?
   AND NOT EXISTS (SELECT 1 FROM utxo_address WHERE utxo_address.utxo_id = utxo.id)
@@ -379,7 +413,7 @@ func (s *Store) SetUtxosNotDeletedAfterSlot(
 			}
 			if _, err := db.ExecContext(ctx, `
 UPDATE utxo
-SET deleted_slot = 0, spent_at_tx_id = NULL
+SET deleted_slot = 0, spent_by_tx_id = NULL
 WHERE deleted_slot > ?`,
 				slotValue,
 			); err != nil {
@@ -1012,7 +1046,7 @@ WHERE tx_id = ? AND output_idx = ?
 	if utxo.DeletedSlot == 0 {
 		if _, err := db.ExecContext(ctx, `
 UPDATE utxo
-SET deleted_slot = 0, spent_at_tx_id = NULL
+SET deleted_slot = 0, spent_by_tx_id = NULL
 WHERE tx_id = ? AND output_idx = ? AND deleted_slot > 0`,
 			utxo.TxId,
 			utxo.OutputIdx,
@@ -2008,6 +2042,12 @@ func dedupeUtxoIDs(ids []models.UtxoId) []models.UtxoId {
 // SQLite walks the matching range backwards and needs no sorter, at every
 // table size and whether or not ANALYZE has run.
 // TestGetUtxosAddedAfterSlotUsesSlotIndex pins the plan.
+var getUtxosAddedAfterSlotQuery = `-- name: GetUtxosAddedAfterSlot :many
+SELECT ` + sqliteUtxoColumns + `
+FROM utxo
+WHERE utxo.added_slot > ?
+ORDER BY utxo.added_slot DESC, utxo.id DESC`
+
 func (s *Store) GetUtxosAddedAfterSlot(
 	slot uint64,
 	txn types.Txn,
@@ -2016,19 +2056,11 @@ func (s *Store) GetUtxosAddedAfterSlot(
 	if err != nil {
 		return nil, err
 	}
-	q := s.operationalQueries(db)
 	sqlSlot, err := checkedInt64(slot)
 	if err != nil {
 		return nil, err
 	}
-	rows, err := q.GetUtxosAddedAfterSlot(
-		ctx,
-		sql.NullInt64{Int64: sqlSlot, Valid: true},
-	)
-	if err != nil {
-		return nil, err
-	}
-	return utxosFromSQLite(rows)
+	return s.queryUtxoModels(ctx, db, getUtxosAddedAfterSlotQuery, sqlSlot)
 }
 
 func (s *Store) GetLiveUtxosBySlot(
@@ -2093,7 +2125,6 @@ func (s *Store) GetUtxosDeletedBeforeSlot(
 	if err != nil {
 		return nil, err
 	}
-	q := s.operationalQueries(db)
 	sqlSlot, err := checkedInt64(slot)
 	if err != nil {
 		return nil, err
@@ -2102,17 +2133,14 @@ func (s *Store) GetUtxosDeletedBeforeSlot(
 	if limit > 0 {
 		sqlLimit = int64(limit)
 	}
-	rows, err := q.GetUtxosDeletedBeforeSlot(
-		ctx,
-		sqlitequery.GetUtxosDeletedBeforeSlotParams{
-			DeletedSlot: sql.NullInt64{Int64: sqlSlot, Valid: true},
-			Limit:       sqlLimit,
-		},
+	return s.queryUtxoModels(
+		ctx, db, `-- name: GetUtxosDeletedBeforeSlot :many
+SELECT `+sqliteUtxoColumns+`
+FROM utxo
+WHERE utxo.deleted_slot > 0 AND utxo.deleted_slot <= ?
+LIMIT ?`,
+		sqlSlot, sqlLimit,
 	)
-	if err != nil {
-		return nil, err
-	}
-	return utxosFromSQLite(rows)
 }
 
 // GetUtxosByAddress runs one OR-joined query per chunk of patterns -- a
@@ -2505,7 +2533,7 @@ func (s *Store) GetUtxosByAddressWithOrdering(
 		orderDir = "DESC"
 	}
 	statement := `
-SELECT ` + qualifiedSQLiteUtxoColumns + `,
+SELECT ` + sqliteUtxoColumns + `,
        ` + slotExpr + `, ` + blockIndexExpr + `
 FROM ` + from + `
 WHERE ` + predicate + `
@@ -2698,7 +2726,7 @@ func (s *Store) GetUtxosWithHistory(
 		orderDirection = "DESC"
 	}
 	statement := `
-SELECT ` + qualifiedSQLiteUtxoColumns + `,
+SELECT ` + sqliteUtxoColumns + `,
        ` + createdSlotExpr + `,
        ` + createdBlockIndexExpr + `,
        created_transaction.block_hash,
@@ -2707,7 +2735,7 @@ FROM utxo
 LEFT JOIN "transaction" AS created_transaction
     ON COALESCE(utxo.transaction_id, utxo.collateral_return_for_tx_id) = created_transaction.id
 LEFT JOIN "transaction" AS spent_transaction
-    ON utxo.spent_at_tx_id = spent_transaction.hash
+    ON utxo.spent_by_tx_id = spent_transaction.id
 WHERE ` + predicate + `
 ORDER BY ` + createdSlotExpr + ` ` + orderDirection + `,
          ` + createdBlockIndexExpr + ` ` + orderDirection + `,
@@ -2900,26 +2928,30 @@ func (s *Store) GetUtxosByAssets(
 	if err != nil {
 		return nil, err
 	}
-	q := s.operationalQueries(db)
-	var rows []sqlitequery.Utxo
+	var ret []models.Utxo
 	if assetName == nil {
-		rows, err = q.GetLiveUtxosByAssetPolicy(
-			ctx,
+		ret, err = s.queryUtxoModels(
+			ctx, db, `-- name: GetLiveUtxosByAssetPolicy :many
+SELECT `+sqliteUtxoColumns+`
+FROM utxo
+WHERE utxo.deleted_slot = 0
+  AND utxo.id IN (SELECT utxo_id FROM asset WHERE policy_id = ?)
+ORDER BY utxo.id`,
 			policyID,
 		)
 	} else {
-		rows, err = q.GetLiveUtxosByAsset(
-			ctx,
-			sqlitequery.GetLiveUtxosByAssetParams{
-				PolicyID: policyID,
-				Name:     assetName,
-			},
+		ret, err = s.queryUtxoModels(
+			ctx, db, `-- name: GetLiveUtxosByAsset :many
+SELECT `+sqliteUtxoColumns+`
+FROM utxo
+WHERE utxo.deleted_slot = 0
+  AND utxo.id IN (
+      SELECT utxo_id FROM asset WHERE policy_id = ? AND name = ?
+  )
+ORDER BY utxo.id`,
+			policyID, assetName,
 		)
 	}
-	if err != nil {
-		return nil, err
-	}
-	ret, err := utxosFromSQLite(rows)
 	if err != nil {
 		return nil, err
 	}
@@ -2999,7 +3031,7 @@ func (s *Store) GetUtxosMissingAddress(
 		return nil, err
 	}
 	rows, err := db.QueryContext(ctx, s.dialect.Rebind(
-		`SELECT `+qualifiedSQLiteUtxoColumns+` FROM utxo
+		`SELECT `+sqliteUtxoColumns+` FROM utxo
 WHERE utxo.id > ?
   AND NOT EXISTS (SELECT 1 FROM utxo_address WHERE utxo_address.utxo_id = utxo.id)
 ORDER BY utxo.id LIMIT ?`,
@@ -3417,16 +3449,31 @@ func (s *Store) loadUtxoAssetsPointers(
 	return nil
 }
 
-func utxosFromSQLite(rows []sqlitequery.Utxo) ([]models.Utxo, error) {
-	ret := make([]models.Utxo, 0, len(rows))
-	for _, row := range rows {
+// queryUtxoModels runs a statement whose select list is sqliteUtxoColumns.
+func (s *Store) queryUtxoModels(
+	ctx context.Context,
+	db queryer,
+	query string,
+	args ...any,
+) ([]models.Utxo, error) {
+	rows, err := db.QueryContext(ctx, s.dialect.Rebind(query), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ret := []models.Utxo{}
+	for rows.Next() {
+		row, err := scanSQLiteUtxo(rows)
+		if err != nil {
+			return nil, err
+		}
 		utxo, err := utxoFromSQLite(row)
 		if err != nil {
 			return nil, err
 		}
 		ret = append(ret, *utxo)
 	}
-	return ret, nil
+	return ret, rows.Err()
 }
 
 func utxoFromSQLite(row sqlitequery.Utxo) (*models.Utxo, error) {
@@ -3575,18 +3622,59 @@ func uintPointer(value sql.NullInt64) *uint {
 	return &ret
 }
 
+// utxoInsertParams are the values of one utxo insert. SpentAtTxID carries the
+// spender's hash; the insert statements resolve it to the spender's row id.
+type utxoInsertParams struct {
+	TransactionID           sql.NullInt64
+	CollateralReturnForTxID sql.NullInt64
+	TxID                    []byte
+	PaymentKey              []byte
+	StakingKey              []byte
+	CredentialTag           int64
+	DatumHash               []byte
+	SpentAtTxID             types.NullableHash
+	ReferencedByTxID        types.NullableHash
+	CollateralByTxID        types.NullableHash
+	AddedSlot               sql.NullInt64
+	DeletedSlot             sql.NullInt64
+	Amount                  sql.NullString
+	OutputIdx               sql.NullInt64
+	PaymentScript           sql.NullBool
+}
+
+// args returns the values in insertUtxoQuery's placeholder order.
+func (p utxoInsertParams) args() []any {
+	return []any{
+		p.TransactionID,
+		p.CollateralReturnForTxID,
+		p.TxID,
+		p.PaymentKey,
+		p.StakingKey,
+		p.CredentialTag,
+		p.DatumHash,
+		nullBytes(p.SpentAtTxID),
+		nullBytes(p.ReferencedByTxID),
+		nullBytes(p.CollateralByTxID),
+		p.AddedSlot,
+		p.DeletedSlot,
+		p.Amount,
+		p.OutputIdx,
+		p.PaymentScript,
+	}
+}
+
 func createUtxoParams(
 	utxo *models.Utxo,
-) (sqlitequery.CreateUtxoParams, error) {
+) (utxoInsertParams, error) {
 	addedSlot, err := checkedInt64(utxo.AddedSlot)
 	if err != nil {
-		return sqlitequery.CreateUtxoParams{}, err
+		return utxoInsertParams{}, err
 	}
 	deletedSlot, err := checkedInt64(utxo.DeletedSlot)
 	if err != nil {
-		return sqlitequery.CreateUtxoParams{}, err
+		return utxoInsertParams{}, err
 	}
-	return sqlitequery.CreateUtxoParams{
+	return utxoInsertParams{
 		TransactionID:           nullableUint(utxo.TransactionID),
 		CollateralReturnForTxID: nullableUint(utxo.CollateralReturnForTxID),
 		TxID:                    utxo.TxId,

@@ -22,13 +22,10 @@ import (
 	"fmt"
 	"math"
 	"math/big"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
-	sqlitequery "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/internal/query/sqlite"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
@@ -130,16 +127,11 @@ func getUtxoGeneratedOneShot(
 	if err != nil {
 		return nil, err
 	}
-	row, err := store.operationalQueries(db).GetLiveUtxo(
+	row, err := scanUtxoRow(db.QueryRowContext(
 		ctx,
-		sqlitequery.GetLiveUtxoParams{
-			TxID: txID,
-			OutputIdx: sql.NullInt64{
-				Int64: int64(index),
-				Valid: true,
-			},
-		},
-	)
+		store.dialect.Rebind(getLiveUtxoByRefQuery),
+		txID, sql.NullInt64{Int64: int64(index), Valid: true},
+	))
 	if err != nil {
 		return nil, err
 	}
@@ -1111,28 +1103,6 @@ func BenchmarkRollbackStakeRefQueries(b *testing.B) {
 	}
 }
 
-// namedQueryFromSource returns the body of a named sqlc query, read from the
-// .sql file sqlc generates the store from. Reading the shipped source rather
-// than restating the SQL in the test means the plan assertions below cannot
-// drift away from the statement the node actually runs.
-func namedQueryFromSource(tb testing.TB, name string) string {
-	tb.Helper()
-	source, err := os.ReadFile(
-		filepath.Join("queries", "sqlite", "operational.sql"),
-	)
-	require.NoError(tb, err)
-	marker := "-- name: " + name + " :"
-	start := strings.Index(string(source), marker)
-	require.GreaterOrEqual(tb, start, 0, "query %q not found in source", name)
-	// Skip the "-- name:" line itself, then take everything up to the
-	// statement terminator.
-	body := string(source)[start:]
-	body = body[strings.Index(body, "\n")+1:]
-	end := strings.Index(body, ";")
-	require.GreaterOrEqual(tb, end, 0, "query %q is unterminated", name)
-	return strings.TrimSpace(body[:end])
-}
-
 // withOrderByIDDesc rewrites a statement's trailing ORDER BY to the
 // "ORDER BY id DESC" GetUtxosAddedAfterSlot used to carry, so the tests can
 // show in the same run that ordering by the rowid alone is what costs the
@@ -1164,7 +1134,7 @@ func withOrderByIDDesc(tb testing.TB, query string) string {
 func TestGetUtxosAddedAfterSlotUsesSlotIndex(t *testing.T) {
 	t.Parallel()
 	const rolledBackFrom = int64(2_656_808)
-	query := namedQueryFromSource(t, "GetUtxosAddedAfterSlot")
+	query := getUtxosAddedAfterSlotQuery
 	legacyQuery := withOrderByIDDesc(t, query)
 
 	for _, stats := range []struct {
@@ -1227,7 +1197,7 @@ func TestGetUtxosAddedAfterSlotReturnsSameRows(t *testing.T) {
 	store := newMigratedSQLiteStore(t)
 	seedRollbackUtxos(t, store, 2_000, 16, rolledBackFrom, 60)
 
-	query := namedQueryFromSource(t, "GetUtxosAddedAfterSlot")
+	query := getUtxosAddedAfterSlotQuery
 	legacyQuery := withOrderByIDDesc(t, query)
 
 	type row struct {
@@ -1307,7 +1277,7 @@ func BenchmarkGetUtxosAddedAfterSlot(b *testing.B) {
 		const rolledBackFrom = int64(4_000_000)
 		store := newMigratedSQLiteStore(b)
 		seedRollbackUtxos(b, store, n, 512, rolledBackFrom, 40)
-		query := namedQueryFromSource(b, "GetUtxosAddedAfterSlot")
+		query := getUtxosAddedAfterSlotQuery
 		legacyQuery := withOrderByIDDesc(b, query)
 		for _, tc := range []struct {
 			name  string

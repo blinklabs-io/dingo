@@ -162,6 +162,7 @@ func TestCatchUpDroppableManifest(t *testing.T) {
 		"idx_utxo_payment_key":         "utxo",
 		"idx_utxo_staking_key":         "utxo",
 		"idx_utxo_spent_at_tx_id":      "utxo",
+		"idx_utxo_spent_by_tx_id":      "utxo",
 		"idx_utxo_referenced_by_tx_id": "utxo",
 		"idx_utxo_collateral_by_tx_id": "utxo",
 		"idx_utxo_added_slot":          "utxo",

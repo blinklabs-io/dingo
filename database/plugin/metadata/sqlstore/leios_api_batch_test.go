@@ -73,7 +73,9 @@ func TestLeiosAPIBatchPreservesConsumedInputTolerance(t *testing.T) {
 	fx := buildSharedCredentialTx(t, 0x43)
 	seedConsumedUtxo(t, store, fx)
 	other := []byte{0xfe}
-	_, err := store.writeDB.Exec(`UPDATE utxo SET deleted_slot = 1, spent_at_tx_id = ? WHERE tx_id = ? AND output_idx = 0`, other, fx.consumedTxID)
+	_, err := store.writeDB.Exec(`INSERT INTO "transaction" (hash, slot) VALUES (?, 1)`, other)
+	require.NoError(t, err)
+	_, err = store.writeDB.Exec(`UPDATE utxo SET deleted_slot = 1, spent_by_tx_id = (SELECT id FROM "transaction" WHERE hash = ?) WHERE tx_id = ? AND output_idx = 0`, other, fx.consumedTxID)
 	require.NoError(t, err)
 	txn := store.Transaction(context.Background())
 	t.Cleanup(func() { _ = txn.Rollback() })

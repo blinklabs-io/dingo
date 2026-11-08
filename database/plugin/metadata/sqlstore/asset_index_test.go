@@ -220,8 +220,9 @@ func (f assetTxFixture) output(
 	}
 	res, err := f.db.Exec(`
 INSERT INTO utxo (transaction_id, collateral_return_for_tx_id, tx_id, output_idx,
-    added_slot, deleted_slot, amount, spent_at_tx_id, credential_tag)
-VALUES (?, ?, ?, 0, 1, 0, '1', ?, 0)`,
+    added_slot, deleted_slot, amount, spent_by_tx_id, credential_tag)
+VALUES (?, ?, ?, 0, 1, 0, '1',
+    (SELECT id FROM "transaction" WHERE hash = ?), 0)`,
 		producer, collateral, txHash, spentBy,
 	)
 	require.NoError(t, err)

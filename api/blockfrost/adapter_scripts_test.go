@@ -373,7 +373,7 @@ func TestNodeAdapterScriptUTXOs(t *testing.T) {
 		require.NoError(t, err)
 		if tx == spentTx {
 			_, err := raw.Exec(
-				`UPDATE utxo SET spent_at_tx_id = ?, deleted_slot = 51 WHERE id = ?`,
+				`UPDATE utxo SET spent_by_tx_id = (SELECT id FROM "transaction" WHERE hash = ?), deleted_slot = 51 WHERE id = ?`,
 				spender.Hash,
 				utxoID,
 			)

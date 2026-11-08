@@ -442,6 +442,7 @@ CREATE TABLE utxo (
     credential_tag INTEGER NOT NULL DEFAULT 0,
     datum_hash BLOB,
     spent_at_tx_id BLOB,
+    spent_by_tx_id INTEGER,
     referenced_by_tx_id BLOB,
     collateral_by_tx_id BLOB,
     id INTEGER PRIMARY KEY,

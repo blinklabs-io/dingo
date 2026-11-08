@@ -411,7 +411,7 @@ func TestNodeAdapterAssetUTXOs(t *testing.T) {
 		})
 		if spentBy != nil {
 			_, err := raw.Exec(
-				`UPDATE utxo SET spent_at_tx_id = ?, deleted_slot = 41 WHERE tx_id = ?`,
+				`UPDATE utxo SET spent_by_tx_id = (SELECT id FROM "transaction" WHERE hash = ?), deleted_slot = 41 WHERE tx_id = ?`,
 				spentBy,
 				tx.Hash,
 			)

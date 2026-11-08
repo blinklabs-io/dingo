@@ -566,6 +566,7 @@ type Utxo struct {
 	CredentialTag           int64
 	DatumHash               []byte
 	SpentAtTxID             types.NullableHash
+	SpentByTxID             sql.NullInt64
 	ReferencedByTxID        types.NullableHash
 	CollateralByTxID        types.NullableHash
 	ID                      int64

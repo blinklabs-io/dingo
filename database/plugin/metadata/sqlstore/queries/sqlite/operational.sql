@@ -988,39 +988,11 @@ SELECT fetched_at, next_fetch_after, created_at, updated_at, url,
 FROM offchain_metadata
 WHERE source_type = ? AND url = ? AND hash = ?;
 
--- name: GetLiveUtxo :one
-SELECT transaction_id, collateral_return_for_tx_id, tx_id, payment_key,
-       staking_key, credential_tag, datum_hash, spent_at_tx_id,
-       referenced_by_tx_id, collateral_by_tx_id, id, added_slot,
-       deleted_slot, amount, output_idx, payment_script
-FROM utxo
-WHERE tx_id = ? AND output_idx = ? AND deleted_slot = 0;
-
--- name: GetUtxoIncludingSpent :one
-SELECT transaction_id, collateral_return_for_tx_id, tx_id, payment_key,
-       staking_key, credential_tag, datum_hash, spent_at_tx_id,
-       referenced_by_tx_id, collateral_by_tx_id, id, added_slot,
-       deleted_slot, amount, output_idx, payment_script
-FROM utxo
-WHERE tx_id = ? AND output_idx = ?;
-
 -- name: GetAssetsByUtxoID :many
 SELECT name, policy_id, fingerprint, id, utxo_id, amount
 FROM asset
 WHERE utxo_id = ?
 ORDER BY id;
-
--- Order by added_slot before id so the sort is the reverse of
--- idx_utxo_added_slot's own order; ordering by id alone costs a full table
--- scan. See the Store wrapper for the full rationale.
--- name: GetUtxosAddedAfterSlot :many
-SELECT transaction_id, collateral_return_for_tx_id, tx_id, payment_key,
-       staking_key, credential_tag, datum_hash, spent_at_tx_id,
-       referenced_by_tx_id, collateral_by_tx_id, id, added_slot,
-       deleted_slot, amount, output_idx, payment_script
-FROM utxo
-WHERE added_slot > ?
-ORDER BY added_slot DESC, id DESC;
 
 -- name: GetLiveUtxoRefsBySlot :many
 SELECT tx_id, output_idx
@@ -1034,15 +1006,6 @@ FROM utxo
 WHERE added_slot = ?
 ORDER BY id;
 
--- name: GetUtxosDeletedBeforeSlot :many
-SELECT transaction_id, collateral_return_for_tx_id, tx_id, payment_key,
-       staking_key, credential_tag, datum_hash, spent_at_tx_id,
-       referenced_by_tx_id, collateral_by_tx_id, id, added_slot,
-       deleted_slot, amount, output_idx, payment_script
-FROM utxo
-WHERE deleted_slot > 0 AND deleted_slot <= ?
-LIMIT ?;
-
 -- name: GetControlledAmountByCredential :many
 SELECT amount
 FROM utxo
@@ -1052,39 +1015,6 @@ WHERE credential_tag = ? AND staking_key = ? AND deleted_slot = 0;
 SELECT amount
 FROM utxo
 WHERE payment_script = TRUE AND deleted_slot = 0;
-
--- name: GetLiveUtxosByAssetPolicy :many
-SELECT u.transaction_id, u.collateral_return_for_tx_id, u.tx_id,
-       u.payment_key, u.staking_key, u.credential_tag, u.datum_hash,
-       u.spent_at_tx_id, u.referenced_by_tx_id, u.collateral_by_tx_id,
-       u.id, u.added_slot, u.deleted_slot, u.amount, u.output_idx,
-       u.payment_script
-FROM utxo u
-WHERE u.deleted_slot = 0
-  AND u.id IN (SELECT utxo_id FROM asset WHERE policy_id = ?)
-ORDER BY u.id;
-
--- name: GetLiveUtxosByAsset :many
-SELECT u.transaction_id, u.collateral_return_for_tx_id, u.tx_id,
-       u.payment_key, u.staking_key, u.credential_tag, u.datum_hash,
-       u.spent_at_tx_id, u.referenced_by_tx_id, u.collateral_by_tx_id,
-       u.id, u.added_slot, u.deleted_slot, u.amount, u.output_idx,
-       u.payment_script
-FROM utxo u
-WHERE u.deleted_slot = 0
-  AND u.id IN (
-      SELECT utxo_id FROM asset WHERE policy_id = ? AND name = ?
-  )
-ORDER BY u.id;
-
--- name: CreateUtxo :one
-INSERT INTO utxo (
-    transaction_id, collateral_return_for_tx_id, tx_id, payment_key,
-    staking_key, credential_tag, datum_hash, spent_at_tx_id,
-    referenced_by_tx_id, collateral_by_tx_id, added_slot, deleted_slot,
-    amount, output_idx, payment_script
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-RETURNING id;
 
 -- name: CreateAsset :one
 INSERT INTO asset (
@@ -1156,16 +1086,6 @@ INSERT INTO drep (
     anchor_url, credential, anchor_hash, added_slot, credential_tag,
     last_activity_epoch, expiry_epoch, active
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-RETURNING id;
-
--- name: CreateUtxoIfAbsent :one
-INSERT INTO utxo (
-    transaction_id, collateral_return_for_tx_id, tx_id, payment_key,
-    staking_key, credential_tag, datum_hash, spent_at_tx_id,
-    referenced_by_tx_id, collateral_by_tx_id, added_slot, deleted_slot,
-    amount, output_idx, payment_script
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT (tx_id, output_idx) DO NOTHING
 RETURNING id;
 
 -- name: ImportAsset :exec

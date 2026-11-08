@@ -76,8 +76,8 @@ func (s *Store) hydrateTransactionSlice(
 	inputs, err := s.transactionUtxosBatch(
 		ctx,
 		db,
-		"spent_at_tx_id",
-		hashes,
+		"spent_by_tx_id",
+		ids,
 		func(u *models.Utxo) string { return string(u.SpentAtTxId) },
 	)
 	if err != nil {
@@ -191,7 +191,7 @@ func (s *Store) transactionInputAssociations(
 	result := make(map[string][]models.Utxo)
 	for start := 0; start < len(hashes); start += s.dialect.ParameterLimit() {
 		end := min(start+s.dialect.ParameterLimit(), len(hashes))
-		query := `SELECT ` + qualifiedSQLiteUtxoColumns + `, input.transaction_hash
+		query := `SELECT ` + sqliteUtxoColumns + `, input.transaction_hash
 FROM utxo AS utxo
 JOIN ` + table + ` AS input ON input.utxo_id = utxo.id
 WHERE input.transaction_hash IN (` + bindPlaceholders(end-start) + `) ORDER BY utxo.id`

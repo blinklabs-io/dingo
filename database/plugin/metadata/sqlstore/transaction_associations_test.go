@@ -321,9 +321,12 @@ func TestCollateralInputsPreserveManyToManyOwnership(t *testing.T) {
 	_, err := store.writeDB.Exec(`CREATE TABLE utxo (
 transaction_id INTEGER, collateral_return_for_tx_id INTEGER, tx_id BLOB,
 payment_key BLOB, staking_key BLOB, credential_tag INTEGER, datum_hash BLOB,
-spent_at_tx_id BLOB, referenced_by_tx_id BLOB, collateral_by_tx_id BLOB,
+spent_at_tx_id BLOB, spent_by_tx_id INTEGER, referenced_by_tx_id BLOB, collateral_by_tx_id BLOB,
 id INTEGER PRIMARY KEY AUTOINCREMENT, added_slot INTEGER, deleted_slot INTEGER,
 amount TEXT, output_idx INTEGER, payment_script BOOLEAN)`)
+	require.NoError(t, err)
+	_, err = store.writeDB.Exec(`CREATE TABLE "transaction" (
+id INTEGER PRIMARY KEY AUTOINCREMENT, hash BLOB)`)
 	require.NoError(t, err)
 	_, err = store.writeDB.Exec(`CREATE TABLE utxo_collateral_input (
 utxo_id INTEGER NOT NULL, transaction_hash BLOB NOT NULL,

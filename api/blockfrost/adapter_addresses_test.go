@@ -90,7 +90,7 @@ func seedAddressOutput(
 	storePointerOutputCbor(t, db, txHash, 0, addr, amount)
 	if spentBy != nil {
 		_, err := raw.Exec(
-			`UPDATE utxo SET spent_at_tx_id = ?, deleted_slot = ? WHERE tx_id = ?`,
+			`UPDATE utxo SET spent_by_tx_id = (SELECT id FROM "transaction" WHERE hash = ?), deleted_slot = ? WHERE tx_id = ?`,
 			spentBy,
 			slot+1,
 			txHash,

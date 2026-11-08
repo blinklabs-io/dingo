@@ -16,7 +16,6 @@
 package sqlstore
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -85,8 +84,10 @@ type overlayOutput struct {
 	model     models.Utxo
 	id        int64
 	assetBase int64
-	// spentBy is the consuming transaction's hash, nil while live.
+	// spentBy is the consuming transaction's hash, nil while live;
+	// spentByID is that transaction's row id.
 	spentBy   []byte
+	spentByID int64
 	spentSlot uint64
 	// written reports that the row exists in utxo, because a read barrier
 	// wrote it before it was spent.
@@ -101,7 +102,11 @@ type overlayInput struct {
 	stakingKey  []byte
 	amount      sql.NullString
 	deletedSlot uint64
-	spentBy     []byte
+	// spentBy is the consuming hash, set only by this batch's own spends;
+	// spentByID is the consuming transaction's row id, from the row or the
+	// batch.
+	spentBy   []byte
+	spentByID sql.NullInt64
 	// deleteOnSpend marks an output an earlier transaction of the same
 	// trusted batch committed. The per-row path deletes such a row when the
 	// batch spends it, instead of leaving it for the post-commit prune.
@@ -109,13 +114,14 @@ type overlayInput struct {
 }
 
 func (in *overlayInput) live() bool {
-	return in.deletedSlot == 0 && len(in.spentBy) == 0
+	return in.deletedSlot == 0 && !in.spentByID.Valid
 }
 
 type overlayMark struct {
 	id   int64
 	slot uint64
-	hash []byte
+	// txID is the consuming transaction's row id.
+	txID int64
 }
 
 // overlayStats counts what one overlay did, for the per-batch debug line.
@@ -455,7 +461,7 @@ func overlayPrefetchQuery(keys int) string {
 	values := strings.TrimSuffix(strings.Repeat("(?, ?), ", keys), ", ")
 	return `-- name: BatchOverlayPrefetchInputs :many
 SELECT u.id, u.tx_id, u.output_idx, u.credential_tag, u.staking_key,
-       u.amount, u.deleted_slot, u.spent_at_tx_id
+       u.amount, u.deleted_slot, u.spent_by_tx_id
 FROM (VALUES ` + values + `) AS k
 CROSS JOIN utxo AS u INDEXED BY tx_id_output_idx
   ON u.tx_id = k.column1 AND u.output_idx = k.column2`
@@ -512,7 +518,7 @@ func scanOverlayInputs(rows *sql.Rows, overlay *utxoOverlay) error {
 		)
 		if err := rows.Scan(
 			&in.id, &txID, &outputIdx, &in.tag, &in.stakingKey,
-			&in.amount, &deletedSlot, &in.spentBy,
+			&in.amount, &deletedSlot, &in.spentByID,
 		); err != nil {
 			return err
 		}
@@ -629,13 +635,14 @@ func (o *utxoOverlay) consume(
 	inputs []models.UtxoId,
 	slot uint64,
 	hash []byte,
+	txID int64,
 ) (spent, skipped []stakeCredentialDelta, err error) {
 	o.mutations++
 	for _, input := range inputs {
 		key := newOverlayKey(input.Hash, input.Idx)
 		if out, ok := o.created[key]; ok {
 			if out.spentBy != nil {
-				if bytes.Equal(out.spentBy, hash) {
+				if out.spentByID == txID {
 					skipped = appendStakeTouch(
 						skipped, int64(out.model.CredentialTag),
 						out.model.StakingKey,
@@ -643,10 +650,11 @@ func (o *utxoOverlay) consume(
 					continue
 				}
 				return nil, nil, overlayConflict(
-					input, out.spentBy, out.spentSlot, hash,
+					input, out.spentByID, out.spentSlot, txID,
 				)
 			}
 			out.spentBy = append([]byte(nil), hash...)
+			out.spentByID = txID
 			out.spentSlot = slot
 			if o.retainHistory {
 				out.model.DeletedSlot = slot
@@ -654,14 +662,14 @@ func (o *utxoOverlay) consume(
 				if out.written {
 					o.marks = append(
 						o.marks,
-						overlayMark{id: out.id, slot: slot, hash: out.spentBy},
+						overlayMark{id: out.id, slot: slot, txID: txID},
 					)
 				}
 			} else {
 				o.stats.Elided++
 				if out.written {
 					o.marks = append(o.marks, overlayMark{
-						id: out.id, slot: slot, hash: out.spentBy,
+						id: out.id, slot: slot, txID: txID,
 					})
 					o.deletes = append(o.deletes, out.id)
 				} else {
@@ -693,19 +701,20 @@ func (o *utxoOverlay) consume(
 			continue
 		}
 		if !in.live() {
-			if bytes.Equal(in.spentBy, hash) {
+			if in.spentByID.Valid && in.spentByID.Int64 == txID {
 				skipped = appendStakeTouch(skipped, in.tag, in.stakingKey)
 				continue
 			}
 			return nil, nil, overlayConflict(
-				input, in.spentBy, in.deletedSlot, hash,
+				input, in.spentByID.Int64, in.deletedSlot, txID,
 			)
 		}
 		in.deletedSlot = slot
 		in.spentBy = append([]byte(nil), hash...)
+		in.spentByID = sql.NullInt64{Int64: txID, Valid: true}
 		o.stats.PrebatchSpent++
 		o.marks = append(o.marks, overlayMark{
-			id: in.id, slot: slot, hash: in.spentBy,
+			id: in.id, slot: slot, txID: txID,
 		})
 		if in.deleteOnSpend {
 			o.deletes = append(o.deletes, in.id)
@@ -738,18 +747,18 @@ func appendStakeTouch(
 
 func overlayConflict(
 	input models.UtxoId,
-	spentBy []byte,
+	spentBy int64,
 	deletedSlot uint64,
-	hash []byte,
+	txID int64,
 ) error {
 	return fmt.Errorf(
-		"%w: %x:%d (already spent_by=%x deleted_slot=%d, this_tx=%x)",
+		"%w: %x:%d (already spent_by_tx_id=%d deleted_slot=%d, this_tx_id=%d)",
 		types.ErrUtxoConflict,
 		input.Hash,
 		input.Idx,
 		spentBy,
 		deletedSlot,
-		hash,
+		txID,
 	)
 }
 
@@ -831,6 +840,15 @@ func (s *Store) writeOverlay(
 	return nil
 }
 
+// overlaySpentByArg is the spender row id an overlay output is written with,
+// NULL while the output is live.
+func overlaySpentByArg(out *overlayOutput) any {
+	if out.spentBy == nil {
+		return nil
+	}
+	return out.spentByID
+}
+
 func (s *Store) insertOverlayUtxos(
 	ctx context.Context,
 	db queryer,
@@ -861,7 +879,7 @@ func (s *Store) insertOverlayUtxos(
 				params.StakingKey,
 				params.CredentialTag,
 				params.DatumHash,
-				nullBytes(params.SpentAtTxID),
+				overlaySpentByArg(out),
 				nullBytes(params.ReferencedByTxID),
 				nullBytes(params.CollateralByTxID),
 				params.AddedSlot,
@@ -875,7 +893,7 @@ func (s *Store) insertOverlayUtxos(
 		query := `-- name: BatchOverlayInsertUtxos :exec
 INSERT INTO utxo (
     id, transaction_id, collateral_return_for_tx_id, tx_id, payment_key,
-    staking_key, credential_tag, datum_hash, spent_at_tx_id,
+    staking_key, credential_tag, datum_hash, spent_by_tx_id,
     referenced_by_tx_id, collateral_by_tx_id, added_slot, deleted_slot,
     amount, output_idx, payment_script
 ) VALUES ` + strings.TrimSuffix(strings.Repeat(row+", ", end-start), ", ")
@@ -933,7 +951,7 @@ VALUES ` + strings.TrimSuffix(strings.Repeat("(?, ?, ?, ?), ", rows), ", ")
 // a candidate.
 func overlayMarkQuery(rows int) string {
 	return `-- name: BatchOverlayMarkSpent :exec
-UPDATE utxo SET deleted_slot = v.column2, spent_at_tx_id = v.column3
+UPDATE utxo SET deleted_slot = v.column2, spent_by_tx_id = v.column3
 FROM (VALUES ` +
 		strings.TrimSuffix(strings.Repeat("(?, ?, ?), ", rows), ", ") + `) AS v
 WHERE utxo.id = v.column1`
@@ -968,7 +986,7 @@ func markOverlaySpends(
 		if err != nil {
 			return err
 		}
-		args = append(args, mark.id, slot, mark.hash)
+		args = append(args, mark.id, slot, mark.txID)
 		rows++
 		if rows == overlayMarkChunk {
 			if err := flush(); err != nil {
@@ -1237,6 +1255,7 @@ func (s *Store) setTransactionOverlayUtxos(
 	o *utxoOverlay,
 	transaction lcommon.Transaction,
 	point ocommon.Point,
+	transactionID int64,
 	producedModels []models.Utxo,
 	uniqueConsumed []models.UtxoId,
 ) (produced, consumed, skipped []stakeCredentialDelta, err error) {
@@ -1249,6 +1268,7 @@ func (s *Store) setTransactionOverlayUtxos(
 	}
 	consumed, skipped, err = o.consume(
 		ctx, db, uniqueConsumed, point.Slot, transaction.Hash().Bytes(),
+		transactionID,
 	)
 	return produced, consumed, skipped, err
 }

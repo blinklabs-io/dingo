@@ -228,11 +228,15 @@ WHERE t.id IN (
 UNION
 SELECT t.hash, t.block_hash, t.slot, t.block_index, t.id
 FROM "transaction" AS t
-WHERE t.hash IN (
-    SELECT u.spent_at_tx_id FROM asset AS a
+WHERE t.id IN (
+    SELECT u.spent_by_tx_id FROM asset AS a
     JOIN utxo AS u ON u.id = a.utxo_id
-    WHERE a.policy_id = ? AND a.name = ? AND u.spent_at_tx_id IS NOT NULL
-    UNION
+    WHERE a.policy_id = ? AND a.name = ? AND u.spent_by_tx_id IS NOT NULL
+)
+UNION
+SELECT t.hash, t.block_hash, t.slot, t.block_index, t.id
+FROM "transaction" AS t
+WHERE t.hash IN (
     SELECT m.tx_hash FROM asset_mint_burn AS m
     WHERE m.policy_id = ? AND m.name = ?
 )`

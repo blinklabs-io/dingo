@@ -33,7 +33,7 @@ func importConflictHash32(b byte) []byte {
 }
 
 // markUtxoSpentDirect records a spend exactly as the block-apply path would
-// leave it on the utxo row (deleted_slot + spent_at_tx_id), without needing a
+// leave it on the utxo row (deleted_slot + spent_by_tx_id), without needing a
 // fully constructed ledger.TransactionInput. This mirrors the setup pattern
 // already used by this package's other conflict-path tests
 // (seedRollbackUtxos inserts rows with raw SQL rather than through the
@@ -48,14 +48,21 @@ func markUtxoSpentDirect(
 ) {
 	tb.Helper()
 	_, err := store.writeDB.Exec(
-		"UPDATE utxo SET deleted_slot = ?, spent_at_tx_id = ? "+
-			"WHERE tx_id = ? AND output_idx = ?",
+		`INSERT INTO "transaction" (hash, slot) VALUES (?, ?)
+ON CONFLICT (hash) DO NOTHING`,
+		spenderTxID, int64(slot),
+	)
+	require.NoError(tb, err)
+	_, err = store.writeDB.Exec(
+		`UPDATE utxo SET deleted_slot = ?,
+    spent_by_tx_id = (SELECT id FROM "transaction" WHERE hash = ?)
+WHERE tx_id = ? AND output_idx = ?`,
 		int64(slot), spenderTxID, txID, int64(outputIdx),
 	)
 	require.NoError(tb, err)
 }
 
-// utxoDeletedAndSpender reads back the raw deleted_slot/spent_at_tx_id
+// utxoDeletedAndSpender reads back the raw deleted_slot/spender hash
 // columns for a reference, bypassing GetUtxo's "live only" filtering so a
 // spent row's state can be inspected directly.
 func utxoDeletedAndSpender(
@@ -66,8 +73,9 @@ func utxoDeletedAndSpender(
 ) (deletedSlot int64, spentAtTxID []byte) {
 	tb.Helper()
 	row := store.writeDB.QueryRow(
-		"SELECT deleted_slot, spent_at_tx_id FROM utxo "+
-			"WHERE tx_id = ? AND output_idx = ?",
+		`SELECT deleted_slot,
+    (SELECT hash FROM "transaction" WHERE id = utxo.spent_by_tx_id)
+FROM utxo WHERE tx_id = ? AND output_idx = ?`,
 		txID, int64(outputIdx),
 	)
 	require.NoError(tb, row.Scan(&deletedSlot, &spentAtTxID))
@@ -76,7 +84,7 @@ func utxoDeletedAndSpender(
 
 // TestImportUtxosClearsPostAnchorSpendOnLiveReimport re-imports a live row
 // over a local row spent after the anchor. The ON CONFLICT path must clear
-// deleted_slot and spent_at_tx_id, or replaying the spending block fails with
+// deleted_slot and spent_by_tx_id, or replaying the spending block fails with
 // "utxo not found".
 func TestImportUtxosClearsPostAnchorSpendOnLiveReimport(t *testing.T) {
 	t.Parallel()
@@ -126,7 +134,7 @@ func TestImportUtxosClearsPostAnchorSpendOnLiveReimport(t *testing.T) {
 
 	deletedSlot, spentAtTxID := utxoDeletedAndSpender(t, store, txID, 0)
 	require.Zero(t, deletedSlot, "deleted_slot must be cleared")
-	require.Nil(t, spentAtTxID, "spent_at_tx_id must be cleared")
+	require.Nil(t, spentAtTxID, "spent_by_tx_id must be cleared")
 }
 
 // TestImportUtxosLeavesSettledPreAnchorSpendAlone proves the fix is scoped to

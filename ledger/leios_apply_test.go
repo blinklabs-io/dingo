@@ -274,7 +274,7 @@ func leiosApplyTestUtxoState(
 	t.Helper()
 	var spender []byte
 	require.NoError(t, raw.QueryRow(`
-SELECT spent_at_tx_id, deleted_slot FROM utxo
+SELECT (SELECT hash FROM "transaction" WHERE id = utxo.spent_by_tx_id), deleted_slot FROM utxo
 WHERE tx_id = ? AND output_idx = ?`,
 		txId,
 		outputIdx,

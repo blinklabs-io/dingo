@@ -29,13 +29,13 @@ import (
 const importedUtxoRows = 2000
 
 // newImportStatsStore returns a store whose utxo statistics were taken over
-// a never-spent UTxO set and are now stale: every spent_at_tx_id was NULL at
-// ANALYZE, so idx_utxo_spent_at_tx_id is recorded as a single value covering
+// a never-spent UTxO set and are now stale: every spent_by_tx_id was NULL at
+// ANALYZE, so idx_utxo_spent_by_tx_id is recorded as a single value covering
 // the whole table, and the spends added afterwards do not grow the table
 // enough for the incremental refresh to revisit it. The fixture writes that
 // statistic itself rather than relying on ANALYZE to produce it, so the test
 // keeps exercising the worst case if the index stops analyzing that way.
-func newImportStatsStore(t *testing.T, spenders int) (*Store, [][]byte) {
+func newImportStatsStore(t *testing.T, spenders int) (*Store, []int64) {
 	t.Helper()
 	store := newFilePlannerStatsStore(t, prometheus.NewRegistry())
 	exec := func(query string, args ...any) {
@@ -54,21 +54,24 @@ SELECT randomblob(32), 0, i %% 2, randomblob(28), 1, 0, '1' FROM n`,
 		importedUtxoRows))
 	exec("ANALYZE")
 	exec(
-		`UPDATE sqlite_stat1 SET stat = ? WHERE idx = 'idx_utxo_spent_at_tx_id'`,
+		`UPDATE sqlite_stat1 SET stat = ? WHERE idx = 'idx_utxo_spent_by_tx_id'`,
 		fmt.Sprintf("%d %d", importedUtxoRows, importedUtxoRows),
 	)
 
-	hashes := make([][]byte, 0, spenders)
+	ids := make([]int64, 0, spenders)
 	for i := range spenders {
 		hash := []byte(fmt.Sprintf("%032d", i))
-		hashes = append(hashes, hash)
-		exec(
+		result, err := store.writeDB.Exec(
 			`INSERT INTO "transaction" (hash, slot, block_index) VALUES (?, 10, 0)`,
 			hash,
 		)
+		require.NoError(t, err)
+		id, err := result.LastInsertId()
+		require.NoError(t, err)
+		ids = append(ids, id)
 		exec(
-			`UPDATE utxo SET spent_at_tx_id = ?, deleted_slot = 10 WHERE id = ?`,
-			hash,
+			`UPDATE utxo SET spent_by_tx_id = ?, deleted_slot = 10 WHERE id = ?`,
+			id,
 			i+1,
 		)
 	}
@@ -76,16 +79,16 @@ SELECT randomblob(32), 0, i %% 2, randomblob(28), 1, 0, '1' FROM n`,
 
 	var stat string
 	require.NoError(t, store.writeDB.QueryRow(
-		`SELECT stat FROM sqlite_stat1 WHERE idx = 'idx_utxo_spent_at_tx_id'`,
+		`SELECT stat FROM sqlite_stat1 WHERE idx = 'idx_utxo_spent_by_tx_id'`,
 	).Scan(&stat))
 	want := fmt.Sprintf("%d %d", importedUtxoRows, importedUtxoRows)
 	require.Equal(
 		t,
 		want,
 		stat,
-		"idx_utxo_spent_at_tx_id statistics must describe the never-spent import",
+		"idx_utxo_spent_by_tx_id statistics must describe the never-spent import",
 	)
-	return store, hashes
+	return store, ids
 }
 
 func explainQueryPlan(
@@ -112,27 +115,27 @@ func explainQueryPlan(
 }
 
 // A rollback whose chunk holds a single transaction hash planned this lookup
-// as a pass over every utxo row: with spent_at_tx_id recorded as one value,
+// as a pass over every utxo row: with spent_by_tx_id recorded as one value,
 // SQLite walked idx_utxo_staking_deleted_amount in credential order to satisfy
-// the DISTINCT, testing each row's spent_at_tx_id. On a mainnet-sized table
+// the DISTINCT, testing each row's spent_by_tx_id. On a mainnet-sized table
 // that held the ledger write lock for tens of seconds per rollback. The lookup
 // must search the spender index whatever the statistics say.
 func TestRollbackSpentStakeRefsQuerySearchesSpenderIndex(t *testing.T) {
 	t.Parallel()
-	store, hashes := newImportStatsStore(t, 3)
+	store, ids := newImportStatsStore(t, 3)
 	ctx := context.Background()
 	for _, n := range []int{1, 3} {
 		query, err := store.rollbackSpentStakeRefsQuery(ctx, store.readDB, n)
 		require.NoError(t, err)
 		args := make([]any, n)
 		for i := range n {
-			args[i] = hashes[i]
+			args[i] = ids[i]
 		}
 		plan := explainQueryPlan(t, store, query, args...)
 		require.NotContains(t, plan, "SCAN utxo",
-			"%d hash(es) must not scan utxo, plan:\n%s", n, plan)
-		require.Contains(t, plan, "idx_utxo_spent_at_tx_id",
-			"%d hash(es) must search the spender index, plan:\n%s", n, plan)
+			"%d spender(s) must not scan utxo, plan:\n%s", n, plan)
+		require.Contains(t, plan, "idx_utxo_spent_by_tx_id",
+			"%d spender(s) must search the spender index, plan:\n%s", n, plan)
 	}
 }
 
@@ -141,7 +144,7 @@ func TestRollbackSpentStakeRefsQuerySearchesSpenderIndex(t *testing.T) {
 func legacyDistinctSpentStakeRefsQuery(n int) string {
 	return `
 SELECT DISTINCT credential_tag, staking_key FROM utxo
-WHERE spent_at_tx_id IN (` + bindPlaceholders(n) + `)`
+WHERE spent_by_tx_id IN (` + bindPlaceholders(n) + `)`
 }
 
 // The rewritten lookup, deduplicated in Go, must return exactly the
@@ -154,18 +157,20 @@ func TestRollbackSpentStakeRefsMatchLegacyDistinct(t *testing.T) {
 	keyA[0] = 0xAA
 	keyB := make([]byte, 28)
 	keyB[0] = 0xBB
-	spender1 := []byte(fmt.Sprintf("%032d", 1))
-	spender2 := []byte(fmt.Sprintf("%032d", 2))
-	other := []byte(fmt.Sprintf("%032d", 3))
-	for _, hash := range [][]byte{spender1, spender2, other} {
-		_, err := store.writeDB.Exec(
+	var spenderIDs []int64
+	for i := 1; i <= 3; i++ {
+		result, err := store.writeDB.Exec(
 			`INSERT INTO "transaction" (hash, slot, block_index) VALUES (?, 10, 0)`,
-			hash,
+			[]byte(fmt.Sprintf("%032d", i)),
 		)
 		require.NoError(t, err)
+		id, err := result.LastInsertId()
+		require.NoError(t, err)
+		spenderIDs = append(spenderIDs, id)
 	}
+	spender1, spender2, other := spenderIDs[0], spenderIDs[1], spenderIDs[2]
 	rows := []struct {
-		spender []byte
+		spender any
 		tag     int64
 		key     []byte
 	}{
@@ -180,7 +185,7 @@ func TestRollbackSpentStakeRefsMatchLegacyDistinct(t *testing.T) {
 	for i, row := range rows {
 		_, err := store.writeDB.Exec(
 			`INSERT INTO utxo
-    (tx_id, output_idx, credential_tag, staking_key, spent_at_tx_id,
+    (tx_id, output_idx, credential_tag, staking_key, spent_by_tx_id,
      added_slot, deleted_slot, amount)
 VALUES (?, 0, ?, ?, ?, 1, 0, '1')`,
 			[]byte{byte(i)}, row.tag, row.key, row.spender,
@@ -224,7 +229,7 @@ func TestRollbackSpentStakeRefsQueryWithoutSpenderIndex(t *testing.T) {
 	query, err := store.rollbackSpentStakeRefsQuery(ctx, store.writeDB, 1)
 	require.NoError(t, err)
 	require.NotContains(t, query, "INDEXED BY")
-	_, err = queryStakeRefs(ctx, store.writeDB, query, []byte("missing"))
+	_, err = queryStakeRefs(ctx, store.writeDB, query, int64(-1))
 	require.NoError(t, err)
 }
 
@@ -240,16 +245,17 @@ func TestDeleteTransactionsAfterSlotRefreshesEachCredentialOnce(t *testing.T) {
 	keyA[0] = 0xAA
 	keyB := make([]byte, 28)
 	keyB[0] = 0xBB
-	spender := []byte(fmt.Sprintf("%032d", 1))
-	_, err := store.writeDB.Exec(
+	result, err := store.writeDB.Exec(
 		`INSERT INTO "transaction" (hash, slot, block_index) VALUES (?, 10, 0)`,
-		spender,
+		[]byte(fmt.Sprintf("%032d", 1)),
 	)
+	require.NoError(t, err)
+	spender, err := result.LastInsertId()
 	require.NoError(t, err)
 	for i, key := range [][]byte{keyA, keyA, keyB} {
 		_, err := store.writeDB.Exec(
 			`INSERT INTO utxo
-    (tx_id, output_idx, credential_tag, staking_key, spent_at_tx_id,
+    (tx_id, output_idx, credential_tag, staking_key, spent_by_tx_id,
      added_slot, deleted_slot, amount)
 VALUES (?, 0, 0, ?, ?, 1, 10, '1')`,
 			[]byte{byte(i)}, key, spender,

@@ -255,7 +255,7 @@ INSERT INTO "transaction" (hash, slot, block_index) VALUES (?, 20, 0)`,
 			)
 			require.NoError(t, err)
 			_, err = raw.Exec(`
-UPDATE utxo SET deleted_slot = 20, spent_at_tx_id = ?`, spenderHash)
+UPDATE utxo SET deleted_slot = 20, spent_by_tx_id = (SELECT id FROM "transaction" WHERE hash = ?)`, spenderHash)
 			require.NoError(t, err)
 
 			if tc.metadataOnly {
@@ -946,7 +946,7 @@ INSERT INTO "transaction" (
 	)
 	require.NoError(t, err)
 	_, err = raw.Exec(`
-UPDATE utxo SET spent_at_tx_id = ?, deleted_slot = 30 WHERE tx_id = ?`,
+UPDATE utxo SET spent_by_tx_id = (SELECT id FROM "transaction" WHERE hash = ?), deleted_slot = 30 WHERE tx_id = ?`,
 		spenderHash,
 		enterpriseUtxo.TxId,
 	)
@@ -2737,7 +2737,7 @@ INSERT INTO "transaction" (hash, slot, valid) VALUES (?, 10, TRUE)`,
 				consumerHash)
 			require.NoError(t, err)
 			_, err = raw.Exec(`
-UPDATE utxo SET deleted_slot = 10, spent_at_tx_id = ?`, consumerHash)
+UPDATE utxo SET deleted_slot = 10, spent_by_tx_id = (SELECT id FROM "transaction" WHERE hash = ?)`, consumerHash)
 			require.NoError(t, err)
 
 			err = db.Transaction(context.Background(), true).Do(func(txn *Txn) error {

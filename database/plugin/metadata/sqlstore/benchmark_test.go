@@ -24,7 +24,6 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
-	sqlitequery "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/internal/query/sqlite"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/require"
@@ -110,7 +109,7 @@ func BenchmarkInsertUtxoModel(b *testing.B) {
 	})
 }
 
-// legacyImportUtxoStatement reproduces importUtxos' former generated sqlc
+// legacyImportUtxoStatement reproduces importUtxos' former unprepared
 // call. The benchmark keeps both paths in one transaction so the measured
 // difference is statement preparation/reuse, not transaction setup.
 func legacyImportUtxoStatement(
@@ -122,10 +121,11 @@ func legacyImportUtxoStatement(
 	if err != nil {
 		return 0, err
 	}
-	return sqlitequery.New(db).CreateUtxoIfAbsent(
-		ctx,
-		sqlitequery.CreateUtxoIfAbsentParams(params),
-	)
+	var id int64
+	err = db.QueryRowContext(
+		ctx, insertUtxoQueryIgnoreConflict, params.args()...,
+	).Scan(&id)
+	return id, err
 }
 
 func cachedImportUtxoStatement(

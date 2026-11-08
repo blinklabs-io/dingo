@@ -16,7 +16,6 @@
 package sqlstore
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -196,7 +195,7 @@ func (a *transactionBatchAccumulator) restore(
 // getUtxoSpendStateQuery reads back a consumed input that the spend UPDATE
 // did not mark, to tell an already-spent input from a missing one.
 const getUtxoSpendStateQuery = `-- name: GetUtxoSpendState :one
-SELECT deleted_slot, spent_at_tx_id
+SELECT deleted_slot, spent_by_tx_id
 FROM utxo WHERE tx_id = ? AND output_idx = ?`
 
 const transactionInsertSQL = `-- name: InsertTransaction :one
@@ -238,24 +237,24 @@ SELECT id FROM "transaction" WHERE hash = ?`
 
 const consumeUtxoSQL = `-- name: ConsumeUtxo :execrows
 UPDATE utxo
-SET deleted_slot = ?, spent_at_tx_id = ?
+SET deleted_slot = ?, spent_by_tx_id = ?
 WHERE tx_id = ? AND output_idx = ?
-  AND deleted_slot = 0 AND spent_at_tx_id IS NULL`
+  AND deleted_slot = 0 AND spent_by_tx_id IS NULL`
 
 const consumeUtxoSQLiteReturningSQL = `-- name: ConsumeUtxoReturningStake :one
 UPDATE utxo
-SET deleted_slot = ?, spent_at_tx_id = ?
+SET deleted_slot = ?, spent_by_tx_id = ?
 WHERE tx_id = ? AND output_idx = ?
-  AND deleted_slot = 0 AND spent_at_tx_id IS NULL
+  AND deleted_slot = 0 AND spent_by_tx_id IS NULL
 RETURNING tx_id, output_idx, credential_tag, staking_key, amount`
 
 func insertUtxoBatchQuery(rowCount int) string {
-	row := "(" + strings.TrimSuffix(strings.Repeat("?,", 15), ",") + ")"
+	row := "(?,?,?,?,?,?,?," + spentByPlaceholder + ",?,?,?,?,?,?,?)"
 	values := strings.TrimSuffix(strings.Repeat(row+",", rowCount), ",")
 	return `-- name: InsertUtxoBatch :many
 INSERT INTO utxo (
     transaction_id, collateral_return_for_tx_id, tx_id, payment_key,
-    staking_key, credential_tag, datum_hash, spent_at_tx_id,
+    staking_key, credential_tag, datum_hash, spent_by_tx_id,
     referenced_by_tx_id, collateral_by_tx_id, added_slot, deleted_slot,
     amount, output_idx, payment_script
 ) VALUES ` + values + `
@@ -276,7 +275,7 @@ RETURNING id`
 // the unique tx_id_output_idx index whatever its statistics say.
 //
 // A row-value "(tx_id, output_idx) IN (...)" list or a join against VALUES
-// does not hold that plan. "deleted_slot = 0" and "spent_at_tx_id IS NULL"
+// does not hold that plan. "deleted_slot = 0" and "spent_by_tx_id IS NULL"
 // match every live row, but spent rows carry many distinct values with few
 // rows each, so sqlite_stat1 reports both columns as selective and SQLite
 // drives the statement from a deleted_slot-leading index, visiting every live
@@ -288,7 +287,7 @@ RETURNING id`
 // Arguments are the two SET values followed by tx_id, output_idx per input.
 func consumeUtxosBatchQuery(rowCount int, returnStake bool) string {
 	const arm = "SELECT id FROM utxo WHERE tx_id = ? AND output_idx = ? " +
-		"AND deleted_slot = 0 AND spent_at_tx_id IS NULL"
+		"AND deleted_slot = 0 AND spent_by_tx_id IS NULL"
 	arms := strings.TrimSuffix(
 		strings.Repeat(arm+" UNION ALL ", rowCount),
 		" UNION ALL ",
@@ -301,7 +300,7 @@ func consumeUtxosBatchQuery(rowCount int, returnStake bool) string {
 	}
 	return `-- name: ` + name + ` :many
 UPDATE utxo
-SET deleted_slot = ?, spent_at_tx_id = ?
+SET deleted_slot = ?, spent_by_tx_id = ?
 WHERE id IN (` + arms + `)
 RETURNING ` + returning
 }
@@ -1372,7 +1371,7 @@ func (s *Store) setTransactionWithAccumulator(
 			if overlay != nil {
 				var produced, consumed, skipped []stakeCredentialDelta
 				produced, consumed, skipped, err = s.setTransactionOverlayUtxos(
-					ctx, db, overlay, transaction, point,
+					ctx, db, overlay, transaction, point, transactionID,
 					producedModels, uniqueConsumedInputs(transaction),
 				)
 				if err != nil {
@@ -1497,7 +1496,7 @@ func (s *Store) setTransactionWithAccumulator(
 				if s.dialect.Name() == "sqlite" && len(batch) > 1 {
 					query := consumeUtxosBatchQuery(len(batch), true)
 					args := make([]any, 0, 2+len(batch)*2)
-					args = append(args, point.Slot, hash)
+					args = append(args, point.Slot, transactionID)
 					for _, ref := range batch {
 						args = append(args, ref.Hash, ref.Idx)
 					}
@@ -1517,7 +1516,7 @@ func (s *Store) setTransactionWithAccumulator(
 				} else if s.dialect.Name() == "sqlite" {
 					rows, err := s.queryRowsCached(
 						ctx, db, consumeUtxoSQLiteReturningSQL,
-						point.Slot, hash, batch[0].Hash, batch[0].Idx,
+						point.Slot, transactionID, batch[0].Hash, batch[0].Idx,
 					)
 					if err != nil {
 						return err
@@ -1534,7 +1533,7 @@ func (s *Store) setTransactionWithAccumulator(
 					for _, ref := range batch {
 						result, err := s.execCached(
 							ctx, db, consumeUtxoSQL,
-							point.Slot, hash, ref.Hash, ref.Idx,
+							point.Slot, transactionID, ref.Hash, ref.Idx,
 						)
 						if err != nil {
 							return err
@@ -1561,7 +1560,7 @@ func (s *Store) setTransactionWithAccumulator(
 					}
 					var (
 						deletedSlot uint64
-						spentBy     []byte
+						spentBy     sql.NullInt64
 					)
 					err = s.queryRowCached(ctx, db, getUtxoSpendStateQuery,
 						utxoID.Hash,
@@ -1573,10 +1572,10 @@ func (s *Store) setTransactionWithAccumulator(
 					if err != nil {
 						return err
 					}
-					if bytes.Equal(spentBy, hash) {
+					if spentBy.Valid && spentBy.Int64 == transactionID {
 						continue
 					}
-					if deletedSlot == 0 && len(spentBy) == 0 {
+					if deletedSlot == 0 && !spentBy.Valid {
 						return fmt.Errorf(
 							"consume UTxO %x#%d: row was not updated",
 							utxoID.Hash,
@@ -1587,13 +1586,13 @@ func (s *Store) setTransactionWithAccumulator(
 						continue
 					}
 					return fmt.Errorf(
-						"%w: %x:%d (already spent_by=%x deleted_slot=%d, this_tx=%x)",
+						"%w: %x:%d (already spent_by_tx_id=%v deleted_slot=%d, this_tx_id=%d)",
 						types.ErrUtxoConflict,
 						utxoID.Hash,
 						utxoID.Idx,
-						spentBy,
+						spentBy.Int64,
 						deletedSlot,
-						hash,
+						transactionID,
 					)
 				}
 			}
@@ -1931,20 +1930,25 @@ func (s *Store) DeleteTransactionsAfterSlot(
 		txn,
 		func(db queryer, ctx context.Context) error {
 			rows, err := db.QueryContext(ctx, `
-SELECT hash FROM "transaction" WHERE slot > ?`,
+SELECT id, hash FROM "transaction" WHERE slot > ?`,
 				slot,
 			)
 			if err != nil {
 				return err
 			}
 			hashes := [][]byte{}
+			txIDs := []int64{}
 			for rows.Next() {
-				var hash []byte
-				if err := rows.Scan(&hash); err != nil {
+				var (
+					id   int64
+					hash []byte
+				)
+				if err := rows.Scan(&id, &hash); err != nil {
 					rows.Close()
 					return err
 				}
 				hashes = append(hashes, hash)
+				txIDs = append(txIDs, id)
 			}
 			if err := rows.Close(); err != nil {
 				return err
@@ -1959,13 +1963,17 @@ SELECT hash FROM "transaction" WHERE slot > ?`,
 				for i, hash := range hashes[start:end] {
 					args[i] = hash
 				}
+				idArgs := make([]any, end-start)
+				for i, id := range txIDs[start:end] {
+					idArgs[i] = id
+				}
 				stakeQuery, err := s.rollbackSpentStakeRefsQuery(
-					ctx, db, len(args),
+					ctx, db, len(idArgs),
 				)
 				if err != nil {
 					return err
 				}
-				stakeRows, err := db.QueryContext(ctx, stakeQuery, args...)
+				stakeRows, err := db.QueryContext(ctx, stakeQuery, idArgs...)
 				if err != nil {
 					return err
 				}
@@ -1987,9 +1995,9 @@ SELECT hash FROM "transaction" WHERE slot > ?`,
 					)
 				}
 				if _, err := db.ExecContext(ctx, `
-UPDATE utxo SET spent_at_tx_id = NULL, deleted_slot = 0
-WHERE spent_at_tx_id IN (`+bindPlaceholders(len(args))+`)`,
-					args...,
+UPDATE utxo SET spent_by_tx_id = NULL, deleted_slot = 0
+WHERE spent_by_tx_id IN (`+bindPlaceholders(len(idArgs))+`)`,
+					idArgs...,
 				); err != nil {
 					return err
 				}
@@ -2049,13 +2057,20 @@ DELETE FROM asset_mint_burn WHERE slot > ?`,
 // insertUtxoQuery inserts one new output. PostgreSQL reads RETURNING
 // natively; MySQL leaves this statement uncached so its dialect adapter
 // can emulate the returning ID. SQLite uses the Exec-result forms below.
+// spentByPlaceholder resolves a spender hash bound by the caller to the
+// spender's transaction row id inside the statement. A NULL hash, which every
+// freshly produced output carries, yields NULL without a lookup. A hash with
+// no transaction row also yields NULL; the apply paths store spends by id
+// directly and only import and recovery inserts pass a hash.
+const spentByPlaceholder = `(SELECT id FROM "transaction" WHERE hash = ?)`
+
 const insertUtxoQuery = `-- name: InsertUtxo :one
 INSERT INTO utxo (
     transaction_id, collateral_return_for_tx_id, tx_id, payment_key,
-    staking_key, credential_tag, datum_hash, spent_at_tx_id,
+    staking_key, credential_tag, datum_hash, spent_by_tx_id,
     referenced_by_tx_id, collateral_by_tx_id, added_slot, deleted_slot,
     amount, output_idx, payment_script
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ` + spentByPlaceholder + `, ?, ?, ?, ?, ?, ?, ?)
 RETURNING id`
 
 // insertUtxoQueryIgnoreConflict leaves an existing (tx_id, output_idx)
@@ -2064,10 +2079,10 @@ RETURNING id`
 const insertUtxoQueryIgnoreConflict = `-- name: InsertUtxoIfAbsent :one
 INSERT INTO utxo (
     transaction_id, collateral_return_for_tx_id, tx_id, payment_key,
-    staking_key, credential_tag, datum_hash, spent_at_tx_id,
+    staking_key, credential_tag, datum_hash, spent_by_tx_id,
     referenced_by_tx_id, collateral_by_tx_id, added_slot, deleted_slot,
     amount, output_idx, payment_script
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ` + spentByPlaceholder + `, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (tx_id, output_idx) DO NOTHING
 RETURNING id`
 
@@ -2610,16 +2625,16 @@ INSERT INTO leios_transaction_context (transaction_id, slot) VALUES (?, ?) ON CO
 // reads. It is a deferred index, so it can be absent while a bulk-load
 // rebuild is pending.
 var rollbackSpentStakeRefsIndex = deferred.Index{
-	Name:  "idx_utxo_spent_at_tx_id",
+	Name:  "idx_utxo_spent_by_tx_id",
 	Table: "utxo",
 }
 
 // rollbackSpentStakeRefsQuery returns the statement that collects the stake
 // credentials of the UTxOs spent by n rolled-back transactions.
 //
-// On SQLite the statement names idx_utxo_spent_at_tx_id whenever that index
+// On SQLite the statement names idx_utxo_spent_by_tx_id whenever that index
 // exists. Its statistics are unreliable: utxo statistics taken over an
-// imported, never-spent UTxO set record spent_at_tx_id as one value covering
+// imported, never-spent UTxO set record spent_by_tx_id as one value covering
 // every row, and the table never grows enough afterwards for the incremental
 // refresh to re-analyze it. With those statistics a single-hash lookup was
 // planned as a pass over every utxo row, holding the ledger write lock for
@@ -2650,7 +2665,7 @@ func (s *Store) rollbackSpentStakeRefsQuery(
 	}
 	return "-- name: GetRollbackSpentStakeRefs\n" +
 		"SELECT credential_tag, staking_key " + from + "\n" +
-		"WHERE spent_at_tx_id IN (" + bindPlaceholders(n) + ")", nil
+		"WHERE spent_by_tx_id IN (" + bindPlaceholders(n) + ")", nil
 }
 
 const insertAccountWithdrawalWitnessSQL = `-- name: InsertAccountWithdrawalWitness :exec
