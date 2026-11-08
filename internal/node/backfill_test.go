@@ -1753,6 +1753,69 @@ func TestRun_ConsumedInputRecoveryDependsOnFreshBootstrap(t *testing.T) {
 	}
 }
 
+// TestRun_ConsumedInputRecoveryBoundedAfterRestart pins the recovery window: a
+// restart that has no legacy progress replays only the first window of blocks
+// with recovery, because later blocks cannot have committed before the
+// restart. Legacy progress without block identity keeps recovery for the
+// whole chain.
+func TestRun_ConsumedInputRecoveryBoundedAfterRestart(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name         string
+		window       int
+		legacySlot   uint64
+		wantSkipping bool
+	}{
+		{name: "restart past window skips recovery", window: 1, wantSkipping: true},
+		{name: "restart inside window recovers", window: 100},
+		{name: "legacy progress recovers whole chain", window: 1, legacySlot: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			db := newTestDB(t)
+			blocks, err := testfixtures.GenerateConwayChainWithTransactions(3)
+			require.NoError(t, err)
+			for _, block := range blocks {
+				require.NoError(t, db.BlockCreate(models.Block{
+					Slot:   block.SlotNumber(),
+					Hash:   block.Hash().Bytes(),
+					Number: block.BlockNumber(),
+					Cbor:   block.Cbor(),
+					Type:   uint(block.Type()),
+				}, nil))
+			}
+			now := time.Now()
+			require.NoError(t, db.Metadata().SetBackfillCheckpoint(
+				&models.BackfillCheckpoint{
+					Phase:     BackfillPhase,
+					LastSlot:  tc.legacySlot,
+					StartedAt: now,
+					UpdatedAt: now,
+				}, nil,
+			))
+
+			var progress []BackfillProgress
+			bf := NewBackfill(
+				db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)),
+			)
+			bf.recoveryWindowBlocks = tc.window
+			bf.SetProgressFunc(func(p BackfillProgress) {
+				progress = append(progress, p)
+			})
+			require.NoError(t, bf.Run(context.Background()))
+			require.NotEmpty(t, progress)
+			skipped := progress[len(progress)-1].Stats.SkippedInputRecovery
+			if tc.wantSkipping {
+				assert.Greater(t, skipped, uint64(0))
+			} else {
+				assert.Zero(t, skipped)
+			}
+		})
+	}
+}
+
 func TestRun_FailedFreshBootstrapRetryEnablesConsumedInputRecovery(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)
@@ -3171,4 +3234,34 @@ func TestRun_ResumesFromCheckpointSharingEbbSlot(t *testing.T) {
 	require.NotNil(t, stored)
 	require.True(t, stored.Completed)
 	require.Equal(t, blocks[1].SlotNumber(), stored.LastSlot)
+}
+
+// The recovery window assumes every periodic checkpoint was saved, so a failed
+// save must stop the run rather than let committed rows outrun it.
+func TestRun_PeriodicCheckpointFailureStopsBackfill(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	blocks, err := testfixtures.GenerateConwayChainWithTransactions(3)
+	require.NoError(t, err)
+	for _, block := range blocks {
+		require.NoError(t, db.BlockCreate(models.Block{
+			Slot:   block.SlotNumber(),
+			Hash:   block.Hash().Bytes(),
+			Number: block.BlockNumber(),
+			Cbor:   block.Cbor(),
+			Type:   uint(block.Type()),
+		}, nil))
+	}
+	bf := NewBackfill(db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	bf.recoveryWindowBlocks = 1
+	writeErr := errors.New("checkpoint write failed")
+	var writes int
+	bf.writeCheckpoint = func(cp *models.BackfillCheckpoint) error {
+		writes++
+		return writeErr
+	}
+	err = bf.Run(context.Background())
+	require.ErrorIs(t, err, writeErr)
+	require.Positive(t, writes)
 }
