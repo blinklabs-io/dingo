@@ -18,6 +18,8 @@ package connmanager
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
@@ -51,6 +53,17 @@ func (l *publishedUnixListener) Close() error {
 	)
 }
 
+// beforeUnixSocketQuarantine runs immediately before teardown moves the
+// published entry aside. Tests use it to replace the entry at that instant.
+var beforeUnixSocketQuarantine func()
+
+// removeUnixSocketIfSame removes name only if it is still the socket
+// described by expected. os.Root offers no compare-and-unlink, so a
+// Lstat followed by Remove would unlink whatever replaced the entry in
+// between. Instead the entry is renamed atomically into a private
+// directory inside root, and identity is checked on the moved entry: only
+// the entry that was actually moved can be removed, and a replacement is
+// renamed back without overwriting anything.
 func removeUnixSocketIfSame(
 	root *os.Root,
 	name string,
@@ -63,10 +76,67 @@ func removeUnixSocketIfSame(
 	if err != nil {
 		return err
 	}
-	if !os.SameFile(expected, current) {
+	if !sameUnixSocket(expected, current) {
 		return nil
 	}
-	return root.Remove(name)
+	quarantine, err := makeUnixSocketQuarantine(root)
+	if err != nil {
+		return err
+	}
+	moved := filepath.Join(quarantine, "s")
+	if beforeUnixSocketQuarantine != nil {
+		beforeUnixSocketQuarantine()
+	}
+	if err := securefs.RenameNoReplace(root, name, moved); err != nil {
+		_ = root.Remove(quarantine)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	movedInfo, err := root.Lstat(moved)
+	if err != nil {
+		return fmt.Errorf("inspect quarantined unix socket: %w", err)
+	}
+	if sameUnixSocket(expected, movedInfo) {
+		return errors.Join(root.Remove(moved), root.Remove(quarantine))
+	}
+	if err := securefs.RenameNoReplace(root, moved, name); err != nil {
+		return fmt.Errorf(
+			"restore replaced unix socket path %s (kept at %s): %w",
+			name,
+			moved,
+			err,
+		)
+	}
+	return root.Remove(quarantine)
+}
+
+// sameUnixSocket also requires a socket type because a freed inode number
+// can be reused by an unrelated file created right after the socket is
+// unlinked, which os.SameFile alone would accept. An unrelated socket that
+// reuses the inode of the one just unlinked cannot be told apart by the
+// available metadata; the private parent directory is what bounds that case.
+func sameUnixSocket(expected, current os.FileInfo) bool {
+	return current.Mode()&os.ModeSocket != 0 && os.SameFile(expected, current)
+}
+
+func makeUnixSocketQuarantine(root *os.Root) (string, error) {
+	for range 16 {
+		var suffix [8]byte
+		if _, err := rand.Read(suffix[:]); err != nil {
+			return "", err
+		}
+		name := ".dingo-sock-" + hex.EncodeToString(suffix[:])
+		err := root.Mkdir(name, 0o700)
+		if err == nil {
+			return name, nil
+		}
+		if !errors.Is(err, os.ErrExist) {
+			return "", fmt.Errorf("create unix socket quarantine: %w", err)
+		}
+	}
+	return "", errors.New("create unix socket quarantine: name collision")
 }
 
 func validateUnixSocketParent(root *os.Root) error {

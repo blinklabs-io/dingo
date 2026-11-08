@@ -410,3 +410,37 @@ func TestStartListener_UnixSocket_PropagatesRemovalError(t *testing.T) {
 	_, statErr := os.Lstat(socketPath)
 	require.NoError(t, statErr, "socket should remain when removal fails")
 }
+
+func TestStartListener_UnixSocket_CloseSwapDuringTeardownPreservesReplacement(
+	t *testing.T,
+) {
+	dir := unixTestTempDir(t)
+	address := filepath.Join(dir, "node.sock")
+	cm := NewConnectionManager(ConnectionManagerConfig{
+		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		PromRegistry: prometheus.NewRegistry(),
+		Listeners: []ListenerConfig{{
+			ListenNetwork:     "unix",
+			ListenAddress:     address,
+			UnixSocketMode:    0o600,
+			UnixSocketModeSet: true,
+		}},
+	})
+	require.NoError(t, cm.Start(t.Context()))
+
+	beforeUnixSocketQuarantine = func() {
+		require.NoError(t, os.Remove(address))
+		require.NoError(t, os.WriteFile(address, []byte("replacement"), 0o600))
+	}
+	t.Cleanup(func() { beforeUnixSocketQuarantine = nil })
+
+	stopCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	require.NoError(t, cm.Stop(stopCtx))
+	contents, err := os.ReadFile(address)
+	require.NoError(t, err)
+	require.Equal(t, []byte("replacement"), contents)
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	require.Len(t, entries, 1, "teardown left quarantine data")
+}
