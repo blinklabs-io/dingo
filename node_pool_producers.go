@@ -143,17 +143,32 @@ func (n *Node) initMultiPool() error {
 		return nil
 	}
 	producers := make([]*poolProducer, 0, len(pools)-1)
-	for i, p := range pools[1:] {
+	// Two entries for one pool would forge it twice, each with its own
+	// forge fence, so every slot it leads would get two blocks.
+	seen := make(map[string]int, len(pools))
+	for i, p := range pools {
 		poolID, err := poolIDFromOpCertFile(p.ShelleyOperationalCertificate)
 		if err != nil {
 			return fmt.Errorf(
 				"blockProducerPools[%d]: read pool ID: %w",
-				i+1,
+				i,
 				err,
 			)
 		}
+		if first, dup := seen[poolID]; dup {
+			return fmt.Errorf(
+				"blockProducerPools[%d] and blockProducerPools[%d] are both pool %s",
+				first,
+				i,
+				poolID,
+			)
+		}
+		seen[poolID] = i
+		if i == 0 {
+			continue
+		}
 		producers = append(producers, &poolProducer{
-			index:  i + 1,
+			index:  i,
 			keys:   producerKeysFromPool(p),
 			poolID: poolID,
 		})
