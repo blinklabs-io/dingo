@@ -160,6 +160,12 @@ func TestConsumeUtxosBatchQueryPlansOnTxIDOutputIdx(t *testing.T) {
 			).Scan(&n))
 			require.Zero(t, n, "fixture must start without sqlite_stat1")
 		}},
+		{"bounded_optimize", func() {
+			supported, err := store.dialect.OptimizePlannerStats(ctx, conn)
+			require.NoError(t, err)
+			require.True(t, supported)
+			require.Positive(t, statRows("sqlite_stat1"))
+		}},
 		{"stat1_and_stat4", func() {
 			exec("ANALYZE")
 			require.Positive(t, statRows("sqlite_stat1"))
