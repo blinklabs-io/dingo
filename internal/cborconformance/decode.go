@@ -15,6 +15,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/mary"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+	plutusdata "github.com/blinklabs-io/plutigo/data"
 )
 
 var conwayRules = []string{
@@ -267,10 +268,7 @@ func reencode(rule string, raw []byte) ([]byte, error) {
 	case "asset_name":
 		return reencodeBytes(raw, 0, 32)
 	case "big_int":
-		if err := validateConwayBigIntCBOR(raw); err != nil {
-			return nil, err
-		}
-		return reencodeTyped[big.Int](raw)
+		return reencodeTyped[plutusdata.Integer](raw)
 	case "block":
 		if err := validateConwayBlockCBOR(raw); err != nil {
 			return nil, err
@@ -292,7 +290,7 @@ func reencode(rule string, raw []byte) ([]byte, error) {
 	case "bootstrap_witness":
 		return reencodeTyped[common.BootstrapWitness](raw)
 	case "bounded_bytes":
-		return reencodeByteString(raw, 0, 64, false)
+		return reencodeTyped[plutusdata.ByteString](raw)
 	case "certificate":
 		if err := requireCBORMajorType(raw, 4); err != nil {
 			return nil, err
@@ -807,29 +805,6 @@ func validateConwayBlockCBOR(raw []byte) error {
 				return errors.New("conway block invalid transaction indexes must be strictly increasing")
 			}
 		}
-	}
-	return nil
-}
-
-func validateConwayBigIntCBOR(raw []byte) error {
-	node, err := cbor.ParseDiagnostic(raw)
-	if err != nil {
-		return err
-	}
-	if node.Type == cbor.DiagTypeUint || node.Type == cbor.DiagTypeNint {
-		return nil
-	}
-	if node.Type != cbor.DiagTypeTag || node.Tag == nil ||
-		(*node.Tag != 2 && *node.Tag != 3) || len(node.Children) != 1 ||
-		node.Children[0].Type != cbor.DiagTypeBytes {
-		return errors.New("big integer must be an integer or a CBOR bignum")
-	}
-	value, ok := node.Children[0].Value.([]byte)
-	if !ok {
-		return errors.New("CBOR bignum does not contain a byte string")
-	}
-	if len(value) > 64 {
-		return fmt.Errorf("CBOR bignum magnitude is %d bytes, maximum is 64", len(value))
 	}
 	return nil
 }

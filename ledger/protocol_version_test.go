@@ -80,7 +80,7 @@ func newBabbageQuorumCfg(
 			"protocolMagic": 42
 		}
 	}`)))
-	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(
+	require.NoError(t, completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(
 		fmt.Sprintf(`{
 		"systemStart": "2026-01-01T00:00:00Z",
 		"securityParam": %d,

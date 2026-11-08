@@ -851,17 +851,34 @@ func shelleyGenesisCfgForBP(
 ) *cardano.CardanoNodeConfig {
 	t.Helper()
 	cfg := &cardano.CardanoNodeConfig{}
-	if err := cfg.LoadShelleyGenesisFromReader(strings.NewReader(`{
-		"systemStart": "` + systemStart.UTC().Format(time.RFC3339Nano) + `",
-		"securityParam": 10,
-		"activeSlotsCoeff": 0.5,
-		"slotsPerKESPeriod": 129600,
-		"maxKESEvolutions": 62,
-		"slotLength": 1
-	}`)); err != nil {
+	genesis := shelleyGenesisJSONForBP(t, systemStart, 129600, 62)
+	if err := cfg.LoadShelleyGenesisFromReader(strings.NewReader(genesis)); err != nil {
 		t.Fatalf("LoadShelleyGenesisFromReader: %v", err)
 	}
 	return cfg
+}
+
+func shelleyGenesisJSONForBP(
+	t *testing.T,
+	systemStart time.Time,
+	slotsPerKESPeriod uint64,
+	maxKESEvolutions uint64,
+) string {
+	t.Helper()
+	var genesis map[string]any
+	if err := json.Unmarshal([]byte(testShelleyGenesisJSON(42)), &genesis); err != nil {
+		t.Fatalf("decode Shelley genesis fixture: %v", err)
+	}
+	genesis["systemStart"] = systemStart.UTC().Format(time.RFC3339Nano)
+	genesis["securityParam"] = 10
+	genesis["activeSlotsCoeff"] = 0.5
+	genesis["slotsPerKESPeriod"] = slotsPerKESPeriod
+	genesis["maxKESEvolutions"] = maxKESEvolutions
+	data, err := json.Marshal(genesis)
+	if err != nil {
+		t.Fatalf("encode Shelley genesis fixture: %v", err)
+	}
+	return string(data)
 }
 
 func newTestNodeForBP(
@@ -923,14 +940,8 @@ func TestValidateBlockProducerStartup_ExpiredKESPeriod(t *testing.T) {
 	vrf, kes, opcert := devnetCredPaths(t)
 	cfg := &cardano.CardanoNodeConfig{}
 	systemStart := time.Now().Add(-365 * 24 * time.Hour)
-	if err := cfg.LoadShelleyGenesisFromReader(strings.NewReader(`{
-		"systemStart": "` + systemStart.UTC().Format(time.RFC3339Nano) + `",
-		"securityParam": 10,
-		"activeSlotsCoeff": 0.5,
-		"slotsPerKESPeriod": 10,
-		"maxKESEvolutions": 1,
-		"slotLength": 1
-	}`)); err != nil {
+	genesis := shelleyGenesisJSONForBP(t, systemStart, 10, 1)
+	if err := cfg.LoadShelleyGenesisFromReader(strings.NewReader(genesis)); err != nil {
 		t.Fatalf("LoadShelleyGenesisFromReader: %v", err)
 	}
 	n := newTestNodeForBP(t, true, vrf, kes, opcert, cfg)
@@ -1225,14 +1236,8 @@ func expiredKESGenesisForBP(t *testing.T) *cardano.CardanoNodeConfig {
 	t.Helper()
 	cfg := &cardano.CardanoNodeConfig{}
 	systemStart := time.Now().Add(-365 * 24 * time.Hour)
-	if err := cfg.LoadShelleyGenesisFromReader(strings.NewReader(`{
-		"systemStart": "` + systemStart.UTC().Format(time.RFC3339Nano) + `",
-		"securityParam": 10,
-		"activeSlotsCoeff": 0.5,
-		"slotsPerKESPeriod": 10,
-		"maxKESEvolutions": 1,
-		"slotLength": 1
-	}`)); err != nil {
+	genesis := shelleyGenesisJSONForBP(t, systemStart, 10, 1)
+	if err := cfg.LoadShelleyGenesisFromReader(strings.NewReader(genesis)); err != nil {
 		t.Fatalf("LoadShelleyGenesisFromReader: %v", err)
 	}
 	return cfg
