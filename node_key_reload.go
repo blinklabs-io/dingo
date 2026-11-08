@@ -498,7 +498,6 @@ func credentialFilesDigest(files []string) [sha256.Size]byte {
 	h := sha256.New()
 	for _, f := range files {
 		data, err := os.ReadFile(f) //nolint:gosec // configured key paths
-
 		if err != nil {
 			fmt.Fprintf(h, "%s\x00error:%v\x00", f, err)
 			continue

@@ -884,6 +884,7 @@ func (n *Node) startBlockProducer(
 	}
 	n.blockProducerCreds.Store(creds)
 	n.setEquivocationSelfPoolID(creds)
+	//nolint:contextcheck // the reload loops are bound to the node lifecycle context, not this call
 	n.startKeyReloadLoops()
 	started = append(started, func() {
 		n.stopKeyReloadLoops()
