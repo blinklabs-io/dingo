@@ -11062,6 +11062,14 @@ func (ls *LedgerState) ledgerProcessBlock(
 				expandedIndexOffset += uint64(len(levels)) - 1
 			}
 
+			// Keeping a consumed output in the created overlay would resurrect it
+			// for a later transaction even though the applied state marks it spent.
+			for _, level := range levels {
+				for _, input := range level.Consumed() {
+					delete(intraBlockUtxos, utxoref.ForInput(input))
+				}
+			}
+
 			// Add this transaction's outputs to intra-block map for subsequent TX lookups
 			// Use tx.Produced() instead of tx.Outputs() to handle failed transactions
 			// correctly - for failed TXs, Produced() returns collateral return at the

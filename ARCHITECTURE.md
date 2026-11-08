@@ -4607,7 +4607,10 @@ applicable endorser transactions and before the ranking block's own mutations.
 The check resolves UTxOs from the block's single prefetch, which the
 per-transaction validators then reuse, so each input the prefetch returns is
 read from the database once; an input it does not return is read by each check
-that needs it. A block of the era listed before the ledger's era is judged under
+that needs it. Outputs created by an earlier transaction are visible through
+the block overlay until another transaction consumes them; a spent overlay
+output cannot resolve as a regular, collateral, or reference input later in the
+block. A block of the era listed before the ledger's era is judged under
 the previous era's parameters, the same rule applied to its transactions. With
 `LedgerStateConfig.LedgerPrefetchAheadEnabled` (`ledgerPrefetchAheadEnabled`, on
 by default in node configuration), the block-apply chunk also resolves block
