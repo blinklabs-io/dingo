@@ -56,6 +56,7 @@ func newTestCert(t *testing.T, name string) testCert {
 		},
 		BasicConstraintsValid: true,
 		IsCA:                  true,
+		IPAddresses:           []net.IP{net.IPv4(127, 0, 0, 1)},
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, pub, priv)
 	require.NoError(t, err)
@@ -85,9 +86,10 @@ func (c testCert) writePEM(t *testing.T) (certFile, keyFile string) {
 	return certFile, keyFile
 }
 
-// fakeRemoteAgent is a bursa attested sign listener with the mtls provider:
-// TLS 1.3 requiring the client certificate, the Hello, the admission
-// exchange, then sign requests answered with real KES signatures.
+// fakeRemoteAgent is a bursa attested sign listener with the "none"
+// provider: by default TLS 1.3 requiring the client certificate, then the
+// Hello, the admission exchange, and sign requests answered with real KES
+// signatures.
 type fakeRemoteAgent struct {
 	addr     string
 	server   testCert
@@ -101,21 +103,57 @@ type fakeRemoteAgent struct {
 	lastAdmission atomic.Pointer[attestationRequest]
 }
 
+// fakeTransport is the listener a fakeRemoteAgent runs.
+type fakeTransport int
+
+const (
+	// fakeMutualTLS requires and verifies the client certificate.
+	fakeMutualTLS fakeTransport = iota
+	// fakeServerTLS asks for no client certificate.
+	fakeServerTLS
+	// fakePlainTCP runs the frames over plain TCP.
+	fakePlainTCP
+)
+
 func startFakeRemoteAgent(
 	t *testing.T,
 	client testCert,
 	skeyData, vkey, opCert []byte,
 ) *fakeRemoteAgent {
 	t.Helper()
+	return startFakeRemoteAgentOn(
+		t, fakeMutualTLS, client, skeyData, vkey, opCert,
+	)
+}
+
+func startFakeRemoteAgentOn(
+	t *testing.T,
+	transport fakeTransport,
+	client testCert,
+	skeyData, vkey, opCert []byte,
+) *fakeRemoteAgent {
+	t.Helper()
 	a := &fakeRemoteAgent{server: newTestCert(t, "agent")}
-	pool := x509.NewCertPool()
-	pool.AddCert(client.x509)
-	ln, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{
-		MinVersion:   tls.VersionTLS13,
-		Certificates: []tls.Certificate{a.server.tls},
-		ClientAuth:   tls.RequireAndVerifyClientCert,
-		ClientCAs:    pool,
-	})
+	var ln net.Listener
+	var err error
+	switch transport {
+	case fakePlainTCP:
+		ln, err = net.Listen("tcp", "127.0.0.1:0")
+	case fakeServerTLS:
+		ln, err = tls.Listen("tcp", "127.0.0.1:0", &tls.Config{
+			MinVersion:   tls.VersionTLS13,
+			Certificates: []tls.Certificate{a.server.tls},
+		})
+	default:
+		pool := x509.NewCertPool()
+		pool.AddCert(client.x509)
+		ln, err = tls.Listen("tcp", "127.0.0.1:0", &tls.Config{
+			MinVersion:   tls.VersionTLS13,
+			Certificates: []tls.Certificate{a.server.tls},
+			ClientAuth:   tls.RequireAndVerifyClientCert,
+			ClientCAs:    pool,
+		})
+	}
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = ln.Close() })
 	a.addr = ln.Addr().String()
@@ -148,7 +186,7 @@ func (a *fakeRemoteAgent) serve(conn net.Conn, skeyData, vkey, opCert []byte) {
 		Type:     "attestation_response",
 		Protocol: AttestedProtocolID,
 		Nonce:    req.Nonce,
-		Provider: ProviderMTLS,
+		Provider: ProviderNone,
 		KESVKey:  vkey,
 		OpCert:   opCert,
 		Period:   0,
@@ -239,15 +277,130 @@ func TestRemoteClientRefusesWrongOrMissingPin(t *testing.T) {
 	require.Error(t, err)
 	require.Zero(t, a.signs.Load())
 
+	// Without a pin the agent's self-signed certificate is verified against
+	// the system roots, which do not hold it.
 	certFile, keyFile := client.writePEM(t)
-	_, err = NewRemoteClient(RemoteConfig{
+	unpinned, err := NewRemoteClient(RemoteConfig{
 		Address:        a.addr,
 		ClientCertFile: certFile,
 		ClientKeyFile:  keyFile,
 		KESVKey:        vkey,
 		OpCert:         opCert,
 	})
-	require.ErrorContains(t, err, "server SPKI SHA-256 pin")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = unpinned.Close() })
+	var unknownAuthority x509.UnknownAuthorityError
+	require.ErrorAs(t, unpinned.Prepare(), &unknownAuthority)
+	require.Zero(t, a.signs.Load())
+}
+
+// TestRemoteClientTransportModes signs through each transport: a pinned
+// server key with and without a client certificate, x509 verification
+// without a pin, and plain TCP. Every
+// mode runs the same admission and verifies every signature against the
+// local operational certificate.
+func TestRemoteClientTransportModes(t *testing.T) {
+	t.Parallel()
+	skeyData, vkey, opCert := testKESMaterial(t)
+	for _, tc := range []struct {
+		name       string
+		transport  fakeTransport
+		clientCert bool
+		pinned     bool
+		trustAgent bool
+		plaintext  bool
+	}{
+		{
+			name:       "pinned, client certificate",
+			transport:  fakeMutualTLS,
+			clientCert: true,
+			pinned:     true,
+		},
+		{name: "pinned, no client certificate", transport: fakeServerTLS, pinned: true},
+		{name: "verified by CA", transport: fakeServerTLS, trustAgent: true},
+		{name: "plain TCP", transport: fakePlainTCP, plaintext: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			client := newTestCert(t, "node")
+			a := startFakeRemoteAgentOn(
+				t, tc.transport, client, skeyData, vkey, opCert,
+			)
+			cfg := RemoteConfig{
+				Address:     a.addr,
+				Plaintext:   tc.plaintext,
+				KESVKey:     vkey,
+				OpCert:      opCert,
+				SignTimeout: 2 * time.Second,
+			}
+			if tc.pinned {
+				cfg.ServerSPKISHA256 = a.server.spki
+			}
+			if tc.clientCert {
+				cfg.ClientCertFile, cfg.ClientKeyFile = client.writePEM(t)
+			}
+			c, err := NewRemoteClient(cfg)
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = c.Close() })
+			if tc.trustAgent {
+				// Stands in for a CA in the system roots: the agent's
+				// self-signed certificate is its own authority.
+				roots := x509.NewCertPool()
+				roots.AddCert(a.server.x509)
+				c.tlsConfig.RootCAs = roots
+			}
+			require.NoError(t, c.Prepare())
+			sig, err := c.Sign(0, []byte("header"))
+			require.NoError(t, err)
+			require.True(t, kes.VerifySignedKES(vkey, 0, []byte("header"), sig))
+			require.Equal(t, int32(1), a.signs.Load())
+		})
+	}
+}
+
+// TestRemoteClientRefusesConflictingTransportOptions checks the only refused
+// combinations: options that need TLS on a plain TCP link, and half a client
+// certificate.
+func TestRemoteClientRefusesConflictingTransportOptions(t *testing.T) {
+	t.Parallel()
+	_, vkey, opCert := testKESMaterial(t)
+	certFile, keyFile := newTestCert(t, "node").writePEM(t)
+	pin := newTestCert(t, "agent").spki
+	for _, tc := range []struct {
+		name string
+		cfg  RemoteConfig
+		want string
+	}{
+		{
+			"plain TCP with a pin",
+			RemoteConfig{Plaintext: true, ServerSPKISHA256: pin},
+			"plain TCP",
+		},
+		{
+			"plain TCP with a client certificate",
+			RemoteConfig{
+				Plaintext:      true,
+				ClientCertFile: certFile,
+				ClientKeyFile:  keyFile,
+			},
+			"plain TCP",
+		},
+		{
+			"certificate without key",
+			RemoteConfig{ServerSPKISHA256: pin, ClientCertFile: certFile},
+			"set together",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := tc.cfg
+			cfg.Address = "127.0.0.1:1"
+			cfg.KESVKey = vkey
+			cfg.OpCert = opCert
+			_, err := NewRemoteClient(cfg)
+			require.ErrorContains(t, err, tc.want)
+		})
+	}
 }
 
 func TestRemoteClientAdmissionChecks(t *testing.T) {
@@ -259,6 +412,7 @@ func TestRemoteClientAdmissionChecks(t *testing.T) {
 	}{
 		{"wrong nonce", func(r *attestationResponse) { r.Nonce = make([]byte, 32) }},
 		{"other provider", func(r *attestationResponse) { r.Provider = "nitro" }},
+		{"pre-rename provider", func(r *attestationResponse) { r.Provider = "mtls" }},
 		{"evidence present", func(r *attestationResponse) { r.Attestation = []byte{1} }},
 		{"other opcert", func(r *attestationResponse) {
 			r.OpCert = append(append([]byte(nil), opCert...), 0)

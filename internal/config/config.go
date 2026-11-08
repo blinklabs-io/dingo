@@ -1029,22 +1029,33 @@ type Config struct {
 	// the client default (500ms).
 	ShelleyKESAgentSignTimeout time.Duration `yaml:"shelleyKesAgentSignTimeout"       envconfig:"SHELLEY_KES_AGENT_SIGN_TIMEOUT"`
 	// ShelleyKESAgentAddress, when set, signs block headers through a bursa
-	// KES agent's remote sign listener (host:port) over mutually
-	// authenticated TLS 1.3, instead of a local socket. It implies sign mode
-	// and requires the client certificate, its key and the agent's server
-	// key pin below.
+	// KES agent's remote sign listener (host:port) instead of a local socket.
+	// It implies sign mode. The link is TLS 1.3, with the agent authenticated
+	// by the server key pin below or, without one, by x509 verification; the
+	// client certificate is optional. ShelleyKESAgentPlaintext selects plain
+	// TCP instead.
 	ShelleyKESAgentAddress string `yaml:"shelleyKesAgentAddress"          envconfig:"SHELLEY_KES_AGENT_ADDRESS"`
 	// ShelleyKESAgentClientCertFile and ShelleyKESAgentClientKeyFile are
 	// this node's PEM TLS client certificate and key for the remote agent.
+	// They are optional and set as a pair; without them no client
+	// certificate is sent.
 	ShelleyKESAgentClientCertFile string `yaml:"shelleyKesAgentClientCertFile"       envconfig:"SHELLEY_KES_AGENT_CLIENT_CERT_FILE"`
 	ShelleyKESAgentClientKeyFile  string `yaml:"shelleyKesAgentClientKeyFile"        envconfig:"SHELLEY_KES_AGENT_CLIENT_KEY_FILE"`
 	// ShelleyKESAgentServerSPKISHA256 pins the remote agent's TLS server key:
 	// the hex SHA-256 of its certificate's SubjectPublicKeyInfo, which the
 	// agent logs at startup as server_spki_sha256. The agent is authenticated
-	// by this pin alone, not by a certificate authority.
+	// by this pin alone, not by a certificate authority. It is optional:
+	// without it the agent's certificate is verified with standard x509
+	// against the system roots for the address's host name (SSL_CERT_FILE
+	// and SSL_CERT_DIR select a private CA on Unix).
 	ShelleyKESAgentServerSPKISHA256 string `yaml:"shelleyKesAgentServerSpkiSha256" envconfig:"SHELLEY_KES_AGENT_SERVER_SPKI_SHA256"`
-	ForgeSyncToleranceSlots         uint64 `yaml:"forgeSyncToleranceSlots"          envconfig:"DINGO_FORGE_SYNC_TOLERANCE_SLOTS"`
-	ForgeStaleGapThresholdSlots     uint64 `yaml:"forgeStaleGapThresholdSlots"      envconfig:"DINGO_FORGE_STALE_GAP_THRESHOLD_SLOTS"`
+	// ShelleyKESAgentPlaintext runs the remote agent link over plain TCP,
+	// for setups where something else secures it, such as a service mesh
+	// sidecar. The agent's counterpart is kes_agent.attested_plaintext. A
+	// server pin and a client certificate need TLS, so it takes neither.
+	ShelleyKESAgentPlaintext    bool   `yaml:"shelleyKesAgentPlaintext" envconfig:"SHELLEY_KES_AGENT_PLAINTEXT"`
+	ForgeSyncToleranceSlots     uint64 `yaml:"forgeSyncToleranceSlots"          envconfig:"DINGO_FORGE_SYNC_TOLERANCE_SLOTS"`
+	ForgeStaleGapThresholdSlots uint64 `yaml:"forgeStaleGapThresholdSlots"      envconfig:"DINGO_FORGE_STALE_GAP_THRESHOLD_SLOTS"`
 	// ForgeUpstreamStalenessSlots bounds how far the newest block this node
 	// holds may trail the corroborated upstream sync target before forging is
 	// skipped. 0 (the default) disables it.

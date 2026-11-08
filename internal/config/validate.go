@@ -59,8 +59,9 @@ func ValidateKESKeySources(kesKeyPath, kesAgentSocket string) error {
 }
 
 // validateRemoteKESAgent checks a remote KES agent configuration: one KES
-// source only, sign mode, and the client certificate, key and server pin it
-// cannot authenticate without.
+// source only, sign mode, and a transport that can work: the server pin and
+// the client certificate are optional, but need TLS, so plain TCP takes
+// neither, and a client certificate is set as a pair.
 func (c *Config) validateRemoteKESAgent() []error {
 	if c.ShelleyKESAgentAddress == "" {
 		return nil
@@ -85,24 +86,34 @@ func (c *Config) validateRemoteKESAgent() []error {
 			c.ShelleyKESAgentMode,
 		))
 	}
-	if c.ShelleyKESAgentClientCertFile == "" ||
-		c.ShelleyKESAgentClientKeyFile == "" {
+	clientCert := c.ShelleyKESAgentClientCertFile != "" ||
+		c.ShelleyKESAgentClientKeyFile != ""
+	if clientCert && (c.ShelleyKESAgentClientCertFile == "" ||
+		c.ShelleyKESAgentClientKeyFile == "") {
 		errs = append(errs, errors.New(
-			"shelleyKesAgentAddress requires shelleyKesAgentClientCertFile and "+
-				"shelleyKesAgentClientKeyFile",
+			"shelleyKesAgentClientCertFile and shelleyKesAgentClientKeyFile "+
+				"must be set together",
 		))
 	}
-	if c.ShelleyKESAgentServerSPKISHA256 == "" {
-		errs = append(errs, errors.New(
-			"shelleyKesAgentAddress requires shelleyKesAgentServerSpkiSha256",
-		))
-	} else if pin, err := hex.DecodeString(
-		strings.TrimSpace(c.ShelleyKESAgentServerSPKISHA256),
-	); err != nil || len(pin) != sha256.Size {
-		errs = append(errs, fmt.Errorf(
-			"shelleyKesAgentServerSpkiSha256 must be %d hex characters",
-			2*sha256.Size,
-		))
+	pinned := strings.TrimSpace(c.ShelleyKESAgentServerSPKISHA256) != ""
+	if c.ShelleyKESAgentPlaintext {
+		if pinned || clientCert {
+			errs = append(errs, errors.New(
+				"shelleyKesAgentServerSpkiSha256 and a client certificate "+
+					"need TLS, so shelleyKesAgentPlaintext takes neither",
+			))
+		}
+		return errs
+	}
+	if pinned {
+		if pin, err := hex.DecodeString(
+			strings.TrimSpace(c.ShelleyKESAgentServerSPKISHA256),
+		); err != nil || len(pin) != sha256.Size {
+			errs = append(errs, fmt.Errorf(
+				"shelleyKesAgentServerSpkiSha256 must be %d hex characters",
+				2*sha256.Size,
+			))
+		}
 	}
 	return errs
 }

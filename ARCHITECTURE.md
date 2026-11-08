@@ -12154,18 +12154,34 @@ set):
 (`bursa-attested-kes/1`) instead of a local socket, so the KES key never has
 to be on the producer's host and several producers can share one agent. It
 implies sign mode and is exclusive with `--shelley-kes-agent-socket` and
-`--shelley-kes-key`. The connection is TLS 1.3 with this node's client
-certificate and key (`--shelley-kes-agent-client-cert-file`,
-`--shelley-kes-agent-client-key-file`). The agent is authenticated by a pin,
-not by a certificate authority: `--shelley-kes-agent-server-spki-sha256` is
-the hex SHA-256 of the agent's server SubjectPublicKeyInfo, compared in
-constant time during the handshake, and the client refuses to start without
-one. After the agent's `Hello` the client sends an `attestation_request`
-carrying a fresh 32-byte nonce, and admits the session only if the response
-echoes the nonce and protocol, names the `mtls` provider with no evidence,
-and reports exactly the local operational certificate's CBOR, its KES
-verification key, and a period no earlier than the certificate's start. No
-sign request is sent on a session that was not admitted.
+`--shelley-kes-key`. The transport is configuration, and the client logs
+which one it uses at startup (`KES agent link: TLS, pinned server key`,
+`TLS, verified by CA`, or `plain TCP`):
+
+- TLS 1.3 (the default). With `--shelley-kes-agent-server-spki-sha256`, the
+  hex SHA-256 of the agent's server SubjectPublicKeyInfo, the agent is
+  authenticated by that pin, compared in constant time during the handshake,
+  instead of a certificate authority or host name. Without a pin, the agent's
+  certificate gets standard x509 verification against the system roots for
+  the address's host name; on Unix, `SSL_CERT_FILE` and `SSL_CERT_DIR` point
+  those roots at a private CA. A client certificate and key
+  (`--shelley-kes-agent-client-cert-file`,
+  `--shelley-kes-agent-client-key-file`) are optional and set as a pair;
+  without them none is sent and the agent decides whether to accept.
+- Plain TCP (`--shelley-kes-agent-plaintext`), for setups where something
+  else secures the link, such as a service mesh sidecar. The agent's
+  counterpart is `kes_agent.attested_plaintext`. A pin and a client
+  certificate need TLS, so they cannot be combined with it.
+
+The exchange is the same on every transport. After the agent's `Hello` the
+client sends an `attestation_request` carrying a fresh 32-byte nonce, and
+admits the session only if the response echoes the nonce and protocol, names
+the `none` provider (a provider names the attestation evidence, not the
+transport; `none` carries no evidence), carries no evidence, and reports
+exactly the local operational certificate's CBOR, its KES verification key,
+and a period no earlier than the certificate's start. No sign request is sent
+on a session that was not admitted, and every signature is verified against
+the local operational certificate whatever the transport.
 
 The admitted session is kept for the next sign, unlike the local socket's
 connection per request, because a remote handshake costs a network round trip
@@ -12289,8 +12305,10 @@ error that states the length and the limit.
 `internal/config.ValidateKESKeySources` rejects a block producer that sets
 both `shelleyKesKey` and `shelleyKesAgentSocket`, so an operator's explicit
 choice of key source is never silently overridden; `shelleyKesAgentAddress`
-is likewise exclusive with both, accepts only sign mode, and requires the
-client certificate and key files and a 64-hex-character server pin.
+is likewise exclusive with both and accepts only sign mode. Its server pin is
+optional but must be 64 hex characters when set, the client certificate and
+key are optional but set as a pair, and `shelleyKesAgentPlaintext` takes
+neither, since both need TLS.
 `Config.Validate` no longer requires a local `shelleyKesKey` when a KES agent
 socket or address is configured — an agent-only configuration must be able to
 start.

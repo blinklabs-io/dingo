@@ -38,10 +38,12 @@ const (
 	// AttestedProtocolID is the protocol a bursa KES agent's remote sign
 	// listener reports in its Hello.
 	AttestedProtocolID = wire.AttestedProtocolID
-	// ProviderMTLS is the attestation provider of an agent authenticated by
-	// mutual TLS alone: its attestation_response carries no evidence, and the
-	// client authenticates the agent by its pinned server key.
-	ProviderMTLS = "mtls"
+	// ProviderNone is the attestation provider of an agent that presents no
+	// evidence: its attestation_response carries none. A provider names the
+	// evidence, not the transport; how the link itself is authenticated (a
+	// pinned server key, a client certificate, or nothing over plain TCP) is
+	// transport configuration.
+	ProviderNone = wire.NoEvidenceProvider
 
 	// DefaultSessionFreshFor is how long after its last frame an admitted
 	// session is reused. The agent closes a sign session that sends no new
@@ -70,15 +72,25 @@ type RemoteConfig struct {
 	// Address is the agent's remote sign listener, host:port.
 	Address string
 	// ClientCertFile and ClientKeyFile are this node's TLS client
-	// certificate and key, which the agent authenticates.
+	// certificate and key, which the agent can authenticate. They are
+	// optional and set as a pair; without them no client certificate is
+	// sent, and the agent decides whether to accept the session.
 	ClientCertFile string
 	ClientKeyFile  string
-	// ServerSPKISHA256 is the hex SHA-256 of the agent's TLS server
-	// certificate SubjectPublicKeyInfo. It is required: the agent is
-	// authenticated by this pin, not by any certificate authority.
+	// ServerSPKISHA256 is the optional hex SHA-256 of the agent's TLS server
+	// certificate SubjectPublicKeyInfo. When set, the agent is authenticated
+	// by this pin instead of a certificate authority or host name. When
+	// empty, the agent's certificate is verified with standard x509 against
+	// the system roots for the address's host name; on Unix, SSL_CERT_FILE
+	// and SSL_CERT_DIR point those roots at a private CA.
 	ServerSPKISHA256 string
+	// Plaintext runs the same frames over plain TCP instead of TLS, for
+	// setups where something else secures the link, such as a service mesh
+	// sidecar. It cannot be combined with a pin or a client certificate,
+	// which need TLS.
+	Plaintext bool
 	// Provider is the attestation provider the agent must report. Only
-	// ProviderMTLS is supported; empty means ProviderMTLS.
+	// ProviderNone is supported; empty means ProviderNone.
 	Provider string
 	// KESVKey and OpCertStartPeriod come from the local operational
 	// certificate. The agent must report this KES key at admission, and
@@ -105,7 +117,9 @@ type RemoteConfig struct {
 }
 
 // RemoteClient signs block headers through a bursa KES agent's remote sign
-// listener (AttestedProtocolID) over mutually authenticated TLS 1.3. The
+// listener (AttestedProtocolID) over TLS 1.3, with the agent authenticated by
+// a pinned server key or by x509 verification and an optional client
+// certificate, or over plain TCP. The
 // forger calls Prepare shortly before each leader slot, so the dial, the TLS
 // handshake and the admission exchange happen before the slot and Sign finds
 // an admitted session; Sign reuses a session while it is fresh and otherwise
@@ -113,8 +127,9 @@ type RemoteConfig struct {
 // failure after it may have reached the agent is returned, never resent on a
 // new session. It is safe for concurrent use.
 type RemoteClient struct {
-	cfg       RemoteConfig
-	logger    *slog.Logger
+	cfg    RemoteConfig
+	logger *slog.Logger
+	// tlsConfig is nil over plain TCP; pin is nil without a server pin.
 	tlsConfig *tls.Config
 	pin       []byte
 
@@ -154,14 +169,14 @@ func NewRemoteClient(cfg RemoteConfig) (*RemoteClient, error) {
 			err,
 		)
 	}
-	pin, err := parseSPKIPin(cfg.ServerSPKISHA256)
+	pin, err := remoteTransportPin(cfg)
 	if err != nil {
 		return nil, err
 	}
 	switch cfg.Provider {
 	case "":
-		cfg.Provider = ProviderMTLS
-	case ProviderMTLS:
+		cfg.Provider = ProviderNone
+	case ProviderNone:
 	default:
 		return nil, fmt.Errorf(
 			"kesagent: unsupported remote agent provider %q",
@@ -180,14 +195,24 @@ func NewRemoteClient(cfg RemoteConfig) (*RemoteClient, error) {
 			"kesagent: remote agent requires the local operational certificate",
 		)
 	}
-	if cfg.ClientCertFile == "" || cfg.ClientKeyFile == "" {
+	if (cfg.ClientCertFile == "") != (cfg.ClientKeyFile == "") {
 		return nil, errors.New(
-			"kesagent: remote agent requires a client certificate and key",
+			"kesagent: remote agent client certificate and key must be set together",
 		)
 	}
-	cert, err := tls.LoadX509KeyPair(cfg.ClientCertFile, cfg.ClientKeyFile)
-	if err != nil {
-		return nil, fmt.Errorf("kesagent: load client certificate: %w", err)
+	var certs []tls.Certificate
+	if cfg.ClientCertFile != "" {
+		cert, err := tls.LoadX509KeyPair(
+			cfg.ClientCertFile,
+			cfg.ClientKeyFile,
+		)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"kesagent: load client certificate: %w",
+				err,
+			)
+		}
+		certs = []tls.Certificate{cert}
 	}
 	if cfg.HelloTimeout <= 0 {
 		cfg.HelloTimeout = DefaultHelloTimeout
@@ -207,25 +232,63 @@ func NewRemoteClient(cfg RemoteConfig) (*RemoteClient, error) {
 		pin:    pin,
 		turn:   make(chan struct{}, 1),
 	}
-	c.tlsConfig = &tls.Config{
-		MinVersion:   tls.VersionTLS13,
-		Certificates: []tls.Certificate{cert},
-		// The agent is authenticated by its pinned server key in
-		// VerifyConnection, not by a certificate authority or host name.
-		InsecureSkipVerify: true, //nolint:gosec // replaced by the SPKI pin
-		VerifyConnection:   c.verifyServerPin,
+	cfg.Logger.Info(
+		"KES agent link: "+remoteTransportName(cfg, pin),
+		"component", "kesagent",
+		"address", cfg.Address,
+		"client_certificate", len(certs) != 0,
+	)
+	if !cfg.Plaintext {
+		c.tlsConfig = &tls.Config{
+			MinVersion:       tls.VersionTLS13,
+			Certificates:     certs,
+			VerifyConnection: c.verifyServerPin,
+		}
+		if pin != nil {
+			// The agent is authenticated by its pinned server key in
+			// VerifyConnection, not by a certificate authority or host
+			// name. Without a pin the standard x509 verification runs.
+			c.tlsConfig.InsecureSkipVerify = true //nolint:gosec // replaced by the SPKI pin
+		}
 	}
 	return c, nil
+}
+
+// remoteTransportName describes the link's transport for the startup log.
+func remoteTransportName(cfg RemoteConfig, pin []byte) string {
+	switch {
+	case cfg.Plaintext:
+		return "plain TCP"
+	case pin == nil:
+		return "TLS, verified by CA"
+	default:
+		return "TLS, pinned server key"
+	}
+}
+
+// remoteTransportPin returns the server pin, nil when there is none. It
+// refuses only combinations that cannot work: a pin or a client certificate
+// over plain TCP, where there is no TLS to carry them.
+func remoteTransportPin(cfg RemoteConfig) ([]byte, error) {
+	pinned := strings.TrimSpace(cfg.ServerSPKISHA256) != ""
+	if cfg.Plaintext {
+		if pinned || cfg.ClientCertFile != "" || cfg.ClientKeyFile != "" {
+			return nil, errors.New(
+				"kesagent: a server pin and a client certificate need TLS; " +
+					"a plain TCP remote agent link cannot carry them",
+			)
+		}
+		return nil, nil
+	}
+	if !pinned {
+		return nil, nil
+	}
+	return parseSPKIPin(cfg.ServerSPKISHA256)
 }
 
 // parseSPKIPin decodes a hex SHA-256 SubjectPublicKeyInfo pin.
 func parseSPKIPin(s string) ([]byte, error) {
 	s = strings.TrimSpace(s)
-	if s == "" {
-		return nil, errors.New(
-			"kesagent: remote agent requires a server SPKI SHA-256 pin",
-		)
-	}
 	pin, err := hex.DecodeString(s)
 	if err != nil || len(pin) != sha256.Size {
 		return nil, fmt.Errorf(
@@ -246,6 +309,9 @@ func SPKIFingerprint(rawSubjectPublicKeyInfo []byte) string {
 func (c *RemoteClient) verifyServerPin(cs tls.ConnectionState) error {
 	if cs.Version != tls.VersionTLS13 {
 		return errors.New("kesagent: remote agent did not negotiate TLS 1.3")
+	}
+	if c.pin == nil {
+		return nil
 	}
 	if len(cs.PeerCertificates) == 0 {
 		return ErrServerPinMismatch
@@ -366,14 +432,20 @@ func (c *RemoteClient) ensureSession(
 	return nil
 }
 
-// admit opens one admitted session: TLS 1.3 with the pinned server key, the
-// agent's Hello, and an attestation exchange bound to a fresh nonce.
+// admit opens one admitted session: the transport (TLS 1.3, by default with
+// the pinned server key, or plain TCP), the agent's Hello, and an attestation
+// exchange bound to a fresh nonce.
 func (c *RemoteClient) admit(ctx context.Context) (net.Conn, error) {
-	dialer := &tls.Dialer{
-		NetDialer: &net.Dialer{},
-		Config:    c.tlsConfig,
+	var raw net.Conn
+	var err error
+	if c.tlsConfig == nil {
+		raw, err = (&net.Dialer{}).DialContext(ctx, "tcp", c.cfg.Address)
+	} else {
+		raw, err = (&tls.Dialer{
+			NetDialer: &net.Dialer{},
+			Config:    c.tlsConfig,
+		}).DialContext(ctx, "tcp", c.cfg.Address)
 	}
-	raw, err := dialer.DialContext(ctx, "tcp", c.cfg.Address)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"kesagent: dial remote agent %s: %w",
@@ -443,9 +515,10 @@ type (
 	attestationResponse = wire.AttestationResponse
 )
 
-// checkAdmission accepts an mtls attestation_response for this node's KES
-// key: the echoed nonce, protocol and provider match, the evidence is absent
-// (mtls carries none, and evidence would mean another provider), the agent's
+// checkAdmission accepts a "none" attestation_response for this node's KES
+// key, whatever the transport: the echoed nonce, protocol and provider match,
+// the evidence is absent ("none" carries none, and evidence would mean
+// another provider), the agent's
 // operational certificate is byte-equal to the local one, and its active KES
 // key is that certificate's.
 func (c *RemoteClient) checkAdmission(
