@@ -324,10 +324,11 @@ func (s State) ShelleyTransitionEpoch(
 	return 0, false
 }
 
-// CheckTransition decides whether the block opening newEpoch may leave or
-// must leave Byron under a version trigger for shelleyMajor. Byron may be
-// left only in the epoch a stable candidate for that version is adopted in,
-// and a Byron block is invalid from that epoch on.
+// CheckTransition decides whether a block at newEpoch may leave or must have
+// left Byron under a version trigger for shelleyMajor. The hard-fork
+// combinator translates at the adoption epoch before ticking to the block's
+// slot, so the first Shelley block may arrive in that epoch or any later one.
+// A Byron block is invalid from the adoption epoch on.
 func (s State) CheckTransition(
 	config Config,
 	shelleyMajor uint16,
@@ -336,7 +337,7 @@ func (s State) CheckTransition(
 ) error {
 	transitionEpoch, known := s.ShelleyTransitionEpoch(config, shelleyMajor)
 	switch {
-	case leaving && (!known || transitionEpoch != newEpoch):
+	case leaving && (!known || transitionEpoch > newEpoch):
 		return TransitionNotAdoptedError{Epoch: newEpoch, Major: shelleyMajor}
 	case !leaving && known && transitionEpoch <= newEpoch:
 		return TransitionMissedError{

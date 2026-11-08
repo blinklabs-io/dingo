@@ -3739,36 +3739,24 @@ func (ls *LedgerState) ensureEpochForSlot(
 	ctx context.Context,
 	targetSlot uint64,
 ) (models.Epoch, error) {
-	const maxAdvance = 5 // Safety limit against runaway loops
-	for range maxAdvance {
-		if err := ls.advanceEpochCache(ctx); err != nil {
-			return models.Epoch{}, fmt.Errorf(
-				"advance epoch cache: %w",
-				err,
-			)
-		}
-		epoch, err := ls.epochForSlot(targetSlot)
-		if err == nil {
-			return epoch, nil
-		}
+	if epoch, err := ls.epochForSlot(targetSlot); err == nil {
+		return epoch, nil
 	}
-	return models.Epoch{}, fmt.Errorf(
-		"could not advance epoch cache to cover slot %d after %d advances",
-		targetSlot,
-		maxAdvance,
-	)
+	if err := ls.advanceEpochCacheToSlot(ctx, targetSlot); err != nil {
+		return models.Epoch{}, fmt.Errorf("advance epoch cache: %w", err)
+	}
+	return ls.epochForSlot(targetSlot)
 }
 
-// advanceEpochCache computes the next same-era epoch's parameters and nonce
-// from chain data and appends it to the in-memory epoch cache. This is a
-// lightweight alternative to the full processEpochRollover — it only
-// populates the nonce and epoch boundaries needed for header verification,
-// without running pparam updates, snapshot rotation, or DB writes. It refuses
-// to cross a confirmed or configured hard-fork boundary because only the full
-// rollover owns the successor era's parameters and snapshot rotation. The full
-// rollover will run later in ledgerProcessBlocks and replace the cache with the
-// authoritative DB-backed version.
-func (ls *LedgerState) advanceEpochCache(ctx context.Context) error {
+// advanceEpochCacheToSlot computes a same-era target epoch's parameters and
+// nonce from chain data and appends it to the in-memory epoch cache. This is a
+// lightweight alternative to the full processEpochRollover: it only populates
+// the nonce and epoch boundaries needed for header verification, without
+// running pparam updates, snapshot rotation, or DB writes.
+func (ls *LedgerState) advanceEpochCacheToSlot(
+	ctx context.Context,
+	targetSlot uint64,
+) error {
 	// Read last epoch from the lock-free consensus snapshot
 	snapshot := ls.loadConsensusSnapshot()
 	if snapshot == nil {
@@ -3779,8 +3767,16 @@ func (ls *LedgerState) advanceEpochCache(ctx context.Context) error {
 		return errors.New("epoch cache is empty")
 	}
 	lastEpoch := cache[len(cache)-1]
-	if err := ls.validateEpochCacheForecast(
+	targetEpoch, err := epochAtSlot(lastEpoch, targetSlot)
+	if err != nil {
+		return err
+	}
+	if targetEpoch.EpochId == lastEpoch.EpochId {
+		return nil
+	}
+	if err := ls.validateEpochCacheForecastTo(
 		lastEpoch,
+		targetEpoch.EpochId,
 		snapshot.currentEra.Id,
 		snapshot.transitionInfo,
 	); err != nil {
@@ -3791,7 +3787,7 @@ func (ls *LedgerState) advanceEpochCache(ctx context.Context) error {
 		return errors.New("last epoch has zero length")
 	}
 
-	newStartSlot := lastEpoch.StartSlot + uint64(lastEpoch.LengthInSlots)
+	newStartSlot := targetEpoch.StartSlot
 
 	// Compute epoch nonce (requires DB access, done outside lock)
 	nonce, evolvingNonce, candidateNonce, labNonce, err := ls.computeEpochNonceForSlot(
@@ -3802,13 +3798,13 @@ func (ls *LedgerState) advanceEpochCache(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf(
 			"compute epoch nonce for epoch %d: %w",
-			lastEpoch.EpochId+1,
+			targetEpoch.EpochId,
 			err,
 		)
 	}
 
 	newEpoch := models.Epoch{
-		EpochId:             lastEpoch.EpochId + 1,
+		EpochId:             targetEpoch.EpochId,
 		StartSlot:           newStartSlot,
 		LengthInSlots:       lastEpoch.LengthInSlots,
 		SlotLength:          lastEpoch.SlotLength,
@@ -3846,8 +3842,9 @@ func (ls *LedgerState) advanceEpochCache(ctx context.Context) error {
 	// nonce computation is in flight. Recheck under the writer lock so that
 	// publication cannot race a newly-confirmed boundary and append a row with
 	// the source era's parameters on the other side.
-	if err := ls.validateEpochCacheForecast(
+	if err := ls.validateEpochCacheForecastTo(
 		lastCached,
+		newEpoch.EpochId,
 		ls.currentEra.Id,
 		ls.transitionInfo,
 	); err != nil {
@@ -3882,7 +3879,21 @@ func (ls *LedgerState) validateEpochCacheForecast(
 	currentEraID uint,
 	transition hardfork.TransitionInfo,
 ) error {
-	nextEpochID := lastEpoch.EpochId + 1
+	return ls.validateEpochCacheForecastTo(
+		lastEpoch,
+		lastEpoch.EpochId+1,
+		currentEraID,
+		transition,
+	)
+}
+
+func (ls *LedgerState) validateEpochCacheForecastTo(
+	lastEpoch models.Epoch,
+	targetEpochID uint64,
+	currentEraID uint,
+	transition hardfork.TransitionInfo,
+) error {
+	nextEpochID := targetEpochID
 	shape := ls.eraShape()
 	if entry, ok := shape.EraForID(lastEpoch.EraId); ok &&
 		entry.NextEraTrigger.Kind == hardfork.TriggerAtEpoch {
@@ -4066,12 +4077,25 @@ func (ls *LedgerState) computeEpochNonceForSlot(
 	// supplies it to TICKN. Mainnet set a non-neutral value for exactly one
 	// epoch (259); everywhere else this resolves to NeutralNonce and leaves
 	// the result unchanged.
-	extraEntropy, err := ls.forecastExtraEntropyForEpoch(
-		prevEpoch.EpochId+1,
-		prevEpoch.EraId,
-	)
-	if err != nil {
-		return nil, nil, nil, nil, err
+	var extraEntropy []byte
+	if epochStartSlot > prevEpochEndSlot {
+		// A jump over an empty epoch does not run NEWEPOCH, so no pending
+		// parameter update is enacted. TICKN sees the currently published
+		// ledger view rather than a chain of per-epoch forecasts.
+		consensusState := ls.loadConsensusSnapshot()
+		if consensusState != nil {
+			extraEntropy = extraEntropyFromPParams(
+				consensusState.currentPParams,
+			)
+		}
+	} else {
+		extraEntropy, err = ls.forecastExtraEntropyForEpoch(
+			prevEpoch.EpochId+1,
+			prevEpoch.EraId,
+		)
+		if err != nil {
+			return nil, nil, nil, nil, err
+		}
 	}
 
 	if len(labForEta) == 0 && len(extraEntropy) == 0 {

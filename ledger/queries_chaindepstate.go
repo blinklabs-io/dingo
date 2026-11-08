@@ -326,9 +326,16 @@ func (ls *LedgerState) queryShelleyDebugChainDepState(
 		}
 		// Epoch 0 has no predecessor; its previous-epoch nonce stays neutral.
 		if current.EpochId > 0 {
-			previous, err := ls.db.GetEpoch(current.EpochId-1, txn)
+			epochs, err := ls.db.GetEpochs(txn)
 			if err != nil {
 				return nil, err
+			}
+			var previous *models.Epoch
+			for i := len(epochs) - 1; i >= 0; i-- {
+				if epochs[i].EpochId < current.EpochId {
+					previous = &epochs[i]
+					break
+				}
 			}
 			if previous != nil {
 				state.PreviousEpochNonce, err = nonceFromBytes(previous.Nonce)

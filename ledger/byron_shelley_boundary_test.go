@@ -458,6 +458,42 @@ func TestByronShelleyBoundaryProcessesFirstShelleyBlockWithPParams(
 	assert.Equal(t, firstShelley.SlotNumber(), ls.currentTip.Point.Slot)
 }
 
+func TestEpochAtSlotForRolloverUsesKnownSuccessorGeometry(t *testing.T) {
+	t.Parallel()
+
+	ls, _, _ := newByronShelleyBoundaryLedger(t)
+	const (
+		sourceEpoch      uint64 = 206
+		sourceEpochStart uint64 = 4_449_600
+		transitionEpoch  uint64 = 208
+		transitionSlot   uint64 = 4_492_800
+		shelleyEpochSize uint64 = 432_000
+	)
+	ls.Lock()
+	ls.currentEpoch = models.Epoch{
+		EpochId:       sourceEpoch,
+		StartSlot:     sourceEpochStart,
+		SlotLength:    20_000,
+		LengthInSlots: 21_600,
+		EraId:         eras.ByronEraDesc.Id,
+	}
+	ls.epochCache = []models.Epoch{ls.currentEpoch}
+	ls.transitionInfo = hardfork.NewTransitionKnown(transitionEpoch)
+	ls.publishSnapshotsLocked()
+	ls.Unlock()
+
+	target, err := ls.epochAtSlotForRollover(
+		ls.currentEpoch,
+		transitionSlot+shelleyEpochSize+5,
+		ls.transitionInfo,
+	)
+	require.NoError(t, err)
+	require.Equal(t, uint64(209), target.EpochId)
+	require.Equal(t, transitionSlot+shelleyEpochSize, target.StartSlot)
+	require.Equal(t, uint(shelleyEpochSize), target.LengthInSlots)
+	require.Equal(t, eras.ShelleyEraDesc.Id, target.EraId)
+}
+
 // TestByronShelleyBoundaryDefersReadResultDoneUntilCachedBatchApplied is a
 // regression test: ledgerProcessBlocksFromSource must not signal a
 // readChainResult's done channel until the whole result has been applied,

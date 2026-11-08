@@ -6297,7 +6297,10 @@ func TestAdvanceEpochCacheRejectsHardForkBoundary(t *testing.T) {
 				t, lastByronEpoch, tc.transition, tc.configuredBoundary,
 			)
 
-			err := ls.advanceEpochCache(context.Background())
+			err := ls.advanceEpochCacheToSlot(
+				context.Background(),
+				lastByronEpoch.StartSlot+uint64(lastByronEpoch.LengthInSlots),
+			)
 			require.ErrorContains(t, err, "hard-fork boundary")
 			require.ErrorIs(t, err, errEpochCacheForecastBoundary)
 			require.Len(t, ls.loadConsensusSnapshot().epochCache, 1,
@@ -6329,7 +6332,10 @@ func TestAdvanceEpochCachePreservesWithinEraForecast(t *testing.T) {
 		true,
 	)
 
-	require.NoError(t, ls.advanceEpochCache(context.Background()))
+	require.NoError(t, ls.advanceEpochCacheToSlot(
+		context.Background(),
+		lastByronEpoch.StartSlot+uint64(lastByronEpoch.LengthInSlots),
+	))
 	cache := ls.loadConsensusSnapshot().epochCache
 	require.Len(t, cache, 2)
 	forecast := cache[1]
@@ -6340,6 +6346,64 @@ func TestAdvanceEpochCachePreservesWithinEraForecast(t *testing.T) {
 	got, err := ls.epochForSlot(forecast.StartSlot)
 	require.NoError(t, err)
 	require.Equal(t, forecast, got)
+}
+
+func TestEnsureEpochForSlotJumpsEmptyEpochsOnce(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+
+	const (
+		epochID     uint64 = 100
+		epochStart  uint64 = 1_000
+		epochLength uint64 = 75
+		emptyEpochs uint64 = 8
+	)
+	candidate := bytes.Repeat([]byte{0xbb}, lcommon.Blake2b256Size)
+	evolving := bytes.Repeat([]byte{0xaa}, lcommon.Blake2b256Size)
+	carriedLab := bytes.Repeat([]byte{0xfa}, lcommon.Blake2b256Size)
+	previousNonce := bytes.Repeat([]byte{0xee}, lcommon.Blake2b256Size)
+	source := models.Epoch{
+		EpochId:             epochID,
+		StartSlot:           epochStart,
+		LengthInSlots:       uint(epochLength),
+		SlotLength:          1_000,
+		EraId:               eras.ConwayEraDesc.Id,
+		Nonce:               previousNonce,
+		EvolvingNonce:       evolving,
+		CandidateNonce:      candidate,
+		LastEpochBlockNonce: carriedLab,
+	}
+	ls := &LedgerState{
+		db:             db,
+		currentEpoch:   source,
+		currentEra:     eras.ConwayEraDesc,
+		epochCache:     []models.Epoch{source},
+		transitionInfo: hardfork.NewTransitionUnknown(),
+		config: LedgerStateConfig{
+			CardanoNodeConfig: newConwayBootstrapStabilityCfg(t),
+			Logger: slog.New(
+				slog.NewJSONHandler(io.Discard, nil),
+			),
+		},
+	}
+	ls.publishSnapshotsLocked()
+
+	targetSlot := epochStart + emptyEpochs*epochLength + 1
+	target, err := ls.ensureEpochForSlot(t.Context(), targetSlot)
+	require.NoError(t, err)
+	require.Equal(t, epochID+emptyEpochs, target.EpochId)
+	require.Equal(t, epochStart+emptyEpochs*epochLength, target.StartSlot)
+	require.Equal(t, evolving, target.EvolvingNonce)
+	require.Equal(t, candidate, target.CandidateNonce)
+	require.Equal(t, carriedLab, target.LastEpochBlockNonce)
+
+	expectedNonce, err := assembleEpochNonce(candidate, carriedLab, nil)
+	require.NoError(t, err)
+	require.Equal(t, expectedNonce, target.Nonce)
+	require.Len(t, ls.loadConsensusSnapshot().epochCache, 2,
+		"an empty-epoch jump ticks consensus once at the target")
 }
 
 func TestHeaderVerificationEpochDefersAtHardForkBoundary(t *testing.T) {

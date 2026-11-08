@@ -9496,6 +9496,41 @@ func (ls *LedgerState) processEpochRolloverWithClassicPParamsContext(
 	classicPParamsApplied bool,
 	plutusV2CostModelWritten bool,
 	transitionHardForkMajors []uint,
+) (*EpochRolloverResult, error) {
+	targetEpoch, err := epochAtSlot(
+		currentEpoch,
+		currentEpoch.StartSlot+uint64(currentEpoch.LengthInSlots),
+	)
+	if err != nil {
+		return nil, err
+	}
+	return ls.processEpochRolloverForTargetWithClassicPParamsContext(
+		ctx,
+		txn,
+		currentEpoch,
+		targetEpoch,
+		targetEpoch,
+		currentEpoch.EpochId,
+		currentEra,
+		currentPParams,
+		classicPParamsApplied,
+		plutusV2CostModelWritten,
+		transitionHardForkMajors,
+	)
+}
+
+func (ls *LedgerState) processEpochRolloverForTargetWithClassicPParamsContext(
+	ctx context.Context,
+	txn *database.Txn,
+	currentEpoch models.Epoch,
+	targetEpoch models.Epoch,
+	transitionEpoch models.Epoch,
+	ledgerEpoch uint64,
+	currentEra eras.EraDesc,
+	currentPParams lcommon.ProtocolParameters,
+	classicPParamsApplied bool,
+	plutusV2CostModelWritten bool,
+	transitionHardForkMajors []uint,
 ) (result *EpochRolloverResult, err error) {
 	_, span := tracing.Start(
 		ls.catchupContext(ctx),
@@ -9514,9 +9549,7 @@ func (ls *LedgerState) processEpochRolloverWithClassicPParamsContext(
 			"process epoch rollover: CardanoNodeConfig is nil",
 		)
 	}
-	epochStartSlot := currentEpoch.StartSlot + uint64(
-		currentEpoch.LengthInSlots,
-	)
+	epochStartSlot := targetEpoch.StartSlot
 	// Era update functions mutate their concrete protocol-parameter pointer.
 	// Give the transaction an independently owned value so a failed or
 	// in-flight rollover cannot modify parameters retained by an older snapshot.
@@ -9532,6 +9565,7 @@ func (ls *LedgerState) processEpochRolloverWithClassicPParamsContext(
 		NewCurrentEra:             currentEra,
 		NewCurrentPParams:         ownedPParams,
 		RealV2CostModelObserved:   plutusV2CostModelWritten,
+		newLedgerEpoch:            ledgerEpoch,
 	}
 
 	// Create initial epoch
@@ -9576,6 +9610,7 @@ func (ls *LedgerState) processEpochRolloverWithClassicPParamsContext(
 		result.NewEpochCache = epochs
 		if len(epochs) > 0 {
 			result.NewCurrentEpoch = epochs[len(epochs)-1]
+			result.newLedgerEpoch = result.NewCurrentEpoch.EpochId
 			eraDesc, ok := ls.eraById(result.NewCurrentEpoch.EraId)
 			if !ok || eraDesc == nil {
 				return nil, fmt.Errorf(
@@ -9591,6 +9626,96 @@ func (ls *LedgerState) processEpochRolloverWithClassicPParamsContext(
 			"epoch", fmt.Sprintf("%+v", result.NewCurrentEpoch),
 			"component", "ledger",
 		)
+		return result, nil
+	}
+
+	byronTranslated := currentEpoch.EraId == eras.ByronEraDesc.Id &&
+		currentEra.Id != eras.ByronEraDesc.Id
+	if byronTranslated {
+		if err := ls.applyByronTranslationReserves(
+			txn,
+			transitionEpoch.EpochId,
+			transitionEpoch.StartSlot,
+		); err != nil {
+			return nil, fmt.Errorf(
+				"apply Byron-to-Shelley reserves: %w", err,
+			)
+		}
+		result.newLedgerEpoch = transitionEpoch.EpochId
+		if targetEpoch.EpochId > transitionEpoch.EpochId {
+			transitionEpoch.Nonce = cloneNonce(currentEpoch.Nonce)
+			transitionEpoch.EvolvingNonce = cloneNonce(currentEpoch.EvolvingNonce)
+			transitionEpoch.CandidateNonce = cloneNonce(currentEpoch.CandidateNonce)
+			transitionEpoch.LastEpochBlockNonce = cloneNonce(
+				currentEpoch.LastEpochBlockNonce,
+			)
+			currentEpoch = transitionEpoch
+			ledgerEpoch = transitionEpoch.EpochId
+		}
+	}
+
+	// cardano-ledger's NEWEPOCH rule runs its boundary effects only when the
+	// signalled epoch is exactly the successor of the ledger state's epoch
+	// label. A later signal leaves that label and all EPOCH effects unchanged.
+	// Consensus still ticks once to the target epoch, so persist one sparse
+	// target row with nonce state computed from the last applied epoch.
+	if targetEpoch.EpochId != ledgerEpoch+1 {
+		epochSlotLength, epochLength, err := currentEra.EpochLengthFunc(
+			ls.config.CardanoNodeConfig,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("calculate jumped epoch length: %w", err)
+		}
+		nonce, evolvingNonce, candidateNonce, labNonce, err := ls.calculateEpochNonce(
+			ctx,
+			txn,
+			epochStartSlot,
+			currentEra,
+			currentEpoch,
+			ownedPParams,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("calculate jumped epoch nonce: %w", err)
+		}
+		if err := ls.db.SetEpoch(
+			epochStartSlot,
+			targetEpoch.EpochId,
+			nonce,
+			evolvingNonce,
+			candidateNonce,
+			labNonce,
+			currentEra.Id,
+			epochSlotLength,
+			epochLength,
+			txn,
+		); err != nil {
+			return nil, fmt.Errorf("set jumped epoch: %w", err)
+		}
+		if byronTranslated && targetEpoch.EpochId > transitionEpoch.EpochId+1 {
+			if err := ls.db.SetEpoch(
+				transitionEpoch.StartSlot,
+				transitionEpoch.EpochId,
+				nonce,
+				evolvingNonce,
+				candidateNonce,
+				labNonce,
+				currentEra.Id,
+				transitionEpoch.SlotLength,
+				transitionEpoch.LengthInSlots,
+				txn,
+			); err != nil {
+				return nil, fmt.Errorf("set translated epoch: %w", err)
+			}
+		}
+		epochs, err := ls.db.GetEpochs(txn)
+		if err != nil {
+			return nil, fmt.Errorf("load jumped epochs: %w", err)
+		}
+		result.NewEpochCache = epochs
+		result.NewCurrentEpoch = epochs[len(epochs)-1]
+		result.NewCurrentEra = currentEra
+		result.NewEpochNum = float64(targetEpoch.EpochId)
+		result.SchedulerIntervalMs = epochSlotLength
 		return result, nil
 	}
 	// EPOCH→HARDFORK ordering invariant.
@@ -9656,22 +9781,6 @@ func (ls *LedgerState) processEpochRolloverWithClassicPParamsContext(
 	// Steps 7 and 8 must observe the post-enactment major version. Step 9 must
 	// observe the persisted pparams (not just the in-memory ones) because its
 	// body issues SQL within `txn` that may join against `pparams` rows.
-	if currentEpoch.EraId == eras.ByronEraDesc.Id &&
-		currentEra.Id != eras.ByronEraDesc.Id {
-		if err := ls.timeRolloverPhase(
-			currentEpoch.EpochId+1, "byron_translation", func() error {
-				return ls.applyByronTranslationReserves(
-					txn,
-					currentEpoch.EpochId+1,
-					epochStartSlot,
-				)
-			},
-		); err != nil {
-			return nil, fmt.Errorf(
-				"apply Byron-to-Shelley reserves: %w", err,
-			)
-		}
-	}
 	if err := ls.timeRolloverPhase(
 		currentEpoch.EpochId+1, "ratify_consume", func() error {
 			return ls.consumePendingRatification(ctx, txn)
@@ -10177,6 +10286,7 @@ func (ls *LedgerState) processEpochRolloverWithClassicPParamsContext(
 	result.NewEpochCache = epochs
 	if len(epochs) > 0 {
 		result.NewCurrentEpoch = epochs[len(epochs)-1]
+		result.newLedgerEpoch = result.NewCurrentEpoch.EpochId
 		eraDesc, ok := ls.eraById(result.NewCurrentEpoch.EraId)
 		if !ok || eraDesc == nil {
 			return nil, fmt.Errorf(

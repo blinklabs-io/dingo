@@ -1684,10 +1684,16 @@ type LedgerState struct {
 	electingVrfMemo             electingVrfMemo // immutable electing VRF key hashes below the stability window (see electing_vrf_memo.go)
 	byronPBFT                   byronPBFTCache
 	currentEpoch                models.Epoch
-	dbWorkerPool                *DatabaseWorkerPool
-	slotClock                   *SlotClock
-	slotTickChan                <-chan SlotTick
-	ctx                         context.Context
+	// ledgerEpoch is the epoch label carried by cardano-ledger's
+	// NewEpochState. It normally equals currentEpoch.EpochId, but remains at
+	// the last sequential transition when a block jumps over an empty epoch.
+	// Epoch rows are intentionally sparse across such a jump, so startup and
+	// rollback can reconstruct this value without another persisted marker.
+	ledgerEpoch  uint64
+	dbWorkerPool *DatabaseWorkerPool
+	slotClock    *SlotClock
+	slotTickChan <-chan SlotTick
+	ctx          context.Context
 	// cleanupMu owns timerCleanupConsumedUtxos and serializes cleanup-run
 	// registration against Close. Deliberately not the LedgerState RWMutex:
 	// Close waits on cleanupWG while an in-flight run still needs RLock to
@@ -2476,6 +2482,7 @@ type EpochRolloverResult struct {
 	// approach, which would then never clear
 	// LedgerState.syntheticV2CostModel on a real network.
 	RealV2CostModelObserved bool
+	newLedgerEpoch          uint64
 }
 
 func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
@@ -6561,16 +6568,43 @@ func (ls *LedgerState) prepareEraTransitionsForRollover(
 	bool,
 	error,
 ) {
+	targetEpoch, err := epochAtSlot(
+		snapshotEpoch,
+		snapshotEpoch.StartSlot+uint64(snapshotEpoch.LengthInSlots),
+	)
+	if err != nil {
+		return nil, 0, nil, nil, false, err
+	}
+	return ls.prepareEraTransitionsForEpoch(
+		ctx, txn, targetEpoch, snapshotEra,
+		currentPParams, transitionPath, true,
+	)
+}
+
+func (ls *LedgerState) prepareEraTransitionsForEpoch(
+	ctx context.Context,
+	txn *database.Txn,
+	transitionEpoch models.Epoch,
+	snapshotEra eras.EraDesc,
+	currentPParams lcommon.ProtocolParameters,
+	transitionPath []uint,
+	applyClassicPParams bool,
+) (
+	lcommon.ProtocolParameters,
+	uint,
+	[]*EraTransitionResult,
+	[]uint,
+	bool,
+	error,
+) {
 	if len(transitionPath) == 0 {
 		return currentPParams, snapshotEra.Id, nil, nil, false, nil
 	}
-	boundarySlot := snapshotEpoch.StartSlot + uint64(
-		snapshotEpoch.LengthInSlots,
-	)
+	boundarySlot := transitionEpoch.StartSlot
 	workingPParams := currentPParams
 	priorVersion, priorVersionErr := GetProtocolVersion(currentPParams)
 	var plutusV2CostModelWritten bool
-	if snapshotEra.Id != eras.ByronEraDesc.Id {
+	if applyClassicPParams && snapshotEra.Id != eras.ByronEraDesc.Id {
 		ownedPParams, err := cloneProtocolParametersForEra(
 			snapshotEra,
 			currentPParams,
@@ -6586,7 +6620,7 @@ func (ls *LedgerState) prepareEraTransitionsForRollover(
 			)
 		}
 		err = ls.timeRolloverPhase(
-			snapshotEpoch.EpochId+1,
+			transitionEpoch.EpochId,
 			"pparam_updates",
 			func() error {
 				var updateErr error
@@ -6594,7 +6628,7 @@ func (ls *LedgerState) prepareEraTransitionsForRollover(
 					ctx,
 					txn,
 					boundarySlot,
-					snapshotEpoch.EpochId+1,
+					transitionEpoch.EpochId,
 					snapshotEra,
 					ownedPParams,
 				)
@@ -6615,7 +6649,7 @@ func (ls *LedgerState) prepareEraTransitionsForRollover(
 			ctx,
 			txn,
 			transitionEraID,
-			snapshotEpoch.EpochId+1,
+			transitionEpoch.EpochId,
 			boundarySlot,
 			workingPParams,
 			workingEraID,
@@ -8771,6 +8805,114 @@ type blockSourceOptions struct {
 	beforeCommit func(txn *database.Txn, applied []ledger.Block) error
 }
 
+// epochAtSlot projects a later slot through the current era's fixed epoch
+// geometry. Era changes are applied by the rollover transaction afterwards;
+// this projection supplies the absolute target epoch and boundary instead of
+// walking every empty epoch in between.
+func epochAtSlot(current models.Epoch, slot uint64) (models.Epoch, error) {
+	if current.LengthInSlots == 0 {
+		return current, nil
+	}
+	if slot < current.StartSlot {
+		return models.Epoch{}, fmt.Errorf(
+			"slot %d precedes current epoch %d start %d",
+			slot, current.EpochId, current.StartSlot,
+		)
+	}
+	epochLength := uint64(current.LengthInSlots)
+	distance := (slot - current.StartSlot) / epochLength
+	if distance > math.MaxUint64-current.EpochId ||
+		distance > (math.MaxUint64-current.StartSlot)/epochLength {
+		return models.Epoch{}, errors.New("target epoch projection overflows")
+	}
+	target := current
+	target.EpochId += distance
+	target.StartSlot += distance * epochLength
+	target.Nonce = nil
+	target.EvolvingNonce = nil
+	target.CandidateNonce = nil
+	target.LastEpochBlockNonce = nil
+	return target, nil
+}
+
+func epochAtID(current models.Epoch, targetEpochID uint64) (models.Epoch, error) {
+	if targetEpochID < current.EpochId {
+		return models.Epoch{}, fmt.Errorf(
+			"epoch %d precedes current epoch %d",
+			targetEpochID,
+			current.EpochId,
+		)
+	}
+	if current.LengthInSlots == 0 {
+		return current, nil
+	}
+	distance := targetEpochID - current.EpochId
+	epochLength := uint64(current.LengthInSlots)
+	if distance > (math.MaxUint64-current.StartSlot)/epochLength {
+		return models.Epoch{}, errors.New("target epoch projection overflows")
+	}
+	return epochAtSlot(
+		current,
+		current.StartSlot+distance*epochLength,
+	)
+}
+
+func (ls *LedgerState) epochAtSlotForRollover(
+	current models.Epoch,
+	slot uint64,
+	transition hardfork.TransitionInfo,
+) (models.Epoch, error) {
+	target, err := epochAtSlot(current, slot)
+	if err != nil || transition.State != hardfork.TransitionKnown ||
+		target.EpochId < transition.KnownEpoch {
+		return target, err
+	}
+	summary, err := ls.hardForkSummaryAnchoredAt(slot)
+	if err != nil {
+		return models.Epoch{}, fmt.Errorf(
+			"build hard-fork summary for slot %d: %w", slot, err,
+		)
+	}
+	info, err := summary.SlotToEpoch(slot)
+	if err != nil {
+		return models.Epoch{}, fmt.Errorf(
+			"resolve target epoch for slot %d: %w", slot, err,
+		)
+	}
+	return models.Epoch{
+		EpochId:       info.Epoch,
+		StartSlot:     info.StartSlot,
+		EraId:         info.EraID,
+		SlotLength:    uint(info.SlotLength / time.Millisecond), // #nosec G115 -- protocol-bounded
+		LengthInSlots: uint(info.LengthInSlots),                 // #nosec G115 -- protocol-bounded
+	}, nil
+}
+
+func (ls *LedgerState) transitionEpochForRollover(
+	target models.Epoch,
+	transition hardfork.TransitionInfo,
+) (models.Epoch, error) {
+	if transition.State != hardfork.TransitionKnown ||
+		transition.KnownEpoch > target.EpochId {
+		return target, nil
+	}
+	summary, err := ls.hardForkSummaryAnchoredAt(target.StartSlot)
+	if err != nil {
+		return models.Epoch{}, err
+	}
+	info, err := summary.EpochInfo(transition.KnownEpoch)
+	if err != nil {
+		return models.Epoch{}, err
+	}
+	return models.Epoch{
+		EpochId:       info.Epoch,
+		StartSlot:     info.StartSlot,
+		EraId:         info.EraID,
+		SlotLength:    uint(info.SlotLength / time.Millisecond), // #nosec G115 -- protocol-bounded
+		LengthInSlots: uint(info.LengthInSlots),                 // #nosec G115 -- protocol-bounded
+	}, nil
+}
+
 func (ls *LedgerState) processBlocksFromSource(
 	ctx context.Context,
 	readChainResultCh <-chan readChainResult,
@@ -8817,6 +8959,7 @@ func (ls *LedgerState) processBlocksFromSource(
 	}
 	// Process blocks
 	var nextEpochEraId uint
+	var targetEpoch models.Epoch
 	var allowTwoEraBoundaryTransition bool
 	// boundaryShouldValidate is whether the block that opens the next epoch
 	// is validated, which decides whether the Byron-to-Shelley gate and the
@@ -8860,7 +9003,16 @@ func (ls *LedgerState) processBlocksFromSource(
 			ls.RLock()
 			snapshotEra := ls.currentEra
 			snapshotEpoch := ls.currentEpoch
+			snapshotLedgerEpoch := ls.ledgerEpoch
+			if snapshotLedgerEpoch == 0 && snapshotEpoch.EpochId != 0 {
+				if len(ls.epochCache) > 0 {
+					snapshotLedgerEpoch = ledgerEpochFromCache(ls.epochCache)
+				} else {
+					snapshotLedgerEpoch = snapshotEpoch.EpochId
+				}
+			}
 			snapshotPParams := ls.currentPParams
+			snapshotTransitionInfo := ls.transitionInfo
 			snapshotTip := cloneTip(ls.currentTip)
 			ls.RUnlock()
 
@@ -8899,13 +9051,48 @@ func (ls *LedgerState) processBlocksFromSource(
 				return fmt.Errorf("%s: %w", label, rejected)
 			}
 
+			if targetEpoch.LengthInSlots == 0 {
+				if len(cachedNextBatch) == 0 {
+					completeReadResult()
+					return errors.New(
+						"epoch rollover has no boundary block",
+					)
+				}
+				targetEpoch, err = ls.epochAtSlotForRollover(
+					snapshotEpoch,
+					cachedNextBatch[0].SlotNumber(),
+					snapshotTransitionInfo,
+				)
+				if err != nil {
+					return err
+				}
+			}
+
+			transitionEpoch, err := ls.transitionEpochForRollover(
+				targetEpoch,
+				snapshotTransitionInfo,
+			)
+			if err != nil {
+				return err
+			}
+
 			if snapshotEra.Id == byron.EraIdByron && boundaryShouldValidate {
-				if err := ls.validateByronShelleyTransition(
+				byronTransitionEpoch, transitionErr := ls.validateByronShelleyTransition(
 					ctx,
-					snapshotEpoch.EpochId+1,
+					transitionEpoch.EpochId,
 					nextEpochEraId,
-				); err != nil {
-					return rejectBoundaryBlock(err, "byron transition")
+				)
+				if transitionErr != nil {
+					return rejectBoundaryBlock(transitionErr, "byron transition")
+				}
+				if byronTransitionEpoch != transitionEpoch.EpochId {
+					transitionEpoch, err = epochAtID(
+						snapshotEpoch,
+						byronTransitionEpoch,
+					)
+					if err != nil {
+						return err
+					}
 				}
 			}
 
@@ -8956,7 +9143,7 @@ func (ls *LedgerState) processBlocksFromSource(
 			// Execute transaction WITHOUT holding ls.Lock()
 			finishValidationTransition := ls.beginTxValidationTransition()
 			//nolint:contextcheck // TranslateRatifiedGovActions reads only through txn, which carries ctx
-			err := submitRollover(func(txn *database.Txn) error {
+			err = submitRollover(func(txn *database.Txn) error {
 				if untickedClosure != nil {
 					if err := ls.applyUntickedBoundaryClosure(ctx, txn, untickedClosure, snapshotTip.Point); err != nil {
 						return err
@@ -8974,7 +9161,7 @@ func (ls *LedgerState) processBlocksFromSource(
 				// Without this, a sole producer that builds in the
 				// prior era at the boundary would never advance,
 				// since nextEpochEraId would equal snapshotEra.Id.
-				newEpochId := snapshotEpoch.EpochId + 1
+				newEpochId := targetEpoch.EpochId
 				// A validated boundary enters the era the ledger decides
 				// from its own state, and a block in any other era is
 				// refused. This runs before any translation: the enacted
@@ -8982,14 +9169,16 @@ func (ls *LedgerState) processBlocksFromSource(
 				// rewrites it.
 				if boundaryShouldValidate {
 					enacted := snapshotPParams
-					forecast, err := ls.forecastPendingPParamUpdateIn(
-						snapshotEra, newEpochId, snapshotPParams, txn,
-					)
-					if err != nil {
-						return fmt.Errorf("forecast pparam updates: %w", err)
-					}
-					if forecast != nil {
-						enacted = forecast
+					if newEpochId == snapshotLedgerEpoch+1 {
+						forecast, err := ls.forecastPendingPParamUpdateIn(
+							snapshotEra, newEpochId, snapshotPParams, txn,
+						)
+						if err != nil {
+							return fmt.Errorf("forecast pparam updates: %w", err)
+						}
+						if forecast != nil {
+							enacted = forecast
+						}
 					}
 					nextEpochEraId, err = ls.authorizeBoundaryEra(
 						ctx,
@@ -9042,28 +9231,33 @@ func (ls *LedgerState) processBlocksFromSource(
 				var transitionHardForkMajors []uint
 				var plutusV2CostModelWritten bool
 				workingPParams, workingEraId, transitionResults,
-					transitionHardForkMajors, plutusV2CostModelWritten, err = ls.prepareEraTransitionsForRollover(
+					transitionHardForkMajors, plutusV2CostModelWritten, err = ls.prepareEraTransitionsForEpoch(
 					ctx,
 					txn,
-					snapshotEpoch,
+					transitionEpoch,
 					snapshotEra,
 					workingPParams,
 					transitionPath,
+					targetEpoch.EpochId == snapshotLedgerEpoch+1,
 				)
 				if err != nil {
 					return err
 				}
 				eraTransitions = append(eraTransitions, transitionResults...)
-				classicPParamsApplied := len(transitionPath) > 0
+				classicPParamsApplied := len(transitionPath) > 0 &&
+					targetEpoch.EpochId == snapshotLedgerEpoch+1
 				// Process epoch rollover
 				workingEraPtr, ok := ls.eraById(workingEraId)
 				if !ok {
 					return fmt.Errorf("unknown era ID %d", workingEraId)
 				}
-				result, err := ls.processEpochRolloverWithClassicPParamsContext(
+				result, err := ls.processEpochRolloverForTargetWithClassicPParamsContext(
 					ctx,
 					txn,
 					snapshotEpoch,
+					targetEpoch,
+					transitionEpoch,
+					snapshotLedgerEpoch,
 					*workingEraPtr,
 					workingPParams,
 					classicPParamsApplied,
@@ -9116,6 +9310,7 @@ func (ls *LedgerState) processBlocksFromSource(
 				ls.currentEpoch = rolloverResult.NewCurrentEpoch
 				ls.currentEra = rolloverResult.NewCurrentEra
 				ls.currentPParams = rolloverResult.NewCurrentPParams
+				ls.ledgerEpoch = rolloverResult.newLedgerEpoch
 				// The durable marker itself was already persisted
 				// transactionally inside processEpochRollover; this only
 				// updates the in-memory mirror under the same lock that
@@ -9815,6 +10010,14 @@ func (ls *LedgerState) processBlocksFromSource(
 						if tmpPoint.Slot >= (snapshotEpoch.StartSlot+uint64(snapshotEpoch.LengthInSlots)) ||
 							snapshotEpoch.SlotLength == 0 {
 							needsEpochRollover = true
+							targetEpoch, err = ls.epochAtSlotForRollover(
+								snapshotEpoch,
+								next.SlotNumber(),
+								ls.loadConsensusSnapshot().transitionInfo,
+							)
+							if err != nil {
+								return err
+							}
 							boundaryShouldValidate, _ = historicalBlockValidationDecision(
 								snapshotValidationEnabled,
 								trustedReplay,
@@ -9833,7 +10036,7 @@ func (ls *LedgerState) processBlocksFromSource(
 								uint(next.Era().Id),
 								headerMajor,
 								headerMajorKnown,
-								snapshotEpoch.EpochId+1,
+								targetEpoch.EpochId,
 							)
 							// Cache rest of the batch for next loop
 							cachedNextBatch = nextBatch[i+offset:]
@@ -12511,6 +12714,7 @@ func (ls *LedgerState) setEpochCache(
 		// Set current epoch and era after healing so currentEpoch reflects
 		// any repaired nonce in epochCache.
 		ls.currentEpoch = ls.epochCache[len(ls.epochCache)-1]
+		ls.ledgerEpoch = ledgerEpochFromCache(ls.epochCache)
 		eraDesc, _ := ls.eraById(ls.currentEpoch.EraId)
 		if eraDesc == nil {
 			return fmt.Errorf("unknown era ID %d", ls.currentEpoch.EraId)
@@ -12612,6 +12816,30 @@ func (ls *LedgerState) setEpochCache(
 	ls.checkpointWrittenForEpoch = rolloverResult.CheckpointWrittenForEpoch
 	ls.metrics.epochNum.Set(rolloverResult.NewEpochNum)
 	return nil
+}
+
+// ledgerEpochFromCache reconstructs the epoch label retained by NEWEPOCH.
+// A numeric gap means the reference rule received a signal other than the
+// immediate successor and therefore left its label unchanged. Byron-to-
+// Shelley translation is the exception: the translation initializes the
+// Shelley NewEpochState at the hard-fork epoch itself.
+func ledgerEpochFromCache(epochs []models.Epoch) uint64 {
+	if len(epochs) == 0 {
+		return 0
+	}
+	ledgerEpoch := epochs[0].EpochId
+	previous := epochs[0]
+	for _, epoch := range epochs[1:] {
+		switch {
+		case previous.EraId == eras.ByronEraDesc.Id &&
+			epoch.EraId != eras.ByronEraDesc.Id:
+			ledgerEpoch = epoch.EpochId
+		case epoch.EpochId == ledgerEpoch+1:
+			ledgerEpoch = epoch.EpochId
+		}
+		previous = epoch
+	}
+	return ledgerEpoch
 }
 
 // healEmptyLabNonces repairs epoch records whose LastEpochBlockNonce or Nonce

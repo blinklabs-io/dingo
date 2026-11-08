@@ -424,11 +424,11 @@ func TestCheckTransition(t *testing.T) {
 	require.NoError(t, err)
 	const major = 1
 
-	// Leaving Byron in the adoption epoch is allowed; in any other epoch,
-	// or with no stable candidate, it is not.
+	// Leaving Byron in or after the adoption epoch is allowed. The hard-fork
+	// combinator translates at the adoption epoch before ticking to a later
+	// first Shelley block.
 	require.NoError(t, stable.CheckTransition(testConfig, major, 1, true))
-	require.ErrorAs(t, stable.CheckTransition(testConfig, major, 2, true),
-		&TransitionNotAdoptedError{})
+	require.NoError(t, stable.CheckTransition(testConfig, major, 2, true))
 	require.ErrorAs(t, candidate.CheckTransition(testConfig, major, 1, true),
 		&TransitionNotAdoptedError{})
 	none := NewState(testGenesisParams()).Advance(0, 0)
