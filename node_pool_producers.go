@@ -347,7 +347,8 @@ func (n *Node) stopPoolProducers() error {
 }
 
 // startPoolProducerRetry tries each skipped pool again every
-// poolProducerRetryInterval until it starts or the node stops.
+// poolProducerRetryInterval until it starts or the node stops. A pool it
+// starts runs under ctx, the block producer's lifetime, not the retry loop's.
 func (n *Node) startPoolProducerRetry(ctx context.Context) {
 	n.multiPool.mu.Lock()
 	defer n.multiPool.mu.Unlock()
@@ -366,7 +367,7 @@ func (n *Node) startPoolProducerRetry(ctx context.Context) {
 			case <-retryCtx.Done():
 				return
 			case <-ticker.C:
-				if n.retrySkippedPoolProducers(retryCtx) {
+				if n.retrySkippedPoolProducers(ctx) {
 					return
 				}
 			}
