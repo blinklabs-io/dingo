@@ -90,6 +90,19 @@ func decodeConwayBlock(t *testing.T, block *conway.ConwayBlock) gledger.Block {
 // inbound envelope.
 func conwayEmptyBlock(t *testing.T, slot uint64) gledger.Block {
 	t.Helper()
+	return conwayEmptyBlockWithMajor(
+		t,
+		slot,
+		eras.ConwayEraDesc.MaxMajorVersion,
+	)
+}
+
+func conwayEmptyBlockWithMajor(
+	t *testing.T,
+	slot uint64,
+	major uint,
+) gledger.Block {
+	t.Helper()
 	block := &conway.ConwayBlock{
 		BlockHeader:            &conway.ConwayBlockHeader{},
 		TransactionBodies:      []conway.ConwayTransactionBody{},
@@ -100,9 +113,7 @@ func conwayEmptyBlock(t *testing.T, slot uint64) gledger.Block {
 	// Block number 0 is the only first block a chain rewound to origin takes.
 	block.BlockHeader.Body.BlockNumber = 0
 	block.BlockHeader.Body.Slot = slot
-	block.BlockHeader.Body.ProtoVersion.Major = uint64(
-		lcommon.ProtocolVersionPlomin,
-	)
+	block.BlockHeader.Body.ProtoVersion.Major = uint64(major)
 	return decodeConwayBlock(t, block)
 }
 
@@ -196,6 +207,112 @@ func TestLedgerProcessBlockClassifiesEnvelopeFailure(t *testing.T) {
 			)
 		})
 	}
+}
+
+func TestLedgerProcessBlockClassifiesUnsupportedHeaderVersion(t *testing.T) {
+	t.Parallel()
+
+	const slot = uint64(10)
+	for _, tc := range []struct {
+		name          string
+		validate      bool
+		forged        bool
+		trustedReplay bool
+		mithrilSlot   uint64
+		wantRejected  bool
+		wantError     bool
+	}{
+		{
+			name: "validated peer block", validate: true,
+			wantRejected: true, wantError: true,
+		},
+		{
+			name:         "historical peer block",
+			wantRejected: true, wantError: true,
+		},
+		{
+			name: "locally forged block", validate: true, forged: true,
+			wantError: true,
+		},
+		{name: "trusted replay skips the check", trustedReplay: true},
+		{name: "Mithril-certified history skips the check", mithrilSlot: slot},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			block := conwayEmptyBlockWithMajor(
+				t,
+				slot,
+				eras.ConwayEraDesc.MaxMajorVersion+1,
+			)
+			ls := newRequiredDatumLedger(t, newTestDB(t), eras.ConwayEraDesc)
+			ls.config.TrustedReplay = tc.trustedReplay
+			ls.mithrilLedgerSlot = tc.mithrilSlot
+			if tc.forged {
+				ls.config.ForgedBlockChecker = envelopeForgedChecker{
+					hash: block.Hash().Bytes(),
+				}
+			}
+			err := processEnvelopeBlock(t, ls, slot, tc.validate, block)
+			if !tc.wantError {
+				require.NoError(t, err)
+				return
+			}
+			var unsupported *UnsupportedHeaderProtocolVersionError
+			require.ErrorAs(t, err, &unsupported)
+			var rejected *headerValidationError
+			if !tc.wantRejected {
+				require.NotErrorAs(t, err, &rejected)
+				return
+			}
+			require.ErrorAs(t, err, &rejected)
+			require.Equal(
+				t,
+				ocommon.NewPoint(slot, block.Hash().Bytes()),
+				rejected.BlockPoint,
+			)
+		})
+	}
+}
+
+// Historical peer blocks skip the full ledger rule set while catching up, but
+// an unsupported header is still a deterministic rejection. Drive the batch
+// apply and recovery path to prove the persisted block is removed rather than
+// accepted or retried indefinitely.
+func TestLedgerRejectsUnsupportedHistoricalPeerBlock(t *testing.T) {
+	t.Parallel()
+
+	const slot = uint64(10)
+	block := conwayEmptyBlockWithMajor(
+		t,
+		slot,
+		eras.ConwayEraDesc.MaxMajorVersion+1,
+	)
+	ls := newReplayTestLedger(
+		t,
+		newTestDB(t),
+		block,
+		conway.BlockTypeConway,
+		eras.ConwayEraDesc,
+		envelopeRecoveryPParams(),
+	)
+	ls.validationEnabled = false
+
+	err := replayTestBlock(ls, block)
+	require.ErrorIs(t, err, errRestartLedgerPipeline)
+	var rejected *headerValidationError
+	require.ErrorAs(t, err, &rejected)
+	require.Equal(
+		t,
+		ocommon.NewPoint(slot, block.Hash().Bytes()),
+		rejected.BlockPoint,
+	)
+	var unsupported *UnsupportedHeaderProtocolVersionError
+	require.ErrorAs(t, rejected.Cause, &unsupported)
+	require.Zero(t, ls.config.ChainManager.PrimaryChain().Tip().Point.Slot)
+	ls.RLock()
+	ledgerTip := ls.currentTip.Point
+	ls.RUnlock()
+	require.Zero(t, ledgerTip.Slot)
 }
 
 // A peer block whose own body exceeds maxBlockExUnits is rejected without

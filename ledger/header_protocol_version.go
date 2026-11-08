@@ -276,17 +276,11 @@ func (ls *LedgerState) validateBlockHeaderProtocolVersion(
 	header lcommon.BlockHeader,
 	pparams lcommon.ProtocolParameters,
 ) error {
-	bhMajor, ok := HeaderProtocolMajor(header)
-	if !ok {
-		return nil
+	if err := ls.validateSupportedHeaderProtocolVersion(header); err != nil {
+		return err
 	}
-	activeEras := ls.eraList()
-	maxMajor := activeEras[len(activeEras)-1].MaxMajorVersion
-	if bhMajor > maxMajor {
-		return &UnsupportedHeaderProtocolVersionError{
-			Supplied: bhMajor,
-			Maximum:  maxMajor,
-		}
+	if _, ok := HeaderProtocolMajor(header); !ok {
+		return nil
 	}
 	pv, err := GetProtocolVersion(pparams)
 	if err != nil {
@@ -301,4 +295,24 @@ func (ls *LedgerState) validateBlockHeaderProtocolVersion(
 		)
 	}
 	return ValidateHeaderProtocolVersion(header, pv.Major, mainnet)
+}
+
+// validateSupportedHeaderProtocolVersion rejects a header newer than the eras
+// enabled by this node without applying the network-specific BBODY rule.
+func (ls *LedgerState) validateSupportedHeaderProtocolVersion(
+	header lcommon.BlockHeader,
+) error {
+	bhMajor, ok := HeaderProtocolMajor(header)
+	if !ok {
+		return nil
+	}
+	activeEras := ls.eraList()
+	maxMajor := activeEras[len(activeEras)-1].MaxMajorVersion
+	if bhMajor > maxMajor {
+		return &UnsupportedHeaderProtocolVersionError{
+			Supplied: bhMajor,
+			Maximum:  maxMajor,
+		}
+	}
+	return nil
 }

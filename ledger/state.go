@@ -10366,9 +10366,10 @@ func (ls *LedgerState) ledgerProcessBlock(
 	if err := validateTransactionOutputIndexes(block.Transactions()); err != nil {
 		return nil, fmt.Errorf("validate block transaction output indexes: %w", err)
 	}
-	// Reject block headers newer than the eras enabled by this node on every
-	// network. The separate BBODY current-version-plus-one rule is relaxed on
-	// testnets before Dijkstra, as specified by cardano-ledger.
+	// Full validation applies both the node's enabled-era ceiling and the BBODY
+	// current-version-plus-one rule. Historical peer blocks still apply the
+	// enabled-era ceiling below; only trusted replay and Mithril-certified
+	// history skip it.
 	if shouldValidate {
 		if err := validateInboundBlockEnvelope(
 			block,
@@ -10381,9 +10382,14 @@ func (ls *LedgerState) ledgerProcessBlock(
 		if err := ls.validateBlockHeaderProtocolVersion(
 			block.Header(), pparams,
 		); err != nil {
-			return nil, err
+			return nil, ls.rejectInboundEnvelopeFailure(point, err)
 		}
 	} else if !ls.config.TrustedReplay && !ls.slotCoveredByMithril(point.Slot) {
+		if err := ls.validateSupportedHeaderProtocolVersion(
+			block.Header(),
+		); err != nil {
+			return nil, ls.rejectInboundEnvelopeFailure(point, err)
+		}
 		// The aggregate maxBlockExUnits bound is a block-level ledger rule
 		// that per-transaction validation never repeats, so a peer-sourced
 		// block must meet it even when ValidateHistorical=false skips the
