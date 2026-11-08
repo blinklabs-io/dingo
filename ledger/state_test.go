@@ -5525,7 +5525,8 @@ func TestLedgerProcessBlockRejectsStandardDijkstraValidationFailure(
 	nodeConfig := newTestShelleyGenesisCfg(t)
 	nodeConfig.ShelleyGenesis().NetworkId = "Testnet"
 	ls := &LedgerState{
-		db: db,
+		db:         db,
+		activeEras: eras.ErasWithDijkstra,
 		config: LedgerStateConfig{
 			CardanoNodeConfig: nodeConfig,
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -9620,7 +9621,8 @@ func TestLedgerProcessBlockRunsPhase1ForPhase2InvalidTransaction(
 	nodeConfig := newTestShelleyGenesisCfg(t)
 	nodeConfig.ShelleyGenesis().NetworkId = "Testnet"
 	ls := &LedgerState{
-		db: db,
+		db:         db,
+		activeEras: eras.ErasWithDijkstra,
 		config: LedgerStateConfig{
 			CardanoNodeConfig: nodeConfig,
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),

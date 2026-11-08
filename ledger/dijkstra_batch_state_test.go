@@ -150,6 +150,7 @@ func newStateBatchHarness(t *testing.T) *stateBatchHarness {
 		db: db,
 		ls: &LedgerState{
 			db:             db,
+			activeEras:     eras.ErasWithDijkstra,
 			currentPParams: &dijkstra.DijkstraProtocolParameters{},
 			config: LedgerStateConfig{
 				CardanoNodeConfig: newTestShelleyGenesisCfg(t),

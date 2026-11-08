@@ -103,10 +103,8 @@ func TestValidatedBlockBatchesAPIIndexesAndKeepsStateImmediate(t *testing.T) {
 				}
 				return nil
 			}
-			era := eras.EraDesc{
-				Id:             conway.EraIdConway,
-				ValidateTxFunc: validate,
-			}
+			era := eras.ConwayEraDesc
+			era.ValidateTxFunc = validate
 			pp := &conway.ConwayProtocolParameters{
 				MaxBlockBodySize:   2_000_000,
 				MaxBlockHeaderSize: 100_000,
