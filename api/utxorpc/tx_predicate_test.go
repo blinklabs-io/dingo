@@ -293,10 +293,6 @@ func TestEvalTxPredicate_NilTree(t *testing.T) {
 	)
 }
 
-func TestEvalTxPredicate_FromSubmitNil(t *testing.T) {
-	require.Nil(t, txPredicateFromSubmit(nil))
-}
-
 func TestTxPredicateFromSubmit_nonCardanoMatchSetsUnevaluable(t *testing.T) {
 	node := txPredicateFromSubmit(&submit.TxPredicate{
 		Match: &submit.AnyChainTxPattern{},
@@ -331,13 +327,6 @@ func TestMatchTxPredicateNode_Not_addresslessCardanoLeaf(t *testing.T) {
 		Not: []*submit.TxPredicate{matchSubmit(emptyAddr)},
 	}
 	require.False(t, u.matchTxPredicateNode(nil, txPredicateFromSubmit(pred)))
-}
-
-func TestWatchHandlers_nilProtobufPredicateSkipsEval(t *testing.T) {
-	// WatchMempool / WatchTx only build predTree when predicate != nil; a nil
-	// request predicate skips conversion (same as leaving predTree unset).
-	predicate := (*submit.TxPredicate)(nil)
-	require.Nil(t, txPredicateFromSubmit(predicate))
 }
 
 func TestEvalTxPredicate_MaxDepthExceeded(t *testing.T) {

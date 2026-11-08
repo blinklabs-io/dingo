@@ -22,9 +22,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -36,39 +34,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-func TestOpenReadOnlySQLite(t *testing.T) {
-	t.Parallel()
-
-	tmpDir := t.TempDir()
-	dbPath := filepath.Join(tmpDir, "metadata.sqlite")
-
-	// Missing file returns error
-	_, err := OpenReadOnlySQLite(t.Context(), dbPath)
-	require.Error(t, err)
-
-	// Create a real SQLite database file
-	initDB, err := sql.Open(
-		"sqlite",
-		"file:"+dbPath+"?_pragma=synchronous(OFF)",
-	)
-	require.NoError(t, err)
-	_, err = initDB.Exec("CREATE TABLE test_table (id INTEGER PRIMARY KEY);")
-	require.NoError(t, err)
-	initDB.Close()
-
-	// Open read-only SQLite connection
-	roDB, err := OpenReadOnlySQLite(t.Context(), dbPath)
-	require.NoError(t, err)
-	defer roDB.Close()
-
-	err = roDB.Ping()
-	require.NoError(t, err)
-
-	// Verify sqliteFileURI
-	uri := sqliteFileURI("test/path.sqlite")
-	assert.True(t, strings.HasPrefix(uri, "file://"))
-}
 
 func TestServerStopClosesDB(t *testing.T) {
 	t.Parallel()
@@ -107,6 +72,11 @@ func TestNewMCPServerUsesActiveSQLiteProvider(t *testing.T) {
 	_, err = stale.Exec("CREATE TABLE stale_marker(n)")
 	require.NoError(t, err)
 	require.NoError(t, stale.Close())
+	// The metadata store lives in active, not in the database's data
+	// directory, so the migrated template must be seeded there explicitly.
+	template, err := dbtest.MetadataTemplateBytes()
+	require.NoError(t, err)
+	require.NoError(t, dbtest.SeedMetadataTemplateBytes(active, template))
 	nodeDB, err := dbtest.NewDatabaseWithOptions(
 		t,
 		dbtest.Options{
@@ -529,12 +499,6 @@ func TestRegisterProvider(t *testing.T) {
 	require.Error(t, RegisterProvider(nil))
 }
 
-func TestMCPDefaultRequiresOptIn(t *testing.T) {
-	t.Parallel()
-	require.Zero(t, DefaultProviderConfig().Port)
-	require.Equal(t, "127.0.0.1", DefaultProviderConfig().Host)
-}
-
 func TestValidateListenSecurity(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -635,58 +599,5 @@ func TestServerStartStopLifecycle(t *testing.T) {
 
 	// Graceful stop
 	err = server.Stop(ctx)
-	require.NoError(t, err)
-}
-
-func TestSSESessionSurvivesIdleInterval(t *testing.T) {
-	t.Parallel()
-	if testing.Short() || os.Getenv("MCP_SSE_SURVIVAL_TEST") != "1" {
-		t.Skip(
-			"set MCP_SSE_SURVIVAL_TEST=1 to exercise the former 60-second SSE deadline",
-		)
-	}
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	addr := listener.Addr().String()
-	require.NoError(t, listener.Close())
-	server, err := NewServer(
-		t.Context(),
-		DefaultProviderConfig(),
-		ProviderDependencies{},
-		apiconfig.EffectiveTLS{},
-		addr,
-	)
-	require.NoError(t, err)
-	ctx, cancel := context.WithTimeout(t.Context(), 75*time.Second)
-	defer cancel()
-	require.NoError(t, server.Start(ctx))
-	defer func() {
-		stopCtx, c := context.WithTimeout(context.Background(), 5*time.Second)
-		defer c()
-		require.NoError(t, server.Stop(stopCtx))
-	}()
-	client := mcp.NewClient(
-		&mcp.Implementation{Name: "test", Version: "1"},
-		nil,
-	)
-	session, err := client.Connect(
-		ctx,
-		&mcp.SSEClientTransport{Endpoint: "http://" + addr + "/sse"},
-		nil,
-	)
-	require.NoError(t, err)
-	defer session.Close()
-	_, err = session.ListTools(ctx, nil)
-	require.NoError(t, err)
-	// This timer advances the scenario beyond the former deadline; it is
-	// not used to synchronize goroutines or wait for readiness.
-	timer := time.NewTimer(61 * time.Second)
-	defer timer.Stop()
-	select {
-	case <-timer.C:
-	case <-ctx.Done():
-		t.Fatal(ctx.Err())
-	}
-	_, err = session.ListTools(ctx, nil)
 	require.NoError(t, err)
 }

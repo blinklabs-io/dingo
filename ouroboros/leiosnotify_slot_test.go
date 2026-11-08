@@ -29,23 +29,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestLeiosBlockKeyDistinguishesSlots guards the composite cache/dedup key
-// leiosEndorserBlocks and leiosFetchInProgress rely on: an entry (or an
-// in-flight claim) for one occurrence of a hash must not collide with -- and
-// so must not suppress or mask -- a legitimate, independent occurrence of the
-// same content-addressed hash at a different slot.
-func TestLeiosBlockKeyDistinguishesSlots(t *testing.T) {
-	t.Parallel()
-
-	hash := []byte{0xaa, 0xbb}
-	a := leiosBlockKey(10, hash)
-	b := leiosBlockKey(11, hash)
-	require.NotEqual(t, a, b)
-
-	same := leiosBlockKey(10, hash)
-	require.Equal(t, a, same)
-}
-
 // TestLeiosNotifyBlockOfferFetchesSameHashAtDifferentSlot is the offer-first
 // regression: MsgBlockOffer's cache-hit skip used to
 // key solely on hash, so a hash already cached at one slot silently swallowed

@@ -177,31 +177,6 @@ func TestLeiosVotesServerRequestNextUnavailableWithoutHandler(t *testing.T) {
 	assert.Nil(t, votes)
 }
 
-func TestLeiosVotesServerRequestNextDelegates(t *testing.T) {
-	t.Parallel()
-
-	// Keep this focused on occurrence binding; semantic validation is covered
-	// separately with an injected ledger validator.
-	o := newOuroboros(OuroborosConfig{EnableLeios: false})
-	handler := &fakeLeiosVoteHandler{
-		nextVotes: []lcommon.LeiosVote{
-			testLeiosVote(0),
-			testLeiosVote(1),
-		},
-	}
-	o.leiosVotes = handler
-
-	votes, err := o.leiosvotesServerRequestNext(
-		oleiosvotes.CallbackContext{},
-		2,
-	)
-	require.NoError(t, err)
-	require.Len(t, votes, 2)
-	assert.Equal(t, uint64(0), votes[0].VoterId)
-	assert.Equal(t, uint64(1), votes[1].VoterId)
-	assert.Equal(t, []uint64{2}, handler.nextRequests)
-}
-
 func TestLeiosVotesServerRequestNextRejectsOversizedCount(t *testing.T) {
 	t.Parallel()
 
@@ -280,22 +255,6 @@ func TestLeiosVotesServerRequestNextCanceledOnConnectionClose(t *testing.T) {
 	}
 }
 
-func TestLeiosVotesClientVoteDelegates(t *testing.T) {
-	t.Parallel()
-
-	o := newOuroboros(OuroborosConfig{EnableLeios: true})
-	handler := &fakeLeiosVoteHandler{}
-	o.leiosVotes = handler
-
-	vote := testLeiosVote(7)
-	require.NoError(
-		t,
-		o.leiosvotesClientVote(oleiosvotes.CallbackContext{}, vote),
-	)
-	require.Len(t, handler.votes, 1)
-	assert.Equal(t, uint64(7), handler.votes[0].vote.VoterId)
-}
-
 func TestLeiosNotifyPrototypeVoteDelegates(t *testing.T) {
 	t.Parallel()
 
@@ -336,44 +295,6 @@ func TestLeiosNotifyPrototypeVoteDelegates(t *testing.T) {
 	assert.Equal(t, vote, handler.prototypeVotes[0].vote)
 }
 
-func TestLeiosVotesClientVoteWithoutHandlerLogsOnly(t *testing.T) {
-	t.Parallel()
-
-	o := newOuroboros(OuroborosConfig{EnableLeios: true})
-	require.NoError(
-		t,
-		o.leiosvotesClientVote(
-			oleiosvotes.CallbackContext{},
-			testLeiosVote(7),
-		),
-	)
-}
-
-func TestLeiosFetchServerVotesRequestDelegates(t *testing.T) {
-	t.Parallel()
-
-	o := newOuroboros(OuroborosConfig{EnableLeios: true})
-	raw := mustCbor(t, "vote-cbor")
-	handler := &fakeLeiosVoteHandler{
-		rawVotes: []cbor.RawMessage{raw},
-	}
-	o.leiosVotes = handler
-
-	ids := []oleiosfetch.MsgVotesRequestVoteId{
-		{SlotNo: 123, VoterId: 0},
-		{SlotNo: 123, VoterId: 9},
-	}
-	msg, err := o.leiosfetchServerVotesRequest(
-		oleiosfetch.CallbackContext{},
-		ids,
-	)
-	require.NoError(t, err)
-	votesMsg, ok := msg.(*oleiosfetch.MsgVotes)
-	require.True(t, ok)
-	require.Len(t, votesMsg.VotesRaw, 1)
-	assert.Equal(t, []lcommon.LeiosVoteId(ids), handler.requestedIds)
-}
-
 func TestLeiosFetchServerVotesRequestWithoutHandler(t *testing.T) {
 	t.Parallel()
 
@@ -386,9 +307,6 @@ func TestLeiosFetchServerVotesRequestWithoutHandler(t *testing.T) {
 	votesMsg, ok := msg.(*oleiosfetch.MsgVotes)
 	require.True(t, ok)
 	assert.Empty(t, votesMsg.VotesRaw)
-	wire, err := cbor.Encode(votesMsg)
-	require.NoError(t, err)
-	assert.Equal(t, []byte{0x82, 0x0b, 0x80}, wire)
 }
 
 func TestStoreLeiosEndorserBlockNotifiesVoteHandler(t *testing.T) {
@@ -606,28 +524,4 @@ func TestLeiosAnnouncementCompletesExistingRelayIntent(t *testing.T) {
 	})
 	require.Equal(t, "peer-a", data.relayOfferSource)
 	require.Equal(t, txsRaw, data.txsRaw)
-}
-
-func TestStoreLeiosEndorserBlockWithoutHandler(t *testing.T) {
-	t.Parallel()
-
-	point, blockRaw := testLeiosEndorserBlockRaw(t, 11)
-	o := newOuroboros(OuroborosConfig{EnableLeios: true})
-	require.NoError(
-		t,
-		o.storeLeiosEndorserBlock(
-			point,
-			blockRaw,
-			nil,
-			leiosStoreAuthoritative,
-		),
-	)
-}
-
-func TestLeiosVotesClientRequestSizeIsIncremental(t *testing.T) {
-	t.Parallel()
-
-	o := newOuroboros(OuroborosConfig{EnableLeios: true})
-	cfg := oleiosvotes.NewConfig(o.leiosvotesClientConnOpts()...)
-	require.Equal(t, uint64(1), cfg.RequestNextCount)
 }

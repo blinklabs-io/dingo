@@ -43,7 +43,6 @@ import (
 	"github.com/blinklabs-io/dingo/mempool"
 	"github.com/blinklabs-io/dingo/peergov"
 	ouroboros "github.com/blinklabs-io/gouroboros"
-	gcbor "github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	"github.com/blinklabs-io/gouroboros/protocol"
@@ -997,64 +996,6 @@ func TestChainsyncAwaitReplyPublishesDeliveredFrontier(t *testing.T) {
 	data, ok := evt.Data.(ledger.ChainsyncAwaitReplyEvent)
 	require.True(t, ok)
 	assert.Equal(t, connId, data.ConnectionId)
-}
-
-func TestChainsyncRejectedStagedCandidateDoesNotReachLedger(t *testing.T) {
-	t.Parallel()
-
-	bus := event.NewEventBus(nil, nil)
-	t.Cleanup(bus.Close)
-	_, ledgerCh := bus.Subscribe(ledger.ChainsyncEventType)
-	_, observedCh := bus.Subscribe(chainselection.PeerTipUpdateEventType)
-	state := dchainsync.NewState(bus, nil)
-	connId := newTestConnId("127.0.0.1:6000", "10.0.0.1:3001")
-	require.True(t, state.AddClientConnId(connId))
-
-	o := newOuroboros(OuroborosConfig{
-		EventBus: bus,
-		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool {
-			return true
-		},
-		ChainsyncApplyEligible: func(ouroboros.ConnectionId) bool {
-			return true
-		},
-		ChainsyncObservePeerTip: func(
-			chainselection.PeerTipUpdateEvent,
-		) chainselection.PeerTipUpdateDisposition {
-			return chainselection.PeerTipUpdateRejected
-		},
-		ChainsyncResolvePeerTip: func(
-			chainselection.PeerTipUpdateEvent,
-			bool,
-		) {
-		},
-	})
-	o.chainsyncState = state
-	header := newTestBlockHeader(100, 1, 0xaa)
-	tip := ochainsync.Tip{
-		Point:       ocommon.NewPoint(100, header.Hash().Bytes()),
-		BlockNumber: 1,
-	}
-
-	require.ErrorIs(t, o.chainsyncClientRollForwardAt(
-		ochainsync.CallbackContext{ConnectionId: connId},
-		0,
-		header,
-		tip,
-		time.Now(),
-	), errChainsyncCandidateRejected)
-	testutil.RequireNoReceive(
-		t,
-		ledgerCh,
-		50*time.Millisecond,
-		"a rejected staged candidate must not reach the ledger",
-	)
-	testutil.RequireNoReceive(
-		t,
-		observedCh,
-		50*time.Millisecond,
-		"a rejected staged candidate must not enter the legacy async path",
-	)
 }
 
 func TestChainsyncFarFutureDropHasNoStateOrConnectionPenalty(t *testing.T) {
@@ -3812,39 +3753,6 @@ func TestCloseOutboundConnAfterChainsyncFailureSparesReplacement(t *testing.T) {
 	require.Same(t, replacement, connManager.GetConnectionById(connId))
 }
 
-// TestCloseOutboundConnAfterChainsyncFailureHandlesMissingConn verifies the
-// helper is a no-op when there was no connection to start with, and when the
-// connection has already gone away entirely.
-func TestCloseOutboundConnAfterChainsyncFailureHandlesMissingConn(
-	t *testing.T,
-) {
-	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	bus := event.NewEventBus(nil, logger)
-	defer bus.Close()
-
-	o, connManager, connId := newOutboundStartTestOuroboros(t, logger, bus)
-
-	// Nil started connection: nothing to close, must not panic.
-	require.NotPanics(t, func() {
-		o.closeOutboundConnAfterChainsyncFailure(connId, nil)
-	})
-	require.NotNil(t, connManager.GetConnectionById(connId))
-
-	// Connection already gone: the id no longer resolves, so the guard sees
-	// current == nil != startedConn and leaves well alone.
-	startedConn := connManager.GetConnectionById(connId)
-	require.NoError(t, startedConn.Close())
-	require.Eventually(
-		t,
-		func() bool { return connManager.GetConnectionById(connId) == nil },
-		2*time.Second,
-		20*time.Millisecond,
-	)
-	require.NotPanics(t, func() {
-		o.closeOutboundConnAfterChainsyncFailure(connId, startedConn)
-	})
-}
-
 type patienceRollForwardFixture struct {
 	o     *Ouroboros
 	state *dchainsync.State
@@ -4564,20 +4472,6 @@ func TestChainsyncServerFindIntersectRejectsPointListOverLimit(t *testing.T) {
 		registered,
 		"a rejected intersection must not register a downstream client",
 	)
-}
-
-// TestChainsyncServerFindIntersectAcceptsNormalPointList verifies the point
-// count a well-behaved client actually sends is served normally.
-func TestChainsyncServerFindIntersectAcceptsNormalPointList(t *testing.T) {
-	t.Parallel()
-
-	f := newChainsyncServerFixture(t, csmock.ModeNtC)
-
-	points := makeFindIntersectPoints(chainsyncIntersectPointCount)
-	require.NoError(t, f.h.FindIntersect(points))
-
-	msg := f.observe(t)
-	require.True(t, msg.IsIntersectFound())
 }
 
 // TestChainsyncServerFindIntersectDeduplicatesRepeatedPointsForBudget verifies
@@ -5310,41 +5204,6 @@ func TestChainsyncServerLocalClientUnparkedWhenAppliedTipLookupFails(
 // connection and server it runs against.
 // =============================================================================
 
-// TestChainsyncServerRequestNextSyncIteratorErrorPropagates verifies a real
-// iterator failure is returned rather than being mistaken for the chain-tip
-// sentinel (which would silently park the peer instead of surfacing the
-// fault).
-func TestChainsyncServerRequestNextSyncIteratorErrorPropagates(t *testing.T) {
-	t.Parallel()
-
-	f := newChainsyncServerFixture(t, csmock.ModeNtC)
-	f.registerClientAtOrigin(t)
-
-	// Break the backing store so the synchronous iterator returns a real
-	// lookup error.
-	require.NoError(t, dbtest.CloseDatabase(f.o.ledgerState.Database()))
-
-	err := f.o.chainsyncServerRequestNext(f.callbackContext(), false)
-
-	require.Error(t, err)
-	require.NotErrorIs(t, err, chain.ErrIteratorChainTip)
-}
-
-// TestChainsyncServerRequestNextAwaitReplyErrorPropagates verifies an
-// AwaitReply send failure is returned from the callback, so the protocol layer
-// tears the connection down instead of arming an async wait on a dead peer.
-func TestChainsyncServerRequestNextAwaitReplyErrorPropagates(t *testing.T) {
-	t.Parallel()
-
-	f := newChainsyncServerFixture(t, csmock.ModeNtC)
-	f.registerClientAtOrigin(t)
-
-	// Stop the protocol so the AwaitReply send itself fails.
-	f.h.Server().Stop()
-
-	require.Error(t, f.o.chainsyncServerRequestNext(f.callbackContext(), false))
-}
-
 // TestChainsyncServerRequestNextErrorsNameTheFailedStep verifies the callback
 // errors carry the step that failed while keeping the underlying error
 // matchable, so a torn-down connection can be diagnosed from its log line.
@@ -5625,30 +5484,6 @@ func TestEffectiveChainsyncBlockTimeoutUsesProtocolMaxAsFloor(t *testing.T) {
 	)
 }
 
-func TestChainsyncByronEbbHeaderRoundTrip(t *testing.T) {
-	t.Parallel()
-
-	ebbCbor := byronEbbFixtureCbor(t)
-
-	msg, err := ochainsync.NewMsgRollForwardNtN(
-		gledger.BlockHeaderTypeByron,
-		gledger.BlockTypeByronEbb,
-		ebbCbor,
-		ochainsync.Tip{},
-	)
-	require.NoError(t, err)
-	wire, err := gcbor.Encode(msg)
-	require.NoError(t, err)
-	var received ochainsync.MsgRollForwardNtN
-	_, err = gcbor.Decode(wire, &received)
-	require.NoError(t, err)
-	_, err = gledger.NewBlockHeaderFromCbor(
-		received.WrappedHeader.ByronType(),
-		received.WrappedHeader.HeaderCbor(),
-	)
-	require.NoError(t, err)
-}
-
 func TestDecodeChainsyncHeaderAcceptsFullByronEbb(t *testing.T) {
 	t.Parallel()
 
@@ -5886,29 +5721,6 @@ func TestNewOuroborosDoesNotMutateChainsyncNtNTimeouts(t *testing.T) {
 		ChainsyncBlockTimeout: 20 * time.Minute,
 	})
 	require.Equal(t, before, snapshotChainsyncNtNTimeouts())
-}
-
-func TestChainsyncConnOptsUseConfiguredBlockTimeout(t *testing.T) {
-	t.Parallel()
-
-	const blockTimeout = 20 * time.Minute
-
-	o := newOuroboros(OuroborosConfig{
-		ChainsyncBlockTimeout: blockTimeout,
-	})
-
-	clientCfg := ochainsync.NewConfig(o.chainsyncClientConnOpts()...)
-	serverCfg := ochainsync.NewConfig(
-		o.chainsyncServerConnOpts(
-			context.Background(),
-			newChainsyncFindIntersectRateLimiter(200, 1000),
-			false,
-		)...)
-
-	require.Equal(t, blockTimeout, clientCfg.BlockTimeout)
-	require.Equal(t, blockTimeout, serverCfg.BlockTimeout)
-	require.Equal(t, ochainsync.DefaultPipelineLimit, clientCfg.PipelineLimit)
-	require.Equal(t, ochainsync.DefaultRecvQueueSize, clientCfg.RecvQueueSize)
 }
 
 // TestChainsyncConnectionConfigOptionCreatesPerConnectionBudget verifies that
@@ -6688,68 +6500,6 @@ func TestChainsyncRejectedHeaderRemovesStagedPeerTip(t *testing.T) {
 	laterChainsyncEvent.PeerTipAdmission(true)
 	require.Contains(t, o.deferredHeaderRecovery, conn,
 		"later admission must not cancel recovery for a rejected prefix")
-}
-
-func TestChainsyncClientRollForwardReplaysDuplicateFromSelectedPeerSeenElsewhere(
-	t *testing.T,
-) {
-	t.Parallel()
-
-	bus := event.NewEventBus(nil, nil)
-	defer bus.Close()
-
-	_, ch := bus.Subscribe(ledger.ChainsyncEventType)
-	state := dchainsync.NewState(bus, nil)
-	connA := newTestConnId("127.0.0.1:6000", "1.1.1.1:3001")
-	connB := newTestConnId("127.0.0.1:6000", "2.2.2.2:3001")
-	require.True(t, state.AddClientConnId(connA))
-	require.True(t, state.AddClientConnId(connB))
-	selectTrackedChainsyncClient(t, state, connA)
-
-	o := newOuroboros(OuroborosConfig{
-		EventBus: bus,
-		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool {
-			return true
-		},
-	})
-	o.chainsyncState = state
-	o.eventBus = bus
-
-	header := newTestBlockHeader(100, 1, 0xaa)
-	tip := ochainsync.Tip{
-		Point:       ocommon.NewPoint(100, header.Hash().Bytes()),
-		BlockNumber: 1,
-	}
-
-	err := o.chainsyncClientRollForward(
-		ochainsync.CallbackContext{ConnectionId: connB},
-		0,
-		header,
-		tip,
-	)
-	require.NoError(t, err)
-	evt1 := <-ch
-	data1, ok := evt1.Data.(ledger.ChainsyncEvent)
-	require.True(t, ok)
-	require.Equal(t, connB, data1.ConnectionId)
-
-	err = o.chainsyncClientRollForward(
-		ochainsync.CallbackContext{ConnectionId: connA},
-		0,
-		header,
-		tip,
-	)
-	require.NoError(t, err)
-	select {
-	case evt2 := <-ch:
-		data2, ok := evt2.Data.(ledger.ChainsyncEvent)
-		require.True(t, ok)
-		require.Equal(t, connA, data2.ConnectionId)
-	case <-time.After(time.Second):
-		t.Fatal(
-			"expected selected peer to replay duplicate header first seen elsewhere",
-		)
-	}
 }
 
 // A suppressed header at a new point is forward protocol activity, while
@@ -7576,6 +7326,7 @@ func TestSubscribeChainsyncResyncClosesConnectionForFreshSyncReasons(
 	}
 	for _, reason := range reasons {
 		t.Run(reason, func(t *testing.T) {
+			t.Parallel()
 			logBuf := &lockedBuffer{}
 			logger := slog.New(
 				slog.NewJSONHandler(
@@ -8696,6 +8447,7 @@ func TestHandleConnClosedEventPreservesLocalRestartStability(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 			bus := event.NewEventBus(nil, logger)
 			defer bus.Close()

@@ -397,7 +397,7 @@ func TestComputeCandidateNonceFastRejectsMalformedNonceRows(t *testing.T) {
 func shelleyGenesisCfgForNonceWindow(t *testing.T) *cardano.CardanoNodeConfig {
 	t.Helper()
 	cfg := &cardano.CardanoNodeConfig{}
-	require.NoError(t, cfg.LoadShelleyGenesisFromReader(
+	require.NoError(t, completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(
 		strings.NewReader(`{
 			"systemStart": "2022-10-25T00:00:00Z",
 			"securityParam": 10,

@@ -135,6 +135,7 @@ func callCtx(t *testing.T) context.Context {
 // verifies the "latest at or before the requested block" query picks the
 // correct row, including the not-found case before the first row.
 func TestGetTechnicalCommitteeDatum_AtOrBefore(t *testing.T) {
+	t.Parallel()
 	db := newTestDatabase(t)
 	for i, blockNumber := range []uint64{10, 20, 30} {
 		require.NoError(
@@ -191,6 +192,7 @@ func TestGetTechnicalCommitteeDatum_AtOrBefore(t *testing.T) {
 // TestGetCouncilDatum_DistinctFromTechnicalCommittee verifies the two
 // governance datum RPCs are scoped by datum_type and don't cross-contaminate.
 func TestGetCouncilDatum_DistinctFromTechnicalCommittee(t *testing.T) {
+	t.Parallel()
 	db := newTestDatabase(t)
 	require.NoError(
 		t,
@@ -238,6 +240,7 @@ func TestGetCouncilDatum_DistinctFromTechnicalCommittee(t *testing.T) {
 // TestGetAriadneParameters_AtOrBefore mirrors the governance-datum at-or-
 // before semantics but against midnight_ariadne_params, keyed by epoch.
 func TestGetAriadneParameters_AtOrBefore(t *testing.T) {
+	t.Parallel()
 	db := newTestDatabase(t)
 	for i, epoch := range []uint64{1, 2, 3} {
 		require.NoError(
@@ -283,6 +286,7 @@ func TestGetAriadneParameters_AtOrBefore(t *testing.T) {
 }
 
 func TestGetEpochNonce(t *testing.T) {
+	t.Parallel()
 	db := newTestDatabase(t)
 	require.NoError(
 		t,
@@ -339,6 +343,7 @@ type candidateInputRefCbor struct {
 }
 
 func TestGetEpochCandidates_CandidatesAndStakeDistribution(t *testing.T) {
+	t.Parallel()
 	db := newTestDatabase(t)
 	entries := []candidateEntryCbor{
 		{TxHash: []byte{0xAA}, OutputIndex: 0, Datum: []byte("candidate-a")},
@@ -471,6 +476,7 @@ func TestGetEpochCandidates_CandidatesAndStakeDistribution(t *testing.T) {
 func TestGetEpochCandidates_MissingRegistrationLeavesProvenanceZero(
 	t *testing.T,
 ) {
+	t.Parallel()
 	db := newTestDatabase(t)
 	entries := []candidateEntryCbor{
 		{TxHash: []byte{0xCC}, OutputIndex: 0, Datum: []byte("candidate-c")},
@@ -520,6 +526,7 @@ func TestGetEpochCandidates_MissingRegistrationLeavesProvenanceZero(
 // with a clean FailedPrecondition status instead of nil-panicking on a
 // missing backend. An unimplemented RPC must still return Unimplemented.
 func TestEmptyConfigImplementedRPCsReturnFailedPrecondition(t *testing.T) {
+	t.Parallel()
 	addr := startTestServerWithConfig(t, server.Config{})
 	client := dialClient(t, addr)
 
@@ -592,6 +599,7 @@ func TestEmptyConfigImplementedRPCsReturnFailedPrecondition(t *testing.T) {
 }
 
 func TestGetLatestBlock(t *testing.T) {
+	t.Parallel()
 	db := newTestDatabase(t)
 	insertPlaceholderBlock(t, db, 1, 1, 0x01)
 	tip := insertPlaceholderBlock(t, db, 2, 2, 0x02)
@@ -620,6 +628,7 @@ func TestGetLatestBlock(t *testing.T) {
 // stable, generic Internal error rather than silently wrapping (uint32(v)
 // on a value one past math.MaxUint32 truncates to 0).
 func TestGetLatestBlock_BlockNumberOutOfDomain(t *testing.T) {
+	t.Parallel()
 	db := newTestDatabase(t)
 	badNumber := uint64(math.MaxUint32) + 1
 	insertPlaceholderBlock(t, db, badNumber, 1, 0x01)
@@ -645,6 +654,7 @@ func TestGetLatestBlock_BlockNumberOutOfDomain(t *testing.T) {
 }
 
 func TestGetBlockByHash(t *testing.T) {
+	t.Parallel()
 	db := newTestDatabase(t)
 	blk := loadRealTestBlock(t)
 	require.NoError(t, db.BlockCreate(blk, nil))
@@ -697,6 +707,7 @@ func praosStabilityOffset(k uint64, f float64) uint64 {
 // Praos stability-window formula for both a small DevNet-style profile and
 // preview testnet's real k/f.
 func TestStability_MatchesConfiguredKAndF(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		k    uint64
@@ -707,6 +718,7 @@ func TestStability_MatchesConfiguredKAndF(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			offset := praosStabilityOffset(tc.k, tc.f)
 			db := newTestDatabase(t)
 			target := insertPlaceholderBlock(t, db, 1000, 1000, 0xAA)
@@ -797,6 +809,7 @@ func TestStability_MatchesConfiguredKAndF(t *testing.T) {
 // set, resolves the "chain tip" to the latest block at or before that
 // wall-clock time rather than the live tip.
 func TestGetStableBlock_AsOfTimestamp(t *testing.T) {
+	t.Parallel()
 	db := newTestDatabase(t)
 	older := insertPlaceholderBlock(t, db, 10, 10, 0x01)
 	insertPlaceholderBlock(t, db, 20, 20, 0x02) // newer than the as-of time
@@ -830,6 +843,7 @@ func TestGetStableBlock_AsOfTimestamp(t *testing.T) {
 // rather than being converted with int64(v), which would silently wrap it
 // into a negative timestamp and resolve against a bogus slot.
 func TestGetStableBlock_AsOfTimestampOutOfDomain(t *testing.T) {
+	t.Parallel()
 	db := newTestDatabase(t)
 	blk := insertPlaceholderBlock(t, db, 10, 10, 0x01)
 

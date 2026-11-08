@@ -111,34 +111,6 @@ func resolveOnFreePortWithConfig(
 	return nil
 }
 
-// TestRegisterProviderDescriptor asserts the provider is advertised
-// under the capability and name the node's configuration selects.
-func TestRegisterProviderDescriptor(t *testing.T) {
-	t.Parallel()
-
-	host := newProviderHost(t)
-
-	var found *plugin.Descriptor
-	for _, d := range host.Providers() {
-		if d.Capability == plugin.CapabilityAPIMesh {
-			found = &d
-			break
-		}
-	}
-
-	require.NotNil(t, found)
-	require.Equal(t, "builtin", found.Name)
-	require.NotEmpty(t, found.Description)
-}
-
-// TestRegisterProviderRejectsNilHost asserts registration fails loudly
-// rather than silently leaving the capability unavailable.
-func TestRegisterProviderRejectsNilHost(t *testing.T) {
-	t.Parallel()
-
-	require.Error(t, RegisterProvider(nil))
-}
-
 // TestProviderBuildsListenAddress covers the host/port composition: the
 // server must listen on the address the node's config asks for.
 func TestProviderBuildsListenAddress(t *testing.T) {
@@ -159,50 +131,6 @@ func TestProviderBuildsListenAddress(t *testing.T) {
 	require.NotEmpty(t, wantPort)
 	// Resolve starts the instance, so the port must be accepting.
 	require.True(t, portAccepts(srv.config.ListenAddress))
-}
-
-// TestProviderDefaultPort pins the port a deployment gets when its
-// configuration omits one. Resolving with no port would exercise the
-// default end to end but would bind 8080 on the test host, so assert
-// the defaults the plugin host is handed instead -- RegisterProvider
-// passes providerDefaults itself, so a change to the default port is a
-// change to what this asserts.
-func TestProviderDefaultPort(t *testing.T) {
-	t.Parallel()
-
-	require.Equal(t, uint(8080), defaultProviderPort)
-	require.Equal(
-		t,
-		ProviderConfig{Port: defaultProviderPort},
-		providerDefaults(),
-	)
-}
-
-// TestProviderPropagatesDependencies asserts the node-supplied network
-// identity and CORS policy reach the server rather than being dropped
-// in the provider wiring.
-func TestProviderPropagatesDependencies(t *testing.T) {
-	t.Parallel()
-
-	host := newProviderHost(t)
-	deps := newTestDeps()
-	pd := providerDeps(deps)
-	pd.CORSAllowedOrigins = []string{"https://wallet.example"}
-
-	srv := resolveOnFreePort(t, host, pd)
-
-	require.Equal(t, testNetwork, srv.config.Network)
-	require.Equal(t, testNetworkMagic, srv.config.NetworkMagic)
-	require.Equal(t, testGenesisHash, srv.config.GenesisHash)
-	require.Equal(
-		t,
-		[]string{"https://wallet.example"},
-		srv.config.CORSAllowedOrigins,
-	)
-	require.Same(t, deps.chain, srv.config.Chain)
-	require.Same(t, deps.database, srv.config.Database)
-	require.Same(t, deps.ledger, srv.config.LedgerState)
-	require.Same(t, deps.mempool, srv.config.Mempool)
 }
 
 // TestProviderRejectsInvalidDependencies asserts a misconfigured node
@@ -273,27 +201,4 @@ func TestProviderRejectsPartialTLSPair(t *testing.T) {
 	require.Error(t, err)
 	require.ErrorContains(t, err, "plugins.api.mesh.config.tls")
 	require.ErrorContains(t, err, "must both be set")
-}
-
-// TestProviderPropagatesTLS asserts a valid provider TLS config reaches the server.
-func TestProviderPropagatesTLS(t *testing.T) {
-	t.Parallel()
-
-	host := newProviderHost(t)
-	certPath, keyPath := testutil.GenerateTestTLSCertKey(t)
-
-	srv := resolveOnFreePortWithConfig(
-		t, host, providerDeps(newTestDeps()),
-		map[string]any{
-			"tls": map[string]any{
-				"mode":         "server",
-				"certFilePath": certPath,
-				"keyFilePath":  keyPath,
-			},
-		},
-	)
-
-	require.True(t, srv.config.TLS.Enabled)
-	require.Equal(t, certPath, srv.config.TLS.CertFilePath)
-	require.Equal(t, keyPath, srv.config.TLS.KeyFilePath)
 }

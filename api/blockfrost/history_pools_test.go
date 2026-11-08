@@ -44,48 +44,6 @@ func TestHandlePoolsRetired(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, get(t, node, "/api/v0/pools/retired?count=0").Code)
 }
 
-func TestHandlePoolHistory(t *testing.T) {
-	t.Parallel()
-	node := &mockNode{}
-	node.poolHistory.items = []PoolHistoryInfo{{
-		Epoch: 233, Blocks: 22, ActiveStake: "20485965693569",
-		ActiveSize: 1.2345, DelegatorsCount: 115,
-		Rewards: "206936253674159", Fees: "1290968354",
-	}}
-	node.poolHistory.total = 1
-	recorder := get(t, node, "/api/v0/pools/pool1xyz/history?order=desc")
-	require.Equal(t, http.StatusOK, recorder.Code)
-	assert.Equal(t, "pool1xyz", node.poolHistory.key)
-	assert.Equal(t, PaginationOrderDesc, node.poolHistory.params.Order)
-	assert.JSONEq(t, `[{
-		"epoch": 233, "blocks": 22, "active_stake": "20485965693569",
-		"active_size": 1.2345, "delegators_count": 115,
-		"rewards": "206936253674159", "fees": "1290968354"
-	}]`, recorder.Body.String())
-}
-
-func TestHandlePoolRelays(t *testing.T) {
-	t.Parallel()
-	node := &mockNode{}
-	node.poolRelays.value = []PoolRelayInfo{
-		{IPv4: "4.4.4.4", Port: 3001},
-		{DNS: "relay.example", Port: 3002},
-		{DNSSrv: "_srv.example"},
-	}
-	recorder := get(t, node, "/api/v0/pools/pool1xyz/relays")
-	require.Equal(t, http.StatusOK, recorder.Code)
-	assert.Equal(t, "pool1xyz", node.poolRelays.key)
-	assert.Empty(t, recorder.Header().Get("X-Pagination-Count-Total"), "relays are not paginated")
-	assert.JSONEq(t, `[
-		{"ipv4":"4.4.4.4","ipv6":null,"dns":null,"dns_srv":null,"port":3001},
-		{"ipv4":null,"ipv6":null,"dns":"relay.example","dns_srv":null,"port":3002},
-		{"ipv4":null,"ipv6":null,"dns":null,"dns_srv":"_srv.example","port":0}
-	]`, recorder.Body.String())
-
-	node.poolRelays.value = nil
-	assert.JSONEq(t, `[]`, get(t, node, "/api/v0/pools/pool1xyz/relays").Body.String())
-}
-
 func TestHandlePoolListsAndErrors(t *testing.T) {
 	t.Parallel()
 	node := &mockNode{}

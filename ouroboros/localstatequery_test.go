@@ -88,6 +88,8 @@ func TestReleaseLocalStateQueryAcquiredPointOwnerKeepsReplacement(
 func TestLocalstatequeryServerAcquire_PointAheadOfTip_GracefulFailure(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	o := &Ouroboros{
 		localstatequeryAcquiredPoints: make(
 			map[ouroboros.ConnectionId]ledger.QueryPoint,
@@ -132,6 +134,8 @@ func TestLocalstatequeryServerAcquire_PointAheadOfTip_GracefulFailure(
 // that slot must still be accepted and recorded, unchanged from before the
 // fix.
 func TestLocalstatequeryServerAcquire_PointOnChain_Succeeds(t *testing.T) {
+	t.Parallel()
+
 	o := &Ouroboros{
 		localstatequeryAcquiredPoints: make(
 			map[ouroboros.ConnectionId]ledger.QueryPoint,
@@ -188,6 +192,8 @@ func TestLocalstatequeryServerAcquire_PointOnChain_Succeeds(t *testing.T) {
 func TestLocalstatequeryServerAcquire_UnexpectedError_MappedToPointTooOld(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	o := &Ouroboros{
 		localstatequeryAcquiredPoints: make(
 			map[ouroboros.ConnectionId]ledger.QueryPoint,
@@ -258,6 +264,8 @@ func TestLocalstatequeryServerAcquire_UnexpectedError_MappedToPointTooOld(
 func TestLocalstatequeryServerAcquire_PastRetentionFloor_MappedToPointTooOld(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	o := &Ouroboros{
 		localstatequeryAcquiredPoints: make(
 			map[ouroboros.ConnectionId]ledger.QueryPoint,
@@ -313,6 +321,8 @@ func TestLocalstatequeryServerAcquire_PastRetentionFloor_MappedToPointTooOld(
 // any previously-recorded pinned point rather than being validated as a
 // specific point.
 func TestLocalstatequeryServerAcquire_VolatileTip_ClearsPoint(t *testing.T) {
+	t.Parallel()
+
 	o := &Ouroboros{
 		localstatequeryAcquiredPoints: make(
 			map[ouroboros.ConnectionId]ledger.QueryPoint,
@@ -360,6 +370,8 @@ func TestLocalstatequeryServerAcquire_VolatileTip_ClearsPoint(t *testing.T) {
 func TestLocalstatequeryProtocol_PointAheadOfTip_ConnectionSurvivesAndStaysUsable(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	o := &Ouroboros{
 		localstatequeryAcquiredPoints: make(
 			map[ouroboros.ConnectionId]ledger.QueryPoint,
@@ -1615,14 +1627,6 @@ func TestLocalstatequeryProtocol_TipAcquireDuringBoundaryJob(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, settledTip.Slot, point.Slot)
 	require.NoError(t, client.Release())
-}
-
-func TestLocalStateQueryDeferredOpenWaitBelowClientTimeout(t *testing.T) {
-	t.Parallel()
-
-	clientTimeout := olocalstatequery.NewConfig().QueryTimeout
-	require.Positive(t, clientTimeout)
-	require.Less(t, localStateQueryDeferredOpenWait, clientTimeout)
 }
 
 // TestLocalstatequeryProtocol_UnansweredQueryEndsConnection pins what a

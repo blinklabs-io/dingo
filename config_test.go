@@ -144,14 +144,7 @@ func TestForgeStalenessBoundsAreOperatorTunable(t *testing.T) {
 func TestConfigValidateRejectsByronNetworkMagicMismatch(t *testing.T) {
 	const shelleyMagic = 42
 
-	shelleyGenesisJSON := `{
-		"networkMagic": ` + strconv.Itoa(shelleyMagic) + `,
-		"activeSlotsCoeff": 0.05,
-		"securityParam": 432,
-		"slotsPerKESPeriod": 129600,
-		"maxKESEvolutions": 62,
-		"systemStart": "2022-10-25T00:00:00Z"
-	}`
+	shelleyGenesisJSON := testShelleyGenesisJSON(shelleyMagic)
 
 	tests := []struct {
 		name               string
@@ -221,6 +214,43 @@ func TestConfigValidateRejectsByronNetworkMagicMismatch(t *testing.T) {
 			t.Cleanup(func() { _ = n.Stop() })
 		})
 	}
+}
+
+func testShelleyGenesisJSON(networkMagic int) string {
+	return `{
+		"networkId": "Testnet",
+		"networkMagic": ` + strconv.Itoa(networkMagic) + `,
+		"activeSlotsCoeff": 0.05,
+		"securityParam": 432,
+		"epochLength": 432000,
+		"slotsPerKESPeriod": 129600,
+		"maxKESEvolutions": 62,
+		"slotLength": 1,
+		"updateQuorum": 5,
+		"maxLovelaceSupply": 45000000000000000,
+		"protocolParams": {
+			"minFeeA": 44,
+			"minFeeB": 155381,
+			"maxBlockBodySize": 65536,
+			"maxTxSize": 16384,
+			"maxBlockHeaderSize": 1100,
+			"keyDeposit": 2000000,
+			"poolDeposit": 500000000,
+			"eMax": 18,
+			"nOpt": 500,
+			"a0": 0.3,
+			"rho": 0.003,
+			"tau": 0.2,
+			"decentralisationParam": 0,
+			"extraEntropy": {"tag": "NeutralNonce"},
+			"protocolVersion": {"major": 8, "minor": 0},
+			"minUTxOValue": 1000000,
+			"minPoolCost": 340000000
+		},
+		"genDelegs": {},
+		"initialFunds": {},
+		"systemStart": "2022-10-25T00:00:00Z"
+	}`
 }
 
 // TestConfigPopulateNetworkMagicSyncsCompatField is a regression test for the
