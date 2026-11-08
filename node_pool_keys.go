@@ -36,6 +36,7 @@ type producerKeys struct {
 	agentSocket           string
 	agentMode             string
 	agentAddress          string
+	agentPlaintext        bool
 	agentClientCertFile   string
 	agentClientKeyFile    string
 	agentServerSPKISHA256 string
@@ -67,6 +68,7 @@ func producerKeysFromPool(p BlockProducerPool) producerKeys {
 		agentSocket:           p.ShelleyKESAgentSocket,
 		agentMode:             p.ShelleyKESAgentMode,
 		agentAddress:          p.ShelleyKESAgentAddress,
+		agentPlaintext:        p.ShelleyKESAgentPlaintext,
 		agentClientCertFile:   p.ShelleyKESAgentClientCertFile,
 		agentClientKeyFile:    p.ShelleyKESAgentClientKeyFile,
 		agentServerSPKISHA256: p.ShelleyKESAgentServerSPKISHA256,
@@ -100,6 +102,7 @@ func (n *Node) primaryKeySource() *poolKeySource {
 			agentSocket:           n.config.shelleyKESAgentSocket,
 			agentMode:             n.config.shelleyKESAgentMode,
 			agentAddress:          n.config.shelleyKESAgentAddress,
+			agentPlaintext:        n.config.shelleyKESAgentPlaintext,
 			agentClientCertFile:   n.config.shelleyKESAgentClientCertFile,
 			agentClientKeyFile:    n.config.shelleyKESAgentClientKeyFile,
 			agentServerSPKISHA256: n.config.shelleyKESAgentServerSPKISHA256,
@@ -479,6 +482,7 @@ func (ks *poolKeySource) newKESAgentSignClient(
 		ClientCertFile:    ks.keys.agentClientCertFile,
 		ClientKeyFile:     ks.keys.agentClientKeyFile,
 		ServerSPKISHA256:  ks.keys.agentServerSPKISHA256,
+		Plaintext:         ks.keys.agentPlaintext,
 		KESVKey:           opCertKey.VKey,
 		OpCertStartPeriod: opCertKey.OpCertKesPeriod,
 		OpCert:            opCertKey.RawCBOR,

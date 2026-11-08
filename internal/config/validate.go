@@ -59,9 +59,10 @@ func ValidateKESKeySources(kesKeyPath, kesAgentSocket string) error {
 }
 
 // validateRemoteKESAgent checks a pool's remote KES agent configuration: one
-// KES source only, sign mode, and the client certificate, key and server pin
-// it cannot authenticate without. prefix is prepended to every setting name,
-// so errors name the list entry they came from.
+// KES source only, sign mode, and a transport that can work: the server pin
+// and the client certificate are optional, but need TLS, so plain TCP takes
+// neither, and a client certificate is set as a pair. prefix is prepended to
+// every setting name, so errors name the list entry they came from.
 func validateRemoteKESAgent(p BlockProducerPool, prefix string) []error {
 	if p.ShelleyKESAgentAddress == "" {
 		return nil
@@ -91,29 +92,37 @@ func validateRemoteKESAgent(p BlockProducerPool, prefix string) []error {
 			p.ShelleyKESAgentMode,
 		))
 	}
-	if p.ShelleyKESAgentClientCertFile == "" ||
-		p.ShelleyKESAgentClientKeyFile == "" {
+	clientCert := p.ShelleyKESAgentClientCertFile != "" ||
+		p.ShelleyKESAgentClientKeyFile != ""
+	if clientCert && (p.ShelleyKESAgentClientCertFile == "" ||
+		p.ShelleyKESAgentClientKeyFile == "") {
 		errs = append(errs, fmt.Errorf(
-			"%s requires %s and %s",
-			field("shelleyKesAgentAddress"),
+			"%s and %s must be set together",
 			field("shelleyKesAgentClientCertFile"),
 			field("shelleyKesAgentClientKeyFile"),
 		))
 	}
-	if p.ShelleyKESAgentServerSPKISHA256 == "" {
-		errs = append(errs, fmt.Errorf(
-			"%s requires %s",
-			field("shelleyKesAgentAddress"),
-			field("shelleyKesAgentServerSpkiSha256"),
-		))
-	} else if pin, err := hex.DecodeString(
-		strings.TrimSpace(p.ShelleyKESAgentServerSPKISHA256),
-	); err != nil || len(pin) != sha256.Size {
-		errs = append(errs, fmt.Errorf(
-			"%s must be %d hex characters",
-			field("shelleyKesAgentServerSpkiSha256"),
-			2*sha256.Size,
-		))
+	pinned := strings.TrimSpace(p.ShelleyKESAgentServerSPKISHA256) != ""
+	if p.ShelleyKESAgentPlaintext {
+		if pinned || clientCert {
+			errs = append(errs, fmt.Errorf(
+				"%s and a client certificate need TLS, so %s takes neither",
+				field("shelleyKesAgentServerSpkiSha256"),
+				field("shelleyKesAgentPlaintext"),
+			))
+		}
+		return errs
+	}
+	if pinned {
+		if pin, err := hex.DecodeString(
+			strings.TrimSpace(p.ShelleyKESAgentServerSPKISHA256),
+		); err != nil || len(pin) != sha256.Size {
+			errs = append(errs, fmt.Errorf(
+				"%s must be %d hex characters",
+				field("shelleyKesAgentServerSpkiSha256"),
+				2*sha256.Size,
+			))
+		}
 	}
 	return errs
 }

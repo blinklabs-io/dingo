@@ -710,12 +710,20 @@ func TestValidate(t *testing.T) {
 			wantErr: "must be host:port",
 		},
 		{
+			name: "remote KES agent with a client certificate but no key",
+			modify: func(c *Config) {
+				setRemoteKESAgent(c)
+				c.ShelleyKESAgentClientKeyFile = ""
+			},
+			wantErr: "must be set together",
+		},
+		{
 			name: "remote KES agent without a client certificate",
 			modify: func(c *Config) {
 				setRemoteKESAgent(c)
 				c.ShelleyKESAgentClientCertFile = ""
+				c.ShelleyKESAgentClientKeyFile = ""
 			},
-			wantErr: "requires shelleyKesAgentClientCertFile",
 		},
 		{
 			name: "remote KES agent without a server pin",
@@ -723,7 +731,35 @@ func TestValidate(t *testing.T) {
 				setRemoteKESAgent(c)
 				c.ShelleyKESAgentServerSPKISHA256 = ""
 			},
-			wantErr: "requires shelleyKesAgentServerSpkiSha256",
+		},
+		{
+			name: "remote KES agent over plain TCP",
+			modify: func(c *Config) {
+				setRemoteKESAgent(c)
+				c.ShelleyKESAgentServerSPKISHA256 = ""
+				c.ShelleyKESAgentClientCertFile = ""
+				c.ShelleyKESAgentClientKeyFile = ""
+				c.ShelleyKESAgentPlaintext = true
+			},
+		},
+		{
+			name: "remote KES agent over plain TCP with a pin",
+			modify: func(c *Config) {
+				setRemoteKESAgent(c)
+				c.ShelleyKESAgentClientCertFile = ""
+				c.ShelleyKESAgentClientKeyFile = ""
+				c.ShelleyKESAgentPlaintext = true
+			},
+			wantErr: "shelleyKesAgentPlaintext takes neither",
+		},
+		{
+			name: "remote KES agent over plain TCP with a client certificate",
+			modify: func(c *Config) {
+				setRemoteKESAgent(c)
+				c.ShelleyKESAgentServerSPKISHA256 = ""
+				c.ShelleyKESAgentPlaintext = true
+			},
+			wantErr: "shelleyKesAgentPlaintext takes neither",
 		},
 		{
 			name: "remote KES agent with a short server pin",
