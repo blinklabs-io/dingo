@@ -11328,6 +11328,11 @@ leader slot writes. A leader slot lost to a bad certificate does not move the
 missed-leader-slot counter, because that counter is incremented only on the
 post-leader-check path below the refusal.
 
+A KES state failure that is not one of those lifetime decisions, such as
+credentials that are no longer loaded, is a fault rather than a refusal. It is
+held the same way and still returned to the caller on every slot so it is never
+hidden, but it increments `could_not_forge` only on a slot this pool leads.
+
 For reference, cardano-node does not report the three conditions alike.
 Not-yet-valid is `PraosCannotForgeKeyNotUsableYet`, reached only from the
 leader branch of `checkShouldForge` and mapped to `Forge.could-not-forge`, so

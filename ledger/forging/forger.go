@@ -1166,6 +1166,10 @@ func (f *BlockForger) checkAndForge(ctx context.Context) error {
 type kesLifetimeRefusal struct {
 	message string
 	attrs   []any
+	// fault is set for a KES state failure that is not a lifetime decision,
+	// such as unloaded credentials. It is returned to the caller rather than
+	// logged and swallowed, so a genuine fault is never hidden.
+	fault error
 }
 
 // checkAndForgeProduction implements production mode forging.
@@ -1235,8 +1239,9 @@ func (f *BlockForger) checkAndForgeProduction(ctx context.Context) error {
 			},
 		}
 	case stateErr != nil:
-		f.incCouldNotForge()
-		return fmt.Errorf("failed to update KES period: %w", stateErr)
+		kesRefusal = &kesLifetimeRefusal{
+			fault: fmt.Errorf("failed to update KES period: %w", stateErr),
+		}
 	}
 
 	// One reading of the evidence the tip gates decide this slot from, and
@@ -1578,9 +1583,12 @@ func (f *BlockForger) checkAndForgeProduction(ctx context.Context) error {
 			if f.metrics != nil {
 				f.metrics.forgeNotLeader.Inc()
 			}
-			return nil
+			return kesRefusal.fault
 		}
 		f.incCouldNotForge()
+		if kesRefusal.fault != nil {
+			return kesRefusal.fault
+		}
 		f.logger.Error(kesRefusal.message, kesRefusal.attrs...)
 		return nil
 	}

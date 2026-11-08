@@ -2693,6 +2693,66 @@ func TestCheckAndForgeProductionExpiredKESRefusalReportedOnlyForLeaderSlot(
 	}
 }
 
+func TestCheckAndForgeProductionKESStateFaultCountedOnlyForLeaderSlot(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name      string
+		leader    LeaderChecker
+		wantCount float64
+	}{
+		{name: "non-leader slot is not counted", leader: &forgerNotLeader{}},
+		{
+			name:      "leader slot is counted",
+			leader:    &forgerCountingLeader{},
+			wantCount: 1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			creds := setupTestCredentials(t)
+			require.NoError(t, creds.ValidateKESPeriod(
+				synthGenesis(10, 10, time.Second, time.Unix(0, 0)),
+				0,
+			))
+			builder := &forgerTestBuilder{}
+			broadcaster := &forgerTestBroadcaster{}
+			forger, err := NewBlockForger(ForgerConfig{
+				Mode:             ModeProduction,
+				Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
+				Credentials:      creds,
+				LeaderChecker:    tc.leader,
+				BlockBuilder:     builder,
+				BlockBroadcaster: broadcaster,
+				SlotClock: forgerTestSlotClock{
+					currentSlot:       1,
+					chainTipSlot:      0,
+					slotsPerKESPeriod: 10,
+				},
+				PromRegistry: prometheus.NewRegistry(),
+			})
+			require.NoError(t, err)
+
+			creds.mu.Lock()
+			creds.vrfSKey = nil
+			creds.mu.Unlock()
+
+			err = forger.checkAndForgeProduction(context.Background())
+			require.ErrorContains(t, err, "credentials not loaded")
+			require.Zero(t, builder.calls)
+			require.Zero(t, broadcaster.calls)
+			require.Equal(
+				t,
+				tc.wantCount,
+				testutil.ToFloat64(forger.metrics.forgeCouldNot),
+			)
+		})
+	}
+}
+
 type closableRemoteKESSigner struct {
 	fakeRemoteKESSigner
 	closed int
