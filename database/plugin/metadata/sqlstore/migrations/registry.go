@@ -95,6 +95,7 @@ const (
 	utxoStakingPartialIndexSchemaRelease                = "utxo-staking-partial-indexes"
 	rewardOutputCredentialPendingIndexSchemaRelease     = "reward-account-output-credential-pending-index"
 	poolSnapshotVrfKeySchemaRelease                     = "pool-snapshot-vrf-key"
+	utxoSpentStakingIndexSchemaRelease                  = "utxo-spent-staking-index"
 )
 
 const mithrilRewardRepairPendingKey = "mithril_reward_repair_pending"
@@ -270,6 +271,7 @@ var schemaVersions = []struct {
 		Dir:     "v54",
 	},
 	{Version: 55, Name: poolSnapshotVrfKeySchemaRelease, Dir: "v55"},
+	{Version: 56, Name: utxoSpentStakingIndexSchemaRelease, Dir: "v56"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
@@ -388,6 +390,13 @@ func registryForDialect(dialect string) ([]Migration, error) {
 			dialect != "mysql" {
 			migration.BackfillRevision = "1"
 			migration.Backfill = utxoStakingPartialIndexBackfill
+		}
+		// MySQL replaces the index with a single-column one from its native
+		// v56 resource, so only the partial-index engines backfill.
+		if version.Name == utxoSpentStakingIndexSchemaRelease &&
+			dialect != "mysql" {
+			migration.BackfillRevision = "1"
+			migration.Backfill = utxoSpentStakingIndexBackfill
 		}
 		if version.Name == poolDepositHeldSchemaRelease {
 			migration.BackfillRevision = "1"
@@ -2288,6 +2297,45 @@ SELECT 1 FROM sync_state WHERE sync_key = ?`), deferred.SyncStateKey).Scan(&pend
 		if _, err := batch.Tx.ExecContext(ctx, "CREATE INDEX "+index.name+" ON utxo ("+index.columns+") WHERE staking_key IS NOT NULL"); err != nil {
 			return BatchResult{}, fmt.Errorf("create %s: %w", index.name, err)
 		}
+	}
+	return BatchResult{Cursor: batch.Cursor, Done: true}, nil
+}
+
+// utxoSpentStakingIndexBackfill rebuilds idx_utxo_deleted_staking_amount over
+// spent rows only. A full index holds every live output at deleted_slot = 0,
+// ordered by credential and amount, so creating and spending an output each
+// dirty an unrelated leaf there. Spend slots only rise, so a spend appends at
+// the right edge of the partial index, and nothing reads the live region
+// through it: live stake and address lookups use the credential-leading
+// indexes. The index is not rebuilt while a bulk load has dropped it; the
+// deferred rebuild restores it partial from the manifest.
+func utxoSpentStakingIndexBackfill(
+	ctx context.Context,
+	batch Batch,
+) (BatchResult, error) {
+	var pending int
+	err := batch.Tx.QueryRowContext(ctx, batch.Rebind(`
+SELECT 1 FROM sync_state WHERE sync_key = ?`), deferred.SyncStateKey).Scan(&pending)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return BatchResult{}, fmt.Errorf("read deferred index marker: %w", err)
+	}
+	const name = "idx_utxo_deleted_staking_amount"
+	if _, err := batch.Tx.ExecContext(
+		ctx,
+		"DROP INDEX IF EXISTS "+name,
+	); err != nil {
+		return BatchResult{}, fmt.Errorf("drop %s: %w", name, err)
+	}
+	if pending != 0 {
+		return BatchResult{Cursor: batch.Cursor, Done: true}, nil
+	}
+	if _, err := batch.Tx.ExecContext(
+		ctx,
+		"CREATE INDEX "+name+" ON utxo "+
+			"(deleted_slot, credential_tag, staking_key, amount) "+
+			"WHERE deleted_slot > 0",
+	); err != nil {
+		return BatchResult{}, fmt.Errorf("create %s: %w", name, err)
 	}
 	return BatchResult{Cursor: batch.Cursor, Done: true}, nil
 }
