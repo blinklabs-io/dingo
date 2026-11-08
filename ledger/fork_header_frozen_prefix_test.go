@@ -92,15 +92,8 @@ func TestPeerHeaderFrozenCandidateUsesStoredPrefix(t *testing.T) {
 			if tc.length > 1310 {
 				cutoff = tc.length - 1310
 			}
-			preSlot, cutoffSlot, anchorSlot, forkSlot := uint64(
-				10,
-			), uint64(
-				20,
-			), uint64(
-				30,
-			), uint64(
-				40,
-			)
+			preSlot, cutoffSlot := uint64(10), uint64(20)
+			anchorSlot, forkSlot := uint64(30), uint64(40)
 			if cutoff > 0 {
 				preSlot = cutoff - 1
 				cutoffSlot = cutoff
@@ -229,7 +222,10 @@ func TestPeerHeaderFrozenCandidateUsesStoredPrefix(t *testing.T) {
 				&n,
 				tamperNone,
 			)
-			ls.config.PeerHeaderLookupFunc = func(_ ouroboros.ConnectionId, hash []byte) (ChainsyncEvent, []byte, bool) {
+			ls.config.PeerHeaderLookupFunc = func(
+				_ ouroboros.ConnectionId,
+				hash []byte,
+			) (ChainsyncEvent, []byte, bool) {
 				if !bytes.Equal(hash, fork.block.Hash().Bytes()) {
 					return ChainsyncEvent{}, nil, false
 				}
@@ -287,7 +283,11 @@ func TestPeerHeaderFrozenCandidateUsesStoredPrefix(t *testing.T) {
 			if tc.wantBodyReads {
 				require.Positive(t, counter.reads.Load())
 			} else {
-				require.Zero(t, counter.reads.Load(), "a stored frozen prefix must not reconstruct transaction bodies")
+				require.Zero(
+					t,
+					counter.reads.Load(),
+					"stored prefix must avoid transaction reconstruction",
+				)
 			}
 		})
 	}
