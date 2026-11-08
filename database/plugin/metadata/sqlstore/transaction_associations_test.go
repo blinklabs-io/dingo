@@ -199,9 +199,9 @@ func collateralProductionFlow(t *testing.T, store *Store, db *sql.DB) {
 
 	require.NoError(t, store.DeleteTransactionsAfterSlot(10, nil))
 	var associationCount int
-	require.NoError(t, db.QueryRow(store.dialect.Rebind(`SELECT COUNT(*) FROM utxo_collateral_edge e JOIN "transaction" t ON t.id = e.transaction_id WHERE t.hash = ?`), txA.Hash().Bytes()).Scan(&associationCount))
+	require.NoError(t, db.QueryRow(store.dialect.Rebind(`SELECT COUNT(*) FROM utxo_collateral_edge e JOIN transaction t ON t.id = e.transaction_id WHERE t.hash = ?`), txA.Hash().Bytes()).Scan(&associationCount))
 	require.Equal(t, 1, associationCount)
-	require.NoError(t, db.QueryRow(store.dialect.Rebind(`SELECT COUNT(*) FROM utxo_collateral_edge e JOIN "transaction" t ON t.id = e.transaction_id WHERE t.hash = ?`), txB.Hash().Bytes()).Scan(&associationCount))
+	require.NoError(t, db.QueryRow(store.dialect.Rebind(`SELECT COUNT(*) FROM utxo_collateral_edge e JOIN transaction t ON t.id = e.transaction_id WHERE t.hash = ?`), txB.Hash().Bytes()).Scan(&associationCount))
 	require.Equal(t, 0, associationCount)
 	got, err := store.GetTransactionByHash(txA.Hash().Bytes(), nil)
 	require.NoError(t, err)
@@ -282,7 +282,7 @@ func TestCollateralRollbackOrderAcrossRestart(t *testing.T) {
 	edges := func(tx lcommon.Transaction) int {
 		var n int
 		require.NoError(t, db.QueryRow(
-			`SELECT COUNT(*) FROM utxo_collateral_edge e JOIN "transaction" t ON t.id = e.transaction_id WHERE t.hash = ?`,
+			`SELECT COUNT(*) FROM utxo_collateral_edge e JOIN transaction t ON t.id = e.transaction_id WHERE t.hash = ?`,
 			tx.Hash().Bytes(),
 		).Scan(&n))
 		return n
