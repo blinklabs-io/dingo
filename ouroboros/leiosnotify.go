@@ -2776,12 +2776,21 @@ func (o *Ouroboros) recordLeiosAnnouncement(
 	// lock across both closes that window; storeLeiosEndorserBlock takes the
 	// same lock (announcementsMu before leiosMu) across its own check and
 	// insertion for the same reason.
-	o.leiosAnnouncementsMu.Lock()
-	var err error
-	if data, ok := o.lookupLeiosEndorserBlock(
+	// The persistent lookup runs before the lock: a blob read can be slow and
+	// must not stall every other announcement and endorser block store. It
+	// also reloads a persisted block into the cache, so the checks under the
+	// lock read memory only. A block evicted between the two is re-resolved
+	// after the unlock if the header had to wait for it.
+	_, persisted := o.lookupLeiosEndorserBlock(
 		header.SlotNumber(),
 		ebHash.Bytes(),
-	); ok && data != nil {
+	)
+	o.leiosAnnouncementsMu.Lock()
+	var err error
+	if data, ok := o.cachedLeiosEndorserBlockManifest(
+		header.SlotNumber(),
+		ebHash.Bytes(),
+	); ok {
 		err = validateLeiosEndorserBlockBinding(header, data)
 	}
 	if err == nil {
@@ -2812,7 +2821,49 @@ func (o *Ouroboros) recordLeiosAnnouncement(
 	if publish != nil {
 		publish()
 	}
+	if err == nil && relay && persisted &&
+		o.leiosRelayAnnouncementPending(
+			header.SlotNumber(),
+			ebHash.Bytes(),
+			string(header.Hash().Bytes()),
+		) {
+		// The block was persisted but left the cache before the header was
+		// parked; reloading it publishes the parked header.
+		o.lookupLeiosEndorserBlock(header.SlotNumber(), ebHash.Bytes())
+	}
 	return err
+}
+
+// cachedLeiosEndorserBlockManifest returns a live cache entry that holds a
+// manifest. It never touches the blob store.
+func (o *Ouroboros) cachedLeiosEndorserBlockManifest(
+	slot uint64,
+	hash []byte,
+) (*leiosEndorserBlockData, bool) {
+	o.leiosMu.RLock()
+	defer o.leiosMu.RUnlock()
+	data := o.leiosEndorserBlocks[leiosBlockKey(slot, hash)]
+	if data == nil || data.expired(time.Now()) || !data.hasManifest() {
+		return nil, false
+	}
+	return data, true
+}
+
+// leiosRelayAnnouncementPending reports whether the header announcementKey is
+// parked waiting for the manifest of (slot, hash).
+func (o *Ouroboros) leiosRelayAnnouncementPending(
+	slot uint64,
+	hash []byte,
+	announcementKey string,
+) bool {
+	o.leiosMu.RLock()
+	defer o.leiosMu.RUnlock()
+	for _, pending := range o.leiosRelayPendingAnnouncements[leiosBlockKey(slot, hash)] {
+		if pending.key == announcementKey {
+			return true
+		}
+	}
+	return false
 }
 
 // recordLeiosAnnouncementLocked is recordLeiosAnnouncement's implementation.
@@ -2905,8 +2956,10 @@ func (o *Ouroboros) recordLeiosAnnouncementLocked(
 	}
 	slots[slot] = struct{}{}
 	if relay {
-		data, available := o.lookupLeiosEndorserBlock(slot, ebHash.Bytes())
-		if !available || data == nil || !data.hasManifest() {
+		if _, available := o.cachedLeiosEndorserBlockManifest(
+			slot,
+			ebHash.Bytes(),
+		); !available {
 			o.leiosMu.Lock()
 			if o.leiosRelayPendingAnnouncements == nil {
 				o.leiosRelayPendingAnnouncements = make(map[string][]leiosPendingRelayAnnouncement)
