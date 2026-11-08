@@ -224,21 +224,8 @@ func TestTickResyncsOnPlateauAfterRecycleWithRealChainSelector(t *testing.T) {
 	assert.Equal(t, now, st.lastProgressAt, "plateau clock must reset")
 }
 
-// TestTickDoesNotResyncOnceTheReplacementHasDeliveredAHeader pins the exit
-// condition, and with it one half of the boundary of the whole fix: the
-// advertised tip is substituted only while the peer has delivered NO header.
-// Here the replacement registers from its rollback, delivers a header at the
-// stalled local tip, then rolls back to a point inside its own retained
-// delivered history -- so its delivered frontier carries a real block number
-// again while its advertised tip is still far ahead. That is an ordinary peer
-// serving our own chain, not a starved watchdog, and the untrusted
-// advertisement must no longer be able to drive a recycle. The other half, a
-// rollback OUTSIDE that history, which leaves no block number behind, is
-// TestTickDoesNotResyncAfterADeliveredPeerRollsBackOutsideItsHistory.
-//
-// Red if AwaitingFirstHeader is forced true, which is the mutation that widens
-// the fallback past its own precondition.
-func TestTickDoesNotResyncOnceTheReplacementHasDeliveredAHeader(t *testing.T) {
+// A delivered header does not exempt an idle stream from bounded recovery.
+func TestTickResyncsOwnPlateauAfterDeliveredHeader(t *testing.T) {
 	t.Parallel()
 	const (
 		securityParam  = 2160
@@ -281,9 +268,7 @@ func TestTickDoesNotResyncOnceTheReplacementHasDeliveredAHeader(t *testing.T) {
 		t,
 		bestTip.Tip.Point.Slot,
 		bestTip.SelectionTip().Point.Slot,
-		"the advertised tip must still be ahead, so only the "+
-			"awaiting-first-header precondition can be what stops the "+
-			"substitution",
+		"the peer's own advertisement supplies self-recovery evidence",
 	)
 
 	active := replacement
@@ -312,34 +297,15 @@ func TestTickDoesNotResyncOnceTheReplacementHasDeliveredAHeader(t *testing.T) {
 		ChainSelector:  sel,
 	}, now, stalledSlot)
 
-	assert.Empty(
-		t,
-		pub.byType(event.ChainsyncResyncEventType),
-		"a peer that has delivered a header is judged on its delivered "+
-			"frontier, never on its advertisement, after a rollback inside "+
-			"its retained history",
-	)
+	events := pub.byType(event.ChainsyncResyncEventType)
+	require.Len(t, events, 1)
+	resync := events[0].evt.Data.(event.ChainsyncResyncEvent)
+	assert.True(t, replacement == resync.ConnectionId)
+	assert.Equal(t, event.ChainsyncResyncReasonLocalTipPlateau, resync.Reason)
 }
 
-// TestTickDoesNotResyncAfterADeliveredPeerRollsBackOutsideItsHistory pins the
-// other half of that boundary. A peer that has delivered a header and then
-// rolls back to a point OUTSIDE its retained delivered-header history ends up
-// with the same bare frontier as a peer registered from its post-intersect
-// rollback: ApplyRollback keeps the point but zeroes the delivered block
-// number, because a RollBackward carries no block number of its own. It has
-// nonetheless delivered headers on this connection, so it is not awaiting its
-// first one, and the advertised-tip fallback must not apply to it.
-//
-// The local chain here is shallower than K. That is what keeps such a peer
-// selectable at all: it is not exempt from the implausibly-behind filter in
-// isPeerSelectableLocked (only a rollback-registered entry is), and on a chain
-// deeper than K its zero block number filters it out, GetBestPeer is nil and
-// the plateau check returns before reaching the fallback either way.
-//
-// Red if AwaitingFirstHeader is computed from the delivered block number
-// rather than read from the flag chain selection sets only when it registers a
-// peer from a rollback: this peer is where the two disagree.
-func TestTickDoesNotResyncAfterADeliveredPeerRollsBackOutsideItsHistory(
+// A rollback with a forgotten block number still permits only self-recovery.
+func TestTickResyncsOwnPlateauAfterRollbackOutsideDeliveredHistory(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -403,9 +369,7 @@ func TestTickDoesNotResyncAfterADeliveredPeerRollsBackOutsideItsHistory(
 		t,
 		bestTip.Tip.Point.Slot,
 		uint64(stalledSlot),
-		"the advertised tip must be ahead of the local tip, so only the "+
-			"awaiting-first-header precondition can be what stops the "+
-			"substitution",
+		"the peer's own advertisement supplies self-recovery evidence",
 	)
 
 	active := replacement
@@ -434,12 +398,11 @@ func TestTickDoesNotResyncAfterADeliveredPeerRollsBackOutsideItsHistory(
 		ChainSelector:  sel,
 	}, now, stalledSlot)
 
-	assert.Empty(
-		t,
-		pub.byType(event.ChainsyncResyncEventType),
-		"a peer that has delivered a header is judged on its delivered "+
-			"frontier even after a rollback outside its retained history",
-	)
+	events := pub.byType(event.ChainsyncResyncEventType)
+	require.Len(t, events, 1)
+	resync := events[0].evt.Data.(event.ChainsyncResyncEvent)
+	assert.True(t, replacement == resync.ConnectionId)
+	assert.Equal(t, event.ChainsyncResyncReasonLocalTipPlateau, resync.Reason)
 	assert.False(
 		t,
 		bestTip.AwaitingFirstHeader(),
@@ -1358,69 +1321,6 @@ func TestTickDoesNotResyncWhenAwaitingPeerAdvertisesNoProgress(t *testing.T) {
 		"a peer advertising no progress must not trigger a plateau resync",
 	)
 	assert.Equal(t, 0, ledger.reconcileCallCount())
-}
-
-// TestTickIgnoresAdvertisedTipOnceBestPeerHasDeliveredAHeader pins that the
-// fallback is confined to the awaiting-first-header window. Once a peer has
-// delivered a header its delivered frontier is real evidence, and a peer that
-// advertises a far tip while its chainsync cursor lags must not be able to
-// drive the watchdog off that frontier -- the reason SelectionTip prefers the
-// delivered value in the first place.
-func TestTickIgnoresAdvertisedTipOnceBestPeerHasDeliveredAHeader(
-	t *testing.T,
-) {
-	t.Parallel()
-	const stalledSlot = 2810012
-	connId := testConnId(5)
-	active := connId
-	ledger := &fakeLedger{
-		tip:                 testTip(stalledSlot, 50),
-		primaryChainTipSlot: stalledSlot,
-		atTip:               true,
-	}
-	state := &fakeChainsyncState{
-		tracked:    []chainsync.TrackedClient{activeClient(connId, stalledSlot)},
-		activeConn: &active,
-	}
-	best := connId
-	// Delivered frontier at the local tip WITH a block number: the peer has
-	// shown us this header, so it is not awaiting its first one.
-	peerTip := chainselection.NewPeerChainTip(
-		connId,
-		testTip(stalledSlot, 1405006),
-		nil,
-	)
-	peerTip.UpdateTipWithObserved(
-		testTip(stalledSlot+811, 1405411),
-		testTip(stalledSlot, 1405006),
-		nil,
-	)
-	require.False(t, peerTip.AwaitingFirstHeader())
-	selector := &fakeChainSelector{
-		bestPeer: &best,
-		peerTips: map[string]*chainselection.PeerChainTip{
-			connId.String(): peerTip,
-		},
-	}
-	pub := newFakePublisher()
-	r, _ := newTestRecycler(t, ledger, state, selector, pub, Config{})
-
-	now := time.Now()
-	st := newTestTickState(stalledSlot, now.Add(-25*time.Minute))
-	st.lastPrimaryChainTipSlot = ledger.primaryChainTipSlot
-
-	runTickWith(r, st, LiveComponents{
-		Ledger:         ledger,
-		ChainsyncState: state,
-		ChainSelector:  selector,
-	}, now, stalledSlot)
-
-	assert.Empty(
-		t,
-		pub.byType(event.ChainsyncResyncEventType),
-		"a delivered frontier that is not ahead of the local tip must keep "+
-			"the watchdog disarmed, advertised tip notwithstanding",
-	)
 }
 
 // TestTickPlateauFallbackNeverLowersTheBestPeerTip pins the fallback as
