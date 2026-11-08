@@ -3538,6 +3538,14 @@ type AddressTransactionIndexRebuilder interface {
 	) error
 }
 
+// UtxoSpendStateReader optionally narrows consumed-input recovery reads. A nil
+// result means the reference is absent, including from any pending UTxO overlay.
+// Providers must observe the same transaction and overlay visibility as
+// GetUtxoIncludingSpent. Providers without this capability keep the full lookup.
+type UtxoSpendStateReader interface {
+	GetUtxoSpendState([]byte, uint32, types.Txn) (*models.UtxoSpendState, error)
+}
+
 // BulkLoadOptimizer is an optional interface that metadata stores can
 // implement to provide optimized settings for bulk loading operations.
 // The load command checks for this interface and uses it when available.

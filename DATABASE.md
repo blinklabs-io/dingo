@@ -2218,8 +2218,9 @@ that no boundary was recorded the strict variant asks the `sync_state` keyspace
 (`ListSyncStateKeysByPrefix`) whether the row exists at all — a row that exists
 and holds nothing is a malformed boundary, not the absence of one. That extra
 query runs only on the empty-value path, and `MithrilTrustBoundarySlot` skips it
-entirely: it discards every failure as 0 anyway and runs once per transaction
-that consumes inputs. After the sweep, `TruncateAfterSlot` loads the new tip's
+entirely: it discards every failure as 0 anyway. Consumed-input recovery reads
+it at most once per call, only after a producer is absent from both stored and
+in-flight state. After the sweep, `TruncateAfterSlot` loads the new tip's
 evolving nonce with a single exact-point `GetBlockNonce(point)` lookup.
 `GetBlockNonce` reports a missing row as `(nil, nil)`, not an error, so silently
 continuing used to seed the resumed evolving-nonce fold (`LedgerState.loadTip` →
@@ -2554,6 +2555,17 @@ unaffected: it never prunes spent rows, so no cap or announced floor applies.
 ## ER Diagrams
 
 ### Transactions and UTxO
+
+Consumed-input recovery uses `metadata.UtxoSpendStateReader` when available to
+read only the deletion slot and spender hash, including unflushed retained
+closure outputs. The SQL store reuses its `GetUtxoSpendState` SQL and prepared
+statements on the write pool. Queries on a separate read pool execute the same
+SQL directly.
+Providers without this performance capability keep `GetUtxoIncludingSpent`;
+the required metadata provider contract is unchanged. Missing-input recovery,
+same-slot spender repair, and strict conflict detection retain their existing
+semantics. The Mithril trust boundary is read once per recovery call only when
+an input is absent from both stored and in-flight outputs.
 
 Normal and batched SQLite transaction inserts use the captured
 `ExecContext` result instead of `RETURNING id`. `RowsAffected` distinguishes a
