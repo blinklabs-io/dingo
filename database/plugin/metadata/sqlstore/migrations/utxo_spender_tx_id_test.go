@@ -69,13 +69,13 @@ func seedSpenderUpgradeRows(t *testing.T, db *sql.DB, spenders int) {
 	// Unspent, reference-input, collateral-input and collateral-return rows.
 	exec(
 		"INSERT INTO utxo (transaction_id, tx_id, output_idx, added_slot, "+
-			"deleted_slot, amount) VALUES (1, ?, 0, 5, 0, '7')",
+			"deleted_slot, amount) VALUES (1, ?, 100, 5, 0, '7')",
 		spenderHash(0xA1),
 	)
 	exec(
 		"INSERT INTO utxo (transaction_id, tx_id, output_idx, added_slot, "+
 			"deleted_slot, referenced_by_tx_id, amount) "+
-			"VALUES (1, ?, 0, 5, 0, ?, '8')",
+			"VALUES (1, ?, 101, 5, 0, ?, '8')",
 		spenderHash(0xA2), spenderHash(1),
 	)
 	exec(
@@ -86,7 +86,7 @@ func seedSpenderUpgradeRows(t *testing.T, db *sql.DB, spenders int) {
 	exec(
 		"INSERT INTO utxo (transaction_id, tx_id, output_idx, added_slot, "+
 			"deleted_slot, collateral_by_tx_id, amount) "+
-			"VALUES (1, ?, 0, 5, 0, ?, '9')",
+			"VALUES (1, ?, 102, 5, 0, ?, '9')",
 		spenderHash(0xA3), spenderHash(1),
 	)
 	exec(
