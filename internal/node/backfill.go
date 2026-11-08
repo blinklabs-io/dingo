@@ -588,6 +588,47 @@ func (b *Backfill) storedEpochPParams(
 	return pp, true, nil
 }
 
+func (b *Backfill) restoreImportedAccountsAtAnchor(
+	ctx context.Context,
+	anchor uint64,
+) (int, error) {
+	var protocolMajor uint
+	if b.currentEraId >= conway.EraIdConway {
+		params, ok := b.currentPParams.(lcommon.PoolRuleProtocolParameters)
+		if !ok {
+			return 0, errors.New(
+				"snapshot anchor protocol version is unavailable",
+			)
+		}
+		protocolMajor = params.ProtocolMajorVersion()
+	}
+	txn := b.db.Transaction(ctx, true)
+	defer txn.Rollback() //nolint:errcheck
+	restored, err := b.db.RestoreImportedAccountStates(ctx, anchor, txn)
+	if err != nil {
+		return 0, err
+	}
+	if protocolMajor >= lcommon.ProtocolVersionPlomin {
+		// Historical replay lacks the PV10 reverse-set rebuild. Restore both
+		// directions before a later deregistration consumes that index; the
+		// snapshot's forward state must already be authoritative.
+		cleared, err := b.db.ClearDanglingDRepDelegations(ctx, anchor, txn)
+		if err != nil {
+			return 0, err
+		}
+		if cleared != 0 {
+			return 0, fmt.Errorf(
+				"snapshot anchor contains %d dangling DRep delegations",
+				cleared,
+			)
+		}
+	}
+	if err := txn.Commit(); err != nil {
+		return 0, err
+	}
+	return restored, nil
+}
+
 func (b *Backfill) processEpochBoundary(
 	epochId uint64, eraId uint,
 ) {
@@ -1406,7 +1447,7 @@ func (b *Backfill) Run(ctx context.Context) error {
 	// Replay has reached the anchor, where the snapshot is the ledger state.
 	// Restore before the rebuild, which attributes stake from account.pool.
 	if endSlotSet {
-		restored, err := b.db.RestoreImportedAccountStates(ctx, endSlot, nil)
+		restored, err := b.restoreImportedAccountsAtAnchor(ctx, endSlot)
 		if err != nil {
 			saveCommittedCheckpoint()
 			return fmt.Errorf(

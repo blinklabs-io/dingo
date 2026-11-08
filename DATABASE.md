@@ -3410,6 +3410,18 @@ that baseline, before the `reward_live_stake` rebuild reads `account.pool`.
 `reward` is not touched. Accounts with no such baseline (a genesis baseline,
 or a row certificate replay created) keep their replayed state.
 
+For snapshot protocol versions 10 and later, the same write transaction also
+reconciles the reverse DRep membership from the restored current accounts.
+Historical replay can otherwise retain an earlier DRep's reverse link even
+when the account's forward delegation matches its snapshot baseline. Existing
+canonical memberships keep their IDs and added slots; only stale memberships
+close at the anchor, and only missing canonical memberships are inserted.
+Repeating finalization therefore preserves history and does not grow the reverse
+index. A reconciliation that would clear a snapshot account's forward delegation
+is rejected and the entire finalization rolls back. Protocol version 9 retains
+its historical reverse-membership semantics. Completed backfills are not rerun
+by this finalization change.
+
 DRep votes and registration or update certificates replayed below the anchor
 record each DRep's `last_activity_epoch`, which the snapshot does not carry,
 and leave the imported `expiry_epoch` unchanged. The snapshot's expiry already

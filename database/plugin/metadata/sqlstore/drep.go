@@ -1752,8 +1752,18 @@ WHERE `+predicate, slot)
 		cleared = int(affected)
 		if _, err := db.ExecContext(ctx, `
 UPDATE drep_delegator SET removed_slot = ?
-WHERE removed_slot IS NULL`, slot); err != nil {
-			return fmt.Errorf("close existing DRep delegator links: %w", err)
+WHERE removed_slot IS NULL
+  AND NOT EXISTS (
+      SELECT 1 FROM account a JOIN drep d
+        ON d.credential_tag = a.drep_type AND d.credential = a.drep
+      WHERE a.credential_tag = drep_delegator.stake_credential_tag
+        AND a.staking_key = drep_delegator.stake_credential
+        AND a.active = TRUE AND a.drep_type IN (0, 1)
+        AND a.drep = drep_delegator.drep_credential
+        AND a.drep_type = drep_delegator.drep_credential_tag
+        AND d.active = TRUE
+  )`, slot); err != nil {
+			return fmt.Errorf("close stale DRep delegator links: %w", err)
 		}
 		if _, err := db.ExecContext(ctx, `
 INSERT INTO drep_delegator (
@@ -1768,7 +1778,15 @@ JOIN drep d
 WHERE a.active = TRUE
   AND a.drep IS NOT NULL
   AND a.drep_type IN (0, 1)
-  AND d.active = TRUE`, slot); err != nil {
+  AND d.active = TRUE
+  AND NOT EXISTS (
+      SELECT 1 FROM drep_delegator existing
+      WHERE existing.drep_credential_tag = d.credential_tag
+        AND existing.drep_credential = d.credential
+        AND existing.stake_credential_tag = a.credential_tag
+        AND existing.stake_credential = a.staking_key
+        AND existing.removed_slot IS NULL
+  )`, slot); err != nil {
 			return fmt.Errorf("rebuild DRep delegator links from accounts: %w", err)
 		}
 		return nil
