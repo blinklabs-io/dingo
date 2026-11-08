@@ -1035,6 +1035,13 @@ type Config struct {
 	// client certificate is optional. ShelleyKESAgentPlaintext selects plain
 	// TCP instead.
 	ShelleyKESAgentAddress string `yaml:"shelleyKesAgentAddress"          envconfig:"SHELLEY_KES_AGENT_ADDRESS"`
+	// ShelleyKESAgentAddresses is an ordered list of remote agents, the first
+	// first: the node signs through the first one that admits it and moves to
+	// the next when a sign fails on the link, keeping that next one admitted
+	// ahead of each leader slot so the move needs no fresh connection. It
+	// replaces ShelleyKESAgentAddress, which is the same as a one-entry list;
+	// every other ShelleyKESAgent* setting applies to each address.
+	ShelleyKESAgentAddresses []string `yaml:"shelleyKesAgentAddresses" envconfig:"SHELLEY_KES_AGENT_ADDRESSES"`
 	// ShelleyKESAgentClientCertFile and ShelleyKESAgentClientKeyFile are
 	// this node's PEM TLS client certificate and key for the remote agent.
 	// They are optional and set as a pair; without them no client
@@ -2104,7 +2111,8 @@ func (c *Config) ApplyDefaults() {
 	if c.ShelleyKESAgentSocket != "" && c.ShelleyKESAgentMode == "" {
 		c.ShelleyKESAgentMode = "serve-key"
 	}
-	if c.ShelleyKESAgentAddress != "" && c.ShelleyKESAgentMode == "" {
+	if (c.ShelleyKESAgentAddress != "" ||
+		len(c.ShelleyKESAgentAddresses) > 0) && c.ShelleyKESAgentMode == "" {
 		c.ShelleyKESAgentMode = "sign"
 	}
 	for i := range c.BlockProducerPools {
@@ -2422,16 +2430,43 @@ func applyMCPAuthCompatibilityEnvironment(cfg *Config, environ []string) {
 // local KES agent socket, or a remote KES agent. The fields mean what the
 // top-level settings of the same name mean.
 type BlockProducerPool struct {
-	ShelleyVRFKey                   string `yaml:"shelleyVrfKey"`
-	ShelleyKESKey                   string `yaml:"shelleyKesKey"`
-	ShelleyOperationalCertificate   string `yaml:"shelleyOperationalCertificate"`
-	ShelleyKESAgentSocket           string `yaml:"shelleyKesAgentSocket"`
-	ShelleyKESAgentMode             string `yaml:"shelleyKesAgentMode"`
-	ShelleyKESAgentAddress          string `yaml:"shelleyKesAgentAddress"`
-	ShelleyKESAgentClientCertFile   string `yaml:"shelleyKesAgentClientCertFile"`
-	ShelleyKESAgentClientKeyFile    string `yaml:"shelleyKesAgentClientKeyFile"`
-	ShelleyKESAgentServerSPKISHA256 string `yaml:"shelleyKesAgentServerSpkiSha256"`
-	ShelleyKESAgentPlaintext        bool   `yaml:"shelleyKesAgentPlaintext"`
+	ShelleyVRFKey                   string   `yaml:"shelleyVrfKey"`
+	ShelleyKESKey                   string   `yaml:"shelleyKesKey"`
+	ShelleyOperationalCertificate   string   `yaml:"shelleyOperationalCertificate"`
+	ShelleyKESAgentSocket           string   `yaml:"shelleyKesAgentSocket"`
+	ShelleyKESAgentMode             string   `yaml:"shelleyKesAgentMode"`
+	ShelleyKESAgentAddress          string   `yaml:"shelleyKesAgentAddress"`
+	ShelleyKESAgentClientCertFile   string   `yaml:"shelleyKesAgentClientCertFile"`
+	ShelleyKESAgentClientKeyFile    string   `yaml:"shelleyKesAgentClientKeyFile"`
+	ShelleyKESAgentServerSPKISHA256 string   `yaml:"shelleyKesAgentServerSpkiSha256"`
+	ShelleyKESAgentAddresses        []string `yaml:"shelleyKesAgentAddresses"`
+	ShelleyKESAgentPlaintext        bool     `yaml:"shelleyKesAgentPlaintext"`
+}
+
+// isZero reports whether no key setting of the pool is set.
+func (p *BlockProducerPool) isZero() bool {
+	return p.ShelleyVRFKey == "" && p.ShelleyKESKey == "" &&
+		p.ShelleyOperationalCertificate == "" &&
+		p.ShelleyKESAgentSocket == "" && p.ShelleyKESAgentMode == "" &&
+		p.ShelleyKESAgentAddress == "" &&
+		p.ShelleyKESAgentClientCertFile == "" &&
+		p.ShelleyKESAgentClientKeyFile == "" &&
+		p.ShelleyKESAgentServerSPKISHA256 == "" &&
+		len(p.ShelleyKESAgentAddresses) == 0 &&
+		!p.ShelleyKESAgentPlaintext
+}
+
+// RemoteAgentAddresses returns the pool's remote agents in order:
+// ShelleyKESAgentAddresses, or ShelleyKESAgentAddress as a one-entry list, or
+// none.
+func (p *BlockProducerPool) RemoteAgentAddresses() []string {
+	if len(p.ShelleyKESAgentAddresses) > 0 {
+		return p.ShelleyKESAgentAddresses
+	}
+	if p.ShelleyKESAgentAddress != "" {
+		return []string{p.ShelleyKESAgentAddress}
+	}
+	return nil
 }
 
 func (p *BlockProducerPool) applyDefaults() {
@@ -2439,7 +2474,7 @@ func (p *BlockProducerPool) applyDefaults() {
 		return
 	}
 	switch {
-	case p.ShelleyKESAgentAddress != "":
+	case len(p.RemoteAgentAddresses()) > 0:
 		p.ShelleyKESAgentMode = "sign"
 	case p.ShelleyKESAgentSocket != "":
 		p.ShelleyKESAgentMode = "serve-key"
@@ -2458,6 +2493,7 @@ func (c *Config) singlePool() BlockProducerPool {
 		ShelleyKESAgentClientCertFile:   c.ShelleyKESAgentClientCertFile,
 		ShelleyKESAgentClientKeyFile:    c.ShelleyKESAgentClientKeyFile,
 		ShelleyKESAgentServerSPKISHA256: c.ShelleyKESAgentServerSPKISHA256,
+		ShelleyKESAgentAddresses:        c.ShelleyKESAgentAddresses,
 		ShelleyKESAgentPlaintext:        c.ShelleyKESAgentPlaintext,
 	}
 }

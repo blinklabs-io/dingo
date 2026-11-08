@@ -293,6 +293,7 @@ type Config struct {
 	shelleyKESAgentServerSPKISHA256                                                     string
 	blockProducerPools                                                                  []BlockProducerPool
 	shelleyKESAgentPlaintext                                                            bool
+	shelleyKESAgentAddresses                                                            []string
 	forgeSyncToleranceSlots, forgeStaleGapThresholdSlots                                uint64
 	forgeUpstreamStalenessSlots, forgeAppliedTipStalenessSlots                          uint64
 	forgeEndorserBlockStalenessSlots                                                    uint64
@@ -1011,6 +1012,7 @@ func (c *Config) syncCompatFields() {
 	c.shelleyKESAgentServerSPKISHA256 = c.cfg.ShelleyKESAgentServerSPKISHA256
 	c.blockProducerPools = slices.Clone(c.cfg.BlockProducerPools)
 	c.shelleyKESAgentPlaintext = c.cfg.ShelleyKESAgentPlaintext
+	c.shelleyKESAgentAddresses = slices.Clone(c.cfg.ShelleyKESAgentAddresses)
 	c.forgeSyncToleranceSlots, c.forgeStaleGapThresholdSlots, c.validateForgedBlock = c.cfg.ForgeSyncToleranceSlots, c.cfg.ForgeStaleGapThresholdSlots, c.cfg.ValidateForgedBlock
 	c.forgeUpstreamStalenessSlots, c.forgeAppliedTipStalenessSlots = c.cfg.ForgeUpstreamStalenessSlots, c.cfg.ForgeAppliedTipStalenessSlots
 	c.forgeEndorserBlockStalenessSlots = c.cfg.ForgeEndorserBlockStalenessSlots
@@ -1824,6 +1826,18 @@ func WithBlockProducerPools(pools ...BlockProducerPool) ConfigOptionFunc {
 func WithShelleyKESAgentPlaintext(plaintext bool) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.ShelleyKESAgentPlaintext = plaintext
+	}
+}
+
+// WithShelleyKESAgentAddresses lists the remote KES agents in order
+// (CARDANO_SHELLEY_KES_AGENT_ADDRESSES). The node signs through the first one
+// that admits it and moves to the next when a sign fails on the link,
+// keeping that next one admitted ahead of each leader slot. It replaces the
+// address of WithShelleyKESAgentRemote, which is the same as a one-entry
+// list; the transport settings apply to every address.
+func WithShelleyKESAgentAddresses(addresses ...string) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.ShelleyKESAgentAddresses = slices.Clone(addresses)
 	}
 }
 

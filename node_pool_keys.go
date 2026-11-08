@@ -35,7 +35,7 @@ type producerKeys struct {
 	opCert                string
 	agentSocket           string
 	agentMode             string
-	agentAddress          string
+	agentAddresses        []string
 	agentPlaintext        bool
 	agentClientCertFile   string
 	agentClientKeyFile    string
@@ -67,12 +67,24 @@ func producerKeysFromPool(p BlockProducerPool) producerKeys {
 		opCert:                p.ShelleyOperationalCertificate,
 		agentSocket:           p.ShelleyKESAgentSocket,
 		agentMode:             p.ShelleyKESAgentMode,
-		agentAddress:          p.ShelleyKESAgentAddress,
+		agentAddresses:        p.RemoteAgentAddresses(),
 		agentPlaintext:        p.ShelleyKESAgentPlaintext,
 		agentClientCertFile:   p.ShelleyKESAgentClientCertFile,
 		agentClientKeyFile:    p.ShelleyKESAgentClientKeyFile,
 		agentServerSPKISHA256: p.ShelleyKESAgentServerSPKISHA256,
 	}
+}
+
+// remoteAgentAddresses is the top-level remote agent list:
+// shelleyKESAgentAddresses, or shelleyKESAgentAddress as a one-entry list.
+func (n *Node) remoteAgentAddresses() []string {
+	if len(n.config.shelleyKESAgentAddresses) > 0 {
+		return n.config.shelleyKESAgentAddresses
+	}
+	if n.config.shelleyKESAgentAddress != "" {
+		return []string{n.config.shelleyKESAgentAddress}
+	}
+	return nil
 }
 
 // producerPoolCount is how many pools this node forges for.
@@ -101,7 +113,7 @@ func (n *Node) primaryKeySource() *poolKeySource {
 			opCert:                n.config.shelleyOperationalCertificate,
 			agentSocket:           n.config.shelleyKESAgentSocket,
 			agentMode:             n.config.shelleyKESAgentMode,
-			agentAddress:          n.config.shelleyKESAgentAddress,
+			agentAddresses:        n.remoteAgentAddresses(),
 			agentPlaintext:        n.config.shelleyKESAgentPlaintext,
 			agentClientCertFile:   n.config.shelleyKESAgentClientCertFile,
 			agentClientKeyFile:    n.config.shelleyKESAgentClientKeyFile,
@@ -290,7 +302,7 @@ func (ks *poolKeySource) loadBlockProducerCredentialsFromAgent(
 	ks.closeKESAgentClient()
 
 	mode := ks.keys.agentMode
-	if ks.keys.agentAddress != "" {
+	if len(ks.keys.agentAddresses) > 0 {
 		// A remote agent serves only sign mode; config validation rejects
 		// any other mode with an address.
 		mode = kesagent.ModeSign
@@ -462,11 +474,12 @@ func (ks *poolKeySource) startKESAgentSign(creds *forging.PoolCredentials) error
 }
 
 // newKESAgentSignClient dials nothing yet: it builds the remote client when
-// shelleyKESAgentAddress is set, otherwise the local socket client.
+// remote agent addresses are set, otherwise the local socket client. Several
+// addresses give a failover client that signs through one at a time.
 func (ks *poolKeySource) newKESAgentSignClient(
 	opCertKey *bursa.LoadedKey,
 ) (kesAgentSignClient, error) {
-	if ks.keys.agentAddress == "" {
+	if len(ks.keys.agentAddresses) == 0 {
 		return kesagent.NewClient(kesagent.Config{
 			SocketPath:        ks.keys.agentSocket,
 			Mode:              kesagent.ModeSign,
@@ -477,8 +490,7 @@ func (ks *poolKeySource) newKESAgentSignClient(
 			Metrics:           ks.metrics(),
 		})
 	}
-	return kesagent.NewRemoteClient(kesagent.RemoteConfig{
-		Address:           ks.keys.agentAddress,
+	cfg := kesagent.RemoteConfig{
 		ClientCertFile:    ks.keys.agentClientCertFile,
 		ClientKeyFile:     ks.keys.agentClientKeyFile,
 		ServerSPKISHA256:  ks.keys.agentServerSPKISHA256,
@@ -489,14 +501,19 @@ func (ks *poolKeySource) newKESAgentSignClient(
 		SignTimeout:       ks.n.config.shelleyKESAgentSignTimeout,
 		Logger:            ks.n.config.logger,
 		Metrics:           ks.metrics(),
-	})
+	}
+	if len(ks.keys.agentAddresses) == 1 {
+		cfg.Address = ks.keys.agentAddresses[0]
+		return kesagent.NewRemoteClient(cfg)
+	}
+	return kesagent.NewFailoverClient(ks.keys.agentAddresses, cfg)
 }
 
 // kesAgentConfigured reports whether KES signing goes through an agent,
 // local or remote, rather than a local key file.
 func (ks *poolKeySource) kesAgentConfigured() bool {
 	return ks.keys.agentSocket != "" ||
-		ks.keys.agentAddress != ""
+		len(ks.keys.agentAddresses) > 0
 }
 
 // closeKESAgentClient stops the serve-key background loop (if any) and

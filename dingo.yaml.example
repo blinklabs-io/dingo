@@ -634,6 +634,13 @@
 #   # Or plain TCP, taking no pin or client certificate (the agent's
 #   # counterpart is kes_agent.attested_plaintext):
 #   # shelleyKesAgentPlaintext: true
+#   # Or list several agents in order, in place of shelleyKesAgentAddress:
+#   # the node signs through the first that admits it and moves to the next
+#   # when a sign fails on the link, keeping that next one admitted ahead of
+#   # each leader slot. The transport settings apply to every address.
+#   # shelleyKesAgentAddresses:
+#   #   - "kes-agent-a.example:3443"
+#   #   - "kes-agent-b.example:3443"
 #   # Or forge for several pools, each with its own keys and KES source
 #   # (replaces the shelley* settings above; YAML only, not with Leios):
 #   # blockProducerPools:

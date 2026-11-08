@@ -323,6 +323,7 @@ var logPlainConfigFields = []string{
 	// material behind it is, and an operator diagnosing a misconfigured
 	// socket needs to see which path failed.
 	"ShelleyKESAgentAddress",
+	"ShelleyKESAgentAddresses",
 	"ShelleyKESAgentClientCertFile",
 	"ShelleyKESAgentClientKeyFile",
 	"ShelleyKESAgentMode",

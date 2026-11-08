@@ -919,6 +919,11 @@ var flagSpecs = []flagSpec{
 		"",
 		"host:port of a bursa KES agent's remote sign listener (mutual TLS 1.3); implies sign mode",
 	),
+	stringSliceFlag(
+		"ShelleyKESAgentAddresses",
+		"shelley-kes-agent-addresses",
+		"ordered host:port list of bursa KES agent remote sign listeners; signs through the first that admits this node and moves to the next when a sign fails on the link (replaces --shelley-kes-agent-address)",
+	),
 	stringFlag(
 		"ShelleyKESAgentClientCertFile",
 		"shelley-kes-agent-client-cert-file",

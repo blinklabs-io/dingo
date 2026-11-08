@@ -99,6 +99,8 @@ type fakeRemoteAgent struct {
 	// dropAfterRequest closes the connection after reading a sign request
 	// without answering it.
 	dropAfterRequest atomic.Bool
+	// refuse answers every sign request with an agent refusal.
+	refuse atomic.Bool
 }
 
 // fakeTransport is the listener a fakeRemoteAgent runs.
@@ -201,6 +203,14 @@ func (a *fakeRemoteAgent) serve(conn net.Conn, skeyData, vkey, opCert []byte) {
 		}
 		if a.dropAfterRequest.Load() {
 			return
+		}
+		if a.refuse.Load() {
+			if err := writeFrame(conn, MaxSignFrameLen, SignResponse{
+				Type: "sign_response", Period: sreq.Period, Error: "refused",
+			}); err != nil {
+				return
+			}
+			continue
 		}
 		sk := &kes.SecretKey{
 			Depth:  kes.CardanoKesDepth,

@@ -59,36 +59,59 @@ func ValidateKESKeySources(kesKeyPath, kesAgentSocket string) error {
 }
 
 // validateRemoteKESAgent checks a pool's remote KES agent configuration: one
-// KES source only, sign mode, and a transport that can work: the server pin
-// and the client certificate are optional, but need TLS, so plain TCP takes
-// neither, and a client certificate is set as a pair. prefix is prepended to
-// every setting name, so errors name the list entry they came from.
+// KES source only, sign mode, every address host:port, and a transport that
+// can work: the server pin and the client certificate are optional, but need
+// TLS, so plain TCP takes neither, and a client certificate is set as a pair.
+// prefix is prepended to every setting name, so errors name the list entry
+// they came from.
 func validateRemoteKESAgent(p BlockProducerPool, prefix string) []error {
-	if p.ShelleyKESAgentAddress == "" {
-		return nil
-	}
 	field := func(name string) string { return prefix + name }
 	var errs []error
+	if p.ShelleyKESAgentAddress != "" && len(p.ShelleyKESAgentAddresses) > 0 {
+		errs = append(errs, fmt.Errorf(
+			"%s and %s are two ways to name the remote agents; set one",
+			field("shelleyKesAgentAddress"),
+			field("shelleyKesAgentAddresses"),
+		))
+	}
+	addresses := p.RemoteAgentAddresses()
+	if len(addresses) == 0 {
+		return errs
+	}
 	if p.ShelleyKESKey != "" || p.ShelleyKESAgentSocket != "" {
+		name := field("shelleyKesAgentAddress")
+		if len(p.ShelleyKESAgentAddresses) > 0 {
+			name = field("shelleyKesAgentAddresses")
+		}
 		errs = append(errs, fmt.Errorf(
 			"blockProducer cannot set %s together with %s or %s",
-			field("shelleyKesAgentAddress"),
+			name,
 			field("shelleyKesKey"),
 			field("shelleyKesAgentSocket"),
 		))
 	}
-	if _, _, err := net.SplitHostPort(p.ShelleyKESAgentAddress); err != nil {
-		errs = append(errs, fmt.Errorf(
-			"%s %q must be host:port: %w",
-			field("shelleyKesAgentAddress"),
-			p.ShelleyKESAgentAddress,
-			err,
-		))
+	for i, address := range addresses {
+		if _, _, err := net.SplitHostPort(address); err != nil {
+			name := field("shelleyKesAgentAddress")
+			if len(p.ShelleyKESAgentAddresses) > 0 {
+				name = fmt.Sprintf(
+					"%s[%d]",
+					field("shelleyKesAgentAddresses"),
+					i,
+				)
+			}
+			errs = append(errs, fmt.Errorf(
+				"%s %q must be host:port: %w",
+				name,
+				address,
+				err,
+			))
+		}
 	}
 	if p.ShelleyKESAgentMode != "" && p.ShelleyKESAgentMode != "sign" {
 		errs = append(errs, fmt.Errorf(
-			"%s supports only shelleyKesAgentMode \"sign\", got %q",
-			field("shelleyKesAgentAddress"),
+			"a remote KES agent supports only %s \"sign\", got %q",
+			field("shelleyKesAgentMode"),
 			p.ShelleyKESAgentMode,
 		))
 	}
@@ -140,7 +163,7 @@ func validateBlockProducerPool(p BlockProducerPool, prefix string) []error {
 	// whole point of the agent -- so requiring both made an agent-only
 	// configuration impossible to start.
 	if p.ShelleyKESKey == "" && p.ShelleyKESAgentSocket == "" &&
-		p.ShelleyKESAgentAddress == "" {
+		len(p.RemoteAgentAddresses()) == 0 {
 		missing = append(missing, prefix+"shelleyKesKey")
 	}
 	if err := ValidateKESKeySources(
@@ -172,7 +195,7 @@ func (c *Config) validateBlockProducerPools() []error {
 		return validateBlockProducerPool(c.singlePool(), "")
 	}
 	var errs []error
-	if c.singlePool() != (BlockProducerPool{}) {
+	if single := c.singlePool(); !single.isZero() {
 		errs = append(errs, errors.New(
 			"blockProducerPools replaces shelleyVrfKey, shelleyKesKey, "+
 				"shelleyOperationalCertificate and the shelleyKesAgent* "+
