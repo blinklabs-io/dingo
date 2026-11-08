@@ -11915,7 +11915,26 @@ fixed fallback budget rather than leaving the pass unbounded. Truncated passes
 are logged and counted (`dingo_forge_eb_selection_truncated_total`), and
 `forgeEbMaxTxRefs` / `forgeEbMaxBytes` (default 20000 references, 24 MiB; an
 explicit 0 disables either) cap the manifest and the memory its construction
-reserves, as backstops behind the deadline.
+reserves, as backstops behind the deadline. Within those operator caps the
+endorser block is held to the capacity the protocol parameters in force at the
+slot allow (`effectiveLeiosEBCaps`): the referenced transactions total at most
+`maxEndorserBlockTxsSize` bytes, measured as the block_transaction bytes the
+manifest references, and the encoded manifest, the size the ranking-block header
+announces, at most `maxEndorserBlockReferencesSize`. Both bound selection as
+well as manifest construction, so selection stops at the first valid transaction
+that no longer fits instead of validating the rest of a deep mempool. They are
+not optional: the reference node never fetches the closure of an endorser block
+over `maxEndorserBlockTxsSize` (`ExnLeiosClosureTooBig`), so no honest committee
+member votes for it, and a header announcing a manifest over
+`maxEndorserBlockReferencesSize` is invalid (`LeiosEbTooBig`). The limits are
+read from the protocol parameters in force at the slot, not from genesis, so an
+on-chain update raising them applies to the next endorser block; the operator
+defaults (24 MiB, 20000 references) can exceed them. Missing, typed-nil or
+unrecognized slot parameters, or either Dijkstra capacity set to zero, skip
+endorser-block production before mempool validation and increment the
+`protocol_capacity_unavailable` skip counter. Ranking-block forging continues
+without a new announcement. Known earlier-era parameters retain the operator
+caps for the Conway-header Leios prototype.
 
 #### Self-Validation (`DINGO_VALIDATE_FORGED_BLOCK`)
 

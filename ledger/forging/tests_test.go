@@ -937,7 +937,8 @@ func (b *fallbackTestBuilder) BuildBlock(context.Context,
 	return nil, nil, b.selectErr
 }
 
-func (b *fallbackTestBuilder) buildBlockWithCredentialGeneration(ctx context.Context,
+func (b *fallbackTestBuilder) buildBlockWithCredentialGeneration(
+	ctx context.Context,
 	_ uint64,
 	_ uint64,
 	_ LeiosBlockData,
@@ -1091,7 +1092,8 @@ func TestBuildBlockEmptyBodyConstraintDropsAllTransactions(t *testing.T) {
 
 	generation := builder.creds.acquireCredentialGeneration()
 	defer generation.release()
-	block, _, err := builder.buildBlockWithCredentialGeneration(context.Background(),
+	block, _, err := builder.buildBlockWithCredentialGeneration(
+		context.Background(),
 		1001,
 		0,
 		LeiosBlockData{},
@@ -1144,7 +1146,8 @@ func TestBuildBlockEmptyBodySkipsMempoolSnapshot(t *testing.T) {
 
 	generation := builder.creds.acquireCredentialGeneration()
 	defer generation.release()
-	block, _, err := builder.buildBlockWithCredentialGeneration(context.Background(),
+	block, _, err := builder.buildBlockWithCredentialGeneration(
+		context.Background(),
 		1001,
 		0,
 		LeiosBlockData{},
@@ -2533,7 +2536,8 @@ func (b *parentSwapBuilder) BuildBlock(context.Context,
 	return nil, nil, errParentChangedDuringBuild
 }
 
-func (b *parentSwapBuilder) buildBlockWithCredentialGeneration(ctx context.Context,
+func (b *parentSwapBuilder) buildBlockWithCredentialGeneration(
+	ctx context.Context,
 	_ uint64,
 	_ uint64,
 	leios LeiosBlockData,
@@ -2700,6 +2704,9 @@ func TestForgeDropsStaleAnnouncementWhenParentChanges(t *testing.T) {
 			chainTipSlot:      9,
 			slotsPerKESPeriod: 100,
 			slotEnd:           time.Now().Add(time.Hour),
+		},
+		EraParams: &mockPParamsProvider{
+			pparams: &conway.ConwayProtocolParameters{},
 		},
 		LeiosProduceChecker:        &forgerTestLeiosChecker{allowed: true},
 		LeiosEBBroadcaster:         &forgerTestLeiosCaster{},
@@ -2921,6 +2928,9 @@ func TestForgeKeepsAnnouncementWhenParentIsUnchanged(t *testing.T) {
 			slotsPerKESPeriod: 100,
 			slotEnd:           time.Now().Add(time.Hour),
 		},
+		EraParams: &mockPParamsProvider{
+			pparams: &conway.ConwayProtocolParameters{},
+		},
 		LeiosProduceChecker:        &forgerTestLeiosChecker{allowed: true},
 		LeiosEBBroadcaster:         &forgerTestLeiosCaster{},
 		LeiosTxValidator:           &sessionMockTxValidator{},
@@ -3015,12 +3025,15 @@ func TestForgeReResolvesLeiosDataWhenParentChangesBeforeTheFirstBuild(
 		LeiosCertificateProvider:        certs,
 		LeiosCertificationTimingChecker: forgerTestCertTiming{},
 		LeiosParentAnnouncementProvider: parent,
-		LeiosProduceChecker:             leiosChecker,
-		LeiosEBBroadcaster:              &forgerTestLeiosCaster{},
-		LeiosMempool:                    forgerTestMempoolProvider{},
-		LeiosTxValidator:                &mockTxValidator{},
-		LeiosAnnouncementValidator:      acceptLeiosAnnouncement,
-		PromRegistry:                    prometheus.NewRegistry(),
+		EraParams: &mockPParamsProvider{
+			pparams: &conway.ConwayProtocolParameters{},
+		},
+		LeiosProduceChecker:        leiosChecker,
+		LeiosEBBroadcaster:         &forgerTestLeiosCaster{},
+		LeiosMempool:               forgerTestMempoolProvider{},
+		LeiosTxValidator:           &mockTxValidator{},
+		LeiosAnnouncementValidator: acceptLeiosAnnouncement,
+		PromRegistry:               prometheus.NewRegistry(),
 	})
 	require.NoError(t, err)
 
@@ -3646,7 +3659,8 @@ func (b *tipMovingBuilder) BuildBlock(context.Context,
 	return nil, nil, b.selectErr
 }
 
-func (b *tipMovingBuilder) buildBlockWithCredentialGeneration(ctx context.Context,
+func (b *tipMovingBuilder) buildBlockWithCredentialGeneration(
+	ctx context.Context,
 	_ uint64,
 	_ uint64,
 	_ LeiosBlockData,
@@ -4875,6 +4889,9 @@ func TestCheckAndForgeProductionAppliesEBRefCap(t *testing.T) {
 			slotsPerKESPeriod: 100,
 			slotEnd:           time.Now().Add(time.Hour),
 		},
+		EraParams: &mockPParamsProvider{
+			pparams: &conway.ConwayProtocolParameters{},
+		},
 		LeiosProduceChecker:        &forgerTestLeiosChecker{allowed: true},
 		LeiosEBBroadcaster:         leiosCaster,
 		LeiosTxValidator:           &sessionMockTxValidator{},
@@ -5123,6 +5140,9 @@ func TestCheckAndForgeProductionBoundsEBSelectionWithoutASlotClock(
 			// A slot clock that cannot report the next slot boundary.
 			slotEnd: time.Time{},
 		},
+		EraParams: &mockPParamsProvider{
+			pparams: &conway.ConwayProtocolParameters{},
+		},
 		LeiosProduceChecker:        &forgerTestLeiosChecker{allowed: true},
 		LeiosEBBroadcaster:         leiosCaster,
 		LeiosTxValidator:           validator,
@@ -5183,7 +5203,8 @@ func TestLeiosEBSelectionStopsAtTheDeadline(t *testing.T) {
 	validator := &sessionMockTxValidator{}
 	validator.onValidate = func(int) { fakeNow = fakeNow.Add(perTxCost) }
 
-	selected, truncated, err := selectValidLeiosTransactions(context.Background(),
+	selected, truncated, err := selectValidLeiosTransactions(
+		context.Background(),
 		leiosCandidateTxs(t, candidates),
 		validator,
 		leiosSelectionLimits{
@@ -5205,7 +5226,8 @@ func TestLeiosEBSelectionStopsAtTheDeadline(t *testing.T) {
 // candidates.
 func TestLeiosEBSelectionCompletesWithinBudget(t *testing.T) {
 	validator := &sessionMockTxValidator{}
-	selected, truncated, err := selectValidLeiosTransactions(context.Background(),
+	selected, truncated, err := selectValidLeiosTransactions(
+		context.Background(),
 		leiosCandidateTxs(t, 5),
 		validator,
 		leiosSelectionLimits{
@@ -5338,6 +5360,9 @@ func TestCheckAndForgeProductionSkipsEBWhenSlotIsOver(t *testing.T) {
 			// The slot has already ended.
 			slotEnd: time.Now(),
 		},
+		EraParams: &mockPParamsProvider{
+			pparams: &conway.ConwayProtocolParameters{},
+		},
 		LeiosProduceChecker:        &forgerTestLeiosChecker{allowed: true},
 		LeiosEBBroadcaster:         leiosCaster,
 		LeiosTxValidator:           validator,
@@ -5395,13 +5420,19 @@ func newEBTimingForger(
 	t.Helper()
 	block := newForgerTestBlock(10, 2)
 	forger, err := NewBlockForger(ForgerConfig{
-		Mode:                       ModeProduction,
-		Logger:                     slog.New(slog.NewJSONHandler(logs, nil)),
-		Credentials:                setupTestCredentials(t),
-		LeaderChecker:              forgerTestLeader{},
-		BlockBuilder:               &forgerTestBuilder{block: block, cbor: block.cbor},
-		BlockBroadcaster:           broadcaster,
-		SlotClock:                  clock,
+		Mode:          ModeProduction,
+		Logger:        slog.New(slog.NewJSONHandler(logs, nil)),
+		Credentials:   setupTestCredentials(t),
+		LeaderChecker: forgerTestLeader{},
+		BlockBuilder: &forgerTestBuilder{
+			block: block,
+			cbor:  block.cbor,
+		},
+		BlockBroadcaster: broadcaster,
+		SlotClock:        clock,
+		EraParams: &mockPParamsProvider{
+			pparams: &conway.ConwayProtocolParameters{},
+		},
 		LeiosProduceChecker:        &forgerTestLeiosChecker{allowed: true},
 		LeiosEBBroadcaster:         caster,
 		LeiosTxValidator:           validator,
