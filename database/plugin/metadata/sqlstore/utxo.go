@@ -78,7 +78,7 @@ func (s *Store) CreateUtxo(txn types.Txn, utxo *models.Utxo) error {
 			if err := s.queryRowCached(
 				ctx, db, insertUtxoQuery, params.args()...,
 			).Scan(&id); err != nil {
-				return err
+				return s.utxoInsertConflict(ctx, db, err, utxo)
 			}
 			utxo.ID = uint(id)
 			if err := s.persistUtxoAddress(ctx, db, id, utxo); err != nil {

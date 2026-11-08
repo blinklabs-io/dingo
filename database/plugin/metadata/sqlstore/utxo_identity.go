@@ -17,8 +17,12 @@ package sqlstore
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"fmt"
+	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 )
 
 // utxoProducedKind reports whether the output names a producing transaction.
@@ -138,4 +142,55 @@ func collectUtxoKeys(rows *sql.Rows, into map[string]struct{}) error {
 		into[utxoIdentityKey(hash, uint32(idx))] = struct{}{} //nolint:gosec
 	}
 	return rows.Err()
+}
+
+// isUniqueViolation reports whether err is an engine's unique-constraint
+// violation. The drivers are not imported: pgx errors carry SQLSTATE 23505,
+// modernc SQLite codes 1555 (primary key) and 2067 (unique), and MySQL
+// surfaces error 1062 as text through database/sql.
+func isUniqueViolation(err error) bool {
+	var state interface{ SQLState() string }
+	if errors.As(err, &state) && state.SQLState() == "23505" {
+		return true
+	}
+	var code interface{ Code() int }
+	if errors.As(err, &code) {
+		if c := code.Code(); c == 1555 || c == 2067 {
+			return true
+		}
+	}
+	return strings.Contains(err.Error(), "Error 1062")
+}
+
+// utxoInsertConflict maps an engine's unique violation on a utxo insert to
+// types.ErrUtxoConflict, so every dialect reports an output that is already
+// stored the way the SQLite cross-identity probe does. MySQL's emulated
+// INSERT ... RETURNING discards the engine's error (dialectQueryer), so there
+// a failed insert is a conflict when the output is stored afterwards.
+func (s *Store) utxoInsertConflict(
+	ctx context.Context,
+	db queryer,
+	err error,
+	utxo *models.Utxo,
+) error {
+	if err == nil {
+		return nil
+	}
+	conflict := isUniqueViolation(err)
+	if !conflict && s.dialect.Name() == "mysql" {
+		var count int
+		u := s.utxoSQL()
+		if probeErr := db.QueryRowContext(
+			ctx, u.countByRef, u.refArgs(utxo.TxId, utxo.OutputIdx)...,
+		).Scan(&count); probeErr == nil && count > 0 {
+			conflict = true
+		}
+	}
+	if !conflict {
+		return err
+	}
+	return fmt.Errorf(
+		"%w: create UTxO %x:%d: output already stored: %w",
+		types.ErrUtxoConflict, utxo.TxId, utxo.OutputIdx, err,
+	)
 }
