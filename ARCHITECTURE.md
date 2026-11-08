@@ -12653,6 +12653,12 @@ At the chain root, the genesis signature authenticates the protocol message.
 Its signed next aggregate verification key and protocol-parameter hash must
 match the genesis certificate's own key and parameters, which same-epoch
 successors inherit.
+STM multi-signature verification rejects signer entries without a lottery
+index and follows the reference aggregation rule: a 128-bit Blake2b
+coefficient derived from the ordered signature list and each signature's
+position weights both that signature and its verification key before the
+pairing check. This binds every included signature to its registered key
+instead of accepting pairs that are valid only through an unweighted sum.
 
 The certificate-chain walk (`bootstrap.go`) runs before any certificate is
 trusted, so it is bounded on every axis the aggregator controls. Each
