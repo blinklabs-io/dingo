@@ -189,7 +189,11 @@ func TestAgentSignReloadLeavesTheLiveCredentialsOnRefusal(t *testing.T) {
 		s := newSignModeReloadNode(t, 1)
 		s.prepareErr = errors.New("admission refused")
 		s.rotateTo(t, 2, nil)
-		require.ErrorContains(t, s.reload(nil), "does not serve the new certificate")
+		require.ErrorContains(
+			t,
+			s.reload(nil),
+			"does not serve the new certificate",
+		)
 		s.requireLiveCounter(t, 1)
 		built := s.builtClients()
 		require.Len(t, built, 1)
@@ -250,7 +254,9 @@ func TestOfferAgentOpCertKeepsTheNewestOffer(t *testing.T) {
 	n := &Node{}
 	n.offerAgentOpCert([]byte("old"))
 	n.offerAgentOpCert([]byte("new"))
-	got := testutil.RequireReceive(t, n.agentOpCertOffers(), time.Second, "offer")
+	got := testutil.RequireReceive(
+		t, n.agentOpCertOffers(), time.Second, "offer",
+	)
 	require.Equal(t, []byte("new"), got)
 	testutil.RequireNoReceive(t, n.agentOpCertOffers(), 20*time.Millisecond,
 		"only the newest offer is kept")

@@ -193,7 +193,10 @@ func (n *Node) reloadAgentSignCredentials(
 		return fmt.Errorf("reloaded credentials failed ledger check: %w", err)
 	}
 	if err := checkKESAgentSignClient(client); err != nil {
-		return fmt.Errorf("KES agent does not serve the new certificate: %w", err)
+		return fmt.Errorf(
+			"KES agent does not serve the new certificate: %w",
+			err,
+		)
 	}
 	oldCounter, oldKESPeriod := opCertCounterAndPeriod(liveOpCert)
 	if err := live.ReplaceWith(next); err != nil {
@@ -494,7 +497,8 @@ func (n *Node) credentialFileWatchLoop(
 func credentialFilesDigest(files []string) [sha256.Size]byte {
 	h := sha256.New()
 	for _, f := range files {
-		data, err := os.ReadFile(f) //nolint:gosec // configured credential paths
+		data, err := os.ReadFile(f) //nolint:gosec // configured key paths
+
 		if err != nil {
 			fmt.Fprintf(h, "%s\x00error:%v\x00", f, err)
 			continue
@@ -536,7 +540,8 @@ func (n *Node) credentialReloadMetric() *prometheus.CounterVec {
 		return nil
 	}
 	n.keyReload.metricsOnce.Do(func() {
-		n.keyReload.reloads = promauto.With(n.config.promRegistry).NewCounterVec(
+		factory := promauto.With(n.config.promRegistry)
+		n.keyReload.reloads = factory.NewCounterVec(
 			prometheus.CounterOpts{
 				Name: "dingo_forge_credential_reloads_total",
 				Help: "block producer credential reloads by trigger (signal, file, agent) and result (success, unchanged, failure)",
