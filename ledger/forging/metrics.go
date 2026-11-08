@@ -29,6 +29,7 @@ type forgingMetrics struct {
 	remainingKESPeriods prometheus.Gauge
 	opCertStartKES      prometheus.Gauge
 	opCertExpiryKES     prometheus.Gauge
+	opCertCounter       prometheus.Gauge
 
 	// Forge outcomes (match cardano-node Forge_* names)
 	forgeAboutToLead  prometheus.Counter
@@ -131,6 +132,12 @@ func initForgingMetrics(
 		prometheus.GaugeOpts{
 			Name: "cardano_node_metrics_operationalCertificateExpiryKESPeriod_int",
 			Help: "KES period when the operational certificate expires",
+		},
+	)
+	m.opCertCounter = factory.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "dingo_forge_opcert_counter",
+			Help: "issue counter of the operational certificate the forger is using",
 		},
 	)
 

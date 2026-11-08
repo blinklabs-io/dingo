@@ -1028,6 +1028,11 @@ type Config struct {
 	// forging for several slots when the agent stops answering. Zero uses
 	// the client default (500ms).
 	ShelleyKESAgentSignTimeout time.Duration `yaml:"shelleyKesAgentSignTimeout"       envconfig:"SHELLEY_KES_AGENT_SIGN_TIMEOUT"`
+	// ShelleyKeyWatchInterval, when set, makes a block producer poll its
+	// credential files at this interval and reload them in place, as on
+	// SIGHUP, once a change has held for two polls -- so a rotated
+	// Kubernetes Secret takes effect without a restart. Zero disables it.
+	ShelleyKeyWatchInterval time.Duration `yaml:"shelleyKeyWatchInterval" envconfig:"SHELLEY_KEY_WATCH_INTERVAL"`
 	// ShelleyKESAgentAddress, when set, signs block headers through a bursa
 	// KES agent's remote sign listener (host:port) over mutually
 	// authenticated TLS 1.3, instead of a local socket. It implies sign mode

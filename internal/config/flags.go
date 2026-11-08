@@ -938,6 +938,11 @@ var flagSpecs = []flagSpec{
 		"hex SHA-256 of the remote KES agent's TLS server key (SubjectPublicKeyInfo), logged by the agent as server_spki_sha256",
 	),
 	durationFlag(
+		"ShelleyKeyWatchInterval",
+		"shelley-key-watch-interval",
+		"poll the block producer credential files at this interval and reload them in place on a change (0 disables)",
+	),
+	durationFlag(
 		"ShelleyKESAgentSignTimeout",
 		"shelley-kes-agent-sign-timeout",
 		"timeout for one sign-mode KES agent round trip; must stay below a slot (0 uses the 500ms default)",

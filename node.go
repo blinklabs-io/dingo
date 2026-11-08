@@ -157,7 +157,10 @@ type Node struct {
 	kesAgentClient  io.Closer
 	kesAgentCancel  context.CancelFunc
 	kesAgentMetrics *kesagent.Metrics
-	leaderElection  nodeconsensus.LeaderScheduler
+	// keyReload is the in-place credential reload's state: the agent's
+	// newer-certificate offers, the file watch and the reload metrics.
+	keyReload      keyReloadState
+	leaderElection nodeconsensus.LeaderScheduler
 	// leaderSchedulerRef mirrors leaderElection for readers outside the
 	// node lifecycle goroutine, such as the ledger rollback callback.
 	leaderSchedulerRef atomic.Pointer[leaderSchedulerRef]

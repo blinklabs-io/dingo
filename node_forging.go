@@ -474,6 +474,7 @@ func (n *Node) newKESAgentSignClient(
 		})
 	}
 	return kesagent.NewRemoteClient(kesagent.RemoteConfig{
+		OnNewerOpCert:     n.offerAgentOpCert,
 		Address:           n.config.shelleyKESAgentAddress,
 		ClientCertFile:    n.config.shelleyKESAgentClientCertFile,
 		ClientKeyFile:     n.config.shelleyKESAgentClientKeyFile,
@@ -485,6 +486,13 @@ func (n *Node) newKESAgentSignClient(
 		Logger:            n.config.logger,
 		Metrics:           n.kesAgentClientMetrics(),
 	})
+}
+
+// kesAgentSignMode reports whether a configured KES agent signs headers
+// (sign mode, local or remote) rather than pushing the key (serve-key).
+func (n *Node) kesAgentSignMode() bool {
+	return n.config.shelleyKESAgentAddress != "" ||
+		n.config.shelleyKESAgentMode == kesagent.ModeSign
 }
 
 // kesAgentConfigured reports whether KES signing goes through an agent,
@@ -539,25 +547,16 @@ func (n *Node) blockProducerContext() context.Context {
 // into the running block producer. Any failure leaves the loaded credentials
 // in place and forging uninterrupted. It is refused while startup, shutdown,
 // or a live restore or truncate is in progress.
+//
+// In KES agent sign mode it re-reads the VRF key and the operational
+// certificate and moves signing to a client for the new certificate; in
+// serve-key mode it is refused, since the agent pushes each new key itself.
 func (n *Node) ReloadBlockProducerCredentials() error {
 	// The reload reads n.ledgerState and the live credentials, both of which
 	// those operations replace, from its own goroutine. Holding the gates for
 	// the whole reload is acceptable where a probe's would not be: it runs
 	// once per operator-initiated rotation, not on every probe interval.
-	release, err := n.tryLifecycleGates()
-	if err != nil {
-		return err
-	}
-	defer release()
-	slot, supported, err := n.blockProducerStartupClock()
-	if err != nil {
-		return err
-	}
-	return n.reloadBlockProducerCredentials(
-		slot,
-		supported,
-		n.validateBlockProducerLedger,
-	)
+	return n.reloadCredentials(reloadTriggerSignal, nil)
 }
 
 // reloadBlockProducerCredentials is ReloadBlockProducerCredentials with the
@@ -575,9 +574,12 @@ func (n *Node) reloadBlockProducerCredentials(
 		return errors.New("block producer credentials are not loaded")
 	}
 	if n.kesAgentConfigured() {
-		return errors.New(
-			"block producer credentials come from a KES agent; rotate the key through the agent",
-		)
+		if !n.kesAgentSignMode() {
+			return errors.New(
+				"block producer credentials come from a KES agent in serve-key mode; rotate the key through the agent, which pushes each new key",
+			)
+		}
+		return n.reloadAgentSignCredentials(slot, supported, ledgerCheck, nil)
 	}
 	if !supported {
 		return errors.New(
@@ -882,7 +884,9 @@ func (n *Node) startBlockProducer(
 	}
 	n.blockProducerCreds.Store(creds)
 	n.setEquivocationSelfPoolID(creds)
+	n.startKeyReloadLoops()
 	started = append(started, func() {
+		n.stopKeyReloadLoops()
 		if n.blockForger != nil {
 			n.blockForger.Stop()
 		}

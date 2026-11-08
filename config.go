@@ -289,6 +289,7 @@ type Config struct {
 	shelleyVRFKey, shelleyKESKey, shelleyOperationalCertificate                         string
 	shelleyKESAgentSocket, shelleyKESAgentMode                                          string
 	shelleyKESAgentSignTimeout                                                          time.Duration
+	shelleyKeyWatchInterval                                                             time.Duration
 	shelleyKESAgentAddress, shelleyKESAgentClientCertFile, shelleyKESAgentClientKeyFile string
 	shelleyKESAgentServerSPKISHA256                                                     string
 	forgeSyncToleranceSlots, forgeStaleGapThresholdSlots                                uint64
@@ -1007,6 +1008,7 @@ func (c *Config) syncCompatFields() {
 	c.shelleyKESAgentSocket, c.shelleyKESAgentMode, c.shelleyKESAgentSignTimeout = c.cfg.ShelleyKESAgentSocket, c.cfg.ShelleyKESAgentMode, c.cfg.ShelleyKESAgentSignTimeout
 	c.shelleyKESAgentAddress, c.shelleyKESAgentClientCertFile, c.shelleyKESAgentClientKeyFile = c.cfg.ShelleyKESAgentAddress, c.cfg.ShelleyKESAgentClientCertFile, c.cfg.ShelleyKESAgentClientKeyFile
 	c.shelleyKESAgentServerSPKISHA256 = c.cfg.ShelleyKESAgentServerSPKISHA256
+	c.shelleyKeyWatchInterval = c.cfg.ShelleyKeyWatchInterval
 	c.forgeSyncToleranceSlots, c.forgeStaleGapThresholdSlots, c.validateForgedBlock = c.cfg.ForgeSyncToleranceSlots, c.cfg.ForgeStaleGapThresholdSlots, c.cfg.ValidateForgedBlock
 	c.forgeUpstreamStalenessSlots, c.forgeAppliedTipStalenessSlots = c.cfg.ForgeUpstreamStalenessSlots, c.cfg.ForgeAppliedTipStalenessSlots
 	c.forgeEndorserBlockStalenessSlots = c.cfg.ForgeEndorserBlockStalenessSlots
@@ -1776,6 +1778,16 @@ func WithShelleyKESAgentMode(mode string) ConfigOptionFunc {
 func WithShelleyKESAgentSignTimeout(timeout time.Duration) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.ShelleyKESAgentSignTimeout = timeout
+	}
+}
+
+// WithShelleyKeyWatchInterval makes a block producer poll its credential
+// files (CARDANO_SHELLEY_KEY_WATCH_INTERVAL) and reload them in place, as on
+// SIGHUP, once a change has held for two polls. It lets a mounted Secret be
+// rotated without a restart. 0, the default, disables the watch.
+func WithShelleyKeyWatchInterval(interval time.Duration) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.ShelleyKeyWatchInterval = interval
 	}
 }
 
