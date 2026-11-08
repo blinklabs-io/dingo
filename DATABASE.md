@@ -216,7 +216,17 @@ the spender's `transaction` row, and `utxo.spent_by_tx_id` readers join
 `transaction` by id. `models.Utxo.SpentAtTxId` still carries the spender's
 hash; every utxo read projects it from `transaction` with a scalar subquery.
 Inserts that name a spender hash (imports and consumed-input recovery) resolve
-it to the id in the statement; a hash with no `transaction` row stores NULL.
+it to the id in the statement, after checking that the hash names an existing
+`transaction` row, so an unknown spender fails the write.
+
+Schema version 56 keys the collateral and reference-input edges by the naming
+transaction's id: `utxo_collateral_edge` and `utxo_reference_edge` replace the
+hash-keyed `utxo_collateral_input` and `utxo_reference_input`, which the
+migration copies (dropping an edge whose transaction has no row) and then
+drops. It also clears `utxo.collateral_by_tx_id` and `utxo.referenced_by_tx_id`,
+which were a lossy single-owner copy of the same relation and are no longer
+written or read; their columns, foreign keys and now-empty partial indexes stay
+for the same reason as the legacy spender column.
 
 The stake-key lookup indexes `idx_utxo_staking_key` and
 `idx_utxo_staking_deleted_amount` include only outputs with a non-NULL
@@ -576,14 +586,15 @@ unversioned metadata databases are intentionally rejected: the database/sql
 cutover is a clean break, so users must remove the data directory (metadata and
 blob stores) and resync from genesis. This keeps startup deterministic and
 avoids carrying a large, fragile compatibility layer for obsolete schemas.
-Reference inputs are stored in the v1alpha1 `utxo_reference_input` association
-table so multiple transactions can reference one output; the legacy
+Reference inputs are stored in the `utxo_reference_edge` association
+table (`utxo_reference_input` until schema version 56) so multiple transactions can reference one output; the legacy
 single-column marker is not used by the new store. `v1alpha1` also creates the
 `node_settings_gate` table described below: the schema is unreleased, so a new
 table belongs in the initial version rather than in a version of its own.
 
-Collateral inputs are stored in the `utxo_collateral_input` association table,
-keyed by `(utxo_id, transaction_hash)`. This is the authoritative many-to-many
+Collateral inputs are stored in the `utxo_collateral_edge` association table,
+keyed by `(utxo_id, transaction_id)` (`utxo_collateral_input` keyed by hash until
+schema version 56). This is the authoritative many-to-many
 relationship: one output can be collateral for multiple transactions, and
 rollback removes only the association belonging to the rolled-back
 transaction. Migration `v14` copies non-NULL legacy
@@ -2618,7 +2629,7 @@ erDiagram
     TRANSACTION ||..o{ UTXO : "id = spent_by_tx_id"
     TRANSACTION ||..o{ UTXO : "hash = referenced_by_tx_id"
     TRANSACTION ||..o{ UTXO : "hash = collateral_by_tx_id"
-    TRANSACTION ||..o{ UTXO_COLLATERAL_INPUT : "transaction_hash"
+    TRANSACTION ||..o{ UTXO_COLLATERAL_EDGE : "transaction_id"
     UTXO ||..o{ UTXO_COLLATERAL_INPUT : "utxo_id"
 ```
 
@@ -3032,7 +3043,8 @@ the stored blocks as they age past the window, as it does on any node.
 | `transaction` | `id`, `hash`, `block_hash`, `slot`, `block_index`, `type`, `fee`, `collateral_fee`, `ttl`, `valid`, `metadata` | PK `id`; unique `hash`; indexes `block_hash`, `slot` | One row per applied transaction body. A Dijkstra batch therefore has one row for each sub-transaction body followed by one for the enclosing body; each row uses that body's hash and a consecutive block index in ledger application order. Produced child UTxOs are keyed by the child body's hash. `block_hash` and `slot` point to the blob block. `fee` is the declared body fee; `collateral_fee` is the collateral consumed into the fee pot by a phase-2-invalid transaction (collateral inputs minus collateral return) and zero for valid transactions. The epoch fee pot sums `fee` for valid rows plus `collateral_fee` for invalid rows. `metadata` is populated only in API mode. Mithril gap-closure writes the same body-level transaction row shape while deliberately skipping input consumption. |
 | `leios_transaction_context` | `transaction_id`, `slot` | PK and FK `transaction_id -> transaction.id` `ON DELETE CASCADE`; index `idx_leios_transaction_context_slot` on `slot` | Records the parent-ledger execution slot for Musashi closure transactions whose physical transaction slot remains the certifying ranking block's slot. The cascade removes context during rollback with its transaction. |
 | `utxo` | `id`, `transaction_id`, `collateral_return_for_tx_id`, `tx_id`, `output_idx`, `payment_key`, `credential_tag`, `staking_key`, `datum_hash`, `spent_at_tx_id` (legacy, NULL since schema version 55), `spent_by_tx_id`, `referenced_by_tx_id`, `collateral_by_tx_id`, `added_slot`, `deleted_slot`, `amount`, `payment_script` | PK `id`; unique `(tx_id, output_idx)`; unique `collateral_return_for_tx_id`; indexes `transaction_id`, `payment_key`, `staking_key`, the spender transaction id and the reference/collateral tx hashes (partial, non-NULL rows only, except on MySQL), and `added_slot`; composites `idx_utxo_deleted_staking_amount` (`deleted_slot`, `credential_tag`, `staking_key`, `amount`), `idx_utxo_staking_deleted_amount` (`credential_tag`, `staking_key`, `deleted_slot`, `amount`), and `idx_utxo_deleted_payment_script` (`deleted_slot`, `payment_script`, `amount`) | Produced outputs use `transaction_id -> transaction.id`. Collateral returns use `collateral_return_for_tx_id -> transaction.id`. Inputs/reference/collateral joins are logical: `spent_at_tx_id`, `referenced_by_tx_id`, and `collateral_by_tx_id` store transaction hashes. `credential_tag`: 0 key hash, 1 script hash for stake-bearing outputs. `deleted_slot = 0` is the live-output sentinel; a nonzero value and `spent_at_tx_id` identify a spent output and back Kupo's spent-output history. The `(credential_tag, staking_key, deleted_slot, amount)` composite backs stake-credential live UTxO sums such as DRep voting-power tallying. `payment_script` is a bool set at index time from the output address type (true when the payment credential is a script hash); the `(deleted_slot, payment_script, amount)` composite backs the network script-locked supply sum (blockfrost `/network` `supply.locked`). It is derived only at write time, so a database synced before this column existed reports script-locked supply only for UTxOs created after the upgrade until it is rebuilt from chain data. |
-| `utxo_collateral_input` | `utxo_id`, `transaction_hash` | PK `(utxo_id, transaction_hash)`; index `transaction_hash` | Authoritative many-to-many collateral relationship. Migration `v14` backfills one edge from each non-NULL legacy `utxo.collateral_by_tx_id`; apply and rollback maintain edges independently. |
+| `utxo_collateral_edge` | `utxo_id`, `transaction_id` | PK `(utxo_id, transaction_id)`; FK `utxo_id -> utxo.id` `ON DELETE CASCADE`; index `idx_utxo_collateral_edge_tx` (`transaction_id`) | Authoritative many-to-many collateral relationship, keyed by the naming transaction's row id. Apply and rollback maintain edges independently; rollback deletes by transaction id. |
+| `utxo_reference_edge` | `utxo_id`, `transaction_id` | PK `(utxo_id, transaction_id)`; FK `utxo_id -> utxo.id` `ON DELETE CASCADE`; index `idx_utxo_reference_edge_tx` (`transaction_id`) | Authoritative many-to-many reference-input relationship, same shape as the collateral edge table. |
 | `utxo_pointer` | `utxo_id`, `ptr_slot`, `ptr_tx_index`, `ptr_cert_index` | PK `utxo_id`; FK `utxo_id -> utxo.id` `ON DELETE CASCADE`; index `idx_utxo_pointer_target` (`ptr_slot`, `ptr_tx_index`, `ptr_cert_index`) | One row per output at a pointer address (address types 4 and 5). Such an address names the position of a stake registration certificate -- `(slot, transaction index in block, certificate index in transaction)` -- instead of carrying a stake credential, so the `utxo` row has no `staking_key` and the position is recorded here. The credential is resolved when stake is computed, not at write time, because it is a function of the certificate history at the slot being evaluated: a pointer may name a position no certificate occupies yet, de-registration removes the reference permanently, and Conway stops counting pointer stake altogether. The cascade is how rollback reaches these rows. Nothing validates an address's pointer payload, so a component above `int64` is dropped rather than stored or raised: no certificate can occupy such a position, and failing the write would stall ingestion of a block the network accepted. |
 | `utxo_reference_script` | `utxo_id`, `script_hash` | PK `utxo_id`; FK `utxo_id -> utxo.id` `ON DELETE CASCADE`; index `idx_utxo_reference_script_hash` (`script_hash`) | API-mode index of the script an output carries as a reference script, written when the output is created from its decoded `script_ref`, and when it is imported from a ledger-state snapshot, recovered as a consumed input, or created through `CreateUtxo`. The script is a property of the output, so re-applying it overwrites the row. Spent outputs keep their row; listings join `utxo` and keep `deleted_slot = 0`. The cascade is how rollback reaches these rows. Outputs created before migration `v45` have no row. |
 | `asset` | `id`, `utxo_id`, `policy_id`, `name`, `fingerprint`, `amount` | PK `id`; unique `(name, policy_id, utxo_id)`; named index `idx_asset_policy_id` on `policy_id` | Multi-asset quantities attached to `utxo.id`. The unique key backs ledger-state import `ON CONFLICT`; the policy-id query index can be deferred during bulk load. Use `utxo.deleted_slot = 0` for live balances. Migration `v19` drops `name_hex` (`hex.EncodeToString(name)`, stored and indexed at write time): every asset lookup keys on `policy_id`/`name`, so nothing ever filtered on it, and `api/blockfrost`'s `NodeAdapter.Asset` and `api/mesh`'s `appendUtxoOps` already recompute the hex encoding from `name` on demand. Migration `v21` drops `idx_asset_fingerprint` and `idx_asset_amount`: a real WAL-frame-churn measurement during genesis sync found `idx_asset_amount` alone responsible for 23.4% of all frame writes to the metadata database -- the single largest contributor of any index or table -- and `idx_asset_fingerprint` for 3.4%, and neither backs a `WHERE`/`JOIN`/`ORDER BY` predicate anywhere in the tree. Unlike `name_hex`, the `fingerprint` and `amount` columns themselves are genuinely read and returned via the blockfrost/mesh API adapters, so only the indexes are dropped. |

@@ -147,10 +147,10 @@ remain rejected because the relational label key is unique and no deterministic
 row selection exists.
 
 Transaction application records collateral through the durable
-`utxo_collateral_input` association table. Hydration joins that table per
-transaction, so shared collateral remains visible to every owner; rollback
-deletes only the rolled-back transaction's edges. The legacy scalar marker is
-kept solely for compatibility and migration.
+`utxo_collateral_edge` association table, keyed by transaction id. Hydration
+joins that table per transaction, so shared collateral remains visible to every
+owner; rollback deletes only the rolled-back transaction's edges. The legacy
+scalar marker is no longer written.
 
 The public compatibility interface is decomposing into narrow capabilities so
 components need not inherit the full historical metadata surface. Three are
