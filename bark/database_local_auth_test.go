@@ -27,7 +27,6 @@ import (
 	"connectrpc.com/connect"
 	databasev1alpha1 "github.com/blinklabs-io/bark/proto/v1alpha1/database"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
-	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/stretchr/testify/require"
 )
 
@@ -79,24 +78,15 @@ type localAuthFixture struct {
 
 func newLocalAuthFixture(t *testing.T) *localAuthFixture {
 	t.Helper()
-	dataDir := t.TempDir()
-	db := newDiskTestDB(t, dataDir)
-	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
-
 	snapshotDir := t.TempDir()
 	cloudBackingDir := t.TempDir()
-	setBarkFakeCloudBackingDir(t, cloudBackingDir)
-	const cloudDest = "barkfaketest://bucket/prefix"
+	bucket := setBarkFakeCloudBackingDir(t, cloudBackingDir)
+	cloudDest := "barkfaketest://" + bucket + "/prefix"
 
 	localDir := filepath.Join(snapshotDir, localAuthSnapshotID)
-	_, err := lifecycle.SnapshotToCloud(
-		context.Background(), testDestinationRegistry, db, localDir,
-		lifecycle.TriggerManual, "test-version", "badger", "sqlite",
-		cloudDest, "", "",
-		lifecycle.WithManifestKey(testSnapshotTrustKey),
+	installTemplateSnapshotInCloud(
+		t, snapshotDir, localAuthSnapshotID, cloudDest, true,
 	)
-	require.NoError(t, err)
-	dbtest.CloseDatabase(db) //nolint:errcheck
 
 	h := newTestDatabaseServiceHandlerWithTrustKey(
 		t, nil, filepath.Join(t.TempDir(), "target"),
@@ -172,8 +162,6 @@ func (f *localAuthFixture) awaitCompleted(t *testing.T) {
 	)
 }
 
-// Not t.Parallel: the fake cloud scheme resolves against the
-// process-global barkFakeCloudDir, so every test using it is sequential.
 func TestRestoreUsesCloudMirrorWhenLocalManifestFailsAuthentication(
 	t *testing.T,
 ) {
@@ -189,7 +177,6 @@ func TestRestoreUsesCloudMirrorWhenLocalManifestFailsAuthentication(
 	require.Contains(t, logs, "using cloud mirror")
 }
 
-// Not t.Parallel: uses the process-global barkFakeCloudDir fixture.
 func TestVerifySnapshotUsesCloudMirrorWhenLocalManifestFailsAuthentication(
 	t *testing.T,
 ) {
@@ -204,7 +191,6 @@ func TestVerifySnapshotUsesCloudMirrorWhenLocalManifestFailsAuthentication(
 	require.Contains(t, logs, "using cloud mirror")
 }
 
-// Not t.Parallel: uses the process-global barkFakeCloudDir fixture.
 func TestLocalAuthFailureWithUnusableCloudMirrorReturnsError(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -249,7 +235,6 @@ func TestLocalAuthFailureWithUnusableCloudMirrorReturnsError(t *testing.T) {
 	}
 }
 
-// Not t.Parallel: uses the process-global barkFakeCloudDir fixture.
 func TestValidLocalManifestIsChosenWithoutConsultingCloud(t *testing.T) {
 	f := newLocalAuthFixture(t)
 	// The cloud copy is made unusable so a lookup would surface in the log
@@ -264,7 +249,6 @@ func TestValidLocalManifestIsChosenWithoutConsultingCloud(t *testing.T) {
 	require.NotContains(t, f.logs.String(), "authentication")
 }
 
-// Not t.Parallel: uses the process-global barkFakeCloudDir fixture.
 func TestUnkeyedLocalProbeUnchangedWithoutTrustKey(t *testing.T) {
 	f := newLocalAuthFixture(t)
 	rewriteManifestUnkeyed(t, f.localDir)
@@ -317,8 +301,6 @@ func oversizeManifest(t *testing.T, dir string) {
 // Under a trust key the unkeyed checksum and the size bound are no stronger
 // than the tag: a writer to the snapshot directory can fail any of them, so
 // none may make the authenticated cloud mirror of the same ID unavailable.
-//
-// Not t.Parallel: uses the process-global barkFakeCloudDir fixture.
 func TestKeyedLocalManifestFailureUsesAuthenticatedCloudMirror(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -380,8 +362,6 @@ func TestKeyedLocalManifestFailureUsesAuthenticatedCloudMirror(t *testing.T) {
 
 // Without a usable cloud mirror a keyed local failure keeps the code the
 // local failure alone would produce.
-//
-// Not t.Parallel: uses the process-global barkFakeCloudDir fixture.
 func TestKeyedLocalManifestFailureWithoutCloudKeepsLocalCode(t *testing.T) {
 	t.Run("corrupted", func(t *testing.T) {
 		f := newLocalAuthFixture(t)
@@ -407,8 +387,6 @@ func TestKeyedLocalManifestFailureWithoutCloudKeepsLocalCode(t *testing.T) {
 
 // A configured trust key that cannot be loaded fails the request before any
 // snapshot is read, rather than probing the local copy unkeyed.
-//
-// Not t.Parallel: uses the process-global barkFakeCloudDir fixture.
 func TestUnloadableTrustKeyFailsResolutionClosed(t *testing.T) {
 	f := newLocalAuthFixture(t)
 	h := newTestDatabaseServiceHandlerWithConfig(

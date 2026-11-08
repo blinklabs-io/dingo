@@ -1113,6 +1113,8 @@ func TestBootstrapV2CreatesMissingConfiguredDownloadDirectory(t *testing.T) {
 }
 
 func TestV2ArchiveByteLimits(t *testing.T) {
+	t.Parallel()
+
 	fixture := newV2Fixture(t, v2FixtureOptions{immutableFileNumber: 0})
 	for _, kind := range []string{"digests", "immutable", "ancillary"} {
 		for _, oversized := range []bool{false, true} {
@@ -1194,6 +1196,8 @@ func TestBootstrapV2NoCertVerification(t *testing.T) {
 }
 
 func TestSyncV2SerializesMetadataWriterPhases(t *testing.T) {
+	t.Parallel()
+
 	_, certifiedHash := validImmutableFiles(t, 1000)
 	fixture := newV2Fixture(t, v2FixtureOptions{
 		validImmutable:       true,
@@ -1246,6 +1250,8 @@ func TestSyncV2SerializesMetadataWriterPhases(t *testing.T) {
 }
 
 func TestSyncV2CancellationDuringLedgerImportResumes(t *testing.T) {
+	t.Parallel()
+
 	_, certifiedHash := validImmutableFiles(t, 1000)
 	fixture := newV2Fixture(t, v2FixtureOptions{
 		validImmutable: true,
@@ -2425,6 +2431,8 @@ func (f *v2Fixture) requestedImmutables() []uint64 {
 }
 
 func TestSyncV2APIModeRemovesImmutableTreeBeforeBackfill(t *testing.T) {
+	t.Parallel()
+
 	_, certifiedHash := validImmutableFiles(t, 1000)
 	fixture := newV2Fixture(t, v2FixtureOptions{
 		validImmutable:       true,
@@ -2482,6 +2490,8 @@ func TestSyncV2APIModeRemovesImmutableTreeBeforeBackfill(t *testing.T) {
 }
 
 func TestSyncV2APIModeResumesBackfillAfterImmutableTreeRemoved(t *testing.T) {
+	t.Parallel()
+
 	_, certifiedHash := validImmutableFiles(t, 1000)
 	fixture := newV2Fixture(t, v2FixtureOptions{
 		validImmutable:       true,

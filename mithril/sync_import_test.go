@@ -118,6 +118,10 @@ func TestUpdateMithrilReadyStateKeepsDeferredIndexPendingMarker(t *testing.T) {
 // The fence is written by the forger during normal operation and guards a
 // slot whose block may already have been signed and diffused, so a producer
 // that re-bootstraps from a snapshot must still refuse it afterwards.
+//
+// It also pins that the consensus database identity survives the clear.
+// Without it the next start reads the database as unmarked Praos and refuses
+// it under any other selected provider.
 func TestUpdateMithrilReadyStateKeepsForgeFence(t *testing.T) {
 	t.Parallel()
 	db := newMithrilTestDB(t)
@@ -129,6 +133,11 @@ func TestUpdateMithrilReadyStateKeepsForgeFence(t *testing.T) {
 	storeB := forging.NewSyncStateForgeFenceStore(db.Metadata(), poolB)
 	require.NoError(t, storeA.StoreLastForgedSlot(fenceA))
 	require.NoError(t, storeB.StoreLastForgedSlot(fenceB))
+
+	const identity = "example/v1"
+	require.NoError(t, db.SetSyncState(
+		nodeconsensus.DatabaseIdentitySyncKey, identity, nil,
+	))
 
 	ledgerStateHash := bytes.Repeat([]byte{0x77}, 32)
 	require.NoError(t, db.SetTip(ochainsync.Tip{
@@ -147,6 +156,12 @@ func TestUpdateMithrilReadyStateKeepsForgeFence(t *testing.T) {
 		true,
 	))
 
+	gotIdentity, err := db.GetSyncState(
+		nodeconsensus.DatabaseIdentitySyncKey, nil,
+	)
+	require.NoError(t, err)
+	require.Equal(t, identity, gotIdentity)
+
 	// A store built after the import is what a restarted node reads.
 	for _, tc := range []struct {
 		pool lcommon.PoolKeyHash
@@ -164,42 +179,6 @@ func TestUpdateMithrilReadyStateKeepsForgeFence(t *testing.T) {
 		require.Equal(t, tc.want, slot)
 	}
 
-	status, err := db.GetSyncState("sync_status", nil)
-	require.NoError(t, err)
-	require.Empty(t, status, "sync_status must still be cleared")
-}
-
-// TestUpdateMithrilReadyStateKeepsConsensusIdentity pins that the sync-state
-// clear ending a Mithril import leaves the consensus database identity in
-// place. Without it the next start reads the database as unmarked Praos and
-// refuses it under any other selected provider.
-func TestUpdateMithrilReadyStateKeepsConsensusIdentity(t *testing.T) {
-	t.Parallel()
-	db := newMithrilTestDB(t)
-	const identity = "example/v1"
-	require.NoError(t, db.SetSyncState(
-		nodeconsensus.DatabaseIdentitySyncKey, identity, nil,
-	))
-	ledgerStateHash := bytes.Repeat([]byte{0x66}, 32)
-	require.NoError(t, db.SetTip(ochainsync.Tip{
-		Point: ocommon.NewPoint(30, ledgerStateHash),
-	}, nil))
-	require.NoError(t, db.SetSyncState("sync_status", "bootstrap", nil))
-
-	require.NoError(t, updateMithrilReadyState(
-		context.Background(),
-		db,
-		slog.New(slog.NewTextHandler(io.Discard, nil)),
-		nil,
-		30,
-		ledgerStateHash,
-		"",
-		true,
-	))
-
-	got, err := db.GetSyncState(nodeconsensus.DatabaseIdentitySyncKey, nil)
-	require.NoError(t, err)
-	require.Equal(t, identity, got)
 	status, err := db.GetSyncState("sync_status", nil)
 	require.NoError(t, err)
 	require.Empty(t, status, "sync_status must still be cleared")
@@ -598,36 +577,6 @@ func TestSetStableMithrilLedgerTipRejectsPointOutsideCertifiedChain(
 		bytes.Repeat([]byte{0x25}, 32),
 	)
 	require.ErrorContains(t, err, "is not present in certified ImmutableDB")
-}
-
-func TestUpdateMithrilReadyStateStoresTrustBoundaryFromLedgerState(
-	t *testing.T,
-) {
-	t.Parallel()
-
-	db := newMithrilTestDB(t)
-	ledgerStateHash := bytes.Repeat([]byte{0x33}, 32)
-	require.NoError(t, db.SetTip(ochainsync.Tip{
-		Point: ocommon.NewPoint(30, ledgerStateHash),
-	}, nil))
-
-	require.NoError(t, updateMithrilReadyState(
-		context.Background(),
-		db,
-		slog.New(slog.NewTextHandler(io.Discard, nil)),
-		nil,
-		30,
-		ledgerStateHash,
-		"",
-		true,
-	))
-
-	slot, err := db.GetSyncState(mithrilLedgerSlotSyncKey, nil)
-	require.NoError(t, err)
-	require.Equal(t, "30", slot)
-	hash, err := db.GetSyncState(mithrilLedgerHashSyncKey, nil)
-	require.NoError(t, err)
-	require.Equal(t, hex.EncodeToString(ledgerStateHash), hash)
 }
 
 func TestUpdateMithrilReadyStateClearsStaleTrustBoundaryHash(

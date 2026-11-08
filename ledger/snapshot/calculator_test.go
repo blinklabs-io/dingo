@@ -899,6 +899,7 @@ func TestCalculateEpochBoundaryStakePathsAgree(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			db := setupTestDB(t)
 			seedBoundaryPathFixture(t, db)
 			calc := NewCalculator(db)
@@ -1022,6 +1023,7 @@ func TestCalculateEpochBoundaryStakeUsesHistoricalFallback(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			db := setupTestDB(t)
 			seedSnapshotEpoch(t, db)
 

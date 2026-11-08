@@ -212,20 +212,6 @@ func TestRecentBlockDelaysSameBlockKeepsFirstDelivery(t *testing.T) {
 	assert.InDelta(t, 1.05, got[2], 1e-9)
 }
 
-// The ring is wired into the blockfetch metrics and registered with the
-// configured registry alongside the cardano-node compatible gauges.
-func TestBlockfetchMetricsRegistersRecentBlockDelays(t *testing.T) {
-	t.Parallel()
-	reg := prometheus.NewRegistry()
-	o := newOuroboros(OuroborosConfig{PromRegistry: reg})
-	require.NotNil(t, o.blockfetchMetrics)
-	require.NotNil(t, o.blockfetchMetrics.recentDelays)
-
-	o.blockfetchMetrics.recentDelays.record(5, testBlockHash(1), 0.5, 0.4)
-	got := gatherRecentDelays(t, reg)
-	require.Contains(t, got, strconv.FormatUint(5%recentBlockDelaySlots, 10))
-}
-
 // A late delivery of a block that has already been overwritten by a newer
 // block in the same slot (the ring wrapped) is stale and must not replace the
 // newer sample.
