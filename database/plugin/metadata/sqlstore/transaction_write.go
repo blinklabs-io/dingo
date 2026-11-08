@@ -604,6 +604,16 @@ func (s *Store) repairConflictedUtxo(
 			params.TxID, params.OutputIdx,
 		)...,
 	).Scan(&id); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			// The insert was suppressed by a unique index, yet no stored
+			// output has this hash: the producer already has a different
+			// output at this index.
+			return fmt.Errorf(
+				"%w: output %x:%d collides with a stored output of its "+
+					"producer",
+				types.ErrUtxoConflict, utxo.TxId, utxo.OutputIdx,
+			)
+		}
 		return err
 	}
 	utxo.ID = uint(id)
