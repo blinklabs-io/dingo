@@ -272,6 +272,10 @@ type Election struct {
 	metrics            *electionMetrics
 	consensusIdentity  string
 	tachysProvider     TachysDistributionProvider
+	// computeGate, when set, is a semaphore shared with the elections of the
+	// node's other pools, so an epoch boundary does not run every pool's
+	// schedule computation at once.
+	computeGate chan struct{}
 
 	// wg owns only the worker loops. The cancellation coordinator joins
 	// them before closing lifecycleDone; it must never join itself. Start
@@ -341,6 +345,16 @@ func (e *Election) SetScheduleStore(store ScheduleStore) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.scheduleStore = store
+}
+
+// SetComputeGate bounds schedule computation with gate, a semaphore whose
+// capacity is the number of computations that may run at once across every
+// election sharing it. Nil, the default, leaves computation unbounded. It must
+// be called before Start.
+func (e *Election) SetComputeGate(gate chan struct{}) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.computeGate = gate
 }
 
 // SetPromRegistry enables leader election metrics.
@@ -779,7 +793,12 @@ func (e *Election) RefreshScheduleForEpoch(
 		}
 	}
 
+	release, err := e.acquireComputeGate(ctx)
+	if err != nil {
+		return err
+	}
 	schedule, err := e.computeSchedule(ctx, epoch)
+	release()
 	if err != nil {
 		return err
 	}
@@ -791,6 +810,25 @@ func (e *Election) RefreshScheduleForEpoch(
 	}
 	e.persistSchedule(schedule)
 	return nil
+}
+
+// acquireComputeGate waits for a slot in the shared compute gate, or returns
+// at once when there is none.
+func (e *Election) acquireComputeGate(
+	ctx context.Context,
+) (release func(), err error) {
+	e.mu.RLock()
+	gate := e.computeGate
+	e.mu.RUnlock()
+	if gate == nil {
+		return func() {}, nil
+	}
+	select {
+	case gate <- struct{}{}:
+		return func() { <-gate }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 func (e *Election) loadPersistedSchedule(
