@@ -10926,7 +10926,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 
 			// Keeping a consumed output in the created overlay would resurrect it
 			// for a later transaction even though the applied state marks it spent.
-			for _, level := range TransactionLevelsForApply(tx) {
+			for _, level := range levels {
 				for _, input := range level.Consumed() {
 					delete(intraBlockUtxos, utxoref.ForInput(input))
 				}
