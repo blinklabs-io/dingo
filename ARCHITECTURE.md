@@ -14137,12 +14137,16 @@ resumes reads the recorded `mithril_ledger_slot`. Replay reaches the anchor
 without POOLREAP or the PV10 HARDFORK rule, so the backfill then restores each
 snapshot-imported account's registration and delegation from its import
 baseline before rebuilding the live-stake aggregate. For protocol versions 10
-and later, this finalization reconciles the reverse DRep memberships in the same
-write transaction. It preserves existing canonical membership intervals, closes
-stale ones at the anchor and inserts missing ones, so an interrupted finalization
-can repeat without changing delegation order or growing history. Any attempt to
-clear an authoritative forward delegation rejects and rolls back finalization.
-Protocol version 9 keeps its historical reverse set. Replayed DRep activity
+and later, this finalization reconciles the reverse DRep memberships in the
+same write transaction. It preserves existing canonical membership intervals,
+closes stale ones at the anchor and inserts missing ones, so an interrupted
+finalization can repeat without changing delegation order or growing history.
+The import-specific metadata operation rejects attempts to clear an
+authoritative baseline established at exactly that anchor and rolls back
+finalization, while allowing native PV10 cleanup of dangling replay-only
+targets. The global HARDFORK operation retains its cleared-account count and
+existing semantics. Protocol version 9 keeps its historical reverse set.
+Replayed DRep activity
 (backfill and gap blocks) records only the activity epoch and keeps the
 snapshot's DRep expiry, and a replayed governance proposal the snapshot does
 not hold is stored as already expired and dropped. Protocol parameters are

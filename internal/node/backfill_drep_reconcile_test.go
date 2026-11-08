@@ -83,7 +83,15 @@ func TestBackfillRestoresPV10ReverseDelegationsAtSnapshotAnchor(t *testing.T) {
 			)
 			vote := func(slot uint64, id byte, drep []byte) {
 				tx := mockledger.NewTransactionBuilder().
-					WithCertificates(&common.VoteDelegationCertificate{CertType: uint(common.CertificateTypeVoteDelegation), StakeCredential: common.Credential{CredType: 0, Credential: common.NewBlake2b224(stake)}, Drep: common.Drep{Type: common.DrepTypeAddrKeyHash, Credential: drep}})
+					WithCertificates(&common.VoteDelegationCertificate{
+						CertType: uint(common.CertificateTypeVoteDelegation),
+						StakeCredential: common.Credential{
+							CredType: 0, Credential: common.NewBlake2b224(stake),
+						},
+						Drep: common.Drep{
+							Type: common.DrepTypeAddrKeyHash, Credential: drep,
+						},
+					})
 				tx.WithId(bytes.Repeat([]byte{id}, 32))
 				tx.WithValid(true)
 				require.NoError(
@@ -139,7 +147,13 @@ func TestBackfillRestoresPV10ReverseDelegationsAtSnapshotAnchor(t *testing.T) {
 				require.Equal(t, 1, after)
 			}
 			tx := mockledger.NewTransactionBuilder().
-				WithCertificates(&common.DeregistrationDrepCertificate{CertType: uint(common.CertificateTypeDeregistrationDrep), DrepCredential: common.Credential{CredType: 0, Credential: common.NewBlake2b224(old)}, Amount: 500})
+				WithCertificates(&common.DeregistrationDrepCertificate{
+					CertType: uint(common.CertificateTypeDeregistrationDrep),
+					DrepCredential: common.Credential{
+						CredType: 0, Credential: common.NewBlake2b224(old),
+					},
+					Amount: 500,
+				})
 			tx.WithId(bytes.Repeat([]byte{0xb6}, 32))
 			tx.WithValid(true)
 			require.NoError(
@@ -200,7 +214,15 @@ func TestBackfillDRepReconciliationRejectsDanglingSnapshotAtomically(
 		),
 	)
 	tx := mockledger.NewTransactionBuilder().
-		WithCertificates(&common.VoteDelegationCertificate{CertType: uint(common.CertificateTypeVoteDelegation), StakeCredential: common.Credential{CredType: 0, Credential: common.NewBlake2b224(stake)}, Drep: common.Drep{Type: common.DrepTypeAddrKeyHash, Credential: old}})
+		WithCertificates(&common.VoteDelegationCertificate{
+			CertType: uint(common.CertificateTypeVoteDelegation),
+			StakeCredential: common.Credential{
+				CredType: 0, Credential: common.NewBlake2b224(stake),
+			},
+			Drep: common.Drep{
+				Type: common.DrepTypeAddrKeyHash, Credential: old,
+			},
+		})
 	tx.WithId(bytes.Repeat([]byte{0xd4}, 32))
 	tx.WithValid(true)
 	require.NoError(
@@ -215,6 +237,14 @@ func TestBackfillDRepReconciliationRejectsDanglingSnapshotAtomically(
 			9,
 		),
 	)
+	replayOnlyStake := bytes.Repeat([]byte{0xd5}, 28)
+	require.NoError(t, store.CreateAccount(nil, &models.Account{
+		StakingKey: replayOnlyStake,
+		Drep:       current,
+		AddedSlot:  50,
+		Reward:     900,
+		Active:     true,
+	}))
 	b := &Backfill{
 		db:           db,
 		currentEraId: conway.EraIdConway,
@@ -242,6 +272,18 @@ func TestBackfillDRepReconciliationRejectsDanglingSnapshotAtomically(
 	)
 	require.NoError(t, err)
 	require.Equal(t, 1, active)
+
+	replayOnly, err := db.GetAccountByCredential(
+		ctx,
+		0,
+		replayOnlyStake,
+		true,
+		nil,
+	)
+	require.NoError(t, err)
+	require.Equal(t, current, replayOnly.Drep)
+	require.Equal(t, uint64(50), replayOnly.AddedSlot)
+	require.Equal(t, uint64(900), uint64(replayOnly.Reward))
 }
 
 func TestBackfillDRepReconciliationRejectsUnknownProtocolAtomically(
@@ -275,7 +317,15 @@ func TestBackfillDRepReconciliationRejectsUnknownProtocolAtomically(
 		),
 	)
 	tx := mockledger.NewTransactionBuilder().
-		WithCertificates(&common.VoteDelegationCertificate{CertType: uint(common.CertificateTypeVoteDelegation), StakeCredential: common.Credential{CredType: 0, Credential: common.NewBlake2b224(stake)}, Drep: common.Drep{Type: common.DrepTypeAddrKeyHash, Credential: old}})
+		WithCertificates(&common.VoteDelegationCertificate{
+			CertType: uint(common.CertificateTypeVoteDelegation),
+			StakeCredential: common.Credential{
+				CredType: 0, Credential: common.NewBlake2b224(stake),
+			},
+			Drep: common.Drep{
+				Type: common.DrepTypeAddrKeyHash, Credential: old,
+			},
+		})
 	tx.WithId(bytes.Repeat([]byte{0xd4}, 32))
 	tx.WithValid(true)
 	require.NoError(
@@ -316,4 +366,35 @@ func TestBackfillDRepReconciliationRejectsUnknownProtocolAtomically(
 	)
 	require.NoError(t, err)
 	require.Equal(t, 1, active)
+}
+
+func TestBackfillDRepReconciliationAllowsReplayOnlyDanglingTargets(
+	t *testing.T,
+) {
+	t.Parallel()
+	db := newTestDB(t)
+	ctx := context.Background()
+	stake := bytes.Repeat([]byte{0xe1}, 28)
+	target := bytes.Repeat([]byte{0xe2}, 28)
+	require.NoError(t, db.Metadata().CreateAccount(nil, &models.Account{
+		StakingKey: stake, Drep: target, AddedSlot: 50, Reward: 700, Active: true,
+	}))
+	b := &Backfill{
+		db:           db,
+		currentEraId: conway.EraIdConway,
+		currentPParams: &conway.ConwayProtocolParameters{
+			ProtocolVersion: common.ProtocolParametersProtocolVersion{
+				Major: 10,
+			},
+		},
+	}
+	for range 2 {
+		_, err := b.restoreImportedAccountsAtAnchor(ctx, 100)
+		require.NoError(t, err)
+		account, err := db.GetAccountByCredential(ctx, 0, stake, true, nil)
+		require.NoError(t, err)
+		require.Empty(t, account.Drep)
+		require.Equal(t, uint64(700), uint64(account.Reward))
+		require.Equal(t, uint64(100), account.AddedSlot)
+	}
 }

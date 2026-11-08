@@ -612,15 +612,10 @@ func (b *Backfill) restoreImportedAccountsAtAnchor(
 		// Historical replay lacks the PV10 reverse-set rebuild. Restore both
 		// directions before a later deregistration consumes that index; the
 		// snapshot's forward state must already be authoritative.
-		cleared, err := b.db.ClearDanglingDRepDelegations(ctx, anchor, txn)
-		if err != nil {
+		if err := b.db.ReconcileImportedDRepDelegations(
+			ctx, anchor, txn,
+		); err != nil {
 			return 0, err
-		}
-		if cleared != 0 {
-			return 0, fmt.Errorf(
-				"snapshot anchor contains %d dangling DRep delegations",
-				cleared,
-			)
 		}
 	}
 	if err := txn.Commit(); err != nil {

@@ -3412,15 +3412,18 @@ or a row certificate replay created) keep their replayed state.
 
 For snapshot protocol versions 10 and later, the same write transaction also
 reconciles the reverse DRep membership from the restored current accounts.
-Historical replay can otherwise retain an earlier DRep's reverse link even
-when the account's forward delegation matches its snapshot baseline. Existing
+Historical replay can otherwise retain an earlier DRep's reverse link even when
+the account's forward delegation matches its snapshot baseline. Existing
 canonical memberships keep their IDs and added slots; only stale memberships
 close at the anchor, and only missing canonical memberships are inserted.
-Repeating finalization therefore preserves history and does not grow the reverse
-index. A reconciliation that would clear a snapshot account's forward delegation
-is rejected and the entire finalization rolls back. Protocol version 9 retains
-its historical reverse-membership semantics. Completed backfills are not rerun
-by this finalization change.
+Repeating finalization therefore preserves history and does not grow the
+reverse index. A reconciliation that would clear an authoritative account
+baseline established at exactly that anchor is rejected and the entire
+finalization rolls back. Replay-only accounts with dangling credential-backed
+targets undergo the native PV10 cleanup; they do not make an otherwise
+consistent import fail. Protocol version 9 retains its historical reverse-
+membership semantics. Completed backfills are not rerun by this finalization
+change.
 
 DRep votes and registration or update certificates replayed below the anchor
 record each DRep's `last_activity_epoch`, which the snapshot does not carry,

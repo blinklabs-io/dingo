@@ -3396,6 +3396,11 @@ type MetadataStore interface {
 	// Pseudo-DRep delegations are preserved. Returns the cleared account count.
 	ClearDanglingDRepDelegations(atSlot uint64, txn types.Txn) (int, error)
 
+	// ReconcileImportedDRepDelegations rejects dangling forward targets for
+	// authoritative baselines at exactly atSlot, then performs the PV10
+	// dangling-target cleanup and reverse-index reconciliation atomically.
+	ReconcileImportedDRepDelegations(atSlot uint64, txn types.Txn) error
+
 	// DeletePParamsAfterSlot removes protocol parameter records added after
 	// the given slot.
 	DeletePParamsAfterSlot(uint64, types.Txn) error

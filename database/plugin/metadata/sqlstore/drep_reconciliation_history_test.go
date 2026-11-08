@@ -16,6 +16,7 @@ package sqlstore
 
 import (
 	"bytes"
+	"fmt"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -152,5 +153,70 @@ func TestReverseReconciliationSkipsLegacyMissingStakeCredentials(t *testing.T) {
 		)
 		require.Equal(t, 3, accounts)
 		require.Equal(t, 2100, rewards)
+	}
+}
+
+func TestImportedDRepProtectionDoesNotChangeNativeHardforkCleanup(
+	t *testing.T,
+) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	stake := bytes.Repeat([]byte{0xe3}, 28)
+	target := bytes.Repeat([]byte{0xe4}, 28)
+	require.NoError(t, store.ImportAccount(&models.Account{
+		StakingKey: stake, Drep: target, AddedSlot: 100, Reward: 700, Active: true,
+	}, nil))
+	require.ErrorContains(
+		t,
+		store.ReconcileImportedDRepDelegations(100, nil),
+		"snapshot anchor contains",
+	)
+	db, ctx, err := store.dbFromTxn(nil)
+	require.NoError(t, err)
+	var actual []byte
+	require.NoError(
+		t,
+		db.QueryRowContext(ctx, "SELECT drep FROM account WHERE staking_key = ?", stake).
+			Scan(&actual),
+	)
+	require.Equal(t, target, actual)
+	cleared, err := store.ClearDanglingDRepDelegations(100, nil)
+	require.NoError(t, err)
+	require.Equal(t, 1, cleared)
+	var reward uint64
+	require.NoError(
+		t,
+		db.QueryRowContext(ctx, "SELECT drep,reward FROM account WHERE staking_key = ?", stake).
+			Scan(&actual, &reward),
+	)
+	require.Empty(t, actual)
+	require.Equal(t, uint64(700), reward)
+}
+
+func TestImportedDRepProtectionMatchesExactAnchor(t *testing.T) {
+	t.Parallel()
+	for _, baselineSlot := range []uint64{99, 101} {
+		t.Run(fmt.Sprint(baselineSlot), func(t *testing.T) {
+			t.Parallel()
+			store := newMigratedSQLiteStore(t)
+			stake := bytes.Repeat([]byte{0xe5}, 28)
+			target := bytes.Repeat([]byte{0xe6}, 28)
+			require.NoError(t, store.ImportAccount(&models.Account{
+				StakingKey: stake, Drep: target, AddedSlot: baselineSlot, Reward: 700, Active: true,
+			}, nil))
+			require.NoError(t, store.ReconcileImportedDRepDelegations(100, nil))
+			db, ctx, err := store.dbFromTxn(nil)
+			require.NoError(t, err)
+			var actual []byte
+			var reward, added uint64
+			require.NoError(
+				t,
+				db.QueryRowContext(ctx, "SELECT drep,reward,added_slot FROM account WHERE staking_key = ?", stake).
+					Scan(&actual, &reward, &added),
+			)
+			require.Empty(t, actual)
+			require.Equal(t, uint64(700), reward)
+			require.Equal(t, uint64(100), added)
+		})
 	}
 }
