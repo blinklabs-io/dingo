@@ -832,6 +832,51 @@ func TestBuildDingoConfigWiresAPIConfig(t *testing.T) {
 	}
 }
 
+// TestBuildDingoConfigForwardsBlockProducerPools covers the pool list, which
+// TestBuildDingoConfigForwardsScalarConfigFields skips as a slice of structs.
+// Without it a multi-pool config would reach the node with no keys at all.
+func TestBuildDingoConfigForwardsBlockProducerPools(t *testing.T) {
+	t.Parallel()
+
+	want := []config.BlockProducerPool{
+		{
+			ShelleyVRFKey:                 "/keys/a/vrf.skey",
+			ShelleyOperationalCertificate: "/keys/a/node.cert",
+			ShelleyKESAgentSocket:         "/run/kes-agent/service.sock",
+			ShelleyKESAgentMode:           "sign",
+		},
+		{
+			ShelleyVRFKey:                   "/keys/b/vrf.skey",
+			ShelleyOperationalCertificate:   "/keys/b/node.cert",
+			ShelleyKESAgentAddress:          "agent.example:3105",
+			ShelleyKESAgentMode:             "sign",
+			ShelleyKESAgentClientCertFile:   "/keys/b/client.crt",
+			ShelleyKESAgentClientKeyFile:    "/keys/b/client.key",
+			ShelleyKESAgentServerSPKISHA256: strings.Repeat("ab", 32),
+		},
+	}
+	cfg := &config.Config{
+		BlockProducer:      true,
+		BlockProducerPools: want,
+	}
+
+	built := buildDingoConfig(
+		cfg,
+		slog.New(slog.NewTextHandler(new(bytes.Buffer), nil)),
+		nil,
+		nil,
+		false,
+		dingo.StorageModeCore,
+		30*time.Second,
+		chainsync.DefaultStallTimeout,
+		chainsync.HeaderSyncStrategyPrimary,
+	)
+
+	if got := built.BlockProducerPools(); !slices.Equal(got, want) {
+		t.Fatalf("block producer pools = %+v, want %+v", got, want)
+	}
+}
+
 // TestBuildDingoConfigWiresBarkOperatorFingerprints pins the production
 // composition boundary between loaded YAML/env/CLI configuration and the root
 // configuration that Run passes to dingo.New and, in turn, Bark.

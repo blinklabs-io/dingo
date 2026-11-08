@@ -291,6 +291,7 @@ type Config struct {
 	shelleyKESAgentSignTimeout                                                          time.Duration
 	shelleyKESAgentAddress, shelleyKESAgentClientCertFile, shelleyKESAgentClientKeyFile string
 	shelleyKESAgentServerSPKISHA256                                                     string
+	blockProducerPools                                                                  []BlockProducerPool
 	forgeSyncToleranceSlots, forgeStaleGapThresholdSlots                                uint64
 	forgeUpstreamStalenessSlots, forgeAppliedTipStalenessSlots                          uint64
 	forgeEndorserBlockStalenessSlots                                                    uint64
@@ -1007,6 +1008,7 @@ func (c *Config) syncCompatFields() {
 	c.shelleyKESAgentSocket, c.shelleyKESAgentMode, c.shelleyKESAgentSignTimeout = c.cfg.ShelleyKESAgentSocket, c.cfg.ShelleyKESAgentMode, c.cfg.ShelleyKESAgentSignTimeout
 	c.shelleyKESAgentAddress, c.shelleyKESAgentClientCertFile, c.shelleyKESAgentClientKeyFile = c.cfg.ShelleyKESAgentAddress, c.cfg.ShelleyKESAgentClientCertFile, c.cfg.ShelleyKESAgentClientKeyFile
 	c.shelleyKESAgentServerSPKISHA256 = c.cfg.ShelleyKESAgentServerSPKISHA256
+	c.blockProducerPools = slices.Clone(c.cfg.BlockProducerPools)
 	c.forgeSyncToleranceSlots, c.forgeStaleGapThresholdSlots, c.validateForgedBlock = c.cfg.ForgeSyncToleranceSlots, c.cfg.ForgeStaleGapThresholdSlots, c.cfg.ValidateForgedBlock
 	c.forgeUpstreamStalenessSlots, c.forgeAppliedTipStalenessSlots = c.cfg.ForgeUpstreamStalenessSlots, c.cfg.ForgeAppliedTipStalenessSlots
 	c.forgeEndorserBlockStalenessSlots = c.cfg.ForgeEndorserBlockStalenessSlots
@@ -1793,6 +1795,21 @@ func WithShelleyKESAgentRemote(
 		c.cfg.ShelleyKESAgentClientCertFile = certFile
 		c.cfg.ShelleyKESAgentClientKeyFile = keyFile
 		c.cfg.ShelleyKESAgentServerSPKISHA256 = serverSPKISHA256
+	}
+}
+
+// BlockProducerPool is one pool a block producer forges for: its VRF key and
+// operational certificate files and one KES source.
+type BlockProducerPool = internalconfig.BlockProducerPool
+
+// WithBlockProducerPools lists every pool this block producer forges for, each
+// with its own VRF key, operational certificate and KES source. It replaces
+// the single-pool WithShelleyVRFKey, WithShelleyKESKey,
+// WithShelleyOperationalCertificate and WithShelleyKESAgent* options, which
+// must then be left unset.
+func WithBlockProducerPools(pools ...BlockProducerPool) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.BlockProducerPools = slices.Clone(pools)
 	}
 }
 
@@ -2897,6 +2914,12 @@ func (c *Config) ShelleyKESKey() string {
 // ShelleyOperationalCertificate returns the path to the operational certificate.
 func (c *Config) ShelleyOperationalCertificate() string {
 	return c.cfg.ShelleyOperationalCertificate
+}
+
+// BlockProducerPools returns a copy of the pools listed with
+// WithBlockProducerPools, or nil when the single-pool settings are used.
+func (c *Config) BlockProducerPools() []BlockProducerPool {
+	return slices.Clone(c.cfg.BlockProducerPools)
 }
 
 // ForgeSyncToleranceSlots returns the sync tolerance for block forging.
