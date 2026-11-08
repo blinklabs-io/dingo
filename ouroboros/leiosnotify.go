@@ -1459,8 +1459,9 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 		if !admitted {
 			return nil
 		}
+		claim := &leiosManifestFetchClaim{done: make(chan struct{})}
 		if _, loaded := o.leiosManifestFetchInProgress.LoadOrStore(
-			manifestKey, struct{}{},
+			manifestKey, claim,
 		); loaded {
 			o.releaseLeiosFetch(guard)
 			return nil
@@ -1469,7 +1470,7 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 			o.leiosFetchClaimPublished()
 		}
 		o.dispatchLeiosFetchReserved(guard, func() {
-			defer o.leiosManifestFetchInProgress.Delete(manifestKey)
+			defer o.finishLeiosManifestFetch(manifestKey, claim)
 			// A transaction offer or historical backfill may have populated
 			// this occurrence while this work waited for its connection guard.
 			if _, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash); ok {

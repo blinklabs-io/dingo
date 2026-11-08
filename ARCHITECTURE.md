@@ -5516,9 +5516,19 @@ leios-fetch server uses the same lookup path for downstream `MsgBlockRequest`
 and `MsgBlockTxsRequest`: it serves from the in-memory cache when present, and
 on cache miss or expired-entry eviction reloads the manifest and complete tx
 list from the durable `em`/`et` blob keys so historical EBs can be re-served
-after the cache TTL. A missing endorser block or incomplete transaction set is
-declined with the protocol's typed `ErrBlockNotFound` or `ErrBlockTxsNotFound`,
-while malformed transaction bitmaps retain their validation error.
+after the cache TTL. When an exact, validated announced occurrence already
+has an admitted manifest or transaction fetch in progress, serving waits up to
+five seconds for that existing work rather than failing the shared bearer just
+before the content arrives. The deadline is absolute across fetch-owner
+handoffs, and at most 64 such requests wait concurrently. Manifest completion
+signals are owner-specific; partial transaction availability is checked against
+only the requested bitmap, without waiting for unrequested transactions. Each
+wait validates its actual LeiosFetch server owner and uses the same connection's
+owner-aware teardown signal, so disconnects cannot leave a callback parked.
+No serving request initiates a new network fetch. Unknown or unclaimed points,
+failed fetches and expired waits retain the typed `ErrBlockNotFound` or
+`ErrBlockTxsNotFound` error; these errors end the bearer because LeiosFetch has
+no absence reply. Malformed transaction bitmaps retain their validation error.
 `MsgBlockRangeRequest` is not served, and is declined with an explicit error
 rather than by returning nil from the callback: gouroboros reads a nil return as
 "an async range send was started", so returning nil left dingo holding
