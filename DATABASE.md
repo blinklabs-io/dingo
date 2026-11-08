@@ -3422,6 +3422,21 @@ that baseline, before the `reward_live_stake` rebuild reads `account.pool`.
 `reward` is not touched. Accounts with no such baseline (a genesis baseline,
 or a row certificate replay created) keep their replayed state.
 
+For snapshot protocol versions 10 and later, the same write transaction also
+reconciles the reverse DRep membership from the restored current accounts.
+Historical replay can otherwise retain an earlier DRep's reverse link even when
+the account's forward delegation matches its snapshot baseline. Existing
+canonical memberships keep their IDs and added slots; only stale memberships
+close at the anchor, and only missing canonical memberships are inserted.
+Repeating finalization therefore preserves history and does not grow the
+reverse index. A reconciliation that would clear an authoritative account
+baseline established at exactly that anchor is rejected and the entire
+finalization rolls back. Replay-only accounts with dangling credential-backed
+targets undergo the native PV10 cleanup; they do not make an otherwise
+consistent import fail. Protocol version 9 retains its historical reverse-
+membership semantics. Completed backfills are not rerun by this finalization
+change.
+
 DRep votes and registration or update certificates replayed below the anchor
 record each DRep's `last_activity_epoch`, which the snapshot does not carry,
 and leave the imported `expiry_epoch` unchanged. The snapshot's expiry already
@@ -3490,6 +3505,13 @@ for a surviving `(pool_key_hash, slot)` row.
 
 ### DReps, Governance, and Committee
 
+DRep deregistration journals and clears active accounts' current forward vote
+delegations at protocol version 10 and later. The current account target is
+authoritative even when historical API replay left a stale or missing reverse
+membership; the deregistered DRep's reverse memberships are still closed at the
+certificate slot. Protocol version 9 retains its reverse-membership-based
+clearing behavior.
+
 DRep activity updates reject epoch-plus-inactivity overflow before addition and
 reject activity or expiry values outside the signed SQL integer domain. Rejected
 updates preserve the previous activity and expiry epochs.
@@ -3521,6 +3543,14 @@ When an enacted treasury withdrawal credits a proposal return account that also
 receives a deposit refund at the same boundary, `account_reward_delta` records
 separate event discriminators for the withdrawal and refund so both credits
 remain distinct and rollbackable.
+
+Snapshot governance import preserves the completed pulser's expired action IDs
+as `governance_proposal.expired_epoch` and `expired_slot` at the snapshot's epoch
+anchor. Matching proposals remain members until the next boundary writes their
+`governance_proposal_drop` row and refunds the deposit. The importer does not
+infer the verdict epoch from the proposal's `expires_epoch`, and does not defer
+an already-recorded verdict until another ratification pass. Invalid expired
+sets reject the import before any phase writes; an empty set is valid.
 
 ### Catch-up import rollback
 
@@ -5217,6 +5247,20 @@ older than the ledger stability window:
   left. The cursor stops at the first block whose expiry fails so that block is
   retried. A rollback or `lifecycle.Truncate` lowers it to the target slot when
   it lies above it, because replay stores new blocks only above the target.
+- The pruner also keeps the start of retained history in memory for the UTxO
+  RPC API, which names it in history-expired errors (`oldest retained
+  slot=N`). `Database.RefreshOldestRetainedSlot` computes it when the pruner
+  starts and after each round. The cursor is only a lower bound (the pruner
+  leaves it on the last block it expired, and a rollback lowers it below
+  already-expired blocks), so the refresh walks forward from it past
+  tombstones, at most 4096 of them, to the first block whose body still reads
+  back. `Database.OldestRetainedSlot` only reads the stored value, so an
+  expired-history request does no scan. The bound is unknown before the first
+  refresh, when no cursor exists or no retained block is found, and from the
+  moment a block at or below it is expired or deleted (`PruneBlock`,
+  `BlockDeleteTxn`, again when that transaction commits) or the blob store is
+  replaced, until the next refresh. A refresh that sees such a removal during
+  its scan at or below the slot it found stores unknown.
 - Expired blocks keep their `bi...`, `bh...`, and `bp..._metadata` entries. SQL
   metadata rows also remain. Blob readers return `types.ErrHistoryExpired` with
   the slot/hash. Without an archive wrapper this is the final read error; with
@@ -7791,6 +7835,13 @@ floor. `TruncateAfterSlot` restores spent UTxOs with an update. The
 Before a rollback marks retained spent UTxOs live again, it fills any missing
 `utxo_address` identity from their retained output CBOR.
 The address restoration and unspend update share the rollback transaction.
+Unary-plus row-ID expressions prevent SQLite from choosing a row-ID-ordered
+history walk to satisfy the batch limit, while preserving ascending-ID
+pagination. An available deleted-slot index can bound the lookup to the
+rollback range. Without those optional indexes, the query remains correct but
+scans the retained table. The query does not name an index, so a deferred index
+rebuild does not cause a missing-index error. Other SQL dialects keep their
+existing query shape.
 
 # Trusted batch commit ordering
 

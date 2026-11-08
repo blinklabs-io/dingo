@@ -7845,6 +7845,14 @@ chain tip lies below every ancestor such a walk would read, because the walk
 could reach no held block. Once the chain tip reaches that range the full walk
 runs again. Replacing the retained path clears the record.
 
+Successful stateless header cryptography is also remembered across peer
+connections in a bounded LRU keyed by epoch nonce and a header identity that
+hashes the stored header CBOR together with the decoded KES and opcert fields
+the verifiers read (`ledger/header_verdict_cache.go`). The verdict depends only
+on those inputs, the nonce, and Shelley genesis constants, so a header
+delivered by many peers is verified once. Failures are never stored, and Byron headers and
+headers without their stored CBOR are not cached.
+
 While Genesis corroboration is active, a new ChainSync session intersects at
 the applied ledger tip through `LedgerState.LedgerTipIntersectPoints`, retaining
 older persisted intersection points when available. Starting at primary-chain
@@ -8976,39 +8984,21 @@ The `chainsync.State` tracks multiple concurrent chainsync clients:
   plateau is a ledger-application backlog, not a chainsync stall, so the healthy
   connection is left running and the condition is logged at INFO instead of
   recycling (recycling cannot advance the applied tip and only churns the
-  connection). The "peers are ahead" comparison reads a peer's DELIVERED
-  frontier. A peer that has delivered no header has that frontier pinned at the
-  point its session intersected at, which immediately after a plateau resync is
-  the stalled local tip itself, so comparing against it would disarm this
-  watchdog exactly when it has just acted. While such a peer is still awaiting
-  its first header (`PeerChainTip.AwaitingFirstHeader`,
-  `chainselection/peer_tip.go`) the recycler therefore falls back to that peer's
-  ADVERTISED tip, but only when the advertised tip is higher and only when the
-  advertising peer IS the connection this plateau would recycle
-  (`advertisesForOwnConnection`, compared by `ConnectionId` rather than by
-  rendered address, so a replacement connection reusing a listen port does not
-  inherit a stale peer's claim). An untrusted advertised tip can therefore only
-  ever be spent on its own connection, and the substituted value also flows into
-  `isLedgerApplicationBacklog` as the best-peer tip, so it sets the
-  backlog-versus-stall classification too. "Awaiting its first header" means the
-  `awaitingFirstHeader` flag chain selection sets only when it registers a peer
-  from a rollback and clears on that peer's first delivered header, not a
-  delivered block number of 0: a tracked peer that has delivered headers and
-  then rolls back to a point outside its retained delivered-header history is
-  also left with a block number of 0 (`ApplyRollback` keeps the point and cannot
-  recover one), but it has delivered headers on this connection, so it is judged
-  on its delivered frontier and its advertised tip is never substituted. That
-  fallback is reachable only because chain selection tracks such a peer in the
-  first place: a plateau resync closes the connection
-  (`SubscribeChainsyncResync`, `ouroboros/chainsync.go`, closes it for every
-  resync reason), the `ConnectionClosedEvent` subscription in `node.go` calls
-  `ChainSelector.RemovePeer`, and the replacement's only chainsync traffic until
-  the next block is its post-`FindIntersect` `MsgRollBackward` — registered as a
-  peer by `registerPeerFromRollbackLocked` and made selectable with a delivered
-  block number of 0 by the `awaitingFirstHeader` exemption in
-  `isPeerSelectableLocked` (`chainselection/selector.go`). Without that
-  registration `GetBestPeer()` is nil through the whole window and the plateau
-  check returns before the fallback, so the two belong together
+  connection). The "peers are ahead" comparison reads the delivered frontier.
+  If that frontier is no longer above the applied tip, the selected connection's
+  own higher advertised tip can arm bounded recovery of that connection, even
+  when it delivered earlier headers. Otherwise a stream that stops delivering
+  after reaching the applied frontier would indefinitely disarm the watchdog.
+  The same fallback covers a rollback-registered peer awaiting its first header.
+  It requires exact `ConnectionId` identity (`advertisesForOwnConnection`),
+  rather than rendered-address equality, so a replacement connection cannot
+  inherit another connection's claim. The advertisement also supplies the
+  existing backlog classifier's peer horizon; local reconciliation, progress
+  clocks, cooldown and Limit-on-Eagerness protection still apply. This
+  advertisement-only evidence never authorizes post-plateau realignment of
+  other peers. It cannot admit a header or change the authenticated chain
+  selector's frontier. Delivered-ahead evidence retains the existing bounded
+  cross-peer realignment behavior.
 - Plateau decisions are counted in
   `dingo_chainsync_plateau_decisions_total{outcome}`: `reconciled` (the local
   reconcile repaired the plateau), `backlog_not_recycled` (ledger-application
@@ -12689,6 +12679,12 @@ At the chain root, the genesis signature authenticates the protocol message.
 Its signed next aggregate verification key and protocol-parameter hash must
 match the genesis certificate's own key and parameters, which same-epoch
 successors inherit.
+STM multi-signature verification rejects signer entries without a lottery
+index and follows the reference aggregation rule: a 128-bit Blake2b
+coefficient derived from the ordered signature list and each signature's
+position weights both that signature and its verification key before the
+pairing check. This binds every included signature to its registered key
+instead of accepting pairs that are valid only through an unweighted sum.
 
 The certificate-chain walk (`bootstrap.go`) runs before any certificate is
 trusted, so it is bounded on every axis the aggregator controls. Each
@@ -14062,6 +14058,16 @@ stored with `ratified_epoch`/`ratified_slot` at the snapshot epoch anchor, so
 the next epoch boundary enacts the same already-ratified actions as the
 certified ledger state instead of re-ratifying them one epoch late.
 
+The completed `RatifyState.rsExpired` set is imported as pending expiration
+verdicts, with `expired_epoch` and `expired_slot` at that same snapshot epoch
+anchor. The following boundary therefore drops those proposals and returns
+their deposits without recomputing expiration one epoch late. The recorded
+expiration epoch comes from the completed pulser, not `expires_epoch + 1`.
+Malformed or duplicate action IDs, or an ID present in both completed sets,
+reject the import rather than discarding the expiration state. A valid empty
+set remains empty. This import rule does not alter the normal one-epoch delay
+between expiration and deposit return.
+
 Ledger-state import also persists `NewEpochState.pool-distr` as
 `pool_stake_snapshot` rows with snapshot type `"actv"` for the imported epoch.
 Those rows store the consensus stake fraction as `total_stake /
@@ -14164,7 +14170,17 @@ suffix: `mithril sync` passes the anchor, and a backfill that `dingo serve`
 resumes reads the recorded `mithril_ledger_slot`. Replay reaches the anchor
 without POOLREAP or the PV10 HARDFORK rule, so the backfill then restores each
 snapshot-imported account's registration and delegation from its import
-baseline before rebuilding the live-stake aggregate. Replayed DRep activity
+baseline before rebuilding the live-stake aggregate. For protocol versions 10
+and later, this finalization reconciles the reverse DRep memberships in the
+same write transaction. It preserves existing canonical membership intervals,
+closes stale ones at the anchor and inserts missing ones, so an interrupted
+finalization can repeat without changing delegation order or growing history.
+The import-specific metadata operation rejects attempts to clear an
+authoritative baseline established at exactly that anchor and rolls back
+finalization, while allowing native PV10 cleanup of dangling replay-only
+targets. The global HARDFORK operation retains its cleared-account count and
+existing semantics. Protocol version 9 keeps its historical reverse set.
+Replayed DRep activity
 (backfill and gap blocks) records only the activity epoch and keeps the
 snapshot's DRep expiry, and a replayed governance proposal the snapshot does
 not hold is stored as already expired and dropped. Protocol parameters are
@@ -15564,6 +15580,17 @@ replay slot (until the stream reaches the tip) and spends the client's rate
 and window budget, which `FollowTip` streams from the same host share.
 Rollback and tip blocks are not charged. The `MaxReplayBlocks` start-distance
 check still applies first.
+
+A read that reaches a block body removed by local history expiry
+(`types.ErrHistoryExpired`) ends the call or stream with `FailedPrecondition`
+rather than `Internal`, naming the expired slot and hash. `historyExpiredError`
+also asks the ledger for the start of retained history
+(`UtxorpcLedgerState.OldestRetainedSlot`, served by
+`Database.OldestRetainedSlot`) and appends `oldest retained slot=N` when it is
+known. The bound is kept in memory by the history-expiry pruner, which
+recomputes it from the cursor in `sync_state` after each round, so the error
+path does no I/O and repeated expired requests cannot drive disk scans. An
+unknown bound leaves the message without it and keeps the code.
 
 `FollowTip` populates `Timestamp` on a `Reset` block reference and on every
 response's `Tip` from `LedgerState.SlotToTime`. `Timestamp` is a plain proto3

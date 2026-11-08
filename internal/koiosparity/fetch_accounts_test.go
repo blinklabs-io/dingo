@@ -32,6 +32,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -78,13 +79,73 @@ func writeAccountRewardHistoryRows(w http.ResponseWriter, addrs []string) {
 	_, _ = w.Write(body)
 }
 
+// The failing response must wait for durable checkpoints, not merely the
+// successful HTTP responses: cancellation can otherwise interrupt their decoding.
+func fetchWithCheckpointedPrefixFailure(
+	t *testing.T,
+	koios *KoiosClient,
+	cache *Cache,
+	epoch uint64,
+	addresses []string,
+	releaseFailure chan struct{},
+) error {
+	t.Helper()
+	ctx, cancel := context.WithCancel(t.Context())
+	var release sync.Once
+	allowFailure := func() { release.Do(func() { close(releaseFailure) }) }
+	result := make(chan error, 1)
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		_, err := FetchAccountRewardsForEpoch(
+			ctx, koios, cache, "preview", epoch, addresses, time.Time{}, 0, nil,
+		)
+		result <- err
+	}()
+	defer func() {
+		cancel()
+		allowFailure()
+		testutil.RequireReceive(
+			t,
+			finished,
+			testutil.AsyncWait,
+			"failed fetch must exit before cache cleanup",
+		)
+	}()
+	checkpointResult := make(chan error, 1)
+	testutil.WaitForCondition(t, func() bool {
+		select {
+		case err := <-result:
+			checkpointResult <- fmt.Errorf("fetch exited before two durable chunk checkpoints: %v", err)
+			return true
+		default:
+		}
+		done, err := cache.GetDoneAccountChunkHashes("preview", epoch)
+		if err != nil {
+			checkpointResult <- fmt.Errorf("read durable chunk checkpoints: %w", err)
+			return true
+		}
+		if len(done) != 2 {
+			return false
+		}
+		checkpointResult <- nil
+		return true
+	}, testutil.AsyncWait, "successful chunks must checkpoint before the other chunk fails")
+	require.NoError(t, <-checkpointResult)
+	allowFailure()
+	return testutil.RequireReceive(
+		t,
+		result,
+		testutil.AsyncWait,
+		"poisoned chunk must fail",
+	)
+}
+
 // TestFetchAccountRewardsForEpochResumesOnlyUndoneChunksAfterRestart proves
 // checkpointing: a chunk that already committed to
 // koios_account_checked/koios_account_fetch_staged_rows on a prior,
 // interrupted call is never re-requested on a resumed call — only the
-// chunk(s) that never succeeded are retried. original
-// implementation had no such checkpoint, so every chunk (including
-// already-succeeded ones) was re-fetched from scratch on every retry.
+// chunk(s) that never succeeded are retried.
 func TestFetchAccountRewardsForEpochResumesOnlyUndoneChunksAfterRestart(
 	t *testing.T,
 ) {
@@ -94,6 +155,7 @@ func TestFetchAccountRewardsForEpochResumesOnlyUndoneChunksAfterRestart(
 
 	var recovered atomic.Bool
 	var requestCount atomic.Int32
+	releaseFailure := make(chan struct{})
 
 	srv := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -106,6 +168,11 @@ func TestFetchAccountRewardsForEpochResumesOnlyUndoneChunksAfterRestart(
 			) // handler goroutine — see decodeAccountRewardHistoryRequest's doc comment
 
 			if slices.Contains(addrs, poisonAddr) && !recovered.Load() {
+				select {
+				case <-releaseFailure:
+				case <-r.Context().Done():
+					return
+				}
 				w.WriteHeader(http.StatusServiceUnavailable)
 				_, _ = w.Write([]byte("unavailable"))
 				return
@@ -117,7 +184,7 @@ func TestFetchAccountRewardsForEpochResumesOnlyUndoneChunksAfterRestart(
 
 	k := &KoiosClient{
 		baseURL: srv.URL,
-		http:    &http.Client{Timeout: 2 * time.Second},
+		http:    &http.Client{Timeout: testutil.AsyncWait},
 		limiter: newBurstLimiter(0, koiosBurstWindow),
 	}
 	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
@@ -129,10 +196,10 @@ func TestFetchAccountRewardsForEpochResumesOnlyUndoneChunksAfterRestart(
 	for i := range numNormal {
 		addrs[i] = fmt.Sprintf("stake1addr%03d", i)
 	}
-	addrs[numNormal] = poisonAddr // 250 addresses total -> chunks of 100,100,50+poison
+	addrs[numNormal] = poisonAddr
 
-	_, err = FetchAccountRewardsForEpoch(
-		t.Context(), k, cache, "preview", 100, addrs, time.Time{}, 0, nil,
+	err = fetchWithCheckpointedPrefixFailure(
+		t, k, cache, 100, addrs, releaseFailure,
 	)
 	require.Error(
 		t,
@@ -197,12 +264,18 @@ func TestFetchAccountRewardsForEpochInvalidatesOnlyChangedChunksOnUniverseChange
 
 	var recovered atomic.Bool
 	var requestCount atomic.Int32
+	releaseFailure := make(chan struct{})
 
 	srv := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			requestCount.Add(1)
 			addrs, _ := decodeAccountRewardHistoryRequest(t, r)
 			if slices.Contains(addrs, poisonAddr) && !recovered.Load() {
+				select {
+				case <-releaseFailure:
+				case <-r.Context().Done():
+					return
+				}
 				w.WriteHeader(http.StatusServiceUnavailable)
 				_, _ = w.Write([]byte("unavailable"))
 				return
@@ -214,7 +287,7 @@ func TestFetchAccountRewardsForEpochInvalidatesOnlyChangedChunksOnUniverseChange
 
 	k := &KoiosClient{
 		baseURL: srv.URL,
-		http:    &http.Client{Timeout: 2 * time.Second},
+		http:    &http.Client{Timeout: testutil.AsyncWait},
 		limiter: newBurstLimiter(0, koiosBurstWindow),
 	}
 	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
@@ -246,16 +319,8 @@ func TestFetchAccountRewardsForEpochInvalidatesOnlyChangedChunksOnUniverseChange
 	// original — anything sorting differently (e.g. an unrelated string)
 	// would shift every later chunk's boundary too, since sorting is global
 	// across the whole universe, not scoped per labeled "chunk".
-	_, err = FetchAccountRewardsForEpoch(
-		t.Context(),
-		k,
-		cache,
-		"preview",
-		200,
-		firstUniverse,
-		time.Time{},
-		0,
-		nil,
+	err = fetchWithCheckpointedPrefixFailure(
+		t, k, cache, 200, firstUniverse, releaseFailure,
 	)
 	require.Error(t, err, "the poisoned chunk 2 must abort the first attempt")
 
