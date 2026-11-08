@@ -40,6 +40,7 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/blinklabs-io/plutigo/data"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1297,29 +1298,31 @@ func TestNodeAdapterNextBlockHash(t *testing.T) {
 		}, nil))
 	}
 
-	const tipHeight = uint64(2)
+	tipPoint := ocommon.NewPoint(20, hashes[2])
 
 	// Middle block (height 0) -> successor at height 1.
-	next, err := adapter.nextBlockHash(0, tipHeight)
+	next, err := adapter.nextBlockHash(context.Background(), 1, tipPoint)
 	require.NoError(t, err)
 	require.NotNil(t, next)
 	assert.Equal(t, hex.EncodeToString(hashes[1]), *next)
 
 	// Height 1 -> successor at height 2.
-	next, err = adapter.nextBlockHash(1, tipHeight)
+	next, err = adapter.nextBlockHash(context.Background(), 2, tipPoint)
 	require.NoError(t, err)
 	require.NotNil(t, next)
 	assert.Equal(t, hex.EncodeToString(hashes[2]), *next)
 
-	// Tip block (height == tipHeight) has no successor: short-circuit to nil
-	// without a DB lookup.
-	next, err = adapter.nextBlockHash(tipHeight, tipHeight)
+	// A tip has no successor even when higher index entries are absent.
+	next, err = adapter.nextBlockHash(context.Background(), 3, tipPoint)
 	require.NoError(t, err)
 	assert.Nil(t, next)
 
 	// A non-tip height whose successor index is absent (gap in storage) must
 	// resolve to nil via the ErrBlockNotFound path, not surface an error.
-	next, err = adapter.nextBlockHash(50, 100)
+	require.NoError(t, db.BlockCreate(models.Block{
+		Hash: fill32(0x18), Slot: 80, Number: 8, ID: 8, Cbor: []byte{8},
+	}, nil))
+	next, err = adapter.nextBlockHash(context.Background(), 6, ocommon.NewPoint(80, fill32(0x18)))
 	require.NoError(t, err)
 	assert.Nil(t, next)
 }
@@ -1330,11 +1333,11 @@ func TestResolveBlockRangeUpperBoundInSparseChain(t *testing.T) {
 	for _, block := range []struct{ height, slot uint64 }{{1, 10}, {3, 30}} {
 		require.NoError(t, db.BlockCreate(models.Block{
 			Hash: fill32(byte(block.height)), Slot: block.slot,
-			Number: block.height, ID: block.height + database.BlockInitialIndex,
+			Number: block.height, ID: block.height * 10,
 			Type: 0, Cbor: []byte{byte(block.height)},
 		}, nil))
 	}
-	require.NoError(t, db.SetTip(ochainsync.Tip{BlockNumber: 3}, nil))
+	require.NoError(t, db.SetTip(ochainsync.Tip{Point: ocommon.NewPoint(30, fill32(3)), BlockNumber: 3}, nil))
 
 	bound, ok, err := adapter.resolveBlockRangeBound(
 		context.Background(), &BlockRangePosition{Block: 2}, false,
@@ -1406,7 +1409,7 @@ INSERT INTO address_transaction (
 		require.NoError(t, err)
 		if i == len(blocks)-1 {
 			require.NoError(t, db.SetTip(
-				ochainsync.Tip{BlockNumber: block.height}, nil,
+				ochainsync.Tip{Point: ocommon.NewPoint(block.slot, block.hash), BlockNumber: block.height}, nil,
 			))
 		}
 	}

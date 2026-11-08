@@ -149,12 +149,6 @@ func (a *databaseAdapter) BlockByHash(ctx context.Context, hash []byte) (models.
 }
 
 func (a *databaseAdapter) BlockByNumber(ctx context.Context, number uint64) (models.Block, error) {
-	// Cardano block numbers are 0-based; the blob store's internal index is
-	// 1-based (database.BlockInitialIndex). Translate here, the same way
-	// api/blockfrost's block-by-height lookup does, so callers deal only in
-	// consensus block numbers. Guard the addition first: no real chain gets
-	// anywhere near math.MaxUint64, but without the check that value would
-	// wrap to internal index 0 instead of failing.
 	if number > math.MaxUint64-database.BlockInitialIndex {
 		return models.Block{}, fmt.Errorf(
 			"block number %d overflows internal index: %w",
@@ -165,7 +159,7 @@ func (a *databaseAdapter) BlockByNumber(ctx context.Context, number uint64) (mod
 	if err := ctx.Err(); err != nil {
 		return models.Block{}, err
 	}
-	block, err := a.db.BlockByIndex(number+database.BlockInitialIndex, nil)
+	block, err := database.BlockByNumber(ctx, a.db, number)
 	if cancelErr := ctx.Err(); cancelErr != nil {
 		return models.Block{}, cancelErr
 	}

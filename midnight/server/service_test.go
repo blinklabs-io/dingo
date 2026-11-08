@@ -71,12 +71,9 @@ func newTestDatabase(t *testing.T) *database.Database {
 	return db
 }
 
-// insertPlaceholderBlock inserts a block whose CBOR is never decoded by the
-// handler under test (GetLatestBlock/GetStableBlock/GetLatestStableBlock
-// only read Number/Hash/Slot). ID is set explicitly to Number +
-// database.BlockInitialIndex, the same invariant a real contiguously-synced
-// chain maintains, so BlockByIndex-based lookups (GetLatestStableBlock) work
-// without inserting every intermediate block number.
+// insertPlaceholderBlock uses a body the handlers never decode; they need
+// only Number, Hash, and Slot. Explicit sparse IDs avoid inserting every
+// intermediate block.
 func insertPlaceholderBlock(
 	t *testing.T,
 	db *database.Database,

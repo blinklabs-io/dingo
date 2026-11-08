@@ -1095,7 +1095,8 @@ func resolveBlockNumberBoundTxn(
 // (height). Block numbers are not indexed in the blob store -- only slot,
 // hash, and the internal sequential ID are -- so this binary-searches the
 // internal-ID space that block numbers increase with, bounded above by the
-// highest indexed block. A number no block carries returns
+// highest indexed block. Shared numbers resolve to the earliest indexed
+// match. A number no block carries returns
 // models.ErrBlockNotFound, so a caller can tell a genuine miss from a
 // storage failure.
 //
@@ -1160,6 +1161,67 @@ func BlockByNumberBoundedTxn(
 	return blockByNumberBoundedTxn(txn, number, bound, nil)
 }
 
+// BlockNumberBoundaryTxn resolves an inclusive chain-number boundary within
+// bound. A lower boundary selects the first indexed block numbered at least
+// number; an upper boundary selects the last numbered at most number. Equal
+// numbers (Byron EBBs) and sparse internal IDs are supported. Search probes
+// read metadata only; the selected block body is fetched once.
+func BlockNumberBoundaryTxn(
+	ctx context.Context,
+	txn *Txn,
+	number uint64,
+	bound BlockNumberBound,
+	lower bool,
+) (models.Block, error) {
+	if txn == nil {
+		return models.Block{}, types.ErrNilTxn
+	}
+	if !bound.Resolved {
+		return models.Block{}, models.ErrBlockNotFound
+	}
+	lo, hi := BlockInitialIndex, bound.HighestID
+	var result []byte
+	found := false
+	for lo <= hi {
+		if err := ctx.Err(); err != nil {
+			return models.Block{}, err
+		}
+		mid := lo + (hi-lo)/2
+		block, err := blockIndexSeekTxn(txn, mid, true)
+		if cancelErr := ctx.Err(); cancelErr != nil {
+			return models.Block{}, cancelErr
+		}
+		if err != nil && !errors.Is(err, models.ErrBlockNotFound) {
+			return models.Block{}, err
+		}
+		if errors.Is(err, models.ErrBlockNotFound) || block.id > hi {
+			hi = mid - 1
+			continue
+		}
+		if lower && block.number >= number {
+			result, found = block.blockKey, true
+			hi = mid - 1
+		} else if !lower && block.number <= number {
+			result, found = block.blockKey, true
+			if block.id == math.MaxUint64 {
+				break
+			}
+			lo = block.id + 1
+		} else if lower {
+			if block.id == math.MaxUint64 {
+				break
+			}
+			lo = block.id + 1
+		} else {
+			hi = mid - 1
+		}
+	}
+	if !found {
+		return models.Block{}, models.ErrBlockNotFound
+	}
+	return blockByKey(txn, result)
+}
+
 // BlockByNumberBoundedBudgeted is BlockByNumberBounded for callers that meter
 // storage work. Every probe skips stale index entries, and each skipped entry
 // costs a metadata read, so reserve is called once per skipped entry before
@@ -1219,6 +1281,7 @@ func blockKeyByNumberBoundedTxn(
 		return nil, models.ErrBlockNotFound
 	}
 	lo, hi := BlockInitialIndex, bound.HighestID
+	var firstMatch []byte
 	for lo <= hi {
 		mid := lo + (hi-lo)/2
 		// At or after mid, not exactly mid: a probe landing in a gap of a
@@ -1240,7 +1303,10 @@ func blockKeyByNumberBoundedTxn(
 		}
 		switch {
 		case entry.number == number:
-			return entry.blockKey, nil
+			// Byron EBBs can share a consensus number with a prior
+			// block. Keep searching left for the earliest indexed match.
+			firstMatch = entry.blockKey
+			hi = mid - 1
 		case entry.number < number:
 			// entry.id, not mid+1: the seek forward may have landed above
 			// mid, and re-probing (mid, entry.id) only finds it again.
@@ -1248,6 +1314,9 @@ func blockKeyByNumberBoundedTxn(
 		default:
 			hi = mid - 1
 		}
+	}
+	if firstMatch != nil {
+		return firstMatch, nil
 	}
 	return nil, models.ErrBlockNotFound
 }

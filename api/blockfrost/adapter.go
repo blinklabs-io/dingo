@@ -52,6 +52,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/ledger/mary"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/btcsuite/btcd/btcutil/bech32"
 )
 
@@ -381,13 +382,7 @@ func (a *NodeAdapter) resolveBlock(
 			ErrInvalidBlockID,
 		)
 	}
-	// Blockfrost accepts Cardano block height here. Dingo's blob block index
-	// is 1-based while Cardano block heights are 0-based, so translate height
-	// to the internal index before lookup.
-	block, err := a.ledgerState.Database().BlockByIndex(
-		height+database.BlockInitialIndex,
-		nil,
-	)
+	block, err := database.BlockByNumber(ctx, a.ledgerState.Database(), height)
 	if err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
 			return models.Block{}, fmt.Errorf(
@@ -452,7 +447,7 @@ func (a *NodeAdapter) blockInfoFromBlock(
 		decodedBlock.Header(),
 	)
 
-	nextBlock, err := a.nextBlockHash(block.Number, tip.BlockNumber)
+	nextBlock, err := a.nextBlockHash(ctx, block.ID, tip.Point)
 	if err != nil {
 		return BlockInfo{}, fmt.Errorf(
 			"resolve next block for block %x: %w",
@@ -507,24 +502,25 @@ func (a *NodeAdapter) blockOutputAndFees(
 }
 
 // nextBlockHash returns the hash of the block that directly follows the block
-// at the given height, or nil when the block is the chain tip (no successor).
+// with the given internal ID, or nil when the block is the chain tip (no successor).
 func (a *NodeAdapter) nextBlockHash(
-	height uint64,
-	tipHeight uint64,
+	ctx context.Context,
+	id uint64,
+	tipPoint ocommon.Point,
 ) (*string, error) {
-	if height >= tipHeight {
+	if len(tipPoint.Hash) == 0 || id == math.MaxUint64 {
 		return nil, nil
 	}
-	// Dingo's blob block index is 1-based (BlockInitialIndex) while Cardano
-	// block heights are 0-based, so the successor's internal index is
-	// height + BlockInitialIndex + 1.
-	if height > math.MaxUint64-database.BlockInitialIndex-1 {
+	txn := a.ledgerState.Database().Transaction(ctx, false)
+	defer txn.Rollback() //nolint:errcheck
+	tipID, err := database.BlockIDByPointMetadataTxn(txn, tipPoint)
+	if err != nil {
+		return nil, err
+	}
+	if id >= tipID {
 		return nil, nil
 	}
-	next, err := a.ledgerState.Database().BlockByIndex(
-		height+database.BlockInitialIndex+1,
-		nil,
-	)
+	next, err := a.ledgerState.Database().BlockByIndex(id+1, txn)
 	if err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
 			return nil, nil

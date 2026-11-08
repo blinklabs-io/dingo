@@ -86,13 +86,6 @@ func newAdapterDatabase(t *testing.T) *database.Database {
 	return db
 }
 
-// TestMeshDatabaseAdapterBlockByIndexUsesChainHeight covers the block
-// numbering contract between the Mesh API and storage. /block reports
-// block_identifier.index as the Cardano block height, so feeding that
-// index back into /block must return the same block. The blob store
-// keys blocks by a 1-based storage index, so the adapter translates
-// height to that index -- the same translation the Blockfrost adapter
-// documents and applies.
 func TestMeshDatabaseAdapterBlockByIndexUsesChainHeight(t *testing.T) {
 	t.Parallel()
 
@@ -180,7 +173,10 @@ func TestMeshDatabaseAdapterTransactionLookups(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, tx)
 
-	txs, err := meshDB.GetTransactionsByBlockHash(context.Background(), testHash(0x5d))
+	txs, err := meshDB.GetTransactionsByBlockHash(
+		context.Background(),
+		testHash(0x5d),
+	)
 	require.NoError(t, err)
 	require.Empty(t, txs)
 }
@@ -213,4 +209,28 @@ func TestMeshAdapterHonorsCancelledContext(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 	_, err = adapter.GetTransactionsByBlockHash(ctx, make([]byte, 32))
 	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestMeshHeightWithBoundaryBlockStorageOffset(t *testing.T) {
+	t.Parallel()
+	db := newAdapterDatabase(t)
+	for i, number := range []uint64{0, 0, 1, 2} {
+		require.NoError(
+			t,
+			db.BlockCreate(
+				models.Block{
+					ID:     uint64(i) + 1,
+					Number: number,
+					Slot:   uint64(i) * 20,
+					Hash:   testHash(byte(i)),
+					Cbor:   []byte{byte(i)},
+				},
+				nil,
+			),
+		)
+	}
+	block, err := NewMeshDatabase(db).BlockByIndex(context.Background(), 2)
+	require.NoError(t, err)
+	require.Equal(t, uint64(2), block.Number)
+	require.Equal(t, testHash(3), block.Hash)
 }

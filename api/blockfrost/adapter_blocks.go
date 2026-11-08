@@ -43,17 +43,24 @@ func (a *NodeAdapter) neighborBlocks(
 	if err != nil {
 		return nil, 0, err
 	}
+	db := a.ledgerState.Database()
+	txn := db.Transaction(ctx, false)
+	defer txn.Rollback() //nolint:errcheck
 	var available uint64
 	if forward {
-		tip, err := a.ledgerState.Database().GetTip(nil)
+		tip, err := db.GetTip(txn)
 		if err != nil {
 			return nil, 0, fmt.Errorf("get chain tip: %w", err)
 		}
-		if tip.BlockNumber > origin.Number {
-			available = tip.BlockNumber - origin.Number
+		tipID, err := database.BlockIDByPointMetadataTxn(txn, tip.Point)
+		if err != nil {
+			return nil, 0, fmt.Errorf("resolve chain tip: %w", err)
 		}
-	} else {
-		available = origin.Number
+		if tipID > origin.ID {
+			available = tipID - origin.ID
+		}
+	} else if origin.ID >= database.BlockInitialIndex {
+		available = origin.ID - database.BlockInitialIndex
 	}
 	// #nosec G115 -- clamped to MaxInt
 	total := int(min(available, uint64(math.MaxInt)))
@@ -67,25 +74,22 @@ func (a *NodeAdapter) neighborBlocks(
 	ret := make([]models.Block, 0, params.Count)
 	for i := range params.Count {
 		distance := skip + uint64(i) // #nosec G115 -- i is non-negative
-		var height uint64
+		var index uint64
 		if forward {
-			if origin.Number > math.MaxUint64-database.BlockInitialIndex-distance {
+			if distance > available || origin.ID > math.MaxUint64-distance {
 				break
 			}
-			height = origin.Number + distance
+			index = origin.ID + distance
 		} else {
-			if distance > origin.Number {
+			if distance > available {
 				break
 			}
-			height = origin.Number - distance
+			index = origin.ID - distance
 		}
 		if err := ctx.Err(); err != nil {
 			return nil, 0, err
 		}
-		block, err := a.ledgerState.Database().BlockByIndex(
-			height+database.BlockInitialIndex,
-			nil,
-		)
+		block, err := db.BlockByIndex(index, txn)
 		if err != nil {
 			if errors.Is(err, models.ErrBlockNotFound) {
 				break

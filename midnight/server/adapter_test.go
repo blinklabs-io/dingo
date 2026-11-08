@@ -35,8 +35,6 @@ func TestBlockByNumber_OverflowIsRejected(t *testing.T) {
 	require.ErrorIs(t, err, models.ErrBlockNotFound)
 }
 
-// TestBlockByNumber_ResolvesInsertedBlock is the non-overflow control case:
-// a normal block number round-trips through the 0-based/1-based translation.
 func TestBlockByNumber_ResolvesInsertedBlock(t *testing.T) {
 	db := newTestDatabase(t)
 	blk := insertPlaceholderBlock(t, db, 5, 5, 0x05)
@@ -61,4 +59,30 @@ func TestMidnightBlockAdapterHonorsCancelledContext(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 	_, err = adapter.BlockBeforeSlot(ctx, 1)
 	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestBlockByNumberWithBoundaryBlockStorageOffset(t *testing.T) {
+	t.Parallel()
+	db := newTestDatabase(t)
+	for i, number := range []uint64{0, 0, 1, 2} {
+		hash := make([]byte, 32)
+		hash[0] = byte(i + 1)
+		require.NoError(
+			t,
+			db.BlockCreate(
+				models.Block{
+					ID:     uint64(i) + 1,
+					Number: number,
+					Slot:   uint64(i) * 20,
+					Hash:   hash,
+					Cbor:   []byte{byte(i)},
+				},
+				nil,
+			),
+		)
+	}
+	block, err := server.NewDatabase(db).BlockByNumber(context.Background(), 2)
+	require.NoError(t, err)
+	require.Equal(t, uint64(2), block.Number)
+	require.Equal(t, byte(4), block.Hash[0])
 }
