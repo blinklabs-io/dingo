@@ -122,6 +122,22 @@ func (s *saturatedForkPathScenario) reads() int {
 	return s.blockReads + s.peerReads
 }
 
+func (s *saturatedForkPathScenario) exposeThrough(i int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for index := 0; index <= i; index++ {
+		header := s.headers[index]
+		s.known[string(header.Hash().Bytes())] = header
+	}
+	s.blockReads, s.peerReads = 0, 0
+}
+
+func (s *saturatedForkPathScenario) resetReads() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.blockReads, s.peerReads = 0, 0
+}
+
 // adopt adds headers to the primary chain and the block store.
 func (s *saturatedForkPathScenario) adopt(t *testing.T, headers []mockHeader) {
 	t.Helper()
@@ -175,6 +191,65 @@ func TestPeerHeaderForkPathSaturatedCacheSkipsAncestryWalk(t *testing.T) {
 			i,
 		)
 	}
+}
+
+// A first header whose retained ancestry cannot reach the local chain has no
+// resolved path to seed the ordinary saturated cache. Retain that bounded
+// walk so retries and descendants defer without reading every block again,
+// but retry once the local chain enters the walk's reachable window.
+func TestPeerHeaderForkPathCachesUnresolvedAncestryWalk(t *testing.T) {
+	t.Parallel()
+
+	s := newSaturatedForkPathScenario(t, 4)
+	limit := s.fixture.ls.peerHeaderHistoryLimit()
+	targetIndex := limit + 2
+	s.exposeThrough(targetIndex + 1)
+
+	_, _, found, err := s.fixture.ls.peerHeaderForkPath(
+		s.fixture.connId,
+		s.headers[targetIndex],
+	)
+	require.ErrorIs(t, err, errHeaderVerificationDeferred)
+	require.False(t, found)
+	require.Greater(t, s.reads(), limit,
+		"the initial lookup must exercise the bounded ancestry walk")
+	s.fixture.ls.forkHeaderNonceCacheMutex.Lock()
+	cached, cachedOK := s.fixture.ls.forkHeaderPathCache[connIdKey(s.fixture.connId)]
+	s.fixture.ls.forkHeaderNonceCacheMutex.Unlock()
+	require.True(t, cachedOK)
+	require.True(t, cached.unresolved)
+	require.Len(t, cached.headers, limit+1)
+
+	s.resetReads()
+	_, _, found, err = s.fixture.ls.peerHeaderForkPath(
+		s.fixture.connId,
+		s.headers[targetIndex],
+	)
+	require.ErrorIs(t, err, errHeaderVerificationDeferred)
+	require.False(t, found)
+	require.Zero(t, s.reads(), "the repeated header must reuse the deferral")
+
+	s.resetReads()
+	_, _, found, err = s.fixture.ls.peerHeaderForkPath(
+		s.fixture.connId,
+		s.headers[targetIndex+1],
+	)
+	require.ErrorIs(t, err, errHeaderVerificationDeferred)
+	require.False(t, found)
+	require.Zero(t, s.reads(), "a descendant must extend the deferral")
+
+	s.adopt(t, s.headers[:2])
+	s.resetReads()
+	ancestor, path, found, err := s.fixture.ls.peerHeaderForkPath(
+		s.fixture.connId,
+		s.headers[targetIndex],
+	)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, s.headers[1].Hash().Bytes(), ancestor.Hash)
+	require.Len(t, path, limit+1)
+	require.Positive(t, s.reads(),
+		"the cache must retry after the local chain enters the walk window")
 }
 
 // The primary chain can adopt the cached path and the deferred headers after
