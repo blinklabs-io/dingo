@@ -34,7 +34,6 @@ import (
 	"github.com/blinklabs-io/dingo/consensus/praos"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
-	ledgerpkg "github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/gouroboros/consensus"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -1682,7 +1681,7 @@ func TestElectionPrecomputesNextEpochOnNonceReady(t *testing.T) {
 		"next epoch schedule should be persisted")
 }
 
-func TestElectionRollbackKeepsCurrentSchedule(t *testing.T) {
+func TestElectionConsensusRestoreKeepsCurrentPraosSchedule(t *testing.T) {
 	t.Parallel()
 	poolId := lcommon.PoolKeyHash{}
 	stakeProvider := newMockStakeProvider()
@@ -1713,13 +1712,7 @@ func TestElectionRollbackKeepsCurrentSchedule(t *testing.T) {
 	require.NotEmpty(t, leaderSlots)
 	leaderSlot := leaderSlots[0]
 
-	eventBus.Publish(
-		ledgerpkg.PoolStateRestoredEventType,
-		event.NewEvent(
-			ledgerpkg.PoolStateRestoredEventType,
-			ledgerpkg.PoolStateRestoredEvent{Slot: 95},
-		),
-	)
+	election.ConsensusStateRestored()
 
 	require.Eventually(t, func() bool {
 		current := election.ScheduleForEpoch(10)
@@ -1734,7 +1727,7 @@ func TestElectionRollbackKeepsCurrentSchedule(t *testing.T) {
 		"rollback should not invalidate a stable current-epoch schedule")
 }
 
-func TestElectionRollbackKeepsPrecomputedNextSchedule(t *testing.T) {
+func TestElectionConsensusRestoreRecomputesNextPraosSchedule(t *testing.T) {
 	t.Parallel()
 	poolId := lcommon.PoolKeyHash{}
 	stakeProvider := newMockStakeProvider()
@@ -1770,27 +1763,16 @@ func TestElectionRollbackKeepsPrecomputedNextSchedule(t *testing.T) {
 		return nextBefore != nil
 	}, testutil.AsyncWait, 100*time.Millisecond)
 	require.NotNil(t, nextBefore)
-	expectedSlots := nextBefore.LeaderSlotsSnapshot()
-	expectedNonce := append([]byte(nil), nextBefore.EpochNonce...)
-
-	eventBus.Publish(
-		ledgerpkg.PoolStateRestoredEventType,
-		event.NewEvent(
-			ledgerpkg.PoolStateRestoredEventType,
-			ledgerpkg.PoolStateRestoredEvent{Slot: 90},
-		),
-	)
+	restoredNonce := makeDistinctNonce(nextEpochNonce)
+	epochProvider.SetEpochNonceForEpoch(11, restoredNonce)
+	election.ConsensusStateRestored()
 
 	require.Eventually(t, func() bool {
 		schedule := election.ScheduleForEpoch(11)
 		return schedule != nil &&
-			bytes.Equal(expectedNonce, schedule.EpochNonce) &&
-			assert.ObjectsAreEqual(
-				expectedSlots,
-				schedule.LeaderSlotsSnapshot(),
-			)
+			bytes.Equal(restoredNonce, schedule.EpochNonce)
 	}, testutil.AsyncWait, 20*time.Millisecond,
-		"rollback should not invalidate a precomputed next-epoch schedule")
+		"rollback should recompute a precomputed next-epoch schedule")
 }
 
 func TestElectionConcurrentAccess(t *testing.T) {
