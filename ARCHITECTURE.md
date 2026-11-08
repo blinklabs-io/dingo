@@ -14654,11 +14654,11 @@ preflight handling.
 The legacy root `tlsCertFilePath`/`tlsKeyFilePath` fields remain a UTxO
 RPC-only TLS compatibility input among these providers; Midnight also
 uses the pair directly. They are not promoted to Blockfrost, Kupo, Mesh, or MCP.
-Kupo and Mesh use the root `bindAddr`, whose default is `0.0.0.0`.
-Blockfrost, UTxO RPC, and MCP override it with their provider `host`,
+Kupo uses the root `bindAddr`, whose default is `0.0.0.0`.
+Blockfrost, Mesh, UTxO RPC, and MCP override it with their provider `host`,
 defaulting to `127.0.0.1`; an explicitly empty provider host falls back to
-`bindAddr`. A non-loopback UTxO RPC listener has no built-in access policy
-and must be placed behind a protective gateway.
+`bindAddr`. Non-loopback Mesh and UTxO RPC listeners have no built-in access
+policy and must be placed behind a protective gateway.
 `metricsBindAddr` and `debugBindAddr` separately configure Prometheus and pprof;
 both default to loopback. `metricsAuthToken` protects both the ordinary and
 Mithril-sync Prometheus listeners when configured. The listener remains plain

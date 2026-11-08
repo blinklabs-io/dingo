@@ -497,12 +497,62 @@ func TestValidate(t *testing.T) {
 			},
 		},
 		{
-			name: "mesh and metrics on the same bind address collide",
+			name: "mesh default loopback may share a port with remote metrics",
 			modify: func(c *Config) {
 				c.StorageMode = storageModeAPI
 				c.BindAddr = "127.0.0.2"
 				c.MetricsBindAddr = "127.0.0.2"
 				c.MetricsPort = APIPluginPort(c.Plugins.API.Mesh)
+			},
+		},
+		{
+			name: "mesh explicit host collides with metrics",
+			modify: func(c *Config) {
+				c.StorageMode = storageModeAPI
+				c.MetricsBindAddr = "127.0.0.2"
+				c.Plugins.API.Mesh.Config["host"] = "127.0.0.2"
+				c.MetricsPort = APIPluginPort(c.Plugins.API.Mesh)
+			},
+			wantErr: "is assigned to both",
+		},
+		{
+			name: "mesh empty host inherits bind address",
+			modify: func(c *Config) {
+				c.StorageMode = storageModeAPI
+				c.BindAddr = "127.0.0.2"
+				c.MetricsBindAddr = "127.0.0.2"
+				c.Plugins.API.Mesh.Config["host"] = ""
+				c.MetricsPort = APIPluginPort(c.Plugins.API.Mesh)
+			},
+			wantErr: "is assigned to both",
+		},
+		{
+			name: "utxorpc default loopback may share a port with remote metrics",
+			modify: func(c *Config) {
+				c.StorageMode = storageModeAPI
+				c.BindAddr = "127.0.0.2"
+				c.MetricsBindAddr = "127.0.0.2"
+				c.MetricsPort = APIPluginPort(c.Plugins.API.Utxorpc)
+			},
+		},
+		{
+			name: "utxorpc explicit host collides with metrics",
+			modify: func(c *Config) {
+				c.StorageMode = storageModeAPI
+				c.MetricsBindAddr = "127.0.0.2"
+				c.Plugins.API.Utxorpc.Config["host"] = "127.0.0.2"
+				c.MetricsPort = APIPluginPort(c.Plugins.API.Utxorpc)
+			},
+			wantErr: "is assigned to both",
+		},
+		{
+			name: "utxorpc empty host inherits bind address",
+			modify: func(c *Config) {
+				c.StorageMode = storageModeAPI
+				c.BindAddr = "127.0.0.2"
+				c.MetricsBindAddr = "127.0.0.2"
+				c.Plugins.API.Utxorpc.Config["host"] = ""
+				c.MetricsPort = APIPluginPort(c.Plugins.API.Utxorpc)
 			},
 			wantErr: "is assigned to both",
 		},

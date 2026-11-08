@@ -118,11 +118,13 @@ func TestProviderBuildsListenAddress(t *testing.T) {
 
 	host := newProviderHost(t)
 	deps := newTestDeps()
+	pd := providerDeps(deps)
+	pd.Host = "0.0.0.0"
 
-	srv := resolveOnFreePort(t, host, providerDeps(deps))
+	srv := resolveOnFreePort(t, host, pd)
 
-	// The address is the configured host joined to the configured
-	// port, not a default or a bare port.
+	// The unauthenticated API stays on loopback even while the public node
+	// listener accepts connections on every interface.
 	wantHost, wantPort, err := net.SplitHostPort(
 		srv.config.ListenAddress,
 	)
@@ -131,6 +133,27 @@ func TestProviderBuildsListenAddress(t *testing.T) {
 	require.NotEmpty(t, wantPort)
 	// Resolve starts the instance, so the port must be accepting.
 	require.True(t, portAccepts(srv.config.ListenAddress))
+}
+
+func TestProviderDefaultsToLoopback(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, "127.0.0.1", providerDefaults().Host)
+}
+
+func TestProviderUsesExplicitHost(t *testing.T) {
+	t.Parallel()
+
+	host := newProviderHost(t)
+	srv := resolveOnFreePortWithConfig(
+		t,
+		host,
+		providerDeps(newTestDeps()),
+		map[string]any{"host": "127.0.0.2"},
+	)
+	wantHost, _, err := net.SplitHostPort(srv.config.ListenAddress)
+	require.NoError(t, err)
+	require.Equal(t, "127.0.0.2", wantHost)
 }
 
 // TestProviderRejectsInvalidDependencies asserts a misconfigured node

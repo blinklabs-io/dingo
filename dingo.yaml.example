@@ -124,10 +124,14 @@
       # provider: "builtin"
       # config:
         # port: 8080
+        # Replace loopback with an interface address to expose remotely.
+        # host: "127.0.0.1"
     # utxorpc:
       # provider: "builtin"
       # config:
         # port: 9090
+        # Replace loopback with an interface address to expose remotely.
+        # host: "127.0.0.1"
     # mcp:
       # Built-in Model Context Protocol (MCP) server for AI agent integration.
       # SQL tools require plugins.storage.metadata.provider: "sqlite".
@@ -141,8 +145,9 @@
 # (Blockfrost, Kupo, Mesh, UTxO RPC, MCP). Each field resolves independently:
 # plugins.api.<name>.config.tls overrides a field for that provider only
 # (see the commented example above). Leaving this section out keeps the API
-# listeners plaintext. Blockfrost, Kupo, Mesh, and UTxO RPC use the root bindAddr,
-# whose default is 0.0.0.0. MCP defaults to its own host: 127.0.0.1.
+# listeners plaintext. Built-in Blockfrost, Mesh, UTxO RPC, and MCP listeners
+# default to 127.0.0.1. Their provider host may be set explicitly; an explicitly
+# empty host inherits the root bindAddr. Kupo uses bindAddr directly.
 # CORS remains operator-chosen through corsAllowedOrigins; MCP ignores "*".
 #
 # api:

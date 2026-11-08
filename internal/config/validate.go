@@ -33,6 +33,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/internal/apiconfig"
 	dingoversion "github.com/blinklabs-io/dingo/internal/version"
+	hostplugin "github.com/blinklabs-io/dingo/plugin"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 )
 
@@ -44,6 +45,20 @@ const (
 	// slot.
 	maxKESAgentSignTimeout = time.Second
 )
+
+func builtinAPIHost(selection hostplugin.Selection, fallback string) string {
+	if selection.Provider != "builtin" {
+		return fallback
+	}
+	host := "127.0.0.1"
+	if configured, ok := selection.Config["host"].(string); ok {
+		host = configured
+		if host == "" {
+			host = fallback
+		}
+	}
+	return host
+}
 
 // ValidateKESKeySources rejects a block producer that names both a local KES
 // signing key file and a KES agent socket: an operator's explicit choice of
@@ -413,16 +428,9 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	blockfrostPort := APIPluginPort(c.Plugins.API.Blockfrost)
 	kupoPort := APIPluginPort(c.Plugins.API.Kupo)
 	meshPort := APIPluginPort(c.Plugins.API.Mesh)
-	blockfrostHost := c.BindAddr
-	if c.Plugins.API.Blockfrost.Provider == "builtin" {
-		blockfrostHost = "127.0.0.1"
-		if host, ok := c.Plugins.API.Blockfrost.Config["host"].(string); ok {
-			blockfrostHost = host
-			if host == "" {
-				blockfrostHost = c.BindAddr
-			}
-		}
-	}
+	utxorpcHost := builtinAPIHost(c.Plugins.API.Utxorpc, c.BindAddr)
+	blockfrostHost := builtinAPIHost(c.Plugins.API.Blockfrost, c.BindAddr)
+	meshHost := builtinAPIHost(c.Plugins.API.Mesh, c.BindAddr)
 	mcpHost := "127.0.0.1"
 	if host, ok := c.Plugins.API.Mcp.Config["host"].(string); ok {
 		mcpHost = host
@@ -430,10 +438,9 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 			mcpHost = c.BindAddr
 		}
 	}
-	// Each entry's host is the bind address the listener actually uses
-	// at runtime: bindAddr for public listeners, privateBindAddr for the
-	// private listener, debugBindAddr for pprof, metricsBindAddr for
-	// Prometheus, midnight.host for Midnight, and BarkHost for bark.
+	// Each entry's host is the bind address the listener actually uses at
+	// runtime. Built-in Blockfrost, Mesh, and UTxO RPC providers default to
+	// loopback and use bindAddr only when their host is explicitly empty.
 	type portSpec struct {
 		setting  string
 		host     string
@@ -470,7 +477,7 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		},
 		{
 			"plugins.api.utxorpc.config.port",
-			c.BindAddr,
+			utxorpcHost,
 			utxorpcPort,
 			apiListeners,
 			false,
@@ -491,7 +498,7 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		},
 		{
 			"plugins.api.mesh.config.port",
-			c.BindAddr,
+			meshHost,
 			meshPort,
 			apiListeners,
 			false,

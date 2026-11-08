@@ -1247,8 +1247,9 @@ func WithCardanoNodeConfig(
 	}
 }
 
-// WithBindAddr specifies the IP address used by relay and public Blockfrost,
-// Kupo, Mesh, and UTxO RPC listeners. The default is 0.0.0.0.
+// WithBindAddr specifies the public node bind address. Built-in Blockfrost,
+// Mesh, and UTxO RPC listeners default to loopback and inherit this address
+// only when their provider host is explicitly empty. The default is 0.0.0.0.
 func WithBindAddr(addr string) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.BindAddr = addr
@@ -2311,9 +2312,8 @@ func WithChainsyncHeaderStrategy(
 }
 
 // WithMeshPort specifies the port for the Mesh (Coinbase
-// Rosetta) compatible REST API server. The server binds
-// to the node's bindAddr on this port. 0 disables the
-// server (default).
+// Rosetta) compatible REST API server. The built-in provider binds to
+// loopback unless its host is configured. 0 disables the server.
 func WithMeshPort(port uint) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.Plugins.API.Mesh.Config["port"] = port
@@ -2396,7 +2396,8 @@ func (c *Config) ConsensusPlugin() string {
 	return c.cfg.Plugins.Consensus.Provider
 }
 
-// BindAddr returns the IP address for relay and public API listeners.
+// BindAddr returns the public node bind address. API providers may use a
+// provider-specific host instead.
 func (c *Config) BindAddr() string {
 	return c.cfg.BindAddr
 }

@@ -25,12 +25,18 @@ import (
 	"github.com/blinklabs-io/dingo/plugin"
 )
 
-// defaultProviderPort is the TCP port the Mesh listener uses when the
-// node's configuration does not set one.
-const defaultProviderPort uint = 8080
+const (
+	// defaultProviderHost keeps the unauthenticated Mesh API on loopback
+	// unless an operator explicitly exposes it.
+	defaultProviderHost = "127.0.0.1"
+	// defaultProviderPort is the TCP port the Mesh listener uses when the
+	// node's configuration does not set one.
+	defaultProviderPort uint = 8080
+)
 
 type ProviderConfig struct {
 	Port uint                `yaml:"port"`
+	Host string              `yaml:"host"`
 	TLS  apiconfig.TLSPolicy `yaml:"tls"`
 }
 
@@ -39,7 +45,7 @@ type ProviderConfig struct {
 // hands this to plugin.Register, so it is the single definition of the
 // Mesh provider's defaults.
 func providerDefaults() ProviderConfig {
-	return ProviderConfig{Port: defaultProviderPort}
+	return ProviderConfig{Port: defaultProviderPort, Host: defaultProviderHost}
 }
 
 type ProviderDependencies struct {
@@ -69,11 +75,15 @@ func RegisterProvider(host *plugin.Host) error {
 			if err != nil {
 				return nil, nil, fmt.Errorf("mesh: %w", err)
 			}
+			listenHost := cfg.Host
+			if listenHost == "" {
+				listenHost = deps.Host
+			}
 			server, err := NewServer(ServerConfig{
 				Logger: deps.Logger, LedgerState: deps.LedgerState,
 				Database: deps.Database, Chain: deps.Chain, Mempool: deps.Mempool,
 				ListenAddress: net.JoinHostPort(
-					deps.Host,
+					listenHost,
 					strconv.FormatUint(uint64(cfg.Port), 10),
 				),
 				Network: deps.Network, NetworkMagic: deps.NetworkMagic,
