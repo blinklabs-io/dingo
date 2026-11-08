@@ -72,15 +72,14 @@ func seedCommitTimestampMismatch(t *testing.T, dir string) {
 }
 
 // TestServiceSnapshotAndRestore verifies the offline path end to end:
-// Service.Snapshot writes a manifest, and Service.Restore reads it back.
+// Service.Snapshot writes a manifest, Service.Restore reads it back into a
+// compatible target and refuses an incompatible one without creating it.
 func TestServiceSnapshotAndRestore(t *testing.T) {
 	t.Parallel()
 
 	srcDir := filepath.Join(t.TempDir(), "src")
 	svc := dblifecycle.NewService(testConfig(srcDir), nil, nil)
 
-	// Seed the source database directly since Service has no block-write
-	// API of its own.
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: srcDir})
 	require.NoError(t, err)
 	require.NoError(t, dbtest.CloseDatabase(db))
@@ -89,6 +88,15 @@ func TestServiceSnapshotAndRestore(t *testing.T) {
 	m, err := svc.Snapshot(context.Background(), snapDir, "", "")
 	require.NoError(t, err)
 	require.Equal(t, "badger", m.BlobPlugin)
+
+	restoreCfg := testConfig(filepath.Join(t.TempDir(), "incompatible"))
+	restoreCfg.Network = "mainnet"
+	_, err = dblifecycle.NewService(restoreCfg, nil, nil).Restore(
+		context.Background(), snapDir,
+	)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "not compatible")
+	require.NoDirExists(t, restoreCfg.DatabasePath)
 
 	restoreSvc := dblifecycle.NewService(
 		testConfig(filepath.Join(t.TempDir(), "restored")), nil, nil,
@@ -162,39 +170,6 @@ func TestServiceSnapshotAppliesMaxCommitPause(t *testing.T) {
 	_, err = svc.Snapshot(context.Background(), snapDir, "", "")
 	require.ErrorIs(t, err, lifecycle.ErrCommitPauseExceeded)
 	require.NoDirExists(t, snapDir)
-}
-
-// TestServiceRestoreRejectsIncompatibleTarget verifies that Service.
-// Restore refuses a snapshot whose recorded network doesn't match the
-// restoring Service's own configured network, before ever creating the
-// target data directory — guarding against a real gap,
-// where the offline restore path had no check against the caller's own
-// configuration at all (only Restore's internal self-consistency check
-// against the manifest's own recorded plugins).
-func TestServiceRestoreRejectsIncompatibleTarget(t *testing.T) {
-	t.Parallel()
-
-	srcDir := filepath.Join(t.TempDir(), "src")
-	srcCfg := testConfig(srcDir)
-	svc := dblifecycle.NewService(srcCfg, nil, nil)
-
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: srcDir})
-	require.NoError(t, err)
-	require.NoError(t, dbtest.CloseDatabase(db))
-
-	snapDir := filepath.Join(t.TempDir(), "snap")
-	_, err = svc.Snapshot(context.Background(), snapDir, "", "")
-	require.NoError(t, err)
-
-	restoreCfg := testConfig(filepath.Join(t.TempDir(), "restored"))
-	restoreCfg.Network = "mainnet"
-	restoreSvc := dblifecycle.NewService(restoreCfg, nil, nil)
-
-	_, err = restoreSvc.Restore(context.Background(), snapDir)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "not compatible")
-
-	require.NoDirExists(t, restoreCfg.DatabasePath)
 }
 
 // TestServiceTruncateRequiresAtLeastOneTarget verifies that Truncate

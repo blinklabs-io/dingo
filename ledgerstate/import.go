@@ -438,6 +438,9 @@ type ImportConfig struct {
 	// when Reconcile is set. It is populated by the import phases and consumed
 	// by reconcileStaleLedgerState. Not caller-settable.
 	reconcileKeys *reconcileKeys
+	// rewardCreditFoldBatchSize overrides how many covered reward credits one
+	// transaction folds. Zero selects defaultRewardCreditFoldBatchSize.
+	rewardCreditFoldBatchSize int
 }
 
 type deferredRewardLiveStakeImporter interface {

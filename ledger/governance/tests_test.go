@@ -684,6 +684,7 @@ func TestProcessEpochSPONonVoterDenominators(t *testing.T) {
 
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
 			ratified := runSPONonVoterRatification(
 				t,
 				spoNonVoterRatificationCase{
@@ -743,6 +744,7 @@ func TestProcessEpochSPONonVoterRatification(t *testing.T) {
 
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
 			ratified := runSPONonVoterRatification(
 				t,
 				spoNonVoterRatificationCase{

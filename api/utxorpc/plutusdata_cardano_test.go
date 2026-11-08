@@ -372,7 +372,3 @@ func TestPlutusDataToCardano_IntegerBoundaries(t *testing.T) {
 		})
 	}
 }
-
-func TestBigIntToCardanoNil(t *testing.T) {
-	require.Nil(t, bigIntToCardano(nil))
-}

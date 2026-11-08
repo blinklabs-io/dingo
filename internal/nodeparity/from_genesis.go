@@ -290,21 +290,24 @@ func currentEpochNo(
 // Unlike ErrAcquireFailurePointNotOnChain, a dial failure carries no signal
 // about whether retrying helps, so it gets the same fixed budget rather than
 // a special-cased one.
-const (
-	acquireRetries    = 10
-	acquireRetryDelay = 200 * time.Millisecond
-)
+const acquireRetries = 10
 
-// protocolParamsAndStakeRetries/protocolParamsAndStakeRetryDelay bound how
-// many times runProtocolParamsAndStake redials and retries the whole
+// sessionRetryDelay is the first reconnect delay after a chainsync session
+// ends. It is a variable only so tests can shorten it; no production code
+// changes it.
+var sessionRetryDelay = 1 * time.Second
+
+// acquireRetryDelay is a variable only so tests can shorten the wait between
+// attempts; no production code changes it.
+var acquireRetryDelay = 200 * time.Millisecond
+
+// protocolParamsAndStakeRetries bounds how many times
+// runProtocolParamsAndStake redials and retries the whole
 // {Acquire, CheckProtocolParams, CheckStakeDistribution} sequence when the
 // shared connection dies during or between the two checks -- see that
-// function's own doc comment. Matches acquireRetries/acquireRetryDelay's
-// existing budget (2s worst case) rather than inventing a second one.
-const (
-	protocolParamsAndStakeRetries    = acquireRetries
-	protocolParamsAndStakeRetryDelay = acquireRetryDelay
-)
+// function's own doc comment. It reuses acquireRetries, and the same
+// acquireRetryDelay between attempts, rather than inventing a second budget.
+const protocolParamsAndStakeRetries = acquireRetries
 
 // isRetryableDingoConnErr reports whether err looks like the shared
 // connection itself died -- gouroboros's protocol.ErrProtocolShuttingDown
@@ -401,7 +404,7 @@ func runProtocolParamsAndStake(
 			select {
 			case <-ctx.Done():
 				return nil, ctx.Err(), nil, ctx.Err()
-			case <-time.After(protocolParamsAndStakeRetryDelay):
+			case <-time.After(acquireRetryDelay):
 			}
 		}
 
@@ -449,14 +452,10 @@ func runProtocolParamsAndStake(
 	return ppMismatches, ppErr, stakeMismatches, stakeErr
 }
 
-// utxoComparisonRetries/utxoComparisonRetryDelay bound how many times
-// compareUTxOWithRetry redials and repeats the whole {Acquire, GetUTxOWhole}
-// sequence after the connection dies, with the same budget as
-// runProtocolParamsAndStake.
-const (
-	utxoComparisonRetries    = acquireRetries
-	utxoComparisonRetryDelay = acquireRetryDelay
-)
+// utxoComparisonRetries bounds how many times compareUTxOWithRetry redials
+// and repeats the whole {Acquire, GetUTxOWhole} sequence after the connection
+// dies, with the same budget as runProtocolParamsAndStake.
+const utxoComparisonRetries = acquireRetries
 
 type utxoComparison struct {
 	refCount int
@@ -484,7 +483,7 @@ func compareUTxOWithRetry(
 			select {
 			case <-ctx.Done():
 				return utxoComparison{}, ctx.Err()
-			case <-time.After(utxoComparisonRetryDelay):
+			case <-time.After(acquireRetryDelay):
 			}
 		}
 		cmp, err := compareUTxOOnce(ctx, dingoAddr, magic, point, want)
@@ -1249,10 +1248,7 @@ func RunFromGenesis(
 	// bound over a run that is mostly healthy with only occasional
 	// hiccups -- growth is reserved for a session that fails immediately on
 	// every reconnect attempt (e.g. Dingo genuinely down).
-	const (
-		sessionRetryDelay    = 1 * time.Second
-		sessionRetryMaxDelay = 30 * time.Second
-	)
+	const sessionRetryMaxDelay = 30 * time.Second
 	delay := sessionRetryDelay
 
 	// retryOrStop sleeps for delay (advanced per nextSessionRetryDelay),

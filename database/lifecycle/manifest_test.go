@@ -307,47 +307,6 @@ func TestLabelSnapshotMissingManifestErrors(t *testing.T) {
 	require.Error(t, err)
 }
 
-// TestCheckGateMatchAcceptsIdenticalGates verifies that CheckGateMatch
-// passes when a gate the manifest recorded has an identical value in the
-// caller's configured map.
-func TestCheckGateMatchAcceptsIdenticalGates(t *testing.T) {
-	t.Parallel()
-
-	m := lifecycle.Manifest{Gates: nodesettings.Values{"network_magic": "1"}}
-	require.NoError(
-		t,
-		m.CheckGateMatch(nodesettings.Values{"network_magic": "1"}),
-	)
-}
-
-// TestCheckGateMatchRejectsDifferingGate verifies that CheckGateMatch
-// errors, naming the gate, when a gate present in both maps disagrees.
-func TestCheckGateMatchRejectsDifferingGate(t *testing.T) {
-	t.Parallel()
-
-	m := lifecycle.Manifest{Gates: nodesettings.Values{"network_magic": "1"}}
-	err := m.CheckGateMatch(nodesettings.Values{"network_magic": "2"})
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "network_magic")
-}
-
-// TestCheckGateMatchIgnoresGatesTheTargetDoesNotKnow verifies that a gate
-// recorded in the manifest but absent from the caller's configured map
-// (e.g. a genesis hash gate when the caller has no cardano config loaded)
-// is not an error -- CheckGateMatch only compares gates present in both.
-func TestCheckGateMatchIgnoresGatesTheTargetDoesNotKnow(t *testing.T) {
-	t.Parallel()
-
-	m := lifecycle.Manifest{Gates: nodesettings.Values{
-		"network_magic":         "1",
-		"dijkstra_genesis_hash": "dddd",
-	}}
-	require.NoError(
-		t,
-		m.CheckGateMatch(nodesettings.Values{"network_magic": "1"}),
-	)
-}
-
 // TestChecksumCoversGates verifies that Gates is covered by the manifest
 // checksum. Exercised through the Write/Read round trip the existing tests
 // use, rather than reaching for the unexported checksum method: two
@@ -367,70 +326,67 @@ func TestChecksumCoversGates(t *testing.T) {
 	require.NotEqual(t, gotA.Checksum, gotB.Checksum)
 }
 
-// TestCheckGateMatchIgnoresBlobStoreID verifies that blob_store_id is
-// never compared, even when present in both maps: the restored blob store
-// IS the snapshot's, so its identity always differs from whatever the
-// caller had, and comparing it would fail every restore.
-func TestCheckGateMatchIgnoresBlobStoreID(t *testing.T) {
+func TestCheckGateMatch(t *testing.T) {
 	t.Parallel()
 
-	m := lifecycle.Manifest{Gates: nodesettings.Values{
-		"blob_store_id": "aaaa-from-snapshot",
-	}}
-	require.NoError(t, m.CheckGateMatch(nodesettings.Values{
-		"blob_store_id": "bbbb-different",
-	}))
-}
-
-// TestCheckGateMatchToleratesGateMissingFromOlderSnapshot verifies the
-// opposite direction from TestCheckGateMatchIgnoresGatesTheTargetDoesNotKnow:
-// an older snapshot predates a gate this dingo now records. The caller
-// supplies it, the manifest does not carry it, and that must NOT be a
-// mismatch -- otherwise every older snapshot becomes unrestorable the
-// moment a new gate is added to the registry.
-func TestCheckGateMatchToleratesGateMissingFromOlderSnapshot(t *testing.T) {
-	t.Parallel()
-
-	m := lifecycle.Manifest{Gates: nodesettings.Values{
-		"network_magic": "1",
-	}}
-	require.NoError(t, m.CheckGateMatch(nodesettings.Values{
-		"network_magic": "1",
-		"start_era":     "dijkstra", // absent from the manifest
-	}))
-}
-
-// TestCheckGateMatchAcceptsPermittedLatchUpgrade is a regression test:
-// CheckGateMatch used to compare LatchBool gates with raw equality, which
-// rejected restoring a snapshot recorded "off" onto a target configured
-// "on" even though nodesettings.Evaluate permits exactly that one-way
-// upgrade at startup (LatchBool moves off-to-on, never back). Restore must
-// agree with startup enforcement instead of being stricter than it.
-func TestCheckGateMatchAcceptsPermittedLatchUpgrade(t *testing.T) {
-	t.Parallel()
-
-	m := lifecycle.Manifest{Gates: nodesettings.Values{
-		"history_expiry_active": "off",
-	}}
-	require.NoError(t, m.CheckGateMatch(nodesettings.Values{
-		"history_expiry_active": "on",
-	}))
-}
-
-// TestCheckGateMatchRejectsForbiddenLatchDowngrade verifies the other
-// direction still fails: a snapshot recorded "on" restored onto a target
-// configured "off" is the direction LatchBool forbids (it cannot be turned
-// off once a database has run with it on), so applying the registry's
-// policy instead of raw equality must not accidentally loosen this side.
-func TestCheckGateMatchRejectsForbiddenLatchDowngrade(t *testing.T) {
-	t.Parallel()
-
-	m := lifecycle.Manifest{Gates: nodesettings.Values{
-		"history_expiry_active": "on",
-	}}
-	err := m.CheckGateMatch(nodesettings.Values{
-		"history_expiry_active": "off",
-	})
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "history_expiry_active")
+	for _, tc := range []struct {
+		name     string
+		snapshot nodesettings.Values
+		target   nodesettings.Values
+		wantErr  string
+	}{
+		{
+			name:     "identical gates",
+			snapshot: nodesettings.Values{"network_magic": "1"},
+			target:   nodesettings.Values{"network_magic": "1"},
+		},
+		{
+			name:     "differing gate is rejected by name",
+			snapshot: nodesettings.Values{"network_magic": "1"},
+			target:   nodesettings.Values{"network_magic": "2"},
+			wantErr:  "network_magic",
+		},
+		{
+			name: "gates the target does not know are ignored",
+			snapshot: nodesettings.Values{
+				"network_magic":         "1",
+				"dijkstra_genesis_hash": "dddd",
+			},
+			target: nodesettings.Values{"network_magic": "1"},
+		},
+		{
+			name:     "blob store ID is ignored",
+			snapshot: nodesettings.Values{"blob_store_id": "aaaa-from-snapshot"},
+			target:   nodesettings.Values{"blob_store_id": "bbbb-different"},
+		},
+		{
+			name:     "gate missing from an older snapshot is tolerated",
+			snapshot: nodesettings.Values{"network_magic": "1"},
+			target: nodesettings.Values{
+				"network_magic": "1",
+				"start_era":     "dijkstra",
+			},
+		},
+		{
+			name:     "permitted latch upgrade",
+			snapshot: nodesettings.Values{"history_expiry_active": "off"},
+			target:   nodesettings.Values{"history_expiry_active": "on"},
+		},
+		{
+			name:     "forbidden latch downgrade",
+			snapshot: nodesettings.Values{"history_expiry_active": "on"},
+			target:   nodesettings.Values{"history_expiry_active": "off"},
+			wantErr:  "history_expiry_active",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := lifecycle.Manifest{Gates: tc.snapshot}.CheckGateMatch(tc.target)
+			if tc.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			require.Contains(t, err.Error(), tc.wantErr)
+		})
+	}
 }

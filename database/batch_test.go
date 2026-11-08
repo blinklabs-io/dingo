@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"sync"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
@@ -97,6 +98,27 @@ func stageTxSentinel(t *testing.T, db *Database, txHash []byte) []byte {
 	return s
 }
 
+var (
+	batchCandidateMu    sync.Mutex
+	batchCandidateReady bool
+	batchCandidate      batchedCrossBlockSpendCandidate
+)
+
+// sharedBatchCandidate scans the immutable fixture once; the candidate is only
+// read by the tests. The result is cached only after the scan returns: the scan
+// asserts with require, and a failed scan must not leave later tests an empty
+// candidate that cascades into unrelated failures.
+func sharedBatchCandidate(t *testing.T) batchedCrossBlockSpendCandidate {
+	t.Helper()
+	batchCandidateMu.Lock()
+	defer batchCandidateMu.Unlock()
+	if !batchCandidateReady {
+		batchCandidate = findBatchedCrossBlockSpendCandidate(t)
+		batchCandidateReady = true
+	}
+	return batchCandidate
+}
+
 func openTestDB(t *testing.T) *Database {
 	t.Helper()
 	db, err := newTestDatabase(t, &Config{
@@ -127,7 +149,7 @@ func TestSetTransactionBatchedWithOpts_SkipsAllProducedUtxoWrites(
 
 	db := openTestDB(t)
 
-	candidate := findBatchedCrossBlockSpendCandidate(t)
+	candidate := sharedBatchCandidate(t)
 	sentinels := stagedProducer(t, db, candidate)
 	require.NotEmpty(t, sentinels, "producer tx must have at least one output")
 
@@ -190,7 +212,7 @@ func TestSetTransactionBatchedWithOpts_TxOffsetStillWritten(t *testing.T) {
 
 	db := openTestDB(t)
 
-	candidate := findBatchedCrossBlockSpendCandidate(t)
+	candidate := sharedBatchCandidate(t)
 	stagedProducer(t, db, candidate)
 
 	txHash := candidate.producerTx.Hash().Bytes()
@@ -255,7 +277,7 @@ func TestSetTransactionBatchedWithOpts_DefaultBehaviorOverwrites(t *testing.T) {
 
 	db := openTestDB(t)
 
-	candidate := findBatchedCrossBlockSpendCandidate(t)
+	candidate := sharedBatchCandidate(t)
 	sentinels := stagedProducer(t, db, candidate)
 	require.NotEmpty(t, sentinels)
 
@@ -310,7 +332,7 @@ func TestSetTransactionBatchedWithOpts_RequiresOffsetsEvenWhenSkipping(
 
 	db := openTestDB(t)
 
-	candidate := findBatchedCrossBlockSpendCandidate(t)
+	candidate := sharedBatchCandidate(t)
 	storeBlockOffsetsOnly(t, db, candidate.producerBlock)
 
 	// Build an offsets struct missing the first produced UTxO. Skipping
@@ -364,7 +386,7 @@ func TestSetTransactionBatchedWithOpts_SkipConsumedInputRecovery(t *testing.T) {
 
 	db := openTestDB(t)
 
-	candidate := findBatchedCrossBlockSpendCandidate(t)
+	candidate := sharedBatchCandidate(t)
 
 	// Store producer block first so consumed inputs exist in metadata
 	storeBlockOffsetsOnly(t, db, candidate.producerBlock)
@@ -436,7 +458,7 @@ func TestSetTransactionBatchedWithOpts_TrustedImmutableReplaySkipsInputRecovery(
 	t.Parallel()
 
 	db := openTestDB(t)
-	candidate := findBatchedCrossBlockSpendCandidate(t)
+	candidate := sharedBatchCandidate(t)
 	storeBlockOffsetsOnly(t, db, candidate.producerBlock)
 
 	acc := db.NewBatchAccumulator()
@@ -499,7 +521,7 @@ func TestSetTransactionBatchedWithOpts_DefaultDoesNotSkipInputRecovery(
 
 	db := openTestDB(t)
 
-	candidate := findBatchedCrossBlockSpendCandidate(t)
+	candidate := sharedBatchCandidate(t)
 
 	// Store producer block first
 	storeBlockOffsetsOnly(t, db, candidate.producerBlock)

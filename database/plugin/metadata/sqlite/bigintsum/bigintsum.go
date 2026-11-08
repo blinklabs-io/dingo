@@ -111,6 +111,8 @@ func init() {
 		&driversqlite.FunctionImpl{
 			NArgs:         1,
 			Deterministic: true,
+			// Callbacks retain only parsed numeric limbs, never argument buffers.
+			VolatileArgs: true,
 			MakeAggregate: func(
 				driversqlite.FunctionContext,
 			) (driversqlite.AggregateFunction, error) {

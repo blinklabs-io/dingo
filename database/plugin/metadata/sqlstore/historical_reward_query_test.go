@@ -78,6 +78,7 @@ func newHistoricalRewardQueryStore(t *testing.T) *Store {
 		false,
 	)
 	require.NoError(t, err)
+	seedMigratedSQLite(t, db)
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
 	store, err := New(Config{
@@ -105,13 +106,10 @@ func seedHistoricalRewardDeltas(
 	store *Store,
 ) []historicalRewardKey {
 	t.Helper()
-	keys := []historicalRewardKey{
-		{tag: 0, key: string([]byte{0x01})},
-		{tag: 0, key: string([]byte{0x02})},
-		{tag: 0, key: string([]byte{0x03})},
-		{tag: 1, key: string([]byte{0x01})},
-		{tag: 1, key: string([]byte{0x04})},
-	}
+	keys := historicalRewardTestKeys()
+	// One transaction: a commit per row dominated the test on a file database.
+	tx, err := store.writeDB.Begin()
+	require.NoError(t, err)
 	contextSlots := []any{nil, nil, 900, 1000, 1100}
 	var deltaID, txID int
 	for _, key := range keys {
@@ -123,7 +121,7 @@ func seedHistoricalRewardDeltas(
 						hash := []byte(fmt.Sprintf("tx-%04d", deltaID))
 						if variant > 0 {
 							txID++
-							_, err := store.writeDB.Exec(
+							_, err := tx.Exec(
 								`INSERT INTO "transaction" (id, hash, slot, block_index) VALUES (?, ?, ?, 0)`,
 								txID,
 								hash,
@@ -131,7 +129,7 @@ func seedHistoricalRewardDeltas(
 							)
 							require.NoError(t, err)
 							if contextSlot != nil {
-								_, err = store.writeDB.Exec(
+								_, err = tx.Exec(
 									`INSERT INTO leios_transaction_context (transaction_id, slot) VALUES (?, ?)`,
 									txID,
 									contextSlot,
@@ -139,7 +137,7 @@ func seedHistoricalRewardDeltas(
 								require.NoError(t, err)
 							}
 						}
-						_, err := store.writeDB.Exec(
+						_, err := tx.Exec(
 							`INSERT INTO account_reward_delta (id, staking_key, credential_tag, tx_hash, amount, previous_reward, added_slot, withdrawal, post_snapshot) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 							deltaID,
 							[]byte(key.key),
@@ -157,7 +155,18 @@ func seedHistoricalRewardDeltas(
 			}
 		}
 	}
+	require.NoError(t, tx.Commit())
 	return keys
+}
+
+func historicalRewardTestKeys() []historicalRewardKey {
+	return []historicalRewardKey{
+		{tag: 0, key: string([]byte{0x01})},
+		{tag: 0, key: string([]byte{0x02})},
+		{tag: 0, key: string([]byte{0x03})},
+		{tag: 1, key: string([]byte{0x01})},
+		{tag: 1, key: string([]byte{0x04})},
+	}
 }
 
 type rewardQueryRow struct {
@@ -275,7 +284,8 @@ func TestHistoricalRewardCreditQueryUsesCredentialIndexWithoutStats(
 ) {
 	t.Parallel()
 	store := newHistoricalRewardQueryStore(t)
-	keys := seedHistoricalRewardDeltas(t, store)
+	// The plan depends on the schema and the empty statistics, not on rows.
+	keys := historicalRewardTestKeys()
 
 	var statTables int
 	require.NoError(t, store.writeDB.QueryRow(

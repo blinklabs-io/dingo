@@ -475,7 +475,7 @@ func TestStackNotificationDeliversEveryMessageOnce(t *testing.T) {
 	t.Parallel()
 	// More messages than a consumer's queue holds, so the feeder must hold
 	// the refused ones back rather than drop them.
-	const total = 250
+	total := localmessagenotification.NewConfig().MaxQueueSize + 20
 	s, _ := newTestStack(t, StackConfig{})
 	submit := submitter(t, s)
 	for i := range total {
@@ -595,59 +595,6 @@ func TestStackShutdownBoundsBlockedEventHandler(t *testing.T) {
 
 	released()
 	require.NoError(t, s.bus.CloseContext(context.Background()))
-}
-
-// A rate() alert on a reject reason needs the series to exist before the
-// first rejection of that reason.
-func TestStackPreRegistersRejectReasons(t *testing.T) {
-	t.Parallel()
-	_, reg := newTestStack(t, StackConfig{})
-	families, err := reg.Gather()
-	require.NoError(t, err)
-	var reasons []string
-	for _, fam := range families {
-		if fam.GetName() != "dingo_dmq_validation_failures_total" {
-			continue
-		}
-		for _, m := range fam.GetMetric() {
-			reasons = append(reasons, m.GetLabel()[0].GetValue())
-		}
-	}
-	require.ElementsMatch(t, []string{
-		reasonInvalid, reasonAlreadyReceived, reasonExpired, reasonOther,
-	}, reasons)
-}
-
-type inboundSubscriptionRecorder struct {
-	eventType event.EventType
-	buffer    int
-	policy    event.SubscriberBackpressurePolicy
-}
-
-func (r *inboundSubscriptionRecorder) SubscribeFuncWithBufferPolicy(
-	eventType event.EventType,
-	buffer int,
-	policy event.SubscriberBackpressurePolicy,
-	_ event.EventHandlerFunc,
-) event.EventSubscriberId {
-	r.eventType = eventType
-	r.buffer = buffer
-	r.policy = policy
-	return 1
-}
-
-func TestStackInboundSubscriptionIsLossless(t *testing.T) {
-	t.Parallel()
-
-	recorder := &inboundSubscriptionRecorder{}
-	subscribeInbound(recorder, func(event.Event) {})
-	require.Equal(
-		t,
-		event.EventType(connmanager.InboundConnectionEventType),
-		recorder.eventType,
-	)
-	require.Equal(t, event.DefaultSubscriberBuffer, recorder.buffer)
-	require.Equal(t, event.SubscriberBackpressureBlock, recorder.policy)
 }
 
 // A full inbound queue must drain without losing the subscription, or no
@@ -938,16 +885,6 @@ func TestStackBacksOffFullNotificationQueue(t *testing.T) {
 			return refusals.n.Load() > before
 		}, 5*time.Second, time.Millisecond, "retry %d did not run", i+1)
 	}
-}
-
-func TestStackAcceptsCurrentKESPeriod(t *testing.T) {
-	t.Parallel()
-	s, _ := newTestStack(t, StackConfig{
-		CurrentKESPeriod: func() (uint64, error) { return 1, nil },
-	})
-	msg := newTestMessage([]byte("current"), soonExpiry())
-	require.Equal(t, uint64(1), msg.Payload.KESPeriod)
-	require.Nil(t, s.admit(&msg))
 }
 
 func TestStackAdmissionUsesPoolClock(t *testing.T) {

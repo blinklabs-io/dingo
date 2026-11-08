@@ -468,6 +468,7 @@ func (ls *LedgerState) verifyBlockHeaderStatelessCryptoWithEpochNonce(
 		block,
 		hex.EncodeToString(epochNonce),
 		slotsPerKesPeriod,
+		ls.maxKESEvolutions(),
 	); err != nil {
 		return err
 	}
@@ -579,6 +580,7 @@ func (ls *LedgerState) headerAppliedSettled(
 //   - block: the block whose header to verify
 //   - epochNonce: the epoch nonce (eta0) for VRF verification
 //   - slotsPerKesPeriod: number of slots per KES period from Shelley genesis
+//   - maxKesEvolutions: maximum KES key evolutions from Shelley genesis
 //
 // Returns an error if verification fails, nil if the block passes
 // verification or is a Byron-era block (validated by the LedgerState wrapper).
@@ -586,6 +588,7 @@ func verifyBlockHeaderHex(
 	block ledger.Block,
 	epochNonceHex string,
 	slotsPerKesPeriod uint64,
+	maxKesEvolutions uint64,
 ) error {
 	// Skip Byron-era blocks - they use PBFT consensus, not Praos,
 	// and do not have VRF/KES/OpCert fields
@@ -618,6 +621,7 @@ func verifyBlockHeaderHex(
 		SkipTransactionValidation: true,
 		SkipStakePoolValidation:   true,
 		SkipBlockLimitsValidation: true,
+		MaxKesEvolutions:          maxKesEvolutions,
 	}
 
 	header, err := normalizeHeaderVrfFieldsFromBodyCbor(block.Header())
@@ -824,7 +828,12 @@ func verifyHeaderCryptoParameters(
 	nonce string,
 	slotsPerKesPeriod, maxEvolutions uint64,
 ) error {
-	if err := verifyBlockHeaderHex(block, nonce, slotsPerKesPeriod); err != nil {
+	if err := verifyBlockHeaderHex(
+		block,
+		nonce,
+		slotsPerKesPeriod,
+		maxEvolutions,
+	); err != nil {
 		return err
 	}
 

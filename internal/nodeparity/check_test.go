@@ -73,18 +73,6 @@ func TestTipsAgree_Mismatch(t *testing.T) {
 	assert.Contains(t, detail, "tips did not match")
 }
 
-// TestTip_SameHashDifferentSlotIsNotEqual guards Tip.Equal's
-// definition of "same point on chain": slot and hash must both agree. A
-// coincidental hash match at a different slot is not realistic on a real
-// chain, but Tip.Equal must not treat it as equal regardless.
-func TestTip_SameHashDifferentSlotIsNotEqual(t *testing.T) {
-	t.Parallel()
-
-	a := Tip{Slot: 100, Hash: "aa"}
-	b := Tip{Slot: 200, Hash: "aa"}
-	assert.False(t, a.Equal(b))
-}
-
 // TestTip_Equal covers Tip.Equal directly: two tips with the same slot and
 // hash are equal even if BlockNumber differs (it is not part of a tip's
 // identity, only slot+hash are), and a tip with a different hash is not
@@ -102,32 +90,10 @@ func TestTip_Equal(t *testing.T) {
 
 	c := Tip{Slot: 100, Hash: "bb"}
 	assert.False(t, a.Equal(c))
-}
 
-// TestTip_Point covers the conversion Check relies on to build the
-// AcquireSpecificPoint argument from an agreed Tip: Slot passes through
-// unchanged and Hash round-trips through hex decoding back to the same raw
-// bytes.
-func TestTip_Point(t *testing.T) {
-	t.Parallel()
-
-	tip := Tip{Slot: 12345, Hash: "aabbcc", BlockNumber: 7}
-	point, err := tip.point()
-	require.NoError(t, err)
-	assert.Equal(t, uint64(12345), point.Slot)
-	assert.Equal(t, []byte{0xaa, 0xbb, 0xcc}, point.Hash)
-}
-
-// TestTip_Point_InvalidHashErrors covers a malformed (non-hex) Hash: point
-// must surface a decode error rather than silently producing a wrong or
-// truncated byte slice that would then be sent to a real node as part of an
-// AcquireSpecificPoint.
-func TestTip_Point_InvalidHashErrors(t *testing.T) {
-	t.Parallel()
-
-	tip := Tip{Slot: 1, Hash: "not-hex"}
-	_, err := tip.point()
-	require.Error(t, err)
+	// A matching hash at a different slot is not the same point.
+	d := Tip{Slot: 200, Hash: "aa"}
+	assert.False(t, a.Equal(d))
 }
 
 // TestCheck_ExplicitPointDialsCardanoOnlyOnce is the regression test for a

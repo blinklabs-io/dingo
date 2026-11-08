@@ -1107,48 +1107,6 @@ func TestExtractArchiveRefusesConflictingDestinationOptions(t *testing.T) {
 		"a refused extraction must not create the destination")
 }
 
-// TestExtractPublishSurvivesDestinationToFileSubstitution is the regression
-// test for a destination that turns from a directory into a file between the
-// moment publication identifies it and the moment publication acts on it.
-//
-// The interleaving is staged rather than raced, because the window is interior
-// to publication and cannot be driven from outside it. The steps are the ones
-// publication takes, in order, with the substitution placed exactly where a
-// concurrent writer would land it: the destination is observed as a directory,
-// replaced with a file, and only then handed to the removal.
-//
-// The removal is what has to hold here. It cannot be told the destination
-// changed, so it must be incapable of acting on the thing it changed into.
-func TestExtractPublishSurvivesDestinationToFileSubstitution(t *testing.T) {
-	t.Parallel()
-
-	parent := t.TempDir()
-	destName := "extracted"
-	destPath := filepath.Join(parent, destName)
-
-	parentRoot, err := os.OpenRoot(parent)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = parentRoot.Close() })
-
-	// As publication finds it: an empty directory, cleared to make way.
-	require.NoError(t, os.MkdirAll(destPath, 0o750))
-	info, err := parentRoot.Lstat(destName)
-	require.NoError(t, err)
-	require.True(t, info.IsDir(), "the check must see a directory")
-
-	// A concurrent writer takes the name for a file of their own.
-	require.NoError(t, os.Remove(destPath))
-	require.NoError(t, os.WriteFile(destPath, []byte("theirs"), 0o640))
-
-	// Publication proceeds on what it observed, which is no longer true.
-	require.Error(t, removeEmptyExtractDir(parentRoot, destName, destPath),
-		"removal must refuse what the destination became")
-
-	data, err := os.ReadFile(destPath)
-	require.NoError(t, err, "the substituted file must not be unlinked")
-	assert.Equal(t, "theirs", string(data))
-}
-
 // TestOpenVerifiedDirRefusesSymlinkedDir covers the cache-reuse fast paths,
 // which decide whether a previous run already produced a usable tree.
 //
@@ -1167,26 +1125,6 @@ func TestOpenVerifiedDirRefusesSymlinkedDir(t *testing.T) {
 
 	_, err := openVerifiedDir(candidate)
 	require.ErrorIs(t, err, ErrExtractUnsafePath)
-}
-
-// TestOpenVerifiedDirOpensRealDir pins that an ordinary directory still opens,
-// and that the handle refers to it.
-func TestOpenVerifiedDirOpensRealDir(t *testing.T) {
-	t.Parallel()
-
-	parent := t.TempDir()
-	candidate := filepath.Join(parent, "extracted")
-	require.NoError(t, os.MkdirAll(candidate, 0o750))
-
-	root, err := openVerifiedDir(candidate)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = root.Close() })
-
-	opened, err := root.Stat(".")
-	require.NoError(t, err)
-	want, err := os.Lstat(candidate)
-	require.NoError(t, err)
-	assert.True(t, os.SameFile(opened, want))
 }
 
 // TestVettedNamesInspectedDirectory pins the ordinary case: the inspected

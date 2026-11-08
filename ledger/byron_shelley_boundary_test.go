@@ -285,7 +285,7 @@ func newUnseededByronShelleyBoundaryLedger(
 	require.NoError(t, loadByronGenesisForTest(t, cfg,
 		strings.NewReader(byronGenesisJSON),
 	))
-	require.NoError(t, cfg.LoadShelleyGenesisFromReader(
+	require.NoError(t, completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(
 		strings.NewReader(shelleyGenesisJSON),
 	))
 

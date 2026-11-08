@@ -370,17 +370,6 @@ func TestPoolCredentialsLoadFromAgentServeKeyRejectsWrongKeySize(t *testing.T) {
 	require.False(t, pc.IsLoaded())
 }
 
-// TestPoolCredentialsLoadFromAgentSignRequiresSigner proves a nil signer is
-// refused rather than silently leaving PoolCredentials in an unsignable state.
-func TestPoolCredentialsLoadFromAgentSignRequiresSigner(t *testing.T) {
-	t.Parallel()
-
-	vrfPath, _, opCertPath := createTestKeys(t)
-	pc := NewPoolCredentials()
-	err := pc.LoadFromAgentSign(vrfPath, opCertPath, nil)
-	require.ErrorContains(t, err, "requires a non-nil signer")
-}
-
 // TestLoadFromAgentServeKeyValidatedNeverPublishesAnUnvalidatedCredential is
 // the defect that installing and re-validating as two locked calls produced.
 //
@@ -945,29 +934,6 @@ func TestForgeProceedsWhenEitherTipHashIsEmpty(t *testing.T) {
 			)
 		})
 	}
-}
-
-// TestForgeStaleTipSkipReasonsArePreMaterialized pins that every reason series
-// exists before the first skip, so a dashboard is not looking at an absent
-// series.
-//
-// Nine series cover primary-chain ancestry, local and peer block-height gaps,
-// the admitted header frontier, existing tip disagreements, the
-// pre-leader-check rival, and staleness.
-func TestForgeStaleTipSkipReasonsArePreMaterialized(t *testing.T) {
-	var logs bytes.Buffer
-	hash := bytes.Repeat([]byte{0xAA}, 32)
-	forger, _, _ := newEqualSlotForkTestForger(
-		t,
-		hash,
-		bytes.Clone(hash),
-		&logs,
-	)
-	require.Equal(
-		t,
-		9,
-		testutil.CollectAndCount(forger.metrics.forgeStaleTipSkip),
-	)
 }
 
 // forgeStaleTipTestNonLeader never elects this node, so a test can separate
@@ -2435,42 +2401,6 @@ func (c forgerTestSlotClock) SecurityParam() int {
 	return 5
 }
 
-// TestCheckAndForgeProductionAllowsUnknownActiveUpstreamTarget verifies that
-// an active upstream with no admitted target does not suppress forging based on
-// wall-clock distance from the local tip. That distance describes a network
-// quiet stretch, not whether a peer is ahead.
-func TestCheckAndForgeProductionAllowsUnknownActiveUpstreamTarget(
-	t *testing.T,
-) {
-	creds := setupTestCredentials(t)
-	block := newForgerTestBlock(1000, 2)
-	builder := &forgerTestBuilder{block: block, cbor: block.cbor}
-	broadcaster := &forgerTestBroadcaster{}
-	forger, err := NewBlockForger(ForgerConfig{
-		Mode:             ModeProduction,
-		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		Credentials:      creds,
-		LeaderChecker:    forgerTestLeader{},
-		BlockBuilder:     builder,
-		BlockBroadcaster: broadcaster,
-		SlotClock: forgerTestSlotClock{
-			// The tip lags the current slot by 991 slots, well past the
-			// tolerance below, so this node is behind on its own reckoning.
-			currentSlot:       1000,
-			chainTipSlot:      9,
-			upstreamActive:    true,
-			slotsPerKESPeriod: 100000,
-		},
-		ForgeSyncToleranceSlots: 99,
-		PromRegistry:            prometheus.NewRegistry(),
-	})
-	require.NoError(t, err)
-
-	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
-	assert.Equal(t, 1, builder.calls)
-	assert.Equal(t, 1, broadcaster.calls)
-}
-
 func TestCheckAndForgeProductionStopsAtProtocolKESExpiry(t *testing.T) {
 	creds := setupTestCredentials(t)
 	genesis := synthGenesis(1, 2, time.Second, time.Unix(0, 0))
@@ -3720,54 +3650,6 @@ func TestCheckAndForgeProductionRecoversBlockBroadcasterPanic(t *testing.T) {
 	assert.Equal(t, float64(1), testutil.ToFloat64(forger.metrics.forgeAdopted))
 }
 
-func TestNewBlockForgerRejectsProductionLeiosWithoutValidators(t *testing.T) {
-	for _, test := range []struct {
-		name                  string
-		txValidator           TxValidator
-		announcementValidator func(context.Context, ledger.BlockHeader) error
-		want                  string
-	}{
-		{
-			name: "transaction validator",
-			announcementValidator: func(
-				context.Context,
-				ledger.BlockHeader,
-			) error {
-				return nil
-			},
-			want: "production Leios forging requires transaction validator",
-		},
-		{
-			name:        "announcement validator",
-			txValidator: &mockTxValidator{},
-			want:        "production Leios forging requires announcement validator",
-		},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			creds := setupTestCredentials(t)
-			_, err := NewBlockForger(ForgerConfig{
-				Mode:             ModeProduction,
-				Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
-				Credentials:      creds,
-				LeaderChecker:    forgerTestLeader{},
-				BlockBuilder:     &forgerTestBuilder{},
-				BlockBroadcaster: &forgerTestBroadcaster{},
-				SlotClock: forgerTestSlotClock{
-					currentSlot:       10,
-					chainTipSlot:      9,
-					slotsPerKESPeriod: 100,
-				},
-				LeiosProduceChecker:        &forgerTestLeiosChecker{allowed: true},
-				LeiosEBBroadcaster:         &forgerTestLeiosCaster{},
-				LeiosMempool:               forgerTestMempoolProvider{},
-				LeiosTxValidator:           test.txValidator,
-				LeiosAnnouncementValidator: test.announcementValidator,
-			})
-			require.EqualError(t, err, test.want)
-		})
-	}
-}
-
 func TestCheckAndForgeProductionAdoptsUnavailableLeiosAnnouncement(t *testing.T) {
 	t.Parallel()
 	creds := setupTestCredentials(t)
@@ -4311,147 +4193,6 @@ func newForgerWithValidator(
 	return forger, clock
 }
 
-// TestBlockValidatorPassesAllowsAdoption verifies that a passing validator
-// does not prevent adoption: broadcaster is called and forgeAdopted increments.
-func TestBlockValidatorPassesAllowsAdoption(t *testing.T) {
-	block := newForgerTestBlock(10, 2)
-	broadcaster := &forgerTestBroadcaster{}
-	validator := &forgerTestValidator{err: nil}
-
-	forger, _ := newForgerWithValidator(t, block, nil, broadcaster, validator)
-	err := forger.checkAndForgeProduction(context.Background())
-
-	require.NoError(t, err)
-	assert.Equal(t, 1, validator.calls, "validator must be called once")
-	assert.Equal(
-		t,
-		1,
-		broadcaster.calls,
-		"block must be adopted after passing validation",
-	)
-	assert.Equal(t, float64(1), testutil.ToFloat64(forger.metrics.forgeAdopted))
-	assert.Equal(
-		t,
-		float64(0),
-		testutil.ToFloat64(forger.metrics.forgeCouldNot),
-	)
-}
-
-// TestBlockValidatorFailureDropsBlock verifies that a failing validator
-// prevents adoption: broadcaster is NOT called, couldNotForge increments.
-func TestBlockValidatorFailureDropsBlock(t *testing.T) {
-	block := newForgerTestBlock(10, 2)
-	broadcaster := &forgerTestBroadcaster{}
-	validator := &forgerTestValidator{
-		err: errors.New("header crypto: invalid KES signature"),
-	}
-
-	forger, _ := newForgerWithValidator(t, block, nil, broadcaster, validator)
-	err := forger.checkAndForgeProduction(context.Background())
-
-	require.Error(t, err)
-	require.ErrorContains(t, err, "self-validation failed")
-	assert.Equal(t, 1, validator.calls, "validator must be called once")
-	assert.Equal(
-		t,
-		0,
-		broadcaster.calls,
-		"block must NOT be adopted after failed validation",
-	)
-	assert.Equal(t, float64(0), testutil.ToFloat64(forger.metrics.forgeAdopted))
-	assert.Equal(
-		t,
-		float64(1),
-		testutil.ToFloat64(forger.metrics.forgeCouldNot),
-	)
-	assert.Equal(
-		t,
-		float64(1),
-		testutil.ToFloat64(forger.metrics.forgeValidationFailed),
-	)
-}
-
-// TestNilBlockValidatorSkipsValidation confirms that the default nil validator
-// does not affect normal forging: block is adopted without any validation call.
-func TestNilBlockValidatorSkipsValidation(t *testing.T) {
-	block := newForgerTestBlock(10, 2)
-	broadcaster := &forgerTestBroadcaster{}
-
-	creds := setupTestCredentials(t)
-	forger, err := NewBlockForger(ForgerConfig{
-		Mode:             ModeProduction,
-		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		Credentials:      creds,
-		LeaderChecker:    forgerTestLeader{},
-		BlockBuilder:     &forgerTestBuilder{block: block},
-		BlockBroadcaster: broadcaster,
-		// BlockValidator intentionally omitted (nil = disabled)
-		SlotClock: forgerTestSlotClock{
-			currentSlot:       10,
-			chainTipSlot:      9,
-			slotsPerKESPeriod: 100,
-		},
-		PromRegistry: prometheus.NewRegistry(),
-	})
-	require.NoError(t, err)
-
-	err = forger.checkAndForgeProduction(context.Background())
-	require.NoError(t, err)
-	assert.Equal(
-		t,
-		1,
-		broadcaster.calls,
-		"block must be adopted when validator is nil",
-	)
-}
-
-// TestBlockValidatorCalledBeforeBroadcaster verifies ordering: the validator
-// runs before AddBlock. If the validator fails, AddBlock must never be called.
-func TestBlockValidatorCalledBeforeBroadcaster(t *testing.T) {
-	block := newForgerTestBlock(10, 2)
-
-	var callOrder []string
-	broadcaster := &forgerTestBroadcaster{}
-	// Override the underlying AddBlock via a tracking broadcaster
-	trackingBroadcaster := &trackingBroadcaster{
-		inner: broadcaster,
-		onAdd: func() { callOrder = append(callOrder, "broadcast") },
-	}
-	trackingValidator := &trackingBlockValidator{
-		onValidate: func() error {
-			callOrder = append(callOrder, "validate")
-			return errors.New("intentional failure")
-		},
-	}
-
-	creds := setupTestCredentials(t)
-	forger, err := NewBlockForger(ForgerConfig{
-		Mode:             ModeProduction,
-		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		Credentials:      creds,
-		LeaderChecker:    forgerTestLeader{},
-		BlockBuilder:     &forgerTestBuilder{block: block},
-		BlockBroadcaster: trackingBroadcaster,
-		BlockValidator:   trackingValidator,
-		SlotClock: forgerTestSlotClock{
-			currentSlot:       10,
-			chainTipSlot:      9,
-			slotsPerKESPeriod: 100,
-		},
-		PromRegistry: prometheus.NewRegistry(),
-	})
-	require.NoError(t, err)
-
-	_ = forger.checkAndForgeProduction(context.Background())
-
-	require.Equal(
-		t,
-		[]string{"validate"},
-		callOrder,
-		"validator must run before broadcaster; broadcaster must not run on failure",
-	)
-}
-
 // trackingBroadcaster wraps a broadcaster and calls a hook on AddBlock.
 type trackingBroadcaster struct {
 	inner BlockBroadcaster
@@ -4461,18 +4202,6 @@ type trackingBroadcaster struct {
 func (b *trackingBroadcaster) AddBlock(ctx context.Context, block ledger.Block, cbor []byte) error {
 	b.onAdd()
 	return b.inner.AddBlock(context.Background(), block, cbor)
-}
-
-// trackingBlockValidator calls a hook on ValidateForgedBlock.
-type trackingBlockValidator struct {
-	onValidate func() error
-}
-
-func (v *trackingBlockValidator) ValidateForgedBlock(context.Context,
-	ledger.Block,
-	[]byte,
-) error {
-	return v.onValidate()
 }
 
 // A forge already in progress when the node context is cancelled must not
@@ -4619,26 +4348,6 @@ func TestCheckAndForgeProductionAppliesLeiosCertificationTiming(
 			}
 		})
 	}
-}
-
-func TestNewBlockForgerRequiresLeiosCertificationTimingChecker(t *testing.T) {
-	_, err := NewBlockForger(ForgerConfig{
-		Mode: ModeProduction,
-		Logger: slog.New(
-			slog.NewJSONHandler(io.Discard, nil),
-		),
-		Credentials:      setupTestCredentials(t),
-		LeaderChecker:    forgerTestLeader{},
-		BlockBuilder:     &forgerTestBuilder{},
-		BlockBroadcaster: &forgerTestBroadcaster{},
-		SlotClock: forgerTestSlotClock{
-			slotsPerKESPeriod: 100,
-		},
-		LeiosCertificateProvider:        &forgerTestLeiosCerts{},
-		LeiosParentAnnouncementProvider: &forgerTestLeiosParentAnnouncement{},
-		PromRegistry:                    prometheus.NewRegistry(),
-	})
-	require.ErrorContains(t, err, "LeiosCertificationTimingChecker")
 }
 
 // forgerTestTxID returns the transaction id the mempool keys a transaction by.

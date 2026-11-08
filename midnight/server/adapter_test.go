@@ -28,6 +28,7 @@ import (
 // it would wrap the blob store's 1-based internal index back to 0 is
 // rejected up front rather than silently looking up the wrong block.
 func TestBlockByNumber_OverflowIsRejected(t *testing.T) {
+	t.Parallel()
 	db := newTestDatabase(t)
 	adapted := server.NewDatabase(db)
 
@@ -38,6 +39,7 @@ func TestBlockByNumber_OverflowIsRejected(t *testing.T) {
 // TestBlockByNumber_ResolvesInsertedBlock is the non-overflow control case:
 // a normal block number round-trips through the 0-based/1-based translation.
 func TestBlockByNumber_ResolvesInsertedBlock(t *testing.T) {
+	t.Parallel()
 	db := newTestDatabase(t)
 	blk := insertPlaceholderBlock(t, db, 5, 5, 0x05)
 	adapted := server.NewDatabase(db)
