@@ -2535,3 +2535,83 @@ func TestSyncV2APIModeResumesBackfillAfterImmutableTreeRemoved(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uint64(1000), result.LedgerSlot)
 }
+
+// Once sync_status is "backfill" every block is in the blob store and the
+// extracted tree is gone, so resuming must run the backfill from its checkpoint
+// without contacting the aggregator or downloading the snapshot again.
+func TestSyncV2APIModeResumesBackfillWithoutAggregator(t *testing.T) {
+	t.Parallel()
+
+	_, certifiedHash := validImmutableFiles(t, 1000)
+	fixture := newV2Fixture(t, v2FixtureOptions{
+		validImmutable:       true,
+		ancillaryLedgerState: minimalLedgerState(t, 1000, certifiedHash),
+		ancillaryLedgerSlot:  1000,
+	})
+	dataDir := t.TempDir()
+	baseConfig := SyncConfig{
+		Network:     "preprod",
+		DataDir:     dataDir,
+		StorageMode: "api",
+		CardanoNodeConfig: testNodeConfigWithMithrilKeys(
+			t, fixture.genesisVKey, fixture.ancillaryVKey,
+		),
+		Backend:           BackendV2,
+		AggregatorURL:     fixture.server.URL,
+		AllowInsecureHTTP: true,
+		VerifyCertChain:   true,
+		CleanupAfterLoad:  true,
+		StoragePlugins:    testStoragePlugins(),
+		DatabaseWorkers:   1,
+		BackfillBatchSize: node.DefaultBackfillBatchSize,
+		Logger:            slog.New(slog.DiscardHandler),
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var cancelled atomic.Bool
+	interrupted := baseConfig
+	interrupted.OnProgress = func(progress SyncProgress) {
+		if progress.Phase == PhaseBackfill && progress.Active &&
+			cancelled.CompareAndSwap(false, true) {
+			cancel()
+		}
+	}
+	_, err := Sync(ctx, interrupted)
+	require.ErrorIs(t, err, context.Canceled)
+	require.True(t, cancelled.Load(), "sync must reach backfill")
+	cacheBefore := listCacheEntries(t, dataDir)
+
+	resumed := baseConfig
+	resumed.AggregatorURL = "http://127.0.0.1:1"
+	result, err := Sync(context.Background(), resumed)
+	require.NoError(t, err)
+	require.Equal(t, uint64(1000), result.LedgerSlot)
+
+	db := openSyncedDB(t, dataDir)
+	status, err := db.GetSyncState("sync_status", nil)
+	require.NoError(t, err)
+	require.Empty(t, status)
+	require.Equal(
+		t, cacheBefore, listCacheEntries(t, dataDir),
+		"resume must not download or extract",
+	)
+}
+
+func listCacheEntries(t *testing.T, dataDir string) []string {
+	t.Helper()
+	var names []string
+	root := filepath.Join(dataDir, ".mithril-cache")
+	err := filepath.WalkDir(root, func(path string, _ os.DirEntry, err error) error {
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
+			return err
+		}
+		names = append(names, path)
+		return nil
+	})
+	require.NoError(t, err)
+	return names
+}
