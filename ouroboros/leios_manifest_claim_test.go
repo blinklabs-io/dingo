@@ -22,6 +22,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/blinklabs-io/dingo/connmanager"
@@ -1012,31 +1013,112 @@ func TestLeiosTxsOfferQueuedOwnerDisconnectPromotesWaiterImmediately(t *testing.
 
 func TestLeiosTxsOfferQueuedOwnerDeadlinePromotesWaiter(t *testing.T) {
 	t.Parallel()
-	o, point, txs := testLeiosTxOfferDeadlineFixture(t, 468)
-	o.leiosTxFetchAttemptTimeoutOverride = 40 * time.Millisecond
-	ownerGuard := &leiosFetchGuard{}
-	waiterGuard := &leiosFetchGuard{}
-	ownerGuard.inflight.Store(1)
-	waiterGuard.inflight.Store(1)
-	ownerGuard.mu.Lock()
-	defer ownerGuard.mu.Unlock()
-	waiterGuard.mu.Lock()
-	defer waiterGuard.mu.Unlock()
-	o.dispatchLeiosTxOfferFetch(
-		ownerGuard, &leiosTxOfferTestRequester{txs: txs},
-		namedConnId("deadline-owner"), "deadline-owner", point, nil,
-	)
-	o.dispatchLeiosTxOfferFetch(
-		waiterGuard, &leiosTxOfferTestRequester{txs: txs},
-		namedConnId("deadline-waiter"), "deadline-waiter", point, nil,
-	)
-	require.Eventually(t, func() bool {
+	synctest.Test(t, func(t *testing.T) {
+		o, point, txs := testLeiosTxOfferDeadlineFixture(t, 468)
+		o.leiosTxFetchAttemptTimeoutOverride = 40 * time.Millisecond
+		ownerGuard, waiterGuard := &leiosFetchGuard{}, &leiosFetchGuard{}
+		ownerGuard.inflight.Store(1)
+		waiterGuard.inflight.Store(1)
+		ownerQueued := make(chan struct{})
+		waiterPromoted := make(chan struct{})
+		releaseLaunch := make(chan struct{})
+		defer close(releaseLaunch)
+		var launches atomic.Uint32
+		o.leiosTxFetchBeforeLaunch = func() {
+			switch launches.Add(1) {
+			case 1:
+				close(ownerQueued)
+			case 2:
+				close(waiterPromoted)
+			}
+			<-releaseLaunch
+		}
+		go o.dispatchLeiosTxOfferFetch(
+			ownerGuard,
+			&leiosTxOfferTestRequester{txs: txs},
+			namedConnId("deadline-owner"),
+			"deadline-owner",
+			point,
+			nil,
+		)
+		testutil.RequireReceive(
+			t,
+			ownerQueued,
+			testutil.AsyncWait,
+			"owner did not reach the activation gate",
+		)
+		key := leiosBlockKey(point.Slot, point.Hash)
 		o.leiosTxFetchClaimsMu.Lock()
-		defer o.leiosTxFetchClaimsMu.Unlock()
-		claim := o.leiosTxFetchClaims[leiosBlockKey(point.Slot, point.Hash)]
-		return claim != nil && claim.owner.connKey == "deadline-waiter"
-	}, 500*time.Millisecond, 10*time.Millisecond,
-		"queued time did not consume the owner's fixed attempt budget")
+		claim := o.leiosTxFetchClaims[key]
+		var originalCtx context.Context
+		if claim != nil {
+			originalCtx = claim.owner.attemptCtx
+		}
+		o.leiosTxFetchClaimsMu.Unlock()
+		require.NotNil(
+			t,
+			originalCtx,
+			"the queued owner must already have its attempt context",
+		)
+		deadline, hasDeadline := originalCtx.Deadline()
+		require.True(t, hasDeadline, "the budget must start before activation")
+		o.dispatchLeiosTxOfferFetch(
+			waiterGuard,
+			&leiosTxOfferTestRequester{txs: txs},
+			namedConnId("deadline-waiter"),
+			"deadline-waiter",
+			point,
+			nil,
+		)
+		o.leiosTxFetchClaimsMu.Lock()
+		var waiter *leiosTxFetchCandidate
+		if len(claim.waiters) == 1 {
+			waiter = claim.waiters[0]
+		}
+		o.leiosTxFetchClaimsMu.Unlock()
+		require.NotNil(
+			t,
+			waiter,
+			"waiter must queue before the virtual clock advances",
+		)
+		// Let both virtual attempt budgets expire before observing the handoff.
+		// A launch latch survives expiry; polling current ownership would miss it.
+		time.Sleep(100 * time.Millisecond)
+		synctest.Wait()
+		testutil.RequireReceive(
+			t,
+			originalCtx.Done(),
+			testutil.AsyncWait,
+			"queued time did not consume the owner's fixed attempt budget",
+		)
+		require.ErrorIs(t, originalCtx.Err(), context.DeadlineExceeded)
+		testutil.RequireReceive(
+			t,
+			waiterPromoted,
+			testutil.AsyncWait,
+			"expired queued owner did not promote its waiter",
+		)
+		o.leiosTxFetchClaimsMu.Lock()
+		promotedOwner := claim.owner
+		waiterCtx := waiter.attemptCtx
+		currentClaim := o.leiosTxFetchClaims[key]
+		o.leiosTxFetchClaimsMu.Unlock()
+		require.Same(t, waiter, promotedOwner)
+		require.Nil(
+			t,
+			currentClaim,
+			"both expired attempts must release the claim",
+		)
+		require.NotNil(t, waiterCtx)
+		require.ErrorIs(t, waiterCtx.Err(), context.DeadlineExceeded)
+		nextDeadline, hasDeadline := waiterCtx.Deadline()
+		require.True(t, hasDeadline)
+		require.True(
+			t,
+			nextDeadline.After(deadline),
+			"the waiter must receive its own fresh attempt budget",
+		)
+	})
 }
 
 func TestLeiosTxsOfferTransferredOwnerCannotFetchWhenDequeued(t *testing.T) {
