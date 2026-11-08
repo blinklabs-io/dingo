@@ -12054,6 +12054,15 @@ replace the ledger state and the live credentials the reload reads. Unlike
 initial startup, reload refuses a wall-clock slot outside confirmed era history:
 it cannot replace working keys without verifying the replacement's KES window.
 
+A node that forges for several pools (`blockProducerPools`) reloads each pool
+through its own key source on the same `SIGHUP`: every pool's replacement is
+validated in full and swapped on its own, and a pool whose replacement is
+refused keeps its loaded credentials without holding back the others. Each
+successful swap logs its `pool_id` with the old and new counter, each refusal
+is named in the returned error and counted on
+`dingo_block_producer_credential_reload_failures_total{pool_id}`. A pool whose
+KES key comes from an agent is still refused, as above.
+
 `ReplaceWith` deliberately does not advance the credential generation. A forge
 attempt that already holds a snapshot owns a private copy of the outgoing
 material, still validly signed for the slot it selected, so the swap does not
@@ -12303,6 +12312,61 @@ outside the lock. That is what lets it interrupt a goroutine parked in
 `Client.Run`'s background loop spends nearly all its time in — during
 shutdown; holding the lock across that read instead (the natural first
 attempt) deadlocks `Close` behind the very read only it can unblock.
+
+### Several Pools on One Node (`node_pool_producers.go`, `node_slot_arbiter.go`)
+
+`blockProducerPools` lists every pool a producer forges for, each with its own
+VRF key, operational certificate and one KES source: a local key file, a local
+KES agent socket in serve-key or sign mode, or a remote agent. The list
+replaces the single-pool `shelley*` settings, and configuration validation
+refuses the two together, two entries sharing an opcert, and more than one pool
+with Leios forging or voting, whose pipeline and vote key are wired for one.
+
+The first pool keeps the node's own forging fields (`blockForger`,
+`leaderElection`, `blockProducerCreds`, `kesAgentClient`), so a single-pool node
+runs exactly as before. Every other pool is a `poolProducer` with its own
+credentials, KES agent client, leader election, durable forge fence (keyed by
+pool) and `BlockForger`. Each pool's key source (`poolKeySource`) loads and
+validates its credentials exactly as the first pool's does, and one KES agent
+client per pool means one agent can serve them all through its profiles.
+
+**Startup and isolation.** The other pools start after the first. A pool whose
+KES source cannot be reached -- a serve-key agent that never pushes its key --
+is skipped, logged, reported by `BlockProducerReady`, and retried every 30
+seconds until it starts; the retry takes the lifecycle gates, so it never races
+a restore, truncate or shutdown. Keys that do not validate and a ledger
+mismatch against the pool's registration stop startup, as they do for one
+pool. Stops run the other pools first, each in the first pool's order: forger,
+agent client, election, then the keys.
+
+**Metrics.** With more than one pool, each pool's forging, leader-election and
+KES agent client series carry a `pool_id` label (`prometheus.WrapRegistererWith`);
+the pool ID comes from the opcert's cold key, which is a local file in every KES
+mode. One pool keeps its unlabelled series.
+
+**Schedules.** Every pool computes its own Praos leader schedule. A semaphore
+shared by all the pools' elections (`Election.SetComputeGate`, half the CPUs)
+bounds how many compute at once, so an epoch boundary does not run every
+pool's proofs together.
+
+**Shared slots.** Two pools of one node can lead the same slot, and only one
+block per slot can stay on chain. Each forger asks the node's
+`poolSlotArbiter` after its leader check. When more than one pool leads the
+slot, the arbiter proves each one's leader VRF input (`MkInputVrf` from Babbage
+on, the `SeedL` TPraos seed before) and keeps the pool with the lowest output,
+the value chain selection compares for two blocks in one slot. The other pools
+skip the slot and count `dingo_forge_yielded_to_own_pool_total` instead of a
+missed leader slot. The decision is made once per slot and cached for the
+pools that ask after it. Anything that leaves the decision in doubt -- a
+non-Praos schedule, no epoch nonce, a VRF failure, a panicking arbiter -- lets
+every leading pool forge: an extra block of the node's own costs less than a
+lost slot.
+
+**Own blocks.** The ledger's slot battle checks and the equivocation detector
+treat every pool as the node's own: `ownForgedBlocks` answers
+`WasForgedByUs` from every forger's slot tracker and counts a battle against
+the forger whose block fought it, and every pool ID is labelled
+`self_key="true"`.
 
 ### Leios Announcement Admission (`ouroboros/`)
 

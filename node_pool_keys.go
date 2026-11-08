@@ -44,17 +44,53 @@ type producerKeys struct {
 // poolKeySource loads and validates one pool's credentials. client and
 // cancel point at where that pool keeps its KES agent client and serve-key
 // loop: the node's own fields for the first pool, a poolProducer's for the
-// others.
+// others. metrics returns that pool's KES agent client metrics.
 type poolKeySource struct {
-	n      *Node
-	keys   producerKeys
-	client *io.Closer
-	cancel *context.CancelFunc
+	n       *Node
+	keys    producerKeys
+	client  *io.Closer
+	cancel  *context.CancelFunc
+	metrics func() *kesagent.Metrics
 }
 
-// primaryKeySource is the first pool's key source: the top-level key
-// settings and the node's own KES agent fields.
+// errKESSourceUnavailable marks a pool whose KES source could not be reached
+// at startup, as opposed to one whose keys are wrong. With several pools the
+// node starts without that pool and retries it; see poolProducer.
+var errKESSourceUnavailable = errors.New("KES source unavailable")
+
+// producerKeysFromPool maps a configured pool entry to its key settings.
+func producerKeysFromPool(p BlockProducerPool) producerKeys {
+	return producerKeys{
+		vrfKey:                p.ShelleyVRFKey,
+		kesKey:                p.ShelleyKESKey,
+		opCert:                p.ShelleyOperationalCertificate,
+		agentSocket:           p.ShelleyKESAgentSocket,
+		agentMode:             p.ShelleyKESAgentMode,
+		agentAddress:          p.ShelleyKESAgentAddress,
+		agentClientCertFile:   p.ShelleyKESAgentClientCertFile,
+		agentClientKeyFile:    p.ShelleyKESAgentClientKeyFile,
+		agentServerSPKISHA256: p.ShelleyKESAgentServerSPKISHA256,
+	}
+}
+
+// producerPoolCount is how many pools this node forges for.
+func (n *Node) producerPoolCount() int {
+	return max(1, len(n.config.blockProducerPools))
+}
+
+// primaryKeySource is the first pool's key source: the first
+// blockProducerPools entry, or the top-level key settings when there is no
+// list, and the node's own KES agent fields.
 func (n *Node) primaryKeySource() *poolKeySource {
+	if len(n.config.blockProducerPools) > 0 {
+		return &poolKeySource{
+			n:       n,
+			keys:    producerKeysFromPool(n.config.blockProducerPools[0]),
+			client:  &n.kesAgentClient,
+			cancel:  &n.kesAgentCancel,
+			metrics: n.kesAgentClientMetrics,
+		}
+	}
 	return &poolKeySource{
 		n: n,
 		keys: producerKeys{
@@ -68,8 +104,9 @@ func (n *Node) primaryKeySource() *poolKeySource {
 			agentClientKeyFile:    n.config.shelleyKESAgentClientKeyFile,
 			agentServerSPKISHA256: n.config.shelleyKESAgentServerSPKISHA256,
 		},
-		client: &n.kesAgentClient,
-		cancel: &n.kesAgentCancel,
+		client:  &n.kesAgentClient,
+		cancel:  &n.kesAgentCancel,
+		metrics: n.kesAgentClientMetrics,
 	}
 }
 
@@ -309,7 +346,7 @@ func (ks *poolKeySource) startKESAgentServeKey(
 		SocketPath: ks.keys.agentSocket,
 		Mode:       kesagent.ModeServeKey,
 		Logger:     ks.n.config.logger,
-		Metrics:    ks.n.kesAgentClientMetrics(),
+		Metrics:    ks.metrics(),
 	})
 	if err != nil {
 		return err
@@ -379,7 +416,11 @@ func (ks *poolKeySource) startKESAgentServeKey(
 	pk, err := client.AwaitPushedKey(ctx)
 	if err != nil {
 		_ = client.Close()
-		return fmt.Errorf("await initial KES agent key push: %w", err)
+		return fmt.Errorf(
+			"%w: await initial KES agent key push: %w",
+			errKESSourceUnavailable,
+			err,
+		)
 	}
 	// ledger/forging copies the key bytes it keeps, so this copy is dead as
 	// soon as the install returns; Client.Run does the same for every later
@@ -450,7 +491,7 @@ func (ks *poolKeySource) newKESAgentSignClient(
 			KESVKey:           opCertKey.VKey,
 			OpCertStartPeriod: opCertKey.OpCertKesPeriod,
 			Logger:            ks.n.config.logger,
-			Metrics:           ks.n.kesAgentClientMetrics(),
+			Metrics:           ks.metrics(),
 		})
 	}
 	return kesagent.NewRemoteClient(kesagent.RemoteConfig{
@@ -463,7 +504,7 @@ func (ks *poolKeySource) newKESAgentSignClient(
 		OpCert:            opCertKey.RawCBOR,
 		SignTimeout:       ks.n.config.shelleyKESAgentSignTimeout,
 		Logger:            ks.n.config.logger,
-		Metrics:           ks.n.kesAgentClientMetrics(),
+		Metrics:           ks.metrics(),
 	})
 }
 

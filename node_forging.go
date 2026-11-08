@@ -45,6 +45,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 func (n *Node) validateBlockProducerStartup() (*forging.PoolCredentials, error) {
@@ -100,11 +101,6 @@ func (n *Node) setEquivocationSelfPoolID(creds *forging.PoolCredentials) {
 	}
 }
 
-
-
-
-
-
 // agentInstallSlot returns the slot an agent key install is validated
 // against: the node's current slot, or fallbackSlot when no ledger state is
 // wired or the slot clock cannot answer. Production block-producer startup
@@ -124,18 +120,27 @@ func (n *Node) agentInstallSlot(fallbackSlot uint64) uint64 {
 	return currentSlot
 }
 
-
 // kesAgentSignClient is a sign-mode KES agent client, local or remote.
 type kesAgentSignClient interface {
 	forging.RemoteKESSigner
 	io.Closer
 }
 
-
-
 func (n *Node) kesAgentClientMetrics() *kesagent.Metrics {
 	if n.kesAgentMetrics == nil && n.config.promRegistry != nil {
-		n.kesAgentMetrics = kesagent.NewMetrics(n.config.promRegistry)
+		reg := n.config.promRegistry
+		if n.producerPoolCount() > 1 {
+			// The other pools register the same series with their pool_id,
+			// so the first pool's must carry its own or the names collide.
+			poolID, err := poolIDFromOpCertFile(
+				n.primaryKeySource().keys.opCert,
+			)
+			if err != nil {
+				return nil
+			}
+			reg = n.poolMetricsRegistry(poolID)
+		}
+		n.kesAgentMetrics = kesagent.NewMetrics(reg)
 	}
 	return n.kesAgentMetrics
 }
@@ -176,8 +181,10 @@ func (n *Node) blockProducerContext() context.Context {
 // ReloadBlockProducerCredentials re-reads the VRF, KES and operational
 // certificate files, validates them exactly as startup does, and swaps them
 // into the running block producer. Any failure leaves the loaded credentials
-// in place and forging uninterrupted. It is refused while startup, shutdown,
-// or a live restore or truncate is in progress.
+// in place and forging uninterrupted. With several pools each reloads through
+// its own key source, and a pool that fails does not stop the others. It is
+// refused while startup, shutdown, or a live restore or truncate is in
+// progress.
 func (n *Node) ReloadBlockProducerCredentials() error {
 	// The reload reads n.ledgerState and the live credentials, both of which
 	// those operations replace, from its own goroutine. Holding the gates for
@@ -192,18 +199,35 @@ func (n *Node) ReloadBlockProducerCredentials() error {
 	if err != nil {
 		return err
 	}
-	return n.reloadBlockProducerCredentials(
+	primaryErr := n.reloadBlockProducerCredentials(
 		slot,
 		supported,
 		n.validateBlockProducerLedger,
 	)
+	if n.producerPoolCount() <= 1 {
+		return primaryErr
+	}
+	// Each pool reloads on its own: one whose replacement is refused keeps
+	// forging with what it had and does not hold back the others.
+	if live := n.blockProducerCreds.Load(); primaryErr != nil && live != nil {
+		primaryErr = fmt.Errorf(
+			"pool %s: %w",
+			live.GetPoolID().String(),
+			primaryErr,
+		)
+	}
+	return errors.Join(
+		primaryErr,
+		n.reloadPoolProducerCredentials(
+			slot,
+			supported,
+			n.validateBlockProducerLedger,
+		),
+	)
 }
 
 // reloadBlockProducerCredentials is ReloadBlockProducerCredentials with the
-// clock and the ledger cross-check supplied. The replacement is loaded into
-// credentials of its own and only moved into the live set once every check has
-// passed, because loading into the live set fails closed on error, which would
-// stop a healthy producer.
+// clock and the ledger cross-check supplied, for the first pool.
 func (n *Node) reloadBlockProducerCredentials(
 	slot uint64,
 	supported bool,
@@ -213,7 +237,35 @@ func (n *Node) reloadBlockProducerCredentials(
 	if live == nil {
 		return errors.New("block producer credentials are not loaded")
 	}
-	if n.kesAgentConfigured() {
+	return n.reloadPoolCredentials(
+		n.primaryKeySource(),
+		live,
+		slot,
+		supported,
+		ledgerCheck,
+	)
+}
+
+// reloadPoolCredentials reloads one pool's credentials through its key
+// source. The replacement is loaded into credentials of its own and only moved
+// into the live set once every check has passed, because loading into the live
+// set fails closed on error, which would stop a healthy producer. A failure is
+// counted against the pool when the node forges for several.
+func (n *Node) reloadPoolCredentials(
+	ks *poolKeySource,
+	live *forging.PoolCredentials,
+	slot uint64,
+	supported bool,
+	ledgerCheck func(*forging.PoolCredentials) error,
+) (retErr error) {
+	if n.producerPoolCount() > 1 {
+		defer func() {
+			if retErr != nil {
+				n.countReloadFailure(live.GetPoolID().String())
+			}
+		}()
+	}
+	if ks.kesAgentConfigured() {
 		return errors.New(
 			"block producer credentials come from a KES agent; rotate the key through the agent",
 		)
@@ -223,7 +275,7 @@ func (n *Node) reloadBlockProducerCredentials(
 			"credential reload requires a wall-clock slot supported by confirmed era history",
 		)
 	}
-	next, err := n.validateBlockProducerStartupForClock(slot, supported)
+	next, err := ks.validateBlockProducerStartupForClock(slot, supported)
 	if err != nil {
 		return fmt.Errorf("validate reloaded credentials: %w", err)
 	}
@@ -268,7 +320,6 @@ func (n *Node) closeBlockProducerCredentials() {
 		creds.Close()
 	}
 }
-
 
 func (n *Node) blockProducerShelleyGenesis() (*shelley.ShelleyGenesis, error) {
 	// KES-period plausibility requires a Shelley genesis. Block producer
@@ -494,6 +545,9 @@ func (n *Node) startBlockProducer(
 	ctx context.Context,
 	started []func(),
 ) ([]func(), error) {
+	if err := n.prepareMultiPool(); err != nil {
+		return started, fmt.Errorf("block producer pools: %w", err)
+	}
 	//nolint:contextcheck // the KES agent loop is bound to the node lifecycle context, not this call
 	creds, err := n.validateBlockProducerStartup()
 	if err != nil {
@@ -505,6 +559,11 @@ func (n *Node) startBlockProducer(
 	n.blockProducerCreds.Store(creds)
 	n.setEquivocationSelfPoolID(creds)
 	started = append(started, func() {
+		logErrIfNotNil(
+			n.config.logger,
+			"failed to stop the other block producer pools during cleanup",
+			n.stopPoolProducers(),
+		)
 		if n.blockForger != nil {
 			n.blockForger.Stop()
 		}
@@ -539,18 +598,17 @@ func (n *Node) startBlockProducer(
 	if err := n.enableLeiosVoting(creds); err != nil {
 		return started, fmt.Errorf("failed to enable leios voting: %w", err)
 	}
-	// Wire forger's slot tracker into ledger state for slot
-	// battle detection. The forger is created after the ledger
-	// state, so we use the late-binding setter.
-	if n.blockForger != nil {
-		n.ledgerState.SetForgedBlockChecker(
-			n.blockForger.SlotTracker(),
-		)
-		n.ledgerState.SetForgingEnabled(true)
-		n.ledgerState.SetSlotBattleRecorder(
-			n.blockForger,
+	// Start every other pool this node forges for.
+	if err := n.startPoolProducers(ctx); err != nil {
+		return started, fmt.Errorf(
+			"failed to start block producer pools: %w",
+			err,
 		)
 	}
+	// Wire the forgers' slot trackers into ledger state for slot
+	// battle detection. The forgers are created after the ledger
+	// state, so we use the late-binding setter.
+	n.wireForgedBlockTracking()
 	return started, nil
 }
 
@@ -562,6 +620,52 @@ func (n *Node) initBlockForger(
 ) error {
 	if creds == nil {
 		return errors.New("nil pool credentials")
+	}
+	poolID := creds.GetPoolID().String()
+	built, err := n.newPoolForger(
+		ctx,
+		creds,
+		n.poolMetricsRegistry(poolID),
+		n.slotArbiterFor(poolID),
+	)
+	if err != nil {
+		return err
+	}
+
+	// Store election for cleanup during shutdown only after the forger is
+	// fully created and running.
+	n.setLeaderElection(built.election)
+	n.blockForger = built.forger
+	n.addArbiterMember(poolID, creds, built)
+	n.config.logger.Info(
+		"block forger started in production mode with leader election",
+		"pool_id", poolID,
+	)
+
+	return nil
+}
+
+// poolForging is one pool's running leader election and block forger.
+type poolForging struct {
+	election nodeconsensus.LeaderScheduler
+	forger   *forging.BlockForger
+	// praos is true when the election draws a Praos VRF schedule, the only
+	// kind whose leader slots a SlotArbiter can rank by VRF output.
+	praos bool
+}
+
+// newPoolForger builds and starts one pool's leader election and block
+// forger. reg is where both register their metrics and arbiter decides slots
+// this pool leads together with another pool of the node; either may be nil.
+// The caller owns stopping what it returns.
+func (n *Node) newPoolForger(
+	ctx context.Context,
+	creds *forging.PoolCredentials,
+	reg prometheus.Registerer,
+	arbiter forging.SlotArbiter,
+) (poolForging, error) {
+	if creds == nil {
+		return poolForging{}, errors.New("nil pool credentials")
 	}
 	// Create mempool adapter for the forging package.
 	mempoolAdapter := &forgingMempoolAdapter{source: n.mempool}
@@ -583,7 +687,7 @@ func (n *Node) initBlockForger(
 		LeiosHeaderExtension: n.config.leiosForgingEnabled(),
 	})
 	if err != nil {
-		return fmt.Errorf("failed to create block builder: %w", err)
+		return poolForging{}, fmt.Errorf("failed to create block builder: %w", err)
 	}
 
 	// Create block broadcaster for synchronous local chain adoption.
@@ -613,6 +717,7 @@ func (n *Node) initBlockForger(
 	// The selected provider owns production scheduling. It receives the same
 	// ledger views used by header validation, while credentials remain owned by
 	// the existing block producer.
+	var praosSchedule bool
 	election, err := n.selectedConsensusProvider().NewLeaderScheduler(
 		func(
 			scheduleIdentity string,
@@ -644,8 +749,12 @@ func (n *Node) initBlockForger(
 					kind,
 				)
 			}
+			praosSchedule = kind == nodeconsensus.LeaderSchedulePraos
 			election.SetConsensusIdentity(scheduleIdentity)
-			election.SetPromRegistry(n.config.promRegistry)
+			election.SetPromRegistry(reg)
+			if n.scheduleComputeGate != nil {
+				election.SetComputeGate(n.scheduleComputeGate)
+			}
 			if scheduleStore != nil {
 				election.SetScheduleStore(scheduleStore)
 			}
@@ -653,12 +762,12 @@ func (n *Node) initBlockForger(
 		},
 	)
 	if err != nil {
-		return fmt.Errorf("create consensus leader scheduler: %w", err)
+		return poolForging{}, fmt.Errorf("create consensus leader scheduler: %w", err)
 	}
 
 	// Start leader election (subscribes to epoch transitions)
 	if err := election.Start(ctx); err != nil {
-		return fmt.Errorf("failed to start leader election: %w", err)
+		return poolForging{}, fmt.Errorf("failed to start leader election: %w", err)
 	}
 
 	// Create slot clock adapter for the forger
@@ -715,7 +824,7 @@ func (n *Node) initBlockForger(
 	}
 	if forgeFence == nil {
 		_ = election.Stop()
-		return errors.New(
+		return poolForging{}, errors.New(
 			"block producer requires a metadata store for the forge fence",
 		)
 	}
@@ -756,7 +865,8 @@ func (n *Node) initBlockForger(
 		},
 		BlockValidator:      blockValidator,
 		ForgeFence:          forgeFence,
-		PromRegistry:        n.config.promRegistry,
+		PromRegistry:        reg,
+		SlotArbiter:         arbiter,
 		LeiosProduceChecker: leiosChecker,
 		LeiosEBBroadcaster:  leiosEBCaster,
 		LeiosMempool:        leiosMempool,
@@ -797,26 +907,21 @@ func (n *Node) initBlockForger(
 	if err != nil {
 		// Stop election to prevent goroutine leak
 		_ = election.Stop()
-		return fmt.Errorf("failed to create block forger: %w", err)
+		return poolForging{}, fmt.Errorf("failed to create block forger: %w", err)
 	}
 
 	// Start the forger with the passed context
 	if err := forger.Start(ctx); err != nil {
 		// Stop election to prevent goroutine leak
 		_ = election.Stop()
-		return fmt.Errorf("failed to start block forger: %w", err)
+		return poolForging{}, fmt.Errorf("failed to start block forger: %w", err)
 	}
 
-	// Store election for cleanup during shutdown only after the forger is
-	// fully created and running.
-	n.setLeaderElection(election)
-	n.blockForger = forger
-	n.config.logger.Info(
-		"block forger started in production mode with leader election",
-		"pool_id", poolID.String(),
-	)
-
-	return nil
+	return poolForging{
+		election: election,
+		forger:   forger,
+		praos:    praosSchedule,
+	}, nil
 }
 
 func classifyLeiosAnnouncementValidationError(err error) error {
