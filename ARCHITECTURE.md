@@ -107,6 +107,13 @@ is still busy. On PostgreSQL and MySQL this also includes read activity and a
 bulk-load session holding its dedicated connection; the detailed scheduling
 and SQLite reclaim behavior is documented in `DATABASE.md`.
 
+The SQLite provider certifies eager preparation for optional wider overlay
+UTxO inserts. The shared store checks the existing transaction's runtime
+parameter limit and main/TEMP trigger state before widening that one statement.
+Unknown queryers, triggers and unsupported checks retain the dialect's bound;
+writer acquisition, global query bounds and overlay rollback ownership stay
+with their existing components.
+
 The SQLite provider is a thin factory around the pure-Go driver. It configures
 one WAL writer, a separate read pool, pragmas, disk-size accounting, migration
 locking, query tracing, optional incremental space reclaim (off by default), and

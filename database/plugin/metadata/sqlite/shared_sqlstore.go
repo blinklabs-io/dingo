@@ -52,7 +52,8 @@ func (s *uint64Sum) Step(
 		return fmt.Errorf("uint64 sum expects text, got %T", args[0])
 	}
 	var item big.Int
-	if _, ok := item.SetString(value, 10); !ok || item.Sign() < 0 || item.BitLen() > 64 {
+	if _, ok := item.SetString(value, 10); !ok || item.Sign() < 0 ||
+		item.BitLen() > 64 {
 		return fmt.Errorf("invalid uint64 amount %q", value)
 	}
 	s.total.Add(&s.total, &item)
@@ -88,13 +89,16 @@ func (s *uint64Sum) WindowValue(
 func (*uint64Sum) Final(_ *driversqlite.FunctionContext) {}
 
 func init() {
-	driversqlite.MustRegisterFunction("dingo_uint64_sum", &driversqlite.FunctionImpl{
-		NArgs:         1,
-		Deterministic: true,
-		MakeAggregate: func(driversqlite.FunctionContext) (driversqlite.AggregateFunction, error) {
-			return &uint64Sum{}, nil
+	driversqlite.MustRegisterFunction(
+		"dingo_uint64_sum",
+		&driversqlite.FunctionImpl{
+			NArgs:         1,
+			Deterministic: true,
+			MakeAggregate: func(driversqlite.FunctionContext) (driversqlite.AggregateFunction, error) {
+				return &uint64Sum{}, nil
+			},
 		},
-	})
+	)
 }
 
 var sharedMemoryDBSequence atomic.Uint64
@@ -660,24 +664,26 @@ func openSQLStore(
 	store, err := sqlstore.New(sqlstore.Config{
 		GenesisStakingEmpty: dependencies.GenesisStakingEmpty,
 		SQLitePath:          databasePath,
-		WriteDB:             writeDB,
-		ReadDB:              readDB,
-		Dialect:             sqlstore.SQLiteDialect(),
-		Logger:              dependencies.Logger,
-		StorageMode:         dependencies.StorageMode,
-		Migrations:          registry,
-		MigrationLocker:     locker,
-		Prepare:             prepare,
-		DiskSize:            diskSizeFunc,
-		Maintenance:         maintenance,
-		MaintenanceInterval: 24 * time.Hour,
-		Vacuum:              vacuum,
-		VacuumInterval:      vacuumInterval,
-		Checkpoint:          checkpoint,
-		CheckpointInterval:  checkpointInterval,
-		BackupTo:            backupTo,
-		RestoreFrom:         restoreFrom,
-		PromRegistry:        dependencies.PromRegistry,
+		// modernc prepares eagerly; runtime probing remains on the active Tx.
+		SQLiteOverlayInsertRows: 2047,
+		WriteDB:                 writeDB,
+		ReadDB:                  readDB,
+		Dialect:                 sqlstore.SQLiteDialect(),
+		Logger:                  dependencies.Logger,
+		StorageMode:             dependencies.StorageMode,
+		Migrations:              registry,
+		MigrationLocker:         locker,
+		Prepare:                 prepare,
+		DiskSize:                diskSizeFunc,
+		Maintenance:             maintenance,
+		MaintenanceInterval:     24 * time.Hour,
+		Vacuum:                  vacuum,
+		VacuumInterval:          vacuumInterval,
+		Checkpoint:              checkpoint,
+		CheckpointInterval:      checkpointInterval,
+		BackupTo:                backupTo,
+		RestoreFrom:             restoreFrom,
+		PromRegistry:            dependencies.PromRegistry,
 	})
 	if err != nil {
 		if readDB != writeDB {
