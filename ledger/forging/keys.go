@@ -20,6 +20,7 @@ import (
 	"crypto/ed25519"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"path/filepath"
 	"reflect"
@@ -823,6 +824,18 @@ func (pc *PoolCredentials) updateKESPeriodUnsafe(period uint64) error {
 func (pc *PoolCredentials) updateKESForSlot(
 	period uint64,
 ) (start, maxEvolutions, expiry uint64, retErr error) {
+	// Dropping the handle is not enough for a transport that keeps a live
+	// connection: close it so the expired certificate's remote signer cannot
+	// be reached through a copy another credential generation still holds. The
+	// close runs after pc.mu is released because it can wait on an in-flight
+	// signing request. A signer that holds nothing open need not implement
+	// io.Closer.
+	var expiredSigner RemoteKESSigner
+	defer func() {
+		if closer, ok := expiredSigner.(io.Closer); ok {
+			_ = closer.Close()
+		}
+	}()
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
 
@@ -848,6 +861,7 @@ func (pc *PoolCredentials) updateKESForSlot(
 	}
 	if period >= expiry {
 		pc.kesMu.Lock()
+		expiredSigner = pc.remoteSigner
 		hadSigningKey := pc.kesSKey != nil || pc.remoteSigner != nil
 		if pc.kesSKey != nil {
 			pc.kesSKey.Zeroize()
