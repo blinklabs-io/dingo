@@ -1648,6 +1648,64 @@ func (k *KoiosClient) GetPoolEpochHistory(
 	return &items[0], nil
 }
 
+// GetPoolRegisteredAtEpoch reports whether Koios's own certificate history
+// for one pool has it registered and not yet retired at epoch. It queries
+// /pool_updates for that single pool, so unlike the bulk first-active map it
+// does not depend on a multi-page scan seeing every row.
+//
+// Among the certificates already effective at epoch (a registration by its
+// active_epoch_no, a deregistration by its retiring_epoch), the most recent
+// by block_time decides. A pool with none effective yet is not registered.
+func (k *KoiosClient) GetPoolRegisteredAtEpoch(
+	ctx context.Context,
+	poolBech32 string,
+	epoch uint64,
+) (bool, error) {
+	path := fmt.Sprintf(
+		"/pool_updates?pool_id_bech32=eq.%s&select=active_epoch_no,retiring_epoch,block_time",
+		poolBech32,
+	)
+	resp, err := k.get(ctx, path, -1, -1)
+	if err != nil {
+		return false, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return false, fmt.Errorf(
+			"koios /pool_updates: status %d body: %s",
+			resp.StatusCode,
+			resp.Body,
+		)
+	}
+	var items []struct {
+		ActiveEpochNo *uint64 `json:"active_epoch_no"`
+		RetiringEpoch *uint64 `json:"retiring_epoch"`
+		BlockTime     int64   `json:"block_time"`
+	}
+	if err := json.Unmarshal(resp.Body, &items); err != nil {
+		return false, fmt.Errorf("koios /pool_updates decode: %w", err)
+	}
+	registered := false
+	var latest int64
+	seen := false
+	for _, item := range items {
+		var isRegistration bool
+		switch {
+		case item.ActiveEpochNo != nil && *item.ActiveEpochNo <= epoch:
+			isRegistration = true
+		case item.RetiringEpoch != nil && *item.RetiringEpoch <= epoch:
+			isRegistration = false
+		default:
+			continue
+		}
+		if !seen || item.BlockTime > latest {
+			seen = true
+			latest = item.BlockTime
+			registered = isRegistration
+		}
+	}
+	return registered, nil
+}
+
 // GetPoolLatestHistoryEpoch returns the newest epoch Koios has a
 // /pool_history row for, for one pool. ok is false when Koios has no row
 // for the pool at any epoch.

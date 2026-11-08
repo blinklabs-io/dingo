@@ -739,6 +739,18 @@ func (o *Observer) processEpoch(ctx context.Context, epoch uint64) {
 		return
 	}
 
+	if err := o.reconcilePoolReference(ctx, epoch); err != nil {
+		if cancelled(ctx, err) {
+			return
+		}
+		if errors.Is(err, errPoolHistoryUnpublished) {
+			o.reportErrorFatal(epoch, false, err, false)
+			return
+		}
+		o.reportFetchError(epoch, false, err)
+		return
+	}
+
 	result, err := CheckEpoch(
 		ctx,
 		o.cache,
@@ -1051,6 +1063,156 @@ func (o *Observer) fetchIfNeeded(ctx context.Context, epoch uint64) error {
 		},
 	)
 	return err
+}
+
+// errPoolHistoryUnpublished marks a pool that Koios's certificate history has
+// registered for an epoch while /pool_history keeps answering with no row.
+var errPoolHistoryUnpublished = errors.New(
+	"koios pool_history has no row for a registered pool",
+)
+
+// reconcilePoolReference re-requests, one pool at a time, every pool Dingo has
+// in an epoch's stake basis but the cached Koios reference lacks, before the
+// comparison can call it pool_only_dingo.
+//
+// The bulk fetch cannot be trusted to prove absence: it skips pools by a
+// first-active epoch assembled from a multi-page /pool_updates scan, and a
+// single empty /pool_history answer is indistinguishable from a pool Koios
+// does not have. A pool Koios answers for now is added to the cache. A pool
+// Koios's own certificates show unregistered at the epoch stays absent, so
+// the comparison still reports it. A pool Koios registered but cannot produce
+// history for leaves the reference incomplete, which returns
+// errPoolHistoryUnpublished instead of a verdict.
+//
+// An empty reference pool set is left to the comparison, which already
+// reports it as reference_lag.
+func (o *Observer) reconcilePoolReference(
+	ctx context.Context,
+	epoch uint64,
+) error {
+	info, err := o.cache.GetEpochInfo(o.cfg.Network, epoch)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		return fmt.Errorf("get epoch info before pool reconcile: %w", err)
+	}
+	if info.PreStaking {
+		return nil
+	}
+	stakeEpoch, ok := koiosStakeEpoch(o.cfg.Network, epoch)
+	if !ok {
+		return nil
+	}
+	dingoPools, err := o.cfg.Source.GetPoolEpochDataMap(
+		ctx, stakeEpoch, koiosParamEpoch(epoch),
+	)
+	if err != nil {
+		// checkEpoch reads the same map and reports the failure itself.
+		return nil //nolint:nilerr // reported by the comparison
+	}
+	cached, err := o.cache.GetAllPoolsForEpoch(o.cfg.Network, epoch)
+	if err != nil {
+		return fmt.Errorf("get cached pools before pool reconcile: %w", err)
+	}
+	if len(cached) == 0 {
+		return nil
+	}
+	known := make(map[string]struct{}, len(cached))
+	for i := range cached {
+		keyHex, decErr := PoolKeyHashHex(cached[i].PoolBech32)
+		if decErr == nil {
+			known[keyHex] = struct{}{}
+		}
+	}
+	var missing []string
+	for keyHex, pool := range dingoPools {
+		if pool == nil || !pool.StakePresent {
+			continue
+		}
+		if _, inCache := known[keyHex]; inCache {
+			continue
+		}
+		bech, bechErr := PoolKeyHashHexToBech32(keyHex)
+		if bechErr != nil {
+			continue
+		}
+		missing = append(missing, bech)
+	}
+	slices.Sort(missing)
+	var unpublished []string
+	for _, poolBech32 := range missing {
+		found, err := o.refetchPoolHistory(ctx, epoch, poolBech32)
+		if err != nil {
+			return fmt.Errorf("pool %s history: %w", poolBech32, err)
+		}
+		if !found {
+			unpublished = append(unpublished, poolBech32)
+		}
+	}
+	if len(unpublished) > 0 {
+		return fmt.Errorf(
+			"epoch %d: %w: %v", epoch, errPoolHistoryUnpublished, unpublished,
+		)
+	}
+	return nil
+}
+
+// refetchPoolHistory caches poolBech32's history row for epoch when Koios
+// has one. found is true when the pool no longer needs a verdict from the
+// caller: its row was cached, or Koios's certificates show it unregistered at
+// epoch. It is false only for a registered pool whose history stays empty
+// through every attempt.
+func (o *Observer) refetchPoolHistory(
+	ctx context.Context,
+	epoch uint64,
+	poolBech32 string,
+) (found bool, err error) {
+	registeredChecked := false
+	for attempt := 0; attempt < o.cfg.FetchRetryAttempts; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return false, ctx.Err()
+			case <-time.After(o.cfg.FetchRetryDelay):
+			}
+		}
+		item, err := o.koios.GetPoolEpochHistory(ctx, poolBech32, epoch)
+		if err != nil {
+			if errors.Is(err, ErrKoiosPermanent) ||
+				attempt == o.cfg.FetchRetryAttempts-1 {
+				return false, err
+			}
+			continue
+		}
+		if item != nil {
+			row := PoolEpochFromKoiosHistoryItem(
+				o.cfg.Network, epoch, poolBech32, item, time.Now(),
+			)
+			if err := o.cache.UpsertPoolEpoch(row); err != nil {
+				return false, fmt.Errorf("cache pool history: %w", err)
+			}
+			return true, nil
+		}
+		if registeredChecked {
+			continue
+		}
+		registered, err := o.koios.GetPoolRegisteredAtEpoch(
+			ctx, poolBech32, epoch,
+		)
+		if err != nil {
+			if errors.Is(err, ErrKoiosPermanent) ||
+				attempt == o.cfg.FetchRetryAttempts-1 {
+				return false, err
+			}
+			continue
+		}
+		if !registered {
+			return true, nil
+		}
+		registeredChecked = true
+	}
+	return false, nil
 }
 
 // fetchParamsIfNeeded fetches the /epoch_params reference row for epoch only

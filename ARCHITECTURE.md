@@ -16166,6 +16166,17 @@ for this: it reflects only a pool's *current* (possibly re-registered)
 parameters, which can be well after its true first-active epoch and would
 unsafely skip epochs where the pool genuinely had history.
 
+The skip map and a single empty `/pool_history` answer are not proof that Koios
+lacks a pool. Before the in-process observer compares an epoch, it re-requests
+`/pool_history` for each pool Dingo has in the epoch's stake basis that the
+cached reference lacks, bypassing the skip, and caches any row Koios returns. A
+pool still empty is checked against its own `/pool_updates` certificates
+(`GetPoolRegisteredAtEpoch`): unregistered, not yet effective or already retired
+at the epoch stays `pool_only_dingo`; registered with persistently empty history
+leaves the reference incomplete, so the epoch is recorded `ERROR` and retried
+without calling `FatalFunc`. The standalone `check` command reads only the cache
+and does not do this reconciliation.
+
 `check` and the default `run` command return a non-nil error (surfaced as a
 non-zero process exit) whenever any epoch comes back `FAIL` or `ERROR`. This
 is based on the *persisted* `check_epoch_status` for the run's scope
