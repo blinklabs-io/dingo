@@ -15818,8 +15818,10 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   `koios_tx_info` (one row per `(network, tx_hash)` holding the decoded
   `/tx_info` subset `node-parity from-genesis` rebuilds the UTxO set from: body
   inputs and outputs, plus the collateral inputs, collateral return and phase-2
-  validity verdict its `Consumed`/`Produced` need). That table is written by
-  `cmd/node-parity from-genesis`, not by the `fetch` subcommand, and unlike the
+  validity verdict its `Consumed`/`Produced` need; the reference inputs serve
+  only the in-process observer's transaction sample, below). That table is
+  written by `cmd/node-parity from-genesis` and by that sample, not by the
+  `fetch` subcommand, and unlike the
   per-epoch tables it needs no TTL — a settled transaction never changes
   Koios-side. A `payload_version` column stands in for one: it stamps the struct
   shape each row was written from, and rows carrying an older version are
@@ -16684,6 +16686,24 @@ second sync:
     may already have failed — cannot be read as the epoch's own answer. The
     observer's `epoch validated` log line and `reportError`'s synthesized
     `ERROR` carry that set too.
+  - **Transaction sample** (`internal/koiosparity/tx_parity.go`). Epoch-level
+    totals cannot see a stored transaction whose inputs or outputs are wrong
+    unless the error moves a total. A source that implements
+    `TransactionParitySource` (`DatabaseSource`, in API storage mode only)
+    reports up to `EpochTransactionSampleSize` transactions of the epoch, in
+    block order. `fetchIfNeeded` caches their `/tx_info` rows under the
+    observer's bounded fetch retry (rows that arrived are kept, and each hash
+    that outlasts it is logged and surfaces as a `dingo_db_missing` mismatch,
+    an `ERROR` epoch), and
+    `checkEpoch` compares, in the aggregate scope, the consumed inputs,
+    collateral inputs, reference inputs and produced outputs including lovelace
+    and native-asset amounts, plus the validity flag. A phase-2-invalid
+    transaction is compared on what the ledger applied: its collateral and
+    collateral return. Core storage mode is not sampled: it hard-deletes
+    consumed UTxOs after the stability window and does not retain the
+    collateral and reference associations. The standalone `check` CLI reads
+    through `DingoDB`, which does not implement the interface, so it skips
+    this comparison.
   - **Prometheus metrics** (`internal/koiosparity/metrics.go`). Before this, a
     FAIL/ERROR result was visible only by grepping the node's log or querying
     `check_epoch_status`/`check_mismatches` directly. `Observer .emitResult` —
