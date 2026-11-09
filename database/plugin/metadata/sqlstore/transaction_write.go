@@ -596,16 +596,21 @@ func (s *Store) repairConflictedUtxo(
 	}
 	var id int64
 	u := s.utxoSQL()
-	if err := s.queryRowCached(ctx, db, u.repairConflicted,
-		u.bindRef(
-			[]any{params.TransactionID, params.CollateralReturnForTxID},
-			params.TxID, params.OutputIdx,
-		)...,
-	).Scan(&id); err != nil {
+	args := u.bindRef(
+		[]any{params.TransactionID, params.CollateralReturnForTxID},
+		params.TxID, params.OutputIdx,
+	)
+	if u.sqlite {
+		// The SQLite statement also compares tx_id, because its reference
+		// resolves through the producer identity alone.
+		args = append(args, params.TxID)
+	}
+	if err := s.queryRowCached(ctx, db, u.repairConflicted, args...).
+		Scan(&id); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			// The insert was suppressed by a unique index, yet no stored
-			// output has this hash: the producer already has a different
-			// output at this index.
+			// output has this hash and index: the producer already has a
+			// different output at this index.
 			return fmt.Errorf(
 				"%w: output %x:%d collides with a stored output of its "+
 					"producer",
@@ -2184,10 +2189,20 @@ func (s *Store) insertUtxoModelCheckedWithRows(
 	}
 	if errors.Is(err, sql.ErrNoRows) && ignoreConflict {
 		inserted = false
-		err = s.queryRowCached(
-			ctx, db, u.idByOutput,
-			u.refArgs(params.TxID, params.OutputIdx)...,
-		).Scan(&id)
+		lookupArgs := u.refArgs(params.TxID, params.OutputIdx)
+		if u.sqlite {
+			// As in repairConflictedUtxo: the SQLite reference resolves
+			// through the producer identity alone.
+			lookupArgs = append(lookupArgs, params.TxID)
+		}
+		err = s.queryRowCached(ctx, db, u.idByOutput, lookupArgs...).Scan(&id)
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, fmt.Errorf(
+				"%w: output %x:%d collides with a stored output of its "+
+					"producer",
+				types.ErrUtxoConflict, utxo.TxId, utxo.OutputIdx,
+			)
+		}
 		if err == nil {
 			// Snapshot imports can create an output before its producer
 			// transaction is replayed. Once that transaction is known, fill in

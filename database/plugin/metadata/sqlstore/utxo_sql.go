@@ -158,11 +158,12 @@ var sqliteUtxoSQL = &utxoSQL{
 	sqlite:            true,
 	getSpendState:     getUtxoSpendStateHead + sqliteRefEq,
 	getSpendStateHash: getUtxoSpendStateHashHead + sqliteRefEq,
-	repairConflicted:  repairConflictedUtxoHead + sqliteRefEq + repairConflictedUtxoTail,
+	repairConflicted: repairConflictedUtxoHead + sqliteRefEq + " AND tx_id = ?" +
+		repairConflictedUtxoTail,
 	getLiveByRef:      getLiveUtxoByRefHead + sqliteRefEq + " AND deleted_slot = 0",
 	getIncludingSpent: getUtxoIncludingSpentByRefHead + sqliteRefEq,
 	idByRef:           utxoIDByRefHead + sqliteRefEq,
-	idByOutput:        utxoIDByOutputHead + sqliteRefEq,
+	idByOutput:        utxoIDByOutputHead + sqliteRefEq + " AND tx_id = ?",
 	amountByOutput:    utxoAmountByOutputHead + sqliteRefEq,
 	spendScriptHash:   spendScriptHashHead + sqliteRefEq,
 	markDeletedAtSlot: markUtxoDeletedAtSlotHead + sqliteRefEq +

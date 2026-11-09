@@ -18,6 +18,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strconv"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -125,16 +126,73 @@ func TestUtxoBatchProducerCollisionFailsCleanly(t *testing.T) {
 	require.Equal(t, 1, count, "the batch's fresh output must not be written")
 }
 
-// An output the legacy spender hash of which names no transaction row keeps
+// A stored output at the producer and index an insert names, under another
+// tx_id, is a different output: the insert conflicts instead of attaching its
+// relations to that row.
+func TestUtxoRepairRejectsStoredOutputWithAnotherTxID(t *testing.T) {
+	t.Parallel()
+	for _, n := range []int{1, 2} {
+		t.Run(strconv.Itoa(n), func(t *testing.T) {
+			t.Parallel()
+			store := newMigratedSQLiteStore(t)
+			producedHash := bytes32(0xb3)
+			id := producerFor(t, store, producedHash)
+			_, err := store.writeDB.Exec(
+				`INSERT INTO utxo (transaction_id, tx_id, output_idx,
+    credential_tag, added_slot, deleted_slot, amount)
+VALUES (?, ?, 0, 0, 1, 0, '1')`, id, bytes32(0xb4),
+			)
+			require.NoError(t, err)
+			utxos := []*models.Utxo{{
+				TxId: producedHash, OutputIdx: 0, TransactionID: &id,
+				Amount: types.Uint64(1),
+			}}
+			if n == 2 {
+				utxos = append(utxos, &models.Utxo{
+					TxId: producedHash, OutputIdx: 5, TransactionID: &id,
+					Amount: types.Uint64(1),
+				})
+			}
+			err = store.withWriteTransaction(nil,
+				func(db queryer, ctx context.Context) error {
+					_, err := store.insertUtxoModelsChecked(
+						ctx, db, utxos, true, nil,
+					)
+					return err
+				},
+			)
+			require.ErrorIs(t, err, types.ErrUtxoConflict)
+		})
+	}
+}
+
+// Foreign keys are on for every store connection, so a legacy spender hash
+// with no transaction row can only come from a database written before they
+// were enforced.
+func TestLegacySpenderHashRequiresATransactionRow(t *testing.T) {
+	t.Parallel()
+	store, _ := newOverlayInsertStore(t, false, 0)
+	_, err := store.writeDB.Exec(
+		`INSERT INTO utxo (tx_id, output_idx, deleted_slot, added_slot, amount,
+    spent_at_tx_id) VALUES (?, 0, 500, 3, '7', ?)`,
+		bytes32(0xc6), bytes32(0xc7),
+	)
+	require.ErrorContains(t, err, "FOREIGN KEY")
+}
+
+// An output whose legacy spender hash names no transaction row keeps
 // deleted_slot but has no spender. Readers return it as a spent output with no
 // spender hash; Kupo's match iterator drops spent outputs without one.
 func TestUtxoSpentWithoutSpenderRowReadsAsSpentWithNoSpender(t *testing.T) {
 	t.Parallel()
 	store := newMigratedSQLiteStore(t)
 	hash := bytes32(0xc5)
+	// This store's connections do not enforce foreign keys, as a database
+	// written before they were enforced did not.
 	_, err := store.writeDB.Exec(
-		`INSERT INTO utxo (tx_id, output_idx, deleted_slot, added_slot, amount)
-VALUES (?, 0, 500, 3, '7')`, hash,
+		`INSERT INTO utxo (tx_id, output_idx, deleted_slot, added_slot, amount,
+    spent_at_tx_id) VALUES (?, 0, 500, 3, '7', ?)`,
+		hash, bytes32(0xc8),
 	)
 	require.NoError(t, err)
 
