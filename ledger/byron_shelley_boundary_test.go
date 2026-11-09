@@ -1295,7 +1295,7 @@ func TestByronShelleyEraHistoryWhenFirstShelleyBlockFollowsTransitionEpoch(
 	seedBoundaryFixtureLiveUtxo(t, ls)
 	ls.Lock()
 	cache := make([]models.Epoch, 0, 4)
-	for id := uint64(0); id < 3; id++ {
+	for id := range uint64(3) {
 		row := models.Epoch{
 			EpochId:       id,
 			StartSlot:     id * byronEpochLength,

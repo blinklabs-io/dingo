@@ -616,7 +616,8 @@ func eraTransitionEpoch(
 		return next.EpochId, nil
 	}
 	if prev.LengthInSlots != next.LengthInSlots {
-		oldLen, newLen := int64(prev.LengthInSlots), int64(next.LengthInSlots)
+		oldLen := int64(prev.LengthInSlots)                    // #nosec G115 -- protocol-bounded
+		newLen := int64(next.LengthInSlots)                    // #nosec G115 -- protocol-bounded
 		slots := int64(next.StartSlot) - int64(prev.StartSlot) // #nosec G115
 		epochs := int64(next.EpochId - prev.EpochId)           // #nosec G115
 		numerator := slots - epochs*newLen

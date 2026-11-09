@@ -133,24 +133,13 @@ func (ls *LedgerState) announcedUtxoPruneFloor() uint64 {
 	return p.utxoFloorSlot
 }
 
-// capPoolSnapshotPruneBefore lowers before -- the epoch below which pool-stake
+// capPoolSnapshotPruneBeforeWith lowers before -- the epoch below which pool-stake
 // snapshots are pruned -- so no acquired point loses the mark snapshot its
 // stake distribution is computed from, clamps it back up to minBefore, and
-// announces the result. epochOf maps an acquired slot to its epoch; a slot it
+// announces the result. epochOf maps an acquired slot to its epoch and snapshotOf
+// an epoch to the mark snapshot that elects it; a slot epochOf
 // cannot map retains everything, the same conservative answer the deferred
 // header pin gives an unmappable slot.
-func (ls *LedgerState) capPoolSnapshotPruneBefore(
-	before, minBefore uint64,
-	epochOf func(slot uint64) (uint64, bool),
-) uint64 {
-	return ls.capPoolSnapshotPruneBeforeWith(
-		before, minBefore, epochOf, ls.LeaderStakeSnapshotEpoch,
-	)
-}
-
-// capPoolSnapshotPruneBeforeWith is capPoolSnapshotPruneBefore with the
-// snapshot an epoch is elected by supplied, so a caller holding one epoch-cache
-// generation resolves every pin against it.
 func (ls *LedgerState) capPoolSnapshotPruneBeforeWith(
 	before, minBefore uint64,
 	epochOf func(slot uint64) (uint64, bool),
