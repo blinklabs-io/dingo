@@ -29,7 +29,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const rewardOutputReshapeVersion = 56
+const rewardOutputReshapeVersion = 57
 
 func rewardOutputIndexNames(t *testing.T, db *sql.DB) []string {
 	t.Helper()
@@ -164,8 +164,8 @@ func TestRewardAccountOutputIndexReshapeTranslatesForProviders(t *testing.T) {
 
 	postgres, err := migrations.PostgresRegistry()
 	require.NoError(t, err)
-	require.Equal(t, rewardOutputReshapeVersion, postgres[55].Version)
-	postgresSQL := strings.Join(postgres[55].SQL["postgres"].Expand, "\n")
+	require.Equal(t, rewardOutputReshapeVersion, postgres[rewardOutputReshapeVersion-1].Version)
+	postgresSQL := strings.Join(postgres[rewardOutputReshapeVersion-1].SQL["postgres"].Expand, "\n")
 	require.Contains(t, postgresSQL, `CREATE INDEX IF NOT EXISTS "idx_reward_account_output_credential_epoch"`)
 	require.Contains(t, postgresSQL, `CREATE UNIQUE INDEX IF NOT EXISTS "idx_reward_account_output_epoch_pool_cred_type"`)
 	require.Contains(t, postgresSQL, `DROP INDEX IF EXISTS "idx_reward_account_output_epoch_cred_pool_type"`)
@@ -174,7 +174,7 @@ func TestRewardAccountOutputIndexReshapeTranslatesForProviders(t *testing.T) {
 
 	mysql, err := migrations.MySQLRegistry()
 	require.NoError(t, err)
-	mysqlSQL := strings.Join(mysql[55].SQL["mysql"].Expand, "\n")
+	mysqlSQL := strings.Join(mysql[rewardOutputReshapeVersion-1].SQL["mysql"].Expand, "\n")
 	require.Contains(t, mysqlSQL, "(`credential_tag`, `staking_key`(255), `epoch`, `pool_key_hash`(255),")
 	require.Contains(t, mysqlSQL, "(`epoch`, `pool_key_hash`(255), `credential_tag`, `staking_key`(255),")
 	require.Contains(t, mysqlSQL, "DROP INDEX `idx_reward_account_output_epoch_cred_pool_type`")

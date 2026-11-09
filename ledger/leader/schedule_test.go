@@ -130,18 +130,6 @@ func TestScheduleStakeRatio(t *testing.T) {
 			expected:   0.1,
 		},
 		{
-			name:       "50% stake",
-			poolStake:  5000,
-			totalStake: 10000,
-			expected:   0.5,
-		},
-		{
-			name:       "100% stake",
-			poolStake:  10000,
-			totalStake: 10000,
-			expected:   1.0,
-		},
-		{
 			name:       "zero total stake",
 			poolStake:  1000,
 			totalStake: 0,

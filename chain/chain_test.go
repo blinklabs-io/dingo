@@ -5212,6 +5212,20 @@ func TestRollbackRejectsPointNotOnChain(t *testing.T) {
 	c, abandoned, forkB := buildAbandonedForkChain(t, db)
 	forkBTip := mockBlockPoint(forkB[len(forkB)-1])
 
+	// ValidateRollback is the pre-check the chainsync rollback-loop detector
+	// uses to decide whether a repeated peer rollback is crossable. A point
+	// resolvable only through the retained cache must not be reported as
+	// crossable, or the detector keeps re-applying the splicing rollback.
+	verr := c.ValidateRollback(context.Background(), mockBlockPoint(abandoned))
+	if !errors.Is(verr, models.ErrBlockNotFound) ||
+		!errors.Is(verr, chain.ErrRollbackPointNotOnChain) {
+		t.Fatalf(
+			"expected ValidateRollback to reject with ErrBlockNotFound and "+
+				"ErrRollbackPointNotOnChain, got: %v",
+			verr,
+		)
+	}
+
 	err := c.Rollback(context.Background(), mockBlockPoint(abandoned))
 	if err == nil {
 		t.Fatal(
@@ -5236,31 +5250,6 @@ func TestRollbackRejectsPointNotOnChain(t *testing.T) {
 		)
 	}
 	assertChainPrevHashContiguous(t, c)
-}
-
-// TestValidateRollbackRejectsPointNotOnChain covers the pre-check the chainsync
-// rollback-loop detector uses to decide whether a repeated peer rollback is
-// "crossable". A point resolvable only through the retained cache must not be
-// reported as crossable, otherwise the detector keeps re-applying the very
-// rollback that splices the chain.
-func TestValidateRollbackRejectsPointNotOnChain(t *testing.T) {
-	t.Parallel()
-
-	db := newTestDB(t)
-	c, abandoned, _ := buildAbandonedForkChain(t, db)
-
-	err := c.ValidateRollback(context.Background(), mockBlockPoint(abandoned))
-	if err == nil {
-		t.Fatal(
-			"expected ValidateRollback to reject a point this chain no longer holds",
-		)
-	}
-	if !errors.Is(err, models.ErrBlockNotFound) {
-		t.Fatalf("expected ErrBlockNotFound, got: %s", err)
-	}
-	if !errors.Is(err, chain.ErrRollbackPointNotOnChain) {
-		t.Fatalf("expected ErrRollbackPointNotOnChain, got: %s", err)
-	}
 }
 
 // TestRollbackRejectsPointAheadOfTip covers the other shape of the same defect.
