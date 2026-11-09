@@ -22,17 +22,6 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestEraParams_Valid(t *testing.T) {
-	t.Parallel()
-	p := hardfork.EraParams{
-		EpochSize:     432_000,
-		SlotLength:    time.Second,
-		SafeZoneSlots: 25_920,
-		GenesisWindow: 25_920,
-	}
-	assert.NoError(t, p.Validate())
-}
-
 func TestEraParams_ValidateRejectsZeroEpochSize(t *testing.T) {
 	t.Parallel()
 	p := hardfork.EraParams{

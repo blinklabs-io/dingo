@@ -7904,7 +7904,12 @@ distance beyond the path's last header. A delivered header extending the path or
 that deferred tail is deferred without walking its ancestry while the primary
 chain tip lies below every ancestor such a walk would read, because the walk
 could reach no held block. Once the chain tip reaches that range the full walk
-runs again. Replacing the retained path clears the record.
+runs again. An initial bounded walk that reaches the history limit without a
+held ancestor retains the same unverified path shape, so a retry or descendant
+uses that bound without repeating full-block reads. The entry remains a
+deferral rather than a verification result and is re-walked once the primary
+chain enters its reachable range. Replacing the retained path clears the
+record.
 
 Successful stateless header cryptography is also remembered across peer
 connections in a bounded LRU keyed by epoch nonce and a header identity that
@@ -11391,99 +11396,46 @@ reciprocal of the active slot coefficient: the same mistake
 `dingo_forge_stale_tip_skip_total` was corrected for once already, by moving
 its gate below the leader check.
 
-The leader check is not the line itself, though, and the counter is not an
-exceptionless record of slots this node was established to lead. Four
-refusals in `checkAndForgeProduction` increment it BEFORE `checkLeaderSafe`:
+The leader check is not the line itself, though. One refusal in
+`checkAndForgeProduction` increments `could_not_forge` BEFORE `checkLeaderSafe`:
+the slot battle lost under the forge fence, where the durable fence proves
+this node led the slot and forged it on an earlier pass, so leadership is
+established by the fence rather than by the leader check.
 
-- the slot battle lost under the forge fence, where the durable fence proves
-  this node led the slot and forged it on an earlier pass, so leadership is
-  established by the fence rather than by the leader check; and
-- the three forging-key validity gates, which run before Praos leader
-  selection so that no VRF proof and no KES signature is computed with a key
-  that cannot sign -- the KES protocol lifetime failing validation, the
-  operational certificate not yet valid for the current KES period, and the
-  operational certificate expired.
-
-Those three change how the counter has to be read, and not only in the
-bookkeeping. `checkAndForgeProduction` runs once per slot from the forging
-loop, so while the forging keys are invalid the gates refuse -- and increment
--- on EVERY slot that reaches them, not once per leader slot. That is the
-overstatement the paragraph above argues the design avoids, and it is larger
-than the figure that paragraph names: one increment per slot against one per
-leader slot is a factor of about 1/(sigma*f) for a pool holding an active
-stake fraction sigma, of which the reciprocal of the active slot coefficient
-is only the sigma = 1 bound. It also lands on the failure an operator is most
-likely to be reading this counter to diagnose: an expired operational
-certificate does not raise `could_not_forge` from zero to this pool's handful
-of lost slots per epoch, it raises it to one per slot. So
-`could_not_forge` is a lost-block count only while the forging keys are valid.
-While they are not, the diagnosis is on the gauges the same code path sets
-every slot before it refuses -- `cardano_node_metrics_currentKESPeriod_int`
-against `cardano_node_metrics_operationalCertificateStartKESPeriod_int` and
+The three forging-key validity refusals -- the KES protocol lifetime failing
+validation, the operational certificate not yet valid for the current KES
+period, and the operational certificate expired -- are decided at the top of
+the slot, together with the unconditional KES state update, so that nothing
+is signed with a key that cannot sign. They are not counted or logged there.
+The refusal is held until the tip gates have passed and `checkLeaderSafe` has
+established that this pool leads the slot; only then does it increment
+`could_not_forge` and write its Error line, and a non-leader slot returns
+through the ordinary not-leader path. `could_not_forge` therefore stays a
+lost-block count while the forging keys are invalid, instead of rising to one
+per slot, and the diagnosis of an expired certificate is on the gauges set
+every slot -- `cardano_node_metrics_currentKESPeriod_int` against
+`cardano_node_metrics_operationalCertificateStartKESPeriod_int` and
 `cardano_node_metrics_operationalCertificateExpiryKESPeriod_int`, and
-`cardano_node_metrics_remainingKESPeriods_int` -- and on the Error log lines
-those three refusals write, which name the cause directly.
+`cardano_node_metrics_remainingKESPeriods_int` -- and on the Error line a
+leader slot writes. A leader slot lost to a bad certificate does not move the
+missed-leader-slot counter, because that counter is incremented only on the
+post-leader-check path below the refusal.
 
-For reference, the counter's cardano-node analogue does not treat the three
-gates alike, and what it does differs per gate rather than across the set.
-Each entry below was read off the source on both sides rather than inferred
-from its neighbours. The ouroboros-consensus files are
-`Ouroboros/Consensus/Block/Forging.hs`,
-`Ouroboros/Consensus/Protocol/Praos.hs`,
-`Ouroboros/Consensus/Protocol/Ledger/HotKey.hs`,
-`Ouroboros/Consensus/Shelley/Node/Praos.hs` and
-`Ouroboros/Consensus/NodeKernel/Forge.hs`; the metric names come from
-cardano-node's `Cardano/Node/Tracing/Tracers/Consensus.hs`.
+A KES state failure that is not one of those lifetime decisions, such as
+credentials that are no longer loaded, is a fault rather than a refusal. It is
+held the same way and still returned to the caller on every slot so it is never
+hidden, but it increments `could_not_forge` only on a slot this pool leads.
 
-- Operational certificate NOT YET VALID (`kesPeriod < opCertStart`): same
-  condition, same series, different frequency. `praosCheckCanForge` throws
-  `PraosCannotForgeKeyNotUsableYet` on exactly this predicate -- the KES start
-  period after the wall-clock period -- `getIsLeaderProof` traces that as
-  `TraceNodeCannotForge`, and `asMetrics` maps that event to the
-  `Forge.could-not-forge` counter. `checkShouldForge` reaches `checkCanForge`
-  only in its `Just isLeader` branch, so cardano-node moves the counter once
-  per leader slot where Dingo moves it once per slot. Parity here means
-  keeping the increment on this counter and fixing only how often it fires.
-  Dropping it, or moving it to a counter of its own, would break a parity that
-  currently holds.
-- Operational certificate EXPIRED (`kesPeriod >= opCertExpiry`): different
-  series, same frequency. Consensus catches this one before the leader check
-  rather than after it. `updateForgeState` for a Praos block is
-  `HotKey.evolve` at the wall-clock period; `evolveKey` finds the target period
-  `AfterKESEnd`, poisons the key and returns `UpdateFailed`, so
-  `checkShouldForge` returns `ForgeStateUpdateError` and never evaluates
-  `checkCanForge` -- which is what the note on
-  `PraosCannotForgeKeyNotUsableYet` means when it says the opposite case is
-  caught in `updateForgeState`. That traces as `TraceForgeStateUpdateError`,
-  whose metrics are `Forge.StateUpdateError` set to the slot plus the KES
-  gauges, with `currentKESPeriod` and `remainingKESPeriods` driven to 0 --
-  never `Forge.could-not-forge`. A poisoned key fails every later evolution,
-  so cardano-node reports this on every slot as well. Parity here means the
-  opposite of the entry above: leave the per-slot frequency alone and take the
-  condition off `could_not_forge`, onto the state-update signal. Dingo already
-  sets those same KES gauges on this path every slot; it is the counter that
-  is extra.
-- KES protocol lifetime NOT VALIDATED: no analogue on either series.
-  `PraosCannotForge` has exactly one constructor, so no condition other than
-  not-yet-valid reaches `TraceNodeCannotForge` under Praos, and the states
-  behind this gate -- credentials not loaded, operational certificate not
-  validated, a zero maximum-evolutions or expiry period -- are ones a
-  cardano-node producer does not carry into its forging loop, since its
-  `HotKey` is built from a validated certificate before `BlockForging` exists.
-  The nearest reachable equivalent, a KES range of zero length, lands on the
-  `AfterKESEnd` update-error path above. Parity says nothing about how often
-  to report this one, only that `could_not_forge` is the wrong place for it.
-
-Two things follow, and they are narrower than the shorthand used earlier in
-this section. Only one of the three gates counts on a series its namesake does
-not count on at all; one is counted by the namesake on the same series and
-differs from it in frequency alone; one has no namesake. And the per-slot
-inflation described above is an accurate account of what an operator sees on
-all three, but it is a parity divergence for only one of them -- the
-not-yet-valid gate -- because the other two are not on the namesake's counter
-in the first place. Whether to act on any of this is a behaviour question, not
-a documentation one; acting on it would take three separate changes rather
-than one rule applied three times.
+For reference, cardano-node does not report the three conditions alike.
+Not-yet-valid is `PraosCannotForgeKeyNotUsableYet`, reached only from the
+leader branch of `checkShouldForge` and mapped to `Forge.could-not-forge`, so
+the leader-slot reporting above matches its frequency. An expired certificate
+is caught earlier by `HotKey.evolveKey` poisoning the key and is reported on
+`Forge.StateUpdateError` with the KES gauges, not on `Forge.could-not-forge`;
+the lifetime-validation failure has no analogue on either series. The
+ouroboros-consensus files are `Ouroboros/Consensus/Protocol/Praos.hs`,
+`Ouroboros/Consensus/Protocol/Ledger/HotKey.hs` and
+`Ouroboros/Consensus/NodeKernel/Forge.hs`.
 
 A separate schedule-driven counter would close the gap from the other side --
 the shape `unapplied_rival_at_leader_slot` uses for the one other
@@ -11754,7 +11706,7 @@ In the deferred state startup still loads the credential material, checks the
 opcert's cold-key signature, and arms the same protocol lifetime — it skips
 only the slot-dependent plausibility check. Enforcement is then entirely the
 per-slot runtime gate described below, which re-derives the period at each
-candidate slot and rejects the certificate before leader selection whenever
+wall-clock slot and rejects the certificate before leader selection whenever
 that period falls outside the admitted half-open interval stated below. The
 skew from extrapolating through the newest confirmed era is not itself the
 safety argument: it moves the computed period downward, which places a
@@ -11763,11 +11715,20 @@ mild downward skew can move an already-expired period back inside
 `[opcertStart, opcertStart + MaxKESEvolutions)`. What fails closed is the
 interval test itself, applied to every candidate slot. When confirmed
 history does span the wall clock, the strict startup check runs unchanged
-and rejects such a certificate outright. Before leader selection at each
-candidate slot, the runtime gate admits exactly the half-open interval
+and rejects such a certificate outright. At the start of each production slot,
+before chain-state gates or leader selection can return early, the runtime gate
+advances the KES key to the wall-clock period and admits exactly the half-open interval
 `[opcertStart, opcertStart + MaxKESEvolutions)`: periods
 before the start and at or after the exclusive end both log/count a
-could-not-forge disposition before Praos, Leios, or ranking-block work.
+could-not-forge disposition for a slot this pool leads, with no Praos, Leios,
+or ranking-block work. Reaching the exclusive end zeroizes and removes the
+active local signing key, or drops the credentials' handle to a remote signer
+and closes it when the signer implements `io.Closer` (the KES agent client in
+sign mode, which refuses later requests once closed), so later slots cannot
+retain an expired hot-key capability. A serve-key agent client is not a remote
+signer: it keeps running and delivering pushes, and only the local key it
+installed is erased at expiry. A credential rotation
+that lands later in the same slot is advanced again before leader selection.
 The start, expiry, current-period, and remaining-period gauges use that same
 protocol lifetime; the KES key's `2^depth` cryptographic capacity remains a
 separate upper bound rather than an operational lifetime.
@@ -11857,7 +11818,8 @@ custom builders, which cannot consume the package-private snapshot. The
 `DefaultBlockBuilder` receives the exact snapshot and performs the same check
 before returning, so provider-triggered reloads cannot publish a block assembled
 from shared mutable credentials. KES evolution advances the still-current owner
-and its private snapshot before provider callbacks; VRF proof, opcert fields,
+at every production slot and advances its private snapshot before provider
+callbacks; VRF proof, opcert fields,
 and KES signature are then derived only from that snapshot. A concurrent reload
 that linearizes after a generation check may coexist with the old snapshot, but
 cannot mutate it or mix its cryptographic inputs. The pool ID and VRF
@@ -12010,7 +11972,9 @@ stays reserved for a block self-validation found invalid.
 
 VRF signing keys, KES signing keys, and operational certificates are loaded from
 files at startup. The `keystore` package handles platform-specific file
-permission checks (Unix file modes, Windows ACLs) and KES key evolution.
+permission checks (Unix file modes, Windows ACLs). The production forger
+advances `PoolCredentials` on every wall-clock slot and retires the signing
+handle at operational-certificate expiry.
 
 VRF and KES secret-key loads check permissions on the open file handle and
 reject group/other access on Unix or insecure DACL grants on Windows before

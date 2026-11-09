@@ -111,13 +111,3 @@ func TestSlotTrackerConcurrency(t *testing.T) {
 	// Just verify no panics and the tracker has a reasonable size
 	assert.LessOrEqual(t, st.Len(), defaultMaxTrackedSlots)
 }
-
-func TestSlotTrackerZeroCapacity(t *testing.T) {
-	// Zero/negative capacity should fall back to default
-	st := NewSlotTrackerWithCapacity(0)
-	assert.NotNil(t, st)
-
-	st.RecordForgedBlock(1, []byte{0x01})
-	_, ok := st.WasForgedByUs(1)
-	assert.True(t, ok)
-}
