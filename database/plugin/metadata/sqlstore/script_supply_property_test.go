@@ -125,7 +125,7 @@ func (s *supplySim) output(
 func (s *supplySim) lovelace() uint64 {
 	if s.rng.Intn(20) == 0 {
 		// Above 2^53 so any float conversion of an amount shows up.
-		return 9_000_000_000_000_000 + uint64(s.rng.Intn(1_000_000))
+		return 9_010_000_000_000_000 + uint64(s.rng.Intn(1_000_000))
 	}
 	return 1_000_000 + uint64(s.rng.Intn(500_000_000))
 }
