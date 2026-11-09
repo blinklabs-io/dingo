@@ -15,12 +15,14 @@
 package ouroboros
 
 import (
+	"context"
 	"sync"
 	"testing"
 	"time"
 
 	dchainsync "github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -41,6 +43,7 @@ type withheldAncestryFixture struct {
 	tipHash  []byte
 	withheld bool
 	armed    []time.Time
+	timers   []func()
 }
 
 // newWithheldAncestryFixture wires an apply-eligible connection whose local
@@ -71,9 +74,11 @@ func newWithheldAncestryFixture(t *testing.T) *withheldAncestryFixture {
 	})
 	f.o.chainsyncState = f.state
 	f.o.eventBus = bus
-	f.o.chainsyncScheduleAt = func(onset time.Time, _ func()) func() {
+	f.o.futureHeaderResyncCtx = context.Background()
+	f.o.chainsyncScheduleAt = func(onset time.Time, fn func()) func() {
 		f.mu.Lock()
 		f.armed = append(f.armed, onset)
+		f.timers = append(f.timers, fn)
 		f.mu.Unlock()
 		return func() {}
 	}
@@ -110,6 +115,16 @@ func (f *withheldAncestryFixture) setAppliedTip(hash string) {
 	f.mu.Lock()
 	f.tipHash = []byte(hash)
 	f.mu.Unlock()
+}
+
+// fireLast runs the most recently armed timer callback.
+func (f *withheldAncestryFixture) fireLast(t *testing.T) {
+	t.Helper()
+	f.mu.Lock()
+	require.NotEmpty(t, f.timers)
+	fn := f.timers[len(f.timers)-1]
+	f.mu.Unlock()
+	fn()
 }
 
 func (f *withheldAncestryFixture) armedCount() int {
@@ -183,6 +198,7 @@ func (f *withheldAncestryFixture) scheduledReason() (string, bool) {
 func TestChainsyncWithheldAncestryReintersectsConnection(t *testing.T) {
 	t.Parallel()
 	f := newWithheldAncestryFixture(t)
+	_, resyncCh := f.o.eventBus.Subscribe(event.ChainsyncResyncEventType)
 	f.setWithheld(true)
 
 	for block := uint64(withheldTipBlock + 2); block < withheldTipBlock+6; block++ {
@@ -193,7 +209,19 @@ func TestChainsyncWithheldAncestryReintersectsConnection(t *testing.T) {
 	require.Equal(t, event.ChainsyncResyncReasonWithheldCandidateAncestry, reason)
 	require.Equal(t, 1, f.armedCount())
 
-	// The resync ran. A new applied tip inside the repeat window still waits.
+	f.fireLast(t)
+	evt := testutil.RequireReceive(
+		t,
+		resyncCh,
+		time.Second,
+		"the armed timer must publish the resync",
+	)
+	data := evt.Data.(event.ChainsyncResyncEvent)
+	require.Equal(t, f.conn, data.ConnectionId)
+	require.Equal(t, event.ChainsyncResyncReasonWithheldCandidateAncestry, data.Reason)
+
+	// The resync handler restarted the protocol. A new applied tip inside the
+	// repeat window still waits.
 	f.o.cancelFutureHeaderResync(f.conn)
 	f.setAppliedTip("applied-tip-2")
 	f.deliver(t, withheldTipBlock+2)
