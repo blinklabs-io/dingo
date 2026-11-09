@@ -125,6 +125,15 @@ func (ls *LedgerState) applyStakeRewardUpdate(ctx context.Context,
 			return nil
 		}
 	}
+	replay, err := ls.replaysPreviousStakeRewardRound(ctx, txn, newEpoch)
+	if err != nil {
+		return err
+	}
+	if replay {
+		return ls.applyReplayedStakeRewardRound(
+			ctx, txn, newEpoch, boundarySlot,
+		)
+	}
 	if rewardEpochs, ok := stakeRewardEpochsForApplication(newEpoch); ok {
 		performanceEpoch, err := ls.db.Metadata().GetEpoch(
 			rewardEpochs.performance,
@@ -504,9 +513,13 @@ func (ls *LedgerState) recheckRoundEligibility(
 }
 
 type stakeRewardApplication struct {
-	pparams        lcommon.ProtocolParameters
-	params         rewards.Parameters
-	pots           *models.RewardAdaPots
+	pparams lcommon.ProtocolParameters
+	params  rewards.Parameters
+	pots    *models.RewardAdaPots
+	// replayBaseline marks a round replayed at a later boundary (see
+	// reward_late_first_block.go). The round's inputs come from pots; its
+	// deltas apply to replayBaseline, the pots at that boundary.
+	replayBaseline *models.RewardAdaPots
 	poolOutputs    []*models.RewardPoolOutput
 	accountOutputs []*models.RewardAccountOutput
 	// reconstructedStakeInputs carries retention-pruned per-credential rows
@@ -975,7 +988,7 @@ func (ls *LedgerState) applyStakeRewardApplication(ctx context.Context,
 		)
 	}
 
-	if !app.precomputed || app.outputsUpdated {
+	if app.replayBaseline == nil && (!app.precomputed || app.outputsUpdated) {
 		if err := saveStakeRewardOutputs(meta, metaTxn, app); err != nil {
 			return err
 		}
@@ -1019,8 +1032,12 @@ func (ls *LedgerState) applyStakeRewardApplication(ctx context.Context,
 	); err != nil {
 		return fmt.Errorf("set network state after stake rewards: %w", err)
 	}
-	app.pots.Rewards = types.Uint64(app.totalRewardPot)
-	if err := meta.SaveRewardAdaPots(app.pots, metaTxn); err != nil {
+	rewardPots := app.pots
+	if app.replayBaseline != nil {
+		rewardPots = app.replayBaseline
+	}
+	rewardPots.Rewards = types.Uint64(app.totalRewardPot)
+	if err := meta.SaveRewardAdaPots(rewardPots, metaTxn); err != nil {
 		return fmt.Errorf("update reward ADA pots: %w", err)
 	}
 
@@ -3123,7 +3140,18 @@ func stakeRewardUpdatedPots(
 			app.pots.Reserves,
 		)
 	}
-	reserves := uint64(app.pots.Reserves) - incentives
+	basePots := app.pots
+	if app.replayBaseline != nil {
+		basePots = app.replayBaseline
+	}
+	if uint64(basePots.Reserves) < incentives {
+		return 0, 0, fmt.Errorf(
+			"stake reward incentives %d exceed reserves %d",
+			incentives,
+			basePots.Reserves,
+		)
+	}
+	reserves := uint64(basePots.Reserves) - incentives
 	var overflow bool
 	reserves, overflow = addRewardUint64(reserves, app.undistributed)
 	if overflow {
@@ -3137,7 +3165,7 @@ func stakeRewardUpdatedPots(
 		return 0, 0, fmt.Errorf("stake reward treasury tax: %w", err)
 	}
 	treasury, overflow := addRewardUint64(
-		uint64(app.pots.Treasury),
+		uint64(basePots.Treasury),
 		treasuryTax,
 	)
 	if overflow {
@@ -3853,6 +3881,7 @@ func stakeRewardEpochsForNewEpoch(newEpoch uint64) (stakeRewardEpochs, bool) {
 }
 
 func (ls *LedgerState) saveRewardAdaPotsForEpoch(
+	ctx context.Context,
 	txn *database.Txn,
 	newEpoch uint64,
 	endedEpoch models.Epoch,
@@ -3876,6 +3905,10 @@ func (ls *LedgerState) saveRewardAdaPotsForEpoch(
 	if state != nil {
 		treasury = uint64(state.Treasury)
 		reserves = uint64(state.Reserves)
+	}
+	fees, err = ls.carriedRewardFees(ctx, txn, newEpoch, fees)
+	if err != nil {
+		return err
 	}
 	if err := meta.SaveRewardAdaPots(&models.RewardAdaPots{
 		Epoch:        newEpoch,

@@ -10122,6 +10122,7 @@ func (ls *LedgerState) processEpochRolloverWithClassicPParamsContext(
 	if err := ls.timeRolloverPhase(
 		currentEpoch.EpochId+1, "save_pots", func() error {
 			return ls.saveRewardAdaPotsForEpoch(
+				ctx,
 				txn,
 				currentEpoch.EpochId+1,
 				currentEpoch,

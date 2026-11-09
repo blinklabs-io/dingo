@@ -4327,6 +4327,26 @@ parameters and ADA pots with no pool rewards, so with `d >= 0.8` reserves expand
 with `eta = 1` and the treasury takes its share. Later updates use the normal
 delayed E-3 snapshot, E-2 performance, and E-1 pots mapping.
 
+The exception is an epoch whose first block lands later than its start plus the
+randomness stabilisation window (4k/f). cardano-ledger's `bheadTransition`
+hands RUPD the epoch state and blocks-made from *before* NEWEPOCH ran, and the
+update NEWEPOCH leaves is empty, so that tick starts the update from the end of
+the previous epoch: the same snapshot, performance epoch, reserves and fee seed
+as the update applied at the boundary into that epoch. The boundary after it
+therefore applies the previous round again (`replaysPreviousStakeRewardRound`,
+`reward_late_first_block.go`), and the performance of the epoch just ended is
+never paid. The replayed round is calculated from the previous round's inputs
+but its deltas are added to the ADA pots of the boundary it is applied at, as
+`applyRUpdFiltered` adds `deltaR`/`deltaT` to the live pots, and its `deltaF`
+removes the replayed fee seed from the fees carried into the next round:
+`saveRewardAdaPotsForEpoch` records the ended epoch's fees plus the fees
+carried at the previous boundary minus that seed, and halts the boundary if
+that would be negative. The decision reads persisted blocks (the first block of
+the ended epoch, and a block in the epoch before it, since NEWEPOCH does not run
+after an empty epoch), so a rollback re-derives it. Not mirrored: boundaries
+into epochs below 4, nonMyopic state, and nodes whose block store lacks the two
+epochs involved.
+
 Within that mapping, every protocol-parameter input to the calculation — d,
 rho, tau, and the pool-level parameters — is read from the **performance**
 epoch, not the pots epoch. cardano-ledger's `startStep` binds
