@@ -246,3 +246,37 @@ func TestPeerStopsReadingAheadWhenTooManyMessagesAreHeld(t *testing.T) {
 	require.True(t, p.pace.full())
 	require.Len(t, p.pace.held, maxHeldMessages)
 }
+
+// A held message the peer announced in the meantime is dropped without using
+// up its pool's interval, so a later message of the pool is announced as soon
+// as the hold on the first has passed.
+func TestPeerDropsAHeldMessageThePeerAnnouncedWithoutDelayingItsPool(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	p, s := newPacedPeer(t, time.Minute, &now)
+	second := poolMessage(t, "a2", 1)
+	for _, m := range []ocommon.DmqMessage{
+		poolMessage(t, "a1", 1),
+		second,
+	} {
+		_, err := s.pool.Add(m)
+		require.NoError(t, err)
+	}
+	require.Equal(t, []string{"a1"}, announcedBodies(t, s, p.nextMessageIDs(10)))
+
+	// a2 is held. The peer announces it itself, then a3 of the same pool
+	// reaches the pool.
+	p.known.add(second.ID())
+	last := poolMessage(t, "a3", 1)
+	_, err := s.pool.Add(last)
+	require.NoError(t, err)
+
+	// The cursor is already past a3's predecessors, so a3 is held behind a1's
+	// interval too. When the hold passes, a2 must be dropped and a3 announced
+	// in the same call, not left waiting for a further interval.
+	require.Empty(t, p.nextMessageIDs(10))
+	now = now.Add(time.Minute + poolPaceSlack)
+	require.Equal(t, []string{"a3"}, announcedBodies(t, s, p.nextMessageIDs(10)))
+	_, held := p.pace.nextRelease(now)
+	require.False(t, held)
+}
