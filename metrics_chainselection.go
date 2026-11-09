@@ -146,12 +146,23 @@ func (n *Node) registerChainSelectionMetrics(r *promutil.Registration) {
 // It reads chainSelectorForGauges rather than chainSelector because the gauges
 // are registered in New, before Run creates the selector, and a scrape may
 // race that assignment.
+//
+// A scrape must not wait for the ledger to finish a block batch, which can
+// take tens of seconds, so while one is applying it reports the last limit
+// read while the ledger was stable.
 func (n *Node) eagernessLimitGauge(slot bool) float64 {
 	selector := n.chainSelectorForGauges.Load()
 	if selector == nil {
 		return 0
 	}
-	limit := selector.EagernessLimit()
+	limit, ok := selector.TryEagernessLimit()
+	if ok {
+		n.lastEagernessLimit.Store(&limit)
+	} else if last := n.lastEagernessLimit.Load(); last != nil {
+		limit = *last
+	} else {
+		return 0
+	}
 	if !limit.Active {
 		return 0
 	}

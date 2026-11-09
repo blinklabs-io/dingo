@@ -397,10 +397,6 @@ func (p *PeerGovernor) AddPeer(
 		EMAAlpha:          p.config.EMAAlpha,
 		FirstSeen:         time.Now(),
 	}
-	// Gossip-discovered peers are sharable since they were already shared
-	if source == PeerSourceP2PGossip {
-		newPeer.Sharable = true
-	}
 	p.peers = append(p.peers, newPeer)
 	p.updatePeerMetrics()
 	if source == PeerSourceP2PGossip && p.metrics != nil {

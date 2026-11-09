@@ -1072,6 +1072,13 @@ type LeiosClosureBatcher interface {
 	) error
 }
 
+// ValidatedBlockBatcher optionally defers API-only transaction indexes until
+// the end of a validated block. UTxOs, assets, datums, scripts and stake must
+// remain visible to the next transaction's validation.
+type ValidatedBlockBatcher interface {
+	NewValidatedBlockBatchAccumulator() types.MetadataBatchAccumulator
+}
+
 // TransactionStore owns chain transactions: the transaction table, the
 // per-transaction metadata it carries, and the address and metadata-label
 // indexes derived from it.
@@ -3314,14 +3321,14 @@ type MetadataStore interface {
 	// retained snapshot window. This is the CORE storage-mode pruning path:
 	// it deletes both reward_stake_input and reward_account_output. See
 	// rewardstate.DeleteStateBeforeEpoch for the full rationale.
-	DeleteRewardStateBeforeEpoch(uint64, types.Txn) error
+	DeleteRewardStateBeforeEpoch(context.Context, uint64, types.Txn) error
 
 	// DeleteRewardStakeInputBeforeEpoch deletes only reward_stake_input rows
 	// older than the retained snapshot window, leaving reward_account_output
 	// intact. This is the Koios-parity pruning path, used so the observer
 	// can read reward_account_output behind the tip. API storage mode prunes
 	// neither table. See rewardstate.DeleteStakeInputBeforeEpoch.
-	DeleteRewardStakeInputBeforeEpoch(uint64, types.Txn) error
+	DeleteRewardStakeInputBeforeEpoch(context.Context, uint64, types.Txn) error
 
 	// Network state methods
 
@@ -3388,6 +3395,11 @@ type MetadataStore interface {
 	// writes use atSlot history so rollback restores the pre-transition links.
 	// Pseudo-DRep delegations are preserved. Returns the cleared account count.
 	ClearDanglingDRepDelegations(atSlot uint64, txn types.Txn) (int, error)
+
+	// ReconcileImportedDRepDelegations rejects dangling forward targets for
+	// authoritative baselines at exactly atSlot, then performs the PV10
+	// dangling-target cleanup and reverse-index reconciliation atomically.
+	ReconcileImportedDRepDelegations(atSlot uint64, txn types.Txn) error
 
 	// DeletePParamsAfterSlot removes protocol parameter records added after
 	// the given slot.
@@ -3531,12 +3543,48 @@ type AddressTransactionIndexRebuilder interface {
 	) error
 }
 
+// UtxoSpendStateReader optionally narrows consumed-input recovery reads. A nil
+// result means the reference is absent, including from any pending UTxO overlay.
+// Providers must observe the same transaction and overlay visibility as
+// GetUtxoIncludingSpent. Providers without this capability keep the full lookup.
+type UtxoSpendStateReader interface {
+	GetUtxoSpendState([]byte, uint32, types.Txn) (*models.UtxoSpendState, error)
+}
+
 // BulkLoadOptimizer is an optional interface that metadata stores can
 // implement to provide optimized settings for bulk loading operations.
 // The load command checks for this interface and uses it when available.
 type BulkLoadOptimizer interface {
 	SetBulkLoadPragmas() error
 	RestoreNormalPragmas() error
+}
+
+// LeiosClosureUtxoOverlay optionally batches plain certified-closure UTxO
+// writes in API mode while retaining spent rows and their address history.
+// Eligibility is established without mutations in the caller's transaction;
+// false leaves the ordinary closure writer selected. True requires that only
+// the preflighted transactions use the accumulator until FlushBatch.
+type LeiosClosureUtxoOverlay interface {
+	EnableLeiosClosureUtxoOverlay(
+		accumulator types.MetadataBatchAccumulator,
+		txn types.Txn,
+		transactions []lcommon.Transaction,
+	) (bool, error)
+}
+
+// LeiosClosureBatchPreparer optionally chooses an ordered prefix of a closure
+// for one accumulator window. Preparing the next window materializes the
+// preceding UTxO overlay before validation; providers may flush its deferred
+// API rows too. The caller flushes the complete closure at the end.
+// A nonempty request returns a count in
+// [1, len(txs)].
+// Preparation does not apply transactions or change validation order.
+type LeiosClosureBatchPreparer interface {
+	PrepareLeiosClosureBatch(
+		accumulator types.MetadataBatchAccumulator,
+		txn types.Txn,
+		txs []lcommon.Transaction,
+	) (int, error)
 }
 
 // BatchUtxoOverlay is an optional interface for metadata stores that can

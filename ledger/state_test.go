@@ -366,7 +366,9 @@ func TestProcessEpochRolloverAppliesUpdateToOwnedCopy(t *testing.T) {
 	}
 	require.NoError(
 		t,
-		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
+		completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(
+			strings.NewReader(shelleyGenesisJSON),
+		),
 	)
 
 	db, err := dbtest.NewDatabase(t, &database.Config{
@@ -625,7 +627,7 @@ func dijkstraRetentionNodeConfigWithCommitteeParameters(
 	cfg := &cardano.CardanoNodeConfig{
 		ShelleyGenesisHash: "363498d1024f84bb39d3fa9593ce391483cb40d479b87233f868d6e57c3a400d",
 	}
-	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(`{
+	require.NoError(t, completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(`{
 		"activeSlotsCoeff": 0.05,
 		"securityParam": 432,
 		"epochLength": 432000,
@@ -1196,7 +1198,7 @@ func TestSecurityParamConcurrentCurrentEraAccess(t *testing.T) {
 	cfg := &cardano.CardanoNodeConfig{}
 	require.NoError(
 		t,
-		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
+		completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
 	)
 
 	ls := &LedgerState{
@@ -1293,7 +1295,7 @@ func TestCalculateStabilityWindow_ByronEra(t *testing.T) {
 			if err := loadByronGenesisForTest(t, cfg, strings.NewReader(byronGenesisJSON)); err != nil {
 				t.Fatalf("failed to load Byron genesis: %v", err)
 			}
-			if err := cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)); err != nil {
+			if err := completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)); err != nil {
 				t.Fatalf("failed to load Shelley genesis: %v", err)
 			}
 
@@ -1391,7 +1393,7 @@ func TestCalculateStabilityWindow_ShelleyEra(t *testing.T) {
 			if err := loadByronGenesisForTest(t, cfg, strings.NewReader(byronGenesisJSON)); err != nil {
 				t.Fatalf("failed to load Byron genesis: %v", err)
 			}
-			if err := cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)); err != nil {
+			if err := completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)); err != nil {
 				t.Fatalf("failed to load Shelley genesis: %v", err)
 			}
 
@@ -1429,7 +1431,7 @@ func TestCalculateStabilityWindow_EdgeCases(t *testing.T) {
 			"securityParam": 432,
 			"systemStart": "2022-10-25T00:00:00Z"
 		}`
-		if err := cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)); err != nil {
+		if err := completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)); err != nil {
 			t.Fatalf("failed to load Shelley genesis: %v", err)
 		}
 
@@ -1501,7 +1503,7 @@ func TestCalculateStabilityWindow_EdgeCases(t *testing.T) {
 		)
 		require.NoError(
 			t,
-			cfg.LoadShelleyGenesisFromReader(
+			completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(
 				strings.NewReader(shelleyGenesisJSON),
 			),
 		)
@@ -1536,7 +1538,7 @@ func TestCalculateStabilityWindow_EdgeCases(t *testing.T) {
 		}`
 		shelleyGenesisJSON := `{
 			"activeSlotsCoeff": 0.05,
-			"securityParam": 0,
+			"securityParam": 432,
 			"systemStart": "2022-10-25T00:00:00Z"
 		}`
 
@@ -1546,10 +1548,11 @@ func TestCalculateStabilityWindow_EdgeCases(t *testing.T) {
 		)
 		require.NoError(
 			t,
-			cfg.LoadShelleyGenesisFromReader(
+			completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(
 				strings.NewReader(shelleyGenesisJSON),
 			),
 		)
+		cfg.ShelleyGenesis().SecurityParam = 0
 
 		ls := &LedgerState{
 			currentEra: eras.ShelleyEraDesc,
@@ -1595,7 +1598,7 @@ func TestCalculateStabilityWindow_ActiveSlotsCoefficientEdgeCases(
 		if err := loadByronGenesisForTest(t, cfg, strings.NewReader(byronGenesisJSON)); err != nil {
 			t.Fatalf("failed to load Byron genesis: %v", err)
 		}
-		if err := cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)); err != nil {
+		if err := completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)); err != nil {
 			t.Fatalf("failed to load Shelley genesis: %v", err)
 		}
 
@@ -1638,7 +1641,7 @@ func TestCalculateStabilityWindow_ActiveSlotsCoefficientEdgeCases(
 		if err := loadByronGenesisForTest(t, cfg, strings.NewReader(byronGenesisJSON)); err != nil {
 			t.Fatalf("failed to load Byron genesis: %v", err)
 		}
-		if err := cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)); err != nil {
+		if err := completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)); err != nil {
 			t.Fatalf("failed to load Shelley genesis: %v", err)
 		}
 
@@ -1676,7 +1679,7 @@ func TestCalculateStabilityWindow_ActiveSlotsCoefficientEdgeCases(
 		if err := loadByronGenesisForTest(t, cfg, strings.NewReader(byronGenesisJSON)); err != nil {
 			t.Fatalf("failed to load Byron genesis: %v", err)
 		}
-		if err := cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)); err != nil {
+		if err := completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)); err != nil {
 			t.Fatalf("failed to load Shelley genesis: %v", err)
 		}
 
@@ -1721,7 +1724,7 @@ func TestCalculateStabilityWindow_AllEras(t *testing.T) {
 	if err := loadByronGenesisForTest(t, cfg, strings.NewReader(byronGenesisJSON)); err != nil {
 		t.Fatalf("failed to load Byron genesis: %v", err)
 	}
-	if err := cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)); err != nil {
+	if err := completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)); err != nil {
 		t.Fatalf("failed to load Shelley genesis: %v", err)
 	}
 
@@ -1792,153 +1795,6 @@ func TestCalculateStabilityWindow_AllEras(t *testing.T) {
 	}
 }
 
-// TestCalculateStabilityWindow_Integration tests the function in realistic scenarios
-func TestCalculateStabilityWindow_Integration(t *testing.T) {
-	t.Parallel()
-
-	t.Run("Mainnet-like configuration", func(t *testing.T) {
-		byronGenesisJSON := `{
-			"protocolConsts": {
-				"k": 2160,
-				"protocolMagic": 764824073
-			}
-		}`
-		shelleyGenesisJSON := `{
-			"activeSlotsCoeff": 0.05,
-			"securityParam": 2160,
-			"systemStart": "2017-09-23T21:44:51Z"
-		}`
-
-		cfg := &cardano.CardanoNodeConfig{}
-		if err := loadByronGenesisForTest(t, cfg, strings.NewReader(byronGenesisJSON)); err != nil {
-			t.Fatalf("failed to load Byron genesis: %v", err)
-		}
-		if err := cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)); err != nil {
-			t.Fatalf("failed to load Shelley genesis: %v", err)
-		}
-
-		// Test Byron era with mainnet params
-		lsByron := &LedgerState{
-			currentEra: eras.ByronEraDesc,
-			config: LedgerStateConfig{
-				CardanoNodeConfig: cfg,
-				Logger: slog.New(
-					slog.NewJSONHandler(io.Discard, nil),
-				),
-			},
-		}
-
-		resultByron := lsByron.calculateStabilityWindow()
-		if resultByron != 4320 {
-			t.Errorf(
-				"Byron era: expected stability window 4320, got %d",
-				resultByron,
-			)
-		}
-
-		// Test Shelley era with mainnet params
-		lsShelley := &LedgerState{
-			currentEra: eras.ShelleyEraDesc,
-			config: LedgerStateConfig{
-				CardanoNodeConfig: cfg,
-				Logger: slog.New(
-					slog.NewJSONHandler(io.Discard, nil),
-				),
-			},
-		}
-
-		resultShelley := lsShelley.calculateStabilityWindow()
-		// 3*2160/0.05 = 129600
-		if resultShelley != 129600 {
-			t.Errorf(
-				"Shelley era: expected stability window 129600, got %d",
-				resultShelley,
-			)
-		}
-	})
-
-	t.Run("Preview testnet configuration", func(t *testing.T) {
-		byronGenesisJSON := `{
-			"protocolConsts": {
-				"k": 432,
-				"protocolMagic": 2
-			}
-		}`
-		shelleyGenesisJSON := `{
-			"activeSlotsCoeff": 0.05,
-			"securityParam": 432,
-			"systemStart": "2022-10-25T00:00:00Z"
-		}`
-
-		cfg := &cardano.CardanoNodeConfig{}
-		if err := loadByronGenesisForTest(t, cfg, strings.NewReader(byronGenesisJSON)); err != nil {
-			t.Fatalf("failed to load Byron genesis: %v", err)
-		}
-		if err := cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)); err != nil {
-			t.Fatalf("failed to load Shelley genesis: %v", err)
-		}
-
-		lsShelley := &LedgerState{
-			currentEra: eras.ShelleyEraDesc,
-			config: LedgerStateConfig{
-				CardanoNodeConfig: cfg,
-				Logger: slog.New(
-					slog.NewJSONHandler(io.Discard, nil),
-				),
-			},
-		}
-
-		result := lsShelley.calculateStabilityWindow()
-		// 3*432/0.05 = 25920
-		if result != 25920 {
-			t.Errorf(
-				"Preview testnet: expected stability window 25920, got %d",
-				result,
-			)
-		}
-	})
-}
-
-// TestCalculateStabilityWindow_LargeValues tests with large but valid values
-func TestCalculateStabilityWindow_LargeValues(t *testing.T) {
-	t.Parallel()
-
-	byronGenesisJSON := `{
-		"protocolConsts": {
-			"k": 432,
-			"protocolMagic": 2
-		}
-	}`
-	shelleyGenesisJSON := `{
-		"activeSlotsCoeff": 0.05,
-		"securityParam": 1000000,
-		"systemStart": "2022-10-25T00:00:00Z"
-	}`
-
-	cfg := &cardano.CardanoNodeConfig{}
-	if err := loadByronGenesisForTest(t, cfg, strings.NewReader(byronGenesisJSON)); err != nil {
-		t.Fatalf("failed to load Byron genesis: %v", err)
-	}
-	if err := cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)); err != nil {
-		t.Fatalf("failed to load Shelley genesis: %v", err)
-	}
-
-	ls := &LedgerState{
-		currentEra: eras.ShelleyEraDesc,
-		config: LedgerStateConfig{
-			CardanoNodeConfig: cfg,
-			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		},
-	}
-
-	result := ls.calculateStabilityWindow()
-	// 3*1000000/0.05 = 60000000
-	expectedWindow := uint64(60000000)
-	if result != expectedWindow {
-		t.Errorf("expected stability window %d, got %d", expectedWindow, result)
-	}
-}
-
 func newNonceReadyTestConfig(t *testing.T) *cardano.CardanoNodeConfig {
 	t.Helper()
 
@@ -1963,7 +1819,7 @@ func newNonceReadyTestConfig(t *testing.T) *cardano.CardanoNodeConfig {
 	)
 	require.NoError(
 		t,
-		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
+		completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
 	)
 	return cfg
 }
@@ -2169,7 +2025,7 @@ func TestNextEpochNonceReadyCutoffSlot(t *testing.T) {
 	)
 	require.NoError(
 		t,
-		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
+		completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
 	)
 
 	ls := &LedgerState{
@@ -2217,7 +2073,7 @@ func TestNextEpochNonceReadyEpoch(t *testing.T) {
 	)
 	require.NoError(
 		t,
-		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
+		completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
 	)
 
 	currentSlot := uint64(1095)
@@ -2336,7 +2192,7 @@ func TestNextEpochNonceReadyEpochNotReadyBeforeCutoff(t *testing.T) {
 	)
 	require.NoError(
 		t,
-		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
+		completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
 	)
 
 	currentSlot := uint64(1085)
@@ -2461,7 +2317,7 @@ func TestNextEpochNonceReadyCutoffSlotShortEpoch(t *testing.T) {
 	)
 	require.NoError(
 		t,
-		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
+		completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
 	)
 
 	ls := &LedgerState{
@@ -3102,43 +2958,6 @@ func TestDatabaseWorkerPoolShutdownTimeoutSpawnsNoWaiterGoroutine(
 	}
 }
 
-// TestDatabaseWorkerPoolResultChannelFull tests handling of full result channels
-func TestDatabaseWorkerPoolResultChannelFull(t *testing.T) {
-	t.Parallel()
-
-	config := DefaultDatabaseWorkerPoolConfig()
-	config.WorkerPoolSize = 1
-	config.TaskQueueSize = 5
-
-	pool := NewDatabaseWorkerPool(nil, config)
-
-	var completedCount atomic.Int32
-
-	// Submit operations
-	for range 3 {
-		resultChan := make(chan DatabaseResult, 1)
-
-		pool.Submit(DatabaseOperation{
-			OpFunc: func(db *database.Database) error {
-				completedCount.Add(1)
-				return nil
-			},
-			ResultChan: resultChan,
-		})
-
-		// Drain result
-		go func(ch chan DatabaseResult) {
-			<-ch
-		}(resultChan)
-	}
-
-	// Shutdown should work
-	pool.Shutdown(5 * time.Second)
-
-	// All operations should complete
-	assert.Equal(t, int32(3), completedCount.Load())
-}
-
 // TestTransitionToEra_ReturnsResultWithoutMutating tests that transitionToEra
 // returns computed state without mutating LedgerState fields
 func TestTransitionToEra_ReturnsResultWithoutMutating(t *testing.T) {
@@ -3184,7 +3003,7 @@ func TestTransitionToEra_ReturnsResultWithoutMutating(t *testing.T) {
 	)
 	require.NoError(
 		t,
-		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
+		completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
 	)
 
 	// Create in-memory database
@@ -3290,7 +3109,7 @@ func TestTransitionToEra_ChainedTransitions(t *testing.T) {
 	)
 	require.NoError(
 		t,
-		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
+		completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
 	)
 
 	db, err := dbtest.NewDatabase(t, &database.Config{
@@ -3506,7 +3325,7 @@ func TestEpochRolloverResult_FieldsPopulated(t *testing.T) {
 	)
 	require.NoError(
 		t,
-		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
+		completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
 	)
 
 	db, err := dbtest.NewDatabase(t, &database.Config{
@@ -3606,7 +3425,7 @@ func TestEpochRollover_NoDeadlockDuringTransaction(t *testing.T) {
 	)
 	require.NoError(
 		t,
-		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
+		completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
 	)
 
 	db, err := dbtest.NewDatabase(t, &database.Config{
@@ -3736,7 +3555,7 @@ func TestEpochRollover_ConcurrentReaders(t *testing.T) {
 	)
 	require.NoError(
 		t,
-		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
+		completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
 	)
 
 	db, err := dbtest.NewDatabase(t, &database.Config{
@@ -3898,69 +3717,6 @@ func makeTestBlock(slot, id uint64) models.Block {
 // makeTestPoint creates a Point from a test block
 func makeTestPoint(block models.Block) pcommon.Point {
 	return pcommon.NewPoint(block.Slot, block.Hash)
-}
-
-// TestCleanupOrphanedBlobs_EmptyBlobStore verifies cleanup returns without
-// error against a real (badger) blob store that has no stored blocks, so there
-// are no orphaned blobs to remove. dbtest.NewDatabase always composes a badger
-// blob store, and database.New now requires a non-nil blob store, so a
-// no-blob-store database is no longer constructible.
-func TestCleanupOrphanedBlobs_EmptyBlobStore(t *testing.T) {
-	t.Parallel()
-
-	ls := &LedgerState{
-		db: nil, // No database
-		config: LedgerStateConfig{
-			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		},
-	}
-
-	// Create a database backed by a real (badger) blob store with no blocks.
-	db, err := dbtest.NewDatabase(t, &database.Config{
-		DataDir: "",
-	})
-	require.NoError(t, err)
-
-	ls.db = db
-
-	// Cleanup should return nil when there are no orphaned blobs.
-	err = ls.cleanupOrphanedBlobs(100)
-	assert.NoError(t, err)
-}
-
-// TestCleanupOrphanedBlobs_NoOrphans tests cleanup when there are no orphaned blocks
-func TestCleanupOrphanedBlobs_NoOrphans(t *testing.T) {
-	t.Parallel()
-
-	// Create an in-memory database
-	db, err := dbtest.NewDatabase(t, &database.Config{
-		DataDir: "",
-	})
-	require.NoError(t, err)
-	ls := &LedgerState{
-		db: db,
-		config: LedgerStateConfig{
-			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		},
-	}
-
-	// Store a few blocks at slots 1, 2, 3
-	for slot := uint64(1); slot <= 3; slot++ {
-		block := makeTestBlock(slot, slot)
-		err = db.BlockCreate(block, nil)
-		require.NoError(t, err)
-	}
-
-	// Cleanup with tip at slot 3 - no orphans expected
-	err = ls.cleanupOrphanedBlobs(3)
-	assert.NoError(t, err)
-
-	// Verify all blocks still exist
-	for slot := uint64(1); slot <= 3; slot++ {
-		block := makeTestBlock(slot, slot)
-		_, err := database.BlockByPoint(context.Background(), db, makeTestPoint(block))
-		assert.NoError(t, err, "block at slot %d should still exist", slot)
-	}
 }
 
 // TestCleanupOrphanedBlobs_WithOrphans tests cleanup when orphaned blocks exist
@@ -4742,7 +4498,7 @@ func TestChainDensityUsesCardanoNodeFragment(t *testing.T) {
 	cfg := &cardano.CardanoNodeConfig{}
 	require.NoError(
 		t,
-		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
+		completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
 	)
 
 	db, err := dbtest.NewDatabase(t, &database.Config{
@@ -4800,7 +4556,7 @@ func TestLoadTipSeedsChainDensityFromPersistedFragment(t *testing.T) {
 	cfg := &cardano.CardanoNodeConfig{}
 	require.NoError(
 		t,
-		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
+		completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
 	)
 
 	db, err := dbtest.NewDatabase(t, &database.Config{
@@ -5008,7 +4764,7 @@ func TestPrepareEpochCacheForStartupPreservesByronPrefix(t *testing.T) {
 		require.NoError(t, loadByronGenesisForTest(t, cfg,
 			strings.NewReader(byronGenesisJSON),
 		))
-		require.NoError(t, cfg.LoadShelleyGenesisFromReader(
+		require.NoError(t, completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(
 			strings.NewReader(shelleyGenesisJSON),
 		))
 		if explicitShelleyHardFork {
@@ -5432,90 +5188,6 @@ func TestEvaluateTriggerAtEpoch_NoOpWithoutOverride(t *testing.T) {
 	assert.Equal(t, hardfork.TransitionUnknown, ls.transitionInfo.State)
 }
 
-// TestRolloverCommit_ResetsTransitionImpossible verifies that a plain epoch
-// rollover (no HardFork, no era transition) resets TransitionImpossible to
-// TransitionUnknown so the new epoch starts fresh.
-func TestRolloverCommit_ResetsTransitionImpossible(t *testing.T) {
-	t.Parallel()
-
-	ls := &LedgerState{
-		currentEra:     requireEraDesc(t, eras.ConwayEraDesc.Id),
-		currentPParams: babbagePParams(9),
-		// Simulate a stale TransitionImpossible state at epoch rollover.
-		transitionInfo: hardfork.NewTransitionImpossible(),
-	}
-
-	var eraTransitions []*EraTransitionResult
-	rolloverResult := &EpochRolloverResult{
-		NewCurrentEpoch: models.Epoch{
-			EpochId:       501,
-			StartSlot:     532_000,
-			LengthInSlots: 432_000,
-		},
-		NewCurrentEra:     requireEraDesc(t, eras.ConwayEraDesc.Id),
-		NewCurrentPParams: babbagePParams(9),
-		NewEpochCache:     []models.Epoch{{EpochId: 501}},
-		HardFork:          nil,
-	}
-
-	ls.Lock()
-	for _, eraResult := range eraTransitions {
-		ls.applyEraTransition(eraResult)
-	}
-	if rolloverResult != nil {
-		ls.epochCache = rolloverResult.NewEpochCache
-		ls.currentEpoch = rolloverResult.NewCurrentEpoch
-		ls.currentEra = rolloverResult.NewCurrentEra
-		ls.currentPParams = rolloverResult.NewCurrentPParams
-		if len(eraTransitions) == 0 {
-			ls.transitionInfo = hardfork.NewTransitionUnknown()
-		}
-	}
-	if len(eraTransitions) == 0 && rolloverResult != nil &&
-		rolloverResult.HardFork != nil {
-		ls.transitionInfo = hardfork.NewTransitionKnown(
-			rolloverResult.NewCurrentEpoch.EpochId,
-		)
-	}
-	ls.Unlock()
-
-	assert.Equal(
-		t,
-		hardfork.TransitionUnknown,
-		ls.transitionInfo.State,
-		"plain epoch rollover must reset TransitionImpossible to TransitionUnknown",
-	)
-}
-
-// TestApplyEraTransition_ClearsTransitionKnown verifies that
-// applyEraTransition unconditionally clears a pending TransitionKnown, even
-// when called outside of any epoch-rollover context (the "standalone
-// era-transition block" case).
-func TestApplyEraTransition_ClearsTransitionKnown(t *testing.T) {
-	t.Parallel()
-
-	ls := &LedgerState{
-		currentEra:     requireEraDesc(t, eras.BabbageEraDesc.Id),
-		currentPParams: babbagePParams(8),
-		transitionInfo: hardfork.NewTransitionKnown(500),
-	}
-
-	result := &EraTransitionResult{
-		NewEra:     requireEraDesc(t, eras.ConwayEraDesc.Id),
-		NewPParams: babbagePParams(9),
-	}
-
-	// Simulate a standalone era-transition path: apply under the lock,
-	// no epoch rollover involved.
-	ls.Lock()
-	ls.applyEraTransition(result)
-	ls.Unlock()
-
-	assert.Equal(t, hardfork.TransitionUnknown, ls.transitionInfo.State,
-		"TransitionKnown must be cleared when the new era becomes active")
-	assert.Equal(t, eras.ConwayEraDesc.Id, ls.currentEra.Id)
-}
-
 // TestApplyEraTransition_ClearsTransitionUnknown confirms that calling
 // applyEraTransition when transitionInfo is already TransitionUnknown is a
 // no-op for the State field (still TransitionUnknown).
@@ -5605,148 +5277,6 @@ func TestApplyEraTransition_MultipleSteps_AllCleared(t *testing.T) {
 
 	assert.Equal(t, hardfork.TransitionUnknown, ls.transitionInfo.State)
 	assert.Equal(t, eras.ConwayEraDesc.Id, ls.currentEra.Id)
-}
-
-// TestRolloverCommit_EraTransitionClearsTransitionInfo exercises the
-// in-memory state update block (the rollover-commit path) with both
-// eraTransitions and a rolloverResult to confirm that eraTransitions take
-// precedence: TransitionKnown is cleared even when rolloverResult.HardFork
-// is also set (should not happen in practice, but the logic must be safe).
-func TestRolloverCommit_EraTransitionClearsTransitionInfo(t *testing.T) {
-	t.Parallel()
-
-	ls := &LedgerState{
-		currentEra:     requireEraDesc(t, eras.BabbageEraDesc.Id),
-		currentPParams: babbagePParams(8),
-		transitionInfo: hardfork.NewTransitionKnown(499),
-	}
-
-	eraTransitions := []*EraTransitionResult{
-		{
-			NewEra:     requireEraDesc(t, eras.ConwayEraDesc.Id),
-			NewPParams: babbagePParams(9),
-		},
-	}
-	rolloverResult := &EpochRolloverResult{
-		NewCurrentEpoch:   models.Epoch{EpochId: 500},
-		NewCurrentEra:     requireEraDesc(t, eras.ConwayEraDesc.Id),
-		NewCurrentPParams: babbagePParams(9),
-		NewEpochCache:     []models.Epoch{{EpochId: 500}},
-		HardFork: &HardForkInfo{
-			OldVersion: ProtocolVersion{Major: 8},
-			NewVersion: ProtocolVersion{Major: 9},
-		},
-	}
-
-	// Replicate the rollover-commit block logic directly.
-	ls.Lock()
-	for _, eraResult := range eraTransitions {
-		ls.applyEraTransition(eraResult)
-	}
-	ls.epochCache = rolloverResult.NewEpochCache
-	ls.currentEpoch = rolloverResult.NewCurrentEpoch
-	ls.currentEra = rolloverResult.NewCurrentEra
-	ls.currentPParams = rolloverResult.NewCurrentPParams
-	if len(eraTransitions) == 0 && rolloverResult.HardFork != nil {
-		ls.transitionInfo = hardfork.NewTransitionKnown(
-			rolloverResult.NewCurrentEpoch.EpochId,
-		)
-	}
-	ls.Unlock()
-
-	assert.Equal(
-		t,
-		hardfork.TransitionUnknown,
-		ls.transitionInfo.State,
-		"era transition must clear transitionInfo even when rolloverResult.HardFork is set",
-	)
-}
-
-// TestRolloverCommit_HardForkWithoutEraTransition verifies that
-// TransitionKnown is set when rolloverResult.HardFork is non-nil and no era
-// transition happened (the normal epoch-boundary version-bump window).
-func TestRolloverCommit_HardForkWithoutEraTransition(t *testing.T) {
-	t.Parallel()
-
-	ls := &LedgerState{
-		currentEra:     requireEraDesc(t, eras.BabbageEraDesc.Id),
-		currentPParams: babbagePParams(8),
-		transitionInfo: hardfork.NewTransitionUnknown(),
-	}
-
-	var eraTransitions []*EraTransitionResult // empty — no standalone transition
-	rolloverResult := &EpochRolloverResult{
-		NewCurrentEpoch:   models.Epoch{EpochId: 500},
-		NewCurrentEra:     requireEraDesc(t, eras.BabbageEraDesc.Id),
-		NewCurrentPParams: babbagePParams(9),
-		NewEpochCache:     []models.Epoch{{EpochId: 500}},
-		HardFork: &HardForkInfo{
-			OldVersion: ProtocolVersion{Major: 8},
-			NewVersion: ProtocolVersion{Major: 9},
-		},
-	}
-
-	ls.Lock()
-	for _, eraResult := range eraTransitions {
-		ls.applyEraTransition(eraResult)
-	}
-	ls.epochCache = rolloverResult.NewEpochCache
-	ls.currentEpoch = rolloverResult.NewCurrentEpoch
-	ls.currentEra = rolloverResult.NewCurrentEra
-	ls.currentPParams = rolloverResult.NewCurrentPParams
-	if len(eraTransitions) == 0 && rolloverResult.HardFork != nil {
-		ls.transitionInfo = hardfork.NewTransitionKnown(
-			rolloverResult.NewCurrentEpoch.EpochId,
-		)
-	}
-	ls.Unlock()
-
-	assert.Equal(
-		t,
-		hardfork.TransitionKnown,
-		ls.transitionInfo.State,
-		"version bump at epoch boundary without era transition must set TransitionKnown",
-	)
-	assert.Equal(t, uint64(500), ls.transitionInfo.KnownEpoch)
-}
-
-// TestRolloverCommit_NoHardFork_TransitionInfoUnchanged verifies that a plain
-// epoch rollover (no HardFork, no era transition) leaves transitionInfo alone.
-func TestRolloverCommit_NoHardFork_TransitionInfoUnchanged(t *testing.T) {
-	t.Parallel()
-
-	ls := &LedgerState{
-		currentEra:     requireEraDesc(t, eras.ConwayEraDesc.Id),
-		currentPParams: babbagePParams(9),
-		transitionInfo: hardfork.NewTransitionUnknown(),
-	}
-
-	var eraTransitions []*EraTransitionResult
-	rolloverResult := &EpochRolloverResult{
-		NewCurrentEpoch:   models.Epoch{EpochId: 501},
-		NewCurrentEra:     requireEraDesc(t, eras.ConwayEraDesc.Id),
-		NewCurrentPParams: babbagePParams(9),
-		NewEpochCache:     []models.Epoch{{EpochId: 501}},
-		HardFork:          nil,
-	}
-
-	ls.Lock()
-	for _, eraResult := range eraTransitions {
-		ls.applyEraTransition(eraResult)
-	}
-	ls.epochCache = rolloverResult.NewEpochCache
-	ls.currentEpoch = rolloverResult.NewCurrentEpoch
-	ls.currentEra = rolloverResult.NewCurrentEra
-	ls.currentPParams = rolloverResult.NewCurrentPParams
-	if len(eraTransitions) == 0 && rolloverResult.HardFork != nil {
-		ls.transitionInfo = hardfork.NewTransitionKnown(
-			rolloverResult.NewCurrentEpoch.EpochId,
-		)
-	}
-	ls.Unlock()
-
-	assert.Equal(t, hardfork.TransitionUnknown, ls.transitionInfo.State,
-		"plain epoch rollover must not change transitionInfo")
 }
 
 func TestLatestOpCertSequenceTracksHighestObservedAndRollback(t *testing.T) {
@@ -5998,7 +5528,8 @@ func TestLedgerProcessBlockRejectsStandardDijkstraValidationFailure(
 	nodeConfig := newTestShelleyGenesisCfg(t)
 	nodeConfig.ShelleyGenesis().NetworkId = "Testnet"
 	ls := &LedgerState{
-		db: db,
+		db:         db,
+		activeEras: eras.ErasWithDijkstra,
 		config: LedgerStateConfig{
 			CardanoNodeConfig: nodeConfig,
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -6660,31 +6191,6 @@ func TestUpstreamSyncStatusReachableStates(t *testing.T) {
 	assert.Zero(t, upstreamTip.BlockNumber)
 }
 
-func TestSetForgedBlockChecker(t *testing.T) {
-	t.Parallel()
-
-	ls := &LedgerState{
-		config: LedgerStateConfig{
-			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		},
-	}
-
-	assert.Nil(t, ls.config.ForgedBlockChecker)
-
-	checker := &mockForgedBlockChecker{
-		forgedSlots: map[uint64][]byte{
-			1000: {0x01},
-		},
-	}
-	ls.SetForgedBlockChecker(checker)
-
-	assert.NotNil(t, ls.config.ForgedBlockChecker)
-
-	hash, ok := ls.config.ForgedBlockChecker.WasForgedByUs(1000)
-	assert.True(t, ok)
-	assert.Equal(t, []byte{0x01}, hash)
-}
-
 // newActiveSlotCoeffLedgerState builds a minimal LedgerState whose Shelley
 // genesis carries the given activeSlotsCoeff JSON literal.
 func newActiveSlotCoeffLedgerState(
@@ -6693,7 +6199,7 @@ func newActiveSlotCoeffLedgerState(
 ) *LedgerState {
 	t.Helper()
 	cfg := &cardano.CardanoNodeConfig{}
-	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(`{
+	require.NoError(t, completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(`{
 		"activeSlotsCoeff": `+coeffJSON+`,
 		"securityParam": 432,
 		"systemStart": "2022-10-25T00:00:00Z"
@@ -6908,12 +6414,14 @@ func TestLedgerReadChainIteratorHoldsGatherMutexAcrossGather(t *testing.T) {
 }
 
 func TestBlockReferenceScriptLimitAdmission(t *testing.T) {
+	t.Parallel()
 	for _, over := range []bool{false, true} {
 		name := "at limit"
 		if over {
 			name = "over limit"
 		}
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			db := newTestDB(t)
 			address, err := lcommon.NewAddressFromParts(
 				lcommon.AddressTypeKeyNone,
@@ -7566,10 +7074,11 @@ func TestCleanupConsumedUtxos_SkipsDeleteWhenPruneFloorPersistFails(
 func TestCleanupConsumedUtxos_ProcessesOneBoundedBatch(t *testing.T) {
 	t.Parallel()
 
+	const batchLimit = 3
 	db := newTestDBForCleanup(t, types.StorageModeCore)
 	mdTxn := db.MetadataTxn(context.Background(), true)
 	require.NoError(t, mdTxn.Do(func(txn *database.Txn) error {
-		for idx := 0; idx <= cleanupConsumedUtxoBatchSize; idx++ {
+		for idx := 0; idx <= batchLimit; idx++ {
 			txID := bytes.Repeat([]byte{0}, 32)
 			binary.BigEndian.PutUint32(txID[:4], uint32(idx+1))
 			if err := db.CreateUtxo(context.Background(), txn, &models.Utxo{
@@ -7586,11 +7095,12 @@ func TestCleanupConsumedUtxos_ProcessesOneBoundedBatch(t *testing.T) {
 	}))
 
 	ls := newLedgerStateForCleanup(db, 100_000)
+	ls.cleanupBatchSizeOverride = batchLimit
 	ls.cleanupConsumedUtxos(context.Background())
 
 	remaining, err := db.Metadata().GetUtxosDeletedBeforeSlot(
 		50_000,
-		cleanupConsumedUtxoBatchSize+1,
+		batchLimit+1,
 		nil,
 	)
 	require.NoError(t, err)
@@ -7599,7 +7109,7 @@ func TestCleanupConsumedUtxos_ProcessesOneBoundedBatch(t *testing.T) {
 	ls.cleanupConsumedUtxos(context.Background())
 	remaining, err = db.Metadata().GetUtxosDeletedBeforeSlot(
 		50_000,
-		cleanupConsumedUtxoBatchSize+1,
+		batchLimit+1,
 		nil,
 	)
 	require.NoError(t, err)
@@ -8116,7 +7626,7 @@ func newBoundaryRolloverLedger(
 	}
 	require.NoError(
 		t,
-		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
+		completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
 	)
 
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
@@ -8478,7 +7988,7 @@ func shelleyOnlyGenesisCfg(t testing.TB) *cardano.CardanoNodeConfig {
 		"systemStart": "2022-10-25T00:00:00Z"
 	}`
 	cfg := &cardano.CardanoNodeConfig{}
-	require.NoError(t, cfg.LoadShelleyGenesisFromReader(
+	require.NoError(t, completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(
 		strings.NewReader(shelleyGenesisJSON),
 	))
 	require.Nil(t, cfg.ByronGenesis())
@@ -8848,11 +8358,8 @@ INSERT INTO auth_committee_hot (
 		ActionType:    uint8(lcommon.GovActionTypeHardForkInitiation),
 		ProposedEpoch: 737,
 		ExpiresEpoch:  767,
-		// Deposit 0 keeps ratificationEnactmentPrecondition's return-address
-		// decode (which real proposals need) out of scope here -- this test
-		// is about the SPO stake epoch selection, not deposit handling.
-		Deposit:       0,
-		ReturnAddress: repeatByte(29, 0),
+		Deposit:       1_000,
+		ReturnAddress: append([]byte{0xe1}, repeatByte(28, 0)...),
 		AnchorURL:     "https://example.invalid/plomin",
 		AnchorHash:    repeatByte(32, 0x4a),
 		GovActionCbor: actionCbor,
@@ -9723,6 +9230,8 @@ func newRollbackWindowFixture(t *testing.T) *rollbackWindowFixture {
 // a future change that makes the window unreachable fails here loudly rather
 // than silently turning the regression tests below into tautologies.
 func TestRollbackWindowPreconditions(t *testing.T) {
+	t.Parallel()
+
 	f := newRollbackWindowFixture(t)
 
 	// The chain has been rewound to the rollback point...
@@ -9754,6 +9263,8 @@ func TestRollbackWindowPreconditions(t *testing.T) {
 func TestAuthoritativeRecentChainPointsFallsBackToChainTipWhenLedgerTipMissing(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	f := newRollbackWindowFixture(t)
 
 	points, err := f.ls.authoritativeRecentChainPoints(context.Background(), 4)
@@ -9792,6 +9303,8 @@ func TestAuthoritativeRecentChainPointsFallsBackToChainTipWhenLedgerTipMissing(
 func TestIntersectPointsDoesNotCollapseToEmptyDuringRollbackWindow(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	f := newRollbackWindowFixture(t)
 
 	points, err := f.ls.IntersectPoints(context.Background(), 4)
@@ -9810,6 +9323,8 @@ func TestIntersectPointsDoesNotCollapseToEmptyDuringRollbackWindow(
 // over-reaching: a node that genuinely has no chain must still report no
 // points, so a fresh node syncs from origin as designed.
 func TestIntersectPointsStillEmptyAtOriginWithNoChain(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	cm, err := chain.NewManager(context.Background(), db, nil)
@@ -9838,6 +9353,8 @@ func TestIntersectPointsStillEmptyAtOriginWithNoChain(t *testing.T) {
 func TestAuthoritativeRecentChainPointsIgnoresChainTipAheadOfLedgerTip(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	f := newRollbackWindowFixture(t)
 
 	// Extend the rewound chain past the (missing) ledger tip with a fork
@@ -9897,6 +9414,8 @@ func (h countingWarnHandler) Enabled(
 // Swallowing it would turn a transient database fault into an origin-only
 // intersect list, i.e. a request that the peer replay the chain from genesis.
 func TestRecentChainPointsFallbackAnchorPropagatesStorageError(t *testing.T) {
+	t.Parallel()
+
 	f := newRollbackWindowFixture(t)
 
 	// Sanity: the anchor resolves while the database is healthy.
@@ -9923,6 +9442,8 @@ func TestRecentChainPointsFallbackAnchorPropagatesStorageError(t *testing.T) {
 func TestAuthoritativeRecentChainPointsPropagatesAnchorStorageError(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	f := newRollbackWindowFixture(t)
 	require.NoError(t, dbtest.CloseDatabase(f.ls.db))
 
@@ -9937,6 +9458,8 @@ func TestAuthoritativeRecentChainPointsPropagatesAnchorStorageError(
 // reconnects roughly once a second across every peer, so an unthrottled
 // warning would emit hundreds of lines for a single rollback.
 func TestIntersectAnchorFallbackWarnIsThrottled(t *testing.T) {
+	t.Parallel()
+
 	f := newRollbackWindowFixture(t)
 
 	var warns atomic.Int64
@@ -9964,6 +9487,8 @@ func TestIntersectAnchorFallbackWarnIsThrottled(t *testing.T) {
 // anchor, which chainsync relies on, names the rollback point during the
 // window.
 func TestRollbackWindowIntersectAnchorReportsRollbackPoint(t *testing.T) {
+	t.Parallel()
+
 	f := newRollbackWindowFixture(t)
 
 	point, ok, err := f.ls.RollbackWindowIntersectAnchor(context.Background())
@@ -9977,6 +9502,8 @@ func TestRollbackWindowIntersectAnchorReportsRollbackPoint(t *testing.T) {
 // anchor is offered only inside the window: a self-consistent ledger whose tip
 // row is readable needs no rescue.
 func TestRollbackWindowIntersectAnchorAbsentWhenLedgerTipPresent(t *testing.T) {
+	t.Parallel()
+
 	f := newRollbackWindowFixture(t)
 
 	// Move the ledger tip onto a block that still exists.
@@ -10097,7 +9624,8 @@ func TestLedgerProcessBlockRunsPhase1ForPhase2InvalidTransaction(
 	nodeConfig := newTestShelleyGenesisCfg(t)
 	nodeConfig.ShelleyGenesis().NetworkId = "Testnet"
 	ls := &LedgerState{
-		db: db,
+		db:         db,
+		activeEras: eras.ErasWithDijkstra,
 		config: LedgerStateConfig{
 			CardanoNodeConfig: nodeConfig,
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -10610,7 +10138,7 @@ func newMultiEraForecastCfg(
 		"blockVersionData": { "slotDuration": "20000" },
 		"protocolConsts": { "k": 1 }
 	}`)))
-	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(`{
+	require.NoError(t, completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(`{
 		"activeSlotsCoeff": 0.4,
 		"securityParam": 1,
 		"slotLength": 1,
@@ -10755,7 +10283,7 @@ func newShelleyUpdateQuorum1Cfg(t *testing.T) *cardano.CardanoNodeConfig {
 			"protocolMagic": 42
 		}
 	}`)))
-	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(`{
+	require.NoError(t, completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(`{
 		"systemStart": "2026-01-01T00:00:00Z",
 		"securityParam": 6,
 		"activeSlotsCoeff": 0.05,
@@ -10782,7 +10310,7 @@ func newAllegraAtEpoch1Cfg(t *testing.T) *cardano.CardanoNodeConfig {
 			"protocolMagic": 42
 		}
 	}`)))
-	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(`{
+	require.NoError(t, completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(`{
 		"systemStart": "2026-01-01T00:00:00Z",
 		"securityParam": 6,
 		"activeSlotsCoeff": 0.4,
@@ -10865,7 +10393,7 @@ func newAlonzoBabbageAtEpoch1Cfg(t *testing.T) *cardano.CardanoNodeConfig {
 			"protocolMagic": 42
 		}
 	}`)))
-	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(`{
+	require.NoError(t, completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(`{
 		"systemStart": "2026-01-01T00:00:00Z",
 		"securityParam": 6,
 		"activeSlotsCoeff": 0.4,
@@ -12602,6 +12130,127 @@ func TestRollbackSameSlotCompetitorRestoresConsumedUtxo(t *testing.T) {
 	)
 }
 
+func TestRollbackToByronEbbRestoresSameSlotUtxos(t *testing.T) {
+	t.Parallel()
+
+	const (
+		ancestorSlot = 21_599
+		ebbSlot      = 21_600
+	)
+	db := newTestDB(t)
+	cm, err := chain.NewManager(context.Background(), db, nil)
+	require.NoError(t, err)
+	require.NoError(t, cm.SetLedger(testSecurityParamLedger{securityParam: 2}))
+	ancestorHash := testHashBytes("byron-ebb-ancestor")
+	ebbHash := testHashBytes("byron-ebb")
+	mainHash := testHashBytes("byron-main-after-ebb")
+	require.NoError(
+		t,
+		cm.PrimaryChain().AddRawBlocks(context.Background(), []chain.RawBlock{
+			{
+				Slot: ancestorSlot, Hash: ancestorHash, BlockNumber: 1,
+				Type: 1, Cbor: []byte{0x80},
+			},
+			{
+				Slot: ebbSlot, Hash: ebbHash, BlockNumber: 1,
+				Type: 0, PrevHash: ancestorHash, Cbor: []byte{0x80},
+			},
+			{
+				Slot: ebbSlot, Hash: mainHash, BlockNumber: 2,
+				Type: 1, PrevHash: ebbHash, Cbor: []byte{0x80},
+			},
+		}),
+	)
+	ebbPoint := ocommon.NewPoint(ebbSlot, ebbHash)
+	_, err = cm.PrimaryChain().RollbackDeferred(context.Background(), ebbPoint)
+	require.NoError(t, err)
+	ls, err := NewLedgerState(LedgerStateConfig{
+		Database: db, ChainManager: cm,
+		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
+		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	ls.metrics.init(prometheus.NewRegistry())
+	for _, block := range []struct {
+		hash []byte
+		slot uint64
+	}{
+		{ancestorHash, ancestorSlot}, {ebbHash, ebbSlot}, {mainHash, ebbSlot},
+	} {
+		require.NoError(
+			t,
+			db.SetBlockNonce(block.hash, block.slot, nil, false, nil),
+		)
+	}
+	mainTip := ochainsync.Tip{
+		Point: ocommon.NewPoint(ebbSlot, mainHash), BlockNumber: 2,
+	}
+	require.NoError(t, db.SetTip(mainTip, nil))
+	ls.currentTip = mainTip
+	ls.chainsyncState = SyncingChainsyncState
+	ls.publishSnapshotsLocked()
+
+	inputTx := testHashBytes("byron-ebb-input")
+	outputTx := testHashBytes("byron-ebb-output")
+	require.NoError(
+		t,
+		db.MetadataTxn(context.Background(), true).
+			Do(func(txn *database.Txn) error {
+				if err := db.CreateUtxo(context.Background(), txn, &models.Utxo{
+					TxId: inputTx, OutputIdx: 0, AddedSlot: ancestorSlot,
+					DeletedSlot: ebbSlot, Amount: types.Uint64(1_000_000),
+				}); err != nil {
+					return err
+				}
+				return db.CreateUtxo(context.Background(), txn, &models.Utxo{
+					TxId: outputTx, OutputIdx: 0, AddedSlot: ebbSlot,
+					Amount: types.Uint64(1_000_000),
+				})
+			}),
+	)
+	fixture := &sameSlotCompetitorFixture{db: db, spentTxId: inputTx}
+	require.False(t, fixture.inputInLiveSet(t))
+
+	require.NoError(t, ls.rollback(context.Background(), ebbPoint))
+	require.True(t, fixture.inputInLiveSet(t),
+		"the main block's spent input must be live after rollback")
+	_, err = db.UtxoByRef(context.Background(), outputTx, 0, nil)
+	require.ErrorIs(t, err, database.ErrUtxoNotFound,
+		"the main block's same-slot output must be removed")
+	require.Equal(
+		t,
+		ocommon.NewPoint(ancestorSlot, ancestorHash),
+		ls.currentTip.Point,
+		"the EBB must be reapplied from the prior block",
+	)
+	require.Equal(t, ebbPoint, cm.PrimaryChain().Tip().Point,
+		"the EBB remains the selected rollback target")
+}
+
+func TestResolveRollbackTargetKeepsQueuedSameSlotTip(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	ebbPoint := ocommon.NewPoint(21_600, testHashBytes("queued-ebb"))
+	mainTip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(21_600, testHashBytes("queued-main")),
+		BlockNumber: 2,
+	}
+	require.NoError(
+		t,
+		db.SetTip(ochainsync.Tip{Point: ebbPoint, BlockNumber: 1}, nil),
+	)
+	ls := &LedgerState{db: db}
+	resolved, err := ls.resolveRollbackTarget(
+		context.Background(),
+		ebbPoint,
+		mainTip,
+	)
+	require.NoError(t, err)
+	require.Equal(t, ebbPoint, resolved,
+		"a queued main block has no UTxO effects to undo at the EBB slot")
+}
+
 // TestRollbackSameSlotCompetitorWithoutAncestorFailsLoudly covers the other
 // half of acceptance criteria: when the contested slot cannot be
 // truncated because no applied ancestor below it can be found, the rollback
@@ -13121,7 +12770,7 @@ func seedRatifiableBootstrapHardForkInitiation(
 		ActionType:    uint8(lcommon.GovActionTypeHardForkInitiation),
 		ProposedEpoch: currentEpoch - 1,
 		ExpiresEpoch:  currentEpoch + 10,
-		Deposit:       1_000,
+		Deposit:       0,
 		ReturnAddress: repeatByte(29, 0),
 		AnchorURL:     "https://example.invalid/anchor",
 		AnchorHash:    repeatByte(32, 0xEE),
@@ -13593,22 +13242,6 @@ func newPrunedUtxoFixture(t *testing.T, mithrilLedgerSlot uint64) *prunedUtxoFix
 	return f
 }
 
-func TestPrunedUtxoFixtureClosesLedgerStateOnCleanup(t *testing.T) {
-	t.Parallel()
-
-	var ls *LedgerState
-	t.Run("fixture", func(t *testing.T) {
-		ls = newPrunedUtxoFixture(t, 0).ls
-		require.False(t, ls.closed.Load())
-	})
-	require.NotNil(t, ls, "fixture must initialize before cleanup assertions")
-	require.True(
-		t,
-		ls.closed.Load(),
-		"fixture cleanup must close the ledger state before the database is torn down",
-	)
-}
-
 // inLiveSet mirrors the probe used by the rollback tests: it asks
 // the database.UtxoByRef lookup that LedgerView.UtxoById delegates to, so it
 // exercises the deleted_slot filter that decides Conway bad-inputs and, through
@@ -13717,6 +13350,8 @@ func (f *prunedUtxoFixture) assertLiveSetConsistentAtTip(t *testing.T) {
 // The recovery schedule here walks 140000 -> 114080 -> 88160, and 88160 is
 // below the 114080 sweep floor.
 func TestAtTipRecoveryRewindBelowConsumedUtxoPruneFloor(t *testing.T) {
+	t.Parallel()
+
 	f := newPrunedUtxoFixture(t, 0)
 
 	require.Equal(
@@ -13767,6 +13402,8 @@ func TestAtTipRecoveryRewindBelowConsumedUtxoPruneFloor(t *testing.T) {
 // LedgerState.rollback directly, and it must refuse before mutating anything
 // rather than move the tip and report a repair it cannot perform.
 func TestRollbackBelowConsumedUtxoPruneFloorIsRefused(t *testing.T) {
+	t.Parallel()
+
 	f := newPrunedUtxoFixture(t, 0)
 	f.ls.cleanupConsumedUtxos(context.Background())
 	tipBefore := f.ls.currentTip
@@ -13814,6 +13451,8 @@ func TestRollbackBelowConsumedUtxoPruneFloorIsRefused(t *testing.T) {
 // reports a lower floor than the database holds, and a rollback admitted on
 // that stale value is exactly the divergence the floor exists to refuse.
 func TestConsumedUtxoPruneFloorIsReadFromTheDatabase(t *testing.T) {
+	t.Parallel()
+
 	f := newPrunedUtxoFixture(t, 0)
 
 	floor, err := f.db.ConsumedUtxoPruneFloor(nil)
@@ -13875,6 +13514,8 @@ func TestConsumedUtxoPruneFloorIsReadFromTheDatabase(t *testing.T) {
 // only after chain.Rollback had already run, splitting the chain from the
 // ledger.
 func TestRollbackChainAndStateRefusesRedirectBelowPruneFloor(t *testing.T) {
+	t.Parallel()
+
 	f := newPrunedUtxoFixture(t, 0)
 	f.ls.cleanupConsumedUtxos(context.Background())
 

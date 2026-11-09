@@ -168,6 +168,7 @@ var logPlainConfigFields = []string{
 	"DatabaseLifecycle.SnapshotMaxCommitPause",
 	"DatabaseLifecycle.SnapshotRetention",
 	"DatabaseLifecycle.SnapshotTrustKeyFile",
+	"CIP0203Enabled",
 	"DatabasePath",
 	"DatabaseQueueSize",
 	"DatabaseWorkers",

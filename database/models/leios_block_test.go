@@ -35,6 +35,7 @@ func buildStandardConwayBlock(t *testing.T) []byte {
 }
 
 func TestDecodeConwayBlockStandard(t *testing.T) {
+	t.Parallel()
 	standardRaw := buildStandardConwayBlock(t)
 	// Sanity: the fixture is a valid standard Conway block.
 	_, err := conway.NewConwayBlockFromCbor(standardRaw)
@@ -53,6 +54,7 @@ func TestDecodeConwayBlockStandard(t *testing.T) {
 }
 
 func TestDecodeConwayBlockLeiosExtendedHeader(t *testing.T) {
+	t.Parallel()
 	standardRaw := buildStandardConwayBlock(t)
 	extendedRaw := testutil.ExtendConwayHeaderWithLeios(t, standardRaw)
 
@@ -109,6 +111,7 @@ func TestDecodeConwayBlockLeiosExtendedHeader(t *testing.T) {
 }
 
 func TestDecodeConwayBlockRejectsMalformedLeiosHeaderExtension(t *testing.T) {
+	t.Parallel()
 	standardRaw := buildStandardConwayBlock(t)
 	for _, tc := range []struct {
 		name        string
@@ -145,6 +148,7 @@ func TestDecodeConwayBlockRejectsMalformedLeiosHeaderExtension(t *testing.T) {
 func TestDecodeConwayBlockRejectsTrailingDataAfterLeiosExtendedBlock(
 	t *testing.T,
 ) {
+	t.Parallel()
 	extendedRaw := testutil.ExtendConwayHeaderWithLeios(
 		t,
 		buildStandardConwayBlock(t),

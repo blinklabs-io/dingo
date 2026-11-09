@@ -49,6 +49,7 @@ func conwayShapeEntry() hardfork.ShapeEntry {
 // BuildSummary with no past eras and TransitionUnknown: the current era's
 // End is tipSlot + SafeZoneSlots snapped to the next epoch boundary.
 func TestBuildSummary_SingleEra_TransitionUnknown(t *testing.T) {
+	t.Parallel()
 	shape := singleEraShape(conwayShapeEntry())
 	current := hardfork.EraSummary{
 		EraID:  6,
@@ -82,6 +83,7 @@ func TestBuildSummary_SingleEra_TransitionUnknown(t *testing.T) {
 
 // BuildSummary with TransitionKnown: the end is set to the KnownEpoch's start.
 func TestBuildSummary_SingleEra_TransitionKnown(t *testing.T) {
+	t.Parallel()
 	shape := singleEraShape(conwayShapeEntry())
 	current := hardfork.EraSummary{
 		EraID:  6,
@@ -113,6 +115,7 @@ func TestBuildSummary_SingleEra_TransitionKnown(t *testing.T) {
 
 // BuildSummary with TransitionImpossible: safe zone applies from era start.
 func TestBuildSummary_SingleEra_TransitionImpossible(t *testing.T) {
+	t.Parallel()
 	shape := singleEraShape(conwayShapeEntry())
 	current := hardfork.EraSummary{
 		EraID:  6,
@@ -141,6 +144,7 @@ func TestBuildSummary_SingleEra_TransitionImpossible(t *testing.T) {
 
 // SafeZoneSlots == 0 denotes UnsafeIndefiniteSafeZone: unbounded.
 func TestBuildSummary_UnsafeIndefiniteSafeZone(t *testing.T) {
+	t.Parallel()
 	entry := conwayShapeEntry()
 	entry.Params.SafeZoneSlots = 0
 	shape := singleEraShape(entry)
@@ -164,6 +168,7 @@ func TestBuildSummary_UnsafeIndefiniteSafeZone(t *testing.T) {
 
 // A past era gets carried through verbatim.
 func TestBuildSummary_WithPastEra(t *testing.T) {
+	t.Parallel()
 	shape := sampleShape()
 	// Byron: closed past era, slot 0..100 (5 epochs: each epoch = 20s * 21_600 = 432_000s).
 	// We keep the arithmetic simple by using a short synthetic Byron.
@@ -214,6 +219,7 @@ func TestBuildSummary_WithPastEra(t *testing.T) {
 
 // BuildSummary copies over transition info onto the summary.
 func TestBuildSummary_CarriesTransitionInfo(t *testing.T) {
+	t.Parallel()
 	shape := singleEraShape(conwayShapeEntry())
 	current := hardfork.EraSummary{
 		EraID:  6,
@@ -228,6 +234,7 @@ func TestBuildSummary_CarriesTransitionInfo(t *testing.T) {
 
 // Sanity-check: after BuildSummary, SlotToTime/TimeToSlot work on the result.
 func TestBuildSummary_RoundTripSlotTime(t *testing.T) {
+	t.Parallel()
 	shape := singleEraShape(conwayShapeEntry())
 	current := hardfork.EraSummary{
 		EraID:  6,
@@ -260,6 +267,7 @@ func TestBuildSummary_RoundTripSlotTime(t *testing.T) {
 // always covers the whole first post-boundary epoch and no more than the safe
 // zone allows.
 func TestSuccessorEra_BoundedBySafeZone(t *testing.T) {
+	t.Parallel()
 	// Boundary at the start of epoch 1 in a Shelley-shaped era.
 	start := hardfork.Bound{
 		RelativeTime: 432_000 * time.Second,
@@ -283,6 +291,7 @@ func TestSuccessorEra_BoundedBySafeZone(t *testing.T) {
 // A zero SafeZoneSlots is UnsafeIndefiniteSafeZone and leaves the successor
 // open, matching how BuildSummary treats the current era.
 func TestSuccessorEra_ZeroSafeZoneStaysOpen(t *testing.T) {
+	t.Parallel()
 	params := shelleyParams
 	params.SafeZoneSlots = 0
 	succ := hardfork.SuccessorEra(
@@ -308,6 +317,7 @@ func TestSuccessorEra_ZeroSafeZoneStaysOpen(t *testing.T) {
 // forward from tipSlot: measured from max(anchorSlot+1, start.Slot), snapped
 // up to at least the next epoch boundary from there.
 func TestSuccessorEra_HorizonRollsForwardWithAnchor(t *testing.T) {
+	t.Parallel()
 	start := hardfork.Bound{
 		RelativeTime: 700 * time.Second,
 		Slot:         700,

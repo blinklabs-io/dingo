@@ -15,6 +15,7 @@
 package mithril
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
@@ -23,7 +24,6 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"testing"
 
 	cardanocfg "github.com/blinklabs-io/dingo/config/cardano"
@@ -43,9 +43,13 @@ func fixedSlotLimit(limit uint64) slotLimitFunc {
 func shelleyNodeConfig(t *testing.T, securityParam int) *cardanocfg.CardanoNodeConfig {
 	t.Helper()
 	cfg := &cardanocfg.CardanoNodeConfig{}
-	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(
-		`{"activeSlotsCoeff":0.05,"securityParam":`+strconv.Itoa(securityParam)+`}`,
+	require.NoError(t, cfg.LoadShelleyGenesisFromReader(bytes.NewReader(
+		testShelleyGenesisJSON(t, map[string]any{
+			"activeSlotsCoeff": 0.05,
+			"securityParam":    2160,
+		}),
 	)))
+	cfg.ShelleyGenesis().SecurityParam = securityParam
 	return cfg
 }
 

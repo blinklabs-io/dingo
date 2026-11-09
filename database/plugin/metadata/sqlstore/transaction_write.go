@@ -56,6 +56,7 @@ func transactionFee(transaction lcommon.Transaction) types.Uint64 {
 // prepared on a transaction must not escape it.
 type transactionBatchAccumulator struct {
 	leiosAPIRowsOnly     bool
+	validatedAPIRowsOnly bool
 	transactionInsert    *sql.Stmt
 	mysql                bool
 	sqlite               bool
@@ -438,20 +439,17 @@ func (s *Store) insertUtxoModelsChecked(
 		}
 
 		processed := make(map[string]struct{}, len(batch))
+		var conflicted, duplicates []*models.Utxo
 		for i, utxo := range batch {
 			key := utxoIdentityKey(utxo.TxId, utxo.OutputIdx)
 			if _, duplicate := processed[key]; duplicate {
-				if err := s.repairConflictedUtxo(ctx, db, utxo, deferredRows); err != nil {
-					return nil, err
-				}
+				duplicates = append(duplicates, utxo)
 				continue
 			}
 			processed[key] = struct{}{}
 			id, created := createdIDs[key]
 			if !created {
-				if err := s.repairConflictedUtxo(ctx, db, utxo, deferredRows); err != nil {
-					return nil, err
-				}
+				conflicted = append(conflicted, utxo)
 				continue
 			}
 			utxo.ID = id
@@ -468,8 +466,130 @@ func (s *Store) insertUtxoModelsChecked(
 				return nil, err
 			}
 		}
+		if err := s.repairConflictedUtxosBatch(
+			ctx, db, conflicted, deferredRows,
+		); err != nil {
+			return nil, err
+		}
+		// A repeat is repaired only after the first occurrence, which is
+		// deferred to the batch above, so the first occurrence's provenance
+		// fills an unlinked row and the repeat only adds missing links.
+		for _, utxo := range duplicates {
+			if err := s.repairConflictedUtxo(ctx, db, utxo, deferredRows); err != nil {
+				return nil, err
+			}
+		}
 	}
 	return inserted, nil
+}
+
+// repairUnlinkedUtxosBatchQuery builds the provenance fill for rowCount
+// outputs that exist with neither a producing-transaction nor a
+// collateral-return link. Each output is its own fully bound arm of the id
+// subquery so SQLite resolves it through the unique tx_id_output_idx index
+// (see consumeUtxosBatchQuery); the unlinked predicate stays inside the arm.
+// Arguments are the transaction_id CASE triples (tx_id, output_idx, value),
+// the collateral_return_for_tx_id CASE triples, then tx_id, output_idx per
+// arm. Rows already linked do not match and are not returned.
+func repairUnlinkedUtxosBatchQuery(rowCount int) string {
+	const when = "WHEN tx_id = ? AND output_idx = ? THEN ? "
+	const arm = "SELECT id FROM utxo WHERE tx_id = ? AND output_idx = ? " +
+		"AND transaction_id IS NULL AND collateral_return_for_tx_id IS NULL"
+	cases := strings.TrimSpace(strings.Repeat(when, rowCount))
+	arms := strings.TrimSuffix(
+		strings.Repeat(arm+" UNION ALL ", rowCount),
+		" UNION ALL ",
+	)
+	return "-- name: RepairUnlinkedUtxosBatch :many\n" +
+		"UPDATE utxo SET transaction_id = CASE " + cases +
+		" END, collateral_return_for_tx_id = CASE " + cases +
+		" END WHERE id IN (" + arms + ") RETURNING id, tx_id, output_idx"
+}
+
+// repairConflictedUtxosBatch links outputs that already exist to the
+// transaction replaying them and re-applies their relation rows. Outputs
+// with no provenance link, which is how a ledger-state import leaves them,
+// are repaired with one statement per chunk. Any other output is repaired
+// individually.
+//
+// An output with no provenance link was created by a ledger-state import or
+// by recovery of a consumed input. Both write the output's assets in the
+// same write transaction as the row, from the same decoded output, so the
+// replay skips the asset writes for it. An already-linked output is repaired
+// in full.
+func (s *Store) repairConflictedUtxosBatch(
+	ctx context.Context,
+	db queryer,
+	utxos []*models.Utxo,
+	addressRows *rowBatch,
+) error {
+	for start := 0; start < len(utxos); start += utxoInsertBatchSize {
+		end := min(start+utxoInsertBatchSize, len(utxos))
+		chunk := utxos[start:end]
+		var txCases, collateralCases, arms []any
+		for _, utxo := range chunk {
+			params, err := createUtxoParams(utxo)
+			if err != nil {
+				return err
+			}
+			txCases = append(
+				txCases, params.TxID, params.OutputIdx, params.TransactionID,
+			)
+			collateralCases = append(
+				collateralCases,
+				params.TxID, params.OutputIdx, params.CollateralReturnForTxID,
+			)
+			arms = append(arms, params.TxID, params.OutputIdx)
+		}
+		args := make([]any, 0, len(txCases)+len(collateralCases)+len(arms))
+		args = append(args, txCases...)
+		args = append(args, collateralCases...)
+		args = append(args, arms...)
+		rows, err := s.queryRowsCached(
+			ctx, db, repairUnlinkedUtxosBatchQuery(len(chunk)), args...,
+		)
+		if err != nil {
+			return err
+		}
+		unlinked := make(map[string]uint, len(chunk))
+		for rows.Next() {
+			var (
+				id        uint
+				txID      []byte
+				outputIdx uint32
+			)
+			if err := rows.Scan(&id, &txID, &outputIdx); err != nil {
+				_ = rows.Close()
+				return err
+			}
+			unlinked[utxoIdentityKey(txID, outputIdx)] = id
+		}
+		rowsErr := rows.Err()
+		closeErr := rows.Close()
+		if rowsErr != nil {
+			return rowsErr
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+		for _, utxo := range chunk {
+			id, ok := unlinked[utxoIdentityKey(utxo.TxId, utxo.OutputIdx)]
+			if !ok {
+				if err := s.repairConflictedUtxo(
+					ctx, db, utxo, addressRows,
+				); err != nil {
+					return err
+				}
+				continue
+			}
+			if err := s.persistUtxoRelationsWithoutAssets(
+				ctx, db, utxo, id, addressRows,
+			); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func (s *Store) repairConflictedUtxo(
@@ -884,11 +1004,29 @@ func (s *Store) NewLeiosClosureBatchAccumulator() types.MetadataBatchAccumulator
 	}
 }
 
-// LeiosClosureRowsOnly reports whether this accumulator defers only API detail rows.
+// NewValidatedBlockBatchAccumulator defers API indexes while keeping every
+// stateful transaction effect visible to subsequent validation.
+func (s *Store) NewValidatedBlockBatchAccumulator() types.MetadataBatchAccumulator {
+	if s.storageMode != types.StorageModeAPI {
+		return nil
+	}
+	return &transactionBatchAccumulator{
+		sqlite:               s.dialect.Name() == "sqlite",
+		validatedAPIRowsOnly: true,
+		sqlOperations:        s.sqlOperations,
+	}
+}
+
+func (a *transactionBatchAccumulator) apiRowsOnly() bool {
+	return a.leiosAPIRowsOnly || a.validatedAPIRowsOnly
+}
+
+// LeiosClosureRowsOnly identifies the ordered API-detail accumulator.
+// Retained UTxO staging is a separate optional capability.
 func (a *transactionBatchAccumulator) LeiosClosureRowsOnly() bool { return a.leiosAPIRowsOnly }
 
-// SetTransactionLeiosClosureBatched preserves the ordinary closure write order
-// and conflict tolerance while deferring only API detail rows until FlushBatch.
+// SetTransactionLeiosClosureBatched preserves ordered closure effects and
+// conflict tolerance, with optional retained UTxO staging until FlushBatch.
 func (s *Store) SetTransactionLeiosClosureBatched(
 	transaction lcommon.Transaction, point ocommon.Point, index uint32,
 	certDeposits map[int]uint64, skipWithdrawalWitness bool,
@@ -896,7 +1034,8 @@ func (s *Store) SetTransactionLeiosClosureBatched(
 	txn types.Txn, protocolMajor uint64,
 ) error {
 	acc, ok := accumulator.(*transactionBatchAccumulator)
-	if !ok || !acc.leiosAPIRowsOnly || acc.overlay != nil {
+	if !ok || !acc.leiosAPIRowsOnly ||
+		(acc.overlay != nil && !acc.overlay.retainHistory) {
 		return errors.New("closure batching requires an API-only accumulator")
 	}
 	if txn == nil {
@@ -1040,6 +1179,23 @@ func (s *Store) setTransactionWithAccumulator(
 	if batchedAccumulator != nil {
 		overlay = batchedAccumulator.overlay
 	}
+	if overlay != nil && overlay.retainHistory {
+		if !batchedAccumulator.leiosAPIRowsOnly ||
+			!tolerateConsumedInputConflict ||
+			historicalBackfill ||
+			!plainLeiosOverlayTransaction(transaction) {
+			return errors.New(
+				"unsupported transaction in API closure UTxO overlay",
+			)
+		}
+		if _, ok := overlay.apiTransactions[string(hash)]; !ok {
+			return errors.New(
+				"transaction was not preflighted for API closure UTxO overlay",
+			)
+		}
+		delete(overlay.apiTransactions, string(hash))
+		overlay.mutations++
+	}
 	// Detail rows are staged here and reach the accumulator only once the
 	// write succeeds, so a failed write cannot leave rows queued for a
 	// transaction that was rolled back, nor drop the rows an earlier
@@ -1089,7 +1245,7 @@ func (s *Store) setTransactionWithAccumulator(
 			if err != nil {
 				return err
 			}
-			if overlay != nil {
+			if overlay != nil && !overlay.retainHistory {
 				transactionID, err = overlay.stageTransaction(
 					hash,
 					point.Hash,
@@ -1234,6 +1390,19 @@ func (s *Store) setTransactionWithAccumulator(
 					skipped,
 					produced,
 				)
+				if overlay.retainHistory {
+					for i := range producedModels {
+						output := overlay.created[newOverlayKey(producedModels[i].TxId, producedModels[i].OutputIdx)]
+						producedModels[i].ID = uint(output.id)
+					}
+					if err := s.applyTransactionAPIDetails(ctx, db, transactionID, transaction, point.Slot, index, producedModels, &staged, transactionIsNew); err != nil {
+						return err
+					}
+					if err := staged.flushExceptClosureAPIRows(ctx, db, s.dialect.ParameterLimit()); err != nil {
+						return err
+					}
+					return nil
+				}
 				return nil
 			}
 			producedModelPtrs := make([]*models.Utxo, len(producedModels))
@@ -1287,7 +1456,7 @@ func (s *Store) setTransactionWithAccumulator(
 				return err
 			}
 			if batchedAccumulator != nil &&
-				batchedAccumulator.leiosAPIRowsOnly {
+				batchedAccumulator.apiRowsOnly() {
 				if err := staged.flushExceptClosureAPIRows(ctx, db, s.dialect.ParameterLimit()); err != nil {
 					return err
 				}
@@ -1500,7 +1669,7 @@ func (s *Store) setTransactionWithAccumulator(
 				producedStakeDeltas,
 			)
 			if batchedAccumulator != nil &&
-				!batchedAccumulator.leiosAPIRowsOnly {
+				!batchedAccumulator.apiRowsOnly() {
 				return nil
 			}
 			return s.refreshRewardLiveStakeDeltas(
@@ -1516,9 +1685,13 @@ func (s *Store) setTransactionWithAccumulator(
 	if err != nil || batchedAccumulator == nil {
 		return err
 	}
-	if !batchedAccumulator.leiosAPIRowsOnly {
+	retained := batchedAccumulator.overlay != nil && batchedAccumulator.overlay.retainHistory
+	if !batchedAccumulator.apiRowsOnly() || retained {
 		if err := batchedAccumulator.addStakeDeltas(batchedStakeDeltas, point.Slot); err != nil {
 			return err
+		}
+		if retained {
+			batchedAccumulator.overlay.closeStakeSegment(batchedAccumulator)
 		}
 	}
 	// The per-transaction cleanup deletes only reach flushed rows, so rows
@@ -2071,22 +2244,8 @@ func (s *Store) persistUtxoRelations(
 func (s *Store) persistUtxoRelationsWithAddressRows(
 	ctx context.Context, db queryer, utxo *models.Utxo, id uint, addressRows *rowBatch,
 ) error {
-	utxo.ID = id
-	if addressRows != nil && s.storageMode == types.StorageModeAPI {
-		address, err := utxoAddress(utxo)
-		if err != nil {
-			return err
-		}
-		addressRows.dropUtxoAddress(int64(id))
-		addressRows.add(utxoAddressShape, int64(id), address)
-	} else if err := s.persistUtxoAddress(ctx, db, int64(id), utxo); err != nil {
-		return err
-	}
-	if err := persistUtxoPointer(ctx, db, int64(id), utxo.Pointer); err != nil {
-		return err
-	}
-	if err := s.persistUtxoReferenceScript(
-		ctx, db, id, utxo.ReferenceScriptHash,
+	if err := s.persistUtxoRelationsWithoutAssets(
+		ctx, db, utxo, id, addressRows,
 	); err != nil {
 		return err
 	}
@@ -2117,6 +2276,30 @@ func (s *Store) persistUtxoRelationsWithAddressRows(
 		asset.ID = assetID
 	}
 	return nil
+}
+
+// persistUtxoRelationsWithoutAssets writes the address, pointer, and
+// reference-script rows of an existing output.
+func (s *Store) persistUtxoRelationsWithoutAssets(
+	ctx context.Context, db queryer, utxo *models.Utxo, id uint, addressRows *rowBatch,
+) error {
+	utxo.ID = id
+	if addressRows != nil && s.storageMode == types.StorageModeAPI {
+		address, err := utxoAddress(utxo)
+		if err != nil {
+			return err
+		}
+		addressRows.dropUtxoAddress(int64(id))
+		addressRows.add(utxoAddressShape, int64(id), address)
+	} else if err := s.persistUtxoAddress(ctx, db, int64(id), utxo); err != nil {
+		return err
+	}
+	if err := persistUtxoPointer(ctx, db, int64(id), utxo.Pointer); err != nil {
+		return err
+	}
+	return s.persistUtxoReferenceScript(
+		ctx, db, id, utxo.ReferenceScriptHash,
+	)
 }
 
 func (s *Store) persistUtxoRelationsWithDeferredAssets(

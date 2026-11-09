@@ -33,6 +33,7 @@ func TestUtxoStakingIndexesUpgrade(t *testing.T) {
 			func(t *testing.T) {
 				t.Parallel()
 				path := filepath.Join(t.TempDir(), "metadata.sqlite")
+				migrations.SeedMigratedPrefix(t, path, 52)
 				db, err := sql.Open("sqlite", "file:"+path+"?"+testDBPragmas)
 				require.NoError(t, err)
 				t.Cleanup(func() { require.NoError(t, db.Close()) })
@@ -49,7 +50,6 @@ func TestUtxoStakingIndexesUpgrade(t *testing.T) {
 					}
 					require.NoError(t, runner.Run(context.Background()))
 				}
-				run(registry[:52])
 				for _, name := range []string{"idx_utxo_staking_key", "idx_utxo_staking_deleted_amount"} {
 					definition, ok := indexSQL(t, db, name)
 					require.True(t, ok)

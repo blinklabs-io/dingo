@@ -220,13 +220,9 @@ func TestFlushOrderedContextWaitsForDelivery(t *testing.T) {
 	) {
 		t.Fatal("PublishOrdered returned false")
 	}
-	deadline := time.Now().Add(5 * time.Second)
-	for len(delivered) != 1 && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
-	if len(delivered) != 1 {
-		t.Fatal("first event did not fill subscriber buffer")
-	}
+	testutil.WaitForCondition(t, func() bool {
+		return len(delivered) == 1
+	}, testutil.AsyncWait, "first event did not fill subscriber buffer")
 	if !eb.PublishOrdered(
 		"ordered.flush",
 		NewEvent("ordered.flush", 2),

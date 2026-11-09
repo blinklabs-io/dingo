@@ -89,7 +89,7 @@ func TestLedgerViewGetLeiosKeysUsesRequestedSnapshotAfterPoolRotation(
 	require.Len(t, current, 1)
 	require.Equal(t, newPublic, current[0].LeiosKeyPublic)
 
-	for _, snapshotEpoch := range []uint64{27, 28} {
+	for _, snapshotEpoch := range []uint64{26, 27, 28} {
 		require.NoError(t, db.Metadata().SavePoolStakeSnapshot(
 			&models.PoolStakeSnapshot{
 				Epoch:                     snapshotEpoch,
@@ -136,12 +136,19 @@ func TestLedgerViewGetLeiosKeysUsesRequestedSnapshotAfterPoolRotation(
 	maxAgeEpochs, err := ls.maxLeiosKeyAgeEpochs()
 	require.NoError(t, err)
 	require.Equal(t, uint64(21), maxAgeEpochs)
-	beforeExpiry, err := view.GetLeiosKeys(27, []lcommon.PoolKeyHash{poolHash})
+	// The key age is judged against the committee epoch, which is the
+	// snapshot epoch plus one. With registration epoch 7 and a max age of 21,
+	// committee epoch 27 (Mark[26]) is the last keyed epoch.
+	beforeExpiry, err := view.GetLeiosKeys(26, []lcommon.PoolKeyHash{poolHash})
 	require.NoError(t, err)
 	require.Contains(t, beforeExpiry, hex.EncodeToString(poolKeyHash))
-	atExpiry, err := view.GetLeiosKeys(28, []lcommon.PoolKeyHash{poolHash})
+	atExpiry, err := view.GetLeiosKeys(27, []lcommon.PoolKeyHash{poolHash})
 	require.NoError(t, err)
-	require.NotContains(t, atExpiry, hex.EncodeToString(poolKeyHash))
+	require.NotContains(t, atExpiry, hex.EncodeToString(poolKeyHash),
+		"committee epoch 28 is registration epoch plus max key age")
+	pastExpiry, err := view.GetLeiosKeys(28, []lcommon.PoolKeyHash{poolHash})
+	require.NoError(t, err)
+	require.NotContains(t, pastExpiry, hex.EncodeToString(poolKeyHash))
 	unknownAge, err := view.GetLeiosKeys(9, []lcommon.PoolKeyHash{poolHash})
 	require.NoError(t, err)
 	require.NotContains(t, unknownAge, hex.EncodeToString(poolKeyHash),

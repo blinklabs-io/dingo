@@ -1,0 +1,36 @@
+// Copyright 2026 Blink Labs Software
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package nodeparity
+
+import (
+	"os"
+	"testing"
+	"time"
+
+	"github.com/blinklabs-io/dingo/internal/koiosparity"
+)
+
+// TestMain shortens the retry and reconnect waits for every test in the
+// package. They are set before any test starts, so no test races a write.
+// Tests assert on whether and how often a retry happens, never on the delay.
+func TestMain(m *testing.M) {
+	acquireRetryDelay = 10 * time.Millisecond
+	sessionRetryDelay = 20 * time.Millisecond
+	boundaryFollowerRetryDelay = 20 * time.Millisecond
+	watcherMinBackoff = 20 * time.Millisecond
+	watcherMaxBackoff = 500 * time.Millisecond
+	koiosparity.SetRetryBackoff5xxForTesting(time.Millisecond)
+	os.Exit(m.Run())
+}

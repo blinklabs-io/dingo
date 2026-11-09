@@ -21,7 +21,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"math"
 	"os"
@@ -522,7 +521,7 @@ func prepareLedgerStateImport(
 	// in-place write reaches a descriptor already open on the file, which is
 	// the one substitution the handle and the descriptor cannot rule out.
 	// One buffer leaves nothing to change.
-	stateBytes, err := io.ReadAll(snapshot.State)
+	stateBytes, err := ledgerstate.ReadSnapshotFile(snapshot.State)
 	if err != nil {
 		return nil, fmt.Errorf("reading ledger state: %w", err)
 	}

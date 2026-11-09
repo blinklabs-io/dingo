@@ -652,9 +652,10 @@ func ResetDormantDRepExpiryBeforeCertificates(
 	return nil
 }
 
-// BumpDormantDRepExpiryAtEpochBoundary extends dormant DRep expiries during
-// historical replay when no governance proposal was active in the epoch that
-// just ended, matching ProcessEpoch's RATIFY candidate set.
+// BumpDormantDRepExpiryAtEpochBoundary extends dormant DRep expiries when no
+// governance proposal is active in the new epoch. It runs in the boundary
+// transaction so later DRep registrations cannot receive the previous
+// boundary's extension.
 func BumpDormantDRepExpiryAtEpochBoundary(
 	ctx context.Context,
 	db *database.Database,

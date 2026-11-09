@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"cloud.google.com/go/storage"
+	"github.com/blinklabs-io/dingo/database/plugin/blob/internal/blobbackup"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/fakecloud"
 	"github.com/blinklabs-io/dingo/internal/test/storagetest"
@@ -75,5 +76,9 @@ func TestGCSBlockNumberBoundWorkIsIndependentOfArchiveSize(t *testing.T) {
 func TestGCSPopulatedRestoreReplacesAndRollsBack(t *testing.T) {
 	t.Parallel()
 	store, fc := storeOnFakeCloud(t)
-	storagetest.RunCloudPopulatedRestore(t, fc, fakeBucket, store)
+	// Not t.Parallel-safe against other restores in this binary: the batch
+	// limit is process-wide, and this is the only test that restores.
+	const batch = 10
+	t.Cleanup(blobbackup.SetRestoreBatchRecordsForTesting(batch))
+	storagetest.RunCloudPopulatedRestore(t, fc, fakeBucket, store, batch)
 }

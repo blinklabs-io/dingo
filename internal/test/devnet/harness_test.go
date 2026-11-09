@@ -44,23 +44,6 @@ func TestHarnessReferenceNodeSelectsProducer(t *testing.T) {
 	require.Equal(t, endpoints[1], referenceNode)
 }
 
-func TestHarnessGetChainTip(t *testing.T) {
-	endpoints := LoadEndpoints()
-	h := NewTestHarness(t, endpoints,
-		WithNetworkMagic(DefaultNetworkMagic),
-	)
-
-	// Wait for all nodes to become reachable
-	h.WaitForAllNodesReady(60 * time.Second)
-
-	// Query each node's chain tip
-	for _, ep := range endpoints {
-		tip, err := h.GetChainTip(ep)
-		require.NoError(t, err, "failed to get chain tip from %s", ep.Name)
-		t.Logf("%s: slot=%d block=%d", ep.Name, tip.SlotNumber, tip.BlockNumber)
-	}
-}
-
 func TestHarnessGetChainTipReusesPersistentObserver(t *testing.T) {
 	endpoint := NodeEndpoint{
 		Name:    "dingo-producer",

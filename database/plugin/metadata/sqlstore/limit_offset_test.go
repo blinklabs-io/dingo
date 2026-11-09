@@ -64,5 +64,5 @@ func testLimitOffset(t *testing.T, store *Store) {
 
 func TestAddLimitOffsetSQLite(t *testing.T) {
 	t.Parallel()
-	testLimitOffset(t, newMigratedTestStore(t))
+	testLimitOffset(t, newTestStore(t))
 }

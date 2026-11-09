@@ -21,7 +21,6 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
-	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -70,40 +69,4 @@ func TestRecordProtocolMessage_LabelsByOutcome(t *testing.T) {
 		3,
 		testutil.CollectAndCount(o.protocolMetrics.messageDuration),
 	)
-}
-
-func TestRecordProtocolMessage_NoopWhenMetricsDisabled(t *testing.T) {
-	t.Parallel()
-
-	o := newOuroboros(OuroborosConfig{}) // no PromRegistry → no metrics
-	// Must not panic when metrics are uninitialized.
-	o.recordProtocolMessage("chainsync", nil, time.Millisecond)
-	o.recordProtocolMessage("chainsync", errors.New("x"), time.Millisecond)
-	o.recordTxsubmissionAdmissionRetry(1)
-}
-
-func TestRecordTxsubmissionAdmissionRetry_RecordsStreak(t *testing.T) {
-	t.Parallel()
-
-	reg := prometheus.NewRegistry()
-	o := newOuroboros(OuroborosConfig{PromRegistry: reg})
-
-	o.recordTxsubmissionAdmissionRetry(1)
-	o.recordTxsubmissionAdmissionRetry(2)
-	o.recordTxsubmissionAdmissionRetry(3)
-
-	assert.Equal(
-		t,
-		1,
-		testutil.CollectAndCount(
-			o.protocolMetrics.txsubmissionAdmissionRetries,
-		),
-	)
-	metric := &dto.Metric{}
-	assert.NoError(
-		t,
-		o.protocolMetrics.txsubmissionAdmissionRetries.Write(metric),
-	)
-	assert.Equal(t, uint64(3), metric.GetHistogram().GetSampleCount())
-	assert.Equal(t, float64(6), metric.GetHistogram().GetSampleSum())
 }

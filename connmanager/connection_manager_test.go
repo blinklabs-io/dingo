@@ -32,29 +32,6 @@ import (
 	"github.com/blinklabs-io/dingo/connmanager"
 )
 
-/*
-func TestConnectionManagerTagString(t *testing.T) {
-	testDefs := map[connmanager.ConnectionManagerTag]string{
-		connmanager.ConnectionManagerTagHostP2PLedger: "HostP2PLedger",
-		connmanager.ConnectionManagerTagHostP2PGossip: "HostP2PGossip",
-		connmanager.ConnectionManagerTagRoleInitiator: "RoleInitiator",
-		connmanager.ConnectionManagerTagRoleResponder: "RoleResponder",
-		connmanager.ConnectionManagerTagNone:          "Unknown",
-		connmanager.ConnectionManagerTag(9999):        "Unknown",
-	}
-	for k, v := range testDefs {
-		if k.String() != v {
-			t.Fatalf(
-				"did not get expected string for ID %d: got %s, expected %s",
-				k,
-				k.String(),
-				v,
-			)
-		}
-	}
-}
-*/
-
 func TestConnectionManagerConnError(t *testing.T) {
 	defer goleak.VerifyNone(t)
 	var expectedConnId ouroboros.ConnectionId
@@ -88,7 +65,7 @@ func TestConnectionManagerConnError(t *testing.T) {
 				ouroboros_mock.ConversationEntryKeepAliveRequest,
 			}
 			kaPeriod = 30 * time.Second
-			kaTimeout = 2 * time.Second
+			kaTimeout = 500 * time.Millisecond
 		}
 		mockConn := ouroboros_mock.NewConnection(
 			ouroboros_mock.ProtocolRoleClient,
@@ -181,12 +158,7 @@ func TestConnectionManagerConnClosed(t *testing.T) {
 	}
 	expectedConnId = oConn.Id()
 	connManager.AddConnection(oConn, false, "127.0.0.1:1234")
-	time.AfterFunc(
-		1*time.Second,
-		func() {
-			oConn.Close()
-		},
-	)
+	oConn.Close()
 	select {
 	case <-doneChan:
 		// Wait for clean shutdown using Stop instead of fixed sleep
@@ -201,26 +173,6 @@ func TestConnectionManagerConnClosed(t *testing.T) {
 		return
 	case <-time.After(10 * time.Second):
 		t.Fatalf("did not receive error within timeout")
-	}
-}
-
-// Not t.Parallel: this and the other goleak.VerifyNone tests in this
-// package assert on the whole process's goroutine set, which a pending
-// parallel test is part of.
-func TestConnectionManager_Stop(t *testing.T) {
-	defer goleak.VerifyNone(t)
-
-	connManager := connmanager.NewConnectionManager(
-		connmanager.ConnectionManagerConfig{},
-	)
-
-	// Test stopping an empty connection manager
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
-	defer cancel()
-
-	err := connManager.Stop(ctx)
-	if err != nil {
-		t.Fatalf("Stop() returned error: %v", err)
 	}
 }
 

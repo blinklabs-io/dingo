@@ -101,6 +101,21 @@ func (cs *ChainSelector) EagernessLimit() EagernessLimit {
 	return cs.computeEagernessLimitLocked(nil, cs.localTip)
 }
 
+// TryEagernessLimit returns the current Limit on Eagerness without waiting for
+// the ledger to finish a state transition. It returns false while one is in
+// progress; during sync that is most of the time, because a block batch holds
+// the transition for its whole database transaction.
+func (cs *ChainSelector) TryEagernessLimit() (EagernessLimit, bool) {
+	releaseGeneration, generationCurrent := cs.tryPinCurrentHeaderCryptoGeneration()
+	if !generationCurrent {
+		return EagernessLimit{}, false
+	}
+	defer releaseGeneration()
+	cs.mutex.RLock()
+	defer cs.mutex.RUnlock()
+	return cs.computeEagernessLimitLocked(nil, cs.localTip), true
+}
+
 // computeEagernessLimitLocked derives the limit from the candidate fragments of
 // every live, eligible, non-stale peer that has delivered a header, excluding
 // peers whose advertised tip is wall-clock stale (advertisedTipStaleLocked).

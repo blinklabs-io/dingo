@@ -32,11 +32,22 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// slowFixtureChunks is how many leading preview chunks the tests that copy a
+// whole ImmutableDB use. The full fixture holds 300 chunks; the behavior under
+// test needs only a few batches of real blocks, so loading all of them only
+// multiplies the runtime.
+const slowFixtureChunks = 2
+
 // copyImmutableChunkPrefix copies chunks [0, count) of the preview testdata
 // ImmutableDB into a fresh directory, so a test can load a short chain.
 func copyImmutableChunkPrefix(t *testing.T, count int) string {
 	t.Helper()
-	src := filepath.Join("..", "..", "database", "immutable", "testdata")
+	// DINGO_TEST_IMMUTABLE_DIR points the tests at a different immutable
+	// fixture, as it did before the tests copied only a leading prefix.
+	src := os.Getenv("DINGO_TEST_IMMUTABLE_DIR")
+	if src == "" {
+		src = filepath.Join("..", "..", "database", "immutable", "testdata")
+	}
 	dst := t.TempDir()
 	for i := range count {
 		for _, ext := range []string{"chunk", "primary", "secondary"} {

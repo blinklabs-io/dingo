@@ -179,6 +179,7 @@ func dial(t *testing.T, addr string) *grpc.ClientConn {
 
 // The stub service must answer every RPC with codes.Unimplemented.
 func TestStubServiceReturnsUnimplemented(t *testing.T) {
+	t.Parallel()
 	addr := startTestServer(t)
 	client := midnight.NewMidnightStateClient(dial(t, addr))
 
@@ -195,6 +196,7 @@ func TestStubServiceReturnsUnimplemented(t *testing.T) {
 // returning Unimplemented (no Metadata backing configured) is irrelevant:
 // the interceptor records every request regardless of the handler's outcome.
 func TestUnaryInterceptor_RecordsRealRPCThroughDialedConnection(t *testing.T) {
+	t.Parallel()
 	addr, reg := startTestServerWithRegistry(t)
 	client := midnight.NewMidnightStateClient(dial(t, addr))
 
@@ -254,6 +256,7 @@ func TestUnaryInterceptor_RecordsRealRPCThroughDialedConnection(t *testing.T) {
 func TestUnaryInterceptor_ExcludesHealthCheckFromMidnightStateMetrics(
 	t *testing.T,
 ) {
+	t.Parallel()
 	addr, reg := startTestServerWithRegistry(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -298,6 +301,7 @@ func TestUnaryInterceptor_ExcludesHealthCheckFromMidnightStateMetrics(
 // The health service must report SERVING for both the overall server and the
 // MidnightState service by name.
 func TestHealthCheckServing(t *testing.T) {
+	t.Parallel()
 	addr := startTestServer(t)
 	hc := healthpb.NewHealthClient(dial(t, addr))
 
@@ -323,6 +327,7 @@ func TestHealthCheckServing(t *testing.T) {
 // Reflection is an explicit opt-in and advertises the MidnightState service
 // when enabled.
 func TestReflectionListsService(t *testing.T) {
+	t.Parallel()
 	addr := startTestServerConfig(t, server.Config{ReflectionEnabled: true})
 	client := reflectionpb.NewServerReflectionClient(dial(t, addr))
 
@@ -346,6 +351,7 @@ func TestReflectionListsService(t *testing.T) {
 }
 
 func TestReflectionDisabledByDefault(t *testing.T) {
+	t.Parallel()
 	addr := startTestServer(t)
 	conn := dial(t, addr)
 	readyCtx, readyCancel := context.WithTimeout(
@@ -389,6 +395,7 @@ func TestReflectionDisabledByDefault(t *testing.T) {
 // New rejects a half-configured TLS pair (cert without key, or key without
 // cert).
 func TestNewRequiresBothTLSPaths(t *testing.T) {
+	t.Parallel()
 	_, err := server.New(server.Config{TLSCertFilePath: "cert.pem"})
 	require.Error(t, err)
 	_, err = server.New(server.Config{TLSKeyFilePath: "key.pem"})
@@ -396,8 +403,10 @@ func TestNewRequiresBothTLSPaths(t *testing.T) {
 }
 
 func TestNewAllowsRemotePlaintextByDefault(t *testing.T) {
+	t.Parallel()
 	for _, host := range []string{"0.0.0.0", "::", "192.0.2.1", "example.test"} {
 		t.Run(host, func(t *testing.T) {
+			t.Parallel()
 			_, err := server.New(server.Config{Host: host})
 			require.NoError(t, err)
 		})
@@ -405,6 +414,7 @@ func TestNewAllowsRemotePlaintextByDefault(t *testing.T) {
 }
 
 func TestNewAllowsRemoteHostWithTLS(t *testing.T) {
+	t.Parallel()
 	_, err := server.New(server.Config{
 		Host:            "192.0.2.1",
 		TLSCertFilePath: "server.crt",
@@ -415,6 +425,7 @@ func TestNewAllowsRemoteHostWithTLS(t *testing.T) {
 
 // Cancelling the context passed to Start must shut the server down.
 func TestShutdownOnContextCancel(t *testing.T) {
+	t.Parallel()
 	srv, port, cancel := startServerOnFreePort(
 		t, func() server.Config { return server.Config{} },
 	)
@@ -460,6 +471,7 @@ func TestShutdownOnContextCancel(t *testing.T) {
 // Stop is idempotent and safe to call when the server was never started or
 // already stopped.
 func TestStopIdempotent(t *testing.T) {
+	t.Parallel()
 	srv, err := server.New(server.Config{})
 	require.NoError(t, err)
 	ctx := context.Background()

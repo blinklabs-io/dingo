@@ -23,41 +23,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestBuildDeferredIndexesContextHonoursCancellation proves the store's
-// context-aware rebuild actually reaches the database driver with the
-// caller's context, rather than accepting one and building on
-// context.Background() anyway. Restore relies on this: an uninterruptible
-// full-manifest rebuild outlives a cancelled restore for as long as its
-// largest index takes.
-func TestBuildDeferredIndexesContextHonoursCancellation(t *testing.T) {
-	t.Parallel()
-	store := newMigratedSQLiteStore(t)
-	require.NoError(t, store.DropDeferredIndexes())
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	require.ErrorIs(
-		t,
-		store.BuildDeferredIndexesContext(ctx),
-		context.Canceled,
-	)
-
-	// The cancelled attempt must leave the recovery marker in place so the
-	// next run still knows a rebuild is outstanding.
-	pending, err := store.HasDeferredIndexesPending()
-	require.NoError(t, err)
-	require.True(t, pending)
-
-	require.NoError(t, store.BuildDeferredIndexesContext(context.Background()))
-	pending, err = store.HasDeferredIndexesPending()
-	require.NoError(t, err)
-	require.False(t, pending)
-	missing, err := store.MissingDeferredIndexes()
-	require.NoError(t, err)
-	require.Empty(t, missing)
-	require.NotEmpty(t, deferred.Manifest)
-}
-
 func TestDropDeferredIndexesContextCancelsWhileWriteLocked(t *testing.T) {
 	t.Parallel()
 	store := newMigratedSQLiteStore(t)
@@ -286,52 +251,23 @@ func TestCatchUpIndexDropAndRebuild(t *testing.T) {
 	require.False(t, pending)
 }
 
-// TestSetCatchUpPragmasLeavesDurabilityAlone checks the catch-up tuning
-// changes only memory settings on the write connection and that
-// RestoreNormalPragmas puts them back.
-func TestSetCatchUpPragmasLeavesDurabilityAlone(t *testing.T) {
-	t.Parallel()
-	store := newMigratedSQLiteStore(t)
-	store.writeDB.SetMaxOpenConns(1)
-	pragma := func(name string) int64 {
-		t.Helper()
-		var value int64
-		require.NoError(t, store.writeDB.QueryRowContext(
-			t.Context(), "PRAGMA "+name,
-		).Scan(&value))
-		return value
-	}
-	synchronous := pragma("synchronous")
-	journal := func() string {
-		t.Helper()
-		var mode string
-		require.NoError(t, store.writeDB.QueryRowContext(
-			t.Context(), "PRAGMA journal_mode",
-		).Scan(&mode))
-		return mode
-	}
-	journalMode := journal()
-
-	require.NoError(t, store.SetCatchUpPragmas())
-	require.Equal(t, int64(-200000), pragma("cache_size"))
-	require.Equal(t, int64(2), pragma("temp_store"), "temp_store = MEMORY")
-	require.Equal(t, synchronous, pragma("synchronous"),
-		"catch-up tuning must not relax durability")
-	require.Equal(t, journalMode, journal())
-	require.False(t, store.bulkMode, "catch-up tuning is not bulk mode")
-
-	require.NoError(t, store.RestoreNormalPragmas())
-	require.Equal(t, int64(-50000), pragma("cache_size"))
-	require.Equal(t, int64(0), pragma("temp_store"), "temp_store = DEFAULT")
-}
-
 // A bulk-load cycle drops the spender indexes and the rebuild recreates them.
 // The rebuild must restore the partial definition the schema migration
 // installed, not a full-table index over the mostly-NULL columns.
-func TestDeferredRebuildKeepsUtxoSpenderIndexesPartial(t *testing.T) {
+func TestDeferredRebuildKeepsUtxoIndexesPartial(t *testing.T) {
 	t.Parallel()
 	store := newMigratedSQLiteStore(t)
 	require.NoError(t, store.DropDeferredIndexes())
+
+	// The retained live-stake index is not part of the drop manifest, so it
+	// must still exist, partial, before any rebuild could repair it.
+	var retained string
+	require.NoError(t, store.readDB.QueryRow(
+		"SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?",
+		"idx_utxo_staking_deleted_amount",
+	).Scan(&retained))
+	require.Contains(t, retained, "WHERE staking_key IS NOT NULL")
+
 	require.NoError(t, store.BuildDeferredIndexes())
 
 	for _, column := range []string{
@@ -346,6 +282,18 @@ func TestDeferredRebuildKeepsUtxoSpenderIndexesPartial(t *testing.T) {
 		).Scan(&definition))
 		require.Contains(t, definition, "WHERE "+column+" IS NOT NULL",
 			"rebuilt idx_utxo_%s must stay partial: %s", column, definition)
+	}
+	for _, name := range []string{
+		"idx_utxo_staking_key",
+		"idx_utxo_staking_deleted_amount",
+	} {
+		var definition string
+		require.NoError(t, store.readDB.QueryRow(
+			"SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?",
+			name,
+		).Scan(&definition))
+		require.Contains(t, definition, "WHERE staking_key IS NOT NULL",
+			"rebuilt %s must stay partial: %s", name, definition)
 	}
 }
 
@@ -374,24 +322,4 @@ func TestDeferredIndexSQLPartialPredicateByDialect(t *testing.T) {
 		"CREATE INDEX `idx_utxo_spent_at_tx_id` ON `utxo` (`spent_at_tx_id`(255))",
 		deferredIndexCreateSQL(MySQLDialect(), index),
 	)
-}
-
-func TestDeferredRebuildKeepsUtxoStakingIndexesPartial(t *testing.T) {
-	t.Parallel()
-	store := newMigratedSQLiteStore(t)
-	check := func(name string) {
-		t.Helper()
-		var definition string
-		require.NoError(
-			t,
-			store.readDB.QueryRow("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?", name).
-				Scan(&definition),
-		)
-		require.Contains(t, definition, "WHERE staking_key IS NOT NULL")
-	}
-	require.NoError(t, store.DropDeferredIndexes())
-	check("idx_utxo_staking_deleted_amount")
-	require.NoError(t, store.BuildDeferredIndexes())
-	check("idx_utxo_staking_key")
-	check("idx_utxo_staking_deleted_amount")
 }

@@ -299,6 +299,8 @@ func (f *leiosAuditFixture) spenderBlockAt(
 // block spending an endorser-resident output was reported as having no
 // producer on the local applied chain, on a node whose UTxO set was correct.
 func TestContinuationAuditAcceptsEndorserBlockProducer(t *testing.T) {
+	t.Parallel()
+
 	f := newLeiosAuditFixture(t)
 	ls := f.ls
 	ls.armContinuationAudit(context.Background(), f.ancestorTip.Point, "test rollback")
@@ -342,6 +344,8 @@ func TestContinuationAuditAcceptsEndorserBlockProducer(t *testing.T) {
 func TestContinuationAuditTreatsPendingEndorserBlockAsInconclusive(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	f := newLeiosAuditFixture(t)
 	ls := f.ls
 	*f.providerOK = false
@@ -373,6 +377,8 @@ func TestContinuationAuditTreatsPendingEndorserBlockAsInconclusive(
 // resolved, an input whose producer is in neither the ranking block bodies,
 // the endorser block, nor the ledger is still reported at Error.
 func TestContinuationAuditStillReportsMissingProducerOnLeios(t *testing.T) {
+	t.Parallel()
+
 	f := newLeiosAuditFixture(t)
 	ls := f.ls
 	ls.armContinuationAudit(context.Background(), f.ancestorTip.Point, "test rollback")
@@ -424,6 +430,8 @@ func TestContinuationAuditStillReportsMissingProducerOnLeios(t *testing.T) {
 // recognising endorser producers and the false positive would return, so the
 // two derivations are compared directly.
 func TestEndorserBlockTxIdsMatchDecodedTransactionHashes(t *testing.T) {
+	t.Parallel()
+
 	rawTxs := make([]cbor.RawMessage, 0, 3)
 	want := make([][]byte, 0, 3)
 	for _, seed := range []byte{0x01, 0x02, 0x03} {
@@ -441,6 +449,8 @@ func TestEndorserBlockTxIdsMatchDecodedTransactionHashes(t *testing.T) {
 // bucket, so "this node is not being audited" (inconclusive) is distinguishable
 // from "this node is clean" and from "this node is spending unknown inputs".
 func TestContinuationAuditOutcomesAreCounted(t *testing.T) {
+	t.Parallel()
+
 	outcome := func(ls *LedgerState, result string) float64 {
 		t.Helper()
 		return promtestutil.ToFloat64(
@@ -546,6 +556,8 @@ func continuationAuditFillProducers(
 // endorser transaction is then the id that runs the set into the cap, which is
 // the path a real Leios window disarms on.
 func TestContinuationAuditCapDisarmIsExplicit(t *testing.T) {
+	t.Parallel()
+
 	f := newLeiosAuditFixture(t)
 	ls := f.ls
 	ls.armContinuationAudit(context.Background(), f.ancestorTip.Point, "test rollback")
@@ -597,6 +609,8 @@ func TestContinuationAuditCapDisarmIsExplicit(t *testing.T) {
 // the endorser block's transaction is already recorded. The drain therefore
 // offers a repeat, the set cannot grow, and the window must stay armed.
 func TestContinuationAuditCapCountsOnlyNewProducers(t *testing.T) {
+	t.Parallel()
+
 	f := newLeiosAuditFixture(t)
 	ls := f.ls
 	ls.armContinuationAudit(context.Background(), f.ancestorTip.Point, "test rollback")
@@ -664,6 +678,8 @@ func TestContinuationAuditCapCountsOnlyNewProducers(t *testing.T) {
 // read plus a hash of every one of its transactions. Three certifying blocks
 // over the same closure must cost exactly one resolution, not three.
 func TestContinuationAuditResolvesEachEndorserBlockOnce(t *testing.T) {
+	t.Parallel()
+
 	f := newLeiosAuditFixture(t)
 	ls := f.ls
 	ls.armContinuationAudit(context.Background(), f.ancestorTip.Point, "test rollback")
@@ -716,6 +732,8 @@ func TestContinuationAuditResolvesEachEndorserBlockOnce(t *testing.T) {
 func TestContinuationAuditSkipsEndorserResolutionWithoutEndorserSpends(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	f := newLeiosAuditFixture(t)
 	ls := f.ls
 	ls.armContinuationAudit(context.Background(), f.ancestorTip.Point, "test rollback")
@@ -815,6 +833,8 @@ func queueContinuationAuditTestRefs(
 // a later body, the window reports inconclusive rather than missing while it is
 // short, and the stop is counted.
 func TestContinuationAuditEndorserResolutionIsBudgeted(t *testing.T) {
+	t.Parallel()
+
 	f := newLeiosAuditFixture(t)
 	ls := f.ls
 	ls.armContinuationAudit(context.Background(), f.ancestorTip.Point, "test rollback")
@@ -884,6 +904,8 @@ func TestContinuationAuditEndorserResolutionIsBudgeted(t *testing.T) {
 // genuine missing one. A miss is a transient state, not a verdict — the parent
 // arrives — so the reference must be requeued and retried.
 func TestContinuationAuditRetriesUnresolvedCertifyingParent(t *testing.T) {
+	t.Parallel()
+
 	f := newLeiosAuditFixtureOpts(t, false)
 	ls := f.ls
 	ls.armContinuationAudit(context.Background(), f.ancestorTip.Point, "test rollback")
@@ -976,6 +998,8 @@ func TestContinuationAuditRetriesUnresolvedCertifyingParent(t *testing.T) {
 // input of the same body, only once per audited body, so a permanently absent
 // parent costs one index miss per block rather than one per input.
 func TestContinuationAuditRetriesParentAtMostOncePerBlock(t *testing.T) {
+	t.Parallel()
+
 	f := newLeiosAuditFixtureOpts(t, false)
 	ls := f.ls
 	ls.armContinuationAudit(context.Background(), f.ancestorTip.Point, "test rollback")
@@ -1031,6 +1055,8 @@ func TestContinuationAuditRetriesParentAtMostOncePerBlock(t *testing.T) {
 // block ended up queued twice and was probed twice on every later body, burning
 // budget that other references needed.
 func TestContinuationAuditDedupesConvergingEndorserRefs(t *testing.T) {
+	t.Parallel()
+
 	f := newLeiosAuditFixture(t)
 	ls := f.ls
 
@@ -1120,6 +1146,8 @@ func TestContinuationAuditDedupesConvergingEndorserRefs(t *testing.T) {
 // and counted again — a body with thirty unresolvable inputs reported thirty
 // budget stops for one exhausted budget.
 func TestContinuationAuditBudgetStopIsCountedOncePerBody(t *testing.T) {
+	t.Parallel()
+
 	f := newLeiosAuditFixture(t)
 	ls := f.ls
 	ls.armContinuationAudit(context.Background(), f.ancestorTip.Point, "test rollback")
@@ -1186,6 +1214,8 @@ func TestContinuationAuditBudgetStopIsCountedOncePerBody(t *testing.T) {
 // body, all under chainsyncBlockfetchMutex. Deduplicating on insert alone
 // cannot do it, because there is nothing left to deduplicate against.
 func TestContinuationAuditReusesAnAlreadyMergedEndorserBlock(t *testing.T) {
+	t.Parallel()
+
 	f := newLeiosAuditFixture(t)
 	ls := f.ls
 	ls.armContinuationAudit(context.Background(), f.ancestorTip.Point, "test rollback")

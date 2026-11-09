@@ -101,14 +101,7 @@ func TestMirrorToCloudRejectsLegacySnapshot(t *testing.T) {
 
 	backingDir := t.TempDir()
 	setFakeCloudBackingDir(t, backingDir)
-	db := newTestDB(t)
-	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
-	dir := snapshotTestDir(t, "epoch-legacy")
-	_, err := lifecycle.Snapshot(
-		context.Background(), db, dir,
-		lifecycle.TriggerEpochBoundary, "test", "badger", "sqlite",
-	)
-	require.NoError(t, err)
+	dir := copyOneBlockSnapshot(t)
 
 	manifest, err := lifecycle.ReadManifest(dir)
 	require.NoError(t, err)
@@ -122,7 +115,7 @@ func TestMirrorToCloudRejectsLegacySnapshot(t *testing.T) {
 		lifecycle.WithManifestKey(testTrustKey),
 	)
 	require.ErrorIs(t, err, lifecycle.ErrManifestUnauthenticated)
-	require.NoDirExists(t, filepath.Join(backingDir, "prefix", "epoch-legacy"))
+	require.NoDirExists(t, filepath.Join(backingDir, "prefix", "snap1"))
 }
 
 // TestIsCloudMirroredToDetectsChangedDestination guards the gap a bare

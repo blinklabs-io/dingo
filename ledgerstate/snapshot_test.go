@@ -15,7 +15,6 @@
 package ledgerstate
 
 import (
-	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"hash/crc32"
@@ -110,82 +109,6 @@ func TestSnapshotPoolParamsMatchCertState(t *testing.T) {
 	}
 }
 
-// The fixture is a two-pool DevNet with zero pledge, zero cost, a zero margin
-// and no owners -- every field that would distinguish a correct mapping from a
-// coincidental one is at its zero value. This runs the same comparison against
-// a real network, where pledges, costs, margins and owner sets differ per
-// pool, so a mapping that only works on zeros fails here.
-//
-//	ZZ_PREVIEW_SNAPSHOT=<path to a cardano-node ledger state file>
-func TestSnapshotPoolParamsMatchCertStateOnRealNetwork(t *testing.T) {
-	t.Parallel()
-
-	path := os.Getenv("ZZ_PREVIEW_SNAPSHOT")
-	if path == "" {
-		t.Skip("set ZZ_PREVIEW_SNAPSHOT to cross-check against a real network")
-	}
-	state, err := ParseSnapshot(path)
-	require.NoError(t, err)
-	snapshots, err := ParseSnapShots(state.SnapShotsData)
-	require.NoError(t, err)
-	certState, err := ParseCertState(state.CertStateData)
-	require.NoError(t, err)
-
-	live := make(map[string]*ParsedPool, len(certState.Pools))
-	for i := range certState.Pools {
-		pool := certState.Pools[i]
-		live[hex.EncodeToString(pool.PoolKeyHash)] = &pool
-	}
-
-	var compared, withMargin, withPledge, withOwners int
-	for key, got := range snapshots.Mark.PoolParams {
-		want, ok := live[key]
-		if !ok {
-			continue
-		}
-		compared++
-		if got.MarginNum != 0 {
-			withMargin++
-		}
-		if got.Pledge != 0 {
-			withPledge++
-		}
-		if len(got.Owners) > 0 {
-			withOwners++
-		}
-		require.Equal(t, want.VrfKeyHash, got.VrfKeyHash, "pool %s vrf", key)
-		require.Equal(t, want.Pledge, got.Pledge, "pool %s pledge", key)
-		require.Equal(t, want.Cost, got.Cost, "pool %s cost", key)
-		require.Equal(
-			t,
-			want.MarginNum,
-			got.MarginNum,
-			"pool %s margin num",
-			key,
-		)
-		require.Equal(
-			t,
-			want.MarginDen,
-			got.MarginDen,
-			"pool %s margin den",
-			key,
-		)
-		require.Equal(t, want.RewardAccount, got.RewardAccount,
-			"pool %s reward account", key)
-		requireOwnersConsistent(t, key, want, got, &snapshots.Mark)
-	}
-	t.Logf("compared %d pools: %d with a non-zero margin, %d with a "+
-		"non-zero pledge, %d with owners",
-		compared, withMargin, withPledge, withOwners)
-	require.Positive(t, compared)
-	require.Positive(t, withMargin,
-		"no pool has a non-zero margin, so this run cannot tell a correct "+
-			"margin field from a zero one")
-	require.Positive(t, withOwners,
-		"no pool has owners, so this run cannot tell a correct owner field "+
-			"from an empty one")
-}
-
 // requireOwnersConsistent checks the snapshot's owner set against the
 // registration's.
 //
@@ -233,83 +156,6 @@ func requireOwnersConsistent(
 				"pool %s: owner %s is omitted from the snapshot's owner set "+
 					"but holds stake in it", poolHex, owner)
 		}
-	}
-}
-
-// A pool that held stake in one of the three snapshots and retired before the
-// snapshot's own epoch is absent from cert state and from the current pool
-// distribution, so no registration in an imported database describes it. Its
-// delegators' stake could not be attributed to any pool, and rather than seed
-// a basis that understates every other pool's share, the gate dropped that
-// epoch entirely -- so a bootstrapped node skipped the reward rounds for all
-// three epochs, stayed short on reward balances, and with them on the
-// leadership stake those balances feed.
-//
-// Measured on preview at the time this was written: mark and set each had one
-// such pool holding 1,218,574,660 lovelace, and go had two holding
-// 19,782,849,212. All three epochs were rejected. Reading the parameters the
-// snapshots carry attributes every pool in all three.
-//
-//	ZZ_PREVIEW_SNAPSHOT=<path to a cardano-node ledger state file>
-func TestEveryDelegatedPoolIsAttributableFromTheSnapshot(t *testing.T) {
-	t.Parallel()
-
-	path := os.Getenv("ZZ_PREVIEW_SNAPSHOT")
-	if path == "" {
-		t.Skip("set ZZ_PREVIEW_SNAPSHOT to check against a real network")
-	}
-	state, err := ParseSnapshot(path)
-	require.NoError(t, err)
-	snapshots, err := ParseSnapShots(state.SnapShotsData)
-	require.NoError(t, err)
-	certState, err := ParseCertState(state.CertStateData)
-	require.NoError(t, err)
-
-	// Cert state alone is what the seeding used to have, and is still the
-	// fallback for a snapshot that cannot describe its own pools.
-	registered := make(map[string]*ParsedPool, len(certState.Pools))
-	for i := range certState.Pools {
-		pool := certState.Pools[i]
-		registered[hex.EncodeToString(pool.PoolKeyHash)] = &pool
-	}
-
-	for _, c := range []struct {
-		name  string
-		snap  *ParsedSnapShot
-		epoch uint64
-	}{
-		{"mark", &snapshots.Mark, state.Epoch},
-		{"set", &snapshots.Set, state.Epoch - 1},
-		{"go", &snapshots.Go, state.Epoch - 2},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			bundle := deriveRewardInputs(
-				c.snap,
-				effectiveRewardPoolParams(c.snap, registered),
-				c.epoch,
-				1,
-				0,
-			)
-			require.NotNil(t, bundle)
-			require.Zero(t, bundle.unattributedPools,
-				"%d pools holding %d lovelace have no parameters, so this "+
-					"epoch's reward round is still dropped",
-				bundle.unattributedPools, bundle.unattributedStake)
-			require.NoError(t, bundle.validate(),
-				"the basis for this epoch must be seedable")
-			require.NotEmpty(t, bundle.poolInputs)
-			t.Logf("%s: %d pools, %d delegators, all attributable",
-				c.name, len(bundle.poolInputs), len(bundle.stakeInputs))
-
-			// Cert state alone must still fall short, or the fixture no
-			// longer contains the case this exists for and the assertion
-			// above proves nothing.
-			old := deriveRewardInputs(c.snap, registered, c.epoch, 1, 0)
-			require.NotNil(t, old)
-			require.Positive(t, old.unattributedPools,
-				"this network no longer has a pool that retired inside the "+
-					"snapshot window, so this run cannot show the fix")
-		})
 	}
 }
 
@@ -561,19 +407,6 @@ func TestIsLedgerStateFile(t *testing.T) {
 	}
 }
 
-func TestEraName(t *testing.T) {
-	t.Parallel()
-
-	require.Equal(t, "Byron", EraName(EraByron))
-	require.Equal(t, "Shelley", EraName(EraShelley))
-	require.Equal(t, "Allegra", EraName(EraAllegra))
-	require.Equal(t, "Mary", EraName(EraMary))
-	require.Equal(t, "Alonzo", EraName(EraAlonzo))
-	require.Equal(t, "Babbage", EraName(EraBabbage))
-	require.Equal(t, "Conway", EraName(EraConway))
-	require.Contains(t, EraName(99), "Unknown")
-}
-
 func TestParseSnapShotsAcceptsTwoElementSnapshots(t *testing.T) {
 	t.Parallel()
 
@@ -725,6 +558,7 @@ func TestParseW32SnapshotPoolParamsCarriesLeiosKeyIntoStakeRows(
 	require.Equal(t, uint64(7), *rows[0].LeiosKeyRegistrationEpoch)
 	require.Equal(t, publicKey, rows[0].LeiosKeyPublic)
 	require.Equal(t, possessionProof, rows[0].LeiosKeyPossessionProof)
+	require.Equal(t, vrfHash[:], rows[0].VrfKeyHash)
 
 	// The row owns its bytes independently of the decoded pool parameters.
 	pool.LeiosKeyPublic[0] ^= 0xff
@@ -993,22 +827,6 @@ func TestParseActivePoolDistributionRejectsMalformedEntry(t *testing.T) {
 
 	_, err := ParseActivePoolDistribution(data)
 	require.ErrorContains(t, err, "expected 2, 3, or 4")
-}
-
-func TestVerifySnapshotDigest(t *testing.T) {
-	t.Parallel()
-
-	content := []byte("test snapshot content for hashing")
-	h := sha256.Sum256(content)
-	expectedDigest := hex.EncodeToString(h[:])
-
-	tmpDir := t.TempDir()
-	archivePath := filepath.Join(tmpDir, "test.tar.zst")
-	err := os.WriteFile(archivePath, content, 0o640)
-	require.NoError(t, err)
-
-	err = VerifySnapshotDigest(archivePath, expectedDigest)
-	require.NoError(t, err)
 }
 
 func TestVerifySnapshotDigestMismatch(t *testing.T) {

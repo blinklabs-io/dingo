@@ -343,7 +343,11 @@ type LeaderChecker interface {
 type BlockBuilder interface {
 	// BuildBlock creates a new block for the given slot.
 	// Returns the block and its CBOR encoding.
-	BuildBlock(ctx context.Context, slot uint64, kesPeriod uint64) (ledger.Block, []byte, error)
+	BuildBlock(
+		ctx context.Context,
+		slot uint64,
+		kesPeriod uint64,
+	) (ledger.Block, []byte, error)
 }
 
 // BlockContext names the parent a forged block is built on. It mirrors
@@ -437,7 +441,10 @@ type AlternativeChainContextProvider interface {
 // Losing is a normal outcome, not an error: the block at the tip keeps the
 // slot and the forged block is discarded without being diffused.
 type SiblingBlockAdopter interface {
-	AdoptLocalForgedSibling(ctx context.Context, block ledger.Block) (adopted bool, err error)
+	AdoptLocalForgedSibling(
+		ctx context.Context,
+		block ledger.Block,
+	) (adopted bool, err error)
 }
 
 // ConfirmedTxRemover removes transactions after the block containing them has
@@ -459,7 +466,11 @@ type BlockForgedObserver func(
 // returns a non-nil error the block is dropped and neither adopted nor
 // diffused.
 type BlockValidator interface {
-	ValidateForgedBlock(ctx context.Context, block ledger.Block, blockCbor []byte) error
+	ValidateForgedBlock(
+		ctx context.Context,
+		block ledger.Block,
+		blockCbor []byte,
+	) error
 }
 
 // ErrForgedBlockStateChanged is returned, wrapped, by a BlockValidator that
@@ -925,7 +936,8 @@ func NewBlockForger(cfg ForgerConfig) (*BlockForger, error) {
 				"production Leios forging requires transaction validator",
 			)
 		}
-		if cfg.LeiosProduceChecker != nil && cfg.LeiosAnnouncementValidator == nil {
+		if cfg.LeiosProduceChecker != nil &&
+			cfg.LeiosAnnouncementValidator == nil {
 			return nil, errors.New(
 				"production Leios forging requires announcement validator",
 			)
@@ -1161,6 +1173,17 @@ func (f *BlockForger) checkAndForge(ctx context.Context) error {
 	}
 }
 
+// kesLifetimeRefusal is a forging refusal decided from the operational
+// certificate lifetime, held until leader eligibility is known.
+type kesLifetimeRefusal struct {
+	message string
+	attrs   []any
+	// fault is set for a KES state failure that is not a lifetime decision,
+	// such as unloaded credentials. It is returned to the caller rather than
+	// logged and swallowed, so a genuine fault is never hidden.
+	fault error
+}
+
 // checkAndForgeProduction implements production mode forging.
 func (f *BlockForger) checkAndForgeProduction(ctx context.Context) error {
 	forgeStartTime := time.Now()
@@ -1169,6 +1192,68 @@ func (f *BlockForger) checkAndForgeProduction(ctx context.Context) error {
 	currentSlot, err := f.slotClock.CurrentSlot()
 	if err != nil {
 		return fmt.Errorf("failed to get current slot: %w", err)
+	}
+
+	// Advance the KES state on every wall-clock slot, before any chain gate or
+	// leader selection can return early. This is the forward-security
+	// boundary: a slot that this pool does not lead still retires the previous
+	// signing period, and the first period outside the operational
+	// certificate's half-open lifetime erases the active signing handle.
+	slotsPerKESPeriod := f.slotClock.SlotsPerKESPeriod()
+	if slotsPerKESPeriod == 0 {
+		return errors.New("slots per KES period is zero")
+	}
+	kesPeriod, err := CurrentKESPeriod(currentSlot, slotsPerKESPeriod)
+	if err != nil {
+		return err
+	}
+	opCertStart, maxEvolutions, opCertExpiry, stateErr := f.creds.updateKESForSlot(
+		kesPeriod,
+	)
+	metricsGeneration := f.creds.acquireCredentialGeneration()
+	f.updateKESMetrics(kesPeriod, metricsGeneration)
+	metricsGeneration.release()
+	// The KES state above is updated unconditionally, but a refusal caused by
+	// the certificate lifetime is only a lost block when this pool leads the
+	// slot. Record the refusal here and report it after leader eligibility is
+	// established, so a non-leader slot neither counts nor logs it.
+	var kesRefusal *kesLifetimeRefusal
+	switch {
+	case stateErr != nil && (maxEvolutions == 0 || opCertExpiry == 0):
+		kesRefusal = &kesLifetimeRefusal{
+			message: "forge skip: KES protocol lifetime is not validated",
+			attrs: []any{
+				"slot", currentSlot,
+				"current_kes_period", kesPeriod,
+				"error", stateErr,
+			},
+		}
+	case kesPeriod < opCertStart:
+		kesRefusal = &kesLifetimeRefusal{
+			message: "forge skip: operational certificate is not yet valid",
+			attrs: []any{
+				"slot", currentSlot,
+				"current_kes_period", kesPeriod,
+				"opcert_start_period", opCertStart,
+				"opcert_expiry_period", opCertExpiry,
+				"max_kes_evolutions", maxEvolutions,
+			},
+		}
+	case kesPeriod >= opCertExpiry:
+		kesRefusal = &kesLifetimeRefusal{
+			message: "forge skip: operational certificate expired; rotate the operational certificate",
+			attrs: []any{
+				"slot", currentSlot,
+				"current_kes_period", kesPeriod,
+				"opcert_start_period", opCertStart,
+				"opcert_expiry_period", opCertExpiry,
+				"max_kes_evolutions", maxEvolutions,
+			},
+		}
+	case stateErr != nil:
+		kesRefusal = &kesLifetimeRefusal{
+			fault: fmt.Errorf("failed to update KES period: %w", stateErr),
+		}
 	}
 
 	// One reading of the evidence the tip gates decide this slot from, and
@@ -1255,20 +1340,13 @@ func (f *BlockForger) checkAndForgeProduction(ctx context.Context) error {
 	//
 	// "Counts lost blocks" is the intent of the counter, not an invariant it
 	// holds: could_not_forge is not exclusively a record of slots this node
-	// was established to lead. Two kinds of refusal increment it before the
-	// leader check -- the slot battle lost under the forge fence, where the
-	// fence itself establishes that this node led the slot, and the three
-	// forging-key validity gates below (KES protocol lifetime, operational
-	// certificate not yet valid, operational certificate expired), which have
-	// to run before Praos leader selection so nothing is signed with a key
-	// that cannot sign. Because checkAndForgeProduction runs once per slot,
-	// those three increment on every slot that reaches them while the keys are
-	// invalid rather than once per leader slot, so the counter over-reports by
-	// about 1/(sigma*f) for an active stake fraction sigma -- exactly when an
-	// operator is reading it to diagnose an expired opcert. Read it as a
-	// lost-block count only while the forging keys are valid; ARCHITECTURE.md
-	// records the full rule, the per-slot inflation and the cardano-node
-	// comparison.
+	// was established to lead. The slot battle lost under the forge fence
+	// increments it before the leader check, because the fence itself
+	// establishes that this node led the slot. The three forging-key validity
+	// refusals (KES protocol lifetime, operational certificate not yet valid,
+	// operational certificate expired) are decided at the top of the slot but
+	// counted and logged only once the leader check says this node leads, so
+	// the counter stays a lost-block count while the keys are invalid.
 	if gates.tipAheadOfSlot() {
 		// Detect stale data: if the tip is far ahead of the slot clock,
 		// the database likely contains chain data from a different genesis.
@@ -1507,43 +1585,26 @@ func (f *BlockForger) checkAndForgeProduction(ctx context.Context) error {
 		return nil
 	}
 
-	// Compute and enforce the protocol KES lifetime before Praos leader
-	// selection, Leios work, or ranking-block construction. The expiry was
-	// checked for overflow when the production forger was created, so these
-	// comparisons cannot wrap.
-	//
-	// The three refusals below are the exception to the rule stated at the
-	// tipAheadOfSlot gate above: they increment could_not_forge without a
-	// leader check behind them, and because checkAndForgeProduction runs once
-	// per slot they increment on EVERY slot that reaches them while the keys
-	// are invalid, not once per leader slot. The counter is therefore a
-	// lost-block count only while the forging keys are valid; an expired or
-	// not-yet-valid operational certificate drives it to one per slot, about
-	// 1/(sigma*f) times the blocks actually lost. The KES gauges updated just
-	// above (currentKESPeriod against the opcert start/expiry periods, and
-	// remainingKESPeriods) and the Error lines here are the unambiguous
-	// signal for that failure.
-	//
-	// The cardano-node comparison differs per gate rather than across the set.
-	// Not-yet-valid is PraosCannotForgeKeyNotUsableYet, which reaches the same
-	// Forge.could-not-forge counter but only from the leader branch of
-	// checkShouldForge, so it differs from this code in frequency alone and
-	// parity means fixing the frequency, not moving the series. Expired is
-	// caught before the leader check by HotKey.evolveKey poisoning the key,
-	// and is reported on Forge.StateUpdateError with the KES gauges instead,
-	// at the same per-slot frequency -- so parity there means the opposite,
-	// leaving the frequency and taking it off this counter. The
-	// lifetime-validation failure has no analogue on either series.
-	// ARCHITECTURE.md carries the full rule with the file references on both
-	// sides.
-	slotsPerKESPeriod := f.slotClock.SlotsPerKESPeriod()
-	if slotsPerKESPeriod == 0 {
-		return errors.New("slots per KES period is zero")
+	if kesRefusal != nil {
+		if !f.checkLeaderSafe(currentSlot) {
+			f.logger.Debug(
+				"forge check: not leader for slot",
+				"current_slot", currentSlot,
+				"tip_slot", tipSlot,
+			)
+			if f.metrics != nil {
+				f.metrics.forgeNotLeader.Inc()
+			}
+			return kesRefusal.fault
+		}
+		f.incCouldNotForge()
+		if kesRefusal.fault != nil {
+			return kesRefusal.fault
+		}
+		f.logger.Error(kesRefusal.message, kesRefusal.attrs...)
+		return nil
 	}
-	kesPeriod, err := CurrentKESPeriod(currentSlot, slotsPerKESPeriod)
-	if err != nil {
-		return err
-	}
+
 	generation := f.creds.acquireCredentialGeneration()
 	generationReleased := false
 	defer func() {
@@ -1551,47 +1612,22 @@ func (f *BlockForger) checkAndForgeProduction(ctx context.Context) error {
 			generation.release()
 		}
 	}()
-	f.updateKESMetrics(kesPeriod, generation)
-	opCertStart, maxEvolutions, opCertExpiry, policyErr := generation.validatedKESProtocolLifetime()
-	if policyErr != nil {
+	if err := generation.validateKESPeriod(kesPeriod); err != nil {
 		f.incCouldNotForge()
 		f.logger.Error(
-			"forge skip: KES protocol lifetime is not validated",
+			"forge skip: credential generation became invalid before leader selection",
 			"slot", currentSlot,
-			"current_kes_period", kesPeriod,
 			"credential_generation", generation.id,
-			"error", policyErr,
+			"error", err,
 		)
 		return nil
 	}
-	if kesPeriod < opCertStart {
+	// A credential rotation can land after this slot's unconditional KES
+	// update. Advance the newly selected generation before leader selection as
+	// well, so the replacement cannot reintroduce an older signing period.
+	if err := generation.updateKESPeriod(kesPeriod); err != nil {
 		f.incCouldNotForge()
-		f.logger.Error(
-			"forge skip: operational certificate is not yet valid",
-			"slot", currentSlot,
-			"current_kes_period", kesPeriod,
-			"opcert_start_period", opCertStart,
-			"opcert_expiry_period", opCertExpiry,
-			"max_kes_evolutions", maxEvolutions,
-		)
-		return nil
-	}
-	if kesPeriod >= opCertExpiry {
-		f.incCouldNotForge()
-		f.logger.Error(
-			"forge skip: operational certificate expired; rotate the operational certificate",
-			"slot",
-			currentSlot,
-			"current_kes_period",
-			kesPeriod,
-			"opcert_start_period",
-			opCertStart,
-			"opcert_expiry_period",
-			opCertExpiry,
-			"max_kes_evolutions",
-			maxEvolutions,
-		)
-		return nil
+		return fmt.Errorf("failed to update KES period: %w", err)
 	}
 
 	// Check if we're the leader for this slot only after the KES gate.
@@ -1783,8 +1819,10 @@ func (f *BlockForger) checkAndForgeProduction(ctx context.Context) error {
 			f.incCouldNotForge()
 			f.logger.Warn(
 				"forge skip: leader slot already holds another block and no alternative can be built",
-				"current_slot", currentSlot,
-				"tip_slot", tipSlot,
+				"current_slot",
+				currentSlot,
+				"tip_slot",
+				tipSlot,
 			)
 			return nil
 		}
@@ -1816,7 +1854,8 @@ func (f *BlockForger) checkAndForgeProduction(ctx context.Context) error {
 
 	leiosState := forgeLeiosState{}
 	if altBlockContext == nil {
-		parentRbHash, parentEbHash, parentKnown := f.leiosParentAnnouncement(ctx,
+		parentRbHash, parentEbHash, parentKnown := f.leiosParentAnnouncement(
+			ctx,
 			currentSlot,
 		)
 		leiosState = f.leiosBlockDataForSlot(
@@ -1979,12 +2018,6 @@ func (f *BlockForger) checkAndForgeProduction(ctx context.Context) error {
 		)
 	}()
 
-	// Ensure KES key is at correct period
-	if err := generation.updateKESPeriod(kesPeriod); err != nil {
-		f.incCouldNotForge()
-		return fmt.Errorf("failed to update KES period: %w", err)
-	}
-
 	// Build the block. A ledger publication landing during transaction
 	// selection invalidates the candidate; buildBlockForSlot re-selects
 	// against the state that publication produced while the slot lasts,
@@ -2076,10 +2109,14 @@ func (f *BlockForger) checkAndForgeProduction(ctx context.Context) error {
 				// build attempt the chain moved under is.
 				f.logger.Warn(
 					"forge skip: ledger state kept changing during self-validation, dropping block",
-					"slot", currentSlot,
-					"hash", blockHashStr,
-					"validation_duration", validationDuration,
-					"error", validationErr,
+					"slot",
+					currentSlot,
+					"hash",
+					blockHashStr,
+					"validation_duration",
+					validationDuration,
+					"error",
+					validationErr,
 				)
 				return nil
 			}
@@ -2175,9 +2212,12 @@ func (f *BlockForger) checkAndForgeProduction(ctx context.Context) error {
 		if !adopted {
 			f.logger.Info(
 				"forged alternative lost the slot battle; the block at the tip stands",
-				"slot", currentSlot,
-				"hash", hex.EncodeToString(block.Hash().Bytes()),
-				"rival_hash", hex.EncodeToString(
+				"slot",
+				currentSlot,
+				"hash",
+				hex.EncodeToString(block.Hash().Bytes()),
+				"rival_hash",
+				hex.EncodeToString(
 					altBlockContext.Rival.Point.Hash,
 				),
 			)
@@ -2251,7 +2291,10 @@ func (f *BlockForger) checkAndForgeProduction(ctx context.Context) error {
 // block it announced. Every parent-dependent Leios selection is made against
 // this answer, and the pre-build guard re-reads it to detect a chain tip that
 // moved underneath that selection.
-func (f *BlockForger) leiosParentAnnouncement(ctx context.Context, slot uint64) (
+func (f *BlockForger) leiosParentAnnouncement(
+	ctx context.Context,
+	slot uint64,
+) (
 	parentRbHash lcommon.Blake2b256,
 	parentHash lcommon.Blake2b256,
 	ok bool,
@@ -2259,7 +2302,9 @@ func (f *BlockForger) leiosParentAnnouncement(ctx context.Context, slot uint64) 
 	if f.leiosParent == nil {
 		return lcommon.Blake2b256{}, lcommon.Blake2b256{}, false
 	}
-	parentRbHash, parentHash, ok, err := f.leiosParent.ParentLeiosAnnouncement(ctx)
+	parentRbHash, parentHash, ok, err := f.leiosParent.ParentLeiosAnnouncement(
+		ctx,
+	)
 	if err != nil {
 		f.logger.Warn(
 			"leios endorser block certificate skipped: parent announcement unavailable",
@@ -2531,7 +2576,9 @@ func (f *BlockForger) readTipEvidence(currentSlot uint64) forgeTipReading {
 		return reading
 	}
 
-	primaryTip, headerTip, unappliedBlocks, appliedTipAncestor, err := safetyTips.PrimaryChainTipRelationAndHeader(appliedTipInfo.Point)
+	primaryTip, headerTip, unappliedBlocks, appliedTipAncestor, err := safetyTips.PrimaryChainTipRelationAndHeader(
+		appliedTipInfo.Point,
+	)
 	if err != nil {
 		reading.safetyErr = fmt.Errorf(
 			"failed to read forge safety frontier: %w",
@@ -2986,7 +3033,10 @@ func (f *BlockForger) refreshLeiosForParent(ctx context.Context,
 	slot uint64,
 	state *forgeLeiosState,
 ) {
-	parentRbHash, parentEbHash, parentKnown := f.leiosParentAnnouncement(ctx, slot)
+	parentRbHash, parentEbHash, parentKnown := f.leiosParentAnnouncement(
+		ctx,
+		slot,
+	)
 	refreshed := f.leiosBlockDataForSlot(
 		slot,
 		parentRbHash,
@@ -3144,7 +3194,10 @@ func (f *BlockForger) buildBlockForSlot(
 			// A retry can move from an alternative back to the live tip.
 			// Resolve certificates for that parent, but do not forge a
 			// second endorser block for this slot.
-			parentRbHash, parentEbHash, parentKnown := f.leiosParentAnnouncement(ctx, slot)
+			parentRbHash, parentEbHash, parentKnown := f.leiosParentAnnouncement(
+				ctx,
+				slot,
+			)
 			*leiosState = f.leiosBlockDataForSlot(
 				slot,
 				parentRbHash,
@@ -3378,7 +3431,8 @@ func (f *BlockForger) buildBlock(ctx context.Context,
 		err       error
 	)
 	if generationBuilder, ok := f.blockBuilder.(credentialGenerationBlockBuilder); ok {
-		block, blockCbor, err = generationBuilder.buildBlockWithCredentialGeneration(ctx,
+		block, blockCbor, err = generationBuilder.buildBlockWithCredentialGeneration(
+			ctx,
 			slot,
 			kesPeriod,
 			leiosData,
@@ -4242,6 +4296,19 @@ func (f *BlockForger) checkAndForgeLeiosEB(
 		return nil, nil
 	}
 
+	// Resolve capacity before mempool work. Unknown slot parameters must not
+	// fall back to operator caps that may exceed the protocol's limits.
+	caps, capacityKnown := f.leiosEBCapsForSlot(slot)
+	if !capacityKnown {
+		f.logger.Debug("leios EB skipped", "slot", slot,
+			"reason", "protocol_capacity_unavailable")
+		if f.metrics != nil {
+			f.metrics.leiosEbSkipped.WithLabelValues("protocol_capacity_unavailable").
+				Inc()
+		}
+		return nil, nil
+	}
+
 	allTxs := f.leiosMempool.Transactions()
 	txs := allTxs
 	if basis.closure != nil && len(basis.closure.txIDs) > 0 {
@@ -4260,7 +4327,11 @@ func (f *BlockForger) checkAndForgeLeiosEB(
 		}
 		return nil, nil
 	}
-	limits := leiosSelectionLimits{now: f.now, deadline: selectionDeadline}
+	limits := leiosSelectionLimits{
+		now:      f.now,
+		deadline: selectionDeadline,
+		caps:     caps,
+	}
 	candidateCount := len(txs)
 	selectStart := f.now()
 	validatedTxs, truncated, err := selectValidLeiosTransactions(ctx,
@@ -4315,10 +4386,7 @@ func (f *BlockForger) checkAndForgeLeiosEB(
 	}
 
 	buildStart := f.now()
-	ebCbor, ebHash, bodies, err := buildLeiosEB(txs, leiosEBCaps{
-		maxRefs:  f.forgeEBMaxTxRefs,
-		maxBytes: f.forgeEBMaxBytes,
-	})
+	ebCbor, ebHash, bodies, err := buildLeiosEB(txs, caps)
 	buildDuration := f.now().Sub(buildStart)
 	if err != nil {
 		if errors.Is(err, errNoValidTxRefs) {
@@ -4399,6 +4467,7 @@ func selectValidLeiosTransactions(ctx context.Context,
 	}
 	truncated := false
 	selected := make([]MempoolTransaction, 0, len(txs))
+	capacity := leiosEBCapacity{caps: limits.caps}
 	err := withLeiosSelectionSession(ctx,
 		validator,
 		basis.parentHash,
@@ -4440,9 +4509,26 @@ func selectValidLeiosTransactions(ctx context.Context,
 				if basis.closure.applies(mempoolTx.Hash) {
 					continue
 				}
-				tx, err := decodeMempoolTx(mempoolTx)
-				if err != nil || validate(tx, consumed, created, accounts) != nil {
+				// The manifest references the block_transaction bytes,
+				// so those are what the capacity is measured in, and a
+				// transaction that cannot take that form is never
+				// referenced.
+				blockTx, err := leiosBlockTransactionCbor(mempoolTx.Cbor)
+				if err != nil || !validLeiosTransactionSize(len(blockTx)) {
 					continue
+				}
+				tx, err := decodeMempoolTx(mempoolTx)
+				if err != nil ||
+					validate(tx, consumed, created, accounts) != nil {
+					continue
+				}
+				if !capacity.admit(uint64(len(blockTx))) {
+					// The endorser block is full. Stop rather than look
+					// for a smaller transaction further on, as manifest
+					// construction does: the selected prefix is a valid
+					// closure, and a protocol-sized endorser block is
+					// all one slot can announce.
+					break
 				}
 				selected = append(selected, mempoolTx)
 				for _, input := range tx.Consumed() {
@@ -4533,6 +4619,21 @@ func (c *leiosCertifiedClosure) consumedOverlay() map[utxoref.Key]struct{} {
 	return overlay
 }
 
+// leiosEBCapsForSlot returns the endorser-block caps for slot: the operator
+// caps bounded by the capacity the protocol parameters in force at the slot
+// allow (effectiveLeiosEBCaps). False means capacity cannot be resolved and
+// no endorser block may be announced.
+func (f *BlockForger) leiosEBCapsForSlot(slot uint64) (leiosEBCaps, bool) {
+	caps := leiosEBCaps{
+		maxRefs:  f.forgeEBMaxTxRefs,
+		maxBytes: f.forgeEBMaxBytes,
+	}
+	if f.eraParams == nil || isNilProtocolParamsProvider(f.eraParams) {
+		return leiosEBCaps{}, false
+	}
+	return effectiveLeiosEBCaps(caps, f.eraParams.ProtocolParamsForSlot(slot))
+}
+
 // certifiedClosureForRebase resolves the certified closure a ranking block
 // embedding ebHash's certificate applies.
 func (f *BlockForger) certifiedClosureForRebase(
@@ -4555,6 +4656,9 @@ type leiosSelectionLimits struct {
 	// deadline, when non-zero, stops selection at the given instant and
 	// builds the endorser block from what has already passed.
 	deadline time.Time
+	// caps stops selection once the next valid transaction would not fit
+	// the endorser block. The zero value imposes no cap.
+	caps leiosEBCaps
 }
 
 // expired reports whether the selection budget is gone.
@@ -4579,6 +4683,10 @@ type leiosEBCaps struct {
 	maxRefs uint64
 	// maxBytes caps the total size of the referenced transactions.
 	maxBytes uint64
+	// maxManifestBytes caps the encoded manifest, the size a ranking-block
+	// header announces. Only the protocol parameters set it; see
+	// effectiveLeiosEBCaps.
+	maxManifestBytes uint64
 }
 
 // buildLeiosEB assembles a LeiosEndorserBlock from mempool transactions.
@@ -4595,7 +4703,7 @@ func buildLeiosEB(
 	bodies [][]byte,
 	err error,
 ) {
-	var totalBytes uint64
+	capacity := leiosEBCapacity{caps: caps}
 	// Preallocate for what the caps actually admit, not for the mempool:
 	// the backstop has to bound construction memory too, or a deep
 	// mempool still dictates the allocation for a manifest capped at a
@@ -4640,14 +4748,9 @@ func buildLeiosEB(
 		// its outputs), and skipping a transaction to fit a smaller one
 		// after it would leave a descendant referenced without its
 		// parent.
-		if caps.maxRefs > 0 && uint64(len(refs)) >= caps.maxRefs {
+		if !capacity.admit(uint64(len(blockTx))) {
 			break
 		}
-		txBytes := uint64(len(blockTx))
-		if caps.maxBytes > 0 && totalBytes+txBytes > caps.maxBytes {
-			break
-		}
-		totalBytes += txBytes
 		// Bounded above by the MaxUint32 check on len(blockTx) above. Kept
 		// on one line so the directive stays attached to the conversion.
 		size := uint32(len(blockTx)) // #nosec G115

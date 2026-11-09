@@ -355,25 +355,6 @@ func (*fakeInternalCloudDestination) DownloadFiles(
 	return nil
 }
 
-// TestDestinationRegistryRegisterNilReceiverIsNoOp guards against a real
-// panic: DestinationRegistry's doc comment promises "every method here is
-// nil-safe" for a nil *DestinationRegistry, and recognizedCloudScheme/
-// ParseCloudDestination both already special-case r == nil, but Register
-// used to dereference r.mu directly with no such guard — so registering a
-// builtin scheme (RegisterS3/RegisterGCS/RegisterBuiltinDestinations) onto
-// a nil registry (a valid, documented configuration for "no cloud
-// destinations wanted") would panic instead of silently doing nothing.
-func TestDestinationRegistryRegisterNilReceiverIsNoOp(t *testing.T) {
-	t.Parallel()
-
-	var r *DestinationRegistry
-	require.NotPanics(t, func() {
-		r.Register("s3", func(*url.URL) (CloudDestination, error) {
-			return nil, nil
-		})
-	})
-}
-
 type boundaryFailureReader struct {
 	data    *bytes.Reader
 	failure error

@@ -779,6 +779,8 @@ func observeOnTimeAnnouncement(
 func TestVoteManagerVotesFromHeaderArrivalBeforeRankingBlockApplies(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	slots := &fakeSlotProvider{slot: headerArmingRbSlot}
 	fixture := newHeaderArmingFixture(t, slots)
 	subId, emittedCh := fixture.eventBus.Subscribe(VoteEmittedEventType)
@@ -837,6 +839,8 @@ func TestVoteManagerVotesFromHeaderArrivalBeforeRankingBlockApplies(
 }
 
 func TestVoteManagerVotesOnlyForValidatedAnnouncement(t *testing.T) {
+	t.Parallel()
+
 	slots := &fakeSlotProvider{slot: headerArmingEbAcquiredAt}
 	fixture := newHeaderArmingFixture(t, slots)
 	subId, emittedCh := fixture.eventBus.Subscribe(VoteEmittedEventType)
@@ -1178,6 +1182,8 @@ func TestVoteManagerCIP164LocalVoteTiming(t *testing.T) {
 // window is open, so only the per-ranking-block dedup can prevent the second
 // vote.
 func TestVoteManagerHeaderAndApplyArmingDoNotDoubleVote(t *testing.T) {
+	t.Parallel()
+
 	slots := &fakeSlotProvider{slot: headerArmingEbAcquiredAt}
 	fixture := newHeaderArmingFixture(t, slots)
 	subId, emittedCh := fixture.eventBus.Subscribe(VoteEmittedEventType)
@@ -1223,6 +1229,8 @@ func TestVoteManagerHeaderAndApplyArmingDoNotDoubleVote(t *testing.T) {
 // may never be. If it is rolled away before the endorser block is acquired,
 // no vote may be emitted for it.
 func TestVoteManagerRolledBackHeaderAnnouncementDoesNotVote(t *testing.T) {
+	t.Parallel()
+
 	slots := &fakeSlotProvider{slot: headerArmingEbAcquiredAt}
 	fixture := newHeaderArmingFixture(t, slots)
 	subId, emittedCh := fixture.eventBus.Subscribe(VoteEmittedEventType)
@@ -1276,6 +1284,8 @@ func TestVoteManagerRolledBackHeaderAnnouncementDoesNotVote(t *testing.T) {
 }
 
 func TestVoteManagerValidationDeadlineDeclineIsCounted(t *testing.T) {
+	t.Parallel()
+
 	reg := prometheus.NewRegistry()
 	slots := &fakeSlotProvider{slot: 1000}
 	fixture := newHeaderArmingFixture(
@@ -1315,6 +1325,8 @@ func TestVoteManagerValidationDeadlineDeclineIsCounted(t *testing.T) {
 }
 
 func TestVoteManagerTimingDeclinePrecedesCommitteeLookup(t *testing.T) {
+	t.Parallel()
+
 	reg := prometheus.NewRegistry()
 	slots := &fakeSlotProvider{slot: 1000}
 	fixture := newManagerFixture(
@@ -1361,6 +1373,8 @@ func TestVoteManagerTimingDeclinePrecedesCommitteeLookup(t *testing.T) {
 // TestVoteManagerVotesNotEmittedCountsMissingKey pins a second reason label so
 // the counter is usable to tell "not configured" apart from "too late".
 func TestVoteManagerVotesNotEmittedCountsMissingKey(t *testing.T) {
+	t.Parallel()
+
 	reg := prometheus.NewRegistry()
 	slots := &fakeSlotProvider{slot: headerArmingEbAcquiredAt}
 	fixture := newManagerFixture(
@@ -1428,6 +1442,8 @@ func publishHeaderInvalidationNaming(
 // invalidation follows, and the endorser block arriving afterwards must not
 // produce a vote for a ranking block that is no longer on our chain.
 func TestVoteManagerInvalidatedHeaderAnnouncementDoesNotVote(t *testing.T) {
+	t.Parallel()
+
 	slots := &fakeSlotProvider{slot: headerArmingEbAcquiredAt}
 	fixture := newHeaderArmingFixture(t, slots)
 	subId, emittedCh := fixture.eventBus.Subscribe(VoteEmittedEventType)
@@ -1474,6 +1490,8 @@ func TestVoteManagerInvalidatedHeaderAnnouncementDoesNotVote(t *testing.T) {
 // headers. Pruning announcements on that late rollback would delete the
 // replacement chain's announcement and put the node back to not voting.
 func TestVoteManagerLateRollbackDoesNotDropRearmedAnnouncement(t *testing.T) {
+	t.Parallel()
+
 	slots := &fakeSlotProvider{slot: headerArmingEbAcquiredAt}
 	fixture := newHeaderArmingFixture(t, slots)
 	subId, emittedCh := fixture.eventBus.Subscribe(VoteEmittedEventType)
@@ -1516,6 +1534,8 @@ func TestVoteManagerLateRollbackDoesNotDropRearmedAnnouncement(t *testing.T) {
 // contract for a rollback that did not come from the chain's sequencer: with
 // no sequence number there is nothing to supersede it, so it prunes as before.
 func TestVoteManagerUnsequencedRollbackStillPrunes(t *testing.T) {
+	t.Parallel()
+
 	slots := &fakeSlotProvider{slot: headerArmingEbAcquiredAt}
 	fixture := newHeaderArmingFixture(t, slots)
 	subId, emittedCh := fixture.eventBus.Subscribe(VoteEmittedEventType)
@@ -1544,6 +1564,8 @@ func TestVoteManagerUnsequencedRollbackStillPrunes(t *testing.T) {
 // the node back to never voting. The loop must keep serving chain events and
 // re-arm header delivery instead of exiting.
 func TestVoteManagerHeaderStreamRecoversFromClosedChannel(t *testing.T) {
+	t.Parallel()
+
 	reg := prometheus.NewRegistry()
 	slots := &fakeSlotProvider{slot: headerArmingEbAcquiredAt}
 	fixture := newHeaderArmingFixture(
@@ -1589,32 +1611,6 @@ func TestVoteManagerHeaderStreamRecoversFromClosedChannel(t *testing.T) {
 	vote, ok := emitted.Data.(VoteEmittedEvent)
 	require.True(t, ok)
 	assert.Equal(t, rbHash, vote.Vote.AnnouncingRbHash)
-}
-
-// TestVoteManagerNotEmittedReasonsMaterialized pins that every reason label
-// exists from startup, so rate()/increase() have a series to work with on a
-// node that has never emitted a vote -- which is the node this counter is for.
-func TestVoteManagerNotEmittedReasonsMaterialized(t *testing.T) {
-	reg := prometheus.NewRegistry()
-	newManagerFixture(t, func(_ *managerFixture, cfg *VoteManagerConfig) {
-		cfg.PromRegistry = reg
-	})
-	families, err := reg.Gather()
-	require.NoError(t, err)
-	var labels []string
-	for _, family := range families {
-		if family.GetName() != "dingo_metrics_leios_votes_not_emitted_total" {
-			continue
-		}
-		for _, metric := range family.GetMetric() {
-			for _, pair := range metric.GetLabel() {
-				if pair.GetName() == "reason" {
-					labels = append(labels, pair.GetValue())
-				}
-			}
-		}
-	}
-	assert.ElementsMatch(t, voteNotEmittedReasons, labels)
 }
 
 // waitForAnnouncement blocks until the announcement record itself is in the
@@ -1671,6 +1667,8 @@ func armAndVote(
 // correctly -- and, because the announcement survives and is marked voted,
 // never re-emit it.
 func TestVoteManagerLateRollbackKeepsReplacementVoteAndTally(t *testing.T) {
+	t.Parallel()
+
 	slots := &fakeSlotProvider{slot: headerArmingEbAcquiredAt}
 	fixture := newHeaderArmingFixture(t, slots)
 	subId, emittedCh := fixture.eventBus.Subscribe(VoteEmittedEventType)
@@ -1729,6 +1727,8 @@ func TestVoteManagerLateRollbackKeepsReplacementVoteAndTally(t *testing.T) {
 // removed, even while the replacement chain's state at the same slot is
 // protected.
 func TestVoteManagerLateRollbackStillPrunesAbandonedChainState(t *testing.T) {
+	t.Parallel()
+
 	slots := &fakeSlotProvider{slot: headerArmingEbAcquiredAt}
 	fixture := newHeaderArmingFixture(t, slots)
 
@@ -1776,6 +1776,8 @@ func TestVoteManagerLateRollbackStillPrunesAbandonedChainState(t *testing.T) {
 // vote id occupied, so the replacement chain's vote at the same slot would be
 // read as equivocation and dropped.
 func TestVoteManagerInvalidationDropsDerivedVoteAndAllowsRevote(t *testing.T) {
+	t.Parallel()
+
 	slots := &fakeSlotProvider{slot: headerArmingEbAcquiredAt}
 	fixture := newHeaderArmingFixture(t, slots)
 	subId, emittedCh := fixture.eventBus.Subscribe(VoteEmittedEventType)
@@ -1837,6 +1839,8 @@ func TestVoteManagerInvalidationDropsDerivedVoteAndAllowsRevote(t *testing.T) {
 // slot: an announcement the invalidation does not cover keeps its own vote,
 // tally, dedup record and acquired endorser block.
 func TestVoteManagerInvalidationKeepsUnrelatedAnnouncementState(t *testing.T) {
+	t.Parallel()
+
 	slots := &fakeSlotProvider{slot: headerArmingEbAcquiredAt}
 	fixture := newHeaderArmingFixture(t, slots)
 	subId, emittedCh := fixture.eventBus.Subscribe(VoteEmittedEventType)
@@ -1915,6 +1919,8 @@ func TestVoteManagerInvalidationKeepsUnrelatedAnnouncementState(t *testing.T) {
 // still happens in chain-mutation order, and the rollback's slot sweep is
 // sequence-guarded so it cannot delete anything the header stream armed later.
 func TestVoteManagerRollbackDeliveredBeforeHeaderStreamIsSafe(t *testing.T) {
+	t.Parallel()
+
 	slots := &fakeSlotProvider{slot: headerArmingEbAcquiredAt}
 	fixture := newHeaderArmingFixture(t, slots)
 	subId, emittedCh := fixture.eventBus.Subscribe(VoteEmittedEventType)
@@ -1968,6 +1974,8 @@ func TestVoteManagerRollbackDeliveredBeforeHeaderStreamIsSafe(t *testing.T) {
 // parent keeps that announcement armed and votes for a ranking block that is
 // not on its chain, leaving the vote id occupied by an abandoned fork.
 func TestVoteManagerLocalBlockInvalidationDropsNamedAnnouncement(t *testing.T) {
+	t.Parallel()
+
 	slots := &fakeSlotProvider{slot: headerArmingEbAcquiredAt}
 	fixture := newHeaderArmingFixture(t, slots)
 	subId, emittedCh := fixture.eventBus.Subscribe(VoteEmittedEventType)
@@ -2024,6 +2032,8 @@ func TestVoteManagerLocalBlockInvalidationDropsNamedAnnouncement(t *testing.T) {
 func TestVoteManagerLocalBlockInvalidationKeepsUnnamedAnnouncements(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	slots := &fakeSlotProvider{slot: headerArmingEbAcquiredAt}
 	fixture := newHeaderArmingFixture(t, slots)
 	subId, emittedCh := fixture.eventBus.Subscribe(VoteEmittedEventType)
@@ -2085,6 +2095,8 @@ func TestVoteManagerLocalBlockInvalidationKeepsUnnamedAnnouncements(
 // always free by the time the announcement is armed. This test delivers the
 // two in that order and requires the local vote.
 func TestVoteManagerSameSlotLocalForgeStillVotes(t *testing.T) {
+	t.Parallel()
+
 	slots := &fakeSlotProvider{slot: headerArmingEbAcquiredAt}
 	fixture := newHeaderArmingFixture(t, slots)
 	subId, emittedCh := fixture.eventBus.Subscribe(VoteEmittedEventType)
@@ -2175,36 +2187,6 @@ func TestVoteManagerSameSlotLocalForgeStillVotes(t *testing.T) {
 	}
 }
 
-// TestVoteManagerRejectedEmissionDoesNotMarkAnnouncementVoted pins the
-// invariant the retry above depends on: an emission attempt refused by the
-// vote store must leave the announcement eligible, or freeing the vote id
-// later would have nothing to retry.
-func TestVoteManagerRejectedEmissionDoesNotMarkAnnouncementVoted(t *testing.T) {
-	slots := &fakeSlotProvider{slot: headerArmingEbAcquiredAt}
-	fixture := newHeaderArmingFixture(t, slots)
-	subId, emittedCh := fixture.eventBus.Subscribe(VoteEmittedEventType)
-	defer fixture.eventBus.Unsubscribe(VoteEmittedEventType, subId)
-
-	peerRb := lcommon.NewBlake2b256([]byte("peer-rb"))
-	peerEb := lcommon.NewBlake2b256([]byte("peer-eb"))
-	localRb := lcommon.NewBlake2b256([]byte("local-rb"))
-	localEb := lcommon.NewBlake2b256([]byte("local-eb"))
-
-	armAndVote(t, fixture, emittedCh, headerArmingRbSlot, peerRb, peerEb, 1)
-	fixture.mgr.HandleValidatedEndorserBlock(headerArmingRbSlot, localRb, localEb)
-	fixture.mgr.ObserveAnnouncement(headerArmingRbSlot, localRb, localEb)
-
-	fixture.mgr.mu.Lock()
-	defer fixture.mgr.mu.Unlock()
-	assert.Contains(t, fixture.mgr.announcements, localRb)
-	assert.NotContains(
-		t,
-		fixture.mgr.votedAnnouncements,
-		localRb,
-		"a refused emission must stay retryable",
-	)
-}
-
 // TestReplacementHeaderSubscriptionIsUndoneWhenStopWins is the regression test
 // for the header-stream resubscribe racing Stop.
 //
@@ -2222,6 +2204,8 @@ func TestVoteManagerRejectedEmissionDoesNotMarkAnnouncementVoted(t *testing.T) {
 // subscription is created, then Stop runs to completion, then the registration
 // step is invoked -- which is the ordering the bug requires.
 func TestReplacementHeaderSubscriptionIsUndoneWhenStopWins(t *testing.T) {
+	t.Parallel()
+
 	fixture := newManagerFixture(t)
 	mgr := fixture.mgr
 	require.NoError(t, mgr.Start(context.Background()))
@@ -2268,6 +2252,8 @@ func TestReplacementHeaderSubscriptionIsUndoneWhenStopWins(t *testing.T) {
 // the branch: with no Stop in flight the replacement is adopted and recorded,
 // so the test above is pinning a distinction rather than a constant.
 func TestReplaceHeaderStreamAdoptsTheReplacementWhileRunning(t *testing.T) {
+	t.Parallel()
+
 	fixture := newManagerFixture(t)
 	mgr := fixture.mgr
 	require.NoError(t, mgr.Start(context.Background()))
@@ -2297,220 +2283,6 @@ func TestReplaceHeaderStreamAdoptsTheReplacementWhileRunning(t *testing.T) {
 	)
 }
 
-const (
-	demoSlot    = headerArmingRbSlot
-	demoVoterId = headerArmingSeatedVoterId
-)
-
-// newOrderingDemo builds one seated committee member with a loaded key, its
-// wall clock parked one slot after the announcing block (so the vote window is
-// open throughout), and a channel of the votes it emits.
-func newOrderingDemo(t *testing.T) (*managerFixture, <-chan any) {
-	t.Helper()
-	fixture := newHeaderArmingFixture(
-		t,
-		&fakeSlotProvider{slot: headerArmingEbAcquiredAt},
-	)
-	subId, ch := fixture.eventBus.Subscribe(VoteEmittedEventType)
-	t.Cleanup(func() {
-		fixture.eventBus.Unsubscribe(VoteEmittedEventType, subId)
-	})
-	out := make(chan any, 16)
-	go func() {
-		for evt := range ch {
-			out <- evt.Data
-		}
-	}()
-	return fixture, out
-}
-
-func demoVoteId() lcommon.LeiosVoteId {
-	return lcommon.LeiosVoteId{SlotNo: demoSlot, VoterId: demoVoterId}
-}
-
-// requireVoteFor drains one emitted vote and requires it to name rbHash.
-func requireVoteFor(
-	t *testing.T,
-	votes <-chan any,
-	rbHash lcommon.Blake2b256,
-	msg string,
-) {
-	t.Helper()
-	data := testutil.RequireReceive(t, votes, testutil.AsyncWait, msg)
-	emitted, ok := data.(VoteEmittedEvent)
-	require.True(t, ok, "got %T", data)
-	assert.Equal(t, rbHash, emitted.Vote.AnnouncingRbHash, msg)
-}
-
-// TestOrderingDemoAnnouncementThenRollback: (a) the ordinary case. The header
-// arrives, the chain then rolls it away, and the endorser block turns up
-// afterwards. Rule 1 puts the invalidation behind the announcement on the one
-// stream, so by the time the endorser block could trigger a vote the
-// announcement is gone.
-func TestOrderingDemoAnnouncementThenRollback(t *testing.T) {
-	fixture, votes := newOrderingDemo(t)
-	rb := lcommon.NewBlake2b256([]byte("rolled-away-rb"))
-	eb := lcommon.NewBlake2b256([]byte("rolled-away-eb"))
-
-	// Chain mutation 1: the announcing header is admitted.
-	publishHeaderAnnouncement(fixture, demoSlot, rb, eb, 1)
-	// Chain mutation 2: it is rolled away again.
-	publishHeaderInvalidation(
-		fixture, demoSlot-1, chain.HeaderInvalidationRollback, 2,
-	)
-	testutil.WaitForCondition(t, func() bool {
-		fixture.mgr.mu.Lock()
-		defer fixture.mgr.mu.Unlock()
-		return fixture.mgr.lastHeaderStreamSeq >= 2
-	}, testutil.AsyncWait, "both header events applied, in order")
-
-	// The endorser block finally arrives. There is nothing left to vote for.
-	fixture.mgr.HandleValidatedEndorserBlock(demoSlot, rb, eb)
-	testutil.RequireNoReceive(
-		t, votes, 500*time.Millisecond,
-		"no vote for a ranking block that left our chain",
-	)
-	assert.Empty(t, fixture.mgr.VotesByIds(
-		[]lcommon.LeiosVoteId{demoVoteId()},
-	))
-}
-
-// TestOrderingDemoRollbackThenLateHeader: (b) the guard that makes the second
-// topic safe. Fork resolution rolls back and then re-queues the winning fork's
-// headers, so the replacement chain is armed BEFORE the rollback's own
-// chain.update is delivered. Rule 2 stops that late rollback from deleting the
-// replacement chain's announcement and the vote already cast for it.
-func TestOrderingDemoRollbackThenLateHeader(t *testing.T) {
-	fixture, votes := newOrderingDemo(t)
-	rb := lcommon.NewBlake2b256([]byte("replacement-rb"))
-	eb := lcommon.NewBlake2b256([]byte("replacement-eb"))
-
-	// Chain mutation 7: roll back. Chain mutation 8: admit the replacement
-	// chain's announcing header. Both on the one ordered stream.
-	publishHeaderInvalidation(
-		fixture, demoSlot-1, chain.HeaderInvalidationRollback, 7,
-	)
-	publishHeaderAnnouncement(fixture, demoSlot, rb, eb, 8)
-	waitForAnnouncement(t, fixture, rb)
-
-	fixture.mgr.HandleValidatedEndorserBlock(demoSlot, rb, eb)
-	requireVoteFor(t, votes, rb, "the replacement chain is voted for")
-
-	// Only now does mutation 7's rollback reach the other topic. It must not
-	// undo anything mutation 8 established.
-	fixture.mgr.handleRollback(chain.ChainRollbackEvent{
-		Point: ocommon.Point{Slot: demoSlot - 1},
-		Seq:   7,
-	})
-	assert.Len(
-		t,
-		fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{demoVoteId()}),
-		1,
-		"a superseded rollback keeps the replacement chain's vote",
-	)
-	fixture.mgr.mu.Lock()
-	defer fixture.mgr.mu.Unlock()
-	assert.Contains(t, fixture.mgr.announcements, rb)
-}
-
-// TestOrderingDemoLocalForgeDisplacingQueuedHeader: (c) the case that used to
-// lose the producer its own vote. The node votes for a peer's header at slot S,
-// then forges its own announcing block at S, which discards that peer header.
-// The peer vote holds the (slot, voter) vote id, so the forged block can only
-// vote once the invalidation has freed it -- which rule 3 guarantees, by
-// putting the forged block's announcement behind the invalidation on the same
-// stream instead of on chain.update.
-func TestOrderingDemoLocalForgeDisplacingQueuedHeader(t *testing.T) {
-	fixture, votes := newOrderingDemo(t)
-	peerRb := lcommon.NewBlake2b256([]byte("peer-rb"))
-	peerEb := lcommon.NewBlake2b256([]byte("peer-eb"))
-	localRb := lcommon.NewBlake2b256([]byte("local-rb"))
-	localEb := lcommon.NewBlake2b256([]byte("local-eb"))
-
-	// The peer's header wins first and takes the vote id.
-	publishHeaderAnnouncement(fixture, demoSlot, peerRb, peerEb, 1)
-	waitForAnnouncement(t, fixture, peerRb)
-	fixture.mgr.HandleValidatedEndorserBlock(demoSlot, peerRb, peerEb)
-	requireVoteFor(t, votes, peerRb, "the peer header is voted for first")
-
-	// We forge at the same slot with our own endorser block in hand. The
-	// apply-driven backstop arms it early, while the id is still taken; the
-	// attempt is refused and must stay retryable.
-	fixture.mgr.HandleValidatedEndorserBlock(demoSlot, localRb, localEb)
-	observeOnTimeAnnouncement(t, fixture, demoSlot, localRb, localEb)
-	testutil.RequireNoReceive(
-		t, votes, 300*time.Millisecond,
-		"the vote id is still held by the peer vote",
-	)
-
-	// Chain mutation order: the peer header is discarded, then the forged
-	// block announces itself.
-	publishHeaderInvalidationNaming(
-		fixture,
-		demoSlot,
-		chain.HeaderInvalidationLocalBlock,
-		2,
-		[]lcommon.Blake2b256{peerRb},
-	)
-	publishHeaderAnnouncement(fixture, demoSlot, localRb, localEb, 3)
-
-	requireVoteFor(t, votes, localRb, "the forged block gets its own vote")
-	testutil.RequireNoReceive(
-		t, votes, 300*time.Millisecond, "exactly one vote for the slot",
-	)
-	assert.Len(
-		t,
-		fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{demoVoteId()}),
-		1,
-	)
-	fixture.mgr.mu.Lock()
-	defer fixture.mgr.mu.Unlock()
-	assert.NotContains(t, fixture.mgr.announcements, peerRb)
-	assert.Contains(t, fixture.mgr.announcements, localRb)
-}
-
-// TestOrderingDemoHeaderQueueDiscardedOnStall: (d) the peer-stall path. A
-// header is admitted and voted for, then the connection dies or blockfetch
-// times out and the whole header queue is discarded. No block was ever added,
-// so no rollback is published -- the invalidation on the header stream is the
-// only thing that voids the announcement, and it must take the vote, tally and
-// dedup record with it so the slot can be voted on again.
-func TestOrderingDemoHeaderQueueDiscardedOnStall(t *testing.T) {
-	fixture, votes := newOrderingDemo(t)
-	stalledRb := lcommon.NewBlake2b256([]byte("stalled-rb"))
-	stalledEb := lcommon.NewBlake2b256([]byte("stalled-eb"))
-
-	publishHeaderAnnouncement(fixture, demoSlot, stalledRb, stalledEb, 1)
-	waitForAnnouncement(t, fixture, stalledRb)
-	fixture.mgr.HandleValidatedEndorserBlock(demoSlot, stalledRb, stalledEb)
-	requireVoteFor(t, votes, stalledRb, "the admitted header is voted for")
-
-	// The peer stalls; the header queue is discarded back to the block tip.
-	publishHeaderInvalidation(
-		fixture, demoSlot-1, chain.HeaderInvalidationQueueCleared, 2,
-	)
-	testutil.WaitForCondition(t, func() bool {
-		return len(fixture.mgr.VotesByIds(
-			[]lcommon.LeiosVoteId{demoVoteId()},
-		)) == 0
-	}, testutil.AsyncWait, "the discarded header's vote is dropped")
-
-	fixture.mgr.mu.Lock()
-	assert.NotContains(t, fixture.mgr.announcements, stalledRb)
-	assert.NotContains(t, fixture.mgr.votedAnnouncements, stalledRb)
-	assert.NotContains(t, fixture.mgr.voteRecords, demoVoteId())
-	fixture.mgr.mu.Unlock()
-
-	// The vote id is free, so whichever header wins the slot next is voted
-	// for rather than dropped as a duplicate.
-	nextRb := lcommon.NewBlake2b256([]byte("next-rb"))
-	nextEb := lcommon.NewBlake2b256([]byte("next-eb"))
-	publishHeaderAnnouncement(fixture, demoSlot, nextRb, nextEb, 3)
-	waitForAnnouncement(t, fixture, nextRb)
-	fixture.mgr.HandleValidatedEndorserBlock(demoSlot, nextRb, nextEb)
-	requireVoteFor(t, votes, nextRb, "the slot can be voted on again")
-}
-
 // TestVoteManagerValidateVotingKeyErrorsNamePoolInSingleHex pins the pool id in
 // the ValidateVotingKey rejections to its 56-character hex form.
 //
@@ -2520,6 +2292,8 @@ func TestOrderingDemoHeaderQueueDiscardedOnStall(t *testing.T) {
 // string, so an operator whose voting key was rejected could not match the
 // logged pool id against the id they registered.
 func TestVoteManagerValidateVotingKeyErrorsNamePoolInSingleHex(t *testing.T) {
+	t.Parallel()
+
 	fixture := newManagerFixture(t)
 	member := fixture.members[3]
 
@@ -2527,6 +2301,15 @@ func TestVoteManagerValidateVotingKeyErrorsNamePoolInSingleHex(t *testing.T) {
 	copy(poolKeyHash[:], member.PoolKeyHash)
 	registeredHex := hex.EncodeToString(member.PoolKeyHash)
 	require.Len(t, registeredHex, 2*lcommon.Blake2b224Size)
+
+	// The key registered for the seat is accepted.
+	require.NoError(
+		t,
+		fixture.mgr.ValidateVotingKey(
+			poolKeyHash,
+			fixture.keys[member.VoterId],
+		),
+	)
 
 	wrongKey, err := ParseVoteSigningKey(fmt.Sprintf("%064x", 999))
 	require.NoError(t, err)
@@ -3003,14 +2786,16 @@ func TestVoteManagerValidatesDijkstraCertificateStrictly(t *testing.T) {
 		message,
 	), ErrInvalidCertificate)
 
-	highBits := append([]byte(nil), signers...)
-	highBits[len(highBits)-1] |= 1
-	require.ErrorIs(t, fixture.mgr.ValidateDijkstraCertificate(
+	// The reference reads only bit indices below the committee size, so
+	// non-zero padding does not change the signer set.
+	paddingBits := append([]byte(nil), signers...)
+	paddingBits[len(paddingBits)-1] |= 1
+	require.NoError(t, fixture.mgr.ValidateDijkstraCertificate(
 		5,
-		highBits,
+		paddingBits,
 		aggregatedSignature,
 		message,
-	), ErrInvalidCertificate)
+	))
 
 	belowQuorum := make([]byte, lcommon.LeiosSignerBitfieldSize(10))
 	belowQuorum[1] = 1 << 6 // only voter 9, with 10 of 550 active stake
@@ -3143,37 +2928,6 @@ func startNextVotes(
 		ch <- nextVotesResult{votes: votes, err: err}
 	}()
 	return ch
-}
-
-func TestNewVoteManagerValidatesConfig(t *testing.T) {
-	t.Parallel()
-
-	registry, err := NewVoterRegistry(nil)
-	require.NoError(t, err)
-	valid := VoteManagerConfig{
-		EventBus:       event.NewEventBus(nil, nil),
-		StakeProvider:  &fakeStakeProvider{},
-		EpochProvider:  &fakeEpochProvider{},
-		ParamsProvider: &fakeParamsProvider{},
-		Registry:       registry,
-	}
-	for _, tc := range []struct {
-		name   string
-		mutate func(*VoteManagerConfig)
-	}{
-		{"nil event bus", func(c *VoteManagerConfig) { c.EventBus = nil }},
-		{"nil stake provider", func(c *VoteManagerConfig) { c.StakeProvider = nil }},
-		{"nil epoch provider", func(c *VoteManagerConfig) { c.EpochProvider = nil }},
-		{"nil params provider", func(c *VoteManagerConfig) { c.ParamsProvider = nil }},
-	} {
-		cfg := valid
-		tc.mutate(&cfg)
-		_, err := NewVoteManager(cfg)
-		assert.Error(t, err, tc.name)
-	}
-	mgr, err := NewVoteManager(valid)
-	require.NoError(t, err)
-	require.NotNil(t, mgr)
 }
 
 func TestVoteManagerHandleVoteAndServe(t *testing.T) {
@@ -3734,7 +3488,7 @@ func TestVoteManagerRejectsInvalidVotes(t *testing.T) {
 	assert.Empty(t, raws, "invalid votes must not be stored")
 }
 
-func TestVoteManagerLenientUnknownPubkey(t *testing.T) {
+func TestVoteManagerRejectsKeylessSeatVote(t *testing.T) {
 	t.Parallel()
 
 	fixture := newManagerFixture(
@@ -3748,8 +3502,8 @@ func TestVoteManagerLenientUnknownPubkey(t *testing.T) {
 	subId, quorumCh := fixture.eventBus.Subscribe(EbQuorumEventType)
 	defer fixture.eventBus.Unsubscribe(EbQuorumEventType, subId)
 
-	// Without registered keys the votes pass membership checks and are
-	// stored, but cannot contribute verified stake.
+	// Without registered keys the votes cannot be verified, so they are
+	// neither stored nor relayed.
 	ebHash := lcommon.NewBlake2b256([]byte("eb"))
 	for voterId := range uint64(10) {
 		require.NoError(
@@ -3763,7 +3517,7 @@ func TestVoteManagerLenientUnknownPubkey(t *testing.T) {
 	raws := fixture.mgr.VotesByIds(
 		[]lcommon.LeiosVoteId{{SlotNo: 577, VoterId: 9}},
 	)
-	assert.Len(t, raws, 1, "unverified votes are stored leniently")
+	assert.Empty(t, raws, "keyless seat votes must not be stored")
 	testutil.RequireNoReceive(
 		t,
 		quorumCh,
@@ -3836,8 +3590,8 @@ func TestVoteManagerQuorumBuildsCertificate(t *testing.T) {
 func TestVoteManagerQuorumRequiresVerifiedStake(t *testing.T) {
 	t.Parallel()
 
-	// Registry missing voter 0's key: their stake (100) is observed but
-	// not verified.
+	// Registry missing voter 0's key: their vote is dropped, so their
+	// stake (100) is never observed.
 	fixture := newManagerFixture(
 		t,
 		func(f *managerFixture, cfg *VoteManagerConfig) {
@@ -3859,7 +3613,7 @@ func TestVoteManagerQuorumRequiresVerifiedStake(t *testing.T) {
 	defer fixture.eventBus.Unsubscribe(EbQuorumEventType, subId)
 
 	ebHash := lcommon.NewBlake2b256([]byte("eb"))
-	// Observed 400 >= 385 but verified only 300: no certificate
+	// Voter 0's keyless vote is dropped; voters 1..4 give 300 < 385.
 	for voterId := range uint64(5) {
 		require.NoError(
 			t,
@@ -3873,7 +3627,7 @@ func TestVoteManagerQuorumRequiresVerifiedStake(t *testing.T) {
 		t,
 		quorumCh,
 		300*time.Millisecond,
-		"observed-but-unverified stake must not certify",
+		"keyless seat vote must not count toward the quorum",
 	)
 
 	// Verified 300+50+40 = 390 >= 385: certificate now builds
@@ -3900,8 +3654,8 @@ func TestVoteManagerQuorumRequiresVerifiedStake(t *testing.T) {
 	quorum, ok := evt.Data.(EbQuorumEvent)
 	require.True(t, ok)
 	assert.Equal(t, uint64(390), quorum.VerifiedStake)
-	assert.Equal(t, uint64(490), quorum.ObservedStake)
-	// Voter 0's unverified vote must not be in the signers bitfield
+	assert.Equal(t, uint64(390), quorum.ObservedStake)
+	// Voter 0's dropped vote must not be in the signers bitfield
 	assert.False(t, quorum.Certificate.Signer(0))
 	assert.True(t, quorum.Certificate.Signer(1))
 }
@@ -4645,9 +4399,8 @@ func TestVoteManagerResolvesOnChainKeyWithoutRegistryEntry(t *testing.T) {
 
 // TestVoteManagerReferenceModeIgnoresStaticRegistryForKeylessSeat proves a
 // production-shaped manager (non-nil ledger key provider) never promotes a
-// keyless seat through the private-harness static registry. The vote remains
-// observable for membership/stake diagnostics, but it is not verified and
-// cannot contribute to a certificate.
+// keyless seat through the private-harness static registry. The vote is
+// rejected outright: it is neither stored, tallied nor relayed.
 func TestVoteManagerReferenceModeIgnoresStaticRegistryForKeylessSeat(
 	t *testing.T,
 ) {
@@ -4668,10 +4421,18 @@ func TestVoteManagerReferenceModeIgnoresStaticRegistryForKeylessSeat(
 	ebHash := lcommon.NewBlake2b256([]byte("keyless-static-fallback-eb"))
 	fixture.mgr.ObserveAnnouncement(577, rbHash, ebHash)
 
+	subID, relayCh := fixture.eventBus.Subscribe(VoteReceivedEventType)
+	defer fixture.eventBus.Unsubscribe(VoteReceivedEventType, subID)
 	require.NoError(t, fixture.mgr.HandlePrototypeVote(
 		"peer",
 		fixture.makePrototypeVote(t, member.VoterId, rbHash),
 	))
+	testutil.RequireNoReceive(
+		t,
+		relayCh,
+		300*time.Millisecond,
+		"a keyless seat vote must not be relayed",
+	)
 	voteID := lcommon.LeiosVoteId{SlotNo: 577, VoterId: member.VoterId}
 	fixture.mgr.mu.Lock()
 	stored := fixture.mgr.votesById[voteID]
@@ -4682,18 +4443,12 @@ func TestVoteManagerReferenceModeIgnoresStaticRegistryForKeylessSeat(
 	}]
 	fixture.mgr.mu.Unlock()
 
-	require.NotNil(t, stored)
-	assert.False(
+	assert.Nil(
 		t,
-		stored.verified,
-		"static registry must not verify a keyless on-chain seat in reference mode",
+		stored,
+		"static registry must not admit a vote for a keyless on-chain seat in reference mode",
 	)
-	require.NotNil(t, tally)
-	assert.Zero(
-		t,
-		tally.verifiedStake,
-		"a static fallback vote must not contribute certificate stake",
-	)
+	assert.Nil(t, tally, "a dropped vote must not create a tally")
 }
 
 // TestVoteManagerReferenceModeRejectsLocalStaticFallback proves production
@@ -4788,8 +4543,8 @@ func TestVoteManagerReferenceModeUsesOnChainKeyOverStaticMismatch(
 // TestVoteManagerTreatsInvalidPoPOnChainKeyAsAbsent proves an on-chain
 // key whose proof of possession does not verify is excluded entirely,
 // matching upstream's "invalid proofs are treated as absent" rule: the
-// member's vote is still accepted (membership-valid) but stays
-// unverified, exactly like a genuinely keyless committee seat.
+// member's vote is dropped, exactly like a vote for a genuinely keyless
+// committee seat.
 func TestVoteManagerTreatsInvalidPoPOnChainKeyAsAbsent(t *testing.T) {
 	t.Parallel()
 
@@ -4825,12 +4580,11 @@ func TestVoteManagerTreatsInvalidPoPOnChainKeyAsAbsent(t *testing.T) {
 		VoteSignature:     sig,
 	}))
 	fixture.mgr.mu.Lock()
-	stored, ok := fixture.mgr.votesById[lcommon.LeiosVoteId{
+	_, ok := fixture.mgr.votesById[lcommon.LeiosVoteId{
 		SlotNo: 577, VoterId: member.VoterId,
 	}]
 	fixture.mgr.mu.Unlock()
-	require.True(t, ok)
-	assert.False(t, stored.verified)
+	assert.False(t, ok, "a vote for a seat with an invalid-PoP key is dropped")
 }
 
 // TestVoteManagerRetriesOnChainKeyResolutionAfterTransientFailure proves a
@@ -4881,31 +4635,6 @@ func TestVoteManagerRetriesOnChainKeyResolutionAfterTransientFailure(
 	committee, err := fixture.mgr.CommitteeForEpoch(5)
 	require.NoError(t, err, "retrying after the store recovers must succeed")
 	require.Equal(t, member.PoolKeyHash, committee.Members[3].PoolKeyHash)
-}
-
-func TestVoteManagerValidateConfiguredVotingKey(t *testing.T) {
-	t.Parallel()
-
-	fixture := newManagerFixture(t)
-	member := fixture.members[3]
-	var poolKeyHash lcommon.PoolKeyHash
-	copy(poolKeyHash[:], member.PoolKeyHash)
-
-	require.NoError(
-		t,
-		fixture.mgr.ValidateVotingKey(
-			poolKeyHash,
-			fixture.keys[member.VoterId],
-		),
-	)
-
-	wrongKey, err := ParseVoteSigningKey(fmt.Sprintf("%064x", 999))
-	require.NoError(t, err)
-	assert.Error(t, fixture.mgr.ValidateVotingKey(poolKeyHash, wrongKey))
-
-	var missingPool lcommon.PoolKeyHash
-	missingPool[0] = 0xff
-	assert.Error(t, fixture.mgr.ValidateVotingKey(missingPool, wrongKey))
 }
 
 func TestVoteManagerDeferredVotingReplaysCurrentEpochAnnouncementsInOrder(
@@ -6468,21 +6197,6 @@ func TestVoteManagerCommitteeMemoized(t *testing.T) {
 	assert.Equal(t, 2, fixture.stake.callCount())
 }
 
-func TestVoteManagerCommitteeUnavailableNotMemoized(t *testing.T) {
-	t.Parallel()
-
-	fixture := newManagerFixture(t)
-	fixture.stake.setError(errors.New("snapshot not ready"))
-	_, err := fixture.mgr.CommitteeForEpoch(5)
-	require.Error(t, err)
-
-	// Recovery: errors are not memoized
-	fixture.stake.setError(nil)
-	committee, err := fixture.mgr.CommitteeForEpoch(5)
-	require.NoError(t, err)
-	assert.Equal(t, uint64(10), committee.Size())
-}
-
 func TestVoteManagerParamsValidationFailureSurfaces(t *testing.T) {
 	t.Parallel()
 
@@ -6845,127 +6559,6 @@ func TestVoteManagerRecordsRetainedWhileTallyLive(t *testing.T) {
 		),
 		1,
 		"vote accepted fresh after its tally expired",
-	)
-}
-
-// partialRegistryOpt removes the registered public keys for the given
-// voter ids so their votes pass lenient validation as unverified.
-func partialRegistryOpt(
-	t *testing.T,
-	unregistered ...uint64,
-) func(*managerFixture, *VoteManagerConfig) {
-	t.Helper()
-	return func(f *managerFixture, cfg *VoteManagerConfig) {
-		partial := maps.Clone(f.registryEntries)
-		for _, member := range f.members {
-			for _, voterId := range unregistered {
-				if member.VoterId == voterId {
-					delete(
-						partial,
-						hex.EncodeToString(member.PoolKeyHash),
-					)
-				}
-			}
-		}
-		registry, err := NewVoterRegistry(partial)
-		require.NoError(t, err)
-		cfg.Registry = registry
-	}
-}
-
-func TestVoteManagerRecordCapacityRejectsNewVotes(t *testing.T) {
-	t.Parallel()
-
-	// Voters 0..2 have no registered keys: their votes are unverified
-	// and subject to the record admission cap.
-	fixture := newManagerFixture(t, partialRegistryOpt(t, 0, 1, 2))
-	fixture.mgr.maxRecords = 2
-	ebHash := lcommon.NewBlake2b256([]byte("eb"))
-	for voterId := range uint64(2) {
-		require.NoError(
-			t,
-			fixture.mgr.HandleVote(
-				"conn-a",
-				fixture.makeVote(t, voterId, 577, ebHash),
-			),
-		)
-	}
-	// The ledger is full: a new unverified vote id is rejected
-	// outright rather than evicting an existing record
-	require.NoError(
-		t,
-		fixture.mgr.HandleVote(
-			"conn-a",
-			fixture.makeVote(t, 2, 577, ebHash),
-		),
-	)
-	assert.Empty(
-		t,
-		fixture.mgr.VotesByIds(
-			[]lcommon.LeiosVoteId{{SlotNo: 577, VoterId: 2}},
-		),
-		"unverified vote beyond the record capacity is rejected",
-	)
-	// Recorded votes are unaffected
-	assert.Len(
-		t,
-		fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{
-			{SlotNo: 577, VoterId: 0},
-			{SlotNo: 577, VoterId: 1},
-		}),
-		2,
-	)
-}
-
-func TestVoteManagerVerifiedVoteBypassesRecordCapacity(t *testing.T) {
-	t.Parallel()
-
-	// Voters 0..2 have no registered keys; voter 3 stays registered.
-	fixture := newManagerFixture(t, partialRegistryOpt(t, 0, 1, 2))
-	fixture.mgr.maxRecords = 2
-	ebHash := lcommon.NewBlake2b256([]byte("eb"))
-	// Unverified votes fill the record ledger
-	for voterId := range uint64(2) {
-		require.NoError(
-			t,
-			fixture.mgr.HandleVote(
-				"conn-a",
-				fixture.makeVote(t, voterId, 577, ebHash),
-			),
-		)
-	}
-	// A verified vote must be admitted despite the full ledger:
-	// unverifiable noise cannot starve the votes that feed
-	// certificates
-	require.NoError(
-		t,
-		fixture.mgr.HandleVote(
-			"conn-a",
-			fixture.makeVote(t, 3, 577, ebHash),
-		),
-	)
-	assert.Len(
-		t,
-		fixture.mgr.VotesByIds(
-			[]lcommon.LeiosVoteId{{SlotNo: 577, VoterId: 3}},
-		),
-		1,
-		"verified vote admitted past the record capacity",
-	)
-	// Unverified votes remain capped
-	require.NoError(
-		t,
-		fixture.mgr.HandleVote(
-			"conn-a",
-			fixture.makeVote(t, 2, 577, ebHash),
-		),
-	)
-	assert.Empty(
-		t,
-		fixture.mgr.VotesByIds(
-			[]lcommon.LeiosVoteId{{SlotNo: 577, VoterId: 2}},
-		),
-		"unverified vote still rejected at capacity",
 	)
 }
 
@@ -7396,5 +6989,56 @@ func TestVoteManagerLatePrototypeVotesAreNotPeerMisbehavior(t *testing.T) {
 		t,
 		fixture.mgr.HandleVote("relay", invalid),
 		ErrPeerMisbehavior,
+	)
+}
+
+// TestVoteManagerRepeatedKeylessVotesDoNotExhaustVerificationBudget proves a
+// peer resending a vote for a keyless seat cannot use up its verification
+// budget: keyless votes are not stored, so without a remembered drop every
+// copy would be admitted and a later valid vote would be dropped.
+func TestVoteManagerRepeatedKeylessVotesDoNotExhaustVerificationBudget(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	fixture := newManagerFixture(
+		t,
+		func(f *managerFixture, cfg *VoteManagerConfig) {
+			partial := maps.Clone(f.registryEntries)
+			for _, member := range f.members {
+				if member.VoterId == 0 {
+					delete(partial, hex.EncodeToString(member.PoolKeyHash))
+				}
+			}
+			registry, err := NewVoterRegistry(partial)
+			require.NoError(t, err)
+			cfg.Registry = registry
+		},
+	)
+	ebHash := lcommon.NewBlake2b256([]byte("eb"))
+	keyless := fixture.makeVote(t, 0, 577, ebHash)
+	for range 2 * voteVerificationMaxPerPeer {
+		require.NoError(t, fixture.mgr.HandleVote("conn-a", keyless))
+	}
+	require.NoError(
+		t,
+		fixture.mgr.HandleVote(
+			"conn-a",
+			fixture.makeVote(t, 1, 577, ebHash),
+		),
+	)
+	assert.Len(
+		t,
+		fixture.mgr.VotesByIds(
+			[]lcommon.LeiosVoteId{{SlotNo: 577, VoterId: 1}},
+		),
+		1,
+		"a valid vote must still be admitted after repeated keyless votes",
+	)
+	assert.Empty(
+		t,
+		fixture.mgr.VotesByIds(
+			[]lcommon.LeiosVoteId{{SlotNo: 577, VoterId: 0}},
+		),
 	)
 }

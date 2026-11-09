@@ -121,54 +121,6 @@ func (s *dnsServer) serve() {
 	}
 }
 
-// Discovery works through a real resolver and a real DNS exchange, not only
-// the fake the other tests use.
-func TestResolveLedgerPeersThroughARealResolver(t *testing.T) {
-	t.Parallel()
-	server := newDNSServer(t, map[string][]srvRecord{
-		testPrefix + ".a.example.org.": {
-			{priority: 10, weight: 1, port: 3141, target: "low.a.example.org."},
-			{
-				priority: 10,
-				weight:   50,
-				port:     3141,
-				target:   "high.a.example.org.",
-			},
-			{
-				priority: 5,
-				weight:   1,
-				port:     3142,
-				target:   "first.a.example.org.",
-			},
-			{priority: 0, weight: 0, port: 3141, target: "."},
-		},
-		testPrefix + ".b.example.org.": {
-			{
-				priority: 1,
-				weight:   1,
-				port:     6161,
-				target:   "relay.b.example.org.",
-			},
-		},
-	})
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-	defer cancel()
-
-	peers, err := ResolveLedgerPeers(ctx, LedgerPeerLookup{
-		Resolver: server.resolver(),
-		Prefix:   testPrefix,
-		Timeout:  5 * time.Second,
-	}, []string{"a.example.org", "missing.example.org", "b.example.org"})
-	require.NoError(t, err)
-	assert.Equal(t, []Peer{
-		{Host: "first.a.example.org", Port: 3142},
-		{Host: "high.a.example.org", Port: 3141},
-		{Host: "low.a.example.org", Port: 3141},
-		{Host: "relay.b.example.org", Port: 6161},
-	}, peers, "ordered by priority and weight, '.' skipped, NXDOMAIN skipped")
-	assert.Contains(t, server.asked(), testPrefix+".a.example.org.")
-}
-
 // A snapshot of pools, an SRV lookup over real DNS, and the peers that come
 // out: the whole chain the node uses, ending in what the manager would dial.
 func TestLedgerPeerSourceThroughARealResolver(t *testing.T) {

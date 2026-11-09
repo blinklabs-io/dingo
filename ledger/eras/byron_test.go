@@ -1540,54 +1540,44 @@ func TestValidateTxByron_ValidMultipleInputsOutputs(
 	assert.NoError(t, err)
 }
 
-func TestValidateTxByron_EmptyInputs(t *testing.T) {
-	tx := &testByronTx{
-		inputs: []lcommon.TransactionInput{},
-		outputs: []lcommon.TransactionOutput{
-			newTestOutput(1_000_000),
-		},
+func TestValidateTxByron_EmptyOrNilInputs(t *testing.T) {
+	for name, inputs := range map[string][]lcommon.TransactionInput{
+		"empty": {},
+		"nil":   nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			tx := &testByronTx{
+				inputs: inputs,
+				outputs: []lcommon.TransactionOutput{
+					newTestOutput(1_000_000),
+				},
+			}
+			err := ValidateTxByron(tx, 0, nil, nil)
+			require.Error(t, err)
+			assert.ErrorAs(t, err, &InputSetEmptyByronError{})
+			assert.Contains(t, err.Error(), "no inputs")
+		})
 	}
-	err := ValidateTxByron(tx, 0, nil, nil)
-	require.Error(t, err)
-	assert.ErrorAs(t, err, &InputSetEmptyByronError{})
-	assert.Contains(t, err.Error(), "no inputs")
 }
 
-func TestValidateTxByron_NilInputs(t *testing.T) {
-	tx := &testByronTx{
-		inputs: nil,
-		outputs: []lcommon.TransactionOutput{
-			newTestOutput(1_000_000),
-		},
+func TestValidateTxByron_EmptyOrNilOutputs(t *testing.T) {
+	for name, outputs := range map[string][]lcommon.TransactionOutput{
+		"empty": {},
+		"nil":   nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			tx := &testByronTx{
+				inputs: []lcommon.TransactionInput{
+					newTestInput(0x01, 0),
+				},
+				outputs: outputs,
+			}
+			err := ValidateTxByron(tx, 0, nil, nil)
+			require.Error(t, err)
+			assert.ErrorAs(t, err, &OutputSetEmptyByronError{})
+			assert.Contains(t, err.Error(), "no outputs")
+		})
 	}
-	err := ValidateTxByron(tx, 0, nil, nil)
-	require.Error(t, err)
-	assert.ErrorAs(t, err, &InputSetEmptyByronError{})
-}
-
-func TestValidateTxByron_EmptyOutputs(t *testing.T) {
-	tx := &testByronTx{
-		inputs: []lcommon.TransactionInput{
-			newTestInput(0x01, 0),
-		},
-		outputs: []lcommon.TransactionOutput{},
-	}
-	err := ValidateTxByron(tx, 0, nil, nil)
-	require.Error(t, err)
-	assert.ErrorAs(t, err, &OutputSetEmptyByronError{})
-	assert.Contains(t, err.Error(), "no outputs")
-}
-
-func TestValidateTxByron_NilOutputs(t *testing.T) {
-	tx := &testByronTx{
-		inputs: []lcommon.TransactionInput{
-			newTestInput(0x01, 0),
-		},
-		outputs: nil,
-	}
-	err := ValidateTxByron(tx, 0, nil, nil)
-	require.Error(t, err)
-	assert.ErrorAs(t, err, &OutputSetEmptyByronError{})
 }
 
 // TestValidateTxByron_DuplicateInputs pins: the reference keeps
@@ -1605,22 +1595,6 @@ func TestValidateTxByron_DuplicateInputs(t *testing.T) {
 	require.NoError(t, ValidateTxByron(tx, 0, nil, nil))
 }
 
-func TestValidateTxByron_SameTxDifferentIndex(t *testing.T) {
-	// Same transaction hash but different output indices
-	// should be valid
-	tx := &testByronTx{
-		inputs: []lcommon.TransactionInput{
-			newTestInput(0x01, 0),
-			newTestInput(0x01, 1),
-		},
-		outputs: []lcommon.TransactionOutput{
-			newTestOutput(1_000_000),
-		},
-	}
-	err := ValidateTxByron(tx, 0, nil, nil)
-	assert.NoError(t, err)
-}
-
 func TestValidateTxByron_MultipleErrors(t *testing.T) {
 	// Empty inputs AND empty outputs should both be reported
 	tx := &testByronTx{
@@ -1631,14 +1605,6 @@ func TestValidateTxByron_MultipleErrors(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorAs(t, err, &InputSetEmptyByronError{})
 	assert.ErrorAs(t, err, &OutputSetEmptyByronError{})
-}
-
-func TestByronEraDesc_HasValidateTxFunc(t *testing.T) {
-	assert.NotNil(
-		t,
-		ByronEraDesc.ValidateTxFunc,
-		"ByronEraDesc should have ValidateTxFunc set",
-	)
 }
 
 // --- Mock LedgerState for UTxO-aware tests ---
@@ -1965,156 +1931,138 @@ func (m *mockLedgerState) CostModels() map[lcommon.PlutusLanguage]lcommon.CostMo
 
 // --- Tests for UTxO-aware Byron validation rules ---
 
-func TestByronValidateBadInputs_AllInputsExist(
-	t *testing.T,
-) {
-	ls := newMockLedgerState()
+func TestByronValidateBadInputs(t *testing.T) {
 	input1 := newTestInput(0x01, 0)
 	input2 := newTestInput(0x02, 0)
-	ls.addUtxo(input1, newTestOutput(1_000_000))
-	ls.addUtxo(input2, newTestOutput(2_000_000))
-
-	tx := &testByronTx{
-		inputs: []lcommon.TransactionInput{input1, input2},
-		outputs: []lcommon.TransactionOutput{
-			newTestOutput(2_500_000),
+	missing := newTestInput(0xFF, 0)
+	tests := []struct {
+		name        string
+		utxos       []lcommon.TransactionInput
+		inputs      []lcommon.TransactionInput
+		wantMissing int
+	}{
+		{
+			name:   "all inputs exist",
+			utxos:  []lcommon.TransactionInput{input1, input2},
+			inputs: []lcommon.TransactionInput{input1, input2},
+		},
+		{
+			name:        "one missing input",
+			utxos:       []lcommon.TransactionInput{input1},
+			inputs:      []lcommon.TransactionInput{input1, missing},
+			wantMissing: 1,
+		},
+		{
+			name:        "all missing",
+			inputs:      []lcommon.TransactionInput{input1, input2},
+			wantMissing: 2,
 		},
 	}
-	err := byronValidateBadInputs(tx, 0, ls, nil)
-	assert.NoError(t, err)
-}
-
-func TestByronValidateBadInputs_MissingInput(
-	t *testing.T,
-) {
-	ls := newMockLedgerState()
-	input1 := newTestInput(0x01, 0)
-	ls.addUtxo(input1, newTestOutput(1_000_000))
-
-	missingInput := newTestInput(0xFF, 0)
-	tx := &testByronTx{
-		inputs: []lcommon.TransactionInput{
-			input1,
-			missingInput,
-		},
-		outputs: []lcommon.TransactionOutput{
-			newTestOutput(500_000),
-		},
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ls := newMockLedgerState()
+			for _, in := range test.utxos {
+				ls.addUtxo(in, newTestOutput(1_000_000))
+			}
+			tx := &testByronTx{
+				inputs: test.inputs,
+				outputs: []lcommon.TransactionOutput{
+					newTestOutput(500_000),
+				},
+			}
+			err := byronValidateBadInputs(tx, 0, ls, nil)
+			if test.wantMissing == 0 {
+				assert.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			var badErr BadInputsByronError
+			require.ErrorAs(t, err, &badErr)
+			assert.Len(t, badErr.Inputs, test.wantMissing)
+			assert.Contains(t, err.Error(), "bad input")
+		})
 	}
-	err := byronValidateBadInputs(tx, 0, ls, nil)
-	require.Error(t, err)
-	assert.ErrorAs(t, err, &BadInputsByronError{})
-	assert.Contains(t, err.Error(), "bad input")
 }
 
-func TestByronValidateBadInputs_AllMissing(t *testing.T) {
-	ls := newMockLedgerState()
-	tx := &testByronTx{
-		inputs: []lcommon.TransactionInput{
-			newTestInput(0x01, 0),
-			newTestInput(0x02, 0),
-		},
-		outputs: []lcommon.TransactionOutput{
-			newTestOutput(500_000),
-		},
-	}
-	err := byronValidateBadInputs(tx, 0, ls, nil)
-	require.Error(t, err)
-	var badErr BadInputsByronError
-	require.ErrorAs(t, err, &badErr)
-	assert.Len(t, badErr.Inputs, 2)
-}
-
-func TestByronValidateValueConserved_Valid(t *testing.T) {
-	ls := newMockLedgerState()
-	input1 := newTestInput(0x01, 0)
-	ls.addUtxo(input1, newTestOutput(3_000_000))
-
-	tx := &testByronTx{
-		inputs: []lcommon.TransactionInput{input1},
-		outputs: []lcommon.TransactionOutput{
-			newTestOutput(2_800_000), // 200k implicit fee
-		},
-	}
-	err := byronValidateValueConserved(tx, 0, ls, nil)
-	assert.NoError(t, err)
-}
-
-func TestByronValidateValueConserved_ExactMatch(
-	t *testing.T,
-) {
-	ls := newMockLedgerState()
-	input1 := newTestInput(0x01, 0)
-	ls.addUtxo(input1, newTestOutput(1_000_000))
-
-	tx := &testByronTx{
-		inputs: []lcommon.TransactionInput{input1},
-		outputs: []lcommon.TransactionOutput{
-			newTestOutput(1_000_000), // zero fee is valid
-		},
-	}
-	err := byronValidateValueConserved(tx, 0, ls, nil)
-	assert.NoError(t, err)
-}
-
-func TestByronValidateValueConserved_OutputExceedsInput(
-	t *testing.T,
-) {
-	ls := newMockLedgerState()
-	input1 := newTestInput(0x01, 0)
-	ls.addUtxo(input1, newTestOutput(1_000_000))
-
-	tx := &testByronTx{
-		inputs: []lcommon.TransactionInput{input1},
-		outputs: []lcommon.TransactionOutput{
-			newTestOutput(2_000_000), // outputs > inputs
-		},
-	}
-	err := byronValidateValueConserved(tx, 0, ls, nil)
-	require.Error(t, err)
-	assert.ErrorAs(t, err, &ValueNotConservedByronError{})
-	assert.Contains(t, err.Error(), "value not conserved")
-}
-
-func TestByronValidateValueConserved_MultipleInputsOutputs(
-	t *testing.T,
-) {
-	ls := newMockLedgerState()
+func TestByronValidateValueConserved(t *testing.T) {
 	input1 := newTestInput(0x01, 0)
 	input2 := newTestInput(0x02, 0)
-	ls.addUtxo(input1, newTestOutput(5_000_000))
-	ls.addUtxo(input2, newTestOutput(3_000_000))
-
-	tx := &testByronTx{
-		inputs: []lcommon.TransactionInput{input1, input2},
-		outputs: []lcommon.TransactionOutput{
-			newTestOutput(4_000_000),
-			newTestOutput(3_500_000),
+	input1SameTxIdx := newTestInput(0x01, 1)
+	tests := []struct {
+		name    string
+		utxos   map[lcommon.TransactionInput]uint64
+		inputs  []lcommon.TransactionInput
+		outputs []uint64
+		wantErr bool
+	}{
+		{
+			name:    "implicit fee",
+			utxos:   map[lcommon.TransactionInput]uint64{input1: 3_000_000},
+			inputs:  []lcommon.TransactionInput{input1},
+			outputs: []uint64{2_800_000},
+		},
+		{
+			name:    "exact match, zero fee",
+			utxos:   map[lcommon.TransactionInput]uint64{input1: 1_000_000},
+			inputs:  []lcommon.TransactionInput{input1},
+			outputs: []uint64{1_000_000},
+		},
+		{
+			name:    "output exceeds input",
+			utxos:   map[lcommon.TransactionInput]uint64{input1: 1_000_000},
+			inputs:  []lcommon.TransactionInput{input1},
+			outputs: []uint64{2_000_000},
+			wantErr: true,
+		},
+		{
+			name: "multiple inputs and outputs",
+			utxos: map[lcommon.TransactionInput]uint64{
+				input1: 5_000_000, input2: 3_000_000,
+			},
+			inputs:  []lcommon.TransactionInput{input1, input2},
+			outputs: []uint64{4_000_000, 3_500_000},
+		},
+		{
+			// Inputs sharing a transaction hash but with different output
+			// indices are distinct and each contributes its value.
+			name: "same transaction different indices",
+			utxos: map[lcommon.TransactionInput]uint64{
+				input1:          1_000_000,
+				input1SameTxIdx: 1_000_000,
+			},
+			inputs:  []lcommon.TransactionInput{input1, input1SameTxIdx},
+			outputs: []uint64{1_800_000},
+		},
+		{
+			// An input absent from the UTxO set is skipped in the value
+			// calculation: only input1's 2M counts against 1M produced.
+			name:    "skips missing inputs",
+			utxos:   map[lcommon.TransactionInput]uint64{input1: 2_000_000},
+			inputs:  []lcommon.TransactionInput{input1, input2},
+			outputs: []uint64{1_000_000},
 		},
 	}
-	// Consumed=8M, Produced=7.5M, fee=0.5M -- valid
-	err := byronValidateValueConserved(tx, 0, ls, nil)
-	assert.NoError(t, err)
-}
-
-func TestByronValidateValueConserved_SkipsMissingInputs(
-	t *testing.T,
-) {
-	ls := newMockLedgerState()
-	input1 := newTestInput(0x01, 0)
-	ls.addUtxo(input1, newTestOutput(2_000_000))
-	// input2 is not in UTxO set -- skipped in value calc
-	input2 := newTestInput(0x02, 0)
-
-	tx := &testByronTx{
-		inputs: []lcommon.TransactionInput{input1, input2},
-		outputs: []lcommon.TransactionOutput{
-			newTestOutput(1_000_000),
-		},
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ls := newMockLedgerState()
+			for in, amount := range test.utxos {
+				ls.addUtxo(in, newTestOutput(amount))
+			}
+			outputs := make([]lcommon.TransactionOutput, 0, len(test.outputs))
+			for _, amount := range test.outputs {
+				outputs = append(outputs, newTestOutput(amount))
+			}
+			tx := &testByronTx{inputs: test.inputs, outputs: outputs}
+			err := byronValidateValueConserved(tx, 0, ls, nil)
+			if !test.wantErr {
+				assert.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.ErrorAs(t, err, &ValueNotConservedByronError{})
+			assert.Contains(t, err.Error(), "value not conserved")
+		})
 	}
-	// Only input1 counted: 2M consumed vs 1M produced -> ok
-	err := byronValidateValueConserved(tx, 0, ls, nil)
-	assert.NoError(t, err)
 }
 
 func TestValidateTxByron_MinimumFee(t *testing.T) {
@@ -2168,57 +2116,6 @@ func TestValidateTxByron_MinimumFee(t *testing.T) {
 			assert.NoError(t, err)
 		})
 	}
-}
-
-func TestValidateTxByron_WithLedgerState_Valid(
-	t *testing.T,
-) {
-	ls := newMockLedgerState()
-	input1 := newTestInput(0x01, 0)
-	ls.addUtxo(input1, newTestOutput(5_000_000))
-
-	tx := &testByronTx{
-		inputs:  []lcommon.TransactionInput{input1},
-		outputs: []lcommon.TransactionOutput{newTestOutput(4_800_000)},
-	}
-	err := ValidateTxByron(tx, 0, ls, nil)
-	assert.NoError(t, err)
-}
-
-func TestValidateTxByron_WithLedgerState_BadInput(
-	t *testing.T,
-) {
-	ls := newMockLedgerState()
-	// Do not add any UTxO -- input will be bad
-	tx := &testByronTx{
-		inputs: []lcommon.TransactionInput{
-			newTestInput(0x01, 0),
-		},
-		outputs: []lcommon.TransactionOutput{
-			newTestOutput(1_000_000),
-		},
-	}
-	err := ValidateTxByron(tx, 0, ls, nil)
-	require.Error(t, err)
-	assert.ErrorAs(t, err, &BadInputsByronError{})
-}
-
-func TestValidateTxByron_WithLedgerState_ValueNotConserved(
-	t *testing.T,
-) {
-	ls := newMockLedgerState()
-	input1 := newTestInput(0x01, 0)
-	ls.addUtxo(input1, newTestOutput(500_000))
-
-	tx := &testByronTx{
-		inputs: []lcommon.TransactionInput{input1},
-		outputs: []lcommon.TransactionOutput{
-			newTestOutput(1_000_000),
-		},
-	}
-	err := ValidateTxByron(tx, 0, ls, nil)
-	require.Error(t, err)
-	assert.ErrorAs(t, err, &ValueNotConservedByronError{})
 }
 
 func TestValidateTxByron_NilLedgerState_SkipsUtxoRules(

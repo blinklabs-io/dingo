@@ -294,170 +294,6 @@ func buildSparseTestChain(t *testing.T, ids []uint64) *chainFixture {
 	return &chainFixture{db: db, blocks: blocks}
 }
 
-// TestResolveTargetByHash verifies that a block hash resolves to the
-// matching block.
-func TestResolveTargetByHash(t *testing.T) {
-	t.Parallel()
-
-	f := buildTestChain(t, 5)
-	target, err := lifecycle.ResolveTargetByHash(
-		context.Background(),
-		f.db,
-		f.blocks[2].Hash,
-	)
-	require.NoError(t, err)
-	require.Equal(t, f.blocks[2].ID, target.ID)
-}
-
-// TestResolveTargetBySlot verifies that a slot with its own block
-// resolves to that exact block.
-func TestResolveTargetBySlot(t *testing.T) {
-	t.Parallel()
-
-	f := buildTestChain(t, 5)
-	target, err := lifecycle.ResolveTargetBySlot(
-		context.Background(),
-		f.db,
-		f.blocks[2].Slot,
-	)
-	require.NoError(t, err)
-	require.Equal(t, f.blocks[2].ID, target.ID)
-}
-
-// TestResolveTargetBySlotResolvesToNearestAncestor exercises the common
-// case for a real chain: the vast majority of slots have no block of
-// their own (average ~20s slot time), so a slot in between two blocks
-// must resolve to the highest-slot block at or before it, not error out.
-func TestResolveTargetBySlotResolvesToNearestAncestor(t *testing.T) {
-	t.Parallel()
-
-	f := buildTestChain(t, 5) // blocks[i].Slot == (i+1)*10
-
-	target, err := lifecycle.ResolveTargetBySlot(
-		context.Background(),
-		f.db,
-		f.blocks[2].Slot+5,
-	)
-	require.NoError(t, err)
-	require.Equal(t, f.blocks[2].ID, target.ID)
-
-	// A slot past the tip resolves to the tip itself (no-op truncate),
-	// rather than erroring — mirrors Truncate's own idempotency at tip.
-	tipTarget, err := lifecycle.ResolveTargetBySlot(
-		context.Background(),
-		f.db,
-		f.blocks[4].Slot+100,
-	)
-	require.NoError(t, err)
-	require.Equal(t, f.blocks[4].ID, tipTarget.ID)
-}
-
-// TestResolveTargetByNumber verifies that every block number in the
-// chain resolves back to its own block.
-func TestResolveTargetByNumber(t *testing.T) {
-	t.Parallel()
-
-	f := buildTestChain(t, 5)
-	for _, b := range f.blocks {
-		target, err := lifecycle.ResolveTargetByNumber(
-			context.Background(),
-			f.db,
-			b.Number,
-		)
-		require.NoError(t, err)
-		require.Equal(t, b.ID, target.ID)
-	}
-}
-
-// TestResolveTargetByNumberAheadOfTipErrors verifies that a block number
-// ahead of the current tip returns an error.
-func TestResolveTargetByNumberAheadOfTipErrors(t *testing.T) {
-	t.Parallel()
-
-	f := buildTestChain(t, 5)
-	_, err := lifecycle.ResolveTargetByNumber(context.Background(), f.db, 100)
-	require.Error(t, err)
-}
-
-// TestResolveTargetBySlotSkipsSparseIndexGap verifies the binary search
-// tolerates missing intermediate block IDs rather than treating a missing
-// probe as fatal — Mithril bootstrap/drain import can legitimately leave
-// large gaps in the block-ID sequence. A target low in the surviving ID
-// range forces the search's very first probe to land inside the gap (with
-// tip ID 1002 and a target at ID 2, the first midpoint is ~501, squarely
-// inside the empty 4-999 range) — this alone only proves missing-ID probes
-// don't hard-fail; TestResolveTargetBySlotSkipsSparseIndexGapAboveGap
-// below additionally proves the search can still find a target *above*
-// the gap, which a naive "treat a miss as answer-must-be-lower" fallback
-// (without an actual seek-forward) would get wrong.
-func TestResolveTargetBySlotSkipsSparseIndexGap(t *testing.T) {
-	t.Parallel()
-
-	f := buildSparseTestChain(t, []uint64{1, 2, 3, 1000, 1001, 1002})
-
-	target, err := lifecycle.ResolveTargetBySlot(
-		context.Background(),
-		f.db,
-		f.blocks[1].Slot,
-	)
-	require.NoError(t, err)
-	require.Equal(t, f.blocks[1].ID, target.ID)
-}
-
-// TestResolveTargetBySlotSkipsSparseIndexGapAboveGap targets a block
-// *above* the gap (ID 1001, out of 1000-1002). A fallback that merely
-// treats a missing-ID probe as "the answer must be below this point"
-// (shrinking hi without ever seeking forward) converges toward the low
-// 1-3 range and never finds this target at all; only an actual
-// seek-forward (BlockAtOrAfterIndex) resolves it correctly.
-func TestResolveTargetBySlotSkipsSparseIndexGapAboveGap(t *testing.T) {
-	t.Parallel()
-
-	f := buildSparseTestChain(t, []uint64{1, 2, 3, 1000, 1001, 1002})
-
-	target, err := lifecycle.ResolveTargetBySlot(
-		context.Background(),
-		f.db,
-		f.blocks[4].Slot,
-	)
-	require.NoError(t, err)
-	require.Equal(t, f.blocks[4].ID, target.ID)
-}
-
-// TestResolveTargetByNumberSkipsSparseIndexGap is
-// TestResolveTargetBySlotSkipsSparseIndexGap's counterpart for
-// ResolveTargetByNumber, which has the identical binary-search structure.
-func TestResolveTargetByNumberSkipsSparseIndexGap(t *testing.T) {
-	t.Parallel()
-
-	f := buildSparseTestChain(t, []uint64{1, 2, 3, 1000, 1001, 1002})
-
-	target, err := lifecycle.ResolveTargetByNumber(
-		context.Background(),
-		f.db,
-		f.blocks[1].Number,
-	)
-	require.NoError(t, err)
-	require.Equal(t, f.blocks[1].ID, target.ID)
-}
-
-// TestResolveTargetByNumberSkipsSparseIndexGapAboveGap is
-// TestResolveTargetBySlotSkipsSparseIndexGapAboveGap's counterpart for
-// ResolveTargetByNumber.
-func TestResolveTargetByNumberSkipsSparseIndexGapAboveGap(t *testing.T) {
-	t.Parallel()
-
-	f := buildSparseTestChain(t, []uint64{1, 2, 3, 1000, 1001, 1002})
-
-	target, err := lifecycle.ResolveTargetByNumber(
-		context.Background(),
-		f.db,
-		f.blocks[4].Number,
-	)
-	require.NoError(t, err)
-	require.Equal(t, f.blocks[4].ID, target.ID)
-}
-
 // TestTruncateReportsActualDeletedCountForSparseIndex verifies that
 // blocksRemoved counts blocks actually deleted, not tipBlock.ID -
 // target.ID: that subtraction is only a valid count when every ID in the
@@ -627,159 +463,6 @@ func TestTruncateRejectsTargetInUnappliedBlobTail(t *testing.T) {
 	}
 }
 
-// TestTruncateRejectsTargetAheadOfTip verifies that a target block ahead
-// of the current tip is rejected with an error.
-func TestTruncateRejectsTargetAheadOfTip(t *testing.T) {
-	t.Parallel()
-
-	f := buildTestChain(t, 3)
-	aheadTarget := testBlock(99, 0x63)
-	_, err := lifecycle.Truncate(
-		context.Background(),
-		f.db,
-		aheadTarget,
-		0,
-		false,
-		0,
-	)
-	require.Error(t, err)
-}
-
-// TestTruncateRejectsTargetWithMismatchedHash verifies Truncate defends
-// against a target whose ID/hash pair doesn't actually match what's stored
-// at that ID on the current chain. ResolveTargetBySlot/ResolveTargetByNumber
-// return a block found by binary-searching the blob store's own contiguous
-// ID space, so their result is structurally guaranteed to be the block
-// genuinely occupying that ID — but a target built some other way (e.g. by
-// hash, via ResolveTargetByHash, which has no such structural guarantee)
-// could in principle carry an ID/hash pair that doesn't actually match.
-// Truncate must verify this itself rather than trust the caller, since
-// DeleteBlocksAfter deletes blob-store blocks by ID range while
-// database.TruncateAfterSlot deletes metadata by slot cutoff — the two
-// only describe the same rollback when target is genuinely the block at
-// its own ID.
-func TestTruncateRejectsTargetWithMismatchedHash(t *testing.T) {
-	t.Parallel()
-
-	f := buildTestChain(t, 5)
-
-	target := f.blocks[2]
-	target.Hash = bytes.Repeat(
-		[]byte{0xFF},
-		32,
-	) // does not match what's stored at this ID
-
-	_, err := lifecycle.Truncate(
-		context.Background(),
-		f.db,
-		target,
-		0,
-		false,
-		0,
-	)
-	require.Error(t, err)
-	require.ErrorIs(t, err, lifecycle.ErrTruncateNotStarted)
-
-	// Nothing must have been touched: every original block still present.
-	for _, b := range f.blocks {
-		_, err := f.db.BlockByIndex(b.ID, nil)
-		require.NoError(t, err)
-	}
-}
-
-// TestTruncateRejectsTargetWithMismatchedSlot verifies Truncate rejects a
-// target with a valid ID/Hash pair but a forged (or otherwise wrong) Slot,
-// not just a mismatched Hash. DeleteBlocksAfter cuts blob-store history by
-// target.ID, while database.TruncateAfterSlot cuts metadata history by
-// target.Slot directly (not by ID) — so a mismatched Slot would make the
-// two deletes cut at different points, silently diverging blob and
-// metadata history even though the Hash matched.
-func TestTruncateRejectsTargetWithMismatchedSlot(t *testing.T) {
-	t.Parallel()
-
-	f := buildTestChain(t, 5)
-
-	target := f.blocks[2]
-	target.Slot = target.Slot + 1 // does not match what's stored at this ID
-
-	_, err := lifecycle.Truncate(
-		context.Background(),
-		f.db,
-		target,
-		0,
-		false,
-		0,
-	)
-	require.Error(t, err)
-	require.ErrorIs(t, err, lifecycle.ErrTruncateNotStarted)
-
-	// Nothing must have been touched: every original block still present.
-	for _, b := range f.blocks {
-		_, err := f.db.BlockByIndex(b.ID, nil)
-		require.NoError(t, err)
-	}
-}
-
-// TestTruncateRejectsTipIDTargetWithMismatchedHash guards against the
-// target.ID == tipBlock.ID no-op path reporting success without ever
-// verifying target actually names the current tip: a stale or malformed
-// caller could pass the tip's own ID paired with a Hash that does not
-// match what is genuinely stored there, and without validating on-lineage
-// slot/hash before that early return, Truncate would report success (zero
-// blocks removed) for a target that was never proven canonical.
-func TestTruncateRejectsTipIDTargetWithMismatchedHash(t *testing.T) {
-	t.Parallel()
-
-	f := buildTestChain(t, 5)
-
-	target := f.blocks[len(f.blocks)-1] // the tip's own ID
-	target.Hash = bytes.Repeat([]byte{0xFF}, 32)
-
-	_, err := lifecycle.Truncate(
-		context.Background(),
-		f.db,
-		target,
-		0,
-		false,
-		0,
-	)
-	require.Error(t, err)
-	require.ErrorIs(t, err, lifecycle.ErrTruncateNotStarted)
-
-	for _, b := range f.blocks {
-		_, err := f.db.BlockByIndex(b.ID, nil)
-		require.NoError(t, err)
-	}
-}
-
-// TestTruncateRejectsTipIDTargetWithMismatchedSlot is
-// TestTruncateRejectsTipIDTargetWithMismatchedHash's counterpart for a
-// forged Slot rather than a mismatched Hash, at the tip's own ID.
-func TestTruncateRejectsTipIDTargetWithMismatchedSlot(t *testing.T) {
-	t.Parallel()
-
-	f := buildTestChain(t, 5)
-
-	target := f.blocks[len(f.blocks)-1] // the tip's own ID
-	target.Slot = target.Slot + 1
-
-	_, err := lifecycle.Truncate(
-		context.Background(),
-		f.db,
-		target,
-		0,
-		false,
-		0,
-	)
-	require.Error(t, err)
-	require.ErrorIs(t, err, lifecycle.ErrTruncateNotStarted)
-
-	for _, b := range f.blocks {
-		_, err := f.db.BlockByIndex(b.ID, nil)
-		require.NoError(t, err)
-	}
-}
-
 // TestTruncateRejectsTargetImmediatelyFollowedBySameSlotBlock guards
 // against a real blob/metadata divergence bug: if the block
 // immediately after target shares its exact slot (the Byron epoch-
@@ -934,54 +617,6 @@ func TestTruncateDetectsAndResumesInterruptedBatchedDelete(t *testing.T) {
 // (possibly corrupted) marker value directly, the same way a bit-flipped
 // or truncated on-disk value could occur in practice.
 const pendingTruncateSyncKey = "database_lifecycle_truncate_pending"
-
-// TestGetPendingTruncateRejectsMarkerWithZeroTargetID guards a real gap: a
-// partially corrupted marker (e.g. only "tipId" survived) decodes as valid
-// JSON with TargetID at Go's zero value, which used to pass the only
-// check GetPendingTruncate had (TipID >= TargetID, trivially true against
-// zero). Resuming with TargetID=0 would delete from the very first block
-// -- a full, unintended chain wipe -- instead of failing loudly.
-func TestGetPendingTruncateRejectsMarkerWithZeroTargetID(t *testing.T) {
-	t.Parallel()
-
-	f := buildTestChain(t, 5)
-	require.NoError(t, f.db.SetSyncState(
-		pendingTruncateSyncKey, `{"tipId":5}`, nil,
-	))
-
-	pending, err := lifecycle.GetPendingTruncate(f.db)
-	require.Error(t, err)
-	require.Nil(t, pending)
-}
-
-// TestGetPendingTruncateRejectsMarkerNotMatchingActualBlock guards the
-// second half of the same gap: a marker whose fields are all individually
-// non-zero and internally consistent (TipID >= TargetID) but whose
-// TargetSlot/TargetHash no longer match what is actually stored at
-// TargetID on the current chain -- e.g. a corrupted (not merely absent)
-// field, or a stale marker left over from before some other operation
-// altered the chain. Resuming this would still diverge blob and metadata
-// deletion at the wrong point, the same way a fresh (non-resumed) target
-// with a forged slot/hash would (see TestTruncateRejectsTargetWith
-// MismatchedHash/Slot) -- this is that same on-lineage check, applied to
-// a resumed marker instead of a fresh target.
-func TestGetPendingTruncateRejectsMarkerNotMatchingActualBlock(t *testing.T) {
-	t.Parallel()
-
-	f := buildTestChain(t, 5)
-	target := f.blocks[1]
-	forgedHash := bytes.Repeat([]byte{0xFF}, 32)
-	marker := fmt.Sprintf(
-		`{"targetId":%d,"targetSlot":%d,"targetHash":%q,"tipId":%d}`,
-		target.ID, target.Slot, base64.StdEncoding.EncodeToString(forgedHash),
-		f.blocks[4].ID,
-	)
-	require.NoError(t, f.db.SetSyncState(pendingTruncateSyncKey, marker, nil))
-
-	pending, err := lifecycle.GetPendingTruncate(f.db)
-	require.Error(t, err)
-	require.Nil(t, pending)
-}
 
 // TestGetPendingTruncateRejectsMarkerWithCorruptedTipID verifies that changing
 // the deletion upper bound in an otherwise valid durable marker is detected.
@@ -1376,4 +1011,127 @@ func TestTruncateAllowsDeepTargetInApiStorageMode(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Equal(t, uint64(2), blocksRemoved)
+}
+
+// The resolvers only read, so every case shares one chain: a dense one for the
+// plain lookups and the nearest-ancestor rule, and a sparse one whose ID gap
+// would make a per-ID probe skip or misreport a block.
+func TestResolveTarget(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	f := buildTestChain(t, 5) // blocks[i].Slot == (i+1)*10
+	t.Run("by hash", func(t *testing.T) {
+		target, err := lifecycle.ResolveTargetByHash(ctx, f.db, f.blocks[2].Hash)
+		require.NoError(t, err)
+		require.Equal(t, f.blocks[2].ID, target.ID)
+	})
+	t.Run("by slot resolves to the nearest ancestor", func(t *testing.T) {
+		target, err := lifecycle.ResolveTargetBySlot(ctx, f.db, f.blocks[2].Slot)
+		require.NoError(t, err)
+		require.Equal(t, f.blocks[2].ID, target.ID)
+
+		target, err = lifecycle.ResolveTargetBySlot(ctx, f.db, f.blocks[2].Slot+5)
+		require.NoError(t, err)
+		require.Equal(t, f.blocks[2].ID, target.ID)
+
+		tipTarget, err := lifecycle.ResolveTargetBySlot(ctx, f.db, f.blocks[4].Slot+100)
+		require.NoError(t, err)
+		require.Equal(t, f.blocks[4].ID, tipTarget.ID)
+	})
+	t.Run("by number", func(t *testing.T) {
+		for _, b := range f.blocks {
+			target, err := lifecycle.ResolveTargetByNumber(ctx, f.db, b.Number)
+			require.NoError(t, err)
+			require.Equal(t, b.ID, target.ID)
+		}
+		_, err := lifecycle.ResolveTargetByNumber(ctx, f.db, 100)
+		require.Error(t, err, "a number ahead of the tip must not resolve")
+	})
+
+	sparse := buildSparseTestChain(t, []uint64{1, 2, 3, 1000, 1001, 1002})
+	t.Run("sparse index gap", func(t *testing.T) {
+		for _, b := range []models.Block{sparse.blocks[1], sparse.blocks[4]} {
+			bySlot, err := lifecycle.ResolveTargetBySlot(ctx, sparse.db, b.Slot)
+			require.NoError(t, err)
+			require.Equal(t, b.ID, bySlot.ID)
+			byNumber, err := lifecycle.ResolveTargetByNumber(ctx, sparse.db, b.Number)
+			require.NoError(t, err)
+			require.Equal(t, b.ID, byNumber.ID)
+		}
+	})
+}
+
+// Every rejected target leaves the chain untouched, so the cases share one
+// chain and re-check it after each.
+func TestTruncateRejectsInvalidTargets(t *testing.T) {
+	t.Parallel()
+
+	f := buildTestChain(t, 5)
+	tip := f.blocks[len(f.blocks)-1]
+	requireChainIntact := func(t *testing.T) {
+		t.Helper()
+		for _, b := range f.blocks {
+			_, err := f.db.BlockByIndex(b.ID, nil)
+			require.NoError(t, err)
+		}
+	}
+	for _, tc := range []struct {
+		name   string
+		target models.Block
+		// aheadOfTip targets fail with a different error than a mismatch.
+		aheadOfTip bool
+	}{
+		{name: "ahead of tip", target: testBlock(99, 0x63), aheadOfTip: true},
+		{name: "mismatched hash", target: withHash(f.blocks[2], bytes.Repeat([]byte{0xFF}, 32))},
+		{name: "mismatched slot", target: withSlot(f.blocks[2], f.blocks[2].Slot+1)},
+		{name: "tip ID with mismatched hash", target: withHash(tip, bytes.Repeat([]byte{0xFF}, 32))},
+		{name: "tip ID with mismatched slot", target: withSlot(tip, tip.Slot+1)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := lifecycle.Truncate(
+				context.Background(), f.db, tc.target, 0, false, 0,
+			)
+			require.Error(t, err)
+			if !tc.aheadOfTip {
+				require.ErrorIs(t, err, lifecycle.ErrTruncateNotStarted)
+			}
+			requireChainIntact(t)
+		})
+	}
+}
+
+func withHash(b models.Block, hash []byte) models.Block {
+	b.Hash = hash
+	return b
+}
+
+func withSlot(b models.Block, slot uint64) models.Block {
+	b.Slot = slot
+	return b
+}
+
+// A pending-truncate marker is only trusted when it names a real block, so
+// both malformed shapes are rejected against one chain.
+func TestGetPendingTruncateRejectsInvalidMarker(t *testing.T) {
+	t.Parallel()
+
+	f := buildTestChain(t, 5)
+	target := f.blocks[1]
+	forgedHash := bytes.Repeat([]byte{0xFF}, 32)
+	for name, marker := range map[string]string{
+		"zero target ID": `{"tipId":5}`,
+		"hash not matching the stored block": fmt.Sprintf(
+			`{"targetId":%d,"targetSlot":%d,"targetHash":%q,"tipId":%d}`,
+			target.ID, target.Slot,
+			base64.StdEncoding.EncodeToString(forgedHash), f.blocks[4].ID,
+		),
+	} {
+		t.Run(name, func(t *testing.T) {
+			require.NoError(t, f.db.SetSyncState(pendingTruncateSyncKey, marker, nil))
+			pending, err := lifecycle.GetPendingTruncate(f.db)
+			require.Error(t, err)
+			require.Nil(t, pending)
+		})
+	}
 }

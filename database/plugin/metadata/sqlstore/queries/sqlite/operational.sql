@@ -327,26 +327,27 @@ WHERE deleted_slot > ?;
 -- name: CreatePoolStakeSnapshot :one
 INSERT INTO pool_stake_snapshot (
     epoch, snapshot_type, pool_key_hash, total_stake, stake_denominator,
-    delegator_count, captured_slot, leios_key_public,
+    delegator_count, captured_slot, vrf_key_hash, leios_key_public,
     leios_key_possession_proof, leios_key_registration_epoch, calculation_version,
     reward_account_auto_vote,
     reward_account_auto_vote_resolved
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 RETURNING id;
 
 -- name: SavePoolStakeSnapshot :one
 INSERT INTO pool_stake_snapshot (
     epoch, snapshot_type, pool_key_hash, total_stake, stake_denominator,
-    delegator_count, captured_slot, leios_key_public,
+    delegator_count, captured_slot, vrf_key_hash, leios_key_public,
     leios_key_possession_proof, leios_key_registration_epoch, calculation_version,
     reward_account_auto_vote,
     reward_account_auto_vote_resolved
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (epoch, snapshot_type, pool_key_hash) DO UPDATE SET
     total_stake = excluded.total_stake,
     stake_denominator = excluded.stake_denominator,
     delegator_count = excluded.delegator_count,
     captured_slot = excluded.captured_slot,
+    vrf_key_hash = excluded.vrf_key_hash,
     leios_key_public = excluded.leios_key_public,
     leios_key_possession_proof = excluded.leios_key_possession_proof,
     leios_key_registration_epoch = excluded.leios_key_registration_epoch,
@@ -358,7 +359,7 @@ RETURNING id;
 
 -- name: GetPoolStakeSnapshot :one
 SELECT id, epoch, snapshot_type, pool_key_hash, total_stake,
-       stake_denominator, delegator_count, captured_slot,
+       stake_denominator, delegator_count, captured_slot, vrf_key_hash,
        leios_key_public, leios_key_possession_proof,
        leios_key_registration_epoch,
        calculation_version, reward_account_auto_vote,
@@ -368,7 +369,7 @@ WHERE epoch = ? AND snapshot_type = ? AND pool_key_hash = ?;
 
 -- name: GetPoolStakeSnapshotsByEpoch :many
 SELECT id, epoch, snapshot_type, pool_key_hash, total_stake,
-       stake_denominator, delegator_count, captured_slot,
+       stake_denominator, delegator_count, captured_slot, vrf_key_hash,
        leios_key_public, leios_key_possession_proof,
        leios_key_registration_epoch,
        calculation_version, reward_account_auto_vote,

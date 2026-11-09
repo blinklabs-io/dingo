@@ -78,6 +78,9 @@ func readVerifiedAncillaryManifest(
 		if err != nil {
 			return nil, nil, fmt.Errorf("reading ancillary archive: %w", err)
 		}
+		if err := rejectSparseMember(header); err != nil {
+			return nil, nil, err
+		}
 		entries++
 		if entries > maxAncillaryEntries {
 			return nil, nil, fmt.Errorf(

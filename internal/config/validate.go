@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/internal/apiconfig"
+	dingoversion "github.com/blinklabs-io/dingo/internal/version"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 )
 
@@ -303,6 +304,9 @@ func hasCapNetBindService() bool {
 // depend on the effective UID or kernel settings of the test runner.
 func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	var errs []error
+	if _, err := dingoversion.HeaderProtocolMinor(c.CIP0203Enabled); err != nil {
+		errs = append(errs, err)
+	}
 
 	// Mode enums
 	if !c.RunMode.Valid() {

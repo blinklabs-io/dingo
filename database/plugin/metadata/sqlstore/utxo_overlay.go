@@ -32,9 +32,9 @@ import (
 )
 
 // The batch UTxO overlay stages one trusted block-apply transaction's UTxO
-// writes in memory and writes their net effect at FlushBatch. DATABASE.md
-// ("Trusted batch UTxO overlay") describes the contract; the invariants the
-// code below depends on are:
+// writes in memory and writes their net effect at FlushBatch. In API closure
+// mode it retains every produced row, including outputs spent in the closure.
+// DATABASE.md describes both contracts; the core-mode invariants are:
 //
 //   - Row ids are assigned at creation from sqlite_sequence, in the order the
 //     per-row path would have inserted the rows, including outputs that are
@@ -56,8 +56,8 @@ import (
 const (
 	// overlayPrefetchChunk keys use two bind parameters each.
 	overlayPrefetchChunk = 499
-	// overlayUtxoInsertColumns is the explicit-id utxo insert width; 62
-	// rows stay under SQLite's 999-parameter limit.
+	// overlayUtxoInsertColumns is the explicit-id utxo insert width; the
+	// dialect's conservative SQLite bound fits 62 rows.
 	overlayUtxoInsertColumns = 16
 	overlayMarkChunk         = 333
 	overlayPointerColumns    = 4
@@ -138,7 +138,10 @@ type overlayTransaction struct {
 }
 
 type utxoOverlay struct {
-	created map[overlayKey]*overlayOutput
+	retainHistory   bool
+	apiInputs       map[overlayKey]models.Utxo
+	apiTransactions map[string]struct{}
+	created         map[overlayKey]*overlayOutput
 	// order holds every created output in id order.
 	order  []*overlayOutput
 	inputs map[overlayKey]*overlayInput
@@ -149,7 +152,7 @@ type utxoOverlay struct {
 	segments []stakeSegment
 	deletes  []int64
 	deleteOn map[overlayKey]struct{}
-	// unwritten counts created outputs that are live and not yet written.
+	// unwritten includes spent outputs when retainHistory is enabled.
 	unwritten int
 	// writtenUpTo indexes order: every output before it was handled by a
 	// barrier flush.
@@ -645,14 +648,25 @@ func (o *utxoOverlay) consume(
 			}
 			out.spentBy = append([]byte(nil), hash...)
 			out.spentSlot = slot
-			o.stats.Elided++
-			if out.written {
-				o.marks = append(o.marks, overlayMark{
-					id: out.id, slot: slot, hash: out.spentBy,
-				})
-				o.deletes = append(o.deletes, out.id)
+			if o.retainHistory {
+				out.model.DeletedSlot = slot
+				out.model.SpentAtTxId = out.spentBy
+				if out.written {
+					o.marks = append(
+						o.marks,
+						overlayMark{id: out.id, slot: slot, hash: out.spentBy},
+					)
+				}
 			} else {
-				o.unwritten--
+				o.stats.Elided++
+				if out.written {
+					o.marks = append(o.marks, overlayMark{
+						id: out.id, slot: slot, hash: out.spentBy,
+					})
+					o.deletes = append(o.deletes, out.id)
+				} else {
+					o.unwritten--
+				}
 			}
 			delta, ok, err := consumedUtxoStakeDelta(
 				int64(out.model.CredentialTag),
@@ -740,10 +754,10 @@ func overlayConflict(
 }
 
 // writeOverlay writes what the overlay holds. A barrier write inserts every
-// live unwritten output, its pointer row and the queued spend marks, so the
-// tables read as the per-row path would have them; final also deletes the
-// rows the per-row path deletes before commit and queues the asset and
-// address rows of every surviving output.
+// live unwritten output (or every output in API mode), its pointer row and
+// the queued spend marks, so tables read as the per-row path would have them.
+// The final flush also deletes rows the per-row path deletes before commit
+// and queues the asset and address rows of every surviving output.
 func (s *Store) writeOverlay(
 	ctx context.Context,
 	db queryer,
@@ -762,13 +776,26 @@ func (s *Store) writeOverlay(
 	}
 	pending := make([]*overlayOutput, 0, o.unwritten)
 	for _, out := range o.order[o.writtenUpTo:] {
-		if out.written || out.spentBy != nil {
+		if out.written || (out.spentBy != nil && !o.retainHistory) {
 			continue
 		}
 		pending = append(pending, out)
 	}
 	if err := s.insertOverlayUtxos(ctx, db, o, pending); err != nil {
 		return err
+	}
+	if o.retainHistory {
+		var addresses rowBatch
+		for _, out := range pending {
+			address, err := utxoAddress(&out.model)
+			if err != nil {
+				return err
+			}
+			addresses.add(utxoAddressShape, out.id, address)
+		}
+		if err := addresses.flush(ctx, db, s.dialect.ParameterLimit()); err != nil {
+			return err
+		}
 	}
 	if err := insertOverlayPointers(ctx, db, pending); err != nil {
 		return err
@@ -810,7 +837,10 @@ func (s *Store) insertOverlayUtxos(
 	o *utxoOverlay,
 	outputs []*overlayOutput,
 ) error {
-	perStatement := max(1, s.dialect.ParameterLimit()/overlayUtxoInsertColumns)
+	perStatement, err := s.overlayInsertRows(ctx, db, len(outputs))
+	if err != nil {
+		return err
+	}
 	row := "(" + strings.TrimSuffix(
 		strings.Repeat("?, ", overlayUtxoInsertColumns), ", ",
 	) + ")"
@@ -973,9 +1003,9 @@ DELETE FROM utxo WHERE id IN (` +
 
 // queueOverlayRelations queues out's asset rows. Asset ids are the ones
 // reserved at creation, so an elided output's assets leave the same gap in
-// the id sequence that inserting and deleting them would. It queues no
-// utxo_address row: the overlay runs only in core storage mode, which does
-// not index UTxO addresses.
+// the id sequence that inserting and deleting them would. Retained API
+// overlays write address rows in writeOverlay; core overlays do not index
+// UTxO addresses.
 func queueOverlayRelations(
 	rows *rowBatch,
 	out *overlayOutput,
@@ -1025,9 +1055,14 @@ func restoreSQLiteSequence(
 	if reserved <= written {
 		return nil
 	}
-	result, err := db.ExecContext(ctx, `-- name: BatchOverlayRaiseSequence :execresult
+	result, err := db.ExecContext(
+		ctx,
+		`-- name: BatchOverlayRaiseSequence :execresult
 UPDATE sqlite_sequence SET seq = ? WHERE name = ? AND seq < ?`,
-		reserved, table, reserved)
+		reserved,
+		table,
+		reserved,
+	)
 	if err != nil {
 		return fmt.Errorf("raise %s id sequence: %w", table, err)
 	}
@@ -1178,7 +1213,8 @@ func (s *Store) flushOverlay(
 	}
 	if s.logger != nil {
 		s.logger.Debug(
-			"trusted batch UTxO overlay flushed",
+			"batch UTxO overlay flushed",
+			"retained_history", o.retainHistory,
 			"created", o.stats.Created,
 			"elided", o.stats.Elided,
 			"prebatch_spent", o.stats.PrebatchSpent,
@@ -1338,7 +1374,12 @@ func (s *Store) replayStakeSegments(
 			if err != nil {
 				return err
 			}
-			if utxo == 0 && !st.account.existedAt(pending.slot) {
+			exists := st.account.existedAt(pending.slot)
+			if o.retainHistory {
+				// Retained closures cannot create or delete accounts.
+				exists = st.account.exists
+			}
+			if utxo == 0 && !exists {
 				st.id = 0
 				st.hasTotal = false
 				st.utxo = 0

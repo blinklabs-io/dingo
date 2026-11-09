@@ -106,6 +106,9 @@ type Database struct {
 	// around the read-modify-write operation. Its context-aware acquire keeps a
 	// cancelled caller from remaining stuck behind a long-running batch.
 	blockInventoryMu cancellableMutex
+	// retained caches the start of retained block history; see
+	// retained_bound.go.
+	retained retainedBound
 
 	cborCache       *TieredCborCache
 	sizeMetricsStop chan struct{}

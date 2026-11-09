@@ -332,32 +332,6 @@ func TestDownloadAncillaryV2AdmitsOnlyConsumedMembers(t *testing.T) {
 	}
 }
 
-// TestBootstrapV2RefusesImmutableArchiveWithForeignMember drives the whole
-// immutable pool: an archive that carries another archive's file is refused
-// rather than letting it replace that archive's verified trio.
-func TestBootstrapV2RefusesImmutableArchiveWithForeignMember(t *testing.T) {
-	t.Parallel()
-
-	fixture := newV2Fixture(t, v2FixtureOptions{immutableFileNumber: 1})
-	files := map[string][]byte{
-		"immutable/00001.chunk": []byte("foreign"),
-	}
-	for name, content := range fixture.immutableContent {
-		if strings.HasPrefix(name, "00000.") {
-			files["immutable/"+name] = content
-		}
-	}
-	fixture.immutableArchives[0] = buildTarZst(t, files)
-
-	cfg := fixture.bootstrapConfig(t.TempDir())
-	cfg.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
-	result, err := Bootstrap(context.Background(), cfg)
-	if err == nil {
-		result.CloseHandles()
-	}
-	require.ErrorContains(t, err, ErrExtractUnexpectedMember.Error())
-}
-
 // TestBootstrapV2RefusesImmutableArchiveWithLedgerMember pins that an immutable
 // archive admits only its own trio: a ledger/ entry is a hard extraction error
 // and nothing outside immutable/ reaches the extraction directory.

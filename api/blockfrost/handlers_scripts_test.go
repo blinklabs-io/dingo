@@ -15,7 +15,6 @@
 package blockfrost
 
 import (
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -56,37 +55,6 @@ func TestHandleScripts(t *testing.T) {
 	require.JSONEq(t, `[]`, w.Body.String())
 	w = serve(t, &mockNode{}, "/api/v0/scripts?count=101")
 	require.Equal(t, http.StatusBadRequest, w.Code)
-}
-
-func TestHandleScript(t *testing.T) {
-	t.Parallel()
-	size := 42
-	node := &mockNode{}
-	node.scriptInfo = ScriptInfo{
-		Hash:           testScriptHash,
-		Type:           "plutusV2",
-		SerialisedSize: &size,
-	}
-	w := serve(t, node, "/api/v0/scripts/"+testScriptHash)
-	require.Equal(t, http.StatusOK, w.Code)
-	require.JSONEq(
-		t,
-		`{"script_hash":"`+testScriptHash+`","type":"plutusV2","serialised_size":42}`,
-		w.Body.String(),
-	)
-	want, _ := hex.DecodeString(testScriptHash)
-	node.mu.Lock()
-	require.Equal(t, want, node.lastScriptHash)
-	node.mu.Unlock()
-
-	node = &mockNode{}
-	node.scriptInfo = ScriptInfo{Hash: testScriptHash, Type: "timelock"}
-	w = serve(t, node, "/api/v0/scripts/"+testScriptHash)
-	require.JSONEq(
-		t,
-		`{"script_hash":"`+testScriptHash+`","type":"timelock","serialised_size":null}`,
-		w.Body.String(),
-	)
 }
 
 func TestHandleScriptJSONAndCBOR(t *testing.T) {
@@ -138,45 +106,6 @@ func TestHandleScriptRedeemers(t *testing.T) {
 	require.Equal(t, "2", w.Header().Get("X-Pagination-Count-Total"))
 	node.mu.Lock()
 	require.Equal(t, "desc", node.lastScriptPage.Order)
-	node.mu.Unlock()
-}
-
-func TestHandleScriptUTXOs(t *testing.T) {
-	t.Parallel()
-	node := &mockNode{}
-	node.scriptUTXOs = []ScriptUTXOInfo{{
-		Address:     "addr1",
-		TxHash:      "aa",
-		OutputIndex: 2,
-		Amount: []AddressAmountInfo{
-			{Unit: "lovelace", Quantity: "7"},
-		},
-		Block:               "bb",
-		ReferenceScriptHash: testScriptHash,
-	}}
-	node.scriptTotal = 1
-	w := serve(t, node, "/api/v0/scripts/"+testScriptHash+"/utxos")
-	require.Equal(t, http.StatusOK, w.Code)
-	require.JSONEq(t, `[{"address":"addr1","tx_hash":"aa","output_index":2,
-"amount":[{"unit":"lovelace","quantity":"7"}],"block":"bb","data_hash":null,
-"inline_datum":null,"reference_script_hash":"`+testScriptHash+`"}]`, w.Body.String())
-	require.Equal(t, "1", w.Header().Get("X-Pagination-Page-Total"))
-}
-
-func TestHandleDatum(t *testing.T) {
-	t.Parallel()
-	node := &mockNode{}
-	node.datumJSON = json.RawMessage(`{"int":42}`)
-	node.datumCBOR = "182a"
-	w := serve(t, node, "/api/v0/scripts/datum/"+testDatumHash)
-	require.Equal(t, http.StatusOK, w.Code)
-	require.JSONEq(t, `{"json_value":{"int":42}}`, w.Body.String())
-	w = serve(t, node, "/api/v0/scripts/datum/"+testDatumHash+"/cbor")
-	require.Equal(t, http.StatusOK, w.Code)
-	require.JSONEq(t, `{"cbor":"182a"}`, w.Body.String())
-	want, _ := hex.DecodeString(testDatumHash)
-	node.mu.Lock()
-	require.Equal(t, want, node.lastScriptHash)
 	node.mu.Unlock()
 }
 

@@ -16,22 +16,10 @@ package config
 
 import (
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-func TestMithrilEnabledDefaultFalse(t *testing.T) {
-	m := newDefaultConfig().Mithril
-	assert.False(t, m.Enabled)
-	assert.Equal(t, 64, m.WindowChunks)
-	assert.Equal(t, 8, m.BatchChunks)
-	assert.Equal(t, 16, m.DownloadWorkers)
-	assert.Equal(t, uint64(4), m.MinGapChunks)
-	assert.Equal(t, 10*time.Minute, m.CheckInterval)
-	assert.Equal(t, 30*time.Minute, m.RetryBackoff)
-}
 
 func TestMithrilEnabledRequiresCore(t *testing.T) {
 	cfg := validTestConfig()

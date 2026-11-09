@@ -124,7 +124,14 @@ type Backfill struct {
 	// Mithril seeds a zero-slot checkpoint before import, so checkpoint
 	// presence alone cannot tell a fresh bootstrap from a resumed backfill.
 	freshDatabaseBootstrap bool
-	computeOffsets         func(
+	// recoveryWindowBlocks overrides backfillCheckpointInterval as the number
+	// of blocks after a (re)start that run consumed-input recovery. Zero uses
+	// the default; tests set it to observe the boundary.
+	recoveryWindowBlocks int
+	// writeCheckpoint persists a checkpoint; tests replace it to inject
+	// failures. Nil uses the metadata store.
+	writeCheckpoint func(*models.BackfillCheckpoint) error
+	computeOffsets  func(
 		uint64,
 		[]byte,
 		[]byte,
@@ -588,6 +595,42 @@ func (b *Backfill) storedEpochPParams(
 	return pp, true, nil
 }
 
+func (b *Backfill) restoreImportedAccountsAtAnchor(
+	ctx context.Context,
+	anchor uint64,
+) (int, error) {
+	var protocolMajor uint
+	if b.currentEraId >= conway.EraIdConway {
+		params, ok := b.currentPParams.(lcommon.PoolRuleProtocolParameters)
+		if !ok {
+			return 0, errors.New(
+				"snapshot anchor protocol version is unavailable",
+			)
+		}
+		protocolMajor = params.ProtocolMajorVersion()
+	}
+	txn := b.db.Transaction(ctx, true)
+	defer txn.Rollback() //nolint:errcheck
+	restored, err := b.db.RestoreImportedAccountStates(ctx, anchor, txn)
+	if err != nil {
+		return 0, err
+	}
+	if protocolMajor >= lcommon.ProtocolVersionPlomin {
+		// Historical replay lacks the PV10 reverse-set rebuild. Restore both
+		// directions before a later deregistration consumes that index; the
+		// snapshot's forward state must already be authoritative.
+		if err := b.db.ReconcileImportedDRepDelegations(
+			ctx, anchor, txn,
+		); err != nil {
+			return 0, err
+		}
+	}
+	if err := txn.Commit(); err != nil {
+		return 0, err
+	}
+	return restored, nil
+}
+
 func (b *Backfill) processEpochBoundary(
 	epochId uint64, eraId uint,
 ) {
@@ -808,10 +851,27 @@ func (b *Backfill) processBlockGovernanceLevel(
 	return nil
 }
 
+// backfillCheckpointInterval is the block count between periodic checkpoint
+// saves. Batches committed since the last save are the only rows a restart can
+// find beyond the recorded progress, so it also bounds consumed-input recovery.
+// That bound holds only because a failed periodic save stops the run.
+const backfillCheckpointInterval = 1000
+
+func (b *Backfill) recoveryWindow() int {
+	if b.recoveryWindowBlocks > 0 {
+		return b.recoveryWindowBlocks
+	}
+	return backfillCheckpointInterval
+}
+
 // Run executes the backfill. Blocks until complete or context
 // cancelled. Safe to call multiple times; uses checkpoints for
 // resume.
 func (b *Backfill) Run(ctx context.Context) error {
+	// legacyProgress marks a checkpoint from a build that recorded progress
+	// without block identity. Its committed rows are not bounded by the
+	// checkpoint interval, so recovery cannot be narrowed for it.
+	var legacyProgress bool
 	cp, err := b.db.Metadata().GetBackfillCheckpoint(
 		BackfillPhase, nil,
 	)
@@ -831,6 +891,9 @@ func (b *Backfill) Run(ctx context.Context) error {
 				"backfill checkpoint has invalid block hash length %d",
 				len(cp.LastBlockHash),
 			)
+		}
+		if !hasIndex && !cp.Completed {
+			legacyProgress = true
 		}
 		if !hasIndex && cp.LastSlot > 0 && !cp.Completed {
 			cp.LastSlot = 0
@@ -976,22 +1039,15 @@ func (b *Backfill) Run(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		txn := b.db.BlobTxn(false)
-		var point ocommon.Point
-		var index uint64
-		if err := txn.Do(func(txn *database.Txn) error {
-			var identityErr error
-			point, index, identityErr = database.CanonicalBlockIdentityAtSlotTxn(
-				ctx, txn, cp.LastSlot,
-			)
-			return identityErr
-		}); err != nil {
+		index := *cp.LastIndexID
+		point, err := b.canonicalCheckpointPoint(ctx, index)
+		if err != nil {
 			return fmt.Errorf(
-				"resolving backfill checkpoint identity at slot %d: %w",
-				cp.LastSlot, err,
+				"resolving backfill checkpoint identity at index %d: %w",
+				index, err,
 			)
 		}
-		if index != *cp.LastIndexID ||
+		if point.Slot != cp.LastSlot ||
 			!bytes.Equal(point.Hash, cp.LastBlockHash) {
 			return fmt.Errorf(
 				"backfill checkpoint identity at slot %d does not match canonical block",
@@ -1020,16 +1076,18 @@ func (b *Backfill) Run(ctx context.Context) error {
 	}
 
 	var (
-		startSlot    uint64
-		startIndex   = database.BlockInitialIndex
-		previousSlot *uint64
+		startSlot     uint64
+		startIndex    = database.BlockInitialIndex
+		previousBlock *ocommon.Point
 	)
 	now := time.Now()
 	// Mithril pre-seeds a zero-slot checkpoint before importing a fresh
 	// database, so the caller's bootstrap classification is also needed to
 	// distinguish it from a resumed run. The consumed-input recovery
-	// optimization is safe only for this monotonic replay; resumed runs may
-	// have inconsistencies from interrupted batches that need repair.
+	// optimization is safe only for this monotonic replay. A batch commits
+	// before its checkpoint is saved, so an interrupted run can leave committed
+	// rows for at most one checkpoint interval beyond the recorded progress.
+	// Those blocks are replayed with recovery; see recoveryWindowBlocks.
 	isFreshStart := cp == nil ||
 		(b.freshDatabaseBootstrap && resumePoint == nil)
 	// The bootstrap classification applies only to the first attempt. A retry,
@@ -1078,7 +1136,7 @@ func (b *Backfill) Run(ctx context.Context) error {
 		} else {
 			startSlot = resumePoint.Slot + 1
 			startIndex = resumeIndex + 1
-			previousSlot = &resumePoint.Slot
+			previousBlock = resumePoint
 			b.logger.Info(
 				"resuming metadata backfill",
 				"component", "backfill",
@@ -1108,7 +1166,7 @@ func (b *Backfill) Run(ctx context.Context) error {
 		iteratorEndSlot = &endSlot
 	}
 	it, err := b.db.CanonicalBlocksFromIndex(
-		ctx, startIndex, previousSlot, iteratorEndSlot,
+		ctx, startIndex, previousBlock, iteratorEndSlot,
 	)
 	if err != nil {
 		return fmt.Errorf("opening canonical block iterator: %w", err)
@@ -1333,7 +1391,9 @@ func (b *Backfill) Run(ctx context.Context) error {
 					if pErr := b.processBlockTxsBatched(
 						ctx, txs, point, epochId, txEraId,
 						pp, offsets, acc, batchTxn,
-						&intervalStats, isFreshStart,
+						&intervalStats,
+						isFreshStart || (!legacyProgress &&
+							processedBlocks >= b.recoveryWindow()),
 					); pErr != nil {
 						saveCommittedCheckpoint()
 						return fmt.Errorf(
@@ -1368,7 +1428,7 @@ func (b *Backfill) Run(ctx context.Context) error {
 			}
 		}
 
-		if processedBlocks%1000 == 0 {
+		if processedBlocks%b.recoveryWindow() == 0 {
 			// Periodic checkpoints must only record durable progress.
 			// Flush any partial batch first so checkpoint safety does
 			// not depend on the configured batch size dividing 1000.
@@ -1380,7 +1440,11 @@ func (b *Backfill) Run(ctx context.Context) error {
 				)
 			}
 			checkpointStart := time.Now()
-			b.saveCheckpoint(cp)
+			// Continuing past a failed save would let committed rows run
+			// beyond the recovery window of the next restart.
+			if err := b.persistCheckpoint(cp); err != nil {
+				return fmt.Errorf("saving backfill checkpoint: %w", err)
+			}
 			// Track checkpoint writes that make backfill resumable.
 			intervalStats.CheckpointWrites += time.Since(checkpointStart)
 		}
@@ -1406,7 +1470,7 @@ func (b *Backfill) Run(ctx context.Context) error {
 	// Replay has reached the anchor, where the snapshot is the ledger state.
 	// Restore before the rebuild, which attributes stake from account.pool.
 	if endSlotSet {
-		restored, err := b.db.RestoreImportedAccountStates(ctx, endSlot, nil)
+		restored, err := b.restoreImportedAccountsAtAnchor(ctx, endSlot)
 		if err != nil {
 			saveCommittedCheckpoint()
 			return fmt.Errorf(
@@ -1506,7 +1570,7 @@ func (b *Backfill) processBlockTxsBatched(
 	acc database.BatchAccumulator,
 	txn *database.Txn,
 	stats *dbtypes.BackfillHotPathStats,
-	isFreshStart bool,
+	skipInputRecovery bool,
 ) error {
 	opts := database.BatchedTxIngestOpts{
 		SkipProducedUtxoOffsetWrites: b.immutableUtxoOffsetsTipSlot > 0 &&
@@ -1547,7 +1611,7 @@ func (b *Backfill) processBlockTxsBatched(
 				b.calculateCertDeposits(level, eraId, pp), offsets, acc, txn,
 				database.BatchedTxIngestOpts{
 					SkipProducedUtxoOffsetWrites: opts.SkipProducedUtxoOffsetWrites,
-					SkipConsumedInputRecovery:    isFreshStart,
+					SkipConsumedInputRecovery:    skipInputRecovery,
 					Stats:                        stats,
 					SkipWithdrawalWitnessWrite:   !b.delegatorInactivityEnabled,
 					HistoricalBackfill:           true,
@@ -1606,12 +1670,19 @@ func (b *Backfill) processBlockTxsBatched(
 	return nil
 }
 
-// saveCheckpoint persists the current backfill progress.
-func (b *Backfill) saveCheckpoint(cp *models.BackfillCheckpoint) {
+// persistCheckpoint writes the current backfill progress.
+func (b *Backfill) persistCheckpoint(cp *models.BackfillCheckpoint) error {
 	cp.UpdatedAt = time.Now()
-	if err := b.db.Metadata().SetBackfillCheckpoint(
-		cp, nil,
-	); err != nil {
+	if b.writeCheckpoint != nil {
+		return b.writeCheckpoint(cp)
+	}
+	return b.db.Metadata().SetBackfillCheckpoint(cp, nil)
+}
+
+// saveCheckpoint persists the current backfill progress on paths that are
+// already returning, where a failed write is only logged.
+func (b *Backfill) saveCheckpoint(cp *models.BackfillCheckpoint) {
+	if err := b.persistCheckpoint(cp); err != nil {
 		b.logger.Warn(
 			"failed to save backfill checkpoint",
 			"component", "backfill",
@@ -1751,4 +1822,20 @@ func appendBackfillStatsAttrs(
 		"checkpoint_write_ms",
 		stats.CheckpointWrites.Milliseconds(),
 	)
+}
+
+// canonicalCheckpointPoint resolves the canonical block point stored at index.
+func (b *Backfill) canonicalCheckpointPoint(
+	ctx context.Context,
+	index uint64,
+) (ocommon.Point, error) {
+	var point ocommon.Point
+	err := b.db.BlobTxn(false).Do(func(txn *database.Txn) error {
+		var identityErr error
+		point, identityErr = database.CanonicalBlockIdentityAtIndexTxn(
+			ctx, txn, index,
+		)
+		return identityErr
+	})
+	return point, err
 }

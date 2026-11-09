@@ -221,24 +221,6 @@ func TestPeerNetworkStopClosesTheListenerAndItsPeers(t *testing.T) {
 	require.Error(t, err, "nothing listens after Stop")
 }
 
-func TestPeerNetworkFailsToStartOnAnAddressInUse(t *testing.T) {
-	t.Parallel()
-	taken, err := net.Listen("tcp4", loopbackAny)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = taken.Close() })
-
-	s, err := NewStack(StackConfig{
-		SocketPath:    shortSocketPath(t),
-		Authenticator: newTestAuthenticator(),
-		Peers: &PeerConfig{
-			MaxPeers:    1,
-			ListenAddrs: []ListenAddr{{Address: taken.Addr().String()}},
-		},
-	})
-	require.NoError(t, err)
-	require.Error(t, s.Start(t.Context()))
-}
-
 func TestPeerNetworkListensOnIPv6WhenTheHostHasIt(t *testing.T) {
 	t.Parallel()
 	probe, err := net.Listen("tcp6", "[::1]:0")

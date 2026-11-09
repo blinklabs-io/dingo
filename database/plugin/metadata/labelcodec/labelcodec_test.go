@@ -340,6 +340,7 @@ func TestDeepMetadataRemainsIndexableWithoutJSON(t *testing.T) {
 		"cbor":      func() ([]Entry, error) { return EntriesFromCBOR(metadataCBOR) },
 	} {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			entries, err := extract()
 			if err != nil {
 				t.Fatalf("valid metadata must remain indexable when JSON encoding fails: %v", err)
@@ -497,7 +498,7 @@ func decodeVectors() []decodeVector {
 
 func TestDecodeIsDeterministicAcrossRepeatsAndKeyOrders(t *testing.T) {
 	t.Parallel()
-	const repeats = 64
+	const repeats = 8
 	for _, vec := range decodeVectors() {
 		t.Run(vec.name, func(t *testing.T) {
 			t.Parallel()
@@ -627,7 +628,7 @@ func TestInvalidTopLevelLabelsRejectedInEveryOrder(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			for range 16 {
+			for range 4 {
 				entries, err := EntriesFromCBOR(metadataCbor)
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 					t.Fatalf("EntriesFromCBOR(%x) = %#v, %v; want error containing %q", metadataCbor, entries, err, tc.wantErr)

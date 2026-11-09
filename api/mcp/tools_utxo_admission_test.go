@@ -206,9 +206,12 @@ func mustDecodeHex(t *testing.T, s string) []byte {
 // can tell a result cut off by maxToolOffset from a complete one.
 func TestOffsetToolsReportOffsetLimit(t *testing.T) {
 	t.Parallel()
-	cs := newUTxOAdmissionSession(
-		t, newReadLimits(), false, maxToolOffset+1,
-	)
+	// A lowered bound exercises the same comparisons as maxOffset without
+	// seeding ten thousand rows.
+	const maxOffset = 20
+	limits := newReadLimits()
+	limits.maxOffset = maxOffset
+	cs := newUTxOAdmissionSession(t, limits, false, maxOffset+1)
 	calls := utxoAdmissionCalls()
 	calls["sqlite_query"] = map[string]any{
 		"query": "SELECT id FROM utxo ORDER BY id",
@@ -219,12 +222,12 @@ func TestOffsetToolsReportOffsetLimit(t *testing.T) {
 			limit  int
 			want   bool
 		}{
-			// The next offset, maxToolOffset, is still accepted.
-			{offset: maxToolOffset - 1, limit: 1, want: false},
-			// The next offset, maxToolOffset+1, is rejected.
-			{offset: maxToolOffset, limit: 1, want: true},
+			// The next offset, maxOffset, is still accepted.
+			{offset: maxOffset - 1, limit: 1, want: false},
+			// The next offset, maxOffset+1, is rejected.
+			{offset: maxOffset, limit: 1, want: true},
 			// A short page is the last one, so nothing was cut off.
-			{offset: maxToolOffset, limit: 2, want: false},
+			{offset: maxOffset, limit: 2, want: false},
 		} {
 			name := tool + "/" + strconv.Itoa(tc.offset) + "/" +
 				strconv.Itoa(tc.limit)

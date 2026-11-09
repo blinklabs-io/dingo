@@ -166,9 +166,14 @@ func TestCheckAndForgeLeiosEBExcludesCertifiedClosure(t *testing.T) {
 		// No slot clock: the selection budget is this reserve from now.
 		forgeEBSelectionReserve: time.Hour,
 		leiosChecker:            &forgerTestLeiosChecker{allowed: true},
-		leiosMempool:            forgerTestMempoolProvider{txs: fixture.mempool},
-		leiosValidator:          fixture.validator,
-		leiosEBCaster:           caster,
+		eraParams: &mockPParamsProvider{
+			pparams: &conway.ConwayProtocolParameters{},
+		},
+		leiosMempool: forgerTestMempoolProvider{
+			txs: fixture.mempool,
+		},
+		leiosValidator: fixture.validator,
+		leiosEBCaster:  caster,
 		leiosCerts: &forgerTestLeiosCerts{
 			closureTxs:   fixture.closureRaw,
 			closureTxsOK: true,
@@ -248,9 +253,14 @@ func TestCheckAndForgeLeiosEBRequiresLedgerAtParent(t *testing.T) {
 		// No slot clock: the selection budget is this reserve from now.
 		forgeEBSelectionReserve: time.Hour,
 		leiosChecker:            &forgerTestLeiosChecker{allowed: true},
-		leiosMempool:            forgerTestMempoolProvider{txs: fixture.mempool},
-		leiosValidator:          validator,
-		leiosEBCaster:           caster,
+		eraParams: &mockPParamsProvider{
+			pparams: &conway.ConwayProtocolParameters{},
+		},
+		leiosMempool: forgerTestMempoolProvider{
+			txs: fixture.mempool,
+		},
+		leiosValidator: validator,
+		leiosEBCaster:  caster,
 	}
 
 	announcement, err := forger.checkAndForgeLeiosEB(
