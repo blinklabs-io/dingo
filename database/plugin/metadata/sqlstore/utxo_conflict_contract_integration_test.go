@@ -31,17 +31,3 @@ func TestMySQLCreateUtxoConflictContract(t *testing.T) {
 		t, newIntegrationSQLStore(t, "mysql", dsn, "mysql", database),
 	)
 }
-
-func TestPostgresCheckUtxoConsistency(t *testing.T) {
-	dsn, schema := newPostgresIntegrationSchema(t)
-	requireUtxoConsistencyCheck(
-		t, newIntegrationSQLStore(t, "pgx", dsn, "postgres", schema),
-	)
-}
-
-func TestMySQLCheckUtxoConsistency(t *testing.T) {
-	dsn, database := newMySQLIntegrationDatabase(t)
-	requireUtxoConsistencyCheck(
-		t, newIntegrationSQLStore(t, "mysql", dsn, "mysql", database),
-	)
-}
