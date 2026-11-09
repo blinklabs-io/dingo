@@ -18,6 +18,7 @@ import (
 	"strings"
 	"testing"
 
+	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/stretchr/testify/require"
 )
 
@@ -77,6 +78,38 @@ func TestValidateBlockProducerPools(t *testing.T) {
 				c.BlockProducerPools = []BlockProducerPool{b}
 			},
 			wantErr: "blockProducerPools[0].shelleyKesAgentServerSpkiSha256 must be 64 hex characters",
+		},
+		{
+			name: "plaintext entry with a pin",
+			modify: func(c *Config) {
+				b := remotePool("b")
+				b.ShelleyKESAgentPlaintext = true
+				c.BlockProducerPools = []BlockProducerPool{b}
+			},
+			wantErr: "so blockProducerPools[0].shelleyKesAgentPlaintext takes neither",
+		},
+		{
+			name: "plaintext entry without an address",
+			modify: func(c *Config) {
+				b := remotePool("b")
+				b.ShelleyKESAgentAddress = ""
+				b.ShelleyKESAgentClientCertFile = ""
+				b.ShelleyKESAgentClientKeyFile = ""
+				b.ShelleyKESAgentServerSPKISHA256 = ""
+				b.ShelleyKESKey = "/keys/b/kes.skey"
+				b.ShelleyKESAgentPlaintext = true
+				c.BlockProducerPools = []BlockProducerPool{b}
+			},
+			wantErr: "blockProducerPools[0].shelleyKesAgentPlaintext requires blockProducerPools[0].shelleyKesAgentAddress",
+		},
+		{
+			name: "entry with an out-of-range port",
+			modify: func(c *Config) {
+				b := remotePool("b")
+				b.ShelleyKESAgentAddress = "kes-agent.example:0"
+				c.BlockProducerPools = []BlockProducerPool{b}
+			},
+			wantErr: "blockProducerPools[0].shelleyKesAgentAddress \"kes-agent.example:0\" must be host:port",
 		},
 		{
 			name: "entry with two KES sources",
@@ -143,23 +176,15 @@ func TestValidateBlockProducerPoolsRefusesLeiosWithSeveralPools(t *testing.T) {
 
 	cfg = validTestConfig()
 	cfg.BlockProducer = true
-	cfg.BlockProducerPools = twoPools[:1]
-	err := cfg.Validate(RunModeLeios)
-	if err != nil {
-		require.NotContains(t, err.Error(), want)
-	}
-}
+	cfg.BlockProducerPools = twoPools
+	cfg.Network = ouroboros.NetworkCardanoMusashi.Name
+	cfg.NetworkMagic = ouroboros.NetworkCardanoMusashi.NetworkMagic
+	require.ErrorContains(t, cfg.Validate(RunModeServe), want)
 
-func TestProducerPoolsFallsBackToTopLevelKeys(t *testing.T) {
-	t.Parallel()
-	cfg := validTestConfig()
-	cfg.ShelleyVRFKey = "/keys/vrf.skey"
-	cfg.ShelleyKESAgentSocket = "/run/kes.sock"
-	cfg.ShelleyOperationalCertificate = "/keys/node.cert"
-	pools := cfg.ProducerPools()
-	require.Len(t, pools, 1)
-	require.Equal(t, "/keys/vrf.skey", pools[0].ShelleyVRFKey)
-	require.Equal(t, "/run/kes.sock", pools[0].ShelleyKESAgentSocket)
+	cfg = validTestConfig()
+	cfg.BlockProducer = true
+	cfg.BlockProducerPools = twoPools[:1]
+	require.NoError(t, cfg.Validate(RunModeLeios))
 }
 
 // Not t.Parallel: loadConfigThroughPipeline resets the package-level
@@ -182,7 +207,7 @@ blockProducerPools:
 	require.Len(t, cfg.BlockProducerPools, 2)
 	require.Equal(t, "sign", cfg.BlockProducerPools[0].ShelleyKESAgentMode)
 	require.Equal(t, "serve-key", cfg.BlockProducerPools[1].ShelleyKESAgentMode)
-	require.Equal(t, "/run/kes-b.sock", cfg.ProducerPools()[1].ShelleyKESAgentSocket)
+	require.Equal(t, "/run/kes-b.sock", cfg.BlockProducerPools[1].ShelleyKESAgentSocket)
 }
 
 func TestValidateRemoteKESAgentAddresses(t *testing.T) {

@@ -423,6 +423,7 @@ func (c *RemoteClient) ensureSession(
 		return ErrClosed
 	}
 	c.conn = conn
+	c.cfg.Metrics.setConnected(true)
 	c.lastUsed = time.Now()
 	c.lastErr = nil
 	c.backoff = 0
@@ -639,9 +640,11 @@ func (c *RemoteClient) Sign(
 		message,
 		resp,
 	); err != nil {
-		// A refusal (resp.Error) leaves the session usable; anything else
-		// means the agent cannot be trusted on this session.
-		if resp.Error == "" {
+		// A well-formed refusal leaves the session usable; anything else,
+		// including an error on a frame of the wrong type or period, means
+		// the agent cannot be trusted on this session.
+		if resp.Error == "" || resp.Type != "sign_response" ||
+			resp.Period != period {
 			c.dropConn(conn)
 		}
 		return nil, err
@@ -673,6 +676,7 @@ func (c *RemoteClient) dropLocked() {
 	if c.conn != nil {
 		_ = c.conn.Close()
 		c.conn = nil
+		c.cfg.Metrics.setConnected(false)
 	}
 }
 

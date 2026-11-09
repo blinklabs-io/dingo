@@ -233,9 +233,10 @@ func ValidateTxBabbage(
 	if len(errs) > 0 {
 		return errors.Join(errs...)
 	}
-	// Core Babbage transaction validity checks (fees/size/etc.) are covered
-	// by babbage.UtxoValidationRules. Keep additional local validation scoped
-	// to script execution compatibility.
+	// Core Babbage transaction validity checks are covered by
+	// babbageUtxoValidationRules, whose size and fee rules use TxSizeForFee.
+	// Keep additional local validation scoped to script execution
+	// compatibility.
 	if shouldSkipPhase2Validation(ls) {
 		return nil
 	}
@@ -468,10 +469,24 @@ func ValidateTxBabbage(
 var babbageUtxoValidationRules = buildBabbageValidationRules()
 
 func buildBabbageValidationRules() []indexedUtxoValidationRule {
-	return buildIndexedUtxoValidationRules(
+	return buildSizeFeeValidationRules(
 		babbage.UtxoValidationRuleDescriptors(),
 		babbage.UtxoValidationRules,
-		lcommon.UtxoValidationRulePlutusScripts,
+		[]lcommon.UtxoValidationRuleId{lcommon.UtxoValidationRulePlutusScripts},
+		maxTxSizeRule(func(pp lcommon.ProtocolParameters) (uint, bool) {
+			p, ok := pp.(*babbage.BabbageProtocolParameters)
+			if !ok || p == nil {
+				return 0, false
+			}
+			return p.MaxTxSize, true
+		}),
+		minFeeRule(func(pp lcommon.ProtocolParameters) (feeParams, bool) {
+			p, ok := pp.(*babbage.BabbageProtocolParameters)
+			if !ok || p == nil {
+				return feeParams{}, false
+			}
+			return feeParams{p.MinFeeA, p.MinFeeB, p.ExecutionCosts}, true
+		}),
 	)
 }
 

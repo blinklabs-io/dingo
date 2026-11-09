@@ -1284,3 +1284,9 @@ func TestLedgerStateConfigWarmsGenesisStakeOnPrototypeNetworks(t *testing.T) {
 		})
 	}
 }
+
+func TestBlockProducerPoolsIsNilForAnEmptyList(t *testing.T) {
+	t.Parallel()
+	cfg := NewConfig(WithBlockProducerPools([]BlockProducerPool{}...))
+	require.Nil(t, cfg.BlockProducerPools())
+}

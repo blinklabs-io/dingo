@@ -33,6 +33,7 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/safedecode"
 	"github.com/blinklabs-io/dingo/internal/tracing"
+	"github.com/blinklabs-io/dingo/internal/txsize"
 	"github.com/blinklabs-io/dingo/plugin"
 	"github.com/blinklabs-io/dingo/utxoref"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -198,9 +199,9 @@ type TxValidationSessionProvider interface {
 
 // TxSizeLimitProvider optionally reports the MaxTxSize ledger validation
 // applies to a transaction of a given era, so admission can refuse an
-// oversized submission before decoding it, taking the mutation gate, or
-// running ledger rules. LedgerState implements it; validators that do not
-// simply skip the early check and rely on the ledger's own rule.
+// oversized submission before constructing the ledger transaction, taking the
+// mutation gate, or running ledger rules. LedgerState implements it; validators
+// that do not simply skip the early check and rely on the ledger's own rule.
 type TxSizeLimitProvider interface {
 	// MaxTxSize returns the MaxTxSize the ledger would apply to a transaction
 	// of era txType, and whether it is known. It must report false rather
@@ -1542,7 +1543,9 @@ func (m *Mempool) rebuildOverlayLocked(ctx context.Context) error {
 	return errValidationSnapshotChanged
 }
 
-func (m *Mempool) rebuildOverlayAttempt(ctx context.Context) ([]event.Event, error) {
+func (m *Mempool) rebuildOverlayAttempt(
+	ctx context.Context,
+) ([]event.Event, error) {
 	m.mutationMutex.Lock()
 	m.RLock()
 	if m.stopped {
@@ -1662,7 +1665,9 @@ func (m *Mempool) rebuildOverlayAttempt(ctx context.Context) ([]event.Event, err
 						m.dag.rebuild(candidate.overlay.applied)
 					}
 					m.notifyHeadroomChangedLocked()
-					m.metrics.txsInMempool.Set(float64(len(candidate.transactions)))
+					m.metrics.txsInMempool.Set(
+						float64(len(candidate.transactions)),
+					)
 					m.metrics.mempoolBytes.Set(float64(candidate.sizeBytes))
 					m.consumersMutex.Unlock()
 					m.Unlock()
@@ -2199,9 +2204,10 @@ func (m *Mempool) apiSubmissionSlotRelease() func() {
 }
 
 // rejectOversizedTx applies the ledger's MaxTxSize rule to the raw submission
-// before any decode, lock, or rule work. The size is common.TxSize's measure,
-// so an early rejection implies the ledger rule would reject it too; the
-// ledger rule stays authoritative for everything this lets through.
+// before the ledger transaction is constructed or any lock or rule work. The
+// size is common.TxSize's measure, so an early rejection implies the ledger
+// rule would reject it too; the ledger rule stays authoritative for everything
+// this lets through.
 func (m *Mempool) rejectOversizedTx(txType uint, txBytes []byte) error {
 	provider, ok := m.validator.(TxSizeLimitProvider)
 	if !ok {
@@ -2221,25 +2227,11 @@ func (m *Mempool) rejectOversizedTx(txType uint, txBytes []byte) error {
 	)
 }
 
-// rawTxSize is common.TxSize computed from the submitted bytes: from Alonzo
-// on, a transaction whose array has four elements is measured one byte short,
-// and any other shape, including the three-element Dijkstra mempool form, at
-// its full length. Discounting by era alone would admit a transaction one
-// byte over the limit into the ledger rules.
+// rawTxSize is the ledger transaction-size measure computed directly from the
+// submitted bytes.
 func rawTxSize(txType uint, txBytes []byte) uint {
-	size := uint(len(txBytes))
-	if txType < uint(gledger.TxTypeAlonzo) || size == 0 {
-		return size
-	}
-	dec, err := cbor.NewStreamDecoder(txBytes)
-	if err != nil {
-		return size
-	}
-	arrayLen, _, _, err := dec.DecodeArrayHeader()
-	if err == nil && arrayLen == 4 {
-		size--
-	}
-	return size
+	size := txsize.FromCBOR(txType, txBytes)
+	return uint(size) // #nosec G115 -- size is bounded by len(txBytes)
 }
 
 // addTransactionAttempt validates and admits one transaction. On

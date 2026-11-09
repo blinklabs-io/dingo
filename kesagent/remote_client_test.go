@@ -30,6 +30,8 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/gouroboros/kes"
+	"github.com/prometheus/client_golang/prometheus"
+	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -101,6 +103,9 @@ type fakeRemoteAgent struct {
 	dropAfterRequest atomic.Bool
 	// refuse answers every sign request with an agent refusal.
 	refuse atomic.Bool
+	// malformedRefusal answers a sign request with an error on a frame of
+	// the wrong type.
+	malformedRefusal atomic.Bool
 }
 
 // fakeTransport is the listener a fakeRemoteAgent runs.
@@ -207,6 +212,15 @@ func (a *fakeRemoteAgent) serve(conn net.Conn, skeyData, vkey, opCert []byte) {
 		if a.refuse.Load() {
 			if err := writeFrame(conn, MaxSignFrameLen, SignResponse{
 				Type: "sign_response", Period: sreq.Period, Error: "refused",
+			}); err != nil {
+				return
+			}
+			continue
+		}
+		if a.malformedRefusal.Load() {
+			if err := writeFrame(conn, MaxSignFrameLen, SignResponse{
+				Type: "not_a_sign_response", Period: sreq.Period,
+				Error: "refused",
 			}); err != nil {
 				return
 			}
@@ -453,13 +467,58 @@ func TestRemoteClientDoesNotResendAfterADroppedRequest(t *testing.T) {
 	require.Equal(t, int32(1), a.accepts.Load(),
 		"a request that may have reached the agent must not be resent")
 
-	// The next call opens a new session after the reconnect backoff.
+	// The next call opens a new session: Sign dials through the reconnect
+	// backoff, so one call must succeed.
 	a.dropAfterRequest.Store(false)
-	require.Eventually(t, func() bool {
-		_, err := c.Sign(0, []byte("next-header"))
-		return err == nil
-	}, 5*time.Second, 10*time.Millisecond)
+	_, err = c.Sign(0, []byte("next-header"))
+	require.NoError(t, err)
 	require.Equal(t, int32(2), a.accepts.Load())
+}
+
+func TestRemoteClientDropsSessionOnMalformedRefusal(t *testing.T) {
+	t.Parallel()
+	skeyData, vkey, opCert := testKESMaterial(t)
+	client := newTestCert(t, "node")
+	a := startFakeRemoteAgent(t, client, skeyData, vkey, opCert)
+	c := newTestRemoteClient(t, a, client, vkey, opCert, a.server.spki)
+
+	require.NoError(t, c.Prepare())
+	a.malformedRefusal.Store(true)
+	_, err := c.Sign(0, []byte("header"))
+	require.Error(t, err)
+
+	a.malformedRefusal.Store(false)
+	_, err = c.Sign(0, []byte("next-header"))
+	require.NoError(t, err)
+	require.Equal(t, int32(2), a.accepts.Load(),
+		"an error on a malformed frame must not keep the session")
+}
+
+func TestRemoteClientReportsConnectedSession(t *testing.T) {
+	t.Parallel()
+	skeyData, vkey, opCert := testKESMaterial(t)
+	client := newTestCert(t, "node")
+	a := startFakeRemoteAgent(t, client, skeyData, vkey, opCert)
+	certFile, keyFile := client.writePEM(t)
+	metrics := NewMetrics(prometheus.NewRegistry())
+	c, err := NewRemoteClient(RemoteConfig{
+		Address:          a.addr,
+		ClientCertFile:   certFile,
+		ClientKeyFile:    keyFile,
+		ServerSPKISHA256: a.server.spki,
+		KESVKey:          vkey,
+		OpCert:           opCert,
+		SignTimeout:      2 * time.Second,
+		Metrics:          metrics,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = c.Close() })
+
+	require.InDelta(t, 0, promtestutil.ToFloat64(metrics.connected), 0)
+	require.NoError(t, c.Prepare())
+	require.InDelta(t, 1, promtestutil.ToFloat64(metrics.connected), 0)
+	require.NoError(t, c.Close())
+	require.InDelta(t, 0, promtestutil.ToFloat64(metrics.connected), 0)
 }
 
 func TestRemoteClientRedialsAStaleSession(t *testing.T) {

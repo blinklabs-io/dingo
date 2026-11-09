@@ -303,8 +303,15 @@ func (ks *poolKeySource) loadBlockProducerCredentialsFromAgent(
 
 	mode := ks.keys.agentMode
 	if len(ks.keys.agentAddresses) > 0 {
-		// A remote agent serves only sign mode; config validation rejects
-		// any other mode with an address.
+		// A remote agent serves only sign mode. Config validation rejects
+		// any other mode with an address, but a library caller can skip it.
+		if mode != "" && mode != kesagent.ModeSign {
+			return fmt.Errorf(
+				"remote KES agent supports only mode %q, got %q",
+				kesagent.ModeSign,
+				mode,
+			)
+		}
 		mode = kesagent.ModeSign
 	}
 	if mode == "" {

@@ -58,6 +58,22 @@ func ValidateKESKeySources(kesKeyPath, kesAgentSocket string) error {
 	return nil
 }
 
+// validateHostPort checks that addr is host:port with a non-empty host and a
+// numeric port in 1-65535.
+func validateHostPort(addr string) error {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return err
+	}
+	if host == "" {
+		return errors.New("empty host")
+	}
+	if p, err := strconv.ParseUint(port, 10, 16); err != nil || p == 0 {
+		return fmt.Errorf("port %q is not in 1-65535", port)
+	}
+	return nil
+}
+
 // validateRemoteKESAgent checks a pool's remote KES agent configuration: one
 // KES source only, sign mode, every address host:port, and a transport that
 // can work: the server pin and the client certificate are optional, but need
@@ -76,6 +92,14 @@ func validateRemoteKESAgent(p BlockProducerPool, prefix string) []error {
 	}
 	addresses := p.RemoteAgentAddresses()
 	if len(addresses) == 0 {
+		if p.ShelleyKESAgentPlaintext {
+			errs = append(errs, fmt.Errorf(
+				"%s requires %s or %s",
+				field("shelleyKesAgentPlaintext"),
+				field("shelleyKesAgentAddress"),
+				field("shelleyKesAgentAddresses"),
+			))
+		}
 		return errs
 	}
 	if p.ShelleyKESKey != "" || p.ShelleyKESAgentSocket != "" {
@@ -91,7 +115,7 @@ func validateRemoteKESAgent(p BlockProducerPool, prefix string) []error {
 		))
 	}
 	for i, address := range addresses {
-		if _, _, err := net.SplitHostPort(address); err != nil {
+		if err := validateHostPort(address); err != nil {
 			name := field("shelleyKesAgentAddress")
 			if len(p.ShelleyKESAgentAddresses) > 0 {
 				name = fmt.Sprintf(
@@ -969,9 +993,12 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		errs = append(errs, c.validateBlockProducerPools()...)
 		// Leios voting and endorser-block production are wired for one pool:
 		// one vote key, one pipeline. A second pool would forge ranking
-		// blocks with no Leios support of its own.
+		// blocks with no Leios support of its own. Musashi forges Leios
+		// headers whatever the run mode.
+		isMusashi := c.Network == ouroboros.NetworkCardanoMusashi.Name ||
+			c.NetworkMagic == ouroboros.NetworkCardanoMusashi.NetworkMagic
 		if len(c.BlockProducerPools) > 1 &&
-			(effectiveMode == RunModeLeios ||
+			(effectiveMode == RunModeLeios || isMusashi ||
 				c.LeiosVoteSigningKeyFile != "") {
 			errs = append(errs, errors.New(
 				"blockProducerPools lists more than one pool, which Leios forging and voting do not support",

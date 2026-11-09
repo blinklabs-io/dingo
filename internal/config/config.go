@@ -2497,13 +2497,3 @@ func (c *Config) singlePool() BlockProducerPool {
 		ShelleyKESAgentPlaintext:        c.ShelleyKESAgentPlaintext,
 	}
 }
-
-// ProducerPools returns the pools this block producer forges for:
-// BlockProducerPools when set, otherwise the one pool the top-level key
-// settings describe.
-func (c *Config) ProducerPools() []BlockProducerPool {
-	if len(c.BlockProducerPools) > 0 {
-		return c.BlockProducerPools
-	}
-	return []BlockProducerPool{c.singlePool()}
-}
