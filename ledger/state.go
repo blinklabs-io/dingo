@@ -5785,6 +5785,9 @@ func (ls *LedgerState) rollbackWithBlocksAndIntent(
 
 		if len(newEpochs) > 0 {
 			ls.currentEpoch = newCurrentEpoch
+			// The label is a function of the epoch rows that remain; a
+			// deleted boundary row must not survive as the label.
+			ls.ledgerEpoch = ledgerEpochFromCache(newEpochs)
 			// Only update currentEra when we successfully
 			// resolved it. Writing a stale era alongside a
 			// new epoch would leave currentEra inconsistent
@@ -5799,6 +5802,7 @@ func (ls *LedgerState) rollbackWithBlocksAndIntent(
 			// and pparams too so they stay consistent with
 			// the zeroed epoch.
 			ls.currentEpoch = models.Epoch{}
+			ls.ledgerEpoch = 0
 			ls.currentEra = eras.EraDesc{}
 			ls.currentPParams = nil
 			ls.prevEraPParams = nil
@@ -8839,24 +8843,6 @@ func epochAtID(current models.Epoch, targetEpochID uint64) (models.Epoch, error)
 	)
 }
 
-// rolloverSkipsEmptyEpoch reports whether a rollover to targetEpochID passes
-// over at least one epoch holding no blocks, judged from the epoch of the
-// previous tip projected from the current epoch's geometry.
-func rolloverSkipsEmptyEpoch(
-	current models.Epoch,
-	tipSlot uint64,
-	targetEpochID uint64,
-) bool {
-	previous := current.EpochId
-	if tipSlot >= current.StartSlot {
-		if tipEpoch, err := epochAtSlot(current, tipSlot); err == nil &&
-			tipEpoch.EpochId > previous {
-			previous = tipEpoch.EpochId
-		}
-	}
-	return targetEpochID > previous+1
-}
-
 // byronTransitionEpochs projects a version-triggered Byron-to-Shelley
 // boundary using Byron geometry up to the adoption slot and Shelley geometry
 // afterwards. The transition is learned from Byron update state, so it may not
@@ -9429,18 +9415,13 @@ func (ls *LedgerState) processBlocksFromSource(
 				}
 			}
 
-			// Publish the block-based event unless the block skipped a whole
-			// epoch that had no blocks: the slot clock already ticks those.
-			// The previous epoch is taken from the tip, not the ledger epoch
-			// label, which lags after a sparse jump or a truncate. Only this
-			// event carries the persisted nonce, so a block landing in the
-			// epoch after its predecessor's always publishes it.
+			// Publish the block-based event when the block lands in the
+			// consensus epoch's immediate successor. A jump over empty
+			// epochs is a single consensus tick that the slot clock already
+			// announced. Only this event carries the persisted nonce.
 			if rolloverResult != nil &&
-				!rolloverSkipsEmptyEpoch(
-					snapshotEpoch,
-					snapshotTip.Point.Slot,
-					rolloverResult.NewCurrentEpoch.EpochId,
-				) &&
+				rolloverResult.NewCurrentEpoch.EpochId ==
+					snapshotEpoch.EpochId+1 &&
 				ls.config.EventBus != nil {
 				newEpochId := rolloverResult.NewCurrentEpoch.EpochId
 
