@@ -45,8 +45,11 @@ type getEpochsFailingMetadataStore struct {
 }
 
 func (s getEpochsFailingMetadataStore) GetEpochs(
-	_ dbtypes.Txn,
+	txn dbtypes.Txn,
 ) ([]models.Epoch, error) {
+	if txn != nil {
+		return s.MetadataStore.GetEpochs(txn)
+	}
 	return nil, s.err
 }
 
