@@ -552,9 +552,27 @@ func mergeRewardWithdrawalSlots(
 	requested map[string]struct{},
 	ret map[string]uint64,
 ) error {
-	if len(keys) == 0 {
-		return nil
+	for start := 0; start < len(keys); start += rewardWithdrawalWitnessKeys {
+		chunk := keys[start:min(start+rewardWithdrawalWitnessKeys, len(keys))]
+		if err := mergeRewardWithdrawalSlotsChunk(
+			ctx, db, chunk, maxSlot, requested, ret,
+		); err != nil {
+			return err
+		}
 	}
+	return nil
+}
+
+// mergeRewardWithdrawalSlotsChunk reads at most rewardWithdrawalWitnessKeys
+// keys.
+func mergeRewardWithdrawalSlotsChunk(
+	ctx context.Context,
+	db queryer,
+	keys [][]byte,
+	maxSlot uint64,
+	requested map[string]struct{},
+	ret map[string]uint64,
+) error {
 	for _, tag := range []uint8{0, 1} {
 		args := make([]any, 0, rewardWithdrawalWitnessKeys+2)
 		args = append(args, tag)
