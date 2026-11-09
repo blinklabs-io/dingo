@@ -241,7 +241,7 @@ func TestCreateUtxoBindsEmptyNullableHashesAsSQLNull(t *testing.T) {
 	require.NoError(t, store.CreateUtxo(nil, utxo))
 	var spent, referenced, collateral any
 	require.NoError(t, store.writeDB.QueryRow(
-		"SELECT spent_at_tx_id, referenced_by_tx_id, collateral_by_tx_id FROM utxo WHERE id = ?",
+		"SELECT spent_by_tx_id, referenced_by_tx_id, collateral_by_tx_id FROM utxo WHERE id = ?",
 		utxo.ID,
 	).Scan(&spent, &referenced, &collateral))
 	require.Nil(t, spent)

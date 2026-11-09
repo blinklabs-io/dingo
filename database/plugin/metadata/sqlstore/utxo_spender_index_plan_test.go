@@ -28,6 +28,7 @@ import (
 // spent, collateralised, or referenced the output, each with its own index.
 var spenderColumns = []string{
 	"spent_at_tx_id",
+	"spent_by_tx_id",
 	"collateral_by_tx_id",
 	"referenced_by_tx_id",
 }
@@ -36,7 +37,7 @@ var spenderColumns = []string{
 // gathered over a never-spent UTxO set, as after a ledger-state import, and
 // which has since spent a few outputs through every spender column. The
 // spends do not grow utxo enough for the incremental refresh to re-analyze it.
-func newImportedLedgerStatsStore(t *testing.T) (*Store, []byte) {
+func newImportedLedgerStatsStore(t *testing.T) (*Store, map[string]any) {
 	t.Helper()
 	store := newFilePlannerStatsStore(t, prometheus.NewRegistry())
 	exec := func(query string, args ...any) {
@@ -59,15 +60,24 @@ SELECT randomblob(32), 0, i % 2, randomblob(28), 1, 0, '1' FROM n`)
 		`INSERT INTO "transaction" (hash, slot, block_index) VALUES (?, 10, 0)`,
 		spender,
 	)
+	var spenderID int64
+	require.NoError(t, store.writeDB.QueryRow(
+		`SELECT id FROM "transaction" WHERE hash = ?`, spender,
+	).Scan(&spenderID))
+	values := make(map[string]any, len(spenderColumns))
 	for i, column := range spenderColumns {
+		values[column] = spender
+		if column == "spent_by_tx_id" {
+			values[column] = spenderID
+		}
 		exec(
 			"UPDATE utxo SET "+column+" = ? WHERE id = ?",
-			spender,
+			values[column],
 			i+1,
 		)
 	}
 	require.NoError(t, store.refreshReadPool(context.Background()))
-	return store, spender
+	return store, values
 }
 
 func writeQueryPlan(
@@ -103,11 +113,11 @@ func TestRollbackSpenderLookupsSearchIndexUnderImportStatistics(
 	t *testing.T,
 ) {
 	t.Parallel()
-	store, spender := newImportedLedgerStatsStore(t)
+	store, values := newImportedLedgerStatsStore(t)
 	statements := map[string]string{
-		"idx_utxo_spent_at_tx_id": `
+		"idx_utxo_spent_by_tx_id": `
 SELECT DISTINCT credential_tag, staking_key FROM utxo
-WHERE spent_at_tx_id IN (?)`,
+WHERE spent_by_tx_id IN (?)`,
 	}
 	for _, column := range spenderColumns {
 		statements["idx_utxo_"+column+" update"] = "UPDATE utxo SET " +
@@ -115,7 +125,8 @@ WHERE spent_at_tx_id IN (?)`,
 	}
 	for name, query := range statements {
 		index := strings.TrimSuffix(name, " update")
-		plan := writeQueryPlan(t, store, query, spender)
+		column := strings.TrimPrefix(index, "idx_utxo_")
+		plan := writeQueryPlan(t, store, query, values[column])
 		require.NotContains(t, plan, "SCAN utxo",
 			"%s must not scan utxo, plan:\n%s", name, plan)
 		require.Contains(t, plan, index,

@@ -971,10 +971,10 @@ func TestBatchedRowsOfFailedWriteAreNotQueued(t *testing.T) {
 
 	tx, point := apiDetailTx(t, 23)
 	_, err := store.writeDB.ExecContext(context.Background(), `
-INSERT INTO utxo (tx_id, output_idx, added_slot, deleted_slot, spent_at_tx_id, amount)
+INSERT INTO utxo (tx_id, output_idx, added_slot, deleted_slot, spent_by_tx_id, amount)
 VALUES (?, 0, 1, 5, ?, '1')`,
 		tx.Inputs()[0].Id().Bytes(),
-		[]byte{0xee},
+		int64(999999),
 	)
 	require.NoError(t, err)
 	err = store.SetTransactionBatchedHistorical(

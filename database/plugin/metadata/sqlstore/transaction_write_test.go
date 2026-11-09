@@ -776,11 +776,10 @@ func TestSetTransactionLeiosClosureSkippedInputAppliesNoDelta(t *testing.T) {
 	fx := buildSharedCredentialTx(t, 0x43)
 	seedConsumedUtxo(t, store, fx)
 
-	otherSpender := make([]byte, 32)
-	otherSpender[0] = 0xfe
+	const otherSpenderID = 999999
 	_, err := store.writeDB.ExecContext(ctx, `
-UPDATE utxo SET deleted_slot = 900, spent_at_tx_id = ?
-WHERE tx_id = ? AND output_idx = 0`, otherSpender, fx.consumedTxID)
+UPDATE utxo SET deleted_slot = 900, spent_by_tx_id = ?
+WHERE tx_id = ? AND output_idx = 0`, otherSpenderID, fx.consumedTxID)
 	require.NoError(t, err)
 
 	// A second live UTxO keeps the credential's reward_live_stake row in
