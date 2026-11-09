@@ -241,6 +241,7 @@ var logPlainConfigFields = []string{
 	"DMQ.MaxPeers",
 	"DMQ.MessageTTL",
 	"DMQ.MinPeers",
+	"DMQ.MinPoolMessageInterval",
 	"DMQ.N2NPort",
 	"DMQ.NetworkMagic",
 	"DMQ.SocketPath",

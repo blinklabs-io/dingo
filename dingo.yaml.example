@@ -994,6 +994,11 @@
   # socketPath: "dingo-dmq.socket"
   # Longest expiry, in seconds, a submitted message may claim. Default: 1800.
   # messageTtl: 1800
+  # Shortest time, in seconds, between two messages of one pool that are
+  # announced to a peer. dmq-node ends the connection when a pool's messages
+  # come closer together than its own setting, which defaults to 60 seconds.
+  # 0 announces without spacing. Default: 60.
+  # minPoolMessageInterval: 60
   # Message pool size limit in megabytes. Default: 128.
   # maxMempoolSize: 128
   # TCP port DMQ peers connect to, separate from the Cardano relay port.

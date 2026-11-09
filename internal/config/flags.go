@@ -466,6 +466,11 @@ var flagSpecs = []flagSpec{
 		"longest message expiry accepted, in seconds",
 	),
 	uintFlag(
+		"DMQ.MinPoolMessageInterval",
+		"dmq-min-pool-message-interval",
+		"shortest time, in seconds, between one pool's messages announced to a peer; 0 disables",
+	),
+	uintFlag(
 		"DMQ.MaxMempoolSize",
 		"dmq-max-mempool-size",
 		"DMQ message pool size limit, in megabytes",

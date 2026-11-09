@@ -1166,6 +1166,12 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 				maxMessageTTL,
 			))
 		}
+		if uint64(c.DMQ.MinPoolMessageInterval) > maxMessageTTL {
+			errs = append(errs, fmt.Errorf(
+				"dmq.minPoolMessageInterval must be at most %d seconds",
+				maxMessageTTL,
+			))
+		}
 		// The pool reads a zero capacity as unbounded.
 		switch {
 		case c.DMQ.MaxMempoolSize == 0:

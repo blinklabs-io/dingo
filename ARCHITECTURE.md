@@ -10866,8 +10866,18 @@ goes unanswered for 20 seconds, so after `blockingReplyWait` (10 seconds) the
 answer is `MsgReplyNoIDs` and the peer asks again. A run against dmq-node showed
 the connection being dropped every 20 seconds until it did. Messages that
 expired, and messages the peer itself announced (kept in a bounded `idSet`), are
-passed over, so a message is not announced back to where it came from. A body
-request returns the messages the pool still holds, which may be fewer than
+passed over, so a message is not announced back to where it came from. A
+connection's `poolPacer` also spaces one pool's messages by
+`dmq.minPoolMessageInterval` (60 seconds; zero turns it off): dmq-node ends the
+whole connection when a pool's message reaches it sooner than its minimum
+signature delay after that pool's previous one (`SigTooFrequent`), and redialing
+offers the same message again. The pacer records when each pool's message was
+announced, keeps a later one from the same pool, and announces it once the
+interval has passed; other pools' messages are announced past it. A blocking
+request that has only held messages to answer waits for the first to fall due as
+well as for `AddedSignal`. The spacing is per connection and applies on
+announcement only, so admission, and the local notification feed, are
+unchanged. A body request returns the messages the pool still holds, which may be fewer than
 asked. The window of announced IDs, and the rules for it, are
 `sigsub_protocol.go`'s: a blocking request only with nothing left
 unacknowledged, no zero request, acknowledgements within what is outstanding,
