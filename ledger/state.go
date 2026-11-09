@@ -15208,6 +15208,10 @@ func (ls *LedgerState) ProtocolParamsForSlot(
 			uint64(currentEpoch.LengthInSlots)
 	}
 	if slotEpoch <= currentEpoch.EpochId {
+		if slotEpoch == currentEpoch.EpochId && tipSnapshot != nil &&
+			slot > tipSnapshot.currentTip.Point.Slot {
+			return ls.protocolParamsAfterMidEpochEra(snapshot, tipSnapshot)
+		}
 		return currentPParams
 	}
 	shape, err := ls.eraShapeWithError()
@@ -15287,35 +15291,72 @@ func (ls *LedgerState) ProtocolParamsForSlot(
 		return pparams
 	}
 	// Apply each successor's HardForkFunc up to the decided era.
-	eraID := currentEra.Id
+	pparams, err = ls.translatePParamsToEra(pparams, currentEra.Id, targetID)
+	if err != nil {
+		ls.config.Logger.Warn(
+			"ProtocolParamsForSlot: era translation failed",
+			"slot", slot,
+			"slot_epoch", slotEpoch,
+			"error", err,
+		)
+		return nil
+	}
+	return pparams
+}
+
+// translatePParamsToEra applies each successor's HardForkFunc to pparams, from
+// the era after fromID up to and including targetID.
+func (ls *LedgerState) translatePParamsToEra(
+	pparams lcommon.ProtocolParameters,
+	fromID, targetID uint,
+) (lcommon.ProtocolParameters, error) {
+	eraID := fromID
 	for eraID < targetID {
 		nextID := eraID + 1
 		nextEraPtr, ok := ls.eraById(nextID)
 		if !ok || nextEraPtr == nil {
-			return nil
+			return nil, fmt.Errorf("era %d is unavailable", nextID)
 		}
-		nextEra := *nextEraPtr
-		if nextEra.HardForkFunc == nil {
-			eraID = nextID
-			continue
-		}
-		newPParams, err := nextEra.HardForkFunc(
-			ls.config.CardanoNodeConfig,
-			pparams,
-		)
-		if err != nil {
-			ls.config.Logger.Warn(
-				"ProtocolParamsForSlot: HardForkFunc failed",
-				"slot", slot,
-				"slot_epoch", slotEpoch,
-				"from_era", eraID,
-				"to_era", nextID,
-				"error", err,
+		if nextEraPtr.HardForkFunc != nil {
+			newPParams, err := nextEraPtr.HardForkFunc(
+				ls.config.CardanoNodeConfig,
+				pparams,
 			)
-			return nil
+			if err != nil {
+				return nil, fmt.Errorf(
+					"translate from era %d to era %d: %w",
+					eraID, nextID, err,
+				)
+			}
+			pparams = newPParams
 		}
-		pparams = newPParams
 		eraID = nextID
+	}
+	return pparams, nil
+}
+
+// protocolParamsAfterMidEpochEra returns the parameters of the block after the
+// applied tip: the ledger's own, translated into the era the mid-epoch rule
+// assigns that block once the tip knows the transition. It returns nil when
+// the translation fails, so a caller cannot build or verify on parameters of
+// an era the block is not in.
+func (ls *LedgerState) protocolParamsAfterMidEpochEra(
+	snapshot *consensusSnapshot,
+	tip *tipSnapshot,
+) lcommon.ProtocolParameters {
+	era, ok := ls.midEpochEraAfterTip(snapshot, tip)
+	if !ok {
+		return snapshot.currentPParams
+	}
+	pparams, err := ls.translatePParamsToEra(
+		snapshot.currentPParams, snapshot.currentEra.Id, era.Id,
+	)
+	if err != nil {
+		ls.config.Logger.Warn(
+			"ProtocolParamsForSlot: mid-epoch era translation failed",
+			"error", err,
+		)
+		return nil
 	}
 	return pparams
 }
@@ -15351,6 +15392,13 @@ func (ls *LedgerState) forecastPendingPParamUpdateIn(
 		pparams == nil ||
 		era.DecodePParamsUpdateFunc == nil ||
 		era.PParamsUpdateFunc == nil {
+		return nil, nil
+	}
+	// Conway has no classic update proposals: its translation drops the
+	// proposals of the era before, so a ledger translated before the pending
+	// update was enacted must not read the rows it left behind, which Conway's
+	// decoder cannot parse.
+	if era.Id >= eras.ConwayEraDesc.Id {
 		return nil, nil
 	}
 	// Quorum is the Shelley-genesis updateQuorum, exactly as the rollover
@@ -15426,7 +15474,7 @@ func (ls *LedgerState) IsByronEra() bool {
 func (ls *LedgerState) EraIDForEpoch(
 	epoch uint64,
 ) (uint, error) {
-	snapshot := ls.loadConsensusSnapshot()
+	snapshot, tipSnapshot := ls.loadConsensusAndTipSnapshots()
 	cache := snapshot.epochCache
 	currentEra := snapshot.currentEra
 	currentEpoch := snapshot.currentEpoch
@@ -15434,6 +15482,18 @@ func (ls *LedgerState) EraIDForEpoch(
 
 	for _, e := range cache {
 		if e.EpochId == epoch {
+			// The block after the tip may already belong to a later era than
+			// the epoch's recorded one: inside an epoch that follows empty
+			// epochs the era changes once the tip knows the transition, and
+			// the leader schedule and the leader check of that block follow
+			// the era it is in.
+			if epoch == currentEpoch.EpochId {
+				if era, ok := ls.midEpochEraAfterTip(
+					snapshot, tipSnapshot,
+				); ok {
+					return era.Id, nil
+				}
+			}
 			return e.EraId, nil
 		}
 	}

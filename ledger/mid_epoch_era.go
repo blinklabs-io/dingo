@@ -74,6 +74,20 @@ func (ls *LedgerState) newMidEpochEraGate(
 	epoch models.Epoch,
 	pparams lcommon.ProtocolParameters,
 ) *midEpochEraGate {
+	return ls.newMidEpochEraGateAt(
+		era, epoch, pparams, ls.ledgerEpochLabel(),
+	)
+}
+
+// newMidEpochEraGateAt is newMidEpochEraGate for a caller that already holds
+// a consistent view of the ledger and the epoch label it implies, such as a
+// published snapshot, and must not take the ledger lock.
+func (ls *LedgerState) newMidEpochEraGateAt(
+	era eras.EraDesc,
+	epoch models.Epoch,
+	pparams lcommon.ProtocolParameters,
+	label uint64,
+) *midEpochEraGate {
 	if era.Id == eras.ByronEraDesc.Id || era.Id >= eras.ConwayEraDesc.Id ||
 		pparams == nil {
 		return nil
@@ -82,7 +96,6 @@ func (ls *LedgerState) newMidEpochEraGate(
 	if !ok || entry.NextEraTrigger.Kind != hardfork.TriggerAtVersion {
 		return nil
 	}
-	label := ls.ledgerEpochLabel()
 	if epoch.EpochId <= label {
 		return nil
 	}
@@ -266,4 +279,41 @@ func midEpochEraRefusal(
 		"%w: block at slot %d is in era %d, the ledger requires era %d",
 		errMidEpochEraBlock, block.SlotNumber(), dec.body, dec.required,
 	)
+}
+
+// midEpochEraAfterTip returns the era of the block that follows the applied
+// tip when the ledger is inside an epoch the mid-epoch rule covers and the
+// transition is already known at the tip, and false otherwise. The answer is
+// a function of the published ledger and tip alone, so the forger, the leader
+// schedule and header verification see the era the apply path will require
+// for that block. A slot beyond the next block is not decided by a tip that
+// does not yet know the transition, as in the reference node, whose forecast
+// from the tip cannot cross an era end the tip's ledger state does not know.
+func (ls *LedgerState) midEpochEraAfterTip(
+	snapshot *consensusSnapshot,
+	tip *tipSnapshot,
+) (eras.EraDesc, bool) {
+	if snapshot == nil || tip == nil {
+		return eras.EraDesc{}, false
+	}
+	gate := ls.newMidEpochEraGateAt(
+		snapshot.currentEra,
+		snapshot.currentEpoch,
+		snapshot.currentPParams,
+		ledgerEpochLabelInCache(
+			snapshot.currentEpoch.EpochId, snapshot.epochCache,
+		),
+	)
+	if gate == nil {
+		return eras.EraDesc{}, false
+	}
+	required, err := gate.requiredEra(ls.closeCtx(), ls, nil, tip.currentTip)
+	if err != nil || required == snapshot.currentEra.Id {
+		return eras.EraDesc{}, false
+	}
+	era, ok := ls.eraById(required)
+	if !ok || era == nil {
+		return eras.EraDesc{}, false
+	}
+	return *era, true
 }

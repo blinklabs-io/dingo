@@ -21,6 +21,8 @@ import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -219,4 +221,77 @@ func TestMidEpochEraSwitchRollsBack(t *testing.T) {
 		assert.Equal(t, eras.BabbageEraDesc.Id, ls.currentEra.Id,
 			"a reload after the rollback must not find the abandoned switch")
 	})
+}
+
+// TestMidEpochEraIsKnownBeforeTheBlockIsApplied pins that everything which
+// decides the era of a block ahead of its application agrees with the apply
+// path once the applied tip knows the transition: the forger builds the next
+// block from ProtocolParamsForSlot, and the leader schedule and the leader
+// check take the consensus mode from EraIDForEpoch. A forger that built the
+// block after the k-th one in Babbage would produce a block the ledger
+// refuses, and a leader check in the old era's mode would judge the block
+// under the wrong VRF derivation. The decision follows the applied tip, so a
+// rollback across the point that made it known withdraws it.
+func TestMidEpochEraIsKnownBeforeTheBlockIsApplied(t *testing.T) {
+	t.Parallel()
+
+	past := uint64(midEpochEraDeadline)
+	ls, blocks := newBoundaryEraLedgerChain(t, midEpochEraCase(
+		past,
+		boundaryEraFollower{babbageBody: true, slot: past + 1},
+	))
+	requireBabbage := func(t *testing.T, slot uint64) {
+		t.Helper()
+		_, ok := ls.ProtocolParamsForSlot(slot).(*babbage.BabbageProtocolParameters)
+		assert.True(t, ok, "slot %d must be forged with Babbage parameters", slot)
+		eraID, err := ls.EraIDForEpoch(3)
+		require.NoError(t, err)
+		assert.Equal(t, eras.BabbageEraDesc.Id, eraID)
+	}
+	requireConway := func(t *testing.T, slot uint64) {
+		t.Helper()
+		_, ok := ls.ProtocolParamsForSlot(slot).(*conway.ConwayProtocolParameters)
+		assert.True(t, ok, "slot %d must be forged with Conway parameters", slot)
+		eraID, err := ls.EraIDForEpoch(3)
+		require.NoError(t, err)
+		assert.Equal(t, eras.ConwayEraDesc.Id, eraID)
+	}
+
+	require.NoError(t, processMidEpochEraBlocks(t, ls, blocks[:1]))
+	requireBabbage(t, past+1)
+
+	require.NoError(t, processMidEpochEraBlocks(t, ls, blocks[1:]))
+	require.Equal(t, eras.BabbageEraDesc.Id, ls.currentEra.Id)
+	requireConway(t, past+2)
+
+	require.NoError(t, ls.rollback(
+		t.Context(),
+		ocommon.NewPoint(blocks[0].SlotNumber(), blocks[0].Hash().Bytes()),
+	))
+	requireBabbage(t, past+1)
+}
+
+// TestMidEpochEraKeepsPendingMajorOutOfConway pins that the update to major 9
+// which was pending when the ledger was translated stays unenacted in Conway.
+// Conway has no classic update proposals (the translation drops them), so the
+// next epoch boundary neither raises the major nor reads the pending update
+// as a second hard fork out of Babbage.
+func TestMidEpochEraKeepsPendingMajorOutOfConway(t *testing.T) {
+	t.Parallel()
+
+	past := uint64(midEpochEraDeadline)
+	nextEpoch := uint64(4 * boundaryEraTestEpochLength)
+	ls, blocks := newBoundaryEraLedgerChain(t, midEpochEraCase(
+		past,
+		boundaryEraFollower{babbageBody: true, slot: past + 1},
+		boundaryEraFollower{slot: past + 2},
+		boundaryEraFollower{slot: nextEpoch + 1},
+	))
+	require.NoError(t, processMidEpochEraBlocks(t, ls, blocks))
+	assert.Equal(t, eras.ConwayEraDesc.Id, ls.currentEra.Id)
+	assert.Equal(t, uint64(4), ls.currentEpoch.EpochId)
+	ver, err := GetProtocolVersion(ls.currentPParams)
+	require.NoError(t, err)
+	assert.Equal(t, uint(8), ver.Major)
+	requireMidEpochEraTip(t, ls, blocks[3])
 }

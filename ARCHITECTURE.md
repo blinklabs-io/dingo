@@ -4754,6 +4754,18 @@ and a block in the source era is refused. The block-apply loop stops its batch a
 that block, translates the frozen ledger without enacting the update, keys the
 translation at the block's slot, and records it (`mid_epoch_era_switch`) so a
 rollback restores the source era. Only classic (pre-Conway) eras are covered.
+Everything that decides the era of a block before it is applied follows the same
+decision from the applied tip: `ProtocolParamsForSlot` returns the translated
+parameters for the slot after the tip, so the forger builds the block the ledger
+will accept, and `EraIDForEpoch` (hence the consensus mode of the leader schedule
+and the leader check) names the later era. A tip that does not yet know the
+transition decides nothing for later slots, and a rollback below the block that
+made it known withdraws it. A Conway ledger translated this way keeps the old
+major and ignores the classic proposals left in the database, which Conway's
+translation drops. The epoch record carries the era after the switch for the
+whole epoch, so a competing header from before the switch slot is still judged
+in the later era's consensus mode; the modes differ only for a switch out of
+Alonzo.
 A refusal releases the rollover's transaction-validation
 transition before the block is rewound as a rejected header, and the ledger
 stays in its source era. The block's body era still selects the transition path:
