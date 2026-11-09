@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 
@@ -190,6 +191,9 @@ func (ls *LedgerState) applyMidEpochEraSwitch(
 		if err != nil {
 			return err
 		}
+		if len(results) == 0 {
+			return errors.New("no era transition produced")
+		}
 		if err := ls.db.SetEpoch(
 			epoch.StartSlot, epoch.EpochId,
 			epoch.Nonce, epoch.EvolvingNonce, epoch.CandidateNonce,
@@ -208,6 +212,10 @@ func (ls *LedgerState) applyMidEpochEraSwitch(
 	if err != nil {
 		finishValidationTransition()
 		return fmt.Errorf("apply mid-epoch era switch: %w", err)
+	}
+	if len(results) == 0 {
+		finishValidationTransition()
+		return errors.New("apply mid-epoch era switch: no era transition")
 	}
 	ls.Lock()
 	for _, result := range results {
