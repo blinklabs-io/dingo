@@ -12208,17 +12208,20 @@ address, which is the same as a one-entry list; setting both is refused. Every
 other remote setting applies to each address, and each gets its own
 `RemoteClient`. One sign goes to one agent, the active one, starting with the
 first listed: a failure is never retried on another agent inside the same
-sign, so the 500ms bound holds. A failure other than an agent refusal (`error`
+sign, so the configured `SignTimeout` (500ms by default) bounds it. A failure other than an agent refusal (`error`
 in the response, which proves the agent is working) moves the client to the
 next address for the next attempt, and logs the move at info
 (`KES agent link: moving to the next remote agent`). `Prepare`, called before
 each leader slot as above, admits the active agent or, when it does not admit
 this node (unreachable, or holding another opcert), the first one after it in
-order that does, which becomes active; it then admits the agent after the
-active one on its own goroutine, so a move at the slot finds that session open
-instead of dialing inside the sign. `CheckReady` reports ready when any agent
-was admitted on its last attempt. The client does not move back to an earlier
-agent on its own: it moves on only after a failure. Metrics:
+order that does, which becomes active; it then tries to admit the agent after the
+active one on its own goroutine, so a move at the slot usually finds that
+session open; a move before that admission finishes dials inside the sign.
+`CheckReady` reports ready unless every agent failed its last attempt, so a
+client that has not tried any agent yet reports ready, as a single
+`RemoteClient` does. The client does not fail back while its active agent
+works: it moves on only after a failure, in order and wrapping from the last
+address to the first. Metrics:
 `dingo_kes_agent_remote_active{address}` (1 for the active agent) and
 `dingo_kes_agent_remote_failovers_total`.
 
