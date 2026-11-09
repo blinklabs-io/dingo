@@ -424,3 +424,42 @@ func TestObserverGapAppliedTipChildSurvivesHeaderBackpressure(t *testing.T) {
 	require.EqualValues(t, 60, evt.Data.(ledger.ChainsyncEvent).Point.Slot)
 	require.NotNil(t, f.o.connManager.GetConnectionById(f.conn))
 }
+
+// A connection advertising a tip chain selection never selects must not hold
+// an ingress slot: otherwise every slot can be held by such peers while
+// selectable peers stay observers, so nothing is ever selected.
+func TestStaleAdvertisedIngressPeerYieldsSlotToObserver(t *testing.T) {
+	t.Parallel()
+	f := newPromotionGapFixture(t)
+	const staleSlot = 50
+	f.o.config.ChainsyncAdvertisedTipStale = func(tip ochainsync.Tip) bool {
+		return tip.Point.Slot == staleSlot
+	}
+	stale := f.fillers[0]
+
+	require.NoError(t, f.o.chainsyncClientRollBackward(
+		ochainsync.CallbackContext{ConnectionId: stale},
+		ocommon.Point{},
+		ochainsync.Tip{Point: ocommon.NewPoint(staleSlot, []byte("stale")), BlockNumber: 10},
+	))
+	observing, exists := f.o.chainsyncState.ClientObservabilityOnly(stale)
+	require.True(t, exists)
+	require.True(t, observing, "a stale-advertising peer must be demoted to observation")
+
+	// The demoted peer's next header must not take the freed slot back.
+	require.NoError(t, f.o.chainsyncClientRollForwardAt(
+		ochainsync.CallbackContext{ConnectionId: stale},
+		0, newTestBlockHeader(100, 1, 0xbb), ochainsync.Tip{
+			Point: ocommon.NewPoint(staleSlot, []byte("stale")), BlockNumber: 10,
+		}, time.Now(),
+	))
+	observing, _ = f.o.chainsyncState.ClientObservabilityOnly(stale)
+	require.True(t, observing, "a stale-advertising peer must not be re-promoted by its next header")
+	require.Equal(t, capacityTestSlots-1, f.o.chainsyncState.ClientConnCount())
+
+	f.rollback(t, ocommon.Point{})
+	observing, exists = f.o.chainsyncState.ClientObservabilityOnly(f.conn)
+	require.True(t, exists)
+	require.False(t, observing, "the slot the stale peer held must go to the selectable observer")
+	require.Equal(t, capacityTestSlots, f.o.chainsyncState.ClientConnCount())
+}

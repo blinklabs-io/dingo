@@ -654,6 +654,7 @@ func (n *Node) newOuroborosConfig(
 		EnableLeiosTxFetch:                   enableLeiosNetworking,
 		LeiosTxFetchTailBudget:               leiosTxFetchTailBudget,
 		ChainsyncIngressEligible:             n.isChainsyncIngressEligible,
+		ChainsyncAdvertisedTipStale:          n.chainsyncAdvertisedTipStale,
 		ChainsyncHasBestPeer:                 n.chainsyncHasBestPeer,
 		ChainsyncApplyEligible:               n.chainsyncApplyEligible,
 		ChainsyncAwaitEagerness:              n.chainsyncAwaitEagerness,

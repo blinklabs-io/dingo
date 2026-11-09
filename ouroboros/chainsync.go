@@ -1789,7 +1789,8 @@ func (o *Ouroboros) chainsyncClientRollBackward(
 	o.clearObserverHeaderGapAtRollback(ctx.ConnectionId, clientSession, point)
 	if !o.reconcileChainsyncIngressAdmission(
 		ctx.ConnectionId,
-		o.shouldPublishChainsyncToLedger(ctx.ConnectionId),
+		o.shouldPublishChainsyncToLedger(ctx.ConnectionId) &&
+			!o.advertisedTipStale(tip),
 	) {
 		return nil
 	}
@@ -2181,7 +2182,8 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				ctx.ConnectionId,
 			)
 		}
-		desiredEligible := o.shouldPublishChainsyncToLedger(ctx.ConnectionId)
+		desiredEligible := o.shouldPublishChainsyncToLedger(ctx.ConnectionId) &&
+			!o.advertisedTipStale(tip)
 		// A promoted observer above the local tip is re-synced below, at most
 		// one per window. While another one holds the window, promoting this
 		// observer would only be undone, so it stays an observer; promoting
@@ -3311,6 +3313,14 @@ func (o *Ouroboros) shouldPublishChainsyncToLedger(
 	}
 	outbound, exists := o.chainsyncState.ClientStartedAsOutbound(connId)
 	return exists && outbound
+}
+
+// advertisedTipStale reports whether chain selection will never select a peer
+// advertising tip. Such a peer cannot feed the ledger, so it must not hold one
+// of the few ingress slots while selectable peers wait as observers.
+func (o *Ouroboros) advertisedTipStale(tip ochainsync.Tip) bool {
+	return o.config.ChainsyncAdvertisedTipStale != nil &&
+		o.config.ChainsyncAdvertisedTipStale(tip)
 }
 
 // shouldApplyChainsyncToLedger reports whether an ingress-eligible peer's

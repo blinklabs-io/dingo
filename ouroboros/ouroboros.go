@@ -578,6 +578,11 @@ type OuroborosConfig struct {
 	// keep inbound/public noise out of ledger ingress while still
 	// tracking peer tips separately for selection and observability.
 	ChainsyncIngressEligible func(ouroboros.ConnectionId) bool
+	// ChainsyncAdvertisedTipStale reports whether an advertised peer tip is
+	// one chain selection will never select. A connection advertising such a
+	// tip does not hold an ingress slot, so a selectable peer can take it.
+	// When nil, no advertised tip is treated as stale.
+	ChainsyncAdvertisedTipStale func(ochainsync.Tip) bool
 	// ChainsyncHasBestPeer reports whether chain selection currently has a
 	// selected best peer. It runs on the ChainSync callback goroutine for
 	// every roll-forward, so it must not wait on locks held across a call back
