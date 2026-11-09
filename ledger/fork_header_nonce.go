@@ -244,11 +244,19 @@ func (ls *LedgerState) verifyPeerForkTargetEpochAncestors(
 		if !ok || event.BlockHeader == nil ||
 			!bytes.Equal(event.Point.Hash, hash) ||
 			!bytes.Equal(event.BlockHeader.Hash().Bytes(), hash) {
-			return fmt.Errorf(
-				"%w: candidate ancestor at slot %d is no longer available",
-				ErrHeaderAncestryUnavailable,
-				header.SlotNumber(),
-			)
+			// The connection's history is bounded and trimmed independently
+			// of the ledger's header queue, which holds only headers the
+			// ledger admitted. A queued ancestor needs no retained record to
+			// be part of this path, but it has no verdict either, so it is
+			// verified below exactly like a retained header with an old one.
+			if !ls.chain.HoldsQueuedHeaderHash(hash) {
+				return fmt.Errorf(
+					"%w: candidate ancestor at slot %d is no longer available",
+					ErrHeaderAncestryUnavailable,
+					header.SlotNumber(),
+				)
+			}
+			event = ChainsyncEvent{}
 		}
 		if headerVerdictInContext(
 			event.HeaderCryptoVerificationGeneration,
