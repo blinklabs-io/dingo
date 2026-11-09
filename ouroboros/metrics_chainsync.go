@@ -109,6 +109,7 @@ var chainsyncResyncReasons = map[string]struct{}{
 	event.ChainsyncResyncReasonRollbackExceedsMithril:            {},
 	event.ChainsyncResyncReasonRollbackLoop:                      {},
 	event.ChainsyncResyncReasonRollbackNotFound:                  {},
+	event.ChainsyncResyncReasonWithheldCandidateAncestry:         {},
 }
 
 // chainsyncResyncReasonLabel bounds the reason label. Some publishers format

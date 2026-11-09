@@ -437,6 +437,69 @@ func (o *Ouroboros) markDeferredHeaderRecovery(
 	}
 }
 
+// recoverWithheldHeaderAncestry re-intersects a connection that delivered a
+// header above the applied tip whose ancestry reaches neither the peer's
+// retained history nor the local chain. The peer's cursor is already past
+// that header, so every descendant is withheld the same way and no header
+// ever reaches the queue; a fresh intersection from the local chain
+// redelivers the linking headers. It acts only for a connection that may feed
+// the ledger, once per connection and applied tip, and spaces repeats per
+// remote address with the deferred-recovery window, so a peer whose chain
+// really does not link cannot turn this into a reconnect loop.
+func (o *Ouroboros) recoverWithheldHeaderAncestry(
+	connId ouroboros.ConnectionId,
+	header gledger.BlockHeader,
+) {
+	if o.headerAtOrBelowLocalTip(header) {
+		return
+	}
+	if !o.shouldApplyChainsyncToLedger(connId) {
+		return
+	}
+	var tipHash []byte
+	switch {
+	case o.chainsyncLocalChainTips != nil:
+		tipHash, _ = o.chainsyncLocalChainTips()
+	case o.ledgerState != nil:
+		tipHash = o.ledgerState.Tip().Point.Hash
+	}
+	if len(tipHash) == 0 {
+		return
+	}
+	o.deferredHeaderRecoveryMu.Lock()
+	retried, seen := o.withheldAncestryRetry[connId]
+	o.deferredHeaderRecoveryMu.Unlock()
+	if seen && bytes.Equal(retried, tipHash) {
+		return
+	}
+	now := time.Now()
+	if !o.claimDeferredRecoveryRecycle(connId, now) {
+		return
+	}
+	if !o.scheduleHeaderResync(
+		connId,
+		now,
+		event.ChainsyncResyncReasonWithheldCandidateAncestry,
+	) {
+		o.releaseDeferredRecoveryRecycle(connId, now)
+		return
+	}
+	o.deferredHeaderRecoveryMu.Lock()
+	if o.withheldAncestryRetry == nil {
+		o.withheldAncestryRetry = make(map[ouroboros.ConnectionId][]byte)
+	}
+	o.withheldAncestryRetry[connId] = append([]byte(nil), tipHash...)
+	o.deferredHeaderRecoveryMu.Unlock()
+	o.config.Logger.Info(
+		"chainsync: re-intersecting after header with unavailable ancestry",
+		"component", "ouroboros",
+		"reason", event.ChainsyncResyncReasonWithheldCandidateAncestry,
+		"slot", header.SlotNumber(),
+		"block_number", header.BlockNumber(),
+		"connection_id", connId.String(),
+	)
+}
+
 // invalidateDeferredHeaderResolution keeps a connection's deferred-header
 // recovery but stops a later application of its withheld header from becoming
 // the connection's cursor, since a rollback moved the peer's protocol cursor
@@ -2382,6 +2445,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		// and neither resyncs nor recycles. A definite crypto/eligibility failure
 		// excludes the header and recycles the connection.
 		selectionEligible := ingressEligible
+		withheldAncestry := false
 		deferredVerification := false
 		transientVerification := false
 		shouldVerifyHeader := o.chainSelectionShouldVerifyHeaderCrypto != nil &&
@@ -2443,6 +2507,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			if verifyErr != nil {
 				if ledger.IsHeaderVerificationWithheld(verifyErr) {
 					selectionEligible = false
+					withheldAncestry = true
 				} else if ledger.IsHeaderVerificationDeferred(verifyErr) {
 					selectionEligible = false
 					deferredVerification = true
@@ -2808,7 +2873,12 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			o.updateChainsyncMetrics(ctx.ConnectionId, tip)
 			return nil
 		}
-		if o.chainsyncState != nil {
+		if withheldAncestry {
+			// A header that cannot be linked is not progress: counting it
+			// would keep a peer that streams only unlinkable headers out of
+			// the stall recycler indefinitely.
+			o.recoverWithheldHeaderAncestry(ctx.ConnectionId, v)
+		} else if o.chainsyncState != nil {
 			o.chainsyncState.RecordClientDelivery(ctx.ConnectionId, point)
 		}
 		if !selectionEligible {
