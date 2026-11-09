@@ -469,3 +469,38 @@ func TestAccountListHonoursWrappedTransport(t *testing.T) {
 	assert.Len(t, addrs, 3)
 	assert.Equal(t, int32(1), wrapped.n.Load())
 }
+
+// TestWalkAccountListAdvancesPastEmptyAddressRows serves a full first page
+// whose rows all carry an empty stake_address. The walk must still move its
+// offset past those rows; refetching the same window would never end.
+func TestWalkAccountListAdvancesPastEmptyAddressRows(t *testing.T) {
+	t.Parallel()
+
+	fake := newFakeAccountList(koiosPageSize + 3)
+	addrs := fake.snapshot()
+	for i := range koiosPageSize {
+		addrs[i] = ""
+	}
+	fake.setAddrs(addrs)
+	srv := httptest.NewServer(fake.handler())
+	defer srv.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var got []string
+	var last accountListPosition
+	err := newUniverseTestClient(srv).walkAccountList(
+		ctx, accountListPosition{},
+		func(page []string, next accountListPosition, _ int) error {
+			got = append(got, page...)
+			last = next
+			return nil
+		},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, addrs[koiosPageSize:], got)
+	assert.Equal(t, []int{0, koiosPageSize}, fake.seenStarts())
+	assert.Equal(t, accountListPosition{
+		Offset:      koiosPageSize + 3,
+		LastAddress: addrs[koiosPageSize+2],
+	}, last)
+}

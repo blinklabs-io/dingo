@@ -1726,8 +1726,10 @@ func (k *KoiosClient) GetAllAccountAddresses(
 
 // walkAccountList pages /account_list from the position from and calls fn with
 // each page of new addresses, the position after it, and the 1-based number
-// of pages fetched by this call. fn returning an error stops the walk and is
-// returned unchanged; the position fn last accepted is a valid resume point.
+// of pages fetched by this call. Rows with an empty stake_address are dropped
+// from the page but still counted in the position, so page may be empty. fn
+// returning an error stops the walk and is returned unchanged; the position fn
+// last accepted is a valid resume point.
 //
 // A walk that resumes from a non-zero offset starts its first request one row
 // early. That row must be the last one already consumed; if it is not, rows
@@ -1783,7 +1785,9 @@ func (k *KoiosClient) walkAccountList(
 				page = append(page, item.StakeAddress)
 			}
 		}
-		if len(page) > 0 {
+		// Advance by the rows returned, not the addresses kept: a page whose
+		// rows all lack an address would otherwise be refetched forever.
+		if len(rows) > 0 {
 			pos = accountListPosition{
 				Offset:      pos.Offset + len(rows),
 				LastAddress: rows[len(rows)-1].StakeAddress,
