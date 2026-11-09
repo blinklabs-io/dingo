@@ -108,7 +108,7 @@ func TestRejectOversizedRationals(t *testing.T) {
 		{"non-minimal array head", append([]byte{0xd8, 0x1e, 0x98, 0x02, 0x01}, pastLimit...), true},
 		{"indefinite array", append(append([]byte{0xd8, 0x1e, 0x9f, 0x01}, pastLimit...), 0xff), true},
 		{"tag stack before the array", append([]byte{0xd8, 0x1e, 0xd9, 0xd9, 0xf7, 0x82, 0x01}, pastLimit...), true},
-		{"array of three is left to the decoder", append(append([]byte{0xd8, 0x1e, 0x83, 0x01, 0x01}, pastLimit...)), false},
+		{"array of three is left to the decoder", append([]byte{0xd8, 0x1e, 0x83, 0x01, 0x01}, pastLimit...), false},
 		{"oversized rational in an indefinite tag-24", nest(chunked(rational(small, pastLimit), 5)), true},
 		{"small rational in an indefinite tag-24", nest(chunked(rational(small, []byte{0x05}), 2)), false},
 		{"oversized byte string outside a rational", nest(append([]byte{0x59, 0x01, 0x00}, make([]byte, 256)...)), false},
