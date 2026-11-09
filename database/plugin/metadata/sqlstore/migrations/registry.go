@@ -2457,8 +2457,10 @@ WHERE table_schema = DATABASE() AND table_name = 'utxo'
 // utxoInputEdgeTxIDBackfill copies the hash-keyed collateral and
 // reference-input rows into the transaction-id keyed edge tables, then clears
 // the legacy single-owner utxo.collateral_by_tx_id and
-// utxo.referenced_by_tx_id values. Each phase walks its table in utxo id order
-// and the cursor is "<phase>:<last utxo id>". An edge whose hash has no
+// utxo.referenced_by_tx_id values. Each phase walks its table in key order. A
+// copy phase pages by edge, since one output can be named by any number of
+// transactions, and its cursor is "<phase>:<last utxo id>:<last hash hex>"; a
+// clear phase's cursor is "<phase>:<last utxo id>". An edge whose hash has no
 // transaction row is dropped: no transaction can own it.
 func utxoInputEdgeTxIDBackfill(dialect string) Backfill {
 	transactionTable := `"transaction"`
@@ -2476,16 +2478,26 @@ func utxoInputEdgeTxIDBackfill(dialect string) Backfill {
 	}
 	order := []string{"ref", "col", "clrref", "clrcol"}
 	return func(ctx context.Context, batch Batch) (BatchResult, error) {
-		phase, last := "ref", int64(0)
+		phase, last, lastHash := "ref", int64(0), []byte{}
 		if batch.Cursor != "" {
 			name, value, ok := strings.Cut(batch.Cursor, ":")
-			parsed, err := strconv.ParseInt(value, 10, 64)
+			id, hashHex, _ := strings.Cut(value, ":")
+			parsed, err := strconv.ParseInt(id, 10, 64)
 			if !ok || err != nil {
 				return BatchResult{}, fmt.Errorf(
 					"parse utxo edge cursor %q", batch.Cursor,
 				)
 			}
+			decoded, err := hex.DecodeString(hashHex)
+			if err != nil {
+				return BatchResult{}, fmt.Errorf(
+					"parse utxo edge cursor %q: %w", batch.Cursor, err,
+				)
+			}
 			phase, last = name, parsed
+			if len(decoded) != 0 {
+				lastHash = decoded
+			}
 		}
 		next := func() BatchResult {
 			for i, name := range order {
@@ -2499,26 +2511,37 @@ func utxoInputEdgeTxIDBackfill(dialect string) Backfill {
 			if c.name != phase {
 				continue
 			}
-			var upper sql.NullInt64
-			if err := batch.Tx.QueryRowContext(ctx, batch.Rebind(`
-SELECT MAX(utxo_id) FROM (
-    SELECT DISTINCT utxo_id FROM `+c.from+`
-    WHERE utxo_id > ? ORDER BY utxo_id LIMIT ?
-) AS batch_ids`), last, batch.Limit).Scan(&upper); err != nil {
-				return BatchResult{}, fmt.Errorf("select %s batch: %w", c.from, err)
-			}
-			if !upper.Valid {
+			var (
+				upperID   int64
+				upperHash []byte
+			)
+			err := batch.Tx.QueryRowContext(ctx, batch.Rebind(`
+SELECT utxo_id, transaction_hash FROM (
+    SELECT utxo_id, transaction_hash FROM `+c.from+`
+    WHERE utxo_id > ? OR (utxo_id = ? AND transaction_hash > ?)
+    ORDER BY utxo_id, transaction_hash LIMIT ?
+) AS batch_edges
+ORDER BY utxo_id DESC, transaction_hash DESC LIMIT 1`),
+				last, last, lastHash, batch.Limit,
+			).Scan(&upperID, &upperHash)
+			if errors.Is(err, sql.ErrNoRows) {
 				return next(), nil
 			}
+			if err != nil {
+				return BatchResult{}, fmt.Errorf("select %s batch: %w", c.from, err)
+			}
+			window := []any{last, last, lastHash, upperID, upperID, upperHash}
+			const inWindow = `(i.utxo_id > ? OR (i.utxo_id = ? AND i.transaction_hash > ?))
+  AND (i.utxo_id < ? OR (i.utxo_id = ? AND i.transaction_hash <= ?))`
 			result, err := batch.Tx.ExecContext(ctx, batch.Rebind(`
 INSERT INTO `+c.to+` (utxo_id, transaction_id)
 SELECT i.utxo_id, t.id FROM `+c.from+` AS i
 JOIN `+transactionTable+` AS t ON t.hash = i.transaction_hash
-WHERE i.utxo_id > ? AND i.utxo_id <= ?
+WHERE `+inWindow+`
   AND NOT EXISTS (
       SELECT 1 FROM `+c.to+` AS e
       WHERE e.utxo_id = i.utxo_id AND e.transaction_id = t.id
-  )`), last, upper.Int64)
+  )`), window...)
 			if err != nil {
 				return BatchResult{}, fmt.Errorf("copy %s: %w", c.from, err)
 			}
@@ -2526,11 +2549,11 @@ WHERE i.utxo_id > ? AND i.utxo_id <= ?
 			var dropped int64
 			if err := batch.Tx.QueryRowContext(ctx, batch.Rebind(`
 SELECT COUNT(*) FROM `+c.from+` AS i
-WHERE i.utxo_id > ? AND i.utxo_id <= ?
+WHERE `+inWindow+`
   AND NOT EXISTS (
       SELECT 1 FROM `+transactionTable+` AS t
       WHERE t.hash = i.transaction_hash
-  )`), last, upper.Int64).Scan(&dropped); err != nil {
+  )`), window...).Scan(&dropped); err != nil {
 				return BatchResult{}, fmt.Errorf("count dropped %s: %w", c.from, err)
 			}
 			if dropped > 0 {
@@ -2542,8 +2565,9 @@ WHERE i.utxo_id > ? AND i.utxo_id <= ?
 				)
 			}
 			return BatchResult{
-				Cursor: phase + ":" + strconv.FormatInt(upper.Int64, 10),
-				Rows:   rows,
+				Cursor: phase + ":" + strconv.FormatInt(upperID, 10) + ":" +
+					hex.EncodeToString(upperHash),
+				Rows: rows,
 			}, nil
 		}
 		for _, c := range clears {
@@ -2659,8 +2683,8 @@ SELECT COUNT(*) FROM (
 			return fmt.Errorf("count utxo producer duplicates: %w", err)
 		}
 		return fmt.Errorf(
-			"%d duplicate outputs share a producer transaction and output "+
-				"index, so idx_utxo_producer_output cannot be created "+
+			"%d producer/output pairs collide, so idx_utxo_producer_output "+
+				"cannot be created "+
 				"(first: %s); remove the duplicate utxo rows or resync",
 			total, strings.Join(samples, "; "),
 		)

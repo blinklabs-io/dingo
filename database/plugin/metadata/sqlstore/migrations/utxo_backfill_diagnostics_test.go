@@ -90,7 +90,7 @@ VALUES (1, ?, 200, 0, '1')`, hash)
 
 	err := upgrade(producerIndexMigrationVersion)
 	require.Error(t, err)
-	require.ErrorContains(t, err, "duplicate outputs")
+	require.ErrorContains(t, err, "producer/output pairs collide")
 	require.ErrorContains(t, err, "producer_tx_id=1 output_idx=200")
 	_, ok := indexSQL(t, db, "tx_id_output_idx")
 	require.True(t, ok, "the hash index stays until the contract can succeed")

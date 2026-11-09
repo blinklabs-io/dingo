@@ -15,12 +15,14 @@
 package migrations_test
 
 import (
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"fmt"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
 	"github.com/stretchr/testify/require"
 )
 
@@ -112,4 +114,55 @@ ORDER BY u.tx_id, u.output_idx, t.hash`
 	upgrade(1, inputEdgeMigrationVersion)
 	again, _ := edgeDigest(t, db, fmt.Sprintf(edge, "utxo_reference_edge"))
 	require.Equal(t, refBefore, again)
+}
+
+// A batch copies at most Batch.Limit edges, however many transactions name one
+// output, so a heavily reused reference input cannot enlarge one backfill
+// transaction without bound.
+func TestUtxoInputEdgeBackfillBoundsEdgesPerBatch(t *testing.T) {
+	t.Parallel()
+	db, upgrade := spenderUpgradeDB(t)
+	upgrade(0, inputEdgeMigrationVersion-1)
+	seedSpenderUpgradeRows(t, db, 8)
+	for _, table := range []string{"utxo_reference_edge", "utxo_collateral_edge"} {
+		_, err := db.Exec("CREATE TABLE " + table +
+			" (utxo_id integer NOT NULL, transaction_id integer NOT NULL, " +
+			"PRIMARY KEY (utxo_id, transaction_id))")
+		require.NoError(t, err)
+	}
+	_, err := db.Exec(`INSERT OR IGNORE INTO utxo_reference_input (utxo_id, transaction_hash)
+SELECT (SELECT MIN(id) FROM utxo), hash FROM "transaction"`)
+	require.NoError(t, err)
+	var sourceEdges int
+	require.NoError(t, db.QueryRow(
+		"SELECT COUNT(*) FROM utxo_reference_input",
+	).Scan(&sourceEdges))
+	require.Greater(t, sourceEdges, 4)
+
+	const limit = 2
+	registry, err := migrations.SQLiteRegistry()
+	require.NoError(t, err)
+	backfill := registry[inputEdgeMigrationVersion-1].Backfill
+	ctx := context.Background()
+	identity := func(query string) string { return query }
+	cursor := ""
+	for {
+		tx, err := db.BeginTx(ctx, nil)
+		require.NoError(t, err)
+		result, err := backfill(ctx, migrations.Batch{
+			Tx: tx, Cursor: cursor, Limit: limit, Rebind: identity,
+		})
+		require.NoError(t, err)
+		require.NoError(t, tx.Commit())
+		require.LessOrEqual(t, result.Rows, int64(limit))
+		cursor = result.Cursor
+		if result.Done {
+			break
+		}
+	}
+	var copied int
+	require.NoError(t, db.QueryRow(
+		"SELECT COUNT(*) FROM utxo_reference_edge",
+	).Scan(&copied))
+	require.Equal(t, sourceEdges, copied)
 }
