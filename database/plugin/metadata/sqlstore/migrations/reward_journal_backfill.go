@@ -96,6 +96,13 @@ func newRewardJournalStatements(dialect string) rewardJournalStatements {
 		}
 		return "ON CONFLICT (" + columns + ") DO NOTHING"
 	}
+	// SQLite answers DISTINCT added_slot by walking the whole added_slot
+	// index rather than the batch's rowid range, which reads every legacy row
+	// once per batch. NOT INDEXED still allows the rowid range.
+	slotsAccess := ""
+	if dialect == "sqlite" {
+		slotsAccess = " NOT INDEXED"
+	}
 	const accountJoin = " JOIN account a ON a.credential_tag = d.credential_tag" +
 		" AND a.staking_key = d.staking_key"
 	const idRange = " d.id > ? AND d.id <= ?"
@@ -116,7 +123,7 @@ func newRewardJournalStatements(dialect string) rewardJournalStatements {
 	return rewardJournalStatements{
 		maxLegacyID: "SELECT COALESCE(MAX(id), 0) FROM account_reward_delta",
 		copySlots: "INSERT INTO reward_credit_slot (boundary_slot) SELECT DISTINCT d.added_slot" +
-			" FROM account_reward_delta d WHERE" + idRange + " AND " + round +
+			" FROM account_reward_delta d" + slotsAccess + " WHERE" + idRange + " AND " + round +
 			" " + nothing(
 			"boundary_slot",
 			"boundary_slot",
