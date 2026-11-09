@@ -18797,17 +18797,7 @@ Once eligible to run, it subscribes to `ledger.block`
 inputs and `Produced()` UTxOs rather than the body-declared inputs and outputs.
 For a phase-2-invalid transaction, this indexes consumed collateral and its
 optional collateral return, preserving that produced UTxO's actual output
-index.
-
-The transactions of each block come from `LedgerState.BlockTransactions` (the
-`Config.BlockTransactions` hook) on the live, backfill, registration-rebuild and
-rollback paths, not from the decoded ranking block. A Leios certifying ranking
-block has no transactions of its own: the ledger applies the endorser block its
-parent announced, so those transactions are indexed, tracked and rolled back
-with the certifying block. A certified endorser block that cannot be loaded
-fails the block through the same fatal-error path as a decode failure; an undo
-that cannot load it still removes the block's rows but returns
-`errIncompleteRollback` because created candidates stay in memory:
+index:
 
 - **cNIGHT create**: an output carrying the configured `cnight_policy_id` +
   `cnight_asset_name` token writes a `midnight_asset_creates` row and adds
@@ -18864,6 +18854,17 @@ that cannot load it still removes the block's rows but returns
   observed, write-before-track same as the in-memory update. `rollbackBlock`
   deletes registration rows for the rolled-back block alongside the epoch
   snapshot cleanup.
+
+**Block transactions**: each block's transactions come from
+`LedgerState.BlockTransactions` (the `Config.BlockTransactions` hook) on the
+live, backfill, registration-rebuild and rollback paths, not from the decoded
+ranking block. A Leios certifying ranking block has no transactions of its own:
+the ledger applies the endorser block its parent announced, so those
+transactions are indexed, tracked and rolled back with the certifying block.
+When a certified endorser block cannot be loaded, the live and backfill paths
+fail like a decode failure. An undo that cannot load it commits the rest of the
+rollback, retains the committee candidate registration rows, leaves the created
+candidates in memory and returns `errIncompleteRollback`.
 
 **Epoch tracking**: `processBlock` resolves and advances the epoch (via
 `advanceEpochLocked`) for every block, on both the live event path and the

@@ -26,10 +26,10 @@ import (
 )
 
 // A certifying ranking block has an empty body; its transactions live in the
-// endorser block. The indexer must take its transactions from BlockTransactions
-// rather than from the decoded ranking block, on the live path and on rollback,
-// including a later spend of an output the endorser block created.
-func TestLiveAndRollbackUseBlockTransactionsHook(t *testing.T) {
+// endorser block. The live path must take its transactions from
+// BlockTransactions rather than from the decoded ranking block, including a
+// later spend of an output the endorser block created.
+func TestLiveUsesBlockTransactionsHook(t *testing.T) {
 	t.Parallel()
 	store := setupTestStore(t)
 	create := validRegistrationHistoryBlock(t)
@@ -80,8 +80,40 @@ func TestLiveAndRollbackUseBlockTransactionsHook(t *testing.T) {
 	require.True(t, tracked(), "endorser-block registration must be indexed")
 	send(ledger.BlockActionApply, spend)
 	require.False(t, tracked(), "endorser-block spend must be recorded")
-	send(ledger.BlockActionUndo, spend)
-	require.True(t, tracked(), "rolling back the spend must restore the output")
-	send(ledger.BlockActionUndo, create)
-	require.False(t, tracked(), "rolling back the create must remove the output")
+}
+
+// rollbackBlock consults the block's transactions to remove the committee
+// candidates it created, and keeps their provenance rows when it cannot read
+// them. The block here has no decodable body, so only BlockTransactions can
+// supply the endorser-block transaction that created the candidate.
+func TestRollbackUsesBlockTransactionsHook(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	idx := setupGovIndexer(t, store)
+
+	ebTx := buildTx(t, pad32("fa000011"),
+		[]lcommon.TransactionInput{buildInput(t, pad32("fa000010"), 0)},
+		[]lcommon.TransactionOutput{
+			buildGovOutput(t, testMappingAddr, simpleDatumCbor(t)),
+		},
+	)
+	idx.config.BlockTransactions = func(
+		context.Context,
+		models.Block,
+	) ([]lcommon.Transaction, error) {
+		return []lcommon.Transaction{ebTx}, nil
+	}
+
+	block := testBlock(1, 100, 0xC8)
+	require.NoError(t, idx.processBlock(
+		block, []lcommon.Transaction{ebTx}, 1_000,
+	))
+	require.Len(t, committeeCandidateRegistrations(t, store), 1)
+
+	require.NoError(t, idx.rollbackBlock(block))
+	require.Empty(
+		t,
+		committeeCandidateRegistrations(t, store),
+		"rollback must resolve the endorser-block transactions",
+	)
 }
