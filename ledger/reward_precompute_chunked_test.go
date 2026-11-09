@@ -420,7 +420,7 @@ func TestChunkedRewardPrecomputeMatchesAcrossChunkSizes(t *testing.T) {
 // monolithic path (calculateStakeRewardApplication +
 // applyStakeRewardApplication, what applyStakeRewards falls back to inline at
 // the boundary) persists for the same reward round: every pool output, every
-// account output, and the credited account_reward_delta/network_state
+// account output, and the credited reward journal/network_state
 // mutations. The rewards-package test proves the arithmetic is equivalent in
 // isolation; this proves the ledger-level orchestration around it (which
 // pool-input/stake-input rows feed which rewards.Pool, which accounts count

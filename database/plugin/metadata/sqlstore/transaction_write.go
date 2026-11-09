@@ -1320,6 +1320,7 @@ func (s *Store) setTransactionWithAccumulator(
 					transaction,
 					point.Slot,
 					hash,
+					transactionID,
 					skipWithdrawalWitness,
 					historicalBackfill,
 					txn,
@@ -2454,6 +2455,7 @@ func (s *Store) applyTransactionWithdrawals(
 	transaction lcommon.Transaction,
 	slot uint64,
 	txHash []byte,
+	transactionID int64,
 	skipWithdrawalWitness bool,
 	historicalBackfill bool,
 	txn types.Txn,
@@ -2522,10 +2524,9 @@ func (s *Store) applyTransactionWithdrawals(
 			return err
 		}
 		var exists bool
-		if err := s.queryRowCached(ctx, db, withdrawalRewardDeltaExistsSQL,
-			txHash,
-			tag,
-			stakeKey.Bytes(),
+		if err := s.queryRowCached(ctx, db, rewardWithdrawalExistsSQL,
+			transactionID,
+			accountID,
 		).Scan(&exists); err != nil {
 			return err
 		}
@@ -2563,13 +2564,12 @@ func (s *Store) applyTransactionWithdrawals(
 				return err
 			}
 		}
-		if _, err := s.execCached(ctx, db, insertWithdrawalRewardDeltaSQL,
-			stakeKey.Bytes(),
-			tag,
-			txHash,
+		if _, err := s.execCached(ctx, db, insertRewardWithdrawalSQL,
+			transactionID,
+			accountID,
+			slot,
 			strconv.FormatUint(amount.Uint64(), 10),
 			strconv.FormatUint(previous, 10),
-			slot,
 		); err != nil {
 			return err
 		}
@@ -2667,21 +2667,5 @@ const getAccountRewardStateSQL = `-- name: GetAccountRewardState :one
 SELECT id, reward, active FROM account
 WHERE credential_tag = ? AND staking_key = ?`
 
-const withdrawalRewardDeltaExistsSQL = `-- name: WithdrawalRewardDeltaExists :one
-SELECT EXISTS (
-    SELECT 1 FROM account_reward_delta
-    WHERE withdrawal = TRUE AND tx_hash = ?
-      AND credential_tag = ? AND staking_key = ?
-)`
-
 const updateAccountRewardSQL = `-- name: UpdateAccountReward :exec
 UPDATE account SET reward = ? WHERE id = ?`
-
-const insertWithdrawalRewardDeltaSQL = `-- name: InsertWithdrawalRewardDelta :exec
-INSERT INTO account_reward_delta (
-    staking_key, credential_tag, tx_hash, amount, previous_reward,
-    added_slot, withdrawal
-) VALUES (?, ?, ?, ?, ?, ?, TRUE)
-ON CONFLICT (
-    withdrawal, tx_hash, credential_tag, staking_key, added_slot
-) DO NOTHING`

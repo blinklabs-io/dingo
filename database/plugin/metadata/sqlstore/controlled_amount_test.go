@@ -66,13 +66,10 @@ func TestGetAccountSumsByCredentialWithdrawalsAggregate(t *testing.T) {
 		{credential, "7000000", false},
 		{other, "9000000", true},
 	} {
-		_, err := store.writeDB.Exec(`
-INSERT INTO account_reward_delta (
-    staking_key, credential_tag, tx_hash, amount, added_slot, withdrawal
-) VALUES (?, 0, ?, ?, 10, ?)`,
-			row.key, []byte{byte(i + 1)}, row.amount, row.withdrawal,
-		)
-		require.NoError(t, err)
+		insertTestRewardRow(t, store.writeDB, testRewardRow{
+			key: row.key, hash: []byte{byte(i + 1)}, amount: row.amount,
+			slot: 10, withdrawal: row.withdrawal,
+		})
 	}
 	sums, err := store.GetAccountSumsByCredential(0, credential, nil)
 	require.NoError(t, err)
@@ -271,15 +268,13 @@ INSERT INTO utxo (
 		{"9223372036854775807", true},
 		{"5", false},
 	} {
-		exec(`
-INSERT INTO account_reward_delta (
-    staking_key, credential_tag, tx_hash, amount, added_slot, withdrawal
-) VALUES (?, 0, ?, ?, 10, ?)`,
-			keyA,
-			bytes.Repeat([]byte{byte(i + 1)}, 32),
-			row.amount,
-			row.withdrawal,
-		)
+		insertTestRewardRow(t, store.writeDB, testRewardRow{
+			key:        keyA,
+			hash:       bytes.Repeat([]byte{byte(i + 1)}, 32),
+			amount:     row.amount,
+			slot:       10,
+			withdrawal: row.withdrawal,
+		})
 	}
 	exec(`
 INSERT INTO move_instantaneous_rewards (

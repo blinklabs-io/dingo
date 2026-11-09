@@ -1625,7 +1625,7 @@ type StakeSnapshotStore interface {
 // The per-credential history readers here are certificate readers despite
 // their Account names -- each joins certs to a stake_* certificate table.
 // Their neighbours in sqlstore's account_history.go that read
-// account_reward_delta or the account witness tables are account and
+// the reward journal or the account witness tables are account and
 // reward state, not certificates, and stay on MetadataStore.
 type CertificateStore interface {
 	// GetMIRCertsInSlotRange returns the processed effects of all MIR
@@ -1801,7 +1801,7 @@ type MetadataStore interface {
 	// witnessing added_slot <= maxSlot across the stake-witnessing certificate
 	// tables and reward-withdrawal history. Withdrawal history includes
 	// account_withdrawal_witness (which preserves zero-amount withdrawals) and
-	// legacy account_reward_delta rows where withdrawal = TRUE — together with
+	// reward_withdrawal rows — together with
 	// the certificate tables, this is the CIP-0163 witness set. The result is
 	// keyed by StakeCredentialRef.MapKey(); a credential with no witness <=
 	// maxSlot is absent from the map. Used by the ledger's rollback expiration
@@ -1816,9 +1816,9 @@ type MetadataStore interface {
 	// credentials with a stake-witnessing certificate OR a reward withdrawal
 	// at added_slot > slot — the CIP-0163 rollback affected set. Withdrawals
 	// come from account_withdrawal_witness (including zero-amount withdrawals)
-	// and legacy account_reward_delta withdrawal rows. Callers must invoke it
+	// and reward_withdrawal rows. Callers must invoke it
 	// before deleting rolled-back certificate, withdrawal-witness, and
-	// reward-delta rows, since those are exactly the rows it inspects.
+	// reward-journal rows, since those are exactly the rows it inspects.
 	AccountsWitnessedAfterSlot(
 		slot uint64,
 		txn types.Txn,
@@ -2528,7 +2528,7 @@ type MetadataStore interface {
 	// held. Pool and DRep come from the live row when it was last written at
 	// or before slot, otherwise from the derivation RestoreAccountStateAtSlot
 	// applies on rollback. Reward is the balance reconstructed from the
-	// account_reward_delta journal, including credits of a pending reward
+	// reward journal, including credits of a pending reward
 	// round applied at or before slot.
 	GetAccountsByCredentialAtSlot(
 		[]models.StakeCredentialRef, // stakeCredentials
@@ -3158,13 +3158,6 @@ type MetadataStore interface {
 	// SetPendingRewardCreditRounds replaces the applied-round index.
 	SetPendingRewardCreditRounds([]models.RewardCreditRound, types.Txn) error
 
-	// RewardCreditsAlreadyApplied reports, for each credit, whether its
-	// account_reward_delta journal row already exists.
-	RewardCreditsAlreadyApplied(
-		[]models.AccountRewardCredit,
-		types.Txn,
-	) ([]bool, error)
-
 	// TakeRewardEligibilityRecheck returns and clears the credentials whose
 	// registration a rollback restored since the last call.
 	TakeRewardEligibilityRecheck(types.Txn) ([]models.StakeCredentialRef, error)
@@ -3223,11 +3216,15 @@ type MetadataStore interface {
 	) ([]*models.RewardAccountOutput, error)
 
 	// ClaimUnfoldedRewardCredits marks up to limit unfolded credits of one
-	// credited round folded and returns them, for the caller to write to
+	// credited round folded and returns them in account order, starting at
+	// the account row with id fromAccountID, for the caller to write to
 	// their accounts in the same transaction, or to acknowledge a certified
-	// imported state that already covers those credits.
+	// imported state that already covers those credits. Each output carries
+	// its AccountID; passing the last one back as fromAccountID resumes the
+	// scan, rereading that account's outputs that are not folded yet.
 	ClaimUnfoldedRewardCredits(
 		uint64, // snapshotEpoch
+		uint, // fromAccountID
 		int, // limit
 		types.Txn,
 	) ([]*models.RewardAccountOutput, error)

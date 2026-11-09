@@ -157,7 +157,7 @@ func applyWithdrawalTransaction(
 // TestImportLedgerStateCatchUpRollsBackPostAnchorAccountRewardCredit covers
 // a reward credit and a reward withdrawal applied after a Mithril snapshot's
 // anchor. ImportLedgerState must reverse both the credit and the withdrawal
-// journal (account_reward_delta, account_withdrawal_witness) before
+// journal (reward journal, account_withdrawal_witness) before
 // cert-state import overwrites account.reward from the snapshot --
 // otherwise the credit and withdrawal amounts are silently dropped when
 // ordinary replay re-applies them, because AddAccountRewardByCredential and

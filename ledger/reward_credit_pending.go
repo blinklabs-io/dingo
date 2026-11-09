@@ -62,7 +62,8 @@ func rewardCreditsForOutputs(
 			StakingKey:    reward.Credential.Hash[:],
 			Amount:        reward.Amount,
 			Slot:          round.BoundarySlot,
-			SourceHash:    stakeRewardSourceHash(round.SnapshotEpoch, reward),
+			OutputID:      output.ID,
+			AccountID:     output.AccountID,
 		})
 	}
 	return credits, nil
@@ -188,7 +189,7 @@ func (ls *LedgerState) foldRewardCreditFor(
 
 // writeClaimedRewardCredits writes claimed credits to their accounts with the
 // journal rows the boundary would have written: each at its round's boundary
-// slot, under its source hash.
+// slot, keyed by its round and output.
 func (ls *LedgerState) writeClaimedRewardCredits(
 	ctx context.Context,
 	txn *database.Txn,

@@ -188,108 +188,15 @@ func historicalRewardsBatch(
 	if err != nil {
 		return nil, err
 	}
-	base := make(map[historicalRewardKey]uint64)
-	predicate, predicateArgs := historicalRewardCredentialPredicate(selected)
-	deltaPredicate, deltaPredicateArgs := historicalRewardCredentialPredicateFor(
-		selected,
-		"d",
-	)
-	rows, err := db.QueryContext(
-		ctx,
-		"SELECT credential_tag, staking_key, reward FROM account WHERE "+predicate,
-		predicateArgs...)
-	if err != nil {
-		return nil, err
-	}
-	for rows.Next() {
-		var tag uint8
-		var key []byte
-		var raw sql.NullString
-		if err := rows.Scan(&tag, &key, &raw); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		if !raw.Valid || raw.String == "" {
-			continue
-		}
-		value, err := parseUint64("historical account reward", raw.String)
-		if err != nil {
-			rows.Close()
-			return nil, err
-		}
-		base[historicalRewardKey{tag: tag, key: string(key)}] = value
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return nil, err
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-
-	withdrawals := make(map[historicalRewardKey]historicalWithdrawal)
-	withdrawalValue := slotValue
-	if boundarySlot > 0 {
-		withdrawalValue, err = checkedInt64(boundarySlot)
-		if err != nil {
-			return nil, err
-		}
-	}
-	withdrawalOp := ">"
-	if boundarySlot > 0 {
-		withdrawalOp = ">="
-	}
-	withdrawalArgs := append([]any{withdrawalValue}, deltaPredicateArgs...)
-	rows, err = db.QueryContext(
-		ctx,
-		historicalRewardWithdrawalQuery(withdrawalOp, deltaPredicate),
-		withdrawalArgs...)
-	if err != nil {
-		return nil, err
-	}
-	for rows.Next() {
-		var tag uint8
-		var key []byte
-		var id, addedSlot int64
-		var raw sql.NullString
-		if err := rows.Scan(&tag, &key, &id, &addedSlot, &raw); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		ref := historicalRewardKey{tag: tag, key: string(key)}
-		if _, exists := withdrawals[ref]; exists {
-			continue
-		}
-		previous := uint64(0)
-		if raw.Valid && raw.String != "" {
-			previous, err = parseUint64(
-				"historical previous reward",
-				raw.String,
-			)
-			if err != nil {
-				rows.Close()
-				return nil, err
-			}
-		}
-		withdrawals[ref] = historicalWithdrawal{
-			slot:     addedSlot,
-			id:       id,
-			previous: previous,
-		}
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return nil, err
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-
-	total := make(map[historicalRewardKey]uint64)
-	beforeWithdrawal := make(map[historicalRewardKey]uint64)
-	includePostSnapshot := false
-	creditArgs := make([]any, 0, 2+len(deltaPredicateArgs))
-	creditArgs = append(creditArgs, slotValue)
+	// A credit counts after the snapshot when its effective slot is above
+	// threshold; at a boundary snapshot taken before enactment, a post-snapshot
+	// credit at threshold counts too. A withdrawal anchors the reconstruction
+	// when its effective slot is above the snapshot slot, or at or above the
+	// boundary.
+	threshold := slotValue
+	withdrawalThreshold := slotValue
+	withdrawalQuery := firstRewardWithdrawalAfterSQL
+	creditQuery := rewardEventCreditsAfterSQL
 	if boundarySlot > 0 {
 		boundaryValue, boundaryErr := checkedInt64(boundarySlot)
 		if boundaryErr != nil {
@@ -303,60 +210,112 @@ func historicalRewardsBatch(
 		if err != nil {
 			return nil, err
 		}
-		if afterEnactment {
-			creditArgs = []any{boundaryValue}
-		} else {
-			includePostSnapshot = true
-			creditArgs = []any{boundaryValue, boundaryValue}
+		threshold = boundaryValue
+		withdrawalThreshold = boundaryValue
+		withdrawalQuery = firstRewardWithdrawalFromSQL
+		if !afterEnactment {
+			creditQuery = rewardEventCreditsAfterOrPostSnapshotSQL
 		}
 	}
-	creditArgs = append(creditArgs, deltaPredicateArgs...)
-	rows, err = db.QueryContext(
-		ctx,
-		historicalRewardCreditQuery(includePostSnapshot, deltaPredicate),
-		creditArgs...)
-	if err != nil {
-		return nil, err
+	keys := make([]historicalRewardKey, 0, len(selected))
+	for key := range selected {
+		keys = append(keys, key)
 	}
-	for rows.Next() {
-		var tag uint8
-		var key []byte
-		var id, addedSlot int64
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].tag != keys[j].tag {
+			return keys[i].tag < keys[j].tag
+		}
+		return keys[i].key < keys[j].key
+	})
+	base := make(map[historicalRewardKey]uint64)
+	withdrawals := make(map[historicalRewardKey]historicalWithdrawal)
+	total := make(map[historicalRewardKey]uint64)
+	beforeWithdrawal := make(map[historicalRewardKey]uint64)
+	for _, ref := range keys {
+		var accountID int64
 		var raw sql.NullString
-		if err := rows.Scan(&tag, &key, &id, &addedSlot, &raw); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		if !raw.Valid || raw.String == "" {
+		var active sql.NullBool
+		err := db.QueryRowContext(
+			ctx, getAccountRewardStateSQL, ref.tag, []byte(ref.key),
+		).Scan(&accountID, &raw, &active)
+		if errors.Is(err, sql.ErrNoRows) {
 			continue
 		}
-		value, err := parseUint64("historical future reward credit", raw.String)
 		if err != nil {
-			rows.Close()
 			return nil, err
 		}
-		ref := historicalRewardKey{tag: tag, key: string(key)}
-		if ^uint64(0)-total[ref] < value {
-			rows.Close()
-			return nil, errors.New("historical reward credit overflow")
-		}
-		total[ref] += value
-		withdrawal, hasWithdrawal := withdrawals[ref]
-		if hasWithdrawal && (addedSlot < withdrawal.slot ||
-			(addedSlot == withdrawal.slot && id < withdrawal.id)) {
-			if ^uint64(0)-beforeWithdrawal[ref] < value {
-				rows.Close()
-				return nil, errors.New("historical reward credit overflow")
+		if raw.Valid && raw.String != "" {
+			value, err := parseUint64("historical account reward", raw.String)
+			if err != nil {
+				return nil, err
 			}
-			beforeWithdrawal[ref] += value
+			base[ref] = value
 		}
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return nil, err
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
+		var (
+			withdrawalSlot int64
+			txID           int64
+			previousRaw    sql.NullString
+		)
+		err = db.QueryRowContext(
+			ctx, withdrawalQuery, accountID, withdrawalThreshold,
+		).Scan(&withdrawalSlot, &txID, &previousRaw)
+		hasWithdrawal := false
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+		case err != nil:
+			return nil, err
+		default:
+			hasWithdrawal = true
+			previous := uint64(0)
+			if previousRaw.Valid && previousRaw.String != "" {
+				previous, err = parseUint64(
+					"historical previous reward", previousRaw.String,
+				)
+				if err != nil {
+					return nil, err
+				}
+			}
+			withdrawals[ref] = historicalWithdrawal{
+				slot:     withdrawalSlot,
+				id:       txID,
+				previous: previous,
+			}
+		}
+		credit := func(effectiveSlot int64, raw sql.NullString) error {
+			if !raw.Valid || raw.String == "" {
+				return nil
+			}
+			value, err := parseUint64("historical future reward credit", raw.String)
+			if err != nil {
+				return err
+			}
+			if ^uint64(0)-total[ref] < value {
+				return errors.New("historical reward credit overflow")
+			}
+			total[ref] += value
+			// Credits of a slot precede its withdrawals.
+			if hasWithdrawal && effectiveSlot <= withdrawalSlot {
+				if ^uint64(0)-beforeWithdrawal[ref] < value {
+					return errors.New("historical reward credit overflow")
+				}
+				beforeWithdrawal[ref] += value
+			}
+			return nil
+		}
+		if err := scanHistoricalCredits(
+			ctx, db, roundRewardCreditsAfterSQL, credit, accountID, threshold,
+		); err != nil {
+			return nil, err
+		}
+		creditArgs := []any{accountID, threshold}
+		if creditQuery == rewardEventCreditsAfterOrPostSnapshotSQL {
+			creditArgs = append(creditArgs, threshold)
+		}
+		if err := scanHistoricalCredits(
+			ctx, db, creditQuery, credit, creditArgs...,
+		); err != nil {
+			return nil, err
+		}
 	}
 
 	ret := make(map[historicalRewardKey]uint64, len(base)+len(total))
@@ -384,56 +343,75 @@ func historicalRewardsBatch(
 	return ret, nil
 }
 
-// historicalRewardEffectiveSlot is the slot a reward delta counts at: the
-// Leios transaction context slot when one exists, else the delta's own slot.
-// The LEFT JOINs in the queries below supply lc and tx. The transaction hash
-// index is unique and leios_transaction_context is keyed by transaction_id, so
-// each delta row joins at most one context row.
-const historicalRewardEffectiveSlot = "COALESCE(lc.slot, d.added_slot)"
+// The reconstruction reads each credential's journal through its account id.
+// The Leios transaction context slot, when a credit's source is a transaction
+// or a withdrawal's own transaction has one, replaces the journal slot.
+const (
+	roundRewardCreditsAfterSQL = `-- name: GetRoundRewardCreditsAfter :many
+SELECT r.boundary_slot, c.amount
+FROM reward_credit_slot r
+JOIN reward_credit c ON c.boundary_slot = r.boundary_slot AND c.account_id = ?
+WHERE r.boundary_slot > ?`
 
-const historicalRewardDeltaJoins = `
-FROM account_reward_delta d
-LEFT JOIN "transaction" tx ON tx.hash = d.tx_hash
-LEFT JOIN leios_transaction_context lc ON lc.transaction_id = tx.id`
+	rewardEventCreditsAfterSQL = `-- name: GetRewardEventCreditsAfter :many
+SELECT COALESCE(lc.slot, e.slot), e.amount
+FROM reward_event_credit e
+LEFT JOIN reward_source s ON s.id = e.source_id
+LEFT JOIN "transaction" tx ON tx.hash = s.hash
+LEFT JOIN leios_transaction_context lc ON lc.transaction_id = tx.id
+WHERE e.account_id = ? AND COALESCE(lc.slot, e.slot) > ?`
 
-// historicalRewardCreditQuery selects the credits that land after the
-// snapshot slot. The first argument is the slot, repeated a second time when
-// includePostSnapshot is set, followed by the credential predicate arguments.
-//
-// "NOT d.withdrawal" is deliberate: SQLite never uses an index for a negated
-// boolean column, so the planner drives from the credential index without
-// depending on sqlite_stat1, which a from-genesis sync never populates.
-// Rewriting it as "withdrawal = FALSE" lets the planner pick the withdrawal
-// index, which matches nearly every row.
-func historicalRewardCreditQuery(
-	includePostSnapshot bool,
-	credentialPredicate string,
-) string {
-	slotPredicate := historicalRewardEffectiveSlot + " > ?"
-	if includePostSnapshot {
-		slotPredicate = "(" + historicalRewardEffectiveSlot + " > ? OR (" +
-			historicalRewardEffectiveSlot +
-			" = ? AND d.post_snapshot = TRUE))"
+	rewardEventCreditsAfterOrPostSnapshotSQL = `-- name: GetRewardEventCreditsAfterOrPostSnapshot :many
+SELECT COALESCE(lc.slot, e.slot), e.amount
+FROM reward_event_credit e
+LEFT JOIN reward_source s ON s.id = e.source_id
+LEFT JOIN "transaction" tx ON tx.hash = s.hash
+LEFT JOIN leios_transaction_context lc ON lc.transaction_id = tx.id
+WHERE e.account_id = ? AND (
+    COALESCE(lc.slot, e.slot) > ?
+    OR (COALESCE(lc.slot, e.slot) = ? AND e.post_snapshot = TRUE)
+)`
+
+	firstRewardWithdrawalAfterSQL = `-- name: GetFirstRewardWithdrawalAfter :one
+SELECT COALESCE(lc.slot, w.slot), w.tx_id, w.previous_reward
+FROM reward_withdrawal w
+LEFT JOIN leios_transaction_context lc ON lc.transaction_id = w.tx_id
+WHERE w.account_id = ? AND COALESCE(lc.slot, w.slot) > ?
+ORDER BY w.slot, w.tx_id
+LIMIT 1`
+
+	firstRewardWithdrawalFromSQL = `-- name: GetFirstRewardWithdrawalFrom :one
+SELECT COALESCE(lc.slot, w.slot), w.tx_id, w.previous_reward
+FROM reward_withdrawal w
+LEFT JOIN leios_transaction_context lc ON lc.transaction_id = w.tx_id
+WHERE w.account_id = ? AND COALESCE(lc.slot, w.slot) >= ?
+ORDER BY w.slot, w.tx_id
+LIMIT 1`
+)
+
+func scanHistoricalCredits(
+	ctx context.Context,
+	db queryer,
+	query string,
+	credit func(int64, sql.NullString) error,
+	args ...any,
+) error {
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return err
 	}
-	return `
-SELECT d.credential_tag, d.staking_key, d.id, ` + historicalRewardEffectiveSlot + `, d.amount` +
-		historicalRewardDeltaJoins + `
-WHERE NOT d.withdrawal AND ` + slotPredicate + ` AND (` + credentialPredicate + `)
-ORDER BY d.credential_tag, d.staking_key, d.added_slot, d.id`
-}
-
-// historicalRewardWithdrawalQuery selects withdrawals at or after the slot.
-// operator is ">" or ">=". withdrawal = TRUE stays an index driver here
-// because only a small fraction of deltas are withdrawals.
-func historicalRewardWithdrawalQuery(
-	operator string,
-	credentialPredicate string,
-) string {
-	return `
-SELECT d.credential_tag, d.staking_key, d.id, ` + historicalRewardEffectiveSlot + `, d.previous_reward` +
-		historicalRewardDeltaJoins + `
-WHERE d.withdrawal = TRUE AND ` + historicalRewardEffectiveSlot + ` ` + operator + ` ? AND (` + credentialPredicate + `)
-ORDER BY d.credential_tag, d.staking_key, d.added_slot, d.id`
+	defer rows.Close()
+	for rows.Next() {
+		var effectiveSlot int64
+		var raw sql.NullString
+		if err := rows.Scan(&effectiveSlot, &raw); err != nil {
+			return err
+		}
+		if err := credit(effectiveSlot, raw); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
 }
 
 // historicalRewardCredentialPredicate builds a bounded, deterministic filter
@@ -1318,7 +1296,7 @@ WHERE `+scopedWhere("account")+`account.created_slot <= ?`+
 
 // historicalExpirationSQL reconstructs each active-delegation credential's
 // CIP-0163 expiration_epoch as of slot from witness history
-// (accountWitnessTables, account_reward_delta, account_withdrawal_witness).
+// (accountWitnessTables, reward_withdrawal, account_withdrawal_witness).
 // Absent the one-time activation floor described below: a witness at or
 // before slot wins outright; failing that, a witness only after slot falls
 // back to a creation-epoch-derived expiration instead (the account existed
@@ -1390,21 +1368,17 @@ LIMIT 1`).Scan(&value)
   WHERE witness.credential_tag = active.credential_tag
     AND witness.staking_key = active.staking_key`)
 	}
-	// A reward delta that is not a withdrawal yields a NULL slot, which no
-	// MAX counts, rather than being filtered out: a withdrawal = TRUE
-	// predicate lets SQLite choose the (withdrawal, ...) index and scan every
-	// withdrawal row once per credential.
 	parts = append(parts, `
   SELECT COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN "transaction" tx ON tx.id = lc.transaction_id WHERE tx.hash = witness.tx_hash), witness.added_slot) AS added_slot
   FROM account_withdrawal_witness witness
   WHERE witness.credential_tag = active.credential_tag
     AND witness.staking_key = active.staking_key`, `
-  SELECT CASE WHEN witness.withdrawal = TRUE
-         THEN COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN "transaction" tx ON tx.id = lc.transaction_id WHERE tx.hash = witness.tx_hash), witness.added_slot)
-         END AS added_slot
-  FROM account_reward_delta witness
-  WHERE witness.credential_tag = active.credential_tag
-    AND witness.staking_key = active.staking_key`)
+  SELECT COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = witness.tx_id), witness.slot) AS added_slot
+  FROM reward_withdrawal witness
+  WHERE witness.account_id = (
+    SELECT wa.id FROM account wa
+    WHERE wa.credential_tag = active.credential_tag
+      AND wa.staking_key = active.staking_key)`)
 	witnessEvents := strings.Join(parts, " UNION ALL ")
 	args := make([]any, 1, 5)
 	args[0] = slot

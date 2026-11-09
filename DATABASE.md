@@ -1999,7 +1999,7 @@ boundary left that epoch's `pool_stake_snapshot`, `epoch_summary` and
 reward-input rows to the same job) naming the latest boundary whose RATIFY
 decision or mark snapshot has not been written yet.
 `GetPostSnapshotRewardCredits(slot)` returns each stake credential's total of
-the `account_reward_delta` credits at `slot` with `post_snapshot` set, which the
+the `reward_event_credit` credits at `slot` with `post_snapshot` set, which the
 deferred mark snapshot subtracts from the live stake read to recover the SNAP
 point. `GetPostSnapshotRewardCreditEvents(slot)` returns the same credits one
 row each with their `tx_hash` source hash, which the Koios parity check pairs
@@ -2039,10 +2039,15 @@ reconstruction join through this table, so the set of applied rounds does not
 consume a growing SQL bind list. Historical reads include only rounds whose
 `boundary_slot` is at or before the requested slot.
 `ClaimPendingRewardCreditsForCredential` (one stake credential's rows) and
-`ClaimUnfoldedRewardCredits` (up to a limit of one round's rows, in `id` order)
-select a credited round's unfolded rows, with `FOR UPDATE` on PostgreSQL and
-MySQL, set `folded` on them and return them for the caller to write to their
-accounts in the same transaction. `FoldPendingRewardAccountOutputs` sets
+`ClaimUnfoldedRewardCredits` (up to a limit of one round's rows, in `account.id`
+order from a `fromAccountID` cursor) select a credited round's unfolded rows, set
+`folded` on each with a conditional `UPDATE ... WHERE id = ? AND folded = FALSE`
+(a concurrent claim of the same row folds zero rows and skips it) and return the
+rows claimed for the caller to write to their accounts in the same transaction.
+Each output returned by `ClaimUnfoldedRewardCredits` carries its `AccountID`; the
+cursor only avoids rereading accounts already folded, and `folded` stays the
+record of progress. Outputs whose credential has no account row follow the
+account-ordered rows, so a round never stays due on them. `FoldPendingRewardAccountOutputs` sets
 `folded` on one credential's rows. Lookups of one stake credential's unfolded
 rows test the flag as `NOT folded`, so SQLite reads them on the credential
 index rather than the `(spendable, guarded, folded, epoch)` pending index,
@@ -2051,14 +2056,37 @@ which serves the per-round probes (`HasPendingRewardCreditRounds`,
 `HasUnfoldedRewardCreditsThroughEpoch`, which tests the rounds through a given
 epoch). `GetPendingRewardCreditRounds` and
 `SetPendingRewardCreditRounds` read and replace the table rows.
-`ClaimUnfoldedRewardCredits` selects the ids on the pending index first and
-then reads the rows by primary key, so a claim, including an empty one, does not
-visit every spendable, unguarded row.
+`ClaimUnfoldedRewardCredits` drives from `account` by `id` and probes
+`idx_reward_account_output_epoch_cred_pool_type` per account (on SQLite the
+statement names that index so the planner cannot pick the pending-round index,
+which has no credential column), so a claim reads one round's accounts in order
+rather than every spendable, unguarded row.
 `DeleteRewardStateAfterSlot` drops every round whose `boundary_slot` is after
 the rollback slot and clears `folded` on its surviving outputs.
 `DeleteRewardStateBeforeEpoch` keeps applied rounds' unfolded rows. Migration
 31 imports any earlier JSON list from
 `models.PendingRewardCreditRoundsKey` into this table.
+
+**Reward journal migration (version 56).** Expand creates `reward_credit`,
+`reward_credit_slot`, `reward_source`, `reward_event_credit` and
+`reward_withdrawal`. The backfill then copies `account_reward_delta` in batches
+of 100,000 legacy ids, one transaction per batch, with the cursor
+(`{phase, after, max}`) committed in the batch's transaction, so a restart
+resumes at the next batch; every statement is `ON CONFLICT DO NOTHING`. A
+legacy row is a stake-reward credit (to `reward_credit`, `output_id = -id`) when it
+is not a withdrawal, not `post_snapshot`, has a 32-byte `tx_hash` and was
+credited at an `epoch.start_slot`; any other non-withdrawal row is an event
+credit, with one `reward_source` per distinct `tx_hash`; withdrawals move to
+`reward_withdrawal` keyed by the `transaction` row with that hash (a `NULL`
+`previous_reward` becomes `'0'`). Each batch then verifies, through the new
+tables' keys, that every legacy row of its range exists with the same amount,
+slot and previous balance, and a final step compares total row counts; a
+mismatch (for example a withdrawal whose transaction row is missing) fails the
+migration with the legacy table intact. The contract phase drops
+`account_reward_delta` and its indexes, whichever of the two earlier-dropped
+indexes were present. The migration needs the epoch table to recognise round
+credits: a credit at a slot with no `epoch` row is kept as an event credit, which
+changes only how the row is stored.
 
 **Reward eligibility recheck.** Key `dingo:reward-credit:eligibility-recheck`
 (`models.RewardEligibilityRecheckKey`) holds the JSON list of credentials whose
@@ -2790,8 +2818,8 @@ account row and its baseline. This uses the `metadata.MetadataStore` methods
 Live-state rows are never deleted.
 
 A reward credit or withdrawal applied locally after a snapshot's anchor
-leaves a row in `account_reward_delta`/`account_withdrawal_witness` with
-`added_slot` strictly after the anchor. `ImportAccount`'s upsert sets
+leaves a row in the reward journal (`reward_credit`, `reward_event_credit`,
+`reward_withdrawal`) or `account_withdrawal_witness` strictly after the anchor. `ImportAccount`'s upsert sets
 `account.reward` from the snapshot's anchor-time value
 (`reward = excluded.reward`, with no guard against a newer local value) and
 leaves those journal rows in place. `AddAccountRewardByCredential`/
@@ -2806,7 +2834,7 @@ anchor-time value.
 `ImportLedgerState` clears those rows with
 `Database.DeleteAccountRewardJournalForCredentialsAfterSlot`, called once
 cert-state import has written the `account` rows, scoped to exactly the
-credentials that import wrote. It deletes the `account_reward_delta` and
+credentials that import wrote. It deletes the reward journal and
 `account_withdrawal_witness` rows above the anchor without touching
 `account.reward`, unlike `TruncateAfterSlot`'s `DeleteAccountRewardsAfterSlot`,
 which reverses credits by subtracting them from the current balance. The
@@ -3316,237 +3344,16 @@ PostgreSQL/MySQL repeatable-read read-only transactions.
 | `account_import_baseline` | `credential_tag`, `staking_key`, `pool`, `drep`, `drep_type`, `active`, `added_slot`, `deposit_amount` | composite PK (`credential_tag`, `staking_key`) | The complete account state a Mithril snapshot import or Shelley genesis stake delegation established, retained as the authoritative full-state event `RestoreAccountStateAtSlot` restores to. `ImportAccount` writes no certificate history because the snapshot cannot prove when registration happened, but existing certificate rows from before a newer import may remain. Written by `ImportAccount` (both the `ledgerstate` snapshot import and `SetGenesis`'s stake delegations) and replaced on re-import, since a newer snapshot becomes the earliest state the database can reach. `deposit_amount` preserves the historical stake deposit carried by a Mithril account so consensus can refund the amount actually locked instead of the current protocol parameter; migration `v7` leaves existing rows NULL because their discarded deposits cannot be reconstructed. `added_slot` is the slot the baseline was established at (the snapshot slot, or 0 for genesis). The baseline wins equal-slot ties; a later certificate supersedes it. Deleted together with the account row on the rollback delete path. Migration `v4` backfills it for existing databases from `account` rows with `created_slot = 0` that have no row in any of the ten `accountWitnessTables` certificate tables, recording `active` as true (both importers only import a registered account) and copying `pool`/`drep` from the live row, which for those rows is still exactly what the import wrote. An account that already carried certificate history is deliberately left without a baseline: its live `pool`, `drep`, and `added_slot` describe that certificate rather than the import, and the pre-certificate values are not recoverable from anything the database retains, so recording them would claim a provenance the row does not have. `staking_key` is `NOT NULL`, and a legacy `account` row with a NULL `staking_key` is skipped, because no credential equality can read such a baseline back. It is always considered at or after its slot and supersedes older or equal-slot certificate and boundary history. |
 | `account_drep_clear` | `credential_tag`, `staking_key`, `added_slot` | composite PK (`credential_tag`, `staking_key`, `added_slot`); index `added_slot` | Rollback-aware history of account DRep delegation clears caused by the PV10 epoch-boundary rule or DRep deregistration. Historical reconstruction lets a certificate at the same slot win because clears are ordered by slot; an import baseline at the same slot wins as the authoritative snapshot end state. Rollback removes rows above its target. |
 | `account_inactivity_activation` | `credential_tag`, `staking_key` | composite PK (`credential_tag`, `staking_key`); index `staking_key` | Exact active-account membership captured by the one-time CIP-0163 activation stamp. Historical expiry reconstruction and rollback use this table instead of inferring membership from account creation time, because an account row may exist while deregistered. The rows are deleted together with the activation marker when rollback crosses before activation. |
-| `account_reward_delta` | `id`, `staking_key`, `credential_tag`, `tx_hash`, `amount`, `previous_reward`, `added_slot`, `withdrawal` | PK `id`; indexes (`credential_tag`, `staking_key`), `tx_hash`, `added_slot`, `withdrawal`; unique (`withdrawal`, `tx_hash`, `credential_tag`, `staking_key`, `added_slot`) | Rollback-aware reward-account change journal. `tx_hash` is non-null; credit writers use an empty blob only when no event discriminator exists. Credit rows add `amount`; positive withdrawal rows subtract `amount` from `account.reward`, store the pre-withdrawal balance in `previous_reward`, and use `tx_hash` plus the full stake credential identity as their slot-independent logical replay key. The physical unique key also includes `added_slot` so distinct per-epoch credits remain separate while same-boundary credit re-ingest is idempotent. Governance proposal credits store a 32-byte proposal-event discriminator derived from proposal `tx_hash` plus `action_index`, not the raw proposal transaction hash alone. Logical join to `account.(credential_tag, staking_key)`. This join is not enforced, so `DeleteAccountRewardsAfterSlot` treats a row whose account is missing as a no-op rather than an error: the balance it journals lives on the account row, so with that row gone there is nothing to restore. It logs a warning, drops the stale journal row, and refreshes the credential's `reward_live_stake` aggregate. Failing instead would abort the whole rollback, and because startup reconciliation rolls both stores back to their newest applied common ancestor through this path, a database holding even one such orphan could never finish booting. |
-| `account_withdrawal_witness` | `id`, `staking_key`, `credential_tag`, `tx_hash`, `added_slot` | PK `id`; indexes `added_slot` and (`staking_key`, `credential_tag`, `added_slot`); unique (`tx_hash`, `credential_tag`, `staking_key`) | Rollback-aware CIP-0163 history for every valid withdrawal-map entry, including zero-amount withdrawals that create no reward delta. Rollback witness queries read this table (and legacy withdrawal delta rows), and rollback deletes rows after its target slot. The insert is elided entirely when the delegator-inactivity gate is off (`MetadataStore.SetTransaction`/`SetTransactionBatched`'s `skipWithdrawalWitness` argument, set from `BatchedTxIngestOpts.SkipWithdrawalWitnessWrite` as `!LedgerStateConfig.DelegatorInactivityEnabled` on the live-apply path): the table is only ever read by the gate's rollback/renewal queries below, so a gate-off node — the default — does the insert's write and index-maintenance work for nothing. `internal/node.Backfill`'s batched historical-replay path derives the same flag from its own `delegatorInactivityEnabled` field, and neither caller relies on its zero-value default: `mithril/sync.go` hardcodes it false (the gate can never be on for a Mithril bootstrap, see `errMithrilInactivityIncompatible` in ARCHITECTURE.md), while `cmd/dingo/serve.go`'s `resumeBackfill` passes the real `DelegatorInactivityEnabled` config value, which can genuinely be true there since it resumes any pending API-mode backfill checkpoint, not only a Mithril-originated one, and does not itself check the gate. |
-| `registration` | `id`, `staking_key`, `credential_tag`, `certificate_id`, `added_slot`, `deposit_amount` | PK `id`; indexes `(credential_tag, staking_key)`, `certificate_id`, `added_slot` | Conway-era stake registration certificate. Join `certificate_id -> certs.id`. |
-| `deregistration` | `id`, `staking_key`, `credential_tag`, `certificate_id`, `added_slot`, `amount` | PK `id`; indexes `(credential_tag, staking_key)`, `certificate_id`, `added_slot` | Conway-era stake deregistration certificate. |
-| `stake_registration` | `id`, `staking_key`, `credential_tag`, `certificate_id`, `added_slot`, `deposit_amount` | PK `id`; indexes `(credential_tag, staking_key)`, `certificate_id`, `added_slot` | Shelley-era stake registration certificate. |
-| `stake_deregistration` | `id`, `staking_key`, `credential_tag`, `certificate_id`, `added_slot` | PK `id`; indexes `(credential_tag, staking_key)`, `certificate_id`, `added_slot` | Shelley-era stake deregistration certificate. |
-| `stake_delegation` | `id`, `staking_key`, `credential_tag`, `pool_key_hash`, `certificate_id`, `added_slot` | PK `id`; indexes `(credential_tag, staking_key)`, `pool_key_hash`, `certificate_id`, `added_slot` | Stake delegation to pool. Logical joins to `account.(credential_tag, staking_key)` and `pool.pool_key_hash`. |
-| `stake_registration_delegation` | `id`, `staking_key`, `credential_tag`, `pool_key_hash`, `certificate_id`, `added_slot`, `deposit_amount` | PK `id`; indexes `(credential_tag, staking_key)`, `pool_key_hash`, `certificate_id`, `added_slot` | Combined registration and pool delegation. |
-| `stake_vote_delegation` | `id`, `staking_key`, `credential_tag`, `pool_key_hash`, `drep`, `drep_type`, `certificate_id`, `added_slot` | PK `id`; indexes `(credential_tag, staking_key)`, `pool_key_hash`, `drep`, `certificate_id`, `added_slot` | Combined pool and DRep delegation. |
-| `stake_vote_registration_delegation` | `id`, `staking_key`, `credential_tag`, `pool_key_hash`, `drep`, `drep_type`, `certificate_id`, `added_slot`, `deposit_amount` | PK `id`; indexes `(credential_tag, staking_key)`, `pool_key_hash`, `drep`, `certificate_id`, `added_slot` | Combined registration, pool delegation, and DRep delegation. |
-| `vote_delegation` | `id`, `staking_key`, `credential_tag`, `drep`, `drep_type`, `certificate_id`, `added_slot` | PK `id`; indexes `(credential_tag, staking_key)`, `drep`, `certificate_id`, `added_slot` | DRep-only vote delegation. |
-| `vote_registration_delegation` | `id`, `staking_key`, `credential_tag`, `drep`, `drep_type`, `certificate_id`, `added_slot`, `deposit_amount` | PK `id`; indexes `(credential_tag, staking_key)`, `drep`, `certificate_id`, `added_slot` | Combined registration and DRep delegation. |
-| `genesis_delegation` | `id`, `genesis_hash`, `genesis_delegate_hash`, `vrf_key_hash`, `added_slot`, `block_index`, `cert_index`, `certificate_id` | PK `id`; lookup index `(genesis_hash, added_slot, block_index, cert_index)`; index `genesis_delegate_hash`; unique index `certificate_id` | Shelley genesis-key delegation certificates. A delegation takes effect at `added_slot` plus the Shelley stability window, as the reference adopts a future genesis delegation. Header validation resolves the latest row with `added_slot + stability_window <= block_slot`, ordered by slot/block/certificate position, and falls back to Shelley genesis only when no on-chain update exists. |
-
-| `move_instantaneous_rewards` | `id`, `pot`, `certificate_id`, `added_slot`, `other_pot` | PK `id`; indexes `pot`, `certificate_id`, `added_slot` | MIR certificate header. `pot`: 0 = Reserves, 1 = Treasury. `other_pot` is non-zero for pot-to-pot transfer certs (no child rows); zero for credential distribution certs (child rows in `move_instantaneous_rewards_reward`). Applied at each epoch boundary by the Shelley INSTANT rule. |
-| `move_instantaneous_rewards_reward` | `id`, `mir_id`, `credential`, `credential_tag`, `amount` | PK `id`; index `mir_id`; composite index `(credential_tag, credential)` | MIR reward rows. Join `mir_id -> move_instantaneous_rewards.id`. `credential_tag` distinguishes key (0) vs script (1) stake credentials sharing a hash; `GetAccountSumsByCredential` filters on `(credential_tag, credential)` to attribute reserves/treasury totals to an account. `amount` is signed decimal text: the wire format types a MIR reward as `delta_coin`, so a certificate may reduce a reward scheduled earlier in the same epoch. `other_pot` on the parent row is `coin` and stays non-negative. |
-
-#### Classic Shelley PPUP and MIR validation reads
-
-`ledger.LedgerView` implements gouroboros' `GenesisDelegationState` and
-`ClassicProtocolParameterUpdateWindowState` for Shelley through Babbage
-validation. Active genesis delegates come from Shelley genesis configuration
-overlaid by the latest `genesis_delegation` certificate whose stability window
-has elapsed by the transaction slot; when validation holds a metadata
-transaction, that same transaction is used for the certificate lookup. The MIR
-quorum comes from Shelley genesis' `updateQuorum`, so it is configuration state
-rather than a metadata row.
-
-The PPUP voting window maps the transaction slot through the `epoch` table to
-its current epoch, start slot, and length, then derives the slot of no return
-from Shelley genesis' `securityParam` and `activeSlotsCoeff`. Proposals before
-that boundary target the current epoch; proposals at or after it target the
-next epoch. These lookups use the existing certificate and epoch data; they
-do not add a schema migration.
-
-#### Reward Withdrawal Persistence
-
-Protocol validation reads the active account's current reward balance before
-transaction ingestion. Before Dijkstra, a withdrawal must equal that balance
-and drain the account. In Dijkstra, transactions that do not use Plutus V1-V3
-may withdraw only part of the balance; transactions using those legacy Plutus
-versions retain the exact-drain rule. No withdrawal may exceed the balance.
-
-For every accepted positive withdrawal in a phase-2-valid transaction,
-transaction ingestion independently checks the era-neutral upper bound,
-subtracts the amount from `account.reward`, and inserts the matching
-`account_reward_delta` row in the same metadata transaction. A zero withdrawal
-in a phase-2-valid
-transaction does not change the balance or create a reward-delta row; when
-delegator inactivity tracking is enabled, it can still create an
-`account_withdrawal_witness` row because witnessing and balance mutation are
-separate concerns. Phase-2-invalid transactions persist neither the reward
-debit nor the witness.
-
-Re-ingesting an already-applied withdrawal checks for the existing logical
-withdrawal row by transaction hash and full stake credential before changing
-the balance, so replay cannot subtract the same amount twice. Rollback processes
-reward deltas after its target in reverse slot and insertion order. A withdrawal
-restores `account.reward` directly from its recorded `previous_reward`; a credit
-subtracts its recorded amount from the then-current balance. The rollback then
-deletes those delta and withdrawal-witness rows and refreshes
-`reward_live_stake`. Replaying the selected chain after rollback therefore sees
-no stale logical withdrawal row and deterministically applies the subtraction
-again.
-
-API-mode Mithril historical metadata backfill (`historicalBackfill`) replays
-already-ledger-validated canonical withdrawals from before the imported
-snapshot, so it skips both the era-neutral upper-bound check and the
-`account.reward` debit -- the imported snapshot balance already reflects every
-credit and debit through the snapshot's boundary, and re-subtracting a
-pre-boundary withdrawal from it would double-count. The withdrawal is still
-required to resolve an *active* `account` row for the credential during live
-ingestion. During historical backfill an inactive row is accepted, but a
-missing one is not:
-
-- A row exists but is inactive. `applyTransactionCertificates` runs
-  unconditionally regardless of `historicalBackfill`, so backfill's own
-  certificate replay can transiently deactivate a row Mithril imported active,
-  between a historical deregistration certificate and a later
-  re-registration certificate for the same credential; a deregistration's
-  account upsert never clears `reward`, so the row can still hold the
-  credential's real balance while inactive. The backfill falls back to an
-  inactive-inclusive lookup and journals that real `reward` as
-  `previous_reward` instead of discarding it as `0`, while still leaving the
-  row itself untouched.
-- No `account` row exists at all: the backfill returns
-  `models.ErrAccountNotFound` and the run stops. A canonical withdrawal
-  requires its reward account to have existed, so an absent row means the
-  certificate replay that should have created it was skipped -- a block whose
-  decode or offset computation failed, for instance. Journaling
-  `previous_reward = 0` in that state would record a balance nothing
-  established and hide the real defect, so the run fails closed and the
-  checkpoint stays before the block that failed.
-
-Historical backfill ends at the Mithril ledger anchor. `mithril sync` passes
-the anchor explicitly, and a backfill resumed by `dingo serve` reads the
-recorded `mithril_ledger_slot` instead. Blocks after the anchor are left to
-ledger replay: a historical pass over them would journal their withdrawals
-without the debit, and replay would then find the journal row and skip the
-debit as already applied.
-
-Replay applies certificates but not the rules that clear a delegation
-outside a certificate: POOLREAP (delegations to a reaped pool) and the PV10
-HARDFORK rule (delegations to an unregistered DRep). A replayed historical
-delegation can therefore name a pool or DRep the snapshot no longer holds.
-When replay reaches the anchor, `RestoreImportedAccountStates` sets `active`,
-`pool`, `drep`, `drep_type`, and `added_slot` of every account whose
-`account_import_baseline` row was recorded at or after the anchor back to
-that baseline, before the `reward_live_stake` rebuild reads `account.pool`.
-`reward` is not touched. Accounts with no such baseline (a genesis baseline,
-or a row certificate replay created) keep their replayed state.
-
-For snapshot protocol versions 10 and later, the same write transaction also
-reconciles the reverse DRep membership from the restored current accounts.
-Historical replay can otherwise retain an earlier DRep's reverse link even when
-the account's forward delegation matches its snapshot baseline. Existing
-canonical memberships keep their IDs and added slots; only stale memberships
-close at the anchor, and only missing canonical memberships are inserted.
-Repeating finalization therefore preserves history and does not grow the
-reverse index. A reconciliation that would clear an authoritative account
-baseline established at exactly that anchor is rejected and the entire
-finalization rolls back. Replay-only accounts with dangling credential-backed
-targets undergo the native PV10 cleanup; they do not make an otherwise
-consistent import fail. Protocol version 9 retains its historical reverse-
-membership semantics. Completed backfills are not rerun by this finalization
-change.
-
-DRep votes and registration or update certificates replayed below the anchor
-record each DRep's `last_activity_epoch`, which the snapshot does not carry,
-and leave the imported `expiry_epoch` unchanged. The snapshot's expiry already
-reflects the dormant epochs and proposal-driven bumps that replay never sees.
-
-A governance proposal replayed below the anchor keeps the imported row when the
-snapshot holds it. Any other replayed proposal was settled before the anchor
-(enacted, expired, or dropped, with its deposit refunded or its action paid),
-so it is stored as expired and dropped at its own epoch and slot and no later
-boundary selects it for ratification, expiry, or refund.
-
-Backfill resolves each epoch's protocol parameters when replay reaches it,
-after the proposals of the epoch before have been stored, and follows the live
-rollover: the classic updates agreed for the boundary are enacted under the era
-they were proposed in (`ComputeAndApplyPParamUpdates`), and at an era boundary
-the hard fork then translates the updated parameters. The epoch before the
-Mithril anchor's and the anchor's own keep the row the import recorded, which
-carries governance-enacted changes derivation cannot reproduce; `GetPParams`
-prefers the newest row for an epoch, so a derived row would replace it. A row
-for an older epoch can only be one backfill derived, possibly before the
-proposals it depends on were stored, and is derived again.
-
-##### Imported reward credit completion
-
-A certified account balance already includes applied reward rounds at or before
-the snapshot anchor, including rewards subsequently withdrawn. Account import
-marks those rounds' spendable, unguarded outputs folded in the same transaction
-as each balance replacement. It preserves applied-round markers, journals,
-already folded outputs, and later rounds.
-
-Before checkpointing cert state, import drains remaining covered outputs without
-adding credits, including credentials absent from the certified account set.
-The drain commits bounded batches and repeats after interruption. A resumed
-cert-state checkpoint from an older importer also drains covered outputs; a
-completed tip checkpoint leaves subsequent ledger activity unchanged.
-
-### Pools
-
-| Table | Columns | Keys / indexes | Relationships and notes |
-|---|---|---|---|
-| `pool` | `id`, `pool_key_hash`, `vrf_key_hash`, `reward_account`, `reward_account_credential_tag`, `latest_op_cert_sequence`, `pledge`, `cost`, `margin`, `leios_key_public`, `leios_key_possession_proof` | PK `id`; unique `pool_key_hash` | Current pool state. Historical registrations and retirements are separate rows. `reward_account_credential_tag`: 0 key hash, 1 script hash for the pool reward account. `leios_key_public` (96-byte BLS12-381 G2 public key) and `leios_key_possession_proof` (48-byte G1 signature) are the pool's registered Dijkstra/Leios voting key from an on-chain `leios_key` pool-cert field (migration `v2`); both are NULL only when the pool has no `leios_key`. Storage here never checks the proof -- a key with an invalid proof is still written as-is, so a value here means "seen on-chain," not "trusted." Committee verification does not read these mutable columns directly: SNAP copies the effective registration into the epoch's `pool_stake_snapshot`, and `ledger.LedgerView.GetLeiosKeys` reads that historical row. The actual proof-of-possession check happens one layer up, in `ledger/leios`'s `resolveOnChainKeys` (`VerifyLeiosKeyProofOfPossession`), which is allowed to depend on `ledger/leios`'s BLS primitives while this package is not (`internal/architecture/tests_test.go` forbids `database` importing `ledger`). |
-| `pool_registration` | `id`, `pool_id`, `pool_key_hash`, `vrf_key_hash`, `reward_account`, `reward_account_credential_tag`, `pledge`, `cost`, `margin`, `metadata_url`, `metadata_hash`, `certificate_id`, `registration_index`, `added_slot`, `deposit_amount`, `deposit_held`, `leios_key_public`, `leios_key_possession_proof`, `leios_key_registration_age_unknown`, `leios_key_registration_epoch` | PK `id`; unique `(pool_id, added_slot, certificate_id, registration_index)`; indexes `pool_key_hash`, `certificate_id` | Pool registration certificate. Join `pool_id -> pool.id` and `certificate_id -> certs.id`. The identity keeps multiple registration certificates from one pool in one block while making replay of the same certificate idempotent. Live certificates use registration index zero because their certificate IDs identify them. Synthetic snapshot registrations use certificate ID zero and stable indexes zero for current parameters and one for staged parameters. Genesis pools with a BLS key are certificate ID zero at slot 0 with `leios_key_registration_epoch` 0. `reward_account_credential_tag`: 0 key hash, 1 script hash. `deposit_amount` is the protocol parameter in force for that certificate; nullable `deposit_held` is the amount actually retained for the registration cycle and refunded by POOLREAP. Migration `v12` reconstructs legacy rows from registration, retirement, and epoch history, carries deposits across re-registrations, starts a new cycle after a completed reap, preserves populated values on replay, and fails closed with a resync-required error when a reap cannot be placed safely. Live certificate ingestion cannot fail block application for missing epoch history, so it preserves the pre-migration charged-amount fallback in that case. An unknown retained amount remains NULL; refund queries then use `deposit_amount` as the legacy fallback. `MetadataStore.GetPoolDepositsHeld` reads the same amount for the latest registration of each requested pool (GetStakePoolState); `GetPoolDepositsHeldAtSlot` reads it over the registrations added at or before a slot (GetPoolState at an acquired point). `leios_key_public`/`leios_key_possession_proof` mirror `pool`'s columns of the same names for this specific registration (see above). Validation resolves active and deferred ownership by `leios_key_public`; a different proof for the same public key does not create a distinct claim. `leios_key_registration_age_unknown` marks Leios key material imported without its on-chain registration slot; the import slot must not restart the protocol TTL. `leios_key_registration_epoch` is the ledger's `BlsKeyState` registered-in epoch. A live registration carrying a `leios_key` writes it from cardano-ledger's POOL and POOLREAP rules, reading only the key state active in the transaction's epoch from rows already stored (the current parameters of the pool's latest snapshot import in that epoch when there is one, because an import replaces the pool state where it lands, and otherwise the pool's latest registration before the epoch, or the epoch's first registration when the pool was reaped before the epoch or is new in it) and the latest retirement. The read of the latest registration before the epoch is an index seek plus the rows one epoch-opening block's closure added, so it does not grow with the pool's registrations in the epoch; the lookups of the latest snapshot import in the epoch and of the latest retirement still read the pool's registrations since the epoch started and its retirements, because no index orders those by position. Nothing is kept outside the rows, so rollback has nothing to undo beyond the deleted rows: the transaction's epoch for a pool that is not registered, the original epoch for a re-registration with an identical key (public key and proof) as the active one, and the epoch after the transaction's for a different key or a key added to a keyless pool. It stays NULL for registrations without a `leios_key`, and for a registration whose epoch cannot be placed in the epoch table; one that keeps an imported key of unknown age is written with NULL and `leios_key_registration_age_unknown` set. Migration `v27` marks existing imported registrations that have no source certificate (NULL or zero ID) and a nonzero synthetic slot. Genesis staking replay reuses the existing slot-0 row and replaces its owner/relay children from the immutable genesis configuration, making startup repair a partially-written genesis registration instead of inserting children against a missing parent. This behavior is covered by the SQLite metadata contract suite. |
-| `pool_registration_owner` | `id`, `pool_registration_id`, `pool_id`, `key_hash` | PK `id`; indexes `pool_registration_id`, `pool_id` | Owners for a pool registration. Join `pool_registration_id -> pool_registration.id`; `pool_id -> pool.id`. |
-| `pool_registration_relay` | `id`, `pool_registration_id`, `pool_id`, `relay_type`, `ipv4`, `ipv6`, `hostname`, `port` | PK `id`; indexes `pool_registration_id`, `pool_id` | Relay addresses and their on-chain constructor for a pool registration. `relay_type` is nullable for pre-v38 rows, which retain legacy field-based inference. `GetActivePoolRelays` joins `pool` and returns each row with its pool's key hash in the transient `PoolRegistrationRelay.PoolKeyHash` field, which is not a stored column. |
-| `pool_retirement` | `id`, `pool_id`, `pool_key_hash`, `certificate_id`, `epoch`, `added_slot` | PK `id`; indexes `pool_id`, `pool_key_hash`, `certificate_id`, `added_slot` | Pool retirement certificate. Synthetic retirements written by a Mithril v2 catch-up (reconcile) or by the initial Mithril bootstrap import have `certificate_id = 0` and no `certs` row (`added_slot` is the catch-up or snapshot point; `epoch` is that same point except for the pending-retirement case below, where it is a future epoch); joins on `certificate_id` must be LEFT JOINs to keep them visible, and active-pool queries rank them ahead of certificate-backed rows at the same slot. The bootstrap case covers a pool that appears in the imported active pool distribution (`pool_stake_snapshot` `"actv"`) but is absent from the certified live pool params: it retired at the snapshot's epoch boundary yet still leads the current epoch's already-fixed schedule, so the import synthesizes a `pool`/`pool_registration` pair carrying only its pool key hash and pool-distr `vrf_key_hash` (pledge/cost/margin/reward-account left zero) plus this retirement tombstone. That keeps the producer resolvable via `GetPool(includeInactive=true)` for the header VRF-key binding check while the tombstone excludes it from active-pool and stake queries. Imported reward seeding separately intersects its shared registration fallback with each target snapshot's positive-stake delegated pool keys before the target snapshot's complete parameters overlay it. A synthesized pool that belongs only to another snapshot therefore cannot leak into this epoch's reward inputs, while an actually referenced pool remains subject to the all-or-nothing reconciliation gate if neither source supplies complete economics. This matches how a genesis-synced node retains a retired pool without treating it as active. The bootstrap import writes a second, distinct kind of `certificate_id = 0` row for a pool the snapshot shows as *pending* retirement: the PState `retiring` map schedules a live pool to retire at a later epoch, so the row carries that future `epoch` while the pool keeps its `pool_registration` economics and its `deposit_held`, and continues to earn rewards and lead slots until the boundary refunds it. Dropping these rows leaves the node holding a deposit the network has already refunded to the pool's reward account, so the two ledgers disagree about that account's balance. |
-| `pool_opcert_sequence` | `id`, `pool_key_hash`, `slot`, `sequence` | PK `id`; unique `(pool_key_hash, slot)`; index `slot`; index `(pool_key_hash, sequence)` | Observed operational certificate sequence by slot. Writes are first-write-wins for `(pool_key_hash, slot)`: replaying the same counter succeeds, while a different counter returns an `opcert counter conflict` error and rolls back the block-apply transaction. Read before write inside the block-apply transaction to enforce inbound opcert counter monotonicity; per-slot rows let rollback drop entries past the rollback slot and recompute `pool.latest_op_cert_sequence`. Trusted replay queues these observations in its metadata accumulator, inserts them in parameter-bounded batches, checks every duplicate against the stored sequence, and advances each pool's denormalized maximum before commit. Its in-memory counter view stages reads and advances per database transaction, promoting them only after commit. Fresh bulk loads may defer both read-oriented indexes and rebuild them before success; ordinary writes keep them resident. A Mithril restore imports the certified HeaderState counter map at its trusted tip; validation selects observations strictly after that boundary, falls back to the certified row at the boundary, and ignores stale pre-boundary rows. A pool with neither is absent from the certified map and is validated against a zero baseline, but only when some row exists at the boundary slot (`PoolOpCertSequencesExistAtSlot`): a database restored before the map was persisted has none there, and the read fails with a rebootstrap error rather than treating an unknown counter as zero. Those imported rows are counters, not blocks — a bootstrap applies no block at or below its anchor, and one slot cannot hold a block from every pool — so `CountPoolBlocksInSlotRange` and `GetPoolBlockIssuersInSlotRange`, the two readers that mean "blocks minted", raise their start slot past the recorded `mithril_ledger_slot` before reading. Without that they credit every pool holding a certified counter with a block it never minted and inflate the epoch total by the size of the pool set, which reaches pool reward performance, the `reward_pool_input` counts seeded at the epoch boundary, and Blockfrost `blocks_minted`. `LatestPoolOpCertSequenceAtOrBefore` uses the same rows to provide Leios announcement validation with the highest issuer counter no later than the selected chain's immutable-tip slot; absence by that bound is distinct from counter zero and classifies the dangling announcement as stale. `LatestPoolOpCertSequenceInRange` reads inclusive slot bounds for a peer candidate fork; basing its counter state at the common ancestor excludes a later operational-certificate rotation on the selected chain. `LatestPoolOpCertSequenceAfter`, `LatestPoolOpCertSequenceAtOrBefore`, and `LatestPoolOpCertSequenceInRange` select a lone `MAX(sequence)` and write the slot bound as `+slot`, so SQLite descends `(pool_key_hash, sequence)` from the pool's highest counter and stops at the first row inside the bound instead of ranging over `(pool_key_hash, slot)`. Counters rise with slot, so the cost is the pool's rows above the bound: small for the near-tip, immutable-tip, and Mithril-boundary slots these callers pass, linear for a slot deep in history. PostgreSQL takes the same backward index scan; MySQL discards the unary plus and aggregates every row of the pool. Reward calculation can read the ordered raw issuer rows for an ended epoch and exclude TPraos overlay slots before deriving pool performance. Raising the start slot removes the imported counter rows, but it leaves no blocks at all for an epoch that ended below the anchor; `imported_pool_block_count` is the positive record of what those epochs actually minted. `LatestPoolOpCertSequences` reduces the whole table to one highest `sequence` per `pool_key_hash` (`GROUP BY pool_key_hash`) for the `GetChainDepState` query, and `LatestPoolOpCertSequencesAtOrBefore(slot)` answers the same question at an acquired point. A slot filter cannot use the `(pool_key_hash, sequence)` index, so it starts from the unbounded result and recomputes only the pools with a row after `slot` (`PoolOpCertSequencesChangedAfterSQL`, a range of the `slot` index; then `PoolOpCertSequenceAtOrBeforeSQL` per pool, a range of the unique `(pool_key_hash, slot)` index). For the unbounded read, because the table is keyed by issuer rather than joined to `pool`, that set includes cold keys whose pool has left the active set, which is what the chain still enforces against. That aggregate has no slot bound available to narrow it — the table takes a row per block minted, is pruned only by rollback, and holds nothing above the tip — so `(pool_key_hash, sequence)` exists to serve it from an index alone: SQLite and PostgreSQL fold it without reading a table row, and MySQL can skip through the index a pool at a time. It is declared by migration `v1alpha1`. The cost is one further index maintained per minted block. At the SQL boundary the store flips bit 63 of every counter. This order-preserving mapping sends `0` to `MinInt64` and `MaxUint64` to `MaxInt64`, so `MAX(sequence)`, the denormalized maximum guard, and the composite index preserve unsigned ledger ordering on signed database columns. Migration `v49` applies the same shift to legacy nonnegative rows. |
-
-Migration v43 adds `registration_index` to pool registrations and includes
-it in their unique identity alongside pool, slot, and certificate. MySQL
-creates the replacement index before dropping the old index so the pool
-foreign key remains indexed throughout the migration.
-
-Pool validation reads `pool_registration` history in two views. The current
-view selects the latest registration before the epoch boundary, or the pool's
-first registration when the pool first appears during the epoch. The future
-view selects the latest same-epoch re-registration and excludes that immediate
-first registration. This keeps the effective and deferred VRF-key indexes
-separate while using the same retirement precedence for both.
-
-The `pool_opcert_sequence` row is also covered by rollback and by the
-`ledgerstate.ImportLedgerState` post-anchor sweep: both remove observations
-after their target, then recompute `pool.latest_op_cert_sequence` from the
-remaining history. This lets replay record a new counter at a slot previously
-written by discarded local state while preserving the first-write-wins rule
-for a surviving `(pool_key_hash, slot)` row.
-
-### DReps, Governance, and Committee
-
-DRep deregistration journals and clears active accounts' current forward vote
-delegations at protocol version 10 and later. The current account target is
-authoritative even when historical API replay left a stale or missing reverse
-membership; the deregistered DRep's reverse memberships are still closed at the
-certificate slot. Protocol version 9 retains its reverse-membership-based
-clearing behavior.
-
-DRep activity updates reject epoch-plus-inactivity overflow before addition and
-reject activity or expiry values outside the signed SQL integer domain. Rejected
-updates preserve the previous activity and expiry epochs.
-
-| Table | Columns | Keys / indexes | Relationships and notes |
-|---|---|---|---|
-| `drep` | `id`, `credential_tag`, `credential`, `anchor_url`, `anchor_hash`, `added_slot`, `last_activity_epoch`, `expiry_epoch`, `active` | PK `id`; unique `(credential_tag, credential)`; indexes `added_slot`, `last_activity_epoch`, `expiry_epoch`, `active` | Current DRep state. `credential_tag`: 0 key-hash, 1 script-hash. The composite unique key distinguishes same-hash key and script DReps. The `active` index supports reconcile scans for live DReps. Activity updates set `last_activity_epoch` and `expiry_epoch` from the containing epoch and active protocol parameters; expiry changes and dormant-boundary extensions are rollbackable. PV9 registration uses accumulated dormant epochs. Mithril imports carry snapshot expiry and dormancy state but do not provide last-activity epochs; imported rows therefore retain `last_activity_epoch = 0`. Historical replay at or below the Mithril anchor records activity without recomputing expiry: the imported expiry already includes dormant epochs and proposal-driven bumps, and the dormancy counter is not advanced by replay. `expiry_epoch = 0` means unset and is exempt from expiry by both `drepActiveAtEpoch` (`ledger/governance/epoch.go`) and the expiry sweep, whose predicate is `expiry_epoch > 0 AND expiry_epoch <= ?`; a Mithril import therefore carries `expiry_epoch` from the snapshot `DRepState` (`ledgerstate.importDReps`), since leaving it unset would hold every imported DRep in `countActiveDReps` and inflate the ratification quorum denominator. `last_activity_epoch` is not carried by the import and imported rows are written `active = 1`. `drep_expiry_history` journals activity/expiry values by effective slot; `drep_dormancy_state/history` tracks consecutive no-proposal epochs for PV9 registration, and proposal resets happen before certificates. `drep_delegator` tracks rollbackable stake-credential membership for each DRep, including snapshot-imported reverse sets.
-| `drep_expiry_history` | `id`, `credential_tag`, `credential`, `added_slot`, `last_activity_epoch`, `expiry_epoch` | PK `id`; unique `(credential_tag, credential, added_slot)`; index `added_slot` | Canonical per-slot journal for activity and expiry values. Rollback and point-in-time DRep reads restore the latest surviving row. Migration v37 seeds the current value at the latest known DRep event. |
-| `drep_expiry_epoch_event` | `added_slot` | PK `added_slot` | Idempotence marker for each dormant DRep expiry extension at an empty-proposal epoch boundary. |
-| `drep_dormancy_state` | `id`, `dormant_epochs` | PK `id` (singleton row id 1) | Consecutive epoch count with no governance proposals, used for PV9 registration expiry. |
-| `drep_dormancy_history` | `id`, `added_slot`, `previous_dormant_epochs` | PK `id`; index `added_slot` | Previous counter values for boundary increments and proposal resets, replayed in reverse during rollback. |
-| `drep_delegator` | `id`, `drep_credential_tag`, `drep_credential`, `stake_credential_tag`, `stake_credential`, `added_slot`, `removed_slot` | PK `id`; indexes `(drep_credential_tag, drep_credential, removed_slot)`, `(added_slot, removed_slot)` | Rollbackable reverse membership from registered DReps to stake credentials, including the reverse set imported from cert-state snapshots. |
-| `registration_drep` | `id`, `credential_tag`, `drep_credential`, `anchor_url`, `anchor_hash`, `certificate_id`, `added_slot`, `deposit_amount` | PK `id`; unique `(credential_tag, drep_credential, added_slot)`; index `certificate_id` | DRep registration certificate. `credential_tag` mirrors `drep.credential_tag` for the registered DRep. |
-| `deregistration_drep` | `id`, `credential_tag`, `drep_credential`, `certificate_id`, `added_slot`, `deposit_amount` | PK `id`; indexes `(credential_tag, drep_credential)`, `certificate_id`, `added_slot` | DRep deregistration certificate. |
-| `update_drep` | `id`, `credential_tag`, `credential`, `anchor_url`, `anchor_hash`, `certificate_id`, `added_slot` | PK `id`; indexes `(credential_tag, credential)`, `certificate_id`, `added_slot` | DRep update certificate. |
-| `governance_proposal` | `id`, `tx_hash`, `action_index`, `action_type`, `proposed_epoch`, `expires_epoch`, `parent_tx_hash`, `parent_action_idx`, `enacted_epoch`, `enacted_slot`, `ratified_epoch`, `ratified_slot`, `policy_hash`, `anchor_url`, `anchor_hash`, `deposit`, `return_address`, `gov_action_cbor`, `expired_epoch`, `expired_slot`, `added_slot`, `deleted_slot` | PK `id`; unique `(tx_hash, action_index)`; composite `(parent_tx_hash, parent_action_idx)` (`idx_gov_proposal_parent`); indexes action type, epochs, lifecycle slots, `added_slot`, `deleted_slot` | Governance action lifecycle. Chain processing writes a row only for a proposal that passes the era's proposal rule: persistence re-applies that rule to a ParameterChange, so values rejected by the active era and protocol-version rule leave no row on replay, backfill or gap-block processing, even where transaction validation is skipped. Ledger-state snapshot import writes the snapshot's proposal rows without running the rule. During a catch-up reconcile, a proposal still present in the local Conway proposal set but absent from the newer snapshot is soft-deleted at the snapshot tip so ratification, parent checks, and deposit refunds cannot consume stale state. Votes join by `governance_vote.proposal_id`. `gov_action_cbor` stores the era-specific GovAction CBOR used for enactment and transaction validation; replay may rewrite ratified parameter-change actions at an era boundary, such as Conway to Dijkstra, so old databases should be rebuilt from chain data when this encoding changes. `expires_epoch` is inclusive; validation derives its final slot from the proposal epoch's start and epoch length. The ledger view exposes rows without `enacted_epoch` or a `governance_proposal_drop` row as members of the Conway proposals set -- an expired action stays a member, and may still be named as a parent or refused a vote by its expiry epoch, until the boundary that drops it -- while the latest enacted rows for the four CIP-1694 purposes are exposed separately as purpose roots. Same-boundary epoch replay reads proposals whose `enacted_epoch/enacted_slot` or `expired_epoch/expired_slot` already match the boundary to restore treasury/reward side effects after stake reward pot reset. `expired_epoch`/`expired_slot` mark a proposal ineligible; they do not by themselves refund its deposit -- see `governance_proposal_drop`. Historical replay at or below a Mithril anchor stores a proposal the snapshot did not import as expired and dropped at its own epoch and slot, so later boundaries do not select it again for ratification, expiry, or refund. |
-| `governance_proposal_order` | `proposal_id`, `tx_index` | PK `proposal_id` | Companion table recording a proposal's position in Conway submission order within its `added_slot`: the transaction's index in its block, or for a proposal imported from a ledger-state snapshot, its position in the snapshot's proposal sequence (all proposals of one epoch share that epoch's anchor slot). RATIFY and ENACT reads order equal-slot proposals by it, then by `action_index`. A companion table for the same reason as `governance_proposal_drop`. FK `proposal_id` references `governance_proposal.id` with cascade deletion, and `DeleteGovernanceProposalsAfterSlot` also deletes the rows of the proposals it removes explicitly. `SetGovernanceProposal` writes the row only when the caller supplies a position, so rewriting a loaded proposal without one keeps the stored position. The v33 migration backfills rows from each proposal's stored `transaction.block_index`; a proposal without a stored transaction (one imported before v33) has no row and keeps the pre-v33 `tx_hash` order until it leaves the proposal set, or until the database is rebuilt from a fresh import. |
-| `governance_proposal_drop` | `proposal_id`, `dropped_epoch`, `dropped_slot` | PK `proposal_id`; indexes `dropped_epoch`, `dropped_slot` | Companion table recording when an expired proposal's deposit was actually returned and the proposal reached final consideration. cardano-ledger does not refund an expired action's deposit in the same epoch it is marked expired -- that happens one full epoch later, the same one-epoch delay ratification has before enactment. A separate table rather than columns on `governance_proposal` avoids widening a table v16 (`governance-proposal-optional-anchor`) already rebuilds via rename-and-recreate with an unqualified `SELECT *`, which cannot tolerate columns added after it. FK `proposal_id` references `governance_proposal.id` with cascade deletion. A row's absence means the proposal, if expired, is still awaiting its drop. The v17 backfill stamps every proposal an upgraded database had already expired, because the pre-v17 tick refunded at expiry; without it the new drop step would return each of those deposits a second time at the first boundary after the upgrade. |
-| `governance_proposal_ratification_history` | `id`, `proposal_id`, `transition_slot`, `ratified_epoch`, `ratified_slot` | PK `id`; indexes `transition_slot`, `(proposal_id, transition_slot, id)` | Rollback journal for proposal ratification lifecycle. A paired epoch/slot records ratification; NULL marker values record an explicit return to pending. FK `proposal_id` references `governance_proposal.id` with cascade deletion. Rollback deletes transitions above the target and restores the latest remaining state, with `id` breaking ties between transitions at the same slot. |
-| `governance_vote` | `id`, `proposal_id`, `voter_type`, `voter_credential_tag`, `voter_credential`, `vote`, `anchor_url`, `anchor_hash`, `added_slot`, `vote_updated_slot`, `deleted_slot` | PK `id`; unique `(proposal_id, voter_type, voter_credential_tag, voter_credential)`; indexes proposal/voter/lifecycle slots | Vote on a governance proposal. `voter_type`: 0 committee, 1 DRep, 2 SPO. `voter_credential_tag`: 0 key hash, 1 script hash for committee/DRep voters; 0 for SPO key hashes. `vote`: 0 No, 1 Yes, 2 Abstain. `SetGovernanceVote` upserts by the unique voter/proposal key, so a replaced vote overwrites `vote`/`anchor_url`/`anchor_hash`/`vote_updated_slot` in place; `governance_vote_history` is what lets rollback recover the value that predated a replacement. |
-| `governance_vote_history` | `id`, `vote_id`, `transition_slot`, `vote`, `anchor_url`, `anchor_hash`, `tx_hash`, `cert_index` | PK `id`; indexes `transition_slot`, `(vote_id, transition_slot, id)` | Rollback journal for vote replacement, mirroring `governance_proposal_ratification_history`'s pattern. `SetGovernanceVote` appends a row here for every cast located by its transaction (`tx_hash`, and `cert_index`, the procedure's position among the voter's own procedures in it; migration v48), skipping one whose `(vote_id, tx_hash, cert_index)` is already recorded so a replayed block adds nothing, and for a write without that position only when the effective `vote`/`anchor_url`/`anchor_hash` changes, including a voter's first cast, keyed by the slot the new value took effect (`vote_updated_slot`, falling back to `added_slot` on a first cast). FK `vote_id` references `governance_vote.id` with cascade deletion, so a vote created after the rollback target is removed along with its own history. For a vote that existed before the rollback target but was later replaced, rollback restores `vote`/`anchor_url`/`anchor_hash`/`vote_updated_slot` from the latest surviving history entry (`transition_slot` at or before the target) rather than deleting the row outright -- the prior behavior lost the vote entirely when a rollback landed between two replacements, since the row itself carries only the current value. Migration `v22` backfills one history row per pre-existing vote from its current value; a replacement that happened before the upgrade cannot be reconstructed, matching `v6`'s ratification-history backfill limitation. A vote whose only surviving history is that single backfilled row, if a rollback deletes it, has no history left to restore from; rollback falls back to deleting that vote outright (the pre-history behavior) instead of writing `NULL` into `vote`'s `NOT NULL` column. |
-| `constitution` | `id`, `anchor_url`, `anchor_hash`, `policy_hash`, `added_slot`, `deleted_slot` | PK `id`; unique `added_slot`; index `deleted_slot` | Current or historical constitution references. |
-| `committee_member` | `id`, `cold_credential_tag`, `cold_cred_hash`, `expires_epoch`, `term_start_slot`, `term_start_slot_set`, `added_slot`, `deleted_slot` | PK `id`; unique `(cold_credential_tag, cold_cred_hash, added_slot)`; indexes `added_slot`, `deleted_slot` | Snapshot-imported and enacted committee state. Credential tag 0 is a key hash and 1 is a script hash. `term_start_slot` bounds the authorization and resignation certificates that apply to this membership term; `term_start_slot_set` preserves an explicit slot-zero start. An `UpdateCommittee` enactment preserves the existing `term_start_slot` of a credential that is already a seated member and stamps a fresh one only for a credential new to the committee or rejoining after removal: the later of the proposal's `added_slot` and the first slot of the epoch the enactment boundary closes, because cardano-ledger drops a non-member's committee state at each epoch boundary. Migration v44 repairs renewal rows written before this rule; a new or rejoining member's term written before the epoch-boundary rule still needs a resync. Re-election creates a new historical row; soft deletion and rollback match the full tagged identity and mutation slot. |
-| `committee_quorum` | `id`, `quorum`, `added_slot` | PK `id`; unique `added_slot` | Enacted committee quorum threshold. `quorum` is stored through `types.Rat`; zero is a valid threshold, while SQL NULL marks a cleared quorum. Migration v23 converts legacy zero clear markers to NULL. |
+| `reward_credit` | `boundary_slot`, `account_id`, `output_id`, `amount` | `WITHOUT ROWID` on SQLite; PK (`boundary_slot`, `account_id`, `output_id`) | Stake-reward credits of the reward round applied at `boundary_slot`, one row per `reward_account_output` row added to `account.reward`. `account_id` is `account.id`; `output_id` is the output row's id, opaque because the output row can be pruned, and negative (`-id` of the former journal row) for rows migrated from `account_reward_delta`. The key makes re-applying a credit a no-op and lets a round fold in `account.id` order append at the end of its key range. There are no foreign keys: a parent delete would otherwise scan this table by its non-leading `account_id`. `amount` is decimal text. |
+| `reward_credit_slot` | `boundary_slot` | PK `boundary_slot` (`WITHOUT ROWID` on SQLite) | The slots that hold `reward_credit` rows, so historical reads and rollback enumerate rounds without scanning credits. |
+| `reward_source` | `id`, `hash` | PK `id`; unique `hash` | Event discriminators of `reward_event_credit`: the retired pool key hash of a pool-retirement refund, the proposal source hash of a governance credit, the transaction hash of a Dijkstra direct deposit, or the synthetic MIR pot hash. |
+| `reward_event_credit` | `id`, `source_id`, `account_id`, `slot`, `amount`, `post_snapshot` | PK `id`; unique (`source_id`, `account_id`, `slot`); indexes (`slot`, `account_id`), (`account_id`, `slot`) | Reward-account credits outside a stake-reward round: pool-retirement refunds, MIR, governance refunds and treasury withdrawals, direct deposits. `post_snapshot` marks POOLREAP and governance credits applied after SNAP through Conway. The unique key includes `slot` because a MIR source repeats across boundaries; a replay of one (source, account, slot) is a no-op. Governance proposal credits use a proposal-event discriminator derived from proposal `tx_hash` plus `action_index`, not the raw proposal transaction hash alone. |
+| `reward_withdrawal` | `tx_id`, `account_id`, `slot`, `amount`, `previous_reward` | `WITHOUT ROWID` on SQLite; PK (`tx_id`, `account_id`); indexes (`account_id`, `slot`), `slot` | Reward withdrawals, keyed by the withdrawing `transaction.id`. Positive withdrawals subtract `amount` from `account.reward` and store the pre-withdrawal balance in `previous_reward`, which rollback restores. `(tx_id, account_id)` is the replay key. Credits of one slot precede withdrawals of that slot, which rollback and historical reads rely on: a credential's pending credits are journaled before a withdrawal reads its balance. Migration 56 replaced the former `account_reward_delta` table with these four tables. Rollback (`DeleteAccountRewardsAfterSlot`) skips an account whose row is missing rather than failing: the balance lives on the account row, so with it gone there is nothing to restore, and failing would abort a rollback that startup reconciliation depends on. |
 | `auth_committee_hot` | `id`, `cold_credential_tag`, `cold_credential`, `hot_credential_tag`, `host_credential`, `certificate_id`, `added_slot` | PK `id`; indexes tagged cold identity and newest-first prune order, tagged hot identity, `certificate_id`, `added_slot` | Committee hot-credential authorization certificate. The SQL column is `host_credential` for backward compatibility. Resolution selects the latest authorization no earlier than the active member's `term_start_slot` and suppresses it after a resignation in that term. For a cold credential that is not seated, `GetCommitteeHotAuthorizationsSince` returns its latest authorization only when that row is at or after the given slot; the ledger passes the current epoch's first slot and suppresses the authorization after a later resignation. Superseded rows older than the rollback window are pruned on write outside API storage mode; see Committee Hot-Key Authorization Retention. |
 | `resign_committee_cold` | `id`, `cold_credential_tag`, `cold_credential`, `anchor_url`, `anchor_hash`, `certificate_id`, `added_slot` | PK `id`; indexes tagged cold identity, `certificate_id`, `added_slot` | Committee cold-credential resignation certificate. A resignation is authoritative even when no earlier authorization row exists and is permanent for that membership term. Removal followed by re-election starts a new term; historical rows remain available for rollback. |
 
 When an enacted treasury withdrawal credits a proposal return account that also
-receives a deposit refund at the same boundary, `account_reward_delta` records
+receives a deposit refund at the same boundary, `reward_event_credit` records
 separate event discriminators for the withdrawal and refund so both credits
 remain distinct and rollbackable.
 
@@ -3567,7 +3374,7 @@ row's sweep list, it restores or removes post-anchor `account`, `drep`, and
 `constitution`, `committee_member`, and `committee_quorum` rows; and deletes
 post-anchor `pparams` and `pparam_update` rows. These operations share the
 atomic pre-import metadata transaction. For accounts deleted because they did
-not exist at the anchor, post-anchor `account_reward_delta` and
+not exist at the anchor, post-anchor reward journal and
 `account_withdrawal_witness` rows are deleted without reversing balances;
 snapshot-imported accounts have their journal rows cleared after their anchor
 balances are written. Replay can then recreate the same accounts and apply
@@ -4148,7 +3955,7 @@ pending snapshot exists. Those paths advance the global prune floor to the
 batch tip, so deleting even outputs created after the snapshot would make its
 historical reconstruction unavailable. Regular sweeps can still remove outputs
 spent at or before the protected captured slot. Historical reward credits and
-withdrawals remain in account_reward_delta, and certificate/registration history
+withdrawals remain in the reward journal, and certificate/registration history
 is retained independently; reward_account_output retention is not an input to
 this reconstruction.
 
@@ -5664,24 +5471,17 @@ query layer (`newDialectQueryer`) does not translate.
 
 ### `AddAccountRewardsByCredential`
 
-Applies a batch of `models.AccountRewardCredit` values with exactly the effect
-of one `AddAccountRewardByCredential` call per credit, in order: a credit whose
-`(withdrawal = FALSE, tx_hash, credential_tag, staking_key, added_slot)` journal
-row exists is skipped, a repeated credit in the batch counts once, every other
-credit is journaled and added to its account's `reward`, and each credited
-credential's `reward_live_stake` row is refreshed. Credits run in batches of
-200: one `tx_hash IN (...)` lookup of existing journal rows, one
-`staking_key IN (...)` lookup per credential tag of the active accounts, one
-multi-row journal insert, then one account update and one live-stake refresh
-per credited account. A missing or inactive account fails the batch with
-`models.ErrAccountNotFound` before anything is written. The epoch-boundary
-reward round credits through it when it writes account rows, and a withdrawal
-folds a credited round's credits through it.
-
-### `RewardCreditsAlreadyApplied`
-
-Reports, per credit, whether its journal row exists, with the same
-`tx_hash IN (...)` lookup.
+Applies a batch of `models.AccountRewardCredit` stake-reward values: a credit
+whose `(boundary_slot, account_id, output_id)` `reward_credit` row exists is
+skipped, every other credit is journaled (`INSERT ... ON CONFLICT DO NOTHING`
+whose affected-row count decides) and added to its account's `reward`, and each
+credited account gets one balance read, one `UPDATE account SET reward` and one
+`reward_live_stake` refresh however many credits it received. The statements
+are fixed: one journal insert per credit, plus one `reward_credit_slot` insert
+per distinct slot. A missing or inactive account fails the call with
+`models.ErrAccountNotFound`. The epoch-boundary reward round credits through it
+when it writes account rows, compaction folds a credited round through it in
+account order, and a withdrawal folds a credited round's credits through it.
 
 ### `GetRewardAccountOutputsForCredential`, `GetRewardAccountOutputsInPoolKeyHashRange`, `FoldRewardAccountOutputs`
 
@@ -6309,7 +6109,7 @@ mark stake by ~10% (worse for pools whose delegators hold most stake as
 rewards), which understates sigma so canonical blocks fail the leader-threshold
 VRF check and wedge networks that enforce it. The query reconstructs each
 credential's reward balance at the requested slot from `account.reward` and
-`account_reward_delta`: without a later withdrawal it subtracts all later
+the reward journal: without a later withdrawal it subtracts all later
 credits from the live balance; with a later withdrawal it starts from the first
 withdrawal's `previous_reward` and subtracts credits between the requested slot
 and that withdrawal. Events after the first withdrawal cannot affect its
@@ -6318,16 +6118,17 @@ bounded Go-side pass over account/reward-delta rows, keyed by credential, and
 adds it once while folding live UTxO rows. This keeps decimal `uint64` values
 exact and avoids multiplication across the UTxO join fan-out.
 
-Each batch reads `account_reward_delta` with a credential predicate grouped
-per `credential_tag` into one `staking_key IN (...)` list, and resolves the
-Leios context slot (`COALESCE(lc.slot, d.added_slot)`) through `LEFT JOIN`s on
-the unique `transaction.hash` and the `leios_transaction_context` primary key,
-so each delta row joins at most one context row. The credit query filters
-`NOT d.withdrawal` rather than `withdrawal = FALSE`: SQLite never uses an index
-for a negated column, so without `sqlite_stat1`, the state of a from-genesis
-sync, the planner drives from `idx_account_reward_delta_credential` instead of
-`idx_account_reward_delta_withdrawal`, which matches nearly every row. The
-withdrawal query keeps `withdrawal = TRUE`, which that index serves well.
+Each credential is resolved to its `account.id` and read through fixed
+statements: its `reward_credit` rows for the slots in `reward_credit_slot` above
+the requested slot (the slot index drives, a primary-key probe per slot), its
+`reward_event_credit` rows through `idx_reward_event_credit_account`, and its
+first later `reward_withdrawal` through `idx_reward_withdrawal_account_slot`.
+Event credits and withdrawals resolve the Leios context slot
+(`COALESCE(lc.slot, ...)`) through `LEFT JOIN`s on the unique `transaction.hash`
+(event credits whose source is a transaction hash) or the withdrawing
+`transaction.id`, and `leios_transaction_context`'s primary key. A credit counts
+before the first later withdrawal when its slot is at or below the withdrawal's.
+No plan depends on `sqlite_stat1`.
 
 `utxo.amount`, `account.reward`, and the reward-delta amounts are stored as text
 (`types.Uint64`) on postgres and mysql, so each is cast to the backend's native
@@ -6936,7 +6737,7 @@ check, and `account_drep_clear` boundary history. An account that derivation
 finds absent at `slot` (created after it with no registration at or before it),
 or inactive there, is omitted. `reward` is the balance at `slot` from
 `historicalRewards`, the reconstruction historical stake uses: the live balance
-less later `account_reward_delta` credits, or the first later withdrawal's
+less later reward-journal credits, or the first later withdrawal's
 `previous_reward` less the credits between, plus the unfolded credits of a
 pending round whose `boundary_slot` is at or before `slot`. The same event
 ordering is used by rollback: import baselines win equal-slot ties, while a
@@ -7014,9 +6815,11 @@ parsing them.
 
 ```sql
 -- withdrawals_sum
-SELECT SUM(CAST(amount AS NUMERIC))
-FROM account_reward_delta
-WHERE withdrawal = true AND credential_tag = $1 AND staking_key = decode($2, 'hex');
+SELECT SUM(CAST(w.amount AS NUMERIC))
+FROM reward_withdrawal w
+WHERE w.account_id = (
+  SELECT id FROM account WHERE credential_tag = $1 AND staking_key = decode($2, 'hex')
+);
 
 -- reserves_sum (pot = 0) / treasury_sum (pot = 1)
 SELECT SUM(CAST(r.amount AS NUMERIC))
@@ -7376,7 +7179,7 @@ credentials when looking up the reward account. Deposit
 refunds are applied in `applyPoolRetirements` (ledger): the deposit is credited
 to the registered, active reward account, or added to `network_state.treasury`
 when that account is missing or inactive. Both writes are slot-keyed (the
-`account_reward_delta` journal and the boundary `network_state` row), so a
+reward journal and the boundary `network_state` row), so a
 rollback past the boundary reverts them and re-application is deterministic.
 
 ### `GetPoolKeyHashesRetiredByEpoch`
@@ -7469,7 +7272,7 @@ transfers are folded into the available pot balances, and the boundary writes a
 single `network_state` row. If either pot cannot cover its total the boundary is
 a no-op rather than an error, so an over-budget cert cannot fail the epoch
 rollover on every retry. MIR has no transaction hash to serve as the
-`account_reward_delta` discriminator, so the source pot is hashed into a
+`reward_source` discriminator, so the source pot is hashed into a
 synthetic one instead: this keeps a reserves credit and a treasury credit to the
 same account at one boundary as distinct journal rows, while multiple MIR certs
 crediting the same account from the same pot in one boundary fold into a single

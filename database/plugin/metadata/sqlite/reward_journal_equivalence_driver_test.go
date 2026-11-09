@@ -38,10 +38,8 @@ func (d rewardJournalDriver) write(t *testing.T, outputs []*models.RewardAccount
 			StakingKey:    output.StakingKey,
 			Amount:        uint64(output.Amount),
 			Slot:          output.BoundarySlot,
-			SourceHash: models.StakeRewardSourceHash(
-				output.Epoch, output.PoolKeyHash, output.CredentialTag,
-				output.StakingKey, output.RewardType,
-			),
+			OutputID:      output.ID,
+			AccountID:     output.AccountID,
 		})
 	}
 	if len(credits) == 0 {
@@ -52,7 +50,7 @@ func (d rewardJournalDriver) write(t *testing.T, outputs []*models.RewardAccount
 
 func (d rewardJournalDriver) foldChunk(t *testing.T, epoch uint64, limit int) int {
 	t.Helper()
-	outputs, err := d.store.ClaimUnfoldedRewardCredits(epoch, limit, nil)
+	outputs, err := d.store.ClaimUnfoldedRewardCredits(epoch, 0, limit, nil)
 	require.NoError(t, err)
 	d.write(t, outputs)
 	return len(outputs)

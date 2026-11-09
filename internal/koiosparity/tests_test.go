@@ -3168,7 +3168,9 @@ func testSchema(includePools bool) []string {
 		// comparison reads. Only the columns that read names are modeled.
 		`CREATE TABLE governance_proposal (id INTEGER PRIMARY KEY AUTOINCREMENT, tx_hash BLOB NOT NULL, action_index INTEGER NOT NULL DEFAULT 0, action_type INTEGER NOT NULL DEFAULT 0, gov_action_cbor BLOB, deposit TEXT, return_address BLOB, enacted_epoch INTEGER, enacted_slot INTEGER, ratified_epoch INTEGER, deleted_slot INTEGER)`,
 		`CREATE TABLE governance_proposal_drop (proposal_id INTEGER PRIMARY KEY, dropped_epoch INTEGER, dropped_slot INTEGER)`,
-		`CREATE TABLE account_reward_delta (id INTEGER PRIMARY KEY AUTOINCREMENT, staking_key BLOB NOT NULL, credential_tag INTEGER NOT NULL DEFAULT 0, tx_hash BLOB NOT NULL, amount TEXT, previous_reward TEXT, added_slot INTEGER NOT NULL, withdrawal NUMERIC NOT NULL DEFAULT 0, post_snapshot NUMERIC NOT NULL DEFAULT 0)`,
+		`CREATE TABLE account (id INTEGER PRIMARY KEY AUTOINCREMENT, staking_key BLOB NOT NULL, credential_tag INTEGER NOT NULL DEFAULT 0)`,
+		`CREATE TABLE reward_source (id INTEGER PRIMARY KEY AUTOINCREMENT, hash BLOB NOT NULL)`,
+		`CREATE TABLE reward_event_credit (id INTEGER PRIMARY KEY AUTOINCREMENT, source_id INTEGER NOT NULL, account_id INTEGER NOT NULL, slot INTEGER NOT NULL, amount TEXT NOT NULL, post_snapshot NUMERIC NOT NULL DEFAULT 0)`,
 		`CREATE TABLE "transaction" (id INTEGER PRIMARY KEY AUTOINCREMENT, hash BLOB, slot INTEGER, block_index INTEGER)`,
 		`CREATE TABLE certs (id INTEGER PRIMARY KEY AUTOINCREMENT, transaction_id INTEGER, slot INTEGER, cert_index INTEGER)`,
 	}

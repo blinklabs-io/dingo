@@ -34,9 +34,11 @@ func refundJournal(
 ) []*models.AccountRewardDelta {
 	t.Helper()
 	rows, err := store.raw.Query(`
-SELECT credential_tag, staking_key, tx_hash, amount, added_slot
-FROM account_reward_delta
-WHERE withdrawal = FALSE AND post_snapshot = TRUE AND added_slot = ?`,
+SELECT a.credential_tag, a.staking_key, s.hash, e.amount, e.slot
+FROM reward_event_credit e
+JOIN account a ON a.id = e.account_id
+JOIN reward_source s ON s.id = e.source_id
+WHERE e.post_snapshot = TRUE AND e.slot = ?`,
 		slot,
 	)
 	require.NoError(t, err)

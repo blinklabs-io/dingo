@@ -43,7 +43,8 @@ import (
 // withdrawals and rollbacks through the store's public API, and records what
 // every reader of the journal returns at checkpoints. The recorded digests in
 // testdata/reward_journal_equivalence.golden were produced by the
-// account_reward_delta journal; the test holds the current journal to them.
+// account_reward_delta journal that migration 56 replaced; the test holds the
+// current journal to them.
 //
 // Set DINGO_UPDATE_REWARD_JOURNAL_GOLDEN=1 to rewrite the golden file and
 // DINGO_REWARD_JOURNAL_TRANSCRIPT_DIR to a directory to keep each seed's full

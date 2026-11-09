@@ -117,7 +117,9 @@ func TestRewardCreditCompactionFoldsDueRoundsExactly(t *testing.T) {
 	unfolded := unfoldedCreditCount(t, f)
 	require.Positive(t, unfolded)
 
-	done, err := f.ls.compactRewardCreditChunk(context.Background(), 3)
+	done, err := f.ls.compactRewardCreditChunk(
+		context.Background(), 3, &rewardCreditCursor{},
+	)
 	require.NoError(t, err)
 	require.False(t, done)
 	require.Equal(t, unfolded-3, unfoldedCreditCount(t, f),

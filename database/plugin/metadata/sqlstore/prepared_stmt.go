@@ -78,9 +78,7 @@ var hotStatements = func() []string {
 		insertAccountWithdrawalWitnessSQL,
 		getActiveAccountRewardSQL,
 		getAccountRewardStateSQL,
-		withdrawalRewardDeltaExistsSQL,
 		updateAccountRewardSQL,
-		insertWithdrawalRewardDeltaSQL,
 		sqlitequery.GetAccountByCredentialQuery,
 		sqlitequery.GetActiveAccountByCredentialQuery,
 		sqlitequery.GetSyncStateQuery,
@@ -97,6 +95,7 @@ var hotStatements = func() []string {
 		utxoStakeConsumedDeltaQuery(256),
 		utxoStakeConsumedDeltaQuery(400),
 	}
+	queries = append(queries, rewardJournalHotStatements...)
 	for rowCount := 2; rowCount <= utxoInsertBatchSize; rowCount++ {
 		queries = append(queries, insertUtxoBatchQuery(rowCount))
 	}

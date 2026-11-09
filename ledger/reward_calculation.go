@@ -993,12 +993,19 @@ func (ls *LedgerState) applyStakeRewardApplication(ctx context.Context,
 		if rewardOutputGuarded(app, output) {
 			continue
 		}
+		if output.ID == 0 {
+			// The credit's key is the output row's id; an unsaved output
+			// would share key zero with the account's other outputs.
+			return fmt.Errorf(
+				"reward output for epoch %d has no row id", app.epochs.snapshot,
+			)
+		}
 		credits = append(credits, models.AccountRewardCredit{
 			CredentialTag: reward.Credential.Tag,
 			StakingKey:    reward.Credential.Hash[:],
 			Amount:        reward.Amount,
 			Slot:          boundarySlot,
-			SourceHash:    stakeRewardSourceHash(app.epochs.snapshot, reward),
+			OutputID:      output.ID,
 		})
 	}
 	if err := ls.db.AddAccountRewardsByCredential(ctx, credits, txn); err != nil {
@@ -5114,19 +5121,6 @@ func rewardCredentialActive(
 		credential.Hash[:],
 	).MapKey()]
 	return ok
-}
-
-func stakeRewardSourceHash(
-	epoch uint64,
-	reward rewards.AccountReward,
-) []byte {
-	return models.StakeRewardSourceHash(
-		epoch,
-		reward.PoolID[:],
-		reward.Credential.Tag,
-		reward.Credential.Hash[:],
-		string(reward.Type),
-	)
 }
 
 // rewardEfficiencyLogValue renders eta for the applied-rewards log line.

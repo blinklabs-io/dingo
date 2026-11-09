@@ -656,11 +656,9 @@ func TestAddAccountRewardsByCredentialRespectsSQLiteParameterLimit(
 
 	credits := make([]models.AccountRewardCredit, 200)
 	for index := range credits {
-		sourceHash := make([]byte, 32)
-		binary.BigEndian.PutUint64(sourceHash[24:], uint64(index+1))
 		credits[index] = models.AccountRewardCredit{
 			StakingKey:    stakingKey,
-			SourceHash:    sourceHash,
+			OutputID:      uint(index + 1),
 			Amount:        1,
 			Slot:          100,
 			CredentialTag: 0,

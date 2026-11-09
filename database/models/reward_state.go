@@ -15,9 +15,6 @@
 package models
 
 import (
-	"crypto/sha256"
-	"encoding/binary"
-
 	"github.com/blinklabs-io/dingo/database/types"
 )
 
@@ -197,6 +194,9 @@ type RewardAccountOutput struct {
 	Guarded      bool
 	CapturedSlot uint64
 	BoundarySlot uint64
+	// AccountID is the account row the claim that returned this output
+	// resolved its credential to. Stored rows leave it zero.
+	AccountID uint
 }
 
 // RewardCreditRound records a reward snapshot applied at an epoch boundary.
@@ -211,27 +211,6 @@ type RewardCreditRound struct {
 // StakeRewardSourcePrefix namespaces the sync_state keys and the journal
 // source hashes of the stake-reward round.
 const StakeRewardSourcePrefix = "dingo:stake-reward:"
-
-// StakeRewardSourceHash is the account_reward_delta tx_hash of the credit a
-// reward_account_output row produces, which makes crediting it idempotent.
-func StakeRewardSourceHash(
-	epoch uint64,
-	poolKeyHash []byte,
-	credentialTag uint8,
-	stakingKey []byte,
-	rewardType string,
-) []byte {
-	h := sha256.New()
-	h.Write([]byte(StakeRewardSourcePrefix)) //nolint:errcheck
-	var buf [8]byte
-	binary.BigEndian.PutUint64(buf[:], epoch)
-	h.Write(buf[:])                //nolint:errcheck
-	h.Write(poolKeyHash)           //nolint:errcheck
-	h.Write([]byte{credentialTag}) //nolint:errcheck
-	h.Write(stakingKey)            //nolint:errcheck
-	h.Write([]byte(rewardType))    //nolint:errcheck
-	return h.Sum(nil)
-}
 
 // PendingRewardCreditRoundsKey is the legacy sync_state key migrated into
 // the reward_credit_round table.

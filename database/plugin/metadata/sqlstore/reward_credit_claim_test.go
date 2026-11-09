@@ -169,6 +169,12 @@ func TestClaimUnfoldedRewardCreditsDoesNotScanEveryUnfoldedRow(t *testing.T) {
 		})
 	}
 	require.NoError(t, store.SaveRewardAccountOutputs(outputs, nil))
+	for _, output := range outputs {
+		require.NoError(t, store.CreateAccount(nil, &models.Account{
+			StakingKey: output.StakingKey, CredentialTag: output.CredentialTag,
+			Active: true,
+		}))
+	}
 	var firstID int64
 	require.NoError(t, store.writeDB.QueryRow(
 		`SELECT MIN(id) FROM reward_account_output WHERE epoch = 1`,
@@ -179,11 +185,11 @@ func TestClaimUnfoldedRewardCreditsDoesNotScanEveryUnfoldedRow(t *testing.T) {
 	require.NoError(t, err)
 
 	mark := len(recorder.snapshot())
-	first, err := store.ClaimUnfoldedRewardCredits(1, 3, nil)
+	first, err := store.ClaimUnfoldedRewardCredits(1, 0, 3, nil)
 	require.NoError(t, err)
-	second, err := store.ClaimUnfoldedRewardCredits(1, 3, nil)
+	second, err := store.ClaimUnfoldedRewardCredits(1, 0, 3, nil)
 	require.NoError(t, err)
-	third, err := store.ClaimUnfoldedRewardCredits(1, 3, nil)
+	third, err := store.ClaimUnfoldedRewardCredits(1, 0, 3, nil)
 	require.NoError(t, err)
 	claimSQL := recorder.snapshot()[mark:]
 	require.Len(t, first, 3)
@@ -200,23 +206,16 @@ WHERE epoch = 2 AND folded`,
 	).Scan(&otherEpochFolded))
 	require.Zero(t, otherEpochFolded)
 
-	prefixOnly := regexp.MustCompile(
-		`pending_round \(spendable=\? AND guarded=\?\)`,
+	// The account-ordered selection must drive from the account rowid range
+	// and probe the outputs by (epoch, credential): a probe that lacks the
+	// credential reads every unfolded output of the round once per account.
+	accountSeek := regexp.MustCompile(`SEARCH a USING INTEGER PRIMARY KEY \(rowid>\?\)`)
+	outputSeek := regexp.MustCompile(
+		`SEARCH o USING INDEX idx_reward_account_output_epoch_cred_pool_type ` +
+			`\(epoch=\? AND credential_tag=\? AND staking_key=\?\)`,
 	)
-	// A plan that loses the index entirely scans the table instead, which
-	// the prefix pattern above does not match.
 	tableScan := regexp.MustCompile(`(?m)^SCAN (rao|o)\b`)
-	// The id step must be answered from the index alone, seeking all four
-	// columns, and in id order without a sort; the row step must then read
-	// each claimed row by primary key.
-	idSeek := regexp.MustCompile(
-		`SEARCH o USING COVERING INDEX idx_reward_account_output_pending_round ` +
-			`\(spendable=\? AND guarded=\? AND folded=\? AND epoch=\?\)`,
-	)
-	rowSeek := regexp.MustCompile(`SEARCH rao USING INTEGER PRIMARY KEY`)
-	idFrom := regexp.MustCompile(`\bFROM reward_account_output o\b`)
-	rowFrom := regexp.MustCompile(`\bFROM reward_account_output rao\b`)
-	var idStatements, rowStatements int
+	var ordered, unaccounted int
 	for _, statement := range claimSQL {
 		if !strings.Contains(statement, "reward_account_output") ||
 			strings.HasPrefix(strings.TrimSpace(statement), "UPDATE") {
@@ -224,20 +223,22 @@ WHERE epoch = 2 AND folded`,
 		}
 		args := make([]any, strings.Count(statement, "?"))
 		plan := queryPlan(t, store.writeDB, statement, args...)
-		require.NotRegexp(t, prefixOnly, plan, "statement: %s", statement)
 		require.NotRegexp(t, tableScan, plan, "statement: %s", statement)
+		// Ordering by output id within an account sorts only the last term
+		// of the ORDER BY, one account's rows at a time; a sort of the whole
+		// round would read "FOR ORDER BY".
+		require.NotContains(t, plan, "USE TEMP B-TREE FOR ORDER BY", "statement: %s", statement)
 		switch {
-		case idFrom.MatchString(statement):
-			idStatements++
-			require.Regexp(t, idSeek, plan, "statement: %s", statement)
-			require.NotContains(t, plan, "TEMP B-TREE", "statement: %s", statement)
-		case rowFrom.MatchString(statement):
-			rowStatements++
-			require.Regexp(t, rowSeek, plan, "statement: %s", statement)
+		case strings.Contains(statement, "GetUnfoldedRewardOutputsInAccountOrder"):
+			ordered++
+			require.Regexp(t, accountSeek, plan, "statement: %s", statement)
+			require.Regexp(t, outputSeek, plan, "statement: %s", statement)
+		case strings.Contains(statement, "GetUnaccountedRewardOutputs"):
+			unaccounted++
 		default:
 			require.Failf(t, "unexpected claim statement", "%s", statement)
 		}
 	}
-	require.Equal(t, 3, idStatements, "one id selection per claim")
-	require.Equal(t, 2, rowStatements, "one row read per non-empty claim")
+	require.Equal(t, 3, ordered, "one account-ordered selection per claim")
+	require.Equal(t, 2, unaccounted, "a short claim also looks for outputs without an account")
 }

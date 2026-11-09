@@ -35,8 +35,9 @@ func boundaryCreditPostSnapshot(
 	t.Helper()
 	var postSnapshot bool
 	require.NoError(t, db.QueryRow(`
-SELECT post_snapshot FROM account_reward_delta
-WHERE credential_tag = ? AND staking_key = ? AND withdrawal = FALSE`,
+SELECT e.post_snapshot FROM reward_event_credit e
+JOIN account a ON a.id = e.account_id
+WHERE a.credential_tag = ? AND a.staking_key = ?`,
 		0, credential).Scan(&postSnapshot))
 	return postSnapshot
 }

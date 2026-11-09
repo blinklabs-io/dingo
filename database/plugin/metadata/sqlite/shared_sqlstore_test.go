@@ -2163,7 +2163,7 @@ func TestSharedSQLStoreTransactionWriteParity(t *testing.T) {
 		var deltas int
 		var witnesses int
 		require.NoError(t, raw.QueryRow(
-			"SELECT COUNT(*) FROM account_reward_delta",
+			"SELECT (SELECT COUNT(*) FROM reward_withdrawal) + (SELECT COUNT(*) FROM reward_event_credit) + (SELECT COUNT(*) FROM reward_credit)",
 		).Scan(&deltas))
 		require.NoError(t, raw.QueryRow(
 			"SELECT COUNT(*) FROM account_withdrawal_witness",
@@ -2224,7 +2224,7 @@ WHERE tx.hash = ? AND l.label = ?`, txHash.Bytes(), "721").Scan(&jsonValue, &cbo
 // account_withdrawal_witness insert must be elided when the caller reports
 // the delegator-inactivity gate off (skipWithdrawalWitness=true), and written
 // when the gate is on -- in both cases the unrelated reward-delta bookkeeping
-// (account_reward_delta) must be unaffected.
+// (the reward journal) must be unaffected.
 func TestSharedSQLStoreWithdrawalWitnessGate(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -2242,7 +2242,7 @@ func TestSharedSQLStoreWithdrawalWitnessGate(t *testing.T) {
 				var deltas int
 				var witnesses int
 				require.NoError(t, raw.QueryRow(
-					"SELECT COUNT(*) FROM account_reward_delta",
+					"SELECT (SELECT COUNT(*) FROM reward_withdrawal) + (SELECT COUNT(*) FROM reward_event_credit) + (SELECT COUNT(*) FROM reward_credit)",
 				).Scan(&deltas))
 				require.NoError(t, raw.QueryRow(
 					"SELECT COUNT(*) FROM account_withdrawal_witness",
@@ -2295,7 +2295,7 @@ func TestSharedSQLStoreWithdrawalRejectsExcessiveBalance(t *testing.T) {
 	require.Equal(t, uint64(1234), uint64(account.Reward))
 	var deltas int
 	require.NoError(t, raw.QueryRow(
-		"SELECT COUNT(*) FROM account_reward_delta",
+		"SELECT (SELECT COUNT(*) FROM reward_withdrawal) + (SELECT COUNT(*) FROM reward_event_credit) + (SELECT COUNT(*) FROM reward_credit)",
 	).Scan(&deltas))
 	require.Zero(t, deltas)
 	var witnesses int
@@ -2346,7 +2346,7 @@ func TestSharedSQLStoreWithdrawalRejectsExcessiveBalance(t *testing.T) {
 	account = requireTransactionWriteAccount(t, store, 0, stakeKey)
 	require.Equal(t, uint64(1234), uint64(account.Reward))
 	require.NoError(t, raw.QueryRow(
-		"SELECT COUNT(*) FROM account_reward_delta WHERE tx_hash = ?",
+		"SELECT COUNT(*) FROM reward_withdrawal w JOIN \"transaction\" t ON t.id = w.tx_id WHERE t.hash = ?",
 		backfillHash.Bytes(),
 	).Scan(&deltas))
 	require.Equal(t, 1, deltas)
@@ -2447,8 +2447,8 @@ func TestSharedSQLStoreHistoricalBackfillWithdrawalMissingAccount(t *testing.T) 
 				require.ErrorContains(t, backfillErr, "account not found")
 				var journaled int
 				require.NoError(t, raw.QueryRow(
-					"SELECT COUNT(*) FROM account_reward_delta "+
-						"WHERE tx_hash = ?",
+					"SELECT COUNT(*) FROM reward_withdrawal w "+
+						"JOIN \"transaction\" t ON t.id = w.tx_id WHERE t.hash = ?",
 					backfillHash.Bytes(),
 				).Scan(&journaled))
 				require.Zero(t, journaled)
@@ -2470,7 +2470,7 @@ func TestSharedSQLStoreHistoricalBackfillWithdrawalMissingAccount(t *testing.T) 
 			var deltas int
 			var previousReward string
 			require.NoError(t, raw.QueryRow(
-				"SELECT COUNT(*), previous_reward FROM account_reward_delta WHERE tx_hash = ?",
+				"SELECT COUNT(*), COALESCE(MAX(w.previous_reward), '') FROM reward_withdrawal w JOIN \"transaction\" t ON t.id = w.tx_id WHERE t.hash = ?",
 				backfillHash.Bytes(),
 			).Scan(&deltas, &previousReward))
 			require.Equal(t, 1, deltas)
@@ -2489,7 +2489,7 @@ func TestSharedSQLStoreHistoricalBackfillWithdrawalMissingAccount(t *testing.T) 
 				nil, 0,
 			))
 			require.NoError(t, raw.QueryRow(
-				"SELECT COUNT(*) FROM account_reward_delta WHERE tx_hash = ?",
+				"SELECT COUNT(*) FROM reward_withdrawal w JOIN \"transaction\" t ON t.id = w.tx_id WHERE t.hash = ?",
 				backfillHash.Bytes(),
 			).Scan(&deltas))
 			require.Equal(t, 1, deltas)
@@ -2622,7 +2622,7 @@ func TestSharedSQLStoreWithdrawalAllowsPartialBalance(t *testing.T) {
 	require.Equal(t, uint64(1234), uint64(account.Reward))
 	var deltas int
 	require.NoError(t, raw.QueryRow(
-		"SELECT COUNT(*) FROM account_reward_delta",
+		"SELECT (SELECT COUNT(*) FROM reward_withdrawal) + (SELECT COUNT(*) FROM reward_event_credit) + (SELECT COUNT(*) FROM reward_credit)",
 	).Scan(&deltas))
 	require.Zero(t, deltas)
 }
