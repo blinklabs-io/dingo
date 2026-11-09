@@ -220,8 +220,8 @@ func (e WitnessWrongKeyByronError) Error() string {
 	)
 }
 
-// WitnessCountByronError is returned when a Byron transaction does not have
-// exactly one positional witness for each input.
+// WitnessCountByronError describes differing Byron input and witness counts.
+// Validation permits the mismatch because the reference rule pairs the lists.
 type WitnessCountByronError struct {
 	Inputs    int
 	Witnesses int
@@ -777,11 +777,8 @@ func byronValidateWitnesses(
 		)
 	}
 	inputs := tx.Inputs()
-	if len(witnesses) != len(inputs) {
-		return WitnessCountByronError{
-			Inputs:    len(inputs),
-			Witnesses: len(witnesses),
-		}
+	if len(witnesses) > len(inputs) {
+		witnesses = witnesses[:len(inputs)]
 	}
 	protocolMagicProvider, ok := stateCapability[ByronProtocolMagicProvider](ls)
 	if !ok {
@@ -929,20 +926,24 @@ func byronDecodeWitnesses(
 }
 
 // validateByronInputWitnesses pairs witness i with input i and requires each
-// witness to authorize its own input's address. The caller has already
-// required one witness for every input.
+// pair to authorize its input's address. The reference rule uses zip, so any
+// unpaired trailing inputs or witnesses are ignored.
 func validateByronInputWitnesses(
 	tx lcommon.Transaction,
 	ls lcommon.LedgerState,
 	witnesses []byronTxInWitness,
 ) error {
 	for idx, input := range tx.Inputs() {
+		if idx >= len(witnesses) {
+			break
+		}
+		witness := witnesses[idx]
 		utxo, err := ls.UtxoById(input)
 		if err != nil || utxo.Output == nil {
 			// Bad inputs are caught by byronValidateBadInputs
 			continue
 		}
-		if !byronWitnessAuthorizes(witnesses[idx], utxo.Output.Address()) {
+		if !byronWitnessAuthorizes(witness, utxo.Output.Address()) {
 			return WitnessWrongKeyByronError{
 				InputIndex: idx,
 				Input:      input.String(),

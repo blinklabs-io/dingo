@@ -4813,8 +4813,9 @@ of validating against another epoch's. The rules follow the reference
 `validateTx`, `validateTxAux` and `updateUTxOTxWitness`: inputs are a list, so a
 repeated input is valid, while balances restrict the UTxO to the input set and
 are bounded Lovelace sums; witness `i` must authorize input `i`, pairing the two
-lists as `zip` does; and a witness's address root is hashed over the canonical
-encoding of the address's decoded attributes.
+lists as `zip` does and ignoring unpaired trailing values from either list; and
+a witness's address root is hashed over the canonical encoding of the address's
+decoded attributes.
 
 Byron output indexes are Word16. The reference `txOutputUTxO` zips a
 transaction's outputs with `[0 ..] :: [Word16]`, so only outputs 0 through
