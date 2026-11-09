@@ -194,6 +194,15 @@ const (
 	// tolerated before that retry fires -- it does not lower the ceiling
 	// on how long a legitimately slow bulk operation may run in total.
 	koiosRequestTimeout = 20 * time.Second
+
+	// koiosAccountListHeaderTimeout and koiosAccountListRequestTimeout bound a
+	// /account_list page. Offset paging is linear in the offset, and a page
+	// near the end of mainnet's ~6M accounts took 20 s against a 1-2 s typical
+	// page; the general 15 s/20 s bounds would fail those pages every time and
+	// the crawl would never get past them. A stall is still cut off, and the
+	// pages already persisted are kept.
+	koiosAccountListHeaderTimeout  = 150 * time.Second
+	koiosAccountListRequestTimeout = 180 * time.Second
 )
 
 // koiosRetryBackoff5xx is the step of the linear backoff between retries of a
@@ -389,7 +398,12 @@ type KoiosClient struct {
 	baseURL string
 	apiKey  string
 	http    *http.Client
-	limiter *burstLimiter
+	// accountListHTTP serves /account_list when set. A deep offset page is
+	// slower than any other request this client makes (seconds near the end of
+	// a mainnet-sized list, against about a second for the rest), so it needs
+	// the longer timeouts; nil falls back to http.
+	accountListHTTP *http.Client
+	limiter         *burstLimiter
 
 	// koios408MaxRetries/koios408InitialBackoff/koios408MaxBackoff configure
 	// the extended 408 retry budget -- see the koios408*Default constants'
@@ -494,6 +508,21 @@ func NewKoiosClient(
 				koiosDialKeepAlive,
 				koiosTLSHandshakeTimeout,
 				koiosResponseHeaderTimeout,
+				koiosExpectContinueTimeout,
+				allowPrivateAddresses,
+			),
+			CheckRedirect: koiosRedirectPolicy(
+				allowInsecureHTTP,
+				allowPrivateAddresses,
+			),
+		},
+		accountListHTTP: &http.Client{
+			Timeout: koiosAccountListRequestTimeout,
+			Transport: newKoiosTransport(
+				koiosDialTimeout,
+				koiosDialKeepAlive,
+				koiosTLSHandshakeTimeout,
+				koiosAccountListHeaderTimeout,
 				koiosExpectContinueTimeout,
 				allowPrivateAddresses,
 			),
@@ -1001,7 +1030,17 @@ func (k *KoiosClient) get(
 		if err := k.limiter.wait(ctx); err != nil {
 			return nil, err
 		}
-		resp, doErr := k.http.Do(req.Clone(ctx))
+		client := k.http
+		if k.accountListHTTP != nil &&
+			strings.HasPrefix(path, "/account_list") {
+			// A transport other than the one NewKoiosClient built has been
+			// wrapped (fault injection, a recording proxy) and has to see
+			// every request, so it keeps the general client.
+			if _, std := k.http.Transport.(*http.Transport); std {
+				client = k.accountListHTTP
+			}
+		}
+		resp, doErr := client.Do(req.Clone(ctx))
 		if doErr != nil {
 			if err := retryOrFail(otherAttempt,
 				koiosRetryBackoff5xx*time.Duration(otherAttempt+1),
@@ -1628,11 +1667,34 @@ func (k *KoiosClient) GetPoolLatestHistoryEpoch(
 	return items[0].EpochNo, true, nil
 }
 
+// accountListQuery is the /account_list request the universe crawl pages
+// through, by Range offset over the endpoint's default order. Keyset paging
+// (order by stake_address, filter on the last address) is not usable: the
+// endpoint has no index to sort or range-scan on, so an ordered page takes
+// tens of seconds on a mainnet-sized list where an offset page takes about a
+// second. Offset paging cannot be trusted across a restart on its own, so
+// the first request after a resume overlaps the last persisted page by a row
+// that is checked against what was recorded; see walkAccountList.
+const accountListQuery = "/account_list?select=stake_address"
+
+// errAccountListDrifted reports that the list no longer lines up with what an
+// earlier page recorded, so a saved offset can no longer be trusted.
+var errAccountListDrifted = errors.New(
+	"koios /account_list: list shifted since the last persisted page",
+)
+
+// accountListPosition is a resume point in the /account_list crawl: the
+// number of rows already consumed and the address of the last of them.
+type accountListPosition struct {
+	Offset      int
+	LastAddress string
+}
+
 // GetAllAccountAddresses returns the bech32 stake address of every account
 // Koios knows about, including accounts with zero current stake or that have
 // since deregistered — the Koios-side "master list" for the per-account
 // address universe, exactly analogous to GetAllHistoricalPoolIDs's role for
-// pools. /account_list is Range-paginated the same way /pool_list is.
+// pools.
 //
 // This alone is not sufficient to build a correct per-epoch address universe
 // — see FetchAccountRewardsForEpoch, which unions this with Dingo's own
@@ -1642,87 +1704,98 @@ func (k *KoiosClient) GetPoolLatestHistoryEpoch(
 func (k *KoiosClient) GetAllAccountAddresses(
 	ctx context.Context,
 ) ([]string, error) {
-	return k.getAllAccountAddresses(ctx, nil)
+	seen := make(map[string]bool)
+	var addrs []string
+	err := k.walkAccountList(
+		ctx, accountListPosition{},
+		func(page []string, _ accountListPosition, _ int) error {
+			for _, a := range page {
+				if !seen[a] {
+					seen[a] = true
+					addrs = append(addrs, a)
+				}
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+	return addrs, nil
 }
 
-// GetAllAccountAddressesWithProgress is GetAllAccountAddresses with a progress
-// line every accountListLogEveryPages pages. The logger is a parameter rather
-// than a client field because the same client serves the concurrent chunk
-// fetchers, and a field written here would be read by them.
-func (k *KoiosClient) GetAllAccountAddressesWithProgress(
+// walkAccountList pages /account_list from the position from and calls fn with
+// each page of new addresses, the position after it, and the 1-based number
+// of pages fetched by this call. fn returning an error stops the walk and is
+// returned unchanged; the position fn last accepted is a valid resume point.
+//
+// A walk that resumes from a non-zero offset starts its first request one row
+// early. That row must be the last one already consumed; if it is not, rows
+// were inserted or removed ahead of the offset and every later page would be
+// misaligned, so the walk returns errAccountListDrifted rather than skipping
+// or repeating accounts. An overlap that matches does not rule out an insert
+// and a removal that cancel out before it; the check bounds drift, it does not
+// prove stability. Within one walk pages are contiguous and unchecked, which
+// relies on the list only growing at its tail while it is read.
+// The walk ends on the first response shorter than koiosPageSize, the only
+// end-of-list signal the default-order endpoint gives.
+func (k *KoiosClient) walkAccountList(
 	ctx context.Context,
-	logger *slog.Logger,
-) ([]string, error) {
-	return k.getAllAccountAddresses(ctx, logger)
-}
-
-func (k *KoiosClient) getAllAccountAddresses(
-	ctx context.Context,
-	logger *slog.Logger,
-) ([]string, error) {
+	from accountListPosition,
+	fn func(page []string, next accountListPosition, pages int) error,
+) error {
 	type listItem struct {
 		StakeAddress string `json:"stake_address"`
 	}
-	seen := make(map[string]bool)
-	var addrs []string
-	total := 0
-	pages := 0
-	for start := 0; ; start += koiosPageSize {
-		end := start + koiosPageSize - 1
-		resp, err := k.get(
-			ctx,
-			"/account_list?select=stake_address",
-			start,
-			end,
-		)
-		if err != nil {
-			return nil, err
+	pos := from
+	for pages := 1; ; pages++ {
+		overlap := pages == 1 && pos.Offset > 0
+		start := pos.Offset
+		if overlap {
+			start--
 		}
-
+		resp, err := k.get(ctx, accountListQuery, start, start+koiosPageSize-1)
+		if err != nil {
+			return err
+		}
 		if resp.StatusCode != http.StatusOK &&
 			resp.StatusCode != http.StatusPartialContent {
-			return nil, fmt.Errorf(
+			return fmt.Errorf(
 				"koios /account_list: status %d body: %s",
 				resp.StatusCode,
 				resp.Body,
 			)
 		}
-		var page []listItem
-		if err := json.Unmarshal(resp.Body, &page); err != nil {
-			return nil, fmt.Errorf("koios /account_list decode: %w", err)
+		var items []listItem
+		if err := json.Unmarshal(resp.Body, &items); err != nil {
+			return fmt.Errorf("koios /account_list decode: %w", err)
 		}
-		for _, item := range page {
-			if item.StakeAddress == "" {
-				continue
+		rows := items
+		if overlap {
+			if len(rows) == 0 || rows[0].StakeAddress != pos.LastAddress {
+				return errAccountListDrifted
 			}
-			if !seen[item.StakeAddress] {
-				seen[item.StakeAddress] = true
-				addrs = append(addrs, item.StakeAddress)
+			rows = rows[1:]
+		}
+		page := make([]string, 0, len(rows))
+		for _, item := range rows {
+			if item.StakeAddress != "" {
+				page = append(page, item.StakeAddress)
 			}
 		}
-		// Preview answers 303k accounts in 304 sequential pages. Without a
-		// progress line the whole walk is silent, which is indistinguishable
-		// from a stalled fetch. Emitted after the page is
-		// folded in, so a crawl ending on exactly a milestone page still
-		// reports it before the loop breaks below.
-		pages++
-		if logger != nil && pages%accountListLogEveryPages == 0 {
-			logger.Info(
-				"koiosparity: crawling Koios account list",
-				"pages", pages,
-				"fetched", len(addrs),
-				"total", total,
-			)
+		if len(page) > 0 {
+			pos = accountListPosition{
+				Offset:      pos.Offset + len(rows),
+				LastAddress: rows[len(rows)-1].StakeAddress,
+			}
+			if err := fn(page, pos, pages); err != nil {
+				return err
+			}
 		}
-		if len(page) < koiosPageSize {
-			break
-		}
-		total = parseTotalFromContentRange(resp.Header.Get("Content-Range"))
-		if total > 0 && start+len(page) >= total {
-			break
+		if len(items) < koiosPageSize {
+			return nil
 		}
 	}
-	return addrs, nil
 }
 
 // accountListLogEveryPages is how many /account_list pages pass between

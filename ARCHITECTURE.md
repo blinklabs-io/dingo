@@ -16897,10 +16897,36 @@ never the reverse.
   a network whose `/account_list` is legitimately empty still has a reusable
   crawl. A refresh that
   fails is an error rather than a fallback to the stale set, for the same
-  reason. `GetAllAccountAddressesWithProgress` logs a line every 50 pages so a
-  long crawl is distinguishable from a stalled one; the logger is a parameter
-  rather than a client field because the same client serves the concurrent
-  chunk fetchers.
+  reason.
+
+  The crawl is durable and resumable. It pages `/account_list` by Range
+  offset over the endpoint's default order. Keyset paging (order and filter on
+  `stake_address`) was measured on a production Koios host and rejected: an
+  ordered first page took 17 s and a later keyset page 70 s, against 1-2 s for
+  an offset page, because the endpoint has no index to sort or range-scan on.
+  Each page is written to `koios_account_universe_partial` in the same
+  transaction that advances the resume point in `koios_account_universe_crawl`
+  (query, start time, next offset, last address, page and address counts).
+  After a restart, or a failed retry attempt, the crawl continues at the
+  offset without refetching persisted pages. Offset paging is only sound while
+  the list does not shift, so the first request after a resume starts one row
+  early and that row must equal the recorded last address; on a mismatch the
+  partial crawl is discarded and restarted from zero, once per call. Within a
+  walk pages are contiguous and unchecked, relying on the list growing only at
+  its tail; an insert and a removal that cancel out ahead of the offset also
+  pass the overlap check. A partial crawl is likewise discarded when its
+  recorded query differs from the current one or it started before the epoch
+  being checked ended (the completed universe is stamped with the crawl's
+  start). `/account_list` requests use a longer response-header and request
+  timeout than other endpoints, since a deep offset page takes seconds. Only
+  `CompleteAccountUniverseCrawl` — after a response shorter than the page
+  size — moves the rows into `koios_account_universe` and writes
+  `koios_account_universe_state`, in one transaction. `GetAccountUniverse`
+  never reads the partial tables, so a partial crawl is never a universe: the
+  resolver returns a complete universe or an error, and account-level checks
+  never start on an incomplete list, since a "no missing accounts" verdict
+  needs the whole list. A crawl is logged every 50 pages so a long one is
+  distinguishable from a stalled one.
 - **Koios host.** `koiosBaseURLs` maps the network to the public `*.koios.rest`
   v1 root, and `KoiosParityConfig.BaseURL` (`--koios-parity-base-url`,
   `DINGO_KOIOS_PARITY_BASE_URL`, and `--koios-url` / `KOIOS_URL` on the
@@ -16968,11 +16994,11 @@ never the reverse.
   `NewObserver` because the probe needs a context and a startup the caller can
   fail — because the node's config dump names the configured value only for
   the in-process observer and says nothing on the `fetch`/`run`/`watch` paths.
-  Recording alone only invalidates the rows present when it runs, so the eight
+  Recording alone only invalidates the rows present when it runs, so the nine
   writes that carry the check verify, inside their own transaction, that the
   cache still holds the root this handle claimed: `CommitEpochData`,
   `CommitAccountRewardsForEpoch`, `SaveAccountFetchChunkProgress`,
-  `SaveAccountUniverse` and `UpsertEpochParams` on the fetch side, and
+  `SaveAccountUniverseCrawlPage`, `CompleteAccountUniverseCrawl` and `UpsertEpochParams` on the fetch side, and
   `CommitEpochMismatches`, `UpsertCheckEpochStatus` and `InsertCheckRun` on the
   check side. `UpsertEpochParams` carries it because `fetchEpochParamsOnly`
   reaches it without going through `CommitEpochData`, making the parameter

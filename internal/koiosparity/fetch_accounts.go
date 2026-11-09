@@ -103,28 +103,164 @@ func ResolveKoiosAccountUniverseCached(
 			return addrs, nil
 		}
 	}
+	if cache == nil {
+		return crawlAccountUniverseInMemory(ctx, koios, network, logger)
+	}
+	return crawlAccountUniverseDurably(
+		ctx, koios, cache, network, notBefore, logger,
+	)
+}
+
+func crawlAccountUniverseInMemory(
+	ctx context.Context,
+	koios *KoiosClient,
+	network string,
+	logger *slog.Logger,
+) ([]string, error) {
 	logger.Info(
 		"koiosparity: crawling Koios account universe",
 		"network", network,
 	)
-	started := time.Now()
-	addrs, err := koios.GetAllAccountAddressesWithProgress(ctx, logger)
+	addrs, err := koios.GetAllAccountAddresses(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("get all koios account addresses: %w", err)
+	}
+	return addrs, nil
+}
+
+// crawlAccountUniverseDurably walks /account_list persisting each page with
+// its resume offset, so a restart continues where the last persisted page
+// ended instead of re-walking a list that takes hours. Only the final page's
+// commit makes the universe visible; until then GetAccountUniverse reports
+// no universe and no account-level verdict can rest on it.
+//
+// A crawl is resumed only when it was taken against the current query and
+// started no earlier than notBefore. The first keeps an offset from a
+// different request from being applied; the second keeps the completed
+// universe, stamped with the crawl's start, from vouching for an epoch that
+// closed after accounts it might be missing registered. A resumed crawl whose
+// list has shifted is discarded and restarted from zero, once per call.
+func crawlAccountUniverseDurably(
+	ctx context.Context,
+	koios *KoiosClient,
+	cache *Cache,
+	network string,
+	notBefore time.Time,
+	logger *slog.Logger,
+) ([]string, error) {
+	for attempt := 0; ; attempt++ {
+		addrs, err := resumeAccountUniverseCrawl(
+			ctx, koios, cache, network, notBefore, logger,
+		)
+		if !errors.Is(err, errAccountListDrifted) || attempt > 0 {
+			return addrs, err
+		}
+		logger.Warn(
+			"koiosparity: Koios account list shifted; restarting crawl",
+			"network", network,
+		)
+		if err := cache.DiscardAccountUniverseCrawl(network); err != nil {
+			return nil, err
+		}
+	}
+}
+
+func resumeAccountUniverseCrawl(
+	ctx context.Context,
+	koios *KoiosClient,
+	cache *Cache,
+	network string,
+	notBefore time.Time,
+	logger *slog.Logger,
+) ([]string, error) {
+	progress, err := cache.GetAccountUniverseCrawl(network)
+	if err != nil {
+		return nil, err
+	}
+	if progress != nil &&
+		(progress.Query != accountListQuery ||
+			!accountUniverseFresh(progress.StartedAt, notBefore)) {
+		logger.Info(
+			"koiosparity: discarding unusable partial Koios account crawl",
+			"network", network,
+			"started_at", progress.StartedAt,
+			"addresses", progress.Addresses,
+		)
+		if err := cache.DiscardAccountUniverseCrawl(network); err != nil {
+			return nil, err
+		}
+		progress = nil
+	}
+	started := time.Now().UTC()
+	var from accountListPosition
+	pages := 0
+	if progress != nil {
+		started = progress.StartedAt
+		from = accountListPosition{
+			Offset:      progress.Offset,
+			LastAddress: progress.LastAddress,
+		}
+		pages = progress.Pages
+		logger.Info(
+			"koiosparity: resuming Koios account universe crawl",
+			"network", network,
+			"offset", from.Offset,
+			"pages", pages,
+		)
+	} else {
+		logger.Info(
+			"koiosparity: crawling Koios account universe",
+			"network", network,
+		)
+	}
+	crawlStart := time.Now()
+	err = koios.walkAccountList(ctx, from, func(
+		page []string, next accountListPosition, _ int,
+	) error {
+		pages++
+		if err := cache.SaveAccountUniverseCrawlPage(
+			network, accountListQuery, started,
+			page, next.Offset, next.LastAddress, pages,
+		); err != nil {
+			return err
+		}
+		if pages%accountListLogEveryPages == 0 {
+			logger.Info(
+				"koiosparity: crawling Koios account list",
+				"pages", pages,
+				"offset", next.Offset,
+			)
+		}
+		return nil
+	})
+	if err != nil {
+		if errors.Is(err, errAccountListDrifted) {
+			return nil, err
+		}
+		return nil, fmt.Errorf("get all koios account addresses: %w", err)
+	}
+	if progress == nil && pages == 0 {
+		// An empty list never wrote a page; record the crawl so completion
+		// has a start time to stamp.
+		if err := cache.SaveAccountUniverseCrawlPage(
+			network, accountListQuery, started, nil, 0, "", 0,
+		); err != nil {
+			return nil, err
+		}
+	}
+	if err := cache.CompleteAccountUniverseCrawl(network); err != nil {
+		return nil, err
+	}
+	addrs, _, _, err := cache.GetAccountUniverse(network)
+	if err != nil {
+		return nil, err
 	}
 	logger.Info(
 		"koiosparity: Koios account universe crawled",
 		"network", network,
 		"addresses", len(addrs),
-		"elapsed", time.Since(started),
+		"elapsed", time.Since(crawlStart),
 	)
-	if cache != nil {
-		if err := cache.SaveAccountUniverse(
-			network, addrs, started,
-		); err != nil {
-			return nil, err
-		}
-	}
 	return addrs, nil
 }
 
