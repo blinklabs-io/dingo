@@ -16,10 +16,13 @@ package chainsync_test
 
 import (
 	"net"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/chainsync"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -366,4 +369,102 @@ func TestDemoteStaleAdvertisingClientsAgesOutIdleClient(t *testing.T) {
 		"a client with no advertised tip must keep its slot")
 	require.Empty(t, state.DemoteStaleAdvertisingClients(),
 		"a demoted client must not be demoted again")
+}
+
+// newPausableStaleTipState is newStaleTipState with a pause: after the returned
+// arm is called, the next staleness judgement closes judging and then blocks
+// until release, holding the decision between its verdict and its effect.
+func newPausableStaleTipState(t *testing.T) (
+	state *chainsync.State,
+	threshold *atomic.Uint64,
+	arm func(),
+	judging <-chan struct{},
+	release func(),
+) {
+	t.Helper()
+	threshold = &atomic.Uint64{}
+	judged := make(chan struct{})
+	released := make(chan struct{})
+	var armed atomic.Bool
+	var releaseOnce sync.Once
+	release = func() { releaseOnce.Do(func() { close(released) }) }
+	// A failing assertion must not leave the decision goroutine blocked.
+	t.Cleanup(release)
+	state = chainsync.NewStateWithConfig(nil, nil, chainsync.Config{
+		MaxClients:   rootTestSlots,
+		StallTimeout: chainsync.DefaultStallTimeout,
+		AdvertisedTipStale: func(tip ochainsync.Tip) bool {
+			stale := tip.Point.Slot < threshold.Load()
+			if armed.CompareAndSwap(true, false) {
+				close(judged)
+				<-released
+			}
+			return stale
+		},
+	})
+	return state, threshold, func() { armed.Store(true) }, judged, release
+}
+
+// A peer that advertises a fresh tip after the sweep judged its old one must
+// keep its slot: the verdict is about a tip the peer no longer advertises.
+func TestDemoteStaleAdvertisingClientsKeepsRefreshedClient(t *testing.T) {
+	t.Parallel()
+	state, threshold, arm, judging, release := newPausableStaleTipState(t)
+	client := newTestConnId(1)
+	addEligible(t, state, client)
+	require.False(t, state.RecordClientAdvertisedTip(client, staleTestTip(50)))
+	threshold.Store(100)
+
+	arm()
+	demoted := make(chan []ouroboros.ConnectionId, 1)
+	go func() { demoted <- state.DemoteStaleAdvertisingClients() }()
+	testutil.RequireReceive(t, judging, 5*time.Second, "sweep judged the tip")
+	require.False(t, state.RecordClientAdvertisedTip(client, staleTestTip(500)))
+	release()
+
+	got := testutil.RequireReceive(t, demoted, 5*time.Second, "sweep finished")
+	require.Empty(t, got, "a refreshed client must not be reported demoted")
+	requireObserving(t, state, client, false,
+		"a client that refreshed its tip must keep its slot")
+}
+
+// A peer that advertises a stale tip after promotion judged its old one must
+// not take the slot: idle at that tip it would hold it until the next sweep.
+func TestPromotionRefusedWhenTipGoesStaleWhileJudging(t *testing.T) {
+	t.Parallel()
+	state, threshold, arm, judging, release := newPausableStaleTipState(t)
+	observer := newTestConnId(1)
+	addObserved(t, state, observer)
+	threshold.Store(100)
+	require.False(
+		t,
+		state.RecordClientAdvertisedTip(observer, staleTestTip(500)),
+	)
+
+	arm()
+	promoted := make(chan bool, 1)
+	go func() {
+		promoted <- state.SetClientObservabilityOnly(observer, false)
+	}()
+	testutil.RequireReceive(
+		t,
+		judging,
+		5*time.Second,
+		"promotion judged the tip",
+	)
+	require.True(t, state.RecordClientAdvertisedTip(observer, staleTestTip(10)))
+	release()
+
+	require.False(
+		t,
+		testutil.RequireReceive(
+			t,
+			promoted,
+			5*time.Second,
+			"promotion finished",
+		),
+		"a promotion judged on a replaced tip must be refused",
+	)
+	requireObserving(t, state, observer, true,
+		"a client now advertising a stale tip must stay an observer")
 }

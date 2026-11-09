@@ -7779,7 +7779,9 @@ promotion, including an eligibility change and a root slot handoff, is refused
 while the stored tip is stale, so a selectable observer can take the slot. An
 idle peer whose tip ages past the threshold sends no message, so the recycler
 also calls `State.DemoteStaleAdvertisingClients` on its stall-check cadence;
-such a peer can hold its slot for up to one tick after its tip goes stale. A
+such a peer can hold its slot for up to one tick after its tip goes stale.
+Staleness is judged outside the `State` lock, so a sweep demotion or a promotion
+is abandoned when the connection has advertised another tip since the verdict. A
 connection that has not yet advertised a tip is not judged. The gate reads the
 peer's tracked tip, so node composition observes tip and rollback updates
 synchronously, before the gate runs, whenever Genesis selection is active

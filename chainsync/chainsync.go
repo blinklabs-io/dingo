@@ -163,6 +163,10 @@ type TrackedClient struct {
 	// advances, so it is judged each time a decision is made.
 	advertisedTip      ochainsync.Tip
 	advertisedTipKnown bool
+	// advertisedTipSeq counts recorded tips. A tip is judged outside the
+	// State lock, so a decision compares this under the lock and abandons a
+	// verdict about a tip that has since been replaced.
+	advertisedTipSeq uint64
 	// TODO: BytesRecv needs to be wired to the underlying
 	// connection's byte counter. Currently unused.
 	BytesRecv uint64
@@ -1021,6 +1025,7 @@ func (s *State) RecordClientAdvertisedTip(
 	if tc, exists := s.trackedClients[connId]; exists {
 		tc.advertisedTip = tip
 		tc.advertisedTipKnown = true
+		tc.advertisedTipSeq++
 	}
 	s.clientConnIdMutex.Unlock()
 	return s.advertisedTipStale(tip)
@@ -1031,25 +1036,30 @@ func (s *State) advertisedTipStale(tip ochainsync.Tip) bool {
 		s.config.AdvertisedTipStale(tip)
 }
 
-// clientAdvertisedTipStale judges a client's latest advertised tip now. A
-// client that has advertised nothing yet is not stale.
+// clientAdvertisedTipStale judges a client's latest advertised tip now and
+// returns the sequence number of the tip it judged. A client that has
+// advertised nothing yet is not stale.
 func (s *State) clientAdvertisedTipStale(
 	connId ouroboros.ConnectionId,
-) bool {
+) (bool, uint64) {
 	var tip ochainsync.Tip
+	var seq uint64
 	known := false
 	s.clientConnIdMutex.RLock()
 	if tc, exists := s.trackedClients[connId]; exists && tc != nil {
 		tip, known = tc.advertisedTip, tc.advertisedTipKnown
+		seq = tc.advertisedTipSeq
 	}
 	s.clientConnIdMutex.RUnlock()
-	return known && s.advertisedTipStale(tip)
+	return known && s.advertisedTipStale(tip), seq
 }
 
 // DemoteStaleAdvertisingClients moves every eligible client whose latest
 // advertised tip is stale to observation, and returns those clients. A peer
 // idle at its own tip sends no message when the wall clock carries that tip
-// past the threshold, so without this sweep it would keep its slot.
+// past the threshold, so without this sweep it would keep its slot. A client
+// that advertises a new tip while the sweep is judging its old one is left for
+// the handler of that message to decide.
 func (s *State) DemoteStaleAdvertisingClients() []ouroboros.ConnectionId {
 	if s.config.AdvertisedTipStale == nil {
 		return nil
@@ -1057,19 +1067,23 @@ func (s *State) DemoteStaleAdvertisingClients() []ouroboros.ConnectionId {
 	type candidate struct {
 		connId ouroboros.ConnectionId
 		tip    ochainsync.Tip
+		seq    uint64
 	}
 	s.clientConnIdMutex.RLock()
 	candidates := make([]candidate, 0, len(s.trackedClients))
 	for id, tc := range s.trackedClients {
 		if !tc.ObservabilityOnly && tc.advertisedTipKnown {
-			candidates = append(candidates, candidate{id, tc.advertisedTip})
+			candidates = append(
+				candidates,
+				candidate{id, tc.advertisedTip, tc.advertisedTipSeq},
+			)
 		}
 	}
 	s.clientConnIdMutex.RUnlock()
 	var demoted []ouroboros.ConnectionId
 	for _, c := range candidates {
 		if s.advertisedTipStale(c.tip) &&
-			s.SetClientObservabilityOnly(c.connId, true) {
+			s.setClientObservabilityOnly(c.connId, true, &c.seq) {
 			demoted = append(demoted, c.connId)
 		}
 	}
@@ -1088,13 +1102,30 @@ func (s *State) SetClientObservabilityOnly(
 	connId ouroboros.ConnectionId,
 	observabilityOnly bool,
 ) bool {
+	var judgedTipSeq *uint64
+	if !observabilityOnly && s.config.AdvertisedTipStale != nil {
+		stale, seq := s.clientAdvertisedTipStale(connId)
+		if stale {
+			return false
+		}
+		judgedTipSeq = &seq
+	}
+	return s.setClientObservabilityOnly(connId, observabilityOnly, judgedTipSeq)
+}
+
+// setClientObservabilityOnly applies a role change. A non-nil judgedTipSeq
+// names the advertised tip the change was decided on, and the change is refused
+// if the client has since advertised another: the staleness judgement runs
+// outside clientConnIdMutex, so the tip can be replaced after the verdict.
+func (s *State) setClientObservabilityOnly(
+	connId ouroboros.ConnectionId,
+	observabilityOnly bool,
+	judgedTipSeq *uint64,
+) bool {
 	var notifyType event.EventType
 	var notify *event.Event
 	var preempted *ClientRemovedEvent
 	var freedSlot bool
-	if !observabilityOnly && s.clientAdvertisedTipStale(connId) {
-		return false
-	}
 	ok := func() bool {
 		s.clientConnIdMutex.Lock()
 		defer s.clientConnIdMutex.Unlock()
@@ -1108,6 +1139,9 @@ func (s *State) SetClientObservabilityOnly(
 		}
 		if tc.ObservabilityOnly == observabilityOnly {
 			return true
+		}
+		if judgedTipSeq != nil && tc.advertisedTipSeq != *judgedTipSeq {
+			return false
 		}
 		if !observabilityOnly &&
 			s.config.MaxClients > 0 &&
