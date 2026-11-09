@@ -2718,12 +2718,10 @@ func (ls *LedgerState) headerAtOrImmediatelyBeforeTip(
 // The caller holds chainsyncMutex, so the guards below keep storage reads off
 // paths that cannot need them. The origin point carries no hash, and a header
 // beyond the localTip snapshot is not observed in the primary-chain index at
-// handler entry. The O(1) local hash index then rejects an unknown fork header
-// before a point lookup could fall through to a configured Bark archive. On a
-// hash-index hit, the returned block ID is checked through the point-only
-// primary-chain index path, avoiding a second block-CBOR read. A hash-index
-// miss also probes the exact local point key for pre-index databases, but that
-// bounded compatibility lookup cannot fall through to Bark's archive.
+// handler entry. The exact local point key then answers the question without
+// falling through to a configured Bark archive, and its block ID is checked
+// through the point-only primary-chain index path, avoiding a second
+// block-CBOR read.
 func (ls *LedgerState) headerAlreadyOnPrimaryChain(
 	e ChainsyncEvent,
 	localTip ochainsync.Tip,
@@ -2788,7 +2786,7 @@ func (ls *LedgerState) rollbackTargetOnLocalChain(
 // historicalPointOnPrimaryChain performs the bounded local membership check
 // shared by historical-header filtering and rollback diagnosis. It never
 // treats append-only blob presence as primary-chain membership and never
-// falls through to a configured archive for a legacy point lookup.
+// falls through to a configured archive.
 func (ls *LedgerState) historicalPointOnPrimaryChain(
 	point ocommon.Point,
 	localTip ochainsync.Tip,
@@ -2797,27 +2795,17 @@ func (ls *LedgerState) historicalPointOnPrimaryChain(
 		point.Slot > localTip.Point.Slot {
 		return false, nil
 	}
-	block, err := ls.blockByHash(ls.lifecycleContext(), point.Hash)
-	if errors.Is(err, models.ErrBlockNotFound) ||
-		errors.Is(err, types.ErrHistoryExpired) {
-		// Blocks written before the hash index was introduced still have an
-		// exact point key and metadata, and history expiry removes only a
-		// block's CBOR, keeping the metadata that records its membership.
-		// Probe that local path without allowing Bark to fall through to its
-		// archive on an unknown fork hash.
-		blockID, localErr := database.BlockIDByPointLocal(ls.db, point)
-		if errors.Is(localErr, models.ErrBlockNotFound) {
-			return false, nil
-		}
-		if localErr != nil {
-			return false, localErr
-		}
-		return ls.primaryChainContainsBlockID(blockID, point)
+	// Only the local point key can answer this. A block read through the hash
+	// index lets Bark turn expired CBOR into an archive fetch, while expiry
+	// keeps the metadata and block index that record membership.
+	blockID, err := database.BlockIDByPointLocal(ls.db, point)
+	if errors.Is(err, models.ErrBlockNotFound) {
+		return false, nil
 	}
 	if err != nil {
 		return false, err
 	}
-	return ls.primaryChainContainsBlock(block, point)
+	return ls.primaryChainContainsBlockID(blockID, point)
 }
 
 var errPeerForkAuthorizationChanged = errors.New(

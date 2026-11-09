@@ -490,3 +490,27 @@ func TestChainsyncPeerBehindWithExpiredHistory(t *testing.T) {
 	require.True(t, behind)
 	assert.Equal(t, uint64(6), depth)
 }
+
+// Classifying a peer as behind must not depend on an archive: with the local
+// CBOR expired and the archive unreachable the peer is still behind on our
+// chain, and no archive read was attempted.
+func TestChainsyncPeerBehindExpiredHistorySkipsArchive(t *testing.T) {
+	t.Parallel()
+
+	f := newBehindPeerFixture(t)
+	peerTip := f.tipAtDepth(6)
+	rollbackPoint := f.pointAtDepth(12)
+	expirePrimaryChainBlock(t, f.ls, peerTip.Point)
+	expirePrimaryChainBlock(t, f.ls, rollbackPoint)
+	store := &archiveDownBlobStore{BlobStore: f.ls.db.Blob()}
+	f.ls.db.SetBlobStore(store)
+
+	depth, behind := f.ls.chainsyncPeerBehindOnOurChain(ChainsyncEvent{
+		ConnectionId: f.connId,
+		Point:        rollbackPoint,
+		Tip:          peerTip,
+	})
+	require.True(t, behind)
+	assert.Equal(t, uint64(6), depth)
+	assert.Zero(t, store.archiveFetches.Load())
+}
