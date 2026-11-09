@@ -1871,6 +1871,23 @@ ORDER BY epoch`,
 	return epochs, nil
 }
 
+const (
+	postSnapshotRewardCreditsSQL = `
+SELECT a.credential_tag, a.staking_key, e.amount
+FROM reward_event_credit e
+JOIN account a ON a.id = e.account_id
+WHERE e.slot = ? AND e.post_snapshot = TRUE
+ORDER BY a.credential_tag, a.staking_key, e.id`
+
+	postSnapshotRewardCreditEventsSQL = `
+SELECT a.credential_tag, a.staking_key, s.hash, e.amount
+FROM reward_event_credit e
+JOIN account a ON a.id = e.account_id
+JOIN reward_source s ON s.id = e.source_id
+WHERE e.slot = ? AND e.post_snapshot = TRUE
+ORDER BY a.credential_tag, a.staking_key, e.id`
+)
+
 func (s *Store) GetPostSnapshotRewardCredits(
 	slot uint64,
 	txn types.Txn,
@@ -1885,12 +1902,7 @@ func (s *Store) GetPostSnapshotRewardCredits(
 			"GetPostSnapshotRewardCredits: resolve db: %w", err,
 		)
 	}
-	rows, err := db.QueryContext(ctx, `
-SELECT a.credential_tag, a.staking_key, e.amount
-FROM reward_event_credit e
-JOIN account a ON a.id = e.account_id
-WHERE e.slot = ? AND e.post_snapshot = TRUE
-ORDER BY a.credential_tag, a.staking_key, e.id`, slotValue)
+	rows, err := db.QueryContext(ctx, postSnapshotRewardCreditsSQL, slotValue)
 	if err != nil {
 		return nil, fmt.Errorf("GetPostSnapshotRewardCredits: %w", err)
 	}
@@ -1953,13 +1965,7 @@ func (s *Store) GetPostSnapshotRewardCreditEvents(
 			"GetPostSnapshotRewardCreditEvents: resolve db: %w", err,
 		)
 	}
-	rows, err := db.QueryContext(ctx, `
-SELECT a.credential_tag, a.staking_key, s.hash, e.amount
-FROM reward_event_credit e
-JOIN account a ON a.id = e.account_id
-JOIN reward_source s ON s.id = e.source_id
-WHERE e.slot = ? AND e.post_snapshot = TRUE
-ORDER BY a.credential_tag, a.staking_key, e.id`, slotValue)
+	rows, err := db.QueryContext(ctx, postSnapshotRewardCreditEventsSQL, slotValue)
 	if err != nil {
 		return nil, fmt.Errorf("GetPostSnapshotRewardCreditEvents: %w", err)
 	}

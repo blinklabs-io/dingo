@@ -242,3 +242,74 @@ WHERE epoch = 2 AND folded`,
 	require.Equal(t, 3, ordered, "one account-ordered selection per claim")
 	require.Equal(t, 2, unaccounted, "a short claim also looks for outputs without an account")
 }
+
+// TestClaimUnfoldedRewardCreditsFollowsAccountOrder pins the claim order: the
+// outputs come back by account id, whatever order the output rows were saved
+// in, the cursor resumes at the last account returned, and an output whose
+// credential has no account row is claimed after the account-ordered ones.
+func TestClaimUnfoldedRewardCreditsFollowsAccountOrder(t *testing.T) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+	require.NoError(t, store.SetPendingRewardCreditRounds(
+		[]models.RewardCreditRound{{SnapshotEpoch: 1, BoundarySlot: 100}}, nil,
+	))
+	// Accounts are created in the order A, B, C; outputs are saved C, A, B,
+	// plus a leader output for A and one for a credential with no account.
+	keys := map[string][]byte{
+		"A": bytesRepeat(0x41, 28),
+		"B": bytesRepeat(0x42, 28),
+		"C": bytesRepeat(0x43, 28),
+		"X": bytesRepeat(0x58, 28),
+	}
+	for _, name := range []string{"A", "B", "C"} {
+		require.NoError(t, store.CreateAccount(nil, &models.Account{
+			StakingKey: keys[name], Active: true,
+		}))
+	}
+	var outputs []*models.RewardAccountOutput
+	for _, row := range []struct{ name, kind string }{
+		{"C", "member"}, {"A", "member"}, {"B", "member"}, {"A", "leader"},
+		{"X", "member"},
+	} {
+		outputs = append(outputs, &models.RewardAccountOutput{
+			Epoch: 1, StakingKey: keys[row.name], PoolKeyHash: bytesRepeat(0x31, 28),
+			RewardType: row.kind, Amount: types.Uint64(5), Spendable: true,
+			BoundarySlot: 100,
+		})
+	}
+	require.NoError(t, store.SaveRewardAccountOutputs(outputs, nil))
+	accountIDs := make(map[string]uint)
+	for _, name := range []string{"A", "B", "C"} {
+		account, err := store.GetAccountByCredential(0, keys[name], false, nil)
+		require.NoError(t, err)
+		accountIDs[name] = account.ID
+	}
+
+	names := func(claimed []*models.RewardAccountOutput) string {
+		var b strings.Builder
+		for _, output := range claimed {
+			for name, key := range keys {
+				if string(key) == string(output.StakingKey) {
+					b.WriteString(name)
+				}
+			}
+		}
+		return b.String()
+	}
+	first, err := store.ClaimUnfoldedRewardCredits(1, 0, 2, nil)
+	require.NoError(t, err)
+	require.Equal(t, "AA", names(first), "account A's two outputs come first")
+	for _, output := range first {
+		require.Equal(t, accountIDs["A"], output.AccountID)
+	}
+	second, err := store.ClaimUnfoldedRewardCredits(1, first[len(first)-1].AccountID, 2, nil)
+	require.NoError(t, err)
+	require.Equal(t, "BC", names(second))
+	third, err := store.ClaimUnfoldedRewardCredits(1, second[len(second)-1].AccountID, 2, nil)
+	require.NoError(t, err)
+	require.Equal(t, "X", names(third), "an output without an account is claimed last")
+	require.Zero(t, third[0].AccountID)
+	rest, err := store.ClaimUnfoldedRewardCredits(1, 0, 10, nil)
+	require.NoError(t, err)
+	require.Empty(t, rest, "nothing is claimed twice")
+}

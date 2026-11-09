@@ -180,3 +180,100 @@ func TestRewardCreditCompactionRollbackBelowBoundary(t *testing.T) {
 	).Scan(&folded))
 	require.Zero(t, folded)
 }
+
+// foldedOutputAccounts maps each folded output of the round to its account id.
+func foldedOutputAccounts(t *testing.T, f *epochBoundaryBenchFixture) map[int64]int64 {
+	t.Helper()
+	raw, err := dbtest.RawSQLiteMetadata(t, f.db)
+	require.NoError(t, err)
+	defer raw.Close()
+	rows, err := raw.Query(`SELECT o.id, a.id FROM reward_account_output o
+JOIN account a ON a.credential_tag = o.credential_tag AND a.staking_key = o.staking_key
+WHERE o.folded`)
+	require.NoError(t, err)
+	defer rows.Close()
+	out := make(map[int64]int64)
+	for rows.Next() {
+		var output, account int64
+		require.NoError(t, rows.Scan(&output, &account))
+		out[output] = account
+	}
+	require.NoError(t, rows.Err())
+	return out
+}
+
+// TestRewardCreditCompactionFoldsInAccountOrder pins the order a chunk claims
+// in: every output a chunk folds belongs to an account no later than the
+// accounts of the outputs it leaves, which is what keeps a round's journal
+// rows and the account updates sequential.
+func TestRewardCreditCompactionFoldsInAccountOrder(t *testing.T) {
+	t.Parallel()
+	f := agedCreditedRound(t)
+	cursor := &rewardCreditCursor{}
+	for step := range 4 {
+		before := foldedOutputAccounts(t, f)
+		done, err := f.ls.compactRewardCreditChunk(context.Background(), 3, cursor)
+		require.NoError(t, err)
+		if done {
+			break
+		}
+		after := foldedOutputAccounts(t, f)
+		var lastFolded, firstLeft int64 = 0, 1 << 62
+		raw, err := dbtest.RawSQLiteMetadata(t, f.db)
+		require.NoError(t, err)
+		rows, err := raw.Query(`SELECT o.id, a.id FROM reward_account_output o
+JOIN account a ON a.credential_tag = o.credential_tag AND a.staking_key = o.staking_key
+WHERE NOT o.folded AND o.spendable AND NOT o.guarded`)
+		require.NoError(t, err)
+		for rows.Next() {
+			var output, account int64
+			require.NoError(t, rows.Scan(&output, &account))
+			firstLeft = min(firstLeft, account)
+		}
+		require.NoError(t, rows.Err())
+		require.NoError(t, rows.Close())
+		require.NoError(t, raw.Close())
+		newly := 0
+		for output, account := range after {
+			if _, was := before[output]; was {
+				continue
+			}
+			newly++
+			lastFolded = max(lastFolded, account)
+		}
+		require.Equal(t, 3, newly, "step %d folds one bounded chunk", step)
+		require.LessOrEqual(t, lastFolded, firstLeft,
+			"step %d folded an account after one it left", step)
+		require.Equal(t, uint(lastFolded), cursor.fromAccountID,
+			"the cursor rests on the last account folded")
+	}
+}
+
+// TestRewardCreditCompactionResumesWithFreshCursor pins crash resumption: a
+// job that stops after some chunks and restarts with no cursor skips the
+// credits already folded and ends exactly where an uninterrupted job does.
+func TestRewardCreditCompactionResumesWithFreshCursor(t *testing.T) {
+	t.Parallel()
+	f := agedCreditedRound(t)
+	for range 3 {
+		done, err := f.ls.compactRewardCreditChunk(
+			context.Background(), 3, &rewardCreditCursor{},
+		)
+		require.NoError(t, err)
+		require.False(t, done)
+	}
+	require.NoError(t, f.ls.compactRewardCreditRounds(context.Background()))
+	require.Zero(t, unfoldedCreditCount(t, f))
+
+	want := agedCreditedRound(t)
+	require.NoError(t, want.ls.compactRewardCreditRounds(context.Background()))
+	gotRaw, err := dbtest.RawSQLiteMetadata(t, f.db)
+	require.NoError(t, err)
+	defer gotRaw.Close()
+	wantRaw, err := dbtest.RawSQLiteMetadata(t, want.db)
+	require.NoError(t, err)
+	defer wantRaw.Close()
+	require.Equal(t, dumpEpochBoundaryState(t, wantRaw),
+		dumpEpochBoundaryState(t, gotRaw),
+		"a resumed job writes what an uninterrupted one writes")
+}

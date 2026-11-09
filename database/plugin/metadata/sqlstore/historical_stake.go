@@ -227,6 +227,10 @@ func historicalRewardsBatch(
 		}
 		return keys[i].key < keys[j].key
 	})
+	creditSlots, err := rewardCreditSlotsAfter(ctx, db, threshold)
+	if err != nil {
+		return nil, err
+	}
 	base := make(map[historicalRewardKey]uint64)
 	withdrawals := make(map[historicalRewardKey]historicalWithdrawal)
 	total := make(map[historicalRewardKey]uint64)
@@ -302,10 +306,12 @@ func historicalRewardsBatch(
 			}
 			return nil
 		}
-		if err := scanHistoricalCredits(
-			ctx, db, roundRewardCreditsAfterSQL, credit, accountID, threshold,
-		); err != nil {
-			return nil, err
+		for _, creditSlot := range creditSlots {
+			if err := scanHistoricalCredits(
+				ctx, db, roundRewardCreditsAtSlotSQL, credit, creditSlot, accountID,
+			); err != nil {
+				return nil, err
+			}
 		}
 		creditArgs := []any{accountID, threshold}
 		if creditQuery == rewardEventCreditsAfterOrPostSnapshotSQL {
@@ -347,11 +353,16 @@ func historicalRewardsBatch(
 // The Leios transaction context slot, when a credit's source is a transaction
 // or a withdrawal's own transaction has one, replaces the journal slot.
 const (
-	roundRewardCreditsAfterSQL = `-- name: GetRoundRewardCreditsAfter :many
-SELECT r.boundary_slot, c.amount
-FROM reward_credit_slot r
-JOIN reward_credit c ON c.boundary_slot = r.boundary_slot AND c.account_id = ?
-WHERE r.boundary_slot > ?`
+	// rewardCreditSlotsAfterSQL lists the credited boundaries once per read;
+	// each credential then probes reward_credit by its primary key per slot. A
+	// join between the two lets the planner scan every credit of the later
+	// rounds and filter by account afterwards.
+	rewardCreditSlotsAfterSQL = `-- name: GetRewardCreditSlotsAfter :many
+SELECT boundary_slot FROM reward_credit_slot WHERE boundary_slot > ?`
+
+	roundRewardCreditsAtSlotSQL = `-- name: GetRoundRewardCreditsAtSlot :many
+SELECT boundary_slot, amount FROM reward_credit
+WHERE boundary_slot = ? AND account_id = ?`
 
 	rewardEventCreditsAfterSQL = `-- name: GetRewardEventCreditsAfter :many
 SELECT COALESCE(lc.slot, e.slot), e.amount
@@ -388,6 +399,27 @@ WHERE w.account_id = ? AND COALESCE(lc.slot, w.slot) >= ?
 ORDER BY w.slot, w.tx_id
 LIMIT 1`
 )
+
+func rewardCreditSlotsAfter(
+	ctx context.Context,
+	db queryer,
+	threshold int64,
+) ([]int64, error) {
+	rows, err := db.QueryContext(ctx, rewardCreditSlotsAfterSQL, threshold)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var slots []int64
+	for rows.Next() {
+		var slot int64
+		if err := rows.Scan(&slot); err != nil {
+			return nil, err
+		}
+		slots = append(slots, slot)
+	}
+	return slots, rows.Err()
+}
 
 func scanHistoricalCredits(
 	ctx context.Context,

@@ -591,6 +591,13 @@ func mergeRewardWithdrawalSlots(
 	return nil
 }
 
+// rewardWithdrawalsWitnessedAfterSQL reads the withdrawals above a slot through
+// idx_reward_withdrawal_slot.
+const rewardWithdrawalsWitnessedAfterSQL = `
+SELECT a.credential_tag, a.staking_key FROM reward_withdrawal w
+JOIN account a ON a.id = w.account_id
+WHERE w.slot > ?`
+
 func (s *Store) AccountsWitnessedAfterSlot(
 	slot uint64,
 	txn types.Txn,
@@ -611,10 +618,7 @@ func (s *Store) AccountsWitnessedAfterSlot(
 SELECT credential_tag, staking_key FROM account_withdrawal_witness
 WHERE added_slot > ?`)
 	args = append(args, slot)
-	parts = append(parts, `
-SELECT a.credential_tag, a.staking_key FROM reward_withdrawal w
-JOIN account a ON a.id = w.account_id
-WHERE w.slot > ?`)
+	parts = append(parts, rewardWithdrawalsWitnessedAfterSQL)
 	args = append(args, slot)
 	rows, err := db.QueryContext(ctx, `
 SELECT credential_tag, staking_key
