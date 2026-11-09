@@ -60,6 +60,12 @@ type rollbackCycle struct {
 	// the boundary. replay is false for the first application, true for the
 	// re-application.
 	postTarget func(t *testing.T, next models.Epoch, replay bool)
+	// forkPostTarget, when set, replaces postTarget for the re-application: a
+	// competing chain whose blocks differ above the rollback target. The
+	// re-application then has to differ, and forkCheck inspects how, instead
+	// of the replay comparison.
+	forkPostTarget func(t *testing.T, next models.Epoch)
+	forkCheck      func(t *testing.T, first, second govDiffEpochDump)
 	// afterRollback runs after the rollback and before the post-rollback
 	// comparison, for in-memory assertions.
 	afterRollback func(t *testing.T, epoch models.Epoch, pparams lcommon.ProtocolParameters)
@@ -178,25 +184,28 @@ func (c *rollbackCycle) attachLedger(t *testing.T, boundaries int) {
 	}
 }
 
-// setTip records that the ledger has applied every block up to slot.
+// setTip records that the ledger has applied every block up to slot. The
+// database tip decides, among other things, whether a boundary applies the
+// epoch's reward update.
 func (c *rollbackCycle) setTip(t *testing.T, slot uint64) {
 	t.Helper()
-	if !c.ledger {
-		return
-	}
 	var number uint64
-	for i := range c.chainSlots() {
-		if c.chainSlots()[i] == slot {
+	for i, chainSlot := range c.chainSlots() {
+		if chainSlot == slot {
 			number = uint64(i) + 1
 		}
 	}
 	require.NotZero(t, number, "slot %d is not a chain block", slot)
 	point := rollbackPoint(slot)
+	tip := ochainsync.Tip{Point: point, BlockNumber: number}
+	if !c.ledger {
+		require.NoError(t, c.s.db.SetTip(tip, nil))
+		return
+	}
 	nonce := testHashBytes("nonce-" + slotLabel(slot))
 	require.NoError(t, c.s.db.SetBlockNonce(
 		point.Hash, point.Slot, nonce, false, nil,
 	))
-	tip := ochainsync.Tip{Point: point, BlockNumber: number}
 	require.NoError(t, c.s.db.SetTip(tip, nil))
 	c.s.ls.Lock()
 	c.s.ls.currentTip = tip
@@ -256,14 +265,22 @@ func (c *rollbackCycle) run(
 	if c.postTarget == nil && c.gap > 1 {
 		t.Fatalf("a rollback target %d slots early needs post-target rows", c.gap)
 	}
+	c.setTip(t, target)
 	if c.ledger {
-		c.setTip(t, target)
+		// A ledger at the target has already precomputed the round the
+		// coming boundary applies, as the rollback's own restart of that
+		// worker will have done; start from that state.
+		s.ls.queueStartupRewardPrecompute()
+		s.ls.rewardPrecomputeWG.Wait()
 	}
 	before := dumpComparableTables(t, c.raw)
 	preDump := s.dump(t, epoch.EpochId, pparams)
 
 	apply := func(replay bool) (models.Epoch, lcommon.ProtocolParameters) {
-		if c.postTarget != nil {
+		switch {
+		case replay && c.forkPostTarget != nil:
+			c.forkPostTarget(t, next)
+		case c.postTarget != nil:
 			c.postTarget(t, next, replay)
 		}
 		newEpoch, newPParams := s.commitRollover(
@@ -289,6 +306,8 @@ func (c *rollbackCycle) run(
 		require.NoError(t, s.db.RollbackMetadataAfterSlot(
 			context.Background(), ocommon.Point{Slot: target}, 0, nil,
 		))
+		// The sweep leaves the tip to its caller.
+		c.setTip(t, target)
 	}
 	after := dumpComparableTables(t, c.raw)
 	require.Equal(t, preDump, s.dump(t, epoch.EpochId, pparams),
@@ -326,6 +345,17 @@ func (c *rollbackCycle) run(
 
 	secondEpoch, secondPParams := apply(true)
 	second := s.dump(t, secondEpoch.EpochId, secondPParams)
+	if c.forkPostTarget != nil {
+		require.NotNil(t, c.forkCheck)
+		c.forkCheck(t, first, second)
+		s.ls.currentEpoch = secondEpoch
+		s.ls.currentPParams = secondPParams
+		s.epoch, s.pparams = secondEpoch, secondPParams
+		return cycleResult{
+			epoch: secondEpoch, pparams: secondPParams, before: before,
+			first: firstTables, changed: changed, preDump: preDump, dump: second,
+		}
+	}
 	require.Equal(t, first, second,
 		"epoch %d: replay must reproduce the first application",
 		firstEpoch.EpochId,

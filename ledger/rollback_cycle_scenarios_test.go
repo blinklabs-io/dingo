@@ -16,10 +16,16 @@ package ledger
 
 import (
 	"context"
+	"math/big"
+	"strings"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/stretchr/testify/require"
 )
 
@@ -242,6 +248,289 @@ func TestRollbackAcrossPlominHardForkRestoresDRepDelegations(t *testing.T) {
 			require.NoError(t, err)
 			require.Empty(t, account.Drep,
 				"the dangling delegation must be cleared by the hard fork")
+		})
+	}
+}
+
+// Votes and treasury donations in blocks above the rollback target are
+// rolled back with them. A vote there is decisive: the proposal ratifies only
+// because of it, so a rollback that left the vote behind, or a replay that
+// dropped it, changes the ledger's governance outcome.
+func TestRollbackRestoresVotesAndDonationsAboveTheTarget(t *testing.T) {
+	t.Parallel()
+	const gap = 50
+	type variant struct {
+		name string
+		// fork replays a chain without the post-target votes and donation.
+		fork bool
+	}
+	variants := []variant{{"same chain", false}, {"fork without the votes", true}}
+	for _, entry := range []struct {
+		name   string
+		ledger bool
+	}{{"database", false}, {"ledger", true}} {
+		for _, v := range variants {
+			name := entry.name + "/" + v.name
+			t.Run("new vote/"+name, func(t *testing.T) {
+				t.Parallel()
+				s := newGovDiffScenarioWithOptions(t, govDiffScenarioOptions{noProposals: true})
+				hf := &lcommon.HardForkInitiationGovAction{
+					Type: uint(lcommon.GovActionTypeHardForkInitiation),
+				}
+				hf.ProtocolVersion.Major = 11
+				p := s.propose(t, 0x85, lcommon.GovActionTypeHardForkInitiation, hf)
+				slot := s.epoch.StartSlot - 5
+				s.castVote(t, p, models.VoterTypeDRep, s.drep, models.VoteYes, slot)
+				s.castVote(t, p, models.VoterTypeCC, s.hotCredential, models.VoteYes, slot)
+				first := s.epoch.EpochId + 1
+				boundaries := 3
+				c := newRollbackCycle(t, s, entry.ledger, false, gap, boundaries)
+				c.postTarget = func(t *testing.T, next models.Epoch, _ bool) {
+					target := next.StartSlot - gap
+					if next.EpochId == first {
+						// Without the SPO vote the action cannot ratify.
+						s.castVote(t, p, models.VoterTypeSPO,
+							[]byte(hfrLiveYesPool), models.VoteYes, target+5)
+					}
+					require.NoError(t, s.db.Metadata().AddNetworkDonation(
+						target+10, next.EpochId-1, 7_000, nil,
+					))
+				}
+				if v.fork {
+					boundaries = 1
+					c.forkPostTarget = func(*testing.T, models.Epoch) {}
+					c.forkCheck = func(t *testing.T, a, b govDiffEpochDump) {
+						require.NotNil(t, a.Proposals[0].RatifiedIn)
+						require.Nil(t, b.Proposals[0].RatifiedIn,
+							"the fork has no SPO vote and must not ratify")
+						require.Greater(t, a.Treasury, b.Treasury,
+							"the fork has no donation")
+					}
+				}
+				results := runBoundaries(t, c, boundaries)
+				requireChanged(t, results,
+					"governance_vote", "governance_vote_history", "network_donation")
+				if !v.fork {
+					require.True(t, s.enacted(t, 0x85))
+				}
+			})
+			t.Run("changed vote/"+name, func(t *testing.T) {
+				t.Parallel()
+				s := newGovDiffScenarioWithOptions(t, govDiffScenarioOptions{noProposals: true})
+				minFee := uint(88)
+				change := &conway.ConwayParameterChangeGovAction{
+					Type: uint(lcommon.GovActionTypeParameterChange),
+					ParamUpdate: conway.ConwayProtocolParameterUpdate{
+						MinFeeA: &minFee,
+					},
+				}
+				p := s.propose(t, 0x89, lcommon.GovActionTypeParameterChange, change)
+				slot := s.epoch.StartSlot - 5
+				s.castVote(t, p, models.VoterTypeDRep, s.drep, models.VoteNo, slot)
+				// A fee change is a security parameter, so pools vote too.
+				s.castVote(t, p, models.VoterTypeSPO,
+					[]byte(hfrLiveYesPool), models.VoteYes, slot)
+				s.castVote(t, p, models.VoterTypeCC, s.hotCredential, models.VoteYes, slot)
+				first := s.epoch.EpochId + 1
+				boundaries := 3
+				c := newRollbackCycle(t, s, entry.ledger, false, gap, boundaries)
+				c.postTarget = func(t *testing.T, next models.Epoch, _ bool) {
+					target := next.StartSlot - gap
+					if next.EpochId != first {
+						return
+					}
+					// The DRep changes its vote after the target.
+					updated := target + 5
+					require.NoError(t, s.db.SetGovernanceVote(
+						context.Background(), &models.GovernanceVote{
+							ProposalID:      p.ID,
+							VoterType:       models.VoterTypeDRep,
+							VoterCredential: s.drep,
+							Vote:            models.VoteYes,
+							AddedSlot:       slot,
+							VoteUpdatedSlot: &updated,
+						}, nil))
+				}
+				if v.fork {
+					boundaries = 1
+					c.forkPostTarget = func(*testing.T, models.Epoch) {}
+					c.forkCheck = func(t *testing.T, a, b govDiffEpochDump) {
+						require.NotNil(t, a.Proposals[0].RatifiedIn)
+						require.Nil(t, b.Proposals[0].RatifiedIn,
+							"without the changed vote the DRep votes no")
+					}
+				}
+				results := runBoundaries(t, c, boundaries)
+				requireChanged(t, results, "governance_vote", "governance_vote_history")
+				if !v.fork {
+					require.True(t, s.enacted(t, 0x89))
+				}
+			})
+		}
+	}
+}
+
+// rewardUpdateNodeConfig is the scenario's genesis with a stability window
+// (4k/f = 8 slots) that fits the scenario's 100-slot epoch, and a supply small
+// enough that the pool's stake earns a nonzero reward.
+func rewardUpdateNodeConfig(t *testing.T) *cardano.CardanoNodeConfig {
+	t.Helper()
+	cfg := &cardano.CardanoNodeConfig{
+		ShelleyGenesisHash: strings.Repeat("5a", 32),
+	}
+	require.NoError(t, completeTestShelleyGenesis(cfg).LoadShelleyGenesisFromReader(strings.NewReader(`{
+		"activeSlotsCoeff": 0.5,
+		"epochLength": 432000,
+		"maxLovelaceSupply": 100000000,
+		"securityParam": 1,
+		"slotLength": 1,
+		"updateQuorum": 5,
+		"systemStart": "2017-09-23T21:44:51Z"
+	}`)))
+	return cfg
+}
+
+// rewardPool is a pool whose members the reward round pays.
+type rewardPool struct {
+	key, owner, member []byte
+}
+
+// addRewardPool registers a pool with an owner and a member, both delegated
+// and registered, whose stake the seeded reward rounds distribute.
+func (s *govDiffScenario) addRewardPool(t *testing.T) rewardPool {
+	t.Helper()
+	rp := rewardPool{
+		key:    repeatByte(28, 0xc1),
+		owner:  s.addAccount(t, 0xc2, nil, ""),
+		member: s.addAccount(t, 0xc3, nil, ""),
+	}
+	margin := &types.Rat{Rat: big.NewRat(1, 10)}
+	require.NoError(t, s.db.ImportPool(context.Background(), nil, &models.Pool{
+		PoolKeyHash:   rp.key,
+		VrfKeyHash:    make([]byte, 32),
+		Pledge:        500,
+		Cost:          1_000,
+		Margin:        margin,
+		RewardAccount: rp.owner,
+	}, &models.PoolRegistration{
+		PoolKeyHash:   rp.key,
+		AddedSlot:     s.epoch.StartSlot - 500,
+		Pledge:        500,
+		Cost:          1_000,
+		Margin:        margin,
+		VrfKeyHash:    make([]byte, 32),
+		RewardAccount: rp.owner,
+	}))
+	raw, err := dbtest.RawSQLiteMetadata(t, s.db)
+	require.NoError(t, err)
+	for _, cred := range [][]byte{rp.owner, rp.member} {
+		_, err := raw.Exec(
+			`UPDATE account SET pool = ? WHERE staking_key = ?`, rp.key, cred,
+		)
+		require.NoError(t, err)
+	}
+	return rp
+}
+
+// seedRewardRound writes the reward round the boundary after epoch applies:
+// the snapshot's pool and stake inputs, and the blocks the pool made in the
+// performance epoch.
+func (s *govDiffScenario) seedRewardRound(
+	t *testing.T,
+	rp rewardPool,
+	epoch models.Epoch,
+	blocks int,
+) {
+	t.Helper()
+	epochs, ok := stakeRewardEpochsForApplication(epoch.EpochId + 1)
+	require.True(t, ok)
+	meta := s.db.Metadata()
+	perf, err := meta.GetEpoch(epochs.performance, nil)
+	require.NoError(t, err)
+	require.NotNil(t, perf)
+	var poolID lcommon.PoolKeyHash
+	copy(poolID[:], rp.key)
+	for i := range blocks {
+		require.NoError(t, s.db.UpdatePoolOpCertSequence(
+			context.Background(), poolID, epoch.EpochId*100+uint64(i)+1, perf.StartSlot+uint64(i), nil,
+		))
+	}
+	captured, boundary := epoch.StartSlot, epoch.StartSlot
+	require.NoError(t, meta.SaveRewardSnapshot(&models.RewardSnapshot{
+		Epoch:            epochs.snapshot,
+		SnapshotType:     "mark",
+		TotalActiveStake: 60_000_000,
+		TotalPoolCount:   1,
+		TotalDelegators:  2,
+		CapturedSlot:     captured,
+		BoundarySlot:     boundary,
+		ProtocolVersion:  10,
+	}, nil))
+	require.NoError(t, meta.SaveRewardPoolInputs([]*models.RewardPoolInput{{
+		Epoch:                      epochs.snapshot,
+		PoolKeyHash:                rp.key,
+		RewardAccount:              rp.owner,
+		RewardAccountCredentialTag: 0,
+		Margin:                     &types.Rat{Rat: big.NewRat(1, 10)},
+		Pledge:                     500,
+		Cost:                       1_000,
+		DelegatedStake:             60_000_000,
+		OwnerStake:                 10_000_000,
+		DelegatorCount:             2,
+		CapturedSlot:               captured,
+		BoundarySlot:               boundary,
+	}}, nil))
+	require.NoError(t, meta.SaveRewardStakeInputs([]*models.RewardStakeInput{
+		{
+			Epoch: epochs.snapshot, PoolKeyHash: rp.key, StakingKey: rp.owner,
+			Stake: 10_000_000, Owner: true, Registered: true,
+			CapturedSlot: captured, BoundarySlot: boundary,
+		},
+		{
+			Epoch: epochs.snapshot, PoolKeyHash: rp.key, StakingKey: rp.member,
+			Stake: 50_000_000, Registered: true,
+			CapturedSlot: captured, BoundarySlot: boundary,
+		},
+	}, nil))
+}
+
+// A boundary that pays rewards moves reserves and the treasury, credits
+// accounts and journals each credit. Rolling it back must undo all of it, and
+// replaying it must pay the same amounts.
+func TestRollbackAcrossRewardPayoutRestoresEveryTable(t *testing.T) {
+	t.Parallel()
+	for _, entry := range []struct {
+		name   string
+		ledger bool
+	}{{"database", false}, {"ledger", true}} {
+		t.Run(entry.name, func(t *testing.T) {
+			t.Parallel()
+			s := newGovDiffScenarioWithOptions(t, govDiffScenarioOptions{noProposals: true})
+			rp := s.addRewardPool(t)
+			// One desired pool lets the pool's stake earn its full share.
+			s.pparams.(*conway.ConwayProtocolParameters).NOpt = 1
+			// The reward update applies only once the tip is past the
+			// stability window of the ended epoch, which must fit in it.
+			s.ls.config.CardanoNodeConfig = rewardUpdateNodeConfig(t)
+			c := newRollbackCycle(t, s, entry.ledger, false, 1, 2)
+			c.prepare = func(t *testing.T, epoch models.Epoch) {
+				s.seedRewardRound(t, rp, epoch, 30)
+			}
+			startTreasury, startReserves, _ := networkState(t, s.db)
+			results := runBoundaries(t, c, 2)
+			treasury, reserves, _ := networkState(t, s.db)
+			require.Less(t, reserves, startReserves,
+				"the reward round must draw on the reserves")
+			require.NotEqual(t, startTreasury, treasury)
+			outputs, err := s.db.Metadata().GetRewardPoolOutputs(739, nil)
+			require.NoError(t, err)
+			require.Len(t, outputs, 1)
+			require.NotZero(t, uint64(outputs[0].LeaderReward))
+			require.NotZero(t, uint64(outputs[0].MemberRewardTotal),
+				"the pool's members must be paid")
+			requireChanged(t, results,
+				"network_state", "reward_ada_pots", "reward_pool_output", "reward_account_output",
+				"reward_credit_round", "account_reward_delta")
 		})
 	}
 }
