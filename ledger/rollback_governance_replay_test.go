@@ -228,7 +228,9 @@ func dumpComparableTables(t *testing.T, raw *sql.DB) map[string][]string {
 	tables["sync_state"] = slices.DeleteFunc(
 		tables["sync_state"],
 		func(line string) bool {
-			return strings.Contains(line, models.RewardEligibilityRecheckKey)
+			return strings.Contains(line, models.RewardEligibilityRecheckKey) ||
+				// An empty pending list is the same state as no list.
+				strings.HasSuffix(line, `value={"entries":[]}`)
 		},
 	)
 	for _, lines := range tables {

@@ -30,8 +30,8 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
-	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/snapshot"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
@@ -537,13 +537,11 @@ func TestRollbackAcrossEpochBoundaryRestoresEveryTable(t *testing.T) {
 	// itself could add or alter.
 	h.addUtxo(0x33, delegatorKey, 7_000_000, h.next.StartSlot-1)
 	h.rollbackBeforeBoundary()
-	before := dumpAllMetadataTables(t, raw)
+	before := dumpComparableTables(t, raw)
 	h.addUtxo(0x33, delegatorKey, 7_000_000, h.next.StartSlot-1)
 	h.applyBoundary()
 	h.rollbackBeforeBoundaryRepairing(true)
-	after := dumpAllMetadataTables(t, raw)
-	delete(before, "commit_timestamp")
-	delete(after, "commit_timestamp")
+	after := dumpComparableTables(t, raw)
 	diffs := diffMetadataTables(before, after)
 	for _, d := range diffs {
 		t.Log(d)
