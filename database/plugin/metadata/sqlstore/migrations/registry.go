@@ -95,6 +95,7 @@ const (
 	utxoStakingPartialIndexSchemaRelease                = "utxo-staking-partial-indexes"
 	rewardOutputCredentialPendingIndexSchemaRelease     = "reward-account-output-credential-pending-index"
 	poolSnapshotVrfKeySchemaRelease                     = "pool-snapshot-vrf-key"
+	blockNonceSlotIndexSchemaRelease                    = "block-nonce-slot-leading-index"
 )
 
 const mithrilRewardRepairPendingKey = "mithril_reward_repair_pending"
@@ -270,6 +271,7 @@ var schemaVersions = []struct {
 		Dir:     "v54",
 	},
 	{Version: 55, Name: poolSnapshotVrfKeySchemaRelease, Dir: "v55"},
+	{Version: 56, Name: blockNonceSlotIndexSchemaRelease, Dir: "v56"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
@@ -1987,6 +1989,11 @@ func translateSchemaSQLInSchema(
 				value,
 				"DROP INDEX IF EXISTS `idx_asset_amount`",
 				"DROP INDEX `idx_asset_amount` ON `asset`",
+			)
+			value = strings.ReplaceAll(
+				value,
+				"DROP INDEX IF EXISTS `hash_slot`",
+				"DROP INDEX `hash_slot` ON `block_nonce`",
 			)
 			value = strings.ReplaceAll(
 				value,
