@@ -383,6 +383,15 @@ func TestStartEra_Validation(t *testing.T) {
 	}
 }
 
+// The NtC TCP listener is opt-in: resetGlobalConfig is a hand-kept fixture, so
+// the default is pinned on the constructor itself.
+func TestDefaultConfigDisablesNtCTCPListener(t *testing.T) {
+	t.Parallel()
+	if port := newDefaultConfig().PrivatePort; port != 0 {
+		t.Fatalf("expected PrivatePort 0 by default, got %d", port)
+	}
+}
+
 func TestLoadConfig_EmbeddedDefaults(t *testing.T) {
 	resetGlobalConfig()
 

@@ -19466,7 +19466,8 @@ pprof listener therefore requires an explicit override of the dedicated setting;
 both serving modes and Mithril snapshot sync use the same resolved address. Port
 checks apply only to the listeners a given invocation actually starts, derived
 from the *effective* run mode plus the storage mode: the serving modes start the
-relay, private, metrics, debug, and bark listeners (and, under `api` storage or
+relay, metrics, debug, and bark listeners, plus the private TCP listener only
+when `privatePort` is non-zero (and, under `api` storage or
 a configured `dev` run mode — which forces `api` storage — the
 UTxORPC/Blockfrost/Mesh listeners and an explicitly enabled Midnight listener);
 the Mithril snapshot sync (`dingo sync --mithril` or `dingo mithril sync`)
@@ -19477,8 +19478,9 @@ create` and `load` start none. A port configured for an inactive listener cannot
 bind, so it is neither range-checked nor counted toward a collision; two active
 listeners are only reported as colliding when their bind addresses overlap
 (equal, or either side a wildcard) — listeners on distinct specific addresses
-may share a port. The relay, private, and metrics ports must additionally be set
-in the serving modes. Because the one-shot subcommands run a fixed operation
+may share a port. The relay and metrics ports must additionally be set in the
+serving modes; `privatePort` is optional, and 0 leaves only the Unix socket.
+Because the one-shot subcommands run a fixed operation
 regardless of the configured `runMode` (which defaults to `serve`), `cmd/dingo`
 passes `Validate()` the effective run mode derived from the invoked command, so
 listener and ImmutableDB-source requirements match what the command actually
