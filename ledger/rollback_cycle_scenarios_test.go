@@ -203,12 +203,20 @@ func TestLedgerRollbackAcrossGovernanceBoundariesRestoresEveryTable(
 	t *testing.T,
 ) {
 	t.Parallel()
-	s := newGovDiffScenario(t)
-	c := newRollbackCycle(t, s, true, false, 1, 4)
-	epoch, pparams := s.epoch, s.pparams
-	for range 4 {
-		r := c.run(t, epoch, pparams)
-		epoch, pparams = r.epoch, r.pparams
+	for _, deferred := range []bool{false, true} {
+		name := "ratified at boundary"
+		if deferred {
+			name = "ratification deferred"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			s := newGovDiffScenario(t)
+			c := newRollbackCycle(t, s, true, deferred, 1, 4)
+			results := runBoundaries(t, c, 4)
+			requireChanged(t, results,
+				"governance_proposal", "committee_member", "pparams",
+				"network_state", "reward_ada_pots")
+		})
 	}
 }
 
@@ -533,4 +541,57 @@ func TestRollbackAcrossRewardPayoutRestoresEveryTable(t *testing.T) {
 				"reward_credit_round", "account_reward_delta")
 		})
 	}
+}
+
+// A boundary whose deferred RATIFY has decided but not written leaves a
+// pending record and a running job. Rolling the boundary back through the
+// ledger must discard both, so that the job's own write finds nothing to do and
+// no ratification of the removed boundary survives; the replayed boundary then
+// ratifies as it did the first time.
+func TestLedgerRollbackDiscardsUndeliveredRatification(t *testing.T) {
+	t.Parallel()
+	s := newGovDiffScenario(t)
+	c := newRollbackCycle(t, s, true, true, 1, 1)
+	epoch, pparams := s.epoch, s.pparams
+	s.prepareRollover(t, epoch, pparams)
+	next := epoch.StartSlot + uint64(epoch.LengthInSlots)
+	target := next - 1
+	c.setTip(t, target)
+	before := dumpComparableTables(t, c.raw)
+
+	held, release := holdRatificationApply(t, s)
+	_, _ = s.commitRollover(t, epoch, pparams, func(*LedgerState) {})
+	c.setTip(t, next)
+	requireHeld(t, held, epoch.EpochId+1)
+	rec, err := loadPendingRatification(s.db, nil)
+	require.NoError(t, err)
+	require.NotNil(t, rec, "the boundary must leave its decision pending")
+	require.Nil(t, s.proposalByMarker(t, 0x71).RatifiedEpoch)
+
+	require.NoError(t, s.ls.rollbackWithBlocksAndIntent(
+		context.Background(), rollbackPoint(target), nil, false, false, false,
+	))
+	rec, err = loadPendingRatification(s.db, nil)
+	require.NoError(t, err)
+	require.Nil(t, rec, "the rollback must discard the pending decision")
+	s.ls.ratificationMu.Lock()
+	job := s.ls.ratificationJob
+	s.ls.ratificationMu.Unlock()
+	require.Nil(t, job, "the rollback must drop the removed boundary's job")
+
+	release()
+	s.ls.ratificationWG.Wait()
+	s.ls.rewardPrecomputeWG.Wait()
+	require.Empty(t, diffMetadataTables(before, dumpComparableTables(t, c.raw)))
+	require.Nil(t, s.proposalByMarker(t, 0x71).RatifiedEpoch,
+		"the removed boundary's decision must not be written")
+
+	s.ls.currentEpoch = epoch
+	s.ls.currentPParams = pparams
+	s.commitRollover(t, epoch, pparams, c.settle())
+	require.NotNil(t, s.proposalByMarker(t, 0x71).RatifiedEpoch,
+		"the replayed boundary must ratify")
+	rec, err = loadPendingRatification(s.db, nil)
+	require.NoError(t, err)
+	require.Nil(t, rec)
 }

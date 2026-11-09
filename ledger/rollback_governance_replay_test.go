@@ -154,10 +154,12 @@ func withoutRowIDs(tables map[string][]string) map[string][]string {
 			fields := strings.Fields(line)
 			kept := fields[:0]
 			for _, f := range fields {
-				// A history row's vote_id names the vote row, whose own id a
-				// re-applied boundary allocates anew.
+				// A history or reward row's vote_id or mir_id names its
+				// parent row, whose own id a re-applied boundary allocates
+				// anew.
 				if !strings.HasPrefix(f, "id=") &&
-					!strings.HasPrefix(f, "vote_id=") {
+					!strings.HasPrefix(f, "vote_id=") &&
+					!strings.HasPrefix(f, "mir_id=") {
 					kept = append(kept, f)
 				}
 			}
