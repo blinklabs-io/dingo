@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
 )
 
@@ -295,9 +296,15 @@ func (ls *LedgerState) buildHardForkSummaryFrom(
 		return nil, errors.New("ledger: no epochs in cache")
 	}
 
+	shape, shapeErr := ls.eraShapeWithError()
+
 	// Walk the epoch cache grouping contiguous epochs by EraId. Each group
-	// becomes one EraSummary; its Start is derived from the first epoch of
-	// the group, and its End (for past eras) is the Start of the next group.
+	// becomes one EraSummary. A group's Start is the bound of its era's first
+	// epoch, which is the first cached row only when no empty epoch precedes
+	// it: rows are sparse across an empty epoch, so a boundary between eras
+	// is resolved by eraTransitionEpoch and the epochs between rows are
+	// counted at their era's geometry, keeping every End equal to the next
+	// era's Start as the hard-fork combinator's summary does.
 	eraSummaries := make([]hardfork.EraSummary, 0, len(cache))
 	relTime := time.Duration(0)
 
@@ -327,9 +334,48 @@ func (ls *LedgerState) buildHardForkSummaryFrom(
 			Slot:         first.StartSlot,
 			Epoch:        first.EpochId,
 		}
+		// nextEpoch is the epoch the next row would occupy if no epoch were
+		// empty.
+		nextEpoch := first.EpochId
+		if i > 0 {
+			prev := cache[i-1]
+			transition, err := eraTransitionEpoch(
+				shape, shapeErr, cache[:i], first,
+			)
+			if err != nil {
+				return nil, err
+			}
+			// Old-era epochs before the transition, from the previous row.
+			oldEpochs := transition - prev.EpochId - 1
+			oldDuration, err := hardForkCachedEpochDuration(
+				prev.LengthInSlots, prev.SlotLength,
+			)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"ledger: cached epoch %d (era %d) params invalid: %w",
+					prev.EpochId, prev.EraId, err,
+				)
+			}
+			relTime, err = addEpochDurations(
+				relTime, oldDuration, oldEpochs, prev.EpochId,
+			)
+			if err != nil {
+				return nil, err
+			}
+			start = hardfork.Bound{
+				RelativeTime: relTime,
+				Slot: prev.StartSlot +
+					(transition-prev.EpochId)*uint64(prev.LengthInSlots),
+				Epoch: transition,
+			}
+			nextEpoch = transition
+			// The previous group, already appended, ends at this start.
+			end := start
+			eraSummaries[len(eraSummaries)-1].End = &end
+		}
 
 		// Advance through all contiguous epochs with the same EraId,
-		// accumulating relTime.
+		// accumulating relTime and counting epochs absent between rows.
 		j := i
 		for j < len(cache) && cache[j].EraId == eraID {
 			ep := cache[j]
@@ -345,6 +391,14 @@ func (ls *LedgerState) buildHardForkSummaryFrom(
 					err,
 				)
 			}
+			if j > 0 && ep.EpochId > nextEpoch {
+				relTime, err = addEpochDurations(
+					relTime, epochDuration, ep.EpochId-nextEpoch, ep.EpochId,
+				)
+				if err != nil {
+					return nil, err
+				}
+			}
 			if epochDuration > maxHardForkDuration-relTime {
 				return nil, fmt.Errorf(
 					"ledger: cumulative cached epoch duration overflows time.Duration at epoch %d (era %d)",
@@ -353,17 +407,11 @@ func (ls *LedgerState) buildHardForkSummaryFrom(
 				)
 			}
 			relTime += epochDuration
+			nextEpoch = ep.EpochId + 1
 			j++
 		}
 
-		last := cache[j-1]
-		end := hardfork.Bound{
-			RelativeTime: relTime,
-			Slot:         last.StartSlot + uint64(last.LengthInSlots),
-			Epoch:        last.EpochId + 1,
-		}
-
-		eraSummary := hardfork.EraSummary{
+		eraSummaries = append(eraSummaries, hardfork.EraSummary{
 			EraID: eraID,
 			Start: start,
 			Params: hardfork.EraParams{
@@ -372,15 +420,7 @@ func (ls *LedgerState) buildHardForkSummaryFrom(
 				SafeZoneSlots: 0,
 				GenesisWindow: 0,
 			},
-		}
-
-		isLast := j == len(cache)
-		if !isLast {
-			// Close this era at the next era's start.
-			eraSummary.End = &end
-		}
-		eraSummaries = append(eraSummaries, eraSummary)
-
+		})
 		i = j
 	}
 
@@ -390,11 +430,10 @@ func (ls *LedgerState) buildHardForkSummaryFrom(
 	// Use the same configured safe-zone source as the NtC era-history query.
 	// A missing shape or current-era entry cannot safely supply a forecast:
 	// the cache-derived current era has a zero safe zone and no end bound.
-	shape, err := ls.eraShapeWithError()
-	if err != nil {
+	if shapeErr != nil {
 		return nil, fmt.Errorf(
 			"ledger: hard-fork forecast unavailable: %w",
-			err,
+			shapeErr,
 		)
 	}
 	shapeEntry, shapeAvailable := shape.EraForID(current.EraID)
@@ -527,4 +566,84 @@ func (ls *LedgerState) WallClockSlotFromConfirmedHistory() (
 		)
 	}
 	return slot, true, nil
+}
+
+// addEpochDurations returns relTime plus count epochs of the given duration,
+// failing when the sum overflows time.Duration.
+func addEpochDurations(
+	relTime, epochDuration time.Duration,
+	count, epoch uint64,
+) (time.Duration, error) {
+	if count == 0 || epochDuration == 0 {
+		return relTime, nil
+	}
+	room := uint64(maxHardForkDuration - relTime) // #nosec G115 -- relTime <= max
+	if count > room/uint64(epochDuration) {       // #nosec G115 -- positive
+		return 0, fmt.Errorf(
+			"ledger: cumulative cached epoch duration overflows time.Duration at epoch %d",
+			epoch,
+		)
+	}
+	return relTime + time.Duration(count)*epochDuration, nil // #nosec G115 -- bounded above
+}
+
+// eraTransitionEpoch returns the epoch at whose start the era of next begins,
+// the hard-fork combinator's transition epoch (boundEpoch), given the cached
+// rows before it. The rows are sparse across an empty epoch, so the transition
+// may precede next: it lies in (previous row, next], and is taken from the
+// first rule that decides it:
+//
+//  1. Eras with different epoch lengths fix it by slot geometry, since the
+//     slots between the two rows are the old era's epochs up to the transition
+//     and the new era's after it.
+//  2. A TriggerAtEpoch era ends at its configured epoch.
+//  3. A version-triggered era ends at the successor of the ledger epoch label,
+//     the epoch ouroboros-consensus reads from the pending update.
+func eraTransitionEpoch(
+	shape hardfork.Shape,
+	shapeErr error,
+	before []models.Epoch,
+	next models.Epoch,
+) (uint64, error) {
+	prev := before[len(before)-1]
+	if next.EpochId <= prev.EpochId {
+		return 0, fmt.Errorf(
+			"ledger: epoch %d (era %d) does not follow epoch %d (era %d)",
+			next.EpochId, next.EraId, prev.EpochId, prev.EraId,
+		)
+	}
+	if next.EpochId == prev.EpochId+1 {
+		return next.EpochId, nil
+	}
+	if prev.LengthInSlots != next.LengthInSlots {
+		oldLen, newLen := int64(prev.LengthInSlots), int64(next.LengthInSlots)
+		slots := int64(next.StartSlot) - int64(prev.StartSlot) // #nosec G115
+		epochs := int64(next.EpochId - prev.EpochId)           // #nosec G115
+		numerator := slots - epochs*newLen
+		denominator := oldLen - newLen
+		if numerator%denominator != 0 {
+			return 0, fmt.Errorf(
+				"ledger: epoch %d slot %d is not reachable from epoch %d "+
+					"across the era change",
+				next.EpochId, next.StartSlot, prev.EpochId,
+			)
+		}
+		oldEpochs := numerator / denominator
+		if oldEpochs < 1 || oldEpochs > epochs {
+			return 0, fmt.Errorf(
+				"ledger: era change between epochs %d and %d has no "+
+					"consistent transition epoch",
+				prev.EpochId, next.EpochId,
+			)
+		}
+		return prev.EpochId + uint64(oldEpochs), nil // #nosec G115
+	}
+	transition := ledgerEpochFromCache(before) + 1
+	if shapeErr == nil {
+		if entry, ok := shape.EraForID(prev.EraId); ok &&
+			entry.NextEraTrigger.Kind == hardfork.TriggerAtEpoch {
+			transition = entry.NextEraTrigger.Epoch
+		}
+	}
+	return min(max(transition, prev.EpochId+1), next.EpochId), nil
 }

@@ -694,10 +694,12 @@ func TestSparseScheduledHardForkEventUsesTransitionEpoch(t *testing.T) {
 	)
 	hardFork, ok := received.Data.(event.HardForkEvent)
 	require.True(t, ok)
-	require.Equal(t, targetEpoch, hardFork.EpochNo)
+	// The hard-fork combinator translates at the scheduled epoch, which is
+	// empty here, not at the epoch of the first block after it.
+	require.Equal(t, conwayEpoch, hardFork.EpochNo)
 	require.Equal(
 		t,
-		targetEpoch*boundaryEraTestEpochLength,
+		conwayEpoch*boundaryEraTestEpochLength,
 		hardFork.Slot,
 	)
 }
