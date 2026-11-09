@@ -150,6 +150,44 @@ func TestElectingVrfKeyHashEarliestFallbackMemoized(t *testing.T) {
 	assert.Equal(t, int64(1), store.earliest.Load())
 }
 
+func TestElectingVrfKeyHashUsesSnapshotKey(t *testing.T) {
+	t.Parallel()
+	elected := lcommon.Blake2b256{8}
+	current := lcommon.Blake2b256{9}
+	store := &countingVrfKeyHashStore{cutoffHash: current[:]}
+	ls, epochCache, snap := newElectingVrfMemoLedger(t, store, 1_000_000)
+	snap.row.VrfKeyHash = elected[:]
+
+	assert.Equal(t, elected, lookupElectingVrf(t, ls, epochCache, snap))
+	assert.Equal(t, int64(0), store.cutoff.Load(), "snapshot key queried current registration")
+}
+
+func TestElectingVrfKeyHashUsesUnchangedSnapshotKey(t *testing.T) {
+	t.Parallel()
+	current := lcommon.Blake2b256{9}
+	store := &countingVrfKeyHashStore{cutoffHash: current[:]}
+	ls, epochCache, snap := newElectingVrfMemoLedger(t, store, 1_000_000)
+	snap.row.VrfKeyHash = current[:]
+
+	assert.Equal(t, current, lookupElectingVrf(t, ls, epochCache, snap))
+	assert.Equal(t, int64(0), store.cutoff.Load(), "snapshot key queried current registration")
+}
+
+func TestElectingVrfKeyHashLegacySnapshotUsesRegistration(t *testing.T) {
+	t.Parallel()
+	cutoff := lcommon.Blake2b256{9}
+	earliest := lcommon.Blake2b256{10}
+	store := &countingVrfKeyHashStore{
+		cutoffHash:   cutoff[:],
+		earliestHash: earliest[:],
+	}
+	ls, epochCache, snap := newElectingVrfMemoLedger(t, store, 1_000_000)
+
+	assert.Equal(t, cutoff, lookupElectingVrf(t, ls, epochCache, snap))
+	assert.Equal(t, int64(1), store.cutoff.Load())
+	assert.Equal(t, int64(0), store.earliest.Load())
+}
+
 func TestElectingVrfKeyHashNotMemoizedWithinStabilityWindow(t *testing.T) {
 	t.Parallel()
 	want := lcommon.Blake2b256{9}

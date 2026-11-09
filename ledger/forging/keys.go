@@ -20,6 +20,7 @@ import (
 	"crypto/ed25519"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"path/filepath"
 	"reflect"
@@ -815,6 +816,81 @@ func (pc *PoolCredentials) updateKESPeriodUnsafe(period uint64) error {
 	}
 
 	return nil
+}
+
+// updateKESForSlot applies the forward-secure KES state transition for a
+// wall-clock slot. It advances valid key material and permanently removes the
+// active signing handle at the operational certificate's exclusive expiry.
+func (pc *PoolCredentials) updateKESForSlot(
+	period uint64,
+) (start, maxEvolutions, expiry uint64, retErr error) {
+	// Dropping the handle is not enough for a transport that keeps a live
+	// connection: close it so the expired certificate's remote signer cannot
+	// be reached through a copy another credential generation still holds. The
+	// close runs after pc.mu is released because it can wait on an in-flight
+	// signing request. A signer that holds nothing open need not implement
+	// io.Closer.
+	var expiredSigner RemoteKESSigner
+	defer func() {
+		if closer, ok := expiredSigner.(io.Closer); ok {
+			_ = closer.Close()
+		}
+	}()
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+
+	start = pc.opCertStartKES
+	maxEvolutions = pc.maxKESEvolutions
+	expiry = pc.opCertExpiryKES
+	if !pc.opCertValidated {
+		return start, maxEvolutions, expiry, errors.New(
+			"operational certificate is not validated",
+		)
+	}
+	if maxEvolutions == 0 || expiry == 0 {
+		return start, maxEvolutions, expiry, errors.New(
+			"KES protocol lifetime is not validated",
+		)
+	}
+	if period < start {
+		return start, maxEvolutions, expiry, fmt.Errorf(
+			"operational certificate is not valid before KES period %d (current %d)",
+			start,
+			period,
+		)
+	}
+	if period >= expiry {
+		pc.kesMu.Lock()
+		expiredSigner = pc.remoteSigner
+		hadSigningKey := pc.kesSKey != nil || pc.remoteSigner != nil
+		if pc.kesSKey != nil {
+			pc.kesSKey.Zeroize()
+			pc.kesSKey = nil
+		}
+		pc.remoteSigner = nil
+		pc.remoteKESPeriod = 0
+		if hadSigningKey {
+			pc.materialRevision++
+			pc.generation++
+		}
+		pc.kesMu.Unlock()
+		return start, maxEvolutions, expiry, fmt.Errorf(
+			"%w at KES period %d (current %d, max evolutions %d)",
+			errOpCertExpired,
+			expiry,
+			period,
+			maxEvolutions,
+		)
+	}
+	if !pc.isLoadedUnsafe() {
+		return start, maxEvolutions, expiry, errors.New(
+			"credentials not loaded",
+		)
+	}
+	if err := pc.updateKESPeriodUnsafe(period); err != nil {
+		return start, maxEvolutions, expiry, err
+	}
+	return start, maxEvolutions, expiry, nil
 }
 
 // VRFProve generates a VRF proof for leader election.

@@ -1599,7 +1599,7 @@ type LedgerState struct {
 	chainsyncBlockfetchTimerGeneration uint64      // generation counter to detect stale timer callbacks
 	activeBlockfetchTimeout            time.Duration
 	currentPParams                     lcommon.ProtocolParameters
-	prevEraPParams                     lcommon.ProtocolParameters // pparams from the immediately previous era (for era-1 TX validation)
+	prevEraPParams                     lcommon.ProtocolParameters // pparams for historical blocks from the immediately previous era
 	// sigResults remembers the outcome of verifying each transaction's
 	// witness signatures, so the repeated validations of one transaction
 	// (mempool admission and revalidation, forging, block application)
@@ -6691,7 +6691,7 @@ func (ls *LedgerState) applyRolloverTransitionInfo(
 // standalone era-transition path) gets the same behaviour without
 // duplicating the clear-on-era-advance logic.
 func (ls *LedgerState) applyEraTransition(result *EraTransitionResult) {
-	// Preserve the pre-hard-fork pparams for era-1 TX validation.
+	// Preserve the pre-hard-fork pparams for historical block validation.
 	ls.prevEraPParams = ls.currentPParams
 	ls.currentPParams = result.NewPParams
 	ls.currentEra = result.NewEra
@@ -6743,12 +6743,12 @@ func resolveSyntheticV2CostModel(
 // value, or its snapshot mirror, describing ls.currentPParams specifically)
 // and whether pp actually is that current-era object.
 //
-// When validating an era-1 transaction, pp is instead the previous era's own
-// (already-superseded) pparams -- the tracked flag describes the CURRENT
-// era's object, not necessarily this different one, so this re-derives
-// directly from pp's own value instead (the same bootstrap heuristic
-// resolveSyntheticV2CostModel's empty-marker branch uses). Pinning the value
-// in LedgerView keeps the answer for a single
+// When validating an era-1 transaction from a historical block, pp is instead
+// the previous era's own (already-superseded) pparams -- the tracked flag
+// describes the CURRENT era's object, not necessarily this different one, so
+// this re-derives directly from pp's own value instead (the same bootstrap
+// heuristic resolveSyntheticV2CostModel's empty-marker branch uses). Pinning
+// the value in LedgerView keeps the answer for a single
 // validation operation consistent with the exact pp it's evaluating
 // against, rather than either a live re-read that can race a concurrent
 // writer or a flag that describes a different pparams object than pp.
@@ -10756,9 +10756,10 @@ func (ls *LedgerState) ledgerProcessBlock(
 			err,
 		)
 	}
-	// Reject blocks whose header protocol major version runs more than
-	// one ahead of current pparams. Skipped on testnets pre-Dijkstra
-	// (a cardano-ledger relaxation).
+	// Full validation applies both the node's enabled-era ceiling and the BBODY
+	// current-version-plus-one rule. Historical peer blocks still apply the
+	// enabled-era ceiling below; only trusted replay and Mithril-certified
+	// history skip it.
 	if shouldValidate {
 		if err := validateInboundBlockEnvelope(
 			block,
@@ -10771,9 +10772,14 @@ func (ls *LedgerState) ledgerProcessBlock(
 		if err := ls.validateBlockHeaderProtocolVersion(
 			block.Header(), pparams,
 		); err != nil {
-			return nil, err
+			return nil, ls.rejectInboundEnvelopeFailure(point, err)
 		}
 	} else if !ls.config.TrustedReplay && !ls.slotCoveredByMithril(point.Slot) {
+		if err := ls.validateSupportedHeaderProtocolVersion(
+			block.Header(),
+		); err != nil {
+			return nil, ls.rejectInboundEnvelopeFailure(point, err)
+		}
 		// The aggregate maxBlockExUnits bound is a block-level ledger rule
 		// that per-transaction validation never repeats, so a peer-sourced
 		// block must meet it even when ValidateHistorical=false skips the
@@ -11059,7 +11065,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 		// transactions still need valid intervals, fees, collateral, witnesses,
 		// and other structural checks.
 		if shouldValidate {
-			validationEra, err := resolveValidationEra(
+			validationEra, err := resolveBlockValidationEra(
 				tx,
 				currentEra,
 				ls.eraList(),
@@ -11315,6 +11321,14 @@ func (ls *LedgerState) ledgerProcessBlock(
 			levels := TransactionLevelsForApply(tx)
 			if len(levels) > 1 {
 				expandedIndexOffset += uint64(len(levels)) - 1
+			}
+
+			// Keeping a consumed output in the created overlay would resurrect it
+			// for a later transaction even though the applied state marks it spent.
+			for _, level := range levels {
+				for _, input := range level.Consumed() {
+					delete(intraBlockUtxos, utxoref.ForInput(input))
+				}
 			}
 
 			// Add this transaction's outputs to intra-block map for subsequent TX lookups
@@ -12447,7 +12461,7 @@ func (ls *LedgerState) computePParams(
 		}
 	}
 
-	// Load previous era's pparams for era-1 TX validation.
+	// Load previous era's pparams for historical block validation.
 	// Walk the epoch cache backwards to find the last epoch
 	// that belonged to a different (earlier) era, then load
 	// its pparams.
@@ -12466,10 +12480,10 @@ func (ls *LedgerState) computePParams(
 					nil,
 				)
 				if prevErr != nil {
-					// Era-1 transaction validation falls back to
-					// the current era's pparams when this is nil,
-					// so a failed read must not look like "no
-					// previous era".
+					// Historical block validation falls back to the
+					// current era's pparams when this is nil, so a
+					// failed read must not look like "no previous
+					// era".
 					return nil, nil, fmt.Errorf(
 						"computePParams: previous-era GetPParams "+
 							"epoch %d: %w",
@@ -15952,11 +15966,10 @@ func (ls *LedgerState) CountTransactionsByMetadataLabel(
 	return count, nil
 }
 
-// resolveValidationEra determines the appropriate era descriptor for
-// validating a transaction. It returns the current era if the transaction
-// matches, the previous era if compatible (era-1), or an error if the
-// transaction era is not compatible with the current ledger era.
-func resolveValidationEra(
+// resolveBlockValidationEra returns the era that validates a transaction from
+// a block. Historical block application can cross a hard-fork boundary, so the
+// immediately previous era remains valid there.
+func resolveBlockValidationEra(
 	tx lcommon.Transaction,
 	currentEra eras.EraDesc,
 	eraList []eras.EraDesc,
@@ -15983,6 +15996,20 @@ func resolveValidationEra(
 	return *txEra, nil
 }
 
+// resolveSubmittedValidationEra requires a submitted transaction to match the
+// current ledger era. The hard-fork combinator rejects every other era before
+// running that era's transaction rules.
+func resolveSubmittedValidationEra(
+	tx lcommon.Transaction,
+	currentEra eras.EraDesc,
+) (eras.EraDesc, error) {
+	txEraId := uint(tx.Type()) // #nosec G115 -- era IDs are non-negative
+	if txEraId != currentEra.Id {
+		return eras.EraDesc{}, newEraMismatchError(txEraId, currentEra.Id)
+	}
+	return currentEra, nil
+}
+
 func validationReferenceSlot(
 	tipSlot uint64,
 	currentSlot uint64,
@@ -15995,10 +16022,12 @@ func validationReferenceSlot(
 }
 
 type txValidationSnapshot struct {
-	generation                   uint64
-	tipPoint                     ocommon.Point
-	currentEra                   eras.EraDesc
-	currentPParams               lcommon.ProtocolParameters
+	generation     uint64
+	tipPoint       ocommon.Point
+	currentEra     eras.EraDesc
+	currentPParams lcommon.ProtocolParameters
+	// prevEraPParams and eraList are used only when this snapshot validates
+	// historical transactions carried by a Leios endorser block.
 	prevEraPParams               lcommon.ProtocolParameters
 	eraList                      []eras.EraDesc
 	referenceSlot                uint64
@@ -16009,35 +16038,19 @@ type txValidationSnapshot struct {
 
 func (s txValidationSnapshot) validationContext(
 	tx lcommon.Transaction,
-) (eras.EraDesc, lcommon.ProtocolParameters, bool, error) {
-	validationEra, err := resolveValidationEra(tx, s.currentEra, s.eraList)
+) (eras.EraDesc, lcommon.ProtocolParameters, error) {
+	validationEra, err := resolveSubmittedValidationEra(tx, s.currentEra)
 	if err != nil {
-		return eras.EraDesc{}, nil, false, err
+		return eras.EraDesc{}, nil, err
 	}
-	pp, isCurrent := s.validationPParams(validationEra.Id)
-	return validationEra, pp, isCurrent, nil
+	return validationEra, s.currentPParams, nil
 }
 
-// validationPParams returns the protocol parameters that validate a
-// transaction of a compatible era, and whether they are the current era's.
-func (s txValidationSnapshot) validationPParams(
-	txEraId uint,
-) (lcommon.ProtocolParameters, bool) {
-	if prev := previousEraPParams(
-		txEraId, s.currentEra.Id, s.currentPParams, s.prevEraPParams,
-	); prev != nil {
-		return prev, false
-	}
-	return s.currentPParams, true
-}
-
-// previousEraPParams returns the parameters that validate a transaction of
-// the era before the ledger's, or nil when txEraId is the ledger's own era or
-// no such parameters exist. They are the recorded previous-era parameters.
-// A network that starts in Dijkstra has no earlier epoch to record them
-// from, but Dijkstra's parameters extend Conway's, so a Conway transaction
-// there is validated with the Conway parameters they embed; cardano-node
-// likewise validates a Conway-tagged submission on such a network.
+// previousEraPParams returns the parameters that validate a transaction in a
+// historical block from the era before the ledger's, or nil when txEraId is
+// the ledger's own era or no such parameters exist. They are the recorded
+// previous-era parameters. A network that starts in Dijkstra has no earlier
+// epoch to record them from, but Dijkstra's parameters extend Conway's.
 func previousEraPParams(
 	txEraId, currentEraId uint,
 	current, prev lcommon.ProtocolParameters,
@@ -16059,7 +16072,7 @@ func previousEraPParams(
 func (s txValidationSnapshot) protocolParameters(
 	tx lcommon.Transaction,
 ) (lcommon.ProtocolParameters, error) {
-	_, pp, _, err := s.validationContext(tx)
+	_, pp, err := s.validationContext(tx)
 	return pp, err
 }
 
@@ -16391,9 +16404,7 @@ func (ls *LedgerState) withResolvingTxValidationSession(ctx context.Context,
 					return fmt.Errorf("load TX input state: %w", err)
 				}
 			}
-			validationEra, pp, isCurrentEraPParams, err := snapshot.validationContext(
-				tx,
-			)
+			validationEra, pp, err := snapshot.validationContext(tx)
 			if err != nil {
 				if isSemanticTxValidationError(err) {
 					return &semanticTxValidationError{err: err}
@@ -16409,7 +16420,7 @@ func (ls *LedgerState) withResolvingTxValidationSession(ctx context.Context,
 			}
 			synthetic := syntheticV2CostModelForValidation(
 				pp,
-				isCurrentEraPParams,
+				true,
 				snapshot.syntheticV2CostModelInEffect,
 			)
 			lv := (&LedgerView{
@@ -16685,16 +16696,14 @@ func (ls *LedgerState) validateTxCore(
 	}
 	snapshot := ls.txValidationSnapshot()
 
-	validationEra, pp, isCurrentEraPParams, err := snapshot.validationContext(
-		tx,
-	)
+	validationEra, pp, err := snapshot.validationContext(tx)
 	if err != nil {
 		return err
 	}
 	if validationEra.ValidateTxFunc != nil {
 		synthetic := syntheticV2CostModelForValidation(
 			pp,
-			isCurrentEraPParams,
+			true,
 			snapshot.syntheticV2CostModelInEffect,
 		)
 		txn := ls.db.Transaction(context.Background(), false)
@@ -16726,10 +16735,7 @@ func (ls *LedgerState) validateTxCore(
 	return nil
 }
 
-// ValidateTx runs ledger validation on the provided transaction.
-// It accepts transactions from the current era and the immediately
-// previous era (era-1), as Cardano allows during the overlap
-// period after a hard fork.
+// ValidateTx runs ledger validation on a transaction from the current era.
 func (ls *LedgerState) ValidateTx(
 	tx lcommon.Transaction,
 ) error {
@@ -16869,12 +16875,10 @@ func (ls *LedgerState) EvaluateTxContext(
 	consensusState := ls.loadConsensusSnapshot()
 	snapshotEra := consensusState.currentEra
 	snapshotPParams := consensusState.currentPParams
-	snapshotPrevEraPParams := consensusState.prevEraPParams
 
-	validationEra, err := resolveValidationEra(
+	validationEra, err := resolveSubmittedValidationEra(
 		tx,
 		snapshotEra,
-		ls.eraList(),
 	)
 	if err != nil {
 		return 0, lcommon.ExUnits{}, nil, err
@@ -16884,20 +16888,10 @@ func (ls *LedgerState) EvaluateTxContext(
 	var totalExUnits lcommon.ExUnits
 	var redeemerExUnits map[lcommon.RedeemerKey]lcommon.ExUnits
 	if validationEra.EvaluateTxFunc != nil {
-		// Use the previous era's protocol parameters when evaluating
-		// a transaction from the immediately previous era (era-1).
 		pp := snapshotPParams
-		isCurrentEraPParams := true
-		if prev := previousEraPParams(
-			validationEra.Id, snapshotEra.Id, snapshotPParams,
-			snapshotPrevEraPParams,
-		); prev != nil {
-			pp = prev
-			isCurrentEraPParams = false
-		}
 		synthetic := syntheticV2CostModelForValidation(
 			pp,
-			isCurrentEraPParams,
+			true,
 			consensusState.syntheticV2CostModelInEffect,
 		)
 		txn := ls.db.Transaction(ctx, false)

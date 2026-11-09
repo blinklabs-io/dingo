@@ -64,12 +64,12 @@ func (e *headerValidationError) Error() string {
 
 func (e *headerValidationError) Unwrap() error { return e.Cause }
 
-// rejectInboundEnvelopeFailure marks a failed inbound block envelope check as a
-// rejected block. The envelope checks (ordering, size limits, the aggregate
-// maxBlockExUnits bound, the Byron body proof) are pure functions of the block
-// and its parent, and the block is already on the primary chain, so a plain
-// error restarts the pipeline onto the identical block until the no-progress
-// limit halts it. Wrapping it in a headerValidationError routes it through the
+// rejectInboundEnvelopeFailure marks a failed inbound block envelope or header
+// compatibility check as a rejected block. These checks are pure functions of
+// the block, its parent, current protocol parameters and node configuration,
+// and the block is already on the primary chain, so a plain error restarts the
+// pipeline onto the identical block until the no-progress limit halts it.
+// Wrapping it in a headerValidationError routes it through the
 // reject-and-rewind recovery so chain selection can offer another candidate.
 //
 // A block this node forged is returned unwrapped: a local forging defect must
