@@ -99,24 +99,10 @@ func txsubmissionWireSize(eraId uint16, bodyLen int) uint64 {
 	return 1 + cborHeadLen(uint64(eraId)) + 2 + cborHeadLen(body) + body
 }
 
-// decodeTxsubmissionTx is the production txsubmissionTxDecoder. The rational
-// size check runs first because the ledger decoder's cost is quadratic in an
-// oversized rational component, and the mempool size check that would bound
-// the transaction only runs after the decode.
-func decodeTxsubmissionTx(
-	txType uint,
-	txCbor []byte,
-) (ledger.Transaction, error) {
-	if err := safedecode.RejectOversizedRationals(txCbor); err != nil {
-		return nil, err
-	}
-	return ledger.NewTransactionFromCbor(txType, txCbor)
-}
-
 // txsubmissionTxDecoder decodes one MsgReplyTxs body. validateTxsubmissionReply
 // receives it rather than naming the ledger decoder directly, so the panic
 // containment wrapped around the call can be driven by a decoder that really
-// panics; production always supplies decodeTxsubmissionTx.
+// panics; production always supplies Ouroboros.decodeTxsubmissionTx.
 type txsubmissionTxDecoder func(txType uint, txCbor []byte) (ledger.Transaction, error)
 
 type validatedTxsubmissionBody struct {
@@ -679,7 +665,7 @@ func (o *Ouroboros) txsubmissionServerInit(
 				validatedTxs, err := validateTxsubmissionReply(
 					requestedTxs,
 					txs,
-					decodeTxsubmissionTx,
+					o.decodeTxsubmissionTx,
 				)
 				o.recordTxsubmissionReplyOutcome(
 					validatedTxs,

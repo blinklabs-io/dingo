@@ -8872,17 +8872,26 @@ block/header decoding rather than Leios EB closures.
 body-hash check, and gouroboros builds a tag-30 rational (a pool margin) with
 `big.Rat.SetFrac`, whose cost is quadratic in the size of an oversized numerator
 or denominator. `decodeBlockfetchBlock` and the transaction-submission decoder
-therefore call `safedecode.RejectOversizedRationals` first: a linear scan of the
-raw CBOR that returns `safedecode.ErrOversizedRational` for a tag-30 component
-whose significant magnitude is wider than a Word64, the range gouroboros
-requires of a pool margin. It reads the rational's array through any tag stack,
-head width or indefinite-length form, copies no payload bytes, and descends into
-tag-24 byte strings, joining the chunks of an indefinite-length one. It rejects only what it
-positively identifies and leaves malformed input to the decoder.
-`safedecode.Transaction` and `safedecode.DijkstraBlockTransaction` apply the
-same check for API submission and endorser-block transactions, and
-`models.DecodeBlockCbor` applies it to every stored or downloaded block (Bark
-archive responses, Mithril chunks, backfill, API reads).
+therefore apply the rules the ledger itself enforces, before the decode, with
+limits read from the ledger's current parameters (`peerDecodeLimits`):
+
+- From protocol version 12 the ledger requires each component to fit a Word64
+  as written, so `safedecode.RejectOversizedRationals` refuses a wider one. The
+  scan is linear, copies no payload (except to join the chunks of an
+  indefinite-length tag-24 wrapper), reads the rational through any tag stack,
+  head width or indefinite-length form, and follows nesting up to the decoder's
+  own limit.
+- Below version 12 the ledger bounds the reduced rational, so a component of
+  any width can be valid and the scan applies no limit. A transaction is
+  instead refused from its length when it exceeds the ledger's `MaxTxSize`,
+  which is invalid whatever it holds and which the mempool otherwise checks
+  only after the decode. A block below version 12 has no such raw bound, so a
+  valid-but-wide rational still costs the quadratic decode until the decoder
+  itself is fixed.
+
+The protocol version never decreases, so a peer block from a later epoch than
+the ledger tip is checked against a rule no stricter than its own. With no
+ledger or no parameters, no limit is applied.
 
 A decode function that panics (adversarial/malformed peer bytes could in
 principle trigger this) does not strand the key and does not crash the

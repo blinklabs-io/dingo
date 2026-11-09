@@ -243,9 +243,12 @@ func (o *Ouroboros) decodeBlockfetchBlock(
 	raw []byte,
 ) (block gledger.Block, err error) {
 	// Peer bytes are decoded before the body is compared with the header's
-	// body hash, so refuse the one input whose decode cost is quadratic in
-	// its size before any decoder runs.
-	if err := safedecode.RejectOversizedRationals(raw); err != nil {
+	// body hash, so refuse a rational the ledger would refuse, whose decode
+	// cost is quadratic in its size, before any decoder runs.
+	if err := safedecode.RejectOversizedRationals(
+		raw,
+		o.peerDecodeLimits(0).rationalWidth,
+	); err != nil {
 		return nil, err
 	}
 	defer func() {

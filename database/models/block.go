@@ -69,12 +69,6 @@ func decodeBlockCborGuarded(
 	decode blockDecoder,
 ) (ledger.Block, error) {
 	return safedecode.Guard(func() (ledger.Block, error) {
-		// Stored bytes are not always trusted: archive downloads and bootstrap
-		// data reach this decoder, and an oversized rational costs it
-		// quadratic CPU.
-		if err := safedecode.RejectOversizedRationals(blockCbor); err != nil {
-			return nil, err
-		}
 		return decode(blockType, blockCbor, config...)
 	})
 }

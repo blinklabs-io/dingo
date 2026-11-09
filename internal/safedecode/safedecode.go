@@ -92,9 +92,6 @@ var ErrTrailingData = errors.New("trailing data after transaction")
 // scan is cheaper than the typed decode and refuses padded input before it.
 func Transaction(txType uint, txCbor []byte) (ledger.Transaction, error) {
 	return Guard(func() (ledger.Transaction, error) {
-		if err := RejectOversizedRationals(txCbor); err != nil {
-			return nil, err
-		}
 		var item cbor.RawMessage
 		consumed, err := cbor.Decode(txCbor, &item)
 		if err != nil {
@@ -119,9 +116,6 @@ func Transaction(txType uint, txCbor []byte) (ledger.Transaction, error) {
 // transaction's CBOR is that input.
 func DijkstraBlockTransaction(txCbor []byte) (lcommon.Transaction, error) {
 	return Guard(func() (lcommon.Transaction, error) {
-		if err := RejectOversizedRationals(txCbor); err != nil {
-			return nil, err
-		}
 		var item cbor.RawMessage
 		consumed, err := cbor.Decode(txCbor, &item)
 		if err != nil {

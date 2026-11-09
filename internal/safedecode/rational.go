@@ -16,70 +16,79 @@ package safedecode
 
 import (
 	"errors"
+
+	"github.com/blinklabs-io/gouroboros/cbor"
 )
 
-// maxRationalMagnitudeBytes is the width of a Word64. A tag-30 component whose
-// bignum magnitude, leading zero bytes aside, is wider than this cannot be
-// represented as a Word64, which is the range gouroboros requires of a pool
-// margin's numerator and denominator.
-const maxRationalMagnitudeBytes = 8
+// Word64Bytes is the width of a Word64. From protocol version 12 the ledger
+// decodes a bounded rational's numerator and denominator as Word64 as written,
+// so a component with more significant bytes than this is invalid.
+const Word64Bytes = 8
 
 // ErrOversizedRational reports a tag-30 rational with a numerator or
-// denominator that does not fit in a Word64. It carries no part of the value:
-// the decoder's own rejection text embeds the full decimal expansion of each
-// component.
+// denominator wider than the limit the caller passed. It carries no part of the
+// value: the decoder's own rejection text embeds the full decimal expansion of
+// each component.
 var ErrOversizedRational = errors.New(
-	"rational component does not fit in 64 bits",
+	"rational component is wider than the allowed size",
 )
 
 const (
-	// maxScanDepth bounds the nesting the scan follows. Deeper input is left
-	// to the decoder, which carries its own limits.
-	maxScanDepth = 128
-
 	cborTagRational = 30
 	// cborTagEncodedCbor marks a byte string holding another CBOR item, which
 	// is how transactions and bodies are wrapped on the wire.
 	cborTagEncodedCbor = 24
 )
 
+// scanner carries the limits one scan applies. maxDepth mirrors the decoder's
+// nesting limit, so input the decoder would refuse is not walked.
+type scanner struct {
+	limit    int
+	maxDepth int
+}
+
 var errScanMalformed = errors.New("malformed cbor")
 
 // RejectOversizedRationals scans raw CBOR for a tag-30 rational with a
-// component that does not fit in a Word64 and returns ErrOversizedRational if
-// it finds one.
+// component whose significant magnitude is wider than maxMagnitudeBytes and
+// returns ErrOversizedRational if it finds one. A limit of zero or less
+// disables the check.
 //
 // gouroboros decodes each component as an arbitrary-size bignum and builds a
 // big.Rat with SetFrac, whose GCD is quadratic in operand size, before any
 // range check on the field. A 64 KB component costs the decoding goroutine
-// about a second, and peer-supplied transactions and blocks are decoded before
-// their size or body hash is checked. This scan runs first, in linear time and
-// without allocating or copying payload bytes.
+// about a second. This scan runs first, in linear time and without copying
+// payload bytes, except to join the chunks of an indefinite-length tag-24
+// wrapper.
+//
+// The caller chooses the limit, because what the ledger accepts depends on the
+// protocol version. Below version 12 the ledger bounds the reduced rational,
+// so a raw component of any width is legal and no raw limit is safe. From
+// version 12 it requires each component to fit a Word64 as written, which is
+// the limit Word64Bytes names.
 //
 // It rejects only what it positively identifies. Input it cannot walk
-// (truncated, reserved head bytes, nesting past maxScanDepth) returns nil so
-// the real decoder reports its own error. Rationals inside a tag-24 byte
-// string are scanned as the nested item they carry.
-//
-// The bound applies to every tag-30 rational, not only pool margins, and
-// measures the value as written: a component with more than eight significant
-// bytes is refused even where it would reduce to a Word64 once divided by its
-// common factor, which the decoder would accept after the quadratic work.
-func RejectOversizedRationals(data []byte) error {
-	// Items are scanned until the input ends: callers pass one item, but a
-	// block or transaction decoder reads only the first, so there is no
-	// reason to look past it.
-	_, err := scanItem(data, 0, 0)
+// (truncated, reserved head bytes, nesting past the decoder's own limit)
+// returns nil so the real decoder reports its own error. A rational inside a
+// tag-24 byte string is scanned as the nested item it carries.
+func RejectOversizedRationals(data []byte, maxMagnitudeBytes int) error {
+	if maxMagnitudeBytes <= 0 {
+		return nil
+	}
+	// Only the first item is scanned: a block or transaction decoder reads
+	// one item, so there is no reason to look past it.
+	s := scanner{limit: maxMagnitudeBytes, maxDepth: cbor.MaxNestedLevels}
+	_, err := s.item(data, 0, 0)
 	if errors.Is(err, ErrOversizedRational) {
 		return err
 	}
 	return nil
 }
 
-// scanItem walks one data item starting at pos and returns the offset just
+// item walks one data item starting at pos and returns the offset just
 // past it.
-func scanItem(data []byte, pos int, depth int) (int, error) {
-	if depth > maxScanDepth {
+func (s scanner) item(data []byte, pos int, depth int) (int, error) {
+	if depth > s.maxDepth {
 		return 0, errScanMalformed
 	}
 	if pos >= len(data) {
@@ -101,7 +110,7 @@ func scanItem(data []byte, pos int, depth int) (int, error) {
 		}
 		return skipBytes(data, next, value)
 	case 4:
-		return scanSequence(data, next, value, indefinite, depth)
+		return s.sequence(data, next, value, indefinite, depth)
 	case 5:
 		if !indefinite {
 			if value > uint64(len(data)) {
@@ -109,24 +118,24 @@ func scanItem(data []byte, pos int, depth int) (int, error) {
 			}
 			value *= 2
 		}
-		return scanSequence(data, next, value, indefinite, depth)
+		return s.sequence(data, next, value, indefinite, depth)
 	default:
 		switch value {
 		case cborTagRational:
-			return scanRational(data, next, depth)
+			return s.rational(data, next, depth)
 		case cborTagEncodedCbor:
-			return scanEncodedCbor(data, next, depth)
+			return s.encodedCbor(data, next, depth)
 		}
-		return scanItem(data, next, depth+1)
+		return s.item(data, next, depth+1)
 	}
 }
 
-// scanRational walks the content of a tag-30 item and checks the width of each
+// rational walks the content of a tag-30 item and checks the width of each
 // component of a two-element array. gouroboros reads the array through any tag
 // stack, a head of any width and the indefinite-length form, so the scan does
 // too. An array that does not hold exactly two items is rejected by the
 // decoder before it builds anything, so it is walked as ordinary data.
-func scanRational(data []byte, pos int, depth int) (int, error) {
+func (s scanner) rational(data []byte, pos int, depth int) (int, error) {
 	start := pos
 	for pos < len(data) && data[pos]>>5 == 6 {
 		_, next, _, err := readHead(data, pos, data[pos]&0x1f)
@@ -136,21 +145,21 @@ func scanRational(data []byte, pos int, depth int) (int, error) {
 		pos = next
 	}
 	if pos >= len(data) || data[pos]>>5 != 4 {
-		return scanItem(data, start, depth+1)
+		return s.item(data, start, depth+1)
 	}
 	count, next, indefinite, err := readHead(data, pos, data[pos]&0x1f)
 	if err != nil {
 		return 0, err
 	}
 	if !indefinite && count != 2 {
-		return scanItem(data, start, depth+1)
+		return s.item(data, start, depth+1)
 	}
 	pos = next
 	for range 2 {
 		if indefinite && (pos >= len(data) || data[pos] == 0xff) {
-			return scanItem(data, start, depth+1)
+			return s.item(data, start, depth+1)
 		}
-		end, err := scanComponent(data, pos, depth+1)
+		end, err := s.component(data, pos, depth+1)
 		if err != nil {
 			return 0, err
 		}
@@ -158,31 +167,31 @@ func scanRational(data []byte, pos int, depth int) (int, error) {
 	}
 	if indefinite {
 		if pos >= len(data) || data[pos] != 0xff {
-			return scanItem(data, start, depth+1)
+			return s.item(data, start, depth+1)
 		}
 		pos++
 	}
 	return pos, nil
 }
 
-// scanComponent walks one rational component. An integer always fits a
+// component walks one rational component. An integer always fits a
 // Word64's width; a bignum (tag 2 or 3) is measured by its significant bytes.
-func scanComponent(data []byte, pos int, depth int) (int, error) {
+func (s scanner) component(data []byte, pos int, depth int) (int, error) {
 	if pos >= len(data) || data[pos]>>5 != 6 {
-		return scanItem(data, pos, depth)
+		return s.item(data, pos, depth)
 	}
 	tag, next, _, err := readHead(data, pos, data[pos]&0x1f)
 	if err != nil {
 		return 0, err
 	}
 	if (tag != 2 && tag != 3) || next >= len(data) || data[next]>>5 != 2 {
-		return scanItem(data, pos, depth)
+		return s.item(data, pos, depth)
 	}
 	significant, end, err := significantBytes(data, next)
 	if err != nil {
 		return 0, err
 	}
-	if significant > maxRationalMagnitudeBytes {
+	if significant > s.limit {
 		return 0, ErrOversizedRational
 	}
 	return end, nil
@@ -241,14 +250,14 @@ func significantBytes(data []byte, pos int) (int, int, error) {
 	}
 }
 
-// scanEncodedCbor walks a tag-24 byte string, scanning the item it wraps. A
+// encodedCbor walks a tag-24 byte string, scanning the item it wraps. A
 // wrapper that is not a byte string, or whose content is not one well-formed
 // item, is skipped as ordinary data: only an oversized rational is reported.
 // An indefinite-length wrapper is scanned over its concatenated chunks, since
 // the wrapped item may straddle a chunk boundary; that is the only place the
 // scan copies bytes.
-func scanEncodedCbor(data []byte, pos int, depth int) (int, error) {
-	end, err := scanItem(data, pos, depth+1)
+func (s scanner) encodedCbor(data []byte, pos int, depth int) (int, error) {
+	end, err := s.item(data, pos, depth+1)
 	if err != nil {
 		return 0, err
 	}
@@ -267,7 +276,7 @@ func scanEncodedCbor(data []byte, pos int, depth int) (int, error) {
 	if indefinite {
 		content = joinChunks(data[contentStart : end-1])
 	}
-	_, scanErr := scanItem(content, 0, depth+1)
+	_, scanErr := s.item(content, 0, depth+1)
 	if errors.Is(scanErr, ErrOversizedRational) {
 		return 0, scanErr
 	}
@@ -275,7 +284,7 @@ func scanEncodedCbor(data []byte, pos int, depth int) (int, error) {
 }
 
 // joinChunks concatenates the definite-length chunks of an indefinite byte
-// string, given the bytes between its head and its break. scanItem has already
+// string, given the bytes between its head and its break. item has already
 // validated the chunk structure.
 func joinChunks(chunks []byte) []byte {
 	var out []byte
@@ -284,14 +293,14 @@ func joinChunks(chunks []byte) []byte {
 		if err != nil {
 			return nil
 		}
-		end := next + int(length) //nolint:gosec // validated by scanItem
+		end := next + int(length) //nolint:gosec // validated by item
 		out = append(out, chunks[next:end]...)
 		pos = end
 	}
 	return out
 }
 
-func scanSequence(
+func (s scanner) sequence(
 	data []byte,
 	pos int,
 	count uint64,
@@ -306,7 +315,7 @@ func scanSequence(
 			if data[pos] == 0xff {
 				return pos + 1, nil
 			}
-			end, err := scanItem(data, pos, depth+1)
+			end, err := s.item(data, pos, depth+1)
 			if err != nil {
 				return 0, err
 			}
@@ -319,7 +328,7 @@ func scanSequence(
 		return 0, errScanMalformed
 	}
 	for range count {
-		end, err := scanItem(data, pos, depth+1)
+		end, err := s.item(data, pos, depth+1)
 		if err != nil {
 			return 0, err
 		}

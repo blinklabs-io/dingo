@@ -19,8 +19,10 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/internal/safedecode"
+	"github.com/blinklabs-io/dingo/internal/txsize"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/stretchr/testify/require"
 )
 
@@ -30,22 +32,6 @@ import (
 func oversizedRationalPayload() []byte {
 	out := []byte{0x81, 0xd8, 0x1e, 0x82, 0x01, 0xc2, 0x59, 0x9c, 0x40}
 	return append(out, bytes.Repeat([]byte{0x01}, 40000)...)
-}
-
-// A fetched block is decoded before its body is compared with the header's
-// body hash, so every decoder branch must refuse the payload up front.
-func TestBlockfetchRefusesOversizedRationals(t *testing.T) {
-	t.Parallel()
-	payload := oversizedRationalPayload()
-	o := newMusashiOuroboros(t, nil)
-	for _, blockType := range []uint{
-		gledger.BlockTypeConway,
-		gledger.BlockTypeDijkstra,
-		gledger.BlockTypeBabbage,
-	} {
-		_, err := o.decodeBlockfetchBlock(blockType, payload)
-		require.ErrorIs(t, err, safedecode.ErrOversizedRational)
-	}
 }
 
 // conwayPoolRegistrationTx builds a Conway transaction whose only certificate
@@ -76,25 +62,79 @@ func conwayPoolRegistrationTx(t *testing.T, margin []byte) []byte {
 	return tx
 }
 
-// A real pool registration with an ordinary margin must still decode, and one
-// with an oversized margin must be refused by the production decoders rather
-// than by the ledger decoder's range check.
-func TestPoolRegistrationMarginThroughPeerDecoders(t *testing.T) {
+// withLimits returns an Ouroboros whose decode limits are fixed, standing in
+// for what a ledger at some protocol version and MaxTxSize would report.
+func withLimits(t *testing.T, limits peerDecodeLimits) *Ouroboros {
+	t.Helper()
+	o := newMusashiOuroboros(t, nil)
+	o.decodeLimits = func(uint) peerDecodeLimits { return limits }
+	return o
+}
+
+// from protocol version 12 the ledger requires each rational component to fit a
+// Word64 as written, so peer bytes that break it are refused before the
+// quadratic decode, on both peer decode paths.
+func TestPeerDecodersRefuseWideRationalsFromVersion12(t *testing.T) {
 	t.Parallel()
-	normal := conwayPoolRegistrationTx(
-		t,
-		[]byte{0xd8, 0x1e, 0x82, 0x01, 0x14}, // 1/20
+	o := withLimits(t, peerDecodeLimits{rationalWidth: safedecode.Word64Bytes})
+
+	t.Run("txsubmission", func(t *testing.T) {
+		t.Parallel()
+		tx := conwayPoolRegistrationTx(t, rationalCbor(1, bytes.Repeat([]byte{1}, 40000)))
+		_, err := o.decodeTxsubmissionTx(gledger.TxTypeConway, tx)
+		require.ErrorIs(t, err, safedecode.ErrOversizedRational)
+	})
+
+	t.Run("blockfetch", func(t *testing.T) {
+		t.Parallel()
+		for _, blockType := range []uint{
+			gledger.BlockTypeConway,
+			gledger.BlockTypeDijkstra,
+			gledger.BlockTypeBabbage,
+		} {
+			_, err := o.decodeBlockfetchBlock(blockType, oversizedRationalPayload())
+			require.ErrorIs(t, err, safedecode.ErrOversizedRational)
+		}
+	})
+}
+
+// Below protocol version 12 the ledger bounds the reduced rational, so a
+// margin of 2^64/2^65 (nine-byte components, reduced 1/2) is a valid
+// transaction and must still decode.
+func TestPeerDecodersAcceptWideRationalsBeforeVersion12(t *testing.T) {
+	t.Parallel()
+	o := withLimits(t, peerDecodeLimits{})
+	two64 := append([]byte{0xc2, 0x49, 0x01}, make([]byte, 8)...)
+	two65 := append([]byte{0xc2, 0x49, 0x02}, make([]byte, 8)...)
+	margin := append(append([]byte{0xd8, 0x1e, 0x82}, two64...), two65...)
+
+	tx, err := o.decodeTxsubmissionTx(
+		gledger.TxTypeConway,
+		conwayPoolRegistrationTx(t, margin),
 	)
-	tx, err := decodeTxsubmissionTx(gledger.TxTypeConway, normal)
 	require.NoError(t, err)
 	require.Len(t, tx.Certificates(), 1)
 
-	oversized := conwayPoolRegistrationTx(
-		t,
-		rationalCbor(1, bytes.Repeat([]byte{0x01}, 40000)),
-	)
-	_, err = decodeTxsubmissionTx(gledger.TxTypeConway, oversized)
-	require.ErrorIs(t, err, safedecode.ErrOversizedRational)
+	_, err = o.decodeBlockfetchBlock(gledger.TxTypeConway, oversizedRationalPayload())
+	require.NotErrorIs(t, err, safedecode.ErrOversizedRational)
+}
+
+// A transaction larger than the ledger's MaxTxSize is invalid whatever it
+// holds, and is refused from its length before any decode cost is paid.
+func TestTxsubmissionRefusesTxOverMaxTxSizeBeforeDecoding(t *testing.T) {
+	t.Parallel()
+	tx := conwayPoolRegistrationTx(t, []byte{0xd8, 0x1e, 0x82, 0x01, 0x14})
+
+	size := uint(txsize.FromCBOR(gledger.TxTypeConway, tx))
+	o := withLimits(t, peerDecodeLimits{maxTxSize: size - 1})
+	_, err := o.decodeTxsubmissionTx(gledger.TxTypeConway, tx)
+	var sizeErr shelley.MaxTxSizeUtxoError
+	require.ErrorAs(t, err, &sizeErr)
+
+	o = withLimits(t, peerDecodeLimits{maxTxSize: size})
+	decoded, err := o.decodeTxsubmissionTx(gledger.TxTypeConway, tx)
+	require.NoError(t, err)
+	require.Len(t, decoded.Certificates(), 1)
 }
 
 // rationalCbor encodes numerator over a bignum denominator of the given
@@ -103,4 +143,12 @@ func rationalCbor(numerator byte, magnitude []byte) []byte {
 	out := []byte{0xd8, 0x1e, 0x82, numerator, 0xc2, 0x59,
 		byte(len(magnitude) >> 8), byte(len(magnitude))}
 	return append(out, magnitude...)
+}
+
+func TestRationalWidthForVersion(t *testing.T) {
+	t.Parallel()
+	require.Zero(t, rationalWidthForVersion(10))
+	require.Zero(t, rationalWidthForVersion(11))
+	require.Equal(t, safedecode.Word64Bytes, rationalWidthForVersion(12))
+	require.Equal(t, safedecode.Word64Bytes, rationalWidthForVersion(13))
 }

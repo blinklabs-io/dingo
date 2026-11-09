@@ -19,7 +19,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/internal/safedecode"
-	"github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/stretchr/testify/require"
 )
 
@@ -120,7 +120,7 @@ func TestRejectOversizedRationals(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			err := safedecode.RejectOversizedRationals(tt.data)
+			err := safedecode.RejectOversizedRationals(tt.data, safedecode.Word64Bytes)
 			if tt.oversze {
 				require.ErrorIs(t, err, safedecode.ErrOversizedRational)
 				return
@@ -135,30 +135,56 @@ func TestRejectOversizedRationals(t *testing.T) {
 func TestRejectOversizedRationalsLeavesMalformedInputToDecoder(t *testing.T) {
 	t.Parallel()
 	valid := nest(rational([]byte{0x01}, bignum(200)))
-	deep := bytes.Repeat([]byte{0x81}, 1000)
+	deep := bytes.Repeat([]byte{0x81}, cbor.MaxNestedLevels+10)
 	for name, data := range map[string][]byte{
-		"empty":                   nil,
-		"truncated mid-bignum":    valid[:len(valid)-10],
-		"reserved head":           {0x82, 0x01, 0x1c},
-		"array longer than input": {0x9b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff},
-		"nesting past the bound":  append(deep, rational([]byte{1}, bignum(200))...),
+		"empty":                          nil,
+		"truncated mid-bignum":           valid[:len(valid)-10],
+		"reserved head":                  {0x82, 0x01, 0x1c},
+		"array longer than input":        {0x9b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff},
+		"nesting past the decoder limit": append(deep, rational([]byte{1}, bignum(200))...),
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			require.NoError(t, safedecode.RejectOversizedRationals(data))
+			require.NoError(t, safedecode.RejectOversizedRationals(data, safedecode.Word64Bytes))
 		})
 	}
 }
 
-// The entry points that decode peer or API bytes must refuse the input before
-// the era decoder runs; a panic or a decode error here would mean it ran.
-func TestDecodeEntryPointsRefuseOversizedRationals(t *testing.T) {
+// Below protocol version 12 the ledger bounds the reduced rational, so a raw
+// component of any width can be valid and the caller passes no limit.
+func TestRejectOversizedRationalsWithoutLimit(t *testing.T) {
 	t.Parallel()
 	data := nest(rational([]byte{0x01}, bignum(200)))
+	require.NoError(t, safedecode.RejectOversizedRationals(data, 0))
+	require.ErrorIs(
+		t,
+		safedecode.RejectOversizedRationals(data, safedecode.Word64Bytes),
+		safedecode.ErrOversizedRational,
+	)
+}
 
-	_, err := safedecode.Transaction(ledger.TxTypeConway, data)
-	require.ErrorIs(t, err, safedecode.ErrOversizedRational)
-
-	_, err = safedecode.DijkstraBlockTransaction(data)
-	require.ErrorIs(t, err, safedecode.ErrOversizedRational)
+// The decoder accepts nesting up to its own limit, so tags or arrays wrapped
+// past any smaller cap must not hide a rational from the scan.
+func TestRejectOversizedRationalsThroughDeepNesting(t *testing.T) {
+	t.Parallel()
+	item := rational([]byte{0x01}, bignum(9))
+	tags := append(bytes.Repeat([]byte{0xd8, 0x37}, 200), item...)
+	arrays := append(bytes.Repeat([]byte{0x81}, 200), item...)
+	earlier := append([]byte{0x82}, bytes.Repeat([]byte{0x81}, 200)...)
+	earlier = append(earlier, 0x00)
+	earlier = append(earlier, item...)
+	for name, data := range map[string][]byte{
+		"tags before the rational":             tags,
+		"arrays around the rational":           arrays,
+		"deep nesting before a later rational": earlier,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			require.ErrorIs(
+				t,
+				safedecode.RejectOversizedRationals(data, safedecode.Word64Bytes),
+				safedecode.ErrOversizedRational,
+			)
+		})
+	}
 }
