@@ -170,9 +170,17 @@ func TestPeerForkVerdictsSurviveLocalRollbackInSameEpoch(t *testing.T) {
 	// a verdict. The fixture's stored blocks are synthetic, so the walk may
 	// still fail later on decoding the ancestor envelope; only the deferral
 	// is the subject here.
-	_, _, _, err := f.ls.peerHeaderForkPath(
+	_, _, found, err := f.ls.peerHeaderForkPath(
 		ouroboros.ConnectionId{}, forkHeaders[2],
 	)
+	// found==false with a nil error means the walk never ran, which would
+	// make the deferral check below vacuous.
+	if !found {
+		require.Error(
+			t, err,
+			"the winning fork's next header was neither resolved nor failed",
+		)
+	}
 	require.NotErrorIs(
 		t, err, errHeaderVerificationDeferred,
 		"the winning fork's next header was deferred after the rollback",
