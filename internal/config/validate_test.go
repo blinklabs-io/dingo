@@ -710,6 +710,41 @@ func TestValidate(t *testing.T) {
 			wantErr: "must be host:port",
 		},
 		{
+			name: "plaintext without a remote KES agent",
+			modify: func(c *Config) {
+				c.BlockProducer = true
+				c.ShelleyVRFKey = "/keys/vrf.skey"
+				c.ShelleyKESKey = "/keys/kes.skey"
+				c.ShelleyOperationalCertificate = "/keys/node.cert"
+				c.ShelleyKESAgentPlaintext = true
+			},
+			wantErr: "shelleyKesAgentPlaintext requires shelleyKesAgentAddress",
+		},
+		{
+			name: "remote KES agent with an empty host",
+			modify: func(c *Config) {
+				setRemoteKESAgent(c)
+				c.ShelleyKESAgentAddress = ":3443"
+			},
+			wantErr: "empty host",
+		},
+		{
+			name: "remote KES agent with an out-of-range port",
+			modify: func(c *Config) {
+				setRemoteKESAgent(c)
+				c.ShelleyKESAgentAddress = "kes-agent.example:70000"
+			},
+			wantErr: "is not in 1-65535",
+		},
+		{
+			name: "remote KES agent with a non-numeric port",
+			modify: func(c *Config) {
+				setRemoteKESAgent(c)
+				c.ShelleyKESAgentAddress = "kes-agent.example:https"
+			},
+			wantErr: "is not in 1-65535",
+		},
+		{
 			name: "remote KES agent with a client certificate but no key",
 			modify: func(c *Config) {
 				setRemoteKESAgent(c)

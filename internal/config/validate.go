@@ -58,12 +58,33 @@ func ValidateKESKeySources(kesKeyPath, kesAgentSocket string) error {
 	return nil
 }
 
+// validateHostPort checks that addr is host:port with a non-empty host and a
+// numeric port in 1-65535.
+func validateHostPort(addr string) error {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return err
+	}
+	if host == "" {
+		return errors.New("empty host")
+	}
+	if p, err := strconv.ParseUint(port, 10, 16); err != nil || p == 0 {
+		return fmt.Errorf("port %q is not in 1-65535", port)
+	}
+	return nil
+}
+
 // validateRemoteKESAgent checks a remote KES agent configuration: one KES
 // source only, sign mode, and a transport that can work: the server pin and
 // the client certificate are optional, but need TLS, so plain TCP takes
 // neither, and a client certificate is set as a pair.
 func (c *Config) validateRemoteKESAgent() []error {
 	if c.ShelleyKESAgentAddress == "" {
+		if c.ShelleyKESAgentPlaintext {
+			return []error{errors.New(
+				"shelleyKesAgentPlaintext requires shelleyKesAgentAddress",
+			)}
+		}
 		return nil
 	}
 	var errs []error
@@ -73,7 +94,7 @@ func (c *Config) validateRemoteKESAgent() []error {
 				"shelleyKesKey or shelleyKesAgentSocket",
 		))
 	}
-	if _, _, err := net.SplitHostPort(c.ShelleyKESAgentAddress); err != nil {
+	if err := validateHostPort(c.ShelleyKESAgentAddress); err != nil {
 		errs = append(errs, fmt.Errorf(
 			"shelleyKesAgentAddress %q must be host:port: %w",
 			c.ShelleyKESAgentAddress,
