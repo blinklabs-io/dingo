@@ -5578,6 +5578,13 @@ func (ls *LedgerState) rollbackWithBlocksAndIntent(
 		); err != nil {
 			return fmt.Errorf("discard pending ratification: %w", err)
 		}
+		if err := discardRewardStakeInputsPendingAfterSlot(
+			ls.db.Metadata(), txn.Metadata(), point.Slot,
+		); err != nil {
+			return fmt.Errorf(
+				"discard pending reward stake inputs: %w", err,
+			)
+		}
 		if err := ls.recomputeAccountExpirationsAfterRollback(
 			ctx,
 			txn,
