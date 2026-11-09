@@ -7904,7 +7904,12 @@ distance beyond the path's last header. A delivered header extending the path or
 that deferred tail is deferred without walking its ancestry while the primary
 chain tip lies below every ancestor such a walk would read, because the walk
 could reach no held block. Once the chain tip reaches that range the full walk
-runs again. Replacing the retained path clears the record.
+runs again. An initial bounded walk that reaches the history limit without a
+held ancestor retains the same unverified path shape, so a retry or descendant
+uses that bound without repeating full-block reads. The entry remains a
+deferral rather than a verification result and is re-walked once the primary
+chain enters its reachable range. Replacing the retained path clears the
+record.
 
 Successful stateless header cryptography is also remembered across peer
 connections in a bounded LRU keyed by epoch nonce and a header identity that
