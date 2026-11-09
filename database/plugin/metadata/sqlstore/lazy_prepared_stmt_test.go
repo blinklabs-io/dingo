@@ -16,6 +16,7 @@ package sqlstore
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"sync"
 	"testing"
@@ -138,19 +139,30 @@ func TestLazyHotStatementsConcurrentFirstUse(t *testing.T) {
 	store := newMigratedSQLiteStoreLazy(t, true)
 	ctx := context.Background()
 	db := newDialectQueryer(store.writeDB, "sqlite")
+	const workers = 16
+	type borrowResult struct {
+		stmt *sql.Stmt
+		ok   bool
+	}
+	results := make([]borrowResult, workers)
 	var wg sync.WaitGroup
-	for range 16 {
+	for i := range workers {
 		wg.Go(func() {
 			stmt, release, ok := store.borrowStmt(
 				ctx, db, sumCredentialUtxoStakeQuery,
 			)
+			results[i] = borrowResult{stmt: stmt, ok: ok}
 			if ok {
-				require.NotNil(t, stmt)
 				release()
 			}
 		})
 	}
 	wg.Wait()
+	for _, r := range results {
+		if r.ok {
+			require.NotNil(t, r.stmt)
+		}
+	}
 	require.Equal(t, 1, cachedStmtCount(store))
 }
 
