@@ -2492,10 +2492,7 @@ type EpochRolloverResult struct {
 	// approach, which would then never clear
 	// LedgerState.syntheticV2CostModel on a real network.
 	RealV2CostModelObserved bool
-	// epochEffectsSkipped is true when a non-successor signal advances the
-	// consensus epoch without running NEWEPOCH boundary effects.
-	epochEffectsSkipped bool
-	newLedgerEpoch      uint64
+	newLedgerEpoch          uint64
 }
 
 func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
@@ -9415,9 +9412,7 @@ func (ls *LedgerState) processBlocksFromSource(
 			}
 
 			// Emit epoch transition event (coordinated with slot clock)
-			if rolloverResult != nil &&
-				!rolloverResult.epochEffectsSkipped &&
-				ls.config.EventBus != nil {
+			if rolloverResult != nil && ls.config.EventBus != nil {
 				newEpochId := rolloverResult.NewCurrentEpoch.EpochId
 
 				// Always emit block-based epoch transitions. Even if the

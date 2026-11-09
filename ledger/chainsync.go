@@ -9716,7 +9716,6 @@ func (ls *LedgerState) processEpochRolloverForTargetWithClassicPParamsContext(
 		result.NewCurrentEra = currentEra
 		result.NewEpochNum = float64(targetEpoch.EpochId)
 		result.SchedulerIntervalMs = epochSlotLength
-		result.epochEffectsSkipped = true
 		return result, nil
 	}
 	// EPOCH→HARDFORK ordering invariant.

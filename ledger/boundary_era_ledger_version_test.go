@@ -382,6 +382,12 @@ func newBoundaryEraLedger(
 			),
 			BlockNumber: tipBlock.BlockNumber(),
 		}
+		require.NoError(t, db.SetTip(ls.currentTip, nil))
+		require.NoError(t, db.SetBlockNonce(
+			ls.currentTip.Point.Hash,
+			ls.currentTip.Point.Slot,
+			nonce, false, nil,
+		))
 	}
 	ls.currentTipBlockNonce = nonce
 	ls.publishSnapshotsLocked()
