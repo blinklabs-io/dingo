@@ -403,8 +403,8 @@ func (w *stakeWorkload) syncBlocks(blocks, perBlock int) (redelegations int) {
 func stakeStateDigest(tb testing.TB, db *sql.DB) string {
 	tb.Helper()
 	queries := []string{
-		`SELECT hex(staking_key), credential_tag, hex(coalesce(pool_key_hash,x'')), utxo_stake, reward_stake, total_stake, registered, pool_delegation_slot, pool_delegation_block_index, pool_delegation_cert_index, updated_slot, calculation_version FROM reward_live_stake ORDER BY credential_tag, staking_key`,
-		`SELECT hex(staking_key), credential_tag, hex(coalesce(pool,x'')), hex(coalesce(drep,x'')), reward, active, added_slot FROM account ORDER BY credential_tag, staking_key`,
+		`SELECT hex(staking_key), credential_tag, hex(coalesce(pool_key_hash,x'')), pool_key_hash IS NULL, utxo_stake, reward_stake, total_stake, registered, pool_delegation_slot, pool_delegation_block_index, pool_delegation_cert_index, updated_slot, calculation_version FROM reward_live_stake ORDER BY credential_tag, staking_key`,
+		`SELECT hex(staking_key), credential_tag, hex(coalesce(pool,x'')), pool IS NULL, hex(coalesce(drep,x'')), drep IS NULL, drep_type, reward, active, added_slot, created_slot, certificate_id, expiration_epoch FROM account ORDER BY credential_tag, staking_key`,
 		`SELECT epoch, hex(pool_key_hash), credential_tag, hex(staking_key), stake, owner, registered, captured_slot, boundary_slot FROM reward_stake_input ORDER BY epoch, pool_key_hash, credential_tag, staking_key`,
 		`SELECT epoch, hex(pool_key_hash), credential_tag, hex(staking_key), reward_type, amount, spendable, guarded, folded, captured_slot, boundary_slot FROM reward_account_output ORDER BY epoch, pool_key_hash, credential_tag, staking_key, reward_type`,
 		`SELECT withdrawal, hex(tx_hash), credential_tag, hex(staking_key), added_slot, amount, coalesce(previous_reward,''), post_snapshot FROM account_reward_delta ORDER BY withdrawal, tx_hash, credential_tag, staking_key, added_slot`,

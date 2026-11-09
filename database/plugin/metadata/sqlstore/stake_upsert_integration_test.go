@@ -19,6 +19,7 @@ package sqlstore
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -121,6 +122,7 @@ FROM reward_live_stake WHERE staking_key = ?`), key).Scan(
 			pool == nil, utxo, reward, total, registered, delegation, block,
 			cert, updated, version)
 	}
+	var kept, full string
 	require.NoError(t, store.withWriteTransaction(nil, func(
 		db queryer, ctx context.Context,
 	) error {
@@ -151,6 +153,36 @@ VALUES (0, ?, ?, '1', '2', '3', ?, 4, 7, 7, 5, 2)`), key, pool, true)
 			require.Equal(t, liveRow(db, ctx, keyFull),
 				liveRow(db, ctx, keyKeep))
 		}
+		// The keep-pool conflict branch must not assign pool_key_hash: given
+		// a different incoming pool it keeps the stored one, where the full
+		// upsert takes the incoming one, and every other column agrees.
+		keyKeep, keyFull := []byte("keep-moved"), []byte("full-moved")
+		for _, key := range [][]byte{keyKeep, keyFull} {
+			_, err := db.ExecContext(ctx, store.dialect.Rebind(`
+INSERT INTO reward_live_stake (credential_tag, staking_key, pool_key_hash,
+  utxo_stake, reward_stake, total_stake, registered, pool_delegation_slot,
+  pool_delegation_block_index, pool_delegation_cert_index, updated_slot,
+  calculation_version)
+VALUES (0, ?, ?, '1', '2', '3', ?, 4, 7, 7, 5, 2)`), key, poolA, true)
+			require.NoError(t, err)
+		}
+		for query, key := range map[string][]byte{
+			rewardLiveStakeUpsertKeepPoolQuery: keyKeep,
+			rewardLiveStakeUpsertQuery:         keyFull,
+		} {
+			_, err := db.ExecContext(ctx, query, 0, key, poolB, "10", "20",
+				"30", true, int64(40), int64(50), int64(3))
+			require.NoError(t, err)
+		}
+		kept = liveRow(db, ctx, keyKeep)
+		full = liveRow(db, ctx, keyFull)
 		return nil
 	}))
+	// Asserted after the transaction ends so a failure cannot leave it open.
+	require.True(t, strings.HasPrefix(kept, fmt.Sprintf("%x|false|", poolA)),
+		kept)
+	require.True(t, strings.HasPrefix(full, fmt.Sprintf("%x|false|", poolB)),
+		full)
+	require.Equal(t,
+		strings.SplitN(full, "|", 3)[2], strings.SplitN(kept, "|", 3)[2])
 }

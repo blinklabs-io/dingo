@@ -54,7 +54,7 @@ func stakeBookkeepingRowDigest(t *testing.T, db *sql.DB) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// TestStakeBookkeepingIndexDropKeepsRows upgrades a v54 database that holds
+// TestStakeBookkeepingIndexDropKeepsRows upgrades a v55 database that holds
 // rows in every table whose indexes v56 drops, and requires the rows to be
 // byte-identical afterwards, the five indexes gone, the indexes that serve
 // their readers present, and a replay of the migration to be a no-op.
@@ -88,7 +88,7 @@ func TestStakeBookkeepingIndexDropKeepsRows(t *testing.T) {
 	}
 	for name := range dropped {
 		_, ok := indexSQL(t, db, name)
-		require.True(t, ok, "v54 must still carry %s", name)
+		require.True(t, ok, "v55 must still carry %s", name)
 	}
 
 	key := func(i int) []byte {

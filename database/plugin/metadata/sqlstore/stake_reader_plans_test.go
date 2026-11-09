@@ -35,7 +35,7 @@ type stakeReader struct {
 	args      []any
 }
 
-func stakeReaders() []stakeReader {
+func stakeReaders(store *Store) []stakeReader {
 	key := make([]byte, 28)
 	hash := make([]byte, 32)
 	return []stakeReader{
@@ -191,10 +191,46 @@ WHERE credential_tag = ? AND staking_key = ? AND epoch IN (?)
 			args: []any{0, key, 1},
 		},
 		{
-			name: "pending credit round scan", table: "reward_account_output",
-			query: `SELECT amount FROM reward_account_output
-WHERE spendable = TRUE AND guarded = FALSE AND folded = FALSE AND epoch <= ?`,
+			name: "pendingRewardCreditTotals", table: "reward_account_output",
+			query: store.pendingRewardCreditTotalsSQL(),
+		},
+		{
+			name: "GetLiveStakeInputsForPools pending subquery", table: "reward_account_output",
+			query: `SELECT ` + store.pendingRewardCreditSubquery(
+				"rls.credential_tag", "rls.staking_key",
+			) + `
+FROM reward_live_stake rls
+WHERE rls.pool_key_hash IN (?) AND rls.registered = TRUE`,
+			args: []any{hash[:28]},
+		},
+		{
+			name: "pendingRewardCreditOutputsExist", table: "reward_account_output",
+			query: `SELECT EXISTS (
+    SELECT 1 FROM reward_credit_round rcr
+    WHERE EXISTS (
+        SELECT 1 FROM reward_account_output rao
+        WHERE rao.spendable = TRUE AND rao.guarded = FALSE
+          AND rao.folded = FALSE AND rao.epoch = rcr.snapshot_epoch
+    )
+)`,
+		},
+		{
+			name: "HasUnfoldedRewardCreditsThroughEpoch", table: "reward_account_output",
+			query: `SELECT EXISTS (
+    SELECT 1 FROM reward_credit_round rcr
+    WHERE rcr.snapshot_epoch <= ?
+      AND EXISTS (
+          SELECT 1 FROM reward_account_output rao
+          WHERE rao.spendable = TRUE AND rao.guarded = FALSE
+            AND rao.folded = FALSE AND rao.epoch = rcr.snapshot_epoch
+      )
+)`,
 			args: []any{5},
+		},
+		{
+			name: "unfoldedRewardOutputIDs", table: "reward_account_output",
+			query: unfoldedRewardOutputIDsSQL,
+			args:  []any{1, 10},
 		},
 	}
 }
@@ -239,7 +275,7 @@ func TestStakeBookkeepingReadersUseAnIndex(t *testing.T) {
 			_, err := store.writeDB.Exec("ANALYZE")
 			require.NoError(t, err)
 		}
-		for _, reader := range stakeReaders() {
+		for _, reader := range stakeReaders(store) {
 			t.Run(
 				fmt.Sprintf("analyze=%t/%s", analyzed, reader.name),
 				func(t *testing.T) {

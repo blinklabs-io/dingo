@@ -40,9 +40,19 @@ var stakeBookkeepingKeptIndexes = []string{
 	"idx_reward_live_stake_pool_order",
 	"idx_account_reward_delta_w_tx_s_slot",
 	"idx_account_reward_delta_credential",
+	"idx_account_reward_delta_added_slot",
 	"idx_account_drep_active_staking_key",
+	"idx_account_active_pool_staking_key",
 	"idx_reward_account_output_credential_spendable_guarded",
+	"idx_reward_account_output_credential_pending",
+	"idx_reward_stake_input_epoch_pool_cred",
 	"idx_reward_stake_input_cred_epoch",
+}
+
+// mysqlSkippedIndexes are kept indexes migration 54 does not create on MySQL:
+// its prefix indexes on staking_key and amount cannot cover.
+var mysqlSkippedIndexes = map[string]bool{
+	"idx_reward_account_output_credential_pending": true,
 }
 
 // TestStakeBookkeepingIndexDropAppliesOnPostgres runs every migration against
@@ -148,6 +158,9 @@ WHERE table_schema = ? AND index_name = ?`, database, name).Scan(&n))
 			require.Zero(t, count(name), "%s must not survive v56", name)
 		}
 		for _, name := range stakeBookkeepingKeptIndexes {
+			if mysqlSkippedIndexes[name] {
+				continue
+			}
 			require.NotZero(t, count(name), "%s must survive v56", name)
 		}
 	}

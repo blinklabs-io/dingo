@@ -112,12 +112,14 @@ func formatFrames(label string, frames map[string]int, blocks int) string {
 // their ids and their autoincrement sequences after the workload above. It was
 // recorded before any index or write-path change, so a match shows the stored
 // state, reward outputs and live stake totals are byte-identical.
-const stakeWorkloadDigest = "f7bc1c3d2dca6a2ea78ff5118b3bf159608f96c69b1e15bd67efb9f9e0e78ad2"
+const stakeWorkloadDigest = "7a52891a744ae243a0c70c7e992e23da3cec1a5fe9609e54c80151833740c546"
 
 // TestStakeBookkeepingWALFrames drives a Shelley-like workload through
 // SetTransaction on a file-backed WAL database, attributes every WAL frame to
-// the b-tree that owns its page, and bounds the frames the stake and reward
-// bookkeeping b-trees take.
+// the b-tree that owns its page, and bounds the frames of the indexes this
+// write path keeps clean: the pool index, the drep indexes and the dropped
+// indexes. Table and other index frames are logged, not bounded; the digest
+// pins the stored state those writes produce.
 func TestStakeBookkeepingWALFrames(t *testing.T) {
 	t.Parallel()
 	res := runStakeWALWorkload(t)
