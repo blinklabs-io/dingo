@@ -174,6 +174,8 @@ var utxoHashLookupAllowList = map[string]string{
 		"PostgreSQL/MySQL forms and the SQLite imported-row arms",
 	"database/plugin/metadata/sqlstore/utxo_overlay.go": "the imported-row " +
 		"arm of the overlay prefetch uses idx_utxo_imported_ref",
+	"api/mcp/tools_cardano.go": "the imported-row arm of the transaction " +
+		"output totals is INDEXED BY idx_utxo_imported_ref",
 }
 
 // TestNoSourceFiltersUtxoByBareTxIDOnSQLite scans api, database and internal:

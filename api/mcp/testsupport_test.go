@@ -63,9 +63,13 @@ func newFixtureDB(t *testing.T) *sql.DB {
 		value INTEGER NOT NULL,
 		amount TEXT,
 		transaction_id INTEGER,
+		collateral_return_for_tx_id INTEGER,
 		tx_id BLOB,
-		producer_tx_id INTEGER AS (transaction_id) VIRTUAL
+		output_idx INTEGER,
+		producer_tx_id INTEGER AS (COALESCE(transaction_id, collateral_return_for_tx_id)) VIRTUAL
 		);
+		CREATE UNIQUE INDEX idx_utxo_imported_ref ON utxo (tx_id, output_idx)
+		WHERE transaction_id IS NULL AND collateral_return_for_tx_id IS NULL;
 		CREATE TABLE account (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			stake_address TEXT NOT NULL UNIQUE,
@@ -116,13 +120,16 @@ func newSchemaDB(t *testing.T) *sql.DB {
 	return db
 }
 
-// producerColumnDDL mirrors the SQLite migrations that add utxo.producer_tx_id
-// and idx_utxo_producer_output.
+// producerColumnDDL mirrors the SQLite migrations that add utxo.producer_tx_id,
+// idx_utxo_producer_output and idx_utxo_imported_ref.
 const producerColumnDDL = `
 ALTER TABLE utxo ADD COLUMN producer_tx_id INTEGER
     AS (COALESCE(transaction_id, collateral_return_for_tx_id)) VIRTUAL;
 CREATE UNIQUE INDEX idx_utxo_producer_output
-    ON utxo (producer_tx_id, output_idx) WHERE producer_tx_id IS NOT NULL;`
+    ON utxo (producer_tx_id, output_idx) WHERE producer_tx_id IS NOT NULL;
+CREATE UNIQUE INDEX idx_utxo_imported_ref
+    ON utxo (tx_id, output_idx)
+    WHERE transaction_id IS NULL AND collateral_return_for_tx_id IS NULL;`
 
 func newToolSession(
 	t *testing.T,

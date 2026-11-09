@@ -193,3 +193,31 @@ WHERE input.transaction_id IN (?, ?) ORDER BY utxo.id`,
 		}
 	}
 }
+
+// A spender hash the version 57 upgrade could not resolve stays in the legacy
+// column with no spender id. The spend-state read reports that hash, and
+// restoring the output to live clears it with the spender id.
+func TestUnresolvedLegacySpenderIsReadAndClearedOnRestore(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	txID, spender := bytes32(0xc1), bytes32(0xc2)
+	// This store's connections do not enforce foreign keys, as a database
+	// written before they were enforced did not.
+	_, err := store.writeDB.Exec(
+		`INSERT INTO utxo (tx_id, output_idx, deleted_slot, added_slot, amount,
+    spent_at_tx_id) VALUES (?, 0, 9, 3, '1', ?)`,
+		txID, spender,
+	)
+	require.NoError(t, err)
+
+	state, err := store.GetUtxoSpendState(txID, 0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	require.Equal(t, spender, []byte(state.SpentAtTxId))
+
+	require.NoError(t, store.SetUtxosNotDeletedAfterSlot(5, nil))
+	row := readSpenderRow(t, store, txID)
+	require.Zero(t, row.deletedSlot)
+	require.False(t, row.spentBy.Valid)
+	require.Nil(t, row.legacy, "a live output keeps no spender hash")
+}

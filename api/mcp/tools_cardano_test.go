@@ -284,8 +284,9 @@ func TestCardanoToolsTransactionFallback(t *testing.T) {
 		CREATE TABLE account (staking_key BLOB, credential_tag INTEGER, balance INTEGER);
  INSERT INTO account VALUES (X'99999999999999999999999999999999999999999999999999999999', 0, 12345);
 
-		CREATE TABLE utxo (tx_hash TEXT, transaction_id INTEGER, address TEXT, amount TEXT, tx_id BLOB, producer_tx_id INTEGER AS (transaction_id) VIRTUAL);
-		INSERT INTO utxo VALUES ('1111111111111111111111111111111111111111111111111111111111111111', 1, 'addr_test_paging', '5000000', X'1111111111111111111111111111111111111111111111111111111111111111');
+		CREATE TABLE utxo (tx_hash TEXT, transaction_id INTEGER, address TEXT, amount TEXT, tx_id BLOB, collateral_return_for_tx_id INTEGER, output_idx INTEGER, producer_tx_id INTEGER AS (COALESCE(transaction_id, collateral_return_for_tx_id)) VIRTUAL);
+		CREATE UNIQUE INDEX idx_utxo_imported_ref ON utxo (tx_id, output_idx) WHERE transaction_id IS NULL AND collateral_return_for_tx_id IS NULL;
+		INSERT INTO utxo (tx_hash, transaction_id, address, amount, tx_id) VALUES ('1111111111111111111111111111111111111111111111111111111111111111', 1, 'addr_test_paging', '5000000', X'1111111111111111111111111111111111111111111111111111111111111111');
 	`)
 	require.NoError(t, err)
 
@@ -537,8 +538,10 @@ func TestParseAddressOrCredential(t *testing.T) {
 	assert.Error(t, err)
 }
 
-// get_transaction totals a transaction's outputs through producer_tx_id; no
-// index leads with utxo.tx_id for produced rows, so a predicate on it scans.
+// get_transaction totals a transaction's outputs through producer_tx_id, and
+// its imported outputs, which have no producer, through the imported-output
+// index; no index leads with utxo.tx_id for produced rows, so a predicate on
+// it alone scans.
 func TestTransactionOutputTotalsSearchProducerIndex(t *testing.T) {
 	t.Parallel()
 	db := newSchemaDB(t)
@@ -549,19 +552,30 @@ func TestTransactionOutputTotalsSearchProducerIndex(t *testing.T) {
 	_, err = db.Exec(`
 INSERT INTO utxo (transaction_id, tx_id, output_idx, amount) VALUES (7, X'11', 0, '5'), (7, X'11', 1, '7');
 INSERT INTO utxo (collateral_return_for_tx_id, tx_id, output_idx, amount) VALUES (8, X'22', 0, '11');
-INSERT INTO utxo (tx_id, output_idx, amount) VALUES (X'33', 0, '13')`)
+INSERT INTO utxo (tx_id, output_idx, amount) VALUES (X'33', 0, '13'), (X'11', 2, '17')`)
 	require.NoError(t, err)
 
-	for id, want := range map[int][2]uint64{7: {2, 12}, 8: {1, 11}, 9: {0, 0}} {
+	for _, tc := range []struct {
+		id   int
+		hash []byte
+		want [2]uint64
+	}{
+		{7, []byte{0x11}, [2]uint64{3, 29}},
+		{8, []byte{0x22}, [2]uint64{1, 11}},
+		{9, []byte{0x99}, [2]uint64{0, 0}},
+	} {
 		var count int
 		var total uint64
-		require.NoError(t, db.QueryRow(transactionOutputTotalsSQL, id).
-			Scan(&count, &total))
-		require.Equal(t, int(want[0]), count, "tx %d count", id)
-		require.Equal(t, want[1], total, "tx %d total", id)
+		require.NoError(t, db.QueryRow(
+			transactionOutputTotalsSQL, tc.id, tc.hash,
+		).Scan(&count, &total))
+		require.Equal(t, int(tc.want[0]), count, "tx %d count", tc.id)
+		require.Equal(t, tc.want[1], total, "tx %d total", tc.id)
 	}
 
-	rows, err := db.Query("EXPLAIN QUERY PLAN "+transactionOutputTotalsSQL, 7)
+	rows, err := db.Query(
+		"EXPLAIN QUERY PLAN "+transactionOutputTotalsSQL, 7, []byte{0x11},
+	)
 	require.NoError(t, err)
 	defer rows.Close()
 	var plan []string
@@ -575,4 +589,5 @@ INSERT INTO utxo (tx_id, output_idx, amount) VALUES (X'33', 0, '13')`)
 	joined := strings.Join(plan, "\n")
 	require.NotContains(t, joined, "SCAN utxo", "plan:\n%s", joined)
 	require.Contains(t, joined, "idx_utxo_producer_output", "plan:\n%s", joined)
+	require.Contains(t, joined, "idx_utxo_imported_ref", "plan:\n%s", joined)
 }

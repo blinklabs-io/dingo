@@ -35,14 +35,16 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
-// utxoRowColumns lists the columns scanUtxoRow reads. The table stores only
-// the spender's row id; the spending transaction's hash is projected by the
-// subselect.
+// utxoRowColumns lists the columns scanUtxoRow reads. The table stores the
+// spender's row id; the spending transaction's hash is projected by the
+// subselect, falling back to a legacy hash the version 57 upgrade could not
+// resolve to a row.
 const utxoRowColumns = "utxo.transaction_id, utxo.collateral_return_for_tx_id, " +
 	"utxo.tx_id, utxo.payment_key, utxo.staking_key, utxo.credential_tag, " +
 	"utxo.datum_hash, " +
-	`(SELECT spender.hash FROM "transaction" AS spender ` +
-	`WHERE spender.id = utxo.spent_by_tx_id) AS spent_at_tx_id, ` +
+	`COALESCE((SELECT spender.hash FROM "transaction" AS spender ` +
+	`WHERE spender.id = utxo.spent_by_tx_id), utxo.spent_at_tx_id) ` +
+	`AS spent_at_tx_id, ` +
 	"utxo.referenced_by_tx_id, utxo.collateral_by_tx_id, utxo.id, " +
 	"utxo.added_slot, utxo.deleted_slot, utxo.amount, utxo.output_idx, " +
 	"utxo.payment_script"
@@ -409,7 +411,7 @@ func (s *Store) SetUtxosNotDeletedAfterSlot(
 			}
 			if _, err := db.ExecContext(ctx, `
 UPDATE utxo
-SET deleted_slot = 0, spent_by_tx_id = NULL
+SET deleted_slot = 0, spent_by_tx_id = NULL, spent_at_tx_id = NULL
 WHERE deleted_slot > ?`,
 				slotValue,
 			); err != nil {

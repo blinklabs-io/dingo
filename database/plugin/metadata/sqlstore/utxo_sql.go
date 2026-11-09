@@ -242,8 +242,8 @@ FROM utxo WHERE `
 	// that report it; the apply path compares transaction ids and uses
 	// getUtxoSpendStateHead.
 	getUtxoSpendStateHashHead = `-- name: GetUtxoSpendStateWithHash :one
-SELECT deleted_slot, (SELECT spender.hash FROM "transaction" AS spender
-    WHERE spender.id = utxo.spent_by_tx_id)
+SELECT deleted_slot, COALESCE((SELECT spender.hash FROM "transaction" AS spender
+    WHERE spender.id = utxo.spent_by_tx_id), spent_at_tx_id)
 FROM utxo WHERE `
 
 	repairConflictedUtxoHead = `-- name: RepairConflictedUtxo :one
@@ -293,7 +293,7 @@ WHERE `
 
 	clearStaleUtxoSpendHead = `-- name: ClearStaleUtxoSpend :execrows
 UPDATE utxo
-SET deleted_slot = 0, spent_by_tx_id = NULL
+SET deleted_slot = 0, spent_by_tx_id = NULL, spent_at_tx_id = NULL
 WHERE `
 	clearStaleUtxoSpendTail = ` AND deleted_slot > 0`
 

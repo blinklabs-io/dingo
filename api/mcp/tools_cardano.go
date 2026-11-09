@@ -124,12 +124,20 @@ func formatHash(val any) string {
 	}
 }
 
-// transactionOutputTotalsSQL counts the outputs a transaction row produced,
-// its collateral return included. producer_tx_id is the SQLite generated
-// column indexed by idx_utxo_producer_output; no index leads with utxo.tx_id
-// for produced rows.
+// transactionOutputTotalsSQL counts the outputs of a transaction: those its
+// row produced, its collateral return included, and those imported under its
+// hash with no producer. producer_tx_id is the SQLite generated column indexed
+// by idx_utxo_producer_output and the imported arm reads idx_utxo_imported_ref;
+// no index leads with utxo.tx_id for produced rows. It binds the transaction's
+// row id, then its hash.
 const transactionOutputTotalsSQL = `SELECT count(*), coalesce(sum(amount), 0)
-FROM utxo WHERE producer_tx_id = ?`
+FROM (
+    SELECT amount FROM utxo WHERE producer_tx_id = ?
+    UNION ALL
+    SELECT amount FROM utxo INDEXED BY idx_utxo_imported_ref
+    WHERE transaction_id IS NULL AND collateral_return_for_tx_id IS NULL
+      AND tx_id = ?
+)`
 
 type utxoAddressLookup func(context.Context, *models.UtxoWithOrderingQuery, int) (models.UtxoAddressPage, error)
 
@@ -486,7 +494,7 @@ func registerCardanoTools(
 		// Count UTxOs created by this tx
 		var outCount int
 		var totalOut uint64
-		err = db.QueryRowContext(qCtx, transactionOutputTotalsSQL, txID).
+		err = db.QueryRowContext(qCtx, transactionOutputTotalsSQL, txID, hashBytes).
 			Scan(&outCount, &totalOut)
 		if err != nil {
 			return nil, nil, fmt.Errorf("query transaction outputs: %w", err)

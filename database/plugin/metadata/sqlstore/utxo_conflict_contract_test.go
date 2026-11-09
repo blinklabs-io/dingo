@@ -181,9 +181,10 @@ func TestLegacySpenderHashRequiresATransactionRow(t *testing.T) {
 }
 
 // An output whose legacy spender hash names no transaction row keeps
-// deleted_slot but has no spender. Readers return it as a spent output with no
-// spender hash; Kupo's match iterator drops spent outputs without one.
-func TestUtxoSpentWithoutSpenderRowReadsAsSpentWithNoSpender(t *testing.T) {
+// deleted_slot but has no spender id. Readers return it as a spent output
+// whose spender is the legacy hash; Kupo's match iterator drops spent outputs
+// without a spender id.
+func TestUtxoSpentWithoutSpenderRowReadsItsLegacySpenderHash(t *testing.T) {
 	t.Parallel()
 	store := newMigratedSQLiteStore(t)
 	hash := bytes32(0xc5)
@@ -200,7 +201,7 @@ func TestUtxoSpentWithoutSpenderRowReadsAsSpentWithNoSpender(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, utxo)
 	require.Equal(t, uint64(500), utxo.DeletedSlot)
-	require.Empty(t, utxo.SpentAtTxId)
+	require.Equal(t, bytes32(0xc8), []byte(utxo.SpentAtTxId))
 
 	live, err := store.GetUtxo(hash, 0, nil)
 	require.NoError(t, err)
