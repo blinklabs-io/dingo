@@ -1,21 +1,10 @@
--- Drop five indexes that no reader needs or that another index already serves.
---
--- idx_reward_live_stake_updated_slot: updated_slot is written on every
--- refresh and never filtered, joined or ordered on, so the index only added a
--- leaf rewrite per touched credential.
---
--- idx_account_reward_delta_tx_hash and idx_account_reward_delta_withdrawal:
--- every reader that names a tx_hash also names withdrawal, so the unique
--- (withdrawal, tx_hash, ...) index serves it, and a boolean-only index
--- narrows nothing.
---
--- idx_account_drep: a prefix of idx_account_drep_active_staking_key.
---
--- idx_reward_account_output_credential_spendable: a prefix of
--- idx_reward_account_output_credential_spendable_guarded, and every reader
--- that constrains spendable also constrains guarded.
-DROP INDEX IF EXISTS `idx_reward_live_stake_updated_slot`;
-DROP INDEX IF EXISTS `idx_account_reward_delta_tx_hash`;
-DROP INDEX IF EXISTS `idx_account_reward_delta_withdrawal`;
-DROP INDEX IF EXISTS `idx_account_drep`;
-DROP INDEX IF EXISTS `idx_reward_account_output_credential_spendable`;
+-- Lead the block_nonce uniqueness index with slot. Block hashes are uniformly
+-- random, so every insert into the (hash, slot) index landed on an unrelated
+-- leaf: each 50-block apply chunk rewrote about 50 index pages. Slots only
+-- grow, so inserts into (slot, hash) hit the right edge. Every reader of
+-- block_nonce supplies a slot or a slot range, so none needs a hash-leading
+-- key; the same index also serves the range, latest-row and prune reads that
+-- previously scanned the table. (slot, hash) is unique exactly when
+-- (hash, slot) is, so existing rows always satisfy it.
+CREATE UNIQUE INDEX IF NOT EXISTS `idx_block_nonce_slot_hash` ON `block_nonce`(`slot`,`hash`);
+DROP INDEX IF EXISTS `hash_slot`;
