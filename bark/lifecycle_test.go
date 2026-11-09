@@ -87,6 +87,18 @@ func TestLifecycleServiceOverRealHTTP(t *testing.T) {
 	}
 	ctx := context.Background()
 
+	t.Run("anonymous status reports the node state", func(t *testing.T) {
+		status, err := newClient().GetStatus(ctx, connect.NewRequest(
+			&lifecyclev1alpha1.GetStatusRequest{}))
+		require.NoError(t, err)
+		require.Equal(
+			t,
+			lifecyclev1alpha1.LifecycleState_LIFECYCLE_STATE_RUNNING,
+			status.Msg.GetState(),
+		)
+		require.Equal(t, "test-version", status.Msg.GetVersion())
+	})
+
 	t.Run("stop and restart reach the node", func(t *testing.T) {
 		client := newClient()
 		stop, err := client.Stop(ctx, connect.NewRequest(

@@ -25,6 +25,7 @@ import (
 	"maps"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"reflect"
 	"regexp"
@@ -40,6 +41,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/health"
 	hostplugin "github.com/blinklabs-io/dingo/plugin"
+	"github.com/stretchr/testify/require"
 )
 
 // sentinelConfig builds a config whose every secret-bearing field carries a
@@ -654,6 +656,24 @@ func TestMetricsServerUsesDedicatedBindAddress(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestMetricsServerIgnoresLegacyAuthToken proves a configured, now-ignored
+// MetricsAuthToken does not gate /metrics: an anonymous request succeeds.
+func TestMetricsServerIgnoresLegacyAuthToken(t *testing.T) {
+	t.Parallel()
+
+	srv := newMetricsServer(&config.Config{
+		MetricsPort:      12798,
+		MetricsAuthToken: "legacy-secret",
+	})
+	require.NotNil(t, srv)
+	rec := httptest.NewRecorder()
+	srv.Handler.ServeHTTP(
+		rec,
+		httptest.NewRequest(http.MethodGet, "/metrics", nil),
+	)
+	require.Equal(t, http.StatusOK, rec.Code)
 }
 
 func TestMetricsServerDisabledByZeroPort(t *testing.T) {
