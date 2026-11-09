@@ -986,7 +986,7 @@ overlay, which credits and debits logically because it elides rows. A rollback
 keeps the rows at or below its slot, so outputs removed by cascade need no
 accounting, and the floor never lets a rollback reach the rows the trim deletes.
 Ledger-state import replaces the aggregate with a scan at the snapshot slot once
-its outputs are in place.
+its outputs are in place, unless the import had already completed.
 
 `rollback` and `rollbackChainAndState` refuse a target below the floor with
 `ErrRollbackBelowUtxoPruneFloor` before mutating anything, and

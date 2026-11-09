@@ -90,3 +90,64 @@ func TestImportLedgerStateSeedsScriptLockedSupply(t *testing.T) {
 	require.EqualValues(t, 1_000, slot)
 	require.EqualValues(t, 1, rows)
 }
+
+// A completed import that runs again leaves the aggregate alone: blocks
+// applied after the first run wrote rows above the snapshot slot, and a scan
+// stamped at that slot would fold their deltas into the base a rollback reads.
+func TestImportLedgerStateRerunKeepsScriptLockedSupplyRows(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	t.Cleanup(func() { dbtest.CloseDatabase(db) })
+	raw, err := dbtest.RawSQLiteMetadata(t, db)
+	require.NoError(t, err)
+
+	addr := buildShelleyAddr(
+		1, 1,
+		bytes.Repeat([]byte{0x11}, 28),
+		bytes.Repeat([]byte{0x22}, 28),
+	)
+	nonce := make([]byte, 32)
+	cfg := ImportConfig{
+		Database:  db,
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ImportKey: "script-supply-rerun",
+		State: &RawLedgerState{
+			UTxOData: inlineUTxOMap(
+				t,
+				addr,
+				[]uint64{1_000_000, 2_000_000},
+			),
+			Epoch:               1,
+			EraIndex:            EraConway,
+			EraBounds:           make([]EraBound, EraConway+1),
+			EpochNonce:          nonce,
+			EvolvingNonce:       nonce,
+			CandidateNonce:      nonce,
+			LastEpochBlockNonce: nonce,
+			Tip: &SnapshotTip{
+				Slot:      1_000,
+				BlockHash: make([]byte, 32),
+			},
+		},
+		EpochLength: func(uint) (uint, uint, error) {
+			return 1, 1_000, nil
+		},
+	}
+	require.NoError(t, ImportLedgerState(context.Background(), cfg))
+	_, err = raw.Exec(
+		"INSERT INTO script_locked_supply (slot, amount) VALUES (2000, 5000000)",
+	)
+	require.NoError(t, err)
+
+	require.NoError(t, ImportLedgerState(context.Background(), cfg))
+	var rows int64
+	require.NoError(t, raw.QueryRow(
+		"SELECT COUNT(*) FROM script_locked_supply",
+	).Scan(&rows))
+	require.EqualValues(t, 2, rows)
+	got, err := db.Metadata().GetScriptLockedSupply(nil)
+	require.NoError(t, err)
+	require.EqualValues(t, 5_000_000, got)
+}
