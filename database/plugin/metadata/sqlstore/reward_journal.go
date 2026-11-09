@@ -40,11 +40,16 @@ import (
 //     same snapshot epoch at different slots.
 //   - reward_event_credit: credits outside a round (pool-retirement refunds,
 //     MIR, governance, direct deposits), identified by reward_source.hash.
+//     after_withdrawal records that the account already had a withdrawal at
+//     the credit's slot when it was applied.
 //   - reward_withdrawal: withdrawals, keyed by the withdrawing transaction.
 //
-// Credits of one slot precede withdrawals of that slot: a credential's pending
-// credits are folded into the journal before any withdrawal reads its balance.
-// Rollback and historical reads depend on that order.
+// Rollback and historical reads need each credit's order relative to the
+// account's withdrawals within a slot. Stake-reward credits precede every
+// withdrawal of their slot: a credential's pending credits are folded into the
+// journal before any withdrawal reads its balance. An event credit can follow
+// one, because a Dijkstra direct deposit is applied after its transaction's
+// withdrawals; after_withdrawal is what places it.
 const (
 	getActiveAccountRewardByIDSQL = `-- name: GetActiveAccountRewardByID :one
 SELECT reward FROM account WHERE id = ? AND active = TRUE`
@@ -72,8 +77,10 @@ SELECT id FROM reward_source WHERE hash = ?`
 
 	insertRewardEventCreditSQL = `-- name: InsertRewardEventCredit :exec
 INSERT INTO reward_event_credit (
-    source_id, account_id, slot, amount, post_snapshot
-) VALUES (?, ?, ?, ?, ?)
+    source_id, account_id, slot, amount, post_snapshot, after_withdrawal
+) VALUES (?, ?, ?, ?, ?, EXISTS (
+    SELECT 1 FROM reward_withdrawal WHERE account_id = ? AND slot = ?
+))
 ON CONFLICT (source_id, account_id, slot) DO NOTHING`
 
 	markRewardEventCreditPostSnapshotSQL = `-- name: MarkRewardEventCreditPostSnapshot :exec
@@ -95,7 +102,7 @@ ON CONFLICT (transaction_id, account_id) DO NOTHING`
 SELECT id FROM "transaction" WHERE hash = ?`
 
 	rollbackRewardEventAccountsSQL = `
-SELECT e.account_id, e.slot, e.amount FROM reward_event_credit e
+SELECT e.account_id, e.slot, e.amount, e.after_withdrawal FROM reward_event_credit e
 WHERE e.slot > ?`
 
 	rollbackRewardWithdrawalsSQL = `
@@ -244,6 +251,7 @@ func (s *Store) addAccountRewardEvent(
 				ctx, db, insertRewardEventCreditSQL,
 				sourceID, accountID, slotValue,
 				strconv.FormatUint(amount, 10), postSnapshot,
+				accountID, slotValue,
 			)
 			if err != nil {
 				return err
@@ -521,8 +529,7 @@ type rewardRollbackAccount struct {
 	// credits is the total of every credit after the rollback slot.
 	credits uint64
 	// beforeWithdrawal is the part of credits that precedes the account's
-	// earliest withdrawal after the slot, a credit at the withdrawal's own
-	// slot counting as before it.
+	// earliest withdrawal after the slot.
 	beforeWithdrawal        uint64
 	hasWithdrawal           bool
 	withdrawalSlot          int64
@@ -536,7 +543,7 @@ type rewardRollbackAccount struct {
 // An account with a withdrawal after slot returns to the earliest such
 // withdrawal's previous balance less the credits between slot and that
 // withdrawal. Any other account loses every credit after slot. Neither result
-// depends on the order rows were written in.
+// depends on the order rows are read in.
 func (s *Store) DeleteAccountRewardsAfterSlot(
 	slot uint64,
 	txn types.Txn,
@@ -722,7 +729,7 @@ func (s *Store) collectRollbackCredits(
 	slot int64,
 	account func(int64) *rewardRollbackAccount,
 ) error {
-	add := func(id, at int64, raw string) error {
+	add := func(id, at int64, raw string, afterWithdrawal bool) error {
 		amount, err := parseUint64("reward credit amount", raw)
 		if err != nil {
 			return err
@@ -732,7 +739,9 @@ func (s *Store) collectRollbackCredits(
 			return errors.New("reward rollback credit total overflows")
 		}
 		entry.credits += amount
-		if entry.hasWithdrawal && at <= entry.withdrawalSlot {
+		if entry.hasWithdrawal && creditPrecedesWithdrawal(
+			at, afterWithdrawal, entry.withdrawalSlot,
+		) {
 			entry.beforeWithdrawal += amount
 		}
 		return nil
@@ -754,7 +763,7 @@ func (s *Store) collectRollbackCredits(
 				if err := rows.Scan(&id, &raw); err != nil {
 					return err
 				}
-				if err := add(id, creditSlot, raw); err != nil {
+				if err := add(id, creditSlot, raw, false); err != nil {
 					return err
 				}
 			}
@@ -771,14 +780,27 @@ func (s *Store) collectRollbackCredits(
 	for rows.Next() {
 		var id, at int64
 		var raw string
-		if err := rows.Scan(&id, &at, &raw); err != nil {
+		var afterWithdrawal bool
+		if err := rows.Scan(&id, &at, &raw, &afterWithdrawal); err != nil {
 			return err
 		}
-		if err := add(id, at, raw); err != nil {
+		if err := add(id, at, raw, afterWithdrawal); err != nil {
 			return err
 		}
 	}
 	return rows.Err()
+}
+
+// creditPrecedesWithdrawal reports whether a credit at slot came before a
+// withdrawal at withdrawalSlot that is the account's earliest one from that
+// slot on. At the withdrawal's slot, a credit flagged after_withdrawal follows
+// some withdrawal of that slot and so follows the earliest one too.
+func creditPrecedesWithdrawal(
+	slot int64,
+	afterWithdrawal bool,
+	withdrawalSlot int64,
+) bool {
+	return slot < withdrawalSlot || (slot == withdrawalSlot && !afterWithdrawal)
 }
 
 // deleteAccountRewardJournalAfterSlot removes one account's journal rows above

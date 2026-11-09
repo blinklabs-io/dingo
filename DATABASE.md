@@ -2074,11 +2074,14 @@ of 100,000 legacy ids, one transaction per batch, with the cursor
 (`{phase, after, max}`) committed in the batch's transaction, so a restart
 resumes at the next batch; every statement is `ON CONFLICT DO NOTHING`. A
 legacy row is a stake-reward credit (to `reward_credit`, `output_id = -id`) when it
-is not a withdrawal, not `post_snapshot`, has a 32-byte `tx_hash` and was
-credited at an `epoch.start_slot`; any other non-withdrawal row is an event
+is not a withdrawal, not `post_snapshot`, has a 32-byte `tx_hash` that is no
+`transaction.hash` (a Dijkstra direct deposit's source is its transaction's
+hash) and was credited at an `epoch.start_slot`; any other non-withdrawal row is an event
 credit, with one `reward_source` per distinct `tx_hash`; withdrawals move to
 `reward_withdrawal` keyed by the `transaction` row with that hash (a `NULL`
-`previous_reward` becomes `'0'`). Each batch then verifies, through the new
+`previous_reward` becomes `'0'`). An event credit gets `after_withdrawal` when the
+legacy table holds a withdrawal of the same credential and slot with a lower id,
+since legacy ids follow application order. Each batch then verifies, through the new
 tables' keys, that every legacy row of its range exists with the same amount,
 slot and previous balance, and a final step compares total row counts; a
 mismatch (for example a withdrawal whose transaction row is missing) fails the
@@ -3347,8 +3350,8 @@ PostgreSQL/MySQL repeatable-read read-only transactions.
 | `reward_credit` | `boundary_slot`, `account_id`, `output_id`, `amount` | `WITHOUT ROWID` on SQLite; PK (`boundary_slot`, `account_id`, `output_id`) | Stake-reward credits of the reward round applied at `boundary_slot`, one row per `reward_account_output` row added to `account.reward`. `account_id` is `account.id`; `output_id` is the output row's id, opaque because the output row can be pruned, and negative (`-id` of the former journal row) for rows migrated from `account_reward_delta`. The key makes re-applying a credit a no-op and lets a round fold in `account.id` order append at the end of its key range. There are no foreign keys: a parent delete would otherwise scan this table by its non-leading `account_id`. `amount` is decimal text. |
 | `reward_credit_slot` | `boundary_slot` | PK `boundary_slot` (`WITHOUT ROWID` on SQLite) | The slots that hold `reward_credit` rows, so historical reads and rollback enumerate rounds without scanning credits. |
 | `reward_source` | `id`, `hash` | PK `id`; unique `hash` | Event discriminators of `reward_event_credit`: the retired pool key hash of a pool-retirement refund, the proposal source hash of a governance credit, the transaction hash of a Dijkstra direct deposit, or the synthetic MIR pot hash. |
-| `reward_event_credit` | `id`, `source_id`, `account_id`, `slot`, `amount`, `post_snapshot` | PK `id`; unique (`source_id`, `account_id`, `slot`); indexes (`slot`, `account_id`), (`account_id`, `slot`) | Reward-account credits outside a stake-reward round: pool-retirement refunds, MIR, governance refunds and treasury withdrawals, direct deposits. `post_snapshot` marks POOLREAP and governance credits applied after SNAP through Conway. The unique key includes `slot` because a MIR source repeats across boundaries; a replay of one (source, account, slot) is a no-op. Governance proposal credits use a proposal-event discriminator derived from proposal `tx_hash` plus `action_index`, not the raw proposal transaction hash alone. |
-| `reward_withdrawal` | `transaction_id`, `account_id`, `slot`, `amount`, `previous_reward` | `WITHOUT ROWID` on SQLite; PK (`transaction_id`, `account_id`); indexes (`account_id`, `slot`), `slot` | Reward withdrawals, keyed by the withdrawing `transaction.id`; `transaction_id` follows the integer-reference naming (`utxo.transaction_id`), while a bare `tx_id` is a 32-byte hash. It has no foreign key: a deleted transaction's id is never reused (`"transaction".id` is `AUTOINCREMENT`), and rollback deletes the journal rows above the slot together with the rolled-back transactions. Positive withdrawals subtract `amount` from `account.reward` and store the pre-withdrawal balance in `previous_reward`, which rollback restores. `(transaction_id, account_id)` is the replay key. Credits of one slot precede withdrawals of that slot, which rollback and historical reads rely on: a credential's pending credits are journaled before a withdrawal reads its balance. Migration 56 replaced the former `account_reward_delta` table with these four tables. Rollback (`DeleteAccountRewardsAfterSlot`) skips an account whose row is missing rather than failing: the balance lives on the account row, so with it gone there is nothing to restore, and failing would abort a rollback that startup reconciliation depends on. |
+| `reward_event_credit` | `id`, `source_id`, `account_id`, `slot`, `amount`, `post_snapshot`, `after_withdrawal` | PK `id`; unique (`source_id`, `account_id`, `slot`); indexes (`slot`, `account_id`), (`account_id`, `slot`) | Reward-account credits outside a stake-reward round: pool-retirement refunds, MIR, governance refunds and treasury withdrawals, direct deposits. `post_snapshot` marks POOLREAP and governance credits applied after SNAP through Conway. `after_withdrawal` is set at insert when the account already has a `reward_withdrawal` row at the credit's slot: a Dijkstra direct deposit is applied after its transaction's withdrawals, so it can follow a withdrawal in one slot. The unique key includes `slot` because a MIR source repeats across boundaries; a replay of one (source, account, slot) is a no-op. Governance proposal credits use a proposal-event discriminator derived from proposal `tx_hash` plus `action_index`, not the raw proposal transaction hash alone. |
+| `reward_withdrawal` | `transaction_id`, `account_id`, `slot`, `amount`, `previous_reward` | `WITHOUT ROWID` on SQLite; PK (`transaction_id`, `account_id`); indexes (`account_id`, `slot`), `slot` | Reward withdrawals, keyed by the withdrawing `transaction.id`; `transaction_id` follows the integer-reference naming (`utxo.transaction_id`), while a bare `tx_id` is a 32-byte hash. It has no foreign key: a deleted transaction's id is never reused (`"transaction".id` is `AUTOINCREMENT`), and rollback deletes the journal rows above the slot together with the rolled-back transactions. Positive withdrawals subtract `amount` from `account.reward` and store the pre-withdrawal balance in `previous_reward`, which rollback restores. `(transaction_id, account_id)` is the replay key. Rollback and historical reads place each credit relative to the account's earliest later withdrawal: a credit at a lower slot precedes it, and at the withdrawal's slot a `reward_credit` row precedes it (a credential's pending credits are journaled before a withdrawal reads its balance) while a `reward_event_credit` row precedes it unless `after_withdrawal` is set. Migration 56 replaced the former `account_reward_delta` table with these four tables. Rollback (`DeleteAccountRewardsAfterSlot`) skips an account whose row is missing rather than failing: the balance lives on the account row, so with it gone there is nothing to restore, and failing would abort a rollback that startup reconciliation depends on. |
 | `account_withdrawal_witness` | `id`, `staking_key`, `credential_tag`, `tx_hash`, `added_slot` | PK `id`; indexes `added_slot` and (`staking_key`, `credential_tag`, `added_slot`); unique (`tx_hash`, `credential_tag`, `staking_key`) | Rollback-aware CIP-0163 history for every valid withdrawal-map entry, including zero-amount withdrawals that create no reward delta. Rollback witness queries read this table (and legacy withdrawal delta rows), and rollback deletes rows after its target slot. The insert is elided entirely when the delegator-inactivity gate is off (`MetadataStore.SetTransaction`/`SetTransactionBatched`'s `skipWithdrawalWitness` argument, set from `BatchedTxIngestOpts.SkipWithdrawalWitnessWrite` as `!LedgerStateConfig.DelegatorInactivityEnabled` on the live-apply path): the table is only ever read by the gate's rollback/renewal queries below, so a gate-off node — the default — does the insert's write and index-maintenance work for nothing. `internal/node.Backfill`'s batched historical-replay path derives the same flag from its own `delegatorInactivityEnabled` field, and neither caller relies on its zero-value default: `mithril/sync.go` hardcodes it false (the gate can never be on for a Mithril bootstrap, see `errMithrilInactivityIncompatible` in ARCHITECTURE.md), while `cmd/dingo/serve.go`'s `resumeBackfill` passes the real `DelegatorInactivityEnabled` config value, which can genuinely be true there since it resumes any pending API-mode backfill checkpoint, not only a Mithril-originated one, and does not itself check the gate. |
 | `registration` | `id`, `staking_key`, `credential_tag`, `certificate_id`, `added_slot`, `deposit_amount` | PK `id`; indexes `(credential_tag, staking_key)`, `certificate_id`, `added_slot` | Conway-era stake registration certificate. Join `certificate_id -> certs.id`. |
 | `deregistration` | `id`, `staking_key`, `credential_tag`, `certificate_id`, `added_slot`, `amount` | PK `id`; indexes `(credential_tag, staking_key)`, `certificate_id`, `added_slot` | Conway-era stake deregistration certificate. |
@@ -3408,14 +3411,15 @@ delegator inactivity tracking is enabled, it can still create an
 separate concerns. Phase-2-invalid transactions persist neither the reward
 debit nor the witness.
 
-Re-ingesting an already-applied withdrawal checks for the existing logical
-withdrawal row by transaction hash and full stake credential before changing
-the balance, so replay cannot subtract the same amount twice. Rollback processes
-reward deltas after its target in reverse slot and insertion order. A withdrawal
-restores `account.reward` directly from its recorded `previous_reward`; a credit
-subtracts its recorded amount from the then-current balance. The rollback then
-deletes those delta and withdrawal-witness rows and refreshes
-`reward_live_stake`. Replaying the selected chain after rollback therefore sees
+Re-ingesting an already-applied withdrawal checks for the existing
+`reward_withdrawal` row by `(transaction_id, account_id)` before changing the
+balance, so replay cannot subtract the same amount twice. Rollback
+(`DeleteAccountRewardsAfterSlot`) computes one balance per affected account: an
+account with a withdrawal after the target returns to the earliest such
+withdrawal's `previous_reward` less the credits that precede it (ordered as
+described for `reward_withdrawal`), and any other account loses every credit
+after the target. The rollback then deletes the journal and withdrawal-witness
+rows above the target and refreshes `reward_live_stake`. Replaying the selected chain after rollback therefore sees
 no stale logical withdrawal row and deterministically applies the subtraction
 again.
 
@@ -6359,8 +6363,9 @@ and transaction id anchors the reconstruction. Event credits and withdrawals
 resolve the Leios context slot (`COALESCE(lc.slot, ...)`) through `LEFT JOIN`s on
 the unique `transaction.hash` (event credits whose source is a transaction hash)
 or the withdrawing `transaction.id`, and `leios_transaction_context`'s primary
-key. A credit counts before the first later withdrawal when its slot is at or
-below the withdrawal's. No plan depends on `sqlite_stat1`.
+key. A credit counts before the first later withdrawal when its slot is below
+the withdrawal's, or equal to it and the credit is not an `after_withdrawal`
+event credit. No plan depends on `sqlite_stat1`.
 
 `utxo.amount`, `account.reward`, and the reward-delta amounts are stored as text
 (`types.Uint64`) on postgres and mysql, so each is cast to the backend's native

@@ -274,8 +274,9 @@ func historicalRewardsBatch(
 				return nil, errors.New("historical reward credit overflow")
 			}
 			total[ref] += value
-			// Credits of a slot precede its withdrawals.
-			if hasWithdrawal && credit.slot <= entries.withdrawalSlot {
+			if hasWithdrawal && creditPrecedesWithdrawal(
+				credit.slot, credit.afterWithdrawal, entries.withdrawalSlot,
+			) {
 				if ^uint64(0)-beforeWithdrawal[ref] < value {
 					return nil, errors.New("historical reward credit overflow")
 				}
@@ -337,7 +338,7 @@ WHERE credential_tag = ? AND staking_key IN (` + rewardHistoryPlaceholders() + `
 	}
 
 	rewardHistoryCreditsSQL = `-- name: GetRewardHistoryCredits :many
-SELECT c.account_id, c.boundary_slot, c.amount FROM reward_credit c
+SELECT c.account_id, c.boundary_slot, c.amount, FALSE FROM reward_credit c
 WHERE c.account_id IN (` + rewardHistoryPlaceholders() + `)
   AND c.boundary_slot IN (
       SELECT boundary_slot FROM reward_credit_slot WHERE boundary_slot > ?
@@ -367,7 +368,7 @@ func rewardHistoryEventsQuery(includePostSnapshot bool) string {
 		filter = "(" + slot + " > ? OR (" + slot + " = ? AND e.post_snapshot = TRUE))"
 	}
 	return `-- name: GetRewardHistoryEvents :many
-SELECT e.account_id, ` + slot + `, e.amount
+SELECT e.account_id, ` + slot + `, e.amount, e.after_withdrawal
 FROM reward_event_credit e
 LEFT JOIN reward_source s ON s.id = e.source_id
 LEFT JOIN "transaction" tx ON tx.hash = s.hash
@@ -376,8 +377,9 @@ WHERE e.account_id IN (` + rewardHistoryPlaceholders() + `) AND ` + filter
 }
 
 type rewardHistoryCredit struct {
-	slot   int64
-	amount sql.NullString
+	slot            int64
+	amount          sql.NullString
+	afterWithdrawal bool
 }
 
 type rewardHistory struct {
@@ -476,11 +478,14 @@ func readRewardHistories(
 		credit := func(rows *sql.Rows) error {
 			var id, slot int64
 			var amount sql.NullString
-			if err := rows.Scan(&id, &slot, &amount); err != nil {
+			var afterWithdrawal bool
+			if err := rows.Scan(&id, &slot, &amount, &afterWithdrawal); err != nil {
 				return err
 			}
 			entry := owner[id]
-			entry.credits = append(entry.credits, rewardHistoryCredit{slot: slot, amount: amount})
+			entry.credits = append(entry.credits, rewardHistoryCredit{
+				slot: slot, amount: amount, afterWithdrawal: afterWithdrawal,
+			})
 			return nil
 		}
 		if err := scanRewardHistoryRows(

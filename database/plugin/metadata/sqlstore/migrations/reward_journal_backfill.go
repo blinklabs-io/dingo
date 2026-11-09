@@ -63,18 +63,22 @@ type rewardJournalStatements struct {
 
 // legacyRoundCreditPredicate is the class of legacy journal rows that are
 // stake-reward credits: not a withdrawal, not marked post-snapshot, a 32-byte
-// source hash, and credited at the first slot of an epoch. Every other credit
-// is an event credit.
-func legacyRoundCreditPredicate(lengthFn string) string {
-	return "d.withdrawal = FALSE AND d.post_snapshot = FALSE AND " +
-		lengthFn + "(d.tx_hash) = 32 AND EXISTS (" +
-		"SELECT 1 FROM epoch e0 WHERE e0.start_slot = d.added_slot)"
+// source hash that is no transaction's hash, and credited at the first slot of
+// an epoch. A stake-reward source is derived from the reward, while a Dijkstra
+// direct deposit's source is its transaction's hash. Every other credit is an
+// event credit.
+func legacyRoundCreditPredicate(lengthFn, tx string) string {
+	return "d.withdrawal = FALSE AND " + legacyRoundSource(lengthFn, tx)
 }
 
-func legacyEventCreditPredicate(lengthFn string) string {
-	return "d.withdrawal = FALSE AND NOT (d.post_snapshot = FALSE AND " +
-		lengthFn + "(d.tx_hash) = 32 AND EXISTS (" +
-		"SELECT 1 FROM epoch e0 WHERE e0.start_slot = d.added_slot))"
+func legacyEventCreditPredicate(lengthFn, tx string) string {
+	return "d.withdrawal = FALSE AND NOT (" + legacyRoundSource(lengthFn, tx) + ")"
+}
+
+func legacyRoundSource(lengthFn, tx string) string {
+	return "d.post_snapshot = FALSE AND " + lengthFn + "(d.tx_hash) = 32" +
+		" AND EXISTS (SELECT 1 FROM epoch e0 WHERE e0.start_slot = d.added_slot)" +
+		" AND NOT EXISTS (SELECT 1 FROM " + tx + " t0 WHERE t0.hash = d.tx_hash)"
 }
 
 func newRewardJournalStatements(dialect string) rewardJournalStatements {
@@ -95,12 +99,19 @@ func newRewardJournalStatements(dialect string) rewardJournalStatements {
 	const accountJoin = " JOIN account a ON a.credential_tag = d.credential_tag" +
 		" AND a.staking_key = d.staking_key"
 	const idRange = " d.id > ? AND d.id <= ?"
-	round := legacyRoundCreditPredicate(lengthFn)
-	event := legacyEventCreditPredicate(lengthFn)
+	round := legacyRoundCreditPredicate(lengthFn, tx)
+	event := legacyEventCreditPredicate(lengthFn, tx)
 	const eventSource = " JOIN reward_source s ON s.hash = d.tx_hash"
+	// A legacy credit follows a withdrawal of its slot when the withdrawal's
+	// row id is lower: the legacy journal was written in application order.
+	const afterWithdrawal = "EXISTS (SELECT 1 FROM account_reward_delta w" +
+		" WHERE w.withdrawal = TRUE AND w.credential_tag = d.credential_tag" +
+		" AND w.staking_key = d.staking_key AND w.added_slot = d.added_slot" +
+		" AND w.id < d.id)"
 	const eventMatch = eventSource + " JOIN reward_event_credit e ON" +
 		" e.source_id = s.id AND e.account_id = a.id AND e.slot = d.added_slot" +
-		" AND e.amount = d.amount AND e.post_snapshot = d.post_snapshot"
+		" AND e.amount = d.amount AND e.post_snapshot = d.post_snapshot" +
+		" AND e.after_withdrawal = " + afterWithdrawal
 	withdrawalJoin := accountJoin + " JOIN " + tx + " tx ON tx.hash = d.tx_hash"
 	return rewardJournalStatements{
 		maxLegacyID: "SELECT COALESCE(MAX(id), 0) FROM account_reward_delta",
@@ -124,8 +135,9 @@ func newRewardJournalStatements(dialect string) rewardJournalStatements {
 			"hash",
 			"hash",
 		),
-		copyEvents: "INSERT INTO reward_event_credit (source_id, account_id, slot, amount, post_snapshot)" +
-			" SELECT s.id, a.id, d.added_slot, d.amount, d.post_snapshot FROM account_reward_delta d" +
+		copyEvents: "INSERT INTO reward_event_credit (source_id, account_id, slot, amount, post_snapshot, after_withdrawal)" +
+			" SELECT s.id, a.id, d.added_slot, d.amount, d.post_snapshot, " + afterWithdrawal +
+			" FROM account_reward_delta d" +
 			accountJoin + eventSource + " WHERE" + idRange + " AND " + event +
 			" ORDER BY d.id " + nothing(
 			"source_id, account_id, slot",

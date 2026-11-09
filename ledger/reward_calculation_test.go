@@ -8501,8 +8501,10 @@ ORDER BY credential_tag, staking_key`},
     hex(a.staking_key), c.amount
 FROM reward_credit c JOIN account a ON a.id = c.account_id
 ORDER BY c.boundary_slot, a.credential_tag, a.staking_key, c.amount`},
+		{"reward_credit_slot", `SELECT boundary_slot FROM reward_credit_slot
+ORDER BY boundary_slot`},
 		{"reward_event_credit", `SELECT a.credential_tag, hex(a.staking_key),
-    hex(s.hash), e.amount, e.slot, e.post_snapshot
+    hex(s.hash), e.amount, e.slot, e.post_snapshot, e.after_withdrawal
 FROM reward_event_credit e JOIN account a ON a.id = e.account_id
 JOIN reward_source s ON s.id = e.source_id
 ORDER BY a.credential_tag, a.staking_key, s.hash, e.slot`},

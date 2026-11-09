@@ -29,7 +29,8 @@ CREATE TABLE IF NOT EXISTS `reward_event_credit` (
     `account_id` integer NOT NULL,
     `slot` integer NOT NULL,
     `amount` text NOT NULL,
-    `post_snapshot` numeric NOT NULL DEFAULT false
+    `post_snapshot` numeric NOT NULL DEFAULT false,
+    `after_withdrawal` numeric NOT NULL DEFAULT false
 );
 CREATE UNIQUE INDEX IF NOT EXISTS `idx_reward_event_credit_source`
     ON `reward_event_credit`(`source_id`, `account_id`, `slot`);

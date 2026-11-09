@@ -54,6 +54,20 @@ func TestMySQLRewardJournalUpgradeIntegration(t *testing.T) {
 	)
 }
 
+func TestPostgresSameSlotCreditOrderIntegration(t *testing.T) {
+	exerciseSameSlotCreditOrder(t, func(t *testing.T) *Store {
+		dsn, schema := newPostgresIntegrationSchema(t)
+		return newIntegrationSQLStore(t, "pgx", dsn, "postgres", schema)
+	})
+}
+
+func TestMySQLSameSlotCreditOrderIntegration(t *testing.T) {
+	exerciseSameSlotCreditOrder(t, func(t *testing.T) *Store {
+		dsn, database := newMySQLIntegrationDatabase(t)
+		return newIntegrationSQLStore(t, "mysql", dsn, "mysql", database)
+	})
+}
+
 // exerciseRewardJournalUpgrade migrates a database to the version before the
 // journal move, seeds every class of legacy row, runs the move in small
 // batches, and then drives the store's journal paths on the result.

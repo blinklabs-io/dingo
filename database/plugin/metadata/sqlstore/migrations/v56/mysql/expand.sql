@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS `reward_event_credit` (
     `slot` BIGINT NOT NULL,
     `amount` VARCHAR(20) NOT NULL,
     `post_snapshot` BOOLEAN NOT NULL DEFAULT FALSE,
+    `after_withdrawal` BOOLEAN NOT NULL DEFAULT FALSE,
     UNIQUE KEY `idx_reward_event_credit_source` (`source_id`, `account_id`, `slot`),
     KEY `idx_reward_event_credit_slot` (`slot`, `account_id`),
     KEY `idx_reward_event_credit_account` (`account_id`, `slot`)
