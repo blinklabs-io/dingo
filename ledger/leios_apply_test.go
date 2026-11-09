@@ -1206,7 +1206,7 @@ func TestEnsureReferencedEndorserBlocksRequiresCertifiedMusashiClosure(
 			) ([]cbor.RawMessage, bool) {
 				return nil, available && bytes.Equal(hash, ebHash.Bytes())
 			},
-			// A zero wait disables best-effort announcement waiting. It must
+			// A zero wait disables the near-head diffusion wait. It must
 			// not disable the certified-closure consistency check.
 			EndorserBlockWaitSlots: 0,
 		},

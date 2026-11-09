@@ -1074,7 +1074,7 @@ type LedgerStateConfig struct {
 	// block that block has already been certified, so the certify-by deadline
 	// is the bound for when it is actually available to fetch) rather than a
 	// hardcoded duration; the ledger converts it to wall-clock using the
-	// Shelley slot length. Zero disables best-effort announcement waiting, but
+	// Shelley slot length. Zero disables the near-head diffusion wait, but
 	// does not permit a certifying ranking block to commit without its
 	// certified closure.
 	EndorserBlockWaitSlots uint64
