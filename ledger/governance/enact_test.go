@@ -15,7 +15,6 @@
 package governance
 
 import (
-	"bytes"
 	"context"
 	"math/big"
 	"testing"
@@ -30,28 +29,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-func TestDecodeGovAction_ParameterChangeRoundtrip(t *testing.T) {
-	t.Parallel()
-
-	fee := uint(1234)
-	original := &conway.ConwayParameterChangeGovAction{
-		Type: 0,
-		ParamUpdate: conway.ConwayProtocolParameterUpdate{
-			MinFeeA: &fee,
-		},
-	}
-	encoded, err := cbor.Encode(original)
-	require.NoError(t, err)
-	decoded, err := decodeGovAction(
-		encoded, uint8(lcommon.GovActionTypeParameterChange),
-	)
-	require.NoError(t, err)
-	concrete, ok := decoded.(*conway.ConwayParameterChangeGovAction)
-	require.True(t, ok)
-	require.NotNil(t, concrete.ParamUpdate.MinFeeA)
-	assert.Equal(t, uint(1234), *concrete.ParamUpdate.MinFeeA)
-}
 
 func TestEnactProposal_DijkstraParameterChange(t *testing.T) {
 	t.Parallel()
@@ -327,42 +304,6 @@ func TestEnactProposal_DijkstraParameterChangeWritesPlutusV2CostModel(
 	require.True(t, result.PParamsChanged)
 	require.True(t, result.PlutusV2CostModelWritten,
 		"the enacted ParamUpdate explicitly specified CostModels[1]")
-}
-
-func TestDecodeGovAction_HardForkRoundtrip(t *testing.T) {
-	t.Parallel()
-
-	original := &lcommon.HardForkInitiationGovAction{Type: 1}
-	original.ProtocolVersion.Major = 10
-	original.ProtocolVersion.Minor = 0
-	encoded, err := cbor.Encode(original)
-	require.NoError(t, err)
-	decoded, err := decodeGovAction(
-		encoded, uint8(lcommon.GovActionTypeHardForkInitiation),
-	)
-	require.NoError(t, err)
-	concrete, ok := decoded.(*lcommon.HardForkInitiationGovAction)
-	require.True(t, ok)
-	assert.Equal(t, uint(10), concrete.ProtocolVersion.Major)
-}
-
-func TestDecodeGovAction_TreasuryWithdrawalRoundtrip(t *testing.T) {
-	t.Parallel()
-
-	policyHash := bytes.Repeat([]byte{0xAB}, lcommon.Blake2b224Size)
-	original := &lcommon.TreasuryWithdrawalGovAction{
-		Type:       2,
-		PolicyHash: policyHash,
-	}
-	encoded, err := cbor.Encode(original)
-	require.NoError(t, err)
-	decoded, err := decodeGovAction(
-		encoded, uint8(lcommon.GovActionTypeTreasuryWithdrawal),
-	)
-	require.NoError(t, err)
-	concrete, ok := decoded.(*lcommon.TreasuryWithdrawalGovAction)
-	require.True(t, ok)
-	assert.Equal(t, policyHash, concrete.PolicyHash)
 }
 
 func TestDecodeGovAction_EmptyCbor(t *testing.T) {

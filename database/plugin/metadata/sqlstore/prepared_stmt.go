@@ -133,6 +133,15 @@ var hotStatements = func() []string {
 	return queries
 }()
 
+// hotStatementSet is hotStatements as a set, for borrowStmt's membership test.
+var hotStatementSet = func() map[string]struct{} {
+	set := make(map[string]struct{}, len(hotStatements))
+	for _, query := range hotStatements {
+		set[query] = struct{}{}
+	}
+	return set
+}()
+
 // cacheableForDialect reports whether query is safe to serve from the
 // hot-statement cache when running against dialect. A RETURNING-id query on
 // MySQL is unsafe: dialectQueryer.
@@ -213,6 +222,9 @@ func isSQLiteBatchQuery(query string) bool {
 // registry before this point, so this only degrades a deliberately
 // schema-less test harness, never a real deployment.
 func (s *Store) prepareHotStatements(ctx context.Context) {
+	if s.lazyHotStatements {
+		return
+	}
 	fresh := s.buildHotStatements(ctx)
 	s.stmtMu.Lock()
 	s.stmts = fresh
@@ -259,6 +271,110 @@ func (s *Store) buildHotStatements(ctx context.Context) map[string]*sql.Stmt {
 		prepared[query] = stmt
 	}
 	return prepared
+}
+
+// Config.LazyHotStatements replaces the eager pass with borrowStmt's
+// on-demand preparation, which keeps the same cache and the same retirement
+// rules. The deadlock argument above is met differently: a lazy prepare runs
+// only when the caller's queryer is the write pool itself, never a
+// transaction, so it never waits on a connection its own caller holds. A
+// miss on any other queryer takes the uncached path, as after Reset.
+// A failed lazy prepare is not returned: like the eager pass it is logged and
+// remembered, so the query takes the uncached path, which reports any real SQL
+// error to the caller, and the statement is not re-prepared on every call.
+// Reset, RestoreFrom and Close forget the failures and stop further lazy
+// preparation, matching the eager cache, which they empty without refilling.
+
+// borrowStmt is borrowCachedStmt that, for a store with lazy hot statements,
+// first prepares query on demand when db is the write pool.
+func (s *Store) borrowStmt(
+	ctx context.Context,
+	db queryer,
+	query string,
+) (*sql.Stmt, func(), bool) {
+	if stmt, release, ok := s.borrowCachedStmt(query); ok {
+		return stmt, release, true
+	}
+	if !s.lazyHotStatements || !s.prepareLazily(ctx, db, query) {
+		return nil, func() {}, false
+	}
+	return s.borrowCachedStmt(query)
+}
+
+// prepareLazily prepares and caches query if it is a cacheable hot statement
+// and db resolves to the write pool. It reports whether the cache may now
+// hold the statement. Preparation runs outside stmtMu so a prepare waiting on
+// a pool connection never blocks other borrowers; two goroutines racing on
+// the same query both prepare and the loser closes its copy.
+func (s *Store) prepareLazily(
+	ctx context.Context,
+	db queryer,
+	query string,
+) bool {
+	if _, hot := hotStatementSet[query]; !hot ||
+		!cacheableForDialect(s.dialect.Name(), query) ||
+		unwrapQueryer(db) != queryer(s.writeDB) {
+		return false
+	}
+	s.stmtMu.Lock()
+	_, failed := s.stmtFailed[query]
+	invalid := s.stmtsInvalidated
+	s.stmtMu.Unlock()
+	if failed || invalid || s.closed.Load() {
+		return false
+	}
+	stmt, err := s.instrumentedQueryer(s.writeDB).
+		PrepareContext(ctx, query) //nolint:sqlclosecheck
+	s.stmtMu.Lock()
+	if err != nil {
+		if ctx.Err() == nil {
+			if s.stmtFailed == nil {
+				s.stmtFailed = make(map[string]struct{})
+			}
+			s.stmtFailed[query] = struct{}{}
+		}
+		s.stmtMu.Unlock()
+		if ctx.Err() == nil {
+			s.logger.Warn(
+				"sqlstore: skipping prepared-statement cache entry",
+				"dialect", s.dialect.Name(),
+				"error", err,
+			)
+		}
+		return false
+	}
+	if s.stmtsInvalidated || s.closed.Load() {
+		s.stmtMu.Unlock()
+		_ = stmt.Close() //nolint:sqlclosecheck // discarded, never installed
+		return false
+	}
+	if _, exists := s.stmts[query]; exists {
+		s.stmtMu.Unlock()
+		_ = stmt.Close()
+		return true
+	}
+	if s.stmts == nil {
+		s.stmts = make(map[string]*sql.Stmt)
+	}
+	s.stmts[query] = stmt
+	s.stmtMu.Unlock()
+	return true
+}
+
+// unwrapQueryer strips the wrappers stmtForQueryer also sees through.
+func unwrapQueryer(db queryer) queryer {
+	for {
+		switch v := db.(type) {
+		case dialectQueryer:
+			db = v.queryer
+		case countingQueryer:
+			db = v.queryer
+		case barrierQueryer:
+			db = v.queryer
+		default:
+			return db
+		}
+	}
 }
 
 // borrowCachedStmt returns the statement prepareHotStatements installed for
@@ -338,6 +454,8 @@ func (s *Store) closePreparedStatements() {
 	s.stmtMu.Lock()
 	idle := s.retireStatementsLocked(s.stmts)
 	s.stmts = nil
+	s.stmtFailed = nil
+	s.stmtsInvalidated = true
 	s.stmtMu.Unlock()
 	for _, stmt := range idle {
 		_ = stmt.Close()
@@ -554,7 +672,7 @@ func (s *Store) queryRowCached(
 	// A failed barrier is recorded on the overlay and fails the batch at
 	// FlushBatch; a *sql.Row cannot carry it.
 	_ = overlayReadBarrier(ctx, db, query)
-	if cached, release, ok := s.borrowCachedStmt(query); ok {
+	if cached, release, ok := s.borrowStmt(ctx, db, query); ok {
 		// Counted and timed here, not by countingQueryer: stmtForQueryer
 		// resolves straight to a *sql.Stmt, bypassing db (and any
 		// countingQueryer wrapping it) entirely -- see metrics.go's doc
@@ -597,7 +715,7 @@ func (s *Store) execCached(
 	if err := overlayReadBarrier(ctx, db, query); err != nil {
 		return nil, err
 	}
-	if cached, release, ok := s.borrowCachedStmt(query); ok {
+	if cached, release, ok := s.borrowStmt(ctx, db, query); ok {
 		op, name := classifySQLStatement(query)
 		if s.sqlOperations != nil {
 			s.sqlOperations.WithLabelValues(op).Inc()
@@ -683,7 +801,7 @@ func (s *Store) queryRowsCached(
 	if err := overlayReadBarrier(ctx, db, query); err != nil {
 		return nil, err
 	}
-	if cached, release, ok := s.borrowCachedStmt(query); ok {
+	if cached, release, ok := s.borrowStmt(ctx, db, query); ok {
 		op, name := classifySQLStatement(query)
 		if s.sqlOperations != nil {
 			s.sqlOperations.WithLabelValues(op).Inc()

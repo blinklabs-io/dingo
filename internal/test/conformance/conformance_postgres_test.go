@@ -832,6 +832,8 @@ func TestNewDingoPostgresStateManagerBadCredentialsFails(t *testing.T) {
 		storagetest.EscapeLibpqValue(database),
 	)
 
+	storagetest.SkipIfPostgresIgnoresPassword(t, dsn)
+
 	m, err := NewDingoPostgresStateManager(dsn)
 	require.Error(t, err)
 	require.Nil(t, m)

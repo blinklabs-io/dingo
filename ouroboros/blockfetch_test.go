@@ -839,48 +839,12 @@ func smallSecurityParamCardanoConfig(
 	return cfg
 }
 
-// TestBlockfetchServerRequestRange_OversizedRangeRejectedWithNoBlocks is
-// review comment feedback on original fix: enforcing the block-count
-// bound only in blockfetchServerSendBatch, after StartBatch, made an
-// over-cap range unrecoverable for an honest peer -- the transport drops
-// with no protocol-level signal, and retrying the identical range repeats
-// the same drop forever. Both endpoints are already resolved against the
-// chain before StartBatch, so the bound belongs on the NoBlocks path with
-// the other invalid-range rejections instead. This drives a real
-// MsgRequestRange whose block count exceeds the (test-configured, small-K)
-// cap over the actual wire and asserts a clean single NoBlocks answer, not
-// a dropped connection.
-func TestBlockfetchServerRequestRange_OversizedRangeRejectedWithNoBlocks(
-	t *testing.T,
-) {
-	// k=1 forces blockfetchMaxBlocksFloor (not 3*k) to be the binding
-	// bound, keeping the fixture's block count in the low thousands rather
-	// than needing a k large enough for 3*k itself to matter.
-	maxBlocks := maxBlockFetchBlocksForSecurityParam(1)
-	blockCount := maxBlocks + 1
-	slots := make([]uint64, blockCount)
-	for i := range slots {
-		slots[i] = uint64(i + 1)
-	}
-	f := newBlockfetchRangeFixtureWithSlotsAndConfig(
-		t,
-		slots,
-		smallSecurityParamCardanoConfig(t, 1),
-	)
-
-	f.requestRange(t, f.point(0), f.point(blockCount-1))
-
-	assert.Equal(
-		t,
-		[]byte{blockfetch.MessageTypeNoBlocks},
-		f.readMessageTypes(t, 1),
-		"a range whose block count exceeds the cap must be answered with a clean NoBlocks, not a dropped connection",
-	)
-}
-
-// The oversized-range rejection must feed the same stuck-peer valve every
-// other invalid-range rejection in blockfetchServerRequestRange feeds,
-// mirroring TestBlockfetchServerRequestRange_RepeatedBadEndPointReachesCloseThreshold.
+// An over-cap range must be answered with a clean NoBlocks before StartBatch
+// rather than a dropped connection: an honest peer retrying the identical
+// range would otherwise hit the same drop forever. The rejection must also
+// feed the same stuck-peer valve every other invalid-range rejection in
+// blockfetchServerRequestRange feeds, mirroring
+// TestBlockfetchServerRequestRange_RepeatedBadEndPointReachesCloseThreshold.
 func TestBlockfetchServerRequestRange_RepeatedOversizedRangeReachesCloseThreshold(
 	t *testing.T,
 ) {
