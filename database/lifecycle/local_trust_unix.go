@@ -23,8 +23,6 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
-
-	"github.com/blinklabs-io/dingo/internal/securefs"
 )
 
 func requirePrivateSnapshotParent(parent string) error {
@@ -142,7 +140,7 @@ func validateSnapshotAncestorChain(path string) error {
 			}
 		}
 		if info.IsDir() {
-			if unsafelyWritableSnapshotAncestor(info) {
+			if info.Mode().Perm()&0o022 != 0 && info.Mode()&os.ModeSticky == 0 {
 				return fmt.Errorf(
 					"snapshot path ancestor %q is writable by group or other without the sticky bit",
 					current,
@@ -165,15 +163,4 @@ func requireTrustedSnapshotOwner(path string, info fs.FileInfo) error {
 		return fmt.Errorf("%q is owned by UID %d", path, stat.Uid)
 	}
 	return nil
-}
-
-// unsafelyWritableSnapshotAncestor reports whether a directory lets another
-// user replace its entries, using the rule in securefs.UnsafelyWritableAncestor.
-// A directory whose group cannot be read is treated as unsafe.
-func unsafelyWritableSnapshotAncestor(info fs.FileInfo) bool {
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		return info.Mode().Perm()&0o022 != 0 && info.Mode()&os.ModeSticky == 0
-	}
-	return securefs.UnsafelyWritableAncestor(info.Mode(), stat.Gid)
 }

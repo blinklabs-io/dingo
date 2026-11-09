@@ -17,8 +17,6 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
-
-	"github.com/blinklabs-io/dingo/internal/securefs"
 )
 
 func canonicalBootstrapParent(path string) (string, error) {
@@ -128,7 +126,7 @@ func validateBootstrapAncestorChain(
 				"bootstrap parent ancestor %q is owned by UID %d", current, stat.Uid,
 			)
 		}
-		if securefs.UnsafelyWritableAncestor(info.Mode(), stat.Gid) {
+		if info.Mode().Perm()&0o022 != 0 && info.Mode()&os.ModeSticky == 0 {
 			return fmt.Errorf(
 				"bootstrap parent ancestor %q is writable by group or other without the sticky bit",
 				current,

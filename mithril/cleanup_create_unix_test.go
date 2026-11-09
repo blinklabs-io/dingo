@@ -125,72 +125,32 @@ func TestBootstrapParentAcceptsTrustedStickyAncestor(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func TestBootstrapParentFSGroupVolumeRoot(t *testing.T) {
+// A root-owned setgid directory group-writable by a group the process belongs
+// to is still shared: every other member of that group can rename its
+// entries, and setgid gives none of the sticky bit's protection.
+func TestBootstrapParentRejectsSharedGroupDirectory(t *testing.T) {
 	t.Parallel()
 	const currentUID = 1000
 	//nolint:gosec // Unix kernel GIDs are uint32 values.
 	egid := uint32(os.Getegid())
-	setgid := os.ModeSetgid
-	for _, tc := range []struct {
-		name    string
-		mode    fs.FileMode
-		gid     uint32
-		wantErr bool
-	}{
-		{name: "fsGroup root", mode: setgid | 0o770, gid: egid},
-		{
-			name: "world writable", mode: setgid | 0o777, gid: egid,
-			wantErr: true,
-		},
-		{
-			name: "foreign group", mode: setgid | 0o770,
-			gid: foreignBootstrapGID(t), wantErr: true,
-		},
-		{name: "no setgid", mode: 0o770, gid: egid, wantErr: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			err := validateBootstrapAncestorChain(
-				"/data/private",
-				currentUID,
-				bootstrapAncestorLookup(t, map[string]bootstrapAncestorInfo{
-					"/": {
-						name: "/", mode: os.ModeDir | 0o755, uid: 0,
-					},
-					"/data": {
-						name: "data", mode: os.ModeDir | tc.mode,
-						uid: 0, gid: tc.gid,
-					},
-					"/data/private": {
-						name: "private", mode: os.ModeDir | 0o700,
-						uid: currentUID, gid: tc.gid,
-					},
-				}),
-			)
-			if tc.wantErr {
-				require.ErrorContains(
-					t, err, `bootstrap parent ancestor "/data" is writable`,
-				)
-				return
-			}
-			require.NoError(t, err)
-		})
-	}
-}
-
-// foreignBootstrapGID returns a GID that is neither the process's effective
-// GID nor one of its supplementary groups.
-func foreignBootstrapGID(t *testing.T) uint32 {
-	t.Helper()
-	groups, err := os.Getgroups()
-	require.NoError(t, err)
-	member := map[int]bool{os.Getegid(): true}
-	for _, g := range groups {
-		member[g] = true
-	}
-	for gid := 60000; ; gid++ {
-		if !member[gid] {
-			return uint32(gid) //nolint:gosec // Small positive constant range.
-		}
-	}
+	err := validateBootstrapAncestorChain(
+		"/shared/private",
+		currentUID,
+		bootstrapAncestorLookup(t, map[string]bootstrapAncestorInfo{
+			"/": {
+				name: "/", mode: os.ModeDir | 0o755, uid: 0,
+			},
+			"/shared": {
+				name: "shared", mode: os.ModeDir | os.ModeSetgid | 0o770,
+				uid: 0, gid: egid,
+			},
+			"/shared/private": {
+				name: "private", mode: os.ModeDir | 0o700,
+				uid: currentUID, gid: egid,
+			},
+		}),
+	)
+	require.ErrorContains(
+		t, err, `bootstrap parent ancestor "/shared" is writable`,
+	)
 }

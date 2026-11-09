@@ -1785,8 +1785,8 @@ Administrator ACE when Administrators owns the file). Cloud snapshot creation,
 manifest inspection, and restore require this trust key so a writer to the
 bucket cannot replace both the payloads and their declared sizes or digests.
 Local snapshot creation rejects a group- or other-writable parent without the
-sticky bit (apart from the `fsGroup` volume root described below) and keeps
-the newly created directory open while it writes, hashes, and publishes the backup. The metadata backup is staged in a private directory
+sticky bit and keeps the newly created directory open while it writes, hashes,
+and publishes the backup. The metadata backup is staged in a private directory
 beside the snapshot, never in the system temp directory, and moved into the open
 directory by handle. This prevents a directory replacement from redirecting
 later writes; `Snapshot` then returns `ErrSnapshotDirectoryReplaced`, empties
@@ -1795,11 +1795,7 @@ local restore is accepted on Unix only when the snapshot directory and its fixed
 files are owned by the current user or root, are not group- or other-writable,
 and every lexical and symlink-resolved directory ancestor, and every symlink in
 the path, is owned by the current user or root, with the sticky bit required on
-any ancestor writable by group or other. The one exception is a Kubernetes
-`fsGroup` volume root: a setgid directory whose group is the process's effective
-or a supplementary GID may be group-writable without the sticky bit, but never
-other-writable.
-Windows local restores require the
+any ancestor writable by group or other. Windows local restores require the
 trust key. A restore reads the manifest first and, under a trust key, refuses
 one whose tag is missing or wrong (`ErrManifestUnauthenticated`) or that
 declares no digests. `FormatVersion` 2 adds `id`, the snapshot ID (the snapshot

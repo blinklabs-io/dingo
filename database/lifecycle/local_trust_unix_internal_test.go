@@ -18,13 +18,11 @@ package lifecycle
 
 import (
 	"context"
-	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
-	"syscall"
 	"testing"
-	"time"
 
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/require"
@@ -247,94 +245,31 @@ func TestSnapshotDirectoryReplacedLeavesReplacementUntouched(t *testing.T) {
 	require.Empty(t, movedEntries, "opened snapshot directory was not emptied")
 }
 
-func TestSnapshotAncestorFSGroupVolumeRoot(t *testing.T) {
+// A setgid directory group-writable by the process's own effective or
+// supplementary group is still shared: every other member of that group can
+// rename its entries, and setgid gives none of the sticky bit's protection.
+func TestSnapshotAncestorRejectsSharedGroupDirectory(t *testing.T) {
 	t.Parallel()
-	egid := os.Getegid()
-	supplementary := -1
+	gids := []int{os.Getegid()}
 	groups, err := os.Getgroups()
 	require.NoError(t, err)
 	for _, g := range groups {
-		if g != egid {
-			supplementary = g
+		if g != gids[0] {
+			gids = append(gids, g)
 			break
 		}
 	}
-	for _, tc := range []struct {
-		name    string
-		mode    os.FileMode
-		gid     int
-		wantErr bool
-	}{
-		{name: "fsGroup root", mode: os.ModeSetgid | 0o770, gid: egid},
-		{
-			name: "supplementary fsGroup root", mode: os.ModeSetgid | 0o770,
-			gid: supplementary,
-		},
-		{
-			name: "world writable", mode: os.ModeSetgid | 0o777, gid: egid,
-			wantErr: true,
-		},
-		{name: "no setgid", mode: 0o770, gid: egid, wantErr: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
+	for _, gid := range gids {
+		t.Run(strconv.Itoa(gid), func(t *testing.T) {
 			t.Parallel()
-			if tc.gid < 0 {
-				t.Skip("process has no supplementary group besides its egid")
-			}
-			volume := filepath.Join(privateSnapshotBase(t), "volume")
-			require.NoError(t, os.Mkdir(volume, 0o700))
-			require.NoError(t, os.Chown(volume, -1, tc.gid))
-			require.NoError(t, os.Chmod(volume, tc.mode))
-			err := validateSnapshotAncestorChain(volume)
-			if tc.wantErr {
-				require.ErrorContains(
-					t, err, "writable by group or other without the sticky bit",
-				)
-				return
-			}
-			require.NoError(t, err)
+			shared := filepath.Join(privateSnapshotBase(t), "shared")
+			require.NoError(t, os.Mkdir(shared, 0o700))
+			require.NoError(t, os.Chown(shared, -1, gid))
+			require.NoError(t, os.Chmod(shared, os.ModeSetgid|0o770))
+			err := validateSnapshotAncestorChain(shared)
+			require.ErrorContains(
+				t, err, "writable by group or other without the sticky bit",
+			)
 		})
-	}
-}
-
-// A non-root process cannot chown a directory to a group it is not in, so the
-// foreign-group case uses a synthetic FileInfo.
-func TestSnapshotAncestorFSGroupForeignGroup(t *testing.T) {
-	t.Parallel()
-	info := snapshotAncestorInfo{
-		mode: os.ModeDir | os.ModeSetgid | 0o770,
-		gid:  foreignGID(t),
-	}
-	require.True(t, unsafelyWritableSnapshotAncestor(info))
-	info.gid = uint32(os.Getegid()) //nolint:gosec // Unix GIDs are uint32.
-	require.False(t, unsafelyWritableSnapshotAncestor(info))
-}
-
-type snapshotAncestorInfo struct {
-	mode fs.FileMode
-	gid  uint32
-}
-
-func (i snapshotAncestorInfo) Name() string       { return "volume" }
-func (i snapshotAncestorInfo) Size() int64        { return 0 }
-func (i snapshotAncestorInfo) Mode() fs.FileMode  { return i.mode }
-func (i snapshotAncestorInfo) ModTime() time.Time { return time.Time{} }
-func (i snapshotAncestorInfo) IsDir() bool        { return i.mode.IsDir() }
-func (i snapshotAncestorInfo) Sys() any           { return &syscall.Stat_t{Gid: i.gid} }
-
-// foreignGID returns a GID that is neither the process's effective GID nor
-// one of its supplementary groups.
-func foreignGID(t *testing.T) uint32 {
-	t.Helper()
-	groups, err := os.Getgroups()
-	require.NoError(t, err)
-	member := map[int]bool{os.Getegid(): true}
-	for _, g := range groups {
-		member[g] = true
-	}
-	for gid := 60000; ; gid++ {
-		if !member[gid] {
-			return uint32(gid) //nolint:gosec // Small positive constant range.
-		}
 	}
 }
