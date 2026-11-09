@@ -16,6 +16,8 @@ package ledger
 
 import (
 	"errors"
+	"io"
+	"log/slog"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -86,4 +88,43 @@ func TestPinHeaderVerdictReturnsVerificationFailure(t *testing.T) {
 	_, release, err = f.ls.pinHeaderVerdict(stale, nil)
 	require.NoError(t, err)
 	require.Nil(t, release, "no fresh verdict can replace an expired one")
+}
+
+// A header whose expired verdict fails verification again is rejected the way
+// a first verification failure is: the error reaches the handler and its
+// connection is recycled. A deferral on the second verification only withholds
+// the header.
+func TestPinChainsyncHeaderVerdictRejectsVerificationFailure(t *testing.T) {
+	t.Parallel()
+	f := newForkPathFreshnessFixture(t, 0)
+	bus := newTestEventBus(t, nil)
+	t.Cleanup(bus.Stop)
+	f.ls.config.Logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
+	f.ls.config.EventBus = bus
+	stale := f.ls.CurrentHeaderCryptoVerificationGeneration()
+	f.ls.publishSnapshotsLocked()
+	e := ChainsyncEvent{ConnectionId: testRecycleConnId()}
+
+	invalid := errors.New("invalid header")
+	pending := &pendingPublishes{}
+	_, release, err := f.ls.pinChainsyncHeaderVerdict(
+		e, pending, stale, func() (uint64, error) { return 0, invalid },
+	)
+	require.ErrorIs(t, err, invalid)
+	require.Nil(t, release)
+	require.Len(t, pending.events, 1, "the connection must be recycled")
+	recycle, ok := pending.events[0].evt.Data.(ConnectionRecycleRequestedEvent)
+	require.True(t, ok)
+	require.Equal(t, e.ConnectionId, recycle.ConnectionId)
+	require.Equal(t, "header_verification_failure", recycle.Reason)
+
+	pending = &pendingPublishes{}
+	_, release, err = f.ls.pinChainsyncHeaderVerdict(
+		e, pending, stale, func() (uint64, error) {
+			return 0, errHeaderVerificationContextChanged
+		},
+	)
+	require.NoError(t, err, "a deferred verification withholds the header")
+	require.Nil(t, release)
+	require.Empty(t, pending.events)
 }

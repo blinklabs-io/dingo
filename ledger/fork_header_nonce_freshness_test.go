@@ -533,15 +533,46 @@ func TestPeerForkOpCertCountersRetriesChangedConsensusContext(t *testing.T) {
 	require.True(t, found)
 	prefix, generation, err = f2.ls.peerForkOpCertPrefix(key, ancestor)
 	require.NoError(t, err)
+	require.NoError(t, f2.ls.chain.RollbackUnbounded(
+		t.Context(), ocommon.NewPointOrigin(),
+	))
+	require.False(t, f2.ls.chain.HoldsPoint(t.Context(), ancestor))
 	f2.ls.publishSnapshotsLocked()
 	err = f2.ls.commitPeerForkOpCertCounters(
-		t.Context(), key, prefix,
-		ocommon.NewPoint(ancestor.Slot, bytes.Repeat([]byte{0xee}, 32)),
-		target, generation, counters,
+		t.Context(), key, prefix, ancestor, target, generation, counters,
 	)
 	require.ErrorIs(t, err, errHeaderVerificationDeferred)
 	require.True(t, IsHeaderVerificationContextTransient(err),
 		"a tip move that drops the ancestor must retry the header")
+}
+
+// A context that ends while the commit checks whether the counters' ancestor
+// is still on the local chain surfaces as the context's error, not as a
+// context change that retries the header.
+func TestPeerForkOpCertCountersCancelledDuringAncestorMembership(
+	t *testing.T,
+) {
+	t.Parallel()
+	connID := ouroboros.ConnectionId{}
+	key := connIdKey(connID)
+	f := newForkPathFreshnessFixture(t, 1)
+	target := f.headers[0]
+	ancestor, _, found, err := f.ls.peerHeaderForkPath(connID, target)
+	require.NoError(t, err)
+	require.True(t, found)
+	prefix, generation, err := f.ls.peerForkOpCertPrefix(key, ancestor)
+	require.NoError(t, err)
+	f.ls.publishSnapshotsLocked()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	err = f.ls.commitPeerForkOpCertCounters(
+		ctx, key, prefix, ancestor, target, generation,
+		map[lcommon.PoolKeyHash]opCertCounterSnapshot{},
+	)
+	require.ErrorIs(t, err, context.Canceled)
+	require.False(t, IsHeaderVerificationContextTransient(err),
+		"a cancelled check must stop, not retry the header")
 }
 
 // A context that ends while the walk checks whether an ancestor is on the

@@ -212,8 +212,16 @@ func (ls *LedgerState) commitPeerForkOpCertCounters(
 	counters map[lcommon.PoolKeyHash]opCertCounterSnapshot,
 ) error {
 	current, contextGeneration := ls.currentHeaderVerificationContext()
-	if !headerVerdictInContext(generation, contextGeneration, current) ||
-		(current != generation && !ls.peerForkAncestorOnChain(ctx, ancestor)) {
+	valid := headerVerdictInContext(generation, contextGeneration, current)
+	if valid && current != generation &&
+		!ls.peerForkAncestorOnChain(ctx, ancestor) {
+		// A cancelled membership read reports the ancestor absent.
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		valid = false
+	}
+	if !valid {
 		return fmt.Errorf(
 			"%w: candidate opcert state changed before commit",
 			errHeaderVerificationContextChanged,

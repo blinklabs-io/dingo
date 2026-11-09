@@ -4802,6 +4802,65 @@ func queuePeerHeaderHistoryInvalidation(
 	pending.addAfterUnlock(e.InvalidatePeerHeaderHistory)
 }
 
+// pinChainsyncHeaderVerdict pins generation for admitting e, verifying the
+// header again when the verdict expired first. It returns a nil release and a
+// nil error when the header is withheld, and an error, after queueing the
+// connection for recycling, when the header fails verification again: a
+// verdict that expired says nothing about the header, but a fresh failure is
+// the same rejection as the first verification's.
+func (ls *LedgerState) pinChainsyncHeaderVerdict(
+	e ChainsyncEvent,
+	pending *pendingPublishes,
+	generation uint64,
+	reverify func() (uint64, error),
+) (uint64, func(), error) {
+	pinned, release, err := ls.pinHeaderVerdict(generation, reverify)
+	if err != nil && !IsHeaderVerificationDeferred(err) {
+		return 0, nil, ls.rejectChainsyncHeaderVerification(e, pending, err)
+	}
+	if release == nil {
+		ls.config.Logger.Debug(
+			"withholding chainsync header after producer authorization changed before admission",
+			"component", "ledger",
+			"slot", e.Point.Slot,
+			"hash", hex.EncodeToString(e.Point.Hash),
+			"error", err,
+		)
+		return generation, nil, nil
+	}
+	return pinned, release, nil
+}
+
+// rejectChainsyncHeaderVerification queues a recycle of the connection that
+// sent a header failing crypto verification and returns the failure.
+func (ls *LedgerState) rejectChainsyncHeaderVerification(
+	e ChainsyncEvent,
+	pending *pendingPublishes,
+	err error,
+) error {
+	if ls.config.EventBus != nil {
+		ls.config.Logger.Warn(
+			"recycling connection after header verification failure",
+			"component", "ledger",
+			"connection_id", e.ConnectionId.String(),
+			"slot", e.Point.Slot,
+			"hash", hex.EncodeToString(e.Point.Hash),
+		)
+		pending.add(
+			ls.config.EventBus,
+			ConnectionRecycleRequestedEventType,
+			event.NewEvent(
+				ConnectionRecycleRequestedEventType,
+				ConnectionRecycleRequestedEvent{
+					ConnectionId: e.ConnectionId,
+					Reason:       "header_verification_failure",
+				},
+			),
+		)
+	}
+	return fmt.Errorf("block header crypto verification failed: %w", err)
+}
+
 func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 	e ChainsyncEvent,
 	pending *pendingPublishes,
@@ -4882,32 +4941,7 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 			producerAuthorizationGeneration = 0
 			clearChainsyncHeaderAuthorization(&e)
 		default:
-			{
-				if ls.config.EventBus != nil {
-					ls.config.Logger.Warn(
-						"recycling connection after header verification failure",
-						"component", "ledger",
-						"connection_id", e.ConnectionId.String(),
-						"slot", e.Point.Slot,
-						"hash", hex.EncodeToString(e.Point.Hash),
-					)
-					pending.add(
-						ls.config.EventBus,
-						ConnectionRecycleRequestedEventType,
-						event.NewEvent(
-							ConnectionRecycleRequestedEventType,
-							ConnectionRecycleRequestedEvent{
-								ConnectionId: e.ConnectionId,
-								Reason:       "header_verification_failure",
-							},
-						),
-					)
-				}
-				return fmt.Errorf(
-					"block header crypto verification failed: %w",
-					err,
-				)
-			}
+			return ls.rejectChainsyncHeaderVerification(e, pending, err)
 		}
 	}
 	var releaseVerificationGeneration func()
@@ -4921,18 +4955,16 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 				)
 			}
 		}
-		pinnedGeneration, release, pinErr := ls.pinHeaderVerdict(
+		pinnedGeneration, release, err := ls.pinChainsyncHeaderVerdict(
+			e,
+			pending,
 			headerCryptoVerificationGeneration,
 			reverify,
 		)
+		if err != nil {
+			return err
+		}
 		if release == nil {
-			ls.config.Logger.Debug(
-				"withholding chainsync header after producer authorization changed before admission",
-				"component", "ledger",
-				"slot", e.Point.Slot,
-				"hash", hex.EncodeToString(e.Point.Hash),
-				"error", pinErr,
-			)
 			return nil
 		}
 		releaseVerificationGeneration = release
