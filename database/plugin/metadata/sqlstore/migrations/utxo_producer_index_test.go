@@ -21,7 +21,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const producerIndexMigrationVersion = 57
+const producerIndexMigrationVersion = 58
 
 // TestUtxoProducerIndexUpgradePreservesOutputs upgrades a database holding
 // produced, spent, reference and collateral input, collateral-return and

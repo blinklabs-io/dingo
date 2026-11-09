@@ -24,7 +24,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const inputEdgeMigrationVersion = 56
+const inputEdgeMigrationVersion = 57
 
 // edgeDigest hashes every (output, naming transaction) edge as the
 // output's reference and the transaction's hash, read through whichever

@@ -28,7 +28,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const spenderMigrationVersion = 55
+const spenderMigrationVersion = 56
 
 func spenderHash(b byte) []byte {
 	hash := make([]byte, 32)

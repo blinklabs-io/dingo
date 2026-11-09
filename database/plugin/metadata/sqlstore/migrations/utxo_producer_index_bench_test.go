@@ -29,8 +29,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestUtxoProducerIndexMigrationScale times the version-57 upgrade over a
-// version-56 database with DINGO_MIGRATION_BENCH_ROWS utxo rows (a tenth of
+// TestUtxoProducerIndexMigrationScale times the version-58 upgrade over a
+// version-57 database with DINGO_MIGRATION_BENCH_ROWS utxo rows (a tenth of
 // them imported, the rest produced and four in five spent) and reports time,
 // database and WAL size and peak resident memory. It only runs when the
 // variable is set.

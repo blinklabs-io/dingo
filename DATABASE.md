@@ -197,7 +197,7 @@ them partial; the version-50 migration only drops them while that rebuild is
 pending. MySQL has no partial indexes and keeps the full indexes its foreign
 keys require.
 
-Schema version 55 stores the spender of an output as the spender's
+Schema version 56 stores the spender of an output as the spender's
 `transaction.id` in `utxo.spent_by_tx_id` instead of its 32-byte hash in
 `utxo.spent_at_tx_id`. Transaction ids grow with apply order, so the
 partial index `idx_utxo_spent_by_tx_id` is appended to rather than updated at
@@ -219,7 +219,7 @@ Inserts that name a spender hash (imports and consumed-input recovery) resolve
 it to the id in the statement, after checking that the hash names an existing
 `transaction` row, so an unknown spender fails the write.
 
-Schema version 56 keys the collateral and reference-input edges by the naming
+Schema version 57 keys the collateral and reference-input edges by the naming
 transaction's id: `utxo_collateral_edge` and `utxo_reference_edge` replace the
 hash-keyed `utxo_collateral_input` and `utxo_reference_input`, which the
 migration copies (dropping an edge whose transaction has no row) and then
@@ -228,7 +228,7 @@ which were a lossy single-owner copy of the same relation and are no longer
 written or read; their columns, foreign keys and now-empty partial indexes stay
 for the same reason as the legacy spender column.
 
-Schema version 57 identifies an output on SQLite by its producer and output
+Schema version 58 identifies an output on SQLite by its producer and output
 index. `utxo.producer_tx_id` is a virtual generated column,
 `COALESCE(transaction_id, collateral_return_for_tx_id)`: a collateral return
 takes the output-index space of its transaction, and a transaction that fails
@@ -259,7 +259,7 @@ prepared at start and served from the statement cache. No unique index spans a
 produced output and an imported row of the same output, so inserts, imports
 and the overlay look for the other identity first and treat a hit as the
 conflict; the producer then hydrates the imported row. PostgreSQL and MySQL
-keep the full unique index and run the statements as written; migration 57 is
+keep the full unique index and run the statements as written; migration 58 is
 empty for them.
 
 `"transaction".id` is `AUTOINCREMENT` on SQLite (an identity sequence on
@@ -275,13 +275,13 @@ transaction.
 An insert of an output that is already stored, under either identity, returns
 `types.ErrUtxoConflict` on every dialect: SQLite from its probe or its unique
 violation, PostgreSQL and MySQL from the unique `(tx_id, output_idx)`
-violation. Migration 57 stops before its contract phase, naming up to five
+violation. Migration 58 stops before its contract phase, naming up to five
 `(producer_tx_id, output_idx)` pairs, when two outputs share a producer and
-output index, since the unique index cannot be built. Migrations 55 and 56
+output index, since the unique index cannot be built. Migrations 56 and 57
 log, per batch, the spender hashes and edge hashes that have no `transaction`
 row: such an output keeps `deleted_slot` but has no spender, readers return it
 as spent with an empty spender hash, and Kupo's match iterator omits it.
-Migration 57 logs the count of outputs whose `tx_id` differs from their
+Migration 58 logs the count of outputs whose `tx_id` differs from their
 producer's `hash`; the producer index does not read `tx_id`, so such a row
 upgrades but is no longer found by hash.
 
@@ -644,14 +644,14 @@ cutover is a clean break, so users must remove the data directory (metadata and
 blob stores) and resync from genesis. This keeps startup deterministic and
 avoids carrying a large, fragile compatibility layer for obsolete schemas.
 Reference inputs are stored in the `utxo_reference_edge` association
-table (`utxo_reference_input` until schema version 56) so multiple transactions can reference one output; the legacy
+table (`utxo_reference_input` until schema version 57) so multiple transactions can reference one output; the legacy
 single-column marker is not used by the new store. `v1alpha1` also creates the
 `node_settings_gate` table described below: the schema is unreleased, so a new
 table belongs in the initial version rather than in a version of its own.
 
 Collateral inputs are stored in the `utxo_collateral_edge` association table,
 keyed by `(utxo_id, transaction_id)` (`utxo_collateral_input` keyed by hash until
-schema version 56). This is the authoritative many-to-many
+schema version 57). This is the authoritative many-to-many
 relationship: one output can be collateral for multiple transactions, and
 rollback removes only the association belonging to the rolled-back
 transaction. Migration `v14` copies non-NULL legacy
@@ -2921,7 +2921,7 @@ credited.
 The UTxO import itself
 (`ImportUtxos`/`ImportUtxosDeferredRewardLiveStakeRefresh`, used by every
 ledger-state import including this reconcile pass and the legacy reward-state
-repair) inserts with an `ON CONFLICT ... DO NOTHING` on both output identities (see schema version 57), since a
+repair) inserts with an `ON CONFLICT ... DO NOTHING` on both output identities (see schema version 58), since a
 catch-up or repair import routinely re-declares an output the local database
 already has a row for. On conflict, `hydrateImportedUtxo` also clears
 `deleted_slot`/`spent_by_tx_id` for that exact `(tx_id, output_idx)` reference
@@ -3099,7 +3099,7 @@ the stored blocks as they age past the window, as it does on any node.
 |---|---|---|---|
 | `transaction` | `id`, `hash`, `block_hash`, `slot`, `block_index`, `type`, `fee`, `collateral_fee`, `ttl`, `valid`, `metadata` | PK `id`; unique `hash`; indexes `block_hash`, `slot` | One row per applied transaction body. A Dijkstra batch therefore has one row for each sub-transaction body followed by one for the enclosing body; each row uses that body's hash and a consecutive block index in ledger application order. Produced child UTxOs are keyed by the child body's hash. `block_hash` and `slot` point to the blob block. `fee` is the declared body fee; `collateral_fee` is the collateral consumed into the fee pot by a phase-2-invalid transaction (collateral inputs minus collateral return) and zero for valid transactions. The epoch fee pot sums `fee` for valid rows plus `collateral_fee` for invalid rows. `metadata` is populated only in API mode. Mithril gap-closure writes the same body-level transaction row shape while deliberately skipping input consumption. |
 | `leios_transaction_context` | `transaction_id`, `slot` | PK and FK `transaction_id -> transaction.id` `ON DELETE CASCADE`; index `idx_leios_transaction_context_slot` on `slot` | Records the parent-ledger execution slot for Musashi closure transactions whose physical transaction slot remains the certifying ranking block's slot. The cascade removes context during rollback with its transaction. |
-| `utxo` | `id`, `transaction_id`, `collateral_return_for_tx_id`, `tx_id`, `output_idx`, `payment_key`, `credential_tag`, `staking_key`, `datum_hash`, `spent_at_tx_id` (legacy, NULL since schema version 55), `spent_by_tx_id`, `producer_tx_id` (SQLite virtual generated column `COALESCE(transaction_id, collateral_return_for_tx_id)`), `referenced_by_tx_id`, `collateral_by_tx_id`, `added_slot`, `deleted_slot`, `amount`, `payment_script` | PK `id`; SQLite: unique `(producer_tx_id, output_idx)` (`idx_utxo_producer_output`, partial) and partial unique `(tx_id, output_idx)` for outputs with neither producer id (`idx_utxo_imported_ref`); PostgreSQL/MySQL: unique `(tx_id, output_idx)`; unique `collateral_return_for_tx_id`; indexes `transaction_id`, `payment_key`, `staking_key`, the spender transaction id and the reference/collateral tx hashes (partial, non-NULL rows only, except on MySQL), and `added_slot`; composites `idx_utxo_deleted_staking_amount` (`deleted_slot`, `credential_tag`, `staking_key`, `amount`), `idx_utxo_staking_deleted_amount` (`credential_tag`, `staking_key`, `deleted_slot`, `amount`), and `idx_utxo_deleted_payment_script` (`deleted_slot`, `payment_script`, `amount`) | Produced outputs use `transaction_id -> transaction.id`. Collateral returns use `collateral_return_for_tx_id -> transaction.id`. The spender is `spent_by_tx_id -> transaction.id`; reference and collateral inputs are rows of `utxo_reference_edge` and `utxo_collateral_edge` keyed by `(utxo_id, transaction_id)`. The legacy `spent_at_tx_id`, `referenced_by_tx_id` and `collateral_by_tx_id` columns are NULL and unread. `credential_tag`: 0 key hash, 1 script hash for stake-bearing outputs. `deleted_slot = 0` is the live-output sentinel; a nonzero value and `spent_at_tx_id` identify a spent output and back Kupo's spent-output history. The `(credential_tag, staking_key, deleted_slot, amount)` composite backs stake-credential live UTxO sums such as DRep voting-power tallying. `payment_script` is a bool set at index time from the output address type (true when the payment credential is a script hash); the `(deleted_slot, payment_script, amount)` composite backs the network script-locked supply sum (blockfrost `/network` `supply.locked`). It is derived only at write time, so a database synced before this column existed reports script-locked supply only for UTxOs created after the upgrade until it is rebuilt from chain data. |
+| `utxo` | `id`, `transaction_id`, `collateral_return_for_tx_id`, `tx_id`, `output_idx`, `payment_key`, `credential_tag`, `staking_key`, `datum_hash`, `spent_at_tx_id` (legacy, NULL since schema version 56), `spent_by_tx_id`, `producer_tx_id` (SQLite virtual generated column `COALESCE(transaction_id, collateral_return_for_tx_id)`), `referenced_by_tx_id`, `collateral_by_tx_id`, `added_slot`, `deleted_slot`, `amount`, `payment_script` | PK `id`; SQLite: unique `(producer_tx_id, output_idx)` (`idx_utxo_producer_output`, partial) and partial unique `(tx_id, output_idx)` for outputs with neither producer id (`idx_utxo_imported_ref`); PostgreSQL/MySQL: unique `(tx_id, output_idx)`; unique `collateral_return_for_tx_id`; indexes `transaction_id`, `payment_key`, `staking_key`, the spender transaction id and the reference/collateral tx hashes (partial, non-NULL rows only, except on MySQL), and `added_slot`; composites `idx_utxo_deleted_staking_amount` (`deleted_slot`, `credential_tag`, `staking_key`, `amount`), `idx_utxo_staking_deleted_amount` (`credential_tag`, `staking_key`, `deleted_slot`, `amount`), and `idx_utxo_deleted_payment_script` (`deleted_slot`, `payment_script`, `amount`) | Produced outputs use `transaction_id -> transaction.id`. Collateral returns use `collateral_return_for_tx_id -> transaction.id`. The spender is `spent_by_tx_id -> transaction.id`; reference and collateral inputs are rows of `utxo_reference_edge` and `utxo_collateral_edge` keyed by `(utxo_id, transaction_id)`. The legacy `spent_at_tx_id`, `referenced_by_tx_id` and `collateral_by_tx_id` columns are NULL and unread. `credential_tag`: 0 key hash, 1 script hash for stake-bearing outputs. `deleted_slot = 0` is the live-output sentinel; a nonzero value and `spent_at_tx_id` identify a spent output and back Kupo's spent-output history. The `(credential_tag, staking_key, deleted_slot, amount)` composite backs stake-credential live UTxO sums such as DRep voting-power tallying. `payment_script` is a bool set at index time from the output address type (true when the payment credential is a script hash); the `(deleted_slot, payment_script, amount)` composite backs the network script-locked supply sum (blockfrost `/network` `supply.locked`). It is derived only at write time, so a database synced before this column existed reports script-locked supply only for UTxOs created after the upgrade until it is rebuilt from chain data. |
 | `utxo_collateral_edge` | `utxo_id`, `transaction_id` | PK `(utxo_id, transaction_id)`; FK `utxo_id -> utxo.id` `ON DELETE CASCADE`; index `idx_utxo_collateral_edge_tx` (`transaction_id`) | Authoritative many-to-many collateral relationship, keyed by the naming transaction's row id. Apply and rollback maintain edges independently; rollback deletes by transaction id. |
 | `utxo_reference_edge` | `utxo_id`, `transaction_id` | PK `(utxo_id, transaction_id)`; FK `utxo_id -> utxo.id` `ON DELETE CASCADE`; index `idx_utxo_reference_edge_tx` (`transaction_id`) | Authoritative many-to-many reference-input relationship, same shape as the collateral edge table. |
 | `utxo_pointer` | `utxo_id`, `ptr_slot`, `ptr_tx_index`, `ptr_cert_index` | PK `utxo_id`; FK `utxo_id -> utxo.id` `ON DELETE CASCADE`; index `idx_utxo_pointer_target` (`ptr_slot`, `ptr_tx_index`, `ptr_cert_index`) | One row per output at a pointer address (address types 4 and 5). Such an address names the position of a stake registration certificate -- `(slot, transaction index in block, certificate index in transaction)` -- instead of carrying a stake credential, so the `utxo` row has no `staking_key` and the position is recorded here. The credential is resolved when stake is computed, not at write time, because it is a function of the certificate history at the slot being evaluated: a pointer may name a position no certificate occupies yet, de-registration removes the reference permanently, and Conway stops counting pointer stake altogether. The cascade is how rollback reaches these rows. Nothing validates an address's pointer payload, so a component above `int64` is dropped rather than stored or raised: no certificate can occupy such a position, and failing the write would stall ingestion of a block the network accepted. |
