@@ -81,6 +81,7 @@ func (n *Node) newConnectionManager() *connmanager.ConnectionManager {
 			MaxNtCConns:             n.config.maxNtCConns,
 			MaxNtCConnectionsPerIP:  n.config.maxNtCConnectionsPerIP,
 			MaxTrustedLocalNtCConns: n.config.maxTrustedLocalNtCConns,
+			TrustedNtCIdleTimeout:   n.config.trustedNtCIdleTimeout,
 			ConnClosedOwnerFunc:     n.handleConnManagerClosedOwner,
 		},
 	)
