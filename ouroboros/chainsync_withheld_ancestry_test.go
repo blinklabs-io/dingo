@@ -265,3 +265,59 @@ func TestChainsyncWithheldAncestryRecoveryScope(t *testing.T) {
 		require.Zero(t, f.armedCount())
 	})
 }
+
+// A close that lands after the resync is scheduled must remove the retry
+// marker, or a replacement connection reusing the ConnectionId is suppressed
+// at the same applied tip. The close's marker cleanup runs from inside the
+// scheduler; its timer cancel runs after delivery returns, because the
+// scheduler holds the timer lock while arming.
+func TestChainsyncWithheldAncestryCloseDuringSchedulingClearsMarker(t *testing.T) {
+	t.Parallel()
+	f := newWithheldAncestryFixture(t)
+	f.setWithheld(true)
+	closeOnArm := true
+	f.o.chainsyncScheduleAt = func(onset time.Time, _ func()) func() {
+		f.mu.Lock()
+		f.armed = append(f.armed, onset)
+		f.mu.Unlock()
+		if closeOnArm {
+			closeOnArm = false
+			f.o.deferredHeaderRecoveryMu.Lock()
+			delete(f.o.withheldAncestryRetry, f.conn)
+			f.o.deferredHeaderRecoveryMu.Unlock()
+		}
+		return func() {}
+	}
+	f.deliver(t, withheldTipBlock+2)
+	require.Equal(t, 1, f.armedCount())
+	f.o.cancelFutureHeaderResync(f.conn)
+
+	// The replacement connection, after the repeat window, at the same tip.
+	f.clearRepeatWindow()
+	f.deliver(t, withheldTipBlock+2)
+	require.Equal(t, 2, f.armedCount(),
+		"a marker written after the close must not suppress the replacement")
+}
+
+// A failed schedule drops the claimed marker, so the next withheld header at
+// the same applied tip may retry.
+func TestChainsyncWithheldAncestryFailedScheduleDropsMarker(t *testing.T) {
+	t.Parallel()
+	f := newWithheldAncestryFixture(t)
+	f.setWithheld(true)
+	f.o.futureHeaderResyncMu.Lock()
+	f.o.futureHeaderResyncClosed = true
+	f.o.futureHeaderResyncMu.Unlock()
+	f.deliver(t, withheldTipBlock+2)
+	require.Zero(t, f.armedCount())
+	f.o.deferredHeaderRecoveryMu.Lock()
+	_, marked := f.o.withheldAncestryRetry[f.conn]
+	f.o.deferredHeaderRecoveryMu.Unlock()
+	require.False(t, marked)
+
+	f.o.futureHeaderResyncMu.Lock()
+	f.o.futureHeaderResyncClosed = false
+	f.o.futureHeaderResyncMu.Unlock()
+	f.deliver(t, withheldTipBlock+2)
+	require.Equal(t, 1, f.armedCount())
+}

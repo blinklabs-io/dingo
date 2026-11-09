@@ -466,30 +466,41 @@ func (o *Ouroboros) recoverWithheldHeaderAncestry(
 	if len(tipHash) == 0 {
 		return
 	}
+	// Claim the marker before scheduling: a close that lands after scheduling
+	// must find it to delete, or a replacement connection reusing this
+	// ConnectionId inherits a suppressor for the same applied tip.
+	now := time.Now()
 	o.deferredHeaderRecoveryMu.Lock()
 	retried, seen := o.withheldAncestryRetry[connId]
+	if (seen && bytes.Equal(retried, tipHash)) ||
+		!o.claimDeferredRecoveryRecycle(connId, now) {
+		o.deferredHeaderRecoveryMu.Unlock()
+		return
+	}
+	if o.withheldAncestryRetry == nil {
+		o.withheldAncestryRetry = make(map[ouroboros.ConnectionId][]byte)
+	}
+	claimed := append([]byte(nil), tipHash...)
+	o.withheldAncestryRetry[connId] = claimed
 	o.deferredHeaderRecoveryMu.Unlock()
-	if seen && bytes.Equal(retried, tipHash) {
-		return
-	}
-	now := time.Now()
-	if !o.claimDeferredRecoveryRecycle(connId, now) {
-		return
-	}
 	if !o.scheduleHeaderResync(
 		connId,
 		now,
 		event.ChainsyncResyncReasonWithheldCandidateAncestry,
 	) {
 		o.releaseDeferredRecoveryRecycle(connId, now)
+		o.deferredHeaderRecoveryMu.Lock()
+		if current, ok := o.withheldAncestryRetry[connId]; ok &&
+			bytes.Equal(current, claimed) {
+			if seen {
+				o.withheldAncestryRetry[connId] = retried
+			} else {
+				delete(o.withheldAncestryRetry, connId)
+			}
+		}
+		o.deferredHeaderRecoveryMu.Unlock()
 		return
 	}
-	o.deferredHeaderRecoveryMu.Lock()
-	if o.withheldAncestryRetry == nil {
-		o.withheldAncestryRetry = make(map[ouroboros.ConnectionId][]byte)
-	}
-	o.withheldAncestryRetry[connId] = append([]byte(nil), tipHash...)
-	o.deferredHeaderRecoveryMu.Unlock()
 	o.config.Logger.Info(
 		"chainsync: re-intersecting after header with unavailable ancestry",
 		"component", "ouroboros",
