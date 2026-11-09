@@ -69,8 +69,9 @@ type Chain struct {
 	// persistent selected chain since it was loaded. Ordinary rollbacks never
 	// lower it, so successive peer rollbacks cannot move the chain more than K
 	// blocks from the highest durable point by taking several individually
-	// shallow steps. Startup reconciliation may reset it through an explicitly
-	// unbounded rollback.
+	// shallow steps. Only an explicitly unbounded rollback (startup
+	// reconciliation) or ResetRollbackAnchorToTip (local replay recovery)
+	// lowers it.
 	rollbackAnchorBlockIndex uint64
 	// persistedRollbackAnchor is the value last written under
 	// rollbackHighWaterSyncKey, so repeated rollbacks from one anchor write
