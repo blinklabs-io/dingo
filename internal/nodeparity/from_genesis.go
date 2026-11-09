@@ -1543,7 +1543,16 @@ func RunFromGenesis(
 						result := EpochResult{Epoch: epoch}
 						captureCompared := false
 						if captures != nil {
-							capture = captures.take(epoch, point)
+							var err error
+							capture, err = captures.await(
+								sessionCtx, epoch, point, logf,
+							)
+							if err != nil {
+								// The capture being waited for answers only
+								// for this block: deliver it again.
+								lastPoint = parentPoint
+								return interrupted()
+							}
 						}
 						if capture != nil {
 							// A callback that ends before reporting this

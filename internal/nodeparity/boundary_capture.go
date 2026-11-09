@@ -110,10 +110,88 @@ type boundaryCaptures struct {
 	mu      sync.Mutex
 	dir     string
 	byEpoch map[uint64]*boundaryCapture
+	// capturing holds each boundary the follower has started capturing and
+	// not finished. A capture's checks can wait on Koios for an hour after
+	// its UTxO set is read, and the main loop can reach the boundary
+	// meanwhile; Dingo no longer answers for it then, so the main loop must
+	// wait for the capture rather than query Dingo.
+	capturing map[uint64]*capturingBoundary
+}
+
+type capturingBoundary struct {
+	point pcommon.Point
+	done  chan struct{}
 }
 
 func newBoundaryCaptures(dir string) *boundaryCaptures {
-	return &boundaryCaptures{dir: dir, byEpoch: map[uint64]*boundaryCapture{}}
+	return &boundaryCaptures{
+		dir:       dir,
+		byEpoch:   map[uint64]*boundaryCapture{},
+		capturing: map[uint64]*capturingBoundary{},
+	}
+}
+
+// begin records that the follower has started capturing epoch at point.
+func (b *boundaryCaptures) begin(epoch uint64, point pcommon.Point) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if old := b.capturing[epoch]; old != nil {
+		close(old.done)
+	}
+	b.capturing[epoch] = &capturingBoundary{
+		point: point, done: make(chan struct{}),
+	}
+}
+
+// finish ends the capture begin started for epoch at point, holding c as
+// put does unless c is nil, for a capture abandoned unfinished. The error
+// is put's.
+func (b *boundaryCaptures) finish(
+	epoch uint64, point pcommon.Point, c *boundaryCapture,
+) error {
+	var err error
+	if c != nil {
+		err = b.put(c)
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if cur := b.capturing[epoch]; cur != nil && pointsEqual(cur.point, point) {
+		close(cur.done)
+		delete(b.capturing, epoch)
+	}
+	return err
+}
+
+// await is take, but first waits for a capture of epoch at point the
+// follower is still making. It returns ctx's error if ctx ends first.
+func (b *boundaryCaptures) await(
+	ctx context.Context,
+	epoch uint64,
+	point pcommon.Point,
+	logf func(format string, args ...any),
+) (*boundaryCapture, error) {
+	logged := false
+	for {
+		b.mu.Lock()
+		cur := b.capturing[epoch]
+		b.mu.Unlock()
+		if cur == nil || !pointsEqual(cur.point, point) {
+			return b.take(epoch, point), nil
+		}
+		if !logged {
+			logged = true
+			logf(
+				"nodeparity: waiting for Dingo's epoch %d boundary capture "+
+					"at slot %d to finish",
+				epoch, point.Slot,
+			)
+		}
+		select {
+		case <-cur.done:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 }
 
 // put holds c as its epoch's capture, replacing any other, and writes c's
@@ -170,8 +248,8 @@ func (b *boundaryCaptures) take(
 	return c
 }
 
-// epochAt returns the epoch of the capture read at exactly point, if one is
-// held. A nil receiver holds none.
+// epochAt returns the epoch of the capture read, or being read, at exactly
+// point, if there is one. A nil receiver holds none.
 func (b *boundaryCaptures) epochAt(point pcommon.Point) (uint64, bool) {
 	if b == nil {
 		return 0, false
@@ -181,6 +259,11 @@ func (b *boundaryCaptures) epochAt(point pcommon.Point) (uint64, bool) {
 	for _, c := range b.byEpoch {
 		if pointsEqual(c.point, point) {
 			return c.epoch, true
+		}
+	}
+	for epoch, c := range b.capturing {
+		if pointsEqual(c.point, point) {
+			return epoch, true
 		}
 	}
 	return 0, false
@@ -657,14 +740,16 @@ func runBoundaryFollower(
 					prevEpoch, haveEpoch = epoch, true
 					return nil
 				}
+				captures.begin(epoch, point)
 				c := capture(cbCtx, point, epoch)
 				if err := cbCtx.Err(); err != nil {
 					if c.utxoPath != "" {
 						_ = os.Remove(c.utxoPath)
 					}
+					_ = captures.finish(epoch, point, nil)
 					return err
 				}
-				if err := captures.put(c); err != nil {
+				if err := captures.finish(epoch, point, c); err != nil {
 					logf(
 						"nodeparity: epoch %d boundary capture is not stored, "+
 							"so a restart before it is compared loses it: %v",
