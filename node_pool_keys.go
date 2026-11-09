@@ -39,6 +39,7 @@ type producerKeys struct {
 	agentClientCertFile   string
 	agentClientKeyFile    string
 	agentServerSPKISHA256 string
+	agentPlaintext        bool
 }
 
 // poolKeySource loads and validates one pool's credentials. client and
@@ -70,6 +71,7 @@ func producerKeysFromPool(p BlockProducerPool) producerKeys {
 		agentClientCertFile:   p.ShelleyKESAgentClientCertFile,
 		agentClientKeyFile:    p.ShelleyKESAgentClientKeyFile,
 		agentServerSPKISHA256: p.ShelleyKESAgentServerSPKISHA256,
+		agentPlaintext:        p.ShelleyKESAgentPlaintext,
 	}
 }
 
@@ -103,6 +105,7 @@ func (n *Node) primaryKeySource() *poolKeySource {
 			agentClientCertFile:   n.config.shelleyKESAgentClientCertFile,
 			agentClientKeyFile:    n.config.shelleyKESAgentClientKeyFile,
 			agentServerSPKISHA256: n.config.shelleyKESAgentServerSPKISHA256,
+			agentPlaintext:        n.config.shelleyKESAgentPlaintext,
 		},
 		client:  &n.kesAgentClient,
 		cancel:  &n.kesAgentCancel,
@@ -288,8 +291,15 @@ func (ks *poolKeySource) loadBlockProducerCredentialsFromAgent(
 
 	mode := ks.keys.agentMode
 	if ks.keys.agentAddress != "" {
-		// A remote agent serves only sign mode; config validation rejects
-		// any other mode with an address.
+		// A remote agent serves only sign mode. Config validation rejects
+		// any other mode with an address, but a library caller can skip it.
+		if mode != "" && mode != kesagent.ModeSign {
+			return fmt.Errorf(
+				"remote KES agent supports only mode %q, got %q",
+				kesagent.ModeSign,
+				mode,
+			)
+		}
 		mode = kesagent.ModeSign
 	}
 	if mode == "" {
@@ -479,6 +489,7 @@ func (ks *poolKeySource) newKESAgentSignClient(
 		ClientCertFile:    ks.keys.agentClientCertFile,
 		ClientKeyFile:     ks.keys.agentClientKeyFile,
 		ServerSPKISHA256:  ks.keys.agentServerSPKISHA256,
+		Plaintext:         ks.keys.agentPlaintext,
 		KESVKey:           opCertKey.VKey,
 		OpCertStartPeriod: opCertKey.OpCertKesPeriod,
 		OpCert:            opCertKey.RawCBOR,

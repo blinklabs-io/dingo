@@ -718,37 +718,22 @@ func protocolBlockLimits(
 }
 
 // MaxTxSize returns the MaxTxSize that ledger validation applies to a
-// transaction of the given era, resolved from one snapshot as
-// validateTxCore resolves it: the era must be one the ledger validates
-// against its current era, and the parameters are the current era's or, for a
-// previous-era transaction, the previous era's. It reports false whenever the
-// ledger would not reach a MaxTxSize rule with those parameters: an era it
-// refuses, an era without a ValidateTxFunc, Dijkstra validation skipped by
-// configuration, or parameters that are unknown or not the type the era's
-// validation requires. Callers then leave the decision to the ledger, so an
-// early rejection based on this limit is never stricter than the ledger.
+// transaction of the current era. It reports false for every other era so the
+// ledger returns the typed era-mismatch error instead of an early size error.
+// It also reports false when the current era has no transaction validator,
+// Dijkstra validation is skipped, or the parameters are unknown or have the
+// wrong type.
 func (ls *LedgerState) MaxTxSize(txEraId uint) (uint, bool) {
 	consensusState := ls.loadConsensusSnapshot()
-	snapshot := txValidationSnapshot{
-		currentEra:     consensusState.currentEra,
-		currentPParams: consensusState.currentPParams,
-		prevEraPParams: consensusState.prevEraPParams,
-		eraList:        ls.eraList(),
-	}
-	if !eras.IsCompatibleEraIn(
-		snapshot.eraList,
-		txEraId,
-		snapshot.currentEra.Id,
-	) {
+	validationEra := consensusState.currentEra
+	if txEraId != validationEra.Id {
 		return 0, false
 	}
-	validationEra := eras.GetEraByIdIn(snapshot.eraList, txEraId)
-	if validationEra == nil || validationEra.ValidateTxFunc == nil ||
+	if validationEra.ValidateTxFunc == nil ||
 		ls.skipDijkstraTxValidation(validationEra.Id) {
 		return 0, false
 	}
-	pp, _ := snapshot.validationPParams(validationEra.Id)
-	return eraMaxTxSize(validationEra.Id, pp)
+	return eraMaxTxSize(validationEra.Id, consensusState.currentPParams)
 }
 
 // eraMaxTxSize returns MaxTxSize from pparams only when they are the type the
