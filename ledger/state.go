@@ -8993,6 +8993,34 @@ func (ls *LedgerState) transitionEpochForRollover(
 	}, nil
 }
 
+// emptyEpochTransitionEpoch returns the epoch an era ends at when its
+// successor's first block lies beyond an empty epoch: the configured epoch of a
+// TriggerAtEpoch era, otherwise the successor of the ledger epoch label, which
+// is where ouroboros-consensus reads the pending update's epoch. It lies after
+// the last applied epoch and no later than the target.
+func (ls *LedgerState) emptyEpochTransitionEpoch(
+	eraID uint,
+	current, target models.Epoch,
+	ledgerEpoch uint64,
+) (models.Epoch, error) {
+	shape, err := ls.eraShapeWithError()
+	if err != nil {
+		return models.Epoch{}, fmt.Errorf("era shape: %w", err)
+	}
+	transition := ledgerEpoch + 1
+	if entry, ok := shape.EraForID(eraID); ok &&
+		entry.NextEraTrigger.Kind == hardfork.TriggerAtEpoch {
+		transition = entry.NextEraTrigger.Epoch
+	}
+	transition = min(max(transition, current.EpochId+1), target.EpochId)
+	epoch, err := epochAtID(current, transition)
+	if err != nil {
+		return models.Epoch{}, err
+	}
+	epoch.EraId = target.EraId
+	return epoch, nil
+}
+
 func (ls *LedgerState) processBlocksFromSource(
 	ctx context.Context,
 	readChainResultCh <-chan readChainResult,
@@ -9271,17 +9299,19 @@ func (ls *LedgerState) processBlocksFromSource(
 				// protocol version is what decides, and a translation
 				// rewrites it.
 				if boundaryShouldValidate {
+					// The hard-fork combinator reads the parameters pending
+					// for the successor of the ledger epoch label, whichever
+					// later epoch the boundary block is in: a skipped epoch
+					// enacts nothing, but the transition it names stands.
 					enacted := snapshotPParams
-					if newEpochId == snapshotLedgerEpoch+1 {
-						forecast, err := ls.forecastPendingPParamUpdateIn(
-							snapshotEra, newEpochId, snapshotPParams, txn,
-						)
-						if err != nil {
-							return fmt.Errorf("forecast pparam updates: %w", err)
-						}
-						if forecast != nil {
-							enacted = forecast
-						}
+					forecast, err := ls.forecastPendingPParamUpdateIn(
+						snapshotEra, snapshotLedgerEpoch+1, snapshotPParams, txn,
+					)
+					if err != nil {
+						return fmt.Errorf("forecast pparam updates: %w", err)
+					}
+					if forecast != nil {
+						enacted = forecast
 					}
 					nextEpochEraId, err = ls.authorizeBoundaryEra(
 						ctx,
@@ -9326,6 +9356,23 @@ func (ls *LedgerState) processBlocksFromSource(
 							"validated successor header at the boundary",
 						snapshotEra.Id, nextEpochEraId,
 					)
+				}
+				// A block beyond an empty epoch opens the new era later than
+				// the era begins: the hard-fork combinator translates at its
+				// transition epoch, which that epoch's rows do not name.
+				if len(transitionPath) > 0 &&
+					snapshotEra.Id != eras.ByronEraDesc.Id &&
+					transitionEpoch.EpochId == targetEpoch.EpochId &&
+					targetEpoch.EpochId > snapshotLedgerEpoch+1 {
+					transitionEpoch, err = ls.emptyEpochTransitionEpoch(
+						snapshotEra.Id,
+						snapshotEpoch,
+						targetEpoch,
+						snapshotLedgerEpoch,
+					)
+					if err != nil {
+						return err
+					}
 				}
 				// Translate into the era that owns the incoming epoch before
 				// running its boundary rules, matching the hard-fork
@@ -15108,14 +15155,30 @@ func (ls *LedgerState) ProtocolParamsForSlot(
 	// the already-collected proposals, so it does not depend on the
 	// target epoch's pparams row being persisted yet (it is not, during
 	// from-genesis before the node has ticked into that epoch).
+	//
+	// NEWEPOCH enacts only for the successor of the ledger epoch label, so a
+	// slot beyond an empty epoch enacts nothing. The pending update is still
+	// the one the hard-fork combinator reads (Shelley/Inspect.hs
+	// pparamsUpdate) to decide the era, so it informs that decision without
+	// becoming the parameters returned.
+	labelEpoch := currentEpoch.EpochId
+	if len(snapshot.epochCache) > 0 {
+		if label := ledgerEpochFromCache(snapshot.epochCache); label < labelEpoch {
+			labelEpoch = label
+		}
+	}
 	updated, err := ls.forecastPendingPParamUpdate(
-		currentEra, currentEpoch.EpochId+1, pparams,
+		currentEra, labelEpoch+1, pparams,
 	)
 	if err != nil {
 		return nil
 	}
+	decisionPParams := pparams
 	if updated != nil {
-		pparams = updated
+		decisionPParams = updated
+		if slotEpoch == labelEpoch+1 {
+			pparams = updated
+		}
 	}
 	// The era the first block of the new epoch belongs to is the one the
 	// ledger enters at the boundary, decided by the same predicate the
@@ -15132,7 +15195,7 @@ func (ls *LedgerState) ProtocolParamsForSlot(
 			sourceEra:  currentEra,
 			epoch:      currentEpoch,
 			tip:        tip,
-			pparams:    pparams,
+			pparams:    decisionPParams,
 			newEpochID: slotEpoch,
 		},
 	)

@@ -2250,6 +2250,37 @@ func (ls *LedgerState) epochCacheSnapshot() []models.Epoch {
 	return snapshot.epochCache
 }
 
+// leaderStakeSnapshotEpochInCache returns the mark snapshot epoch that elects
+// a block in epoch, given the epoch cache that describes the chain the block
+// extends. The ledger epoch label is reconstructed from the rows up to epoch,
+// so rows persisted for a jump over an empty epoch leave it behind and the
+// distribution frozen at the label stays in force.
+func leaderStakeSnapshotEpochInCache(
+	epoch uint64,
+	cache []models.Epoch,
+) uint64 {
+	if len(cache) == 0 {
+		return praos.StakeSnapshotEpoch(epoch)
+	}
+	end := 0
+	for end < len(cache) && cache[end].EpochId <= epoch {
+		end++
+	}
+	if end == 0 {
+		return praos.StakeSnapshotEpoch(epoch)
+	}
+	return praos.LeaderStakeSnapshotEpoch(
+		epoch,
+		ledgerEpochFromCache(cache[:end]),
+	)
+}
+
+// LeaderStakeSnapshotEpoch returns the mark snapshot epoch that elects leaders
+// for the given epoch against the published epoch cache.
+func (ls *LedgerState) LeaderStakeSnapshotEpoch(epoch uint64) uint64 {
+	return leaderStakeSnapshotEpochInCache(epoch, ls.epochCacheSnapshot())
+}
+
 //nolint:unused // retained as a test helper
 func (ls *LedgerState) verifyBlockLeaderEligibility(
 	block ledger.Block,
@@ -2533,7 +2564,7 @@ func (ls *LedgerState) resolveElectingSnapshotAtSlot(
 	txn types.Txn,
 ) electingSnapshot {
 	snap := electingSnapshot{
-		epoch: praos.StakeSnapshotEpoch(epochId),
+		epoch: leaderStakeSnapshotEpochInCache(epochId, epochCache),
 		kind:  models.PoolStakeSnapshotTypeMark,
 
 		epochCache: epochCache,
@@ -3526,7 +3557,7 @@ func (ls *LedgerState) oldestRequiredSnapshotEpochLocked() (uint64, bool) {
 			// will read once the cache advances, looping the header on defer.
 			return 0, true
 		}
-		snapshotEpoch := praos.StakeSnapshotEpoch(epoch.EpochId)
+		snapshotEpoch := leaderStakeSnapshotEpochInCache(epoch.EpochId, cache)
 		if !have || snapshotEpoch < floor {
 			floor = snapshotEpoch
 			have = true
@@ -3615,7 +3646,7 @@ func (ls *LedgerState) PrunePoolSnapshotsWithRetentionFloor(
 	// released; the epoch cache is an atomic snapshot and takes no lock. One
 	// cache generation for every pin keeps the floor coherent, as above.
 	cache := ls.loadConsensusSnapshot().epochCache
-	before = ls.capPoolSnapshotPruneBefore(
+	before = ls.capPoolSnapshotPruneBeforeWith(
 		before, minBefore,
 		func(slot uint64) (uint64, bool) {
 			epoch, err := epochForSlotInCache(cache, slot)
@@ -3624,7 +3655,23 @@ func (ls *LedgerState) PrunePoolSnapshotsWithRetentionFloor(
 			}
 			return epoch.EpochId, true
 		},
+		func(epoch uint64) uint64 {
+			return leaderStakeSnapshotEpochInCache(epoch, cache)
+		},
 	)
+	// Once an epoch has been empty the ledger epoch label stops advancing, so
+	// the distribution leaders are elected by stays the one captured before the
+	// gap however many epochs pass. It is not a deferred header's need and so
+	// is exempt from the depth backstop: pruning it leaves every later block
+	// without a leader distribution.
+	if len(cache) > 0 &&
+		ledgerEpochFromCache(cache) < cache[len(cache)-1].EpochId {
+		if frozen := leaderStakeSnapshotEpochInCache(
+			cache[len(cache)-1].EpochId+1, cache,
+		); frozen < before {
+			before = frozen
+		}
+	}
 	// Prune runs with the mutex RELEASED: it opens the single sqlite write
 	// connection, which block apply holds before taking this mutex, so running
 	// it under the lock deadlocks. See the doc comment.

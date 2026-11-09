@@ -4742,7 +4742,11 @@ ENACT applies at the boundary itself, so the decision forecasts it without
 writing: `governance.ForecastHardForkInitiations` applies the
 `HardForkInitiation` proposals marked ratified and not yet enacted, and those
 the previous boundary's deferred RATIFY has decided but not yet written, in the
-order ENACT would. A refusal releases the rollover's transaction-validation
+order ENACT would. The decision reads the parameters pending for the successor
+of the ledger epoch label, so a block beyond an empty epoch is judged by the same
+forecast as one that opens the successor: NEWEPOCH enacts nothing for it, but the
+transition the pending update names stands, and `ProtocolParamsForSlot` returns
+the parameters in force rather than the pending ones for such a slot. A refusal releases the rollover's transaction-validation
 transition before the block is rewound as a rejected header, and the ledger
 stays in its source era. The block's body era still selects the transition path:
 a header elevation is a header-carried protocol version, which outside mainnet
@@ -11161,7 +11165,14 @@ era, provider identity, and full-distribution commitment.
 The stake distribution is the reference node's active `set`/`nesPd`
 distribution, as of the end of E-2. Dingo captures `mark[K]` at the boundary
 into K, holding stake as of the end of K-1; the electing row is therefore
-Mark E-1 (`praos.StakeSnapshotEpoch(E)`). Header validation uses the same
+Mark E-1 (`praos.StakeSnapshotEpoch(E)`). The reference `nesPd` is rewritten
+only when NEWEPOCH runs for the successor of the ledger epoch label, so once
+an epoch is empty the label stops advancing and every later epoch is elected
+by the distribution frozen at the label, `StakeSnapshotEpoch(label)`
+(`praos.LeaderStakeSnapshotEpoch`, resolved from the epoch cache by
+`LedgerState.LeaderStakeSnapshotEpoch`). Header validation, the forging
+schedule, Tachys, the pool-distribution queries and the retention pins all
+use that resolution. Header validation uses the same
 row except in the imported Mithril epoch, which uses the imported active
 `pool-distr` stake fraction. Boundary snapshots use slot-aware delegation
 and UTxO state. An absent pool is rejected, while an entirely empty Mark

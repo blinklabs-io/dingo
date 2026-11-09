@@ -571,6 +571,44 @@ func TestBoundaryBlockEraMustMatchLedgerProtocolVersion(t *testing.T) {
 	})
 }
 
+// TestVersionTriggeredTransitionIntoEmptyEpochs pins the era decision when the
+// first block after the transition lies beyond an empty epoch. The hard-fork
+// combinator takes the transition epoch from the parameters pending for the
+// successor of the ledger epoch label (Shelley/Inspect.hs pparamsUpdate), and
+// extends the ledger into the new era at that epoch's start whichever later
+// epoch the block is in. The block must therefore be accepted in the new era
+// exactly as when it opens the successor epoch.
+func TestVersionTriggeredTransitionIntoEmptyEpochs(t *testing.T) {
+	t.Parallel()
+
+	k := uint64(boundaryEraTestSecurityParam)
+	skipped := uint64(3 * boundaryEraTestEpochLength)
+	t.Run("quorum-met classic major bump with a conway block is accepted", func(t *testing.T) {
+		t.Parallel()
+		ls, err := runBoundaryEraCase(t, boundaryEraCase{
+			pparamsMajor:       8,
+			classicUpdateMajor: 9,
+			votingBlocks:       k,
+			blockSlot:          skipped + 1,
+		})
+		require.NoError(t, err)
+		assert.Equal(t, eras.ConwayEraDesc.Id, ls.currentEra.Id)
+		assert.Equal(t, uint64(3), ls.currentEpoch.EpochId)
+	})
+	t.Run("quorum-met classic major bump with a babbage block is rejected", func(t *testing.T) {
+		t.Parallel()
+		ls, err := runBoundaryEraCase(t, boundaryEraCase{
+			pparamsMajor:       8,
+			classicUpdateMajor: 9,
+			babbageBody:        true,
+			votingBlocks:       k,
+			blockSlot:          skipped + 1,
+		})
+		require.ErrorIs(t, err, errRestartLedgerPipeline)
+		assert.Equal(t, eras.BabbageEraDesc.Id, ls.currentEra.Id)
+	})
+}
+
 // TestTrustedReplayBoundaryEraFollowsBlock pins that a boundary the node does
 // not validate keeps following the block that opens the epoch: the era
 // decision runs only where the block is validated.
@@ -656,10 +694,12 @@ func TestSparseScheduledHardForkEventUsesTransitionEpoch(t *testing.T) {
 	)
 	hardFork, ok := received.Data.(event.HardForkEvent)
 	require.True(t, ok)
-	require.Equal(t, targetEpoch, hardFork.EpochNo)
+	// The hard-fork combinator translates at the scheduled epoch, which is
+	// empty here, not at the epoch of the first block after it.
+	require.Equal(t, conwayEpoch, hardFork.EpochNo)
 	require.Equal(
 		t,
-		targetEpoch*boundaryEraTestEpochLength,
+		conwayEpoch*boundaryEraTestEpochLength,
 		hardFork.Slot,
 	)
 }

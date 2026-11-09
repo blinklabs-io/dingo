@@ -22,7 +22,6 @@ import (
 	"math/bits"
 
 	nodeconsensus "github.com/blinklabs-io/dingo/consensus"
-	"github.com/blinklabs-io/dingo/consensus/praos"
 	"github.com/blinklabs-io/dingo/database/models"
 	gconsensus "github.com/blinklabs-io/gouroboros/consensus"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -240,6 +239,7 @@ func (ls *LedgerState) verifyTachysHeaderStateWithCache(
 				ctx,
 				block,
 				epochID,
+				epochCache,
 				snap,
 				epochNonce,
 			)
@@ -251,6 +251,7 @@ func (ls *LedgerState) verifyTachysLeaderEligibility(
 	ctx context.Context,
 	block gledger.Block,
 	epochID uint64,
+	epochCache []models.Epoch,
 	_ electingSnapshot,
 	epochNonce []byte,
 ) error {
@@ -271,7 +272,7 @@ func (ls *LedgerState) verifyTachysLeaderEligibility(
 	}
 	distribution, err := ls.TachysDistribution(
 		ctx,
-		praos.StakeSnapshotEpoch(epochID),
+		leaderStakeSnapshotEpochInCache(epochID, epochCache),
 	)
 	if IsHeaderVerificationDeferred(err) {
 		return err

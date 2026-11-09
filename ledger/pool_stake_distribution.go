@@ -72,6 +72,22 @@ func checkAsOfEpochRecency(
 	targetEpoch, liveEpoch uint64,
 	apiStorageMode bool,
 ) error {
+	return checkAsOfSnapshotRecency(
+		targetEpoch,
+		praos.StakeSnapshotEpoch(targetEpoch),
+		liveEpoch,
+		apiStorageMode,
+	)
+}
+
+// checkAsOfSnapshotRecency is checkAsOfEpochRecency for a caller that has
+// already resolved the mark snapshot epoch its read needs. After an empty-epoch
+// gap that is the snapshot frozen at the ledger epoch label, which no boundary
+// job has pruned however far the live epoch has advanced.
+func checkAsOfSnapshotRecency(
+	targetEpoch, snapshotEpoch, liveEpoch uint64,
+	apiStorageMode bool,
+) error {
 	if targetEpoch > liveEpoch {
 		return fmt.Errorf(
 			"%w: as-of epoch %d is ahead of the live epoch (%d)",
@@ -89,7 +105,6 @@ func checkAsOfEpochRecency(
 		return nil
 	}
 	deleteBeforeEpoch := liveEpoch - stakeSnapshotRetentionEpochs
-	snapshotEpoch := praos.StakeSnapshotEpoch(targetEpoch)
 	if snapshotEpoch < deleteBeforeEpoch {
 		return fmt.Errorf(
 			"%w: as-of epoch %d (mark snapshot epoch %d) is outside the "+
@@ -154,8 +169,11 @@ func (ls *LedgerState) verifyStakeDistributionRetentionOnly(
 	if err != nil {
 		return err
 	}
-	if err := checkAsOfEpochRecency(
-		targetEpoch, liveEpoch, ls.db.StorageMode() == types.StorageModeAPI,
+	if err := checkAsOfSnapshotRecency(
+		targetEpoch,
+		ls.LeaderStakeSnapshotEpoch(targetEpoch),
+		liveEpoch,
+		ls.db.StorageMode() == types.StorageModeAPI,
 	); err != nil {
 		return err
 	}
@@ -342,13 +360,16 @@ func (ls *LedgerState) poolStakeDistribution(
 		if err != nil {
 			return nil, err
 		}
-		if err := checkAsOfEpochRecency(
-			epoch, liveEpoch, ls.db.StorageMode() == types.StorageModeAPI,
+		if err := checkAsOfSnapshotRecency(
+			epoch,
+			ls.LeaderStakeSnapshotEpoch(epoch),
+			liveEpoch,
+			ls.db.StorageMode() == types.StorageModeAPI,
 		); err != nil {
 			return nil, err
 		}
 	}
-	snapshotEpoch := praos.StakeSnapshotEpoch(epoch)
+	snapshotEpoch := ls.LeaderStakeSnapshotEpoch(epoch)
 
 	// A filter is bounded by the caller, so only the pools it names are read;
 	// loading the whole snapshot to discard most of it is work the request did
