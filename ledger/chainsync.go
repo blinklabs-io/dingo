@@ -4913,19 +4913,36 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 	var releaseVerificationGeneration func()
 	verificationGenerationReleased := false
 	if headerCryptoVerificationGeneration != 0 {
-		var generationCurrent bool
-		releaseVerificationGeneration, generationCurrent = ls.
-			PinHeaderCryptoVerificationGeneration(
-				headerCryptoVerificationGeneration,
-			)
-		if !generationCurrent {
+		var reverify func() (uint64, error)
+		if headerValidationRequired {
+			reverify = func() (uint64, error) {
+				return ls.ValidateChainSelectionHeaderCryptoWithGeneration(
+					e.BlockHeader,
+				)
+			}
+		}
+		pinnedGeneration, release, pinErr := ls.pinHeaderVerdict(
+			headerCryptoVerificationGeneration,
+			reverify,
+		)
+		if release == nil {
 			ls.config.Logger.Debug(
 				"withholding chainsync header after producer authorization changed before admission",
 				"component", "ledger",
 				"slot", e.Point.Slot,
 				"hash", hex.EncodeToString(e.Point.Hash),
+				"error", pinErr,
 			)
 			return nil
+		}
+		releaseVerificationGeneration = release
+		if pinnedGeneration != headerCryptoVerificationGeneration {
+			headerCryptoVerificationGeneration = pinnedGeneration
+			producerAuthorizationGeneration = pinnedGeneration
+			e.HeaderCryptoVerificationGeneration = pinnedGeneration
+			if e.PeerTipUpdate != nil {
+				e.PeerTipUpdate.HeaderCryptoVerificationGeneration = pinnedGeneration
+			}
 		}
 		defer func() {
 			if releaseVerificationGeneration != nil {

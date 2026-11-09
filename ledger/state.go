@@ -1797,6 +1797,10 @@ type LedgerState struct {
 	// headerVerificationEpochWithCache, before the snapshot is re-read, so a
 	// test can publish a new snapshot mid-lookup.
 	headerVerificationEpochLookupHook func()
+	// peerForkOpCertCheckedHook is a test seam, nil in production. It runs
+	// after a candidate's opcert counters are checked and before they are
+	// committed, so a test can publish a snapshot mid-check.
+	peerForkOpCertCheckedHook func()
 	// blockfetchContinuationPending prevents a chainsync handler from starting
 	// a competing batch in the short interval after the blockfetch subscriber
 	// schedules its next request on a worker. The worker must run outside the

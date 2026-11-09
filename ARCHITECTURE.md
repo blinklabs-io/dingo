@@ -768,7 +768,13 @@ last epoch-block nonce, and checks operational-certificate counters along that
 same path. This bounded history is scoped to the peer and consensus context:
 tip-only snapshot publications preserve cached verdicts, while a consensus
 input change requires revalidation. It is discarded when the retained path is
-reset or the connection closes. Deferred headers may remain as raw ancestry,
+reset or the connection closes. The operational-certificate counters are read
+at the fork ancestor, so their commit survives tip-only publications: it is
+discarded only for a validation transition, a changed consensus context, or an
+ancestor that left the local chain. Requiring an unchanged generation instead
+never commits a long check during catch-up, when blocks publish a tip every few
+milliseconds, and parks the connection for a re-intersection each time. Deferred
+headers may remain as raw ancestry,
 but selection waits until the candidate path and required header checks are
 available. A header beyond the forecast horizon or with unavailable ancestry
 or context is deferred.
@@ -784,7 +790,10 @@ again, up to four waits per roll-forward. All waits of one roll-forward share
 one `catchUpBandWaitTimeout` bound, which stays under the protocol state
 timers, and end when the connection closes. Only a header still deferred at
 the bound is parked by `markDeferredHeaderRecovery`; an invalid header is
-rejected without waiting. A snapshot publication or validation transition
+rejected without waiting.
+Queue admission has the same tolerance: a verdict that a tip publication expires
+between its verification and its pin (`pinHeaderVerdict`) is verified again, up
+to three times, before the header is withheld. A snapshot publication or validation transition
 also waits and retries a local extension: otherwise an unstamped header can
 be withheld by corroboration while its peer cursor advances past it. Other
 deferrals on local extensions are forwarded unverified at once because
