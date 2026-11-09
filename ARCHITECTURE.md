@@ -7770,11 +7770,18 @@ the apply gate in the roll-forward and roll-backward handlers): ingress is open
 to every eligible peer, not only the selected one, so headers admitted from a
 stale peer would stay in the shared header queue after selection moved to honest
 peers and make their headers look like a persistent fork. A connection whose
-latest advertised tip is stale holds no ingress slot either: the roll-forward
-and roll-backward handlers demote it to observation so a selectable observer can
-take the slot, its delivered history still counts for corroboration, and no
-promotion path re-admits it until a message from the peer advertises a fresh
-tip. The gate reads the peer's tracked tip, so node composition observes tip and rollback updates
+latest advertised tip is stale holds no ingress slot either, and its delivered
+history still counts for corroboration. `chainsync.State` keeps each
+connection's latest advertised tip and judges it against the wall clock when a
+decision is made, through `Config.AdvertisedTipStale`: the roll-forward and
+roll-backward handlers demote a connection advertising a stale tip, and every
+promotion, including an eligibility change and a root slot handoff, is refused
+while the stored tip is stale, so a selectable observer can take the slot. An
+idle peer whose tip ages past the threshold sends no message, so the recycler
+also calls `State.DemoteStaleAdvertisingClients` on its stall-check cadence;
+such a peer can hold its slot for up to one tick after its tip goes stale. A
+connection that has not yet advertised a tip is not judged. The gate reads the
+peer's tracked tip, so node composition observes tip and rollback updates
 synchronously, before the gate runs, whenever Genesis selection is active
 (`ChainSelector.GenesisSelectionState`); the rule can decide only in Genesis
 mode, so this is a superset of when it applies. An asynchronous observation

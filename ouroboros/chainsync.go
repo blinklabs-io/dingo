@@ -3316,18 +3316,16 @@ func (o *Ouroboros) shouldPublishChainsyncToLedger(
 // chainsyncIngressDesired decides whether a peer that just advertised tip
 // should hold an ingress slot. A tip chain selection will never select cannot
 // feed the ledger, so its peer must not hold one of the few slots while
-// selectable peers wait as observers. The verdict is recorded on the client so
-// that promotions with no message to judge also leave the slot free.
+// selectable peers wait as observers.
 func (o *Ouroboros) chainsyncIngressDesired(
 	connId ouroboros.ConnectionId,
 	tip ochainsync.Tip,
 ) bool {
-	stale := o.config.ChainsyncAdvertisedTipStale != nil &&
-		o.config.ChainsyncAdvertisedTipStale(tip)
-	if o.chainsyncState != nil {
-		o.chainsyncState.SetClientAdvertisedTipStale(connId, stale)
+	if o.chainsyncState != nil &&
+		o.chainsyncState.RecordClientAdvertisedTip(connId, tip) {
+		return false
 	}
-	return !stale && o.shouldPublishChainsyncToLedger(connId)
+	return o.shouldPublishChainsyncToLedger(connId)
 }
 
 // shouldApplyChainsyncToLedger reports whether an ingress-eligible peer's
