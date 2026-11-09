@@ -20599,8 +20599,8 @@ Retention itself is never configurable or age-based for any of these tables
 -- the only statements that delete rows from them are
 `DeleteCertificatesAfterSlot` and the reward-journal and
 `account_withdrawal_witness` deletes in
-`database/plugin/metadata/sqlstore/reward_journal.go`, all of the form `slot >
-slot`/`boundary_slot > slot` for a rollback or lifecycle-truncate target slot (the same primitive
+`database/plugin/metadata/sqlstore/reward_journal.go`, all of the form
+`added_slot > slot`, `slot > slot` or `boundary_slot > slot` for a rollback or lifecycle-truncate target slot (the same primitive
 both share, see "CIP-0163 Bookkeeping Shared Between Ledger Rollback and
 Lifecycle Truncate" below). That target slot is derived from consensus chain
 state, not wall-clock time or per-node configuration, so it produces

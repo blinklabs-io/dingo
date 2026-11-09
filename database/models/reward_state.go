@@ -195,7 +195,8 @@ type RewardAccountOutput struct {
 	CapturedSlot uint64
 	BoundarySlot uint64
 	// AccountID is the account row the claim that returned this output
-	// resolved its credential to. Stored rows leave it zero.
+	// resolved its credential to. Stored rows, and claimed outputs whose
+	// credential has no account row, leave it zero.
 	AccountID uint
 }
 
