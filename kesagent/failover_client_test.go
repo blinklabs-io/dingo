@@ -176,3 +176,29 @@ func TestNewFailoverClientRefusesAnEmptyList(t *testing.T) {
 	})
 	require.Error(t, err)
 }
+
+func TestFailoverClientPrepareKeepsANewerMove(t *testing.T) {
+	t.Parallel()
+	skeyData, vkey, opCert := testKESMaterial(t)
+	agents := startPlainAgents(t, 3, skeyData, vkey, opCert)
+	f := newTestFailoverClient(t, agents, vkey, opCert, nil)
+
+	// A Sign moved the client from agent 0 to agent 2 while a Prepare that
+	// started at agent 0 was admitting agent 1.
+	f.mu.Lock()
+	f.active = 2
+	f.mu.Unlock()
+	f.adoptPrepared(0, 1, nil)
+	require.Equal(t, agents[2].addr, f.Active())
+
+	f.adoptPrepared(2, 1, nil)
+	require.Equal(t, agents[1].addr, f.Active())
+}
+
+func TestFailoverMetricsReportADuplicatedActiveAddress(t *testing.T) {
+	t.Parallel()
+	m := NewMetrics(prometheus.NewRegistry())
+	m.setActiveAgent([]string{"a:1", "b:1", "a:1"}, 0)
+	require.InDelta(t, 1, testutil.ToFloat64(m.activeAgent.WithLabelValues("a:1")), 0)
+	require.InDelta(t, 0, testutil.ToFloat64(m.activeAgent.WithLabelValues("b:1")), 0)
+}

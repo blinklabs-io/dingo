@@ -76,8 +76,10 @@ func (m *Metrics) setActiveAgent(addresses []string, active int) {
 	if m == nil {
 		return
 	}
-	for i, address := range addresses {
-		if i == active {
+	// By address, not index: a list naming one address twice must not
+	// report its active entry as inactive.
+	for _, address := range addresses {
+		if address == addresses[active] {
 			m.activeAgent.WithLabelValues(address).Set(1)
 		} else {
 			m.activeAgent.WithLabelValues(address).Set(0)

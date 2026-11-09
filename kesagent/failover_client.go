@@ -145,17 +145,25 @@ func (f *FailoverClient) Prepare() error {
 		idx := (start + i) % n
 		err := f.clients[idx].Prepare()
 		if err == nil {
-			if idx != start {
-				f.mu.Lock()
-				f.setActiveLocked(idx, errors.Join(errs...))
-				f.mu.Unlock()
-			}
+			f.adoptPrepared(start, idx, errors.Join(errs...))
 			f.prepareStandby(idx)
 			return nil
 		}
 		errs = append(errs, fmt.Errorf("%s: %w", f.addresses[idx], err))
 	}
 	return errors.Join(errs...)
+}
+
+// adoptPrepared makes idx, the agent Prepare admitted, the active one, unless
+// the active agent changed from start while Prepare was dialing: a Sign that
+// moved on in the meantime made the newer decision.
+func (f *FailoverClient) adoptPrepared(start, idx int, reason error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if idx == start || f.active != start {
+		return
+	}
+	f.setActiveLocked(idx, reason)
 }
 
 // prepareStandby admits the agent after idx in the background. Its result is
