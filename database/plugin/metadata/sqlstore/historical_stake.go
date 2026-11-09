@@ -526,27 +526,15 @@ func scanRewardHistoryRows(
 // reconstruction used to scan every account and reward delta in the database,
 // even when a caller requested a single pool; keeping the selected set in the
 // SQL predicates makes the work proportional to the request.
-func historicalRewardCredentialPredicate(
-	selected map[historicalRewardKey]struct{},
-) (string, []any) {
-	return historicalRewardCredentialPredicateFor(selected, "")
-}
-
-// historicalRewardCredentialPredicateFor is
-// historicalRewardCredentialPredicate with the columns qualified by alias.
+//
 // Keys are grouped per credential tag into one IN list, so SQLite can search
 // the (credential_tag, staking_key) index per group instead of evaluating a
 // long OR of conjunctions against every row of a different index.
-func historicalRewardCredentialPredicateFor(
+func historicalRewardCredentialPredicate(
 	selected map[historicalRewardKey]struct{},
-	alias string,
 ) (string, []any) {
 	if len(selected) == 0 {
 		return "1 = 0", nil
-	}
-	prefix := ""
-	if alias != "" {
-		prefix = alias + "."
 	}
 	keys := make([]historicalRewardKey, 0, len(selected))
 	for key := range selected {
@@ -566,9 +554,7 @@ func historicalRewardCredentialPredicateFor(
 			end++
 		}
 		parts = append(parts, fmt.Sprintf(
-			"(%scredential_tag = ? AND %sstaking_key IN (%s))",
-			prefix,
-			prefix,
+			"(credential_tag = ? AND staking_key IN (%s))",
 			strings.TrimSuffix(strings.Repeat("?,", end-start), ","),
 		))
 		args = append(args, keys[start].tag)
