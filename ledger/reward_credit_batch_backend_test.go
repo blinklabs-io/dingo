@@ -311,9 +311,11 @@ func dumpRewardBatchTables(t *testing.T, raw *sql.DB) string {
 	queries := []string{
 		`SELECT credential_tag, staking_key, reward, active FROM account
 ORDER BY credential_tag, staking_key`,
-		`SELECT a.staking_key, a.credential_tag, c.boundary_slot, c.output_id,
+		// output_id is the output row's id, which a database assigns from its
+		// own sequence, so it is not part of what two databases must agree on.
+		`SELECT a.staking_key, a.credential_tag, c.boundary_slot,
     c.amount FROM reward_credit c JOIN account a ON a.id = c.account_id
-ORDER BY a.credential_tag, a.staking_key, c.boundary_slot, c.output_id`,
+ORDER BY a.credential_tag, a.staking_key, c.boundary_slot, c.amount`,
 		`SELECT a.staking_key, a.credential_tag, s.hash, e.amount, e.slot,
     e.post_snapshot FROM reward_event_credit e
 JOIN account a ON a.id = e.account_id JOIN reward_source s ON s.id = e.source_id

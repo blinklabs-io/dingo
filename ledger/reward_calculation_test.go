@@ -8498,9 +8498,9 @@ func dumpEpochBoundaryState(t *testing.T, raw *sql.DB) string {
     hex(pool), hex(drep), drep_type FROM account
 ORDER BY credential_tag, staking_key`},
 		{"reward_credit", `SELECT c.boundary_slot, a.credential_tag,
-    hex(a.staking_key), c.output_id, c.amount
+    hex(a.staking_key), c.amount
 FROM reward_credit c JOIN account a ON a.id = c.account_id
-ORDER BY c.boundary_slot, a.credential_tag, a.staking_key, c.output_id`},
+ORDER BY c.boundary_slot, a.credential_tag, a.staking_key, c.amount`},
 		{"reward_event_credit", `SELECT a.credential_tag, hex(a.staking_key),
     hex(s.hash), e.amount, e.slot, e.post_snapshot
 FROM reward_event_credit e JOIN account a ON a.id = e.account_id
