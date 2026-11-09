@@ -12040,12 +12040,12 @@ replace the ledger state and the live credentials the reload reads. Unlike
 initial startup, reload refuses a wall-clock slot outside confirmed era history:
 it cannot replace working keys without verifying the replacement's KES window.
 
-A node that forges for several pools (`blockProducerPools`) reloads each pool
-through its own key source on the same `SIGHUP`: every pool's replacement is
-validated in full and swapped on its own, and a pool whose replacement is
-refused keeps its loaded credentials without holding back the others. Each
-successful swap logs its `pool_id` with the old and new counter, each refusal
-is named in the returned error and counted on
+A node that forges for several pools (`blockProducerPools`) reloads each
+running pool through its own key source on the same `SIGHUP`: every pool's
+replacement is validated in full and swapped on its own, and a pool whose
+replacement is refused keeps its loaded credentials without holding back the
+others. Each successful swap logs its `pool_id` with the old and new counter,
+each refusal is named in the returned error and counted on
 `dingo_block_producer_credential_reload_failures_total{pool_id}`. A pool whose
 KES key comes from an agent is still refused, as above.
 
@@ -12335,10 +12335,12 @@ validates its credentials exactly as the first pool's does, and one KES agent
 client per pool means one agent can serve them all through its profiles.
 
 **Startup and isolation.** The other pools start after the first. A pool whose
-KES source cannot be reached -- a serve-key agent that never pushes its key --
+serve-key KES source cannot be reached -- an agent that never pushes its key --
 is skipped, logged, reported by `BlockProducerReady`, and retried every 30
-seconds until it starts; the retry takes the lifecycle gates, so it never races
-a restore, truncate or shutdown. Keys that do not validate and a ledger
+seconds until it starts; a sign-mode client dials nothing at startup, so its
+pool starts and an unreachable agent shows in its readiness check instead. The
+retry takes the lifecycle gates, so it never races a restore, truncate or
+shutdown. Keys that do not validate and a ledger
 mismatch against the pool's registration stop startup, as they do for one
 pool. Stops run the other pools first, each in the first pool's order: forger,
 agent client, election, then the keys.
@@ -12361,9 +12363,10 @@ on, the `SeedL` TPraos seed before) and keeps the pool with the lowest output,
 the value chain selection compares for two blocks in one slot. The other pools
 skip the slot and count `dingo_forge_yielded_to_own_pool_total` instead of a
 missed leader slot. The decision is made once per slot and cached for the
-pools that ask after it. Anything that leaves the decision in doubt -- a
-non-Praos schedule, no epoch nonce, a VRF failure, a panicking arbiter -- lets
-every leading pool forge: an extra block of the node's own costs less than a
+pools that ask after it; a slot fewer than two pools lead is not cached, since
+a pool whose schedule is not ready yet reads as a non-leader. Anything that
+leaves the decision in doubt -- a non-Praos schedule, no epoch nonce, a VRF
+failure, a panicking arbiter -- lets every leading pool forge: an extra block of the node's own costs less than a
 lost slot.
 
 **Own blocks.** The ledger's slot battle checks and the equivocation detector

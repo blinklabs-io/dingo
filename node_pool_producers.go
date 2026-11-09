@@ -173,6 +173,13 @@ func (n *Node) initMultiPool() error {
 			poolID: poolID,
 		})
 	}
+	// One zero series per pool from startup, so rate() over the reload
+	// failure counter is defined before the first failure.
+	if counter := n.reloadFailureCounter(); counter != nil {
+		for poolID := range seen {
+			counter.WithLabelValues(poolID)
+		}
+	}
 	n.multiPool.producers = producers
 	n.multiPool.arbiter = newPoolSlotArbiter(n.config.logger)
 	n.multiPool.own = &ownForgedBlocks{}
@@ -579,9 +586,17 @@ func (n *Node) reloadPoolProducerCredentials(
 }
 
 // countReloadFailure counts a credential reload that left poolID's keys as
-// they were. The counter lives as long as the node, so it registers on the
-// registry a live rebuild does not clear.
+// they were.
 func (n *Node) countReloadFailure(poolID string) {
+	if counter := n.reloadFailureCounter(); counter != nil {
+		counter.WithLabelValues(poolID).Inc()
+	}
+}
+
+// reloadFailureCounter registers the credential reload failure counter once
+// and returns it, or nil without a registry. The counter lives as long as the
+// node, so it registers on the registry a live rebuild does not clear.
+func (n *Node) reloadFailureCounter() *prometheus.CounterVec {
 	n.multiPool.reloadFailuresOnce.Do(func() {
 		reg := n.retainedComponentPromRegistry()
 		if reg == nil {
@@ -604,7 +619,5 @@ func (n *Node) countReloadFailure(poolID string) {
 		}
 		n.multiPool.reloadFailures = counter
 	})
-	if n.multiPool.reloadFailures != nil {
-		n.multiPool.reloadFailures.WithLabelValues(poolID).Inc()
-	}
+	return n.multiPool.reloadFailures
 }

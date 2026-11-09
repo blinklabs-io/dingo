@@ -163,7 +163,10 @@ func (a *poolSlotArbiter) winner(slot uint64) string {
 	if w, ok := a.decided[slot]; ok {
 		return w
 	}
-	w := a.decideLocked(slot)
+	w, final := a.decideLocked(slot)
+	if !final {
+		return w
+	}
 	a.decided[slot] = w
 	a.order = append(a.order, slot)
 	if len(a.order) > arbiterDecisionCacheSlots {
@@ -178,8 +181,11 @@ func (a *poolSlotArbiter) winner(slot uint64) string {
 
 // decideLocked ranks the pools that lead slot by their leader VRF output. It
 // holds a.mu while it proves, so a pool asking while another's decision is
-// being made waits for that decision rather than making its own.
-func (a *poolSlotArbiter) decideLocked(slot uint64) string {
+// being made waits for that decision rather than making its own. final is
+// false when fewer than two pools lead the slot: a pool whose schedule is not
+// ready yet reads as a non-leader, so that answer is not cached, and a pool
+// asking once its schedule arrives sees every leader.
+func (a *poolSlotArbiter) decideLocked(slot uint64) (winner string, final bool) {
 	leaders := make([]arbiterMember, 0, len(a.members))
 	for _, m := range a.members {
 		if next, ok := m.leader.NextLeaderSlot(slot); ok && next == slot {
@@ -187,7 +193,7 @@ func (a *poolSlotArbiter) decideLocked(slot uint64) string {
 		}
 	}
 	if len(leaders) < 2 {
-		return ""
+		return "", false
 	}
 	// Map order is random; equal outputs, which a VRF all but rules out,
 	// still need one answer for every pool that asks.
@@ -206,29 +212,29 @@ func (a *poolSlotArbiter) decideLocked(slot uint64) string {
 			return a.noDecision(
 				slot,
 				"a leading pool has no Praos VRF schedule",
-			)
+			), true
 		}
 	}
 	input, reason := a.leaderVRFInputLocked(slot)
 	if reason != "" {
-		return a.noDecision(slot, reason)
+		return a.noDecision(slot, reason), true
 	}
 	best := ""
 	var bestOutput []byte
 	for _, m := range leaders {
 		_, output, err := m.creds.VRFProve(input)
 		if err != nil {
-			return a.noDecision(slot, "VRF prove failed: "+err.Error())
+			return a.noDecision(slot, "VRF prove failed: "+err.Error()), true
 		}
 		if len(output) != praos.VRFOutputSize {
-			return a.noDecision(slot, "VRF output has the wrong length")
+			return a.noDecision(slot, "VRF output has the wrong length"), true
 		}
 		if best == "" ||
 			praos.CompareVRFOutputs(output, bestOutput) == praos.ChainABetter {
 			best, bestOutput = m.poolID, output
 		}
 	}
-	return best
+	return best, true
 }
 
 // leaderVRFInputLocked builds the VRF input a block for slot proves its
