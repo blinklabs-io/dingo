@@ -23,6 +23,8 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
+
+	"github.com/blinklabs-io/dingo/internal/securefs"
 )
 
 func requirePrivateSnapshotParent(parent string) error {
@@ -166,20 +168,12 @@ func requireTrustedSnapshotOwner(path string, info fs.FileInfo) error {
 }
 
 // unsafelyWritableSnapshotAncestor reports whether a directory lets another
-// user replace its entries. A sticky directory is safe. So is the volume root
-// of a Kubernetes pod with securityContext.fsGroup: the kubelet makes it
-// group-owned by the fsGroup GID, group-writable and setgid, and that GID is
-// the process's own. Such a directory is accepted only while it is not
-// writable by other.
+// user replace its entries, using the rule in securefs.UnsafelyWritableAncestor.
+// A directory whose group cannot be read is treated as unsafe.
 func unsafelyWritableSnapshotAncestor(info fs.FileInfo) bool {
-	mode := info.Mode()
-	perm := mode.Perm()
-	if perm&0o022 == 0 || mode&os.ModeSticky != 0 {
-		return false
-	}
-	if perm&0o002 != 0 || mode&os.ModeSetgid == 0 {
-		return true
-	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	return !ok || int64(stat.Gid) != int64(os.Getegid())
+	if !ok {
+		return info.Mode().Perm()&0o022 != 0 && info.Mode()&os.ModeSticky == 0
+	}
+	return securefs.UnsafelyWritableAncestor(info.Mode(), stat.Gid)
 }

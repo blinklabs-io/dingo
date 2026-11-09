@@ -4104,7 +4104,8 @@ than any data. Before the first removal by name, `Restore` requires `dataDir`'s
 parent to pass `lifecycle.ValidateRestoreWorkParent` (on Unix, every ancestor
 owned by the current user or root and writable by others only with the sticky
 bit, or group-writable as a Kubernetes `fsGroup` volume root: setgid, its group
-the process's effective GID, and not other-writable), and the staging and backup directories are removed through
+is the process's effective or a supplementary GID, and it is not
+other-writable), and the staging and backup directories are removed through
 `lifecycle.RemoveRestoreWorkDir`, which recurses through a retained directory
 handle and never follows a substituted name. Local Badger/SQLite data is
 restored in `<dataDir>.restore-staging`, opened again through the node's actual
@@ -12977,8 +12978,8 @@ Temporary feed, extraction, and probe directories are created privately before
 their names are exposed. On Unix, each real directory in the absolute ancestor
 chain must be owned by the current user or root and may be group- or
 other-writable only when a trusted owner also set the sticky bit. A Kubernetes
-`fsGroup` volume root (setgid, group-owned by the process's effective GID, and
-not other-writable) may be group-writable without it. On Windows,
+`fsGroup` volume root (setgid, group-owned by the process's effective or a
+supplementary GID, and not other-writable) may be group-writable without it. On Windows,
 creation installs a protected inheritable ACL and retains no-delete handles on
 the created directory and every ancestor until cleanup or publication. The
 identity returned by native creation must match the directory opened for later

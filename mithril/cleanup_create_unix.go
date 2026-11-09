@@ -17,6 +17,8 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
+
+	"github.com/blinklabs-io/dingo/internal/securefs"
 )
 
 func canonicalBootstrapParent(path string) (string, error) {
@@ -126,7 +128,7 @@ func validateBootstrapAncestorChain(
 				"bootstrap parent ancestor %q is owned by UID %d", current, stat.Uid,
 			)
 		}
-		if unsafelyWritableAncestor(info.Mode(), stat.Gid) {
+		if securefs.UnsafelyWritableAncestor(info.Mode(), stat.Gid) {
 			return fmt.Errorf(
 				"bootstrap parent ancestor %q is writable by group or other without the sticky bit",
 				current,
@@ -137,21 +139,4 @@ func validateBootstrapAncestorChain(
 			return nil
 		}
 	}
-}
-
-// unsafelyWritableAncestor reports whether a directory with this mode and
-// group lets another user replace its entries. A sticky directory is safe.
-// So is the volume root of a Kubernetes pod with securityContext.fsGroup: the
-// kubelet makes it group-owned by the fsGroup GID, group-writable and setgid,
-// and that GID is the process's own. Such a directory is accepted only while
-// it is not writable by other.
-func unsafelyWritableAncestor(mode os.FileMode, gid uint32) bool {
-	perm := mode.Perm()
-	if perm&0o022 == 0 || mode&os.ModeSticky != 0 {
-		return false
-	}
-	if perm&0o002 != 0 || mode&os.ModeSetgid == 0 {
-		return true
-	}
-	return int64(gid) != int64(os.Getegid())
 }

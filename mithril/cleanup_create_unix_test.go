@@ -143,8 +143,8 @@ func TestBootstrapParentFSGroupVolumeRoot(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "foreign group", mode: setgid | 0o770, gid: egid + 1,
-			wantErr: true,
+			name: "foreign group", mode: setgid | 0o770,
+			gid: foreignBootstrapGID(t), wantErr: true,
 		},
 		{name: "no setgid", mode: 0o770, gid: egid, wantErr: true},
 	} {
@@ -175,5 +175,22 @@ func TestBootstrapParentFSGroupVolumeRoot(t *testing.T) {
 			}
 			require.NoError(t, err)
 		})
+	}
+}
+
+// foreignBootstrapGID returns a GID that is neither the process's effective
+// GID nor one of its supplementary groups.
+func foreignBootstrapGID(t *testing.T) uint32 {
+	t.Helper()
+	groups, err := os.Getgroups()
+	require.NoError(t, err)
+	member := map[int]bool{os.Getegid(): true}
+	for _, g := range groups {
+		member[g] = true
+	}
+	for gid := 60000; ; gid++ {
+		if !member[gid] {
+			return uint32(gid) //nolint:gosec // Small positive constant range.
+		}
 	}
 }

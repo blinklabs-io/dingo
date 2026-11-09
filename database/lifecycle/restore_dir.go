@@ -506,7 +506,10 @@ func activateRestoreDirs(
 // ValidateRestoreWorkParent reports an error unless dir is a real directory
 // whose absolute ancestor chain only the current user or root can modify. On
 // Unix, each ancestor must be owned by one of them and may be writable by
-// group or other only with the sticky bit set. Anyone else who could write
+// group or other only with the sticky bit set. The exception is a Kubernetes
+// fsGroup volume root: a setgid directory whose group is the process's
+// effective or a supplementary GID may be group-writable, but never
+// other-writable, without the sticky bit. Anyone else who could write
 // dir could rename a live data directory onto a work directory's name before
 // a removal or rename by that name runs.
 func ValidateRestoreWorkParent(dir string) error {
