@@ -780,6 +780,11 @@ func byronValidateWitnesses(
 	if len(witnesses) > len(inputs) {
 		witnesses = witnesses[:len(inputs)]
 	}
+	// Only input and witness pairs are checked, so an empty zip has no
+	// signature to verify and needs no protocol magic.
+	if len(witnesses) == 0 {
+		return nil
+	}
 	protocolMagicProvider, ok := stateCapability[ByronProtocolMagicProvider](ls)
 	if !ok {
 		return errors.New(
