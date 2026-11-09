@@ -4742,7 +4742,11 @@ ENACT applies at the boundary itself, so the decision forecasts it without
 writing: `governance.ForecastHardForkInitiations` applies the
 `HardForkInitiation` proposals marked ratified and not yet enacted, and those
 the previous boundary's deferred RATIFY has decided but not yet written, in the
-order ENACT would. A refusal releases the rollover's transaction-validation
+order ENACT would. The decision reads the parameters pending for the successor
+of the ledger epoch label, so a block beyond an empty epoch is judged by the same
+forecast as one that opens the successor: NEWEPOCH enacts nothing for it, but the
+transition the pending update names stands, and `ProtocolParamsForSlot` returns
+the parameters in force rather than the pending ones for such a slot. A refusal releases the rollover's transaction-validation
 transition before the block is rewound as a rejected header, and the ledger
 stays in its source era. The block's body era still selects the transition path:
 a header elevation is a header-carried protocol version, which outside mainnet
