@@ -544,12 +544,11 @@ func (cs *ChainSelector) clonePeerTipAdmissionFrontier(
 	result.observedTipHistory = nil
 	result.admittedTipHistory = nil
 	if cs.mode == SelectionModeGenesis {
-		result.observedSlots = append([]uint64(nil), peerTip.observedSlots...)
-		result.observedPoints = cloneObservedPoints(peerTip.observedPoints)
+		// The struct copy shares the committed frontier's windows. Points
+		// and hash bytes in a window are never written after they are
+		// appended, so both peers may keep reading and appending to them.
 	} else {
-		result.observedSlots = nil
-		result.observedPoints = nil
-		result.observedPointBaseBlock = 0
+		result.resetObservedFrontier()
 	}
 	return &result
 }
@@ -912,8 +911,7 @@ func (cs *ChainSelector) advanceSelectionModeWithBestKnownBlockLocked(
 	// Corroboration no longer applies in Praos; drop the per-peer hash
 	// frontier so it does not linger for the full window on every tracked peer.
 	for _, peerTip := range cs.peerTips {
-		peerTip.observedPoints = nil
-		peerTip.observedPointBaseBlock = 0
+		peerTip.resetObservedPoints()
 	}
 	clear(cs.deliveredPeerTips)
 	clear(cs.eagernessDeliveries)
