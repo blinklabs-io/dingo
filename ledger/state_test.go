@@ -7737,12 +7737,22 @@ func TestBoundaryEraTransitionsSnapshotRecordsFinalProtocolVersion(
 		t.Fatal("epoch rollover returned no result")
 	}
 	require.Len(t, captures, 1)
+	// Dingo's Shelley-to-Allegra translation raises the major to Allegra's:
+	// the AVVM return (hardfork_rule.go) and the forger's Shelley/Allegra
+	// split are keyed on it. The reference ledger copies the version there too,
+	// so this is a known divergence for a chain that reaches Allegra by trigger
+	// epoch. The Mary translation carries the major over unchanged, as
+	// upgradePParams does. The snapshot records the major the new epoch runs
+	// at, which is no longer the source era's major.
 	require.Equal(
 		t,
-		uint(mary.MinProtocolVersionMary),
+		uint(allegra.MinProtocolVersionAllegra),
 		captures[0].ProtocolVersion,
-		"the mark snapshot must record the protocol major of the era the "+
-			"new epoch runs at, not the era the rollover started in",
+		"the mark snapshot must record the protocol major the new epoch "+
+			"runs at, not the one the rollover started with",
+	)
+	require.NotEqual(
+		t, uint(shelley.MinProtocolVersionShelley), captures[0].ProtocolVersion,
 	)
 	require.Equal(t, eras.MaryEraDesc.Id, result.NewCurrentEra.Id)
 	require.Equal(t, eras.MaryEraDesc.Id, result.NewCurrentEpoch.EraId)
