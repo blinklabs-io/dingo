@@ -113,16 +113,37 @@ func TestRemoteReadinessDoesNotBlockKESEvolution(t *testing.T) {
 	go func() { ready <- pc.usableAtKESPeriod(0) }()
 	defer func() {
 		close(release)
-		require.NoError(t, dingotestutil.RequireReceive(t, ready, 5*time.Second, "readiness completes after release"))
+		require.NoError(
+			t,
+			dingotestutil.RequireReceive(
+				t,
+				ready,
+				5*time.Second,
+				"readiness completes after release",
+			),
+		)
 	}()
-	dingotestutil.RequireReceive(t, entered, 5*time.Second, "readiness handshake entered")
+	dingotestutil.RequireReceive(
+		t,
+		entered,
+		5*time.Second,
+		"readiness handshake entered",
+	)
 	evolved := make(chan error, 1)
 	go func() {
 		evolved <- pc.updateKESPeriodForGeneration(
 			snapshot.id, snapshot.materialRevision, 1,
 		)
 	}()
-	require.NoError(t, dingotestutil.RequireReceive(t, evolved, time.Second, "KES evolution must not wait for readiness I/O"))
+	require.NoError(
+		t,
+		dingotestutil.RequireReceive(
+			t,
+			evolved,
+			time.Second,
+			"KES evolution must not wait for readiness I/O",
+		),
+	)
 }
 
 // TestCredentialGenerationKesSignRejectsExpiredPeriod proves the
@@ -2512,6 +2533,9 @@ func TestCheckAndForgeProductionStopsBeforeOpCertStart(t *testing.T) {
 			chainTipSlot:      3,
 			slotsPerKESPeriod: 1,
 		},
+		EraParams: &mockPParamsProvider{
+			pparams: &conway.ConwayProtocolParameters{},
+		},
 		LeiosProduceChecker:        leiosChecker,
 		LeiosEBBroadcaster:         &forgerTestLeiosCaster{},
 		LeiosMempool:               forgerTestMempoolProvider{},
@@ -2820,6 +2844,9 @@ func TestCheckAndForgeProductionRejectsReentrantLeiosRevalidation(
 			currentSlot:       1,
 			chainTipSlot:      0,
 			slotsPerKESPeriod: 1,
+		},
+		EraParams: &mockPParamsProvider{
+			pparams: &conway.ConwayProtocolParameters{},
 		},
 		LeiosProduceChecker:        leiosChecker,
 		LeiosEBBroadcaster:         &forgerTestLeiosCaster{},
@@ -3321,7 +3348,9 @@ type forgerTestLeiosParentAnnouncement struct {
 	rbHashAfterFirst *lcommon.Blake2b256
 }
 
-func (p *forgerTestLeiosParentAnnouncement) ParentLeiosAnnouncement(ctx context.Context) (
+func (p *forgerTestLeiosParentAnnouncement) ParentLeiosAnnouncement(
+	ctx context.Context,
+) (
 	lcommon.Blake2b256,
 	lcommon.Blake2b256,
 	bool,
@@ -3650,7 +3679,9 @@ func TestCheckAndForgeProductionRecoversBlockBroadcasterPanic(t *testing.T) {
 	assert.Equal(t, float64(1), testutil.ToFloat64(forger.metrics.forgeAdopted))
 }
 
-func TestCheckAndForgeProductionAdoptsUnavailableLeiosAnnouncement(t *testing.T) {
+func TestCheckAndForgeProductionAdoptsUnavailableLeiosAnnouncement(
+	t *testing.T,
+) {
 	t.Parallel()
 	creds := setupTestCredentials(t)
 	block := newForgerTestBlock(10, 2)
@@ -3671,6 +3702,9 @@ func TestCheckAndForgeProductionAdoptsUnavailableLeiosAnnouncement(t *testing.T)
 			currentSlot:       10,
 			chainTipSlot:      9,
 			slotsPerKESPeriod: 100,
+		},
+		EraParams: &mockPParamsProvider{
+			pparams: &conway.ConwayProtocolParameters{},
 		},
 		LeiosProduceChecker: leiosChecker,
 		LeiosEBBroadcaster:  leiosCaster,
@@ -3781,8 +3815,10 @@ func TestCheckAndForgeProductionRejectsLeiosAnnouncementValidationFailure(
 			defer cancel()
 
 			forger, err := NewBlockForger(ForgerConfig{
-				Mode:             ModeProduction,
-				Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
+				Mode: ModeProduction,
+				Logger: slog.New(
+					slog.NewJSONHandler(io.Discard, nil),
+				),
 				Credentials:      creds,
 				LeaderChecker:    forgerTestLeader{},
 				BlockBuilder:     builder,
@@ -3792,6 +3828,9 @@ func TestCheckAndForgeProductionRejectsLeiosAnnouncementValidationFailure(
 					chainTipSlot:      9,
 					slotsPerKESPeriod: 100,
 				},
+				EraParams: &mockPParamsProvider{
+					pparams: &conway.ConwayProtocolParameters{},
+				},
 				LeiosProduceChecker: leiosChecker,
 				LeiosEBBroadcaster:  leiosCaster,
 				LeiosTxValidator:    &mockTxValidator{},
@@ -3800,8 +3839,11 @@ func TestCheckAndForgeProductionRejectsLeiosAnnouncementValidationFailure(
 					header ledger.BlockHeader,
 				) error {
 					require.Same(t, block, header)
-					require.Zero(t, broadcaster.calls,
-						"announcement validation must precede ranking-block adoption")
+					require.Zero(
+						t,
+						broadcaster.calls,
+						"announcement validation must precede ranking-block adoption",
+					)
 					announcementValidated = true
 					if test.cancelInValidator {
 						cancel()
@@ -3824,7 +3866,11 @@ func TestCheckAndForgeProductionRejectsLeiosAnnouncementValidationFailure(
 
 			require.True(t, announcementValidated)
 			require.Zero(t, broadcaster.calls)
-			require.Equal(t, float64(1), testutil.ToFloat64(forger.metrics.forgeValidationFailed))
+			require.Equal(
+				t,
+				float64(1),
+				testutil.ToFloat64(forger.metrics.forgeValidationFailed),
+			)
 			require.Equal(t, 1, leiosChecker.calls)
 			require.NotEmpty(t, leiosCaster.hash)
 			require.Equal(t, uint64(10), leiosCaster.slot)
@@ -3899,10 +3945,13 @@ func TestCheckAndForgeProductionCertifiesLeiosEBAfterAdoption(t *testing.T) {
 				LeiosCertificateProvider:        leiosCerts,
 				LeiosCertificationTimingChecker: forgerTestCertTiming{},
 				LeiosParentAnnouncementProvider: parent,
-				LeiosProduceChecker:             leiosChecker,
-				LeiosEBBroadcaster:              leiosCaster,
-				LeiosTxValidator:                &mockTxValidator{},
-				LeiosAnnouncementValidator:      acceptLeiosAnnouncement,
+				EraParams: &mockPParamsProvider{
+					pparams: &conway.ConwayProtocolParameters{},
+				},
+				LeiosProduceChecker:        leiosChecker,
+				LeiosEBBroadcaster:         leiosCaster,
+				LeiosTxValidator:           &mockTxValidator{},
+				LeiosAnnouncementValidator: acceptLeiosAnnouncement,
 				// Mempool entries are keyed by transaction id, as the
 				// real mempool keys them. The closure is served by the
 				// provider as block_transaction CBOR, whose manifest
@@ -4152,7 +4201,11 @@ type forgerTestValidator struct {
 	calls int
 }
 
-func (v *forgerTestValidator) ValidateForgedBlock(context.Context, ledger.Block, []byte) error {
+func (v *forgerTestValidator) ValidateForgedBlock(
+	context.Context,
+	ledger.Block,
+	[]byte,
+) error {
 	v.calls++
 	if v.panic {
 		panic("validator panic")
@@ -4199,7 +4252,11 @@ type trackingBroadcaster struct {
 	onAdd func()
 }
 
-func (b *trackingBroadcaster) AddBlock(ctx context.Context, block ledger.Block, cbor []byte) error {
+func (b *trackingBroadcaster) AddBlock(
+	ctx context.Context,
+	block ledger.Block,
+	cbor []byte,
+) error {
 	b.onAdd()
 	return b.inner.AddBlock(context.Background(), block, cbor)
 }

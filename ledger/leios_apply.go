@@ -408,7 +408,7 @@ func (ls *LedgerState) validateAndApplyEndorserBlockTransactions(
 				err,
 			)
 		}
-		validationEra, err := resolveValidationEra(
+		validationEra, err := resolveBlockValidationEra(
 			tx,
 			snapshot.currentEra,
 			snapshot.eraList,

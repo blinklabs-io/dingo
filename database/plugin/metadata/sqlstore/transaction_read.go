@@ -132,8 +132,7 @@ func (s *Store) SumTransactionFeesInSlotRange(
 	if err != nil {
 		return 0, err
 	}
-	total, err := sumUint64Rows(ctx, db, s.dialect.Rebind(`
-SELECT CASE WHEN tx.valid THEN tx.fee ELSE tx.collateral_fee END
+	query := `SELECT CASE WHEN tx.valid THEN tx.fee ELSE tx.collateral_fee END AS amount
 FROM "transaction" tx
 WHERE tx.slot >= ? AND tx.slot <= ?
   AND NOT EXISTS (SELECT 1 FROM leios_transaction_context context WHERE context.transaction_id = tx.id)
@@ -141,7 +140,17 @@ UNION ALL
 SELECT CASE WHEN tx.valid THEN tx.fee ELSE tx.collateral_fee END
 FROM leios_transaction_context context
 JOIN "transaction" tx ON tx.id = context.transaction_id
-WHERE context.slot >= ? AND context.slot <= ?`), validInt64(start), validInt64(end), validInt64(start), validInt64(end))
+WHERE context.slot >= ? AND context.slot <= ?`
+	if s.dialect.Name() == "sqlite" {
+		// Check each coin before summing; signed aggregation could hide a
+		// corrupt negative row behind another transaction's positive fee.
+		query = `-- name: SumTransactionFeesInSlotRangeAggregate :one
+SELECT dingo_coin_sum(amount) FROM (` + query + `) AS fees`
+	} else {
+		query = "-- name: SumTransactionFeesInSlotRangeRows :many\n" + query
+	}
+	total, err := sumUint64Rows(ctx, db, s.dialect.Rebind(query),
+		validInt64(start), validInt64(end), validInt64(start), validInt64(end))
 	if err != nil {
 		return 0, fmt.Errorf("sum transaction fees in slot range: %w", err)
 	}

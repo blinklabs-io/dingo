@@ -5470,6 +5470,20 @@ FROM "transaction"
 WHERE hash IN (decode($1, 'hex'), decode($2, 'hex'));
 ```
 
+### `SumTransactionFeesInSlotRange`
+
+Fees use the inclusive execution-slot range: valid transactions contribute
+their declared fee and phase-2-invalid transactions their collateral fee.
+Leios context rows replace the certifying block's slot for this selection.
+SQLite sums selected amounts with the provider-registered `dingo_coin_sum`
+aggregate (`database/plugin/metadata/sqlite/coinsum`), returning one decimal
+value instead of every transaction row to Go. Each input and the running total
+must fit `uint64`; NULL and empty inputs contribute zero, while malformed,
+negative, floating-point and oversized values fail. Callback arguments are
+consumed before returning; only the numeric total and owned error text survive.
+The caller's transaction and cancellation still govern the query. PostgreSQL
+and MySQL retain per-row unsigned validation in Go. No schema change.
+
 ### `GetTransactionsByBlockHash`
 
 ```sql
@@ -6968,6 +6982,18 @@ null or after it, each with the `vote` and anchor of its latest
 predates the v22 journal: it is returned with its row's values when they took
 effect at or before `slot`, and left out otherwise, since a vote replaced
 before the journal after `slot` has no record of its value there.
+
+`DeleteGovernanceVotesAfterSlot` discards future history before deleting votes
+created after the target or lacking any surviving history. Orphan detection uses
+a non-correlated set of non-null history vote IDs, so it does not rescan the
+history table per vote when its lookup index is absent. On SQLite, restoration writes only
+votes whose value, anchor URL, anchor hash, or update slot differs from the
+latest surviving history entry, with null-safe tuple comparison. Numeric values
+in the affinity-free anchor hash BLOB column always restore, preserving their
+storage classes and floating-point bits even when SQL considers them equal. This also
+normalizes older replayed casts and legacy null timestamps while leaving
+unaffected votes untouched. Other SQL providers retain full restoration.
+Deletion-slot restoration remains independent.
 
 ### `GetAccountSumsByCredential`
 

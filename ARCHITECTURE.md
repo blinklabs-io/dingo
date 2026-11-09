@@ -107,6 +107,11 @@ is still busy. On PostgreSQL and MySQL this also includes read activity and a
 bulk-load session holding its dedicated connection; the detailed scheduling
 and SQLite reclaim behavior is documented in `DATABASE.md`.
 
+The SQLite provider registers decimal aggregates beside its driver, keeping
+driver imports out of the shared store. Its `coinsum` aggregate validates each
+coin and the total as `uint64`, allowing execution-slot fee queries to return
+one row while preserving rejection of invalid stored amounts.
+
 The SQLite provider certifies eager preparation for optional wider overlay
 UTxO inserts. The shared store checks the existing transaction's runtime
 parameter limit and main/TEMP trigger state before widening that one statement.
@@ -1419,6 +1424,13 @@ occupancy. An error without a supported era-specific representation terminates
 the connection through the protocol error path instead of fabricating a ledger
 failure. Clients must reconnect after that termination.
 
+Transaction admission and standalone evaluation accept only the ledger's
+current era. A transaction tagged with any other era is rejected with the
+hard-fork combinator's typed era-mismatch error before era-specific validation.
+Block application is different: a historical block from the era immediately
+before the ledger's current era remains valid across a hard-fork boundary and
+is checked with that block era's validator and protocol parameters.
+
 LocalTxSubmission validation runs under a context that is cancelled when the
 bearer closes. The listener starts an NtC connection's protocols before it
 registers the connection, so the handler watches the mini-protocol's stop
@@ -2145,19 +2157,23 @@ already queued restores. Revalidation therefore sees transactions in ledger
 order.
 
 `Mempool.AddTransaction` refuses a submission larger than the `MaxTxSize`
-ledger validation would apply to it before decoding it, taking
-`mutationMutex`, or running ledger rules. That limit follows the submitted era
-as transaction validation does: the current era's parameters, or the previous
-era's for a previous-era transaction. No limit is reported, and the ledger
-decides alone, for an era it refuses, an era whose validation is skipped, or
-parameters that are not the type that era's validation requires. The size is
-measured as `common.TxSize` does (the raw CBOR length, one byte less for a
-four-element transaction from Alonzo on), so the early rejection never refuses
-a transaction the ledger rule would accept; the rule still decides everything
-that passes. The limit comes from the optional `mempool.TxSizeLimitProvider`
-implemented by `LedgerState`, and the rejection is the ledger's own
-`shelley.MaxTxSizeUtxoError`, so every submit path reports it as an ordinary
-transaction rejection.
+ledger validation would apply to it before constructing the ledger transaction,
+taking `mutationMutex`, or running ledger rules. A limit is reported only for the
+current era; a wrong-era transaction reaches ledger validation so its typed
+era-mismatch error takes precedence over a size error. No limit is reported
+for an era whose validation is skipped or parameters that are not the type its
+validation requires. From Alonzo through Conway, the ledger's fee and maximum
+size rules measure a canonical three-element transaction envelope while
+preserving the exact received body, witness-set and auxiliary-data bytes; the
+third element of a four-element envelope is the IsValid field and is omitted.
+Dijkstra keeps the same canonical three-component measure for its current
+mempool envelope, its legacy mempool envelope with a `true` validity flag before
+auxiliary data, and its block envelope with the validity flag last. An unrecognized or
+ambiguous envelope keeps its full received size. The raw admission guard and
+decoded ledger rules use the same sizing primitive. The limit comes from the
+optional `mempool.TxSizeLimitProvider` implemented by `LedgerState`, and the
+rejection is the ledger's own `shelley.MaxTxSizeUtxoError`, so every submit path
+reports it as an ordinary transaction rejection.
 
 Mempool admission, revalidation, block-candidate selection and forged-block
 validation each validate a transaction against the UTxO overlay and a state
@@ -4592,7 +4608,10 @@ applicable endorser transactions and before the ranking block's own mutations.
 The check resolves UTxOs from the block's single prefetch, which the
 per-transaction validators then reuse, so each input the prefetch returns is
 read from the database once; an input it does not return is read by each check
-that needs it. A block of the era listed before the ledger's era is judged under
+that needs it. Outputs created by an earlier transaction are visible through
+the block overlay until another transaction consumes them; a spent overlay
+output cannot resolve as a regular, collateral, or reference input later in the
+block. A block of the era listed before the ledger's era is judged under
 the previous era's parameters, the same rule applied to its transactions. With
 `LedgerStateConfig.LedgerPrefetchAheadEnabled` (`ledgerPrefetchAheadEnabled`, on
 by default in node configuration), the block-apply chunk also resolves block
@@ -5553,9 +5572,27 @@ leios-fetch server uses the same lookup path for downstream `MsgBlockRequest`
 and `MsgBlockTxsRequest`: it serves from the in-memory cache when present, and
 on cache miss or expired-entry eviction reloads the manifest and complete tx
 list from the durable `em`/`et` blob keys so historical EBs can be re-served
-after the cache TTL. A missing endorser block or incomplete transaction set is
-declined with the protocol's typed `ErrBlockNotFound` or `ErrBlockTxsNotFound`,
-while malformed transaction bitmaps retain their validation error.
+after the cache TTL. Relayed ranking-block announcements remain queued, in arrival
+order per endorser-block occurrence, until that occurrence's EB manifest is
+available;
+independent ChainSync propagation is unchanged. The queue shares the validated
+announcement admission and expiry bounds, and expired headers are discarded
+even if historical backfill later loads their manifests. Manifest publication
+queues the retained headers before its offers, so a peer cannot fetch solely
+from a relayed header before this node can serve the content. When an exact,
+validated announced occurrence already
+has an admitted manifest or transaction fetch in progress, serving waits up to
+five seconds for that existing work rather than failing the shared bearer just
+before the content arrives. The deadline is absolute across fetch-owner
+handoffs, and at most 64 such requests wait concurrently. Manifest completion
+signals are owner-specific; partial transaction availability is checked against
+only the requested bitmap, without waiting for unrequested transactions. Each
+wait validates its actual LeiosFetch server owner and uses the same connection's
+owner-aware teardown signal, so disconnects cannot leave a callback parked.
+No serving request initiates a new network fetch. Unknown or unclaimed points,
+failed fetches and expired waits retain the typed `ErrBlockNotFound` or
+`ErrBlockTxsNotFound` error; these errors end the bearer because LeiosFetch has
+no absence reply. Malformed transaction bitmaps retain their validation error.
 `MsgBlockRangeRequest` is not served, and is declined with an explicit error
 rather than by returning nil from the callback: gouroboros reads a nil return as
 "an async range send was started", so returning nil left dingo holding
@@ -5641,7 +5678,18 @@ released instead of offering the same entry again. A successfully sent entry is
 therefore never offered to that connection twice. Failed or aborted sends
 release the reservation into a counted retry set retained across reconnects; a
 reconnect advances through every pending retry on its stream rather than
-clearing only the first failed entry. The transitional offered-ID and four-field
+clearing only the first failed entry. Endorser-block offers retain their signed
+announcing header as a dependency. A connection that resumes at an offer after
+reconnect or transient-entry eviction receives that header first, reserving the
+same logical offer index until the header send succeeds. Per-connection header
+identities prevent repeated announcements even when offers interleave; identities
+expire at the original slot-relative relay deadline, and a full bounded history
+recycles the connection without forgetting a live identity. Connection-owner
+replacement clears this history. Relay announcements and offers wait for the
+complete transaction cache, and serving rechecks content availability before
+sending a queued header or dependent offer. Expired dependencies and unavailable
+content are not advertised. Persisted oversized content remains servable without
+entering the bounded cache and still releases pending relay announcements. The transitional offered-ID and four-field
 forms remain decode-compatible only.
 
 Apply-boundary validation checks the exact endorser block
@@ -11095,6 +11143,9 @@ consensus-context generation. Rollback or state replacement changes that
 generation, while the leader manager clears its in-memory Tachys schedules on
 every rollback synchronously after the replacement consensus snapshot is
 published, and refuses an in-flight result from the older schedule generation.
+A Praos rollback retains the current epoch's immutable schedule, discards every
+future schedule, and refuses in-flight results from the older generation before
+recomputing any next-epoch schedule whose nonce remains ready.
 A distribution read that observes a consensus-context change defers header
 verification instead of reporting the stake snapshot unavailable. Next-epoch
 nonce readiness drops only the ready epoch's schedule; the current epoch's
@@ -11887,7 +11938,26 @@ fixed fallback budget rather than leaving the pass unbounded. Truncated passes
 are logged and counted (`dingo_forge_eb_selection_truncated_total`), and
 `forgeEbMaxTxRefs` / `forgeEbMaxBytes` (default 20000 references, 24 MiB; an
 explicit 0 disables either) cap the manifest and the memory its construction
-reserves, as backstops behind the deadline.
+reserves, as backstops behind the deadline. Within those operator caps the
+endorser block is held to the capacity the protocol parameters in force at the
+slot allow (`effectiveLeiosEBCaps`): the referenced transactions total at most
+`maxEndorserBlockTxsSize` bytes, measured as the block_transaction bytes the
+manifest references, and the encoded manifest, the size the ranking-block header
+announces, at most `maxEndorserBlockReferencesSize`. Both bound selection as
+well as manifest construction, so selection stops at the first valid transaction
+that no longer fits instead of validating the rest of a deep mempool. They are
+not optional: the reference node never fetches the closure of an endorser block
+over `maxEndorserBlockTxsSize` (`ExnLeiosClosureTooBig`), so no honest committee
+member votes for it, and a header announcing a manifest over
+`maxEndorserBlockReferencesSize` is invalid (`LeiosEbTooBig`). The limits are
+read from the protocol parameters in force at the slot, not from genesis, so an
+on-chain update raising them applies to the next endorser block; the operator
+defaults (24 MiB, 20000 references) can exceed them. Missing, typed-nil or
+unrecognized slot parameters, or either Dijkstra capacity set to zero, skip
+endorser-block production before mempool validation and increment the
+`protocol_capacity_unavailable` skip counter. Ranking-block forging continues
+without a new announcement. Known earlier-era parameters retain the operator
+caps for the Conway-header Leios prototype.
 
 #### Self-Validation (`DINGO_VALIDATE_FORGED_BLOCK`)
 
@@ -12898,9 +12968,10 @@ substituted at the archive name is preserved.
 With `CleanupAfterLoad` set, an API-mode `Sync` runs `Cleanup` as soon as
 `sync_status` becomes `backfill`, before the metadata backfill starts: the
 backfill reads blocks from the blob store, and on mainnet it runs for days
-while the extracted immutable tree holds hundreds of GB. `serve` resumes an
-interrupted backfill without the tree; re-running `dingo mithril sync` instead
-downloads the immutable archives again. Core mode cleans up at completion.
+while the extracted immutable tree holds hundreds of GB. Both `serve` and a
+re-run of `dingo mithril sync` resume an interrupted backfill from its
+checkpoint without the tree or the aggregator. Core mode cleans up at
+completion.
 
 Temporary feed, extraction, and probe directories are created privately before
 their names are exposed. On Unix, each real directory in the absolute ancestor
@@ -13825,9 +13896,14 @@ exactly as before: no coordinator starts and no aggregator is contacted.
 the database state alone, so the operator never needs to know it:
 
 - empty database -> full bootstrap
-- non-empty `sync_status` (`in_progress`, `backfill`, or an unknown future
-  value) -> resume the existing path against the pinned artifact (below),
-  except an interrupted v2 core catch-up
+- `sync_status` `backfill` in API mode, as an ordinary backfill with no
+  pending repair or catch-up -> resume the metadata backfill from its
+  checkpoint and finish the import; every block is already in the blob store,
+  so nothing is downloaded (`resumeMithrilBackfill`). The recorded artifact pin
+  is still checked against the run's backend and network first
+- any other non-empty `sync_status` (`in_progress`, or an unknown future value)
+  -> resume the existing path against the pinned artifact (below), except an
+  interrupted v2 core catch-up
   (import marker present, or the ephemeral `mithril_catchup_active` flag for a
   markerless catch-up) re-runs as a catch-up so the reconcile pass repairs the
   partial import
@@ -22844,11 +22920,11 @@ that operation is actually evaluating against. Every `ValidateTxFunc`/
 `EvaluateTxFunc` call site pins this alongside `pp` itself, sourced from
 `ledger.LedgerState.syntheticV2CostModel` (or its snapshot mirror). Since
 that tracked flag describes the *current* era's own `pparams` specifically,
-a call site validating an era-1 transaction against `prevEraPParams` instead
-re-derives the answer directly from `prevEraPParams`'s own value
-(`syntheticV2CostModelForValidation`, the same bootstrap heuristic
-`resolveSyntheticV2CostModel`'s empty-marker branch uses) rather than
-reusing the current era's flag for a different pparams object.
+a block-application call site validating an era-1 transaction against
+`prevEraPParams` instead re-derives the answer directly from
+`prevEraPParams`'s own value (`syntheticV2CostModelForValidation`, the same
+bootstrap heuristic `resolveSyntheticV2CostModel`'s empty-marker branch uses)
+rather than reusing the current era's flag for a different pparams object.
 
 The block-application call site (`ledgerProcessBlock`) cannot source this
 from a snapshot mirror the way mempool/standalone validation do, since it
