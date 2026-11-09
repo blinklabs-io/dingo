@@ -48,7 +48,7 @@ func resetGlobalConfig() {
 		DebugBindAddr:                    DefaultDebugBindAddr,
 		MetricsBindAddr:                  DefaultMetricsBindAddr,
 		PrivateBindAddr:                  "127.0.0.1",
-		PrivatePort:                      3002,
+		PrivatePort:                      0,
 		RelayPort:                        3001,
 		CORSAllowedOrigins:               []string{"*"},
 		Topology:                         "",

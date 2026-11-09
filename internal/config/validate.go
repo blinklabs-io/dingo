@@ -450,7 +450,7 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	}
 	ports := slices.Concat([]portSpec{
 		{"port (relay/NtN)", c.BindAddr, c.RelayPort, serving, serving},
-		{"privatePort", c.PrivateBindAddr, c.PrivatePort, serving, serving},
+		{"privatePort", c.PrivateBindAddr, c.PrivatePort, serving, false},
 		{
 			"metricsPort",
 			c.MetricsBindAddr,

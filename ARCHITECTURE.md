@@ -17879,8 +17879,8 @@ LocalStateQuery requests have a bounded process-wide footprint.
 Disabling the mux segment-read timeout is unsafe to grant unconditionally,
 though: `internal/node/node.go` builds two separate `UseNtC` listeners from
 ordinary operator config -- a Unix socket (`cfg.SocketPath`) and a TCP listener
-(`cfg.PrivateBindAddr:cfg.PrivatePort`, defaulting to `127.0.0.1:3002` but not
-code-enforced to stay there) -- and there is no authentication or identity check
+(`cfg.PrivateBindAddr:cfg.PrivatePort`, disabled by default with `PrivatePort`
+0 and bound to `127.0.0.1` when enabled, but not code-enforced to stay there) -- and there is no authentication or identity check
 between `accept()` and these options being applied; `connmanager` only enforces
 a connection-count limit (`MaxNtCConns`/`MaxNtCConnectionsPerIP`), not who is
 connecting. Disabling the mux segment-read timeout for *any* client that
