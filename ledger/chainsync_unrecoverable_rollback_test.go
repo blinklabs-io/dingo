@@ -531,3 +531,25 @@ func TestRollbackTargetOnLocalChainExpiredCbor(t *testing.T) {
 		),
 	))
 }
+
+// The prune-floor rejection classifies its target once: the WARN/ERROR choice
+// reuses the membership result the stuck-rollback tracker cached for the
+// unchanged local tip instead of repeating the storage lookup.
+func TestRollbackTargetOnLocalChainReusesTrackerClassification(t *testing.T) {
+	t.Parallel()
+	fixture := newChainsyncRollbackFixture(t)
+	lookups := 0
+	fixture.ls.lookupBlockByHash = func(hash []byte) (models.Block, error) {
+		lookups++
+		return database.BlockByHash(t.Context(), fixture.ls.db, hash)
+	}
+	for range 3 {
+		fixture.ls.reportUnrecoverableRollbackIfStuck(
+			fixture.ancestorTip.Point,
+			event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
+			fixture.connId,
+		)
+		require.True(t, fixture.ls.rollbackTargetOnLocalChain(fixture.ancestorTip.Point))
+	}
+	require.Equal(t, 1, lookups, "membership is classified once for this tip")
+}

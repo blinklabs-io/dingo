@@ -2742,8 +2742,14 @@ func (ls *LedgerState) headerAlreadyOnPrimaryChain(
 }
 
 // rollbackTargetOnLocalChain reports whether a peer-requested rollback target
-// is origin or a block on the local primary chain. A lookup error reports
-// false so the caller keeps the more severe classification.
+// is origin or a block on the local primary chain. It shares the membership
+// result cached in the point's unrecoverableRollbacks record for the unchanged
+// local tip with reportUnrecoverableRollbackIfStuck, reading it when present
+// and filling it otherwise, so a repeated rejection costs one storage read. A
+// lookup error reports false so the caller keeps the more severe
+// classification.
+//
+// Callers must hold chainsyncMutex.
 func (ls *LedgerState) rollbackTargetOnLocalChain(
 	point ocommon.Point,
 ) bool {
@@ -2753,11 +2759,30 @@ func (ls *LedgerState) rollbackTargetOnLocalChain(
 	if ls.chain == nil {
 		return false
 	}
-	onPrimary, err := ls.historicalPointOnPrimaryChain(
-		point,
-		ls.chain.HeaderTip(),
-	)
-	return err == nil && onPrimary
+	localTip := ls.chain.HeaderTip()
+	key := unrecoverableRollbackKey(point)
+	rec, ok := ls.unrecoverableRollbacks[key]
+	cacheable := ok && pointMatches(rec.localTip, localTip.Point)
+	if cacheable && rec.primaryChainChecked {
+		return rec.onPrimaryChain
+	}
+	onPrimary, err := ls.historicalPointOnPrimaryChain(point, localTip)
+	if err != nil {
+		ls.config.Logger.Debug(
+			"could not classify rollback target against primary chain",
+			"component", "ledger",
+			"slot", point.Slot,
+			"hash", hex.EncodeToString(point.Hash),
+			"error", err,
+		)
+		return false
+	}
+	if cacheable {
+		rec.primaryChainChecked = true
+		rec.onPrimaryChain = onPrimary
+		ls.unrecoverableRollbacks[key] = rec
+	}
+	return onPrimary
 }
 
 // historicalPointOnPrimaryChain performs the bounded local membership check
@@ -4010,8 +4035,15 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 			// boundary does. Returning the error instead would reach
 			// handleEventChainsync's fatal path and terminate the node on a
 			// rollback a peer chose.
-			// A target on our own chain (origin included) means the peer is
-			// behind or forked, so it is not a local fault worth ERROR.
+			// The tracker runs first so the log level below reuses its cached
+			// membership result. A target on our own chain (origin included)
+			// means the peer is behind or forked, so it is not a local fault
+			// worth ERROR.
+			ls.reportUnrecoverableRollbackIfStuck(
+				e.Point,
+				event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
+				e.ConnectionId,
+			)
 			logRejection := ls.config.Logger.Error
 			if ls.rollbackTargetOnLocalChain(e.Point) {
 				logRejection = ls.config.Logger.Warn
@@ -4030,11 +4062,6 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 				err,
 				"hint",
 				"UTxOs consumed above the prune floor were hard-deleted and cannot be restored by a rewind",
-			)
-			ls.reportUnrecoverableRollbackIfStuck(
-				e.Point,
-				event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
-				e.ConnectionId,
 			)
 			ls.resetChainsyncResyncState(pending)
 			ls.setChainsyncState(SyncingChainsyncState)
