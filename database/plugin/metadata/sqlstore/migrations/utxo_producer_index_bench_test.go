@@ -41,6 +41,7 @@ func TestUtxoProducerIndexMigrationScale(t *testing.T) {
 	}
 	rows, err := strconv.Atoi(rowsEnv)
 	require.NoError(t, err)
+	require.Greater(t, rows, 1, "DINGO_MIGRATION_BENCH_ROWS must be greater than 1")
 	txs := rows / 2
 	path := filepath.Join(t.TempDir(), "metadata.sqlite")
 	dsn := "file:" + path + "?_pragma=journal_mode(WAL)&_pragma=synchronous(OFF)" +
@@ -70,11 +71,13 @@ WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < %d)
 INSERT INTO utxo (transaction_id, tx_id, output_idx, credential_tag,
     payment_key, added_slot, deleted_slot, spent_by_tx_id, amount)
 SELECT CASE WHEN i %% 10 = 0 THEN NULL ELSE 1 + ((i - 1) %% %d) END,
-    randomblob(32), (i - 1) / %d, 0, randomblob(28), i,
+    CASE WHEN i %% 10 = 0 THEN randomblob(32)
+         ELSE (SELECT hash FROM "transaction" WHERE id = 1 + ((i - 1) %% %d)) END,
+    (i - 1) / %d, 0, randomblob(28), i,
     CASE WHEN i %% 5 = 0 THEN 0 ELSE i + 1 END,
     CASE WHEN i %% 5 = 0 THEN NULL ELSE 1 + (i * 7919) %% %d END,
     '1000000'
-FROM n`, rows, txs, txs, txs))
+FROM n`, rows, txs, txs, txs, txs))
 	require.NoError(t, err)
 	_, err = db.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
 	require.NoError(t, err)

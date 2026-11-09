@@ -18,12 +18,15 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 )
 
-// sqliteOrOfRefs is the SQLite form of the legacy OR-of-references
-// predicate the plan tests compare the production statements against: one
-// "(id = <reference>)" term per reference.
+// sqliteOrOfRefs is the legacy OR-of-references predicate the plan tests
+// compare the production statements against: one "(tx_id = ? AND output_idx =
+// ?)" term per reference, independent of the production identity predicate.
 func sqliteOrOfRefs(refs []models.UtxoId) (string, []any) {
-	return joinN(len(refs), " OR ", "("+sqliteRefEq+")"),
-		sqliteOrRefArgs(refs)
+	args := make([]any, 0, len(refs)*2)
+	for _, ref := range refs {
+		args = append(args, ref.Hash, ref.Idx)
+	}
+	return joinN(len(refs), " OR ", "(tx_id = ? AND output_idx = ?)"), args
 }
 
 func sqliteOrRefArgs(refs []models.UtxoId) []any {

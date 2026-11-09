@@ -15,6 +15,7 @@
 package sqlstore
 
 import (
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -26,7 +27,7 @@ func BenchmarkGetUtxoProduced(b *testing.B) {
 	store := newMigratedSQLiteStore(b)
 	const txs = 25_000
 	_, err := store.writeDB.Exec(`
-WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ` + "25000" + `)
+WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ` + strconv.Itoa(txs) + `)
 INSERT INTO "transaction" (hash, slot, block_index) SELECT randomblob(32), i, 0 FROM n`)
 	require.NoError(b, err)
 	_, err = store.writeDB.Exec(`
@@ -42,6 +43,7 @@ FROM "transaction" t, (SELECT 0 AS i UNION ALL SELECT 1) o`)
 		require.NoError(b, rows.Scan(&h))
 		hashes = append(hashes, h)
 	}
+	require.NoError(b, rows.Err())
 	require.NoError(b, rows.Close())
 	b.ResetTimer()
 	i := 0

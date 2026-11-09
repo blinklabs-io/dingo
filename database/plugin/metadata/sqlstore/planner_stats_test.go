@@ -95,7 +95,12 @@ func stat1Rows(tb testing.TB, db *sql.DB) (int, bool) {
 func seedPlannerStatsProbeUtxos(t *testing.T, store *Store) {
 	t.Helper()
 	seedStakeRefLookupUtxos(t, store, 3_000, 256)
-	_, err := store.writeDB.Exec("UPDATE utxo SET deleted_slot = 0")
+	_, err := store.writeDB.Exec(`INSERT INTO "transaction" (id, hash, slot)
+SELECT id, tx_id, added_slot FROM utxo`)
+	require.NoError(t, err)
+	_, err = store.writeDB.Exec(
+		"UPDATE utxo SET transaction_id = id, deleted_slot = 0",
+	)
 	require.NoError(t, err)
 }
 
@@ -379,7 +384,7 @@ func TestPreparedStatementReplansAfterOptimizeOnSameConnection(t *testing.T) {
 
 	_, err = store.OptimizePlannerStatsContext(ctx, PlannerStatsTriggerEpoch)
 	require.NoError(t, err)
-	require.LessOrEqual(t, run(), int64(2), "prepared statement must re-plan")
+	require.Equal(t, int64(2), run(), "prepared statement must re-plan")
 }
 
 func TestOptimizePlannerStatsSkipsDuringBulkLoad(t *testing.T) {

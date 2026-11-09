@@ -190,6 +190,11 @@ func TestImportedOutputIsHydratedByItsProducer(t *testing.T) {
 	).Scan(&rows, &transactionID))
 	require.Equal(t, 1, rows)
 	require.NotNil(t, transactionID, "the producer must hydrate the imported row")
+	var producerID int64
+	require.NoError(t, store.writeDB.QueryRow(
+		`SELECT id FROM "transaction" WHERE hash = ?`, producer,
+	).Scan(&producerID))
+	require.Equal(t, producerID, *transactionID)
 }
 
 // TestOutputLookupsDoNotScan pins the plans of the reference lookups the apply

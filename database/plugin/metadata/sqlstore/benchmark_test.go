@@ -31,11 +31,10 @@ import (
 )
 
 // BenchmarkInsertUtxoModel is the before/after timing counterpart:
-// legacyInsertUtxo reproduces insertUtxoModel's pre-cache one-shot
-// QueryRowContext call (the exact query text and argument order that used
-// to be inlined directly in insertUtxoModel), run against the same migrated
-// schema and connection insertUtxoModel itself uses via the hot-statement
-// cache.
+// legacyInsertUtxo runs insertUtxoModel's insert uncached through the same
+// statement and Exec result path insertUtxoModel uses via the hot-statement
+// cache, against the same migrated schema and connection, so the delta is
+// statement preparation alone.
 func legacyInsertUtxo(
 	ctx context.Context,
 	db queryer,
@@ -45,25 +44,13 @@ func legacyInsertUtxo(
 	if err != nil {
 		return 0, err
 	}
-	var id int64
-	err = db.QueryRowContext(ctx, sqliteUtxoSQL.insertIgnore,
-		params.TransactionID,
-		params.CollateralReturnForTxID,
-		params.TxID,
-		params.PaymentKey,
-		params.StakingKey,
-		params.CredentialTag,
-		params.DatumHash,
-		nullBytes(params.SpentAtTxID),
-		nullBytes(params.ReferencedByTxID),
-		nullBytes(params.CollateralByTxID),
-		params.AddedSlot,
-		params.DeletedSlot,
-		params.Amount,
-		params.OutputIdx,
-		params.PaymentScript,
-	).Scan(&id)
-	return id, err
+	result, err := db.ExecContext(
+		ctx, sqliteUtxoSQL.insertResultIgnore, params.args()...,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return sqliteTransactionInsertID(result)
 }
 
 // utxoForBenchmarkIteration builds a UTxO with a unique tx_id per i, so each
