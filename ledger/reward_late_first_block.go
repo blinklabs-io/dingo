@@ -185,7 +185,7 @@ func (ls *LedgerState) applyReplayedStakeRewardRound(
 	if err != nil {
 		return err
 	}
-	if !ok {
+	if !ok || app == nil {
 		return nil
 	}
 	baselineCopy := *baseline
