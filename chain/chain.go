@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -47,6 +48,11 @@ const (
 	// recent block, then fall back to exponentially older points to avoid
 	// origin intersects when the peer lags by more than a few dozen blocks.
 	intersectDensePointCount = 32
+	// rollbackHighWaterSyncKey names the sync-state row holding the highest
+	// block index the persistent chain held before its most recent
+	// rollback. The in-memory anchor is rebuilt from it on load; without it a
+	// restart would measure the next rollback from the already-lowered tip.
+	rollbackHighWaterSyncKey = "chain_rollback_high_water"
 )
 
 type Chain struct {
@@ -66,6 +72,10 @@ type Chain struct {
 	// shallow steps. Startup reconciliation may reset it through an explicitly
 	// unbounded rollback.
 	rollbackAnchorBlockIndex uint64
+	// persistedRollbackAnchor is the value last written under
+	// rollbackHighWaterSyncKey, so repeated rollbacks from one anchor write
+	// it once.
+	persistedRollbackAnchor uint64
 	// mutationGeneration counts mutations of the in-memory block state:
 	// currentTip, tipBlockIndex, the ephemeral block buffer, and its common
 	// block anchor.
@@ -1995,6 +2005,46 @@ func (c *Chain) rollbackForkDepth(
 	return 0
 }
 
+// persistRollbackAnchorLocked records anchor under rollbackHighWaterSyncKey
+// before a rollback removes the blocks above it, so a crash or restart cannot
+// lose the high-water mark. Callers must hold c.mutex.
+func (c *Chain) persistRollbackAnchorLocked(anchor uint64) error {
+	if !c.persistent || c.manager.db == nil ||
+		anchor == c.persistedRollbackAnchor {
+		return nil
+	}
+	if err := c.manager.db.SetSyncState(
+		rollbackHighWaterSyncKey,
+		strconv.FormatUint(anchor, 10),
+		nil,
+	); err != nil {
+		return fmt.Errorf("persist rollback high-water mark: %w", err)
+	}
+	c.persistedRollbackAnchor = anchor
+	return nil
+}
+
+// ResetRollbackAnchorToTip lowers the cumulative rollback bound to the current
+// tip. Local recovery that descends past K deliberately, one K-bounded step at
+// a time, calls it before each step so that step is measured from the live tip
+// as an ordinary rollback was before the anchor existed. It must never be
+// reachable from a peer-initiated rollback.
+func (c *Chain) ResetRollbackAnchorToTip() error {
+	if c == nil || !c.persistent {
+		return nil
+	}
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	if c.rollbackAnchorBlockIndex == c.tipBlockIndex {
+		return nil
+	}
+	if err := c.persistRollbackAnchorLocked(c.tipBlockIndex); err != nil {
+		return err
+	}
+	c.rollbackAnchorBlockIndex = c.tipBlockIndex
+	return nil
+}
+
 // rollbackExceedsSecurityParam reports whether rollbackBlockIndex lies more
 // than K blocks behind the highest durable point reached by the persistent
 // selected chain. The anchor, rather than the current tip, makes the bound
@@ -2432,6 +2482,17 @@ func (c *Chain) rollbackWithMutationBarrierHeld(
 	// corrupt span fails the rollback whole rather than part-way through.
 	if err := c.checkEphemeralBufferSpan(); err != nil {
 		return nil, err
+	}
+	// Record the high-water mark before any block is removed. An unbounded
+	// rollback records the lowered anchor it is about to adopt instead.
+	if c.persistent && rollbackBlockIndex < c.tipBlockIndex {
+		anchor := c.rollbackAnchorBlockIndex
+		if unbounded {
+			anchor = rollbackBlockIndex
+		}
+		if err := c.persistRollbackAnchorLocked(anchor); err != nil {
+			return nil, err
+		}
 	}
 	// Capture old tip for fork event before we modify it
 	oldTip := c.currentTip

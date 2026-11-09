@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strconv"
 	"sync"
 	"sync/atomic"
 
@@ -484,6 +485,22 @@ func (cm *ChainManager) loadPrimaryChain(ctx context.Context) error {
 			}
 			chain.tipBlockIndex = recentBlocks[0].ID
 			chain.rollbackAnchorBlockIndex = recentBlocks[0].ID
+		}
+		raw, err := cm.db.GetSyncState(rollbackHighWaterSyncKey, nil)
+		if err != nil {
+			return fmt.Errorf("load rollback high-water mark: %w", err)
+		}
+		if raw != "" {
+			highWater, err := strconv.ParseUint(raw, 10, 64)
+			if err != nil {
+				return fmt.Errorf(
+					"parse rollback high-water mark %q: %w", raw, err,
+				)
+			}
+			chain.persistedRollbackAnchor = highWater
+			chain.rollbackAnchorBlockIndex = max(
+				chain.rollbackAnchorBlockIndex, highWater,
+			)
 		}
 	}
 	cm.chains[primaryChainId] = chain
