@@ -15738,6 +15738,7 @@ func validationReferenceSlot(
 type txValidationSnapshot struct {
 	generation     uint64
 	tipPoint       ocommon.Point
+	tip            ochainsync.Tip
 	currentEra     eras.EraDesc
 	currentPParams lcommon.ProtocolParameters
 	// prevEraPParams and eraList are used only when this snapshot validates
@@ -15747,6 +15748,7 @@ type txValidationSnapshot struct {
 	referenceSlot                uint64
 	currentEpoch                 uint64
 	currentEpochStartSlot        uint64
+	currentEpochInfo             models.Epoch
 	syntheticV2CostModelInEffect bool
 }
 
@@ -15871,6 +15873,7 @@ func (ls *LedgerState) txValidationSnapshot() txValidationSnapshot {
 			Slot: tipState.currentTip.Point.Slot,
 			Hash: slices.Clone(tipState.currentTip.Point.Hash),
 		},
+		tip:            cloneTip(tipState.currentTip),
 		currentEra:     consensusState.currentEra,
 		currentPParams: consensusState.currentPParams,
 		prevEraPParams: consensusState.prevEraPParams,
@@ -15882,6 +15885,7 @@ func (ls *LedgerState) txValidationSnapshot() txValidationSnapshot {
 		),
 		currentEpoch:                 consensusState.currentEpoch.EpochId,
 		currentEpochStartSlot:        consensusState.currentEpoch.StartSlot,
+		currentEpochInfo:             consensusState.currentEpoch,
 		syntheticV2CostModelInEffect: consensusState.syntheticV2CostModelInEffect,
 	}
 }
@@ -15894,6 +15898,7 @@ func (ls *LedgerState) txValidationSnapshot() txValidationSnapshot {
 // the root package, which is where *LedgerState is wired in as its validator.
 var (
 	_ forging.TxValidationSessionProvider               = (*LedgerState)(nil)
+	_ forging.SlotTxValidationSessionProvider           = (*LedgerState)(nil)
 	_ forging.ParentPinnedTxValidationSessionProvider   = (*LedgerState)(nil)
 	_ lcommon.GenesisDelegationState                    = (*LedgerState)(nil)
 	_ lcommon.ClassicProtocolParameterUpdateWindowState = (*LedgerState)(nil)
@@ -15946,7 +15951,34 @@ func (ls *LedgerState) WithTxValidationSession(ctx context.Context,
 		commitIfCurrent func(func() error) (bool, error),
 	) error,
 ) error {
-	return ls.withTxValidationSession(ctx, nil, nil, false, false, func(
+	return ls.withTxValidationSession(ctx, nil, nil, false, false, nil, func(
+		validate func(ledger.Transaction, map[utxoref.Key]struct{}, map[utxoref.Key]lcommon.Utxo, *utxoref.StateOverlay) error,
+		stillCurrent func() bool,
+		commitIfCurrent func(func() error) (bool, error),
+		_ txValidationApplyFunc,
+	) error {
+		return fn(validate, stillCurrent, commitIfCurrent)
+	})
+}
+
+// WithTxValidationSessionAtSlot pins validation to a rollback-only ledger
+// view ticked to slot. Epoch-boundary effects are staged in the session's
+// transaction and are discarded when the session ends.
+func (ls *LedgerState) WithTxValidationSessionAtSlot(
+	ctx context.Context,
+	slot uint64,
+	fn func(
+		validate func(
+			tx ledger.Transaction,
+			consumedUtxos map[utxoref.Key]struct{},
+			createdUtxos map[utxoref.Key]lcommon.Utxo,
+			accounts *utxoref.StateOverlay,
+		) error,
+		stillCurrent func() bool,
+		commitIfCurrent func(func() error) (bool, error),
+	) error,
+) error {
+	return ls.withTxValidationSession(ctx, nil, &slot, true, false, nil, func(
 		validate func(ledger.Transaction, map[utxoref.Key]struct{}, map[utxoref.Key]lcommon.Utxo, *utxoref.StateOverlay) error,
 		stillCurrent func() bool,
 		commitIfCurrent func(func() error) (bool, error),
@@ -15978,6 +16010,7 @@ func (ls *LedgerState) WithResolvingTxValidationSession(ctx context.Context,
 		nil,
 		false,
 		false,
+		nil,
 		func(
 			validate func(ledger.Transaction, map[utxoref.Key]struct{}, map[utxoref.Key]lcommon.Utxo, *utxoref.StateOverlay) error,
 			stillCurrent func() bool,
@@ -16014,7 +16047,7 @@ func (ls *LedgerState) WithTxValidationSessionAtParent(ctx context.Context,
 		// parent is the empty hash.
 		parentHash = []byte{}
 	}
-	err := ls.withTxValidationSession(ctx, parentHash, nil, false, false, func(
+	err := ls.withTxValidationSession(ctx, parentHash, nil, false, false, nil, func(
 		validate func(ledger.Transaction, map[utxoref.Key]struct{}, map[utxoref.Key]lcommon.Utxo, *utxoref.StateOverlay) error,
 		stillCurrent func() bool,
 		commitIfCurrent func(func() error) (bool, error),
@@ -16037,6 +16070,7 @@ func (ls *LedgerState) withTxValidationSession(ctx context.Context,
 	referenceSlot *uint64,
 	readWrite bool,
 	leiosClosureSemantics bool,
+	validationBlock ledger.Block,
 	fn func(
 		validate func(
 			tx ledger.Transaction,
@@ -16054,6 +16088,7 @@ func (ls *LedgerState) withTxValidationSession(ctx context.Context,
 		referenceSlot,
 		readWrite,
 		leiosClosureSemantics,
+		validationBlock,
 		func(
 			validate func(ledger.Transaction, map[utxoref.Key]struct{}, map[utxoref.Key]lcommon.Utxo, *utxoref.StateOverlay) error,
 			stillCurrent func() bool,
@@ -16066,11 +16101,129 @@ func (ls *LedgerState) withTxValidationSession(ctx context.Context,
 	)
 }
 
+func (ls *LedgerState) tickTxValidationSnapshot(
+	ctx context.Context,
+	txn *database.Txn,
+	snapshot *txValidationSnapshot,
+) error {
+	if snapshot == nil {
+		return errors.New("transaction validation snapshot is nil")
+	}
+	epoch := snapshot.currentEpochInfo
+	if epoch.LengthInSlots == 0 {
+		return errors.New("current epoch has zero slots")
+	}
+	boundarySlot := epoch.StartSlot + uint64(epoch.LengthInSlots)
+	if snapshot.referenceSlot < boundarySlot {
+		return nil
+	}
+
+	enacted := snapshot.currentPParams
+	forecast, err := ls.forecastPendingPParamUpdateIn(
+		snapshot.currentEra,
+		epoch.EpochId+1,
+		snapshot.currentPParams,
+		txn,
+	)
+	if err != nil {
+		return fmt.Errorf("forecast protocol parameter updates: %w", err)
+	}
+	if forecast != nil {
+		enacted = forecast
+	}
+	targetEraID, decided, err := ls.ledgerBoundaryEra(ctx, boundaryEraInputs{
+		sourceEra:  snapshot.currentEra,
+		epoch:      epoch,
+		tip:        snapshot.tip,
+		pparams:    enacted,
+		newEpochID: epoch.EpochId + 1,
+		txn:        txn,
+	})
+	if err != nil {
+		return err
+	}
+	if !decided {
+		targetEraID = snapshot.currentEra.Id
+	}
+	transitionPath, ok := ls.eraTransitionPath(
+		snapshot.currentEra.Id,
+		targetEraID,
+		false,
+	)
+	if !ok {
+		return fmt.Errorf(
+			"cannot tick validation state from era %d to era %d",
+			snapshot.currentEra.Id,
+			targetEraID,
+		)
+	}
+	workingPParams, workingEraID, transitionResults,
+		transitionHardForkMajors, plutusV2CostModelWritten, err := ls.prepareEraTransitionsForRollover(
+		ctx,
+		txn,
+		epoch,
+		snapshot.currentEra,
+		snapshot.currentPParams,
+		transitionPath,
+	)
+	if err != nil {
+		return err
+	}
+	workingEra, ok := ls.eraById(workingEraID)
+	if !ok || workingEra == nil {
+		return fmt.Errorf("unknown era ID %d", workingEraID)
+	}
+	rollover, err := ls.processEpochRolloverWithClassicPParamsContext(
+		ctx,
+		txn,
+		epoch,
+		*workingEra,
+		workingPParams,
+		len(transitionPath) > 0,
+		plutusV2CostModelWritten,
+		transitionHardForkMajors,
+	)
+	if err != nil {
+		return err
+	}
+	if rollover.NewCurrentEpoch.LengthInSlots == 0 {
+		return errors.New("ticked epoch has zero slots")
+	}
+	tickedEpochEnd := rollover.NewCurrentEpoch.StartSlot +
+		uint64(rollover.NewCurrentEpoch.LengthInSlots)
+	if snapshot.referenceSlot >= tickedEpochEnd {
+		return fmt.Errorf(
+			"forge slot %d is more than one epoch beyond applied epoch %d",
+			snapshot.referenceSlot,
+			epoch.EpochId,
+		)
+	}
+
+	if len(transitionResults) > 0 {
+		snapshot.prevEraPParams = snapshot.currentPParams
+	}
+	snapshot.currentEra = rollover.NewCurrentEra
+	snapshot.currentPParams = rollover.NewCurrentPParams
+	snapshot.currentEpoch = rollover.NewCurrentEpoch.EpochId
+	snapshot.currentEpochStartSlot = rollover.NewCurrentEpoch.StartSlot
+	snapshot.currentEpochInfo = rollover.NewCurrentEpoch
+	for _, transition := range transitionResults {
+		if transition.InjectedSyntheticV2CostModel {
+			snapshot.syntheticV2CostModelInEffect = true
+		}
+	}
+	if rollover.RealV2CostModelObserved {
+		snapshot.syntheticV2CostModelInEffect = false
+	}
+	return nil
+}
+
 func (ls *LedgerState) withResolvingTxValidationSession(ctx context.Context,
 	expectedParentHash []byte,
 	referenceSlot *uint64,
 	readWrite bool,
 	leiosClosureSemantics bool,
+	validationBlock ledger.Block,
 	fn func(
 		validate func(
 			tx ledger.Transaction,
@@ -16101,6 +16254,37 @@ func (ls *LedgerState) withResolvingTxValidationSession(ctx context.Context,
 	// prior certificate and governance changes, but must never persist them.
 	rollbackValidationSession := errRollbackLedgerValidationSession
 	err := txn.Do(func(txn *database.Txn) error {
+		if referenceSlot != nil {
+			if !readWrite {
+				return errors.New(
+					"slot-pinned transaction validation requires a write transaction",
+				)
+			}
+			if err := ls.tickTxValidationSnapshot(ctx, txn, &snapshot); err != nil {
+				return fmt.Errorf(
+					"tick transaction validation state to slot %d: %w",
+					snapshot.referenceSlot,
+					err,
+				)
+			}
+		}
+		if validationBlock != nil {
+			pp := referenceScriptParams(
+				validationBlock,
+				snapshot.currentEra,
+				snapshot.eraList,
+				snapshot.currentPParams,
+				snapshot.prevEraPParams,
+			)
+			lv := &LedgerView{ctx: ctx, txn: txn, ls: ls}
+			if err := validateBlockReferenceScripts(
+				validationBlock,
+				pp,
+				lv,
+			); err != nil {
+				return storageFaultOrErr(lv, err)
+			}
+		}
 		validate := func(
 			tx ledger.Transaction,
 			consumedUtxos map[utxoref.Key]struct{},
@@ -16300,6 +16484,7 @@ func (ls *LedgerState) ValidateLeiosEndorserBlockTransactions(
 		&slot,
 		true,
 		true,
+		nil,
 		func(
 			validate func(
 				tx ledger.Transaction,

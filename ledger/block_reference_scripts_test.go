@@ -107,11 +107,18 @@ func additionalReferenceLedger(
 		activeEras:     []eras.EraDesc{era},
 		currentEra:     era,
 		currentPParams: pp,
+		currentEpoch: models.Epoch{
+			StartSlot:     0,
+			LengthInSlots: 100_000,
+			SlotLength:    1_000,
+			EraId:         era.Id,
+		},
 		config: LedgerStateConfig{
 			Logger:            testLogger(),
 			CardanoNodeConfig: cfg,
 		},
 	}
+	ls.epochCache = []models.Epoch{ls.currentEpoch}
 	ls.metrics.init(prometheus.NewRegistry())
 	ls.publishSnapshotsLocked()
 	return ls, sentinel

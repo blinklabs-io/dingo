@@ -164,10 +164,6 @@ func (ls *LedgerState) validateForgedTxs(
 		return nil
 	}
 
-	if err := ls.ValidateBlockReferenceScripts(ctx, block); err != nil {
-		return err
-	}
-
 	parentHash := LeiosValidationParentHash(block.Header())
 	_, startTip := ls.loadStateSnapshots()
 	startHash := startTip.currentTip.Point.Hash
@@ -318,6 +314,7 @@ func (ls *LedgerState) validateForgedTxsOnce(
 	}
 	// Non-nil even at origin, so the session always checks its tip.
 	sessionTip := append(make([]byte, 0, len(tip.Hash)), tip.Hash...)
+	slot := block.SlotNumber()
 	// consumedUtxos: inputs spent within this block (prevents intra-block
 	// double-spend).
 	// createdUtxos: outputs produced within this block and not yet in the
@@ -325,9 +322,10 @@ func (ls *LedgerState) validateForgedTxsOnce(
 	err := ls.withTxValidationSession(
 		ctx,
 		sessionTip,
-		nil,
+		&slot,
+		true,
 		false,
-		false,
+		block,
 		func(
 			validate func(
 				ledger.Transaction,
