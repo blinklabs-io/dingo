@@ -150,7 +150,8 @@ func reportJournalSizes(t *testing.T, pages map[string][2]int64) {
 	t.Helper()
 	var names []string
 	for name := range pages {
-		if strings.Contains(name, "reward_credit") || strings.Contains(name, "reward_event") ||
+		if strings.Contains(name, "reward_credit") ||
+			strings.Contains(name, "reward_event") ||
 			strings.Contains(name, "reward_source") ||
 			strings.Contains(name, "reward_withdrawal") ||
 			strings.Contains(name, "account_reward_delta") {
@@ -367,7 +368,7 @@ VALUES (?, ?, 'member', ?, 0, '1234567', TRUE, FALSE, ?, ?)`,
 	reportWAL(t, "fold of one round", fold, credits, pages)
 
 	_, framesBefore = walFramesByBTree(t, db, walPath, 1<<30)
-	for batch := 0; batch < walWithdrawals/20; batch++ {
+	for batch := range walWithdrawals / 20 {
 		txn := store.Transaction(context.Background())
 		for i := range 20 {
 			account := rng.Intn(walAccounts)

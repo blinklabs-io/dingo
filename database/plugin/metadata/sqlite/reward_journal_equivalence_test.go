@@ -306,10 +306,7 @@ func (r *rewardJournalRun) boundary() {
 	t := r.t
 	r.epoch++
 	snapshot := r.epoch - 2
-	boundarySlot := (r.epoch - 3) * rewardJournalEpochLength
-	if boundarySlot > r.slot {
-		boundarySlot = r.slot
-	}
+	boundarySlot := min((r.epoch-3)*rewardJournalEpochLength, r.slot)
 	round := rewardJournalRound{
 		epoch:    snapshot,
 		slot:     boundarySlot,
@@ -472,10 +469,10 @@ func (r *rewardJournalRun) withdraw() {
 	}
 	amount := balance
 	if r.rng.Intn(100) < 55 {
-		amount = 1 + uint64Value(r.rng.Intn(int(min(balance, 1<<30))))
-		if amount > balance {
-			amount = balance
-		}
+		amount = min(
+			1+uint64Value(r.rng.Intn(int(min(balance, 1<<30)))),
+			balance,
+		)
 	}
 	r.txSeq++
 	var txHash lcommon.Blake2b256
