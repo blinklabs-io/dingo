@@ -48,10 +48,15 @@ type Config struct {
 	// wider overlay INSERTs after transaction-local limit and trigger checks.
 	// Zero retains the dialect's parameter bound; the maximum is 2047 rows.
 	SQLiteOverlayInsertRows int
-	WriteDB                 *sql.DB
-	ReadDB                  *sql.DB
-	Dialect                 Dialect
-	Logger                  *slog.Logger
+	// LazyHotStatements defers preparing the hot-statement cache from Start
+	// to the first use of each statement on the write pool. It is off by
+	// default and exists for test stores, which open many short-lived stores;
+	// a production Store keeps eager preparation. See borrowStmt.
+	LazyHotStatements bool
+	WriteDB           *sql.DB
+	ReadDB            *sql.DB
+	Dialect           Dialect
+	Logger            *slog.Logger
 	// StorageMode controls retention of API-only transaction detail. Empty
 	// selects the consensus-focused core mode.
 	StorageMode string
@@ -259,6 +264,12 @@ type Store struct {
 	stmts       map[string]*sql.Stmt
 	stmtBorrows map[*sql.Stmt]int
 	stmtRetired map[*sql.Stmt]struct{}
+	// stmtFailed holds hot queries whose lazy prepare failed; stmtsInvalidated
+	// is set once closePreparedStatements has emptied the cache for good.
+	stmtFailed       map[string]struct{}
+	stmtsInvalidated bool
+	// lazyHotStatements is Config.LazyHotStatements; immutable after New.
+	lazyHotStatements bool
 
 	// sumCredentialUtxoStakeCalls counts invocations of
 	// sumCredentialUtxoStake, the per-credential full live-UTxO aggregate
@@ -338,6 +349,7 @@ func New(config Config) (*Store, error) {
 		readDB:                      config.ReadDB,
 		sqlitePath:                  config.SQLitePath,
 		sqliteOverlayInsertRows:     config.SQLiteOverlayInsertRows,
+		lazyHotStatements:           config.LazyHotStatements,
 		dialect:                     config.Dialect,
 		logger:                      config.Logger,
 		storageMode:                 config.StorageMode,
