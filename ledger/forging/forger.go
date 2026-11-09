@@ -4134,11 +4134,6 @@ func (f *BlockForger) updateKESPolicyMetrics(
 	}
 	f.metrics.opCertStartKES.Set(float64(generation.opCertStartKES))
 	f.metrics.opCertExpiryKES.Set(float64(generation.opCertExpiryKES))
-	if generation.operationalCert != nil {
-		f.metrics.opCertCounter.Set(
-			float64(generation.operationalCert.IssueNumber),
-		)
-	}
 }
 
 // RecordSlotBattle increments the slot battles counter. This is

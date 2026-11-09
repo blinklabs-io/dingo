@@ -12047,7 +12047,8 @@ certificate's KES key. The certificate must differ from the loaded one and
 carry a **higher** counter: an equal counter with different bytes, or a lower
 one, is refused before any client is built. The new credentials pass the same
 signature, KES-window and ledger checks, the ledger check enforcing the
-on-chain counter rule (at most one above the last seen), and the agent must
+on-chain counter rule (rejecting a stale counter and, where the era's rule
+applies, one more than one above the last seen), and the agent must
 serve the certificate before the swap: a remote client is admitted, which
 checks the agent reports this certificate and its KES key; a local socket
 client, whose protocol carries neither, is only checked to answer in sign mode,
@@ -12070,12 +12071,14 @@ agent's newer certificate is picked up the same way.
 `shelleyKeyWatchInterval` (off by default) makes the node poll the credential
 files and reload once a changed content has held for two polls. Polling
 content rather than file events sees the atomic `..data` symlink swap
-Kubernetes uses for a mounted Secret, needs no notification support, and the
-two-poll wait keeps a file being written by hand from being read half done.
+Kubernetes uses for a mounted Secret and needs no notification support. The
+two-poll wait reduces reloads during short writes; credential validation still
+rejects an incomplete credential set. In serve-key mode, where a reload is
+always refused, the watch is not started and a warning says so.
 `dingo_forge_credential_reloads_total{trigger,result}` counts reloads by
 trigger (`signal`, `file`, `agent`) and result (`success`, `unchanged`,
-`failure`), and `dingo_forge_opcert_counter` reports the counter the forger is
-using, so an operator can confirm a rotation took effect.
+`failure`), and `dingo_forge_opcert_counter_loaded` reports the counter the
+forger is using, so an operator can confirm a rotation took effect.
 
 `ReplaceWith` deliberately does not advance the credential generation. A forge
 attempt that already holds a snapshot owns a private copy of the outgoing
