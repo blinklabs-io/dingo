@@ -16268,7 +16268,10 @@ func (ls *LedgerState) withResolvingTxValidationSession(ctx context.Context,
 				)
 			}
 		}
-		if validationBlock != nil {
+		if validationBlock != nil &&
+			validationBlock.Era().Id >= conway.EraIdConway &&
+			len(validationBlock.Transactions()) > 0 &&
+			!ls.skipDijkstraTxValidation(snapshot.currentEra.Id) {
 			pp := referenceScriptParams(
 				validationBlock,
 				snapshot.currentEra,

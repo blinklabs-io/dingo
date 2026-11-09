@@ -15,14 +15,18 @@
 package ledger
 
 import (
+	"bytes"
 	"fmt"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/utxoref"
+	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 )
@@ -49,6 +53,7 @@ func TestTxValidationSessionTicksEpochBoundary(t *testing.T) {
 	))
 
 	wantTreasury := oldTreasury
+	validatorCalls := 0
 	validationEra := eras.ConwayEraDesc
 	validationEra.ValidateTxFunc = func(
 		_ lcommon.Transaction,
@@ -56,6 +61,7 @@ func TestTxValidationSessionTicksEpochBoundary(t *testing.T) {
 		state lcommon.LedgerState,
 		_ lcommon.ProtocolParameters,
 	) error {
+		validatorCalls++
 		provider, ok := state.(interface {
 			TreasuryValue() (uint64, error)
 		})
@@ -105,6 +111,12 @@ func TestTxValidationSessionTicksEpochBoundary(t *testing.T) {
 	require.NoError(t, validateAt(fixture.currentEpoch.StartSlot+99))
 	wantTreasury = oldTreasury + donation
 	require.NoError(t, validateAt(fixture.currentEpoch.StartSlot+100))
+	require.Equal(
+		t,
+		2,
+		validatorCalls,
+		"the injected validator must run for both slot validations",
+	)
 
 	requireTreasuryValue(t, fixture.ls, nil, oldTreasury)
 	nextEpoch, err := fixture.db.Metadata().GetEpoch(
@@ -113,4 +125,60 @@ func TestTxValidationSessionTicksEpochBoundary(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Nil(t, nextEpoch)
+}
+
+func TestValidateBlockReferenceScriptsUsesTickedSession(t *testing.T) {
+	t.Parallel()
+
+	fixture := newTreasuryRolloverFixture(t, 1_000)
+	seedEmptyRewardBasisForRollover(
+		t,
+		fixture.db,
+		fixture.currentEpoch,
+		fixture.currentPParams,
+	)
+	fixture.ls.epochCache = []models.Epoch{fixture.currentEpoch}
+	fixture.ls.metrics.init(prometheus.NewRegistry())
+	fixture.ls.publishSnapshotsLocked()
+
+	blockAt := func(slot uint64) *conway.ConwayBlock {
+		return &conway.ConwayBlock{
+			BlockHeader: &conway.ConwayBlockHeader{
+				BabbageBlockHeader: babbage.BabbageBlockHeader{
+					Body: babbage.BabbageBlockHeaderBody{Slot: slot},
+				},
+			},
+			TransactionBodies: []conway.ConwayTransactionBody{{
+				TxReferenceInputs: cbor.NewSetType(
+					[]shelley.ShelleyTransactionInput{{
+						TxId: lcommon.NewBlake2b256(
+							bytes.Repeat([]byte{7}, 32),
+						),
+					}},
+					false,
+				),
+			}},
+			TransactionWitnessSets: []conway.ConwayTransactionWitnessSet{{}},
+		}
+	}
+	boundary := fixture.currentEpoch.StartSlot +
+		uint64(fixture.currentEpoch.LengthInSlots)
+	nextEpochEnd := boundary + uint64(
+		fixture.ls.config.CardanoNodeConfig.ShelleyGenesis().EpochLength,
+	)
+
+	// A slot in the next epoch ticks across the boundary and passes.
+	err := fixture.ls.ValidateBlockReferenceScripts(
+		t.Context(),
+		blockAt(boundary+1),
+	)
+	require.NoError(t, err)
+
+	// Only a ticked view refuses a slot the ledger cannot reach from its
+	// applied epoch in one boundary.
+	err = fixture.ls.ValidateBlockReferenceScripts(
+		t.Context(),
+		blockAt(nextEpochEnd+1),
+	)
+	require.ErrorContains(t, err, "more than one epoch beyond")
 }
