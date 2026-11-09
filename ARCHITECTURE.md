@@ -10868,12 +10868,15 @@ the connection being dropped every 20 seconds until it did. Messages that
 expired, and messages the peer itself announced (kept in a bounded `idSet`), are
 passed over, so a message is not announced back to where it came from. A
 connection's `poolPacer` also spaces one pool's messages by
-`dmq.minPoolMessageInterval` (60 seconds; zero turns it off): dmq-node ends the
+`dmq.minPoolMessageInterval` plus one second of slack (60 seconds; zero turns it
+off): dmq-node ends the
 whole connection when a pool's message reaches it sooner than its minimum
 signature delay after that pool's previous one (`SigTooFrequent`), and redialing
 offers the same message again. The pacer records when each pool's message was
 announced, keeps a later one from the same pool, and announces it once the
-interval has passed; other pools' messages are announced past it. A held
+interval and the slack have passed. The slack is there because dmq-node times
+the gap from when each message reaches it: a run against dmq-node 0.7.2.1 was
+refused at 59.998 seconds without it; other pools' messages are announced past it. A held
 message that expires, or that the peer announced meanwhile, is dropped without
 using up its pool's interval, and at most 256 messages are held per connection:
 past that the connection stops reading ahead in the pool. A blocking

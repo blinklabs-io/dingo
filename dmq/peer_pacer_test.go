@@ -80,12 +80,15 @@ func TestPeerHoldsASecondMessageOfOnePoolUntilTheIntervalPasses(t *testing.T) {
 	require.Equal(t, []string{"a1"}, announcedBodies(t, s, p.nextMessageIDs(10)))
 	wait, held := p.pace.nextRelease(now)
 	require.True(t, held)
-	require.Equal(t, time.Minute, wait)
+	require.Equal(t, time.Minute+poolPaceSlack, wait)
 
-	now = now.Add(59 * time.Second)
-	require.Empty(t, p.nextMessageIDs(10))
+	now = now.Add(time.Minute)
+	require.Empty(
+		t, p.nextMessageIDs(10),
+		"the interval alone is not enough: the slack is part of the hold",
+	)
 
-	now = now.Add(time.Second)
+	now = now.Add(poolPaceSlack)
 	require.Equal(t, []string{"a2"}, announcedBodies(t, s, p.nextMessageIDs(10)))
 	_, held = p.pace.nextRelease(now)
 	require.False(t, held)
@@ -125,9 +128,9 @@ func TestPeerReleasesHeldMessagesOfOnePoolOnePerInterval(t *testing.T) {
 	}
 
 	require.Equal(t, []string{"a1"}, announcedBodies(t, s, p.nextMessageIDs(10)))
-	now = now.Add(time.Minute)
+	now = now.Add(time.Minute + poolPaceSlack)
 	require.Equal(t, []string{"a2"}, announcedBodies(t, s, p.nextMessageIDs(10)))
-	now = now.Add(time.Minute)
+	now = now.Add(time.Minute + poolPaceSlack)
 	require.Equal(t, []string{"a3"}, announcedBodies(t, s, p.nextMessageIDs(10)))
 }
 
@@ -148,7 +151,7 @@ func TestPeerKeepsAHeldMessageThatDoesNotFitTheRequest(t *testing.T) {
 		t, []string{"a1", "b1"}, announcedBodies(t, s, p.nextMessageIDs(10)),
 	)
 
-	now = now.Add(time.Minute)
+	now = now.Add(time.Minute + poolPaceSlack)
 	require.Equal(t, []string{"a2"}, announcedBodies(t, s, p.nextMessageIDs(1)))
 	require.Equal(t, []string{"b2"}, announcedBodies(t, s, p.nextMessageIDs(1)))
 }

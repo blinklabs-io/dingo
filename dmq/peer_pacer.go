@@ -28,6 +28,13 @@ import (
 // connection.
 const maxHeldMessages = 256
 
+// poolPaceSlack is added to the configured interval. dmq-node measures the gap
+// between two messages from when each reaches it, and this stack measures it
+// from when each was announced, so network and scheduling jitter can leave the
+// gap dmq-node sees a few milliseconds short: a live run was refused at
+// 59.998 seconds against a 60 second limit.
+const poolPaceSlack = time.Second
+
 // DefaultMinPoolMessageInterval is dmq-node's minimum delay between two
 // messages signed by the same pool (minSigDelay in DMQ/Policy.hs). CIP-0137
 // does not state it.
@@ -58,7 +65,7 @@ func newPoolPacer(interval time.Duration) *poolPacer {
 		return nil
 	}
 	return &poolPacer{
-		interval: interval,
+		interval: interval + poolPaceSlack,
 		last:     make(map[lcommon.Blake2b224]time.Time),
 	}
 }
