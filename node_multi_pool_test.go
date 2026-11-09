@@ -233,11 +233,44 @@ func TestSlotArbiterLeavesASlotOnePoolLeads(t *testing.T) {
 	require.Zero(t, poolA.proofs.Load()+poolB.proofs.Load(),
 		"a slot one pool leads needs no VRF proof")
 
-	// A pool removed from the arbiter is no longer weighed.
-	a.add(arbiterMember{"c", newTestVRFPool(t, 9), testLeader{10: true}, true})
+	// A pool removed from the arbiter is no longer weighed. Pool c beats a
+	// at slot 10, so a leftover c would make a yield.
+	alpha, err := vrf.MkInputVrf(10, nonce)
+	require.NoError(t, err)
+	var poolC *testVRFPool
+	for seed := byte(9); seed < 255; seed++ {
+		p := newTestVRFPool(t, seed)
+		if w, _ := rankPools(t, alpha, poolA, p, "a", "c"); w == "c" {
+			poolC = p
+			break
+		}
+	}
+	require.NotNil(t, poolC, "no seed ranks c above a at slot 10")
+	a.add(arbiterMember{"c", poolC, testLeader{10: true}, true})
 	a.remove("c")
 	yield, _ = a.forPool("a").YieldSlot(10)
 	require.False(t, yield)
+}
+
+func TestSlotArbiterRedecidesASlotOnceAScheduleArrives(t *testing.T) {
+	t.Parallel()
+	const slot = 10
+	nonce := bytes.Repeat([]byte{0x09}, 32)
+	poolA, poolB := newTestVRFPool(t, 7), newTestVRFPool(t, 8)
+	a := newTestArbiter(testArbiterView{era: conway.EraIdConway, nonce: nonce})
+	leaderB := testLeader{}
+	a.add(arbiterMember{"a", poolA, testLeader{slot: true}, true})
+	a.add(arbiterMember{"b", poolB, leaderB, true})
+
+	// b's schedule is not ready: it reads as a non-leader.
+	require.Empty(t, a.winner(slot))
+
+	leaderB[slot] = true
+	alpha, err := vrf.MkInputVrf(slot, nonce)
+	require.NoError(t, err)
+	want, _ := rankPools(t, alpha, poolA, poolB, "a", "b")
+	require.Equal(t, want, a.winner(slot),
+		"a slot decided before every schedule was ready must be decided again")
 }
 
 func TestOwnForgedBlocksAnswersForEveryPool(t *testing.T) {
@@ -430,6 +463,29 @@ func TestStartBlockProducerSkipsAPoolWhoseKESAgentIsUnreachable(t *testing.T) {
 	n.multiPool.mu.Unlock()
 	require.False(t, retrying, "stopping the producer stops the retry")
 	require.False(t, n.blockForger.IsRunning())
+}
+
+func TestInitMultiPoolExposesAZeroReloadFailureSeriesPerPool(t *testing.T) {
+	t.Parallel()
+	first := newReloadTestNode(t, 1)
+	second := newReloadTestNode(t, 1)
+	reg := prometheus.NewRegistry()
+	n := &Node{config: Config{
+		logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		promRegistry: reg,
+		blockProducerPools: []BlockProducerPool{
+			{ShelleyOperationalCertificate: first.opcertPath},
+			{ShelleyOperationalCertificate: second.opcertPath},
+		},
+	}}
+	require.NoError(t, n.initMultiPool())
+	require.Equal(t, 2, testutil.CollectAndCount(
+		reg,
+		"dingo_block_producer_credential_reload_failures_total",
+	))
+	require.Zero(t, testutil.ToFloat64(n.multiPool.reloadFailures.WithLabelValues(
+		first.live.GetPoolID().String(),
+	)))
 }
 
 func TestInitMultiPoolRefusesOnePoolListedTwice(t *testing.T) {
