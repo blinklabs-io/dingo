@@ -885,11 +885,15 @@ func (s *Store) insertOverlayUtxos(
 		if err != nil {
 			return err
 		}
-		if len(existing) > 0 {
-			return fmt.Errorf(
-				"%w: a produced output is already stored by an import",
-				types.ErrBatchUtxoOverlayConflict,
-			)
+		for _, utxo := range produced {
+			if _, dup := existing[utxoIdentityKey(
+				utxo.TxId, utxo.OutputIdx,
+			)]; dup {
+				return fmt.Errorf(
+					"%w: a produced output is already stored by an import",
+					types.ErrBatchUtxoOverlayConflict,
+				)
+			}
 		}
 		args := make([]any, 0, (end-start)*overlayUtxoInsertColumns)
 		for _, out := range outputs[start:end] {

@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/prometheus/client_golang/prometheus"
@@ -274,6 +275,40 @@ func TestSQLiteOverlayInsertRechecksTemporarySchema(t *testing.T) {
 	)
 	require.Equal(t, uint64(8), overlayInsertStatementCount(t, metrics))
 	require.NoError(t, txn.Rollback())
+}
+
+// An imported output blocks a produced output only at its own output index;
+// a sibling output of the same transaction hash does not.
+func TestSQLiteOverlayInsertConflictsOnlyWithTheExactImportedOutput(t *testing.T) {
+	t.Parallel()
+	for _, sameIndex := range []bool{false, true} {
+		t.Run(fmt.Sprint(sameIndex), func(t *testing.T) {
+			t.Parallel()
+			store, _ := newOverlayInsertStore(t, false, 0)
+			outputs := overlayInsertOutputs(10, 2)
+			importedIdx := outputs[0].model.OutputIdx + 100
+			if sameIndex {
+				importedIdx = outputs[0].model.OutputIdx
+			}
+			require.NoError(t, store.ImportUtxos([]models.Utxo{{
+				TxId:      outputs[0].model.TxId,
+				OutputIdx: importedIdx,
+				Amount:    types.Uint64(1),
+			}}, nil))
+			err := insertOverlayFixture(store, outputs)
+			var rows int
+			require.NoError(t, store.writeDB.QueryRow(
+				"SELECT COUNT(*) FROM utxo",
+			).Scan(&rows))
+			if sameIndex {
+				require.ErrorIs(t, err, types.ErrBatchUtxoOverlayConflict)
+				require.Equal(t, 1, rows, "the batch must not be written")
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, 3, rows)
+		})
+	}
 }
 
 func TestSQLiteOverlayInsertKeepsConflictAndCancellationRollback(t *testing.T) {
