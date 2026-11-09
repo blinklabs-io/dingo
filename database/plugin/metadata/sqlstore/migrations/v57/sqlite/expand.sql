@@ -5,15 +5,16 @@
 -- leaf rewrite per touched credential.
 --
 -- idx_account_reward_delta_tx_hash and idx_account_reward_delta_withdrawal:
--- every reader that names a tx_hash also names withdrawal, so the unique
+-- every lookup by tx_hash also names withdrawal, so the unique
 -- (withdrawal, tx_hash, ...) index serves it, and a boolean-only index
 -- narrows nothing.
 --
 -- idx_account_drep: a prefix of idx_account_drep_active_staking_key.
 --
--- idx_reward_account_output_credential_spendable: a prefix of
--- idx_reward_account_output_credential_spendable_guarded, and every reader
--- that constrains spendable also constrains guarded.
+-- idx_reward_account_output_credential_spendable: every reader that
+-- constrains spendable also constrains guarded, so
+-- idx_reward_account_output_credential_spendable_guarded serves the same
+-- lookups.
 DROP INDEX IF EXISTS `idx_reward_live_stake_updated_slot`;
 DROP INDEX IF EXISTS `idx_account_reward_delta_tx_hash`;
 DROP INDEX IF EXISTS `idx_account_reward_delta_withdrawal`;

@@ -3891,12 +3891,12 @@ naming columns they do not change.
 | `idx_reward_live_stake_cred` | kept | Unique conflict target and per-credential point read. |
 | `idx_reward_stake_input_epoch_pool_cred` | kept | Unique key; epoch and pool-range reads. Rows are written once per epoch in key order. |
 | `idx_reward_stake_input_cred_epoch` | kept | The only index for per-account stake history (`registered` and `epoch < ?` ordered by `epoch`). |
-| `idx_account_reward_delta_tx_hash` | dropped | Every `tx_hash` reader names `withdrawal`, which leads the unique index. |
+| `idx_account_reward_delta_tx_hash` | dropped | Every lookup by `tx_hash` names `withdrawal`, which leads the unique index. |
 | `idx_account_reward_delta_withdrawal` | dropped | A boolean prefix of the unique index; no reader needs it alone. |
 | `idx_account_reward_delta_credential`, `idx_account_reward_delta_added_slot` | kept | Credential and rollback readers. |
 | `idx_account_drep` | dropped | Prefix of `idx_account_drep_active_staking_key`. |
 | `idx_account_drep_active_staking_key`, `idx_account_drep_type_active_staking_key`, `idx_account_active_pool_staking_key` | kept | DRep power, delegator and pool-delegator readers. Written only when drep, drep type, active or pool change. |
-| `idx_reward_account_output_credential_spendable` | dropped | Prefix of the `guarded` variant. |
+| `idx_reward_account_output_credential_spendable` | dropped | Every reader that constrains `spendable` also constrains `guarded`, so the `guarded` variant serves the same lookups. |
 
 `updateCertificateAccount` reads the stored `active`, `pool`, `drep` and
 `drep_type` and names only the changed ones in the conflict branch of the
