@@ -353,6 +353,14 @@ func (d *Database) rollbackAfterSlot(
 			err,
 		)
 	}
+	// An epoch row survives a rollback that stays inside its epoch, so an era
+	// translation applied mid-epoch must be undone explicitly.
+	if err := d.revertMidEpochEraSwitchAfterSlot(point.Slot, txn); err != nil {
+		return ochainsync.Tip{}, nil, fmt.Errorf(
+			"revert mid-epoch era switch after rollback: %w",
+			err,
+		)
+	}
 	// Pool stake snapshots and epoch summaries are keyed by epoch number, not
 	// slot, so DeleteEpochsAfterSlot does not reach them. Drop those of every
 	// epoch the rollback rewound past: a restored ledger snapshot has no

@@ -189,6 +189,16 @@ type boundaryEraCase struct {
 	// delegates to meet the Shelley genesis updateQuorum. The boundary enacts
 	// it, so the major reaches the ledger only through that enactment.
 	classicUpdateMajor uint
+	// followers are blocks that follow the boundary block on the chain, in
+	// order, each linked to its predecessor.
+	followers []boundaryEraFollower
+}
+
+// boundaryEraFollower describes a block after the boundary block.
+type boundaryEraFollower struct {
+	// babbageBody encodes the block as Babbage instead of Conway.
+	babbageBody bool
+	slot        uint64
 }
 
 // boundaryEraTestUpdateQuorum is the Shelley genesis updateQuorum of a case
@@ -236,6 +246,17 @@ func newBoundaryEraLedger(
 	t *testing.T,
 	tc boundaryEraCase,
 ) (*LedgerState, gledger.Block) {
+	t.Helper()
+	ls, blocks := newBoundaryEraLedgerChain(t, tc)
+	return ls, blocks[0]
+}
+
+// newBoundaryEraLedgerChain is newBoundaryEraLedger returning the boundary
+// block followed by tc.followers, all already on the primary chain.
+func newBoundaryEraLedgerChain(
+	t *testing.T,
+	tc boundaryEraCase,
+) (*LedgerState, []gledger.Block) {
 	t.Helper()
 	headerMajor := tc.headerMajor
 	if headerMajor == 0 {
@@ -299,6 +320,22 @@ func newBoundaryEraLedger(
 		raw = append(raw, rawBoundaryEraBlock(tipBlock, tipType))
 	}
 	raw = append(raw, rawBoundaryEraBlock(block, blockType))
+	blocks := []gledger.Block{block}
+	for _, follower := range tc.followers {
+		prev := blocks[len(blocks)-1]
+		followerType := uint(gledger.BlockTypeConway)
+		followerMajor := uint(conway.MinProtocolVersionConway)
+		if follower.babbageBody {
+			followerType = uint(gledger.BlockTypeBabbage)
+			followerMajor = tc.pparamsMajor
+		}
+		next := boundaryEraBlock(
+			t, follower.babbageBody, followerMajor,
+			prev.BlockNumber()+1, follower.slot, prev.Hash(),
+		)
+		raw = append(raw, rawBoundaryEraBlock(next, followerType))
+		blocks = append(blocks, next)
+	}
 	require.NoError(t, cm.PrimaryChain().AddRawBlocks(context.Background(), raw))
 
 	nodeConfig := newTestShelleyGenesisCfg(t)
@@ -399,7 +436,7 @@ func newBoundaryEraLedger(
 	if tc.classicUpdateMajor != 0 {
 		seedClassicVersionUpdate(t, db, tc.classicUpdateMajor)
 	}
-	return ls, block
+	return ls, blocks
 }
 
 // TestBoundaryBlockEraMustMatchLedgerProtocolVersion pins that an epoch

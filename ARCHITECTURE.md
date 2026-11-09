@@ -4746,7 +4746,27 @@ order ENACT would. The decision reads the parameters pending for the successor
 of the ledger epoch label, so a block beyond an empty epoch is judged by the same
 forecast as one that opens the successor: NEWEPOCH enacts nothing for it, but the
 transition the pending update names stands, and `ProtocolParamsForSlot` returns
-the parameters in force rather than the pending ones for such a slot. A refusal releases the rollover's transaction-validation
+the parameters in force rather than the pending ones for such a slot. Inside an epoch that follows an empty epoch the label stays behind, so the
+hard-fork combinator also decides the era block by block from the state before
+the block: once k blocks of that epoch lie at or past its voting deadline and the
+pending update names the next era's major, the next block must be in the next era
+and a block in the source era is refused. The block-apply loop stops its batch at
+that block, translates the frozen ledger without enacting the update, keys the
+translation at the block's slot, and records it (`mid_epoch_era_switch`) so a
+rollback restores the source era. Only classic (pre-Conway) eras are covered.
+Everything that decides the era of a block before it is applied follows the same
+decision from the applied tip: `ProtocolParamsForSlot` returns the translated
+parameters for the slot after the tip, so the forger builds the block the ledger
+will accept, and `EraIDForEpoch` (hence the consensus mode of the leader schedule
+and the leader check) names the later era. A tip that does not yet know the
+transition decides nothing for later slots, and a rollback below the block that
+made it known withdraws it. A Conway ledger translated this way keeps the old
+major and ignores the classic proposals left in the database, which Conway's
+translation drops. The epoch record carries the era after the switch for the
+whole epoch, so a competing header from before the switch slot is still judged
+in the later era's consensus mode; the modes differ only for a switch out of
+Alonzo.
+A refusal releases the rollover's transaction-validation
 transition before the block is rewound as a rejected header, and the ledger
 stays in its source era. The block's body era still selects the transition path:
 a header elevation is a header-carried protocol version, which outside mainnet

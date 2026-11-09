@@ -1993,6 +1993,12 @@ refused without allocating the remainder. A record with a field the writer
 never emits is refused for the same reason. Any such record is treated as
 unreadable and removed.
 
+**Mid-epoch era switch.** Key `mid_epoch_era_switch` in `sync_state` holds
+`epoch:slot:from_era:to_era` for the last era translation applied inside an epoch
+that follows an empty epoch. The epoch row carries `to_era` and the translated
+`pparams` row is keyed at `slot`; a rollback or truncation to an earlier slot
+restores the row's `from_era` and deletes the key in the same sweep.
+
 **Pending ratification.** Key `dingo:governance:ratify-pending` in `sync_state`
 holds a JSON record (`epoch`, `boundary_slot`, `id`, and `snapshot` when the
 boundary left that epoch's `pool_stake_snapshot`, `epoch_summary` and
