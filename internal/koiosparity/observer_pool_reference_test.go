@@ -71,6 +71,8 @@ type poolRefScenario struct {
 	// bulkUpdates, when set, is the all-pools /pool_updates body the fetch
 	// builds its first-active skip map from.
 	bulkUpdates string
+	// accounts drives processAccountEpoch instead of processEpoch.
+	accounts bool
 }
 
 type poolRefOutcome struct {
@@ -158,6 +160,7 @@ func runPoolRefScenario(t *testing.T, sc poolRefScenario) poolRefOutcome {
 		CachePath:             filepath.Join(t.TempDir(), "cache.db"),
 		Source:                source,
 		Strict:                true,
+		AccountsEnabled:       sc.accounts,
 		Logger:                slog.New(slog.DiscardHandler),
 		FetchRetryAttempts:    3,
 		FetchRetryDelay:       5 * time.Millisecond,
@@ -171,7 +174,11 @@ func runPoolRefScenario(t *testing.T, sc poolRefScenario) poolRefOutcome {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = o.Stop(context.Background()) })
 
-	o.processEpoch(context.Background(), 5)
+	if sc.accounts {
+		o.processAccountEpoch(context.Background(), 5)
+	} else {
+		o.processEpoch(context.Background(), 5)
+	}
 
 	pools, err := o.cache.GetAllPoolsForEpoch("preview", 5)
 	require.NoError(t, err)
@@ -284,4 +291,55 @@ func TestObserverPoolSkippedByFirstActiveMapIsRefetched(t *testing.T) {
 	require.Zero(t, out.callsA-1, "the fetch skipped the pool; only the refetch asks")
 	require.True(t, out.cachedA)
 	require.Equal(t, StatusPass, out.result.Status, "%+v", out.result.Mismatches)
+}
+
+// The account queue compares pool presence too, and it can reach an epoch
+// before the aggregate queue has reconciled the reference, so it must confirm
+// a missing pool itself before strict mode can act on pool_only_dingo.
+func TestObserverAccountQueueConfirmsMissingPool(t *testing.T) {
+	t.Parallel()
+	t.Run("published on re-request", func(t *testing.T) {
+		t.Parallel()
+		out := runPoolRefScenario(t, poolRefScenario{
+			accounts: true,
+			historyA: func(call int32) bool { return call >= 2 },
+			updatesA: updatesRegisteredAt1,
+		})
+		require.False(
+			t,
+			hasCategory(out.result, "pool_presence", CategoryPoolOnlyDingo),
+			"%+v", out.result.Mismatches,
+		)
+		require.True(t, out.cachedA, "the refetched row must reach the cache")
+		require.Zero(t, out.fatal, "%+v", out.result.Mismatches)
+	})
+	t.Run("never registered", func(t *testing.T) {
+		t.Parallel()
+		out := runPoolRefScenario(t, poolRefScenario{
+			accounts: true,
+			historyA: func(int32) bool { return false },
+			updatesA: `[]`,
+		})
+		require.True(
+			t,
+			hasCategory(out.result, "pool_presence", CategoryPoolOnlyDingo),
+			"%+v", out.result.Mismatches,
+		)
+		require.Equal(t, int32(1), out.fatal)
+	})
+	t.Run("registered but never published", func(t *testing.T) {
+		t.Parallel()
+		out := runPoolRefScenario(t, poolRefScenario{
+			accounts: true,
+			historyA: func(int32) bool { return false },
+			updatesA: updatesRegisteredAt1,
+		})
+		require.False(
+			t,
+			hasCategory(out.result, "pool_presence", CategoryPoolOnlyDingo),
+			"%+v", out.result.Mismatches,
+		)
+		require.Equal(t, StatusError, out.result.Status)
+		require.Zero(t, out.fatal, "an incomplete reference must not halt strict mode")
+	})
 }

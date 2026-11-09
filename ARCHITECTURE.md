@@ -16328,7 +16328,10 @@ second sync:
     with it, so the error is persisted and the epoch is retried, but the node
     keeps running. A local cache or database error during the fetch, any
     other `ErrKoiosPermanent` failure (auth, bad request, oversized
-    response) and a response that fails to decode stay fatal-eligible. The one
+    response) and a response that fails to decode stay fatal-eligible, and a
+    failure to persist the retry (`RecordObserverError`) makes any reported
+    error fatal-eligible, because a non-fatal failure relies on that retry
+    surviving a restart. The one
     non-pass result that is not fatal-eligible is a result whose significant
     mismatches are all
     `reference_lag` (`referenceLagOnly`). That means Koios's own data for the

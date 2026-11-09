@@ -739,15 +739,7 @@ func (o *Observer) processEpoch(ctx context.Context, epoch uint64) {
 		return
 	}
 
-	if err := o.reconcilePoolReference(ctx, epoch); err != nil {
-		if cancelled(ctx, err) {
-			return
-		}
-		if errors.Is(err, errPoolHistoryUnpublished) {
-			o.reportErrorFatal(epoch, false, err, false)
-			return
-		}
-		o.reportFetchError(epoch, false, err)
+	if !o.reconcilePoolReferenceOrReport(ctx, epoch, false) {
 		return
 	}
 
@@ -839,6 +831,10 @@ func (o *Observer) processAccountEpoch(ctx context.Context, epoch uint64) {
 			return
 		}
 		o.reportFetchError(epoch, true, err)
+		return
+	}
+
+	if !o.reconcilePoolReferenceOrReport(ctx, epoch, true) {
 		return
 	}
 
@@ -948,7 +944,8 @@ func (o *Observer) reportError(
 // later attempt can fix (koiosUnavailable) is never fatal: an unreachable
 // reference says nothing about whether Dingo's state agrees with it, and the
 // epoch is retried. Every other failure, including any local cache or database
-// error and a permanent Koios error, stays fatal in strict mode.
+// error and a permanent Koios error, stays fatal in strict mode, and so does
+// an unavailable Koios when the retry itself cannot be recorded.
 func (o *Observer) reportFetchError(
 	epoch uint64,
 	accountsChecked bool,
@@ -986,6 +983,9 @@ func (o *Observer) reportErrorFatal(
 			err,
 			fmt.Errorf("persist observer retry: %w", persistErr),
 		)
+		// A non-fatal failure is only safe while its retry survives a restart,
+		// and a local write failure is fatal in its own right.
+		fatal = true
 	}
 	o.scheduleErrorRetry(epoch, accountsChecked, StatusError)
 	o.fail(epoch, err, fatal)
@@ -1070,6 +1070,26 @@ func (o *Observer) fetchIfNeeded(ctx context.Context, epoch uint64) error {
 var errPoolHistoryUnpublished = errors.New(
 	"koios pool_history has no row for a registered pool",
 )
+
+// reconcilePoolReferenceOrReport runs reconcilePoolReference for one queue and
+// reports a failure, returning whether the queue can go on to CheckEpoch.
+func (o *Observer) reconcilePoolReferenceOrReport(
+	ctx context.Context,
+	epoch uint64,
+	accountsChecked bool,
+) bool {
+	err := o.reconcilePoolReference(ctx, epoch)
+	switch {
+	case err == nil:
+		return true
+	case cancelled(ctx, err):
+	case errors.Is(err, errPoolHistoryUnpublished):
+		o.reportErrorFatal(epoch, accountsChecked, err, false)
+	default:
+		o.reportFetchError(epoch, accountsChecked, err)
+	}
+	return false
+}
 
 // reconcilePoolReference re-requests, one pool at a time, every pool Dingo has
 // in an epoch's stake basis but the cached Koios reference lacks, before the
@@ -1516,7 +1536,8 @@ func (o *Observer) fetchAccountsIfNeeded(
 // still logged, and processEpoch/processAccountEpoch have already persisted
 // the result, but it never reaches FatalFunc and never sets fatalFired, so
 // run/runAccounts keep processing later epochs. reportFetchError also passes
-// false for a Koios request that failed transiently (see koiosUnavailable).
+// false for a Koios request that failed transiently (see koiosUnavailable),
+// unless the epoch's retry could not be persisted (see reportErrorFatal).
 // Every other non-pass result, including dingo_db_missing and dingo_db_error,
 // and every reportError call stays fatal in strict mode.
 //

@@ -165,3 +165,69 @@ func TestStrictFetchErrorFatalityFollowsProvenance(t *testing.T) {
 		})
 	}
 }
+
+// An unavailable Koios is non-fatal only because the epoch's retry is durable.
+// When the local database cannot record that retry, the failure is a local one
+// and strict mode must stop, whichever queue hit it.
+func TestStrictRetryPersistFailureIsFatalDuringKoiosOutage(t *testing.T) {
+	t.Parallel()
+	for name, accounts := range map[string]bool{
+		"aggregate": false,
+		"accounts":  true,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			source, err := NewDatabaseSource(newTestDatabaseSourceDB(t))
+			require.NoError(t, err)
+			srv := newFakeKoiosServer(t, map[uint64]*fakeEpochRef{
+				5: {activeStake: "1000000", treasury: "10", reserves: "20", fees: "30", endTimeUnix: time.Now().Add(-time.Hour).Unix()},
+			})
+			var mu sync.Mutex
+			var fatals []error
+			o, err := NewObserver(ObserverConfig{
+				Network:               "preview",
+				CachePath:             filepath.Join(t.TempDir(), "cache.db"),
+				Source:                source,
+				BaseURL:               srv.URL,
+				AllowInsecureHTTP:     true,
+				AllowPrivateAddresses: true,
+				AccountsEnabled:       accounts,
+				Strict:                true,
+				FetchRetryAttempts:    1,
+				ErrorRetryDelay:       time.Hour,
+				Logger:                slog.New(slog.DiscardHandler),
+				FatalFunc: func(err error) {
+					mu.Lock()
+					defer mu.Unlock()
+					fatals = append(fatals, err)
+				},
+			})
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, o.Stop(context.Background())) })
+			o.koios.http.Transport = failingKoiosTransport{
+				next: o.koios.http.Transport,
+				paths: map[string]bool{
+					"/pool_list": true, "/pool_updates": true, "/epoch_info": true,
+					"/totals": true, "/epoch_params": true,
+				},
+			}
+			_, err = o.cache.db.Exec(
+				"CREATE TRIGGER fail_insert BEFORE INSERT ON check_epoch_status" +
+					" BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END",
+			)
+			require.NoError(t, err)
+
+			if accounts {
+				o.processAccountEpoch(context.Background(), 5)
+			} else {
+				o.processEpoch(context.Background(), 5)
+			}
+
+			mu.Lock()
+			defer mu.Unlock()
+			require.Len(t, fatals, 1, "an unrecorded retry is a local failure")
+			require.ErrorContains(t, fatals[0], "persist observer retry")
+			require.True(t, o.stopping())
+		})
+	}
+}
