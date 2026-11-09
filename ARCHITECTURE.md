@@ -5726,13 +5726,18 @@ other validation error rejects the local forge, so an unclassified failure
 cannot publish an unchecked announcement. The composition adapter marks
 confirmed transaction failures for the forger without introducing a dependency
 from forging to the parent ledger package.
-Endorser manifests and
-transactions arrive independently on the asynchronous LeiosNotify and
-LeiosFetch workers, so this wait does not serialize the fetch that satisfies
-it. The wait is bounded by the configured diffusion window and observes node
-shutdown cancellation. A missing, late, wrong-sized, or ledger-invalid
-closure fails apply-boundary validation; the remote ranking-block header remains
-admitted. Prototype VoteManager votes attest to authenticated announcements
+Endorser manifests and transactions can arrive on the asynchronous LeiosNotify
+and LeiosFetch workers. Announcement validation runs before the next chunk's
+required certified-closure fetch. Its passive wait is bounded by the configured
+diffusion window and observes node shutdown cancellation. When the ledger can resolve an announcement's slot time
+and it is older than the existing ten-minute announcement lifetime, an incomplete
+closure returns unavailable without a passive wait. Historical uncertified
+announcements are not prefetched, so waiting for one here would delay the next
+chunk's mandatory certified fetch. Complete cached closures retain synchronous
+semantic validation, including pending results. Certified closures still require
+their active fetch and validation before application. A missing, late,
+wrong-sized, or ledger-invalid closure fails apply-boundary validation; the
+remote ranking-block header remains admitted. Prototype VoteManager votes attest to authenticated announcements
 and acquisition, and may be emitted before this semantic validation. The
 LeiosVoteHandler validation path remains separate.
 
