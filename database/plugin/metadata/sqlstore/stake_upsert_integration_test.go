@@ -43,6 +43,12 @@ func TestMySQLStakeUpsertsMatchFullUpserts(t *testing.T) {
 // translation and requires the rows to equal what the full upserts leave.
 func testStakeUpsertsMatchFullUpserts(t *testing.T, store *Store) {
 	t.Helper()
+	for _, query := range append(
+		upsertAccountChangedSQLs[:], rewardLiveStakeUpsertKeepPoolQuery,
+	) {
+		_, ok := store.lookupCachedStmt(query)
+		require.True(t, ok, "not prepared by Start:\n%s", query)
+	}
 	poolA, poolB := []byte{0xa1}, []byte{0xb1}
 	drepX := []byte{0xc1}
 	var states []certificateAccountStored

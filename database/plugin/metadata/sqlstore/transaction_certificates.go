@@ -874,21 +874,17 @@ func (s *Store) updateCertificateAccountRow(
 	stored certificateAccountStored,
 	next certificateAccountStored,
 ) error {
-	assignments := []string{"added_slot = excluded.added_slot"}
+	changed := 0
 	if !samePool(stored.pool, next.pool) {
-		assignments = append(assignments, "pool = excluded.pool")
+		changed |= accountChangedPool
 	}
 	if !samePool(stored.drep, next.drep) || stored.drepType != next.drepType {
-		assignments = append(
-			assignments, "drep = excluded.drep", "drep_type = excluded.drep_type",
-		)
+		changed |= accountChangedDrep
 	}
 	if stored.active != next.active {
-		assignments = append(assignments, "active = excluded.active")
+		changed |= accountChangedActive
 	}
-	assignments = append(assignments, accountCreatedSlotAssignment)
-	_, err := s.execCached(ctx, db,
-		upsertAccountInsertSQL+strings.Join(assignments, ",\n    "),
+	_, err := s.execCached(ctx, db, upsertAccountChangedSQLs[changed],
 		key,
 		tag,
 		next.pool,
@@ -1424,6 +1420,41 @@ const accountCreatedSlotAssignment = `created_slot = CASE
         WHEN account.created_slot <= excluded.created_slot THEN account.created_slot
         ELSE excluded.created_slot
     END`
+
+// Bits of an upsertAccountChangedSQLs index: the certificate columns whose
+// stored value an update changes.
+const (
+	accountChangedPool = 1 << iota
+	accountChangedDrep
+	accountChangedActive
+	accountChangedVariants = 1 << iota
+)
+
+// upsertAccountChangedSQLs holds every statement updateCertificateAccountRow
+// issues, indexed by accountChanged* bits. The set is finite so each variant
+// is a fixed text that Start prepares (see hotStatements); a text built per
+// call would miss the prepared-statement cache on every update.
+var upsertAccountChangedSQLs = func() [accountChangedVariants]string {
+	var out [accountChangedVariants]string
+	for changed := range out {
+		assignments := []string{"added_slot = excluded.added_slot"}
+		if changed&accountChangedPool != 0 {
+			assignments = append(assignments, "pool = excluded.pool")
+		}
+		if changed&accountChangedDrep != 0 {
+			assignments = append(assignments,
+				"drep = excluded.drep", "drep_type = excluded.drep_type",
+			)
+		}
+		if changed&accountChangedActive != 0 {
+			assignments = append(assignments, "active = excluded.active")
+		}
+		assignments = append(assignments, accountCreatedSlotAssignment)
+		out[changed] = upsertAccountInsertSQL +
+			strings.Join(assignments, ",\n    ")
+	}
+	return out
+}()
 
 const upsertAccountSQL = upsertAccountInsertSQL +
 	`pool = excluded.pool,
