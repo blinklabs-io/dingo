@@ -937,6 +937,11 @@ var flagSpecs = []flagSpec{
 		"",
 		"hex SHA-256 of the remote KES agent's TLS server key (SubjectPublicKeyInfo), logged by the agent as server_spki_sha256",
 	),
+	boolFlag(
+		"ShelleyKESAgentPlaintext",
+		"shelley-kes-agent-plaintext",
+		"run the remote KES agent link over plain TCP",
+	),
 	durationFlag(
 		"ShelleyKeyWatchInterval",
 		"shelley-key-watch-interval",

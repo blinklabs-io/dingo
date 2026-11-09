@@ -337,6 +337,7 @@ func buildConwayValidationRules() []indexedUtxoValidationRule {
 		lcommon.UtxoValidationRuleCommitteeCertificates,
 		lcommon.UtxoValidationRuleUnknownVoters,
 		lcommon.UtxoValidationRuleDelegation,
+		lcommon.UtxoValidationRuleMaxTxSize,
 	}
 	descriptors := conway.UtxoValidationRuleDescriptors()
 	indexes := make([]int, len(skipRuleIds))
@@ -366,6 +367,20 @@ func buildConwayValidationRules() []indexedUtxoValidationRule {
 		indexedUtxoValidationRule{
 			index:          indexes[5],
 			validationFunc: validateDelegationConwayBootstrapAware,
+		},
+		// The upstream rule sizes the transaction by wire length, not
+		// TxSizeForFee, which ValidateTxFeeConway already uses.
+		indexedUtxoValidationRule{
+			index: indexes[6],
+			validationFunc: maxTxSizeRule(
+				func(pp lcommon.ProtocolParameters) (uint, bool) {
+					p, ok := pp.(*conway.ConwayProtocolParameters)
+					if !ok || p == nil {
+						return 0, false
+					}
+					return p.MaxTxSize, true
+				},
+			),
 		},
 	)
 	slices.SortFunc(ret, func(a, b indexedUtxoValidationRule) int {

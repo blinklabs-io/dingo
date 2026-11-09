@@ -1088,6 +1088,7 @@ func buildDingoConfig(
 			cfg.ShelleyKESAgentClientKeyFile,
 			cfg.ShelleyKESAgentServerSPKISHA256,
 		),
+		dingo.WithShelleyKESAgentPlaintext(cfg.ShelleyKESAgentPlaintext),
 		dingo.WithForgeSyncToleranceSlots(
 			cfg.ForgeSyncToleranceSlots,
 		),

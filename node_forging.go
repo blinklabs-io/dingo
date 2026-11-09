@@ -266,8 +266,15 @@ func (n *Node) loadBlockProducerCredentialsFromAgent(
 
 	mode := n.config.shelleyKESAgentMode
 	if n.config.shelleyKESAgentAddress != "" {
-		// A remote agent serves only sign mode; config validation rejects
-		// any other mode with an address.
+		// A remote agent serves only sign mode. Config validation rejects
+		// any other mode with an address, but a library caller can skip it.
+		if mode != "" && mode != kesagent.ModeSign {
+			return fmt.Errorf(
+				"remote KES agent supports only mode %q, got %q",
+				kesagent.ModeSign,
+				mode,
+			)
+		}
 		mode = kesagent.ModeSign
 	}
 	if mode == "" {
@@ -479,6 +486,7 @@ func (n *Node) newKESAgentSignClient(
 		ClientCertFile:    n.config.shelleyKESAgentClientCertFile,
 		ClientKeyFile:     n.config.shelleyKESAgentClientKeyFile,
 		ServerSPKISHA256:  n.config.shelleyKESAgentServerSPKISHA256,
+		Plaintext:         n.config.shelleyKESAgentPlaintext,
 		KESVKey:           opCertKey.VKey,
 		OpCertStartPeriod: opCertKey.OpCertKesPeriod,
 		OpCert:            opCertKey.RawCBOR,

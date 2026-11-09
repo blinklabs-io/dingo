@@ -39,7 +39,7 @@ FROM ghcr.io/blinklabs-io/cardano-configs:20261027-1@sha256:f111e6bfd0d0332fa73d
 FROM ghcr.io/blinklabs-io/nview:0.17.0@sha256:9b3c78702d3074cae7fe410e8594d98dbac7414ffb5512b00877558964a956b8 AS nview
 FROM ghcr.io/blinklabs-io/txtop:0.17.0@sha256:ac64eec8467f579d01a7cf070e9d006b7b509e31cd1d701b5882933f3b8f7b42 AS txtop
 
-FROM debian:bookworm-slim@sha256:99c0b25c46d0214d5a2091092e7908907dcaecd6a962cde0ac700acee222b6f3 AS dingo
+FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS dingo
 # pg_dump/pg_restore version compatibility is asymmetric and narrower than
 # it first appears, confirmed by actually running both directions against
 # real Postgres 16/17 servers while building this image:
