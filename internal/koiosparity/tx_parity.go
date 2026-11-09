@@ -65,6 +65,15 @@ type TransactionParitySource interface {
 		epoch uint64,
 		limit int,
 	) ([]DingoTransaction, error)
+	// GetEpochTransactionHashes returns the hashes of the transactions
+	// GetEpochTransactionSample reports for the same arguments, in the same
+	// order. It skips the per-output reads a comparison needs, so the fetch
+	// phase can tell what is already cached without paying for them.
+	GetEpochTransactionHashes(
+		ctx context.Context,
+		epoch uint64,
+		limit int,
+	) ([]string, error)
 }
 
 var _ TransactionParitySource = (*DatabaseSource)(nil)
@@ -279,65 +288,112 @@ func (s *DatabaseSource) resolveOutputAddresses(
 }
 
 // GetEpochTransactionSample returns the first limit transactions, in block
-// order, of epoch. Only API storage mode is sampled: core mode hard-deletes
-// consumed UTxOs after the stability window and does not retain the
-// collateral and reference associations, so an old transaction there would
-// read as having lost inputs.
+// order, of epoch.
 func (s *DatabaseSource) GetEpochTransactionSample(
 	ctx context.Context,
 	epoch uint64,
 	limit int,
 ) ([]DingoTransaction, error) {
+	var sample []DingoTransaction
+	err := s.walkEpochTransactions(
+		ctx, epoch, limit,
+		func(txn *database.Txn, tx *models.Transaction) error {
+			if err := s.resolveOutputAddresses(ctx, txn, tx); err != nil {
+				return err
+			}
+			sample = append(sample, dingoTransactionFromModel(tx))
+			return nil
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+	return sample, nil
+}
+
+// GetEpochTransactionHashes returns the hashes of the transactions
+// GetEpochTransactionSample reports for the same arguments.
+func (s *DatabaseSource) GetEpochTransactionHashes(
+	ctx context.Context,
+	epoch uint64,
+	limit int,
+) ([]string, error) {
+	var hashes []string
+	err := s.walkEpochTransactions(
+		ctx, epoch, limit,
+		func(_ *database.Txn, tx *models.Transaction) error {
+			hashes = append(hashes, hex.EncodeToString(tx.Hash))
+			return nil
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+	return hashes, nil
+}
+
+// walkEpochTransactions visits the first limit transactions, in block order,
+// of epoch. Only API storage mode is sampled: core mode hard-deletes consumed
+// UTxOs after the stability window and does not retain the collateral and
+// reference associations, so an old transaction there would read as having
+// lost inputs.
+func (s *DatabaseSource) walkEpochTransactions(
+	ctx context.Context,
+	epoch uint64,
+	limit int,
+	visit func(*database.Txn, *models.Transaction) error,
+) error {
 	if limit <= 0 || s.db.StorageMode() != types.StorageModeAPI {
-		return nil, nil
+		return nil
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return err
 	}
 	txn := s.db.Transaction(ctx, false)
 	defer txn.Release()
 	ep, err := s.db.GetEpoch(epoch, txn)
 	if err != nil {
-		return nil, fmt.Errorf("epoch %d lookup: %w", epoch, err)
+		return fmt.Errorf("epoch %d lookup: %w", epoch, err)
 	}
 	if ep == nil || ep.LengthInSlots == 0 {
-		return nil, nil
+		return nil
 	}
 	it := s.db.BlocksInRangeContext(
 		ctx, ep.StartSlot, ep.StartSlot+uint64(ep.LengthInSlots)-1,
 	)
 	defer it.Close()
-	var sample []DingoTransaction
-	for len(sample) < limit {
+	visited := 0
+	for visited < limit {
 		blk, err := it.NextRaw()
 		if err != nil {
-			return nil, fmt.Errorf("epoch %d blocks: %w", epoch, err)
+			return fmt.Errorf("epoch %d blocks: %w", epoch, err)
 		}
 		if blk == nil {
-			break
+			return nil
 		}
 		txs, err := s.db.GetTransactionsByBlockHash(ctx, blk.Hash, txn)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		for i := range txs {
-			if len(sample) == limit {
+			if visited == limit {
 				break
 			}
-			if err := s.resolveOutputAddresses(ctx, txn, &txs[i]); err != nil {
-				return nil, err
+			if err := visit(txn, &txs[i]); err != nil {
+				return err
 			}
-			sample = append(sample, dingoTransactionFromModel(&txs[i]))
+			visited++
 		}
 	}
-	return sample, nil
+	return nil
 }
 
 // fetchTransactionsIfNeeded caches the /tx_info rows of the epoch's sampled
 // transactions that are not cached yet. A Koios failure that outlasts the
-// retries is logged and swallowed: the check then records each uncached
-// transaction as a missing reference (an ERROR), and the rest of the epoch is
-// still compared. Only cancellation is returned.
+// retries is logged and swallowed, keeping any rows that did arrive: the check
+// then records each transaction still uncached as a missing reference (an
+// ERROR), and the rest of the epoch is still compared. Only cancellation is
+// returned.
 func (o *Observer) fetchTransactionsIfNeeded(
 	ctx context.Context,
 	epoch uint64,
@@ -354,15 +410,11 @@ func (o *Observer) fetchTransactionsIfNeeded(
 			"network", o.cfg.Network, "epoch", epoch, "error", err)
 		return nil
 	}
-	sample, err := source.GetEpochTransactionSample(
+	hashes, err := source.GetEpochTransactionHashes(
 		ctx, epoch, EpochTransactionSampleSize,
 	)
 	if err != nil {
 		return fail(err)
-	}
-	hashes := make([]string, len(sample))
-	for i, tx := range sample {
-		hashes[i] = tx.Hash
 	}
 	cached, err := o.cache.GetTxInfos(o.cfg.Network, hashes)
 	if err != nil {
@@ -377,14 +429,16 @@ func (o *Observer) fetchTransactionsIfNeeded(
 	if len(missing) == 0 {
 		return nil
 	}
-	items, err := o.getTxInfosWithRetry(ctx, missing)
-	if err != nil {
-		return fail(err)
+	items, fetchErr := o.getTxInfosWithRetry(ctx, missing)
+	if len(items) > 0 {
+		if err := o.cache.UpsertTxInfos(
+			o.cfg.Network, items, time.Now().UTC(),
+		); err != nil {
+			return fail(err)
+		}
 	}
-	if err := o.cache.UpsertTxInfos(
-		o.cfg.Network, items, time.Now().UTC(),
-	); err != nil {
-		return fail(err)
+	if fetchErr != nil {
+		return fail(fetchErr)
 	}
 	return nil
 }
@@ -392,29 +446,49 @@ func (o *Observer) fetchTransactionsIfNeeded(
 // getTxInfosWithRetry applies the observer's bounded fetch retry to /tx_info.
 // The retry covers ErrTxInfoMissing too: the public host can answer a valid
 // request with 200 and an empty array, and an answer that the next request
-// would correct must not turn the epoch into an ERROR.
+// would correct must not turn the epoch into an ERROR. Each attempt asks only
+// for the hashes still unanswered, and the rows gathered so far are returned
+// alongside the final error, so one hash Koios cannot answer costs only its
+// own comparison.
 func (o *Observer) getTxInfosWithRetry(
 	ctx context.Context,
 	hashes []string,
 ) ([]KoiosTxInfoItem, error) {
+	var items []KoiosTxInfoItem
 	var lastErr error
+	remaining := hashes
 	for attempt := range o.cfg.FetchRetryAttempts {
-		items, err := o.koios.GetTxInfos(ctx, hashes)
-		if err == nil {
-			return items, nil
+		answered, err := o.koios.getAvailableTxInfos(ctx, remaining)
+		switch {
+		case err == nil:
+			var unanswered []string
+			for _, h := range remaining {
+				if item, ok := answered[h]; ok {
+					items = append(items, item)
+				} else {
+					unanswered = append(unanswered, h)
+				}
+			}
+			remaining = unanswered
+			if len(remaining) == 0 {
+				return items, nil
+			}
+			lastErr = fmt.Errorf(
+				"%w %s", ErrTxInfoMissing, strings.Join(remaining, ","),
+			)
+		case errors.Is(err, ErrKoiosPermanent):
+			return items, err
+		default:
+			lastErr = err
 		}
-		if errors.Is(err, ErrKoiosPermanent) {
-			return nil, err
-		}
-		lastErr = err
 		if attempt == o.cfg.FetchRetryAttempts-1 {
 			break
 		}
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return items, ctx.Err()
 		case <-time.After(o.cfg.FetchRetryDelay):
 		}
 	}
-	return nil, lastErr
+	return items, lastErr
 }

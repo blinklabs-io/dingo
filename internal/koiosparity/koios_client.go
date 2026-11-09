@@ -2401,6 +2401,30 @@ func (k *KoiosClient) GetTxInfos(
 	ctx context.Context,
 	txHashes []string,
 ) ([]KoiosTxInfoItem, error) {
+	byHash, err := k.getAvailableTxInfos(ctx, txHashes)
+	if err != nil {
+		return nil, err
+	}
+	all := make([]KoiosTxInfoItem, len(txHashes))
+	for i, hash := range txHashes {
+		item, ok := byHash[hash]
+		if !ok {
+			return nil, fmt.Errorf("%w %s", ErrTxInfoMissing, hash)
+		}
+		all[i] = item
+	}
+	return all, nil
+}
+
+// getAvailableTxInfos requests txHashes and returns the rows Koios answered
+// with, keyed by hash. A hash Koios has no row for is simply absent, which
+// suits a caller that treats each transaction independently; GetTxInfos layers
+// its every-hash contract on top. A failed request or a duplicated row still
+// fails the call.
+func (k *KoiosClient) getAvailableTxInfos(
+	ctx context.Context,
+	txHashes []string,
+) (map[string]KoiosTxInfoItem, error) {
 	byHash := make(map[string]KoiosTxInfoItem, len(txHashes))
 	batch := k.TxInfoBatchSize()
 	for start := 0; start < len(txHashes); start += batch {
@@ -2451,16 +2475,7 @@ func (k *KoiosClient) GetTxInfos(
 			byHash[item.TxHash] = item
 		}
 	}
-
-	all := make([]KoiosTxInfoItem, len(txHashes))
-	for i, hash := range txHashes {
-		item, ok := byHash[hash]
-		if !ok {
-			return nil, fmt.Errorf("%w %s", ErrTxInfoMissing, hash)
-		}
-		all[i] = item
-	}
-	return all, nil
+	return byHash, nil
 }
 
 // describeTxInfoDecodeFailure turns a whole-response /tx_info decode failure

@@ -28,6 +28,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -294,13 +295,25 @@ func TestDatabaseSourceTransactionSampleSkippedInCoreMode(t *testing.T) {
 // txSampleStub makes a DatabaseSource report a fixed transaction sample.
 type txSampleStub struct {
 	RewardParitySource
-	sample []DingoTransaction
+	sample      []DingoTransaction
+	sampleCalls atomic.Int32
 }
 
 func (s *txSampleStub) GetEpochTransactionSample(
 	context.Context, uint64, int,
 ) ([]DingoTransaction, error) {
+	s.sampleCalls.Add(1)
 	return s.sample, nil
+}
+
+func (s *txSampleStub) GetEpochTransactionHashes(
+	context.Context, uint64, int,
+) ([]string, error) {
+	hashes := make([]string, len(s.sample))
+	for i, tx := range s.sample {
+		hashes[i] = tx.Hash
+	}
+	return hashes, nil
 }
 
 func txMismatchFields(t *testing.T, ms []CheckMismatch) []string {
@@ -499,9 +512,6 @@ func TestObserverFetchIfNeededCachesTransactionSample(t *testing.T) {
 	require.Contains(t, got, txParityHash)
 }
 
-// TestCacheTxInfoIgnoresRowsWithoutReferenceInputs: a row stored before
-// ReferenceInputs existed decodes with none, which would read as a
-// transaction that references nothing, so it must be re-fetched.
 // TestObserverRetriesTransientEmptyTxInfo pins the bounded retry around
 // /tx_info: the public host intermittently answers a valid request with 200
 // and an empty array, and one such answer must not become an ERROR epoch.
@@ -568,6 +578,113 @@ func TestObserverRetriesTransientEmptyTxInfo(t *testing.T) {
 	}
 }
 
+// TestObserverKeepsAnsweredTxInfoRows: one hash Koios has no row for must cost
+// only that transaction's comparison, and a retry must not re-request the
+// hashes already answered.
+func TestObserverKeepsAnsweredTxInfoRows(t *testing.T) {
+	t.Parallel()
+
+	const unanswered = "ee55"
+	var mu sync.Mutex
+	var requested [][]string
+	srv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			var body struct {
+				TxHashes []string `json:"_tx_hashes"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			mu.Lock()
+			requested = append(requested, body.TxHashes)
+			mu.Unlock()
+			items := make([]KoiosTxInfoItem, 0, len(body.TxHashes))
+			for _, h := range body.TxHashes {
+				if h == unanswered {
+					continue
+				}
+				item := koiosTx()
+				item.TxHash = h
+				items = append(items, item)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(items)
+		}))
+	defer srv.Close()
+
+	base, err := NewDatabaseSource(newTestDatabaseSourceDB(t))
+	require.NoError(t, err)
+	second := dingoTx()
+	second.Hash = unanswered
+	sample := []DingoTransaction{dingoTx(), second}
+	o, err := NewObserver(ObserverConfig{
+		Network:   "preview",
+		CachePath: filepath.Join(t.TempDir(), "cache.db"),
+		Source: &txSampleStub{
+			RewardParitySource: base,
+			sample:             sample,
+		},
+		BaseURL:               srv.URL,
+		AllowInsecureHTTP:     true,
+		AllowPrivateAddresses: true,
+		FetchRetryAttempts:    2,
+		FetchRetryDelay:       time.Millisecond,
+		Logger:                slog.New(slog.DiscardHandler),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = o.Stop(context.Background()) })
+
+	require.NoError(t, o.fetchTransactionsIfNeeded(context.Background(), 5))
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Equal(t, [][]string{
+		{txParityHash, unanswered},
+		{unanswered},
+	}, requested)
+	got, err := o.cache.GetTxInfos(
+		"preview", []string{txParityHash, unanswered},
+	)
+	require.NoError(t, err)
+	require.Contains(t, got, txParityHash)
+	require.NotContains(t, got, unanswered)
+
+	mismatches := CompareEpochTransactions(
+		"preview", 5, sample, got, time.Now(),
+	)
+	require.Len(t, mismatches, 1)
+	require.Equal(t, "tx_info:"+unanswered, mismatches[0].Field)
+	require.Equal(t, CategoryDBMissing, mismatches[0].Category)
+}
+
+// TestObserverFetchSkipsPerOutputSampleReads: the fetch phase runs on every
+// fetchIfNeeded call, so it must learn what is cached from the hashes alone.
+func TestObserverFetchSkipsPerOutputSampleReads(t *testing.T) {
+	t.Parallel()
+
+	base, err := NewDatabaseSource(newTestDatabaseSourceDB(t))
+	require.NoError(t, err)
+	source := &txSampleStub{
+		RewardParitySource: base,
+		sample:             []DingoTransaction{dingoTx()},
+	}
+	o, err := NewObserver(ObserverConfig{
+		Network:   "preview",
+		CachePath: filepath.Join(t.TempDir(), "cache.db"),
+		Source:    source,
+		Logger:    slog.New(slog.DiscardHandler),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = o.Stop(context.Background()) })
+	require.NoError(t, o.cache.UpsertTxInfos(
+		"preview", []KoiosTxInfoItem{koiosTx()}, time.Now(),
+	))
+
+	require.NoError(t, o.fetchTransactionsIfNeeded(context.Background(), 5))
+	require.Zero(t, source.sampleCalls.Load())
+}
+
+// TestCacheTxInfoIgnoresRowsWithoutReferenceInputs: a row stored before
+// ReferenceInputs existed decodes with none, which would read as a
+// transaction that references nothing, so it must be re-fetched.
 func TestCacheTxInfoIgnoresRowsWithoutReferenceInputs(t *testing.T) {
 	t.Parallel()
 
@@ -806,5 +923,15 @@ func sampleStoredTxParityBlock(
 		ctx, 3, EpochTransactionSampleSize,
 	)
 	require.NoError(t, err)
+
+	hashes, err := source.GetEpochTransactionHashes(
+		ctx, 3, EpochTransactionSampleSize,
+	)
+	require.NoError(t, err)
+	wantHashes := make([]string, len(sample))
+	for i, tx := range sample {
+		wantHashes[i] = tx.Hash
+	}
+	require.Equal(t, wantHashes, hashes)
 	return sample
 }

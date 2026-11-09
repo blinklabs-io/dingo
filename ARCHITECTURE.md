@@ -15814,11 +15814,11 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   below for why `complete` gates every per-account comparison). It also holds
   `koios_tx_info` (one row per `(network, tx_hash)` holding the decoded
   `/tx_info` subset `node-parity from-genesis` rebuilds the UTxO set from: body
-  inputs, reference inputs and outputs, plus the collateral inputs, collateral
-  return and phase-2 validity verdict its `Consumed`/`Produced` need). That
-  table is written by `cmd/node-parity from-genesis` and by the in-process
-  observer's transaction sample (below), not by the `fetch` subcommand, and
-  unlike the
+  inputs and outputs, plus the collateral inputs, collateral return and phase-2
+  validity verdict its `Consumed`/`Produced` need; the reference inputs serve
+  only the in-process observer's transaction sample, below). That table is
+  written by `cmd/node-parity from-genesis` and by that sample, not by the
+  `fetch` subcommand, and unlike the
   per-epoch tables it needs no TTL — a settled transaction never changes
   Koios-side. A `payload_version` column stands in for one: it stamps the struct
   shape each row was written from, and rows carrying an older version are
@@ -16689,8 +16689,9 @@ second sync:
     `TransactionParitySource` (`DatabaseSource`, in API storage mode only)
     reports up to `EpochTransactionSampleSize` transactions of the epoch, in
     block order. `fetchIfNeeded` caches their `/tx_info` rows under the
-    observer's bounded fetch retry (a Koios failure that outlasts it is logged
-    and surfaces as a `dingo_db_missing` mismatch, an `ERROR` epoch), and
+    observer's bounded fetch retry (rows that arrived are kept, and each hash
+    that outlasts it is logged and surfaces as a `dingo_db_missing` mismatch,
+    an `ERROR` epoch), and
     `checkEpoch` compares, in the aggregate scope, the consumed inputs,
     collateral inputs, reference inputs and produced outputs including lovelace
     and native-asset amounts, plus the validity flag. A phase-2-invalid
