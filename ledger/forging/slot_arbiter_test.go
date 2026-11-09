@@ -39,6 +39,7 @@ func (a *fixedSlotArbiter) YieldSlot(slot uint64) (bool, string) {
 }
 
 func TestForgerYieldsALeaderSlotToTheNodesWinningPool(t *testing.T) {
+	t.Parallel()
 	var logs bytes.Buffer
 	forger, builder, _ := newStaleTipTestForger(t, 200, 199, 199, &logs)
 	arbiter := &fixedSlotArbiter{yield: true, winner: "pool-b"}
@@ -57,6 +58,7 @@ func TestForgerYieldsALeaderSlotToTheNodesWinningPool(t *testing.T) {
 }
 
 func TestForgerForgesWhenTheArbiterKeepsTheSlot(t *testing.T) {
+	t.Parallel()
 	for _, arbiter := range []*fixedSlotArbiter{
 		{yield: false},
 		{panics: true}, // a faulty arbiter fails open
@@ -73,6 +75,7 @@ func TestForgerForgesWhenTheArbiterKeepsTheSlot(t *testing.T) {
 }
 
 func TestForgerAsksTheArbiterOnlyForLeaderSlots(t *testing.T) {
+	t.Parallel()
 	var logs bytes.Buffer
 	forger, _, _ := newStaleTipTestForger(t, 200, 199, 199, &logs)
 	forger.leaderChecker = forgeStaleTipTestNonLeader{}
