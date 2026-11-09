@@ -16,6 +16,7 @@ package sqlstore
 
 import (
 	"context"
+	"maps"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -255,9 +256,7 @@ func (s *Store) cachedStatementHits() map[string]uint64 {
 	s.stmtMu.Lock()
 	defer s.stmtMu.Unlock()
 	hits := make(map[string]uint64, len(s.stmtHits))
-	for query, n := range s.stmtHits {
-		hits[query] = n
-	}
+	maps.Copy(hits, s.stmtHits)
 	return hits
 }
 
