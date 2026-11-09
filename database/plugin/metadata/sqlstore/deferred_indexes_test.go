@@ -272,6 +272,7 @@ func TestDeferredRebuildKeepsUtxoIndexesPartial(t *testing.T) {
 
 	for _, column := range []string{
 		"spent_at_tx_id",
+		"spent_by_tx_id",
 		"collateral_by_tx_id",
 		"referenced_by_tx_id",
 	} {

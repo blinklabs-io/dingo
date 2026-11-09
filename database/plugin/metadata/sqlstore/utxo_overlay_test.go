@@ -771,7 +771,7 @@ func TestReadsOverlayTables(t *testing.T) {
 		"SELECT value FROM sync_state WHERE sync_key = ?":          false,
 		"SELECT 'consumed_utxo_prune_floor'":                       false,
 		`INSERT INTO "transaction" (hash) VALUES (?) RETURNING id`: false,
-		"SELECT * FROM utxo_reference_input":                       false,
+		"SELECT * FROM utxo_reference_edge":                        false,
 	} {
 		require.Equal(t, want, readsOverlayTables(query), query)
 	}
@@ -779,7 +779,7 @@ func TestReadsOverlayTables(t *testing.T) {
 
 // TestBatchUtxoOverlayStatementPlans pins the plans of the overlay's bulk
 // statements against a skewed utxo table: the prefetch probes
-// tx_id_output_idx once per key, the spend mark and the delete find rows by
+// the output indexes once per key, the spend mark and the delete find rows by
 // primary key, and the live-stake prefetches probe the unique credential
 // indexes of reward_live_stake and account. No plan may use a deleted_slot
 // index or scan utxo, with no statistics, with statistics, and with the

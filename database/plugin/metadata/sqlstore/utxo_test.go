@@ -170,7 +170,7 @@ func legacyGetUtxosByRefsAsOfQuery(
 // TestGetUtxosByRefsUsesTxIDIndex pins the query plan of the predicate
 // GetUtxosByRefs and GetUtxosByRefsAsOf run, the same planner-fallback shape
 // documents for queryUtxoStakeRefs: the legacy OR-predicate form
-// abandons tx_id_output_idx for idx_utxo_deleted_payment_script/
+// abandons the output index for idx_utxo_deleted_payment_script/
 // idx_utxo_deleted_staking_amount past a handful of terms, and the tx_id-IN
 // form this test also exercises does not.
 func TestGetUtxosByRefsUsesTxIDIndex(t *testing.T) {
@@ -465,7 +465,7 @@ func legacyMarkUtxosDeletedAtSlotQuery(
 // method updates the selected primary keys. The former OR-of-pairs update
 // prefers a deleted_slot index after a few terms, which turns a bounded
 // batch into a scan of nearly every live UTxO. Selecting by tx_id and
-// filtering output indexes in Go keeps the lookup on tx_id_output_idx.
+// filtering output indexes in Go keeps the lookup on the output index.
 func TestMarkUtxosDeletedAtSlotUsesTxIDIndex(t *testing.T) {
 	skipPlanTestUnderRace(t)
 	t.Parallel()
@@ -1394,11 +1394,11 @@ func utxoIDAt(i int) models.UtxoId {
 // the per-transaction write path (transaction_write.go, not liveOnly).
 //
 // The old OR-of-(tx_id = ? AND output_idx = ?) form abandons the unique
-// tx_id_output_idx index once liveOnly's "deleted_slot = 0" gives the
+// output index once liveOnly's "deleted_slot = 0" gives the
 // planner a falsely attractive alternative: idx_utxo_deleted_staking_amount
 // matches nearly every live row, so past a handful of OR terms SQLite drives
 // off that index instead and visits the whole table. The
-// tx_id-IN form this test also exercises stays on tx_id_output_idx
+// tx_id-IN form this test also exercises stays on the output index
 // regardless of term count, because a plain IN list has no such competing
 // index to be lured by.
 func TestQueryUtxoStakeRefsUsesTxIDIndex(t *testing.T) {
@@ -2425,7 +2425,7 @@ func TestUtxosByExactRefsSpansQueryBatches(t *testing.T) {
 }
 
 // TestUtxoRefsExactQueryUsesCompositeIndex pins the plan: each reference is
-// its own tx_id_output_idx lookup, with no fallback to a deleted_slot index.
+// its own output-index lookup, with no fallback to a deleted_slot index.
 func TestUtxoRefsExactQueryUsesCompositeIndex(t *testing.T) {
 	skipPlanTestUnderRace(t)
 	t.Parallel()
