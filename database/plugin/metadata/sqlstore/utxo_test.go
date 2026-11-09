@@ -2142,8 +2142,8 @@ func TestImportUtxosBoundsTxScopedStatementRetentionInOneTransaction(
 	require.LessOrEqual(
 		t,
 		retained,
-		1,
-		"expected one Tx-scoped importer statement for %d outputs, got %d",
+		2,
+		"expected the insert and cross-identity probe as the only Tx-scoped importer statements for %d outputs, got %d",
 		outputCount,
 		retained,
 	)

@@ -139,7 +139,7 @@ func hotStatementsFor(u *utxoSQL) []string {
 		)
 	}
 	for size := 1; size <= maxImportedProbeHashes; size *= 2 {
-		queries = append(queries, importedProbeQuery(size))
+		queries = append(queries, importedProbeQuery(size), producedProbeQuery(size))
 	}
 	return queries
 }

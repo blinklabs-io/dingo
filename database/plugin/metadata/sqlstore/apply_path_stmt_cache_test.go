@@ -282,6 +282,8 @@ func TestApplyPathUtxoStatementsComeFromThePreparedCache(t *testing.T) {
 		{"output insert (batch)", insertUtxoBatchQuery(2)},
 		{"un-spend of a stale spend", u.clearStaleSpend},
 		{"imported row id", u.idByRef},
+		{"imported row probe", producedProbeQuery(1)},
+		{"imported row insert", u.insertIgnore},
 	}
 	prepared := map[string]bool{}
 	for _, q := range recorder.snapshot() {
