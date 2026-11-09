@@ -11236,11 +11236,19 @@ a sibling adopter.
 The default builder omits mempool transactions and Leios data from that
 alternative; the sibling adopter lets chain selection decide whether it wins.
 
-Step 5's transaction selection runs inside `LedgerState.WithTxValidationSession`
-(the same mechanism the mempool backend rebuilds use above): one pinned ledger
-generation, one validation reference slot, and one repeatable-read transaction
-cover every mempool transaction considered for the candidate block, not a
-fresh snapshot per transaction. If a block, rollback, or protocol-parameter
+Step 5's transaction selection runs inside `LedgerState.WithTxValidationSessionAtSlot`
+(the slot-ticked variant of the `WithTxValidationSession` mechanism the mempool
+backend rebuilds use above): one pinned ledger generation, one validation
+reference slot (the forge slot), and one transaction cover every mempool
+transaction considered for the candidate block, not a fresh snapshot per
+transaction. The session's view is ticked to the forge slot
+(`tickTxValidationSnapshot`): when the slot lies past the applied epoch's end,
+the epoch rollover, any era transition and the pending protocol-parameter
+updates are staged in the session's rollback-only transaction, so selection
+sees the parameters and state enacted at that boundary and nothing is
+committed; a forge slot more than one epoch beyond the applied epoch is
+refused. A validator without the slot-ticked session falls back to the
+unticked `WithTxValidationSession`. If a block, rollback, or protocol-parameter
 change publishes a newer generation before selection finishes, the whole
 candidate is rejected (`transaction validation snapshot changed`) instead of
 being built from transactions checked against different ledger views.
@@ -11966,9 +11974,13 @@ and 7, before adoption or diffusion, via `newForgedBlockValidator`'s mandatory
 disabled in config (enabled by default, fail closed), that same call
 additionally runs full self-validation: (a) VRF proof and KES signature
 verification of the block header, (b) body-hash non-zero guard, and (c)
-per-transaction ledger rule validation against the current UTxO state with an
-intra-block overlay so outputs created by earlier transactions in the same block
-are visible to later ones. A failing block is logged, counted in
+per-transaction ledger rule validation with an intra-block overlay so outputs
+created by earlier transactions in the same block are visible to later ones.
+Both checks run in a session ticked to the block's slot, the same view
+selection used: a block forged across an epoch boundary is judged against the
+epoch rollover, era transition and pending protocol-parameter updates staged
+(rollback-only, never committed) for that slot, including the reference-script
+limits enacted there, rather than the pre-boundary parameters. A failing block is logged, counted in
 `dingo_forge_validation_failed_total`, and dropped without being adopted or
 diffused. Validation wall-clock time is recorded in the
 `dingo_forge_validation_duration_seconds` histogram. An operator may set
