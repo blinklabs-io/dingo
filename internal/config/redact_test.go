@@ -162,8 +162,7 @@ func sentinelSecretConfig() *Config {
 			Enabled: true,
 			APIKey:  "SENTINEL-KOIOS-API-KEY",
 		},
-		MetricsAuthToken: "SENTINEL-METRICS-AUTH-TOKEN",
-		BarkBaseUrl:      "https://bark:SENTINEL-BARK-PASSWORD@bark.example/api",
+		BarkBaseUrl: "https://bark:SENTINEL-BARK-PASSWORD@bark.example/api",
 		BarkBlockDownloadHosts: []string{
 			"https://blocks:SENTINEL-BARK-HOST-PASSWORD@blocks.example",
 			"https://plain.example",

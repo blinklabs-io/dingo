@@ -58,7 +58,7 @@ api/mcp/
   `plugin.Host`. Compiled in without an extra build tag; disabled by default
   (`port: 0`). Node composition skips construction at zero; a positive port such
   as `8088` enables it in either storage mode. This makes the endpoint opt-in
-  while authentication is unset. Zero does not select an ephemeral port.
+  without restricting callers. Zero does not select an ephemeral port.
 - **Connection Management**: Opens a separate read-only pool at the active
   metadata provider's `SQLitePath()` using `modernc.org/sqlite`, `mode=ro`,
   `_pragma=query_only(1)`, and `_pragma=busy_timeout(5000)`. This reads the live
@@ -77,16 +77,14 @@ api/mcp/
   transport (used by Claude Code CLI and Cursor).
 - **Health Check (`/health` & `/healthz`)**: Listener status endpoints returning
   `{"service":"dingo-mcp","status":"ok"}`; they do not probe database
-  connectivity. `/healthz` bypasses token authentication and rate limiting,
-  while `/health` does not. Both remain subject to origin validation.
+  connectivity. Both bypass rate limiting. Both remain subject to origin validation.
 
 ### 2.3 Security & Guardrails (`security.go`, `sanitize.go`)
-- **Bearer Authentication**: Optional shared secret token configured via
-  `DINGO_PLUGINS_API_MCP_CONFIG_AUTH_TOKEN` or YAML
-  `plugins.api.mcp.config.authToken`.
+- **Anonymous HTTP**: All endpoints accept requests without caller credentials
+  and support plaintext HTTP on every bind address.
 - **Rate Limiting**: Thread-safe token bucket rate limiter (default: 60
   requests/sec with burst capacity of 15) keyed per client IP address.
-  Pre-authentication state is capped at 4096 identities and one timer removes
+  Client limiter state is capped at 4096 identities and one timer removes
   entries after 30 idle minutes.
 - **Session Admission**: Streamable HTTP and legacy SSE share a 128-session cap,
   with at most eight sessions per client address. New sessions fail with HTTP
@@ -312,11 +310,10 @@ Historical protocol-parameter requests return an explicit unsupported error.
 Minimum UTxO calculation delegates to the pinned gouroboros ledger helper using
 complete output CBOR, or a constructed ADA-only output.
 
-Both HTTP transports share origin validation before authentication and route
+Both HTTP transports share origin validation before route
 handling. Only same-origin on loopback or explicitly allowed origins pass; the
 shared CORS wildcard is ignored for MCP. Native clients without Origin remain
-supported. `DINGO_MCP_AUTH_TOKEN` is a compatibility alias below the canonical
-plugin environment setting in precedence. HTTP has no absolute write deadline
+supported. HTTP has no absolute write deadline
 because SSE responses span client sessions. The session admission layer supplies
 the finite idle and lifetime bounds for both transports. The limiter's
 idle-expiry timer reclaims entries even when no requests arrive and is stopped

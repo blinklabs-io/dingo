@@ -17,7 +17,7 @@ DINGO_PLUGINS_API_MCP_CONFIG_PORT=8088 ./dingo serve --config dingo.yaml --mcp-p
 ```
 MCP is disabled by default (`port: 0`): node startup skips the server entirely,
 so zero does not allocate a random port. This makes the SQL and node-inspection
-endpoint opt-in while authentication is unset by default. The command above
+endpoint opt-in. The command above
 enables it at `http://127.0.0.1:8088`; the default host is loopback.
 
 ### Step 2: Verify Listener Health
@@ -127,7 +127,7 @@ Pre-packaged diagnostic and forensic protocols exposed via `prompts/list` and
 - **Immutable Ledger State**: Cardano domain tools read immutable in-memory
   ledger state or read-only database connections.
 - **Rate Limiting**: Per-IP token bucket (default 60 req/s, burst 15) prevents
-  runaway agent loops from exhausting CPU or disk I/O. Pre-authentication state
+  runaway agent loops from exhausting CPU or disk I/O. Client limiter state
   is capped at 4096 identities and entries expire after 30 idle minutes
   independently of incoming traffic.
 - **Output Sanitization**: External asset text is length-bounded, stripped of
@@ -358,16 +358,14 @@ You can configure MCP via canonical plugin environment variables:
 | Variable | Default | Description |
 | --- | --- | --- |
 | `DINGO_PLUGINS_API_MCP_CONFIG_PORT` | `0` (disabled) | Port for the MCP HTTP/SSE listener (also accepts legacy `DINGO_MCP_PORT`) |
-| `DINGO_PLUGINS_API_MCP_CONFIG_AUTH_TOKEN` | *empty* (disabled) | Optional Bearer token for authentication |
 | `DINGO_PLUGINS_API_MCP_CONFIG_RATE_LIMIT` | `60.0` | Sustained requests per second per IP (0 = unlimited) |
 | `DINGO_PLUGINS_API_MCP_CONFIG_BURST` | `15` | Maximum burst requests per IP |
 | `DINGO_PLUGINS_API_MCP_CONFIG_QUERY_TIMEOUT` | `5s` | Maximum execution timeout for SQLite queries |
 | `DINGO_PLUGINS_API_MCP_CONFIG_MAX_ROWS` | `100` | Maximum rows returned per query by default |
 
-Example with authentication and custom port:
+Example with a custom port:
 ```bash
 export DINGO_PLUGINS_API_MCP_CONFIG_PORT=8088
-export DINGO_PLUGINS_API_MCP_CONFIG_AUTH_TOKEN="secret-agent-key-123"
 ./dingo serve --network preview --storage-mode api --mcp-provider builtin
 ```
 
@@ -404,15 +402,8 @@ When running on port `8088`, Dingo serves:
 
 ### Authentication and browser origins
 
-Set `DINGO_MCP_AUTH_TOKEN` or the canonical
-`DINGO_PLUGINS_API_MCP_CONFIG_AUTH_TOKEN` to require a Bearer token or
-`X-API-Key`. The canonical variable takes precedence when both are present;
-otherwise the compatibility variable overrides YAML `authToken`. The
-compatibility variable preserves its value verbatim. Canonical plugin variables
-use the generic YAML scalar convention; quote token values that resemble YAML
-numbers or booleans. Non-loopback binds require both an auth token and server
-TLS; loopback remains the default and supports local clients without
-credentials.
+All MCP endpoints accept anonymous requests. Plaintext HTTP is supported on
+loopback and non-loopback listeners without authentication or TLS requirements.
 
 Clients without an `Origin` header remain supported. Browser requests must be
 same-origin on loopback or match an explicit entry in root `corsAllowedOrigins`;
@@ -426,8 +417,7 @@ corsAllowedOrigins:
   - "http://localhost:6274"
 ```
 
-`localhost` and `127.0.0.1` are distinct origins. Origin validation happens
-before authentication; an allowed browser must also supply the configured token.
+`localhost` and `127.0.0.1` are distinct origins. Origin validation uses the configured browser origin list.
 
 ### Metadata and query semantics
 
@@ -555,10 +545,6 @@ npx @modelcontextprotocol/inspector --web --server-url http://127.0.0.1:8088/mcp
 3. Select any tool (e.g. `get_cardano_tip` or `sqlite_query`) and click
    **Execute Tool**.
 
-If Dingo requires an authentication token:
-```bash
-npx @modelcontextprotocol/inspector --web --server-url http://127.0.0.1:8088/mcp --header "Authorization: Bearer secret-agent-key-123"
-```
 
 ### B. Command-Line Interface (CLI)
 
@@ -610,10 +596,6 @@ Run in your terminal (with Dingo running on port `8088`):
 claude mcp add --transport sse dingo http://127.0.0.1:8088/sse
 ```
 
-If Dingo is configured with an authentication token:
-```bash
-claude mcp add --transport sse dingo http://127.0.0.1:8088/sse --header "Authorization: Bearer secret-agent-key-123"
-```
 
 #### B. Verify or Manage Servers in Claude Code
 
@@ -677,19 +659,6 @@ Edit your Claude Desktop configuration file:
 }
 ```
 
-If you configured an authentication token:
-```json
-{
-  "mcpServers": {
-    "dingo": {
-      "url": "http://127.0.0.1:8088/sse",
-      "headers": {
-        "Authorization": "Bearer secret-agent-key-123"
-      }
-    }
-  }
-}
-```
 
 #### Stdio-only clients
 

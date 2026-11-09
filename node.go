@@ -1557,13 +1557,6 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			n.config.barkHost,
 			lifecycleEnabled || remoteLifecycleEnabled,
 		)
-		if barkHost != n.config.barkHost {
-			n.config.logger.Warn(
-				"bark database lifecycle and remote Stop/Restart services default to a loopback-only bind since no --bark-host was set; every DatabaseService RPC requires a verified mTLS client certificate (--bark-client-ca-file-path), and destructive RPCs require an allowlisted certificate fingerprint (--bark-operator-certificate-fingerprints), independent of bind address; widen this bind only behind your own trusted network controls",
-				"component",
-				"bark",
-			)
-		}
 		barkConfig := bark.BarkConfig{
 			Logger:                                   n.config.logger,
 			DB:                                       db,
@@ -1846,7 +1839,10 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 
 	// Node-managed Mithril starts last, once Ouroboros and the ledger it
 	// holds off and hands back to are running.
-	started = append(started, n.startMithrilCoordinator(n.ctx)) //nolint:contextcheck
+	started = append(
+		started,
+		n.startMithrilCoordinator(n.ctx),
+	) //nolint:contextcheck
 
 	// All components started successfully
 	n.startupLifecycleMu.Unlock()

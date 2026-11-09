@@ -16,7 +16,6 @@ package config
 
 import (
 	"crypto/ed25519"
-	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -57,30 +56,6 @@ func ValidateKESKeySources(kesKeyPath, kesAgentSocket string) error {
 	return nil
 }
 
-func validateCertificateFingerprints(field string, values []string) []error {
-	var errs []error
-	for idx, fingerprint := range values {
-		normalized := strings.ReplaceAll(
-			strings.TrimSpace(fingerprint),
-			":",
-			"",
-		)
-		decoded, err := hex.DecodeString(normalized)
-		if err != nil || len(decoded) != sha256.Size {
-			errs = append(errs, fmt.Errorf(
-				"%s[%d] must be a %d-byte SHA-256 certificate fingerprint "+
-					"encoded as hexadecimal",
-				field,
-				idx,
-				sha256.Size,
-			))
-		}
-	}
-	return errs
-}
-
-// ValidateKESAgentSignTimeout accepts zero as the documented default
-// selector, or an explicit positive timeout shorter than one mainnet slot.
 func ValidateKESAgentSignTimeout(timeout time.Duration) error {
 	if timeout < 0 || timeout >= maxKESAgentSignTimeout {
 		return fmt.Errorf(
@@ -600,72 +575,13 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		))
 	}
 
-	// Bark's DatabaseService is mounted whenever bark is enabled with a snapshot
-	// directory configured. Every method must authenticate its caller, and its
-	// destructive methods additionally require explicit operator authorization.
-	// Validate both policies here rather than failing deep in Bark.Start.
-	if serving && c.BarkPort > 0 && c.DatabaseLifecycle.SnapshotDir != "" &&
-		c.BarkClientCAFilePath == "" {
-		errs = append(errs, errors.New(
-			"barkClientCaFilePath is required when bark is enabled "+
-				"(barkPort) alongside databaseLifecycle.snapshotDir: its "+
-				"DatabaseService RPCs must not be mounted without a way to "+
-				"authenticate callers",
-		))
-	}
-	if serving && c.BarkPort > 0 && c.DatabaseLifecycle.SnapshotDir != "" &&
-		len(c.BarkOperatorCertificateFingerprints) == 0 {
-		errs = append(errs, errors.New(
-			"barkOperatorCertificateFingerprints requires at least one SHA-256 "+
-				"client certificate fingerprint when bark is enabled (barkPort) "+
-				"alongside databaseLifecycle.snapshotDir: verified identity alone "+
-				"does not authorize destructive DatabaseService RPCs",
-		))
-	}
-	errs = append(errs, validateCertificateFingerprints(
-		"barkOperatorCertificateFingerprints",
-		c.BarkOperatorCertificateFingerprints,
-	)...)
-	if len(c.BarkLifecycleOperatorCertificateFingerprints) > 0 &&
-		!c.BarkLifecycleEnabled {
-		errs = append(errs, errors.New(
-			"barkLifecycleOperatorCertificateFingerprints requires "+
-				"barkLifecycleEnabled",
-		))
-	}
 	if serving && c.BarkLifecycleEnabled && c.BarkPort == 0 {
-		errs = append(errs, errors.New(
-			"barkPort must be non-zero when barkLifecycleEnabled is true",
-		))
-	}
-	if serving && c.BarkLifecycleEnabled && c.BarkClientCAFilePath == "" {
-		errs = append(errs, errors.New(
-			"barkClientCaFilePath is required when barkLifecycleEnabled is true",
-		))
-	}
-	if serving && c.BarkLifecycleEnabled &&
-		len(c.BarkLifecycleOperatorCertificateFingerprints) == 0 {
-		errs = append(errs, errors.New(
-			"barkLifecycleOperatorCertificateFingerprints requires at least one "+
-				"SHA-256 client certificate fingerprint when barkLifecycleEnabled is true",
-		))
-	}
-	errs = append(errs, validateCertificateFingerprints(
-		"barkLifecycleOperatorCertificateFingerprints",
-		c.BarkLifecycleOperatorCertificateFingerprints,
-	)...)
-	// mTLS client verification also needs the server's own TLS pair --
-	// without it, bark.Bark.Start's own equivalent check (independent of
-	// Lifecycle, since it applies to any TlsClientCAFilePath) would fail
-	// deep inside node startup instead of here. Checked independently of
-	// the barkPort/snapshotDir gate above so a barkClientCaFilePath set by
-	// mistake without barkPort/snapshotDir still gets flagged.
-	if serving && c.BarkClientCAFilePath != "" &&
-		(c.TlsCertFilePath == "" || c.TlsKeyFilePath == "") {
-		errs = append(errs, errors.New(
-			"barkClientCaFilePath requires tlsCertFilePath and tlsKeyFilePath "+
-				"to also be set for mTLS client verification",
-		))
+		errs = append(
+			errs,
+			errors.New(
+				"barkPort must be non-zero when barkLifecycleEnabled is true",
+			),
+		)
 	}
 
 	// Mempool
@@ -1031,19 +947,6 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 						"when the aggregator is enabled",
 				))
 			}
-			if agg.OperatorTokenFile == "" {
-				errs = append(errs, errors.New(
-					"mithril.server.aggregator.operatorTokenFile is required "+
-						"when the aggregator is enabled",
-				))
-			}
-			if !isLoopbackListenHost(c.BindAddr) &&
-				!c.Mithril.Server.TLSEnabled {
-				errs = append(errs, errors.New(
-					"mithril.server.tlsEnabled is required when the aggregator "+
-						"uses a non-loopback bindAddr",
-				))
-			}
 		}
 	}
 	// Node-managed Mithril sync runs only inside a serving node, so the
@@ -1368,12 +1271,6 @@ func normalizeBindAddr(addr string) string {
 		return addr
 	}
 	return parsed.Unmap().String()
-}
-
-func isLoopbackListenHost(host string) bool {
-	literal := strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
-	addr, err := netip.ParseAddr(literal)
-	return err == nil && addr.Unmap().IsLoopback()
 }
 
 // isWildcardAddr reports whether a bind address selects all interfaces. The

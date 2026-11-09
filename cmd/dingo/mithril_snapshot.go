@@ -24,7 +24,6 @@ import (
 	"os/signal"
 	"slices"
 	"strconv"
-	"strings"
 	"syscall"
 	"time"
 
@@ -276,11 +275,6 @@ func newMithrilAggregator(
 	if err != nil {
 		return nil, err
 	}
-	tokenData, err := keystore.ReadSecretKeyFile(agg.OperatorTokenFile)
-	if err != nil {
-		return nil, fmt.Errorf("reading aggregator operator token: %w", err)
-	}
-	operatorToken := strings.TrimSpace(string(tokenData))
 	network := cfg.Network
 	if network == "" {
 		network = "preview"
@@ -293,7 +287,6 @@ func newMithrilAggregator(
 		},
 		GenesisSigningKey: key,
 		Store:             store,
-		OperatorToken:     operatorToken,
 	})
 }
 

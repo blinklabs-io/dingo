@@ -30,7 +30,6 @@ import (
 type ProviderConfig struct {
 	Port                            uint                `yaml:"port"`
 	Host                            string              `yaml:"host"`
-	AuthToken                       string              `yaml:"authToken"`
 	MaxConcurrentMutations          uint                `yaml:"maxConcurrentMutations"`
 	MaxConcurrentMutationsPerClient uint                `yaml:"maxConcurrentMutationsPerClient"`
 	TLS                             apiconfig.TLSPolicy `yaml:"tls"`
@@ -84,15 +83,11 @@ func RegisterProvider(host *plugin.Host) error {
 					"blockfrost: maxConcurrentMutationsPerClient must be positive and no greater than maxConcurrentMutations",
 				)
 			}
-			if err := validateListenSecurity(listenHost, cfg.AuthToken, tls); err != nil {
-				return nil, nil, fmt.Errorf("blockfrost: %w", err)
-			}
 			server := New(BlockfrostConfig{
 				ListenAddress: net.JoinHostPort(
 					listenHost,
 					strconv.FormatUint(uint64(cfg.Port), 10),
 				),
-				AuthToken:                       cfg.AuthToken,
 				MaxConcurrentMutations:          cfg.MaxConcurrentMutations,
 				MaxConcurrentMutationsPerClient: cfg.MaxConcurrentMutationsPerClient,
 				CORSAllowedOrigins:              deps.CORSAllowedOrigins,
@@ -110,21 +105,4 @@ func normalizeListenHost(host string) string {
 		return host[1 : len(host)-1]
 	}
 	return host
-}
-
-func validateListenSecurity(
-	host string,
-	authToken string,
-	tls apiconfig.EffectiveTLS,
-) error {
-	host = strings.Trim(host, "[]")
-	ip := net.ParseIP(host)
-	if authToken == "" || strings.EqualFold(host, "localhost") ||
-		(ip != nil && ip.IsLoopback()) || tls.Enabled {
-		return nil
-	}
-	return fmt.Errorf(
-		"non-loopback Blockfrost mutation access on %q requires server TLS",
-		host,
-	)
 }

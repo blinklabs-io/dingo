@@ -16,6 +16,7 @@ package bark
 
 import (
 	"context"
+	"net/http"
 	"sync"
 	"testing"
 	"time"
@@ -23,7 +24,6 @@ import (
 	"connectrpc.com/connect"
 	lifecyclev1alpha1 "github.com/blinklabs-io/bark/proto/v1alpha1/lifecycle"
 	lifecycleconnect "github.com/blinklabs-io/bark/proto/v1alpha1/lifecycle/lifecyclev1alpha1connect"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/types/known/durationpb"
 )
@@ -69,149 +69,26 @@ func (f *fakeNode) recorded() []shutdownCall {
 	return append([]shutdownCall(nil), f.calls...)
 }
 
-// TestLifecycleProceduresCoverEveryGeneratedMethod fails when a
-// LifecycleService RPC is added to the generated descriptor without being
-// classified, so it cannot be served with the wrong authorization stage.
-func TestLifecycleProceduresCoverEveryGeneratedMethod(t *testing.T) {
-	t.Parallel()
-
-	svc := lifecyclev1alpha1.File_v1alpha1_lifecycle_lifecycle_proto.
-		Services().ByName("LifecycleService")
-	require.NotNil(t, svc)
-	methods := svc.Methods()
-	require.Positive(t, methods.Len())
-	for i := range methods.Len() {
-		procedure := "/" + string(svc.FullName()) + "/" +
-			string(methods.Get(i).Name())
-		isDestructive := destructiveLifecycleProcedures[procedure]
-		isReadOnly := readOnlyLifecycleProcedures[procedure]
-		assert.Truef(t, isDestructive != isReadOnly,
-			"procedure %q must be classified as exactly one of destructive "+
-				"or read-only", procedure)
-	}
-}
-
-func TestStartRejectsNodeControlWithoutAuthentication(t *testing.T) {
-	t.Parallel()
-
-	serverCertPath, serverKeyPath := writeTestTLSCertKey(t)
-	_, _, caCertPath := writeTestCA(t)
-	base := BarkConfig{
-		DB:   newTestDB(t),
-		Node: &fakeNode{},
-		Host: "127.0.0.1",
-	}
-	for name, mutate := range map[string]func(*BarkConfig){
-		"client CA": func(c *BarkConfig) {
-			c.TlsCertFilePath = serverCertPath
-			c.TlsKeyFilePath = serverKeyPath
-			c.LifecycleOperatorCertificateFingerprints = []string{
-				"0000000000000000000000000000000000000000000000000000000000000000",
-			}
-		},
-		"TLS": func(c *BarkConfig) {
-			c.TlsClientCAFilePath = caCertPath
-			c.LifecycleOperatorCertificateFingerprints = []string{
-				"0000000000000000000000000000000000000000000000000000000000000000",
-			}
-		},
-		"operator allowlist": func(c *BarkConfig) {
-			c.TlsCertFilePath = serverCertPath
-			c.TlsKeyFilePath = serverKeyPath
-			c.TlsClientCAFilePath = caCertPath
-		},
-	} {
-		t.Run(name, func(t *testing.T) {
-			cfg := base
-			mutate(&cfg)
-			b, err := NewBark(cfg)
-			require.NoError(t, err)
-			require.Error(t, b.Start(t.Context()))
-			require.Empty(t, b.Addr())
-		})
-	}
-}
-
 func TestLifecycleServiceOverRealHTTP(t *testing.T) {
 	t.Parallel()
 
-	serverCertPath, serverKeyPath := writeTestTLSCertKey(t)
-	ca, caKey, caCertPath := writeTestCA(t)
-	operatorCert, operatorKey := writeTestClientCert(t, ca, caKey, "operator")
-	databaseOperatorCert, databaseOperatorKey := writeTestClientCert(
-		t, ca, caKey, "database-operator",
-	)
-	readerCert, readerKey := writeTestClientCert(t, ca, caKey, "reader")
-
 	node := &fakeNode{deadline: time.Unix(1_700_000_000, 0)}
-	b, err := NewBark(BarkConfig{
-		DB:                  newTestDB(t),
-		Node:                node,
-		Host:                "127.0.0.1",
-		TlsCertFilePath:     serverCertPath,
-		TlsKeyFilePath:      serverKeyPath,
-		TlsClientCAFilePath: caCertPath,
-		OperatorCertificateFingerprints: []string{
-			testCertificateFingerprint(t, databaseOperatorCert),
-		},
-		LifecycleOperatorCertificateFingerprints: []string{
-			testCertificateFingerprint(t, operatorCert),
-		},
-	})
+	b, err := NewBark(
+		BarkConfig{DB: newTestDB(t), Node: node, Host: "127.0.0.1"},
+	)
 	require.NoError(t, err)
 	require.NoError(t, b.Start(t.Context()))
 	defer func() { _ = b.Stop(context.Background()) }()
-
-	newClient := func(certPath, keyPath string) lifecycleconnect.LifecycleServiceClient {
+	newClient := func() lifecycleconnect.LifecycleServiceClient {
 		return lifecycleconnect.NewLifecycleServiceClient(
-			mtlsHTTPClient(t, certPath, keyPath),
-			"https://"+b.Addr(),
+			http.DefaultClient,
+			"http://"+b.Addr(),
 		)
 	}
 	ctx := context.Background()
 
-	t.Run("database operator cannot control node lifecycle", func(t *testing.T) {
-		client := newClient(databaseOperatorCert, databaseOperatorKey)
-		_, err := client.GetStatus(ctx, connect.NewRequest(
-			&lifecyclev1alpha1.GetStatusRequest{}))
-		require.NoError(t, err)
-		_, err = client.Stop(ctx, connect.NewRequest(
-			&lifecyclev1alpha1.StopRequest{}))
-		require.Equal(t, connect.CodePermissionDenied, connect.CodeOf(err))
-		require.Empty(t, node.recorded())
-	})
-
-	t.Run("anonymous client is rejected from every RPC", func(t *testing.T) {
-		client := newClient("", "")
-		_, err := client.GetStatus(ctx, connect.NewRequest(
-			&lifecyclev1alpha1.GetStatusRequest{}))
-		require.Equal(t, connect.CodeUnauthenticated, connect.CodeOf(err))
-		_, err = client.Stop(ctx, connect.NewRequest(
-			&lifecyclev1alpha1.StopRequest{}))
-		require.Equal(t, connect.CodeUnauthenticated, connect.CodeOf(err))
-		_, err = client.Restart(ctx, connect.NewRequest(
-			&lifecyclev1alpha1.RestartRequest{}))
-		require.Equal(t, connect.CodeUnauthenticated, connect.CodeOf(err))
-		require.Empty(t, node.recorded())
-	})
-
-	t.Run("authenticated reader may only read status", func(t *testing.T) {
-		client := newClient(readerCert, readerKey)
-		status, err := client.GetStatus(ctx, connect.NewRequest(
-			&lifecyclev1alpha1.GetStatusRequest{}))
-		require.NoError(t, err)
-		require.Equal(t, "test-version", status.Msg.GetVersion())
-		_, err = client.Stop(ctx, connect.NewRequest(
-			&lifecyclev1alpha1.StopRequest{}))
-		require.Equal(t, connect.CodePermissionDenied, connect.CodeOf(err))
-		_, err = client.Restart(ctx, connect.NewRequest(
-			&lifecyclev1alpha1.RestartRequest{}))
-		require.Equal(t, connect.CodePermissionDenied, connect.CodeOf(err))
-		require.Empty(t, node.recorded())
-	})
-
-	t.Run("operator stop and restart reach the node", func(t *testing.T) {
-		client := newClient(operatorCert, operatorKey)
+	t.Run("stop and restart reach the node", func(t *testing.T) {
+		client := newClient()
 		stop, err := client.Stop(ctx, connect.NewRequest(
 			&lifecyclev1alpha1.StopRequest{
 				GracefulTimeout: durationpb.New(3 * time.Second),
@@ -246,7 +123,7 @@ func TestLifecycleServiceOverRealHTTP(t *testing.T) {
 	t.Run(
 		"invalid and refused requests map to Connect codes",
 		func(t *testing.T) {
-			client := newClient(operatorCert, operatorKey)
+			client := newClient()
 			before := len(node.recorded())
 			_, err := client.Stop(ctx, connect.NewRequest(
 				&lifecyclev1alpha1.StopRequest{

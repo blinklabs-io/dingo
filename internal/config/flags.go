@@ -519,7 +519,7 @@ var flagSpecs = []flagSpec{
 		"BarkClientCAFilePath",
 		"bark-client-ca-file-path",
 		"",
-		"path to a PEM CA bundle; client certs verified against it authenticate every Bark DatabaseService RPC (required whenever the database lifecycle service is enabled)",
+		"legacy compatibility setting; ignored",
 	),
 	intFlag(
 		"BarkArchiveMaxConcurrentFetches",
@@ -539,7 +539,7 @@ var flagSpecs = []flagSpec{
 	stringSliceFlag(
 		"BarkOperatorCertificateFingerprints",
 		"bark-operator-certificate-fingerprints",
-		"SHA-256 client certificate fingerprints authorized for destructive Bark DatabaseService RPCs",
+		"legacy compatibility setting; ignored",
 	),
 	boolFlag(
 		"BarkLifecycleEnabled",
@@ -549,7 +549,7 @@ var flagSpecs = []flagSpec{
 	stringSliceFlag(
 		"BarkLifecycleOperatorCertificateFingerprints",
 		"bark-lifecycle-operator-certificate-fingerprints",
-		"SHA-256 client certificate fingerprints authorized for Bark Stop and Restart RPCs",
+		"legacy compatibility setting; ignored",
 	),
 
 	// History expiry
@@ -1200,7 +1200,7 @@ var flagSpecs = []flagSpec{
 		"Mithril.Server.Aggregator.OperatorTokenFile",
 		"mithril-aggregator-operator-token-file",
 		"",
-		"file holding the bearer token for aggregator signer registration",
+		"legacy compatibility setting; ignored",
 	),
 
 	// Database lifecycle (snapshot/restore/truncate)
