@@ -90,7 +90,9 @@ func walFramesByBTree(
 
 func btreePages(t *testing.T, db *sql.DB) map[string][2]int64 {
 	t.Helper()
-	rows, err := db.Query(`SELECT name, COUNT(*), SUM(pgsize) FROM dbstat GROUP BY name`)
+	rows, err := db.Query(
+		`SELECT name, COUNT(*), SUM(pgsize) FROM dbstat GROUP BY name`,
+	)
 	require.NoError(t, err)
 	defer rows.Close()
 	out := make(map[string][2]int64)
@@ -104,7 +106,13 @@ func btreePages(t *testing.T, db *sql.DB) map[string][2]int64 {
 	return out
 }
 
-func reportWAL(t *testing.T, label string, counts map[string]int, units int, pages map[string][2]int64) {
+func reportWAL(
+	t *testing.T,
+	label string,
+	counts map[string]int,
+	units int,
+	pages map[string][2]int64,
+) {
 	t.Helper()
 	names := make([]string, 0, len(counts))
 	total := 0
@@ -112,12 +120,28 @@ func reportWAL(t *testing.T, label string, counts map[string]int, units int, pag
 		names = append(names, name)
 		total += n
 	}
-	sort.Slice(names, func(i, j int) bool { return counts[names[i]] > counts[names[j]] })
+	sort.Slice(
+		names,
+		func(i, j int) bool { return counts[names[i]] > counts[names[j]] },
+	)
 	var b strings.Builder
-	fmt.Fprintf(&b, "WAL %s: %d frames over %d units = %.3f per unit\n", label, total, units, float64(total)/float64(units))
+	fmt.Fprintf(
+		&b,
+		"WAL %s: %d frames over %d units = %.3f per unit\n",
+		label,
+		total,
+		units,
+		float64(total)/float64(units),
+	)
 	for _, name := range names[:min(len(names), 8)] {
-		fmt.Fprintf(&b, "  %-45s %7d  %.3f/unit  btree %d pages\n", name, counts[name],
-			float64(counts[name])/float64(units), pages[name][0])
+		fmt.Fprintf(
+			&b,
+			"  %-45s %7d  %.3f/unit  btree %d pages\n",
+			name,
+			counts[name],
+			float64(counts[name])/float64(units),
+			pages[name][0],
+		)
 	}
 	t.Log(b.String())
 }
@@ -127,7 +151,8 @@ func reportJournalSizes(t *testing.T, pages map[string][2]int64) {
 	var names []string
 	for name := range pages {
 		if strings.Contains(name, "reward_credit") || strings.Contains(name, "reward_event") ||
-			strings.Contains(name, "reward_source") || strings.Contains(name, "reward_withdrawal") ||
+			strings.Contains(name, "reward_source") ||
+			strings.Contains(name, "reward_withdrawal") ||
 			strings.Contains(name, "account_reward_delta") {
 			names = append(names, name)
 		}
@@ -137,7 +162,13 @@ func reportJournalSizes(t *testing.T, pages map[string][2]int64) {
 	var total int64
 	b.WriteString("journal b-trees:\n")
 	for _, name := range names {
-		fmt.Fprintf(&b, "  %-45s %6d pages %9d bytes\n", name, pages[name][0], pages[name][1])
+		fmt.Fprintf(
+			&b,
+			"  %-45s %6d pages %9d bytes\n",
+			name,
+			pages[name][0],
+			pages[name][1],
+		)
 		total += pages[name][1]
 	}
 	fmt.Fprintf(&b, "  total %d bytes\n", total)
@@ -146,14 +177,19 @@ func reportJournalSizes(t *testing.T, pages map[string][2]int64) {
 
 // reportReadTimings logs the best of five runs of the journal readers, before
 // and after ANALYZE.
-func reportReadTimings(t *testing.T, store interface {
-	GetAccountsByCredentialAtSlot([]models.StakeCredentialRef, uint64, types.Txn) (map[string]*models.Account, error)
-	AccountLastWitnessSlots([]models.StakeCredentialRef, uint64, types.Txn) (map[string]uint64, error)
-	AccountsWitnessedAfterSlot(uint64, types.Txn) ([]models.StakeCredentialRef, error)
-	GetPostSnapshotRewardCredits(uint64, types.Txn) ([]*models.AccountRewardDelta, error)
-	GetAccountWithdrawalHistoryByCredential(uint8, []byte, int, int, string, types.Txn) ([]models.AccountWithdrawalHistoryRow, error)
-	GetAccountSumsByCredential(uint8, []byte, types.Txn) (models.AccountSums, error)
-}, db *sql.DB, keys [][]byte) {
+func reportReadTimings(
+	t *testing.T,
+	store interface {
+		GetAccountsByCredentialAtSlot([]models.StakeCredentialRef, uint64, types.Txn) (map[string]*models.Account, error)
+		AccountLastWitnessSlots([]models.StakeCredentialRef, uint64, types.Txn) (map[string]uint64, error)
+		AccountsWitnessedAfterSlot(uint64, types.Txn) ([]models.StakeCredentialRef, error)
+		GetPostSnapshotRewardCredits(uint64, types.Txn) ([]*models.AccountRewardDelta, error)
+		GetAccountWithdrawalHistoryByCredential(uint8, []byte, int, int, string, types.Txn) ([]models.AccountWithdrawalHistoryRow, error)
+		GetAccountSumsByCredential(uint8, []byte, types.Txn) (models.AccountSums, error)
+	},
+	db *sql.DB,
+	keys [][]byte,
+) {
 	t.Helper()
 	refs := make([]models.StakeCredentialRef, 0, 1000)
 	for _, key := range keys[:1000] {
@@ -164,16 +200,26 @@ func reportReadTimings(t *testing.T, store interface {
 		name string
 		run  func() error
 	}{
-		{"credit and withdrawal history of 1000 credentials, 2 rounds back", func() error {
-			_, err := store.GetAccountsByCredentialAtSlot(refs, 2000, nil)
-			return err
-		}},
+		{
+			"credit and withdrawal history of 1000 credentials, 2 rounds back",
+			func() error {
+				_, err := store.GetAccountsByCredentialAtSlot(refs, 2000, nil)
+				return err
+			},
+		},
 		{"withdrawal sum, one credential", func() error {
 			_, err := store.GetAccountSumsByCredential(0, keys[5], nil)
 			return err
 		}},
 		{"withdrawal history page, one credential", func() error {
-			_, err := store.GetAccountWithdrawalHistoryByCredential(0, keys[5], 20, 0, "desc", nil)
+			_, err := store.GetAccountWithdrawalHistoryByCredential(
+				0,
+				keys[5],
+				20,
+				0,
+				"desc",
+				nil,
+			)
 			return err
 		}},
 		{"last witness slots of 400 credentials", func() error {
@@ -203,7 +249,12 @@ func reportReadTimings(t *testing.T, store interface {
 				require.NoError(t, reader.run())
 				best = min(best, time.Since(start))
 			}
-			fmt.Fprintf(&b, "  %-70s %8.2f ms\n", reader.name, float64(best.Microseconds())/1000)
+			fmt.Fprintf(
+				&b,
+				"  %-70s %8.2f ms\n",
+				reader.name,
+				float64(best.Microseconds())/1000,
+			)
 		}
 		t.Log(b.String())
 	}
@@ -219,7 +270,10 @@ func reportReadTimings(t *testing.T, store interface {
 func TestRewardJournalWriteAmplification(t *testing.T) {
 	t.Parallel()
 	if os.Getenv(rewardJournalWALEnv) == "" {
-		t.Skipf("set %s=1 to measure WAL write amplification", rewardJournalWALEnv)
+		t.Skipf(
+			"set %s=1 to measure WAL write amplification",
+			rewardJournalWALEnv,
+		)
 	}
 	dir := t.TempDir()
 	store, db, _, err := openSQLStore(
@@ -233,7 +287,8 @@ func TestRewardJournalWriteAmplification(t *testing.T) {
 	require.NoError(t, err)
 	var walPath string
 	require.NoError(t, db.QueryRow(
-		`SELECT file FROM pragma_database_list WHERE name = 'main'`).Scan(&walPath))
+		`SELECT file FROM pragma_database_list WHERE name = 'main'`,
+	).Scan(&walPath))
 	walPath += "-wal"
 
 	rng := rand.New(rand.NewSource(7))
@@ -280,7 +335,12 @@ VALUES (?, ?, 'member', ?, 0, '1234567', TRUE, FALSE, ?, ?)`,
 		}
 		require.NoError(t, tx.Commit())
 		require.NoError(t, store.AddAppliedRewardCreditRound(
-			models.RewardCreditRound{SnapshotEpoch: epoch, BoundarySlot: boundary}, nil))
+			models.RewardCreditRound{
+				SnapshotEpoch: epoch,
+				BoundarySlot:  boundary,
+			},
+			nil,
+		))
 	}
 
 	driver := rewardJournalDriver{store: store, cursors: map[uint64]uint{}}
@@ -312,7 +372,11 @@ VALUES (?, ?, 'member', ?, 0, '1234567', TRUE, FALSE, ?, ?)`,
 		for i := range 20 {
 			account := rng.Intn(walAccounts)
 			address, err := lcommon.NewAddressFromParts(
-				lcommon.AddressTypeNoneKey, lcommon.AddressNetworkTestnet, nil, keys[account])
+				lcommon.AddressTypeNoneKey,
+				lcommon.AddressNetworkTestnet,
+				nil,
+				keys[account],
+			)
 			require.NoError(t, err)
 			var hash lcommon.Blake2b256
 			binary.BigEndian.PutUint64(hash[:8], uint64(batch*20+i+1))
@@ -320,10 +384,19 @@ VALUES (?, ?, 'member', ?, 0, '1234567', TRUE, FALSE, ?, ?)`,
 			require.NoError(t, store.SetTransaction(
 				&mockTransaction{
 					hash: hash, isValid: true,
-					withdrawals: map[*lcommon.Address]*big.Int{&address: big.NewInt(1)},
+					withdrawals: map[*lcommon.Address]*big.Int{
+						&address: big.NewInt(1),
+					},
 				},
-				ocommon.Point{Slot: uint64(10_000 + batch), Hash: bytes.Repeat([]byte{byte(batch)}, 32)},
-				uint32(i), nil, true, txn, 0,
+				ocommon.Point{
+					Slot: uint64(10_000 + batch),
+					Hash: bytes.Repeat([]byte{byte(batch)}, 32),
+				},
+				uint32(i),
+				nil,
+				true,
+				txn,
+				0,
 			))
 		}
 		require.NoError(t, txn.Commit())
@@ -336,13 +409,21 @@ VALUES (?, ?, 'member', ?, 0, '1234567', TRUE, FALSE, ?, ?)`,
 
 	journal := 0
 	for name, n := range fold {
-		if strings.Contains(name, "reward_credit") || strings.Contains(name, "account_reward_delta") {
+		if strings.Contains(name, "reward_credit") ||
+			strings.Contains(name, "account_reward_delta") {
 			journal += n
 		}
 	}
 	accountFrames := fold["account"]
-	t.Logf("fold journal frames per credit %.3f, account frames per credit %.3f",
-		float64(journal)/float64(credits), float64(accountFrames)/float64(credits))
+	t.Logf(
+		"fold journal frames per credit %.3f, account frames per credit %.3f",
+		float64(
+			journal,
+		)/float64(
+			credits,
+		),
+		float64(accountFrames)/float64(credits),
+	)
 	// Measured on the keyed-by-slot journal: 0.07 and 0.01. A fold in output
 	// order measures about 0.5 and 0.45; the former journal's five b-trees
 	// measured 1.9 and 0.45.

@@ -30,14 +30,28 @@ func TestPostgresRewardJournalUpgradeIntegration(t *testing.T) {
 	dsn, schema := newPostgresIntegrationSchema(t)
 	registry, err := migrations.PostgresRegistry()
 	require.NoError(t, err)
-	exerciseRewardJournalUpgrade(t, "pgx", dsn, PostgresDialect(), schema, registry)
+	exerciseRewardJournalUpgrade(
+		t,
+		"pgx",
+		dsn,
+		PostgresDialect(),
+		schema,
+		registry,
+	)
 }
 
 func TestMySQLRewardJournalUpgradeIntegration(t *testing.T) {
 	dsn, database := newMySQLIntegrationDatabase(t)
 	registry, err := migrations.MySQLRegistry()
 	require.NoError(t, err)
-	exerciseRewardJournalUpgrade(t, "mysql", dsn, MySQLDialect(), database, registry)
+	exerciseRewardJournalUpgrade(
+		t,
+		"mysql",
+		dsn,
+		MySQLDialect(),
+		database,
+		registry,
+	)
 }
 
 // exerciseRewardJournalUpgrade migrates a database to the version before the
@@ -98,10 +112,22 @@ VALUES (?, 0, ?, ?, ?, ?, ?, ?)`, key, h, amount, previous, slot, withdrawal, po
 		legacy(key, hash(byte(0x20+i)), "10", nil, 700, false, false)
 	}
 	legacy(keys[0], bytes.Repeat([]byte{0xc1}, 28), "7", nil, 700, false, true)
-	legacy(keys[1], []byte("dingo:mir:\x00\x00\x00\x00\x00\x00\x00\x00"), "5", nil, 710, false, false)
+	legacy(
+		keys[1],
+		[]byte("dingo:mir:\x00\x00\x00\x00\x00\x00\x00\x00"),
+		"5",
+		nil,
+		710,
+		false,
+		false,
+	)
 	for i := range 2 {
 		h := hash(byte(0x30 + i))
-		exec(`INSERT INTO `+tx+` (hash, slot, block_index) VALUES (?, ?, 0)`, h, 720+i)
+		exec(
+			`INSERT INTO `+tx+` (hash, slot, block_index) VALUES (?, ?, 0)`,
+			h,
+			720+i,
+		)
 		legacy(keys[i], h, "4", "50", int64(720+i), true, false)
 	}
 	runTo(registry[:index+1])
@@ -129,7 +155,14 @@ VALUES (?, 0, ?, ?, ?, ?, ?, ?)`, key, h, amount, previous, slot, withdrawal, po
 	sums, err := store.GetAccountSumsByCredential(0, keys[0], nil)
 	require.NoError(t, err)
 	require.Equal(t, uint64(4), sums.WithdrawalsSum)
-	history, err := store.GetAccountWithdrawalHistoryByCredential(0, keys[1], 10, 0, "desc", nil)
+	history, err := store.GetAccountWithdrawalHistoryByCredential(
+		0,
+		keys[1],
+		10,
+		0,
+		"desc",
+		nil,
+	)
 	require.NoError(t, err)
 	require.Len(t, history, 1)
 	require.Equal(t, uint64(721), history[0].TxSlot)
@@ -140,13 +173,25 @@ VALUES (?, 0, ?, ?, ?, ?, ?, ?)`, key, h, amount, previous, slot, withdrawal, po
 
 	// New writes: an event credit, a stake-reward credit applied twice, and
 	// a rollback across all of them.
-	require.NoError(t, store.AddAccountRewardByCredential(0, keys[2], 9, 800, hash(0x40), nil))
-	require.NoError(t, store.AddAccountRewardByCredential(0, keys[2], 9, 800, hash(0x40), nil))
+	require.NoError(
+		t,
+		store.AddAccountRewardByCredential(0, keys[2], 9, 800, hash(0x40), nil),
+	)
+	require.NoError(
+		t,
+		store.AddAccountRewardByCredential(0, keys[2], 9, 800, hash(0x40), nil),
+	)
 	credit := models.AccountRewardCredit{
 		StakingKey: keys[3], Amount: 6, Slot: 900, OutputID: 77,
 	}
 	for range 2 {
-		require.NoError(t, store.AddAccountRewardsByCredential([]models.AccountRewardCredit{credit}, nil))
+		require.NoError(
+			t,
+			store.AddAccountRewardsByCredential(
+				[]models.AccountRewardCredit{credit},
+				nil,
+			),
+		)
 	}
 	account, err := store.GetAccountByCredential(0, keys[2], false, nil)
 	require.NoError(t, err)
@@ -155,16 +200,37 @@ VALUES (?, 0, ?, ?, ?, ?, ?, ?)`, key, h, amount, previous, slot, withdrawal, po
 	require.NoError(t, err)
 	require.Equal(t, uint64(106), uint64(account.Reward))
 	atSlot, err := store.GetAccountsByCredentialAtSlot(
-		[]models.StakeCredentialRef{models.NewStakeCredentialRef(0, keys[3])}, 850, nil,
+		[]models.StakeCredentialRef{
+			models.NewStakeCredentialRef(0, keys[3]),
+		},
+		850,
+		nil,
 	)
 	require.NoError(t, err)
-	require.Equal(t, uint64(100), uint64(atSlot[models.NewStakeCredentialRef(0, keys[3]).MapKey()].Reward))
+	require.Equal(
+		t,
+		uint64(100),
+		uint64(
+			atSlot[models.NewStakeCredentialRef(0, keys[3]).MapKey()].Reward,
+		),
+	)
 	require.NoError(t, store.DeleteAccountRewardsAfterSlot(750, nil))
 	for i, want := range []uint64{100, 100, 100, 100} {
 		account, err := store.GetAccountByCredential(0, keys[i], false, nil)
 		require.NoError(t, err)
-		require.Equal(t, want, uint64(account.Reward), "account %d after rollback", i)
+		require.Equal(
+			t,
+			want,
+			uint64(account.Reward),
+			"account %d after rollback",
+			i,
+		)
 	}
-	require.Equal(t, 2, count(`SELECT COUNT(*) FROM reward_withdrawal`), "withdrawals below the slot stay")
+	require.Equal(
+		t,
+		2,
+		count(`SELECT COUNT(*) FROM reward_withdrawal`),
+		"withdrawals below the slot stay",
+	)
 	require.Equal(t, 4, count(`SELECT COUNT(*) FROM reward_credit`))
 }

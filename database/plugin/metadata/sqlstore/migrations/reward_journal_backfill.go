@@ -106,24 +106,39 @@ func newRewardJournalStatements(dialect string) rewardJournalStatements {
 		maxLegacyID: "SELECT COALESCE(MAX(id), 0) FROM account_reward_delta",
 		copySlots: "INSERT INTO reward_credit_slot (boundary_slot) SELECT DISTINCT d.added_slot" +
 			" FROM account_reward_delta d WHERE" + idRange + " AND " + round +
-			" " + nothing("boundary_slot", "boundary_slot"),
+			" " + nothing(
+			"boundary_slot",
+			"boundary_slot",
+		),
 		copyCredits: "INSERT INTO reward_credit (boundary_slot, account_id, output_id, amount)" +
 			" SELECT d.added_slot, a.id, -d.id, d.amount FROM account_reward_delta d" +
 			accountJoin + " WHERE" + idRange + " AND " + round +
 			" ORDER BY d.added_slot, a.id, d.id " +
-			nothing("boundary_slot, account_id, output_id", "boundary_slot"),
+			nothing(
+				"boundary_slot, account_id, output_id",
+				"boundary_slot",
+			),
 		copySources: "INSERT INTO reward_source (hash) SELECT DISTINCT d.tx_hash" +
 			" FROM account_reward_delta d WHERE" + idRange + " AND " + event +
-			" " + nothing("hash", "hash"),
+			" " + nothing(
+			"hash",
+			"hash",
+		),
 		copyEvents: "INSERT INTO reward_event_credit (source_id, account_id, slot, amount, post_snapshot)" +
 			" SELECT s.id, a.id, d.added_slot, d.amount, d.post_snapshot FROM account_reward_delta d" +
 			accountJoin + eventSource + " WHERE" + idRange + " AND " + event +
-			" ORDER BY d.id " + nothing("source_id, account_id, slot", "source_id"),
+			" ORDER BY d.id " + nothing(
+			"source_id, account_id, slot",
+			"source_id",
+		),
 		copyWithdrawals: "INSERT INTO reward_withdrawal (tx_id, account_id, slot, amount, previous_reward)" +
 			" SELECT tx.id, a.id, d.added_slot, d.amount, COALESCE(d.previous_reward, '0')" +
 			" FROM account_reward_delta d" + withdrawalJoin +
 			" WHERE" + idRange + " AND d.withdrawal = TRUE ORDER BY tx.id, a.id " +
-			nothing("tx_id, account_id", "tx_id"),
+			nothing(
+				"tx_id, account_id",
+				"tx_id",
+			),
 		expectCredits: "SELECT COUNT(*) FROM account_reward_delta d WHERE" + idRange + " AND " + round,
 		matchCredits: "SELECT COUNT(*) FROM account_reward_delta d" + accountJoin +
 			" JOIN reward_credit c ON c.boundary_slot = d.added_slot" +
@@ -158,7 +173,10 @@ func rewardJournalBackfill(dialect string) Backfill {
 		cursor := rewardJournalCursor{}
 		if batch.Cursor != "" {
 			if err := json.Unmarshal([]byte(batch.Cursor), &cursor); err != nil {
-				return BatchResult{}, fmt.Errorf("decode reward journal cursor: %w", err)
+				return BatchResult{}, fmt.Errorf(
+					"decode reward journal cursor: %w",
+					err,
+				)
 			}
 		}
 		next := func(c rewardJournalCursor, rows int64, done bool) (BatchResult, error) {
@@ -174,7 +192,10 @@ func rewardJournalBackfill(dialect string) Backfill {
 			if err := batch.Tx.QueryRowContext(
 				ctx, batch.Rebind(stmts.maxLegacyID),
 			).Scan(&maxID); err != nil {
-				return BatchResult{}, fmt.Errorf("read legacy reward journal bound: %w", err)
+				return BatchResult{}, fmt.Errorf(
+					"read legacy reward journal bound: %w",
+					err,
+				)
 			}
 			return next(rewardJournalCursor{
 				Phase: rewardJournalPhaseRows, Max: maxID,
@@ -203,13 +224,19 @@ func rewardJournalBackfill(dialect string) Backfill {
 				if err := batch.Tx.QueryRowContext(
 					ctx, batch.Rebind(statement),
 				).Scan(target); err != nil {
-					return BatchResult{}, fmt.Errorf("count reward journal rows: %w", err)
+					return BatchResult{}, fmt.Errorf(
+						"count reward journal rows: %w",
+						err,
+					)
 				}
 			}
 			if legacy != credits+events+withdrawals {
 				return BatchResult{}, fmt.Errorf(
 					"reward journal digest mismatch: %d legacy rows, %d credits + %d events + %d withdrawals",
-					legacy, credits, events, withdrawals,
+					legacy,
+					credits,
+					events,
+					withdrawals,
 				)
 			}
 			cursor.Phase = rewardJournalPhaseDone
@@ -217,7 +244,11 @@ func rewardJournalBackfill(dialect string) Backfill {
 		case rewardJournalPhaseDone:
 			return next(cursor, 0, true)
 		default:
-			return BatchResult{}, errors.New("unknown reward journal backfill phase " + strings.TrimSpace(cursor.Phase))
+			return BatchResult{}, errors.New(
+				"unknown reward journal backfill phase " + strings.TrimSpace(
+					cursor.Phase,
+				),
+			)
 		}
 	}
 }
@@ -256,7 +287,11 @@ func copyRewardJournalRange(
 		if err := batch.Tx.QueryRowContext(
 			ctx, batch.Rebind(check.expect), after, upper,
 		).Scan(&expected); err != nil {
-			return fmt.Errorf("count legacy reward journal %s: %w", check.name, err)
+			return fmt.Errorf(
+				"count legacy reward journal %s: %w",
+				check.name,
+				err,
+			)
 		}
 		if err := batch.Tx.QueryRowContext(
 			ctx, batch.Rebind(check.match), after, upper,
@@ -266,7 +301,11 @@ func copyRewardJournalRange(
 		if expected != matched {
 			return fmt.Errorf(
 				"reward journal digest mismatch for %s of legacy ids (%d, %d]: %d legacy rows, %d migrated",
-				check.name, after, upper, expected, matched,
+				check.name,
+				after,
+				upper,
+				expected,
+				matched,
 			)
 		}
 	}

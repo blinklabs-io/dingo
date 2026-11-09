@@ -105,21 +105,36 @@ func TestRewardJournalPlansDoNotDependOnStatistics(t *testing.T) {
 			[]string{`idx_reward_withdrawal_account_slot`}},
 	} {
 		for _, analyzed := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%s analyzed=%v", tc.name, analyzed), func(t *testing.T) {
-				t.Parallel()
-				store := newManagementTestStore(t)
-				seedRewardJournalPlanRows(t, store)
-				if analyzed {
-					_, err := store.writeDB.Exec(`ANALYZE`)
-					require.NoError(t, err)
-				}
-				plan := queryPlan(t, store.writeDB, tc.query, tc.args...)
-				for _, want := range tc.want {
-					require.Regexp(t, regexp.MustCompile(want), plan, "plan:\n%s", plan)
-				}
-				require.NotRegexp(t, `SCAN (c|w|e|reward_\w+)\b`, plan, "plan:\n%s", plan)
-				require.NotContains(t, plan, "AUTOMATIC", "plan:\n%s", plan)
-			})
+			t.Run(
+				fmt.Sprintf("%s analyzed=%v", tc.name, analyzed),
+				func(t *testing.T) {
+					t.Parallel()
+					store := newManagementTestStore(t)
+					seedRewardJournalPlanRows(t, store)
+					if analyzed {
+						_, err := store.writeDB.Exec(`ANALYZE`)
+						require.NoError(t, err)
+					}
+					plan := queryPlan(t, store.writeDB, tc.query, tc.args...)
+					for _, want := range tc.want {
+						require.Regexp(
+							t,
+							regexp.MustCompile(want),
+							plan,
+							"plan:\n%s",
+							plan,
+						)
+					}
+					require.NotRegexp(
+						t,
+						`SCAN (c|w|e|reward_\w+)\b`,
+						plan,
+						"plan:\n%s",
+						plan,
+					)
+					require.NotContains(t, plan, "AUTOMATIC", "plan:\n%s", plan)
+				},
+			)
 		}
 	}
 }

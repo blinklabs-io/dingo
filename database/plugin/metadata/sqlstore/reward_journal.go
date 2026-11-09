@@ -705,7 +705,10 @@ func (s *Store) collectRollbackWithdrawals(
 		if err := rows.Scan(&id, &withdrawnAt, &txID, &raw); err != nil {
 			return err
 		}
-		previous, err := parseNullUint64("reward withdrawal previous reward", raw)
+		previous, err := parseNullUint64(
+			"reward withdrawal previous reward",
+			raw,
+		)
 		if err != nil {
 			return err
 		}

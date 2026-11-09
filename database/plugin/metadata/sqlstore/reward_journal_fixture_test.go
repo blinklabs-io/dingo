@@ -63,7 +63,10 @@ WHERE NOT EXISTS (
 	if row.withdrawal {
 		_, err = db.Exec(
 			`INSERT INTO "transaction" (hash, slot, block_index) VALUES (?, ?, 0)
-ON CONFLICT (hash) DO NOTHING`, row.hash, row.slot)
+ON CONFLICT (hash) DO NOTHING`,
+			row.hash,
+			row.slot,
+		)
 		require.NoError(t, err)
 		var txID int64
 		require.NoError(t, db.QueryRow(
@@ -81,7 +84,8 @@ VALUES (?, ?, ?, ?, ?)`, txID, accountID, row.slot, row.amount, previous)
 	}
 	_, err = db.Exec(
 		`INSERT INTO reward_source (hash) VALUES (?) ON CONFLICT (hash) DO NOTHING`,
-		row.hash)
+		row.hash,
+	)
 	require.NoError(t, err)
 	var sourceID int64
 	require.NoError(t, db.QueryRow(

@@ -32,7 +32,10 @@ type rewardJournalDriver struct {
 	cursors map[uint64]uint
 }
 
-func (d rewardJournalDriver) write(t *testing.T, outputs []*models.RewardAccountOutput) {
+func (d rewardJournalDriver) write(
+	t *testing.T,
+	outputs []*models.RewardAccountOutput,
+) {
 	t.Helper()
 	credits := make([]models.AccountRewardCredit, 0, len(outputs))
 	for _, output := range outputs {
@@ -51,7 +54,11 @@ func (d rewardJournalDriver) write(t *testing.T, outputs []*models.RewardAccount
 	require.NoError(t, d.store.AddAccountRewardsByCredential(credits, nil))
 }
 
-func (d rewardJournalDriver) foldChunk(t *testing.T, epoch uint64, limit int) int {
+func (d rewardJournalDriver) foldChunk(
+	t *testing.T,
+	epoch uint64,
+	limit int,
+) int {
 	t.Helper()
 	from := uint(0)
 	if d.cursors != nil {
@@ -72,9 +79,17 @@ func (d rewardJournalDriver) foldRound(t *testing.T, epoch uint64) {
 	}
 }
 
-func (d rewardJournalDriver) foldCredential(t *testing.T, tag uint8, key []byte) {
+func (d rewardJournalDriver) foldCredential(
+	t *testing.T,
+	tag uint8,
+	key []byte,
+) {
 	t.Helper()
-	outputs, err := d.store.ClaimPendingRewardCreditsForCredential(tag, key, nil)
+	outputs, err := d.store.ClaimPendingRewardCreditsForCredential(
+		tag,
+		key,
+		nil,
+	)
 	require.NoError(t, err)
 	d.write(t, outputs)
 }

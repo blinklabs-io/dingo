@@ -70,7 +70,10 @@ func TestRollbackRestoresBalanceAroundWithdrawals(t *testing.T) {
 			require.Equal(t, uint64(0), rewardOf(t, store, key))
 			require.NoError(t, store.AddAccountRewardByCredential(
 				0, key, 10, 250, bytesRepeat(0x03, 32), nil))
-			require.NoError(t, store.DeleteAccountRewardsAfterSlot(tc.rollback, nil))
+			require.NoError(
+				t,
+				store.DeleteAccountRewardsAfterSlot(tc.rollback, nil),
+			)
 			require.Equal(t, tc.want, rewardOf(t, store, key))
 		})
 	}
@@ -145,9 +148,16 @@ func TestRollbackUnderflowFailsWithoutChangingRows(t *testing.T) {
 	rollbackAccount(t, store, key, 0)
 	require.NoError(t, store.AddAccountRewardByCredential(
 		0, key, 9, 100, bytesRepeat(0x21, 32), nil))
-	_, err := store.writeDB.Exec(`UPDATE account SET reward = '4' WHERE staking_key = ?`, key)
+	_, err := store.writeDB.Exec(
+		`UPDATE account SET reward = '4' WHERE staking_key = ?`,
+		key,
+	)
 	require.NoError(t, err)
-	require.ErrorContains(t, store.DeleteAccountRewardsAfterSlot(50, nil), "rollback underflow")
+	require.ErrorContains(
+		t,
+		store.DeleteAccountRewardsAfterSlot(50, nil),
+		"rollback underflow",
+	)
 	require.Equal(t, uint64(4), rewardOf(t, store, key))
 	var events int
 	require.NoError(t, store.writeDB.QueryRow(
@@ -163,7 +173,11 @@ func TestRollbackOfPartlyFoldedRound(t *testing.T) {
 	store := newManagementTestStore(t)
 	require.NoError(t, store.SetPendingRewardCreditRounds(
 		[]models.RewardCreditRound{{SnapshotEpoch: 3, BoundarySlot: 500}}, nil))
-	keys := [][]byte{bytesRepeat(0x71, 28), bytesRepeat(0x72, 28), bytesRepeat(0x73, 28)}
+	keys := [][]byte{
+		bytesRepeat(0x71, 28),
+		bytesRepeat(0x72, 28),
+		bytesRepeat(0x73, 28),
+	}
 	var outputs []*models.RewardAccountOutput
 	for _, key := range keys {
 		rollbackAccount(t, store, key, 100)
@@ -196,13 +210,22 @@ func TestRollbackOfPartlyFoldedRound(t *testing.T) {
 	}
 	has, err := store.HasPendingRewardCreditRounds(nil)
 	require.NoError(t, err)
-	require.False(t, has, "the round is gone, so its surviving outputs are not pending credits")
+	require.False(
+		t,
+		has,
+		"the round is gone, so its surviving outputs are not pending credits",
+	)
 	// Replaying the round credits every output once.
 	require.NoError(t, store.AddAppliedRewardCreditRound(
 		models.RewardCreditRound{SnapshotEpoch: 3, BoundarySlot: 500}, nil))
 	claimed, err = store.ClaimUnfoldedRewardCredits(3, 0, 10, nil)
 	require.NoError(t, err)
-	require.Len(t, claimed, 3, "outputs captured before the rollback slot survive and are claimable again")
+	require.Len(
+		t,
+		claimed,
+		3,
+		"outputs captured before the rollback slot survive and are claimable again",
+	)
 }
 
 // With several withdrawals above the rollback slot, the earliest one anchors

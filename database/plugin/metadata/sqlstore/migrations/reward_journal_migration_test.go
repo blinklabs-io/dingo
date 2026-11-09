@@ -43,7 +43,10 @@ func hexBlob(b []byte) string { return fmt.Sprintf("x'%x'", b) }
 
 // seedLegacyRewardJournal fills a v55 database with every class of row the
 // legacy journal holds and returns how many of each it wrote.
-func seedLegacyRewardJournal(t *testing.T, db *sql.DB) (credits, events, withdrawals int) {
+func seedLegacyRewardJournal(
+	t *testing.T,
+	db *sql.DB,
+) (credits, events, withdrawals int) {
 	t.Helper()
 	pool := bytes.Repeat([]byte{0x71}, 28)
 	for i := 1; i <= 6; i++ {
@@ -57,10 +60,16 @@ VALUES (%s, %d, 1, 1, TRUE, '%d')`, hexBlob(key), i%2, i*100))
 	// the rounds at 500 and 600 were applied eagerly and have none.
 	for e := 5; e <= 8; e++ {
 		execAll(t, db, fmt.Sprintf(
-			`INSERT INTO epoch (epoch_id, start_slot) VALUES (%d, %d)`, e, e*100))
+			`INSERT INTO epoch (epoch_id, start_slot) VALUES (%d, %d)`,
+			e,
+			e*100,
+		))
 	}
-	execAll(t, db,
-		`INSERT INTO reward_credit_round (snapshot_epoch, boundary_slot) VALUES (5, 700)`)
+	execAll(
+		t,
+		db,
+		`INSERT INTO reward_credit_round (snapshot_epoch, boundary_slot) VALUES (5, 700)`,
+	)
 	// Outputs: the eager rounds' (snapshot 3 at 500, snapshot 4 at 600) were
 	// never marked folded; the deferred round's partly are.
 	for _, round := range []struct{ epoch, slot int }{{3, 500}, {4, 600}, {5, 700}} {
@@ -83,10 +92,21 @@ VALUES (%s, %s, 'member', %d, %d, '10', TRUE, FALSE, %d, %d, %v)`,
 		if previous != "" {
 			prev = "'" + previous + "'"
 		}
-		execAll(t, db, fmt.Sprintf(`INSERT INTO account_reward_delta
+		execAll(t, db, fmt.Sprintf(
+			`INSERT INTO account_reward_delta
 (staking_key, credential_tag, tx_hash, amount, previous_reward, added_slot,
  withdrawal, post_snapshot) VALUES (%s, %d, %s, '%s', %s, %d, %v, %v)`,
-			hexBlob(key), i%2, hexBlob(hash), amount, prev, slot, withdrawal, post))
+			hexBlob(
+				key,
+			),
+			i%2,
+			hexBlob(hash),
+			amount,
+			prev,
+			slot,
+			withdrawal,
+			post,
+		))
 	}
 	hash32 := func(seed int) []byte {
 		return bytes.Repeat([]byte{byte(0xa0 + seed)}, 32)
@@ -103,8 +123,24 @@ VALUES (%s, %s, 'member', %d, %d, '10', TRUE, FALSE, %d, %d, %v)`,
 	// Event credits: pool-retirement refund, a MIR repeated at two slots, and
 	// a governance credit, each marked post-snapshot except the MIR.
 	journal(1, bytes.Repeat([]byte{0xc1}, 28), "7", "", 600, false, true)
-	journal(2, []byte("dingo:mir:\x00\x00\x00\x00\x00\x00\x00\x00"), "5", "", 600, false, false)
-	journal(2, []byte("dingo:mir:\x00\x00\x00\x00\x00\x00\x00\x00"), "9", "", 700, false, false)
+	journal(
+		2,
+		[]byte("dingo:mir:\x00\x00\x00\x00\x00\x00\x00\x00"),
+		"5",
+		"",
+		600,
+		false,
+		false,
+	)
+	journal(
+		2,
+		[]byte("dingo:mir:\x00\x00\x00\x00\x00\x00\x00\x00"),
+		"9",
+		"",
+		700,
+		false,
+		false,
+	)
 	journal(3, bytes.Repeat([]byte{0xd1}, 32), "11", "", 700, false, true)
 	journal(4, hash32(150), "13", "", 650, false, false)
 	events = 5
@@ -113,7 +149,9 @@ VALUES (%s, %s, 'member', %d, %d, '10', TRUE, FALSE, %d, %d, %v)`,
 		txHash := bytes.Repeat([]byte{byte(0xe0 + i)}, 32)
 		execAll(t, db, fmt.Sprintf(
 			`INSERT INTO "transaction" (hash, slot, block_index) VALUES (%s, %d, 0)`,
-			hexBlob(txHash), 640+i))
+			hexBlob(txHash),
+			640+i,
+		))
 		previous := fmt.Sprint(20 * i)
 		if i == 4 {
 			previous = ""
@@ -142,18 +180,36 @@ func rewardJournalDigest(t *testing.T, db *sql.DB) string {
 		}
 		require.NoError(t, rows.Err())
 	}
-	collect("credit", `SELECT c.boundary_slot, hex(a.staking_key), c.output_id, c.amount, ''
-FROM reward_credit c JOIN account a ON a.id = c.account_id`)
-	collect("slot", `SELECT boundary_slot, '', '', '', '' FROM reward_credit_slot`)
-	collect("event", `SELECT hex(s.hash), hex(a.staking_key), e.slot, e.amount, e.post_snapshot
+	collect(
+		"credit",
+		`SELECT c.boundary_slot, hex(a.staking_key), c.output_id, c.amount, ''
+FROM reward_credit c JOIN account a ON a.id = c.account_id`,
+	)
+	collect(
+		"slot",
+		`SELECT boundary_slot, '', '', '', '' FROM reward_credit_slot`,
+	)
+	collect(
+		"event",
+		`SELECT hex(s.hash), hex(a.staking_key), e.slot, e.amount, e.post_snapshot
 FROM reward_event_credit e JOIN account a ON a.id = e.account_id
-JOIN reward_source s ON s.id = e.source_id`)
-	collect("withdrawal", `SELECT hex(t.hash), hex(a.staking_key), w.slot, w.amount, w.previous_reward
+JOIN reward_source s ON s.id = e.source_id`,
+	)
+	collect(
+		"withdrawal",
+		`SELECT hex(t.hash), hex(a.staking_key), w.slot, w.amount, w.previous_reward
 FROM reward_withdrawal w JOIN account a ON a.id = w.account_id
-JOIN "transaction" t ON t.id = w.tx_id`)
-	collect("round", `SELECT snapshot_epoch, boundary_slot, '', '', '' FROM reward_credit_round`)
-	collect("folded", `SELECT epoch, COUNT(*), '', '', '' FROM reward_account_output
-WHERE folded GROUP BY epoch`)
+JOIN "transaction" t ON t.id = w.tx_id`,
+	)
+	collect(
+		"round",
+		`SELECT snapshot_epoch, boundary_slot, '', '', '' FROM reward_credit_round`,
+	)
+	collect(
+		"folded",
+		`SELECT epoch, COUNT(*), '', '', '' FROM reward_account_output
+WHERE folded GROUP BY epoch`,
+	)
 	sort.Strings(lines)
 	return strings.Join(lines, "\n")
 }
@@ -161,8 +217,10 @@ WHERE folded GROUP BY epoch`)
 func tableExists(t *testing.T, db *sql.DB, name string) bool {
 	t.Helper()
 	var n int
-	require.NoError(t, db.QueryRowContext(context.Background(),
-		`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, name,
+	require.NoError(t, db.QueryRowContext(
+		context.Background(),
+		`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?`,
+		name,
 	).Scan(&n))
 	return n == 1
 }
@@ -196,20 +254,61 @@ func TestRewardJournalMigrationMovesEveryLegacyRow(t *testing.T) {
 			runTo(registry)
 
 			require.False(t, tableExists(t, db, "account_reward_delta"))
-			require.Equal(t, credits, count(t, db, `SELECT COUNT(*) FROM reward_credit`))
-			require.Equal(t, events, count(t, db, `SELECT COUNT(*) FROM reward_event_credit`))
-			require.Equal(t, withdrawals, count(t, db, `SELECT COUNT(*) FROM reward_withdrawal`))
+			require.Equal(
+				t,
+				credits,
+				count(t, db, `SELECT COUNT(*) FROM reward_credit`),
+			)
+			require.Equal(
+				t,
+				events,
+				count(t, db, `SELECT COUNT(*) FROM reward_event_credit`),
+			)
+			require.Equal(
+				t,
+				withdrawals,
+				count(t, db, `SELECT COUNT(*) FROM reward_withdrawal`),
+			)
 			// The MIR source is shared by its two slots.
-			require.Equal(t, events-1, count(t, db, `SELECT COUNT(*) FROM reward_source`))
+			require.Equal(
+				t,
+				events-1,
+				count(t, db, `SELECT COUNT(*) FROM reward_source`),
+			)
 			// Credits keep their slots: one entry per credited boundary, the
 			// round table and the outputs' folded flags untouched.
-			require.Equal(t, 3, count(t, db, `SELECT COUNT(*) FROM reward_credit_slot`))
-			require.Equal(t, 1, count(t, db, `SELECT COUNT(*) FROM reward_credit_round`))
-			require.Equal(t, 3, count(t, db, `SELECT COUNT(*) FROM reward_account_output WHERE folded`))
-			require.Equal(t, 1, count(t, db, `SELECT COUNT(*) FROM reward_event_credit
-WHERE post_snapshot AND slot = 700`))
-			require.Equal(t, 1, count(t, db, `SELECT COUNT(*) FROM reward_withdrawal
-WHERE amount = '4' AND previous_reward = '0'`), "a NULL previous reward reads as zero")
+			require.Equal(
+				t,
+				3,
+				count(t, db, `SELECT COUNT(*) FROM reward_credit_slot`),
+			)
+			require.Equal(
+				t,
+				1,
+				count(t, db, `SELECT COUNT(*) FROM reward_credit_round`),
+			)
+			require.Equal(
+				t,
+				3,
+				count(
+					t,
+					db,
+					`SELECT COUNT(*) FROM reward_account_output WHERE folded`,
+				),
+			)
+			require.Equal(
+				t,
+				1,
+				count(t, db, `SELECT COUNT(*) FROM reward_event_credit
+WHERE post_snapshot AND slot = 700`),
+			)
+			require.Equal(
+				t,
+				1,
+				count(t, db, `SELECT COUNT(*) FROM reward_withdrawal
+WHERE amount = '4' AND previous_reward = '0'`),
+				"a NULL previous reward reads as zero",
+			)
 
 			// A second run finds nothing to do.
 			digest := rewardJournalDigest(t, db)

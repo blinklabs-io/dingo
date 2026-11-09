@@ -172,7 +172,10 @@ func TestRewardJournalEquivalence(t *testing.T) {
 	})
 }
 
-func addRewardJournalCoverage(dst *rewardJournalCoverage, src rewardJournalCoverage) {
+func addRewardJournalCoverage(
+	dst *rewardJournalCoverage,
+	src rewardJournalCoverage,
+) {
 	dst.deferredRounds += src.deferredRounds
 	dst.eagerRounds += src.eagerRounds
 	dst.partialCompactions += src.partialCompactions
@@ -218,7 +221,9 @@ func readRewardJournalGolden(t *testing.T) map[int][]string {
 func writeRewardJournalGolden(t *testing.T, results map[int][]string) {
 	t.Helper()
 	var b strings.Builder
-	b.WriteString("# seed checkpoint digest (first 16 hex of sha256 over the reader transcript)\n")
+	b.WriteString(
+		"# seed checkpoint digest (first 16 hex of sha256 over the reader transcript)\n",
+	)
 	seeds := make([]int, 0, len(results))
 	for seed := range results {
 		seeds = append(seeds, seed)
@@ -229,8 +234,14 @@ func writeRewardJournalGolden(t *testing.T, results map[int][]string) {
 			fmt.Fprintf(&b, "%d %d %s\n", seed, i, h)
 		}
 	}
-	require.NoError(t, os.MkdirAll(filepath.Dir(rewardJournalGoldenFile), 0o750))
-	require.NoError(t, os.WriteFile(rewardJournalGoldenFile, []byte(b.String()), 0o600))
+	require.NoError(
+		t,
+		os.MkdirAll(filepath.Dir(rewardJournalGoldenFile), 0o750),
+	)
+	require.NoError(
+		t,
+		os.WriteFile(rewardJournalGoldenFile, []byte(b.String()), 0o600),
+	)
 }
 
 func newRewardJournalRun(t *testing.T, seed int64) *rewardJournalRun {
@@ -334,17 +345,23 @@ func (r *rewardJournalRun) boundary() {
 				RewardType:    rewardType,
 				Epoch:         snapshot,
 				CredentialTag: ref.Tag,
-				Amount:        types.Uint64(1_000_000 + uint64Value(r.rng.Intn(9_000_000))),
-				Spendable:     r.rng.Intn(100) >= 8,
-				Guarded:       r.rng.Intn(100) < 6,
-				CapturedSlot:  boundarySlot - 1,
-				BoundarySlot:  boundarySlot,
+				Amount: types.Uint64(
+					1_000_000 + uint64Value(r.rng.Intn(9_000_000)),
+				),
+				Spendable:    r.rng.Intn(100) >= 8,
+				Guarded:      r.rng.Intn(100) < 6,
+				CapturedSlot: boundarySlot - 1,
+				BoundarySlot: boundarySlot,
 			})
 		}
 	}
 	require.NoError(t, r.store.SaveRewardAccountOutputs(outputs, nil))
 	require.NoError(t, r.store.AddAppliedRewardCreditRound(
-		models.RewardCreditRound{SnapshotEpoch: snapshot, BoundarySlot: boundarySlot}, nil,
+		models.RewardCreditRound{
+			SnapshotEpoch: snapshot,
+			BoundarySlot:  boundarySlot,
+		},
+		nil,
 	))
 	if round.deferred {
 		r.cov.deferredRounds++
@@ -374,7 +391,12 @@ func (r *rewardJournalRun) boundary() {
 		pot := byte(r.rng.Intn(2))
 		hash := append([]byte("mir-reward:"), pot)
 		require.NoError(t, r.store.AddAccountRewardByCredential(
-			ref.Tag, ref.Key, uint64Value(1+r.rng.Intn(900_000)), boundarySlot, hash, nil,
+			ref.Tag,
+			ref.Key,
+			uint64Value(1+r.rng.Intn(900_000)),
+			boundarySlot,
+			hash,
+			nil,
 		))
 		r.cov.mirEvents++
 	}
@@ -431,7 +453,11 @@ func (r *rewardJournalRun) compact() {
 func (r *rewardJournalRun) withdraw() {
 	t := r.t
 	ref := r.pick()
-	pending, err := r.store.GetPendingRewardAccountOutputsForCredential(ref.Tag, ref.Key, nil)
+	pending, err := r.store.GetPendingRewardAccountOutputsForCredential(
+		ref.Tag,
+		ref.Key,
+		nil,
+	)
 	require.NoError(t, err)
 	if len(pending) > 0 {
 		r.cov.foldBeforeWithdrawal++
@@ -464,9 +490,11 @@ func (r *rewardJournalRun) withdraw() {
 	)
 	require.NoError(t, err)
 	tx := &mockTransaction{
-		hash:        txHash,
-		isValid:     true,
-		withdrawals: map[*lcommon.Address]*big.Int{&address: new(big.Int).SetUint64(amount)},
+		hash:    txHash,
+		isValid: true,
+		withdrawals: map[*lcommon.Address]*big.Int{
+			&address: new(big.Int).SetUint64(amount),
+		},
 	}
 	blockHash := bytes.Repeat([]byte{byte(r.slot % 251)}, 32)
 	index := uint32(r.rng.Intn(4))
@@ -542,10 +570,25 @@ func (r *rewardJournalRun) checkpoint() {
 	fmt.Fprintf(&b, "checkpoint %d slot=%d\n", r.cpCount, r.slot)
 	sorted := append([]models.StakeCredentialRef(nil), r.refs...)
 	for _, ref := range sorted {
-		account, err := r.store.GetAccountByCredential(ref.Tag, ref.Key, true, nil)
+		account, err := r.store.GetAccountByCredential(
+			ref.Tag,
+			ref.Key,
+			true,
+			nil,
+		)
 		require.NoError(t, err)
-		fmt.Fprintf(&b, "account %d/%x reward=%d\n", ref.Tag, ref.Key[:2], account.Reward)
-		pending, err := r.store.GetPendingRewardAccountOutputsForCredential(ref.Tag, ref.Key, nil)
+		fmt.Fprintf(
+			&b,
+			"account %d/%x reward=%d\n",
+			ref.Tag,
+			ref.Key[:2],
+			account.Reward,
+		)
+		pending, err := r.store.GetPendingRewardAccountOutputsForCredential(
+			ref.Tag,
+			ref.Key,
+			nil,
+		)
 		require.NoError(t, err)
 		var total uint64
 		for _, output := range pending {
@@ -555,7 +598,11 @@ func (r *rewardJournalRun) checkpoint() {
 		sums, err := r.store.GetAccountSumsByCredential(ref.Tag, ref.Key, nil)
 		require.NoError(t, err)
 		fmt.Fprintf(&b, "  sums withdrawals=%d\n", sums.WithdrawalsSum)
-		count, err := r.store.CountAccountWithdrawalHistoryByCredential(ref.Tag, ref.Key, nil)
+		count, err := r.store.CountAccountWithdrawalHistoryByCredential(
+			ref.Tag,
+			ref.Key,
+			nil,
+		)
 		require.NoError(t, err)
 		fmt.Fprintf(&b, "  history count=%d\n", count)
 		for _, order := range []string{"asc", "desc"} {
@@ -564,8 +611,16 @@ func (r *rewardJournalRun) checkpoint() {
 			)
 			require.NoError(t, err)
 			for _, row := range rows {
-				fmt.Fprintf(&b, "  history %s %x amount=%d slot=%d index=%d block=%x\n",
-					order, row.TxHash[:9], row.Amount, row.TxSlot, row.BlockIndex, row.BlockHash[:2])
+				fmt.Fprintf(
+					&b,
+					"  history %s %x amount=%d slot=%d index=%d block=%x\n",
+					order,
+					row.TxHash[:9],
+					row.Amount,
+					row.TxSlot,
+					row.BlockIndex,
+					row.BlockHash[:2],
+				)
 			}
 		}
 	}
@@ -574,7 +629,11 @@ func (r *rewardJournalRun) checkpoint() {
 		slots = append(slots, round.slot, round.slot-1, round.slot+1)
 	}
 	for _, slot := range slots {
-		accounts, err := r.store.GetAccountsByCredentialAtSlot(r.refs, slot, nil)
+		accounts, err := r.store.GetAccountsByCredentialAtSlot(
+			r.refs,
+			slot,
+			nil,
+		)
 		require.NoError(t, err)
 		keys := make([]string, 0, len(accounts))
 		for key := range accounts {
@@ -593,8 +652,14 @@ func (r *rewardJournalRun) checkpoint() {
 		require.NoError(t, err)
 		fmt.Fprintf(&b, "post-snapshot %d\n", slot)
 		for _, delta := range totals {
-			fmt.Fprintf(&b, "  total %d/%x amount=%d post=%v\n",
-				delta.CredentialTag, delta.StakingKey[:2], delta.Amount, delta.PostSnapshot)
+			fmt.Fprintf(
+				&b,
+				"  total %d/%x amount=%d post=%v\n",
+				delta.CredentialTag,
+				delta.StakingKey[:2],
+				delta.Amount,
+				delta.PostSnapshot,
+			)
 		}
 		for _, delta := range events {
 			fmt.Fprintf(&b, "  event %d/%x hash=%x amount=%d slot=%d\n",
@@ -623,7 +688,12 @@ func (r *rewardJournalRun) checkpoint() {
 			lines = append(lines, fmt.Sprintf("%d/%x", ref.Tag, ref.Key[:2]))
 		}
 		sort.Strings(lines)
-		fmt.Fprintf(&b, "witnessed-after %d: %s\n", after, strings.Join(lines, ","))
+		fmt.Fprintf(
+			&b,
+			"witnessed-after %d: %s\n",
+			after,
+			strings.Join(lines, ","),
+		)
 	}
 	r.out.WriteString(b.String())
 	digest := sha256.Sum256([]byte(b.String()))
