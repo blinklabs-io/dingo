@@ -499,13 +499,18 @@ func TestBoundaryBlockEraMustMatchLedgerProtocolVersion(t *testing.T) {
 		})
 		requireStaysBabbage(t, ls, err, 8)
 	})
+	// TestConwayHardForkAtEpoch moves the era without touching the ledger's
+	// protocol version: the Haskell node takes the transition epoch from the
+	// trigger (singleEraTransition) and the Babbage-to-Conway translation
+	// copies the version (upgradeConwayPParams). The ledger therefore enters
+	// Conway still at major 8, outside the major-9 bootstrap phase.
 	t.Run("configured trigger epoch transitions", func(t *testing.T) {
 		t.Parallel()
 		ls, err := runBoundaryEraCase(t, boundaryEraCase{
 			pparamsMajor: 8,
 			configure:    conwayAt(1),
 		})
-		requireBecomesConway(t, ls, err)
+		requireBecomes(t, ls, err, eras.ConwayEraDesc.Id, 8)
 	})
 	// A header major of 12 elevates the Conway body to Dijkstra, which the
 	// major-9 parameters do not authorize. The body era is authorized, so the
