@@ -28,6 +28,8 @@ import (
 )
 
 type ProviderConfig struct {
+	// AuthToken is ignored; API requests do not require authentication.
+	AuthToken                       string              `yaml:"authToken"`
 	Port                            uint                `yaml:"port"`
 	Host                            string              `yaml:"host"`
 	MaxConcurrentMutations          uint                `yaml:"maxConcurrentMutations"`

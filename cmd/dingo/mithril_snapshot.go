@@ -169,12 +169,10 @@ func mithrilServeCommand() *cobra.Command {
 		Long: `Serve the snapshots in mithril.server.artifactStore through the
 Mithril aggregator artifact API, with range request support, on the shared
 bindAddr and mithril.server.port. Set mithril.server.publicBaseUrl to the
-absolute HTTPS origin clients use to reach this server (HTTP is allowed only
-for loopback). Artifact download locations use this configured origin.
-Artifact reads and signature submissions are public. With
-mithril.server.aggregator.enabled, signer registration and explicit registration
-closure require the configured operator bearer token; the aggregator certifies
-stored snapshots.`,
+absolute HTTP(S) origin clients use to reach this server. Artifact download
+locations use this configured origin. All endpoints accept anonymous requests.
+With mithril.server.aggregator.enabled, the aggregator collects signer
+registrations and signatures and certifies stored snapshots.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cfg := config.FromContext(cmd.Context())
 			if cfg == nil {

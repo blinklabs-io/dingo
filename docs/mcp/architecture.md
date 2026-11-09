@@ -39,7 +39,7 @@ api/mcp/
 ├── provider.go               # Dingo node API Provider plugin integration
 ├── server.go                 # MCP server lifecycle, options, and DB management
 ├── transport_http.go         # Streamable HTTP, SSE, and health endpoints
-├── security.go               # Token auth, IP rate limiter, and Origin validation
+├── security.go               # IP rate limiter and Origin validation
 ├── sanitize.go               # Zero-width, prompt injection, and output sanitization
 ├── types.go                  # Tool schemas, server options, and resource records
 ├── tools_cardano.go          # 13 Cardano domain tools + node identity & doc inspection
@@ -102,9 +102,8 @@ api/mcp/
   registry and CIP-25 data. Markdown tables sanitize and HTML-escape each cell
   at the table boundary, then wrap the table in an explicit untrusted-data
   envelope. Clients must not follow instructions contained in it.
-- **Network Bind Protection**: The default listener is loopback. Provider
-  construction rejects a non-loopback bind unless both an auth token and server
-  TLS are configured.
+- **Network Binding**: The default listener is loopback. Every bind address
+  supports anonymous HTTP requests; server TLS is optional.
 
 ---
 
@@ -249,9 +248,9 @@ sequenceDiagram
     participant Node as Injected node services
 
     Client->>Sec: MCP request
-    Sec->>Sec: Validate Origin, optional token, rate limit
+    Sec->>Sec: Validate Origin and rate limit
     alt Request rejected
-        Sec-->>Client: 403, 401, or 429
+        Sec-->>Client: 403 or 429
     else Request accepted
         Sec->>Core: Forward request
         Core->>Tool: Invoke registered handler

@@ -67,9 +67,7 @@ func ValidateKESAgentSignTimeout(timeout time.Duration) error {
 	return nil
 }
 
-// ValidateMithrilPublicBaseURL accepts an absolute public origin. Plain HTTP
-// is restricted to loopback so artifact locations are HTTPS for normal
-// bootstrap clients.
+// ValidateMithrilPublicBaseURL accepts an absolute HTTP(S) origin.
 func ValidateMithrilPublicBaseURL(value string) error {
 	u, err := url.Parse(value)
 	if err != nil {
@@ -77,7 +75,7 @@ func ValidateMithrilPublicBaseURL(value string) error {
 	}
 	scheme := strings.ToLower(u.Scheme)
 	if scheme != "https" && scheme != "http" {
-		return errors.New("must use HTTPS (HTTP is allowed only on loopback)")
+		return errors.New("must use HTTP or HTTPS")
 	}
 	if u.Host == "" || u.Hostname() == "" || u.User != nil || u.Opaque != "" ||
 		(u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.ForceQuery ||
@@ -85,16 +83,6 @@ func ValidateMithrilPublicBaseURL(value string) error {
 		return errors.New(
 			"must be an origin without credentials, a path, query, or fragment",
 		)
-	}
-	if scheme == "http" {
-		host := strings.ToLower(u.Hostname())
-		addr, parseErr := netip.ParseAddr(host)
-		if host != "localhost" &&
-			(parseErr != nil || !addr.Unmap().IsLoopback()) {
-			return errors.New(
-				"plain HTTP public URL is allowed only on loopback",
-			)
-		}
 	}
 	return nil
 }

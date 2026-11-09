@@ -300,8 +300,6 @@ The complete lifecycle of a request consists of 6 distinct phases:
    - The LLM parses the user prompt, determines the required data, and emits a
      JSON-RPC 2.0 tool invocation.
 3. **Phase 3: Ingress Security Perimeter**:
-   - **Authentication**: If configured, `Authorization: Bearer <token>` is
-     validated using `crypto/subtle.ConstantTimeCompare`.
    - **Rate Limiting**: Per-client IP token bucket (default 60 req/s, burst 15)
      decrements tokens. Excess requests receive HTTP 429.
    - **SQL Statement Validation**: SQL tools tokenize comments, quoted data, and

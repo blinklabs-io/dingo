@@ -14400,9 +14400,8 @@ manifest entries.
 bootstrap: they produce the artifact format `dingo mithril sync` consumes (a
 Mithril Cardano database, v2) and serve it through the aggregator artifact API.
 Neither starts the node; both read the `mithril.server` configuration, and the
-server binds the shared `bindAddr`. Artifact reads are public. When the
-aggregator is enabled, signer registration and registration closure require an
-operator bearer token; non-loopback binds require TLS.
+server binds the shared `bindAddr`. All endpoints accept anonymous HTTP requests,
+including signer registration and registration closure.
 
 **Production** (`mithril.CreateSnapshot`) takes a sealed cardano-node database
 directory. Immutable file numbers must be contiguous from 0 with a chunk,
@@ -14456,8 +14455,7 @@ stored snapshot older than the newest N fails, since retention has removed it.
 /artifact/cardano-database`, `/artifact/cardano-database/{hash}`,
 `/download/{hash}/{name}` and `/certificate/{hash}` (a stored
 `certificates/{hash}.json`, if present). `mithril.server.publicBaseUrl` is the
-absolute origin used in artifact download locations; it must use HTTPS except
-for a loopback HTTP origin. Request Host and forwarded headers do not affect
+absolute HTTP(S) origin used in artifact download locations. Request Host and forwarded headers do not affect
 generated links. Archive downloads use `http.ServeContent`, giving range and
 HEAD support. From a remote store, a request naming more than one range is
 answered with the whole object instead: each range would cost a separate ranged
@@ -18683,7 +18681,8 @@ terminal status is published only after the next operation can start.
 operation's in-memory state (no push notification from the goroutine to a
 concurrently open stream) — adequate given operations run for seconds to
 hours, far coarser than the poll interval. The handler admits at most 32
-progress streams globally and four for one remote client address.
+progress streams globally and four for one remote client address (one IPv4
+address or one IPv6 /64).
 It rejects an excess stream before allocating its ticker. An
 admitted stream ends when the operation becomes terminal, its request context
 is cancelled, or its 15-minute lifetime expires; a client following a longer

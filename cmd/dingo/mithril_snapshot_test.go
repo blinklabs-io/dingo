@@ -193,7 +193,7 @@ func TestNewMithrilServerRejectsIncompleteConfig(t *testing.T) {
 			c.Mithril.Server.PublicBaseURL = ""
 		},
 		"invalid public base URL": func(c *config.Config) {
-			c.Mithril.Server.PublicBaseURL = "http://snapshots.example.test"
+			c.Mithril.Server.PublicBaseURL = "ftp://snapshots.example.test"
 		},
 		"no store": func(c *config.Config) {
 			c.Mithril.Server.ArtifactStore = ""

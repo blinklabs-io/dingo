@@ -216,8 +216,8 @@ func (a *Aggregator) registerRoutes(
 	publicRequest func(http.HandlerFunc) http.HandlerFunc,
 	signatureRequest func(signatureRequestHandler) http.HandlerFunc,
 ) {
-	mux.HandleFunc("POST /register-signer", a.handleRegisterSigner)
-	mux.HandleFunc("POST /close-registrations", a.handleCloseRegistrations)
+	mux.HandleFunc("POST /register-signer", publicRequest(a.handleRegisterSigner))
+	mux.HandleFunc("POST /close-registrations", publicRequest(a.handleCloseRegistrations))
 	mux.HandleFunc(
 		"GET /certificate-pending", publicRequest(a.handlePending),
 	)

@@ -16,7 +16,6 @@ package bark
 
 import (
 	"context"
-	"net"
 	"net/http"
 )
 
@@ -33,10 +32,7 @@ func requestClientFromContext(ctx context.Context) string {
 
 func requestClientMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		client, _, err := net.SplitHostPort(r.RemoteAddr)
-		if err != nil {
-			client = r.RemoteAddr
-		}
+		client := archiveCallerKey(r.RemoteAddr)
 		next.ServeHTTP(w, r.WithContext(withRequestClient(r.Context(), client)))
 	})
 }

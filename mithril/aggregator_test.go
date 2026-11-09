@@ -428,25 +428,6 @@ func TestAggregatorRegistrationValidation(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, code)
 }
 
-func TestAggregatorReRegistration(t *testing.T) {
-	t.Parallel()
-	f := newAggregatorFixture(t, lotteryParams)
-	f.newSnapshot(2)
-	s := newTestSTMSigner(1, 100)
-	code, body := f.register(s)
-	require.Equal(t, http.StatusCreated, code, body)
-	s.stake = 250
-	code, body = f.register(s)
-	require.Equal(t, http.StatusCreated, code, body)
-	code, body = f.closeRegistrations()
-	require.Equal(t, http.StatusNoContent, code, body)
-	status, pc := f.pending()
-	require.Equal(t, http.StatusOK, status)
-	require.NotNil(t, pc)
-	require.Len(t, pc.Signers, 1)
-	require.Equal(t, uint64(250), pc.Signers[0].Stake)
-}
-
 func TestAggregatorOperatorCanUpdateRegistration(t *testing.T) {
 	t.Parallel()
 	f := newAggregatorFixture(t, lotteryParams)

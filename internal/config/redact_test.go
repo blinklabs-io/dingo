@@ -151,10 +151,11 @@ var sentinelSecrets = []string{
 func sentinelSecretConfig() *Config {
 	certPath := "/etc/dingo/api.crt"
 	return &Config{
-		Network:      "preview",
-		DatabasePath: "/var/lib/dingo",
-		StorageMode:  "api",
-		Logging:      LoggingConfig{Format: "json", Level: "debug"},
+		Network:          "preview",
+		MetricsAuthToken: "SENTINEL-METRICS-AUTH-TOKEN",
+		DatabasePath:     "/var/lib/dingo",
+		StorageMode:      "api",
+		Logging:          LoggingConfig{Format: "json", Level: "debug"},
 		API: APIConfig{
 			TLS: apiconfig.TLSPolicy{CertFilePath: &certPath},
 		},

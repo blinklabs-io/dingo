@@ -798,6 +798,8 @@ type Config struct {
 	// metrics on a wildcard or remote-scrape address.
 	MetricsBindAddr string `yaml:"metricsBindAddr" envconfig:"DINGO_METRICS_BIND_ADDR"`
 	MetricsPort     uint   `yaml:"metricsPort"    split_words:"true"`
+	// MetricsAuthToken is ignored; metrics requests do not require authentication.
+	MetricsAuthToken string `yaml:"metricsAuthToken" envconfig:"DINGO_METRICS_AUTH_TOKEN"`
 	// DebugBindAddr is the interface used by the unauthenticated pprof
 	// listener. It defaults to loopback independently of BindAddr and
 	// PrivateBindAddr; operators must set this field explicitly to expose
@@ -1430,13 +1432,11 @@ type MithrilConfig struct {
 }
 
 // MithrilServerConfig holds configuration for producing Mithril snapshot
-// artifacts and serving them over HTTP. Artifact reads are public; aggregator
-// signer registration and registration closure require operator credentials.
+// artifacts and serving them over HTTP. All endpoints accept anonymous requests.
 type MithrilServerConfig struct {
 	// Port is the TCP port `dingo mithril serve` listens on.
 	Port uint `yaml:"port"                    envconfig:"DINGO_MITHRIL_SERVER_PORT"`
-	// PublicBaseURL is the public HTTPS origin used in snapshot download
-	// locations. Plain HTTP is accepted only for a loopback origin.
+	// PublicBaseURL is the public HTTP(S) origin used in snapshot download locations.
 	PublicBaseURL string `yaml:"publicBaseUrl"           envconfig:"DINGO_MITHRIL_SERVER_PUBLIC_BASE_URL"`
 	// ArtifactStore is where produced artifacts are kept and served from: a
 	// filesystem directory, or an s3://bucket/prefix or gcs://bucket/prefix
@@ -1454,8 +1454,7 @@ type MithrilServerConfig struct {
 	// manifest of produced snapshots, in the Mithril JSON-hex key format.
 	AncillarySigningKeyFile string `yaml:"ancillarySigningKeyFile" envconfig:"DINGO_MITHRIL_SERVER_ANCILLARY_SIGNING_KEY_FILE"`
 	// TLSEnabled serves HTTPS using the shared tlsCertFilePath and
-	// tlsKeyFilePath. It is off by default; aggregator-enabled servers bound
-	// outside loopback require it to protect the operator bearer token.
+	// tlsKeyFilePath. It is off by default and is optional on every bind address.
 	TLSEnabled bool `yaml:"tlsEnabled"              envconfig:"DINGO_MITHRIL_SERVER_TLS_ENABLED"`
 	// Aggregator configures certificate production for the stored snapshots.
 	Aggregator MithrilAggregatorConfig `yaml:"aggregator"`

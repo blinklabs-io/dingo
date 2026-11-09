@@ -244,7 +244,6 @@ func TestValidateMithrilPublicBaseURL(t *testing.T) {
 		{name: "IPv6 loopback HTTP", value: "http://[::1]:8080"},
 		{
 			name: "remote HTTP", value: "http://snapshots.example.org",
-			wantErr: true,
 		},
 		{
 			name: "unsupported scheme", value: "ftp://snapshots.example.org",
@@ -916,11 +915,10 @@ func TestValidateMithrilServer(t *testing.T) {
 			wantErr: "invalid mithril.server.port",
 		},
 		{
-			name: "mithril server public HTTP base URL is not loopback",
+			name: "mithril server public HTTP base URL",
 			modify: func(c *Config) {
 				c.Mithril.Server.PublicBaseURL = "http://snapshots.example.org"
 			},
-			wantErr: "invalid mithril.server.publicBaseUrl",
 		},
 		{
 			name: "enabled mithril aggregator needs an epoch",

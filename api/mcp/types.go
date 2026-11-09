@@ -27,6 +27,8 @@ import (
 
 // ProviderConfig holds the configuration for the MCP API server.
 type ProviderConfig struct {
+	// AuthToken is ignored; API requests do not require authentication.
+	AuthToken    string              `yaml:"authToken"`
 	Port         uint                `yaml:"port"`
 	Host         string              `yaml:"host"`
 	RateLimit    float64             `yaml:"rateLimit"` // requests per second (0 = unlimited)

@@ -15,10 +15,11 @@
 package bark
 
 import (
+	"testing"
+
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
 	"github.com/blinklabs-io/dingo/plugin"
-	"testing"
 )
 
 func newTestLifecycleService(t *testing.T) *dblifecycle.Service {
