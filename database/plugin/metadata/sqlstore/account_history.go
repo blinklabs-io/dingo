@@ -417,7 +417,7 @@ func withdrawalHistoryQuery(
 	stakingKey []byte,
 ) (string, []any) {
 	return `
-SELECT ard.tx_hash, ard.amount, tx.slot, tx.block_index, tx.block_hash
+SELECT ard.tx_hash, ard.amount, tx.slot AS tx_slot, tx.block_index, tx.block_hash
 FROM account_reward_delta ard
 JOIN "transaction" tx ON tx.hash = ard.tx_hash
 WHERE ard.withdrawal = TRUE
