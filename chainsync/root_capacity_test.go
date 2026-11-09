@@ -214,3 +214,48 @@ func TestDemotedRootIsNotRepromoted(t *testing.T) {
 		"a demoted root must stay an observer",
 	)
 }
+
+// A freed slot must not go to a root advertising a stale tip: idle at that tip
+// it may never send the message that would demote it again.
+func TestFreedSlotSkipsStaleAdvertisingRoot(t *testing.T) {
+	t.Parallel()
+	state := newRootCapacityState(t)
+	holder := newTestConnId(1)
+	staleRoot := newTestConnId(100)
+	require.True(t, state.TryAddClientConnIdWithDirection(holder, rootTestSlots, true))
+	require.True(t, state.TryAddObservedClientConnIdWithDirection(staleRoot, true))
+	state.SetClientAdvertisedTipStale(staleRoot, true)
+
+	require.True(t, state.SetClientObservabilityOnly(holder, true))
+	observing, exists := state.ClientObservabilityOnly(staleRoot)
+	require.True(t, exists)
+	require.True(t, observing, "a stale-advertising root must not take the freed slot")
+
+	require.False(t, state.SetClientObservabilityOnly(staleRoot, false),
+		"a stale-advertising root must refuse direct promotion")
+
+	state.SetClientAdvertisedTipStale(staleRoot, false)
+	require.True(t, state.SetClientObservabilityOnly(staleRoot, false),
+		"a fresh advertised tip must lift the hold")
+}
+
+// A stale-advertising root must not consume the handoff. Map iteration picks
+// the candidate, so one round would pass by chance half the time.
+func TestFreedSlotReachesFreshRootPastStaleRoot(t *testing.T) {
+	t.Parallel()
+	for range 64 {
+		state := newRootCapacityState(t)
+		holder := newTestConnId(1)
+		staleRoot := newTestConnId(100)
+		freshRoot := newTestConnId(101)
+		require.True(t, state.TryAddClientConnIdWithDirection(holder, rootTestSlots, true))
+		require.True(t, state.TryAddObservedClientConnIdWithDirection(staleRoot, true))
+		require.True(t, state.TryAddObservedClientConnIdWithDirection(freshRoot, true))
+		state.SetClientAdvertisedTipStale(staleRoot, true)
+
+		require.True(t, state.SetClientObservabilityOnly(holder, true))
+		observing, exists := state.ClientObservabilityOnly(freshRoot)
+		require.True(t, exists)
+		require.False(t, observing, "the freed slot must reach the fresh root")
+	}
+}

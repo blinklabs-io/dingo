@@ -463,3 +463,65 @@ func TestStaleAdvertisedIngressPeerYieldsSlotToObserver(t *testing.T) {
 	require.False(t, observing, "the slot the stale peer held must go to the selectable observer")
 	require.Equal(t, capacityTestSlots, f.o.chainsyncState.ClientConnCount())
 }
+
+// A promotion with no message to judge must not hand a stale peer a slot: idle
+// at its own stale tip, it may never send the message that would demote it.
+func TestStaleAdvertisedObserverHeldOutUntilFreshTip(t *testing.T) {
+	t.Parallel()
+	f := newPromotionGapFixture(t)
+	const staleSlot = 50
+	f.o.config.ChainsyncAdvertisedTipStale = func(tip ochainsync.Tip) bool {
+		return tip.Point.Slot == staleSlot
+	}
+	stale := f.fillers[0]
+	rollback := func(slot uint64) {
+		require.NoError(t, f.o.chainsyncClientRollBackward(
+			ochainsync.CallbackContext{ConnectionId: stale},
+			ocommon.Point{},
+			ochainsync.Tip{Point: ocommon.NewPoint(slot, []byte("tip")), BlockNumber: 10},
+		))
+	}
+	rollback(staleSlot)
+
+	f.o.HandlePeerEligibilityChangedEvent(event.NewEvent(
+		peergov.PeerEligibilityChangedEventType,
+		peergov.PeerEligibilityChangedEvent{ConnectionId: stale, Eligible: true},
+	))
+	observing, exists := f.o.chainsyncState.ClientObservabilityOnly(stale)
+	require.True(t, exists)
+	require.True(t, observing, "an eligibility event must not re-admit a stale-advertising peer")
+
+	rollback(staleSlot + 1000)
+	observing, exists = f.o.chainsyncState.ClientObservabilityOnly(stale)
+	require.True(t, exists)
+	require.False(t, observing, "a fresh advertised tip must re-admit the peer")
+}
+
+// A header can carry the first stale verdict: a peer already admitted is
+// demoted by it, and a later header advertising a fresh tip re-admits the peer.
+func TestStaleAdvertisedHeaderDemotesIngressPeerUntilFreshTip(t *testing.T) {
+	t.Parallel()
+	f := newPromotionGapFixture(t)
+	const staleSlot = 50
+	f.o.config.ChainsyncAdvertisedTipStale = func(tip ochainsync.Tip) bool {
+		return tip.Point.Slot == staleSlot
+	}
+	peer := f.fillers[1]
+	rollForward := func(tipSlot uint64, hash byte) {
+		require.NoError(t, f.o.chainsyncClientRollForwardAt(
+			ochainsync.CallbackContext{ConnectionId: peer},
+			0, newTestBlockHeader(100, 1, hash), ochainsync.Tip{
+				Point: ocommon.NewPoint(tipSlot, []byte("tip")), BlockNumber: 10,
+			}, time.Now(),
+		))
+	}
+	rollForward(staleSlot, 0xc1)
+	observing, exists := f.o.chainsyncState.ClientObservabilityOnly(peer)
+	require.True(t, exists)
+	require.True(t, observing, "a header advertising a stale tip must demote an admitted peer")
+
+	rollForward(staleSlot+1000, 0xc2)
+	observing, exists = f.o.chainsyncState.ClientObservabilityOnly(peer)
+	require.True(t, exists)
+	require.False(t, observing, "a header advertising a fresh tip must re-admit the peer")
+}

@@ -158,6 +158,9 @@ type TrackedClient struct {
 	// observerHeaderGap survives role changes until a safe intersection or
 	// replacement session can replay headers skipped by this observer.
 	observerHeaderGap bool
+	// advertisedTipStale marks a client whose latest advertised tip chain
+	// selection never selects; it holds the client out of the eligible pool.
+	advertisedTipStale bool
 	// TODO: BytesRecv needs to be wired to the underlying
 	// connection's byte counter. Currently unused.
 	BytesRecv uint64
@@ -656,7 +659,8 @@ func (s *State) promoteObservedRoot(freed ouroboros.ConnectionId) {
 	s.clientConnIdMutex.RLock()
 	var root *ouroboros.ConnectionId
 	for id, tc := range s.trackedClients {
-		if id != freed && tc.ObservabilityOnly && s.config.IsRoot(id) {
+		if id != freed && tc.ObservabilityOnly && !tc.advertisedTipStale &&
+			s.config.IsRoot(id) {
 			root = &id
 			break
 		}
@@ -997,6 +1001,22 @@ func (s *State) SetClientStartedAsOutbound(
 	return true
 }
 
+// SetClientAdvertisedTipStale records whether a client's latest advertised tip
+// is one chain selection never selects. While set, no path can promote the
+// client into the eligible pool: a peer idle at its own stale tip may never
+// send the message that would demote it again, so a promotion would hold a slot
+// that a selectable observer needs.
+func (s *State) SetClientAdvertisedTipStale(
+	connId ouroboros.ConnectionId,
+	stale bool,
+) {
+	s.clientConnIdMutex.Lock()
+	defer s.clientConnIdMutex.Unlock()
+	if tc, exists := s.trackedClients[connId]; exists {
+		tc.advertisedTipStale = stale
+	}
+}
+
 // SetClientObservabilityOnly toggles whether a tracked client participates in
 // the eligible chainsync pool. Promoting an observability-only client back into
 // the eligible pool respects MaxClients: when the pool is full a configured
@@ -1019,7 +1039,8 @@ func (s *State) SetClientObservabilityOnly(
 		if !exists {
 			return false
 		}
-		if !observabilityOnly && tc.Status == ClientStatusFailed {
+		if !observabilityOnly &&
+			(tc.Status == ClientStatusFailed || tc.advertisedTipStale) {
 			return false
 		}
 		if tc.ObservabilityOnly == observabilityOnly {

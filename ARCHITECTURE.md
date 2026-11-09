@@ -7769,8 +7769,12 @@ headers are also not applied to the ledger (`ChainSelector.ShouldApplyIngress`,
 the apply gate in the roll-forward and roll-backward handlers): ingress is open
 to every eligible peer, not only the selected one, so headers admitted from a
 stale peer would stay in the shared header queue after selection moved to honest
-peers and make their headers look like a persistent fork. The gate reads the
-peer's tracked tip, so node composition observes tip and rollback updates
+peers and make their headers look like a persistent fork. A connection whose
+latest advertised tip is stale holds no ingress slot either: the roll-forward
+and roll-backward handlers demote it to observation so a selectable observer can
+take the slot, its delivered history still counts for corroboration, and no
+promotion path re-admits it until a message from the peer advertises a fresh
+tip. The gate reads the peer's tracked tip, so node composition observes tip and rollback updates
 synchronously, before the gate runs, whenever Genesis selection is active
 (`ChainSelector.GenesisSelectionState`); the rule can decide only in Genesis
 mode, so this is a superset of when it applies. An asynchronous observation

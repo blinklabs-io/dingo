@@ -1789,8 +1789,7 @@ func (o *Ouroboros) chainsyncClientRollBackward(
 	o.clearObserverHeaderGapAtRollback(ctx.ConnectionId, clientSession, point)
 	if !o.reconcileChainsyncIngressAdmission(
 		ctx.ConnectionId,
-		o.shouldPublishChainsyncToLedger(ctx.ConnectionId) &&
-			!o.advertisedTipStale(tip),
+		o.chainsyncIngressDesired(ctx.ConnectionId, tip),
 	) {
 		return nil
 	}
@@ -2182,8 +2181,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				ctx.ConnectionId,
 			)
 		}
-		desiredEligible := o.shouldPublishChainsyncToLedger(ctx.ConnectionId) &&
-			!o.advertisedTipStale(tip)
+		desiredEligible := o.chainsyncIngressDesired(ctx.ConnectionId, tip)
 		// A promoted observer above the local tip is re-synced below, at most
 		// one per window. While another one holds the window, promoting this
 		// observer would only be undone, so it stays an observer; promoting
@@ -3315,12 +3313,21 @@ func (o *Ouroboros) shouldPublishChainsyncToLedger(
 	return exists && outbound
 }
 
-// advertisedTipStale reports whether chain selection will never select a peer
-// advertising tip. Such a peer cannot feed the ledger, so it must not hold one
-// of the few ingress slots while selectable peers wait as observers.
-func (o *Ouroboros) advertisedTipStale(tip ochainsync.Tip) bool {
-	return o.config.ChainsyncAdvertisedTipStale != nil &&
+// chainsyncIngressDesired decides whether a peer that just advertised tip
+// should hold an ingress slot. A tip chain selection will never select cannot
+// feed the ledger, so its peer must not hold one of the few slots while
+// selectable peers wait as observers. The verdict is recorded on the client so
+// that promotions with no message to judge also leave the slot free.
+func (o *Ouroboros) chainsyncIngressDesired(
+	connId ouroboros.ConnectionId,
+	tip ochainsync.Tip,
+) bool {
+	stale := o.config.ChainsyncAdvertisedTipStale != nil &&
 		o.config.ChainsyncAdvertisedTipStale(tip)
+	if o.chainsyncState != nil {
+		o.chainsyncState.SetClientAdvertisedTipStale(connId, stale)
+	}
+	return !stale && o.shouldPublishChainsyncToLedger(connId)
 }
 
 // shouldApplyChainsyncToLedger reports whether an ingress-eligible peer's
